@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/earthwind/project/lights3/build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

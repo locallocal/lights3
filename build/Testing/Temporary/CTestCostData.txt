@@ -1,6 +1,0 @@
-unit_tests 5 0.450064
-e2e 2 0.228295
-e2e_builtin 3 0.154975
-e2e_beast 3 0.178441
-e2e_httplib 2 0.191073
----

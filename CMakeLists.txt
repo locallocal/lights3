@@ -20,6 +20,7 @@ option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 # ---- 核心库：L2/L3/L4 + HTTP 边界 ----
 add_library(lights3_core STATIC
   src/core/thread_pool.cc
+  src/core/timer.cc
   src/core/config.cc
   src/core/util/crypto.cc
   src/core/util/uri.cc
@@ -84,6 +85,7 @@ if(LIGHTS3_BUILD_TESTS)
   add_executable(unit_tests
     tests/unit/main.cc
     tests/unit/test_task.cc
+    tests/unit/test_concurrency.cc
     tests/unit/test_config.cc
     tests/unit/test_sigv4.cc
     tests/unit/test_storage.cc

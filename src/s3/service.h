@@ -3,6 +3,7 @@
 
 #include <string>
 
+#include "core/cancel.h"
 #include "core/task.h"
 #include "http/model.h"
 #include "s3/auth/sigv4.h"
@@ -12,6 +13,9 @@ namespace lights3::s3 {
 
 struct RequestContext {
     std::string request_id;
+    // 取消信号：客户端断连（driver 发现）、请求超时、进程 shutdown（docs/03 §5）；
+    // 默认"永不取消"。长循环（流式读写每块之间）与 pool.schedule() 感知它
+    CancelToken cancel;
 };
 
 class S3Service {

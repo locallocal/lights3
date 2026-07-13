@@ -3,6 +3,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "http/server.h"
 #include "s3/service.h"
@@ -52,7 +53,14 @@ int main(int argc, char** argv) {
         auto service = std::make_shared<s3::S3Service>(std::move(router), std::move(auth));
 
         auto server = http::HttpServerFactory::create(cfg.http.driver, cfg.http);
-        server->set_handler([service](http::HttpRequest req) -> Task<http::HttpResponse> {
+        // dispatch 入口限流（docs/03 §6）：超限请求在信号量上排队而非拒绝；
+        // 等待者经池 executor 唤醒，避免在释放方调用栈上内联跑整条请求协程链
+        auto pool_exec = std::make_shared<ThreadPoolExecutor>(*pool);
+        auto inflight = std::make_shared<AsyncSemaphore>(cfg.runtime.max_inflight_requests,
+                                                         pool_exec.get());
+        server->set_handler([service, inflight, pool_exec](
+                                http::HttpRequest req) -> Task<http::HttpResponse> {
+            auto permit = co_await inflight->acquire();
             co_return co_await service->dispatch(std::move(req));
         });
         server->listen(cfg.http.bind, cfg.http.port);

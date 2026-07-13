@@ -35,7 +35,7 @@ http::HttpResponse error_response(const S3Error& e, const std::string& request_i
 }  // namespace
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
-    RequestContext ctx{make_request_id()};
+    RequestContext ctx{make_request_id(), {}};
     bool head = req.method == "HEAD";
     http::HttpResponse resp;
     try {

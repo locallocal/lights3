@@ -1,0 +1,52 @@
+#include "core/util/time.h"
+
+#include <cstdio>
+#include <ctime>
+
+namespace lights3::util {
+
+namespace {
+std::tm to_utc_tm(SysTime t) {
+    auto tt = std::chrono::system_clock::to_time_t(t);
+    std::tm tm{};
+    gmtime_r(&tt, &tm);
+    return tm;
+}
+}  // namespace
+
+std::string http_date(SysTime t) {
+    auto tm = to_utc_tm(t);
+    char buf[64];
+    strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
+    return buf;
+}
+
+std::string iso8601(SysTime t) {
+    auto tm = to_utc_tm(t);
+    char buf[48];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.000Z", tm.tm_year + 1900,
+             tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
+}
+
+std::string amz_date(SysTime t) {
+    auto tm = to_utc_tm(t);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%04d%02d%02dT%02d%02d%02dZ", tm.tm_year + 1900, tm.tm_mon + 1,
+             tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+    return buf;
+}
+
+std::optional<SysTime> parse_amz_date(const std::string& s) {
+    std::tm tm{};
+    if (sscanf(s.c_str(), "%4d%2d%2dT%2d%2d%2dZ", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+               &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
+        return std::nullopt;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    time_t tt = timegm(&tm);
+    if (tt == static_cast<time_t>(-1)) return std::nullopt;
+    return std::chrono::system_clock::from_time_t(tt);
+}
+
+}  // namespace lights3::util

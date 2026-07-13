@@ -1,0 +1,188 @@
+[
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/core/thread_pool.cc.o -c /home/earthwind/project/lights3/src/core/thread_pool.cc",
+  "file": "/home/earthwind/project/lights3/src/core/thread_pool.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/core/thread_pool.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/core/config.cc.o -c /home/earthwind/project/lights3/src/core/config.cc",
+  "file": "/home/earthwind/project/lights3/src/core/config.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/core/config.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/core/util/crypto.cc.o -c /home/earthwind/project/lights3/src/core/util/crypto.cc",
+  "file": "/home/earthwind/project/lights3/src/core/util/crypto.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/core/util/crypto.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/core/util/uri.cc.o -c /home/earthwind/project/lights3/src/core/util/uri.cc",
+  "file": "/home/earthwind/project/lights3/src/core/util/uri.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/core/util/uri.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/core/util/time.cc.o -c /home/earthwind/project/lights3/src/core/util/time.cc",
+  "file": "/home/earthwind/project/lights3/src/core/util/time.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/core/util/time.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/http/server.cc.o -c /home/earthwind/project/lights3/src/http/server.cc",
+  "file": "/home/earthwind/project/lights3/src/http/server.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/http/server.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/errors.cc.o -c /home/earthwind/project/lights3/src/s3/errors.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/errors.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/errors.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/xml.cc.o -c /home/earthwind/project/lights3/src/s3/xml.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/xml.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/xml.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/router.cc.o -c /home/earthwind/project/lights3/src/s3/router.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/router.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/router.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/service.cc.o -c /home/earthwind/project/lights3/src/s3/service.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/service.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/service.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/auth/sigv4.cc.o -c /home/earthwind/project/lights3/src/s3/auth/sigv4.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/auth/sigv4.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/auth/sigv4.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/handlers/buckets.cc.o -c /home/earthwind/project/lights3/src/s3/handlers/buckets.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/handlers/buckets.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/handlers/buckets.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/handlers/objects.cc.o -c /home/earthwind/project/lights3/src/s3/handlers/objects.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/handlers/objects.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/handlers/objects.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/s3/handlers/list_objects.cc.o -c /home/earthwind/project/lights3/src/s3/handlers/list_objects.cc",
+  "file": "/home/earthwind/project/lights3/src/s3/handlers/list_objects.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/s3/handlers/list_objects.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/storage/validate.cc.o -c /home/earthwind/project/lights3/src/storage/validate.cc",
+  "file": "/home/earthwind/project/lights3/src/storage/validate.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/storage/validate.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/storage/listing.cc.o -c /home/earthwind/project/lights3/src/storage/listing.cc",
+  "file": "/home/earthwind/project/lights3/src/storage/listing.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/storage/listing.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/storage/registry.cc.o -c /home/earthwind/project/lights3/src/storage/registry.cc",
+  "file": "/home/earthwind/project/lights3/src/storage/registry.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/storage/registry.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/storage/bucket_router.cc.o -c /home/earthwind/project/lights3/src/storage/bucket_router.cc",
+  "file": "/home/earthwind/project/lights3/src/storage/bucket_router.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/storage/bucket_router.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/storage/localfs/localfs_backend.cc.o -c /home/earthwind/project/lights3/src/storage/localfs/localfs_backend.cc",
+  "file": "/home/earthwind/project/lights3/src/storage/localfs/localfs_backend.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/storage/localfs/localfs_backend.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/storage/memory/memory_backend.cc.o -c /home/earthwind/project/lights3/src/storage/memory/memory_backend.cc",
+  "file": "/home/earthwind/project/lights3/src/storage/memory/memory_backend.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/storage/memory/memory_backend.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/http/drivers/builtin/builtin_server.cc.o -c /home/earthwind/project/lights3/src/http/drivers/builtin/builtin_server.cc",
+  "file": "/home/earthwind/project/lights3/src/http/drivers/builtin/builtin_server.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/http/drivers/builtin/builtin_server.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/http/drivers/beast/beast_server.cc.o -c /home/earthwind/project/lights3/src/http/drivers/beast/beast_server.cc",
+  "file": "/home/earthwind/project/lights3/src/http/drivers/beast/beast_server.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/http/drivers/beast/beast_server.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -isystem /home/earthwind/.local/opt/boost-1.90 -isystem /home/earthwind/project/lights3/third_party -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3_core.dir/src/http/drivers/httplib/httplib_server.cc.o -c /home/earthwind/project/lights3/src/http/drivers/httplib/httplib_server.cc",
+  "file": "/home/earthwind/project/lights3/src/http/drivers/httplib/httplib_server.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir/src/http/drivers/httplib/httplib_server.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/lights3.dir/src/main.cc.o -c /home/earthwind/project/lights3/src/main.cc",
+  "file": "/home/earthwind/project/lights3/src/main.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/lights3.dir/src/main.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/tests -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/unit_tests.dir/tests/unit/main.cc.o -c /home/earthwind/project/lights3/tests/unit/main.cc",
+  "file": "/home/earthwind/project/lights3/tests/unit/main.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir/tests/unit/main.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/tests -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/unit_tests.dir/tests/unit/test_task.cc.o -c /home/earthwind/project/lights3/tests/unit/test_task.cc",
+  "file": "/home/earthwind/project/lights3/tests/unit/test_task.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir/tests/unit/test_task.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/tests -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/unit_tests.dir/tests/unit/test_config.cc.o -c /home/earthwind/project/lights3/tests/unit/test_config.cc",
+  "file": "/home/earthwind/project/lights3/tests/unit/test_config.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir/tests/unit/test_config.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/tests -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/unit_tests.dir/tests/unit/test_sigv4.cc.o -c /home/earthwind/project/lights3/tests/unit/test_sigv4.cc",
+  "file": "/home/earthwind/project/lights3/tests/unit/test_sigv4.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir/tests/unit/test_sigv4.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/tests -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/unit_tests.dir/tests/unit/test_storage.cc.o -c /home/earthwind/project/lights3/tests/unit/test_storage.cc",
+  "file": "/home/earthwind/project/lights3/tests/unit/test_storage.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir/tests/unit/test_storage.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/tests -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/unit_tests.dir/tests/unit/test_service.cc.o -c /home/earthwind/project/lights3/tests/unit/test_service.cc",
+  "file": "/home/earthwind/project/lights3/tests/unit/test_service.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir/tests/unit/test_service.cc.o"
+},
+{
+  "directory": "/home/earthwind/project/lights3/build",
+  "command": "/usr/bin/g++ -DLIGHTS3_DRIVER_BEAST -DLIGHTS3_DRIVER_BUILTIN -DLIGHTS3_DRIVER_HTTPLIB -I/home/earthwind/project/lights3/tests -I/home/earthwind/project/lights3/src -g -std=gnu++20 -Wall -Wextra -o CMakeFiles/unit_tests.dir/tests/unit/test_http_drivers.cc.o -c /home/earthwind/project/lights3/tests/unit/test_http_drivers.cc",
+  "file": "/home/earthwind/project/lights3/tests/unit/test_http_drivers.cc",
+  "output": "/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir/tests/unit/test_http_drivers.cc.o"
+}
+]

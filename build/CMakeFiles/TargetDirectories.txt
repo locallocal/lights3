@@ -1,0 +1,6 @@
+/home/earthwind/project/lights3/build/CMakeFiles/lights3_core.dir
+/home/earthwind/project/lights3/build/CMakeFiles/lights3.dir
+/home/earthwind/project/lights3/build/CMakeFiles/unit_tests.dir
+/home/earthwind/project/lights3/build/CMakeFiles/test.dir
+/home/earthwind/project/lights3/build/CMakeFiles/edit_cache.dir
+/home/earthwind/project/lights3/build/CMakeFiles/rebuild_cache.dir

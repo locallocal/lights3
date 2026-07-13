@@ -1,0 +1,261 @@
+Start testing: Jul 14 03:29 CST
+----------------------------------------------------------
+1/4 Testing: unit_tests
+1/4 Test: unit_tests
+Command: "/home/earthwind/project/lights3/build/unit_tests"
+Directory: /home/earthwind/project/lights3/build
+"unit_tests" start time: Jul 14 03:29 CST
+Output:
+----------------------------------------------------------
+2026-07-13T19:29:44.847Z INFO  req 507BFAD3146C4E02 GET /nobucket/k -> NoSuchBucket: The specified bucket does not exist
+2026-07-13T19:29:44.847Z INFO  req C49B221A8EE08F29 GET /bkt/missing -> NoSuchKey: The specified key does not exist
+2026-07-13T19:29:44.847Z INFO  req CA44F2A88D6FAE31 HEAD /bkt -> NoSuchBucket: The specified bucket does not exist
+2026-07-13T19:29:44.847Z INFO  req 32D19C63100C56D9 POST /bkt/k -> NotImplemented: Multipart upload is not implemented yet.
+2026-07-13T19:29:44.847Z INFO  req A9F3311AA21290C2 PUT /bkt -> AccessDenied: Missing Authorization header
+2026-07-13T19:29:44.848Z INFO  req 14FFF49C8197FA06 PUT /bkt/k -> XAmzContentSHA256Mismatch: The provided 'x-amz-content-sha256' does not match what was computed.
+2026-07-13T19:29:44.848Z INFO  beast http server listening on 127.0.0.1:35059
+2026-07-13T19:29:45.048Z INFO  beast http server stopped
+2026-07-13T19:29:45.048Z INFO  builtin http server listening on 127.0.0.1:44393
+2026-07-13T19:29:45.118Z INFO  builtin http server stopped
+2026-07-13T19:29:45.118Z INFO  httplib http server listening on 127.0.0.1:58737
+2026-07-13T19:29:45.191Z INFO  httplib http server stopped
+2026-07-13T19:29:45.191Z INFO  beast http server listening on 127.0.0.1:40355
+2026-07-13T19:29:45.275Z INFO  beast http server stopped
+2026-07-13T19:29:45.275Z INFO  builtin http server listening on 127.0.0.1:41037
+2026-07-13T19:29:45.340Z INFO  builtin http server stopped
+2026-07-13T19:29:45.340Z INFO  httplib http server listening on 127.0.0.1:49613
+2026-07-13T19:29:45.404Z INFO  httplib http server stopped
+2026-07-13T19:29:45.404Z INFO  beast http server listening on 127.0.0.1:39481
+2026-07-13T19:29:45.412Z INFO  beast http server stopped
+2026-07-13T19:29:45.412Z INFO  builtin http server listening on 127.0.0.1:45597
+2026-07-13T19:29:45.423Z INFO  builtin http server stopped
+2026-07-13T19:29:45.424Z INFO  httplib http server listening on 127.0.0.1:50443
+2026-07-13T19:29:45.435Z INFO  httplib http server stopped
+2026-07-13T19:29:45.435Z INFO  beast http server listening on 127.0.0.1:33431
+2026-07-13T19:29:45.444Z INFO  beast http server stopped
+2026-07-13T19:29:45.444Z INFO  builtin http server listening on 127.0.0.1:36483
+2026-07-13T19:29:45.451Z INFO  builtin http server stopped
+2026-07-13T19:29:45.452Z INFO  httplib http server listening on 127.0.0.1:55661
+2026-07-13T19:29:45.461Z INFO  httplib http server stopped
+2026-07-13T19:29:45.461Z INFO  beast http server listening on 127.0.0.1:32771
+2026-07-13T19:29:45.470Z INFO  beast http server stopped
+2026-07-13T19:29:45.470Z INFO  builtin http server listening on 127.0.0.1:33939
+2026-07-13T19:29:45.474Z INFO  builtin http server stopped
+2026-07-13T19:29:45.474Z INFO  httplib http server listening on 127.0.0.1:47939
+2026-07-13T19:29:45.479Z INFO  httplib http server stopped
+2026-07-13T19:29:45.479Z INFO  beast http server listening on 127.0.0.1:33127
+2026-07-13T19:29:45.480Z INFO  beast http server stopped
+2026-07-13T19:29:45.480Z INFO  builtin http server listening on 127.0.0.1:41101
+2026-07-13T19:29:45.501Z INFO  builtin http server stopped
+2026-07-13T19:29:45.502Z INFO  httplib http server listening on 127.0.0.1:47043
+2026-07-13T19:29:45.514Z INFO  httplib http server stopped
+2026-07-13T19:29:45.514Z INFO  beast http server listening on 127.0.0.1:38763
+2026-07-13T19:29:45.515Z ERROR handler escaped exception: boom
+2026-07-13T19:29:45.515Z INFO  beast http server stopped
+2026-07-13T19:29:45.515Z INFO  builtin http server listening on 127.0.0.1:40335
+2026-07-13T19:29:45.515Z ERROR handler escaped exception: boom
+2026-07-13T19:29:45.515Z INFO  builtin http server stopped
+2026-07-13T19:29:45.516Z INFO  httplib http server listening on 127.0.0.1:38167
+2026-07-13T19:29:45.516Z ERROR handler escaped exception: boom
+2026-07-13T19:29:45.516Z INFO  httplib http server stopped
+2026-07-13T19:29:45.517Z INFO  beast http server listening on 127.0.0.1:44803
+2026-07-13T19:29:45.518Z INFO  beast http server stopped
+2026-07-13T19:29:45.518Z INFO  builtin http server listening on 127.0.0.1:45509
+2026-07-13T19:29:45.518Z INFO  builtin http server stopped
+2026-07-13T19:29:45.519Z INFO  httplib http server listening on 127.0.0.1:40461
+2026-07-13T19:29:45.520Z INFO  httplib http server stopped
+2026-07-13T19:29:45.520Z INFO  beast http server listening on 127.0.0.1:36311
+2026-07-13T19:29:45.529Z INFO  beast http server stopped
+2026-07-13T19:29:45.529Z INFO  builtin http server listening on 127.0.0.1:37391
+2026-07-13T19:29:45.532Z INFO  builtin http server stopped
+2026-07-13T19:29:45.532Z INFO  httplib http server listening on 127.0.0.1:46345
+2026-07-13T19:29:45.535Z INFO  httplib http server stopped
+2026-07-13T19:29:45.535Z INFO  beast http server listening on 127.0.0.1:35949
+2026-07-13T19:29:45.536Z ERROR handler escaped exception: http body: client disconnected mid-body (partial message)
+2026-07-13T19:29:45.546Z INFO  beast http server stopped
+2026-07-13T19:29:45.546Z INFO  builtin http server listening on 127.0.0.1:46729
+2026-07-13T19:29:45.546Z ERROR handler escaped exception: http body: client disconnected mid-body
+2026-07-13T19:29:45.556Z INFO  builtin http server stopped
+2026-07-13T19:29:45.556Z INFO  httplib http server listening on 127.0.0.1:39521
+2026-07-13T19:29:45.556Z ERROR handler escaped exception: http body: client disconnected mid-body
+2026-07-13T19:29:45.566Z INFO  httplib http server stopped
+2026-07-13T19:29:45.566Z INFO  beast http server listening on 127.0.0.1:42035
+2026-07-13T19:29:46.067Z INFO  beast http server stopped
+2026-07-13T19:29:46.067Z INFO  builtin http server listening on 127.0.0.1:46383
+2026-07-13T19:29:46.568Z INFO  builtin http server stopped
+2026-07-13T19:29:46.569Z INFO  httplib http server listening on 127.0.0.1:50925
+2026-07-13T19:29:47.071Z INFO  httplib http server stopped
+2026-07-13T19:29:47.072Z INFO  beast http server listening on 127.0.0.1:45961
+2026-07-13T19:29:47.075Z INFO  beast http server stopped
+2026-07-13T19:29:47.075Z INFO  builtin http server listening on 127.0.0.1:46101
+2026-07-13T19:29:47.077Z INFO  builtin http server stopped
+2026-07-13T19:29:47.077Z INFO  httplib http server listening on 127.0.0.1:52999
+2026-07-13T19:29:47.080Z INFO  httplib http server stopped
+[ OK ] task_returns_value
+[ OK ] task_composes
+[ OK ] task_propagates_exception
+[ OK ] task_void_works
+[ OK ] schedule_switches_thread
+[ OK ] schedule_twice
+[ OK ] many_concurrent_tasks
+[ OK ] config_parses_sample
+[ OK ] config_rejects_unknown_backend_ref
+[ OK ] config_defaults
+[ OK ] parse_size_and_duration
+[ OK ] sigv4_official_get_vanilla_vector
+[ OK ] sigv4_rejects_tampered_signature
+[ OK ] sigv4_rejects_unknown_access_key
+[ OK ] sigv4_rejects_clock_skew
+[ OK ] sigv4_rejects_missing_authorization
+[ OK ] sigv4_sign_then_verify_roundtrip
+[ OK ] sigv4_detects_payload_mismatch
+[ OK ] memory_backend_suite
+[ OK ] localfs_backend_suite
+[ OK ] localfs_atomic_layout
+[ OK ] service_put_get_roundtrip
+[ OK ] service_range_request
+[ OK ] service_error_xml
+[ OK ] service_list_objects_v2
+[ OK ] service_delete_semantics
+[ OK ] service_not_implemented_apis
+[ OK ] service_with_auth
+[ OK ] http_driver_registry_complete
+[ OK ] http_driver_large_put
+[ OK ] http_driver_large_get
+[ OK ] http_driver_chunked_response
+[ OK ] http_driver_chunked_request
+[ OK ] http_driver_expect_100_continue
+[ OK ] http_driver_expect_100_rejected_without_body
+[ OK ] http_driver_handler_exception_500_xml
+[ OK ] http_driver_keep_alive
+[ OK ] http_driver_unconsumed_body_then_reuse
+[ OK ] http_driver_mid_body_disconnect
+[ OK ] http_driver_concurrent_shutdown
+[ OK ] http_driver_head_request
+41 tests, 0 failed
+<end of output>
+Test time =   2.25 sec
+----------------------------------------------------------
+Test Passed.
+"unit_tests" end time: Jul 14 03:29 CST
+"unit_tests" time elapsed: 00:00:02
+----------------------------------------------------------
+
+2/4 Testing: e2e_builtin
+2/4 Test: e2e_builtin
+Command: "/home/earthwind/project/lights3/tests/e2e/run_e2e.sh" "/home/earthwind/project/lights3/build/lights3" "builtin"
+Directory: /home/earthwind/project/lights3/build
+"e2e_builtin" start time: Jul 14 03:29 CST
+Output:
+----------------------------------------------------------
+server up: http://127.0.0.1:41427 (pid 188250)
+[ OK ] healthz（免认证）
+[ OK ] 未签名请求被拒
+[ OK ] 错误密钥被拒
+[ OK ] CreateBucket
+[ OK ] HeadBucket
+[ OK ] 重复创建 409
+[ OK ] PutObject(5MB)
+[ OK ] GetObject 内容一致
+[ OK ] HeadObject ETag=MD5
+[ OK ] HeadObject Content-Type 保留
+[ OK ] HeadObject Content-Length
+[ OK ] Range 下载(1KiB@1KiB)
+[ OK ] Range 响应 206
+[ OK ] ListObjectsV2 + delimiter
+[ OK ] ListObjectsV2 prefix 计数
+[ OK ] ListBuckets 包含 bucket
+[ OK ] DeleteObject
+[ OK ] 删后 GET 404
+[ OK ] 404 错误 XML
+[ OK ] DeleteBucket
+[ OK ] SIGTERM 优雅退出
+
+e2e: 21 passed, 0 failed
+<end of output>
+Test time =   0.46 sec
+----------------------------------------------------------
+Test Passed.
+"e2e_builtin" end time: Jul 14 03:29 CST
+"e2e_builtin" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/4 Testing: e2e_beast
+3/4 Test: e2e_beast
+Command: "/home/earthwind/project/lights3/tests/e2e/run_e2e.sh" "/home/earthwind/project/lights3/build/lights3" "beast"
+Directory: /home/earthwind/project/lights3/build
+"e2e_beast" start time: Jul 14 03:29 CST
+Output:
+----------------------------------------------------------
+server up: http://127.0.0.1:37241 (pid 188356)
+[ OK ] healthz（免认证）
+[ OK ] 未签名请求被拒
+[ OK ] 错误密钥被拒
+[ OK ] CreateBucket
+[ OK ] HeadBucket
+[ OK ] 重复创建 409
+[ OK ] PutObject(5MB)
+[ OK ] GetObject 内容一致
+[ OK ] HeadObject ETag=MD5
+[ OK ] HeadObject Content-Type 保留
+[ OK ] HeadObject Content-Length
+[ OK ] Range 下载(1KiB@1KiB)
+[ OK ] Range 响应 206
+[ OK ] ListObjectsV2 + delimiter
+[ OK ] ListObjectsV2 prefix 计数
+[ OK ] ListBuckets 包含 bucket
+[ OK ] DeleteObject
+[ OK ] 删后 GET 404
+[ OK ] 404 错误 XML
+[ OK ] DeleteBucket
+[ OK ] SIGTERM 优雅退出
+
+e2e: 21 passed, 0 failed
+<end of output>
+Test time =   0.54 sec
+----------------------------------------------------------
+Test Passed.
+"e2e_beast" end time: Jul 14 03:29 CST
+"e2e_beast" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/4 Testing: e2e_httplib
+4/4 Test: e2e_httplib
+Command: "/home/earthwind/project/lights3/tests/e2e/run_e2e.sh" "/home/earthwind/project/lights3/build/lights3" "httplib"
+Directory: /home/earthwind/project/lights3/build
+"e2e_httplib" start time: Jul 14 03:29 CST
+Output:
+----------------------------------------------------------
+server up: http://127.0.0.1:51515 (pid 188443)
+[ OK ] healthz（免认证）
+[ OK ] 未签名请求被拒
+[ OK ] 错误密钥被拒
+[ OK ] CreateBucket
+[ OK ] HeadBucket
+[ OK ] 重复创建 409
+[ OK ] PutObject(5MB)
+[ OK ] GetObject 内容一致
+[ OK ] HeadObject ETag=MD5
+[ OK ] HeadObject Content-Type 保留
+[ OK ] HeadObject Content-Length
+[ OK ] Range 下载(1KiB@1KiB)
+[ OK ] Range 响应 206
+[ OK ] ListObjectsV2 + delimiter
+[ OK ] ListObjectsV2 prefix 计数
+[ OK ] ListBuckets 包含 bucket
+[ OK ] DeleteObject
+[ OK ] 删后 GET 404
+[ OK ] 404 错误 XML
+[ OK ] DeleteBucket
+[ OK ] SIGTERM 优雅退出
+
+e2e: 21 passed, 0 failed
+<end of output>
+Test time =   0.38 sec
+----------------------------------------------------------
+Test Passed.
+"e2e_httplib" end time: Jul 14 03:29 CST
+"e2e_httplib" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Jul 14 03:29 CST

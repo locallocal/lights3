@@ -1,0 +1,31 @@
+# LightS3 示例配置（docs/01-architecture.md §5）
+http:
+  driver: builtin          # builtin | beast | httplib（需对应 CMake 选项编译进来）
+  bind: 0.0.0.0
+  port: 9000
+  io_threads: 4
+  max_header_size: 16KiB
+  idle_timeout: 60s
+
+runtime:
+  io_threads: 16           # 阻塞 IO 线程池大小
+  max_inflight_requests: 1024
+
+auth:
+  credentials:
+    - access_key: AKIDEXAMPLE
+      secret_key: ${LIGHTS3_SECRET_1}   # 环境变量引用；留空则拒绝所有请求
+  region: us-east-1
+
+backends:
+  - name: localdata
+    type: localfs
+    root: ./data/objects
+    staging: ./data/staging            # 须与 root 同一文件系统（rename 原子性）
+
+buckets:
+  default_backend: localdata
+  rules: []
+
+log:
+  level: info

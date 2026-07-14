@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -64,6 +65,12 @@ struct BucketInfo {
     std::chrono::system_clock::time_point created;
 };
 
+// CompleteMultipartUpload 请求中的一项：客户端声明的分片号与 ETag
+struct PartInfo {
+    int part_no = 0;
+    std::string etag;  // 允许带引号，比较前统一去除
+};
+
 struct IStorageBackend {
     // ---- bucket ----
     virtual Task<void> create_bucket(std::string_view bucket) = 0;
@@ -80,6 +87,22 @@ struct IStorageBackend {
     // S3 语义：对不存在的 key 也返回成功（幂等删除）
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;
+
+    // ---- multipart（docs/04 §1/§3.2）----
+    // 返回 upload_id；meta 为期望的 content_type/user_meta，complete 时生效
+    virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
+                                               ObjectMeta meta) = 0;
+    // part_no ∈ [1,10000]；同号重传 last-write-wins；返回该分片的 ETag（内容 MD5）
+    virtual Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
+                                        std::string_view upload_id, int part_no,
+                                        http::BodyReader& body) = 0;
+    // parts 须分片号严格递增且 ETag 与已上传分片一致；
+    // 总 ETag = md5(各分片 md5 二进制拼接)-N（与 S3 规则一致）
+    virtual Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
+                                               std::string_view upload_id,
+                                               std::span<const PartInfo> parts) = 0;
+    virtual Task<void> abort_multipart(std::string_view bucket, std::string_view key,
+                                       std::string_view upload_id) = 0;
 
     virtual Task<void> close() { co_return; }
     virtual ~IStorageBackend() = default;

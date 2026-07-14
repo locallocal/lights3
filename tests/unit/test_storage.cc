@@ -93,6 +93,9 @@ void run_backend_suite(IStorageBackend& b) {
                     S3ErrorCode::NoSuchBucket);
     CHECK_THROWS_S3(put(b, "suite-bkt", "../escape", "x"), S3ErrorCode::InvalidArgument);
     CHECK_THROWS_S3(put(b, "suite-bkt", "a/../b", "x"), S3ErrorCode::InvalidArgument);
+    // 单段超过文件名上限（255B）统一拒绝（docs/04 §3.1）
+    CHECK_THROWS_S3(put(b, "suite-bkt", "a/" + std::string(300, 'x'), "x"),
+                    S3ErrorCode::KeyTooLongError);
 
     // list：prefix / delimiter / 分页
     put(b, "suite-bkt", "photos/2026/a.jpg", "1");
@@ -135,10 +138,67 @@ void run_backend_suite(IStorageBackend& b) {
     CHECK(!p3.is_truncated);
     CHECK(p1.objects[1].key < p2.objects[0].key);
 
+    // multipart：分片上传-拼接-总 ETag 规则（docs/04 §1/§3.2）
+    ObjectMeta mmeta;
+    mmeta.content_type = "application/x-mpu";
+    mmeta.user_meta["origin"] = "suite";
+    auto uid = sync_wait(b.create_multipart("suite-bkt", "mp/joined.bin", mmeta));
+    CHECK(!uid.empty());
+    CHECK_THROWS_S3(sync_wait(b.create_multipart("no-such-bkt", "k", {})),
+                    S3ErrorCode::NoSuchBucket);
+
+    auto upload = [&](const std::string& id, int no, const std::string& data) {
+        http::StringBodyReader body(data);
+        return sync_wait(b.upload_part("suite-bkt", "mp/joined.bin", id, no, body));
+    };
+    auto r1 = upload(uid, 1, "hello ");
+    CHECK_EQ(r1.etag, "f814893777bcc2295fff05f00e508da6");  // md5("hello ")
+    auto r2 = upload(uid, 2, "world");
+    CHECK_EQ(r2.etag, "7d793037a0760186574b0282f2f435e7");  // md5("world")
+    auto r1b = upload(uid, 1, "hello ");  // 同号重传 last-write-wins
+    CHECK_EQ(r1b.etag, r1.etag);
+
+    // 分片号越界 / 未知 upload id
+    CHECK_THROWS_S3(upload(uid, 0, "x"), S3ErrorCode::InvalidArgument);
+    CHECK_THROWS_S3(upload(uid, 10001, "x"), S3ErrorCode::InvalidArgument);
+    CHECK_THROWS_S3(upload("00000000000000000000000000000000", 1, "x"),
+                    S3ErrorCode::NoSuchUpload);
+
+    auto complete = [&](const std::string& id, std::vector<PartInfo> parts) {
+        return sync_wait(b.complete_multipart("suite-bkt", "mp/joined.bin", id, parts));
+    };
+    // 乱序 / ETag 不匹配 / 缺分片 / 空 parts
+    CHECK_THROWS_S3(complete(uid, {{2, r2.etag}, {1, r1.etag}}), S3ErrorCode::InvalidPart);
+    CHECK_THROWS_S3(complete(uid, {{1, "deadbeef"}}), S3ErrorCode::InvalidPart);
+    CHECK_THROWS_S3(complete(uid, {{1, r1.etag}, {3, r2.etag}}), S3ErrorCode::InvalidPart);
+    CHECK_THROWS_S3(complete(uid, {}), S3ErrorCode::InvalidPart);
+    // key 与 upload 不匹配 → NoSuchUpload
+    CHECK_THROWS_S3(sync_wait(b.complete_multipart("suite-bkt", "other.bin", uid,
+                                                   std::vector<PartInfo>{{1, r1.etag}})),
+                    S3ErrorCode::NoSuchUpload);
+
+    // ETag 允许带引号；总 ETag = md5(分片 md5 拼接)-N
+    auto done = complete(uid, {{1, "\"" + r1.etag + "\""}, {2, r2.etag}});
+    CHECK_EQ(done.etag, "e09e4fd6265b36115fe3db32df945d84-2");
+    auto mo = sync_wait(b.get_object("suite-bkt", "mp/joined.bin", std::nullopt));
+    CHECK_EQ(read_all(*mo.body), "hello world");
+    CHECK_EQ(mo.meta.etag, done.etag);
+    CHECK_EQ(mo.meta.content_type, "application/x-mpu");
+    CHECK_EQ(mo.meta.user_meta.at("origin"), "suite");
+
+    // 完成后 upload 即消失；abort 后同理
+    CHECK_THROWS_S3(complete(uid, {{1, r1.etag}}), S3ErrorCode::NoSuchUpload);
+    CHECK_THROWS_S3(sync_wait(b.abort_multipart("suite-bkt", "mp/joined.bin", uid)),
+                    S3ErrorCode::NoSuchUpload);
+    auto uid2 = sync_wait(b.create_multipart("suite-bkt", "mp/joined.bin", {}));
+    upload(uid2, 1, "zzz");
+    sync_wait(b.abort_multipart("suite-bkt", "mp/joined.bin", uid2));
+    CHECK_THROWS_S3(upload(uid2, 2, "x"), S3ErrorCode::NoSuchUpload);
+
     // 删除：幂等 + 目录清理；空 bucket 才能删
     CHECK_THROWS_S3(sync_wait(b.delete_bucket("suite-bkt")), S3ErrorCode::BucketNotEmpty);
     for (auto& k : {"dir/a.txt", "photos/2026/a.jpg", "photos/2026/b.jpg",
-                    "photos/2027/c.jpg", "readme.md"})
+                    "photos/2027/c.jpg", "readme.md", "mp/joined.bin"})
         sync_wait(b.delete_object("suite-bkt", k));
     sync_wait(b.delete_object("suite-bkt", "dir/a.txt"));  // 再删不报错
     auto empty = sync_wait(b.list_objects("suite-bkt", {}));
@@ -179,4 +239,32 @@ TEST(localfs_atomic_layout) {
     // 内部保留名不可作为 key
     CHECK_THROWS_S3(put(b, "bkt", "x/y.bin.lights3-meta", "z"),
                     lights3::s3::S3ErrorCode::InvalidArgument);
+}
+
+TEST(localfs_multipart_layout_and_cleanup) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+
+    // 分片落 <staging>/mpu/<id>/，complete 后目录清理、对象原子落地（docs/04 §3.2）
+    auto uid = sync_wait(b.create_multipart("bkt", "big.bin", {}));
+    http::StringBodyReader part("data");
+    auto pr = sync_wait(b.upload_part("bkt", "big.bin", uid, 1, part));
+    fs::path mpu = tmp.path / "staging/mpu" / uid;
+    CHECK(fs::exists(mpu / "manifest"));
+    CHECK(fs::exists(mpu / "part.00001"));
+    sync_wait(b.complete_multipart("bkt", "big.bin", uid,
+                                   std::vector<PartInfo>{{1, pr.etag}}));
+    CHECK(!fs::exists(mpu));
+    CHECK(fs::exists(tmp.path / "data/bkt/big.bin"));
+    CHECK(fs::exists(tmp.path / "data/bkt/big.bin.lights3-meta"));
+
+    // 超期（>7 天）孤儿上传在新实例启动时被清理
+    auto stale = sync_wait(b.create_multipart("bkt", "stale.bin", {}));
+    fs::path stale_dir = tmp.path / "staging/mpu" / stale;
+    fs::last_write_time(stale_dir / "manifest",
+                        fs::file_time_type::clock::now() - std::chrono::hours(24 * 8));
+    LocalFsBackend b2(tmp.path / "data", tmp.path / "staging", pool);
+    CHECK(!fs::exists(stale_dir));
 }

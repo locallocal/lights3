@@ -2,6 +2,7 @@
 
 #include "core/util/crypto.h"
 #include "storage/listing.h"
+#include "storage/multipart.h"
 
 namespace lights3::storage {
 
@@ -117,6 +118,94 @@ Task<ListResult> MemoryBackend::list_objects(std::string_view bucket, const List
     keys.reserve(b.objects.size());
     for (auto& [k, _] : b.objects) keys.push_back(k);
     co_return apply_listing(keys, opt, [&](const std::string& k) { return b.objects[k].meta; });
+}
+
+// ---------- multipart ----------
+
+MemoryBackend::Upload& MemoryBackend::upload_or_throw(std::string_view bucket,
+                                                      std::string_view key,
+                                                      std::string_view upload_id) {
+    auto it = uploads_.find(std::string(upload_id));
+    if (it == uploads_.end() || it->second.bucket != bucket || it->second.key != key)
+        throw S3Error(S3ErrorCode::NoSuchUpload,
+                      "The specified multipart upload does not exist.", std::string(upload_id));
+    return it->second;
+}
+
+Task<std::string> MemoryBackend::create_multipart(std::string_view bucket, std::string_view key,
+                                                  ObjectMeta meta) {
+    validate_bucket_name(bucket);
+    validate_object_key(key);
+    std::lock_guard lk(m_);
+    bucket_or_throw(std::string(bucket));
+    std::string id = new_upload_id();
+    uploads_[id] = Upload{std::string(bucket), std::string(key), std::move(meta), {}};
+    co_return id;
+}
+
+Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_view key,
+                                           std::string_view upload_id, int part_no,
+                                           http::BodyReader& body) {
+    validate_part_number(part_no);
+    {
+        std::lock_guard lk(m_);
+        upload_or_throw(bucket, key, upload_id);  // 早失败；不持锁读 body
+    }
+    std::string data;
+    std::byte buf[64 * 1024];
+    util::HashStream md5(util::HashStream::Algo::Md5);
+    for (;;) {
+        size_t n = co_await body.read(std::span(buf));
+        if (n == 0) break;
+        md5.update(std::span(reinterpret_cast<const uint8_t*>(buf), n));
+        data.append(reinterpret_cast<const char*>(buf), n);
+    }
+    std::string etag = md5.final_hex();
+
+    std::lock_guard lk(m_);
+    auto& up = upload_or_throw(bucket, key, upload_id);  // 读 body 期间可能已被 abort
+    up.parts[part_no] = Part{std::move(data), etag};     // 同号重传 last-write-wins
+    co_return PutResult{etag};
+}
+
+Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::string_view key,
+                                                  std::string_view upload_id,
+                                                  std::span<const PartInfo> parts) {
+    validate_part_order(parts);
+    std::lock_guard lk(m_);
+    auto& up = upload_or_throw(bucket, key, upload_id);
+    auto& b = bucket_or_throw(std::string(bucket));
+
+    std::string data;
+    std::vector<std::string> md5s;
+    for (auto& p : parts) {
+        auto it = up.parts.find(p.part_no);
+        if (it == up.parts.end() || it->second.etag != strip_etag_quotes(p.etag))
+            throw S3Error(S3ErrorCode::InvalidPart,
+                          "One or more of the specified parts could not be found or the "
+                          "ETag did not match.",
+                          std::string(key));
+        data += it->second.data;
+        md5s.push_back(it->second.etag);
+    }
+
+    ObjectMeta meta = std::move(up.meta);
+    meta.key = std::string(key);
+    meta.size = data.size();
+    meta.etag = combined_etag(md5s);
+    meta.last_modified = std::chrono::system_clock::now();
+    PutResult r{meta.etag};
+    b.objects[std::string(key)] = Object{std::move(meta), std::move(data)};
+    uploads_.erase(std::string(upload_id));
+    co_return r;
+}
+
+Task<void> MemoryBackend::abort_multipart(std::string_view bucket, std::string_view key,
+                                          std::string_view upload_id) {
+    std::lock_guard lk(m_);
+    upload_or_throw(bucket, key, upload_id);
+    uploads_.erase(std::string(upload_id));
+    co_return;
 }
 
 }  // namespace lights3::storage

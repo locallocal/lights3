@@ -36,6 +36,7 @@ add_library(lights3_core STATIC
   src/s3/handlers/list_objects.cc
   src/storage/validate.cc
   src/storage/listing.cc
+  src/storage/multipart.cc
   src/storage/registry.cc
   src/storage/bucket_router.cc
   src/storage/localfs/localfs_backend.cc

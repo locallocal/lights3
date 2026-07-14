@@ -33,6 +33,11 @@ void validate_object_key(std::string_view k) {
         if (seg.empty() || seg == "." || seg == "..")
             throw S3Error(S3ErrorCode::InvalidArgument,
                           "Object key contains invalid path segment.");
+        // LocalFs 直接映射为路径，单段超过文件名上限（255B）无法落盘；
+        // 统一在共享校验层拒绝，保证各后端行为一致（docs/04 §3.1）
+        if (seg.size() > 255)
+            throw S3Error(S3ErrorCode::KeyTooLongError,
+                          "A single path segment of the key exceeds 255 bytes.");
         if (end == k.size()) break;
         start = end + 1;
     }

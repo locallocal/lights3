@@ -29,14 +29,29 @@ public:
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
+    // multipart：分片落 <staging>/mpu/<upload_id>/part.NNNNN，complete 拼接后
+    // 走与 PUT 相同的 rename 原子提交（docs/04 §3.2）
+    Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
+                                       ObjectMeta meta) override;
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
+                                std::string_view upload_id, int part_no,
+                                http::BodyReader& body) override;
+    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
+                                       std::string_view upload_id,
+                                       std::span<const PartInfo> parts) override;
+    Task<void> abort_multipart(std::string_view bucket, std::string_view key,
+                               std::string_view upload_id) override;
+
     static constexpr const char* kSidecarSuffix = ".lights3-meta";
     static constexpr const char* kBucketMarker = ".lights3-bucket";
+    static constexpr std::chrono::hours kMpuTtl{24 * 7};  // 孤儿上传清理阈值
 
 private:
     std::filesystem::path bucket_dir(std::string_view bucket) const;
     std::filesystem::path object_path(std::string_view bucket, std::string_view key) const;
     void require_bucket(std::string_view bucket) const;      // 不存在抛 NoSuchBucket
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
+    void cleanup_stale_uploads();  // 启动时清理超期（kMpuTtl）的 mpu 目录
 
     std::filesystem::path root_;
     std::filesystem::path staging_;

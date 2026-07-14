@@ -214,7 +214,7 @@ public:
         socklen_t blen = sizeof(bound);
         getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen);
         port_ = ntohs(bound.sin_port);
-        LOG_INFO("builtin http server listening on ", addr, ":", port_);
+        LOG_INFO("builtin http server listening on {}:{}", addr, port_);
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -251,7 +251,7 @@ public:
         // 优雅退出：等待在途连接，超时强制断开
         std::unique_lock lk(m_);
         if (!cv_.wait_for(lk, std::chrono::seconds(10), [&] { return active_ == 0; })) {
-            LOG_WARN("forcing ", active_, " connection(s) closed on shutdown");
+            LOG_WARN("forcing {} connection(s) closed on shutdown", active_);
             for (int fd : conns_) ::shutdown(fd, SHUT_RDWR);
             cv_.wait_for(lk, std::chrono::seconds(5), [&] { return active_ == 0; });
         }
@@ -368,7 +368,7 @@ bool BuiltinServer::serve_one(int fd, ConnReader& reader, const std::string& pee
         resp = sync_wait(handler_(std::move(req)));
     } catch (const std::exception& e) {
         // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2：500 + InternalError XML）
-        LOG_ERROR("handler escaped exception: ", e.what());
+        LOG_ERROR("handler escaped exception: {}", e.what());
         resp = driver::internal_error_response();
         keep_alive = false;
     }
@@ -419,7 +419,7 @@ bool BuiltinServer::write_response(int fd, HttpResponse& resp, bool head_request
         try {
             n = sync_wait(resp.stream_body->read(std::span(buf)));
         } catch (const std::exception& e) {
-            LOG_ERROR("stream body read failed mid-response: ", e.what());
+            LOG_ERROR("stream body read failed mid-response: {}", e.what());
             return false;  // 响应头已发出，只能断连
         }
         if (n == 0) break;

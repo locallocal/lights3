@@ -18,6 +18,9 @@ set(GFLAGS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(GFLAGS_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/gflags EXCLUDE_FROM_ALL)
 
+# spdlog：日志实现（git submodule，静态库；core/log.h 为门面）
+add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
+
 # HTTP 驱动的编译期裁剪（docs/01 §6 依赖策略）
 option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
@@ -52,7 +55,7 @@ add_library(lights3_core STATIC
   src/storage/memory/memory_backend.cc
 )
 target_include_directories(lights3_core PUBLIC src)
-target_link_libraries(lights3_core PUBLIC OpenSSL::Crypto Threads::Threads)
+target_link_libraries(lights3_core PUBLIC OpenSSL::Crypto Threads::Threads spdlog::spdlog)
 
 if(LIGHTS3_DRIVER_BUILTIN)
   target_sources(lights3_core PRIVATE src/http/drivers/builtin/builtin_server.cc)

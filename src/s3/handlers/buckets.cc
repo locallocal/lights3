@@ -63,4 +63,21 @@ Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket) {
     co_return resp;
 }
 
+// GetBucketLocation：回显配置 region（docs/05 §1：LocationConstraint 无 region 约束）
+Task<http::HttpResponse> S3Service::get_bucket_location(std::string bucket) {
+    bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
+    if (!exists)
+        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
+    XmlWriter w;
+    // us-east-1 按 S3 惯例返回空 LocationConstraint
+    const std::string& region = auth_.region();
+    w.open("LocationConstraint", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
+    if (region != "us-east-1") w.text(region);
+    w.close();
+    http::HttpResponse resp;
+    resp.headers.set("Content-Type", "application/xml");
+    resp.small_body = w.str();
+    co_return resp;
+}
+
 }  // namespace lights3::s3

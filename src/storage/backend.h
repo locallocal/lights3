@@ -71,6 +71,21 @@ struct PartInfo {
     std::string etag;  // 允许带引号，比较前统一去除
 };
 
+// ListParts 返回项
+struct PartMeta {
+    int part_no = 0;
+    uint64_t size = 0;
+    std::string etag;
+    std::chrono::system_clock::time_point last_modified;
+};
+
+// ListMultipartUploads 返回项
+struct UploadInfo {
+    std::string key;
+    std::string upload_id;
+    std::chrono::system_clock::time_point initiated;
+};
+
 struct IStorageBackend {
     // ---- bucket ----
     virtual Task<void> create_bucket(std::string_view bucket) = 0;
@@ -103,6 +118,12 @@ struct IStorageBackend {
                                                std::span<const PartInfo> parts) = 0;
     virtual Task<void> abort_multipart(std::string_view bucket, std::string_view key,
                                        std::string_view upload_id) = 0;
+    // 按 part_no 升序；upload 不存在抛 NoSuchUpload
+    virtual Task<std::vector<PartMeta>> list_parts(std::string_view bucket,
+                                                   std::string_view key,
+                                                   std::string_view upload_id) = 0;
+    // 该 bucket 的活跃上传，按 (key, upload_id) 排序
+    virtual Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) = 0;
 
     virtual Task<void> close() { co_return; }
     virtual ~IStorageBackend() = default;

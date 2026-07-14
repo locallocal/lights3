@@ -177,6 +177,21 @@ void run_backend_suite(IStorageBackend& b) {
                                                    std::vector<PartInfo>{{1, r1.etag}})),
                     S3ErrorCode::NoSuchUpload);
 
+    // list_parts / list_multipart_uploads（docs/05 ListParts 支撑）
+    auto lparts = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid));
+    CHECK_EQ(lparts.size(), size_t(2));
+    CHECK_EQ(lparts[0].part_no, 1);
+    CHECK_EQ(lparts[0].etag, r1.etag);
+    CHECK_EQ(lparts[0].size, uint64_t(6));
+    CHECK_EQ(lparts[1].part_no, 2);
+    auto lups = sync_wait(b.list_multipart_uploads("suite-bkt"));
+    CHECK_EQ(lups.size(), size_t(1));
+    CHECK_EQ(lups[0].key, "mp/joined.bin");
+    CHECK_EQ(lups[0].upload_id, uid);
+    CHECK_THROWS_S3(sync_wait(b.list_parts("suite-bkt", "mp/joined.bin",
+                                           "00000000000000000000000000000000")),
+                    S3ErrorCode::NoSuchUpload);
+
     // ETag 允许带引号；总 ETag = md5(分片 md5 拼接)-N
     auto done = complete(uid, {{1, "\"" + r1.etag + "\""}, {2, r2.etag}});
     CHECK_EQ(done.etag, "e09e4fd6265b36115fe3db32df945d84-2");

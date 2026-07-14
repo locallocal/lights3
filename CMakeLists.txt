@@ -30,10 +30,12 @@ add_library(lights3_core STATIC
   src/s3/xml.cc
   src/s3/router.cc
   src/s3/service.cc
+  src/s3/metrics.cc
   src/s3/auth/sigv4.cc
   src/s3/handlers/buckets.cc
   src/s3/handlers/objects.cc
   src/s3/handlers/list_objects.cc
+  src/s3/handlers/multipart.cc
   src/storage/validate.cc
   src/storage/listing.cc
   src/storage/multipart.cc
@@ -89,6 +91,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_concurrency.cc
     tests/unit/test_config.cc
     tests/unit/test_sigv4.cc
+    tests/unit/test_xml.cc
     tests/unit/test_storage.cc
     tests/unit/test_service.cc
     tests/unit/test_http_drivers.cc

@@ -1,5 +1,8 @@
 #include "storage/memory/memory_backend.h"
 
+#include <algorithm>
+#include <tuple>
+
 #include "core/util/crypto.h"
 #include "storage/listing.h"
 #include "storage/multipart.h"
@@ -139,7 +142,8 @@ Task<std::string> MemoryBackend::create_multipart(std::string_view bucket, std::
     std::lock_guard lk(m_);
     bucket_or_throw(std::string(bucket));
     std::string id = new_upload_id();
-    uploads_[id] = Upload{std::string(bucket), std::string(key), std::move(meta), {}};
+    uploads_[id] = Upload{std::string(bucket), std::string(key), std::move(meta), {},
+                          std::chrono::system_clock::now()};
     co_return id;
 }
 
@@ -164,7 +168,8 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
 
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);  // 读 body 期间可能已被 abort
-    up.parts[part_no] = Part{std::move(data), etag};     // 同号重传 last-write-wins
+    // 同号重传 last-write-wins
+    up.parts[part_no] = Part{std::move(data), etag, std::chrono::system_clock::now()};
     co_return PutResult{etag};
 }
 
@@ -206,6 +211,30 @@ Task<void> MemoryBackend::abort_multipart(std::string_view bucket, std::string_v
     upload_or_throw(bucket, key, upload_id);
     uploads_.erase(std::string(upload_id));
     co_return;
+}
+
+Task<std::vector<PartMeta>> MemoryBackend::list_parts(std::string_view bucket,
+                                                      std::string_view key,
+                                                      std::string_view upload_id) {
+    std::lock_guard lk(m_);
+    auto& up = upload_or_throw(bucket, key, upload_id);
+    std::vector<PartMeta> out;
+    out.reserve(up.parts.size());
+    for (auto& [no, p] : up.parts)
+        out.push_back({no, p.data.size(), p.etag, p.uploaded});
+    co_return out;
+}
+
+Task<std::vector<UploadInfo>> MemoryBackend::list_multipart_uploads(std::string_view bucket) {
+    std::lock_guard lk(m_);
+    bucket_or_throw(std::string(bucket));
+    std::vector<UploadInfo> out;
+    for (auto& [id, up] : uploads_)
+        if (up.bucket == bucket) out.push_back({up.key, id, up.initiated});
+    std::sort(out.begin(), out.end(), [](const UploadInfo& a, const UploadInfo& b) {
+        return std::tie(a.key, a.upload_id) < std::tie(b.key, b.upload_id);
+    });
+    co_return out;
 }
 
 }  // namespace lights3::storage

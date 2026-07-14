@@ -33,6 +33,9 @@ public:
                                        std::span<const PartInfo> parts) override;
     Task<void> abort_multipart(std::string_view bucket, std::string_view key,
                                std::string_view upload_id) override;
+    Task<std::vector<PartMeta>> list_parts(std::string_view bucket, std::string_view key,
+                                           std::string_view upload_id) override;
+    Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) override;
 
 private:
     struct Object {
@@ -46,12 +49,14 @@ private:
     struct Part {
         std::string data;
         std::string etag;  // 分片内容 MD5 hex
+        std::chrono::system_clock::time_point uploaded;
     };
     struct Upload {
         std::string bucket;
         std::string key;
         ObjectMeta meta;
         std::map<int, Part> parts;  // part_no 有序
+        std::chrono::system_clock::time_point initiated;
     };
 
     Bucket& bucket_or_throw(const std::string& name);

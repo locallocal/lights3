@@ -18,10 +18,18 @@ public:
     static SigV4Authenticator build(const AuthConfig& cfg);
 
     bool enabled() const { return !creds_.empty(); }
+    const std::string& region() const { return region_; }
 
-    // 验签失败抛 S3Error；通过后如需 payload 校验，会把 req.body 包装为
-    // 流式 SHA256 校验 reader（EOF 时不匹配抛 XAmzContentSHA256Mismatch）
-    void verify(http::HttpRequest& req) const;
+    // 验签失败抛 S3Error；返回请求方 access key（认证关闭时为空，供访问日志）。
+    // 通过后如需 payload 校验，把 req.body 包装为流式校验 reader：
+    //  - hex 摘要 → SHA256 校验（EOF 不匹配抛 XAmzContentSHA256Mismatch）
+    //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] → aws-chunked 剥壳 +
+    //    逐 chunk 签名链验证（docs/05 §3.2）
+    //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER → 仅剥壳
+    std::string verify(http::HttpRequest& req) const;
+
+    // presigned URL 的 X-Amz-Expires 上限（7 天，与 S3 一致）
+    static constexpr long kMaxPresignExpires = 7 * 24 * 3600;
 
     // 为请求补充 x-amz-date / x-amz-content-sha256 / Authorization
     // （payload_hash 传空则按空 body 计算）

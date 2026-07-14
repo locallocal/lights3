@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <ctime>
+#include <string_view>
 
 namespace lights3::util {
 
@@ -19,6 +20,25 @@ std::string http_date(SysTime t) {
     char buf[64];
     strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
     return buf;
+}
+
+std::optional<SysTime> parse_http_date(const std::string& s) {
+    static const char* months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+    char mon[4] = {0};
+    std::tm tm{};
+    // "Tue, 14 Jul 2026 08:00:00 GMT"（星期与 GMT 后缀不严格校验）
+    if (sscanf(s.c_str(), "%*3s, %2d %3s %4d %2d:%2d:%2d", &tm.tm_mday, mon, &tm.tm_year,
+               &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
+        return std::nullopt;
+    tm.tm_mon = -1;
+    for (int i = 0; i < 12; ++i)
+        if (std::string_view(mon) == months[i]) tm.tm_mon = i;
+    if (tm.tm_mon < 0) return std::nullopt;
+    tm.tm_year -= 1900;
+    time_t tt = timegm(&tm);
+    if (tt == static_cast<time_t>(-1)) return std::nullopt;
+    return std::chrono::system_clock::from_time_t(tt);
 }
 
 std::string iso8601(SysTime t) {

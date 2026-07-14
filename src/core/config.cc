@@ -178,6 +178,7 @@ Config Config::from_string(const std::string& text) {
         cfg.http.bind = http->get("bind", cfg.http.bind);
         cfg.http.port = static_cast<uint16_t>(to_int(http->get("port"), cfg.http.port));
         cfg.http.io_threads = to_int(http->get("io_threads"), cfg.http.io_threads);
+        cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
         if (auto v = http->get("max_header_size"); !v.empty())
             cfg.http.max_header_size = parse_size(v);
         if (auto v = http->get("idle_timeout"); !v.empty())

@@ -50,7 +50,9 @@ int main(int argc, char** argv) {
         auto auth = s3::SigV4Authenticator::build(cfg.auth);
         if (!auth.enabled())
             LOG_WARN("no credentials configured: authentication is DISABLED");
-        auto service = std::make_shared<s3::S3Service>(std::move(router), std::move(auth));
+        auto service = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
+                                                       cfg.http.base_domain);
+        service->set_pool_stats([pool] { return pool->stats(); });
 
         auto server = http::HttpServerFactory::create(cfg.http.driver, cfg.http);
         // dispatch 入口限流（docs/03 §6）：超限请求在信号量上排队而非拒绝；

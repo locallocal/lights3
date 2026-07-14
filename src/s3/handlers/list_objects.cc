@@ -25,16 +25,26 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
 
     auto result = co_await router_.resolve(bucket).list_objects(bucket, opt);
 
+    // V2（?list-type=2）与 V1 的响应差异：KeyCount/ContinuationToken vs Marker
+    bool v2 = req.query_get("list-type").value_or("") == "2";
+
     XmlWriter w;
     w.open("ListBucketResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
     w.element("Name", bucket);
     w.element("Prefix", opt.prefix);
     if (!opt.delimiter.empty()) w.element("Delimiter", opt.delimiter);
     w.element("MaxKeys", static_cast<uint64_t>(opt.max_keys));
-    w.element("KeyCount",
-              static_cast<uint64_t>(result.objects.size() + result.common_prefixes.size()));
+    if (v2) {
+        w.element("KeyCount",
+                  static_cast<uint64_t>(result.objects.size() + result.common_prefixes.size()));
+        if (auto tok = req.query_get("continuation-token"))
+            w.element("ContinuationToken", *tok);
+    } else {
+        w.element("Marker", opt.start_after);
+    }
     w.element("IsTruncated", result.is_truncated ? "true" : "false");
-    if (result.is_truncated) w.element("NextContinuationToken", result.next_token);
+    if (result.is_truncated)
+        w.element(v2 ? "NextContinuationToken" : "NextMarker", result.next_token);
     for (auto& o : result.objects) {
         w.open("Contents");
         w.element("Key", o.key);

@@ -117,6 +117,58 @@ check "ListObjectsV2 prefix 计数" "2" "$(echo "$LIST2" | grep -o '<Key>' | wc 
 check "ListBuckets 包含 bucket" "0" \
     "$(s3curl "$BASE/" | grep -q '<Name>mybucket</Name>'; echo $?)"
 
+# GetBucketLocation（MinIO SDK 等客户端依赖）
+check "GetBucketLocation" "0" \
+    "$(s3curl "$BASE/mybucket?location" | grep -q 'LocationConstraint'; echo $?)"
+
+# 条件请求：If-None-Match 命中 → 304
+ETAG=$(s3curl -I "$BASE/mybucket/top.txt" | tr -d '\r' | sed -n 's/^etag: //Ip')
+check "If-None-Match 304" "304" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -H "If-None-Match: $ETAG" "$BASE/mybucket/top.txt")"
+
+# CopyObject
+check "CopyObject" "0" \
+    "$(s3curl -X PUT -H 'x-amz-copy-source: /mybucket/top.txt' "$BASE/mybucket/copy.txt" \
+       | grep -q 'CopyObjectResult'; echo $?)"
+check "Copy 内容一致" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
+
+# Multipart：两个 3MiB 分片（docs/05 §8 真实流程）
+dd if=/dev/urandom of="$WORK/p1" bs=1M count=3 2>/dev/null
+dd if=/dev/urandom of="$WORK/p2" bs=1M count=3 2>/dev/null
+INIT=$(s3curl -X POST "$BASE/mybucket/mpu.bin?uploads")
+UPLOAD_ID=$(echo "$INIT" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
+check "CreateMultipartUpload 返回 UploadId" "0" "$([[ -n "$UPLOAD_ID" ]]; echo $?)"
+s3curl -o /dev/null -D "$WORK/h1" --data-binary "@$WORK/p1" -X PUT \
+    "$BASE/mybucket/mpu.bin?partNumber=1&uploadId=$UPLOAD_ID"
+s3curl -o /dev/null -D "$WORK/h2" --data-binary "@$WORK/p2" -X PUT \
+    "$BASE/mybucket/mpu.bin?partNumber=2&uploadId=$UPLOAD_ID"
+E1=$(tr -d '\r' < "$WORK/h1" | sed -n 's/^etag: //Ip')
+E2=$(tr -d '\r' < "$WORK/h2" | sed -n 's/^etag: //Ip')
+check "ListParts 含两个分片" "2" \
+    "$(s3curl "$BASE/mybucket/mpu.bin?uploadId=$UPLOAD_ID" | grep -o '<PartNumber>' | wc -l)"
+COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$E1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$E2</ETag></Part></CompleteMultipartUpload>"
+DONE=$(s3curl -X POST --data-binary "$COMPLETE_XML" "$BASE/mybucket/mpu.bin?uploadId=$UPLOAD_ID")
+check "CompleteMultipartUpload 拼接 ETag(-2)" "0" \
+    "$(echo "$DONE" | grep -q -- '-2&quot;</ETag>'; echo $?)"
+s3curl -o "$WORK/mpu.out" "$BASE/mybucket/mpu.bin"
+check "Multipart 下载内容一致" \
+    "$(cat "$WORK/p1" "$WORK/p2" | md5sum | cut -d' ' -f1)" \
+    "$(md5sum "$WORK/mpu.out" | cut -d' ' -f1)"
+
+# DeleteObjects 批量删除
+DEL_XML='<Delete><Object><Key>copy.txt</Key></Object><Object><Key>mpu.bin</Key></Object></Delete>'
+DEL_OUT=$(s3curl -X POST --data-binary "$DEL_XML" "$BASE/mybucket?delete")
+check "DeleteObjects 批量" "0" "$(echo "$DEL_OUT" | grep -q '<Deleted><Key>copy.txt</Key>'; echo $?)"
+check "批量删除生效" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/mpu.bin")"
+
+# 观测端点
+check "metrics 输出" "0" \
+    "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_requests_total'; echo $?)"
+check "readyz" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/readyz")"
+
+# 不支持的子资源 → 501
+check "?acl 显式 501" "501" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket?acl")"
+
 # 删除与 404
 check "DeleteObject" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/mybucket/dir/big.bin")"
 check "删后 GET 404" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/dir/big.bin")"

@@ -21,6 +21,7 @@ enum class S3ErrorCode {
     InvalidRange,
     InvalidRequest,
     KeyTooLongError,
+    MalformedXML,
     MethodNotAllowed,
     NoSuchBucket,
     NoSuchKey,

@@ -25,6 +25,7 @@ Entry entry(S3ErrorCode c) {
         case S3ErrorCode::InvalidRange:                 return {416, "InvalidRange"};
         case S3ErrorCode::InvalidRequest:               return {400, "InvalidRequest"};
         case S3ErrorCode::KeyTooLongError:              return {400, "KeyTooLongError"};
+        case S3ErrorCode::MalformedXML:                 return {400, "MalformedXML"};
         case S3ErrorCode::MethodNotAllowed:             return {405, "MethodNotAllowed"};
         case S3ErrorCode::NoSuchBucket:                 return {404, "NoSuchBucket"};
         case S3ErrorCode::NoSuchKey:                    return {404, "NoSuchKey"};

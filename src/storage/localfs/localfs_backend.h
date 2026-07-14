@@ -41,6 +41,9 @@ public:
                                        std::span<const PartInfo> parts) override;
     Task<void> abort_multipart(std::string_view bucket, std::string_view key,
                                std::string_view upload_id) override;
+    Task<std::vector<PartMeta>> list_parts(std::string_view bucket, std::string_view key,
+                                           std::string_view upload_id) override;
+    Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) override;
 
     static constexpr const char* kSidecarSuffix = ".lights3-meta";
     static constexpr const char* kBucketMarker = ".lights3-bucket";

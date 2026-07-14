@@ -10,6 +10,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <tuple>
 
 #include "core/log.h"
 #include "core/util/crypto.h"
@@ -586,6 +587,61 @@ Task<void> LocalFsBackend::abort_multipart(std::string_view bucket, std::string_
     fs::remove_all(up.dir, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "remove mpu dir: " + ec.message());
     co_return;
+}
+
+Task<std::vector<PartMeta>> LocalFsBackend::list_parts(std::string_view bucket,
+                                                       std::string_view key,
+                                                       std::string_view upload_id) {
+    co_await pool_->schedule();
+    auto up = require_upload(staging_, bucket, key, upload_id,
+                             load_manifest(staging_, upload_id));
+    std::vector<PartMeta> out;
+    for (auto& e : fs::directory_iterator(up.dir)) {
+        std::string name = e.path().filename().string();
+        // part.NNNNN（跳过 manifest 与 .md5 sidecar）
+        if (name.rfind("part.", 0) != 0 || name.ends_with(".md5")) continue;
+        int no = 0;
+        try {
+            no = std::stoi(name.substr(5));
+        } catch (...) {
+            continue;
+        }
+        struct stat st{};
+        if (::stat(e.path().c_str(), &st) != 0) continue;
+        std::string etag;
+        for (auto& [k, v] : read_tsv(up.dir / (name + ".md5")))
+            if (k == "md5") etag = v;
+        out.push_back({no, static_cast<uint64_t>(st.st_size), etag,
+                       std::chrono::system_clock::from_time_t(st.st_mtime)});
+    }
+    std::sort(out.begin(), out.end(),
+              [](const PartMeta& a, const PartMeta& b) { return a.part_no < b.part_no; });
+    co_return out;
+}
+
+Task<std::vector<UploadInfo>> LocalFsBackend::list_multipart_uploads(std::string_view bucket) {
+    co_await pool_->schedule();
+    require_bucket(bucket);
+    std::vector<UploadInfo> out;
+    for (auto& e : fs::directory_iterator(staging_ / "mpu")) {
+        if (!e.is_directory()) continue;
+        std::string id = e.path().filename().string();
+        std::string m_bucket, m_key;
+        for (auto& [k, v] : read_tsv(e.path() / "manifest")) {
+            if (k == "bucket") m_bucket = v;
+            else if (k == "key") m_key = v;
+        }
+        if (m_bucket != bucket) continue;
+        struct stat st{};
+        auto initiated = ::stat((e.path() / "manifest").c_str(), &st) == 0
+                             ? std::chrono::system_clock::from_time_t(st.st_mtime)
+                             : std::chrono::system_clock::now();
+        out.push_back({m_key, id, initiated});
+    }
+    std::sort(out.begin(), out.end(), [](const UploadInfo& a, const UploadInfo& b) {
+        return std::tie(a.key, a.upload_id) < std::tie(b.key, b.upload_id);
+    });
+    co_return out;
 }
 
 void LocalFsBackend::cleanup_stale_uploads() {

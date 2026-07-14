@@ -160,6 +160,164 @@ bool is_hex_digest(const std::string& s) {
     return true;
 }
 
+// HMAC 链派生签名密钥：date → region → service → "aws4_request"
+util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::string& date,
+                                      const std::string& region, const std::string& service) {
+    std::string init = "AWS4" + secret_key;
+    auto k = util::hmac_sha256(
+        std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
+    k = util::hmac_sha256(k, region);
+    k = util::hmac_sha256(k, service);
+    return util::hmac_sha256(k, "aws4_request");
+}
+
+// aws-chunked 剥壳装饰器（docs/05 §3.2）：
+// 逐 chunk 解析 "<hex-size>[;chunk-signature=<sig>]\r\n<data>\r\n"，向下游只暴露纯数据。
+// signed 模式验证签名链：sig_n = HMAC(key, "AWS4-HMAC-SHA256-PAYLOAD" \n amz_date \n scope
+//                                   \n sig_{n-1} \n sha256("") \n sha256(chunk_data))；
+// 0 号尾 chunk 同样验证；其后的 trailer 行（-TRAILER 变体）读掉不校验。
+class ChunkedSigV4BodyReader final : public http::BodyReader {
+public:
+    ChunkedSigV4BodyReader(std::unique_ptr<http::BodyReader> inner, bool signed_chunks,
+                           util::Sha256Digest signing_key, std::string seed_signature,
+                           std::string amz_date, std::string scope,
+                           std::optional<uint64_t> decoded_length)
+        : inner_(std::move(inner)),
+          signed_(signed_chunks),
+          key_(signing_key),
+          prev_sig_(std::move(seed_signature)),
+          amz_date_(std::move(amz_date)),
+          scope_(std::move(scope)),
+          decoded_length_(decoded_length) {}
+
+    Task<size_t> read(std::span<std::byte> out) override {
+        while (state_ != State::Done) {
+            if (state_ == State::Header) {
+                if (!co_await parse_header()) continue;  // 需要更多数据
+            } else if (state_ == State::Data) {
+                if (chunk_remaining_ == 0) {
+                    co_await finish_chunk();
+                    continue;
+                }
+                if (buf_.empty() && !co_await fill()) malformed_body("truncated chunk data");
+                size_t n = std::min({out.size(), buf_.size(),
+                                     static_cast<size_t>(chunk_remaining_)});
+                std::memcpy(out.data(), buf_.data(), n);
+                if (chunk_hash_)
+                    chunk_hash_->update(
+                        std::span(reinterpret_cast<const uint8_t*>(buf_.data()), n));
+                buf_.erase(0, n);
+                chunk_remaining_ -= n;
+                delivered_ += n;
+                co_return n;
+            } else {  // Trailer：读掉剩余输入（trailer 头与结尾空行）
+                buf_.clear();
+                if (!co_await fill()) state_ = State::Done;
+            }
+        }
+        if (decoded_length_ && delivered_ != *decoded_length_)
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "Decoded body size does not match x-amz-decoded-content-length.");
+        co_return 0;
+    }
+
+    std::optional<uint64_t> length() const override { return decoded_length_; }
+
+private:
+    enum class State { Header, Data, Trailer, Done };
+
+    [[noreturn]] static void malformed_body(const char* why) {
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      std::string("Malformed aws-chunked body: ") + why);
+    }
+
+    Task<bool> fill() {
+        std::byte tmp[16 * 1024];
+        size_t n = co_await inner_->read(std::span(tmp));
+        if (n == 0) co_return false;
+        buf_.append(reinterpret_cast<const char*>(tmp), n);
+        co_return true;
+    }
+
+    // 返回 false 表示还需 fill；解析出 header 后切到 Data
+    Task<bool> parse_header() {
+        auto eol = buf_.find("\r\n");
+        if (eol == std::string::npos) {
+            if (buf_.size() > 4096) malformed_body("chunk header too long");
+            if (!co_await fill()) malformed_body("truncated chunk header");
+            co_return false;
+        }
+        std::string line = buf_.substr(0, eol);
+        buf_.erase(0, eol + 2);
+
+        auto semi = line.find(';');
+        std::string size_hex = line.substr(0, semi == std::string::npos ? line.size() : semi);
+        chunk_sig_.clear();
+        if (semi != std::string::npos) {
+            constexpr std::string_view kSigKey = "chunk-signature=";
+            auto at = line.find(kSigKey, semi);
+            if (at != std::string::npos) {
+                chunk_sig_ = line.substr(at + kSigKey.size());
+                if (auto extra = chunk_sig_.find(';'); extra != std::string::npos)
+                    chunk_sig_.resize(extra);
+            }
+        }
+        if (size_hex.empty() || size_hex.size() > 16) malformed_body("bad chunk size");
+        uint64_t size = 0;
+        for (char c : size_hex) {
+            if (!isxdigit(static_cast<unsigned char>(c))) malformed_body("bad chunk size");
+            size = size * 16 + (c <= '9' ? c - '0' : (tolower(c) - 'a' + 10));
+        }
+        if (signed_ && chunk_sig_.empty()) malformed_body("missing chunk-signature");
+
+        chunk_remaining_ = size;
+        final_chunk_ = size == 0;
+        if (signed_) chunk_hash_.emplace(util::HashStream::Algo::Sha256);
+        state_ = State::Data;
+        co_return true;
+    }
+
+    // 当前 chunk 数据读完：验证签名、消费结尾 CRLF（尾 chunk 无 CRLF，直接进 Trailer）
+    Task<void> finish_chunk() {
+        if (signed_) {
+            std::string data_hash = chunk_hash_->final_hex();
+            chunk_hash_.reset();
+            std::string sts = std::string("AWS4-HMAC-SHA256-PAYLOAD\n") + amz_date_ + "\n" +
+                              scope_ + "\n" + prev_sig_ + "\n" + kEmptySha256 + "\n" + data_hash;
+            std::string expect = util::to_hex(util::hmac_sha256(key_, sts));
+            if (!constant_time_eq(expect, chunk_sig_))
+                throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
+                              "Chunk signature does not match.");
+            prev_sig_ = expect;
+        }
+        if (final_chunk_) {
+            state_ = State::Trailer;
+            co_return;
+        }
+        while (buf_.size() < 2)
+            if (!co_await fill()) malformed_body("truncated chunk terminator");
+        if (buf_[0] != '\r' || buf_[1] != '\n') malformed_body("missing chunk terminator");
+        buf_.erase(0, 2);
+        state_ = State::Header;
+    }
+
+    std::unique_ptr<http::BodyReader> inner_;
+    bool signed_;
+    util::Sha256Digest key_;
+    std::string prev_sig_;
+    std::string amz_date_;
+    std::string scope_;
+    std::optional<uint64_t> decoded_length_;
+
+    std::string buf_;
+    State state_ = State::Header;
+    uint64_t chunk_remaining_ = 0;
+    uint64_t delivered_ = 0;
+    bool final_chunk_ = false;
+    std::string chunk_sig_;
+    std::optional<util::HashStream> chunk_hash_;
+};
+
 }  // namespace
 
 SigV4Authenticator SigV4Authenticator::build(const AuthConfig& cfg) {
@@ -200,21 +358,13 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
     std::string sts = std::string(kAlgo) + "\n" + amz_date + "\n" + scope + "\n" +
                       util::sha256_hex(canonical.str());
 
-    // HMAC 链派生签名密钥
-    std::string date = amz_date.substr(0, 8);
     auto parts = split(scope, '/');  // date/region/service/aws4_request
-    std::string init = "AWS4" + secret_key;
-    auto k = util::hmac_sha256(
-        std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
-    k = util::hmac_sha256(k, parts[1]);
-    k = util::hmac_sha256(k, parts[2]);
-    k = util::hmac_sha256(k, "aws4_request");
-    auto sig = util::hmac_sha256(k, sts);
-    return util::to_hex(sig);
+    auto k = derive_signing_key(secret_key, parts[0], parts[1], parts[2]);
+    return util::to_hex(util::hmac_sha256(k, sts));
 }
 
-void SigV4Authenticator::verify(http::HttpRequest& req) const {
-    if (!enabled()) return;
+std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
+    if (!enabled()) return "";
 
     AuthFields f;
     if (auto auth = req.headers.get("Authorization")) {
@@ -243,13 +393,28 @@ void SigV4Authenticator::verify(http::HttpRequest& req) const {
     if (f.amz_date.substr(0, 8) != f.date)
         malformed("credential date does not match x-amz-date");
 
-    // 时钟偏移
     auto t = util::parse_amz_date(f.amz_date);
     if (!t) malformed("cannot parse x-amz-date");
-    auto skew = std::chrono::duration_cast<std::chrono::seconds>(clock() - *t).count();
-    if (skew > kMaxClockSkewSec || skew < -kMaxClockSkewSec)
-        throw S3Error(S3ErrorCode::RequestTimeTooSkewed,
-                      "The difference between the request time and the server's time is too large.");
+    if (f.presigned) {
+        // presigned 按 X-Amz-Expires 判有效期（docs/05 §3.4），不做 15min 偏移检查
+        auto exp = req.query_get("X-Amz-Expires");
+        if (!exp) malformed("missing X-Amz-Expires");
+        long expires = 0;
+        try {
+            expires = std::stol(*exp);
+        } catch (...) {
+            malformed("invalid X-Amz-Expires");
+        }
+        if (expires < 1 || expires > kMaxPresignExpires) malformed("invalid X-Amz-Expires");
+        if (clock() > *t + std::chrono::seconds(expires))
+            throw S3Error(S3ErrorCode::AccessDenied, "Request has expired");
+    } else {
+        auto skew = std::chrono::duration_cast<std::chrono::seconds>(clock() - *t).count();
+        if (skew > kMaxClockSkewSec || skew < -kMaxClockSkewSec)
+            throw S3Error(
+                S3ErrorCode::RequestTimeTooSkewed,
+                "The difference between the request time and the server's time is too large.");
+    }
 
     // 凭证
     auto it = creds_.find(f.access_key);
@@ -257,15 +422,21 @@ void SigV4Authenticator::verify(http::HttpRequest& req) const {
         throw S3Error(S3ErrorCode::InvalidAccessKeyId,
                       "The AWS access key ID you provided does not exist in our records.");
 
-    // payload hash
+    // payload hash（streaming 变体在 canonical request 中按字面值参与签名）
     std::string payload_hash;
+    bool chunked_signed = false, chunked_unsigned = false;
     if (f.presigned) {
         payload_hash = "UNSIGNED-PAYLOAD";
     } else if (auto h = req.headers.get("x-amz-content-sha256")) {
         payload_hash = *h;
-        if (payload_hash.rfind("STREAMING-", 0) == 0)
+        if (payload_hash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD" ||
+            payload_hash == "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER")
+            chunked_signed = true;
+        else if (payload_hash == "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
+            chunked_unsigned = true;
+        else if (payload_hash.rfind("STREAMING-", 0) == 0)
             throw S3Error(S3ErrorCode::NotImplemented,
-                          "aws-chunked streaming payloads are not supported yet.");
+                          "This streaming payload type is not supported.");
     } else {
         bool has_body = req.body && req.body->length().value_or(0) > 0;
         if (has_body)
@@ -282,9 +453,25 @@ void SigV4Authenticator::verify(http::HttpRequest& req) const {
                       "The request signature we calculated does not match the signature you "
                       "provided.");
 
-    // 流式 payload 校验（docs/05 §3.3）
-    if (is_hex_digest(payload_hash) && payload_hash != kEmptySha256 && req.body)
+    // 流式 payload 校验（docs/05 §3.2/§3.3）
+    if ((chunked_signed || chunked_unsigned) && req.body) {
+        std::optional<uint64_t> decoded_len;
+        if (auto dl = req.headers.get("x-amz-decoded-content-length")) {
+            try {
+                decoded_len = std::stoull(*dl);
+            } catch (...) {
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "Invalid x-amz-decoded-content-length.");
+            }
+        }
+        req.body = std::make_unique<ChunkedSigV4BodyReader>(
+            std::move(req.body), chunked_signed,
+            derive_signing_key(it->second, f.date, f.region, f.service), f.signature,
+            f.amz_date, scope, decoded_len);
+    } else if (is_hex_digest(payload_hash) && payload_hash != kEmptySha256 && req.body) {
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);
+    }
+    return f.access_key;
 }
 
 void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred,

@@ -1,6 +1,8 @@
 // 进程装配与启动流程（docs/01-architecture.md §4）
 #include <csignal>
 
+#include <gflags/gflags.h>
+
 #include "core/config.h"
 #include "core/log.h"
 #include "core/semaphore.h"
@@ -27,21 +29,16 @@ lights3::LogLevel parse_level(const std::string& s) {
 
 }  // namespace
 
+DEFINE_string(config, "config/lights3.yaml", "Path to the lights3 YAML config file");
+
 int main(int argc, char** argv) {
     using namespace lights3;
 
-    std::string config_path = "config/lights3.yaml";
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if ((arg == "--config" || arg == "-c") && i + 1 < argc) config_path = argv[++i];
-        else if (arg == "--help" || arg == "-h") {
-            printf("usage: lights3 [--config <path>]\n");
-            return 0;
-        }
-    }
+    gflags::SetUsageMessage("S3-compatible object storage server.\nusage: lights3 [--config <path>]");
+    gflags::ParseCommandLineFlags(&argc, &argv, /*remove_flags=*/true);
 
     try {
-        auto cfg = Config::load(config_path);
+        auto cfg = Config::load(FLAGS_config);
         Logger::init(parse_level(cfg.log_level));
 
         auto pool = std::make_shared<ThreadPool>(cfg.runtime.io_threads);

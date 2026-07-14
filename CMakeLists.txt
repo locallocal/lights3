@@ -11,6 +11,13 @@ add_compile_options(-Wall -Wextra)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
+# gflags：命令行参数解析（git submodule，静态链接进主程序）
+set(GFLAGS_BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
+set(GFLAGS_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(GFLAGS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(GFLAGS_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/gflags EXCLUDE_FROM_ALL)
+
 # HTTP 驱动的编译期裁剪（docs/01 §6 依赖策略）
 option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
@@ -80,7 +87,7 @@ endif()
 
 # ---- 主程序 ----
 add_executable(lights3 src/main.cc)
-target_link_libraries(lights3 PRIVATE lights3_core)
+target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
 
 # ---- 测试 ----
 if(LIGHTS3_BUILD_TESTS)

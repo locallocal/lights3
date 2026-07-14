@@ -109,7 +109,7 @@ Detached spawn_detached(Task<void> t, Done done) {
     try {
         co_await std::move(t);
     } catch (const std::exception& e) {
-        LOG_ERROR("beast session escaped exception: ", e.what());
+        LOG_ERROR("beast session escaped exception: {}", e.what());
     }
     done();
 }
@@ -212,7 +212,7 @@ public:
 
         work_.emplace(asio::make_work_guard(ioc_));
         spawn_detached(accept_loop(), [] {});
-        LOG_INFO("beast http server listening on ", addr, ":", port_);
+        LOG_INFO("beast http server listening on {}:{}", addr, port_);
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -243,7 +243,7 @@ private:
             auto [ec, sock] = co_await AcceptAwaiter{*acceptor_, ioc_, {}, {}};
             if (ec) {
                 if (stopping_.load() || ec == asio::error::operation_aborted) break;
-                LOG_WARN("accept failed: ", ec.message());
+                LOG_WARN("accept failed: {}", ec.message());
                 continue;
             }
             auto sess = std::make_shared<Session>(std::move(sock));
@@ -305,7 +305,7 @@ private:
                 resp = co_await handler_(std::move(req));
             } catch (const std::exception& e) {
                 // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
-                LOG_ERROR("handler escaped exception: ", e.what());
+                LOG_ERROR("handler escaped exception: {}", e.what());
                 resp = driver::internal_error_response();
                 keep = false;
             }
@@ -411,7 +411,7 @@ private:
             try {
                 n = co_await resp.stream_body->read(std::span(buf));
             } catch (const std::exception& e) {
-                LOG_ERROR("stream body read failed mid-response: ", e.what());
+                LOG_ERROR("stream body read failed mid-response: {}", e.what());
                 co_return false;  // 响应头已发出，只能断连（契约 3：丢弃结果）
             }
             co_await ResumeOn{stream.get_executor()};
@@ -466,7 +466,7 @@ private:
                 std::lock_guard lk(m_);
                 rest.assign(sessions_.begin(), sessions_.end());
             }
-            LOG_WARN("forcing ", rest.size(), " connection(s) closed on shutdown");
+            LOG_WARN("forcing {} connection(s) closed on shutdown", rest.size());
             for (auto& s : rest) close_session(s);
             force_timer_.emplace(ioc_, std::chrono::seconds(5));
             force_timer_->async_wait([this](beast::error_code e2) {

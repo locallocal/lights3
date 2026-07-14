@@ -102,8 +102,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         metrics_.s3_error(wire_code(e.code));
         resp = error_response(e, ctx.request_id, head);
     } catch (const std::exception& e) {
-        LOG_ERROR("req ", ctx.request_id, " ", req.method, " ", req.path,
-                  " internal error: ", e.what());
+        LOG_ERROR("req {} {} {} internal error: {}", ctx.request_id, req.method, req.path,
+                  e.what());
         metrics_.s3_error("InternalError");
         resp = error_response(
             S3Error(S3ErrorCode::InternalError, "We encountered an internal error."),
@@ -116,9 +116,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     metrics_.request_end(req.method, resp.status, secs);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
-    LOG_INFO("access ", ctx.request_id, " ", access_key.empty() ? "-" : access_key, " ",
-             req.method, " ", req.path, " ", resp.status, " ", bytes, " ",
-             static_cast<uint64_t>(secs * 1000), "ms");
+    LOG_INFO("access {} {} {} {} {} {} {}ms", ctx.request_id,
+             access_key.empty() ? "-" : access_key, req.method, req.path, resp.status, bytes,
+             static_cast<uint64_t>(secs * 1000));
     co_return resp;
 }
 

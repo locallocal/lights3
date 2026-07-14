@@ -656,7 +656,7 @@ void LocalFsBackend::cleanup_stale_uploads() {
         if (tec || now - t <= kMpuTtl) continue;
         fs::remove_all(e.path(), tec);
         if (!tec)
-            LOG_INFO("localfs: removed stale multipart upload ",
+            LOG_INFO("localfs: removed stale multipart upload {}",
                      e.path().filename().string());
     }
 }

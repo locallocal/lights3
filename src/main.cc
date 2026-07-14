@@ -71,8 +71,8 @@ int main(int argc, char** argv) {
         sigaction(SIGTERM, &sa, nullptr);
         signal(SIGPIPE, SIG_IGN);
 
-        LOG_INFO("lights3 started: driver=", cfg.http.driver,
-                 " backends=", cfg.backends.size(), " pool=", cfg.runtime.io_threads);
+        LOG_INFO("lights3 started: driver={} backends={} pool={}", cfg.http.driver,
+                 cfg.backends.size(), cfg.runtime.io_threads);
         server->run();  // 阻塞直至 SIGINT/SIGTERM
 
         g_server = nullptr;

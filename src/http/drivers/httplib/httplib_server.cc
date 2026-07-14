@@ -152,7 +152,7 @@ public:
                                          std::to_string(port));
             port_ = port;
         }
-        LOG_INFO("httplib http server listening on ", addr, ":", port_);
+        LOG_INFO("httplib http server listening on {}:{}", addr, port_);
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -203,7 +203,7 @@ private:
             resp = sync_wait(handler_(std::move(req)));
         } catch (const std::exception& e) {
             // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
-            LOG_ERROR("handler escaped exception: ", e.what());
+            LOG_ERROR("handler escaped exception: {}", e.what());
             resp = driver::internal_error_response();
         }
 
@@ -276,7 +276,7 @@ private:
                     try {
                         n = sync_wait(body->read(std::span(buf)));
                     } catch (const std::exception& e) {
-                        LOG_ERROR("stream body read failed mid-response: ", e.what());
+                        LOG_ERROR("stream body read failed mid-response: {}", e.what());
                         return false;  // 响应头已发出，只能断连（契约 3）
                     }
                     if (n == 0) return false;  // 长度未到就 EOF，视为错误
@@ -290,7 +290,7 @@ private:
                     try {
                         n = sync_wait(body->read(std::span(buf)));
                     } catch (const std::exception& e) {
-                        LOG_ERROR("stream body read failed mid-response: ", e.what());
+                        LOG_ERROR("stream body read failed mid-response: {}", e.what());
                         return false;
                     }
                     if (n == 0) {

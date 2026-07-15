@@ -5,10 +5,7 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <atomic>
-#include <cstring>
 #include <fstream>
-#include <sstream>
 #include <system_error>
 #include <tuple>
 
@@ -24,41 +21,19 @@ namespace lights3::storage {
 using s3::S3Error;
 using s3::S3ErrorCode;
 
+// 落盘原语在 fs_util 中，与 xlocalfs 共用
+using fsutil::TmpFile;
+using fsutil::commit_object_file;
+using fsutil::load_manifest;
+using fsutil::next_tmp_name;
+using fsutil::part_file_name;
+using fsutil::read_tsv;
+using fsutil::reject_reserved_key;
+using fsutil::require_upload;
+using fsutil::throw_errno;
+using fsutil::write_tsv;
+
 namespace {
-
-std::string next_tmp_name() {
-    static std::atomic<uint64_t> seq{0};
-    std::ostringstream os;
-    os << ::getpid() << "-" << std::chrono::steady_clock::now().time_since_epoch().count()
-       << "-" << seq.fetch_add(1);
-    return os.str();
-}
-
-// 未提交则析构时删除
-struct TmpFile {
-    fs::path path;
-    int fd = -1;
-    bool committed = false;
-
-    ~TmpFile() {
-        if (fd >= 0) ::close(fd);
-        if (!committed) {
-            std::error_code ec;
-            fs::remove(path, ec);
-        }
-    }
-};
-
-// key 不得使用内部保留名（sidecar/marker），避免与数据文件冲突
-void reject_reserved_key(std::string_view key) {
-    if (key.ends_with(LocalFsBackend::kSidecarSuffix) ||
-        key.find(LocalFsBackend::kBucketMarker) != std::string_view::npos)
-        throw S3Error(S3ErrorCode::InvalidArgument, "Object key uses a reserved name");
-}
-
-[[noreturn]] void throw_errno(const std::string& what) {
-    throw S3Error(S3ErrorCode::InternalError, what + ": " + std::strerror(errno));
-}
 
 // pread 流式读取；每块经线程池执行（阻塞 IO 不占 HTTP 执行环境）
 class FdBodyReader final : public http::BodyReader {
@@ -111,67 +86,6 @@ void LocalFsBackend::require_bucket(std::string_view bucket) const {
     if (!fs::exists(bucket_dir(bucket) / kBucketMarker))
         throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist",
                       std::string(bucket));
-}
-
-// ---------- sidecar / manifest：k<TAB>v 行格式，tmp+rename 原子写 ----------
-
-static void write_tsv(const fs::path& dest, const fs::path& tmp_dir,
-                      const std::vector<std::pair<std::string, std::string>>& kv) {
-    fs::path tmp = tmp_dir / ("meta-" + next_tmp_name());
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) throw_errno("open meta tmp");
-        for (auto& [k, v] : kv) f << k << "\t" << v << "\n";
-        if (!f.flush()) throw_errno("write meta");
-    }
-    std::error_code ec;
-    fs::rename(tmp, dest, ec);
-    if (ec) {
-        fs::remove(tmp, ec);
-        throw S3Error(S3ErrorCode::InternalError, "rename meta file failed");
-    }
-}
-
-static std::vector<std::pair<std::string, std::string>> read_tsv(const fs::path& path) {
-    std::vector<std::pair<std::string, std::string>> out;
-    std::ifstream f(path, std::ios::binary);
-    std::string line;
-    while (std::getline(f, line)) {
-        auto tab = line.find('\t');
-        if (tab == std::string::npos) continue;
-        out.emplace_back(line.substr(0, tab), line.substr(tab + 1));
-    }
-    return out;
-}
-
-static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
-                          const fs::path& staging_dir) {
-    std::vector<std::pair<std::string, std::string>> kv{{"etag", meta.etag},
-                                                        {"content_type", meta.content_type}};
-    for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
-    write_tsv(sidecar, staging_dir, kv);
-}
-
-// 建父目录 + 目录冲突检查 + 先 sidecar 后数据 rename（docs/04 §3.1 写入原子性）；
-// PUT 与 complete_multipart 共用
-static void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                               const fs::path& staging_put, std::string_view key) {
-    std::error_code ec;
-    fs::create_directories(dest.parent_path(), ec);
-    if (ec)
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Object key conflicts with an existing object path", std::string(key));
-    if (fs::is_directory(dest))
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Object key conflicts with an existing key prefix", std::string(key));
-
-    write_sidecar(fs::path(dest.string() + LocalFsBackend::kSidecarSuffix), meta, staging_put);
-    fs::rename(tmp.path, dest, ec);
-    if (ec) {
-        fs::remove(dest.string() + LocalFsBackend::kSidecarSuffix, ec);
-        throw S3Error(S3ErrorCode::InternalError, "rename object failed");
-    }
-    tmp.committed = true;
 }
 
 ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key) const {
@@ -386,49 +300,6 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
 // ---------- multipart（docs/04 §3.2）----------
 // 布局：<staging>/mpu/<upload_id>/{manifest, part.NNNNN, part.NNNNN.md5}
 // 分片先 md5 后数据文件（与 sidecar-先-data-后 一致，数据文件出现即分片就绪）
-
-namespace {
-
-std::string part_file_name(int part_no) {
-    char buf[16];
-    snprintf(buf, sizeof(buf), "part.%05d", part_no);
-    return buf;
-}
-
-struct UploadState {
-    fs::path dir;
-    ObjectMeta meta;  // manifest 中记录的 content_type / user_meta
-};
-
-// upload_id 合法性 + manifest 存在 + bucket/key 匹配，任一不满足视为 NoSuchUpload
-UploadState require_upload(const fs::path& staging, std::string_view bucket,
-                           std::string_view key, std::string_view upload_id,
-                           const std::vector<std::pair<std::string, std::string>>& manifest) {
-    UploadState up;
-    up.dir = staging / "mpu" / std::string(upload_id);
-    std::string m_bucket, m_key;
-    for (auto& [k, v] : manifest) {
-        if (k == "bucket") m_bucket = v;
-        else if (k == "key") m_key = v;
-        else if (k == "content_type") up.meta.content_type = v;
-        else if (k.rfind("meta.", 0) == 0) up.meta.user_meta[k.substr(5)] = v;
-    }
-    if (manifest.empty() || m_bucket != bucket || m_key != key)
-        throw S3Error(S3ErrorCode::NoSuchUpload,
-                      "The specified multipart upload does not exist.", std::string(upload_id));
-    return up;
-}
-
-}  // namespace
-
-// 读 manifest 前先做 id 格式与存在性检查（id 会拼进路径，格式校验兼防逃逸）
-static std::vector<std::pair<std::string, std::string>> load_manifest(
-    const fs::path& staging, std::string_view upload_id) {
-    if (!is_valid_upload_id(upload_id)) return {};
-    fs::path manifest = staging / "mpu" / std::string(upload_id) / "manifest";
-    if (!fs::exists(manifest)) return {};
-    return read_tsv(manifest);
-}
 
 Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
                                                    std::string_view key, ObjectMeta meta) {

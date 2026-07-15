@@ -2,8 +2,9 @@
 # e2e：起真实 lights3 进程（localfs 后端 + SigV4 认证），用 curl --aws-sigv4 全流程验证
 set -u
 
-BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver]}"
+BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
+BACKEND="${3:-localfs}"   # localfs | xlocalfs
 AK=E2EACCESSKEY
 SK=e2e-secret-key
 REGION=us-east-1
@@ -42,7 +43,7 @@ auth:
   region: $REGION
 backends:
   - name: localdata
-    type: localfs
+    type: $BACKEND
     root: $WORK/data
     staging: $WORK/staging
 buckets:

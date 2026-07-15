@@ -51,8 +51,11 @@ add_library(lights3_core STATIC
   src/storage/multipart.cc
   src/storage/registry.cc
   src/storage/bucket_router.cc
+  src/storage/localfs/fs_util.cc
   src/storage/localfs/localfs_backend.cc
   src/storage/memory/memory_backend.cc
+  src/storage/xlocalfs/uring.cc
+  src/storage/xlocalfs/xlocalfs_backend.cc
 )
 target_include_directories(lights3_core PUBLIC src)
 target_link_libraries(lights3_core PUBLIC OpenSSL::Crypto Threads::Threads spdlog::spdlog)
@@ -122,5 +125,11 @@ if(LIGHTS3_BUILD_TESTS)
   if(LIGHTS3_DRIVER_HTTPLIB)
     add_test(NAME e2e_httplib
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh $<TARGET_FILE:lights3> httplib)
+  endif()
+  # xlocalfs 后端复用同一组 e2e 用例（io_uring 数据面）
+  if(LIGHTS3_DRIVER_BUILTIN)
+    add_test(NAME e2e_xlocalfs
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin xlocalfs)
   endif()
 endif()

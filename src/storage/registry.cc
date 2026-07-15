@@ -4,6 +4,7 @@
 
 #include "storage/localfs/localfs_backend.h"
 #include "storage/memory/memory_backend.h"
+#include "storage/xlocalfs/xlocalfs_backend.h"
 
 namespace lights3::storage {
 
@@ -14,16 +15,31 @@ std::map<std::string, BackendFactory>& registry() {
     return r;
 }
 
+// localfs 与 xlocalfs 共用的 root/staging 参数解析
+std::pair<std::string, std::string> fs_backend_paths(const BackendConfig& cfg) {
+    auto root = cfg.params.count("root") ? cfg.params.at("root") : "";
+    if (root.empty())
+        throw std::runtime_error(cfg.type + " backend '" + cfg.name + "' needs root");
+    auto staging = cfg.params.count("staging") ? cfg.params.at("staging")
+                                               : root + "/.lights3-staging";
+    return {root, staging};
+}
+
 void ensure_registered() {
     static bool done = [] {
         StorageRegistry::register_backend(
             "localfs", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
-                auto root = cfg.params.count("root") ? cfg.params.at("root") : "";
-                if (root.empty())
-                    throw std::runtime_error("localfs backend '" + cfg.name + "' needs root");
-                auto staging = cfg.params.count("staging") ? cfg.params.at("staging")
-                                                           : root + "/.lights3-staging";
+                auto [root, staging] = fs_backend_paths(cfg);
                 return std::make_shared<LocalFsBackend>(root, staging, std::move(pool));
+            });
+        StorageRegistry::register_backend(
+            "xlocalfs", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+                auto [root, staging] = fs_backend_paths(cfg);
+                unsigned depth = cfg.params.count("queue_depth")
+                                     ? std::stoul(cfg.params.at("queue_depth"))
+                                     : 256;
+                return std::make_shared<XLocalFsBackend>(root, staging, std::move(pool),
+                                                         depth);
             });
         StorageRegistry::register_backend(
             "memory", [](const BackendConfig&, std::shared_ptr<ThreadPool>) {

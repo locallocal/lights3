@@ -1,9 +1,10 @@
-// 后端一致性套件：同一组用例参数化跑 memory 与 localfs（docs/04 §5）
+// 后端一致性套件：同一组用例参数化跑 memory / localfs / xlocalfs（docs/04 §5）
 #include <filesystem>
 
 #include "core/thread_pool.h"
 #include "storage/localfs/localfs_backend.h"
 #include "storage/memory/memory_backend.h"
+#include "storage/xlocalfs/xlocalfs_backend.h"
 #include "unit/mini_test.h"
 
 using namespace lights3;
@@ -234,6 +235,52 @@ TEST(localfs_backend_suite) {
     auto pool = std::make_shared<ThreadPool>(4);
     LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
     run_backend_suite(b);
+}
+
+TEST(xlocalfs_backend_suite) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    run_backend_suite(b);
+    sync_wait(b.close());
+}
+
+// 跨多个 64KiB 数据块的读写路径：io_uring 流式写入与带偏移读取
+TEST(xlocalfs_large_object_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+
+    std::string data(1 << 20, '\0');  // 1 MiB 伪随机内容
+    uint32_t x = 0x12345678;
+    for (auto& c : data) {
+        x = x * 1664525 + 1013904223;
+        c = static_cast<char>(x >> 24);
+    }
+    auto pr = put(b, "bkt", "big/blob.bin", data);
+
+    auto whole = sync_wait(b.get_object("bkt", "big/blob.bin", std::nullopt));
+    CHECK_EQ(whole.meta.size, uint64_t(data.size()));
+    CHECK_EQ(whole.meta.etag, pr.etag);
+    CHECK(read_all(*whole.body) == data);
+
+    // 跨块边界的 Range
+    auto mid = sync_wait(b.get_object("bkt", "big/blob.bin",
+                                      ByteRange{uint64_t(65530), uint64_t(65545)}));
+    CHECK(read_all(*mid.body) == data.substr(65530, 16));
+
+    // multipart：两个跨块分片经 io_uring 拼接
+    auto uid = sync_wait(b.create_multipart("bkt", "big/joined.bin", {}));
+    std::string p1 = data.substr(0, 300 * 1024), p2 = data.substr(300 * 1024);
+    http::StringBodyReader b1(p1), b2(p2);
+    auto r1 = sync_wait(b.upload_part("bkt", "big/joined.bin", uid, 1, b1));
+    auto r2 = sync_wait(b.upload_part("bkt", "big/joined.bin", uid, 2, b2));
+    sync_wait(b.complete_multipart("bkt", "big/joined.bin", uid,
+                                   std::vector<PartInfo>{{1, r1.etag}, {2, r2.etag}}));
+    auto joined = sync_wait(b.get_object("bkt", "big/joined.bin", std::nullopt));
+    CHECK(read_all(*joined.body) == data);
+    sync_wait(b.close());
 }
 
 TEST(localfs_atomic_layout) {

@@ -19,9 +19,10 @@ auth:
 
 backends:
   - name: localdata
-    type: localfs
+    type: localfs                      # localfs | xlocalfs（io_uring 数据面）| memory
     root: ./data/objects
     staging: ./data/staging            # 须与 root 同一文件系统（rename 原子性）
+    # queue_depth: 256                 # 仅 xlocalfs：io_uring SQ 深度
 
 buckets:
   default_backend: localdata

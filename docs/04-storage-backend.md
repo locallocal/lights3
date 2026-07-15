@@ -135,6 +135,24 @@ resolve(bucket) → IStorageBackend&
   与 S3 规则一致）；abort 删目录。启动时扫描 mpu 目录清理超期（默认 7 天）
   的孤儿上传。
 
+### 3.3 XLocalFsBackend（xlocalfs，io_uring 数据面变体）
+
+磁盘布局、元数据与 multipart 逻辑**完全复用** LocalFsBackend（继承 + 共享
+`fs_util` 落盘原语），仅把数据面的字节搬运换成 io_uring：
+
+- **封装**：`storage/xlocalfs/uring.h` 用原生 syscall（io_uring_setup/enter +
+  mmap SQ/CQ）实现最小封装，不引入 liburing 依赖。单 ring：提交侧互斥锁
+  串行化 SQE 填充并逐个 enter（SQ 不积压）；独立收割线程等待 CQE，完成后把
+  协程续体投递回线程池——磁盘等待期间不占任何线程，后续的同步落盘调用
+  （rename/sidecar）天然回到池线程。
+- **覆盖范围**：GET 流式读（`UringBodyReader`，带偏移天然支持 Range）、
+  PUT/UploadPart 流式写、complete 分片拼接。目录遍历与元数据操作仍走线程池
+  （io_uring 无 getdents 等目录原语）。
+- **配置**：`type: xlocalfs`，参数同 localfs（root/staging），另有可选
+  `queue_depth`（SQ 深度，默认 256）。
+- **生命周期**：`close()` 停止收割线程；须在在途请求完成后调用（与
+  ThreadPool::join 同一假设）。
+
 ## 4. CloudProxyBackend（映射公有云）
 
 把本地 bucket 映射到公有云对象存储（AWS S3 / 兼容 S3 协议的 OSS、COS、MinIO

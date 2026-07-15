@@ -8,10 +8,12 @@
 
 #include "core/thread_pool.h"
 #include "storage/backend.h"
+#include "storage/localfs/fs_util.h"
 
 namespace lights3::storage {
 
-class LocalFsBackend final : public IStorageBackend {
+// 可被 xlocalfs 继承：数据面（GET/PUT/分片/拼接）为 virtual，布局与元数据逻辑复用
+class LocalFsBackend : public IStorageBackend {
 public:
     LocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
                    std::shared_ptr<ThreadPool> pool);
@@ -45,20 +47,22 @@ public:
                                            std::string_view upload_id) override;
     Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) override;
 
-    static constexpr const char* kSidecarSuffix = ".lights3-meta";
-    static constexpr const char* kBucketMarker = ".lights3-bucket";
+    static constexpr const char* kSidecarSuffix = fsutil::kSidecarSuffix;
+    static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
     static constexpr std::chrono::hours kMpuTtl{24 * 7};  // 孤儿上传清理阈值
 
-private:
+protected:
     std::filesystem::path bucket_dir(std::string_view bucket) const;
     std::filesystem::path object_path(std::string_view bucket, std::string_view key) const;
     void require_bucket(std::string_view bucket) const;      // 不存在抛 NoSuchBucket
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
-    void cleanup_stale_uploads();  // 启动时清理超期（kMpuTtl）的 mpu 目录
 
     std::filesystem::path root_;
     std::filesystem::path staging_;
     std::shared_ptr<ThreadPool> pool_;
+
+private:
+    void cleanup_stale_uploads();  // 启动时清理超期（kMpuTtl）的 mpu 目录
 };
 
 }  // namespace lights3::storage

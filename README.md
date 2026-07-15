@@ -1,59 +1,78 @@
 # LightS3
 
-基于 C++20 的 S3 协议网关。对外暴露 S3 REST API，对内可插拔 HTTP 驱动与存储后端。
-设计文档见 [docs/](docs/README.md)，当前实现对应 [docs/01-architecture.md](docs/01-architecture.md) 的架构。
+An S3-protocol gateway written in C++20. It exposes the standard S3 REST API on
+the outside, with pluggable HTTP drivers and storage backends on the inside.
+Design documents live in [docs/](docs/README.md) (in Chinese); the current
+implementation follows the architecture described in
+[docs/01-architecture.md](docs/01-architecture.md).
 
-## 构建与测试
+*中文介绍见 [docs/README.zh-CN.md](docs/README.zh-CN.md)。*
 
-依赖：g++ ≥ 13（C++20 协程）、CMake ≥ 3.20、OpenSSL；
-beast 驱动需要 Boost 头文件（≥ 1.75，header-only，无需编译库；
-找不到系统 Boost 时可用 `BOOST_ROOT` 指向头文件目录，或 `-DLIGHTS3_DRIVER_BEAST=OFF` 裁剪）。
-httplib 驱动使用 vendored 的 `third_party/httplib/httplib.h`，无外部依赖。
+## Build and test
+
+Requirements: g++ ≥ 13 (C++20 coroutines), CMake ≥ 3.20, OpenSSL.
+The beast driver needs Boost headers (≥ 1.75, header-only, no compiled
+libraries; if system Boost is not found, point `BOOST_ROOT` at the header
+directory, or disable the driver with `-DLIGHTS3_DRIVER_BEAST=OFF`).
+httplib, spdlog and gflags are git submodules under `third_party/` and must be
+initialized before the first build.
 
 ```bash
+git submodule update --init
 cmake -B build
 cmake --build build -j
-ctest --test-dir build --output-on-failure   # 单测 + 每驱动 e2e（e2e 需要 curl ≥ 7.75）
+ctest --test-dir build --output-on-failure   # unit tests + per-driver e2e (e2e needs curl ≥ 7.75)
 ```
 
-## 运行
+## Run
 
 ```bash
 export LIGHTS3_SECRET_1=my-secret
 ./build/lights3 --config config/lights3.yaml
 ```
 
-用任意 S3 客户端访问（示例用 curl 的 SigV4 支持）：
+Access it with any S3 client (the examples below use curl's SigV4 support):
 
 ```bash
 alias s3curl='curl -s --aws-sigv4 "aws:amz:us-east-1:s3" --user "AKIDEXAMPLE:$LIGHTS3_SECRET_1"'
 s3curl -X PUT http://127.0.0.1:9000/mybucket                      # CreateBucket
 s3curl -X PUT --data-binary @file.bin http://127.0.0.1:9000/mybucket/file.bin
 s3curl http://127.0.0.1:9000/mybucket?list-type=2                 # ListObjectsV2
-s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
+s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range download
 ```
 
-或使用 aws cli：`aws --endpoint-url http://127.0.0.1:9000 s3 ls`。
+Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
 
-## 当前实现范围
+## Current scope
 
-- **架构**：四层（HTTP Adapter / S3 Protocol / Storage / Core），依赖单向；
-  `IHttpServer` 与 `IStorageBackend` 两个插拔边界均已落地
-- **HTTP 驱动**：三个驱动全部落地，运行期由 `http.driver` 切换、编译期由
-  CMake 选项裁剪，并共享同一套驱动一致性测试（docs/02 §4 契约）：
-  - `builtin` —— 零依赖 POSIX socket，thread-per-connection；
-  - `beast` —— Boost.Beast/Asio 异步驱动（默认性能路径）：N 线程共跑一个
-    io_context，每连接一个 strand 上的会话协程，延迟 100-continue；
-  - `httplib` —— cpp-httplib 同步驱动（thread-per-request，功能验证用），
-    推模型 body 经有界队列翻转为拉模型
-- **并发**：自研 `Task<T>` 惰性协程 + `ThreadPool`，阻塞 IO 经
-  `co_await pool.schedule()` 下沉池线程，同步驱动经 `sync_wait` 桥接
-- **认证**：SigV4 自实现（头签名 + presigned query），流式 payload SHA256 校验，
-  单测覆盖 AWS 官方测试向量
-- **存储**：LocalFs（sidecar 元数据、staging+rename 原子写）、Memory（测试用）；
-  bucket 级 glob 路由
-- **S3 API**：ListBuckets、Create/Head/DeleteBucket、Put/Get/Head/DeleteObject
-  （含 Range 与条件请求）、ListObjectsV2（prefix/delimiter/分页）
+- **Architecture**: four layers (HTTP Adapter / S3 Protocol / Storage / Core)
+  with one-way dependencies; both pluggable boundaries — `IHttpServer` and
+  `IStorageBackend` — are in place
+- **HTTP drivers**: all three drivers are implemented, selected at runtime via
+  `http.driver` and trimmed at compile time via CMake options; they share one
+  driver-conformance test suite (the contract in
+  [docs/02-http-adapter.md](docs/02-http-adapter.md) §4):
+  - `builtin` — zero-dependency POSIX sockets, thread-per-connection;
+  - `beast` — asynchronous Boost.Beast/Asio driver (the default performance
+    path): N threads share one io_context, one per-connection session
+    coroutine on a strand, deferred 100-continue;
+  - `httplib` — synchronous cpp-httplib driver (thread-per-request, for
+    functional verification); its push-model body is flipped to a pull model
+    through a bounded queue
+- **Concurrency**: home-grown lazy `Task<T>` coroutines + `ThreadPool`;
+  blocking IO is moved onto pool threads via `co_await pool.schedule()`,
+  synchronous drivers bridge through `sync_wait`
+- **Auth**: SigV4 implemented from scratch (header signing + presigned query),
+  streaming payload SHA256 verification, unit tests cover the official AWS
+  test vectors
+- **Storage**: LocalFs (sidecar metadata, atomic writes via staging+rename),
+  XLocalFs (io_uring data plane using raw syscalls, no liburing required),
+  Memory (for tests); bucket-level glob routing
+- **S3 API**: ListBuckets, Create/Head/DeleteBucket, Put/Get/Head/DeleteObject
+  (including Range and conditional requests), ListObjectsV2
+  (prefix/delimiter/pagination)
 
-未实现（返回 NotImplemented，见 docs/05 规划）：Multipart Upload、CopyObject、
-DeleteObjects 批量、cloudproxy 后端、aws-chunked 流式签名。
+Not implemented yet (returns NotImplemented; see
+[docs/05-s3-protocol.md](docs/05-s3-protocol.md) for the roadmap): Multipart
+Upload, CopyObject, batch DeleteObjects, the cloudproxy backend, and
+aws-chunked streaming signatures.

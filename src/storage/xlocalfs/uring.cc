@@ -12,6 +12,18 @@
 
 #include "s3/errors.h"
 
+// 提交线程 → 内核 → 收割线程的 happens-before 经由 syscall 与 ring barrier
+// 传递，TSan 观测不到，会把收割侧对 Op 的读写全部误报成竞态；在 Op 指针上
+// 补一条注解边（release 于提交、acquire 于收割）精确还原这层同步
+#if defined(__SANITIZE_THREAD__)
+#include <sanitizer/tsan_interface.h>
+#define LIGHTS3_TSAN_RELEASE(p) __tsan_release(p)
+#define LIGHTS3_TSAN_ACQUIRE(p) __tsan_acquire(p)
+#else
+#define LIGHTS3_TSAN_RELEASE(p) (void)(p)
+#define LIGHTS3_TSAN_ACQUIRE(p) (void)(p)
+#endif
+
 namespace lights3::storage {
 
 using s3::S3Error;
@@ -135,6 +147,7 @@ void UringEngine::submit(uint8_t opcode, int fd, const void* addr, unsigned len,
                          Op* op) {
     std::lock_guard lk(submit_mu_);
     if (stopped_) throw S3Error(S3ErrorCode::InternalError, "io_uring engine stopped");
+    LIGHTS3_TSAN_RELEASE(op);
     push_and_enter(opcode, fd, addr, len, off, reinterpret_cast<uint64_t>(op));
 }
 
@@ -149,6 +162,7 @@ void UringEngine::reap_loop() {
                 stop = true;  // shutdown 提交的 NOP 哨兵
             } else {
                 Op* op = reinterpret_cast<Op*>(static_cast<uintptr_t>(cqe.user_data));
+                LIGHTS3_TSAN_ACQUIRE(op);
                 op->res = cqe.res;
                 // 经线程池恢复；post 的内部锁保证 res 写入对恢复线程可见
                 pool_->post([h = op->h] { h.resume(); });

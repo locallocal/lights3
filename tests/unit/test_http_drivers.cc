@@ -336,6 +336,9 @@ TEST(http_driver_registry_complete) {
 #ifdef LIGHTS3_DRIVER_HTTPLIB
     CHECK(has("httplib"));
 #endif
+#ifdef LIGHTS3_DRIVER_SEASTAR
+    CHECK(has("seastar"));
+#endif
 }
 
 TEST(http_driver_large_put) {

@@ -4,7 +4,10 @@ project(lights3 CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE RelWithDebInfo)
+  # 必须进缓存：seastar 子目录会 set(CMAKE_BUILD_TYPE ... CACHE)，若此处只是
+  # 普通变量，会被其自家默认值（Debug + sanitizers）顶掉。CMake 启动时会预置
+  # 一个空的 CMAKE_BUILD_TYPE 缓存项，不带 FORCE 的 set(CACHE) 覆盖不了它
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 add_compile_options(-Wall -Wextra)
 
@@ -18,14 +21,31 @@ set(GFLAGS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(GFLAGS_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/gflags EXCLUDE_FROM_ALL)
 
-# spdlog：日志实现（git submodule，静态库；core/log.h 为门面）
-add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
-
 # HTTP 驱动的编译期裁剪（docs/01 §6 依赖策略）
 option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
 option(LIGHTS3_DRIVER_HTTPLIB "Build the cpp-httplib sync HTTP driver (vendored header)" ON)
+option(LIGHTS3_DRIVER_SEASTAR "Build the Seastar shard-per-core HTTP driver (heavy deps)" OFF)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
+
+if(LIGHTS3_DRIVER_SEASTAR)
+  # seastar 依赖较重（编译版 Boost、fmt、c-ares、lz4、yaml-cpp、protobuf、ragel、
+  # xfs 头）；无 root 的机器可解包到 ~/.local/opt/seastar-deps（apt-get download + dpkg -x）
+  if(EXISTS "$ENV{HOME}/.local/opt/seastar-deps")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local/opt/seastar-deps")
+    list(APPEND CMAKE_PROGRAM_PATH "$ENV{HOME}/.local/opt/seastar-deps/bin")
+  endif()
+  if(EXISTS "$ENV{HOME}/.local/opt/boost-1.90")
+    list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local/opt/boost-1.90")
+  endif()
+  # spdlog 自带的 bundled fmt(v12) 与 seastar 用的 fmt(v11) 的 include 守卫同名，
+  # 同一 TU 里先到者屏蔽后者，产生 ABI 撕裂的未定义符号——seastar 开启时全项目
+  # 统一用 seastar 那份外部 fmt
+  set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "" FORCE)
+endif()
+
+# spdlog：日志实现（git submodule，静态库；core/log.h 为门面）
+add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 
 # ---- 核心库：L2/L3/L4 + HTTP 边界 ----
 add_library(lights3_core STATIC
@@ -91,6 +111,33 @@ if(LIGHTS3_DRIVER_HTTPLIB)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
 endif()
 
+if(LIGHTS3_DRIVER_SEASTAR)
+  # beast 块的 find_package(Boost QUIET) 走老式 FindBoost 时会把
+  # Boost_USE_DEBUG_RUNTIME 默认置 TRUE，污染 BoostConfig 的变体选择
+  set(Boost_USE_DEBUG_RUNTIME OFF)
+  # 顶层的 -Wall -Wextra 会漏进子目录，撞上 seastar 自己的 -Werror；
+  # 用 seastar 提供的旋钮把它的告警降回非致命
+  set(Seastar_CXX_FLAGS "-Wno-error" CACHE STRING "" FORCE)
+  set(Seastar_APPS OFF CACHE BOOL "" FORCE)
+  set(Seastar_DEMOS OFF CACHE BOOL "" FORCE)
+  set(Seastar_DOCS OFF CACHE BOOL "" FORCE)
+  set(Seastar_TESTING OFF CACHE BOOL "" FORCE)
+  set(Seastar_HWLOC OFF CACHE BOOL "" FORCE)
+  set(Seastar_DPDK OFF CACHE BOOL "" FORCE)
+  set(Seastar_IO_URING OFF CACHE BOOL "" FORCE)  # 机器无 liburing 开发头
+  set(Seastar_LTTNG OFF CACHE BOOL "" FORCE)
+  set(Seastar_INSTALL OFF CACHE BOOL "" FORCE)
+  # seastar 子目录把 CMAKE_CXX_STANDARD 的缓存默认为 26；显式钉在与项目一致的 20
+  set(CMAKE_CXX_STANDARD 20 CACHE STRING "" FORCE)
+  add_subdirectory(third_party/seastar EXCLUDE_FROM_ALL SYSTEM)
+  # 进程里 reactor 之外还有自有线程池，跨线程 new/free 常态化：
+  # 强制 seastar 用系统分配器，绕开其自带 allocator 的线程归属约束
+  target_compile_definitions(seastar PUBLIC SEASTAR_DEFAULT_ALLOCATOR)
+  target_sources(lights3_core PRIVATE src/http/drivers/seastar/seastar_server.cc)
+  target_compile_definitions(lights3_core PUBLIC LIGHTS3_DRIVER_SEASTAR)
+  target_link_libraries(lights3_core PRIVATE seastar)
+endif()
+
 # ---- 主程序 ----
 add_executable(lights3 src/main.cc)
 target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
@@ -125,6 +172,10 @@ if(LIGHTS3_BUILD_TESTS)
   if(LIGHTS3_DRIVER_HTTPLIB)
     add_test(NAME e2e_httplib
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh $<TARGET_FILE:lights3> httplib)
+  endif()
+  if(LIGHTS3_DRIVER_SEASTAR)
+    add_test(NAME e2e_seastar
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh $<TARGET_FILE:lights3> seastar)
   endif()
   # xlocalfs 后端复用同一组 e2e 用例（io_uring 数据面）
   if(LIGHTS3_DRIVER_BUILTIN)

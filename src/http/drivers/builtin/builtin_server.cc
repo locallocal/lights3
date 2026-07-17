@@ -24,27 +24,6 @@ namespace lights3::http {
 
 namespace {
 
-const char* reason_phrase(int status) {
-    switch (status) {
-        case 100: return "Continue";
-        case 200: return "OK";
-        case 204: return "No Content";
-        case 206: return "Partial Content";
-        case 304: return "Not Modified";
-        case 400: return "Bad Request";
-        case 403: return "Forbidden";
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 409: return "Conflict";
-        case 412: return "Precondition Failed";
-        case 416: return "Range Not Satisfiable";
-        case 500: return "Internal Server Error";
-        case 501: return "Not Implemented";
-        case 503: return "Service Unavailable";
-        default: return "Unknown";
-    }
-}
-
 bool send_all(int fd, const char* data, size_t len) {
     while (len > 0) {
         ssize_t n = ::send(fd, data, len, MSG_NOSIGNAL);
@@ -383,31 +362,9 @@ bool BuiltinServer::serve_one(int fd, ConnReader& reader, const std::string& pee
 bool BuiltinServer::write_response(int fd, HttpResponse& resp, bool head_request,
                                    bool keep_alive) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
-    bool chunked = false;
-    uint64_t body_len = 0;
-
-    std::string head = "HTTP/1.1 " + std::to_string(resp.status) + " " +
-                       reason_phrase(resp.status) + "\r\n";
-    for (auto& [k, v] : resp.headers.items()) head += k + ": " + v + "\r\n";
-    if (!resp.headers.has("Date")) head += "Date: " + util::http_date(std::chrono::system_clock::now()) + "\r\n";
-
-    if (!no_body_status) {
-        if (resp.stream_body) {
-            if (resp.content_length) {
-                body_len = *resp.content_length;
-                head += "Content-Length: " + std::to_string(body_len) + "\r\n";
-            } else {
-                chunked = true;
-                head += "Transfer-Encoding: chunked\r\n";
-            }
-        } else {
-            body_len = resp.content_length.value_or(resp.small_body.size());
-            head += "Content-Length: " + std::to_string(body_len) + "\r\n";
-        }
-    }
-    head += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
-    head += "\r\n";
-    if (!send_all(fd, head.data(), head.size())) return false;
+    auto head = driver::render_response_head(resp, keep_alive);
+    bool chunked = head.chunked;
+    if (!send_all(fd, head.text.data(), head.text.size())) return false;
     if (head_request || no_body_status) return true;
 
     if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());

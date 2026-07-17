@@ -46,8 +46,11 @@ void TimerQueue::loop() {
             continue;
         }
         auto first = items_.begin();
-        if (first->first.first > Clock::now()) {
-            cv_.wait_until(lk, first->first.first);
+        // deadline 必须按值取出：wait_until 持引用等待，等待期间锁已释放，
+        // 并发 cancel() 删掉该节点后醒来重比时间会读已释放内存
+        auto deadline = first->first.first;
+        if (deadline > Clock::now()) {
+            cv_.wait_until(lk, deadline);
             continue;
         }
         auto fn = std::move(first->second);

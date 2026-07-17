@@ -10,6 +10,9 @@ void validate_bucket_name(std::string_view b) {
         throw S3Error(S3ErrorCode::InvalidBucketName,
                       "The specified bucket is not valid.", std::string(b));
     };
+    // 内部保留 bucket（docs/06 §4.1，凭证持久化）：仅 CredentialStore 走到这里；
+    // 用户请求在 L2 路由入口就被拒（'.' 开头不合法），到不了后端
+    if (b == ".sys") return;
     if (b.size() < 3 || b.size() > 63) fail();
     for (char c : b)
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) fail();

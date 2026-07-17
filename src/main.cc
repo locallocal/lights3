@@ -8,6 +8,7 @@
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "http/server.h"
+#include "s3/auth/credential_store.h"
 #include "s3/service.h"
 #include "storage/bucket_router.h"
 #include "storage/registry.h"
@@ -45,11 +46,16 @@ int main(int argc, char** argv) {
         auto backends = storage::StorageRegistry::build(cfg.backends, pool);
         auto router = storage::BucketRouter::build(cfg.buckets, std::move(backends));
         auto auth = s3::SigV4Authenticator::build(cfg.auth);
+        // 动态凭证（docs/06）：从默认后端加载并替换静态查表
+        auto cred_store =
+            sync_wait(s3::CredentialStore::load(router.default_backend(), cfg.auth));
+        auth.set_provider(cred_store);
         if (!auth.enabled())
             LOG_WARN("no credentials configured: authentication is DISABLED");
         auto service = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
                                                        cfg.http.base_domain);
         service->set_pool_stats([pool] { return pool->stats(); });
+        service->set_credential_store(cred_store);
 
         auto server = http::HttpServerFactory::create(cfg.http.driver, cfg.http);
         // dispatch 入口限流（docs/03 §6）：超限请求在信号量上排队而非拒绝；

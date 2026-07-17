@@ -20,6 +20,8 @@ public:
     const std::map<std::string, std::shared_ptr<IStorageBackend>>& backends() const {
         return backends_;
     }
+    // 内部数据（如凭证持久化，docs/06 §4.1）固定落在默认后端
+    std::shared_ptr<IStorageBackend> default_backend() const { return default_; }
 
 private:
     struct Rule {

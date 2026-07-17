@@ -180,6 +180,46 @@ s3curl -o /dev/null -X DELETE "$BASE/mybucket/dir/small.txt"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/top.txt"
 check "DeleteBucket" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/mybucket")"
 
+# ---------- 动态凭证管理（docs/06）----------
+json_field() {  # json_field <key> —— 从 stdin 的缩进 JSON 里提取字符串字段
+    sed -n "s/.*\"$1\": \"\([^\"]*\)\".*/\1/p" | head -1
+}
+
+CRED_OUT=$(s3curl -X POST "$BASE/-/admin/credentials?comment=e2e")
+DYN_AK=$(echo "$CRED_OUT" | json_field access_key)
+DYN_SK=$(echo "$CRED_OUT" | json_field secret_key)
+check "生成动态凭证" "0" "$([[ -n "$DYN_AK" && -n "$DYN_SK" ]]; echo $?)"
+
+dyncurl() {  # 用动态凭证签名
+    curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$DYN_AK:$DYN_SK" "$@"
+}
+check "动态凭证 CreateBucket" "200" \
+    "$(dyncurl -o /dev/null -w '%{http_code}' -X PUT "$BASE/credbkt")"
+check "动态凭证 PutObject" "200" \
+    "$(dyncurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'cred-data' "$BASE/credbkt/k")"
+check "动态凭证 GetObject" "cred-data" "$(dyncurl "$BASE/credbkt/k")"
+
+LIST_CREDS=$(s3curl "$BASE/-/admin/credentials")
+check "凭证列表含新 AK" "0" "$(echo "$LIST_CREDS" | grep -q "$DYN_AK"; echo $?)"
+check "凭证列表 SK 掩码" "1" "$(echo "$LIST_CREDS" | grep -q "$DYN_SK"; echo $?)"
+check "show-secret 取回 SK" "$DYN_SK" \
+    "$(s3curl "$BASE/-/admin/credentials/$DYN_AK?show-secret=true" | json_field secret_key)"
+check "动态凭证调 admin 被拒" "403" \
+    "$(dyncurl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/credentials")"
+
+# 第二个凭证只用于重启后的持久化验证
+CRED2_OUT=$(s3curl -X POST "$BASE/-/admin/credentials?comment=survivor")
+AK2=$(echo "$CRED2_OUT" | json_field access_key)
+SK2=$(echo "$CRED2_OUT" | json_field secret_key)
+
+check "吊销动态凭证" "204" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/-/admin/credentials/$DYN_AK")"
+check "吊销后数据面被拒" "403" \
+    "$(dyncurl -o /dev/null -w '%{http_code}' "$BASE/credbkt/k")"
+check ".sys 对用户不可达" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/.sys/credentials/$AK2")"
+check "ListBuckets 不含 .sys" "1" "$(s3curl "$BASE/" | grep -qF '.sys'; echo $?)"
+
 # 优雅退出
 kill -TERM "$SRV_PID"
 EXITED=1
@@ -188,6 +228,27 @@ for _ in $(seq 1 50); do
     sleep 0.1
 done
 check "SIGTERM 优雅退出" "0" "$EXITED"
+wait "$SRV_PID" 2>/dev/null
+SRV_PID=""
+
+# ---------- 重启：动态凭证持久化验证（docs/06 §8）----------
+"$BIN" --config "$WORK/config.yaml" > "$WORK/server2.log" 2>&1 &
+SRV_PID=$!
+PORT=""
+for _ in $(seq 1 50); do
+    PORT=$(sed -n 's/.*listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server2.log" | head -1)
+    [[ -n "$PORT" ]] && break
+    kill -0 "$SRV_PID" 2>/dev/null || break
+    sleep 0.1
+done
+check "重启后 server 就绪" "0" "$([[ -n "$PORT" ]]; echo $?)"
+BASE="http://127.0.0.1:$PORT"
+check "重启后动态凭证仍可用" "200" \
+    "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" \
+       -o /dev/null -w '%{http_code}' -I "$BASE/credbkt")"
+check "重启后已吊销凭证仍被拒" "403" \
+    "$(dyncurl -o /dev/null -w '%{http_code}' "$BASE/credbkt/k")"
+kill -TERM "$SRV_PID"
 wait "$SRV_PID" 2>/dev/null
 SRV_PID=""
 

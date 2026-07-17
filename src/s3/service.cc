@@ -93,9 +93,16 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
         } else if (req.path == "/-/readyz") {
             resp = co_await readyz();
+        } else if (req.path.rfind("/-/admin/credentials", 0) == 0) {
+            resp = co_await admin_credentials(req, access_key);
         } else {
             access_key = auth_.verify(req);
             std::tie(bucket, key) = resolve_address(req);
+            // '.' 开头为内部保留名（docs/06 §4.1）：用户请求在此统一拒绝，
+            // 后端的 validate 对保留名放行，仅 CredentialStore 可达
+            if (!bucket.empty() && bucket.front() == '.')
+                throw S3Error(S3ErrorCode::InvalidBucketName,
+                              "The specified bucket is not valid.", bucket);
             resp = co_await route(req, bucket, key);
         }
     } catch (const S3Error& e) {

@@ -47,6 +47,9 @@ endif()
 # spdlog：日志实现（git submodule，静态库；core/log.h 为门面）
 add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 
+# nlohmann/json：admin 凭证 API 的 JSON 编解码（header-only，docs/06 §5.4）
+add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
+
 # ---- 核心库：L2/L3/L4 + HTTP 边界 ----
 add_library(lights3_core STATIC
   src/core/thread_pool.cc
@@ -62,6 +65,8 @@ add_library(lights3_core STATIC
   src/s3/service.cc
   src/s3/metrics.cc
   src/s3/auth/sigv4.cc
+  src/s3/auth/credential_store.cc
+  src/s3/handlers/admin_credentials.cc
   src/s3/handlers/buckets.cc
   src/s3/handlers/objects.cc
   src/s3/handlers/list_objects.cc
@@ -79,6 +84,8 @@ add_library(lights3_core STATIC
 )
 target_include_directories(lights3_core PUBLIC src)
 target_link_libraries(lights3_core PUBLIC OpenSSL::Crypto Threads::Threads spdlog::spdlog)
+# JSON 只在 admin handler / CredentialStore 的 .cc 里用，不进公共头（docs/06 §5.4）
+target_link_libraries(lights3_core PRIVATE nlohmann_json::nlohmann_json)
 
 if(LIGHTS3_DRIVER_BUILTIN)
   target_sources(lights3_core PRIVATE src/http/drivers/builtin/builtin_server.cc)
@@ -151,12 +158,13 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_concurrency.cc
     tests/unit/test_config.cc
     tests/unit/test_sigv4.cc
+    tests/unit/test_credentials.cc
     tests/unit/test_xml.cc
     tests/unit/test_storage.cc
     tests/unit/test_service.cc
     tests/unit/test_http_drivers.cc
   )
-  target_link_libraries(unit_tests PRIVATE lights3_core)
+  target_link_libraries(unit_tests PRIVATE lights3_core nlohmann_json::nlohmann_json)
   target_include_directories(unit_tests PRIVATE tests)
   add_test(NAME unit_tests COMMAND unit_tests)
 

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <map>
 #include <sstream>
 
 #include "core/util/crypto.h"
@@ -320,11 +321,32 @@ private:
 
 }  // namespace
 
+namespace {
+
+// build() 的默认实现：配置文件静态表，构造后只读
+class StaticCredentialProvider final : public ICredentialProvider {
+public:
+    explicit StaticCredentialProvider(const AuthConfig& cfg) {
+        for (auto& c : cfg.credentials) creds_[c.access_key] = c.secret_key;
+    }
+    std::optional<std::string> secret_for(std::string_view ak) const override {
+        auto it = creds_.find(ak);
+        if (it == creds_.end()) return std::nullopt;
+        return it->second;
+    }
+    bool has_credentials() const override { return !creds_.empty(); }
+
+private:
+    std::map<std::string, std::string, std::less<>> creds_;
+};
+
+}  // namespace
+
 SigV4Authenticator SigV4Authenticator::build(const AuthConfig& cfg) {
     SigV4Authenticator a;
     a.region_ = cfg.region;
     a.service_ = cfg.service;
-    for (auto& c : cfg.credentials) a.creds_[c.access_key] = c.secret_key;
+    a.provider_ = std::make_shared<StaticCredentialProvider>(cfg);
     return a;
 }
 
@@ -417,8 +439,8 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
     }
 
     // 凭证
-    auto it = creds_.find(f.access_key);
-    if (it == creds_.end())
+    auto secret = provider_->secret_for(f.access_key);
+    if (!secret)
         throw S3Error(S3ErrorCode::InvalidAccessKeyId,
                       "The AWS access key ID you provided does not exist in our records.");
 
@@ -447,7 +469,7 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
 
     std::string scope = f.date + "/" + f.region + "/" + f.service + "/aws4_request";
     std::string expect =
-        signature_for(req, it->second, f.amz_date, scope, f.signed_headers, payload_hash);
+        signature_for(req, *secret, f.amz_date, scope, f.signed_headers, payload_hash);
     if (!constant_time_eq(expect, f.signature))
         throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
                       "The request signature we calculated does not match the signature you "
@@ -466,7 +488,7 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
         }
         req.body = std::make_unique<ChunkedSigV4BodyReader>(
             std::move(req.body), chunked_signed,
-            derive_signing_key(it->second, f.date, f.region, f.service), f.signature,
+            derive_signing_key(*secret, f.date, f.region, f.service), f.signature,
             f.amz_date, scope, decoded_len);
     } else if (is_hex_digest(payload_hash) && payload_hash != kEmptySha256 && req.body) {
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);

@@ -15,6 +15,8 @@
 
 namespace lights3::s3 {
 
+class CredentialStore;  // auth/credential_store.h（仅 admin handler 的 .cc 需要完整定义）
+
 struct RequestContext {
     std::string request_id;
     // 取消信号：客户端断连（driver 发现）、请求超时、进程 shutdown（docs/03 §5）；
@@ -36,6 +38,11 @@ public:
 
     // /-/metrics 的线程池指标来源（可选，main 装配时注入）
     void set_pool_stats(std::function<ThreadPool::Stats()> fn) { pool_stats_ = std::move(fn); }
+
+    // 动态凭证管理（docs/06）：未注入时 /-/admin/credentials 一律 AccessDenied
+    void set_credential_store(std::shared_ptr<CredentialStore> s) {
+        cred_store_ = std::move(s);
+    }
 
     // 显式分派表（docs/05 §2）：(method, scope, query-flag) → handler，声明序匹配
     enum class Scope { Service, Bucket, Object };
@@ -83,6 +90,11 @@ private:
 
     Task<http::HttpResponse> readyz();
 
+    // handlers/admin_credentials.cc（docs/06 §2）：内部完成验签与 root 判定，
+    // 错误渲染成 JSON 体；access_key 出参供访问日志
+    Task<http::HttpResponse> admin_credentials(http::HttpRequest& req,
+                                               std::string& access_key);
+
     // virtual-host style：Host 匹配 *.base_domain 时把 bucket 前置到路径解析
     std::pair<std::string, std::string> resolve_address(const http::HttpRequest& req) const;
 
@@ -91,6 +103,7 @@ private:
     std::string base_domain_;
     Metrics metrics_;
     std::function<ThreadPool::Stats()> pool_stats_;
+    std::shared_ptr<CredentialStore> cred_store_;
 };
 
 }  // namespace lights3::s3

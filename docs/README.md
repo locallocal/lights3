@@ -20,6 +20,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [03-concurrency.md](03-concurrency.md) | 并发模型：Task 协程、Executor 抽象、线程池、同步/异步 HTTP 库的统一 |
 | [04-storage-backend.md](04-storage-backend.md) | 存储后端抽象、LocalFs 后端、CloudProxy 后端、bucket 路由 |
 | [05-s3-protocol.md](05-s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证、Multipart Upload、错误码映射 |
+| [06-credential-management.md](06-credential-management.md) | 凭证管理：AK/SK 生成/查询 API、两级权限、`.sys` 存储持久化 |
 
 ## 一页纸架构图
 

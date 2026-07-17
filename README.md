@@ -8,21 +8,81 @@ implementation follows the architecture described in
 
 *中文介绍见 [docs/README.zh-CN.md](docs/README.zh-CN.md)。*
 
+## Architecture
+
+Four layers with one-way, top-down dependencies; the two pluggable
+boundaries are `IHttpServer` (L1/L2) and `IStorageBackend` (L2/L3):
+
+```text
+              S3 clients (aws cli / boto3 / curl --aws-sigv4)
+                                  │ HTTP/1.1
+┌─ L1 · HTTP Adapter ─────────────▼─────────────────────────────────────┐
+│ HttpServerFactory → IHttpServer, driver picked at runtime             │
+│   builtin : POSIX sockets, thread-per-connection                      │
+│   beast   : Boost.Asio async, N io threads, per-connection coroutine  │
+│   httplib : cpp-httplib sync, thread-per-request                      │
+│   seastar : shard-per-core reactor, process-wide engine (optional)    │
+│ neutral HttpRequest/HttpResponse model, streaming BodyReader bodies   │
+└─────────────────────────────────┬─────────────────────────────────────┘
+                                  ▼
+┌─ L2 · S3 Protocol ────────────────────────────────────────────────────┐
+│ S3Service::dispatch                                                   │
+│   ├─ /-/healthz · /-/metrics · /-/readyz          (anonymous)         │
+│   ├─ /-/admin/credentials → admin handler (JSON, root-only)           │
+│   │        └─ CredentialStore ──(ICredentialProvider)──┐              │
+│   └─ SigV4Authenticator.verify ◄───────────────────────┘              │
+│        └─ route table (method + scope + query flag)                   │
+│             └─ handlers: buckets / objects / list_objects / multipart │
+│ XML codec · S3Error mapping · Metrics · access log                    │
+└─────────────────────────────────┬─────────────────────────────────────┘
+                   IStorageBackend (Task<T>, streaming)
+┌─ L3 · Storage ──────────────────▼─────────────────────────────────────┐
+│ BucketRouter: glob rules → backend; ".sys" reserved for credentials   │
+│   localfs  : sidecar .meta JSON, atomic staging+rename                │
+│   xlocalfs : io_uring data plane (raw syscalls), reaper thread        │
+│   memory   : in-memory backend for tests                              │
+│ shared: listing · multipart state · name validation                   │
+└─────────────────────────────────┬─────────────────────────────────────┘
+                                  ▼
+┌─ L4 · Core (cross-cutting) ───────────────────────────────────────────┐
+│ Task<T> lazy coroutines · sync_wait / when_all · ThreadPool           │
+│ AsyncSemaphore (inflight limit) · TimerQueue · YAML config · spdlog   │
+│ util: crypto (OpenSSL EVP) / uri / time / hex                         │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+Request lifecycle in one line: driver parses HTTP and hands a neutral
+request to `S3Service::dispatch`, which authenticates (SigV4, credentials
+resolved through `ICredentialProvider`), routes by method/scope/query to a
+handler coroutine, which streams data to/from the backend chosen by
+`BucketRouter`; every layer runs on `Task<T>` coroutines scheduled onto the
+shared `ThreadPool`.
+
 ## Build and test
 
 Requirements: g++ ≥ 13 (C++20 coroutines), CMake ≥ 3.20, OpenSSL.
 The beast driver needs Boost headers (≥ 1.75, header-only, no compiled
 libraries; if system Boost is not found, point `BOOST_ROOT` at the header
 directory, or disable the driver with `-DLIGHTS3_DRIVER_BEAST=OFF`).
-httplib, spdlog and gflags are git submodules under `third_party/` and must be
-initialized before the first build.
+httplib, spdlog, gflags and nlohmann/json are git submodules under
+`third_party/` and must be initialized before the first build.
 
 ```bash
-git submodule update --init
+./build.sh --test        # submodules + cmake + ninja + ctest in one go
+```
+
+or manually:
+
+```bash
+git submodule update --init third_party/gflags third_party/spdlog \
+    third_party/httplib third_party/json
 cmake -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure   # unit tests + per-driver e2e (e2e needs curl ≥ 7.75)
 ```
+
+The seastar driver is off by default (heavy dependencies); enable with
+`./build.sh --seastar`. Sanitizer builds: `./build.sh --asan` / `--tsan`.
 
 ## Run
 
@@ -48,7 +108,7 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
 - **Architecture**: four layers (HTTP Adapter / S3 Protocol / Storage / Core)
   with one-way dependencies; both pluggable boundaries — `IHttpServer` and
   `IStorageBackend` — are in place
-- **HTTP drivers**: all three drivers are implemented, selected at runtime via
+- **HTTP drivers**: all four drivers are implemented, selected at runtime via
   `http.driver` and trimmed at compile time via CMake options; they share one
   driver-conformance test suite (the contract in
   [docs/02-http-adapter.md](docs/02-http-adapter.md) §4):
@@ -58,21 +118,26 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
     coroutine on a strand, deferred 100-continue;
   - `httplib` — synchronous cpp-httplib driver (thread-per-request, for
     functional verification); its push-model body is flipped to a pull model
-    through a bounded queue
+    through a bounded queue;
+  - `seastar` — shard-per-core reactor driver (compile-time optional,
+    `-DLIGHTS3_DRIVER_SEASTAR=ON`); process-wide engine singleton, session
+    coroutines bridge `seastar::future` into the project's `Task<T>`
 - **Concurrency**: home-grown lazy `Task<T>` coroutines + `ThreadPool`;
   blocking IO is moved onto pool threads via `co_await pool.schedule()`,
   synchronous drivers bridge through `sync_wait`
 - **Auth**: SigV4 implemented from scratch (header signing + presigned query),
-  streaming payload SHA256 verification, unit tests cover the official AWS
-  test vectors
+  streaming payload SHA256 verification and aws-chunked per-chunk signature
+  chains, unit tests cover the official AWS test vectors; runtime credential
+  management (generate/query/revoke AK/SK, persisted in storage) via
+  `/-/admin/credentials` ([docs/06](docs/06-credential-management.md))
 - **Storage**: LocalFs (sidecar metadata, atomic writes via staging+rename),
   XLocalFs (io_uring data plane using raw syscalls, no liburing required),
   Memory (for tests); bucket-level glob routing
 - **S3 API**: ListBuckets, Create/Head/DeleteBucket, Put/Get/Head/DeleteObject
-  (including Range and conditional requests), ListObjectsV2
-  (prefix/delimiter/pagination)
+  (including Range and conditional requests), CopyObject, batch DeleteObjects,
+  ListObjectsV2 (prefix/delimiter/pagination), Multipart Upload
+  (create/upload/list/complete/abort)
 
 Not implemented yet (returns NotImplemented; see
-[docs/05-s3-protocol.md](docs/05-s3-protocol.md) for the roadmap): Multipart
-Upload, CopyObject, batch DeleteObjects, the cloudproxy backend, and
-aws-chunked streaming signatures.
+[docs/05-s3-protocol.md](docs/05-s3-protocol.md) for the roadmap): the
+cloudproxy backend, versioning, ACL/policy, lifecycle, SSE, and Object Lock.

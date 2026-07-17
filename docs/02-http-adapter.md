@@ -117,7 +117,26 @@ struct HttpServerFactory {
   （单生产者单消费者，容量 2~4 块）翻转成拉模型的 `BodyReader`。
 - 定位：功能验证、低并发场景、快速排查问题时使用；不是性能路径。
 
-### 3.3 CivetWeb / 其他
+### 3.3 Seastar（shard-per-core 异步驱动）
+
+- 结构：seastar reactor 每进程只能启动一次，驱动内维护**进程级引擎单例**
+  （首次 `listen()` 拉起 `app_template` 后台线程，`atexit` 收尾）；每个
+  server 实例只管理自己的 listener 与连接，可反复建销（单测依赖此行为）。
+- 每 shard 一个 listener（posix 栈 SO_REUSEPORT 分流）+ accept 循环；
+  会话协程用项目自己的 `Task<void>`，`seastar::future` 经 awaiter 适配。
+- 跨线程衔接：handler/stream_body 可能在池线程 resume，发起下一个 socket
+  操作前经 `seastar::alien` 投递回连接所在 shard（对应 beast 的 ResumeOn）。
+- `shutdown()` 写 eventfd（async-signal-safe），shard0 上的 watcher 协程
+  编排停机：停 accept → 掐空闲连接 → 10s 宽限 → 强断 → run() 返回。
+- 构建要求 `SEASTAR_DEFAULT_ALLOCATOR`：进程内 reactor 之外还有自有线程池，
+  统一用系统分配器绕开 seastar allocator 的线程归属约束。
+- port=0 时先用一次性 POSIX socket 探测空闲端口再交给 seastar：posix 栈
+  的监听地址在各 shard 间必须是同一个具体端口。
+- 依赖较重（编译版 Boost、fmt、c-ares、lz4、yaml-cpp、protobuf、ragel、
+  xfs 头），默认不编译；`-DLIGHTS3_DRIVER_SEASTAR=ON` 启用，无 root 机器
+  可把依赖解包到 `~/.local/opt/seastar-deps`（apt-get download + dpkg -x）。
+
+### 3.4 CivetWeb / 其他
 
 - CivetWeb 同为线程池同步模型，适配方式与 httplib 相同；其 C API 的
   `mg_read` 本身是拉模型，`BodyReader` 直接包一层即可，比 httplib 更顺。

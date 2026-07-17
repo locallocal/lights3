@@ -16,6 +16,9 @@ void register_beast_driver();
 #ifdef LIGHTS3_DRIVER_HTTPLIB
 void register_httplib_driver();
 #endif
+#ifdef LIGHTS3_DRIVER_SEASTAR
+void register_seastar_driver();
+#endif
 
 namespace {
 
@@ -34,6 +37,9 @@ void ensure_registered() {
 #endif
 #ifdef LIGHTS3_DRIVER_HTTPLIB
         register_httplib_driver();
+#endif
+#ifdef LIGHTS3_DRIVER_SEASTAR
+        register_seastar_driver();
 #endif
         return true;
     }();

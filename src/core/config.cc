@@ -160,6 +160,7 @@ int parse_duration_sec(const std::string& s) {
     if (unit.empty() || unit == "s") return num;
     if (unit == "m") return num * 60;
     if (unit == "h") return num * 3600;
+    if (unit == "d") return num * 86400;  // tiered 的 cold_after（docs/08 §8）
     throw std::runtime_error("bad duration unit: " + s);
 }
 

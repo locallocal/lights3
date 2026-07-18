@@ -33,39 +33,6 @@ using fsutil::require_upload;
 using fsutil::throw_errno;
 using fsutil::write_tsv;
 
-namespace {
-
-// pread 流式读取；每块经线程池执行（阻塞 IO 不占 HTTP 执行环境）
-class FdBodyReader final : public http::BodyReader {
-public:
-    FdBodyReader(int fd, uint64_t offset, uint64_t remaining, std::shared_ptr<ThreadPool> pool)
-        : fd_(fd), offset_(offset), remaining_(remaining), pool_(std::move(pool)) {}
-    ~FdBodyReader() override { ::close(fd_); }
-
-    Task<size_t> read(std::span<std::byte> buf) override {
-        if (remaining_ == 0) co_return 0;
-        co_await pool_->schedule();
-        size_t want = std::min<uint64_t>(buf.size(), remaining_);
-        ssize_t n = ::pread(fd_, buf.data(), want, static_cast<off_t>(offset_));
-        if (n < 0) throw_errno("pread");
-        if (n == 0) remaining_ = 0;  // 文件被外部截断，提前 EOF
-        offset_ += static_cast<uint64_t>(n);
-        remaining_ -= static_cast<uint64_t>(n);
-        co_return static_cast<size_t>(n);
-    }
-    std::optional<uint64_t> length() const override { return total_; }
-    void set_total(uint64_t t) { total_ = t; }
-
-private:
-    int fd_;
-    uint64_t offset_;
-    uint64_t remaining_;
-    uint64_t total_ = 0;
-    std::shared_ptr<ThreadPool> pool_;
-};
-
-}  // namespace
-
 LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool)
     : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)) {
     fs::create_directories(root_);
@@ -89,25 +56,8 @@ void LocalFsBackend::require_bucket(std::string_view bucket) const {
 }
 
 ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key) const {
-    ObjectMeta meta;
-    meta.key = std::move(key);
-    struct stat st{};
-    if (::stat(data_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", meta.key);
-    meta.size = static_cast<uint64_t>(st.st_size);
-    meta.last_modified = std::chrono::system_clock::from_time_t(st.st_mtime);
-
-    std::ifstream f(data_path.string() + kSidecarSuffix, std::ios::binary);
-    std::string line;
-    while (std::getline(f, line)) {
-        auto tab = line.find('\t');
-        if (tab == std::string::npos) continue;
-        std::string k = line.substr(0, tab), v = line.substr(tab + 1);
-        if (k == "etag") meta.etag = v;
-        else if (k == "content_type") meta.content_type = v;
-        else if (k.rfind("meta.", 0) == 0) meta.user_meta[k.substr(5)] = v;
-    }
-    return meta;
+    // tier 感知（stub 的 size 以 sidecar 为准）在共享实现里处理（docs/08 §4.1）
+    return fsutil::load_object_meta(data_path, std::move(key));
 }
 
 // ---------- bucket ----------
@@ -229,7 +179,13 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
 
     ObjectStream out;
     try {
-        out.meta = load_meta(path, std::string(key));
+        fsutil::TierInfo tier;
+        out.meta = fsutil::load_object_meta(path, std::string(key), &tier);
+        // open 与读 sidecar 之间被 stub 化：fd 指向 0 长度新 inode，无法兑现
+        // sidecar 宣称的 size——报给 tiered 改走云端（docs/08 §7.3 冲突矩阵）
+        if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
+            static_cast<uint64_t>(st.st_size) != out.meta.size)
+            throw fsutil::StubRace(std::string(key));
         uint64_t f = 0, l = out.meta.size ? out.meta.size - 1 : 0;
         uint64_t len = out.meta.size;
         if (range) {
@@ -239,9 +195,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         } else if (out.meta.size == 0) {
             len = 0;
         }
-        auto reader = std::make_unique<FdBodyReader>(fd, f, len, pool_);
-        reader->set_total(len);
-        out.body = std::move(reader);  // fd 所有权交给 reader
+        out.body = std::make_unique<fsutil::FdStreamReader>(fd, f, len, pool_);  // fd 所有权移交
     } catch (...) {
         ::close(fd);
         throw;

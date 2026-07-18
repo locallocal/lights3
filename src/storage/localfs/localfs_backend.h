@@ -51,6 +51,14 @@ public:
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
     static constexpr std::chrono::hours kMpuTtl{24 * 7};  // 孤儿上传清理阈值
 
+    // ---- 组合后端（tiered，docs/08 §2）需要的布局访问 ----
+    const std::filesystem::path& root() const { return root_; }
+    const std::filesystem::path& staging() const { return staging_; }
+    const std::shared_ptr<ThreadPool>& pool() const { return pool_; }
+    std::filesystem::path object_data_path(std::string_view bucket, std::string_view key) const {
+        return object_path(bucket, key);
+    }
+
 protected:
     std::filesystem::path bucket_dir(std::string_view bucket) const;
     std::filesystem::path object_path(std::string_view bucket, std::string_view key) const;

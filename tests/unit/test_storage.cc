@@ -4,6 +4,7 @@
 #include "core/thread_pool.h"
 #include "storage/localfs/localfs_backend.h"
 #include "storage/memory/memory_backend.h"
+#include "storage/tiered/tiered_backend.h"
 #include "storage/xlocalfs/xlocalfs_backend.h"
 #include "unit/mini_test.h"
 
@@ -243,6 +244,18 @@ TEST(xlocalfs_backend_suite) {
     XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
     run_backend_suite(b);
     sync_wait(b.close());
+}
+
+// tiered 对 L2 仍是普通后端（docs/08 §2）：全 local 态跑同一套一致性用例
+TEST(tiered_backend_suite) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto local = std::make_shared<LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
+    TieredConfig cfg;
+    cfg.scan_interval_sec = 0;  // 单测不开后台任务
+    auto b = std::make_shared<TieredBackend>(local, std::make_shared<MemoryBackend>(), pool, cfg);
+    run_backend_suite(*b);
+    sync_wait(b->close());
 }
 
 // 跨多个 64KiB 数据块的读写路径：io_uring 流式写入与带偏移读取

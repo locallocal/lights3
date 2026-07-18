@@ -4,7 +4,7 @@ set -u
 
 BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
-BACKEND="${3:-localfs}"   # localfs | xlocalfs
+BACKEND="${3:-localfs}"   # localfs | xlocalfs | tiered（localfs+memory 组合，docs/08）
 AK=E2EACCESSKEY
 SK=e2e-secret-key
 REGION=us-east-1
@@ -42,12 +42,28 @@ auth:
       secret_key: $SK
   region: $REGION
 backends:
+$(if [[ "$BACKEND" == "tiered" ]]; then cat <<TIER
   - name: localdata
+    type: localfs
+    root: $WORK/data
+    staging: $WORK/staging
+  - name: cloudmem
+    type: memory
+  - name: tierdata
+    type: tiered
+    local: localdata
+    cloud: cloudmem
+    scan_interval: 0s
+TIER
+else cat <<PLAIN
+  - name: tierdata
     type: $BACKEND
     root: $WORK/data
     staging: $WORK/staging
+PLAIN
+fi)
 buckets:
-  default_backend: localdata
+  default_backend: tierdata
 log:
   level: info
 EOF

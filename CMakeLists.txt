@@ -79,6 +79,7 @@ add_library(lights3_core STATIC
   src/storage/localfs/fs_util.cc
   src/storage/localfs/localfs_backend.cc
   src/storage/memory/memory_backend.cc
+  src/storage/tiered/tiered_backend.cc
   src/storage/xlocalfs/uring.cc
   src/storage/xlocalfs/xlocalfs_backend.cc
 )
@@ -161,6 +162,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_credentials.cc
     tests/unit/test_xml.cc
     tests/unit/test_storage.cc
+    tests/unit/test_tiered.cc
     tests/unit/test_service.cc
     tests/unit/test_http_drivers.cc
   )
@@ -190,5 +192,9 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_xlocalfs
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin xlocalfs)
+    # tiered 组合后端（localfs+memory，docs/08）同样跑全协议用例
+    add_test(NAME e2e_tiered
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin tiered)
   endif()
 endif()

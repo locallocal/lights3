@@ -154,7 +154,12 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
 
     ObjectStream out;
     try {
-        out.meta = load_meta(path, std::string(key));
+        fsutil::TierInfo tier;
+        out.meta = fsutil::load_object_meta(path, std::string(key), &tier);
+        // 同 localfs：open 与读 sidecar 之间被 stub 化 → 报给 tiered 改走云端
+        if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
+            static_cast<uint64_t>(st.st_size) != out.meta.size)
+            throw fsutil::StubRace(std::string(key));
         uint64_t f = 0, l = out.meta.size ? out.meta.size - 1 : 0;
         uint64_t len = out.meta.size;
         if (range) {

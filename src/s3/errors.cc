@@ -10,39 +10,24 @@ struct Entry {
     const char* code;
 };
 
-Entry entry(S3ErrorCode c) {
-    switch (c) {
-        case S3ErrorCode::AccessDenied:                 return {403, "AccessDenied"};
-        case S3ErrorCode::AuthorizationHeaderMalformed: return {400, "AuthorizationHeaderMalformed"};
-        case S3ErrorCode::BucketAlreadyOwnedByYou:      return {409, "BucketAlreadyOwnedByYou"};
-        case S3ErrorCode::BucketNotEmpty:               return {409, "BucketNotEmpty"};
-        case S3ErrorCode::EntityTooLarge:               return {400, "EntityTooLarge"};
-        case S3ErrorCode::InternalError:                return {500, "InternalError"};
-        case S3ErrorCode::InvalidAccessKeyId:           return {403, "InvalidAccessKeyId"};
-        case S3ErrorCode::InvalidArgument:              return {400, "InvalidArgument"};
-        case S3ErrorCode::InvalidBucketName:            return {400, "InvalidBucketName"};
-        case S3ErrorCode::InvalidPart:                  return {400, "InvalidPart"};
-        case S3ErrorCode::InvalidRange:                 return {416, "InvalidRange"};
-        case S3ErrorCode::InvalidRequest:               return {400, "InvalidRequest"};
-        case S3ErrorCode::KeyTooLongError:              return {400, "KeyTooLongError"};
-        case S3ErrorCode::MalformedXML:                 return {400, "MalformedXML"};
-        case S3ErrorCode::MethodNotAllowed:             return {405, "MethodNotAllowed"};
-        case S3ErrorCode::NoSuchBucket:                 return {404, "NoSuchBucket"};
-        case S3ErrorCode::NoSuchKey:                    return {404, "NoSuchKey"};
-        case S3ErrorCode::NoSuchUpload:                 return {404, "NoSuchUpload"};
-        case S3ErrorCode::NotImplemented:               return {501, "NotImplemented"};
-        case S3ErrorCode::PreconditionFailed:           return {412, "PreconditionFailed"};
-        case S3ErrorCode::RequestTimeTooSkewed:         return {403, "RequestTimeTooSkewed"};
-        case S3ErrorCode::SignatureDoesNotMatch:        return {403, "SignatureDoesNotMatch"};
-        case S3ErrorCode::SlowDown:                     return {503, "SlowDown"};
-        case S3ErrorCode::XAmzContentSHA256Mismatch:    return {400, "XAmzContentSHA256Mismatch"};
-    }
-    return {500, "InternalError"};
-}
+// 与枚举同源生成（errors.h 的 LIGHTS3_S3_ERROR_CODES），按枚举值索引
+constexpr Entry kEntries[] = {
+#define LIGHTS3_S3_ERROR_ENTRY(name, st) {st, #name},
+    LIGHTS3_S3_ERROR_CODES(LIGHTS3_S3_ERROR_ENTRY)
+#undef LIGHTS3_S3_ERROR_ENTRY
+};
+
+constexpr Entry entry(S3ErrorCode c) { return kEntries[static_cast<size_t>(c)]; }
 }  // namespace
 
 int http_status(S3ErrorCode code) { return entry(code).status; }
 const char* wire_code(S3ErrorCode code) { return entry(code).code; }
+
+std::optional<S3ErrorCode> code_from_wire(std::string_view wire) {
+    for (size_t i = 0; i < std::size(kEntries); ++i)
+        if (wire == kEntries[i].code) return static_cast<S3ErrorCode>(i);
+    return std::nullopt;
+}
 
 std::string error_xml(const S3Error& e, const std::string& request_id) {
     XmlWriter w;

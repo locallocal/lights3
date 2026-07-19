@@ -49,6 +49,19 @@ std::string iso8601(SysTime t) {
     return buf;
 }
 
+std::optional<SysTime> parse_iso8601(const std::string& s) {
+    std::tm tm{};
+    // "2026-07-14T08:00:00[.sss]Z"（小数秒与 Z 后缀不严格校验）
+    if (sscanf(s.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+               &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
+        return std::nullopt;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    time_t tt = timegm(&tm);
+    if (tt == static_cast<time_t>(-1)) return std::nullopt;
+    return std::chrono::system_clock::from_time_t(tt);
+}
+
 std::string amz_date(SysTime t) {
     auto tm = to_utc_tm(t);
     char buf[40];

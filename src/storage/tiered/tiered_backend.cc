@@ -734,11 +734,13 @@ Task<void> TieredBackend::run_gc_once() {
 // ---------- 杂项 ----------
 
 Task<void> TieredBackend::ensure_cloud_bucket(std::string_view bucket) {
-    if (co_await cloud_->bucket_exists(bucket)) co_return;
+    // 不经 bucket_exists 判断：cloudproxy 按 AWS HeadBucket 语义把远端 403 视为
+    // "存在"（docs/09 §4.3），网关侧权限故障会让该判断撒谎、跳过建桶，下沉管线
+    // 从此每轮静默失败。直接 create + 409 视为已存在，幂等且歧义可辨
     try {
         co_await cloud_->create_bucket(bucket);
     } catch (const S3Error& e) {
-        if (e.code != S3ErrorCode::BucketAlreadyOwnedByYou) throw;  // 并发创建视为成功
+        if (e.code != S3ErrorCode::BucketAlreadyOwnedByYou) throw;
     }
     co_return;
 }

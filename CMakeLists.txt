@@ -26,6 +26,7 @@ option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
 option(LIGHTS3_DRIVER_HTTPLIB "Build the cpp-httplib sync HTTP driver (vendored header)" ON)
 option(LIGHTS3_DRIVER_SEASTAR "Build the Seastar shard-per-core HTTP driver (heavy deps)" OFF)
+option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/09)" ON)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -119,6 +120,18 @@ if(LIGHTS3_DRIVER_HTTPLIB)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
 endif()
 
+if(LIGHTS3_CLOUDPROXY)
+  target_sources(lights3_core PRIVATE
+    src/storage/cloudproxy/remote_client.cc
+    src/storage/cloudproxy/cloudproxy_backend.cc
+  )
+  # OPENSSL_SUPPORT 必须目标级统一：httplib_server.cc 与 cloudproxy 的 TU 一开一关
+  # 是 ODR 违规（docs/09 §8.3）
+  target_compile_definitions(lights3_core PUBLIC LIGHTS3_CLOUDPROXY CPPHTTPLIB_OPENSSL_SUPPORT)
+  target_include_directories(lights3_core SYSTEM PRIVATE third_party)
+  target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
+endif()
+
 if(LIGHTS3_DRIVER_SEASTAR)
   # beast 块的 find_package(Boost QUIET) 走老式 FindBoost 时会把
   # Boost_USE_DEBUG_RUNTIME 默认置 TRUE，污染 BoostConfig 的变体选择
@@ -163,6 +176,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_xml.cc
     tests/unit/test_storage.cc
     tests/unit/test_tiered.cc
+    tests/unit/test_cloudproxy.cc
     tests/unit/test_service.cc
     tests/unit/test_http_drivers.cc
   )
@@ -196,5 +210,15 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_tiered
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin tiered)
+  endif()
+  # cloudproxy 双实例场景（docs/09 §10）：实例 B 充当"云端"，A 经 cloudproxy 代理；
+  # tiered-cloudproxy 即 docs/08 P5 组合（tiered 的 cloud 侧接真实 CloudProxyBackend）
+  if(LIGHTS3_CLOUDPROXY AND LIGHTS3_DRIVER_BUILTIN)
+    add_test(NAME e2e_cloudproxy
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin cloudproxy)
+    add_test(NAME e2e_tiered_cloudproxy
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin tiered-cloudproxy)
   endif()
 endif()

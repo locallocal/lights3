@@ -1,8 +1,11 @@
 # 09 CloudProxyBackend：映射公有云的代理后端
 
-> 状态：设计完成，未实现。承接 docs/04 §4 的概述与 docs/08 §10 P5 的预留
+> 状态：P1–P5 已实现（`src/storage/cloudproxy/`），单测双栈自举跑一致性套件
+> （`test_cloudproxy.cc`），e2e 双实例场景 `e2e_cloudproxy` / `e2e_tiered_cloudproxy`
+> 全绿。§8.2 指标与 §2.3 `control_in_pump` 未做；`force_path_style: false`
+> 未实现（配置加载期报错）。承接 docs/04 §4 的概述与 docs/08 §10 P5 的预留
 > （tiered 的 cloud 侧接入真实云端）。本文档确定实现路线为**自签 SigV4 +
-> vendored httplib 直连**（docs/04 §4.1 的路线 B），并给出完整设计。
+> vendored httplib 直连**（docs/04 §4.1 的路线 B）。
 
 ## 1. 目标与非目标
 
@@ -210,10 +213,12 @@ put_object(bucket, key, meta, body)：
 
 本地 `ListOptions.start_after` 的 token 语义是"上一页最后一个 key"，而 V2 的
 `continuation-token` 是远端不透明串——两者不匹配。解法：**每页都发**
-`?list-type=2&start-after=<token>&prefix=&delimiter=&max-keys=`，返回的
-`next_token` = 本页最后一个 key/common prefix。`start-after` 对任意页都合法，
-无状态、与本地后端 token 语义完全一致（正确性优先于 continuation-token
-可能的服务端优化）。
+`?list-type=2&start-after=<token>&prefix=&delimiter=&max-keys=`。`next_token`
+的取法：末元素是普通 key 时即该 key；是 common prefix 组时取
+`group_skip_token(prefix)` = prefix 用 0xff 填充到 key 长度上限（1024）——
+排他语义下组内 key 全部被跳过、组外后继 key（含与"末字符 +1"同名的字面 key）
+一个不漏。`start-after` 对任意页都合法，无状态（正确性优先于
+continuation-token 可能的服务端优化）。
 
 - 响应解析用现成 `s3::xml_parse`（`src/s3/xml.h`，浅结构解析器，属性跳过——
   ListBucketResult 只有 xmlns 属性，够用）；
@@ -233,7 +238,9 @@ put_object(bucket, key, meta, body)：
   CreateBucketConfiguration XML，`XmlWriter` 生成）；409 已存在 →
   `BucketAlreadyOwnedByYou` 透传；
 - `bucket_exists` → HEAD bucket：200 → true；404 → false；**403 → true**
-  （与 AWS HeadBucket 语义一致：存在但无权也返回 403，视为存在并记 warn 日志）；
+  （与 AWS HeadBucket 语义一致：存在但无权也返回 403，视为存在并记 warn 日志）。
+  该歧义意味着调用方不得拿 bucket_exists 结果决定是否建桶——tiered 的
+  `ensure_cloud_bucket` 因此直接 create + 409 视为已存在，不经 exists 判断；
 - `delete_bucket` → DELETE；409 → `BucketNotEmpty`。
 
 ### 4.4 multipart 透传
@@ -268,9 +275,12 @@ put_object(bucket, key, meta, body)：
 ### 5.2 重试策略
 
 - 可重试条件：网络层错误、5xx、SlowDown。指数退避 `base × 2^n + 抖动`
-  （默认 base 100ms、3 次，`retry_max` / `retry_base_ms` 可配）；
+  （默认 base 100ms、3 次，`retry_max` / `retry_base_ms` 可配，加载期做
+  范围校验；单次退避钳制在 60s 内）；
 - 幂等操作全量适用：GET / HEAD / LIST / DELETE / abort / bucket 操作 /
-  create_multipart / complete_multipart；
+  create_multipart / complete_multipart。注：create_multipart 严格说非幂等
+  ——响应丢失后的重试会在远端留下一个空的孤儿 upload（业界通行做法，AWS SDK
+  同此行为），建议远端账号配 AbortIncompleteMultipartUpload 生命周期规则；
 - **complete 重试的歧义**：重试后收 `NoSuchUpload` 可能意味着前一次实际已
   成功（upload 已消失）——此时降级为 HEAD 目标对象验证，存在且 ETag 形如
   `-N` 则视为成功；
@@ -308,6 +318,7 @@ backends:
     retry_max: 3
     retry_base_ms: 100
     max_connections: 16              # ClientPool 上限 = pump 并发上限
+    queue_cap: 1MiB                  # 数据面 BlockQueue 容量（背压水位，§3.1）
     verify_etag: true                # §6；远端 SSE-KMS 时关
 ```
 
@@ -318,7 +329,7 @@ backends:
 MinIO / 自建端点 / lights3 作远端都必须 path-style，且 AWS 至今兼容
 path-style。显式关掉时 host 变为 `<remote_bucket>.<endpoint-host>`（签名侧
 host 同步变化），Client 连接按 bucket 独立——ClientPool 退化为 per-bucket，
-属低优先路径。
+属低优先路径，**当前未实现**（配置 `force_path_style: false` 在加载期报错）。
 
 ## 8. 连接管理与构建改动
 
@@ -334,10 +345,12 @@ host 同步变化），Client 连接按 bucket 独立——ClientPool 退化为 
 （`enable_server_certificate_verification` / `set_ca_cert_path`）。
 被取消的传输（§3.1）连接作废，归还后由 httplib 自动重连。
 
-### 8.2 指标
+### 8.2 指标（未实现）
 
 沿用现有 metrics 机制新增：远端请求计数/时延分布（按操作）、重试次数、
 错误映射计数（按远端码）、ETag 校验失败计数、ClientPool 等待时长。
+现有 `Metrics` 是 L2 请求维度、无后端级注册机制，接入需先扩展 metrics
+框架——留待独立特性；当前以 warn 日志覆盖关键路径（403 映射、ETag 兜底）。
 
 ### 8.3 CMake
 
@@ -383,8 +396,8 @@ ETag 校验失败路径、重试计数（可注入失败的假端点）、comple
 
 | 阶段 | 内容 | 可独立验收 | 状态 |
 | --- | --- | --- | --- |
-| P1 | CMake（OPENSSL_SUPPORT + OpenSSL::SSL + option）；BlockQueue/QueueBodyReader 提取为 `http/pushpull.h`（server 驱动同步改用）；配置解析与校验；ClientPool；签名衔接管线；控制面 head/delete/bucket CRUD；错误映射骨架；`parse_iso8601`；registry 注册 | in-process 远端上控制面用例过；既有全量单测不回归 | 未开始 |
-| P2 | GET 数据面（pump + ResponseHandler + BlockQueue、Range、取消）；list_objects / list_buckets XML 解析 | run_backend_suite 读/列路径过；取消专项测试过 | 未开始 |
-| P3 | PUT / upload_part 流式（拉转拉 + UNSIGNED-PAYLOAD + MD5 校验）；multipart 全套（含 200-错误体处理） | `run_backend_suite(CloudProxyBackend)` 全绿 | 未开始 |
-| P4 | 重试/退避、超时细化、指标、日志；无长度 body 路径决断（NotImplemented 或 TRAILER 组帧）；`control_in_pump` 压测定默认值 | 故障注入专项测试过 | 未开始 |
-| P5 | e2e 双实例脚本；tiered 对接（§9 清单）；docs/08 P5 状态更新 | e2e 过；tiered + cloudproxy 冒烟过 | 未开始 |
+| P1 | CMake（OPENSSL_SUPPORT + OpenSSL::SSL + option）；BlockQueue/QueueBodyReader 提取为 `http/pushpull.h`（server 驱动同步改用）；配置解析与校验；ClientPool；签名衔接管线；控制面 head/delete/bucket CRUD；错误映射骨架；`parse_iso8601`；registry 注册 | in-process 远端上控制面用例过；既有全量单测不回归 | ✅ |
+| P2 | GET 数据面（pump + ResponseHandler + BlockQueue、Range、取消）；list_objects / list_buckets XML 解析 | run_backend_suite 读/列路径过；取消专项测试过 | ✅ |
+| P3 | PUT / upload_part 流式（拉转拉 + UNSIGNED-PAYLOAD + MD5 校验）；multipart 全套（含 200-错误体处理） | `run_backend_suite(CloudProxyBackend)` 全绿 | ✅ |
+| P4 | 重试/退避、超时细化、指标、日志；无长度 body 路径决断（NotImplemented 或 TRAILER 组帧）；`control_in_pump` 压测定默认值 | 故障注入专项测试过 | 重试/退避/超时/日志 ✅；无长度 body 已定为 NotImplemented；指标与 `control_in_pump` 未做 |
+| P5 | e2e 双实例脚本；tiered 对接（§9 清单）；docs/08 P5 状态更新 | e2e 过；tiered + cloudproxy 冒烟过 | ✅（`e2e_cloudproxy` + `e2e_tiered_cloudproxy`） |

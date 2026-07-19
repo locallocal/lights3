@@ -156,46 +156,42 @@ resolve(bucket) → IStorageBackend&
 ## 4. CloudProxyBackend（映射公有云）
 
 把本地 bucket 映射到公有云对象存储（AWS S3 / 兼容 S3 协议的 OSS、COS、MinIO
-等），网关充当带本地认证的代理。
+等），网关充当带本地认证的代理。完整设计见
+[09-cloudproxy-backend.md](09-cloudproxy-backend.md)，本节保留概述与路线决策。
 
 ### 4.1 两种实现路线
 
 | 路线 | 做法 | 取舍 |
 | --- | --- | --- |
-| A. SDK 封装（首选） | 用 aws-sdk-cpp（或轻量的 aws-c-s3）调用远端 | 正确性省心：重试、region、TLS、分片都是现成的；SDK 同步 API 在线程池里调用即可接入协程模型 |
-| B. 直接转发 | 自己构造 HTTP 请求 + 对远端做 SigV4 重签名，经 HTTP client 转发 | 零 SDK 依赖、可真流式转发；但要自己处理重试与各云差异 |
+| A. SDK 封装 | 用 aws-sdk-cpp（或轻量的 aws-c-s3）调用远端 | 正确性省心：重试、region、TLS、分片都是现成的；SDK 同步 API 在线程池里调用即可接入协程模型 |
+| B. 直接转发（已定） | 自己构造 HTTP 请求 + 对远端做 SigV4 签名，经 HTTP client 转发 | 零 SDK 依赖、可真流式转发；但要自己处理重试与各云差异 |
 
-首期取 **路线 A**，接口内封装：
+设计初期倾向路线 A，**详细设计阶段反转为路线 B**（理由见 docs/09 §2.1）：
+出方向签名 `SigV4Authenticator::sign()` 早已随验签一并实现并预留给
+cloudproxy；vendored 的 httplib 具备流式 client 能力；而 aws-sdk-cpp 的
+依赖体量与本项目"全 vendored 子模块"的构建约束冲突。
 
-```cpp
-Task<ObjectStream> CloudProxyBackend::get_object(bucket, key, range) {
-    co_await pool_->schedule();
-    auto remote_bucket = cfg_.bucket_prefix + std::string(bucket);
-    // SDK 的 GetObject 返回 IOStream，包装成 BodyReader（每次 read 都经线程池）
-    ...
-}
-```
-
-要点：
+要点（详细展开见 docs/09 对应小节）：
 
 - **凭证隔离**：客户端用网关本地的 AK/SK 认证；网关用自己的云凭证访问远端。
   客户端凭证绝不透传，云凭证只存在于网关配置。
-- **流式**：PUT 方向用 SDK 的流式接口把 `BodyReader` 包装成 `std::streambuf`
-  喂给 SDK；GET 方向反向包装。避免整对象缓冲。
+- **流式**：GET 方向 pump 线程 + 有界队列把 httplib 推模型翻成 `BodyReader`
+  拉模型；PUT 方向对称反转。避免整对象缓冲（docs/09 §3）。
 - **Multipart 透传**：upload_id、part 直接映射远端同名概念，网关不落地分片。
-- **超时与重试**：SDK 配置层面设置（连接/请求超时、指数退避 3 次）；
-  远端 5xx 映射为网关 502/503 对应的 S3 错误码，透传远端 4xx 语义
-  （NoSuchKey 等）。
+- **超时与重试**：连接/请求超时、指数退避 3 次；远端 5xx 映射为网关 500/503
+  对应的 S3 错误码，透传远端 4xx 语义（NoSuchKey 等）（docs/09 §5）。
 - **名称映射**：`bucket_prefix` 解决本地 bucket 名与远端全局命名空间冲突；
   key 不变换。
-- 线程占用：SDK 同步调用会占住池线程整个请求时长，高并发远端访问时这是
-  容量瓶颈——通过 backend 独立线程池（03 篇 §3 预留）或切换路线 B 演进。
+- 线程占用：同步 HTTP client 会占住线程整个请求时长——数据面 pump 使用
+  cloudproxy 私有线程而非共享池，即 03 篇 §3 预留的 backend 独立线程池的
+  落地形态（docs/09 §2.3）。
 
 ## 5. 新增后端的步骤（扩展指南)
 
 1. 实现 `IStorageBackend`（放 `src/storage/<name>/`）。
-2. `REGISTER_STORAGE_BACKEND("<type>", factory)` 注册，工厂签名
-   `(const BackendConfig&, shared_ptr<ThreadPool>) → unique_ptr<IStorageBackend>`。
+2. 在 `registry.cc` 的 `ensure_registered()` 里调用
+   `StorageRegistry::register_backend("<type>", factory)` 注册，工厂签名
+   `(const BackendConfig&, shared_ptr<ThreadPool>) → shared_ptr<IStorageBackend>`。
 3. 配置 `backends[].type` 即可引用；通过通用的**后端一致性测试套件**
    （同一组用例参数化跑所有后端：CRUD、range、list 分页、multipart、
    并发 PUT 同 key、异常 key）验收。

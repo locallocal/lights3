@@ -2,8 +2,9 @@
 
 > 状态：P1–P4 已实现（`src/storage/tiered/`），cloud 侧经 `IStorageBackend`
 > 抽象接入，CI 用 MemoryBackend 充当云端全覆盖（单测 `test_tiered.cc` +
-> `e2e_tiered`）。P5（真实 CloudProxyBackend，docs/04 §4）与 §9 的对账工具
-> 尚未实现；GC 重试简化为按轮周期重试（未做指数退避）。
+> `e2e_tiered`）。P5（真实 CloudProxyBackend，设计已完成见
+> [09-cloudproxy-backend.md](09-cloudproxy-backend.md)，实现未开始）与 §9 的
+> 对账工具尚未实现；GC 重试简化为按轮周期重试（未做指数退避）。
 
 ## 1. 目标与非目标
 
@@ -251,7 +252,7 @@ backends:
     root: ./data/objects
     staging: ./data/staging
   - name: aws
-    type: cloudproxy                  # docs/04 §4
+    type: cloudproxy                  # docs/09
     endpoint: https://s3.us-east-1.amazonaws.com
     bucket_prefix: lights3-tier-
     # 云端凭证……
@@ -301,7 +302,7 @@ buckets:
 | P2 | TierScanner（判冷 + 水位）、TierIndex 持久化、per-key 锁与冲突矩阵测试 | 并发 PUT/GET/下沉压测无脏数据 | ✅ |
 | P3 | Tee 缓存回填 + 空间兜底降级 + single-flight | 断连/ENOSPC 注入测试 | ✅ |
 | P4 | GC 队列 + 对账工具 | 崩溃注入后对账收敛 | GC 队列 ✅；对账工具未做 |
-| P5 | 接入真实 CloudProxyBackend（其自身为独立特性） | 对公有云端到端 | 未开始 |
+| P5 | 接入真实 CloudProxyBackend（其自身为独立特性，设计见 docs/09） | 对公有云端到端 | 设计完成，实现未开始 |
 
 P1–P4 完全不依赖云 SDK，`tiered` + `memory` 组合即可在 CI 全覆盖，
 这是把 local 侧耦合具体类型、cloud 侧走抽象接口这一决策换来的直接红利。

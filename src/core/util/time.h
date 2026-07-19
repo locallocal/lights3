@@ -16,6 +16,8 @@ std::optional<SysTime> parse_http_date(const std::string& s);
 
 // "2026-07-14T08:00:00.000Z"（S3 XML LastModified）
 std::string iso8601(SysTime t);
+// 解析 ISO8601（小数秒可选、按截断处理）；无法解析返回 nullopt
+std::optional<SysTime> parse_iso8601(const std::string& s);
 
 // "20260714T080000Z"（x-amz-date basic 格式）
 std::string amz_date(SysTime t);

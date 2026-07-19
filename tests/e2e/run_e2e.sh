@@ -4,7 +4,9 @@ set -u
 
 BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
-BACKEND="${3:-localfs}"   # localfs | xlocalfs | tiered（localfs+memory 组合，docs/08）
+# localfs | xlocalfs | tiered（localfs+memory，docs/08）
+# | cloudproxy | tiered-cloudproxy（双实例：实例 B 充当"云端"，docs/09 §10）
+BACKEND="${3:-localfs}"
 AK=E2EACCESSKEY
 SK=e2e-secret-key
 REGION=us-east-1
@@ -14,9 +16,51 @@ PASS=0; FAIL=0
 cleanup() {
     [[ -n "${SRV_PID:-}" ]] && kill "$SRV_PID" 2>/dev/null
     [[ -n "${SRV_PID:-}" ]] && wait "$SRV_PID" 2>/dev/null
+    [[ -n "${RSRV_PID:-}" ]] && kill "$RSRV_PID" 2>/dev/null
+    [[ -n "${RSRV_PID:-}" ]] && wait "$RSRV_PID" 2>/dev/null
     rm -rf "$WORK"
 }
 trap cleanup EXIT
+
+# ---------- cloudproxy 场景：先起"云端"实例 B（自身也是 lights3）----------
+CLOUD_AK=E2ECLOUDKEY
+CLOUD_SK=e2e-cloud-secret
+RPORT=""
+RSRV_PID=""
+if [[ "$BACKEND" == "cloudproxy" || "$BACKEND" == "tiered-cloudproxy" ]]; then
+    cat > "$WORK/remote.yaml" <<EOF
+http:
+  driver: builtin
+  bind: 127.0.0.1
+  port: 0
+runtime:
+  io_threads: 8
+auth:
+  credentials:
+    - access_key: $CLOUD_AK
+      secret_key: $CLOUD_SK
+  region: $REGION
+backends:
+  - name: clouddata
+    type: localfs
+    root: $WORK/remote-data
+    staging: $WORK/remote-staging
+buckets:
+  default_backend: clouddata
+log:
+  level: info
+EOF
+    "$BIN" --config "$WORK/remote.yaml" > "$WORK/remote.log" 2>&1 &
+    RSRV_PID=$!
+    for _ in $(seq 1 50); do
+        RPORT=$(sed -n 's/.*listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/remote.log" | head -1)
+        [[ -n "$RPORT" ]] && break
+        kill -0 "$RSRV_PID" 2>/dev/null || { echo "remote instance died at startup:"; cat "$WORK/remote.log"; exit 1; }
+        sleep 0.1
+    done
+    [[ -z "$RPORT" ]] && { echo "remote instance did not report port"; cat "$WORK/remote.log"; exit 1; }
+    echo "remote (cloud) instance up: 127.0.0.1:$RPORT (pid $RSRV_PID)"
+fi
 
 check() {  # check <描述> <期望> <实际>
     if [[ "$2" == "$3" ]]; then
@@ -55,6 +99,33 @@ $(if [[ "$BACKEND" == "tiered" ]]; then cat <<TIER
     cloud: cloudmem
     scan_interval: 0s
 TIER
+elif [[ "$BACKEND" == "cloudproxy" ]]; then cat <<CLOUD
+  - name: tierdata
+    type: cloudproxy
+    endpoint: http://127.0.0.1:$RPORT
+    region: $REGION
+    access_key: $CLOUD_AK
+    secret_key: $CLOUD_SK
+    bucket_prefix: e2e-
+CLOUD
+elif [[ "$BACKEND" == "tiered-cloudproxy" ]]; then cat <<TIERCLOUD
+  - name: localdata
+    type: localfs
+    root: $WORK/data
+    staging: $WORK/staging
+  - name: cloudpx
+    type: cloudproxy
+    endpoint: http://127.0.0.1:$RPORT
+    region: $REGION
+    access_key: $CLOUD_AK
+    secret_key: $CLOUD_SK
+    bucket_prefix: e2e-
+  - name: tierdata
+    type: tiered
+    local: localdata
+    cloud: cloudpx
+    scan_interval: 0s
+TIERCLOUD
 else cat <<PLAIN
   - name: tierdata
     type: $BACKEND
@@ -270,5 +341,9 @@ SRV_PID=""
 
 echo
 echo "e2e: $PASS passed, $FAIL failed"
-[[ $FAIL -eq 0 ]] || { echo "--- server.log ---"; cat "$WORK/server.log"; exit 1; }
+if [[ $FAIL -ne 0 ]]; then
+    echo "--- server.log ---"; cat "$WORK/server.log"
+    [[ -f "$WORK/remote.log" ]] && { echo "--- remote.log ---"; cat "$WORK/remote.log"; }
+    exit 1
+fi
 exit 0

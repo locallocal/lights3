@@ -7,6 +7,9 @@
 #include "storage/memory/memory_backend.h"
 #include "storage/tiered/tiered_backend.h"
 #include "storage/xlocalfs/xlocalfs_backend.h"
+#ifdef LIGHTS3_CLOUDPROXY
+#include "storage/cloudproxy/cloudproxy_backend.h"
+#endif
 
 namespace lights3::storage {
 
@@ -47,7 +50,13 @@ void ensure_registered() {
             "memory", [](const BackendConfig&, std::shared_ptr<ThreadPool>) {
                 return std::make_shared<MemoryBackend>();
             });
-        // cloudproxy：依赖云 SDK，后续 CMake 选项接入（docs/04 §4）
+#ifdef LIGHTS3_CLOUDPROXY
+        StorageRegistry::register_backend(
+            "cloudproxy", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+                auto c = CloudProxyConfig::from_params(cfg.name, cfg.params);
+                return std::make_shared<CloudProxyBackend>(std::move(c), std::move(pool));
+            });
+#endif
         return true;
     }();
     (void)done;

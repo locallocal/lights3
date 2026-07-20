@@ -1,4 +1,4 @@
-// L4: Task<T> 惰性协程原语与 sync_wait / when_all / with_timeout（见 docs/03-concurrency.md）
+// L4: Task<T> 惰性协程原语与 sync_wait / when_all / with_timeout（见 docs/concurrency.md）
 #pragma once
 
 #include <atomic>
@@ -45,7 +45,7 @@ namespace detail {
 struct PromiseBase {
     std::coroutine_handle<> continuation;
     SyncWaitEvent* event = nullptr;
-    // home executor（docs/03 §3）：设置后 final_suspend 把续体 post 过去，
+    // home executor（docs/concurrency.md §3）：设置后 final_suspend 把续体 post 过去，
     // 而非对称转移——协议逻辑由此回到 HTTP 执行环境；子任务在 co_await 时继承
     IExecutor* cont_executor = nullptr;
 
@@ -231,7 +231,7 @@ inline void sync_wait(Task<void> t) {
     t.take_result();
 }
 
-// ---------- when_all：并发等待一组 Task（docs/03 §2/§6）----------
+// ---------- when_all：并发等待一组 Task（docs/concurrency.md §2/§6）----------
 
 namespace detail {
 
@@ -325,7 +325,7 @@ inline Task<void> when_all(std::vector<Task<void>> tasks) {
         if (e) std::rethrow_exception(e);
 }
 
-// ---------- with_timeout：协作式超时（docs/03 §2/§5）----------
+// ---------- with_timeout：协作式超时（docs/concurrency.md §2/§5）----------
 // 到点仅触发 src.request_cancel()；task 须以 src.token() 构造并在挂起点/
 // 长循环感知取消，超时表现为 OperationCancelled 从 task 内浮出。
 // src 应为本次调用专用：与他人共享的 source 会在超时后殃及同请求的后续操作。

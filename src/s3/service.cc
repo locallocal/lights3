@@ -33,7 +33,7 @@ http::HttpResponse error_response(const S3Error& e, const std::string& request_i
     return resp;
 }
 
-// 明确不支持的子资源（docs/05 §1）：显式 501，避免落进 List/Get 兜底造成误答
+// 明确不支持的子资源（docs/s3-protocol.md §1）：显式 501，避免落进 List/Get 兜底造成误答
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",       "website",
     "lifecycle",   "tagging",      "cors",           "encryption",     "object-lock",
@@ -53,7 +53,7 @@ void reject_unsupported_subresource(const http::HttpRequest& req) {
 
 }  // namespace
 
-// ---------- virtual-host style（docs/05 §2）----------
+// ---------- virtual-host style（docs/s3-protocol.md §2）----------
 
 std::pair<std::string, std::string> S3Service::resolve_address(
     const http::HttpRequest& req) const {
@@ -98,7 +98,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         } else {
             access_key = auth_.verify(req);
             std::tie(bucket, key) = resolve_address(req);
-            // '.' 开头为内部保留名（docs/06 §4.1）：用户请求在此统一拒绝，
+            // '.' 开头为内部保留名（docs/credential-management.md §4.1）：用户请求在此统一拒绝，
             // 后端的 validate 对保留名放行，仅 CredentialStore 可达
             if (!bucket.empty() && bucket.front() == '.')
                 throw S3Error(S3ErrorCode::InvalidBucketName,
@@ -119,7 +119,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     resp.headers.set("x-amz-request-id", ctx.request_id);
     resp.headers.set("Server", "lights3");
 
-    // 访问日志（docs/05 §7）：一行结构化，字段序对齐 S3 access log 精简版
+    // 访问日志（docs/s3-protocol.md §7）：一行结构化，字段序对齐 S3 access log 精简版
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     metrics_.request_end(req.method, resp.status, secs);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
@@ -129,7 +129,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     co_return resp;
 }
 
-// ---------- 显式分派表（docs/05 §2）----------
+// ---------- 显式分派表（docs/s3-protocol.md §2）----------
 
 namespace {
 
@@ -237,7 +237,7 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
     throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.");
 }
 
-// ---------- readyz（docs/05 §7：各后端探活）----------
+// ---------- readyz（docs/s3-protocol.md §7：各后端探活）----------
 
 Task<http::HttpResponse> S3Service::readyz() {
     http::HttpResponse resp;

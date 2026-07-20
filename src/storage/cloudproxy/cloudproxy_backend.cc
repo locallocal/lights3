@@ -1,7 +1,7 @@
-// CloudProxyBackend 实现（docs/09）。
+// CloudProxyBackend 实现（docs/cloudproxy-backend.md）。
 // 通用管线：构造最小 HttpRequest 签名 → 搬运 headers → ClientPool 发送 → 映射错误。
 // 数据面经 http/pushpull.h 的 BlockQueue 在私有 pump 线程与 handler 协程间翻转
-// 推/拉模型；控制面短请求在共享池线程同步调用（docs/09 §2.3）。
+// 推/拉模型；控制面短请求在共享池线程同步调用（docs/cloudproxy-backend.md §2.3）。
 #include "storage/cloudproxy/cloudproxy_backend.h"
 
 #include <future>
@@ -97,7 +97,7 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
     return m;
 }
 
-// GET 头部到达后交付给等待协程的载荷（docs/09 §3.1 ①）
+// GET 头部到达后交付给等待协程的载荷（docs/cloudproxy-backend.md §3.1 ①）
 struct GetHead {
     ObjectMeta meta;
     std::optional<ByteRange> range;
@@ -155,7 +155,7 @@ struct TransferAbort {
 };
 
 // 析构即 cancel + 打断在途传输 + join pump：客户端断连/handler 异常时
-// 中止远端传输（docs/09 §3.1）
+// 中止远端传输（docs/cloudproxy-backend.md §3.1）
 class PumpBodyReader final : public http::BodyReader {
 public:
     PumpBodyReader(std::shared_ptr<http::BlockQueue> q, std::optional<uint64_t> len,
@@ -182,7 +182,7 @@ std::string resource_of(std::string_view bucket, std::string_view key = "") {
     return r;
 }
 
-// 总 ETag 规则复用 combined_etag（docs/09 §5.2 complete 歧义消解用）
+// 总 ETag 规则复用 combined_etag（docs/cloudproxy-backend.md §5.2 complete 歧义消解用）
 std::string expected_total_etag(std::span<const PartInfo> parts) {
     std::vector<std::string> md5s;
     md5s.reserve(parts.size());
@@ -218,7 +218,7 @@ std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
     return rb;
 }
 
-// ---------- bucket 操作（docs/09 §4.3）----------
+// ---------- bucket 操作（docs/cloudproxy-backend.md §4.3）----------
 
 Task<void> CloudProxyBackend::create_bucket(std::string_view bucket) {
     auto rb = remote_bucket(bucket);
@@ -266,7 +266,7 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
     if (res->status / 100 == 2) co_return true;
     if (res->status == 404) co_return false;
     if (res->status == 403) {
-        // AWS HeadBucket 语义：存在但无权也是 403，视为存在（docs/09 §4.3）
+        // AWS HeadBucket 语义：存在但无权也是 403，视为存在（docs/cloudproxy-backend.md §4.3）
         LOG_WARN("cloudproxy: HEAD bucket {} returned 403, treating as exists", rb);
         co_return true;
     }
@@ -300,7 +300,7 @@ Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
     co_return out;
 }
 
-// ---------- 对象数据面（docs/09 §3）----------
+// ---------- 对象数据面（docs/cloudproxy-backend.md §3）----------
 
 Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::string_view key,
                                                  std::optional<ByteRange> range) {
@@ -541,7 +541,7 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 200) co_return meta_from_response(key, *res);
-    // HEAD 无错误体：404 按上下文补 NoSuchKey（docs/09 §4.1/§5.1）
+    // HEAD 无错误体：404 按上下文补 NoSuchKey（docs/cloudproxy-backend.md §4.1/§5.1）
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
@@ -559,7 +559,7 @@ Task<void> CloudProxyBackend::delete_object(std::string_view bucket, std::string
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
-// ---------- list（docs/09 §4.2：恒用 start-after 分页）----------
+// ---------- list（docs/cloudproxy-backend.md §4.2：恒用 start-after 分页）----------
 
 Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
                                                  const ListOptions& opt) {
@@ -607,7 +607,7 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
     co_return out;
 }
 
-// ---------- multipart 透传（docs/09 §4.4）----------
+// ---------- multipart 透传（docs/cloudproxy-backend.md §4.4）----------
 
 Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
                                                       std::string_view key, ObjectMeta meta) {
@@ -690,7 +690,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
         try {
             if (res->status != 200)
                 ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
-            // S3 特有：complete 耗时长时先回 200，错误在 body 里（docs/09 §4.4）
+            // S3 特有：complete 耗时长时先回 200，错误在 body 里（docs/cloudproxy-backend.md §4.4）
             s3::XmlNode root;
             try {
                 root = s3::xml_parse(res->body);
@@ -706,7 +706,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             }
             etag_out = std::string(strip_etag_quotes(root.get("ETag")));
         } catch (const S3Error& e) {
-            // 重试后收 NoSuchUpload：前一次可能实际已成功 → HEAD 验证（docs/09 §5.2）
+            // 重试后收 NoSuchUpload：前一次可能实际已成功 → HEAD 验证（docs/cloudproxy-backend.md §5.2）
             if (e.code == S3ErrorCode::NoSuchUpload && retried) {
                 ambiguous_nosuch = std::current_exception();
                 break;

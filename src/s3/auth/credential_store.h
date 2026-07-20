@@ -1,4 +1,4 @@
-// L2: 动态凭证管理（docs/06）：AK/SK 的生成/查询/吊销 + IStorageBackend 持久化。
+// L2: 动态凭证管理（docs/credential-management.md）：AK/SK 的生成/查询/吊销 + IStorageBackend 持久化。
 // 两级模型：静态凭证（配置文件）= root，动态凭证（本类生成）仅数据面。
 #pragma once
 
@@ -27,7 +27,7 @@ struct CredentialInfo {
     std::chrono::system_clock::time_point created;
 };
 
-// 保留系统 bucket 与对象键前缀（docs/06 §4.1）
+// 保留系统 bucket 与对象键前缀（docs/credential-management.md §4.1）
 inline constexpr std::string_view kSysBucket = ".sys";
 inline constexpr std::string_view kCredPrefix = "credentials/";
 
@@ -44,7 +44,7 @@ public:
 
     bool is_root(std::string_view ak) const;
 
-    // ---- 管理面（docs/06 §5.1）----
+    // ---- 管理面（docs/credential-management.md §5.1）----
     // 先写 storage 成功再改内存（write-through）：崩溃时以 storage 为准，
     // 内存顶多"少"不会"多"。注意不在持锁状态下 co_await（协程可能换线程恢复，
     // std::mutex 跨线程解锁是 UB）；并发 generate 的唯一性由 AK 随机空间保证

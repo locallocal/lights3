@@ -1,4 +1,4 @@
-// L4: 协作式取消原语（docs/03-concurrency.md §5）
+// L4: 协作式取消原语（docs/concurrency.md §5）
 // CancelSource 触发、CancelToken 观察；取消以 OperationCancelled 异常从挂起点浮出。
 // 不追求抢占：正在执行的阻塞调用等其自然返回，返回后由挂起点/长循环检查 token。
 #pragma once

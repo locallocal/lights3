@@ -29,7 +29,7 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     return meta;
 }
 
-// 读整个请求体（XML 请求限 1MiB，docs/05 §4）；超限抛 MalformedXML
+// 读整个请求体（XML 请求限 1MiB，docs/s3-protocol.md §4）；超限抛 MalformedXML
 inline Task<std::string> read_body(http::HttpRequest& req, size_t max_size = 1024 * 1024) {
     std::string out;
     if (!req.body) co_return out;

@@ -1,4 +1,4 @@
-// L1/L2 边界：HTTP 中立模型（见 docs/02-http-adapter.md）
+// L1/L2 边界：HTTP 中立模型（见 docs/http-adapter.md）
 // 本头文件只依赖标准库与 core/task.h，任何 HTTP 库的类型都不得出现在这里。
 #pragma once
 

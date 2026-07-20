@@ -1,4 +1,4 @@
-# LightS3 示例配置（docs/01-architecture.md §5）
+# LightS3 示例配置（docs/architecture.md §5）
 http:
   driver: builtin          # builtin | beast | httplib（需对应 CMake 选项编译进来）
   bind: 0.0.0.0

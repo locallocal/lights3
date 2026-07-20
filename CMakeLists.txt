@@ -21,12 +21,12 @@ set(GFLAGS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(GFLAGS_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/gflags EXCLUDE_FROM_ALL)
 
-# HTTP 驱动的编译期裁剪（docs/01 §6 依赖策略）
+# HTTP 驱动的编译期裁剪（docs/architecture.md §6 依赖策略）
 option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
 option(LIGHTS3_DRIVER_HTTPLIB "Build the cpp-httplib sync HTTP driver (vendored header)" ON)
 option(LIGHTS3_DRIVER_SEASTAR "Build the Seastar shard-per-core HTTP driver (heavy deps)" OFF)
-option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/09)" ON)
+option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/cloudproxy-backend.md)" ON)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -48,7 +48,7 @@ endif()
 # spdlog：日志实现（git submodule，静态库；core/log.h 为门面）
 add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 
-# nlohmann/json：admin 凭证 API 的 JSON 编解码（header-only，docs/06 §5.4）
+# nlohmann/json：admin 凭证 API 的 JSON 编解码（header-only，docs/credential-management.md §5.4）
 add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
 # ---- 核心库：L2/L3/L4 + HTTP 边界 ----
@@ -86,7 +86,7 @@ add_library(lights3_core STATIC
 )
 target_include_directories(lights3_core PUBLIC src)
 target_link_libraries(lights3_core PUBLIC OpenSSL::Crypto Threads::Threads spdlog::spdlog)
-# JSON 只在 admin handler / CredentialStore 的 .cc 里用，不进公共头（docs/06 §5.4）
+# JSON 只在 admin handler / CredentialStore 的 .cc 里用，不进公共头（docs/credential-management.md §5.4）
 target_link_libraries(lights3_core PRIVATE nlohmann_json::nlohmann_json)
 
 if(LIGHTS3_DRIVER_BUILTIN)
@@ -126,7 +126,7 @@ if(LIGHTS3_CLOUDPROXY)
     src/storage/cloudproxy/cloudproxy_backend.cc
   )
   # OPENSSL_SUPPORT 必须目标级统一：httplib_server.cc 与 cloudproxy 的 TU 一开一关
-  # 是 ODR 违规（docs/09 §8.3）
+  # 是 ODR 违规（docs/cloudproxy-backend.md §8.3）
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_CLOUDPROXY CPPHTTPLIB_OPENSSL_SUPPORT)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
@@ -206,13 +206,13 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_xlocalfs
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin xlocalfs)
-    # tiered 组合后端（localfs+memory，docs/08）同样跑全协议用例
+    # tiered 组合后端（localfs+memory，docs/tiered-storage.md）同样跑全协议用例
     add_test(NAME e2e_tiered
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin tiered)
   endif()
-  # cloudproxy 双实例场景（docs/09 §10）：实例 B 充当"云端"，A 经 cloudproxy 代理；
-  # tiered-cloudproxy 即 docs/08 P5 组合（tiered 的 cloud 侧接真实 CloudProxyBackend）
+  # cloudproxy 双实例场景（docs/cloudproxy-backend.md §10）：实例 B 充当"云端"，A 经 cloudproxy 代理；
+  # tiered-cloudproxy 即 docs/tiered-storage.md P5 组合（tiered 的 cloud 侧接真实 CloudProxyBackend）
   if(LIGHTS3_CLOUDPROXY AND LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_cloudproxy
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh

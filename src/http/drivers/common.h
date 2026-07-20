@@ -36,7 +36,7 @@ inline void parse_target(std::string_view target, HttpRequest& req) {
     }
 }
 
-// 契约 2（docs/02 §4）：handler 逃逸异常时驱动统一回 500 + S3 InternalError XML
+// 契约 2（docs/http-adapter.md §4）：handler 逃逸异常时驱动统一回 500 + S3 InternalError XML
 inline HttpResponse internal_error_response() {
     s3::S3Error err(s3::S3ErrorCode::InternalError, "We encountered an internal error.");
     HttpResponse resp;

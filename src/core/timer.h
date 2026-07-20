@@ -1,4 +1,4 @@
-// L4: 进程级定时器线程；with_timeout 等超时原语的底座（docs/03-concurrency.md §2/§5）
+// L4: 进程级定时器线程；with_timeout 等超时原语的底座（docs/concurrency.md §2/§5）
 #pragma once
 
 #include <chrono>

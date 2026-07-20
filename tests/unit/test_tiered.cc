@@ -1,4 +1,4 @@
-// 分层存储后端单测（docs/08 §10 P1–P4 验收）：
+// 分层存储后端单测（docs/tiered-storage.md §10 P1–P4 验收）：
 // 一致性套件、tier 状态机、覆盖/删除入 GC、scanner 判冷与崩溃恢复、空间兜底。
 // 云侧用 MemoryBackend 充当（经计数包装断言云端调用次数）。
 #include <atomic>

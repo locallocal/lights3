@@ -17,7 +17,7 @@ namespace {
 
 using nlohmann::json;
 
-// ---------- CSPRNG 生成（docs/06 §6）----------
+// ---------- CSPRNG 生成（docs/credential-management.md §6）----------
 
 void fill_random(uint8_t* buf, size_t n) {
     // getentropy 单次上限 256 字节，这里最多 30 字节
@@ -52,7 +52,7 @@ std::string random_secret_key() {
     return sk;
 }
 
-// ---------- 落盘格式（docs/06 §4.2）----------
+// ---------- 落盘格式（docs/credential-management.md §4.2）----------
 
 std::string object_key(std::string_view ak) {
     return std::string(kCredPrefix) + std::string(ak);
@@ -102,7 +102,7 @@ Task<std::string> read_all(http::BodyReader& body, size_t max_size = 64 * 1024) 
 
 }  // namespace
 
-// ---------- 加载（docs/06 §5.1）----------
+// ---------- 加载（docs/credential-management.md §5.1）----------
 
 Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
     std::shared_ptr<storage::IStorageBackend> backend, const AuthConfig& static_cfg) {
@@ -134,7 +134,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
     }
     size_t dynamic_count = store->creds_.size();
 
-    // 静态表：同 AK 时静态优先（docs/06 §5.1）
+    // 静态表：同 AK 时静态优先（docs/credential-management.md §5.1）
     for (auto& c : static_cfg.credentials) {
         CredentialInfo info;
         info.access_key = c.access_key;

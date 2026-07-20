@@ -1,4 +1,4 @@
-# 05 S3 协议实现
+# S3 协议实现
 
 ## 1. API 范围
 
@@ -80,7 +80,7 @@ presigned POST（presigned GET/PUT 的 query 签名**支持**，见 §3.4）。
 首期：配置文件静态 AK/SK 表（secret 支持环境变量引用），全部凭证等价于
 超级用户（无 IAM policy）。接口上预留 `ICredentialProvider`，
 后续可接文件热加载或外部服务。运行期生成/查询 AK/SK 并持久化到存储的
-方案见 [06-credential-management.md](06-credential-management.md)。
+方案见 [credential-management.md](credential-management.md)。
 
 ## 4. XML 编解码
 

@@ -1,4 +1,4 @@
-// docs/06：CredentialStore 持久化/两级权限 + /-/admin/credentials 全流程
+// docs/credential-management.md：CredentialStore 持久化/两级权限 + /-/admin/credentials 全流程
 #include <nlohmann/json.hpp>
 
 #include "core/util/crypto.h"

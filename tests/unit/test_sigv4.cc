@@ -133,7 +133,7 @@ TEST(sigv4_detects_payload_mismatch) {
     CHECK(thrown);
 }
 
-// ---------- docs/05 §3.2/§3.4：aws-chunked 与 presigned ----------
+// ---------- docs/s3-protocol.md §3.2/§3.4：aws-chunked 与 presigned ----------
 
 namespace {
 

@@ -1,4 +1,4 @@
-// L3: CloudProxyBackend —— 映射公有云的代理后端（docs/09）。
+// L3: CloudProxyBackend —— 映射公有云的代理后端（docs/cloudproxy-backend.md）。
 // 自签 SigV4 + vendored httplib 直连远端 S3 兼容端点；本头文件不暴露 httplib 类型
 // （httplib 细节全部收在 remote_client.h/.cc 内部）。
 #pragma once
@@ -26,7 +26,7 @@ struct CloudProxyConfig {
     int retry_max = 3;
     int retry_base_ms = 100;
     int max_connections = 16;
-    bool verify_etag = true;             // docs/09 §6：单段 PUT 与远端 ETag 比对 MD5
+    bool verify_etag = true;             // docs/cloudproxy-backend.md §6：单段 PUT 与远端 ETag 比对 MD5
     size_t queue_cap_bytes = 1 << 20;    // 数据面 BlockQueue 容量（背压水位）
 
     // BackendConfig::params → 配置；非法值在配置加载期抛 std::runtime_error
@@ -73,7 +73,7 @@ public:
 private:
     // 本地名校验 + 前缀映射；映射后超 63 字节抛 InvalidBucketName
     std::string remote_bucket(std::string_view bucket) const;
-    // PUT / upload_part 共用的流式上行（docs/09 §3.2）。resource 为客户端视角的
+    // PUT / upload_part 共用的流式上行（docs/cloudproxy-backend.md §3.2）。resource 为客户端视角的
     // "/bucket/key"（进错误 XML，不泄漏带前缀的远端路径）；multipart_ctx 决定
     // 无错误体 404 的语义兜底（Upload / Bucket）
     Task<PutResult> stream_upload(std::string raw_path, std::string raw_query,

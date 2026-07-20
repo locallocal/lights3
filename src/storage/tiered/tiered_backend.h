@@ -1,4 +1,4 @@
-// L3: 分层存储组合后端（docs/08-tiered-storage.md）
+// L3: 分层存储组合后端（docs/tiered-storage.md）
 // 组合 local（须为 localfs/xlocalfs，共享磁盘布局）与 cloud（任意 IStorageBackend）：
 // 冷对象上传云端后本地 stub 化，访问时透明回读并 Tee 缓存回本地。
 #pragma once
@@ -25,7 +25,7 @@
 namespace lights3::storage {
 
 struct TieredConfig {
-    int64_t cold_after_sec = 30 * 24 * 3600;  // 判冷阈值（docs/08 §5.1）
+    int64_t cold_after_sec = 30 * 24 * 3600;  // 判冷阈值（docs/tiered-storage.md §5.1）
     int64_t scan_interval_sec = 3600;         // 0 = 关闭后台任务（测试用手动钩子）
     double space_high_watermark = 0.85;       // 触发空间回收
     double space_low_watermark = 0.70;        // 回收目标
@@ -54,7 +54,7 @@ public:
     Task<bool> bucket_exists(std::string_view bucket) override;
     Task<std::vector<BucketInfo>> list_buckets() override;
 
-    // ---- object：tier 感知（docs/08 §6/§7）----
+    // ---- object：tier 感知（docs/tiered-storage.md §6/§7）----
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
     Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
@@ -82,7 +82,7 @@ public:
     //（它们由 registry 独立持有，可能同时被直接路由）
     Task<void> close() override;
 
-    // ---- 后台任务与测试钩子（docs/08 §10 P1"手动触发"）----
+    // ---- 后台任务与测试钩子（docs/tiered-storage.md §10 P1"手动触发"）----
     // 单对象下沉：local → remote（上传+stub 化）或 cached → remote（零流量 stub 化）。
     // 前置不满足（已 remote / 在途任务）静默返回；被并发写打败时云副本入 GC
     Task<void> demote_object(std::string bucket, std::string key);
@@ -100,7 +100,7 @@ private:
     friend class TeeCacheReader;
     friend struct InflightRelease;
 
-    // ---- per-key 锁（docs/08 §7.3）：striped 异步互斥，只保护状态提交段 ----
+    // ---- per-key 锁（docs/tiered-storage.md §7.3）：striped 异步互斥，只保护状态提交段 ----
     static constexpr size_t kLockStripes = 64;
     AsyncSemaphore& key_lock(std::string_view bucket, std::string_view key);
 
@@ -112,14 +112,14 @@ private:
         return std::string(bucket) + "/" + std::string(key);
     }
 
-    // ---- TierIndex：atime 表（docs/08 §4.3）----
+    // ---- TierIndex：atime 表（docs/tiered-storage.md §4.3）----
     void touch_atime(std::string_view bucket, std::string_view key);
     void erase_atime(std::string_view bucket, std::string_view key);
     int64_t atime_or(const std::string& ikey, int64_t fallback);
     void load_atime_snapshot();
     void save_atime_snapshot();
 
-    // ---- GC 队列（docs/08 §7.2）：<staging>/tier/gc/<seq> 每项一个 TSV ----
+    // ---- GC 队列（docs/tiered-storage.md §7.2）：<staging>/tier/gc/<seq> 每项一个 TSV ----
     void enqueue_gc(std::string_view bucket, std::string_view key, std::string_view remote_etag);
 
     // 云侧 bucket 惰性创建（并发下 AlreadyOwned 视为成功）
@@ -127,7 +127,7 @@ private:
     // 缓存回填提交：per-key 锁内复核 sidecar 仍为同一 remote 版本后 rename+sidecar
     Task<void> commit_cache_fill(std::string bucket, std::string key, ObjectMeta expect,
                                  fsutil::TierInfo expect_tier, fsutil::TmpFile& tmp);
-    // statvfs 余量预检（docs/08 §6.2 步骤②）
+    // statvfs 余量预检（docs/tiered-storage.md §6.2 步骤②）
     bool cache_space_ok(uint64_t size) const;
 
     // 后台协程管理：spawn 计数 + close() 等待归零
@@ -149,7 +149,7 @@ private:
     std::filesystem::path gc_dir_;    // <staging>/tier/gc
 
     std::vector<std::unique_ptr<AsyncSemaphore>> key_locks_;
-    AsyncSemaphore transfers_;  // max_concurrent_transfers 限流（docs/08 §5.1）
+    AsyncSemaphore transfers_;  // max_concurrent_transfers 限流（docs/tiered-storage.md §5.1）
 
     std::mutex inflight_m_;
     std::set<std::string> inflight_;

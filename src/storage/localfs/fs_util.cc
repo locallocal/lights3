@@ -112,7 +112,7 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     tmp.committed = true;
 }
 
-// ---- 分层存储扩展（docs/08 §4）----
+// ---- 分层存储扩展（docs/tiered-storage.md §4）----
 
 ObjectMeta load_object_meta(const fs::path& data_path, std::string key, TierInfo* tier_out) {
     ObjectMeta meta;

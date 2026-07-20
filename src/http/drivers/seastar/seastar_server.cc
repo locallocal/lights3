@@ -1,4 +1,4 @@
-// L1: seastar 驱动 —— shard-per-core 异步模型（docs/02 §3.4）。
+// L1: seastar 驱动 —— shard-per-core 异步模型（docs/http-adapter.md §3.4）。
 //
 // 与其他驱动的关键差异：seastar reactor 每进程只能启动一次，因此引擎是进程级
 // 单例（首次 listen() 拉起，atexit 收尾），每个 SeastarServer 实例只管理自己的
@@ -270,7 +270,7 @@ struct SeaConn {
 };
 
 // body 读取状态归属会话协程帧（handler 内的 reader 销毁后，连接仍需 drain）。
-// 契约（docs/02 §4）：正常 EOF 返回 0；客户端断连/坏 chunked 以异常传播。
+// 契约（docs/http-adapter.md §4）：正常 EOF 返回 0；客户端断连/坏 chunked 以异常传播。
 struct BodyState {
     SeaConn* conn = nullptr;
     unsigned shard = 0;
@@ -289,7 +289,7 @@ struct BodyState {
     Task<size_t> read_some(std::byte* dst, size_t want) {
         co_await ResumeOnShard{shard};  // 消费方可能在池线程 resume
         if (error) fail("read after connection error");
-        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/02 §3.1）
+        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/http-adapter.md §3.1）
         if (need_continue) {
             need_continue = false;
             try {
@@ -428,7 +428,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
         co_return false;  // 对端断连等写失败：关连接
     }
 
-    // 流式响应：64KiB 块拉取（docs/01 请求生命周期）
+    // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
     std::vector<std::byte> buf(64 * 1024);
     for (;;) {
         size_t n = 0;

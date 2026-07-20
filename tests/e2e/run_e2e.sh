@@ -4,8 +4,8 @@ set -u
 
 BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
-# localfs | xlocalfs | tiered（localfs+memory，docs/08）
-# | cloudproxy | tiered-cloudproxy（双实例：实例 B 充当"云端"，docs/09 §10）
+# localfs | xlocalfs | tiered（localfs+memory，docs/tiered-storage.md）
+# | cloudproxy | tiered-cloudproxy（双实例：实例 B 充当"云端"，docs/cloudproxy-backend.md §10）
 BACKEND="${3:-localfs}"
 AK=E2EACCESSKEY
 SK=e2e-secret-key
@@ -220,7 +220,7 @@ check "CopyObject" "0" \
        | grep -q 'CopyObjectResult'; echo $?)"
 check "Copy 内容一致" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
 
-# Multipart：两个 3MiB 分片（docs/05 §8 真实流程）
+# Multipart：两个 3MiB 分片（docs/s3-protocol.md §8 真实流程）
 dd if=/dev/urandom of="$WORK/p1" bs=1M count=3 2>/dev/null
 dd if=/dev/urandom of="$WORK/p2" bs=1M count=3 2>/dev/null
 INIT=$(s3curl -X POST "$BASE/mybucket/mpu.bin?uploads")
@@ -267,7 +267,7 @@ s3curl -o /dev/null -X DELETE "$BASE/mybucket/dir/small.txt"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/top.txt"
 check "DeleteBucket" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/mybucket")"
 
-# ---------- 动态凭证管理（docs/06）----------
+# ---------- 动态凭证管理（docs/credential-management.md）----------
 json_field() {  # json_field <key> —— 从 stdin 的缩进 JSON 里提取字符串字段
     sed -n "s/.*\"$1\": \"\([^\"]*\)\".*/\1/p" | head -1
 }
@@ -318,7 +318,7 @@ check "SIGTERM 优雅退出" "0" "$EXITED"
 wait "$SRV_PID" 2>/dev/null
 SRV_PID=""
 
-# ---------- 重启：动态凭证持久化验证（docs/06 §8）----------
+# ---------- 重启：动态凭证持久化验证（docs/credential-management.md §8）----------
 "$BIN" --config "$WORK/config.yaml" > "$WORK/server2.log" 2>&1 &
 SRV_PID=$!
 PORT=""

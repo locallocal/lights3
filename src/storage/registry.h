@@ -1,4 +1,4 @@
-// L3: 后端类型注册表：type 字符串 → 工厂（docs/04 §5 扩展指南）
+// L3: 后端类型注册表：type 字符串 → 工厂（docs/storage-backend.md §5 扩展指南）
 #pragma once
 
 #include <functional>

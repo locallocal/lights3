@@ -1,7 +1,7 @@
-// L1: Boost.Beast 驱动 —— 异步模型（docs/02 §3.1）。
+// L1: Boost.Beast 驱动 —— 异步模型（docs/http-adapter.md §3.1）。
 // N 个线程共跑一个 io_context；每连接一个会话协程（每连接一个 strand）。
 // 会话协程直接使用项目自己的 Task<void>：asio 异步操作经 awaiter 适配挂起/恢复，
-// 与 docs/03 §4.1 的衔接点语义一致（handler 的续体回到连接 strand 上运行），
+// 与 docs/concurrency.md §4.1 的衔接点语义一致（handler 的续体回到连接 strand 上运行），
 // 只是无需在 asio::awaitable 与 Task 两套协程类型之间转换。
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -138,7 +138,7 @@ public:
     Task<size_t> read(std::span<std::byte> buf) override {
         co_await ResumeOn{ctx_->stream->get_executor()};
         if (ctx_->errored) throw std::runtime_error("http body: read after connection error");
-        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/02 §3.1）
+        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/http-adapter.md §3.1）
         if (ctx_->need_100) {
             ctx_->need_100 = false;
             bhttp::response<bhttp::empty_body> cont{bhttp::status::continue_, 11};
@@ -379,7 +379,7 @@ private:
             co_return !ec;
         }
 
-        // 流式响应：serializer + buffer_body，64KiB 块拉取（docs/01 请求生命周期）
+        // 流式响应：serializer + buffer_body，64KiB 块拉取（docs/architecture.md 请求生命周期）
         bhttp::response<bhttp::buffer_body> res;
         res.result(static_cast<unsigned>(resp.status));
         res.version(11);

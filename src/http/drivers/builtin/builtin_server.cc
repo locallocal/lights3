@@ -1,5 +1,5 @@
 // L1: builtin 驱动 —— 零依赖 POSIX socket HTTP/1.1，thread-per-connection 同步模型。
-// 演示插拔层的同步驱动接入方式（协程经 sync_wait 桥接，见 docs/02 §3.2、docs/03 §4.2）。
+// 演示插拔层的同步驱动接入方式（协程经 sync_wait 桥接，见 docs/http-adapter.md §3.2、docs/concurrency.md §4.2）。
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -73,7 +73,7 @@ struct ConnReader {
 };
 
 // body 读取状态归属连接（handler 内的 reader 销毁后，连接仍需 drain 残余字节）
-// 契约（docs/02 §4）：正常 EOF 返回 0；客户端断连/坏 chunked 以异常传播。
+// 契约（docs/http-adapter.md §4）：正常 EOF 返回 0；客户端断连/坏 chunked 以异常传播。
 struct BodyState {
     ConnReader* conn = nullptr;
     int fd = -1;
@@ -91,7 +91,7 @@ struct BodyState {
 
     size_t read_some(std::byte* dst, size_t want) {
         if (error) fail("read after connection error");
-        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/02 §3.1），
+        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/http-adapter.md §3.1），
         // 认证失败等场景可以在不接收 body 的情况下直接拒绝
         if (need_continue) {
             need_continue = false;
@@ -369,7 +369,7 @@ bool BuiltinServer::write_response(int fd, HttpResponse& resp, bool head_request
 
     if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());
 
-    // 流式响应：64KiB 块拉取（docs/01 请求生命周期）
+    // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
     std::byte buf[64 * 1024];
     for (;;) {
         size_t n = 0;

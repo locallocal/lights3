@@ -4,7 +4,7 @@ An S3-protocol gateway written in C++20. It exposes the standard S3 REST API on
 the outside, with pluggable HTTP drivers and storage backends on the inside.
 Design documents live in [docs/](docs/README.md) (in Chinese); the current
 implementation follows the architecture described in
-[docs/01-architecture.md](docs/01-architecture.md).
+[docs/architecture.md](docs/architecture.md).
 
 *中文介绍见 [docs/README.zh-CN.md](docs/README.zh-CN.md)。*
 
@@ -111,7 +111,7 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
 - **HTTP drivers**: all four drivers are implemented, selected at runtime via
   `http.driver` and trimmed at compile time via CMake options; they share one
   driver-conformance test suite (the contract in
-  [docs/02-http-adapter.md](docs/02-http-adapter.md) §4):
+  [docs/http-adapter.md](docs/http-adapter.md) §4):
   - `builtin` — zero-dependency POSIX sockets, thread-per-connection;
   - `beast` — asynchronous Boost.Beast/Asio driver (the default performance
     path): N threads share one io_context, one per-connection session
@@ -129,7 +129,7 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
   streaming payload SHA256 verification and aws-chunked per-chunk signature
   chains, unit tests cover the official AWS test vectors; runtime credential
   management (generate/query/revoke AK/SK, persisted in storage) via
-  `/-/admin/credentials` ([docs/06](docs/06-credential-management.md))
+  `/-/admin/credentials` ([docs/credential-management.md](docs/credential-management.md))
 - **Storage**: LocalFs (sidecar metadata, atomic writes via staging+rename),
   XLocalFs (io_uring data plane using raw syscalls, no liburing required),
   Memory (for tests); bucket-level glob routing
@@ -139,5 +139,5 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
   (create/upload/list/complete/abort)
 
 Not implemented yet (returns NotImplemented; see
-[docs/05-s3-protocol.md](docs/05-s3-protocol.md) for the roadmap): the
+[docs/s3-protocol.md](docs/s3-protocol.md) for the roadmap): the
 cloudproxy backend, versioning, ACL/policy, lifecycle, SSE, and Object Lock.

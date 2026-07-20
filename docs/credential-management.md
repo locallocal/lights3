@@ -1,6 +1,6 @@
-# 06 凭证管理：AK/SK 的生成、查询与持久化（方案）
+# 凭证管理：AK/SK 的生成、查询与持久化（方案）
 
-> 状态：已实现（一期，见 §9）。承接 docs/05 §3.5 预留的 `ICredentialProvider` 扩展点。
+> 状态：已实现（一期，见 §9）。承接 docs/s3-protocol.md §3.5 预留的 `ICredentialProvider` 扩展点。
 > 代码：`src/s3/auth/credential_store.{h,cc}`、`src/s3/handlers/admin_credentials.cc`。
 
 ## 1. 目标与非目标
@@ -148,7 +148,7 @@ public:
 
 ### 5.2 `SigV4Authenticator` 改造
 
-把私有的 `std::map creds_` 换成 docs/05 §3.5 预留的接口：
+把私有的 `std::map creds_` 换成 docs/s3-protocol.md §3.5 预留的接口：
 
 ```cpp
 struct ICredentialProvider {
@@ -209,7 +209,7 @@ dispatch 中 `/-/admin/` 分支插在现有匿名 `/-/` 端点之后、S3 寻址
   自然完成（与 AWS 的最终一致行为相同）；
 - 多实例限制：多个网关实例共享同一后端时，实例间无失效/新增通知，
   各自的内存表只在启动时加载。本期明确不支持该拓扑（单进程假设，
-  docs/01 的部署模型），二期可选方案：定期增量 reload 或管理面广播。
+  docs/architecture.md 的部署模型），二期可选方案：定期增量 reload 或管理面广播。
 
 ## 8. 测试计划
 

@@ -1,4 +1,4 @@
-// L1: HTTP 服务器接口与驱动工厂（见 docs/02-http-adapter.md）
+// L1: HTTP 服务器接口与驱动工厂（见 docs/http-adapter.md）
 #pragma once
 
 #include <functional>

@@ -1,5 +1,5 @@
-// 后端一致性套件（docs/04 §5）：同一组用例参数化跑所有 IStorageBackend 实现。
-// 自 test_storage.cc 提取，test_cloudproxy.cc 复用（docs/09 §10）。
+// 后端一致性套件（docs/storage-backend.md §5）：同一组用例参数化跑所有 IStorageBackend 实现。
+// 自 test_storage.cc 提取，test_cloudproxy.cc 复用（docs/cloudproxy-backend.md §10）。
 #pragma once
 
 #include <string>
@@ -79,7 +79,7 @@ inline void run_backend_suite(IStorageBackend& b) {
                     S3ErrorCode::NoSuchBucket);
     CHECK_THROWS_S3(put(b, "suite-bkt", "../escape", "x"), S3ErrorCode::InvalidArgument);
     CHECK_THROWS_S3(put(b, "suite-bkt", "a/../b", "x"), S3ErrorCode::InvalidArgument);
-    // 单段超过文件名上限（255B）统一拒绝（docs/04 §3.1）
+    // 单段超过文件名上限（255B）统一拒绝（docs/storage-backend.md §3.1）
     CHECK_THROWS_S3(put(b, "suite-bkt", "a/" + std::string(300, 'x'), "x"),
                     S3ErrorCode::KeyTooLongError);
 
@@ -124,7 +124,7 @@ inline void run_backend_suite(IStorageBackend& b) {
     CHECK(!p3.is_truncated);
     CHECK(p1.objects[1].key < p2.objects[0].key);
 
-    // multipart：分片上传-拼接-总 ETag 规则（docs/04 §1/§3.2）
+    // multipart：分片上传-拼接-总 ETag 规则（docs/storage-backend.md §1/§3.2）
     ObjectMeta mmeta;
     mmeta.content_type = "application/x-mpu";
     mmeta.user_meta["origin"] = "suite";
@@ -163,7 +163,7 @@ inline void run_backend_suite(IStorageBackend& b) {
                                                    std::vector<PartInfo>{{1, r1.etag}})),
                     S3ErrorCode::NoSuchUpload);
 
-    // list_parts / list_multipart_uploads（docs/05 ListParts 支撑）
+    // list_parts / list_multipart_uploads（docs/s3-protocol.md ListParts 支撑）
     auto lparts = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid));
     CHECK_EQ(lparts.size(), size_t(2));
     CHECK_EQ(lparts[0].part_no, 1);

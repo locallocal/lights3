@@ -1,5 +1,5 @@
 // L4: 阻塞 IO 线程池；协程经 co_await pool.schedule() 切入池线程
-// （docs/03-concurrency.md §3：有界队列 + 背压、深度/等待时长指标、§5 取消）
+// （docs/concurrency.md §3：有界队列 + 背压、深度/等待时长指标、§5 取消）
 #pragma once
 
 #include <array>
@@ -67,7 +67,7 @@ public:
             if (slot->cancelled) throw OperationCancelled();
         }
     };
-    // token 取消时：仍在排队的任务被以 OperationCancelled 异常 resume（docs/03 §5）；
+    // token 取消时：仍在排队的任务被以 OperationCancelled 异常 resume（docs/concurrency.md §5）；
     // 已在池线程上执行的阻塞段不被抢占，等其自然返回后由调用方检查 token
     ScheduleAwaiter schedule(CancelToken token = {}) { return {*this, std::move(token), nullptr}; }
 

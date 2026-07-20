@@ -1,4 +1,4 @@
-// L2 纯逻辑测试：mock HttpRequest + memory 后端走完整 dispatch（docs/01 §2）
+// L2 纯逻辑测试：mock HttpRequest + memory 后端走完整 dispatch（docs/architecture.md §2）
 #include "core/util/crypto.h"
 #include "s3/service.h"
 #include "storage/memory/memory_backend.h"
@@ -141,7 +141,7 @@ TEST(service_delete_semantics) {
 TEST(service_not_implemented_apis) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
-    // 明确不支持的子资源（docs/05 §1）显式 501，不落入 List/Get 兜底
+    // 明确不支持的子资源（docs/s3-protocol.md §1）显式 501，不落入 List/Get 兜底
     for (auto* sub : {"acl", "policy", "versioning", "lifecycle", "tagging"}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{sub, ""}})));
         CHECK_EQ(resp.status, 501);
@@ -182,7 +182,7 @@ TEST(service_with_auth) {
     CHECK_EQ(hz.status, 200);
 }
 
-// ---------- docs/05 新增覆盖 ----------
+// ---------- docs/s3-protocol.md 新增覆盖 ----------
 
 namespace {
 // 从响应 XML 中抽取首个 <tag>…</tag> 文本（测试用，够浅结构使用）
@@ -331,7 +331,7 @@ TEST(service_conditional_requests) {
     ius.headers.add("If-Unmodified-Since", "Mon, 01 Jan 2001 00:00:00 GMT");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(ius))).status, 412);
 
-    // PUT If-None-Match:* 防覆盖（docs/05 §6）
+    // PUT If-None-Match:* 防覆盖（docs/s3-protocol.md §6）
     auto pin = make_req("PUT", "/bkt/c.txt", "v2");
     pin.headers.add("If-None-Match", "*");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(pin))).status, 412);

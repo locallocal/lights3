@@ -1,4 +1,4 @@
-// cloudproxy 单测（docs/09 §10）：in-process 双栈自举，不 mock httplib——
+// cloudproxy 单测（docs/cloudproxy-backend.md §10）：in-process 双栈自举，不 mock httplib——
 // 测试内起 lights3 自己的 HTTP server + S3Service + MemoryBackend 当"远端"，
 // CloudProxyBackend 指向它跑一致性套件；同时覆盖自签 sign() 与本地 verify()
 // 的互操作。专项用例用裸 handler server 构造错误映射/重试/取消/校验路径。
@@ -120,7 +120,7 @@ TEST(cloudproxy_backend_suite) {
     run_backend_suite(b);
 }
 
-// bucket_prefix 映射与 list_buckets 过滤（docs/09 §4.2/§4.3）
+// bucket_prefix 映射与 list_buckets 过滤（docs/cloudproxy-backend.md §4.2/§4.3）
 TEST(cloudproxy_bucket_prefix_mapping) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -141,7 +141,7 @@ TEST(cloudproxy_bucket_prefix_mapping) {
     sync_wait(b.delete_bucket("mapped"));
 }
 
-// 错误映射矩阵（docs/09 §5.1）
+// 错误映射矩阵（docs/cloudproxy-backend.md §5.1）
 TEST(cloudproxy_error_mapping) {
     using s3::S3ErrorCode;
     std::atomic<int> mode{0};
@@ -180,7 +180,7 @@ TEST(cloudproxy_error_mapping) {
                     S3ErrorCode::InvalidPart);
 }
 
-// bucket_exists 的 HEAD 403 例外：视为存在（docs/09 §4.3）
+// bucket_exists 的 HEAD 403 例外：视为存在（docs/cloudproxy-backend.md §4.3）
 TEST(cloudproxy_head_bucket_403_means_exists) {
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
         co_return xml_error(403, "AccessDenied");
@@ -190,7 +190,7 @@ TEST(cloudproxy_head_bucket_403_means_exists) {
     CHECK(sync_wait(b.bucket_exists("bkt")));
 }
 
-// 幂等请求对 5xx 的指数退避重试（docs/09 §5.2）
+// 幂等请求对 5xx 的指数退避重试（docs/cloudproxy-backend.md §5.2）
 TEST(cloudproxy_retry_on_5xx) {
     std::atomic<int> hits{0};
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
@@ -212,7 +212,7 @@ TEST(cloudproxy_retry_on_5xx) {
     CHECK_THROWS_S3(sync_wait(b2.head_object("bkt", "k")), s3::S3ErrorCode::SlowDown);
 }
 
-// 远端不可达：重试耗尽后 InternalError 而非挂死（docs/09 §9.6）
+// 远端不可达：重试耗尽后 InternalError 而非挂死（docs/cloudproxy-backend.md §9.6）
 TEST(cloudproxy_unreachable_endpoint) {
     auto pool = std::make_shared<ThreadPool>(2);
     // 端口 1：几乎必然连接拒绝
@@ -222,7 +222,7 @@ TEST(cloudproxy_unreachable_endpoint) {
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), s3::S3ErrorCode::InternalError);
 }
 
-// GET 中途取消：reader 提前析构 → 远端流被中止，连接不腐化（docs/09 §3.1）
+// GET 中途取消：reader 提前析构 → 远端流被中止，连接不腐化（docs/cloudproxy-backend.md §3.1）
 TEST(cloudproxy_get_cancel_mid_stream) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -249,7 +249,7 @@ TEST(cloudproxy_get_cancel_mid_stream) {
     sync_wait(b.delete_bucket("big"));
 }
 
-// ETag 端到端校验：远端回错误 ETag → InternalError（docs/09 §6）
+// ETag 端到端校验：远端回错误 ETag → InternalError（docs/cloudproxy-backend.md §6）
 TEST(cloudproxy_etag_verify_failure) {
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         if (req.body) {
@@ -275,7 +275,7 @@ TEST(cloudproxy_etag_verify_failure) {
     CHECK_EQ(r.etag, "00000000000000000000000000000000");
 }
 
-// S3 特有的"200 OK 但 body 是 <Error>"（docs/09 §4.4 complete 的著名坑）
+// S3 特有的"200 OK 但 body 是 <Error>"（docs/cloudproxy-backend.md §4.4 complete 的著名坑）
 TEST(cloudproxy_complete_200_with_error_body) {
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         if (req.body) {
@@ -291,7 +291,7 @@ TEST(cloudproxy_complete_200_with_error_body) {
                     s3::S3ErrorCode::InvalidPart);
 }
 
-// Range 三形态透传 + 远端忽略 Range 回 200 的降级（docs/09 §3.3）
+// Range 三形态透传 + 远端忽略 Range 回 200 的降级（docs/cloudproxy-backend.md §3.3）
 TEST(cloudproxy_range_forms) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -320,7 +320,7 @@ TEST(cloudproxy_range_forms) {
     CHECK_EQ(read_all(*r2.body), "0123456789");
 }
 
-// 分页边界：组尾 token 不得吞掉与"前缀上界"同名的字面 key（docs/09 §4.2）
+// 分页边界：组尾 token 不得吞掉与"前缀上界"同名的字面 key（docs/cloudproxy-backend.md §4.2）
 TEST(cloudproxy_list_pagination_boundary_key) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -347,7 +347,7 @@ TEST(cloudproxy_list_pagination_boundary_key) {
     CHECK_EQ(keys[0], "a0");
 }
 
-// 不合契约的远端响应必须报错，不得静默截断（docs/09 §3.3 / backend.h size 契约）
+// 不合契约的远端响应必须报错，不得静默截断（docs/cloudproxy-backend.md §3.3 / backend.h size 契约）
 TEST(cloudproxy_rejects_nonconforming_remote_responses) {
     std::atomic<int> mode{0};
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
@@ -372,7 +372,7 @@ TEST(cloudproxy_rejects_nonconforming_remote_responses) {
                     s3::S3ErrorCode::InternalError);
 }
 
-// 配置加载期校验：前缀位置规则 / 数值范围 / queue_cap 解析（docs/09 §4.3/§7）
+// 配置加载期校验：前缀位置规则 / 数值范围 / queue_cap 解析（docs/cloudproxy-backend.md §4.3/§7）
 TEST(cloudproxy_config_load_validation) {
     auto expect_reject = [](std::map<std::string, std::string> params) {
         params.emplace("endpoint", "http://127.0.0.1:1");
@@ -398,7 +398,7 @@ TEST(cloudproxy_config_load_validation) {
     CHECK_EQ(ok.queue_cap_bytes, size_t(64 * 1024));
 }
 
-// 无长度 body（真 chunked）首期拒绝为 NotImplemented（docs/09 §3.2）
+// 无长度 body（真 chunked）首期拒绝为 NotImplemented（docs/cloudproxy-backend.md §3.2）
 TEST(cloudproxy_chunked_upload_not_implemented) {
     struct NoLenReader final : http::BodyReader {
         Task<size_t> read(std::span<std::byte>) override { co_return 0; }

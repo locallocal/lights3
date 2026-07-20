@@ -33,7 +33,7 @@ struct HttpConfig {
     int io_threads = 4;
     size_t max_header_size = 16 * 1024;
     int idle_timeout_sec = 60;
-    std::string base_domain;  // 非空时启用 virtual-host style（docs/05 §2）
+    std::string base_domain;  // 非空时启用 virtual-host style（docs/s3-protocol.md §2）
 };
 
 struct RuntimeConfig {

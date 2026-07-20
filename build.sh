@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 usage() {
     cat <<'EOF'
 用法: ./build.sh [选项]
-  --seastar     开启 seastar 驱动（重依赖，默认关；见 docs/02 §3.3）。
+  --seastar     开启 seastar 驱动（重依赖，默认关；见 docs/http-adapter.md §3.3）。
                 该开关写入 CMake 缓存后是粘性的，要关掉请配合 --clean
   --debug       Debug 构建（默认 RelWithDebInfo）
   --asan        AddressSanitizer 构建；构建目录默认改用 build-asan，

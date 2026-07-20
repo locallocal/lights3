@@ -1,4 +1,4 @@
-// 后端一致性套件（docs/storage-backend.md §5）：同一组用例参数化跑所有 IStorageBackend 实现。
+// 后端一致性套件（docs/storage-backend.md §6）：同一组用例参数化跑所有 IStorageBackend 实现。
 // 自 test_storage.cc 提取，test_cloudproxy.cc 复用（docs/cloudproxy-backend.md §10）。
 #pragma once
 

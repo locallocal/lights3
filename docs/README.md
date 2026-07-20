@@ -24,6 +24,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
 | [tiered-storage.md](tiered-storage.md) | 分层存储（设计稿）：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |
 | [cloudproxy-backend.md](cloudproxy-backend.md) | CloudProxy 后端：自签 SigV4 + httplib 直连远端 S3、双向流式泵、错误映射与重试 |
+| [duostore-backend.md](duostore-backend.md) | DuoStore 后端（设计稿）：元数据/数据分离引擎，RocksDB 元数据 + chunk 切片/pack 聚合/GC |
 
 ## 一页纸架构图
 

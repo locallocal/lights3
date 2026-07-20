@@ -1,4 +1,4 @@
-// 后端一致性套件：同一组用例参数化跑 memory / localfs / xlocalfs（docs/storage-backend.md §5）；
+// 后端一致性套件：同一组用例参数化跑 memory / localfs / xlocalfs（docs/storage-backend.md §6）；
 // 套件本体在 unit/backend_suite.h（cloudproxy 测试同用，docs/cloudproxy-backend.md §10）
 #include <filesystem>
 

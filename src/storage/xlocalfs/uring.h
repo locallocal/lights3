@@ -1,4 +1,4 @@
-// L3: 原生 syscall 的最小 io_uring 封装（不依赖 liburing，docs/01 §6 依赖策略）。
+// L3: 原生 syscall 的最小 io_uring 封装（不依赖 liburing，docs/architecture.md §6 依赖策略）。
 // 单 ring：提交侧互斥锁串行化 SQE 填充与 io_uring_enter；独立收割线程等待 CQE，
 // 完成后把协程续体投递到线程池恢复（后续的同步落盘调用因此天然在池线程执行）。
 #pragma once

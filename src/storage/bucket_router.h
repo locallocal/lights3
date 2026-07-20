@@ -1,4 +1,4 @@
-// L3: bucket → 后端路由（glob 规则，声明序匹配，见 docs/04 §2）
+// L3: bucket → 后端路由（glob 规则，声明序匹配，见 docs/storage-backend.md §2）
 #pragma once
 
 #include <map>
@@ -20,7 +20,7 @@ public:
     const std::map<std::string, std::shared_ptr<IStorageBackend>>& backends() const {
         return backends_;
     }
-    // 内部数据（如凭证持久化，docs/06 §4.1）固定落在默认后端
+    // 内部数据（如凭证持久化，docs/credential-management.md §4.1）固定落在默认后端
     std::shared_ptr<IStorageBackend> default_backend() const { return default_; }
 
 private:

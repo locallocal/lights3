@@ -1,5 +1,5 @@
-// S3 错误码单一事实来源：code → (HTTP status, wire code)（docs/05 §5）
-// L3 存储层也抛 S3Error（约定见 docs/04 §1），因此本头文件不含 HTTP 模型依赖。
+// S3 错误码单一事实来源：code → (HTTP status, wire code)（docs/s3-protocol.md §5）
+// L3 存储层也抛 S3Error（约定见 docs/storage-backend.md §1），因此本头文件不含 HTTP 模型依赖。
 #pragma once
 
 #include <exception>
@@ -56,7 +56,7 @@ struct S3Error : std::exception {
 
 int http_status(S3ErrorCode code);
 const char* wire_code(S3ErrorCode code);
-// wire code → enum 反查（cloudproxy 透传远端错误用，docs/09 §5.1）；未知返回 nullopt
+// wire code → enum 反查（cloudproxy 透传远端错误用，docs/cloudproxy-backend.md §5.1）；未知返回 nullopt
 std::optional<S3ErrorCode> code_from_wire(std::string_view wire);
 
 // 标准 S3 错误响应 XML

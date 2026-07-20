@@ -172,7 +172,7 @@ util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::
     return util::hmac_sha256(k, "aws4_request");
 }
 
-// aws-chunked 剥壳装饰器（docs/05 §3.2）：
+// aws-chunked 剥壳装饰器（docs/s3-protocol.md §3.2）：
 // 逐 chunk 解析 "<hex-size>[;chunk-signature=<sig>]\r\n<data>\r\n"，向下游只暴露纯数据。
 // signed 模式验证签名链：sig_n = HMAC(key, "AWS4-HMAC-SHA256-PAYLOAD" \n amz_date \n scope
 //                                   \n sig_{n-1} \n sha256("") \n sha256(chunk_data))；
@@ -418,7 +418,7 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
     auto t = util::parse_amz_date(f.amz_date);
     if (!t) malformed("cannot parse x-amz-date");
     if (f.presigned) {
-        // presigned 按 X-Amz-Expires 判有效期（docs/05 §3.4），不做 15min 偏移检查
+        // presigned 按 X-Amz-Expires 判有效期（docs/s3-protocol.md §3.4），不做 15min 偏移检查
         auto exp = req.query_get("X-Amz-Expires");
         if (!exp) malformed("missing X-Amz-Expires");
         long expires = 0;
@@ -475,7 +475,7 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
                       "The request signature we calculated does not match the signature you "
                       "provided.");
 
-    // 流式 payload 校验（docs/05 §3.2/§3.3）
+    // 流式 payload 校验（docs/s3-protocol.md §3.2/§3.3）
     if ((chunked_signed || chunked_unsigned) && req.body) {
         std::optional<uint64_t> decoded_len;
         if (auto dl = req.headers.get("x-amz-decoded-content-length")) {

@@ -1,4 +1,4 @@
-// L4: 协程版异步信号量（docs/03-concurrency.md §6）
+// L4: 协程版异步信号量（docs/concurrency.md §6）
 // dispatch 入口的 max_inflight_requests 限流、multipart 分片并发控制。
 // 超限的 acquire() 挂起排队（FIFO）而非拒绝。
 #pragma once

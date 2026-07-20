@@ -1,4 +1,4 @@
-// L1/L3 共享：推模型 ↔ 拉模型的翻转组件（docs/09 §3.1，自 httplib 驱动提取）。
+// L1/L3 共享：推模型 ↔ 拉模型的翻转组件（docs/cloudproxy-backend.md §3.1，自 httplib 驱动提取）。
 // BlockQueue：按字节限容的有界缓冲，单生产者/单消费者；容量即背压。
 // 生产者 push 返回 false 表示消费方已 cancel；消费者 pop 返回 0 表示 EOF，
 // close(ok=false) 后的 pop 以异常传播（对应"对端中途失败"契约）。

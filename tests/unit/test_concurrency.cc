@@ -1,4 +1,4 @@
-// docs/03 并发原语：when_all / with_timeout / 取消 / home executor / 背压与指标 / 信号量
+// docs/concurrency.md 并发原语：when_all / with_timeout / 取消 / home executor / 背压与指标 / 信号量
 #include <atomic>
 #include <chrono>
 #include <future>
@@ -201,7 +201,7 @@ TEST(with_timeout_cancels_cooperatively) {
     CHECK(std::chrono::steady_clock::now() - begin < 2s);  // 远早于 1000*5ms
 }
 
-// ---------- home executor 切回（docs/03 §3）----------
+// ---------- home executor 切回（docs/concurrency.md §3）----------
 
 TEST(continuation_posted_back_to_home_executor) {
     ThreadPool home(1);
@@ -246,7 +246,7 @@ TEST(inline_executor_resumes_in_place) {
     CHECK(sync_wait(std::move(task)) != std::this_thread::get_id());
 }
 
-// ---------- 背压与指标（docs/03 §3）----------
+// ---------- 背压与指标（docs/concurrency.md §3）----------
 
 TEST(bounded_queue_backpressure) {
     ThreadPool pool(1, /*queue_capacity=*/1);
@@ -283,7 +283,7 @@ TEST(bounded_queue_backpressure) {
     CHECK_EQ(hist_total, uint64_t(4));   // 每个出队任务都记了等待时长
 }
 
-// ---------- AsyncSemaphore（docs/03 §6）----------
+// ---------- AsyncSemaphore（docs/concurrency.md §6）----------
 
 TEST(semaphore_limits_concurrency) {
     ThreadPool pool(8);

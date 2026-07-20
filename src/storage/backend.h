@@ -1,4 +1,4 @@
-// L2/L3 边界：存储后端接口（见 docs/04-storage-backend.md）
+// L2/L3 边界：存储后端接口（见 docs/storage-backend.md）
 // 错误约定：后端抛 s3::S3Error，不感知 HTTP。
 #pragma once
 
@@ -103,7 +103,7 @@ struct IStorageBackend {
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;
 
-    // ---- multipart（docs/04 §1/§3.2）----
+    // ---- multipart（docs/storage-backend.md §1/§3.2）----
     // 返回 upload_id；meta 为期望的 content_type/user_meta，complete 时生效
     virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                                ObjectMeta meta) = 0;

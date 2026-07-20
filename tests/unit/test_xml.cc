@@ -1,4 +1,4 @@
-// XML 解析器（docs/05 §4：浅结构请求 XML）
+// XML 解析器（docs/s3-protocol.md §4：浅结构请求 XML）
 #include "s3/errors.h"
 #include "s3/xml.h"
 #include "unit/mini_test.h"

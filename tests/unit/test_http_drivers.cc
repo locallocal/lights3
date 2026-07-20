@@ -1,4 +1,4 @@
-// 驱动一致性测试（docs/02 §4）：所有已编译 driver 跑同一组契约用例。
+// 驱动一致性测试（docs/http-adapter.md §4）：所有已编译 driver 跑同一组契约用例。
 // 用裸 TCP 客户端直接说 HTTP/1.1，验证驱动行为而非 L2 语义。
 #include <arpa/inet.h>
 #include <netinet/in.h>

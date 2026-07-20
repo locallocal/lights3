@@ -1,5 +1,5 @@
 // L3: localfs 系后端共用的落盘原语（tmp 文件、TSV sidecar/manifest、原子提交）。
-// localfs 与 xlocalfs 共享同一磁盘布局（docs/04 §3.1/§3.2），差异仅在数据面 IO 方式。
+// localfs 与 xlocalfs 共享同一磁盘布局（docs/storage-backend.md §3.1/§3.2），差异仅在数据面 IO 方式。
 #pragma once
 
 #include <filesystem>
@@ -37,12 +37,12 @@ void write_tsv(const std::filesystem::path& dest, const std::filesystem::path& t
                const std::vector<std::pair<std::string, std::string>>& kv);
 std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem::path& path);
 
-// 建父目录 + 目录冲突检查 + 先 sidecar 后数据 rename（docs/04 §3.1 写入原子性）；
+// 建父目录 + 目录冲突检查 + 先 sidecar 后数据 rename（docs/storage-backend.md §3.1 写入原子性）；
 // PUT 与 complete_multipart 共用
 void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                         const std::filesystem::path& staging_put, std::string_view key);
 
-// ---- 分层存储的 sidecar 扩展（docs/08 §4）----
+// ---- 分层存储的 sidecar 扩展（docs/tiered-storage.md §4）----
 
 enum class Tier { kLocal, kRemote, kCached };
 
@@ -53,7 +53,7 @@ struct TierInfo {
 };
 
 // stat 数据文件 + 读 sidecar；tier != local 时 size 以 sidecar 为准
-//（stub 数据文件为 0 长度，docs/08 §4.1）。缺失/非普通文件抛 NoSuchKey。
+//（stub 数据文件为 0 长度，docs/tiered-storage.md §4.1）。缺失/非普通文件抛 NoSuchKey。
 ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key,
                             TierInfo* tier_out = nullptr);
 
@@ -65,12 +65,12 @@ struct StubRace : s3::S3Error {
         : S3Error(s3::S3ErrorCode::InternalError, "object is a tier stub", std::move(key)) {}
 };
 
-// stub 化提交（docs/08 §5.2 步骤 b/c）：先写 tier=remote 的 sidecar，
+// stub 化提交（docs/tiered-storage.md §5.2 步骤 b/c）：先写 tier=remote 的 sidecar，
 // 再用 0 长度 tmp rename 盖过数据文件。幂等；调用方须持 per-key 锁。
 void commit_stub(const std::filesystem::path& dest, const ObjectMeta& meta, const TierInfo& tier,
                  const std::filesystem::path& staging_put);
 
-// 缓存回填提交（docs/08 §6.2）：先 rename 数据 tmp、再写 tier=cached 的 sidecar
+// 缓存回填提交（docs/tiered-storage.md §6.2）：先 rename 数据 tmp、再写 tier=cached 的 sidecar
 //（中间崩溃时 sidecar 仍为 remote，读走云端不受影响）。
 // dest 此前必为 stub（父目录已存在），不再做目录冲突检查。
 void commit_cached(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
@@ -97,7 +97,7 @@ private:
     std::shared_ptr<ThreadPool> pool_;
 };
 
-// ---- multipart 布局（docs/04 §3.2）：<staging>/mpu/<id>/{manifest, part.NNNNN, .md5} ----
+// ---- multipart 布局（docs/storage-backend.md §3.2）：<staging>/mpu/<id>/{manifest, part.NNNNN, .md5} ----
 
 std::string part_file_name(int part_no);
 

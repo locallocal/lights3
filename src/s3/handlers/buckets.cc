@@ -11,7 +11,7 @@ Task<http::HttpResponse> S3Service::list_buckets() {
     for (auto& [_, backend] : router_.backends()) {
         auto part = co_await backend->list_buckets();
         for (auto& b : part) {
-            if (!b.name.empty() && b.name.front() == '.') continue;  // 内部保留（docs/06 §4.1）
+            if (!b.name.empty() && b.name.front() == '.') continue;  // 内部保留（docs/credential-management.md §4.1）
             bool dup = false;
             for (auto& e : all)
                 if (e.name == b.name) dup = true;
@@ -64,7 +64,7 @@ Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket) {
     co_return resp;
 }
 
-// GetBucketLocation：回显配置 region（docs/05 §1：LocationConstraint 无 region 约束）
+// GetBucketLocation：回显配置 region（docs/s3-protocol.md §1：LocationConstraint 无 region 约束）
 Task<http::HttpResponse> S3Service::get_bucket_location(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
     if (!exists)

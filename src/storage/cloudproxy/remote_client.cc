@@ -82,11 +82,11 @@ CloudProxyConfig CloudProxyConfig::from_params(
     require_range("retry_base_ms", c.retry_base_ms, 1, 60'000);
     require_range("max_connections", c.max_connections, 1, 4096);
     require_range("queue_cap", static_cast<int64_t>(c.queue_cap_bytes), 4096, 1 << 30);
-    // virtual-hosted style 是低优先路径（docs/09 §7），当前未实现
+    // virtual-hosted style 是低优先路径（docs/cloudproxy-backend.md §7），当前未实现
     if (!c.force_path_style)
         throw std::runtime_error("cloudproxy backend '" + name +
                                  "': force_path_style=false is not implemented yet");
-    // 拼接名整体按 S3 规则校验（docs/09 §4.3）："aaa" 代表最短合法本地名，
+    // 拼接名整体按 S3 规则校验（docs/cloudproxy-backend.md §4.3）："aaa" 代表最短合法本地名，
     // 覆盖前缀引入的字符集/首字符/".."/长度问题，注定非法的前缀在加载期即报错
     if (!c.bucket_prefix.empty()) {
         try {
@@ -141,7 +141,7 @@ Endpoint Endpoint::parse(const std::string& url) {
     }
     if (ep.host.empty())
         throw std::runtime_error("cloudproxy endpoint has empty host: " + url);
-    // httplib 的 Host 头：默认端口只发 host，否则 host:port（docs/09 §2.2 一致性陷阱）
+    // httplib 的 Host 头：默认端口只发 host，否则 host:port（docs/cloudproxy-backend.md §2.2 一致性陷阱）
     bool default_port = ep.port == (ep.https ? 443 : 80);
     ep.signed_host = default_port ? ep.host : ep.host + ":" + std::to_string(ep.port);
     ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" +
@@ -221,7 +221,7 @@ httplib::Headers RemoteContext::signed_headers(
     return out;
 }
 
-// ---------- 错误映射（docs/09 §5.1）----------
+// ---------- 错误映射（docs/cloudproxy-backend.md §5.1）----------
 
 std::optional<S3ErrorCode> map_remote_code(std::string_view wire) {
     if (auto c = s3::code_from_wire(wire)) return c;

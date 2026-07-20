@@ -15,15 +15,15 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 
 | 文档 | 内容 |
 | --- | --- |
-| [01-architecture.md](01-architecture.md) | 总体架构、分层设计、请求生命周期、代码目录规划 |
-| [02-http-adapter.md](02-http-adapter.md) | HTTP 协议库插拔层：中立请求/响应模型、流式 Body、适配器实现要点 |
-| [03-concurrency.md](03-concurrency.md) | 并发模型：Task 协程、Executor 抽象、线程池、同步/异步 HTTP 库的统一 |
-| [04-storage-backend.md](04-storage-backend.md) | 存储后端抽象、LocalFs 后端、CloudProxy 后端、bucket 路由 |
-| [05-s3-protocol.md](05-s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证、Multipart Upload、错误码映射 |
-| [06-credential-management.md](06-credential-management.md) | 凭证管理：AK/SK 生成/查询 API、两级权限、`.sys` 存储持久化 |
-| [07-object-read-write-flow.md](07-object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
-| [08-tiered-storage.md](08-tiered-storage.md) | 分层存储（设计稿）：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |
-| [09-cloudproxy-backend.md](09-cloudproxy-backend.md) | CloudProxy 后端：自签 SigV4 + httplib 直连远端 S3、双向流式泵、错误映射与重试 |
+| [architecture.md](architecture.md) | 总体架构、分层设计、请求生命周期、代码目录规划 |
+| [http-adapter.md](http-adapter.md) | HTTP 协议库插拔层：中立请求/响应模型、流式 Body、适配器实现要点 |
+| [concurrency.md](concurrency.md) | 并发模型：Task 协程、Executor 抽象、线程池、同步/异步 HTTP 库的统一 |
+| [storage-backend.md](storage-backend.md) | 存储后端抽象、LocalFs 后端、CloudProxy 后端、bucket 路由 |
+| [s3-protocol.md](s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证、Multipart Upload、错误码映射 |
+| [credential-management.md](credential-management.md) | 凭证管理：AK/SK 生成/查询 API、两级权限、`.sys` 存储持久化 |
+| [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
+| [tiered-storage.md](tiered-storage.md) | 分层存储（设计稿）：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |
+| [cloudproxy-backend.md](cloudproxy-backend.md) | CloudProxy 后端：自签 SigV4 + httplib 直连远端 S3、双向流式泵、错误映射与重试 |
 
 ## 一页纸架构图
 

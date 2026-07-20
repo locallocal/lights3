@@ -71,7 +71,7 @@ void StorageRegistry::register_backend(const std::string& type, BackendFactory f
 std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool) {
     ensure_registered();
-    // 两阶段构建（docs/08 §2）：先构造全部叶子后端，再按依赖迭代构造组合后端
+    // 两阶段构建（docs/tiered-storage.md §2）：先构造全部叶子后端，再按依赖迭代构造组合后端
     std::map<std::string, std::shared_ptr<IStorageBackend>> out;
     std::vector<const BackendConfig*> deferred;
     {

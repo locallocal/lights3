@@ -1,9 +1,9 @@
-# 07 对象读写流程
+# 对象读写流程
 
 本文按"一个字节从 socket 到磁盘（写），再从磁盘回到 socket（读）"的视角，串联
 HTTP Adapter 层（L1）、S3 Protocol 层（L2）、Storage 层（L3）三层的实际代码路径。
-分层职责见 [01-architecture.md](01-architecture.md)，各层内部细节见
-[02](02-http-adapter.md)/[04](04-storage-backend.md)/[05](05-s3-protocol.md)。
+分层职责见 [architecture.md](architecture.md)，各层内部细节见
+[http-adapter.md](http-adapter.md)/[storage-backend.md](storage-backend.md)/[s3-protocol.md](s3-protocol.md)。
 
 贯穿全文的核心抽象只有一个：**`http::BodyReader` 流式拉接口**
 （`src/http/model.h`）。请求体和响应体在三层之间都以它传递，
@@ -25,9 +25,9 @@ S3Service::dispatch()                       src/s3/service.cc
   │ ④ SigV4 验签 auth_.verify(req)           src/s3/auth/sigv4.cc
   │    需要 payload 校验时把 req.body 再包一层（见 §2.1）
   │ ⑤ resolve_address()：virtual-host 或 path-style 解出 (bucket, key)
-  │    '.' 开头 bucket 为内部保留名，统一拒绝（docs/06 §4.1）
+  │    '.' 开头 bucket 为内部保留名，统一拒绝（docs/credential-management.md §4.1）
   ▼
-S3Service::route()                          显式分派表（docs/05 §2）
+S3Service::route()                          显式分派表（docs/s3-protocol.md §2）
   │ ⑥ 先拒绝不支持的子资源（?acl 等 → 501）
   │ ⑦ 按 (method, scope, query-flag) 匹配表项 → 具体 handler 协程
   ▼
@@ -40,7 +40,7 @@ IStorageBackend                             src/storage/backend.h
 ```
 
 整条链路是一个 `Task<HttpResponse>` 协程链；同步驱动（builtin/httplib）在
-驱动线程上 `sync_wait`，异步驱动挂到自己的事件循环（docs/03）。
+驱动线程上 `sync_wait`，异步驱动挂到自己的事件循环（docs/concurrency.md）。
 `dispatch()` 统一 catch：`S3Error` → 对应状态码 + 错误 XML，
 其他异常 → 500 `InternalError`；最后补 `x-amz-request-id`/`Server` 头并打一行访问日志。
 
@@ -77,7 +77,7 @@ IStorageBackend                             src/storage/backend.h
 `S3Service::put_object`（`objects.cc:117`）：
 
 1. `router_.resolve(bucket)` 选后端；
-2. 条件请求（docs/05 §6）：`If-None-Match: *` 先 `head_object` 探在，存在则 412
+2. 条件请求（docs/s3-protocol.md §6）：`If-None-Match: *` 先 `head_object` 探在，存在则 412
    （防覆盖创建）；`If-Match: <etag>` 比对当前 ETag（乐观并发），对象缺失时 404；
 3. `meta_from_headers()`（`handlers/common.h`）提取 `Content-Type` 与
    `x-amz-meta-*` 用户元数据；
@@ -112,7 +112,7 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
   看到"有数据无 meta"的窗口；旧对象被覆盖时 sidecar 先换新也只是 meta 短暂超前。
 - `TmpFile` 为 RAII：任何一步抛异常（含客户端断连使 `body.read` 抛错），
   析构时自动删除 staging 残留，`committed = true` 后才免删。
-- 客户端断连由驱动层 reader 以异常上抛（契约见 docs/02 §4），
+- 客户端断连由驱动层 reader 以异常上抛（契约见 docs/http-adapter.md §4），
   整个协程链回卷，不会产生半截对象——最终路径上的文件要么旧要么新。
 
 ### 2.4 变体
@@ -125,7 +125,7 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 - **CopyObject**（`objects.cc:152`）：服务端拼管道——源后端
   `get_object()` 得到流，直接作为目标后端 `put_object()` 的 body，
   跨后端复制同样零整体缓冲；`x-amz-copy-source-if-*` 先于复制校验。
-- **Multipart**（详见 docs/04 §3.2、docs/05 §4）：`upload_part` 与 PUT 完全同构
+- **Multipart**（详见 docs/storage-backend.md §3.2、docs/s3-protocol.md §4）：`upload_part` 与 PUT 完全同构
   （staging 流式写 + 分片 MD5，先写 `part.NNNNN.md5` 再 rename 数据文件，
   同号重传 last-write-wins）；`complete_multipart` 校验各分片 ETag 后按声明顺序
   拼接到新 tmp，总 ETag = `md5(各分片 md5 二进制拼接)-N`，最后走同一个

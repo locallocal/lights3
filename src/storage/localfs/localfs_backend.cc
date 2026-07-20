@@ -56,7 +56,7 @@ void LocalFsBackend::require_bucket(std::string_view bucket) const {
 }
 
 ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key) const {
-    // tier 感知（stub 的 size 以 sidecar 为准）在共享实现里处理（docs/08 §4.1）
+    // tier 感知（stub 的 size 以 sidecar 为准）在共享实现里处理（docs/tiered-storage.md §4.1）
     return fsutil::load_object_meta(data_path, std::move(key));
 }
 
@@ -182,7 +182,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         fsutil::TierInfo tier;
         out.meta = fsutil::load_object_meta(path, std::string(key), &tier);
         // open 与读 sidecar 之间被 stub 化：fd 指向 0 长度新 inode，无法兑现
-        // sidecar 宣称的 size——报给 tiered 改走云端（docs/08 §7.3 冲突矩阵）
+        // sidecar 宣称的 size——报给 tiered 改走云端（docs/tiered-storage.md §7.3 冲突矩阵）
         if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
             static_cast<uint64_t>(st.st_size) != out.meta.size)
             throw fsutil::StubRace(std::string(key));
@@ -251,7 +251,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     });
 }
 
-// ---------- multipart（docs/04 §3.2）----------
+// ---------- multipart（docs/storage-backend.md §3.2）----------
 // 布局：<staging>/mpu/<upload_id>/{manifest, part.NNNNN, part.NNNNN.md5}
 // 分片先 md5 后数据文件（与 sidecar-先-data-后 一致，数据文件出现即分片就绪）
 

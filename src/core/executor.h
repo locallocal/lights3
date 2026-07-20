@@ -1,4 +1,4 @@
-// L4: 协程续体的投递抽象（见 docs/03-concurrency.md §3）
+// L4: 协程续体的投递抽象（见 docs/concurrency.md §3）
 #pragma once
 
 #include <coroutine>

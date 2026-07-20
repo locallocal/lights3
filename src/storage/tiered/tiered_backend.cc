@@ -26,7 +26,7 @@ using fsutil::TierInfo;
 
 namespace {
 
-constexpr int64_t kAtimeSnapshotSec = 300;  // atime 快照周期（docs/08 §4.3）
+constexpr int64_t kAtimeSnapshotSec = 300;  // atime 快照周期（docs/tiered-storage.md §4.3）
 
 // 只读 sidecar 的 tier 字段（数据文件可有可无；PUT/DELETE 前查旧云副本用）
 TierInfo read_tier_only(const fs::path& data_path) {
@@ -40,7 +40,7 @@ TierInfo read_tier_only(const fs::path& data_path) {
     return t;
 }
 
-// 下沉上传用：FdStreamReader 之上叠加同步 MD5 与字节计数（docs/08 §5.2 ③ 校验）
+// 下沉上传用：FdStreamReader 之上叠加同步 MD5 与字节计数（docs/tiered-storage.md §5.2 ③ 校验）
 class HashingFdReader final : public http::BodyReader {
 public:
     HashingFdReader(int fd, uint64_t size, std::shared_ptr<ThreadPool> pool)
@@ -96,7 +96,7 @@ struct InflightRelease {
     ~InflightRelease() { owner->inflight_end(ikey); }
 };
 
-// Tee 透传 + 边下边缓存（docs/08 §6.2）：云端流照常返给客户端，同时写
+// Tee 透传 + 边下边缓存（docs/tiered-storage.md §6.2）：云端流照常返给客户端，同时写
 // staging tmp 并增量算 MD5；EOF 校验通过则提交为 cached。写盘失败静默降级
 // 纯透传；客户端断连时析构，TmpFile RAII 丢弃半截缓存。
 class TeeCacheReader final : public http::BodyReader {
@@ -231,7 +231,7 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
     auto local = std::dynamic_pointer_cast<LocalFsBackend>(built.at(local_name));
     if (!local)
         throw std::runtime_error("tiered backend '" + cfg.name + "': local '" + local_name +
-                                 "' must be a localfs/xlocalfs backend (docs/08 §2)");
+                                 "' must be a localfs/xlocalfs backend (docs/tiered-storage.md §2)");
     auto cloud = built.at(cloud_name);
     if (cloud.get() == local.get())
         throw std::runtime_error("tiered backend '" + cfg.name + "': local and cloud must differ");
@@ -296,7 +296,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
             }
         }
 
-        // remote：云端流透传（docs/08 §6.2/§6.3），对外 meta 恒为本地原始值
+        // remote：云端流透传（docs/tiered-storage.md §6.2/§6.3），对外 meta 恒为本地原始值
         ObjectStream cs = co_await cloud_->get_object(bucket, key, range);
         ObjectStream out;
         out.meta = m;
@@ -399,7 +399,7 @@ Task<std::vector<UploadInfo>> TieredBackend::list_multipart_uploads(std::string_
     co_return co_await local_->list_multipart_uploads(bucket);
 }
 
-// ---------- 下沉（docs/08 §5）----------
+// ---------- 下沉（docs/tiered-storage.md §5）----------
 
 Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
     auto permit = co_await transfers_.acquire();  // max_concurrent_transfers 限流
@@ -491,7 +491,7 @@ Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
     co_return;
 }
 
-// ---------- 回迁（Range GET 的后台整对象回迁 + 测试钩子，docs/08 §6.3）----------
+// ---------- 回迁（Range GET 的后台整对象回迁 + 测试钩子，docs/tiered-storage.md §6.3）----------
 
 Task<void> TieredBackend::promote_object(std::string bucket, std::string key) {
     auto permit = co_await transfers_.acquire();
@@ -565,7 +565,7 @@ Task<void> TieredBackend::commit_cache_fill(std::string bucket, std::string key,
     co_return;
 }
 
-// ---------- TierScanner（docs/08 §5.1）----------
+// ---------- TierScanner（docs/tiered-storage.md §5.1）----------
 
 Task<void> TieredBackend::scan_once() {
     co_await pool_->schedule();
@@ -669,7 +669,7 @@ Task<void> TieredBackend::promote_quiet(std::string bucket, std::string key) {
     }
 }
 
-// ---------- GC 队列（docs/08 §7.2）----------
+// ---------- GC 队列（docs/tiered-storage.md §7.2）----------
 
 void TieredBackend::enqueue_gc(std::string_view bucket, std::string_view key,
                                std::string_view remote_etag) {
@@ -735,7 +735,7 @@ Task<void> TieredBackend::run_gc_once() {
 
 Task<void> TieredBackend::ensure_cloud_bucket(std::string_view bucket) {
     // 不经 bucket_exists 判断：cloudproxy 按 AWS HeadBucket 语义把远端 403 视为
-    // "存在"（docs/09 §4.3），网关侧权限故障会让该判断撒谎、跳过建桶，下沉管线
+    // "存在"（docs/cloudproxy-backend.md §4.3），网关侧权限故障会让该判断撒谎、跳过建桶，下沉管线
     // 从此每轮静默失败。直接 create + 409 视为已存在，幂等且歧义可辨
     try {
         co_await cloud_->create_bucket(bucket);
@@ -770,7 +770,7 @@ bool TieredBackend::inflight_contains(const std::string& ikey) {
     return inflight_.count(ikey) > 0;
 }
 
-// ---------- TierIndex：atime 表（docs/08 §4.3）----------
+// ---------- TierIndex：atime 表（docs/tiered-storage.md §4.3）----------
 
 void TieredBackend::touch_atime(std::string_view bucket, std::string_view key) {
     std::lock_guard lk(atime_m_);

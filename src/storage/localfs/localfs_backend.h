@@ -1,4 +1,4 @@
-// L3: 本地文件系统后端（见 docs/04-storage-backend.md §3）
+// L3: 本地文件系统后端（见 docs/storage-backend.md §3）
 // 布局：<root>/<bucket>/<key路径>，sidecar 元数据 <data>.lights3-meta，
 // PUT 经 <staging>/put/<uuid> 写入后 rename 原子落地。
 #pragma once
@@ -32,7 +32,7 @@ public:
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
     // multipart：分片落 <staging>/mpu/<upload_id>/part.NNNNN，complete 拼接后
-    // 走与 PUT 相同的 rename 原子提交（docs/04 §3.2）
+    // 走与 PUT 相同的 rename 原子提交（docs/storage-backend.md §3.2）
     Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                        ObjectMeta meta) override;
     Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
@@ -51,7 +51,7 @@ public:
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
     static constexpr std::chrono::hours kMpuTtl{24 * 7};  // 孤儿上传清理阈值
 
-    // ---- 组合后端（tiered，docs/08 §2）需要的布局访问 ----
+    // ---- 组合后端（tiered，docs/tiered-storage.md §2）需要的布局访问 ----
     const std::filesystem::path& root() const { return root_; }
     const std::filesystem::path& staging() const { return staging_; }
     const std::shared_ptr<ThreadPool>& pool() const { return pool_; }

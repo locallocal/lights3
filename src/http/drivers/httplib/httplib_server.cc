@@ -1,4 +1,4 @@
-// L1: cpp-httplib 驱动 —— 同步模型，thread-per-request（docs/02 §3.2）。
+// L1: cpp-httplib 驱动 —— 同步模型，thread-per-request（docs/http-adapter.md §3.2）。
 // 请求线程 sync_wait(handler(req)) 阻塞至协程完成；home executor 为 inline。
 // httplib 的 ContentReader 是推模型，由 pump 线程经有界缓冲队列翻转成拉模型，
 // 队列容量即背压：存储写得慢，pump 就停在 push，socket 停止收数据。
@@ -20,7 +20,7 @@ namespace lights3::http {
 namespace {
 
 // 推转拉的 BlockQueue / QueueBodyReader 已提取为共享组件（http/pushpull.h，
-// cloudproxy 后端同用，docs/09 §3.1）
+// cloudproxy 后端同用，docs/cloudproxy-backend.md §3.1）
 
 // httplib 在 process_request 里塞进 headers 的连接信息伪头，不属于 HTTP 报文
 bool is_pseudo_header(const std::string& k) {

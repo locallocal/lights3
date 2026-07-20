@@ -1,4 +1,4 @@
-// L3: xlocalfs——localfs 的 io_uring 数据面变体（见 docs/04-storage-backend.md §3.3）。
+// L3: xlocalfs——localfs 的 io_uring 数据面变体（见 docs/storage-backend.md §3.3）。
 // 磁盘布局与元数据逻辑完全复用 LocalFsBackend；GET 流式读、PUT/分片流式写、
 // complete 拼接中的字节搬运改经 io_uring 异步执行，不再占用池线程等待磁盘。
 // 目录遍历与元数据操作仍走线程池（io_uring 无 getdents 等目录原语）。

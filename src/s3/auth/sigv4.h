@@ -1,4 +1,4 @@
-// L2: AWS Signature V4 认证（见 docs/05-s3-protocol.md §3）
+// L2: AWS Signature V4 认证（见 docs/s3-protocol.md §3）
 // 自实现验签 + 签名（签名端供单测与后续 cloudproxy 转发复用）。
 #pragma once
 
@@ -15,7 +15,7 @@
 
 namespace lights3::s3 {
 
-// 凭证查表接口（docs/05 §3.5、docs/06 §5.2）：验签热路径同步调用，实现须线程安全。
+// 凭证查表接口（docs/s3-protocol.md §3.5、docs/credential-management.md §5.2）：验签热路径同步调用，实现须线程安全。
 // build() 默认包一个静态表实现；CredentialStore 实现本接口后经 set_provider 注入
 struct ICredentialProvider {
     virtual ~ICredentialProvider() = default;
@@ -37,7 +37,7 @@ public:
     // 通过后如需 payload 校验，把 req.body 包装为流式校验 reader：
     //  - hex 摘要 → SHA256 校验（EOF 不匹配抛 XAmzContentSHA256Mismatch）
     //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] → aws-chunked 剥壳 +
-    //    逐 chunk 签名链验证（docs/05 §3.2）
+    //    逐 chunk 签名链验证（docs/s3-protocol.md §3.2）
     //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER → 仅剥壳
     std::string verify(http::HttpRequest& req) const;
 

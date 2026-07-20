@@ -1,4 +1,4 @@
-// object 级 handler：Put/Get/Head/Delete/Copy/DeleteObjects 与条件请求（docs/05 §1/§6）
+// object 级 handler：Put/Get/Head/Delete/Copy/DeleteObjects 与条件请求（docs/s3-protocol.md §1/§6）
 #include <charconv>
 
 #include "core/util/time.h"
@@ -54,7 +54,7 @@ int64_t to_epoch_sec(util::SysTime t) {
     return std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
 }
 
-// GET/HEAD 条件请求（docs/05 §6，优先级遵循 RFC 7232：
+// GET/HEAD 条件请求（docs/s3-protocol.md §6，优先级遵循 RFC 7232：
 // If-Match > If-Unmodified-Since；If-None-Match > If-Modified-Since）
 void check_read_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& meta,
                               bool& not_modified) {
@@ -118,7 +118,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
                                                std::string key) {
     auto& backend = router_.resolve(bucket);
 
-    // PUT 条件请求（docs/05 §6）：If-None-Match:* 防覆盖，If-Match 乐观并发
+    // PUT 条件请求（docs/s3-protocol.md §6）：If-None-Match:* 防覆盖，If-Match 乐观并发
     if (auto v = req.headers.get("If-None-Match")) {
         if (*v != "*")
             throw S3Error(S3ErrorCode::NotImplemented,

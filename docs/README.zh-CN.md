@@ -1,7 +1,7 @@
 # LightS3（中文介绍）
 
 基于 C++20 的 S3 协议网关。对外暴露 S3 REST API，对内可插拔 HTTP 驱动与存储后端。
-设计文档见[本目录索引](README.md)，当前实现对应 [01-architecture.md](01-architecture.md) 的架构。
+设计文档见[本目录索引](README.md)，当前实现对应 [architecture.md](architecture.md) 的架构。
 
 *English version: [../README.md](../README.md)*
 
@@ -43,7 +43,7 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
 - **架构**：四层（HTTP Adapter / S3 Protocol / Storage / Core），依赖单向；
   `IHttpServer` 与 `IStorageBackend` 两个插拔边界均已落地
 - **HTTP 驱动**：三个驱动全部落地，运行期由 `http.driver` 切换、编译期由
-  CMake 选项裁剪，并共享同一套驱动一致性测试（[02-http-adapter.md](02-http-adapter.md) §4 契约）：
+  CMake 选项裁剪，并共享同一套驱动一致性测试（[http-adapter.md](http-adapter.md) §4 契约）：
   - `builtin` —— 零依赖 POSIX socket，thread-per-connection；
   - `beast` —— Boost.Beast/Asio 异步驱动（默认性能路径）：N 线程共跑一个
     io_context，每连接一个 strand 上的会话协程，延迟 100-continue；
@@ -59,5 +59,5 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
 - **S3 API**：ListBuckets、Create/Head/DeleteBucket、Put/Get/Head/DeleteObject
   （含 Range 与条件请求）、ListObjectsV2（prefix/delimiter/分页）
 
-未实现（返回 NotImplemented，见 [05-s3-protocol.md](05-s3-protocol.md) 规划）：
+未实现（返回 NotImplemented，见 [s3-protocol.md](s3-protocol.md) 规划）：
 Multipart Upload、CopyObject、DeleteObjects 批量、cloudproxy 后端、aws-chunked 流式签名。

@@ -10,7 +10,7 @@ namespace lights3::s3 {
 
 std::string xml_escape(const std::string& s);
 
-// ---------- 解析（docs/05 §4：仅 CompleteMultipartUpload / DeleteObjects 等浅结构）----------
+// ---------- 解析（docs/s3-protocol.md §4：仅 CompleteMultipartUpload / DeleteObjects 等浅结构）----------
 // 支持：元素嵌套、文本、实体（lt gt amp quot apos #dd #xhh）、注释、XML 声明、CDATA。
 // 属性被跳过（S3 请求 XML 只有 xmlns）。格式错误或超过 max_size 抛 S3Error{MalformedXML}。
 

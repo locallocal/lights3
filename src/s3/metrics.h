@@ -1,4 +1,4 @@
-// L2: 请求指标（docs/05 §7），GET /-/metrics 以 Prometheus 文本格式输出
+// L2: 请求指标（docs/s3-protocol.md §7），GET /-/metrics 以 Prometheus 文本格式输出
 #pragma once
 
 #include <array>

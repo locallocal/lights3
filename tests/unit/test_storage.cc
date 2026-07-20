@@ -1,5 +1,5 @@
-// 后端一致性套件：同一组用例参数化跑 memory / localfs / xlocalfs（docs/04 §5）；
-// 套件本体在 unit/backend_suite.h（cloudproxy 测试同用，docs/09 §10）
+// 后端一致性套件：同一组用例参数化跑 memory / localfs / xlocalfs（docs/storage-backend.md §5）；
+// 套件本体在 unit/backend_suite.h（cloudproxy 测试同用，docs/cloudproxy-backend.md §10）
 #include <filesystem>
 
 #include "core/thread_pool.h"
@@ -55,7 +55,7 @@ TEST(xlocalfs_backend_suite) {
     sync_wait(b.close());
 }
 
-// tiered 对 L2 仍是普通后端（docs/08 §2）：全 local 态跑同一套一致性用例
+// tiered 对 L2 仍是普通后端（docs/tiered-storage.md §2）：全 local 态跑同一套一致性用例
 TEST(tiered_backend_suite) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -112,7 +112,7 @@ TEST(localfs_atomic_layout) {
     sync_wait(b.create_bucket("bkt"));
     put(b, "bkt", "x/y.bin", "payload");
 
-    // 磁盘布局符合 docs/04 §3.1：数据文件 + sidecar，staging 无残留
+    // 磁盘布局符合 docs/storage-backend.md §3.1：数据文件 + sidecar，staging 无残留
     CHECK(fs::exists(tmp.path / "data/bkt/x/y.bin"));
     CHECK(fs::exists(tmp.path / "data/bkt/x/y.bin.lights3-meta"));
     size_t staging_leftover = 0;
@@ -131,7 +131,7 @@ TEST(localfs_multipart_layout_and_cleanup) {
     LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
     sync_wait(b.create_bucket("bkt"));
 
-    // 分片落 <staging>/mpu/<id>/，complete 后目录清理、对象原子落地（docs/04 §3.2）
+    // 分片落 <staging>/mpu/<id>/，complete 后目录清理、对象原子落地（docs/storage-backend.md §3.2）
     auto uid = sync_wait(b.create_multipart("bkt", "big.bin", {}));
     http::StringBodyReader part("data");
     auto pr = sync_wait(b.upload_part("bkt", "big.bin", uid, 1, part));

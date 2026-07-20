@@ -1,4 +1,4 @@
-# 04 存储后端
+# 存储后端
 
 ## 1. IStorageBackend 接口
 
@@ -157,7 +157,7 @@ resolve(bucket) → IStorageBackend&
 
 把本地 bucket 映射到公有云对象存储（AWS S3 / 兼容 S3 协议的 OSS、COS、MinIO
 等），网关充当带本地认证的代理。完整设计见
-[09-cloudproxy-backend.md](09-cloudproxy-backend.md)，本节保留概述与路线决策。
+[cloudproxy-backend.md](cloudproxy-backend.md)，本节保留概述与路线决策。
 
 ### 4.1 两种实现路线
 
@@ -166,25 +166,25 @@ resolve(bucket) → IStorageBackend&
 | A. SDK 封装 | 用 aws-sdk-cpp（或轻量的 aws-c-s3）调用远端 | 正确性省心：重试、region、TLS、分片都是现成的；SDK 同步 API 在线程池里调用即可接入协程模型 |
 | B. 直接转发（已定） | 自己构造 HTTP 请求 + 对远端做 SigV4 签名，经 HTTP client 转发 | 零 SDK 依赖、可真流式转发；但要自己处理重试与各云差异 |
 
-设计初期倾向路线 A，**详细设计阶段反转为路线 B**（理由见 docs/09 §2.1）：
+设计初期倾向路线 A，**详细设计阶段反转为路线 B**（理由见 docs/cloudproxy-backend.md §2.1）：
 出方向签名 `SigV4Authenticator::sign()` 早已随验签一并实现并预留给
 cloudproxy；vendored 的 httplib 具备流式 client 能力；而 aws-sdk-cpp 的
 依赖体量与本项目"全 vendored 子模块"的构建约束冲突。
 
-要点（详细展开见 docs/09 对应小节）：
+要点（详细展开见 docs/cloudproxy-backend.md 对应小节）：
 
 - **凭证隔离**：客户端用网关本地的 AK/SK 认证；网关用自己的云凭证访问远端。
   客户端凭证绝不透传，云凭证只存在于网关配置。
 - **流式**：GET 方向 pump 线程 + 有界队列把 httplib 推模型翻成 `BodyReader`
-  拉模型；PUT 方向对称反转。避免整对象缓冲（docs/09 §3）。
+  拉模型；PUT 方向对称反转。避免整对象缓冲（docs/cloudproxy-backend.md §3）。
 - **Multipart 透传**：upload_id、part 直接映射远端同名概念，网关不落地分片。
 - **超时与重试**：连接/请求超时、指数退避 3 次；远端 5xx 映射为网关 500/503
-  对应的 S3 错误码，透传远端 4xx 语义（NoSuchKey 等）（docs/09 §5）。
+  对应的 S3 错误码，透传远端 4xx 语义（NoSuchKey 等）（docs/cloudproxy-backend.md §5）。
 - **名称映射**：`bucket_prefix` 解决本地 bucket 名与远端全局命名空间冲突；
   key 不变换。
 - 线程占用：同步 HTTP client 会占住线程整个请求时长——数据面 pump 使用
   cloudproxy 私有线程而非共享池，即 03 篇 §3 预留的 backend 独立线程池的
-  落地形态（docs/09 §2.3）。
+  落地形态（docs/cloudproxy-backend.md §2.3）。
 
 ## 5. 新增后端的步骤（扩展指南)
 

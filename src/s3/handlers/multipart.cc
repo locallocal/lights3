@@ -1,5 +1,5 @@
 // multipart handler：Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
-// （docs/05 §1；存储层语义见 docs/04 §3.2）
+// （docs/s3-protocol.md §1；存储层语义见 docs/storage-backend.md §3.2）
 #include <charconv>
 
 #include "core/util/time.h"

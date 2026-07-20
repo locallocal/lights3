@@ -1,4 +1,4 @@
-// 进程装配与启动流程（docs/01-architecture.md §4）
+// 进程装配与启动流程（docs/architecture.md §4）
 #include <csignal>
 
 #include <gflags/gflags.h>
@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
         auto backends = storage::StorageRegistry::build(cfg.backends, pool);
         auto router = storage::BucketRouter::build(cfg.buckets, std::move(backends));
         auto auth = s3::SigV4Authenticator::build(cfg.auth);
-        // 动态凭证（docs/06）：从默认后端加载并替换静态查表
+        // 动态凭证（docs/credential-management.md）：从默认后端加载并替换静态查表
         auto cred_store =
             sync_wait(s3::CredentialStore::load(router.default_backend(), cfg.auth));
         auth.set_provider(cred_store);
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
         service->set_credential_store(cred_store);
 
         auto server = http::HttpServerFactory::create(cfg.http.driver, cfg.http);
-        // dispatch 入口限流（docs/03 §6）：超限请求在信号量上排队而非拒绝；
+        // dispatch 入口限流（docs/concurrency.md §6）：超限请求在信号量上排队而非拒绝；
         // 等待者经池 executor 唤醒，避免在释放方调用栈上内联跑整条请求协程链
         auto pool_exec = std::make_shared<ThreadPoolExecutor>(*pool);
         auto inflight = std::make_shared<AsyncSemaphore>(cfg.runtime.max_inflight_requests,

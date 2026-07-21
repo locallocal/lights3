@@ -10,6 +10,7 @@
 #include "storage/memory/memory_backend.h"
 #include "storage/registry.h"
 #include "storage/tiered/tiered_backend.h"
+#include "unit/backend_suite.h"
 #include "unit/mini_test.h"
 
 using namespace lights3;
@@ -35,19 +36,7 @@ PutResult put(IStorageBackend& b, const std::string& bkt, const std::string& key
     return sync_wait(b.put_object(bkt, key, std::move(meta), body));
 }
 
-struct TmpDir {
-    fs::path path;
-    TmpDir() {
-        path = fs::temp_directory_path() /
-               ("lights3-tier-" + std::to_string(::getpid()) + "-" +
-                std::to_string(reinterpret_cast<uintptr_t>(this)));
-        fs::create_directories(path);
-    }
-    ~TmpDir() {
-        std::error_code ec;
-        fs::remove_all(path, ec);
-    }
-};
+using TmpDir = backend_suite::TmpDir;
 
 // 计数包装：断言 tiered 何时真正触碰云端
 class CountingCloud final : public IStorageBackend {

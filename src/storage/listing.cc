@@ -30,6 +30,9 @@ std::pair<uint64_t, uint64_t> resolve_range(const ByteRange& r, uint64_t size) {
 ListResult apply_listing(const std::vector<std::string>& keys, const ListOptions& opt,
                          const std::function<ObjectMeta(const std::string&)>& fetch) {
     ListResult out;
+    // S3：max-keys=0 返回空结果且 IsTruncated=false（否则空 token + truncated
+    // 会让按 IsTruncated 循环续传的客户端原地死循环）
+    if (opt.max_keys <= 0) return out;
     const auto& prefix = opt.prefix;
     const auto& delim = opt.delimiter;
     int count = 0;

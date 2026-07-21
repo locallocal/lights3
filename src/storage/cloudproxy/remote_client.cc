@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <thread>
 
+#include "core/config.h"
 #include "core/log.h"
 #include "s3/xml.h"
 
@@ -35,9 +36,11 @@ bool bool_param(const std::map<std::string, std::string>& p, const char* k, bool
                 const std::string& name) {
     auto* v = find(p, k);
     if (!v) return def;
-    if (*v == "true" || *v == "1" || *v == "yes" || *v == "on") return true;
-    if (*v == "false" || *v == "0" || *v == "no" || *v == "off") return false;
-    throw std::runtime_error("cloudproxy backend '" + name + "': invalid " + k + ": " + *v);
+    try {
+        return parse_bool(*v);  // 共享 token 集（core/config.h），与 duostore 一致
+    } catch (...) {
+        throw std::runtime_error("cloudproxy backend '" + name + "': invalid " + k + ": " + *v);
+    }
 }
 
 }  // namespace

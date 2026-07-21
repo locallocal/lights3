@@ -60,9 +60,11 @@ if [[ -z $BUILD_DIR ]]; then
     esac
 fi
 
-# 子模块：常规三件套始终初始化；seastar 克隆很大，仅在需要时拉取
+# 子模块：常规件始终初始化（rocksdb 为 shallow 克隆，压缩全关后零系统级依赖，
+# 不做惰性拉取，docs/duostore-backend.md §13.2）；seastar 克隆很大，仅在需要时拉取
 # （其自带的 dpdk 子模块构建时不用，不做递归初始化）
-LIGHT_MODULES=(third_party/gflags third_party/spdlog third_party/httplib third_party/json)
+LIGHT_MODULES=(third_party/gflags third_party/spdlog third_party/httplib third_party/json
+               third_party/rocksdb)
 git submodule update --init "${LIGHT_MODULES[@]}"
 if [[ $SEASTAR -eq 1 ]]; then
     git submodule update --init third_party/seastar

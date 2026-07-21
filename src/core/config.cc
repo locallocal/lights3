@@ -164,6 +164,12 @@ int parse_duration_sec(const std::string& s) {
     throw std::runtime_error("bad duration unit: " + s);
 }
 
+bool parse_bool(const std::string& s) {
+    if (s == "true" || s == "1" || s == "yes" || s == "on") return true;
+    if (s == "false" || s == "0" || s == "no" || s == "off") return false;
+    throw std::runtime_error("bad bool value: " + s);
+}
+
 // ---------------- 类型化配置 ----------------
 
 namespace {

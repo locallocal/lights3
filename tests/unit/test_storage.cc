@@ -7,6 +7,9 @@
 #include "storage/memory/memory_backend.h"
 #include "storage/tiered/tiered_backend.h"
 #include "storage/xlocalfs/xlocalfs_backend.h"
+#ifdef LIGHTS3_DUOSTORE
+#include "storage/duostore/duostore_backend.h"
+#endif
 #include "unit/backend_suite.h"
 #include "unit/mini_test.h"
 
@@ -17,23 +20,7 @@ using backend_suite::read_all;
 using backend_suite::run_backend_suite;
 namespace fs = std::filesystem;
 
-namespace {
-
-struct TmpDir {
-    fs::path path;
-    TmpDir() {
-        path = fs::temp_directory_path() /
-               ("lights3-test-" + std::to_string(::getpid()) + "-" +
-                std::to_string(reinterpret_cast<uintptr_t>(this)));
-        fs::create_directories(path);
-    }
-    ~TmpDir() {
-        std::error_code ec;
-        fs::remove_all(path, ec);
-    }
-};
-
-}  // namespace
+using backend_suite::TmpDir;
 
 TEST(memory_backend_suite) {
     MemoryBackend b;
@@ -66,6 +53,36 @@ TEST(tiered_backend_suite) {
     run_backend_suite(*b);
     sync_wait(b->close());
 }
+
+#ifdef LIGHTS3_DUOSTORE
+// duostore（RocksDB meta + chunk 数据面，docs/duostore-backend.md §14）：
+// 默认参数与小 chunk（强制多 chunk manifest）两个布局变体同套件；全 pack 变体随 P2 引入
+TEST(duostore_backend_suite) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    DuoStoreConfig cfg;
+    cfg.name = "suite";
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
+    run_backend_suite(*b);
+    sync_wait(b->close());
+}
+
+TEST(duostore_backend_suite_small_chunk) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    DuoStoreConfig cfg;
+    cfg.name = "suite-4k";
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    cfg.chunk_size = 4096;
+    cfg.meta_sync = false;  // 变体顺带覆盖 meta_sync 关闭路径（§6.3）
+    auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
+    run_backend_suite(*b);
+    sync_wait(b->close());
+}
+#endif
 
 // 跨多个 64KiB 数据块的读写路径：io_uring 流式写入与带偏移读取
 TEST(xlocalfs_large_object_roundtrip) {

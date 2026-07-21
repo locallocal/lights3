@@ -2,6 +2,9 @@
 // 自 test_storage.cc 提取，test_cloudproxy.cc 复用（docs/cloudproxy-backend.md §10）。
 #pragma once
 
+#include <unistd.h>
+
+#include <filesystem>
 #include <string>
 
 #include "storage/backend.h"
@@ -11,6 +14,21 @@ namespace backend_suite {
 
 using namespace lights3;
 using namespace lights3::storage;
+
+// 各后端测试共用的临时目录（析构即清理）
+struct TmpDir {
+    std::filesystem::path path;
+    explicit TmpDir(std::string_view prefix = "lights3-test-") {
+        path = std::filesystem::temp_directory_path() /
+               (std::string(prefix) + std::to_string(::getpid()) + "-" +
+                std::to_string(reinterpret_cast<uintptr_t>(this)));
+        std::filesystem::create_directories(path);
+    }
+    ~TmpDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
 
 inline std::string read_all(http::BodyReader& r) {
     std::string out;

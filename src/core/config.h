@@ -80,8 +80,9 @@ struct Config {
     static Config from_string(const std::string& yaml_text);
 };
 
-// "16KiB" / "1MB" / "60s" 之类的解析辅助
+// "16KiB" / "1MB" / "60s" / "true" 之类的解析辅助
 size_t parse_size(const std::string& s);
 int parse_duration_sec(const std::string& s);
+bool parse_bool(const std::string& s);  // true/1/yes/on | false/0/no/off，其余抛 runtime_error
 
 }  // namespace lights3

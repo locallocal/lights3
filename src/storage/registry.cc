@@ -10,6 +10,9 @@
 #ifdef LIGHTS3_CLOUDPROXY
 #include "storage/cloudproxy/cloudproxy_backend.h"
 #endif
+#ifdef LIGHTS3_DUOSTORE
+#include "storage/duostore/duostore_backend.h"
+#endif
 
 namespace lights3::storage {
 
@@ -55,6 +58,13 @@ void ensure_registered() {
             "cloudproxy", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
                 auto c = CloudProxyConfig::from_params(cfg.name, cfg.params);
                 return std::make_shared<CloudProxyBackend>(std::move(c), std::move(pool));
+            });
+#endif
+#ifdef LIGHTS3_DUOSTORE
+        StorageRegistry::register_backend(
+            "duostore", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+                auto c = DuoStoreConfig::from_params(cfg.name, cfg.params);
+                return std::make_shared<DuoStoreBackend>(std::move(c), std::move(pool));
             });
 #endif
         return true;

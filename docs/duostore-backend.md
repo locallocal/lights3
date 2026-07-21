@@ -1,9 +1,10 @@
 # DuoStore：元数据/数据分离的存储引擎后端
 
-> 状态：设计稿，未实现。拟代码路径 `src/storage/duostore/`；元数据引擎
-> RocksDB（`third_party/rocksdb` submodule），数据引擎本地文件系统
+> 状态：P1 已实现（双接口 + RocksMetaStore 全量 + chunk 数据路径，代码在
+> `src/storage/duostore/`）；P2-P5 未开始。元数据引擎 RocksDB
+> （`third_party/rocksdb` submodule），数据引擎本地文件系统
 > （chunk 切片 + pack 聚合 + GC）。承接 [storage-backend.md](storage-backend.md)
-> §1 的接口契约与 §5 扩展指南；实施拆分见 §15，当前全部未开始。
+> §1 的接口契约与 §5 扩展指南；实施拆分见 §15。
 
 ## 1. 目标与非目标
 
@@ -241,21 +242,26 @@ key，违背引入有序 KV 的初衷。直接在 `objects` CF 上迭代：
 | GC 销账 | 删 gcq 项 + 删 refs（物理 unlink 成功之后，§9.1） |
 
 跨 key 复合不变量（bucket 存在性校验+对象提交、delete_bucket 空检查、
-complete 校验+提交、号段预留）用 store 内**一把 `std::mutex`** 序列化；
-纯读（get/list，走 snapshot）不加锁。调用已全在池线程且临界区是微秒级
-内存操作 + WriteBatch 构造，首期够用；竞争成为瓶颈时的升级路径是
-RocksDB `TransactionDB`（不做，仅注明）。
+complete 校验+提交）用 store 内**一把 `std::mutex`** 序列化；纯读
+（get/list，走 snapshot）不加锁。注意：读改写型事务要求提交（含
+meta_sync=true 的 WAL fsync）也在锁内完成，写路径吞吐上限 ≈ 1/fsync 延迟
+且 RocksDB group commit 失效——P1 明确接受此代价；竞争成为瓶颈时的升级
+路径是 RocksDB `TransactionDB`（不做，仅注明）。delete_bucket 的空检查
+同时覆盖 objects 与 uploads（有进行中 multipart 即 BucketNotEmpty，对齐
+AWS——否则桶删后 put_part 仍可写入、refs 永久泄漏、重建桶复活幽灵上传）。
 
-`alloc_file_id` 用**号段预留**：`stats` 计数器一次 merge +4096、内存派发；
-崩溃浪费号段无害（file_id 只需唯一单调，不需连续）。
+`alloc_file_id` 用**号段预留**：`stats` 计数器一次 merge +4096、内存派发，
+持独立小锁（不排在业务提交的 fsync 之后）；预留提交**恒 WAL fsync**（独立
+于 meta_sync）——否则崩溃丢预留后重启重发已用 file_id，与已落盘的 chunk
+文件 O_EXCL 冲突。崩溃浪费号段无害（file_id 只需唯一单调，不需连续）。
 
 ## 5. 数据布局（FsDataStore）
 
 ```text
 <root>/
   meta/                             # RocksDB（可用 meta_path 单独指到 SSD）
-  chunks/<ss>/<file_id:016x>.chk    # ss = file_id 低 8 位 hex，256 个 shard 目录
-  packs/<ss>/<pack_id:016x>.pak
+  chunks/<ss>/<file_id:016x>.chk    # ss = (file_id >> 8) 低 8 位 hex，256 个 shard 目录
+  packs/<ss>/<pack_id:016x>.pak     # 连续 id 每 256 个同目录：一次写会话的目录 fsync 收敛到 1-2 次
 ```
 
 ### 5.1 chunk（大对象切片）
@@ -352,8 +358,8 @@ Extent{ kind=kPack, file_id=pack_id, offset=payload 起始, length=payload_len }
   推进到下一个；`length()` 返回 last−first+1；
 - pack extent：整段 payload（≤128KiB）一次读入、**恒校验 crc32c**，再按
   range 切片吐出；chunk extent 直接 pread 流式吐，crc 默认不校验
-  （`verify_chunk_crc: false`——Range 命中 chunk 中段时无从校验，完整性
-  主责在 GC/对账路径）。
+  （`verify_chunk_crc: false`）；开启后只对"从段首完整读到段尾"的 chunk
+  校验——Range 命中 chunk 中段时无从校验，完整性主责在 GC/对账路径。
 
 **与删除/GC 并发的安全性**：POSIX 已保证打开的 fd 不受 unlink 影响
 （localfs fd 快照同理），风险只在**懒打开**：对象被 DELETE 且 GC 立即
@@ -588,7 +594,7 @@ backend_suite/e2e 在日常构建缺席、特性必然腐化。裁剪模板照 c
 
 | 阶段 | 内容 | 可独立验收 | 状态 |
 | --- | --- | --- | --- |
-| P1 | rocksdb submodule + CMake/build.sh 接入；DataRef/编码；双接口；RocksMetaStore 全量（bucket/object/list/multipart 事务）；FsDataStore 仅 chunk 路径（`pack_threshold=0` 全走 chunk）；删除只记账不回收 | `duostore_backend_suite` 全绿 + `e2e_duostore` + 编码/list 专项 | 未开始 |
+| P1 | rocksdb submodule + CMake/build.sh 接入；DataRef/编码；双接口；RocksMetaStore 全量（bucket/object/list/multipart 事务）；FsDataStore 仅 chunk 路径（`pack_threshold=0` 全走 chunk）；删除只记账不回收 | `duostore_backend_suite` 全绿 + `e2e_duostore` + 编码/list 专项 | 已完成 |
 | P2 | pack 聚合：阈值判定（含 chunked 缓冲）、多 active pack 并发追加、record 格式与 crc、重启弃用 active pack | 全 pack/混合布局套件变体全绿 + record/torn tail 专项 | 未开始 |
 | P3 | GC 一期：gcq 消费、chunk unlink 与整 pack 删除、pin 计数 + gc_grace、`run_gc_once()` 钩子、mpu_ttl 清理、后台 worker | 覆盖/删除/abort 后 GC 收敛专项 + 并发 GET vs GC 无 ENOENT | 未开始 |
 | P4 | GC 二期：pack 压实（顺扫 + owner 反查 + swap_extents）、孤儿扫描与 refs 反向对账告警、崩溃注入（kill -9 重启收敛） | 低存活压实 + 崩溃注入专项全绿 | 未开始 |

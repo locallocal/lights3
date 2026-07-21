@@ -27,7 +27,35 @@ option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires B
 option(LIGHTS3_DRIVER_HTTPLIB "Build the cpp-httplib sync HTTP driver (vendored header)" ON)
 option(LIGHTS3_DRIVER_SEASTAR "Build the Seastar shard-per-core HTTP driver (heavy deps)" OFF)
 option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/cloudproxy-backend.md)" ON)
+option(LIGHTS3_DUOSTORE "Build the duostore storage backend (RocksDB metadata + chunk/pack data engine, docs/duostore-backend.md)" ON)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
+
+if(LIGHTS3_DUOSTORE)
+  # RocksDB 裁剪预设（docs/duostore-backend.md §13.3，仿 gflags/seastar 模板）
+  set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # 仓库已有 gflags 目标；仅 rocksdb 工具需要——OFF 防目标冲突
+  set(WITH_TESTS OFF CACHE BOOL "" FORCE)
+  set(WITH_ALL_TESTS OFF CACHE BOOL "" FORCE)
+  set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "" FORCE)
+  set(WITH_TOOLS OFF CACHE BOOL "" FORCE)
+  set(WITH_CORE_TOOLS OFF CACHE BOOL "" FORCE)
+  set(WITH_TRACE_TOOLS OFF CACHE BOOL "" FORCE)
+  set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+  set(WITH_SNAPPY OFF CACHE BOOL "" FORCE)      # 压缩全关：元数据体量小，换零外部依赖
+  set(WITH_LZ4 OFF CACHE BOOL "" FORCE)
+  set(WITH_ZLIB OFF CACHE BOOL "" FORCE)
+  set(WITH_ZSTD OFF CACHE BOOL "" FORCE)
+  set(WITH_LIBURING OFF CACHE BOOL "" FORCE)    # 机器无 liburing 开发头（seastar 同款注释）
+  set(PORTABLE ON CACHE BOOL "" FORCE)          # 不用 -march=native
+  set(USE_RTTI 1 CACHE BOOL "" FORCE)           # lights3 全程异常 + RTTI
+  set(FAIL_ON_WARNINGS OFF CACHE BOOL "" FORCE)
+  # add_subdirectory 的 SYSTEM 关键字需 CMake >= 3.25（本项目最低 3.20）；
+  # 老版本会把 SYSTEM 误解析为 binary_dir 参数，必须按版本分支
+  if(CMAKE_VERSION VERSION_LESS 3.25)
+    add_subdirectory(third_party/rocksdb EXCLUDE_FROM_ALL)
+  else()
+    add_subdirectory(third_party/rocksdb EXCLUDE_FROM_ALL SYSTEM)
+  endif()
+endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
   # seastar 依赖较重（编译版 Boost、fmt、c-ares、lz4、yaml-cpp、protobuf、ragel、
@@ -132,6 +160,18 @@ if(LIGHTS3_CLOUDPROXY)
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
 endif()
 
+if(LIGHTS3_DUOSTORE)
+  # 裁剪模板照 cloudproxy（docs/duostore-backend.md §13.3）
+  target_sources(lights3_core PRIVATE
+    src/storage/duostore/codec.cc
+    src/storage/duostore/rocks_meta_store.cc
+    src/storage/duostore/fs_data_store.cc
+    src/storage/duostore/duostore_backend.cc
+  )
+  target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE)
+  target_link_libraries(lights3_core PRIVATE rocksdb)
+endif()
+
 if(LIGHTS3_DRIVER_SEASTAR)
   # beast 块的 find_package(Boost QUIET) 走老式 FindBoost 时会把
   # Boost_USE_DEBUG_RUNTIME 默认置 TRUE，污染 BoostConfig 的变体选择
@@ -180,6 +220,9 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_service.cc
     tests/unit/test_http_drivers.cc
   )
+  if(LIGHTS3_DUOSTORE)
+    target_sources(unit_tests PRIVATE tests/unit/test_duostore.cc)
+  endif()
   target_link_libraries(unit_tests PRIVATE lights3_core nlohmann_json::nlohmann_json)
   target_include_directories(unit_tests PRIVATE tests)
   add_test(NAME unit_tests COMMAND unit_tests)
@@ -213,6 +256,12 @@ if(LIGHTS3_BUILD_TESTS)
   endif()
   # cloudproxy 双实例场景（docs/cloudproxy-backend.md §10）：实例 B 充当"云端"，A 经 cloudproxy 代理；
   # tiered-cloudproxy 即 docs/tiered-storage.md P5 组合（tiered 的 cloud 侧接真实 CloudProxyBackend）
+  # duostore 后端（RocksDB meta + chunk/pack 数据面）跑同一组 e2e 用例
+  if(LIGHTS3_DUOSTORE AND LIGHTS3_DRIVER_BUILTIN)
+    add_test(NAME e2e_duostore
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin duostore)
+  endif()
   if(LIGHTS3_CLOUDPROXY AND LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_cloudproxy
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh

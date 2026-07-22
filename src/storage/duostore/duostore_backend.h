@@ -16,10 +16,19 @@
 
 namespace lights3::storage {
 
+// meta 引擎选择（docs/duostore-redis-meta.md §8）：redis 需编译期开启
+// LIGHTS3_DUOSTORE_REDIS_META，否则 from_params 抛 "not compiled in"
+enum class DuoMetaKind { kRocksDb, kRedis };
+
 struct DuoStoreConfig {
     std::string name;
     std::filesystem::path root;       // 必填；meta/ chunks/ packs/ 均在其下
     std::filesystem::path meta_path;  // 默认 <root>/meta（可单独指到 SSD）
+    DuoMetaKind meta_kind = DuoMetaKind::kRocksDb;
+    std::string redis_uri;                // meta=redis 时必填
+    std::string redis_prefix = "duo:";    // key 前缀（多实例/测试隔离）
+    int redis_timeout_sec = 3;            // 建连 + 单命令超时
+    int redis_pool_size = 8;              // 连接池大小
     uint64_t chunk_size = 8ull << 20;
     uint64_t pack_threshold = 128 << 10;   // P2 生效
     uint64_t pack_max_size = 128ull << 20;

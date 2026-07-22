@@ -1,6 +1,8 @@
 // DuoStore 专项单测（docs/duostore-backend.md §14）：编解码 roundtrip 与 run 边界、
-// list 的 delimiter Seek 跳跃与分页 token、meta 事务的 GC 记账、号段重启单调、
-// 跨 chunk 读写。pack/GC 变现/压实/崩溃注入专项随 P2-P4 增补。
+// 跨 chunk 读写、位腐检出。meta 语义用例（GC 记账、号段单调、delimiter 分页等）
+// 已接口化为 meta_store_suite（docs/duostore-redis-meta.md §9），RocksMetaStore
+// 在此恒跑，RedisMetaStore 在 test_duostore_redis.cc 条件跑。
+// pack/GC 变现/压实/崩溃注入专项随 P2-P4 增补。
 #ifdef LIGHTS3_DUOSTORE
 
 #include <unistd.h>
@@ -15,6 +17,7 @@
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "unit/backend_suite.h"
+#include "unit/meta_store_suite.h"
 #include "unit/mini_test.h"
 
 namespace fs = std::filesystem;
@@ -138,84 +141,19 @@ TEST(duostore_value_codec_roundtrip) {
     CHECK_EQ(codec::part_no_of_key(codec::part_key("b", "k", "id", 300)), 300);
 }
 
-// 覆盖写/删除的 GC 记账（§4.5 同批不变量）：gcq 入账、refs 增删、version 递增
-TEST(duostore_meta_gc_accounting) {
+// meta 语义基线（GC 记账、号段单调、MPU 挡桶删、max-keys=0、delimiter 分页）：
+// 接口化套件，RocksMetaStore 恒跑；RedisMetaStore 同一套件见 test_duostore_redis.cc
+TEST(duostore_meta_store_suite_rocksdb) {
     TmpDir tmp;
-    RocksMetaStore m(meta_opts(tmp));
-    m.create_bucket("b");
-
-    uint64_t id1 = m.alloc_file_id(Extent::Kind::kChunk);
-    m.put_object("b", "k", make_rec("k", {chunk_extent(id1, 3)}));
-    CHECK(m.chunk_referenced(id1));
-    CHECK_EQ(m.peek_reclaims(10).size(), size_t(0));
-    CHECK_EQ(m.get_object("b", "k")->version, uint64_t(1));
-
-    // 覆盖写：旧 extent 入 gcq、旧 refs 删除、新 refs 建立
-    uint64_t id2 = m.alloc_file_id(Extent::Kind::kChunk);
-    m.put_object("b", "k", make_rec("k", {chunk_extent(id2, 5)}));
-    auto rs = m.peek_reclaims(10);
-    CHECK_EQ(rs.size(), size_t(1));
-    CHECK_EQ(rs[0].second.extents.at(0).file_id, id1);
-    CHECK(!m.chunk_referenced(id1));
-    CHECK(m.chunk_referenced(id2));
-    CHECK_EQ(m.get_object("b", "k")->version, uint64_t(2));
-
-    // 删除：入 gcq；幂等二次删返回 false
-    CHECK(m.delete_object("b", "k"));
-    CHECK(!m.delete_object("b", "k"));
-    CHECK(!m.chunk_referenced(id2));
-    auto rs2 = m.peek_reclaims(10);
-    CHECK_EQ(rs2.size(), size_t(2));
-
-    // 销账后 gcq 清空
-    for (auto& [seq, rec] : rs2) m.ack_reclaim(seq);
-    CHECK_EQ(m.peek_reclaims(10).size(), size_t(0));
-    m.close();
+    meta_store_suite::run_meta_store_suite(
+        [&] { return std::make_unique<RocksMetaStore>(meta_opts(tmp)); });
 }
 
-// file_id 号段：重启后不回退（§4.5——只需唯一单调，不需连续）
-TEST(duostore_alloc_monotonic_across_reopen) {
-    TmpDir tmp;
-    uint64_t last = 0;
-    {
-        RocksMetaStore m(meta_opts(tmp));
-        for (int i = 0; i < 10; ++i) last = m.alloc_file_id(Extent::Kind::kChunk);
-        m.close();
-    }
-    {
-        RocksMetaStore m(meta_opts(tmp));
-        CHECK(m.alloc_file_id(Extent::Kind::kChunk) > last);
-        // pack 与 chunk 计数器相互独立
-        CHECK_EQ(m.alloc_file_id(Extent::Kind::kPack), uint64_t(0));
-        m.close();
-    }
-}
-
-// delete_bucket：有进行中 multipart 时拒绝（对齐 AWS；防 refs 永久泄漏与幽灵上传复活）
-TEST(duostore_meta_delete_bucket_blocks_on_mpu) {
+// RocksDB 实现细节：pack 计数器从 0 起（Redis 版首段空烧，绝对值是实现自由度）
+TEST(duostore_alloc_pack_counter_starts_at_zero) {
     TmpDir tmp;
     RocksMetaStore m(meta_opts(tmp));
-    m.create_bucket("b");
-    ObjectMeta meta;
-    auto id = m.create_upload("b", "k", meta);
-    CHECK_THROWS_S3(m.delete_bucket("b"), s3::S3ErrorCode::BucketNotEmpty);
-    m.abort_upload("b", "k", id);
-    m.delete_bucket("b");  // abort 后可删
-    CHECK(!m.bucket_exists("b"));
-    m.close();
-}
-
-// max-keys=0：S3 语义为空结果 + IsTruncated=false（否则空 token 使客户端死循环）
-TEST(duostore_meta_list_max_keys_zero) {
-    TmpDir tmp;
-    RocksMetaStore m(meta_opts(tmp));
-    m.create_bucket("b");
-    m.put_object("b", "k", make_rec("k", {}));
-    ListOptions opt;
-    opt.max_keys = 0;
-    auto r = m.list_objects("b", opt);
-    CHECK_EQ(r.objects.size(), size_t(0));
-    CHECK(!r.is_truncated);
+    CHECK_EQ(m.alloc_file_id(Extent::Kind::kPack), uint64_t(0));
     m.close();
 }
 
@@ -241,41 +179,6 @@ TEST(duostore_codec_rejects_nul_key) {
     std::string nul_key("k\0x", 3);
     CHECK_THROWS_S3(codec::object_key("b", nul_key), s3::S3ErrorCode::InternalError);
     CHECK_THROWS_S3(codec::upload_key("b", "k", nul_key), s3::S3ErrorCode::InternalError);
-}
-
-// list：delimiter 组的 Seek 跳跃 + 分页 token 落在组尾（§4.4）
-TEST(duostore_meta_list_delimiter_paging) {
-    TmpDir tmp;
-    RocksMetaStore m(meta_opts(tmp));
-    m.create_bucket("b");
-    for (auto k : {"a", "b/1", "b/2", "b/3", "c"}) m.put_object("b", k, make_rec(k, {}));
-
-    ListOptions opt;
-    opt.delimiter = "/";
-    opt.max_keys = 2;
-    auto p1 = m.list_objects("b", opt);
-    CHECK_EQ(p1.objects.size(), size_t(1));
-    CHECK_EQ(p1.objects[0].key, "a");
-    CHECK_EQ(p1.common_prefixes.size(), size_t(1));
-    CHECK_EQ(p1.common_prefixes[0], "b/");
-    CHECK(p1.is_truncated);
-    CHECK_EQ(p1.next_token, "b/3");  // token 语义（start after）须落在组尾
-
-    opt.start_after = p1.next_token;
-    auto p2 = m.list_objects("b", opt);
-    CHECK_EQ(p2.objects.size(), size_t(1));
-    CHECK_EQ(p2.objects[0].key, "c");
-    CHECK(p2.common_prefixes.empty());
-    CHECK(!p2.is_truncated);
-
-    // prefix + delimiter：子层级分组
-    ListOptions sub;
-    sub.prefix = "b/";
-    sub.delimiter = "/";
-    auto ps = m.list_objects("b", sub);
-    CHECK_EQ(ps.objects.size(), size_t(3));
-    CHECK(ps.common_prefixes.empty());
-    m.close();
 }
 
 // 跨 chunk 的写读与 Range（4KiB chunk 强制多 chunk manifest）；chunk 文件布局落位

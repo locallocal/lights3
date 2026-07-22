@@ -18,9 +18,30 @@ cleanup() {
     [[ -n "${SRV_PID:-}" ]] && wait "$SRV_PID" 2>/dev/null
     [[ -n "${RSRV_PID:-}" ]] && kill "$RSRV_PID" 2>/dev/null
     [[ -n "${RSRV_PID:-}" ]] && wait "$RSRV_PID" 2>/dev/null
+    [[ -n "${REDIS_PID:-}" ]] && kill "$REDIS_PID" 2>/dev/null
+    [[ -n "${REDIS_PID:-}" ]] && wait "$REDIS_PID" 2>/dev/null
     rm -rf "$WORK"
 }
 trap cleanup EXIT
+
+# ---------- duostore-redis 场景：拉起私有 redis（docs/duostore-redis-meta.md §9）----------
+REDIS_PID=""
+if [[ "$BACKEND" == "duostore-redis" ]]; then
+    if ! command -v redis-server >/dev/null; then
+        echo "[SKIP] duostore-redis: redis-server not available"
+        exit 0
+    fi
+    redis-server --port 0 --unixsocket "$WORK/redis.sock" --save '' --appendonly no \
+        --dir "$WORK" > "$WORK/redis.log" 2>&1 &
+    REDIS_PID=$!
+    for _ in $(seq 1 50); do
+        [[ -S "$WORK/redis.sock" ]] && break
+        kill -0 "$REDIS_PID" 2>/dev/null || { echo "redis-server died at startup:"; cat "$WORK/redis.log"; exit 1; }
+        sleep 0.1
+    done
+    [[ -S "$WORK/redis.sock" ]] || { echo "redis-server did not come up"; cat "$WORK/redis.log"; exit 1; }
+    echo "redis up: $WORK/redis.sock (pid $REDIS_PID)"
+fi
 
 # ---------- cloudproxy 场景：先起"云端"实例 B（自身也是 lights3）----------
 CLOUD_AK=E2ECLOUDKEY
@@ -108,6 +129,13 @@ elif [[ "$BACKEND" == "cloudproxy" ]]; then cat <<CLOUD
     secret_key: $CLOUD_SK
     bucket_prefix: e2e-
 CLOUD
+elif [[ "$BACKEND" == "duostore-redis" ]]; then cat <<DUOREDIS
+  - name: tierdata
+    type: duostore
+    root: $WORK/data
+    meta: redis
+    redis_uri: unix://$WORK/redis.sock
+DUOREDIS
 elif [[ "$BACKEND" == "tiered-cloudproxy" ]]; then cat <<TIERCLOUD
   - name: localdata
     type: localfs

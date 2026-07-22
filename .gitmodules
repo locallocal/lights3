@@ -17,3 +17,6 @@
 	path = third_party/rocksdb
 	url = https://github.com/facebook/rocksdb.git
 	shallow = true
+[submodule "third_party/hiredis"]
+	path = third_party/hiredis
+	url = https://github.com/redis/hiredis.git

@@ -4,11 +4,16 @@
 #include <stdexcept>
 
 #include "core/config.h"
+#include "core/log.h"
 #include "core/util/crypto.h"
 #include "storage/duostore/codec.h"
 #include "storage/duostore/fs_data_store.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/multipart.h"
+
+#ifdef LIGHTS3_DUOSTORE_REDIS_META
+#include "storage/duostore/redis_meta_store.h"
+#endif
 
 namespace lights3::storage {
 
@@ -85,6 +90,43 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         c.verify_chunk_crc = parse_bool_param(name, "verify_chunk_crc", *v);
     if (auto* v = get("rocksdb_block_cache")) c.rocksdb_block_cache = parse_size(*v);
 
+    // meta 引擎选择（docs/duostore-redis-meta.md §8）
+    if (auto* v = get("meta")) {
+        if (*v == "rocksdb") {
+            c.meta_kind = DuoMetaKind::kRocksDb;
+        } else if (*v == "redis") {
+#ifdef LIGHTS3_DUOSTORE_REDIS_META
+            c.meta_kind = DuoMetaKind::kRedis;
+#else
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': meta=redis not compiled in "
+                                     "(build with -DLIGHTS3_DUOSTORE_REDIS_META=ON)");
+#endif
+        } else {
+            bad_param(name, "meta", *v);
+        }
+    }
+    if (auto* v = get("redis_uri")) c.redis_uri = *v;
+    if (auto* v = get("redis_prefix")) c.redis_prefix = *v;
+    if (auto* v = get("redis_timeout")) c.redis_timeout_sec = parse_duration_sec(*v);
+    if (auto* v = get("redis_pool_size"))
+        c.redis_pool_size = parse_int_param(name, "redis_pool_size", *v);
+    if (c.meta_kind == DuoMetaKind::kRedis) {
+        if (c.redis_uri.empty())
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': meta=redis needs redis_uri");
+        if (c.redis_pool_size < 1 || c.redis_pool_size > 256)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': redis_pool_size must be in [1,256]");
+        if (c.redis_timeout_sec < 1)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': redis_timeout must be >= 1s");
+        // 持久化语义改由 Redis 侧 AOF 配置承担（docs/duostore-redis-meta.md §6/§8）
+        for (const char* k : {"meta_path", "meta_sync", "rocksdb_block_cache"})
+            if (params.count(k))
+                LOG_WARN("duostore backend '{}': {} ignored with meta=redis", name, k);
+    }
+
     if (c.chunk_size < 4096)
         throw std::runtime_error("duostore backend '" + name + "': chunk_size must be >= 4KiB");
     if (c.pack_threshold > c.pack_max_size)
@@ -104,8 +146,15 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool)
     : cfg_(std::move(cfg)), pool_(std::move(pool)) {
     std::filesystem::create_directories(cfg_.root);
-    meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{
-        cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache});
+#ifdef LIGHTS3_DUOSTORE_REDIS_META
+    if (cfg_.meta_kind == DuoMetaKind::kRedis)
+        meta_ = std::make_unique<RedisMetaStore>(RedisMetaOptions{
+            cfg_.redis_uri, cfg_.redis_prefix, cfg_.redis_timeout_sec * 1000,
+            cfg_.redis_pool_size});
+#endif
+    if (!meta_)
+        meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{
+            cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache});
     IMetaStore* meta = meta_.get();  // 分配回调不延长 meta 生命周期：本类持有两者，先关 data
     data_ = std::make_unique<FsDataStore>(
         FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc}, pool_,

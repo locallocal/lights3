@@ -28,6 +28,7 @@ option(LIGHTS3_DRIVER_HTTPLIB "Build the cpp-httplib sync HTTP driver (vendored 
 option(LIGHTS3_DRIVER_SEASTAR "Build the Seastar shard-per-core HTTP driver (heavy deps)" OFF)
 option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/cloudproxy-backend.md)" ON)
 option(LIGHTS3_DUOSTORE "Build the duostore storage backend (RocksDB metadata + chunk/pack data engine, docs/duostore-backend.md)" ON)
+option(LIGHTS3_DUOSTORE_REDIS_META "Build the Redis-backed IMetaStore for duostore (hiredis submodule, docs/duostore-redis-meta.md)" OFF)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DUOSTORE)
@@ -54,6 +55,22 @@ if(LIGHTS3_DUOSTORE)
     add_subdirectory(third_party/rocksdb EXCLUDE_FROM_ALL)
   else()
     add_subdirectory(third_party/rocksdb EXCLUDE_FROM_ALL SYSTEM)
+  endif()
+endif()
+
+if(LIGHTS3_DUOSTORE_REDIS_META)
+  if(NOT LIGHTS3_DUOSTORE)
+    message(FATAL_ERROR "LIGHTS3_DUOSTORE_REDIS_META requires LIGHTS3_DUOSTORE")
+  endif()
+  # hiredis 裁剪预设（docs/duostore-redis-meta.md §7.2）
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)  # hiredis 默认 shared；全仓惯例静态
+  set(DISABLE_TESTS ON CACHE BOOL "" FORCE)
+  set(ENABLE_SSL OFF CACHE BOOL "" FORCE)         # 首期不启用 TLS（§5.5）
+  set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+  if(CMAKE_VERSION VERSION_LESS 3.25)
+    add_subdirectory(third_party/hiredis EXCLUDE_FROM_ALL)
+  else()
+    add_subdirectory(third_party/hiredis EXCLUDE_FROM_ALL SYSTEM)
   endif()
 endif()
 
@@ -170,6 +187,11 @@ if(LIGHTS3_DUOSTORE)
   )
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE)
   target_link_libraries(lights3_core PRIVATE rocksdb)
+  if(LIGHTS3_DUOSTORE_REDIS_META)
+    target_sources(lights3_core PRIVATE src/storage/duostore/redis_meta_store.cc)
+    target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE_REDIS_META)
+    target_link_libraries(lights3_core PRIVATE hiredis::hiredis)
+  endif()
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -222,6 +244,11 @@ if(LIGHTS3_BUILD_TESTS)
   )
   if(LIGHTS3_DUOSTORE)
     target_sources(unit_tests PRIVATE tests/unit/test_duostore.cc)
+    if(LIGHTS3_DUOSTORE_REDIS_META)
+      # redis 用例需 hiredis 头（测试 harness 直连拉起的私有 redis-server）
+      target_sources(unit_tests PRIVATE tests/unit/test_duostore_redis.cc)
+      target_link_libraries(unit_tests PRIVATE hiredis::hiredis)
+    endif()
   endif()
   target_link_libraries(unit_tests PRIVATE lights3_core nlohmann_json::nlohmann_json)
   target_include_directories(unit_tests PRIVATE tests)
@@ -261,6 +288,13 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_duostore
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin duostore)
+    # duostore + Redis meta（docs/duostore-redis-meta.md §9）：脚本内探测
+    # redis-server，缺则显式 SKIP
+    if(LIGHTS3_DUOSTORE_REDIS_META)
+      add_test(NAME e2e_duostore_redis
+               COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                       $<TARGET_FILE:lights3> builtin duostore-redis)
+    endif()
   endif()
   if(LIGHTS3_CLOUDPROXY AND LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_cloudproxy

@@ -20,3 +20,7 @@
 [submodule "third_party/hiredis"]
 	path = third_party/hiredis
 	url = https://github.com/redis/hiredis.git
+[submodule "third_party/sqlite"]
+	path = third_party/sqlite
+	url = https://github.com/sqlite/sqlite.git
+	shallow = true

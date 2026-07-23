@@ -16,6 +16,7 @@
 
 #include "core/log.h"
 #include "storage/duostore/codec.h"
+#include "storage/duostore/meta_util.h"
 #include "storage/multipart.h"
 
 namespace lights3::storage::duostore {
@@ -69,17 +70,7 @@ std::string_view strip_prefix(const rocksdb::Slice& k, size_t prefix_len) {
     return {k.data() + prefix_len, k.size() - prefix_len};
 }
 
-// 组前缀的后继（delimiter 跳组用，§4.4）；全 0xff 时返回 false（不可能：组尾是 delimiter）
-bool bump_last_byte(std::string& s) {
-    for (size_t i = s.size(); i-- > 0;) {
-        if (uint8_t(s[i]) != 0xff) {
-            ++s[i];
-            s.resize(i + 1);
-            return true;
-        }
-    }
-    return false;
-}
+using codec::bump_last_byte;  // delimiter 跳组后继（codec.h，meta store 实现共用）
 
 }  // namespace
 
@@ -481,25 +472,8 @@ std::string RocksMetaStore::complete_upload(std::string_view b, std::string_view
     std::map<int, PartRec> stored;
     for (auto& p : scan_parts(b, k, id)) stored.emplace(p.part_no, std::move(p));
 
-    ObjectRec rec;
-    rec.meta = std::move(up.meta);
-    std::vector<std::string> md5s;
     std::set<int> selected;
-    for (const auto& pi : parts) {
-        auto sit = stored.find(pi.part_no);
-        if (sit == stored.end() || sit->second.etag != strip_etag_quotes(pi.etag))
-            throw S3Error(S3ErrorCode::InvalidPart,
-                          "One or more of the specified parts could not be found or the "
-                          "ETag did not match.",
-                          std::string(k));
-        md5s.push_back(sit->second.etag);
-        selected.insert(pi.part_no);
-        rec.meta.size += sit->second.size;
-        auto& ex = sit->second.data.extents;
-        rec.data.extents.insert(rec.data.extents.end(), ex.begin(), ex.end());
-    }
-    rec.meta.etag = combined_etag(md5s);
-    rec.meta.last_modified = std::chrono::system_clock::now();
+    ObjectRec rec = assemble_completed_object(std::move(up.meta), parts, stored, selected);
 
     std::string okey = codec::object_key(b, k);
     std::optional<ObjectRec> old;
@@ -567,6 +541,13 @@ void RocksMetaStore::ack_reclaim(uint64_t seq) {
     // 盲删单 key，无跨 key 不变量——不占 mu_，GC 销账不排队业务提交的 fsync
     rocksdb::WriteBatch batch;
     batch.Delete(cfs_[kGcq], codec::be64_key(seq));
+    commit(batch);
+}
+
+void RocksMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
+    if (seqs.empty()) return;
+    rocksdb::WriteBatch batch;  // 单批单提交（覆写接口默认的逐条转发）
+    for (uint64_t s : seqs) batch.Delete(cfs_[kGcq], codec::be64_key(s));
     commit(batch);
 }
 

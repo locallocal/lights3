@@ -15,6 +15,10 @@
 #include "storage/duostore/redis_meta_store.h"
 #endif
 
+#ifdef LIGHTS3_DUOSTORE_SQLITE_META
+#include "storage/duostore/sqlite_meta_store.h"
+#endif
+
 namespace lights3::storage {
 
 using s3::S3Error;
@@ -90,7 +94,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         c.verify_chunk_crc = parse_bool_param(name, "verify_chunk_crc", *v);
     if (auto* v = get("rocksdb_block_cache")) c.rocksdb_block_cache = parse_size(*v);
 
-    // meta 引擎选择（docs/duostore-redis-meta.md §8）
+    // meta 引擎选择（docs/duostore-redis-meta.md §8 / docs/duostore-sqlite-meta.md §8）
     if (auto* v = get("meta")) {
         if (*v == "rocksdb") {
             c.meta_kind = DuoMetaKind::kRocksDb;
@@ -101,6 +105,14 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             throw std::runtime_error("duostore backend '" + name +
                                      "': meta=redis not compiled in "
                                      "(build with -DLIGHTS3_DUOSTORE_REDIS_META=ON)");
+#endif
+        } else if (*v == "sqlite") {
+#ifdef LIGHTS3_DUOSTORE_SQLITE_META
+            c.meta_kind = DuoMetaKind::kSqlite;
+#else
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': meta=sqlite not compiled in "
+                                     "(build with -DLIGHTS3_DUOSTORE_SQLITE_META=ON)");
 #endif
         } else {
             bad_param(name, "meta", *v);
@@ -121,10 +133,46 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         if (c.redis_timeout_sec < 1)
             throw std::runtime_error("duostore backend '" + name +
                                      "': redis_timeout must be >= 1s");
-        // 持久化语义改由 Redis 侧 AOF 配置承担（docs/duostore-redis-meta.md §6/§8）
-        for (const char* k : {"meta_path", "meta_sync", "rocksdb_block_cache"})
-            if (params.count(k))
-                LOG_WARN("duostore backend '{}': {} ignored with meta=redis", name, k);
+    }
+
+    // sqlite meta（docs/duostore-sqlite-meta.md §8）：meta_sync 沿用（本地引擎，
+    // 持久化档位归本进程管，映射 synchronous FULL/NORMAL）
+    if (auto* v = get("sqlite_path"); v && !v->empty()) c.sqlite_path = *v;
+    else c.sqlite_path = c.root / "meta.sqlite3";
+    if (auto* v = get("sqlite_cache")) c.sqlite_cache = parse_size(*v);
+    if (c.meta_kind == DuoMetaKind::kSqlite) {
+        // 进程级总预算，按连接摊分后仍需有意义（docs/duostore-sqlite-meta.md §8）
+        if (c.sqlite_cache < (1ull << 20))
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': sqlite_cache must be >= 1MiB");
+    }
+
+    // meta 引擎专属键：出现但不属于选中引擎 → WARN（键→归属表；新引擎加行即可，
+    // 免去每个分支各自维护对方键清单的 O(kinds²) 漏网）。meta_sync 为 rocksdb 与
+    // sqlite 共有、仅 redis 下忽略（持久化语义改由 Redis 侧 AOF 承担），单列处理
+    {
+        static constexpr struct {
+            const char* key;
+            DuoMetaKind kind;
+        } kMetaOwnedKeys[] = {
+            {"meta_path", DuoMetaKind::kRocksDb},
+            {"rocksdb_block_cache", DuoMetaKind::kRocksDb},
+            {"redis_uri", DuoMetaKind::kRedis},
+            {"redis_prefix", DuoMetaKind::kRedis},
+            {"redis_timeout", DuoMetaKind::kRedis},
+            {"redis_pool_size", DuoMetaKind::kRedis},
+            {"sqlite_path", DuoMetaKind::kSqlite},
+            {"sqlite_cache", DuoMetaKind::kSqlite},
+        };
+        const char* kind_name = c.meta_kind == DuoMetaKind::kRocksDb  ? "rocksdb"
+                                : c.meta_kind == DuoMetaKind::kRedis ? "redis"
+                                                                     : "sqlite";
+        for (const auto& mk : kMetaOwnedKeys)
+            if (mk.kind != c.meta_kind && params.count(mk.key))
+                LOG_WARN("duostore backend '{}': {} ignored with meta={}", name, mk.key,
+                         kind_name);
+        if (c.meta_kind == DuoMetaKind::kRedis && params.count("meta_sync"))
+            LOG_WARN("duostore backend '{}': meta_sync ignored with meta=redis", name);
     }
 
     if (c.chunk_size < 4096)
@@ -151,6 +199,11 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         meta_ = std::make_unique<RedisMetaStore>(RedisMetaOptions{
             cfg_.redis_uri, cfg_.redis_prefix, cfg_.redis_timeout_sec * 1000,
             cfg_.redis_pool_size});
+#endif
+#ifdef LIGHTS3_DUOSTORE_SQLITE_META
+    if (cfg_.meta_kind == DuoMetaKind::kSqlite)
+        meta_ = std::make_unique<SqliteMetaStore>(SqliteMetaOptions{
+            cfg_.sqlite_path.string(), cfg_.meta_sync, cfg_.sqlite_cache});
 #endif
     if (!meta_)
         meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{

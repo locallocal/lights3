@@ -41,6 +41,19 @@ int part_no_of_key(std::string_view parts_cf_key);  // 尾部 be16
 std::string be64_key(uint64_t v);       // refs / gcq 的 big-endian key
 uint64_t parse_be64(std::string_view k);
 
+// delimiter 跳组的后继 seek 点（主文档 §4.4）：最后一个非 0xff 字节 +1、截断其后；
+// 全 0xff 返回 false（组尾是 delimiter，实际不可达）。各 meta store 实现共用。
+inline bool bump_last_byte(std::string& s) {
+    for (size_t i = s.size(); i-- > 0;) {
+        if (uint8_t(s[i]) != 0xff) {
+            ++s[i];
+            s.resize(i + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
 // ---- extent run 编解码（§4.3；供测试观察 run 压缩效果）----
 std::string encode_extents(const std::vector<Extent>& extents);
 std::vector<Extent> decode_extents(std::string_view v);

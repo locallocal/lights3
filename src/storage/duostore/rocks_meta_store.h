@@ -57,6 +57,7 @@ public:
     uint64_t alloc_file_id(Extent::Kind kind) override;
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max) override;
     void ack_reclaim(uint64_t seq) override;
+    void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单 WriteBatch
     std::vector<PackStat> pack_stats() override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;

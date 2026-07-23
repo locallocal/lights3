@@ -86,6 +86,13 @@ struct IMetaStore {
     virtual uint64_t alloc_file_id(Extent::Kind kind) = 0;  // 持久单调，号段预留
     virtual std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max) = 0;
     virtual void ack_reclaim(uint64_t seq) = 0;    // 物理删除成功后销账
+    // 批量销账：默认逐条转发；实现可覆写为单事务/单批提交。GC 消费端应优先走本
+    // 接口——逐条 ack 的成本按实现差异巨大（SQLite 版每条是一次独立 fsync 且与
+    // 业务提交争同一把写锁，RocksDB 版接近免费）。丢 ack 无害（gcq 残留重试，
+    // unlink 幂等），故批量语义安全（主文档 §9.1 崩溃论证）
+    virtual void ack_reclaims(std::span<const uint64_t> seqs) {
+        for (uint64_t s : seqs) ack_reclaim(s);
+    }
     virtual std::vector<PackStat> pack_stats() = 0;  // 压实候选
     virtual bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                               const DataRef& from, const DataRef& to) = 0;  // 压实换 ref

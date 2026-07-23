@@ -136,6 +136,12 @@ elif [[ "$BACKEND" == "duostore-redis" ]]; then cat <<DUOREDIS
     meta: redis
     redis_uri: unix://$WORK/redis.sock
 DUOREDIS
+elif [[ "$BACKEND" == "duostore-sqlite" ]]; then cat <<DUOSQLITE
+  - name: tierdata
+    type: duostore
+    root: $WORK/data
+    meta: sqlite
+DUOSQLITE
 elif [[ "$BACKEND" == "tiered-cloudproxy" ]]; then cat <<TIERCLOUD
   - name: localdata
     type: localfs

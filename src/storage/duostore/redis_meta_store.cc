@@ -13,6 +13,7 @@
 
 #include "core/log.h"
 #include "storage/duostore/codec.h"
+#include "storage/duostore/meta_util.h"
 #include "storage/multipart.h"
 
 namespace lights3::storage::duostore {
@@ -853,25 +854,8 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
         std::map<int, PartRec> stored;
         for (auto& [raw, p] : scanned) stored.emplace(p.part_no, std::move(p));
 
-        ObjectRec rec;
-        rec.meta = std::move(up.meta);
-        std::vector<std::string> md5s;
         std::set<int> selected;
-        for (const auto& pi : parts) {
-            auto sit = stored.find(pi.part_no);
-            if (sit == stored.end() || sit->second.etag != strip_etag_quotes(pi.etag))
-                throw S3Error(S3ErrorCode::InvalidPart,
-                              "One or more of the specified parts could not be found or the "
-                              "ETag did not match.",
-                              std::string(k));
-            md5s.push_back(sit->second.etag);
-            selected.insert(pi.part_no);
-            rec.meta.size += sit->second.size;
-            auto& ex = sit->second.data.extents;
-            rec.data.extents.insert(rec.data.extents.end(), ex.begin(), ex.end());
-        }
-        rec.meta.etag = combined_etag(md5s);
-        rec.meta.last_modified = std::chrono::system_clock::now();
+        ObjectRec rec = assemble_completed_object(std::move(up.meta), parts, stored, selected);
 
         auto oldv = hget_raw(objects_key(b), k);
         std::optional<ObjectRec> old;

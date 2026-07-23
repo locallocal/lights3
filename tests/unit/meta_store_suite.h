@@ -62,8 +62,11 @@ inline void case_gc_accounting(const MetaFactory& make) {
     auto rs2 = m->peek_reclaims(10);
     CHECK_EQ(rs2.size(), size_t(2));
 
-    // 销账后 gcq 清空
-    for (auto& [seq, rec] : rs2) m->ack_reclaim(seq);
+    // 销账后 gcq 清空：逐条与批量接口各走一遍（批量为 GC 消费端的首选形态）
+    m->ack_reclaim(rs2[0].first);
+    std::vector<uint64_t> rest;
+    for (size_t i = 1; i < rs2.size(); ++i) rest.push_back(rs2[i].first);
+    m->ack_reclaims(rest);
     CHECK_EQ(m->peek_reclaims(10).size(), size_t(0));
     m->delete_bucket("ms-gc");
     m->close();

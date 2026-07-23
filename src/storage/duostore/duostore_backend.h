@@ -16,9 +16,9 @@
 
 namespace lights3::storage {
 
-// meta 引擎选择（docs/duostore-redis-meta.md §8）：redis 需编译期开启
-// LIGHTS3_DUOSTORE_REDIS_META，否则 from_params 抛 "not compiled in"
-enum class DuoMetaKind { kRocksDb, kRedis };
+// meta 引擎选择（docs/duostore-redis-meta.md §8 / docs/duostore-sqlite-meta.md §8）：
+// redis / sqlite 需编译期开启对应 option，否则 from_params 抛 "not compiled in"
+enum class DuoMetaKind { kRocksDb, kRedis, kSqlite };
 
 struct DuoStoreConfig {
     std::string name;
@@ -29,6 +29,8 @@ struct DuoStoreConfig {
     std::string redis_prefix = "duo:";    // key 前缀（多实例/测试隔离）
     int redis_timeout_sec = 3;            // 建连 + 单命令超时
     int redis_pool_size = 8;              // 连接池大小
+    std::filesystem::path sqlite_path;    // meta=sqlite：DB 文件，默认 <root>/meta.sqlite3
+    size_t sqlite_cache = 64ull << 20;    // 页缓存（PRAGMA cache_size）
     uint64_t chunk_size = 8ull << 20;
     uint64_t pack_threshold = 128 << 10;   // P2 生效
     uint64_t pack_max_size = 128ull << 20;

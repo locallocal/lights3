@@ -29,6 +29,7 @@ option(LIGHTS3_DRIVER_SEASTAR "Build the Seastar shard-per-core HTTP driver (hea
 option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed SigV4 + vendored httplib, docs/cloudproxy-backend.md)" ON)
 option(LIGHTS3_DUOSTORE "Build the duostore storage backend (RocksDB metadata + chunk/pack data engine, docs/duostore-backend.md)" ON)
 option(LIGHTS3_DUOSTORE_REDIS_META "Build the Redis-backed IMetaStore for duostore (hiredis submodule, docs/duostore-redis-meta.md)" OFF)
+option(LIGHTS3_DUOSTORE_SQLITE_META "Build the SQLite-backed IMetaStore for duostore (sqlite submodule, docs/duostore-sqlite-meta.md)" OFF)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DUOSTORE)
@@ -72,6 +73,37 @@ if(LIGHTS3_DUOSTORE_REDIS_META)
   else()
     add_subdirectory(third_party/hiredis EXCLUDE_FROM_ALL SYSTEM)
   endif()
+endif()
+
+if(LIGHTS3_DUOSTORE_SQLITE_META)
+  if(NOT LIGHTS3_DUOSTORE)
+    message(FATAL_ERROR "LIGHTS3_DUOSTORE_SQLITE_META requires LIGHTS3_DUOSTORE")
+  endif()
+  # sqlite 的 canonical 源码树不含现成 amalgamation，需 configure && make sqlite3.c
+  # 生成（脚本跑在 tclsh 上，新树无 tclsh 时以内置 jimsh 自举；
+  # docs/duostore-sqlite-meta.md §7）。out-of-tree 生成到 build 目录，
+  # DEPENDS VERSION 使 submodule 升级触发重生成
+  set(SQLITE_GEN_DIR ${CMAKE_BINARY_DIR}/sqlite-amalgamation)
+  add_custom_command(
+    OUTPUT ${SQLITE_GEN_DIR}/sqlite3.c ${SQLITE_GEN_DIR}/sqlite3.h
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${SQLITE_GEN_DIR}
+    COMMAND ${CMAKE_COMMAND} -E chdir ${SQLITE_GEN_DIR}
+            ${CMAKE_SOURCE_DIR}/third_party/sqlite/configure
+    COMMAND ${CMAKE_COMMAND} -E chdir ${SQLITE_GEN_DIR} make sqlite3.c
+    DEPENDS ${CMAKE_SOURCE_DIR}/third_party/sqlite/VERSION
+    COMMENT "Generating SQLite amalgamation (third_party/sqlite)"
+    VERBATIM)
+  # 编译期选项 = 官方 Recommended Compile-time Options 裁剪
+  # （docs/duostore-sqlite-meta.md §5.1）；THREADSAFE=1（serialized）是防御纵深
+  enable_language(C)  # 项目本体 CXX-only，amalgamation 是唯一 C 编译单元
+  add_library(lights3_sqlite3 STATIC ${SQLITE_GEN_DIR}/sqlite3.c)
+  target_include_directories(lights3_sqlite3 PUBLIC ${SQLITE_GEN_DIR})
+  target_compile_definitions(lights3_sqlite3 PRIVATE
+    SQLITE_THREADSAFE=1 SQLITE_OMIT_LOAD_EXTENSION SQLITE_DQS=0
+    SQLITE_DEFAULT_MEMSTATUS=0 SQLITE_LIKE_DOESNT_MATCH_BLOBS
+    SQLITE_MAX_EXPR_DEPTH=0 SQLITE_OMIT_DEPRECATED
+    SQLITE_OMIT_SHARED_CACHE SQLITE_USE_ALLOCA)
+  target_compile_options(lights3_sqlite3 PRIVATE -w)  # 第三方生成物不受 -Wall -Wextra 约束
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -192,6 +224,11 @@ if(LIGHTS3_DUOSTORE)
     target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE_REDIS_META)
     target_link_libraries(lights3_core PRIVATE hiredis::hiredis)
   endif()
+  if(LIGHTS3_DUOSTORE_SQLITE_META)
+    target_sources(lights3_core PRIVATE src/storage/duostore/sqlite_meta_store.cc)
+    target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE_SQLITE_META)
+    target_link_libraries(lights3_core PRIVATE lights3_sqlite3)
+  endif()
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -249,6 +286,11 @@ if(LIGHTS3_BUILD_TESTS)
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_redis.cc)
       target_link_libraries(unit_tests PRIVATE hiredis::hiredis)
     endif()
+    if(LIGHTS3_DUOSTORE_SQLITE_META)
+      # sqlite 用例需 sqlite3.h（测试 harness 直接构造"别人的库"做谱系拒绝校验）
+      target_sources(unit_tests PRIVATE tests/unit/test_duostore_sqlite.cc)
+      target_link_libraries(unit_tests PRIVATE lights3_sqlite3)
+    endif()
   endif()
   target_link_libraries(unit_tests PRIVATE lights3_core nlohmann_json::nlohmann_json)
   target_include_directories(unit_tests PRIVATE tests)
@@ -294,6 +336,12 @@ if(LIGHTS3_BUILD_TESTS)
       add_test(NAME e2e_duostore_redis
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-redis)
+    endif()
+    # duostore + SQLite meta（docs/duostore-sqlite-meta.md §9）：零外部依赖
+    if(LIGHTS3_DUOSTORE_SQLITE_META)
+      add_test(NAME e2e_duostore_sqlite
+               COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                       $<TARGET_FILE:lights3> builtin duostore-sqlite)
     endif()
   endif()
   if(LIGHTS3_CLOUDPROXY AND LIGHTS3_DRIVER_BUILTIN)

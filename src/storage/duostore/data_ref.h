@@ -8,10 +8,11 @@
 namespace lights3::storage::duostore {
 
 struct Extent {
-    enum class Kind : uint8_t { kChunk = 0, kPack = 1 };  // 可扩展：kRados…
+    // kRados：file_id 映射 rados 对象名（docs/duostore-rados-data.md §3.1）
+    enum class Kind : uint8_t { kChunk = 0, kPack = 1, kRados = 2 };
     Kind kind = Kind::kChunk;
     uint64_t file_id = 0;  // chunk / pack 文件号（全局单调分配，§4.5）
-    uint64_t offset = 0;   // pack 内 payload 起始偏移；chunk 恒 0
+    uint64_t offset = 0;   // pack 内 payload 起始偏移；chunk/rados 恒 0
     uint64_t length = 0;   // 本段字节数
     uint32_t crc32c = 0;   // 本段内容校验和
 

@@ -20,6 +20,14 @@ cleanup() {
     [[ -n "${RSRV_PID:-}" ]] && wait "$RSRV_PID" 2>/dev/null
     [[ -n "${REDIS_PID:-}" ]] && kill "$REDIS_PID" 2>/dev/null
     [[ -n "${REDIS_PID:-}" ]] && wait "$REDIS_PID" 2>/dev/null
+    # rados 数据面对象清扫（best-effort；GC 变现前 DELETE 只记账不删对象）
+    if [[ -n "${RADOS_NS:-}" ]] && command -v rados >/dev/null; then
+        rados -c "$LIGHTS3_TEST_RADOS_CONF" -p "$LIGHTS3_TEST_RADOS_POOL" \
+            --namespace "$RADOS_NS" ls 2>/dev/null | while read -r obj; do
+            rados -c "$LIGHTS3_TEST_RADOS_CONF" -p "$LIGHTS3_TEST_RADOS_POOL" \
+                --namespace "$RADOS_NS" rm "$obj" 2>/dev/null
+        done
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -41,6 +49,19 @@ if [[ "$BACKEND" == "duostore-redis" ]]; then
     done
     [[ -S "$WORK/redis.sock" ]] || { echo "redis-server did not come up"; cat "$WORK/redis.log"; exit 1; }
     echo "redis up: $WORK/redis.sock (pid $REDIS_PID)"
+fi
+
+# ---------- duostore-rados 场景：探测真实集群（docs/duostore-rados-data.md §11）----------
+# 集群无法像 redis 一样随手拉起（mon+osd+cephx 全套依赖）；环境变量
+# LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL 同时设置才跑，否则显式 SKIP
+RADOS_NS=""
+if [[ "$BACKEND" == "duostore-rados" ]]; then
+    if [[ -z "${LIGHTS3_TEST_RADOS_CONF:-}" || -z "${LIGHTS3_TEST_RADOS_POOL:-}" ]]; then
+        echo "[SKIP] duostore-rados: LIGHTS3_TEST_RADOS_CONF/LIGHTS3_TEST_RADOS_POOL not set"
+        exit 0
+    fi
+    RADOS_NS="e2e-$$-$RANDOM"  # 唯一 namespace 隔离，pool 可复用
+    echo "rados: conf=$LIGHTS3_TEST_RADOS_CONF pool=$LIGHTS3_TEST_RADOS_POOL ns=$RADOS_NS"
 fi
 
 # ---------- cloudproxy 场景：先起"云端"实例 B（自身也是 lights3）----------
@@ -142,6 +163,16 @@ elif [[ "$BACKEND" == "duostore-sqlite" ]]; then cat <<DUOSQLITE
     root: $WORK/data
     meta: sqlite
 DUOSQLITE
+elif [[ "$BACKEND" == "duostore-rados" ]]; then cat <<DUORADOS
+  - name: tierdata
+    type: duostore
+    root: $WORK/data
+    data: rados
+    rados_conf: ${LIGHTS3_TEST_RADOS_CONF:-}
+    rados_client: ${LIGHTS3_TEST_RADOS_CLIENT:-client.admin}
+    rados_pool: ${LIGHTS3_TEST_RADOS_POOL:-}
+    rados_namespace: $RADOS_NS
+DUORADOS
 elif [[ "$BACKEND" == "tiered-cloudproxy" ]]; then cat <<TIERCLOUD
   - name: localdata
     type: localfs

@@ -30,6 +30,7 @@ option(LIGHTS3_CLOUDPROXY "Build the cloudproxy storage backend (self-signed Sig
 option(LIGHTS3_DUOSTORE "Build the duostore storage backend (RocksDB metadata + chunk/pack data engine, docs/duostore-backend.md)" ON)
 option(LIGHTS3_DUOSTORE_REDIS_META "Build the Redis-backed IMetaStore for duostore (hiredis submodule, docs/duostore-redis-meta.md)" OFF)
 option(LIGHTS3_DUOSTORE_SQLITE_META "Build the SQLite-backed IMetaStore for duostore (sqlite submodule, docs/duostore-sqlite-meta.md)" OFF)
+option(LIGHTS3_DUOSTORE_RADOS_DATA "Build the Ceph/RADOS-backed IDataStore for duostore (system librados, docs/duostore-rados-data.md)" OFF)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DUOSTORE)
@@ -104,6 +105,52 @@ if(LIGHTS3_DUOSTORE_SQLITE_META)
     SQLITE_MAX_EXPR_DEPTH=0 SQLITE_OMIT_DEPRECATED
     SQLITE_OMIT_SHARED_CACHE SQLITE_USE_ALLOCA)
   target_compile_options(lights3_sqlite3 PRIVATE -w)  # 第三方生成物不受 -Wall -Wextra 约束
+endif()
+
+if(LIGHTS3_DUOSTORE_RADOS_DATA)
+  if(NOT LIGHTS3_DUOSTORE)
+    message(FATAL_ERROR "LIGHTS3_DUOSTORE_RADOS_DATA requires LIGHTS3_DUOSTORE")
+  endif()
+  # librados 取系统包，不作 submodule（Ceph 仓库数 GiB 级，docs/duostore-rados-data.md §9.1）：
+  # pkg-config 优先，退 find_path/find_library；无 sudo 环境可 dpkg -x 解包
+  # librados-dev/librados2 到 ~/.local/opt/ceph，或 LIGHTS3_RADOS_ROOT 显式指过去
+  find_package(PkgConfig QUIET)
+  if(PKG_CONFIG_FOUND)
+    pkg_check_modules(RADOS QUIET rados)
+  endif()
+  if(RADOS_FOUND)
+    set(LIGHTS3_RADOS_INCLUDE ${RADOS_INCLUDE_DIRS})
+    list(GET RADOS_LINK_LIBRARIES 0 LIGHTS3_RADOS_LIB)
+  else()
+    find_path(LIGHTS3_RADOS_INCLUDE rados/librados.h
+              HINTS "${LIGHTS3_RADOS_ROOT}/include" "${LIGHTS3_RADOS_ROOT}/usr/include"
+                    "$ENV{HOME}/.local/opt/ceph/include" "$ENV{HOME}/.local/opt/ceph/usr/include")
+    find_library(LIGHTS3_RADOS_LIB rados
+                 HINTS "${LIGHTS3_RADOS_ROOT}/lib" "${LIGHTS3_RADOS_ROOT}/usr/lib"
+                       "${LIGHTS3_RADOS_ROOT}/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+                       "$ENV{HOME}/.local/opt/ceph/lib" "$ENV{HOME}/.local/opt/ceph/usr/lib"
+                       "$ENV{HOME}/.local/opt/ceph/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+    if(NOT LIGHTS3_RADOS_INCLUDE OR NOT LIGHTS3_RADOS_LIB)
+      message(FATAL_ERROR "LIGHTS3_DUOSTORE_RADOS_DATA=ON but librados not found; "
+                          "install librados-dev or set LIGHTS3_RADOS_ROOT")
+    endif()
+  endif()
+  # deb 布局把 DT_NEEDED 的 libceph-common 装在 <libdir>/ceph 私有目录，且 librados
+  # 自带的 RUNPATH 是绝对路径 /usr/lib/...——非系统前缀（~/.local 解包）需补
+  # rpath-link（链接期解析 libceph-common 及其传递依赖：boost/rdmacm 等同前缀解包件）
+  # 与 rpath（运行期加载）
+  get_filename_component(LIGHTS3_RADOS_LIBDIR ${LIGHTS3_RADOS_LIB} DIRECTORY)
+  if(EXISTS "${LIGHTS3_RADOS_LIBDIR}/ceph" AND NOT LIGHTS3_RADOS_LIBDIR MATCHES "^/usr/lib")
+    # --disable-new-dtags：发 DT_RPATH 而非 DT_RUNPATH——librados 自带的 RUNPATH
+    # 指绝对系统路径，加载其 NEEDED 的 libceph-common 时不看可执行文件的 RUNPATH
+    # （RUNPATH 不传递），只有旧式 RPATH 对整棵依赖树生效
+    set(LIGHTS3_RADOS_LINKOPTS
+        "-Wl,--disable-new-dtags"
+        "-Wl,-rpath-link,${LIGHTS3_RADOS_LIBDIR}/ceph"
+        "-Wl,-rpath-link,${LIGHTS3_RADOS_LIBDIR}"
+        "-Wl,-rpath,${LIGHTS3_RADOS_LIBDIR}/ceph"
+        "-Wl,-rpath,${LIGHTS3_RADOS_LIBDIR}")
+  endif()
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -229,6 +276,15 @@ if(LIGHTS3_DUOSTORE)
     target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE_SQLITE_META)
     target_link_libraries(lights3_core PRIVATE lights3_sqlite3)
   endif()
+  if(LIGHTS3_DUOSTORE_RADOS_DATA)
+    target_sources(lights3_core PRIVATE src/storage/duostore/rados_data_store.cc)
+    target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE_RADOS_DATA)
+    target_include_directories(lights3_core SYSTEM PRIVATE ${LIGHTS3_RADOS_INCLUDE})
+    target_link_libraries(lights3_core PUBLIC ${LIGHTS3_RADOS_LIB})
+    if(DEFINED LIGHTS3_RADOS_LINKOPTS)
+      target_link_options(lights3_core PUBLIC ${LIGHTS3_RADOS_LINKOPTS})
+    endif()
+  endif()
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -291,6 +347,12 @@ if(LIGHTS3_BUILD_TESTS)
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_sqlite.cc)
       target_link_libraries(unit_tests PRIVATE lights3_sqlite3)
     endif()
+    if(LIGHTS3_DUOSTORE_RADOS_DATA)
+      # rados 用例需 librados 头（namespace 清扫 + 故障注入直连集群）；无集群时
+      # 用例全部显式 SKIP（docs/duostore-rados-data.md §11）
+      target_sources(unit_tests PRIVATE tests/unit/test_duostore_rados.cc)
+      target_include_directories(unit_tests SYSTEM PRIVATE ${LIGHTS3_RADOS_INCLUDE})
+    endif()
   endif()
   target_link_libraries(unit_tests PRIVATE lights3_core nlohmann_json::nlohmann_json)
   target_include_directories(unit_tests PRIVATE tests)
@@ -342,6 +404,13 @@ if(LIGHTS3_BUILD_TESTS)
       add_test(NAME e2e_duostore_sqlite
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-sqlite)
+    endif()
+    # duostore + RADOS data（docs/duostore-rados-data.md §11）：脚本内探测
+    # LIGHTS3_TEST_RADOS_CONF/POOL，缺则显式 SKIP（真实集群依赖）
+    if(LIGHTS3_DUOSTORE_RADOS_DATA)
+      add_test(NAME e2e_duostore_rados
+               COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                       $<TARGET_FILE:lights3> builtin duostore-rados)
     endif()
   endif()
   if(LIGHTS3_CLOUDPROXY AND LIGHTS3_DRIVER_BUILTIN)

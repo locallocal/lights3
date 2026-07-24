@@ -95,8 +95,8 @@ void check_ver(Cursor& c, uint8_t expect) {
 // ---- extent run 编解码（§4.3）----
 // run = { u8 kind, u64 first_file_id, u32 count, u64 chunk_len, u64 last_len,
 //         u64 pack_offset, u32 crc[count] }
-// 合并条件：连续 file_id 的 chunk 且前一段为满长（run 中除末段外长度必须一致）；
-// pack extent 不合并（count 恒 1）。
+// 合并条件：同 kind（chunk/rados，二者形态同构）连续 file_id 且前一段为满长
+// （run 中除末段外长度必须一致）；pack extent 不合并（count 恒 1）。
 
 void append_extent_runs(std::string& out, const std::vector<Extent>& extents) {
     struct Run {
@@ -112,7 +112,7 @@ void append_extent_runs(std::string& out, const std::vector<Extent>& extents) {
     for (const auto& e : extents) {
         if (!runs.empty()) {
             Run& r = runs.back();
-            if (r.kind == Extent::Kind::kChunk && e.kind == Extent::Kind::kChunk &&
+            if (r.kind == e.kind && e.kind != Extent::Kind::kPack &&
                 e.file_id == r.first_id + r.count && e.offset == 0 &&
                 r.last_len == r.chunk_len) {
                 ++r.count;
@@ -154,7 +154,7 @@ std::vector<Extent> read_extent_runs(Cursor& c) {
     std::vector<Extent> out;
     for (uint32_t i = 0; i < n_runs; ++i) {
         uint8_t kind = c.u8();
-        if (kind > uint8_t(Extent::Kind::kPack)) corrupt("unknown extent kind");
+        if (kind > uint8_t(Extent::Kind::kRados)) corrupt("unknown extent kind");
         uint64_t first_id = c.u64();
         uint32_t count = c.u32();
         if (count == 0) corrupt("empty run");

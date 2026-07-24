@@ -20,6 +20,10 @@ namespace lights3::storage {
 // redis / sqlite 需编译期开启对应 option，否则 from_params 抛 "not compiled in"
 enum class DuoMetaKind { kRocksDb, kRedis, kSqlite };
 
+// data 引擎选择（docs/duostore-rados-data.md §10，对偶 meta_kind）：
+// rados 需编译期开启 LIGHTS3_DUOSTORE_RADOS_DATA
+enum class DuoDataKind { kFs, kRados };
+
 struct DuoStoreConfig {
     std::string name;
     std::filesystem::path root;       // 必填；meta/ chunks/ packs/ 均在其下
@@ -31,6 +35,15 @@ struct DuoStoreConfig {
     int redis_pool_size = 8;              // 连接池大小
     std::filesystem::path sqlite_path;    // meta=sqlite：DB 文件，默认 <root>/meta.sqlite3
     size_t sqlite_cache = 64ull << 20;    // 页缓存（PRAGMA cache_size）
+    DuoDataKind data_kind = DuoDataKind::kFs;
+    std::string rados_conf = "/etc/ceph/ceph.conf";  // data=rados 键（docs/duostore-rados-data.md §10）
+    std::string rados_client = "client.admin";
+    std::string rados_pool;                          // data=rados 时必填
+    std::string rados_namespace;                     // pool 内逻辑隔离（多实例/测试）
+    uint64_t rados_chunk_size = 8ull << 20;
+    uint64_t rados_buffer_total = 256ull << 20;
+    int rados_connect_timeout_sec = 5;
+    int rados_op_timeout_sec = 0;                    // 0 = 不设 op 超时
     uint64_t chunk_size = 8ull << 20;
     uint64_t pack_threshold = 128 << 10;   // P2 生效
     uint64_t pack_max_size = 128ull << 20;

@@ -544,7 +544,8 @@ std::optional<std::string> RedisMetaStore::upload_raw(std::string_view b, std::s
 void RedisMetaStore::batch_refs(RedisBatch& bt, const DataRef& ref, bool add,
                                 std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind != Extent::Kind::kChunk) continue;  // pack 存活走 stats 账（P2）
+        if (e.kind == Extent::Kind::kPack) continue;  // pack 存活走 stats 账（P2）；
+                                                      // chunk/rados 皆按 file_id 入 refs
         if (add)
             bt.hset(refs_key(), std::to_string(e.file_id), owner);
         else
@@ -579,6 +580,8 @@ uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r) {
 }
 
 uint64_t RedisMetaStore::alloc_file_id(Extent::Kind kind) {
+    // kRados 与 kChunk 共号段（同 rocks 版论证：refs 不分 kind，防跨 kind id 碰撞）
+    if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCounterChunk : kCounterPack,
                     file_ids_[size_t(kind)]);
 }

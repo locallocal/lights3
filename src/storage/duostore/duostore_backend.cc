@@ -19,6 +19,10 @@
 #include "storage/duostore/sqlite_meta_store.h"
 #endif
 
+#ifdef LIGHTS3_DUOSTORE_RADOS_DATA
+#include "storage/duostore/rados_data_store.h"
+#endif
+
 namespace lights3::storage {
 
 using s3::S3Error;
@@ -147,6 +151,79 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
                                      "': sqlite_cache must be >= 1MiB");
     }
 
+    // data 引擎选择（docs/duostore-rados-data.md §10，对偶 meta 分支）
+    if (auto* v = get("data")) {
+        if (*v == "fs") {
+            c.data_kind = DuoDataKind::kFs;
+        } else if (*v == "rados") {
+#ifdef LIGHTS3_DUOSTORE_RADOS_DATA
+            c.data_kind = DuoDataKind::kRados;
+#else
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': data=rados not compiled in "
+                                     "(build with -DLIGHTS3_DUOSTORE_RADOS_DATA=ON)");
+#endif
+        } else {
+            bad_param(name, "data", *v);
+        }
+    }
+    if (auto* v = get("rados_conf"); v && !v->empty()) c.rados_conf = *v;
+    if (auto* v = get("rados_client"); v && !v->empty()) c.rados_client = *v;
+    if (auto* v = get("rados_pool")) c.rados_pool = *v;
+    if (auto* v = get("rados_namespace")) c.rados_namespace = *v;
+    if (auto* v = get("rados_chunk_size")) c.rados_chunk_size = parse_size(*v);
+    if (auto* v = get("rados_buffer_total")) c.rados_buffer_total = parse_size(*v);
+    if (auto* v = get("rados_connect_timeout"))
+        c.rados_connect_timeout_sec = parse_duration_sec(*v);
+    if (auto* v = get("rados_op_timeout")) c.rados_op_timeout_sec = parse_duration_sec(*v);
+    if (c.data_kind == DuoDataKind::kRados) {
+        if (c.rados_pool.empty())
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': data=rados needs rados_pool");
+        // 上限对齐 osd_max_object_size 默认 128MiB（docs/duostore-rados-data.md §3.4）
+        if (c.rados_chunk_size < 4096 || c.rados_chunk_size > (128ull << 20))
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': rados_chunk_size must be in [4KiB,128MiB]");
+        if (c.rados_buffer_total < c.rados_chunk_size)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': rados_buffer_total must be >= rados_chunk_size");
+        if (c.rados_connect_timeout_sec < 1)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': rados_connect_timeout must be >= 1s");
+        if (c.rados_op_timeout_sec < 0)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': rados_op_timeout must be >= 0");
+    }
+
+    // data 引擎专属键：出现但不属于选中引擎 → WARN（同下 meta 键归属表的机制；
+    // docs/duostore-rados-data.md §10——data=rados 下 chunk_size 被 rados_chunk_size
+    // 取代、pack_* 全部忽略；verify_chunk_crc 为两引擎共有）
+    {
+        static constexpr struct {
+            const char* key;
+            DuoDataKind kind;
+        } kDataOwnedKeys[] = {
+            {"chunk_size", DuoDataKind::kFs},
+            {"pack_threshold", DuoDataKind::kFs},
+            {"pack_max_size", DuoDataKind::kFs},
+            {"pack_writers", DuoDataKind::kFs},
+            {"pack_gc_ratio", DuoDataKind::kFs},
+            {"rados_conf", DuoDataKind::kRados},
+            {"rados_client", DuoDataKind::kRados},
+            {"rados_pool", DuoDataKind::kRados},
+            {"rados_namespace", DuoDataKind::kRados},
+            {"rados_chunk_size", DuoDataKind::kRados},
+            {"rados_buffer_total", DuoDataKind::kRados},
+            {"rados_connect_timeout", DuoDataKind::kRados},
+            {"rados_op_timeout", DuoDataKind::kRados},
+        };
+        const char* kind_name = c.data_kind == DuoDataKind::kFs ? "fs" : "rados";
+        for (const auto& dk : kDataOwnedKeys)
+            if (dk.kind != c.data_kind && params.count(dk.key))
+                LOG_WARN("duostore backend '{}': {} ignored with data={}", name, dk.key,
+                         kind_name);
+    }
+
     // meta 引擎专属键：出现但不属于选中引擎 → WARN（键→归属表；新引擎加行即可，
     // 免去每个分支各自维护对方键清单的 O(kinds²) 漏网）。meta_sync 为 rocksdb 与
     // sqlite 共有、仅 redis 下忽略（持久化语义改由 Redis 侧 AOF 承担），单列处理
@@ -209,9 +286,19 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{
             cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache});
     IMetaStore* meta = meta_.get();  // 分配回调不延长 meta 生命周期：本类持有两者，先关 data
-    data_ = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc}, pool_,
-        [meta](Extent::Kind kind) { return meta->alloc_file_id(kind); });
+    auto alloc = [meta](Extent::Kind kind) { return meta->alloc_file_id(kind); };
+#ifdef LIGHTS3_DUOSTORE_RADOS_DATA
+    if (cfg_.data_kind == DuoDataKind::kRados)
+        data_ = std::make_unique<RadosDataStore>(
+            RadosDataOptions{cfg_.rados_conf, cfg_.rados_client, cfg_.rados_pool,
+                             cfg_.rados_namespace, cfg_.rados_chunk_size,
+                             cfg_.rados_buffer_total, cfg_.rados_connect_timeout_sec,
+                             cfg_.rados_op_timeout_sec, cfg_.verify_chunk_crc},
+            pool_, alloc);
+#endif
+    if (!data_)
+        data_ = std::make_unique<FsDataStore>(
+            FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc}, pool_, alloc);
 }
 
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,

@@ -490,6 +490,8 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r) {
 }
 
 uint64_t SqliteMetaStore::alloc_file_id(Extent::Kind kind) {
+    // kRados 与 kChunk 共号段（同 rocks 版论证：refs 不分 kind，防跨 kind id 碰撞）
+    if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack,
                     file_ids_[size_t(kind)]);
 }
@@ -515,7 +517,8 @@ std::optional<std::string> SqliteMetaStore::object_raw(Conn& c, std::string_view
 void SqliteMetaStore::write_refs(Conn& c, const DataRef& ref, bool add,
                                  std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind != Extent::Kind::kChunk) continue;  // pack 存活走 pack_stats 账（P2）
+        if (e.kind == Extent::Kind::kPack) continue;  // pack 存活走 pack_stats 账（P2）；
+                                                      // chunk/rados 皆按 file_id 入 refs
         if (add) {
             Stmt st(c, kRefPut);
             st.i64(1, int64_t(e.file_id)).blob(2, owner);

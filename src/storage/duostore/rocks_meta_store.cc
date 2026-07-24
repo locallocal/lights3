@@ -174,7 +174,8 @@ void RocksMetaStore::require_bucket_locked(std::string_view b) {
 void RocksMetaStore::batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add,
                                 std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind != Extent::Kind::kChunk) continue;  // pack 存活走 stats 账（P2）
+        if (e.kind == Extent::Kind::kPack) continue;  // pack 存活走 stats 账（P2）；
+                                                      // chunk/rados 皆按 file_id 入 refs
         if (add)
             batch.Put(cfs_[kRefs], codec::be64_key(e.file_id), slice(owner));
         else
@@ -212,6 +213,9 @@ uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r) {
 }
 
 uint64_t RocksMetaStore::alloc_file_id(Extent::Kind kind) {
+    // kRados 与 kChunk 共号段：refs 表按裸 file_id 记账不分 kind，独立计数器会在
+    // 同一 meta 上切换 data 引擎（fs↔rados）时产生跨 kind id 碰撞
+    if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCounterChunk : kCounterPack,
                     file_ids_[size_t(kind)]);
 }

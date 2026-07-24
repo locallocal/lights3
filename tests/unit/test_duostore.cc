@@ -87,6 +87,17 @@ TEST(duostore_extent_run_roundtrip) {
                                  {Extent::Kind::kPack, 7, 8192, 50, 43}};
     CHECK(codec::decode_extents(codec::encode_extents(packs)) == packs);
 
+    // kRados 与 kChunk 同构合并（docs/duostore-rados-data.md §3.1）：连续 id 压单
+    // run；异 kind 相邻不合并
+    std::vector<Extent> rados;
+    for (uint64_t i = 0; i < 4; ++i)
+        rados.push_back({Extent::Kind::kRados, 500 + i, 0, i == 3 ? 100 : 8192, uint32_t(i)});
+    CHECK_EQ(codec::encode_extents(rados).size(), size_t(4 + 37 + 4 * 4));
+    CHECK(codec::decode_extents(codec::encode_extents(rados)) == rados);
+    std::vector<Extent> cross = {chunk_extent(600, 8192, 1),
+                                 {Extent::Kind::kRados, 601, 0, 8192, 2}};
+    CHECK(codec::decode_extents(codec::encode_extents(cross)) == cross);
+
     // 空 = 0 字节对象
     CHECK(codec::decode_extents(codec::encode_extents({})).empty());
 }

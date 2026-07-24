@@ -509,7 +509,7 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | --- | --- | --- |
 | meta | redis / TiKV（多网关共 meta） | 实现 IMetaStore：同步客户端在池线程调用即可（§2.2）；事务不变量用各自原语（redis MULTI/Lua、TiKV 事务）表达——语义级接口不假设有序 KV，这正是 §2.1 选 A 的原因。Redis 版详细设计见 [duostore-redis-meta.md](duostore-redis-meta.md) |
 | meta | SQLite（单文件部署） | 同上，SQL 事务。详细设计见 [duostore-sqlite-meta.md](duostore-sqlite-meta.md) |
-| data | Ceph / RADOS | 实现 IDataStore：新增 `Extent::Kind::kRados`（file_id 映射 rados 对象名），meta 层零改动；librados 异步 API 与协程接口天然契合 |
+| data | Ceph / RADOS | 实现 IDataStore：新增 `Extent::Kind::kRados`（file_id 映射 rados 对象名），meta 层零改动；librados 异步 API 与协程接口天然契合。详细调研见 [duostore-rados-data.md](duostore-rados-data.md) |
 | data | io_uring 版 FsDataStore | 对照 xlocalfs 的做法，数据面换 IO 引擎、布局不变 |
 
 组合矩阵：RocksDB+本地盘（首期）、TiKV+Ceph（全分布式网关）、

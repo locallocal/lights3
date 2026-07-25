@@ -23,6 +23,10 @@
 #include "storage/duostore/rados_data_store.h"
 #endif
 
+#ifdef LIGHTS3_DUOSTORE_TIKV_META
+#include "storage/duostore/tikv_meta_store.h"
+#endif
+
 namespace lights3::storage {
 
 using s3::S3Error;
@@ -118,6 +122,14 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
                                      "': meta=sqlite not compiled in "
                                      "(build with -DLIGHTS3_DUOSTORE_SQLITE_META=ON)");
 #endif
+        } else if (*v == "tikv") {
+#ifdef LIGHTS3_DUOSTORE_TIKV_META
+            c.meta_kind = DuoMetaKind::kTikv;
+#else
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': meta=tikv not compiled in "
+                                     "(build with -DLIGHTS3_DUOSTORE_TIKV_META=ON)");
+#endif
         } else {
             bad_param(name, "meta", *v);
         }
@@ -149,6 +161,36 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         if (c.sqlite_cache < (1ull << 20))
             throw std::runtime_error("duostore backend '" + name +
                                      "': sqlite_cache must be >= 1MiB");
+    }
+
+    // tikv meta（docs/duostore-tikv-meta.md §9）：pd_endpoints 逗号分隔；持久化 =
+    // raft 多数派，meta_sync 无意义（归属表下方单列 WARN）
+    if (auto* v = get("pd_endpoints")) {
+        std::string_view rest = *v;
+        while (!rest.empty()) {
+            auto comma = rest.find(',');
+            std::string_view ep = rest.substr(0, comma);
+            // 修剪空白（YAML 里 "a:2379, b:2379" 的书写习惯）
+            while (!ep.empty() && (ep.front() == ' ' || ep.front() == '\t')) ep.remove_prefix(1);
+            while (!ep.empty() && (ep.back() == ' ' || ep.back() == '\t')) ep.remove_suffix(1);
+            if (!ep.empty()) c.pd_endpoints.emplace_back(ep);
+            if (comma == std::string_view::npos) break;
+            rest.remove_prefix(comma + 1);
+        }
+    }
+    if (auto* v = get("tikv_prefix")) c.tikv_prefix = *v;
+    if (auto* v = get("tikv_ca")) c.tikv_ca = *v;
+    if (auto* v = get("tikv_cert")) c.tikv_cert = *v;
+    if (auto* v = get("tikv_key")) c.tikv_key = *v;
+    if (c.meta_kind == DuoMetaKind::kTikv) {
+        if (c.pd_endpoints.empty())
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': meta=tikv needs pd_endpoints");
+        // mTLS 三件套要么全给要么全空（ClusterConfig 以 ca 非空为启用判据）
+        int given = int(!c.tikv_ca.empty()) + int(!c.tikv_cert.empty()) + int(!c.tikv_key.empty());
+        if (given != 0 && given != 3)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': tikv_ca/tikv_cert/tikv_key must be set together");
     }
 
     // data 引擎选择（docs/duostore-rados-data.md §10，对偶 meta 分支）
@@ -226,7 +268,8 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
 
     // meta 引擎专属键：出现但不属于选中引擎 → WARN（键→归属表；新引擎加行即可，
     // 免去每个分支各自维护对方键清单的 O(kinds²) 漏网）。meta_sync 为 rocksdb 与
-    // sqlite 共有、仅 redis 下忽略（持久化语义改由 Redis 侧 AOF 承担），单列处理
+    // sqlite 共有、redis / tikv 下忽略（持久化语义分别归 Redis AOF 与 raft 多数派
+    // 承担），单列处理
     {
         static constexpr struct {
             const char* key;
@@ -240,16 +283,24 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             {"redis_pool_size", DuoMetaKind::kRedis},
             {"sqlite_path", DuoMetaKind::kSqlite},
             {"sqlite_cache", DuoMetaKind::kSqlite},
+            {"pd_endpoints", DuoMetaKind::kTikv},
+            {"tikv_prefix", DuoMetaKind::kTikv},
+            {"tikv_ca", DuoMetaKind::kTikv},
+            {"tikv_cert", DuoMetaKind::kTikv},
+            {"tikv_key", DuoMetaKind::kTikv},
         };
-        const char* kind_name = c.meta_kind == DuoMetaKind::kRocksDb  ? "rocksdb"
-                                : c.meta_kind == DuoMetaKind::kRedis ? "redis"
-                                                                     : "sqlite";
+        const char* kind_name = c.meta_kind == DuoMetaKind::kRocksDb   ? "rocksdb"
+                                : c.meta_kind == DuoMetaKind::kRedis   ? "redis"
+                                : c.meta_kind == DuoMetaKind::kSqlite  ? "sqlite"
+                                                                       : "tikv";
         for (const auto& mk : kMetaOwnedKeys)
             if (mk.kind != c.meta_kind && params.count(mk.key))
                 LOG_WARN("duostore backend '{}': {} ignored with meta={}", name, mk.key,
                          kind_name);
-        if (c.meta_kind == DuoMetaKind::kRedis && params.count("meta_sync"))
-            LOG_WARN("duostore backend '{}': meta_sync ignored with meta=redis", name);
+        // redis：持久化语义归 Redis 侧 AOF；tikv：提交即 raft 多数派，恒等效 sync
+        if ((c.meta_kind == DuoMetaKind::kRedis || c.meta_kind == DuoMetaKind::kTikv) &&
+            params.count("meta_sync"))
+            LOG_WARN("duostore backend '{}': meta_sync ignored with meta={}", name, kind_name);
     }
 
     if (c.chunk_size < 4096)
@@ -281,6 +332,11 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     if (cfg_.meta_kind == DuoMetaKind::kSqlite)
         meta_ = std::make_unique<SqliteMetaStore>(SqliteMetaOptions{
             cfg_.sqlite_path.string(), cfg_.meta_sync, cfg_.sqlite_cache});
+#endif
+#ifdef LIGHTS3_DUOSTORE_TIKV_META
+    if (cfg_.meta_kind == DuoMetaKind::kTikv)
+        meta_ = std::make_unique<TikvMetaStore>(TikvMetaOptions{
+            cfg_.pd_endpoints, cfg_.tikv_prefix, cfg_.tikv_ca, cfg_.tikv_cert, cfg_.tikv_key});
 #endif
     if (!meta_)
         meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{

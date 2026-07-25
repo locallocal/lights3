@@ -24,3 +24,6 @@
 	path = third_party/sqlite
 	url = https://github.com/sqlite/sqlite.git
 	shallow = true
+[submodule "third_party/client-c"]
+	path = third_party/client-c
+	url = https://github.com/tikv/client-c.git

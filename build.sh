@@ -8,6 +8,9 @@ usage() {
 用法: ./build.sh [选项]
   --seastar     开启 seastar 驱动（重依赖，默认关；见 docs/http-adapter.md §3.3）。
                 该开关写入 CMake 缓存后是粘性的，要关掉请配合 --clean
+  --tikv        开启 duostore 的 TiKV meta 后端（client-c submodule + 系统级
+                gRPC/Poco 依赖，默认关；见 docs/duostore-tikv-meta.md §8）。
+                粘性语义同 --seastar；建议配 -B build-tikv 与常规构建隔离
   --debug       Debug 构建（默认 RelWithDebInfo）
   --asan        AddressSanitizer 构建；构建目录默认改用 build-asan，
                 与普通构建隔离（可再用 -B 覆盖）
@@ -26,6 +29,7 @@ BUILD_DIR=""
 BUILD_TYPE=""
 SAN=""      # "" | address | thread
 SEASTAR=0
+TIKV=0
 CLEAN=0
 RUN_TEST=0
 JOBS=$(nproc)
@@ -34,6 +38,7 @@ CMAKE_EXTRA=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --seastar) SEASTAR=1 ;;
+        --tikv)    TIKV=1 ;;
         --debug)   BUILD_TYPE=Debug ;;
         --asan)    [[ $SAN == thread ]] && { echo "--asan 与 --tsan 互斥" >&2; exit 2; }
                    SAN=address ;;
@@ -69,6 +74,13 @@ git submodule update --init "${LIGHT_MODULES[@]}"
 if [[ $SEASTAR -eq 1 ]]; then
     git submodule update --init third_party/seastar
 fi
+# client-c 需系统级 gRPC/Poco 工具链，惰性拉取（docs/duostore-tikv-meta.md §8.1）；
+# 其内嵌 submodule 只取 kvproto/libfiu（abseil 统一用系统份，googletest 不编）
+if [[ $TIKV -eq 1 ]]; then
+    git submodule update --init third_party/client-c
+    git -C third_party/client-c submodule update --init \
+        third_party/kvproto third_party/libfiu
+fi
 
 [[ $CLEAN -eq 1 ]] && rm -rf "$BUILD_DIR"
 
@@ -77,6 +89,7 @@ command -v ninja >/dev/null && CMAKE_ARGS+=(-G Ninja)
 [[ -n $BUILD_TYPE ]] && CMAKE_ARGS+=(-DCMAKE_BUILD_TYPE="$BUILD_TYPE")
 # 不传 OFF：避免覆盖既有缓存里的 ON（粘性语义，见 usage）
 [[ $SEASTAR -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DRIVER_SEASTAR=ON)
+[[ $TIKV -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DUOSTORE_TIKV_META=ON)
 if [[ -n $SAN ]]; then
     CMAKE_ARGS+=(-DCMAKE_CXX_FLAGS="-fsanitize=$SAN -fno-omit-frame-pointer"
                  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=$SAN")

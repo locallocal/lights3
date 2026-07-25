@@ -396,9 +396,9 @@ backends:
 
 | 阶段 | 内容 | 可独立验收 | 状态 |
 | --- | --- | --- | --- |
-| R1 | hiredis submodule + CMake option + build.sh；连接池 / reply RAII / 错误映射 / 脚本加载器；`ctr:*` 计数器与 alloc_file_id；bucket 四方法 + schema 校验；meta 测试套件接口化 + redis-server 探测/skip 机制 | RocksDB 套件重构后全绿；redis 在场时 R1 用例绿 | 未开始 |
-| R2 | 通用 guarded-commit 脚本 + `RedisBatch`；object 四方法（含 list_objects Lua）+ refs / gcq / swap_extents / chunk_referenced / peek_reclaims / ack_reclaim | meta store 套件两实现全绿 + 冲突重试/CAS 专项 | 未开始 |
-| R3 | multipart 全套（create / put_part / list_parts / list_uploads / complete / abort，含 parts sha1 指纹）；注入组合跑 `run_backend_suite`；`e2e_duostore_redis` | 后端一致性套件 + e2e 绿 | 未开始 |
+| R1 | hiredis submodule + CMake option + build.sh；连接池 / reply RAII / 错误映射 / 脚本加载器；`ctr:*` 计数器与 alloc_file_id；bucket 四方法 + schema 校验；meta 测试套件接口化 + redis-server 探测/skip 机制 | RocksDB 套件重构后全绿；redis 在场时 R1 用例绿 | 已完成 |
+| R2 | 通用 guarded-commit 脚本 + `RedisBatch`；object 四方法（含 list_objects Lua）+ refs / gcq / swap_extents / chunk_referenced / peek_reclaims / ack_reclaim | meta store 套件两实现全绿 + 冲突重试/CAS 专项 | 已完成 |
+| R3 | multipart 全套（create / put_part / list_parts / list_uploads / complete / abort，含 parts sha1 指纹）；注入组合跑 `run_backend_suite`；`e2e_duostore_redis` | 后端一致性套件 + e2e 绿 | 已完成 |
 | R4 | 打磨：AOF 探测告警、`redis_wait_replicas`、指标（CAS 重试 / 重连计数）、TLS 评估、文档状态头更新 | 全 ctest 矩阵（含 skip 路径）绿 | 未开始 |
 
 R1 先做 bucket 而非 object：bucket 方法覆盖"单命令原子（HSETNX）+ 纯读

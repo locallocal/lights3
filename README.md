@@ -132,12 +132,18 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
   `/-/admin/credentials` ([docs/credential-management.md](docs/credential-management.md))
 - **Storage**: LocalFs (sidecar metadata, atomic writes via staging+rename),
   XLocalFs (io_uring data plane using raw syscalls, no liburing required),
-  Memory (for tests); bucket-level glob routing
+  Memory (for tests), CloudProxy (self-signed SigV4 proxy to a remote S3,
+  [docs/cloudproxy-backend.md](docs/cloudproxy-backend.md)), Tiered (cold-data
+  tiering combinator, [docs/tiered-storage.md](docs/tiered-storage.md)),
+  DuoStore (split metadata/data engine — meta: RocksDB/Redis/SQLite/TiKV,
+  data: local fs/RADOS, [docs/duostore-backend.md](docs/duostore-backend.md));
+  bucket-level glob routing
 - **S3 API**: ListBuckets, Create/Head/DeleteBucket, Put/Get/Head/DeleteObject
   (including Range and conditional requests), CopyObject, batch DeleteObjects,
   ListObjectsV2 (prefix/delimiter/pagination), Multipart Upload
   (create/upload/list/complete/abort)
 
 Not implemented yet (returns NotImplemented; see
-[docs/s3-protocol.md](docs/s3-protocol.md) for the roadmap): the
-cloudproxy backend, versioning, ACL/policy, lifecycle, SSE, and Object Lock.
+[docs/s3-protocol.md](docs/s3-protocol.md) for the roadmap):
+UploadPartCopy, versioning, ACL/policy, lifecycle, SSE, and Object Lock.
+The full backlog lives in [docs/todo.md](docs/todo.md).

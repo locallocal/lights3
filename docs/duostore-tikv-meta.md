@@ -356,8 +356,9 @@ TiDB**。本方案不引入 TiDB（§1），则：
 | 纯 KV 集群 + 长期运行 | **必须自行推进**：周期调用 PD 的 UpdateServiceGCSafePoint（kvproto 有、client-c 未封装——上游扩展或 pd-ctl/HTTP API 旁路脚本）。推进为 now − 保留窗口（如 10 分钟，只需覆盖最长 list/事务时长） |
 | 测试/短期集群 | 不推进无碍（垃圾积累但正确性无损） |
 
-首期（T1-T4）按测试形态处理；**T5 交付推进方案**（优先在 fork 的
-pd::Client 上加 updateServiceGCSafePoint——与 §6.3 同一 fork 流程）。
+首期（T1-T4）按测试形态处理；**T5 交付推进方案**（优先以 in-tree 侧车
+封装 PD 的 UpdateServiceGCSafePoint——与 §6.3 同一侧车流程、不改上游
+submodule；或 pd-ctl / HTTP API 旁路脚本）。
 不推进的后果是空间放大与 scan 变慢，不是正确性问题，故可后置。
 
 ## 8. 构建接入
@@ -516,8 +517,8 @@ backends:
    万分片 complete_upload 的 prewrite 时长与 lock_ttl 余量（§6.3）；
    残留锁恢复——事务提交中途 kill 网关进程，另一网关读同 key 经
    LockResolver 正常解锁推进；
-4. **上游锁定**：fork 指针变更（§6.3）经 submodule commit 锁定，CI
-   不追 master——升级 = 显式换指针 + 全套件回归。
+4. **上游锁定**：submodule 指针锁定上游 commit（§6.3 侧车不改上游源码），
+   CI 不追 master——升级 = 显式换指针 + 全套件回归。
 
 ## 11. 实施拆分
 

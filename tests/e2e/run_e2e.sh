@@ -64,6 +64,21 @@ if [[ "$BACKEND" == "duostore-rados" ]]; then
     echo "rados: conf=$LIGHTS3_TEST_RADOS_CONF pool=$LIGHTS3_TEST_RADOS_POOL ns=$RADOS_NS"
 fi
 
+# ---------- duostore-tikv 场景：探测真实集群（docs/duostore-tikv-meta.md §10）----------
+# PD+TiKV 无法随手拉起（tiup/多进程依赖）；LIGHTS3_TEST_PD_ADDR 设置才跑，否则显式 SKIP。
+# 集群侧残留：TxnKV 无客户端可及的按前缀清删（tikv-ctl 不假设在场），每次运行留下
+# 的键有界且前缀唯一——用例自删桶/对象，残留仅 schema、计数器与已销账 gcq 的版本
+# 垃圾，随集群 GC safepoint 回收（docs/duostore-tikv-meta.md §7.3）
+TIKV_PREFIX=""
+if [[ "$BACKEND" == "duostore-tikv" ]]; then
+    if [[ -z "${LIGHTS3_TEST_PD_ADDR:-}" ]]; then
+        echo "[SKIP] duostore-tikv: LIGHTS3_TEST_PD_ADDR not set"
+        exit 0
+    fi
+    TIKV_PREFIX="e2e-$$-$RANDOM:"  # 唯一前缀隔离，集群可复用
+    echo "tikv: pd=$LIGHTS3_TEST_PD_ADDR prefix=$TIKV_PREFIX"
+fi
+
 # ---------- cloudproxy 场景：先起"云端"实例 B（自身也是 lights3）----------
 CLOUD_AK=E2ECLOUDKEY
 CLOUD_SK=e2e-cloud-secret
@@ -173,6 +188,14 @@ elif [[ "$BACKEND" == "duostore-rados" ]]; then cat <<DUORADOS
     rados_pool: ${LIGHTS3_TEST_RADOS_POOL:-}
     rados_namespace: $RADOS_NS
 DUORADOS
+elif [[ "$BACKEND" == "duostore-tikv" ]]; then cat <<DUOTIKV
+  - name: tierdata
+    type: duostore
+    root: $WORK/data
+    meta: tikv
+    pd_endpoints: "${LIGHTS3_TEST_PD_ADDR:-}"
+    tikv_prefix: "$TIKV_PREFIX"
+DUOTIKV
 elif [[ "$BACKEND" == "tiered-cloudproxy" ]]; then cat <<TIERCLOUD
   - name: localdata
     type: localfs

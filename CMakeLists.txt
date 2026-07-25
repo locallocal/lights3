@@ -31,6 +31,7 @@ option(LIGHTS3_DUOSTORE "Build the duostore storage backend (RocksDB metadata + 
 option(LIGHTS3_DUOSTORE_REDIS_META "Build the Redis-backed IMetaStore for duostore (hiredis submodule, docs/duostore-redis-meta.md)" OFF)
 option(LIGHTS3_DUOSTORE_SQLITE_META "Build the SQLite-backed IMetaStore for duostore (sqlite submodule, docs/duostore-sqlite-meta.md)" OFF)
 option(LIGHTS3_DUOSTORE_RADOS_DATA "Build the Ceph/RADOS-backed IDataStore for duostore (system librados, docs/duostore-rados-data.md)" OFF)
+option(LIGHTS3_DUOSTORE_TIKV_META "Build the TiKV-backed IMetaStore for duostore (client-c submodule, docs/duostore-tikv-meta.md)" OFF)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DUOSTORE)
@@ -151,6 +152,102 @@ if(LIGHTS3_DUOSTORE_RADOS_DATA)
         "-Wl,-rpath,${LIGHTS3_RADOS_LIBDIR}/ceph"
         "-Wl,-rpath,${LIGHTS3_RADOS_LIBDIR}")
   endif()
+endif()
+
+if(LIGHTS3_DUOSTORE_TIKV_META)
+  if(NOT LIGHTS3_DUOSTORE)
+    message(FATAL_ERROR "LIGHTS3_DUOSTORE_TIKV_META requires LIGHTS3_DUOSTORE")
+  endif()
+  # client-c 依赖 gRPC/protobuf（构建期还需 protoc + grpc_cpp_plugin 生成 kvproto）
+  # /Poco/abseil，取系统包；无 sudo 环境 apt-get download + dpkg -x 解包到
+  # ~/.local/opt/tikv-deps（docs/duostore-tikv-meta.md §8.2），或用
+  # LIGHTS3_TIKV_DEPS_ROOT 显式指解包前缀（<root>/bin/protoc、<root>/include、
+  # <root>/lib/<arch>）。client-c 的依赖发现均带 if(NOT ...) 守卫，父作用域预置
+  # 变量即整体短路其 find 模块
+  if(NOT LIGHTS3_TIKV_DEPS_ROOT AND EXISTS "$ENV{HOME}/.local/opt/tikv-deps/usr")
+    set(LIGHTS3_TIKV_DEPS_ROOT "$ENV{HOME}/.local/opt/tikv-deps/usr")
+  endif()
+  if(LIGHTS3_TIKV_DEPS_ROOT)
+    set(LIGHTS3_TIKV_LIBDIR "${LIGHTS3_TIKV_DEPS_ROOT}/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
+    set(LIGHTS3_TIKV_INCLUDE "${LIGHTS3_TIKV_DEPS_ROOT}/include")
+    # 解包的 protoc / grpc_cpp_plugin 运行时依赖同树 so——生成 LD_LIBRARY_PATH
+    # wrapper，kvproto 的 codegen custom command 经变量引用拿到的就是 wrapper
+    foreach(tool protoc grpc_cpp_plugin)
+      file(WRITE "${CMAKE_BINARY_DIR}/tikv-tools/${tool}"
+           "#!/bin/sh\nexport LD_LIBRARY_PATH='${LIGHTS3_TIKV_LIBDIR}'\nexec '${LIGHTS3_TIKV_DEPS_ROOT}/bin/${tool}' \"$@\"\n")
+      file(CHMOD "${CMAKE_BINARY_DIR}/tikv-tools/${tool}" PERMISSIONS
+           OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
+           WORLD_READ WORLD_EXECUTE)
+    endforeach()
+    set(Protobuf_INCLUDE_DIR "${LIGHTS3_TIKV_INCLUDE}")
+    set(Protobuf_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libprotobuf.so")
+    set(Protobuf_PROTOC_EXECUTABLE "${CMAKE_BINARY_DIR}/tikv-tools/protoc")
+    set(gRPC_FOUND TRUE)
+    set(gRPC_INCLUDE_DIRS "${LIGHTS3_TIKV_INCLUDE}")
+    set(gRPC_LIBRARIES
+        "${LIGHTS3_TIKV_LIBDIR}/libgrpc++.so"
+        "${LIGHTS3_TIKV_LIBDIR}/libgrpc.so"
+        "${LIGHTS3_TIKV_LIBDIR}/libgpr.so")
+    set(gRPC_CPP_PLUGIN "${CMAKE_BINARY_DIR}/tikv-tools/grpc_cpp_plugin")
+    set(Poco_Foundation_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libPocoFoundation.so")
+    set(Poco_Net_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libPocoNet.so")
+    set(Poco_JSON_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libPocoJSON.so")
+    set(Poco_Util_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libPocoUtil.so")
+    # kvproto 链 absl::synchronization——用解包树的 absl config（与解包 grpc 同 ABI）
+    find_package(absl REQUIRED CONFIG PATHS "${LIGHTS3_TIKV_LIBDIR}/cmake/absl" NO_DEFAULT_PATH)
+    # 链接期解析 grpc/Poco 的 NEEDED（absl/re2/cares 同树解包）+ 运行期加载：
+    # RUNPATH 不传递到依赖树深处，须旧式 RPATH 对整棵树生效（librados 同款论证）
+    set(LIGHTS3_TIKV_LINKOPTS
+        "-Wl,--disable-new-dtags"
+        "-Wl,-rpath-link,${LIGHTS3_TIKV_LIBDIR}"
+        "-Wl,-rpath,${LIGHTS3_TIKV_LIBDIR}")
+  else()
+    # 系统包路线：Poco 用 client-c 自带的 FindPoco 在父作用域先找（其变量同时
+    # 短路 client-c 内部的 find_poco），absl 走系统 config。模块路径用毕即还原
+    # （client-c 的 FindgRPC/FindPoco 及其捆绑 FPHSA 不能泄漏给后续 find_package）
+    set(LIGHTS3_SAVED_MODULE_PATH "${CMAKE_MODULE_PATH}")
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/third_party/client-c/cmake/Modules")
+    find_package(Poco REQUIRED Foundation Net JSON Util)
+    find_package(absl REQUIRED)
+    set(CMAKE_MODULE_PATH "${LIGHTS3_SAVED_MODULE_PATH}")
+    unset(LIGHTS3_SAVED_MODULE_PATH)
+  endif()
+  # 非空即阻断 client-c 内建 abseil-cpp submodule 与 kvproto 的 find_abseil——
+  # 统一用上面 find 到的 absl，避免与 grpc 所链 absl 双份共存
+  set(ABSL_ROOT_DIR "/usr")
+  set(ENABLE_TESTS OFF)  # client-c 自带 gtest 用例（上游 #104：ON 已知构建断裂）
+  if(CMAKE_VERSION VERSION_LESS 3.25)
+    add_subdirectory(third_party/client-c EXCLUDE_FROM_ALL)
+  else()
+    add_subdirectory(third_party/client-c EXCLUDE_FROM_ALL SYSTEM)
+  endif()
+  # 上游 kv_client 欠链/欠传：只链 PocoFoundation，而 pd/coprocessor 源码实际
+  # 用到 Net/JSON/Util 符号；Poco include 也未进其传递 include
+  target_link_libraries(kv_client ${Poco_Net_LIBRARY} ${Poco_JSON_LIBRARY} ${Poco_Util_LIBRARY})
+  if(LIGHTS3_TIKV_DEPS_ROOT)
+    target_include_directories(kv_client SYSTEM PUBLIC "${LIGHTS3_TIKV_INCLUDE}")
+  endif()
+  # 第三方源码不受 -Wall -Wextra 约束（sqlite 同款惯例）
+  target_compile_options(kv_client PRIVATE -w)
+  target_compile_options(kvproto PRIVATE -w)
+  target_compile_options(fiu PRIVATE -w)
+  # 依赖预置/短路变量只为 client-c 子目录配置服务（target 属性已固化），用毕
+  # 即清——顶层目录作用域的 Protobuf_*/gRPC_* 会短路后续兄弟子目录（如 seastar
+  # 的 SeastarDependencies 走 module 模式 FindProtobuf）的依赖发现，静默造成
+  # 跨依赖树 ABI 混链
+  unset(Protobuf_INCLUDE_DIR)
+  unset(Protobuf_LIBRARY)
+  unset(Protobuf_PROTOC_EXECUTABLE)
+  unset(gRPC_FOUND)
+  unset(gRPC_INCLUDE_DIRS)
+  unset(gRPC_LIBRARIES)
+  unset(gRPC_CPP_PLUGIN)
+  unset(Poco_Foundation_LIBRARY)
+  unset(Poco_Net_LIBRARY)
+  unset(Poco_JSON_LIBRARY)
+  unset(Poco_Util_LIBRARY)
+  unset(ABSL_ROOT_DIR)
+  unset(ENABLE_TESTS)
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -285,6 +382,16 @@ if(LIGHTS3_DUOSTORE)
       target_link_options(lights3_core PUBLIC ${LIGHTS3_RADOS_LINKOPTS})
     endif()
   endif()
+  if(LIGHTS3_DUOSTORE_TIKV_META)
+    target_sources(lights3_core PRIVATE
+      src/storage/duostore/tikv_client.cc
+      src/storage/duostore/tikv_meta_store.cc)
+    target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE_TIKV_META)
+    target_link_libraries(lights3_core PRIVATE kv_client)
+    if(DEFINED LIGHTS3_TIKV_LINKOPTS)
+      target_link_options(lights3_core PUBLIC ${LIGHTS3_TIKV_LINKOPTS})
+    endif()
+  endif()
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
@@ -353,6 +460,12 @@ if(LIGHTS3_BUILD_TESTS)
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_rados.cc)
       target_include_directories(unit_tests SYSTEM PRIVATE ${LIGHTS3_RADOS_INCLUDE})
     endif()
+    if(LIGHTS3_DUOSTORE_TIKV_META)
+      # tikv 用例需真实 PD/TiKV 集群（LIGHTS3_TEST_PD_ADDR），缺则显式 SKIP
+      # （docs/duostore-tikv-meta.md §10）；专项用例直连 kv_client 做守卫/冲突验证
+      target_sources(unit_tests PRIVATE tests/unit/test_duostore_tikv.cc)
+      target_link_libraries(unit_tests PRIVATE kv_client)
+    endif()
   endif()
   target_link_libraries(unit_tests PRIVATE lights3_core nlohmann_json::nlohmann_json)
   target_include_directories(unit_tests PRIVATE tests)
@@ -411,6 +524,13 @@ if(LIGHTS3_BUILD_TESTS)
       add_test(NAME e2e_duostore_rados
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-rados)
+    endif()
+    # duostore + TiKV meta（docs/duostore-tikv-meta.md §10）：脚本内探测
+    # LIGHTS3_TEST_PD_ADDR，缺则显式 SKIP（真实集群依赖）
+    if(LIGHTS3_DUOSTORE_TIKV_META)
+      add_test(NAME e2e_duostore_tikv
+               COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                       $<TARGET_FILE:lights3> builtin duostore-tikv)
     endif()
   endif()
   if(LIGHTS3_CLOUDPROXY AND LIGHTS3_DRIVER_BUILTIN)

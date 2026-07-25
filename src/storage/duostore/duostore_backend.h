@@ -8,6 +8,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "core/thread_pool.h"
 #include "storage/backend.h"
@@ -16,9 +17,10 @@
 
 namespace lights3::storage {
 
-// meta 引擎选择（docs/duostore-redis-meta.md §8 / docs/duostore-sqlite-meta.md §8）：
-// redis / sqlite 需编译期开启对应 option，否则 from_params 抛 "not compiled in"
-enum class DuoMetaKind { kRocksDb, kRedis, kSqlite };
+// meta 引擎选择（docs/duostore-redis-meta.md §8 / docs/duostore-sqlite-meta.md §8 /
+// docs/duostore-tikv-meta.md §9）：redis / sqlite / tikv 需编译期开启对应 option，
+// 否则 from_params 抛 "not compiled in"
+enum class DuoMetaKind { kRocksDb, kRedis, kSqlite, kTikv };
 
 // data 引擎选择（docs/duostore-rados-data.md §10，对偶 meta_kind）：
 // rados 需编译期开启 LIGHTS3_DUOSTORE_RADOS_DATA
@@ -35,6 +37,11 @@ struct DuoStoreConfig {
     int redis_pool_size = 8;              // 连接池大小
     std::filesystem::path sqlite_path;    // meta=sqlite：DB 文件，默认 <root>/meta.sqlite3
     size_t sqlite_cache = 64ull << 20;    // 页缓存（PRAGMA cache_size）
+    std::vector<std::string> pd_endpoints;  // meta=tikv 时必填（docs/duostore-tikv-meta.md §9）
+    std::string tikv_prefix = "duo:";       // key 前缀（多实例/测试隔离）
+    std::string tikv_ca;                    // mTLS 三件套（三者同给才启用）
+    std::string tikv_cert;
+    std::string tikv_key;
     DuoDataKind data_kind = DuoDataKind::kFs;
     std::string rados_conf = "/etc/ceph/ceph.conf";  // data=rados 键（docs/duostore-rados-data.md §10）
     std::string rados_client = "client.admin";

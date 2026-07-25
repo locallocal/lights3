@@ -146,8 +146,10 @@ L2 逻辑，直到下一个挂起点。这省掉一次线程切换，代价就�
 - `join()`：停止接收新任务，**排空队列**（含 backlog）后等待线程退出；
   join 后 `post/schedule` 抛异常。
 
-localfs / xlocalfs / tiered / cloudproxy 共享此池。如出现云端慢请求占满池
-饿死本地盘，再按 backend 配置独立池（Registry 构造时注入，接口已预留）。
+localfs / xlocalfs / tiered / cloudproxy / duostore 共享此池。如出现云端慢
+请求占满池饿死本地盘，再按 backend 配置独立池（Registry 构造时注入，接口
+已预留；该特性列于 [todo.md](todo.md) §3.2，cloudproxy 目前以私有 pump
+线程局部落地，见 [cloudproxy-backend.md](cloudproxy-backend.md) §2.3）。
 
 ### 3.2 schedule() 的取消竞态
 

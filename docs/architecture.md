@@ -8,10 +8,12 @@
 | HTTP 库可插拔 | 更换 HTTP 库不触碰协议层与存储层代码 |
 | 高吞吐大对象 | 全链路流式传输，内存占用与对象大小无关 |
 | 后端可扩展 | 新增存储后端只需实现一个接口并注册工厂 |
-| 部署简单 | 单二进制 + 一个 YAML 配置文件，无外部元数据服务依赖 |
+| 部署简单 | 单二进制 + 一个 YAML 配置文件；默认形态无外部服务依赖（duostore 后端可选接入外部 meta/data 服务：Redis/TiKV/Ceph，见 [storage-backend.md](storage-backend.md) §5） |
 
-非目标（首期不做）：多节点集群与数据分片、纠删码、bucket versioning、
-Object Lock、事件通知。
+非目标（首期不做）：网关多节点集群（进程本身单实例假设）、纠删码、
+bucket versioning、Object Lock、事件通知。元数据/数据侧的多副本与水平
+扩展不由网关实现，而是经 duostore 的 TiKV meta / RADOS data 插拔件
+借外部系统获得。
 
 ## 2. 分层架构
 
@@ -214,7 +216,8 @@ lights3/
 │       ├── localfs/          #   本地文件系统后端
 │       ├── xlocalfs/         #   localfs 的 io_uring 数据面变体
 │       ├── tiered/           #   分层存储组合后端（见 tiered-storage.md）
-│       └── cloudproxy/       #   公有云代理后端（见 cloudproxy-backend.md）
+│       ├── cloudproxy/       #   公有云代理后端（见 cloudproxy-backend.md）
+│       └── duostore/         #   元数据/数据分离引擎（见 duostore-backend.md）
 ├── tests/
 │   ├── unit/                 # L2/L3 纯逻辑测试（mock http + 内存后端）
 │   └── e2e/                  # 起真实进程，用 aws cli 打请求
@@ -223,6 +226,9 @@ lights3/
 
 依赖策略：核心（core/s3/storage）依赖标准库 + OpenSSL（SigV4 需要
 SHA256/HMAC）+ spdlog（日志）+ gflags（命令行）+ nlohmann/json（admin
-凭证 API，不进公共头）；各 HTTP driver 与 cloudproxy 后端通过 CMake 选项
-（`LIGHTS3_DRIVER_BEAST`、`LIGHTS3_CLOUDPROXY` 等）隔离，未启用则不参与
-编译。cloudproxy 不引入云 SDK，用 vendored httplib 自签 SigV4 直连远端。
+凭证 API，不进公共头）；各 HTTP driver 与 cloudproxy、duostore 后端通过
+CMake 选项（`LIGHTS3_DRIVER_BEAST`、`LIGHTS3_CLOUDPROXY`、`LIGHTS3_DUOSTORE`
+及其子开关 `LIGHTS3_DUOSTORE_REDIS_META` / `LIGHTS3_DUOSTORE_SQLITE_META` /
+`LIGHTS3_DUOSTORE_RADOS_DATA` / `LIGHTS3_DUOSTORE_TIKV_META` 等）隔离，
+未启用则不参与编译。cloudproxy 不引入云 SDK，用 vendored httplib 自签
+SigV4 直连远端。

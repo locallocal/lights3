@@ -4,12 +4,13 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 对内将请求路由到可插拔的存储后端。设计上强调三点：
 
 1. **HTTP 协议库可插拔** —— 核心业务逻辑不依赖任何具体 HTTP 库，通过适配层可以在
-   Boost.Beast、cpp-httplib、CivetWeb 等实现之间切换。
+   builtin（POSIX socket）、Boost.Beast、cpp-httplib、Seastar 等驱动之间切换。
 2. **协程 + 线程池双执行模型** —— 请求处理链路以 C++20 协程表达，阻塞型操作
-   （磁盘 IO、云 SDK 调用）卸载到专用线程池，两种模型通过统一的 Executor 抽象衔接。
-3. **多存储后端** —— 后端以 `IStorageBackend` 接口抽象，首期实现两种：
-   本地文件系统（LocalFs）与映射到公有云对象存储的代理后端（CloudProxy），
-   按 bucket 粒度路由。
+   （磁盘 IO、远端 S3 调用）卸载到专用线程池，两种模型通过统一的 Executor 抽象衔接。
+3. **多存储后端** —— 后端以 `IStorageBackend` 接口抽象，按 bucket 粒度路由。
+   已实现：本地文件系统（LocalFs / XLocalFs）、内存（Memory，测试用）、
+   公有云代理（CloudProxy）、冷热分层组合（Tiered）、元数据/数据分离引擎
+   （DuoStore，meta 可选 RocksDB/Redis/SQLite/TiKV，data 可选本地 fs/RADOS）。
 
 ## 文档目录
 
@@ -22,16 +23,23 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [s3-protocol.md](s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证、Multipart Upload、错误码映射 |
 | [credential-management.md](credential-management.md) | 凭证管理：AK/SK 生成/查询 API、两级权限、`.sys` 存储持久化 |
 | [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
-| [tiered-storage.md](tiered-storage.md) | 分层存储（设计稿）：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |
+| [tiered-storage.md](tiered-storage.md) | 分层存储：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |
 | [cloudproxy-backend.md](cloudproxy-backend.md) | CloudProxy 后端：自签 SigV4 + httplib 直连远端 S3、双向流式泵、错误映射与重试 |
-| [duostore-backend.md](duostore-backend.md) | DuoStore 后端（设计稿）：元数据/数据分离引擎，RocksDB 元数据 + chunk 切片/pack 聚合/GC |
+| [duostore-backend.md](duostore-backend.md) | DuoStore 后端：元数据/数据分离引擎，RocksDB 元数据 + chunk 切片/pack 聚合/GC |
+| [duostore-redis-meta.md](duostore-redis-meta.md) | DuoStore 的 Redis IMetaStore：hiredis + Lua guarded-commit，多网关共享 meta |
+| [duostore-sqlite-meta.md](duostore-sqlite-meta.md) | DuoStore 的 SQLite IMetaStore：amalgamation 内嵌，WAL + 读池/单写连接 |
+| [duostore-rados-data.md](duostore-rados-data.md) | DuoStore 的 RADOS IDataStore：librados 直连，chunk → rados 对象 |
+| [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore 的 TiKV IMetaStore：client-c + 2PC 侧车，meta 水平扩展 |
+| [todo.md](todo.md) | 项目待办清单：未完成阶段、横切基础设施、测试缺口 |
+
+*另有中文项目介绍 [README.zh-CN.md](README.zh-CN.md)（构建/运行/当前实现范围）。*
 
 ## 一页纸架构图
 
 ```text
                 ┌────────────────────────────────────────────────┐
                 │                  HTTP Adapter 层                │
-                │  BeastServer / HttplibServer / CivetWebServer   │
+                │  Builtin / Beast / Httplib / Seastar 驱动       │
                 │        (实现 IHttpServer, 编译期/运行期可选)      │
                 └───────────────────────┬────────────────────────┘
                                         │ HttpRequest / HttpResponse (中立模型)
@@ -43,8 +51,8 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
                                         │ IStorageBackend (异步流式接口)
                 ┌───────────────────────▼────────────────────────┐
                 │                  Storage 层                     │
-                │   LocalFsBackend        CloudProxyBackend       │
-                │   (posix + 线程池)      (SigV4 签名直接转发)     │
+                │  LocalFs/XLocalFs · Memory · CloudProxy         │
+                │  Tiered(组合) · DuoStore(meta/data 可插拔)      │
                 └────────────────────────────────────────────────┘
                           ▲ 横切：Executor(协程调度) / ThreadPool /
                             Config / Logging / Metrics
@@ -58,6 +66,6 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
   `BodyReader`/`BodyWriter` 拉/推接口传递，支撑大对象上传下载与 SigV4
   chunked 签名校验。
 - **bucket 级路由而非 object 级**：路由规则简单、可静态配置，避免元数据服务；
-  后续如需 object 级分层可在此之上叠加。
+  object 级分层已按此思路以组合后端形式叠加实现（见 [tiered-storage.md](tiered-storage.md)）。
 - **元数据 sidecar 而非嵌入数据文件**：LocalFs 后端用 `.meta` sidecar JSON 存储
   Content-Type、ETag、自定义元数据，保持数据文件与普通文件系统工具兼容。

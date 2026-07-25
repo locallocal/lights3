@@ -186,15 +186,22 @@ cloudproxy；vendored 的 httplib 具备流式 client 能力；而 aws-sdk-cpp �
   cloudproxy 私有线程而非共享池，即 [concurrency.md](concurrency.md) §3 预留的
   backend 独立线程池的落地形态（docs/cloudproxy-backend.md §2.3）。
 
-## 5. DuoStoreBackend（元数据/数据分离引擎，设计稿）
+## 5. DuoStoreBackend（元数据/数据分离引擎）
 
 内部拆成元数据（IMetaStore）与数据（IDataStore）两个可插拔实现、以
-DataRef 为唯一耦合点的存储引擎：首期元数据用 RocksDB（submodule）、数据用
+DataRef 为唯一耦合点的存储引擎：默认元数据用 RocksDB（submodule）、数据用
 本地文件系统——大对象定长 chunk 切片、小对象聚合进 append-only pack、
-删除/覆盖经 GC 回收（延迟 unlink + pack 压实 + 孤儿对账）。multipart 的
-complete 是纯元数据拼接（O(#parts)，零数据搬运）。meta 侧未来可换
-redis/TiKV，data 侧可换 Ceph/RADOS。完整设计见
+删除/覆盖经 GC 回收（延迟 unlink + pack 压实 + 孤儿对账；pack 聚合与 GC
+属 P2-P4 规划，当前已实现 P1 的 chunk 路径）。multipart 的 complete 是纯
+元数据拼接（O(#parts)，零数据搬运）。完整设计见
 [duostore-backend.md](duostore-backend.md)。
+
+meta / data 两侧均已有可选替换实现（各有专文，编译开关默认 OFF）：
+
+- meta：Redis（[duostore-redis-meta.md](duostore-redis-meta.md)）、
+  SQLite（[duostore-sqlite-meta.md](duostore-sqlite-meta.md)）、
+  TiKV（[duostore-tikv-meta.md](duostore-tikv-meta.md)）；
+- data：Ceph/RADOS（[duostore-rados-data.md](duostore-rados-data.md)）。
 
 注意：duostore 不能作 tiered 的 local 侧（tiered 绑定 localfs 磁盘布局），
 可作其 cloud 侧或独立使用。

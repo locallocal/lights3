@@ -279,6 +279,12 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
     co_return;
 }
 
+Task<void> RadosDataStore::remove_pack(uint64_t pack_id) {
+    // 无 pack：pack_stats 恒空，实际不会被调用（§3.3）；显式 no-op 而非接口默认
+    (void)pack_id;
+    co_return;
+}
+
 Task<GcRewrite> RadosDataStore::rewrite_pack(uint64_t pack_id) {
     // 无 pack：meta 永无 kRados 的 pack 记录，压实候选恒空，实际不会被调用（§3.3）
     (void)pack_id;

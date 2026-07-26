@@ -306,7 +306,7 @@ TEST(duostore_redis_concurrent_cas_converges) {
     CHECK(rec.has_value());
     CHECK_EQ(rec->version, uint64_t(2 * kPerWriter));
     CHECK(g1.chunk_referenced(rec->data.extents.at(0).file_id));
-    CHECK_EQ(g1.peek_reclaims(1000).size(), size_t(2 * kPerWriter - 1));
+    CHECK_EQ(g1.peek_reclaims(1000, 0).size(), size_t(2 * kPerWriter - 1));
 
     CHECK(g1.delete_object("race", "hot"));
     g1.delete_bucket("race");

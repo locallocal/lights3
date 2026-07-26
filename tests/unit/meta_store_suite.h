@@ -51,6 +51,7 @@ inline void case_gc_accounting(const MetaFactory& make) {
     auto rs = m->peek_reclaims(10);
     CHECK_EQ(rs.size(), size_t(1));
     CHECK_EQ(rs[0].second.extents.at(0).file_id, id1);
+    CHECK(rs[0].second.enqueue_ms > 0);  // 入队时刻回传（GC 消费端判 gc_grace，§9.1）
     CHECK(!m->chunk_referenced(id1));
     CHECK(m->chunk_referenced(id2));
     CHECK_EQ(m->get_object("ms-gc", "k")->version, uint64_t(2));
@@ -61,6 +62,11 @@ inline void case_gc_accounting(const MetaFactory& make) {
     CHECK(!m->chunk_referenced(id2));
     auto rs2 = m->peek_reclaims(10);
     CHECK_EQ(rs2.size(), size_t(2));
+    // min_seq 断点续扫（§9.1）：从第二项 seq 起 peek 只见后续；越过队尾即空
+    auto tail = m->peek_reclaims(10, rs2[1].first);
+    CHECK_EQ(tail.size(), size_t(1));
+    CHECK_EQ(tail[0].first, rs2[1].first);
+    CHECK_EQ(m->peek_reclaims(10, rs2[1].first + 1).size(), size_t(0));
 
     // 销账后 gcq 清空：逐条与批量接口各走一遍（批量为 GC 消费端的首选形态）
     m->ack_reclaim(rs2[0].first);

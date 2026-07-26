@@ -274,6 +274,7 @@ add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
 # ---- 核心库：L2/L3/L4 + HTTP 边界 ----
 add_library(lights3_core STATIC
+  src/core/background.cc
   src/core/thread_pool.cc
   src/core/timer.cc
   src/core/config.cc
@@ -431,6 +432,7 @@ if(LIGHTS3_BUILD_TESTS)
   add_executable(unit_tests
     tests/unit/main.cc
     tests/unit/test_task.cc
+    tests/unit/test_timer.cc
     tests/unit/test_concurrency.cc
     tests/unit/test_config.cc
     tests/unit/test_sigv4.cc

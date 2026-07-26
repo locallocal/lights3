@@ -104,7 +104,7 @@ constexpr const char* kRefPut = "INSERT OR REPLACE INTO refs(file_id,owner) VALU
 constexpr const char* kRefDel = "DELETE FROM refs WHERE file_id=?1";
 constexpr const char* kRefGet = "SELECT 1 FROM refs WHERE file_id=?1";
 constexpr const char* kGcqPut = "INSERT INTO gcq(val) VALUES(?1)";
-constexpr const char* kGcqPeek = "SELECT seq,val FROM gcq ORDER BY seq LIMIT ?1";
+constexpr const char* kGcqPeek = "SELECT seq,val FROM gcq WHERE seq>=?2 ORDER BY seq LIMIT ?1";
 constexpr const char* kGcqDel = "DELETE FROM gcq WHERE seq=?1";
 constexpr const char* kCtrReserve =
     "UPDATE counters SET val=val+?1 WHERE name=?2 RETURNING val";
@@ -887,11 +887,13 @@ void SqliteMetaStore::abort_upload(std::string_view b, std::string_view k,
 
 // ---------- GC 记账 ----------
 
-std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t max) {
+std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t max,
+                                                                         uint64_t min_seq) {
     auto lease = read_conn();
     std::vector<std::pair<uint64_t, Reclaim>> out;
     Stmt st(*lease, kGcqPeek);
     st.i64(1, int64_t(std::min<size_t>(max, INT64_MAX)));
+    st.i64(2, int64_t(std::min<uint64_t>(min_seq, INT64_MAX)));
     while (st.step())
         out.emplace_back(uint64_t(st.col_i64(0)), codec::decode_reclaim(st.col_blob(1)));
     return out;

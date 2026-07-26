@@ -528,11 +528,13 @@ void RocksMetaStore::abort_upload(std::string_view b, std::string_view k,
 
 // ---------- GC 记账 ----------
 
-std::vector<std::pair<uint64_t, Reclaim>> RocksMetaStore::peek_reclaims(size_t max) {
+std::vector<std::pair<uint64_t, Reclaim>> RocksMetaStore::peek_reclaims(size_t max,
+                                                                        uint64_t min_seq) {
     std::vector<std::pair<uint64_t, Reclaim>> out;
     auto it = std::unique_ptr<rocksdb::Iterator>(
         db()->NewIterator(rocksdb::ReadOptions(), cfs_[kGcq]));
-    for (it->SeekToFirst(); it->Valid() && out.size() < max; it->Next()) {
+    std::string start = codec::be64_key(min_seq);
+    for (it->Seek(start); it->Valid() && out.size() < max; it->Next()) {
         uint64_t seq = codec::parse_be64({it->key().data(), it->key().size()});
         out.emplace_back(seq,
                          codec::decode_reclaim({it->value().data(), it->value().size()}));

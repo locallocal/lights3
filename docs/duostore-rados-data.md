@@ -417,7 +417,7 @@ backends:
 | 阶段 | 内容 | 可独立验收 | 状态 |
 | --- | --- | --- | --- |
 | C1 | CMake option + librados 发现；`kRados` 枚举与 alloc 接线；连接生命周期/错误映射/throw_rados；写路径（切片缓冲 + write_full + 信号量）与读路径与 remove；测试探测/skip 机制 | 集群在场时 `run_backend_suite` 注入组合全绿；无集群时全 SKIP 不红 | 已完成 |
-| C2 | 未知长度流式收口；配置全量（校验/WARN 语义）；`e2e_duostore_rados`；rados 专项单测（§11.4 除孤儿外） | e2e + 专项绿 | 已完成（GC 变现/pin 竞态专项依赖主线 P3 的 GC worker 与 pin 表，随 P3 后补） |
+| C2 | 未知长度流式收口；配置全量（校验/WARN 语义）；`e2e_duostore_rados`；rados 专项单测（§11.4 除孤儿外） | e2e + 专项绿 | 已完成（GC 变现/pin 竞态专项已随主线 P3 补齐） |
 | C3 | aio 协程桥接（completion → executor reschedule）+ 双缓冲流水（写第 N 片时接收 N+1）；读侧对象级 read-ahead 评估 | 同套件全绿 + 吞吐对比数据 | 未开始 |
 | C4 | 孤儿扫描（随主线 P4 的接口定形）；多网关 GC 约束落地（单实例执行配置）与分布式 pin 方案评估（§8.3）；指标（op 延迟/错误计数）；文档状态头更新 | 孤儿/对账专项 + 全 ctest 矩阵绿 | 未开始 |
 

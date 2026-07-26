@@ -923,9 +923,11 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
 
 // ---------- GC 记账 ----------
 
-std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t max) {
+std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t max,
+                                                                        uint64_t min_seq) {
     if (max == 0) return {};
-    auto r = exec({"ZRANGEBYSCORE", gcq_key(), "-inf", "+inf", "LIMIT", "0",
+    // score = seq（≪ 2^53，double 精确），min_seq 起始闭区间
+    auto r = exec({"ZRANGEBYSCORE", gcq_key(), std::to_string(min_seq), "+inf", "LIMIT", "0",
                    std::to_string(max)},
                   /*read_retry=*/true);
     check_reply_error("peek_reclaims", r.get());

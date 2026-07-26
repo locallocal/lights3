@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/background.h"
 #include "core/config.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
@@ -130,9 +131,7 @@ private:
     // statvfs 余量预检（docs/tiered-storage.md §6.2 步骤②）
     bool cache_space_ok(uint64_t size) const;
 
-    // 后台协程管理：spawn 计数 + close() 等待归零
-    void spawn_background(Task<void> t);
-    void on_background_done();
+    // 后台协程管理：core/background.h 等待组（spawn 计数 + close() 等待归零）
     void schedule_scan();
     void schedule_snapshot();
 
@@ -159,14 +158,11 @@ private:
 
     std::atomic<uint64_t> gc_seq_{0};
 
-    std::mutex bg_m_;
-    std::condition_variable bg_cv_;
-    int bg_count_ = 0;
-    bool closing_ = false;
+    BackgroundTaskGroup bg_{"tiered"};
+    // 定时器 id 只在 bg_.if_open 内写入；begin_close 后不再变更（读侧无需加锁）。
+    // 未 arm 时为 0：TimerQueue id 从 1 起，cancel(0) 为安全 no-op
     TimerQueue::Id scan_timer_ = 0;
-    bool scan_timer_armed_ = false;
     TimerQueue::Id snap_timer_ = 0;  // atime 快照周期（§4.3，固定 5 min）
-    bool snap_timer_armed_ = false;
 };
 
 }  // namespace lights3::storage

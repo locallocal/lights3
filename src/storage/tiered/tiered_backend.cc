@@ -65,28 +65,6 @@ private:
     uint64_t bytes_ = 0;
 };
 
-// 自销毁的顶层协程：驱动一个后台 Task 并在结束时回调（异常只记日志）
-struct Detached {
-    struct promise_type {
-        Detached get_return_object() { return {}; }
-        std::suspend_never initial_suspend() noexcept { return {}; }
-        std::suspend_never final_suspend() noexcept { return {}; }
-        void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // 协程体内已全捕获
-    };
-};
-
-Detached run_detached(Task<void> t, std::function<void()> done) {
-    try {
-        co_await std::move(t);
-    } catch (const std::exception& e) {
-        LOG_WARN("tiered: background task failed: {}", e.what());
-    } catch (...) {
-        LOG_WARN("tiered: background task failed (unknown exception)");
-    }
-    done();
-}
-
 }  // namespace
 
 // 在途表项的 RAII 释放（demote/promote 用；Tee 回填由 reader 析构释放）
@@ -200,15 +178,12 @@ TieredBackend::TieredBackend(std::shared_ptr<LocalFsBackend> local,
 }
 
 TieredBackend::~TieredBackend() {
-    {
-        std::lock_guard lk(bg_m_);
-        closing_ = true;
-        if (scan_timer_armed_) TimerQueue::instance().cancel(scan_timer_);
-        if (snap_timer_armed_) TimerQueue::instance().cancel(snap_timer_);
-    }
-    // 后台协程持有裸 this，必须等它们归零后才能析构
-    std::unique_lock lk(bg_m_);
-    bg_cv_.wait(lk, [&] { return bg_count_ == 0; });
+    bg_.begin_close();
+    // cancel 在组锁外（回调内要拿组锁，见 close()）；阻塞等在途回调返回后，
+    // 后台协程持有的裸 this 不再被引用，等计数归零即可安全析构
+    TimerQueue::instance().cancel(scan_timer_);
+    TimerQueue::instance().cancel(snap_timer_);
+    bg_.wait_idle();
 }
 
 std::shared_ptr<TieredBackend> TieredBackend::from_config(
@@ -304,7 +279,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
         if (range) {
             out.body = std::move(cs.body);  // Range 不做部分缓存（§6.3）
             if (cfg_.cache_fill_on_range)
-                spawn_background(promote_quiet(std::string(bucket), std::string(key)));
+                bg_.spawn(promote_quiet(std::string(bucket), std::string(key)));
             co_return out;
         }
         std::string ikey = make_ikey(bucket, key);
@@ -811,42 +786,28 @@ void TieredBackend::save_atime_snapshot() {
     }
 }
 
-// ---------- 后台任务管理 ----------
-
-void TieredBackend::spawn_background(Task<void> t) {
-    {
-        std::lock_guard lk(bg_m_);
-        if (closing_) return;
-        ++bg_count_;
-    }
-    run_detached(std::move(t), [this] { on_background_done(); });
-}
-
-void TieredBackend::on_background_done() {
-    std::lock_guard lk(bg_m_);
-    --bg_count_;
-    bg_cv_.notify_all();
-}
+// ---------- 后台任务管理（core/background.h 等待组）----------
 
 void TieredBackend::schedule_scan() {
-    std::lock_guard lk(bg_m_);
-    if (closing_ || cfg_.scan_interval_sec <= 0) return;
-    scan_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.scan_interval_sec),
-                                             [this] {
-                                                 spawn_background(scan_and_gc());
-                                                 schedule_scan();
-                                             });
-    scan_timer_armed_ = true;
+    if (cfg_.scan_interval_sec <= 0) return;
+    bg_.if_open([&] {
+        scan_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.scan_interval_sec),
+                                                 [this] {
+                                                     bg_.spawn(scan_and_gc());
+                                                     schedule_scan();
+                                                 });
+    });
 }
 
 void TieredBackend::schedule_snapshot() {
-    std::lock_guard lk(bg_m_);
-    if (closing_ || cfg_.scan_interval_sec <= 0) return;
-    snap_timer_ = TimerQueue::instance().add(std::chrono::seconds(kAtimeSnapshotSec), [this] {
-        spawn_background(snapshot_task());
-        schedule_snapshot();
+    if (cfg_.scan_interval_sec <= 0) return;
+    bg_.if_open([&] {
+        snap_timer_ = TimerQueue::instance().add(std::chrono::seconds(kAtimeSnapshotSec),
+                                                 [this] {
+                                                     bg_.spawn(snapshot_task());
+                                                     schedule_snapshot();
+                                                 });
     });
-    snap_timer_armed_ = true;
 }
 
 Task<void> TieredBackend::snapshot_task() {
@@ -860,17 +821,13 @@ Task<void> TieredBackend::scan_and_gc() {
 }
 
 Task<void> TieredBackend::close() {
-    {
-        std::lock_guard lk(bg_m_);
-        closing_ = true;
-        if (scan_timer_armed_) TimerQueue::instance().cancel(scan_timer_);
-        if (snap_timer_armed_) TimerQueue::instance().cancel(snap_timer_);
-    }
-    {
-        // 阻塞等待在调用方线程上进行；后台任务在池线程收尾，不会互相占用
-        std::unique_lock lk(bg_m_);
-        bg_cv_.wait(lk, [&] { return bg_count_ == 0; });
-    }
+    bg_.begin_close();
+    // cancel 须在组锁外调用：TimerQueue::cancel 会阻塞等在途回调，而回调内要拿
+    // 组锁（spawn/if_open）——begin_close 后定时器 id 不再变更，读取无需加锁
+    TimerQueue::instance().cancel(scan_timer_);
+    TimerQueue::instance().cancel(snap_timer_);
+    // 阻塞等待在调用方线程上进行；后台任务在池线程收尾，不会互相占用
+    bg_.wait_idle();
     save_atime_snapshot();
     co_return;
 }

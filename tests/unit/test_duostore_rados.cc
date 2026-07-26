@@ -384,6 +384,87 @@ TEST(duostore_rados_get_detects_bitrot) {
     sync_wait(b->close());
 }
 
+// 覆盖/删除后 run_gc_once 收敛（§11.4，随主线 P3 后补）：rados 对象消失、gcq 清空
+TEST(duostore_rados_gc_reclaims_after_delete) {
+    RADOS_OR_SKIP();
+    std::string ns = unique_ns();
+    NsCleaner cleaner(ns);
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto meta = std::make_unique<RocksMetaStore>(
+        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    IMetaStore* mp = meta.get();
+    DuoStoreConfig cfg;
+    cfg.name = "rados-gc";
+    cfg.root = tmp.path / "duo";
+    cfg.gc_interval_sec = 0;  // 后台关闭，专测手动钩子
+    cfg.gc_grace_sec = 0;
+    fs::create_directories(cfg.root);
+    auto data = std::make_unique<RadosDataStore>(
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
+    sync_wait(b->create_bucket("bkt"));
+
+    put(*b, "bkt", "k", patterned(10000));  // 3 对象
+    put(*b, "bkt", "k", patterned(5000));   // 覆盖：旧 3 入 gcq，新 2
+    sync_wait(b->delete_object("bkt", "k"));
+    CHECK_EQ(RadosRaw(ns).list().size(), size_t(5));
+
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.reclaims_acked, uint64_t(2));
+    CHECK_EQ(st.files_removed, uint64_t(5));
+    CHECK_EQ(RadosRaw(ns).list().size(), size_t(0));
+
+    // 收敛：再跑一轮零动作
+    auto st2 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st2.reclaims_acked, uint64_t(0));
+    sync_wait(b->close());
+}
+
+// 并发 GET 持 pin 时 GC 跳过（§8.1/§11.4：rados 无 POSIX 已打开 fd 兜底，pin 是
+// 读侧唯一防线，必测）：读中删除 + GC 不 remove；读完内容完整；解 pin 后回收
+TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
+    RADOS_OR_SKIP();
+    std::string ns = unique_ns();
+    NsCleaner cleaner(ns);
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto meta = std::make_unique<RocksMetaStore>(
+        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    IMetaStore* mp = meta.get();
+    DuoStoreConfig cfg;
+    cfg.name = "rados-gc-pin";
+    cfg.root = tmp.path / "duo";
+    cfg.gc_interval_sec = 0;
+    cfg.gc_grace_sec = 0;
+    fs::create_directories(cfg.root);
+    auto data = std::make_unique<RadosDataStore>(
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
+    sync_wait(b->create_bucket("bkt"));
+    std::string body = patterned(10000);
+    put(*b, "bkt", "k", body);
+
+    auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
+    std::byte buf[100];
+    size_t n0 = sync_wait(got.body->read(std::span(buf)));
+    CHECK(n0 > 0);
+
+    sync_wait(b->delete_object("bkt", "k"));
+    auto st1 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st1.skipped_pinned, uint64_t(1));
+    CHECK_EQ(RadosRaw(ns).list().size(), size_t(3));
+
+    std::string rest = read_all(*got.body);  // 无 -ENOENT
+    CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n0) + rest, body);
+
+    got.body.reset();  // 析构解 pin
+    auto st2 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st2.reclaims_acked, uint64_t(1));
+    CHECK_EQ(RadosRaw(ns).list().size(), size_t(0));
+    sync_wait(b->close());
+}
+
 // close 后调用干净失败（500）而非崩溃（§6.5 守卫）
 TEST(duostore_rados_closed_store_throws) {
     RADOS_OR_SKIP();

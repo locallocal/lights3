@@ -134,7 +134,7 @@ TEST(duostore_sqlite_persistence_across_reopen) {
         CHECK_EQ(rec->data.extents.at(0).file_id, id2);
         CHECK(m.chunk_referenced(id2));
         CHECK(!m.chunk_referenced(id1));
-        CHECK_EQ(m.peek_reclaims(10).size(), size_t(1));  // 覆盖写的旧账仍在
+        CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(1));  // 覆盖写的旧账仍在
         m.close();
     }
 }

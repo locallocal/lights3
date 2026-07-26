@@ -1,4 +1,8 @@
 # LightS3 示例配置（docs/architecture.md §5）
+# 默认生效的是最下方 backends 里未注释的 localfs；其余后端均以注释形式给出
+# 全量参数（值为默认值，标「必填」的除外），取消注释即可切换。
+# 注意：内置 YAML parser 为简化版（不支持 tab 缩进/flow style/锚点，src/core/config.cc）。
+# 尺寸单位：B/KiB/MiB/GiB（KB/MB/GB/K/M/G 同义）；时长单位：s/m/h/d。
 http:
   driver: builtin          # builtin | beast | httplib（需对应 CMake 选项编译进来）
   bind: 0.0.0.0
@@ -18,15 +22,116 @@ auth:
   region: us-east-1
 
 backends:
+  # ---------- localfs / xlocalfs：本地文件系统（docs/storage-backend.md）----------
   - name: localdata
     type: localfs                      # localfs | xlocalfs（io_uring 数据面）| memory
     root: ./data/objects
-    staging: ./data/staging            # 须与 root 同一文件系统（rename 原子性）
+    staging: ./data/staging            # 须与 root 同一文件系统（rename 原子性）；
+                                       # 默认 <root>/.lights3-staging
     # queue_depth: 256                 # 仅 xlocalfs：io_uring SQ 深度
+
+  # ---------- duostore：元数据 KV + chunk/pack 数据引擎（docs/duostore-backend.md）----------
+  # meta 引擎四选一：rocksdb（默认）| redis | sqlite | tikv；
+  # data 引擎二选一：fs（默认）| rados。
+  # redis/sqlite/tikv/rados 须以对应 CMake 选项编译进来（LIGHTS3_DUOSTORE_*，
+  # build.sh 的 --redis/--sqlite/--rados/--tikv）。非选中引擎的专属键会被忽略并 WARN。
+  # - name: duodata
+  #   type: duostore
+  #   root: ./data/duostore            # 必填；meta/ chunks/ packs/ 均在其下
+  #   verify_chunk_crc: false          # 读路径校验 chunk CRC（两种 data 引擎共用）
+  #   # -- 后台任务（gc_* 为 P3、orphan_scan 为 P4 预留，当前未生效；docs/todo.md）--
+  #   gc_interval: 300s
+  #   gc_grace: 300s
+  #   orphan_scan_interval: 1d
+  #   mpu_ttl: 7d                      # 未完成 multipart upload 的清理期限
+  #
+  #   # -- meta = rocksdb（默认，docs/duostore-backend.md）--
+  #   meta: rocksdb
+  #   meta_path: ./data/duostore/meta  # 默认 <root>/meta（可单独指到 SSD）
+  #   rocksdb_block_cache: 64MiB
+  #   meta_sync: true                  # 每次提交 fsync WAL（rocksdb/sqlite 共用）
+  #
+  #   # -- meta = redis（docs/duostore-redis-meta.md §8）--
+  #   # meta: redis
+  #   # redis_uri: tcp://127.0.0.1:6379    # 必填；也支持 unix:///path/redis.sock
+  #   # redis_prefix: "duo:"               # key 前缀（多实例/测试隔离）
+  #   # redis_timeout: 3s                  # 建连 + 单命令超时
+  #   # redis_pool_size: 8                 # 连接池大小 [1,256]
+  #
+  #   # -- meta = sqlite（docs/duostore-sqlite-meta.md §8）--
+  #   # meta: sqlite
+  #   # sqlite_path: ./data/duostore/meta.sqlite3   # 默认 <root>/meta.sqlite3
+  #   # sqlite_cache: 64MiB                # 进程级页缓存总预算（>= 1MiB）
+  #   # meta_sync: true                    # 映射 PRAGMA synchronous FULL/NORMAL
+  #
+  #   # -- meta = tikv（docs/duostore-tikv-meta.md §9）--
+  #   # meta: tikv
+  #   # pd_endpoints: "127.0.0.1:2379"     # 必填；逗号分隔多个 PD
+  #   # tikv_prefix: "duo:"                # key 前缀（多实例/测试隔离）
+  #   # tikv_ca: /path/ca.pem              # mTLS 三件套：要么全给要么全不给
+  #   # tikv_cert: /path/client.pem
+  #   # tikv_key: /path/client-key.pem
+  #
+  #   # -- data = fs（默认）：chunk/pack 本地引擎（docs/duostore-backend.md）--
+  #   data: fs
+  #   chunk_size: 8MiB
+  #   pack_threshold: 128KiB           # 小于该值的对象进 pack（P2 生效）
+  #   pack_max_size: 128MiB
+  #   pack_writers: 4
+  #   pack_gc_ratio: 0.5
+  #
+  #   # -- data = rados（docs/duostore-rados-data.md §10）--
+  #   # data: rados
+  #   # rados_pool: lights3                # 必填
+  #   # rados_conf: /etc/ceph/ceph.conf
+  #   # rados_client: client.admin
+  #   # rados_namespace: ""                # pool 内逻辑隔离（多实例/测试）
+  #   # rados_chunk_size: 8MiB             # [4KiB, 128MiB]（对齐 osd_max_object_size）
+  #   # rados_buffer_total: 256MiB         # 写缓冲总额（>= rados_chunk_size）
+  #   # rados_connect_timeout: 5s
+  #   # rados_op_timeout: 0s               # 0 = 不设 op 超时
+
+  # ---------- cloudproxy：转发到远端 S3（docs/cloudproxy-backend.md）----------
+  # 需 LIGHTS3_CLOUDPROXY=ON（默认开）。
+  # - name: cloudpx
+  #   type: cloudproxy
+  #   endpoint: https://s3.example.com   # 必填；scheme://host[:port]
+  #   region: us-east-1
+  #   access_key: ${REMOTE_AK}
+  #   secret_key: ${REMOTE_SK}
+  #   bucket_prefix: ""                  # 远端 bucket = 前缀 + 本地名
+  #   force_path_style: true             # false（virtual-hosted）未实现
+  #   tls_verify: true
+  #   ca_cert: ""                        # 自签远端的 CA 证书路径
+  #   connect_timeout_ms: 5000
+  #   request_timeout_ms: 60000
+  #   retry_max: 3                       # [0,16]
+  #   retry_base_ms: 100                 # 指数退避基数
+  #   max_connections: 16
+  #   verify_etag: true                  # 单段 PUT 与远端 ETag 比对 MD5（§6）
+  #   queue_cap: 1MiB                    # 数据面队列容量（背压水位）[4KiB,1GiB]
+
+  # ---------- tiered：本地缓存 + 云端沉降（docs/tiered-storage.md）----------
+  # local/cloud 按 name 引用本列表中的其他后端；local 须为 localfs/xlocalfs。
+  # - name: tierdata
+  #   type: tiered
+  #   local: localdata                   # 必填
+  #   cloud: cloudpx                     # 必填
+  #   cold_after: 30d                    # 判冷阈值
+  #   scan_interval: 1h                  # 0s = 关闭后台扫描
+  #   space_high_watermark: 85%          # 触发空间回收
+  #   space_low_watermark: 70%           # 回收目标
+  #   min_free_bytes: 1GiB               # 缓存回填所需最小余量
+  #   cache_fill_on_range: true          # Range 命中云端时后台整对象回迁
+  #   max_concurrent_transfers: 4
+  #   quota_bytes: 0                     # 逻辑配额；0 = 不启用
 
 buckets:
   default_backend: localdata
-  rules: []
+  rules: []                # 按声明序 glob 匹配（docs/storage-backend.md §2）
+  # rules:
+  #   - match: "archive-*"               # fnmatch glob
+  #     backend: tierdata
 
 log:
   level: info

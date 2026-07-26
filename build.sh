@@ -11,6 +11,14 @@ usage() {
   --tikv        开启 duostore 的 TiKV meta 后端（client-c submodule + 系统级
                 gRPC/Poco 依赖，默认关；见 docs/duostore-tikv-meta.md §8）。
                 粘性语义同 --seastar；建议配 -B build-tikv 与常规构建隔离
+  --redis       开启 duostore 的 Redis meta 后端（hiredis submodule，默认关；
+                见 docs/duostore-redis-meta.md）。粘性语义同 --seastar
+  --sqlite      开启 duostore 的 SQLite meta 后端（sqlite submodule，默认关；
+                见 docs/duostore-sqlite-meta.md）。粘性语义同 --seastar
+  --rados       开启 duostore 的 RADOS data 后端（默认关；见
+                docs/duostore-rados-data.md §9）。需系统 librados（apt 装
+                librados-dev，或解包到自定义路径后 -DLIGHTS3_RADOS_ROOT=... 指过去）。
+                粘性语义同 --seastar；建议配 -B build-rados 与常规构建隔离
   --debug       Debug 构建（默认 RelWithDebInfo）
   --asan        AddressSanitizer 构建；构建目录默认改用 build-asan，
                 与普通构建隔离（可再用 -B 覆盖）
@@ -30,6 +38,9 @@ BUILD_TYPE=""
 SAN=""      # "" | address | thread
 SEASTAR=0
 TIKV=0
+REDIS=0
+SQLITE=0
+RADOS=0
 CLEAN=0
 RUN_TEST=0
 JOBS=$(nproc)
@@ -39,6 +50,9 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --seastar) SEASTAR=1 ;;
         --tikv)    TIKV=1 ;;
+        --redis)   REDIS=1 ;;
+        --sqlite)  SQLITE=1 ;;
+        --rados)   RADOS=1 ;;
         --debug)   BUILD_TYPE=Debug ;;
         --asan)    [[ $SAN == thread ]] && { echo "--asan 与 --tsan 互斥" >&2; exit 2; }
                    SAN=address ;;
@@ -90,6 +104,11 @@ command -v ninja >/dev/null && CMAKE_ARGS+=(-G Ninja)
 # 不传 OFF：避免覆盖既有缓存里的 ON（粘性语义，见 usage）
 [[ $SEASTAR -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DRIVER_SEASTAR=ON)
 [[ $TIKV -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DUOSTORE_TIKV_META=ON)
+[[ $REDIS -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DUOSTORE_REDIS_META=ON)
+[[ $SQLITE -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DUOSTORE_SQLITE_META=ON)
+# librados 无 submodule、取系统包；找不到时 CMake 会 FATAL_ERROR 并提示装
+# librados-dev 或设 LIGHTS3_RADOS_ROOT（CMakeLists.txt）
+[[ $RADOS -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DUOSTORE_RADOS_DATA=ON)
 if [[ -n $SAN ]]; then
     CMAKE_ARGS+=(-DCMAKE_CXX_FLAGS="-fsanitize=$SAN -fno-omit-frame-pointer"
                  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=$SAN")

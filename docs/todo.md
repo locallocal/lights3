@@ -162,17 +162,21 @@ concurrency.md §3.1 预留（Registry 构造注入接口已留）：云端慢�
 
 ## 5. 工程与测试缺口
 
-### 5.1 配置样例严重滞后（低成本高收益）
+### 5.1 配置样例严重滞后（✅ 已完成，2026-07-26）
 
-`config/lights3.yaml` 仅 26 行、只示范 localfs。duostore（meta/data 及各引擎参数）、
-cloudproxy、tiered 完全缺失，用户只能从 `tests/e2e/run_e2e.sh` 反查写法。建议补全带
-注释的全后端样例。
+~~`config/lights3.yaml` 仅 26 行、只示范 localfs。duostore（meta/data 及各引擎参数）、
+cloudproxy、tiered 完全缺失，用户只能从 `tests/e2e/run_e2e.sh` 反查写法。~~
+已补全带注释的全后端样例：duostore 四种 meta（rocksdb/redis/sqlite/tikv）与两种
+data（fs/rados）引擎全参数、cloudproxy、tiered、buckets.rules 均以注释形式给出
+默认值与取值范围；样例已实测可解析启动（localfs 默认 + 全后端取消注释两种形态）。
 
-### 5.2 build.sh 开关不同步
+### 5.2 build.sh 开关不同步（✅ 已完成，2026-07-26）
 
-CMake 有 10 个 `LIGHTS3_*` 选项，build.sh 只暴露 `--seastar` 与 `--tikv`。
-缺 `--redis` / `--sqlite` / `--rados`（submodule 均已在 LIGHT_MODULES 拉取，只差
-argparse 三行）；rados 需系统 librados 也无提示。
+~~CMake 有 10 个 `LIGHTS3_*` 选项，build.sh 只暴露 `--seastar` 与 `--tikv`。
+缺 `--redis` / `--sqlite` / `--rados`；rados 需系统 librados 也无提示。~~
+已补 `--redis` / `--sqlite` / `--rados` 三开关（粘性语义同 `--seastar`），usage 注明
+rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B build-rados`
+隔离；`--rados` 已在 build-rados 目录实测构建通过。
 
 ### 5.3 测试覆盖缺口
 
@@ -218,7 +222,7 @@ argparse 三行）；rados 需系统 librados 也无提示。
 
 ## 7. 建议推进顺序
 
-1. **文档一致性修复（§6）+ 配置样例（§5.1）+ build.sh 开关（§5.2）**——半天级，先清零
+1. ~~**文档一致性修复（§6）+ 配置样例（§5.1）+ build.sh 开关（§5.2）**——半天级，先清零~~ ✅ 已全部完成（2026-07-26）
 2. **DuoStore P3 GC 一期（§1.1）**——生产可用性硬阻塞；先补 `src/core/timer` 单测
 3. **DuoStore P2 pack 聚合（§1.2）**——解锁四个 meta store 的 pack 账与全 pack 测试变体
 4. **后端级 metrics 框架（§3.1）**——一次解锁六处指标项

@@ -57,8 +57,10 @@ TEST(duostore_sqlite_backend_suite) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc}, pool,
-        [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                      cfg.pack_max_size, cfg.pack_writers},
+        pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); },
+        [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     backend_suite::run_backend_suite(*b);
     sync_wait(b->close());

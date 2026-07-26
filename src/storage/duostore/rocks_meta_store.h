@@ -59,6 +59,8 @@ public:
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单 WriteBatch
     std::vector<PackStat> pack_stats() override;
+    void seal_pack(uint64_t pack_id, uint64_t file_size) override;
+    void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
@@ -87,6 +89,9 @@ private:
     // 同批维护 refs（chunk 引用表，§4.1）：add=写入 owner、否则删除
     void batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add,
                     std::string_view owner);
+    // 同批维护 pack 存活账（stats CF 增量 merge，§9.1）。独立于 batch_refs：
+    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
+    void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign);
 
     RocksMetaOptions opt_;
     std::atomic<rocksdb::DB*> db_{nullptr};

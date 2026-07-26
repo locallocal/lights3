@@ -105,8 +105,10 @@ TEST(duostore_tikv_backend_suite) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc}, pool,
-        [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                      cfg.pack_max_size, cfg.pack_writers},
+        pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); },
+        [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     backend_suite::run_backend_suite(*b);
     sync_wait(b->close());
@@ -194,7 +196,7 @@ TEST(duostore_tikv_write_skew_guard) {
         }
     }
     // 清理 GC 账（本用例的 reclaim 无数据面文件，直接销账）
-    for (auto& [seq, r] : a.peek_reclaims(1000)) a.ack_reclaim(seq);
+    for (auto& [seq, r] : a.peek_reclaims(1000, 0)) a.ack_reclaim(seq);
     a.close();
     b.close();
 }
@@ -238,7 +240,7 @@ TEST(duostore_tikv_part_abort_guard) {
         CHECK_THROWS_S3(a.list_parts("pg", "k", id), s3::S3ErrorCode::NoSuchUpload);
     }
     a.delete_bucket("pg");
-    for (auto& [seq, r] : a.peek_reclaims(1000)) a.ack_reclaim(seq);
+    for (auto& [seq, r] : a.peek_reclaims(1000, 0)) a.ack_reclaim(seq);
     a.close();
     b.close();
 }
@@ -305,11 +307,11 @@ TEST(duostore_tikv_concurrent_conflict_converges) {
     CHECK(rec.has_value());
     CHECK_EQ(rec->version, uint64_t(2 * kPerWriter));
     CHECK(g1.chunk_referenced(rec->data.extents.at(0).file_id));
-    CHECK_EQ(g1.peek_reclaims(1000).size(), size_t(2 * kPerWriter - 1));
+    CHECK_EQ(g1.peek_reclaims(1000, 0).size(), size_t(2 * kPerWriter - 1));
 
     CHECK(g1.delete_object("race", "hot"));
     g1.delete_bucket("race");
-    for (auto& [seq, r] : g1.peek_reclaims(1000)) g1.ack_reclaim(seq);
+    for (auto& [seq, r] : g1.peek_reclaims(1000, 0)) g1.ack_reclaim(seq);
     g1.close();
     g2.close();
 }

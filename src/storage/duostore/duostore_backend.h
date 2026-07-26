@@ -1,7 +1,8 @@
 // L3: DuoStore 后端门面（docs/duostore-backend.md）：S3 语义、ETag/MD5、泵送循环；
 // 元数据/数据分离到 IMetaStore / IDataStore 两个可插拔接口，DataRef 为唯一耦合点。
-// P1：RocksDB meta + chunk 数据路径；P3：GC 一期（gcq 消费 + pin 计数 + mpu_ttl +
-// 后台 worker）；pack 聚合（P2）与压实/孤儿扫描（P4）后续引入。
+// P1：RocksDB meta + chunk 数据路径；P2：pack 聚合（阈值分流 + 存活账 + 重启弃用）；
+// P3：GC 一期（gcq 消费 + pin 计数 + mpu_ttl + 后台 worker）；压实/孤儿扫描（P4）
+// 后续引入。
 #pragma once
 
 #include <array>
@@ -56,7 +57,7 @@ struct DuoGcStats {
     uint64_t files_removed = 0;     // 物理删除的 chunk/rados extent 数（pack record 不计）
     uint64_t skipped_grace = 0;     // 未逾 gc_grace 而跳过的 gcq 项数
     uint64_t skipped_pinned = 0;    // 所涉 file 有 pin 而跳过的 gcq 项数
-    uint64_t packs_removed = 0;     // 整文件删除的空 pack 数（P2 前 pack_stats 恒空）
+    uint64_t packs_removed = 0;     // 整文件删除的空 pack 数（sealed 且 live_recs==0）
     uint64_t uploads_expired = 0;   // mpu_ttl 过期而内部 abort 的 multipart 数
 };
 
@@ -97,11 +98,11 @@ struct DuoStoreConfig {
     int rados_connect_timeout_sec = 5;
     int rados_op_timeout_sec = 0;                    // 0 = 不设 op 超时
     uint64_t chunk_size = 8ull << 20;
-    uint64_t pack_threshold = 128 << 10;   // P2 生效
+    uint64_t pack_threshold = 128 << 10;   // ≤ 此值进 pack；0 = 关闭（全走 chunk）
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;
-    double pack_gc_ratio = 0.5;
-    int gc_interval_sec = 300;             // P3 生效
+    double pack_gc_ratio = 0.5;            // P4 压实生效
+    int gc_interval_sec = 300;
     int gc_grace_sec = 300;
     int orphan_scan_interval_sec = 86400;  // P4 生效
     int mpu_ttl_sec = 7 * 86400;
@@ -161,6 +162,8 @@ private:
     void require_bucket(std::string_view bucket);  // 池线程调用
     // 取对象记录；缺失时区分 NoSuchBucket / NoSuchKey（GET/HEAD 错误语义必须一致）
     duostore::ObjectRec require_object(std::string_view bucket, std::string_view key);
+    // 重启弃用 active pack（§5.2）：把上代遗留的 unsealed pack 账补封（构造时调用）
+    void abandon_stale_packs();
 
     // 后台 GC 管理（§9 生命周期）：BackgroundTaskGroup 等待组 + 完成后重臂的
     // 单 worker tick；close/dtor 共用 shutdown_background（begin_close → 锁外

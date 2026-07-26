@@ -1,14 +1,17 @@
 // DuoStore 专项单测（docs/duostore-backend.md §14）：编解码 roundtrip 与 run 边界、
-// 跨 chunk 读写、位腐检出。meta 语义用例（GC 记账、号段单调、delimiter 分页等）
-// 已接口化为 meta_store_suite（docs/duostore-redis-meta.md §9），RocksMetaStore
-// 在此恒跑，RedisMetaStore 在 test_duostore_redis.cc 条件跑。
-// pack/GC 变现/压实/崩溃注入专项随 P2-P4 增补。
+// 跨 chunk 读写、位腐检出、GC 一期（P3）、pack 聚合（P2：分流/chunked 缓冲/轮转
+// 封存/record 格式/crc/重启弃用/空 pack 整删）。meta 语义用例（GC 记账、号段单调、
+// pack 存活账等）已接口化为 meta_store_suite（docs/duostore-redis-meta.md §9），
+// RocksMetaStore 在此恒跑，redis/sqlite/tikv 在各自测试文件条件跑。
+// 压实/崩溃注入专项随 P4 增补。
 #ifdef LIGHTS3_DUOSTORE
 
 #include <unistd.h>
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -204,6 +207,7 @@ TEST(duostore_multichunk_roundtrip_and_layout) {
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
     cfg.chunk_size = 4096;
+    cfg.pack_threshold = 0;  // 本用例专测 chunk 布局（pack 专项在下方）
     cfg.meta_sync = false;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
     sync_wait(b->create_bucket("bkt"));
@@ -247,6 +251,7 @@ TEST(duostore_get_detects_chunk_bitrot) {
     cfg.name = "crc";
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
+    cfg.pack_threshold = 0;  // 走 chunk：pack 恒校验 crc，有独立用例
     cfg.meta_sync = false;
     cfg.verify_chunk_crc = true;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
@@ -272,14 +277,15 @@ TEST(duostore_get_detects_chunk_bitrot) {
 
 namespace {
 
-// GC 专项统一配置：4KiB chunk 强制多 chunk、grace=0 立即可回收、后台 worker 关闭
-// （专测手动钩子；worker 有独立用例）
+// GC 专项统一配置：4KiB chunk 强制多 chunk、pack 关闭（chunk unlink 语义专测；
+// pack 侧 GC 有独立用例）、grace=0 立即可回收、后台 worker 关闭（专测手动钩子）
 DuoStoreConfig gc_cfg(const TmpDir& tmp, const char* name) {
     DuoStoreConfig cfg;
     cfg.name = name;
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
     cfg.chunk_size = 4096;
+    cfg.pack_threshold = 0;
     cfg.meta_sync = false;
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
@@ -543,7 +549,7 @@ TEST(duostore_gc_manual_hook_vs_close) {
     CHECK_EQ(st.reclaims_acked, uint64_t(0));
 }
 
-// FsDataStore::remove_pack：整 pack 文件删除幂等（§9.1；P2 前无写路径，手工造文件）
+// FsDataStore::remove_pack：整 pack 文件删除幂等（§9.1；手工造文件，不走写路径）
 TEST(duostore_fs_remove_pack_idempotent) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -558,6 +564,323 @@ TEST(duostore_fs_remove_pack_idempotent) {
     CHECK(!fs::exists(p));
     sync_wait(d.remove_pack(7));  // 双删幂等（ENOENT 忽略）
     sync_wait(d.close());
+}
+
+// ---------- P2 pack 聚合专项（§5.2/§5.3/§14）----------
+
+namespace {
+
+// pack 专项统一配置：1KiB 阈值 + 单 writer（布局断言确定性）；chunk 4KiB；
+// GC 手动钩子、grace=0
+DuoStoreConfig pack_cfg(const TmpDir& tmp, const char* name) {
+    DuoStoreConfig cfg;
+    cfg.name = name;
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    cfg.chunk_size = 4096;
+    cfg.pack_threshold = 1024;
+    cfg.pack_max_size = 64 << 10;
+    cfg.pack_writers = 1;
+    cfg.meta_sync = false;
+    cfg.gc_interval_sec = 0;
+    cfg.gc_grace_sec = 0;
+    return cfg;
+}
+
+size_t pack_files_on_disk(const fs::path& root) {
+    size_t n = 0;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(root / "packs", ec), end;
+    for (; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file() && it->path().extension() == ".pak") ++n;
+    return n;
+}
+
+std::string read_file(const fs::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    return {std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>()};
+}
+
+fs::path sole_pack_file(const fs::path& root) {
+    fs::path found;
+    for (auto& e : fs::recursive_directory_iterator(root / "packs"))
+        if (e.is_regular_file() && e.path().extension() == ".pak") found = e.path();
+    return found;
+}
+
+// 长度未知的流（chunked PUT 模拟）：length() 恒 nullopt，逼出缓冲/分流路径（§5.3）
+class UnknownLenReader final : public http::BodyReader {
+public:
+    explicit UnknownLenReader(std::string data) : data_(std::move(data)) {}
+    std::optional<uint64_t> length() const override { return std::nullopt; }
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t n = std::min(buf.size(), data_.size() - off_);
+        std::memcpy(buf.data(), data_.data() + off_, n);
+        off_ += n;
+        co_return n;
+    }
+
+private:
+    std::string data_;
+    size_t off_ = 0;
+};
+
+// 注入组装：拿得到 meta 裸指针以断言 pack 存活账（backend 持有所有权）
+struct PackHarness {
+    std::shared_ptr<DuoStoreBackend> b;
+    RocksMetaStore* meta = nullptr;  // 生命周期随 b
+};
+
+PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+    fs::create_directories(cfg.root);
+    auto meta = std::make_unique<RocksMetaStore>(
+        RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
+    auto* mp = meta.get();
+    auto data = std::make_unique<FsDataStore>(
+        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                      cfg.pack_max_size, cfg.pack_writers},
+        pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); },
+        [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
+    PackHarness h;
+    h.meta = mp;
+    h.b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
+    return h;
+}
+
+std::optional<PackStat> find_pack_stat(IMetaStore& m, uint64_t pack_id) {
+    for (const auto& ps : m.pack_stats())
+        if (ps.pack_id == pack_id) return ps;
+    return std::nullopt;
+}
+
+}  // namespace
+
+// 分流 + 布局 + record 格式（§5.2）：≤ 阈值进同一 active pack 追加（零 chunk）、
+// magic/owner 落盘、> 阈值走 chunk、GET 全量与 Range、存活账随写累计
+TEST(duostore_pack_layout_roundtrip_and_stats) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack");
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+
+    std::string d1 = patterned(600), d2 = patterned(500);
+    put(*h.b, "bkt", "k1", d1);
+    put(*h.b, "bkt", "k2", d2);
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));  // 同一 active pack 追加
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
+
+    // record 格式落盘：文件以 "LP3R" magic 起头，owner = "bucket\0key" 内嵌
+    std::string raw = read_file(sole_pack_file(cfg.root));
+    CHECK_EQ(raw.substr(0, 4), "LP3R");
+    CHECK(raw.find(std::string("bkt\0k1", 6)) != std::string::npos);
+    CHECK(raw.find(std::string("bkt\0k2", 6)) != std::string::npos);
+
+    // 读回：全量 + 跨 record 无关的 Range（payload 内切片）
+    auto g1 = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
+    CHECK_EQ(read_all(*g1.body), d1);
+    auto g2 = sync_wait(h.b->get_object("bkt", "k2", ByteRange{100, 299}));
+    CHECK_EQ(read_all(*g2.body), d2.substr(100, 200));
+
+    // 存活账（meta 侧）：2 record / 1100B，未封存
+    auto rec = h.meta->get_object("bkt", "k1");
+    CHECK(rec.has_value());
+    CHECK_EQ(size_t(rec->data.extents.size()), size_t(1));
+    uint64_t pid = rec->data.extents[0].file_id;
+    CHECK(rec->data.extents[0].kind == Extent::Kind::kPack);
+    auto ps = find_pack_stat(*h.meta, pid);
+    CHECK(ps.has_value());
+    CHECK_EQ(ps->live_bytes, int64_t(1100));
+    CHECK_EQ(ps->live_recs, int64_t(2));
+    CHECK(!ps->sealed);
+
+    // 大于阈值 → chunk 路径（pack 无新增）
+    std::string big = patterned(2000);
+    put(*h.b, "bkt", "big", big);
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(1));
+    auto g3 = sync_wait(h.b->get_object("bkt", "big", std::nullopt));
+    CHECK_EQ(read_all(*g3.body), big);
+
+    // multipart 小分片同样进 pack，owner = "mpu\0<id>\0<no>"
+    auto id = sync_wait(h.b->create_multipart("bkt", "mp", {}));
+    {
+        http::StringBodyReader body(patterned(300));
+        sync_wait(h.b->upload_part("bkt", "mp", id, 1, body));
+    }
+    raw = read_file(sole_pack_file(cfg.root));
+    CHECK(raw.find(std::string("mpu\0", 4) + id) != std::string::npos);
+    sync_wait(h.b->abort_multipart("bkt", "mp", id));
+    sync_wait(h.b->close());
+}
+
+// chunked（长度未知）PUT 的缓冲分流（§5.3）：恰 == 阈值整体进 pack；超阈值缓冲
+// 落盘转 chunk 流式路径，内容完整
+TEST(duostore_pack_chunked_put_buffer_and_spill) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack-chunked");
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+
+    std::string exact = patterned(1024);  // == pack_threshold：EOF 时整体进 pack
+    {
+        UnknownLenReader body(exact);
+        sync_wait(h.b->put_object("bkt", "fit", {}, body));
+    }
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
+    auto g1 = sync_wait(h.b->get_object("bkt", "fit", std::nullopt));
+    CHECK_EQ(read_all(*g1.body), exact);
+
+    std::string spill = patterned(10000);  // 超阈值：缓冲落盘 + 转 chunk（3×4KiB）
+    {
+        UnknownLenReader body(spill);
+        sync_wait(h.b->put_object("bkt", "spill", {}, body));
+    }
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(3));
+    auto g2 = sync_wait(h.b->get_object("bkt", "spill", std::nullopt));
+    CHECK_EQ(read_all(*g2.body), spill);
+    auto g3 = sync_wait(h.b->get_object("bkt", "spill", ByteRange{4000, 8500}));
+    CHECK_EQ(read_all(*g3.body), spill.substr(4000, 4501));
+    sync_wait(h.b->close());
+}
+
+// 轮转封存（§5.2）：达 pack_max_size 即 sealed（file_size 回报）、换新 pack_id；
+// close() 封存余下 active pack
+TEST(duostore_pack_rotation_seals_and_close_seals_rest) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack-rot");
+    cfg.pack_max_size = 2048;  // record ≈ 600+29 → 每 pack 3 条即满
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    for (int i = 0; i < 4; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // 3 + 1 分布
+
+    auto stats = h.meta->pack_stats();
+    CHECK_EQ(stats.size(), size_t(2));
+    size_t sealed = 0, active = 0;
+    for (const auto& ps : stats) {
+        if (ps.sealed) {
+            ++sealed;
+            CHECK(ps.file_size > 0);  // 轮转封存回报最终文件大小
+            CHECK_EQ(ps.live_recs, int64_t(3));
+        } else {
+            ++active;
+            CHECK_EQ(ps.live_recs, int64_t(1));
+        }
+    }
+    CHECK_EQ(sealed, size_t(1));
+    CHECK_EQ(active, size_t(1));
+    for (int i = 0; i < 4; ++i) {  // 跨 pack 全部可读
+        auto g = sync_wait(h.b->get_object("bkt", "k" + std::to_string(i), std::nullopt));
+        CHECK_EQ(read_all(*g.body), patterned(600));
+    }
+
+    IMetaStore* mp = h.meta;
+    sync_wait(h.b->close());  // 封存余下 active pack（§9 生命周期：close 内 data 先于 meta）
+    (void)mp;                 // close 后 meta 已关，账的复核放重启用例
+}
+
+// pack record 恒校验 crc（§7）：payload 位腐在 GET 时被检出（500），与
+// verify_chunk_crc 开关无关
+TEST(duostore_pack_get_detects_bitrot) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack-crc");
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k", patterned(600));
+
+    auto p = sole_pack_file(cfg.root);
+    CHECK(!p.empty());
+    {
+        std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
+        f.seekp(-10, std::ios::end);  // payload 尾部（头在文件首）
+        f.put('!');
+    }
+    auto got = sync_wait(h.b->get_object("bkt", "k", std::nullopt));
+    CHECK_THROWS_S3(read_all(*got.body), s3::S3ErrorCode::InternalError);
+    sync_wait(h.b->close());
+}
+
+// 空 pack 整删（§9.1）：sealed 且 live_recs==0 → unlink + 销 packstat；pin 挡整删。
+// pack record 的 gcq 变现不计 files_removed（死区随压实回收）
+TEST(duostore_pack_gc_empty_pack_removal_respects_pin) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack-gc");
+    cfg.pack_max_size = 1024;  // 单 record 即满：写第二个对象时封存第一个 pack
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k1", patterned(600));  // pack P1
+    put(*h.b, "bkt", "k2", patterned(600));  // P1 封存，P2 active
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+
+    uint64_t p1 = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
+    auto got = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));  // 持 pin
+    sync_wait(h.b->delete_object("bkt", "k1"));  // live_recs(P1) → 0
+
+    auto st1 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st1.skipped_pinned, uint64_t(1));  // gcq 项被 pin 挡
+    CHECK_EQ(st1.packs_removed, uint64_t(0));   // 空 pack 整删同样被 pin 挡
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+    CHECK_EQ(read_all(*got.body), patterned(600));  // 读者不受影响
+
+    got.body.reset();  // 解 pin
+    auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st2.reclaims_acked, uint64_t(1));
+    CHECK_EQ(st2.files_removed, uint64_t(0));  // pack record 不计物理删除
+    CHECK_EQ(st2.packs_removed, uint64_t(1));  // 整文件 unlink
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat 已销
+    sync_wait(h.b->close());
+}
+
+// 重启弃用 active pack（§5.2）：不 close 直接析构（崩溃等价）→ 重开同 root 后
+// 上代 active pack 被补封（sealed/size 未知=0）、旧对象仍可读、新写入走新 pack、
+// 旧对象删净后整 pack 回收
+TEST(duostore_pack_restart_abandons_active) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack-restart");
+    {
+        auto h = make_pack_backend(cfg, pool);
+        sync_wait(h.b->create_bucket("bkt"));
+        put(*h.b, "bkt", "old", patterned(600));
+        CHECK(!h.meta->pack_stats()[0].sealed);
+        // 不 close：析构兜底（active pack 不封存，等价崩溃遗留）
+    }
+    {
+        // torn tail 注入（§5.2/§6.2）：崩溃可能在 append 中途留下半截 record——
+        // 无引用即死区，不得影响已提交对象的读取
+        std::ofstream f(sole_pack_file(cfg.root), std::ios::binary | std::ios::app);
+        f << "LP3R" << std::string(7, '\x5a');  // magic + 截断的头
+    }
+    auto h = make_pack_backend(cfg, pool);
+    auto stats = h.meta->pack_stats();
+    CHECK_EQ(stats.size(), size_t(1));
+    CHECK(stats[0].sealed);  // 构造时补封（abandon_stale_packs）
+    CHECK_EQ(stats[0].file_size, uint64_t(0));  // 大小未知，0 占位
+    uint64_t p1 = stats[0].pack_id;
+
+    auto g = sync_wait(h.b->get_object("bkt", "old", std::nullopt));
+    CHECK_EQ(read_all(*g.body), patterned(600));  // 旧 pack 只是弃用，不影响读
+    g.body.reset();
+
+    put(*h.b, "bkt", "fresh", patterned(600));  // 新写入开新 pack（不复用旧 active）
+    uint64_t p2 = h.meta->get_object("bkt", "fresh")->data.extents[0].file_id;
+    CHECK(p2 != p1);
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+
+    sync_wait(h.b->delete_object("bkt", "old"));
+    auto st = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st.packs_removed, uint64_t(1));  // 补封后旧 pack 才进得了整删候选
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    auto g2 = sync_wait(h.b->get_object("bkt", "fresh", std::nullopt));
+    CHECK_EQ(read_all(*g2.body), patterned(600));
+    sync_wait(h.b->close());
 }
 
 #endif  // LIGHTS3_DUOSTORE

@@ -21,10 +21,26 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// 计数器 kind 字符（'C' 表内）：chunk / pack 号段与 gcq seq
+// 计数器 kind 字符（'C' 表内）：chunk / pack 号段、gcq seq 与 pack 账 delta 行 id
 constexpr char kCtrChunk = '0';
 constexpr char kCtrPack = '1';
 constexpr char kCtrSeq = 'q';
+constexpr char kCtrPackDelta = 'd';
+
+// pack 账 delta 行折叠阈值（§3.2）：单 pack 的 delta 行超过此数即在 pack_stats()
+// 顺带折叠为一行——低频 GC 路径承担合并，业务写路径保持纯写无冲突
+constexpr size_t kPackFoldThreshold = 16;
+
+// delta 行值：le64 live_bytes ‖ le64 live_recs（encode_counter_delta 的 8B 编码 ×2）
+std::string encode_pack_delta(int64_t bytes, int64_t recs) {
+    return codec::encode_counter_delta(bytes) + codec::encode_counter_delta(recs);
+}
+
+std::pair<int64_t, int64_t> decode_pack_delta(std::string_view v) {
+    if (v.size() != 16)
+        throw S3Error(S3ErrorCode::InternalError, "duostore tikv meta: bad pack delta row");
+    return {codec::decode_counter(v.substr(0, 8)), codec::decode_counter(v.substr(8, 8))};
+}
 
 // 冲突重试（§4.1，与 Redis 版 CAS 循环同构）：指数退避 100µs 起、上限 6.4ms、
 // 最多 16 次——超限即病态热点竞争，响亮失败优于活锁
@@ -115,6 +131,19 @@ std::string TikvMetaStore::gcq_key(uint64_t seq) const { return tkey('G', codec:
 
 std::string TikvMetaStore::counter_key(char kind) const {
     return tkey('C', std::string_view(&kind, 1));
+}
+
+std::string TikvMetaStore::pack_delta_key(uint64_t pack_id, uint64_t delta_id) const {
+    std::string rest = codec::be64_key(pack_id);
+    rest += 'd';
+    rest += codec::be64_key(delta_id);
+    return tkey('S', rest);
+}
+
+std::string TikvMetaStore::pack_seal_key(uint64_t pack_id) const {
+    std::string rest = codec::be64_key(pack_id);
+    rest += 's';
+    return tkey('S', rest);
 }
 
 std::pair<std::string, std::string> TikvMetaStore::range_of(char tag,
@@ -274,6 +303,24 @@ void TikvMetaStore::mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref
     }
 }
 
+void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref,
+                                   int sign) {
+    // 同 pack 多 extent 先聚合，每 pack 一条唯一 delta 行（id 预派发，入账纯写——
+    // 共享账行的读改写会让同 active-pack 的并发小对象 PUT prewrite 冲突，§3.2）
+    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
+    for (const auto& e : ref.extents) {
+        if (e.kind != Extent::Kind::kPack) continue;
+        auto& [bytes, recs] = agg[e.file_id];
+        bytes += sign * int64_t(e.length);
+        recs += sign;
+    }
+    for (const auto& [id, d] : agg) {
+        uint64_t delta_id = alloc_id(kCtrPackDelta, pack_deltas_);
+        muts.push_back(
+            {TikvOp::kPut, pack_delta_key(id, delta_id), encode_pack_delta(d.first, d.second)});
+    }
+}
+
 void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref) {
     if (ref.extents.empty()) return;
     uint64_t seq = alloc_id(kCtrSeq, seqs_);  // 预派发（独立小事务），入账保持纯写
@@ -389,9 +436,11 @@ void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec
         muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});
         muts.push_back({TikvOp::kLock, bucket_guard(b, uint32_t(fnv1a(k) % kGuardShards)), {}});
         mut_refs(muts, rec.data, /*add=*/true, okey);
+        mut_pack_delta(muts, rec.data, +1);
         if (old) {
             enqueue_reclaim(muts, old->data);
             mut_refs(muts, old->data, /*add=*/false, {});
+            mut_pack_delta(muts, old->data, -1);
         }
     });
 }
@@ -406,6 +455,7 @@ bool TikvMetaStore::delete_object(std::string_view b, std::string_view k) {
         muts.push_back({TikvOp::kDel, okey, {}});
         enqueue_reclaim(muts, old.data);
         mut_refs(muts, old.data, /*add=*/false, {});
+        mut_pack_delta(muts, old.data, -1);
         return true;
     });
 }
@@ -535,9 +585,11 @@ void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string
         muts.push_back(
             {TikvOp::kLock, upload_guard(b, k, id, uint32_t(p.part_no) % kGuardShards), {}});
         mut_refs(muts, p.data, /*add=*/true, pkey);
+        mut_pack_delta(muts, p.data, +1);
         if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
             enqueue_reclaim(muts, old->data);
             mut_refs(muts, old->data, /*add=*/false, {});
+            mut_pack_delta(muts, old->data, -1);
         }
     });
 }
@@ -613,15 +665,19 @@ std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view 
         for (const auto& [no, p] : stored) {
             muts.push_back({TikvOp::kDel, part_key(b, k, id, no), {}});
             if (selected.count(no)) {
-                mut_refs(muts, p.data, /*add=*/true, okey);  // refs 转移：owner 改写为对象
+                // refs 转移：owner 改写为对象；pack 账不动（put_part 已计，改
+                // owner 不改存活）
+                mut_refs(muts, p.data, /*add=*/true, okey);
             } else {  // 未选中分片入 GC 账
                 enqueue_reclaim(muts, p.data);
                 mut_refs(muts, p.data, /*add=*/false, {});
+                mut_pack_delta(muts, p.data, -1);
             }
         }
         if (old) {  // 旧同名对象入 GC 账
             enqueue_reclaim(muts, old->data);
             mut_refs(muts, old->data, /*add=*/false, {});
+            mut_pack_delta(muts, old->data, -1);
         }
         return rec.meta.etag;
     });
@@ -637,6 +693,7 @@ void TikvMetaStore::abort_upload(std::string_view b, std::string_view k, std::st
             muts.push_back({TikvOp::kDel, part_key(b, k, id, p.part_no), {}});
             enqueue_reclaim(muts, p.data);
             mut_refs(muts, p.data, /*add=*/false, {});
+            mut_pack_delta(muts, p.data, -1);
         }
     });
 }
@@ -673,7 +730,91 @@ void TikvMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
 }
 
 std::vector<PackStat> TikvMetaStore::pack_stats() {
-    return {};  // pack 存活账随 P2 pack 聚合引入（§3.2 'S' 表；热点冲突预警见文档）
+    // 'S' 表前缀扫（同 pack 的 delta/seal 行相邻：'d' < 's'），边扫边聚合。
+    // 顺带折叠（§3.2 delta 行方案的另一半）：单 pack delta 行超阈值即合并为一行
+    // ——GC 低频路径承担合并，业务写路径保持纯写无冲突
+    struct Acc {
+        PackStat ps;
+        std::vector<std::string> delta_keys;  // 折叠候选
+    };
+    std::vector<Acc> accs;
+    guarded("pack_stats", [&] {
+        uint64_t ts = client().get_ts();
+        auto [lo, hi] = range_of('S', {});
+        size_t plen = opt_.prefix.size() + 1;  // prefix + 'S'
+        scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
+            std::string_view rest = std::string_view(key).substr(plen);
+            if (rest.size() < 9) return true;  // 非本店格式，跳过
+            uint64_t id = codec::parse_be64(rest.substr(0, 8));
+            if (accs.empty() || accs.back().ps.pack_id != id) {
+                accs.emplace_back();
+                accs.back().ps.pack_id = id;
+            }
+            Acc& a = accs.back();
+            if (rest[8] == 'd') {
+                auto [bytes, recs] = decode_pack_delta(v);
+                a.ps.live_bytes += bytes;
+                a.ps.live_recs += recs;
+                a.delta_keys.push_back(key);
+            } else if (rest[8] == 's') {
+                a.ps.sealed = true;
+                a.ps.file_size = uint64_t(codec::decode_counter(v));
+            }
+            return true;
+        });
+    });
+    for (Acc& a : accs) {
+        if (a.delta_keys.size() <= kPackFoldThreshold) continue;
+        // 折叠为一行：删除已读到的 delta 行 + 写合并行（新 delta_id）。并发业务
+        // 事务只会新增其他 key 的行，不冲突；并发折叠（多网关）经 txn_retry 的
+        // 写写冲突仲裁——失败方重读重算，收敛无双计
+        try {
+            txn_retry("fold pack stats", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
+                int64_t bytes = 0, recs = 0;
+                for (const auto& dk : a.delta_keys) {
+                    auto v = snap_get(ts, dk);
+                    if (!v) {  // 他人已折叠：放弃（清 muts 防半程提交丢账）
+                        muts.clear();
+                        return;
+                    }
+                    auto [db, dr] = decode_pack_delta(*v);
+                    bytes += db;
+                    recs += dr;
+                    muts.push_back({TikvOp::kDel, dk, {}});
+                }
+                uint64_t delta_id = alloc_id(kCtrPackDelta, pack_deltas_);
+                muts.push_back({TikvOp::kPut, pack_delta_key(a.ps.pack_id, delta_id),
+                                encode_pack_delta(bytes, recs)});
+            });
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore tikv meta: pack {} fold skipped: {}", a.ps.pack_id, e.what());
+        }
+    }
+    std::vector<PackStat> out;
+    out.reserve(accs.size());
+    for (auto& a : accs) out.push_back(a.ps);
+    return out;
+}
+
+void TikvMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
+    txn_retry("seal_pack", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
+        // 幂等；file_size=0 不覆盖已有记录（IMetaStore 契约）
+        std::string skey = pack_seal_key(pack_id);
+        if (file_size == 0 && snap_get(ts, skey)) return;  // muts 空，不发事务
+        muts.push_back({TikvOp::kPut, skey, codec::encode_counter_delta(int64_t(file_size))});
+    });
+}
+
+void TikvMetaStore::drop_pack_stat(uint64_t pack_id) {
+    txn_retry("drop_pack_stat", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
+        // 删除该 pack 的全部账行（delta + seal）。前提：live_recs==0 且 pack 已删，
+        // 不再有并发追加——快照读到的即全集
+        auto [lo, hi] = range_of('S', codec::be64_key(pack_id));
+        scan_range(ts, lo, hi, [&](const std::string& key, const std::string&) {
+            muts.push_back({TikvOp::kDel, key, {}});
+            return true;
+        });
+    });
 }
 
 bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k,
@@ -692,6 +833,8 @@ bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k,
         muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});
         mut_refs(muts, to, /*add=*/true, okey);
         mut_refs(muts, from, /*add=*/false, {});
+        mut_pack_delta(muts, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
+        mut_pack_delta(muts, from, -1);
         return true;
     });
 }

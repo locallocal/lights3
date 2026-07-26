@@ -3,3 +3,4 @@ build-tsan
 build-asan
 build-redis
 build-rados
+build-tikv

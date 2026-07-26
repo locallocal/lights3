@@ -61,6 +61,8 @@ public:
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单事务批量销账
     std::vector<PackStat> pack_stats() override;
+    void seal_pack(uint64_t pack_id, uint64_t file_size) override;
+    void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
@@ -95,6 +97,12 @@ private:
     std::string refs_key(uint64_t file_id) const;                   // 'R'
     std::string gcq_key(uint64_t seq) const;                        // 'G'
     std::string counter_key(char kind) const;                       // 'C'
+    // pack 存活账（'S' 表，§3.2）：delta 行 S<be64 id>d<be64 delta_id>（值 =
+    // le64 bytes ‖ le64 recs）+ 封存行 S<be64 id>s（值 = le64 file_size）。
+    // 每次业务事务写唯一 delta 行——读改写共享账行会让同 active-pack 的小对象
+    // PUT prewrite 互相冲突（§3.2 预警的物化解法）；折叠见 pack_stats()
+    std::string pack_delta_key(uint64_t pack_id, uint64_t delta_id) const;
+    std::string pack_seal_key(uint64_t pack_id) const;
     // [lo, hi) 前缀区间（bucket 名/上层校验保证复合段无 NUL 歧义）
     std::pair<std::string, std::string> range_of(char tag, std::string_view rest) const;
 
@@ -120,6 +128,9 @@ private:
     void enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref);
     void mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add,
                   std::string_view owner);
+    // 同批维护 pack 存活账（唯一 delta 行，纯写无冲突）。独立于 mut_refs：
+    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
+    void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign);
     // parts 全量读（按 part_no 升序，be16 尾缀天然有序）
     std::vector<PartRec> scan_parts(uint64_t ver, std::string_view b, std::string_view k,
                                     std::string_view id);
@@ -133,6 +144,7 @@ private:
     std::mutex alloc_mu_;
     IdRange file_ids_[2];  // 按 Extent::Kind 下标
     IdRange seqs_;         // gcq seq
+    IdRange pack_deltas_;  // pack 账 delta 行 id（唯一性即可，'d' 计数器）
 };
 
 }  // namespace lights3::storage::duostore

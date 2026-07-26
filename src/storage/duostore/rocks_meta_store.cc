@@ -31,6 +31,17 @@ constexpr const char* kCounterChunk = "c0";
 constexpr const char* kCounterPack = "c1";
 constexpr const char* kCounterSeq = "q";
 
+// pack 存活账 key（stats CF，§4.1 的 p<be64 pack_id> 按字段展开为子 key）：
+// 'b' = live_bytes（merge 计数）、'r' = live_recs（merge 计数）、
+// 's' = 封存标记（plain Put，值 = 8B 小端 file_size；存在即 sealed）。
+// 同 pack 的三个 key 前缀相邻，pack_stats() 一次前缀扫聚合
+std::string pack_stat_key(uint64_t pack_id, char field) {
+    std::string k = "p";
+    k += codec::be64_key(pack_id);
+    k += field;
+    return k;
+}
+
 [[noreturn]] void throw_status(const char* what, const rocksdb::Status& s) {
     LOG_ERROR("duostore meta: {}: {}", what, s.ToString());
     throw S3Error(S3ErrorCode::InternalError,
@@ -183,6 +194,22 @@ void RocksMetaStore::batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, 
     }
 }
 
+void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref,
+                                      int sign) {
+    // 同 pack 多 extent 先聚合，每 pack 两次 merge（§9.1：随业务事务同批增减）
+    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
+    for (const auto& e : ref.extents) {
+        if (e.kind != Extent::Kind::kPack) continue;
+        auto& [bytes, recs] = agg[e.file_id];
+        bytes += sign * int64_t(e.length);
+        recs += sign;
+    }
+    for (const auto& [id, d] : agg) {
+        batch.Merge(cfs_[kStats], pack_stat_key(id, 'b'), codec::encode_counter_delta(d.first));
+        batch.Merge(cfs_[kStats], pack_stat_key(id, 'r'), codec::encode_counter_delta(d.second));
+    }
+}
+
 void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref) {
     if (ref.extents.empty()) return;
     uint64_t seq = alloc_id(kCounterSeq, seqs_);
@@ -288,9 +315,11 @@ void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kObjects], okey, codec::encode_object(rec));
     batch_refs(batch, rec.data, /*add=*/true, okey);
+    batch_pack_delta(batch, rec.data, +1);
     if (old) {
         enqueue_reclaim_locked(batch, old->data);
         batch_refs(batch, old->data, /*add=*/false, {});
+        batch_pack_delta(batch, old->data, -1);
     }
     commit(batch);
 }
@@ -307,6 +336,7 @@ bool RocksMetaStore::delete_object(std::string_view b, std::string_view k) {
     batch.Delete(cfs_[kObjects], okey);
     enqueue_reclaim_locked(batch, old.data);
     batch_refs(batch, old.data, /*add=*/false, {});
+    batch_pack_delta(batch, old.data, -1);
     commit(batch);
     return true;
 }
@@ -418,9 +448,11 @@ void RocksMetaStore::put_part(std::string_view b, std::string_view k, std::strin
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kParts], pkey, codec::encode_part(p));
     batch_refs(batch, p.data, /*add=*/true, pkey);
+    batch_pack_delta(batch, p.data, +1);
     if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
         enqueue_reclaim_locked(batch, old->data);
         batch_refs(batch, old->data, /*add=*/false, {});
+        batch_pack_delta(batch, old->data, -1);
     }
     commit(batch);
 }
@@ -495,15 +527,19 @@ std::string RocksMetaStore::complete_upload(std::string_view b, std::string_view
     batch.DeleteRange(cfs_[kParts], pfx, pfx_end);
     for (const auto& [no, p] : stored) {
         if (selected.count(no)) {
-            batch_refs(batch, p.data, /*add=*/true, okey);  // refs 转移：owner 改写为对象
+            // refs 转移：owner 改写为对象；pack 账不动（put_part 已计，改 owner
+            // 不改存活——正是 pack 账独立于 batch_refs 的原因）
+            batch_refs(batch, p.data, /*add=*/true, okey);
         } else {  // 未选中分片入 GC 账
             enqueue_reclaim_locked(batch, p.data);
             batch_refs(batch, p.data, /*add=*/false, {});
+            batch_pack_delta(batch, p.data, -1);
         }
     }
     if (old) {  // 旧同名对象入 GC 账
         enqueue_reclaim_locked(batch, old->data);
         batch_refs(batch, old->data, /*add=*/false, {});
+        batch_pack_delta(batch, old->data, -1);
     }
     commit(batch);
     return rec.meta.etag;
@@ -522,6 +558,7 @@ void RocksMetaStore::abort_upload(std::string_view b, std::string_view k,
     for (const auto& p : scan_parts(b, k, id)) {
         enqueue_reclaim_locked(batch, p.data);
         batch_refs(batch, p.data, /*add=*/false, {});
+        batch_pack_delta(batch, p.data, -1);
     }
     commit(batch);
 }
@@ -558,7 +595,45 @@ void RocksMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
 }
 
 std::vector<PackStat> RocksMetaStore::pack_stats() {
-    return {};  // pack 存活账随 P2 pack 聚合引入（§4.1 stats CF）
+    // stats CF 前缀扫 'p'：同 pack 的 b/r/s 子 key 相邻，边扫边聚合。返回含
+    // live=0 与未封存项（空 pack 整删与重启补封依赖能看见它们）
+    std::vector<PackStat> out;
+    auto it = std::unique_ptr<rocksdb::Iterator>(
+        db()->NewIterator(rocksdb::ReadOptions(), cfs_[kStats]));
+    for (it->Seek("p"); it->Valid() && it->key().starts_with("p"); it->Next()) {
+        std::string_view k(it->key().data(), it->key().size());
+        if (k.size() != 10) continue;  // 'p' + be64 + field
+        uint64_t id = codec::parse_be64(k.substr(1, 8));
+        std::string_view v(it->value().data(), it->value().size());
+        if (out.empty() || out.back().pack_id != id) out.push_back({.pack_id = id});
+        switch (k[9]) {
+            case 'b': out.back().live_bytes = codec::decode_counter(v); break;
+            case 'r': out.back().live_recs = codec::decode_counter(v); break;
+            case 's':
+                out.back().sealed = true;
+                out.back().file_size = uint64_t(codec::decode_counter(v));
+                break;
+            default: break;
+        }
+    }
+    if (!it->status().ok()) throw_status("pack_stats", it->status());
+    return out;
+}
+
+void RocksMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
+    std::lock_guard lk(mu_);  // 读改写（保留已记录 size），与并发 seal 序列化
+    std::string skey = pack_stat_key(pack_id, 's');
+    if (file_size == 0 && get_raw(kStats, skey)) return;  // 幂等：0 不覆盖已知 size
+    rocksdb::WriteBatch batch;
+    batch.Put(cfs_[kStats], skey, codec::encode_counter_delta(int64_t(file_size)));
+    commit(batch);
+}
+
+void RocksMetaStore::drop_pack_stat(uint64_t pack_id) {
+    // 盲删三个子 key，无跨 key 不变量——同 ack_reclaim 不占 mu_
+    rocksdb::WriteBatch batch;
+    for (char f : {'b', 'r', 's'}) batch.Delete(cfs_[kStats], pack_stat_key(pack_id, f));
+    commit(batch);
 }
 
 bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k,
@@ -577,6 +652,8 @@ bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k,
     batch.Put(cfs_[kObjects], okey, codec::encode_object(rec));
     batch_refs(batch, to, /*add=*/true, okey);
     batch_refs(batch, from, /*add=*/false, {});
+    batch_pack_delta(batch, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
+    batch_pack_delta(batch, from, -1);
     commit(batch);
     return true;
 }

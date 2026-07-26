@@ -75,10 +75,10 @@ backends:
   #   # -- data = fs（默认）：chunk/pack 本地引擎（docs/duostore-backend.md）--
   #   data: fs
   #   chunk_size: 8MiB
-  #   pack_threshold: 128KiB           # 小于该值的对象进 pack（P2 生效）
-  #   pack_max_size: 128MiB
-  #   pack_writers: 4
-  #   pack_gc_ratio: 0.5
+  #   pack_threshold: 128KiB           # ≤ 该值的对象进 pack；0 = 关闭（全走 chunk）
+  #   pack_max_size: 128MiB            # active pack 封存阈值（轮转换新 pack）
+  #   pack_writers: 4                  # 并存 active pack 数（1-64）
+  #   pack_gc_ratio: 0.5               # 存活率低于此值触发压实（P4 生效）
   #
   #   # -- data = rados（docs/duostore-rados-data.md §10）--
   #   # data: rados

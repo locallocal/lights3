@@ -125,7 +125,7 @@ CREATE TABLE pack_stats(
 | `parts` 的 `<be16 part_no>` 尾缀 | `part_no INTEGER` 列 | 数值列天然升序，无需 big-endian 技巧 |
 | `refs` / `gcq` 的 `<be64>` key | `INTEGER PRIMARY KEY` | 同上；`INTEGER PRIMARY KEY` 即 rowid，B-tree 按数值有序。**gcq 的 seq 不走号段计数器而走 `AUTOINCREMENT`**：随业务事务分配、同批提交/回滚——事务回滚不产生账外 seq，且避开"开放写事务内不能再碰号段连接"的单写者互斥（§4）；seq 64 位整型，无 Redis 版 2^53 约束 |
 | `stats`（号段计数器） | `counters` 表（仅 chunk / pack） | `UPDATE … SET val = val + ? … RETURNING val` 一条语句完成预留（§4） |
-| `stats`（pack 存活账，merge operator） | `pack_stats` 原生列 | `INSERT … ON CONFLICT DO UPDATE SET live_bytes = live_bytes + ?` 即增量记账，事务内与业务写同批；随 pack 聚合（主文档 P2）启用，当前 `pack_stats()` 返回空——三实现行为一致 |
+| `stats`（pack 存活账，merge operator） | `pack_stats` 原生列 | `INSERT … ON CONFLICT DO UPDATE SET live_bytes = live_bytes + ?` 即增量记账，事务内与业务写同批；随 pack 聚合（主文档 P2）启用：`kPackDelta` 增量 upsert、`seal_pack` 幂等封存（file_size=0 不覆盖已知值）、`drop_pack_stat` 空 pack 整删后销账 |
 
 codec 复用范围与 Redis 版相同：取全部 value 编解码 + crc32c；**不取**
 CF key 构造器（`be64_key`、`part_key` 尾缀、`\0` 拼接）——SQLite 侧

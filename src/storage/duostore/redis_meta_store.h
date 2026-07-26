@@ -64,6 +64,8 @@ public:
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq) override;
     void ack_reclaim(uint64_t seq) override;
     std::vector<PackStat> pack_stats() override;
+    void seal_pack(uint64_t pack_id, uint64_t file_size) override;
+    void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
@@ -104,6 +106,7 @@ private:
     std::string parts_key(std::string_view b, std::string_view k, std::string_view id) const;
     std::string refs_key() const;
     std::string gcq_key() const;
+    std::string pack_key(uint64_t pack_id) const;  // pack:<id> HASH（§2.2 pack 存活账）
 
     // ---- 高层辅助 ----
     void require_bucket(std::string_view b);  // 缺 → NoSuchBucket（纯读预检）
@@ -114,6 +117,9 @@ private:
     // gcq 入账（§2.2）：member = be64(seq) ‖ encode_reclaim；seq 预派发保持脚本确定性
     void enqueue_reclaim(RedisBatch& bt, const DataRef& ref);
     void batch_refs(RedisBatch& bt, const DataRef& ref, bool add, std::string_view owner);
+    // 同批维护 pack 存活账（pack:<id> HINCRBY，§2.2）。独立于 batch_refs：
+    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
+    void batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign);
     // 读 parts HASH：raw value（sha1 指纹用）+ 解码记录，按 part_no 升序
     std::vector<std::pair<std::string, PartRec>> scan_parts(std::string_view b,
                                                             std::string_view k,

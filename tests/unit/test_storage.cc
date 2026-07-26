@@ -55,8 +55,9 @@ TEST(tiered_backend_suite) {
 }
 
 #ifdef LIGHTS3_DUOSTORE
-// duostore（RocksDB meta + chunk 数据面，docs/duostore-backend.md §14）：
-// 默认参数与小 chunk（强制多 chunk manifest）两个布局变体同套件；全 pack 变体随 P2 引入
+// duostore（RocksDB meta + chunk/pack 数据面，docs/duostore-backend.md §14）：
+// 三种布局变体同套件全绿——默认参数（混合：小对象进 pack）、小 chunk（强制多
+// chunk manifest）、强制全 pack（阈值调大 + 小 pack_max_size 高频轮转封存）
 TEST(duostore_backend_suite) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -77,7 +78,24 @@ TEST(duostore_backend_suite_small_chunk) {
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
     cfg.chunk_size = 4096;
-    cfg.meta_sync = false;  // 变体顺带覆盖 meta_sync 关闭路径（§6.3）
+    cfg.pack_threshold = 0;  // 关 pack：本变体专测多 chunk manifest 路径
+    cfg.meta_sync = false;   // 变体顺带覆盖 meta_sync 关闭路径（§6.3）
+    auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
+    run_backend_suite(*b);
+    sync_wait(b->close());
+}
+
+TEST(duostore_backend_suite_all_pack) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    DuoStoreConfig cfg;
+    cfg.name = "suite-pack";
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    cfg.pack_threshold = 8 << 10;  // 套件对象全部 ≤ 8KiB → 强制全 pack（§14 变体）
+    cfg.pack_max_size = 8 << 10;   // 阈值 == 上限：小 pack 高频轮转，封存路径吃满
+    cfg.pack_writers = 2;
+    cfg.meta_sync = false;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
     run_backend_suite(*b);
     sync_wait(b->close());

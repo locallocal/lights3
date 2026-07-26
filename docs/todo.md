@@ -8,14 +8,14 @@
 
 已完成（有 commit 佐证）：四层架构 + 四个 HTTP driver + SigV4（含 chunked/presigned）+
 凭证管理一期；存储侧 localfs / xlocalfs / memory / tiered（P1-P5）/ cloudproxy（P1-P5）/
-duostore P1（RocksDB meta + chunk data），以及 duostore 可插拔件：Redis meta（R1-R3）、
+duostore P1-P3（RocksDB meta + chunk/pack data + GC 一期），以及 duostore 可插拔件：Redis meta（R1-R3）、
 SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 未完成阶段总览：
 
 | 阶段 | 出处 | 状态 |
 | --- | --- | --- |
-| DuoStore P2（pack 聚合） | duostore-backend.md §15 | 未开始 |
+| DuoStore P2（pack 聚合） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
 | DuoStore P3（GC 一期） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
 | DuoStore P4（GC 二期：压实/孤儿） | duostore-backend.md §15 | 未开始 |
 | DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | 未开始 |
@@ -48,19 +48,31 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 - 验收：GC 收敛/grace/pin/mpu/worker/close 专项 + 并发 GET vs GC 无 ENOENT 全绿；
   asan 10 连跑、tsan 4 连跑零告警（顺带修复 tsan 检出的 `closed_` 数据竞争）
 
-### 1.2 P2 · pack 聚合
+### 1.2 P2 · pack 聚合（✅ 已完成，2026-07-26）
 
-- `FsDataStore::open_writer()` 的 pack/chunk 分流（`src/storage/duostore/fs_data_store.cc:247`
-  目前 `(void)hint;` 恒走 chunk）；阈值判定含 chunked 缓冲（§5.3 内存上界 =
-  `pack_threshold × max_inflight_requests`，两配置联动）
-- 多 active pack 并发追加、record 格式与 crc、重启弃用 active pack（§5.2）
-- close() 封存 active pack（`fs_data_store.cc:278-281` 现为空）
-- 四个 meta store 的 pack 存活账：`pack_stats()` 目前一律返回空
-  （`rocks_meta_store.cc:559` / `redis_meta_store.cc:951` / `sqlite_meta_store.cc:926` /
-  `tikv_meta_store.cc:674`），配套 4 处「pack 存活走 stats 账」跳过分支一并接通
-- ⚠️ TiKV 版预警（duostore-tikv-meta.md §3.2）：事务内读改写 pack 账会让同
-  active-pack 的小对象 PUT 互相冲突，接入时演进为 delta 行 + 后台折叠
-- 测试：主文档 §14 要求「强制全 pack」布局变体与默认/多 chunk 变体同套件全绿
+全部条目落地，覆盖 4 meta × fs data（rados 无 pack 实体，天然不涉）：
+
+- ✅ `open_writer()` pack/chunk 分流：已知长度 > 阈值直走 chunk；其余进
+  `FsPackedWriter` 缓冲，EOF ≤ 阈值整体进 pack、超限转 chunk 流式（§5.3
+  chunked 缓冲；`WriteHint` 增 owner 供 record 内嵌）
+- ✅ 多 active pack 并发追加（`pack_writers` 槽 + try_lock 轮询）、record 格式
+  （"LP3R" 头 + crc32c + owner）、达 `pack_max_size` 轮转封存、close() 封存、
+  重启弃用（构造时 `abandon_stale_packs` 补封上代 unsealed 账）
+- ✅ GET 侧 pack record 整段读入恒校验 crc（§7）
+- ✅ 四个 meta store 的 pack 存活账接通：`IMetaStore` 增 `seal_pack` /
+  `drop_pack_stat`；rocks = stats CF 子 key merge、redis = `pack:<id>` HASH
+  HINCRBY（脚本增 hincr op）、sqlite = pack_stats 表 upsert、tikv = **delta 行 +
+  pack_stats() 顺带折叠**（§3.2 预警的物化解法，业务写保持纯写无冲突）；
+  complete 的 refs 转移不动 pack 账（防双计）
+- ✅ GC 空 pack 整删后 `drop_pack_stat` 销账（P3 预铺路径接通）
+- ✅ 测试：`duostore_backend_suite_all_pack`（强制全 pack + 小 pack_max_size 高频
+  轮转）与默认/多 chunk 变体同套件全绿；meta_store_suite 增 pack 账两用例
+  （rocks/redis/sqlite/tikv 共享）；专项覆盖分流/chunked 缓冲/轮转封存/record
+  格式落盘/crc 位腐/空 pack 整删 vs pin/重启弃用
+- 验收：默认/redis/sqlite/rados/tikv 五种构建单测全绿（redis 真实 server、
+  tikv 真实 tiup playground 集群，rados 无集群恒 SKIP）；e2e_duostore ×
+  {rocksdb,redis,sqlite,tikv} 全绿；asan 3 连跑、tsan 2 连跑零告警（顺带修复
+  P3 改 `peek_reclaims` 签名后 test_duostore_tikv 三处具体类调用的编译遗留）
 
 ### 1.3 P4 · GC 二期
 
@@ -193,7 +205,8 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
   `src/storage/bucket_router`、`src/storage/listing`、`src/storage/validate.cc`、
   `src/s3/handlers/admin_credentials.cc`、`src/http/pushpull.h`、
   `src/storage/xlocalfs/uring`
-- `pack_stats()` / `rewrite_pack()` 未进共享套件（功能未实现所致，随 P2/P4 补）
+- ~~`pack_stats()` 未进共享套件~~（✅ 已随 P2 进 meta_store_suite）；`rewrite_pack()`
+  仍未进（P4 未实现所致，随 P4 补）
 - 环境依赖用例：rados 8 个 + tikv 9 个在裸环境恒 SKIP，redis 8 个取决于
   redis-server——共约 17% 用例默认不执行，CI 若要覆盖需专门环境
 - tiered 隐性耦合：tiered 走两阶段构建、不在 registry map 内，"unknown type" 检查
@@ -231,7 +244,7 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
 
 1. ~~**文档一致性修复（§6）+ 配置样例（§5.1）+ build.sh 开关（§5.2）**——半天级，先清零~~ ✅ 已全部完成（2026-07-26）
 2. ~~**DuoStore P3 GC 一期（§1.1）**——生产可用性硬阻塞；先补 `src/core/timer` 单测~~ ✅ 已完成（2026-07-26）
-3. **DuoStore P2 pack 聚合（§1.2）**——解锁四个 meta store 的 pack 账与全 pack 测试变体
+3. ~~**DuoStore P2 pack 聚合（§1.2）**——解锁四个 meta store 的 pack 账与全 pack 测试变体~~ ✅ 已完成（2026-07-26）
 4. **后端级 metrics 框架（§3.1）**——一次解锁六处指标项
 5. **DuoStore P4（§1.3）** → 随之做 **rados C4 孤儿扫描**（接口一并定形）
 6. 各引擎打磨（R4 / S4 / C3 / T5）与 P5、tiered 对账、凭证二期按需排期

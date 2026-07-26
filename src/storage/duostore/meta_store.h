@@ -47,7 +47,7 @@ struct Reclaim {
 
 struct PackStat {
     uint64_t pack_id = 0;
-    uint64_t file_size = 0;
+    uint64_t file_size = 0;  // 封存时由数据面回报；0 = 未知（崩溃遗留，压实时再 stat）
     int64_t live_bytes = 0;
     int64_t live_recs = 0;
     bool sealed = false;
@@ -97,7 +97,15 @@ struct IMetaStore {
     virtual void ack_reclaims(std::span<const uint64_t> seqs) {
         for (uint64_t s : seqs) ack_reclaim(s);
     }
-    virtual std::vector<PackStat> pack_stats() = 0;  // 压实候选
+    // pack 存活账（§9.1/§9.2）：live_bytes/live_recs 随提交类事务同批增减（pack
+    // extent 不入 refs，走本账），pack_stats() 返回全部有账 pack（含 live=0 与未
+    // 封存项——空 pack 整删与重启弃用都依赖能看见它们）
+    virtual std::vector<PackStat> pack_stats() = 0;
+    // 封存（数据面轮转/close 时回调；幂等）：file_size=0 表示未知，不得覆盖已记录
+    // 的非零值——崩溃遗留 pack 由 DuoStoreBackend 启动时以 0 补封（重启弃用，§5.2）
+    virtual void seal_pack(uint64_t pack_id, uint64_t file_size) = 0;
+    // 空 pack 整文件 unlink 成功后销账（§9.1 顺序铁律同 ack_reclaim：先物理删后销）
+    virtual void drop_pack_stat(uint64_t pack_id) = 0;
     virtual bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                               const DataRef& from, const DataRef& to) = 0;  // 压实换 ref
     virtual bool chunk_referenced(uint64_t file_id) = 0;  // 孤儿扫描

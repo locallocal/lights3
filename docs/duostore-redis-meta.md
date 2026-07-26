@@ -69,7 +69,7 @@
 | `refs` | `refs` | HASH：field=十进制 `file_id`，value=owner 简述 | `chunk_referenced` = `HEXISTS`，O(1) |
 | `gcq` | `gcq` | ZSET：score=`seq`，member=`be64(seq) ‖ encode_reclaim(...)` | be64 前缀保证 member 唯一且自含 seq；`peek_reclaims` = `ZRANGEBYSCORE gcq -inf +inf LIMIT 0 max`（seq 从 member 前 8 字节精确解析）；`ack_reclaim` = `ZREMRANGEBYSCORE gcq seq seq`。约束：score 为 double，要求 seq < 2^53——每秒 1 万次删除可用 2.8 万年，声明即可 |
 | `stats`（号段计数器） | `ctr:chunk` / `ctr:pack` / `ctr:seq` | STRING（整数） | `INCRBY` 号段预留（§4） |
-| `stats`（pack 存活账） | `pack:<id>` | HASH：live_bytes / live_recs / file_size / sealed | `HINCRBY` 即增量记账（替代 RocksDB merge operator）；随 pack 聚合（主文档 P2）引入，当前无 pack 记录，`pack_stats()` 返回空——两实现行为一致 |
+| `stats`（pack 存活账） | `pack:<id>` | HASH：live_bytes / live_recs / file_size / sealed | `HINCRBY` 即增量记账（替代 RocksDB merge operator，提交脚本增 `hincr` op 与业务写同批）；`pack_stats()` = SCAN MATCH `pack:*` + 逐 key HGETALL（GC 低频路径）；`seal_pack` file_size=0 走 HSETNX 不覆盖已知值 |
 
 ### 2.3 list_objects：ZRANGEBYLEX + 单 Lua 脚本
 

@@ -394,7 +394,11 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
 #endif
     if (!data_)
         data_ = std::make_unique<FsDataStore>(
-            FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc}, pool_, alloc);
+            FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc,
+                          cfg_.pack_threshold, cfg_.pack_max_size, cfg_.pack_writers},
+            pool_, alloc,
+            [meta](uint64_t pack_id, uint64_t size) { meta->seal_pack(pack_id, size); });
+    abandon_stale_packs();
     schedule_gc();
 }
 
@@ -403,7 +407,22 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
                                  std::unique_ptr<IDataStore> data)
     : cfg_(std::move(cfg)), pool_(std::move(pool)), meta_(std::move(meta)),
       data_(std::move(data)) {
+    abandon_stale_packs();
     schedule_gc();
+}
+
+// 重启弃用 active pack（§5.2）：数据面从不复用旧 active pack（新号段 + O_EXCL），
+// 上代崩溃/析构遗留的 unsealed 账在此补封——否则它们永远进不了空 pack 整删与
+// P4 压实的候选集。file_size 以 0 补（未知；压实顺扫时可再 stat），seal_pack
+// 契约保证 0 不覆盖已知值
+void DuoStoreBackend::abandon_stale_packs() {
+    try {
+        for (const auto& ps : meta_->pack_stats())
+            if (!ps.sealed) meta_->seal_pack(ps.pack_id, 0);
+    } catch (const std::exception& e) {
+        // 补封失败不阻断启动（下次启动/GC 重试机会仍在），但要响亮留痕
+        LOG_WARN("duostore '{}': sealing stale packs failed: {}", cfg_.name, e.what());
+    }
 }
 
 DuoStoreBackend::~DuoStoreBackend() {
@@ -471,9 +490,10 @@ struct Pumped {
     std::string md5;
 };
 
-// PUT/upload_part 共用泵送循环（§6.1 ③④）：流式写数据面，边写边算 MD5
-Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body) {
-    auto writer = co_await data.open_writer({body.length()});
+// PUT/upload_part 共用泵送循环（§6.1 ③④）：流式写数据面，边写边算 MD5。
+// owner 进 pack record 头（§5.2）：对象 = "bucket\0key"、分片 = "mpu\0<id>\0<no>"
+Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string owner) {
+    auto writer = co_await data.open_writer({body.length(), std::move(owner)});
     util::HashStream md5(util::HashStream::Algo::Md5);
     std::byte buf[64 * 1024];
     for (;;) {
@@ -534,7 +554,7 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     co_await pool_->schedule();
     require_bucket(bucket);  // 预检；正式检查在提交事务内复查（§6.1 ②）
 
-    auto pumped = co_await pump_body(*data_, body);
+    auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
     ObjectRec rec;
     rec.meta = std::move(meta);
     rec.meta.key = std::string(key);
@@ -630,7 +650,12 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     co_await pool_->schedule();
     meta_->require_upload(bucket, key, upload_id);  // 前置校验；提交时复查
 
-    auto pumped = co_await pump_body(*data_, body);
+    std::string owner = "mpu";
+    owner += '\0';
+    owner += upload_id;
+    owner += '\0';
+    owner += std::to_string(part_no);
+    auto pumped = co_await pump_body(*data_, body, std::move(owner));
     PartRec p;
     p.part_no = part_no;
     p.size = pumped.ref.total();
@@ -760,12 +785,13 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         if (batch.size() < kGcBatch) break;  // 队列见底
     }
 
-    // 3) 空 pack 整删（§9.1 顺带检查）：sealed 且 live_recs==0 → 整文件 unlink。
-    // packstat 销账接口随 P2 存活账落地（当前 pack_stats() 恒空，此路径为 P2 预铺）
+    // 3) 空 pack 整删（§9.1 顺带检查）：sealed 且 live_recs==0 → 整文件 unlink
+    // → 销 packstat（顺序铁律同 gcq：先物理删、后销账——反序崩溃产生账外文件）
     for (const auto& ps : meta_->pack_stats()) {
         if (!ps.sealed || ps.live_recs != 0 || pins_->pinned(ps.pack_id)) continue;
         try {
             co_await data_->remove_pack(ps.pack_id);
+            meta_->drop_pack_stat(ps.pack_id);
             ++st.packs_removed;
         } catch (const std::exception& e) {
             LOG_WARN("duostore '{}': gc remove pack {} failed: {}", cfg_.name, ps.pack_id,

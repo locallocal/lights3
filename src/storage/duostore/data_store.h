@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 
 #include "core/task.h"
 #include "http/model.h"
@@ -15,6 +16,9 @@ namespace lights3::storage::duostore {
 
 struct WriteHint {
     std::optional<uint64_t> content_length;  // body.length()，chunked 时 nullopt
+    // pack record 内嵌的归属（§5.2："bucket\0key" 或 "mpu\0<id>\0<part_no>"）：
+    // 压实顺扫反查存活与灾难恢复离线打捞用；无 pack 的引擎忽略
+    std::string owner;
 };
 
 struct DataWriter {

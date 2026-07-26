@@ -56,6 +56,8 @@ public:
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单事务单 fsync（§3.3）
     std::vector<PackStat> pack_stats() override;
+    void seal_pack(uint64_t pack_id, uint64_t file_size) override;
+    void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
@@ -101,6 +103,9 @@ private:
                                 std::string_view id);
     // 同批维护 refs（chunk 引用表）：add=写入 owner、否则删除
     void write_refs(Conn& c, const DataRef& ref, bool add, std::string_view owner);
+    // 同批维护 pack 存活账（pack_stats 表算术 UPDATE，§2.2）。独立于 write_refs：
+    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
+    void write_pack_delta(Conn& c, const DataRef& ref, int sign);
     // gcq 入账：seq 由 AUTOINCREMENT 随事务分配，与业务写同批提交/回滚
     void enqueue_reclaim(Conn& c, const DataRef& ref);
     std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k,

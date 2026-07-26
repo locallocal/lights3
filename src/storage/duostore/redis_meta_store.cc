@@ -94,6 +94,7 @@ for _ = 1, no do
   local key = KEYS[tonumber(kx)]
   if k == 'hset' then redis.call('HSET', key, a, b)
   elseif k == 'hdel' then redis.call('HDEL', key, a)
+  elseif k == 'hincr' then redis.call('HINCRBY', key, a, b)
   elseif k == 'zadd' then redis.call('ZADD', key, a, b)
   elseif k == 'zrem' then redis.call('ZREM', key, a)
   elseif k == 'del' then redis.call('DEL', key)
@@ -242,6 +243,9 @@ public:
     }
     void hdel(const std::string& key, std::string_view field) {
         add_op("hdel", key, field, {});
+    }
+    void hincr(const std::string& key, std::string_view field, int64_t delta) {
+        add_op("hincr", key, field, std::to_string(delta));
     }
     void zadd(const std::string& key, std::string_view score, std::string_view member) {
         add_op("zadd", key, score, member);
@@ -517,6 +521,9 @@ std::string RedisMetaStore::parts_key(std::string_view b, std::string_view k,
 }
 std::string RedisMetaStore::refs_key() const { return key("refs"); }
 std::string RedisMetaStore::gcq_key() const { return key("gcq"); }
+std::string RedisMetaStore::pack_key(uint64_t pack_id) const {
+    return key("pack:" + std::to_string(pack_id));
+}
 
 // ---------- 高层辅助 ----------
 
@@ -550,6 +557,21 @@ void RedisMetaStore::batch_refs(RedisBatch& bt, const DataRef& ref, bool add,
             bt.hset(refs_key(), std::to_string(e.file_id), owner);
         else
             bt.hdel(refs_key(), std::to_string(e.file_id));
+    }
+}
+
+void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign) {
+    // 同 pack 多 extent 先聚合，每 pack 两条 HINCRBY（§9.1 随业务脚本同批增减）
+    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
+    for (const auto& e : ref.extents) {
+        if (e.kind != Extent::Kind::kPack) continue;
+        auto& [bytes, recs] = agg[e.file_id];
+        bytes += sign * int64_t(e.length);
+        recs += sign;
+    }
+    for (const auto& [id, d] : agg) {
+        bt.hincr(pack_key(id), "live_bytes", d.first);
+        bt.hincr(pack_key(id), "live_recs", d.second);
     }
 }
 
@@ -666,9 +688,11 @@ void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
         bt.hset(objects_key(b), k, codec::encode_object(rec));
         bt.zadd(zindex_key(b), "0", k);
         batch_refs(bt, rec.data, /*add=*/true, owner);
+        batch_pack_delta(bt, rec.data, +1);
         if (old) {
             enqueue_reclaim(bt, old->data);
             batch_refs(bt, old->data, /*add=*/false, {});
+            batch_pack_delta(bt, old->data, -1);
         }
         if (bt.commit()) return;
     }
@@ -689,6 +713,7 @@ bool RedisMetaStore::delete_object(std::string_view b, std::string_view k) {
         bt.zrem(zindex_key(b), k);
         enqueue_reclaim(bt, old.data);
         batch_refs(bt, old.data, /*add=*/false, {});
+        batch_pack_delta(bt, old.data, -1);
         if (bt.commit()) return true;
     }
     throw_internal("delete_object", "too many CAS retries");
@@ -774,9 +799,11 @@ void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::strin
             bt.expect_absent(pkey, pfield);
         bt.hset(pkey, pfield, codec::encode_part(p));
         batch_refs(bt, p.data, /*add=*/true, owner);
+        batch_pack_delta(bt, p.data, +1);
         if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
             enqueue_reclaim(bt, old->data);
             batch_refs(bt, old->data, /*add=*/false, {});
+            batch_pack_delta(bt, old->data, -1);
         }
         if (bt.commit()) return;
         if (!upload_raw(b, k, id))  // 并发 complete/abort 赢了
@@ -879,15 +906,18 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
         bt.del(parts_key(b, k, id));
         for (const auto& [no, p] : stored) {
             if (selected.count(no)) {
-                batch_refs(bt, p.data, /*add=*/true, okey_owner);  // refs 转移到对象
+                // refs 转移到对象；pack 账不动（put_part 已计，改 owner 不改存活）
+                batch_refs(bt, p.data, /*add=*/true, okey_owner);
             } else {  // 未选中分片入 GC 账
                 enqueue_reclaim(bt, p.data);
                 batch_refs(bt, p.data, /*add=*/false, {});
+                batch_pack_delta(bt, p.data, -1);
             }
         }
         if (old) {  // 旧同名对象入 GC 账
             enqueue_reclaim(bt, old->data);
             batch_refs(bt, old->data, /*add=*/false, {});
+            batch_pack_delta(bt, old->data, -1);
         }
         if (bt.commit()) return rec.meta.etag;
         // 守卫失败：重读分类——upload 消失 → NoSuchUpload（require_upload 抛出），
@@ -915,6 +945,7 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
         for (const auto& [raw, p] : scanned) {
             enqueue_reclaim(bt, p.data);
             batch_refs(bt, p.data, /*add=*/false, {});
+            batch_pack_delta(bt, p.data, -1);
         }
         if (bt.commit()) return;
     }
@@ -950,7 +981,77 @@ void RedisMetaStore::ack_reclaim(uint64_t seq) {
 }
 
 std::vector<PackStat> RedisMetaStore::pack_stats() {
-    return {};  // pack 存活账（pack:<id> HASH）随 P2 pack 聚合引入（§2.2）
+    // SCAN MATCH <prefix>pack:*（游标遍历，不阻塞 server）+ 逐 key HGETALL。
+    // GC 低频路径，逐 key 往返可接受；返回含 live=0 与未封存项
+    std::string pattern;
+    for (char ch : key("pack:")) {  // glob 元字符转义（prefix 可含任意字节）
+        if (ch == '*' || ch == '?' || ch == '[' || ch == ']' || ch == '\\')
+            pattern.push_back('\\');
+        pattern.push_back(ch);
+    }
+    pattern.push_back('*');
+    const size_t skip = key("pack:").size();
+
+    std::vector<PackStat> out;
+    std::string cursor = "0";
+    do {
+        auto r = exec({"SCAN", cursor, "MATCH", pattern, "COUNT", "512"}, /*read_retry=*/true);
+        check_reply_error("pack_stats scan", r.get());
+        if (r->type != REDIS_REPLY_ARRAY || r->elements != 2)
+            throw_internal("pack_stats", "unexpected SCAN reply");
+        cursor = std::string(reply_str(r->element[0]));
+        const redisReply* keys = r->element[1];
+        for (size_t i = 0; i < keys->elements; ++i) {
+            std::string kstr(reply_str(keys->element[i]));
+            uint64_t id = 0;
+            try {
+                id = std::stoull(kstr.substr(skip));
+            } catch (const std::exception&) {
+                continue;  // 非本店格式（前缀撞车），跳过
+            }
+            auto h = exec({"HGETALL", kstr}, /*read_retry=*/true);
+            check_reply_error("pack_stats hgetall", h.get());
+            if (h->type != REDIS_REPLY_ARRAY) continue;
+            PackStat ps;
+            ps.pack_id = id;
+            for (size_t j = 0; j + 1 < h->elements; j += 2) {
+                std::string_view f = reply_str(h->element[j]);
+                int64_t v = 0;
+                try {
+                    v = std::stoll(std::string(reply_str(h->element[j + 1])));
+                } catch (const std::exception&) {
+                    continue;
+                }
+                if (f == "live_bytes") ps.live_bytes = v;
+                else if (f == "live_recs") ps.live_recs = v;
+                else if (f == "file_size") ps.file_size = uint64_t(v);
+                else if (f == "sealed") ps.sealed = v != 0;
+            }
+            out.push_back(ps);
+        }
+    } while (cursor != "0");
+    std::sort(out.begin(), out.end(),
+              [](const PackStat& a, const PackStat& x) { return a.pack_id < x.pack_id; });
+    return out;
+}
+
+void RedisMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
+    // HSET sealed 恒置 1（幂等）；file_size=0 走 HSETNX——不覆盖已知 size（契约）
+    auto r = exec({"HSET", pack_key(pack_id), "sealed", "1"}, /*read_retry=*/false);
+    require_int("seal_pack", r.get());
+    if (file_size > 0) {
+        auto s = exec({"HSET", pack_key(pack_id), "file_size", std::to_string(file_size)},
+                      /*read_retry=*/false);
+        require_int("seal_pack", s.get());
+    } else {
+        auto s = exec({"HSETNX", pack_key(pack_id), "file_size", "0"}, /*read_retry=*/false);
+        require_int("seal_pack", s.get());
+    }
+}
+
+void RedisMetaStore::drop_pack_stat(uint64_t pack_id) {
+    auto r = exec({"DEL", pack_key(pack_id)}, /*read_retry=*/false);
+    require_int("drop_pack_stat", r.get());
 }
 
 bool RedisMetaStore::swap_extents(std::string_view b, std::string_view k,
@@ -972,6 +1073,8 @@ bool RedisMetaStore::swap_extents(std::string_view b, std::string_view k,
     bt.hset(objects_key(b), k, codec::encode_object(rec));
     batch_refs(bt, to, /*add=*/true, okey_owner);
     batch_refs(bt, from, /*add=*/false, {});
+    batch_pack_delta(bt, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
+    batch_pack_delta(bt, from, -1);
     return bt.commit();
 }
 

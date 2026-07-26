@@ -104,7 +104,7 @@
 | `refs` | `R<be64 file_id>` | owner 简述 | `chunk_referenced` = 单 key Get |
 | `gcq` | `G<be64 seq>` | `encode_reclaim` | `peek_reclaims` = 前缀 Scan limit max；seq 即 key 序 |
 | `stats` 计数器 | `C<kind>`（kind ∈ {`0`,`1`,`q`}） | 8B 小端 i64（复用 codec 计数器格式） | 号段预留（§5） |
-| `stats` pack 账 | `S<be64 pack_id>` | 计数结构 | 随 pack 聚合（P2）引入；当前 `pack_stats()` 返回空，与其余实现一致。预警：事务内读改写 pack 账会使同 active-pack 的小对象 PUT 互相冲突，P2 接入时的演进是 delta 行 + 后台折叠，此处仅立此存照 |
+| `stats` pack 账 | `S<be64 id>d<be64 delta_id>`（delta 行）/ `S<be64 id>s`（封存行） | delta = le64 bytes‖le64 recs；seal = le64 file_size | 随 pack 聚合（P2）落地为 **delta 行 + 折叠**：每次业务事务写唯一 delta 行（id 出 'd' 号段计数器），纯写无冲突——共享账行的读改写会让同 active-pack 的小对象 PUT prewrite 互撞（原预警的物化解法）；`pack_stats()` 前缀扫聚合，单 pack delta 行超 16 条即顺带折叠为一行（删旧行 + 写合并行，与并发新增不冲突） |
 
 ### 3.3 list_objects：Snapshot + Scanner，算法照搬 RocksDB 版
 

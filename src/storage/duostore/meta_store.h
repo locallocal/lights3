@@ -42,6 +42,7 @@ struct PartRec {
 
 struct Reclaim {
     std::vector<Extent> extents;  // 待物理回收
+    int64_t enqueue_ms = 0;       // 入队时刻（unix ms）；GC 消费端据此判 gc_grace（§9.1）
 };
 
 struct PackStat {
@@ -84,7 +85,10 @@ struct IMetaStore {
 
     // ---- 资源分配与 GC 记账（§9）----
     virtual uint64_t alloc_file_id(Extent::Kind kind) = 0;  // 持久单调，号段预留
-    virtual std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max) = 0;
+    // 取 seq >= min_seq 的最早至多 max 项（seq 升序）。GC 消费端按 min_seq 断点
+    // 续扫：被 grace/pin 跳过而未销账的队头项不会让整轮卡死或被重复统计（§9.1）
+    virtual std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max,
+                                                                   uint64_t min_seq = 0) = 0;
     virtual void ack_reclaim(uint64_t seq) = 0;    // 物理删除成功后销账
     // 批量销账：默认逐条转发；实现可覆写为单事务/单批提交。GC 消费端应优先走本
     // 接口——逐条 ack 的成本按实现差异巨大（SQLite 版每条是一次独立 fsync 且与

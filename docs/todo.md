@@ -16,7 +16,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | 阶段 | 出处 | 状态 |
 | --- | --- | --- |
 | DuoStore P2（pack 聚合） | duostore-backend.md §15 | 未开始 |
-| DuoStore P3（GC 一期） | duostore-backend.md §15 | 未开始 |
+| DuoStore P3（GC 一期） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
 | DuoStore P4（GC 二期：压实/孤儿） | duostore-backend.md §15 | 未开始 |
 | DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | 未开始 |
 | Redis meta R4（打磨） | duostore-redis-meta.md §10 | 未开始 |
@@ -29,18 +29,24 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 ## 1. 主线：DuoStore P2–P5（最高优先，多项依赖其解锁）
 
-### 1.1 P3 · GC 一期 —— 生产可用性的硬阻塞，建议最先做
+### 1.1 P3 · GC 一期（✅ 已完成，2026-07-26）
 
-当前删除/覆盖只写 gcq 记账、无任何回收代码（`src/storage/duostore/duostore_backend.cc:374`
-的 close() 只有一行注释），**磁盘空间永久增长**，影响全部 4 meta × 2 data 组合。
+全部条目落地，覆盖 4 meta × 2 data 组合（经 IMetaStore/IDataStore 接口天然生效）：
 
-- gcq 消费 worker（peek_reclaims / ack_reclaim 已在各 meta store 就绪）
-- chunk unlink 与整 pack 删除
-- pin 计数 + `gc_grace`（默认 5m，防御纵深，主文档 §7）
-- `run_gc_once()` 测试钩子 + 后台 worker（基于 `src/core/timer`，注意该模块目前零单测，见 §5.3）
-- mpu_ttl 过期 multipart 清理（主文档 §8 末）
-- close() 补齐：撤销 GC 定时器、等待在途 GC 协程
-- 前置解锁：rados C2 遗留的「GC 变现 / pin 竞态」专项测试（duostore-rados-data.md §11.4）
+- ✅ gcq 消费 worker：`run_gc_once()` 批取 `peek_reclaims`（256/批）→ grace/pin 过滤
+  → 先物理删后批量销账（`ack_reclaims`，§9.1 顺序铁律）；`Reclaim` 增 `enqueue_ms`
+  回传入队时刻供判 grace
+- ✅ chunk/rados unlink 与整 pack 删除（`IDataStore::remove_pack`，fs 实现 unlink，
+  其余默认 no-op；packstat 销账接口随 P2 存活账落地）
+- ✅ pin 计数（`duostore::PinTable`，GET reader 持 pin、析构解除）+ `gc_grace`
+- ✅ `run_gc_once()` 测试钩子 + 后台 worker（TimerQueue 周期；`gc_interval` 0 可关；
+  `src/core/timer` 首批单测同步补齐，§5.3 已销）
+- ✅ mpu_ttl 过期 multipart 清理（内部 abort，分片同轮变现）
+- ✅ close() 补齐：撤销 GC 定时器、等待在途 GC 协程；dtor 兜底同路径（定时器回调
+  生命期由 GcGuard 防悬垂 this）
+- ✅ rados C2 遗留「GC 变现 / pin 竞态」专项测试（无集群 SKIP）
+- 验收：GC 收敛/grace/pin/mpu/worker/close 专项 + 并发 GET vs GC 无 ENOENT 全绿；
+  asan 10 连跑、tsan 4 连跑零告警（顺带修复 tsan 检出的 `closed_` 数据竞争）
 
 ### 1.2 P2 · pack 聚合
 
@@ -94,7 +100,8 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
   §6.2 纪律）+ 双缓冲流水（写第 N 片时接收 N+1）；对象级 read-ahead 评估
 - C4：孤儿扫描（随主线 P4 的 `IDataStore` 枚举接口定形）；多网关 GC 单实例执行配置
   与分布式 pin 方案评估（租约 / rados_lock / watch-notify，§8.3）；op 延迟/错误指标
-- C2 遗留：GC 变现 / pin 竞态专项测试（前置：主线 P3）
+- ~~C2 遗留：GC 变现 / pin 竞态专项测试（前置：主线 P3）~~ ✅ 已随 P3 补齐
+  （test_duostore_rados.cc，无集群 SKIP）
 
 ### 2.4 TiKV meta · T5（duostore-tikv-meta.md §11）
 
@@ -182,7 +189,7 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
 
 - **3 个未验证组合**：redis×rados、sqlite×rados、tikv×rados（配置可写、构造可跑，
   但零单测零 e2e；`run_e2e.sh` 的 duostore-rados 场景恒用默认 rocksdb meta）
-- 零单测模块：`src/core/timer`（P3 GC worker 将直接依赖它，建议先补）、
+- 零单测模块：~~`src/core/timer`~~（✅ 已随 P3 补齐，test_timer.cc）、
   `src/storage/bucket_router`、`src/storage/listing`、`src/storage/validate.cc`、
   `src/s3/handlers/admin_credentials.cc`、`src/http/pushpull.h`、
   `src/storage/xlocalfs/uring`
@@ -223,7 +230,7 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
 ## 7. 建议推进顺序
 
 1. ~~**文档一致性修复（§6）+ 配置样例（§5.1）+ build.sh 开关（§5.2）**——半天级，先清零~~ ✅ 已全部完成（2026-07-26）
-2. **DuoStore P3 GC 一期（§1.1）**——生产可用性硬阻塞；先补 `src/core/timer` 单测
+2. ~~**DuoStore P3 GC 一期（§1.1）**——生产可用性硬阻塞；先补 `src/core/timer` 单测~~ ✅ 已完成（2026-07-26）
 3. **DuoStore P2 pack 聚合（§1.2）**——解锁四个 meta store 的 pack 账与全 pack 测试变体
 4. **后端级 metrics 框架（§3.1）**——一次解锁六处指标项
 5. **DuoStore P4（§1.3）** → 随之做 **rados C4 孤儿扫描**（接口一并定形）

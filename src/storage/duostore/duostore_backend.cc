@@ -33,6 +33,46 @@ using s3::S3Error;
 using s3::S3ErrorCode;
 using namespace duostore;
 
+// ---------- PinTable（§7）----------
+
+namespace duostore {
+
+std::vector<uint64_t> PinTable::pin(std::span<const Extent> extents) {
+    std::vector<uint64_t> ids;
+    ids.reserve(extents.size());
+    for (const auto& e : extents) {
+        auto& s = shard_of(e.file_id);
+        std::lock_guard lk(s.m);
+        ++s.refs[e.file_id];
+        ids.push_back(e.file_id);
+    }
+    return ids;
+}
+
+void PinTable::unpin(const std::vector<uint64_t>& ids) {
+    for (uint64_t id : ids) {
+        auto& s = shard_of(id);
+        std::lock_guard lk(s.m);
+        auto it = s.refs.find(id);
+        if (it == s.refs.end()) continue;  // 不应发生；防御性容忍
+        if (--it->second <= 0) s.refs.erase(it);
+    }
+}
+
+bool PinTable::any_pinned(std::span<const Extent> extents) {
+    for (const auto& e : extents)
+        if (pinned(e.file_id)) return true;
+    return false;
+}
+
+bool PinTable::pinned(uint64_t file_id) {
+    auto& s = shard_of(file_id);
+    std::lock_guard lk(s.m);
+    return s.refs.count(file_id) != 0;
+}
+
+}  // namespace duostore
+
 // ---------- 配置解析（§11）----------
 
 namespace {
@@ -355,23 +395,29 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     if (!data_)
         data_ = std::make_unique<FsDataStore>(
             FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc}, pool_, alloc);
+    schedule_gc();
 }
 
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
                                  std::unique_ptr<IMetaStore> meta,
                                  std::unique_ptr<IDataStore> data)
     : cfg_(std::move(cfg)), pool_(std::move(pool)), meta_(std::move(meta)),
-      data_(std::move(data)) {}
+      data_(std::move(data)) {
+    schedule_gc();
+}
 
 DuoStoreBackend::~DuoStoreBackend() {
-    // 正路是先 sync_wait(close())；兜底只同步关 meta（RocksDB 干净落盘）
-    if (!closed_ && meta_) meta_->close();
+    // 正路是先 sync_wait(close())；兜底：撤定时器 + 等在途 GC（防回调用后释放的 this），
+    // 再同步关 meta（RocksDB 干净落盘）
+    if (closed_) return;
+    shutdown_background();
+    if (meta_) meta_->close();
 }
 
 Task<void> DuoStoreBackend::close() {
-    if (closed_) co_return;
-    closed_ = true;
-    // P3 起：撤销 GC 定时器、等待在途 GC 协程（§9 生命周期）
+    if (closed_.exchange(true)) co_return;
+    // 撤销 GC 定时器、等待在途 GC 协程结束（§9 生命周期）
+    shutdown_background();
     co_await data_->close();  // 封存 active pack（P2）
     co_await pool_->schedule();
     meta_->close();
@@ -442,6 +488,24 @@ Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body) {
     co_return out;
 }
 
+// pin 持有的读包装（§7）：构造前 pin 已登记，析构解除。自包含——reader 随 HTTP
+// 响应逃逸出 backend 生命周期，经 shared_ptr 持 pin 表
+class PinnedReader final : public http::BodyReader {
+public:
+    PinnedReader(std::unique_ptr<http::BodyReader> inner, std::shared_ptr<PinTable> pins,
+                 std::vector<uint64_t> ids)
+        : inner_(std::move(inner)), pins_(std::move(pins)), ids_(std::move(ids)) {}
+    ~PinnedReader() override { pins_->unpin(ids_); }
+
+    Task<size_t> read(std::span<std::byte> buf) override { return inner_->read(buf); }
+    std::optional<uint64_t> length() const override { return inner_->length(); }
+
+private:
+    std::unique_ptr<http::BodyReader> inner_;
+    std::shared_ptr<PinTable> pins_;
+    std::vector<uint64_t> ids_;
+};
+
 // meta 提交失败时兜底删除已产出数据（§6.1 ⑤）；co_await 不能出现在 catch 块内，
 // 清理经 exception_ptr 移出 handler。兜底失败也无害——落入孤儿扫描
 template <class Commit>
@@ -500,10 +564,33 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
     } else if (rec.meta.size > 0) {
         last = rec.meta.size - 1;
     }
-    if (len == 0)
+    if (len == 0) {
         out.body = std::make_unique<http::StringBodyReader>("");
-    else
-        out.body = co_await data_->open_reader(std::move(rec.data), first, last);
+    } else {
+        // 先 pin 后开 reader（§7）：meta 读出与 pin 之间的微窗口由 gc_grace 兜底。
+        // 只 pin [first,last] 命中的 extent——Range GET 不为整对象的 manifest 买单。
+        // open_reader 失败须解 pin（co_await 不能进 catch，经 exception_ptr 移出）
+        std::vector<Extent> hit;
+        uint64_t off = 0;
+        for (const auto& e : rec.data.extents) {
+            if (off > last) break;
+            if (off + e.length > first) hit.push_back(e);
+            off += e.length;
+        }
+        auto ids = pins_->pin(hit);
+        std::unique_ptr<http::BodyReader> inner;
+        std::exception_ptr err;
+        try {
+            inner = co_await data_->open_reader(std::move(rec.data), first, last);
+        } catch (...) {
+            err = std::current_exception();
+        }
+        if (err) {
+            pins_->unpin(ids);
+            std::rethrow_exception(err);
+        }
+        out.body = std::make_unique<PinnedReader>(std::move(inner), pins_, std::move(ids));
+    }
     co_return out;
 }
 
@@ -590,6 +677,131 @@ Task<std::vector<UploadInfo>> DuoStoreBackend::list_multipart_uploads(
     std::string_view bucket) {
     co_await pool_->schedule();
     co_return meta_->list_uploads(bucket);
+}
+
+// ---------- GC 一期（§9/§9.1）----------
+
+namespace {
+
+constexpr size_t kGcBatch = 256;  // 单轮 peek 批量；批间 ack 后推进，防大积压单批爆内存
+
+}  // namespace
+
+Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
+    co_await pool_->schedule();
+    // 登记为在途：close() 经 bg_.wait_idle() 等本轮结束后才拆 meta_/data_——
+    // 手动钩子与后台 worker 同一套账，不存在"只查一次 closed_"的 TOCTOU 窗口
+    BackgroundTaskGroup::Scope scope(bg_);
+    DuoGcStats st;
+    if (!scope.ok()) co_return st;                 // 正在关闭
+    auto permit = co_await gc_sem_.acquire();      // 手动钩子 vs 后台 worker 互斥
+
+    // 1) mpu_ttl 过期 multipart 清理（§8 末）：内部 abort，分片入 gcq 由下一步变现。
+    // <=0 = 关闭（与 gc_interval 的 0 语义对齐——0 若解释为"立即过期"会把在途
+    // multipart 全部静默 abort，是配置脚枪）
+    const int64_t ttl_ms = int64_t(cfg_.mpu_ttl_sec) * 1000;
+    if (ttl_ms > 0) {
+        const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
+        for (const auto& bk : meta_->list_buckets()) {
+            for (const auto& u : meta_->list_uploads(bk.name)) {
+                if (now - codec::to_unix_ms(u.initiated) < ttl_ms) continue;
+                try {
+                    meta_->abort_upload(bk.name, u.key, u.upload_id);
+                    ++st.uploads_expired;
+                } catch (const std::exception& e) {
+                    // 与并发 complete/abort 竞争丢 NoSuchUpload 属正常；其余记 WARN 下轮重试
+                    LOG_WARN("duostore '{}': gc abort expired upload {} failed: {}", cfg_.name,
+                             u.upload_id, e.what());
+                }
+            }
+        }
+    }
+
+    // 2) gcq 消费（§9.1）：逾 gc_grace 且无 pin 的项，先物理删、后销账——反序在删
+    // 与销之间崩溃会产生永久孤儿的账外文件；正序崩溃只是 gcq 残留，重试 unlink 幂等。
+    // 按 next_seq 断点续扫：被 grace/pin 跳过的队头项不重扫（不卡轮、不重复计数、
+    // 无二次解码），扫到队尾即一轮结束
+    const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
+    uint64_t next_seq = 0;
+    for (;;) {
+        auto batch = meta_->peek_reclaims(kGcBatch, next_seq);
+        if (batch.empty()) break;
+        next_seq = batch.back().first + 1;
+        std::vector<uint64_t> acked;
+        // 逐批取新鲜时间戳：上一步 abort 刚入队的项 enqueue_ms 晚于本函数入口时刻，
+        // 用入口时刻判 grace 会把差值算成负数而误跳过（grace=0 应当立即可回收）
+        const int64_t batch_now = codec::to_unix_ms(std::chrono::system_clock::now());
+        for (const auto& [seq, rc] : batch) {
+            if (batch_now - rc.enqueue_ms < grace_ms) {
+                ++st.skipped_grace;
+                continue;
+            }
+            if (pins_->any_pinned(rc.extents)) {
+                ++st.skipped_pinned;
+                continue;
+            }
+            try {
+                // chunk/rados extent 物理 unlink；pack record 为死区随压实回收（data
+                // 侧 remove 内部跳过），存活账已在业务事务扣减 → 直接销账
+                co_await data_->remove(rc.extents);
+            } catch (const std::exception& e) {
+                LOG_WARN("duostore '{}': gc remove (seq {}) failed: {}", cfg_.name, seq,
+                         e.what());
+                continue;  // 不销账，gcq 残留下轮重试
+            }
+            for (const auto& e : rc.extents)
+                if (e.kind != Extent::Kind::kPack) ++st.files_removed;
+            acked.push_back(seq);
+        }
+        if (!acked.empty()) {
+            meta_->ack_reclaims(acked);  // 批量销账（单事务/单批，接口注释的成本论证）
+            st.reclaims_acked += acked.size();
+        }
+        if (batch.size() < kGcBatch) break;  // 队列见底
+    }
+
+    // 3) 空 pack 整删（§9.1 顺带检查）：sealed 且 live_recs==0 → 整文件 unlink。
+    // packstat 销账接口随 P2 存活账落地（当前 pack_stats() 恒空，此路径为 P2 预铺）
+    for (const auto& ps : meta_->pack_stats()) {
+        if (!ps.sealed || ps.live_recs != 0 || pins_->pinned(ps.pack_id)) continue;
+        try {
+            co_await data_->remove_pack(ps.pack_id);
+            ++st.packs_removed;
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore '{}': gc remove pack {} failed: {}", cfg_.name, ps.pack_id,
+                     e.what());
+        }
+    }
+    co_return st;
+}
+
+Task<void> DuoStoreBackend::gc_tick() {
+    // 完成后重臂（而非触发时）：GC 轮次绝不重叠/堆积——慢轮只是顺延下次触发
+    std::exception_ptr err;
+    try {
+        co_await run_gc_once();
+    } catch (...) {
+        err = std::current_exception();
+    }
+    schedule_gc();
+    if (err) std::rethrow_exception(err);  // 交 BackgroundTaskGroup 记日志
+}
+
+void DuoStoreBackend::schedule_gc() {
+    if (cfg_.gc_interval_sec <= 0) return;  // 0 = 关闭后台 GC（测试用手动钩子）
+    bg_.if_open([&] {
+        gc_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.gc_interval_sec),
+                                               [this] { bg_.spawn(gc_tick()); });
+    });
+}
+
+void DuoStoreBackend::shutdown_background() {
+    bg_.begin_close();
+    // cancel 须在组锁外调用：TimerQueue::cancel 阻塞等在途回调，而回调内要拿组锁
+    // （bg_.spawn）——begin_close 后 gc_timer_ 不再变更，读取无需加锁
+    TimerQueue::instance().cancel(gc_timer_);
+    // 阻塞等待在调用方线程上进行；在途 GC 在池线程收尾，不会互相占用（同 tiered close）
+    bg_.wait_idle();
 }
 
 }  // namespace lights3::storage

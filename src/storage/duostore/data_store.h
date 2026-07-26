@@ -36,6 +36,10 @@ struct IDataStore {
     virtual Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
                                                                uint64_t last) = 0;
     virtual Task<void> remove(std::span<const Extent> extents) = 0;  // 幂等（ENOENT 忽略）
+    // 整 pack 文件删除（§9.1：sealed 且 live_recs==0 的 pack）；幂等。纯虚：无 pack
+    // 实体的引擎显式写 no-op override（对齐 rewrite_pack 惯例）——静默接口默认会让
+    // "有 pack 但忘了实现删除"的新引擎编译通过、GC 记了账却永不释放字节
+    virtual Task<void> remove_pack(uint64_t pack_id) = 0;
     virtual Task<GcRewrite> rewrite_pack(uint64_t pack_id) = 0;      // 压实顺扫（§9.2）
     virtual Task<void> close() = 0;
     virtual ~IDataStore() = default;

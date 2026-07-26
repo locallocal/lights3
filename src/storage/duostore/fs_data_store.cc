@@ -268,6 +268,13 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
     co_return;
 }
 
+Task<void> FsDataStore::remove_pack(uint64_t pack_id) {
+    co_await pool_->schedule();
+    if (::unlink(pack_path(pack_id).c_str()) != 0 && errno != ENOENT)
+        throw_errno("unlink pack");  // 幂等：ENOENT 忽略
+    co_return;
+}
+
 Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
     (void)pack_id;
     throw S3Error(S3ErrorCode::InternalError,

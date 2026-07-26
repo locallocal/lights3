@@ -11,10 +11,13 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "core/thread_pool.h"
 #include "storage/duostore/codec.h"
 #include "storage/duostore/duostore_backend.h"
+#include "storage/duostore/fs_data_store.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
@@ -263,6 +266,298 @@ TEST(duostore_get_detects_chunk_bitrot) {
     auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
     CHECK_THROWS_S3(read_all(*got.body), s3::S3ErrorCode::InternalError);
     sync_wait(b->close());
+}
+
+// ---------- GC 一期专项（§9/§15 P3 验收：覆盖/删除/abort 后收敛 + GET vs GC）----------
+
+namespace {
+
+// GC 专项统一配置：4KiB chunk 强制多 chunk、grace=0 立即可回收、后台 worker 关闭
+// （专测手动钩子；worker 有独立用例）
+DuoStoreConfig gc_cfg(const TmpDir& tmp, const char* name) {
+    DuoStoreConfig cfg;
+    cfg.name = name;
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    cfg.chunk_size = 4096;
+    cfg.meta_sync = false;
+    cfg.gc_interval_sec = 0;
+    cfg.gc_grace_sec = 0;
+    return cfg;
+}
+
+size_t chunk_files_on_disk(const fs::path& root) {
+    size_t n = 0;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(root / "chunks", ec), end;
+    for (; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file() && it->path().extension() == ".chk") ++n;
+    return n;
+}
+
+std::string patterned(size_t n) {
+    std::string s(n, '\0');
+    for (size_t i = 0; i < n; ++i) s[i] = char('a' + i % 26);
+    return s;
+}
+
+}  // namespace
+
+// 覆盖 + 删除后 run_gc_once 收敛：chunk 物理消失、gcq 清空、再跑一轮零动作
+TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunk
+    put(*b, "bkt", "k", patterned(5000));   // 覆盖：旧 3 chunk 入 gcq，新 2 chunk
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(5));
+
+    auto st1 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st1.reclaims_acked, uint64_t(1));
+    CHECK_EQ(st1.files_removed, uint64_t(3));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(2));
+    {
+        // 存活版本不受影响（作用域内读完即析构——reader 存活期间持 pin）
+        auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(read_all(*got.body), patterned(5000));
+    }
+    sync_wait(b->delete_object("bkt", "k"));
+    auto st2 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st2.reclaims_acked, uint64_t(1));
+    CHECK_EQ(st2.files_removed, uint64_t(2));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
+
+    // 收敛：空 gcq 再跑一轮零动作
+    auto st3 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st3.reclaims_acked, uint64_t(0));
+    CHECK_EQ(st3.files_removed, uint64_t(0));
+    sync_wait(b->close());
+}
+
+// gc_grace 防御纵深（§7/§9.1）：未逾宽限期的项跳过——不销账、文件保留
+TEST(duostore_gc_grace_defers_reclaim) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-grace");
+    cfg.gc_grace_sec = 3600;
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(100));
+    sync_wait(b->delete_object("bkt", "k"));
+
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.skipped_grace, uint64_t(1));
+    CHECK_EQ(st.reclaims_acked, uint64_t(0));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(1));
+    sync_wait(b->close());
+}
+
+// 并发 GET vs GC（§7 pin 计数；§15 P3 验收"无 ENOENT"）：读中对象被删，pin 挡
+// GC 不 unlink；读完整校验内容；reader 析构解 pin 后下一轮回收
+TEST(duostore_gc_pin_blocks_unlink_during_get) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-pin");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    std::string body = patterned(10000);
+    put(*b, "bkt", "k", body);
+
+    auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
+    // 读一小段（首 chunk 已打开），后续 chunk 依赖懒打开——正是 pin 防护的窗口
+    std::byte buf[100];
+    size_t n0 = sync_wait(got.body->read(std::span(buf)));
+    CHECK(n0 > 0);
+
+    sync_wait(b->delete_object("bkt", "k"));
+    auto st1 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st1.skipped_pinned, uint64_t(1));
+    CHECK_EQ(st1.reclaims_acked, uint64_t(0));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(3));
+
+    // 剩余部分完整读出，无 ENOENT / 500
+    std::string rest = read_all(*got.body);
+    CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n0) + rest, body);
+
+    got.body.reset();  // 析构解 pin
+    auto st2 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st2.reclaims_acked, uint64_t(1));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
+    sync_wait(b->close());
+}
+
+// abort 后 GC 收敛 + mpu_ttl 过期清理（§8 末）：过期 upload 内部 abort，分片
+// 同轮变现；abort 后的 upload_id 干净失效
+TEST(duostore_gc_mpu_ttl_expiry) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-mpu");
+    cfg.mpu_ttl_sec = 1;  // 最小正 ttl（0 = 关闭清理，非"立即过期"）
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+
+    auto id = sync_wait(b->create_multipart("bkt", "mpu", {}));
+    {
+        http::StringBodyReader part(patterned(6000));  // 2 chunk
+        sync_wait(b->upload_part("bkt", "mpu", id, 1, part));
+    }
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(2));
+
+    usleep(1100 * 1000);  // 越过 1s ttl
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.uploads_expired, uint64_t(1));
+    // abort 入 gcq 的分片在同一轮消费（mpu 清理先于 gcq 消费）
+    CHECK_EQ(st.reclaims_acked, uint64_t(1));
+    CHECK_EQ(st.files_removed, uint64_t(2));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
+    CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt")).size(), size_t(0));
+    {
+        http::StringBodyReader part("x");
+        CHECK_THROWS_S3(sync_wait(b->upload_part("bkt", "mpu", id, 2, part)),
+                        s3::S3ErrorCode::NoSuchUpload);
+    }
+    sync_wait(b->close());
+}
+
+// mpu_ttl=0 = 关闭清理（与 gc_interval 的 0 语义对齐）；未过期 upload 也不受影响
+TEST(duostore_gc_mpu_fresh_upload_survives) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-mpu-fresh");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    sync_wait(b->create_multipart("bkt", "mpu", {}));
+
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.uploads_expired, uint64_t(0));
+    CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt")).size(), size_t(1));
+    sync_wait(b->close());
+
+    // ttl=0：清理整体关闭，任何"已过期"的 upload 都不动
+    TmpDir tmp2;
+    auto cfg2 = gc_cfg(tmp2, "gc-mpu-off");
+    cfg2.mpu_ttl_sec = 0;
+    auto b2 = std::make_shared<DuoStoreBackend>(cfg2, pool);
+    sync_wait(b2->create_bucket("bkt"));
+    sync_wait(b2->create_multipart("bkt", "mpu", {}));
+    auto st2 = sync_wait(b2->run_gc_once());
+    CHECK_EQ(st2.uploads_expired, uint64_t(0));
+    CHECK_EQ(sync_wait(b2->list_multipart_uploads("bkt")).size(), size_t(1));
+    sync_wait(b2->close());
+}
+
+// gcq 断点续扫（§9.1）：整批被 pin 的队头不卡整轮——后续积压仍被回收，且跳过
+// 项只计一次
+TEST(duostore_gc_skipped_head_does_not_stall_round) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-stall");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+
+    // 257 个单 chunk 对象：前 256 个读者持 pin（占满一个 peek 批），第 257 个可回收
+    constexpr int kN = 257;
+    for (int i = 0; i < kN; ++i)
+        put(*b, "bkt", "k" + std::to_string(i), patterned(64));
+    std::vector<ObjectStream> readers;
+    for (int i = 0; i < kN - 1; ++i)
+        readers.push_back(sync_wait(b->get_object("bkt", "k" + std::to_string(i), std::nullopt)));
+    for (int i = 0; i < kN; ++i) sync_wait(b->delete_object("bkt", "k" + std::to_string(i)));
+
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.skipped_pinned, uint64_t(kN - 1));  // 每项只计一次
+    CHECK_EQ(st.reclaims_acked, uint64_t(1));       // 队头全 pin 不挡队尾变现
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(kN - 1));
+
+    readers.clear();  // 解 pin 后全量收敛
+    auto st2 = sync_wait(b->run_gc_once());
+    CHECK_EQ(st2.reclaims_acked, uint64_t(kN - 1));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
+    sync_wait(b->close());
+}
+
+// 后台 worker（§9）：gc_interval=1s 周期自动变现；close 撤定时器、等在途 GC
+TEST(duostore_gc_background_worker_runs) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-worker");
+    cfg.gc_interval_sec = 1;
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(10000));
+    sync_wait(b->delete_object("bkt", "k"));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(3));
+
+    // 至多等 15s 收敛（正常 1-2 个周期）
+    bool converged = false;
+    for (int i = 0; i < 150 && !converged; ++i) {
+        if (chunk_files_on_disk(cfg.root) == 0) converged = true;
+        else usleep(100 * 1000);
+    }
+    CHECK(converged);
+    sync_wait(b->close());
+}
+
+// 生命周期：远期定时器被 close 干净撤销；不 close 直接析构走 dtor 兜底——两条
+// 路径都不得悬挂/用后释放（asan/tsan 矩阵覆盖）
+TEST(duostore_gc_close_and_dtor_cancel_worker) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    {
+        auto cfg = gc_cfg(tmp, "gc-close");
+        cfg.gc_interval_sec = 300;
+        auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+        sync_wait(b->create_bucket("bkt"));
+        sync_wait(b->close());
+    }
+    {
+        auto cfg = gc_cfg(tmp, "gc-dtor");
+        cfg.root = tmp.path / "duo2";
+        cfg.meta_path = cfg.root / "meta";
+        cfg.gc_interval_sec = 300;
+        DuoStoreBackend b(cfg, pool);  // 析构兜底路径
+    }
+}
+
+// close 与手动 run_gc_once 并发：手动钩子经等待组登记在途，close 等它结束后才拆
+// meta/data；关闭后的手动钩子拒绝进入、返回零统计（asan/tsan 矩阵下验证无 UAF）
+TEST(duostore_gc_manual_hook_vs_close) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-race");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(10000));
+    sync_wait(b->delete_object("bkt", "k"));
+
+    std::thread gc([&] {
+        for (int i = 0; i < 50; ++i) sync_wait(b->run_gc_once());
+    });
+    std::thread closer([&] { sync_wait(b->close()); });
+    gc.join();
+    closer.join();
+    auto st = sync_wait(b->run_gc_once());  // 已关闭：拒绝进入
+    CHECK_EQ(st.reclaims_acked, uint64_t(0));
+}
+
+// FsDataStore::remove_pack：整 pack 文件删除幂等（§9.1；P2 前无写路径，手工造文件）
+TEST(duostore_fs_remove_pack_idempotent) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    uint64_t next_id = 1;
+    FsDataStore d(FsDataOptions{tmp.path / "duo", 4096, false}, pool,
+                  [&](Extent::Kind) { return next_id++; });
+    auto p = d.pack_path(7);
+    fs::create_directories(p.parent_path());
+    std::ofstream(p) << "stub";
+    CHECK(fs::exists(p));
+    sync_wait(d.remove_pack(7));
+    CHECK(!fs::exists(p));
+    sync_wait(d.remove_pack(7));  // 双删幂等（ENOENT 忽略）
+    sync_wait(d.close());
 }
 
 #endif  // LIGHTS3_DUOSTORE

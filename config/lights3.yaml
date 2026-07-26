@@ -39,11 +39,11 @@ backends:
   #   type: duostore
   #   root: ./data/duostore            # 必填；meta/ chunks/ packs/ 均在其下
   #   verify_chunk_crc: false          # 读路径校验 chunk CRC（两种 data 引擎共用）
-  #   # -- 后台任务（gc_* 为 P3、orphan_scan 为 P4 预留，当前未生效；docs/todo.md）--
-  #   gc_interval: 300s
-  #   gc_grace: 300s
+  #   # -- 后台 GC（P3 已生效；orphan_scan 为 P4 预留；docs/duostore-backend.md §9）--
+  #   gc_interval: 300s                # 回收周期；0s = 关闭后台 GC
+  #   gc_grace: 300s                   # 延迟删除宽限（读并发防御纵深）
   #   orphan_scan_interval: 1d
-  #   mpu_ttl: 7d                      # 未完成 multipart upload 的清理期限
+  #   mpu_ttl: 7d                      # 未完成 multipart upload 的清理期限；0 = 关闭
   #
   #   # -- meta = rocksdb（默认，docs/duostore-backend.md）--
   #   meta: rocksdb

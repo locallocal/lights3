@@ -415,7 +415,7 @@ Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms) {
     c.u8();  // reason
     int64_t ms = int64_t(c.u64());
     if (enqueue_ms) *enqueue_ms = ms;
-    Reclaim r{read_extent_runs(c)};
+    Reclaim r{read_extent_runs(c), ms};
     c.done();
     return r;
 }

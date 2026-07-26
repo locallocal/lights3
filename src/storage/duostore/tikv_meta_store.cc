@@ -643,13 +643,15 @@ void TikvMetaStore::abort_upload(std::string_view b, std::string_view k, std::st
 
 // ---------- GC 记账 ----------
 
-std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t max) {
+std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t max,
+                                                                       uint64_t min_seq) {
     return guarded("peek_reclaims", [&] {
         std::vector<std::pair<uint64_t, Reclaim>> out;
         uint64_t ts = client().get_ts();
         auto [lo, hi] = range_of('G', {});
+        (void)lo;  // 起点用 gcq_key(min_seq)：min_seq=0 时即 'G' 段首，等价 lo
         size_t plen = opt_.prefix.size() + 1;
-        for (auto& [key, v] : client().scan(ts, lo, hi, max)) {
+        for (auto& [key, v] : client().scan(ts, gcq_key(min_seq), hi, max)) {
             uint64_t seq = codec::parse_be64(std::string_view(key).substr(plen));
             out.emplace_back(seq, codec::decode_reclaim(v));
         }

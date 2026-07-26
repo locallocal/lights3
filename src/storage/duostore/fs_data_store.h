@@ -37,6 +37,7 @@ public:
     Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
                                                         uint64_t last) override;
     Task<void> remove(std::span<const Extent> extents) override;
+    Task<void> remove_pack(uint64_t pack_id) override;
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
     Task<void> close() override;
 

@@ -131,7 +131,9 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
   复用现有分析工具。
 - **Metrics**（Prometheus 文本格式，`GET /-/metrics`，仅内网 bind）：
   请求数/延迟直方图（按 API 与后端分维度）、在途请求数、线程池队列深度、
-  multipart 活跃数、后端错误率。
+  multipart 活跃数、后端错误率。后端级指标经 `core/metrics.h` 注册表
+  （backend=<name> 标签，todo.md §3.1）追加在 L2 请求指标之后输出；
+  「按 API×后端分维度的请求直方图、后端错误率」仍待接入。
 - **健康检查**：`GET /-/healthz`（进程存活）与 `GET /-/readyz`
   （各后端探活：LocalFs 写探针文件、CloudProxy HeadBucket）。
   `/-/` 前缀不与合法 bucket 名冲突（S3 bucket 命名不允许该形态）。

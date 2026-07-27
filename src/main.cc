@@ -5,6 +5,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "http/server.h"
@@ -43,7 +44,10 @@ int main(int argc, char** argv) {
         Logger::init(parse_level(cfg.log_level));
 
         auto pool = std::make_shared<ThreadPool>(cfg.runtime.io_threads);
-        auto backends = storage::StorageRegistry::build(cfg.backends, pool);
+        // 后端级 metrics 注册表（docs/todo.md §3.1）：build 给每个后端派发
+        // backend=<name> 标签的 scope，/-/metrics 追加渲染
+        auto metrics = std::make_shared<MetricsRegistry>();
+        auto backends = storage::StorageRegistry::build(cfg.backends, pool, metrics);
         auto router = storage::BucketRouter::build(cfg.buckets, std::move(backends));
         auto auth = s3::SigV4Authenticator::build(cfg.auth);
         // 动态凭证（docs/credential-management.md）：从默认后端加载并替换静态查表
@@ -55,6 +59,7 @@ int main(int argc, char** argv) {
         auto service = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
                                                        cfg.http.base_domain);
         service->set_pool_stats([pool] { return pool->stats(); });
+        service->set_backend_metrics(metrics);
         service->set_credential_store(cred_store);
 
         auto server = http::HttpServerFactory::create(cfg.http.driver, cfg.http);

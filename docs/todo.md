@@ -84,7 +84,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 ### 1.4 P5 · 打磨
 
-- RocksDB 调参外露；corruption / GC 计数指标（前置：§3.1 后端级 metrics 框架）
+- RocksDB 调参外露；corruption 计数指标（§3.1 框架已具备；GC 计数已随 §3.1 示范落地）
 - `e2e_tiered_duostore` 组合场景（duostore 作 tiered 的 cloud 侧）——e2e 目前缺此条目
 - 文档状态头更新
 
@@ -94,7 +94,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 - AOF 探测告警（`CONFIG GET appendonly` 非 AOF 打 WARN）
 - `redis_wait_replicas`（WAIT 命令）配置项
-- 指标：CAS 重试 / 重连计数（前置：§3.1）
+- 指标：CAS 重试 / 重连计数（§3.1 框架已具备）
 - TLS（hiredis_ssl）评估；`list_uploads` 超大时 HGETALL → HSCAN 分批（§2.2）
 - ⚠️ 文档 bug：§10 表中 R1/R2/R3 状态仍写「未开始」，与状态头矛盾，需修
 
@@ -103,7 +103,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 - 崩溃模拟专项：kill 后 WAL 回放对账；list 迭代中并发写的一致视图注入（需进程级 harness）
 - `sqlite3_backup` 在线备份评估（运行中拷贝目前不保证一致，§6 末）
 - `PRAGMA optimize` / checkpoint 调优（目前全默认，§6）
-- 指标：BUSY / corruption 计数（前置：§3.1）
+- 指标：BUSY / corruption 计数（§3.1 框架已具备）
 - 已知保守泄漏：开放事务残留连接不回池（`sqlite_meta_store.cc:445`），可顺带评估
 
 ### 2.3 RADOS data · C3 / C4（duostore-rados-data.md §12）
@@ -122,20 +122,36 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 - 万分片 complete 专项：数万 mutation 的 prewrite 可能越过默认 lock_ttl，超时则接入
   client-c 的 TTLManager（§6.3）；核实 T4 是否已跑过此专项
 - Poco 日志收敛到统一 stderr 格式；超时参数化（上游无全局单调用超时）
-- 指标：冲突重试计数（前置：§3.1）
+- 指标：冲突重试计数（§3.1 框架已具备）
 - 上游 PR：2PC mutation op 扩展回馈 + `Snapshot::Get` not_found 重载 + 指针升级
   （当前靠 `@78a557e` 错误消息字面量匹配，`tikv_client.cc:180,194`，脆弱耦合）
 - ⚠️ 文档措辞：§7.3 / §10.4 仍残留「fork」流程描述，需同步为 in-tree 侧车（§6.3）
 
 ## 3. 横切基础设施（一处未做卡住多处）
 
-### 3.1 后端级 metrics 注册机制
+### 3.1 后端级 metrics 注册机制（✅ 已完成，2026-07-28）
 
-现有 Metrics 只有 L2 请求维度，无后端级注册（cloudproxy-backend.md §8.2 明确指出需先
-扩展框架）。它是以下所有指标项的共同前置：
+~~现有 Metrics 只有 L2 请求维度，无后端级注册（cloudproxy-backend.md §8.2 明确指出需先
+扩展框架）。~~框架已落地（`src/core/metrics.{h,cc}`）：
+
+- `MetricsRegistry`：counter / gauge / histogram / 回调 gauge 四类件，
+  同名同标签 get-or-create（幂等）、同名异类型/异桶界抛装配错误；
+  Prometheus 文本渲染（家族分组、# HELP/# TYPE、标签转义、输出序稳定）
+- `MetricsScope`：per-backend 注册句柄，`StorageRegistry::build` 给每个后端派发
+  `backend=<name>` 基础标签的 scope（`BackendFactory` 增第三参），`with()` 可派生
+  子件维度；默认空 scope 返回孤立实例——测试直构后端零装配成本
+- 装配：main 建注册表 → build 注入 → `S3Service::set_backend_metrics`，
+  `GET /-/metrics` 在 L2 请求指标之后追加渲染（未注入则行为不变）
+- 示范消费者：duostore GC 计数 5 项（runs/reclaims/files_removed/packs_removed/
+  uploads_expired，P5 指标项的 GC 切片）经 scope 注册，构造期即注册故 0 值可见
+- 验收：test_metrics.cc 8 用例 + service/duostore 端到端断言；默认/asan/tsan/
+  rados/redis 五种构建单测全绿，e2e duostore 全绿，真实进程 /-/metrics 实测输出
+
+它解锁以下指标项（各随所属阶段排期，接入方式见 storage-backend.md §6）：
 
 - cloudproxy P4 指标（远端请求计数/时延、重试、错误映射、ETag 校验失败、ClientPool 等待）
-- duostore P5、redis R4、sqlite S4、rados C4、tikv T5 的各自指标项
+- duostore P5（corruption 计数；GC 计数已随本项示范落地）、redis R4、sqlite S4、
+  rados C4、tikv T5 的各自指标项
 - s3-protocol.md §7 规划的「按后端分维度、后端错误率」
 
 ### 3.2 per-backend 独立 ThreadPool
@@ -245,6 +261,6 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
 1. ~~**文档一致性修复（§6）+ 配置样例（§5.1）+ build.sh 开关（§5.2）**——半天级，先清零~~ ✅ 已全部完成（2026-07-26）
 2. ~~**DuoStore P3 GC 一期（§1.1）**——生产可用性硬阻塞；先补 `src/core/timer` 单测~~ ✅ 已完成（2026-07-26）
 3. ~~**DuoStore P2 pack 聚合（§1.2）**——解锁四个 meta store 的 pack 账与全 pack 测试变体~~ ✅ 已完成（2026-07-26）
-4. **后端级 metrics 框架（§3.1）**——一次解锁六处指标项
+4. ~~**后端级 metrics 框架（§3.1）**——一次解锁六处指标项~~ ✅ 已完成（2026-07-28）
 5. **DuoStore P4（§1.3）** → 随之做 **rados C4 孤儿扫描**（接口一并定形）
 6. 各引擎打磨（R4 / S4 / C3 / T5）与 P5、tiered 对账、凭证二期按需排期

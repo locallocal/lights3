@@ -36,12 +36,14 @@ std::pair<std::string, std::string> fs_backend_paths(const BackendConfig& cfg) {
 void ensure_registered() {
     static bool done = [] {
         StorageRegistry::register_backend(
-            "localfs", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+            "localfs",
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope) {
                 auto [root, staging] = fs_backend_paths(cfg);
                 return std::make_shared<LocalFsBackend>(root, staging, std::move(pool));
             });
         StorageRegistry::register_backend(
-            "xlocalfs", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+            "xlocalfs",
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope) {
                 auto [root, staging] = fs_backend_paths(cfg);
                 unsigned depth = cfg.params.count("queue_depth")
                                      ? std::stoul(cfg.params.at("queue_depth"))
@@ -50,21 +52,24 @@ void ensure_registered() {
                                                          depth);
             });
         StorageRegistry::register_backend(
-            "memory", [](const BackendConfig&, std::shared_ptr<ThreadPool>) {
+            "memory", [](const BackendConfig&, std::shared_ptr<ThreadPool>, MetricsScope) {
                 return std::make_shared<MemoryBackend>();
             });
 #ifdef LIGHTS3_CLOUDPROXY
         StorageRegistry::register_backend(
-            "cloudproxy", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+            "cloudproxy",
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope) {
                 auto c = CloudProxyConfig::from_params(cfg.name, cfg.params);
                 return std::make_shared<CloudProxyBackend>(std::move(c), std::move(pool));
             });
 #endif
 #ifdef LIGHTS3_DUOSTORE
         StorageRegistry::register_backend(
-            "duostore", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+            "duostore",
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
                 auto c = DuoStoreConfig::from_params(cfg.name, cfg.params);
-                return std::make_shared<DuoStoreBackend>(std::move(c), std::move(pool));
+                return std::make_shared<DuoStoreBackend>(std::move(c), std::move(pool),
+                                                         std::move(m));
             });
 #endif
         return true;
@@ -79,7 +84,8 @@ void StorageRegistry::register_backend(const std::string& type, BackendFactory f
 }
 
 std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
-    const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool) {
+    const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool,
+    std::shared_ptr<MetricsRegistry> metrics) {
     ensure_registered();
     // 两阶段构建（docs/tiered-storage.md §2）：先构造全部叶子后端，再按依赖迭代构造组合后端
     std::map<std::string, std::shared_ptr<IStorageBackend>> out;
@@ -98,7 +104,8 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
         auto it = registry().find(cfg.type);
         if (it == registry().end())
             throw std::runtime_error("unknown storage backend type: " + cfg.type);
-        out[cfg.name] = it->second(cfg, pool);
+        // 每后端一个 scope：实例级 backend=<name> 标签，工厂内按需再加维度
+        out[cfg.name] = it->second(cfg, pool, MetricsScope(metrics, {{"backend", cfg.name}}));
     }
     // tiered 引用 name 已就绪即可构造；tiered 套 tiered 按依赖序解开，解不开
     // 的（循环/未知引用）视为配置错误

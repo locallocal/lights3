@@ -186,6 +186,7 @@ lights3/
 │   │   ├── timer.h/.cc       #   定时器线程（with_timeout 底座）
 │   │   ├── cancel.h          #   协作式取消原语
 │   │   ├── config.h/.cc      #   YAML 解析 + 类型化配置
+│   │   ├── metrics.h/.cc     #   后端级 metrics 注册表 + scope（todo.md §3.1）
 │   │   ├── log.h             #   spdlog 门面
 │   │   └── util/             #   hex, crypto(OpenSSL SHA256/HMAC), uri, time
 │   ├── http/                 # L1

@@ -278,6 +278,7 @@ add_library(lights3_core STATIC
   src/core/thread_pool.cc
   src/core/timer.cc
   src/core/config.cc
+  src/core/metrics.cc
   src/core/util/crypto.cc
   src/core/util/uri.cc
   src/core/util/time.cc
@@ -433,6 +434,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/main.cc
     tests/unit/test_task.cc
     tests/unit/test_timer.cc
+    tests/unit/test_metrics.cc
     tests/unit/test_concurrency.cc
     tests/unit/test_config.cc
     tests/unit/test_sigv4.cc

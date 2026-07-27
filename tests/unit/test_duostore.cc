@@ -343,6 +343,30 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     sync_wait(b->close());
 }
 
+// 后端级 metrics（docs/todo.md §3.1）：GC 计数经 MetricsScope 落注册表，
+// backend 标签来自装配侧；直构（默认空 scope）路径由其余 GC 用例覆盖
+TEST(duostore_gc_metrics_registered) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gcm");
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool,
+                                               MetricsScope(reg, {{"backend", "gcm"}}));
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunk
+    sync_wait(b->delete_object("bkt", "k"));
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.reclaims_acked, uint64_t(1));
+
+    auto out = reg->render();
+    CHECK(out.find("lights3_duostore_gc_runs_total{backend=\"gcm\"} 1\n") != std::string::npos);
+    CHECK(out.find("lights3_duostore_gc_reclaims_total{backend=\"gcm\"} 1\n") !=
+          std::string::npos);
+    CHECK(out.find("lights3_duostore_gc_files_removed_total{backend=\"gcm\"} 3\n") !=
+          std::string::npos);
+    sync_wait(b->close());
+}
+
 // gc_grace 防御纵深（§7/§9.1）：未逾宽限期的项跳过——不销账、文件保留
 TEST(duostore_gc_grace_defers_reclaim) {
     TmpDir tmp;

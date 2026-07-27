@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "core/background.h"
+#include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "core/timer.h"
@@ -117,11 +118,13 @@ struct DuoStoreConfig {
 
 class DuoStoreBackend final : public IStorageBackend {
 public:
-    DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool);
+    // metrics 默认空 scope（docs/todo.md §3.1）：测试直构免装配，计数落孤立实例
+    DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
+                    MetricsScope metrics = {});
     // 测试注入用：自组装 meta/data
     DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
                     std::unique_ptr<duostore::IMetaStore> meta,
-                    std::unique_ptr<duostore::IDataStore> data);
+                    std::unique_ptr<duostore::IDataStore> data, MetricsScope metrics = {});
     ~DuoStoreBackend() override;
 
     Task<void> create_bucket(std::string_view bucket) override;
@@ -171,6 +174,8 @@ private:
     void schedule_gc();
     Task<void> gc_tick();
     void shutdown_background();
+    // GC 计数指标注册（P5 指标项的 GC 切片，docs/todo.md §1.4；两个构造共用）
+    void init_metrics(const MetricsScope& metrics);
 
     DuoStoreConfig cfg_;
     std::shared_ptr<ThreadPool> pool_;
@@ -178,6 +183,10 @@ private:
     std::unique_ptr<duostore::IDataStore> data_;
     std::shared_ptr<duostore::PinTable> pins_ = std::make_shared<duostore::PinTable>();
     std::atomic<bool> closed_{false};  // close() 幂等闩；在途判定统一走 bg_
+
+    // GC 完成轮末尾一次性累计（run_gc_once 的 DuoGcStats → 单调计数器）
+    std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_,
+        m_gc_packs_removed_, m_gc_uploads_expired_;
 
     BackgroundTaskGroup bg_{"duostore"};
     // 只在 bg_.if_open 内写、begin_close 后不变（读侧免锁）；0 = 未 arm（cancel(0) 安全）

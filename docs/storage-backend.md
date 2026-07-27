@@ -211,7 +211,13 @@ meta / data 两侧均已有可选替换实现（各有专文，编译开关默�
 1. 实现 `IStorageBackend`（放 `src/storage/<name>/`）。
 2. 在 `registry.cc` 的 `ensure_registered()` 里调用
    `StorageRegistry::register_backend("<type>", factory)` 注册，工厂签名
-   `(const BackendConfig&, shared_ptr<ThreadPool>) → shared_ptr<IStorageBackend>`。
-3. 配置 `backends[].type` 即可引用；通过通用的**后端一致性测试套件**
+   `(const BackendConfig&, shared_ptr<ThreadPool>, MetricsScope)
+   → shared_ptr<IStorageBackend>`。
+3. 后端级指标（可选，todo.md §3.1）：工厂收到的 `MetricsScope` 已带
+   `backend=<name>` 基础标签，透传给后端构造器、构造期领取实例
+   （`scope.counter/gauge/histogram/gauge_callback`，`with()` 派生子件维度），
+   热路径无锁递增，`GET /-/metrics` 自动追加输出。不消费指标时忽略该参即可；
+   测试直构后端传默认空 scope，计数落孤立实例、无需装配注册表。
+4. 配置 `backends[].type` 即可引用；通过通用的**后端一致性测试套件**
    （同一组用例参数化跑所有后端：CRUD、range、list 分页、multipart、
    并发 PUT 同 key、异常 key）验收。

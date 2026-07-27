@@ -90,6 +90,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.headers.set("Content-Type", "text/plain");
         } else if (req.path == "/-/metrics") {
             resp.small_body = metrics_.render(pool_stats_);
+            // 后端级注册表（docs/todo.md §3.1）追加在 L2 请求指标之后
+            if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
         } else if (req.path == "/-/readyz") {
             resp = co_await readyz();

@@ -6,6 +6,7 @@
 #include <string>
 
 #include "core/cancel.h"
+#include "core/metrics.h"
 #include "core/task.h"
 #include "core/thread_pool.h"
 #include "http/model.h"
@@ -38,6 +39,11 @@ public:
 
     // /-/metrics 的线程池指标来源（可选，main 装配时注入）
     void set_pool_stats(std::function<ThreadPool::Stats()> fn) { pool_stats_ = std::move(fn); }
+
+    // 后端级指标注册表（docs/todo.md §3.1，可选）：渲染追加在 L2 请求指标之后
+    void set_backend_metrics(std::shared_ptr<MetricsRegistry> m) {
+        backend_metrics_ = std::move(m);
+    }
 
     // 动态凭证管理（docs/credential-management.md）：未注入时 /-/admin/credentials 一律 AccessDenied
     void set_credential_store(std::shared_ptr<CredentialStore> s) {
@@ -103,6 +109,7 @@ private:
     std::string base_domain_;
     Metrics metrics_;
     std::function<ThreadPool::Stats()> pool_stats_;
+    std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
 };
 

@@ -349,8 +349,11 @@ host 同步变化），Client 连接按 bucket 独立——ClientPool 退化为 
 
 沿用现有 metrics 机制新增：远端请求计数/时延分布（按操作）、重试次数、
 错误映射计数（按远端码）、ETag 校验失败计数、ClientPool 等待时长。
-现有 `Metrics` 是 L2 请求维度、无后端级注册机制，接入需先扩展 metrics
-框架——留待独立特性；当前以 warn 日志覆盖关键路径（403 映射、ETag 兜底）。
+~~现有 `Metrics` 是 L2 请求维度、无后端级注册机制，接入需先扩展 metrics
+框架——留待独立特性~~（框架已落地：`core/metrics.h` 的 MetricsRegistry +
+MetricsScope，工厂第三参即本后端的 scope，见 todo.md §3.1 与
+storage-backend.md §6）；指标项本身仍未接入，当前以 warn 日志覆盖关键路径
+（403 映射、ETag 兜底）。
 
 ### 8.3 CMake
 

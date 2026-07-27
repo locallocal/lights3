@@ -359,8 +359,10 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
 
 // ---------- 构造 / 关闭 ----------
 
-DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool)
+DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
+                                 MetricsScope metrics)
     : cfg_(std::move(cfg)), pool_(std::move(pool)) {
+    init_metrics(metrics);
     std::filesystem::create_directories(cfg_.root);
 #ifdef LIGHTS3_DUOSTORE_REDIS_META
     if (cfg_.meta_kind == DuoMetaKind::kRedis)
@@ -404,11 +406,26 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
 
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
                                  std::unique_ptr<IMetaStore> meta,
-                                 std::unique_ptr<IDataStore> data)
+                                 std::unique_ptr<IDataStore> data, MetricsScope metrics)
     : cfg_(std::move(cfg)), pool_(std::move(pool)), meta_(std::move(meta)),
       data_(std::move(data)) {
+    init_metrics(metrics);
     abandon_stale_packs();
     schedule_gc();
+}
+
+void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
+    m_gc_runs_ = metrics.counter("lights3_duostore_gc_runs_total",
+                                 "Completed GC rounds (manual hook + background worker)");
+    m_gc_reclaims_ = metrics.counter("lights3_duostore_gc_reclaims_total",
+                                     "Reclaim queue entries acked after physical removal");
+    m_gc_files_removed_ = metrics.counter("lights3_duostore_gc_files_removed_total",
+                                          "Chunk/rados extents physically removed by GC");
+    m_gc_packs_removed_ = metrics.counter("lights3_duostore_gc_packs_removed_total",
+                                          "Empty sealed packs removed by GC");
+    m_gc_uploads_expired_ = metrics.counter(
+        "lights3_duostore_gc_uploads_expired_total",
+        "Multipart uploads aborted by GC after exceeding mpu_ttl");
 }
 
 // 重启弃用 active pack（§5.2）：数据面从不复用旧 active pack（新号段 + O_EXCL），
@@ -798,6 +815,14 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                      e.what());
         }
     }
+
+    // 完成轮才计数（关闭态的早退不计）；skip 类不设计数器——grace/pin 跳过项
+    // 每轮重扫会重复累计，单调计数会虚高误导
+    m_gc_runs_->inc();
+    m_gc_reclaims_->inc(st.reclaims_acked);
+    m_gc_files_removed_->inc(st.files_removed);
+    m_gc_packs_removed_->inc(st.packs_removed);
+    m_gc_uploads_expired_->inc(st.uploads_expired);
     co_return st;
 }
 

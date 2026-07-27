@@ -399,3 +399,18 @@ TEST(service_observability_endpoints) {
     CHECK(contains(metrics.small_body, "lights3_request_duration_seconds_bucket"));
     CHECK(contains(metrics.small_body, "lights3_inflight_requests"));
 }
+
+// 后端级 metrics 注册表（docs/todo.md §3.1）：注入后 /-/metrics 在 L2 请求指标
+// 之后追加渲染；未注入（上一用例）则只有 L2 部分
+TEST(service_backend_metrics_appended) {
+    auto svc = make_service_noauth();
+    auto reg = std::make_shared<MetricsRegistry>();
+    reg->counter("lights3_duostore_gc_runs_total", "", {{"backend", "duo1"}})->inc(2);
+    svc.set_backend_metrics(reg);
+
+    auto metrics = sync_wait(svc.dispatch(make_req("GET", "/-/metrics")));
+    CHECK_EQ(metrics.status, 200);
+    CHECK(contains(metrics.small_body, "lights3_requests_total"));
+    CHECK(contains(metrics.small_body,
+                   "lights3_duostore_gc_runs_total{backend=\"duo1\"} 2\n"));
+}

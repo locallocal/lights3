@@ -1083,4 +1083,26 @@ bool RedisMetaStore::chunk_referenced(uint64_t file_id) {
     return require_int("chunk_referenced", r.get()) == 1;
 }
 
+void RedisMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
+    // HSCAN 分批遍历 refs HASH（游标快照弱一致，孤儿扫描容忍）；field = 十进制 file_id
+    std::string cursor = "0";
+    do {
+        auto r = exec({"HSCAN", refs_key(), cursor, "COUNT", "512"}, /*read_retry=*/true);
+        check_reply_error("scan_refs", r.get());
+        if (r->type != REDIS_REPLY_ARRAY || r->elements != 2)
+            throw_internal("scan_refs", "unexpected HSCAN reply");
+        cursor = std::string(reply_str(r->element[0]));
+        const redisReply* kv = r->element[1];
+        for (size_t i = 0; i + 1 < kv->elements; i += 2) {  // field,value 对；只取 field
+            uint64_t id = 0;
+            try {
+                id = std::stoull(std::string(reply_str(kv->element[i])));
+            } catch (const std::exception&) {
+                continue;  // 非本店格式（前缀撞车），跳过
+            }
+            cb(id);
+        }
+    } while (cursor != "0");
+}
+
 }  // namespace lights3::storage::duostore

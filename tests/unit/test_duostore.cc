@@ -6,6 +6,7 @@
 // 压实/崩溃注入专项随 P4 增补。
 #ifdef LIGHTS3_DUOSTORE
 
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cstring>
@@ -13,6 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <memory>
+#include <semaphore>
 #include <string>
 #include <thread>
 #include <vector>
@@ -660,11 +662,17 @@ PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadP
     auto meta = std::make_unique<RocksMetaStore>(
         RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
     auto* mp = meta.get();
+    // 迁移回调同 cfg 构造的装配（migrate_pack_record 标准实现）；写侧 pin 钩子不接
+    // ——压实用例的迁移 payload ≤ 阈值恒走 pack 路径，pins 传空即可
     auto data = std::make_unique<FsDataStore>(
         FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
                       cfg.pack_max_size, cfg.pack_writers},
         pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); },
-        [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
+        [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
+        [mp](IDataStore& ds, std::string_view owner, const Extent& from,
+             std::span<const std::byte> payload) {
+            return migrate_pack_record(*mp, ds, nullptr, owner, from, payload);
+        });
     PackHarness h;
     h.meta = mp;
     h.b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -726,14 +734,15 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     auto g3 = sync_wait(h.b->get_object("bkt", "big", std::nullopt));
     CHECK_EQ(read_all(*g3.body), big);
 
-    // multipart 小分片同样进 pack，owner = "mpu\0<id>\0<no>"
+    // multipart 小分片同样进 pack，owner = "mpu\0<b>\0<k>\0<id>\0<no>"（P4 §9.2：
+    // 带 b/k 才能在 complete 后反查归属对象）
     auto id = sync_wait(h.b->create_multipart("bkt", "mp", {}));
     {
         http::StringBodyReader body(patterned(300));
         sync_wait(h.b->upload_part("bkt", "mp", id, 1, body));
     }
     raw = read_file(sole_pack_file(cfg.root));
-    CHECK(raw.find(std::string("mpu\0", 4) + id) != std::string::npos);
+    CHECK(raw.find(std::string("mpu\0bkt\0mp\0", 11) + id) != std::string::npos);
     sync_wait(h.b->abort_multipart("bkt", "mp", id));
     sync_wait(h.b->close());
 }
@@ -905,6 +914,666 @@ TEST(duostore_pack_restart_abandons_active) {
     auto g2 = sync_wait(h.b->get_object("bkt", "fresh", std::nullopt));
     CHECK_EQ(read_all(*g2.body), patterned(600));
     sync_wait(h.b->close());
+}
+
+// ---------- P4 压实专项（§9.2/§15 P4 验收：低存活压实全绿）----------
+
+namespace {
+
+// pack 文件路径（与 FsDataStore 布局约定一致；测试直算免持 store 指针）
+fs::path pack_file_path(const fs::path& root, uint64_t pack_id) {
+    char ss[3], name[32];
+    std::snprintf(ss, sizeof ss, "%02x", unsigned((pack_id >> 8) & 0xff));
+    std::snprintf(name, sizeof name, "%016llx.pak", (unsigned long long)pack_id);
+    return root / "packs" / ss / name;
+}
+
+void corrupt_file_at(const fs::path& p, uint64_t off) {
+    std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
+    f.seekg(std::streamoff(off));
+    char c = 0;
+    f.get(c);
+    f.seekp(std::streamoff(off));
+    f.put(char(c ^ 0x5a));
+}
+
+}  // namespace
+
+// 低存活压实收敛：存活率高不触发；跌破 pack_gc_ratio 后顺扫迁移存活 record 到
+// active pack、swap 换 ref、空 pack 同轮整删（grace=0）；对象读取无缝
+TEST(duostore_compact_low_liveness_pack) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "compact");
+    cfg.pack_max_size = 2048;  // 600B record ≈ 629B，3 条即满轮转
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    for (int i = 0; i < 4; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // P1 封存（k0-k2），P2 active（k3）
+
+    uint64_t p1 = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
+
+    // 存活 3/3 与 2/3（0.64 ≥ 0.5）都不触发压实
+    auto st0 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st0.packs_compacted, uint64_t(0));
+    sync_wait(h.b->delete_object("bkt", "k0"));
+    auto st1 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st1.packs_compacted, uint64_t(0));
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+
+    // 存活 1/3（0.32 < 0.5）→ 压实：k2 迁移、P1 空、同轮整删
+    sync_wait(h.b->delete_object("bkt", "k1"));
+    auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st2.packs_compacted, uint64_t(1));
+    CHECK_EQ(st2.records_migrated, uint64_t(1));
+    CHECK_EQ(st2.records_corrupt, uint64_t(0));
+    CHECK_EQ(st2.packs_removed, uint64_t(1));
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat 已销
+
+    // 换 ref 后 k2 指向新 pack 且逐字节正确；k3 不受扰
+    auto rec = h.meta->get_object("bkt", "k2");
+    CHECK(rec.has_value());
+    CHECK(rec->data.extents[0].file_id != p1);
+    auto g = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
+    CHECK_EQ(read_all(*g.body), patterned(600));
+    auto g3 = sync_wait(h.b->get_object("bkt", "k3", std::nullopt));
+    CHECK_EQ(read_all(*g3.body), patterned(600));
+
+    // 收敛：再跑一轮零动作
+    auto st3 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st3.packs_compacted, uint64_t(0));
+    CHECK_EQ(st3.packs_removed, uint64_t(0));
+    sync_wait(h.b->close());
+}
+
+// 死 record 损坏不阻压实（§10）：存活账证明损坏者已死——存活者照常迁移、
+// live 归零后空 pack 整删（含损坏死区）不丢任何数据
+TEST(duostore_compact_corrupt_dead_record) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "compact-cdead");
+    cfg.pack_max_size = 1400;  // 2 条即满（第 3 条触发轮转封存）
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k1", patterned(600));
+    put(*h.b, "bkt", "k2", patterned(600));
+    auto old2 = h.meta->get_object("bkt", "k2")->data.extents[0];  // 覆盖前的 P1 定位
+    put(*h.b, "bkt", "k2", patterned(500));  // 第 3 条 → P1 封存，新值进 P2；旧 k2 成死区
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+
+    corrupt_file_at(pack_file_path(cfg.root, old2.file_id), old2.offset + 10);  // 损坏死区
+    auto st = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st.packs_compacted, uint64_t(1));
+    CHECK_EQ(st.records_corrupt, uint64_t(1));   // 死区损坏：告警跳过
+    CHECK_EQ(st.records_migrated, uint64_t(1));  // 存活 k1 照常迁移
+    CHECK_EQ(st.packs_removed, uint64_t(1));     // live 归零 → 空 pack（含死区）整删
+    auto g1 = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
+    CHECK_EQ(read_all(*g1.body), patterned(600));
+    auto g2 = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
+    CHECK_EQ(read_all(*g2.body), patterned(500));
+    sync_wait(h.b->close());
+}
+
+// 存活 record 损坏 → 迁移不了、live 不归零 → 保留原 pack 不删（人工介入，§10）；
+// 账无推进 + 冷却窗内不重扫（compact_blocked 记忆）
+TEST(duostore_compact_corrupt_live_record_keeps_pack) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "compact-clive");
+    cfg.pack_max_size = 1400;
+    cfg.gc_grace_sec = 3600;  // 冷却窗生效（也用于验证跳过重扫）
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k1", patterned(600));
+    put(*h.b, "bkt", "k2", patterned(600));
+    put(*h.b, "bkt", "filler", patterned(600));  // P1 封存
+    sync_wait(h.b->delete_object("bkt", "k1"));  // P1 存活 1/2 → 候选
+
+    auto live2 = h.meta->get_object("bkt", "k2")->data.extents[0];
+    corrupt_file_at(pack_file_path(cfg.root, live2.file_id), live2.offset + 10);  // 损坏存活者
+
+    auto st1 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st1.packs_compacted, uint64_t(1));
+    CHECK_EQ(st1.records_corrupt, uint64_t(1));
+    CHECK_EQ(st1.records_migrated, uint64_t(0));
+    CHECK_EQ(st1.packs_removed, uint64_t(0));  // live>0：pack 保留（不丢注定要人工救的数据）
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+
+    // 账无推进 + 冷却窗内：下一轮跳过重扫
+    auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st2.packs_compacted, uint64_t(0));
+    sync_wait(h.b->close());
+}
+
+// mpu 分片的压实（§9.2 owner 提示）：进行中 upload 的 pack 分片不可迁（保守阻塞、
+// pack 保留）；complete 后凭 owner 内嵌的 b/k 反查归属对象 → 迁移解锁、pack 回收
+TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "compact-mpu");
+    cfg.pack_max_size = 1400;
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+
+    auto id = sync_wait(h.b->create_multipart("bkt", "mp", {}));
+    std::string etag;
+    {
+        http::StringBodyReader body(patterned(600));
+        etag = sync_wait(h.b->upload_part("bkt", "mp", id, 1, body)).etag;
+    }
+    put(*h.b, "bkt", "f1", patterned(600));
+    put(*h.b, "bkt", "f2", patterned(600));  // P1（part+f1）封存，f2 进 P2
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+    sync_wait(h.b->delete_object("bkt", "f1"));  // P1 存活 = 进行中分片 1 条 → 候选
+
+    auto st1 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st1.packs_compacted, uint64_t(1));
+    CHECK_EQ(st1.records_migrated, uint64_t(0));  // 进行中 mpu：对象不存在 → 保守不迁
+    CHECK_EQ(st1.packs_removed, uint64_t(0));
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
+
+    std::vector<PartInfo> parts = {{1, etag}};
+    sync_wait(h.b->complete_multipart("bkt", "mp", id, parts));
+
+    // complete 后（grace=0 无冷却）：owner 的 b/k 提示反查对象成功 → 迁移 + 整删
+    auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st2.records_migrated, uint64_t(1));
+    CHECK_EQ(st2.packs_removed, uint64_t(1));
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    auto g = sync_wait(h.b->get_object("bkt", "mp", std::nullopt));
+    CHECK_EQ(read_all(*g.body), patterned(600));
+    sync_wait(h.b->close());
+}
+
+// rewrite_pack 顺扫语义（store 级，无迁移回调）：统计、file_size 回报、torn tail
+// 静默止扫（重启弃用的预期形态）、magic 损坏响亮止扫
+TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    RocksMetaStore meta({(tmp.path / "meta").string(), false, 8ull << 20});
+    FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1};
+    FsDataStore d(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); });
+
+    auto append = [&](std::string owner, size_t n) {
+        auto w = sync_wait(d.open_writer({uint64_t(n), std::move(owner)}));
+        std::string data = patterned(n);
+        sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(data.data()), n)));
+        return sync_wait(w->finish()).extents.at(0);
+    };
+    auto e1 = append(std::string("bkt\0a", 5), 600);
+    auto e2 = append(std::string("bkt\0b", 5), 600);
+    CHECK_EQ(e1.file_id, e2.file_id);
+    uint64_t real_size = fs::file_size(pack_file_path(tmp.path / "duo", e1.file_id));
+    {
+        // torn tail 注入：截断的 record 头（崩溃残迹）
+        std::ofstream f(pack_file_path(tmp.path / "duo", e1.file_id),
+                        std::ios::binary | std::ios::app);
+        f << "LP3R" << std::string(7, '\x5a');
+    }
+    auto rw = sync_wait(d.rewrite_pack(e1.file_id));
+    CHECK_EQ(rw.scanned, uint64_t(2));
+    CHECK_EQ(rw.migrated, uint64_t(0));  // 无迁移回调：只扫不迁
+    CHECK_EQ(rw.corrupt, uint64_t(0));   // torn tail 不计损坏
+    CHECK_EQ(rw.file_size, real_size + 11);
+
+    corrupt_file_at(pack_file_path(tmp.path / "duo", e1.file_id), 0);  // magic 损坏
+    auto rw2 = sync_wait(d.rewrite_pack(e1.file_id));
+    CHECK_EQ(rw2.scanned, uint64_t(0));  // 无法重同步：响亮止扫
+    CHECK_EQ(rw2.corrupt, uint64_t(1));
+    sync_wait(d.close());
+    meta.close();
+}
+
+// P4 前旧格式 mpu owner（"mpu\0<id>\0<no>"，无 b/k）：不可反查 → 保守不迁，
+// pack 保留、对象照常可读；新格式（带 b/k）经对象反查正常迁移——两代盘面共存安全
+TEST(duostore_compact_legacy_mpu_owner_blocks) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    RocksMetaStore meta({(tmp.path / "meta").string(), false, 8ull << 20});
+    meta.create_bucket("bkt");
+    FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1};
+    uint64_t pack_id = 0;
+    {
+        FsDataStore d1(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); },
+                       [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); });
+        auto write_rec = [&](std::string owner, const std::string& data) {
+            auto w = sync_wait(d1.open_writer({uint64_t(data.size()), std::move(owner)}));
+            sync_wait(w->write(
+                std::span(reinterpret_cast<const std::byte*>(data.data()), data.size())));
+            return sync_wait(w->finish()).extents.at(0);
+        };
+        // 旧格式（模拟 P4 前遗留盘面）与新格式各一条，都归属 complete 后的对象
+        auto legacy = write_rec(std::string("mpu\0oldid\0001", 11), patterned(300));
+        auto modern =
+            write_rec(std::string("mpu\0bkt\0knew\0newid\0001", 20), patterned(400));
+        pack_id = legacy.file_id;
+        ObjectRec r1;
+        r1.meta.key = "kold";
+        r1.meta.etag = "e1";
+        r1.meta.size = 300;
+        r1.meta.last_modified = std::chrono::system_clock::now();
+        r1.data.extents = {legacy};
+        meta.put_object("bkt", "kold", std::move(r1));
+        ObjectRec r2;
+        r2.meta.key = "knew";
+        r2.meta.etag = "e2";
+        r2.meta.size = 400;
+        r2.meta.last_modified = std::chrono::system_clock::now();
+        r2.data.extents = {modern};
+        meta.put_object("bkt", "knew", std::move(r2));
+        sync_wait(d1.close());  // 封存 pack（迁移目标须是另一个 active pack）
+    }
+    FsDataStore d2(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); },
+                   [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); },
+                   [&](IDataStore& ds, std::string_view owner, const Extent& from,
+                       std::span<const std::byte> payload) {
+                       return migrate_pack_record(meta, ds, nullptr, owner, from, payload);
+                   });
+    auto rw = sync_wait(d2.rewrite_pack(pack_id));
+    CHECK_EQ(rw.scanned, uint64_t(2));
+    CHECK_EQ(rw.migrated, uint64_t(1));  // 新格式迁移；旧格式保守搁置
+    CHECK(meta.get_object("bkt", "kold")->data.extents[0].file_id == pack_id);  // ref 未动
+    CHECK(meta.get_object("bkt", "knew")->data.extents[0].file_id != pack_id);  // 已换 ref
+    // 两个对象都可读且内容正确
+    auto read_obj = [&](const char* k, size_t n) {
+        auto rec = meta.get_object("bkt", k);
+        auto r = sync_wait(d2.open_reader(rec->data, 0, n - 1));
+        return read_all(*r);
+    };
+    CHECK_EQ(read_obj("kold", 300), patterned(300));
+    CHECK_EQ(read_obj("knew", 400), patterned(400));
+    sync_wait(d2.close());
+    meta.close();
+}
+
+// ---------- P4 孤儿扫描专项（§9.3）----------
+
+// 正向：盘上无引用且逾宽限 → unlink（在册对象不受扰）；反向：refs 在而文件缺 →
+// 告警计数、绝不删 meta；grace 挡新写
+TEST(duostore_orphan_scan_forward_and_reverse) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "orphan");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunk 在册
+
+    // 孤儿注入：崩溃残留形态（盘上有文件、meta 无账）；id 取远端避开号段
+    fs::create_directories(cfg.root / "chunks" / "ab");
+    std::ofstream(cfg.root / "chunks" / "ab" / "000000000000abcd.chk") << patterned(100);
+
+    auto st1 = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(st1.chunks_scanned, uint64_t(4));
+    CHECK_EQ(st1.orphans_removed, uint64_t(1));
+    CHECK_EQ(st1.refs_missing, uint64_t(0));
+    CHECK_EQ(st1.skipped_pinned, uint64_t(0));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(3));
+    auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));
+    CHECK_EQ(read_all(*g.body), patterned(10000));
+    g.body.reset();
+
+    // 反向：手工删一个在册 chunk 文件 → 只告警计数，meta 保持（人工介入线索）
+    uint64_t lost = 0;
+    {
+        auto rec = sync_wait(b->head_object("bkt", "k"));
+        (void)rec;
+    }
+    {
+        // 经孤儿扫描枚举拿到一个在册 id（与 refs 交集必非空）
+        fs::path victim;
+        for (auto& e : fs::recursive_directory_iterator(cfg.root / "chunks"))
+            if (e.is_regular_file() && e.path().extension() == ".chk") {
+                victim = e.path();
+                break;
+            }
+        CHECK(!victim.empty());
+        lost = std::stoull(victim.filename().string().substr(0, 16), nullptr, 16);
+        fs::remove(victim);
+    }
+    auto st2 = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(st2.chunks_scanned, uint64_t(2));
+    CHECK_EQ(st2.orphans_removed, uint64_t(0));
+    CHECK_EQ(st2.refs_missing, uint64_t(1));
+    (void)lost;
+    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta 未被动
+    sync_wait(b->close());
+
+    // grace 挡新写：宽限内的无引用文件不动
+    TmpDir tmp2;
+    auto cfg2 = gc_cfg(tmp2, "orphan-grace");
+    cfg2.gc_grace_sec = 3600;
+    auto b2 = std::make_shared<DuoStoreBackend>(cfg2, pool);
+    sync_wait(b2->create_bucket("bkt"));
+    fs::create_directories(cfg2.root / "chunks" / "ab");
+    std::ofstream(cfg2.root / "chunks" / "ab" / "000000000000abcd.chk") << "x";
+    auto st3 = sync_wait(b2->run_orphan_scan_once());
+    CHECK_EQ(st3.skipped_grace, uint64_t(1));
+    CHECK_EQ(st3.orphans_removed, uint64_t(0));
+    CHECK_EQ(chunk_files_on_disk(cfg2.root), size_t(1));
+    sync_wait(b2->close());
+}
+
+namespace {
+
+// 可拦停的 body：吐出 first 后阻塞等 release，再吐 rest——制造"写入中、meta 未
+// 提交"的长窗口（写侧 pin 的防护对象，§9.3）
+class GatedReader final : public http::BodyReader {
+public:
+    GatedReader(std::string first, std::string rest)
+        : first_(std::move(first)), rest_(std::move(rest)),
+          total_(first_.size() + rest_.size()) {}
+
+    std::optional<uint64_t> length() const override { return total_; }
+
+    Task<size_t> read(std::span<std::byte> buf) override {
+        if (stage_ == 0) {
+            size_t n = std::min(buf.size(), first_.size() - off_);
+            std::memcpy(buf.data(), first_.data() + off_, n);
+            off_ += n;
+            if (off_ == first_.size()) {
+                stage_ = 1;
+                off_ = 0;
+            }
+            co_return n;
+        }
+        if (stage_ == 1) {
+            gate_.acquire();  // 阻塞池线程直至 release()（池 >1 线程，扫描不受阻）
+            stage_ = 2;
+        }
+        size_t n = std::min(buf.size(), rest_.size() - off_);
+        std::memcpy(buf.data(), rest_.data() + off_, n);
+        off_ += n;
+        co_return n;
+    }
+
+    void release() { gate_.release(); }
+
+private:
+    std::string first_, rest_;
+    uint64_t total_;
+    size_t off_ = 0;
+    int stage_ = 0;
+    std::binary_semaphore gate_{0};
+};
+
+}  // namespace
+
+// 写侧 pin（§9.3）：慢流式 PUT 已落盘、未提交 meta 的 chunk 不被孤儿扫描误删
+// ——mtime 宽限对超长写不充分，pin 是硬防线（grace=0 下唯一防线）
+TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "orphan-pin");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+
+    std::string body_data = patterned(9000);
+    GatedReader body(body_data.substr(0, 5000), body_data.substr(5000));
+    std::thread writer([&] { sync_wait(b->put_object("bkt", "slow", {}, body)); });
+
+    // 等首个 chunk 落盘（4096 切片：5000B → chunk0 封存 + chunk1 在写）
+    for (int i = 0; i < 200 && chunk_files_on_disk(cfg.root) < 1; ++i) usleep(20 * 1000);
+    size_t on_disk = chunk_files_on_disk(cfg.root);
+    CHECK(on_disk >= 1);
+
+    auto st1 = sync_wait(b->run_orphan_scan_once());
+    CHECK(st1.skipped_pinned >= 1);  // grace=0：写侧 pin 是唯一防线
+    CHECK_EQ(st1.orphans_removed, uint64_t(0));
+    CHECK(chunk_files_on_disk(cfg.root) >= on_disk);
+
+    body.release();
+    writer.join();
+
+    // 提交后：refs 在账、pin 已解，再扫零动作；内容完整
+    auto st2 = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(st2.orphans_removed, uint64_t(0));
+    CHECK_EQ(st2.skipped_pinned, uint64_t(0));
+    CHECK_EQ(st2.refs_missing, uint64_t(0));
+    auto g = sync_wait(b->get_object("bkt", "slow", std::nullopt));
+    CHECK_EQ(read_all(*g.body), body_data);
+    sync_wait(b->close());
+}
+
+// ---------- P4 崩溃注入（§15 P4 验收：kill -9 重启收敛）----------
+// 子进程（execv 自身进 duostore-crash-child 模式）在指定点 _exit / 被 SIGKILL
+// ——两者对进程状态等价（无析构无 flush）；父进程重开同 root 验证：已提交对象
+// 逐字节存活（meta_sync=true 的提交契约）、GC + 孤儿扫描把残迹收敛到零
+
+namespace {
+
+DuoStoreConfig crash_cfg(const fs::path& root) {
+    DuoStoreConfig cfg;
+    cfg.name = "crash";
+    cfg.root = root;
+    cfg.meta_path = root / "meta";
+    cfg.chunk_size = 4096;
+    cfg.pack_threshold = 1024;
+    cfg.pack_max_size = 64 << 10;
+    cfg.pack_writers = 1;
+    cfg.meta_sync = true;  // 崩溃语义主角：提交点 = WAL fsync（§6）
+    cfg.gc_interval_sec = 0;
+    cfg.orphan_scan_interval_sec = 0;
+    cfg.gc_grace_sec = 0;
+    return cfg;
+}
+
+// 吐满 limit 字节后在 read() 内 _exit——PUT 泵送中途崩溃（数据半落盘、meta 无账）
+class ExitMidwayReader final : public http::BodyReader {
+public:
+    ExitMidwayReader(std::string data, size_t limit) : data_(std::move(data)), limit_(limit) {}
+    std::optional<uint64_t> length() const override { return data_.size(); }
+    Task<size_t> read(std::span<std::byte> buf) override {
+        if (off_ >= limit_) ::_exit(0);
+        size_t n = std::min({buf.size(), data_.size() - off_, limit_ - off_, size_t(3000)});
+        std::memcpy(buf.data(), data_.data() + off_, n);
+        off_ += n;
+        co_return n;
+    }
+
+private:
+    std::string data_;
+    size_t limit_;
+    size_t off_ = 0;
+};
+
+int duostore_crash_child(int argc, char** argv) {
+    if (argc < 4) return 2;
+    std::string mode = argv[2];
+    fs::path root = argv[3];
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto b = std::make_shared<DuoStoreBackend>(crash_cfg(root), pool);
+    sync_wait(b->create_bucket("bkt"));
+    if (mode == "commit") {
+        // pack 小对象 + 多 chunk 大对象 + multipart complete，各提交路径全走一遍
+        put(*b, "bkt", "small", patterned(600));
+        put(*b, "bkt", "big", patterned(10000));
+        auto id = sync_wait(b->create_multipart("bkt", "mp", {}));
+        std::vector<PartInfo> parts;
+        for (int no = 1; no <= 2; ++no) {
+            http::StringBodyReader body(patterned(6000));
+            parts.push_back({no, sync_wait(b->upload_part("bkt", "mp", id, no, body)).etag});
+        }
+        sync_wait(b->complete_multipart("bkt", "mp", id, parts));
+    } else if (mode == "midput") {
+        put(*b, "bkt", "before", patterned(600));
+        ExitMidwayReader body(patterned(20000), 9000);
+        sync_wait(b->put_object("bkt", "victim", {}, body));
+        return 3;  // 不可达：body 在 9000 字节处 _exit
+    } else if (mode == "afterdelete") {
+        put(*b, "bkt", "gone", patterned(10000));
+        sync_wait(b->delete_object("bkt", "gone"));  // gcq 已入账、文件未回收
+    } else if (mode == "spin") {
+        // 循环提交并回报；父进程随机时刻 SIGKILL。行在 put 返回（WAL fsync）后才
+        // 写出——凡父进程读到整行，重启后该对象必须存在
+        for (int i = 0;; ++i) {
+            size_t n = (i % 2) ? 600 : 10000;
+            put(*b, "bkt", "k" + std::to_string(i), patterned(n));
+            std::string line = "ok " + std::to_string(i) + "\n";
+            if (::write(1, line.data(), line.size()) < 0) return 4;
+        }
+    } else {
+        return 2;
+    }
+    ::_exit(0);  // 等价 kill -9：不 close、不析构（WAL 重放与 active pack 弃用留给重启）
+}
+
+mini_test::ChildRegistrar crash_child_reg("duostore-crash-child", duostore_crash_child);
+
+pid_t spawn_crash_child(const char* mode, const fs::path& root, int* out_fd = nullptr) {
+    int pfd[2] = {-1, -1};
+    if (out_fd) CHECK(::pipe(pfd) == 0);
+    pid_t pid = ::fork();
+    CHECK(pid >= 0);
+    if (pid == 0) {
+        if (out_fd) {
+            ::dup2(pfd[1], 1);
+            ::close(pfd[0]);
+            ::close(pfd[1]);
+        }
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof exe - 1);
+        if (n <= 0) ::_exit(127);
+        exe[n] = 0;
+        ::execl(exe, exe, "duostore-crash-child", mode, root.c_str(), (char*)nullptr);
+        ::_exit(127);
+    }
+    if (out_fd) {
+        ::close(pfd[1]);
+        *out_fd = pfd[0];
+    }
+    return pid;
+}
+
+int wait_child(pid_t pid) {
+    int stat = 0;
+    CHECK(::waitpid(pid, &stat, 0) == pid);
+    return stat;
+}
+
+std::string expect_body(int i) { return patterned((i % 2) ? 600 : 10000); }
+
+// 重启收敛验证：GC + 孤儿扫描跑到不动点后，再各跑一轮零动作
+void verify_converged(DuoStoreBackend& b) {
+    sync_wait(b.run_gc_once());
+    sync_wait(b.run_orphan_scan_once());
+    sync_wait(b.run_gc_once());  // 压实解锁的空 pack 等二阶效应再变现一轮
+    auto gc = sync_wait(b.run_gc_once());
+    CHECK_EQ(gc.reclaims_acked, uint64_t(0));
+    CHECK_EQ(gc.files_removed, uint64_t(0));
+    CHECK_EQ(gc.packs_removed, uint64_t(0));
+    CHECK_EQ(gc.uploads_expired, uint64_t(0));
+    auto os = sync_wait(b.run_orphan_scan_once());
+    CHECK_EQ(os.orphans_removed, uint64_t(0));
+    CHECK_EQ(os.refs_missing, uint64_t(0));
+    CHECK_EQ(os.skipped_pinned, uint64_t(0));
+}
+
+void check_body(DuoStoreBackend& b, const std::string& key, const std::string& want) {
+    auto g = sync_wait(b.get_object("bkt", key, std::nullopt));
+    CHECK_EQ(read_all(*g.body), want);
+}
+
+}  // namespace
+
+// 提交后崩溃：pack/多 chunk/multipart 三条提交路径的对象重启后逐字节存活；
+// 崩溃残迹（未封存 active pack、孤儿）收敛到零；收敛后（含压实迁移）内容仍正确
+TEST(duostore_crash_after_commit_recovers_all) {
+    TmpDir tmp;
+    fs::path root = tmp.path / "duo";
+    CHECK_EQ(wait_child(spawn_crash_child("commit", root)), 0);
+
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto b = std::make_shared<DuoStoreBackend>(crash_cfg(root), pool);
+    check_body(*b, "small", patterned(600));
+    check_body(*b, "big", patterned(10000));
+    check_body(*b, "mp", patterned(6000) + patterned(6000));
+    verify_converged(*b);
+    check_body(*b, "small", patterned(600));  // 复核：收敛（含压实迁移）不动内容
+    check_body(*b, "big", patterned(10000));
+    check_body(*b, "mp", patterned(6000) + patterned(6000));
+    sync_wait(b->close());
+}
+
+// PUT 泵送中途崩溃：victim 无账（NoSuchKey），半落盘 chunk 成孤儿被扫净；
+// 先行提交的对象不受扰
+TEST(duostore_crash_mid_put_leaves_no_garbage) {
+    TmpDir tmp;
+    fs::path root = tmp.path / "duo";
+    CHECK_EQ(wait_child(spawn_crash_child("midput", root)), 0);
+
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto b = std::make_shared<DuoStoreBackend>(crash_cfg(root), pool);
+    CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "victim")), s3::S3ErrorCode::NoSuchKey);
+    check_body(*b, "before", patterned(600));
+    // 9000B / 4096 切片 → 2 个封存 chunk + 1 个在写 chunk 全部无账
+    auto os = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(os.orphans_removed, uint64_t(3));
+    CHECK_EQ(os.refs_missing, uint64_t(0));
+    CHECK_EQ(chunk_files_on_disk(root), size_t(0));  // before 是 pack 对象，chunks/ 应净
+    verify_converged(*b);
+    check_body(*b, "before", patterned(600));
+    sync_wait(b->close());
+}
+
+// 删除入账后崩溃：gcq 残账重启后由 GC 变现（先物理删后销账的崩溃安全侧）
+TEST(duostore_crash_after_delete_converges) {
+    TmpDir tmp;
+    fs::path root = tmp.path / "duo";
+    CHECK_EQ(wait_child(spawn_crash_child("afterdelete", root)), 0);
+
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto b = std::make_shared<DuoStoreBackend>(crash_cfg(root), pool);
+    CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "gone")), s3::S3ErrorCode::NoSuchKey);
+    auto gc = sync_wait(b->run_gc_once());
+    CHECK_EQ(gc.reclaims_acked, uint64_t(1));
+    CHECK_EQ(gc.files_removed, uint64_t(3));  // 10000B / 4096 → 3 chunk
+    CHECK_EQ(chunk_files_on_disk(root), size_t(0));
+    verify_converged(*b);
+    sync_wait(b->close());
+}
+
+// 随机时刻 SIGKILL：凡子进程回报过的提交（行在 WAL fsync 后写出）重启后必须
+// 逐字节存在——真 kill -9 下的持久性契约；残迹照常收敛
+TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
+    TmpDir tmp;
+    fs::path root = tmp.path / "duo";
+    int fd = -1;
+    pid_t pid = spawn_crash_child("spin", root, &fd);
+
+    // 等到首个提交回报后再随机点开杀（保证测试非空转）
+    std::string buf;
+    char c;
+    while (buf.find('\n') == std::string::npos && ::read(fd, &c, 1) == 1) buf.push_back(c);
+    CHECK(buf.find('\n') != std::string::npos);
+    usleep((200 + unsigned(::getpid()) % 500) * 1000);  // 200-700ms 随机窗口
+    CHECK_EQ(::kill(pid, SIGKILL), 0);
+    int stat = wait_child(pid);
+    CHECK(WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL);
+    // 排空管道；只认完整行
+    for (;;) {
+        char rb[4096];
+        ssize_t n = ::read(fd, rb, sizeof rb);
+        if (n <= 0) break;
+        buf.append(rb, size_t(n));
+    }
+    ::close(fd);
+    std::vector<int> committed;
+    for (size_t pos = 0; pos < buf.size();) {
+        size_t nl = buf.find('\n', pos);
+        if (nl == std::string::npos) break;  // 尾部半行：不作数
+        std::string line = buf.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (line.rfind("ok ", 0) == 0) committed.push_back(std::stoi(line.substr(3)));
+    }
+    CHECK(!committed.empty());
+
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto b = std::make_shared<DuoStoreBackend>(crash_cfg(root), pool);
+    for (int i : committed) check_body(*b, "k" + std::to_string(i), expect_body(i));
+    verify_converged(*b);
+    for (int i : committed) check_body(*b, "k" + std::to_string(i), expect_body(i));
+    sync_wait(b->close());
 }
 
 #endif  // LIGHTS3_DUOSTORE

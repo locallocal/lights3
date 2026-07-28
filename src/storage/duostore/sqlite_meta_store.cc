@@ -103,6 +103,7 @@ constexpr const char* kPartDelAll = "DELETE FROM parts WHERE bucket=?1 AND key=?
 constexpr const char* kRefPut = "INSERT OR REPLACE INTO refs(file_id,owner) VALUES(?1,?2)";
 constexpr const char* kRefDel = "DELETE FROM refs WHERE file_id=?1";
 constexpr const char* kRefGet = "SELECT 1 FROM refs WHERE file_id=?1";
+constexpr const char* kRefScan = "SELECT file_id FROM refs";
 constexpr const char* kGcqPut = "INSERT INTO gcq(val) VALUES(?1)";
 constexpr const char* kGcqPeek = "SELECT seq,val FROM gcq WHERE seq>=?2 ORDER BY seq LIMIT ?1";
 constexpr const char* kGcqDel = "DELETE FROM gcq WHERE seq=?1";
@@ -1024,6 +1025,13 @@ bool SqliteMetaStore::chunk_referenced(uint64_t file_id) {
     Stmt st(*lease, kRefGet);
     st.i64(1, int64_t(file_id));
     return st.step();
+}
+
+void SqliteMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
+    // 读连接迭代（WAL 下单语句自带一致快照）；孤儿扫描容忍弱一致视图
+    auto lease = read_conn();
+    Stmt st(*lease, kRefScan);
+    while (st.step()) cb(uint64_t(st.col_i64(0)));
 }
 
 }  // namespace lights3::storage::duostore

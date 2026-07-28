@@ -34,6 +34,15 @@ struct FsDataOptions {
 class ChunkWriter;
 class FsPackedWriter;
 
+// 写侧 pin 钩子（§9.3）：孤儿扫描不得回收"写入中尚未提交 meta"的 chunk——慢流式
+// PUT 的早期 chunk mtime 可远逾 gc_grace，仅靠 mtime 宽限不充分。ChunkWriter 在
+// 分配 file_id 时 pin、未 finish 即析构时解 pin；finish 之后的解 pin 责任移交
+// 调用方（DuoStoreBackend 在 meta 提交 / 兜底删除之后解除）
+struct ChunkPinHooks {
+    std::function<void(uint64_t)> pin;
+    std::function<void(uint64_t)> unpin;
+};
+
 class FsDataStore final : public IDataStore {
 public:
     // file_id 分配回调（持久单调，由 IMetaStore::alloc_file_id 提供）
@@ -42,8 +51,9 @@ public:
     // 崩溃（未回调）遗留的 unsealed pack 由 DuoStoreBackend 启动时补封（§5.2）
     using PackSeal = std::function<void(uint64_t pack_id, uint64_t file_size)>;
 
+    // migrate（§9.2）：压实迁移回调，空 = rewrite_pack 只扫不迁（统计仍产出）
     FsDataStore(FsDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc,
-                PackSeal seal = {});
+                PackSeal seal = {}, PackMigrateFn migrate = {}, ChunkPinHooks pins = {});
     ~FsDataStore() override;
     FsDataStore(const FsDataStore&) = delete;
 
@@ -53,6 +63,8 @@ public:
     Task<void> remove(std::span<const Extent> extents) override;
     Task<void> remove_pack(uint64_t pack_id) override;
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
+    Task<void> scan_chunks(
+        const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;
     Task<void> close() override;
 
     // 布局路径（§5）；测试观察用
@@ -85,6 +97,8 @@ private:
     std::shared_ptr<ThreadPool> pool_;
     FileIdAlloc alloc_;
     PackSeal seal_;
+    PackMigrateFn migrate_;
+    ChunkPinHooks pins_;
     std::mutex dir_mu_;
     std::array<int, 256> chunk_dirfds_;
     std::array<int, 256> pack_dirfds_;

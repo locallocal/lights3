@@ -8,7 +8,7 @@
 
 已完成（有 commit 佐证）：四层架构 + 四个 HTTP driver + SigV4（含 chunked/presigned）+
 凭证管理一期；存储侧 localfs / xlocalfs / memory / tiered（P1-P5）/ cloudproxy（P1-P5）/
-duostore P1-P3（RocksDB meta + chunk/pack data + GC 一期），以及 duostore 可插拔件：Redis meta（R1-R3）、
+duostore P1-P4（RocksDB meta + chunk/pack data + GC 一二期），以及 duostore 可插拔件：Redis meta（R1-R3）、
 SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 未完成阶段总览：
@@ -17,7 +17,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | --- | --- | --- |
 | DuoStore P2（pack 聚合） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
 | DuoStore P3（GC 一期） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
-| DuoStore P4（GC 二期：压实/孤儿） | duostore-backend.md §15 | 未开始 |
+| DuoStore P4（GC 二期：压实/孤儿） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
 | DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | 未开始 |
 | Redis meta R4（打磨） | duostore-redis-meta.md §10 | 未开始 |
 | SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | 未开始 |
@@ -74,13 +74,38 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
   {rocksdb,redis,sqlite,tikv} 全绿；asan 3 连跑、tsan 2 连跑零告警（顺带修复
   P3 改 `peek_reclaims` 签名后 test_duostore_tikv 三处具体类调用的编译遗留）
 
-### 1.3 P4 · GC 二期
+### 1.3 P4 · GC 二期（✅ 已完成，2026-07-29）
 
-- pack 压实：`FsDataStore::rewrite_pack()` 目前硬编码抛 InternalError
-  （`fs_data_store.cc:271-276`）；顺扫 + owner 反查 + `swap_extents`
-- 孤儿扫描与 refs 反向对账告警；`IDataStore` 需新增枚举接口（如
-  `scan_orphans(callback)`）——接口定形时同步考虑 rados C4（duostore-rados-data.md §8.2）
-- 崩溃注入测试（kill -9 重启收敛）
+全部条目落地：
+
+- ✅ pack 压实：`FsDataStore::rewrite_pack()` 顺扫（record 解析；损坏语义分级——
+  magic/头坏告警止扫、payload crc 坏告警跳过、torn tail 静默止扫不计损坏）+
+  `PackMigrateFn` 迁移回调（标准实现 `migrate_pack_record`：owner 反查存活 →
+  payload 追加回 active pack → `swap_extents` 乐观换 ref，swap 失败清理 chunk 残留；
+  误判恒保守不迁，pack 删除只走"live 归零 + 空 pack 整删"，绝不丢数据）
+- ✅ 压实调度进 `run_gc_once()`：`pack_gc_ratio` 存活率阈值分选 + 崩溃遗留 seal(0)
+  的 file_size 回填；`compact_blocked_` 记账 + gc_grace 冷却窗防无效重扫（进行中
+  mpu 分片/旧格式 owner/存活损坏 record，账有推进立即重试）；mpu owner 增 b/k
+  （"mpu\0b\0k\0id\0no"，complete 后分片仍可反查；P4 前旧格式保守搁置）
+- ✅ 空 pack 整删改延迟 unlink（空置逾 gc_grace 且无 pin 才删，服务压实/删除瞬间
+  已持旧 ref 未及 pin 的读者）
+- ✅ 孤儿扫描：接口定形 `IDataStore::scan_chunks(cb)`（fs 实现目录顺扫；rados 显式
+  抛错留 C4，绝不静默空扫谎报）+ `IMetaStore::scan_refs(cb)`（4 meta 全实现，弱一致
+  快照）；正向 = 无引用 + mtime 逾 grace + 无 pin + `chunk_referenced` 现点复查 →
+  unlink；反向 = refs 在而文件缺 → 告警计数绝不删 meta（与 GC 同信号量互斥保
+  "文件先于 ref 存在"论证）；独立低频定时器 `orphan_scan_interval`（默认 1d，0 关）
+  + `run_orphan_scan_once()` 手动钩子
+- ✅ 写侧 pin（`ChunkPinHooks`）：ChunkWriter 分配 file_id 即 pin，meta 提交/兜底
+  删除后调用方对称解除（`WritePinRelease`）——慢流式 PUT 的早期 chunk mtime 可远逾
+  grace，仅靠 mtime 宽限不充分
+- ✅ 崩溃注入测试：mini_test 增子进程模式（execv /proc/self/exe + SIGKILL），4 专项
+  ——提交后崩溃全恢复 / PUT 中途崩溃孤儿扫描无垃圾 / 删除后崩溃 GC 收敛 / 随机
+  kill -9 已报告提交全保
+- ✅ 指标：压实 3 项（packs_compacted/records_migrated/pack_corrupt_records）+
+  孤儿 3 项（scans/chunks_removed/refs_missing gauge）
+- 验收：默认/redis/rados/tikv/asan/tsan 六种构建单测全绿（redis 真实 server、tikv
+  真实 tiup playground 集群 9 用例、rados 无集群恒 SKIP）；asan 3 连跑、tsan 2 连跑
+  零告警；e2e × {rocksdb,redis,sqlite,tikv} 各 49 用例全绿
 
 ### 1.4 P5 · 打磨
 
@@ -110,7 +135,8 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 - C3：aio 协程桥接（completion → 先 reschedule 回本进程 executor/池，再继续业务逻辑——
   §6.2 纪律）+ 双缓冲流水（写第 N 片时接收 N+1）；对象级 read-ahead 评估
-- C4：孤儿扫描（随主线 P4 的 `IDataStore` 枚举接口定形）；多网关 GC 单实例执行配置
+- C4：孤儿扫描——接口已随主线 P4 定形（`IDataStore::scan_chunks`，rados 侧目前
+  显式抛错），待实现 rados_nobjects_list_* + rados_stat 枚举；多网关 GC 单实例执行配置
   与分布式 pin 方案评估（租约 / rados_lock / watch-notify，§8.3）；op 延迟/错误指标
 - ~~C2 遗留：GC 变现 / pin 竞态专项测试（前置：主线 P3）~~ ✅ 已随 P3 补齐
   （test_duostore_rados.cc，无集群 SKIP）
@@ -221,8 +247,9 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
   `src/storage/bucket_router`、`src/storage/listing`、`src/storage/validate.cc`、
   `src/s3/handlers/admin_credentials.cc`、`src/http/pushpull.h`、
   `src/storage/xlocalfs/uring`
-- ~~`pack_stats()` 未进共享套件~~（✅ 已随 P2 进 meta_store_suite）；`rewrite_pack()`
-  仍未进（P4 未实现所致，随 P4 补）
+- ~~`pack_stats()` 未进共享套件~~（✅ 已随 P2 进 meta_store_suite）；~~`rewrite_pack()`
+  仍未进~~（✅ 已随 P4 补：scan_refs 进 meta_store_suite，rewrite_pack/压实/孤儿/
+  崩溃注入专项进 test_duostore.cc）
 - 环境依赖用例：rados 8 个 + tikv 9 个在裸环境恒 SKIP，redis 8 个取决于
   redis-server——共约 17% 用例默认不执行，CI 若要覆盖需专门环境
 - tiered 隐性耦合：tiered 走两阶段构建、不在 registry map 内，"unknown type" 检查
@@ -262,5 +289,6 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
 2. ~~**DuoStore P3 GC 一期（§1.1）**——生产可用性硬阻塞；先补 `src/core/timer` 单测~~ ✅ 已完成（2026-07-26）
 3. ~~**DuoStore P2 pack 聚合（§1.2）**——解锁四个 meta store 的 pack 账与全 pack 测试变体~~ ✅ 已完成（2026-07-26）
 4. ~~**后端级 metrics 框架（§3.1）**——一次解锁六处指标项~~ ✅ 已完成（2026-07-28）
-5. **DuoStore P4（§1.3）** → 随之做 **rados C4 孤儿扫描**（接口一并定形）
+5. ~~**DuoStore P4（§1.3）**~~ ✅ 已完成（2026-07-29；枚举接口已定形）→ **rados C4
+   孤儿扫描**（`RadosDataStore::scan_chunks` 实现）可随 C3/C4 排期
 6. 各引擎打磨（R4 / S4 / C3 / T5）与 P5、tiered 对账、凭证二期按需排期

@@ -64,6 +64,7 @@ public:
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
+    void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
 
 private:

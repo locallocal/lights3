@@ -1,11 +1,13 @@
 #include "storage/duostore/fs_data_store.h"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <bitset>
 #include <cerrno>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -84,13 +86,16 @@ public:
     explicit ChunkWriter(FsDataStore* store) : store_(store) {}
 
     ~ChunkWriter() override {
-        // 未 finish 即析构 = 丢弃：尽力删除已产出文件；残留落入孤儿扫描（§9.3）
+        // 未 finish 即析构 = 丢弃：尽力删除已产出文件；残留落入孤儿扫描（§9.3）。
+        // 写侧 pin 同步解除——finish 成功后 pin 所有权已移交调用方（ChunkPinHooks）
         if (finished_) return;
         if (fd_ >= 0) {
             ::close(fd_);
             ::unlink(store_->chunk_path(cur_id_).c_str());
         }
         for (const auto& e : extents_) ::unlink(store_->chunk_path(e.file_id).c_str());
+        if (store_->pins_.unpin)
+            for (uint64_t id : pinned_) store_->pins_.unpin(id);
     }
 
     Task<void> write(std::span<const std::byte> buf) override {
@@ -119,6 +124,11 @@ public:
 private:
     void open_next_chunk() {
         cur_id_ = store_->alloc_(Extent::Kind::kChunk);
+        // 先 pin 后建文件：文件一旦存在即受写侧 pin 保护，孤儿扫描无观察窗口
+        if (store_->pins_.pin) {
+            store_->pins_.pin(cur_id_);
+            pinned_.push_back(cur_id_);
+        }
         unsigned shard = shard_of(cur_id_);
         store_->shard_dirfd(shard);  // 确保 shard 目录存在
         auto path = store_->chunk_path(cur_id_);
@@ -138,6 +148,7 @@ private:
 
     FsDataStore* store_;
     std::vector<Extent> extents_;
+    std::vector<uint64_t> pinned_;  // 本会话写侧 pin 的 id（finish 后所有权移交调用方）
     std::bitset<256> touched_;
     int fd_ = -1;
     uint64_t cur_id_ = 0;
@@ -333,9 +344,9 @@ private:
 // ---------- FsDataStore ----------
 
 FsDataStore::FsDataStore(FsDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc,
-                         PackSeal seal)
+                         PackSeal seal, PackMigrateFn migrate, ChunkPinHooks pins)
     : opt_(std::move(opt)), pool_(std::move(pool)), alloc_(std::move(alloc)),
-      seal_(std::move(seal)) {
+      seal_(std::move(seal)), migrate_(std::move(migrate)), pins_(std::move(pins)) {
     chunk_dirfds_.fill(-1);
     pack_dirfds_.fill(-1);
     std::filesystem::create_directories(opt_.root / "chunks");
@@ -483,11 +494,122 @@ Task<void> FsDataStore::remove_pack(uint64_t pack_id) {
     co_return;
 }
 
+namespace {
+
+uint64_t get_le(const std::byte* p, size_t n) {
+    uint64_t v = 0;
+    for (size_t i = 0; i < n; ++i) v |= uint64_t(uint8_t(p[i])) << (8 * i);
+    return v;
+}
+
+// pread 至多 n 字节（循环补齐短读）；EOF 返回实际读到的字节数
+size_t pread_upto(int fd, std::byte* buf, size_t n, uint64_t off) {
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = ::pread(fd, buf + got, n - got, off_t(off + got));
+        if (r < 0) throw_errno("pread pack scan");
+        if (r == 0) break;
+        got += size_t(r);
+    }
+    return got;
+}
+
+}  // namespace
+
+// 压实顺扫（§9.2）：逐 record 解析 → 凭 migrate 回调反查存活并换 ref。本函数从不
+// 改动/删除被扫 pack——删除恒走"live 账归零 + 空 pack 整删（延迟）"路径，任何
+// 误判（损坏、owner 不可反查）最多让 pack 多活，绝不丢数据。
+// 损坏语义（§10）：magic/版本/头长坏 = 无法重同步 → 告警并终止顺扫（后续字节
+// 不可信）；payload crc 坏 = 头可信 → 告警跳过该条继续；payload 越过文件尾 =
+// torn tail（重启弃用 active pack 的预期残迹，§5.2）→ 静默止扫不计损坏
 Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
-    (void)pack_id;
-    throw S3Error(S3ErrorCode::InternalError,
-                  "duostore: pack compaction not implemented (P4)");
-    co_return GcRewrite{};  // unreachable
+    co_await pool_->schedule();
+    GcRewrite st;
+    auto path = pack_path(pack_id);
+    int rfd = ::open(path.c_str(), O_RDONLY);
+    if (rfd < 0) throw_errno("open pack for rewrite");
+    struct FdGuard {
+        int fd;
+        ~FdGuard() { ::close(fd); }
+    } guard{rfd};
+    struct stat sb;
+    if (::fstat(rfd, &sb) != 0) throw_errno("fstat pack");
+    st.file_size = uint64_t(sb.st_size);
+
+    std::vector<std::byte> hdr(kPackHeaderFixed);
+    std::string owner;
+    std::vector<std::byte> payload;
+    uint64_t off = 0;
+    while (off + kPackHeaderFixed <= st.file_size) {
+        if (pread_upto(rfd, hdr.data(), hdr.size(), off) < hdr.size()) break;
+        if (std::memcmp(hdr.data(), kPackMagic, sizeof kPackMagic) != 0 ||
+            uint8_t(hdr[4]) != 1) {
+            ++st.corrupt;
+            LOG_WARN("duostore: pack {:016x} record at {} has bad magic/version, "
+                     "aborting scan (pack kept for manual inspection)", pack_id, off);
+            break;
+        }
+        const uint64_t header_len = get_le(hdr.data() + 6, 2);
+        const uint64_t payload_len = get_le(hdr.data() + 8, 8);
+        const uint32_t crc = uint32_t(get_le(hdr.data() + 16, 4));
+        const uint64_t owner_len = get_le(hdr.data() + 20, 2);
+        if (header_len != kPackHeaderFixed + owner_len) {
+            ++st.corrupt;
+            LOG_WARN("duostore: pack {:016x} record at {} has inconsistent header, "
+                     "aborting scan", pack_id, off);
+            break;
+        }
+        if (off + header_len + payload_len > st.file_size) break;  // torn tail（预期）
+        owner.resize(owner_len);
+        if (owner_len > 0 &&
+            pread_upto(rfd, reinterpret_cast<std::byte*>(owner.data()), owner_len,
+                       off + kPackHeaderFixed) < owner_len)
+            break;
+        payload.resize(payload_len);
+        if (pread_upto(rfd, payload.data(), payload_len, off + header_len) < payload_len)
+            break;
+        if (codec::crc32c_of(std::span<const std::byte>(payload)) != crc) {
+            ++st.corrupt;
+            LOG_WARN("duostore: pack {:016x} record at {} crc mismatch, skipping record",
+                     pack_id, off);
+            off += header_len + payload_len;
+            continue;
+        }
+        ++st.scanned;
+        Extent from{Extent::Kind::kPack, pack_id, off + header_len, payload_len, crc};
+        if (migrate_) {
+            if (co_await migrate_(*this, owner, from, std::span<const std::byte>(payload)))
+                ++st.migrated;
+            co_await pool_->schedule();  // 迁移含 IO + meta 提交；record 间让出池线程
+        }
+        off += header_len + payload_len;
+    }
+    co_return st;
+}
+
+Task<void> FsDataStore::scan_chunks(
+    const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) {
+    co_await pool_->schedule();
+    std::error_code ec;
+    std::filesystem::directory_iterator shards(opt_.root / "chunks", ec);
+    if (ec) co_return;  // 目录不存在 = 无 chunk
+    for (const auto& sd : shards) {
+        if (!sd.is_directory(ec) || ec) continue;
+        std::filesystem::directory_iterator files(sd.path(), ec);
+        if (ec) continue;
+        for (const auto& f : files) {
+            // <file_id:016x>.chk；其余文件（临时/外来）不属本店，忽略
+            std::string name = f.path().filename().string();
+            if (name.size() != 20 || name.compare(16, 4, ".chk") != 0) continue;
+            uint64_t id = 0;
+            auto r = std::from_chars(name.data(), name.data() + 16, id, 16);
+            if (r.ec != std::errc() || r.ptr != name.data() + 16) continue;
+            struct stat sb;
+            if (::stat(f.path().c_str(), &sb) != 0) continue;  // 并发 unlink 竞态容忍
+            cb(id, int64_t(sb.st_mtim.tv_sec) * 1000 + sb.st_mtim.tv_nsec / 1000000);
+        }
+    }
+    co_return;
 }
 
 Task<void> FsDataStore::close() {

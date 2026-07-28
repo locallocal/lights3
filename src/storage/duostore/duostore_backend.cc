@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <stdexcept>
+#include <unordered_set>
 
 #include "core/config.h"
 #include "core/log.h"
@@ -50,13 +51,21 @@ std::vector<uint64_t> PinTable::pin(std::span<const Extent> extents) {
 }
 
 void PinTable::unpin(const std::vector<uint64_t>& ids) {
-    for (uint64_t id : ids) {
-        auto& s = shard_of(id);
-        std::lock_guard lk(s.m);
-        auto it = s.refs.find(id);
-        if (it == s.refs.end()) continue;  // 不应发生；防御性容忍
-        if (--it->second <= 0) s.refs.erase(it);
-    }
+    for (uint64_t id : ids) unpin_id(id);
+}
+
+void PinTable::pin_id(uint64_t file_id) {
+    auto& s = shard_of(file_id);
+    std::lock_guard lk(s.m);
+    ++s.refs[file_id];
+}
+
+void PinTable::unpin_id(uint64_t file_id) {
+    auto& s = shard_of(file_id);
+    std::lock_guard lk(s.m);
+    auto it = s.refs.find(file_id);
+    if (it == s.refs.end()) return;  // 不应发生；防御性容忍
+    if (--it->second <= 0) s.refs.erase(it);
 }
 
 bool PinTable::any_pinned(std::span<const Extent> extents) {
@@ -69,6 +78,90 @@ bool PinTable::pinned(uint64_t file_id) {
     auto& s = shard_of(file_id);
     std::lock_guard lk(s.m);
     return s.refs.count(file_id) != 0;
+}
+
+// ---------- 压实迁移（P4 §9.2 步骤 2-3）----------
+
+namespace {
+
+// owner 按 '\0' 切段（各段来源 bucket/key/upload_id 均经校验不含 NUL，无歧义）
+std::vector<std::string_view> split_owner(std::string_view owner) {
+    std::vector<std::string_view> parts;
+    size_t pos = 0;
+    while (pos <= owner.size()) {
+        size_t nul = owner.find('\0', pos);
+        if (nul == std::string_view::npos) {
+            parts.push_back(owner.substr(pos));
+            break;
+        }
+        parts.push_back(owner.substr(pos, nul - pos));
+        pos = nul + 1;
+    }
+    return parts;
+}
+
+}  // namespace
+
+Task<bool> migrate_pack_record(IMetaStore& meta, IDataStore& data, PinTable* pins,
+                               std::string_view owner, const Extent& from,
+                               std::span<const std::byte> payload) {
+    // owner 只是反查提示（§9.2）：对象 record 内嵌 "b\0k"；mpu record 内嵌
+    // "mpu\0b\0k\0id\0no"——complete 后分片归属 b/k 的对象（refs 转移不改 record），
+    // 提示仍然可用。进行中 mpu 的分片（对象上查不到 from）与 P4 之前的旧格式
+    // "mpu\0id\0no"（无 b/k 可查）都保守返回 false：live 账不动，pack 本轮不删，
+    // 分别待 complete/abort 后自然解锁与永久搁置（重写盘上旧 record 非目标）
+    auto parts = split_owner(owner);
+    std::string_view b, k;
+    if (parts.size() == 2) {
+        b = parts[0];
+        k = parts[1];
+    } else if (parts.size() == 5 && parts[0] == "mpu") {
+        b = parts[1];
+        k = parts[2];
+    } else {
+        co_return false;
+    }
+    if (b.empty() || k.empty()) co_return false;
+
+    auto rec = meta.get_object(b, k);
+    if (!rec) co_return false;
+    size_t idx = rec->data.extents.size();
+    for (size_t i = 0; i < rec->data.extents.size(); ++i)
+        if (rec->data.extents[i] == from) {
+            idx = i;
+            break;
+        }
+    if (idx == rec->data.extents.size()) co_return false;  // 已覆盖/删除 = 死区
+
+    // 存活：payload 追加回 active pack（open_writer 按当前配置分流——阈值缩小或
+    // pack 关停时落 chunk 同样正确）；新 record 的 owner 统一写对象形态
+    auto writer = co_await data.open_writer(
+        {payload.size(), std::string(b) + '\0' + std::string(k)});
+    co_await writer->write(payload);
+    DataRef nref = co_await writer->finish();
+
+    DataRef to;
+    to.extents.reserve(rec->data.extents.size() - 1 + nref.extents.size());
+    to.extents.assign(rec->data.extents.begin(), rec->data.extents.begin() + idx);
+    to.extents.insert(to.extents.end(), nref.extents.begin(), nref.extents.end());
+    to.extents.insert(to.extents.end(), rec->data.extents.begin() + idx + 1,
+                      rec->data.extents.end());
+
+    bool ok = meta.swap_extents(b, k, rec->version, rec->data, to);
+    if (!ok) {
+        // 期间被覆盖/删除：追加的新 record 成死区（无账，随未来压实回收）；chunk 类
+        // 残留则显式清（refs 从未建立，删之即净）
+        try {
+            co_await data.remove(nref.extents);
+        } catch (...) {
+        }
+    }
+    // 写侧 pin 对称解除（追加走 chunk 路径时 ChunkPinHooks 已 pin；swap 成功即
+    // refs 在账，失败则文件已删——两况都该解）
+    if (pins)
+        for (const auto& e : nref.extents)
+            if (e.kind != Extent::Kind::kPack) pins->unpin_id(e.file_id);
+    co_return ok;
 }
 
 }  // namespace duostore
@@ -394,14 +487,26 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
                              cfg_.rados_op_timeout_sec, cfg_.verify_chunk_crc},
             pool_, alloc);
 #endif
-    if (!data_)
+    if (!data_) {
+        // 压实迁移与写侧 pin 钩子（P4）：迁移标准实现 + pin 表同源注入。回调不捕获
+        // this（meta/pins 生命周期由本类持有与 shared_ptr 保证），测试注入组装同款
+        auto pins = pins_;
         data_ = std::make_unique<FsDataStore>(
             FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc,
                           cfg_.pack_threshold, cfg_.pack_max_size, cfg_.pack_writers},
             pool_, alloc,
-            [meta](uint64_t pack_id, uint64_t size) { meta->seal_pack(pack_id, size); });
+            [meta](uint64_t pack_id, uint64_t size) { meta->seal_pack(pack_id, size); },
+            [meta, pins](IDataStore& ds, std::string_view owner, const Extent& from,
+                         std::span<const std::byte> payload) {
+                return migrate_pack_record(*meta, ds, pins.get(), owner, from, payload);
+            },
+            ChunkPinHooks{[pins](uint64_t id) { pins->pin_id(id); },
+                          [pins](uint64_t id) { pins->unpin_id(id); }});
+        write_pins_ = true;
+    }
     abandon_stale_packs();
     schedule_gc();
+    schedule_orphan_scan();
 }
 
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
@@ -412,6 +517,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     init_metrics(metrics);
     abandon_stale_packs();
     schedule_gc();
+    schedule_orphan_scan();
 }
 
 void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
@@ -426,6 +532,21 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
     m_gc_uploads_expired_ = metrics.counter(
         "lights3_duostore_gc_uploads_expired_total",
         "Multipart uploads aborted by GC after exceeding mpu_ttl");
+    m_gc_packs_compacted_ = metrics.counter("lights3_duostore_gc_packs_compacted_total",
+                                            "Low-liveness packs rewritten by GC compaction");
+    m_gc_records_migrated_ = metrics.counter(
+        "lights3_duostore_gc_records_migrated_total",
+        "Live pack records migrated (extent swap) during GC compaction");
+    m_gc_records_corrupt_ = metrics.counter(
+        "lights3_duostore_pack_corrupt_records_total",
+        "Corrupt pack records detected during GC compaction scans (skipped, kept on disk)");
+    m_orphan_runs_ = metrics.counter("lights3_duostore_orphan_scans_total",
+                                     "Completed orphan reconciliation scans");
+    m_orphan_removed_ = metrics.counter("lights3_duostore_orphan_chunks_removed_total",
+                                        "Unreferenced chunk files removed by orphan scans");
+    m_orphan_refs_missing_ = metrics.gauge(
+        "lights3_duostore_orphan_refs_missing",
+        "Refs pointing at missing chunk files as of the last orphan scan (data loss signal)");
 }
 
 // 重启弃用 active pack（§5.2）：数据面从不复用旧 active pack（新号段 + O_EXCL），
@@ -543,6 +664,26 @@ private:
     std::vector<uint64_t> ids_;
 };
 
+// 写侧 pin 的对称解除（§9.3）：ChunkWriter 分配即 pin（孤儿扫描不回收在途写入），
+// finish 后所有权移交调用方——本守卫在 meta 提交或兜底删除之后（协程帧退出时）
+// 解除。仅 cfg 构造装配了 ChunkPinHooks 时生效（write_pins_）：注入构造无钩子，
+// 盲解会误减并发读者的 pin
+struct WritePinRelease {
+    duostore::PinTable* pins = nullptr;
+    std::vector<uint64_t> ids;
+    WritePinRelease(bool active, duostore::PinTable* p, const DataRef& ref) {
+        if (!active) return;
+        pins = p;
+        for (const auto& e : ref.extents)
+            if (e.kind != Extent::Kind::kPack) ids.push_back(e.file_id);
+    }
+    WritePinRelease(const WritePinRelease&) = delete;
+    ~WritePinRelease() {
+        if (pins)
+            for (uint64_t id : ids) pins->unpin_id(id);
+    }
+};
+
 // meta 提交失败时兜底删除已产出数据（§6.1 ⑤）；co_await 不能出现在 catch 块内，
 // 清理经 exception_ptr 移出 handler。兜底失败也无害——落入孤儿扫描
 template <class Commit>
@@ -572,6 +713,7 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     require_bucket(bucket);  // 预检；正式检查在提交事务内复查（§6.1 ②）
 
     auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
+    WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     ObjectRec rec;
     rec.meta = std::move(meta);
     rec.meta.key = std::string(key);
@@ -667,12 +809,20 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     co_await pool_->schedule();
     meta_->require_upload(bucket, key, upload_id);  // 前置校验；提交时复查
 
+    // mpu owner 带 b/k（P4 §9.2）：complete 后分片 record 的归属对象可凭此反查，
+    // 压实不因 upload 消亡而失去提示（P4 前的旧格式 "mpu\0id\0no" 无从反查，遇之
+    // 保守不迁）
     std::string owner = "mpu";
+    owner += '\0';
+    owner += bucket;
+    owner += '\0';
+    owner += key;
     owner += '\0';
     owner += upload_id;
     owner += '\0';
     owner += std::to_string(part_no);
     auto pumped = co_await pump_body(*data_, body, std::move(owner));
+    WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     PartRec p;
     p.part_no = part_no;
     p.size = pumped.ref.total();
@@ -802,18 +952,76 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         if (batch.size() < kGcBatch) break;  // 队列见底
     }
 
-    // 3) 空 pack 整删（§9.1 顺带检查）：sealed 且 live_recs==0 → 整文件 unlink
-    // → 销 packstat（顺序铁律同 gcq：先物理删、后销账——反序崩溃产生账外文件）
+    // 3) pack 压实（P4 §9.2）：sealed、live>0 且存活率低于 pack_gc_ratio（或崩溃遗留
+    // file_size 未知）的 pack 顺扫迁移存活 record；live 账随 swap 归零后由第 4 步整
+    // 删变现。上轮压实后 live_recs 无推进的 pack（进行中 mpu 分片 / 旧格式 owner /
+    // 存活损坏 record）跳过重扫——账一有变化即自动重试
+    std::vector<uint64_t> rewritten;
+    const int64_t compact_now = codec::to_unix_ms(std::chrono::system_clock::now());
     for (const auto& ps : meta_->pack_stats()) {
-        if (!ps.sealed || ps.live_recs != 0 || pins_->pinned(ps.pack_id)) continue;
+        if (!ps.sealed || ps.live_recs <= 0) continue;
+        if (ps.file_size > 0 &&
+            double(ps.live_bytes) >= cfg_.pack_gc_ratio * double(ps.file_size))
+            continue;
+        if (auto it = compact_blocked_.find(ps.pack_id);
+            it != compact_blocked_.end() && it->second.live_recs == ps.live_recs &&
+            compact_now < it->second.retry_at_ms)
+            continue;
         try {
-            co_await data_->remove_pack(ps.pack_id);
-            meta_->drop_pack_stat(ps.pack_id);
-            ++st.packs_removed;
+            auto rw = co_await data_->rewrite_pack(ps.pack_id);
+            ++st.packs_compacted;
+            st.records_migrated += rw.migrated;
+            st.records_corrupt += rw.corrupt;
+            rewritten.push_back(ps.pack_id);
+            // 崩溃遗留 seal(0) 的分母回填：下轮起存活率判定有效（§9.2）
+            if (ps.file_size == 0 && rw.file_size > 0)
+                meta_->seal_pack(ps.pack_id, rw.file_size);
         } catch (const std::exception& e) {
-            LOG_WARN("duostore '{}': gc remove pack {} failed: {}", cfg_.name, ps.pack_id,
+            LOG_WARN("duostore '{}': gc rewrite pack {} failed: {}", cfg_.name, ps.pack_id,
                      e.what());
         }
+    }
+
+    // 4) 空 pack 整删（§9.1/§9.2 步骤 4）：sealed 且 live_recs==0，且空置已逾
+    // gc_grace（延迟 unlink：服务压实/删除瞬间已读出旧 ref 未及 pin 的读者）且无
+    // pin → 整文件 unlink → 销 packstat（顺序铁律同 gcq：先物理删、后销账）
+    {
+        const int64_t pack_now = codec::to_unix_ms(std::chrono::system_clock::now());
+        auto stats = meta_->pack_stats();
+        std::unordered_set<uint64_t> known;
+        for (const auto& ps : stats) {
+            known.insert(ps.pack_id);
+            if (!ps.sealed || ps.live_recs != 0) {
+                pack_empty_since_.erase(ps.pack_id);
+                continue;
+            }
+            auto [it, first_seen] = pack_empty_since_.try_emplace(ps.pack_id, pack_now);
+            (void)first_seen;
+            if (pack_now - it->second < grace_ms || pins_->pinned(ps.pack_id)) continue;
+            try {
+                co_await data_->remove_pack(ps.pack_id);
+                meta_->drop_pack_stat(ps.pack_id);
+                pack_empty_since_.erase(ps.pack_id);
+                ++st.packs_removed;
+            } catch (const std::exception& e) {
+                LOG_WARN("duostore '{}': gc remove pack {} failed: {}", cfg_.name, ps.pack_id,
+                         e.what());
+            }
+        }
+        // 压实阻塞记账：迁移后仍有 live = 本轮未能全迁 → 记当前账 + 冷却窗
+        for (uint64_t pid : rewritten) {
+            int64_t live = 0;
+            for (const auto& ps : stats)
+                if (ps.pack_id == pid) {
+                    live = ps.live_recs;
+                    break;
+                }
+            if (live > 0) compact_blocked_[pid] = {live, pack_now + grace_ms};
+            else compact_blocked_.erase(pid);
+        }
+        // 剪枝已销账的 pack，两张簿记表不随历史无界增长
+        std::erase_if(pack_empty_since_, [&](const auto& kv) { return !known.count(kv.first); });
+        std::erase_if(compact_blocked_, [&](const auto& kv) { return !known.count(kv.first); });
     }
 
     // 完成轮才计数（关闭态的早退不计）；skip 类不设计数器——grace/pin 跳过项
@@ -823,6 +1031,76 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     m_gc_files_removed_->inc(st.files_removed);
     m_gc_packs_removed_->inc(st.packs_removed);
     m_gc_uploads_expired_->inc(st.uploads_expired);
+    m_gc_packs_compacted_->inc(st.packs_compacted);
+    m_gc_records_migrated_->inc(st.records_migrated);
+    m_gc_records_corrupt_->inc(st.records_corrupt);
+    co_return st;
+}
+
+Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
+    co_await pool_->schedule();
+    BackgroundTaskGroup::Scope scope(bg_);
+    DuoOrphanStats st;
+    if (!scope.ok()) co_return st;                 // 正在关闭
+    auto permit = co_await gc_sem_.acquire();      // 与 GC/后台 worker 互斥（反向对账前提）
+
+    // refs 快照先行：反向对账"文件必先于 ref 提交存在"（§6 数据先行）要求 R 先于
+    // 盘面枚举采集——R 内的每个 id 在枚举开始前文件已在盘，缺失即真丢失。持
+    // gc_sem_ 排除了 gcq 的 unlink→销账窗口，业务路径不存在"有 refs 的文件被删"。
+    // 注意：refs 不分 kChunk/kRados（共号段账），本扫描以当前 data 引擎的枚举为盘
+    // 面真相——同一 meta 切换 data 引擎的部署形态不在孤儿扫描支持范围
+    std::unordered_set<uint64_t> refs;
+    meta_->scan_refs([&](uint64_t id) { refs.insert(id); });
+
+    struct Seen {
+        uint64_t id;
+        int64_t mtime_ms;
+    };
+    std::vector<Seen> disk;
+    std::unordered_set<uint64_t> on_disk;
+    co_await data_->scan_chunks([&](uint64_t id, int64_t mtime_ms) {
+        disk.push_back({id, mtime_ms});
+        on_disk.insert(id);
+    });
+    st.chunks_scanned = disk.size();
+
+    // 正向（§9.3）：无引用、mtime 逾 gc_grace、无 pin（写侧 pin 覆盖超长流式 PUT，
+    // mtime 宽限对其不充分）→ unlink。快照后新提交的引用由 chunk_referenced 现点
+    // 复查兜住（grace=0 的测试形态下快照必然过时）
+    const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
+    const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
+    for (const auto& c : disk) {
+        if (refs.count(c.id)) continue;
+        if (now - c.mtime_ms < grace_ms) {
+            ++st.skipped_grace;
+            continue;
+        }
+        if (pins_->pinned(c.id)) {
+            ++st.skipped_pinned;
+            continue;
+        }
+        if (meta_->chunk_referenced(c.id)) continue;  // 扫描间隙提交的新引用
+        Extent e{Extent::Kind::kChunk, c.id, 0, 0, 0};
+        try {
+            co_await data_->remove(std::span<const Extent>(&e, 1));
+            ++st.orphans_removed;
+        } catch (const std::exception& ex) {
+            LOG_WARN("duostore '{}': orphan unlink {:016x} failed: {}", cfg_.name, c.id,
+                     ex.what());
+        }
+    }
+
+    // 反向（§9.3）：refs 在而文件缺 = 数据丢失征兆 → 告警计数，绝不静默删 meta
+    for (uint64_t id : refs) {
+        if (on_disk.count(id)) continue;
+        ++st.refs_missing;
+        LOG_ERROR("duostore '{}': refs entry for chunk {:016x} but file missing "
+                  "(data loss signal, keeping meta for manual inspection)", cfg_.name, id);
+    }
+
+    m_orphan_runs_->inc();
+    m_orphan_removed_->inc(st.orphans_removed);
+    m_orphan_refs_missing_->set(int64_t(st.refs_missing));
     co_return st;
 }
 
@@ -846,11 +1124,33 @@ void DuoStoreBackend::schedule_gc() {
     });
 }
 
+Task<void> DuoStoreBackend::orphan_tick() {
+    // 完成后重臂（同 gc_tick）：扫描轮次绝不重叠/堆积
+    std::exception_ptr err;
+    try {
+        co_await run_orphan_scan_once();
+    } catch (...) {
+        err = std::current_exception();
+    }
+    schedule_orphan_scan();
+    if (err) std::rethrow_exception(err);  // 交 BackgroundTaskGroup 记日志
+}
+
+void DuoStoreBackend::schedule_orphan_scan() {
+    if (cfg_.orphan_scan_interval_sec <= 0) return;  // 0 = 关闭（测试用手动钩子）
+    bg_.if_open([&] {
+        orphan_timer_ = TimerQueue::instance().add(
+            std::chrono::seconds(cfg_.orphan_scan_interval_sec),
+            [this] { bg_.spawn(orphan_tick()); });
+    });
+}
+
 void DuoStoreBackend::shutdown_background() {
     bg_.begin_close();
     // cancel 须在组锁外调用：TimerQueue::cancel 阻塞等在途回调，而回调内要拿组锁
-    // （bg_.spawn）——begin_close 后 gc_timer_ 不再变更，读取无需加锁
+    // （bg_.spawn）——begin_close 后两个 timer id 不再变更，读取无需加锁
     TimerQueue::instance().cancel(gc_timer_);
+    TimerQueue::instance().cancel(orphan_timer_);
     // 阻塞等待在调用方线程上进行；在途 GC 在池线程收尾，不会互相占用（同 tiered close）
     bg_.wait_idle();
 }

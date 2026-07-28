@@ -45,6 +45,9 @@ public:
     Task<void> remove(std::span<const Extent> extents) override;
     Task<void> remove_pack(uint64_t pack_id) override;        // no-op（无 pack，§3.3）
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;  // 恒 {}（无 pack，§3.3）
+    // C4 未实现（列举原语见 docs/duostore-rados-data.md §8.2）；调用抛 InternalError
+    Task<void> scan_chunks(
+        const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;
     Task<void> close() override;
 
     // 对象命名：c.<file_id:016x>（§3.1）；测试观察用

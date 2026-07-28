@@ -38,6 +38,9 @@ struct PinTable {
     // 逐 extent 计一次（同 file_id 多 extent 多次计入），pin/unpin 按同一 id 列表对称
     std::vector<uint64_t> pin(std::span<const Extent> extents);
     void unpin(const std::vector<uint64_t>& ids);
+    // 单 id 变体（写侧 pin，§9.3）：ChunkWriter 分配即 pin，meta 提交/丢弃后解除
+    void pin_id(uint64_t file_id);
+    void unpin_id(uint64_t file_id);
     bool any_pinned(std::span<const Extent> extents);
     bool pinned(uint64_t file_id);
 
@@ -60,7 +63,30 @@ struct DuoGcStats {
     uint64_t skipped_pinned = 0;    // 所涉 file 有 pin 而跳过的 gcq 项数
     uint64_t packs_removed = 0;     // 整文件删除的空 pack 数（sealed 且 live_recs==0）
     uint64_t uploads_expired = 0;   // mpu_ttl 过期而内部 abort 的 multipart 数
+    uint64_t packs_compacted = 0;   // 本轮顺扫（rewrite_pack）过的低存活 pack 数（P4 §9.2）
+    uint64_t records_migrated = 0;  // 压实迁移成功换 ref 的 record 数
+    uint64_t records_corrupt = 0;   // 压实顺扫检出的损坏 record 数（跳过 + 告警，不删）
 };
+
+// run_orphan_scan_once() 的对账统计（§9.3）
+struct DuoOrphanStats {
+    uint64_t chunks_scanned = 0;   // 数据面枚举到的 chunk 实体数
+    uint64_t orphans_removed = 0;  // 无引用且逾宽限 → 已 unlink 的孤儿数
+    uint64_t skipped_grace = 0;    // 无引用但 mtime 未逾 gc_grace（在途写入嫌疑）
+    uint64_t skipped_pinned = 0;   // 无引用但有 pin（写侧 pin / 在途读者）
+    uint64_t refs_missing = 0;     // 反向：refs 在而文件缺（数据丢失征兆，只告警不删 meta）
+};
+
+// PackMigrateFn 的标准实现（§9.2 步骤 2-3；cfg 构造与测试注入组装共用）：owner
+// 反查存活（对象 "b\0k" 直查；mpu "mpu\0b\0k\0id\0no" 借 b/k 提示查 complete 后的
+// 归属对象——owner 只是提示，存活判据恒为"当前 DataRef 含 from"+ swap 的 version
+// 守卫，提示失效只保守不迁、绝不误删）→ payload 经 data.open_writer 追加 →
+// swap_extents 乐观换 ref。竞态覆盖使 swap 失败时清理已追加的 chunk 类残留（pack
+// 类为死区随压实回收）。pins 可空；须与 data 的 ChunkPinHooks 同源（追加走 chunk
+// 路径时对称解 pin）
+Task<bool> migrate_pack_record(IMetaStore& meta, IDataStore& data, PinTable* pins,
+                               std::string_view owner, const Extent& from,
+                               std::span<const std::byte> payload);
 
 }  // namespace duostore
 
@@ -156,10 +182,15 @@ public:
 
     Task<void> close() override;
 
-    // GC 一期手动钩子（§9：测试直调，仿 tiered "手动触发下沉"先例）：
-    // mpu_ttl 过期清理 + gcq 消费（grace/pin 过滤，先物理删后销账）+ 空 pack 整删。
-    // 与后台 worker 经内部信号量互斥，可并发调用
+    // GC 手动钩子（§9：测试直调，仿 tiered "手动触发下沉"先例）：mpu_ttl 过期清理
+    // + gcq 消费（grace/pin 过滤，先物理删后销账）+ pack 压实（P4 §9.2）+ 空 pack
+    // 整删（空置逾 gc_grace 才 unlink，服务在途读者）。与后台 worker / 孤儿扫描经
+    // 内部信号量互斥，可并发调用
     Task<duostore::DuoGcStats> run_gc_once();
+    // 孤儿扫描手动钩子（P4 §9.3）：正向（盘上 chunk 无引用、逾 gc_grace、无 pin →
+    // unlink）+ 反向（refs 在而文件缺 → 告警计数，绝不删 meta）。与 GC 同信号量
+    // 互斥——反向对账"文件必先于 ref 存在"的论证依赖 gcq 的 unlink→销账窗口不并发
+    Task<duostore::DuoOrphanStats> run_orphan_scan_once();
 
 private:
     void require_bucket(std::string_view bucket);  // 池线程调用
@@ -173,6 +204,8 @@ private:
     // cancel 定时器[TimerQueue::cancel 阻塞等在途回调] → 等在途 GC 清零）
     void schedule_gc();
     Task<void> gc_tick();
+    void schedule_orphan_scan();  // 独立低频定时器（orphan_scan_interval；0 = 关）
+    Task<void> orphan_tick();
     void shutdown_background();
     // GC 计数指标注册（P5 指标项的 GC 切片，docs/todo.md §1.4；两个构造共用）
     void init_metrics(const MetricsScope& metrics);
@@ -182,16 +215,36 @@ private:
     std::unique_ptr<duostore::IMetaStore> meta_;
     std::unique_ptr<duostore::IDataStore> data_;
     std::shared_ptr<duostore::PinTable> pins_ = std::make_shared<duostore::PinTable>();
+    // 写侧 pin 已装配（cfg 构造给 FsDataStore 注入 ChunkPinHooks 时置位）：put 路径
+    // 提交/丢弃后须对称解 pin。注入构造默认无钩子——盲解会误减并发读者的 pin
+    bool write_pins_ = false;
     std::atomic<bool> closed_{false};  // close() 幂等闩；在途判定统一走 bg_
 
     // GC 完成轮末尾一次性累计（run_gc_once 的 DuoGcStats → 单调计数器）
     std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_,
-        m_gc_packs_removed_, m_gc_uploads_expired_;
+        m_gc_packs_removed_, m_gc_uploads_expired_, m_gc_packs_compacted_,
+        m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_, m_orphan_removed_;
+    std::shared_ptr<MetricGauge> m_orphan_refs_missing_;  // 最近一轮反向对账缺文件数
+
+    // GC 轮内簿记（只在持 gc_sem_ 时读写，免锁）：
+    // pack_empty_since_ = 空 pack 首见时刻（§9.2 步骤 4 延迟 unlink：空置逾 gc_grace
+    // 才整删，服务压实/删除瞬间已持旧 ref 未及 pin 的读者；进程内读者进程内计时即
+    // 正确，重启清零只是保守）。compact_blocked_ = 上轮压实未能全迁的 pack（进行中
+    // mpu 分片 / 旧格式 owner / 存活损坏 record）：live 账无变化且未过冷却窗
+    // （gc_grace）则跳过重扫——账有推进立即重试；冷却兜住"账不动但可归属性变了"
+    // 的情形（complete_upload 的 refs 转移不动 pack 账）
+    struct CompactBlocked {
+        int64_t live_recs = 0;
+        int64_t retry_at_ms = 0;
+    };
+    std::unordered_map<uint64_t, int64_t> pack_empty_since_;
+    std::unordered_map<uint64_t, CompactBlocked> compact_blocked_;
 
     BackgroundTaskGroup bg_{"duostore"};
     // 只在 bg_.if_open 内写、begin_close 后不变（读侧免锁）；0 = 未 arm（cancel(0) 安全）
     TimerQueue::Id gc_timer_ = 0;
-    // 手动钩子与后台 worker 互斥（跨 co_await 不可持 std::mutex，用协程信号量）
+    TimerQueue::Id orphan_timer_ = 0;
+    // 手动钩子、后台 worker 与孤儿扫描互斥（跨 co_await 不可持 std::mutex，用协程信号量）
     AsyncSemaphore gc_sem_{1};
 };
 

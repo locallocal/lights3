@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -109,6 +110,11 @@ struct IMetaStore {
     virtual bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                               const DataRef& from, const DataRef& to) = 0;  // 压实换 ref
     virtual bool chunk_referenced(uint64_t file_id) = 0;  // 孤儿扫描
+    // 孤儿反向对账（§9.3）：遍历 refs 表全部 file_id（chunk/rados 同账，顺序不保证）。
+    // 快照语义从宽：遍历期间的并发增删可见与否均可——调用方（孤儿扫描）对"文件在
+    // refs 缺"走 chunk_referenced 现点复查、对"refs 在文件缺"只告警不删，两向都容忍
+    // 弱一致快照
+    virtual void scan_refs(const std::function<void(uint64_t file_id)>& cb) = 0;
     virtual void close() = 0;
     virtual ~IMetaStore() = default;
 };

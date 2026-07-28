@@ -662,4 +662,13 @@ bool RocksMetaStore::chunk_referenced(uint64_t file_id) {
     return get_raw(kRefs, codec::be64_key(file_id)).has_value();
 }
 
+void RocksMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
+    // 纯读走迭代器快照（§4.4 同款），不占 mu_；孤儿扫描容忍弱一致视图
+    auto it = std::unique_ptr<rocksdb::Iterator>(
+        db()->NewIterator(rocksdb::ReadOptions(), cfs_[kRefs]));
+    for (it->SeekToFirst(); it->Valid(); it->Next())
+        cb(codec::parse_be64({it->key().data(), it->key().size()}));
+    if (!it->status().ok()) throw_status("scan_refs", it->status());
+}
+
 }  // namespace lights3::storage::duostore

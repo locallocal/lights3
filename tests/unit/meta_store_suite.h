@@ -300,6 +300,50 @@ inline void case_pack_stats_multipart(const MetaFactory& make) {
     m->close();
 }
 
+// refs 遍历（P4 §9.3 反向对账用）：写入建 ref、scan_refs 可见、删除后消失；与
+// chunk_referenced 点查一致。断言用包含语义——套件各用例共享底层存储，只看本例 id
+inline void case_scan_refs(const MetaFactory& make) {
+    auto m = make();
+    m->create_bucket("ms-scanrefs");
+    uint64_t a = m->alloc_file_id(Extent::Kind::kChunk);
+    uint64_t b = m->alloc_file_id(Extent::Kind::kChunk);
+    uint64_t c = m->alloc_file_id(Extent::Kind::kChunk);
+    m->put_object("ms-scanrefs", "k1", make_rec("k1", {chunk_extent(a, 10)}));
+    m->put_object("ms-scanrefs", "k2",
+                  make_rec("k2", {chunk_extent(b, 20), chunk_extent(c, 30)}));
+
+    auto collect = [&] {
+        std::vector<uint64_t> ids;
+        m->scan_refs([&](uint64_t id) { ids.push_back(id); });
+        return ids;
+    };
+    auto has = [](const std::vector<uint64_t>& ids, uint64_t id) {
+        for (uint64_t x : ids)
+            if (x == id) return true;
+        return false;
+    };
+    auto ids = collect();
+    CHECK(has(ids, a));
+    CHECK(has(ids, b));
+    CHECK(has(ids, c));
+
+    CHECK(m->delete_object("ms-scanrefs", "k1"));
+    ids = collect();
+    CHECK(!has(ids, a));  // 删除同批销 ref（§4.5）
+    CHECK(has(ids, b));
+    CHECK(has(ids, c));
+    CHECK(!m->chunk_referenced(a));  // 点查与遍历一致
+    CHECK(m->chunk_referenced(b));
+
+    CHECK(m->delete_object("ms-scanrefs", "k2"));
+    ids = collect();
+    CHECK(!has(ids, b));
+    CHECK(!has(ids, c));
+    drain_gcq(*m);
+    m->delete_bucket("ms-scanrefs");
+    m->close();
+}
+
 inline void run_meta_store_suite(const MetaFactory& make) {
     case_gc_accounting(make);
     case_alloc_monotonic_across_reopen(make);
@@ -308,6 +352,7 @@ inline void run_meta_store_suite(const MetaFactory& make) {
     case_list_delimiter_paging(make);
     case_pack_stats_accounting(make);
     case_pack_stats_multipart(make);
+    case_scan_refs(make);
 }
 
 }  // namespace meta_store_suite

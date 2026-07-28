@@ -56,6 +56,33 @@ inline int run_all() {
     return failed == 0 ? 0 : 1;
 }
 
+// ---- 子进程模式（崩溃注入用）----
+// 测试进程带参重启自身（execv /proc/self/exe <mode> ...）进入注册的子例程，
+// 子例程以 _exit / 被 SIGKILL 收尾模拟 kill -9；父进程重开状态目录验证收敛
+
+using ChildFn = int (*)(int argc, char** argv);
+
+struct ChildCase {
+    const char* name;
+    ChildFn fn;
+};
+
+inline std::vector<ChildCase>& child_registry() {
+    static std::vector<ChildCase> r;
+    return r;
+}
+
+struct ChildRegistrar {
+    ChildRegistrar(const char* name, ChildFn fn) { child_registry().push_back({name, fn}); }
+};
+
+inline int run_child(int argc, char** argv) {  // argv[1] = 子模式名
+    for (auto& c : child_registry())
+        if (std::string(argv[1]) == c.name) return c.fn(argc, argv);
+    fprintf(stderr, "unknown child mode: %s\n", argv[1]);
+    return 2;
+}
+
 }  // namespace mini_test
 
 #define TEST(name)                                                          \

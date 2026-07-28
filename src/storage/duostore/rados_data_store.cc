@@ -291,4 +291,14 @@ Task<GcRewrite> RadosDataStore::rewrite_pack(uint64_t pack_id) {
     co_return GcRewrite{};
 }
 
+Task<void> RadosDataStore::scan_chunks(
+    const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) {
+    // C4 未实现（docs/duostore-rados-data.md §8.2：rados_nobjects_list_* + rados_stat）。
+    // 显式抛错而非静默空扫——空枚举会让孤儿扫描谎报"零孤儿"
+    (void)cb;
+    throw S3Error(S3ErrorCode::InternalError,
+                  "duostore: rados orphan scan not implemented (C4)");
+    co_return;  // unreachable
+}
+
 }  // namespace lights3::storage::duostore

@@ -844,4 +844,18 @@ bool TikvMetaStore::chunk_referenced(uint64_t file_id) {
                    [&] { return snap_get(client().get_ts(), refs_key(file_id)).has_value(); });
 }
 
+void TikvMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
+    // 'R' 前缀快照分页扫（孤儿扫描容忍弱一致视图）；key 尾部 = be64 file_id
+    guarded("scan_refs", [&] {
+        auto [lo, hi] = range_of('R', {});
+        const size_t suffix = codec::be64_key(0).size();
+        scan_range(client().get_ts(), lo, hi, [&](const std::string& key, const std::string&) {
+            if (key.size() >= suffix)
+                cb(codec::parse_be64(std::string_view(key).substr(key.size() - suffix)));
+            return true;
+        });
+        return 0;
+    });
+}
+
 }  // namespace lights3::storage::duostore

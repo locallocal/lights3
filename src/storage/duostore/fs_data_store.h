@@ -29,6 +29,9 @@ struct FsDataOptions {
     uint64_t pack_threshold = 0;
     uint64_t pack_max_size = 128ull << 20;  // active pack 封存阈值
     int pack_writers = 4;                   // 并存 active pack 数
+    // 读路径 crc 失配上报（P5 corruption 指标；空 = 不上报）。reader 持本 options
+    // 拷贝逃逸出 store 生命周期——回调不得引用 store/backend（装配侧只捕获计数器）
+    std::function<void()> on_corruption;
 };
 
 class ChunkWriter;

@@ -196,6 +196,20 @@ elif [[ "$BACKEND" == "duostore-tikv" ]]; then cat <<DUOTIKV
     pd_endpoints: "${LIGHTS3_TEST_PD_ADDR:-}"
     tikv_prefix: "$TIKV_PREFIX"
 DUOTIKV
+elif [[ "$BACKEND" == "tiered-duostore" ]]; then cat <<TIERDUO
+  - name: localdata
+    type: localfs
+    root: $WORK/data
+    staging: $WORK/staging
+  - name: cloudduo
+    type: duostore
+    root: $WORK/cloud-duo
+  - name: tierdata
+    type: tiered
+    local: localdata
+    cloud: cloudduo
+    scan_interval: 0s
+TIERDUO
 elif [[ "$BACKEND" == "tiered-cloudproxy" ]]; then cat <<TIERCLOUD
   - name: localdata
     type: localfs

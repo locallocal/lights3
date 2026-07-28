@@ -509,6 +509,11 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_duostore
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin duostore)
+    # tiered 组合（docs/duostore-backend.md §13.1/§15 P5）：duostore 作 tiered 的
+    # cloud 侧（cloud 只经 IStorageBackend 抽象，复证组件关系）
+    add_test(NAME e2e_tiered_duostore
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin tiered-duostore)
     # duostore + Redis meta（docs/duostore-redis-meta.md §9）：脚本内探测
     # redis-server，缺则显式 SKIP
     if(LIGHTS3_DUOSTORE_REDIS_META)

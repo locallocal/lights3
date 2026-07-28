@@ -251,6 +251,7 @@ public:
             if (crc_active_ && crc_acc_ != e.crc32c) {
                 LOG_ERROR("duostore: chunk {:016x} crc mismatch (stored {:08x} got {:08x})",
                           e.file_id, e.crc32c, crc_acc_);
+                if (opt_.on_corruption) opt_.on_corruption();
                 throw S3Error(S3ErrorCode::InternalError, "duostore: chunk crc mismatch");
             }
             advance_extent();
@@ -302,6 +303,7 @@ private:
             if (crc != e.crc32c) {
                 LOG_ERROR("duostore: pack {:016x}+{} crc mismatch (stored {:08x} got {:08x})",
                           e.file_id, e.offset, e.crc32c, crc);
+                if (opt_.on_corruption) opt_.on_corruption();
                 throw S3Error(S3ErrorCode::InternalError, "duostore: pack record crc mismatch");
             }
             pack_loaded_ = true;

@@ -49,6 +49,9 @@ backends:
   #   meta: rocksdb
   #   meta_path: ./data/duostore/meta  # 默认 <root>/meta（可单独指到 SSD）
   #   rocksdb_block_cache: 64MiB
+  #   rocksdb_write_buffer: 64MiB      # 每 CF memtable 容量（RocksDB 默认 64MiB）
+  #   rocksdb_max_write_buffers: 2     # 每 CF memtable 个数上限（≥1）
+  #   rocksdb_max_background_jobs: 2   # flush/compaction 后台线程总数（≥1）
   #   meta_sync: true                  # 每次提交 fsync WAL（rocksdb/sqlite 共用）
   #
   #   # -- meta = redis（docs/duostore-redis-meta.md §8）--

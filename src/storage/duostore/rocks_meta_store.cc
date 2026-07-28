@@ -89,6 +89,7 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
     rocksdb::Options options;
     options.create_if_missing = true;
     options.create_missing_column_families = true;
+    options.max_background_jobs = opt_.max_background_jobs;
 
     rocksdb::BlockBasedTableOptions table;
     table.block_cache = rocksdb::NewLRUCache(opt_.block_cache_bytes);
@@ -98,6 +99,8 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
     rocksdb::ColumnFamilyOptions cf_opt;
     cf_opt.table_factory = table_factory;
     cf_opt.compression = rocksdb::kNoCompression;  // 压缩全关（§13.3）
+    cf_opt.write_buffer_size = opt_.write_buffer_bytes;
+    cf_opt.max_write_buffer_number = opt_.max_write_buffers;
     rocksdb::ColumnFamilyOptions stats_opt = cf_opt;
     stats_opt.merge_operator = std::make_shared<CounterMerge>();
 

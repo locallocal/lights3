@@ -191,8 +191,8 @@ cloudproxy；vendored 的 httplib 具备流式 client 能力；而 aws-sdk-cpp �
 内部拆成元数据（IMetaStore）与数据（IDataStore）两个可插拔实现、以
 DataRef 为唯一耦合点的存储引擎：默认元数据用 RocksDB（submodule）、数据用
 本地文件系统——大对象定长 chunk 切片、小对象聚合进 append-only pack、
-删除/覆盖经 GC 回收（延迟 unlink + pack 压实 + 孤儿对账；pack 聚合与 GC
-属 P2-P4 规划，当前已实现 P1 的 chunk 路径）。multipart 的 complete 是纯
+删除/覆盖经 GC 回收（延迟 unlink + pack 压实 + 孤儿对账；P1-P5 已全部
+实现）。multipart 的 complete 是纯
 元数据拼接（O(#parts)，零数据搬运）。完整设计见
 [duostore-backend.md](duostore-backend.md)。
 

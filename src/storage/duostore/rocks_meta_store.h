@@ -24,6 +24,11 @@ struct RocksMetaOptions {
     std::string path;
     bool sync = true;                        // 提交是否 WAL fsync（§6.3 meta_sync）
     size_t block_cache_bytes = 64ull << 20;
+    // 调参外露（P5，docs/duostore-backend.md §11）；默认值 = RocksDB 自身默认，
+    // 不改变既有部署行为。压缩恒关（§13.3），不外露
+    size_t write_buffer_bytes = 64ull << 20;  // 每 CF memtable 容量
+    int max_write_buffers = 2;                // 每 CF memtable 个数上限
+    int max_background_jobs = 2;              // flush/compaction 后台线程总数
 };
 
 class RocksMetaStore final : public IMetaStore {

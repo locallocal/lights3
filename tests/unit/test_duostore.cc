@@ -580,7 +580,7 @@ TEST(duostore_fs_remove_pack_idempotent) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     uint64_t next_id = 1;
-    FsDataStore d(FsDataOptions{tmp.path / "duo", 4096, false}, pool,
+    FsDataStore d(FsDataOptions{tmp.path / "duo", 4096, false, 0, 128ull << 20, 4, {}}, pool,
                   [&](Extent::Kind) { return next_id++; });
     auto p = d.pack_path(7);
     fs::create_directories(p.parent_path());
@@ -666,7 +666,7 @@ PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadP
     // ——压实用例的迁移 payload ≤ 阈值恒走 pack 路径，pins 传空即可
     auto data = std::make_unique<FsDataStore>(
         FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers},
+                      cfg.pack_max_size, cfg.pack_writers, {}},
         pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
         [mp](IDataStore& ds, std::string_view owner, const Extent& from,
@@ -836,6 +836,72 @@ TEST(duostore_pack_get_detects_bitrot) {
     auto got = sync_wait(h.b->get_object("bkt", "k", std::nullopt));
     CHECK_THROWS_S3(read_all(*got.body), s3::S3ErrorCode::InternalError);
     sync_wait(h.b->close());
+}
+
+// P5 corruption 指标：GET 读路径 crc 失配经 on_corruption 回调落注册表——chunk 与
+// pack 两处接入各计一次（cfg 构造装配；注入组装不接钩子，其余位腐用例不计数）
+TEST(duostore_read_corruption_metric) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "corrupt");
+    cfg.verify_chunk_crc = true;
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool,
+                                               MetricsScope(reg, {{"backend", "corrupt"}}));
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "small", patterned(600));  // ≤ 阈值：pack record
+    put(*b, "bkt", "big", patterned(5000));   // > 阈值：2 chunk（chunk_size 4KiB）
+    CHECK(reg->render().find(
+              "lights3_duostore_read_corruption_total{backend=\"corrupt\"} 0\n") !=
+          std::string::npos);  // 构造期即注册，0 值可见
+
+    fs::path chunk;
+    for (auto& e : fs::recursive_directory_iterator(cfg.root / "chunks"))
+        if (e.is_regular_file() && e.path().extension() == ".chk") chunk = e.path();
+    CHECK(!chunk.empty());
+    {
+        std::fstream f(chunk, std::ios::in | std::ios::out | std::ios::binary);
+        f.seekp(100);
+        f.put('!');
+    }
+    auto got1 = sync_wait(b->get_object("bkt", "big", std::nullopt));
+    CHECK_THROWS_S3(read_all(*got1.body), s3::S3ErrorCode::InternalError);
+
+    auto p = sole_pack_file(cfg.root);
+    CHECK(!p.empty());
+    {
+        std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
+        f.seekp(-10, std::ios::end);  // payload 尾部（头在 record 首）
+        f.put('!');
+    }
+    auto got2 = sync_wait(b->get_object("bkt", "small", std::nullopt));
+    CHECK_THROWS_S3(read_all(*got2.body), s3::S3ErrorCode::InternalError);
+
+    CHECK(reg->render().find(
+              "lights3_duostore_read_corruption_total{backend=\"corrupt\"} 2\n") !=
+          std::string::npos);
+    sync_wait(b->close());
+}
+
+// P5 RocksDB 调参外露：尺寸/整数解析 + 范围校验（≥1）
+TEST(duostore_config_rocksdb_tuning_params) {
+    std::map<std::string, std::string> p{{"root", "/tmp/duo-cfg"},
+                                         {"rocksdb_write_buffer", "8MiB"},
+                                         {"rocksdb_max_write_buffers", "3"},
+                                         {"rocksdb_max_background_jobs", "4"}};
+    auto c = DuoStoreConfig::from_params("t", p);
+    CHECK_EQ(c.rocksdb_write_buffer, size_t(8) << 20);
+    CHECK_EQ(c.rocksdb_max_write_buffers, 3);
+    CHECK_EQ(c.rocksdb_max_background_jobs, 4);
+
+    p["rocksdb_max_write_buffers"] = "0";
+    bool threw = false;
+    try {
+        DuoStoreConfig::from_params("t", p);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
 }
 
 // 空 pack 整删（§9.1）：sealed 且 live_recs==0 → unlink + 销 packstat；pin 挡整删。
@@ -1092,7 +1158,7 @@ TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     RocksMetaStore meta({(tmp.path / "meta").string(), false, 8ull << 20});
-    FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1};
+    FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1, {}};
     FsDataStore d(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); });
 
     auto append = [&](std::string owner, size_t n) {
@@ -1132,7 +1198,7 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
     auto pool = std::make_shared<ThreadPool>(2);
     RocksMetaStore meta({(tmp.path / "meta").string(), false, 8ull << 20});
     meta.create_bucket("bkt");
-    FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1};
+    FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1, {}};
     uint64_t pack_id = 0;
     {
         FsDataStore d1(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); },

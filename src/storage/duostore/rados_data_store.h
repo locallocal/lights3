@@ -26,6 +26,8 @@ struct RadosDataOptions {
     int connect_timeout_sec = 5;                    // client_mount_timeout
     int op_timeout_sec = 0;                         // 0 = 不设（§6.4）
     bool verify_chunk_crc = false;                  // 语义同 fs 版（§5）
+    // 读路径 crc 失配上报（P5 corruption 指标；空 = 不上报）；生命周期约束同 fs 版
+    std::function<void()> on_corruption;
 };
 
 class RadosChunkWriter;

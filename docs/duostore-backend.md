@@ -1,9 +1,10 @@
 # DuoStore：元数据/数据分离的存储引擎后端
 
-> 状态：P1-P3 已实现（双接口 + RocksMetaStore 全量 + chunk/pack 数据路径 +
-> GC 一期，代码在 `src/storage/duostore/`）；P4（压实/孤儿扫描）与 P5（打磨）
-> 未开始。元数据引擎 RocksDB（`third_party/rocksdb` submodule），数据引擎本地
-> 文件系统（chunk 切片 + pack 聚合 + GC）。承接
+> 状态：P1-P5 全部完成（双接口 + RocksMetaStore 全量 + chunk/pack 数据路径 +
+> GC 一二期（压实/孤儿扫描/崩溃注入）+ 打磨（调参外露/corruption 指标/
+> `e2e_tiered_duostore`），代码在 `src/storage/duostore/`）。元数据引擎 RocksDB
+> （`third_party/rocksdb` submodule，可换 redis/sqlite/tikv），数据引擎本地
+> 文件系统（chunk 切片 + pack 聚合 + GC，可换 rados）。承接
 > [storage-backend.md](storage-backend.md) §1 的接口契约与 §5 扩展指南；
 > 实施拆分见 §15。
 
@@ -501,6 +502,9 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | meta_sync | true | RocksDB 提交是否 WAL fsync（§6.3） |
 | verify_chunk_crc | false | GET 链路 chunk crc 校验（pack 恒校验） |
 | rocksdb_block_cache | 64MiB | RocksDB block cache 容量 |
+| rocksdb_write_buffer | 64MiB | 每 CF memtable 容量（P5 调参外露；默认同 RocksDB） |
+| rocksdb_max_write_buffers | 2 | 每 CF memtable 个数上限（≥1） |
+| rocksdb_max_background_jobs | 2 | flush/compaction 后台线程总数（≥1） |
 
 ## 12. 可插拔演进：分布式实现
 
@@ -598,8 +602,8 @@ backend_suite/e2e 在日常构建缺席、特性必然腐化。裁剪模板照 c
 | P1 | rocksdb submodule + CMake/build.sh 接入；DataRef/编码；双接口；RocksMetaStore 全量（bucket/object/list/multipart 事务）；FsDataStore 仅 chunk 路径（`pack_threshold=0` 全走 chunk）；删除只记账不回收 | `duostore_backend_suite` 全绿 + `e2e_duostore` + 编码/list 专项 | 已完成 |
 | P2 | pack 聚合：阈值判定（含 chunked 缓冲）、多 active pack 并发追加、record 格式与 crc、重启弃用 active pack | 全 pack/混合布局套件变体全绿 + record/torn tail 专项 | 已完成 |
 | P3 | GC 一期：gcq 消费、chunk unlink 与整 pack 删除、pin 计数 + gc_grace、`run_gc_once()` 钩子、mpu_ttl 清理、后台 worker | 覆盖/删除/abort 后 GC 收敛专项 + 并发 GET vs GC 无 ENOENT | 已完成 |
-| P4 | GC 二期：pack 压实（顺扫 + owner 反查 + swap_extents）、孤儿扫描与 refs 反向对账告警、崩溃注入（kill -9 重启收敛） | 低存活压实 + 崩溃注入专项全绿 | 未开始 |
-| P5 | 打磨：RocksDB 调参外露、s3/metrics 指标（corruption/GC 计数）、`e2e_tiered_duostore` 组合、文档状态头更新 | 全 ctest 矩阵含新 e2e 全绿 | 未开始 |
+| P4 | GC 二期：pack 压实（顺扫 + owner 反查 + swap_extents）、孤儿扫描与 refs 反向对账告警、崩溃注入（kill -9 重启收敛） | 低存活压实 + 崩溃注入专项全绿 | 已完成 |
+| P5 | 打磨：RocksDB 调参外露、s3/metrics 指标（corruption/GC 计数）、`e2e_tiered_duostore` 组合、文档状态头更新 | 全 ctest 矩阵含新 e2e 全绿 | 已完成 |
 
 P1 即含 multipart：`run_backend_suite` 是单入口全语义套件绕不开；且
 duostore 的 complete 本就是纯 meta 拼接（§8），multipart 在本架构下反而

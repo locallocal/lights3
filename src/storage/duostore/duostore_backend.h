@@ -136,6 +136,10 @@ struct DuoStoreConfig {
     bool meta_sync = true;
     bool verify_chunk_crc = false;
     size_t rocksdb_block_cache = 64ull << 20;
+    // RocksDB 调参外露（P5，§11）；默认 = RocksDB 自身默认，行为不变
+    size_t rocksdb_write_buffer = 64ull << 20;
+    int rocksdb_max_write_buffers = 2;
+    int rocksdb_max_background_jobs = 2;
 
     // 集中解析 + 范围校验（docs/duostore-backend.md §11）；配置错误抛 std::runtime_error
     static DuoStoreConfig from_params(const std::string& name,
@@ -224,6 +228,9 @@ private:
     std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_,
         m_gc_packs_removed_, m_gc_uploads_expired_, m_gc_packs_compacted_,
         m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_, m_orphan_removed_;
+    // GET 读路径 crc 失配计数（P5 corruption 指标）：数据面 reader 经 on_corruption
+    // 回调递增——回调只捕获此 shared_ptr，reader 逃逸出 backend 生命周期仍安全
+    std::shared_ptr<MetricCounter> m_read_corruption_;
     std::shared_ptr<MetricGauge> m_orphan_refs_missing_;  // 最近一轮反向对账缺文件数
 
     // GC 轮内簿记（只在持 gc_sem_ 时读写，免锁）：

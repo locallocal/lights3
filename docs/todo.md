@@ -8,7 +8,7 @@
 
 已完成（有 commit 佐证）：四层架构 + 四个 HTTP driver + SigV4（含 chunked/presigned）+
 凭证管理一期；存储侧 localfs / xlocalfs / memory / tiered（P1-P5）/ cloudproxy（P1-P5）/
-duostore P1-P4（RocksDB meta + chunk/pack data + GC 一二期），以及 duostore 可插拔件：Redis meta（R1-R3）、
+duostore P1-P5 全部（RocksDB meta + chunk/pack data + GC 一二期 + 打磨），以及 duostore 可插拔件：Redis meta（R1-R3）、
 SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 未完成阶段总览：
@@ -18,7 +18,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | DuoStore P2（pack 聚合） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
 | DuoStore P3（GC 一期） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
 | DuoStore P4（GC 二期：压实/孤儿） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
-| DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | 未开始 |
+| DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
 | Redis meta R4（打磨） | duostore-redis-meta.md §10 | 未开始 |
 | SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | 未开始 |
 | RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | 未开始 |
@@ -27,7 +27,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | cloudproxy 指标 + control_in_pump（P4 剩余） | cloudproxy-backend.md §8.2/§2.3 | 未做 |
 | 凭证管理二期 | credential-management.md §9 | 未开始 |
 
-## 1. 主线：DuoStore P2–P5（最高优先，多项依赖其解锁）
+## 1. 主线：DuoStore P2–P5（✅ 已全部完成，2026-07-29）
 
 ### 1.1 P3 · GC 一期（✅ 已完成，2026-07-26）
 
@@ -107,11 +107,27 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
   真实 tiup playground 集群 9 用例、rados 无集群恒 SKIP）；asan 3 连跑、tsan 2 连跑
   零告警；e2e × {rocksdb,redis,sqlite,tikv} 各 49 用例全绿
 
-### 1.4 P5 · 打磨
+### 1.4 P5 · 打磨（✅ 已完成，2026-07-29）
 
-- RocksDB 调参外露；corruption 计数指标（§3.1 框架已具备；GC 计数已随 §3.1 示范落地）
-- `e2e_tiered_duostore` 组合场景（duostore 作 tiered 的 cloud 侧）——e2e 目前缺此条目
-- 文档状态头更新
+全部条目落地：
+
+- ✅ RocksDB 调参外露：`rocksdb_write_buffer` / `rocksdb_max_write_buffers` /
+  `rocksdb_max_background_jobs` 三键（默认 = RocksDB 自身默认，既有部署行为不变；
+  压缩恒关 §13.3 不外露），from_params 范围校验（≥1）+ 引擎归属 WARN 表 +
+  lights3.yaml 样例与 §11 配置表同步
+- ✅ corruption 计数指标：`lights3_duostore_read_corruption_total`——GET 读路径
+  crc 失配经 `on_corruption` 回调递增，fs chunk / fs pack / rados 三处接入；回调
+  只捕获计数器 shared_ptr，reader（持 options 拷贝）逃逸出 backend 生命周期仍安全。
+  GC 顺扫损坏计数（pack_corrupt_records_total）已随 P4 落地
+- ✅ `e2e_tiered_duostore`：run_e2e.sh 增 tiered-duostore 场景（localfs local +
+  duostore cloud + tiered 组合），CMake 注册；复证 §13.1「duostore 可作 tiered
+  cloud 侧」（cloud 只经 IStorageBackend 抽象）
+- ✅ 文档状态头更新：duostore-backend.md 状态头（P1-P5 全部完成）+ §11 配置表 +
+  §15 表；storage-backend.md §5 去掉「P2-P4 规划」措辞
+- 验收：默认 ctest 矩阵 12/12 全绿（含新 e2e_tiered_duostore）；默认/redis/rados/
+  tikv/asan/tsan 六种构建单测全绿（新增 corruption 指标 + 调参解析 2 用例；tikv
+  真实 tiup playground 集群、rados 无集群恒 SKIP）；asan 3 连跑、tsan 2 连跑零
+  告警；e2e × {rocksdb,redis,sqlite,tikv} 各 49 用例全绿
 
 ## 2. 各插拔引擎的打磨尾巴
 
@@ -176,8 +192,8 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 它解锁以下指标项（各随所属阶段排期，接入方式见 storage-backend.md §6）：
 
 - cloudproxy P4 指标（远端请求计数/时延、重试、错误映射、ETag 校验失败、ClientPool 等待）
-- duostore P5（corruption 计数；GC 计数已随本项示范落地）、redis R4、sqlite S4、
-  rados C4、tikv T5 的各自指标项
+- ~~duostore P5（corruption 计数；GC 计数已随本项示范落地）~~（✅ 已随 P5 落地：
+  read_corruption_total）、redis R4、sqlite S4、rados C4、tikv T5 的各自指标项
 - s3-protocol.md §7 规划的「按后端分维度、后端错误率」
 
 ### 3.2 per-backend 独立 ThreadPool
@@ -291,4 +307,5 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
 4. ~~**后端级 metrics 框架（§3.1）**——一次解锁六处指标项~~ ✅ 已完成（2026-07-28）
 5. ~~**DuoStore P4（§1.3）**~~ ✅ 已完成（2026-07-29；枚举接口已定形）→ **rados C4
    孤儿扫描**（`RadosDataStore::scan_chunks` 实现）可随 C3/C4 排期
-6. 各引擎打磨（R4 / S4 / C3 / T5）与 P5、tiered 对账、凭证二期按需排期
+6. 各引擎打磨（R4 / S4 / C3 / T5）与 tiered 对账、凭证二期按需排期
+   （~~P5~~ ✅ 已完成，2026-07-29）

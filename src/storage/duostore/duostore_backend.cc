@@ -234,6 +234,12 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("verify_chunk_crc"))
         c.verify_chunk_crc = parse_bool_param(name, "verify_chunk_crc", *v);
     if (auto* v = get("rocksdb_block_cache")) c.rocksdb_block_cache = parse_size(*v);
+    if (auto* v = get("rocksdb_write_buffer")) c.rocksdb_write_buffer = parse_size(*v);
+    if (auto* v = get("rocksdb_max_write_buffers"))
+        c.rocksdb_max_write_buffers = parse_int_param(name, "rocksdb_max_write_buffers", *v);
+    if (auto* v = get("rocksdb_max_background_jobs"))
+        c.rocksdb_max_background_jobs =
+            parse_int_param(name, "rocksdb_max_background_jobs", *v);
 
     // meta 引擎选择（docs/duostore-redis-meta.md §8 / docs/duostore-sqlite-meta.md §8）
     if (auto* v = get("meta")) {
@@ -410,6 +416,9 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         } kMetaOwnedKeys[] = {
             {"meta_path", DuoMetaKind::kRocksDb},
             {"rocksdb_block_cache", DuoMetaKind::kRocksDb},
+            {"rocksdb_write_buffer", DuoMetaKind::kRocksDb},
+            {"rocksdb_max_write_buffers", DuoMetaKind::kRocksDb},
+            {"rocksdb_max_background_jobs", DuoMetaKind::kRocksDb},
             {"redis_uri", DuoMetaKind::kRedis},
             {"redis_prefix", DuoMetaKind::kRedis},
             {"redis_timeout", DuoMetaKind::kRedis},
@@ -447,6 +456,12 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (!(c.pack_gc_ratio > 0.0 && c.pack_gc_ratio <= 1.0))
         throw std::runtime_error("duostore backend '" + name +
                                  "': pack_gc_ratio must be in (0,1]");
+    if (c.rocksdb_max_write_buffers < 1)
+        throw std::runtime_error("duostore backend '" + name +
+                                 "': rocksdb_max_write_buffers must be >= 1");
+    if (c.rocksdb_max_background_jobs < 1)
+        throw std::runtime_error("duostore backend '" + name +
+                                 "': rocksdb_max_background_jobs must be >= 1");
     return c;
 }
 
@@ -475,16 +490,22 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
 #endif
     if (!meta_)
         meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{
-            cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache});
+            cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache,
+            cfg_.rocksdb_write_buffer, cfg_.rocksdb_max_write_buffers,
+            cfg_.rocksdb_max_background_jobs});
     IMetaStore* meta = meta_.get();  // 分配回调不延长 meta 生命周期：本类持有两者，先关 data
     auto alloc = [meta](Extent::Kind kind) { return meta->alloc_file_id(kind); };
+    // 读路径 crc 失配上报（P5 corruption 指标）：只捕获计数器 shared_ptr——reader
+    // 持 options 拷贝逃逸出 backend 生命周期后回调仍安全
+    auto on_corruption = [c = m_read_corruption_] { c->inc(); };
 #ifdef LIGHTS3_DUOSTORE_RADOS_DATA
     if (cfg_.data_kind == DuoDataKind::kRados)
         data_ = std::make_unique<RadosDataStore>(
             RadosDataOptions{cfg_.rados_conf, cfg_.rados_client, cfg_.rados_pool,
                              cfg_.rados_namespace, cfg_.rados_chunk_size,
                              cfg_.rados_buffer_total, cfg_.rados_connect_timeout_sec,
-                             cfg_.rados_op_timeout_sec, cfg_.verify_chunk_crc},
+                             cfg_.rados_op_timeout_sec, cfg_.verify_chunk_crc,
+                             on_corruption},
             pool_, alloc);
 #endif
     if (!data_) {
@@ -493,7 +514,8 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         auto pins = pins_;
         data_ = std::make_unique<FsDataStore>(
             FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc,
-                          cfg_.pack_threshold, cfg_.pack_max_size, cfg_.pack_writers},
+                          cfg_.pack_threshold, cfg_.pack_max_size, cfg_.pack_writers,
+                          on_corruption},
             pool_, alloc,
             [meta](uint64_t pack_id, uint64_t size) { meta->seal_pack(pack_id, size); },
             [meta, pins](IDataStore& ds, std::string_view owner, const Extent& from,
@@ -547,6 +569,9 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
     m_orphan_refs_missing_ = metrics.gauge(
         "lights3_duostore_orphan_refs_missing",
         "Refs pointing at missing chunk files as of the last orphan scan (data loss signal)");
+    m_read_corruption_ = metrics.counter(
+        "lights3_duostore_read_corruption_total",
+        "Chunk/pack crc mismatches detected on the GET read path (P5 corruption metric)");
 }
 
 // 重启弃用 active pack（§5.2）：数据面从不复用旧 active pack（新号段 + O_EXCL），

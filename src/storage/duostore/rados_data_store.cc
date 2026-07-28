@@ -179,9 +179,10 @@ namespace {
 class RadosExtentReader final : public http::BodyReader {
 public:
     RadosExtentReader(std::shared_ptr<RadosDataStore::Conn> conn, bool verify_crc,
-                      std::vector<Extent> extents, uint64_t first, uint64_t last,
-                      std::shared_ptr<ThreadPool> pool)
-        : conn_(std::move(conn)), verify_crc_(verify_crc), extents_(std::move(extents)),
+                      std::function<void()> on_corruption, std::vector<Extent> extents,
+                      uint64_t first, uint64_t last, std::shared_ptr<ThreadPool> pool)
+        : conn_(std::move(conn)), verify_crc_(verify_crc),
+          on_corruption_(std::move(on_corruption)), extents_(std::move(extents)),
           remaining_(last - first + 1), total_(remaining_), pool_(std::move(pool)) {
         uint64_t off = first;
         while (idx_ < extents_.size() && off >= extents_[idx_].length) {
@@ -224,6 +225,7 @@ public:
             if (crc_active_ && crc_acc_ != e.crc32c) {
                 LOG_ERROR("duostore-rados: object {} crc mismatch (stored {:08x} got {:08x})",
                           RadosDataStore::object_name(e.file_id), e.crc32c, crc_acc_);
+                if (on_corruption_) on_corruption_();
                 throw S3Error(S3ErrorCode::InternalError, "duostore-rados: chunk crc mismatch");
             }
             ++idx_;
@@ -236,6 +238,7 @@ public:
 private:
     std::shared_ptr<RadosDataStore::Conn> conn_;
     bool verify_crc_;
+    std::function<void()> on_corruption_;
     std::vector<Extent> extents_;
     size_t idx_ = 0;
     uint64_t cur_off_ = 0;
@@ -265,7 +268,8 @@ Task<std::unique_ptr<http::BodyReader>> RadosDataStore::open_reader(DataRef ref,
                       "duostore-rados: reader range beyond manifest");  // 调用方已 resolve_range
     io(conn_);  // close 守卫
     co_return std::make_unique<RadosExtentReader>(conn_, opt_.verify_chunk_crc,
-                                                  std::move(ref.extents), first, last, pool_);
+                                                  opt_.on_corruption, std::move(ref.extents),
+                                                  first, last, pool_);
 }
 
 Task<void> RadosDataStore::remove(std::span<const Extent> extents) {

@@ -278,6 +278,8 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("redis_timeout")) c.redis_timeout_sec = parse_duration_sec(*v);
     if (auto* v = get("redis_pool_size"))
         c.redis_pool_size = parse_int_param(name, "redis_pool_size", *v);
+    if (auto* v = get("redis_wait_replicas"))
+        c.redis_wait_replicas = parse_int_param(name, "redis_wait_replicas", *v);
     if (c.meta_kind == DuoMetaKind::kRedis) {
         if (c.redis_uri.empty())
             throw std::runtime_error("duostore backend '" + name +
@@ -288,6 +290,9 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         if (c.redis_timeout_sec < 1)
             throw std::runtime_error("duostore backend '" + name +
                                      "': redis_timeout must be >= 1s");
+        if (c.redis_wait_replicas < 0 || c.redis_wait_replicas > 256)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': redis_wait_replicas must be in [0,256]");
     }
 
     // sqlite meta（docs/duostore-sqlite-meta.md §8）：meta_sync 沿用（本地引擎，
@@ -423,6 +428,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             {"redis_prefix", DuoMetaKind::kRedis},
             {"redis_timeout", DuoMetaKind::kRedis},
             {"redis_pool_size", DuoMetaKind::kRedis},
+            {"redis_wait_replicas", DuoMetaKind::kRedis},
             {"sqlite_path", DuoMetaKind::kSqlite},
             {"sqlite_cache", DuoMetaKind::kSqlite},
             {"pd_endpoints", DuoMetaKind::kTikv},
@@ -476,7 +482,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     if (cfg_.meta_kind == DuoMetaKind::kRedis)
         meta_ = std::make_unique<RedisMetaStore>(RedisMetaOptions{
             cfg_.redis_uri, cfg_.redis_prefix, cfg_.redis_timeout_sec * 1000,
-            cfg_.redis_pool_size});
+            cfg_.redis_pool_size, cfg_.redis_wait_replicas, metrics});
 #endif
 #ifdef LIGHTS3_DUOSTORE_SQLITE_META
     if (cfg_.meta_kind == DuoMetaKind::kSqlite)

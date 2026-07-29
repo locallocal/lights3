@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include "core/metrics.h"
 #include "storage/duostore/meta_store.h"
 
 struct redisReply;
@@ -23,6 +24,8 @@ struct RedisMetaOptions {
     std::string prefix = "duo:";  // 全部 key 的前缀（§2.1 多实例/测试隔离）
     int timeout_ms = 3000;        // 建连 + 单命令超时（§5.4）
     int pool_size = 8;            // 连接池大小（§5.2）
+    int wait_replicas = 0;        // 提交类命令后 WAIT 的副本数（§6；0 = 不等待）
+    MetricsScope metrics;         // CAS 重试 / 重连计数（R4；空 scope 即孤立实例）
 };
 
 class RedisBatch;
@@ -94,6 +97,11 @@ private:
     // 命令执行（一律 redisCommandArgv，二进制安全，§5.1）。read_retry：纯读允许
     // 换新连接重试一次；提交类 IO 失败 = 结果不明 → InternalError（§3.5 盲重试禁令）
     ReplyPtr exec(const std::vector<std::string>& args, bool read_retry);
+    // 提交类命令成功后在同一连接上 WAIT（§6，wait_replicas > 0 时）；副本数不足
+    // 仅 WARN——写已在主上生效，报错会误导客户端重试。返回 false = 连接已坏（弃用）
+    bool wait_for_replicas(Conn& c);
+    // CAS 重试退避（§3.2）：attempt > 0 计入重试指标
+    void cas_backoff(int attempt);
     // EVALSHA + NOSCRIPT 自愈（脚本明确未执行，重载后重发安全，§3.5）
     ReplyPtr eval(const std::string& sha, const char* body, std::vector<std::string> keys,
                   std::vector<std::string> argv, bool read_retry);
@@ -145,6 +153,10 @@ private:
     std::mutex alloc_mu_;
     IdRange file_ids_[2];  // 按 Extent::Kind 下标
     IdRange seqs_;         // gcq seq
+
+    // R4 指标（构造期注册，0 值可见）
+    std::shared_ptr<MetricCounter> m_cas_retries_;
+    std::shared_ptr<MetricCounter> m_reconnects_;
 };
 
 }  // namespace lights3::storage::duostore

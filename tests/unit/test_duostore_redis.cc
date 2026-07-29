@@ -12,10 +12,14 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <thread>
+#include <utility>
+
+#include "core/metrics.h"
 
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
@@ -149,7 +153,12 @@ std::string unique_prefix() {
 }
 
 RedisMetaOptions redis_opts(const std::string& prefix) {
-    return {RedisTestServer::instance().uri, prefix, /*timeout_ms=*/3000, /*pool_size=*/4};
+    RedisMetaOptions o;
+    o.uri = RedisTestServer::instance().uri;
+    o.prefix = prefix;
+    o.timeout_ms = 3000;
+    o.pool_size = 4;
+    return o;
 }
 
 #define REDIS_OR_SKIP()                                                       \
@@ -322,6 +331,94 @@ TEST(duostore_redis_closed_store_throws) {
     RedisMetaStore m(redis_opts(unique_prefix()));
     m.close();
     CHECK_THROWS_S3(m.bucket_exists("x"), s3::S3ErrorCode::InternalError);
+}
+
+// R4 配置：redis_wait_replicas 解析 + 范围校验（纯解析，无需真实 server）
+TEST(duostore_redis_config_wait_replicas) {
+    std::map<std::string, std::string> p{{"root", "/tmp/duo-redis-cfg"},
+                                         {"meta", "redis"},
+                                         {"redis_uri", "redis://127.0.0.1:6379"},
+                                         {"redis_wait_replicas", "2"}};
+    auto c = DuoStoreConfig::from_params("t", p);
+    CHECK_EQ(c.redis_wait_replicas, 2);
+    p["redis_wait_replicas"] = "-1";
+    bool threw = false;
+    try {
+        DuoStoreConfig::from_params("t", p);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// R4 指标 + 重连边界（§5.3/§3.5）：构造期注册 0 值可见；CLIENT KILL 杀掉池中
+// 连接后——纯读换新连接重试（reconnects 递增），提交类单命令 IO 失败 = 结果
+// 不明 → InternalError（盲重试禁令），store 不失能（下次调用新建连接照常）
+TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
+    REDIS_OR_SKIP();
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto opts = redis_opts(unique_prefix());
+    opts.metrics = MetricsScope(reg, {{"backend", "r4"}});
+    RedisMetaStore m(opts);
+    CHECK(reg->render().find(
+              "lights3_duostore_redis_cas_retries_total{backend=\"r4\"} 0\n") !=
+          std::string::npos);
+    CHECK(reg->render().find(
+              "lights3_duostore_redis_reconnects_total{backend=\"r4\"} 0\n") !=
+          std::string::npos);
+
+    m.create_bucket("kill");
+    CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
+    CHECK(m.bucket_exists("kill"));  // 纯读：坏连接丢弃、重连重试成功
+    CHECK(reg->render().find(
+              "lights3_duostore_redis_reconnects_total{backend=\"r4\"} 1\n") !=
+          std::string::npos);
+
+    CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
+    CHECK_THROWS_S3(m.ack_reclaim(1), s3::S3ErrorCode::InternalError);
+    m.delete_bucket("kill");  // 坏连接已弃，新建连接照常
+    m.close();
+}
+
+// R4 wait_replicas（§6）：standalone（0 副本）下 WAIT 达不到副本数仅 WARN 不
+// 报错——写已在主上生效，报错会误导客户端重试。timeout 调短控制用例时长
+TEST(duostore_redis_wait_replicas_no_replica_tolerated) {
+    REDIS_OR_SKIP();
+    auto opts = redis_opts(unique_prefix());
+    opts.timeout_ms = 400;  // WAIT 超时取半 = 200ms/次提交
+    opts.wait_replicas = 1;
+    RedisMetaStore m(opts);
+    m.create_bucket("wr");
+    m.put_object("wr", "k", make_rec("k", {}));
+    auto rec = m.get_object("wr", "k");
+    CHECK(rec.has_value());
+    CHECK_EQ(rec->version, uint64_t(1));
+    CHECK(m.delete_object("wr", "k"));
+    m.delete_bucket("wr");
+    m.close();
+}
+
+// R4 list_uploads HSCAN 分批（§2.2）：uploads 表超过 listpack 阈值与单批
+// COUNT 后仍完整返回、(key, upload_id) 字典序、内容与登记一致
+TEST(duostore_redis_list_uploads_hscan_batches) {
+    REDIS_OR_SKIP();
+    RedisMetaStore m(redis_opts(unique_prefix()));
+    m.create_bucket("many");
+    constexpr int kUploads = 600;  // > hash-max-listpack-entries(128) 转真 hashtable，> COUNT 512 跨批
+    std::set<std::pair<std::string, std::string>> expect;
+    for (int i = 0; i < kUploads; ++i) {
+        std::string k = "k" + std::to_string(i % 40);  // 同 key 多 upload 混合
+        expect.emplace(k, m.create_upload("many", k, {}));
+    }
+    auto got = m.list_uploads("many");
+    CHECK_EQ(got.size(), size_t(kUploads));
+    for (size_t i = 1; i < got.size(); ++i)
+        CHECK(std::pair(got[i - 1].key, got[i - 1].upload_id) <
+              std::pair(got[i].key, got[i].upload_id));
+    for (const auto& u : got) CHECK(expect.count({u.key, u.upload_id}) == 1);
+    for (const auto& u : got) m.abort_upload("many", u.key, u.upload_id);
+    m.delete_bucket("many");
+    m.close();
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META

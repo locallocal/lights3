@@ -108,6 +108,7 @@ struct DuoStoreConfig {
     std::string redis_prefix = "duo:";    // key 前缀（多实例/测试隔离）
     int redis_timeout_sec = 3;            // 建连 + 单命令超时
     int redis_pool_size = 8;              // 连接池大小
+    int redis_wait_replicas = 0;          // 提交后 WAIT 的副本数（0 = 不等待）
     std::filesystem::path sqlite_path;    // meta=sqlite：DB 文件，默认 <root>/meta.sqlite3
     size_t sqlite_cache = 64ull << 20;    // 页缓存（PRAGMA cache_size）
     std::vector<std::string> pd_endpoints;  // meta=tikv 时必填（docs/duostore-tikv-meta.md §9）

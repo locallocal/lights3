@@ -56,10 +56,12 @@ backends:
   #
   #   # -- meta = redis（docs/duostore-redis-meta.md §8）--
   #   # meta: redis
-  #   # redis_uri: tcp://127.0.0.1:6379    # 必填；也支持 unix:///path/redis.sock
+  #   # redis_uri: redis://127.0.0.1:6379  # 必填；也支持 unix:///path/redis.sock
   #   # redis_prefix: "duo:"               # key 前缀（多实例/测试隔离）
   #   # redis_timeout: 3s                  # 建连 + 单命令超时
   #   # redis_pool_size: 8                 # 连接池大小 [1,256]
+  #   # redis_wait_replicas: 0             # 提交后 WAIT 的副本数 [0,256]（0=不等待；
+  #                                        # Sentinel 主从缩小 failover 丢写窗口，副本不足仅 WARN）
   #
   #   # -- meta = sqlite（docs/duostore-sqlite-meta.md §8）--
   #   # meta: sqlite

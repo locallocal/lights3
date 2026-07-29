@@ -136,6 +136,9 @@ using codec::bump_last_byte;  // delimiter 跳组后继（codec.h，meta store �
 struct SqliteMetaStore::Conn {
     sqlite3* db = nullptr;
     std::map<const char*, sqlite3_stmt*> stmts;  // key = SQL 字面量地址（§5.3）
+    // S4 指标：错误分类计数（§5.4）。open_raw 赋值；空 scope 下为孤立实例，恒非空
+    std::shared_ptr<MetricCounter> busy;
+    std::shared_ptr<MetricCounter> corrupt;
 
     ~Conn() {
         for (auto& [sql, st] : stmts) sqlite3_finalize(st);
@@ -143,8 +146,22 @@ struct SqliteMetaStore::Conn {
             LOG_ERROR("duostore meta(sqlite): close connection: {}", sqlite3_errmsg(db));
     }
 
+    // 错误分类（§5.4 表的指标切片）：BUSY = busy_timeout 耗尽仍拿不到锁（进程外
+    // 有人碰库 / 号段饥饿）；CORRUPT/NOTADB = 数据丢失征兆，单列 corruption 告警
+    void classify_error() const {
+        if (!db) return;
+        int rc = sqlite3_extended_errcode(db) & 0xff;
+        if (rc == SQLITE_BUSY && busy) busy->inc();
+        if ((rc == SQLITE_CORRUPT || rc == SQLITE_NOTADB) && corrupt) {
+            corrupt->inc();
+            LOG_ERROR("duostore meta(sqlite): corruption detected (rc={}) — data loss signal",
+                      rc);
+        }
+    }
+
     [[noreturn]] void raise(const char* what) const {
         std::string msg = db ? sqlite3_errmsg(db) : "no connection";
+        classify_error();
         LOG_ERROR("duostore meta(sqlite): {}: {}", what, msg);
         throw S3Error(S3ErrorCode::InternalError,
                       std::string("duostore meta(sqlite): ") + what + ": " + msg);
@@ -165,6 +182,7 @@ struct SqliteMetaStore::Conn {
         if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
             std::string msg = err ? err : sqlite3_errmsg(db);
             sqlite3_free(err);
+            classify_error();
             LOG_ERROR("duostore meta(sqlite): {}: {}", what, msg);
             throw S3Error(S3ErrorCode::InternalError,
                           std::string("duostore meta(sqlite): ") + what + ": " + msg);
@@ -208,7 +226,10 @@ public:
         int rc = sqlite3_step(s_);
         if (rc == SQLITE_ROW) return true;
         if (rc == SQLITE_DONE) return false;
-        if (rc == SQLITE_BUSY) return std::nullopt;
+        if (rc == SQLITE_BUSY) {
+            if (c_.busy) c_.busy->inc();  // 每轮饥饿计一次（S4 指标）
+            return std::nullopt;
+        }
         c_.raise("step");
     }
     void exec() {  // 跑到底（DML / RETURNING 排空）
@@ -267,6 +288,8 @@ SqliteMetaStore::Lease::~Lease() {
 
 std::unique_ptr<SqliteMetaStore::Conn> SqliteMetaStore::open_raw() {
     auto c = std::make_unique<Conn>();
+    c->busy = m_busy_;
+    c->corrupt = m_corrupt_;
     if (sqlite3_open_v2(opt_.path.c_str(), &c->db,
                         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
         std::string msg = c->db ? sqlite3_errmsg(c->db) : "out of memory";
@@ -274,7 +297,8 @@ std::unique_ptr<SqliteMetaStore::Conn> SqliteMetaStore::open_raw() {
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore meta(sqlite): open " + opt_.path + ": " + msg);
     }
-    sqlite3_busy_timeout(c->db, 5000);  // 防御纵深：进程内本不该长 BUSY（§5.2）
+    // 防御纵深：进程内本不该长 BUSY（§5.2）；测试用 busy_timeout_ms 调短做注入
+    sqlite3_busy_timeout(c->db, opt_.busy_timeout_ms);
     return c;
 }
 
@@ -285,9 +309,13 @@ void SqliteMetaStore::apply_pragmas(Conn& c, bool full_sync) {
     // journal_mode 是库的持久属性，首连接写入文件头
     size_t per_conn_kib =
         std::max<size_t>(opt_.cache_bytes / size_t(opt_.pool_size + 2) / 1024, 256);
+    // journal_size_limit（S4 调优，§6）：auto-checkpoint（默认 1000 页）搬空 WAL 后
+    // 把 -wal 文件截回上限——否则运行期 WAL 恒驻高水位尺寸。其余保持默认（评估
+    // 结论见 §6：checkpoint 策略与 optimize 时机不加码）
     c.exec("PRAGMA journal_mode=WAL;"
            "PRAGMA synchronous=" + std::string(full_sync ? "FULL" : "NORMAL") + ";" +
            "PRAGMA cache_size=-" + std::to_string(per_conn_kib) + ";" +
+           "PRAGMA journal_size_limit=4194304;"
            "PRAGMA temp_store=MEMORY;"
            "PRAGMA foreign_keys=OFF;",
            "open pragmas");
@@ -349,6 +377,16 @@ void SqliteMetaStore::init_schema(Conn& c) {
 }
 
 SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
+    // S4 指标：先于任何连接注册——打开路径的 NOTADB/CORRUPT（拿错文件、坏库）
+    // 也要计入；空 scope 返回孤立实例，测试直构零装配成本
+    m_busy_ = opt_.metrics.counter(
+        "lights3_duostore_sqlite_busy_total",
+        "Statements that saw SQLITE_BUSY (busy_timeout exhausted: external writer "
+        "on the db file, or starved id reservation)");
+    m_corrupt_ = opt_.metrics.counter(
+        "lights3_duostore_sqlite_corruption_total",
+        "SQLITE_CORRUPT/SQLITE_NOTADB errors observed (data loss signal)");
+
     // 父目录由本店自建（文件归属本店，覆盖所有调用方；失败留给 open 报错）
     std::error_code ec;
     auto parent = std::filesystem::path(opt_.path).parent_path();
@@ -376,7 +414,7 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
         init_schema(*wc_);
         ac_ = open_conn(/*full_sync=*/true);  // 号段连接恒 FULL（§4）
     } catch (...) {
-        close();
+        shutdown(/*graceful=*/false);
         throw;
     }
 }
@@ -389,11 +427,14 @@ SqliteMetaStore::~SqliteMetaStore() {
     }
 }
 
-void SqliteMetaStore::close() {
+void SqliteMetaStore::close() { shutdown(/*graceful=*/true); }
+
+void SqliteMetaStore::shutdown(bool graceful) {
     std::scoped_lock lk(mu_, alloc_mu_, pool_mu_);
     closed_ = true;
     idle_.clear();
     ac_.reset();
+    if (wc_ && !graceful) wc_.reset();  // 构造失败清理：库没开利索，不跑优雅收尾
     if (wc_) {
         // 干净关闭（§5.3）：WAL 合并回主文件并截断，目录里只剩单个 DB 文件——
         // 冷备 = 拷这一个文件。走 checkpoint_v2 而非 PRAGMA：被读者阻塞时 PRAGMA
@@ -456,9 +497,19 @@ SqliteMetaStore::Lease SqliteMetaStore::read_conn() {
 }
 
 void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
-    // 开放事务残留（Txn 回滚也失败的极端路径）不得回池：后续裸读会永远读该
-    // 冻结 snapshot（静默陈旧）、事务方法撞嵌套 BEGIN——直接销毁
-    if (c && !sqlite3_get_autocommit(c->db)) c.reset();
+    // 开放事务残留（Txn 回滚也失败的极端路径）不得裸回池：后续裸读会永远读该
+    // 冻结 snapshot（静默陈旧）、事务方法撞嵌套 BEGIN。S4 评估后由"直接销毁"
+    // 改为先补 ROLLBACK——成功即恢复 autocommit，连接可安全复用（省一次重建）；
+    // 仍失败才销毁（重建成本兜底正确性）
+    if (c && !sqlite3_get_autocommit(c->db)) {
+        try {
+            Stmt(*c, kRollback).exec();
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore meta(sqlite): rollback on release failed, dropping "
+                     "connection: {}", e.what());
+            c.reset();
+        }
+    }
     std::lock_guard lk(pool_mu_);
     if (!c || closed_ || int(idle_.size()) >= opt_.pool_size) return;  // 直接销毁
     idle_.push_back(std::move(c));
@@ -734,6 +785,14 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
 
     std::string last_emitted;
     int count = 0;
+    bool paused = false;
+    // 一致视图注入点（§9 S4 测试专用）：首个条目发出后调一次——钩子内从写连接
+    // 并发提交，本读事务的 WAL snapshot 必须岿然不动
+    auto pause_hook = [&] {
+        if (paused || !list_pause_for_test_) return;
+        paused = true;
+        list_pause_for_test_();
+    };
     while (it->step()) {
         std::string uk(it->col_blob(0));
         if (uk.compare(0, prefix.size(), prefix) != 0) break;  // 出前缀区间即止
@@ -748,6 +807,7 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
                 std::string group = uk.substr(0, pos + delim.size());
                 out.common_prefixes.push_back(group);
                 ++count;
+                pause_hook();
                 // 组末字节 +1 = 后继 seek 点，跳过整组；token 语义须落组尾 →
                 // 反向单查组内最后一条 key（对应 RocksDB SeekForPrev）
                 std::string target = group;
@@ -764,6 +824,7 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
         out.objects.push_back(codec::decode_object_meta(uk, it->col_blob(1)));
         last_emitted = std::move(uk);
         ++count;
+        pause_hook();
     }
     it.reset();  // 先收语句再收事务
     t.commit();

@@ -1,8 +1,10 @@
 # SqliteMetaStore：基于 SQLite 的 DuoStore 元数据存储
 
-> 状态：S1-S3 已实现（`SqliteMetaStore` 全接口 + meta/backend 套件 + e2e，
-> 代码在 `src/storage/duostore/sqlite_meta_store.{h,cc}`，编译开关
-> `LIGHTS3_DUOSTORE_SQLITE_META` 默认 OFF）；S4 未开始（§10）。兑现
+> 状态：S1-S4 全部完成（2026-07-30；`SqliteMetaStore` 全接口 + meta/backend
+> 套件 + e2e + S4 打磨——崩溃回放/一致视图专项、BUSY/corruption 指标、
+> checkpoint 调优与在线备份评估，代码在
+> `src/storage/duostore/sqlite_meta_store.{h,cc}`，编译开关
+> `LIGHTS3_DUOSTORE_SQLITE_META` 默认 OFF）。兑现
 > [duostore-backend.md](duostore-backend.md)
 > §12 "SQLite（单文件部署）"的演进承诺：meta 侧换 SQLite，实现
 > `IMetaStore`（`src/storage/duostore/meta_store.h`），元数据收敛为**单个
@@ -35,7 +37,8 @@
   器"，不做关系建模（§2.1 原则 1 的推论）；
 - 不启用 FTS / json1 / rtree 等扩展，不加载运行时扩展（编译期
   `SQLITE_OMIT_LOAD_EXTENSION`，§5.1）；
-- 分库分表 / 在线备份 API（`sqlite3_backup`）首期不做，列为演进（§10 S4）。
+- 分库分表不做；进程内在线备份 API（`sqlite3_backup`）经 S4 评估后维持
+  不做——WAL 模式下外部工具即可在线取一致快照（评估结论见 §6.3）。
 
 ## 2. 数据模型
 
@@ -315,7 +318,9 @@ PRAGMA foreign_keys = OFF;       -- 不用外键：跨表不变量由事务保�
 - **连接卫生**：归还读池与复用写连接前检查 `sqlite3_get_autocommit`——
   COMMIT 与兜底 ROLLBACK 相继失败（Txn 析构吞异常）的极端路径会残留开放
   事务，带它回池 = 裸读永远读冻结 snapshot（静默陈旧）、事务方法撞嵌套
-  BEGIN。残留读连接直接销毁；写连接先补 ROLLBACK、失败则响亮 500；
+  BEGIN。残留读连接先补 ROLLBACK——成功即恢复 autocommit 可安全回池
+  （S4 起；此前保守直接销毁，评估后省一次重建），仍失败才销毁；写连接
+  先补 ROLLBACK、失败则响亮 500；
 - `close()`：读池与号段连接直接关；写连接 `PRAGMA optimize` 后走
   `sqlite3_wal_checkpoint_v2(TRUNCATE)` 把 WAL 合并回主文件再最后关，
   然后释放 `.lock` 文件锁——干净关闭后目录里只剩单个 DB 文件，可直接
@@ -353,10 +358,21 @@ PRAGMA foreign_keys = OFF;       -- 不用外键：跨表不变量由事务保�
 
 - WAL 是**库的持久属性**，首连接设置一次即写进文件头；
 - checkpoint 用默认自动策略（WAL ≥1000 页时借道提交线程搬运）；后台
-  worker 不做主动 checkpoint，首期不调——WAL 文件上界 ≈ 高峰未搬运量，
-  meta 记录小，可接受；
-- **冷备路径**：干净 `close()` 后（§5.3 checkpoint TRUNCATE）拷贝单
-  文件即完整备份；运行中拷贝不保证一致（在线备份 API 列 §10 S4）。
+  worker 不做主动 checkpoint——WAL 文件上界 ≈ 高峰未搬运量，meta 记录小，
+  可接受。S4 调优结论：自动策略不加码，仅补 `journal_size_limit=4MiB`
+  ——auto-checkpoint 搬空 WAL 后把 `-wal` 文件截回上限，否则其尺寸恒驻
+  历史高水位（默认 -1 从不回缩）。`PRAGMA optimize` 只在 `close()` 收尾
+  跑一次（§5.3）：语句全是主键点查/前缀扫，计划天然稳定，运行期周期跑
+  收益为零；
+- **冷备路径**（本节即 §6.3 的引用点）：干净 `close()` 后（§5.3
+  checkpoint TRUNCATE）拷贝单文件即完整备份；运行中直接 `cp` 不保证一致。
+  **在线备份评估结论（S4）**：进程内 `sqlite3_backup` API 维持不做——
+  WAL 模式允许外部只读连接并发（`.lock` flock 只拦第二个本店实例，不拦
+  备份工具；读者不阻塞写者），运维用 sqlite3 CLI 的 `VACUUM INTO
+  'backup.sqlite3'`（或 `.backup`，二者都基于一致 snapshot）即可在运行中
+  取得一致快照，进程内实现只省一个外部工具，却要新增 API/配置/生命周期
+  管理三件套。注意事项：备份期间该读事务会钉住 WAL 回收点，WAL 可能
+  临时增长（备份完成即恢复），meta 库体量小、时长可忽略。
 
 ## 7. 构建接入
 
@@ -494,8 +510,18 @@ meta 引擎专属键（meta_path / rocksdb_* / redis_* / sqlite_*）出现但不
    - 单进程独占：第二个实例被 `.lock` flock 拒绝，close 释放后可重开；
    - create_bucket 重复 → BucketAlreadyOwnedByYou；close 后调用 → 500。
 
-   崩溃模拟（kill 后 WAL 回放对账）与 list 迭代中途并发写的一致视图注入
-   属 S4 打磨项（需进程级 harness / 内部钩子）。
+   S4 打磨专项（同文件）：
+   - 崩溃模拟：子进程（execv 自身，`sync=true`）循环「alloc_file_id +
+     put_object」并在每次 COMMIT 后逐行回报，父进程随机窗口 SIGKILL；
+     重启后凡回报过的提交必在（持久性契约）、refs↔objects 双向对账收敛、
+     gcq 无幻账、号段不回退、干净 close 后 `integrity_check` 干净——
+     WAL 回放的完整验收；
+   - 一致视图注入：`set_list_pause_for_test` 钩子在 list 发出首个条目后
+     从写连接并发提交（未访问区间插入/删除 + 已访问 key 覆盖）——本次
+     list 的 WAL snapshot 岿然不动，下一次 list 见新态；
+   - 指标：外部裸连接持写锁扮演"进程外来客"→ BUSY 计数（单语句 +1、
+     号段预留 4 轮饥饿 +4，锁释放后恢复）；文件头写花重开 → 打开路径
+     NOTADB 计入 corruption 且响亮拒绝。
 
 ## 10. 实施拆分
 
@@ -504,7 +530,7 @@ meta 引擎专属键（meta_path / rocksdb_* / redis_* / sqlite_*）出现但不
 | S1 | sqlite submodule + amalgamation 生成 + CMake option + build.sh；连接/语句 RAII、打开序列与 schema 建表校验、错误映射；`counters` 与 alloc_file_id（独立 FULL 连接）；bucket 四方法；套件接入 factory | RocksDB 套件不回归；S1 用例（bucket + 号段 + schema/重开）绿 | 已完成 |
 | S2 | `Txn` guard + object 四方法（含 list 读事务与 delimiter 跳组）+ refs / gcq / swap_extents / chunk_referenced / peek_reclaims / ack_reclaim / pack_stats | meta store 套件三实现全绿 + BLOB 排序/冷备专项 | 已完成 |
 | S3 | multipart 全套（create / put_part / list_parts / list_uploads / complete / abort）；注入组合跑 `run_backend_suite`；`e2e_duostore_sqlite` | 后端一致性套件 + e2e 绿 | 已完成 |
-| S4 | 打磨：崩溃模拟（kill 后 WAL 回放对账）与一致视图注入专项、`sqlite3_backup` 在线备份评估、`PRAGMA optimize`/checkpoint 调优、指标（BUSY/corruption 计数）、文档状态头更新 | 全 ctest 矩阵绿 | 未开始 |
+| S4 | 打磨：崩溃模拟（kill 后 WAL 回放对账）与一致视图注入专项、`sqlite3_backup` 在线备份评估（维持不做，§6.3）、`PRAGMA optimize`/checkpoint 调优（`journal_size_limit`，§6）、指标（BUSY/corruption 计数）、文档状态头更新 | 全 ctest 矩阵绿 | 已完成（2026-07-30） |
 
 S1 先做 bucket 的理由同 Redis 版：bucket 四方法覆盖"约束冲突原子性
 （create）+ 纯读（exists/list）+ 最简复合事务（delete 的空检查）"三种

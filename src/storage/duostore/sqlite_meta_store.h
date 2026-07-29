@@ -6,12 +6,14 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "core/metrics.h"
 #include "storage/duostore/meta_store.h"
 
 namespace lights3::storage::duostore {
@@ -21,6 +23,8 @@ struct SqliteMetaOptions {
     bool sync = true;                  // 提交是否持久：synchronous FULL/NORMAL（§6）
     size_t cache_bytes = 64ull << 20;  // 页缓存容量（PRAGMA cache_size，§8）
     int pool_size = 8;                 // 读连接池上限（§3.1）
+    int busy_timeout_ms = 5000;        // busy handler 等待（§5.2；不进 YAML，测试可调短）
+    MetricsScope metrics;              // BUSY / corruption 计数（S4；空 scope 即孤立实例）
 };
 
 class SqliteMetaStore final : public IMetaStore {
@@ -64,9 +68,19 @@ public:
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
 
+    // 测试专用（§9 S4 一致视图专项）：list_objects 每次调用在发出第一个条目后
+    // 调一次该钩子——钩子内从其他连接并发提交，验证 list 读事务的 WAL snapshot
+    void set_list_pause_for_test(std::function<void()> hook) {
+        list_pause_for_test_ = std::move(hook);
+    }
+
 private:
     struct Conn;  // sqlite3* + prepared statement 常驻缓存（.cc 内定义，头文件不泄漏 sqlite3 类型）
     class Stmt;
+
+    // close() 的共用体：graceful=false 用于构造失败清理——只释放连接与文件锁，
+    // 不跑 optimize/checkpoint 收尾（库没开利索，收尾必然失败且重复计 corruption）
+    void shutdown(bool graceful);
     class Txn;
 
     // 读连接租借 RAII（§3.1）：析构归还池；close 后归还即销毁。
@@ -132,6 +146,12 @@ private:
     std::mutex pool_mu_;
     std::vector<std::unique_ptr<Conn>> idle_;
     bool closed_ = false;
+
+    // S4 指标（构造期注册，0 值可见）；连接持 shared_ptr 副本在错误路径递增
+    std::shared_ptr<MetricCounter> m_busy_;
+    std::shared_ptr<MetricCounter> m_corrupt_;
+
+    std::function<void()> list_pause_for_test_;
 };
 
 }  // namespace lights3::storage::duostore

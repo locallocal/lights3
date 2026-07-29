@@ -485,9 +485,14 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
             cfg_.redis_pool_size, cfg_.redis_wait_replicas, metrics});
 #endif
 #ifdef LIGHTS3_DUOSTORE_SQLITE_META
-    if (cfg_.meta_kind == DuoMetaKind::kSqlite)
-        meta_ = std::make_unique<SqliteMetaStore>(SqliteMetaOptions{
-            cfg_.sqlite_path.string(), cfg_.meta_sync, cfg_.sqlite_cache});
+    if (cfg_.meta_kind == DuoMetaKind::kSqlite) {
+        SqliteMetaOptions so;
+        so.path = cfg_.sqlite_path.string();
+        so.sync = cfg_.meta_sync;
+        so.cache_bytes = cfg_.sqlite_cache;
+        so.metrics = metrics;
+        meta_ = std::make_unique<SqliteMetaStore>(std::move(so));
+    }
 #endif
 #ifdef LIGHTS3_DUOSTORE_TIKV_META
     if (cfg_.meta_kind == DuoMetaKind::kTikv)

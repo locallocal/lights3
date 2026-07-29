@@ -1,8 +1,10 @@
 # RedisMetaStore：基于 Redis 的 DuoStore 元数据存储
 
-> 状态：R1-R3 已实现（`RedisMetaStore` 全接口 + guarded-commit 脚本 + 测试
-> 套件接口化 + e2e，代码在 `src/storage/duostore/redis_meta_store.{h,cc}`，
-> 编译开关 `LIGHTS3_DUOSTORE_REDIS_META` 默认 OFF）；R4 未开始（§10）。兑现
+> 状态：R1-R4 全部完成（`RedisMetaStore` 全接口 + guarded-commit 脚本 + 测试
+> 套件接口化 + e2e + R4 打磨：AOF 探测告警 / `redis_wait_replicas` / CAS 重试与
+> 重连指标 / `list_uploads` HSCAN 分批 / TLS 评估维持不启用，代码在
+> `src/storage/duostore/redis_meta_store.{h,cc}`，
+> 编译开关 `LIGHTS3_DUOSTORE_REDIS_META` 默认 OFF）。兑现
 > [duostore-backend.md](duostore-backend.md) §12 的演进承诺：meta 侧换
 > Redis，实现 `IMetaStore`（`src/storage/duostore/meta_store.h`），供多网关
 > 共享同一份元数据。客户端库 hiredis（`third_party/hiredis` submodule，§7）。
@@ -64,7 +66,7 @@
 | `default` | `schema` | STRING | 打开时 `SET NX` 写 `"r1"`，已存在则读出校验；谱系与 RocksDB 的 schema 区分。不设 `instance`——meta 本就为多网关共享，不绑实例 |
 | `buckets` | `buckets` | HASH：field=`<bucket>`，value=`encode_bucket` | `create_bucket` = `HSETNX` 单命令即原子，返回 0 → BucketAlreadyOwnedByYou，无需脚本；`list_buckets` = `HGETALL` + 客户端按名排序（桶数小） |
 | `objects` | `o:<b>` + `oz:<b>` | HASH + ZSET（§2.1 原则 3） | 点查 `HGET o:<b> <key>`；迭代走 `oz:<b>` |
-| `uploads` | `up:<b>` | HASH：field=`<key>\0<id>`，value=`encode_upload` | `list_uploads` = `HGETALL` + 客户端按 field 字节序排序，即得 (key, upload_id) 序（与 RocksDB 前缀扫同序）；量受 mpu_ttl 约束，HGETALL 可接受（超大时的演进是 HSCAN 分批） |
+| `uploads` | `up:<b>` | HASH：field=`<key>\0<id>`，value=`encode_upload` | `list_uploads` = `HSCAN` 分批（COUNT 512，R4——超大 uploads 表不再单命令整体物化；游标弱一致对 ListMultipartUploads 可接受，client 侧 map 兼做去重）+ 按 field 字节序排序，即得 (key, upload_id) 序（与 RocksDB 前缀扫同序） |
 | `parts` | `pt:<b>\0<key>\0<id>` | HASH：field=十进制 `part_no`，value=`encode_part` | 每 upload 一个 HASH；`complete/abort` 整键 `DEL`（对应 RocksDB 的范围删）；≤1 万 field，`HGETALL` + 客户端数值排序 |
 | `refs` | `refs` | HASH：field=十进制 `file_id`，value=owner 简述 | `chunk_referenced` = `HEXISTS`，O(1) |
 | `gcq` | `gcq` | ZSET：score=`seq`，member=`be64(seq) ‖ encode_reclaim(...)` | be64 前缀保证 member 唯一且自含 seq；`peek_reclaims` = `ZRANGEBYSCORE gcq -inf +inf LIMIT 0 max`（seq 从 member 前 8 字节精确解析）；`ack_reclaim` = `ZREMRANGEBYSCORE gcq seq seq`。约束：score 为 double，要求 seq < 2^53——每秒 1 万次删除可用 2.8 万年，声明即可 |
@@ -251,7 +253,16 @@ mutex 保护的空闲连接栈，规模默认 ≈ 线程池大小（`redis_pool_
 ### 5.5 TLS 与 close
 
 TLS 走 hiredis 的独立组件 `hiredis_ssl`（编译期 `ENABLE_SSL`），首期
-不启用以减小构建面；项目已链 OpenSSL，列为可选演进。`close()`：排空
+不启用以减小构建面；项目已链 OpenSSL，列为可选演进。
+
+**R4 评估结论：维持不启用。**（1）支持范围是 standalone / Sentinel 主从
+（§1），典型部署形态为同机 unix socket 或内网 TCP，无明面诉求；（2）开启
+是确定性小工作量——hiredis 以 `ENABLE_SSL=ON` 重编出 `hiredis_ssl` 库、
+建连后 `redisInitiateSSLWithContext` 握手、`rediss://` URI 方言 + CA/证书
+/私钥三个配置键，项目已链 OpenSSL 无新依赖，出现诉求时按需开启即可；
+（3）期间跨不可信网络的替代是 stunnel / 网络层加密。
+
+`close()`：排空
 连接池逐一 `redisFree`，之后任何调用干净地抛 `InternalError`（仿
 RocksDB 版 `db()` 守卫——防御纵深，误用变 500 而非崩溃）。
 
@@ -269,10 +280,13 @@ Redis 默认持久化（RDB 快照）对本方案**不成立**——整库回档
 
 - 打开时 `CONFIG GET appendonly` 探测，非 AOF 打 WARN 日志（托管 Redis
   可能禁用 CONFIG 命令——降级为无法探测的提示，不拒绝启动）；
-- **WAIT（可选）**：Sentinel 主从部署下，提交类脚本后可追加
-  `WAIT <n> <timeout>` 等待 n 个副本确认，缩小 failover 丢写窗口（注意
-  WAIT 只保证复制送达、不保证副本 fsync）。配置 `redis_wait_replicas`
-  默认 0（不等待），不进首期实现（§10 R4）。
+- **WAIT（R4 已实现）**：Sentinel 主从部署下缩小 failover 丢写窗口。
+  `redis_wait_replicas`（默认 0 = 不等待）> 0 时，每个提交类命令成功后在
+  **同一连接**上追加 `WAIT <n> <timeout>`（WAIT 只对本连接此前的写生效；
+  timeout 取命令超时的一半，保证 server 先于客户端读超时返回）。副本数
+  不足或 WAIT 被拒**仅 WARN 不报错**——写已在主上生效，报错会误导 S3
+  客户端重试（complete 类重试还会得到假 NoSuchUpload）。注意 WAIT 只保证
+  复制送达、不保证副本 fsync。
 
 ## 7. 构建接入与组件关系
 
@@ -346,6 +360,7 @@ backends:
     redis_prefix: "duo:"
     redis_timeout: 3s
     redis_pool_size: 8
+    redis_wait_replicas: 0
     # 其余 duostore 键（chunk_size / pack_* / gc_* / mpu_ttl …）不变
 ```
 
@@ -356,7 +371,7 @@ backends:
 | redis_prefix | `duo:` | 全部 key 的前缀（多实例/测试隔离，§2.1） |
 | redis_timeout | 3s | 建连 + 单命令超时（`parse_duration_sec`） |
 | redis_pool_size | 8 | 连接池大小（§5.2），建议 ≈ 线程池规模 |
-| redis_wait_replicas | 0 | 提交后 `WAIT` 的副本数（§6，R4 才实现） |
+| redis_wait_replicas | 0 | 提交类命令后 `WAIT` 的副本数，范围 [0,256]（§6；0 = 不等待，副本不足仅 WARN 不报错） |
 
 `meta: redis` 时 `meta_path` / `rocksdb_block_cache` / `meta_sync` 被
 忽略并打 WARN（持久化语义改由 Redis 侧 AOF 配置承担，§6）。
@@ -388,9 +403,12 @@ backends:
    `if(LIGHTS3_DUOSTORE_REDIS_META AND LIGHTS3_DRIVER_BUILTIN)`；
 4. **Redis 专项**：guarded-commit 冲突路径（并发写触发 check 失败 →
    重试收敛）；NOSCRIPT 自愈（SCRIPT FLUSH 后操作照常）；杀连接后纯读
-   自动重连、提交类抛 InternalError（§3.5 边界）；swap_extents CAS
-   放弃路径；list 的 delimiter 跳组与组尾 token；schema 校验与前缀隔离
-   （两个不同 prefix 的 store 共用一个 server 互不可见）。
+   自动重连、提交类抛 InternalError（§3.5 边界，CLIENT KILL 注入）；
+   swap_extents CAS 放弃路径；list 的 delimiter 跳组与组尾 token；schema
+   校验与前缀隔离（两个不同 prefix 的 store 共用一个 server 互不可见）。
+   R4 增：指标构造期注册 0 值可见 + 重连计数递增断言；`redis_wait_replicas`
+   在 standalone（0 副本）下容忍（WARN 不报错）；`list_uploads` 跨 HSCAN
+   批次完整性与序；`redis_wait_replicas` 配置解析与范围校验。
 
 ## 10. 实施拆分
 
@@ -399,7 +417,7 @@ backends:
 | R1 | hiredis submodule + CMake option + build.sh；连接池 / reply RAII / 错误映射 / 脚本加载器；`ctr:*` 计数器与 alloc_file_id；bucket 四方法 + schema 校验；meta 测试套件接口化 + redis-server 探测/skip 机制 | RocksDB 套件重构后全绿；redis 在场时 R1 用例绿 | 已完成 |
 | R2 | 通用 guarded-commit 脚本 + `RedisBatch`；object 四方法（含 list_objects Lua）+ refs / gcq / swap_extents / chunk_referenced / peek_reclaims / ack_reclaim | meta store 套件两实现全绿 + 冲突重试/CAS 专项 | 已完成 |
 | R3 | multipart 全套（create / put_part / list_parts / list_uploads / complete / abort，含 parts sha1 指纹）；注入组合跑 `run_backend_suite`；`e2e_duostore_redis` | 后端一致性套件 + e2e 绿 | 已完成 |
-| R4 | 打磨：AOF 探测告警、`redis_wait_replicas`、指标（CAS 重试 / 重连计数）、TLS 评估、文档状态头更新 | 全 ctest 矩阵（含 skip 路径）绿 | 未开始 |
+| R4 | 打磨：AOF 探测告警（R1 已随构造落地）、`redis_wait_replicas`、指标（CAS 重试 / 重连计数，§3.1 框架接入）、`list_uploads` HSCAN 分批、TLS 评估（§5.5，维持不启用）、文档状态头更新 | 全 ctest 矩阵（含 skip 路径）绿 | 已完成 |
 
 R1 先做 bucket 而非 object：bucket 方法覆盖"单命令原子（HSETNX）+ 纯读
 + 最简脚本（delete_bucket 的空检查）"三种形态，把连接层与脚本机制的

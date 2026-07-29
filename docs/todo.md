@@ -19,7 +19,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | DuoStore P3（GC 一期） | duostore-backend.md §15 | ✅ 已完成（2026-07-26） |
 | DuoStore P4（GC 二期：压实/孤儿） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
 | DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
-| Redis meta R4（打磨） | duostore-redis-meta.md §10 | 未开始 |
+| Redis meta R4（打磨） | duostore-redis-meta.md §10 | ✅ 已完成（2026-07-30） |
 | SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | 未开始 |
 | RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | 未开始 |
 | TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | 未开始 |
@@ -131,13 +131,23 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 
 ## 2. 各插拔引擎的打磨尾巴
 
-### 2.1 Redis meta · R4（duostore-redis-meta.md §10）
+### 2.1 Redis meta · R4（duostore-redis-meta.md §10）（✅ 已完成，2026-07-30）
 
-- AOF 探测告警（`CONFIG GET appendonly` 非 AOF 打 WARN）
-- `redis_wait_replicas`（WAIT 命令）配置项
-- 指标：CAS 重试 / 重连计数（§3.1 框架已具备）
-- TLS（hiredis_ssl）评估；`list_uploads` 超大时 HGETALL → HSCAN 分批（§2.2）
-- ⚠️ 文档 bug：§10 表中 R1/R2/R3 状态仍写「未开始」，与状态头矛盾，需修
+- ✅ AOF 探测告警：已随 R1 构造函数在场（`CONFIG GET appendonly` 非 AOF 打
+  WARN、CONFIG 不可用降级提示），本期核对无需改动
+- ✅ `redis_wait_replicas`（默认 0，范围 [0,256]）：>0 时提交类命令成功后同
+  连接追加 `WAIT <n> <timeout/2>`；副本不足仅 WARN 不报错（写已在主上生效，
+  报错会误导客户端重试）——§6 语义说明同步
+- ✅ 指标：`redis_cas_retries_total` / `redis_reconnects_total` 经
+  MetricsScope 接入（RedisMetaOptions 增 metrics 字段，构造期注册 0 值可见）
+- ✅ `list_uploads` HGETALL → HSCAN 分批（COUNT 512，游标弱一致可接受，
+  map 去重 + 排序）；TLS 评估结论落 §5.5（维持不启用，开启路径已记录）
+- ✅ 文档：状态头 R1-R4 完成、§10 表 R4 行、§8 配置表/样例、lights3.yaml
+  样例（顺修 `redis_uri: tcp://` 应为 `redis://` 的样例笔误）。§10 表中
+  R1/R2/R3 状态此前已修正为「已完成」，原记录的矛盾不复存在
+- 验收：redis 构建 181 用例全绿（新增 4 专项：wait_replicas 容忍/配置校验、
+  CLIENT KILL 重连计数 + 提交类 InternalError 边界、HSCAN 跨批完整性）；
+  默认构建全绿；e2e duostore-redis 全绿
 
 ### 2.2 SQLite meta · S4（duostore-sqlite-meta.md §10）
 
@@ -307,5 +317,5 @@ rados 需系统 librados（librados-dev 或 `LIGHTS3_RADOS_ROOT`）、建议 `-B
 4. ~~**后端级 metrics 框架（§3.1）**——一次解锁六处指标项~~ ✅ 已完成（2026-07-28）
 5. ~~**DuoStore P4（§1.3）**~~ ✅ 已完成（2026-07-29；枚举接口已定形）→ **rados C4
    孤儿扫描**（`RadosDataStore::scan_chunks` 实现）可随 C3/C4 排期
-6. 各引擎打磨（R4 / S4 / C3 / T5）与 tiered 对账、凭证二期按需排期
+6. 各引擎打磨（~~R4~~ ✅ 2026-07-30 / S4 / C3 / T5）与 tiered 对账、凭证二期按需排期
    （~~P5~~ ✅ 已完成，2026-07-29）

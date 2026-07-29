@@ -32,12 +32,6 @@ constexpr const char* kSchemaValue = "r1";  // 与 RocksDB 的 "1" 区分谱系�
 // 无退避的紧循环会被对端的连续提交流饿死（多网关热 key），故重试前指数退避
 constexpr int kMaxCasRetries = 16;
 
-void cas_backoff(int attempt) {
-    if (attempt == 0) return;
-    int shift = std::min(attempt - 1, 6);  // 100µs … 6.4ms，16 次合计 ≈ 80ms
-    std::this_thread::sleep_for(std::chrono::microseconds(100 << shift));
-}
-
 [[noreturn]] void throw_internal(const char* what, const std::string& detail) {
     LOG_ERROR("duostore redis meta: {}: {}", what, detail);
     throw S3Error(S3ErrorCode::InternalError,
@@ -300,7 +294,22 @@ private:
 
 // ---------- 构造 / 关闭 ----------
 
+void RedisMetaStore::cas_backoff(int attempt) {
+    if (attempt == 0) return;
+    m_cas_retries_->inc();  // 上一轮 commit 守卫失败，本轮即重试
+    int shift = std::min(attempt - 1, 6);  // 100µs … 6.4ms，16 次合计 ≈ 80ms
+    std::this_thread::sleep_for(std::chrono::microseconds(100 << shift));
+}
+
 RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
+    // R4 指标：构造期注册即 0 值可见；空 scope 返回孤立实例，测试直构零装配成本
+    m_cas_retries_ = opt_.metrics.counter(
+        "lights3_duostore_redis_cas_retries_total",
+        "Guarded-commit rounds retried after a CAS check failed (concurrent modification)");
+    m_reconnects_ = opt_.metrics.counter(
+        "lights3_duostore_redis_reconnects_total",
+        "Connections re-established after a pooled redis connection went bad");
+
     // URI 解析（§8）：redis://[user][:pass]@host[:port][/db] 或 unix://<path>
     const std::string& uri = opt_.uri;
     auto bad_uri = [&] {
@@ -462,14 +471,39 @@ RedisMetaStore::ReplyPtr RedisMetaStore::exec(const std::vector<std::string>& ar
     if (!r && read_retry) {
         // 纯读：坏连接（多半是池中陈旧连接）丢弃，换新连接重试一次（§5.3）
         c = make_conn();
+        m_reconnects_->inc();
         r = run_on(c->ctx, args, &err);
     }
     if (!r) {
         // 提交类到这里 = 结果不明：不盲重试（§3.5），抛 500 交上层客户端重试
         throw_internal(args.empty() ? "exec" : args[0].c_str(), err);
     }
+    // 提交类（!read_retry）成功后同连接 WAIT（§6）——WAIT 只对本连接此前的写生效
+    if (!read_retry && opt_.wait_replicas > 0 && !wait_for_replicas(*c))
+        return r;  // 连接已坏：不归还池（写本身已成功）
     release(std::move(c));
     return r;
+}
+
+bool RedisMetaStore::wait_for_replicas(Conn& c) {
+    // 超时取命令超时的一半：server 需先于客户端读超时返回（否则连接被误判坏）。
+    // 副本数不足仅 WARN——写已在主上生效，报错会误导 S3 客户端重试（complete
+    // 类重试还会得到假 NoSuchUpload）；WAIT 只保证复制送达、不保证副本 fsync
+    int timeout = std::max(1, opt_.timeout_ms / 2);
+    std::string err;
+    auto r = run_on(c.ctx, {"WAIT", std::to_string(opt_.wait_replicas),
+                            std::to_string(timeout)}, &err);
+    if (!r) {
+        LOG_WARN("duostore redis meta: WAIT failed ({}), replication not confirmed", err);
+        return false;
+    }
+    if (r->type == REDIS_REPLY_ERROR) {
+        LOG_WARN("duostore redis meta: WAIT rejected: {}", std::string(r->str, r->len));
+    } else if (r->type == REDIS_REPLY_INTEGER && r->integer < opt_.wait_replicas) {
+        LOG_WARN("duostore redis meta: WAIT reached {}/{} replicas within {}ms", r->integer,
+                 opt_.wait_replicas, timeout);
+    }
+    return true;
 }
 
 RedisMetaStore::ReplyPtr RedisMetaStore::eval(const std::string& sha, const char* body,
@@ -846,15 +880,22 @@ std::vector<PartRec> RedisMetaStore::list_parts(std::string_view b, std::string_
 
 std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b) {
     require_bucket(b);
-    auto r = exec({"HGETALL", uploads_key(b)}, /*read_retry=*/true);
-    check_reply_error("list_uploads", r.get());
-    if (r->type != REDIS_REPLY_ARRAY) throw_internal("list_uploads", "unexpected reply type");
-    // field = <key>\0<id>，按 field 字节序排序即 (key, upload_id) 序（§2.2）
-    std::vector<std::pair<std::string, std::string>> rows;
-    for (size_t i = 0; i + 1 < r->elements; i += 2)
-        rows.emplace_back(std::string(reply_str(r->element[i])),
-                          std::string(reply_str(r->element[i + 1])));
-    std::sort(rows.begin(), rows.end());
+    // HSCAN 分批（R4，§2.2）：超大 uploads 表不再单命令整体物化。游标弱一致
+    // （迭代中并发增删可能漏/重）对 ListMultipartUploads 可接受；map 兼做去重
+    // （HSCAN 可能重复返回同 field）与 field 字节序排序 = (key, upload_id) 序
+    std::map<std::string, std::string> rows;
+    std::string cursor = "0";
+    do {
+        auto r = exec({"HSCAN", uploads_key(b), cursor, "COUNT", "512"}, /*read_retry=*/true);
+        check_reply_error("list_uploads", r.get());
+        if (r->type != REDIS_REPLY_ARRAY || r->elements != 2)
+            throw_internal("list_uploads", "unexpected HSCAN reply");
+        cursor = std::string(reply_str(r->element[0]));
+        const redisReply* kv = r->element[1];
+        for (size_t i = 0; i + 1 < kv->elements; i += 2)
+            rows.insert_or_assign(std::string(reply_str(kv->element[i])),
+                                  std::string(reply_str(kv->element[i + 1])));
+    } while (cursor != "0");
     std::vector<UploadInfo> out;
     for (auto& [field, val] : rows) {
         auto sep = field.rfind('\0');

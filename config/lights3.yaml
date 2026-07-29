@@ -76,6 +76,10 @@ backends:
   #   # tikv_ca: /path/ca.pem              # mTLS 三件套：要么全给要么全不给
   #   # tikv_cert: /path/client.pem
   #   # tikv_key: /path/client-key.pem
+  #   # tikv_gc_interval: 60s              # GC safepoint 推进周期（纯 KV 集群必需；
+  #                                        # 共 TiDB 集群设 0 关闭，§7.3）
+  #   # tikv_gc_retention: 10m             # safepoint 保留窗口（now − retention，须为正）
+  #   # tikv_backoff_ms: 0                 # 侧车路径退避预算（0 = client-c 库默认）
   #
   #   # -- data = fs（默认）：chunk/pack 本地引擎（docs/duostore-backend.md）--
   #   data: fs

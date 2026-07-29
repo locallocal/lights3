@@ -326,6 +326,10 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("tikv_ca")) c.tikv_ca = *v;
     if (auto* v = get("tikv_cert")) c.tikv_cert = *v;
     if (auto* v = get("tikv_key")) c.tikv_key = *v;
+    if (auto* v = get("tikv_backoff_ms"))
+        c.tikv_backoff_ms = parse_int_param(name, "tikv_backoff_ms", *v);
+    if (auto* v = get("tikv_gc_interval")) c.tikv_gc_interval_sec = parse_duration_sec(*v);
+    if (auto* v = get("tikv_gc_retention")) c.tikv_gc_retention_sec = parse_duration_sec(*v);
     if (c.meta_kind == DuoMetaKind::kTikv) {
         if (c.pd_endpoints.empty())
             throw std::runtime_error("duostore backend '" + name +
@@ -335,6 +339,15 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         if (given != 0 && given != 3)
             throw std::runtime_error("duostore backend '" + name +
                                      "': tikv_ca/tikv_cert/tikv_key must be set together");
+        if (c.tikv_backoff_ms < 0)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': tikv_backoff_ms must be >= 0 (0 = library default)");
+        // interval 0 = 关闭推进（共 TiDB 集群时由 TiDB 治理，§7.3 部署矩阵）；
+        // 开启时 retention 必须为正——safepoint 推到 now 会砍掉在途快照
+        if (c.tikv_gc_interval_sec < 0 || c.tikv_gc_retention_sec <= 0)
+            throw std::runtime_error(
+                "duostore backend '" + name +
+                "': tikv_gc_interval must be >= 0 and tikv_gc_retention > 0");
     }
 
     // data 引擎选择（docs/duostore-rados-data.md §10，对偶 meta 分支）
@@ -436,6 +449,9 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             {"tikv_ca", DuoMetaKind::kTikv},
             {"tikv_cert", DuoMetaKind::kTikv},
             {"tikv_key", DuoMetaKind::kTikv},
+            {"tikv_backoff_ms", DuoMetaKind::kTikv},
+            {"tikv_gc_interval", DuoMetaKind::kTikv},
+            {"tikv_gc_retention", DuoMetaKind::kTikv},
         };
         const char* kind_name = c.meta_kind == DuoMetaKind::kRocksDb   ? "rocksdb"
                                 : c.meta_kind == DuoMetaKind::kRedis   ? "redis"
@@ -495,9 +511,19 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     }
 #endif
 #ifdef LIGHTS3_DUOSTORE_TIKV_META
-    if (cfg_.meta_kind == DuoMetaKind::kTikv)
-        meta_ = std::make_unique<TikvMetaStore>(TikvMetaOptions{
-            cfg_.pd_endpoints, cfg_.tikv_prefix, cfg_.tikv_ca, cfg_.tikv_cert, cfg_.tikv_key});
+    if (cfg_.meta_kind == DuoMetaKind::kTikv) {
+        TikvMetaOptions to;
+        to.pd_endpoints = cfg_.pd_endpoints;
+        to.prefix = cfg_.tikv_prefix;
+        to.ca_path = cfg_.tikv_ca;
+        to.cert_path = cfg_.tikv_cert;
+        to.key_path = cfg_.tikv_key;
+        to.backoff_budget_ms = cfg_.tikv_backoff_ms;
+        to.gc_safepoint_interval_s = cfg_.tikv_gc_interval_sec;
+        to.gc_retention_s = cfg_.tikv_gc_retention_sec;
+        to.metrics = metrics;
+        meta_ = std::make_unique<TikvMetaStore>(std::move(to));
+    }
 #endif
     if (!meta_)
         meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{

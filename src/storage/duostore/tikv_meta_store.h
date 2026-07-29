@@ -7,13 +7,16 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
+#include "core/metrics.h"
 #include "storage/duostore/meta_store.h"
 #include "storage/duostore/tikv_client.h"
 
@@ -26,6 +29,15 @@ struct TikvMetaOptions {
     std::string ca_path;
     std::string cert_path;
     std::string key_path;
+    // 退避预算参数化（§6.1，T5）：>0 覆盖侧车路径的库默认；0 = 库默认
+    int backoff_budget_ms = 0;
+    // GC safepoint 推进（§7.3，T5）：纯 KV 集群长期运行的硬需求。interval=0 关闭
+    //（直构测试/共 TiDB 部署）；开启后后台每 interval 秒推进 safepoint 至
+    // now − retention（service safepoint 声明 + 集群 safepoint 推进两步，多网关
+    // 并发推进经 PD min/单调语义天然收敛）
+    int gc_safepoint_interval_s = 0;
+    int gc_retention_s = 600;  // 保留窗口：只需覆盖最长 list/事务时长（§7.3）
+    MetricsScope metrics;  // 冲突重试 / safepoint 计数（T5；空 scope 即孤立实例）
 };
 
 class TikvMetaStore final : public IMetaStore {
@@ -68,6 +80,12 @@ public:
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
+
+    // GC safepoint 单轮推进（§7.3；后台 worker 每 tick 调用，测试直调）：
+    // service safepoint 声明 now − retention 并取回全体服务 min → 以 min 推进
+    // 集群 safepoint。返回推进后的集群 safepoint（TSO 格式）；失败抛 pingcap
+    // 异常（worker 捕获计数，下轮重试）
+    uint64_t update_gc_safepoint_once();
 
 private:
     // 号段预留（§5，与 RocksDB/Redis 版同构）：计数器 key 上的 RMW 小事务一次
@@ -139,6 +157,18 @@ private:
     TikvMetaOptions opt_;
     std::unique_ptr<TikvClient> client_owned_;
     std::atomic<TikvClient*> client_{nullptr};  // close 后置空（见 client() 注释）
+
+    // T5 指标（构造期注册，0 值可见）
+    std::shared_ptr<MetricCounter> m_conflict_retries_;
+    std::shared_ptr<MetricCounter> m_safepoint_failures_;
+    std::shared_ptr<MetricGauge> m_safepoint_ms_;  // 最近推进的集群 safepoint（物理 ms）
+
+    // safepoint worker（§7.3）：cv 等待可即时唤醒退出；close() 先停 worker 再摘
+    // client（worker 经 client() 取句柄，摘早了会把正常退出路径变成 500 抛掷）
+    std::thread sp_thread_;
+    std::mutex sp_mu_;
+    std::condition_variable sp_cv_;
+    bool sp_stop_ = false;
 
     // 号段派发独立小锁（alloc 在数据面每个 chunk 打开时调用，不排队业务提交）；
     // 段耗尽的网络续段在锁外进行（alloc_id 注释）

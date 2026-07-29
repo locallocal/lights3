@@ -1,9 +1,11 @@
 # TikvMetaStore：基于 TiKV 的 DuoStore 元数据存储
 
-> 状态：T1-T4 已实现（`TikvMetaStore` 全接口 + 带 op 的 2PC 侧车提交器 +
-> 守卫分片 + 测试套件/e2e 接线，代码在 `src/storage/duostore/tikv_client.{h,cc}`
-> 与 `tikv_meta_store.{h,cc}`，编译开关 `LIGHTS3_DUOSTORE_TIKV_META` 默认
-> OFF）；T5 未开始（§11）。submodule `third_party/client-c` 锁定 `78a557e`
+> 状态：T0-T5 全部完成（2026-07-30；`TikvMetaStore` 全接口 + 带 op 的 2PC
+> 侧车提交器 + 守卫分片 + 测试套件/e2e 接线 + T5 打磨——GC safepoint 推进
+> worker、Poco 日志桥、退避预算参数化、冲突重试指标、万分片 complete 专项，
+> 代码在 `src/storage/duostore/tikv_client.{h,cc}` 与
+> `tikv_meta_store.{h,cc}`，编译开关 `LIGHTS3_DUOSTORE_TIKV_META` 默认
+> OFF）。submodule `third_party/client-c` 锁定 `78a557e`
 > （2026-07-21，上游无 release tag 只能按 commit 锁定）。实施偏差：上游扩展
 > 未走 fork，改为 in-tree 侧车（§6.3）。兑现
 > [duostore-backend.md](duostore-backend.md)
@@ -264,16 +266,22 @@ Redis 版 §4 的"崩溃回滚重发已用 id"三层缓解**在此不需要**：
   纵深惯例）。析构在无在途调用后进行——由 DuoStoreBackend 的 close
   顺序保证（主文档 §9 生命周期）；
 - 超时：client-c 无全局"单调用超时"参数，各操作的 Backoffer 预算是
-  库内常量（如 GetMaxBackoff/prewriteMaxBackoff）。首期接受库默认；
-  外层兜底是 S3 请求超时。参数化列为上游改进项（T5）。
+  库内常量（如 GetMaxBackoff/prewriteMaxBackoff）。T5 起侧车路径（2PC
+  提交、batch_get、last_key、safepoint RPC）的预算经 `tikv_backoff_ms`
+  参数化（0 = 库默认；commit 用 2× 对齐上游 commit:prewrite 比例，§9）；
+  上游 Snapshot/Scanner 内部自建的 Backoffer 仍不受控——全局参数化保持
+  上游改进项。外层兜底是 S3 请求超时。
 
 ### 6.2 Poco 依赖的处置
 
 `Poco::Logger`/`Poco::Exception` 出现在 client-c 公共头，Poco
 Foundation 是硬依赖（find_poco 还要求 Net/JSON/Util）。不做剥离
-（改动面深入上游全部源文件），接受依赖；日志桥接：Poco 默认输出与
-spdlog 各行其道，T5 可配置 Poco root logger 的 channel 收敛到统一
-stderr 格式——纯运维项，不阻塞功能。
+（改动面深入上游全部源文件），接受依赖；日志桥接已随 T5 落地
+（`tikv_client.cc` 的 `PocoSpdlogChannel`）：首个 TikvClient 构造时把
+Poco root logger 的 channel 换成 spdlog 桥（须先于任何 pingcap logger
+创建——Poco 子 logger 在创建时继承 channel），`pingcap.*` 日志以
+"源名: 消息"进统一 stderr 格式；Poco 侧 information 起送，进 spdlog
+后仍受全局级别二次过滤。
 
 ### 6.3 2PC 扩展：in-tree 侧车（已实现，`tikv_client.{h,cc}`）
 
@@ -306,12 +314,18 @@ pristine 上游锁定，升级 = 换指针 + 回归。上游 PR 仍列为 T5 事
 Get 的 not_found 重载未做（codec 值恒非空已消歧，§3.1），与
 `Snapshot`/`Scanner` 一样直接复用上游。
 
-明确不做：pessimistic（§4.2）、async commit、TTLManager 加固（首期
+明确不做：pessimistic（§4.2）、async commit、TTLManager 加固（常规
 事务 mutation 数 ≤ 数十 + 16 守卫，单批远低于 `txnCommitBatchSize =
-16KiB` 键量级，无长事务）。**大 complete 例外**：万级分片的
-complete_upload 事务含数万 mutation，prewrite 耗时可能越过默认
-lock_ttl——T4 验收项含万分片 complete 专项，超时则接入 client-c 已有
-的 `TTLManager` 心跳（机制在库内现成，只是 Txn 未接线）。
+16KiB` 键量级，无长事务）。**大 complete 的处置（T5 已定）**：万级分片
+的 complete_upload 事务含约 2 万 mutation，prewrite 分批串行发送、耗时
+可能逼近默认 lock_ttl(3s)——T5 起侧车按上游 `txnLockTTL` 语义伸缩：
+事务字节超单批上界即按 `ttlFactor·√MiB` 放大 lock_ttl、夹在 [3s, 20s]
+（`tikv_client.cc` txn_lock_ttl）。万分片专项实测
+（`duostore_tikv_bulk_complete_10k_parts`，含并发读者全程驱动
+LockResolver 对在途 primary 判 TTL）：10000 分片 complete 全程 ~0.5s，
+距 3s 默认底线尚有 6 倍余量，伸缩后余量更宽。`TTLManager` 心跳维持
+不接线——事务规模有上界（S3 万分片顶格 = 最大事务），无"未知时长"
+的长事务；若未来出现超 20s prewrite 的形态再接（机制在库内现成）。
 
 ### 6.4 错误映射
 
@@ -356,10 +370,28 @@ TiDB**。本方案不引入 TiDB（§1），则：
 | 纯 KV 集群 + 长期运行 | **必须自行推进**：周期调用 PD 的 UpdateServiceGCSafePoint（kvproto 有、client-c 未封装——上游扩展或 pd-ctl/HTTP API 旁路脚本）。推进为 now − 保留窗口（如 10 分钟，只需覆盖最长 list/事务时长） |
 | 测试/短期集群 | 不推进无碍（垃圾积累但正确性无损） |
 
-首期（T1-T4）按测试形态处理；**T5 交付推进方案**（优先以 in-tree 侧车
-封装 PD 的 UpdateServiceGCSafePoint——与 §6.3 同一侧车流程、不改上游
-submodule；或 pd-ctl / HTTP API 旁路脚本）。
-不推进的后果是空间放大与 scan 变慢，不是正确性问题，故可后置。
+推进方案已随 T5 落地（in-tree 侧车封装 PD RPC 三件：
+`UpdateServiceGCSafePoint` / `UpdateGCSafePoint` / `GetGCSafePoint`，
+`tikv_client.cc` 经 `getLeaderUrl()` 直连 leader 自建 stub——client-c
+的 PD stub 全私有；leader 变更/报错弃缓存重建）。TikvMetaStore 后台
+worker 每 `tikv_gc_interval`（默认 60s，0 = 关）推进一轮，单轮三步
+（`update_gc_safepoint_once`，测试直调）：
+
+1. 注册本网关 service safepoint = now − `tikv_gc_retention`（默认
+   10 分钟；TTL 3×interval，推进停摆的网关过两轮自动摘除）；
+2. **顶替 TiDB 的 gc_worker 角色**：PD 对缺失的 `gc_worker` 服务项以
+   当前集群 safepoint 永久占位（无限 TTL）——不推它 min 恒被钉死，
+   这正是"纯 KV 集群无人推进"的物化形态。以无限 TTL 更新
+   `gc_worker` 项至同一目标值；
+3. 以第 2 步返回的全服务 min 推进集群 safepoint——不越过任何存活服务
+   （BR/CDC 类外部工具）的声明快照；PD 端单调只进，多网关并发推进
+   天然收敛。
+
+共 TiDB 集群须设 `tikv_gc_interval: 0`（表首行"无事可做"），否则与真
+gc_worker 竞写（单调语义下无害但无谓）。失败计
+`safepoint_update_failures_total` 并下轮重试；最近推进值落
+`gc_safepoint_ms` gauge。
+不推进的后果是空间放大与 scan 变慢，不是正确性问题。
 
 ## 8. 构建接入
 
@@ -484,6 +516,9 @@ backends:
     pd_endpoints: "10.0.0.1:2379,10.0.0.2:2379,10.0.0.3:2379"
     tikv_prefix: "duo:"
     # tikv_ca / tikv_cert / tikv_key: TLS 三件套（可选，透传 ClusterConfig）
+    # tikv_gc_interval: 60s               # GC safepoint 推进周期（0 = 关，§7.3）
+    # tikv_gc_retention: 10m              # safepoint 保留窗口（now − retention）
+    # tikv_backoff_ms: 0                  # 侧车路径退避预算（0 = 库默认，§6.1）
     # 其余 duostore 键（chunk_size / pack_* / gc_* / mpu_ttl …）不变
 ```
 
@@ -493,6 +528,9 @@ backends:
 | pd_endpoints | —（meta=tikv 时必填） | 逗号分隔 PD 地址列表 |
 | tikv_prefix | `duo:` | 全部 key 前缀（多实例/测试隔离，§3.1） |
 | tikv_ca / tikv_cert / tikv_key | 空（明文） | mTLS 证书路径，三者同时给定才启用 |
+| tikv_gc_interval | `60s` | GC safepoint 推进周期；`0` 关闭（共 TiDB 集群，§7.3）；时长量纲同 gc_interval |
+| tikv_gc_retention | `10m` | safepoint 保留窗口，须为正；只需覆盖最长 list/事务时长 |
+| tikv_backoff_ms | `0` | 侧车路径（2PC/batch_get/last_key/safepoint）退避预算；`0` = client-c 库默认（§6.1） |
 
 `meta: tikv` 时 `meta_path` / `rocksdb_block_cache` / `meta_sync` 忽略
 并打 WARN（§7.1）。
@@ -514,9 +552,14 @@ backends:
    幽灵残留；Op::Lock 冲突语义冒烟（T1 验证项）；WriteConflict 重试
    收敛与 16 次上限路径；`splitRegion` 测试钩子制造多 region 后跑
    list 分页与跨 region 事务（2PC primary/secondary 分属不同 region）；
-   万分片 complete_upload 的 prewrite 时长与 lock_ttl 余量（§6.3）；
+   万分片 complete_upload 的 prewrite 时长与 lock_ttl 余量（§6.3，
+   ✅ T5：`duostore_tikv_bulk_complete_10k_parts`，10000 分片 + 并发
+   读者驱动 TTL 判定，实测 ~0.5s）；
    残留锁恢复——事务提交中途 kill 网关进程，另一网关读同 key 经
    LockResolver 正常解锁推进；
+   T5 增补专项：冲突重试指标计数（热点竞争有界轮次必现 + 0 值可见）、
+   GC safepoint 单轮推进（返回值 >0、跨轮单调、gauge 同步）与 worker
+   模式（interval=1s 首 tick 即推进、close 干净停）；
 4. **上游锁定**：submodule 指针锁定上游 commit（§6.3 侧车不改上游源码），
    CI 不追 master——升级 = 显式换指针 + 全套件回归。
 
@@ -529,4 +572,12 @@ backends:
 | T2 | `TikvMetaStore` 骨架：错误映射 / 重试循环 / close 守卫；`C<kind>` 号段 alloc_file_id；bucket 四方法（含 Insert 语义）+ schema 校验；meta 套件接线 + PD 探测/SKIP 机制 | 集群在场时用例绿；无集群 SKIP 路径绿 | **已完成** |
 | T3 | object 四方法（list = Snapshot+Scanner，§3.3）+ 守卫分片 + refs / gcq / swap_extents / chunk_referenced / peek_reclaims / ack_reclaims 批量覆写 | meta 套件全绿 + 写偏斜/冲突专项 | **已完成** |
 | T4 | multipart 全套（含 `u` 守卫）；注入组合 `run_backend_suite`；`e2e_duostore_tikv` | 后端一致性套件 + e2e 绿 | **已完成** |
-| T5 | 打磨：GC safepoint 推进方案（§7.3）、Poco 日志收敛、超时参数化、指标（冲突重试计数）、万分片 complete 专项与 TTLManager 评估（§6.3）、上游 PR（op 扩展回馈）与指针升级 | 全 ctest 矩阵（含 skip 路径）绿 | 未开始 |
+| T5 | 打磨：GC safepoint 推进方案（§7.3 worker + gc_worker 角色接管）、Poco 日志收敛（§6.2 桥）、超时参数化（`tikv_backoff_ms`，§6.1）、指标（冲突重试/safepoint 计数）、万分片 complete 专项与 TTLManager 评估（§6.3 伸缩 lock_ttl，心跳维持不接线）| 全 ctest 矩阵（含 skip 路径）绿 | 已完成（2026-07-30；上游 PR 回馈与指针升级除外——依赖上游流程，见 §11 末注） |
+
+**§11 末注——上游回馈项（唯一未销的 T5 子项，依赖上游流程）**：向
+tikv/client-c 回馈 2PC mutation op 扩展、`Snapshot::Get` not_found 重载，
+合入后升级 submodule 指针、侧车相应退役。在此之前侧车对
+`@78a557e` 的两处消息串耦合持续有效（`tikv_client.cc` 对
+resolveLocksForWrite 裸 `Exception("write conflict")` 的兜底匹配，另有
+先行结构化判定压低依赖，文件头差异 7）——**升级指针时必须复查该消息串**。
+跟踪落 todo.md §2.4 尾巴。

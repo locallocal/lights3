@@ -4,3 +4,4 @@ build-asan
 build-redis
 build-rados
 build-tikv
+build-sqlite

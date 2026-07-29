@@ -20,7 +20,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | DuoStore P4（GC 二期：压实/孤儿） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
 | DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
 | Redis meta R4（打磨） | duostore-redis-meta.md §10 | ✅ 已完成（2026-07-30） |
-| SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | 未开始 |
+| SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | ✅ 已完成（2026-07-30） |
 | RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | 未开始 |
 | TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | 未开始 |
 | tiered 对账工具（P4 剩余） | tiered-storage.md §9/§10 | 未做 |
@@ -149,13 +149,24 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
   CLIENT KILL 重连计数 + 提交类 InternalError 边界、HSCAN 跨批完整性）；
   默认构建全绿；e2e duostore-redis 全绿
 
-### 2.2 SQLite meta · S4（duostore-sqlite-meta.md §10）
+### 2.2 SQLite meta · S4（duostore-sqlite-meta.md §10）（✅ 已完成，2026-07-30）
 
-- 崩溃模拟专项：kill 后 WAL 回放对账；list 迭代中并发写的一致视图注入（需进程级 harness）
-- `sqlite3_backup` 在线备份评估（运行中拷贝目前不保证一致，§6 末）
-- `PRAGMA optimize` / checkpoint 调优（目前全默认，§6）
-- 指标：BUSY / corruption 计数（§3.1 框架已具备）
-- 已知保守泄漏：开放事务残留连接不回池（`sqlite_meta_store.cc:445`），可顺带评估
+- ✅ 崩溃模拟专项：子进程（execv 自身，sync=true）逐提交回报、父进程随机 SIGKILL；
+  重启后回报过的提交必在、refs↔objects 双向对账收敛、gcq 无幻账、号段不回退、
+  integrity_check 干净（进程级 harness 复用 mini_test ChildRegistrar）
+- ✅ list 一致视图注入：`set_list_pause_for_test` 钩子中途并发提交（插入/删除/
+  覆盖），本次 list 的 WAL snapshot 不动、下次 list 见新态
+- ✅ `sqlite3_backup` 在线备份评估：维持不做——WAL 下外部只读连接（sqlite3 CLI
+  `VACUUM INTO`/`.backup`）即可在线取一致快照，结论落 §6.3
+- ✅ `PRAGMA optimize` / checkpoint 调优：自动策略不加码，补 `journal_size_limit=4MiB`
+  截断 WAL 高水位；optimize 维持仅 close() 收尾跑（结论落 §6）
+- ✅ 指标：`sqlite_busy_total` / `sqlite_corruption_total` 经 MetricsScope 接入
+  （SqliteMetaOptions 增 metrics / busy_timeout_ms 字段，构造期注册 0 值可见；
+  含打开路径 NOTADB）
+- ✅ 残留开放事务连接改「先补 ROLLBACK、成功回池」（原保守直接销毁）；构造失败
+  清理走非优雅 shutdown（不跑 optimize/checkpoint，避免重复计 corruption）
+- 验收：sqlite 构建 184 用例全绿（新增 4 专项）；默认构建全绿；
+  e2e_duostore_sqlite 全绿；崩溃专项 5 连跑稳定
 
 ### 2.3 RADOS data · C3 / C4（duostore-rados-data.md §12）
 

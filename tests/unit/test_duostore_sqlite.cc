@@ -3,14 +3,19 @@
 // swap_extents CAS、文件谱系校验。零外部依赖——无 Redis 版的探测/SKIP 路径。
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_SQLITE_META)
 
+#include <signal.h>
 #include <sqlite3.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "core/metrics.h"
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
@@ -32,7 +37,12 @@ using meta_store_suite::make_rec;
 
 SqliteMetaOptions sqlite_opts(const fs::path& file) {
     // 单测不需要 fsync（崩溃语义另测；号段连接内部恒 FULL 不受此影响）
-    return {file.string(), /*sync=*/false, /*cache_bytes=*/8ull << 20, /*pool_size=*/4};
+    SqliteMetaOptions o;
+    o.path = file.string();
+    o.sync = false;
+    o.cache_bytes = 8ull << 20;
+    o.pool_size = 4;
+    return o;
 }
 
 }  // namespace
@@ -263,6 +273,230 @@ TEST(duostore_sqlite_closed_store_throws) {
     m.close();
     CHECK_THROWS_S3(m.bucket_exists("x"), s3::S3ErrorCode::InternalError);
     CHECK_THROWS_S3(m.create_bucket("x"), s3::S3ErrorCode::InternalError);
+}
+
+// ---------- S4 崩溃模拟（§9/§10 S4：kill 后 WAL 回放对账）----------
+// 子进程（execv 自身进 duostore-sqlite-crash-child 模式）以 sync=true 循环提交
+// 并逐行回报（行在 COMMIT 的 WAL fsync 之后才写出）；父进程随机时刻 SIGKILL。
+// 重启后：凡回报过的提交必在（持久性契约）、refs↔objects 双向对账收敛、gcq
+// 无幻账、号段不回退、integrity_check 干净——WAL 回放的完整验收
+
+namespace {
+
+int sqlite_crash_child(int argc, char** argv) {
+    if (argc < 3) return 2;
+    SqliteMetaOptions o;
+    o.path = argv[2];
+    o.sync = true;  // 崩溃语义主角：提交点 = WAL fsync（§6）
+    SqliteMetaStore m(o);
+    m.create_bucket("bkt");
+    for (int i = 0;; ++i) {
+        uint64_t id = m.alloc_file_id(Extent::Kind::kChunk);
+        std::string k = "k" + std::to_string(i);
+        m.put_object("bkt", k, make_rec(k, {chunk_extent(id, 8)}));
+        std::string line = "ok " + std::to_string(i) + " " + std::to_string(id) + "\n";
+        if (::write(1, line.data(), line.size()) < 0) return 4;
+    }
+}
+
+mini_test::ChildRegistrar sqlite_crash_reg("duostore-sqlite-crash-child",
+                                           sqlite_crash_child);
+
+pid_t spawn_sqlite_crash_child(const fs::path& db, int* out_fd) {
+    int pfd[2] = {-1, -1};
+    CHECK(::pipe(pfd) == 0);
+    pid_t pid = ::fork();
+    CHECK(pid >= 0);
+    if (pid == 0) {
+        ::dup2(pfd[1], 1);
+        ::close(pfd[0]);
+        ::close(pfd[1]);
+        char exe[4096];
+        ssize_t n = ::readlink("/proc/self/exe", exe, sizeof exe - 1);
+        if (n <= 0) ::_exit(127);
+        exe[n] = 0;
+        ::execl(exe, exe, "duostore-sqlite-crash-child", db.c_str(), (char*)nullptr);
+        ::_exit(127);
+    }
+    ::close(pfd[1]);
+    *out_fd = pfd[0];
+    return pid;
+}
+
+}  // namespace
+
+TEST(duostore_sqlite_crash_wal_replay_reconciles) {
+    TmpDir tmp;
+    fs::path db = tmp.path / "meta.sqlite3";
+    int fd = -1;
+    pid_t pid = spawn_sqlite_crash_child(db, &fd);
+
+    // 等到首个提交回报后再随机点开杀（保证测试非空转）
+    std::string buf;
+    char ch;
+    while (buf.find('\n') == std::string::npos && ::read(fd, &ch, 1) == 1) buf.push_back(ch);
+    CHECK(buf.find('\n') != std::string::npos);
+    usleep((100 + unsigned(::getpid()) % 300) * 1000);  // 100-400ms 随机窗口
+    CHECK_EQ(::kill(pid, SIGKILL), 0);
+    int stat = 0;
+    CHECK(::waitpid(pid, &stat, 0) == pid);
+    CHECK(WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL);
+    for (;;) {  // 排空管道；只认完整行
+        char rb[4096];
+        ssize_t n = ::read(fd, rb, sizeof rb);
+        if (n <= 0) break;
+        buf.append(rb, size_t(n));
+    }
+    ::close(fd);
+    std::vector<std::pair<int, uint64_t>> reported;  // (i, file_id)
+    for (size_t pos = 0; pos < buf.size();) {
+        size_t nl = buf.find('\n', pos);
+        if (nl == std::string::npos) break;  // 尾部半行：不作数
+        std::string line = buf.substr(pos, nl - pos);
+        pos = nl + 1;
+        if (line.rfind("ok ", 0) != 0) continue;
+        size_t sp = line.find(' ', 3);
+        CHECK(sp != std::string::npos);
+        reported.emplace_back(std::stoi(line.substr(3, sp - 3)),
+                              std::stoull(line.substr(sp + 1)));
+    }
+    CHECK(!reported.empty());
+    CHECK(fs::exists(db.string() + "-wal"));  // 未 close：WAL 待回放
+
+    uint64_t max_id = 0;
+    {
+        SqliteMetaStore m(sqlite_opts(db));
+        // 回报过的提交必在，且账目正确
+        for (const auto& [i, id] : reported) {
+            auto rec = m.get_object("bkt", "k" + std::to_string(i));
+            CHECK(rec.has_value());
+            CHECK_EQ(rec->version, uint64_t(1));
+            CHECK_EQ(rec->data.extents.at(0).file_id, id);
+            CHECK(m.chunk_referenced(id));
+            max_id = std::max(max_id, id);
+        }
+        // 对账：refs 表 = 全部存活对象 extents 的并集（可能含已提交未回报的尾部
+        // 对象——同样要成立；无孤儿 ref、无漏 ref）
+        std::set<uint64_t> live;
+        ListOptions lo;
+        for (;;) {
+            auto r = m.list_objects("bkt", lo);
+            for (const auto& o : r.objects) {
+                auto rec = m.get_object("bkt", o.key);
+                CHECK(rec.has_value());
+                for (const auto& e : rec->data.extents) live.insert(e.file_id);
+            }
+            if (!r.is_truncated) break;
+            lo.start_after = r.next_token;
+        }
+        std::set<uint64_t> refs;
+        m.scan_refs([&](uint64_t id) { refs.insert(id); });
+        CHECK(live == refs);
+        // 唯一 key 无覆盖写 → gcq 必空（无幻账）
+        CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(0));
+        // 号段不回退：崩溃后新派发的 id 严格大于一切已用 id（counters 连接恒 FULL）
+        CHECK(m.alloc_file_id(Extent::Kind::kChunk) > max_id);
+        m.close();
+    }
+    // 干净 close 后底层库物理完好
+    sqlite3* raw = nullptr;
+    CHECK_EQ(sqlite3_open(db.string().c_str(), &raw), SQLITE_OK);
+    sqlite3_stmt* st = nullptr;
+    CHECK_EQ(sqlite3_prepare_v2(raw, "PRAGMA integrity_check", -1, &st, nullptr), SQLITE_OK);
+    CHECK_EQ(sqlite3_step(st), SQLITE_ROW);
+    CHECK_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 0))),
+             std::string("ok"));
+    sqlite3_finalize(st);
+    sqlite3_close(raw);
+}
+
+// S4 一致视图注入（§2.3/§9）：list 迭代中途从写连接并发提交——本次 list 的 WAL
+// snapshot 必须岿然不动（插入不可见、删除仍可见、覆盖不串台）；下一次 list 见新态
+TEST(duostore_sqlite_list_consistent_view_under_concurrent_write) {
+    TmpDir tmp;
+    SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
+    m.create_bucket("iso");
+    for (const char* k : {"a", "b", "c", "d"}) m.put_object("iso", k, make_rec(k, {}));
+
+    int fired = 0;
+    m.set_list_pause_for_test([&] {
+        ++fired;
+        m.put_object("iso", "bb", make_rec("bb", {}));  // 未访问区间插入
+        CHECK(m.delete_object("iso", "d"));             // 未访问 key 删除
+        m.put_object("iso", "a", make_rec("a", {}));    // 已访问 key 覆盖
+    });
+    auto r1 = m.list_objects("iso", {});
+    CHECK_EQ(fired, 1);
+    CHECK_EQ(r1.objects.size(), size_t(4));  // snapshot：恰是 a b c d
+    const char* want1[] = {"a", "b", "c", "d"};
+    for (size_t i = 0; i < 4; ++i) CHECK_EQ(r1.objects[i].key, std::string(want1[i]));
+
+    m.set_list_pause_for_test(nullptr);
+    auto r2 = m.list_objects("iso", {});  // 新视图：bb 可见、d 没了
+    CHECK_EQ(r2.objects.size(), size_t(4));
+    const char* want2[] = {"a", "b", "bb", "c"};
+    for (size_t i = 0; i < 4; ++i) CHECK_EQ(r2.objects[i].key, std::string(want2[i]));
+    // 覆盖写生效于快照之外：a 的 version 已 bump
+    CHECK_EQ(m.get_object("iso", "a")->version, uint64_t(2));
+
+    for (const char* k : {"a", "b", "bb", "c"}) CHECK(m.delete_object("iso", k));
+    m.delete_bucket("iso");
+    m.close();
+}
+
+// S4 指标：BUSY 计数——外部裸连接持写锁（flock 只拦本店实例，正好扮演"进程外
+// 来客"，§5.4 表的 BUSY 行）：单语句写 busy_timeout 耗尽 → 500 计 1；号段预留
+// 有界重试 4 轮全饥饿 → 500 计 4；锁释放后恢复。busy_timeout_ms 调短控制时长
+TEST(duostore_sqlite_busy_metric_counts_starvation) {
+    TmpDir tmp;
+    fs::path db = tmp.path / "meta.sqlite3";
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto opts = sqlite_opts(db);
+    opts.busy_timeout_ms = 100;
+    opts.metrics = MetricsScope(reg, {{"backend", "s4"}});
+    SqliteMetaStore m(opts);
+    // 构造期注册：0 值可见
+    CHECK(reg->render().find(
+              "lights3_duostore_sqlite_busy_total{backend=\"s4\"} 0\n") != std::string::npos);
+    CHECK(reg->render().find(
+              "lights3_duostore_sqlite_corruption_total{backend=\"s4\"} 0\n") !=
+          std::string::npos);
+
+    sqlite3* ext = nullptr;
+    CHECK_EQ(sqlite3_open(db.string().c_str(), &ext), SQLITE_OK);
+    CHECK_EQ(sqlite3_exec(ext, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+    CHECK_THROWS_S3(m.seal_pack(1, 0), s3::S3ErrorCode::InternalError);          // +1
+    CHECK_THROWS_S3(m.alloc_file_id(Extent::Kind::kChunk),
+                    s3::S3ErrorCode::InternalError);                             // +4（4 轮饥饿）
+    CHECK_EQ(sqlite3_exec(ext, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(ext);
+
+    m.seal_pack(1, 0);  // 锁释放后恢复
+    CHECK(reg->render().find(
+              "lights3_duostore_sqlite_busy_total{backend=\"s4\"} 5\n") != std::string::npos);
+    m.close();
+}
+
+// S4 指标：corruption 计数——文件头写花后重开，打开路径的 NOTADB 计入并响亮拒绝
+TEST(duostore_sqlite_corruption_metric_counts_notadb) {
+    TmpDir tmp;
+    fs::path db = tmp.path / "meta.sqlite3";
+    {
+        SqliteMetaStore m(sqlite_opts(db));
+        m.create_bucket("x");
+        m.close();
+    }
+    {
+        std::fstream f(db, std::ios::in | std::ios::out | std::ios::binary);
+        f.write("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", 32);  // 覆写 SQLite 文件头魔数
+    }
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto opts = sqlite_opts(db);
+    opts.metrics = MetricsScope(reg, {{"backend", "s4c"}});
+    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(opts), s3::S3ErrorCode::InternalError);
+    CHECK(reg->render().find(
+              "lights3_duostore_sqlite_corruption_total{backend=\"s4c\"} 1\n") !=
+          std::string::npos);
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_SQLITE_META

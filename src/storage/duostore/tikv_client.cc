@@ -20,6 +20,14 @@
 //      上游 Snapshot/Scanner 未覆盖。
 #include "storage/duostore/tikv_client.h"
 
+#include <Poco/AutoPtr.h>
+#include <Poco/Channel.h>
+#include <Poco/Logger.h>
+#include <Poco/Message.h>
+#include <Poco/URI.h>
+#include <grpcpp/create_channel.h>
+#include <grpcpp/security/credentials.h>
+#include <kvproto/pdpb.grpc.pb.h>
 #include <pingcap/Exception.h>
 #include <pingcap/kv/Backoff.h>
 #include <pingcap/kv/Cluster.h>
@@ -29,6 +37,9 @@
 #include <pingcap/kv/Snapshot.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <mutex>
 #include <tuple>
 #include <unordered_map>
 
@@ -47,6 +58,57 @@ using pingcap::kv::RegionVerID;
 // 与 client-c txnCommitBatchSize 一致：单区域批的 key+value 字节上界
 constexpr uint64_t kTxnCommitBatchSize = 16 * 1024;
 
+// lock_ttl 伸缩上限（上游 2pc.cc managedLockTTL，未导出故复制）：大事务 prewrite
+// 分批串行发送耗时上升，TTL 随之放大，否则读者会把仍在 prewrite 的 primary 判死
+// 回滚（§6.3 万分片 complete 专项）
+constexpr uint64_t kManagedLockTTL = 20000;
+
+// 事务 lock_ttl（上游 txnLockTTL 的侧车版）：小事务恒 defaultLockTTL(3s)；
+// 超过单批字节上界的按 ttlFactor·√MiB 放大、夹在 [3s, 20s]。与上游差异：不加
+// elapsed 项——我们在组批后立即提交，无 TiDB 式"攒 buffer 再 commit"的间隔
+uint64_t txn_lock_ttl(uint64_t mutation_bytes) {
+    if (mutation_bytes < kTxnCommitBatchSize) return pingcap::kv::defaultLockTTL;
+    uint64_t mb = std::max<uint64_t>(mutation_bytes >> 20, 1);
+    auto ttl = uint64_t(double(pingcap::kv::ttlFactor) * std::sqrt(double(mb)));
+    return std::clamp(ttl, pingcap::kv::defaultLockTTL, kManagedLockTTL);
+}
+
+// Poco 日志桥（§6.2，T5）：client-c 全部经 Poco::Logger 输出，默认 ConsoleChannel
+// 自带格式与 spdlog 两张皮。root logger 换成本桥后，其余 pingcap.* logger 沿
+// 继承链汇入统一 stderr 格式（源名保留为消息前缀）。须在首个 pingcap logger
+// 创建（= 首个 Cluster 构造）之前安装——Poco 子 logger 在创建时继承 channel
+class PocoSpdlogChannel : public Poco::Channel {
+public:
+    void log(const Poco::Message& m) override {
+        switch (m.getPriority()) {
+            case Poco::Message::PRIO_FATAL:
+            case Poco::Message::PRIO_CRITICAL:
+            case Poco::Message::PRIO_ERROR:
+                LOG_ERROR("{}: {}", m.getSource(), m.getText());
+                break;
+            case Poco::Message::PRIO_WARNING:
+                LOG_WARN("{}: {}", m.getSource(), m.getText());
+                break;
+            case Poco::Message::PRIO_NOTICE:
+            case Poco::Message::PRIO_INFORMATION:
+                LOG_INFO("{}: {}", m.getSource(), m.getText());
+                break;
+            default:
+                LOG_DEBUG("{}: {}", m.getSource(), m.getText());
+        }
+    }
+};
+
+void bridge_poco_logs_once() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        Poco::Logger::root().setChannel(Poco::AutoPtr<Poco::Channel>(new PocoSpdlogChannel));
+        // information 起送：pingcap 的 debug 噪声在源头掐掉（省 format 开销）；
+        // information 及以上进 spdlog 后仍受全局日志级别二次过滤
+        Poco::Logger::root().setLevel(Poco::Message::PRIO_INFORMATION);
+    });
+}
+
 ::kvrpcpb::Op to_pb_op(TikvOp op) {
     switch (op) {
         case TikvOp::kPut: return ::kvrpcpb::Put;
@@ -64,9 +126,11 @@ struct Batch {
 
 class Committer {
 public:
-    Committer(Cluster* cluster, uint64_t start_ts, const std::vector<TikvMutation>& muts)
+    Committer(Cluster* cluster, uint64_t start_ts, const std::vector<TikvMutation>& muts,
+              int backoff_budget_ms)
         : cluster_(cluster), start_ts_(start_ts) {
         keys_.reserve(muts.size());
+        uint64_t bytes = 0;
         for (const auto& m : muts) {
             // 同 key 多条 mutation：后者胜（WriteBatch 按序覆盖语义；Percolator
             // 每 key 只发一个 op）。keys_ 保持首现序去重——primary 仍是首 key
@@ -76,12 +140,19 @@ public:
             else
                 it->second = &m;
         }
+        for (auto& [k, m] : by_key_) bytes += k.size() + m->value.size();
+        lock_ttl_ = txn_lock_ttl(bytes);
         primary_ = keys_.front();
+        // 预算参数化（§6.1，T5）：commit 用 2× 对齐上游 commit:prewrite ≈ 2:1
+        prewrite_budget_ = backoff_budget_ms > 0 ? backoff_budget_ms
+                                                 : pingcap::kv::prewriteMaxBackoff;
+        commit_budget_ = backoff_budget_ms > 0 ? 2 * backoff_budget_ms
+                                               : pingcap::kv::commitMaxBackoff;
     }
 
     void execute() {
         try {
-            Backoffer bo(pingcap::kv::prewriteMaxBackoff);
+            Backoffer bo(prewrite_budget_);
             prewrite_keys(bo, keys_);
             // 提交点 TSO 取号也在清锁保护内：PD 故障 = 明确未提交，残锁必须清
             //（否则 delete_bucket 等宽事务的守卫锁会卡住同桶并发写整个 TTL）
@@ -92,7 +163,7 @@ public:
         }
         // ---- 提交点：primary 单独一批（§4.6）----
         try {
-            Backoffer bo(pingcap::kv::commitMaxBackoff);
+            Backoffer bo(commit_budget_);
             commit_keys(bo, {primary_}, /*primary_phase=*/true);
         } catch (TikvConflict&) {
             // TiKV 对已提交事务的 commit 幂等返回 ok，明确拒绝 = 已被回滚——安全重试
@@ -104,7 +175,7 @@ public:
         // LockResolver 回查 primary），吞掉并告警 ----
         if (keys_.size() > 1) {
             try {
-                Backoffer bo(pingcap::kv::commitMaxBackoff);
+                Backoffer bo(commit_budget_);
                 commit_keys(bo, {keys_.begin() + 1, keys_.end()}, /*primary_phase=*/false);
             } catch (const TikvConflict& c) {
                 LOG_WARN("tikv: secondary commit rejected (resolves lazily): {}", c.what);
@@ -155,7 +226,7 @@ private:
             }
             req.set_primary_lock(primary_);
             req.set_start_version(start_ts_);
-            req.set_lock_ttl(pingcap::kv::defaultLockTTL);
+            req.set_lock_ttl(lock_ttl_);  // 事务规模伸缩（txn_lock_ttl，§6.3）
             req.set_txn_size(keys_.size());
             req.set_min_commit_ts(start_ts_ + 1);
 
@@ -251,7 +322,7 @@ private:
     // 多写 Rollback 墓碑无害（本 start_ts 不复用）
     void cleanup_locks() noexcept {
         try {
-            Backoffer bo(pingcap::kv::prewriteMaxBackoff);
+            Backoffer bo(prewrite_budget_);
             for (auto& b : make_batches(bo, keys_, /*with_values=*/false)) {
                 ::kvrpcpb::BatchRollbackRequest req;
                 req.set_start_version(start_ts_);
@@ -268,6 +339,9 @@ private:
     Cluster* cluster_;
     uint64_t start_ts_;
     uint64_t commit_ts_ = 0;
+    uint64_t lock_ttl_ = pingcap::kv::defaultLockTTL;
+    int prewrite_budget_ = pingcap::kv::prewriteMaxBackoff;
+    int commit_budget_ = pingcap::kv::commitMaxBackoff;
     std::vector<std::string> keys_;
     std::unordered_map<std::string, const TikvMutation*> by_key_;
     std::string primary_;
@@ -277,13 +351,62 @@ private:
 
 struct TikvClient::Impl {
     std::unique_ptr<Cluster> cluster;
+    pingcap::ClusterConfig cluster_cfg;  // safepoint 直连通道复用同一 TLS 配置
+    int backoff_budget_ms = 0;
+
+    // ---- GC safepoint 的 PD leader 直连 stub（§7.3）----
+    // client-c 的 PDConnClient/stub 全私有，safepoint 三件未封装——侧车自建
+    // channel 到 getLeaderUrl()（公开接口）。惰建缓存；RPC 报错或 leader 变更
+    // 即弃缓存重建（下次调用重解析 leader）。低频运维路径，锁全程无妨
+    std::mutex pd_mu;
+    std::string pd_url;
+    std::unique_ptr<::pdpb::PD::Stub> pd_stub;
+
+    template <typename Resp, typename Rpc>
+    Resp pd_call(const char* what, const Rpc& rpc) {
+        std::lock_guard lk(pd_mu);
+        std::string url = cluster->pd_client->getLeaderUrl();
+        if (!pd_stub || url != pd_url) {
+            Poco::URI uri(url);  // leader URL 形如 http(s)://host:port，grpc 只要 authority
+            auto creds = cluster_cfg.hasTlsConfig()
+                             ? grpc::SslCredentials(cluster_cfg.getGrpcCredentials())
+                             : grpc::InsecureChannelCredentials();
+            pd_stub = ::pdpb::PD::NewStub(grpc::CreateChannel(uri.getAuthority(), creds));
+            pd_url = url;
+        }
+        grpc::ClientContext ctx;
+        ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(10));
+        Resp resp;
+        grpc::Status st = rpc(&ctx, *pd_stub, &resp);
+        if (!st.ok()) {
+            pd_stub.reset();
+            throw Exception(std::string(what) + " failed: " + std::to_string(st.error_code()) +
+                                ": " + st.error_message(),
+                            pingcap::ErrorCodes::GRPCErrorCode);
+        }
+        if (resp.header().has_error()) {  // 非 leader 等 PD 层错误
+            pd_stub.reset();
+            throw Exception(std::string(what) + " rejected: " + resp.header().error().message(),
+                            pingcap::ErrorCodes::UnknownError);
+        }
+        return resp;
+    }
+
+    ::pdpb::RequestHeader* pd_header() {
+        auto* h = new ::pdpb::RequestHeader();  // set_allocated_* 接管所有权
+        h->set_cluster_id(cluster->pd_client->getClusterID());
+        return h;
+    }
 };
 
 TikvClient::TikvClient(const TikvOptions& opt) : impl_(std::make_unique<Impl>()) {
+    bridge_poco_logs_once();  // 先于首个 pingcap logger 创建（注释见桥定义）
     pingcap::ClusterConfig cfg;
     cfg.ca_path = opt.ca_path;
     cfg.cert_path = opt.cert_path;
     cfg.key_path = opt.key_path;
+    impl_->cluster_cfg = cfg;
+    impl_->backoff_budget_ms = opt.backoff_budget_ms;
     impl_->cluster = std::make_unique<Cluster>(opt.pd_endpoints, cfg);
 }
 
@@ -320,7 +443,8 @@ std::vector<std::optional<std::string>> TikvClient::batch_get(
     using pingcap::kv::LockPtr;
     std::unordered_map<std::string, std::string> found;
     std::vector<std::string> pending = keys;
-    Backoffer bo(pingcap::kv::GetMaxBackoff);
+    Backoffer bo(impl_->backoff_budget_ms > 0 ? impl_->backoff_budget_ms
+                                              : pingcap::kv::GetMaxBackoff);
     while (!pending.empty()) {
         auto [groups, first_region] = impl_->cluster->region_cache->groupKeysByRegion(bo, pending);
         std::ignore = first_region;
@@ -379,7 +503,8 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
                                                 const std::string& hi) {
     using pingcap::kv::KeyLocation;
     using pingcap::kv::LockPtr;
-    Backoffer bo(pingcap::kv::scanMaxBackoff);
+    Backoffer bo(impl_->backoff_budget_ms > 0 ? impl_->backoff_budget_ms
+                                              : pingcap::kv::scanMaxBackoff);
     for (;;) {  // 外层：region 拓扑变化时整体重来
         // 前向行走收集 [lo, hi) 覆盖的 region（cache 命中为主，零数据传输），
         // 再自尾向前逐 region 反向扫 limit=1——绕开"按上界定位前驱 region"
@@ -449,7 +574,49 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
 
 void TikvClient::commit(uint64_t start_ts, const std::vector<TikvMutation>& muts) {
     if (muts.empty()) return;
-    Committer(impl_->cluster.get(), start_ts, muts).execute();
+    Committer(impl_->cluster.get(), start_ts, muts, impl_->backoff_budget_ms).execute();
+}
+
+// ---------- GC safepoint（§7.3）----------
+
+uint64_t TikvClient::update_service_gc_safepoint(const std::string& service_id, int64_t ttl_s,
+                                                 uint64_t safe_point) {
+    ::pdpb::UpdateServiceGCSafePointRequest req;
+    req.set_allocated_header(impl_->pd_header());
+    req.set_service_id(service_id);
+    req.set_ttl(ttl_s);
+    req.set_safe_point(safe_point);
+    auto resp = impl_->pd_call<::pdpb::UpdateServiceGCSafePointResponse>(
+        "update_service_gc_safepoint",
+        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub,
+            ::pdpb::UpdateServiceGCSafePointResponse* r) {
+            return stub.UpdateServiceGCSafePoint(ctx, req, r);
+        });
+    return resp.min_safe_point();
+}
+
+uint64_t TikvClient::update_gc_safepoint(uint64_t safe_point) {
+    ::pdpb::UpdateGCSafePointRequest req;
+    req.set_allocated_header(impl_->pd_header());
+    req.set_safe_point(safe_point);
+    auto resp = impl_->pd_call<::pdpb::UpdateGCSafePointResponse>(
+        "update_gc_safepoint",
+        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub,
+            ::pdpb::UpdateGCSafePointResponse* r) { return stub.UpdateGCSafePoint(ctx, req, r); });
+    return resp.new_safe_point();
+}
+
+uint64_t TikvClient::get_gc_safepoint() {
+    // 不走 client-c getGCSafePoint()（已标 deprecated，且异常路径翻转其
+    // check_leader 内部状态）；与 update 两件同一直连通道
+    ::pdpb::GetGCSafePointRequest req;
+    req.set_allocated_header(impl_->pd_header());
+    auto resp = impl_->pd_call<::pdpb::GetGCSafePointResponse>(
+        "get_gc_safepoint",
+        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub, ::pdpb::GetGCSafePointResponse* r) {
+            return stub.GetGCSafePoint(ctx, req, r);
+        });
+    return resp.safe_point();
 }
 
 pingcap::kv::Cluster* TikvClient::cluster() { return impl_->cluster.get(); }

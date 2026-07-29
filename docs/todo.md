@@ -22,7 +22,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | Redis meta R4（打磨） | duostore-redis-meta.md §10 | ✅ 已完成（2026-07-30） |
 | SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | ✅ 已完成（2026-07-30） |
 | RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | 未开始 |
-| TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | 未开始 |
+| TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | ✅ 已完成（2026-07-30，上游 PR 回馈除外） |
 | tiered 对账工具（P4 剩余） | tiered-storage.md §9/§10 | 未做 |
 | cloudproxy 指标 + control_in_pump（P4 剩余） | cloudproxy-backend.md §8.2/§2.3 | 未做 |
 | 凭证管理二期 | credential-management.md §9 | 未开始 |
@@ -178,17 +178,31 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 - ~~C2 遗留：GC 变现 / pin 竞态专项测试（前置：主线 P3）~~ ✅ 已随 P3 补齐
   （test_duostore_rados.cc，无集群 SKIP）
 
-### 2.4 TiKV meta · T5（duostore-tikv-meta.md §11）
+### 2.4 TiKV meta · T5（duostore-tikv-meta.md §11）（✅ 已完成，2026-07-30）
 
-- **GC safepoint 推进方案**（§7.3）：纯 KV 集群长期运行必须周期调用 PD 的
-  `UpdateServiceGCSafePoint`（kvproto 有、client-c 未封装）——长期运行部署的硬需求
-- 万分片 complete 专项：数万 mutation 的 prewrite 可能越过默认 lock_ttl，超时则接入
-  client-c 的 TTLManager（§6.3）；核实 T4 是否已跑过此专项
-- Poco 日志收敛到统一 stderr 格式；超时参数化（上游无全局单调用超时）
-- 指标：冲突重试计数（§3.1 框架已具备）
-- 上游 PR：2PC mutation op 扩展回馈 + `Snapshot::Get` not_found 重载 + 指针升级
-  （当前靠 `@78a557e` 错误消息字面量匹配，`tikv_client.cc:180,194`，脆弱耦合）
-- ⚠️ 文档措辞：§7.3 / §10.4 仍残留「fork」流程描述，需同步为 in-tree 侧车（§6.3）
+- ✅ **GC safepoint 推进**（§7.3）：侧车封装 PD RPC 三件（UpdateServiceGCSafePoint /
+  UpdateGCSafePoint / GetGCSafePoint，经 getLeaderUrl 直连 leader 自建 stub）；
+  TikvMetaStore 后台 worker 每 `tikv_gc_interval`（默认 60s，0=关）三步推进：注册
+  本网关 service safepoint（now−`tikv_gc_retention`）→ 以无限 TTL 接管 `gc_worker`
+  角色（PD 对缺失 gc_worker 以 0 永久占位，不推它 min 恒被钉死——实测坐实）→
+  以全服务 min 推进集群 safepoint；多网关并发经 PD min/单调语义收敛
+- ✅ 万分片 complete 专项：`duostore_tikv_bulk_complete_10k_parts`（10000 分片、
+  8 线程残差类并行上传、complete 期间并发读者驱动 TTL 判定），实测 ~0.5s；
+  侧车 lock_ttl 按上游 txnLockTTL 语义伸缩（ttlFactor·√MiB，[3s,20s]）；
+  TTLManager 心跳评估结论：不接线（事务规模有上界，S3 万分片顶格），结论落 §6.3。
+  核实结果：T4 未跑过此专项，本期补齐
+- ✅ Poco 日志收敛：`PocoSpdlogChannel` 桥接 root logger 到统一 stderr 格式
+  （源名前缀保留；information 起送）；超时参数化：`tikv_backoff_ms` 覆盖侧车
+  路径退避预算（上游 Snapshot/Scanner 内部不受控，全局参数化仍列上游项）
+- ✅ 指标：`tikv_txn_conflict_retries_total` / `tikv_safepoint_update_failures_total` /
+  `tikv_gc_safepoint_ms` 经 MetricsScope 接入（TikvMetaOptions 增 metrics 字段，
+  构造期注册 0 值可见）
+- ✅ 文档措辞核实：§7.3/§10.4 的 fork 描述此前已同步为 in-tree 侧车，无残留
+- 尾巴（依赖上游流程，无法本地销）：上游 PR——2PC mutation op 扩展回馈 +
+  `Snapshot::Get` not_found 重载 + 指针升级（当前靠 `@78a557e` 错误消息字面量
+  匹配兜底，升级指针须复查，duostore-tikv-meta.md §11 末注）
+- 验收：tikv 构建 181 用例全绿 ×3（新增 3 专项）+ 无集群 SKIP 路径绿；
+  build-tikv ctest 11/11（含 e2e_duostore_tikv）；默认构建 ctest 12/12
 
 ## 3. 横切基础设施（一处未做卡住多处）
 

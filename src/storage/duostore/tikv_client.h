@@ -24,6 +24,11 @@ struct TikvOptions {
     std::string ca_path;
     std::string cert_path;
     std::string key_path;
+    // 退避预算参数化（§6.1，T5）：>0 时替换**侧车路径**（2PC 提交、batch_get、
+    // last_key、safepoint RPC）的库默认预算（ms）；commit 用 2×（对齐上游
+    // commitMaxBackoff ≈ 2×prewrite 的比例）。0 = 库默认。上游 Snapshot/Scanner
+    // 内部自建的 Backoffer 不受控——全局单调用超时列上游改进项（§11 T5）
+    int backoff_budget_ms = 0;
 };
 
 // mutation op（kvrpcpb::Op 子集，§4.4 用到的四种）
@@ -94,6 +99,17 @@ public:
     //   TikvUndetermined  —— primary commit 结果不明，禁止盲重试
     //   pingcap::Exception —— 其余（网络/集群），prewrite 阶段者明确未提交
     void commit(uint64_t start_ts, const std::vector<TikvMutation>& muts);
+
+    // ---- GC safepoint（§7.3；PD RPC 直连侧车——client-c 未封装该三件）----
+    // 注册/续租本服务的 service safepoint（TTL 秒；PD 侧过期自动摘除）并返回
+    // 全体服务的最小值。语义：声明"本服务不再读 safe_point 之前的版本"
+    uint64_t update_service_gc_safepoint(const std::string& service_id, int64_t ttl_s,
+                                         uint64_t safe_point);
+    // 推进集群 GC safepoint（PD 端单调只进不退，落后值原样返回当前值）。
+    // 入参恒应为 update_service_gc_safepoint 返回的 min——越过任一存活服务
+    // 的声明即破坏其快照
+    uint64_t update_gc_safepoint(uint64_t safe_point);
+    uint64_t get_gc_safepoint();
 
     // 测试钩子：暴露底层集群（splitRegion 制造多 region 等，§10）
     pingcap::kv::Cluster* cluster();

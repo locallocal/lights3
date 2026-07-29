@@ -116,6 +116,9 @@ struct DuoStoreConfig {
     std::string tikv_ca;                    // mTLS 三件套（三者同给才启用）
     std::string tikv_cert;
     std::string tikv_key;
+    int tikv_backoff_ms = 0;                // 侧车路径退避预算（0 = client-c 库默认）
+    int tikv_gc_interval_sec = 60;          // GC safepoint 推进周期（0 = 关，§7.3）
+    int tikv_gc_retention_sec = 600;        // safepoint 保留窗口（now − retention）
     DuoDataKind data_kind = DuoDataKind::kFs;
     std::string rados_conf = "/etc/ceph/ceph.conf";  // data=rados 键（docs/duostore-rados-data.md §10）
     std::string rados_client = "client.admin";

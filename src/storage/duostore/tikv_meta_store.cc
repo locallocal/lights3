@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <map>
 #include <set>
 #include <thread>
@@ -188,6 +189,7 @@ auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
                     client().commit(ts, muts);
                     return true;
                 } catch (const TikvConflict& c) {
+                    m_conflict_retries_->inc();  // 每轮冲突重试计一次（T5 指标）
                     if (attempt + 1 >= kMaxTxnRetries)
                         throw_internal(what, "txn conflict storm: " + c.what);
                     conflict_backoff(attempt);
@@ -208,8 +210,21 @@ auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
 // ---------- 构造 / 关闭 ----------
 
 TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
-    client_owned_ = std::make_unique<TikvClient>(
-        TikvOptions{opt_.pd_endpoints, opt_.ca_path, opt_.cert_path, opt_.key_path});
+    // T5 指标：先于任何网络调用注册——schema init 的冲突重试也要计入；
+    // 空 scope 返回孤立实例，测试直构零装配成本
+    m_conflict_retries_ = opt_.metrics.counter(
+        "lights3_duostore_tikv_txn_conflict_retries_total",
+        "Optimistic txn retries after WriteConflict/lock contention (one per retry round)");
+    m_safepoint_failures_ = opt_.metrics.counter(
+        "lights3_duostore_tikv_safepoint_update_failures_total",
+        "Failed GC safepoint update rounds (retried next tick)");
+    m_safepoint_ms_ = opt_.metrics.gauge(
+        "lights3_duostore_tikv_gc_safepoint_ms",
+        "Cluster GC safepoint as of last successful push (unix ms, 0 until first push)");
+
+    client_owned_ = std::make_unique<TikvClient>(TikvOptions{opt_.pd_endpoints, opt_.ca_path,
+                                                             opt_.cert_path, opt_.key_path,
+                                                             opt_.backoff_budget_ms});
     client_.store(client_owned_.get(), std::memory_order_release);
     // schema 谱系校验（§3.2）：Insert 表达"只允许首建"。多网关同前缀首次启动是
     // 受支持的合法竞态——冲突/撞键/结果不明（常量幂等写，重读即可判定）都进
@@ -228,7 +243,8 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
                 client().commit(ts, {{TikvOp::kInsert, skey, "t1"}});
                 return;
             } catch (const TikvAlreadyExist&) {  // 并发首建已成，下轮读出校验
-            } catch (const TikvConflict&) {      // 并发首建进行中
+            } catch (const TikvConflict&) {  // 并发首建进行中
+                m_conflict_retries_->inc();
             } catch (const TikvUndetermined&) {  // 写入的是常量，下轮重读判定
             }
             if (attempt + 1 >= kMaxTxnRetries)
@@ -237,6 +253,52 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
             conflict_backoff(attempt);
         }
     });
+
+    // GC safepoint worker（§7.3）：首 tick 立即推进，之后每 interval 一轮；失败
+    // 计数并下轮重试（PD leader 切换等瞬态）。interval=0 = 关闭（测试直构 /
+    // 共 TiDB 集群部署）
+    if (opt_.gc_safepoint_interval_s > 0) {
+        sp_thread_ = std::thread([this] {
+            std::unique_lock lk(sp_mu_);
+            while (!sp_stop_) {
+                lk.unlock();
+                try {
+                    update_gc_safepoint_once();
+                } catch (const std::exception& e) {
+                    m_safepoint_failures_->inc();
+                    LOG_WARN("duostore tikv meta: gc safepoint push failed (retry next tick): {}",
+                             e.what());
+                }
+                lk.lock();
+                sp_cv_.wait_for(lk, std::chrono::seconds(opt_.gc_safepoint_interval_s),
+                                [this] { return sp_stop_; });
+            }
+        });
+    }
+}
+
+uint64_t TikvMetaStore::update_gc_safepoint_once() {
+    // TSO = physical_ms << 18 | logical：retention 直接在 ts 域上减（ms << 18）
+    uint64_t now = client().get_ts();
+    uint64_t retention = (uint64_t(opt_.gc_retention_s) * 1000) << 18;
+    uint64_t target = now > retention ? now - retention : 0;
+    // 1) 注册本网关的 service safepoint。service id 同前缀共享：多网关互相覆盖
+    //    无妨（都声明 ~now−retention，PD 取 min 后仍然安全）；TTL 3×interval——
+    //    推进停摆的网关过两轮自动摘除，不悬吊集群 GC
+    int64_t ttl_s = std::max<int64_t>(3 * opt_.gc_safepoint_interval_s, 60);
+    client().update_service_gc_safepoint("lights3-duostore:" + opt_.prefix, ttl_s, target);
+    // 2) 顶替 TiDB 的 gc_worker 角色（§7.3 纯 KV 部署的本义）：PD 对缺失的
+    //    gc_worker 以当前集群 safepoint 永久占位（无限 TTL）——不推它 min 恒被
+    //    钉死。gc_worker 项 PD 强制无限 TTL。共 TiDB 集群须关本推进器
+    //   （interval=0），否则与真 gc_worker 竞写（单调语义下无害但无谓）
+    uint64_t min_sp = client().update_service_gc_safepoint(
+        "gc_worker", std::numeric_limits<int64_t>::max(), target);
+    // 3) 以 min 推进集群 safepoint：min 覆盖全体存活服务（含 BR/CDC 类外部
+    //    服务），不越过任何服务声明的快照；PD 端单调只进，落后值原样返回当前值
+    //    ——多网关并发推进天然收敛
+    uint64_t cluster_sp = client().update_gc_safepoint(min_sp);
+    m_safepoint_ms_->set(int64_t(cluster_sp >> 18));
+    return cluster_sp;
 }
 
 TikvMetaStore::~TikvMetaStore() {
@@ -248,7 +310,15 @@ TikvMetaStore::~TikvMetaStore() {
 }
 
 void TikvMetaStore::close() {
-    // 先摘句柄再析构：close 后调用在 client() 处确定性抛 500（rocks 版同型）；
+    // 先停 safepoint worker：其经 client() 取句柄，摘句柄早于停线程会把正常
+    // 退出路径变成 500 抛掷
+    {
+        std::lock_guard lk(sp_mu_);
+        sp_stop_ = true;
+    }
+    sp_cv_.notify_all();
+    if (sp_thread_.joinable()) sp_thread_.join();
+    // 再摘句柄再析构：close 后调用在 client() 处确定性抛 500（rocks 版同型）；
     // Cluster 析构停后台线程，须在无在途调用后进行（DuoStoreBackend close 顺序保证）
     TikvClient* c = client_.exchange(nullptr, std::memory_order_acq_rel);
     if (!c) return;

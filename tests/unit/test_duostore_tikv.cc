@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <memory>
 #include <set>
@@ -17,6 +18,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/metrics.h"
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
@@ -322,6 +324,188 @@ TEST(duostore_tikv_closed_store_throws) {
     TikvMetaStore m(tikv_opts(unique_prefix()));
     m.close();
     CHECK_THROWS_S3(m.bucket_exists("x"), s3::S3ErrorCode::InternalError);
+}
+
+// ---------- T5 专项（§11）----------
+
+// 从 Prometheus 渲染文本中取指定序列的值（找不到返回 -1）
+namespace {
+long long metric_value(const std::string& render, const std::string& series) {
+    auto pos = render.find(series + " ");
+    if (pos == std::string::npos) return -1;
+    return std::stoll(render.substr(pos + series.size() + 1));
+}
+}  // namespace
+
+// T5 指标：冲突重试计数——两网关热点 key 竞争覆盖写，WriteConflict 重试轮次
+// 落 lights3_duostore_tikv_txn_conflict_retries_total；构造期注册 0 值可见。
+// 顺带冒烟退避预算参数化（backoff_budget_ms 缩到 5s，功能路径全通）
+TEST(duostore_tikv_conflict_metric_counts) {
+    TIKV_OR_SKIP();
+    std::string prefix = unique_prefix();
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto opts = tikv_opts(prefix);
+    opts.backoff_budget_ms = 5000;
+    opts.metrics = MetricsScope(reg, {{"backend", "t5m"}});
+    TikvMetaStore g1(opts);
+    CHECK_EQ(metric_value(
+                 reg->render(),
+                 "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}"),
+             0);
+    CHECK_EQ(metric_value(reg->render(),
+                          "lights3_duostore_tikv_safepoint_update_failures_total{backend=\"t5m\"}"),
+             0);
+
+    TikvMetaStore g2(tikv_opts(prefix));
+    g1.create_bucket("cm");
+    // 冲突是并发交错的产物，单批可能恰好错开——有界轮次跑到观察为止（每轮
+    // 2×15 次热点覆盖写，正常一两轮内必现）
+    long long retries = 0;
+    for (int round = 0; round < 20 && retries <= 0; ++round) {
+        std::exception_ptr errs[2];
+        auto writer = [&](TikvMetaStore& m, std::exception_ptr& err) {
+            try {
+                for (int i = 0; i < 15; ++i) m.put_object("cm", "hot", make_rec("hot", {}));
+            } catch (...) {
+                err = std::current_exception();
+            }
+        };
+        std::thread t1(writer, std::ref(g1), std::ref(errs[0]));
+        std::thread t2(writer, std::ref(g2), std::ref(errs[1]));
+        t1.join();
+        t2.join();
+        for (auto& e : errs)
+            if (e) std::rethrow_exception(e);
+        retries = metric_value(
+            reg->render(), "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}");
+    }
+    CHECK(retries > 0);  // 计数只增不减
+
+    CHECK(g1.delete_object("cm", "hot"));
+    g1.delete_bucket("cm");
+    for (auto& [seq, r] : g1.peek_reclaims(1000, 0)) g1.ack_reclaim(seq);
+    g1.close();
+    g2.close();
+}
+
+// T5 GC safepoint（§7.3）：单轮推进 = service safepoint 声明 + 集群 safepoint
+// 推进，返回值 >0 且跨轮单调；worker 模式（interval>0）后台自动推进，close 干净停
+TEST(duostore_tikv_gc_safepoint_advances) {
+    TIKV_OR_SKIP();
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto opts = tikv_opts(unique_prefix());
+    opts.gc_retention_s = 60;  // 集群共享：保留 60s 窗口，不动别的用例的在途快照
+    opts.metrics = MetricsScope(reg, {{"backend", "t5sp"}});
+    TikvMetaStore m(opts);
+    CHECK_EQ(metric_value(reg->render(),
+                          "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"),
+             0);
+    uint64_t sp1 = m.update_gc_safepoint_once();
+    CHECK(sp1 > 0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    uint64_t sp2 = m.update_gc_safepoint_once();
+    CHECK(sp2 >= sp1);  // PD 端单调只进
+    // gauge = 最近推进的集群 safepoint 物理 ms
+    CHECK_EQ(metric_value(reg->render(),
+                          "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"),
+             (long long)(sp2 >> 18));
+    m.close();
+
+    // worker 模式：首 tick 立即推进——轮询等 gauge 非零（上限 10s），close 即停
+    auto wopts = tikv_opts(unique_prefix());
+    wopts.gc_safepoint_interval_s = 1;
+    wopts.gc_retention_s = 60;
+    wopts.metrics = MetricsScope(reg, {{"backend", "t5spw"}});
+    TikvMetaStore w(wopts);
+    long long pushed = 0;
+    for (int i = 0; i < 200 && pushed <= 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        pushed = metric_value(reg->render(),
+                              "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5spw\"}");
+    }
+    CHECK(pushed > 0);
+    w.close();
+}
+
+// T5 万分片 complete 专项（§6.3）：10000 分片的 complete_upload 是全实现最大
+// 事务（对象 + upload 删 + 全量守卫 + 万级 part 删/refs 转移 ≈ 2 万 mutation）。
+// 验证：prewrite/commit 在伸缩 lock_ttl（txn_lock_ttl，√MiB 放大）内收敛；并发
+// 读者全程驱动 LockResolver 对在途 primary 做 TTL 判定——TTL 不足时会把
+// prewrite 中的事务判死回滚，complete 无法成功。TTLManager 心跳不接线的评估
+// 依据也在此：事务规模有上界（S3 万分片顶格），伸缩 TTL 足够覆盖
+TEST(duostore_tikv_bulk_complete_10k_parts) {
+    TIKV_OR_SKIP();
+    std::string prefix = unique_prefix();
+    TikvMetaStore m(tikv_opts(prefix));
+    TikvMetaStore reader_store(tikv_opts(prefix));
+    m.create_bucket("big");
+    ObjectMeta meta;
+    auto id = m.create_upload("big", "k", meta);
+
+    constexpr int kParts = 10000;
+    const char* kEtag = "d41d8cd98f00b204e9800998ecf8427e";
+    std::vector<uint64_t> ids(kParts + 1, 0);
+    // 8 线程按 part_no 残差类分工：守卫按 part_no % 16 分片，残差类互斥 → 零误撞
+    std::exception_ptr errs[8];
+    std::vector<std::thread> ths;
+    for (int t = 0; t < 8; ++t) {
+        ths.emplace_back([&, t] {
+            try {
+                for (int no = 1 + t; no <= kParts; no += 8) {
+                    uint64_t fid = m.alloc_file_id(Extent::Kind::kChunk);
+                    ids[size_t(no)] = fid;
+                    PartRec p;
+                    p.part_no = no;
+                    p.size = 8;
+                    p.etag = kEtag;
+                    p.data.extents = {chunk_extent(fid, 8)};
+                    m.put_part("big", "k", id, p);
+                }
+            } catch (...) {
+                errs[t] = std::current_exception();
+            }
+        });
+    }
+    for (auto& th : ths) th.join();
+    for (auto& e : errs)
+        if (e) std::rethrow_exception(e);
+
+    // 并发读者：complete 期间持续读同 key，驱动锁解析路径对 primary 判 TTL
+    std::atomic<bool> stop{false};
+    std::thread reader([&] {
+        while (!stop.load(std::memory_order_relaxed)) reader_store.get_object("big", "k");
+    });
+
+    std::vector<PartInfo> parts;
+    parts.reserve(kParts);
+    for (int no = 1; no <= kParts; ++no) parts.push_back({no, kEtag});
+    auto t0 = std::chrono::steady_clock::now();
+    std::string etag = m.complete_upload("big", "k", id, parts);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now() - t0)
+                  .count();
+    stop.store(true);
+    reader.join();
+    printf("       [info] 10k-part complete_upload took %lld ms\n", (long long)ms);
+    CHECK(!etag.empty());
+
+    auto rec = m.get_object("big", "k");
+    CHECK(rec.has_value());
+    CHECK_EQ(rec->data.extents.size(), size_t(kParts));
+    CHECK_EQ(rec->meta.size, uint64_t(kParts) * 8);
+    CHECK(m.chunk_referenced(ids[1]));
+    CHECK(m.chunk_referenced(ids[kParts]));
+    CHECK_THROWS_S3(m.list_parts("big", "k", id), s3::S3ErrorCode::NoSuchUpload);
+
+    // 清理：删除对象（第二个万级 mutation 事务）→ refs 清空、GC 账销掉
+    CHECK(m.delete_object("big", "k"));
+    CHECK(!m.chunk_referenced(ids[1]));
+    m.delete_bucket("big");
+    std::vector<uint64_t> seqs;
+    for (auto& [seq, r] : m.peek_reclaims(100000, 0)) seqs.push_back(seq);
+    m.ack_reclaims(seqs);
+    m.close();
+    reader_store.close();
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_TIKV_META

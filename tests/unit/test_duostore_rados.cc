@@ -1,6 +1,7 @@
 // RadosDataStore 专项单测（docs/duostore-rados-data.md §11）：注入组合跑后端套件、
 // 多 chunk roundtrip 与跨 extent Range、未知长度流式、remove 幂等、namespace 隔离、
-// 信号量背压、refs 在而对象缺的告警路径、位腐检出、close 守卫。
+// 信号量背压、refs 在而对象缺的告警路径、位腐检出、close 守卫；C3 双缓冲流水
+//（含串行退化）、C4 孤儿扫描（正向/反向/grace/外来对象）与 op 指标。
 // 真实集群获取：环境变量 LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL 同时
 // 设置才跑（可选 LIGHTS3_TEST_RADOS_CLIENT，默认 client.admin），否则显式 SKIP
 // （不算失败，机制同 test_duostore_redis.cc）。隔离：每用例唯一 rados_namespace，
@@ -463,6 +464,164 @@ TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
     CHECK_EQ(st2.reclaims_acked, uint64_t(1));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(0));
     sync_wait(b->close());
+}
+
+// C3 双缓冲流水（§4.2）：多 chunk 流经"写 N 收 N+1"路径 roundtrip 不变形；
+// buffer_total = chunk_size（try_acquire 恒失败）时退化为单缓冲串行，结果同一。
+// crc 全程开启（全量读逐段校验），extent 账目与对象数落位
+TEST(duostore_rados_pipeline_multi_chunk_stream) {
+    RADOS_OR_SKIP();
+    auto pool = std::make_shared<ThreadPool>(4);
+    std::string body = patterned(100000);  // 100000B / 4KiB = 25 对象
+    for (uint64_t buffer_total : {8 * 4096ull, 4096ull}) {  // 流水 / 串行退化
+        std::string ns = unique_ns();
+        NsCleaner cleaner(ns);
+        auto opts = rados_opts(ns, 4096);
+        opts.buffer_total = buffer_total;
+        opts.verify_chunk_crc = true;
+        RadosDataStore d(opts, pool, counter_alloc());
+        auto w = sync_wait(d.open_writer({std::nullopt}));
+        // 7000B 步长写入：写边界与 chunk 边界交错，覆盖跨片搬运
+        std::span<const std::byte> rest(reinterpret_cast<const std::byte*>(body.data()),
+                                        body.size());
+        while (!rest.empty()) {
+            size_t n = std::min<size_t>(7000, rest.size());
+            sync_wait(w->write(rest.first(n)));
+            rest = rest.subspan(n);
+        }
+        DataRef ref = sync_wait(w->finish());
+        CHECK_EQ(ref.total(), uint64_t(body.size()));
+        CHECK_EQ(ref.extents.size(), size_t(25));
+        CHECK_EQ(RadosRaw(ns).list().size(), size_t(25));
+        auto r = sync_wait(d.open_reader(ref, 0, ref.total() - 1));
+        CHECK_EQ(read_all(*r), body);
+        sync_wait(d.close());
+    }
+}
+
+// C4 孤儿扫描（§8.2）：写对象不提交 meta → 正向回收；外来命名对象不归本店；
+// 反向 refs 在而对象缺只告警；grace 内孤儿不动
+TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
+    RADOS_OR_SKIP();
+    std::string ns = unique_ns();
+    NsCleaner cleaner(ns);
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto meta = std::make_unique<RocksMetaStore>(
+        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    IMetaStore* mp = meta.get();
+    DuoStoreConfig cfg;
+    cfg.name = "rados-orphan";
+    cfg.root = tmp.path / "duo";
+    cfg.data_kind = DuoDataKind::kRados;  // 孤儿 unlink 的 extent kind 由此决定
+    cfg.gc_interval_sec = 0;
+    cfg.gc_grace_sec = 0;
+    fs::create_directories(cfg.root);
+    auto data = std::make_unique<RadosDataStore>(
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(10000));  // 3 对象在册
+
+    // 孤儿注入：直连 data store 写对象、不提交 meta（崩溃残留形态）；id 取远端避开号段
+    {
+        auto far = std::make_shared<std::atomic<uint64_t>>(0xabc0);
+        RadosDataStore orphan_src(rados_opts(ns, 4096), pool,
+                                  [far](Extent::Kind) { return (*far)++; });
+        auto w = sync_wait(orphan_src.open_writer({std::nullopt}));
+        std::string junk = patterned(5000);  // 2 对象
+        sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(junk.data()),
+                                     junk.size())));
+        (void)sync_wait(w->finish());  // DataRef 落地即弃——meta 无账
+        sync_wait(orphan_src.close());
+    }
+    // 外来对象：非 c.<016x> 命名，枚举忽略（§8.2）
+    RadosRaw raw(ns);
+    CHECK(rados_write_full(raw.io, "not-ours", "x", 1) == 0);
+
+    auto st1 = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(st1.chunks_scanned, uint64_t(5));  // 3 在册 + 2 孤儿；外来对象不计
+    CHECK_EQ(st1.orphans_removed, uint64_t(2));
+    CHECK_EQ(st1.refs_missing, uint64_t(0));
+    auto after = raw.list();
+    CHECK_EQ(after.size(), size_t(4));  // 3 在册 + not-ours
+    auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
+    CHECK_EQ(read_all(*got.body), patterned(10000));
+    got.body.reset();
+
+    // 反向：越过 store 删一个在册对象 → 只告警计数，meta 保持（人工介入线索）
+    for (const auto& o : raw.list())
+        if (o.rfind("c.", 0) == 0) {
+            CHECK(rados_remove(raw.io, o.c_str()) == 0);
+            break;
+        }
+    auto st2 = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(st2.chunks_scanned, uint64_t(2));
+    CHECK_EQ(st2.orphans_removed, uint64_t(0));
+    CHECK_EQ(st2.refs_missing, uint64_t(1));
+    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta 未被动
+    sync_wait(b->close());
+
+    // grace 挡新写：宽限内的无引用对象不动（在途写入嫌疑）
+    std::string ns2 = unique_ns();
+    NsCleaner cleaner2(ns2);
+    TmpDir tmp2;
+    auto meta2 = std::make_unique<RocksMetaStore>(
+        RocksMetaOptions{(tmp2.path / "meta").string(), false, 8ull << 20});
+    DuoStoreConfig cfg2 = cfg;
+    cfg2.name = "rados-orphan-grace";
+    cfg2.root = tmp2.path / "duo";
+    cfg2.gc_grace_sec = 3600;
+    fs::create_directories(cfg2.root);
+    auto far2 = std::make_shared<std::atomic<uint64_t>>(1);
+    auto data2 = std::make_unique<RadosDataStore>(
+        rados_opts(ns2, 4096), pool, [far2](Extent::Kind) { return (*far2)++; });
+    auto b2 = std::make_shared<DuoStoreBackend>(cfg2, pool, std::move(meta2), std::move(data2));
+    {
+        RadosDataStore orphan_src(rados_opts(ns2, 4096), pool,
+                                  [far2](Extent::Kind) { return (*far2)++; });
+        auto w = sync_wait(orphan_src.open_writer({std::nullopt}));
+        sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>("x"), 1)));
+        (void)sync_wait(w->finish());
+        sync_wait(orphan_src.close());
+    }
+    auto st3 = sync_wait(b2->run_orphan_scan_once());
+    CHECK_EQ(st3.skipped_grace, uint64_t(1));
+    CHECK_EQ(st3.orphans_removed, uint64_t(0));
+    CHECK_EQ(RadosRaw(ns2).list().size(), size_t(1));
+    sync_wait(b2->close());
+}
+
+// C4 op 指标（§10）：构造期 0 值可见；write_full/read/remove 落账，错误恒 0
+TEST(duostore_rados_op_metrics_registered) {
+    RADOS_OR_SKIP();
+    std::string ns = unique_ns();
+    NsCleaner cleaner(ns);
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto reg = std::make_shared<MetricsRegistry>();
+    auto opts = rados_opts(ns, 4096);
+    opts.metrics = MetricsScope(reg, {{"backend", "rados-m"}});
+    RadosDataStore d(opts, pool, counter_alloc());
+    auto text0 = reg->render();
+    CHECK(text0.find("lights3_duostore_rados_op_duration_seconds") != std::string::npos);
+    CHECK(text0.find("lights3_duostore_rados_op_errors_total") != std::string::npos);
+
+    auto w = sync_wait(d.open_writer({std::nullopt}));
+    std::string body = patterned(9000);  // 3 对象
+    sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
+    DataRef ref = sync_wait(w->finish());
+    auto r = sync_wait(d.open_reader(ref, 0, ref.total() - 1));
+    CHECK_EQ(read_all(*r), body);
+    sync_wait(d.remove(ref.extents));
+    auto text = reg->render();
+    CHECK(text.find("lights3_duostore_rados_op_duration_seconds_count"
+                    "{backend=\"rados-m\",op=\"write_full\"} 3") != std::string::npos);
+    CHECK(text.find("op=\"read\"") != std::string::npos);
+    CHECK(text.find("lights3_duostore_rados_op_duration_seconds_count"
+                    "{backend=\"rados-m\",op=\"remove\"} 3") != std::string::npos);
+    CHECK(text.find("lights3_duostore_rados_op_errors_total"
+                    "{backend=\"rados-m\",op=\"write_full\"} 0") != std::string::npos);
+    sync_wait(d.close());
 }
 
 // close 后调用干净失败（500）而非崩溃（§6.5 守卫）

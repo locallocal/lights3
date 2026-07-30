@@ -1,6 +1,8 @@
 // L3: IDataStore 的 Ceph/RADOS 实现（docs/duostore-rados-data.md）。
 // 单一路径：切片缓冲 → rados 对象一次 write_full（无 pack、无压实、无 torn tail，
-// §3.3）；C1 同步 librados 在池线程（§6.2），aio 桥接后置 C3。
+// §3.3）。C3 起全 IO 走 rados_aio_*：completion 回调只把续体投递回本进程池
+// executor（§6.2 纪律），写侧双缓冲流水（写第 N 片时接收 N+1，§4.2）；C4 起
+// scan_chunks 孤儿枚举与 op 延迟/错误指标（§8.2/§10）。
 // 编译期由 LIGHTS3_DUOSTORE_RADOS_DATA 裁剪（§9.2）。
 #pragma once
 
@@ -10,6 +12,7 @@
 #include <memory>
 #include <string>
 
+#include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "storage/duostore/data_store.h"
@@ -28,6 +31,8 @@ struct RadosDataOptions {
     bool verify_chunk_crc = false;                  // 语义同 fs 版（§5）
     // 读路径 crc 失配上报（P5 corruption 指标；空 = 不上报）；生命周期约束同 fs 版
     std::function<void()> on_corruption;
+    // op 延迟/错误指标（C4，§10）；空 scope 即孤立实例，测试直构免装配
+    MetricsScope metrics;
 };
 
 class RadosChunkWriter;
@@ -38,6 +43,8 @@ public:
 
     // 构造即建连（fail fast，§6.1）；失败抛 std::runtime_error（配置/环境错误级）
     RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc);
+    // 兜底（正路先 close()）：在途写清尾后释放本方 Conn 引用——弃单 writer 的
+    // completion 回调引用 exec_/buffer_sem_，必须先 rados_aio_flush 等回调收尾
     ~RadosDataStore() override;
     RadosDataStore(const RadosDataStore&) = delete;
 
@@ -47,7 +54,8 @@ public:
     Task<void> remove(std::span<const Extent> extents) override;
     Task<void> remove_pack(uint64_t pack_id) override;        // no-op（无 pack，§3.3）
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;  // 恒 {}（无 pack，§3.3）
-    // C4 未实现（列举原语见 docs/duostore-rados-data.md §8.2）；调用抛 InternalError
+    // 孤儿扫描枚举（C4，§8.2）：rados_nobjects_list_*（ioctx 已限 namespace）+
+    // rados_stat；非本店命名（非 c.<016x>）的外来对象忽略
     Task<void> scan_chunks(
         const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;
     Task<void> close() override;
@@ -74,8 +82,13 @@ private:
     RadosDataOptions opt_;
     std::shared_ptr<ThreadPool> pool_;
     FileIdAlloc alloc_;
-    ThreadPoolExecutor exec_;    // 信号量等待者经池唤醒，避免在释放方栈上内联跑协程链
+    ThreadPoolExecutor exec_;    // 信号量唤醒与 aio completion 续体统一经池投递（§6.2）
     AsyncSemaphore buffer_sem_;  // 许可数 = buffer_total / chunk_size（§4.2）
+
+    // op 延迟直方图（提交 → completion 回调，含集群往返）与错误计数（C4，§10）；
+    // 构造期注册 0 值可见。shared_ptr 供 reader/在途单逃逸后仍安全递增
+    std::shared_ptr<MetricHistogram> m_lat_write_, m_lat_read_, m_lat_remove_;
+    std::shared_ptr<MetricCounter> m_err_write_, m_err_read_, m_err_remove_, m_err_scan_;
 };
 
 }  // namespace lights3::storage::duostore

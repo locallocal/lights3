@@ -496,6 +496,7 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | pack_max_size | 128MiB | active pack 封存阈值（= 压实重写单元） |
 | pack_writers | 4 | 并存 active pack 数 |
 | pack_gc_ratio | 0.5 | 存活率低于此值触发压实 |
+| gc_enabled | true | 后台 GC worker + 孤儿扫描排程总开关；多网关部署非指定实例置 false（单实例执行约束，duostore-rados-data.md §8.3），手动钩子不受门控 |
 | gc_interval / gc_grace | 5m / 5m | 回收周期 / 延迟删除宽限 |
 | orphan_scan_interval | 1d | chunk 孤儿对账周期 |
 | mpu_ttl | 7d | 未完成 multipart 过期清理；0 = 关闭（对齐 gc_interval 的 0 语义） |

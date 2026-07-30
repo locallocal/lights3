@@ -9,7 +9,7 @@
 已完成（有 commit 佐证）：四层架构 + 四个 HTTP driver + SigV4（含 chunked/presigned）+
 凭证管理一期；存储侧 localfs / xlocalfs / memory / tiered（P1-P5）/ cloudproxy（P1-P5）/
 duostore P1-P5 全部（RocksDB meta + chunk/pack data + GC 一二期 + 打磨），以及 duostore 可插拔件：Redis meta（R1-R3）、
-SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
+SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 
 未完成阶段总览：
 
@@ -21,7 +21,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 | DuoStore P5（打磨/指标/e2e_tiered_duostore） | duostore-backend.md §15 | ✅ 已完成（2026-07-29） |
 | Redis meta R4（打磨） | duostore-redis-meta.md §10 | ✅ 已完成（2026-07-30） |
 | SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | ✅ 已完成（2026-07-30） |
-| RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | 未开始 |
+| RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | ✅ 已完成（2026-07-30，吞吐对比数据留待集群环境） |
 | TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | ✅ 已完成（2026-07-30，上游 PR 回馈除外） |
 | tiered 对账工具（P4 剩余） | tiered-storage.md §9/§10 | 未做 |
 | cloudproxy 指标 + control_in_pump（P4 剩余） | cloudproxy-backend.md §8.2/§2.3 | 未做 |
@@ -168,13 +168,25 @@ SQLite meta（S1-S3）、RADOS data（C1-C2）、TiKV meta（T1-T4）。
 - 验收：sqlite 构建 184 用例全绿（新增 4 专项）；默认构建全绿；
   e2e_duostore_sqlite 全绿；崩溃专项 5 连跑稳定
 
-### 2.3 RADOS data · C3 / C4（duostore-rados-data.md §12）
+### 2.3 RADOS data · C3 / C4（duostore-rados-data.md §12）（✅ 已完成，2026-07-30）
 
-- C3：aio 协程桥接（completion → 先 reschedule 回本进程 executor/池，再继续业务逻辑——
-  §6.2 纪律）+ 双缓冲流水（写第 N 片时接收 N+1）；对象级 read-ahead 评估
-- C4：孤儿扫描——接口已随主线 P4 定形（`IDataStore::scan_chunks`，rados 侧目前
-  显式抛错），待实现 rados_nobjects_list_* + rados_stat 枚举；多网关 GC 单实例执行配置
-  与分布式 pin 方案评估（租约 / rados_lock / watch-notify，§8.3）；op 延迟/错误指标
+- ✅ C3 aio 协程桥接：write_full/read/remove 全部换 `rados_aio_*`，completion 回调
+  只投递续体回池 executor（§6.2 纪律，`AioPending` CAS 会合 + 双引用弃单安全——
+  writer 未 finish 即析构时在途缓冲/信号量额度活到回调落地）；写侧双缓冲流水
+  （至多 1 单在途，第二份额度 `AsyncSemaphore::try_acquire` 非阻塞获取，拿不到
+  退化 C1 串行，无嵌套等待死锁形态）；remove 窗口化并发（16/批）；close/dtor
+  `rados_aio_flush` 清尾。对象级 read-ahead 评估结论：不实现（边界气泡 ~11%
+  vs 缓冲记账新耦合，量化论证落 §5）；吞吐对比数据依赖真实集群，留待集群 e2e
+- ✅ C4 孤儿扫描：`scan_chunks` = nobjects_list（namespace 限定，外来命名忽略）
+  + rados_stat（竞态容忍）；顺带修复 backend 孤儿 unlink 硬编码 kChunk 导致
+  rados 下静默空转的问题（kind 随 `data_kind`）
+- ✅ C4 多网关：`gc_enabled` 配置（默认 true；false 只停后台排程，手动钩子保留）；
+  分布式 pin 评估结论落 §8.3——租约式延迟删除胜出（自愈/无逐对象锁 RTT），
+  rados_lock 与 watch/notify 否决，真实多网关需求出现前不实现
+- ✅ C4 指标：`lights3_duostore_rados_op_duration_seconds`（op 标签直方图，提交→
+  completion）/ `lights3_duostore_rados_op_errors_total` 经 MetricsScope 接入
+- ✅ 测试：流水 roundtrip（含串行退化）/ 孤儿正反向+grace+外来对象 / op 指标
+  （无集群 SKIP）；`gc_enabled` 门控与 `try_acquire` 常跑用例
 - ~~C2 遗留：GC 变现 / pin 竞态专项测试（前置：主线 P3）~~ ✅ 已随 P3 补齐
   （test_duostore_rados.cc，无集群 SKIP）
 

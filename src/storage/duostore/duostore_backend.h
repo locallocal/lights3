@@ -133,6 +133,11 @@ struct DuoStoreConfig {
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;
     double pack_gc_ratio = 0.5;            // P4 压实生效
+    // 多网关部署（docs/duostore-rados-data.md §8.3）：GC/孤儿扫描须单实例执行，
+    // 非指定网关置 false（后台 worker 不排程；手动钩子保留供测试/运维）。共享
+    // meta/data 的并发 GC 会互踩（重复压实/扫描），且他网关 GC 无从看见本网关
+    // 进程内 pin 表——单实例 + gc_grace ≥ 最长预期 GET 时长是首期部署约束
+    bool gc_enabled = true;
     int gc_interval_sec = 300;
     int gc_grace_sec = 300;
     int orphan_scan_interval_sec = 86400;  // P4 生效
@@ -155,7 +160,8 @@ public:
     // metrics 默认空 scope（docs/todo.md §3.1）：测试直构免装配，计数落孤立实例
     DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
                     MetricsScope metrics = {});
-    // 测试注入用：自组装 meta/data
+    // 测试注入用：自组装 meta/data。注意 cfg.data_kind 须与注入的 data 引擎一致
+    // ——孤儿扫描 unlink 的 extent kind 由它决定（rados 引擎只认 kRados）
     DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
                     std::unique_ptr<duostore::IMetaStore> meta,
                     std::unique_ptr<duostore::IDataStore> data, MetricsScope metrics = {});

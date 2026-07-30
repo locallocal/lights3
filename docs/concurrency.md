@@ -239,7 +239,12 @@ httplib 的请求 body 是推模型，由 pump 线程经有界缓冲队列翻转
 ```cpp
 auto permit = co_await sem.acquire();   // Permit 是 RAII 许可
 // ... 协程帧退出（含异常路径）时自动归还
+auto maybe = sem.try_acquire();         // 非阻塞：无许可立即 nullopt，绝不入队
 ```
+
+`try_acquire` 供"已持一份、还想再拿一份"的调用方（rados 双缓冲流水，
+duostore-rados-data.md §4.2）：嵌套的阻塞 acquire 会在全员各持一份时
+互等死锁，try 语义把第二份降级为"拿得到就流水，拿不到就串行"。
 
 实现要点：
 
@@ -249,13 +254,14 @@ auto permit = co_await sem.acquire();   // Permit 是 RAII 许可
   就地 resume 等待者——同步驱动大量排队时会形成"完成一个请求→内联跑完
   下一个请求"的深递归，生产路径应传池 executor。
 
-三个生产消费方：
+生产消费方：
 
 | 位置 | 用途 |
 | --- | --- |
 | `main.cc` dispatch 入口 | `runtime.max_inflight_requests` 全局限流，超限请求排队而非拒绝；等待者经池 executor 唤醒 |
 | tiered `transfers_` | `max_concurrent_transfers`：下沉/回迁的并发传输上限（见 [tiered-storage.md](tiered-storage.md) §5.1） |
 | tiered `key_locks_` | permits=1 当异步互斥用：striped per-key 锁，只保护状态提交段（见 [tiered-storage.md](tiered-storage.md) §7.3） |
+| rados `buffer_sem_` | `rados_buffer_total` 写缓冲总额度：首份阻塞 acquire（背压），双缓冲第二份 try_acquire（见 [duostore-rados-data.md](duostore-rados-data.md) §4.2） |
 
 此外：每连接串行处理（HTTP/1.1 pipelining 不并行执行）由 driver 保证；
 线程池的有界队列 + backlog（§3.1）是最底层的第二道闸门。

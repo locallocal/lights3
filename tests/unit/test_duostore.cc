@@ -904,6 +904,41 @@ TEST(duostore_config_rocksdb_tuning_params) {
     CHECK(threw);
 }
 
+// 多网关单实例执行门控（C4，docs/duostore-rados-data.md §8.3）：gc_enabled=false
+// 只停后台 worker/孤儿扫描的排程，手动钩子（测试/运维通道）不受门控
+TEST(duostore_config_gc_enabled_gates_background_only) {
+    std::map<std::string, std::string> p{{"root", "/tmp/duo-cfg"}, {"gc_enabled", "false"}};
+    auto c = DuoStoreConfig::from_params("t", p);
+    CHECK(!c.gc_enabled);
+    CHECK(DuoStoreConfig::from_params("t", {{"root", "/tmp/duo-cfg"}}).gc_enabled);  // 默认开
+    p["gc_enabled"] = "not-a-bool";
+    bool threw = false;
+    try {
+        DuoStoreConfig::from_params("t", p);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    // 行为：gc_enabled=false + gc_interval>0 也不排后台 worker；手动钩子照常回收
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "gc-gated");
+    cfg.gc_enabled = false;
+    cfg.gc_interval_sec = 3600;
+    cfg.orphan_scan_interval_sec = 3600;
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(5000));
+    sync_wait(b->delete_object("bkt", "k"));
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.reclaims_acked, uint64_t(1));
+    CHECK_EQ(st.files_removed, uint64_t(2));  // 5000B / 4KiB = 2 chunk
+    auto ost = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(ost.orphans_removed, uint64_t(0));
+    sync_wait(b->close());
+}
+
 // 空 pack 整删（§9.1）：sealed 且 live_recs==0 → unlink + 销 packstat；pin 挡整删。
 // pack record 的 gcq 变现不计 files_removed（死区随压实回收）
 TEST(duostore_pack_gc_empty_pack_removal_respects_pin) {

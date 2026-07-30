@@ -225,6 +225,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("pack_writers")) c.pack_writers = parse_int_param(name, "pack_writers", *v);
     if (auto* v = get("pack_gc_ratio"))
         c.pack_gc_ratio = parse_double_param(name, "pack_gc_ratio", *v);
+    if (auto* v = get("gc_enabled")) c.gc_enabled = parse_bool_param(name, "gc_enabled", *v);
     if (auto* v = get("gc_interval")) c.gc_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("gc_grace")) c.gc_grace_sec = parse_duration_sec(*v);
     if (auto* v = get("orphan_scan_interval"))
@@ -536,14 +537,21 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     // 持 options 拷贝逃逸出 backend 生命周期后回调仍安全
     auto on_corruption = [c = m_read_corruption_] { c->inc(); };
 #ifdef LIGHTS3_DUOSTORE_RADOS_DATA
-    if (cfg_.data_kind == DuoDataKind::kRados)
-        data_ = std::make_unique<RadosDataStore>(
-            RadosDataOptions{cfg_.rados_conf, cfg_.rados_client, cfg_.rados_pool,
-                             cfg_.rados_namespace, cfg_.rados_chunk_size,
-                             cfg_.rados_buffer_total, cfg_.rados_connect_timeout_sec,
-                             cfg_.rados_op_timeout_sec, cfg_.verify_chunk_crc,
-                             on_corruption},
-            pool_, alloc);
+    if (cfg_.data_kind == DuoDataKind::kRados) {
+        RadosDataOptions ro;
+        ro.conf_path = cfg_.rados_conf;
+        ro.client_name = cfg_.rados_client;
+        ro.pool = cfg_.rados_pool;
+        ro.ns = cfg_.rados_namespace;
+        ro.chunk_size = cfg_.rados_chunk_size;
+        ro.buffer_total = cfg_.rados_buffer_total;
+        ro.connect_timeout_sec = cfg_.rados_connect_timeout_sec;
+        ro.op_timeout_sec = cfg_.rados_op_timeout_sec;
+        ro.verify_chunk_crc = cfg_.verify_chunk_crc;
+        ro.on_corruption = on_corruption;
+        ro.metrics = metrics;  // op 延迟/错误指标（C4，docs/duostore-rados-data.md §10）
+        data_ = std::make_unique<RadosDataStore>(std::move(ro), pool_, alloc);
+    }
 #endif
     if (!data_) {
         // 压实迁移与写侧 pin 钩子（P4）：迁移标准实现 + pin 表同源注入。回调不捕获
@@ -1142,7 +1150,11 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
             continue;
         }
         if (meta_->chunk_referenced(c.id)) continue;  // 扫描间隙提交的新引用
-        Extent e{Extent::Kind::kChunk, c.id, 0, 0, 0};
+        // kind 随 data 引擎（C4）：RadosDataStore::remove 只认 kRados（异种 extent
+        // 视为引擎切换遗留跳过），kChunk 硬编码会让 rados 孤儿删除静默空转
+        Extent e{cfg_.data_kind == DuoDataKind::kRados ? Extent::Kind::kRados
+                                                       : Extent::Kind::kChunk,
+                 c.id, 0, 0, 0};
         try {
             co_await data_->remove(std::span<const Extent>(&e, 1));
             ++st.orphans_removed;
@@ -1179,6 +1191,13 @@ Task<void> DuoStoreBackend::gc_tick() {
 }
 
 void DuoStoreBackend::schedule_gc() {
+    if (!cfg_.gc_enabled) {
+        // 多网关非指定实例（docs/duostore-rados-data.md §8.3）；手动钩子保留。
+        // 构造期各到达一次（gc_tick 不会再入），响亮留痕防"忘了哪台在跑 GC"
+        LOG_INFO("duostore '{}': background GC/orphan scan disabled by gc_enabled=false "
+                 "(multi-gateway secondary)", cfg_.name);
+        return;
+    }
     if (cfg_.gc_interval_sec <= 0) return;  // 0 = 关闭后台 GC（测试用手动钩子）
     bg_.if_open([&] {
         gc_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.gc_interval_sec),
@@ -1199,6 +1218,7 @@ Task<void> DuoStoreBackend::orphan_tick() {
 }
 
 void DuoStoreBackend::schedule_orphan_scan() {
+    if (!cfg_.gc_enabled) return;                    // 与 GC 同门控（§8.3 单实例执行）
     if (cfg_.orphan_scan_interval_sec <= 0) return;  // 0 = 关闭（测试用手动钩子）
     bg_.if_open([&] {
         orphan_timer_ = TimerQueue::instance().add(

@@ -6,6 +6,7 @@
 #include <coroutine>
 #include <deque>
 #include <mutex>
+#include <optional>
 #include <utility>
 
 #include "core/executor.h"
@@ -40,6 +41,7 @@ public:
         void release() {
             if (auto* s = std::exchange(sem_, nullptr)) s->release_one();
         }
+        explicit operator bool() const { return sem_ != nullptr; }
 
     private:
         AsyncSemaphore* sem_ = nullptr;
@@ -62,6 +64,16 @@ public:
 
     // 用法：auto permit = co_await sem.acquire();
     AcquireAwaiter acquire() { return {*this}; }
+
+    // 非阻塞获取：有许可即拿，无则返回 nullopt——绝不入等待队列。供"已持一份、
+    // 还想再拿一份"的调用方（rados 双缓冲流水）使用：嵌套的阻塞 acquire 会在
+    // 全员各持一份时互等死锁，try 语义把第二份降级为"拿得到就流水，拿不到就串行"
+    std::optional<Permit> try_acquire() {
+        std::lock_guard lk(m_);
+        if (permits_ <= 0) return std::nullopt;
+        --permits_;
+        return Permit{this};
+    }
 
     long available() const {
         std::lock_guard lk(m_);

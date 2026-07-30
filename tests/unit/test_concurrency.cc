@@ -308,6 +308,22 @@ TEST(semaphore_limits_concurrency) {
     CHECK_EQ(sem.waiting(), size_t(0));
 }
 
+// try_acquire（rados 双缓冲流水的第二份额度）：非阻塞、绝不入等待队列；
+// 归还后可再取，Permit 的 bool 观测器区分持有/空
+TEST(semaphore_try_acquire_nonblocking) {
+    AsyncSemaphore sem(1);
+    auto p1 = sem.try_acquire();
+    CHECK(p1.has_value());
+    CHECK(*p1);                            // 持有态
+    CHECK(!sem.try_acquire().has_value());  // 耗尽：立即 nullopt，不排队
+    CHECK_EQ(sem.waiting(), size_t(0));
+    p1->release();
+    CHECK(!*p1);                           // 释放后空
+    auto p2 = sem.try_acquire();
+    CHECK(p2.has_value());
+    CHECK_EQ(sem.available(), 0L);
+}
+
 TEST(semaphore_permit_released_on_exception) {
     ThreadPool pool(2);
     AsyncSemaphore sem(1);

@@ -1,7 +1,7 @@
 # RadosDataStore：基于 Ceph/RADOS 的 DuoStore 数据存储
 
-> 状态：C1-C2 已实现（`src/storage/duostore/rados_data_store.{h,cc}`，
-> CMake option `LIGHTS3_DUOSTORE_RADOS_DATA`），C3-C4 未开始（§12）。兑现
+> 状态：C1-C4 已实现（`src/storage/duostore/rados_data_store.{h,cc}`，
+> CMake option `LIGHTS3_DUOSTORE_RADOS_DATA`，2026-07-30 全部完成，§12）。兑现
 > [duostore-backend.md](duostore-backend.md) §12 的演进承诺：data 侧换
 > Ceph，实现 `IDataStore`（`src/storage/duostore/data_store.h`），数据面从
 > 单机文件系统换成 RADOS 分布式对象池，副本/EC、扩容再平衡、自修复由
@@ -22,10 +22,9 @@
 - **不管理 Ceph 集群本身**：pool 创建、副本数/EC profile、配额、placement
   rule 是部署侧职责，后端只消费既有 pool（§10）；
 - **不引入 libradosstriper**（§2 路线 B 否决论证）；
-- rados 层读缓存/预取首期不做（C3 评估，§5）；
-- aio 协程桥接后置：C1 同步 librados 在池线程，C3 再上 aio（§6.2）；
-- 多网关数据面的分布式 pin/租约不在首期——单网关跑 GC 为部署前提，
-  完备方案列 C4 评估（§8.3）。
+- rados 层读缓存/预取不做（C3 已评估，结论与量化论证见 §5）；
+- 多网关数据面的分布式 pin/租约不实现——单实例跑 GC（`gc_enabled`）为
+  部署前提，完备方案已评估（C4，结论见 §8.3）。
 
 ## 2. 接入路线选型（调研结论）
 
@@ -113,14 +112,18 @@ fs 版 DataRef 形态一致（同一对象在两种 data store 间的 manifest �
 
 ### 4.2 内存上界与背压
 
-每个活跃 writer 持一个 `chunk_size` 缓冲。总量用 `core/semaphore.h`
-信号量按 **`rados_buffer_total`（默认 256MiB）** 限流：writer 首次
-`write()` 时获取缓冲额度，信号量耗尽则 `co_await` 挂起——背压沿协程链
-传导回 socket 读循环，主文档"全链路流式"在此的兑现形式从"零缓冲"变为
-"**有界缓冲**"。默认参数下 = 32 路并发流式 PUT，其余排队；每 PUT 恒持
-≤1 份额度、无嵌套获取，无死锁形态。对比 fs 版既有先例：主文档 §5.3 的
-chunked 缓冲同样是"缓冲上界 × 并发数"的联动声明，本实现只是把它推广到
-全部写路径并用信号量显式封顶。
+每个活跃 writer 持 1-2 个 `chunk_size` 缓冲（接收中 + 在途，C3 双缓冲
+流水）。总量用 `core/semaphore.h` 信号量按 **`rados_buffer_total`
+（默认 256MiB）** 限流：writer 首次 `write()` 时**阻塞式**获取第一份
+额度，信号量耗尽则 `co_await` 挂起——背压沿协程链传导回 socket 读循环，
+主文档"全链路流式"在此的兑现形式从"零缓冲"变为"**有界缓冲**"。第二份
+额度（流水用）只经 `try_acquire` **非阻塞**获取：各 writer 已持一份时
+嵌套阻塞等待会互等死锁，拿不到即退化为单缓冲串行（发起后立等完成），
+正确性与背压语义不变、只失去重叠。弃单（未 finish 即析构）时在途缓冲
+与其额度随 aio 单存活到 completion 落地，记账与实际驻留内存恒一致
+（§6.2）。对比 fs 版既有先例：主文档 §5.3 的 chunked 缓冲同样是"缓冲
+上界 × 并发数"的联动声明，本实现只是把它推广到全部写路径并用信号量
+显式封顶。
 
 小对象（总长 < chunk_size，含未知长度未超限的流）：同一路径的退化情形
 ——缓冲至 EOF，单对象一次 write_full，对象 length < chunk_size。
@@ -129,11 +132,12 @@ chunked 缓冲同样是"缓冲上界 × 并发数"的联动声明，本实现只
 
 librados 写回执的含义：**全部副本（或 EC k+m 条带）已提交到持久化存储**
 ——BlueStore 事务落盘后才 ack（Luminous 起 ack 即 safe，
-`rados_aio_wait_for_safe` 已废弃）。因此同步 `rados_write_full` 返回 0
-即等价于 fs 版"fdatasync + shard 目录 fsync"，且更强（多副本）。没有
-目录 fsync 的对应物需要操心。`finish()` = 最后一片 write_full 返回后组
-DataRef 返回；未 finish 即析构 = 已写出的对象成为无主对象，由上层
-remove 兜底或孤儿扫描回收（§8.2），与主文档 §6.1 ⑤ 的兜底路径同构。
+`rados_aio_wait_for_safe` 已废弃）。因此 write_full 回执（aio
+completion 返回 0）即等价于 fs 版"fdatasync + shard 目录 fsync"，且
+更强（多副本）。没有目录 fsync 的对应物需要操心。`finish()` = 收讫
+在途单 + 尾片 write_full 落地后组 DataRef 返回；未 finish 即析构 =
+已写出的对象成为无主对象，由上层 remove 兜底或孤儿扫描回收（§8.2），
+与主文档 §6.1 ⑤ 的兜底路径同构。
 
 ### 4.4 失败处理与重试边界
 
@@ -164,9 +168,20 @@ remove 兜底或孤儿扫描回收（§8.2），与主文档 §6.1 ⑤ 的兜底
 - `verify_chunk_crc` 语义照搬：只对"从段首完整读到段尾"的 extent 校验
   crc32c，Range 命中中段不校验（主文档 §7 同款论证与默认值）。
 
-每次 `read(buf)` 一次 RTT，粒度 = 泵送循环的 buf 尺寸。读放大可接受
-（顺序读被 librados 内部流水掩盖一部分）；对象级 read-ahead（读 N 时
-预发 N+1 的 aio）列 C3 与 aio 桥接一并评估，不进首期。
+每次 `read(buf)` 一次 RTT（C3 起为 aio：发起后停车，completion 恢复，
+池线程不再阻塞等网络），粒度 = 泵送循环的 buf 尺寸。读放大可接受
+（顺序读被 librados 内部流水掩盖一部分）。
+
+**对象级 read-ahead 评估（C3，结论：不实现）**。读 N 时预发 N+1 的
+aio 只能消掉对象边界上的一次未重叠 RTT——每 `rados_chunk_size`
+（默认 8MiB）一次。量化：RTT 1ms、单流 1GiB/s 时气泡占比 ≈ 1/(8+1)
+≈ 11%，chunk 越大占比越低。代价则是结构性的：每 reader 额外常驻
+≥1 个 chunk_size 缓冲，且必须并入 `rados_buffer_total` 记账才诚实
+——读写共抢额度让 GET 延迟受写并发影响（新耦合）；Range 提前终止/
+弃读时预读成废读；GC pin 语义还要覆盖预读中的对象。对照之下，加大
+HTTP 泵送缓冲或 `rados_chunk_size` 以更低成本达到同向收益。若集群
+环境 e2e 实测显示对象边界气泡主导，先调参数；read-ahead 保持为记录
+在案的候选，不进实现。
 
 ## 6. librados 接入
 
@@ -194,17 +209,31 @@ rados_create2(&cluster, "ceph", rados_client, 0)
 发起同步 op 即天然并行，不需要连接池（对比 hiredis 的池化，§5.2 in
 redis-meta——那是因为 redis 连接是有序单工的，rados 无此约束）。
 
-### 6.2 线程模型：C1 同步在池线程，C3 aio 桥接
+### 6.2 线程模型：aio 桥接（C3 已实现）
 
-- **C1**：全部 librados 调用为同步版，`co_await pool_->schedule()` 后
-  在池线程阻塞等待——与 FsDataStore 的 open/pread 切池线程同构（主文档
-  §7），也是主文档 §2.2 给 IDataStore 选协程接口时预留的演进空间的
-  最小实现：接口是 Task<T>，内部先用"池线程 + 同步"兑付；
-- **C3**：换 `rados_aio_*` + completion 回调恢复协程，池线程不再阻塞
-  等网络。纪律：completion 回调运行在 librados finisher 线程，**必须
-  先 reschedule 回本进程 executor/池再继续业务逻辑**——在 ceph 内部
-  线程上跑业务是借线程干私活，阻塞它会反压 librados 内部管线。接口
-  零改动，纯实现内替换——这正是 IDataStore 选 Task<T> 的还本。
+C1 曾以"池线程 + 同步 librados"兑付 Task<T> 接口（主文档 §2.2 预留
+的演进空间的最小实现）；C3 起数据路径全部换 `rados_aio_*`，接口零
+改动，纯实现内替换——这正是 IDataStore 选 Task<T> 的还本。
+
+- **纪律**：completion 回调运行在 librados finisher 线程，**只记录
+  结果并把停车的续体投递回本进程池 executor，绝不在 ceph 线程上继续
+  业务逻辑**——在 ceph 内部线程上跑业务是借线程干私活，阻塞它会
+  反压 librados 内部管线。实现为 `AioPending` 会合点（原子状态机：
+  空 → 等待者 handle → done，回调与等待者以 CAS 会合，谁后到谁执行
+  恢复/续行）；
+- **弃单安全**：`AioPending` 堆分配 + 双引用（发起方/回调）。写侧
+  流水允许"发起后先不等待"，writer 未 finish 即析构（丢弃语义，
+  §4.3）时在途缓冲与其信号量额度都随单存活到回调落地——librados
+  正在读的内存恒有效，额度记账与实际驻留内存恒一致；
+- **写侧双缓冲流水**（§4.2）：至多 1 单在途（extent 顺序天然保序），
+  写第 N 片时继续接收 N+1。第二份缓冲额度经 `try_acquire` 非阻塞
+  获取——各 writer 已持一份时嵌套阻塞等待会互等死锁，拿不到即退化
+  为单缓冲串行（C1 行为），背压语义不变；
+- **remove 窗口化并发**：单批至多 16 个在途 aio remove——GC 大
+  manifest（TiB 级对象数十万 extent）不无界压集群；
+- **读侧**：逐段按名 aio 读，发起即停车；crc 累计与业务续行在池线程。
+  列举/统计（`scan_chunks`）无 aio 版，低频（默认 1/d）驻池线程同步
+  阻塞，对齐 fs 版整扫描先例。
 
 ### 6.3 错误映射
 
@@ -232,8 +261,11 @@ librados 返回负 errno，统一经 `throw_rados(what, ret)`（仿 fs/rocks 版
 
 ### 6.5 close
 
-`close()`：等待在途 op 收尾（C3 起 `rados_aio_flush`）→
-`rados_ioctx_destroy` → `rados_shutdown`。close 后任何调用干净地抛
+`close()`：等待在途写收尾（`rados_aio_flush`，连 completion 回调一起
+等完——弃单 writer 的缓冲/额度归还随之落地，此后 ceph 线程不再触碰
+store 成员；析构兜底同路径）→ `rados_ioctx_destroy` → `rados_shutdown`
+（后两步由最后一个 Conn 持有者执行，在途读由逃逸 reader 自身的 Conn
+引用兜住）。close 后任何调用干净地抛
 `InternalError`（守卫，仿 rocks 版 `db()` / redis 版 §5.5——防御纵深，
 误用变 500 而非崩溃）。生命周期挂接主文档 §9 既有顺序：backend close
 先停 GC，再 `data_->close()`，后 `meta_->close()`，零改动。
@@ -277,17 +309,21 @@ librados 返回负 errno，统一经 `throw_rados(what, ret)`（仿 fs/rocks 版
 "已打开 fd 不受 unlink 影响"兜底，pin 表是读侧唯一防线——单网关部署下
 进程内计数即完全正确（与主文档同一论证）。
 
-### 8.2 孤儿扫描
+### 8.2 孤儿扫描（C4 已实现）
 
-`rados_nobjects_list_open/next`（ioctx 已限 namespace）遍历本实例全部
-对象 → 从对象名解析 file_id → `chunk_referenced(file_id) == false` 且
-`rados_stat` mtime 逾 `gc_grace` → remove。反向对账（refs 在而对象缺）
-同主文档 §9.3：告警计数、绝不静默删 meta。列举成本 O(namespace 内对象
-数)，低频（`orphan_scan_interval` 默认 1d）可接受。
+`scan_chunks`（接口随主线 P4 定形）：`rados_nobjects_list_open/next`
+（ioctx 已限 namespace）遍历本实例全部对象 → 从对象名解析 file_id
+（非 `c.<016x>` 命名的外来对象不归本店，忽略——对齐 fs 版对非 *.chk
+文件的处置）→ `rados_stat` 取 mtime（秒级足够，宽限判定分钟级；stat
+失败 = 并发 remove 竞态，容忍跳过）。孤儿判定（refs 反查/grace/pin）
+是调用方 `run_orphan_scan_once` 的事，数据面只枚举；反向对账（refs 在
+而对象缺）同主文档 §9.3：告警计数、绝不静默删 meta。列举成本
+O(namespace 内对象数)，低频（`orphan_scan_interval` 默认 1d）可接受。
 
-接口留位：`IDataStore` 当前无枚举方法，孤儿扫描在 fs 版同样要到 P4 才
-落地——届时随 P4 一并给接口定形（如 `scan_orphans(callback)`），本文
-只锁定 rados 侧实现原语。
+落地时的集成修正：backend 孤儿 unlink 的 extent kind 此前硬编码
+kChunk，而 rados 版 `remove` 只认 kRados（异种 extent 视为数据引擎
+切换遗留跳过）——kind 现随 `data_kind` 决定，否则 rados 孤儿删除会
+静默空转。
 
 ### 8.3 多网关组合
 
@@ -301,12 +337,23 @@ RedisMetaStore + RadosDataStore = 主文档 §12 组合矩阵里"全分布式网
 | 读侧 pin vs 他网关 GC | **缺口**：pin 表进程内，网关 A 长读期间网关 B 的 GC 可 remove 对象 → 读 -ENOENT。首期约束 + 缓解见下 |
 | GC/孤儿扫描的执行者 | **需单实例执行**（配置指定哪个网关跑 GC），否则并发压实/扫描互踩 |
 
-首期部署约束：**多网关时 GC 仅由指定的单一实例执行，且
-`gc_grace` ≥ 最长预期 GET 时长**（把概率正确拉到工程可接受）。完备
-方案候选（C4 评估，不承诺）：租约式延迟删除（gcq 项带最近读租约）、
-`rados_lock_shared/exclusive` 对象锁（读者共享锁、GC 试排他锁）、
-watch/notify 广播 pin。主文档 §12 "跨网关共享 meta 时 pin 表不再充分"
-的预警在此落为具体条目。
+部署约束（C4 起有配置承载）：**多网关时 GC 仅由指定的单一实例执行，
+且 `gc_grace` ≥ 最长预期 GET 时长**（把概率正确拉到工程可接受）。
+非指定网关配 **`gc_enabled: false`**（duostore 通用键，主文档 §11）：
+只停后台 GC worker 与孤儿扫描的排程，手动钩子（测试/运维通道）保留；
+启动期打 INFO 留痕防"忘了哪台在跑 GC"。
+
+**分布式 pin 方案评估（C4，结论：暂不实现，首选方向 = 租约式）**：
+
+| 候选 | 评估 |
+| --- | --- |
+| 租约式延迟删除 | GET 开始把 file_id→deadline 租约写共享介质（meta 侧表或对象 xattr），GC 对未到期项跳过；超长读续租。代价 = GET 热路径多一次共享写；优点 = 无锁、崩溃自愈（租约到期自动失效）、与现有 gcq/grace/pin 形态同构（进程内 pin 表搬到共享介质）。**胜出候选** |
+| `rados_lock_shared/exclusive` | 读者共享锁、GC 试排他锁，对象级正确性最强；但每 GET 增 lock+unlock 两次 RTT，读者崩溃遗留锁靠超时打破（选小误伤长读、选大拖慢 GC），GC 要逐候选对象试锁 O(n) RTT。否决 |
+| watch/notify 广播 pin | 通知面 = 网关数而非对象数（优）；但回报聚合是自建协议，网关无响应时 notify 等超时（默认 30s）拖慢每轮 GC，且分区下"没回报"与"没在读"不可区分，仍须叠加 grace 兜底。否决 |
+
+真实多网关共享 data 的部署需求出现时再实现租约式；当前
+`gc_enabled` + grace 约束已把风险收敛到工程可接受。主文档 §12 "跨
+网关共享 meta 时 pin 表不再充分"的预警在此落为具体条目。
 
 ## 9. 构建接入
 
@@ -382,6 +429,16 @@ backends:
 | rados_connect_timeout | 5s | 建连超时（client_mount_timeout） |
 | rados_op_timeout | 0 | 单 op 硬超时；非 0 时注意 §4.4 结果不明语义 |
 
+GC 键新增 `gc_enabled`（duostore 通用键，默认 true，归属表见主文档
+§11）：多网关部署中非指定实例置 false，语义见 §8.3。
+
+**op 指标（C4）**：`RadosDataOptions` 携 `MetricsScope`（backend 装配
+时传入，测试直构默认空 scope 即孤立实例），构造期注册 0 值可见：
+`lights3_duostore_rados_op_duration_seconds`（histogram，label
+op=write_full/read/remove，提交 → completion 回调含集群往返）与
+`lights3_duostore_rados_op_errors_total`（counter，op 另含 scan；
+remove 的幂等 -ENOENT 不计错）。
+
 `data: rados` 时 `chunk_size` / `pack_*` / `verify_chunk_crc` 的处置：
 `verify_chunk_crc` 保留（语义同 §5）；`chunk_size` 被 `rados_chunk_size`
 取代、`pack_*` 全部忽略并打 WARN（§3.3）。`DuoStoreConfig` 增
@@ -410,7 +467,11 @@ backends:
    与覆盖/删除后 `run_gc_once()` 收敛（对象消失、gcq 清空）；并发 GET
    持 pin 时 GC 跳过（pin 是唯一防线，§8.1，必测）；buffer 信号量背压
    （并发 PUT > 额度数不死锁、全部完成）；孤儿路径（写对象不提交 meta
-   → 扫描回收）；refs 在而对象缺的告警路径（手工 rados 删对象注入）。
+   → 扫描回收；外来命名忽略；grace 内不动）；refs 在而对象缺的告警
+   路径（手工 rados 删对象注入）；C3 双缓冲流水 roundtrip（含
+   buffer_total = chunk_size 的串行退化）；op 指标落账。`gc_enabled`
+   门控与 `try_acquire` 语义无需集群，落在 test_duostore.cc /
+   test_concurrency.cc 常跑。
 
 ## 12. 实施拆分
 
@@ -418,8 +479,8 @@ backends:
 | --- | --- | --- | --- |
 | C1 | CMake option + librados 发现；`kRados` 枚举与 alloc 接线；连接生命周期/错误映射/throw_rados；写路径（切片缓冲 + write_full + 信号量）与读路径与 remove；测试探测/skip 机制 | 集群在场时 `run_backend_suite` 注入组合全绿；无集群时全 SKIP 不红 | 已完成 |
 | C2 | 未知长度流式收口；配置全量（校验/WARN 语义）；`e2e_duostore_rados`；rados 专项单测（§11.4 除孤儿外） | e2e + 专项绿 | 已完成（GC 变现/pin 竞态专项已随主线 P3 补齐） |
-| C3 | aio 协程桥接（completion → executor reschedule）+ 双缓冲流水（写第 N 片时接收 N+1）；读侧对象级 read-ahead 评估 | 同套件全绿 + 吞吐对比数据 | 未开始 |
-| C4 | 孤儿扫描（随主线 P4 的接口定形）；多网关 GC 约束落地（单实例执行配置）与分布式 pin 方案评估（§8.3）；指标（op 延迟/错误计数）；文档状态头更新 | 孤儿/对账专项 + 全 ctest 矩阵绿 | 未开始 |
+| C3 | aio 协程桥接（completion → executor reschedule）+ 双缓冲流水（写第 N 片时接收 N+1）；读侧对象级 read-ahead 评估 | 同套件全绿 + 吞吐对比数据 | 已完成（§6.2 落地纪律与弃单安全；read-ahead 评估结论 §5；吞吐对比依赖真实集群，留待集群环境 e2e，本机恒 SKIP §11.1） |
+| C4 | 孤儿扫描（随主线 P4 的接口定形）；多网关 GC 约束落地（单实例执行配置）与分布式 pin 方案评估（§8.3）；指标（op 延迟/错误计数）；文档状态头更新 | 孤儿/对账专项 + 全 ctest 矩阵绿 | 已完成（scan_chunks §8.2；gc_enabled 与租约式评估结论 §8.3；op 指标 §10） |
 
 C1 即含完整读写：rados 版没有 pack/GC 压实等增量台阶，单一路径一步到
 可用；GC 消费（gcq → rados_remove）依赖主线 P3 的 GC worker——在 P3

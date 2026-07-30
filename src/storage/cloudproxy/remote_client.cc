@@ -8,6 +8,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "core/util/uri.h"
 #include "s3/xml.h"
 
 namespace lights3::storage {
@@ -57,6 +58,7 @@ CloudProxyConfig CloudProxyConfig::from_params(
     if (auto* v = find(params, "bucket_prefix")) c.bucket_prefix = *v;
     if (auto* v = find(params, "ca_cert")) c.ca_cert = *v;
     c.force_path_style = bool_param(params, "force_path_style", true, name);
+    c.control_in_pump = bool_param(params, "control_in_pump", false, name);
     c.tls_verify = bool_param(params, "tls_verify", true, name);
     c.verify_etag = bool_param(params, "verify_etag", true, name);
     c.connect_timeout_ms = int_param(params, "connect_timeout_ms", 5000, name);
@@ -85,10 +87,9 @@ CloudProxyConfig CloudProxyConfig::from_params(
     require_range("retry_base_ms", c.retry_base_ms, 1, 60'000);
     require_range("max_connections", c.max_connections, 1, 4096);
     require_range("queue_cap", static_cast<int64_t>(c.queue_cap_bytes), 4096, 1 << 30);
-    // virtual-hosted style 是低优先路径（docs/cloudproxy-backend.md §7），当前未实现
-    if (!c.force_path_style)
-        throw std::runtime_error("cloudproxy backend '" + name +
-                                 "': force_path_style=false is not implemented yet");
+    // virtual-hosted style（force_path_style=false）：连接与 SNI 恒指 endpoint，仅
+    // Host/签名与路径按 bucket 变化（docs/cloudproxy-backend.md §7）；含 '.' 的
+    // bucket 名在 TLS 泛域名证书下会失配，属部署侧约束，不在此拦截
     // 拼接名整体按 S3 规则校验（docs/cloudproxy-backend.md §4.3）："aaa" 代表最短合法本地名，
     // 覆盖前缀引入的字符集/首字符/".."/长度问题，注定非法的前缀在加载期即报错
     if (!c.bucket_prefix.empty()) {
@@ -152,9 +153,52 @@ Endpoint Endpoint::parse(const std::string& url) {
     return ep;
 }
 
+// ---------- 指标（docs/cloudproxy-backend.md §8.2）----------
+
+RemoteMetrics::RemoteMetrics(const MetricsScope& scope) : scope_(scope) {
+    etag_mismatch = scope.counter(
+        "lights3_cloudproxy_etag_mismatch_total",
+        "Uploads where remote ETag disagreed with locally computed MD5 (in-transit corruption)");
+    pool_wait = scope.histogram("lights3_cloudproxy_pool_wait_seconds",
+                                "Time spent waiting for a free remote connection lease",
+                                {0.001, 0.01, 0.1, 1, 10});
+}
+
+std::shared_ptr<MetricHistogram> RemoteMetrics::op_seconds(const char* op) const {
+    std::lock_guard lk(m_);
+    auto& h = ops_[op];
+    if (!h)
+        h = scope_.histogram("lights3_cloudproxy_remote_request_seconds",
+                             "Remote round-trip duration per attempt (data plane = full "
+                             "transfer)",
+                             {0.005, 0.02, 0.1, 0.5, 2, 10, 60}, {{"op", op}});
+    return h;
+}
+
+void RemoteMetrics::count_retry(const char* op) const {
+    std::lock_guard lk(m_);
+    auto& c = retries_[op];
+    if (!c)
+        c = scope_.counter("lights3_cloudproxy_retries_total",
+                           "Remote request retries (backoff taken)", {{"op", op}});
+    c->inc();
+}
+
+void RemoteMetrics::count_error(const std::string& code) const {
+    std::lock_guard lk(m_);
+    auto& c = errors_[code];
+    if (!c)
+        c = scope_.counter("lights3_cloudproxy_remote_errors_total",
+                           "Remote failures mapped to local errors, by remote code",
+                           {{"code", code}});
+    c->inc();
+}
+
 // ---------- ClientPool ----------
 
-ClientPool::ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep) : cfg_(cfg), ep_(ep) {}
+ClientPool::ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep,
+                       std::shared_ptr<MetricHistogram> wait_hist)
+    : cfg_(cfg), ep_(ep), wait_hist_(std::move(wait_hist)) {}
 
 std::unique_ptr<httplib::Client> ClientPool::make_client() const {
     auto c = std::make_unique<httplib::Client>(ep_.base_url);
@@ -171,18 +215,28 @@ std::unique_ptr<httplib::Client> ClientPool::make_client() const {
 }
 
 ClientPool::Lease ClientPool::acquire() {
-    auto deadline = std::chrono::steady_clock::now() +
-                    std::chrono::milliseconds(cfg_.request_timeout_ms);
+    auto start = std::chrono::steady_clock::now();
+    auto deadline = start + std::chrono::milliseconds(cfg_.request_timeout_ms);
+    // 等待时长观测（§8.2）：Lease 发出或 SlowDown 抛出都记账——排队恶化是
+    // max_connections 调优的直接信号
+    auto observe = [&] {
+        if (wait_hist_)
+            wait_hist_->observe(std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count());
+    };
     std::unique_lock lk(m_);
     for (;;) {
         if (!idle_.empty()) {
             auto c = std::move(idle_.back());
             idle_.pop_back();
+            observe();
             return Lease(this, std::move(c));
         }
         if (total_ < cfg_.max_connections) {
             ++total_;
             lk.unlock();
+            observe();
             try {
                 return Lease(this, make_client());
             } catch (...) {
@@ -194,9 +248,11 @@ ClientPool::Lease ClientPool::acquire() {
             }
         }
         if (!cv_.wait_until(lk, deadline,
-                            [&] { return !idle_.empty() || total_ < cfg_.max_connections; }))
+                            [&] { return !idle_.empty() || total_ < cfg_.max_connections; })) {
+            observe();
             throw S3Error(S3ErrorCode::SlowDown,
                           "cloudproxy: all remote connections busy, try again later");
+        }
     }
 }
 
@@ -206,17 +262,26 @@ void ClientPool::release(std::unique_ptr<httplib::Client> c) {
     cv_.notify_one();
 }
 
-// ---------- 签名管线 ----------
+// ---------- 寻址与签名管线 ----------
+
+Target RemoteContext::target(const std::string& remote_bucket) const {
+    if (cfg.force_path_style)
+        return {"/" + util::aws_uri_encode(remote_bucket, /*encode_slash=*/false),
+                ep.signed_host};
+    // virtual-hosted（§7）：Host = <rb>.<endpoint-host>[:port]，路径不含 bucket。
+    // httplib 只在 Host 缺席时自设，本管线恒显式携带签名后的 Host，无需改连接
+    return {"", remote_bucket + "." + ep.signed_host};
+}
 
 httplib::Headers RemoteContext::signed_headers(
     const std::string& method, const std::string& raw_path, const std::string& raw_query,
     const std::vector<std::pair<std::string, std::string>>& extra,
-    const std::string& payload_hash) const {
+    const std::string& payload_hash, const std::string& host) const {
     http::HttpRequest req;
     req.method = method;
     req.raw_path = raw_path;
     req.raw_query = raw_query;
-    req.headers.set("Host", ep.signed_host);
+    req.headers.set("Host", host.empty() ? ep.signed_host : host);
     for (auto& [k, v] : extra) req.headers.set(k, v);
     auth.sign(req, cred, payload_hash);
     httplib::Headers out;
@@ -250,6 +315,8 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
         }
     }
     auto res = std::string(resource);
+    // 错误映射计数（§8.2）：优先远端 wire code，不可解析按状态码归桶
+    metrics.count_error(remote_code.empty() ? "http_" + std::to_string(status) : remote_code);
 
     // 429/503/SlowDown → 本地 503，客户端可退避重试
     if (status == 429 || status == 503 || remote_code == "SlowDown")
@@ -299,6 +366,7 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
 }
 
 void RemoteContext::throw_transport_error(httplib::Error err) const {
+    metrics.count_error("transport");  // §8.2：连接/DNS/超时类归一桶，细节进 message
     throw S3Error(S3ErrorCode::InternalError,
                   "cloudproxy: request to " + cfg.endpoint +
                       " failed: " + httplib::to_string(err));

@@ -95,9 +95,10 @@ void ensure_registered() {
 #ifdef LIGHTS3_CLOUDPROXY
         StorageRegistry::register_backend(
             "cloudproxy",
-            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope) {
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
                 auto c = CloudProxyConfig::from_params(cfg.name, cfg.params);
-                return std::make_shared<CloudProxyBackend>(std::move(c), std::move(pool));
+                return std::make_shared<CloudProxyBackend>(std::move(c), std::move(pool),
+                                                           std::move(m));
             });
 #endif
 #ifdef LIGHTS3_DUOSTORE

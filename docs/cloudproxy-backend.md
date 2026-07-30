@@ -1,9 +1,10 @@
 # CloudProxyBackend：映射公有云的代理后端
 
-> 状态：P1–P5 已实现（`src/storage/cloudproxy/`），单测双栈自举跑一致性套件
-> （`test_cloudproxy.cc`），e2e 双实例场景 `e2e_cloudproxy` / `e2e_tiered_cloudproxy`
-> 全绿。§8.2 指标与 §2.3 `control_in_pump` 未做；`force_path_style: false`
-> 未实现（配置加载期报错）。承接 docs/storage-backend.md §4 的概述与 docs/tiered-storage.md §10 P5 的预留
+> 状态：P1–P5 全部实现（`src/storage/cloudproxy/`，P4 剩余项 2026-07-31 收尾：
+> §8.2 指标、§2.3 `control_in_pump`、§7 `force_path_style: false` vhost），
+> 单测双栈自举跑一致性套件（`test_cloudproxy.cc`，含 vhost/control_in_pump
+> 套件与指标断言），e2e 双实例场景 `e2e_cloudproxy` / `e2e_tiered_cloudproxy`
+> 全绿。承接 docs/storage-backend.md §4 的概述与 docs/tiered-storage.md §10 P5 的预留
 > （tiered 的 cloud 侧接入真实云端）。本文档确定实现路线为**自签 SigV4 +
 > vendored httplib 直连**（docs/storage-backend.md §4.1 的路线 B）。
 
@@ -103,10 +104,17 @@ HttpRequest 只为签名，再搬运 headers"——另一种做法（直接对 h
 
 - **数据面 pump 跑在 CloudProxyBackend 私有线程上**（per in-flight transfer
   一个 `std::thread`，上限 = `max_connections`，由 ClientPool 容量自然限制）；
-- 控制面短请求（HEAD/DELETE/LIST 等，响应体小）仍可 `co_await pool->schedule()`
+- 控制面短请求（HEAD/DELETE/LIST 等，响应体小）默认 `co_await pool->schedule()`
   后在池线程同步调用——单次占用时间与 localfs 的一次磁盘操作同量级，可接受；
-  若远端 RTT 高导致池占用可观，配置 `control_in_pump: true` 让控制面也走
-  私有线程（P4 视压测决定默认值）。
+  远端 RTT 高导致池占用可观时，配 **`control_in_pump: true`** 让控制面也走
+  一次性私有线程（`control_io` helper：私有线程执行阻塞段含重试退避，完成后
+  续体经池 executor 恢复，与数据面 pump 同族）。
+  **压测结论（P4，默认 false）**：in-process loopback 远端上 HEAD 每操作
+  pool≈210µs、pump≈294µs——每控制请求一次线程创建的 ~80µs 固定开销在低 RTT
+  下净亏损；当远端 RTT ≥ 数 ms（公网/跨区）时该开销占比 <5% 而释放的池线程
+  占用是整段 RTT+退避，此时置 true 划算。判据：池等待时长直方图
+  （`lights3_pool_*` / `lights3_backend_pool_*`）右移且 cloudproxy 控制面
+  op 时延主导时开启。
 
 这正是 docs/concurrency.md §3"如出现云端慢请求占满池饿死本地盘，再按 backend 配置独立池"
 预留的落地形态——只是独立的不是通用 ThreadPool，而是 cloudproxy 自管的
@@ -312,6 +320,7 @@ backends:
     secret_key: "${CLOUD_SK}"
     bucket_prefix: "lights3-"        # 远端 bucket = 前缀 + 本地名；默认空
     force_path_style: true           # 默认 true，见下
+    control_in_pump: false           # 控制面走私有线程（§2.3 压测结论默认 false）
     tls_verify: true                 # 自签名远端可关；可选 ca_cert: /path/to/ca.pem
     connect_timeout_ms: 5000
     request_timeout_ms: 60000        # httplib read/write timeout（按次 recv/send 计）
@@ -325,11 +334,17 @@ backends:
 全部键经 `BackendConfig::params` 自动收集（yaml 后端条目下非 name/type 的
 标量键都进 params），**无需改配置解析器**。
 
-**`force_path_style` 默认 true**：virtual-hosted 风格要求泛域名 DNS，
-MinIO / 自建端点 / lights3 作远端都必须 path-style，且 AWS 至今兼容
-path-style。显式关掉时 host 变为 `<remote_bucket>.<endpoint-host>`（签名侧
-host 同步变化），Client 连接按 bucket 独立——ClientPool 退化为 per-bucket，
-属低优先路径，**当前未实现**（配置 `force_path_style: false` 在加载期报错）。
+**`force_path_style` 默认 true**：MinIO / 自建端点 / lights3 作远端都天然
+path-style，且 AWS 至今兼容 path-style。显式关掉即 **virtual-hosted style
+（P4 已实现）**：Host 与签名变为 `<remote_bucket>.<endpoint-host>[:port]`、
+路径不含 bucket 段（`Target` 解析单点，`RemoteContext::target`）。实现要点：
+**TCP 连接与 TLS SNI 恒指 endpoint 本身**，仅 Host 头/签名/路径按 bucket
+变化——httplib 只在 Host 缺席时自设，本管线恒显式携带签名后的 Host，故
+ClientPool 无需按 bucket 分化（否决了早先"per-bucket 连接池"的设想：泛域名
+DNS 解析到同组前端时二者等价，而 endpoint 直连免去 per-bucket 连接放大）。
+部署侧约束：远端须在 endpoint 证书/前端下受理 vhost Host（AWS 区域端点与
+S3 兼容网关的常见形态；lights3 作远端配 `http.base_domain` 即可）；含 `.`
+的 bucket 名在 TLS 泛域名证书下会失配，属部署侧责任不在网关拦截。
 
 ## 8. 连接管理与构建改动
 
@@ -345,15 +360,23 @@ host 同步变化），Client 连接按 bucket 独立——ClientPool 退化为 
 （`enable_server_certificate_verification` / `set_ca_cert_path`）。
 被取消的传输（§3.1）连接作废，归还后由 httplib 自动重连。
 
-### 8.2 指标（未实现）
+### 8.2 指标（P4 已实现）
 
-沿用现有 metrics 机制新增：远端请求计数/时延分布（按操作）、重试次数、
-错误映射计数（按远端码）、ETag 校验失败计数、ClientPool 等待时长。
-~~现有 `Metrics` 是 L2 请求维度、无后端级注册机制，接入需先扩展 metrics
-框架——留待独立特性~~（框架已落地：`core/metrics.h` 的 MetricsRegistry +
-MetricsScope，工厂第三参即本后端的 scope，见 todo.md §3.1 与
-storage-backend.md §6）；指标项本身仍未接入，当前以 warn 日志覆盖关键路径
-（403 映射、ETag 兜底）。
+经 MetricsScope（工厂第三参，todo.md §3.1）接入，`RemoteMetrics` 单点封装：
+
+| 指标 | 类型/标签 | 语义 |
+| --- | --- | --- |
+| `lights3_cloudproxy_remote_request_seconds` | histogram, op | 每次远端往返一次观测（含重试的每尝试各记一次）；数据面（get/put/upload_part）= 整段传输时长 |
+| `lights3_cloudproxy_retries_total` | counter, op | 实际发生退避重试的次数 |
+| `lights3_cloudproxy_remote_errors_total` | counter, code | 映射为本地错误的远端失败：优先 wire code（NoSuchKey…），体不可解析归 `http_<status>`，网络层归 `transport`——码集有界 |
+| `lights3_cloudproxy_etag_mismatch_total` | counter | 远端 ETag ≠ 本地增量 MD5（在途损坏信号，§6）；构造期注册 0 值可见 |
+| `lights3_cloudproxy_pool_wait_seconds` | histogram | ClientPool acquire 等待（含 SlowDown 超时路径）；右移 = `max_connections` 调优信号 |
+
+op 标签取值：控制面 create_bucket / delete_bucket / head_bucket /
+list_buckets / head / delete / list / create_multipart / complete_multipart /
+abort_multipart / list_parts / list_uploads，数据面 get / put / upload_part。
+op/code 维度实例经互斥缓存按需注册（get-or-create 幂等）。warn 日志
+（403 映射、ETag 兜底）保留不变。
 
 ### 8.3 CMake
 
@@ -402,5 +425,5 @@ ETag 校验失败路径、重试计数（可注入失败的假端点）、comple
 | P1 | CMake（OPENSSL_SUPPORT + OpenSSL::SSL + option）；BlockQueue/QueueBodyReader 提取为 `http/pushpull.h`（server 驱动同步改用）；配置解析与校验；ClientPool；签名衔接管线；控制面 head/delete/bucket CRUD；错误映射骨架；`parse_iso8601`；registry 注册 | in-process 远端上控制面用例过；既有全量单测不回归 | ✅ |
 | P2 | GET 数据面（pump + ResponseHandler + BlockQueue、Range、取消）；list_objects / list_buckets XML 解析 | run_backend_suite 读/列路径过；取消专项测试过 | ✅ |
 | P3 | PUT / upload_part 流式（拉转拉 + UNSIGNED-PAYLOAD + MD5 校验）；multipart 全套（含 200-错误体处理） | `run_backend_suite(CloudProxyBackend)` 全绿 | ✅ |
-| P4 | 重试/退避、超时细化、指标、日志；无长度 body 路径决断（NotImplemented 或 TRAILER 组帧）；`control_in_pump` 压测定默认值 | 故障注入专项测试过 | 重试/退避/超时/日志 ✅；无长度 body 已定为 NotImplemented；指标与 `control_in_pump` 未做 |
+| P4 | 重试/退避、超时细化、指标、日志；无长度 body 路径决断（NotImplemented 或 TRAILER 组帧）；`control_in_pump` 压测定默认值 | 故障注入专项测试过 | ✅ 全部落地（2026-07-31）：指标见 §8.2；`control_in_pump` 压测定默认 false（§2.3）；顺带实现 `force_path_style: false` vhost（§7） |
 | P5 | e2e 双实例脚本；tiered 对接（§9 清单）；docs/tiered-storage.md P5 状态更新 | e2e 过；tiered + cloudproxy 冒烟过 | ✅（`e2e_cloudproxy` + `e2e_tiered_cloudproxy`） |

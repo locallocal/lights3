@@ -1,11 +1,11 @@
 # 分层存储：冷数据下沉公有云
 
-> 状态：P1–P5 已实现（`src/storage/tiered/`），cloud 侧经 `IStorageBackend`
+> 状态：P1–P5 全部实现（`src/storage/tiered/`，P4 剩余项 2026-07-31 收尾：
+> §9 对账工具 + GC 失败条目指数退避），cloud 侧经 `IStorageBackend`
 > 抽象接入，CI 用 MemoryBackend 充当云端全覆盖（单测 `test_tiered.cc` +
 > `e2e_tiered`）；P5 的真实 CloudProxyBackend 见
 > [cloudproxy-backend.md](cloudproxy-backend.md)，组合场景由
-> `e2e_tiered_cloudproxy` 验收。§9 的对账工具尚未实现；GC 重试简化为按轮
-> 周期重试（未做指数退避）。
+> `e2e_tiered_cloudproxy` 验收。
 
 ## 1. 目标与非目标
 
@@ -269,6 +269,10 @@ backends:
     cache_fill_on_range: true         # Range GET 是否触发后台整对象回迁
     max_concurrent_transfers: 4
     # quota_bytes: 500GiB             # 可选逻辑配额，叠加在 statvfs 之上
+    gc_retry_base: 60s                # GC 失败条目退避基数（delay = base × 2^n，§9）
+    gc_retry_cap: 1h                  # 退避上限
+    reconcile_interval: 1d            # 双向对账周期（§9）；0 = 关（scan_interval=0 时全停）
+    reconcile_orphans: rebuild        # 云端孤儿处置：rebuild（默认，重建 stub）| delete
 
 buckets:
   default_backend: localdata
@@ -285,15 +289,27 @@ buckets:
 | 故障 | 行为 |
 | --- | --- |
 | 云端不可达（GET remote） | 透传云端错误映射（对齐 cloudproxy：远端 5xx → 502/503 S3 错误码）；本地 `local`/`cached` 对象完全不受影响 |
-| 云端不可达（scanner/GC） | 本轮跳过，指数退避；判冷积压无副作用 |
+| 云端不可达（scanner/GC） | 本轮跳过；GC 失败条目按指数退避重排（`attempts`/`retry_at` 持久化在条目 TSV，重启不清零；delay = `gc_retry_base` × 2^n 钳制 `gc_retry_cap`），未到点条目零云端访问。判冷积压无副作用 |
 | 上传后崩溃、stub 未提交 | 云端孤儿副本，下轮幂等覆盖或对账清理 |
 | stub 提交一半崩溃（§5.2 b/c 之间） | sidecar 为准走云端读，数据文件下轮补回收 |
 | 缓存回填中断连/ENOSPC | TmpFile 丢弃/降级透传，客户端无感知 |
 | 本地 stub 丢失（人为误删） | 对账工具从云端 `x-amz-meta-lights3-*` 冗余头重建 sidecar |
 
-**对账任务**（低频，默认每天）：遍历云端 `remote_bucket` 与本地 stub 集合做
-双向 diff——云端有、本地无 → 重建 stub 或删除（可配置）；本地 remote、
-云端无 → 告警（数据丢失，绝不静默删 stub）。
+**对账任务**（P4 收尾已实现，`run_reconcile_once` 手动钩子 + 独立低频定时器，
+默认每天）：逐 bucket 遍历云端与本地对象集合做双向 diff——
+
+- **正向（云端有、本地无）**：默认从云端 `x-amz-meta-lights3-*` 冗余头重建
+  stub（原始 etag/content-type/user meta 全还原）；`reconcile_orphans: delete`
+  则删除云副本回收存储费。无冗余头的对象视为外来（远端 bucket 可能与他方
+  共用），告警跳过、绝不动。**防误判三道守卫**：GC 队列快照（待删副本不是
+  孤儿——重建会复活刚 DELETE 的对象）、inflight 表（下沉在途的上传件不是
+  孤儿）、per-key 锁内复核本地现状 + 云端 etag 后才动手；
+- **本地已回到 local 的陈旧云副本**（GC 丢单形态）：本地全量在手，删除恒
+  安全，两种模式下都直接删；
+- **反向（本地 remote、云端无/etag 不符）**：先 HEAD 现点复核（列举快照与
+  并发下沉有竞态），确认缺失后告警计数（数据丢失信号），**绝不静默删
+  stub**——对象保留在列表中供人工介入；cached 引用失效只降级告警（数据仍
+  在本地，下轮判冷重新上传）。
 
 ## 10. 实施拆分
 
@@ -302,7 +318,7 @@ buckets:
 | P1 | sidecar 扩展字段 + stub 读写路径（GET/HEAD/List 识别 tier），云侧用 MemoryBackend；手动触发下沉/回迁的测试钩子 | 后端一致性套件全绿 + tier 状态机单测 | ✅ |
 | P2 | TierScanner（判冷 + 水位）、TierIndex 持久化、per-key 锁与冲突矩阵测试 | 并发 PUT/GET/下沉压测无脏数据 | ✅ |
 | P3 | Tee 缓存回填 + 空间兜底降级 + single-flight | 断连/ENOSPC 注入测试 | ✅ |
-| P4 | GC 队列 + 对账工具 | 崩溃注入后对账收敛 | GC 队列 ✅；对账工具未做 |
+| P4 | GC 队列 + 对账工具 | 崩溃注入后对账收敛 | ✅ 全部落地（对账工具 + GC 指数退避 2026-07-31 收尾；stub 丢失重建/删除模式/防复活/反向告警/退避恢复专项全绿） |
 | P5 | 接入真实 CloudProxyBackend（其自身为独立特性，见 docs/cloudproxy-backend.md） | 对公有云端到端 | ✅（`e2e_tiered_cloudproxy` 双实例组合） |
 
 P1–P4 完全不依赖云 SDK，`tiered` + `memory` 组合即可在 CI 全覆盖，

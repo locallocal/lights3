@@ -34,6 +34,31 @@ struct TieredConfig {
     bool cache_fill_on_range = true;          // Range 命中 remote 时后台整对象回迁
     int max_concurrent_transfers = 4;
     uint64_t quota_bytes = 0;                 // 0 = 不启用逻辑配额
+    // GC 失败条目的指数退避（docs/tiered-storage.md §9）：delay = base × 2^attempts，
+    // 钳制到 cap；条目级持久化（attempts/retry_at 随 TSV 落盘，重启不清零）
+    int64_t gc_retry_base_sec = 60;
+    int64_t gc_retry_cap_sec = 3600;
+    // 对账（§9）：默认每日；0 = 关闭（测试用手动钩子）。孤儿处置默认重建 stub
+    //（绝不销毁数据；删除模式回收云端存储费但误判即丢副本）
+    int64_t reconcile_interval_sec = 86400;
+    bool reconcile_delete_orphans = false;
+};
+
+// run_gc_once() 的统计（退避/测试断言用）
+struct TierGcStats {
+    uint64_t resolved = 0;       // 条目落地移除（删除成功 / 云端本就没有 / 活引用作废 / 损坏）
+    uint64_t removed_cloud = 0;  // 实际删除的云端孤儿副本
+    uint64_t deferred = 0;       // 退避未到点，本轮跳过
+    uint64_t failed = 0;         // 本轮失败，已按指数退避重排
+};
+
+// run_reconcile_once() 的双向对账统计（docs/tiered-storage.md §9）
+struct TierReconcileStats {
+    uint64_t cloud_objects = 0;    // 云端遍历到的对象数
+    uint64_t stubs_rebuilt = 0;    // 云端有、本地无 → 从冗余头重建 stub
+    uint64_t orphans_deleted = 0;  // 云端孤儿删除（delete 模式，或本地 local 级的陈旧副本）
+    uint64_t orphans_skipped = 0;  // 不可裁决（无 lights3 冗余头 / etag 歧义）→ 告警跳过
+    uint64_t refs_missing = 0;     // 本地 remote、云端无 → 告警（数据丢失，绝不删 stub）
 };
 
 class TieredBackend final : public IStorageBackend,
@@ -92,8 +117,14 @@ public:
     Task<void> promote_object(std::string bucket, std::string key);
     // 一轮扫描：判冷 + 空间水位回收 + 崩溃恢复（remote 但数据未回收）+ atime 快照
     Task<void> scan_once();
-    // 消费一轮 GC 队列：删除孤儿云副本（校验 etag，绝不删活副本）
-    Task<void> run_gc_once();
+    // 消费一轮 GC 队列：删除孤儿云副本（校验 etag，绝不删活副本）；失败条目按
+    // 指数退避重排（attempts/retry_at 持久化在条目 TSV，重启不清零）
+    Task<TierGcStats> run_gc_once();
+    // 双向对账（docs/tiered-storage.md §9，低频默认每日）：云端有本地无 → 从
+    // lights3-* 冗余头重建 stub（默认）或删除（reconcile_delete_orphans）；本地
+    // remote 云端无 → 告警绝不删 stub。GC 队列快照 + inflight 守卫防误判
+    //（待删副本不是孤儿、下沉在途不是孤儿——重建会复活刚 DELETE 的对象）
+    Task<TierReconcileStats> run_reconcile_once();
 
     const TieredConfig& config() const { return cfg_; }
 
@@ -134,11 +165,16 @@ private:
     // 后台协程管理：core/background.h 等待组（spawn 计数 + close() 等待归零）
     void schedule_scan();
     void schedule_snapshot();
+    void schedule_reconcile();  // 独立低频定时器（reconcile_interval；0 = 关）
 
     Task<void> demote_quiet(std::string bucket, std::string key);
     Task<void> promote_quiet(std::string bucket, std::string key);
     Task<void> scan_and_gc();
     Task<void> snapshot_task();
+    Task<void> reconcile_task();
+    // 对账的孤儿处置（per-key 锁内复核后执行）；返回是否动了云端/本地
+    Task<void> reconcile_orphan(std::string bucket, std::string key, std::string cloud_etag,
+                                bool local_is_live, TierReconcileStats& st);
 
     std::shared_ptr<LocalFsBackend> local_;
     std::shared_ptr<IStorageBackend> cloud_;
@@ -162,7 +198,8 @@ private:
     // 定时器 id 只在 bg_.if_open 内写入；begin_close 后不再变更（读侧无需加锁）。
     // 未 arm 时为 0：TimerQueue id 从 1 起，cancel(0) 为安全 no-op
     TimerQueue::Id scan_timer_ = 0;
-    TimerQueue::Id snap_timer_ = 0;  // atime 快照周期（§4.3，固定 5 min）
+    TimerQueue::Id snap_timer_ = 0;       // atime 快照周期（§4.3，固定 5 min）
+    TimerQueue::Id reconcile_timer_ = 0;  // 对账周期（§9，默认 1d）
 };
 
 }  // namespace lights3::storage

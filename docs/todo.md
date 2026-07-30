@@ -23,7 +23,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 | SQLite meta S4（打磨） | duostore-sqlite-meta.md §10 | ✅ 已完成（2026-07-30） |
 | RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | ✅ 已完成（2026-07-30，吞吐对比数据留待集群环境） |
 | TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | ✅ 已完成（2026-07-30，上游 PR 回馈除外） |
-| tiered 对账工具（P4 剩余） | tiered-storage.md §9/§10 | 未做 |
+| tiered 对账工具（P4 剩余） | tiered-storage.md §9/§10 | ✅ 已完成（2026-07-31，含 GC 指数退避） |
 | cloudproxy 指标 + control_in_pump（P4 剩余） | cloudproxy-backend.md §8.2/§2.3 | ✅ 已完成（2026-07-31，含 vhost） |
 | 凭证管理二期 | credential-management.md §9 | 未开始 |
 
@@ -281,13 +281,22 @@ SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 - 验收：202 用例全绿（新增 vhost 套件 / control_in_pump 套件+压测 / 指标
   断言 / 配置解析）；全构建矩阵 + e2e 绿
 
-### 3.4 tiered 剩余
+### 3.4 tiered 剩余（✅ 已完成，2026-07-31；演进项除外）
 
-- §9 对账工具（P4 剩余）：默认每日双向 diff——云端有本地无 → 重建 stub 或删除；
-  本地 remote 云端无 → 告警
-- GC 重试指数退避（目前简化为按轮周期重试）
-- 演进项：抽象 local 侧接口以支持 duostore 作 local 侧（目前绑定 localfs 磁盘布局，
-  duostore-backend.md §13.1）
+- ✅ §9 对账工具：`run_reconcile_once` 双向 diff（手动钩子 + `reconcile_interval`
+  独立定时器，默认 1d）——正向孤儿默认从 lights3-* 冗余头重建 stub
+  （`reconcile_orphans: delete` 可选删除；无冗余头的外来对象告警跳过）；
+  防误判三道守卫：GC 队列快照（防复活刚 DELETE 的对象）/ inflight 表 /
+  锁内复核 + 云端 etag 现点验证；本地 local 级陈旧副本（GC 丢单）删除恒
+  安全两模式皆删；反向 refs_missing 先 HEAD 复核再告警，绝不删 stub
+- ✅ GC 重试指数退避：失败条目 `attempts`/`retry_at` 持久化在 TSV（重启不
+  清零，老条目缺省立即可试向后兼容）；delay = `gc_retry_base`(60s) × 2^n
+  钳制 `gc_retry_cap`(1h)；未到点条目零云端访问；`run_gc_once` 返回
+  TierGcStats 供断言
+- 验收：退避（失败→翻倍→恢复变现）/ 对账（重建/删除模式/防复活/反向告警/
+  配置校验）专项 5 例 + 全量 207 用例绿；asan/tsan 连跑零告警
+- 演进项（另立特性，不在本期）：抽象 local 侧接口以支持 duostore 作 local 侧
+  （目前绑定 localfs 磁盘布局，duostore-backend.md §13.1）
 
 ### 3.5 凭证管理二期（credential-management.md §9）
 

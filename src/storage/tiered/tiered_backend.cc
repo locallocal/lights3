@@ -175,6 +175,7 @@ TieredBackend::TieredBackend(std::shared_ptr<LocalFsBackend> local,
     load_atime_snapshot();
     schedule_scan();
     schedule_snapshot();
+    schedule_reconcile();
 }
 
 TieredBackend::~TieredBackend() {
@@ -183,6 +184,7 @@ TieredBackend::~TieredBackend() {
     // 后台协程持有的裸 this 不再被引用，等计数归零即可安全析构
     TimerQueue::instance().cancel(scan_timer_);
     TimerQueue::instance().cancel(snap_timer_);
+    TimerQueue::instance().cancel(reconcile_timer_);
     bg_.wait_idle();
 }
 
@@ -222,6 +224,20 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
     if (auto v = param("max_concurrent_transfers"); !v.empty())
         tc.max_concurrent_transfers = std::stoi(v);
     if (auto v = param("quota_bytes"); !v.empty()) tc.quota_bytes = parse_size(v);
+    if (auto v = param("gc_retry_base"); !v.empty()) tc.gc_retry_base_sec = parse_duration_sec(v);
+    if (auto v = param("gc_retry_cap"); !v.empty()) tc.gc_retry_cap_sec = parse_duration_sec(v);
+    if (auto v = param("reconcile_interval"); !v.empty())
+        tc.reconcile_interval_sec = parse_duration_sec(v);
+    if (auto v = param("reconcile_orphans"); !v.empty()) {
+        if (v == "rebuild") tc.reconcile_delete_orphans = false;
+        else if (v == "delete") tc.reconcile_delete_orphans = true;
+        else
+            throw std::runtime_error("tiered backend '" + cfg.name +
+                                     "': reconcile_orphans must be rebuild|delete");
+    }
+    if (tc.gc_retry_base_sec < 1 || tc.gc_retry_cap_sec < tc.gc_retry_base_sec)
+        throw std::runtime_error("tiered backend '" + cfg.name +
+                                 "': gc_retry_base must be >= 1s and <= gc_retry_cap");
     if (tc.space_low_watermark > tc.space_high_watermark)
         throw std::runtime_error("tiered backend '" + cfg.name + "': low watermark > high");
     return std::make_shared<TieredBackend>(std::move(local), std::move(cloud), std::move(pool), tc);
@@ -663,23 +679,34 @@ void TieredBackend::enqueue_gc(std::string_view bucket, std::string_view key,
     }
 }
 
-Task<void> TieredBackend::run_gc_once() {
+Task<TierGcStats> TieredBackend::run_gc_once() {
     co_await pool_->schedule();
+    TierGcStats st;
     std::vector<fs::path> entries;
     std::error_code ec;
     for (auto& e : fs::directory_iterator(gc_dir_, ec))
         if (e.is_regular_file()) entries.push_back(e.path());
     std::sort(entries.begin(), entries.end());
 
+    const int64_t now = ::time(nullptr);
     for (auto& p : entries) {
         std::string bucket, key, etag;
+        int64_t attempts = 0, retry_at = 0;
         for (auto& [k, v] : fsutil::read_tsv(p)) {
             if (k == "bucket") bucket = v;
             else if (k == "key") key = v;
             else if (k == "etag") etag = v;
+            // 退避字段（§9）：老条目缺省 0 = 立即可试，向后兼容
+            else if (k == "attempts") std::from_chars(v.data(), v.data() + v.size(), attempts);
+            else if (k == "retry_at") std::from_chars(v.data(), v.data() + v.size(), retry_at);
         }
         if (bucket.empty() || key.empty() || etag.empty()) {
             fs::remove(p, ec);  // 损坏条目
+            ++st.resolved;
+            continue;
+        }
+        if (retry_at > now) {  // 指数退避未到点（§9），本轮跳过
+            ++st.deferred;
             continue;
         }
         if (inflight_contains(make_ikey(bucket, key))) continue;  // 下沉在途，下轮再看
@@ -689,19 +716,222 @@ Task<void> TieredBackend::run_gc_once() {
         TierInfo cur = read_tier_only(local_->object_data_path(bucket, key));
         if (cur.tier != Tier::kLocal && cur.remote_etag == etag) {
             fs::remove(p, ec);
+            ++st.resolved;
             continue;
         }
         try {
             auto cm = co_await cloud_->head_object(bucket, key);
             // 只删 etag 吻合的孤儿；不符说明云端已是新副本，条目直接作废
-            if (std::string(strip_etag_quotes(cm.etag)) == etag)
+            if (std::string(strip_etag_quotes(cm.etag)) == etag) {
                 co_await cloud_->delete_object(bucket, key);
+                ++st.removed_cloud;
+            }
             fs::remove(p, ec);
+            ++st.resolved;
         } catch (const S3Error& e) {
-            if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket)
+            if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket) {
                 fs::remove(p, ec);  // 云端本就没有
-            // 其他错误（云端不可达）：保留条目，下轮重试直至成功
+                ++st.resolved;
+                continue;
+            }
+            // 云端不可达等：指数退避重排（delay = base × 2^attempts 钳制 cap，§9），
+            // 条目原地重写——attempts/retry_at 随 TSV 持久化，重启不清零
+            ++st.failed;
+            int64_t delay = cfg_.gc_retry_base_sec;
+            for (int64_t i = 0; i < std::min<int64_t>(attempts, 30) &&
+                                delay < cfg_.gc_retry_cap_sec; ++i)
+                delay *= 2;
+            delay = std::min(delay, cfg_.gc_retry_cap_sec);
+            try {
+                fsutil::write_tsv(p, local_->staging() / "put",
+                                  {{"bucket", bucket},
+                                   {"key", key},
+                                   {"etag", etag},
+                                   {"attempts", std::to_string(attempts + 1)},
+                                   {"retry_at", std::to_string(now + delay)}});
+            } catch (const std::exception& we) {
+                // 重写失败：条目保持原样（无退避字段则下轮立即重试），只是退避失效
+                LOG_WARN("tiered: gc backoff rewrite for {}/{} failed: {}", bucket, key,
+                         we.what());
+            }
+            LOG_WARN("tiered: gc delete {}/{} failed ({}), retry in {}s (attempt {})", bucket,
+                     key, e.message, delay, attempts + 1);
         }
+    }
+    co_return st;
+}
+
+// ---------- 对账（docs/tiered-storage.md §9）----------
+
+Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
+    co_await pool_->schedule();
+    TierReconcileStats st;
+    std::error_code ec;
+
+    // GC 队列快照：已排队待删的云副本不是孤儿——重建会复活刚 DELETE 的对象
+    //（本地删、云删条目还没变现的窗口），统一跳过等 GC 收敛
+    std::set<std::string> gc_pending;  // "bucket/key\tetag"
+    for (auto& e : fs::directory_iterator(gc_dir_, ec)) {
+        if (!e.is_regular_file()) continue;
+        std::string b, k, t;
+        for (auto& [kk, vv] : fsutil::read_tsv(e.path())) {
+            if (kk == "bucket") b = vv;
+            else if (kk == "key") k = vv;
+            else if (kk == "etag") t = vv;
+        }
+        if (!b.empty() && !k.empty()) gc_pending.insert(make_ikey(b, k) + "\t" + t);
+    }
+
+    for (auto& be : fs::directory_iterator(local_->root(), ec)) {
+        if (!be.is_directory() || !fs::exists(be.path() / fsutil::kBucketMarker)) continue;
+        std::string bucket = be.path().filename().string();
+
+        // 本地视图：key → tier（对象存在与否以数据文件为准；tier=local 也须在册
+        // ——判孤儿要区分"本地无对象"与"本地已回到 local 的陈旧云副本"）
+        std::unordered_map<std::string, TierInfo> local_map;
+        for (auto it = fs::recursive_directory_iterator(be.path(), ec);
+             it != fs::recursive_directory_iterator(); ++it) {
+            if (!it->is_regular_file()) continue;
+            std::string name = it->path().filename().string();
+            if (name == fsutil::kBucketMarker || name.ends_with(fsutil::kSidecarSuffix)) continue;
+            std::string key = fs::relative(it->path(), be.path()).generic_string();
+            local_map.emplace(key, read_tier_only(it->path()));
+        }
+
+        // 云端分页遍历（恒用 start-after 语义的 next_token）；云端无此 bucket =
+        // 从未下沉，空集
+        std::unordered_map<std::string, std::string> cloud_etags;
+        ListOptions opt;
+        opt.max_keys = 1000;
+        for (;;) {
+            ListResult lr;
+            try {
+                lr = co_await cloud_->list_objects(bucket, opt);
+            } catch (const S3Error& e) {
+                if (e.code == S3ErrorCode::NoSuchBucket) break;
+                throw;  // 云端不可达：本轮失败，调度侧下轮重试
+            }
+            for (auto& cm : lr.objects) {
+                ++st.cloud_objects;
+                std::string ce(strip_etag_quotes(cm.etag));
+                cloud_etags[cm.key] = ce;
+                auto it = local_map.find(cm.key);
+                if (it != local_map.end()) {
+                    const TierInfo& t = it->second;
+                    if (t.tier != Tier::kLocal) {
+                        if (t.remote_etag != ce) {
+                            // 云端版本与本地引用不一致（失败下沉残留/在途覆盖）：
+                            // 正向不动云端，引用缺失由反向路径裁决
+                            LOG_WARN("tiered reconcile: {}/{} cloud etag {} != referenced {}",
+                                     bucket, cm.key, ce, t.remote_etag);
+                            ++st.orphans_skipped;
+                        }
+                        continue;  // 关联正常
+                    }
+                    // 本地已回到 local（GC 丢单的陈旧副本）：本地全量在手，删除恒安全
+                    co_await reconcile_orphan(bucket, cm.key, ce, /*local_is_live=*/true, st);
+                    continue;
+                }
+                if (gc_pending.count(make_ikey(bucket, cm.key) + "\t" + ce)) continue;
+                if (inflight_contains(make_ikey(bucket, cm.key))) continue;  // 下沉在途
+                co_await reconcile_orphan(bucket, cm.key, ce, /*local_is_live=*/false, st);
+            }
+            if (!lr.is_truncated || lr.next_token.empty()) break;
+            opt.start_after = lr.next_token;
+        }
+
+        // 反向：本地 remote/cached 引用的云副本必须在（§9：告警计数，绝不删 stub）
+        for (auto& [key, t] : local_map) {
+            if (t.tier == Tier::kLocal) continue;
+            auto it = cloud_etags.find(key);
+            if (it != cloud_etags.end() && it->second == t.remote_etag) continue;
+            if (inflight_contains(make_ikey(bucket, key))) continue;  // 下沉/回填中间态
+            // 列举快照与状态变更有竞态（对账期间刚完成下沉）：HEAD 现点复核再裁决
+            bool present = false;
+            try {
+                auto cm = co_await cloud_->head_object(bucket, key);
+                present = std::string(strip_etag_quotes(cm.etag)) == t.remote_etag;
+            } catch (const S3Error&) {
+            }
+            if (present) continue;
+            if (t.tier == Tier::kRemote) {
+                ++st.refs_missing;
+                LOG_ERROR("tiered reconcile: stub {}/{} references cloud copy (etag {}) that "
+                          "is gone — data loss signal, keeping stub for manual inspection",
+                          bucket, key, t.remote_etag);
+            } else {
+                // cached：数据仍在本地，只失去云副本——下轮判冷会重新上传
+                LOG_WARN("tiered reconcile: cached {}/{} lost cloud copy (etag {}); will "
+                         "re-upload on next demote",
+                         bucket, key, t.remote_etag);
+            }
+        }
+    }
+    co_return st;
+}
+
+Task<void> TieredBackend::reconcile_orphan(std::string bucket, std::string key,
+                                           std::string cloud_etag, bool local_is_live,
+                                           TierReconcileStats& st) {
+    auto lk = co_await key_lock(bucket, key).acquire();
+    fs::path path = local_->object_data_path(bucket, key);
+    // 锁内复核本地现状：列举期间可能已 PUT/下沉/DELETE，状态变了就让位不裁决
+    TierInfo t;
+    bool exists = true;
+    try {
+        fsutil::load_object_meta(path, key, &t);
+    } catch (const S3Error&) {
+        exists = false;
+    }
+    if (local_is_live ? !(exists && t.tier == Tier::kLocal) : exists) co_return;
+
+    try {
+        auto cm = co_await cloud_->head_object(bucket, key);
+        if (std::string(strip_etag_quotes(cm.etag)) != cloud_etag) co_return;  // 云端已改写
+        if (local_is_live || cfg_.reconcile_delete_orphans) {
+            // 本地 local 级的陈旧副本删除恒安全（全量在手）；纯孤儿删除按配置
+            co_await cloud_->delete_object(bucket, key);
+            ++st.orphans_deleted;
+            LOG_INFO("tiered reconcile: deleted orphan cloud copy {}/{} (etag {})", bucket, key,
+                     cloud_etag);
+            co_return;
+        }
+        // 重建 stub（默认）：只信 lights3-* 冗余头（§4.2/§9）——无头即外来对象，
+        // 不动也不删（远端 bucket 可能与他方共用）
+        auto oe = cm.user_meta.find("lights3-etag");
+        if (oe == cm.user_meta.end() || oe->second.empty()) {
+            ++st.orphans_skipped;
+            LOG_WARN("tiered reconcile: cloud object {}/{} lacks lights3 redundant headers, "
+                     "skipping (foreign object?)",
+                     bucket, key);
+            co_return;
+        }
+        ObjectMeta nm;
+        nm.key = key;
+        nm.etag = oe->second;
+        nm.size = cm.size;
+        nm.last_modified = cm.last_modified;
+        if (auto ct = cm.user_meta.find("lights3-content-type"); ct != cm.user_meta.end())
+            nm.content_type = ct->second;
+        for (auto& [mk, mv] : cm.user_meta)
+            if (mk.rfind("lights3-", 0) != 0) nm.user_meta.emplace(mk, mv);
+        std::error_code ec;
+        fs::create_directories(path.parent_path(), ec);
+        fsutil::commit_stub(path, nm,
+                            TierInfo{Tier::kRemote, cloud_etag,
+                                     util::iso8601(std::chrono::system_clock::now())},
+                            local_->staging() / "put");
+        touch_atime(bucket, key);
+        ++st.stubs_rebuilt;
+        LOG_INFO("tiered reconcile: rebuilt stub {}/{} from cloud redundant headers", bucket,
+                 key);
+    } catch (const S3Error& e) {
+        if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket)
+            co_return;  // 复核时已消失：他人处理完毕
+        // 单对象失败只跳过（head/delete 的云端错误），整轮继续
+        ++st.orphans_skipped;
+        LOG_WARN("tiered reconcile: orphan handling for {}/{} failed: {}", bucket, key,
+                 e.message);
     }
     co_return;
 }
@@ -815,6 +1045,27 @@ Task<void> TieredBackend::snapshot_task() {
     save_atime_snapshot();
 }
 
+void TieredBackend::schedule_reconcile() {
+    // scan_interval=0 是后台任务总开关（测试用手动钩子）；对账另有独立周期
+    if (cfg_.scan_interval_sec <= 0 || cfg_.reconcile_interval_sec <= 0) return;
+    bg_.if_open([&] {
+        reconcile_timer_ = TimerQueue::instance().add(
+            std::chrono::seconds(cfg_.reconcile_interval_sec), [this] {
+                bg_.spawn(reconcile_task());
+                schedule_reconcile();
+            });
+    });
+}
+
+Task<void> TieredBackend::reconcile_task() {
+    try {
+        co_await run_reconcile_once();
+    } catch (const std::exception& e) {
+        // 云端不可达等：本轮放弃，下个周期重试（§9 低频任务，无补偿窗口需求）
+        LOG_WARN("tiered: reconcile round failed: {} (retry next interval)", e.what());
+    }
+}
+
 Task<void> TieredBackend::scan_and_gc() {
     co_await run_gc_once();
     co_await scan_once();
@@ -826,6 +1077,7 @@ Task<void> TieredBackend::close() {
     // 组锁（spawn/if_open）——begin_close 后定时器 id 不再变更，读取无需加锁
     TimerQueue::instance().cancel(scan_timer_);
     TimerQueue::instance().cancel(snap_timer_);
+    TimerQueue::instance().cancel(reconcile_timer_);
     // 阻塞等待在调用方线程上进行；后台任务在池线程收尾，不会互相占用
     bg_.wait_idle();
     save_atime_snapshot();

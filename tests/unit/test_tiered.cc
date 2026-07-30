@@ -38,11 +38,18 @@ PutResult put(IStorageBackend& b, const std::string& bkt, const std::string& key
 
 using TmpDir = backend_suite::TmpDir;
 
-// 计数包装：断言 tiered 何时真正触碰云端
+// 计数包装：断言 tiered 何时真正触碰云端；fail_cloud 模拟云端不可达（GC 退避/
+// 对账失败路径注入）
 class CountingCloud final : public IStorageBackend {
 public:
     std::shared_ptr<MemoryBackend> inner = std::make_shared<MemoryBackend>();
     std::atomic<int> puts{0}, gets{0}, heads{0}, deletes{0};
+    std::atomic<bool> fail_cloud{false};
+
+    void require_up() const {
+        if (fail_cloud)
+            throw s3::S3Error(s3::S3ErrorCode::InternalError, "injected: cloud unreachable");
+    }
 
     Task<void> create_bucket(std::string_view b) override {
         co_return co_await inner->create_bucket(b);
@@ -68,13 +75,16 @@ public:
     }
     Task<ObjectMeta> head_object(std::string_view b, std::string_view k) override {
         ++heads;
+        require_up();
         co_return co_await inner->head_object(b, k);
     }
     Task<void> delete_object(std::string_view b, std::string_view k) override {
         ++deletes;
+        require_up();
         co_return co_await inner->delete_object(b, k);
     }
     Task<ListResult> list_objects(std::string_view b, const ListOptions& o) override {
+        require_up();
         co_return co_await inner->list_objects(b, o);
     }
     Task<std::string> create_multipart(std::string_view b, std::string_view k,
@@ -287,6 +297,210 @@ TEST(tiered_gc_never_deletes_live_copy) {
     // 活副本未被误删，对象仍可读
     auto got = sync_wait(f.tiered->get_object("bkt", "live.bin", std::nullopt));
     CHECK(read_all(*got.body) == data);
+}
+
+// GC 云端不可达：条目指数退避（attempts/retry_at 持久化在 TSV，重启不清零），
+// 到点后恢复变现（todo §3.4；docs/tiered-storage.md §9）
+TEST(tiered_gc_retry_exponential_backoff) {
+    Fixture f;
+    sync_wait(f.tiered->create_bucket("bkt"));
+    put(*f.tiered, "bkt", "g.bin", make_data(8 * 1024));
+    sync_wait(f.tiered->demote_object("bkt", "g.bin"));
+    sync_wait(f.tiered->delete_object("bkt", "g.bin"));  // 云副本入 GC
+    CHECK_EQ(f.gc_entries(), size_t(1));
+
+    f.cloud->fail_cloud = true;
+    auto st1 = sync_wait(f.tiered->run_gc_once());
+    CHECK_EQ(st1.failed, uint64_t(1));
+    CHECK_EQ(f.gc_entries(), size_t(1));  // 条目保留
+
+    fs::path entry;
+    for (auto& e : fs::directory_iterator(f.tmp.path / "staging/tier/gc")) entry = e.path();
+    auto read_entry = [&] {
+        std::map<std::string, std::string> kv;
+        for (auto& [k, v] : fsutil::read_tsv(entry)) kv[k] = v;
+        return kv;
+    };
+    auto kv1 = read_entry();
+    CHECK_EQ(kv1["attempts"], "1");
+    int64_t now = ::time(nullptr);
+    int64_t ra1 = std::stoll(kv1["retry_at"]);
+    CHECK(ra1 - now >= 50 && ra1 - now <= 70);  // base=60s
+
+    // 未到点：本轮跳过，云端零访问
+    int heads_before = f.cloud->heads.load();
+    auto st2 = sync_wait(f.tiered->run_gc_once());
+    CHECK_EQ(st2.deferred, uint64_t(1));
+    CHECK_EQ(f.cloud->heads.load(), heads_before);
+
+    // 手动拨回到点（模拟退避窗口过去）、仍失败 → attempts=2、退避翻倍（≈120s）
+    auto rewind = [&] {
+        auto kv = read_entry();
+        std::ofstream out(entry, std::ios::trunc);
+        out << "bucket\t" << kv["bucket"] << "\nkey\t" << kv["key"] << "\netag\t" << kv["etag"]
+            << "\nattempts\t" << kv["attempts"] << "\nretry_at\t0\n";
+    };
+    rewind();
+    auto st3 = sync_wait(f.tiered->run_gc_once());
+    CHECK_EQ(st3.failed, uint64_t(1));
+    auto kv2 = read_entry();
+    CHECK_EQ(kv2["attempts"], "2");
+    now = ::time(nullptr);
+    int64_t ra2 = std::stoll(kv2["retry_at"]);
+    CHECK(ra2 - now >= 110 && ra2 - now <= 130);
+
+    // 云端恢复 + 到点 → 变现收敛
+    f.cloud->fail_cloud = false;
+    rewind();
+    auto st4 = sync_wait(f.tiered->run_gc_once());
+    CHECK_EQ(st4.removed_cloud, uint64_t(1));
+    CHECK_EQ(st4.resolved, uint64_t(1));
+    CHECK_EQ(f.gc_entries(), size_t(0));
+}
+
+// 对账正向（docs/tiered-storage.md §9）：人为误删的 stub 从 lights3-* 冗余头重建；
+// 无冗余头的外来对象跳过不动
+TEST(tiered_reconcile_rebuilds_lost_stub) {
+    Fixture f;
+    sync_wait(f.tiered->create_bucket("bkt"));
+    ObjectMeta meta;
+    meta.content_type = "text/x-test";
+    meta.user_meta["color"] = "blue";
+    std::string data = make_data(8 * 1024);
+    put(*f.tiered, "bkt", "dir/lost.bin", data, meta);
+    auto orig = sync_wait(f.tiered->head_object("bkt", "dir/lost.bin"));
+    sync_wait(f.tiered->demote_object("bkt", "dir/lost.bin"));
+
+    // 人为误删本地 stub + sidecar（§9 故障行）
+    fs::remove(f.data_path("bkt", "dir/lost.bin"));
+    fs::remove(fs::path(f.data_path("bkt", "dir/lost.bin").string() + fsutil::kSidecarSuffix));
+    // 外来对象：直接写进云端 bucket，无 lights3 冗余头
+    {
+        http::StringBodyReader b2("foreign");
+        sync_wait(f.cloud->inner->put_object("bkt", "foreign.bin", {}, b2));
+    }
+
+    auto st = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st.cloud_objects, uint64_t(2));
+    CHECK_EQ(st.stubs_rebuilt, uint64_t(1));
+    CHECK_EQ(st.orphans_skipped, uint64_t(1));  // foreign.bin
+    CHECK_EQ(st.orphans_deleted, uint64_t(0));
+    CHECK_EQ(st.refs_missing, uint64_t(0));
+
+    // 重建的 stub：meta 完整还原，走云端可读
+    CHECK(f.tier_of("bkt", "dir/lost.bin").tier == fsutil::Tier::kRemote);
+    auto m = sync_wait(f.tiered->head_object("bkt", "dir/lost.bin"));
+    CHECK_EQ(m.etag, orig.etag);
+    CHECK_EQ(m.size, orig.size);
+    CHECK_EQ(m.content_type, "text/x-test");
+    CHECK_EQ(m.user_meta.at("color"), "blue");
+    auto got = sync_wait(f.tiered->get_object("bkt", "dir/lost.bin", std::nullopt));
+    CHECK(read_all(*got.body) == data);
+    got.body.reset();
+    // 外来对象原样保留，且未生成本地对象
+    CHECK_EQ(sync_wait(f.cloud->inner->head_object("bkt", "foreign.bin")).size, uint64_t(7));
+    CHECK_THROWS_S3(sync_wait(f.tiered->head_object("bkt", "foreign.bin")),
+                    s3::S3ErrorCode::NoSuchKey);
+    // 收敛：再跑一轮无重建
+    auto st2 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st2.stubs_rebuilt, uint64_t(0));
+}
+
+// 对账删除模式 + GC 待删不复活 + 本地 local 级陈旧副本清理（§9）
+TEST(tiered_reconcile_delete_mode_and_stale_copy) {
+    TieredConfig cfg;
+    cfg.reconcile_delete_orphans = true;
+    Fixture f(cfg);
+    sync_wait(f.tiered->create_bucket("bkt"));
+    std::string data = make_data(4 * 1024);
+    put(*f.tiered, "bkt", "o.bin", data);
+    sync_wait(f.tiered->demote_object("bkt", "o.bin"));
+    sync_wait(f.tiered->delete_object("bkt", "o.bin"));  // GC 排队，云副本暂在
+    CHECK_EQ(f.gc_entries(), size_t(1));
+
+    // GC 待删条目在 → 对账既不重建也不删（防复活刚 DELETE 的对象），等 GC 变现
+    auto st1 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st1.cloud_objects, uint64_t(1));
+    CHECK_EQ(st1.stubs_rebuilt + st1.orphans_deleted, uint64_t(0));
+    sync_wait(f.tiered->run_gc_once());
+
+    // 纯孤儿（无 GC 条目）：delete 模式下即便带 lights3 头也删除
+    {
+        http::StringBodyReader b2("orphan");
+        ObjectMeta om;
+        om.user_meta["lights3-etag"] = "deadbeef";
+        sync_wait(f.cloud->inner->put_object("bkt", "orphan.bin", std::move(om), b2));
+    }
+    auto st2 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st2.orphans_deleted, uint64_t(1));
+    CHECK_THROWS_S3(sync_wait(f.cloud->inner->head_object("bkt", "orphan.bin")),
+                    s3::S3ErrorCode::NoSuchKey);
+
+    // 本地已回到 local 的陈旧云副本（GC 丢单形态）：删除恒安全（本地全量在手）
+    put(*f.tiered, "bkt", "s.bin", data);
+    sync_wait(f.tiered->demote_object("bkt", "s.bin"));
+    put(*f.tiered, "bkt", "s.bin", make_data(2 * 1024));  // 覆盖 → 旧副本入 GC
+    for (auto& e : fs::directory_iterator(f.tmp.path / "staging/tier/gc"))
+        fs::remove(e.path());  // 模拟 GC 丢单
+    auto st3 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st3.orphans_deleted, uint64_t(1));
+    CHECK(f.tier_of("bkt", "s.bin").tier == fsutil::Tier::kLocal);  // 本地不动
+    auto got = sync_wait(f.tiered->get_object("bkt", "s.bin", std::nullopt));
+    CHECK(read_all(*got.body) == make_data(2 * 1024));
+}
+
+// 对账反向（§9）：本地 remote、云端无 → 告警计数，绝不删 stub
+TEST(tiered_reconcile_reverse_alarm_keeps_stub) {
+    Fixture f;
+    sync_wait(f.tiered->create_bucket("bkt"));
+    put(*f.tiered, "bkt", "r.bin", make_data(4 * 1024));
+    sync_wait(f.tiered->demote_object("bkt", "r.bin"));
+    sync_wait(f.cloud->inner->delete_object("bkt", "r.bin"));  // 越过 GC 删云副本
+
+    auto st = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st.refs_missing, uint64_t(1));
+    CHECK(f.tier_of("bkt", "r.bin").tier == fsutil::Tier::kRemote);  // stub 保留
+    auto lr = sync_wait(f.tiered->list_objects("bkt", {}));
+    CHECK_EQ(lr.objects.size(), size_t(1));  // 供人工介入
+}
+
+// 对账/退避配置解析：合法参数落 config；非法 reconcile_orphans / gc_retry 范围报错
+TEST(tiered_reconcile_config_validation) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto try_build = [&](std::map<std::string, std::string> extra) {
+        std::vector<BackendConfig> cfgs = {
+            {"l", "localfs",
+             {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}},
+            {"m", "memory", {}}};
+        extra.emplace("local", "l");
+        extra.emplace("cloud", "m");
+        extra.emplace("scan_interval", "0s");
+        cfgs.push_back({"t", "tiered", std::move(extra)});
+        return StorageRegistry::build(cfgs, pool);
+    };
+    auto out = try_build({{"reconcile_interval", "12h"},
+                          {"reconcile_orphans", "delete"},
+                          {"gc_retry_base", "30s"},
+                          {"gc_retry_cap", "10m"}});
+    auto t = std::dynamic_pointer_cast<TieredBackend>(out.at("t"));
+    CHECK_EQ(t->config().reconcile_interval_sec, int64_t(12 * 3600));
+    CHECK(t->config().reconcile_delete_orphans);
+    CHECK_EQ(t->config().gc_retry_base_sec, int64_t(30));
+    CHECK_EQ(t->config().gc_retry_cap_sec, int64_t(600));
+    sync_wait(t->close());
+    for (const auto& bad : std::vector<std::map<std::string, std::string>>{
+             {{"reconcile_orphans", "maybe"}},
+             {{"gc_retry_base", "0s"}},
+             {{"gc_retry_base", "2h"}, {"gc_retry_cap", "1h"}}}) {
+        bool threw = false;
+        try {
+            try_build(bad);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
 }
 
 // scanner：cold_after=0 全量判冷下沉；崩溃恢复（remote 但数据未回收）补做 stub 化

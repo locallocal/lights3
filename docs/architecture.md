@@ -135,7 +135,8 @@ http:
   # base_domain: s3.local  # 非空时启用 virtual-host style 寻址
 
 runtime:
-  io_threads: 16           # 阻塞 IO 线程池大小（localfs、cloudproxy 共用）
+  io_threads: 16           # 阻塞 IO 线程池大小（各后端默认共用；后端可配
+                           # 同名键建专属池隔离，concurrency.md §3.1）
   max_inflight_requests: 1024
 
 auth:

@@ -435,3 +435,46 @@ TEST(tiered_registry_two_phase_build) {
     }
     CHECK(threw);
 }
+
+// per-backend 独立 IO 池（todo.md §3.2）：io_threads 参数为该后端建专属池
+// （任意 type 通用键），池观测指标挂 backend 标签；未配置的后端共享全局池
+// （无该指标）；非法值配置期报错
+TEST(registry_per_backend_thread_pool) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto metrics = std::make_shared<MetricsRegistry>();
+    std::vector<BackendConfig> cfgs;
+    cfgs.push_back({"fast", "localfs",
+                    {{"root", (tmp.path / "d").string()},
+                     {"staging", (tmp.path / "s").string()},
+                     {"io_threads", "3"}}});
+    cfgs.push_back({"mem", "memory", {}});
+    auto out = StorageRegistry::build(cfgs, pool, metrics);
+    CHECK_EQ(out.size(), size_t(2));
+
+    // 冒烟：专属池后端正常读写（IO 全走专属池）
+    auto& fast = *out.at("fast");
+    sync_wait(fast.create_bucket("bkt"));
+    backend_suite::put(fast, "bkt", "k", "hello dedicated pool");
+    auto got = sync_wait(fast.get_object("bkt", "k", std::nullopt));
+    CHECK_EQ(backend_suite::read_all(*got.body), "hello dedicated pool");
+
+    auto text = metrics->render();
+    CHECK(text.find("lights3_backend_pool_threads{backend=\"fast\"} 3") != std::string::npos);
+    CHECK(text.find("lights3_backend_pool_queue_depth{backend=\"fast\"}") !=
+          std::string::npos);
+    CHECK(text.find("lights3_backend_pool_completed{backend=\"fast\"}") != std::string::npos);
+    CHECK(text.find("{backend=\"mem\"}") == std::string::npos);  // 共享池后端无池指标
+
+    // 非法 io_threads：非整数 / 0 都在构建期报错（fail fast）
+    for (const char* bad : {"0", "many"}) {
+        std::vector<BackendConfig> bc = {{"m", "memory", {{"io_threads", bad}}}};
+        bool t = false;
+        try {
+            StorageRegistry::build(bc, pool);
+        } catch (const std::runtime_error&) {
+            t = true;
+        }
+        CHECK(t);
+    }
+}

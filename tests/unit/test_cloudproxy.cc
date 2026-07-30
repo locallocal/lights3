@@ -56,14 +56,16 @@ struct HandlerServer {
     }
 };
 
-// "远端"完整栈：S3Service + MemoryBackend + 静态凭证
+// "远端"完整栈：S3Service + MemoryBackend + 静态凭证；base_domain 非空时远端
+// 受理 virtual-hosted 寻址（Host: <bucket>.<base_domain>）
 struct RemoteStack {
     std::shared_ptr<MemoryBackend> mem = std::make_shared<MemoryBackend>();
     s3::S3Service svc;
     HandlerServer server;
 
-    RemoteStack()
-        : svc(make_router(mem), s3::SigV4Authenticator::build(auth_cfg())),
+    explicit RemoteStack(std::string base_domain = "")
+        : svc(make_router(mem), s3::SigV4Authenticator::build(auth_cfg()),
+              std::move(base_domain)),
           server([this](http::HttpRequest req) { return svc.dispatch(std::move(req)); }) {}
 
     static AuthConfig auth_cfg() {
@@ -396,6 +398,97 @@ TEST(cloudproxy_config_load_validation) {
         "t", {{"endpoint", "http://127.0.0.1:1"}, {"queue_cap", "64KiB"},
               {"bucket_prefix", "px-"}});
     CHECK_EQ(ok.queue_cap_bytes, size_t(64 * 1024));
+    CHECK(ok.force_path_style && !ok.control_in_pump);  // 默认值
+
+    // P4 剩余（docs/cloudproxy-backend.md §2.3/§7）：两键均可解析，vhost 不再报错
+    auto ok2 = CloudProxyConfig::from_params(
+        "t", {{"endpoint", "http://127.0.0.1:1"}, {"force_path_style", "false"},
+              {"control_in_pump", "true"}});
+    CHECK(!ok2.force_path_style);
+    CHECK(ok2.control_in_pump);
+    expect_reject({{"control_in_pump", "not-a-bool"}});
+}
+
+// virtual-hosted style（docs/cloudproxy-backend.md §7）：连接恒指 endpoint，仅
+// Host/签名与路径按 bucket 变化；远端以 base_domain 受理 vhost，全套件过 =
+// 寻址/签名/分页/multipart 在 vhost 下全部自洽
+TEST(cloudproxy_virtual_hosted_style) {
+    RemoteStack remote("127.0.0.1");  // 远端 vhost 域 = <bucket>.127.0.0.1
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = remote.proxy_cfg();
+    cfg.force_path_style = false;
+    CloudProxyBackend b(cfg, pool);
+    run_backend_suite(b);
+}
+
+// control_in_pump=true（docs/cloudproxy-backend.md §2.3）：控制面走一次性私有
+// 线程，语义与池线程路径完全一致（全套件过）；随后两模式对拍 HEAD 时延，
+// 输出压测数（默认值论证的数据来源，无断言——本机 loopback 只作量级参考）
+TEST(cloudproxy_control_in_pump_suite_and_bench) {
+    RemoteStack remote;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = remote.proxy_cfg();
+    cfg.control_in_pump = true;
+    CloudProxyBackend b(cfg, pool);
+    run_backend_suite(b);
+
+    auto bench = [&](bool in_pump) {
+        auto c = remote.proxy_cfg("bench-");
+        c.control_in_pump = in_pump;
+        CloudProxyBackend bb(c, pool);
+        sync_wait(bb.create_bucket("bench"));
+        backend_suite::put(bb, "bench", "k", "x");
+        constexpr int kOps = 300;
+        auto t0 = std::chrono::steady_clock::now();
+        for (int i = 0; i < kOps; ++i) sync_wait(bb.head_object("bench", "k"));
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+                      std::chrono::steady_clock::now() - t0)
+                      .count();
+        sync_wait(bb.delete_object("bench", "k"));
+        sync_wait(bb.delete_bucket("bench"));
+        return double(us) / kOps;
+    };
+    double pool_us = bench(false), pump_us = bench(true);
+    printf("       [bench] control HEAD us/op: pool=%.0f pump=%.0f (loopback)\n", pool_us,
+           pump_us);
+}
+
+// §8.2 指标：构造期 0 值可见；请求时延/错误映射/池等待落账（空 scope 后端不受影响）
+TEST(cloudproxy_metrics_registered) {
+    RemoteStack remote;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto reg = std::make_shared<MetricsRegistry>();
+    CloudProxyBackend b(remote.proxy_cfg(), pool, MetricsScope(reg, {{"backend", "cp"}}));
+    auto text0 = reg->render();
+    CHECK(text0.find("lights3_cloudproxy_etag_mismatch_total{backend=\"cp\"} 0") !=
+          std::string::npos);
+    CHECK(text0.find("lights3_cloudproxy_pool_wait_seconds") != std::string::npos);
+
+    sync_wait(b.create_bucket("bkt"));
+    backend_suite::put(b, "bkt", "k", "hello metrics");
+    auto got = sync_wait(b.get_object("bkt", "k", std::nullopt));
+    CHECK_EQ(read_all(*got.body), "hello metrics");
+    got.body.reset();
+    sync_wait(b.head_object("bkt", "k"));
+    bool threw = false;
+    try {
+        // GET 缺失 key：远端回 404 + XML 错误体 → 按 wire code 计 NoSuchKey
+        // （HEAD 无错误体，只会归 http_404 桶）
+        sync_wait(b.get_object("bkt", "missing", std::nullopt));
+    } catch (const s3::S3Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+
+    auto text = reg->render();
+    for (const char* op : {"create_bucket", "put", "get", "head"})
+        CHECK(text.find("lights3_cloudproxy_remote_request_seconds_count"
+                        "{backend=\"cp\",op=\"" +
+                        std::string(op) + "\"}") != std::string::npos);
+    CHECK(text.find("lights3_cloudproxy_remote_errors_total{backend=\"cp\",code=\"NoSuchKey\"}"
+                    " 1") != std::string::npos);
+    CHECK(text.find("lights3_cloudproxy_pool_wait_seconds_count{backend=\"cp\"}") !=
+          std::string::npos);
 }
 
 // 无长度 body（真 chunked）首期拒绝为 NotImplemented（docs/cloudproxy-backend.md §3.2）

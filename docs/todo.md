@@ -24,7 +24,7 @@ SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 | RADOS data C3（aio 桥接）/ C4（孤儿+多网关） | duostore-rados-data.md §12 | ✅ 已完成（2026-07-30，吞吐对比数据留待集群环境） |
 | TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | ✅ 已完成（2026-07-30，上游 PR 回馈除外） |
 | tiered 对账工具（P4 剩余） | tiered-storage.md §9/§10 | 未做 |
-| cloudproxy 指标 + control_in_pump（P4 剩余） | cloudproxy-backend.md §8.2/§2.3 | 未做 |
+| cloudproxy 指标 + control_in_pump（P4 剩余） | cloudproxy-backend.md §8.2/§2.3 | ✅ 已完成（2026-07-31，含 vhost） |
 | 凭证管理二期 | credential-management.md §9 | 未开始 |
 
 ## 1. 主线：DuoStore P2–P5（✅ 已全部完成，2026-07-29）
@@ -259,13 +259,27 @@ SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 - 验收：registry_per_backend_thread_pool（专属池读写冒烟 + 指标断言 +
   非法值 fail fast）；cloudproxy 私有 pump 线程的局部规避保留不动
 
-### 3.3 cloudproxy P4 剩余
+### 3.3 cloudproxy P4 剩余（✅ 已完成，2026-07-31）
 
-- §8.2 指标（见上）
-- §2.3 `control_in_pump: true` 配置项 + 压测定默认值
-- `force_path_style: false`（virtual-hosted style）：目前配置加载期直接报错
-  （`src/storage/cloudproxy/remote_client.cc:88-91`），低优先
-- 已知权衡记录：create_multipart 重试可能留空孤儿 upload（建议远端配生命周期规则，§5.2）
+- ✅ §8.2 指标：`RemoteMetrics` 单点封装五件——请求时延直方图（op 标签，
+  重试每尝试各记一次，数据面 = 整段传输）/ 重试计数 / 错误映射计数（wire
+  code，不可解析归 `http_<status>`、网络层归 `transport`）/ ETag 失配 /
+  ClientPool 等待直方图；op/code 维度按需 get-or-create 并本地缓存
+- ✅ §2.3 `control_in_pump` 配置项：`control_io` helper——false 走共享池
+  （原行为），true 起一次性私有线程执行阻塞段（含重试退避），续体经池
+  executor 恢复；complete_multipart 重试循环重构为可线程执行的纯阻塞段。
+  压测（in-process loopback，300 次 HEAD）：pool≈210µs/op、pump≈294µs/op
+  ——线程创建 ~80µs 固定开销在低 RTT 下净亏损，**默认 false**；远端 RTT
+  数 ms 起或池等待直方图右移时置 true（结论落 §2.3）
+- ✅ `force_path_style: false`（virtual-hosted style）：`Target` 寻址单点
+  （路径前缀 + Host），TCP/SNI 恒指 endpoint、仅 Host/签名/路径按 bucket
+  变化（httplib 只在 Host 缺席时自设，管线恒显式携带签名 Host）——免
+  per-bucket 连接池；vhost 全套件测试过（远端 lights3 配 base_domain）
+- ✅ 已知权衡记录：create_multipart 重试可能留空孤儿 upload——§5.2 已记录
+  （建议远端配 AbortIncompleteMultipartUpload 生命周期规则），代码处
+  同步加注
+- 验收：202 用例全绿（新增 vhost 套件 / control_in_pump 套件+压测 / 指标
+  断言 / 配置解析）；全构建矩阵 + e2e 绿
 
 ### 3.4 tiered 剩余
 

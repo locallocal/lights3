@@ -243,10 +243,21 @@ SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
   read_corruption_total）、redis R4、sqlite S4、rados C4、tikv T5 的各自指标项
 - s3-protocol.md §7 规划的「按后端分维度、后端错误率」
 
-### 3.2 per-backend 独立 ThreadPool
+### 3.2 per-backend 独立 ThreadPool（✅ 已完成，2026-07-30）
 
-concurrency.md §3.1 预留（Registry 构造注入接口已留）：云端慢请求占满共享池会饿死
-本地盘路径；cloudproxy 目前只用私有 pump 线程局部规避。可与 §3.1 一起作为独立特性。
+~~concurrency.md §3.1 预留（Registry 构造注入接口已留）~~已落地
+（`storage/registry.cc` `backend_pool`）：
+
+- 通用配置键 `io_threads`（[1,1024]，任意 type 生效；缺省共享全局池）——
+  Registry 调工厂前按参数注入专属 ThreadPool，工厂/后端零改动无感知；
+  tiered 组合后端同样支持
+- 生命周期：后端持 shared_ptr，析构即 join；指标回调另持一份，join 后
+  stats() 只读安全
+- 观测：`lights3_backend_pool_{threads,queue_depth,backlogged,completed}`
+  gauge 回调挂 backend 标签，与全局池无标签 `lights3_pool_*` 名字空间错开
+  （避免同名双 TYPE 行）
+- 验收：registry_per_backend_thread_pool（专属池读写冒烟 + 指标断言 +
+  非法值 fail fast）；cloudproxy 私有 pump 线程的局部规避保留不动
 
 ### 3.3 cloudproxy P4 剩余
 

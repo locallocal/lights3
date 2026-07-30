@@ -146,10 +146,18 @@ L2 逻辑，直到下一个挂起点。这省掉一次线程切换，代价就�
 - `join()`：停止接收新任务，**排空队列**（含 backlog）后等待线程退出；
   join 后 `post/schedule` 抛异常。
 
-localfs / xlocalfs / tiered / cloudproxy / duostore 共享此池。如出现云端慢
-请求占满池饿死本地盘，再按 backend 配置独立池（Registry 构造时注入，接口
-已预留；该特性列于 [todo.md](todo.md) §3.2，cloudproxy 目前以私有 pump
-线程局部落地，见 [cloudproxy-backend.md](cloudproxy-backend.md) §2.3）。
+localfs / xlocalfs / tiered / cloudproxy / duostore 默认共享此池。
+**per-backend 独立池**（todo.md §3.2，已落地）：任意后端配置
+`io_threads: N`（通用键，[1,1024]）即获得专属 ThreadPool——云端慢请求
+占满共享池饿死本地盘路径时，按 backend 隔离即互不牵制（Registry 构造时
+按参数注入，`storage/registry.cc` 的 `backend_pool`）。缺省共享是多数
+部署的正确选择，隔离是"确认了饿死征兆（等待时长直方图右移）再开"的
+定向手段；cloudproxy 另有私有 pump 线程的局部规避，见
+[cloudproxy-backend.md](cloudproxy-backend.md) §2.3。专属池随后端
+shared_ptr 存亡（析构即 join）；观测指标
+`lights3_backend_pool_{threads,queue_depth,backlogged,completed}` 挂
+backend 标签经后端注册表暴露，与全局池的无标签 `lights3_pool_*` 名字
+空间错开。
 
 ### 3.2 schedule() 的取消竞态
 

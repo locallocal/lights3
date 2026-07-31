@@ -53,6 +53,16 @@ bool contains(const std::string& s, const std::string& sub) {
     return s.find(sub) != std::string::npos;
 }
 
+// 从响应 XML 中抽取首个 <tag>…</tag> 文本（测试用，够浅结构使用）
+std::string xelem(const std::string& xml, const std::string& tag) {
+    auto open = "<" + tag + ">", close = "</" + tag + ">";
+    auto b = xml.find(open);
+    if (b == std::string::npos) return "";
+    b += open.size();
+    auto e = xml.find(close, b);
+    return e == std::string::npos ? "" : xml.substr(b, e - b);
+}
+
 }  // namespace
 
 TEST(service_put_get_roundtrip) {
@@ -147,10 +157,99 @@ TEST(service_not_implemented_apis) {
         CHECK_EQ(resp.status, 501);
         CHECK(contains(resp.small_body, "NotImplemented"));
     }
+    // versioning 经 copy-source query 表达也是 501
     auto upc = make_req("PUT", "/bkt/k", "", {{"partNumber", "1"}, {"uploadId", "x"}});
-    upc.headers.add("x-amz-copy-source", "/bkt/other");
+    upc.headers.add("x-amz-copy-source", "/bkt/other?versionId=abc");
     auto resp = sync_wait(svc.dispatch(std::move(upc)));
-    CHECK_EQ(resp.status, 501);  // UploadPartCopy 二期
+    CHECK_EQ(resp.status, 501);
+}
+
+TEST(service_upload_part_copy) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/src.bin", "0123456789")));
+
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/bkt/dst.bin", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+
+    auto copy_part = [&](int no, std::vector<std::pair<std::string, std::string>> hdrs) {
+        auto req = make_req("PUT", "/bkt/dst.bin", "",
+                            {{"partNumber", std::to_string(no)}, {"uploadId", uid}});
+        req.headers.add("x-amz-copy-source", "/bkt/src.bin");
+        for (auto& [k, v] : hdrs) req.headers.add(k, v);
+        return sync_wait(svc.dispatch(std::move(req)));
+    };
+
+    // 全量 copy + range copy，CopyPartResult 带 ETag，complete 后内容正确
+    auto p1 = copy_part(1, {});
+    CHECK_EQ(p1.status, 200);
+    std::string etag1 = xelem(body_of(p1), "ETag");
+    CHECK(!etag1.empty());
+    auto p2 = copy_part(2, {{"x-amz-copy-source-range", "bytes=2-4"}});
+    CHECK_EQ(p2.status, 200);
+    std::string etag2 = xelem(body_of(p2), "ETag");
+
+    std::string cxml = "<CompleteMultipartUpload>"
+                       "<Part><PartNumber>1</PartNumber><ETag>" + etag1 + "</ETag></Part>"
+                       "<Part><PartNumber>2</PartNumber><ETag>" + etag2 + "</ETag></Part>"
+                       "</CompleteMultipartUpload>";
+    auto done = sync_wait(svc.dispatch(make_req("POST", "/bkt/dst.bin", cxml, {{"uploadId", uid}})));
+    CHECK_EQ(done.status, 200);
+    auto get = sync_wait(svc.dispatch(make_req("GET", "/bkt/dst.bin")));
+    CHECK_EQ(body_of(get), "0123456789234");
+
+    // 错误路径：range 形式非法 / 越界（AWS 语义均为 InvalidArgument）、
+    // 源条件不满足 412、源缺失 404
+    auto init2 = sync_wait(svc.dispatch(make_req("POST", "/bkt/dst2.bin", "", {{"uploads", ""}})));
+    uid = xelem(body_of(init2), "UploadId");
+    // helper 复用 uid，key 换成 dst2
+    auto copy_part2 = [&](std::vector<std::pair<std::string, std::string>> hdrs,
+                          std::string src = "/bkt/src.bin") {
+        auto req = make_req("PUT", "/bkt/dst2.bin", "",
+                            {{"partNumber", "1"}, {"uploadId", uid}});
+        req.headers.add("x-amz-copy-source", std::move(src));
+        for (auto& [k, v] : hdrs) req.headers.add(k, v);
+        return sync_wait(svc.dispatch(std::move(req)));
+    };
+    auto bad_form = copy_part2({{"x-amz-copy-source-range", "bytes=2-"}});
+    CHECK_EQ(bad_form.status, 400);
+    CHECK(contains(bad_form.small_body, "InvalidArgument"));
+    auto oob = copy_part2({{"x-amz-copy-source-range", "bytes=5-100"}});
+    CHECK_EQ(oob.status, 400);
+    auto src_etag = *sync_wait(svc.dispatch(make_req("HEAD", "/bkt/src.bin"))).headers.get("ETag");
+    CHECK_EQ(copy_part2({{"x-amz-copy-source-if-none-match", src_etag}}).status, 412);
+    CHECK_EQ(copy_part2({{"x-amz-copy-source-if-match", src_etag}}).status, 200);
+    CHECK_EQ(copy_part2({}, "/bkt/nope.bin").status, 404);
+}
+
+TEST(service_copy_source_cannot_reach_reserved_bucket) {
+    // '.' 开头 bucket 走 copy-source header 不经 dispatch 路径拦截，须单独拒绝
+    //（否则 CopyObject/UploadPartCopy 能读 .sys 凭证对象）
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto cp = make_req("PUT", "/bkt/leak");
+    cp.headers.add("x-amz-copy-source", "/.sys/credentials/SOMEAK");
+    auto resp = sync_wait(svc.dispatch(std::move(cp)));
+    CHECK_EQ(resp.status, 400);
+    CHECK(contains(resp.small_body, "InvalidBucketName"));
+}
+
+TEST(service_aws_aligned_edge_semantics) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
+
+    // 多段 Range：AWS 不支持，整个头忽略 → 200 全量（docs/todo.md §4）
+    auto multi = make_req("GET", "/bkt/k");
+    multi.headers.add("Range", "bytes=0-1,3-4");
+    auto resp = sync_wait(svc.dispatch(std::move(multi)));
+    CHECK_EQ(resp.status, 200);
+    CHECK_EQ(body_of(resp), "0123456789");
+
+    // PUT If-None-Match 非 '*'：AWS 同样 501（conditional writes 仅支持 *）
+    auto put = make_req("PUT", "/bkt/k", "new");
+    put.headers.add("If-None-Match", "\"someetag\"");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 501);
 }
 
 TEST(service_with_auth) {
@@ -184,17 +283,6 @@ TEST(service_with_auth) {
 
 // ---------- docs/s3-protocol.md 新增覆盖 ----------
 
-namespace {
-// 从响应 XML 中抽取首个 <tag>…</tag> 文本（测试用，够浅结构使用）
-std::string xelem(const std::string& xml, const std::string& tag) {
-    auto open = "<" + tag + ">", close = "</" + tag + ">";
-    auto b = xml.find(open);
-    if (b == std::string::npos) return "";
-    b += open.size();
-    auto e = xml.find(close, b);
-    return e == std::string::npos ? "" : xml.substr(b, e - b);
-}
-}  // namespace
 
 TEST(service_multipart_flow) {
     auto svc = make_service_noauth();

@@ -10,7 +10,7 @@
 | Bucket | CreateBucket / DeleteBucket / HeadBucket | 无 region 约束，LocationConstraint 忽略但回显配置 region |
 | Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects(批量) / CopyObject | Get 支持 Range 与条件请求（If-Match/If-None-Match/If-Modified-Since） |
 | List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token |
-| Multipart | CreateMultipartUpload / UploadPart / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 二期 |
+| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端 |
 
 明确不支持（返回 `NotImplemented`）：versioning、ACL 细粒度（只认
 private）、policy、website、lifecycle、SSE-C/KMS、Object Lock、
@@ -73,7 +73,9 @@ presigned POST（presigned GET/PUT 的 query 签名**支持**，见 §3.4）。
 ### 3.4 Presigned URL
 
 `X-Amz-Signature` 等参数出现在 query 中：同一套 canonical 算法，payload 按
-`UNSIGNED-PAYLOAD` 处理，额外校验 `X-Amz-Expires`。
+`UNSIGNED-PAYLOAD` 处理，额外校验 `X-Amz-Expires`。过期只约束过去一侧；
+`X-Amz-Date` 超前服务器 15min 以上同样拒绝（AccessDenied "Request is not
+valid yet"），防未来时间戳把有效期无限外推。
 
 ### 3.5 凭证管理
 
@@ -122,7 +124,13 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
 - **并发 PUT 同 key**：last-write-wins，无版本保留。
 - **ETag**：单段 = 内容 MD5；multipart = `md5(分片md5拼接)-N`，两个后端一致。
 - **条件请求**：GET/HEAD/PUT 支持 If-Match / If-None-Match，
-  CopyObject 支持 x-amz-copy-source-if-*。
+  CopyObject / UploadPartCopy 支持 x-amz-copy-source-if-*。
+  两处与 AWS 逐字对齐的边界：PUT `If-None-Match` 仅支持 `*`（AWS conditional
+  writes 同样只支持 `*`，带 ETag → 501）；GET 多段 Range（含逗号）AWS 不支持，
+  行为同 AWS——整个 Range 头忽略、返回 200 全量。
+- **copy-source 的安全边界**：`x-amz-copy-source` 不走 dispatch 的路径拦截，
+  `.` 开头的保留 bucket（`.sys`）与 per-credential policy 的源桶"读"授权在
+  header 解析处单独执行（InvalidBucketName / AccessDenied）。
 
 ## 7. 可观测性
 
@@ -147,4 +155,8 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
 3. **驱动一致性套件**：同一组 HTTP 行为用例跑所有编译进来的 driver。
 4. **端到端**：CI 起网关（LocalFs 后端），用 aws cli 与 boto3 跑真实操作
    脚本（含 100MB 级 multipart、Range 下载、presigned URL）；
-   另跑 MinIO 的 `mint` 兼容性测试集作为回归门槛。
+   另跑 MinIO 的 `mint` 兼容性测试集作为回归门槛——已落地
+   `tests/e2e/run_mint.sh`（起 lights3 + `minio/mint` 容器对打，docker 不可用
+   时显式 SKIP）。mint 依赖 docker daemon 权限，本地开发机通常跑不了，定位为
+   CI/有权限环境的手动门槛；全集含 versioning/tagging 等明确不支持的 API，
+   建议以 `s3cmd`、`awscli` 子集起步（`run_mint.sh <bin> s3cmd awscli`）。

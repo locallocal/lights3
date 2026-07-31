@@ -311,18 +311,27 @@ v2 加密落盘并就地升级存量 v1 对象（缺 key/错 key fail-fast）；
 per-credential policy（bucket glob 白名单 + readonly，POST body / 文件条目携带，
 dispatch 统一 authorize）。单测 8 个新用例 + e2e 12 项新检查全绿。
 
-## 4. S3 协议层缺口（s3-protocol.md）
+## 4. S3 协议层缺口（s3-protocol.md）（✅ 已完成，2026-07-31）
 
-明确列为二期/不支持、返回 NotImplemented 的（集中拒绝表见 `src/s3/service.cc:36-52`，
-27 个子资源）：
+可落地项全部处理完毕；versioning（含 CopyObject ?versionId、ListObjectVersions）、
+ACL/policy、website、lifecycle、tagging、CORS、SSE-C/KMS、Object Lock、
+replication、notification 等仍为**设计上明确不支持**（集中拒绝表
+`src/s3/service.cc`，27 个子资源，维持 NotImplemented）：
 
-- **UploadPartCopy**（§1 明确「二期」，`src/s3/handlers/multipart.cc:59`）——协议层最近的一个
-- versioning（含 CopyObject ?versionId、ListObjectVersions）、ACL/policy、website、
-  lifecycle、tagging、CORS、SSE-C/KMS、Object Lock、replication、notification 等
-- PUT `If-None-Match` 仅支持 `*`（`src/s3/handlers/objects.cc:122-125`）
-- 多段 Range（含逗号）不支持（`objects.cc:20`）
-- presigned 未做 15min 时钟偏移检查（`src/s3/auth/sigv4.cc:421`）
-- §8 测试策略提到跑 MinIO mint 兼容集作回归门槛——未见落地，需核对/排期
+- ~~**UploadPartCopy**~~ 已实现（`multipart.cc`）：x-amz-copy-source-if-* 条件头、
+  x-amz-copy-source-range（bytes=first-last 严格解析，越界 InvalidArgument）、
+  跨后端源、CopyPartResult XML；顺带修了一个存量安全洞——copy-source 走 header
+  绕过 dispatch 的 `.` 前缀拦截，可读 `.sys` 凭证对象，且 policy 凭证可借
+  copy-source 读白名单外的桶，两者均已在解析/授权处封堵并有测试钉住
+- ~~PUT `If-None-Match` 仅支持 `*`~~ 核对结论：与 AWS 一致（conditional writes
+  官方也仅支持 `*`，带 ETag 同为 501），补断言测试钉住，非缺口
+- ~~多段 Range 不支持~~ 核对结论：AWS 同样不支持多段，行为对齐（忽略整个
+  Range 头回 200 全量），补断言测试钉住，非缺口
+- ~~presigned 未做 15min 时钟偏移检查~~ 已补：X-Amz-Date 超前 15min 以上 →
+  AccessDenied "Request is not valid yet"（过去一侧仍由 X-Amz-Expires 约束）
+- ~~mint 兼容集核对/排期~~ 已落地 `tests/e2e/run_mint.sh`（docker 探测不可用则
+  SKIP，同 rados/tikv 模式）；本机 docker socket 无权限跑不了，定位为 CI 手动
+  门槛，建议 s3cmd/awscli 子集起步（详见 s3-protocol.md §8）
 
 ## 5. 工程与测试缺口
 

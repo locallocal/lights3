@@ -49,11 +49,6 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
     for (auto& [k, v] : meta.user_meta) resp.headers.set("x-amz-meta-" + k, v);
 }
 
-// HTTP 时间头按秒粒度比较（Last-Modified 序列化即秒精度）
-int64_t to_epoch_sec(util::SysTime t) {
-    return std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
-}
-
 // GET/HEAD 条件请求（docs/s3-protocol.md §6，优先级遵循 RFC 7232：
 // If-Match > If-Unmodified-Since；If-None-Match > If-Modified-Since）
 void check_read_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& meta,
@@ -74,42 +69,6 @@ void check_read_preconditions(const http::HttpRequest& req, const storage::Objec
         auto t = util::parse_http_date(*ims);
         if (t && to_epoch_sec(meta.last_modified) <= to_epoch_sec(*t)) not_modified = true;
     }
-}
-
-// CopyObject 的源条件（x-amz-copy-source-if-*）：任一不满足即 412
-void check_copy_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& src) {
-    auto fail = [] {
-        throw S3Error(S3ErrorCode::PreconditionFailed,
-                      "At least one of the pre-conditions you specified did not hold");
-    };
-    if (auto v = req.headers.get("x-amz-copy-source-if-match"))
-        if (strip_quotes(*v) != src.etag) fail();
-    if (auto v = req.headers.get("x-amz-copy-source-if-none-match"))
-        if (strip_quotes(*v) == src.etag) fail();
-    if (auto v = req.headers.get("x-amz-copy-source-if-unmodified-since")) {
-        auto t = util::parse_http_date(*v);
-        if (t && to_epoch_sec(src.last_modified) > to_epoch_sec(*t)) fail();
-    }
-    if (auto v = req.headers.get("x-amz-copy-source-if-modified-since")) {
-        auto t = util::parse_http_date(*v);
-        if (t && to_epoch_sec(src.last_modified) <= to_epoch_sec(*t)) fail();
-    }
-}
-
-// "x-amz-copy-source: [/]bucket/key"（percent-encoded）；?versionId → NotImplemented
-std::pair<std::string, std::string> parse_copy_source(const std::string& raw) {
-    std::string s = raw;
-    if (auto q = s.find('?'); q != std::string::npos) {
-        if (s.find("versionId=", q) != std::string::npos)
-            throw S3Error(S3ErrorCode::NotImplemented, "Versioning is not implemented.");
-        s.resize(q);
-    }
-    s = util::percent_decode(s);
-    if (!s.empty() && s.front() == '/') s.erase(0, 1);
-    auto slash = s.find('/');
-    if (slash == std::string::npos || slash == 0 || slash + 1 >= s.size())
-        throw S3Error(S3ErrorCode::InvalidArgument, "Invalid x-amz-copy-source header.");
-    return {s.substr(0, slash), s.substr(slash + 1)};
 }
 
 }  // namespace

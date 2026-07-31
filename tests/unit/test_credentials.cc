@@ -55,7 +55,8 @@ struct SvcEnv {
 
     http::HttpResponse call(std::string method, std::string path, const Credential& cred,
                             std::vector<std::pair<std::string, std::string>> query = {},
-                            std::string body = "") {
+                            std::string body = "",
+                            std::vector<std::pair<std::string, std::string>> headers = {}) {
         http::HttpRequest req;
         req.method = std::move(method);
         req.raw_path = path;
@@ -66,6 +67,7 @@ struct SvcEnv {
             req.raw_query += k + (v.empty() ? "" : "=" + v);
         }
         req.headers.add("Host", "localhost");
+        for (auto& [k, v] : headers) req.headers.add(k, v);
         std::string hash = util::sha256_hex(body);
         if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
         signer.sign(req, cred, hash);
@@ -373,6 +375,22 @@ TEST(admin_api_policy_flow) {
     CHECK_EQ(env.call("PUT", "/logs-a/new", dyn, {}, "x").status, 403);  // readonly
     CHECK_EQ(env.call("GET", "/private/k", dyn).status, 403);            // 白名单外
     CHECK_EQ(env.call("GET", "/", dyn).status, 200);                     // ListBuckets
+
+    // copy-source 也受 policy 约束（读旁路封堵，docs/todo.md §4）：可写的 scoped
+    // 凭证从白名单外的桶 copy → 403，白名单内 → 200
+    auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {},
+                                 R"({"policy":{"buckets":["logs-*"]}})"));
+    Credential dyn2{j2.at("access_key").get<std::string>(),
+                    j2.at("secret_key").get<std::string>()};
+    CHECK_EQ(env.call("PUT", "/logs-a/stolen", dyn2, {}, "",
+                      {{"x-amz-copy-source", "/private/k"}})
+                 .status,
+             403);
+    CHECK_EQ(env.call("PUT", "/private/k", root, {}, "secret").status, 200);
+    CHECK_EQ(env.call("PUT", "/logs-a/copied", dyn2, {}, "",
+                      {{"x-amz-copy-source", "/logs-a/k"}})
+                 .status,
+             200);
 
     // 严格校验：未知字段 / 非法 policy → 400
     CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {}, R"({"bogus":1})").status,

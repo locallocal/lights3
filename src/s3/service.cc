@@ -9,6 +9,7 @@
 #include "core/util/hex.h"
 #include "s3/auth/credential_store.h"
 #include "s3/errors.h"
+#include "s3/handlers/common.h"
 #include "s3/router.h"
 
 namespace lights3::s3 {
@@ -108,9 +109,17 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                               "The specified bucket is not valid.", bucket);
             // per-credential policy（docs/credential-management.md §10.4）：
             // GET/HEAD 为读，其余（PUT/POST/DELETE）算写
-            if (cred_store_)
+            if (cred_store_) {
                 cred_store_->authorize(access_key, bucket,
                                        req.method != "GET" && req.method != "HEAD");
+                // CopyObject / UploadPartCopy 的源在 header 里，不经上面的 bucket
+                // 检查：对源桶单独做一次"读"授权，防 policy 凭证借 copy 读白名单外数据
+                if (req.method == "PUT")
+                    if (auto src = req.headers.get("x-amz-copy-source"))
+                        cred_store_->authorize(access_key,
+                                               handlers::parse_copy_source(*src).first,
+                                               /*is_write=*/false);
+            }
             resp = co_await route(req, bucket, key);
         }
     } catch (const S3Error& e) {

@@ -352,6 +352,31 @@ check "Multipart 下载内容一致" \
     "$(cat "$WORK/p1" "$WORK/p2" | md5sum | cut -d' ' -f1)" \
     "$(md5sum "$WORK/mpu.out" | cut -d' ' -f1)"
 
+# UploadPartCopy（docs/s3-protocol.md §1）：整段 copy + range copy 再拼装
+INIT2=$(s3curl -X POST "$BASE/mybucket/upc.bin?uploads")
+UPC_ID=$(echo "$INIT2" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
+UPC1=$(s3curl -X PUT -H 'x-amz-copy-source: /mybucket/mpu.bin' \
+    "$BASE/mybucket/upc.bin?partNumber=1&uploadId=$UPC_ID")
+check "UploadPartCopy 整段" "0" "$(echo "$UPC1" | grep -q 'CopyPartResult'; echo $?)"
+UPC2=$(s3curl -X PUT -H 'x-amz-copy-source: /mybucket/mpu.bin' \
+    -H 'x-amz-copy-source-range: bytes=0-1048575' \
+    "$BASE/mybucket/upc.bin?partNumber=2&uploadId=$UPC_ID")
+check "UploadPartCopy range" "0" "$(echo "$UPC2" | grep -q 'CopyPartResult'; echo $?)"
+UE1=$(echo "$UPC1" | sed -n 's/.*<ETag>\(.*\)<\/ETag>.*/\1/p')
+UE2=$(echo "$UPC2" | sed -n 's/.*<ETag>\(.*\)<\/ETag>.*/\1/p')
+UPC_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$UE1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$UE2</ETag></Part></CompleteMultipartUpload>"
+s3curl -o /dev/null -X POST --data-binary "$UPC_XML" "$BASE/mybucket/upc.bin?uploadId=$UPC_ID"
+s3curl -o "$WORK/upc.out" "$BASE/mybucket/upc.bin"
+check "UploadPartCopy 拼装内容一致" \
+    "$(cat "$WORK/p1" "$WORK/p2" | head -c $((6*1024*1024)) | cat - <(head -c 1048576 "$WORK/p1") | md5sum | cut -d' ' -f1)" \
+    "$(md5sum "$WORK/upc.out" | cut -d' ' -f1)"
+check "UploadPartCopy 越界 range 拒绝" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT \
+       -H 'x-amz-copy-source: /mybucket/mpu.bin' \
+       -H 'x-amz-copy-source-range: bytes=0-99999999' \
+       "$BASE/mybucket/upc.bin?partNumber=3&uploadId=$UPC_ID")"
+s3curl -o /dev/null -X DELETE "$BASE/mybucket/upc.bin"
+
 # DeleteObjects 批量删除
 DEL_XML='<Delete><Object><Key>copy.txt</Key></Object><Object><Key>mpu.bin</Key></Object></Delete>'
 DEL_OUT=$(s3curl -X POST --data-binary "$DEL_XML" "$BASE/mybucket?delete")

@@ -418,7 +418,10 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
     auto t = util::parse_amz_date(f.amz_date);
     if (!t) malformed("cannot parse x-amz-date");
     if (f.presigned) {
-        // presigned 按 X-Amz-Expires 判有效期（docs/s3-protocol.md §3.4），不做 15min 偏移检查
+        // presigned 按 X-Amz-Expires 判有效期（docs/s3-protocol.md §3.4）。过期只约束
+        // 过去一侧；签发时间不得超前服务器 15min（防未来时间戳把有效期无限外推）
+        if (*t - clock() > std::chrono::seconds(kMaxClockSkewSec))
+            throw S3Error(S3ErrorCode::AccessDenied, "Request is not valid yet");
         auto exp = req.query_get("X-Amz-Expires");
         if (!exp) malformed("missing X-Amz-Expires");
         long expires = 0;

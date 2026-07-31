@@ -262,4 +262,13 @@ TEST(sigv4_presigned_url_expiry) {
     auth.clock = [] { return *util::parse_amz_date("20260714T001000Z"); };
     auto expired = make();
     CHECK_THROWS_S3(auth.verify(expired), S3ErrorCode::AccessDenied);
+
+    // 签发时间超前（docs/todo.md §4）：X-Amz-Date 比 now 晚 16min → 未生效拒绝；
+    // 15min 内的时钟偏移放行
+    auth.clock = [] { return *util::parse_amz_date("20260713T234400Z"); };
+    auto future = make();
+    CHECK_THROWS_S3(auth.verify(future), S3ErrorCode::AccessDenied);
+    auth.clock = [] { return *util::parse_amz_date("20260713T235000Z"); };
+    auto skewed = make();
+    auth.verify(skewed);
 }

@@ -180,7 +180,6 @@ Not supported by design (returns NotImplemented; see
 [docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1): versioning, fine-grained
 ACL (only "private" is accepted), bucket policy, website, lifecycle,
 tagging/CORS, SSE-C/KMS, Object Lock, and presigned POST.
-The full backlog lives in [docs/todo.md](docs/todo.md) (Chinese).
 
 ## Documentation
 
@@ -204,4 +203,3 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [duostore-sqlite-meta](docs/en/duostore-sqlite-meta.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
 | [duostore-rados-data](docs/en/duostore-rados-data.md) | RADOS IDataStore: librados, chunk → rados objects |
 | [duostore-tikv-meta](docs/en/duostore-tikv-meta.md) | TiKV IMetaStore: client-c + 2PC sidecar |
-| [todo](docs/en/todo.md) | Backlog and completion log (English snapshot; the Chinese original is authoritative) |

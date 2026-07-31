@@ -10,7 +10,9 @@
 | 后端可扩展 | 新增存储后端只需实现一个接口并注册工厂 |
 | 部署简单 | 单二进制 + 一个 YAML 配置文件；默认形态无外部服务依赖（duostore 后端可选接入外部 meta/data 服务：Redis/TiKV/Ceph，见 [storage-backend.md](storage-backend.md) §5） |
 
-非目标（首期不做）：网关多节点集群（进程本身单实例假设）、纠删码、
+非目标（首期不做）：网关多节点集群（凭证面已有 `auth.sync_interval` 定期
+同步，见 [credential-management.md](credential-management.md) §10.3；
+数据面仍为单实例假设）、纠删码、
 bucket versioning、Object Lock、事件通知。元数据/数据侧的多副本与水平
 扩展不由网关实现，而是经 duostore 的 TiKV meta / RADOS data 插拔件
 借外部系统获得。
@@ -97,7 +99,8 @@ int main(int argc, char** argv) {
     auto cfg      = Config::load(FLAGS_config);
     Logger::init(parse_level(cfg.log_level));
     auto pool     = std::make_shared<ThreadPool>(cfg.runtime.io_threads);
-    auto backends = StorageRegistry::build(cfg.backends, pool);   // 构造各后端
+    auto metrics  = std::make_shared<MetricsRegistry>();          // 后端级指标注册表
+    auto backends = StorageRegistry::build(cfg.backends, pool, metrics);  // 构造各后端
     auto router   = BucketRouter::build(cfg.buckets, std::move(backends));
     auto auth     = SigV4Authenticator::build(cfg.auth);          // 静态凭证表
     // 动态凭证（docs/credential-management.md）：从默认后端加载并替换静态查表
@@ -105,6 +108,11 @@ int main(int argc, char** argv) {
     auth.set_provider(cred_store);
     auto service  = std::make_shared<S3Service>(std::move(router), std::move(auth),
                                                 cfg.http.base_domain);      // L2 入口
+    service->set_backend_metrics(metrics);      // /-/metrics 追加后端级指标
+    service->set_credential_store(cred_store);  // per-credential policy 执行点
+    // 凭证二期后台任务（credential-management.md §10.2/§10.3）：
+    // credentials_file 热加载轮询 + 多实例定期增量同步（均按配置门控）
+    cred_store->start_background(pool);
 
     // 按配置选择 HTTP 驱动（可用 CMake 选项在编译期裁剪）
     auto server = HttpServerFactory::create(cfg.http.driver, cfg.http);
@@ -120,7 +128,9 @@ int main(int argc, char** argv) {
 ```
 
 优雅退出：信号处理函数触发 `server->shutdown()`（仅 async-signal-safe 操作）
-→ 停止 accept、等待在途请求完成 → `run()` 返回 → 线程池 `join()`。
+→ 停止 accept、等待在途请求完成 → `run()` 返回 →
+`cred_store->shutdown_background()`（撤定时器并等在途同步收尾，**必须先于**
+线程池 join，否则后台协程可能投递到已关闭的池）→ 线程池 `join()`。
 
 ## 5. 配置文件示例
 
@@ -144,10 +154,15 @@ auth:
     - access_key: AKIDEXAMPLE
       secret_key: ${LIGHTS3_SECRET_1}     # 支持环境变量引用；留空则拒绝所有请求
   region: us-east-1
+  # 凭证管理二期（credential-management.md §10）；动态凭证 SK 的 at-rest 加密
+  # 不走配置：设环境变量 LIGHTS3_MASTER_KEY（openssl rand -hex 32）即启用
+  # credentials_file: /etc/lights3/creds.json  # 外部凭证文件（热加载，仅数据面）
+  # credentials_file_reload: 30s               # 文件 mtime 轮询周期；0s = 仅启动时加载
+  # sync_interval: 0s                          # 多实例定期增量 reload .sys 凭证；0s = 关闭
 
 backends:
   - name: localdata
-    type: localfs                         # localfs | xlocalfs | memory | tiered | cloudproxy
+    type: localfs                         # localfs | xlocalfs | memory | tiered | cloudproxy | duostore
     root: /var/lib/lights3/data
     staging: /var/lib/lights3/staging     # multipart 暂存，需与 root 同文件系统
   - name: aws-archive
@@ -186,6 +201,7 @@ lights3/
 │   │   ├── semaphore.h       #   AsyncSemaphore（入口限流）
 │   │   ├── timer.h/.cc       #   定时器线程（with_timeout 底座）
 │   │   ├── cancel.h          #   协作式取消原语
+│   │   ├── background.h/.cc  #   后台任务等待组（concurrency.md §7）
 │   │   ├── config.h/.cc      #   YAML 解析 + 类型化配置
 │   │   ├── metrics.h/.cc     #   后端级 metrics 注册表 + scope（todo.md §3.1）
 │   │   ├── log.h             #   spdlog 门面

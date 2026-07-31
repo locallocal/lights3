@@ -48,8 +48,9 @@ backends:
   #   type: duostore
   #   root: ./data/duostore            # 必填；meta/ chunks/ packs/ 均在其下
   #   verify_chunk_crc: false          # 读路径校验 chunk CRC（两种 data 引擎共用）
-  #   # -- 后台 GC（P3 已生效；orphan_scan 为 P4 预留；docs/duostore-backend.md §9）--
+  #   # -- 后台 GC 与孤儿扫描（均已生效；docs/duostore-backend.md §9）--
   #   gc_interval: 300s                # 回收周期；0s = 关闭后台 GC
+  #   gc_enabled: true                 # false = 多网关非指定实例（§8.3 单实例执行 GC）
   #   gc_grace: 300s                   # 延迟删除宽限（读并发防御纵深）
   #   orphan_scan_interval: 1d
   #   mpu_ttl: 7d                      # 未完成 multipart upload 的清理期限；0 = 关闭
@@ -118,7 +119,7 @@ backends:
   #   access_key: ${REMOTE_AK}
   #   secret_key: ${REMOTE_SK}
   #   bucket_prefix: ""                  # 远端 bucket = 前缀 + 本地名
-  #   force_path_style: true             # false（virtual-hosted）未实现
+  #   force_path_style: true             # false = virtual-hosted style（已支持，§7 部署约束）
   #   tls_verify: true
   #   ca_cert: ""                        # 自签远端的 CA 证书路径
   #   connect_timeout_ms: 5000
@@ -128,6 +129,9 @@ backends:
   #   max_connections: 16
   #   verify_etag: true                  # 单段 PUT 与远端 ETag 比对 MD5（§6）
   #   queue_cap: 1MiB                    # 数据面队列容量（背压水位）[4KiB,1GiB]
+  #   control_in_pump: false             # true = 控制面小请求也走 pump 线程（§8.2）
+  #   io_threads: 8                      # 后端专属线程池（通用键，所有后端可用；
+  #                                      # 缺省共享 runtime.io_threads 的池）
 
   # ---------- tiered：本地缓存 + 云端沉降（docs/tiered-storage.md）----------
   # local/cloud 按 name 引用本列表中的其他后端；local 须为 localfs/xlocalfs。
@@ -143,6 +147,10 @@ backends:
   #   cache_fill_on_range: true          # Range 命中云端时后台整对象回迁
   #   max_concurrent_transfers: 4
   #   quota_bytes: 0                     # 逻辑配额；0 = 不启用
+  #   gc_retry_base: 60s                 # 云端删除失败的指数退避基数（§9）
+  #   gc_retry_cap: 1h                   # 退避上限
+  #   reconcile_interval: 0s             # 索引/云端对账周期；0s = 关闭（§9）
+  #   reconcile_orphans: rebuild         # rebuild = 重建索引项 | delete = 删云端孤儿
 
 buckets:
   default_backend: localdata

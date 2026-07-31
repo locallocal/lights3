@@ -1,4 +1,4 @@
-// L4: 后台任务等待组（docs/concurrency.md §2）：自销毁顶层协程驱动 + close 时
+// L4: 后台任务等待组（docs/concurrency.md §7）：自销毁顶层协程驱动 + close 时
 // 等待在途任务清零。自 TieredBackend / DuoStoreBackend 的逐字重复私有机制提炼
 // （生命期关键路径只维护一份）。
 //

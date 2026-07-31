@@ -11,6 +11,7 @@
 | `core/semaphore.h` | `AsyncSemaphore` 协程版异步信号量 |
 | `core/cancel.h` | `CancelSource` / `CancelToken` 协作式取消 |
 | `core/timer.h/.cc` | `TimerQueue` 进程级定时器线程 |
+| `core/background.h/.cc` | `BackgroundTaskGroup` 后台任务等待组 |
 
 ## 1. 总体思路
 
@@ -20,7 +21,7 @@
 | 执行环境 | 谁提供 | 跑什么 |
 | --- | --- | --- |
 | HTTP 执行环境 | driver（asio io_context / seastar shard / 同步库的请求线程） | HTTP 解析、socket 读写 |
-| 阻塞 IO 线程池 | `core/ThreadPool`，进程内一个共享实例 | posix 文件 IO、cloudproxy 的远端 HTTP 调用等一切可能阻塞的事 |
+| 阻塞 IO 线程池 | `core/ThreadPool`，默认共享一个实例，后端可配 `io_threads` 建专属池（§3.1） | posix 文件 IO、cloudproxy 的远端 HTTP 调用等一切可能阻塞的事 |
 
 规则一句话：**协程里不许直接调用可能阻塞的函数；先 `co_await pool.schedule()`
 切过去，干完再切回来。**
@@ -140,9 +141,10 @@ L2 逻辑，直到下一个挂起点。这省掉一次线程切换，代价就�
 
 - **背压**：backlog 中的任务不占队列容量，但 `schedule()` 的协程保持挂起
   ——相当于把压力传导回请求协程乃至 socket 读取，防止阻塞任务无限堆积；
-- **指标**（`stats()`，经 `/-/metrics` 暴露，见 [s3-protocol.md](s3-protocol.md) §7）：
-  队列深度、backlog 长度、完成计数、入队→开跑等待时长直方图
-  （<1ms / <10ms / <100ms / <1s / ≥1s），是容量调优的主要信号；
+- **指标**（`stats()`，见 [s3-protocol.md](s3-protocol.md) §7）：
+  队列深度、backlog 长度、完成计数经 `/-/metrics` 暴露，是容量调优的
+  主要信号；入队→开跑等待时长直方图（<1ms / <10ms / <100ms / <1s / ≥1s）
+  已采集、暂未经 `/-/metrics` 输出（`s3/metrics.cc` 的 `render` 待接入）；
 - `join()`：停止接收新任务，**排空队列**（含 backlog）后等待线程退出；
   join 后 `post/schedule` 抛异常。
 
@@ -152,7 +154,8 @@ localfs / xlocalfs / tiered / cloudproxy / duostore 默认共享此池。
 占满共享池饿死本地盘路径时，按 backend 隔离即互不牵制（Registry 构造时
 按参数注入，`storage/registry.cc` 的 `backend_pool`）。缺省共享是多数
 部署的正确选择，隔离是"确认了饿死征兆（等待时长直方图右移）再开"的
-定向手段；cloudproxy 另有私有 pump 线程的局部规避，见
+定向手段——该直方图暂未经 `/-/metrics` 输出（见上），当前只能靠
+`queue_depth`/`backlogged` 判断；cloudproxy 另有私有 pump 线程的局部规避，见
 [cloudproxy-backend.md](cloudproxy-backend.md) §2.3。专属池随后端
 shared_ptr 存亡（析构即 join）；观测指标
 `lights3_backend_pool_{threads,queue_depth,backlogged,completed}` 挂
@@ -273,3 +276,29 @@ duostore-rados-data.md §4.2）：嵌套的阻塞 acquire 会在全员各持一�
 
 此外：每连接串行处理（HTTP/1.1 pipelining 不并行执行）由 driver 保证；
 线程池的有界队列 + backlog（§3.1）是最底层的第二道闸门。
+
+## 7. 后台任务的生命期
+
+`BackgroundTaskGroup`（core/background.h/.cc）：后台任务等待组，自
+TieredBackend / DuoStoreBackend 逐字重复的私有机制提炼（生命期关键路径
+只维护一份），现由 duostore、tiered 与 CredentialStore
+（credential-management.md §10.3）三处共用。解决的问题：定时器驱动的
+后台协程（GC / 扫描 / 凭证同步）与持有者析构赛跑——关闭时必须保证
+"不再产生新任务 + 在途任务清零"之后才能拆资源。
+
+三个登记入口（均与 closing 判定原子互斥，关闭后一律拒绝）：
+
+- `spawn(task)`：定时器回调里派生**自销毁顶层协程**驱动 task，异常在
+  内部捕获记 WARN 不外抛；closing 后返回 false，任务被丢弃不执行；
+- `enter()/exit()`（建议用 RAII 的 `Scope`）：调用方驱动的协程（如手动
+  GC 钩子）登记为在途，close 会等它结束后才拆资源；`enter`/`Scope::ok()`
+  返回 false 表示正在关闭，调用方应立即返回；
+- `if_open(fn)`：与 closing 判定原子地执行 fn，典型用于"检查未关闭 +
+  登记定时器 id"必须一步完成的场景。
+
+关闭铁律（惯例序照 `background.h` 头注释）：**`begin_close()` → 锁外
+cancel 定时器 → `wait_idle()` → 拆资源**。`begin_close` 置 closing，此后
+spawn/enter/if_open 全部拒绝；`TimerQueue::cancel` 阻塞等在途回调，
+不得持本组锁调用——回调内 spawn/if_open 要拿组锁，持锁 cancel 即死锁；
+`wait_idle()` 阻塞调用方线程等在途任务清零（任务在池线程收尾），
+之后才轮到拆资源。

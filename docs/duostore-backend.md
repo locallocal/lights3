@@ -13,7 +13,7 @@
 | 目标 | 说明 |
 | --- | --- |
 | 实现 `IStorageBackend` 全接口 | bucket CRUD、对象数据面、list、multipart 全套（以 `src/storage/backend.h` 为准），通过后端一致性套件 |
-| 元数据/数据分离 | 内部拆成 IMetaStore / IDataStore 两个**可插拔**接口；首期 RocksDB + 本地 fs，未来 meta 可换 redis/TiKV，data 可换 Ceph/RADOS（§12） |
+| 元数据/数据分离 | 内部拆成 IMetaStore / IDataStore 两个**可插拔**接口；默认 RocksDB + 本地 fs；meta 现已支持 redis/sqlite/tikv，data 现已支持 rados（§12） |
 | 大对象切片 | 定长 chunk（默认 8MiB），Range 读 O(1) 定位；multipart complete 零数据搬运（§8） |
 | 小对象聚合 | ≤ 阈值（默认 128KiB）的对象追加进 append-only pack 文件，避免海量小文件的 inode/目录开销 |
 | GC | 删除/覆盖/abort 产生的垃圾可回收：chunk 延迟 unlink、pack 按存活率压实、孤儿对账（§9） |
@@ -511,12 +511,12 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 
 双接口 + DataRef 解耦的设计目标就是让两侧独立替换：
 
-| 侧 | 未来实现 | 接入方式 |
+| 侧 | 实现 | 接入方式 |
 | --- | --- | --- |
-| meta | redis / TiKV（多网关共 meta） | 实现 IMetaStore：同步客户端在池线程调用即可（§2.2）；事务不变量用各自原语（redis MULTI/Lua、TiKV 事务）表达——语义级接口不假设有序 KV，这正是 §2.1 选 A 的原因。Redis 版详细设计见 [duostore-redis-meta.md](duostore-redis-meta.md)，TiKV 版详细调研见 [duostore-tikv-meta.md](duostore-tikv-meta.md) |
-| meta | SQLite（单文件部署） | 同上，SQL 事务。详细设计见 [duostore-sqlite-meta.md](duostore-sqlite-meta.md) |
-| data | Ceph / RADOS | 实现 IDataStore：新增 `Extent::Kind::kRados`（file_id 映射 rados 对象名），meta 层零改动；librados 异步 API 与协程接口天然契合。详细调研见 [duostore-rados-data.md](duostore-rados-data.md) |
-| data | io_uring 版 FsDataStore | 对照 xlocalfs 的做法，数据面换 IO 引擎、布局不变 |
+| meta | redis / TiKV（多网关共 meta，均已实现） | 实现 IMetaStore：同步客户端在池线程调用即可（§2.2）；事务不变量用各自原语（redis MULTI/Lua、TiKV 事务）表达——语义级接口不假设有序 KV，这正是 §2.1 选 A 的原因。Redis 版详细设计见 [duostore-redis-meta.md](duostore-redis-meta.md)，TiKV 版详细调研见 [duostore-tikv-meta.md](duostore-tikv-meta.md) |
+| meta | SQLite（单文件部署，已实现） | 同上，SQL 事务。详细设计见 [duostore-sqlite-meta.md](duostore-sqlite-meta.md) |
+| data | Ceph / RADOS（已实现） | 实现 IDataStore：新增 `Extent::Kind::kRados`（file_id 映射 rados 对象名），meta 层零改动；librados 异步 API 与协程接口天然契合。详细调研见 [duostore-rados-data.md](duostore-rados-data.md) |
+| data | io_uring 版 FsDataStore（未实现） | 对照 xlocalfs 的做法，数据面换 IO 引擎、布局不变 |
 
 组合矩阵：RocksDB+本地盘（首期）、TiKV+Ceph（全分布式网关）、
 RocksDB+Ceph（本地索引 + 远端数据）均为合法组合。注意：跨网关共享 meta

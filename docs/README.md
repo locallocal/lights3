@@ -19,9 +19,9 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [architecture.md](architecture.md) | 总体架构、分层设计、请求生命周期、代码目录规划 |
 | [http-adapter.md](http-adapter.md) | HTTP 协议库插拔层：中立请求/响应模型、流式 Body、适配器实现要点 |
 | [concurrency.md](concurrency.md) | 并发模型：Task 协程、Executor 抽象、线程池、同步/异步 HTTP 库的统一 |
-| [storage-backend.md](storage-backend.md) | 存储后端抽象、LocalFs 后端、CloudProxy 后端、bucket 路由 |
-| [s3-protocol.md](s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证、Multipart Upload、错误码映射 |
-| [credential-management.md](credential-management.md) | 凭证管理：AK/SK 生成/查询 API、两级权限、`.sys` 存储持久化 |
+| [storage-backend.md](storage-backend.md) | 存储后端抽象、LocalFs/XLocalFs、DuoStore 概览与新增后端指南、bucket 路由 |
+| [s3-protocol.md](s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证（含 presigned 与时钟偏移）、Multipart Upload、错误码映射、mint 兼容集 |
+| [credential-management.md](credential-management.md) | 凭证管理：AK/SK 生成/查询/吊销 API、三来源模型（静态 root / 文件 / 动态）、`.sys` 持久化；二期：SK at-rest 加密、凭证文件热加载、多实例同步、per-credential policy |
 | [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
 | [tiered-storage.md](tiered-storage.md) | 分层存储：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |
 | [cloudproxy-backend.md](cloudproxy-backend.md) | CloudProxy 后端：自签 SigV4 + httplib 直连远端 S3、双向流式泵、错误映射与重试 |
@@ -32,7 +32,9 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore 的 TiKV IMetaStore：client-c + 2PC 侧车，meta 水平扩展 |
 | [todo.md](todo.md) | 项目待办清单：未完成阶段、横切基础设施、测试缺口 |
 
-*另有中文项目介绍 [README.zh-CN.md](README.zh-CN.md)（构建/运行/当前实现范围）。*
+*另有中文项目介绍 [README.zh-CN.md](README.zh-CN.md)（构建/运行/当前实现范围）；
+全部设计文档的英文翻译在 [en/](en/README.md)，章节编号与中文版一一对应，
+代码注释中的 `docs/<name>.md §N` 引用两边通用。*
 
 ## 一页纸架构图
 
@@ -45,7 +47,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
                                         │ HttpRequest / HttpResponse (中立模型)
                 ┌───────────────────────▼────────────────────────┐
                 │                  S3 Protocol 层                 │
-                │  Router → SigV4 Auth → S3 Handler (协程)        │
+                │  Router → SigV4 Auth → policy 授权 → Handler    │
                 │  XML 编解码 / 错误码映射 / Multipart 状态机       │
                 └───────────────────────┬────────────────────────┘
                                         │ IStorageBackend (异步流式接口)

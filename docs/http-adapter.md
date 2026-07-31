@@ -29,7 +29,8 @@ struct HttpRequest {
     std::string method;                 // "GET" "PUT" ...
     std::string raw_path;               // 未解码，SigV4 需要
     std::string path;                   // 已解码
-    std::vector<std::pair<std::string,std::string>> query;   // 保序，SigV4 需要
+    std::string raw_query;              // 未解码原始 query 串，SigV4 canonical query 用它
+    std::vector<std::pair<std::string,std::string>> query;   // 已解码，保序
     HeaderMap   headers;
     std::string remote_addr;
     std::unique_ptr<BodyReader> body;   // 可能为 nullptr（无 body）
@@ -49,8 +50,9 @@ struct HttpResponse {
 
 设计说明：
 
-- **保序 query / 未解码 path**：SigV4 的 canonical request 对 query 排序和
-  URI 编码规则有严格要求，必须保留原始信息，不能只给解析后的 map。
+- **未解码 raw_path / raw_query**：SigV4 的 canonical request 对 query 排序和
+  URI 编码规则有严格要求，canonical query 基于未解码的 `raw_query` 重建而非
+  已解码的 `query`；必须保留原始信息，不能只给解析后的 map。
 - **Body 用拉模型（BodyReader）而不是推模型**：协议层与存储层作为消费者按需
   `co_await read()`，天然形成反压——存储写得慢，就不会从 socket 继续收数据
   （对异步库体现为不再投递 async_read；对同步库体现为线程阻塞在 recv）。
@@ -70,13 +72,14 @@ using Handler = std::function<Task<HttpResponse>(HttpRequest)>;
 struct IHttpServer {
     virtual void set_handler(Handler h) = 0;
     virtual void listen(const std::string& addr, uint16_t port) = 0;
+    virtual uint16_t bound_port() const = 0;   // listen 后实际端口（port=0 场景用）
     virtual void run() = 0;          // 阻塞运行
     virtual void shutdown() = 0;     // 线程安全；停 accept，等在途请求
     virtual ~IHttpServer() = default;
 };
 
-// 各 driver 在自己的编译单元里注册：
-//   REGISTER_HTTP_DRIVER("beast", [](const HttpConfig& c){ return ...; });
+// 各 driver 的工厂在 server.cc 的 ensure_registered() 里集中注册，
+// 由 #ifdef LIGHTS3_DRIVER_* 决定编译进哪些（与 storage registry 同套路）
 struct HttpServerFactory {
     static std::unique_ptr<IHttpServer> create(const std::string& driver,
                                                const HttpConfig& cfg);
@@ -87,14 +90,17 @@ struct HttpServerFactory {
 } // namespace
 ```
 
-- 驱动通过**静态注册宏**挂到工厂；CMake 选项决定哪些驱动编译进二进制，
-  运行期由配置 `http.driver` 选择。二者结合实现"编译期裁剪 + 运行期切换"。
+- 驱动经 `server.cc` 的 `ensure_registered()` **集中注册**到工厂
+  （`#ifdef LIGHTS3_DRIVER_*` 裁剪，与 storage registry 同套路）；CMake 选项
+  决定哪些驱动编译进二进制，运行期由配置 `http.driver` 选择。二者结合实现
+  "编译期裁剪 + 运行期切换"。
 - `Handler` 返回 `Task<HttpResponse>`，这是对 driver 的唯一执行约定：
-  driver 负责在自己的执行环境里驱动这个协程直至完成（方式见 03 篇）。
+  driver 负责在自己的执行环境里驱动这个协程直至完成
+  （方式见 [concurrency.md](concurrency.md)）。
 
 ## 3. 各驱动实现要点
 
-### 3.1 Boost.Beast（默认，异步驱动）
+### 3.1 Boost.Beast（异步驱动，性能路径首选）
 
 - 结构：N 个线程共跑一个 `asio::io_context`（或 per-thread io_context，
   首期用前者，简单）；每连接一个 `asio::co_spawn` 的会话协程。
@@ -102,7 +108,8 @@ struct HttpServerFactory {
   `BeastBodyReader`，其 `read()` 内部 `async_read_some` 续读）→
   `co_await handler(req)` → 序列化响应头 → 循环拉 `stream_body` 写 socket。
 - `Task<T>` 与 asio 的衔接：`Task` 是我们自己的协程类型，在 asio 协程里
-  `co_await` 它需要一个适配 awaiter（见 03 篇 §4），resume 回到当前 executor。
+  `co_await` 它需要一个适配 awaiter（见 [concurrency.md](concurrency.md) §4），
+  resume 回到当前 executor。
 - 支持 `Expect: 100-continue`：Beast 解析到该头后，由 driver 在 handler 首次
   调用 `body->read()` 时先回 `100 Continue` 再收 body——这样认证失败可以在
   不接收 body 的情况下直接拒绝，符合 S3 行为。
@@ -136,7 +143,7 @@ struct HttpServerFactory {
   xfs 头），默认不编译；`-DLIGHTS3_DRIVER_SEASTAR=ON` 启用，无 root 机器
   可把依赖解包到 `~/.local/opt/seastar-deps`（apt-get download + dpkg -x）。
 
-### 3.4 CivetWeb / 其他
+### 3.4 CivetWeb / 其他（仅为扩展示例，未实现，不在计划内）
 
 - CivetWeb 同为线程池同步模型，适配方式与 httplib 相同；其 C API 的
   `mg_read` 本身是拉模型，`BodyReader` 直接包一层即可，比 httplib 更顺。

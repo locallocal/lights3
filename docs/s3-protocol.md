@@ -65,7 +65,7 @@ presigned POST（presigned GET/PUT 的 query 签名**支持**，见 §3.4）。
 
 ### 3.3 与流式模型的配合
 
-签名校验装饰器模式：`SigV4VerifyingReader` 包装原始 `BodyReader`，
+签名校验装饰器模式：`Sha256VerifyingReader` 包装原始 `BodyReader`，
 透传数据同时累积摘要；存储层消费的就是这个装饰后的 reader。校验失败时
 `complete()` 抛异常 → handler 走错误路径 → LocalFs 的 staging 临时文件
 被 RAII 清理，不会留下半个对象。
@@ -79,10 +79,10 @@ valid yet"），防未来时间戳把有效期无限外推。
 
 ### 3.5 凭证管理
 
-首期：配置文件静态 AK/SK 表（secret 支持环境变量引用），全部凭证等价于
-超级用户（无 IAM policy）。接口上预留 `ICredentialProvider`，
-后续可接文件热加载或外部服务。运行期生成/查询 AK/SK 并持久化到存储的
-方案见 [credential-management.md](credential-management.md)。
+配置文件静态 AK/SK 表（secret 支持环境变量引用）是一期形态；二期已落地
+三来源模型（static=root / file / dynamic）、凭证文件热加载与轻量的
+per-credential policy。运行期生成/查询 AK/SK 并持久化到存储的方案与
+二期设计详见 [credential-management.md](credential-management.md) §10。
 
 ## 4. XML 编解码
 
@@ -92,7 +92,7 @@ S3 的 XML 结构简单且模式固定，不引入大型 XML 库：
   `to_xml(const ListResult&) → std::string`。
 - **解析**：仅三处需要解析请求 XML——CompleteMultipartUpload、
   DeleteObjects、CreateBucket(LocationConstraint)。结构都很浅，用
-  vendored 的 pugixml（header-only，MIT）解析，限制请求 XML ≤ 1MiB。
+  自写的小型解析器（`src/s3/xml.cc`）处理，限制请求 XML ≤ 1MiB。
 
 ## 5. 错误处理
 
@@ -129,21 +129,25 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
   writes 同样只支持 `*`，带 ETag → 501）；GET 多段 Range（含逗号）AWS 不支持，
   行为同 AWS——整个 Range 头忽略、返回 200 全量。
 - **copy-source 的安全边界**：`x-amz-copy-source` 不走 dispatch 的路径拦截，
-  `.` 开头的保留 bucket（`.sys`）与 per-credential policy 的源桶"读"授权在
-  header 解析处单独执行（InvalidBucketName / AccessDenied）。
+  两道检查分处两地：`.` 开头的保留 bucket（`.sys`）在 `parse_copy_source()`
+  （src/s3/handlers/common.h）拒绝（InvalidBucketName）；per-credential
+  policy 的源桶"读"授权在 dispatch 入口（src/s3/service.cc）单独执行
+  （AccessDenied）。
 
 ## 7. 可观测性
 
-- **访问日志**：每请求一行结构化日志（request_id、AK、method、bucket/key、
-  status、字节数、总耗时、后端耗时），格式对齐 S3 server access log 便于
-  复用现有分析工具。
-- **Metrics**（Prometheus 文本格式，`GET /-/metrics`，仅内网 bind）：
+- **访问日志**：每请求一行结构化日志（request_id、AK、method、path、
+  status、字节数、总耗时 ms；后端耗时待接入），格式对齐 S3 server
+  access log 便于复用现有分析工具。
+- **Metrics**（Prometheus 文本格式，`GET /-/metrics`，匿名端点、与数据面
+  同一监听，访问面需靠部署侧限制）：
   请求数/延迟直方图（按 API 与后端分维度）、在途请求数、线程池队列深度、
   multipart 活跃数、后端错误率。后端级指标经 `core/metrics.h` 注册表
   （backend=<name> 标签，todo.md §3.1）追加在 L2 请求指标之后输出；
   「按 API×后端分维度的请求直方图、后端错误率」仍待接入。
 - **健康检查**：`GET /-/healthz`（进程存活）与 `GET /-/readyz`
-  （各后端探活：LocalFs 写探针文件、CloudProxy HeadBucket）。
+  （各后端探活：对所有后端一律 `co_await list_buckets()`，任一失败
+  返回 503 并在响应体中报告失败的后端名）。
   `/-/` 前缀不与合法 bucket 名冲突（S3 bucket 命名不允许该形态）。
 
 ## 8. 测试策略

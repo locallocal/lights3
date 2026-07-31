@@ -1,6 +1,6 @@
 # 凭证管理：AK/SK 的生成、查询与持久化（方案）
 
-> 状态：已实现（一期，见 §9）。承接 docs/s3-protocol.md §3.5 预留的 `ICredentialProvider` 扩展点。
+> 状态：一期、二期均已实现（分期见 §9，二期设计见 §10）。承接 docs/s3-protocol.md §3.5 预留的 `ICredentialProvider` 扩展点。
 > 代码：`src/s3/auth/credential_store.{h,cc}`、`src/s3/handlers/admin_credentials.cc`。
 
 ## 1. 目标与非目标
@@ -12,11 +12,12 @@
 - 验签路径保持现状的同步内存查表，不因动态凭证引入异步或明显开销；
 - 配置文件静态凭证的行为完全不变（向后兼容）。
 
-**非目标（本期不做）**
+**非目标（一期不做；标注项已在二期补齐，见 §10）**
 
-- IAM 式细粒度 policy——所有凭证仍等价于超级用户的数据面权限（见 §3 两级模型）；
+- IAM 式细粒度 policy——所有凭证仍等价于超级用户的数据面权限（见 §3 两级模型）。
+  二期补了轻量的 per-credential policy（bucket 白名单 + readonly，§10.4），仍非 IAM；
 - STS 临时凭证 / 凭证轮换到期；
-- 多实例共享后端时的跨节点失效通知（限制见 §7）。
+- 多实例共享后端时的跨节点失效通知（限制见 §7）——二期以定期增量 reload 补齐（§10.3）。
 
 ## 2. API 设计
 
@@ -115,9 +116,9 @@ staging + rename）、换后端自动跟随；代价是 memory 后端下凭证�
 }
 ```
 
-SK 以明文落盘，密级等同于配置文件里的静态 SK（同一台机器、同一套文件
-权限）。`version` 字段为二期的 at-rest 加密（master key 来自环境变量，
-AES-256-GCM，OpenSSL 已在依赖里）预留升级路径。
+未设置 master key 时 SK 以明文落盘（version=1），密级等同于配置文件里的静态
+SK（同一台机器、同一套文件权限）。设置 `LIGHTS3_MASTER_KEY` 后落盘为
+version=2 的 AES-256-GCM 加密格式，存量 v1 对象在启动时就地升级（§10.1）。
 
 ## 5. 组件与数据流
 
@@ -208,8 +209,8 @@ dispatch 中 `/-/admin/` 分支插在现有匿名 `/-/` 端点之后、S3 寻址
 - 吊销语义：删除后**新请求**立即失效；已通过验签、尚在处理中的请求
   自然完成（与 AWS 的最终一致行为相同）；
 - 多实例限制：多个网关实例共享同一后端时，实例间无失效/新增通知，
-  各自的内存表只在启动时加载。本期明确不支持该拓扑（单进程假设，
-  docs/architecture.md 的部署模型），二期可选方案：定期增量 reload 或管理面广播。
+  各自的内存表默认只在启动时加载。二期提供 `auth.sync_interval` 定期增量
+  reload（§10.3）；不开启时仍是单进程假设（docs/architecture.md 的部署模型）。
 
 ## 8. 测试计划
 
@@ -236,7 +237,90 @@ root 凭证 POST 生成 → 解析响应 JSON 取出新 AK/SK（sed/grep 提取�
 
 ## 9. 分期
 
-| 期 | 内容 |
-| --- | --- |
-| 一期 | 本方案全部：4 个 API、`.sys` 持久化、动态生效、两级权限、单测 + e2e |
-| 二期 | SK at-rest 加密（master key）、外部 IdP/文件热加载 provider、多实例失效同步、per-credential policy |
+| 期 | 内容 | 状态 |
+| --- | --- | --- |
+| 一期 | 本方案全部：4 个 API、`.sys` 持久化、动态生效、两级权限、单测 + e2e | 已实现 |
+| 二期 | SK at-rest 加密（master key）、文件热加载 provider、多实例失效同步、per-credential policy（设计见 §10） | 已实现 |
+
+## 10. 二期设计
+
+一期后的凭证来源从两级扩展为三来源：
+
+```text
+静态凭证（config auth.credentials）        = root：数据面 + admin API
+文件凭证（auth.credentials_file，热加载）  = 普通：仅数据面，可带 policy
+动态凭证（API 生成，storage 持久化）       = 普通：仅数据面，可带 policy
+```
+
+同 AK 冲突优先级 static > file > dynamic，均有启动/加载告警。
+`CredentialInfo::source` 三值枚举替代一期的 `is_static` 布尔；admin API 的
+`source` 字段相应多出 `"file"`。
+
+### 10.1 SK at-rest 加密
+
+- 开关即环境变量 `LIGHTS3_MASTER_KEY`（64 个 hex 字符 = 32 字节，
+  `openssl rand -hex 32` 生成）；不进配置文件，避免与被加密物同处一份文件；
+- 算法 AES-256-GCM（OpenSSL EVP，封装在 `core/util/crypto.h`：
+  `aes256gcm_seal/open`，布局 `12B nonce || ciphertext || 16B tag`）；
+- 落盘对象 `version: 2`，`sk` 字段换成 `sk_enc`（seal 输出的 hex）；
+- 兼容与升级：load 同时接受 v1/v2；设置 master key 后启动时把存量 v1
+  对象**就地重写为 v2**（对象个数有限，一次性代价可忽略）；
+- fail-fast：遇到 v2 对象而 key 未设置 / key 不对（GCM tag 校验失败）时
+  **启动报错**而非跳过——静默丢凭证会把用户锁在门外还无从排查；JSON 损坏
+  仍是跳过 + 告警（与一期一致）。运行期 sync（§10.3）里同类错误降级为告警，
+  不让单个坏对象打断同步；
+- 无降级路径：想撤掉 master key，先用 `?show-secret=true` 导出再重建凭证。
+
+### 10.2 外部凭证文件热加载 provider
+
+面向"凭证由外部系统（IdP/配置管理）生成下发"的场景：lights3 只消费文件，
+不做协议对接——外部系统负责把凭证渲染成 JSON 文件放到指定路径。
+
+- 配置 `auth.credentials_file`，格式：
+  `{"credentials": [{"access_key", "secret_key", "comment"?, "policy"?}]}`；
+- 热加载：`auth.credentials_file_reload`（默认 30s，0s = 仅启动时加载）周期
+  轮询 mtime，变更即整表替换 file 来源的条目（删掉的凭证随之失效）。选
+  mtime 轮询而非 inotify：跨文件系统可靠、代码量小，30s 级延迟对凭证下发
+  完全够用；
+- 启动时解析失败 fail-fast（配置错误）；运行期 reload 失败告警并**保留旧表**
+  （宁可旧凭证多活一轮，不可解析错误清空全表）；
+- 文件凭证仅数据面（不能调 admin API），也不能经 admin API 吊销（405，
+  归文件管——从文件里删掉即吊销）。
+
+### 10.3 多实例失效同步（定期增量 reload）
+
+§7 预留的两个方案里选**定期增量 reload**：无须新增管理面广播通道与成员
+发现，代价是失效延迟一个周期（凭证下发/吊销本就是分钟级运维操作）。
+
+- 配置 `auth.sync_interval`（默认 0s = 关闭，单实例部署零开销）；
+- 每轮：先采内存中动态凭证的 AK 快照，再 list `.sys/credentials/`——
+  storage 有而内存无的拉取入表（新增），快照有而 storage 无的移除（吊销）。
+  快照**必须先于 list**：write-through 保证快照里的凭证当时已持久化，
+  "快照有 + list 无"只能是别处吊销；list 期间本实例新生成的凭证不在快照里，
+  不会被误删；
+- 已存在的 AK 不重拉：SK 与 policy 在凭证生命周期内不可变（无 update API），
+  增量只有增删两种；
+- 定时器模式与 duostore GC 相同（`BackgroundTaskGroup` + `TimerQueue`，
+  完成后重臂不重叠），tick 先 `pool_->schedule()` 挪到池线程再做 IO。
+
+### 10.4 per-credential policy
+
+刻意保持在"够用"档，不引入 IAM 的 statement/effect/action 语法：
+
+```json
+{ "policy": { "buckets": ["logs-*", "backup"], "readonly": true } }
+```
+
+- `buckets`：bucket glob 白名单（fnmatch，同 bucket 路由规则）；空/缺省 = 全部；
+- `readonly`：true 时仅允许 GET/HEAD；
+- 携带方式：`POST /-/admin/credentials` 的 JSON body
+  `{"comment"?, "policy"?}`（`?comment=` 查询参数仍兼容，body 优先），或
+  credentials_file 条目的 `policy` 字段；创建后不可改（无 update API，重建即可）；
+- 执行点：dispatch 验签通过、bucket 解析后统一 `authorize(ak, bucket, is_write)`
+  （src/s3/service.cc），非 GET/HEAD 即视为写。静态凭证与无 policy 凭证恒通过；
+  拒绝为 `AccessDenied`(403) 且先于 NoSuchBucket 等数据面错误暴露；
+- 校验从严：POST body / policy 出现未知字段直接 `InvalidRequest`——拼错的
+  限制字段被静默忽略等于放权；
+- 已知取舍：`ListBuckets` 对 policy 凭证放行且**不过滤**结果（只泄露桶名，
+  过滤需把 AK 下探到 handler，不值得）；吊销/policy 均不影响已通过验签的
+  在途请求（§7 语义）。

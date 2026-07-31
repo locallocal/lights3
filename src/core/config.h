@@ -50,6 +50,10 @@ struct AuthConfig {
     std::vector<Credential> credentials;  // 为空则关闭认证（demo/测试用）
     std::string region = "us-east-1";
     std::string service = "s3";
+    // 凭证管理二期（docs/credential-management.md §10）
+    std::string credentials_file;          // 外部凭证文件（JSON，热加载）；空 = 不启用
+    int credentials_file_reload_sec = 30;  // 文件 mtime 轮询周期；0 = 仅启动时加载
+    int sync_interval_sec = 0;             // 多实例：定期增量 reload .sys；0 = 关闭
 };
 
 struct BackendConfig {

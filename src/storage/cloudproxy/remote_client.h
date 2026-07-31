@@ -114,7 +114,7 @@ struct RemoteContext {
           metrics(scope),
           pool(cfg, ep, metrics.pool_wait),
           auth(s3::SigV4Authenticator::build(
-              AuthConfig{{}, cfg.region, "s3"})),
+              AuthConfig{.credentials = {}, .region = cfg.region, .service = "s3"})),
           cred{cfg.access_key, cfg.secret_key} {}
 
     // 寻址（docs/cloudproxy-backend.md §7）：按 force_path_style 给出路径前缀与 Host

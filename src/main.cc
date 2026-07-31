@@ -61,6 +61,9 @@ int main(int argc, char** argv) {
         service->set_pool_stats([pool] { return pool->stats(); });
         service->set_backend_metrics(metrics);
         service->set_credential_store(cred_store);
+        // 二期后台任务（docs/credential-management.md §10.2/§10.3）：
+        // credentials_file 热加载轮询 + 多实例定期增量同步（均按配置门控）
+        cred_store->start_background(pool);
 
         auto server = http::HttpServerFactory::create(cfg.http.driver, cfg.http);
         // dispatch 入口限流（docs/concurrency.md §6）：超限请求在信号量上排队而非拒绝；
@@ -87,6 +90,7 @@ int main(int argc, char** argv) {
         server->run();  // 阻塞直至 SIGINT/SIGTERM
 
         g_server = nullptr;
+        cred_store->shutdown_background();  // 定时器/在途同步须先于线程池收尾
         // 各后端冲刷 + 线程池收尾
         pool->join();
         LOG_INFO("lights3 exited cleanly");

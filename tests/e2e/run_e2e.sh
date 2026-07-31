@@ -130,6 +130,12 @@ check() {  # check <描述> <期望> <实际>
 }
 
 # ---------- 配置与启动 ----------
+# 外部凭证文件（credential-management.md §10.2）：热加载 provider，仅数据面
+FILE_AK=E2EFILEKEY
+FILE_SK=e2e-file-secret
+cat > "$WORK/creds.json" <<EOF
+{"credentials": [{"access_key": "$FILE_AK", "secret_key": "$FILE_SK"}]}
+EOF
 cat > "$WORK/config.yaml" <<EOF
 http:
   driver: $DRIVER
@@ -142,6 +148,7 @@ auth:
     - access_key: $AK
       secret_key: $SK
   region: $REGION
+  credentials_file: $WORK/creds.json
 backends:
 $(if [[ "$BACKEND" == "tiered" ]]; then cat <<TIER
   - name: localdata
@@ -409,6 +416,34 @@ check ".sys 对用户不可达" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/.sys/credentials/$AK2")"
 check "ListBuckets 不含 .sys" "1" "$(s3curl "$BASE/" | grep -qF '.sys'; echo $?)"
 
+# ---------- 二期：文件凭证 + per-credential policy（credential-management.md §10）----------
+filecurl() {  # 用 credentials_file 里的凭证签名
+    curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$FILE_AK:$FILE_SK" "$@"
+}
+check "文件凭证数据面可用" "cred-data" "$(filecurl "$BASE/credbkt/k")"
+check "文件凭证调 admin 被拒" "403" \
+    "$(filecurl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/credentials")"
+check "文件凭证不可经 API 吊销" "405" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/-/admin/credentials/$FILE_AK")"
+
+POL_OUT=$(s3curl -X POST \
+    --data-binary '{"comment":"scoped","policy":{"buckets":["credbkt"],"readonly":true}}' \
+    "$BASE/-/admin/credentials")
+POL_AK=$(echo "$POL_OUT" | json_field access_key)
+POL_SK=$(echo "$POL_OUT" | json_field secret_key)
+check "生成带 policy 的凭证" "0" "$([[ -n "$POL_AK" && -n "$POL_SK" ]]; echo $?)"
+polcurl() {
+    curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$POL_AK:$POL_SK" "$@"
+}
+check "policy 白名单内读放行" "cred-data" "$(polcurl "$BASE/credbkt/k")"
+check "policy readonly 写被拒" "403" \
+    "$(polcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'x' "$BASE/credbkt/blocked")"
+check "policy 白名单外被拒" "403" \
+    "$(polcurl -o /dev/null -w '%{http_code}' "$BASE/otherbkt/x")"
+check "POST 未知字段被拒" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST --data-binary '{"bogus":1}' \
+       "$BASE/-/admin/credentials")"
+
 # 优雅退出
 kill -TERM "$SRV_PID"
 EXITED=1
@@ -421,7 +456,9 @@ wait "$SRV_PID" 2>/dev/null
 SRV_PID=""
 
 # ---------- 重启：动态凭证持久化验证（docs/credential-management.md §8）----------
-"$BIN" --config "$WORK/config.yaml" > "$WORK/server2.log" 2>&1 &
+# 带 master key 重启：load 时 v1 明文对象就地升级为 v2 加密（§10.1），验签仍可用
+MASTER_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
+LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server2.log" 2>&1 &
 SRV_PID=$!
 PORT=""
 for _ in $(seq 1 50); do
@@ -437,6 +474,15 @@ check "重启后动态凭证仍可用" "200" \
        -o /dev/null -w '%{http_code}' -I "$BASE/credbkt")"
 check "重启后已吊销凭证仍被拒" "403" \
     "$(dyncurl -o /dev/null -w '%{http_code}' "$BASE/credbkt/k")"
+check "master key 下 show-secret 可逆" "$SK2" \
+    "$(s3curl "$BASE/-/admin/credentials/$AK2?show-secret=true" | json_field secret_key)"
+if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
+    # localfs 才能直接翻 .sys 对象文件：升级后不应再有明文 SK 落盘
+    check "凭证对象已加密（无明文 SK）" "1" \
+        "$(grep -rqF "$SK2" "$WORK/data" 2>/dev/null; echo $?)"
+    check "凭证对象含 sk_enc" "0" \
+        "$(grep -rq 'sk_enc' "$WORK/data" 2>/dev/null; echo $?)"
+fi
 kill -TERM "$SRV_PID"
 wait "$SRV_PID" 2>/dev/null
 SRV_PID=""

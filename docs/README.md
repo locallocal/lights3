@@ -30,6 +30,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [duostore-sqlite-meta.md](duostore-sqlite-meta.md) | DuoStore 的 SQLite IMetaStore：amalgamation 内嵌，WAL + 读池/单写连接 |
 | [duostore-rados-data.md](duostore-rados-data.md) | DuoStore 的 RADOS IDataStore：librados 直连，chunk → rados 对象 |
 | [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore 的 TiKV IMetaStore：client-c + 2PC 侧车，meta 水平扩展 |
+| [code-review/](code-review/README.md) | 全项目代码评审发现（2026-08-01）：按框架/模块/文件三粒度记录的问题清单 |
 
 *另有中文项目介绍 [README.zh-CN.md](README.zh-CN.md)（构建/运行/当前实现范围）；
 全部设计文档的英文翻译在 [en/](en/README.md)，章节编号与中文版一一对应，

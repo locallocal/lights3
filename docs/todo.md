@@ -298,12 +298,18 @@ SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 - 演进项（另立特性，不在本期）：抽象 local 侧接口以支持 duostore 作 local 侧
   （目前绑定 localfs 磁盘布局，duostore-backend.md §13.1）
 
-### 3.5 凭证管理二期（credential-management.md §9）
+### 3.5 凭证管理二期（credential-management.md §9）（✅ 已完成，2026-07-31）
 
-- SK at-rest 加密（master key 来自环境变量，AES-256-GCM；`version` 字段已预留升级路径）
-- 外部 IdP / 文件热加载 provider
-- 多实例失效同步（定期增量 reload 或管理面广播，§7）
-- per-credential policy
+~~- SK at-rest 加密（master key 来自环境变量，AES-256-GCM；`version` 字段已预留升级路径）~~
+~~- 外部 IdP / 文件热加载 provider~~
+~~- 多实例失效同步（定期增量 reload 或管理面广播，§7）~~
+~~- per-credential policy~~
+四项全部落地（设计见 credential-management.md §10）：`LIGHTS3_MASTER_KEY` 触发
+v2 加密落盘并就地升级存量 v1 对象（缺 key/错 key fail-fast）；
+`auth.credentials_file` JSON 文件 provider（mtime 轮询热加载，仅数据面）；
+`auth.sync_interval` 定期增量 reload `.sys`（快照先于 list 防误删竞态）；
+per-credential policy（bucket glob 白名单 + readonly，POST body / 文件条目携带，
+dispatch 统一 authorize）。单测 8 个新用例 + e2e 12 项新检查全绿。
 
 ## 4. S3 协议层缺口（s3-protocol.md）
 

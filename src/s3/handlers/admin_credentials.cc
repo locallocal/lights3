@@ -27,17 +27,72 @@ std::string mask(const std::string& sk) {
     return sk.substr(0, 4) + "****" + sk.substr(sk.size() - 4);
 }
 
+const char* source_name(CredSource s) {
+    switch (s) {
+        case CredSource::kStatic: return "static";
+        case CredSource::kFile: return "file";
+        case CredSource::kDynamic: return "dynamic";
+    }
+    return "dynamic";
+}
+
 json to_json(const CredentialInfo& c, bool with_secret) {
     json j;
     j["access_key"] = c.access_key;
     if (with_secret) j["secret_key"] = c.secret_key;
     else j["secret_key_masked"] = mask(c.secret_key);
-    j["source"] = c.is_static ? "static" : "dynamic";
-    if (!c.is_static) {
+    j["source"] = source_name(c.source);
+    if (c.source == CredSource::kDynamic) {
         j["created_at"] = util::iso8601(c.created);
+    }
+    if (!c.is_static()) {
         if (!c.comment.empty()) j["comment"] = c.comment;
+        if (c.policy) j["policy"] = json::parse(policy_to_json(*c.policy));
     }
     return j;
+}
+
+// POST body（可选）：{"comment": "...", "policy": {"buckets": [...], "readonly": bool}}
+// 未知顶层字段与非法 policy 严格拒绝（InvalidRequest）
+struct CreateRequest {
+    std::string comment;
+    std::optional<CredentialPolicy> policy;
+};
+
+Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
+    CreateRequest out;
+    out.comment = req.query_get("comment").value_or("");
+    if (!req.body) co_return out;
+    std::string text;
+    std::byte buf[16 * 1024];
+    for (;;) {
+        size_t n = co_await req.body->read(std::span(buf));
+        if (n == 0) break;
+        if (text.size() + n > 64 * 1024)
+            throw S3Error(S3ErrorCode::InvalidRequest, "Request body too large.");
+        text.append(reinterpret_cast<const char*>(buf), n);
+    }
+    if (text.empty()) co_return out;
+    json j;
+    try {
+        j = json::parse(text);
+    } catch (const json::exception&) {
+        throw S3Error(S3ErrorCode::InvalidRequest, "Request body is not valid JSON.");
+    }
+    if (!j.is_object())
+        throw S3Error(S3ErrorCode::InvalidRequest, "Request body must be a JSON object.");
+    for (auto& [k, v] : j.items()) {
+        if (k == "comment") {
+            if (!v.is_string())
+                throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
+            out.comment = v.get<std::string>();  // body 优先于 ?comment=
+        } else if (k == "policy") {
+            out.policy = parse_policy_json(v.dump());
+        } else {
+            throw S3Error(S3ErrorCode::InvalidRequest, "unknown field '" + k + "'.");
+        }
+    }
+    co_return out;
 }
 
 }  // namespace
@@ -60,8 +115,9 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
             throw S3Error(S3ErrorCode::InvalidRequest, "Malformed admin API path.");
 
         if (req.method == "POST" && rest.empty()) {
-            auto c = co_await cred_store_->generate(
-                std::string(req.query_get("comment").value_or("")));
+            auto body = co_await parse_create_body(req);
+            auto c = co_await cred_store_->generate(std::move(body.comment),
+                                                    std::move(body.policy));
             co_return json_response(201, to_json(c, /*with_secret=*/true));
         }
         if (req.method == "GET" && rest.empty()) {

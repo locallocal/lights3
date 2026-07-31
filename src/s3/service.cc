@@ -7,6 +7,7 @@
 
 #include "core/log.h"
 #include "core/util/hex.h"
+#include "s3/auth/credential_store.h"
 #include "s3/errors.h"
 #include "s3/router.h"
 
@@ -105,6 +106,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             if (!bucket.empty() && bucket.front() == '.')
                 throw S3Error(S3ErrorCode::InvalidBucketName,
                               "The specified bucket is not valid.", bucket);
+            // per-credential policy（docs/credential-management.md §10.4）：
+            // GET/HEAD 为读，其余（PUT/POST/DELETE）算写
+            if (cred_store_)
+                cred_store_->authorize(access_key, bucket,
+                                       req.method != "GET" && req.method != "HEAD");
             resp = co_await route(req, bucket, key);
         }
     } catch (const S3Error& e) {

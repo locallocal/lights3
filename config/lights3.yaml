@@ -20,6 +20,15 @@ auth:
     - access_key: AKIDEXAMPLE
       secret_key: ${LIGHTS3_SECRET_1}   # 环境变量引用；留空则拒绝所有请求
   region: us-east-1
+  # ---------- 凭证管理二期（docs/credential-management.md §10）----------
+  # 动态凭证 SK 的 at-rest 加密不在此配置：设环境变量 LIGHTS3_MASTER_KEY
+  # （64 个 hex 字符，如 `openssl rand -hex 32`）即启用，存量明文对象启动时自动升级。
+  # credentials_file: /etc/lights3/creds.json  # 外部凭证文件（热加载，仅数据面）。
+  #                                            # 格式：{"credentials": [{"access_key",
+  #                                            # "secret_key", "comment"?, "policy"?}]}
+  # credentials_file_reload: 30s               # 文件 mtime 轮询周期；0s = 仅启动时加载
+  # sync_interval: 0s                          # 多实例共享后端时定期增量 reload .sys
+  #                                            # （新增拉取/吊销失效）；0s = 关闭（单实例默认）
 
 backends:
   # ---------- localfs / xlocalfs：本地文件系统（docs/storage-backend.md）----------

@@ -2,7 +2,9 @@
 
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
+#include <unistd.h>
 
+#include <cstring>
 #include <stdexcept>
 
 #include "core/util/hex.h"
@@ -32,6 +34,68 @@ Sha256Digest hmac_sha256(std::span<const uint8_t> key, std::string_view data) {
     if (!HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
               reinterpret_cast<const uint8_t*>(data.data()), data.size(), out.data(), &len))
         throw std::runtime_error("HMAC(sha256) failed");
+    return out;
+}
+
+namespace {
+
+constexpr size_t kGcmNonceLen = 12;
+constexpr size_t kGcmTagLen = 16;
+
+struct CipherCtx {
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    ~CipherCtx() {
+        if (ctx) EVP_CIPHER_CTX_free(ctx);
+    }
+};
+
+}  // namespace
+
+std::string aes256gcm_seal(const Aes256Key& key, std::string_view plaintext) {
+    uint8_t nonce[kGcmNonceLen];
+    if (::getentropy(nonce, sizeof(nonce)) != 0)
+        throw std::runtime_error("getentropy failed: cannot generate GCM nonce");
+
+    CipherCtx c;
+    if (!c.ctx ||
+        !EVP_EncryptInit_ex(c.ctx, EVP_aes_256_gcm(), nullptr, key.data(), nonce))
+        throw std::runtime_error("EVP_EncryptInit(aes-256-gcm) failed");
+
+    std::string out(kGcmNonceLen + plaintext.size() + kGcmTagLen, '\0');
+    memcpy(out.data(), nonce, kGcmNonceLen);
+    auto* ct = reinterpret_cast<uint8_t*>(out.data()) + kGcmNonceLen;
+    int n = 0;
+    if (!EVP_EncryptUpdate(c.ctx, ct, &n,
+                           reinterpret_cast<const uint8_t*>(plaintext.data()),
+                           static_cast<int>(plaintext.size())) ||
+        !EVP_EncryptFinal_ex(c.ctx, ct + n, &n) ||
+        !EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_GET_TAG, kGcmTagLen,
+                             out.data() + kGcmNonceLen + plaintext.size()))
+        throw std::runtime_error("EVP_Encrypt(aes-256-gcm) failed");
+    return out;
+}
+
+std::optional<std::string> aes256gcm_open(const Aes256Key& key, std::string_view sealed) {
+    if (sealed.size() < kGcmNonceLen + kGcmTagLen) return std::nullopt;
+    auto* p = reinterpret_cast<const uint8_t*>(sealed.data());
+    size_t ct_len = sealed.size() - kGcmNonceLen - kGcmTagLen;
+
+    CipherCtx c;
+    if (!c.ctx || !EVP_DecryptInit_ex(c.ctx, EVP_aes_256_gcm(), nullptr, key.data(), p))
+        throw std::runtime_error("EVP_DecryptInit(aes-256-gcm) failed");
+
+    std::string out(ct_len, '\0');
+    int n = 0;
+    if (!EVP_DecryptUpdate(c.ctx, reinterpret_cast<uint8_t*>(out.data()), &n,
+                           p + kGcmNonceLen, static_cast<int>(ct_len)))
+        return std::nullopt;
+    // tag 校验在 Final：失败 = 密文被篡改或密钥不符
+    uint8_t tag[kGcmTagLen];
+    memcpy(tag, p + kGcmNonceLen + ct_len, kGcmTagLen);
+    if (!EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_SET_TAG, kGcmTagLen, tag)) return std::nullopt;
+    int fin = 0;
+    if (EVP_DecryptFinal_ex(c.ctx, reinterpret_cast<uint8_t*>(out.data()) + n, &fin) <= 0)
+        return std::nullopt;
     return out;
 }
 

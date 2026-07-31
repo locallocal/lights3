@@ -199,6 +199,11 @@ Config Config::from_string(const std::string& text) {
     if (auto* auth = root.find("auth")) {
         cfg.auth.region = auth->get("region", cfg.auth.region);
         cfg.auth.service = auth->get("service", cfg.auth.service);
+        cfg.auth.credentials_file = auth->get("credentials_file", cfg.auth.credentials_file);
+        if (auto v = auth->get("credentials_file_reload"); !v.empty())
+            cfg.auth.credentials_file_reload_sec = parse_duration_sec(v);
+        if (auto v = auth->get("sync_interval"); !v.empty())
+            cfg.auth.sync_interval_sec = parse_duration_sec(v);
         if (auto* creds = auth->find("credentials"); creds && creds->type == YamlNode::Type::List) {
             for (auto& c : creds->list) {
                 Credential cr{c.get("access_key"), c.get("secret_key")};

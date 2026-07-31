@@ -154,4 +154,3 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
 设计上明确不支持（返回 NotImplemented，见 [s3-protocol.md](s3-protocol.md) §1）：
 versioning、ACL 细粒度（只认 private）、bucket policy、website、lifecycle、
 tagging/CORS、SSE-C/KMS、Object Lock、presigned POST。
-完整待办见 [todo.md](todo.md)。

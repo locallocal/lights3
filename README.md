@@ -2,9 +2,10 @@
 
 An S3-protocol gateway written in C++20. It exposes the standard S3 REST API on
 the outside, with pluggable HTTP drivers and storage backends on the inside.
-Design documents live in [docs/](docs/README.md) (in Chinese); the current
-implementation follows the architecture described in
-[docs/architecture.md](docs/architecture.md).
+Design documents live in [docs/](docs/README.md) (Chinese originals, English
+translations under [docs/en/](docs/en/README.md)); the current implementation
+follows the architecture described in
+[docs/en/architecture.md](docs/en/architecture.md).
 
 *中文介绍见 [docs/README.zh-CN.md](docs/README.zh-CN.md)。*
 
@@ -31,8 +32,9 @@ boundaries are `IHttpServer` (L1/L2) and `IStorageBackend` (L2/L3):
 │   ├─ /-/admin/credentials → admin handler (JSON, root-only)           │
 │   │        └─ CredentialStore ──(ICredentialProvider)──┐              │
 │   └─ SigV4Authenticator.verify ◄───────────────────────┘              │
-│        └─ route table (method + scope + query flag)                   │
-│             └─ handlers: buckets / objects / list_objects / multipart │
+│        └─ per-credential policy authorize (bucket glob / readonly)    │
+│             └─ route table (method + scope + query flag)              │
+│                  └─ handlers: buckets / objects / list / multipart    │
 │ XML codec · S3Error mapping · Metrics · access log                    │
 └─────────────────────────────────┬─────────────────────────────────────┘
                    IStorageBackend (Task<T>, streaming)
@@ -64,8 +66,10 @@ Requirements: g++ ≥ 13 (C++20 coroutines), CMake ≥ 3.20, OpenSSL.
 The beast driver needs Boost headers (≥ 1.75, header-only, no compiled
 libraries; if system Boost is not found, point `BOOST_ROOT` at the header
 directory, or disable the driver with `-DLIGHTS3_DRIVER_BEAST=OFF`).
-httplib, spdlog, gflags and nlohmann/json are git submodules under
-`third_party/` and must be initialized before the first build.
+gflags, spdlog, httplib, nlohmann/json, rocksdb, hiredis and sqlite are git
+submodules under `third_party/` and must be initialized before the first
+build (rocksdb is required — the DuoStore backend is on by default; hiredis
+and sqlite serve its optional meta engines).
 
 ```bash
 ./build.sh --test        # submodules + cmake + ninja + ctest in one go
@@ -75,19 +79,37 @@ or manually:
 
 ```bash
 git submodule update --init third_party/gflags third_party/spdlog \
-    third_party/httplib third_party/json
+    third_party/httplib third_party/json third_party/rocksdb \
+    third_party/hiredis third_party/sqlite
 cmake -B build
 cmake --build build -j
-ctest --test-dir build --output-on-failure   # unit tests + per-driver e2e (e2e needs curl ≥ 7.75)
+ctest --test-dir build --output-on-failure   # unit tests + per-driver and per-backend e2e
+                                             # (e2e needs curl ≥ 7.75)
 ```
 
 The seastar driver is off by default (heavy dependencies); enable with
-`./build.sh --seastar`. Sanitizer builds: `./build.sh --asan` / `--tsan`.
+`./build.sh --seastar`. Optional backend switches: `--redis` / `--sqlite`
+(DuoStore meta engines), `--tikv` (needs system gRPC/Poco, lazily pulls the
+client-c submodule), `--rados` (needs librados, or `-DLIGHTS3_RADOS_ROOT`).
+These CMake options are sticky in the build cache — combine with `--clean`
+or a separate `-B build-x` directory to switch them off. Sanitizer builds:
+`./build.sh --asan` / `--tsan`.
+
+The MinIO mint compatibility suite is a manual gate (not wired into ctest;
+needs docker and skips cleanly without it — see
+[docs/en/s3-protocol.md](docs/en/s3-protocol.md) §8):
+
+```bash
+tests/e2e/run_mint.sh build/lights3 s3cmd awscli
+```
 
 ## Run
 
 ```bash
 export LIGHTS3_SECRET_1=my-secret
+# optional: encrypt dynamically generated secret keys at rest (AES-256-GCM).
+# Once enabled, starting without the key (or with a wrong one) fails fast.
+export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
 ./build/lights3 --config config/lights3.yaml
 ```
 
@@ -127,9 +149,18 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
   synchronous drivers bridge through `sync_wait`
 - **Auth**: SigV4 implemented from scratch (header signing + presigned query),
   streaming payload SHA256 verification and aws-chunked per-chunk signature
-  chains, unit tests cover the official AWS test vectors; runtime credential
-  management (generate/query/revoke AK/SK, persisted in storage) via
-  `/-/admin/credentials` ([docs/credential-management.md](docs/credential-management.md))
+  chains, unit tests cover the official AWS test vectors; presigned URLs are
+  bounded on both sides (`X-Amz-Expires` for the past, a 15-minute clock-skew
+  limit against future-dated `X-Amz-Date`)
+- **Credential management**
+  ([docs/en/credential-management.md](docs/en/credential-management.md)):
+  runtime generate/query/revoke of AK/SK via `/-/admin/credentials`, persisted
+  in storage; three credential sources (static config = root, external
+  credentials file, dynamic) — only static credentials may call the admin API;
+  at-rest AES-256-GCM encryption of secret keys via `LIGHTS3_MASTER_KEY`;
+  hot-reloaded external credentials file (`auth.credentials_file`);
+  periodic multi-instance sync (`auth.sync_interval`); per-credential policy
+  (bucket glob whitelist + readonly)
 - **Storage**: LocalFs (sidecar metadata, atomic writes via staging+rename),
   XLocalFs (io_uring data plane using raw syscalls, no liburing required),
   Memory (for tests), CloudProxy (self-signed SigV4 proxy to a remote S3,
@@ -141,9 +172,36 @@ Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
 - **S3 API**: ListBuckets, Create/Head/DeleteBucket, Put/Get/Head/DeleteObject
   (including Range and conditional requests), CopyObject, batch DeleteObjects,
   ListObjectsV2 (prefix/delimiter/pagination), Multipart Upload
-  (create/upload/list/complete/abort)
+  (create/upload/upload-part-copy/list/complete/abort; UploadPartCopy supports
+  `x-amz-copy-source-range` and copy-source conditional headers, and the
+  source may live on a different backend than the destination)
 
-Not implemented yet (returns NotImplemented; see
-[docs/s3-protocol.md](docs/s3-protocol.md) for the roadmap):
-UploadPartCopy, versioning, ACL/policy, lifecycle, SSE, and Object Lock.
-The full backlog lives in [docs/todo.md](docs/todo.md).
+Not supported by design (returns NotImplemented; see
+[docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1): versioning, fine-grained
+ACL (only "private" is accepted), bucket policy, website, lifecycle,
+tagging/CORS, SSE-C/KMS, Object Lock, and presigned POST.
+The full backlog lives in [docs/todo.md](docs/todo.md) (Chinese).
+
+## Documentation
+
+Design docs are written in Chinese under [docs/](docs/README.md); English
+translations live in [docs/en/](docs/en/README.md) and mirror the Chinese
+section numbering (source comments reference sections as `docs/<name>.md §N`).
+
+| Document ([en](docs/en/README.md) · [中文](docs/README.md)) | Contents |
+| --- | --- |
+| [architecture](docs/en/architecture.md) | Overall architecture, layering, request lifecycle, code layout |
+| [http-adapter](docs/en/http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, driver notes |
+| [concurrency](docs/en/concurrency.md) | Task coroutines, Executor abstraction, thread pool, sync/async driver bridging |
+| [storage-backend](docs/en/storage-backend.md) | `IStorageBackend`, LocalFs/XLocalFs, bucket routing, new-backend guide |
+| [s3-protocol](docs/en/s3-protocol.md) | API scope, SigV4 (incl. presigned & clock skew), XML codec, errors, mint gate |
+| [credential-management](docs/en/credential-management.md) | AK/SK admin API, three credential sources, `.sys` persistence, at-rest encryption, policy |
+| [object-read-write-flow](docs/en/object-read-write-flow.md) | End-to-end read/write paths, BodyReader chains, staging commit, fd-snapshot reads |
+| [tiered-storage](docs/en/tiered-storage.md) | Cold-data tiering to cloud, stub metadata, transparent read-back |
+| [cloudproxy-backend](docs/en/cloudproxy-backend.md) | Self-signed SigV4 proxy to remote S3, streaming pumps, retries |
+| [duostore-backend](docs/en/duostore-backend.md) | Split meta/data engine: RocksDB meta, chunk/pack, GC |
+| [duostore-redis-meta](docs/en/duostore-redis-meta.md) | Redis IMetaStore: hiredis + Lua guarded-commit |
+| [duostore-sqlite-meta](docs/en/duostore-sqlite-meta.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
+| [duostore-rados-data](docs/en/duostore-rados-data.md) | RADOS IDataStore: librados, chunk → rados objects |
+| [duostore-tikv-meta](docs/en/duostore-tikv-meta.md) | TiKV IMetaStore: client-c + 2PC sidecar |
+| [todo](docs/en/todo.md) | Backlog and completion log (English snapshot; the Chinese original is authoritative) |

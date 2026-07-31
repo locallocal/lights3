@@ -3,7 +3,7 @@
 ## 1. IStorageBackend 接口
 
 L2 与存储的唯一边界。接口按 S3 语义而非文件语义设计，全部返回 `Task<T>`，
-数据面走流式 `BodyReader`：
+数据面走流式 `BodyReader`（以下为节选）：
 
 ```cpp
 // src/storage/backend.h
@@ -72,6 +72,9 @@ struct IStorageBackend {
 } // namespace
 ```
 
+（快照为节选：backend.h 另有 `list_buckets()` / `list_parts()` /
+`list_multipart_uploads()`；`close()` 有默认空实现而非纯虚。）
+
 错误约定：后端抛 `StorageError{S3ErrorCode, message}`（NoSuchKey、
 NoSuchBucket、EntityTooLarge…），L2 的 errors 模块统一映射为 HTTP 响应。
 后端不感知 HTTP。
@@ -96,32 +99,34 @@ resolve(bucket) → IStorageBackend&
 ```text
 <root>/
 ├── mybucket/                          # bucket = 一级目录
-│   ├── .bucket.json                   # bucket 标记与属性（创建时间等）
+│   ├── .lights3-bucket                # bucket 标记与属性（创建时间等）
 │   ├── dir/a.bin                      # object 数据文件，key 即相对路径
-│   └── dir/a.bin.lights3-meta         # sidecar：ObjectMeta 的 JSON
+│   └── dir/a.bin.lights3-meta         # sidecar：ObjectMeta 的 TSV
 <staging>/                             # 与 root 同一文件系统（rename 原子性）
-├── put/<uuid>                         # PUT 进行中的临时文件
+├── put/<pid>-<ts>-<seq>               # PUT 进行中的临时文件
 └── mpu/<upload_id>/
-    ├── manifest.json                  # bucket/key/meta/创建时间
-    └── part.00001 ... part.NNNNN
+    ├── manifest                       # bucket/key/meta/创建时间（TSV）
+    └── part.00001 ... part.NNNNN      # 每片伴随同目录 part.NNNNN.md5 sidecar
 ```
 
 关键决策：
 
 - **key → 路径映射**：`/` 作目录分隔直接落盘，保持人类可读、可用普通工具
-  操作。逃逸处理：拒绝含 `..` 段的 key；对文件系统非法或超长（>255B）的
-  path 段做 percent-encoding 落盘（meta 中记录原始 key，list 时还原）。
+  操作。逃逸处理：单段 >255B、含 `.`/`..` 或空段的 key 一律在共享校验层
+  （`src/storage/validate.cc`）拒绝，各后端行为一致。
   key 与目录冲突（已存在 `a/b` 再 PUT `a`）返回 S3 兼容错误。
-- **sidecar 而非 xattr**：xattr 有大小限制且 scp/rsync 易丢；sidecar JSON
+- **sidecar 而非 xattr**：xattr 有大小限制且 scp/rsync 易丢；sidecar TSV
   可靠且可检。list 时按后缀过滤掉 sidecar。
-- **写入原子性**：PUT 全部写到 staging 临时文件（边写边算 MD5/SHA256），
+- **写入原子性**：PUT 全部写到 staging 临时文件（边写边算 MD5 作 ETag；
+  SHA256 校验属 L2 的验签装饰器，不在后端），
   校验通过后 `rename()` 到最终路径（先 meta 后 data，读取侧以 data 为准），
   失败路径统一 unlink 临时文件。并发 PUT 同一 key 采用 last-write-wins
   （与 S3 语义一致），rename 的原子性保证读者看不到半截数据。
 
 ### 3.2 各操作实现要点
 
-- 所有 posix 调用都在 `co_await pool.schedule()` 之后执行（见 03 篇）。
+- 所有 posix 调用都在 `co_await pool.schedule()` 之后执行
+  （见 [concurrency.md](concurrency.md) §3）。
 - **GET**：open + fstat + 读 sidecar；`FdBodyReader` 每次 `read()` 都经池
   执行 `pread`（带偏移，天然支持 Range）；fd 由 RAII 持有，取消/断连自动关闭。
 - **PUT**：循环 `body.read(64KiB)` → 池内 write + 增量 MD5 → rename。
@@ -183,8 +188,9 @@ cloudproxy；vendored 的 httplib 具备流式 client 能力；而 aws-sdk-cpp �
 - **名称映射**：`bucket_prefix` 解决本地 bucket 名与远端全局命名空间冲突；
   key 不变换。
 - 线程占用：同步 HTTP client 会占住线程整个请求时长——数据面 pump 使用
-  cloudproxy 私有线程而非共享池，即 [concurrency.md](concurrency.md) §3 预留的
-  backend 独立线程池的落地形态（docs/cloudproxy-backend.md §2.3）。
+  cloudproxy 私有 pump 线程而非共享池（docs/cloudproxy-backend.md §2.3）。
+  与之独立的另一机制是通用的 per-backend `io_threads` 池，已作为任意后端
+  可配的通用键落地（见 [concurrency.md](concurrency.md) §3.1）。
 
 ## 5. DuoStoreBackend（元数据/数据分离引擎）
 

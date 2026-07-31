@@ -26,15 +26,18 @@ S3Service::dispatch()                       src/s3/service.cc
   │    需要 payload 校验时把 req.body 再包一层（见 §2.1）
   │ ⑤ resolve_address()：virtual-host 或 path-style 解出 (bucket, key)
   │    '.' 开头 bucket 为内部保留名，统一拒绝（docs/credential-management.md §4.1）
+  │ ⑥ per-credential policy 授权：cred_store->authorize(ak, bucket, is_write)
+  │    （GET/HEAD 为读，其余为写；CopyObject/UploadPartCopy 另对源桶做一次
+  │    读授权，见 docs/credential-management.md §10.4）
   ▼
 S3Service::route()                          显式分派表（docs/s3-protocol.md §2）
-  │ ⑥ 先拒绝不支持的子资源（?acl 等 → 501）
-  │ ⑦ 按 (method, scope, query-flag) 匹配表项 → 具体 handler 协程
+  │ ⑦ 先拒绝不支持的子资源（?acl 等 → 501）
+  │ ⑧ 按 (method, scope, query-flag) 匹配表项 → 具体 handler 协程
   ▼
 object handler                              src/s3/handlers/objects.cc
   ▼
 BucketRouter::resolve(bucket)               src/storage/bucket_router.cc
-  │ ⑧ 按 glob 规则（fnmatch）选后端，无匹配走 default
+  │ ⑨ 按 glob 规则（fnmatch）选后端，无匹配走 default
   ▼
 IStorageBackend                             src/storage/backend.h
 ```
@@ -54,6 +57,7 @@ IStorageBackend                             src/storage/backend.h
 | `HEAD /b/k` | `get_object(head_only=true)` |
 | `DELETE /b/k` | `delete_object` |
 | `PUT /b/k?partNumber&uploadId` | `upload_part`（multipart，见 §2.4） |
+| `PUT /b/k?partNumber&uploadId` + `x-amz-copy-source` | `upload_part` 的 copy 分支（UploadPartCopy，`multipart.cc:upload_part`） |
 
 ## 2. 写入流程（PutObject）
 
@@ -74,7 +78,7 @@ IStorageBackend                             src/storage/backend.h
 
 ### 2.2 handler：条件 PUT 与元数据提取
 
-`S3Service::put_object`（`objects.cc:117`）：
+`S3Service::put_object`（`objects.cc:put_object`）：
 
 1. `router_.resolve(bucket)` 选后端；
 2. 条件请求（docs/s3-protocol.md §6）：`If-None-Match: *` 先 `head_object` 探在，存在则 412
@@ -86,10 +90,10 @@ IStorageBackend                             src/storage/backend.h
 
 ### 2.3 LocalFs 后端：staging + 原子提交
 
-`LocalFsBackend::put_object`（`localfs_backend.cc:167`）：
+`LocalFsBackend::put_object`（`localfs_backend.cc:put_object`）：
 
 ```text
-校验 bucket/key 合法性、拒绝保留名（.meta 后缀 / bucket marker）
+校验 bucket/key 合法性、拒绝保留名（.lights3-meta 后缀 / bucket marker）
 co_await pool_->schedule()          ← 切到磁盘 IO 线程池，之后全程阻塞 IO
 require_bucket()                    ← 无 marker 则 NoSuchBucket
 
@@ -98,10 +102,11 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
    loop: body.read(64KiB) → md5.update → write(tmp)
    —— 边写边算 MD5，对象从不整体驻留内存
 
-② commit_object_file()              fs_util.cc:84，原子提交原语
+② commit_object_file()              fs_util.cc:commit_object_file，原子提交原语
    create_directories(父目录)       失败 → key 与既有对象路径冲突（InvalidArgument）
    目标是目录 → key 与既有前缀冲突（InvalidArgument）
-   先写 sidecar：<data>.meta（TSV：etag/content_type/meta.*，自身也是 tmp+rename）
+   先写 sidecar：<data>.lights3-meta（后缀 fs_util.h:kSidecarSuffix；
+   TSV：etag/content_type/meta.*，自身也是 tmp+rename）
    再 rename(tmp → 最终路径)        ← 提交点；rename 失败则回滚删 sidecar
 ```
 
@@ -117,15 +122,15 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 
 ### 2.4 变体
 
-- **XLocalFs**（`xlocalfs_backend.cc:107`）：同一 staging/提交路径，仅把数据面
+- **XLocalFs**（`xlocalfs_backend.cc:put_object`）：同一 staging/提交路径，仅把数据面
   `write` 换成 io_uring（`drain_to_tmp()`：`body.read` → `uring_->write`），
   完成续体经线程池恢复，落盘期间不占线程；提交仍回池线程同步执行。
-- **Memory**（`memory_backend.cc:54`）：先不持锁流式读完 body 到 `std::string`
+- **Memory**（`memory_backend.cc:put_object`）：先不持锁流式读完 body 到 `std::string`
   并算 MD5，再加锁插入 map（对象整体驻留内存，主要用于测试）。
-- **CopyObject**（`objects.cc:152`）：服务端拼管道——源后端
+- **CopyObject**（`objects.cc:copy_object`）：服务端拼管道——源后端
   `get_object()` 得到流，直接作为目标后端 `put_object()` 的 body，
   跨后端复制同样零整体缓冲；`x-amz-copy-source-if-*` 先于复制校验。
-- **Multipart**（详见 docs/storage-backend.md §3.2、docs/s3-protocol.md §4）：`upload_part` 与 PUT 完全同构
+- **Multipart**（详见 docs/storage-backend.md §3.2、docs/s3-protocol.md §1）：`upload_part` 与 PUT 完全同构
   （staging 流式写 + 分片 MD5，先写 `part.NNNNN.md5` 再 rename 数据文件，
   同号重传 last-write-wins）；`complete_multipart` 校验各分片 ETag 后按声明顺序
   拼接到新 tmp，总 ETag = `md5(各分片 md5 二进制拼接)-N`，最后走同一个
@@ -135,7 +140,7 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 
 ### 3.1 handler：Range 与条件请求
 
-`S3Service::get_object`（`objects.cc:191`）：
+`S3Service::get_object`（`objects.cc:get_object`）：
 
 1. 解析 `Range: bytes=a-b / a- / -n`；malformed 时**忽略**而非报错（S3 行为），
    多段 range 不支持，同样按无 Range 处理；
@@ -144,7 +149,7 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
    优先级遵循 RFC 7232）→ 填 `ETag`/`Content-Type`/`Last-Modified`/
    `x-amz-meta-*`，`content_length = size` 但无 body；
 3. **GET**：`backend.get_object(bucket, key, range)` 返回
-   `ObjectStream{meta, body, range}`（`storage/backend.h:39`），body 已按 range 裁剪，
+   `ObjectStream{meta, body, range}`（`storage/backend.h:ObjectStream`），body 已按 range 裁剪，
    `range` 是解析后的实际生效闭区间；
 4. 条件判定在拿到流之后做（304 时丢弃流即可）；
 5. 命中 Range → `206` + `Content-Range: bytes f-l/size`，`content_length = l-f+1`；
@@ -152,13 +157,13 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 
 ### 3.2 LocalFs 后端：打开即快照
 
-`LocalFsBackend::get_object`（`localfs_backend.cc:210`）：
+`LocalFsBackend::get_object`（`localfs_backend.cc:get_object`）：
 
 ```text
 co_await pool_->schedule()
 open(O_RDONLY)；失败时先 require_bucket() 区分 NoSuchBucket/NoSuchKey
 fstat 确认普通文件
-load_meta()：stat（size/mtime）+ 读 <data>.meta sidecar（etag/content_type/meta.*）
+load_meta()：stat（size/mtime）+ 读 <data>.lights3-meta sidecar（etag/content_type/meta.*）
 resolve_range(range, size)：解析 a-b/a-/-n 为闭区间，不可满足 → InvalidRange(416)
 构造 FdBodyReader(fd, offset=f, remaining=len)   ← fd 所有权移交 reader
 ```
@@ -176,9 +181,9 @@ resolve_range(range, size)：解析 a-b/a-/-n 为闭区间，不可满足 → In
 
 ## 4. 响应回写（驱动层）
 
-`HttpResponse` 的 body 二选一（`http/model.h:97`）：小响应 `small_body`（字符串），
+`HttpResponse` 的 body 二选一（`http/model.h:HttpResponse`）：小响应 `small_body`（字符串），
 大响应 `stream_body`（BodyReader）+ `content_length`。builtin 驱动的回写
-（`builtin_server.cc:362`）：
+（`builtin_server.cc:write_response`）：
 
 1. `content_length` 有值 → 发 `Content-Length`；stream 无长度 → chunked；
 2. HEAD 与 204/304 只发头；

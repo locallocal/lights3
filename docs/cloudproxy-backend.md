@@ -116,9 +116,9 @@ HttpRequest 只为签名，再搬运 headers"——另一种做法（直接对 h
   （`lights3_pool_*` / `lights3_backend_pool_*`）右移且 cloudproxy 控制面
   op 时延主导时开启。
 
-这正是 docs/concurrency.md §3"如出现云端慢请求占满池饿死本地盘，再按 backend 配置独立池"
-预留的落地形态——只是独立的不是通用 ThreadPool，而是 cloudproxy 自管的
-pump 线程集。
+docs/concurrency.md §3.1 预留的通用 per-backend 独立池（`io_threads` 配置键）
+已另行落地，可为 cloudproxy 单独配池；这里的私有 pump 线程集是对数据面
+阻塞段的局部规避，与通用池是两回事，保留不动。
 
 ## 3. 数据面流式设计
 
@@ -192,8 +192,9 @@ put_object(bucket, key, meta, body)：
   也有 `x-amz-decoded-content-length` 兜底）→ 定长 `client.Put(...)`,
   兼容性最好；
 - nullopt（真 chunked 且无长度）：AWS S3 不接受裸 `Transfer-Encoding:
-  chunked`（要求定长或 aws-chunked）。首期抛 `NotImplemented`（罕见路径），
-  P4 视需要补 `STREAMING-UNSIGNED-PAYLOAD-TRAILER` 出方向组帧。
+  chunked`（要求定长或 aws-chunked）。P4 决断：维持
+  `NotImplemented`，不实现 `STREAMING-UNSIGNED-PAYLOAD-TRAILER` 出方向
+  组帧——罕见路径，收益不抵复杂度（todo.md §5.4 注明不做）。
 
 ### 3.3 Range GET 透传
 
@@ -383,8 +384,8 @@ op/code 维度实例经互斥缓存按需注册（get-or-create 幂等）。warn
 - `CPPHTTPLIB_OPENSSL_SUPPORT` 必须在 **lights3_core 目标级**定义——
   httplib_server.cc 与 cloudproxy 两个 TU 一个开一个不开是 ODR 违规；
 - 链接从 `OpenSSL::Crypto` 扩展为 + `OpenSSL::SSL`；
-- 新增 option `LIGHTS3_CLOUDPROXY`（默认 ON）；`registry.cc` 中 cloudproxy 的
-  TODO 注释替换为真实注册（工厂从 `BackendConfig::params` 读 §7 各键）。
+- 新增 option `LIGHTS3_CLOUDPROXY`（默认 ON）；`registry.cc` 已注册 cloudproxy
+  工厂（从 `BackendConfig::params` 读 §7 各键）。
 
 ## 9. 与 TieredBackend 的对接验收（docs/tiered-storage.md P5）
 

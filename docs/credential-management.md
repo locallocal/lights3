@@ -128,9 +128,10 @@ version=2 的 AES-256-GCM 加密格式，存量 v1 对象在启动时就地升�
 class CredentialStore final : public ICredentialProvider {
 public:
     // 启动时全量加载：list(".sys", "credentials/") + 逐个 get，
-    // 与静态表合并（同 AK 时静态优先并告警）
+    // 与静态表合并（同 AK 时静态优先并告警）。二期起收整个 AuthConfig
+    //（含 credentials_file / credentials_file_reload / sync_interval 配置）
     static Task<std::shared_ptr<CredentialStore>> load(
-        std::shared_ptr<storage::IStorageBackend> backend, const AuthConfig& static_cfg);
+        std::shared_ptr<storage::IStorageBackend> backend, const AuthConfig& cfg);
 
     // 验签热路径：同步内存查表（shared_mutex 读锁）
     std::optional<std::string> secret_for(std::string_view ak) const override;
@@ -140,7 +141,9 @@ public:
     // 管理面：先写 storage 成功再改内存（write-through，崩溃时以 storage
     // 为准，内存顶多"少"不会"多"）。注意不持锁 co_await（协程可能换线程
     // 恢复，std::mutex 跨线程解锁是 UB），并发唯一性靠 AK 随机空间保证
-    Task<CredentialInfo> generate(std::string comment);
+    // policy 为二期扩展（§10.4），缺省无 policy
+    Task<CredentialInfo> generate(std::string comment,
+                                  std::optional<CredentialPolicy> policy = std::nullopt);
     Task<void>           remove(std::string_view ak);
     std::optional<CredentialInfo> find(std::string_view ak) const;
     std::vector<CredentialInfo>   list() const;
@@ -253,7 +256,8 @@ root 凭证 POST 生成 → 解析响应 JSON 取出新 AK/SK（sed/grep 提取�
 ```
 
 同 AK 冲突优先级 static > file > dynamic，均有启动/加载告警。
-`CredentialInfo::source` 三值枚举替代一期的 `is_static` 布尔；admin API 的
+`CredentialInfo::source` 三值枚举替代一期的 `is_static` 布尔（`is_static()`
+仍保留为基于 source 的便捷方法）；admin API 的
 `source` 字段相应多出 `"file"`。
 
 ### 10.1 SK at-rest 加密
@@ -289,7 +293,8 @@ root 凭证 POST 生成 → 解析响应 JSON 取出新 AK/SK（sed/grep 提取�
 
 ### 10.3 多实例失效同步（定期增量 reload）
 
-§7 预留的两个方案里选**定期增量 reload**：无须新增管理面广播通道与成员
+补齐 §7 的多实例限制有两个候选：管理面广播（实例间互通失效/新增事件）
+与定期增量 reload。选**定期增量 reload**：无须新增管理面广播通道与成员
 发现，代价是失效延迟一个周期（凭证下发/吊销本就是分钟级运维操作）。
 
 - 配置 `auth.sync_interval`（默认 0s = 关闭，单实例部署零开销）；

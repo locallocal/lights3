@@ -7,7 +7,7 @@
 ## 0. 现状快照
 
 已完成（有 commit 佐证）：四层架构 + 四个 HTTP driver + SigV4（含 chunked/presigned）+
-凭证管理一期；存储侧 localfs / xlocalfs / memory / tiered（P1-P5）/ cloudproxy（P1-P5）/
+凭证管理一二期 + S3 协议层缺口收口（UploadPartCopy/presigned 偏移，§4）；存储侧 localfs / xlocalfs / memory / tiered（P1-P5）/ cloudproxy（P1-P5）/
 duostore P1-P5 全部（RocksDB meta + chunk/pack data + GC 一二期 + 打磨），以及 duostore 可插拔件：Redis meta（R1-R3）、
 SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 
@@ -25,7 +25,8 @@ SQLite meta（S1-S3）、RADOS data（C1-C4）、TiKV meta（T1-T4）。
 | TiKV meta T5（打磨） | duostore-tikv-meta.md §11 | ✅ 已完成（2026-07-30，上游 PR 回馈除外） |
 | tiered 对账工具（P4 剩余） | tiered-storage.md §9/§10 | ✅ 已完成（2026-07-31，含 GC 指数退避） |
 | cloudproxy 指标 + control_in_pump（P4 剩余） | cloudproxy-backend.md §8.2/§2.3 | ✅ 已完成（2026-07-31，含 vhost） |
-| 凭证管理二期 | credential-management.md §9 | 未开始 |
+| 凭证管理二期 | credential-management.md §9 | ✅ 已完成（2026-07-31，§3.5） |
+| S3 协议层缺口收口（UploadPartCopy 等） | s3-protocol.md / 本文 §4 | ✅ 已完成（2026-07-31） |
 
 ## 1. 主线：DuoStore P2–P5（✅ 已全部完成，2026-07-29）
 

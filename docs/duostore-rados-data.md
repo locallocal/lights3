@@ -483,5 +483,6 @@ remove 的幂等 -ENOENT 不计错）。
 | C4 | 孤儿扫描（随主线 P4 的接口定形）；多网关 GC 约束落地（单实例执行配置）与分布式 pin 方案评估（§8.3）；指标（op 延迟/错误计数）；文档状态头更新 | 孤儿/对账专项 + 全 ctest 矩阵绿 | 已完成（scan_chunks §8.2；gc_enabled 与租约式评估结论 §8.3；op 指标 §10） |
 
 C1 即含完整读写：rados 版没有 pack/GC 压实等增量台阶，单一路径一步到
-可用；GC 消费（gcq → rados_remove）依赖主线 P3 的 GC worker——在 P3
-落地前，删除只记账不回收的行为与 fs 版 P1/P2 一致，无额外风险。
+可用；GC 消费（gcq → rados_remove）由主线 P3 的 GC worker
+承担（P3 已落地）；此前「删除只记账不回收」的过渡形态与 fs 版 P1/P2
+一致，已成历史。

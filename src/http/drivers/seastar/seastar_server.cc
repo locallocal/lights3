@@ -212,6 +212,10 @@ Detached spawn_detached(Task<void> t, Done done) {
         co_await std::move(t);
     } catch (const std::exception& e) {
         LOG_ERROR("seastar session escaped exception: {}", e.what());
+    } catch (...) {
+        // 非 std::exception 也必须兜住，否则打到 promise 的
+        // unhandled_exception 就是 terminate
+        LOG_ERROR("seastar session escaped non-standard exception");
     }
     done();
 }
@@ -226,6 +230,21 @@ struct SeaConn {
     ss::output_stream<char> out;
     ss::temporary_buffer<char> buf;
     size_t pos = 0;
+    // 空闲超时：每个挂起的 socket 操作都在定时器保护下进行（slowloris 防护，
+    // 覆盖请求行/头块/body 读与响应写全程，而非只有请求行那一次读）。
+    // 到点回调关读写两端，挂起的操作以 EOF/异常醒来，会话自然收尾
+    ss::timer<>* idle = nullptr;
+    std::chrono::seconds idle_timeout{0};
+
+    struct ArmGuard {
+        ss::timer<>* t;
+        explicit ArmGuard(SeaConn& c) : t(c.idle) {
+            if (t) t->arm(c.idle_timeout);
+        }
+        ~ArmGuard() {
+            if (t) t->cancel();
+        }
+    };
 
     explicit SeaConn(ss::connected_socket s)
         : cs(std::move(s)), in(cs.input()), out(cs.output()) {}
@@ -233,6 +252,7 @@ struct SeaConn {
     // 保证缓冲非空；EOF 返回 false
     Task<bool> fill() {
         while (pos == buf.size()) {
+            ArmGuard g(*this);
             buf = co_await fut_await(in.read());
             pos = 0;
             if (buf.empty()) co_return false;
@@ -265,8 +285,14 @@ struct SeaConn {
         co_return n;
     }
 
-    Task<void> write(const char* p, size_t n) { co_await fut_await(out.write(p, n)); }
-    Task<void> flush() { co_await fut_await(out.flush()); }
+    Task<void> write(const char* p, size_t n) {
+        ArmGuard g(*this);
+        co_await fut_await(out.write(p, n));
+    }
+    Task<void> flush() {
+        ArmGuard g(*this);
+        co_await fut_await(out.flush());
+    }
 };
 
 // body 读取状态归属会话协程帧（handler 内的 reader 销毁后，连接仍需 drain）。
@@ -278,6 +304,7 @@ struct BodyState {
     bool chunked = false;
     uint64_t remaining = 0;
     uint64_t chunk_left = 0;
+    bool after_chunk_data = false;  // 刚读完一个 chunk 的数据，下一行必须是 CRLF
     bool chunk_eof = false;
     bool error = false;
 
@@ -310,17 +337,28 @@ struct BodyState {
         while (chunk_left == 0) {
             if (chunk_eof) co_return 0;
             std::string line;
-            if (!co_await conn->read_line(line, 1024)) fail("client disconnected mid-body");
-            if (line.empty()) continue;  // chunk 数据后的 CRLF
-            size_t sz = 0;
-            try {
-                sz = std::stoull(line, nullptr, 16);
-            } catch (...) {
-                fail("malformed chunk size");
+            if (after_chunk_data) {
+                // chunk 数据后必须紧跟一个 CRLF，且只允许一个：任意"看似 hex"
+                // 的垃圾或多余空行都不能被当作下一个 chunk size 静默吞掉
+                if (!co_await conn->read_line(line, 2)) fail("client disconnected mid-body");
+                if (!line.empty()) fail("missing CRLF after chunk data");
+                after_chunk_data = false;
             }
-            if (sz == 0) {  // 末 chunk：吃掉 trailer 直到空行
+            if (!co_await conn->read_line(line, 1024)) fail("client disconnected mid-body");
+            uint64_t sz = 0;
+            if (!driver::parse_chunk_size(line, sz)) fail("malformed chunk size");
+            if (sz == 0) {
+                // 末 chunk：吃掉 trailer 直到空行。总量设上限防无限 trailer
+                // 灌注；读失败是 body 截断，必须报错而非当正常 EOF
                 std::string t;
-                while (co_await conn->read_line(t, 1024) && !t.empty()) {}
+                size_t trailer_bytes = 0;
+                for (;;) {
+                    if (!co_await conn->read_line(t, 1024))
+                        fail("client disconnected in trailers");
+                    if (t.empty()) break;
+                    trailer_bytes += t.size();
+                    if (trailer_bytes > 16 * 1024) fail("trailer section too large");
+                }
                 chunk_eof = true;
                 co_return 0;
             }
@@ -329,6 +367,7 @@ struct BodyState {
         size_t n = co_await conn->read_some(dst, std::min<uint64_t>(want, chunk_left));
         if (n == 0) fail("client disconnected mid-body");
         chunk_left -= n;
+        if (chunk_left == 0) after_chunk_data = true;
         co_return n;
     }
 
@@ -430,6 +469,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
 
     // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
     std::vector<std::byte> buf(64 * 1024);
+    uint64_t written = 0;
     for (;;) {
         size_t n = 0;
         try {
@@ -441,9 +481,23 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
         co_await ResumeOnShard{shard};
         try {
             if (n == 0) {
-                if (head.chunked) co_await conn.write("0\r\n\r\n", 5);
+                if (head.chunked) {
+                    co_await conn.write("0\r\n\r\n", 5);
+                } else if (resp.content_length && written != *resp.content_length) {
+                    // 定长响应写少了不能保持 keep-alive：客户端会把下个响应头
+                    // 当作本次 body 剩余 → 响应错位
+                    LOG_ERROR("stream body short of declared Content-Length ({} != {})",
+                              written, *resp.content_length);
+                    co_return false;
+                }
                 co_await conn.flush();
                 co_return true;
+            }
+            if (!head.chunked && resp.content_length &&
+                written + n > *resp.content_length) {
+                LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})",
+                          written, n, *resp.content_length);
+                co_return false;
             }
             if (head.chunked) {
                 char sz[32];
@@ -452,6 +506,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
             }
             co_await conn.write(reinterpret_cast<const char*>(buf.data()), n);
             if (head.chunked) co_await conn.write("\r\n", 2);
+            written += n;
         } catch (...) {
             co_return false;
         }
@@ -462,8 +517,17 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                        std::string peer, unsigned shard) {
     auto& conn = sess->conn;
     conn.cs.set_nodelay(true);
-    // keep-alive 空闲超时：到点关读端，挂起的读醒来见 EOF，会话自然收尾
-    ss::timer<> idle_timer([sess] { sess->conn.cs.shutdown_input(); });
+    // 空闲/慢速超时：到点关读写两端，挂起的操作醒来见 EOF/异常，会话自然收尾。
+    // 定时器由 SeaConn 在每个挂起的 socket 操作期间武装（ArmGuard），覆盖
+    // 请求行、头块、body 读与响应写全程（slowloris 防护）
+    ss::timer<> idle_timer([sess] {
+        try {
+            sess->conn.cs.shutdown_input();
+            sess->conn.cs.shutdown_output();
+        } catch (...) {}
+    });
+    conn.idle = &idle_timer;
+    conn.idle_timeout = std::chrono::seconds(core->cfg.idle_timeout_sec);
     bool keep = true;
 
     // 对端 RST 等 socket 错误从 seastar future 以异常浮出：兜住后统一走关流收尾
@@ -471,9 +535,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     while (keep && !core->stopping.load(std::memory_order_relaxed)) {
         const size_t max_line = core->cfg.max_header_size;
         std::string line;
-        idle_timer.arm(std::chrono::seconds(core->cfg.idle_timeout_sec));
         bool got = co_await conn.read_line(line, max_line);
-        idle_timer.cancel();
         if (!got || line.empty()) break;
 
         HttpRequest req;
@@ -503,8 +565,10 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                 bad = true;
                 break;
             }
+            // 裸 CR 不得留在头名/头值里（read_line 只剥行尾的单个 \r）
             auto colon = line.find(':');
-            if (colon == std::string::npos) {
+            if (colon == std::string::npos || colon == 0 ||
+                line.find('\r') != std::string::npos) {
                 bad = true;
                 break;
             }
@@ -523,22 +587,23 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
             else if (HeaderMap::ieq(*c, "keep-alive")) keep = true;
         }
 
-        // body
+        // body 边界：CL/TE 冲突、重复 CL、非法值一律拒绝关连接（请求走私前置
+        // 条件，见 drivers/common.h parse_body_framing）
+        auto framing = driver::parse_body_framing(req.headers);
+        if (!framing.valid) {
+            auto bad = driver::bad_request_response("Invalid message framing.");
+            co_await write_response(conn, bad, req.method == "HEAD", /*keep=*/false, shard);
+            break;
+        }
         BodyState bstate;
         bstate.conn = &conn;
         bstate.shard = shard;
-        std::optional<uint64_t> content_length;
+        std::optional<uint64_t> content_length = framing.content_length;
         bool has_body = false;
-        if (auto te = req.headers.get("Transfer-Encoding");
-            te && HeaderMap::ieq(*te, "chunked")) {
+        if (framing.chunked) {
             bstate.chunked = true;
             has_body = true;
-        } else if (auto cl = req.headers.get("Content-Length")) {
-            try {
-                content_length = std::stoull(*cl);
-            } catch (...) {
-                break;
-            }
+        } else if (content_length) {
             bstate.remaining = *content_length;
             has_body = *content_length > 0;
         }
@@ -560,10 +625,12 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         co_await ResumeOnShard{shard};  // handler 可能在池线程 resume
 
         if (core->stopping.load(std::memory_order_relaxed)) keep = false;
-        // 复用连接前必须排空未消费的 body；从未回过 100-continue 则客户端
-        // 可能根本不会发 body，不能傻等，直接关连接
-        if (!bstate.at_eof()) {
-            if (bstate.need_continue || bstate.error) keep = false;
+        // 复用连接前必须排空未消费的 body。body 出过错则流已失步（残余字节会
+        // 被当下一个请求解析），必须关连接；从未回过 100-continue 则客户端可能
+        // 根本不会发 body，不能傻等，同样关连接
+        if (bstate.error) keep = false;
+        else if (!bstate.at_eof()) {
+            if (bstate.need_continue) keep = false;
             else if (keep) keep = co_await bstate.drain();
         }
 
@@ -575,6 +642,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         LOG_DEBUG("seastar session ended with error: {}", e.what());
     }
     idle_timer.cancel();
+    conn.idle = nullptr;  // 定时器即将随本帧销毁，不得再被 ArmGuard 触碰
     sess->in_flight = false;
     // output_stream 必须显式 close（flush + 释放），失败（对端已断）忽略
     try {
@@ -590,10 +658,20 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
                          unsigned shard) {
     while (!st->stopping) {
         std::optional<ss::accept_result> ar;
+        bool retry = false;  // co_await 不能写在 catch 块里，先记标志再退避
         try {
             ar.emplace(co_await st->listener->accept());
+        } catch (const std::exception& e) {
+            if (st->stopping) break;  // abort_accept 的正常退出路径
+            // 暂态错误（fd 耗尽等）退避后继续，不能永久停止 accept
+            LOG_WARN("seastar accept failed: {}, throttling", e.what());
+            retry = true;
         } catch (...) {
             break;
+        }
+        if (retry) {
+            co_await ss::sleep(std::chrono::milliseconds(100));
+            continue;
         }
         if (st->stopping) break;  // 竞态窗口内接入的连接直接丢弃（析构即关闭）
         std::ostringstream oss;
@@ -712,7 +790,12 @@ public:
         }
     }
 
-    void set_handler(Handler h) override { handler_ = std::move(h); }
+    // listen() 之后调用也生效（core_ 同步更新，与其他驱动"请求期读 handler"
+    // 的时序语义对齐）；但与在途请求并发调用仍属 API 误用
+    void set_handler(Handler h) override {
+        handler_ = std::move(h);
+        if (core_) core_->handler = handler_;
+    }
 
     void listen(const std::string& addr, uint16_t port) override {
         auto& eng = SeastarEngine::instance();
@@ -730,6 +813,12 @@ public:
         }).get();
 
         port_ = p;
+        // shutdown() 早于 listen() 到达时 stop_fd_ 还是 -1，信号被吞：
+        // 此处补发，保证随后的 run() 能返回
+        if (stopping_.load()) {
+            uint64_t one = 1;
+            [[maybe_unused]] ssize_t r = ::write(stop_fd_, &one, sizeof(one));
+        }
         LOG_INFO("seastar http server listening on {}:{} (smp={})", addr, port_, eng.shards());
     }
 

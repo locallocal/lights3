@@ -9,6 +9,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -23,6 +24,10 @@
 namespace lights3::http {
 
 namespace {
+
+// 并发连接硬上限：超过即拒绝新连接（thread-per-connection 模型的自保阈值，
+// 无上限时每连接一线程可耗尽内存/线程数）
+constexpr int kMaxConnections = 4096;
 
 bool send_all(int fd, const char* data, size_t len) {
     while (len > 0) {
@@ -81,6 +86,7 @@ struct BodyState {
     bool chunked = false;
     uint64_t remaining = 0;       // 定长模式：剩余字节
     uint64_t chunk_left = 0;      // chunked 模式：当前 chunk 剩余
+    bool after_chunk_data = false;  // 刚读完一个 chunk 的数据，下一行必须是 CRLF
     bool chunk_eof = false;
     bool error = false;
 
@@ -109,17 +115,27 @@ struct BodyState {
         while (chunk_left == 0) {
             if (chunk_eof) return 0;
             std::string line;
-            if (!conn->read_line(line, 1024)) fail("client disconnected mid-body");
-            if (line.empty()) continue;  // chunk 数据后的 CRLF
-            size_t sz = 0;
-            try {
-                sz = std::stoull(line, nullptr, 16);
-            } catch (...) {
-                fail("malformed chunk size");
+            if (after_chunk_data) {
+                // chunk 数据后必须紧跟一个 CRLF，且只允许一个：任意"看似 hex"
+                // 的垃圾或多余空行都不能被当作下一个 chunk size 静默吞掉
+                if (!conn->read_line(line, 2)) fail("client disconnected mid-body");
+                if (!line.empty()) fail("missing CRLF after chunk data");
+                after_chunk_data = false;
             }
-            if (sz == 0) {  // 末 chunk：吃掉 trailer 直到空行
+            if (!conn->read_line(line, 1024)) fail("client disconnected mid-body");
+            uint64_t sz = 0;
+            if (!driver::parse_chunk_size(line, sz)) fail("malformed chunk size");
+            if (sz == 0) {
+                // 末 chunk：吃掉 trailer 直到空行。总量设上限防无限 trailer 灌注；
+                // 读失败是 body 截断，必须报错而非当正常 EOF
                 std::string t;
-                while (conn->read_line(t, 1024) && !t.empty()) {}
+                size_t trailer_bytes = 0;
+                for (;;) {
+                    if (!conn->read_line(t, 1024)) fail("client disconnected in trailers");
+                    if (t.empty()) break;
+                    trailer_bytes += t.size();
+                    if (trailer_bytes > 16 * 1024) fail("trailer section too large");
+                }
                 chunk_eof = true;
                 return 0;
             }
@@ -128,6 +144,7 @@ struct BodyState {
         size_t n = conn->read_some(dst, std::min<uint64_t>(want, chunk_left));
         if (n == 0) fail("client disconnected mid-body");
         chunk_left -= n;
+        if (chunk_left == 0) after_chunk_data = true;
         return n;
     }
 
@@ -167,14 +184,181 @@ private:
     std::optional<uint64_t> len_;
 };
 
+// 连接线程共享的服务器状态：run() 可能在残余连接线程退出前返回（强杀等待超时），
+// 线程经 shared_ptr 持有本结构，服务器对象析构后仍安全（否则析构期 UAF）
+struct ConnShared {
+    HttpConfig cfg;
+    Handler handler;
+    std::atomic<bool> stopping{false};
+    std::mutex m;
+    std::condition_variable cv;
+    std::set<int> conns;
+    int active = 0;
+};
+
+bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_alive) {
+    bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
+    auto head = driver::render_response_head(resp, keep_alive);
+    bool chunked = head.chunked;
+    if (!send_all(fd, head.text.data(), head.text.size())) return false;
+    if (head_request || no_body_status) return true;
+
+    if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());
+
+    // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
+    std::byte buf[64 * 1024];
+    uint64_t written = 0;
+    for (;;) {
+        size_t n = 0;
+        try {
+            n = sync_wait(resp.stream_body->read(std::span(buf)));
+        } catch (const std::exception& e) {
+            LOG_ERROR("stream body read failed mid-response: {}", e.what());
+            return false;  // 响应头已发出，只能断连
+        }
+        if (n == 0) break;
+        if (!chunked && resp.content_length && written + n > *resp.content_length) {
+            LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})", written, n,
+                      *resp.content_length);
+            return false;
+        }
+        if (chunked) {
+            char sz[32];
+            int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
+            if (!send_all(fd, sz, static_cast<size_t>(m))) return false;
+        }
+        if (!send_all(fd, reinterpret_cast<const char*>(buf), n)) return false;
+        if (chunked && !send_all(fd, "\r\n", 2)) return false;
+        written += n;
+    }
+    if (chunked) return send_all(fd, "0\r\n\r\n", 5);
+    // 定长响应写少了不能保持 keep-alive：客户端会把下个响应头当作本次 body 剩余
+    if (resp.content_length && written != *resp.content_length) {
+        LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
+                  *resp.content_length);
+        return false;
+    }
+    return true;
+}
+
+// 处理一个请求；返回 false 表示连接应关闭
+bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& peer,
+               bool& keep_alive) {
+    const size_t max_line = sh.cfg.max_header_size;
+
+    std::string line;
+    if (!reader.read_line(line, max_line) || line.empty()) return false;
+
+    HttpRequest req;
+    req.remote_addr = peer;
+    {
+        auto sp1 = line.find(' ');
+        auto sp2 = line.rfind(' ');
+        if (sp1 == std::string::npos || sp2 == sp1) return false;
+        req.method = line.substr(0, sp1);
+        std::string target = line.substr(sp1 + 1, sp2 - sp1 - 1);
+        std::string version = line.substr(sp2 + 1);
+        if (version == "HTTP/1.0") keep_alive = false;
+        driver::parse_target(target, req);
+    }
+
+    // 头部
+    size_t header_bytes = 0;
+    for (;;) {
+        if (!reader.read_line(line, max_line)) return false;
+        if (line.empty()) break;
+        header_bytes += line.size();
+        if (header_bytes > sh.cfg.max_header_size) return false;
+        // 裸 CR 不得留在头名/头值里（read_line 只剥行尾的单个 \r）
+        if (line.find('\r') != std::string::npos) return false;
+        auto colon = line.find(':');
+        if (colon == std::string::npos || colon == 0) return false;
+        std::string k = line.substr(0, colon);
+        std::string v = line.substr(colon + 1);
+        v.erase(0, v.find_first_not_of(" \t"));
+        auto tail = v.find_last_not_of(" \t");
+        if (tail != std::string::npos) v.erase(tail + 1);
+        req.headers.add(std::move(k), std::move(v));
+    }
+
+    if (auto c = req.headers.get("Connection")) {
+        if (HeaderMap::ieq(*c, "close")) keep_alive = false;
+        else if (HeaderMap::ieq(*c, "keep-alive")) keep_alive = true;
+    }
+
+    // body 边界：CL/TE 冲突、重复 CL、非法值一律拒绝关连接（请求走私前置条件，
+    // 见 drivers/common.h parse_body_framing）
+    auto framing = driver::parse_body_framing(req.headers);
+    if (!framing.valid) {
+        auto bad = driver::bad_request_response("Invalid message framing.");
+        write_response(fd, bad, req.method == "HEAD", /*keep_alive=*/false);
+        return false;
+    }
+    BodyState body_state;
+    body_state.conn = &reader;
+    body_state.fd = fd;
+    std::optional<uint64_t> content_length = framing.content_length;
+    bool has_body = false;
+    if (framing.chunked) {
+        body_state.chunked = true;
+        has_body = true;
+    } else if (content_length) {
+        body_state.remaining = *content_length;
+        has_body = *content_length > 0;
+    }
+    if (has_body || content_length)
+        req.body = std::make_unique<SocketBodyReader>(&body_state, content_length);
+    if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
+        body_state.need_continue = true;
+
+    bool head_request = req.method == "HEAD";
+    HttpResponse resp;
+    try {
+        resp = sync_wait(sh.handler(std::move(req)));
+    } catch (const std::exception& e) {
+        // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2：500 + InternalError XML）
+        LOG_ERROR("handler escaped exception: {}", e.what());
+        resp = driver::internal_error_response();
+        keep_alive = false;
+    }
+
+    // 复用连接前必须排空未消费的 body。body 出过错则流已失步（残余字节会被
+    // 当下一个请求解析），必须关连接；从未回过 100-continue 则客户端可能根本
+    // 不会发 body，不能傻等，同样关连接
+    if (body_state.error) keep_alive = false;
+    else if (!body_state.at_eof()) {
+        if (body_state.need_continue) keep_alive = false;
+        else if (keep_alive) keep_alive = body_state.drain();
+    }
+
+    if (!write_response(fd, resp, head_request, keep_alive)) return false;
+    return keep_alive;
+}
+
+void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
+    timeval tv{sh.cfg.idle_timeout_sec, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+    ConnReader reader{fd};
+    bool keep_alive = true;
+    while (keep_alive && !sh.stopping.load()) {
+        if (!serve_one(sh, fd, reader, peer, keep_alive)) break;
+    }
+}
+
 class BuiltinServer final : public IHttpServer {
 public:
-    explicit BuiltinServer(const HttpConfig& cfg) : cfg_(cfg) {}
+    explicit BuiltinServer(const HttpConfig& cfg) : shared_(std::make_shared<ConnShared>()) {
+        shared_->cfg = cfg;
+    }
     ~BuiltinServer() override {
         if (listen_fd_ >= 0) ::close(listen_fd_);
     }
 
-    void set_handler(Handler h) override { handler_ = std::move(h); }
+    void set_handler(Handler h) override { shared_->handler = std::move(h); }
 
     void listen(const std::string& addr, uint16_t port) override {
         listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -199,198 +383,81 @@ public:
     uint16_t bound_port() const override { return port_; }
 
     void run() override {
-        for (;;) {
+        auto& sh = *shared_;
+        // shutdown() 可能先于 run() 甚至先于 listen() 到达：入循环前先看一眼，
+        // 否则信号已被吞掉，accept 会永久阻塞
+        while (!sh.stopping.load()) {
             sockaddr_in peer{};
             socklen_t plen = sizeof(peer);
             int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&peer), &plen);
             if (fd < 0) {
-                if (stopping_.load()) break;
-                if (errno == EINTR) continue;
+                if (sh.stopping.load()) break;
+                if (errno == EINTR || errno == ECONNABORTED) continue;
+                if (errno == EMFILE || errno == ENFILE) {
+                    // fd 耗尽是暂态（在途连接会释放），退避后继续而非停止 accept
+                    LOG_WARN("accept: {}, throttling", strerror(errno));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    continue;
+                }
+                LOG_ERROR("accept failed: {}", strerror(errno));
                 break;
             }
-            if (stopping_.load()) {
+            if (sh.stopping.load()) {
                 ::close(fd);
                 break;
             }
             char ip[64] = {0};
             inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
             {
-                std::lock_guard lk(m_);
-                ++active_;
-                conns_.insert(fd);
+                std::lock_guard lk(sh.m);
+                if (sh.active >= kMaxConnections) {
+                    LOG_WARN("connection limit ({}) reached, rejecting {}", kMaxConnections, ip);
+                    ::close(fd);
+                    continue;
+                }
+                ++sh.active;
+                sh.conns.insert(fd);
             }
-            std::thread([this, fd, peer_ip = std::string(ip)] {
-                handle_connection(fd, peer_ip);
-                std::lock_guard lk(m_);
-                conns_.erase(fd);
+            try {
+                std::thread([sp = shared_, fd, peer_ip = std::string(ip)] {
+                    handle_connection(*sp, fd, peer_ip);
+                    std::lock_guard lk(sp->m);
+                    sp->conns.erase(fd);
+                    ::close(fd);
+                    if (--sp->active == 0) sp->cv.notify_all();
+                }).detach();
+            } catch (const std::exception& e) {
+                // 线程创建失败（资源耗尽）：回滚计数并拒绝该连接，不能让异常
+                // 穿出 run() 终结进程
+                LOG_ERROR("failed to spawn connection thread: {}", e.what());
+                std::lock_guard lk(sh.m);
+                sh.conns.erase(fd);
                 ::close(fd);
-                if (--active_ == 0) cv_.notify_all();
-            }).detach();
+                if (--sh.active == 0) sh.cv.notify_all();
+            }
         }
-        // 优雅退出：等待在途连接，超时强制断开
-        std::unique_lock lk(m_);
-        if (!cv_.wait_for(lk, std::chrono::seconds(10), [&] { return active_ == 0; })) {
-            LOG_WARN("forcing {} connection(s) closed on shutdown", active_);
-            for (int fd : conns_) ::shutdown(fd, SHUT_RDWR);
-            cv_.wait_for(lk, std::chrono::seconds(5), [&] { return active_ == 0; });
+        // 优雅退出：等待在途连接，超时强制断开。残余线程经 shared_ptr 持有
+        // 共享状态，run() 返回乃至 server 析构后自行收尾，无悬空引用
+        std::unique_lock lk(sh.m);
+        if (!sh.cv.wait_for(lk, std::chrono::seconds(10), [&] { return sh.active == 0; })) {
+            LOG_WARN("forcing {} connection(s) closed on shutdown", sh.active);
+            for (int fd : sh.conns) ::shutdown(fd, SHUT_RDWR);
+            sh.cv.wait_for(lk, std::chrono::seconds(5), [&] { return sh.active == 0; });
         }
         LOG_INFO("builtin http server stopped");
     }
 
     // 仅做 async-signal-safe 操作，可在信号处理器中调用
     void shutdown() override {
-        stopping_.store(true);
+        shared_->stopping.store(true);
         if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);
     }
 
 private:
-    void handle_connection(int fd, const std::string& peer);
-    bool serve_one(int fd, ConnReader& reader, const std::string& peer, bool& keep_alive);
-    bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_alive);
-
-    HttpConfig cfg_;
-    Handler handler_;
+    std::shared_ptr<ConnShared> shared_;
     int listen_fd_ = -1;
     uint16_t port_ = 0;
-    std::atomic<bool> stopping_{false};
-    std::mutex m_;
-    std::condition_variable cv_;
-    std::set<int> conns_;
-    int active_ = 0;
 };
-
-void BuiltinServer::handle_connection(int fd, const std::string& peer) {
-    timeval tv{cfg_.idle_timeout_sec, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-    int one = 1;
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-
-    ConnReader reader{fd};
-    bool keep_alive = true;
-    while (keep_alive && !stopping_.load()) {
-        if (!serve_one(fd, reader, peer, keep_alive)) break;
-    }
-}
-
-// 处理一个请求；返回 false 表示连接应关闭
-bool BuiltinServer::serve_one(int fd, ConnReader& reader, const std::string& peer,
-                              bool& keep_alive) {
-    const size_t max_line = cfg_.max_header_size;
-
-    std::string line;
-    if (!reader.read_line(line, max_line) || line.empty()) return false;
-
-    HttpRequest req;
-    req.remote_addr = peer;
-    {
-        auto sp1 = line.find(' ');
-        auto sp2 = line.rfind(' ');
-        if (sp1 == std::string::npos || sp2 == sp1) return false;
-        req.method = line.substr(0, sp1);
-        std::string target = line.substr(sp1 + 1, sp2 - sp1 - 1);
-        std::string version = line.substr(sp2 + 1);
-        if (version == "HTTP/1.0") keep_alive = false;
-        driver::parse_target(target, req);
-    }
-
-    // 头部
-    size_t header_bytes = 0;
-    for (;;) {
-        if (!reader.read_line(line, max_line)) return false;
-        if (line.empty()) break;
-        header_bytes += line.size();
-        if (header_bytes > cfg_.max_header_size) return false;
-        auto colon = line.find(':');
-        if (colon == std::string::npos) return false;
-        std::string k = line.substr(0, colon);
-        std::string v = line.substr(colon + 1);
-        v.erase(0, v.find_first_not_of(" \t"));
-        auto tail = v.find_last_not_of(" \t");
-        if (tail != std::string::npos) v.erase(tail + 1);
-        req.headers.add(std::move(k), std::move(v));
-    }
-
-    if (auto c = req.headers.get("Connection")) {
-        if (HeaderMap::ieq(*c, "close")) keep_alive = false;
-        else if (HeaderMap::ieq(*c, "keep-alive")) keep_alive = true;
-    }
-
-    // body
-    BodyState body_state;
-    body_state.conn = &reader;
-    std::optional<uint64_t> content_length;
-    bool has_body = false;
-    if (auto te = req.headers.get("Transfer-Encoding");
-        te && HeaderMap::ieq(*te, "chunked")) {
-        body_state.chunked = true;
-        has_body = true;
-    } else if (auto cl = req.headers.get("Content-Length")) {
-        try {
-            content_length = std::stoull(*cl);
-        } catch (...) {
-            return false;
-        }
-        body_state.remaining = *content_length;
-        has_body = *content_length > 0;
-    }
-    if (has_body || content_length)
-        req.body = std::make_unique<SocketBodyReader>(&body_state, content_length);
-
-    if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue")) {
-        if (!send_all(fd, "HTTP/1.1 100 Continue\r\n\r\n", 25)) return false;
-    }
-
-    bool head_request = req.method == "HEAD";
-    HttpResponse resp;
-    try {
-        resp = sync_wait(handler_(std::move(req)));
-    } catch (const std::exception& e) {
-        // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2：500 + InternalError XML）
-        LOG_ERROR("handler escaped exception: {}", e.what());
-        resp = driver::internal_error_response();
-        keep_alive = false;
-    }
-
-    // 复用连接前必须排空未消费的 body
-    if (!body_state.drain()) keep_alive = false;
-
-    if (!write_response(fd, resp, head_request, keep_alive)) return false;
-    return keep_alive;
-}
-
-bool BuiltinServer::write_response(int fd, HttpResponse& resp, bool head_request,
-                                   bool keep_alive) {
-    bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
-    auto head = driver::render_response_head(resp, keep_alive);
-    bool chunked = head.chunked;
-    if (!send_all(fd, head.text.data(), head.text.size())) return false;
-    if (head_request || no_body_status) return true;
-
-    if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());
-
-    // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
-    std::byte buf[64 * 1024];
-    for (;;) {
-        size_t n = 0;
-        try {
-            n = sync_wait(resp.stream_body->read(std::span(buf)));
-        } catch (const std::exception& e) {
-            LOG_ERROR("stream body read failed mid-response: {}", e.what());
-            return false;  // 响应头已发出，只能断连
-        }
-        if (n == 0) break;
-        if (chunked) {
-            char sz[32];
-            int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
-            if (!send_all(fd, sz, static_cast<size_t>(m))) return false;
-        }
-        if (!send_all(fd, reinterpret_cast<const char*>(buf), n)) return false;
-        if (chunked && !send_all(fd, "\r\n", 2)) return false;
-    }
-    if (chunked && !send_all(fd, "0\r\n\r\n", 5)) return false;
-    return true;
-}
 
 }  // namespace
 

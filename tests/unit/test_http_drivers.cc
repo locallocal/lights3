@@ -15,6 +15,7 @@
 
 #include "core/config.h"
 #include "core/task.h"
+#include "http/pushpull.h"
 #include "http/server.h"
 #include "unit/mini_test.h"
 
@@ -88,6 +89,12 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         uint64_t size = std::stoull(req.query_get("size").value_or("0"));
         resp.stream_body = std::make_unique<PatternReader>(size);
         if (req.path == "/stream") resp.content_length = size;
+        co_return resp;
+    }
+    if (req.path == "/short") {  // 后端截断：声明 size，实际只给一半
+        uint64_t size = std::stoull(req.query_get("size").value_or("0"));
+        resp.stream_body = std::make_unique<PatternReader>(size / 2);
+        resp.content_length = size;
         co_return resp;
     }
     if (req.path == "/noread") {  // 故意不消费 body（100-continue 拒绝场景）
@@ -538,6 +545,166 @@ TEST(http_driver_concurrent_shutdown) {
         auto elapsed = std::chrono::steady_clock::now() - t0;
         CHECK(elapsed < std::chrono::seconds(8));
     });
+}
+
+// ---------- 消息边界（framing）：请求走私防护 ----------
+//
+// RFC 9112 §6.1：边界有歧义的请求必须 400 或关连接。对所有驱动统一断言两件事：
+//   1) 第一个响应不是成功（错误状态码，或连接直接关闭）；
+//   2) 攻击载荷里夹带的第二个请求不被当作独立请求应答（走私未发生）。
+void check_framing_rejected(const std::string& driver, const std::string& raw) {
+    TestServer ts(driver);
+    Client c(ts.port);
+    c.send_str(raw);
+    auto r1 = c.read_response();
+    // ok=false 表示驱动直接关连接，也是允许的处置方式
+    if (r1.ok) CHECK(r1.status >= 400);
+    // 夹带的 GET /small 若被独立应答，会得到 200 + "nobody"
+    auto r2 = c.read_response();
+    CHECK(!(r2.ok && r2.status == 200 && r2.body == "nobody"));
+}
+
+TEST(http_driver_rejects_cl_te_conflict) {
+    for_each_driver([](const std::string& d) {
+        // CL.TE 走私：前置代理按 Content-Length 断帧，后端按 chunked 断帧时，
+        // "GET /small" 会成为下一个请求
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\n"
+                               "Content-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n"
+                               "0\r\n\r\nGET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+TEST(http_driver_rejects_duplicate_content_length) {
+    for_each_driver([](const std::string& d) {
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\n"
+                               "Content-Length: 0\r\nContent-Length: 44\r\n\r\n"
+                               "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+TEST(http_driver_rejects_negative_content_length) {
+    for_each_driver([](const std::string& d) {
+        // stoull("-1") 回绕成 2^64-1：驱动会"永远等 body"，连接挂死
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Length: -1\r\n\r\n"
+                               "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+TEST(http_driver_rejects_content_length_trailing_garbage) {
+    for_each_driver([](const std::string& d) {
+        // stoull("5abc") 截成 5：声明与实际断帧脱节
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 5abc\r\n\r\n"
+                               "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+TEST(http_driver_rejects_non_chunked_transfer_encoding) {
+    for_each_driver([](const std::string& d) {
+        // "gzip, chunked" 不被识别为 chunked 时，body 会被当作下一个请求行解析
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\n"
+                               "Transfer-Encoding: gzip, chunked\r\n\r\n"
+                               "0\r\n\r\nGET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+TEST(http_driver_rejects_bad_chunk_size) {
+    for_each_driver([](const std::string& d) {
+        // chunk size "-1"：stoull 接受负号，body 长度脱离声明
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\n"
+                               "Transfer-Encoding: chunked\r\n\r\n"
+                               "-1\r\nxx\r\n0\r\n\r\n"
+                               "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+TEST(http_driver_rejects_missing_crlf_after_chunk) {
+    for_each_driver([](const std::string& d) {
+        // chunk 数据后不是 CRLF 而是"看似 hex"的垃圾：不得被当作下一个 chunk size
+        check_framing_rejected(d,
+                               "POST /sum HTTP/1.1\r\nHost: t\r\n"
+                               "Transfer-Encoding: chunked\r\n\r\n"
+                               "4\r\nAAAAdead\r\n0\r\n\r\n"
+                               "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+    });
+}
+
+TEST(http_driver_truncated_stream_closes_connection) {
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        // 后端只给出声明长度的一半：驱动必须断连，否则客户端会把下一个响应头
+        // 当作本次 body 的剩余部分（响应错位）
+        c.send_str("GET /short?size=100000 HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(!r.ok);  // 声明的字节数读不满，连接被关闭
+        // 连接确已不可复用：后续请求得不到响应
+        c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r2 = c.read_response();
+        CHECK(!r2.ok);
+    });
+}
+
+TEST(http_driver_response_headers_not_duplicated) {
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(r.ok);
+        // 驱动自管的头只能出现一次：重复 Content-Length 即断帧漏洞
+        auto count = [&](const char* name) {
+            int n = 0;
+            for (auto& [k, v] : r.headers)
+                if (HeaderMap::ieq(k, name)) ++n;
+            return n;
+        };
+        CHECK_EQ(count("Content-Length"), 1);
+        CHECK(count("Transfer-Encoding") == 0);
+        CHECK(count("Connection") <= 1);
+    });
+}
+
+// ---------- pushpull：共享的推转拉组件 ----------
+
+TEST(block_queue_cancel_wakes_blocked_consumer) {
+    auto q = std::make_shared<BlockQueue>(64 * 1024);
+    std::atomic<bool> threw{false}, done{false};
+    std::thread consumer([&] {
+        std::byte buf[1024];
+        try {
+            q->pop(std::span(buf));
+        } catch (const std::exception&) {
+            threw.store(true);
+        }
+        done.store(true);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 确保已阻塞在 pop
+    CHECK(!done.load());
+    q->cancel();  // 必须同时唤醒 pop 侧，否则消费者永久阻塞
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!done.load() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    consumer.join();
+    CHECK(done.load());
+    CHECK(threw.load());  // cancel 不是正常 EOF，以异常传播
+}
+
+TEST(block_queue_normal_eof_still_returns_zero) {
+    auto q = std::make_shared<BlockQueue>(64 * 1024);
+    CHECK(q->push("hello", 5));
+    q->close(true);
+    std::byte buf[16];
+    CHECK_EQ(q->pop(std::span(buf)), size_t(5));
+    CHECK_EQ(q->pop(std::span(buf)), size_t(0));  // 正常 EOF
+    // close 之后再 cancel（消费端析构的常规顺序）不得把 EOF 变成异常
+    q->cancel();
+    CHECK_EQ(q->pop(std::span(buf)), size_t(0));
 }
 
 TEST(http_driver_head_request) {

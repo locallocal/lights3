@@ -97,11 +97,29 @@ private:
             if (!is_pseudo_header(k)) req.headers.add(k, v);
         req.remote_addr = rq.remote_addr;
 
-        std::optional<uint64_t> content_length;
-        if (rq.has_header("Content-Length"))
-            content_length = rq.get_header_value_u64("Content-Length");
-        bool chunked =
-            HeaderMap::ieq(rq.get_header_value("Transfer-Encoding"), "chunked");
+        // 消息边界校验（drivers/common.h parse_body_framing）：httplib 自身对
+        // CL/TE 冲突、非数字 Content-Length 等更宽松，一律在 L1 拒绝并关连接，
+        // 保证四个驱动接受/拒绝的请求集合一致
+        auto reject = [&](const char* why) {
+            auto bad = driver::bad_request_response(why);
+            rs.status = bad.status;
+            rs.set_content(bad.small_body, "application/xml");
+            rs.set_header("Connection", "close");  // 边界已存疑，不复用连接
+        };
+        auto framing = driver::parse_body_framing(req.headers);
+        if (!framing.valid) {
+            reject("Invalid message framing.");
+            return;
+        }
+        std::optional<uint64_t> content_length = framing.content_length;
+        bool chunked = framing.chunked;
+
+        // httplib 不给 GET/OPTIONS 路由提供 ContentReader：带非零 body 的这类
+        // 请求无法满足 BodyReader 契约（length() 报 N 但立即 EOF），直接 400
+        if (!content_reader && ((content_length && *content_length > 0) || chunked)) {
+            reject("Request body is not supported for this method.");
+            return;
+        }
 
         // 推转拉：pump 线程驱动 ContentReader 往队列灌，请求线程阻塞在 sync_wait
         std::shared_ptr<BlockQueue> queue;

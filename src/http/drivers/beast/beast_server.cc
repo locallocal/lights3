@@ -110,6 +110,10 @@ Detached spawn_detached(Task<void> t, Done done) {
         co_await std::move(t);
     } catch (const std::exception& e) {
         LOG_ERROR("beast session escaped exception: {}", e.what());
+    } catch (...) {
+        // 非 std::exception 也必须兜住，否则打到 promise 的
+        // unhandled_exception 就是 terminate
+        LOG_ERROR("beast session escaped non-standard exception");
     }
     done();
 }
@@ -212,6 +216,12 @@ public:
 
         work_.emplace(asio::make_work_guard(ioc_));
         spawn_detached(accept_loop(), [] {});
+        // shutdown() 早于 listen() 到达时 event_fd_ 还是 -1，信号被吞：
+        // 此处补发，保证随后的 run() 能返回
+        if (stopping_.load()) {
+            uint64_t one = 1;
+            [[maybe_unused]] ssize_t r = ::write(event_fd_, &one, sizeof(one));
+        }
         LOG_INFO("beast http server listening on {}:{}", addr, port_);
     }
 
@@ -243,7 +253,13 @@ private:
             auto [ec, sock] = co_await AcceptAwaiter{*acceptor_, ioc_, {}, {}};
             if (ec) {
                 if (stopping_.load() || ec == asio::error::operation_aborted) break;
-                LOG_WARN("accept failed: {}", ec.message());
+                // 暂态错误（EMFILE 等 fd 耗尽）立即重试会忙等自旋，退避后继续
+                LOG_WARN("accept failed: {}, throttling", ec.message());
+                asio::steady_timer backoff(ioc_, std::chrono::milliseconds(100));
+                co_await io_op([&](auto cb) {
+                    backoff.async_wait(
+                        [cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
+                });
                 continue;
             }
             auto sess = std::make_shared<Session>(std::move(sock));
@@ -265,7 +281,10 @@ private:
         while (keep && !stopping_.load()) {
             bhttp::request_parser<bhttp::buffer_body> parser;
             parser.header_limit(static_cast<uint32_t>(cfg_.max_header_size));
-            parser.body_limit(boost::none);  // 大小限制是 L2 的职责
+            // 大小限制是 L2 的职责：XML 类请求经 read_body 限 1MiB
+            // （s3/handlers/common.h），PUT 数据面 64KiB 块流式透传不落内存；
+            // 对象大小上限未设（与其他驱动一致，属 S3 语义决策）
+            parser.body_limit(boost::none);
             stream.expires_after(std::chrono::seconds(cfg_.idle_timeout_sec));
             {
                 auto [ec, n] = co_await io_op([&](auto cb) {
@@ -288,6 +307,15 @@ private:
                 beast::error_code epc;
                 auto ep = beast::get_lowest_layer(stream).socket().remote_endpoint(epc);
                 if (!epc) req.remote_addr = ep.address().to_string();
+            }
+
+            // 消息边界校验（drivers/common.h parse_body_framing）：beast 自身
+            // 的解析对 CL/TE 冲突等更宽松，且本实现不解码 chunked 以外的传输
+            // 编码，一律在 L1 拒绝，保证四个驱动接受/拒绝的请求集合一致
+            if (!driver::parse_body_framing(req.headers).valid) {
+                auto bad = driver::bad_request_response("Invalid message framing.");
+                co_await write_response(stream, bad, /*head_request=*/false, /*keep=*/false);
+                break;
             }
 
             BodyCtx bctx{&parser, &stream, &buffer, cfg_.idle_timeout_sec};

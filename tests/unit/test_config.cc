@@ -98,3 +98,58 @@ TEST(parse_size_and_duration) {
     CHECK_EQ(parse_duration_sec("60s"), 60);
     CHECK_EQ(parse_duration_sec("5m"), 300);
 }
+
+namespace {
+template <class F>
+bool throws(F&& fn) {
+    try {
+        fn();
+    } catch (const std::exception&) {
+        return true;
+    }
+    return false;
+}
+}  // namespace
+
+TEST(parse_size_rejects_negative_and_overflow) {
+    CHECK(throws([] { parse_size("-1"); }));            // stoull 回绕成 2^64-1
+    CHECK(throws([] { parse_size("20000000000G"); }));  // << 30 回绕
+    CHECK_EQ(parse_size("0"), size_t(0));
+}
+
+TEST(parse_duration_rejects_negative_and_overflow) {
+    CHECK(throws([] { parse_duration_sec("30000000h"); }));  // int 乘法溢出
+    CHECK(throws([] { parse_duration_sec("-5s"); }));
+    CHECK_EQ(parse_duration_sec("24h"), 86400);
+    CHECK_EQ(parse_duration_sec("2d"), 172800);
+}
+
+TEST(yaml_rejects_unexpected_indent) {
+    // 列表项参数多缩进两格：此前被静默丢弃，现在报错
+    CHECK(throws([] {
+        yaml_parse("backends:\n  - name: a\n      type: memory\n");
+    }));
+    // 列表项参数少缩进：同样报错而非丢弃
+    CHECK(throws([] {
+        yaml_parse("backends:\n  - name: a\n type: memory\n");
+    }));
+    // 正常嵌套不受影响
+    auto n = yaml_parse("backends:\n  - name: a\n    type: memory\n");
+    CHECK_EQ(n.find("backends")->list.size(), size_t(1));
+}
+
+TEST(config_rejects_out_of_range_values) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  port: 70000\n") + backends);
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string("runtime:\n  max_inflight_requests: 0\n") + backends);
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string("runtime:\n  io_threads: -2\n") + backends);
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  io_threads: 0\n") + backends);
+    }));
+}

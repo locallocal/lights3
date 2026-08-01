@@ -1,7 +1,9 @@
 #include "core/config.h"
 
+#include <climits>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -12,6 +14,7 @@ namespace {
 
 struct Line {
     int indent = 0;
+    int lineno = 0;    // 原始行号（1 起），用于报错定位
     std::string text;  // 去掉缩进与注释后的内容
 };
 
@@ -51,7 +54,9 @@ std::vector<Line> to_lines(const std::string& text) {
     std::vector<Line> lines;
     std::istringstream is(text);
     std::string raw;
+    int lineno = 0;
     while (std::getline(is, raw)) {
+        ++lineno;
         if (!raw.empty() && raw.back() == '\r') raw.pop_back();
         size_t indent = 0;
         while (indent < raw.size() && raw[indent] == ' ') ++indent;
@@ -64,7 +69,7 @@ std::vector<Line> to_lines(const std::string& text) {
         if (pos != std::string::npos) content = content.substr(0, pos);
         content = trim(content);
         if (content.empty()) continue;
-        lines.push_back({static_cast<int>(indent), std::move(content)});
+        lines.push_back({static_cast<int>(indent), lineno, std::move(content)});
     }
     return lines;
 }
@@ -75,12 +80,23 @@ public:
 
     YamlNode parse() {
         if (lines_.empty()) return YamlNode{YamlNode::Type::Map, {}, {}, {}};
-        return parse_block(lines_[0].indent);
+        YamlNode root = parse_block(lines_[0].indent, 0);
+        // 缩进不匹配的行会让各层块循环全部退出而非被消费；
+        // 不检查则静默丢弃（可选参数丢了配置无声失效），这里一律报错
+        if (i_ < lines_.size())
+            throw std::runtime_error("yaml: unexpected indent at line " +
+                                     std::to_string(lines_[i_].lineno));
+        return root;
     }
 
 private:
+    static constexpr int kMaxDepth = 64;  // 病态深嵌套输入防栈溢出
+
     // 解析从当前行开始、缩进恰为 indent 的块
-    YamlNode parse_block(int indent) {
+    YamlNode parse_block(int indent, int depth) {
+        if (depth > kMaxDepth)
+            throw std::runtime_error("yaml: nesting too deep at line " +
+                                     std::to_string(lines_[i_].lineno));
         YamlNode node;
         if (i_ < lines_.size() && lines_[i_].text.rfind("- ", 0) == 0) {
             node.type = YamlNode::Type::List;
@@ -89,7 +105,7 @@ private:
                 // 把 "- xxx" 视为缩进 indent+2 的一行，与后续同缩进行组成 item
                 lines_[i_].text = lines_[i_].text.substr(2);
                 lines_[i_].indent = indent + 2;
-                node.list.push_back(parse_block(indent + 2));
+                node.list.push_back(parse_block(indent + 2, depth + 1));
             }
             return node;
         }
@@ -111,7 +127,8 @@ private:
             } else {
                 // 嵌套块：取下一行缩进（须更深），无内容则视为空 map
                 if (i_ < lines_.size() && lines_[i_].indent > indent) {
-                    node.map.emplace_back(std::move(key), parse_block(lines_[i_].indent));
+                    node.map.emplace_back(std::move(key),
+                                          parse_block(lines_[i_].indent, depth + 1));
                 } else {
                     node.map.emplace_back(std::move(key),
                                           YamlNode{YamlNode::Type::Map, {}, {}, {}});
@@ -143,25 +160,36 @@ YamlNode yaml_parse(const std::string& text) { return Parser(to_lines(text)).par
 // ---------------- 尺寸/时长 ----------------
 
 size_t parse_size(const std::string& s) {
+    // stoull 接受 "-1" 并回绕成 2^64-1，须显式拒绝负号
+    if (s.find('-') != std::string::npos)
+        throw std::runtime_error("negative size not allowed: " + s);
     size_t pos = 0;
     unsigned long long num = std::stoull(s, &pos);
     std::string unit = trim(s.substr(pos));
-    if (unit.empty() || unit == "B") return num;
-    if (unit == "KiB" || unit == "KB" || unit == "K" || unit == "k") return num << 10;
-    if (unit == "MiB" || unit == "MB" || unit == "M" || unit == "m") return num << 20;
-    if (unit == "GiB" || unit == "GB" || unit == "G" || unit == "g") return num << 30;
-    throw std::runtime_error("bad size unit: " + s);
+    int shift = 0;
+    if (unit.empty() || unit == "B") shift = 0;
+    else if (unit == "KiB" || unit == "KB" || unit == "K" || unit == "k") shift = 10;
+    else if (unit == "MiB" || unit == "MB" || unit == "M" || unit == "m") shift = 20;
+    else if (unit == "GiB" || unit == "GB" || unit == "G" || unit == "g") shift = 30;
+    else throw std::runtime_error("bad size unit: " + s);
+    if (shift && num > (std::numeric_limits<size_t>::max() >> shift))
+        throw std::runtime_error("size out of range: " + s);
+    return static_cast<size_t>(num) << shift;
 }
 
 int parse_duration_sec(const std::string& s) {
     size_t pos = 0;
-    int num = std::stoi(s, &pos);
+    long long num = std::stoll(s, &pos);
     std::string unit = trim(s.substr(pos));
-    if (unit.empty() || unit == "s") return num;
-    if (unit == "m") return num * 60;
-    if (unit == "h") return num * 3600;
-    if (unit == "d") return num * 86400;  // tiered 的 cold_after（docs/tiered-storage.md §8）
-    throw std::runtime_error("bad duration unit: " + s);
+    long long mult = 0;
+    if (unit.empty() || unit == "s") mult = 1;
+    else if (unit == "m") mult = 60;
+    else if (unit == "h") mult = 3600;
+    else if (unit == "d") mult = 86400;  // tiered 的 cold_after（docs/tiered-storage.md §8）
+    else throw std::runtime_error("bad duration unit: " + s);
+    if (num < 0 || num > INT_MAX / mult)
+        throw std::runtime_error("duration out of range: " + s);
+    return static_cast<int>(num * mult);
 }
 
 bool parse_bool(const std::string& s) {
@@ -183,7 +211,12 @@ Config Config::from_string(const std::string& text) {
     if (auto* http = root.find("http")) {
         cfg.http.driver = http->get("driver", cfg.http.driver);
         cfg.http.bind = http->get("bind", cfg.http.bind);
-        cfg.http.port = static_cast<uint16_t>(to_int(http->get("port"), cfg.http.port));
+        if (auto v = http->get("port"); !v.empty()) {
+            int p = std::stoi(v);
+            if (p < 1 || p > 65535)
+                throw std::runtime_error("config: http.port out of range: " + v);
+            cfg.http.port = static_cast<uint16_t>(p);
+        }
         cfg.http.io_threads = to_int(http->get("io_threads"), cfg.http.io_threads);
         cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
         if (auto v = http->get("max_header_size"); !v.empty())
@@ -236,6 +269,13 @@ Config Config::from_string(const std::string& text) {
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
 
     // 一致性检查
+    if (cfg.http.io_threads < 1)
+        throw std::runtime_error("config: http.io_threads must be >= 1");
+    if (cfg.runtime.io_threads < 1)
+        throw std::runtime_error("config: runtime.io_threads must be >= 1");
+    // <= 0 会让第一个请求在信号量上永久挂起，须启动时报错而非静默挂死
+    if (cfg.runtime.max_inflight_requests < 1)
+        throw std::runtime_error("config: runtime.max_inflight_requests must be >= 1");
     if (cfg.backends.empty()) throw std::runtime_error("config: no backends configured");
     if (cfg.buckets.default_backend.empty()) cfg.buckets.default_backend = cfg.backends[0].name;
     auto has_backend = [&](const std::string& n) {

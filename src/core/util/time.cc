@@ -7,6 +7,13 @@
 namespace lights3::util {
 
 namespace {
+
+// system_clock 纳秒精度下 int64 只覆盖约 1677–2262 年，超界经 from_time_t
+// 放大为纳秒时有符号溢出（UB）。各 parse 先拒掉范围外年份（月/日等字段被
+// %2d 限制在两位数内，timegm 归一化后最多再外推数年，不会越过安全边界）
+constexpr int kMinYear = 1970;
+constexpr int kMaxYear = 2200;
+
 std::tm to_utc_tm(SysTime t) {
     auto tt = std::chrono::system_clock::to_time_t(t);
     std::tm tm{};
@@ -35,6 +42,7 @@ std::optional<SysTime> parse_http_date(const std::string& s) {
     for (int i = 0; i < 12; ++i)
         if (std::string_view(mon) == months[i]) tm.tm_mon = i;
     if (tm.tm_mon < 0) return std::nullopt;
+    if (tm.tm_year < kMinYear || tm.tm_year > kMaxYear) return std::nullopt;
     tm.tm_year -= 1900;
     time_t tt = timegm(&tm);
     if (tt == static_cast<time_t>(-1)) return std::nullopt;
@@ -55,6 +63,7 @@ std::optional<SysTime> parse_iso8601(const std::string& s) {
     if (sscanf(s.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
         return std::nullopt;
+    if (tm.tm_year < kMinYear || tm.tm_year > kMaxYear) return std::nullopt;
     tm.tm_year -= 1900;
     tm.tm_mon -= 1;
     time_t tt = timegm(&tm);
@@ -75,6 +84,7 @@ std::optional<SysTime> parse_amz_date(const std::string& s) {
     if (sscanf(s.c_str(), "%4d%2d%2dT%2d%2d%2dZ", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
         return std::nullopt;
+    if (tm.tm_year < kMinYear || tm.tm_year > kMaxYear) return std::nullopt;
     tm.tm_year -= 1900;
     tm.tm_mon -= 1;
     time_t tt = timegm(&tm);

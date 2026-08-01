@@ -304,9 +304,25 @@ Task<std::vector<T>> when_all(std::vector<Task<T>> tasks) {
     detail::WhenAllLatch latch(tasks.size());
     std::vector<std::optional<T>> results(tasks.size());
     std::vector<std::exception_ptr> errors(tasks.size());
-    for (size_t i = 0; i < tasks.size(); ++i)
-        detail::when_all_run(std::move(tasks[i]), latch, results[i], errors[i]).start();
+    // runner 帧分配可能中途抛出；此时已起跑的 runner 仍引用本帧的 latch/results/
+    // errors，必须补齐未起跑者的票并等它们收敛后才能让异常离开本协程
+    std::exception_ptr spawn_err;
+    size_t started = 0;
+    for (; started < tasks.size(); ++started) {
+        try {
+            detail::when_all_run(std::move(tasks[started]), latch, results[started],
+                                 errors[started])
+                .start();
+        } catch (...) {
+            spawn_err = std::current_exception();
+            break;
+        }
+    }
+    if (spawn_err)
+        // awaiter 的一票尚未投出，pending 不可能减到 0，无 resume 竞态
+        latch.pending.fetch_sub(tasks.size() - started, std::memory_order_acq_rel);
     co_await detail::WhenAllAwaiter{latch};
+    if (spawn_err) std::rethrow_exception(spawn_err);
     for (auto& e : errors)
         if (e) std::rethrow_exception(e);
     std::vector<T> out;
@@ -318,9 +334,21 @@ Task<std::vector<T>> when_all(std::vector<Task<T>> tasks) {
 inline Task<void> when_all(std::vector<Task<void>> tasks) {
     detail::WhenAllLatch latch(tasks.size());
     std::vector<std::exception_ptr> errors(tasks.size());
-    for (size_t i = 0; i < tasks.size(); ++i)
-        detail::when_all_run(std::move(tasks[i]), latch, errors[i]).start();
+    // 同上：启动中途抛出时先等已起跑 runner 收敛再重抛
+    std::exception_ptr spawn_err;
+    size_t started = 0;
+    for (; started < tasks.size(); ++started) {
+        try {
+            detail::when_all_run(std::move(tasks[started]), latch, errors[started]).start();
+        } catch (...) {
+            spawn_err = std::current_exception();
+            break;
+        }
+    }
+    if (spawn_err)
+        latch.pending.fetch_sub(tasks.size() - started, std::memory_order_acq_rel);
     co_await detail::WhenAllAwaiter{latch};
+    if (spawn_err) std::rethrow_exception(spawn_err);
     for (auto& e : errors)
         if (e) std::rethrow_exception(e);
 }

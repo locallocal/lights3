@@ -144,6 +144,13 @@ TEST(config_rejects_out_of_range_values) {
         Config::from_string(std::string("http:\n  port: 70000\n") + backends);
     }));
     CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  port: -1\n") + backends);
+    }));
+    // port 0 合法：内核分配空闲端口
+    CHECK_EQ(static_cast<int>(
+                 Config::from_string(std::string("http:\n  port: 0\n") + backends).http.port),
+             0);
+    CHECK(throws([&] {
         Config::from_string(std::string("runtime:\n  max_inflight_requests: 0\n") + backends);
     }));
     CHECK(throws([&] {

@@ -35,7 +35,7 @@
 
 | 位置 | 问题 | 状态 |
 | --- | --- | --- |
-| `config.cc` port 解析 | `to_int` → uint16 截断，`port: 70000` 静默截成 4464，无范围校验 | ✅已修复：范围限 1–65535，超界抛错 |
+| `config.cc` port 解析 | `to_int` → uint16 截断，`port: 70000` 静默截成 4464，无范围校验 | ✅已修复：范围限 0–65535 超界抛错（2026-08-02 调整：0 合法=内核分配空闲端口，单测/e2e 夹具依赖此约定） |
 | `config.cc:194-198` | `max_inflight_requests <= 0` 无校验 → 第一个请求就在信号量上永久挂起（静默挂死非启动报错）；`io_threads` 负数则 `reserve(size_t(-n))` 抛 length_error（至少 fail-fast） | ✅已修复：`http.io_threads`/`runtime.io_threads`/`max_inflight_requests` < 1 一律启动时抛错 |
 | `thread_pool.cc` post 无界 | `post` 队列无上限（docs 已声明取舍，记录以备量化背压时参考） | 保留（文档化取舍，不改） |
 | util/time `%4d` | `parse_amz_date`/`parse_http_date` 接受 9999 年，下游 chrono 溢出（详见 s3.md 的 amz-date 条） | ✅已修复：三个 parse（http/iso8601/amz）年份限 1970–2200，超界返回 nullopt |

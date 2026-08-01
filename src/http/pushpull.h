@@ -39,11 +39,15 @@ public:
         cv_pop_.notify_all();
     }
 
-    // 消费者；0 = EOF；生产方中途失败以异常传播
+    // 消费者；0 = EOF；生产方中途失败、或队列已 cancel 且无余量时以异常传播
     size_t pop(std::span<std::byte> buf) {
         std::unique_lock lk(m_);
-        cv_pop_.wait(lk, [&] { return !blocks_.empty() || closed_; });
+        cv_pop_.wait(lk, [&] { return !blocks_.empty() || closed_ || cancelled_; });
         if (blocks_.empty()) {
+            // cancel 后不能再等生产者（它见到 cancelled 即停止 push），
+            // 也不能报成正常 EOF
+            if (cancelled_ && !closed_)
+                throw std::runtime_error("http body: transfer cancelled");
             if (!ok_) throw std::runtime_error("http body: peer disconnected mid-body");
             return 0;
         }
@@ -64,6 +68,9 @@ public:
         std::lock_guard lk(m_);
         cancelled_ = true;
         cv_push_.notify_all();
+        // 挂在 pop 上的消费者同样要唤醒：本组件是共享件（cloudproxy 也用），
+        // 先 cancel 再 pop（或另一线程 cancel）不能让消费者永久阻塞
+        cv_pop_.notify_all();
     }
 
 private:

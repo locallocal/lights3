@@ -213,7 +213,8 @@ Config Config::from_string(const std::string& text) {
         cfg.http.bind = http->get("bind", cfg.http.bind);
         if (auto v = http->get("port"); !v.empty()) {
             int p = std::stoi(v);
-            if (p < 1 || p > 65535)
+            // 0 合法：让内核分配空闲端口（e2e/单测夹具即用此约定）
+            if (p < 0 || p > 65535)
                 throw std::runtime_error("config: http.port out of range: " + v);
             cfg.http.port = static_cast<uint16_t>(p);
         }

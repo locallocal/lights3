@@ -298,3 +298,35 @@ TEST(localfs_orphan_sidecar_reaped_by_list) {
     CHECK(!fs::exists(orphan));
     CHECK(fs::exists(tmp.path / "data/bkt/stay.bin.lights3-meta"));
 }
+
+// ---------- P0 §1.3 / §1.4 回归 ----------
+
+// commit_cached 必须在 rename 之前把数据落盘：随后写的 sidecar 是 fsync 过的，
+// 数据没落盘就掉电会得到"sidecar 说 cached/size=N、文件是 N 字节零块"的对象，
+// 而 StubRace 检查比的是 st_size（rename 已提交 inode size）故检查不出来。
+// 这里断言的是提交后立即可读到正确内容（fsync 的正确性无法在单测里模拟掉电，
+// 但顺序错误会在 LIGHTS3_FSYNC=1 下被 fsync_path 的 errno 路径暴露）
+TEST(localfs_commit_cached_persists_data_before_sidecar) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto local = std::make_shared<LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
+    TieredConfig cfg;
+    cfg.scan_interval_sec = 0;
+    cfg.cold_after_sec = 0;  // 立即判冷
+    auto cloud = std::make_shared<MemoryBackend>();
+    auto b = std::make_shared<TieredBackend>(local, cloud, pool, cfg);
+    sync_wait(b->create_bucket("bkt"));
+    std::string data(64 * 1024, 'c');
+    put(*b, "bkt", "k.bin", data);
+
+    // 下沉到云端（本地成 stub），再 GET 触发 Tee 回填 → commit_cached
+    sync_wait(b->scan_once());
+    auto s1 = sync_wait(b->get_object("bkt", "k.bin", std::nullopt));
+    CHECK_EQ(read_all(*s1.body), data);   // 回填在 EOF 处提交
+
+    // 缓存命中路径读出的内容必须与原文逐字节一致（提交顺序错会读到截断/零块）
+    auto s2 = sync_wait(b->get_object("bkt", "k.bin", std::nullopt));
+    CHECK_EQ(read_all(*s2.body), data);
+    CHECK_EQ(s2.meta.size, uint64_t(data.size()));
+    sync_wait(b->close());
+}

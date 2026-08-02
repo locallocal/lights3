@@ -622,3 +622,63 @@ TEST(service_ipv6_host_literal) {
     auto resp = sync_wait(svc.dispatch(std::move(get)));
     CHECK_EQ(body_of(resp), "v6 data");
 }
+
+// ---------- P0 §1.1：bucket 名校验统一收口 ----------
+
+// vhost 寻址下 Host 前缀是 bucket，含 '/'、'..' 或控制字符时必须在 L2 就被拒——
+// 否则 localfs 的 root_/bucket/key 拼接会逃出 root（fs::path 遇绝对路径替换整条
+// 路径），造成任意文件读
+TEST(service_vhost_bucket_name_validated) {
+    S3Service svc(make_router(), SigV4Authenticator::build(AuthConfig{}), "s3.local");
+    for (const char* host : {"/etc.s3.local", "b/../.sys.s3.local", "b/x.s3.local",
+                             "UPPER.s3.local", "ab.s3.local"}) {
+        auto req = make_req("GET", "/passwd");
+        req.headers.set("Host", host);
+        auto resp = sync_wait(svc.dispatch(std::move(req)));
+        CHECK_EQ(resp.status, 400);
+        CHECK(contains(resp.small_body, "InvalidBucketName"));
+    }
+}
+
+// path-style：%00 解码后首字符是 NUL 而非 '.'，旧的首字符启发式会放行
+TEST(service_path_style_bucket_name_validated) {
+    auto svc = make_service_noauth();
+    for (const char* path : {"/.sys/credentials/x", "/\x01bkt/k", "/AB C/k"}) {
+        auto resp = sync_wait(svc.dispatch(make_req("GET", path)));
+        CHECK_EQ(resp.status, 400);
+        CHECK(contains(resp.small_body, "InvalidBucketName"));
+    }
+    // NUL 开头：解码后 bucket.front() == '\0'，字符集规则同样拒绝
+    http::HttpRequest nul;
+    nul.method = "GET";
+    nul.raw_path = "/%00.sys/credentials/x";
+    nul.path = std::string("/\0.sys/credentials/x", 20);
+    nul.headers.add("Host", "localhost");
+    auto resp = sync_wait(svc.dispatch(std::move(nul)));
+    CHECK_EQ(resp.status, 400);
+}
+
+// copy-source 走 header 不经 dispatch 闸门，须用同一校验函数独立拦截
+TEST(service_copy_source_bucket_validated) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    for (const char* src : {"/.sys/credentials/AK", "/b\x01d/k", "/A/k"}) {
+        auto req = make_req("PUT", "/bkt/copy");
+        req.headers.add("x-amz-copy-source", src);
+        auto resp = sync_wait(svc.dispatch(std::move(req)));
+        CHECK(resp.status == 400);
+    }
+}
+
+// 合法桶名不受影响（vhost 与 path-style 都能正常读写）
+TEST(service_valid_bucket_still_works_after_validation) {
+    S3Service svc(make_router(), SigV4Authenticator::build(AuthConfig{}), "s3.local");
+    auto create = make_req("PUT", "/");
+    create.headers.set("Host", "my-bkt.s3.local");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(create))).status, 200);
+    auto put = make_req("PUT", "/dir/a.txt", "vh data");
+    put.headers.set("Host", "my-bkt.s3.local");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+    auto get = sync_wait(svc.dispatch(make_req("GET", "/my-bkt/dir/a.txt")));
+    CHECK_EQ(body_of(get), "vh data");
+}

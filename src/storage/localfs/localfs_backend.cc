@@ -56,7 +56,18 @@ fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const {
 }
 
 fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view key) const {
-    return bucket_dir(bucket) / fs::path(std::string(key));
+    fs::path p = bucket_dir(bucket) / fs::path(std::string(key));
+    // 纵深防御（docs/gaps.md §1.1）：bucket/key 已在 L2 与各入口校验过，路径不该
+    // 逃出 root_。但 fs::path::operator/ 遇绝对路径右操作数会**替换整条路径**
+    // （root_ / "/etc" == "/etc"），单点失误的代价是任意文件读——所以在真正
+    // 触碰文件系统之前再确认一次。lexically_normal 折叠 ".."，无需触盘
+    fs::path norm = p.lexically_normal();
+    fs::path base = root_.lexically_normal();
+    auto [it, _] = std::mismatch(base.begin(), base.end(), norm.begin(), norm.end());
+    if (it != base.end())
+        throw S3Error(S3ErrorCode::InvalidBucketName,
+                      "The specified bucket is not valid.", std::string(bucket));
+    return p;
 }
 
 void LocalFsBackend::require_bucket(std::string_view bucket) const {
@@ -73,7 +84,7 @@ ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key)
 // ---------- bucket ----------
 
 Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     co_await pool_->schedule();
     fs::path dir = bucket_dir(bucket);
     if (fs::exists(dir / kBucketMarker))
@@ -88,6 +99,7 @@ Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
 }
 
 Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
+    validate_bucket_name(bucket, kAllowReserved);
     co_await pool_->schedule();
     require_bucket(bucket);
     fs::path dir = bucket_dir(bucket);
@@ -102,6 +114,7 @@ Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
 }
 
 Task<bool> LocalFsBackend::bucket_exists(std::string_view bucket) {
+    validate_bucket_name(bucket, kAllowReserved);
     co_await pool_->schedule();
     co_return fs::exists(bucket_dir(bucket) / kBucketMarker);
 }
@@ -126,7 +139,7 @@ Task<std::vector<BucketInfo>> LocalFsBackend::list_buckets() {
 
 Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_view key,
                                            ObjectMeta meta, http::BodyReader& body) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
@@ -172,17 +185,19 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
 
 Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::string_view key,
                                               std::optional<ByteRange> range) {
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
+    // 桶存在性是无条件前置：此前只在 open 失败分支才查，成功路径完全不检查桶，
+    // 于是任何能构造出落在 root_ 之外的路径的 bucket 都能直接读到文件
+    require_bucket(bucket);
 
     fs::path path = object_path(bucket, key);
     int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        require_bucket(bucket);  // 区分 NoSuchBucket / NoSuchKey
+    if (fd < 0)
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
-    }
     struct stat st{};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);
@@ -219,6 +234,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
 }
 
 Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::string_view key) {
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
@@ -227,6 +243,7 @@ Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::strin
 }
 
 Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_view key) {
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
@@ -248,6 +265,7 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
 }
 
 Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
+    validate_bucket_name(bucket, kAllowReserved);
     co_await pool_->schedule();
     require_bucket(bucket);
 
@@ -282,7 +300,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
 
 Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
                                                    std::string_view key, ObjectMeta meta) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();

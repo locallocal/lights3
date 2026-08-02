@@ -1242,6 +1242,36 @@ TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
     sync_wait(h.b->close());
 }
 
+// P0 §1.4：另一实例正在写的 active pack 不得被补封（补封 → 压实全量重写 →
+// 账归零后整删，而对方仍持 fd 追加 = 静默数据丢失）。用第二个 FsDataStore 持有
+// 同一 root 上的 active pack 模拟"另一个网关"，验证 pack_write_locked 能识别
+TEST(duostore_active_pack_of_other_writer_not_sealed) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack-owner");
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k1", patterned(600));  // 建一个 active（未封存）pack
+
+    uint64_t pack_id = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
+    auto stats = h.meta->pack_stats();
+    bool unsealed = false;
+    for (const auto& ps : stats)
+        if (ps.pack_id == pack_id && !ps.sealed) unsealed = true;
+    CHECK(unsealed);  // 前提：该 pack 确实处于 active 态
+
+    // 本实例持有写锁 → 探测应报 "正被写"
+    CHECK(h.b->data_for_test().pack_write_locked(pack_id));
+
+    // 关掉本实例（fd 关闭 → 锁释放）后，同一 pack 不再被判为在写
+    sync_wait(h.b->close());
+    FsDataOptions probe_opt{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc,
+                            cfg.pack_threshold, cfg.pack_max_size, cfg.pack_writers, {}};
+    FsDataStore probe(probe_opt, pool, [](Extent::Kind) -> uint64_t { return 0; });
+    CHECK(!probe.pack_write_locked(pack_id));
+    sync_wait(probe.close());
+}
+
 // rewrite_pack 顺扫语义（store 级，无迁移回调）：统计、file_size 回报、torn tail
 // 静默止扫（重启弃用的预期形态）、magic 损坏响亮止扫
 TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {

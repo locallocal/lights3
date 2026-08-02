@@ -221,6 +221,9 @@ public:
     // 互斥——反向对账"文件必先于 ref 存在"的论证依赖 gcq 的 unlink→销账窗口不并发
     Task<duostore::DuoOrphanStats> run_orphan_scan_once();
 
+    // 数据面直访（仅测试用）：验证 active pack 的写锁探测（docs/gaps.md §1.4）
+    duostore::IDataStore& data_for_test() { return *data_; }
+
 private:
     void require_bucket(std::string_view bucket);  // 池线程调用
     // 取对象记录；缺失时区分 NoSuchBucket / NoSuchKey（GET/HEAD 错误语义必须一致）

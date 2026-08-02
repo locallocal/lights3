@@ -20,7 +20,7 @@ MemoryBackend::Bucket& MemoryBackend::bucket_or_throw(const std::string& name) {
 }
 
 Task<void> MemoryBackend::create_bucket(std::string_view bucket) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     std::string name(bucket);
     if (buckets_.count(name))
@@ -30,6 +30,7 @@ Task<void> MemoryBackend::create_bucket(std::string_view bucket) {
 }
 
 Task<void> MemoryBackend::delete_bucket(std::string_view bucket) {
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
     if (!b.objects.empty())
@@ -40,6 +41,7 @@ Task<void> MemoryBackend::delete_bucket(std::string_view bucket) {
 }
 
 Task<bool> MemoryBackend::bucket_exists(std::string_view bucket) {
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     co_return buckets_.count(std::string(bucket)) > 0;
 }
@@ -53,7 +55,7 @@ Task<std::vector<BucketInfo>> MemoryBackend::list_buckets() {
 
 Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_view key,
                                           ObjectMeta meta, http::BodyReader& body) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     // 先流式读完 body（不持锁），再提交
     std::string data;
@@ -79,6 +81,7 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
 
 Task<ObjectStream> MemoryBackend::get_object(std::string_view bucket, std::string_view key,
                                              std::optional<ByteRange> range) {
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
     auto it = b.objects.find(std::string(key));
@@ -98,6 +101,7 @@ Task<ObjectStream> MemoryBackend::get_object(std::string_view bucket, std::strin
 }
 
 Task<ObjectMeta> MemoryBackend::head_object(std::string_view bucket, std::string_view key) {
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
     auto it = b.objects.find(std::string(key));
@@ -108,6 +112,7 @@ Task<ObjectMeta> MemoryBackend::head_object(std::string_view bucket, std::string
 }
 
 Task<void> MemoryBackend::delete_object(std::string_view bucket, std::string_view key) {
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
     b.objects.erase(std::string(key));  // 幂等
@@ -115,6 +120,7 @@ Task<void> MemoryBackend::delete_object(std::string_view bucket, std::string_vie
 }
 
 Task<ListResult> MemoryBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
     std::vector<std::string> keys;
@@ -137,7 +143,7 @@ MemoryBackend::Upload& MemoryBackend::upload_or_throw(std::string_view bucket,
 
 Task<std::string> MemoryBackend::create_multipart(std::string_view bucket, std::string_view key,
                                                   ObjectMeta meta) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     std::lock_guard lk(m_);
     bucket_or_throw(std::string(bucket));
@@ -226,6 +232,7 @@ Task<std::vector<PartMeta>> MemoryBackend::list_parts(std::string_view bucket,
 }
 
 Task<std::vector<UploadInfo>> MemoryBackend::list_multipart_uploads(std::string_view bucket) {
+    validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     bucket_or_throw(std::string(bucket));
     std::vector<UploadInfo> out;

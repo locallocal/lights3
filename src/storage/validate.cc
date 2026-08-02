@@ -5,14 +5,19 @@ namespace lights3::storage {
 using s3::S3Error;
 using s3::S3ErrorCode;
 
-void validate_bucket_name(std::string_view b) {
+void validate_bucket_name(std::string_view b, bool allow_reserved) {
     auto fail = [&] {
         throw S3Error(S3ErrorCode::InvalidBucketName,
                       "The specified bucket is not valid.", std::string(b));
     };
-    // 内部保留 bucket（docs/credential-management.md §4.1，凭证持久化）：仅 CredentialStore 走到这里；
-    // 用户请求在 L2 路由入口就被拒（'.' 开头不合法），到不了后端
-    if (b == ".sys") return;
+    // 内部保留 bucket（docs/credential-management.md §4.1，凭证持久化）：只有显式
+    // 传 allow_reserved 的调用方（CredentialStore）能用。此前是无条件放行，等于
+    // 后端层对保留名毫无保护，全指望 L2 的 '.' 前缀启发式——而那道防线在 vhost
+    // 寻址下可被绕过（bucket 完全由 Host 决定）
+    if (b == kSysBucketName) {
+        if (allow_reserved) return;
+        fail();
+    }
     if (b.size() < 3 || b.size() > 63) fail();
     for (char c : b)
         if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '.')) fail();

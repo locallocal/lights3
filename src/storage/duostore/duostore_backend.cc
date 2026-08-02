@@ -558,7 +558,13 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         ro.verify_chunk_crc = cfg_.verify_chunk_crc;
         ro.on_corruption = on_corruption;
         ro.metrics = metrics;  // op 延迟/错误指标（C4，docs/duostore-rados-data.md §10）
+        // 写侧 pin 与 fs 路径同源注入（docs/gaps.md §1.2）：此前 rados 分支整条
+        // 缺失，孤儿扫描会删掉在途大对象已落地的分片
+        auto rpins = pins_;
+        ro.pins = ChunkPinHooks{[rpins](uint64_t id) { rpins->pin_id(id); },
+                                [rpins](uint64_t id) { rpins->unpin_id(id); }};
         data_ = std::make_unique<RadosDataStore>(std::move(ro), pool_, alloc);
+        write_pins_ = true;
     }
 #endif
     if (!data_) {
@@ -632,9 +638,32 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
 // P4 压实的候选集。file_size 以 0 补（未知；压实顺扫时可再 stat），seal_pack
 // 契约保证 0 不覆盖已知值
 void DuoStoreBackend::abandon_stale_packs() {
+    // 只补封"确实无人在写"的 pack（docs/gaps.md §1.4）：多网关共享同一 meta +
+    // 同一 data root 时（redis/tikv meta 的误配，或滚动重启期间新旧进程重叠），
+    // 无条件补封会把**另一实例正在写**的 active pack 标成 sealed → 它随即成为
+    // 压实候选被整体重写，账一度归零还会被 remove_pack 整删，而对方仍持 fd 继续
+    // 追加，写入落到已删 inode = 静默数据丢失。
+    // 两道门：从网关（gc_enabled=false）根本不该碰别人的账；主网关则逐个探测
+    // active pack 的写锁
+    if (!cfg_.gc_enabled) {
+        LOG_INFO("duostore '{}': gc_enabled=false, skipping stale-pack sealing "
+                 "(another instance owns GC)", cfg_.name);
+        return;
+    }
     try {
-        for (const auto& ps : meta_->pack_stats())
-            if (!ps.sealed) meta_->seal_pack(ps.pack_id, 0);
+        size_t sealed = 0, in_use = 0;
+        for (const auto& ps : meta_->pack_stats()) {
+            if (ps.sealed) continue;
+            if (data_->pack_write_locked(ps.pack_id)) {
+                ++in_use;
+                continue;
+            }
+            meta_->seal_pack(ps.pack_id, 0);
+            ++sealed;
+        }
+        if (in_use)
+            LOG_WARN("duostore '{}': {} unsealed pack(s) are being written by another "
+                     "process, left untouched ({} sealed)", cfg_.name, in_use, sealed);
     } catch (const std::exception& e) {
         // 补封失败不阻断启动（下次启动/GC 重试机会仍在），但要响亮留痕
         LOG_WARN("duostore '{}': sealing stale packs failed: {}", cfg_.name, e.what());
@@ -677,7 +706,7 @@ ObjectRec DuoStoreBackend::require_object(std::string_view bucket, std::string_v
 // ---------- bucket ----------
 
 Task<void> DuoStoreBackend::create_bucket(std::string_view bucket) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     co_await pool_->schedule();
     meta_->create_bucket(bucket);
 }
@@ -794,7 +823,7 @@ Task<void> commit_or_discard(IDataStore& data, const DataRef& ref, Commit commit
 
 Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string_view key,
                                             ObjectMeta meta, http::BodyReader& body) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);  // 预检；正式检查在提交事务内复查（§6.1 ②）
@@ -882,7 +911,7 @@ Task<ListResult> DuoStoreBackend::list_objects(std::string_view bucket,
 
 Task<std::string> DuoStoreBackend::create_multipart(std::string_view bucket,
                                                     std::string_view key, ObjectMeta meta) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     co_await pool_->schedule();
     co_return meta_->create_upload(bucket, key, std::move(meta));

@@ -230,6 +230,9 @@ public:
     // 兜底或孤儿扫描回收；析构中不做网络 IO
     ~RadosChunkWriter() override {
         if (pending_) pending_->unref();
+        // 未 finish 即丢弃：本 writer 建立的 pin 无人接手，就地解除（finish 成功
+        // 时 pinned_ 已清空，不会误解调用方接手的那批）
+        for (uint64_t id : pinned_) store_->opt_.pins.unpin_one(id);
     }
 
     Task<void> write(std::span<const std::byte> buf) override {
@@ -256,6 +259,7 @@ public:
             co_await harvest_pending();
         }
         finished_ = true;
+        pinned_.clear();  // 解 pin 责任随 DataRef 移交调用方（同 fs 版语义）
         co_return DataRef{std::move(extents_)};
     }
 
@@ -295,6 +299,12 @@ private:
         rados_ioctx_t ctx = io(store_->conn_);
         AioPending* p = make_pending(store_->exec_, store_->m_lat_write_);
         p->file_id = store_->alloc_(Extent::Kind::kRados);
+        // 分配即 pin（docs/gaps.md §1.2）：本片对象在 T0 落地，而整个 PUT 要到
+        // T0+Δ 才提交 meta。Δ 超过 gc_grace 时孤儿扫描会看到"refs 里没有、mtime
+        // 逾宽限、无 pin"的对象直接删掉，PUT 随后提交成功即得到引用已删数据的
+        // 坏对象。pin 一直持有到 finish 后由调用方解除，或本 writer 析构时解除
+        store_->opt_.pins.pin_one(p->file_id);
+        pinned_.push_back(p->file_id);
         p->len = buf_.size();
         p->crc = codec::crc32c_of(std::span<const std::byte>(buf_));
         p->data = std::move(buf_);
@@ -338,6 +348,7 @@ private:
     AsyncSemaphore::Permit permit_;
     AsyncSemaphore::Permit spare_permit_;
     AioPending* pending_ = nullptr;  // 在途单（至多 1：写第 N 片时接收 N+1）
+    std::vector<uint64_t> pinned_;   // 本 writer 建立的写侧 pin（finish 后清空）
     bool finished_ = false;
     bool failed_ = false;
 };

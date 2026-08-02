@@ -133,8 +133,20 @@ struct IStorageBackend {
     virtual ~IStorageBackend() = default;
 };
 
-// bucket/key 合法性校验（各后端共用），非法时抛 S3Error
-void validate_bucket_name(std::string_view bucket);
+// 内部保留 bucket 名（凭证持久化，docs/credential-management.md §4.1）。
+// 只有 allow_reserved=true 的校验调用能通过——即只有 CredentialStore
+inline constexpr std::string_view kSysBucketName = ".sys";
+
+// bucket/key 合法性校验（各后端共用），非法时抛 S3Error。
+// bucket 校验是**唯一**的保留名与路径安全防线：L2 的 dispatch 在路由前对每个
+// 请求调用它（allow_reserved=false），各后端数据面入口再调一次作纵深防御。
+// 用户请求永远拿不到 allow_reserved=true
+void validate_bucket_name(std::string_view bucket, bool allow_reserved = false);
 void validate_object_key(std::string_view key);
+
+// 后端内部校验的实参：后端必须能服务 CredentialStore 对 .sys 的读写，故这一层
+// 放行保留名。它校验的是**路径安全**（字符集、长度、无 '/' 与 NUL），保留名的
+// 拦截由 L2 dispatch 负责（那里恒用默认的 allow_reserved=false）
+inline constexpr bool kAllowReserved = true;
 
 }  // namespace lights3::storage

@@ -1,6 +1,7 @@
 #include "storage/duostore/fs_data_store.h"
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -439,6 +440,13 @@ Extent FsDataStore::append_pack_record(std::string_view owner,
         auto path = pack_path(slot->id);
         slot->fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
         if (slot->fd < 0) throw_errno("open pack");
+        // active pack 加咨询锁，随 fd 关闭自动释放（封存/进程退出/崩溃都算）。
+        // 它是"这个 pack 正被某个活着的进程写"的唯一可靠信号：另一实例启动时
+        // 据此区分"我上一代遗留的 pack"与"别人正在写的 pack"，避免把后者补封
+        // 后当成低存活 pack 重写甚至整删（docs/gaps.md §1.4）
+        if (::flock(slot->fd, LOCK_EX | LOCK_NB) != 0)
+            LOG_WARN("duostore: cannot lock active pack {} ({}); concurrent-writer "
+                     "detection degraded", slot->id, std::strerror(errno));
         slot->size = 0;
         // pack 创建低频（轮转粒度），目录立即 fsync（chunk 是会话末批量，§5.1）
         if (::fsync(dirfd) != 0) throw_errno("fsync pack shard dir");
@@ -487,6 +495,17 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
             throw_errno("unlink chunk");  // 幂等：ENOENT 忽略
     }
     co_return;
+}
+
+bool FsDataStore::pack_write_locked(uint64_t pack_id) {
+    // 试着以非阻塞方式加锁：拿得到 ⇒ 无人持有（自己的 fd 也已随进程消失）；
+    // EWOULDBLOCK ⇒ 另有活着的写者。拿到后立刻解锁，不改变任何状态
+    int fd = ::open(pack_path(pack_id).c_str(), O_RDONLY);
+    if (fd < 0) return false;  // 文件不存在/不可读：交给上层按原逻辑处理
+    bool locked_by_other = ::flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+    if (!locked_by_other) ::flock(fd, LOCK_UN);
+    ::close(fd);
+    return locked_by_other;
 }
 
 Task<void> FsDataStore::remove_pack(uint64_t pack_id) {

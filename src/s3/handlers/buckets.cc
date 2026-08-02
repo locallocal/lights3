@@ -11,7 +11,8 @@ Task<http::HttpResponse> S3Service::list_buckets() {
     for (auto& [_, backend] : router_.backends()) {
         auto part = co_await backend->list_buckets();
         for (auto& b : part) {
-            if (!b.name.empty() && b.name.front() == '.') continue;  // 内部保留（docs/credential-management.md §4.1）
+            // 内部保留名不出现在用户可见的列表里（docs/credential-management.md §4.1）
+            if (b.name == storage::kSysBucketName) continue;
             bool dup = false;
             for (auto& e : all)
                 if (e.name == b.name) dup = true;

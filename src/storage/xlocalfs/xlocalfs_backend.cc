@@ -106,7 +106,7 @@ Task<std::pair<uint64_t, std::string>> XLocalFsBackend::drain_to_tmp(http::BodyR
 
 Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
                                             ObjectMeta meta, http::BodyReader& body) {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
@@ -136,17 +136,17 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
 
 Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::string_view key,
                                                std::optional<ByteRange> range) {
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
+    require_bucket(bucket);  // 同 localfs：桶存在性是无条件前置，不能只在失败分支查
 
     fs::path path = object_path(bucket, key);
     int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0) {
-        require_bucket(bucket);  // 区分 NoSuchBucket / NoSuchKey
+    if (fd < 0)
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
-    }
     struct stat st{};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);

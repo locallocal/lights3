@@ -263,6 +263,8 @@ Task<std::vector<BucketInfo>> TieredBackend::list_buckets() {
 
 Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::string_view key,
                                              std::optional<ByteRange> range) {
+    // tiered 自己拼本地路径（object_data_path），故不能只依赖 local_ 的入口校验
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
     for (int attempt = 0;; ++attempt) {
@@ -321,6 +323,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
 
 Task<PutResult> TieredBackend::put_object(std::string_view bucket, std::string_view key,
                                           ObjectMeta meta, http::BodyReader& body) {
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
     co_await pool_->schedule();
@@ -333,6 +336,7 @@ Task<PutResult> TieredBackend::put_object(std::string_view bucket, std::string_v
 }
 
 Task<ObjectMeta> TieredBackend::head_object(std::string_view bucket, std::string_view key) {
+    validate_bucket_name(bucket, kAllowReserved);
     // stub 的 sidecar 信息完备，HEAD 完全本地完成（§6.1）
     auto m = co_await local_->head_object(bucket, key);
     touch_atime(bucket, key);
@@ -340,6 +344,7 @@ Task<ObjectMeta> TieredBackend::head_object(std::string_view bucket, std::string
 }
 
 Task<void> TieredBackend::delete_object(std::string_view bucket, std::string_view key) {
+    validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
     co_await pool_->schedule();
@@ -352,6 +357,7 @@ Task<void> TieredBackend::delete_object(std::string_view bucket, std::string_vie
 }
 
 Task<ListResult> TieredBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
+    validate_bucket_name(bucket, kAllowReserved);
     co_return co_await local_->list_objects(bucket, opt);  // stub 即 0 长度文件，遍历原样复用
 }
 

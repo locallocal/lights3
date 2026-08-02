@@ -37,15 +37,6 @@ struct FsDataOptions {
 class ChunkWriter;
 class FsPackedWriter;
 
-// 写侧 pin 钩子（§9.3）：孤儿扫描不得回收"写入中尚未提交 meta"的 chunk——慢流式
-// PUT 的早期 chunk mtime 可远逾 gc_grace，仅靠 mtime 宽限不充分。ChunkWriter 在
-// 分配 file_id 时 pin、未 finish 即析构时解 pin；finish 之后的解 pin 责任移交
-// 调用方（DuoStoreBackend 在 meta 提交 / 兜底删除之后解除）
-struct ChunkPinHooks {
-    std::function<void(uint64_t)> pin;
-    std::function<void(uint64_t)> unpin;
-};
-
 class FsDataStore final : public IDataStore {
 public:
     // file_id 分配回调（持久单调，由 IMetaStore::alloc_file_id 提供）
@@ -65,6 +56,7 @@ public:
                                                         uint64_t last) override;
     Task<void> remove(std::span<const Extent> extents) override;
     Task<void> remove_pack(uint64_t pack_id) override;
+    bool pack_write_locked(uint64_t pack_id) override;
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
     Task<void> scan_chunks(
         const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;

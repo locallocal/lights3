@@ -23,7 +23,7 @@
 - **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5）、存储引擎能力缺口 23 项（§6）、运维与工程能力缺口 10 项（§7）。
 - **第三部分 · 文档与实现的偏差**：15 条实现与承诺不符（含"改实现"与"改文档"两类），另有 7 条中英文档漂移（§8）。
 
-P0 四条按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
+P0 四条**已于 2026-08-03 全部修复**（详见 §1）。按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
 
 ---
 
@@ -31,7 +31,11 @@ P0 四条按影响排：vhost bucket 名不校验（任意文件读 + 全部凭�
 
 ## 1. P0 —— 安全越权与静默数据丢失
 
-### 1.1 vhost 寻址的 bucket 名从不校验 → 任意文件读 + 全部凭证泄露 + 提权
+> **2026-08-03 已全部修复**（四条同批上线，各条末尾附实际修法与回归用例）。
+> 验证：主构建 261 / TSan 246（零竞争）/ sqlite 11 套件 / redis 11 套件 /
+> rados 变体编译通过。
+
+### 1.1 [✅已修复] vhost 寻址的 bucket 名从不校验 → 任意文件读 + 全部凭证泄露 + 提权
 
 **位置**：`src/s3/service.cc:96-118`（`resolve_address` vhost 分支，`:110` 把 Host 前缀原样当 bucket）、`:149-154`（全链路唯一检查，只看首字符是否为 `.`）；`src/storage/localfs/localfs_backend.cc:54-60`（`object_path = root_ / fs::path(bucket) / key`）、`:173-180`（`get_object` 只校验 key，且 `require_bucket` 只在 `open` **失败**分支才调用）；xlocalfs 同构。
 
@@ -55,7 +59,18 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 3. localfs/xlocalfs/memory/tiered 的**全部**数据面入口补 `validate_bucket_name`；`get_object` 的 `require_bucket` 提到 `::open()` 之前。
 4. 纵深防御：`object_path()` 之后 `fs::weakly_canonical` 并断言结果仍以 `root_` 为前缀。
 
-### 1.2 `data=rados` 无写侧 pin → 孤儿扫描删掉在途大对象已落地的分片
+**✅已修复**（四处同批）：(1) `dispatch` 对非空 bucket 统一调
+`storage::validate_bucket_name()`，替换掉首字符启发式；(2) `validate_bucket_name`
+增加 `allow_reserved` 形参（默认 false），`.sys` 只对显式传 true 的调用方开放，
+保留名常量提为 `storage::kSysBucketName`；(3) localfs / xlocalfs / memory / tiered
+的全部数据面入口补 `validate_bucket_name(bucket, kAllowReserved)`（后端这一层校验
+的是路径安全，保留名拦截由 L2 负责），localfs/xlocalfs 的 `get_object` 把
+`require_bucket` 提到 `::open()` 之前；(4) `object_path()` 用 `lexically_normal`
+比对确认结果仍在 `root_` 之下，否则抛 InvalidBucketName。`.` 前缀检查的三份副本
+（service / copy-source / ListBuckets 过滤）收敛为同一个函数。
+回归用例四组（vhost 恶意 Host、path-style 含 NUL/控制字符、copy-source、合法桶名
+不受影响）——移除 L2 闸门即有 2 个用例失败。
+### 1.2 [✅已修复] `data=rados` 无写侧 pin → 孤儿扫描删掉在途大对象已落地的分片
 
 **位置**：`src/storage/duostore/duostore_backend.cc:548-562`（rados 装配分支不注入 `ChunkPinHooks`，`write_pins_` 保持 false；对比 fs 分支 `:578-580`）、`:1180`（`pinned_chunk()` 因此恒 false）、`src/storage/duostore/rados_data_store.cc:293-313`。
 
@@ -63,7 +78,13 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：把 `ChunkPinHooks` 提升为 `IDataStore` 的通用装配项，`RadosChunkWriter::start_flush` 分配 file_id 后立即 pin、未 finish 即析构时 unpin；rados 分支同样置 `write_pins_ = true`。补上之前，`data=rados` 应强制关闭孤儿扫描或把 `gc_grace` 下限抬到最长预期 PUT 时长。
 
-### 1.3 tiered 缓存回填 rename 前不 fsync → 掉电后静默返回整文件零块
+**✅已修复**：`ChunkPinHooks` 从 `fs_data_store.h` 提到 `data_store.h`（并加
+`pin_one`/`unpin_one` 的空安全包装），`RadosDataOptions` 增加 `pins` 字段；
+`RadosChunkWriter::start_flush` 分配 file_id 后立即 pin 并记入 `pinned_`，
+`finish()` 成功时清空该表（解 pin 责任随 DataRef 移交调用方），未 finish 即析构
+则就地解除；backend 的 rados 装配分支注入与 fs 同源的钩子并置 `write_pins_ = true`。
+
+### 1.3 [✅已修复] tiered 缓存回填 rename 前不 fsync → 掉电后静默返回整文件零块
 
 **位置**：`src/storage/localfs/fs_util.cc:257-267`（`commit_cached` 直接 `fs::rename`，无 `fsync_path`；对比 `commit_object_file:181-187` 有）。
 
@@ -71,13 +92,26 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：`fs::rename` 前插 `fsync_path(tmp.path)`、后插 `fsync_dir(dest.parent_path())`，与 `commit_object_file` 逐字对齐。
 
-### 1.4 duostore 多网关下 `abandon_stale_packs` 封存他方正在写的 pack → 静默数据丢失
+**✅已修复**：按建议实现，注释写明"数据必须在 rename 之前落盘"的理由与 StubRace
+检查为何拦不住。回归用例走完整的下沉 → Tee 回填 → 缓存命中读取链路，断言两次读出
+的内容与原文逐字节一致。
+
+### 1.4 [✅已修复] duostore 多网关下 `abandon_stale_packs` 封存他方正在写的 pack → 静默数据丢失
 
 **位置**：`src/storage/duostore/duostore_backend.cc:634-642`（构造期无条件把所有 unsealed pack 补封为 `file_size=0`）。
 
 **机制**：该函数不区分"本实例上一代遗留"与"其他实例正在写"。两个网关共享同一 meta + 同一 fs data root（redis/tikv meta 的误配，或滚动重启期间新旧进程重叠）时，网关 B 启动会把网关 A 的 **active** pack 标记为 sealed → 进入下面 2.3 的无条件全量重写 → 若其账一度归零还会被 `remove_pack` 整删，而 A 仍持有该 fd 继续追加，写入落到已删 inode。
 
 **建议**：pack 账记录 owner instance id（rocks 在 schema 初始化时已写了 `instance` 但从未使用），只补封 owner == 本实例的项；或在 `gc_enabled=false`（从网关）时跳过补封。
+
+**✅已修复**（两道门，均不需要改 meta schema）：(1) `gc_enabled=false` 的从网关
+直接跳过补封——它本就不该动别人的账；(2) 主网关逐个探测 pack 是否正被写：
+`FsDataStore` 给每个 active pack 加 `flock(LOCK_EX|LOCK_NB)` 咨询锁（随 fd 关闭
+自动释放，封存/退出/崩溃都算），新增 `IDataStore::pack_write_locked()` 以非阻塞
+加锁探测，拿得到锁 ⇒ 无人持有 ⇒ 才补封。默认实现返回 false（保守方向：返回 true
+只推迟补封，返回 false 才可能封掉别人的 pack）。选咨询锁而非 owner id 是因为它
+不需要动四个 meta 引擎的编码与 schema 版本，且"谁持有 fd"本就是比"谁写过账"更
+准确的存活信号。回归用例验证本实例持锁时探测为真、close 后为假。
 
 ---
 

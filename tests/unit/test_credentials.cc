@@ -465,7 +465,7 @@ TEST(sys_bucket_hidden_from_data_plane) {
     CHECK(listed.small_body.find(".sys") == std::string::npos);
 }
 
-// ---------- docs/code-review/s3.md / README §1.2 修复回归 ----------
+// ---------- 评审发现的回归用例（认证 fail-open 防护 / 吊销竞态）----------
 
 // fail-open 防护：纯文件形态下文件被清成空数组不得把凭证表清空（保留旧表 + degraded）
 TEST(credstore_file_reload_refuses_empty_table) {

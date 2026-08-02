@@ -73,12 +73,10 @@ inline std::pair<std::string, std::string> parse_copy_source(const std::string& 
     if (slash == std::string::npos || slash == 0 || slash + 1 >= s.size())
         throw S3Error(S3ErrorCode::InvalidArgument, "Invalid x-amz-copy-source header.");
     std::string bucket = s.substr(0, slash);
-    // '.' 开头为内部保留名（docs/credential-management.md §4.1）：copy-source 走 header
-    // 不经过 dispatch 的路径拦截，须在此单独拒绝——否则 CopyObject 能把 .sys 里的
-    // 凭证对象拷进用户可读的对象
-    if (bucket.front() == '.')
-        throw S3Error(S3ErrorCode::InvalidBucketName, "The specified bucket is not valid.",
-                      bucket);
+    // copy-source 走 header，不经 dispatch 的 bucket 闸门，须在此独立校验——否则
+    // CopyObject 能把 .sys 里的凭证对象拷进用户可读的对象。用与 dispatch 同一个
+    // 校验函数（此前是第三份独立的 '.' 前缀启发式，三份副本各自演化是漂移源头）
+    storage::validate_bucket_name(bucket);
     return {std::move(bucket), s.substr(slash + 1)};
 }
 

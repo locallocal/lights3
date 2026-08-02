@@ -147,11 +147,15 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         } else {
             access_key = auth_.verify(req);
             std::tie(bucket, key) = resolve_address(req);
-            // '.' 开头为内部保留名（docs/credential-management.md §4.1）：用户请求在此统一拒绝，
-            // 后端的 validate 对保留名放行，仅 CredentialStore 可达
-            if (!bucket.empty() && bucket.front() == '.')
-                throw S3Error(S3ErrorCode::InvalidBucketName,
-                              "The specified bucket is not valid.", bucket);
+            // 用户请求的 bucket 名在此统一过完整校验，这是**唯一**的权威闸门
+            // （docs/gaps.md §1.1）。此前只查首字符是否为 '.'，而 vhost 寻址下
+            // bucket 完全取自 Host 头、可含 '/' 甚至以 '/' 开头，配合 localfs 的
+            // root_/bucket/key 拼接（fs::path 遇绝对路径会替换整条路径）即任意
+            // 文件读；path-style 侧还能用 %00 让首字符变成 NUL 绕过保留名检查。
+            // validate_bucket_name 的字符集规则一次堵死两条入口，保留名
+            // （.sys）也只对 allow_reserved=true 的调用方开放——用户请求永远
+            // 拿不到那个参数
+            if (!bucket.empty()) storage::validate_bucket_name(bucket);
             // per-credential policy（docs/credential-management.md §10.4）：
             // GET/HEAD 为读，其余（PUT/POST/DELETE）算写
             if (cred_store_) {

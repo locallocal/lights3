@@ -266,7 +266,7 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
 }
 
 std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
-    validate_bucket_name(bucket);
+    validate_bucket_name(bucket, kAllowReserved);
     std::string rb = ctx_->cfg.bucket_prefix + std::string(bucket);
     if (rb.size() > 63)
         throw S3Error(S3ErrorCode::InvalidBucketName,

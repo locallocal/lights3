@@ -47,6 +47,24 @@ using PackMigrateFn = std::function<Task<bool>(
     IDataStore& self, std::string_view owner, const Extent& from,
     std::span<const std::byte> payload)>;
 
+// 写侧 pin 钩子（§9.3）：孤儿扫描不得回收"写入中尚未提交 meta"的 chunk——慢流式
+// PUT 的早期 chunk mtime 可远逾 gc_grace，仅靠 mtime 宽限不充分。writer 在分配
+// file_id 时 pin、未 finish 即析构时解 pin；finish 之后的解 pin 责任移交调用方
+// （DuoStoreBackend 在 meta 提交 / 兜底删除之后解除）。
+// **每个产出 chunk 类实体的 data store 都必须接**：漏接的引擎会让孤儿扫描把在途
+// 大对象已落地的分片当无引用文件删掉（docs/gaps.md §1.2）
+struct ChunkPinHooks {
+    std::function<void(uint64_t)> pin;
+    std::function<void(uint64_t)> unpin;
+
+    void pin_one(uint64_t id) const {
+        if (pin) pin(id);
+    }
+    void unpin_one(uint64_t id) const {
+        if (unpin) unpin(id);
+    }
+};
+
 struct IDataStore {
     virtual Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) = 0;
     // [first,last] 为 resolve_range 后的闭区间；返回流式 BodyReader（length()=last-first+1）
@@ -65,6 +83,11 @@ struct IDataStore {
     // 惯例）：不支持枚举的引擎显式抛错，绝不静默空扫谎报"无孤儿"
     virtual Task<void> scan_chunks(
         const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) = 0;
+    // "该 pack 是否正被某个活着的写者持有"（启动补封用，docs/gaps.md §1.4）。
+    // fs 实现探测 active pack 的咨询锁；无 pack 实体或无从探测的引擎返回 false
+    // （= 不阻止补封，与本改动前的行为一致）。**false 必须是保守方向**：返回
+    // true 只会让补封推迟到下次启动，返回 false 却可能封掉别人正在写的 pack
+    virtual bool pack_write_locked(uint64_t /*pack_id*/) { return false; }
     virtual Task<void> close() = 0;
     virtual ~IDataStore() = default;
 };

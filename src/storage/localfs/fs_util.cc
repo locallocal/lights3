@@ -258,11 +258,19 @@ void commit_cached(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                    const TierInfo& tier, const fs::path& staging_put) {
     // 与 stub 化相反：先 rename 数据、后写 sidecar。中间崩溃时 sidecar 仍为
     // remote（读走云端，正确），数据文件由 scanner 按"remote 但 size>0"回收；
-    // 反序则存在 sidecar=cached 而数据仍为 0 长度 stub 的截断窗口
+    // 反序则存在 sidecar=cached 而数据仍为 0 长度 stub 的截断窗口。
+    //
+    // 数据必须在 rename 之前落盘：随后写的 sidecar 是 fsync 过的，若数据块还在
+    // page cache 就掉电，重启后 sidecar 说 tier=cached/size=N 而文件是 N 字节的
+    // 零块——rename 已提交 inode size，get_object 的 StubRace 检查（比 st_size
+    // 与声明 size）因此通过，把零块当对象内容返回且 ETag 正确。与
+    // commit_object_file 的顺序逐字对齐
+    fsync_path(tmp.path);
     std::error_code ec;
     fs::rename(tmp.path, dest, ec);
     if (ec) throw s3::S3Error(s3::S3ErrorCode::InternalError, "rename cached data failed");
     tmp.committed = true;
+    fsync_dir(dest.parent_path());
     write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put, tier);
 }
 

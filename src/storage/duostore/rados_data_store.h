@@ -33,6 +33,9 @@ struct RadosDataOptions {
     std::function<void()> on_corruption;
     // op 延迟/错误指标（C4，§10）；空 scope 即孤立实例，测试直构免装配
     MetricsScope metrics;
+    // 写侧 pin（docs/gaps.md §1.2）：分配 file_id 即 pin，未 finish 即析构时解。
+    // 不接的话，大对象 PUT 的早期分片会在 meta 提交前被孤儿扫描当无引用文件删掉
+    ChunkPinHooks pins;
 };
 
 class RadosChunkWriter;

@@ -1,6 +1,7 @@
 // object 级 handler：Put/Get/Head/Delete/Copy/DeleteObjects 与条件请求（docs/s3-protocol.md §1/§6）
 #include <charconv>
 
+#include "core/log.h"
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "s3/handlers/common.h"
@@ -71,17 +72,36 @@ void check_read_preconditions(const http::HttpRequest& req, const storage::Objec
     }
 }
 
+bool has_read_preconditions(const http::HttpRequest& req) {
+    return req.headers.has("If-Match") || req.headers.has("If-None-Match") ||
+           req.headers.has("If-Modified-Since") || req.headers.has("If-Unmodified-Since");
+}
+
+// If-Range（RFC 7233 §3.2）：验证器（强 ETag 或 HTTP-date 精确匹配 Last-Modified）
+// 命中才生效 Range，否则忽略 Range 回整对象
+bool if_range_matches(const http::HttpRequest& req, const storage::ObjectMeta& meta) {
+    auto v = req.headers.get("If-Range");
+    if (!v) return true;
+    if (!v->empty() && v->front() == '"') return strip_quotes(*v) == meta.etag;
+    auto t = util::parse_http_date(*v);
+    return t && to_epoch_sec(meta.last_modified) == to_epoch_sec(*t);
+}
+
 }  // namespace
 
 Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket,
                                                std::string key) {
     auto& backend = router_.resolve(bucket);
 
-    // PUT 条件请求（docs/s3-protocol.md §6）：If-None-Match:* 防覆盖，If-Match 乐观并发
+    // PUT 条件请求（docs/s3-protocol.md §6）：If-None-Match:* 防覆盖，If-Match 乐观并发。
+    // head 检查与 put 在同 key 条带锁内串行化——不加锁时两个并发条件写都能通过
+    // 检查后互相覆盖，"防覆盖/乐观并发"语义双双失效
+    std::optional<AsyncSemaphore::Permit> cond_lock;
     if (auto v = req.headers.get("If-None-Match")) {
         if (*v != "*")
             throw S3Error(S3ErrorCode::NotImplemented,
                           "PUT If-None-Match only supports '*'.");
+        cond_lock = co_await cond_put_lock(bucket, key).acquire();
         bool exists = true;
         try {
             co_await backend.head_object(bucket, key);
@@ -93,6 +113,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
     } else if (auto v2 = req.headers.get("If-Match")) {
+        cond_lock = co_await cond_put_lock(bucket, key).acquire();
         auto cur = co_await backend.head_object(bucket, key);  // 缺失 → NoSuchKey(404)
         if (strip_quotes(*v2) != cur.etag)
             throw S3Error(S3ErrorCode::PreconditionFailed,
@@ -157,6 +178,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     http::HttpResponse resp;
     if (head_only) {
         auto meta = co_await backend.head_object(bucket, key);
+        // 前置条件先于 Range 判定（RFC 7232 优先级：412/304 压过 416）
         bool not_modified = false;
         check_read_preconditions(req, meta, not_modified);
         if (not_modified) {
@@ -165,22 +187,43 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
             co_return resp;
         }
         fill_object_headers(resp, meta);
-        resp.content_length = meta.size;  // 无 body，驱动只发 Content-Length
+        if (range && !if_range_matches(req, meta)) range.reset();
+        if (range) {  // 与 GET 对齐：206 + Content-Range，无 body 只报长度
+            auto [f, l] = storage::resolve_range(*range, meta.size);  // 不可满足 → 416
+            resp.status = 206;
+            resp.headers.set("Content-Range", "bytes " + std::to_string(f) + "-" +
+                                                  std::to_string(l) + "/" +
+                                                  std::to_string(meta.size));
+            resp.content_length = l - f + 1;
+        } else {
+            resp.content_length = meta.size;  // 无 body，驱动只发 Content-Length
+        }
         co_return resp;
     }
 
-    auto stream = co_await backend.get_object(bucket, key, range);
-    bool not_modified = false;
-    check_read_preconditions(req, stream.meta, not_modified);
-    if (not_modified) {
-        resp.status = 304;
-        resp.headers.set("ETag", quote_etag(stream.meta.etag));
-        co_return resp;
+    // 条件头存在时先 head 判定再建流：412/304 先于 range 的 416（RFC 7232），
+    // 也避免 cloudproxy 之类后端先向上游拉取对象再整个丢弃
+    if (has_read_preconditions(req) || (range && req.headers.has("If-Range"))) {
+        auto meta = co_await backend.head_object(bucket, key);
+        bool not_modified = false;
+        check_read_preconditions(req, meta, not_modified);
+        if (not_modified) {
+            resp.status = 304;
+            resp.headers.set("ETag", quote_etag(meta.etag));
+            co_return resp;
+        }
+        if (range && !if_range_matches(req, meta)) range.reset();
     }
+
+    auto stream = co_await backend.get_object(bucket, key, range);
 
     fill_object_headers(resp, stream.meta);
     uint64_t len = stream.meta.size;
     if (stream.range) {
+        // 后端契约：返回的 range 须两端都已解析；漏填是后端缺陷，不能 UB 解引用
+        if (!stream.range->first || !stream.range->last)
+            throw S3Error(S3ErrorCode::InternalError,
+                          "storage backend returned an unresolved range");
         uint64_t f = *stream.range->first, l = *stream.range->last;
         len = l - f + 1;
         resp.status = 206;
@@ -231,6 +274,15 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
             w.element("Key", key);
             w.element("Code", wire_code(e.code));
             w.element("Message", e.message);
+            w.close();
+        } catch (const std::exception& e) {
+            // 非 S3 异常（后端传输/存储错误）不得中断整批：已删的 key 必须出现
+            // 在响应里，否则客户端无从得知哪些删成了。原始文案只进日志
+            LOG_ERROR("DeleteObjects: key {} failed: {}", key, e.what());
+            w.open("Error");
+            w.element("Key", key);
+            w.element("Code", "InternalError");
+            w.element("Message", "We encountered an internal error.");
             w.close();
         }
     }

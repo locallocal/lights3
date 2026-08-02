@@ -96,6 +96,10 @@ struct IStorageBackend {
     // ---- object ----
     virtual Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                           std::optional<ByteRange> range) = 0;
+    // body 契约（put_object / upload_part 同）：实现必须把 body 读到 EOF（read 返回
+    // 0）为止，不得读满 length() 即停——上层的验签装饰器（x-amz-content-sha256 /
+    // aws-chunked 签名链）挂在读满与 EOF 处，跳过尾部读取会跳过校验；
+    // body.read 抛异常 ⇒ 后端不得提交对象（staging 丢弃 / 远端传输中止）
     virtual Task<PutResult> put_object(std::string_view bucket, std::string_view key,
                                        ObjectMeta meta, http::BodyReader& body) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;

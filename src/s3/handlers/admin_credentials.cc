@@ -3,6 +3,7 @@
 // 不走 dispatch 外层的 S3 XML 错误路径。
 #include <nlohmann/json.hpp>
 
+#include "core/log.h"
 #include "core/util/time.h"
 #include "s3/auth/credential_store.h"
 #include "s3/service.h"
@@ -146,8 +147,23 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
         metrics_.s3_error(wire_code(e.code));
         json j;
         j["code"] = wire_code(e.code);
-        j["message"] = e.message;
+        // 内部错误原始文案可能含后端拓扑：只进日志，响应用固定文案
+        if (e.code == S3ErrorCode::InternalError) {
+            LOG_ERROR("admin api {} {} internal error: {}", req.method, req.path, e.message);
+            j["message"] = "We encountered an internal error.";
+        } else {
+            j["message"] = e.message;
+        }
         co_return json_response(http_status(e.code), j);
+    } catch (const std::exception& e) {
+        // generate() 的 getentropy/put 失败等 runtime_error：本 handler 承诺
+        // 错误一律渲染 JSON，不得逃到外层的 S3 XML 路径
+        LOG_ERROR("admin api {} {} internal error: {}", req.method, req.path, e.what());
+        metrics_.s3_error("InternalError");
+        json j;
+        j["code"] = "InternalError";
+        j["message"] = "We encountered an internal error.";
+        co_return json_response(500, j);
     }
 }
 

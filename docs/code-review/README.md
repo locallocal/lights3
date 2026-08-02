@@ -56,7 +56,11 @@ payload 校验、后端 close 不被调用、请求取消是死代码）。
 
 **建议**：`resolve_address` 解析出 vhost bucket 后立即 `validate_bucket_name`；并在各 localfs/xlocalfs 数据面入口补 `validate_bucket_name(bucket)`（get/head/list/delete 与 put 对齐），作为纵深防御。
 
-### 1.2 [高 · ✅已复核] 认证 fail-open：凭证表运行期变空 → 整个端点匿名开放
+### 1.2 [高 · ✅已复核 · ✅已修复] 认证 fail-open：凭证表运行期变空 → 整个端点匿名开放
+
+> **2026-08-02 已随 s3 评审修复落地**（详见 [s3.md](s3.md) 高危第三条）：`enabled()`
+> 改为只升不降的闩锁（表变空后 fail-closed）；`apply_file_credentials`/`sync_now`
+> 拒绝把非空表清成空表（保留旧表 + LOG_ERROR + `degraded` → `/-/readyz` 503）。
 
 **位置**：`src/s3/auth/sigv4.cc:388-389`（`verify()` 首行 `if (!enabled()) return ""`）、`sigv4.h:33`（`enabled() = provider_->has_credentials()`）；`src/s3/auth/credential_store.cc:344`（`has_credentials() = !creds_.empty()`）、`apply_file_credentials()`（先清空 kFile 再插入）、`sync_now()` 吊销分支。
 

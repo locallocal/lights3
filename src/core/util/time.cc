@@ -81,8 +81,11 @@ std::string amz_date(SysTime t) {
 
 std::optional<SysTime> parse_amz_date(const std::string& s) {
     std::tm tm{};
-    if (sscanf(s.c_str(), "%4d%2d%2dT%2d%2d%2dZ", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
-               &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
+    // 格式固定 "YYYYMMDDTHHMMSSZ"（16 字符）：%n 校验 'Z' 在场、长度校验拒尾部垃圾
+    int consumed = 0;
+    if (sscanf(s.c_str(), "%4d%2d%2dT%2d%2d%2dZ%n", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+               &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &consumed) != 6 ||
+        consumed != 16 || s.size() != 16)
         return std::nullopt;
     if (tm.tm_year < kMinYear || tm.tm_year > kMaxYear) return std::nullopt;
     tm.tm_year -= 1900;

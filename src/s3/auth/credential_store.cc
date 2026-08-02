@@ -3,6 +3,7 @@
 #include <fnmatch.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdlib>
 #include <fstream>
@@ -436,8 +437,20 @@ Task<void> CredentialStore::remove(std::string_view ak) {
             throw S3Error(S3ErrorCode::MethodNotAllowed,
                           "File-sourced credentials are managed via the credentials file.");
     }
+    // tombstone 先于 delete 落表：与 sync_now 的 list 交错时（list 早于 delete 生效、
+    // emplace 晚于下面的 erase），新增分支据此拒绝把刚吊销的 AK 拉回内存
+    {
+        std::unique_lock lk(mu_);
+        tombstones_[std::string(ak)] = std::chrono::steady_clock::now();
+    }
     // 先删存储（幂等）再删内存；失败则内存保留，与存储一致
-    co_await backend_->delete_object(kSysBucket, object_key(ak));
+    try {
+        co_await backend_->delete_object(kSysBucket, object_key(ak));
+    } catch (...) {
+        std::unique_lock lk(mu_);
+        tombstones_.erase(std::string(ak));  // 未吊销成功，不得挡住后续 sync
+        throw;
+    }
     {
         std::unique_lock lk(mu_);
         creds_.erase(std::string(ak));
@@ -449,6 +462,18 @@ Task<void> CredentialStore::remove(std::string_view ak) {
 
 void CredentialStore::apply_file_credentials(std::vector<CredentialInfo> creds) {
     std::unique_lock lk(mu_);
+    // fail-open 防护（README §1.2）：拒绝把非空表清成空表——文件被误编辑成
+    // `{"credentials": []}` 是合法 JSON，照单全收会让 enabled() 依赖的表变空。
+    // 保留旧表、置 degraded（readyz 转 503），文件修好后下一轮恢复
+    if (!creds_.empty() && creds.empty() &&
+        std::all_of(creds_.begin(), creds_.end(),
+                    [](auto& kv) { return kv.second.source == CredSource::kFile; })) {
+        LOG_ERROR("credentials file would empty the credential table; keeping previous "
+                  "table (authentication stays enabled)");
+        degraded_.store(true, std::memory_order_relaxed);
+        return;
+    }
+    degraded_.store(false, std::memory_order_relaxed);
     // 整体替换 file 来源的条目：旧文件里删掉的凭证随之失效
     for (auto it = creds_.begin(); it != creds_.end();)
         it = (it->second.source == CredSource::kFile) ? creds_.erase(it) : std::next(it);
@@ -518,9 +543,27 @@ Task<void> CredentialStore::sync_now() {
     }
     size_t added = 0, removed = 0;
 
+    // tombstone 清理与快照：过期条目剔除；近期吊销的 AK 在新增分支跳过
+    //（remove 与本轮 list 交错时对象可能仍被 list 到，不加防护会复活已吊销凭证）
+    const auto now = std::chrono::steady_clock::now();
+    const auto ttl = std::chrono::seconds(std::max(60, 2 * cfg_.sync_interval_sec));
+    std::set<std::string, std::less<>> recently_revoked;
+    {
+        std::unique_lock lk(mu_);
+        for (auto it = tombstones_.begin(); it != tombstones_.end();) {
+            if (now - it->second > ttl) {
+                it = tombstones_.erase(it);
+            } else {
+                recently_revoked.insert(it->first);
+                ++it;
+            }
+        }
+    }
+
     // 新增：storage 有、内存无 → 拉取入表
     for (auto& ak : on_storage) {
         if (find(ak)) continue;
+        if (recently_revoked.contains(ak)) continue;
         try {
             auto stream = co_await backend_->get_object(kSysBucket, object_key(ak),
                                                         std::nullopt);
@@ -539,12 +582,19 @@ Task<void> CredentialStore::sync_now() {
         }
     }
 
-    // 消失：快照里的动态凭证不在 storage 上 → 别处已吊销，本地失效
+    // 消失：快照里的动态凭证不在 storage 上 → 别处已吊销，本地失效。
+    // fail-open 防护（README §1.2）：.sys 被外部整体清空时不把表清成空表
     for (auto& ak : snapshot) {
         if (on_storage.contains(ak)) continue;
         std::unique_lock lk(mu_);
         auto it = creds_.find(ak);
         if (it != creds_.end() && it->second.source == CredSource::kDynamic) {
+            if (creds_.size() == 1) {
+                LOG_ERROR("credential sync would empty the credential table (\"{}\" gone "
+                          "from storage); keeping it (authentication stays enabled)", ak);
+                degraded_.store(true, std::memory_order_relaxed);
+                break;
+            }
             creds_.erase(it);
             ++removed;
         }

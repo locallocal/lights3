@@ -2,6 +2,7 @@
 // 自实现验签 + 签名（签名端供单测与后续 cloudproxy 转发复用）。
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -27,10 +28,35 @@ class SigV4Authenticator {
 public:
     static SigV4Authenticator build(const AuthConfig& cfg);
 
-    void set_provider(std::shared_ptr<const ICredentialProvider> p) { provider_ = std::move(p); }
+    // require_auth_ 为 atomic（不可隐式拷贝/移动）：装配期按值搬运须显式定义
+    SigV4Authenticator() = default;
+    SigV4Authenticator(SigV4Authenticator&& o) noexcept
+        : clock(std::move(o.clock)),
+          provider_(std::move(o.provider_)),
+          require_auth_(o.require_auth_.load()),
+          region_(std::move(o.region_)),
+          service_(std::move(o.service_)) {}
+    SigV4Authenticator(const SigV4Authenticator& o)
+        : clock(o.clock),
+          provider_(o.provider_),
+          require_auth_(o.require_auth_.load()),
+          region_(o.region_),
+          service_(o.service_) {}
 
-    // 注意：接入 CredentialStore 后该状态是动态的（首个动态凭证生成即开启）
-    bool enabled() const { return provider_ && provider_->has_credentials(); }
+    void set_provider(std::shared_ptr<const ICredentialProvider> p) {
+        provider_ = std::move(p);
+        if (provider_ && provider_->has_credentials()) require_auth_.store(true);
+    }
+
+    // 认证开关只升不降（docs/code-review/README.md §1.2 fail-open）：一旦观察到
+    // 凭证表非空即固化为"必须认证"，运行期表被清空不再放行匿名（此后未知 AK 走
+    // InvalidAccessKeyId，fail-closed）；表由空变非空仍即时开启（首个动态凭证生成即生效）
+    bool enabled() const {
+        if (require_auth_.load(std::memory_order_relaxed)) return true;
+        bool has = provider_ && provider_->has_credentials();
+        if (has) require_auth_.store(true, std::memory_order_relaxed);
+        return has;
+    }
     const std::string& region() const { return region_; }
 
     // 验签失败抛 S3Error；返回请求方 access key（认证关闭时为空，供访问日志）。
@@ -55,12 +81,14 @@ public:
     static constexpr int kMaxClockSkewSec = 15 * 60;
 
 private:
+    // presigned=true 时把 X-Amz-Signature 排除出 canonical query（仅 presigned 请求）
     std::string signature_for(const http::HttpRequest& req, const std::string& secret_key,
                               const std::string& amz_date, const std::string& scope,
                               const std::string& signed_headers,
-                              const std::string& payload_hash) const;
+                              const std::string& payload_hash, bool presigned = false) const;
 
     std::shared_ptr<const ICredentialProvider> provider_;
+    mutable std::atomic<bool> require_auth_{false};
     std::string region_ = "us-east-1";
     std::string service_ = "s3";
 };

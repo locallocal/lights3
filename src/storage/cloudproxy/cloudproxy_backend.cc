@@ -554,7 +554,9 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     std::exception_ptr read_err;
     std::vector<std::byte> buf(64 * 1024);
     try {
-        while (sent < len) {
+        // 读到 EOF（n==0）为止而非 sent==len 即停：storage-backend 契约要求把 body
+        // 读干——验签装饰器（sha256/chunked 校验）挂在读满/EOF 处，读满自停会跳过校验
+        for (;;) {
             size_t n = co_await body.read(std::span(buf));
             // body.read 可能把协程恢复到 L1 驱动线程（beast 经对称转移回 strand）；
             // push 会因背压阻塞，必须回池线程再做，不得占住事件循环（§2.3）

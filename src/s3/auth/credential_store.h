@@ -104,6 +104,10 @@ public:
     // 立即做一次 .sys 增量同步：新增 AK 拉取入表，消失的动态凭证移除
     Task<void> sync_now();
 
+    // 防 fail-open 的清空保护被触发过（README §1.2）：热加载/同步试图把非空表
+    // 清成空表时保留旧表并置位；/-/readyz 据此转 503。成功的下一轮加载会复位
+    bool degraded() const { return degraded_.load(std::memory_order_relaxed); }
+
 private:
     CredentialStore() = default;
 
@@ -119,6 +123,11 @@ private:
 
     mutable std::shared_mutex mu_;
     std::map<std::string, CredentialInfo, std::less<>> creds_;
+    // 本实例刚吊销的 AK → 吊销时刻（mu_ 保护）。sync_now 的新增分支跳过近期
+    // tombstone：remove 的 delete_object 与 sync 的 list 交错时，list 可能仍见到
+    // 已吊销对象，无 tombstone 会把它重新拉回内存复活一个同步周期
+    std::map<std::string, std::chrono::steady_clock::time_point, std::less<>> tombstones_;
+    std::atomic<bool> degraded_{false};
     std::atomic<bool> sys_bucket_ready_{false};  // 惰性 create_bucket(".sys") 只做一次
 
     // credentials_file 的 mtime 快照（轮询变更检测；仅后台/手动 reload 线程触碰）

@@ -157,9 +157,10 @@ std::string read_all_body(http::BodyReader& r) {
     return out;
 }
 
-// 构造一个签名正确的 aws-chunked 请求；tamper 时篡改第二个 chunk 的数据
+// 构造一个签名正确的 aws-chunked 请求；tamper 时篡改第二个 chunk 的数据；
+// bad_final 时把 0 号尾块签名换成垃圾（末块校验路径）
 http::HttpRequest make_chunked_request(SigV4Authenticator& auth, const Credential& cred,
-                                       bool tamper) {
+                                       bool tamper, bool bad_final = false) {
     http::HttpRequest req;
     req.method = "PUT";
     req.raw_path = "/bkt/big";
@@ -182,7 +183,7 @@ http::HttpRequest make_chunked_request(SigV4Authenticator& auth, const Credentia
     };
     std::string s1 = chunk_sig(seed, "hello ");
     std::string s2 = chunk_sig(s1, "world");
-    std::string s3 = chunk_sig(s2, "");
+    std::string s3 = bad_final ? std::string(64, '0') : chunk_sig(s2, "");
     std::string body = "6;chunk-signature=" + s1 + "\r\nhello \r\n" +
                        "5;chunk-signature=" + s2 + "\r\n" + (tamper ? "worlx" : "world") +
                        "\r\n0;chunk-signature=" + s3 + "\r\n\r\n";
@@ -219,6 +220,138 @@ TEST(sigv4_chunked_rejects_tampered_chunk) {
         CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::SignatureDoesNotMatch));
     }
     CHECK(thrown);
+}
+
+// ---------- docs/code-review/s3.md 修复回归 ----------
+
+// 校验不绑 EOF：消费者只读满 length() 字节（cloudproxy 的消费模式）也必须检出 mismatch
+TEST(sigv4_payload_mismatch_detected_without_eof_read) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = "/bkt/x";
+    req.path = "/bkt/x";
+    req.headers.add("Host", "localhost");
+    req.body = std::make_unique<http::StringBodyReader>("actual body");
+    auth.sign(req, cfg.credentials[0], util::sha256_hex("declared body"));
+    auth.verify(req);
+
+    uint64_t len = *req.body->length();
+    std::vector<std::byte> buf(len);
+    bool thrown = false;
+    try {
+        size_t got = 0;
+        while (got < len)
+            got += sync_wait(req.body->read(std::span(buf.data() + got, len - got)));
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::XAmzContentSHA256Mismatch));
+    }
+    CHECK(thrown);
+}
+
+// chunked 同理：读满 decoded length 即触发末块/0 号尾块验签，无需再读一次 EOF
+TEST(sigv4_chunked_final_signature_checked_without_eof_read) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+
+    auto req = make_chunked_request(auth, cfg.credentials[0], false, /*bad_final=*/true);
+    auth.verify(req);
+    std::byte buf[64];
+    bool thrown = false;
+    size_t got = 0;
+    try {
+        while (got < 11) got += sync_wait(req.body->read(std::span(buf, 11 - got)));
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::SignatureDoesNotMatch));
+    }
+    CHECK(thrown);
+}
+
+// streaming 变体缺 x-amz-decoded-content-length → InvalidRequest（AWS 强制该头）
+TEST(sigv4_chunked_requires_decoded_length) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = "/bkt/big";
+    req.path = "/bkt/big";
+    req.headers.add("Host", "localhost");
+    auth.sign(req, cfg.credentials[0], "STREAMING-AWS4-HMAC-SHA256-PAYLOAD");
+    req.body = std::make_unique<http::StringBodyReader>("x");
+    CHECK_THROWS_S3(auth.verify(req), S3ErrorCode::InvalidRequest);
+}
+
+// 声明空摘要（sha256("")）+ 非空 body：body 不得脱离签名保护
+TEST(sigv4_empty_digest_with_nonempty_body_rejected) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = "/bkt/x";
+    req.path = "/bkt/x";
+    req.headers.add("Host", "localhost");
+    req.body = std::make_unique<http::StringBodyReader>("smuggled");
+    auth.sign(req, cfg.credentials[0], util::sha256_hex(""));
+    auth.verify(req);
+    bool thrown = false;
+    try {
+        read_all_body(*req.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::XAmzContentSHA256Mismatch));
+    }
+    CHECK(thrown);
+}
+
+// 大写 hex 摘要：签名按字面值参与，内容比对大小写不敏感 → 正确 body 应通过
+TEST(sigv4_uppercase_hex_digest_accepted) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+
+    std::string body = "hello upper";
+    std::string upper = util::sha256_hex(body);
+    for (char& c : upper) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = "/bkt/x";
+    req.path = "/bkt/x";
+    req.headers.add("Host", "localhost");
+    req.body = std::make_unique<http::StringBodyReader>(body);
+    auth.sign(req, cfg.credentials[0], upper);
+    auth.verify(req);
+    CHECK_EQ(read_all_body(*req.body), body);  // 不抛 = 校验通过
+}
+
+// host 不在 SignedHeaders → 拒绝（vhost 下不绑 host 的签名可换 Host 头跨桶重放）
+TEST(sigv4_requires_host_in_signed_headers) {
+    auto auth = SigV4Authenticator::build(vector_auth_config());
+    auth.clock = vector_time;
+    auto req = vector_request();
+    req.headers.set("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/"
+                    "aws4_request, SignedHeaders=x-amz-date, Signature=" +
+                        std::string(64, '0'));
+    CHECK_THROWS_S3(auth.verify(req), S3ErrorCode::AuthorizationHeaderMalformed);
+}
+
+// parse_amz_date 严格消费：缺 Z / 尾部垃圾 / 年份超界一律拒绝
+TEST(amz_date_strict_parse) {
+    CHECK(util::parse_amz_date("20260714T000000Z").has_value());
+    CHECK(!util::parse_amz_date("20260714T000000").has_value());
+    CHECK(!util::parse_amz_date("20260714T000000Zjunk").has_value());
+    CHECK(!util::parse_amz_date("99990714T000000Z").has_value());
 }
 
 TEST(sigv4_presigned_url_expiry) {

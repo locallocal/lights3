@@ -502,3 +502,123 @@ TEST(service_backend_metrics_appended) {
     CHECK(contains(metrics.small_body,
                    "lights3_duostore_gc_runs_total{backend=\"duo1\"} 2\n"));
 }
+
+// ---------- docs/code-review/s3.md 修复回归 ----------
+
+// ?versionId 显式拒绝：DELETE ?versionId= 不得静默删当前对象
+TEST(service_version_id_rejected) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "keep me")));
+
+    auto del = sync_wait(
+        svc.dispatch(make_req("DELETE", "/bkt/k", "", {{"versionId", "abc"}})));
+    CHECK_EQ(del.status, 501);
+    auto get = sync_wait(svc.dispatch(make_req("GET", "/bkt/k")));
+    CHECK_EQ(get.status, 200);  // 对象未被误删
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "",
+                                             {{"versionId", "abc"}}))).status, 501);
+}
+
+// HEAD + Range：与 GET 对齐返回 206/Content-Range；不可满足 → 416
+TEST(service_head_range) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
+
+    auto head = make_req("HEAD", "/bkt/k");
+    head.headers.add("Range", "bytes=2-5");
+    auto resp = sync_wait(svc.dispatch(std::move(head)));
+    CHECK_EQ(resp.status, 206);
+    CHECK_EQ(*resp.headers.get("Content-Range"), "bytes 2-5/10");
+    CHECK_EQ(*resp.content_length, uint64_t(4));
+
+    auto bad = make_req("HEAD", "/bkt/k");
+    bad.headers.add("Range", "bytes=99-");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 416);
+}
+
+// RFC 7232 优先级：前置条件（412）判定先于 Range（416）
+TEST(service_precondition_beats_range) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
+
+    auto req = make_req("GET", "/bkt/k");
+    req.headers.add("If-Match", "\"wrong-etag\"");
+    req.headers.add("Range", "bytes=99-");  // 本身会 416
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(req))).status, 412);
+}
+
+// If-Range：验证器命中才生效 Range，否则回整对象
+TEST(service_if_range) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto put = sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
+    std::string etag = *put.headers.get("ETag");
+
+    auto hit = make_req("GET", "/bkt/k");
+    hit.headers.add("Range", "bytes=2-5");
+    hit.headers.add("If-Range", etag);
+    auto r1 = sync_wait(svc.dispatch(std::move(hit)));
+    CHECK_EQ(r1.status, 206);
+    CHECK_EQ(body_of(r1), "2345");
+
+    auto miss = make_req("GET", "/bkt/k");
+    miss.headers.add("Range", "bytes=2-5");
+    miss.headers.add("If-Range", "\"stale-etag\"");
+    auto r2 = sync_wait(svc.dispatch(std::move(miss)));
+    CHECK_EQ(r2.status, 200);
+    CHECK_EQ(body_of(r2), "0123456789");
+}
+
+// max-keys 钳制到 1000（S3 语义静默钳制）；encoding-type 只认 url
+TEST(service_max_keys_clamp_and_encoding_type) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/a b.txt", "x")));
+
+    auto big = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"max-keys", "2147483647"}})));
+    CHECK_EQ(big.status, 200);
+    CHECK(contains(body_of(big), "<MaxKeys>1000</MaxKeys>"));
+
+    auto enc = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"encoding-type", "url"}})));
+    auto encb = body_of(enc);
+    CHECK(contains(encb, "<EncodingType>url</EncodingType>"));
+    CHECK(contains(encb, "<Key>a%20b.txt</Key>"));
+
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt", "",
+                                             {{"encoding-type", "zzz"}}))).status, 400);
+}
+
+// 对象键控制字符拒绝（0x01 会让 ListObjects XML 对合规解析器不可解析）
+TEST(service_key_control_chars_rejected) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto resp = sync_wait(svc.dispatch(make_req("PUT", "/bkt/a\x01b", "x")));
+    CHECK_EQ(resp.status, 400);
+    CHECK(contains(resp.small_body, "InvalidArgument"));
+}
+
+// /-/admin/credentials 前缀边界：credentialsXYZ 不得进管理面（应走数据面 → XML 错误）
+TEST(service_admin_prefix_boundary) {
+    auto svc = make_service_noauth();
+    auto resp = sync_wait(svc.dispatch(make_req("GET", "/-/admin/credentialsXYZ")));
+    CHECK(*resp.headers.get("Content-Type") == "application/xml");
+    CHECK(resp.status == 400 || resp.status == 404);
+}
+
+// IPv6 字面量 Host 不被 rfind(':') 截坏（vhost 配置下仍正常走 path-style）
+TEST(service_ipv6_host_literal) {
+    S3Service svc(make_router(), SigV4Authenticator::build(AuthConfig{}), "s3.local");
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto req = make_req("PUT", "/bkt/k", "v6 data");
+    req.headers.set("Host", "[::1]:9000");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(req))).status, 200);
+    auto get = make_req("GET", "/bkt/k");
+    get.headers.set("Host", "[::1]:9000");
+    auto resp = sync_wait(svc.dispatch(std::move(get)));
+    CHECK_EQ(body_of(resp), "v6 data");
+}

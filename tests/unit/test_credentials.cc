@@ -464,3 +464,62 @@ TEST(sys_bucket_hidden_from_data_plane) {
     auto listed = env.call("GET", "/", root);
     CHECK(listed.small_body.find(".sys") == std::string::npos);
 }
+
+// ---------- docs/code-review/s3.md / README §1.2 修复回归 ----------
+
+// fail-open 防护：纯文件形态下文件被清成空数组不得把凭证表清空（保留旧表 + degraded）
+TEST(credstore_file_reload_refuses_empty_table) {
+    namespace fs = std::filesystem;
+    auto path = fs::temp_directory_path() / "lights3-test-empty-creds.json";
+    std::ofstream(path) << R"({"credentials":[
+        {"access_key":"FILEAKAAA","secret_key":"file-secret-1"}]})";
+    AuthConfig cfg;  // 无静态凭证：认证完全依赖文件
+    cfg.credentials_file = path.string();
+    auto be = std::make_shared<storage::MemoryBackend>();
+    auto store = load_store(be, cfg);
+    CHECK(store->secret_for("FILEAKAAA").has_value());
+    CHECK(!store->degraded());
+
+    std::ofstream(path, std::ios::trunc) << R"({"credentials":[]})";
+    store->reload_file_now();
+    CHECK(store->secret_for("FILEAKAAA").has_value());  // 旧表保留，不匿名开放
+    CHECK(store->degraded());
+
+    // 文件恢复 → 正常应用并复位
+    std::ofstream(path, std::ios::trunc)
+        << R"({"credentials":[{"access_key":"FILEAKBBB","secret_key":"file-secret-2"}]})";
+    store->reload_file_now();
+    CHECK(!store->secret_for("FILEAKAAA"));
+    CHECK(store->secret_for("FILEAKBBB").has_value());
+    CHECK(!store->degraded());
+    fs::remove(path);
+}
+
+// remove 与 sync 竞态：tombstone 拒绝把刚吊销的凭证拉回内存
+TEST(credstore_sync_tombstone_blocks_revival) {
+    auto be = std::make_shared<storage::MemoryBackend>();
+    auto store = load_store(be, root_cfg());
+    auto c = sync_wait(store->generate("revoke-me"));
+    std::string obj_key = std::string(kCredPrefix) + c.access_key;
+
+    // 抓取落盘对象；remove 后放回存储，模拟 sync 的 list 在 delete 生效前
+    // 已看到该对象的交错时序
+    auto stream = sync_wait(be->get_object(kSysBucket, obj_key, std::nullopt));
+    std::string body;
+    {
+        std::byte buf[4096];
+        for (;;) {
+            size_t n = sync_wait(stream.body->read(std::span(buf)));
+            if (n == 0) break;
+            body.append(reinterpret_cast<const char*>(buf), n);
+        }
+    }
+    sync_wait(store->remove(c.access_key));
+    storage::ObjectMeta meta;
+    meta.content_type = "application/json";
+    http::StringBodyReader rb(body);
+    sync_wait(be->put_object(kSysBucket, obj_key, std::move(meta), rb));
+
+    sync_wait(store->sync_now());
+    CHECK(!store->secret_for(c.access_key));  // 吊销即刻生效，不复活
+}

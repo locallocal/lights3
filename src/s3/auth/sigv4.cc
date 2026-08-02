@@ -30,12 +30,13 @@ std::string lower(std::string s) {
     return s;
 }
 
-// 值 trim + 连续空白折叠（SigV4 canonical headers 规则）
+// 值 trim + 连续空白折叠（SigV4 canonical headers 规则；引号内的空白原样保留）
 std::string canonical_header_value(const std::string& v) {
     std::string out;
-    bool in_space = false;
+    bool in_space = false, in_quotes = false;
     for (char c : v) {
-        if (c == ' ' || c == '\t') {
+        if (c == '"') in_quotes = !in_quotes;
+        if (!in_quotes && (c == ' ' || c == '\t')) {
             in_space = true;
             continue;
         }
@@ -124,12 +125,14 @@ AuthFields parse_auth_header(const std::string& value) {
     return f;
 }
 
-// EOF 时校验 SHA256 的流式装饰器
+// 流式校验 SHA256 的装饰器。校验不绑 EOF：读满自报 length() 即比对（cloudproxy
+// 等消费者只读 length() 字节、不再多读一次到 EOF），EOF 路径兜底无长度的情况。
+// 比对失败抛出时最后一块数据尚未交付下游——配合 backend.h 的"抛异常不得提交"契约。
 class Sha256VerifyingReader final : public http::BodyReader {
 public:
     Sha256VerifyingReader(std::unique_ptr<http::BodyReader> inner, std::string expected_hex)
         : inner_(std::move(inner)),
-          expected_(std::move(expected_hex)),
+          expected_(lower(std::move(expected_hex))),  // AWS 摘要恒小写，容忍大写输入
           hash_(util::HashStream::Algo::Sha256) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {
@@ -137,20 +140,27 @@ public:
         size_t n = co_await inner_->read(buf);
         if (n > 0) {
             hash_.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
+            consumed_ += n;
+            if (auto len = inner_->length(); len && consumed_ >= *len) verify();
         } else {
-            done_ = true;
-            if (hash_.final_hex() != expected_)
-                throw S3Error(S3ErrorCode::XAmzContentSHA256Mismatch,
-                              "The provided 'x-amz-content-sha256' does not match what was computed.");
+            verify();
         }
         co_return n;
     }
     std::optional<uint64_t> length() const override { return inner_->length(); }
 
 private:
+    void verify() {
+        done_ = true;
+        if (hash_.final_hex() != expected_)
+            throw S3Error(S3ErrorCode::XAmzContentSHA256Mismatch,
+                          "The provided 'x-amz-content-sha256' does not match what was computed.");
+    }
+
     std::unique_ptr<http::BodyReader> inner_;
     std::string expected_;
     util::HashStream hash_;
+    uint64_t consumed_ = 0;
     bool done_ = false;
 };
 
@@ -210,6 +220,12 @@ public:
                 buf_.erase(0, n);
                 chunk_remaining_ -= n;
                 delivered_ += n;
+                // 校验不绑 EOF：交付满声明长度后同步走完末块验签、0 号尾块与
+                // trailer——只读 length() 字节即停的消费者（cloudproxy）同样执行
+                // 完整校验；失败时本次 n 字节不交付
+                if (chunk_remaining_ == 0 && decoded_length_ &&
+                    delivered_ == *decoded_length_)
+                    co_await drain_to_done();
                 co_return n;
             } else {  // Trailer：读掉剩余输入（trailer 头与结尾空行）
                 buf_.clear();
@@ -238,6 +254,25 @@ private:
         if (n == 0) co_return false;
         buf_.append(reinterpret_cast<const char*>(tmp), n);
         co_return true;
+    }
+
+    // 数据交付完毕后驱动状态机到 Done：验末块签名、解析 0 号尾块、消费 trailer。
+    // 若解析出的下一块仍带数据（实际数据多于声明长度）→ 长度对账失败
+    Task<void> drain_to_done() {
+        while (state_ != State::Done) {
+            if (state_ == State::Header) {
+                co_await parse_header();
+            } else if (state_ == State::Data) {
+                if (chunk_remaining_ != 0)
+                    throw S3Error(
+                        S3ErrorCode::InvalidRequest,
+                        "Decoded body size does not match x-amz-decoded-content-length.");
+                co_await finish_chunk();
+            } else {  // Trailer
+                buf_.clear();
+                if (!co_await fill()) state_ = State::Done;
+            }
+        }
     }
 
     // 返回 false 表示还需 fill；解析出 header 后切到 Data
@@ -355,20 +390,30 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
                                               const std::string& amz_date,
                                               const std::string& scope,
                                               const std::string& signed_headers,
-                                              const std::string& payload_hash) const {
-    // canonical headers（按 SignedHeaders 列表取值；列表须已排序）
+                                              const std::string& payload_hash,
+                                              bool presigned) const {
+    // canonical headers（按 SignedHeaders 列表取值；列表须已排序；
+    // 同名头按出现序逗号合并——SigV4 规则）
     std::string canon_headers;
     for (auto& name : split(signed_headers, ';')) {
-        auto v = req.headers.get(name);
-        if (!v)
+        std::string joined;
+        bool found = false;
+        for (auto& [k, v] : req.headers.items()) {
+            if (!http::HeaderMap::ieq(k, name)) continue;
+            if (found) joined += ",";
+            joined += canonical_header_value(v);
+            found = true;
+        }
+        if (!found)
             throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
                           "Signed header '" + name + "' is missing from the request.");
-        canon_headers += name + ":" + canonical_header_value(*v) + "\n";
+        canon_headers += name + ":" + joined + "\n";
     }
 
     std::string canonical_uri = req.raw_path.empty() ? "/" : req.raw_path;
-    std::string presigned_exclude =
-        req.query_has("X-Amz-Signature") ? "X-Amz-Signature" : "";
+    // 仅 presigned 请求把 X-Amz-Signature 排除出 canonical query；header 认证的
+    // 请求带这个 query 参数时按普通参数参与签名（与 AWS 一致）
+    std::string presigned_exclude = presigned ? "X-Amz-Signature" : "";
     std::ostringstream canonical;
     canonical << req.method << "\n"
               << canonical_uri << "\n"
@@ -414,6 +459,15 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
                   ")");
     if (f.amz_date.substr(0, 8) != f.date)
         malformed("credential date does not match x-amz-date");
+
+    // host 必须在 SignedHeaders 内（AWS 规定；vhost 下 bucket 取自 Host，
+    // 不绑 host 的签名换个 Host 头即可跨桶重放）——presigned 同样强制
+    {
+        bool host_signed = false;
+        for (auto& n : split(f.signed_headers, ';'))
+            if (n == "host") host_signed = true;
+        if (!host_signed) malformed("SignedHeaders must include 'host'");
+    }
 
     auto t = util::parse_amz_date(f.amz_date);
     if (!t) malformed("cannot parse x-amz-date");
@@ -471,8 +525,8 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
     }
 
     std::string scope = f.date + "/" + f.region + "/" + f.service + "/aws4_request";
-    std::string expect =
-        signature_for(req, *secret, f.amz_date, scope, f.signed_headers, payload_hash);
+    std::string expect = signature_for(req, *secret, f.amz_date, scope, f.signed_headers,
+                                       payload_hash, f.presigned);
     if (!constant_time_eq(expect, f.signature))
         throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
                       "The request signature we calculated does not match the signature you "
@@ -480,20 +534,26 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
 
     // 流式 payload 校验（docs/s3-protocol.md §3.2/§3.3）
     if ((chunked_signed || chunked_unsigned) && req.body) {
-        std::optional<uint64_t> decoded_len;
-        if (auto dl = req.headers.get("x-amz-decoded-content-length")) {
-            try {
-                decoded_len = std::stoull(*dl);
-            } catch (...) {
-                throw S3Error(S3ErrorCode::InvalidRequest,
-                              "Invalid x-amz-decoded-content-length.");
-            }
+        // AWS 对 streaming 变体强制该头；缺失时 decoded 长度未知，"读满即校验"
+        // 无从触发，也无法向后端报告长度
+        auto dl = req.headers.get("x-amz-decoded-content-length");
+        if (!dl)
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "Missing required header: x-amz-decoded-content-length");
+        uint64_t decoded_len = 0;
+        try {
+            decoded_len = std::stoull(*dl);
+        } catch (...) {
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "Invalid x-amz-decoded-content-length.");
         }
         req.body = std::make_unique<ChunkedSigV4BodyReader>(
             std::move(req.body), chunked_signed,
             derive_signing_key(*secret, f.date, f.region, f.service), f.signature,
             f.amz_date, scope, decoded_len);
-    } else if (is_hex_digest(payload_hash) && payload_hash != kEmptySha256 && req.body) {
+    } else if (is_hex_digest(payload_hash) && req.body) {
+        // 声明空摘要（sha256("")）也照样包校验：不查实际 body 是否为空的话，
+        // 空摘要 + 非空 body 会把 body 脱出签名保护
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);
     }
     return f.access_key;

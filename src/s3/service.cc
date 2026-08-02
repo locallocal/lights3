@@ -35,6 +35,42 @@ http::HttpResponse error_response(const S3Error& e, const std::string& request_i
     return resp;
 }
 
+// InternalError/SlowDown 的原始文案可能含上游 endpoint 等内部拓扑（cloudproxy
+// 传输错误直接拼 endpoint）：原文只进日志（经 request_id 关联），响应体固定文案
+S3Error public_error(const S3Error& e, const std::string& request_id,
+                     const http::HttpRequest& req) {
+    if (e.code == S3ErrorCode::InternalError) {
+        LOG_ERROR("req {} {} {} internal error: {}", request_id, req.method, req.path,
+                  e.message);
+        return S3Error(e.code, "We encountered an internal error. Please try again.");
+    }
+    if (e.code == S3ErrorCode::SlowDown) {
+        LOG_WARN("req {} {} {} slow down: {}", request_id, req.method, req.path, e.message);
+        return S3Error(e.code, "Please reduce your request rate.");
+    }
+    return e;
+}
+
+// request_start/request_end 的 RAII 配对：请求协程被驱动提前销毁（客户端断连、
+// 关停）时也执行 request_end，inflight 计数不泄漏；该路径以 499 记入状态分布
+struct MetricsEndGuard {
+    Metrics& m;
+    std::string method;
+    std::chrono::steady_clock::time_point start;
+    bool done = false;
+
+    ~MetricsEndGuard() {
+        if (!done) finish(499);
+    }
+    double finish(int status) {
+        done = true;
+        double secs =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        m.request_end(method, status, secs);
+        return secs;
+    }
+};
+
 // 明确不支持的子资源（docs/s3-protocol.md §1）：显式 501，避免落进 List/Get 兜底造成误答
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",       "website",
@@ -42,7 +78,7 @@ constexpr std::string_view kUnsupportedSubresources[] = {
     "legal-hold",  "retention",    "torrent",        "replication",    "logging",
     "notification", "requestPayment", "accelerate",  "analytics",      "inventory",
     "intelligent-tiering", "metrics", "ownershipControls", "publicAccessBlock",
-    "restore",     "select",       "policyStatus",
+    "restore",     "select",       "policyStatus",   "versionId",
 };
 
 void reject_unsupported_subresource(const http::HttpRequest& req) {
@@ -62,7 +98,13 @@ std::pair<std::string, std::string> S3Service::resolve_address(
     if (!base_domain_.empty()) {
         if (auto host = req.headers.get("Host")) {
             std::string h = *host;
-            if (auto colon = h.rfind(':'); colon != std::string::npos) h.resize(colon);
+            // 去端口：Host 可为 "name:port" 或 "[v6]:port"，IPv6 字面量内的 ':'
+            // 不是端口分隔符（rfind 会把 "[::1]" 截成 "[:"）
+            if (!h.empty() && h.front() == '[') {
+                if (auto rb = h.find(']'); rb != std::string::npos) h.resize(rb + 1);
+            } else if (auto colon = h.rfind(':'); colon != std::string::npos) {
+                h.resize(colon);
+            }
             std::string suffix = "." + base_domain_;
             if (h.size() > suffix.size() && h.ends_with(suffix)) {
                 std::string bucket = h.substr(0, h.size() - suffix.size());
@@ -82,6 +124,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     bool head = req.method == "HEAD";
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
+    MetricsEndGuard mguard{metrics_, req.method, start};
 
     std::string access_key;
     std::string bucket, key;
@@ -97,7 +140,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
         } else if (req.path == "/-/readyz") {
             resp = co_await readyz();
-        } else if (req.path.rfind("/-/admin/credentials", 0) == 0) {
+        } else if (req.path == "/-/admin/credentials" ||
+                   req.path.rfind("/-/admin/credentials/", 0) == 0) {
+            // 边界必须落在 '/'：裸前缀匹配会把 /-/admin/credentialsXYZ 也放进管理面
             resp = co_await admin_credentials(req, access_key);
         } else {
             access_key = auth_.verify(req);
@@ -124,7 +169,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         }
     } catch (const S3Error& e) {
         metrics_.s3_error(wire_code(e.code));
-        resp = error_response(e, ctx.request_id, head);
+        resp = error_response(public_error(e, ctx.request_id, req), ctx.request_id, head);
     } catch (const std::exception& e) {
         LOG_ERROR("req {} {} {} internal error: {}", ctx.request_id, req.method, req.path,
                   e.what());
@@ -137,8 +182,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     resp.headers.set("Server", "lights3");
 
     // 访问日志（docs/s3-protocol.md §7）：一行结构化，字段序对齐 S3 access log 精简版
-    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    metrics_.request_end(req.method, resp.status, secs);
+    double secs = mguard.finish(resp.status);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
     LOG_INFO("access {} {} {} {} {} {} {}ms", ctx.request_id,
              access_key.empty() ? "-" : access_key, req.method, req.path, resp.status, bytes,
@@ -259,6 +303,30 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
 Task<http::HttpResponse> S3Service::readyz() {
     http::HttpResponse resp;
     resp.headers.set("Content-Type", "text/plain");
+
+    // 端点匿名可达而探测对每个后端发真实调用（cloudproxy 是计费的远端
+    // ListBuckets）：结果短缓存 + 单飞，匿名循环打不出放大流量
+    constexpr auto kTtl = std::chrono::seconds(5);
+    {
+        std::lock_guard lk(readyz_mu_);
+        auto now = std::chrono::steady_clock::now();
+        bool fresh = readyz_status_ != 0 && now - readyz_at_ < kTtl;
+        if (fresh || readyz_inflight_) {
+            resp.status = readyz_status_ != 0 ? readyz_status_ : 503;
+            resp.small_body = readyz_status_ != 0 ? readyz_body_ : "probing\n";
+            co_return resp;
+        }
+        readyz_inflight_ = true;
+    }
+    // 协程被提前销毁（断连）也要复位单飞标记，否则 readyz 永久返回旧值
+    struct InflightReset {
+        S3Service* s;
+        ~InflightReset() {
+            std::lock_guard lk(s->readyz_mu_);
+            s->readyz_inflight_ = false;
+        }
+    } inflight_reset{this};
+
     std::string report;
     bool ok = true;
     for (auto& [name, backend] : router_.backends()) {
@@ -267,8 +335,23 @@ Task<http::HttpResponse> S3Service::readyz() {
             report += name + " ok\n";
         } catch (const std::exception& e) {
             ok = false;
-            report += name + " FAIL: " + e.what() + "\n";
+            // 异常文本可能含上游 endpoint 等拓扑：只进日志，不回给匿名调用方
+            LOG_WARN("readyz: backend {} probe failed: {}", name, e.what());
+            report += name + " FAIL\n";
         }
+    }
+    // 凭证表清空防护触发过（fail-open 防护，README §1.2）：报不健康引导运维介入
+    if (cred_store_ && cred_store_->degraded()) {
+        ok = false;
+        report += "credential-store DEGRADED\n";
+    }
+
+    {
+        std::lock_guard lk(readyz_mu_);
+        readyz_inflight_ = false;
+        readyz_at_ = std::chrono::steady_clock::now();
+        readyz_status_ = ok ? 200 : 503;
+        readyz_body_ = report;
     }
     resp.status = ok ? 200 : 503;
     resp.small_body = std::move(report);

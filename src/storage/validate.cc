@@ -25,8 +25,12 @@ void validate_object_key(std::string_view k) {
         throw S3Error(S3ErrorCode::KeyTooLongError, "Object key is empty or too long.");
     if (k.front() == '/')
         throw S3Error(S3ErrorCode::InvalidArgument, "Object key must not start with '/'.");
-    if (k.find('\0') != std::string_view::npos)
-        throw S3Error(S3ErrorCode::InvalidArgument, "Object key contains NUL.");
+    // 控制字符（含 NUL）拒绝：XML 1.0 连数值实体都无法表示 0x00–0x1F（除 \t\n\r），
+    // 允许的话一个对象就能让整个 ListObjects 响应对合规解析器不可解析
+    for (unsigned char c : k)
+        if (c < 0x20 || c == 0x7f)
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Object key contains control characters.");
     // 拒绝路径逃逸段与空段（LocalFs 直接映射为路径）
     size_t start = 0;
     while (start <= k.size()) {

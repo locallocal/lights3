@@ -89,6 +89,10 @@ public:
     void gauge_callback(const std::string& name, const std::string& help,
                         std::function<double()> fn, const MetricLabels& labels = {});
 
+    // 撤销某个标签值下的全部序列（含回调 gauge）。用于装配失败回滚：孤儿实例的
+    // 回调闭包会持着已弃用对象的 shared_ptr，留在表里会一直渲染陈旧值
+    void remove_labeled(const std::string& label_key, const std::string& label_value);
+
     // Prometheus 文本格式；家族按名字序、子实例按标签串序，输出稳定可断言
     std::string render() const;
 

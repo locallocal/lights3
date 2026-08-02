@@ -76,7 +76,10 @@ payload 校验、后端 close 不被调用、请求取消是死代码）。
 
 **建议**：`percent_decode(s, bool plus_is_space)`，path / copy-source / SigV4 canonical query 传 false，仅真正的 form 解析传 true。
 
-### 1.4 [高 · ✅已复核] 后端 `close()` 生产环境从不调用；关停顺序 close 晚于 `pool->join()`
+### 1.4 [高 · ✅已复核 · ✅已修复] 后端 `close()` 生产环境从不调用；关停顺序 close 晚于 `pool->join()`
+
+> **2026-08-02 已随 storage 评审修复落地**：`main.cc` 在 `pool->join()` 之前遍历
+> 全部后端 `sync_wait(backend->close())`（单个失败只记 ERROR 不阻断其余）。
 
 **位置**：`src/main.cc:90-96`（`server->run()` 返回 → `cred_store->shutdown_background()` → `pool->join()`，注释称"各后端冲刷"实际只有 join）；backends 由 service/router 持有，只在 main 返回（join 之后）走析构兜底。`DuoStoreBackend::~`（跳过 `data_->close()` 的 active pack 封存/rados flush）、`TieredBackend::~`（少 `save_atime_snapshot()`）。
 

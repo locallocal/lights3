@@ -117,6 +117,37 @@ void MetricsRegistry::gauge_callback(const std::string& name, const std::string&
     family_of(name, Kind::kGauge, help).callbacks[label_str(labels)] = std::move(fn);
 }
 
+void MetricsRegistry::remove_labeled(const std::string& label_key,
+                                     const std::string& label_value) {
+    std::string needle = label_key + "=\"";
+    append_escaped(needle, label_value);
+    needle += '"';
+    auto hit = [&](const std::string& ls) {
+        // 标签串形如 a="1",backend="x"：匹配须落在分隔边界上，防 backend="x" 命中
+        // backend="xy" 这类前缀重名
+        for (size_t at = ls.find(needle); at != std::string::npos;
+             at = ls.find(needle, at + 1)) {
+            bool left_ok = at == 0 || ls[at - 1] == ',';
+            size_t end = at + needle.size();
+            bool right_ok = end == ls.size() || ls[end] == ',';
+            if (left_ok && right_ok) return true;
+        }
+        return false;
+    };
+    std::lock_guard lk(m_);
+    for (auto& [name, fam] : families_) {
+        (void)name;
+        auto prune = [&](auto& map) {
+            for (auto it = map.begin(); it != map.end();)
+                it = hit(it->first) ? map.erase(it) : std::next(it);
+        };
+        prune(fam.counters);
+        prune(fam.gauges);
+        prune(fam.histograms);
+        prune(fam.callbacks);
+    }
+}
+
 std::string MetricsRegistry::render() const {
     // 回调 gauge 在锁外求值：回调可能耗时甚至反过来触碰注册表（锁内调用会死锁）。
     // 先持锁抄回调清单 → 锁外求值 → 再持锁渲染，同名样本紧跟其 # TYPE 行

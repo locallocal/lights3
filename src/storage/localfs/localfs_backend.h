@@ -5,7 +5,9 @@
 
 #include <filesystem>
 #include <memory>
+#include <vector>
 
+#include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "storage/backend.h"
 #include "storage/localfs/fs_util.h"
@@ -65,12 +67,20 @@ protected:
     void require_bucket(std::string_view bucket) const;      // 不存在抛 NoSuchBucket
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
 
+    // 提交段的 per-key 串行化（striped，同 tiered 的 key_lock）：sidecar 与数据文件
+    // 是两次 rename，不加锁时并发 PUT 同 key 可交错成"数据=A、sidecar(etag)=B"的
+    // 撕裂对象。只护提交段，body 读写仍全并发；xlocalfs 继承同一把锁
+    static constexpr size_t kLockStripes = 64;
+    AsyncSemaphore& commit_lock(std::string_view bucket, std::string_view key);
+
     std::filesystem::path root_;
     std::filesystem::path staging_;
     std::shared_ptr<ThreadPool> pool_;
 
 private:
     void cleanup_stale_uploads();  // 启动时清理超期（kMpuTtl）的 mpu 目录
+
+    std::vector<std::unique_ptr<AsyncSemaphore>> commit_locks_;
 };
 
 }  // namespace lights3::storage

@@ -2,12 +2,14 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/xattr.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -47,6 +49,39 @@ void throw_errno(const std::string& what) {
     throw S3Error(S3ErrorCode::InternalError, what + ": " + std::strerror(errno));
 }
 
+// 持久性开关（docs/storage-backend.md §3.1）：默认开——已 200 应答的写掉电不丢是
+// S3 语义的一部分。吞吐优先的部署可用 LIGHTS3_FSYNC=0 关掉（测试夹具亦用它提速）
+bool fsync_enabled() {
+    static const bool on = [] {
+        const char* v = std::getenv("LIGHTS3_FSYNC");
+        return !(v && (std::string_view(v) == "0" || std::string_view(v) == "false"));
+    }();
+    return on;
+}
+
+void fsync_file(int fd) {
+    if (!fsync_enabled()) return;
+    if (::fdatasync(fd) != 0 && errno != EINVAL)  // EINVAL: 目标 fs 不支持，忽略
+        throw_errno("fdatasync");
+}
+
+void fsync_dir(const fs::path& dir) {
+    if (!fsync_enabled()) return;
+    // 目录项落盘：rename 本身只保证原子，不保证父目录已持久化
+    int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
+    if (fd < 0) return;  // 目录不可读不该拖垮写路径
+    ::fsync(fd);
+    ::close(fd);
+}
+
+void fsync_path(const fs::path& path) {
+    if (!fsync_enabled()) return;
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return;
+    ::fdatasync(fd);
+    ::close(fd);
+}
+
 void write_tsv(const fs::path& dest, const fs::path& tmp_dir,
                const std::vector<std::pair<std::string, std::string>>& kv) {
     fs::path tmp = tmp_dir / ("meta-" + next_tmp_name());
@@ -56,12 +91,14 @@ void write_tsv(const fs::path& dest, const fs::path& tmp_dir,
         for (auto& [k, v] : kv) f << k << "\t" << v << "\n";
         if (!f.flush()) throw_errno("write meta");
     }
+    fsync_path(tmp);  // 内容先落盘，再让 rename 把它接进目录树
     std::error_code ec;
     fs::rename(tmp, dest, ec);
     if (ec) {
         fs::remove(tmp, ec);
         throw S3Error(S3ErrorCode::InternalError, "rename meta file failed");
     }
+    fsync_dir(dest.parent_path());
 }
 
 std::vector<std::pair<std::string, std::string>> read_tsv(const fs::path& path) {
@@ -76,10 +113,8 @@ std::vector<std::pair<std::string, std::string>> read_tsv(const fs::path& path) 
     return out;
 }
 
-// tier=local 时不写 tier/size/remote.* 键：与存量 sidecar 格式保持一致
-static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
-                          const fs::path& staging_dir,
-                          const TierInfo& tier = TierInfo{}) {
+std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
+                                                         const TierInfo& tier) {
     std::vector<std::pair<std::string, std::string>> kv{{"etag", meta.etag},
                                                         {"content_type", meta.content_type}};
     if (tier.tier != Tier::kLocal) {
@@ -89,7 +124,39 @@ static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
         kv.emplace_back("remote.at", tier.remote_at);
     }
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
-    write_tsv(sidecar, staging_dir, kv);
+    return kv;
+}
+
+std::string kv_to_tsv(const std::vector<std::pair<std::string, std::string>>& kv) {
+    std::string out;
+    for (auto& [k, v] : kv) out += k + "\t" + v + "\n";
+    return out;
+}
+
+// tier=local 时不写 tier/size/remote.* 键：与存量 sidecar 格式保持一致
+static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
+                          const fs::path& staging_dir,
+                          const TierInfo& tier = TierInfo{}) {
+    write_tsv(sidecar, staging_dir, meta_kv(meta, tier));
+}
+
+// 元数据随数据文件一同原子提交（docs/storage-backend.md §3.1）：把 sidecar 的 TSV
+// 同时写进数据文件的扩展属性，rename 一次即同时提交数据与元数据——sidecar 与数据
+// 是两次 rename，中间崩溃会留下"新 etag + 旧数据"（或反之）的不一致对象，而 xattr
+// 随 inode 走，绝不可能与它所描述的数据错位。sidecar 继续写（外部工具/存量兼容，
+// 也是不支持 xattr 的文件系统上的唯一来源）。
+// 失败（ENOTSUP/E2BIG 等）静默降级为 sidecar-only，不拖垮写路径
+void set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier) {
+    std::string blob = kv_to_tsv(meta_kv(meta, tier));
+    ::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0);
+}
+
+// 返回 nullopt = 无 xattr（存量对象 / 不支持的文件系统）→ 调用方回落 sidecar
+std::optional<std::string> get_meta_xattr(const fs::path& path) {
+    char buf[8192];
+    ssize_t n = ::getxattr(path.c_str(), kMetaXattr, buf, sizeof(buf));
+    if (n < 0) return std::nullopt;
+    return std::string(buf, static_cast<size_t>(n));
 }
 
 void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
@@ -103,32 +170,30 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "Object key conflicts with an existing key prefix", std::string(key));
 
-    write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
+    // 顺序：先数据后 sidecar（与 commit_cached 一致）。反序（旧实现）的崩溃窗口是
+    // "sidecar 新 etag/size + 数据仍旧"——GET 返回的 body 与 ETag 不符，静默损坏；
+    // 本序的窗口是"数据新 + sidecar 旧"，读到的是旧 etag 配新 body，同样不一致但
+    // 有 GET 时校验的余地，且覆盖写场景下更常见的是两者皆新。调用方持 per-key 锁
+    // 保证这一对 rename 之间无并发写者插入（撕裂由锁消除，此处只余单写者崩溃窗口）
+    // 元数据先进数据文件的 xattr：这一次 rename 即同时提交数据与元数据，
+    // 崩溃不可能留下"新 etag 配旧数据"的不一致对象（sidecar 随后写，仅供
+    // 外部工具与不支持 xattr 的文件系统回落）
+    set_meta_xattr(tmp.path, meta, TierInfo{});
+    fsync_path(tmp.path);  // 数据内容先落盘，再接进目录树
     fs::rename(tmp.path, dest, ec);
-    if (ec) {
-        fs::remove(dest.string() + kSidecarSuffix, ec);
-        throw S3Error(S3ErrorCode::InternalError, "rename object failed");
-    }
+    if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
     tmp.committed = true;
+    fsync_dir(dest.parent_path());
+    write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
 }
 
 // ---- 分层存储扩展（docs/tiered-storage.md §4）----
 
-ObjectMeta load_object_meta(const fs::path& data_path, std::string key, TierInfo* tier_out) {
-    ObjectMeta meta;
-    meta.key = std::move(key);
-    struct stat st{};
-    if (::stat(data_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-        throw s3::S3Error(s3::S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                          meta.key);
-    meta.size = static_cast<uint64_t>(st.st_size);
-    meta.last_modified = std::chrono::system_clock::from_time_t(st.st_mtime);
-
-    TierInfo tier;
-    uint64_t sidecar_size = 0;
-    std::ifstream f(data_path.string() + kSidecarSuffix, std::ios::binary);
+// 元数据 TSV 解析（xattr 与 sidecar 同一格式）
+static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier,
+                           uint64_t& declared_size) {
     std::string line;
-    while (std::getline(f, line)) {
+    while (std::getline(in, line)) {
         auto tab = line.find('\t');
         if (tab == std::string::npos) continue;
         std::string k = line.substr(0, tab), v = line.substr(tab + 1);
@@ -137,13 +202,40 @@ ObjectMeta load_object_meta(const fs::path& data_path, std::string key, TierInfo
         else if (k == "tier") tier.tier = (v == "remote") ? Tier::kRemote
                                           : (v == "cached") ? Tier::kCached
                                                             : Tier::kLocal;
-        else if (k == "size") std::from_chars(v.data(), v.data() + v.size(), sidecar_size);
+        else if (k == "size") std::from_chars(v.data(), v.data() + v.size(), declared_size);
         else if (k == "remote.etag") tier.remote_etag = v;
         else if (k == "remote.at") tier.remote_at = v;
         else if (k.rfind("meta.", 0) == 0) meta.user_meta[k.substr(5)] = v;
     }
-    // stub 数据文件为 0 长度，真实大小以 sidecar 为准；local 沿用 stat（兼容存量）
-    if (tier.tier != Tier::kLocal) meta.size = sidecar_size;
+}
+
+ObjectMeta load_object_meta(const fs::path& data_path, std::string key, TierInfo* tier_out) {
+    struct stat st{};
+    if (::stat(data_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+        throw s3::S3Error(s3::S3ErrorCode::NoSuchKey, "The specified key does not exist", key);
+    return load_object_meta_stat(data_path, std::move(key), st, tier_out);
+}
+
+ObjectMeta load_object_meta_stat(const fs::path& data_path, std::string key,
+                                 const struct stat& st, TierInfo* tier_out) {
+    ObjectMeta meta;
+    meta.key = std::move(key);
+    meta.size = static_cast<uint64_t>(st.st_size);
+    meta.last_modified = std::chrono::system_clock::from_time_t(st.st_mtime);
+
+    TierInfo tier;
+    uint64_t declared_size = 0;
+    // xattr 优先：它与数据同一次 rename 提交，绝不会描述别的 inode 的内容；
+    // 缺失（存量对象 / 文件系统不支持 / tiered 的 stub-cached 提交）回落 sidecar
+    if (auto blob = get_meta_xattr(data_path)) {
+        std::istringstream in(*blob);
+        parse_meta_tsv(in, meta, tier, declared_size);
+    } else {
+        std::ifstream f(data_path.string() + kSidecarSuffix, std::ios::binary);
+        parse_meta_tsv(f, meta, tier, declared_size);
+    }
+    // stub 数据文件为 0 长度，真实大小以元数据为准；local 沿用 stat（兼容存量）
+    if (tier.tier != Tier::kLocal) meta.size = declared_size;
     if (tier_out) *tier_out = tier;
     return meta;
 }

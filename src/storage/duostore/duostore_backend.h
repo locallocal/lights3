@@ -35,24 +35,39 @@ namespace duostore {
 // 单进程独占 root 是既有前提，进程内计数即完全正确；shared_ptr 共享给 reader——
 // ObjectStream 会随 HTTP 响应逃逸出 backend 生命周期，pin 表不得依赖 backend 存活
 struct PinTable {
-    // 逐 extent 计一次（同 file_id 多 extent 多次计入），pin/unpin 按同一 id 列表对称
-    std::vector<uint64_t> pin(std::span<const Extent> extents);
-    void unpin(const std::vector<uint64_t>& ids);
-    // 单 id 变体（写侧 pin，§9.3）：ChunkWriter 分配即 pin，meta 提交/丢弃后解除
+    // pin 的键是 (是否 pack, file_id)：chunk/rados 共号段，pack 用独立计数器——
+    // 两个空间的数值必然重叠，共用一张裸 id 表会让"某 chunk 在读"误判成"同号
+    // pack 被 pin"（反之亦然），GC 保守顺延回收。分表后无此假阳性
+    struct Handle {
+        bool is_pack = false;
+        uint64_t file_id = 0;
+    };
+
+    // 逐 extent 计一次（同 file_id 多 extent 多次计入），pin/unpin 按同一句柄列表对称
+    std::vector<Handle> pin(std::span<const Extent> extents);
+    void unpin(const std::vector<Handle>& handles);
+    // 单 id 变体（写侧 pin，§9.3）：ChunkWriter 分配即 pin，meta 提交/丢弃后解除。
+    // 写侧只产出 chunk/rados（pack 追加不分配独立 file），故恒在 chunk 空间
     void pin_id(uint64_t file_id);
     void unpin_id(uint64_t file_id);
     bool any_pinned(std::span<const Extent> extents);
-    bool pinned(uint64_t file_id);
+    bool pinned_chunk(uint64_t file_id);  // 孤儿扫描（chunk/rados 实体）
+    bool pinned_pack(uint64_t pack_id);   // 空 pack 整删
 
 private:
     // file_id 哈希分片：GET 热路径的 pin/unpin 与 GC 批量 any_pinned 不共抢一把锁
     static constexpr size_t kShards = 16;
     struct Shard {
         std::mutex m;
-        std::unordered_map<uint64_t, int> refs;
+        std::unordered_map<uint64_t, int> chunk_refs;
+        std::unordered_map<uint64_t, int> pack_refs;
     };
     Shard& shard_of(uint64_t id) { return shards_[id % kShards]; }
     std::array<Shard, kShards> shards_;
+
+    void pin_key(bool is_pack, uint64_t id);
+    void unpin_key(bool is_pack, uint64_t id);
+    bool pinned_key(bool is_pack, uint64_t id);
 };
 
 // run_gc_once() 的回收统计（§9.1；测试断言与后续指标接入用）

@@ -1187,6 +1187,61 @@ TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
     sync_wait(h.b->close());
 }
 
+// 混合对象（chunk + pack extent）压实后 chunk 的 refs 必须留存（storage.md 高危
+// 第一条）：swap_extents 的 to/from 共享未迁移的 chunk，整加再整删在 refs 的
+// last-wins 语义下净效果是删除 → 孤儿扫描随后 unlink 活数据
+TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "compact-mixed");
+    cfg.pack_max_size = 1400;
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+
+    // 混合 MPU：part1 大（走 chunk）、part2 小（走 pack）
+    std::string big = patterned(6000), small = patterned(600);
+    auto id = sync_wait(h.b->create_multipart("bkt", "mixed", {}));
+    std::string e1, e2;
+    {
+        http::StringBodyReader b1(big);
+        e1 = sync_wait(h.b->upload_part("bkt", "mixed", id, 1, b1)).etag;
+        http::StringBodyReader b2(small);
+        e2 = sync_wait(h.b->upload_part("bkt", "mixed", id, 2, b2)).etag;
+    }
+    std::vector<PartInfo> parts = {{1, e1}, {2, e2}};
+    sync_wait(h.b->complete_multipart("bkt", "mixed", id, parts));
+
+    auto rec = h.meta->get_object("bkt", "mixed");
+    CHECK(rec.has_value());
+    std::vector<uint64_t> chunk_ids;
+    bool has_pack = false;
+    for (const auto& e : rec->data.extents) {
+        if (e.kind == Extent::Kind::kPack) has_pack = true;
+        else chunk_ids.push_back(e.file_id);
+    }
+    CHECK(has_pack && !chunk_ids.empty());  // 确实是混合对象
+    for (uint64_t cid : chunk_ids) CHECK(h.meta->chunk_referenced(cid));
+
+    // 让该 pack 存活率跌破阈值 → 压实迁移那一个 pack extent
+    put(*h.b, "bkt", "f1", patterned(600));
+    put(*h.b, "bkt", "f2", patterned(600));  // 触发轮转封存
+    sync_wait(h.b->delete_object("bkt", "f1"));
+    auto st = sync_wait(h.b->run_gc_once());
+    CHECK(st.records_migrated >= uint64_t(1));
+
+    // 未迁移的 chunk 仍被对象引用：refs 表项不得被 swap 抹掉
+    auto after = h.meta->get_object("bkt", "mixed");
+    CHECK(after.has_value());
+    for (uint64_t cid : chunk_ids) CHECK(h.meta->chunk_referenced(cid));
+
+    // 孤儿扫描不得把它们当无引用文件删掉，对象内容仍逐字节正确
+    auto os = sync_wait(h.b->run_orphan_scan_once());
+    CHECK_EQ(os.orphans_removed, uint64_t(0));
+    auto g = sync_wait(h.b->get_object("bkt", "mixed", std::nullopt));
+    CHECK_EQ(read_all(*g.body), big + small);
+    sync_wait(h.b->close());
+}
+
 // rewrite_pack 顺扫语义（store 级，无迁移回调）：统计、file_size 回报、torn tail
 // 静默止扫（重启弃用的预期形态）、magic 损坏响亮止扫
 TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {

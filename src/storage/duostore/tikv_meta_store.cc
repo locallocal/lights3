@@ -166,7 +166,10 @@ auto TikvMetaStore::guarded(const char* what, Fn&& fn) {
     } catch (const S3Error&) {
         throw;
     } catch (const TikvUndetermined& u) {
-        throw_internal(what, "commit result undetermined: " + u.what);
+        // 可区分类型上抛：事务可能已生效，调用方不得兜底物理删数据（§4.6）
+        LOG_ERROR("duostore tikv meta: {}: commit result undetermined: {}", what, u.what);
+        throw UndeterminedCommit(std::string("duostore tikv meta: ") + what +
+                                 ": commit result undetermined: " + u.what);
     } catch (const pingcap::Exception& e) {
         throw_internal(what, e.displayText());
     }
@@ -901,8 +904,11 @@ bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k,
         rec.data = to;
         rec.version += 1;
         muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});
-        mut_refs(muts, to, /*add=*/true, okey);
-        mut_refs(muts, from, /*add=*/false, {});
+        // refs 按差集操作（meta_util.h refs_delta）：同 key 多 mutation 在
+        // TiKV 是"后者胜"，整加再整删会抹掉未迁移 chunk 的 refs → 误删活数据
+        auto rd = refs_delta(from, to);
+        mut_refs(muts, rd.added, /*add=*/true, okey);
+        mut_refs(muts, rd.removed, /*add=*/false, {});
         mut_pack_delta(muts, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
         mut_pack_delta(muts, from, -1);
         return true;

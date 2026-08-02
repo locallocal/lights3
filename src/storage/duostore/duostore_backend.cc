@@ -38,46 +38,54 @@ using namespace duostore;
 
 namespace duostore {
 
-std::vector<uint64_t> PinTable::pin(std::span<const Extent> extents) {
-    std::vector<uint64_t> ids;
-    ids.reserve(extents.size());
+std::vector<PinTable::Handle> PinTable::pin(std::span<const Extent> extents) {
+    std::vector<Handle> handles;
+    handles.reserve(extents.size());
     for (const auto& e : extents) {
-        auto& s = shard_of(e.file_id);
-        std::lock_guard lk(s.m);
-        ++s.refs[e.file_id];
-        ids.push_back(e.file_id);
+        bool is_pack = e.kind == Extent::Kind::kPack;
+        pin_key(is_pack, e.file_id);
+        handles.push_back({is_pack, e.file_id});
     }
-    return ids;
+    return handles;
 }
 
-void PinTable::unpin(const std::vector<uint64_t>& ids) {
-    for (uint64_t id : ids) unpin_id(id);
+void PinTable::unpin(const std::vector<Handle>& handles) {
+    for (const auto& h : handles) unpin_key(h.is_pack, h.file_id);
 }
 
-void PinTable::pin_id(uint64_t file_id) {
-    auto& s = shard_of(file_id);
-    std::lock_guard lk(s.m);
-    ++s.refs[file_id];
-}
+void PinTable::pin_id(uint64_t file_id) { pin_key(/*is_pack=*/false, file_id); }
 
-void PinTable::unpin_id(uint64_t file_id) {
-    auto& s = shard_of(file_id);
-    std::lock_guard lk(s.m);
-    auto it = s.refs.find(file_id);
-    if (it == s.refs.end()) return;  // 不应发生；防御性容忍
-    if (--it->second <= 0) s.refs.erase(it);
-}
+void PinTable::unpin_id(uint64_t file_id) { unpin_key(/*is_pack=*/false, file_id); }
 
 bool PinTable::any_pinned(std::span<const Extent> extents) {
     for (const auto& e : extents)
-        if (pinned(e.file_id)) return true;
+        if (pinned_key(e.kind == Extent::Kind::kPack, e.file_id)) return true;
     return false;
 }
 
-bool PinTable::pinned(uint64_t file_id) {
-    auto& s = shard_of(file_id);
+bool PinTable::pinned_chunk(uint64_t file_id) { return pinned_key(false, file_id); }
+
+bool PinTable::pinned_pack(uint64_t pack_id) { return pinned_key(true, pack_id); }
+
+void PinTable::pin_key(bool is_pack, uint64_t id) {
+    auto& s = shard_of(id);
     std::lock_guard lk(s.m);
-    return s.refs.count(file_id) != 0;
+    ++(is_pack ? s.pack_refs : s.chunk_refs)[id];
+}
+
+void PinTable::unpin_key(bool is_pack, uint64_t id) {
+    auto& s = shard_of(id);
+    std::lock_guard lk(s.m);
+    auto& refs = is_pack ? s.pack_refs : s.chunk_refs;
+    auto it = refs.find(id);
+    if (it == refs.end()) return;  // 不应发生；防御性容忍
+    if (--it->second <= 0) refs.erase(it);
+}
+
+bool PinTable::pinned_key(bool is_pack, uint64_t id) {
+    auto& s = shard_of(id);
+    std::lock_guard lk(s.m);
+    return (is_pack ? s.pack_refs : s.chunk_refs).count(id) != 0;
 }
 
 // ---------- 压实迁移（P4 §9.2 步骤 2-3）----------
@@ -721,7 +729,7 @@ Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string own
 class PinnedReader final : public http::BodyReader {
 public:
     PinnedReader(std::unique_ptr<http::BodyReader> inner, std::shared_ptr<PinTable> pins,
-                 std::vector<uint64_t> ids)
+                 std::vector<PinTable::Handle> ids)
         : inner_(std::move(inner)), pins_(std::move(pins)), ids_(std::move(ids)) {}
     ~PinnedReader() override { pins_->unpin(ids_); }
 
@@ -731,7 +739,7 @@ public:
 private:
     std::unique_ptr<http::BodyReader> inner_;
     std::shared_ptr<PinTable> pins_;
-    std::vector<uint64_t> ids_;
+    std::vector<PinTable::Handle> ids_;
 };
 
 // 写侧 pin 的对称解除（§9.3）：ChunkWriter 分配即 pin（孤儿扫描不回收在途写入），
@@ -755,19 +763,28 @@ struct WritePinRelease {
 };
 
 // meta 提交失败时兜底删除已产出数据（§6.1 ⑤）；co_await 不能出现在 catch 块内，
-// 清理经 exception_ptr 移出 handler。兜底失败也无害——落入孤儿扫描
+// 清理经 exception_ptr 移出 handler。兜底失败也无害——落入孤儿扫描。
+// 例外：UndeterminedCommit（redis 连接断 / tikv primary commit 超时）意味着事务
+// **可能已生效**——此时删数据会毁掉已被对象引用的内容，产生指向已删数据的坏对象。
+// 结果不明一律不删，把数据留给孤儿扫描按"refs 无引用"自然收敛
 template <class Commit>
 Task<void> commit_or_discard(IDataStore& data, const DataRef& ref, Commit commit) {
     std::exception_ptr err;
+    bool undetermined = false;
     try {
         commit();
+    } catch (const duostore::UndeterminedCommit&) {
+        err = std::current_exception();
+        undetermined = true;
     } catch (...) {
         err = std::current_exception();
     }
     if (err) {
-        try {
-            co_await data.remove(ref.extents);
-        } catch (...) {
+        if (!undetermined) {
+            try {
+                co_await data.remove(ref.extents);
+            } catch (...) {
+            }
         }
         std::rethrow_exception(err);
     }
@@ -964,18 +981,33 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     const int64_t ttl_ms = int64_t(cfg_.mpu_ttl_sec) * 1000;
     if (ttl_ms > 0) {
         const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
-        for (const auto& bk : meta_->list_buckets()) {
-            for (const auto& u : meta_->list_uploads(bk.name)) {
-                if (now - codec::to_unix_ms(u.initiated) < ttl_ms) continue;
+        // list_buckets/list_uploads 亦须在 try 内：与并发 DeleteBucket 竞态时
+        // list_uploads 抛 NoSuchBucket，逃出去会把本轮的 gcq 消费/压实/孤儿扫描
+        // （步骤 2-4）全部跳过，回收白白顺延一个 gc_interval
+        try {
+            for (const auto& bk : meta_->list_buckets()) {
+                std::vector<UploadInfo> uploads;
                 try {
-                    meta_->abort_upload(bk.name, u.key, u.upload_id);
-                    ++st.uploads_expired;
+                    uploads = meta_->list_uploads(bk.name);
                 } catch (const std::exception& e) {
-                    // 与并发 complete/abort 竞争丢 NoSuchUpload 属正常；其余记 WARN 下轮重试
-                    LOG_WARN("duostore '{}': gc abort expired upload {} failed: {}", cfg_.name,
-                             u.upload_id, e.what());
+                    LOG_WARN("duostore '{}': gc list uploads of bucket {} failed: {}",
+                             cfg_.name, bk.name, e.what());
+                    continue;  // 桶已删/暂时不可读：跳过该桶，不影响其余步骤
+                }
+                for (const auto& u : uploads) {
+                    if (now - codec::to_unix_ms(u.initiated) < ttl_ms) continue;
+                    try {
+                        meta_->abort_upload(bk.name, u.key, u.upload_id);
+                        ++st.uploads_expired;
+                    } catch (const std::exception& e) {
+                        // 与并发 complete/abort 竞争丢 NoSuchUpload 属正常；其余记 WARN 下轮重试
+                        LOG_WARN("duostore '{}': gc abort expired upload {} failed: {}",
+                                 cfg_.name, u.upload_id, e.what());
+                    }
                 }
             }
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore '{}': gc expired-upload sweep failed: {}", cfg_.name, e.what());
         }
     }
 
@@ -1067,7 +1099,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             }
             auto [it, first_seen] = pack_empty_since_.try_emplace(ps.pack_id, pack_now);
             (void)first_seen;
-            if (pack_now - it->second < grace_ms || pins_->pinned(ps.pack_id)) continue;
+            if (pack_now - it->second < grace_ms || pins_->pinned_pack(ps.pack_id)) continue;
             try {
                 co_await data_->remove_pack(ps.pack_id);
                 meta_->drop_pack_stat(ps.pack_id);
@@ -1145,7 +1177,7 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
             ++st.skipped_grace;
             continue;
         }
-        if (pins_->pinned(c.id)) {
+        if (pins_->pinned_chunk(c.id)) {
             ++st.skipped_pinned;
             continue;
         }

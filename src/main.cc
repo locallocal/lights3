@@ -48,6 +48,8 @@ int main(int argc, char** argv) {
         // backend=<name> 标签的 scope，/-/metrics 追加渲染
         auto metrics = std::make_shared<MetricsRegistry>();
         auto backends = storage::StorageRegistry::build(cfg.backends, pool, metrics);
+        // 关停时要逐个 close()（见下）：router 只按桶路由，拿不到全集
+        auto all_backends = backends;
         auto router = storage::BucketRouter::build(cfg.buckets, std::move(backends));
         auto auth = s3::SigV4Authenticator::build(cfg.auth);
         // 动态凭证（docs/credential-management.md）：从默认后端加载并替换静态查表
@@ -91,7 +93,19 @@ int main(int argc, char** argv) {
 
         g_server = nullptr;
         cred_store->shutdown_background();  // 定时器/在途同步须先于线程池收尾
-        // 各后端冲刷 + 线程池收尾
+
+        // 各后端冲刷：close() 须在 pool->join() **之前**——它内部要 co_await
+        // pool->schedule()（join 后的池会抛 post-after-join），且析构兜底不等于
+        // close（duostore 跳过 active pack 封存与 rados flush、tiered 丢 atime
+        // 快照）。逐个 close，单个失败不阻断其余（docs/code-review §1.4）
+        for (auto& [name, backend] : all_backends) {
+            try {
+                sync_wait(backend->close());
+            } catch (const std::exception& e) {
+                LOG_ERROR("backend {} close failed: {}", name, e.what());
+            }
+        }
+        all_backends.clear();
         pool->join();
         LOG_INFO("lights3 exited cleanly");
         return 0;

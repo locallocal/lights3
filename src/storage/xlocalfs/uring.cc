@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 #include "s3/errors.h"
 
@@ -128,12 +130,17 @@ void UringEngine::push_and_enter(uint8_t opcode, int fd, const void* addr, unsig
     sq_array_[idx] = idx;
     store_release(sq_tail_, tail + 1);
 
-    for (;;) {
+    for (int spin = 0;; ++spin) {
         int ret = sys_io_uring_enter(ring_fd_, 1, 0, 0);
         if (ret >= 1) return;
-        if (ret >= 0) continue;  // 消费 0 个，重试
-        if (errno == EINTR || errno == EAGAIN || errno == EBUSY) {
-            std::this_thread::yield();
+        if (ret >= 0 || errno == EINTR || errno == EAGAIN || errno == EBUSY) {
+            // 重试要退避：EAGAIN/EBUSY 是内核内存压力或 CQ 满的信号，纯 yield
+            // 自旋会持着 submit_mu_ 空转，把所有并发提交一起拖住。前几轮 yield
+            // （瞬时抖动的常见情形），随后指数睡到 1ms 封顶让出 CPU
+            if (spin < 8) std::this_thread::yield();
+            else
+                std::this_thread::sleep_for(
+                    std::chrono::microseconds(std::min(1000, 16 << std::min(spin - 8, 6))));
             continue;
         }
         // SQE 未被内核消费：回滚 tail 后抛错，协程按未挂起处理

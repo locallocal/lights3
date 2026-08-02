@@ -48,7 +48,7 @@ public:
         if (provider_ && provider_->has_credentials()) require_auth_.store(true);
     }
 
-    // 认证开关只升不降（docs/code-review/README.md §1.2 fail-open）：一旦观察到
+    // 认证开关只升不降（防 fail-open）：一旦观察到
     // 凭证表非空即固化为"必须认证"，运行期表被清空不再放行匿名（此后未知 AK 走
     // InvalidAccessKeyId，fail-closed）；表由空变非空仍即时开启（首个动态凭证生成即生效）
     bool enabled() const {

@@ -503,7 +503,7 @@ TEST(service_backend_metrics_appended) {
                    "lights3_duostore_gc_runs_total{backend=\"duo1\"} 2\n"));
 }
 
-// ---------- docs/code-review/s3.md 修复回归 ----------
+// ---------- 评审发现的回归用例 ----------
 
 // ?versionId 显式拒绝：DELETE ?versionId= 不得静默删当前对象
 TEST(service_version_id_rejected) {

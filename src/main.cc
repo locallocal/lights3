@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
         // 各后端冲刷：close() 须在 pool->join() **之前**——它内部要 co_await
         // pool->schedule()（join 后的池会抛 post-after-join），且析构兜底不等于
         // close（duostore 跳过 active pack 封存与 rados flush、tiered 丢 atime
-        // 快照）。逐个 close，单个失败不阻断其余（docs/code-review §1.4）
+        // 快照）。逐个 close，单个失败不阻断其余
         for (auto& [name, backend] : all_backends) {
             try {
                 sync_wait(backend->close());

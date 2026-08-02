@@ -222,7 +222,7 @@ TEST(sigv4_chunked_rejects_tampered_chunk) {
     CHECK(thrown);
 }
 
-// ---------- docs/code-review/s3.md 修复回归 ----------
+// ---------- 评审发现的回归用例 ----------
 
 // 校验不绑 EOF：消费者只读满 length() 字节（cloudproxy 的消费模式）也必须检出 mismatch
 TEST(sigv4_payload_mismatch_detected_without_eof_read) {

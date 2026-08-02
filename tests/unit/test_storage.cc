@@ -192,7 +192,7 @@ TEST(localfs_multipart_layout_and_cleanup) {
     CHECK(!fs::exists(stale_dir));
 }
 
-// ---------- docs/code-review/storage.md 修复回归 ----------
+// ---------- 评审发现的回归用例（撕裂/元数据同源/孤儿 sidecar）----------
 
 // 并发 PUT 同 key 不撕裂（storage.md 高危第一条）：提交段的 per-key 锁保证
 // GET 拿到的 body 与 ETag 恒来自同一次写入

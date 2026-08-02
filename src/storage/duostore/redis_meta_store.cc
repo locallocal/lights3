@@ -38,6 +38,13 @@ constexpr int kMaxCasRetries = 16;
                   std::string("duostore redis meta: ") + what + ": " + detail);
 }
 
+// 提交类 IO 失败 = 事务可能已生效（§3.5）：用可区分类型上抛，调用方据此不删数据
+[[noreturn]] void throw_undetermined(const char* what, const std::string& detail) {
+    LOG_ERROR("duostore redis meta: {}: commit result undetermined: {}", what, detail);
+    throw UndeterminedCommit(std::string("duostore redis meta: ") + what +
+                             ": commit result undetermined: " + detail);
+}
+
 int64_t now_ms() { return codec::to_unix_ms(std::chrono::system_clock::now()); }
 
 std::string sha1_hex(std::string_view data) {
@@ -475,8 +482,11 @@ RedisMetaStore::ReplyPtr RedisMetaStore::exec(const std::vector<std::string>& ar
         r = run_on(c->ctx, args, &err);
     }
     if (!r) {
-        // 提交类到这里 = 结果不明：不盲重试（§3.5），抛 500 交上层客户端重试
-        throw_internal(args.empty() ? "exec" : args[0].c_str(), err);
+        // 纯读重试后仍失败 = 明确失败；提交类到这里 = 结果不明：不盲重试（§3.5），
+        // 抛可区分类型（调用方不得兜底删数据）交上层客户端重试
+        const char* what = args.empty() ? "exec" : args[0].c_str();
+        if (read_retry) throw_internal(what, err);
+        throw_undetermined(what, err);
     }
     // 提交类（!read_retry）成功后同连接 WAIT（§6）——WAIT 只对本连接此前的写生效
     if (!read_retry && opt_.wait_replicas > 0 && !wait_for_replicas(*c))
@@ -1112,8 +1122,11 @@ bool RedisMetaStore::swap_extents(std::string_view b, std::string_view k,
     // 失败不重试——语义上等同 version 不符，放弃本条（新写入自会记账）
     bt.expect_eq(objects_key(b), k, *oldv);
     bt.hset(objects_key(b), k, codec::encode_object(rec));
-    batch_refs(bt, to, /*add=*/true, okey_owner);
-    batch_refs(bt, from, /*add=*/false, {});
+    // refs 按差集操作（meta_util.h refs_delta）：Lua 内 hset→hdel 对同一 field
+    // 净效果是删除，整加再整删会抹掉未迁移 chunk 的 refs → 孤儿扫描误删活数据
+    auto rd = refs_delta(from, to);
+    batch_refs(bt, rd.added, /*add=*/true, okey_owner);
+    batch_refs(bt, rd.removed, /*add=*/false, {});
     batch_pack_delta(bt, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
     batch_pack_delta(bt, from, -1);
     return bt.commit();

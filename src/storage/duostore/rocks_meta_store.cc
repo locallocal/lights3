@@ -653,8 +653,11 @@ bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k,
     rec.version += 1;
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kObjects], okey, codec::encode_object(rec));
-    batch_refs(batch, to, /*add=*/true, okey);
-    batch_refs(batch, from, /*add=*/false, {});
+    // refs 按差集操作：to/from 共享未迁移的 chunk，整加再整删在 last-wins 下
+    // 净效果是删除，会抹掉活数据的 refs（meta_util.h refs_delta 详述）
+    auto rd = refs_delta(from, to);
+    batch_refs(batch, rd.added, /*add=*/true, okey);
+    batch_refs(batch, rd.removed, /*add=*/false, {});
     batch_pack_delta(batch, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
     batch_pack_delta(batch, from, -1);
     commit(batch);

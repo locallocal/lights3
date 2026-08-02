@@ -54,6 +54,16 @@ struct PackStat {
     bool sealed = false;
 };
 
+// 提交结果不明（网络型引擎专有）：redis EVALSHA 后连接断、tikv primary commit
+// 超时——事务**可能已经生效**。对本地引擎"抛异常 ≈ 未提交"成立，对这两个不成立。
+// 调用方（commit_or_discard）据此**不得**兜底物理删数据：提交实已生效时删掉的是
+// 已被对象引用的数据，产生指向已删数据的坏对象；未生效则留给孤儿扫描收敛。
+// 对客户端仍是 InternalError（500，语义不变）
+struct UndeterminedCommit : s3::S3Error {
+    explicit UndeterminedCommit(std::string msg)
+        : S3Error(s3::S3ErrorCode::InternalError, std::move(msg)) {}
+};
+
 struct IMetaStore {
     // ---- bucket ----
     virtual void create_bucket(std::string_view b) = 0;  // 已存在→BucketAlreadyOwnedByYou

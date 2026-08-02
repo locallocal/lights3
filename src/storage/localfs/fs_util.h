@@ -2,6 +2,8 @@
 // localfs 与 xlocalfs 共享同一磁盘布局（docs/storage-backend.md §3.1/§3.2），差异仅在数据面 IO 方式。
 #pragma once
 
+#include <sys/stat.h>
+
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -16,6 +18,9 @@ namespace lights3::storage::fsutil {
 
 inline constexpr const char* kSidecarSuffix = ".lights3-meta";
 inline constexpr const char* kBucketMarker = ".lights3-bucket";
+// 数据文件的元数据扩展属性（内容 = sidecar 同款 TSV）：随 inode 走，与数据同一次
+// rename 提交，故不可能与它描述的数据错位（docs/storage-backend.md §3.1）
+inline constexpr const char* kMetaXattr = "user.lights3.meta";
 
 std::string next_tmp_name();
 
@@ -52,10 +57,17 @@ struct TierInfo {
     std::string remote_at;    // 上传时间（iso8601）
 };
 
-// stat 数据文件 + 读 sidecar；tier != local 时 size 以 sidecar 为准
-//（stub 数据文件为 0 长度，docs/tiered-storage.md §4.1）。缺失/非普通文件抛 NoSuchKey。
+// stat 数据文件 + 读元数据（xattr 优先，回落 sidecar）；tier != local 时 size 以
+// 元数据为准（stub 数据文件为 0 长度，docs/tiered-storage.md §4.1）。
+// 缺失/非普通文件抛 NoSuchKey。
 ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key,
                             TierInfo* tier_out = nullptr);
+
+// 同上，但复用调用方已持有的 stat 结果。GET 须用**已打开 fd 的 fstat**：对路径
+// 二次 stat 会在并发覆盖写后拿到新对象的 size/etag 却配着旧 inode 的 body
+// （size 变大 → pread 提前 EOF 短包；变小 → body 被截断），静默损坏
+ObjectMeta load_object_meta_stat(const std::filesystem::path& data_path, std::string key,
+                                 const struct stat& st, TierInfo* tier_out = nullptr);
 
 // GET 在 open(data) 与读 sidecar 之间对象被 stub 化：持有的 fd 是 0 长度新
 // inode，而 sidecar 宣称 size>0。TieredBackend 捕获后改走云端重试；

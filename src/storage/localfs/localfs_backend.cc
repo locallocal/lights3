@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <system_error>
 #include <tuple>
@@ -38,7 +39,16 @@ LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<
     fs::create_directories(root_);
     fs::create_directories(staging_ / "put");
     fs::create_directories(staging_ / "mpu");
+    commit_locks_.reserve(kLockStripes);
+    for (size_t i = 0; i < kLockStripes; ++i)
+        commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
     cleanup_stale_uploads();
+}
+
+AsyncSemaphore& LocalFsBackend::commit_lock(std::string_view bucket, std::string_view key) {
+    size_t h = std::hash<std::string_view>()(bucket) * 1315423911u ^
+               std::hash<std::string_view>()(key);
+    return *commit_locks_[h % kLockStripes];
 }
 
 fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const {
@@ -152,7 +162,10 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     meta.etag = md5.final_hex();
     meta.last_modified = std::chrono::system_clock::now();
 
-    // 2. 冲突检查 + sidecar + rename 原子提交
+    // 2. 冲突检查 + 数据 rename + sidecar 提交。per-key 锁：提交段是两次
+    // rename，并发同 key PUT 交错会产生"数据=A、etag=B"的撕裂对象
+    auto lk = co_await commit_lock(bucket, key).acquire();
+    co_await pool_->schedule();  // 锁唤醒可能在别的线程恢复，阻塞 IO 回池线程做
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
     co_return PutResult{meta.etag};
 }
@@ -180,7 +193,9 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     ObjectStream out;
     try {
         fsutil::TierInfo tier;
-        out.meta = fsutil::load_object_meta(path, std::string(key), &tier);
+        // 用已打开 fd 的 fstat（而非对路径二次 stat）：并发覆盖写后路径指向新
+        // inode，size/mtime 会与 fd 持有的旧 body 错位（短包或截断，静默损坏）
+        out.meta = fsutil::load_object_meta_stat(path, std::string(key), st, &tier);
         // open 与读 sidecar 之间被 stub 化：fd 指向 0 长度新 inode，无法兑现
         // sidecar 宣称的 size——报给 tiered 改走云端（docs/tiered-storage.md §7.3 冲突矩阵）
         if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
@@ -242,7 +257,17 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
          ++it) {
         if (!it->is_regular_file()) continue;
         std::string name = it->path().filename().string();
-        if (name == kBucketMarker || name.ends_with(kSidecarSuffix)) continue;
+        if (name == kBucketMarker) continue;
+        if (name.ends_with(kSidecarSuffix)) {
+            // 孤儿 sidecar 自愈：delete_object 是"先删数据后删 sidecar"两步，
+            // 之间崩溃会遗留一个对 list 不可见、却一直占空间的 sidecar。
+            // 全树遍历本就在这里，顺手清掉（best-effort，失败下轮再来）
+            std::string data = it->path().string();
+            data.resize(data.size() - std::strlen(kSidecarSuffix));
+            std::error_code ec;
+            if (!fs::exists(data, ec)) fs::remove(it->path(), ec);
+            continue;
+        }
         keys.push_back(fs::relative(it->path(), base).generic_string());
     }
     std::sort(keys.begin(), keys.end());
@@ -396,7 +421,11 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     meta.size = total;
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
-    commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+    {
+        auto lk = co_await commit_lock(bucket, key).acquire();  // 同 PUT：提交段串行化
+        co_await pool_->schedule();
+        commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+    }
 
     std::error_code ec;
     fs::remove_all(up.dir, ec);

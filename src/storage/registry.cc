@@ -134,6 +134,23 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
             if (!names.insert(cfg.name).second)
                 throw std::runtime_error("duplicate backend name: " + cfg.name);
     }
+    // 构建中途失败要回滚：已建的后端各自持一个专属 ThreadPool（线程已起）与一组
+    // 指标 gauge 回调（闭包持池的 shared_ptr）。直接让异常穿出去会留下孤儿池与
+    // 读陈旧 stats 的回调，且 main 走不到 close() 路径。守卫在异常路径清空 out
+    // （后端析构 → 池 join）并撤掉本次注册的指标
+    struct BuildRollback {
+        std::map<std::string, std::shared_ptr<IStorageBackend>>* out;
+        MetricsRegistry* metrics;
+        std::vector<std::string> scopes;
+        bool done = false;
+        ~BuildRollback() {
+            if (done) return;
+            if (metrics)  // 测试装配可不带注册表
+                for (auto& name : scopes) metrics->remove_labeled("backend", name);
+            out->clear();
+        }
+    } rollback{&out, metrics.get(), {}};
+
     for (auto& cfg : configs) {
         if (cfg.type == "tiered") {
             deferred.push_back(&cfg);
@@ -144,6 +161,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
             throw std::runtime_error("unknown storage backend type: " + cfg.type);
         // 每后端一个 scope：实例级 backend=<name> 标签，工厂内按需再加维度
         MetricsScope scope(metrics, {{"backend", cfg.name}});
+        rollback.scopes.push_back(cfg.name);
         out[cfg.name] = it->second(cfg, backend_pool(cfg, pool, scope), scope);
     }
     // tiered 引用 name 已就绪即可构造；tiered 套 tiered 按依赖序解开，解不开
@@ -171,6 +189,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     if (!deferred.empty())
         throw std::runtime_error("tiered backend '" + deferred.front()->name +
                                  "' has unknown or circular local/cloud reference");
+    rollback.done = true;  // 全部就绪：撤销守卫，交出后端表
     return out;
 }
 

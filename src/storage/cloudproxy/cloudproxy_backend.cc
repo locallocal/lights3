@@ -160,14 +160,23 @@ struct TransferAbort {
 class PumpBodyReader final : public http::BodyReader {
 public:
     PumpBodyReader(std::shared_ptr<http::BlockQueue> q, std::optional<uint64_t> len,
-                   std::shared_ptr<TransferAbort> abort, std::thread pump)
-        : q_(q), inner_(std::move(q), len), abort_(std::move(abort)), pump_(std::move(pump)) {}
+                   std::shared_ptr<TransferAbort> abort, std::thread pump,
+                   std::shared_ptr<ThreadPool> pool)
+        : q_(q), inner_(std::move(q), len), abort_(std::move(abort)), pump_(std::move(pump)),
+          pool_(std::move(pool)) {}
     ~PumpBodyReader() override {
         q_->cancel();
         abort_->abort();
         if (pump_.joinable()) pump_.join();
     }
-    Task<size_t> read(std::span<std::byte> buf) override { return inner_.read(buf); }
+    // QueueBodyReader::pop 是 cv 阻塞：远端慢于客户端时（cloudproxy 常态）几乎
+    // 每次读都要等 pump 推数。调用方可能是 beast 的 io 线程 / seastar reactor
+    // shard（读协程在那里恢复），在其上阻塞会让整个事件循环停摆——先切池线程再
+    // 阻塞，与项目内其余流式 reader 的约定一致（出方向 stream_upload 已如此）
+    Task<size_t> read(std::span<std::byte> buf) override {
+        co_await pool_->schedule();
+        co_return co_await inner_.read(buf);
+    }
     std::optional<uint64_t> length() const override { return inner_.length(); }
 
 private:
@@ -175,6 +184,7 @@ private:
     http::QueueBodyReader inner_;
     std::shared_ptr<TransferAbort> abort_;
     std::thread pump_;
+    std::shared_ptr<ThreadPool> pool_;
 };
 
 std::string resource_of(std::string_view bucket, std::string_view key = "") {
@@ -448,16 +458,30 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
 
     GetHead head;
     try {
-        head = fut.get();  // 池线程阻塞等首部；pump 在私有线程推进，无互等（§2.3）
+        // 池线程阻塞等首部；pump 在私有线程推进，无互等（§2.3）。等待须有上界
+        //（docs §3.1：超时 = request_timeout）——滴流远端否则可让单次 Get 永不完成，
+        // 并发 GET ≈ 池大小时把共享池占满、全局停摆。留一份连接建立预算的余量：
+        // 重试链最坏是 (retry_max+1) 轮，每轮的实际 IO 由 httplib 自身超时兜住
+        auto budget = std::chrono::milliseconds(ctx_->cfg.request_timeout_ms) *
+                      (ctx_->cfg.retry_max + 1);
+        if (fut.wait_for(budget) != std::future_status::ready) {
+            abortst->abort();   // 打断在途 socket 读写，别陪绑到 httplib 超时
+            queue->cancel();
+            pump.join();
+            ctx_->metrics.count_error("transport");
+            throw S3Error(S3ErrorCode::SlowDown,
+                          "cloudproxy: timed out waiting for remote response headers");
+        }
+        head = fut.get();
     } catch (...) {
-        pump.join();
+        if (pump.joinable()) pump.join();
         throw;
     }
     ObjectStream out;
     out.meta = std::move(head.meta);
     out.range = head.range;
-    out.body =
-        std::make_unique<PumpBodyReader>(queue, head.body_len, abortst, std::move(pump));
+    out.body = std::make_unique<PumpBodyReader>(queue, head.body_len, abortst,
+                                                std::move(pump), pool_);
     co_return out;
 }
 
@@ -782,6 +806,22 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             }();
             bool retry = !res ? RemoteContext::retryable_transport(res.error())
                               : ctx_->retryable_status(res->status);
+            // S3 特有：complete 耗时长时先回 200，错误在 body 里（§4.4）。body 里的
+            // InternalError/SlowDown 与同名 HTTP 状态是一回事，同样值得重试——不重试
+            // 就直接变成对客户端的 500，客户端重试再走 NoSuchUpload 歧义消解，白白
+            // 多一轮往返。重试后的 NoSuchUpload 由下面的 retried 分支消解
+            if (!retry && res && res->status == 200 &&
+                res->body.find("<Error") != std::string::npos) {
+                try {
+                    auto root = s3::xml_parse(res->body);
+                    if (root.name == "Error") {
+                        auto code = map_remote_code(root.get("Code"));
+                        retry = code == S3ErrorCode::InternalError ||
+                                code == S3ErrorCode::SlowDown;
+                    }
+                } catch (...) {  // 解析不了：留给下面的统一处置
+                }
+            }
             if (retry && attempt < ctx_->cfg.retry_max) {
                 ctx_->metrics.count_retry("complete_multipart");
                 ctx_->backoff(attempt);

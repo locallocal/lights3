@@ -126,7 +126,9 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     meta.etag = etag;
     meta.last_modified = std::chrono::system_clock::now();
 
-    // 2. 冲突检查 + sidecar + rename 原子提交（同步调用，回到池线程）
+    // 2. 冲突检查 + 数据 rename + sidecar 提交（同步调用，回到池线程）。
+    // per-key 锁同 localfs：提交段的两次 rename 不得与同 key 并发写交错
+    auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
     co_return PutResult{meta.etag};
@@ -155,7 +157,8 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     ObjectStream out;
     try {
         fsutil::TierInfo tier;
-        out.meta = fsutil::load_object_meta(path, std::string(key), &tier);
+        // 同 localfs：用 fd 的 fstat，避免并发覆盖写后 meta 与 body 来自不同 inode
+        out.meta = fsutil::load_object_meta_stat(path, std::string(key), st, &tier);
         // 同 localfs：open 与读 sidecar 之间被 stub 化 → 报给 tiered 改走云端
         if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
             static_cast<uint64_t>(st.st_size) != out.meta.size)
@@ -272,8 +275,11 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     meta.size = total;
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
-    co_await pool_->schedule();
-    commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+    {
+        auto lk = co_await commit_lock(bucket, key).acquire();  // 同 PUT
+        co_await pool_->schedule();
+        commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+    }
 
     std::error_code ec;
     fs::remove_all(up.dir, ec);

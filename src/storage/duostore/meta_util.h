@@ -44,4 +44,42 @@ inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const Part
     return rec;
 }
 
+// 压实换 ref（swap_extents，§9.2）的 refs 差集。
+//
+// refs 表按 file_id 是 last-wins 语义：对同一 file_id"先 Put 后 Delete"（四引擎的
+// WriteBatch / Lua 顺序 / SQL 顺序 / TiKV 后者胜都如此）净效果是删除。而压实只替换
+// 一个 pack extent，to 与 from **共享全部未迁移的 chunk extent**——整表 add(to) 再
+// 整表 remove(from) 会抹掉这些仍被对象引用的 chunk 的 refs 表项，孤儿扫描随后
+// unlink 活数据（不可恢复的数据丢失）。
+//
+// 只对真正新增（to−from）与真正消失（from−to）的 file_id 操作，顺序即无关，同时
+// 省掉无谓 mutation。pack 存活账是加法语义（同 pack 的 +1/-1 自然抵消），不受影响，
+// 故本 helper 只服务 refs 一侧；kPack extent 不入 refs，在此一并滤掉。
+struct RefsDelta {
+    DataRef added;    // 需 Put refs 的 extent
+    DataRef removed;  // 需 Delete refs 的 extent
+};
+
+inline RefsDelta refs_delta(const DataRef& from, const DataRef& to) {
+    auto ref_ids = [](const DataRef& r) {
+        std::set<uint64_t> ids;
+        for (const auto& e : r.extents)
+            if (e.kind != Extent::Kind::kPack) ids.insert(e.file_id);
+        return ids;
+    };
+    std::set<uint64_t> from_ids = ref_ids(from), to_ids = ref_ids(to);
+    RefsDelta d;
+    std::set<uint64_t> seen;
+    for (const auto& e : to.extents)
+        if (e.kind != Extent::Kind::kPack && !from_ids.count(e.file_id) &&
+            seen.insert(e.file_id).second)
+            d.added.extents.push_back(e);
+    seen.clear();
+    for (const auto& e : from.extents)
+        if (e.kind != Extent::Kind::kPack && !to_ids.count(e.file_id) &&
+            seen.insert(e.file_id).second)
+            d.removed.extents.push_back(e);
+    return d;
+}
+
 }  // namespace lights3::storage::duostore

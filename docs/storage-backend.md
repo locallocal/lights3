@@ -118,17 +118,31 @@ resolve(bucket) → IStorageBackend&
 - **sidecar 而非 xattr**：xattr 有大小限制且 scp/rsync 易丢；sidecar TSV
   可靠且可检。list 时按后缀过滤掉 sidecar。
 - **写入原子性**：PUT 全部写到 staging 临时文件（边写边算 MD5 作 ETag；
-  SHA256 校验属 L2 的验签装饰器，不在后端），
-  校验通过后 `rename()` 到最终路径（先 meta 后 data，读取侧以 data 为准），
-  失败路径统一 unlink 临时文件。并发 PUT 同一 key 采用 last-write-wins
+  SHA256 校验属 L2 的验签装饰器，不在后端），校验通过后 `rename()` 到最终
+  路径，失败路径统一 unlink 临时文件。并发 PUT 同一 key 采用 last-write-wins
   （与 S3 语义一致），rename 的原子性保证读者看不到半截数据。
+  - **元数据与数据同批提交**：元数据（etag/content_type/user_meta/tier）在
+    rename 之前写进数据临时文件的扩展属性 `user.lights3.meta`（内容与 sidecar
+    同款 TSV），因此**一次 rename 同时提交数据与元数据**——xattr 随 inode 走，
+    读到的 etag 不可能描述另一个 inode 的 body。sidecar 文件继续写（外部工具
+    可读、存量对象兼容），读取侧 xattr 优先、缺失时回落 sidecar；不支持 xattr
+    的文件系统上退化为纯 sidecar 语义（提交顺序为先数据后 sidecar）。
+  - **提交段 per-key 锁**：数据与 sidecar 毕竟是两次 rename，提交段取 striped
+    异步互斥（64 条带，PUT 与 complete_multipart 共用），使 sidecar 也恒描述
+    最终落地的那次写入。锁只覆盖提交段，body 读写全并发。
+  - **持久性**：数据 tmp 与 sidecar tmp 在 rename 前 `fdatasync`、rename 后
+    `fsync` 父目录（目录项落盘）。`LIGHTS3_FSYNC=0` 可关（吞吐优先的部署与
+    测试夹具），默认开——已 200 应答的写掉电不丢是 S3 语义的一部分。
 
 ### 3.2 各操作实现要点
 
 - 所有 posix 调用都在 `co_await pool.schedule()` 之后执行
   （见 [concurrency.md](concurrency.md) §3）。
-- **GET**：open + fstat + 读 sidecar；`FdBodyReader` 每次 `read()` 都经池
-  执行 `pread`（带偏移，天然支持 Range）；fd 由 RAII 持有，取消/断连自动关闭。
+- **GET**：open + fstat + 读元数据（该 fd 的 xattr，缺失回落 sidecar）。
+  size/mtime 一律取**已打开 fd 的 fstat**、绝不对路径二次 stat——并发覆盖写后
+  路径指向新 inode，二次 stat 会让 meta 与 fd 持有的 body 错位（短包/截断）。
+  `FdBodyReader` 每次 `read()` 都经池执行 `pread`（带偏移，天然支持 Range）；
+  fd 由 RAII 持有，取消/断连自动关闭。
 - **PUT**：循环 `body.read(64KiB)` → 池内 write + 增量 MD5 → rename。
   ETag = MD5 hex，与 S3 单段上传一致。
 - **LIST**：递归目录遍历 + prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；

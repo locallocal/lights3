@@ -1073,8 +1073,11 @@ bool SqliteMetaStore::swap_extents(std::string_view b, std::string_view k,
         st.exec();
     }
     std::string owner = std::string(b) + '/' + std::string(k);
-    write_refs(c, to, /*add=*/true, owner);
-    write_refs(c, from, /*add=*/false, {});
+    // refs 按差集操作（meta_util.h refs_delta）：整加再整删会删掉 to/from 共享的
+    // 未迁移 chunk 的 refs 表项 → 孤儿扫描误删活数据
+    auto rd = refs_delta(from, to);
+    write_refs(c, rd.added, /*add=*/true, owner);
+    write_refs(c, rd.removed, /*add=*/false, {});
     write_pack_delta(c, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
     write_pack_delta(c, from, -1);
     t.commit();

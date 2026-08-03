@@ -5,6 +5,7 @@
 
 #include <linux/io_uring.h>
 
+#include <condition_variable>
 #include <coroutine>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <mutex>
 #include <span>
 #include <thread>
+#include <unordered_set>
 
 #include "core/thread_pool.h"
 
@@ -25,7 +27,9 @@ public:
     ~UringEngine();
     UringEngine(const UringEngine&) = delete;
 
-    // 停止收割线程（幂等）；须在所有在途操作完成后调用，之后不得再提交
+    // 停止收割线程（幂等），之后不得再提交。先拒新提交、等在途 CQE 排空
+    //（带超时告警）再投哨兵——CQE 顺序不保证哨兵排在既有读写之后，不等排空就
+    // munmap 会让内核继续写已释放的用户缓冲（docs/gaps.md §2.9）
     void shutdown();
 
     struct Op {
@@ -76,6 +80,11 @@ private:
     // SQ（提交侧，submit_mu_ 保护）
     std::mutex submit_mu_;
     bool stopped_ = false;
+    bool failed_ = false;  // 收割线程因不可恢复错误退出；后续提交一律拒绝
+    // 在途操作登记（submit_mu_ 保护）：收割线程失败时以 -EIO 唤醒全部在途协程
+    //（否则 GET 永久挂死、连接不释放），shutdown 依它等待排空
+    std::unordered_set<Op*> inflight_;
+    std::condition_variable inflight_cv_;
     unsigned sq_entries_ = 0;
     unsigned sq_mask_ = 0;
     unsigned* sq_head_ = nullptr;

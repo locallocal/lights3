@@ -175,6 +175,9 @@ private:
     // 对账的孤儿处置（per-key 锁内复核后执行）；返回是否动了云端/本地
     Task<void> reconcile_orphan(std::string bucket, std::string key, std::string cloud_etag,
                                 bool local_is_live, TierReconcileStats& st);
+    // 反向裁决：本地 remote/cached 引用在云端缺失/etag 不符时 HEAD 现点复核再告警
+    Task<void> reconcile_ref_missing(std::string bucket, std::string key, fsutil::TierInfo t,
+                                     TierReconcileStats& st);
 
     std::shared_ptr<LocalFsBackend> local_;
     std::shared_ptr<IStorageBackend> cloud_;
@@ -183,6 +186,9 @@ private:
     std::filesystem::path tier_dir_;  // <staging>/tier
     std::filesystem::path gc_dir_;    // <staging>/tier/gc
 
+    // 信号量统一传池 executor：release 时把等待者续体投回池线程，根除"就地
+    // resume 把阻塞 IO 压在 HTTP 响应线程"的路径（docs/gaps.md §2.4）
+    ThreadPoolExecutor pool_exec_{*pool_};
     std::vector<std::unique_ptr<AsyncSemaphore>> key_locks_;
     AsyncSemaphore transfers_;  // max_concurrent_transfers 限流（docs/tiered-storage.md §5.1）
 

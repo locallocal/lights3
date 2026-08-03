@@ -197,13 +197,14 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
 
     auto [total, etag] = co_await drain_to_tmp(body, tmp.fd);
     (void)total;
+    co_await pool_->schedule();
+    fsutil::fsync_file(tmp.fd);  // 同 localfs：分片数据先落盘，.md5 才是就绪证据
     ::close(tmp.fd);
     tmp.fd = -1;
 
-    // 先 md5 后数据文件；同号重传 last-write-wins（rename 覆盖）
-    co_await pool_->schedule();
+    // 顺序：先数据 rename、后写 .md5（同号重传 last-write-wins，rename 覆盖）；
+    // 理由同 localfs——反序会在掉电后留下合法 .md5 配零块数据
     std::string name = part_file_name(part_no);
-    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
     std::error_code ec;
     fs::rename(tmp.path, up.dir / name, ec);
     if (ec) {
@@ -215,6 +216,8 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
         throw S3Error(S3ErrorCode::InternalError, "rename part failed");
     }
     tmp.committed = true;
+    fsutil::fsync_dir(up.dir);
+    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
     co_return PutResult{etag};
 }
 

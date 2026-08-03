@@ -405,3 +405,18 @@ TEST(sigv4_presigned_url_expiry) {
     auto skewed = make();
     auth.verify(skewed);
 }
+
+// ---------- percent_decode 语义拆分（gaps §2.13）----------
+
+TEST(percent_decode_preserves_literal_plus) {
+    // path / copy-source / canonical query：'+' 是合法字面字符
+    CHECK_EQ(util::percent_decode("a+b.txt"), "a+b.txt");
+    CHECK_EQ(util::percent_decode("a%2Bb%20c"), "a+b c");
+}
+
+TEST(percent_decode_query_form_semantics) {
+    // query 参数：裸 '+' 是 form 空格，%2B 解出的 '+' 不受影响
+    CHECK_EQ(util::percent_decode_query("a+b"), "a b");
+    CHECK_EQ(util::percent_decode_query("a%2Bb"), "a+b");
+    CHECK_EQ(util::percent_decode_query("a%20b+c"), "a b c");
+}

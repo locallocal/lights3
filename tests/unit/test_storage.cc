@@ -330,3 +330,85 @@ TEST(localfs_commit_cached_persists_data_before_sidecar) {
     CHECK_EQ(s2.meta.size, uint64_t(data.size()));
     sync_wait(b->close());
 }
+
+// ---------- localfs 剪枝式 LIST 与全量参考实现的差分（gaps §2.7）----------
+// memory 后端走 apply_listing（全量收集 + 排序），作为语义参考；localfs 的
+// 目录树剪枝遍历必须在任意 prefix/delimiter/分页组合下产出一致结果
+TEST(localfs_list_pruning_matches_reference) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    LocalFsBackend lf(tmp.path / "data", tmp.path / "staging", pool);
+    MemoryBackend mem;
+    sync_wait(lf.create_bucket("bkt"));
+    sync_wait(mem.create_bucket("bkt"));
+    const std::vector<std::string> keys = {
+        "a.txt",      "a/b.txt",     "a/b/c.txt",  "a/b/d.txt", "a/e.txt",
+        "a0after",    "dir-x/1",     "dir-x/2",    "dir-y/1",   "photos/2026/a.jpg",
+        "photos/2026/b.jpg", "photos/2027/c.jpg", "readme.md", "z-last",
+    };
+    for (auto& k : keys) {
+        put(lf, "bkt", k, "v");
+        put(mem, "bkt", k, "v");
+    }
+
+    auto keys_of = [](const ListResult& r) {
+        std::vector<std::string> out;
+        for (auto& o : r.objects) out.push_back(o.key);
+        return out;
+    };
+    auto check_same = [&](ListOptions opt) {
+        auto a = sync_wait(lf.list_objects("bkt", opt));
+        auto b = sync_wait(mem.list_objects("bkt", opt));
+        CHECK(keys_of(a) == keys_of(b));
+        CHECK(a.common_prefixes == b.common_prefixes);
+        CHECK_EQ(a.is_truncated, b.is_truncated);
+        // 分页游走：token 语义各自自洽即可，这里再各走一轮全量对齐
+        return std::pair(a, b);
+    };
+
+    for (const std::string& prefix :
+         {std::string(""), std::string("a"), std::string("a/"), std::string("a/b"),
+          std::string("photos/202"), std::string("photos/2026/"), std::string("nope/"),
+          std::string("dir-")}) {
+        for (const std::string& delim : {std::string(""), std::string("/"), std::string("-")}) {
+            ListOptions opt;
+            opt.prefix = prefix;
+            opt.delimiter = delim;
+            check_same(opt);
+            // 逐页游走（max_keys=1/2/3），拼起来必须与一次性全量一致且无重复
+            for (int mk : {1, 2, 3}) {
+                for (auto* backend : std::initializer_list<IStorageBackend*>{&lf, &mem}) {
+                    ListOptions page;
+                    page.prefix = prefix;
+                    page.delimiter = delim;
+                    page.max_keys = mk;
+                    std::vector<std::string> walked;
+                    for (int guard = 0; guard < 50; ++guard) {
+                        auto r = sync_wait(backend->list_objects("bkt", page));
+                        for (auto& o : r.objects) walked.push_back(o.key);
+                        for (auto& g : r.common_prefixes) walked.push_back(g);
+                        if (!r.is_truncated) break;
+                        CHECK(!r.next_token.empty());
+                        page.start_after = r.next_token;
+                    }
+                    ListOptions full;
+                    full.prefix = prefix;
+                    full.delimiter = delim;
+                    auto fr = sync_wait(backend->list_objects("bkt", full));
+                    std::vector<std::string> expect;
+                    for (auto& o : fr.objects) expect.push_back(o.key);
+                    for (auto& g : fr.common_prefixes) expect.push_back(g);
+                    std::sort(walked.begin(), walked.end());
+                    std::sort(expect.begin(), expect.end());
+                    CHECK(walked == expect);
+                }
+            }
+        }
+    }
+
+    // start_after 落在组内：组仍应被发出（与参考实现一致）
+    ListOptions mid;
+    mid.delimiter = "/";
+    mid.start_after = "a/b/c.txt";
+    check_same(mid);
+}

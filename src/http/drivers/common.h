@@ -27,10 +27,10 @@ inline void parse_target(std::string_view target, HttpRequest& req) {
         if (!kv.empty()) {
             auto eq = kv.find('=');
             if (eq == std::string::npos)
-                req.query.emplace_back(util::percent_decode(kv), "");
+                req.query.emplace_back(util::percent_decode_query(kv), "");
             else
-                req.query.emplace_back(util::percent_decode(kv.substr(0, eq)),
-                                       util::percent_decode(kv.substr(eq + 1)));
+                req.query.emplace_back(util::percent_decode_query(kv.substr(0, eq)),
+                                       util::percent_decode_query(kv.substr(eq + 1)));
         }
         start = amp + 1;
     }

@@ -29,7 +29,25 @@ std::string percent_decode(std::string_view s) {
                 continue;
             }
         }
-        if (s[i] == '+') {  // query 中的空格
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
+std::string percent_decode_query(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            int hi = hex_val(s[i + 1]), lo = hex_val(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>(hi * 16 + lo));
+                i += 2;
+                continue;
+            }
+        }
+        // 只有未编码的字面 '+' 才是 form 空格；%2B 解码所得的 '+' 不受影响
+        if (s[i] == '+') {
             out.push_back(' ');
             continue;
         }

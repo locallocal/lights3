@@ -37,6 +37,12 @@ void reject_reserved_key(std::string_view key);
 
 [[noreturn]] void throw_errno(const std::string& what);
 
+// 持久性原语（LIGHTS3_FSYNC=0 时全部为 no-op，docs/storage-backend.md §3.1）：
+// fsync_file 对已打开 fd 做 fdatasync（失败抛错）；fsync_dir 使目录项持久
+//（rename 只保证原子，不保证父目录已落盘；失败静默——不该拖垮写路径）
+void fsync_file(int fd);
+void fsync_dir(const std::filesystem::path& dir);
+
 // k<TAB>v 行格式，tmp+rename 原子写
 void write_tsv(const std::filesystem::path& dest, const std::filesystem::path& tmp_dir,
                const std::vector<std::pair<std::string, std::string>>& kv);

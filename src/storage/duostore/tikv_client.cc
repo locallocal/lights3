@@ -572,8 +572,47 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
     }
 }
 
+namespace {
+
+// 单事务体积保护（docs/gaps.md §2.12）——fail-fast 于任何 RPC 之前：
+// - 单值上限：TiKV raft-entry-max-size 默认 8MiB，超限的 prewrite 必然失败且**每次
+//   重试都失败**（对象写不进去、已存在的账删不掉）。留 2MiB 余量给 proto 包装。
+// - 总量/条数上限：对齐 TiDB txn-total-size-limit（100MB）与 entry 数限制的量级，
+//   拦住失控组批（正常业务事务远低于此）。
+// 上抛 pingcap::Exception：prewrite 前抛出 = 明确未提交，txn_retry 的调用方按
+// InternalError 处理（客户端可见 500；对象 manifest 的 400 语义由 meta 层在编码
+// 处先行拦截，这里是最后防线）
+constexpr uint64_t kMaxMutationValueBytes = 6ull << 20;
+constexpr uint64_t kMaxTxnTotalBytes = 96ull << 20;
+constexpr size_t kMaxTxnMutations = 300'000;
+
+void check_txn_size(const std::vector<TikvMutation>& muts) {
+    if (muts.size() > kMaxTxnMutations)
+        throw Exception("tikv txn rejected: " + std::to_string(muts.size()) +
+                            " mutations exceed limit " + std::to_string(kMaxTxnMutations),
+                        pingcap::ErrorCodes::LogicalError);
+    uint64_t total = 0;
+    for (const auto& m : muts) {
+        uint64_t sz = m.key.size() + m.value.size();
+        if (m.value.size() > kMaxMutationValueBytes)
+            throw Exception("tikv txn rejected: mutation value " +
+                                std::to_string(m.value.size()) + " bytes exceeds limit " +
+                                std::to_string(kMaxMutationValueBytes) +
+                                " (raft entry cap; key " + m.key.substr(0, 64) + ")",
+                            pingcap::ErrorCodes::LogicalError);
+        total += sz;
+    }
+    if (total > kMaxTxnTotalBytes)
+        throw Exception("tikv txn rejected: " + std::to_string(total) +
+                            " total bytes exceed limit " + std::to_string(kMaxTxnTotalBytes),
+                        pingcap::ErrorCodes::LogicalError);
+}
+
+}  // namespace
+
 void TikvClient::commit(uint64_t start_ts, const std::vector<TikvMutation>& muts) {
     if (muts.empty()) return;
+    check_txn_size(muts);
     Committer(impl_->cluster.get(), start_ts, muts, impl_->backoff_budget_ms).execute();
 }
 

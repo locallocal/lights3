@@ -57,6 +57,22 @@ void conflict_backoff(int attempt) {
     std::this_thread::sleep_for(us);
 }
 
+// 对象 manifest 单值体积保护（docs/gaps.md §2.12）：TiKV 单值受 raft entry 上限
+// （默认 8MiB）约束，超限的 PUT/complete 会**永久失败**且已存在的对象删不掉。
+// 编码后 fail-fast 抛 EntityTooLarge（400，可操作：客户端换 multipart/加大分片）
+// ——比让 prewrite 反复撞 raft 上限的 500 诚实。上限留 2MiB 余量给 proto 包装；
+// extent 数上限拦同量级的病态 manifest（run 编码失效的交错 id 形态 ≈ 30B/extent）
+constexpr size_t kMaxObjectValueBytes = 6ull << 20;
+constexpr size_t kMaxObjectExtents = 200'000;
+
+void check_object_value(std::string_view k, size_t n_extents, size_t encoded_bytes) {
+    if (n_extents <= kMaxObjectExtents && encoded_bytes <= kMaxObjectValueBytes) return;
+    throw S3Error(S3ErrorCode::EntityTooLarge,
+                  "duostore tikv meta: object manifest too large for a single TiKV value (" +
+                      std::string(k) + ": " + std::to_string(n_extents) + " extents, " +
+                      std::to_string(encoded_bytes) + " bytes)");
+}
+
 [[noreturn]] void throw_internal(const char* what, const std::string& detail) {
     LOG_ERROR("duostore tikv meta: {}: {}", what, detail);
     throw S3Error(S3ErrorCode::InternalError,
@@ -396,9 +412,16 @@ void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRe
 
 void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref) {
     if (ref.extents.empty()) return;
-    uint64_t seq = alloc_id(kCtrSeq, seqs_);  // 预派发（独立小事务），入账保持纯写
-    muts.push_back(
-        {TikvOp::kPut, gcq_key(seq), codec::encode_reclaim(Reclaim{ref.extents}, now_ms())});
+    // 超大 DataRef 拆多条（docs/gaps.md §2.11）：GC 单批解码内存有界、单条 gcq
+    // 值不逼近 raft entry 上限；ack 逐条独立、unlink 幂等，拆分不改变崩溃语义
+    const int64_t ts = now_ms();
+    for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
+        size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
+        Reclaim r;
+        r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        uint64_t seq = alloc_id(kCtrSeq, seqs_);  // 预派发（独立小事务），入账保持纯写
+        muts.push_back({TikvOp::kPut, gcq_key(seq), codec::encode_reclaim(r, ts)});
+    }
 }
 
 uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r) {
@@ -506,7 +529,9 @@ void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec
         rec.version = old ? old->version + 1 : 1;
 
         // primary = 对象键（写写冲突的语义焦点）；守卫 Lock 物化桶存在性检查（§4.3）
-        muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});
+        std::string oval = codec::encode_object(rec);
+        check_object_value(k, rec.data.extents.size(), oval.size());  // §2.12 fail-fast
+        muts.push_back({TikvOp::kPut, okey, std::move(oval)});
         muts.push_back({TikvOp::kLock, bucket_guard(b, uint32_t(fnv1a(k) % kGuardShards)), {}});
         mut_refs(muts, rec.data, /*add=*/true, okey);
         const int64_t ov = codec::pack_rec_overhead(b, k);
@@ -733,7 +758,9 @@ std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view 
         if (vals[1]) old = codec::decode_object(std::string(k), *vals[1]);
         rec.version = old ? old->version + 1 : 1;
 
-        muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});  // primary
+        std::string oval = codec::encode_object(rec);
+        check_object_value(k, rec.data.extents.size(), oval.size());  // §2.12 fail-fast
+        muts.push_back({TikvOp::kPut, okey, std::move(oval)});  // primary
         muts.push_back({TikvOp::kDel, upload_key(b, k, id), {}});
         for (uint32_t s = 0; s < kGuardShards; ++s)
             muts.push_back({TikvOp::kLock, upload_guard(b, k, id, s), {}});

@@ -604,13 +604,15 @@ void RedisMetaStore::batch_refs(RedisBatch& bt, const DataRef& ref, bool add,
     }
 }
 
-void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign) {
-    // 同 pack 多 extent 先聚合，每 pack 两条 HINCRBY（§9.1 随业务脚本同批增减）
+void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign,
+                                      int64_t rec_overhead) {
+    // 同 pack 多 extent 先聚合，每 pack 两条 HINCRBY（§9.1 随业务脚本同批增减）；
+    // 每条 record 计 payload + 头开销，与 file_size 同口径（docs/gaps.md §2.3a）
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
         auto& [bytes, recs] = agg[e.file_id];
-        bytes += sign * int64_t(e.length);
+        bytes += sign * (int64_t(e.length) + rec_overhead);
         recs += sign;
     }
     for (const auto& [id, d] : agg) {
@@ -622,11 +624,18 @@ void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int si
 void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref) {
     if (ref.extents.empty()) return;
     // seq 预派发（INCRBY 号段）使 gcq 入账成为纯写 op，脚本保持确定性（§4）。
-    // CAS 重试会浪费 seq——无害，seq 只需唯一单调
-    uint64_t seq = alloc_id(kCounterSeq, seqs_);
-    std::string member = codec::be64_key(seq);
-    member += codec::encode_reclaim(Reclaim{ref.extents}, now_ms());
-    bt.zadd(gcq_key(), std::to_string(seq), member);
+    // CAS 重试会浪费 seq——无害，seq 只需唯一单调。
+    // 超大 DataRef 拆多条（docs/gaps.md §2.11）：GC 单批解码内存有界，ack 独立无害
+    const int64_t ts = now_ms();
+    for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
+        size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
+        Reclaim r;
+        r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        uint64_t seq = alloc_id(kCounterSeq, seqs_);
+        std::string member = codec::be64_key(seq);
+        member += codec::encode_reclaim(r, ts);
+        bt.zadd(gcq_key(), std::to_string(seq), member);
+    }
 }
 
 uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r) {
@@ -732,11 +741,12 @@ void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
         bt.hset(objects_key(b), k, codec::encode_object(rec));
         bt.zadd(zindex_key(b), "0", k);
         batch_refs(bt, rec.data, /*add=*/true, owner);
-        batch_pack_delta(bt, rec.data, +1);
+        const int64_t ov = codec::pack_rec_overhead(b, k);
+        batch_pack_delta(bt, rec.data, +1, ov);
         if (old) {
             enqueue_reclaim(bt, old->data);
             batch_refs(bt, old->data, /*add=*/false, {});
-            batch_pack_delta(bt, old->data, -1);
+            batch_pack_delta(bt, old->data, -1, ov);
         }
         if (bt.commit()) return;
     }
@@ -757,7 +767,7 @@ bool RedisMetaStore::delete_object(std::string_view b, std::string_view k) {
         bt.zrem(zindex_key(b), k);
         enqueue_reclaim(bt, old.data);
         batch_refs(bt, old.data, /*add=*/false, {});
-        batch_pack_delta(bt, old.data, -1);
+        batch_pack_delta(bt, old.data, -1, codec::pack_rec_overhead(b, k));
         if (bt.commit()) return true;
     }
     throw_internal("delete_object", "too many CAS retries");
@@ -843,11 +853,12 @@ void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::strin
             bt.expect_absent(pkey, pfield);
         bt.hset(pkey, pfield, codec::encode_part(p));
         batch_refs(bt, p.data, /*add=*/true, owner);
-        batch_pack_delta(bt, p.data, +1);
+        const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
+        batch_pack_delta(bt, p.data, +1, ov);
         if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
             enqueue_reclaim(bt, old->data);
             batch_refs(bt, old->data, /*add=*/false, {});
-            batch_pack_delta(bt, old->data, -1);
+            batch_pack_delta(bt, old->data, -1, ov);
         }
         if (bt.commit()) return;
         if (!upload_raw(b, k, id))  // 并发 complete/abort 赢了
@@ -957,18 +968,24 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
         bt.del(parts_key(b, k, id));
         for (const auto& [no, p] : stored) {
             if (selected.count(no)) {
-                // refs 转移到对象；pack 账不动（put_part 已计，改 owner 不改存活）
+                // refs 转移到对象。pack 账存活不变，但口径从分片重平衡为对象
+                // （-分片头开销 +对象头开销，recs 一减一增相抵）：保证后续对象
+                // 删除按对象口径扣减后账精确归零
                 batch_refs(bt, p.data, /*add=*/true, okey_owner);
+                batch_pack_delta(bt, p.data, -1,
+                                 codec::pack_rec_overhead_part(b, k, id, no));
+                batch_pack_delta(bt, p.data, +1, codec::pack_rec_overhead(b, k));
             } else {  // 未选中分片入 GC 账
                 enqueue_reclaim(bt, p.data);
                 batch_refs(bt, p.data, /*add=*/false, {});
-                batch_pack_delta(bt, p.data, -1);
+                batch_pack_delta(bt, p.data, -1,
+                                 codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
         if (old) {  // 旧同名对象入 GC 账
             enqueue_reclaim(bt, old->data);
             batch_refs(bt, old->data, /*add=*/false, {});
-            batch_pack_delta(bt, old->data, -1);
+            batch_pack_delta(bt, old->data, -1, codec::pack_rec_overhead(b, k));
         }
         if (bt.commit()) return rec.meta.etag;
         // 守卫失败：重读分类——upload 消失 → NoSuchUpload（require_upload 抛出），
@@ -996,7 +1013,8 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
         for (const auto& [raw, p] : scanned) {
             enqueue_reclaim(bt, p.data);
             batch_refs(bt, p.data, /*add=*/false, {});
-            batch_pack_delta(bt, p.data, -1);
+            batch_pack_delta(bt, p.data, -1,
+                             codec::pack_rec_overhead_part(b, k, id, p.part_no));
         }
         if (bt.commit()) return;
     }
@@ -1006,7 +1024,8 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
 // ---------- GC 记账 ----------
 
 std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t max,
-                                                                        uint64_t min_seq) {
+                                                                        uint64_t min_seq,
+                                                                        size_t max_extents) {
     if (max == 0) return {};
     // score = seq（≪ 2^53，double 精确），min_seq 起始闭区间
     auto r = exec({"ZRANGEBYSCORE", gcq_key(), std::to_string(min_seq), "+inf", "LIMIT", "0",
@@ -1015,11 +1034,15 @@ std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t m
     check_reply_error("peek_reclaims", r.get());
     if (r->type != REDIS_REPLY_ARRAY) throw_internal("peek_reclaims", "unexpected reply type");
     std::vector<std::pair<uint64_t, Reclaim>> out;
+    size_t extents = 0;
     for (size_t i = 0; i < r->elements; ++i) {
         auto member = reply_str(r->element[i]);
         if (member.size() < 8) throw_internal("peek_reclaims", "bad gcq member");
         uint64_t seq = codec::parse_be64(member.substr(0, 8));  // member 前 8 字节即 seq
         out.emplace_back(seq, codec::decode_reclaim(member.substr(8)));
+        // 累计 extent 上限（gaps §2.11）：至少返回 1 项（多取的 member 就地丢弃）
+        extents += out.back().second.extents.size();
+        if (extents >= max_extents) break;
     }
     return out;
 }
@@ -1127,8 +1150,11 @@ bool RedisMetaStore::swap_extents(std::string_view b, std::string_view k,
     auto rd = refs_delta(from, to);
     batch_refs(bt, rd.added, /*add=*/true, okey_owner);
     batch_refs(bt, rd.removed, /*add=*/false, {});
-    batch_pack_delta(bt, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
-    batch_pack_delta(bt, from, -1);
+    // 压实换 ref：账随 extent 迁移（§9.2）；两侧都按对象口径（迁出旧 record 若为
+    // mpu 形态则轻微低扣，保守方向）
+    const int64_t ov = codec::pack_rec_overhead(b, k);
+    batch_pack_delta(bt, to, +1, ov);
+    batch_pack_delta(bt, from, -1, ov);
     return bt.commit();
 }
 

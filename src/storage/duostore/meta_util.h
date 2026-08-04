@@ -16,6 +16,11 @@
 
 namespace lights3::storage::duostore {
 
+// gcq 单项 extent 上限（docs/gaps.md §2.11）：删除 TB 级对象（数十万 extent）时
+// 把 DataRef 拆成多条 gcq 项入队，GC 消费端单批 peek 的解码内存驻留有界。ack 逐
+// 条独立、unlink 幂等，拆分不改变崩溃语义（§9.1 先物理删后销账的论证不变）
+inline constexpr size_t kReclaimMaxExtents = 4096;
+
 // complete_upload 的分片选择与对象拼装（RocksDB/Redis/SQLite 三实现原为逐字相同
 // 的块）：逐项 ETag 校验（缺失/不符抛 InvalidPart）、按提交顺序拼接 extent、累加
 // size、合成总 ETag 与 last_modified。selected 输出选中分片号，供调用方做 refs

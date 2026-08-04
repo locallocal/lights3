@@ -56,7 +56,8 @@ public:
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;
 
     uint64_t alloc_file_id(Extent::Kind kind) override;
-    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq) override;
+    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
+                                                            size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单事务单 fsync（§3.3）
     std::vector<PackStat> pack_stats() override;
@@ -64,6 +65,8 @@ public:
     void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
+    // 单事务单 fsync（压实批量化，gaps §2.13）；逐项 CAS 独立
+    std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
@@ -120,7 +123,13 @@ private:
     void write_refs(Conn& c, const DataRef& ref, bool add, std::string_view owner);
     // 同批维护 pack 存活账（pack_stats 表算术 UPDATE，§2.2）。独立于 write_refs：
     // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
-    void write_pack_delta(Conn& c, const DataRef& ref, int sign);
+    // rec_overhead：每条 record 的头开销（codec::pack_rec_overhead*），live_bytes
+    // 与 file_size 同口径（docs/gaps.md §2.3a）
+    void write_pack_delta(Conn& c, const DataRef& ref, int sign, int64_t rec_overhead);
+    // swap 的单项 CAS 核心（持 mu_、在调用方事务内执行）：校验通过即落写返回 true；
+    // 不符返回 false 不落写。swap_extents / swap_extents_batch 共用
+    bool apply_swap(Conn& c, std::string_view b, std::string_view k, uint64_t expect_version,
+                    const DataRef& from, const DataRef& to);
     // gcq 入账：seq 由 AUTOINCREMENT 随事务分配，与业务写同批提交/回滚
     void enqueue_reclaim(Conn& c, const DataRef& ref);
     std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k,

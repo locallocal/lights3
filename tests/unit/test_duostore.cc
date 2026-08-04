@@ -669,9 +669,8 @@ PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadP
                       cfg.pack_max_size, cfg.pack_writers, {}},
         pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
-        [mp](IDataStore& ds, std::string_view owner, const Extent& from,
-             std::span<const std::byte> payload) {
-            return migrate_pack_record(*mp, ds, nullptr, owner, from, payload);
+        [mp](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
+            return migrate_pack_records(*mp, ds, nullptr, std::move(batch));
         });
     PackHarness h;
     h.meta = mp;
@@ -714,7 +713,8 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     auto g2 = sync_wait(h.b->get_object("bkt", "k2", ByteRange{100, 299}));
     CHECK_EQ(read_all(*g2.body), d2.substr(100, 200));
 
-    // 存活账（meta 侧）：2 record / 1100B，未封存
+    // 存活账（meta 侧）：2 record，payload 1100B + 每条 28B record 头（22 固定 +
+    // "bkt\0kN" owner，§2.3a 与 file_size 同口径），未封存
     auto rec = h.meta->get_object("bkt", "k1");
     CHECK(rec.has_value());
     CHECK_EQ(size_t(rec->data.extents.size()), size_t(1));
@@ -722,7 +722,7 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     CHECK(rec->data.extents[0].kind == Extent::Kind::kPack);
     auto ps = find_pack_stat(*h.meta, pid);
     CHECK(ps.has_value());
-    CHECK_EQ(ps->live_bytes, int64_t(1100));
+    CHECK_EQ(ps->live_bytes, int64_t(1156));
     CHECK_EQ(ps->live_recs, int64_t(2));
     CHECK(!ps->sealed);
 
@@ -1154,6 +1154,9 @@ TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact-mpu");
     cfg.pack_max_size = 1400;
+    // live 计头后（§2.3a）分片 record 的 owner 头较长：删 f1 后存活占比 ≈ 0.52，
+    // 阈值抬到 0.6 保持"该 pack 是压实候选"的测试语境
+    cfg.pack_gc_ratio = 0.6;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
 
@@ -1272,6 +1275,35 @@ TEST(duostore_active_pack_of_other_writer_not_sealed) {
     sync_wait(probe.close());
 }
 
+// 崩溃遗留 pack 的分母回填（gaps §2.3b）：补封 seal(0) 后首轮 GC 用 stat_pack 一次
+// stat 回填 file_size——健康存活率的 pack 不再无条件进全量顺扫重写
+TEST(duostore_gc_stat_backfills_crash_leftover_pack) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "pack-statfill");
+    {
+        auto h = make_pack_backend(cfg, pool);
+        sync_wait(h.b->create_bucket("bkt"));
+        put(*h.b, "bkt", "k1", patterned(600));
+        put(*h.b, "bkt", "k2", patterned(600));
+        // 不 close：析构兜底（等价崩溃遗留，重开后补封 seal(0)）
+    }
+    auto h = make_pack_backend(cfg, pool);
+    uint64_t pid = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
+    auto ps0 = find_pack_stat(*h.meta, pid);
+    CHECK(ps0->sealed);
+    CHECK_EQ(ps0->file_size, uint64_t(0));  // 补封时大小未知
+
+    auto st = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st.packs_compacted, uint64_t(0));  // 100% 存活：回填后按存活率跳过重写
+    auto ps1 = find_pack_stat(*h.meta, pid);
+    CHECK_EQ(ps1->file_size, uint64_t(fs::file_size(pack_file_path(cfg.root, pid))));
+
+    auto g = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
+    CHECK_EQ(read_all(*g.body), patterned(600));
+    sync_wait(h.b->close());
+}
+
 // rewrite_pack 顺扫语义（store 级，无迁移回调）：统计、file_size 回报、torn tail
 // 静默止扫（重启弃用的预期形态）、magic 损坏响亮止扫
 TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
@@ -1352,9 +1384,8 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
     }
     FsDataStore d2(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); },
                    [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); },
-                   [&](IDataStore& ds, std::string_view owner, const Extent& from,
-                       std::span<const std::byte> payload) {
-                       return migrate_pack_record(meta, ds, nullptr, owner, from, payload);
+                   [&](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
+                       return migrate_pack_records(meta, ds, nullptr, std::move(batch));
                    });
     auto rw = sync_wait(d2.rewrite_pack(pack_id));
     CHECK_EQ(rw.scanned, uint64_t(2));

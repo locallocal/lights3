@@ -11,7 +11,9 @@
 #include <string>
 #include <vector>
 
+#include "storage/duostore/codec.h"
 #include "storage/duostore/meta_store.h"
+#include "storage/duostore/meta_util.h"  // kReclaimMaxExtents（gcq 拆分上限）
 #include "unit/mini_test.h"
 
 namespace meta_store_suite {
@@ -192,11 +194,12 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
     uint64_t pid = m->alloc_file_id(Extent::Kind::kPack);
     CHECK(!find_pack(*m, pid).has_value());  // 未写入即无账
 
+    // 每条 record 计 29B 头（22 固定 + "ms-pk\0<k>" owner，§2.3a 同口径）
     m->put_object("ms-pk", "a", make_rec("a", {pack_extent(pid, 30, 100)}));
     m->put_object("ms-pk", "b", make_rec("b", {pack_extent(pid, 160, 50)}));
     auto ps = find_pack(*m, pid);
     CHECK(ps.has_value());
-    CHECK_EQ(ps->live_bytes, int64_t(150));
+    CHECK_EQ(ps->live_bytes, int64_t(150 + 2 * 29));
     CHECK_EQ(ps->live_recs, int64_t(2));
     CHECK(!ps->sealed);
 
@@ -205,7 +208,7 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
     CHECK(m->swap_extents("ms-pk", "a", /*expect_version=*/1,
                           DataRef{{pack_extent(pid, 30, 100)}}, DataRef{{chunk_extent(cid, 100)}}));
     ps = find_pack(*m, pid);
-    CHECK_EQ(ps->live_bytes, int64_t(50));
+    CHECK_EQ(ps->live_bytes, int64_t(50 + 29));
     CHECK_EQ(ps->live_recs, int64_t(1));
 
     // 封存：幂等，file_size=0 不覆盖已知值
@@ -223,7 +226,7 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
     CHECK_EQ(ps->live_recs, int64_t(0));
     CHECK(ps->sealed);  // live=0 的封存 pack 仍可见——空 pack 整删的候选（§9.1）
     auto ps2 = find_pack(*m, pid2);
-    CHECK_EQ(ps2->live_bytes, int64_t(70));
+    CHECK_EQ(ps2->live_bytes, int64_t(70 + 29));
 
     // 销账（空 pack 整删后）
     m->drop_pack_stat(pid);
@@ -259,34 +262,39 @@ inline void case_pack_stats_multipart(const MetaFactory& make) {
         p.data.extents = {pack_extent(pid, off, len)};
         return p;
     };
+    // 分片 record 头开销（§2.3a 同口径）：22 固定 + "mpu\0<b>\0<k>\0<id>\0<no>"
+    const int64_t pov = codec::pack_rec_overhead_part("ms-pmpu", "k", id, 1);
+    const int64_t oov = codec::pack_rec_overhead("ms-pmpu", "k");
     m->put_part("ms-pmpu", "k", id, part(1, 0, 100));
     m->put_part("ms-pmpu", "k", id, part(2, 130, 60));
     m->put_part("ms-pmpu", "k", id, part(3, 220, 40));
     auto ps = find_pack(*m, pid);
-    CHECK_EQ(ps->live_bytes, int64_t(200));
+    CHECK_EQ(ps->live_bytes, int64_t(200) + 3 * pov);
     CHECK_EQ(ps->live_recs, int64_t(3));
 
     // 同号重传（last-write-wins）：旧 60 扣、新 80 计
     m->put_part("ms-pmpu", "k", id, part(2, 300, 80));
     ps = find_pack(*m, pid);
-    CHECK_EQ(ps->live_bytes, int64_t(220));
+    CHECK_EQ(ps->live_bytes, int64_t(220) + 3 * pov);
     CHECK_EQ(ps->live_recs, int64_t(3));
 
-    // complete 选 1/2：选中分片账不动（仅 refs 转移），未选中 part3 扣 40
+    // complete 选 1/2：选中分片存活不变但口径重平衡（-分片头 +对象头，保证后续
+    // 对象删除按对象口径扣减后精确归零），未选中 part3 扣 40+头
     std::vector<PartInfo> sel = {{1, "deadbeef"}, {2, "deadbeef"}};
     m->complete_upload("ms-pmpu", "k", id, sel);
     ps = find_pack(*m, pid);
-    CHECK_EQ(ps->live_bytes, int64_t(180));
+    CHECK_EQ(ps->live_bytes, int64_t(180) + 2 * oov);
     CHECK_EQ(ps->live_recs, int64_t(2));
 
     // abort 路径：另一 upload 的 pack 分片全扣
     auto id2 = m->create_upload("ms-pmpu", "k2", meta);
+    const int64_t pov2 = codec::pack_rec_overhead_part("ms-pmpu", "k2", id2, 1);
     m->put_part("ms-pmpu", "k2", id2, part(1, 400, 30));
     ps = find_pack(*m, pid);
-    CHECK_EQ(ps->live_bytes, int64_t(210));
+    CHECK_EQ(ps->live_bytes, int64_t(210) + 2 * oov + pov2);
     m->abort_upload("ms-pmpu", "k2", id2);
     ps = find_pack(*m, pid);
-    CHECK_EQ(ps->live_bytes, int64_t(180));
+    CHECK_EQ(ps->live_bytes, int64_t(180) + 2 * oov);
     CHECK_EQ(ps->live_recs, int64_t(2));
 
     // 删除 complete 出的对象 → 归零
@@ -344,6 +352,77 @@ inline void case_scan_refs(const MetaFactory& make) {
     m->close();
 }
 
+// gcq 拆分（gaps §2.11）：超大 DataRef 入队按 kReclaimMaxExtents 拆多条；peek 的
+// max_extents 上限提前收批但至少返回 1 项；全量消费后 extent 总数守恒
+inline void case_reclaim_split_and_capped_peek(const MetaFactory& make) {
+    auto m = make();
+    m->create_bucket("ms-split");
+    const size_t total = kReclaimMaxExtents + 700;  // 拆 2 条：4096 + 700
+    std::vector<Extent> big;
+    big.reserve(total);
+    for (size_t i = 0; i < total; ++i)
+        big.push_back(chunk_extent(m->alloc_file_id(Extent::Kind::kChunk), 1));
+    m->put_object("ms-split", "big", make_rec("big", std::move(big)));
+    CHECK(m->delete_object("ms-split", "big"));
+
+    // 封顶 peek：第一批累计到 kReclaimMaxExtents 即收批（1 项）
+    auto capped = m->peek_reclaims(100, 0, kReclaimMaxExtents);
+    CHECK_EQ(capped.size(), size_t(1));
+    CHECK_EQ(capped[0].second.extents.size(), kReclaimMaxExtents);
+
+    // 全量视图：恰 2 项，extent 总数守恒
+    auto all = m->peek_reclaims(100, 0);
+    CHECK_EQ(all.size(), size_t(2));
+    size_t seen = 0;
+    std::vector<uint64_t> seqs;
+    for (auto& [seq, rc] : all) {
+        seen += rc.extents.size();
+        seqs.push_back(seq);
+    }
+    CHECK_EQ(seen, total);
+    m->ack_reclaims(seqs);
+    m->delete_bucket("ms-split");
+    m->close();
+}
+
+// swap_extents_batch（gaps §2.13 压实批量化）：逐项 CAS 独立——版本不符项失败不落
+// 写，其余照常生效（rocks/sqlite 覆写单批提交，redis/tikv 走默认逐条转发）
+inline void case_swap_extents_batch(const MetaFactory& make) {
+    auto m = make();
+    m->create_bucket("ms-swapb");
+    uint64_t pid = m->alloc_file_id(Extent::Kind::kPack);
+    m->put_object("ms-swapb", "a", make_rec("a", {pack_extent(pid, 30, 100)}));
+    m->put_object("ms-swapb", "b", make_rec("b", {pack_extent(pid, 160, 50)}));
+
+    uint64_t ca = m->alloc_file_id(Extent::Kind::kChunk);
+    uint64_t cb = m->alloc_file_id(Extent::Kind::kChunk);
+    std::vector<SwapReq> reqs;
+    reqs.push_back({"ms-swapb", "a", /*expect_version=*/1,
+                    DataRef{{pack_extent(pid, 30, 100)}}, DataRef{{chunk_extent(ca, 100)}}});
+    reqs.push_back({"ms-swapb", "b", /*expect_version=*/7,  // 版本不符：该项须失败
+                    DataRef{{pack_extent(pid, 160, 50)}}, DataRef{{chunk_extent(cb, 50)}}});
+    auto ok = m->swap_extents_batch(reqs);
+    CHECK_EQ(ok.size(), size_t(2));
+    CHECK(ok[0]);
+    CHECK(!ok[1]);
+
+    auto ra = m->get_object("ms-swapb", "a");
+    CHECK(ra->data.extents[0].kind == Extent::Kind::kChunk);
+    CHECK_EQ(ra->version, uint64_t(2));  // 成功项版本递增
+    auto rb = m->get_object("ms-swapb", "b");
+    CHECK(rb->data.extents[0].kind == Extent::Kind::kPack);  // 失败项原样
+    CHECK_EQ(rb->version, uint64_t(1));
+    CHECK(m->chunk_referenced(ca));   // refs 随成功项迁移
+    CHECK(!m->chunk_referenced(cb));  // 失败项不落写
+
+    CHECK(m->delete_object("ms-swapb", "a"));
+    CHECK(m->delete_object("ms-swapb", "b"));
+    drain_gcq(*m);
+    m->drop_pack_stat(pid);
+    m->delete_bucket("ms-swapb");
+    m->close();
+}
+
 inline void run_meta_store_suite(const MetaFactory& make) {
     case_gc_accounting(make);
     case_alloc_monotonic_across_reopen(make);
@@ -353,6 +432,8 @@ inline void run_meta_store_suite(const MetaFactory& make) {
     case_pack_stats_accounting(make);
     case_pack_stats_multipart(make);
     case_scan_refs(make);
+    case_reclaim_split_and_capped_peek(make);
+    case_swap_extents_batch(make);
 }
 
 }  // namespace meta_store_suite

@@ -52,11 +52,15 @@ public:
     FsDataStore(const FsDataStore&) = delete;
 
     Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) override;
+    // 批量写覆写（压实迁移，docs/gaps.md §2.13）：pack 适格项一次槽锁 + 一次
+    // fdatasync 批量追加；超阈值/pack 关闭的项退回逐条 open_writer 路径
+    Task<std::vector<DataRef>> write_batch(std::span<const PackAppendItem> items) override;
     Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
                                                         uint64_t last) override;
     Task<void> remove(std::span<const Extent> extents) override;
     Task<void> remove_pack(uint64_t pack_id) override;
     bool pack_write_locked(uint64_t pack_id) override;
+    uint64_t stat_pack(uint64_t pack_id) override;
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
     Task<void> scan_chunks(
         const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;
@@ -86,6 +90,9 @@ private:
 
     // 追加一条 pack record（阻塞 IO，须在池线程调用）；返回指向 payload 的 extent
     Extent append_pack_record(std::string_view owner, std::span<const std::byte> payload);
+    // 批量追加（write_batch 的 pack 路径）：单次槽锁内逐条 pwrite、末尾一次
+    // fdatasync（§2.13 批量化——中途轮转封存前会先把未同步的写落盘）
+    std::vector<Extent> append_pack_records(std::span<const PackAppendItem> items);
     void seal_slot_locked(ActivePack& slot);  // 持 slot.m 调用；关 fd + 回报封存
 
     FsDataOptions opt_;

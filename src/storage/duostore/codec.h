@@ -80,4 +80,24 @@ Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms = nullptr);
 std::string encode_counter_delta(int64_t d);
 int64_t decode_counter(std::string_view v);
 
+// ---- pack record 头开销（fs_data_store §5.2：22B 固定头 + owner）----
+// pack 存活账（live_bytes）必须把 record 头计入、与 file_size 同口径：只记 payload
+// 时，小对象 pack 即使 100% 存活其 live/file_size 也恒低于 pack_gc_ratio，压实
+// 陷入"全量重写→迁走→新 pack 再重写"的永久循环（docs/gaps.md §2.3a）。
+// 头长按 owner 形态算：对象 record 为 "b\0k"，分片 record 为 "mpu\0b\0k\0id\0no"。
+// complete 把选中分片的账从分片口径重平衡到对象口径（refs 转移同批），保证
+// "对象删除 → 账归零"的守恒；盘上 record 仍是 mpu 形态，与账的头长差为轻微
+// 低计——保守方向（live 略低估 ⇒ 略多压实一次即转成对象形态，随后精确）
+inline constexpr int64_t kPackRecHeaderFixed = 22;
+inline int64_t pack_rec_overhead(std::string_view b, std::string_view k) {
+    return kPackRecHeaderFixed + int64_t(b.size()) + 1 + int64_t(k.size());
+}
+inline int64_t pack_rec_overhead_part(std::string_view b, std::string_view k,
+                                      std::string_view id, int part_no) {
+    int digits = 1;
+    for (int v = part_no; v >= 10; v /= 10) ++digits;
+    return kPackRecHeaderFixed + 3 + 1 + int64_t(b.size()) + 1 + int64_t(k.size()) + 1 +
+           int64_t(id.size()) + 1 + digits;
+}
+
 }  // namespace lights3::storage::duostore::codec

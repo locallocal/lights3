@@ -408,9 +408,14 @@ Task<std::unique_ptr<DataWriter>> FsDataStore::open_writer(WriteHint hint) {
 
 Extent FsDataStore::append_pack_record(std::string_view owner,
                                        std::span<const std::byte> payload) {
-    uint32_t crc = codec::crc32c_of(payload);
-    std::string header = build_pack_header(owner, payload.size(), crc);
-    const uint64_t rec_size = header.size() + payload.size();
+    PackAppendItem item{owner, payload};
+    return append_pack_records({&item, 1}).at(0);
+}
+
+std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendItem> items) {
+    std::vector<Extent> out;
+    if (items.empty()) return out;
+    out.reserve(items.size());
 
     // 轮询取锁（§5.2）：先 try_lock 扫一圈摊薄排队，全忙则阻塞等在起始槽上
     const unsigned start = pack_rr_.fetch_add(1, std::memory_order_relaxed) % packs_.size();
@@ -429,45 +434,94 @@ Extent FsDataStore::append_pack_record(std::string_view owner,
         lk = std::unique_lock(slot->m);
     }
 
-    // 达到 pack_max_size 即封存、换新 pack_id；size>0 守卫保证单条超限 record
-    // （threshold==max 的边界配置）仍可独占一个 pack 落地
-    if (slot->fd >= 0 && slot->size > 0 && slot->size + rec_size > opt_.pack_max_size)
-        seal_slot_locked(*slot);
-    if (slot->fd < 0) {
-        slot->id = alloc_(Extent::Kind::kPack);
-        unsigned shard = shard_of(slot->id);
-        int dirfd = pack_dirfd(shard);  // 确保 shard 目录存在
-        auto path = pack_path(slot->id);
-        slot->fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-        if (slot->fd < 0) throw_errno("open pack");
-        // active pack 加咨询锁，随 fd 关闭自动释放（封存/进程退出/崩溃都算）。
-        // 它是"这个 pack 正被某个活着的进程写"的唯一可靠信号：另一实例启动时
-        // 据此区分"我上一代遗留的 pack"与"别人正在写的 pack"，避免把后者补封
-        // 后当成低存活 pack 重写甚至整删（docs/gaps.md §1.4）
-        if (::flock(slot->fd, LOCK_EX | LOCK_NB) != 0)
-            LOG_WARN("duostore: cannot lock active pack {} ({}); concurrent-writer "
-                     "detection degraded", slot->id, std::strerror(errno));
-        slot->size = 0;
-        // pack 创建低频（轮转粒度），目录立即 fsync（chunk 是会话末批量，§5.1）
-        if (::fsync(dirfd) != 0) throw_errno("fsync pack shard dir");
-    }
+    // 批量化（docs/gaps.md §2.13）：批内逐条 pwrite，fdatasync 收敛到批末一次。
+    // 崩溃丢失的只可能是"尚未返回给调用方"的记录——swap/meta 提交都在本函数返回
+    // 之后，等价 torn tail（§5.2 重启弃用的预期形态）
+    bool dirty = false;
+    auto sync_slot = [&] {
+        if (!dirty) return;
+        if (::fdatasync(slot->fd) != 0) throw_errno("fdatasync pack");
+        dirty = false;
+    };
 
-    // 一次 pwrite 头+payload + fdatasync（§5.2；group-commit 聚合为非目标 §6.3）
-    std::string rec = std::move(header);
-    rec.append(reinterpret_cast<const char*>(payload.data()), payload.size());
-    size_t off = 0;
-    while (off < rec.size()) {
-        ssize_t w = ::pwrite(slot->fd, rec.data() + off, rec.size() - off,
-                             off_t(slot->size + off));
-        if (w < 0) throw_errno("pwrite pack record");
-        off += size_t(w);
-    }
-    if (::fdatasync(slot->fd) != 0) throw_errno("fdatasync pack");
+    for (const auto& item : items) {
+        uint32_t crc = codec::crc32c_of(item.payload);
+        std::string header = build_pack_header(item.owner, item.payload.size(), crc);
+        const uint64_t rec_size = header.size() + item.payload.size();
 
-    Extent e{Extent::Kind::kPack, slot->id, slot->size + (rec.size() - payload.size()),
-             payload.size(), crc};
-    slot->size += rec_size;
-    return e;
+        // 达到 pack_max_size 即封存、换新 pack_id；size>0 守卫保证单条超限 record
+        // （threshold==max 的边界配置）仍可独占一个 pack 落地。封存前先把本批未
+        // 同步的写落盘——seal 回调回报的 file_size 必须对应已持久的字节
+        if (slot->fd >= 0 && slot->size > 0 && slot->size + rec_size > opt_.pack_max_size) {
+            sync_slot();
+            seal_slot_locked(*slot);
+        }
+        if (slot->fd < 0) {
+            slot->id = alloc_(Extent::Kind::kPack);
+            unsigned shard = shard_of(slot->id);
+            int dirfd = pack_dirfd(shard);  // 确保 shard 目录存在
+            auto path = pack_path(slot->id);
+            slot->fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+            if (slot->fd < 0) throw_errno("open pack");
+            // active pack 加咨询锁，随 fd 关闭自动释放（封存/进程退出/崩溃都算）。
+            // 它是"这个 pack 正被某个活着的进程写"的唯一可靠信号：另一实例启动时
+            // 据此区分"我上一代遗留的 pack"与"别人正在写的 pack"，避免把后者补封
+            // 后当成低存活 pack 重写甚至整删（docs/gaps.md §1.4）
+            if (::flock(slot->fd, LOCK_EX | LOCK_NB) != 0)
+                LOG_WARN("duostore: cannot lock active pack {} ({}); concurrent-writer "
+                         "detection degraded", slot->id, std::strerror(errno));
+            slot->size = 0;
+            // pack 创建低频（轮转粒度），目录立即 fsync（chunk 是会话末批量，§5.1）
+            if (::fsync(dirfd) != 0) throw_errno("fsync pack shard dir");
+        }
+
+        // 一次 pwrite 头+payload（§5.2；group-commit 聚合为非目标 §6.3）
+        std::string rec = std::move(header);
+        rec.append(reinterpret_cast<const char*>(item.payload.data()), item.payload.size());
+        size_t off = 0;
+        while (off < rec.size()) {
+            ssize_t w = ::pwrite(slot->fd, rec.data() + off, rec.size() - off,
+                                 off_t(slot->size + off));
+            if (w < 0) throw_errno("pwrite pack record");
+            off += size_t(w);
+        }
+        dirty = true;
+
+        out.push_back({Extent::Kind::kPack, slot->id,
+                       slot->size + (rec.size() - item.payload.size()), item.payload.size(),
+                       crc});
+        slot->size += rec_size;
+    }
+    sync_slot();
+    return out;
+}
+
+Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendItem> items) {
+    co_await pool_->schedule();
+    std::vector<DataRef> out(items.size());
+    // pack 适格项批量追加（单槽锁 + 单 fdatasync）；其余（超阈值/pack 关停/空
+    // payload）退回逐条 writer——阈值缩小后旧 pack record 也可能超限，分流须保留
+    std::vector<size_t> pack_idx;
+    std::vector<PackAppendItem> pk;
+    for (size_t i = 0; i < items.size(); ++i)
+        if (opt_.pack_threshold > 0 && !items[i].payload.empty() &&
+            items[i].payload.size() <= opt_.pack_threshold) {
+            pack_idx.push_back(i);
+            pk.push_back(items[i]);
+        }
+    if (!pk.empty()) {
+        auto exts = append_pack_records(pk);
+        for (size_t j = 0; j < exts.size(); ++j) out[pack_idx[j]].extents = {exts[j]};
+    }
+    std::vector<bool> via_pack(items.size(), false);
+    for (size_t i : pack_idx) via_pack[i] = true;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (via_pack[i]) continue;
+        auto w = co_await open_writer({items[i].payload.size(), std::string(items[i].owner)});
+        co_await w->write(items[i].payload);
+        out[i] = co_await w->finish();
+    }
+    co_return out;
 }
 
 void FsDataStore::seal_slot_locked(ActivePack& slot) {
@@ -489,12 +543,23 @@ Task<std::unique_ptr<http::BodyReader>> FsDataStore::open_reader(DataRef ref, ui
 
 Task<void> FsDataStore::remove(std::span<const Extent> extents) {
     co_await pool_->schedule();
+    size_t done = 0;
     for (const auto& e : extents) {
         if (e.kind != Extent::Kind::kChunk) continue;  // pack record 为死区，随压实回收（§9.1）
         if (::unlink(chunk_path(e.file_id).c_str()) != 0 && errno != ENOENT)
             throw_errno("unlink chunk");  // 幂等：ENOENT 忽略
+        // TB 级对象数十万 extent：定期让出，别把一个池线程占死数分钟（gaps §2.11）
+        if (++done % 1024 == 0) co_await pool_->schedule();
     }
     co_return;
+}
+
+uint64_t FsDataStore::stat_pack(uint64_t pack_id) {
+    // GC 判定前回填崩溃遗留 seal(0) 的分母（gaps §2.3b）：一次 stat 即得，免得
+    // file_size 未知的 pack 无条件进全量顺扫重写
+    struct stat sb;
+    if (::stat(pack_path(pack_id).c_str(), &sb) != 0) return 0;
+    return uint64_t(sb.st_size);
 }
 
 bool FsDataStore::pack_write_locked(uint64_t pack_id) {
@@ -557,6 +622,20 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
     if (::fstat(rfd, &sb) != 0) throw_errno("fstat pack");
     st.file_size = uint64_t(sb.st_size);
 
+    // 迁移攒批（gaps §2.13 批量化）：K 条一次交付回调——追加侧一次 fdatasync、
+    // meta 侧按 owner 聚合换 ref，替代逐条"一次 fdatasync + 一次 meta 提交"
+    constexpr size_t kMigrateBatchRecs = 64;
+    constexpr uint64_t kMigrateBatchBytes = 4ull << 20;
+    std::vector<PackScanRecord> batch;
+    uint64_t batch_bytes = 0;
+    auto flush_batch = [&]() -> Task<void> {
+        if (batch.empty()) co_return;
+        st.migrated += co_await migrate_(*this, std::move(batch));
+        batch.clear();
+        batch_bytes = 0;
+        co_await pool_->schedule();  // 迁移含 IO + meta 提交；批间让出池线程
+    };
+
     std::vector<std::byte> hdr(kPackHeaderFixed);
     std::string owner;
     std::vector<std::byte> payload;
@@ -599,12 +678,15 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
         ++st.scanned;
         Extent from{Extent::Kind::kPack, pack_id, off + header_len, payload_len, crc};
         if (migrate_) {
-            if (co_await migrate_(*this, owner, from, std::span<const std::byte>(payload)))
-                ++st.migrated;
-            co_await pool_->schedule();  // 迁移含 IO + meta 提交；record 间让出池线程
+            batch.push_back({owner, from, std::move(payload)});
+            payload = {};  // moved-from 复位（下一条 resize 重新分配）
+            batch_bytes += payload_len;
+            if (batch.size() >= kMigrateBatchRecs || batch_bytes >= kMigrateBatchBytes)
+                co_await flush_batch();
         }
         off += header_len + payload_len;
     }
+    if (migrate_) co_await flush_batch();
     co_return st;
 }
 

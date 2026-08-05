@@ -38,7 +38,13 @@ bool BackgroundTaskGroup::spawn(Task<void> t) {
         if (closing_) return false;
         ++count_;
     }
-    run_detached(name_, std::move(t), [this] { on_done(); });
+    try {
+        run_detached(name_, std::move(t), [this] { on_done(); });
+    } catch (...) {
+        // 帧分配失败：计数已加而 done 回调永不执行，不回补则 wait_idle() 永久阻塞
+        on_done();
+        throw;
+    }
     return true;
 }
 

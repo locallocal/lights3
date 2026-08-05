@@ -110,66 +110,123 @@ std::vector<std::string_view> split_owner(std::string_view owner) {
 
 }  // namespace
 
-Task<bool> migrate_pack_record(IMetaStore& meta, IDataStore& data, PinTable* pins,
-                               std::string_view owner, const Extent& from,
-                               std::span<const std::byte> payload) {
+Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable* pins,
+                                    std::vector<PackScanRecord> batch) {
     // owner 只是反查提示（§9.2）：对象 record 内嵌 "b\0k"；mpu record 内嵌
     // "mpu\0b\0k\0id\0no"——complete 后分片归属 b/k 的对象（refs 转移不改 record），
     // 提示仍然可用。进行中 mpu 的分片（对象上查不到 from）与 P4 之前的旧格式
-    // "mpu\0id\0no"（无 b/k 可查）都保守返回 false：live 账不动，pack 本轮不删，
+    // "mpu\0id\0no"（无 b/k 可查）都保守不迁：live 账不动，pack 本轮不删，
     // 分别待 complete/abort 后自然解锁与永久搁置（重写盘上旧 record 非目标）
-    auto parts = split_owner(owner);
-    std::string_view b, k;
-    if (parts.size() == 2) {
-        b = parts[0];
-        k = parts[1];
-    } else if (parts.size() == 5 && parts[0] == "mpu") {
-        b = parts[1];
-        k = parts[2];
-    } else {
-        co_return false;
-    }
-    if (b.empty() || k.empty()) co_return false;
 
-    auto rec = meta.get_object(b, k);
-    if (!rec) co_return false;
-    size_t idx = rec->data.extents.size();
-    for (size_t i = 0; i < rec->data.extents.size(); ++i)
-        if (rec->data.extents[i] == from) {
-            idx = i;
-            break;
+    // 1) 按 owner 聚合（gaps §2.13）：同一对象在同一 pack 的多条 record 一次
+    // get_object + 一次换 ref，替代逐条整份 manifest 重写的 O(n²)
+    struct Group {
+        std::string b, k;
+        std::vector<size_t> recs;  // batch 下标，扫描序
+    };
+    std::vector<Group> groups;
+    std::map<std::string, size_t> by_owner;  // "b\0k" -> groups 下标
+    for (size_t i = 0; i < batch.size(); ++i) {
+        auto parts = split_owner(batch[i].owner);
+        std::string_view b, k;
+        if (parts.size() == 2) {
+            b = parts[0];
+            k = parts[1];
+        } else if (parts.size() == 5 && parts[0] == "mpu") {
+            b = parts[1];
+            k = parts[2];
+        } else {
+            continue;
         }
-    if (idx == rec->data.extents.size()) co_return false;  // 已覆盖/删除 = 死区
-
-    // 存活：payload 追加回 active pack（open_writer 按当前配置分流——阈值缩小或
-    // pack 关停时落 chunk 同样正确）；新 record 的 owner 统一写对象形态
-    auto writer = co_await data.open_writer(
-        {payload.size(), std::string(b) + '\0' + std::string(k)});
-    co_await writer->write(payload);
-    DataRef nref = co_await writer->finish();
-
-    DataRef to;
-    to.extents.reserve(rec->data.extents.size() - 1 + nref.extents.size());
-    to.extents.assign(rec->data.extents.begin(), rec->data.extents.begin() + idx);
-    to.extents.insert(to.extents.end(), nref.extents.begin(), nref.extents.end());
-    to.extents.insert(to.extents.end(), rec->data.extents.begin() + idx + 1,
-                      rec->data.extents.end());
-
-    bool ok = meta.swap_extents(b, k, rec->version, rec->data, to);
-    if (!ok) {
-        // 期间被覆盖/删除：追加的新 record 成死区（无账，随未来压实回收）；chunk 类
-        // 残留则显式清（refs 从未建立，删之即净）
-        try {
-            co_await data.remove(nref.extents);
-        } catch (...) {
-        }
+        if (b.empty() || k.empty()) continue;
+        std::string gk = std::string(b) + '\0' + std::string(k);
+        auto [it, fresh] = by_owner.try_emplace(std::move(gk), groups.size());
+        if (fresh) groups.push_back({std::string(b), std::string(k), {}});
+        groups[it->second].recs.push_back(i);
     }
-    // 写侧 pin 对称解除（追加走 chunk 路径时 ChunkPinHooks 已 pin；swap 成功即
-    // refs 在账，失败则文件已删——两况都该解）
-    if (pins)
-        for (const auto& e : nref.extents)
-            if (e.kind != Extent::Kind::kPack) pins->unpin_id(e.file_id);
-    co_return ok;
+
+    // 2) 逐组反查存活：from 与当前 manifest 逐位置配对（同 extent 不会出现两次——
+    // manifest 由互异 record 拼成；防御起见仍标记已配对位置）
+    struct LiveRec {
+        size_t group;      // groups 下标
+        size_t manifest_i; // 该组 manifest 中被替换的位置
+        size_t rec_i;      // batch 下标
+    };
+    std::vector<LiveRec> live;
+    std::vector<std::optional<ObjectRec>> group_rec(groups.size());
+    for (size_t g = 0; g < groups.size(); ++g) {
+        auto rec = meta.get_object(groups[g].b, groups[g].k);
+        if (!rec) continue;  // 对象不存在 = 全部死区/进行中 mpu，保守不迁
+        std::vector<bool> used(rec->data.extents.size(), false);
+        for (size_t ri : groups[g].recs)
+            for (size_t i = 0; i < rec->data.extents.size(); ++i)
+                if (!used[i] && rec->data.extents[i] == batch[ri].from) {
+                    used[i] = true;
+                    live.push_back({g, i, ri});
+                    break;
+                }
+        group_rec[g] = std::move(rec);
+    }
+    if (live.empty()) co_return 0;
+
+    // 3) 存活 payload 批量追加（fs 实现单槽锁 + 单 fdatasync）；新 record 的 owner
+    // 统一写对象形态。open_writer 同款分流语义——阈值缩小或 pack 关停时落 chunk
+    // 同样正确
+    std::vector<std::string> owners(live.size());
+    std::vector<PackAppendItem> items(live.size());
+    for (size_t i = 0; i < live.size(); ++i) {
+        const auto& gr = groups[live[i].group];
+        owners[i] = gr.b + '\0' + gr.k;
+        items[i] = {owners[i], std::span<const std::byte>(batch[live[i].rec_i].payload)};
+    }
+    std::vector<DataRef> nrefs = co_await data.write_batch(items);
+
+    // 4) 逐组拼新 manifest（多处替换一次完成）→ 批量换 ref
+    std::vector<SwapReq> reqs;
+    std::vector<size_t> req_group;
+    reqs.reserve(groups.size());
+    for (size_t g = 0; g < groups.size(); ++g) {
+        if (!group_rec[g]) continue;
+        std::map<size_t, size_t> repl;  // manifest 位置 -> live 下标
+        for (size_t i = 0; i < live.size(); ++i)
+            if (live[i].group == g) repl[live[i].manifest_i] = i;
+        if (repl.empty()) continue;
+        const auto& old = group_rec[g]->data;
+        DataRef to;
+        to.extents.reserve(old.extents.size());
+        for (size_t i = 0; i < old.extents.size(); ++i) {
+            auto it = repl.find(i);
+            if (it == repl.end()) to.extents.push_back(old.extents[i]);
+            else
+                to.extents.insert(to.extents.end(), nrefs[it->second].extents.begin(),
+                                  nrefs[it->second].extents.end());
+        }
+        reqs.push_back({groups[g].b, groups[g].k, group_rec[g]->version, old, std::move(to)});
+        req_group.push_back(g);
+    }
+    std::vector<bool> ok = meta.swap_extents_batch(reqs);
+
+    // 5) 失败组清理 + 写侧 pin 对称解除。期间被覆盖/删除：追加的新 record 成死区
+    // （无账，随未来压实回收）；chunk 类残留显式清（refs 从未建立，删之即净）。
+    // pin：swap 成功即 refs 在账，失败则文件已删——两况都解
+    uint64_t migrated = 0;
+    std::vector<bool> group_ok(groups.size(), false);
+    for (size_t r = 0; r < reqs.size(); ++r) group_ok[req_group[r]] = ok[r];
+    for (size_t i = 0; i < live.size(); ++i) {
+        const DataRef& nref = nrefs[i];
+        if (group_ok[live[i].group]) {
+            ++migrated;
+        } else {
+            try {
+                co_await data.remove(nref.extents);
+            } catch (...) {
+            }
+        }
+        if (pins)
+            for (const auto& e : nref.extents)
+                if (e.kind != Extent::Kind::kPack) pins->unpin_id(e.file_id);
+    }
+    co_return migrated;
 }
 
 }  // namespace duostore
@@ -577,9 +634,8 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
                           on_corruption},
             pool_, alloc,
             [meta](uint64_t pack_id, uint64_t size) { meta->seal_pack(pack_id, size); },
-            [meta, pins](IDataStore& ds, std::string_view owner, const Extent& from,
-                         std::span<const std::byte> payload) {
-                return migrate_pack_record(*meta, ds, pins.get(), owner, from, payload);
+            [meta, pins](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
+                return migrate_pack_records(*meta, ds, pins.get(), std::move(batch));
             },
             ChunkPinHooks{[pins](uint64_t id) { pins->pin_id(id); },
                           [pins](uint64_t id) { pins->unpin_id(id); }});
@@ -822,7 +878,8 @@ Task<void> commit_or_discard(IDataStore& data, const DataRef& ref, Commit commit
 }  // namespace
 
 Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string_view key,
-                                            ObjectMeta meta, http::BodyReader& body) {
+                                            ObjectMeta meta, http::BodyReader& body,
+                                            PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     co_await pool_->schedule();
@@ -837,9 +894,10 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     rec.meta.etag = pumped.md5;
     rec.meta.last_modified = std::chrono::system_clock::now();
     rec.data = pumped.ref;
-    // 提交点；旧 DataRef 同批入 gcq
+    // 提交点；旧 DataRef 同批入 gcq。条件检查在 meta 事务原子区内完成，
+    // 失败抛出走 discard 路径回收已落的数据 extent
     co_await commit_or_discard(*data_, pumped.ref,
-                               [&] { meta_->put_object(bucket, key, std::move(rec)); });
+                               [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
     co_return PutResult{pumped.md5};
 }
 
@@ -992,6 +1050,9 @@ Task<std::vector<UploadInfo>> DuoStoreBackend::list_multipart_uploads(
 namespace {
 
 constexpr size_t kGcBatch = 256;  // 单轮 peek 批量；批间 ack 后推进，防大积压单批爆内存
+// 批内累计 extent 上限（gaps §2.11）：按条数批在"删过 TB 级对象"的账面下单批可达
+// GB 级驻留——enqueue 侧已按 kReclaimMaxExtents 拆分，这里对拆分前遗留的旧账兜底
+constexpr size_t kGcBatchExtents = 32768;
 
 }  // namespace
 
@@ -1043,11 +1104,23 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     // 2) gcq 消费（§9.1）：逾 gc_grace 且无 pin 的项，先物理删、后销账——反序在删
     // 与销之间崩溃会产生永久孤儿的账外文件；正序崩溃只是 gcq 残留，重试 unlink 幂等。
     // 按 next_seq 断点续扫：被 grace/pin 跳过的队头项不重扫（不卡轮、不重复计数、
-    // 无二次解码），扫到队尾即一轮结束
+    // 无二次解码），扫到队尾即一轮结束。
+    // 跨轮水位（gaps §2.13）：上轮跳过项全部未到可重试时刻的轮次，从上轮高位起扫
+    // ——队头 grace 积压不再每轮重复 peek+解码
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
+    const int64_t round_now = codec::to_unix_ms(std::chrono::system_clock::now());
     uint64_t next_seq = 0;
+    if (gcq_skips_.any)
+        next_seq = round_now < gcq_skips_.retry_at_ms ? gcq_hi_ : gcq_skips_.lo_seq;
+    const bool full_scan = !gcq_skips_.any || next_seq == gcq_skips_.lo_seq;
+    GcqSkips skips;  // 本轮新增的跳过项
+    auto note_skip = [&skips](uint64_t seq, int64_t retry_at) {
+        if (!skips.any || seq < skips.lo_seq) skips.lo_seq = seq;
+        if (!skips.any || retry_at < skips.retry_at_ms) skips.retry_at_ms = retry_at;
+        skips.any = true;
+    };
     for (;;) {
-        auto batch = meta_->peek_reclaims(kGcBatch, next_seq);
+        auto batch = meta_->peek_reclaims(kGcBatch, next_seq, kGcBatchExtents);
         if (batch.empty()) break;
         next_seq = batch.back().first + 1;
         std::vector<uint64_t> acked;
@@ -1057,10 +1130,12 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         for (const auto& [seq, rc] : batch) {
             if (batch_now - rc.enqueue_ms < grace_ms) {
                 ++st.skipped_grace;
+                note_skip(seq, rc.enqueue_ms + grace_ms);  // 确定性下界
                 continue;
             }
             if (pins_->any_pinned(rc.extents)) {
                 ++st.skipped_pinned;
+                note_skip(seq, batch_now);  // pin 何时释放未知：下一轮即重试
                 continue;
             }
             try {
@@ -1070,7 +1145,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             } catch (const std::exception& e) {
                 LOG_WARN("duostore '{}': gc remove (seq {}) failed: {}", cfg_.name, seq,
                          e.what());
-                continue;  // 不销账，gcq 残留下轮重试
+                note_skip(seq, batch_now);  // 不销账，gcq 残留下轮重试
+                continue;
             }
             for (const auto& e : rc.extents)
                 if (e.kind != Extent::Kind::kPack) ++st.files_removed;
@@ -1080,7 +1156,14 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             meta_->ack_reclaims(acked);  // 批量销账（单事务/单批，接口注释的成本论证）
             st.reclaims_acked += acked.size();
         }
-        if (batch.size() < kGcBatch) break;  // 队列见底
+    }
+    gcq_hi_ = std::max(gcq_hi_, next_seq);
+    if (full_scan) {
+        gcq_skips_ = skips;  // 全量轮：水位以本轮观测整体重建
+    } else if (skips.any) {
+        // 增量轮：与既有水位合并（旧跳过项仍在队头未重访）
+        gcq_skips_.lo_seq = std::min(gcq_skips_.lo_seq, skips.lo_seq);
+        gcq_skips_.retry_at_ms = std::min(gcq_skips_.retry_at_ms, skips.retry_at_ms);
     }
 
     // 3) pack 压实（P4 §9.2）：sealed、live>0 且存活率低于 pack_gc_ratio（或崩溃遗留
@@ -1089,11 +1172,25 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     // 存活损坏 record）跳过重扫——账一有变化即自动重试
     std::vector<uint64_t> rewritten;
     const int64_t compact_now = codec::to_unix_ms(std::chrono::system_clock::now());
-    for (const auto& ps : meta_->pack_stats()) {
+    for (auto ps : meta_->pack_stats()) {
         if (!ps.sealed || ps.live_recs <= 0) continue;
-        if (ps.file_size > 0 &&
-            double(ps.live_bytes) >= cfg_.pack_gc_ratio * double(ps.file_size))
-            continue;
+        // 崩溃遗留 seal(0) 的分母先回填（gaps §2.3b）：一次 stat 即得，免得每次非
+        // 优雅退出都把全部 active pack 无条件推进全量顺扫重写
+        if (ps.file_size == 0) {
+            if (uint64_t sz = data_->stat_pack(ps.pack_id); sz > 0) {
+                meta_->seal_pack(ps.pack_id, sz);
+                ps.file_size = sz;
+            }
+        }
+        if (ps.file_size > 0) {
+            // live 计入 record 头后与 file_size 同口径（gaps §2.3a——只记 payload 时
+            // 小对象 pack 100% 存活也恒低于阈值，压实永不收敛）。无可回收字节
+            // （live ≥ file_size，含轻微低计的容差方向）或存活率过阈值都跳过
+            const int64_t reclaimable = int64_t(ps.file_size) - ps.live_bytes;
+            if (reclaimable <= 0 ||
+                double(ps.live_bytes) > cfg_.pack_gc_ratio * double(ps.file_size))
+                continue;
+        }
         if (auto it = compact_blocked_.find(ps.pack_id);
             it != compact_blocked_.end() && it->second.live_recs == ps.live_recs &&
             compact_now < it->second.retry_at_ms)
@@ -1104,7 +1201,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             st.records_migrated += rw.migrated;
             st.records_corrupt += rw.corrupt;
             rewritten.push_back(ps.pack_id);
-            // 崩溃遗留 seal(0) 的分母回填：下轮起存活率判定有效（§9.2）
+            // stat_pack 不支持的引擎（返回 0）：顺扫回报的 file_size 兜底回填（§9.2）
             if (ps.file_size == 0 && rw.file_size > 0)
                 meta_->seal_pack(ps.pack_id, rw.file_size);
         } catch (const std::exception& e) {

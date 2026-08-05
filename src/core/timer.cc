@@ -1,5 +1,7 @@
 #include "core/timer.h"
 
+#include "core/log.h"
+
 namespace lights3 {
 
 TimerQueue::TimerQueue() : thread_([this] { loop(); }) {}
@@ -65,7 +67,17 @@ void TimerQueue::loop() {
         deadlines_.erase(first->first.second);
         items_.erase(first);
         lk.unlock();
-        fn();  // 锁外执行；期间的 cancel(id) 阻塞至此处返回（语义仍为 false"已触发"）
+        // 锁外执行；期间的 cancel(id) 阻塞至此处返回（语义仍为 false"已触发"）。
+        // 异常防线：回调抛出若逃逸线程函数即 terminate；且必须保证 running_id_
+        // 复位 + notify 在任何路径都执行，否则 cancel(该 id) 永久阻塞——而 cancel
+        // 正是各后端关停路径的第一步
+        try {
+            fn();
+        } catch (const std::exception& e) {
+            LOG_ERROR("TimerQueue: callback threw: {}", e.what());
+        } catch (...) {
+            LOG_ERROR("TimerQueue: callback threw unknown exception");
+        }
         lk.lock();
         running_id_ = 0;
         done_cv_.notify_all();

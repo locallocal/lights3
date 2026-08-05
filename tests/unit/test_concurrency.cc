@@ -341,3 +341,22 @@ TEST(semaphore_permit_released_on_exception) {
     CHECK(thrown);
     CHECK_EQ(sem.available(), 1L);  // 异常路径同样归还
 }
+
+// ---------- 关停期投递与异常防线（gaps §2.1/§2.2）----------
+
+TEST(post_after_join_runs_inline_without_throwing) {
+    ThreadPool pool(2);
+    pool.join();
+    // 续体投递的消费方是 noexcept 上下文：join 后绝不能抛，改为就地执行
+    std::atomic<bool> ran{false};
+    pool.post([&] { ran = true; });
+    CHECK(ran.load());
+}
+
+TEST(pool_task_exception_does_not_kill_worker) {
+    ThreadPool pool(1);
+    pool.post([] { throw std::runtime_error("escaped task exception"); });
+    std::promise<void> done;
+    pool.post([&] { done.set_value(); });  // 同一 worker 线程仍然活着
+    CHECK(done.get_future().wait_for(5s) == std::future_status::ready);
+}

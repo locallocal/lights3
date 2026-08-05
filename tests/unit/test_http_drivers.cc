@@ -101,6 +101,13 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         resp.small_body = "ok";
         co_return resp;
     }
+    if (req.path == "/badheader") {  // 出站头注入面：CR/LF 值与非法头名必须被丢弃
+        resp.headers.set("X-Evil", "a\r\nInjected: 1");
+        resp.headers.set("Bad Name", "v");
+        resp.headers.set("X-Fine", "ok");
+        resp.small_body = "ok";
+        co_return resp;
+    }
     if (req.path == "/slow") {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         resp.small_body = "done";
@@ -667,6 +674,23 @@ TEST(http_driver_response_headers_not_duplicated) {
         CHECK_EQ(count("Content-Length"), 1);
         CHECK(count("Transfer-Encoding") == 0);
         CHECK(count("Connection") <= 1);
+    });
+}
+
+TEST(http_driver_filters_header_injection) {
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        c.send_str("GET /badheader HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(r.ok);
+        CHECK_EQ(r.status, 200);
+        // CR/LF 值（响应拆分注入面）与非法头名整体丢弃，正常头保留
+        CHECK(!r.header("Injected"));
+        CHECK(!r.header("X-Evil"));
+        CHECK(!r.header("Bad Name"));
+        CHECK_EQ(r.header("X-Fine").value_or(""), "ok");
+        CHECK_EQ(r.body, "ok");
     });
 }
 

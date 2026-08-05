@@ -36,7 +36,8 @@ public:
     ~ThreadPool();
     ThreadPool(const ThreadPool&) = delete;
 
-    // 无界入队：续体投递（executor post）不可失败也不可等待
+    // 无界入队：续体投递（executor post）不可失败也不可等待；
+    // join 后调用不抛（noexcept 消费方），改为记 ERROR 并在调用方线程就地执行
     void post(std::function<void()> fn);
     void join();  // 停止接收新任务，排空队列并等待线程退出
     size_t size() const { return workers_.size(); }

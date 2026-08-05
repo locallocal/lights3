@@ -89,3 +89,39 @@ TEST(many_concurrent_tasks) {
     for (auto& t : threads) t.join();
     CHECK_EQ(sum.load(), 31 * 32);  // 2 * (0+1+...+31)
 }
+
+// ---------- sync_wait_pumping / PumpExecutor（docs/gaps.md §2.10）----------
+
+TEST(pump_executor_runs_resume_on_caller_thread) {
+    ThreadPool pool(2);
+    PumpExecutor ex;
+    auto caller = std::this_thread::get_id();
+    // 任务链先跳到池线程，再经 resume_on 切回请求线程（阻塞读的切换路径）
+    auto t = [](ThreadPool& p, PumpExecutor& e,
+                std::thread::id caller) -> Task<bool> {
+        co_await p.schedule();
+        bool on_pool = std::this_thread::get_id() != caller;
+        co_await resume_on(e);
+        bool back_on_caller = std::this_thread::get_id() == caller;
+        co_return on_pool && back_on_caller;
+    };
+    CHECK(sync_wait_pumping(ex, t(pool, ex, caller)));
+}
+
+TEST(pump_executor_value_and_exception) {
+    PumpExecutor ex1;
+    auto v = []( ) -> Task<int> { co_return 7; };
+    CHECK_EQ(sync_wait_pumping(ex1, v()), 7);
+    PumpExecutor ex2;
+    auto boom = []() -> Task<void> {
+        throw std::runtime_error("boom");
+        co_return;
+    };
+    bool caught = false;
+    try {
+        sync_wait_pumping(ex2, boom());
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    CHECK(caught);
+}

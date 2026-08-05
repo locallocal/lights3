@@ -43,7 +43,8 @@ public:
     std::vector<BucketInfo> list_buckets() override;
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec) override;
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                    PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
     ListResult list_objects(std::string_view b, const ListOptions& opt) override;
 
@@ -60,7 +61,8 @@ public:
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;
 
     uint64_t alloc_file_id(Extent::Kind kind) override;
-    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq) override;
+    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
+                                                            size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单 WriteBatch
     std::vector<PackStat> pack_stats() override;
@@ -68,6 +70,8 @@ public:
     void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
+    // 单 WriteBatch 单提交（压实批量化，gaps §2.13）；逐项 CAS 独立
+    std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
@@ -97,7 +101,14 @@ private:
                     std::string_view owner);
     // 同批维护 pack 存活账（stats CF 增量 merge，§9.1）。独立于 batch_refs：
     // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
-    void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign);
+    // rec_overhead：每条 record 的头开销（codec::pack_rec_overhead*），live_bytes
+    // 与 file_size 同口径（docs/gaps.md §2.3a）
+    void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign,
+                          int64_t rec_overhead);
+    // swap 的单项 CAS 核心（持 mu_ 调用）：校验通过即把整组 mutation 追加进 batch
+    // 并返回 true；不符返回 false 不动 batch。swap_extents / swap_extents_batch 共用
+    bool stage_swap_locked(rocksdb::WriteBatch& batch, std::string_view b, std::string_view k,
+                          uint64_t expect_version, const DataRef& from, const DataRef& to);
 
     RocksMetaOptions opt_;
     std::atomic<rocksdb::DB*> db_{nullptr};

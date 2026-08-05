@@ -3,6 +3,7 @@
 // 超限的 acquire() 挂起排队（FIFO）而非拒绝。
 #pragma once
 
+#include <cassert>
 #include <coroutine>
 #include <deque>
 #include <mutex>
@@ -10,6 +11,7 @@
 #include <utility>
 
 #include "core/executor.h"
+#include "core/log.h"
 
 namespace lights3 {
 
@@ -21,6 +23,16 @@ public:
     explicit AsyncSemaphore(long permits, IExecutor* resume_executor = nullptr)
         : permits_(permits), exec_(resume_executor) {}
     AsyncSemaphore(const AsyncSemaphore&) = delete;
+
+    // 契约：析构时不得仍有等待者——resume 它们会拿到指向已亡信号量的 Permit（UAF），
+    // 不 resume 则帧泄漏 + sync_wait 线程永久阻塞。持有方必须先排空在途请求再析构；
+    // 违反契约时记 ERROR（debug 构建直接断言），泄漏帧是两害相权的保守选择
+    ~AsyncSemaphore() {
+        std::lock_guard lk(m_);
+        if (!waiters_.empty())
+            LOG_ERROR("AsyncSemaphore destroyed with {} waiter(s); frames leaked", waiters_.size());
+        assert(waiters_.empty());
+    }
 
     // RAII 许可：析构即归还（协程帧退出时自动释放，异常路径同样覆盖）
     class Permit {

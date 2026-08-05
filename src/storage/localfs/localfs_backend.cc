@@ -138,7 +138,8 @@ Task<std::vector<BucketInfo>> LocalFsBackend::list_buckets() {
 // ---------- object ----------
 
 Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_view key,
-                                           ObjectMeta meta, http::BodyReader& body) {
+                                           ObjectMeta meta, http::BodyReader& body,
+                                           PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
@@ -176,9 +177,11 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     meta.last_modified = std::chrono::system_clock::now();
 
     // 2. 冲突检查 + 数据 rename + sidecar 提交。per-key 锁：提交段是两次
-    // rename，并发同 key PUT 交错会产生"数据=A、etag=B"的撕裂对象
+    // rename，并发同 key PUT 交错会产生"数据=A、etag=B"的撕裂对象。
+    // 条件 PUT 的检查同在锁内（PutCondition 契约）：检查与提交对并发写者原子
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();  // 锁唤醒可能在别的线程恢复，阻塞 IO 回池线程做
+    fsutil::check_put_condition(object_path(bucket, key), cond, key);
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
     co_return PutResult{meta.etag};
 }
@@ -264,39 +267,195 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
     co_return;
 }
 
+namespace {
+
+// list_objects 的有序目录遍历（docs/gaps.md §2.7 剪枝）。
+// 目录条目的排序键：文件用 name，目录用 name+"/"——其下所有 key 均以该串为前缀，
+// 混排后的输出顺序与"全量收集 + 全排序"逐字节一致，无需物化整棵树。
+struct ListWalker {
+    const std::string& prefix;
+    const std::string& start_after;  // 仅严格大于此 key 的条目可见
+    // 返回 false 即整体终止（截断）；回调可设置 skip_prefix 以跳过 delimiter 组
+    std::function<bool(std::string&&)> on_key;
+    std::string skip_prefix;  // 非空：凡以此为前缀的 key/子树整体跳过
+    bool stopped = false;
+
+    // 子树（key 前缀 q）是否可能含有匹配的 key：与 prefix 相交，
+    // 且 start_after 不整体大于该子树的全部 key
+    bool subtree_may_match(const std::string& q) const {
+        size_t n = std::min(q.size(), prefix.size());
+        if (q.compare(0, n, prefix, 0, n) != 0) return false;
+        if (!start_after.empty() && start_after.compare(0, q.size(), q) > 0) return false;
+        return true;
+    }
+
+    // rel：该目录对应的 key 前缀（"" 或 "a/b/"）
+    void walk(const fs::path& dir, const std::string& rel) {
+        struct Entry {
+            std::string sort_key;  // 文件：name；目录：name+"/"
+            bool is_dir;
+        };
+        std::vector<Entry> es;
+        std::error_code ec;
+        for (auto& e : fs::directory_iterator(dir, ec)) {
+            std::string name = e.path().filename().string();
+            std::error_code tec;
+            if (e.is_directory(tec)) {
+                es.push_back({name + "/", true});
+                continue;
+            }
+            if (name == fsutil::kBucketMarker) continue;
+            if (name.ends_with(fsutil::kSidecarSuffix)) {
+                // 孤儿 sidecar 自愈：delete_object 是"先删数据后删 sidecar"两步，
+                // 之间崩溃会遗留一直占空间的孤儿。剪枝后只覆盖被访问到的目录
+                //（best-effort，未访问部分留待后续 list）
+                std::string data = e.path().string();
+                data.resize(data.size() - std::strlen(fsutil::kSidecarSuffix));
+                if (!fs::exists(data, tec)) fs::remove(e.path(), tec);
+                continue;
+            }
+            if (e.is_regular_file(tec)) es.push_back({std::move(name), false});
+        }
+        std::sort(es.begin(), es.end(),
+                  [](const Entry& a, const Entry& b) { return a.sort_key < b.sort_key; });
+
+        for (auto& e : es) {
+            if (stopped) return;
+            std::string q = rel + e.sort_key;  // 文件：完整 key；目录：子树前缀
+            // delimiter 组跳过：整项落在组内直接略过；组前缀在子树内部继续
+            //（skip_prefix 比 q 长且以 q 开头）时仍需下钻
+            if (!skip_prefix.empty()) {
+                if (q.compare(0, skip_prefix.size(), skip_prefix) == 0) continue;
+                if (!(e.is_dir && skip_prefix.compare(0, q.size(), q) == 0))
+                    skip_prefix.clear();
+            }
+            if (e.is_dir) {
+                if (!subtree_may_match(q)) continue;
+                fs::path sub = dir / e.sort_key.substr(0, e.sort_key.size() - 1);
+                walk(sub, q);
+                continue;
+            }
+            if (q.compare(0, prefix.size(), prefix) != 0) {
+                if (q > prefix) return;  // 已排序：出 prefix 区间即止（本目录层面）
+                continue;
+            }
+            if (!start_after.empty() && q <= start_after) continue;
+            if (!on_key(std::move(q))) {
+                stopped = true;
+                return;
+            }
+        }
+    }
+};
+
+// 以 want 为前缀的最大 key（降序扫描，首个命中即最大）；无则空串。
+// 截断边界落在 common prefix 上时用它求组尾，保持 next_token 语义
+//（"组内最后一个 key"）与全量实现一致
+std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
+                                const std::string& want) {
+    struct Entry {
+        std::string sort_key;
+        bool is_dir;
+    };
+    std::vector<Entry> es;
+    std::error_code ec;
+    for (auto& e : fs::directory_iterator(dir, ec)) {
+        std::string name = e.path().filename().string();
+        std::error_code tec;
+        if (e.is_directory(tec)) es.push_back({name + "/", true});
+        else if (name != fsutil::kBucketMarker && !name.ends_with(fsutil::kSidecarSuffix) &&
+                 e.is_regular_file(tec))
+            es.push_back({std::move(name), false});
+    }
+    std::sort(es.begin(), es.end(),
+              [](const Entry& a, const Entry& b) { return a.sort_key > b.sort_key; });
+    for (auto& e : es) {
+        std::string q = rel + e.sort_key;
+        if (e.is_dir) {
+            // 子树整体在组内（q 以 want 开头），或组前缀穿过该子树（want 以 q 开头）
+            if (q.compare(0, want.size(), want) != 0 && want.compare(0, q.size(), q) != 0)
+                continue;
+            fs::path sub = dir / e.sort_key.substr(0, e.sort_key.size() - 1);
+            auto r = max_key_with_prefix(sub, q, want);
+            if (!r.empty()) return r;
+        } else if (q.compare(0, want.size(), want) == 0) {
+            return q;
+        }
+    }
+    return {};
+}
+
+}  // namespace
+
 Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
     validate_bucket_name(bucket, kAllowReserved);
     co_await pool_->schedule();
     require_bucket(bucket);
 
     fs::path base = bucket_dir(bucket);
-    std::vector<std::string> keys;
-    for (auto it = fs::recursive_directory_iterator(base); it != fs::recursive_directory_iterator();
-         ++it) {
-        if (!it->is_regular_file()) continue;
-        std::string name = it->path().filename().string();
-        if (name == kBucketMarker) continue;
-        if (name.ends_with(kSidecarSuffix)) {
-            // 孤儿 sidecar 自愈：delete_object 是"先删数据后删 sidecar"两步，
-            // 之间崩溃会遗留一个对 list 不可见、却一直占空间的 sidecar。
-            // 全树遍历本就在这里，顺手清掉（best-effort，失败下轮再来）
-            std::string data = it->path().string();
-            data.resize(data.size() - std::strlen(kSidecarSuffix));
-            std::error_code ec;
-            if (!fs::exists(data, ec)) fs::remove(it->path(), ec);
-            continue;
+    ListResult out;
+    // S3：max-keys=0 返回空结果且 IsTruncated=false（与 apply_listing 一致）
+    if (opt.max_keys <= 0) co_return out;
+
+    // prefix 剪枝：最后一个 '/' 之前的部分直接定位起始目录，不存在即无匹配
+    std::string dir_rel;
+    if (auto slash = opt.prefix.rfind('/'); slash != std::string::npos)
+        dir_rel = opt.prefix.substr(0, slash + 1);
+    fs::path start_dir = dir_rel.empty() ? base : base / fs::path(dir_rel);
+    std::error_code ec;
+    if (!fs::is_directory(start_dir, ec)) co_return out;
+
+    const std::string& delim = opt.delimiter;
+    int count = 0;
+    std::string last_emitted;   // 最后发出的条目（key 或组名）
+    bool last_is_group = false;
+
+    ListWalker walker{opt.prefix, opt.start_after, nullptr, {}, false};
+    auto truncate = [&] {
+        out.is_truncated = true;
+        // 组尾即 token（与全量实现一致）；并发删除使组消失时回落组名本身
+        if (last_is_group) {
+            std::string tail = max_key_with_prefix(start_dir, dir_rel, last_emitted);
+            out.next_token = tail.empty() ? last_emitted : tail;
+        } else {
+            out.next_token = last_emitted;
         }
-        keys.push_back(fs::relative(it->path(), base).generic_string());
-    }
-    std::sort(keys.begin(), keys.end());
-    co_return apply_listing(keys, opt, [&](const std::string& k) {
-        return load_meta(base / fs::path(k), k);
-    });
+    };
+    walker.on_key = [&](std::string&& key) {
+        if (!delim.empty()) {
+            auto pos = key.find(delim, opt.prefix.size());
+            if (pos != std::string::npos) {
+                std::string group = key.substr(0, pos + delim.size());
+                if (count >= opt.max_keys) {
+                    truncate();
+                    return false;
+                }
+                out.common_prefixes.push_back(group);
+                walker.skip_prefix = group;  // 同组其余 key/子树整体剪掉
+                last_emitted = std::move(group);
+                last_is_group = true;
+                ++count;
+                return true;
+            }
+        }
+        if (count >= opt.max_keys) {
+            truncate();
+            return false;
+        }
+        out.objects.push_back(load_meta(base / fs::path(key), key));
+        last_emitted = std::move(key);
+        last_is_group = false;
+        ++count;
+        return true;
+    };
+    walker.walk(start_dir, dir_rel);
+    co_return out;
 }
 
 // ---------- multipart（docs/storage-backend.md §3.2）----------
 // 布局：<staging>/mpu/<upload_id>/{manifest, part.NNNNN, part.NNNNN.md5}
-// 分片先 md5 后数据文件（与 sidecar-先-data-后 一致，数据文件出现即分片就绪）
+// 分片先 fsync 数据、后写 .md5：.md5 的出现即分片数据已持久（complete 信任
+// .md5 不重算校验和，该信任必须以此顺序为前提）
 
 Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
                                                    std::string_view key, ObjectMeta meta) {
@@ -349,13 +508,15 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
             left -= static_cast<size_t>(w);
         }
     }
+    fsutil::fsync_file(tmp.fd);  // 分片数据先落盘：.md5 的出现才是数据已持久的证据
     ::close(tmp.fd);
     tmp.fd = -1;
     std::string etag = md5.final_hex();
 
-    // 先 md5 后数据文件；同号重传 last-write-wins（rename 覆盖）
+    // 顺序：先数据 rename、后写 .md5（同号重传 last-write-wins，rename 覆盖）。
+    // 反序（旧实现）下"分片 200 → 掉电"会留下 fsync 过的 .md5 配零块数据，
+    // 而 complete 信任 .md5 不重算，产出 ETag 合法、内容为零块的对象
     std::string name = part_file_name(part_no);
-    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
     std::error_code ec;
     fs::rename(tmp.path, up.dir / name, ec);
     if (ec) {
@@ -367,6 +528,8 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
         throw S3Error(S3ErrorCode::InternalError, "rename part failed");
     }
     tmp.committed = true;
+    fsutil::fsync_dir(up.dir);
+    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
     co_return PutResult{etag};
 }
 

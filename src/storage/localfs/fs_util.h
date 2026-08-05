@@ -37,6 +37,12 @@ void reject_reserved_key(std::string_view key);
 
 [[noreturn]] void throw_errno(const std::string& what);
 
+// 持久性原语（LIGHTS3_FSYNC=0 时全部为 no-op，docs/storage-backend.md §3.1）：
+// fsync_file 对已打开 fd 做 fdatasync（失败抛错）；fsync_dir 使目录项持久
+//（rename 只保证原子，不保证父目录已落盘；失败静默——不该拖垮写路径）
+void fsync_file(int fd);
+void fsync_dir(const std::filesystem::path& dir);
+
 // k<TAB>v 行格式，tmp+rename 原子写
 void write_tsv(const std::filesystem::path& dest, const std::filesystem::path& tmp_dir,
                const std::vector<std::pair<std::string, std::string>>& kv);
@@ -46,6 +52,12 @@ std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem:
 // PUT 与 complete_multipart 共用
 void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                         const std::filesystem::path& staging_put, std::string_view key);
+
+// 条件 PUT 的提交点校验（PutCondition 契约，storage/backend.h）：调用方必须持
+// 同 key 的 commit 锁，使检查与随后的 rename 提交原子。元数据经 xattr/sidecar
+// 读取，对 tier stub 同样权威（stub 保留原 etag），tiered 直接复用本检查
+void check_put_condition(const std::filesystem::path& data_path, const PutCondition& cond,
+                         std::string_view key);
 
 // ---- 分层存储的 sidecar 扩展（docs/tiered-storage.md §4）----
 

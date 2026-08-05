@@ -337,6 +337,14 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
             if (auto code = map_remote_code(remote_code))
                 throw S3Error(*code, remote_msg.empty() ? remote_code : remote_msg, res);
         }
+        // 条件写被上游拒绝（If-None-Match/If-Match 透传，backend.h PutCondition）：
+        // 体不可解析时也要按语义映射，不能落进 InternalError
+        if (status == 412)
+            throw S3Error(S3ErrorCode::PreconditionFailed,
+                          remote_msg.empty()
+                              ? "At least one of the pre-conditions you specified did not hold"
+                              : remote_msg,
+                          res);
         if (status == 404) {
             switch (ctx) {
                 case ErrCtx::Key:

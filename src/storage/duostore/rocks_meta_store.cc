@@ -198,13 +198,14 @@ void RocksMetaStore::batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, 
 }
 
 void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref,
-                                      int sign) {
-    // 同 pack 多 extent 先聚合，每 pack 两次 merge（§9.1：随业务事务同批增减）
+                                      int sign, int64_t rec_overhead) {
+    // 同 pack 多 extent 先聚合，每 pack 两次 merge（§9.1：随业务事务同批增减）；
+    // 每条 record 计 payload + 头开销，与 file_size 同口径（docs/gaps.md §2.3a）
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
         auto& [bytes, recs] = agg[e.file_id];
-        bytes += sign * int64_t(e.length);
+        bytes += sign * (int64_t(e.length) + rec_overhead);
         recs += sign;
     }
     for (const auto& [id, d] : agg) {
@@ -215,9 +216,16 @@ void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef&
 
 void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref) {
     if (ref.extents.empty()) return;
-    uint64_t seq = alloc_id(kCounterSeq, seqs_);
-    batch.Put(cfs_[kGcq], codec::be64_key(seq),
-              codec::encode_reclaim(Reclaim{ref.extents}, now_ms()));
+    // 超大 DataRef（TB 级对象 = 数十万 extent）拆成多条 gcq 项（docs/gaps.md §2.11）：
+    // GC 单批的解码驻留内存有界；ack 逐条独立，拆分不改变崩溃语义（unlink 幂等）
+    const int64_t ts = now_ms();
+    for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
+        size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
+        Reclaim r;
+        r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        uint64_t seq = alloc_id(kCounterSeq, seqs_);
+        batch.Put(cfs_[kGcq], codec::be64_key(seq), codec::encode_reclaim(r, ts));
+    }
 }
 
 uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r) {
@@ -307,22 +315,25 @@ std::optional<ObjectRec> RocksMetaStore::get_object(std::string_view b, std::str
     return codec::decode_object(std::string(k), *v);
 }
 
-void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec) {
+void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                                PutCondition cond) {
     std::lock_guard lk(mu_);
     require_bucket_locked(b);
     std::string okey = codec::object_key(b, k);
     std::optional<ObjectRec> old;
     if (auto oldv = get_raw(kObjects, okey)) old = codec::decode_object(std::string(k), *oldv);
+    check_put_condition(cond, old, k);  // 与提交同锁（PutCondition 契约）
     rec.version = old ? old->version + 1 : 1;
 
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kObjects], okey, codec::encode_object(rec));
     batch_refs(batch, rec.data, /*add=*/true, okey);
-    batch_pack_delta(batch, rec.data, +1);
+    const int64_t ov = codec::pack_rec_overhead(b, k);
+    batch_pack_delta(batch, rec.data, +1, ov);
     if (old) {
         enqueue_reclaim_locked(batch, old->data);
         batch_refs(batch, old->data, /*add=*/false, {});
-        batch_pack_delta(batch, old->data, -1);
+        batch_pack_delta(batch, old->data, -1, ov);
     }
     commit(batch);
 }
@@ -339,7 +350,7 @@ bool RocksMetaStore::delete_object(std::string_view b, std::string_view k) {
     batch.Delete(cfs_[kObjects], okey);
     enqueue_reclaim_locked(batch, old.data);
     batch_refs(batch, old.data, /*add=*/false, {});
-    batch_pack_delta(batch, old.data, -1);
+    batch_pack_delta(batch, old.data, -1, codec::pack_rec_overhead(b, k));
     commit(batch);
     return true;
 }
@@ -451,11 +462,12 @@ void RocksMetaStore::put_part(std::string_view b, std::string_view k, std::strin
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kParts], pkey, codec::encode_part(p));
     batch_refs(batch, p.data, /*add=*/true, pkey);
-    batch_pack_delta(batch, p.data, +1);
+    const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
+    batch_pack_delta(batch, p.data, +1, ov);
     if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
         enqueue_reclaim_locked(batch, old->data);
         batch_refs(batch, old->data, /*add=*/false, {});
-        batch_pack_delta(batch, old->data, -1);
+        batch_pack_delta(batch, old->data, -1, ov);
     }
     commit(batch);
 }
@@ -530,19 +542,24 @@ std::string RocksMetaStore::complete_upload(std::string_view b, std::string_view
     batch.DeleteRange(cfs_[kParts], pfx, pfx_end);
     for (const auto& [no, p] : stored) {
         if (selected.count(no)) {
-            // refs 转移：owner 改写为对象；pack 账不动（put_part 已计，改 owner
-            // 不改存活——正是 pack 账独立于 batch_refs 的原因）
+            // refs 转移：owner 改写为对象。pack 账存活不变，但口径从分片重平衡为
+            // 对象（-分片头开销 +对象头开销，recs 一减一增相抵）：保证后续对象
+            // 删除按对象口径扣减后账精确归零
             batch_refs(batch, p.data, /*add=*/true, okey);
+            batch_pack_delta(batch, p.data, -1,
+                             codec::pack_rec_overhead_part(b, k, id, no));
+            batch_pack_delta(batch, p.data, +1, codec::pack_rec_overhead(b, k));
         } else {  // 未选中分片入 GC 账
             enqueue_reclaim_locked(batch, p.data);
             batch_refs(batch, p.data, /*add=*/false, {});
-            batch_pack_delta(batch, p.data, -1);
+            batch_pack_delta(batch, p.data, -1,
+                             codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
     if (old) {  // 旧同名对象入 GC 账
         enqueue_reclaim_locked(batch, old->data);
         batch_refs(batch, old->data, /*add=*/false, {});
-        batch_pack_delta(batch, old->data, -1);
+        batch_pack_delta(batch, old->data, -1, codec::pack_rec_overhead(b, k));
     }
     commit(batch);
     return rec.meta.etag;
@@ -561,7 +578,8 @@ void RocksMetaStore::abort_upload(std::string_view b, std::string_view k,
     for (const auto& p : scan_parts(b, k, id)) {
         enqueue_reclaim_locked(batch, p.data);
         batch_refs(batch, p.data, /*add=*/false, {});
-        batch_pack_delta(batch, p.data, -1);
+        batch_pack_delta(batch, p.data, -1,
+                         codec::pack_rec_overhead_part(b, k, id, p.part_no));
     }
     commit(batch);
 }
@@ -569,15 +587,20 @@ void RocksMetaStore::abort_upload(std::string_view b, std::string_view k,
 // ---------- GC 记账 ----------
 
 std::vector<std::pair<uint64_t, Reclaim>> RocksMetaStore::peek_reclaims(size_t max,
-                                                                        uint64_t min_seq) {
+                                                                        uint64_t min_seq,
+                                                                        size_t max_extents) {
     std::vector<std::pair<uint64_t, Reclaim>> out;
     auto it = std::unique_ptr<rocksdb::Iterator>(
         db()->NewIterator(rocksdb::ReadOptions(), cfs_[kGcq]));
     std::string start = codec::be64_key(min_seq);
+    size_t extents = 0;
     for (it->Seek(start); it->Valid() && out.size() < max; it->Next()) {
         uint64_t seq = codec::parse_be64({it->key().data(), it->key().size()});
         out.emplace_back(seq,
                          codec::decode_reclaim({it->value().data(), it->value().size()}));
+        // 累计 extent 上限（gaps §2.11）：至少返回 1 项（拆分前遗留的超大单项）
+        extents += out.back().second.extents.size();
+        if (extents >= max_extents) break;
     }
     if (!it->status().ok()) throw_status("peek_reclaims", it->status());
     return out;
@@ -639,10 +662,9 @@ void RocksMetaStore::drop_pack_stat(uint64_t pack_id) {
     commit(batch);
 }
 
-bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k,
-                                  uint64_t expect_version, const DataRef& from,
-                                  const DataRef& to) {
-    std::lock_guard lk(mu_);
+bool RocksMetaStore::stage_swap_locked(rocksdb::WriteBatch& batch, std::string_view b,
+                                       std::string_view k, uint64_t expect_version,
+                                       const DataRef& from, const DataRef& to) {
     std::string okey = codec::object_key(b, k);
     auto v = get_raw(kObjects, okey);
     if (!v) return false;
@@ -651,17 +673,45 @@ bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k,
     if (rec.version != expect_version || rec.data.extents != from.extents) return false;
     rec.data = to;
     rec.version += 1;
-    rocksdb::WriteBatch batch;
     batch.Put(cfs_[kObjects], okey, codec::encode_object(rec));
     // refs 按差集操作：to/from 共享未迁移的 chunk，整加再整删在 last-wins 下
     // 净效果是删除，会抹掉活数据的 refs（meta_util.h refs_delta 详述）
     auto rd = refs_delta(from, to);
     batch_refs(batch, rd.added, /*add=*/true, okey);
     batch_refs(batch, rd.removed, /*add=*/false, {});
-    batch_pack_delta(batch, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
-    batch_pack_delta(batch, from, -1);
+    // 压实换 ref：账随 extent 迁移（§9.2）；两侧都按对象口径（迁出的旧 record 若
+    // 是 mpu 形态则轻微低扣，保守方向——见 codec.h pack_rec_overhead 注释）
+    const int64_t ov = codec::pack_rec_overhead(b, k);
+    batch_pack_delta(batch, to, +1, ov);
+    batch_pack_delta(batch, from, -1, ov);
+    return true;
+}
+
+bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k,
+                                  uint64_t expect_version, const DataRef& from,
+                                  const DataRef& to) {
+    std::lock_guard lk(mu_);
+    rocksdb::WriteBatch batch;
+    if (!stage_swap_locked(batch, b, k, expect_version, from, to)) return false;
     commit(batch);
     return true;
+}
+
+std::vector<bool> RocksMetaStore::swap_extents_batch(std::span<const SwapReq> reqs) {
+    // 压实批量化（gaps §2.13）：整批一次 WriteBatch 提交。逐项 CAS 独立——失败项
+    // 只是不入批，不殃及其余
+    std::lock_guard lk(mu_);
+    std::vector<bool> out;
+    out.reserve(reqs.size());
+    rocksdb::WriteBatch batch;
+    bool any = false;
+    for (const auto& r : reqs) {
+        bool ok = stage_swap_locked(batch, r.bucket, r.key, r.expect_version, r.from, r.to);
+        any = any || ok;
+        out.push_back(ok);
+    }
+    if (any) commit(batch);
+    return out;
 }
 
 bool RocksMetaStore::chunk_referenced(uint64_t file_id) {

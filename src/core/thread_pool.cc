@@ -2,6 +2,8 @@
 
 #include <stdexcept>
 
+#include "core/log.h"
+
 namespace lights3 {
 
 using Clock = std::chrono::steady_clock;
@@ -19,10 +21,17 @@ ThreadPool::~ThreadPool() { join(); }
 void ThreadPool::post(std::function<void()> fn) {
     {
         std::lock_guard lk(m_);
-        if (stopping_) throw std::runtime_error("ThreadPool: post after join");
-        queue_.push_back({std::move(fn), Clock::now()});
+        if (!stopping_) {
+            queue_.push_back({std::move(fn), Clock::now()});
+            cv_.notify_one();
+            return;
+        }
     }
-    cv_.notify_one();
+    // join 后的续体投递不可失败：消费方（FinalAwaiter::await_suspend、Permit 析构）
+    // 都是 noexcept 上下文，抛出即 std::terminate。就地执行让残余请求链在调用方
+    // 线程上收尾（schedule() 保留抛出语义，它有 co_await 承接点）
+    LOG_ERROR("ThreadPool: post after join, running task inline on caller thread");
+    fn();
 }
 
 void ThreadPool::enqueue_bounded(std::function<void()> fn) {
@@ -82,7 +91,15 @@ void ThreadPool::worker_loop() {
             }
             ++wait_hist_[wait_bucket(Clock::now() - item.enqueued)];
         }
-        item.fn();
+        // 异常防线：任务异常逃逸线程函数即 std::terminate（协程续体自身全捕获，
+        // 这里兜的是裸 post 的阻塞任务）
+        try {
+            item.fn();
+        } catch (const std::exception& e) {
+            LOG_ERROR("ThreadPool: task threw: {}", e.what());
+        } catch (...) {
+            LOG_ERROR("ThreadPool: task threw unknown exception");
+        }
         {
             std::lock_guard lk(m_);
             ++completed_;

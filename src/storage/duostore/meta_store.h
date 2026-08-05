@@ -54,6 +54,15 @@ struct PackStat {
     bool sealed = false;
 };
 
+// swap_extents_batch 的单项请求（压实按 owner 聚合后逐对象一条，§9.2）
+struct SwapReq {
+    std::string bucket;
+    std::string key;
+    uint64_t expect_version = 0;
+    DataRef from;
+    DataRef to;
+};
+
 // 提交结果不明（网络型引擎专有）：redis EVALSHA 后连接断、tikv primary commit
 // 超时——事务**可能已经生效**。对本地引擎"抛异常 ≈ 未提交"成立，对这两个不成立。
 // 调用方（commit_or_discard）据此**不得**兜底物理删数据：提交实已生效时删掉的是
@@ -74,7 +83,11 @@ struct IMetaStore {
 
     // ---- object ----
     virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
-    virtual void put_object(std::string_view b, std::string_view k, ObjectRec rec) = 0;
+    // cond.active() 时在本事务的原子区内按 PutCondition 契约（storage/backend.h）
+    // 校验旧记录：违反抛 PreconditionFailed / NoSuchKey，事务不提交（共享检查
+    // 见 meta_util.h check_put_condition）
+    virtual void put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                            PutCondition cond = {}) = 0;
     virtual bool delete_object(std::string_view b, std::string_view k) = 0;  // 不存在返回 false（幂等）
     virtual ListResult list_objects(std::string_view b, const ListOptions& opt) = 0;
 
@@ -97,9 +110,12 @@ struct IMetaStore {
     // ---- 资源分配与 GC 记账（§9）----
     virtual uint64_t alloc_file_id(Extent::Kind kind) = 0;  // 持久单调，号段预留
     // 取 seq >= min_seq 的最早至多 max 项（seq 升序）。GC 消费端按 min_seq 断点
-    // 续扫：被 grace/pin 跳过而未销账的队头项不会让整轮卡死或被重复统计（§9.1）
-    virtual std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max,
-                                                                   uint64_t min_seq = 0) = 0;
+    // 续扫：被 grace/pin 跳过而未销账的队头项不会让整轮卡死或被重复统计（§9.1）。
+    // max_extents = 批内累计 extent 数上限（docs/gaps.md §2.11：按条数批 256 条最坏
+    // 驻留 GB 级）：累计达到上限即提前收批，但至少返回 1 项（拆分前遗留的超大单项
+    // 仍要能被消费）
+    virtual std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(
+        size_t max, uint64_t min_seq = 0, size_t max_extents = SIZE_MAX) = 0;
     virtual void ack_reclaim(uint64_t seq) = 0;    // 物理删除成功后销账
     // 批量销账：默认逐条转发；实现可覆写为单事务/单批提交。GC 消费端应优先走本
     // 接口——逐条 ack 的成本按实现差异巨大（SQLite 版每条是一次独立 fsync 且与
@@ -119,6 +135,18 @@ struct IMetaStore {
     virtual void drop_pack_stat(uint64_t pack_id) = 0;
     virtual bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                               const DataRef& from, const DataRef& to) = 0;  // 压实换 ref
+    // 批量换 ref（docs/gaps.md §2.13 压实批量化）：每项独立 CAS，返回逐项成败。
+    // 默认逐条转发；本地引擎（rocks/sqlite）覆写为单批/单事务提交——sqlite 逐条
+    // swap 是每条一次 fsync 且与业务提交争同一把写锁。网络引擎（redis/tikv）保持
+    // 逐条：合并成单事务会让一个对象的 CAS 失败殃及整批（all-or-nothing），而其
+    // 单条提交本就是一次 RTT
+    virtual std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) {
+        std::vector<bool> out;
+        out.reserve(reqs.size());
+        for (const auto& r : reqs)
+            out.push_back(swap_extents(r.bucket, r.key, r.expect_version, r.from, r.to));
+        return out;
+    }
     virtual bool chunk_referenced(uint64_t file_id) = 0;  // 孤儿扫描
     // 孤儿反向对账（§9.3）：遍历 refs 表全部 file_id（chunk/rados 同账，顺序不保证）。
     // 快照语义从宽：遍历期间的并发增删可见与否均可——调用方（孤儿扫描）对"文件在

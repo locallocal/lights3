@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "core/executor.h"
 #include "http/model.h"
 
 namespace lights3::http {
@@ -87,11 +88,16 @@ private:
 
 class QueueBodyReader : public BodyReader {
 public:
-    QueueBodyReader(std::shared_ptr<BlockQueue> q, std::optional<uint64_t> len)
-        : q_(std::move(q)), len_(len) {}
+    // request_thread 非空时（httplib 驱动，docs/gaps.md §2.10）：pop 的 cv 阻塞
+    // 先切回请求自己的线程（它正闲在 sync_wait_pumping 里），不占共享池线程；
+    // 空则就地阻塞（cloudproxy 的 pump 方向本就在池线程按块让出，见调用方注释）
+    QueueBodyReader(std::shared_ptr<BlockQueue> q, std::optional<uint64_t> len,
+                    IExecutor* request_thread = nullptr)
+        : q_(std::move(q)), len_(len), exec_(request_thread) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {
         if (eof_) co_return 0;
+        if (exec_) co_await resume_on(*exec_);
         size_t n = q_->pop(buf);
         if (n == 0) eof_ = true;
         co_return n;
@@ -101,6 +107,7 @@ public:
 private:
     std::shared_ptr<BlockQueue> q_;
     std::optional<uint64_t> len_;
+    IExecutor* exec_;
     bool eof_ = false;
 };
 

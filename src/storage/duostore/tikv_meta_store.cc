@@ -57,6 +57,22 @@ void conflict_backoff(int attempt) {
     std::this_thread::sleep_for(us);
 }
 
+// 对象 manifest 单值体积保护（docs/gaps.md §2.12）：TiKV 单值受 raft entry 上限
+// （默认 8MiB）约束，超限的 PUT/complete 会**永久失败**且已存在的对象删不掉。
+// 编码后 fail-fast 抛 EntityTooLarge（400，可操作：客户端换 multipart/加大分片）
+// ——比让 prewrite 反复撞 raft 上限的 500 诚实。上限留 2MiB 余量给 proto 包装；
+// extent 数上限拦同量级的病态 manifest（run 编码失效的交错 id 形态 ≈ 30B/extent）
+constexpr size_t kMaxObjectValueBytes = 6ull << 20;
+constexpr size_t kMaxObjectExtents = 200'000;
+
+void check_object_value(std::string_view k, size_t n_extents, size_t encoded_bytes) {
+    if (n_extents <= kMaxObjectExtents && encoded_bytes <= kMaxObjectValueBytes) return;
+    throw S3Error(S3ErrorCode::EntityTooLarge,
+                  "duostore tikv meta: object manifest too large for a single TiKV value (" +
+                      std::string(k) + ": " + std::to_string(n_extents) + " extents, " +
+                      std::to_string(encoded_bytes) + " bytes)");
+}
+
 [[noreturn]] void throw_internal(const char* what, const std::string& detail) {
     LOG_ERROR("duostore tikv meta: {}: {}", what, detail);
     throw S3Error(S3ErrorCode::InternalError,
@@ -377,14 +393,14 @@ void TikvMetaStore::mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref
 }
 
 void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref,
-                                   int sign) {
+                                   int sign, int64_t rec_overhead) {
     // 同 pack 多 extent 先聚合，每 pack 一条唯一 delta 行（id 预派发，入账纯写——
     // 共享账行的读改写会让同 active-pack 的并发小对象 PUT prewrite 冲突，§3.2）
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
         auto& [bytes, recs] = agg[e.file_id];
-        bytes += sign * int64_t(e.length);
+        bytes += sign * (int64_t(e.length) + rec_overhead);  // 头开销同口径（§2.3a）
         recs += sign;
     }
     for (const auto& [id, d] : agg) {
@@ -396,9 +412,16 @@ void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRe
 
 void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref) {
     if (ref.extents.empty()) return;
-    uint64_t seq = alloc_id(kCtrSeq, seqs_);  // 预派发（独立小事务），入账保持纯写
-    muts.push_back(
-        {TikvOp::kPut, gcq_key(seq), codec::encode_reclaim(Reclaim{ref.extents}, now_ms())});
+    // 超大 DataRef 拆多条（docs/gaps.md §2.11）：GC 单批解码内存有界、单条 gcq
+    // 值不逼近 raft entry 上限；ack 逐条独立、unlink 幂等，拆分不改变崩溃语义
+    const int64_t ts = now_ms();
+    for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
+        size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
+        Reclaim r;
+        r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        uint64_t seq = alloc_id(kCtrSeq, seqs_);  // 预派发（独立小事务），入账保持纯写
+        muts.push_back({TikvOp::kPut, gcq_key(seq), codec::encode_reclaim(r, ts)});
+    }
 }
 
 uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r) {
@@ -496,24 +519,32 @@ std::optional<ObjectRec> TikvMetaStore::get_object(std::string_view b, std::stri
     });
 }
 
-void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec) {
+void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                               PutCondition cond) {
     txn_retry("put_object", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         std::string okey = object_key(b, k);
         auto vals = snap_get_many(ts, {bucket_key(b), okey});  // 一次往返读全前置
         if (!vals[0]) throw_no_bucket(b);
         std::optional<ObjectRec> old;
         if (vals[1]) old = codec::decode_object(std::string(k), *vals[1]);
+        // 快照读 + 提交时写写冲突检测：并发覆盖会使本事务冲突重试，重试轮以新
+        // 快照重新检查——检查与提交对外原子（PutCondition 契约）。抛出时 muts
+        // 未发出任何 RPC
+        check_put_condition(cond, old, k);
         rec.version = old ? old->version + 1 : 1;
 
         // primary = 对象键（写写冲突的语义焦点）；守卫 Lock 物化桶存在性检查（§4.3）
-        muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});
+        std::string oval = codec::encode_object(rec);
+        check_object_value(k, rec.data.extents.size(), oval.size());  // §2.12 fail-fast
+        muts.push_back({TikvOp::kPut, okey, std::move(oval)});
         muts.push_back({TikvOp::kLock, bucket_guard(b, uint32_t(fnv1a(k) % kGuardShards)), {}});
         mut_refs(muts, rec.data, /*add=*/true, okey);
-        mut_pack_delta(muts, rec.data, +1);
+        const int64_t ov = codec::pack_rec_overhead(b, k);
+        mut_pack_delta(muts, rec.data, +1, ov);
         if (old) {
             enqueue_reclaim(muts, old->data);
             mut_refs(muts, old->data, /*add=*/false, {});
-            mut_pack_delta(muts, old->data, -1);
+            mut_pack_delta(muts, old->data, -1, ov);
         }
     });
 }
@@ -528,7 +559,7 @@ bool TikvMetaStore::delete_object(std::string_view b, std::string_view k) {
         muts.push_back({TikvOp::kDel, okey, {}});
         enqueue_reclaim(muts, old.data);
         mut_refs(muts, old.data, /*add=*/false, {});
-        mut_pack_delta(muts, old.data, -1);
+        mut_pack_delta(muts, old.data, -1, codec::pack_rec_overhead(b, k));
         return true;
     });
 }
@@ -658,11 +689,12 @@ void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string
         muts.push_back(
             {TikvOp::kLock, upload_guard(b, k, id, uint32_t(p.part_no) % kGuardShards), {}});
         mut_refs(muts, p.data, /*add=*/true, pkey);
-        mut_pack_delta(muts, p.data, +1);
+        const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
+        mut_pack_delta(muts, p.data, +1, ov);
         if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
             enqueue_reclaim(muts, old->data);
             mut_refs(muts, old->data, /*add=*/false, {});
-            mut_pack_delta(muts, old->data, -1);
+            mut_pack_delta(muts, old->data, -1, ov);
         }
     });
 }
@@ -731,26 +763,33 @@ std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view 
         if (vals[1]) old = codec::decode_object(std::string(k), *vals[1]);
         rec.version = old ? old->version + 1 : 1;
 
-        muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});  // primary
+        std::string oval = codec::encode_object(rec);
+        check_object_value(k, rec.data.extents.size(), oval.size());  // §2.12 fail-fast
+        muts.push_back({TikvOp::kPut, okey, std::move(oval)});  // primary
         muts.push_back({TikvOp::kDel, upload_key(b, k, id), {}});
         for (uint32_t s = 0; s < kGuardShards; ++s)
             muts.push_back({TikvOp::kLock, upload_guard(b, k, id, s), {}});
         for (const auto& [no, p] : stored) {
             muts.push_back({TikvOp::kDel, part_key(b, k, id, no), {}});
             if (selected.count(no)) {
-                // refs 转移：owner 改写为对象；pack 账不动（put_part 已计，改
-                // owner 不改存活）
+                // refs 转移：owner 改写为对象。pack 账存活不变，但口径从分片重
+                // 平衡为对象（-分片头开销 +对象头开销，recs 相抵）：保证后续对象
+                // 删除按对象口径扣减后账精确归零
                 mut_refs(muts, p.data, /*add=*/true, okey);
+                mut_pack_delta(muts, p.data, -1,
+                               codec::pack_rec_overhead_part(b, k, id, no));
+                mut_pack_delta(muts, p.data, +1, codec::pack_rec_overhead(b, k));
             } else {  // 未选中分片入 GC 账
                 enqueue_reclaim(muts, p.data);
                 mut_refs(muts, p.data, /*add=*/false, {});
-                mut_pack_delta(muts, p.data, -1);
+                mut_pack_delta(muts, p.data, -1,
+                               codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
         if (old) {  // 旧同名对象入 GC 账
             enqueue_reclaim(muts, old->data);
             mut_refs(muts, old->data, /*add=*/false, {});
-            mut_pack_delta(muts, old->data, -1);
+            mut_pack_delta(muts, old->data, -1, codec::pack_rec_overhead(b, k));
         }
         return rec.meta.etag;
     });
@@ -766,7 +805,8 @@ void TikvMetaStore::abort_upload(std::string_view b, std::string_view k, std::st
             muts.push_back({TikvOp::kDel, part_key(b, k, id, p.part_no), {}});
             enqueue_reclaim(muts, p.data);
             mut_refs(muts, p.data, /*add=*/false, {});
-            mut_pack_delta(muts, p.data, -1);
+            mut_pack_delta(muts, p.data, -1,
+                           codec::pack_rec_overhead_part(b, k, id, p.part_no));
         }
     });
 }
@@ -774,16 +814,21 @@ void TikvMetaStore::abort_upload(std::string_view b, std::string_view k, std::st
 // ---------- GC 记账 ----------
 
 std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t max,
-                                                                       uint64_t min_seq) {
+                                                                       uint64_t min_seq,
+                                                                       size_t max_extents) {
     return guarded("peek_reclaims", [&] {
         std::vector<std::pair<uint64_t, Reclaim>> out;
         uint64_t ts = client().get_ts();
         auto [lo, hi] = range_of('G', {});
         (void)lo;  // 起点用 gcq_key(min_seq)：min_seq=0 时即 'G' 段首，等价 lo
         size_t plen = opt_.prefix.size() + 1;
+        size_t extents = 0;
         for (auto& [key, v] : client().scan(ts, gcq_key(min_seq), hi, max)) {
             uint64_t seq = codec::parse_be64(std::string_view(key).substr(plen));
             out.emplace_back(seq, codec::decode_reclaim(v));
+            // 累计 extent 上限（gaps §2.11）：至少返回 1 项（多扫的 kv 就地丢弃）
+            extents += out.back().second.extents.size();
+            if (extents >= max_extents) break;
         }
         return out;
     });
@@ -909,8 +954,11 @@ bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k,
         auto rd = refs_delta(from, to);
         mut_refs(muts, rd.added, /*add=*/true, okey);
         mut_refs(muts, rd.removed, /*add=*/false, {});
-        mut_pack_delta(muts, to, +1);  // 压实换 ref：账随 extent 迁移（§9.2）
-        mut_pack_delta(muts, from, -1);
+        // 压实换 ref：账随 extent 迁移（§9.2）；两侧都按对象口径（迁出旧 record
+        // 若为 mpu 形态则轻微低扣，保守方向）
+        const int64_t ov = codec::pack_rec_overhead(b, k);
+        mut_pack_delta(muts, to, +1, ov);
+        mut_pack_delta(muts, from, -1, ov);
         return true;
     });
 }

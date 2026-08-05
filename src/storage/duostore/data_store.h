@@ -8,6 +8,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "core/task.h"
 #include "http/model.h"
@@ -38,14 +39,29 @@ struct GcRewrite {
 
 struct IDataStore;
 
-// 压实迁移回调（§9.2，DuoStoreBackend 装配）：数据面顺扫出 (owner, from, payload)，
-// 回调负责 owner 反查存活 + 追加回本 store（经 self.open_writer 进 active pack）+
-// swap_extents 乐观换 ref。返回 true = 已迁移；false = 死区或存活但暂不可迁（进行
-// 中 mpu 等），数据面一律不动原 record——pack 的删除恒走"live 账归零 + 空 pack
-// 整删"路径，误判不丢数据。标准实现见 duostore_backend.h 的 migrate_pack_record
-using PackMigrateFn = std::function<Task<bool>(
-    IDataStore& self, std::string_view owner, const Extent& from,
-    std::span<const std::byte> payload)>;
+// 压实顺扫交给迁移回调的一条候选 record（§9.2）
+struct PackScanRecord {
+    std::string owner;
+    Extent from;
+    std::vector<std::byte> payload;
+};
+
+// 压实迁移回调（§9.2，DuoStoreBackend 装配）：数据面顺扫攒 K 条 record 一次交付
+// （docs/gaps.md §2.13 批量化——逐条交付时每条一次 fdatasync + 一次 meta 提交，
+// 128MiB pack ≈ 1000 次，与业务写抢同一把写锁）。回调负责 owner 反查存活 + 批量
+// 追加回本 store（write_batch，一次持久化屏障）+ 按 owner 聚合换 ref（同一对象的
+// 多条 record 一次 swap，消掉整份 manifest 的 O(n²) 重写）。返回成功迁移的 record
+// 数；死区或存活但暂不可迁（进行中 mpu 等）不计入，数据面一律不动原 record——
+// pack 的删除恒走"live 账归零 + 空 pack 整删"路径，误判不丢数据。
+// 标准实现见 duostore_backend.h 的 migrate_pack_records
+using PackMigrateFn = std::function<Task<uint64_t>(IDataStore& self,
+                                                   std::vector<PackScanRecord>&& batch)>;
+
+// write_batch 的输入项（压实迁移专用）：payload 由调用方持有到调用返回
+struct PackAppendItem {
+    std::string_view owner;
+    std::span<const std::byte> payload;
+};
 
 // 写侧 pin 钩子（§9.3）：孤儿扫描不得回收"写入中尚未提交 meta"的 chunk——慢流式
 // PUT 的早期 chunk mtime 可远逾 gc_grace，仅靠 mtime 宽限不充分。writer 在分配
@@ -67,6 +83,19 @@ struct ChunkPinHooks {
 
 struct IDataStore {
     virtual Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) = 0;
+    // 批量写（压实迁移专用，docs/gaps.md §2.13）：K 条 payload 一次落地，返回与
+    // 输入等长的 DataRef 列表。默认逐条 open_writer（语义不变）；fs 实现覆写为
+    // 单次槽锁 + 单次 fdatasync 的 pack 批量追加
+    virtual Task<std::vector<DataRef>> write_batch(std::span<const PackAppendItem> items) {
+        std::vector<DataRef> out;
+        out.reserve(items.size());
+        for (const auto& it : items) {
+            auto w = co_await open_writer({it.payload.size(), std::string(it.owner)});
+            co_await w->write(it.payload);
+            out.push_back(co_await w->finish());
+        }
+        co_return out;
+    }
     // [first,last] 为 resolve_range 后的闭区间；返回流式 BodyReader（length()=last-first+1）
     virtual Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
                                                                uint64_t last) = 0;
@@ -88,6 +117,10 @@ struct IDataStore {
     // （= 不阻止补封，与本改动前的行为一致）。**false 必须是保守方向**：返回
     // true 只会让补封推迟到下次启动，返回 false 却可能封掉别人正在写的 pack
     virtual bool pack_write_locked(uint64_t /*pack_id*/) { return false; }
+    // pack 文件实际大小（docs/gaps.md §2.3b）：崩溃遗留 seal(0) 的账在 GC 判定前
+    // 借此回填分母，免得 file_size 未知的 pack 无条件进全量重写。0 = 未知/不支持
+    // （调用方退回原有的"顺扫回填"路径）
+    virtual uint64_t stat_pack(uint64_t /*pack_id*/) { return 0; }
     virtual Task<void> close() = 0;
     virtual ~IDataStore() = default;
 };

@@ -52,7 +52,8 @@ public:
     std::vector<BucketInfo> list_buckets() override;
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec) override;
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                    PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
     ListResult list_objects(std::string_view b, const ListOptions& opt) override;
 
@@ -69,7 +70,8 @@ public:
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;
 
     uint64_t alloc_file_id(Extent::Kind kind) override;
-    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq) override;
+    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
+                                                            size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单事务批量销账
     std::vector<PackStat> pack_stats() override;
@@ -149,7 +151,10 @@ private:
                   std::string_view owner);
     // 同批维护 pack 存活账（唯一 delta 行，纯写无冲突）。独立于 mut_refs：
     // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
-    void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign);
+    // rec_overhead：每条 record 的头开销（codec::pack_rec_overhead*），live_bytes
+    // 与 file_size 同口径（docs/gaps.md §2.3a）
+    void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign,
+                        int64_t rec_overhead);
     // parts 全量读（按 part_no 升序，be16 尾缀天然有序）
     std::vector<PartRec> scan_parts(uint64_t ver, std::string_view b, std::string_view k,
                                     std::string_view id);

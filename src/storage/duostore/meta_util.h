@@ -16,6 +16,32 @@
 
 namespace lights3::storage::duostore {
 
+// gcq 单项 extent 上限（docs/gaps.md §2.11）：删除 TB 级对象（数十万 extent）时
+// 把 DataRef 拆成多条 gcq 项入队，GC 消费端单批 peek 的解码内存驻留有界。ack 逐
+// 条独立、unlink 幂等，拆分不改变崩溃语义（§9.1 先物理删后销账的论证不变）
+inline constexpr size_t kReclaimMaxExtents = 4096;
+
+// 条件 PUT 的原子区检查（PutCondition 契约，storage/backend.h）：四引擎在各自
+// 事务内读到旧记录后调用；抛出即放弃提交（本地引擎回滚天然成立，redis 在
+// 组 batch 前、tikv 在填 mutation 前调用，均不会发出任何写）
+inline void check_put_condition(const PutCondition& cond, const std::optional<ObjectRec>& old,
+                                std::string_view key) {
+    if (!cond.active()) return;
+    if (cond.if_none_match && old)
+        throw s3::S3Error(s3::S3ErrorCode::PreconditionFailed,
+                          "At least one of the pre-conditions you specified did not hold",
+                          std::string(key));
+    if (cond.if_match_etag) {
+        if (!old)
+            throw s3::S3Error(s3::S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                              std::string(key));
+        if (*cond.if_match_etag != old->meta.etag)
+            throw s3::S3Error(s3::S3ErrorCode::PreconditionFailed,
+                              "At least one of the pre-conditions you specified did not hold",
+                              std::string(key));
+    }
+}
+
 // complete_upload 的分片选择与对象拼装（RocksDB/Redis/SQLite 三实现原为逐字相同
 // 的块）：逐项 ETag 校验（缺失/不符抛 InvalidPart）、按提交顺序拼接 extent、累加
 // size、合成总 ETag 与 last_modified。selected 输出选中分片号，供调用方做 refs

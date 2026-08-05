@@ -69,9 +69,9 @@ public:
         co_return co_await inner->get_object(b, k, r);
     }
     Task<PutResult> put_object(std::string_view b, std::string_view k, ObjectMeta m,
-                               http::BodyReader& body) override {
+                               http::BodyReader& body, PutCondition cond = {}) override {
         ++puts;
-        co_return co_await inner->put_object(b, k, std::move(m), body);
+        co_return co_await inner->put_object(b, k, std::move(m), body, cond);
     }
     Task<ObjectMeta> head_object(std::string_view b, std::string_view k) override {
         ++heads;

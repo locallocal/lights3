@@ -46,6 +46,18 @@ struct PutResult {
     std::string etag;
 };
 
+// 条件 PUT（docs/s3-protocol.md §6）：检查与提交必须在后端自身的原子提交点内
+// 完成（commit 临界区 / 元数据 CAS）——L2 层"先 head 再 put"的窗口内并发写会让
+// 防覆盖/乐观并发语义双双失效，且跨实例不成立。
+// 语义：if_none_match（对应 If-None-Match: *）要求对象不存在，违反抛
+// PreconditionFailed；if_match_etag 要求当前 ETag 相等，不等抛 PreconditionFailed、
+// 对象不存在抛 NoSuchKey。两者互斥（L2 保证）。条件失败时后端不得留下任何写入痕迹。
+struct PutCondition {
+    bool if_none_match = false;
+    std::optional<std::string> if_match_etag;
+    bool active() const { return if_none_match || if_match_etag.has_value(); }
+};
+
 struct ListOptions {
     std::string prefix;
     std::string delimiter;    // 空或 "/"
@@ -99,9 +111,11 @@ struct IStorageBackend {
     // body 契约（put_object / upload_part 同）：实现必须把 body 读到 EOF（read 返回
     // 0）为止，不得读满 length() 即停——上层的验签装饰器（x-amz-content-sha256 /
     // aws-chunked 签名链）挂在读满与 EOF 处，跳过尾部读取会跳过校验；
-    // body.read 抛异常 ⇒ 后端不得提交对象（staging 丢弃 / 远端传输中止）
+    // body.read 抛异常 ⇒ 后端不得提交对象（staging 丢弃 / 远端传输中止）；
+    // cond.active() 时按 PutCondition 契约在提交点原子校验
     virtual Task<PutResult> put_object(std::string_view bucket, std::string_view key,
-                                       ObjectMeta meta, http::BodyReader& body) = 0;
+                                       ObjectMeta meta, http::BodyReader& body,
+                                       PutCondition cond = {}) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;
     // S3 语义：对不存在的 key 也返回成功（幂等删除）
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;

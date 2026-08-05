@@ -105,7 +105,8 @@ Task<std::pair<uint64_t, std::string>> XLocalFsBackend::drain_to_tmp(http::BodyR
 }
 
 Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
-                                            ObjectMeta meta, http::BodyReader& body) {
+                                            ObjectMeta meta, http::BodyReader& body,
+                                            PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
@@ -127,9 +128,11 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     meta.last_modified = std::chrono::system_clock::now();
 
     // 2. 冲突检查 + 数据 rename + sidecar 提交（同步调用，回到池线程）。
-    // per-key 锁同 localfs：提交段的两次 rename 不得与同 key 并发写交错
+    // per-key 锁同 localfs：提交段的两次 rename 不得与同 key 并发写交错；
+    // 条件 PUT 检查同在锁内（PutCondition 契约）
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
+    fsutil::check_put_condition(object_path(bucket, key), cond, key);
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
     co_return PutResult{meta.etag};
 }
@@ -197,13 +200,14 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
 
     auto [total, etag] = co_await drain_to_tmp(body, tmp.fd);
     (void)total;
+    co_await pool_->schedule();
+    fsutil::fsync_file(tmp.fd);  // 同 localfs：分片数据先落盘，.md5 才是就绪证据
     ::close(tmp.fd);
     tmp.fd = -1;
 
-    // 先 md5 后数据文件；同号重传 last-write-wins（rename 覆盖）
-    co_await pool_->schedule();
+    // 顺序：先数据 rename、后写 .md5（同号重传 last-write-wins，rename 覆盖）；
+    // 理由同 localfs——反序会在掉电后留下合法 .md5 配零块数据
     std::string name = part_file_name(part_no);
-    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
     std::error_code ec;
     fs::rename(tmp.path, up.dir / name, ec);
     if (ec) {
@@ -215,6 +219,8 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
         throw S3Error(S3ErrorCode::InternalError, "rename part failed");
     }
     tmp.committed = true;
+    fsutil::fsync_dir(up.dir);
+    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
     co_return PutResult{etag};
 }
 

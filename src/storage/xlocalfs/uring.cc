@@ -11,7 +11,9 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include "core/log.h"
 #include "s3/errors.h"
 
 // 提交线程 → 内核 → 收割线程的 happens-before 经由 syscall 与 ring barrier
@@ -153,9 +155,17 @@ void UringEngine::push_and_enter(uint8_t opcode, int fd, const void* addr, unsig
 void UringEngine::submit(uint8_t opcode, int fd, const void* addr, unsigned len, uint64_t off,
                          Op* op) {
     std::lock_guard lk(submit_mu_);
-    if (stopped_) throw S3Error(S3ErrorCode::InternalError, "io_uring engine stopped");
+    if (stopped_ || failed_)
+        throw S3Error(S3ErrorCode::InternalError,
+                      failed_ ? "io_uring engine failed" : "io_uring engine stopped");
+    inflight_.insert(op);
     LIGHTS3_TSAN_RELEASE(op);
-    push_and_enter(opcode, fd, addr, len, off, reinterpret_cast<uint64_t>(op));
+    try {
+        push_and_enter(opcode, fd, addr, len, off, reinterpret_cast<uint64_t>(op));
+    } catch (...) {
+        inflight_.erase(op);  // SQE 已回滚，协程按未挂起处理，不会再有 CQE
+        throw;
+    }
 }
 
 void UringEngine::reap_loop() {
@@ -171,6 +181,13 @@ void UringEngine::reap_loop() {
                 Op* op = reinterpret_cast<Op*>(static_cast<uintptr_t>(cqe.user_data));
                 LIGHTS3_TSAN_ACQUIRE(op);
                 op->res = cqe.res;
+                bool drained;
+                {
+                    std::lock_guard lk(submit_mu_);
+                    inflight_.erase(op);
+                    drained = stopped_ && inflight_.empty();
+                }
+                if (drained) inflight_cv_.notify_all();
                 // 经线程池恢复；post 的内部锁保证 res 写入对恢复线程可见
                 pool_->post([h = op->h] { h.resume(); });
             }
@@ -179,17 +196,52 @@ void UringEngine::reap_loop() {
         store_release(cq_head_, head);
         if (stop) return;
         int ret = sys_io_uring_enter(ring_fd_, 0, 1, IORING_ENTER_GETEVENTS);
-        if (ret < 0 && errno != EINTR && errno != EAGAIN && errno != EBUSY) return;
+        if (ret < 0 && errno != EINTR && errno != EAGAIN && errno != EBUSY) {
+            // 不可恢复错误：无声退出会让所有在途 co_await 永不 resume（GET 挂死、
+            // 连接不释放、帧泄漏），而 submit() 还在照常收新单。置错误态拒新提交，
+            // 全部在途 Op 以 -EIO 唤醒。注意内核理论上仍可能完成这些 IO 并写入
+            // 用户缓冲——但走到这里的 errno（EBADF/EFAULT/ENXIO）都意味着 ring
+            // 已不可用，两害相权取告知调用方
+            int err = errno;
+            std::vector<Op*> orphans;
+            {
+                std::lock_guard lk(submit_mu_);
+                failed_ = true;
+                orphans.assign(inflight_.begin(), inflight_.end());
+                inflight_.clear();
+            }
+            LOG_ERROR("io_uring reaper exiting on fatal error: {}; failing {} in-flight op(s) "
+                      "with EIO",
+                      std::strerror(err), orphans.size());
+            for (Op* op : orphans) {
+                op->res = -EIO;
+                pool_->post([h = op->h] { h.resume(); });
+            }
+            inflight_cv_.notify_all();
+            return;
+        }
     }
 }
 
 void UringEngine::shutdown() {
-    {
-        std::lock_guard lk(submit_mu_);
-        if (stopped_) return;
-        stopped_ = true;
-        push_and_enter(IORING_OP_NOP, -1, nullptr, 0, 0, /*user_data=*/0);
+    std::unique_lock lk(submit_mu_);
+    if (stopped_) {
+        lk.unlock();
+        if (reaper_.joinable()) reaper_.join();
+        return;
     }
+    stopped_ = true;  // 先拒新提交，才谈得上排空
+    if (!failed_) {
+        // 等在途 CQE 归零再投哨兵：CQE 顺序不保证哨兵排在既有读写之后，不等排空
+        // 就析构 munmap，内核会继续写已释放的用户缓冲（UAF）。超时只告警不阻死
+        // 进程退出——此时风险已无法消除，至少留下现场
+        if (!inflight_cv_.wait_for(lk, std::chrono::seconds(10),
+                                   [&] { return inflight_.empty() || failed_; }))
+            LOG_ERROR("io_uring shutdown: {} op(s) still in flight after 10s; proceeding",
+                      inflight_.size());
+    }
+    if (!failed_) push_and_enter(IORING_OP_NOP, -1, nullptr, 0, 0, /*user_data=*/0);
+    lk.unlock();
     if (reaper_.joinable()) reaper_.join();
 }
 

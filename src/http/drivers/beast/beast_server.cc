@@ -197,7 +197,10 @@ public:
         beast::error_code ec;
         auto address = asio::ip::make_address(addr, ec);
         if (ec) throw std::runtime_error("bad bind address: " + addr);
-        acceptor_.emplace(ioc_);
+        // 控制面对象（acceptor/stop_event/grace 定时器）统一挂 ctl_strand_：
+        // asio I/O 对象非线程安全，accept 循环与停机编排原本在两个线程上并发
+        // 访问同一 acceptor/timer
+        acceptor_.emplace(ctl_strand_);
         tcp::endpoint ep{address, port};
         acceptor_->open(ep.protocol());
         acceptor_->set_option(asio::socket_base::reuse_address(true));
@@ -208,7 +211,7 @@ public:
         // shutdown() 只写 eventfd（async-signal-safe），停机编排全部在 io 线程内完成
         event_fd_ = ::eventfd(0, EFD_CLOEXEC);
         if (event_fd_ < 0) throw std::runtime_error("eventfd() failed");
-        stop_event_.emplace(ioc_, event_fd_);
+        stop_event_.emplace(ctl_strand_, event_fd_);
         stop_event_->async_read_some(asio::buffer(&stop_buf_, sizeof(stop_buf_)),
                                      [this](beast::error_code e, size_t) {
                                          if (!e) on_stop_signal();
@@ -255,7 +258,7 @@ private:
                 if (stopping_.load() || ec == asio::error::operation_aborted) break;
                 // 暂态错误（EMFILE 等 fd 耗尽）立即重试会忙等自旋，退避后继续
                 LOG_WARN("accept failed: {}, throttling", ec.message());
-                asio::steady_timer backoff(ioc_, std::chrono::milliseconds(100));
+                asio::steady_timer backoff(ctl_strand_, std::chrono::milliseconds(100));
                 co_await io_op([&](auto cb) {
                     backoff.async_wait(
                         [cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
@@ -266,6 +269,11 @@ private:
             {
                 std::lock_guard lk(m_);
                 if (stopping_.load()) break;
+                // 并发连接上限（四驱动统一）：无上限时每连接的协程帧/缓冲可耗尽内存
+                if (sessions_.size() >= static_cast<size_t>(cfg_.max_connections)) {
+                    LOG_WARN("connection limit ({}) reached, rejecting", cfg_.max_connections);
+                    continue;  // sess 随作用域析构即关闭 socket
+                }
                 sessions_.insert(sess);
             }
             spawn_detached(session_run(sess), [this, sess] { on_session_done(sess); });
@@ -386,7 +394,13 @@ private:
             bhttp::response<bhttp::string_body> res;
             res.result(static_cast<unsigned>(resp.status));
             res.version(11);
-            for (auto& [k, v] : resp.headers.items()) res.insert(k, v);
+            // 统一出站头过滤（drivers/common.h，契约 5）：beast 的
+            // try_create_new_element 只校验长度不查 CR/LF，直接 insert 是四驱动中
+            // 唯一的响应拆分注入面（后端元数据可来自上游 S3 / duostore 元数据存
+            // 储，不在 L1 入站过滤范围内）；超长头还会抛异常导致连响应都不发
+            driver::emit_headers(resp.headers, [&](const std::string& k, const std::string& v) {
+                res.insert(k, v);
+            });
             if (!resp.headers.has("Date"))
                 res.set(bhttp::field::date, util::http_date(std::chrono::system_clock::now()));
             res.keep_alive(keep);
@@ -411,7 +425,9 @@ private:
         bhttp::response<bhttp::buffer_body> res;
         res.result(static_cast<unsigned>(resp.status));
         res.version(11);
-        for (auto& [k, v] : resp.headers.items()) res.insert(k, v);
+        driver::emit_headers(resp.headers, [&](const std::string& k, const std::string& v) {
+            res.insert(k, v);
+        });
         if (!resp.headers.has("Date"))
             res.set(bhttp::field::date, util::http_date(std::chrono::system_clock::now()));
         res.keep_alive(keep);
@@ -434,6 +450,7 @@ private:
         }
 
         std::vector<std::byte> buf(64 * 1024);
+        uint64_t written = 0;
         for (;;) {
             size_t n = 0;
             try {
@@ -443,6 +460,19 @@ private:
                 co_return false;  // 响应头已发出，只能断连（契约 3：丢弃结果）
             }
             co_await ResumeOn{stream.get_executor()};
+            // 定长响应字节对账（与另三驱动一致）：写多会破坏消息边界；写少不能
+            // 保持 keep-alive——客户端会把下个响应的状态行当作本次 body 剩余部分
+            if (resp.content_length && written + n > *resp.content_length) {
+                LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})",
+                          written, n, *resp.content_length);
+                co_return false;
+            }
+            if (n == 0 && resp.content_length && written != *resp.content_length) {
+                LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
+                          *resp.content_length);
+                co_return false;
+            }
+            written += n;
             if (n == 0) {
                 res.body().data = nullptr;
                 res.body().more = false;
@@ -486,7 +516,7 @@ private:
             finish();
             return;
         }
-        grace_timer_.emplace(ioc_, std::chrono::seconds(10));
+        grace_timer_.emplace(ctl_strand_, std::chrono::seconds(10));
         grace_timer_->async_wait([this](beast::error_code e) {
             if (e) return;
             std::vector<std::shared_ptr<Session>> rest;
@@ -496,7 +526,7 @@ private:
             }
             LOG_WARN("forcing {} connection(s) closed on shutdown", rest.size());
             for (auto& s : rest) close_session(s);
-            force_timer_.emplace(ioc_, std::chrono::seconds(5));
+            force_timer_.emplace(ctl_strand_, std::chrono::seconds(5));
             force_timer_->async_wait([this](beast::error_code e2) {
                 if (!e2) ioc_.stop();  // 最后兜底：卡死的会话不再等
             });
@@ -523,7 +553,9 @@ private:
 
     void finish() {
         std::call_once(finish_once_, [this] {
-            asio::post(ioc_, [this] {
+            // 收尾动作触碰 grace/force 定时器与 stop_event，须与 on_stop_signal
+            // 同 strand 串行
+            asio::post(ctl_strand_, [this] {
                 if (grace_timer_) grace_timer_->cancel();
                 if (force_timer_) force_timer_->cancel();
                 beast::error_code ig;
@@ -536,6 +568,9 @@ private:
     HttpConfig cfg_;
     Handler handler_;
     asio::io_context ioc_;
+    // 控制面 strand：acceptor / stop_event / grace_timer / force_timer 的所有
+    // 操作在此串行（数据面仍是每连接一个 strand）
+    asio::strand<asio::io_context::executor_type> ctl_strand_ = asio::make_strand(ioc_);
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> work_;
     std::optional<tcp::acceptor> acceptor_;
     std::optional<asio::posix::stream_descriptor> stop_event_;

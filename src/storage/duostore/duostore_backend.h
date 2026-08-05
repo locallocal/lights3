@@ -95,13 +95,14 @@ struct DuoOrphanStats {
 // PackMigrateFn 的标准实现（§9.2 步骤 2-3；cfg 构造与测试注入组装共用）：owner
 // 反查存活（对象 "b\0k" 直查；mpu "mpu\0b\0k\0id\0no" 借 b/k 提示查 complete 后的
 // 归属对象——owner 只是提示，存活判据恒为"当前 DataRef 含 from"+ swap 的 version
-// 守卫，提示失效只保守不迁、绝不误删）→ payload 经 data.open_writer 追加 →
-// swap_extents 乐观换 ref。竞态覆盖使 swap 失败时清理已追加的 chunk 类残留（pack
-// 类为死区随压实回收）。pins 可空；须与 data 的 ChunkPinHooks 同源（追加走 chunk
-// 路径时对称解 pin）
-Task<bool> migrate_pack_record(IMetaStore& meta, IDataStore& data, PinTable* pins,
-                               std::string_view owner, const Extent& from,
-                               std::span<const std::byte> payload);
+// 守卫，提示失效只保守不迁、绝不误删）。批量形态（gaps §2.13）：整批按 owner 聚合
+// ——同一对象的多条 record 只做一次 get_object + 一次换 ref（消 O(n²) manifest 重
+// 写）；存活 payload 经 data.write_batch 一次追加（fs 实现单 fdatasync）；换 ref 走
+// meta.swap_extents_batch（本地引擎单事务提交）。竞态覆盖使 swap 失败时清理已追加
+// 的 chunk 类残留（pack 类为死区随压实回收）。返回成功迁移的 record 数。pins 可空；
+// 须与 data 的 ChunkPinHooks 同源（追加走 chunk 路径时对称解 pin）
+Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable* pins,
+                                    std::vector<PackScanRecord> batch);
 
 }  // namespace duostore
 
@@ -190,7 +191,8 @@ public:
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
     Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
-                               http::BodyReader& body) override;
+                               http::BodyReader& body,
+                               PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
@@ -274,6 +276,19 @@ private:
     };
     std::unordered_map<uint64_t, int64_t> pack_empty_since_;
     std::unordered_map<uint64_t, CompactBlocked> compact_blocked_;
+    // gcq 扫描水位（gaps §2.13：每轮从 seq 0 重扫全部不可回收项的 CPU 随 backlog
+    // 线性涨且不降）：记录被跳过项里最早的 seq 与最早的可重试时刻。全部跳过项都
+    // 未到重试时刻的轮次直接从上轮高位起扫（只看新入队项），免去队头积压的重复
+    // peek+解码。pinned/删除失败的重试时刻取"本轮时刻"（下一轮即全量重扫——pin
+    // 何时释放无从预知，保守方向）；grace 跳过取 enqueue+grace（确定性下界）。
+    // 纯内存优化：重启清零只是退回全量扫，不影响正确性
+    struct GcqSkips {
+        bool any = false;
+        uint64_t lo_seq = 0;       // 最早跳过项的 seq（any 时有效）
+        int64_t retry_at_ms = 0;   // 跳过项中最早的可重试时刻
+    };
+    GcqSkips gcq_skips_;
+    uint64_t gcq_hi_ = 0;          // 已扫过的 seq 高位（下一个未见 seq）
 
     BackgroundTaskGroup bg_{"duostore"};
     // 只在 bg_.if_open 内写、begin_close 后不变（读侧免锁）；0 = 未 arm（cancel(0) 安全）

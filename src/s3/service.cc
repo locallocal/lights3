@@ -98,6 +98,11 @@ std::pair<std::string, std::string> S3Service::resolve_address(
     if (!base_domain_.empty()) {
         if (auto host = req.headers.get("Host")) {
             std::string h = *host;
+            // 域名大小写不敏感（RFC 4343）：不归一化则 Host: B.GW.EXAMPLE.COM
+            // 静默降级成 path-style，同一 URL 两种大小写指向不同资源，且 policy
+            // 判定的 bucket 输入被客户端控制
+            for (char& c : h)
+                if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
             // 去端口：Host 可为 "name:port" 或 "[v6]:port"，IPv6 字面量内的 ':'
             // 不是端口分隔符（rfind 会把 "[::1]" 截成 "[:"）
             if (!h.empty() && h.front() == '[') {

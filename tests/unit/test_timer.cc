@@ -2,6 +2,7 @@
 // 触发、到期顺序、撤销语义（未触发 true / 已触发或不存在 false）、析构不悬挂、
 // 更早条目插队唤醒。时序断言只用宽松上界（cv + 超时等待），避免慢机 flake。
 #include <atomic>
+#include <stdexcept>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -139,4 +140,21 @@ TEST(timer_add_earlier_item_preempts_wait) {
     q.add(std::chrono::seconds(3600), [&] {});
     q.add(20ms, [&] { s.hit(); });
     CHECK(s.wait_for_count(1, 5000ms));
+}
+
+TEST(timer_callback_exception_does_not_wedge_cancel) {
+    // gaps §2.2：回调抛出时 running_id_ 复位与 notify 必须仍然执行，
+    // 否则 cancel(该 id) 永久阻塞（它是各后端关停路径的第一步）
+    TimerQueue q;
+    Signal s;
+    auto id = q.add(1ms, [&] {
+        s.hit();
+        throw std::runtime_error("timer callback failure");
+    });
+    CHECK(s.wait_for_count(1, 5000ms));
+    CHECK(!q.cancel(id));  // 已触发：立即返回 false，而非挂死
+    // 队列线程仍存活，后续条目照常触发
+    Signal s2;
+    q.add(1ms, [&] { s2.hit(); });
+    CHECK(s2.wait_for_count(1, 5000ms));
 }

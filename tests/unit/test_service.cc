@@ -631,13 +631,21 @@ TEST(service_ipv6_host_literal) {
 TEST(service_vhost_bucket_name_validated) {
     S3Service svc(make_router(), SigV4Authenticator::build(AuthConfig{}), "s3.local");
     for (const char* host : {"/etc.s3.local", "b/../.sys.s3.local", "b/x.s3.local",
-                             "UPPER.s3.local", "ab.s3.local"}) {
+                             "ab.s3.local"}) {
         auto req = make_req("GET", "/passwd");
         req.headers.set("Host", host);
         auto resp = sync_wait(svc.dispatch(std::move(req)));
         CHECK_EQ(resp.status, 400);
         CHECK(contains(resp.small_body, "InvalidBucketName"));
     }
+    // 域名大小写不敏感（RFC 4343，docs/gaps.md §2.13）：大写 Host 归一化后与
+    // 小写指向同一 bucket（"upper" 不存在 → 404），而不是降级 path-style 或按
+    // 大写桶名拒绝——后者会让同一 URL 在两种大小写下指向不同资源
+    auto req = make_req("GET", "/k");
+    req.headers.set("Host", "UPPER.s3.local");
+    auto resp = sync_wait(svc.dispatch(std::move(req)));
+    CHECK_EQ(resp.status, 404);
+    CHECK(contains(resp.small_body, "NoSuchBucket"));
 }
 
 // path-style：%00 解码后首字符是 NUL 而非 '.'，旧的首字符启发式会放行

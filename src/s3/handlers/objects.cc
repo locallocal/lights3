@@ -94,14 +94,16 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
     auto& backend = router_.resolve(bucket);
 
     // PUT 条件请求（docs/s3-protocol.md §6）：If-None-Match:* 防覆盖，If-Match 乐观并发。
-    // head 检查与 put 在同 key 条带锁内串行化——不加锁时两个并发条件写都能通过
-    // 检查后互相覆盖，"防覆盖/乐观并发"语义双双失效
-    std::optional<AsyncSemaphore::Permit> cond_lock;
+    // "检查 + 提交"由后端在其原子提交点完成（PutCondition 契约，backend.h）——此处
+    // 只做一次无锁 head 预检，让明显失败的请求不必上传完整 body 就能拿到 412/404。
+    // 预检非原子，不承担正确性；曾经的 L2 条带锁跨整个 body 上传，64 条慢速连接
+    // 即可堵死全网关条件写，且多实例部署下本就守不住
+    storage::PutCondition cond;
     if (auto v = req.headers.get("If-None-Match")) {
         if (*v != "*")
             throw S3Error(S3ErrorCode::NotImplemented,
                           "PUT If-None-Match only supports '*'.");
-        cond_lock = co_await cond_put_lock(bucket, key).acquire();
+        cond.if_none_match = true;
         bool exists = true;
         try {
             co_await backend.head_object(bucket, key);
@@ -113,16 +115,16 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
     } else if (auto v2 = req.headers.get("If-Match")) {
-        cond_lock = co_await cond_put_lock(bucket, key).acquire();
+        cond.if_match_etag = strip_quotes(*v2);
         auto cur = co_await backend.head_object(bucket, key);  // 缺失 → NoSuchKey(404)
-        if (strip_quotes(*v2) != cur.etag)
+        if (*cond.if_match_etag != cur.etag)
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
     }
 
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
-    auto result = co_await backend.put_object(bucket, key, meta_from_headers(req), body);
+    auto result = co_await backend.put_object(bucket, key, meta_from_headers(req), body, cond);
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));

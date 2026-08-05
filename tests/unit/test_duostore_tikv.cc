@@ -247,6 +247,24 @@ TEST(duostore_tikv_part_abort_guard) {
     b.close();
 }
 
+// 单值体积保护（gaps §2.12）：manifest 超过 raft entry 承载即 fail-fast 抛
+// EntityTooLarge（400），而非 prewrite 永久失败的 500——写不进也删不掉最伤
+TEST(duostore_tikv_object_manifest_size_guard) {
+    TIKV_OR_SKIP();
+    TikvMetaStore m(tikv_opts(unique_prefix()));
+    m.create_bucket("etl");
+    std::vector<Extent> huge;
+    huge.reserve(200'001);
+    // 交错 id 破坏 run 编码（病态形态），条数越过 kMaxObjectExtents
+    for (size_t i = 0; i < 200'001; ++i)
+        huge.push_back(chunk_extent(i * 2 + 1, 1));
+    CHECK_THROWS_S3(m.put_object("etl", "k", make_rec("k", std::move(huge))),
+                    s3::S3ErrorCode::EntityTooLarge);
+    CHECK(!m.get_object("etl", "k").has_value());  // 未落写
+    m.delete_bucket("etl");
+    m.close();
+}
+
 // swap_extents 的 CAS 放弃路径（§4.4/主文档 §9.2）：version/extents 不符 → false 不落写
 TEST(duostore_tikv_swap_extents_cas) {
     TIKV_OR_SKIP();

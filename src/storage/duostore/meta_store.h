@@ -83,7 +83,11 @@ struct IMetaStore {
 
     // ---- object ----
     virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
-    virtual void put_object(std::string_view b, std::string_view k, ObjectRec rec) = 0;
+    // cond.active() 时在本事务的原子区内按 PutCondition 契约（storage/backend.h）
+    // 校验旧记录：违反抛 PreconditionFailed / NoSuchKey，事务不提交（共享检查
+    // 见 meta_util.h check_put_condition）
+    virtual void put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                            PutCondition cond = {}) = 0;
     virtual bool delete_object(std::string_view b, std::string_view k) = 0;  // 不存在返回 false（幂等）
     virtual ListResult list_objects(std::string_view b, const ListOptions& opt) = 0;
 

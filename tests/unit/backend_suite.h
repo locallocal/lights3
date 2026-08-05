@@ -90,6 +90,38 @@ inline void run_backend_suite(IStorageBackend& b) {
     auto v2 = sync_wait(b.get_object("suite-bkt", "dir/a.txt", std::nullopt));
     CHECK_EQ(read_all(*v2.body), "v2");
 
+    // 条件 PUT（PutCondition 契约，storage/backend.h）：检查在后端提交点原子完成，
+    // 失败不得留下写入痕迹
+    {
+        auto put_if = [&](const std::string& key, const std::string& data, PutCondition cond) {
+            http::StringBodyReader body(data);
+            return sync_wait(b.put_object("suite-bkt", key, ObjectMeta{}, body, cond));
+        };
+        PutCondition none_match;
+        none_match.if_none_match = true;
+        CHECK_THROWS_S3(put_if("dir/a.txt", "clobber", none_match),
+                        S3ErrorCode::PreconditionFailed);
+        auto created = put_if("cond/new.txt", "fresh", none_match);  // 不存在 → 创建
+        PutCondition match_ok;
+        match_ok.if_match_etag = created.etag;
+        put_if("cond/new.txt", "fresh2", match_ok);  // etag 相符 → 覆盖
+        PutCondition match_stale;
+        match_stale.if_match_etag = created.etag;  // 已被上一步覆盖，etag 过期
+        CHECK_THROWS_S3(put_if("cond/new.txt", "x", match_stale),
+                        S3ErrorCode::PreconditionFailed);
+        PutCondition match_absent;
+        match_absent.if_match_etag = created.etag;
+        CHECK_THROWS_S3(put_if("cond/absent.txt", "x", match_absent), S3ErrorCode::NoSuchKey);
+        // 条件失败的路径均未污染现场
+        auto cur = sync_wait(b.get_object("suite-bkt", "cond/new.txt", std::nullopt));
+        CHECK_EQ(read_all(*cur.body), "fresh2");
+        auto keep = sync_wait(b.get_object("suite-bkt", "dir/a.txt", std::nullopt));
+        CHECK_EQ(read_all(*keep.body), "v2");
+        CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "cond/absent.txt", std::nullopt)),
+                        S3ErrorCode::NoSuchKey);
+        sync_wait(b.delete_object("suite-bkt", "cond/new.txt"));
+    }
+
     // 错误路径
     CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "missing", std::nullopt)),
                     S3ErrorCode::NoSuchKey);

@@ -519,13 +519,18 @@ std::optional<ObjectRec> TikvMetaStore::get_object(std::string_view b, std::stri
     });
 }
 
-void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec) {
+void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                               PutCondition cond) {
     txn_retry("put_object", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         std::string okey = object_key(b, k);
         auto vals = snap_get_many(ts, {bucket_key(b), okey});  // 一次往返读全前置
         if (!vals[0]) throw_no_bucket(b);
         std::optional<ObjectRec> old;
         if (vals[1]) old = codec::decode_object(std::string(k), *vals[1]);
+        // 快照读 + 提交时写写冲突检测：并发覆盖会使本事务冲突重试，重试轮以新
+        // 快照重新检查——检查与提交对外原子（PutCondition 契约）。抛出时 muts
+        // 未发出任何 RPC
+        check_put_condition(cond, old, k);
         rec.version = old ? old->version + 1 : 1;
 
         // primary = 对象键（写写冲突的语义焦点）；守卫 Lock 物化桶存在性检查（§4.3）

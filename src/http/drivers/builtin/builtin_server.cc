@@ -25,10 +25,6 @@ namespace lights3::http {
 
 namespace {
 
-// 并发连接硬上限：超过即拒绝新连接（thread-per-connection 模型的自保阈值，
-// 无上限时每连接一线程可耗尽内存/线程数）
-constexpr int kMaxConnections = 4096;
-
 bool send_all(int fd, const char* data, size_t len) {
     while (len > 0) {
         ssize_t n = ::send(fd, data, len, MSG_NOSIGNAL);
@@ -173,8 +169,13 @@ struct BodyState {
 
 class SocketBodyReader final : public BodyReader {
 public:
-    SocketBodyReader(BodyState* st, std::optional<uint64_t> len) : st_(st), len_(len) {}
+    SocketBodyReader(BodyState* st, std::optional<uint64_t> len, PumpExecutor* conn_exec)
+        : st_(st), len_(len), conn_exec_(conn_exec) {}
     Task<size_t> read(std::span<std::byte> buf) override {
+        // 阻塞 recv 切回连接自己的线程执行（docs/gaps.md §2.10）：handler 协程链
+        // 跑在共享 ThreadPool 上，就地 recv 会把池线程堵在慢速客户端上——16 个
+        // 慢速上传即可占死全部池线程；连接线程此刻正闲在 sync_wait_pumping 里
+        co_await resume_on(*conn_exec_);
         co_return st_->read_some(buf.data(), buf.size());
     }
     std::optional<uint64_t> length() const override { return len_; }
@@ -182,6 +183,7 @@ public:
 private:
     BodyState* st_;
     std::optional<uint64_t> len_;
+    PumpExecutor* conn_exec_;
 };
 
 // 连接线程共享的服务器状态：run() 可能在残余连接线程退出前返回（强杀等待超时），
@@ -306,15 +308,17 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
         body_state.remaining = *content_length;
         has_body = *content_length > 0;
     }
+    PumpExecutor conn_exec;
     if (has_body || content_length)
-        req.body = std::make_unique<SocketBodyReader>(&body_state, content_length);
+        req.body = std::make_unique<SocketBodyReader>(&body_state, content_length, &conn_exec);
     if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
         body_state.need_continue = true;
 
     bool head_request = req.method == "HEAD";
     HttpResponse resp;
     try {
-        resp = sync_wait(sh.handler(std::move(req)));
+        // pumping 变体：等待期间连接线程运行 conn_exec 队列，承接 body 的阻塞读
+        resp = sync_wait_pumping(conn_exec, sh.handler(std::move(req)));
     } catch (const std::exception& e) {
         // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2：500 + InternalError XML）
         LOG_ERROR("handler escaped exception: {}", e.what());
@@ -410,8 +414,11 @@ public:
             inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
             {
                 std::lock_guard lk(sh.m);
-                if (sh.active >= kMaxConnections) {
-                    LOG_WARN("connection limit ({}) reached, rejecting {}", kMaxConnections, ip);
+                // 并发连接硬上限（cfg.max_connections，四驱动统一）：thread-per-
+                // connection 模型无上限时每连接一线程可耗尽内存/线程数
+                if (sh.active >= sh.cfg.max_connections) {
+                    LOG_WARN("connection limit ({}) reached, rejecting {}",
+                             sh.cfg.max_connections, ip);
                     ::close(fd);
                     continue;
                 }

@@ -187,6 +187,30 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
 }
 
+void check_put_condition(const fs::path& data_path, const PutCondition& cond,
+                         std::string_view key) {
+    if (!cond.active()) return;
+    std::optional<ObjectMeta> cur;
+    try {
+        cur = load_object_meta(data_path, std::string(key));
+    } catch (const S3Error& e) {
+        if (e.code != S3ErrorCode::NoSuchKey) throw;
+    }
+    if (cond.if_none_match && cur)
+        throw S3Error(S3ErrorCode::PreconditionFailed,
+                      "At least one of the pre-conditions you specified did not hold",
+                      std::string(key));
+    if (cond.if_match_etag) {
+        if (!cur)
+            throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                          std::string(key));
+        if (*cond.if_match_etag != cur->etag)
+            throw S3Error(S3ErrorCode::PreconditionFailed,
+                          "At least one of the pre-conditions you specified did not hold",
+                          std::string(key));
+    }
+}
+
 // ---- 分层存储扩展（docs/tiered-storage.md §4）----
 
 // 元数据 TSV 解析（xattr 与 sidecar 同一格式）

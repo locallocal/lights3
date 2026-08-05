@@ -39,7 +39,8 @@ public:
     std::vector<BucketInfo> list_buckets() override;
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec) override;
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                    PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
     ListResult list_objects(std::string_view b, const ListOptions& opt) override;
 

@@ -622,12 +622,19 @@ Task<PutResult> CloudProxyBackend::stream_upload(
 }
 
 Task<PutResult> CloudProxyBackend::put_object(std::string_view bucket, std::string_view key,
-                                              ObjectMeta meta, http::BodyReader& body) {
+                                              ObjectMeta meta, http::BodyReader& body,
+                                              PutCondition cond) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
+    // 条件写透传给上游（S3 conditional writes）：检查与提交的原子性只能由持有
+    // 对象的一方保证，代理侧任何 head+put 组合都守不住。上游若不支持会以
+    // 4xx/501 拒绝，由 throw_remote_error 原样映射；412 → PreconditionFailed
+    auto extra = meta_headers(meta);
+    if (cond.if_none_match) extra.emplace_back("If-None-Match", "*");
+    if (cond.if_match_etag) extra.emplace_back("If-Match", "\"" + *cond.if_match_etag + "\"");
     co_return co_await stream_upload(t.object_path(key_path(key)), "", t.host,
-                                     meta.content_type, meta_headers(meta), body,
+                                     meta.content_type, std::move(extra), body,
                                      resource_of(bucket, key), /*multipart_ctx=*/false);
 }
 

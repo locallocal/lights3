@@ -323,13 +323,16 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
 }
 
 Task<PutResult> TieredBackend::put_object(std::string_view bucket, std::string_view key,
-                                          ObjectMeta meta, http::BodyReader& body) {
+                                          ObjectMeta meta, http::BodyReader& body,
+                                          PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
     co_await pool_->schedule();
     TierInfo prior = read_tier_only(local_->object_data_path(bucket, key));
-    auto r = co_await local_->put_object(bucket, key, std::move(meta), body);
+    // 条件透传给 local_：stub 的 sidecar 保留原 etag（HEAD 全本地，§6.1），
+    // 本地 commit 锁内的检查对 demoted 对象同样权威
+    auto r = co_await local_->put_object(bucket, key, std::move(meta), body, cond);
     touch_atime(bucket, key);
     // write-back：新数据只落本地，tier 回到 local；旧云副本成孤儿（§7.1）
     if (prior.tier != Tier::kLocal) enqueue_gc(bucket, key, prior.remote_etag);

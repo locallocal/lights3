@@ -54,7 +54,8 @@ Task<std::vector<BucketInfo>> MemoryBackend::list_buckets() {
 }
 
 Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_view key,
-                                          ObjectMeta meta, http::BodyReader& body) {
+                                          ObjectMeta meta, http::BodyReader& body,
+                                          PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     // 先流式读完 body（不持锁），再提交
@@ -74,6 +75,23 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
 
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
+    // 条件检查与提交同锁（PutCondition 契约）
+    if (cond.active()) {
+        auto it = b.objects.find(std::string(key));
+        if (cond.if_none_match && it != b.objects.end())
+            throw S3Error(S3ErrorCode::PreconditionFailed,
+                          "At least one of the pre-conditions you specified did not hold",
+                          std::string(key));
+        if (cond.if_match_etag) {
+            if (it == b.objects.end())
+                throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                              std::string(key));
+            if (*cond.if_match_etag != it->second.meta.etag)
+                throw S3Error(S3ErrorCode::PreconditionFailed,
+                              "At least one of the pre-conditions you specified did not hold",
+                              std::string(key));
+        }
+    }
     PutResult r{meta.etag};
     b.objects[std::string(key)] = Object{std::move(meta), std::move(data)};
     co_return r;

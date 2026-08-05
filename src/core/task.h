@@ -231,6 +231,63 @@ inline void sync_wait(Task<void> t) {
     t.take_result();
 }
 
+// ---------- sync_wait_pumping：请求线程边等边当 executor（docs/gaps.md §2.10）----------
+// 与 sync_wait 的差异：等待期间在当前线程运行 ex 的队列，body reader 经
+// resume_on(ex) 把阻塞读切回本线程执行。同步驱动（builtin/httplib）专用。
+
+namespace detail {
+
+// 自毁式包装协程：驱动顶层任务、把结果搬到调用方栈上，最后叫醒 pump 循环。
+// out/err 先于 finish() 写入；finish() 之后不再触碰任何调用方状态
+struct PumpRunner {
+    struct promise_type {
+        PumpRunner get_return_object() { return {}; }
+        std::suspend_never initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }
+        void return_void() {}
+        void unhandled_exception() { std::terminate(); }  // 协程体内已全捕获
+    };
+};
+
+template <class T>
+PumpRunner pump_run(Task<T> t, PumpExecutor& ex, std::optional<T>& out,
+                    std::exception_ptr& err) {
+    try {
+        out.emplace(co_await std::move(t));
+    } catch (...) {
+        err = std::current_exception();
+    }
+    ex.finish();
+}
+
+inline PumpRunner pump_run(Task<void> t, PumpExecutor& ex, std::exception_ptr& err) {
+    try {
+        co_await std::move(t);
+    } catch (...) {
+        err = std::current_exception();
+    }
+    ex.finish();
+}
+
+}  // namespace detail
+
+template <class T>
+T sync_wait_pumping(PumpExecutor& ex, Task<T> t) {
+    std::optional<T> out;
+    std::exception_ptr err;
+    detail::pump_run(std::move(t), ex, out, err);
+    ex.run();
+    if (err) std::rethrow_exception(err);
+    return std::move(*out);
+}
+
+inline void sync_wait_pumping(PumpExecutor& ex, Task<void> t) {
+    std::exception_ptr err;
+    detail::pump_run(std::move(t), ex, err);
+    ex.run();
+    if (err) std::rethrow_exception(err);
+}
+
 // ---------- when_all：并发等待一组 Task（docs/concurrency.md §2/§6）----------
 
 namespace detail {

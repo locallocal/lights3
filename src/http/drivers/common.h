@@ -172,20 +172,28 @@ inline bool header_emittable(const std::string& k, const std::string& v) {
     return true;
 }
 
+// 出站头统一过滤（四驱动同一套规则，契约 5）：长度/编码/连接管理是驱动的职责
+// 由各驱动自行追加，放行会产生重复 Content-Length 等断帧漏洞；不可安全写入报文
+// 的头（CR/LF 注入面）直接丢弃。set(k, v) 由驱动适配自己的响应对象
+template <class SetFn>
+inline void emit_headers(const HeaderMap& headers, SetFn&& set) {
+    for (auto& [k, v] : headers.items()) {
+        if (HeaderMap::ieq(k, "Content-Length") || HeaderMap::ieq(k, "Transfer-Encoding") ||
+            HeaderMap::ieq(k, "Connection") || HeaderMap::ieq(k, "Keep-Alive"))
+            continue;
+        if (!header_emittable(k, v)) continue;
+        set(k, v);
+    }
+}
+
 inline ResponseHead render_response_head(const HttpResponse& resp, bool keep_alive) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
     ResponseHead out;
     out.text = "HTTP/1.1 " + std::to_string(resp.status) + " " + reason_phrase(resp.status) +
                "\r\n";
-    for (auto& [k, v] : resp.headers.items()) {
-        // 长度/编码/连接管理是驱动的职责，后面统一追加（与 httplib 驱动的
-        // 过滤一致，见契约 5）；放行会产生重复 Content-Length 等断帧漏洞
-        if (HeaderMap::ieq(k, "Content-Length") || HeaderMap::ieq(k, "Transfer-Encoding") ||
-            HeaderMap::ieq(k, "Connection") || HeaderMap::ieq(k, "Keep-Alive"))
-            continue;
-        if (!header_emittable(k, v)) continue;
+    emit_headers(resp.headers, [&](const std::string& k, const std::string& v) {
         out.text += k + ": " + v + "\r\n";
-    }
+    });
     if (!resp.headers.has("Date"))
         out.text += "Date: " + util::http_date(std::chrono::system_clock::now()) + "\r\n";
     if (!no_body_status) {

@@ -138,7 +138,8 @@ Task<std::vector<BucketInfo>> LocalFsBackend::list_buckets() {
 // ---------- object ----------
 
 Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_view key,
-                                           ObjectMeta meta, http::BodyReader& body) {
+                                           ObjectMeta meta, http::BodyReader& body,
+                                           PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     reject_reserved_key(key);
@@ -176,9 +177,11 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     meta.last_modified = std::chrono::system_clock::now();
 
     // 2. 冲突检查 + 数据 rename + sidecar 提交。per-key 锁：提交段是两次
-    // rename，并发同 key PUT 交错会产生"数据=A、etag=B"的撕裂对象
+    // rename，并发同 key PUT 交错会产生"数据=A、etag=B"的撕裂对象。
+    // 条件 PUT 的检查同在锁内（PutCondition 契约）：检查与提交对并发写者原子
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();  // 锁唤醒可能在别的线程恢复，阻塞 IO 回池线程做
+    fsutil::check_put_condition(object_path(bucket, key), cond, key);
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
     co_return PutResult{meta.etag};
 }

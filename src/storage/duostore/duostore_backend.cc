@@ -878,7 +878,8 @@ Task<void> commit_or_discard(IDataStore& data, const DataRef& ref, Commit commit
 }  // namespace
 
 Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string_view key,
-                                            ObjectMeta meta, http::BodyReader& body) {
+                                            ObjectMeta meta, http::BodyReader& body,
+                                            PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     co_await pool_->schedule();
@@ -893,9 +894,10 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     rec.meta.etag = pumped.md5;
     rec.meta.last_modified = std::chrono::system_clock::now();
     rec.data = pumped.ref;
-    // 提交点；旧 DataRef 同批入 gcq
+    // 提交点；旧 DataRef 同批入 gcq。条件检查在 meta 事务原子区内完成，
+    // 失败抛出走 discard 路径回收已落的数据 extent
     co_await commit_or_discard(*data_, pumped.ref,
-                               [&] { meta_->put_object(bucket, key, std::move(rec)); });
+                               [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
     co_return PutResult{pumped.md5};
 }
 

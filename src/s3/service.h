@@ -37,9 +37,9 @@ public:
         : router_(std::move(router)),
           auth_(std::move(auth)),
           base_domain_(std::move(base_domain)) {
-        cond_put_locks_.reserve(kCondPutStripes);
-        for (size_t i = 0; i < kCondPutStripes; ++i)
-            cond_put_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
+        // Host 匹配统一按小写进行（resolve_address），配置侧同样归一化
+        for (char& c : base_domain_)
+            if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
     }
 
     // 顶层入口：内部捕获一切异常并映射为 S3 错误响应，不向 L1 抛出
@@ -112,14 +112,6 @@ private:
     // virtual-host style：Host 匹配 *.base_domain 时把 bucket 前置到路径解析
     std::pair<std::string, std::string> resolve_address(const http::HttpRequest& req) const;
 
-    // 条件 PUT（If-Match / If-None-Match）的 per-key 条带互斥（handlers/objects.cc）：
-    // head 检查 + put 的窗口内对同 key 串行化，两个并发条件写不再都能通过检查。
-    // 只覆盖本进程；多实例共享后端时仍需后端级 CAS（当前部署形态为单网关写入）
-    AsyncSemaphore& cond_put_lock(std::string_view bucket, std::string_view key) {
-        size_t h = std::hash<std::string>()(std::string(bucket) + "/" + std::string(key));
-        return *cond_put_locks_[h % kCondPutStripes];
-    }
-
     storage::BucketRouter router_;
     SigV4Authenticator auth_;
     std::string base_domain_;
@@ -127,9 +119,6 @@ private:
     std::function<ThreadPool::Stats()> pool_stats_;
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
-
-    static constexpr size_t kCondPutStripes = 64;
-    std::vector<std::unique_ptr<AsyncSemaphore>> cond_put_locks_;
 
     // /-/readyz 结果短缓存（匿名可达，探测对每个后端发真实调用：不加缓存
     // 可被匿名循环放大成对上游的计费/限流调用）

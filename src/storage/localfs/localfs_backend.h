@@ -28,7 +28,8 @@ public:
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
     Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
-                               http::BodyReader& body) override;
+                               http::BodyReader& body,
+                               PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;

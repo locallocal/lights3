@@ -722,7 +722,8 @@ std::optional<ObjectRec> RedisMetaStore::get_object(std::string_view b, std::str
     return codec::decode_object(std::string(k), *v);
 }
 
-void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec) {
+void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                                PutCondition cond) {
     std::string owner = codec::object_key(b, k);
     for (int attempt = 0; attempt < kMaxCasRetries; ++attempt) {
         cas_backoff(attempt);
@@ -730,6 +731,9 @@ void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
         auto oldv = hget_raw(objects_key(b), k);
         std::optional<ObjectRec> old;
         if (oldv) old = codec::decode_object(std::string(k), *oldv);
+        // 检查基于本轮 CAS 见证的旧值：并发写者插入会使 expect_eq/expect_absent
+        // 失败重试，重试轮重新检查——检查与提交对外原子（PutCondition 契约）
+        check_put_condition(cond, old, k);
         rec.version = old ? old->version + 1 : 1;
 
         RedisBatch bt(*this);

@@ -53,6 +53,12 @@ std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem:
 void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                         const std::filesystem::path& staging_put, std::string_view key);
 
+// 条件 PUT 的提交点校验（PutCondition 契约，storage/backend.h）：调用方必须持
+// 同 key 的 commit 锁，使检查与随后的 rename 提交原子。元数据经 xattr/sidecar
+// 读取，对 tier stub 同样权威（stub 保留原 etag），tiered 直接复用本检查
+void check_put_condition(const std::filesystem::path& data_path, const PutCondition& cond,
+                         std::string_view key);
+
 // ---- 分层存储的 sidecar 扩展（docs/tiered-storage.md §4）----
 
 enum class Tier { kLocal, kRemote, kCached };

@@ -719,13 +719,15 @@ std::optional<ObjectRec> SqliteMetaStore::get_object(std::string_view b, std::st
     return codec::decode_object(std::string(k), *v);
 }
 
-void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec) {
+void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                                 PutCondition cond) {
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
     require_bucket(c, b);
     std::optional<ObjectRec> old;
     if (auto v = object_raw(c, b, k)) old = codec::decode_object(std::string(k), *v);
+    check_put_condition(cond, old, k);  // 事务内检查，抛出即回滚（PutCondition 契约）
     rec.version = old ? old->version + 1 : 1;
 
     std::string owner = std::string(b) + '/' + std::string(k);

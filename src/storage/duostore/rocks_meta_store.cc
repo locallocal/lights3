@@ -315,12 +315,14 @@ std::optional<ObjectRec> RocksMetaStore::get_object(std::string_view b, std::str
     return codec::decode_object(std::string(k), *v);
 }
 
-void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec) {
+void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                                PutCondition cond) {
     std::lock_guard lk(mu_);
     require_bucket_locked(b);
     std::string okey = codec::object_key(b, k);
     std::optional<ObjectRec> old;
     if (auto oldv = get_raw(kObjects, okey)) old = codec::decode_object(std::string(k), *oldv);
+    check_put_condition(cond, old, k);  // 与提交同锁（PutCondition 契约）
     rec.version = old ? old->version + 1 : 1;
 
     rocksdb::WriteBatch batch;

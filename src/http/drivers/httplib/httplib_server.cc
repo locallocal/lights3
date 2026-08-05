@@ -5,6 +5,7 @@
 // 定位：功能验证、低并发场景；不是性能路径。
 #include <httplib/httplib.h>
 
+#include <atomic>
 #include <cstring>
 #include <thread>
 
@@ -44,6 +45,25 @@ public:
                 rs.status = err.status;
                 rs.set_content(err.small_body, "application/xml");
             });
+        // Expect: 100-continue（docs/http-adapter.md §3.1 要求延迟应答）。
+        // 上游 API 只有三种出路：立即回 100 / 回 417 / 以最终响应关连接——
+        // "抑制自动应答、handler 决定后再回 100"在 v0.20 不可表达，属该驱动的
+        // 已知限制（本驱动定位功能验证，误发 100 后的无效 body 由 handle() 的
+        // 4MiB 有界排空 + 关连接兜住）。此处能做的：消息边界违规在邀请客户端
+        // 上传之前就以 400 拒绝，不再是"先回 100 再拒"
+        svr_.set_expect_100_continue_handler(
+            [](const httplib::Request& rq, httplib::Response& rs) {
+                HeaderMap headers;
+                for (auto& [k, v] : rq.headers)
+                    if (!is_pseudo_header(k)) headers.add(k, v);
+                if (!driver::parse_body_framing(headers).valid) {
+                    auto bad = driver::bad_request_response("Invalid message framing.");
+                    rs.status = bad.status;
+                    rs.set_content(bad.small_body, "application/xml");
+                    return bad.status;  // 非 100/417：上游发出该响应并关连接
+                }
+                return static_cast<int>(httplib::StatusCode::Continue_100);
+            });
 
         const std::string pat = ".*";
         auto no_body = [this](const httplib::Request& rq, httplib::Response& rs) {
@@ -78,11 +98,23 @@ public:
     uint16_t bound_port() const override { return port_; }
 
     void run() override {
-        svr_.listen_after_bind();  // 返回前 httplib 线程池已 join（在途请求跑完）
+        // shutdown 早于 run 的补偿（另三驱动同款）：不检查则该顺序下 stop() 是
+        // no-op（is_running_ 未置位），listen 永不返回
+        if (!stopping_.load()) {
+            svr_.listen_after_bind();  // 返回前 httplib 线程池已 join（在途请求跑完）
+        }
         LOG_INFO("httplib http server stopped");
     }
 
-    void shutdown() override { svr_.stop(); }
+    void shutdown() override {
+        stopping_.store(true);
+        // 顺序敏感：stop() 会把 is_decommissioned 复位，必须先 stop 后 decommission。
+        // 已在运行 → stop() 关监听 socket 使循环退出；尚未运行 → decommission()
+        // 使随后的 listen_after_bind() 立即返回。上游 listen_internal 的
+        // decommission 检查与 is_running_ 置位之间仍有纳秒级窗口，属上游 API 限制
+        svr_.stop();
+        svr_.decommission();
+    }
 
 private:
     void handle(const httplib::Request& rq, httplib::Response& rs,
@@ -121,12 +153,15 @@ private:
             return;
         }
 
-        // 推转拉：pump 线程驱动 ContentReader 往队列灌，请求线程阻塞在 sync_wait
+        // 推转拉：pump 线程驱动 ContentReader 往队列灌；请求线程在
+        // sync_wait_pumping 里运行 req_exec 队列，body 的 cv 阻塞切回请求线程
+        // 执行（docs/gaps.md §2.10），不占共享池线程
+        PumpExecutor req_exec;
         std::shared_ptr<BlockQueue> queue;
         std::thread pump;
         if (content_reader && (chunked || (content_length && *content_length > 0))) {
             queue = std::make_shared<BlockQueue>(256 * 1024);
-            req.body = std::make_unique<QueueBodyReader>(queue, content_length);
+            req.body = std::make_unique<QueueBodyReader>(queue, content_length, &req_exec);
             pump = std::thread([content_reader, queue] {
                 bool ok = (*content_reader)(
                     [&](const char* data, size_t n) { return queue->push(data, n); });
@@ -138,7 +173,7 @@ private:
 
         HttpResponse resp;
         try {
-            resp = sync_wait(handler_(std::move(req)));
+            resp = sync_wait_pumping(req_exec, handler_(std::move(req)));
         } catch (const std::exception& e) {
             // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
             LOG_ERROR("handler escaped exception: {}", e.what());
@@ -244,6 +279,7 @@ private:
     Handler handler_;
     httplib::Server svr_;
     uint16_t port_ = 0;
+    std::atomic<bool> stopping_{false};
 };
 
 }  // namespace

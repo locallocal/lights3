@@ -33,6 +33,9 @@ struct HttpConfig {
     int io_threads = 4;
     size_t max_header_size = 16 * 1024;
     int idle_timeout_sec = 60;
+    // 并发连接硬上限（四驱动统一；httplib 由其线程池隐式约束）：超限拒绝新连接，
+    // 无上限时每连接的线程/协程帧/缓冲可耗尽内存
+    int max_connections = 4096;
     std::string base_domain;  // 非空时启用 virtual-host style（docs/s3-protocol.md §2）
 };
 

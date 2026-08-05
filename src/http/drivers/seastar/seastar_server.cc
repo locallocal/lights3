@@ -674,6 +674,14 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
             continue;
         }
         if (st->stopping) break;  // 竞态窗口内接入的连接直接丢弃（析构即关闭）
+        // 并发连接上限（cfg.max_connections，四驱动统一）：按 shard 均摊，超限
+        // 丢弃新连接（ar 析构即关闭），无上限时每连接的协程帧/缓冲可耗尽内存
+        size_t shard_cap = std::max<size_t>(
+            1, static_cast<size_t>(core->cfg.max_connections) / ss::smp::count);
+        if (st->sessions.size() >= shard_cap) {
+            LOG_WARN("connection limit ({}/shard) reached, rejecting", shard_cap);
+            continue;
+        }
         std::ostringstream oss;
         oss << ar->remote_address.addr();
         auto sess = std::make_shared<Session>(std::move(ar->connection));

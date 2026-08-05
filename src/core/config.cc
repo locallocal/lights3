@@ -224,6 +224,10 @@ Config Config::from_string(const std::string& text) {
             cfg.http.max_header_size = parse_size(v);
         if (auto v = http->get("idle_timeout"); !v.empty())
             cfg.http.idle_timeout_sec = parse_duration_sec(v);
+        cfg.http.max_connections = to_int(http->get("max_connections"),
+                                          cfg.http.max_connections);
+        if (cfg.http.max_connections < 1)
+            throw std::runtime_error("config: http.max_connections must be >= 1");
     }
     if (auto* rt = root.find("runtime")) {
         cfg.runtime.io_threads = to_int(rt->get("io_threads"), cfg.runtime.io_threads);

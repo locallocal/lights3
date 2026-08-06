@@ -48,6 +48,11 @@ struct PromiseBase {
     // home executor（docs/concurrency.md §3）：设置后 final_suspend 把续体 post 过去，
     // 而非对称转移——协议逻辑由此回到 HTTP 执行环境；子任务在 co_await 时继承
     IExecutor* cont_executor = nullptr;
+    // 取消 token（docs/concurrency.md §5，docs/gaps.md §3.1）：与 cont_executor 同样
+    // 沿 co_await 链向下继承。请求入口用 Task::with_cancel() 挂上本请求的 token 之后，
+    // 整条 L2/L3 协程链上的 co_await pool_->schedule() 会自动拿到它——挂起点因此可被
+    // 取消唤醒，无需在 40+ 个调用点逐一显式传参
+    CancelToken cancel;
 
     struct FinalAwaiter {
         bool await_ready() const noexcept { return false; }
@@ -71,14 +76,17 @@ struct PromiseBase {
     FinalAwaiter final_suspend() noexcept { return {}; }
 };
 
-// co_await 时的公共挂起逻辑：记录续体并继承调用方的 home executor
+// co_await 时的公共挂起逻辑：记录续体并继承调用方的 home executor 与取消 token
 template <class Promise>
 std::coroutine_handle<> task_await_suspend(std::coroutine_handle<Promise> task,
                                            std::coroutine_handle<> cont,
-                                           IExecutor* parent_executor) noexcept {
+                                           IExecutor* parent_executor,
+                                           const CancelToken& parent_cancel) noexcept {
     auto& p = task.promise();
     p.continuation = cont;
     if (!p.cont_executor) p.cont_executor = parent_executor;
+    // 子任务自带 token（with_cancel 显式挂过）时不覆盖，否则继承调用方的
+    if (!p.cancel.valid()) p.cancel = parent_cancel;
     return task;  // 对称转移启动被等待的任务
 }
 
@@ -117,9 +125,12 @@ public:
         template <class P>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<P> cont) noexcept {
             IExecutor* parent = nullptr;
-            if constexpr (std::derived_from<P, detail::PromiseBase>)
+            CancelToken tok;
+            if constexpr (std::derived_from<P, detail::PromiseBase>) {
                 parent = cont.promise().cont_executor;
-            return detail::task_await_suspend(h, cont, parent);
+                tok = cont.promise().cancel;
+            }
+            return detail::task_await_suspend(h, cont, parent, tok);
         }
         T await_resume() {
             auto& r = h.promise().result;
@@ -132,6 +143,12 @@ public:
     // 绑定 home executor（driver 在链路起点调用）；完成后续体投递回 ex
     Task& via(IExecutor& ex) {
         h_.promise().cont_executor = &ex;
+        return *this;
+    }
+
+    // 绑定取消 token（请求入口调用）；本任务及其 co_await 的所有子任务继承
+    Task& with_cancel(CancelToken t) {
+        h_.promise().cancel = std::move(t);
         return *this;
     }
 
@@ -184,9 +201,12 @@ public:
         template <class P>
         std::coroutine_handle<> await_suspend(std::coroutine_handle<P> cont) noexcept {
             IExecutor* parent = nullptr;
-            if constexpr (std::derived_from<P, detail::PromiseBase>)
+            CancelToken tok;
+            if constexpr (std::derived_from<P, detail::PromiseBase>) {
                 parent = cont.promise().cont_executor;
-            return detail::task_await_suspend(h, cont, parent);
+                tok = cont.promise().cancel;
+            }
+            return detail::task_await_suspend(h, cont, parent, tok);
         }
         void await_resume() {
             if (h.promise().error) std::rethrow_exception(h.promise().error);
@@ -196,6 +216,11 @@ public:
 
     Task& via(IExecutor& ex) {
         h_.promise().cont_executor = &ex;
+        return *this;
+    }
+
+    Task& with_cancel(CancelToken t) {
+        h_.promise().cancel = std::move(t);
         return *this;
     }
 
@@ -411,12 +436,17 @@ inline Task<void> when_all(std::vector<Task<void>> tasks) {
 }
 
 // ---------- with_timeout：协作式超时（docs/concurrency.md §2/§5）----------
-// 到点仅触发 src.request_cancel()；task 须以 src.token() 构造并在挂起点/
-// 长循环感知取消，超时表现为 OperationCancelled 从 task 内浮出。
+// 到点仅触发 src.request_cancel()；task 由本函数挂上 src.token()（连同其
+// co_await 的整条子任务链），超时表现为 OperationCancelled 从最近的可取消挂起点
+// （pool.schedule / semaphore.acquire）浮出。已在池线程上执行的阻塞系统调用不被
+// 抢占——协作式取消不追求抢占，等其自然返回后由下一个挂起点感知。
 // src 应为本次调用专用：与他人共享的 source 会在超时后殃及同请求的后续操作。
+// 需要"外部取消（断连/进程关停）也能打断"时，调用方把外部 token 的回调接到
+// 同一个 src 上（见 S3Service::dispatch）。
 template <class T>
 Task<T> with_timeout(Task<T> task, std::chrono::milliseconds timeout, CancelSource src) {
     auto& tq = TimerQueue::instance();
+    task.with_cancel(src.token());
     auto id = tq.add(timeout, [src]() mutable { src.request_cancel(); });
     try {
         if constexpr (std::is_void_v<T>) {

@@ -14,6 +14,7 @@
 
 using namespace lights3;
 using namespace std::chrono_literals;
+using Id2 = TimerQueue::Id;
 
 namespace {
 
@@ -157,4 +158,40 @@ TEST(timer_callback_exception_does_not_wedge_cancel) {
     Signal s2;
     q.add(1ms, [&] { s2.hit(); });
     CHECK(s2.wait_for_count(1, 5000ms));
+}
+
+// ---------- 回调线程与调度线程分离（gaps §3.2）----------
+
+TEST(slow_callback_does_not_stall_deadline_tracking) {
+    // 取消回调会就地展开被取消的协程链，是有界但非零的工作。它必须跑在专用回调
+    // 线程上：跑在调度线程上，期间到期的其他定时器连"到期判定"都做不了
+    TimerQueue q;
+    Signal slow_started;
+    q.add(10ms, [&] {
+        slow_started.hit();
+        std::this_thread::sleep_for(300ms);
+    });
+    Id2 second = q.add(40ms, [] {});
+    CHECK(slow_started.wait_for_count(1, 2s));
+    std::this_thread::sleep_for(120ms);  // 早已过第二项的到期时刻
+    // 慢回调仍在跑（300ms 未满）。此时第二项若还留在待触发表里，cancel 会返回
+    // true——说明调度线程被回调卡住了。返回 false = 已被按时摘出，只是排队待执行
+    CHECK(!q.cancel(second));
+}
+
+TEST(cancel_waits_for_due_but_unstarted_callback) {
+    // 已到期、还排在回调队列里（尚未开始执行）的项：cancel 必须等它收敛，
+    // 否则调用方会去析构回调仍要访问的资源
+    TimerQueue q;
+    Signal first_started;
+    std::atomic<bool> second_ran{false};
+    q.add(10ms, [&] {
+        first_started.hit();
+        std::this_thread::sleep_for(200ms);
+    });
+    Id2 second = q.add(20ms, [&] { second_ran = true; });
+    CHECK(first_started.wait_for_count(1, 2s));
+    std::this_thread::sleep_for(60ms);  // 第二项已到期，排在慢回调之后
+    CHECK(!q.cancel(second));  // 返回 false = 已触发
+    CHECK(second_ran.load());  // 且返回时确已执行完毕
 }

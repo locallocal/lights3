@@ -160,3 +160,68 @@ TEST(config_rejects_out_of_range_values) {
         Config::from_string(std::string("http:\n  io_threads: 0\n") + backends);
     }));
 }
+
+// ---------- 校验缺口（gaps §3.9）----------
+
+TEST(config_rejects_absurd_thread_counts) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // 上界与 per-backend 的同名参数取齐 [1,1024]：手滑的 100000 会在启动时把进程拖垮
+    CHECK(throws([&] {
+        Config::from_string(std::string("runtime:\n  io_threads: 100000\n") + backends);
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  io_threads: 2048\n") + backends);
+    }));
+    CHECK_EQ(Config::from_string(std::string("runtime:\n  io_threads: 1024\n") + backends)
+                 .runtime.io_threads,
+             1024);
+}
+
+TEST(config_int_errors_name_the_key_and_value) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    std::string msg;
+    try {
+        Config::from_string(std::string("runtime:\n  io_threads: eight\n") + backends);
+    } catch (const std::exception& e) {
+        msg = e.what();
+    }
+    // 裸 stoi 只会报 "stoi"：既没有键名也没有原值
+    CHECK(msg.find("runtime.io_threads") != std::string::npos);
+    CHECK(msg.find("eight") != std::string::npos);
+    // 尾随垃圾不再被当成合法前缀
+    CHECK(throws([&] {
+        Config::from_string(std::string("runtime:\n  io_threads: 8x\n") + backends);
+    }));
+}
+
+TEST(config_rejects_duplicate_backend_name) {
+    CHECK(throws([] {
+        Config::from_string(
+            "backends:\n  - name: dup\n    type: memory\n  - name: dup\n    type: memory\n");
+    }));
+}
+
+TEST(config_keeps_hash_inside_quotes) {
+    setenv("LIGHTS3_TEST_SECRET", "sekrit", 1);
+    auto cfg = Config::from_string(
+        "auth:\n  credentials:\n    - access_key: AK\n      secret_key: \"a #b c\"\n"
+        "backends:\n  - name: m\n    type: memory\n");
+    // 引号内的 " #" 不是注释：裸 find(" #") 会把密钥静默截短
+    CHECK_EQ(cfg.auth.credentials[0].secret_key, "a #b c");
+    // 引号外的行内注释仍照常剥离
+    auto n = yaml_parse("a: b   # trailing\n");
+    CHECK_EQ(n.get("a"), "b");
+}
+
+TEST(config_undefined_env_is_an_error_unless_defaulted) {
+    unsetenv("LIGHTS3_DEFINITELY_UNSET");
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // 静默展开成空串会把"变量名写错"变成"值悄悄变空"
+    CHECK(throws([&] {
+        Config::from_string(std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET}\n") + backends);
+    }));
+    // 确实可选的写 ${VAR:-默认值}
+    auto cfg = Config::from_string(
+        std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET:-debug}\n") + backends);
+    CHECK_EQ(cfg.log_level, "debug");
+}

@@ -58,6 +58,10 @@ public:
         cred_store_ = std::move(s);
     }
 
+    // 请求级超时（docs/gaps.md §3.3）：0 = 关闭。到点以协作式取消打断整条 handler
+    // 链，挂起点抛 OperationCancelled → 503
+    void set_request_timeout(std::chrono::milliseconds t) { request_timeout_ = t; }
+
     // 显式分派表（docs/s3-protocol.md §2）：(method, scope, query-flag) → handler，声明序匹配
     enum class Scope { Service, Bucket, Object };
     using Handler = Task<http::HttpResponse> (*)(S3Service&, http::HttpRequest&, std::string,
@@ -117,6 +121,7 @@ private:
     std::string base_domain_;
     Metrics metrics_;
     std::function<ThreadPool::Stats()> pool_stats_;
+    std::chrono::milliseconds request_timeout_{0};
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
 

@@ -33,6 +33,13 @@ struct HttpConfig {
     int io_threads = 4;
     size_t max_header_size = 16 * 1024;
     int idle_timeout_sec = 60;
+    // 请求级超时（docs/gaps.md §3.3）：从 handler 开始执行起计时，到点以协作式取消
+    // 打断请求（挂起点抛 OperationCancelled → 504）。idle_timeout 只覆盖 socket
+    // 系统调用，覆盖不到 handler 执行期。0 = 关闭
+    int request_timeout_sec = 300;
+    // 传输停滞上限：流式收发**整体**允许的无进展时长。四驱动的分块超时都是逐块
+    // 重置的，每 59 秒发 1 字节的客户端可无限期占住连接。0 = 关闭
+    int transfer_stall_timeout_sec = 300;
     // 并发连接硬上限（四驱动统一；httplib 由其线程池隐式约束）：超限拒绝新连接，
     // 无上限时每连接的线程/协程帧/缓冲可耗尽内存
     int max_connections = 4096;

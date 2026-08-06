@@ -85,6 +85,9 @@ struct HttpRequest {
     HeaderMap headers;
     std::string remote_addr;
     std::unique_ptr<BodyReader> body;  // 可能为 nullptr（无 body）
+    // 取消信号（docs/concurrency.md §5）：驱动/装配层挂上本请求的 token，L2 把它
+    // 与请求级超时并到同一个源，整条协程链据此收敛。默认"永不取消"
+    CancelToken cancel;
 
     std::optional<std::string> query_get(std::string_view key) const {
         for (auto& [k, v] : query)

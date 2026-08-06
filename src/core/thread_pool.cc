@@ -107,7 +107,7 @@ void ThreadPool::worker_loop() {
     }
 }
 
-bool ThreadPool::ScheduleAwaiter::await_suspend(std::coroutine_handle<> h) {
+bool ThreadPool::ScheduleAwaiter::suspend_impl(std::coroutine_handle<> h) {
     slot = std::make_shared<Slot>();
     slot->h = h;
     // 局部持有一切后续要用的东西：取消回调注册成功后，协程随时可能在
@@ -120,7 +120,14 @@ bool ThreadPool::ScheduleAwaiter::await_suspend(std::coroutine_handle<> h) {
         [s] {
             if (!s->claimed.exchange(true, std::memory_order_acq_rel)) {
                 s->cancelled = true;
-                s->h.resume();  // 在取消发起线程上以 OperationCancelled resume
+                // 就地 resume：恢复后立即从 await_resume 抛 OperationCancelled，
+                // 做的只是异常展开（展开中不可能 co_await，遇到挂起点即交还本线程），
+                // 是有界工作。**不能**改投线程池——取消最需要生效的场景正是池被占满，
+                // 那时 post 的续体排在阻塞任务后面，取消变成空头支票（docs/gaps.md
+                // §3.2 的建议按字面实现会死锁，见 test_concurrency 的相应用例）。
+                // 触发线程侧的防线在 TimerQueue：回调跑在专用回调线程上，展开不会
+                // 停摆到期判定
+                s->h.resume();
             }
         },
         s->reg_id, s->cancel_state);

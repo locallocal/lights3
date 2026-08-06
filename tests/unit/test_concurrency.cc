@@ -360,3 +360,113 @@ TEST(pool_task_exception_does_not_kill_worker) {
     pool.post([&] { done.set_value(); });  // 同一 worker 线程仍然活着
     CHECK(done.get_future().wait_for(5s) == std::future_status::ready);
 }
+
+// ---------- 取消体系接线（gaps §3.1/§3.2/§3.9）----------
+
+TEST(semaphore_acquire_is_cancellable) {
+    AsyncSemaphore sem(1);
+    ThreadPool pool(1);
+    auto hold = sem.try_acquire();  // 占住唯一许可
+    CHECK(hold.has_value());
+
+    CancelSource src;
+    auto t = [](AsyncSemaphore& s, CancelToken tok) -> Task<int> {
+        auto p = co_await s.acquire(std::move(tok));
+        co_return 1;  // 不应到达
+    };
+    std::atomic<bool> cancelled{false};
+    std::thread waiter([&] {
+        try {
+            sync_wait(t(sem, src.token()));
+        } catch (const OperationCancelled&) {
+            cancelled = true;
+        }
+    });
+    std::this_thread::sleep_for(20ms);  // 让它排进等待队列
+    CHECK_EQ(sem.waiting(), size_t(1));
+    src.request_cancel();
+    waiter.join();
+    CHECK(cancelled.load());
+    CHECK_EQ(sem.waiting(), size_t(0));  // 取消者已摘链，许可不会派给死等待者
+    hold.reset();
+    CHECK_EQ(sem.available(), 1L);
+}
+
+TEST(semaphore_close_wakes_all_waiters) {
+    AsyncSemaphore sem(0);  // 无许可：全部排队
+    auto t = [](AsyncSemaphore& s) -> Task<int> {
+        auto p = co_await s.acquire();
+        co_return 1;
+    };
+    std::atomic<int> cancelled{0};
+    std::vector<std::thread> ws;
+    for (int i = 0; i < 3; ++i)
+        ws.emplace_back([&] {
+            try {
+                sync_wait(t(sem));
+            } catch (const OperationCancelled&) {
+                ++cancelled;
+            }
+        });
+    while (sem.waiting() < 3) std::this_thread::sleep_for(1ms);
+    sem.close();
+    for (auto& w : ws) w.join();
+    CHECK_EQ(cancelled.load(), 3);
+    // close 之后不再接受新的 acquire
+    bool thrown = false;
+    try {
+        sync_wait(t(sem));
+    } catch (const OperationCancelled&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+}
+
+TEST(cancel_token_propagates_down_task_chain) {
+    // 子任务不显式传 token 也应继承——存量 co_await pool.schedule() 的接线方式
+    ThreadPool pool(1);
+    std::promise<void> gate;
+    auto blocked = gate.get_future().share();
+    pool.post([blocked] { blocked.wait(); });  // 占住唯一 worker
+
+    auto inner = [](ThreadPool& p) -> Task<int> {
+        co_await p.schedule();  // 无参：token 来自 promise 继承
+        co_return 1;
+    };
+    auto outer = [&inner](ThreadPool& p) -> Task<int> { co_return co_await inner(p); };
+
+    CancelSource src;
+    std::atomic<bool> cancelled{false};
+    std::thread waiter([&] {
+        try {
+            sync_wait(std::move(outer(pool).with_cancel(src.token())));
+        } catch (const OperationCancelled&) {
+            cancelled = true;
+        }
+    });
+    std::this_thread::sleep_for(20ms);
+    src.request_cancel();
+    waiter.join();
+    CHECK(cancelled.load());
+    gate.set_value();
+}
+
+TEST(cancel_registration_reset_waits_for_inflight_callback) {
+    // reset() 返回后回调必不再运行（与 TimerQueue::cancel 同语义）
+    CancelSource src;
+    std::atomic<bool> in_cb{false};
+    std::atomic<bool> cb_done{false};
+    std::atomic<bool> reset_returned{false};
+    auto reg = src.token().on_cancel([&] {
+        in_cb = true;
+        std::this_thread::sleep_for(100ms);
+        cb_done = true;
+    });
+    std::thread trigger([&] { src.request_cancel(); });
+    while (!in_cb.load()) std::this_thread::sleep_for(1ms);
+    reg.reset();
+    reset_returned = true;
+    CHECK(cb_done.load());  // reset 期间回调已跑完，不是并发在跑
+    trigger.join();
+    CHECK(reset_returned.load());
+}

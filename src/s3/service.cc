@@ -125,7 +125,7 @@ std::pair<std::string, std::string> S3Service::resolve_address(
 // ---------- 顶层入口 ----------
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
-    RequestContext ctx{make_request_id(), {}};
+    RequestContext ctx{make_request_id(), req.cancel};
     bool head = req.method == "HEAD";
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
@@ -174,8 +174,31 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                                handlers::parse_copy_source(*src).first,
                                                /*is_write=*/false);
             }
-            resp = co_await route(req, bucket, key);
+            // 请求级超时 + 取消接线（docs/gaps.md §3.1/§3.3）：req_src 为本请求专用，
+            // 外部 token（进程关停，驱动接线后还有客户端断连）接到同一个源上——任一
+            // 触发都让整条 L2/L3 链从最近的可取消挂起点（pool.schedule /
+            // semaphore.acquire）以 OperationCancelled 收敛。token 沿 Task promise
+            // 自动下传，无需逐个 handler/后端改签名
+            CancelSource req_src;
+            CancelRegistration link;
+            if (ctx.cancel.valid()) {
+                link = ctx.cancel.on_cancel([&req_src] { req_src.request_cancel(); });
+                if (ctx.cancel.cancelled()) req_src.request_cancel();
+            }
+            if (request_timeout_.count() > 0)
+                resp = co_await with_timeout(route(req, bucket, key), request_timeout_, req_src);
+            else
+                resp = co_await std::move(route(req, bucket, key).with_cancel(req_src.token()));
         }
+    } catch (const OperationCancelled&) {
+        // 超时/断连/关停：503 让 SDK 重试。已在池线程上执行的阻塞系统调用不被抢占，
+        // 本响应只代表"网关不再等它"（docs/concurrency.md §5 的协作式语义）
+        LOG_WARN("req {} {} {} cancelled (timeout or shutdown)", ctx.request_id, req.method,
+                 req.path);
+        metrics_.s3_error(wire_code(S3ErrorCode::SlowDown));
+        resp = error_response(
+            S3Error(S3ErrorCode::SlowDown, "Request cancelled: timed out or server shutting down."),
+            ctx.request_id, head);
     } catch (const S3Error& e) {
         metrics_.s3_error(wire_code(e.code));
         resp = error_response(public_error(e, ctx.request_id, req), ctx.request_id, head);

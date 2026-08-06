@@ -20,12 +20,19 @@ struct Detached {
 };
 
 Detached run_detached(const char* name, Task<void> t, std::function<void()> done) {
-    try {
-        co_await std::move(t);
-    } catch (const std::exception& e) {
-        LOG_WARN("{}: background task failed: {}", name, e.what());
-    } catch (...) {
-        LOG_WARN("{}: background task failed (unknown exception)", name);
+    {
+        // 被等待任务的协程帧必须在 done() **之前**销毁：done() 一旦执行，
+        // wait_idle() 就会放行持有方开始析构后端/线程池等资源，而任务帧内的局部量
+        // 此刻才刚要销毁，会去碰这些已亡对象（docs/gaps.md §3.9）。协程参数 t 是
+        // 帧的一部分（随帧销毁，晚于 done），故先移进本作用域的局部量
+        Task<void> task = std::move(t);
+        try {
+            co_await std::move(task);
+        } catch (const std::exception& e) {
+            LOG_WARN("{}: background task failed: {}", name, e.what());
+        } catch (...) {
+            LOG_WARN("{}: background task failed (unknown exception)", name);
+        }
     }
     done();
 }

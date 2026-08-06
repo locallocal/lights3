@@ -23,7 +23,11 @@
 - **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5）、存储引擎能力缺口 23 项（§6）、运维与工程能力缺口 10 项（§7）。
 - **第三部分 · 文档与实现的偏差**：15 条实现与承诺不符（含"改实现"与"改文档"两类），另有 7 条中英文档漂移（§8）。
 
-P0 四条**已于 2026-08-03 全部修复**（详见 §1）。按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
+P0 四条**已于 2026-08-03 全部修复**（详见 §1），高危 25 条（§2 的 12 条展开 + §2.13 的 13 行）
+**已于 2026-08-06 全部修复**（详见 §2；其中 §2.6 的下推顺带解决了 §3.6）。当前未修复的起点是
+§3 中危。
+
+P0 四条按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
 
 ---
 
@@ -117,7 +121,14 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 ## 2. 高
 
-### 2.1 关停期 `std::terminate`：`post` 在 join 后抛异常，却被 noexcept 上下文调用
+> **2026-08-06 已全部修复**（12 条展开 + §2.13 的 13 行，分五批上线，各条末尾附实际修法）。
+> 对应提交：`617245c`（2.1/2.2/2.7/2.8 与 §2.13 部分）、`ddca047`（2.4/2.9 与 §2.13 部分）、
+> `78b770e`（2.3/2.11 与 §2.13 duostore 三行）、`fb1a1c9`（2.12）、
+> `021a1d6`（2.5/2.6/2.10 与 §2.13 剩余六行），合入 PR #32。
+> 验证：主构建 271 + e2e 12 / TSan 256（零竞争）/ sqlite 259 / redis 256（真实例）/
+> rados 257 / tikv 257（tiup playground 真集群）全绿；seastar 无本机构建条件，改动为最小增量。
+
+### 2.1 [✅已修复] 关停期 `std::terminate`：`post` 在 join 后抛异常，却被 noexcept 上下文调用
 
 **位置**：抛出点 `src/core/thread_pool.cc:22`；noexcept 消费点 `src/core/task.h:55`（`FinalAwaiter::await_suspend` 标 noexcept 却调 `cont_executor->post`）、`src/core/semaphore.h:99`（`release_one` 源头是 `Permit::~Permit` 的隐式 noexcept 析构）。
 
@@ -125,7 +136,11 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：`post` 对 stopping 改为"就地 resume 或丢弃并记 ERROR"，绝不抛（`schedule()` 保留抛出语义，它有 co_await 承接点）；同时给 `IHttpServer::run()` 定义"返回即保证 handler 不再被调用且已返回"的硬契约，或让 `main` 在 `close()` 前等 `inflight->available()` 归位（带超时）。
 
-### 2.2 后台线程主循环无异常防线 → 异常逃逸线程函数即 terminate
+**✅已修复**：`ThreadPool::post` 在 `stopping_` 之后不再抛，改为就地在调用线程执行并记
+ERROR（`thread_pool.cc:24-33`）——noexcept 消费点（`FinalAwaiter::await_suspend`、
+`Permit::~Permit`）不再有异常来源；`schedule()` 保留抛出语义（它有 co_await 承接点）。
+
+### 2.2 [✅已修复] 后台线程主循环无异常防线 → 异常逃逸线程函数即 terminate
 
 **位置**：`src/core/thread_pool.cc:85`（`item.fn();` 裸调用）、`src/core/timer.cc:68`（`fn();` 裸调用）。
 
@@ -133,7 +148,11 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：两处循环体各包 try/catch 记 ERROR；`running_id_` 复位与 `notify_all` 放进 RAII 守卫，保证任何路径都执行。成本极低，建议优先。
 
-### 2.3 duostore 压实的两个不收敛缺陷
+**✅已修复**：`thread_pool.cc:99-101` 与 `timer.cc:76-79` 两处循环体各包 try/catch 记
+ERROR；`running_id_ = 0` 与 `done_cv_.notify_all()` 移到回调之后的必经路径
+（`timer.cc:82-83`），回调抛出不再让 `cancel()`（所有后端关停路径第一步）永久阻塞。
+
+### 2.3 [✅已修复] duostore 压实的两个不收敛缺陷
 
 **(a) 存活率分母口径不一致 → 小对象负载下永久重写循环**
 `duostore_backend.cc:1065-1066` 用 `live_bytes >= ratio * file_size` 判定，而 `live_bytes` 只累计 payload（`fs_data_store.cc:459-461`），`file_size` 含每 record 的 `22 + owner_len` 头部（`:55`/`:61-75`）。小对象（100B payload + 60B owner）即使 pack **100% 存活**比值也只有 ~0.55，默认 `pack_gc_ratio=0.5` 下恒低于阈值。后果：pack A 全量重写 → 存活 record 迁入 B → A 删除 → B 封存后同样低于阈值 → 再重写，**数据被无限搬运，GC 永不收敛**，且 `compact_blocked_` 拦不住（每轮 live_recs 都归零，属"账有推进"）。
@@ -143,7 +162,15 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：(a) 判据改为"可回收字节"（`file_size - live_bytes_with_header > max(min_reclaim, ratio * file_size)`），并让 `live_bytes` 计入 header 使分子分母同口径；(b) 给 `IDataStore` 加轻量 `stat_pack(pack_id)`，判定前先回填 file_size。
 
-### 2.4 tiered 的 per-key 锁临界区未切回池线程 → 阻塞 IO 跑在 HTTP 响应线程
+**✅已修复**：(a) `live_bytes` 改为含 record 头口径（`codec::pack_rec_overhead*`），四引擎
+put/delete/put_part/complete/abort/swap 全路径同步增减，complete 把选中分片的账从分片口径
+重平衡到对象口径以保证删除后精确归零；压实判据改为"有可回收字节 **且** 存活率 ≤
+`pack_gc_ratio`"（`duostore_backend.cc:1169-1191`），小对象 pack 100% 存活也低于阈值导致的
+永久重写循环消除。(b) `IDataStore` 增 `stat_pack()`（fs 实现即一次 `stat`，
+`data_store.h:123`），GC 判定前回填 `seal(0)` 遗留 pack 的 file_size（`:1180`），不支持的
+引擎沿用顺扫回报兜底。
+
+### 2.4 [✅已修复] tiered 的 per-key 锁临界区未切回池线程 → 阻塞 IO 跑在 HTTP 响应线程
 
 **位置**：`src/storage/tiered/tiered_backend.cc:541-555`（`commit_cache_fill`）、`:406-416` 与 `:466-481`（demote）、`:714-716`（GC）、`:876-887`（reconcile）——四处 `acquire()` 之后都**没有** `co_await pool_->schedule()`。
 
@@ -151,7 +178,12 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：四处统一补 `co_await pool_->schedule()`；并给 `key_locks_` 传入池 executor，从构造处根除就地 resume。
 
-### 2.5 beast 驱动出站头零校验 → 响应拆分注入面（四驱动中唯一）
+**✅已修复**：`key_locks_` / `transfers_` 统一传入池 executor，从构造处根除就地 resume；五处
+`acquire()` 之后补 `co_await pool_->schedule()`（`tiered_backend.cc:407`、`:417`、`:478`、
+`:778`、`:967`），`commit_cache_fill` 的 rename + 两次 fsync + sidecar 写入不再压在 HTTP
+响应线程上。
+
+### 2.5 [✅已修复] beast 驱动出站头零校验 → 响应拆分注入面（四驱动中唯一）
 
 **位置**：`src/http/drivers/beast/beast_server.cc:389` 与 `:414`（`for (auto& [k,v] : resp.headers.items()) res.insert(k, v);`）。对比 builtin/seastar 走 `common.h:166-188` 的 `header_emittable` + 保留头过滤，httplib 由上游 `is_field_value` 兜住。Beast 的 `try_create_new_element` 只校验长度，不校验 CR/LF。
 
@@ -159,7 +191,11 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：把 `common.h` 的过滤提成 `emit_headers(bhttp::fields&, const HeaderMap&)`，beast 两处循环统一改用。
 
-### 2.6 条件 PUT 的条带锁跨整个 body 上传 → 64 条连接即可堵死全网关条件写
+**✅已修复**：`common.h:179` 抽出 `emit_headers(headers, set)`——保留头过滤 + CR/LF 拒写，
+`render_response_head` 同步改用；beast 两条写出路径（`beast_server.cc:401`、`:428`）统一走它，
+四驱动出站头校验口径一致。回归用例：驱动套件新增 `/badheader` 头注入用例（四驱动共享）。
+
+### 2.6 [✅已修复] 条件 PUT 的条带锁跨整个 body 上传 → 64 条连接即可堵死全网关条件写
 
 **位置**：`src/s3/handlers/objects.cc:99-125`（`cond_lock` 在 `:104`/`:116` 取得，活到 `:125` 的 `put_object` 返回之后）；锁池 `src/s3/service.h:118-121`（64 条带）。
 
@@ -167,7 +203,15 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：把"检查 + 提交"下沉为后端原子操作——localfs 用 `renameat2(RENAME_NOREPLACE)` 或在已有的 commit 阶段 per-key 锁内比对 ETag，duostore 用元数据 CAS；L2 的锁随之删除。这同时解决下面 3.6 的多实例问题。
 
-### 2.7 localfs LIST 无 prefix/delimiter 剪枝（文档声称有）
+**✅已修复**：`IStorageBackend::put_object` 增 `PutCondition` 形参，"检查 + 提交"下沉到各后端
+自身的原子提交点——localfs/xlocalfs/memory 在 per-key commit 锁内、duostore 在四引擎的原子区
+内（rocks/sqlite 锁+事务、redis CAS 批、tikv 乐观事务，共享 `meta_util.h` 的检查）、tiered 透传
+local（stub sidecar 为权威）、cloudproxy 把 `If-None-Match`/`If-Match` 透传上游并补 412 兜底
+映射。`service.h` 的 64 条带锁删除，L2 只保留无锁 head 预检做快速失败（`objects.cc:97-101`）。
+**这同时解决了 §3.6 的多实例原子性问题。** 回归用例：backend_suite 增条件 PUT 六断言（全后端
+共享，cloudproxy 走真实转发链路）。
+
+### 2.7 [✅已修复] localfs LIST 无 prefix/delimiter 剪枝（文档声称有）
 
 **位置**：`src/storage/localfs/localfs_backend.cc:250-277`——不论 prefix/delimiter 是什么，一律 `recursive_directory_iterator` 全桶遍历 + 全部 key 收进 vector + 全排序。而 `docs/storage-backend.md:148-150` 明确声称"prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；delimiter=`/` 时目录即 common prefix，无需展开其内部"。
 
@@ -175,7 +219,12 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：prefix 取最后一个 `/` 之前的部分作为起始目录；delimiter=`/` 时改用非递归 `directory_iterator` 并 `disable_recursion_pending()`；`apply_listing` 改为收满 `max_keys+1` 即停的游标式。
 
-### 2.8 upload_part 分片数据不 fsync，但 `.md5` sidecar fsync 了
+**✅已修复**：`list_objects` 改为有序 `directory_iterator` 遍历 + prefix/delimiter/start_after
+三重子树剪枝 + 游标式截断（`localfs_backend.cc:276-380`）：子树与 prefix 不相交或整体 ≤
+start_after 即不下钻，delimiter 组命中后整组跳过，收满即停。截断边界落在 common prefix 上时用
+`max_key_with_prefix` 求组尾以保持 `next_token` 语义。差分测试对照全量实现验证语义等价。
+
+### 2.8 [✅已修复] upload_part 分片数据不 fsync，但 `.md5` sidecar fsync 了
 
 **位置**：`src/storage/localfs/localfs_backend.cc:334-342`（xlocalfs `:200-208` 同构）。`complete_multipart`（`:369-382`）**信任 `.md5` 不重算校验和**。
 
@@ -183,7 +232,11 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：`upload_part` 在 close 前 `fsync_file`，rename 后 `fsync_dir`；顺序改为"先 fsync 数据 → rename 数据 → 再写 .md5"，使 `.md5` 的出现成为数据已持久的证据。或直接把 md5 写进分片文件 xattr，复用 `set_meta_xattr`。
 
-### 2.9 io_uring 收割线程可静默死亡；shutdown 不排空在途
+**✅已修复**：localfs 与 xlocalfs 的 `upload_part` 改为"close 前 `fsync_file` 数据 → rename →
+`fsync_dir` → 最后写 `.md5`"（`localfs_backend.cc:511-532`），`.md5` 的出现即分片数据已持久
+——`complete_multipart` 信任 `.md5` 不重算校验和的前提由此顺序保证。
+
+### 2.9 [✅已修复] io_uring 收割线程可静默死亡；shutdown 不排空在途
 
 **位置**：`src/storage/xlocalfs/uring.cc:181-183`——`io_uring_enter` 返回非 EINTR/EAGAIN/EBUSY 的任何 errno 都让收割线程**无声退出**：不记日志、不置错误态、不唤醒任何在途 Op。此后所有 `co_await eng_->read/write` 永不 resume（GET 挂死、连接不释放、帧泄漏），而 `submit()` 仍接受新提交。
 
@@ -191,7 +244,12 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：失败退出前 LOG_ERROR + 置 failed 标志 + 唤醒全部在途 Op（`res = -EIO`）；加 `inflight_` 计数，shutdown 先等归零（带超时告警）再投哨兵；`Op` 改堆分配由 engine 持有，帧销毁时只标记 orphan。
 
-### 2.10 builtin/httplib 的 `BodyReader::read()` 阻塞在共享池线程上
+**✅已修复**：收割线程遇不可恢复 errno 不再无声退出——置 `failed_` 拒新提交、把全部在途 Op
+以 `-EIO` 唤醒并记 ERROR（`uring.cc:202-220`）；新增 `inflight_` 登记与条件变量，`shutdown()`
+先等在途 CQE 排空（10s 超时告警，`:234-241`）再投哨兵，避免 munmap/close 之后内核继续写用户
+缓冲区。
+
+### 2.10 [✅已修复] builtin/httplib 的 `BodyReader::read()` 阻塞在共享池线程上
 
 **位置**：`src/http/drivers/builtin/builtin_server.cc:177-179` → 裸 `::recv`；`src/http/pushpull.h:93-98` → `cv_pop_.wait`。而 `main.cc:76-81` 使整条请求协程链跑在 `ThreadPool`（默认 16 线程）上。
 
@@ -199,7 +257,13 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：给这两个驱动的 reader 一个"请求线程 executor"，`read()` 先切回连接自己的线程再阻塞；或把 `runtime.io_threads` 与这两个驱动的并发上限做联动校验并在文档写明限制。
 
-### 2.11 gcq 批量按条数而非 extent 数；单条 Reclaim 可达数十 MB
+**✅已修复**：新增 `PumpExecutor`（`core/executor.h:29`）与 `sync_wait_pumping`
+（`core/task.h:234`）——请求线程不再傻等在 `sync_wait` 里，而是边等边运行本请求的任务队列；
+`SocketBodyReader` / `QueueBodyReader` 把阻塞 `recv` 与 cv pop 经 `resume_on` 切回连接自己的
+线程（`pushpull.h:92-100`）。16 个慢速上传占死全部池线程的通路消除。TSan 抓出首版"锁外
+notify"的析构竞态，已改为锁内 notify。回归用例：test_task 增 PumpExecutor 两用例。
+
+### 2.11 [✅已修复] gcq 批量按条数而非 extent 数；单条 Reclaim 可达数十 MB
 
 **位置**：`duostore_backend.cc:965`（`kGcBatch = 256`）、`:1021`；`fs_data_store.cc:482-489`（`remove` 对 N 个 extent 顺序 unlink，全程不让出池线程）。
 
@@ -207,7 +271,13 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：`peek_reclaims` 增加"累计 extent 数上限"；`enqueue_reclaim` 对超阈值 DataRef 拆多条（ack 丢失本就无害）；`remove` 每 N 个 extent 让出一次线程。
 
-### 2.12 TiKV 无单值/单事务体积保护
+**✅已修复**：`enqueue_reclaim` 按 `kReclaimMaxExtents = 4096` 把超大 DataRef 拆成多条（四引擎
+统一；ack 独立、unlink 幂等，崩溃语义不变）；`peek_reclaims` 增累计 extent 上限
+（`kGcBatchExtents = 32768`，至少返回 1 项以兜住拆分前的旧账，`duostore_backend.cc:1052-1123`）；
+`FsDataStore::remove` 每 1024 次 unlink 让出一次池线程。回归用例：meta 套件新增 gcq 拆分/封顶
+用例（四引擎共享）。
+
+### 2.12 [✅已修复] TiKV 无单值/单事务体积保护
 
 **位置**：`codec.cc:307-318`（`encode_object` 无体积上限）、`tikv_meta_store.cc:509`（整份 manifest 作为单个 mutation value）、`:736-749`（万分片 complete 生成 3 万+ mutation）、`tikv_client.cc:213-215`（16KiB 批**串行**发送）。
 
@@ -215,23 +285,32 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 **建议**：manifest 分片存储或对 extent 数设硬上限（超限抛 `EntityTooLarge`）；`TikvClient::commit` 增加 mutation 数/字节的 fail-fast 校验。
 
-### 2.13 其余高危（简列）
+**✅已修复**：meta 层 fail-fast——`encode_object` 之后校验 manifest 单值 ≤ 6MiB（raft entry
+8MiB 默认值留余量）且 extent ≤ 20 万，超限抛 `EntityTooLarge`（400，可操作：客户端换 multipart
+或加大分片），替代此前在 prewrite 反复撞 raft 上限的永久 500；client 层最后防线——
+`TikvClient::commit` 在任何 RPC 之前校验单值 ≤ 6MiB、总量 ≤ 96MiB、条数 ≤ 30 万，超限在
+prewrite 之前抛出（语义上明确未提交）。回归用例：`duostore_tikv_object_manifest_size_guard`
+（20 万+ extent 抛 400 且未落写），tiup playground 真集群实测。
 
-| 位置 | 问题 | 建议 |
+### 2.13 [✅已修复] 其余高危（简列）
+
+> 本表 13 行**已于 2026-08-06 全部修复**，末列为实际修法。
+
+| 位置 | 问题 | ✅ 实际修法 |
 | --- | --- | --- |
-| `src/s3/service.cc:108-113` | Host 后缀匹配**大小写敏感** → `Host: b.GW.EXAMPLE.COM` 静默降级为 path-style，同一 URL 在两种大小写下指向不同资源，且 policy 判定的输入被攻击者控制 | 比较前统一转小写（与 1.1 的 Host 归一化同处实现） |
-| `src/core/util/uri.cc:31-34` | `percent_decode` 无条件把 `+` 解成空格并用于 **path** 与 copy-source → `PUT /b/a+b.txt` 静默存成 `a b.txt`；canonical query 侧还会把字面 `+` 重编码成 `%20` 造成 SignatureDoesNotMatch | 拆 `percent_decode`（不动 `+`）与 `percent_decode_query`；path/copy-source/canonical query 全用前者 |
-| `src/http/drivers/beast/beast_server.cc:436-463` | beast 缺定长流式响应的字节数对账（另三驱动都有）→ 后端流提前 EOF 时连接被复用，客户端把下个响应的状态行当作 body 剩余部分，**响应错位** | 累加 written，overrun/short 均断连 |
-| `src/http/drivers/beast/beast_server.cc:253` vs `:471` | `acceptor_`/`grace_timer_` 未绑 strand，与停机路径在两个线程上并发访问（asio I/O 对象非线程安全） | 建专用 `ctl_strand_`，停机动作全部 dispatch 进去 |
-| beast `:251-273` / seastar `:657-685` | 无并发连接上限（builtin 有 4096、httplib 有隐式约束）——beast 是"性能路径首选"却最缺自保 | `HttpConfig` 加 `max_connections`，四驱动统一 |
-| `src/http/drivers/httplib/httplib_server.cc:32-46` | 未注册 `set_expect_100_continue_handler` → 上游在**调用业务 handler 之前**无条件回 100，与文档要求的延迟应答相反：无效签名的 5GB PUT 会被完整收下再拒绝 | 注册 handler 抑制自动应答，把 100 挪到首次 pop 之前 |
-| `src/http/drivers/httplib/httplib_server.cc:85` | 缺"shutdown 早于 run"的补偿（另三驱动都有）→ 该顺序下 `run()` 永不返回 | 加 `stopping_` 原子位，`run()` 入口检查、`listen()` 末尾补发 |
-| `src/core/background.cc:35-43` | `spawn` 先 `++count_` 再 `run_detached`，帧分配失败时计数泄漏 → 后续 `wait_idle()`（无超时无日志）永久阻塞，而它就在 `~TieredBackend` 里 | `catch (...) { on_done(); throw; }` |
-| `src/core/semaphore.h:103-107` | `AsyncSemaphore` 析构不处理 `waiters_`（既不 resume 也不 destroy → 帧泄漏 + sync_wait 线程永久阻塞）；`Permit` 持裸指针 | 析构断言空，或提供 `close()` 以取消语义唤醒全部等待者 |
-| `src/storage/tiered/tiered_backend.cc:561-644` | scan/reconcile 把整个实例的对象全量物化进内存，并一次性构造 N 个协程帧（`transfers_` 只限并发执行数，不限帧数）；1000 万对象约 1.5–2GB | 分批 + 游标；`work` 改固定大小工作池 |
-| `duostore_backend.cc:146-158` + `fs_data_store.cc:447-457` | 压实每条 record 一次 fdatasync + 一次 meta 提交，与业务写抢同一把写锁（128MiB pack ≈ 1000 次） | 批量化：K 条合并成一次 pack 追加 + 一次多对象 `swap_extents_batch` |
-| `duostore_backend.cc:134` + 四引擎 `swap_extents` | 同一对象在同一 pack 有多条 record 时，压实退化为 O(n²) 的整份 manifest 重写（redis 更差，还要把整份旧值当 CAS 见证再传一遍） | `swap_extents` 接受多个 (from,to) 对，按 owner 聚合后一次换 ref |
-| `duostore_backend.cc:1019-1021` | GC 每轮从 seq 0 重扫全部不可回收项（断点续扫只在单轮内有效），backlog 下 CPU/内存开销线性增长且永不下降 | 持久化 `gcq_lo` 水位，或给跳过项记"下次可重试时刻" |
+| `src/s3/service.cc:108-113` | Host 后缀匹配**大小写敏感** → `Host: b.GW.EXAMPLE.COM` 静默降级为 path-style，同一 URL 在两种大小写下指向不同资源，且 policy 判定的输入被攻击者控制 | `resolve_address` 与 `base_domain_` 统一转小写（RFC 4343，`service.cc:98-113` / `service.h:41`）；vhost 用例按新语义更新为"同一 URL 两种大小写指向同一资源" |
+| `src/core/util/uri.cc:31-34` | `percent_decode` 无条件把 `+` 解成空格并用于 **path** 与 copy-source → `PUT /b/a+b.txt` 静默存成 `a b.txt`；canonical query 侧还会把字面 `+` 重编码成 `%20` 造成 SignatureDoesNotMatch | 已拆分：`percent_decode` 不再动 `+`（path / copy-source / canonical query 全用它），新增 `percent_decode_query` 供 query 参数值（`uri.h:12-15`） |
+| `src/http/drivers/beast/beast_server.cc:436-463` | beast 缺定长流式响应的字节数对账（另三驱动都有）→ 后端流提前 EOF 时连接被复用，客户端把下个响应的状态行当作 body 剩余部分，**响应错位** | 按建议实现：累加 `written`，overrun 与 short 均 LOG_ERROR + 断连（`beast_server.cc:453-475`） |
+| `src/http/drivers/beast/beast_server.cc:253` vs `:471` | `acceptor_`/`grace_timer_` 未绑 strand，与停机路径在两个线程上并发访问（asio I/O 对象非线程安全） | 新增 `ctl_strand_`，acceptor / stop_event / grace / force 定时器全部挂它，停机编排经 `asio::post(ctl_strand_, …)`（`beast_server.cc:200-214`、`:519-558`） |
+| beast `:251-273` / seastar `:657-685` | 无并发连接上限（builtin 有 4096、httplib 有隐式约束）——beast 是"性能路径首选"却最缺自保 | `HttpConfig` 增 `max_connections`（默认 4096，配置可调）：beast 按会话数拒绝、seastar 按 shard 均摊、builtin 改用配置值，四驱动统一 |
+| `src/http/drivers/httplib/httplib_server.cc:32-46` | 未注册 `set_expect_100_continue_handler` → 上游在**调用业务 handler 之前**无条件回 100，与文档要求的延迟应答相反：无效签名的 5GB PUT 会被完整收下再拒绝 | 已注册 `set_expect_100_continue_handler`（`:54`），消息边界违规在邀请上传前即 400 关连接。**残留限制**：cpp-httplib v0.20 的 API 只有"立即 100 / 417 / 最终响应"三种出路，无法表达"抑制自动应答、延迟到首次 pop"，因此签名无效的大 PUT 仍会被邀请上传，由 4MiB 有界排空兜住；代码处已注明 |
+| `src/http/drivers/httplib/httplib_server.cc:85` | 缺"shutdown 早于 run"的补偿（另三驱动都有）→ 该顺序下 `run()` 永不返回 | 加 `stopping_` 原子位，`run()` 入口检查（`:103`）；`stop()` 后补 `decommission()`（顺序敏感：`stop()` 会复位 decommission 标志，`:110-116`） |
+| `src/core/background.cc:35-43` | `spawn` 先 `++count_` 再 `run_detached`，帧分配失败时计数泄漏 → 后续 `wait_idle()`（无超时无日志）永久阻塞，而它就在 `~TieredBackend` 里 | 按建议实现：帧分配失败时回补计数后重抛（`background.cc:43`），`wait_idle()` 不再被泄漏的计数永久阻塞 |
+| `src/core/semaphore.h:103-107` | `AsyncSemaphore` 析构不处理 `waiters_`（既不 resume 也不 destroy → 帧泄漏 + sync_wait 线程永久阻塞）；`Permit` 持裸指针 | 析构断言 `waiters_` 为空，违反时记 ERROR 并保留帧（泄漏是保守方向，`semaphore.h:32-34`）。带取消语义的 `close()` 留到 §3.1 取消体系接线时一并做 |
+| `src/storage/tiered/tiered_backend.cc:561-644` | scan/reconcile 把整个实例的对象全量物化进内存，并一次性构造 N 个协程帧（`transfers_` 只限并发执行数，不限帧数）；1000 万对象约 1.5–2GB | `scan_once` 改两遍扫描：第一遍流式判冷 + 崩溃恢复（分批 `co_await`，帧数有界），第二遍仅在超水位时收集候选，multiset 只保留恰好覆盖回收目标的最优前缀；`reconcile` 改本地/云端双游标有序合并（各 1000/页），正反两向对账在 O(页) 内存内完成 |
+| `duostore_backend.cc:146-158` + `fs_data_store.cc:447-457` | 压实每条 record 一次 fdatasync + 一次 meta 提交，与业务写抢同一把写锁（128MiB pack ≈ 1000 次） | `rewrite_pack` 攒批（64 条 / 4MiB）交付批量迁移；数据侧 `write_batch` 单槽锁 + 单 fdatasync；meta 侧新增 `swap_extents_batch`（逐项 CAS 独立），rocks/sqlite 覆写为单批/单事务提交，redis/tikv 保持逐条（单条即一次 RTT，合并会让单项 CAS 失败殃及整批） |
+| `duostore_backend.cc:134` + 四引擎 `swap_extents` | 同一对象在同一 pack 有多条 record 时，压实退化为 O(n²) 的整份 manifest 重写（redis 更差，还要把整份旧值当 CAS 见证再传一遍） | 批内按 owner 聚合——同一对象的多条 record 一次 `get_object` + 一次换 ref，O(n²) 的整份 manifest 重写消除 |
+| `duostore_backend.cc:1019-1021` | GC 每轮从 seq 0 重扫全部不可回收项（断点续扫只在单轮内有效），backlog 下 CPU/内存开销线性增长且永不下降 | 跳过项记录最早 seq 与最早可重试时刻（grace 项取 `enqueue+grace` 的确定性下界；pin/删除失败取下一轮），全部未到期的轮次从上轮高位起扫（`duostore_backend.cc:1108-1162`）。纯内存优化，重启退回全量扫 |
 
 ---
 
@@ -280,6 +359,11 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 `docs/s3-protocol.md:126-130` 把 If-Match / If-None-Match 列为"对客户端的承诺"，但判定发生在网关内存里。两个实例并发处理同 key 的 `If-None-Match: *` 时各自 head 都得到 NoSuchKey，两者都 put。而 `docs/credential-management.md §10.3` 刚为多实例补齐了凭证同步——项目已把多实例当作支持形态，这条限制不再是理论问题。
 
 **建议**：短期在文档明写限制并在 `auth.sync_interval > 0` 时启动打 WARN；中期按 2.6 下推到后端。
+
+**✅已随 §2.6 修复**（2026-08-06）：条件判定已下推为后端原子操作（`PutCondition` 契约），
+localfs/xlocalfs/memory 在 per-key commit 锁内、duostore 在四引擎的原子区内完成检查，
+共享同一份元数据的多实例因此天然互斥；cloudproxy 把条件透传上游由其保证。L2 只剩无锁 head
+预检做快速失败。
 
 ### 3.7 在途吊销竞态时 policy 被整体跳过（fail-open 方向反了）
 
@@ -523,9 +607,10 @@ GET /credentials/L3AK…  Host: b/../.sys.gw.example.com
 
 按依赖关系而非单纯严重度排：
 
-1. **先修 P0 的四条**（1.1–1.4）。其中 1.1 的三处改动必须同批上线（单改一处不构成防线）。
-2. **2.1 + 2.2 一起修**——两条都是"后台线程/关停期异常防线"，成本极低、收益立竿见影，且 2.2 的 TimerQueue 次生问题会让 2.1 的修复更难验证。
-3. **3.1 / 3.2 / 2.9 / `AsyncSemaphore` 取消是同一条链**：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持，否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。
-4. **2.3 与 6.1 的 pack 老化/预算一起做**——三者都动 GC 判据，分批改会反复推翻测试基线。
+1. ~~**先修 P0 的四条**（1.1–1.4）。其中 1.1 的三处改动必须同批上线（单改一处不构成防线）。~~ ✅ 2026-08-03 完成。
+2. ~~**2.1 + 2.2 一起修**——两条都是"后台线程/关停期异常防线"，成本极低、收益立竿见影，且 2.2 的 TimerQueue 次生问题会让 2.1 的修复更难验证。~~ ✅ 2026-08-06 完成（§2 整节同批）。
+3. **3.1 / 3.2 / `AsyncSemaphore` 取消是同一条链**（2.9 已单独修完）：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持（§2.13 只做了析构断言，`close()` 留在这里），否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。**这是当前的下一站。**
+4. **6.1 的 pack 老化/预算**——2.3 的存活账口径与压实判据已改，续做时以现判据为基线，避免再次推翻测试。
 5. **3.5 的白名单反转**一次性消掉 5.3、3.4 的一半与未来所有子资源漂移，性价比最高。
 6. 第 7 节的工程能力（CI、TLS、后端指标）不阻塞正确性修复，可并行推进。
+7. §2.13 的 httplib `Expect: 100-continue` 留有上游 API 限制（无法延迟应答），如需彻底解决要么换驱动、要么向 cpp-httplib 提 PR。

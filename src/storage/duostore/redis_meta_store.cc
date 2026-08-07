@@ -71,7 +71,8 @@ for _ = 1, nc do
   i = i + 4
   local key = KEYS[tonumber(kx)]
   if t == 'eq' then
-    if redis.call('HGET', key, f) ~= exp then return 0 end
+    local v = redis.call('HGET', key, f)
+    if not v or redis.sha1hex(v) ~= exp then return 0 end
   elseif t == 'absent' then
     if redis.call('HGET', key, f) then return 0 end
   elseif t == 'exists' then
@@ -225,8 +226,12 @@ class RedisBatch {
 public:
     explicit RedisBatch(RedisMetaStore& store) : store_(store) {}
 
+    // CAS 见证上送 SHA1 指纹而非整份旧值（docs/gaps.md §3.9）：大 manifest 的
+    // 见证从 MB 级降到 40 字节，重试轮不再整份重发；比对在脚本内对存量值做
+    // redis.sha1hex。SHA1 碰撞需要对同一 field 的两份既有合法编码值做
+    // 选择前缀攻击，收益是撞掉自己的一次 CAS——非防护目标
     void expect_eq(const std::string& key, std::string_view field, std::string_view expected) {
-        add_check("eq", key, field, expected);
+        add_check("eq", key, field, sha1_hex(expected));
     }
     void expect_absent(const std::string& key, std::string_view field) {
         add_check("absent", key, field, {});

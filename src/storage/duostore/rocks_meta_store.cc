@@ -315,6 +315,12 @@ std::optional<ObjectRec> RocksMetaStore::get_object(std::string_view b, std::str
     return codec::decode_object(std::string(k), *v);
 }
 
+std::optional<ObjectMeta> RocksMetaStore::head_object(std::string_view b, std::string_view k) {
+    auto v = get_raw(kObjects, codec::object_key(b, k));
+    if (!v) return std::nullopt;
+    return codec::decode_object_meta(std::string(k), *v);
+}
+
 void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
                                 PutCondition cond) {
     std::lock_guard lk(mu_);

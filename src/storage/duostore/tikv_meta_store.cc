@@ -434,14 +434,28 @@ uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r) {
     // 仲裁各拿到不相交段；落败方整段弃置无害（id 只需唯一单调，不需连续）。
     // raft 多数派持久，无 Redis 版的崩溃回滚补偿
     std::string ck = counter_key(kind);
-    uint64_t hi = txn_retry(
-        "reserve id segment", [&](uint64_t ts, std::vector<TikvMutation>& muts) -> uint64_t {
-            uint64_t cur = 0;
-            if (auto v = snap_get(ts, ck)) cur = uint64_t(codec::decode_counter(*v));
-            uint64_t next_hi = cur + kIdSegment;
-            muts.push_back({TikvOp::kPut, ck, codec::encode_counter_delta(int64_t(next_hi))});
-            return next_hi;
-        });
+    uint64_t hi;
+    try {
+        hi = txn_retry(
+            "reserve id segment",
+            [&](uint64_t ts, std::vector<TikvMutation>& muts) -> uint64_t {
+                uint64_t cur = 0;
+                if (auto v = snap_get(ts, ck)) cur = uint64_t(codec::decode_counter(*v));
+                uint64_t next_hi = cur + kIdSegment;
+                muts.push_back(
+                    {TikvOp::kPut, ck, codec::encode_counter_delta(int64_t(next_hi))});
+                return next_hi;
+            });
+    } catch (const UndeterminedCommit& u) {
+        // 号段计数器事务"结果不明"只意味着可能烧掉一段 id（空洞无害），而**外层
+        // 业务事务确定未提交**——本函数在组 mutation 阶段被调用，业务 commit 还没
+        // 发生。原样透传会被 commit_or_discard 当成"业务提交结果不明"而拒绝清理
+        // 已落的数据 extent，制造无谓孤儿（docs/gaps.md §3.9）。降为确定性失败
+        throw S3Error(S3ErrorCode::InternalError,
+                      std::string("duostore tikv meta: id segment reservation failed "
+                                  "(business txn not committed): ") +
+                          u.what());
+    }
     std::lock_guard lk(alloc_mu_);
     if (r.next == r.limit) {  // 他人已续上则用其段，本段弃置（空洞无害，同上）
         r.limit = hi;
@@ -516,6 +530,14 @@ std::optional<ObjectRec> TikvMetaStore::get_object(std::string_view b, std::stri
         auto v = snap_get(client().get_ts(), object_key(b, k));
         if (!v) return std::nullopt;
         return codec::decode_object(std::string(k), *v);
+    });
+}
+
+std::optional<ObjectMeta> TikvMetaStore::head_object(std::string_view b, std::string_view k) {
+    return guarded("head_object", [&]() -> std::optional<ObjectMeta> {
+        auto v = snap_get(client().get_ts(), object_key(b, k));
+        if (!v) return std::nullopt;
+        return codec::decode_object_meta(std::string(k), *v);
     });
 }
 

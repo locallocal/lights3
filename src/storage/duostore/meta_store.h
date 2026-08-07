@@ -83,6 +83,10 @@ struct IMetaStore {
 
     // ---- object ----
     virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
+    // 只要 meta 不要 manifest（docs/gaps.md §3.9）：HEAD/前置读走这里。
+    // decode_object 会物化整份 extent vector（65 万 extent ≈ 26MB）后立刻丢弃，
+    // decode_object_meta 只解码定长头
+    virtual std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) = 0;
     // cond.active() 时在本事务的原子区内按 PutCondition 契约（storage/backend.h）
     // 校验旧记录：违反抛 PreconditionFailed / NoSuchKey，事务不提交（共享检查
     // 见 meta_util.h check_put_condition）

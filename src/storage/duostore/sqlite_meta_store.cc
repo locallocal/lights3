@@ -719,6 +719,13 @@ std::optional<ObjectRec> SqliteMetaStore::get_object(std::string_view b, std::st
     return codec::decode_object(std::string(k), *v);
 }
 
+std::optional<ObjectMeta> SqliteMetaStore::head_object(std::string_view b, std::string_view k) {
+    auto lease = read_conn();
+    auto v = object_raw(*lease, b, k);
+    if (!v) return std::nullopt;
+    return codec::decode_object_meta(std::string(k), *v);
+}
+
 void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
                                  PutCondition cond) {
     std::lock_guard lk(mu_);

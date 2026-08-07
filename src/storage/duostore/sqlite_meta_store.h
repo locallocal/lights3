@@ -39,6 +39,7 @@ public:
     std::vector<BucketInfo> list_buckets() override;
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
+    std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override;
     void put_object(std::string_view b, std::string_view k, ObjectRec rec,
                     PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;

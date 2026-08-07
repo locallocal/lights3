@@ -396,8 +396,12 @@ public:
         }
         size_t want = size_t(std::min<uint64_t>({buf.size(), e.length - cur_off_, remaining_}));
         AioPending* p = make_pending(exec_, lat_);
+        // 与写侧同一策略的缓冲移交（docs/gaps.md §3.9）：aio 写入在途单自有的
+        // 缓冲，完成后再拷给调用方。直写 buf 的话，读超时/取消把协程帧连同调用
+        // 方缓冲一起销毁后，远端 completion 仍会写穿已释放内存
+        p->data.resize(want);
         int r = rados_aio_read(ctx, RadosDataStore::object_name(e.file_id).c_str(), p->comp,
-                               reinterpret_cast<char*>(buf.data()), want, cur_off_);
+                               reinterpret_cast<char*>(p->data.data()), want, cur_off_);
         if (r < 0) {
             p->unref();
             p->unref();
@@ -405,6 +409,7 @@ public:
             throw_rados("aio_read submit", r);
         }
         int n = co_await AioAwait{p};  // completion → 池线程恢复（§6.2）
+        if (n > 0) std::memcpy(buf.data(), p->data.data(), std::min(size_t(n), want));
         p->unref();
         if (n == -ENOENT) {
             // refs 在而对象缺 = 数据丢失征兆，或 pin/grace 失效（§6.3；主文档 §10 同款）

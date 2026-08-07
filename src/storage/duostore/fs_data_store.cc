@@ -454,7 +454,7 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         // 同步的写落盘——seal 回调回报的 file_size 必须对应已持久的字节
         if (slot->fd >= 0 && slot->size > 0 && slot->size + rec_size > opt_.pack_max_size) {
             sync_slot();
-            seal_slot_locked(*slot);
+            close_slot_locked(*slot);
         }
         if (slot->fd < 0) {
             slot->id = alloc_(Extent::Kind::kPack);
@@ -493,6 +493,10 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         slot->size += rec_size;
     }
     sync_slot();
+    // seal 的 meta 提交在槽锁外补交（docs/gaps.md §3.9）；失败只告警，
+    // (id,size) 留在队列由后续写入/close 重试——本批写入自身已安全落盘
+    lk.unlock();
+    flush_seals(/*rethrow=*/false);
     return out;
 }
 
@@ -524,11 +528,37 @@ Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendIt
     co_return out;
 }
 
-void FsDataStore::seal_slot_locked(ActivePack& slot) {
+void FsDataStore::close_slot_locked(ActivePack& slot) {
+    PendingSeal ps{slot.id, slot.size};
     ::close(slot.fd);
     slot.fd = -1;
-    if (seal_) seal_(slot.id, slot.size);
     slot.size = 0;
+    std::lock_guard lk(seal_mu_);
+    seal_retry_.push_back(ps);
+}
+
+void FsDataStore::flush_seals(bool rethrow) {
+    std::vector<PendingSeal> todo;
+    {
+        std::lock_guard lk(seal_mu_);
+        todo.swap(seal_retry_);
+    }
+    for (size_t i = 0; i < todo.size(); ++i) {
+        try {
+            if (seal_) seal_(todo[i].id, todo[i].size);
+        } catch (...) {
+            // 剩余项放回队列：封存"迟到"等价于 pack 多当一会儿 active（崩溃
+            // 恢复本就要补封），丢失才是不可恢复的
+            {
+                std::lock_guard lk(seal_mu_);
+                seal_retry_.insert(seal_retry_.end(), todo.begin() + i, todo.end());
+            }
+            if (rethrow) throw;
+            LOG_WARN("duostore: seal_pack({}) failed; queued for retry on next write/close",
+                     todo[i].id);
+            return;
+        }
+    }
 }
 
 Task<std::unique_ptr<http::BodyReader>> FsDataStore::open_reader(DataRef ref, uint64_t first,
@@ -721,8 +751,9 @@ Task<void> FsDataStore::close() {
     co_await pool_->schedule();
     for (auto& slot : packs_) {
         std::lock_guard lk(slot->m);
-        if (slot->fd >= 0) seal_slot_locked(*slot);
+        if (slot->fd >= 0) close_slot_locked(*slot);
     }
+    flush_seals(/*rethrow=*/true);  // 关停路径的封存失败要让调用方看见
     co_return;
 }
 

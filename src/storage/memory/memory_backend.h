@@ -2,6 +2,7 @@
 #pragma once
 
 #include <map>
+#include <memory>
 #include <mutex>
 
 #include "storage/backend.h"
@@ -39,9 +40,14 @@ public:
     Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) override;
 
 private:
+    // data 为不可变共享块（docs/gaps.md §3.9）：get_object 在锁内只取一次
+    // shared_ptr，大对象不再在全局锁内整体拷贝。put 覆盖同 key 时旧块由仍在
+    // 流式读它的 GET 持有，读完自然释放——天然的快照隔离。
+    // 剩余临界区都是 O(map 操作)，故本后端不接线程池：demo/单测定位下把
+    // 微秒级锁放在事件循环线程上是有意的取舍
     struct Object {
         ObjectMeta meta;
-        std::string data;
+        std::shared_ptr<const std::string> data;
     };
     struct Bucket {
         BucketInfo info;

@@ -950,7 +950,14 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
 Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
-    co_return require_object(bucket, key).meta;
+    // meta-only 读（docs/gaps.md §3.9）：HEAD 不为整份 manifest 买单
+    auto meta = meta_->head_object(bucket, key);
+    if (!meta) {
+        require_bucket(bucket);  // 区分 NoSuchBucket / NoSuchKey
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(key));
+    }
+    co_return std::move(*meta);
 }
 
 Task<void> DuoStoreBackend::delete_object(std::string_view bucket, std::string_view key) {

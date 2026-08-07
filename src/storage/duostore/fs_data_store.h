@@ -93,7 +93,18 @@ private:
     // 批量追加（write_batch 的 pack 路径）：单次槽锁内逐条 pwrite、末尾一次
     // fdatasync（§2.13 批量化——中途轮转封存前会先把未同步的写落盘）
     std::vector<Extent> append_pack_records(std::span<const PackAppendItem> items);
-    void seal_slot_locked(ActivePack& slot);  // 持 slot.m 调用；关 fd + 回报封存
+
+    // 封存拆两步（docs/gaps.md §3.9）：锁内只关 fd/清槽状态并把 (id,size) 入
+    // seal_retry_，seal_ 的 meta 提交（可能是网络 RTT/fsync）在 flush_seals 里
+    // 锁外执行。此前 seal_ 在 slot 互斥内跑会堵死该槽；抛出时 fd 已置 -1 而
+    // size 未清，下一次写会开新 pack 覆盖槽状态，旧 pack 从此永远不被封存
+    struct PendingSeal {
+        uint64_t id = 0;
+        uint64_t size = 0;
+    };
+    void close_slot_locked(ActivePack& slot);  // 持 slot.m 调用
+    // 提交积压的封存；失败放回队列（append 路径告警后续重试，close 路径上抛）
+    void flush_seals(bool rethrow);
 
     FsDataOptions opt_;
     std::shared_ptr<ThreadPool> pool_;
@@ -106,6 +117,8 @@ private:
     std::array<int, 256> pack_dirfds_;
     std::vector<std::unique_ptr<ActivePack>> packs_;  // pack_writers 个槽
     std::atomic<unsigned> pack_rr_{0};                // 轮询游标
+    std::mutex seal_mu_;
+    std::vector<PendingSeal> seal_retry_;  // 已关 fd、meta 尚未确认封存的 pack
 };
 
 }  // namespace lights3::storage::duostore

@@ -1,6 +1,7 @@
 #include "storage/memory/memory_backend.h"
 
 #include <algorithm>
+#include <cstring>
 #include <tuple>
 
 #include "core/util/crypto.h"
@@ -11,6 +12,30 @@ namespace lights3::storage {
 
 using s3::S3Error;
 using s3::S3ErrorCode;
+
+namespace {
+
+// 共享底层数据的只读 reader：锁外流式吐给客户端，put 覆盖也不影响在途 GET
+class SharedBlobReader final : public http::BodyReader {
+public:
+    SharedBlobReader(std::shared_ptr<const std::string> blob, size_t off, size_t len)
+        : blob_(std::move(blob)), off_(off), len_(len) {}
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t n = std::min(buf.size(), len_ - pos_);
+        if (n > 0) {
+            std::memcpy(buf.data(), blob_->data() + off_ + pos_, n);
+            pos_ += n;
+        }
+        co_return n;
+    }
+    std::optional<uint64_t> length() const override { return len_; }
+
+private:
+    std::shared_ptr<const std::string> blob_;
+    size_t off_, len_, pos_ = 0;
+};
+
+}  // namespace
 
 MemoryBackend::Bucket& MemoryBackend::bucket_or_throw(const std::string& name) {
     auto it = buckets_.find(name);
@@ -72,6 +97,7 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
     meta.size = data.size();
     meta.etag = md5.final_hex();
     meta.last_modified = std::chrono::system_clock::now();
+    auto blob = std::make_shared<const std::string>(std::move(data));
 
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
@@ -93,28 +119,35 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
         }
     }
     PutResult r{meta.etag};
-    b.objects[std::string(key)] = Object{std::move(meta), std::move(data)};
+    b.objects[std::string(key)] = Object{std::move(meta), std::move(blob)};
     co_return r;
 }
 
 Task<ObjectStream> MemoryBackend::get_object(std::string_view bucket, std::string_view key,
                                              std::optional<ByteRange> range) {
     validate_bucket_name(bucket, kAllowReserved);
-    std::lock_guard lk(m_);
-    auto& b = bucket_or_throw(std::string(bucket));
-    auto it = b.objects.find(std::string(key));
-    if (it == b.objects.end())
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
     ObjectStream out;
-    out.meta = it->second.meta;
-    std::string data = it->second.data;
+    std::shared_ptr<const std::string> blob;
+    {
+        // 锁内只取 meta 与数据块的 shared_ptr（docs/gaps.md §3.9）：此前在全局
+        // 锁内整体拷贝对象（1GB 对象 = 2GB 驻留 + 全程锁住所有 bucket）
+        std::lock_guard lk(m_);
+        auto& b = bucket_or_throw(std::string(bucket));
+        auto it = b.objects.find(std::string(key));
+        if (it == b.objects.end())
+            throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                          std::string(key));
+        out.meta = it->second.meta;
+        blob = it->second.data;
+    }
+    size_t off = 0, len = blob->size();
     if (range) {
-        auto [f, l] = resolve_range(*range, data.size());
-        data = data.substr(f, l - f + 1);
+        auto [f, l] = resolve_range(*range, blob->size());
+        off = f;
+        len = l - f + 1;
         out.range = ByteRange{f, l};
     }
-    out.body = std::make_unique<http::StringBodyReader>(std::move(data));
+    out.body = std::make_unique<SharedBlobReader>(std::move(blob), off, len);
     co_return out;
 }
 
@@ -144,7 +177,8 @@ Task<ListResult> MemoryBackend::list_objects(std::string_view bucket, const List
     std::vector<std::string> keys;
     keys.reserve(b.objects.size());
     for (auto& [k, _] : b.objects) keys.push_back(k);
-    co_return apply_listing(keys, opt, [&](const std::string& k) { return b.objects[k].meta; });
+    // at() 而非 operator[]：后者对不存在的 key 会静默插入空对象（docs/gaps.md §3.9）
+    co_return apply_listing(keys, opt, [&](const std::string& k) { return b.objects.at(k).meta; });
 }
 
 // ---------- multipart ----------
@@ -224,7 +258,8 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
     PutResult r{meta.etag};
-    b.objects[std::string(key)] = Object{std::move(meta), std::move(data)};
+    b.objects[std::string(key)] =
+        Object{std::move(meta), std::make_shared<const std::string>(std::move(data))};
     uploads_.erase(std::string(upload_id));
     co_return r;
 }

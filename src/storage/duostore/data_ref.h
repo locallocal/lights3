@@ -19,6 +19,10 @@ struct Extent {
     bool operator==(const Extent&) const = default;
 };
 
+// alloc_file_run 单次批取上限（docs/gaps.md §3.9）：写者几何增长到此封顶，
+// 远小于各引擎号段（kIdSegment=4096），单写会话最坏浪费 kMaxIdRun-1 个 id
+inline constexpr uint32_t kMaxIdRun = 64;
+
 struct DataRef {
     std::vector<Extent> extents;  // 空 = 0 字节对象；持久化用 run 编码（§4.3）
 

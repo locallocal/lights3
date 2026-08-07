@@ -643,11 +643,13 @@ void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref) {
     }
 }
 
-uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r) {
+uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n) {
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
     std::lock_guard lk(alloc_mu_);
-    if (r.next == r.limit) {
+    if (r.limit - r.next < n) {
         // 首次预留空烧一个号段（§4 缓解 2）：跳过 AOF everysec 崩溃窗口内可能
-        // 已派发、但计数器回滚丢失的 id。崩溃/重启浪费号段无害（只需唯一单调）
+        // 已派发、但计数器回滚丢失的 id。崩溃/重启浪费号段无害（只需唯一单调）；
+        // 换段弃置的残段同理（run 批派发要求段内连续，docs/gaps.md §3.9）
         uint64_t take = r.burned ? kIdSegment : 2 * kIdSegment;
         auto reply = exec({"INCRBY", key(counter_suffix), std::to_string(take)},
                           /*read_retry=*/false);
@@ -656,14 +658,16 @@ uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r) {
         r.next = hi - kIdSegment;
         r.burned = true;
     }
-    return r.next++;
+    uint64_t first = r.next;
+    r.next += n;
+    return first;
 }
 
-uint64_t RedisMetaStore::alloc_file_id(Extent::Kind kind) {
+uint64_t RedisMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
     // kRados 与 kChunk 共号段（同 rocks 版论证：refs 不分 kind，防跨 kind id 碰撞）
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCounterChunk : kCounterPack,
-                    file_ids_[size_t(kind)]);
+                    file_ids_[size_t(kind)], n);
 }
 
 // ---------- bucket ----------

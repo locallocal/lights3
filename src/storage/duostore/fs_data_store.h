@@ -39,8 +39,10 @@ class FsPackedWriter;
 
 class FsDataStore final : public IDataStore {
 public:
-    // file_id 分配回调（持久单调，由 IMetaStore::alloc_file_id 提供）
-    using FileIdAlloc = std::function<uint64_t(Extent::Kind)>;
+    // file_id 分配回调（持久单调，由 IMetaStore::alloc_file_run 提供）：返回
+    // 连续 run [first, first+n) 的首 id。写者按几何增长批取，同对象的 chunk id
+    // 连续，manifest 的 run 编码才有效（docs/gaps.md §3.9）
+    using FileIdAlloc = std::function<uint64_t(Extent::Kind, uint32_t)>;
     // pack 封存回调（IMetaStore::seal_pack）：轮转与 close 时回报最终文件大小。
     // 崩溃（未回调）遗留的 unsealed pack 由 DuoStoreBackend 启动时补封（§5.2）
     using PackSeal = std::function<void(uint64_t pack_id, uint64_t file_size)>;

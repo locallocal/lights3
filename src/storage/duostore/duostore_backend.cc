@@ -597,7 +597,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
             cfg_.rocksdb_write_buffer, cfg_.rocksdb_max_write_buffers,
             cfg_.rocksdb_max_background_jobs});
     IMetaStore* meta = meta_.get();  // 分配回调不延长 meta 生命周期：本类持有两者，先关 data
-    auto alloc = [meta](Extent::Kind kind) { return meta->alloc_file_id(kind); };
+    auto alloc = [meta](Extent::Kind kind, uint32_t n) { return meta->alloc_file_run(kind, n); };
     // 读路径 crc 失配上报（P5 corruption 指标）：只捕获计数器 shared_ptr——reader
     // 持 options 拷贝逃逸出 backend 生命周期后回调仍安全
     auto on_corruption = [c = m_read_corruption_] { c->inc(); };

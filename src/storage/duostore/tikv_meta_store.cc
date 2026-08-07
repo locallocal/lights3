@@ -424,10 +424,15 @@ void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataR
     }
 }
 
-uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r) {
+uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r, uint32_t n) {
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
     {
-        std::lock_guard lk(alloc_mu_);  // 常见路径：纯内存 next++
-        if (r.next < r.limit) return r.next++;
+        std::lock_guard lk(alloc_mu_);  // 常见路径：纯内存 next += n
+        if (r.limit - r.next >= n) {
+            uint64_t first = r.next;
+            r.next += n;
+            return first;
+        }
     }
     // 段耗尽：计数器 RMW 小事务（§5）在锁外进行——TSO + 2PC + 冲突重试可达
     // 数十 ms，锁内会把所有 kind 的派发一并串行卡死。并发续段者经 WriteConflict
@@ -457,18 +462,20 @@ uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r) {
                           u.what());
     }
     std::lock_guard lk(alloc_mu_);
-    if (r.next == r.limit) {  // 他人已续上则用其段，本段弃置（空洞无害，同上）
+    if (r.limit - r.next < n) {  // 他人已续上且够用则用其段，本段弃置（空洞无害，同上）
         r.limit = hi;
         r.next = hi - kIdSegment;
     }
-    return r.next++;
+    uint64_t first = r.next;
+    r.next += n;
+    return first;
 }
 
-uint64_t TikvMetaStore::alloc_file_id(Extent::Kind kind) {
+uint64_t TikvMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
     // kRados 与 kChunk 共号段（rocks 版同一论证：refs 按裸 file_id 记账不分 kind）
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack,
-                    file_ids_[size_t(kind)]);
+                    file_ids_[size_t(kind)], n);
 }
 
 // ---------- bucket ----------

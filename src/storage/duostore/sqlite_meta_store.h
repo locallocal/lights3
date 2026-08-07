@@ -57,7 +57,7 @@ public:
                                 std::span<const PartInfo> parts) override;
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;
 
-    uint64_t alloc_file_id(Extent::Kind kind) override;
+    uint64_t alloc_file_run(Extent::Kind kind, uint32_t n) override;
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
@@ -136,7 +136,7 @@ private:
     void enqueue_reclaim(Conn& c, const DataRef& ref);
     std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k,
                                     std::string_view id);
-    uint64_t alloc_id(std::string_view counter, IdRange& r);
+    uint64_t alloc_id(std::string_view counter, IdRange& r, uint32_t n = 1);
 
     SqliteMetaOptions opt_;
     // 单进程独占的 fail-fast enforcement（§1；对应 RocksDB 的 LOCK 文件）：
@@ -149,7 +149,8 @@ private:
     std::mutex mu_;
     std::unique_ptr<Conn> wc_;  // 专用写连接（BEGIN IMMEDIATE 事务恒在此连接）
     // 号段专用连接，恒 synchronous=FULL（独立于 opt_.sync，§4）；alloc_mu_ 保护
-    // IdRange 与本连接。与 mu_ 无嵌套（alloc 由数据面在业务事务之外调用）
+    // IdRange 与本连接。锁序 alloc_mu_ → mu_（预留期间持 mu_ 挡开业务写者，
+    // docs/gaps.md §3.9）；alloc 由数据面在业务事务之外调用，无反向嵌套
     std::mutex alloc_mu_;
     std::unique_ptr<Conn> ac_;
     IdRange file_ids_[2];  // 按 Extent::Kind 下标

@@ -124,7 +124,15 @@ public:
 
 private:
     void open_next_chunk() {
-        cur_id_ = store_->alloc_(Extent::Kind::kChunk);
+        // 几何增长批取连续 run（docs/gaps.md §3.9）：并发写者逐个派发会让同对象
+        // 的 chunk id 交错，manifest 的 run 编码失效反而膨胀。首块取 1（小对象
+        // 零浪费），之后 2、4、…封顶 kMaxIdRun；run 尾部弃置无害（id 只需唯一）
+        if (run_next_ == run_limit_) {
+            run_len_ = run_len_ == 0 ? 1 : std::min<uint32_t>(run_len_ * 2, kMaxIdRun);
+            run_next_ = store_->alloc_(Extent::Kind::kChunk, run_len_);
+            run_limit_ = run_next_ + run_len_;
+        }
+        cur_id_ = run_next_++;
         // 先 pin 后建文件：文件一旦存在即受写侧 pin 保护，孤儿扫描无观察窗口
         if (store_->pins_.pin) {
             store_->pins_.pin(cur_id_);
@@ -155,6 +163,8 @@ private:
     uint64_t cur_id_ = 0;
     uint64_t cur_len_ = 0;
     uint32_t cur_crc_ = 0;
+    uint64_t run_next_ = 0, run_limit_ = 0;  // 本会话的连续 id run（§3.9 批取）
+    uint32_t run_len_ = 0;
     bool finished_ = false;
 };
 
@@ -457,7 +467,7 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
             close_slot_locked(*slot);
         }
         if (slot->fd < 0) {
-            slot->id = alloc_(Extent::Kind::kPack);
+            slot->id = alloc_(Extent::Kind::kPack, 1);
             unsigned shard = shard_of(slot->id);
             int dirfd = pack_dirfd(shard);  // 确保 shard 目录存在
             auto path = pack_path(slot->id);

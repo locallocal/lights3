@@ -228,12 +228,14 @@ void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const Da
     }
 }
 
-uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r) {
-    std::lock_guard lk(alloc_mu_);  // 独立于 mu_：常见路径是纯内存 next++
-    if (r.next == r.limit) {
+uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r, uint32_t n) {
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
+    std::lock_guard lk(alloc_mu_);  // 独立于 mu_：常见路径是纯内存 next += n
+    if (r.limit - r.next < n) {
         // 号段预留必须先于派发持久化，且恒 WAL fsync（独立于 meta_sync）——
         // 否则崩溃丢预留后重启重发已用 file_id，与已落盘的 chunk 文件
-        // O_EXCL 冲突（§6.3 的"仍自洽"依赖这里恒 sync）。崩溃浪费号段无害
+        // O_EXCL 冲突（§6.3 的"仍自洽"依赖这里恒 sync）。崩溃浪费号段无害；
+        // 换段弃置的残段同理（run 批派发要求段内连续，docs/gaps.md §3.9）
         rocksdb::WriteBatch batch;
         batch.Merge(cfs_[kStats], slice(counter_key),
                     codec::encode_counter_delta(int64_t(kIdSegment)));
@@ -247,15 +249,17 @@ uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r) {
         r.limit = hi;
         r.next = hi - kIdSegment;
     }
-    return r.next++;
+    uint64_t first = r.next;
+    r.next += n;
+    return first;
 }
 
-uint64_t RocksMetaStore::alloc_file_id(Extent::Kind kind) {
+uint64_t RocksMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
     // kRados 与 kChunk 共号段：refs 表按裸 file_id 记账不分 kind，独立计数器会在
     // 同一 meta 上切换 data 引擎（fs↔rados）时产生跨 kind id 碰撞
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCounterChunk : kCounterPack,
-                    file_ids_[size_t(kind)]);
+                    file_ids_[size_t(kind)], n);
 }
 
 // ---------- bucket ----------

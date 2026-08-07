@@ -581,7 +581,7 @@ TEST(duostore_fs_remove_pack_idempotent) {
     auto pool = std::make_shared<ThreadPool>(2);
     uint64_t next_id = 1;
     FsDataStore d(FsDataOptions{tmp.path / "duo", 4096, false, 0, 128ull << 20, 4, {}}, pool,
-                  [&](Extent::Kind) { return next_id++; });
+                  [&](Extent::Kind, uint32_t n) { uint64_t f = next_id; next_id += n; return f; });
     auto p = d.pack_path(7);
     fs::create_directories(p.parent_path());
     std::ofstream(p) << "stub";
@@ -667,7 +667,7 @@ PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadP
     auto data = std::make_unique<FsDataStore>(
         FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
                       cfg.pack_max_size, cfg.pack_writers, {}},
-        pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); },
+        pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
         [mp](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
             return migrate_pack_records(*mp, ds, nullptr, std::move(batch));
@@ -1270,7 +1270,7 @@ TEST(duostore_active_pack_of_other_writer_not_sealed) {
     sync_wait(h.b->close());
     FsDataOptions probe_opt{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc,
                             cfg.pack_threshold, cfg.pack_max_size, cfg.pack_writers, {}};
-    FsDataStore probe(probe_opt, pool, [](Extent::Kind) -> uint64_t { return 0; });
+    FsDataStore probe(probe_opt, pool, [](Extent::Kind, uint32_t) -> uint64_t { return 0; });
     CHECK(!probe.pack_write_locked(pack_id));
     sync_wait(probe.close());
 }
@@ -1311,7 +1311,7 @@ TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
     auto pool = std::make_shared<ThreadPool>(2);
     RocksMetaStore meta({(tmp.path / "meta").string(), false, 8ull << 20});
     FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1, {}};
-    FsDataStore d(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); });
+    FsDataStore d(opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); });
 
     auto append = [&](std::string owner, size_t n) {
         auto w = sync_wait(d.open_writer({uint64_t(n), std::move(owner)}));
@@ -1353,7 +1353,7 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
     FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1, {}};
     uint64_t pack_id = 0;
     {
-        FsDataStore d1(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); },
+        FsDataStore d1(opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
                        [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); });
         auto write_rec = [&](std::string owner, const std::string& data) {
             auto w = sync_wait(d1.open_writer({uint64_t(data.size()), std::move(owner)}));
@@ -1382,7 +1382,7 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
         meta.put_object("bkt", "knew", std::move(r2));
         sync_wait(d1.close());  // 封存 pack（迁移目标须是另一个 active pack）
     }
-    FsDataStore d2(opt, pool, [&](Extent::Kind k) { return meta.alloc_file_id(k); },
+    FsDataStore d2(opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
                    [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); },
                    [&](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
                        return migrate_pack_records(meta, ds, nullptr, std::move(batch));
@@ -1791,6 +1791,31 @@ TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
     verify_converged(*b);
     for (int i : committed) check_body(*b, "k" + std::to_string(i), expect_body(i));
     sync_wait(b->close());
+}
+
+// gaps §3.9：chunk id 按几何 run 批取——即使分配器被并发写者穿插烧号（run 之间
+// 不连续），同对象的 chunk id 在每个 run 内仍连续，manifest 的 run 编码不失效
+TEST(duostore_chunk_ids_batched_in_runs) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    uint64_t next_id = 1;
+    FsDataStore d(FsDataOptions{tmp.path / "duo", 64, false, 0, 128ull << 20, 4, {}}, pool,
+                  [&](Extent::Kind, uint32_t n) {
+                      uint64_t f = next_id;
+                      next_id += n + 7;  // 模拟并发写者在两次批取之间消耗 id
+                      return f;
+                  });
+    auto w = sync_wait(d.open_writer({std::nullopt, "t/runs"}));
+    std::string body(64 * 7, 'x');  // 7 个 chunk：run 序列 1, 2, 4
+    sync_wait(
+        w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
+    auto ref = sync_wait(w->finish());
+    CHECK_EQ(ref.extents.size(), size_t(7));
+    CHECK_EQ(ref.extents[2].file_id, ref.extents[1].file_id + 1);  // run(2) 内连续
+    for (size_t i = 4; i <= 6; ++i)                                // run(4) 内连续
+        CHECK_EQ(ref.extents[i].file_id, ref.extents[3].file_id + (i - 3));
+    CHECK(ref.extents[1].file_id != ref.extents[0].file_id + 1);  // 穿插确实发生了
+    sync_wait(d.close());
 }
 
 #endif  // LIGHTS3_DUOSTORE

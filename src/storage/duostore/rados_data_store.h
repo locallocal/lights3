@@ -42,7 +42,9 @@ class RadosChunkWriter;
 
 class RadosDataStore final : public IDataStore {
 public:
-    using FileIdAlloc = std::function<uint64_t(Extent::Kind)>;
+    // 返回连续 run [first, first+n) 的首 id（IMetaStore::alloc_file_run，
+    // docs/gaps.md §3.9：id 连续 manifest 的 run 编码才有效）
+    using FileIdAlloc = std::function<uint64_t(Extent::Kind, uint32_t)>;
 
     // 构造即建连（fail fast，§6.1）；失败抛 std::runtime_error（配置/环境错误级）
     RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc);

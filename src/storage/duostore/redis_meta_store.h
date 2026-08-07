@@ -65,7 +65,7 @@ public:
                                 std::span<const PartInfo> parts) override;
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;
 
-    uint64_t alloc_file_id(Extent::Kind kind) override;
+    uint64_t alloc_file_run(Extent::Kind kind, uint32_t n) override;
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
@@ -125,7 +125,7 @@ private:
     std::optional<std::string> hget_raw(const std::string& k, std::string_view field);
     std::optional<std::string> upload_raw(std::string_view b, std::string_view k,
                                           std::string_view id);
-    uint64_t alloc_id(std::string_view counter_suffix, IdRange& r);
+    uint64_t alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n = 1);
     // gcq 入账（§2.2）：member = be64(seq) ‖ encode_reclaim；seq 预派发保持脚本确定性
     void enqueue_reclaim(RedisBatch& bt, const DataRef& ref);
     void batch_refs(RedisBatch& bt, const DataRef& ref, bool add, std::string_view owner);

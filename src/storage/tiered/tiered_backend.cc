@@ -708,6 +708,14 @@ Task<void> TieredBackend::scan_once() {
             if (batch.size() >= kScanBatch) co_await drain_batch();
         }
         co_await drain_batch();
+        // 淘汰候选覆盖不了缺口（磁盘被本后端之外的东西吃掉，或全部对象都比
+        // 水位缺口小）：此前每轮静默重算、释放 0 字节，运维完全看不见
+        //（docs/gaps.md §4）
+        if (need > 0)
+            LOG_WARN("tiered: space watermark still exceeded after eviction round, "
+                     "{} bytes short — disk consumed outside this backend, or no "
+                     "evictable candidates left",
+                     need);
     }
 
     save_atime_snapshot();
@@ -1101,11 +1109,21 @@ void TieredBackend::load_atime_snapshot() {
 void TieredBackend::save_atime_snapshot() {
     std::vector<std::pair<std::string, std::string>> kv;
     {
+        // 有界化（docs/gaps.md §4：绕过本后端的删除会让表无界增长，快照又是
+        // 全量重写）：早于判冷阈值的记录直接淘汰——对象既已到判冷资格线，丢掉
+        // atime 后 mtime 兜底得出同一结论。表由此只随"近期被访问的键"增长
+        const int64_t cutoff = ::time(nullptr) - cfg_.cold_after_sec;
         std::lock_guard lk(atime_m_);
-        kv.reserve(atime_.size());
-        for (auto& [k, v] : atime_)
-            if (k.find('\t') == std::string::npos && k.find('\n') == std::string::npos)
-                kv.emplace_back(k, std::to_string(v));
+        for (auto it = atime_.begin(); it != atime_.end();) {
+            if (it->second < cutoff) {
+                it = atime_.erase(it);
+                continue;
+            }
+            if (it->first.find('\t') == std::string::npos &&
+                it->first.find('\n') == std::string::npos)
+                kv.emplace_back(it->first, std::to_string(it->second));
+            ++it;
+        }
     }
     try {
         fsutil::write_tsv(tier_dir_ / "atime.tsv", local_->staging() / "put", kv);

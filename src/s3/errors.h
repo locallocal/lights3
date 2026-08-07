@@ -45,6 +45,13 @@ enum class S3ErrorCode {
 #undef LIGHTS3_S3_ERROR_ENUM
 };
 
+// 码表大小（与枚举同源）：错误计数用定长原子数组按枚举值下标，免锁
+inline constexpr size_t kS3ErrorCodeCount = 0
+#define LIGHTS3_S3_ERROR_COUNT(name, status) +1
+    LIGHTS3_S3_ERROR_CODES(LIGHTS3_S3_ERROR_COUNT)
+#undef LIGHTS3_S3_ERROR_COUNT
+    ;
+
 struct S3Error : std::exception {
     S3ErrorCode code;
     std::string message;

@@ -98,11 +98,16 @@ private:
 
     mutable std::mutex m_;
     std::condition_variable cv_;
-    std::deque<Item> queue_;
+    // 续体投递（post）与阻塞任务（schedule）分队列（docs/gaps.md §4）：post 的
+    // 契约是"不可失败不可等待"，共用一个 4096 队列时压力下续体要排在 4096 个
+    // IO 之后。worker 恒先取续体队列——续体是让出过线程的既有工作，天然优先
+    std::deque<Item> cont_queue_;  // post：无界
+    std::deque<Item> queue_;       // schedule：capacity_ 有界
     std::deque<Item> backlog_;
     size_t capacity_;
-    uint64_t completed_ = 0;
-    std::array<uint64_t, kWaitBuckets> wait_hist_{};
+    // 每任务免锁记账（docs/gaps.md §4：completed_ 每任务取一次锁与调度争用）
+    std::atomic<uint64_t> completed_{0};
+    std::array<std::atomic<uint64_t>, kWaitBuckets> wait_hist_{};
     std::vector<std::thread> workers_;
     bool stopping_ = false;
 };

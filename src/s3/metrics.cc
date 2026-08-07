@@ -23,11 +23,6 @@ void Metrics::request_end(std::string_view method, int status, double seconds) {
     latency_count_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void Metrics::s3_error(const char* wire_code) {
-    std::lock_guard lk(err_m_);
-    ++errors_[wire_code];
-}
-
 std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats) const {
     std::ostringstream os;
 
@@ -59,10 +54,12 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
        << latency_count_.load(std::memory_order_relaxed) << "\n";
 
     os << "# TYPE lights3_s3_errors_total counter\n";
-    {
-        std::lock_guard lk(err_m_);
-        for (auto& [code, n] : errors_)
-            os << "lights3_s3_errors_total{code=\"" << code << "\"} " << n << "\n";
+    for (size_t i = 0; i < kS3ErrorCodeCount; ++i) {
+        uint64_t n = errors_[i].load(std::memory_order_relaxed);
+        // 只渲染出现过的码（与旧 map 行为一致，避免 25 行恒零序列）
+        if (n > 0)
+            os << "lights3_s3_errors_total{code=\"" << wire_code(S3ErrorCode(i)) << "\"} "
+               << n << "\n";
     }
 
     os << "# TYPE lights3_multipart_active gauge\n";

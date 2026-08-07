@@ -364,7 +364,7 @@ private:
     }
 
     Task<bool> drain_body(BodyCtx& ctx) {
-        std::vector<std::byte> tmp(16 * 1024);
+        std::vector<std::byte> tmp(driver::kScratchBytes);
         uint64_t drained = 0;
         while (!ctx.parser->is_done()) {
             auto& body = ctx.parser->get().body();
@@ -379,7 +379,7 @@ private:
             if (ec == bhttp::error::need_buffer) ec = {};
             if (ec) co_return false;
             drained += tmp.size() - body.size;
-            if (drained > 4 * 1024 * 1024) co_return false;  // 过大放弃，关连接
+            if (drained > driver::kDrainMaxBytes) co_return false;  // 过大放弃，关连接
         }
         co_return true;
     }
@@ -454,7 +454,7 @@ private:
             if (ec) co_return false;
         }
 
-        std::vector<std::byte> buf(64 * 1024);
+        std::vector<std::byte> buf(driver::kIoChunkBytes);
         uint64_t written = 0;
         for (;;) {
             size_t n = 0;
@@ -521,7 +521,7 @@ private:
             finish();
             return;
         }
-        grace_timer_.emplace(ctl_strand_, std::chrono::seconds(10));
+        grace_timer_.emplace(ctl_strand_, driver::kShutdownGrace);
         grace_timer_->async_wait([this](beast::error_code e) {
             if (e) return;
             std::vector<std::shared_ptr<Session>> rest;
@@ -531,7 +531,7 @@ private:
             }
             LOG_WARN("forcing {} connection(s) closed on shutdown", rest.size());
             for (auto& s : rest) close_session(s);
-            force_timer_.emplace(ctl_strand_, std::chrono::seconds(5));
+            force_timer_.emplace(ctl_strand_, driver::kShutdownForceWait);
             force_timer_->async_wait([this](beast::error_code e2) {
                 if (!e2) ioc_.stop();  // 最后兜底：卡死的会话不再等
             });

@@ -16,7 +16,14 @@ std::string xml_escape(const std::string& s) {
             case '>': out += "&gt;"; break;
             case '"': out += "&quot;"; break;
             case '\'': out += "&apos;"; break;
-            default: out.push_back(c);
+            default:
+                // XML 1.0 禁止绝大多数 C0 控制字符（连字符引用都不合法）：直接
+                // 丢弃，出口兜底防反射（docs/gaps.md §4——<Resource> 会回显
+                // 请求侧字符串，上游校验之外仍要保证输出恒为合法 XML）
+                if (static_cast<unsigned char>(c) < 0x20 && c != '\t' && c != '\n' &&
+                    c != '\r')
+                    break;
+                out.push_back(c);
         }
     }
     return out;

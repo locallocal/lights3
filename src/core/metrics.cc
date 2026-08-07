@@ -1,11 +1,39 @@
 #include "core/metrics.h"
 
+#include <charconv>
 #include <sstream>
 #include <stdexcept>
+
+#include "core/log.h"
 
 namespace lights3 {
 
 namespace {
+
+// 浮点按最短往返表示渲染（docs/gaps.md §4）：ostream 默认 6 位有效数字会把
+// ≥1e6 的桶界渲成 "1.04858e+06"，相近桶界折叠成重复 le 序列时 Prometheus
+// 直接拒绝整个 target
+std::string fmt_double(double v) {
+    char buf[32];
+    auto [p, ec] = std::to_chars(buf, buf + sizeof(buf), v);
+    return std::string(buf, p);
+}
+
+// # HELP 文本转义（docs/gaps.md §4：标签值有转义，help 此前没有）：
+// 规范要求 \ → \\、换行 → \n
+std::string escape_help(const std::string& v) {
+    std::string out;
+    out.reserve(v.size());
+    for (char c : v) {
+        if (c == '\\')
+            out += "\\\\";
+        else if (c == '\n')
+            out += "\\n";
+        else
+            out += c;
+    }
+    return out;
+}
 
 // Prometheus 文本格式的标签值转义：\ → \\、" → \"、换行 → \n
 void append_escaped(std::string& out, const std::string& v) {
@@ -74,6 +102,10 @@ MetricsRegistry::Family& MetricsRegistry::family_of(const std::string& name, Kin
         throw std::runtime_error("metric '" + name + "' re-registered as " +
                                  kind_str(int(kind)) + ", was " +
                                  kind_str(int(it->second.kind)));
+    } else if (!help.empty() && it->second.help != help) {
+        // 保留首次 help（同族只渲染一行 # HELP），但不再静默（docs/gaps.md §4）
+        LOG_WARN("metric '{}' re-registered with different help text; keeping the first",
+                 name);
     }
     return it->second;
 }
@@ -165,7 +197,7 @@ std::string MetricsRegistry::render() const {
     std::ostringstream os;
     std::lock_guard lk(m_);
     for (const auto& [name, fam] : families_) {
-        if (!fam.help.empty()) os << "# HELP " << name << " " << fam.help << "\n";
+        if (!fam.help.empty()) os << "# HELP " << name << " " << escape_help(fam.help) << "\n";
         os << "# TYPE " << name << " " << kind_str(int(fam.kind)) << "\n";
         for (const auto& [ls, c] : fam.counters)
             os << series(name, ls) << " " << c->value() << "\n";
@@ -173,20 +205,20 @@ std::string MetricsRegistry::render() const {
             os << series(name, ls) << " " << g->value() << "\n";
         for (const auto& [ls, fn] : fam.callbacks) {
             auto it = cb_vals.find({name, ls});
-            if (it != cb_vals.end()) os << series(name, ls) << " " << it->second << "\n";
+            if (it != cb_vals.end())
+                os << series(name, ls) << " " << fmt_double(it->second) << "\n";
         }
         for (const auto& [ls, h] : fam.histograms) {
             auto snap = h->snapshot();
             uint64_t cum = 0;
             for (size_t i = 0; i < fam.bounds.size(); ++i) {
                 cum += snap.buckets[i];
-                std::ostringstream le;
-                le << "le=\"" << fam.bounds[i] << "\"";
-                os << series(name + "_bucket", ls, le.str()) << " " << cum << "\n";
+                os << series(name + "_bucket", ls, "le=\"" + fmt_double(fam.bounds[i]) + "\"")
+                   << " " << cum << "\n";
             }
             cum += snap.buckets[fam.bounds.size()];
             os << series(name + "_bucket", ls, "le=\"+Inf\"") << " " << cum << "\n";
-            os << series(name + "_sum", ls) << " " << snap.sum << "\n";
+            os << series(name + "_sum", ls) << " " << fmt_double(snap.sum) << "\n";
             os << series(name + "_count", ls) << " " << snap.count << "\n";
         }
     }

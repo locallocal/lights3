@@ -22,7 +22,7 @@ void ThreadPool::post(std::function<void()> fn) {
     {
         std::lock_guard lk(m_);
         if (!stopping_) {
-            queue_.push_back({std::move(fn), Clock::now()});
+            cont_queue_.push_back({std::move(fn), Clock::now()});
             cv_.notify_one();
             return;
         }
@@ -58,8 +58,16 @@ void ThreadPool::join() {
 }
 
 ThreadPool::Stats ThreadPool::stats() const {
-    std::lock_guard lk(m_);
-    return {queue_.size(), backlog_.size(), completed_, wait_hist_};
+    Stats st;
+    {
+        std::lock_guard lk(m_);
+        st.queue_depth = cont_queue_.size() + queue_.size();
+        st.backlogged = backlog_.size();
+    }
+    st.completed = completed_.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < kWaitBuckets; ++i)
+        st.wait_hist[i] = wait_hist_[i].load(std::memory_order_relaxed);
+    return st;
 }
 
 size_t ThreadPool::wait_bucket(Clock::duration d) {
@@ -76,21 +84,34 @@ void ThreadPool::worker_loop() {
         Item item;
         {
             std::unique_lock lk(m_);
-            cv_.wait(lk, [&] { return stopping_ || !queue_.empty() || !backlog_.empty(); });
-            if (queue_.empty() && backlog_.empty()) return;  // stopping 且已排空
-            if (queue_.empty()) {
-                queue_.push_back(std::move(backlog_.front()));
-                backlog_.pop_front();
+            cv_.wait(lk, [&] {
+                return stopping_ || !cont_queue_.empty() || !queue_.empty() ||
+                       !backlog_.empty();
+            });
+            if (cont_queue_.empty() && queue_.empty() && backlog_.empty())
+                return;  // stopping 且已排空
+            // 续体优先（§4）：它是让出过线程的既有工作，排在新阻塞任务后面
+            // 会把"挂起-恢复"变成"挂起-排长队"
+            if (!cont_queue_.empty()) {
+                item = std::move(cont_queue_.front());
+                cont_queue_.pop_front();
+            } else {
+                if (queue_.empty()) {
+                    queue_.push_back(std::move(backlog_.front()));
+                    backlog_.pop_front();
+                }
+                item = std::move(queue_.front());
+                queue_.pop_front();
+                // 腾出的空位放行一个背压等待者（保序：等待列表也是 FIFO）
+                if (!backlog_.empty() && queue_.size() < capacity_) {
+                    queue_.push_back(std::move(backlog_.front()));
+                    backlog_.pop_front();
+                }
             }
-            item = std::move(queue_.front());
-            queue_.pop_front();
-            // 腾出的空位放行一个背压等待者（保序：等待列表也是 FIFO）
-            if (!backlog_.empty() && queue_.size() < capacity_) {
-                queue_.push_back(std::move(backlog_.front()));
-                backlog_.pop_front();
-            }
-            ++wait_hist_[wait_bucket(Clock::now() - item.enqueued)];
         }
+        // 计时与记账都在锁外（§4：wait_hist_ 曾在持锁段内取时间）
+        wait_hist_[wait_bucket(Clock::now() - item.enqueued)].fetch_add(
+            1, std::memory_order_relaxed);
         // 异常防线：任务异常逃逸线程函数即 std::terminate（协程续体自身全捕获，
         // 这里兜的是裸 post 的阻塞任务）
         try {
@@ -100,10 +121,7 @@ void ThreadPool::worker_loop() {
         } catch (...) {
             LOG_ERROR("ThreadPool: task threw unknown exception");
         }
-        {
-            std::lock_guard lk(m_);
-            ++completed_;
-        }
+        completed_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 

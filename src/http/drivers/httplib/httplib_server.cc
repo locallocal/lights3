@@ -235,13 +235,13 @@ private:
         if (pump.joinable()) {
             // handler 可能没读完 body：有限排空以保住连接，过大则取消（连接随后关闭）
             try {
-                std::byte tmp[16 * 1024];
+                std::byte tmp[driver::kScratchBytes];
                 uint64_t drained = 0;
                 for (;;) {
                     size_t n = queue->pop(std::span(tmp));
                     if (n == 0) break;
                     drained += n;
-                    if (drained > 4 * 1024 * 1024) {
+                    if (drained > driver::kDrainMaxBytes) {
                         queue->cancel();
                         break;
                     }
@@ -296,30 +296,31 @@ private:
         }
 
         // 流式响应：httplib 的 content provider 本身是拉模型，逐块 sync_wait 即可。
-        // reader 的所有权交给闭包（响应写出发生在本回调返回之后）
+        // reader 与复用缓冲的所有权都交给闭包（响应写出发生在本回调返回之后）；
+        // 缓冲随闭包存活（docs/gaps.md §4：此前每 64KiB 块构造一次 vector）
         std::shared_ptr<BodyReader> body(std::move(resp.stream_body));
+        auto buf = std::make_shared<std::vector<std::byte>>(driver::kIoChunkBytes);
         if (resp.content_length) {
             rs.set_content_provider(
                 static_cast<size_t>(*resp.content_length), content_type,
-                [body](size_t /*offset*/, size_t length, httplib::DataSink& sink) {
-                    std::vector<std::byte> buf(std::min<size_t>(length, 64 * 1024));
+                [body, buf](size_t /*offset*/, size_t length, httplib::DataSink& sink) {
+                    size_t want = std::min<size_t>(length, buf->size());
                     size_t n = 0;
                     try {
-                        n = sync_wait(body->read(std::span(buf)));
+                        n = sync_wait(body->read(std::span(buf->data(), want)));
                     } catch (const std::exception& e) {
                         LOG_ERROR("stream body read failed mid-response: {}", e.what());
                         return false;  // 响应头已发出，只能断连（契约 3）
                     }
                     if (n == 0) return false;  // 长度未到就 EOF，视为错误
-                    return sink.write(reinterpret_cast<const char*>(buf.data()), n);
+                    return sink.write(reinterpret_cast<const char*>(buf->data()), n);
                 });
         } else {
             rs.set_chunked_content_provider(
-                content_type, [body](size_t /*offset*/, httplib::DataSink& sink) {
-                    std::vector<std::byte> buf(64 * 1024);
+                content_type, [body, buf](size_t /*offset*/, httplib::DataSink& sink) {
                     size_t n = 0;
                     try {
-                        n = sync_wait(body->read(std::span(buf)));
+                        n = sync_wait(body->read(std::span(*buf)));
                     } catch (const std::exception& e) {
                         LOG_ERROR("stream body read failed mid-response: {}", e.what());
                         return false;
@@ -328,7 +329,7 @@ private:
                         sink.done();
                         return true;
                     }
-                    return sink.write(reinterpret_cast<const char*>(buf.data()), n);
+                    return sink.write(reinterpret_cast<const char*>(buf->data()), n);
                 });
         }
     }

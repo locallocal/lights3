@@ -32,7 +32,9 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
     auto deadline = Clock::now() + delay;
     items_.emplace(std::make_pair(deadline, id), std::move(fn));
     deadlines_.emplace(id, deadline);
-    cv_.notify_all();  // 新条目可能成为最早到期者
+    // 只有成为最早到期者才需要叫醒调度线程重算等待时长；其余情况它醒来也只会
+    // 按原 deadline 继续睡（docs/gaps.md §4：此前每次 add 都 notify_all）
+    if (items_.begin()->first == std::make_pair(deadline, id)) cv_.notify_one();
     return id;
 }
 

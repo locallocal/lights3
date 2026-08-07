@@ -1,5 +1,6 @@
 #include "storage/duostore/duostore_backend.h"
 
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 #include <unordered_set>
@@ -1283,58 +1284,63 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // 盘面枚举采集——R 内的每个 id 在枚举开始前文件已在盘，缺失即真丢失。持
     // gc_sem_ 排除了 gcq 的 unlink→销账窗口，业务路径不存在"有 refs 的文件被删"。
     // 注意：refs 不分 kChunk/kRados（共号段账），本扫描以当前 data 引擎的枚举为盘
-    // 面真相——同一 meta 切换 data 引擎的部署形态不在孤儿扫描支持范围
-    std::unordered_set<uint64_t> refs;
-    meta_->scan_refs([&](uint64_t id) { refs.insert(id); });
+    // 面真相——同一 meta 切换 data 引擎的部署形态不在孤儿扫描支持范围。
+    // 内存形态（docs/gaps.md §3.9）：此前 refs/on_disk 两个哈希集合 + disk 全量
+    // 向量同时驻留（1 亿 chunk ≈ 4–5GB）；改为 refs 有序向量（8B/项）+ 盘面流式
+    // 判定 + 命中位图（1bit/项），峰值降一个数量级
+    std::vector<uint64_t> refs;
+    meta_->scan_refs([&](uint64_t id) { refs.push_back(id); });
+    std::sort(refs.begin(), refs.end());
+    refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
+    std::vector<bool> ref_seen(refs.size(), false);  // 反向对账：盘面命中标记
 
-    struct Seen {
-        uint64_t id;
-        int64_t mtime_ms;
-    };
-    std::vector<Seen> disk;
-    std::unordered_set<uint64_t> on_disk;
-    co_await data_->scan_chunks([&](uint64_t id, int64_t mtime_ms) {
-        disk.push_back({id, mtime_ms});
-        on_disk.insert(id);
-    });
-    st.chunks_scanned = disk.size();
-
-    // 正向（§9.3）：无引用、mtime 逾 gc_grace、无 pin（写侧 pin 覆盖超长流式 PUT，
-    // mtime 宽限对其不充分）→ unlink。快照后新提交的引用由 chunk_referenced 现点
-    // 复查兜住（grace=0 的测试形态下快照必然过时）
+    // 正向（§9.3）判定内联进枚举回调：无引用、mtime 逾 gc_grace、无 pin（写侧
+    // pin 覆盖超长流式 PUT，mtime 宽限对其不充分）→ 记为候选。now 取扫描起点，
+    // 宽限窗口只会偏严（安全方向）；快照后新提交的引用仍由删除前的
+    // chunk_referenced 现点复查兜住（grace=0 的测试形态下快照必然过时）
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
-    for (const auto& c : disk) {
-        if (refs.count(c.id)) continue;
-        if (now - c.mtime_ms < grace_ms) {
+    std::vector<uint64_t> orphans;
+    co_await data_->scan_chunks([&](uint64_t id, int64_t mtime_ms) {
+        ++st.chunks_scanned;
+        auto it = std::lower_bound(refs.begin(), refs.end(), id);
+        if (it != refs.end() && *it == id) {
+            ref_seen[size_t(it - refs.begin())] = true;
+            return;
+        }
+        if (now - mtime_ms < grace_ms) {
             ++st.skipped_grace;
-            continue;
+            return;
         }
-        if (pins_->pinned_chunk(c.id)) {
+        if (pins_->pinned_chunk(id)) {
             ++st.skipped_pinned;
-            continue;
+            return;
         }
-        if (meta_->chunk_referenced(c.id)) continue;  // 扫描间隙提交的新引用
+        orphans.push_back(id);
+    });
+
+    for (uint64_t id : orphans) {
+        if (meta_->chunk_referenced(id)) continue;  // 扫描间隙提交的新引用
         // kind 随 data 引擎（C4）：RadosDataStore::remove 只认 kRados（异种 extent
         // 视为引擎切换遗留跳过），kChunk 硬编码会让 rados 孤儿删除静默空转
         Extent e{cfg_.data_kind == DuoDataKind::kRados ? Extent::Kind::kRados
                                                        : Extent::Kind::kChunk,
-                 c.id, 0, 0, 0};
+                 id, 0, 0, 0};
         try {
             co_await data_->remove(std::span<const Extent>(&e, 1));
             ++st.orphans_removed;
         } catch (const std::exception& ex) {
-            LOG_WARN("duostore '{}': orphan unlink {:016x} failed: {}", cfg_.name, c.id,
+            LOG_WARN("duostore '{}': orphan unlink {:016x} failed: {}", cfg_.name, id,
                      ex.what());
         }
     }
 
     // 反向（§9.3）：refs 在而文件缺 = 数据丢失征兆 → 告警计数，绝不静默删 meta
-    for (uint64_t id : refs) {
-        if (on_disk.count(id)) continue;
+    for (size_t i = 0; i < refs.size(); ++i) {
+        if (ref_seen[i]) continue;
         ++st.refs_missing;
         LOG_ERROR("duostore '{}': refs entry for chunk {:016x} but file missing "
-                  "(data loss signal, keeping meta for manual inspection)", cfg_.name, id);
+                  "(data loss signal, keeping meta for manual inspection)", cfg_.name, refs[i]);
     }
 
     m_orphan_runs_->inc();

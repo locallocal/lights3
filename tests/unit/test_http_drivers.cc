@@ -72,6 +72,10 @@ Task<HttpResponse> test_handler(HttpRequest req) {
     HttpResponse resp;
     resp.headers.set("Content-Type", "text/plain");
 
+    if (req.path == "/method") {  // 回显方法：验证 L1 是否原样转发未知方法
+        resp.small_body = req.method;
+        co_return resp;
+    }
     if (req.path == "/small") {
         resp.small_body = req.body ? "hasbody" : "nobody";
         co_return resp;
@@ -744,5 +748,56 @@ TEST(http_driver_head_request) {
         auto r2 = c.read_response();
         CHECK(r2.ok);
         CHECK_EQ(r2.body, "nobody");
+    });
+}
+
+// ---------- 驱动一致性（gaps §3.9）----------
+
+TEST(http_driver_connection_close_token_list) {
+    // Connection: close, Upgrade —— 合法的 token 列表。全等比较会漏判 close，
+    // 服务端继续复用连接而客户端已经准备关闭
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nConnection: close, Upgrade\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(r.ok);
+        CHECK_EQ(r.status, 200);
+        bool close_sent = false;
+        for (auto& [k, v] : r.headers)
+            if (HeaderMap::ieq(k, "Connection") && HeaderMap::ieq(v, "close")) close_sent = true;
+        CHECK(close_sent);
+    });
+}
+
+TEST(http_driver_unknown_method_forwarded_or_s3_xml) {
+    // 未知方法只有两种合法结局：原样交给 handler 由 L2 判定（builtin/beast/
+    // seastar），或被驱动拒绝但给出 **S3 XML**（httplib 无法路由未注册方法，
+    // 此前直接回上游自己的报文，破坏四驱动一致性）
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        c.send_str("BREW /method HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(r.ok);
+        if (r.status < 400) {
+            CHECK_EQ(r.body, "BREW");  // 转发给了 handler
+        } else {
+            CHECK(r.body.find("<Error>") != std::string::npos);
+            CHECK(r.body.find("<Code>") != std::string::npos);
+        }
+    });
+}
+
+TEST(http_driver_rejects_oversized_headers) {
+    // http.max_header_size：httplib 此前完全忽略该配置，四驱动接受集合不一致
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        std::string big(64 * 1024, 'x');
+        c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nX-Pad: " + big + "\r\n\r\n");
+        auto r = c.read_response();
+        // 要么以错误状态拒绝，要么直接断连——都不能当作正常请求处理
+        CHECK(!r.ok || r.status >= 400);
     });
 }

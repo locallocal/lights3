@@ -14,6 +14,7 @@
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "http/server.h"
+#include "http/stall_guard.h"
 #include "s3/auth/credential_store.h"
 #include "s3/errors.h"
 #include "s3/service.h"
@@ -105,14 +106,20 @@ int main(int argc, char** argv) {
         // 在途请求从最近的可取消挂起点收敛，不必干等各自的 request_timeout
         auto shutdown_src = std::make_shared<CancelSource>();
         const int max_inflight = cfg.runtime.max_inflight_requests;
-        server->set_handler([service, inflight, pool_exec, shutdown_src](
+        auto stall = std::chrono::seconds(cfg.http.transfer_stall_timeout_sec);
+        server->set_handler([service, inflight, pool_exec, shutdown_src, stall](
                                 http::HttpRequest req) -> Task<http::HttpResponse> {
             // driver 已挂上本连接的 token 时保留它，否则至少接上关停源
             if (!req.cancel.valid()) req.cancel = shutdown_src->token();
             CancelToken tok = req.cancel;
             try {
                 auto permit = co_await inflight->acquire(tok);
-                co_return co_await service->dispatch(std::move(req));
+                // 传输停滞守卫（docs/gaps.md §3.3）：收发两个方向都包一层。装在
+                // L1/L2 交界处，四驱动一次性生效
+                req.body = http::guard_stalls(std::move(req.body), stall);
+                auto resp = co_await service->dispatch(std::move(req));
+                resp.stream_body = http::guard_stalls(std::move(resp.stream_body), stall);
+                co_return resp;
             } catch (const OperationCancelled&) {
                 // 排队期间被关停/超时取消：503 让 SDK 重试
                 http::HttpResponse r;

@@ -451,7 +451,7 @@ struct ServerCore {
 Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, bool keep,
                           unsigned shard) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
-    auto head = driver::render_response_head(resp, keep);
+    auto head = driver::render_response_head(resp, keep, head_request);
     try {
         co_await conn.write(head.text.data(), head.text.size());
         if (head_request || no_body_status) {
@@ -582,9 +582,10 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         if (bad) break;
         sess->in_flight = true;
 
-        if (auto c = req.headers.get("Connection")) {
-            if (HeaderMap::ieq(*c, "close")) keep = false;
-            else if (HeaderMap::ieq(*c, "keep-alive")) keep = true;
+        if (req.headers.has("Connection")) {
+            // 列表头：Connection: close, Upgrade 是合法写法，全等比较会漏判 close
+            if (req.headers.has_token("Connection", "close")) keep = false;
+            else if (req.headers.has_token("Connection", "keep-alive")) keep = true;
         }
 
         // body 边界：CL/TE 冲突、重复 CL、非法值一律拒绝关连接（请求走私前置
@@ -750,7 +751,10 @@ ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr,
             auto st = std::make_shared<ShardState>();
             ss::listen_options lo;
             lo.reuse_address = true;
-            st->listener = ss::engine().listen(ss::socket_address(ss::ipv4_addr(addr, p)), lo);
+            // inet_address 同时接受 v4/v6 字面量：写死 ipv4_addr 时配置里的
+            // bind: "::" 直接抛错，而 beast/httplib 都能起（docs/gaps.md §3.9）
+            st->listener =
+                ss::engine().listen(ss::socket_address(ss::inet_address(addr), p), lo);
             core->shards[s] = st;
             (void)accept_loop(core, st, s).handle_exception([](std::exception_ptr) {});
         });
@@ -767,23 +771,39 @@ ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr,
 // port=0 时先用一次性 socket 解析实际端口：posix 栈的跨 shard 连接分发按
 // listen 时传入的地址配对，各 shard 必须用同一个具体端口号监听
 uint16_t probe_free_port(const std::string& addr) {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) throw std::runtime_error("socket() failed");
-    sockaddr_in sa{};
-    sa.sin_family = AF_INET;
-    if (inet_pton(AF_INET, addr.c_str(), &sa.sin_addr) != 1) {
-        ::close(fd);
+    // 同 listen：地址族按字面量判定，v6 也要能探端口
+    sockaddr_storage ss{};
+    socklen_t sslen = 0;
+    int family = AF_INET;
+    if (auto* v6 = reinterpret_cast<sockaddr_in6*>(&ss);
+        inet_pton(AF_INET6, addr.c_str(), &v6->sin6_addr) == 1) {
+        family = AF_INET6;
+        v6->sin6_family = AF_INET6;
+        sslen = sizeof(sockaddr_in6);
+    } else if (auto* v4 = reinterpret_cast<sockaddr_in*>(&ss);
+               inet_pton(AF_INET, addr.c_str(), &v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET;
+        sslen = sizeof(sockaddr_in);
+    } else {
         throw std::runtime_error("bad bind address: " + addr);
     }
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
+    int fd = ::socket(family, SOCK_STREAM, 0);
+    if (fd < 0) throw std::runtime_error("socket() failed");
+    if (family == AF_INET6) {
+        int off = 0;
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+    }
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&ss), sslen) != 0) {
         ::close(fd);
         throw std::runtime_error("bind failed: " + std::string(strerror(errno)));
     }
-    sockaddr_in bound{};
+    sockaddr_storage bound{};
     socklen_t blen = sizeof(bound);
     getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &blen);
     ::close(fd);
-    return ntohs(bound.sin_port);
+    return ntohs(bound.ss_family == AF_INET6
+                     ? reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port
+                     : reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
 }
 
 class SeastarServer final : public IHttpServer {

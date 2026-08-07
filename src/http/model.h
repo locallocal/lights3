@@ -30,13 +30,61 @@ public:
             }
         add(key, std::move(value));
     }
-    std::optional<std::string> get(std::string_view key) const {
+    // 首个匹配头的指针，不存在返回 nullptr。L1/L2 每请求要查十几次头，
+    // get() 的 optional<string> 每次都拷一份值——判存在/比较时用这个
+    const std::string* find(std::string_view key) const {
         for (auto& [k, v] : items_)
-            if (ieq(k, key)) return v;
+            if (ieq(k, key)) return &v;
+        return nullptr;
+    }
+    std::optional<std::string> get(std::string_view key) const {
+        if (auto* v = find(key)) return *v;
         return std::nullopt;
     }
-    bool has(std::string_view key) const { return get(key).has_value(); }
+    bool has(std::string_view key) const { return find(key) != nullptr; }
+
+    // 同名头可以出现多次（Set-Cookie、逗号可拆的列表头等）。只取首个会漏判，
+    // 调用方此前只能自己遍历 items()（parse_body_framing 就是这么绕开 get 的）
+    std::vector<const std::string*> get_all(std::string_view key) const {
+        std::vector<const std::string*> out;
+        for (auto& [k, v] : items_)
+            if (ieq(k, key)) out.push_back(&v);
+        return out;
+    }
+    size_t count(std::string_view key) const {
+        size_t n = 0;
+        for (auto& [k, v] : items_)
+            if (ieq(k, key)) ++n;
+        return n;
+    }
+
+    // 删除全部同名头，返回删除条数
+    size_t remove(std::string_view key) {
+        size_t before = items_.size();
+        std::erase_if(items_, [&](const auto& kv) { return ieq(kv.first, key); });
+        return before - items_.size();
+    }
+
     const std::vector<std::pair<std::string, std::string>>& items() const { return items_; }
+
+    // 逗号分隔的列表头里是否含某个 token（大小写不敏感，忽略两侧空白）。
+    // Connection 之类的列表头用全等比较会漏判 "close, Upgrade" 这种合法写法
+    bool has_token(std::string_view key, std::string_view token) const {
+        for (auto& [k, v] : items_) {
+            if (!ieq(k, key)) continue;
+            size_t start = 0;
+            while (start <= v.size()) {
+                size_t comma = v.find(',', start);
+                if (comma == std::string::npos) comma = v.size();
+                std::string_view t(v.data() + start, comma - start);
+                while (!t.empty() && (t.front() == ' ' || t.front() == '\t')) t.remove_prefix(1);
+                while (!t.empty() && (t.back() == ' ' || t.back() == '\t')) t.remove_suffix(1);
+                if (ieq(t, token)) return true;
+                start = comma + 1;
+            }
+        }
+        return false;
+    }
 
     static bool ieq(std::string_view a, std::string_view b) {
         if (a.size() != b.size()) return false;

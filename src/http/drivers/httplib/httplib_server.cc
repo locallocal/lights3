@@ -31,6 +31,14 @@ bool is_pseudo_header(const std::string& k) {
 class HttplibServer final : public IHttpServer {
 public:
     explicit HttplibServer(const HttpConfig& cfg) : cfg_(cfg) {
+        // 上游对**单行**头有编译期上限 CPPHTTPLIB_HEADER_MAX_LENGTH（8KiB），
+        // 不可配。配置值大于它时超长单行仍会被上游先拒掉，行为与另三驱动不同——
+        // 明确告警而不是让它悄悄生效
+        if (cfg.max_header_size > CPPHTTPLIB_HEADER_MAX_LENGTH)
+            LOG_WARN(
+                "httplib driver: single header lines above {} bytes are rejected by the upstream "
+                "parser regardless of http.max_header_size={}",
+                int(CPPHTTPLIB_HEADER_MAX_LENGTH), cfg.max_header_size);
         svr_.new_task_queue = [n = std::max(cfg.io_threads, 8)] {
             return new httplib::ThreadPool(static_cast<size_t>(n));
         };
@@ -64,6 +72,31 @@ public:
                 }
                 return static_cast<int>(httplib::StatusCode::Continue_100);
             });
+
+        // 上游自产的错误响应（未注册方法 → 路由 404、请求行/头非法 → 400 等）
+        // 此前直接回 httplib 的非 S3 报文，破坏"四驱动接受/拒绝集合一致"。这里
+        // 统一补成 S3 XML；body 非空说明是 handler 自己渲染的错误，不覆盖。
+        // 路由 404 只可能是"方法没注册"（下面对全部业务方法注册了 ".*"），
+        // 与另三驱动一致地翻译成 405 MethodNotAllowed
+        svr_.set_error_handler([](const httplib::Request&, httplib::Response& rs) {
+            using HR = httplib::Server::HandlerResponse;
+            if (!rs.body.empty()) return HR::Unhandled;
+            s3::S3ErrorCode code = s3::S3ErrorCode::InternalError;
+            switch (rs.status) {
+                case 404: rs.status = 405; code = s3::S3ErrorCode::MethodNotAllowed; break;
+                case 405: code = s3::S3ErrorCode::MethodNotAllowed; break;
+                case 413: code = s3::S3ErrorCode::EntityTooLarge; break;
+                case 400:
+                case 431: code = s3::S3ErrorCode::InvalidRequest; break;
+                case 501:
+                case 505: code = s3::S3ErrorCode::NotImplemented; break;
+                default: if (rs.status < 500) code = s3::S3ErrorCode::InvalidRequest; break;
+            }
+            rs.set_content(s3::error_xml(s3::S3Error(code, "Request rejected by the HTTP layer."),
+                                         ""),
+                           "application/xml");
+            return HR::Handled;
+        });
 
         const std::string pat = ".*";
         auto no_body = [this](const httplib::Request& rq, httplib::Response& rs) {
@@ -143,8 +176,27 @@ private:
             reject("Invalid message framing.");
             return;
         }
+        // http.max_header_size 此前被本驱动完全忽略（另三驱动都按它拒收），
+        // 四驱动的接受集合因此不一致。上游只有编译期的单行上限
+        // CPPHTTPLIB_HEADER_MAX_LENGTH，配置值在这里补做整体校验
+        size_t header_bytes = 0;
+        for (auto& [k, v] : rq.headers)
+            if (!is_pseudo_header(k)) header_bytes += k.size() + v.size() + 4;  // ": " + CRLF
+        if (header_bytes > cfg_.max_header_size) {
+            rs.status = 431;
+            rs.set_content(s3::error_xml(s3::S3Error(s3::S3ErrorCode::InvalidRequest,
+                                                     "Request header fields too large."),
+                                         ""),
+                           "application/xml");
+            rs.set_header("Connection", "close");
+            return;
+        }
         std::optional<uint64_t> content_length = framing.content_length;
         bool chunked = framing.chunked;
+        // Connection 是 token 列表：上游只做全等比较，"close, Upgrade" 会被当成
+        // keep-alive，响应里也不会带 Connection: close（另三驱动都按 token 判定）。
+        // 这里自行判定并补上响应头，客户端据此关连接
+        bool client_wants_close = req.headers.has_token("Connection", "close");
 
         // httplib 不给 GET/OPTIONS 路由提供 ContentReader：带非零 body 的这类
         // 请求无法满足 BodyReader 契约（length() 报 N 但立即 EOF），直接 400
@@ -202,6 +254,7 @@ private:
         }
 
         write_response(std::move(resp), rs, rq.method == "HEAD");
+        if (client_wants_close) rs.set_header("Connection", "close");
     }
 
     void write_response(HttpResponse resp, httplib::Response& rs, bool head_request) {
@@ -224,10 +277,15 @@ private:
             rs.set_header("Date", util::http_date(std::chrono::system_clock::now()));
 
         if (head_request) {
-            // HEAD 不经 set_content 系列（httplib 不写 body），头部直接给出
+            // HEAD 不经 set_content 系列（httplib 不写 body），头部直接给出。
+            // 长度未知（流式无 content_length）时两个框架头都不写并关连接
+            //（drivers/common.h 契约 6，四驱动统一）——写 0 是撒谎
             if (has_content_type) rs.set_header("Content-Type", content_type);
-            uint64_t len = resp.content_length.value_or(resp.small_body.size());
-            rs.set_header("Content-Length", std::to_string(len));
+            if (driver::head_length_known(resp))
+                rs.set_header("Content-Length",
+                              std::to_string(resp.content_length.value_or(resp.small_body.size())));
+            else
+                rs.set_header("Connection", "close");
             return;
         }
 

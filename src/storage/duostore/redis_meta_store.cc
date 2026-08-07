@@ -82,10 +82,18 @@ for _ = 1, nc do
   elseif t == 'zcard0' then
     if redis.call('ZCARD', key) ~= 0 then return 0 end
   else
-    local fields = redis.call('HKEYS', key)
+    -- 一次 HGETALL 取整表（docs/gaps.md §3.9）：此前 HKEYS + 逐 field HGET，
+    -- 万分片 complete = 1 万次 redis.call，脚本原子执行期间独占整个 Redis。
+    -- 排序/拼接仍在 Lua 内做（与 C++ 侧 scan_parts 的 part_no 数值序对齐）
+    local flat = redis.call('HGETALL', key)
+    local fields, byf = {}, {}
+    for j = 1, #flat, 2 do
+      fields[#fields + 1] = flat[j]
+      byf[flat[j]] = flat[j + 1]
+    end
     table.sort(fields, function(a, b) return tonumber(a) < tonumber(b) end)
     local buf = {}
-    for j = 1, #fields do buf[j] = redis.call('HGET', key, fields[j]) end
+    for j = 1, #fields do buf[j] = byf[fields[j]] end
     if redis.sha1hex(table.concat(buf)) ~= exp then return 0 end
   end
 end
@@ -124,7 +132,7 @@ local function bump(s)
   return nil
 end
 
-local objs, groups = {}, {}
+local keys, groups = {}, {}
 local truncated, next_token, last_emitted = 0, '', ''
 local count = 0
 
@@ -132,10 +140,19 @@ local min
 if start_after ~= '' and start_after >= prefix then min = '(' .. start_after
 else min = '[' .. prefix end
 
+-- 分页扫描（docs/gaps.md §3.9）：此前逐 key 一次 ZRANGEBYLEX + 一次 HGET，
+-- list 1000 key = 2000 次 redis.call，脚本原子执行期间独占整个 Redis。
+-- 现在按页取 key（组跳跃时弃页重 seek），value 末尾分批 HMGET——脚本内
+-- 全程同一原子执行，一致视图不变
+local PAGE = 200
+local page, pi = {}, 1
 while true do
-  local m = redis.call('ZRANGEBYLEX', oz, min, '+', 'LIMIT', 0, 1)
-  local uk = m[1]
-  if not uk then break end
+  if pi > #page then
+    page = redis.call('ZRANGEBYLEX', oz, min, '+', 'LIMIT', 0, PAGE)
+    pi = 1
+    if #page == 0 then break end
+  end
+  local uk = page[pi]; pi = pi + 1
   if string.sub(uk, 1, #prefix) ~= prefix then break end
   if count >= maxkeys then
     truncated = 1
@@ -153,19 +170,30 @@ while true do
       local tail = redis.call('ZREVRANGEBYLEX', oz, '(' .. target, '-', 'LIMIT', 0, 1)
       if tail[1] then last_emitted = tail[1] end
       min = '[' .. target
+      page, pi = {}, 1
       grouped = true
     end
   end
   if not grouped then
-    local v = redis.call('HGET', oh, uk)
-    if v then
-      objs[#objs + 1] = uk
-      objs[#objs + 1] = v
-    end
+    keys[#keys + 1] = uk
     last_emitted = uk
     count = count + 1
     min = '(' .. uk
   end
+end
+
+local objs = {}
+local i = 1
+while i <= #keys do
+  local j = math.min(i + 499, #keys)  -- unpack 受 Lua C 栈上限约束，分批
+  local vals = redis.call('HMGET', oh, unpack(keys, i, j))
+  for x = 1, j - i + 1 do
+    if vals[x] then
+      objs[#objs + 1] = keys[i + x - 1]
+      objs[#objs + 1] = vals[x]
+    end
+  end
+  i = j + 1
 end
 return { truncated, next_token, objs, groups }
 )lua";

@@ -360,9 +360,13 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
                     break;
             }
         }
-        throw S3Error(S3ErrorCode::InternalError,
-                      "remote returned unexpected " + std::to_string(status) +
-                          (remote_code.empty() ? "" : " (" + remote_code + ")"),
+        // 未知 4xx 不折成 500（docs/gaps.md §3.9）：SDK 对 500 自动重试，会把
+        // InvalidObjectState 这类确定性拒绝变成无限重试循环。映射为本地 400
+        //（InvalidRequest 不经 public_error 抹文案），远端码与原文随消息带出
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "remote rejected request: " + std::to_string(status) +
+                          (remote_code.empty() ? "" : " " + remote_code) +
+                          (remote_msg.empty() ? "" : " — " + remote_msg),
                       res);
     }
 

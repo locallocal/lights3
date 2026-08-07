@@ -108,8 +108,19 @@ Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
             throw S3Error(S3ErrorCode::BucketNotEmpty,
                           "The bucket you tried to delete is not empty", std::string(bucket));
     }
-    fs::remove(dir / kBucketMarker);
-    fs::remove(dir);
+    // 抛异常重载会把 filesystem_error（非 S3Error）直接漏成 500；且 marker 删除
+    // 后目录若删不掉（空检查与 remove 之间并发写入落了对象），桶从 list/exists
+    // 里消失而数据仍在——不可见也删不掉（docs/gaps.md §3.9）
+    std::error_code ec;
+    fs::remove(dir / kBucketMarker, ec);
+    if (ec) throw S3Error(S3ErrorCode::InternalError, "delete bucket marker: " + ec.message());
+    fs::remove(dir, ec);
+    if (ec) {
+        // 目录非空即并发写赢了竞态：把 marker 恢复回来让桶保持可见，报 NotEmpty
+        std::ofstream marker(dir / kBucketMarker);
+        throw S3Error(S3ErrorCode::BucketNotEmpty,
+                      "The bucket you tried to delete is not empty", std::string(bucket));
+    }
     co_return;
 }
 

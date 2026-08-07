@@ -244,6 +244,27 @@ Task<http::HttpResponse> S3Service::delete_object(std::string bucket, std::strin
     co_return resp;
 }
 
+namespace {
+
+// 单 key 删除，异常收敛为结果值（docs/gaps.md §3.9）：批内任何 key 失败都不得
+// 中断整批——已删的 key 必须出现在响应里，否则客户端无从得知哪些删成了。
+// 独立函数而非捕获 lambda：协程挂起期间 lambda 临时对象已析构，捕获即悬垂
+Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
+                                        const std::string& bucket, const std::string& key) {
+    try {
+        co_await backend.delete_object(bucket, key);
+        co_return std::nullopt;
+    } catch (const S3Error& e) {
+        co_return e;
+    } catch (const std::exception& e) {
+        // 非 S3 异常（后端传输/存储错误）：原始文案只进日志
+        LOG_ERROR("DeleteObjects: key {} failed: {}", key, e.what());
+        co_return S3Error(S3ErrorCode::InternalError, "We encountered an internal error.");
+    }
+}
+
+}  // namespace
+
 // DeleteObjects 批量删除（POST /bucket?delete，请求 XML ≤ 1MiB，至多 1000 key）
 Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::string bucket) {
     std::string body = co_await read_body(req);
@@ -253,38 +274,53 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
     bool quiet = root.get("Quiet") == "true";
 
     std::vector<std::string> keys;
-    for (auto& child : root.children)
-        if (child.name == "Object") keys.push_back(child.get("Key"));
+    for (auto& child : root.children) {
+        if (child.name != "Object") continue;
+        // 缺 <Key>/空 Key 是畸形请求，整批拒绝（与 AWS 一致）——不是逐 key 报错
+        std::string k = child.get("Key");
+        if (k.empty())
+            throw S3Error(S3ErrorCode::MalformedXML,
+                          "Each <Object> must contain a non-empty <Key>.");
+        // <VersionId> 静默忽略的话，"删指定版本"会变成"删当前对象"——比报错
+        // 危险得多（docs/gaps.md §3.9）
+        if (!child.get("VersionId").empty())
+            throw S3Error(S3ErrorCode::NotImplemented, "Versioning is not implemented.");
+        keys.push_back(std::move(k));
+    }
+    if (keys.empty())
+        throw S3Error(S3ErrorCode::MalformedXML, "Delete must contain at least one <Object>.");
     if (keys.size() > 1000)
         throw S3Error(S3ErrorCode::MalformedXML, "DeleteObjects accepts at most 1000 keys.");
 
     auto& backend = router_.resolve(bucket);
+    // 有界并发（docs/gaps.md §3.9）：串行 co_await 在 cloudproxy/duostore 上是
+    // 1000 次串行 RTT。批大小压住对单后端的并发冲击，批间仍顺序推进
+    constexpr size_t kBatch = 32;
+    std::vector<std::optional<S3Error>> outcome(keys.size());
+    for (size_t base = 0; base < keys.size(); base += kBatch) {
+        size_t n = std::min(kBatch, keys.size() - base);
+        std::vector<Task<std::optional<S3Error>>> batch;
+        batch.reserve(n);
+        for (size_t i = 0; i < n; ++i)
+            batch.push_back(delete_one(backend, bucket, keys[base + i]));
+        auto res = co_await when_all(std::move(batch));
+        for (size_t i = 0; i < n; ++i) outcome[base + i] = std::move(res[i]);
+    }
+
     XmlWriter w;
     w.open("DeleteResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
-    for (auto& key : keys) {
-        try {
-            if (key.empty())
-                throw S3Error(S3ErrorCode::InvalidArgument, "Object key must not be empty.");
-            co_await backend.delete_object(bucket, key);
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (!outcome[i]) {
             if (!quiet) {
                 w.open("Deleted");
-                w.element("Key", key);
+                w.element("Key", keys[i]);
                 w.close();
             }
-        } catch (const S3Error& e) {
+        } else {
             w.open("Error");
-            w.element("Key", key);
-            w.element("Code", wire_code(e.code));
-            w.element("Message", e.message);
-            w.close();
-        } catch (const std::exception& e) {
-            // 非 S3 异常（后端传输/存储错误）不得中断整批：已删的 key 必须出现
-            // 在响应里，否则客户端无从得知哪些删成了。原始文案只进日志
-            LOG_ERROR("DeleteObjects: key {} failed: {}", key, e.what());
-            w.open("Error");
-            w.element("Key", key);
-            w.element("Code", "InternalError");
-            w.element("Message", "We encountered an internal error.");
+            w.element("Key", keys[i]);
+            w.element("Code", wire_code(outcome[i]->code));
+            w.element("Message", outcome[i]->message);
             w.close();
         }
     }

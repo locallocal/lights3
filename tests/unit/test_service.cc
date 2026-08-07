@@ -766,3 +766,30 @@ TEST(service_internal_endpoints_not_shadowing_vhost_keys) {
     auto hh = sync_wait(svc.dispatch(make_req("HEAD", "/-/healthz")));
     CHECK_EQ(hh.status, 200);  // 探活器常用 HEAD
 }
+
+// ---------- gaps §3.9：DeleteObjects 的畸形输入与版本删除 ----------
+TEST(service_delete_objects_malformed_inputs) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/a", "x")));
+
+    // 空列表与缺 <Key> 都是畸形请求：整批 MalformedXML，而不是 200 空结果
+    auto empty = sync_wait(
+        svc.dispatch(make_req("POST", "/bkt", "<Delete></Delete>", {{"delete", ""}})));
+    CHECK_EQ(empty.status, 400);
+    CHECK(contains(empty.small_body, "MalformedXML"));
+
+    auto nokey = sync_wait(svc.dispatch(
+        make_req("POST", "/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
+    CHECK_EQ(nokey.status, 400);
+    CHECK(contains(nokey.small_body, "MalformedXML"));
+
+    // <VersionId> 静默忽略会把"删指定版本"变成"删当前对象"：501 且对象未删
+    auto ver = sync_wait(svc.dispatch(make_req(
+        "POST", "/bkt",
+        "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>",
+        {{"delete", ""}})));
+    CHECK_EQ(ver.status, 501);
+    CHECK(contains(ver.small_body, "NotImplemented"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
+}

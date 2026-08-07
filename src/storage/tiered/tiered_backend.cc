@@ -198,9 +198,17 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
     };
     auto parse_pct = [&](const std::string& s) {
         std::string t = s;
-        if (!t.empty() && t.back() == '%') t.pop_back();
+        bool suffixed = !t.empty() && t.back() == '%';
+        if (suffixed) t.pop_back();
         double v = std::stod(t);
-        return v > 1.0 ? v / 100.0 : v;  // "85%"/"85" 与 "0.85" 均接受
+        // "%" 后缀必须参与判定："1%" 是 1%。旧写法丢弃后缀后 1.0 不触发 /100，
+        // 低水位 1% 被解析成 100%，(used-low) 转负回绕后把整个桶全部下沉
+        //（docs/gaps.md §3.9）。"85%"/"85" 与 "0.85" 均接受
+        if (suffixed || v > 1.0) v /= 100.0;
+        if (!(v > 0.0 && v <= 1.0))
+            throw std::runtime_error("tiered backend '" + cfg.name + "': watermark '" + s +
+                                     "' out of range (0, 100%]");
+        return v;
     };
 
     std::string local_name = param("local"), cloud_name = param("cloud");

@@ -403,8 +403,13 @@ private:
             });
             if (!resp.headers.has("Date"))
                 res.set(bhttp::field::date, util::http_date(std::chrono::system_clock::now()));
+            // HEAD 且长度未知（流式无 content_length）：不写 Content-Length 也不写
+            // Transfer-Encoding，改为关连接（drivers/common.h 的契约 6，四驱动统一）。
+            // 旧行为写 Content-Length: 0 是撒谎——GET 并不返回 0 字节
+            bool head_unknown_len = head_request && !driver::head_length_known(resp);
+            if (head_unknown_len) keep = false;
             res.keep_alive(keep);
-            if (!no_body_status) {
+            if (!no_body_status && !head_unknown_len) {
                 uint64_t len = resp.content_length.value_or(
                     resp.stream_body && resp.stream_body->length()
                         ? *resp.stream_body->length()

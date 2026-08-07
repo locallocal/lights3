@@ -15,6 +15,7 @@
 #include <sstream>
 #include <system_error>
 
+#include "core/log.h"
 #include "storage/multipart.h"
 
 namespace fs = std::filesystem;
@@ -145,27 +146,51 @@ static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
 // 是两次 rename，中间崩溃会留下"新 etag + 旧数据"（或反之）的不一致对象，而 xattr
 // 随 inode 走，绝不可能与它所描述的数据错位。sidecar 继续写（外部工具/存量兼容，
 // 也是不支持 xattr 的文件系统上的唯一来源）。
-// 失败（ENOTSUP/E2BIG 等）静默降级为 sidecar-only，不拖垮写路径
+// 失败（ENOTSUP/E2BIG 等）降级为 sidecar-only，不拖垮写路径——但必须留痕：
+// 降级意味着退回"两次 rename"一致性模型，静默发生的话运维无从得知
+//（docs/gaps.md §3.9）。同类 errno 只告警一次，防写路径刷屏
 void set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier) {
     std::string blob = kv_to_tsv(meta_kv(meta, tier));
-    ::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0);
+    if (::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0) != 0) {
+        static std::atomic<int> last_errno{0};
+        int e = errno;
+        if (last_errno.exchange(e) != e)
+            LOG_WARN("setxattr({}) failed: {} — object metadata falls back to sidecar-only "
+                     "(two-rename consistency model)",
+                     path.string(), strerror(e));
+    }
 }
 
 // 返回 nullopt = 无 xattr（存量对象 / 不支持的文件系统）→ 调用方回落 sidecar
 std::optional<std::string> get_meta_xattr(const fs::path& path) {
     char buf[8192];
     ssize_t n = ::getxattr(path.c_str(), kMetaXattr, buf, sizeof(buf));
+    if (n >= 0) return std::string(buf, static_cast<size_t>(n));
+    if (errno != ERANGE) return std::nullopt;
+    // 超出栈缓冲：按实际大小重取。此处静默回落 sidecar 的话，读到的可能是
+    // 一次崩溃窗口里的旧元数据——xattr 存在即以它为准（docs/gaps.md §3.9）
+    ssize_t sz = ::getxattr(path.c_str(), kMetaXattr, nullptr, 0);
+    if (sz < 0) return std::nullopt;
+    std::string out(static_cast<size_t>(sz), '\0');
+    n = ::getxattr(path.c_str(), kMetaXattr, out.data(), out.size());
     if (n < 0) return std::nullopt;
-    return std::string(buf, static_cast<size_t>(n));
+    out.resize(static_cast<size_t>(n));
+    return out;
 }
 
 void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                         const fs::path& staging_put, std::string_view key) {
     std::error_code ec;
     fs::create_directories(dest.parent_path(), ec);
-    if (ec)
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Object key conflicts with an existing object path", std::string(key));
+    if (ec) {
+        // 只有"前缀撞上既有文件"是客户端错误；ENOSPC/EACCES/EIO 一律 500——
+        // 映射成 400 的话客户端不会重试、运维拿不到磁盘满的信号（docs/gaps.md §3.9）
+        if (ec == std::errc::not_a_directory || ec == std::errc::file_exists)
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Object key conflicts with an existing object path", std::string(key));
+        throw S3Error(S3ErrorCode::InternalError,
+                      "create object directory: " + ec.message(), std::string(key));
+    }
     if (fs::is_directory(dest))
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "Object key conflicts with an existing key prefix", std::string(key));

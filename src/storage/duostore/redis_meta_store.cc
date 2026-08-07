@@ -71,7 +71,8 @@ for _ = 1, nc do
   i = i + 4
   local key = KEYS[tonumber(kx)]
   if t == 'eq' then
-    if redis.call('HGET', key, f) ~= exp then return 0 end
+    local v = redis.call('HGET', key, f)
+    if not v or redis.sha1hex(v) ~= exp then return 0 end
   elseif t == 'absent' then
     if redis.call('HGET', key, f) then return 0 end
   elseif t == 'exists' then
@@ -81,10 +82,18 @@ for _ = 1, nc do
   elseif t == 'zcard0' then
     if redis.call('ZCARD', key) ~= 0 then return 0 end
   else
-    local fields = redis.call('HKEYS', key)
+    -- 一次 HGETALL 取整表（docs/gaps.md §3.9）：此前 HKEYS + 逐 field HGET，
+    -- 万分片 complete = 1 万次 redis.call，脚本原子执行期间独占整个 Redis。
+    -- 排序/拼接仍在 Lua 内做（与 C++ 侧 scan_parts 的 part_no 数值序对齐）
+    local flat = redis.call('HGETALL', key)
+    local fields, byf = {}, {}
+    for j = 1, #flat, 2 do
+      fields[#fields + 1] = flat[j]
+      byf[flat[j]] = flat[j + 1]
+    end
     table.sort(fields, function(a, b) return tonumber(a) < tonumber(b) end)
     local buf = {}
-    for j = 1, #fields do buf[j] = redis.call('HGET', key, fields[j]) end
+    for j = 1, #fields do buf[j] = byf[fields[j]] end
     if redis.sha1hex(table.concat(buf)) ~= exp then return 0 end
   end
 end
@@ -123,7 +132,7 @@ local function bump(s)
   return nil
 end
 
-local objs, groups = {}, {}
+local keys, groups = {}, {}
 local truncated, next_token, last_emitted = 0, '', ''
 local count = 0
 
@@ -131,10 +140,19 @@ local min
 if start_after ~= '' and start_after >= prefix then min = '(' .. start_after
 else min = '[' .. prefix end
 
+-- 分页扫描（docs/gaps.md §3.9）：此前逐 key 一次 ZRANGEBYLEX + 一次 HGET，
+-- list 1000 key = 2000 次 redis.call，脚本原子执行期间独占整个 Redis。
+-- 现在按页取 key（组跳跃时弃页重 seek），value 末尾分批 HMGET——脚本内
+-- 全程同一原子执行，一致视图不变
+local PAGE = 200
+local page, pi = {}, 1
 while true do
-  local m = redis.call('ZRANGEBYLEX', oz, min, '+', 'LIMIT', 0, 1)
-  local uk = m[1]
-  if not uk then break end
+  if pi > #page then
+    page = redis.call('ZRANGEBYLEX', oz, min, '+', 'LIMIT', 0, PAGE)
+    pi = 1
+    if #page == 0 then break end
+  end
+  local uk = page[pi]; pi = pi + 1
   if string.sub(uk, 1, #prefix) ~= prefix then break end
   if count >= maxkeys then
     truncated = 1
@@ -152,19 +170,30 @@ while true do
       local tail = redis.call('ZREVRANGEBYLEX', oz, '(' .. target, '-', 'LIMIT', 0, 1)
       if tail[1] then last_emitted = tail[1] end
       min = '[' .. target
+      page, pi = {}, 1
       grouped = true
     end
   end
   if not grouped then
-    local v = redis.call('HGET', oh, uk)
-    if v then
-      objs[#objs + 1] = uk
-      objs[#objs + 1] = v
-    end
+    keys[#keys + 1] = uk
     last_emitted = uk
     count = count + 1
     min = '(' .. uk
   end
+end
+
+local objs = {}
+local i = 1
+while i <= #keys do
+  local j = math.min(i + 499, #keys)  -- unpack 受 Lua C 栈上限约束，分批
+  local vals = redis.call('HMGET', oh, unpack(keys, i, j))
+  for x = 1, j - i + 1 do
+    if vals[x] then
+      objs[#objs + 1] = keys[i + x - 1]
+      objs[#objs + 1] = vals[x]
+    end
+  end
+  i = j + 1
 end
 return { truncated, next_token, objs, groups }
 )lua";
@@ -225,8 +254,12 @@ class RedisBatch {
 public:
     explicit RedisBatch(RedisMetaStore& store) : store_(store) {}
 
+    // CAS 见证上送 SHA1 指纹而非整份旧值（docs/gaps.md §3.9）：大 manifest 的
+    // 见证从 MB 级降到 40 字节，重试轮不再整份重发；比对在脚本内对存量值做
+    // redis.sha1hex。SHA1 碰撞需要对同一 field 的两份既有合法编码值做
+    // 选择前缀攻击，收益是撞掉自己的一次 CAS——非防护目标
     void expect_eq(const std::string& key, std::string_view field, std::string_view expected) {
-        add_check("eq", key, field, expected);
+        add_check("eq", key, field, sha1_hex(expected));
     }
     void expect_absent(const std::string& key, std::string_view field) {
         add_check("absent", key, field, {});
@@ -638,11 +671,13 @@ void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref) {
     }
 }
 
-uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r) {
+uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n) {
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
     std::lock_guard lk(alloc_mu_);
-    if (r.next == r.limit) {
+    if (r.limit - r.next < n) {
         // 首次预留空烧一个号段（§4 缓解 2）：跳过 AOF everysec 崩溃窗口内可能
-        // 已派发、但计数器回滚丢失的 id。崩溃/重启浪费号段无害（只需唯一单调）
+        // 已派发、但计数器回滚丢失的 id。崩溃/重启浪费号段无害（只需唯一单调）；
+        // 换段弃置的残段同理（run 批派发要求段内连续，docs/gaps.md §3.9）
         uint64_t take = r.burned ? kIdSegment : 2 * kIdSegment;
         auto reply = exec({"INCRBY", key(counter_suffix), std::to_string(take)},
                           /*read_retry=*/false);
@@ -651,14 +686,16 @@ uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r) {
         r.next = hi - kIdSegment;
         r.burned = true;
     }
-    return r.next++;
+    uint64_t first = r.next;
+    r.next += n;
+    return first;
 }
 
-uint64_t RedisMetaStore::alloc_file_id(Extent::Kind kind) {
+uint64_t RedisMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
     // kRados 与 kChunk 共号段（同 rocks 版论证：refs 不分 kind，防跨 kind id 碰撞）
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCounterChunk : kCounterPack,
-                    file_ids_[size_t(kind)]);
+                    file_ids_[size_t(kind)], n);
 }
 
 // ---------- bucket ----------
@@ -720,6 +757,12 @@ std::optional<ObjectRec> RedisMetaStore::get_object(std::string_view b, std::str
     auto v = hget_raw(objects_key(b), k);
     if (!v) return std::nullopt;
     return codec::decode_object(std::string(k), *v);
+}
+
+std::optional<ObjectMeta> RedisMetaStore::head_object(std::string_view b, std::string_view k) {
+    auto v = hget_raw(objects_key(b), k);
+    if (!v) return std::nullopt;
+    return codec::decode_object_meta(std::string(k), *v);
 }
 
 void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,

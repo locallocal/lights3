@@ -83,6 +83,10 @@ struct IMetaStore {
 
     // ---- object ----
     virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
+    // 只要 meta 不要 manifest（docs/gaps.md §3.9）：HEAD/前置读走这里。
+    // decode_object 会物化整份 extent vector（65 万 extent ≈ 26MB）后立刻丢弃，
+    // decode_object_meta 只解码定长头
+    virtual std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) = 0;
     // cond.active() 时在本事务的原子区内按 PutCondition 契约（storage/backend.h）
     // 校验旧记录：违反抛 PreconditionFailed / NoSuchKey，事务不提交（共享检查
     // 见 meta_util.h check_put_condition）
@@ -108,7 +112,12 @@ struct IMetaStore {
                               std::string_view id) = 0;
 
     // ---- 资源分配与 GC 记账（§9）----
-    virtual uint64_t alloc_file_id(Extent::Kind kind) = 0;  // 持久单调，号段预留
+    // 批派发（docs/gaps.md §3.9）：返回连续 run [first, first+n) 的首 id，持久
+    // 单调、号段预留。并发写者逐个派发会让同对象的 chunk id 交错，manifest 的
+    // run 编码完全失效（编码后反而膨胀 28%）；写者按几何增长的 run 批取即恢复
+    // 连续性。n ≤ kMaxIdRun；run 的未用尾部弃置无害（id 只需唯一单调，不需连续）
+    virtual uint64_t alloc_file_run(Extent::Kind kind, uint32_t n) = 0;
+    uint64_t alloc_file_id(Extent::Kind kind) { return alloc_file_run(kind, 1); }
     // 取 seq >= min_seq 的最早至多 max 项（seq 升序）。GC 消费端按 min_seq 断点
     // 续扫：被 grace/pin 跳过而未销账的队头项不会让整轮卡死或被重复统计（§9.1）。
     // max_extents = 批内累计 extent 数上限（docs/gaps.md §2.11：按条数批 256 条最坏

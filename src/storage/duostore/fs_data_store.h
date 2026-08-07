@@ -39,8 +39,10 @@ class FsPackedWriter;
 
 class FsDataStore final : public IDataStore {
 public:
-    // file_id 分配回调（持久单调，由 IMetaStore::alloc_file_id 提供）
-    using FileIdAlloc = std::function<uint64_t(Extent::Kind)>;
+    // file_id 分配回调（持久单调，由 IMetaStore::alloc_file_run 提供）：返回
+    // 连续 run [first, first+n) 的首 id。写者按几何增长批取，同对象的 chunk id
+    // 连续，manifest 的 run 编码才有效（docs/gaps.md §3.9）
+    using FileIdAlloc = std::function<uint64_t(Extent::Kind, uint32_t)>;
     // pack 封存回调（IMetaStore::seal_pack）：轮转与 close 时回报最终文件大小。
     // 崩溃（未回调）遗留的 unsealed pack 由 DuoStoreBackend 启动时补封（§5.2）
     using PackSeal = std::function<void(uint64_t pack_id, uint64_t file_size)>;
@@ -93,7 +95,18 @@ private:
     // 批量追加（write_batch 的 pack 路径）：单次槽锁内逐条 pwrite、末尾一次
     // fdatasync（§2.13 批量化——中途轮转封存前会先把未同步的写落盘）
     std::vector<Extent> append_pack_records(std::span<const PackAppendItem> items);
-    void seal_slot_locked(ActivePack& slot);  // 持 slot.m 调用；关 fd + 回报封存
+
+    // 封存拆两步（docs/gaps.md §3.9）：锁内只关 fd/清槽状态并把 (id,size) 入
+    // seal_retry_，seal_ 的 meta 提交（可能是网络 RTT/fsync）在 flush_seals 里
+    // 锁外执行。此前 seal_ 在 slot 互斥内跑会堵死该槽；抛出时 fd 已置 -1 而
+    // size 未清，下一次写会开新 pack 覆盖槽状态，旧 pack 从此永远不被封存
+    struct PendingSeal {
+        uint64_t id = 0;
+        uint64_t size = 0;
+    };
+    void close_slot_locked(ActivePack& slot);  // 持 slot.m 调用
+    // 提交积压的封存；失败放回队列（append 路径告警后续重试，close 路径上抛）
+    void flush_seals(bool rethrow);
 
     FsDataOptions opt_;
     std::shared_ptr<ThreadPool> pool_;
@@ -106,6 +119,8 @@ private:
     std::array<int, 256> pack_dirfds_;
     std::vector<std::unique_ptr<ActivePack>> packs_;  // pack_writers 个槽
     std::atomic<unsigned> pack_rr_{0};                // 轮询游标
+    std::mutex seal_mu_;
+    std::vector<PendingSeal> seal_retry_;  // 已关 fd、meta 尚未确认封存的 pack
 };
 
 }  // namespace lights3::storage::duostore

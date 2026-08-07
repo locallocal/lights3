@@ -690,3 +690,106 @@ TEST(service_valid_bucket_still_works_after_validation) {
     auto get = sync_wait(svc.dispatch(make_req("GET", "/my-bkt/dir/a.txt")));
     CHECK_EQ(body_of(get), "vh data");
 }
+
+// ---------- gaps §3.4：不支持的请求头必须 501，而不是静默吞掉 ----------
+// 静默接受比报错危险：客户端会据 200 认为对象已加密/已打标/已锁定
+TEST(service_unsupported_headers_rejected) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto try_put = [&](std::string header, std::string value) {
+        auto req = make_req("PUT", "/bkt/k", "data");
+        req.headers.add(std::move(header), std::move(value));
+        return sync_wait(svc.dispatch(std::move(req)));
+    };
+    for (const char* h : {"x-amz-server-side-encryption",
+                          "x-amz-server-side-encryption-customer-algorithm", "x-amz-tagging",
+                          "x-amz-object-lock-mode", "x-amz-grant-read"}) {
+        auto resp = try_put(h, "whatever");
+        CHECK_EQ(resp.status, 501);
+        CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
+    }
+    // x-amz-acl: private 是本实现的实际语义，放行；其余 ACL 值 501
+    CHECK_EQ(try_put("x-amz-acl", "private").status, 200);
+    CHECK_EQ(try_put("x-amz-acl", "public-read").status, 501);
+}
+
+// ---------- gaps §3.5：query 白名单，未知参数 501 而非静默误答 ----------
+TEST(service_query_whitelist) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
+
+    // 黑名单时代的确切漏项：都曾静默降级为"读整个对象"
+    for (auto q : {std::pair{"attributes", ""}, std::pair{"partNumber", "1"},
+                   std::pair{"response-content-type", "text/html"}}) {
+        auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{q.first, q.second}})));
+        CHECK_EQ(resp.status, 501);
+        CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
+    }
+
+    // 白名单内的参数不受影响；fetch-owner 允许但忽略（V2 缺省不回 Owner，等价 =false）
+    auto ls = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"prefix", ""}, {"fetch-owner", "true"}})));
+    CHECK_EQ(ls.status, 200);
+
+    // presigned 签名参数族全局放行（值不在此校验，SigV4 层负责）
+    auto pre = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"}})));
+    CHECK_EQ(pre.status, 200);
+}
+
+// ---------- gaps §3.8：/-/ 内部端点不得遮蔽 vhost 下的合法对象键 ----------
+TEST(service_internal_endpoints_not_shadowing_vhost_keys) {
+    S3Service svc(make_router(), SigV4Authenticator::build(AuthConfig{}), "s3.local");
+    auto create = make_req("PUT", "/");
+    create.headers.set("Host", "vbkt.s3.local");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(create))).status, 200);
+
+    // vhost 下 "/-/metrics" 是 vbkt 里的对象键 "-/metrics"：PUT 必须真的写进去
+    //（旧行为：命中匿名 metrics 端点，返回 200 但对象没写——静默丢数据）
+    auto put = make_req("PUT", "/-/metrics", "real object data");
+    put.headers.set("Host", "vbkt.s3.local");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+
+    auto get = make_req("GET", "/-/metrics");
+    get.headers.set("Host", "vbkt.s3.local");
+    auto resp = sync_wait(svc.dispatch(std::move(get)));
+    CHECK_EQ(resp.status, 200);
+    CHECK_EQ(body_of(resp), "real object data");  // 对象内容，不是 Prometheus 文本
+
+    // path-style 下内部端点照常工作，但只认 GET/HEAD：PUT 是 405 而不是"200 且丢数据"
+    auto m = sync_wait(svc.dispatch(make_req("GET", "/-/metrics")));
+    CHECK_EQ(m.status, 200);
+    CHECK(contains(m.small_body, "lights3_requests_total"));
+    auto pm = sync_wait(svc.dispatch(make_req("PUT", "/-/metrics", "x")));
+    CHECK_EQ(pm.status, 405);
+    auto hh = sync_wait(svc.dispatch(make_req("HEAD", "/-/healthz")));
+    CHECK_EQ(hh.status, 200);  // 探活器常用 HEAD
+}
+
+// ---------- gaps §3.9：DeleteObjects 的畸形输入与版本删除 ----------
+TEST(service_delete_objects_malformed_inputs) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/a", "x")));
+
+    // 空列表与缺 <Key> 都是畸形请求：整批 MalformedXML，而不是 200 空结果
+    auto empty = sync_wait(
+        svc.dispatch(make_req("POST", "/bkt", "<Delete></Delete>", {{"delete", ""}})));
+    CHECK_EQ(empty.status, 400);
+    CHECK(contains(empty.small_body, "MalformedXML"));
+
+    auto nokey = sync_wait(svc.dispatch(
+        make_req("POST", "/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
+    CHECK_EQ(nokey.status, 400);
+    CHECK(contains(nokey.small_body, "MalformedXML"));
+
+    // <VersionId> 静默忽略会把"删指定版本"变成"删当前对象"：501 且对象未删
+    auto ver = sync_wait(svc.dispatch(make_req(
+        "POST", "/bkt",
+        "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>",
+        {{"delete", ""}})));
+    CHECK_EQ(ver.status, 501);
+    CHECK(contains(ver.small_body, "NotImplemented"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
+}

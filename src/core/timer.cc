@@ -4,15 +4,21 @@
 
 namespace lights3 {
 
-TimerQueue::TimerQueue() : thread_([this] { loop(); }) {}
+TimerQueue::TimerQueue() : thread_([this] { loop(); }), fire_thread_([this] { fire_loop(); }) {}
 
 TimerQueue::~TimerQueue() {
     {
         std::lock_guard lk(m_);
         stopping_ = true;
+        // 进程收尾：已到期未执行的回调整体丢弃（对象正在析构，跑它们只会碰到
+        // 已亡状态）。等在 cancel() 里的调用方随之放行
+        due_.clear();
     }
     cv_.notify_all();
+    fire_cv_.notify_all();
+    done_cv_.notify_all();
     thread_.join();
+    fire_thread_.join();
 }
 
 TimerQueue& TimerQueue::instance() {
@@ -30,6 +36,13 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
     return id;
 }
 
+bool TimerQueue::pending_locked(Id id) const {
+    if (running_id_ == id) return true;
+    for (auto& [qid, fn] : due_)
+        if (qid == id) return true;
+    return false;
+}
+
 bool TimerQueue::cancel(Id id) {
     std::unique_lock lk(m_);
     auto it = deadlines_.find(id);
@@ -38,14 +51,16 @@ bool TimerQueue::cancel(Id id) {
         deadlines_.erase(it);
         return true;
     }
-    // 已触发：若正在执行则等它返回（回调内自撤销除外——等自己必死锁），
-    // 调用方由此获得"cancel 返回后回调必不再运行"的析构安全保证（见头注）。
-    // id 0 非法（分配从 1 起，也是 running_id_ 的空闲值），直接 no-op
-    if (id != 0 && running_id_ == id && std::this_thread::get_id() != thread_.get_id())
-        done_cv_.wait(lk, [&] { return running_id_ != id; });
+    // 已触发：若还在待执行队列里或正在执行，等它收敛（回调线程上自撤销除外——
+    // 等自己必死锁），调用方由此获得"cancel 返回后回调必不再运行"的析构安全保证
+    //（见头注）。id 0 非法（分配从 1 起，也是 running_id_ 的空闲值），直接 no-op
+    if (id != 0 && std::this_thread::get_id() != fire_thread_.get_id())
+        done_cv_.wait(lk, [&] { return !pending_locked(id); });
     return false;
 }
 
+// 调度线程：只做到期判定，到期项交给回调线程。这里绝不执行回调——回调可能是
+// request_cancel，会就地展开整条被取消的协程链，跑在本线程上即全进程定时器停摆
 void TimerQueue::loop() {
     std::unique_lock lk(m_);
     for (;;) {
@@ -62,10 +77,25 @@ void TimerQueue::loop() {
             cv_.wait_until(lk, deadline);
             continue;
         }
-        auto fn = std::move(first->second);
-        running_id_ = first->first.second;
-        deadlines_.erase(first->first.second);
+        Id id = first->first.second;
+        due_.emplace_back(id, std::move(first->second));
+        deadlines_.erase(id);
         items_.erase(first);
+        fire_cv_.notify_one();
+    }
+}
+
+void TimerQueue::fire_loop() {
+    std::unique_lock lk(m_);
+    for (;;) {
+        fire_cv_.wait(lk, [&] { return stopping_ || !due_.empty(); });
+        if (due_.empty()) {
+            if (stopping_) return;
+            continue;
+        }
+        auto [id, fn] = std::move(due_.front());
+        due_.pop_front();
+        running_id_ = id;
         lk.unlock();
         // 锁外执行；期间的 cancel(id) 阻塞至此处返回（语义仍为 false"已触发"）。
         // 异常防线：回调抛出若逃逸线程函数即 terminate；且必须保证 running_id_

@@ -27,18 +27,8 @@ namespace lights3::s3 {
 
 enum class CredSource { kStatic, kFile, kDynamic };
 
-// per-credential policy（docs/credential-management.md §10.4）。缺省（nullopt）= 无限制
-struct CredentialPolicy {
-    std::vector<std::string> buckets;  // bucket glob 白名单；空 = 全部
-    bool readonly = false;             // true: 仅允许 GET/HEAD
-    bool allows(std::string_view bucket, bool is_write) const;
-};
-
-// policy 的 JSON 字段约定（{"buckets": [...], "readonly": bool}），admin handler、
-// 落盘对象与 credentials_file 共用一套；实现在 .cc（nlohmann 不进头文件）。
-// 字段非法/未知抛 S3Error(InvalidRequest)
-CredentialPolicy parse_policy_json(const std::string& text);
-std::string policy_to_json(const CredentialPolicy& p);
+// CredentialPolicy 与 parse_policy_json/policy_to_json 在 s3/auth/policy.h
+//（sigv4.h 的 verify 快照需要它，放这里会与 sigv4.h 成环）
 
 struct CredentialInfo {
     std::string access_key;
@@ -71,14 +61,17 @@ public:
     ~CredentialStore() { shutdown_background(); }
 
     // ---- ICredentialProvider（验签热路径，读锁） ----
-    std::optional<std::string> secret_for(std::string_view ak) const override;
+    // SK 与 policy 快照一次带出（docs/gaps.md §3.7）：dispatch 的授权判定用
+    // verify 返回的快照，在途吊销不会让 policy 凭空消失
+    std::optional<CredentialLookup> lookup(std::string_view ak) const override;
     bool has_credentials() const override;
 
     bool is_root(std::string_view ak) const;
 
-    // per-credential policy 执行（§10.4）：验签通过后、路由前调用；
-    // 静态凭证/无 policy 恒通过，拒绝抛 S3Error(AccessDenied)。
-    // ak 为空（认证关闭）或查不到（在途吊销竞态，§7 语义）也放行
+    // per-credential policy 执行（§10.4）：按**当前表**判定，拒绝抛
+    // S3Error(AccessDenied)；静态凭证/无 policy 恒通过，ak 为空（认证关闭）或
+    // 查不到也放行。请求路径不再用它（dispatch 改用 verify 时刻的快照，§3.7），
+    // 保留给运维/测试直接对表查询
     void authorize(std::string_view ak, std::string_view bucket, bool is_write) const;
 
     // ---- 管理面（docs/credential-management.md §5.1）----

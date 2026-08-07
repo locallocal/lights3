@@ -4,12 +4,14 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <exception>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <utility>
 
 namespace lights3 {
@@ -23,14 +25,32 @@ namespace detail {
 
 class CancelState {
 public:
+    // 回调契约（docs/concurrency.md §5）：**必须轻量**。取消源常常是 TimerQueue 的
+    // 单线程定时器线程，回调里直接 resume 续体会把整条请求链跑在定时器线程上、
+    // 期间全进程定时器停摆（docs/gaps.md §3.2）。需要恢复协程的消费方一律经
+    // executor 投递（见 ThreadPool::ScheduleAwaiter / AsyncSemaphore::AcquireAwaiter）
     void request_cancel() {
         std::map<uint64_t, std::function<void()>> cbs;
         {
             std::lock_guard lk(m_);
             if (cancelled_.exchange(true, std::memory_order_acq_rel)) return;
             cbs.swap(callbacks_);
+            firing_ = true;
+            firing_thread_ = std::this_thread::get_id();
         }
-        for (auto& [id, fn] : cbs) fn();  // 锁外执行，回调内可再操作 token
+        // 锁外执行，回调内可再操作 token。FiringGuard 保证任何路径（含回调抛出）
+        // 都复位 firing_ 并唤醒等在 remove_callback 里的注销方
+        struct FiringGuard {
+            CancelState* self;
+            ~FiringGuard() {
+                {
+                    std::lock_guard lk(self->m_);
+                    self->firing_ = false;
+                }
+                self->fired_cv_.notify_all();
+            }
+        } guard{this};
+        for (auto& [id, fn] : cbs) fn();
     }
 
     bool cancelled() const { return cancelled_.load(std::memory_order_acquire); }
@@ -62,16 +82,24 @@ public:
         return id;
     }
 
+    // 注销：返回后保证该回调不会再被执行——若取消正在触发中（回调批次锁外执行），
+    // 阻塞等这一批跑完，与 TimerQueue::cancel 同语义（docs/gaps.md §3.9）。
+    // 触发线程上（回调内）自注销不等待，防自死锁；等待期间不得持有回调所需的锁
     void remove_callback(uint64_t id) {
         if (id == 0) return;
-        std::lock_guard lk(m_);
+        std::unique_lock lk(m_);
         callbacks_.erase(id);
+        if (firing_ && firing_thread_ != std::this_thread::get_id())
+            fired_cv_.wait(lk, [&] { return !firing_; });
     }
 
 private:
     std::atomic<bool> cancelled_{false};
     std::mutex m_;
+    std::condition_variable fired_cv_;
     uint64_t next_id_ = 0;
+    bool firing_ = false;              // 回调批次正在锁外执行
+    std::thread::id firing_thread_{};  // 执行该批次的线程
     std::map<uint64_t, std::function<void()>> callbacks_;
 };
 
@@ -117,6 +145,9 @@ public:
     void throw_if_cancelled() const {
         if (cancelled()) throw OperationCancelled();
     }
+    // 是否绑定了真实的取消源（默认构造的"永不取消" token 为 false）。
+    // 协程链沿 Task 继承 token 时用它判断"本级是否已有 token"（core/task.h）
+    bool valid() const { return state_ != nullptr; }
 
     // 注意：若注册时已取消，回调不会被调用（返回空句柄）——调用方随后自查 cancelled()
     CancelRegistration on_cancel(std::function<void()> fn) const {

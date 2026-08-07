@@ -4,6 +4,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 
@@ -18,15 +20,27 @@ struct Line {
     std::string text;  // 去掉缩进与注释后的内容
 };
 
-// ${VAR} → 环境变量值；未定义展开为空串
+// ${VAR} → 环境变量值。未定义即报错：静默展开成空串会把"环境变量名写错"变成
+// "凭证/路径悄悄变空"，错误在启动后很久才以别的面貌出现（docs/gaps.md §3.9）。
+// 确实可选的值写 ${VAR:-默认值}
 std::string expand_env(const std::string& s) {
     std::string out;
     for (size_t i = 0; i < s.size();) {
         if (s[i] == '$' && i + 1 < s.size() && s[i + 1] == '{') {
             auto end = s.find('}', i + 2);
             if (end != std::string::npos) {
-                std::string var = s.substr(i + 2, end - i - 2);
+                std::string expr = s.substr(i + 2, end - i - 2);
+                std::string var = expr;
+                std::optional<std::string> def;
+                if (auto d = expr.find(":-"); d != std::string::npos) {
+                    var = expr.substr(0, d);
+                    def = expr.substr(d + 2);
+                }
                 if (const char* v = getenv(var.c_str())) out += v;
+                else if (def) out += *def;
+                else
+                    throw std::runtime_error("config: undefined environment variable ${" + var +
+                                             "} (use ${" + var + ":-default} if optional)");
                 i = end + 1;
                 continue;
             }
@@ -63,10 +77,24 @@ std::vector<Line> to_lines(const std::string& text) {
         if (indent < raw.size() && raw[indent] == '\t')
             throw std::runtime_error("yaml: tab indentation not supported");
         std::string content = raw.substr(indent);
-        // 注释：行首 # 或 " #"（简化处理；引号内含 " #" 的值不支持）
-        if (!content.empty() && content[0] == '#') content.clear();
-        auto pos = content.find(" #");
-        if (pos != std::string::npos) content = content.substr(0, pos);
+        // 注释：行首 # 或引号外的 " #"。引号内的 " #" 不是注释——裸 find(" #")
+        // 会把 secret_key: "a #b" 截成 "a，密钥静默变短（docs/gaps.md §3.9）
+        if (!content.empty() && content[0] == '#') {
+            content.clear();
+        } else {
+            char quote = 0;
+            for (size_t j = 0; j < content.size(); ++j) {
+                char c = content[j];
+                if (quote) {
+                    if (c == quote) quote = 0;
+                } else if (c == '"' || c == '\'') {
+                    quote = c;
+                } else if (c == '#' && j > 0 && (content[j - 1] == ' ' || content[j - 1] == '\t')) {
+                    content = content.substr(0, j);
+                    break;
+                }
+            }
+        }
         content = trim(content);
         if (content.empty()) continue;
         lines.push_back({static_cast<int>(indent), lineno, std::move(content)});
@@ -201,7 +229,32 @@ bool parse_bool(const std::string& s) {
 // ---------------- 类型化配置 ----------------
 
 namespace {
-int to_int(const std::string& s, int def) { return s.empty() ? def : std::stoi(s); }
+
+// 带上下文的整数解析：裸 stoi 对非法值抛的是无参 std::invalid_argument("stoi")，
+// 运维拿到的报错里既没有键名也没有原值（docs/gaps.md §3.9）。同时拒绝尾随垃圾
+// （"8x" 不再被当成 8）与越界
+int to_int(const std::string& key, const std::string& s, int def) {
+    if (s.empty()) return def;
+    size_t pos = 0;
+    long long v = 0;
+    try {
+        v = std::stoll(s, &pos);
+    } catch (const std::exception&) {
+        throw std::runtime_error("config: " + key + " is not an integer: '" + s + "'");
+    }
+    if (trim(s.substr(pos)) != "")
+        throw std::runtime_error("config: " + key + " has trailing garbage: '" + s + "'");
+    if (v < INT_MIN || v > INT_MAX)
+        throw std::runtime_error("config: " + key + " out of range: '" + s + "'");
+    return static_cast<int>(v);
+}
+
+void check_range(const std::string& key, int v, int lo, int hi) {
+    if (v < lo || v > hi)
+        throw std::runtime_error("config: " + key + " must be in [" + std::to_string(lo) + "," +
+                                 std::to_string(hi) + "], got " + std::to_string(v));
+}
+
 }  // namespace
 
 Config Config::from_string(const std::string& text) {
@@ -218,21 +271,28 @@ Config Config::from_string(const std::string& text) {
                 throw std::runtime_error("config: http.port out of range: " + v);
             cfg.http.port = static_cast<uint16_t>(p);
         }
-        cfg.http.io_threads = to_int(http->get("io_threads"), cfg.http.io_threads);
+        cfg.http.io_threads =
+            to_int("http.io_threads", http->get("io_threads"), cfg.http.io_threads);
         cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
         if (auto v = http->get("max_header_size"); !v.empty())
             cfg.http.max_header_size = parse_size(v);
         if (auto v = http->get("idle_timeout"); !v.empty())
             cfg.http.idle_timeout_sec = parse_duration_sec(v);
-        cfg.http.max_connections = to_int(http->get("max_connections"),
-                                          cfg.http.max_connections);
-        if (cfg.http.max_connections < 1)
-            throw std::runtime_error("config: http.max_connections must be >= 1");
+        // 请求级超时与传输停滞上限（docs/gaps.md §3.3）：0 = 关闭
+        if (auto v = http->get("request_timeout"); !v.empty())
+            cfg.http.request_timeout_sec = parse_duration_sec(v);
+        if (auto v = http->get("transfer_stall_timeout"); !v.empty())
+            cfg.http.transfer_stall_timeout_sec = parse_duration_sec(v);
+        cfg.http.max_connections =
+            to_int("http.max_connections", http->get("max_connections"), cfg.http.max_connections);
+        check_range("http.max_connections", cfg.http.max_connections, 1, 1'000'000);
     }
     if (auto* rt = root.find("runtime")) {
-        cfg.runtime.io_threads = to_int(rt->get("io_threads"), cfg.runtime.io_threads);
-        cfg.runtime.max_inflight_requests =
-            to_int(rt->get("max_inflight_requests"), cfg.runtime.max_inflight_requests);
+        cfg.runtime.io_threads =
+            to_int("runtime.io_threads", rt->get("io_threads"), cfg.runtime.io_threads);
+        cfg.runtime.max_inflight_requests = to_int(
+            "runtime.max_inflight_requests", rt->get("max_inflight_requests"),
+            cfg.runtime.max_inflight_requests);
     }
     if (auto* auth = root.find("auth")) {
         cfg.auth.region = auth->get("region", cfg.auth.region);
@@ -261,6 +321,11 @@ Config Config::from_string(const std::string& text) {
             }
             if (bc.name.empty() || bc.type.empty())
                 throw std::runtime_error("config: backend needs name + type");
+            // 重名后端：注册表按名建表，后者静默覆盖前者，桶路由指向的是哪一个
+            // 取决于插入顺序——启动即报错
+            for (auto& prev : cfg.backends)
+                if (prev.name == bc.name)
+                    throw std::runtime_error("config: duplicate backend name '" + bc.name + "'");
             cfg.backends.push_back(std::move(bc));
         }
     }
@@ -273,14 +338,14 @@ Config Config::from_string(const std::string& text) {
     }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
 
-    // 一致性检查
-    if (cfg.http.io_threads < 1)
-        throw std::runtime_error("config: http.io_threads must be >= 1");
-    if (cfg.runtime.io_threads < 1)
-        throw std::runtime_error("config: runtime.io_threads must be >= 1");
+    // 一致性检查。线程数上界与 per-backend 的同名参数取齐（[1,1024]）：
+    // 没有上界时一个手滑的 io_threads: 100000 会在启动时直接把进程拖垮
+    check_range("http.io_threads", cfg.http.io_threads, 1, 1024);
+    check_range("runtime.io_threads", cfg.runtime.io_threads, 1, 1024);
     // <= 0 会让第一个请求在信号量上永久挂起，须启动时报错而非静默挂死
-    if (cfg.runtime.max_inflight_requests < 1)
-        throw std::runtime_error("config: runtime.max_inflight_requests must be >= 1");
+    check_range("runtime.max_inflight_requests", cfg.runtime.max_inflight_requests, 1, 1'000'000);
+    check_range("http.request_timeout", cfg.http.request_timeout_sec, 0, 86400);
+    check_range("http.transfer_stall_timeout", cfg.http.transfer_stall_timeout_sec, 0, 86400);
     if (cfg.backends.empty()) throw std::runtime_error("config: no backends configured");
     if (cfg.buckets.default_backend.empty()) cfg.buckets.default_backend = cfg.backends[0].name;
     auto has_backend = [&](const std::string& n) {

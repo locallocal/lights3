@@ -52,6 +52,7 @@ public:
     std::vector<BucketInfo> list_buckets() override;
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
+    std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override;
     void put_object(std::string_view b, std::string_view k, ObjectRec rec,
                     PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
@@ -69,7 +70,7 @@ public:
                                 std::span<const PartInfo> parts) override;
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;
 
-    uint64_t alloc_file_id(Extent::Kind kind) override;
+    uint64_t alloc_file_run(Extent::Kind kind, uint32_t n) override;
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
@@ -144,7 +145,7 @@ private:
     template <typename Fn>
     void scan_range(uint64_t ver, std::string lo, const std::string& hi, Fn&& cb);
 
-    uint64_t alloc_id(char kind, IdRange& r);
+    uint64_t alloc_id(char kind, IdRange& r, uint32_t n = 1);
     // gcq 入账：seq 预派发（独立小事务），入账本身保持纯写 mutation
     void enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref);
     void mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add,

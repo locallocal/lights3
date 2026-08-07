@@ -613,6 +613,29 @@ TEST(tiered_registry_two_phase_build) {
           tiered->config().space_high_watermark < 0.86);
     sync_wait(tiered->close());
 
+    // 水位解析（gaps §3.9）："1%" 是 1%——旧实现丢弃 "%" 后 1.0 不触发 /100，
+    // 被解析成 100%，(used-low) 转负回绕后把整个桶全部下沉
+    std::vector<BackendConfig> pct = cfgs;
+    pct[2].params["space_high_watermark"] = "5%";
+    pct[2].params["space_low_watermark"] = "1%";
+    auto out2 = StorageRegistry::build(pct, pool);
+    auto t2 = std::dynamic_pointer_cast<TieredBackend>(out2.at("tier"));
+    CHECK(t2->config().space_low_watermark > 0.009 && t2->config().space_low_watermark < 0.011);
+    CHECK(t2->config().space_high_watermark > 0.049 &&
+          t2->config().space_high_watermark < 0.051);
+    sync_wait(t2->close());
+
+    // 越界值在启动期报错，而不是运行期回绕
+    std::vector<BackendConfig> oob = cfgs;
+    oob[2].params["space_high_watermark"] = "150%";
+    bool oob_threw = false;
+    try {
+        StorageRegistry::build(oob, pool);
+    } catch (const std::exception&) {
+        oob_threw = true;
+    }
+    CHECK(oob_threw);
+
     // 未知引用
     std::vector<BackendConfig> bad1 = {
         {"t", "tiered", {{"local", "nope"}, {"cloud", "mem"}}}};

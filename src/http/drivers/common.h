@@ -186,8 +186,21 @@ inline void emit_headers(const HeaderMap& headers, SetFn&& set) {
     }
 }
 
-inline ResponseHead render_response_head(const HttpResponse& resp, bool keep_alive) {
+// HEAD 响应的框架头（契约 6，四驱动统一）：HEAD 不写 body，因此
+//  - 长度已知 → 写 Content-Length（值即对应 GET 会返回的长度）
+//  - 长度未知（流式、无 content_length）→ **两个都不写**并关连接。
+//    写 Content-Length: 0 是撒谎（GET 并不返回 0 字节，beast/httplib 旧行为）；
+//    写 Transfer-Encoding: chunked 则要求随后有 chunk 帧，而 HEAD 不发 body
+//    （builtin/seastar 旧行为）。L2 的 HEAD 路径总会给出长度，这条只是兜底，
+//    但四驱动必须给同一个答案
+inline bool head_length_known(const HttpResponse& resp) {
+    return resp.content_length.has_value() || !resp.stream_body;
+}
+
+inline ResponseHead render_response_head(const HttpResponse& resp, bool keep_alive,
+                                         bool head_request = false) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
+    if (head_request && !head_length_known(resp)) keep_alive = false;
     ResponseHead out;
     out.text = "HTTP/1.1 " + std::to_string(resp.status) + " " + reason_phrase(resp.status) +
                "\r\n";
@@ -197,7 +210,12 @@ inline ResponseHead render_response_head(const HttpResponse& resp, bool keep_ali
     if (!resp.headers.has("Date"))
         out.text += "Date: " + util::http_date(std::chrono::system_clock::now()) + "\r\n";
     if (!no_body_status) {
-        if (resp.stream_body && !resp.content_length) {
+        if (head_request) {
+            if (head_length_known(resp))
+                out.text += "Content-Length: " +
+                            std::to_string(resp.content_length.value_or(resp.small_body.size())) +
+                            "\r\n";
+        } else if (resp.stream_body && !resp.content_length) {
             out.chunked = true;
             out.text += "Transfer-Encoding: chunked\r\n";
         } else {

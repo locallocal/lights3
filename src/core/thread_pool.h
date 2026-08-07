@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <coroutine>
 #include <cstdint>
@@ -60,7 +61,18 @@ public:
         std::shared_ptr<Slot> slot;
 
         bool await_ready() const noexcept { return false; }
-        bool await_suspend(std::coroutine_handle<> h);
+        // 未显式传 token 时从调用方协程的 promise 继承（core/task.h 的 PromiseBase
+        // 沿 co_await 链传递）——存量的 co_await pool_->schedule() 因此无需改调用点
+        // 就能感知请求级取消（docs/gaps.md §3.1）
+        template <class P>
+        bool await_suspend(std::coroutine_handle<P> h) {
+            if constexpr (requires {
+                              { h.promise().cancel } -> std::convertible_to<CancelToken>;
+                          })
+                if (!token.valid()) token = h.promise().cancel;
+            return suspend_impl(h);
+        }
+        bool suspend_impl(std::coroutine_handle<> h);
         void await_resume() {
             if (!slot) return;
             if (slot->cancel_state)

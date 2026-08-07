@@ -124,7 +124,15 @@ public:
 
 private:
     void open_next_chunk() {
-        cur_id_ = store_->alloc_(Extent::Kind::kChunk);
+        // 几何增长批取连续 run（docs/gaps.md §3.9）：并发写者逐个派发会让同对象
+        // 的 chunk id 交错，manifest 的 run 编码失效反而膨胀。首块取 1（小对象
+        // 零浪费），之后 2、4、…封顶 kMaxIdRun；run 尾部弃置无害（id 只需唯一）
+        if (run_next_ == run_limit_) {
+            run_len_ = run_len_ == 0 ? 1 : std::min<uint32_t>(run_len_ * 2, kMaxIdRun);
+            run_next_ = store_->alloc_(Extent::Kind::kChunk, run_len_);
+            run_limit_ = run_next_ + run_len_;
+        }
+        cur_id_ = run_next_++;
         // 先 pin 后建文件：文件一旦存在即受写侧 pin 保护，孤儿扫描无观察窗口
         if (store_->pins_.pin) {
             store_->pins_.pin(cur_id_);
@@ -155,6 +163,8 @@ private:
     uint64_t cur_id_ = 0;
     uint64_t cur_len_ = 0;
     uint32_t cur_crc_ = 0;
+    uint64_t run_next_ = 0, run_limit_ = 0;  // 本会话的连续 id run（§3.9 批取）
+    uint32_t run_len_ = 0;
     bool finished_ = false;
 };
 
@@ -454,10 +464,10 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         // 同步的写落盘——seal 回调回报的 file_size 必须对应已持久的字节
         if (slot->fd >= 0 && slot->size > 0 && slot->size + rec_size > opt_.pack_max_size) {
             sync_slot();
-            seal_slot_locked(*slot);
+            close_slot_locked(*slot);
         }
         if (slot->fd < 0) {
-            slot->id = alloc_(Extent::Kind::kPack);
+            slot->id = alloc_(Extent::Kind::kPack, 1);
             unsigned shard = shard_of(slot->id);
             int dirfd = pack_dirfd(shard);  // 确保 shard 目录存在
             auto path = pack_path(slot->id);
@@ -493,6 +503,10 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         slot->size += rec_size;
     }
     sync_slot();
+    // seal 的 meta 提交在槽锁外补交（docs/gaps.md §3.9）；失败只告警，
+    // (id,size) 留在队列由后续写入/close 重试——本批写入自身已安全落盘
+    lk.unlock();
+    flush_seals(/*rethrow=*/false);
     return out;
 }
 
@@ -524,11 +538,37 @@ Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendIt
     co_return out;
 }
 
-void FsDataStore::seal_slot_locked(ActivePack& slot) {
+void FsDataStore::close_slot_locked(ActivePack& slot) {
+    PendingSeal ps{slot.id, slot.size};
     ::close(slot.fd);
     slot.fd = -1;
-    if (seal_) seal_(slot.id, slot.size);
     slot.size = 0;
+    std::lock_guard lk(seal_mu_);
+    seal_retry_.push_back(ps);
+}
+
+void FsDataStore::flush_seals(bool rethrow) {
+    std::vector<PendingSeal> todo;
+    {
+        std::lock_guard lk(seal_mu_);
+        todo.swap(seal_retry_);
+    }
+    for (size_t i = 0; i < todo.size(); ++i) {
+        try {
+            if (seal_) seal_(todo[i].id, todo[i].size);
+        } catch (...) {
+            // 剩余项放回队列：封存"迟到"等价于 pack 多当一会儿 active（崩溃
+            // 恢复本就要补封），丢失才是不可恢复的
+            {
+                std::lock_guard lk(seal_mu_);
+                seal_retry_.insert(seal_retry_.end(), todo.begin() + i, todo.end());
+            }
+            if (rethrow) throw;
+            LOG_WARN("duostore: seal_pack({}) failed; queued for retry on next write/close",
+                     todo[i].id);
+            return;
+        }
+    }
 }
 
 Task<std::unique_ptr<http::BodyReader>> FsDataStore::open_reader(DataRef ref, uint64_t first,
@@ -721,8 +761,9 @@ Task<void> FsDataStore::close() {
     co_await pool_->schedule();
     for (auto& slot : packs_) {
         std::lock_guard lk(slot->m);
-        if (slot->fd >= 0) seal_slot_locked(*slot);
+        if (slot->fd >= 0) close_slot_locked(*slot);
     }
+    flush_seals(/*rethrow=*/true);  // 关停路径的封存失败要让调用方看见
     co_return;
 }
 

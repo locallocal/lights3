@@ -1,6 +1,6 @@
 #include "storage/multipart.h"
 
-#include <random>
+#include <unistd.h>
 
 #include "core/util/crypto.h"
 #include "core/util/hex.h"
@@ -11,12 +11,12 @@ using s3::S3Error;
 using s3::S3ErrorCode;
 
 std::string new_upload_id() {
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    // upload_id 直接返回给客户端，且是 abort/complete 他人上传的唯一凭据：
+    // mt19937_64 可由约 2496 个输出还原内部状态，且 random_device 种子只有
+    // 32 位熵——可预测即可枚举/篡改（docs/gaps.md §3.9）。必须走 CSPRNG
     uint8_t bytes[16];
-    for (size_t i = 0; i < sizeof(bytes); i += 8) {
-        uint64_t v = rng();
-        for (size_t j = 0; j < 8; ++j) bytes[i + j] = static_cast<uint8_t>(v >> (j * 8));
-    }
+    if (::getentropy(bytes, sizeof(bytes)) != 0)
+        throw S3Error(S3ErrorCode::InternalError, "cannot generate upload id");
     return util::to_hex(bytes);
 }
 

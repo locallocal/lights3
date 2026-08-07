@@ -176,7 +176,11 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
             if (local.empty() || cloud.empty())
                 throw std::runtime_error("tiered backend '" + cfg.name + "' needs local + cloud");
             if (out.count(local) && out.count(cloud)) {
-                // 组合后端同样支持专属池（tiered 自身的下沉/回迁传输走它）
+                // 组合后端同样支持专属池（tiered 自身的下沉/回迁传输走它）。
+                // scope 先登记再构造：tiered 构建抛出时它的 gauge 回调已经注册
+                // 且持有池的 shared_ptr，漏登记则回滚后线程永不 join——正是本
+                // 守卫要防的场景（docs/gaps.md §3.9）
+                rollback.scopes.push_back(cfg.name);
                 out[cfg.name] = TieredBackend::from_config(
                     cfg, out, backend_pool(cfg, pool, MetricsScope(metrics, {{"backend", cfg.name}})));
                 it = deferred.erase(it);

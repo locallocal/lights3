@@ -335,11 +335,11 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
 
 // ---------- 查表（验签热路径）----------
 
-std::optional<std::string> CredentialStore::secret_for(std::string_view ak) const {
+std::optional<CredentialLookup> CredentialStore::lookup(std::string_view ak) const {
     std::shared_lock lk(mu_);
     auto it = creds_.find(ak);
     if (it == creds_.end()) return std::nullopt;
-    return it->second.secret_key;
+    return CredentialLookup{it->second.secret_key, it->second.policy};
 }
 
 bool CredentialStore::has_credentials() const {

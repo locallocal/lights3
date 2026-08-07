@@ -517,18 +517,22 @@ void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
 
 // ---------- 号段（§4）----------
 
-uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r) {
-    std::lock_guard lk(alloc_mu_);  // 与 mu_ 无嵌套：常见路径是纯内存 next++
-    if (r.next == r.limit) {
+uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_t n) {
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
+    std::lock_guard lk(alloc_mu_);  // 锁序 alloc_mu_ → mu_；无反向嵌套（alloc_mu_ 只在此处）
+    if (r.limit - r.next < n) {  // 换段弃置残段（run 批派发要求段内连续，docs/gaps.md §3.9）
         // 号段预留必须先于派发持久化——专用连接恒 synchronous=FULL（独立于
         // opt_.sync），否则崩溃丢预留后重启重发已用 file_id，与已落盘的 chunk
         // 文件 O_EXCL 冲突。崩溃浪费号段无害（file_id 只需唯一单调，不需连续）。
-        // 与并发业务事务撞写锁先由 busy_timeout(5s) 吸收；写热点下仍可能连续输掉
-        // 锁竞争（busy handler 不公平排队）——BUSY 即语句明确未执行，有界重试而非
-        // 立刻 500（每次重试自带一轮 5s 等待）
+        // 与业务写事务的库级写锁互斥改为**确定性**的（docs/gaps.md §3.9）：预留
+        // 期间持 mu_——进程内唯一写者被挡在门外，不可能再靠 busy_timeout 与
+        // 自家业务事务抽签（busy handler 不公平排队，写热点下连输 4 轮 = 20 秒
+        // 后把正常 PUT 变成 500）。有界重试保留，只针对绕过单进程锁的外部写者
+        //（flock 拦不住裸 sqlite3 工具，§5.4 表的 BUSY 行）
         if (!ac_)
             throw S3Error(S3ErrorCode::InternalError,
                           "duostore meta(sqlite): store is closed");
+        std::lock_guard wl(mu_);
         uint64_t hi = 0;
         for (int attempt = 0;; ++attempt) {
             Stmt st(*ac_, kCtrReserve);
@@ -538,7 +542,7 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r) {
                 if (attempt >= 3)
                     throw S3Error(S3ErrorCode::InternalError,
                                   "duostore meta(sqlite): id reservation starved "
-                                  "(write lock busy)");
+                                  "(write lock busy — external writer?)");
                 continue;
             }
             if (!*row)
@@ -551,14 +555,16 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r) {
         r.limit = hi;
         r.next = hi - kIdSegment;
     }
-    return r.next++;
+    uint64_t first = r.next;
+    r.next += n;
+    return first;
 }
 
-uint64_t SqliteMetaStore::alloc_file_id(Extent::Kind kind) {
+uint64_t SqliteMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
     // kRados 与 kChunk 共号段（同 rocks 版论证：refs 不分 kind，防跨 kind id 碰撞）
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack,
-                    file_ids_[size_t(kind)]);
+                    file_ids_[size_t(kind)], n);
 }
 
 // ---------- 事务内共用件 ----------
@@ -717,6 +723,13 @@ std::optional<ObjectRec> SqliteMetaStore::get_object(std::string_view b, std::st
     auto v = object_raw(*lease, b, k);
     if (!v) return std::nullopt;
     return codec::decode_object(std::string(k), *v);
+}
+
+std::optional<ObjectMeta> SqliteMetaStore::head_object(std::string_view b, std::string_view k) {
+    auto lease = read_conn();
+    auto v = object_raw(*lease, b, k);
+    if (!v) return std::nullopt;
+    return codec::decode_object_meta(std::string(k), *v);
 }
 
 void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,

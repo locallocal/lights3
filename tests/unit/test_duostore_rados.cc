@@ -130,7 +130,7 @@ struct NsCleaner {
 // file_id 自给的分配器（直连 data store 的用例不需要 meta）
 RadosDataStore::FileIdAlloc counter_alloc() {
     auto next = std::make_shared<std::atomic<uint64_t>>(1);
-    return [next](Extent::Kind) { return (*next)++; };
+    return [next](Extent::Kind, uint32_t n) { return next->fetch_add(n); };
 }
 
 // 未知长度流（chunked）：length() = nullopt，走"缓冲至 EOF"的同一切片路径（§3.3）
@@ -172,7 +172,7 @@ TEST(duostore_rados_backend_suite) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
-        rados_opts(ns), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        rados_opts(ns), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     backend_suite::run_backend_suite(*b);
     sync_wait(b->close());
@@ -194,7 +194,7 @@ TEST(duostore_rados_multichunk_roundtrip_and_layout) {
     fs::create_directories(cfg.root);
     // 4KiB 切片强制多对象 manifest
     auto data = std::make_unique<RadosDataStore>(
-        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
@@ -239,7 +239,7 @@ TEST(duostore_rados_unknown_length_stream) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
-        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
@@ -300,7 +300,7 @@ TEST(duostore_rados_buffer_backpressure) {
     auto opts = rados_opts(ns, 4096);
     opts.buffer_total = 2 * 4096;  // 2 份额度，6 路并发
     auto data = std::make_unique<RadosDataStore>(
-        opts, pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        opts, pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
@@ -340,7 +340,7 @@ TEST(duostore_rados_missing_object_alarm) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
-        rados_opts(ns), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        rados_opts(ns), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", std::string(1000, 'x'));
@@ -368,7 +368,7 @@ TEST(duostore_rados_get_detects_bitrot) {
     auto opts = rados_opts(ns);
     opts.verify_chunk_crc = true;
     auto data = std::make_unique<RadosDataStore>(
-        opts, pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        opts, pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", std::string(1000, 'x'));
@@ -402,7 +402,7 @@ TEST(duostore_rados_gc_reclaims_after_delete) {
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
-        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
@@ -440,7 +440,7 @@ TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
-        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
     std::string body = patterned(10000);
@@ -518,7 +518,7 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
-        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind) { return mp->alloc_file_id(kind); });
+        rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", patterned(10000));  // 3 对象在册
@@ -527,7 +527,7 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     {
         auto far = std::make_shared<std::atomic<uint64_t>>(0xabc0);
         RadosDataStore orphan_src(rados_opts(ns, 4096), pool,
-                                  [far](Extent::Kind) { return (*far)++; });
+                                  [far](Extent::Kind, uint32_t n) { return far->fetch_add(n); });
         auto w = sync_wait(orphan_src.open_writer({std::nullopt}));
         std::string junk = patterned(5000);  // 2 对象
         sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(junk.data()),
@@ -575,11 +575,11 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     fs::create_directories(cfg2.root);
     auto far2 = std::make_shared<std::atomic<uint64_t>>(1);
     auto data2 = std::make_unique<RadosDataStore>(
-        rados_opts(ns2, 4096), pool, [far2](Extent::Kind) { return (*far2)++; });
+        rados_opts(ns2, 4096), pool, [far2](Extent::Kind, uint32_t n) { return far2->fetch_add(n); });
     auto b2 = std::make_shared<DuoStoreBackend>(cfg2, pool, std::move(meta2), std::move(data2));
     {
         RadosDataStore orphan_src(rados_opts(ns2, 4096), pool,
-                                  [far2](Extent::Kind) { return (*far2)++; });
+                                  [far2](Extent::Kind, uint32_t n) { return far2->fetch_add(n); });
         auto w = sync_wait(orphan_src.open_writer({std::nullopt}));
         sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>("x"), 1)));
         (void)sync_wait(w->finish());

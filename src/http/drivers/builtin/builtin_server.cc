@@ -200,7 +200,7 @@ struct ConnShared {
 
 bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_alive) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
-    auto head = driver::render_response_head(resp, keep_alive);
+    auto head = driver::render_response_head(resp, keep_alive, head_request);
     bool chunked = head.chunked;
     if (!send_all(fd, head.text.data(), head.text.size())) return false;
     if (head_request || no_body_status) return true;
@@ -283,9 +283,10 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
         req.headers.add(std::move(k), std::move(v));
     }
 
-    if (auto c = req.headers.get("Connection")) {
-        if (HeaderMap::ieq(*c, "close")) keep_alive = false;
-        else if (HeaderMap::ieq(*c, "keep-alive")) keep_alive = true;
+    if (req.headers.has("Connection")) {
+        // 列表头：Connection: close, Upgrade 是合法写法，全等比较会漏判 close
+        if (req.headers.has_token("Connection", "close")) keep_alive = false;
+        else if (req.headers.has_token("Connection", "keep-alive")) keep_alive = true;
     }
 
     // body 边界：CL/TE 冲突、重复 CL、非法值一律拒绝关连接（请求走私前置条件，
@@ -365,22 +366,44 @@ public:
     void set_handler(Handler h) override { shared_->handler = std::move(h); }
 
     void listen(const std::string& addr, uint16_t port) override {
-        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        // IPv4/IPv6 双支持：此前写死 AF_INET + inet_pton(AF_INET)，配置里写
+        // bind: "::" 会直接抛 "bad bind address"，而 beast/httplib 都能起
+        // （同一份配置换驱动就起不来）
+        sockaddr_storage ss{};
+        socklen_t sslen = 0;
+        int family = AF_INET;
+        if (auto* v6 = reinterpret_cast<sockaddr_in6*>(&ss);
+            inet_pton(AF_INET6, addr.c_str(), &v6->sin6_addr) == 1) {
+            family = AF_INET6;
+            v6->sin6_family = AF_INET6;
+            v6->sin6_port = htons(port);
+            sslen = sizeof(sockaddr_in6);
+        } else if (auto* v4 = reinterpret_cast<sockaddr_in*>(&ss);
+                   inet_pton(AF_INET, addr.c_str(), &v4->sin_addr) == 1) {
+            v4->sin_family = AF_INET;
+            v4->sin_port = htons(port);
+            sslen = sizeof(sockaddr_in);
+        } else {
+            throw std::runtime_error("bad bind address: " + addr);
+        }
+        listen_fd_ = ::socket(family, SOCK_STREAM, 0);
         if (listen_fd_ < 0) throw std::runtime_error("socket() failed");
         int one = 1;
         setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        sockaddr_in sa{};
-        sa.sin_family = AF_INET;
-        sa.sin_port = htons(port);
-        if (inet_pton(AF_INET, addr.c_str(), &sa.sin_addr) != 1)
-            throw std::runtime_error("bad bind address: " + addr);
-        if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0)
+        // "::" 默认双栈（v6only=0），与 beast/httplib 的行为对齐
+        if (family == AF_INET6) {
+            int off = 0;
+            setsockopt(listen_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
+        }
+        if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&ss), sslen) != 0)
             throw std::runtime_error("bind failed: " + std::string(strerror(errno)));
         if (::listen(listen_fd_, 256) != 0) throw std::runtime_error("listen failed");
-        sockaddr_in bound{};
+        sockaddr_storage bound{};
         socklen_t blen = sizeof(bound);
         getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen);
-        port_ = ntohs(bound.sin_port);
+        port_ = ntohs(bound.ss_family == AF_INET6
+                          ? reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port
+                          : reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
         LOG_INFO("builtin http server listening on {}:{}", addr, port_);
     }
 
@@ -391,7 +414,7 @@ public:
         // shutdown() 可能先于 run() 甚至先于 listen() 到达：入循环前先看一眼，
         // 否则信号已被吞掉，accept 会永久阻塞
         while (!sh.stopping.load()) {
-            sockaddr_in peer{};
+            sockaddr_storage peer{};
             socklen_t plen = sizeof(peer);
             int fd = ::accept(listen_fd_, reinterpret_cast<sockaddr*>(&peer), &plen);
             if (fd < 0) {
@@ -410,8 +433,13 @@ public:
                 ::close(fd);
                 break;
             }
-            char ip[64] = {0};
-            inet_ntop(AF_INET, &peer.sin_addr, ip, sizeof(ip));
+            char ip[INET6_ADDRSTRLEN] = {0};
+            if (peer.ss_family == AF_INET6)
+                inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&peer)->sin6_addr, ip,
+                          sizeof(ip));
+            else
+                inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&peer)->sin_addr, ip,
+                          sizeof(ip));
             {
                 std::lock_guard lk(sh.m);
                 // 并发连接硬上限（cfg.max_connections，四驱动统一）：thread-per-

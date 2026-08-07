@@ -102,7 +102,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                                                       std::string& access_key) {
     constexpr std::string_view kBase = "/-/admin/credentials";
     try {
-        access_key = auth_.verify(req);
+        access_key = auth_.verify(req).access_key;
         // 两级模型（docs/credential-management.md §3）：仅 root（静态凭证）可用；认证关闭时
         // verify 返回空 ak，同样落到 AccessDenied——没有 root 就没有管理面
         if (!cred_store_ || !cred_store_->is_root(access_key))

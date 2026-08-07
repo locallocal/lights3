@@ -298,7 +298,14 @@ private:
         co_await store_->pool_->schedule();  // crc 计算（CPU）不占 HTTP 驱动线程
         rados_ioctx_t ctx = io(store_->conn_);
         AioPending* p = make_pending(store_->exec_, store_->m_lat_write_);
-        p->file_id = store_->alloc_(Extent::Kind::kRados);
+        // 几何增长批取连续 run（docs/gaps.md §3.9，与 fs ChunkWriter 同策略）：
+        // 并发写者交错派发会让 manifest 的 run 编码失效
+        if (run_next_ == run_limit_) {
+            run_len_ = run_len_ == 0 ? 1 : std::min<uint32_t>(run_len_ * 2, kMaxIdRun);
+            run_next_ = store_->alloc_(Extent::Kind::kRados, run_len_);
+            run_limit_ = run_next_ + run_len_;
+        }
+        p->file_id = run_next_++;
         // 分配即 pin（docs/gaps.md §1.2）：本片对象在 T0 落地，而整个 PUT 要到
         // T0+Δ 才提交 meta。Δ 超过 gc_grace 时孤儿扫描会看到"refs 里没有、mtime
         // 逾宽限、无 pin"的对象直接删掉，PUT 随后提交成功即得到引用已删数据的
@@ -349,6 +356,8 @@ private:
     AsyncSemaphore::Permit spare_permit_;
     AioPending* pending_ = nullptr;  // 在途单（至多 1：写第 N 片时接收 N+1）
     std::vector<uint64_t> pinned_;   // 本 writer 建立的写侧 pin（finish 后清空）
+    uint64_t run_next_ = 0, run_limit_ = 0;  // 本会话的连续 id run（§3.9 批取）
+    uint32_t run_len_ = 0;
     bool finished_ = false;
     bool failed_ = false;
 };
@@ -396,8 +405,12 @@ public:
         }
         size_t want = size_t(std::min<uint64_t>({buf.size(), e.length - cur_off_, remaining_}));
         AioPending* p = make_pending(exec_, lat_);
+        // 与写侧同一策略的缓冲移交（docs/gaps.md §3.9）：aio 写入在途单自有的
+        // 缓冲，完成后再拷给调用方。直写 buf 的话，读超时/取消把协程帧连同调用
+        // 方缓冲一起销毁后，远端 completion 仍会写穿已释放内存
+        p->data.resize(want);
         int r = rados_aio_read(ctx, RadosDataStore::object_name(e.file_id).c_str(), p->comp,
-                               reinterpret_cast<char*>(buf.data()), want, cur_off_);
+                               reinterpret_cast<char*>(p->data.data()), want, cur_off_);
         if (r < 0) {
             p->unref();
             p->unref();
@@ -405,6 +418,7 @@ public:
             throw_rados("aio_read submit", r);
         }
         int n = co_await AioAwait{p};  // completion → 池线程恢复（§6.2）
+        if (n > 0) std::memcpy(buf.data(), p->data.data(), std::min(size_t(n), want));
         p->unref();
         if (n == -ENOENT) {
             // refs 在而对象缺 = 数据丢失征兆，或 pin/grace 失效（§6.3；主文档 §10 同款）

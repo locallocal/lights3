@@ -70,6 +70,11 @@ public:
         std::string_view method;
         Scope scope;
         std::string_view flag;  // ""=兜底；"k" 按 query 存在匹配；"k=v" 按值匹配
+        // query 白名单（docs/gaps.md §3.5）：本路由额外允许的 query key（空格分隔）。
+        // flag 键与 presigned 签名参数天然允许；出现名单外的 key → 501。
+        // 黑名单兜底的结构性问题是任何遗漏都静默降级成"读/写整对象"——
+        // ?attributes 回整个对象体、?partNumber 回整个对象、response-* 被吞
+        std::string_view extra_query;
         Handler fn;
     };
 
@@ -113,8 +118,14 @@ private:
     Task<http::HttpResponse> admin_credentials(http::HttpRequest& req,
                                                std::string& access_key);
 
-    // virtual-host style：Host 匹配 *.base_domain 时把 bucket 前置到路径解析
-    std::pair<std::string, std::string> resolve_address(const http::HttpRequest& req) const;
+    // virtual-host style：Host 匹配 *.base_domain 时把 bucket 前置到路径解析。
+    // vhost 标记供内部端点分流用（docs/gaps.md §3.8）：vhost 下 req.path 是 key，
+    // "/-/metrics" 可能是 mybucket 里的合法对象键，不得被内部端点遮蔽
+    struct Address {
+        std::string bucket, key;
+        bool vhost = false;
+    };
+    Address resolve_address(const http::HttpRequest& req) const;
 
     storage::BucketRouter router_;
     SigV4Authenticator auth_;

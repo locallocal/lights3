@@ -89,12 +89,83 @@ void reject_unsupported_subresource(const http::HttpRequest& req) {
                               "' is not implemented.");
 }
 
+// 明确不支持的**请求头**（docs/gaps.md §3.4）：SSE/SSE-C、tagging、object-lock、
+// ACL 授权类此前被静默吞掉——200 但语义未兑现，合规场景下客户端会据此认为对象
+// 已加密/已锁定。命中即 501；x-amz-acl 单独放行 private（即本实现的实际语义）
+void reject_unsupported_headers(const http::HttpRequest& req) {
+    constexpr std::string_view kPrefixes[] = {
+        "x-amz-server-side-encryption",  // SSE 与 SSE-C 全家（含 -customer-*、-aws-kms-*）
+        "x-amz-copy-source-server-side-encryption",  // 拷贝源侧的 SSE-C 三头
+        "x-amz-object-lock-",                        // mode / retain-until-date / legal-hold
+        "x-amz-grant-",                              // ACL grant 五头，与 x-amz-acl 同类
+    };
+    constexpr std::string_view kExact[] = {
+        "x-amz-tagging",
+        "x-amz-website-redirect-location",
+    };
+    for (auto& [k, v] : req.headers.items()) {
+        std::string lk;
+        lk.reserve(k.size());
+        for (char c : k) lk.push_back(http::HeaderMap::lower(c));
+        auto refuse = [&] {
+            throw S3Error(S3ErrorCode::NotImplemented,
+                          "The request header '" + lk + "' is not implemented.");
+        };
+        if (lk == "x-amz-acl") {
+            // private = 本实现的唯一语义，接受；其余（public-read 等）静默接受
+            // 等于谎报"已公开授权"
+            if (!http::HeaderMap::ieq(v, "private")) refuse();
+            continue;
+        }
+        for (auto p : kPrefixes)
+            if (lk.rfind(p, 0) == 0) refuse();
+        for (auto e : kExact)
+            if (lk == e) refuse();
+    }
+}
+
+// query 白名单（docs/gaps.md §3.5）：所有路由共同允许的 key——presigned 签名
+// 参数族 + SDK 溯源参数。key 区分大小写（与 SigV4 canonical query 一致）
+constexpr std::string_view kCommonQueryKeys[] = {
+    "X-Amz-Algorithm",     "X-Amz-Credential", "X-Amz-Date",
+    "X-Amz-Expires",       "X-Amz-Signature",  "X-Amz-SignedHeaders",
+    "X-Amz-Security-Token", "X-Amz-Content-Sha256",
+    "x-id",  // aws-sdk-js v3 给每个操作附带的溯源参数，无语义
+};
+
+bool word_in(std::string_view list, std::string_view w) {
+    size_t pos = 0;
+    while (pos <= list.size()) {
+        size_t sp = list.find(' ', pos);
+        if (sp == std::string_view::npos) sp = list.size();
+        if (list.substr(pos, sp - pos) == w) return true;
+        pos = sp + 1;
+    }
+    return false;
+}
+
+void enforce_query_whitelist(const http::HttpRequest& req, const S3Service::Route& r) {
+    std::string_view flag_key = r.flag.substr(0, r.flag.find('='));
+    for (auto& [k, v] : req.query) {
+        if (!flag_key.empty() && k == flag_key) continue;
+        if (word_in(r.extra_query, k)) continue;
+        bool common = false;
+        for (auto c : kCommonQueryKeys)
+            if (k == c) {
+                common = true;
+                break;
+            }
+        if (common) continue;
+        throw S3Error(S3ErrorCode::NotImplemented,
+                      "The query parameter '" + k + "' is not implemented.");
+    }
+}
+
 }  // namespace
 
 // ---------- virtual-host style（docs/s3-protocol.md §2）----------
 
-std::pair<std::string, std::string> S3Service::resolve_address(
-    const http::HttpRequest& req) const {
+S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) const {
     if (!base_domain_.empty()) {
         if (auto host = req.headers.get("Host")) {
             std::string h = *host;
@@ -115,11 +186,12 @@ std::pair<std::string, std::string> S3Service::resolve_address(
                 std::string bucket = h.substr(0, h.size() - suffix.size());
                 std::string key = req.path;
                 if (!key.empty() && key.front() == '/') key.erase(0, 1);
-                return {std::move(bucket), std::move(key)};
+                return {std::move(bucket), std::move(key), /*vhost=*/true};
             }
         }
     }
-    return parse_bucket_key(req.path);
+    auto [bucket, key] = parse_bucket_key(req.path);
+    return {std::move(bucket), std::move(key), /*vhost=*/false};
 }
 
 // ---------- 顶层入口 ----------
@@ -135,23 +207,43 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::string bucket, key;
     http::HttpResponse resp;
     try {
-        if (req.path == "/-/healthz") {
+        // 先解析寻址再分流内部端点（docs/gaps.md §3.8）：vhost 下 req.path 是 key，
+        // "/-/metrics" 可能是 mybucket 里的合法对象——按 path 精确比较会把
+        // GET 变成匿名 metrics、PUT 变成"200 但对象没写"的静默丢数据。
+        // 只有 path 寻址（非 vhost）下的 /-/ 前缀才进入内部分支
+        auto addr = resolve_address(req);
+        bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
+        // 读端点只认 GET/HEAD（探活器常用 HEAD）；此前 PUT /-/metrics 也回 200
+        auto internal_get = [&](std::string_view ep) {
+            if (req.path != ep) return false;
+            if (req.method != "GET" && req.method != "HEAD")
+                throw S3Error(S3ErrorCode::MethodNotAllowed,
+                              "The specified method is not allowed against this resource.");
+            return true;
+        };
+        if (internal && internal_get("/-/healthz")) {
             resp.small_body = "ok\n";
             resp.headers.set("Content-Type", "text/plain");
-        } else if (req.path == "/-/metrics") {
+        } else if (internal && internal_get("/-/metrics")) {
             resp.small_body = metrics_.render(pool_stats_);
             // 后端级注册表（docs/todo.md §3.1）追加在 L2 请求指标之后
             if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
-        } else if (req.path == "/-/readyz") {
+        } else if (internal && internal_get("/-/readyz")) {
             resp = co_await readyz();
-        } else if (req.path == "/-/admin/credentials" ||
-                   req.path.rfind("/-/admin/credentials/", 0) == 0) {
+        } else if (internal && (req.path == "/-/admin/credentials" ||
+                                req.path.rfind("/-/admin/credentials/", 0) == 0)) {
             // 边界必须落在 '/'：裸前缀匹配会把 /-/admin/credentialsXYZ 也放进管理面
             resp = co_await admin_credentials(req, access_key);
         } else {
-            access_key = auth_.verify(req);
-            std::tie(bucket, key) = resolve_address(req);
+            // 授权用验签时刻的 policy 快照（docs/gaps.md §3.7）：验签后回 store
+            // 二次查表的话，凭证被 sync/remove 删掉的竞态窗口里 policy 会整体
+            // 消失——readonly 凭证在窗口内变成不受限凭证。快照让在途请求严格
+            // 按验签时的语义完成
+            auto ident = auth_.verify(req);
+            access_key = ident.access_key;
+            bucket = std::move(addr.bucket);
+            key = std::move(addr.key);
             // 用户请求的 bucket 名在此统一过完整校验，这是**唯一**的权威闸门
             // （docs/gaps.md §1.1）。此前只查首字符是否为 '.'，而 vhost 寻址下
             // bucket 完全取自 Host 头、可含 '/' 甚至以 '/' 开头，配合 localfs 的
@@ -162,17 +254,22 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // 拿不到那个参数
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
             // per-credential policy（docs/credential-management.md §10.4）：
-            // GET/HEAD 为读，其余（PUT/POST/DELETE）算写
-            if (cred_store_) {
-                cred_store_->authorize(access_key, bucket,
-                                       req.method != "GET" && req.method != "HEAD");
+            // GET/HEAD 为读，其余（PUT/POST/DELETE）算写。判定输入是 verify
+            // 带出的快照，不再回 store 查表（§3.7）
+            if (ident.policy) {
+                auto deny = [] {
+                    throw S3Error(S3ErrorCode::AccessDenied,
+                                  "Access denied by credential policy.");
+                };
+                if (!ident.policy->allows(bucket, req.method != "GET" && req.method != "HEAD"))
+                    deny();
                 // CopyObject / UploadPartCopy 的源在 header 里，不经上面的 bucket
                 // 检查：对源桶单独做一次"读"授权，防 policy 凭证借 copy 读白名单外数据
                 if (req.method == "PUT")
                     if (auto src = req.headers.get("x-amz-copy-source"))
-                        cred_store_->authorize(access_key,
-                                               handlers::parse_copy_source(*src).first,
-                                               /*is_write=*/false);
+                        if (!ident.policy->allows(handlers::parse_copy_source(*src).first,
+                                                  /*is_write=*/false))
+                            deny();
             }
             // 请求级超时 + 取消接线（docs/gaps.md §3.1/§3.3）：req_src 为本请求专用，
             // 外部 token（进程关停，驱动接线后还有客户端断连）接到同一个源上——任一
@@ -243,88 +340,105 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
     // 表定义在成员函数体内：lambda 由此获得私有 handler 的访问权
     static constexpr Route kRoutes[] = {
     // service 级
-    {"GET", Scope::Service, "", [](S3Service& s, http::HttpRequest&, std::string, std::string) {
+    {"GET", Scope::Service, "", "",
+     [](S3Service& s, http::HttpRequest&, std::string, std::string) {
          return s.list_buckets();
      }},
 
     // bucket 级
-    {"GET", Scope::Bucket, "location",
+    {"GET", Scope::Bucket, "location", "",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
          return s.get_bucket_location(std::move(b));
      }},
-    {"GET", Scope::Bucket, "uploads",
+    // 分页参数允许但忽略：handler 一次回全量且 IsTruncated=false，是完整的
+    // 答案（分页循环正确终止，cloudproxy 自己就这么发）。prefix/delimiter 不在
+    // 名单内——忽略它们会把过滤范围外的 upload 混进来，那才是静默误答
+    {"GET", Scope::Bucket, "uploads", "max-uploads key-marker upload-id-marker",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
          return s.list_multipart_uploads(req, std::move(b));
      }},
-    {"GET", Scope::Bucket, "",  // ListObjectsV2 与 V1 兼容同入口
+    // ListObjectsV2 与 V1 兼容同入口。fetch-owner 允许但忽略：V2 缺省本就不回
+    // Owner，忽略等价于 =false，不属于"静默误答"
+    {"GET", Scope::Bucket, "",
+     "list-type prefix delimiter marker continuation-token start-after max-keys "
+     "encoding-type fetch-owner",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
          return s.list_objects(req, std::move(b));
      }},
-    {"PUT", Scope::Bucket, "", [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
+    {"PUT", Scope::Bucket, "", "",
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
          return s.create_bucket(std::move(b));
      }},
-    {"HEAD", Scope::Bucket, "", [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
+    {"HEAD", Scope::Bucket, "", "",
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
          return s.head_bucket(std::move(b));
      }},
-    {"DELETE", Scope::Bucket, "",
+    {"DELETE", Scope::Bucket, "", "",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
          return s.delete_bucket(std::move(b));
      }},
-    {"POST", Scope::Bucket, "delete",
+    {"POST", Scope::Bucket, "delete", "",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
          return s.delete_objects(req, std::move(b));
      }},
 
     // object 级：multipart
-    {"POST", Scope::Object, "uploads",
+    {"POST", Scope::Object, "uploads", "",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.create_multipart(req, std::move(b), std::move(k));
      }},
-    {"POST", Scope::Object, "uploadId",
+    {"POST", Scope::Object, "uploadId", "",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.complete_multipart(req, std::move(b), std::move(k));
      }},
-    {"PUT", Scope::Object, "partNumber",
+    {"PUT", Scope::Object, "partNumber", "uploadId",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.upload_part(req, std::move(b), std::move(k));
      }},
-    {"GET", Scope::Object, "uploadId",
+    {"GET", Scope::Object, "uploadId", "max-parts part-number-marker",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.list_parts(req, std::move(b), std::move(k));
      }},
-    {"DELETE", Scope::Object, "uploadId",
+    {"DELETE", Scope::Object, "uploadId", "",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.abort_multipart(req, std::move(b), std::move(k));
      }},
 
     // object 级：数据面
-    {"PUT", Scope::Object, "",  // PutObject / CopyObject（按 x-amz-copy-source 分流）
+    {"PUT", Scope::Object, "", "",  // PutObject / CopyObject（按 x-amz-copy-source 分流）
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          if (req.headers.has("x-amz-copy-source"))
              return s.copy_object(req, std::move(b), std::move(k));
          return s.put_object(req, std::move(b), std::move(k));
      }},
-    {"GET", Scope::Object, "",
+    {"GET", Scope::Object, "", "",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.get_object(req, std::move(b), std::move(k), false);
      }},
-    {"HEAD", Scope::Object, "",
+    {"HEAD", Scope::Object, "", "",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.get_object(req, std::move(b), std::move(k), true);
      }},
-    {"DELETE", Scope::Object, "",
+    {"DELETE", Scope::Object, "", "",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string k) {
          return s.delete_object(std::move(b), std::move(k));
      }},
     };
 
+    // 黑名单先行只为给已知子资源更明确的报错文案；结构性防线是下面按路由的
+    // query 白名单（§3.5）与请求头检查（§3.4）
     reject_unsupported_subresource(req);
+    reject_unsupported_headers(req);
     Scope scope = bucket.empty() ? Scope::Service
                   : key.empty() ? Scope::Bucket
                                 : Scope::Object;
     for (auto& r : kRoutes) {
         if (r.method != req.method || r.scope != scope) continue;
         if (!flag_matches(req, r.flag)) continue;
+        // 白名单（§3.5）：本路由名单外的 query key → 501。黑名单模型下任何遗漏
+        // 都静默降级成"读/写整对象"（?attributes 回对象体、?partNumber 回整个
+        // 对象、response-* 被吞），501 至少是诚实的
+        enforce_query_whitelist(req, r);
         co_return co_await r.fn(*this, req, std::move(bucket), std::move(key));
     }
     throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.");

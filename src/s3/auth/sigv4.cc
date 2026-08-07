@@ -364,10 +364,11 @@ public:
     explicit StaticCredentialProvider(const AuthConfig& cfg) {
         for (auto& c : cfg.credentials) creds_[c.access_key] = c.secret_key;
     }
-    std::optional<std::string> secret_for(std::string_view ak) const override {
+    std::optional<CredentialLookup> lookup(std::string_view ak) const override {
         auto it = creds_.find(ak);
         if (it == creds_.end()) return std::nullopt;
-        return it->second;
+        // 静态凭证恒无限制（root 语义，docs/credential-management.md §3）
+        return CredentialLookup{it->second, std::nullopt};
     }
     bool has_credentials() const override { return !creds_.empty(); }
 
@@ -430,8 +431,8 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
     return util::to_hex(util::hmac_sha256(k, sts));
 }
 
-std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
-    if (!enabled()) return "";
+VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
+    if (!enabled()) return {};
 
     AuthFields f;
     if (auto auth = req.headers.get("Authorization")) {
@@ -495,11 +496,13 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
                 "The difference between the request time and the server's time is too large.");
     }
 
-    // 凭证
-    auto secret = provider_->secret_for(f.access_key);
-    if (!secret)
+    // 凭证：一次查表同时带出 SK 与 policy 快照（docs/gaps.md §3.7）——授权判定
+    // 用这份快照，凭证在本请求在途期间被吊销也按验签时刻的语义完成
+    auto cred = provider_->lookup(f.access_key);
+    if (!cred)
         throw S3Error(S3ErrorCode::InvalidAccessKeyId,
                       "The AWS access key ID you provided does not exist in our records.");
+    const std::string& secret_key = cred->secret_key;
 
     // payload hash（streaming 变体在 canonical request 中按字面值参与签名）
     std::string payload_hash;
@@ -525,7 +528,7 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
     }
 
     std::string scope = f.date + "/" + f.region + "/" + f.service + "/aws4_request";
-    std::string expect = signature_for(req, *secret, f.amz_date, scope, f.signed_headers,
+    std::string expect = signature_for(req, secret_key, f.amz_date, scope, f.signed_headers,
                                        payload_hash, f.presigned);
     if (!constant_time_eq(expect, f.signature))
         throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
@@ -549,14 +552,14 @@ std::string SigV4Authenticator::verify(http::HttpRequest& req) const {
         }
         req.body = std::make_unique<ChunkedSigV4BodyReader>(
             std::move(req.body), chunked_signed,
-            derive_signing_key(*secret, f.date, f.region, f.service), f.signature,
+            derive_signing_key(secret_key, f.date, f.region, f.service), f.signature,
             f.amz_date, scope, decoded_len);
     } else if (is_hex_digest(payload_hash) && req.body) {
         // 声明空摘要（sha256("")）也照样包校验：不查实际 body 是否为空的话，
         // 空摘要 + 非空 body 会把 body 脱出签名保护
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);
     }
-    return f.access_key;
+    return {std::move(f.access_key), std::move(cred->policy)};
 }
 
 void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred,

@@ -12,16 +12,39 @@
 #include "core/config.h"
 #include "core/util/time.h"
 #include "http/model.h"
+#include "s3/auth/policy.h"
 #include "s3/errors.h"
 
 namespace lights3::s3 {
 
 // 凭证查表接口（docs/s3-protocol.md §3.5、docs/credential-management.md §5.2）：验签热路径同步调用，实现须线程安全。
-// build() 默认包一个静态表实现；CredentialStore 实现本接口后经 set_provider 注入
+// build() 默认包一个静态表实现；CredentialStore 实现本接口后经 set_provider 注入。
+// 一次查表同时带出 SK 与 policy 快照（docs/gaps.md §3.7）：verify 之后再回store 查
+// policy 的话，凭证可能已被 sync/remove 删除——那样查不到不是"无限制"而是竞态窗口
+struct CredentialLookup {
+    std::string secret_key;
+    std::optional<CredentialPolicy> policy;  // 查表时刻的快照；nullopt = 无限制
+};
+
 struct ICredentialProvider {
     virtual ~ICredentialProvider() = default;
-    virtual std::optional<std::string> secret_for(std::string_view access_key) const = 0;
+    virtual std::optional<CredentialLookup> lookup(std::string_view access_key) const = 0;
     virtual bool has_credentials() const = 0;
+
+    // 便捷取 SK（测试/签名侧）；热路径请直接 lookup 免二次查表
+    std::optional<std::string> secret_for(std::string_view access_key) const {
+        auto l = lookup(access_key);
+        if (!l) return std::nullopt;
+        return std::move(l->secret_key);
+    }
+};
+
+// verify 的结果：请求方身份 + 验签那一刻的 policy 快照。授权判定必须用这份快照
+// 而不是回 store 二次查表——在途吊销竞态下二次查表落空会让 policy 整体消失
+// （readonly 凭证在窗口内变成不受限凭证，docs/gaps.md §3.7）
+struct VerifiedIdentity {
+    std::string access_key;                  // 认证关闭时为空（供访问日志）
+    std::optional<CredentialPolicy> policy;  // nullopt = 无限制
 };
 
 class SigV4Authenticator {
@@ -59,13 +82,13 @@ public:
     }
     const std::string& region() const { return region_; }
 
-    // 验签失败抛 S3Error；返回请求方 access key（认证关闭时为空，供访问日志）。
+    // 验签失败抛 S3Error；返回请求方身份与验签时刻的 policy 快照。
     // 通过后如需 payload 校验，把 req.body 包装为流式校验 reader：
     //  - hex 摘要 → SHA256 校验（EOF 不匹配抛 XAmzContentSHA256Mismatch）
     //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] → aws-chunked 剥壳 +
     //    逐 chunk 签名链验证（docs/s3-protocol.md §3.2）
     //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER → 仅剥壳
-    std::string verify(http::HttpRequest& req) const;
+    VerifiedIdentity verify(http::HttpRequest& req) const;
 
     // presigned URL 的 X-Amz-Expires 上限（7 天，与 S3 一致）
     static constexpr long kMaxPresignExpires = 7 * 24 * 3600;

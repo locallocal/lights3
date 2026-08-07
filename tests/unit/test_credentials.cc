@@ -146,7 +146,7 @@ TEST(credstore_sigv4_roundtrip) {
     req.path = "/bkt/k";
     req.headers.add("Host", "localhost");
     auth.sign(req, {c.access_key, c.secret_key});
-    CHECK_EQ(auth.verify(req), c.access_key);
+    CHECK_EQ(auth.verify(req).access_key, c.access_key);
 }
 
 // ---------- /-/admin/credentials ----------
@@ -522,4 +522,33 @@ TEST(credstore_sync_tombstone_blocks_revival) {
 
     sync_wait(store->sync_now());
     CHECK(!store->secret_for(c.access_key));  // 吊销即刻生效，不复活
+}
+
+// gaps §3.7：授权判定用验签时刻的 policy 快照。凭证在验签之后被吊销（sync_now
+// 每个同步周期都会批量删除，窗口可被撞上）时，旧行为是回表查不到 → policy 整体
+// 消失——readonly 凭证在窗口内变成不受限凭证。快照让在途请求严格按验签时刻的
+// 语义完成，新请求则因查不到 AK 而 fail-closed
+TEST(credstore_policy_snapshot_survives_revocation) {
+    SvcEnv env;
+    CredentialPolicy p;
+    p.readonly = true;
+    auto c = sync_wait(env.store->generate("scoped", p));
+
+    auto auth = SigV4Authenticator::build(root_cfg());
+    auth.set_provider(env.store);
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = req.path = "/bkt/k";
+    req.headers.add("Host", "localhost");
+    env.signer.sign(req, Credential{c.access_key, c.secret_key});
+    auto ident = auth.verify(req);
+    CHECK_EQ(ident.access_key, c.access_key);
+    CHECK(ident.policy && ident.policy->readonly);
+
+    sync_wait(env.store->remove(c.access_key));
+    // 在途请求继续用快照判定：写仍被拒、读仍放行，与验签时刻一致
+    CHECK(!ident.policy->allows("bkt", /*is_write=*/true));
+    CHECK(ident.policy->allows("bkt", /*is_write=*/false));
+    // 吊销后的新请求查不到 AK → InvalidAccessKeyId（fail-closed，而非不受限）
+    CHECK(!env.store->lookup(c.access_key));
 }

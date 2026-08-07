@@ -37,8 +37,15 @@ void put_u32(std::string& s, uint32_t v) {
 void put_u64(std::string& s, uint64_t v) {
     for (int i = 0; i < 8; ++i) s.push_back(char(v >> (8 * i)));
 }
+// 编码侧超限是**请求**问题而非库损坏（docs/gaps.md §4）：用户提交超长
+// user-meta 应得到 400，而不是 500 "corrupt meta value"
+[[noreturn]] void too_large(const char* what) {
+    throw S3Error(S3ErrorCode::InvalidArgument,
+                  std::string("Metadata field too large: ") + what);
+}
+
 void put_str(std::string& s, std::string_view v) {
-    if (v.size() > 0xffff) corrupt("string field too long");
+    if (v.size() > 0xffff) too_large("string field exceeds 64KiB");
     put_u16(s, uint16_t(v.size()));
     s.append(v);
 }
@@ -158,6 +165,10 @@ std::vector<Extent> read_extent_runs(Cursor& c) {
         uint64_t first_id = c.u64();
         uint32_t count = c.u32();
         if (count == 0) corrupt("empty run");
+        // 编码约定 pack 不合并（count 恒 1）；count 还必须被剩余 crc 数组字节
+        // 覆盖——损坏值不得解出一串假 extent（docs/gaps.md §4）
+        if (kind == uint8_t(Extent::Kind::kPack) && count != 1) corrupt("pack run count");
+        if (size_t(count) * 4 > c.s.size() - c.pos) corrupt("run count beyond payload");
         uint64_t chunk_len = c.u64();
         uint64_t last_len = c.u64();
         uint64_t pack_offset = c.u64();
@@ -175,7 +186,7 @@ std::vector<Extent> read_extent_runs(Cursor& c) {
 }
 
 void put_user_meta(std::string& s, const std::map<std::string, std::string>& m) {
-    if (m.size() > 0xffff) corrupt("too many user meta entries");
+    if (m.size() > 0xffff) too_large("too many user metadata entries");
     put_u16(s, uint16_t(m.size()));
     for (const auto& [k, v] : m) {
         put_str(s, k);

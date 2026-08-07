@@ -12,6 +12,7 @@
 #include <string_view>
 
 #include "core/thread_pool.h"
+#include "s3/errors.h"
 
 namespace lights3::s3 {
 
@@ -22,7 +23,11 @@ public:
 
     void request_start() { inflight_.fetch_add(1, std::memory_order_relaxed); }
     void request_end(std::string_view method, int status, double seconds);
-    void s3_error(const char* wire_code);
+    // 免锁（docs/gaps.md §4：此前每个错误响应抢一把全局互斥）：码集有界且与
+    // 枚举同源，定长原子数组按枚举值下标
+    void s3_error(S3ErrorCode code) {
+        errors_[size_t(code)].fetch_add(1, std::memory_order_relaxed);
+    }
 
     void mpu_created() { mpu_created_.fetch_add(1, std::memory_order_relaxed); }
     void mpu_finished() { mpu_finished_.fetch_add(1, std::memory_order_relaxed); }
@@ -45,8 +50,7 @@ private:
     std::atomic<uint64_t> mpu_created_{0};
     std::atomic<uint64_t> mpu_finished_{0};  // complete + abort
 
-    mutable std::mutex err_m_;
-    std::map<std::string, uint64_t> errors_;  // wire code → count
+    std::atomic<uint64_t> errors_[kS3ErrorCodeCount]{};  // 按 S3ErrorCode 下标
 };
 
 }  // namespace lights3::s3

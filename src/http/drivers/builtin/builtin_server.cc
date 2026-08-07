@@ -3,6 +3,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -35,10 +36,12 @@ bool send_all(int fd, const char* data, size_t len) {
     return true;
 }
 
-// 带缓冲的连接读取器；请求头解析与 body 读取共用
+// 带缓冲的连接读取器；请求头解析与 body 读取共用。
+// buf 不做零初始化（docs/gaps.md §4）：pos/end 界定有效区，每连接 memset 16KiB
+// 纯属浪费
 struct ConnReader {
     int fd = -1;
-    char buf[16 * 1024] = {};
+    char buf[driver::kScratchBytes];
     size_t pos = 0, end = 0;
 
     // 读一行（含 \n 之前的内容，去掉 \r\n）；失败/超限返回 false
@@ -130,7 +133,7 @@ struct BodyState {
                     if (!conn->read_line(t, 1024)) fail("client disconnected in trailers");
                     if (t.empty()) break;
                     trailer_bytes += t.size();
-                    if (trailer_bytes > 16 * 1024) fail("trailer section too large");
+                    if (trailer_bytes > driver::kTrailerMaxBytes) fail("trailer section too large");
                 }
                 chunk_eof = true;
                 return 0;
@@ -148,10 +151,10 @@ struct BodyState {
         return error || (chunked ? chunk_eof : remaining == 0);
     }
     // 响应后排空残余 body 以复用连接；过大/出错放弃（调用方随即关连接）
-    bool drain(uint64_t limit = 4 * 1024 * 1024) {
+    bool drain(uint64_t limit = driver::kDrainMaxBytes) {
         // 从未回过 100-continue，客户端可能根本不会发 body，不能傻等
         if (need_continue) return false;
-        std::byte tmp[16 * 1024];
+        std::byte tmp[driver::kScratchBytes];
         uint64_t drained = 0;
         try {
             while (!at_eof()) {
@@ -195,8 +198,42 @@ struct ConnShared {
     std::mutex m;
     std::condition_variable cv;
     std::set<int> conns;
+    // 正在 keep-alive 等待下一请求的连接（docs/gaps.md §4）：停机时这些可以
+    // 立即掐断，宽限只留给在途请求——此前不区分，空闲连接也让停机干等 10 秒
+    std::set<int> idle;
     int active = 0;
 };
+
+// 连接线程用 512KiB 栈显式创建（docs/gaps.md §4）：std::thread 走默认 8MiB，
+// × max_connections(4096) = 32GiB 虚拟地址空间预留，而实测栈峰值 ~100KiB
+//（协程帧在堆上，栈只承载解析与阻塞 IO 调用链）。detached：生命周期由闭包里的
+// shared_ptr 管，与旧 std::thread(...).detach() 相同
+bool spawn_conn_thread(std::function<void()> fn) {
+    constexpr size_t kConnThreadStack = 512 * 1024;
+    struct Ctx {
+        std::function<void()> fn;
+    };
+    auto* ctx = new Ctx{std::move(fn)};
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, kConnThreadStack);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t tid;
+    int rc = pthread_create(
+        &tid, &attr,
+        [](void* p) -> void* {
+            std::unique_ptr<Ctx> c(static_cast<Ctx*>(p));
+            c->fn();
+            return nullptr;
+        },
+        ctx);
+    pthread_attr_destroy(&attr);
+    if (rc != 0) {
+        delete ctx;
+        return false;
+    }
+    return true;
+}
 
 bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_alive) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
@@ -208,7 +245,7 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
     if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());
 
     // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
-    std::byte buf[64 * 1024];
+    std::byte buf[driver::kIoChunkBytes];
     uint64_t written = 0;
     for (;;) {
         size_t n = 0;
@@ -248,8 +285,20 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
                bool& keep_alive) {
     const size_t max_line = sh.cfg.max_header_size;
 
+    // 请求行读到之前本连接是"空闲 keep-alive"：登记进 idle，停机扫荡直接掐；
+    // 读到首字节即转在途（享受停机宽限）
     std::string line;
-    if (!reader.read_line(line, max_line) || line.empty()) return false;
+    {
+        std::lock_guard lk(sh.m);
+        if (sh.stopping.load()) return false;
+        sh.idle.insert(fd);
+    }
+    bool got = reader.read_line(line, max_line);
+    {
+        std::lock_guard lk(sh.m);
+        sh.idle.erase(fd);
+    }
+    if (!got || line.empty()) return false;
 
     HttpRequest req;
     req.remote_addr = peer;
@@ -453,31 +502,33 @@ public:
                 ++sh.active;
                 sh.conns.insert(fd);
             }
-            try {
-                std::thread([sp = shared_, fd, peer_ip = std::string(ip)] {
-                    handle_connection(*sp, fd, peer_ip);
-                    std::lock_guard lk(sp->m);
-                    sp->conns.erase(fd);
-                    ::close(fd);
-                    if (--sp->active == 0) sp->cv.notify_all();
-                }).detach();
-            } catch (const std::exception& e) {
+            bool spawned = spawn_conn_thread([sp = shared_, fd, peer_ip = std::string(ip)] {
+                handle_connection(*sp, fd, peer_ip);
+                std::lock_guard lk(sp->m);
+                sp->conns.erase(fd);
+                sp->idle.erase(fd);
+                ::close(fd);
+                if (--sp->active == 0) sp->cv.notify_all();
+            });
+            if (!spawned) {
                 // 线程创建失败（资源耗尽）：回滚计数并拒绝该连接，不能让异常
                 // 穿出 run() 终结进程
-                LOG_ERROR("failed to spawn connection thread: {}", e.what());
+                LOG_ERROR("failed to spawn connection thread");
                 std::lock_guard lk(sh.m);
                 sh.conns.erase(fd);
                 ::close(fd);
                 if (--sh.active == 0) sh.cv.notify_all();
             }
         }
-        // 优雅退出：等待在途连接，超时强制断开。残余线程经 shared_ptr 持有
-        // 共享状态，run() 返回乃至 server 析构后自行收尾，无悬空引用
+        // 优雅退出：空闲 keep-alive 连接立即掐断（它们只是在等下一个请求，
+        // docs/gaps.md §4），宽限只留给在途请求；超时再强制断开全部。残余线程经
+        // shared_ptr 持有共享状态，run() 返回乃至 server 析构后自行收尾，无悬空引用
         std::unique_lock lk(sh.m);
-        if (!sh.cv.wait_for(lk, std::chrono::seconds(10), [&] { return sh.active == 0; })) {
+        for (int cfd : sh.idle) ::shutdown(cfd, SHUT_RDWR);
+        if (!sh.cv.wait_for(lk, driver::kShutdownGrace, [&] { return sh.active == 0; })) {
             LOG_WARN("forcing {} connection(s) closed on shutdown", sh.active);
             for (int fd : sh.conns) ::shutdown(fd, SHUT_RDWR);
-            sh.cv.wait_for(lk, std::chrono::seconds(5), [&] { return sh.active == 0; });
+            sh.cv.wait_for(lk, driver::kShutdownForceWait, [&] { return sh.active == 0; });
         }
         LOG_INFO("builtin http server stopped");
     }

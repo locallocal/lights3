@@ -210,11 +210,21 @@ private:
         return batches;
     }
 
+    // 显式工作栈而非递归（docs/gaps.md §4）：region split/迁移触发的重做此前走
+    // 递归（prewrite_batch → prewrite_keys → …），退避预算约束的是时间不是栈深，
+    // 频繁 region 变动下深度无界。false = 本批遭 region 错误，键回栈重取路由重做
     void prewrite_keys(Backoffer& bo, const std::vector<std::string>& keys) {
-        for (auto& b : make_batches(bo, keys, /*with_values=*/true)) prewrite_batch(bo, b);
+        std::vector<std::vector<std::string>> work;
+        work.push_back(keys);
+        while (!work.empty()) {
+            auto group = std::move(work.back());
+            work.pop_back();
+            for (auto& b : make_batches(bo, group, /*with_values=*/true))
+                if (!prewrite_batch(bo, b)) work.push_back(std::move(b.keys));
+        }
     }
 
-    void prewrite_batch(Backoffer& bo, const Batch& batch) {
+    bool prewrite_batch(Backoffer& bo, const Batch& batch) {
         for (;;) {
             ::kvrpcpb::PrewriteRequest req;
             for (auto& k : batch.keys) {
@@ -235,12 +245,11 @@ private:
             try {
                 rc.sendReqToRegion<pingcap::kv::RPC_NAME(KvPrewrite)>(bo, req, &resp);
             } catch (Exception& e) {
-                // region 级错误（split/迁移）：退避后重取路由、按新分组重做本批
+                // region 级错误（split/迁移）：退避后交还调用方工作栈重取路由重做
                 bo.backoff(pingcap::kv::boRegionMiss, e);
-                prewrite_keys(bo, batch.keys);
-                return;
+                return false;
             }
-            if (resp.errors_size() == 0) return;
+            if (resp.errors_size() == 0) return true;
             std::vector<pingcap::kv::LockPtr> locks;
             for (const auto& err : resp.errors()) {
                 if (err.has_already_exist()) throw TikvAlreadyExist{err.already_exist().key()};
@@ -277,12 +286,19 @@ private:
         }
     }
 
+    // 与 prewrite_keys 同构的工作栈（docs/gaps.md §4）
     void commit_keys(Backoffer& bo, const std::vector<std::string>& keys, bool primary_phase) {
-        for (auto& b : make_batches(bo, keys, /*with_values=*/false))
-            commit_batch(bo, b, primary_phase);
+        std::vector<std::vector<std::string>> work;
+        work.push_back(keys);
+        while (!work.empty()) {
+            auto group = std::move(work.back());
+            work.pop_back();
+            for (auto& b : make_batches(bo, group, /*with_values=*/false))
+                if (!commit_batch(bo, b, primary_phase)) work.push_back(std::move(b.keys));
+        }
     }
 
-    void commit_batch(Backoffer& bo, const Batch& batch, bool primary_phase) {
+    bool commit_batch(Backoffer& bo, const Batch& batch, bool primary_phase) {
         // primary 提交的 commit_ts 换号重试上限：CommitTsExpired 由并发读者推高
         // min_commit_ts 触发，换新 TSO 即消解；上限防读侧持续推高下的原地打转
         //（超限=明确未提交，抛冲突走整事务重试）
@@ -305,10 +321,9 @@ private:
                 // secondaries 恒用 primary 定格的 commit_ts_（上游对 secondary 也
                 // 重取 TSO，会造成主从 commit_ts 分叉，属其 test-grade 缺陷，不跟随）
                 if (primary_phase) commit_ts_ = cluster_->pd_client->getTS();
-                commit_keys(bo, batch.keys, primary_phase);
-                return;
+                return false;  // 交还调用方工作栈重取路由重做
             }
-            if (!resp.has_error()) return;
+            if (!resp.has_error()) return true;
             if (primary_phase && resp.error().has_commit_ts_expired() &&
                 ts_refresh < kMaxTsRefresh) {
                 commit_ts_ = cluster_->pd_client->getTS();  // 取号自身延迟即节流

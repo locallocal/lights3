@@ -39,6 +39,9 @@ std::optional<storage::ByteRange> parse_range_header(const std::string& v) {
         r.last = to_u64(b);
         if (!r.last) return std::nullopt;
     }
+    // "bytes=5-3" 是语法非法（RFC 9110 §14.1.1 要求 last >= first）：整个头按
+    // 无效忽略、回 200 整对象——此前落到 resolve_range 变成 416（docs/gaps.md §4）
+    if (r.first && r.last && *r.last < *r.first) return std::nullopt;
     return r;
 }
 

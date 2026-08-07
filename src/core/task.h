@@ -138,22 +138,30 @@ public:
             return std::move(std::get<1>(r));
         }
     };
-    Awaiter operator co_await() && noexcept { return {h_}; }
+    // moved-from 防护（docs/gaps.md §4）：空柄上继续用是编程错误，抛出比
+    // 空指针解引用可诊断得多
+    Awaiter operator co_await() && {
+        check_valid("co_await");
+        return {h_};
+    }
 
     // 绑定 home executor（driver 在链路起点调用）；完成后续体投递回 ex
     Task& via(IExecutor& ex) {
+        check_valid("via");
         h_.promise().cont_executor = &ex;
         return *this;
     }
 
     // 绑定取消 token（请求入口调用）；本任务及其 co_await 的所有子任务继承
     Task& with_cancel(CancelToken t) {
+        check_valid("with_cancel");
         h_.promise().cancel = std::move(t);
         return *this;
     }
 
     // sync_wait 专用：绑定事件并启动
     void start(SyncWaitEvent* ev) {
+        check_valid("start");
         h_.promise().event = ev;
         h_.resume();
     }
@@ -165,6 +173,10 @@ public:
 
 private:
     explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
+    void check_valid(const char* op) const {
+        if (!h_)
+            throw std::logic_error(std::string("Task: ") + op + " on a moved-from task");
+    }
     void destroy() {
         if (h_) h_.destroy();
     }
@@ -212,19 +224,26 @@ public:
             if (h.promise().error) std::rethrow_exception(h.promise().error);
         }
     };
-    Awaiter operator co_await() && noexcept { return {h_}; }
+    // moved-from 防护同主模板（docs/gaps.md §4）
+    Awaiter operator co_await() && {
+        check_valid("co_await");
+        return {h_};
+    }
 
     Task& via(IExecutor& ex) {
+        check_valid("via");
         h_.promise().cont_executor = &ex;
         return *this;
     }
 
     Task& with_cancel(CancelToken t) {
+        check_valid("with_cancel");
         h_.promise().cancel = std::move(t);
         return *this;
     }
 
     void start(SyncWaitEvent* ev) {
+        check_valid("start");
         h_.promise().event = ev;
         h_.resume();
     }
@@ -234,6 +253,10 @@ public:
 
 private:
     explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
+    void check_valid(const char* op) const {
+        if (!h_)
+            throw std::logic_error(std::string("Task: ") + op + " on a moved-from task");
+    }
     void destroy() {
         if (h_) h_.destroy();
     }

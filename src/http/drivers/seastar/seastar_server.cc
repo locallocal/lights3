@@ -357,7 +357,7 @@ struct BodyState {
                         fail("client disconnected in trailers");
                     if (t.empty()) break;
                     trailer_bytes += t.size();
-                    if (trailer_bytes > 16 * 1024) fail("trailer section too large");
+                    if (trailer_bytes > driver::kTrailerMaxBytes) fail("trailer section too large");
                 }
                 chunk_eof = true;
                 co_return 0;
@@ -374,10 +374,10 @@ struct BodyState {
     bool at_eof() const { return error || (chunked ? chunk_eof : remaining == 0); }
 
     // 响应前排空残余 body 以复用连接；过大/出错放弃（调用方随即关连接）
-    Task<bool> drain(uint64_t limit = 4 * 1024 * 1024) {
+    Task<bool> drain(uint64_t limit = driver::kDrainMaxBytes) {
         // 从未回过 100-continue，客户端可能根本不会发 body，不能傻等
         if (need_continue) co_return false;
-        std::vector<std::byte> tmp(16 * 1024);
+        std::vector<std::byte> tmp(driver::kScratchBytes);
         uint64_t drained = 0;
         try {
             while (!at_eof()) {
@@ -468,7 +468,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
     }
 
     // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
-    std::vector<std::byte> buf(64 * 1024);
+    std::vector<std::byte> buf(driver::kIoChunkBytes);
     uint64_t written = 0;
     for (;;) {
         size_t n = 0;
@@ -731,11 +731,11 @@ ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd
     co_await evfd.wait();
     co_await shutdown_sessions(core, /*idle_only=*/true);
 
-    size_t left = co_await wait_drained(core, std::chrono::seconds(10));
+    size_t left = co_await wait_drained(core, driver::kShutdownGrace);
     if (left > 0) {
         LOG_WARN("forcing {} connection(s) closed on shutdown", left);
         co_await shutdown_sessions(core, /*idle_only=*/false);
-        left = co_await wait_drained(core, std::chrono::seconds(5));
+        left = co_await wait_drained(core, driver::kShutdownForceWait);
         if (left > 0) LOG_WARN("{} connection(s) still alive after force close", left);
     }
     core->notify_stopped();

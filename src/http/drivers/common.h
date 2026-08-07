@@ -2,6 +2,8 @@
 #pragma once
 
 #include <chrono>
+#include <cstdio>
+#include <random>
 #include <string>
 #include <string_view>
 
@@ -11,6 +13,15 @@
 #include "s3/errors.h"
 
 namespace lights3::http::driver {
+
+// ---------- 四驱动共用的边界常量（docs/gaps.md §4）----------
+// 曾散落四处各写一份字面量，改一处漏三处（§2.13 的连接上限就是教训）
+inline constexpr uint64_t kDrainMaxBytes = 4 * 1024 * 1024;  // 回错前排空请求体上限
+inline constexpr size_t kTrailerMaxBytes = 16 * 1024;        // chunked trailer 区上限
+inline constexpr size_t kIoChunkBytes = 64 * 1024;           // 流式读写块大小
+inline constexpr size_t kScratchBytes = 16 * 1024;           // 排空/行解析等杂用缓冲
+inline constexpr std::chrono::seconds kShutdownGrace{10};    // 停机等在途请求的宽限
+inline constexpr std::chrono::seconds kShutdownForceWait{5}; // 强制断开后的二次等待
 
 // 把请求行的 target（"/a%2Fb?x=1&y"）拆成中立模型的四个字段：
 // raw_path / raw_query 保留原文（SigV4 需要），path / query 为解码结果（保序）
@@ -112,13 +123,26 @@ inline BodyFraming parse_body_framing(const HeaderMap& headers) {
     return f;
 }
 
+// 驱动兜底响应的 request id（docs/gaps.md §4）：400/500 恰是最需要日志关联的两类
+// 错误，此前既无 x-amz-request-id 头也无 XML 里的 RequestId。此时 L2 dispatch
+// 根本没跑，id 只能在驱动侧生成（非安全用途，PRNG 足够）
+inline std::string fallback_request_id() {
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llX",
+                  static_cast<unsigned long long>(rng()));
+    return std::string(buf, 16);
+}
+
 // 契约 2（docs/http-adapter.md §4）：handler 逃逸异常时驱动统一回 500 + S3 InternalError XML
 inline HttpResponse internal_error_response() {
     s3::S3Error err(s3::S3ErrorCode::InternalError, "We encountered an internal error.");
+    std::string rid = fallback_request_id();
     HttpResponse resp;
     resp.status = s3::http_status(err.code);
-    resp.small_body = s3::error_xml(err, "");
+    resp.small_body = s3::error_xml(err, rid);
     resp.headers.set("Content-Type", "application/xml");
+    resp.headers.set("x-amz-request-id", rid);
     return resp;
 }
 
@@ -126,10 +150,12 @@ inline HttpResponse internal_error_response() {
 // 关连接。手写解析器的驱动两者都做：回 400 再关，避免客户端把关连接读成截断响应
 inline HttpResponse bad_request_response(const char* why) {
     s3::S3Error err(s3::S3ErrorCode::InvalidRequest, why);
+    std::string rid = fallback_request_id();
     HttpResponse resp;
     resp.status = s3::http_status(err.code);
-    resp.small_body = s3::error_xml(err, "");
+    resp.small_body = s3::error_xml(err, rid);
     resp.headers.set("Content-Type", "application/xml");
+    resp.headers.set("x-amz-request-id", rid);
     return resp;
 }
 

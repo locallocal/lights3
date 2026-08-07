@@ -8,6 +8,77 @@
 
 namespace lights3::s3 {
 
+namespace {
+
+// V2 continuation-token 的不透明化（docs/gaps.md §4）：V1 的 marker 语义上就是
+// key（响应会回显），V2 的 token 规范是不透明串——此前 V1 做了 URL 编码而 V2
+// 明文透传，两版本不一致且把内部键序直接暴露成 API。base64 一层对齐 AWS 形态
+constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string token_encode(const std::string& in) {
+    std::string out;
+    out.reserve((in.size() + 2) / 3 * 4);
+    size_t i = 0;
+    for (; i + 3 <= in.size(); i += 3) {
+        uint32_t v = (uint32_t(uint8_t(in[i])) << 16) | (uint32_t(uint8_t(in[i + 1])) << 8) |
+                     uint8_t(in[i + 2]);
+        out.push_back(kB64[(v >> 18) & 63]);
+        out.push_back(kB64[(v >> 12) & 63]);
+        out.push_back(kB64[(v >> 6) & 63]);
+        out.push_back(kB64[v & 63]);
+    }
+    size_t rem = in.size() - i;
+    if (rem == 1) {
+        uint32_t v = uint32_t(uint8_t(in[i])) << 16;
+        out.push_back(kB64[(v >> 18) & 63]);
+        out.push_back(kB64[(v >> 12) & 63]);
+        out += "==";
+    } else if (rem == 2) {
+        uint32_t v = (uint32_t(uint8_t(in[i])) << 16) | (uint32_t(uint8_t(in[i + 1])) << 8);
+        out.push_back(kB64[(v >> 18) & 63]);
+        out.push_back(kB64[(v >> 12) & 63]);
+        out.push_back(kB64[(v >> 6) & 63]);
+        out += "=";
+    }
+    return out;
+}
+
+std::optional<std::string> token_decode(const std::string& in) {
+    if (in.empty() || in.size() % 4 != 0) return std::nullopt;
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string out;
+    out.reserve(in.size() / 4 * 3);
+    for (size_t i = 0; i < in.size(); i += 4) {
+        int pad = 0;
+        int v[4];
+        for (int j = 0; j < 4; ++j) {
+            char c = in[i + j];
+            if (c == '=' && i + 4 == in.size() && j >= 2) {
+                v[j] = 0;
+                ++pad;
+            } else {
+                v[j] = val(c);
+                if (v[j] < 0 || pad > 0) return std::nullopt;  // '=' 只能在末尾
+            }
+        }
+        uint32_t x = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) | (uint32_t(v[2]) << 6) |
+                     uint32_t(v[3]);
+        out.push_back(char((x >> 16) & 0xff));
+        if (pad < 2) out.push_back(char((x >> 8) & 0xff));
+        if (pad < 1) out.push_back(char(x & 0xff));
+    }
+    return out;
+}
+
+}  // namespace
+
 Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::string bucket) {
     storage::ListOptions opt;
     opt.prefix = req.query_get("prefix").value_or("");
@@ -36,15 +107,22 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     auto enc = [&](const std::string& s) {
         return encode_url ? util::aws_uri_encode(s, /*encode_slash=*/false) : s;
     };
-    // token 即 "start after this key"（V2 continuation-token / start-after，V1 marker）
-    opt.start_after = req.query_get("continuation-token")
-                          .value_or(req.query_get("start-after")
-                                        .value_or(req.query_get("marker").value_or("")));
+    // V2（?list-type=2）与 V1 的差异：KeyCount/ContinuationToken vs Marker
+    bool v2 = req.query_get("list-type").value_or("") == "2";
+    // token 即 "start after this key"：V2 的 continuation-token 是本实现签发的
+    // 不透明串（base64），解不开即无效参数；start-after / V1 marker 是明文 key
+    if (auto tok = req.query_get("continuation-token"); v2 && tok) {
+        auto key = token_decode(*tok);
+        if (!key)
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "The continuation token provided is incorrect.");
+        opt.start_after = std::move(*key);
+    } else {
+        opt.start_after = req.query_get("start-after")
+                              .value_or(req.query_get("marker").value_or(""));
+    }
 
     auto result = co_await router_.resolve(bucket).list_objects(bucket, opt);
-
-    // V2（?list-type=2）与 V1 的响应差异：KeyCount/ContinuationToken vs Marker
-    bool v2 = req.query_get("list-type").value_or("") == "2";
 
     XmlWriter w;
     w.open("ListBucketResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
@@ -64,7 +142,7 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     w.element("IsTruncated", result.is_truncated ? "true" : "false");
     if (result.is_truncated)
         w.element(v2 ? "NextContinuationToken" : "NextMarker",
-                  v2 ? result.next_token : enc(result.next_token));
+                  v2 ? token_encode(result.next_token) : enc(result.next_token));
     for (auto& o : result.objects) {
         w.open("Contents");
         w.element("Key", enc(o.key));

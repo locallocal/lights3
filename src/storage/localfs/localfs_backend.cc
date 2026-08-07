@@ -93,8 +93,22 @@ Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "create bucket dir: " + ec.message());
-    std::ofstream marker(dir / kBucketMarker);
-    if (!marker) throw_errno("create bucket marker");
+    // marker 与所在目录都 fsync（docs/gaps.md §4）：对象写路径是严格 fsync 的，
+    // 掉电后"桶消失而客户端已收到 200、甚至桶里对象还在"的倒挂不可接受
+    fs::path marker = dir / kBucketMarker;
+    int fd = ::open(marker.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) throw_errno("create bucket marker");
+    if (::fsync(fd) != 0) {
+        int e = errno;
+        ::close(fd);
+        errno = e;
+        throw_errno("fsync bucket marker");
+    }
+    ::close(fd);
+    if (int dfd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY); dfd >= 0) {
+        ::fsync(dfd);
+        ::close(dfd);
+    }
     co_return;
 }
 

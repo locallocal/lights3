@@ -585,7 +585,17 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
     co_await pool_->schedule();
     size_t done = 0;
     for (const auto& e : extents) {
-        if (e.kind != Extent::Kind::kChunk) continue;  // pack record 为死区，随压实回收（§9.1）
+        if (e.kind == Extent::Kind::kPack) continue;  // pack record 为死区，随压实回收（§9.1）
+        if (e.kind != Extent::Kind::kChunk) {
+            // 引擎错配（fs 数据引擎收到 kRados extent）：静默跳过会让 GC 全程
+            // 空转且无从察觉（docs/gaps.md §4）。告警一次，防回收循环刷屏
+            static std::atomic<bool> warned{false};
+            if (!warned.exchange(true))
+                LOG_ERROR("duostore-fs: remove() got extent kind {} — data/meta engine "
+                          "mismatch, these extents cannot be reclaimed by this engine",
+                          int(e.kind));
+            continue;
+        }
         if (::unlink(chunk_path(e.file_id).c_str()) != 0 && errno != ENOENT)
             throw_errno("unlink chunk");  // 幂等：ENOENT 忽略
         // TB 级对象数十万 extent：定期让出，别把一个池线程占死数分钟（gaps §2.11）

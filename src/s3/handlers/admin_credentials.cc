@@ -144,7 +144,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
         throw S3Error(S3ErrorCode::MethodNotAllowed,
                       "The specified method is not allowed against this resource.");
     } catch (const S3Error& e) {
-        metrics_.s3_error(wire_code(e.code));
+        metrics_.s3_error(e.code);
         json j;
         j["code"] = wire_code(e.code);
         // 内部错误原始文案可能含后端拓扑：只进日志，响应用固定文案
@@ -159,7 +159,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
         // generate() 的 getentropy/put 失败等 runtime_error：本 handler 承诺
         // 错误一律渲染 JSON，不得逃到外层的 S3 XML 路径
         LOG_ERROR("admin api {} {} internal error: {}", req.method, req.path, e.what());
-        metrics_.s3_error("InternalError");
+        metrics_.s3_error(S3ErrorCode::InternalError);
         json j;
         j["code"] = "InternalError";
         j["message"] = "We encountered an internal error.";

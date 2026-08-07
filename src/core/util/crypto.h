@@ -28,6 +28,10 @@ using Aes256Key = std::array<uint8_t, 32>;
 std::string aes256gcm_seal(const Aes256Key& key, std::string_view plaintext);
 std::optional<std::string> aes256gcm_open(const Aes256Key& key, std::string_view sealed);
 
+// 编译器删不掉的清零（OPENSSL_cleanse）：解出的 SK 临时串用完就地擦
+// （docs/gaps.md §4——对做了 SK at-rest 加密的系统，明文残留是防护链缺环）
+void secure_wipe(std::string& s);
+
 // 增量哈希（流式 body 校验 / ETag 计算）
 class HashStream {
 public:

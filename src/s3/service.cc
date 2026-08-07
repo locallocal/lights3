@@ -292,17 +292,17 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         // 本响应只代表"网关不再等它"（docs/concurrency.md §5 的协作式语义）
         LOG_WARN("req {} {} {} cancelled (timeout or shutdown)", ctx.request_id, req.method,
                  req.path);
-        metrics_.s3_error(wire_code(S3ErrorCode::SlowDown));
+        metrics_.s3_error(S3ErrorCode::SlowDown);
         resp = error_response(
             S3Error(S3ErrorCode::SlowDown, "Request cancelled: timed out or server shutting down."),
             ctx.request_id, head);
     } catch (const S3Error& e) {
-        metrics_.s3_error(wire_code(e.code));
+        metrics_.s3_error(e.code);
         resp = error_response(public_error(e, ctx.request_id, req), ctx.request_id, head);
     } catch (const std::exception& e) {
         LOG_ERROR("req {} {} {} internal error: {}", ctx.request_id, req.method, req.path,
                   e.what());
-        metrics_.s3_error("InternalError");
+        metrics_.s3_error(S3ErrorCode::InternalError);
         resp = error_response(
             S3Error(S3ErrorCode::InternalError, "We encountered an internal error."),
             ctx.request_id, head);

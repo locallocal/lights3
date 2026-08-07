@@ -767,6 +767,53 @@ TEST(service_internal_endpoints_not_shadowing_vhost_keys) {
     CHECK_EQ(hh.status, 200);  // 探活器常用 HEAD
 }
 
+// ---------- gaps §4：语法非法 Range 忽略回 200；V2 token 不透明往返 ----------
+TEST(service_malformed_range_ignored) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
+
+    // "bytes=5-3"（last < first）语法非法：RFC 9110 要求整个头按无效忽略，
+    // 回 200 整对象——此前误答 416
+    auto req = make_req("GET", "/bkt/k");
+    req.headers.add("Range", "bytes=5-3");
+    auto resp = sync_wait(svc.dispatch(std::move(req)));
+    CHECK_EQ(resp.status, 200);
+    CHECK_EQ(body_of(resp), "0123456789");
+
+    // 真正不可满足的 range 仍是 416
+    auto req2 = make_req("GET", "/bkt/k");
+    req2.headers.add("Range", "bytes=99-");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(req2))).status, 416);
+}
+
+TEST(service_v2_token_opaque_roundtrip) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    for (auto* k : {"a", "b", "c"})
+        sync_wait(svc.dispatch(make_req("PUT", std::string("/bkt/") + k, "x")));
+
+    auto p1 = sync_wait(
+        svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"max-keys", "2"}})));
+    auto b1 = body_of(p1);
+    CHECK(contains(b1, "<IsTruncated>true</IsTruncated>"));
+    std::string tok = xelem(b1, "NextContinuationToken");
+    CHECK(!tok.empty());
+    CHECK(tok != "b");  // 不透明（base64），不再是明文 key
+
+    auto p2 = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"continuation-token", tok}})));
+    auto b2 = body_of(p2);
+    CHECK(contains(b2, "<Key>c</Key>"));
+    CHECK(!contains(b2, "<Key>b</Key>"));
+
+    // 解不开的 token → InvalidArgument，而不是被当明文 key 静默使用
+    auto bad = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"continuation-token", "!!!"}})));
+    CHECK_EQ(bad.status, 400);
+    CHECK(contains(bad.small_body, "InvalidArgument"));
+}
+
 // ---------- gaps §3.9：DeleteObjects 的畸形输入与版本删除 ----------
 TEST(service_delete_objects_malformed_inputs) {
     auto svc = make_service_noauth();

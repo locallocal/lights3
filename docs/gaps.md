@@ -316,7 +316,7 @@ prewrite 之前抛出（语义上明确未提交）。回归用例：`duostore_t
 
 ## 3. 中
 
-### 3.1 取消体系整体是死代码
+### 3.1 [✅已修复] 取消体系整体是死代码
 
 `docs/concurrency.md §5` 声称取消源有三（客户端断连、请求超时、进程 shutdown），实际一个都没接线：`src/s3/service.cc:123` 的 `RequestContext.cancel` 恒为默认"永不取消" token 且 `ctx` 不传给 route/handler/后端；40+ 处 `pool_->schedule()` 无一传 token；`with_timeout`（`task.h:361`）零生产调用点。
 
@@ -324,13 +324,26 @@ prewrite 之前抛出（语义上明确未提交）。回归用例：`duostore_t
 
 **建议**：要么接线（dispatch 建 per-request `CancelSource`，driver 断连回调 + `with_timeout` + shutdown 广播三处触发，并给 `acquire` 加取消支持），要么承认不做并删掉半条命的取消分支。**接线前必须先修 3.2**，否则会引入新的故障模式。
 
-### 3.2 取消回调在触发线程上跑完整条请求续体
+**✅已修复**（2026-08-07）：选择接线。Task 的 promise 增 cancel token 沿 co_await 链
+向下继承（与 cont_executor 同机制），`ThreadPool::schedule` / `AsyncSemaphore::acquire`
+的 await_suspend 模板化后从调用方 promise 取 token——存量 40+ 处 `co_await
+pool_->schedule()` 一处未改即获得请求级取消。dispatch 建 per-request `CancelSource`
+并把外部 token（进程关停广播）接到同一个源；`AsyncSemaphore` 补取消入口（等待者
+摘链 + `OperationCancelled` 唤醒）与 `close()`。挂起点取消统一映射 503 SlowDown。
+
+### 3.2 [✅已修复] 取消回调在触发线程上跑完整条请求续体
 
 `src/core/cancel.h:33` 锁外逐个 `fn()`；`src/core/thread_pool.cc:104-107` 的回调直接 `s->h.resume()`。取消源是 `TimerQueue`（`with_timeout` 的唯一形态）时，这条 resume 会在**单线程的定时器线程上**把整条 L2/L3 续体跑完，期间全进程所有定时器停摆。而 `core/timer.h:25` 明确写着"fn 须轻量"。
 
 **建议**：取消回调改为 `pool.post(...)` 而非直接 resume。
 
-### 3.3 无任何请求级超时；`idle_timeout` 覆盖不到 handler 执行期
+**✅已修复**（2026-08-07）：`TimerQueue` 拆成"调度线程 + 专用回调线程"，到期判定
+与回调执行分离——慢回调不再停摆全进程定时器。注意原建议的"改 `pool.post`"按字面
+实现会死锁：取消最需要生效的场景正是池被占满，续体排在阻塞任务后面永远轮不上
+（test_concurrency 既有用例即刻复现），故保留就地 resume（恢复即抛，只做有界的
+异常展开），把防线放在触发侧。
+
+### 3.3 [✅已修复] 无任何请求级超时；`idle_timeout` 覆盖不到 handler 执行期
 
 四驱动的超时都只管 socket 系统调用（builtin 的 `SO_RCVTIMEO`、beast 读头后 `expires_never()`、seastar 的 ArmGuard、httplib 的读写超时），`co_await handler_` 期间无 timer。一个 hang 住的存储调用会永久占住：builtin 的一个连接线程 + 一个池线程；beast/seastar 的一个会话；httplib 的一个池线程 + 一个 pump 线程。配置里也没有对应旋钮。
 
@@ -338,7 +351,13 @@ prewrite 之前抛出（语义上明确未提交）。回归用例：`duostore_t
 
 **建议**：`HttpConfig` 加 `request_timeout_sec` 与传输停滞上限；用 `with_timeout` 包 handler 并与 3.1 的取消打通。
 
-### 3.4 SSE / tagging / object-lock / ACL 的**请求头**被静默吞掉
+**✅已修复**（2026-08-08）：按建议实施。`HttpConfig` 增 `request_timeout`（默认 300s）
+与 `transfer_stall_timeout`（默认 300s，0=关）；dispatch 用 `with_timeout` 包 route
+并与 §3.1 的取消源汇合，超时映射 503。传输停滞由 `http/stall_guard.h` 的
+`StallGuardReader` 治：按"每窗口至少推进 64KiB"判定，装在 L1/L2 交界处请求体/响应体
+各包一层，四驱动一次生效——真慢但在传的连接不受影响，每 59 秒滴 1 字节的被掐断。
+
+### 3.4 [✅已修复] SSE / tagging / object-lock / ACL 的**请求头**被静默吞掉
 
 `src/s3/service.cc:75-90` 只按 query 子资源拒绝，`src/s3/handlers/common.h:25-34` 的元数据提取只认 `Content-Type` 与 `x-amz-meta-*`。于是 `x-amz-server-side-encryption`、SSE-C 的三个头、`x-amz-tagging`、`x-amz-object-lock-*`、`x-amz-acl: public-read` 全部返回 200 但语义未兑现。`docs/s3-protocol.md:15-17` 承诺这些返回 `NotImplemented`——只对子资源做到了，对头没有。
 
@@ -346,7 +365,13 @@ prewrite 之前抛出（语义上明确未提交）。回归用例：`duostore_t
 
 **建议**：增加 `kUnsupportedHeaders` 表，命中即 501；`x-amz-acl` 单独放行 `private`。
 
-### 3.5 分派表的黑名单兜底 → 未列入名单的子资源变成静默误答
+**✅已修复**（2026-08-08）：按建议实施（`service.cc` 的 `reject_unsupported_headers`，
+route 入口统一执行）。前缀表覆盖 `x-amz-server-side-encryption*`（含 SSE-C、KMS）、
+`x-amz-copy-source-server-side-encryption*`、`x-amz-object-lock-*`、`x-amz-grant-*`；
+精确表覆盖 `x-amz-tagging`、`x-amz-website-redirect-location`；`x-amz-acl` 仅放行
+`private`（即本实现的实际语义），其余值 501。
+
+### 3.5 [✅已修复] 分派表的黑名单兜底 → 未列入名单的子资源变成静默误答
 
 `src/s3/service.cc:212-287` 以 `flag == ""` 兜底，`reject_unsupported_subresource` 是唯一防线且是**黑名单**。确切漏项：`?attributes`（GetObjectAttributes）→ 返回整个对象体而非 XML；`GET ?partNumber=1` → 返回整个对象而非第 1 片；`response-*` 六个参数 → 静默忽略。
 
@@ -354,7 +379,15 @@ prewrite 之前抛出（语义上明确未提交）。回归用例：`duostore_t
 
 **建议**：反转为白名单——枚举每个 (method, scope) 下允许出现的 query key，出现未知 key 即 501。一处改动同时消掉全部漏项且不会再漂移。
 
-### 3.6 条件写在多实例部署下无原子性，与文档承诺不符
+**✅已修复**（2026-08-08）：按建议反转。`Route` 增 `extra_query` 字段逐路由枚举允许的
+query key（flag 键与 presigned 签名参数族、SDK 的 `x-id` 全局放行），命中路由后名单外
+一律 501——`?attributes`、`GET ?partNumber`、`response-*` 三类漏项一次消掉。两点校准：
+分页参数（`max-parts`/`part-number-marker`/`max-uploads`/`key-marker`/`upload-id-marker`）
+允许但忽略——handler 一次回全量且 `IsTruncated=false` 是完整的答案（cloudproxy 后端
+自己就发这些参数，拒收会破坏自转发）；uploads 列表的 `prefix`/`delimiter` 则不放行，
+忽略它们会把过滤范围外的结果混进来。黑名单保留仅为给已知子资源更明确的报错文案。
+
+### 3.6 [✅已修复] 条件写在多实例部署下无原子性，与文档承诺不符
 
 `docs/s3-protocol.md:126-130` 把 If-Match / If-None-Match 列为"对客户端的承诺"，但判定发生在网关内存里。两个实例并发处理同 key 的 `If-None-Match: *` 时各自 head 都得到 NoSuchKey，两者都 put。而 `docs/credential-management.md §10.3` 刚为多实例补齐了凭证同步——项目已把多实例当作支持形态，这条限制不再是理论问题。
 
@@ -365,19 +398,32 @@ localfs/xlocalfs/memory 在 per-key commit 锁内、duostore 在四引擎的原�
 共享同一份元数据的多实例因此天然互斥；cloudproxy 把条件透传上游由其保证。L2 只剩无锁 head
 预检做快速失败。
 
-### 3.7 在途吊销竞态时 policy 被整体跳过（fail-open 方向反了）
+### 3.7 [✅已修复] 在途吊销竞态时 policy 被整体跳过（fail-open 方向反了）
 
 `src/s3/auth/credential_store.cc:361`：`if (it == creds_.end()) return;`。若凭证在验签（`secret_for`）与 `authorize` 之间被 `remove()`/`sync_now()` 删除，结果不是"按原 policy 继续"，而是 **policy 完全消失**——一个 `readonly=true` 的凭证在这个窗口里变成不受限凭证。`sync_now` 每个同步周期都会批量删除，窗口可被重放撞上。
 
 **建议**：让 `verify()` 返回验签那一刻的 `CredentialInfo` 快照，`dispatch` 直接用它 authorize——既修竞态又真正兑现"在途请求按验签时语义完成"。
 
-### 3.8 `/-/` 内部端点在 vhost 模式下遮蔽合法 key 且匿名可达
+**✅已修复**（2026-08-08）：按建议实施。`ICredentialProvider::secret_for` 升级为
+`lookup`——一次查表同时带出 SK 与 policy 快照；`verify()` 返回
+`VerifiedIdentity{access_key, policy}`，dispatch 用快照 authorize、不再回 store 二次
+查表。在途请求严格按验签时刻语义完成（readonly 仍拒写），吊销后的新请求因查不到 AK
+走 InvalidAccessKeyId（fail-closed）。`CredentialPolicy` 拆到 `s3/auth/policy.h`
+（sigv4.h 需要它，留在 credential_store.h 会成环）。回归用例：
+credstore_policy_snapshot_survives_revocation。
+
+### 3.8 [✅已修复] `/-/` 内部端点在 vhost 模式下遮蔽合法 key 且匿名可达
 
 `src/s3/service.cc:133-146` 四个内部端点用 `req.path` 精确比较且在 `resolve_address` **之前**。vhost 下 `req.path` 是 key 而非 `/bucket/key`，于是 `GET /-/metrics` with `Host: mybucket.gw.example.com` 命中匿名 metrics 端点；`PUT /-/metrics` 同样命中（不区分 method）→ 返回 200 但对象根本没写，**静默丢数据**。
 
 **建议**：把 `resolve_address` 提到内部端点分流之前，仅当 bucket 为空才进入 `/-/` 分支；或把内部端点挪到独立监听端口。
 
-### 3.9 其余中危（简列）
+**✅已修复**（2026-08-08）：取第一方案变体——`resolve_address` 提前并返回 vhost 标记，
+只有 **path 寻址**（非 vhost）下的 `/-/` 前缀才进内部分支；vhost 下 `/-/metrics` 按
+普通对象键读写。同时补 method 区分：三个读端点只认 GET/HEAD（探活器常用 HEAD），
+其余方法 405——`PUT /-/metrics` 不再"200 且静默丢数据"。
+
+### 3.9 [✅已修复] 其余中危（简列）
 
 | 位置 | 问题 |
 | --- | --- |
@@ -409,6 +455,68 @@ localfs/xlocalfs/memory 在 per-key commit 锁内、duostore 在四引擎的原�
 | `tikv_meta_store.cc:391,414-421` | 内层号段事务的"结果不明"被翻译成外层业务提交的 `UndeterminedCommit`，而业务事务明确从未提交 → 拒绝清理、制造无谓孤儿 |
 | `src/s3/handlers/objects.cc:246-295` | DeleteObjects：空列表与缺 Key 不报 MalformedXML；1000 个 key **串行** `co_await`（cloudproxy/duostore 上即 1000 次串行 RTT）；请求里的 `<VersionId>` 被静默忽略 → "删指定版本"变成"删当前对象" |
 | `src/s3/errors.cc:26-30` | 未知远端 wire code 折成 500 → SDK 对 500 自动重试，一个 `InvalidObjectState`(403) 会被无限重试；原文还被 `public_error` 抹掉 |
+
+**✅全部已修复**（2026-08-07/08，按表序逐行）：
+
+1. **main.cc 关停序**：改为"广播取消 → 等许可归位（10s 超时告警）→ close → 按持有
+   关系反序释放 → join"；启动后期失败的异常路径走同一份 close，不再跳过 active pack 封存。
+2. **config.cc**：`io_threads` 上界 [1,1024] 与 per-backend 取齐；backend name 查重；
+   `to_int` 报错带键名与原值并拒尾随垃圾；注释剥离改引号感知；未定义 `${VAR}` 改报错
+   （可选值写 `${VAR:-默认}`）。
+3. **cancel.h**：`CancelRegistration::reset()` 等待在途回调批次跑完（触发线程上自注销
+   不等待，防自死锁），与 `TimerQueue::cancel` 语义对齐。
+4. **background.cc**：被等待任务的协程帧移入内层作用域，析构先于 `done()`。
+5. **main.cc 信号**：改 self-pipe + 守护线程（httplib 的 shutdown 内部取锁，信号落在
+   持锁线程上即自死锁）；`sigemptyset` 补齐。
+6. **HeaderMap**：补 `find()`（免拷贝，has/get 改走它）、`get_all`/`count`（多值头）、
+   `remove()`、`has_token()`（列表头）。
+7. **Connection 列表头**：builtin/seastar/httplib 统一改 `has_token` 按 token 判定；
+   httplib 上游不认列表时补发 `Connection: close` 响应头。
+8. **httplib 两行**：`max_header_size` 补整体校验（超限 431 + S3 XML；上游单行 8KiB
+   编译期上限启动时告警说明）；`set_error_handler` 把上游自产报文统一翻译成 S3 XML
+   （路由 404 → 405 MethodNotAllowed，与另三驱动对齐）。
+9. **HEAD 无长度**：统一为 `head_length_known` 契约——长度已知写真值，未知则两个框架
+   头都不写并关连接（写 0 是撒谎，写 chunked 却不发帧也是）。
+10. **IPv4-only**：builtin 改 `sockaddr_storage` 按字面量选族（v6 关 V6ONLY 对齐另两
+    驱动），seastar 改 `inet_address` 并同步修 `probe_free_port`。
+11. **tiered parse_pct**：`%` 后缀参与判定（"1%" = 0.01），加 (0,100%] 越界启动报错——
+    (used-low) 回绕整桶下沉的通路消除。
+12. **registry 回滚守卫**：tiered 的 metrics scope 先登记再构造，构建失败不再残留
+    持池 gauge 回调。
+13. **localfs delete_bucket**：改 error_code 重载；目录删除失败（并发写赢了竞态）时
+    恢复 marker 报 BucketNotEmpty，不再留下不可见数据。
+14. **fs_util xattr**：setxattr 失败告警（同类 errno 只报一次）——降级 sidecar-only
+    不再无声；getxattr ERANGE 按实际大小重取，不静默回落旧元数据。
+15. **create_directories**：只有"前缀撞既有文件"保持 400，ENOSPC/EACCES/EIO 改 500。
+16. **upload_id**：`mt19937_64` 改 `getentropy`（CSPRNG）。
+17. **memory 后端**：数据块改 `shared_ptr<const string>`，GET 锁内只取指针锁外流式
+    吐出（put 覆盖时旧块由在途读者持有，天然快照）；`operator[]` 改 `at()`；剩余
+    临界区皆 O(map 操作)，不接线程池为有意取舍（注释注明）。
+18. **redis Lua O(N)**：parts 指纹检查改一次 HGETALL + Lua 内排序拼接（指纹值不变）；
+    list 脚本改 200/页分页取 key + 500/批 HMGET——1000 key 从 2000 次调用降到约 10 次，
+    原子性与翻页语义不变。
+19. **redis CAS 见证**：`expect_eq` 改上送 40 字节 SHA1 指纹，比对在脚本内对存量值做
+    `redis.sha1hex`。
+20. **sqlite 号段**：预留期间持 `mu_`——进程内写者被确定性挡开（单进程 flock 保证无
+    外部写者），不再与业务事务抽签；有界重试保留给绕过 flock 的外部裸连接。
+21. **alloc_id 交错**：`IMetaStore` 升级为 `alloc_file_run(kind, n)` 批派发连续区间，
+    四引擎统一"不足即换段、残段弃置"；fs/rados 写者按 1、2、4…封顶 64 的几何 run
+    批取——并发写下 run 编码恢复有效。
+22. **HEAD 全量解码**：`IMetaStore` 增 `head_object`（同一 raw 读 + `decode_object_meta`），
+    四引擎实现；backend 的 HEAD 不再物化整份 manifest。
+23. **孤儿扫描内存**：refs 改有序向量（8B/项）+ 盘面流式判定 + 命中位图（1bit/项）
+    做反向对账，三份全量哈希集合（4–5GB）降一个数量级；全部既有不变式保留。
+24. **pack 封存**：拆"锁内 `close_slot_locked`（关 fd/清槽/入重试队列）+ 锁外
+    `flush_seals` 补交 meta"；seal 失败进队列由后续写入/close 重试，append 路径只
+    告警、close 路径上抛——"永不封存"与"堵死槽"两个问题同时消除。
+25. **rados 读侧**：改缓冲移交（与写侧同策略）——aio 写入在途单自有缓冲，完成后拷给
+    调用方，取消/超时不再有 UAF 通路。
+26. **tikv 号段误译**：内层计数器事务的 UndeterminedCommit 降为确定性 InternalError
+    （号段结果不明只可能烧 id，外层业务事务确定未提交），不再误触发"拒绝清理"。
+27. **DeleteObjects**：空列表/缺 Key 整批 MalformedXML；`<VersionId>` 出现即 501；
+    删除改 32 一批的有界并发 `when_all`，单 key 失败收敛为结果值不中断整批。
+28. **未知远端 4xx**：映射本地 400 InvalidRequest（不经 `public_error` 抹文案），
+    远端码与原文随消息带出——SDK 不再对确定性拒绝无限重试。
 
 ---
 

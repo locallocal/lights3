@@ -619,8 +619,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
             resp = co_await core->handler(std::move(req));
         } catch (const std::exception& e) {
             // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
-            LOG_ERROR("handler escaped exception: {}", e.what());
-            resp = driver::internal_error_response();
+            resp = driver::internal_error_response(e.what());
             keep = false;
         }
         co_await ResumeOnShard{shard};  // handler 可能在池线程 resume

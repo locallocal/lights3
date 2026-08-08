@@ -166,6 +166,7 @@ public:
         h_.resume();
     }
     T take_result() {
+        check_valid("take_result");
         auto& r = h_.promise().result;
         if (r.index() == 2) std::rethrow_exception(std::get<2>(r));
         return std::move(std::get<1>(r));
@@ -248,6 +249,7 @@ public:
         h_.resume();
     }
     void take_result() {
+        check_valid("take_result");
         if (h_.promise().error) std::rethrow_exception(h_.promise().error);
     }
 

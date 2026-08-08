@@ -27,14 +27,19 @@ TimerQueue& TimerQueue::instance() {
 }
 
 TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) {
-    std::lock_guard lk(m_);
-    Id id = ++next_id_;
-    auto deadline = Clock::now() + delay;
-    items_.emplace(std::make_pair(deadline, id), std::move(fn));
-    deadlines_.emplace(id, deadline);
-    // 只有成为最早到期者才需要叫醒调度线程重算等待时长；其余情况它醒来也只会
-    // 按原 deadline 继续睡（docs/gaps.md §4：此前每次 add 都 notify_all）
-    if (items_.begin()->first == std::make_pair(deadline, id)) cv_.notify_one();
+    Id id = 0;
+    bool wake = false;
+    {
+        std::lock_guard lk(m_);
+        id = ++next_id_;
+        auto deadline = Clock::now() + delay;
+        items_.emplace(std::make_pair(deadline, id), std::move(fn));
+        deadlines_.emplace(id, deadline);
+        // 只有成为最早到期者才需要叫醒调度线程重算等待时长；其余情况它醒来也只会
+        // 按原 deadline 继续睡（docs/gaps.md §4：此前每次 add 都 notify_all）
+        wake = items_.begin()->first == std::make_pair(deadline, id);
+    }
+    if (wake) cv_.notify_one();  // 锁外唤醒：持锁 notify 会让被唤线程立刻撞上锁
     return id;
 }
 

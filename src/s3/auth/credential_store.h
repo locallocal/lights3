@@ -32,7 +32,7 @@ enum class CredSource { kStatic, kFile, kDynamic };
 
 struct CredentialInfo {
     std::string access_key;
-    std::string secret_key;
+    util::SecretString secret_key;  // 析构即擦除（docs/gaps.md §4）
     CredSource source = CredSource::kDynamic;
     std::string comment;
     std::chrono::system_clock::time_point created;

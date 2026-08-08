@@ -198,6 +198,9 @@ private:
 
     std::mutex atime_m_;
     std::unordered_map<std::string, int64_t> atime_;  // ikey → epoch 秒
+    // 自上次快照以来表是否变过（docs/gaps.md §4）：没变就不重写，空闲实例不再
+    // 每 5 分钟对着同一份内容做一遍全量写 + fsync
+    bool atime_dirty_ = false;
 
     std::atomic<uint64_t> gc_seq_{0};
 

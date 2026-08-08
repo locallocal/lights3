@@ -110,7 +110,8 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
             std::span(reinterpret_cast<const uint8_t*>(sealed.data()), sealed.size()));
     } else {
         j["version"] = 1;
-        j["sk"] = c.secret_key;
+        // v1 是无 master key 时的明文形态，SK 本来就要落盘；这一份 json 缓冲无从擦除
+        j["sk"] = static_cast<const std::string&>(c.secret_key);
     }
     j["created"] = util::iso8601(c.created);  // 给人看
     j["created_unix"] = std::chrono::duration_cast<std::chrono::seconds>(

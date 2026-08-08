@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "core/config.h"
+#include "core/util/crypto.h"
 #include "core/util/time.h"
 #include "http/model.h"
 #include "s3/auth/policy.h"
@@ -22,7 +23,7 @@ namespace lights3::s3 {
 // 一次查表同时带出 SK 与 policy 快照（docs/gaps.md §3.7）：verify 之后再回store 查
 // policy 的话，凭证可能已被 sync/remove 删除——那样查不到不是"无限制"而是竞态窗口
 struct CredentialLookup {
-    std::string secret_key;
+    util::SecretString secret_key;  // 析构即擦除（docs/gaps.md §4）
     std::optional<CredentialPolicy> policy;  // 查表时刻的快照；nullopt = 无限制
 };
 
@@ -32,7 +33,7 @@ struct ICredentialProvider {
     virtual bool has_credentials() const = 0;
 
     // 便捷取 SK（测试/签名侧）；热路径请直接 lookup 免二次查表
-    std::optional<std::string> secret_for(std::string_view access_key) const {
+    std::optional<util::SecretString> secret_for(std::string_view access_key) const {
         auto l = lookup(access_key);
         if (!l) return std::nullopt;
         return std::move(l->secret_key);

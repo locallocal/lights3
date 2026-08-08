@@ -1,5 +1,6 @@
 // 后端级 metrics 注册机制单测（docs/todo.md §3.1）：实例复用/类型冲突/标签转义/
 // 直方图渲染/回调 gauge/空 scope 无害/并发递增冒烟
+#include <limits>
 #include <memory>
 #include <string>
 #include <thread>
@@ -93,6 +94,38 @@ TEST(metrics_histogram_render) {
         thrown = true;
     }
     CHECK(thrown);
+}
+
+TEST(metrics_nonfinite_render) {
+    // 非有限值必须用 Prometheus 的拼写（docs/gaps.md §4）：to_chars 直出的
+    // "inf"/"nan" 会让抓取端拒收整个 target，与桶界折叠是同一个失败模式
+    MetricsRegistry reg;
+    reg.gauge_callback("lights3_test_nf_pos", "cb",
+                       [] { return std::numeric_limits<double>::infinity(); });
+    reg.gauge_callback("lights3_test_nf_neg", "cb",
+                       [] { return -std::numeric_limits<double>::infinity(); });
+    reg.gauge_callback("lights3_test_nf_nan", "cb",
+                       [] { return std::numeric_limits<double>::quiet_NaN(); });
+    auto out = reg.render();
+    CHECK(contains(out, "lights3_test_nf_pos +Inf\n"));
+    CHECK(contains(out, "lights3_test_nf_neg -Inf\n"));
+    CHECK(contains(out, "lights3_test_nf_nan NaN\n"));
+    CHECK(!contains(out, "inf\n"));
+    CHECK(!contains(out, "nan\n"));
+}
+
+TEST(metrics_large_bucket_bounds_render) {
+    // ≥1e6 的桶界曾被 6 位有效数字渲成 "1.04858e+06"，相近桶界还会折叠成重复
+    // 的 le 序列——Prometheus 对重复 le 直接拒收整个 target
+    MetricsRegistry reg;
+    auto h = reg.histogram("lights3_test_bytes", "sz", {1048576.0, 1048577.0, 1e9});
+    h->observe(1.0);
+    auto out = reg.render();
+    CHECK(contains(out, "le=\"1048576\""));
+    CHECK(contains(out, "le=\"1048577\""));  // 与上一桶不得折叠成同一个 le
+    CHECK(!contains(out, "e+06"));
+    // 最短往返允许指数写法（1e+09 精确回读，Prometheus 也认），要害是不丢精度
+    CHECK(contains(out, "le=\"1e+09\""));
 }
 
 TEST(metrics_gauge_callback) {

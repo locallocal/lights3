@@ -1087,10 +1087,11 @@ bool TieredBackend::inflight_contains(const std::string& ikey) {
 void TieredBackend::touch_atime(std::string_view bucket, std::string_view key) {
     std::lock_guard lk(atime_m_);
     atime_[make_ikey(bucket, key)] = ::time(nullptr);
+    atime_dirty_ = true;
 }
 void TieredBackend::erase_atime(std::string_view bucket, std::string_view key) {
     std::lock_guard lk(atime_m_);
-    atime_.erase(make_ikey(bucket, key));
+    if (atime_.erase(make_ikey(bucket, key)) > 0) atime_dirty_ = true;
 }
 int64_t TieredBackend::atime_or(const std::string& ikey, int64_t fallback) {
     std::lock_guard lk(atime_m_);
@@ -1114,6 +1115,7 @@ void TieredBackend::save_atime_snapshot() {
         // atime 后 mtime 兜底得出同一结论。表由此只随"近期被访问的键"增长
         const int64_t cutoff = ::time(nullptr) - cfg_.cold_after_sec;
         std::lock_guard lk(atime_m_);
+        size_t before = atime_.size();
         for (auto it = atime_.begin(); it != atime_.end();) {
             if (it->second < cutoff) {
                 it = atime_.erase(it);
@@ -1124,12 +1126,19 @@ void TieredBackend::save_atime_snapshot() {
                 kv.emplace_back(it->first, std::to_string(it->second));
             ++it;
         }
+        if (atime_.size() != before) atime_dirty_ = true;  // 滚动淘汰本身也是变更
+        // 表自上次快照后没动过，落盘内容会与磁盘上那份逐字节相同：全量重写 +
+        // fsync 不做也罢。留一份"仍需写"的状态，写失败时下轮自然重试
+        if (!atime_dirty_) return;
+        atime_dirty_ = false;
     }
     try {
         fsutil::write_tsv(tier_dir_ / "atime.tsv", local_->staging() / "put", kv);
     } catch (const std::exception& e) {
         // 快照失败只影响下次启动的判冷精度（mtime 兜底），可容忍
         LOG_WARN("tiered: atime snapshot failed: {}", e.what());
+        std::lock_guard lk(atime_m_);
+        atime_dirty_ = true;  // 下轮重试，否则这次的丢失会被"不脏"永久掩盖
     }
 }
 

@@ -125,3 +125,32 @@ TEST(pump_executor_value_and_exception) {
     }
     CHECK(caught);
 }
+
+TEST(task_moved_from_throws_not_segv) {
+    // moved-from 的 Task 上调用曾是空指针解引用（docs/gaps.md §4）：四个入口
+    // 都改抛 logic_error，take_result 一并覆盖（sync_wait 之外还有直接调用者）
+    auto make = []() -> Task<int> { co_return 1; };
+    auto count_throws = [](auto&& fn) {
+        try {
+            fn();
+        } catch (const std::logic_error&) {
+            return true;
+        } catch (...) {
+        }
+        return false;
+    };
+
+    Task<int> a = make();
+    Task<int> moved_a = std::move(a);
+    CHECK(count_throws([&] { a.start(nullptr); }));
+    CHECK(count_throws([&] { (void)a.take_result(); }));
+
+    Task<void> v = []() -> Task<void> { co_return; }();
+    Task<void> moved_v = std::move(v);
+    CHECK(count_throws([&] { v.start(nullptr); }));
+    CHECK(count_throws([&] { v.take_result(); }));
+
+    // 未被搬走的那一份仍然正常
+    CHECK_EQ(sync_wait(std::move(moved_a)), 1);
+    sync_wait(std::move(moved_v));
+}

@@ -1,6 +1,7 @@
 #include "core/metrics.h"
 
 #include <charconv>
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 
@@ -14,6 +15,10 @@ namespace {
 // ≥1e6 的桶界渲成 "1.04858e+06"，相近桶界折叠成重复 le 序列时 Prometheus
 // 直接拒绝整个 target
 std::string fmt_double(double v) {
+    // 非有限值必须用 Prometheus 的拼写：to_chars 会写出 "inf"/"-inf"/"nan"，
+    // 抓取端同样以整个 target 报废收场——与桶界折叠是同一个失败模式
+    if (std::isnan(v)) return "NaN";
+    if (std::isinf(v)) return v > 0 ? "+Inf" : "-Inf";
     char buf[32];
     auto [p, ec] = std::to_chars(buf, buf + sizeof(buf), v);
     return std::string(buf, p);

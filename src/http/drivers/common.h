@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 
+#include "core/log.h"
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "http/model.h"
@@ -134,10 +135,14 @@ inline std::string fallback_request_id() {
     return std::string(buf, 16);
 }
 
-// 契约 2（docs/http-adapter.md §4）：handler 逃逸异常时驱动统一回 500 + S3 InternalError XML
-inline HttpResponse internal_error_response() {
+// 契约 2（docs/http-adapter.md §4）：handler 逃逸异常时驱动统一回 500 + S3 InternalError XML。
+// 日志在这里打而不在调用方：客户端手里只有 request id，只有同一处同时写出 id 与
+// 现场，那张纸条才能换回日志——四驱动因此都不必各记一份
+inline HttpResponse internal_error_response(std::string_view detail = {}) {
     s3::S3Error err(s3::S3ErrorCode::InternalError, "We encountered an internal error.");
     std::string rid = fallback_request_id();
+    LOG_ERROR("handler escaped exception (request id {}): {}", rid,
+              detail.empty() ? std::string_view("<no detail>") : detail);
     HttpResponse resp;
     resp.status = s3::http_status(err.code);
     resp.small_body = s3::error_xml(err, rid);
@@ -151,6 +156,20 @@ inline HttpResponse internal_error_response() {
 inline HttpResponse bad_request_response(const char* why) {
     s3::S3Error err(s3::S3ErrorCode::InvalidRequest, why);
     std::string rid = fallback_request_id();
+    LOG_WARN("rejected malformed request (request id {}): {}", rid, why);
+    HttpResponse resp;
+    resp.status = s3::http_status(err.code);
+    resp.small_body = s3::error_xml(err, rid);
+    resp.headers.set("Content-Type", "application/xml");
+    resp.headers.set("x-amz-request-id", rid);
+    return resp;
+}
+
+// 上游驱动自产的错误响应（httplib 的路由/头部拒绝等）：仍需带 id 才能回捞
+inline HttpResponse upstream_error_response(s3::S3ErrorCode code, const char* why) {
+    s3::S3Error err(code, why);
+    std::string rid = fallback_request_id();
+    LOG_WARN("rejected by the HTTP layer (request id {}): {}", rid, why);
     HttpResponse resp;
     resp.status = s3::http_status(err.code);
     resp.small_body = s3::error_xml(err, rid);

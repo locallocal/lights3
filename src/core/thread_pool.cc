@@ -19,13 +19,18 @@ ThreadPool::ThreadPool(size_t threads, size_t queue_capacity)
 ThreadPool::~ThreadPool() { join(); }
 
 void ThreadPool::post(std::function<void()> fn) {
+    auto now = Clock::now();  // 取时间在锁外：入队侧同样不该把时钟读进临界区
+    bool queued = false;
     {
         std::lock_guard lk(m_);
         if (!stopping_) {
-            cont_queue_.push_back({std::move(fn), Clock::now()});
-            cv_.notify_one();
-            return;
+            cont_queue_.push_back({std::move(fn), now});
+            queued = true;
         }
+    }
+    if (queued) {
+        cv_.notify_one();  // 唤醒放在锁外：持锁 notify 会让被唤线程立刻撞上锁
+        return;
     }
     // join 后的续体投递不可失败：消费方（FinalAwaiter::await_suspend、Permit 析构）
     // 都是 noexcept 上下文，抛出即 std::terminate。就地执行让残余请求链在调用方
@@ -35,13 +40,14 @@ void ThreadPool::post(std::function<void()> fn) {
 }
 
 void ThreadPool::enqueue_bounded(std::function<void()> fn) {
+    auto now = Clock::now();  // 同 post：时钟读取不进临界区
     {
         std::lock_guard lk(m_);
         if (stopping_) throw std::runtime_error("ThreadPool: schedule after join");
         if (queue_.size() >= capacity_)
-            backlog_.push_back({std::move(fn), Clock::now()});
+            backlog_.push_back({std::move(fn), now});
         else
-            queue_.push_back({std::move(fn), Clock::now()});
+            queue_.push_back({std::move(fn), now});
     }
     cv_.notify_one();
 }

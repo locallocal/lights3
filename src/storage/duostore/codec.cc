@@ -145,6 +145,7 @@ void append_extent_runs(std::string& out, const std::vector<Extent>& extents) {
 // 算术跳过 runs 段（run 头定长 33B + 4B×count 的 crc 数组），不物化 Extent
 void skip_extent_runs(Cursor& c) {
     uint32_t n_runs = c.u32();
+    if (size_t(n_runs) * 33 > c.s.size() - c.pos) corrupt("run count beyond payload");
     for (uint32_t i = 0; i < n_runs; ++i) {
         c.u8();   // kind
         c.u64();  // first_file_id
@@ -158,7 +159,11 @@ void skip_extent_runs(Cursor& c) {
 
 std::vector<Extent> read_extent_runs(Cursor& c) {
     uint32_t n_runs = c.u32();
+    // n_runs 是裸 u32：每个 run 至少占 33B 头，先按剩余载荷卡掉离谱值。否则
+    // 损坏的长度字段要先把 out 撑到几十万条，才轮到 need() 在半路抛（§4）
+    if (size_t(n_runs) * 33 > c.s.size() - c.pos) corrupt("run count beyond payload");
     std::vector<Extent> out;
+    out.reserve(n_runs);
     for (uint32_t i = 0; i < n_runs; ++i) {
         uint8_t kind = c.u8();
         if (kind > uint8_t(Extent::Kind::kRados)) corrupt("unknown extent kind");

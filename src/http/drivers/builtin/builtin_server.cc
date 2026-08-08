@@ -371,8 +371,7 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
         resp = sync_wait_pumping(conn_exec, sh.handler(std::move(req)));
     } catch (const std::exception& e) {
         // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2：500 + InternalError XML）
-        LOG_ERROR("handler escaped exception: {}", e.what());
-        resp = driver::internal_error_response();
+        resp = driver::internal_error_response(e.what());
         keep_alive = false;
     }
 
@@ -396,7 +395,8 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
-    ConnReader reader{fd};
+    ConnReader reader;
+    reader.fd = fd;  // 逐字段赋值：聚合初始化会把未列出的 buf 值初始化（memset 16KiB）
     bool keep_alive = true;
     while (keep_alive && !sh.stopping.load()) {
         if (!serve_one(sh, fd, reader, peer, keep_alive)) break;

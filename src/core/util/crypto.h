@@ -32,6 +32,23 @@ std::optional<std::string> aes256gcm_open(const Aes256Key& key, std::string_view
 // （docs/gaps.md §4——对做了 SK at-rest 加密的系统，明文残留是防护链缺环）
 void secure_wipe(std::string& s);
 
+// 析构即擦除的字符串：SK 解出来之后要在凭证表里长期存活，只擦解密失败路径
+// 等于防护链只修了最短那一段。继承 std::string 是为了让既有的
+// const std::string& 形参、string_view 转换、比较与 JSON 赋值一处都不用改。
+// 已知局限：扩容遗留的旧缓冲区不在擦除范围内——根治需要自定义分配器
+class SecretString : public std::string {
+public:
+    using std::string::string;  // const char* / string_view / (n, c) 等一并继承
+    SecretString() = default;
+    SecretString(std::string s) : std::string(std::move(s)) {}  // NOLINT(google-explicit-constructor)
+    SecretString(const SecretString&) = default;
+    SecretString(SecretString&&) = default;
+    SecretString& operator=(const SecretString&) = default;
+    SecretString& operator=(SecretString&&) = default;
+    using std::string::operator=;
+    ~SecretString() { secure_wipe(*this); }
+};
+
 // 增量哈希（流式 body 校验 / ETag 计算）
 class HashStream {
 public:

@@ -24,8 +24,9 @@
 - **第三部分 · 文档与实现的偏差**：15 条实现与承诺不符（含"改实现"与"改文档"两类），另有 7 条中英文档漂移（§8）。
 
 P0 四条**已于 2026-08-03 全部修复**（详见 §1），高危 25 条（§2 的 12 条展开 + §2.13 的 13 行）
-**已于 2026-08-06 全部修复**（详见 §2；其中 §2.6 的下推顺带解决了 §3.6）。当前未修复的起点是
-§3 中危。
+**已于 2026-08-06 全部修复**（详见 §2；其中 §2.6 的下推顺带解决了 §3.6），中危三十余条
+**已于 2026-08-08 全部修复**（详见 §3），低危 23 行**已于 2026-08-08 全部修复**（详见 §4）。
+第一部分至此清零；当前未修复的起点是第二部分的 §5 S3 协议缺口。
 
 P0 四条按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
 
@@ -520,33 +521,38 @@ credstore_policy_snapshot_survives_revocation。
 
 ---
 
-## 4. 低
+## 4. [✅已修复] 低
 
-| 位置 | 问题 |
-| --- | --- |
-| `src/core/thread_pool.h:39` vs `.cc:23` | 声称"不可失败不可等待"的续体投递与阻塞任务共用同一个 4096 队列，压力下续体要排在 4096 个 IO 之后 |
-| `src/core/thread_pool.cc:87-89` | `completed_` 每任务取一次锁与调度队列争用；`wait_hist_` 在持锁段内取时间 |
-| `src/core/metrics.cc:184,189` | 渲染用默认 6 位浮点精度：桶界 ≥1e6 会渲成 `1.04858e+06`，相近桶界可能折叠成重复 le 序列（Prometheus 直接拒绝整个 target） |
-| `src/core/metrics.cc:168` | `# HELP` 文本不转义（标签值有转义，help 没有）；同名指标 help 不一致时静默取首次 |
-| `src/core/util/crypto.cc:87-99` | 解出的凭证 SK 留在 `std::string` 里不擦除——对一个做了 SK at-rest 加密的系统是防护链缺环 |
-| `src/core/timer.cc:27` | 每次 `add` 都 `notify_all`，即便新条目不是最早到期者 |
-| `src/core/task.h:133,139,143` | moved-from 的 `Task` 上调用即空指针解引用，无防护 |
-| `src/http/drivers/common.h:116-134` | 驱动兜底的 400/500 响应既无 `x-amz-request-id` 头也无 XML 里的 RequestId——恰恰是最需要追溯的两类错误 |
-| `src/http/drivers/builtin/builtin_server.cc:422-428` | thread-per-connection 默认 8MiB 栈 × 4096 = 32GiB 虚拟地址空间（实际峰值约 100KiB）；`char buf[16*1024] = {}` 每连接 memset 16KiB |
-| `src/http/drivers/builtin/builtin_server.cc:347-349` | 无法区分空闲 keep-alive 与在途请求，停机固定阻塞 10 秒（beast/seastar 会立刻掐空闲会话） |
-| `src/http/drivers/httplib/httplib_server.cc:130,212,226` | 每个带 body 的请求额外起一个 `std::thread`；content provider **每 64KiB 块**构造一次 vector；`pushpull` 让请求体被拷贝两次 |
-| 四驱动 | drain 上限 4MiB、宽限 10s、trailer 16KiB、块大小 64KiB、连接上限 4096 等全部硬编码且散落四处（2.13 的连接上限漏改就是例子） |
-| `src/s3/metrics.cc:26-29` | `s3_error` 每个错误响应抢一把全局互斥锁（键有界，问题只在争用；同文件 `by_method_` 已是原子数组） |
-| `src/s3/xml.cc:9-23` | `xml_escape` 不处理控制字符，而 `<Resource>` 会反射**未经校验**的 bucket 名（1.1 修好后自动消解，但出口仍应兜底） |
-| `src/storage/listing.cc:7-28` | `bytes=5-3` 这类**语法非法**的 range 返回 416，RFC 9110 与 AWS 的行为是忽略该头回 200 |
-| `src/storage/listing.cc:52,66,71` | `next_token` 是明文 key 而非不透明串；S3 层 V1 做了编码、V2 直接透传，两版本不一致 |
-| `src/storage/tiered/tiered_backend.cc:614-639` | 磁盘被本实例之外的东西写满且无可回收候选时，每轮重算 `need>0` 却释放 0 字节，无任何日志 |
-| `src/storage/tiered/tiered_backend.cc:980-1017` | `atime_` 表无界增长（绕过 tiered 的删除不清理），快照是每 5 分钟**全量重写**（千万对象即数百 MB + fsync） |
-| `src/storage/localfs/localfs_backend.cc:85-86` | `create_bucket` 的 marker 从不 fsync（对象写路径是严格 fsync 的），掉电后 bucket 消失而客户端已收到 200 |
-| `src/storage/duostore/codec.cc:41,180` | 编码路径的超限走 `corrupt()` → 用户提交超长 user-meta 得到 500 "corrupt meta value"，正确语义是 400 |
-| `src/storage/duostore/codec.cc:152-175` | `read_extent_runs` 不校验 pack extent 的 `count` 必须为 1，也无 run 数上限，损坏值会解出一串假 extent |
-| `tikv_client.cc:240,308` | region 错误路径用**递归**重做批次，退避预算耗尽前深度无界 |
-| `fs_data_store.cc:485` | fs 引擎对 `kRados` extent 静默跳过 → 引擎错配时 GC 全程空转且不告警 |
+> 本表 23 行**已于 2026-08-08 全部修复**，末列为实际修法。
+> 修复分两批：主体在 `fix: gaps §4「低」全部 23 行`，逐条复核后发现其中 7 行只落了一半
+> （memset 未真正消除、SK 只擦了失败路径、httplib 兜底仍丢 request id 等），残留在
+> `fix: gaps §4 复核残留` 补齐。末列凡写"**残留**"者为刻意不做，并给出理由。
+
+| 位置 | 问题 | ✅ 实际修法 |
+| --- | --- | --- |
+| `src/core/thread_pool.h:39` vs `.cc:23` | 声称"不可失败不可等待"的续体投递与阻塞任务共用同一个 4096 队列，压力下续体要排在 4096 个 IO 之后 | 续体独立 `cont_queue_`（无容量上限，`post` 不检查 `capacity_` 也不抛），worker 严格优先排空它再看 `queue_`/`backlog_`（`thread_pool.cc:95-97`）。**残留**：严格优先意味着续体洪峰理论上可饿死调度队列——续体是已完成任务的有限后继、不自我繁殖，故未加配额；`join` 之后的 `post` 仍就地执行（消费方是 noexcept 上下文，只能这样收尾） |
+| `src/core/thread_pool.cc:87-89` | `completed_` 每任务取一次锁与调度队列争用；`wait_hist_` 在持锁段内取时间 | 两者改原子（`completed_` 与 `wait_hist_[]`，`thread_pool.h:109-110`），完成侧计时移出锁；复核时补掉入队侧——`post`/`enqueue_bounded` 的 `Clock::now()` 也移出临界区，`post` 的 `notify_one` 一并挪到锁外 |
+| `src/core/metrics.cc:184,189` | 渲染用默认 6 位浮点精度：桶界 ≥1e6 会渲成 `1.04858e+06`，相近桶界可能折叠成重复 le 序列（Prometheus 直接拒绝整个 target） | `fmt_double` 改 `std::to_chars` 最短往返（`metrics.cc:16-24`），桶界不再折叠；复核补掉同一失败模式的另一半——`to_chars` 对非有限值写出的是 `inf`/`nan`，Prometheus 同样拒收整个 target，改为 `+Inf`/`-Inf`/`NaN`。两条均有用例（`metrics_nonfinite_render`、`metrics_large_bucket_bounds_render`） |
+| `src/core/metrics.cc:168` | `# HELP` 文本不转义（标签值有转义，help 没有）；同名指标 help 不一致时静默取首次 | `escape_help`（`\` → `\\`、换行 → `\n`，规范只要求这两个）用于 `# HELP` 行；同名不同 help 改 LOG_WARN 后仍取首次（`metrics.cc:105-109`） |
+| `src/core/util/crypto.cc:87-99` | 解出的凭证 SK 留在 `std::string` 里不擦除——对一个做了 SK at-rest 加密的系统是防护链缺环 | 首批只加了 `secure_wipe`（OPENSSL_cleanse）并擦解密失败路径，**成功路径的 SK 仍原样留在凭证表里**，即本行原文所指。复核补 `util::SecretString`（析构即 cleanse，继承 `std::string` 故既有 `const std::string&` 形参与比较一处未改），铺到 SK 的整条存活链：`Credential::secret_key`、`CredentialInfo::secret_key`、`CredentialLookup::secret_key`、静态表 `creds_`、`secret_for()` 返回值、以及 `derive_signing_key` 里的 `"AWS4"+sk` 派生串。**残留**：`std::string` 扩容遗留的旧缓冲不在擦除范围内（需自定义分配器），v1 明文凭证对象的 JSON 缓冲同理——那条路径本就是明文落盘 |
+| `src/core/timer.cc:27` | 每次 `add` 都 `notify_all`，即便新条目不是最早到期者 | 仅当新条目成为 `items_` 首元素才 `notify_one`（`timer.cc:29-44`）；复核把该唤醒挪到锁外，免得被唤线程醒来即撞锁 |
+| `src/core/task.h:133,139,143` | moved-from 的 `Task` 上调用即空指针解引用，无防护 | `co_await`/`via`/`with_cancel`/`start` 四个入口经 `check_valid` 抛 `logic_error`（`Task<T>` 与 `Task<void>` 两份特化各一套）；复核补上未列入原文但同样裸解引用的 `take_result()`。用例 `task_moved_from_throws_not_segv` |
+| `src/http/drivers/common.h:116-134` | 驱动兜底的 400/500 响应既无 `x-amz-request-id` 头也无 XML 里的 RequestId——恰恰是最需要追溯的两类错误 | `internal_error_response`/`bad_request_response` 生成 id 并同时写进响应头与 XML。复核发现"能追溯"并未真正兑现：id 从不进日志（客户端拿着 id 也换不回现场），且 httplib 有五条兜底路径只搬 status+body、id 丢在半路。现改为在这两个构造点直接打日志（四驱动因此都不必各记一份，异常文本经参数带入），httplib 新增 `apply_fallback` 统一搬运，另两条自产错误响应（上游 4xx/5xx 翻译、431 头过大）改走新的 `upstream_error_response`，不再发空 `<RequestId>` |
+| `src/http/drivers/builtin/builtin_server.cc:422-428` | thread-per-connection 默认 8MiB 栈 × 4096 = 32GiB 虚拟地址空间（实际峰值约 100KiB）；`char buf[16*1024] = {}` 每连接 memset 16KiB | 连接线程改 `pthread_create` + `pthread_attr_setstacksize(512KiB)` + DETACHED（`:211-236`），32GiB 虚拟地址预留消除。memset 那半首批**没真正消除**：`= {}` 从成员声明上删掉了，但构造点 `ConnReader reader{fd};` 是聚合初始化，未列出的成员照样值初始化（反汇编里 `memset` 仍在）。复核改为默认初始化后逐字段赋值，现编译产物中该目标文件已无 `memset` |
+| `src/http/drivers/builtin/builtin_server.cc:347-349` | 无法区分空闲 keep-alive 与在途请求，停机固定阻塞 10 秒（beast/seastar 会立刻掐空闲会话） | `ConnShared` 增 idle fd 集合，等待新请求行期间登记（登记与 `stopping` 判定在同一临界区内，关闭竞态因此闭合），停机先 `shutdown()` 全部空闲 fd 再进宽限（`:203`、`:289-300`、`:527`）。**残留**：判定粒度是"是否已读到请求行的第一个字节"，卡在半个请求头上的连接算在途，仍占满宽限 |
+| `src/http/drivers/httplib/httplib_server.cc:130,212,226` | 每个带 body 的请求额外起一个 `std::thread`；content provider **每 64KiB 块**构造一次 vector；`pushpull` 让请求体被拷贝两次 | content provider 的缓冲随闭包复用（`:302`，每响应一次 64KiB 分配）。**残留**：每请求一个 pump 线程与 `pushpull` 的两次拷贝是该驱动"推转拉"架构的形态本身，改动等于重写驱动；该驱动定位为功能验证而非性能路径（文件头已注明），故不做 |
+| 四驱动 | drain 上限 4MiB、宽限 10s、trailer 16KiB、块大小 64KiB、连接上限 4096 等全部硬编码且散落四处（2.13 的连接上限漏改就是例子） | `drivers/common.h:19-24` 收口 `kDrainMaxBytes`/`kTrailerMaxBytes`/`kIoChunkBytes`/`kScratchBytes`/`kShutdownGrace`/`kShutdownForceWait`，四驱动全部引用，字面量不再有第二份。连接上限走的是另一条路——它已是 `HttpConfig::max_connections` 配置项（§2.13 的修法），运维可调，不该再退回编译期常量。复核另收掉 `main.cc` 里与宽限同值的第二个 `10`：它等的是许可归位（与驱动的连接宽限是两个量），但日志串里又抄了一遍 `"10s"`，改为单一常量 + 格式化 |
+| `src/s3/metrics.cc:26-29` | `s3_error` 每个错误响应抢一把全局互斥锁（键有界，问题只在争用；同文件 `by_method_` 已是原子数组） | 改按枚举下标的定长原子数组（`metrics.h:28-30`），互斥锁去除；`kS3ErrorCodeCount` 与枚举同出一张 X-macro 码表（`errors.h:49-53`），加错误码时两者一次改完，不存在漂移 |
+| `src/s3/xml.cc:9-23` | `xml_escape` 不处理控制字符，而 `<Resource>` 会反射**未经校验**的 bucket 名（1.1 修好后自动消解，但出口仍应兜底） | `xml_escape` 丢弃 XML 1.0 非法控制字符（`< 0x20` 且非 `\t`/`\n`/`\r`，`xml.cc:23-25`），出口兜底成立 |
+| `src/storage/listing.cc:7-28` | `bytes=5-3` 这类**语法非法**的 range 返回 416，RFC 9110 与 AWS 的行为是忽略该头回 200 | 修在解析侧而非 `resolve_range`：`parse_range_header` 判出 `last < first` 即返回 `nullopt`，整个头按无效忽略回 200（`s3/handlers/objects.cc:42-44`）——416 的语义留给"语法合法但不可满足"，两者本就该分开。用例已加 |
+| `src/storage/listing.cc:52,66,71` | `next_token` 是明文 key 而非不透明串；S3 层 V1 做了编码、V2 直接透传，两版本不一致 | 同样修在 S3 层：V2 的 `continuation-token` base64 签发/解析，解不开回 400 InvalidArgument；V1 的 `marker` 保持明文 key（规范里它本就是 key 且响应要回显），两版本各归各语义（`s3/handlers/list_objects.cc:11-78`、`:113-125`）。用例覆盖不透明往返与坏 token |
+| `src/storage/tiered/tiered_backend.cc:614-639` | 磁盘被本实例之外的东西写满且无可回收候选时，每轮重算 `need>0` 却释放 0 字节，无任何日志 | 淘汰轮结束仍有缺口时 LOG_WARN 并报出还差多少字节（`:714-718`），不再静默空转。频率由 `scan_interval_sec`（默认 3600s）天然限住 |
+| `src/storage/tiered/tiered_backend.cc:980-1017` | `atime_` 表无界增长（绕过 tiered 的删除不清理），快照是每 5 分钟**全量重写**（千万对象即数百 MB + fsync） | 有界化：快照时按判冷阈值滚动淘汰（早于 `cold_after_sec` 的记录丢掉——对象已够判冷资格，mtime 兜底得同一结论），表只随"近期被访问的键"增长（`:1109-1130`）。全量重写那半复核时补：加脏位，表自上次快照没动过就整轮跳过（写失败则置回脏位下轮重试）。**残留**：表确有变更时仍是全量重写，增量 journal 未做——变更即写是这份快照的正确性来源，且滚动淘汰后体量已随近期访问集而非对象总数 |
+| `src/storage/localfs/localfs_backend.cc:85-86` | `create_bucket` 的 marker 从不 fsync（对象写路径是严格 fsync 的），掉电后 bucket 消失而客户端已收到 200 | marker 与桶目录 fsync；复核补两点：桶目录自己的 dirent 记在 root 里，只 fsync 桶目录换不来它的持久性，故加 `fsync_dir(root_)`；且原实现绕开了 `fsutil` 的 fsync 总开关，改走 `fsutil::fsync_file`/`fsync_dir` 与对象写路径同进退（`:96-110`） |
+| `src/storage/duostore/codec.cc:41,180` | 编码路径的超限走 `corrupt()` → 用户提交超长 user-meta 得到 500 "corrupt meta value"，正确语义是 400 | 编码侧超限改抛 `S3Error(InvalidArgument)`（`too_large()`，`codec.cc:42-48`、`:189`），映射 400；`corrupt()`（InternalError/500）此后只用于解码路径 |
+| `src/storage/duostore/codec.cc:152-175` | `read_extent_runs` 不校验 pack extent 的 `count` 必须为 1，也无 run 数上限，损坏值会解出一串假 extent | 校验 `kind <= kRados`、`count != 0`、pack 的 `count == 1`、以及 `count` 必须被剩余 crc 字节覆盖（`:159-171`）。复核补上原文点名的"run 数上限"：`n_runs` 是裸 u32，按每 run 至少 33B 头先卡剩余载荷，否则损坏长度要先把 vector 撑到几十万条才轮到 `need()` 抛；`skip_extent_runs` 同步加 |
+| `tikv_client.cc:240,308` | region 错误路径用**递归**重做批次，退避预算耗尽前深度无界 | `prewrite_keys`/`commit_keys` 改显式工作栈（`:214-224`、`:293-304`），递归消除。栈驻留的 key 总量不超过本事务的 key 数（`make_batches` 只做切分不复制），终止由退避预算耗尽时抛出保证 |
+| `fs_data_store.cc:485` | fs 引擎对 `kRados` extent 静默跳过 → 引擎错配时 GC 全程空转且不告警 | `FsDataStore::remove` 遇非 `kChunk`/`kPack` 的 extent 记一次 LOG_ERROR（函数内静态原子位，全进程一次），指出数据/元引擎错配（`:588-597`）。`kPack` 仍静默跳过是设计——它的空洞由压实回收 |
 
 ---
 
@@ -717,7 +723,7 @@ credstore_policy_snapshot_survives_revocation。
 
 1. ~~**先修 P0 的四条**（1.1–1.4）。其中 1.1 的三处改动必须同批上线（单改一处不构成防线）。~~ ✅ 2026-08-03 完成。
 2. ~~**2.1 + 2.2 一起修**——两条都是"后台线程/关停期异常防线"，成本极低、收益立竿见影，且 2.2 的 TimerQueue 次生问题会让 2.1 的修复更难验证。~~ ✅ 2026-08-06 完成（§2 整节同批）。
-3. **3.1 / 3.2 / `AsyncSemaphore` 取消是同一条链**（2.9 已单独修完）：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持（§2.13 只做了析构断言，`close()` 留在这里），否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。**这是当前的下一站。**
+3. ~~**3.1 / 3.2 / `AsyncSemaphore` 取消是同一条链**（2.9 已单独修完）：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持（§2.13 只做了析构断言，`close()` 留在这里），否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。~~ ✅ 2026-08-07/08 完成（§3 整节，§4 随后）。**第一部分至此清零，下一站是 §5.1 的分页缺失**——ListMultipartUploads / ListParts 恒报 `IsTruncated=false` 是会让客户端漏读的谎报，在第二部分里最该先动。
 4. **6.1 的 pack 老化/预算**——2.3 的存活账口径与压实判据已改，续做时以现判据为基线，避免再次推翻测试。
 5. **3.5 的白名单反转**一次性消掉 5.3、3.4 的一半与未来所有子资源漂移，性价比最高。
 6. 第 7 节的工程能力（CI、TLS、后端指标）不阻塞正确性修复，可并行推进。

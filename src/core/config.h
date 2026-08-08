@@ -8,6 +8,8 @@
 #include <string>
 #include <vector>
 
+#include "core/util/crypto.h"
+
 namespace lights3 {
 
 // ---------- YAML 子集节点 ----------
@@ -53,7 +55,7 @@ struct RuntimeConfig {
 
 struct Credential {
     std::string access_key;
-    std::string secret_key;
+    util::SecretString secret_key;  // 析构即擦除（docs/gaps.md §4）
 };
 
 struct AuthConfig {

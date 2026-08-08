@@ -170,13 +170,16 @@ int main(int argc, char** argv) {
         shutdown_src->request_cancel();
         inflight->close();
         {
-            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+            // 驱动侧的连接宽限是另一个量（drivers/common.h kShutdownGrace），这里
+            // 等的是许可归位。字面量只写一处：日志里再抄一份 "10s" 迟早对不上
+            constexpr auto kDrainDeadline = std::chrono::seconds(10);
+            auto deadline = std::chrono::steady_clock::now() + kDrainDeadline;
             while (inflight->available() < max_inflight &&
                    std::chrono::steady_clock::now() < deadline)
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));
             if (inflight->available() < max_inflight)
-                LOG_ERROR("{} request(s) still in flight after 10s; proceeding with shutdown",
-                          max_inflight - inflight->available());
+                LOG_ERROR("{} request(s) still in flight after {}s; proceeding with shutdown",
+                          max_inflight - inflight->available(), kDrainDeadline.count());
         }
 
         cred_store->shutdown_background();  // 定时器/在途同步须先于线程池收尾

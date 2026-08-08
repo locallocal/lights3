@@ -28,6 +28,15 @@ bool is_pseudo_header(const std::string& k) {
     return k == "REMOTE_ADDR" || k == "REMOTE_PORT" || k == "LOCAL_ADDR" || k == "LOCAL_PORT";
 }
 
+// 兜底响应搬进 httplib::Response（docs/gaps.md §4）：此前各处只搬 status 与 body，
+// x-amz-request-id 头被丢在 HttpResponse 里——XML 里有 id 而头里没有，恰是另三驱动
+// 都不会出现的不一致
+void apply_fallback(httplib::Response& rs, const HttpResponse& src) {
+    rs.status = src.status;
+    rs.set_content(src.small_body, "application/xml");
+    if (auto* rid = src.headers.find("x-amz-request-id")) rs.set_header("x-amz-request-id", *rid);
+}
+
 class HttplibServer final : public IHttpServer {
 public:
     explicit HttplibServer(const HttpConfig& cfg) : cfg_(cfg) {
@@ -48,10 +57,16 @@ public:
         svr_.set_keep_alive_timeout(cfg.idle_timeout_sec);
         svr_.set_keep_alive_max_count(1024);
         svr_.set_exception_handler(
-            [](const httplib::Request&, httplib::Response& rs, std::exception_ptr) {
-                auto err = driver::internal_error_response();
-                rs.status = err.status;
-                rs.set_content(err.small_body, "application/xml");
+            [](const httplib::Request&, httplib::Response& rs, std::exception_ptr ep) {
+                std::string what;
+                try {
+                    if (ep) std::rethrow_exception(ep);
+                } catch (const std::exception& e) {
+                    what = e.what();
+                } catch (...) {
+                    what = "<non-std exception>";
+                }
+                apply_fallback(rs, driver::internal_error_response(what));
             });
         // Expect: 100-continue（docs/http-adapter.md §3.1 要求延迟应答）。
         // 上游 API 只有三种出路：立即回 100 / 回 417 / 以最终响应关连接——
@@ -66,8 +81,7 @@ public:
                     if (!is_pseudo_header(k)) headers.add(k, v);
                 if (!driver::parse_body_framing(headers).valid) {
                     auto bad = driver::bad_request_response("Invalid message framing.");
-                    rs.status = bad.status;
-                    rs.set_content(bad.small_body, "application/xml");
+                    apply_fallback(rs, bad);
                     return bad.status;  // 非 100/417：上游发出该响应并关连接
                 }
                 return static_cast<int>(httplib::StatusCode::Continue_100);
@@ -92,9 +106,10 @@ public:
                 case 505: code = s3::S3ErrorCode::NotImplemented; break;
                 default: if (rs.status < 500) code = s3::S3ErrorCode::InvalidRequest; break;
             }
-            rs.set_content(s3::error_xml(s3::S3Error(code, "Request rejected by the HTTP layer."),
-                                         ""),
-                           "application/xml");
+            int status = rs.status;  // 上面已按上游语义定好，不能被兜底的映射覆盖
+            apply_fallback(rs,
+                           driver::upstream_error_response(code, "Request rejected by the HTTP layer."));
+            rs.status = status;
             return HR::Handled;
         });
 
@@ -166,9 +181,7 @@ private:
         // CL/TE 冲突、非数字 Content-Length 等更宽松，一律在 L1 拒绝并关连接，
         // 保证四个驱动接受/拒绝的请求集合一致
         auto reject = [&](const char* why) {
-            auto bad = driver::bad_request_response(why);
-            rs.status = bad.status;
-            rs.set_content(bad.small_body, "application/xml");
+            apply_fallback(rs, driver::bad_request_response(why));
             rs.set_header("Connection", "close");  // 边界已存疑，不复用连接
         };
         auto framing = driver::parse_body_framing(req.headers);
@@ -183,11 +196,9 @@ private:
         for (auto& [k, v] : rq.headers)
             if (!is_pseudo_header(k)) header_bytes += k.size() + v.size() + 4;  // ": " + CRLF
         if (header_bytes > cfg_.max_header_size) {
-            rs.status = 431;
-            rs.set_content(s3::error_xml(s3::S3Error(s3::S3ErrorCode::InvalidRequest,
-                                                     "Request header fields too large."),
-                                         ""),
-                           "application/xml");
+            apply_fallback(rs, driver::upstream_error_response(s3::S3ErrorCode::InvalidRequest,
+                                                              "Request header fields too large."));
+            rs.status = 431;  // InvalidRequest 映射 400，此处按上游语义回 431
             rs.set_header("Connection", "close");
             return;
         }
@@ -228,8 +239,7 @@ private:
             resp = sync_wait_pumping(req_exec, handler_(std::move(req)));
         } catch (const std::exception& e) {
             // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
-            LOG_ERROR("handler escaped exception: {}", e.what());
-            resp = driver::internal_error_response();
+            resp = driver::internal_error_response(e.what());
         }
 
         if (pump.joinable()) {

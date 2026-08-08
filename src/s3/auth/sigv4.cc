@@ -174,7 +174,7 @@ bool is_hex_digest(const std::string& s) {
 // HMAC 链派生签名密钥：date → region → service → "aws4_request"
 util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::string& date,
                                       const std::string& region, const std::string& service) {
-    std::string init = "AWS4" + secret_key;
+    util::SecretString init = "AWS4" + secret_key;  // SK 派生物，出作用域即擦
     auto k = util::hmac_sha256(
         std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
     k = util::hmac_sha256(k, region);
@@ -373,7 +373,7 @@ public:
     bool has_credentials() const override { return !creds_.empty(); }
 
 private:
-    std::map<std::string, std::string, std::less<>> creds_;
+    std::map<std::string, util::SecretString, std::less<>> creds_;
 };
 
 }  // namespace

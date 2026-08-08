@@ -281,6 +281,9 @@ Config Config::from_string(const std::string& text) {
         // 请求级超时与传输停滞上限（docs/gaps.md §3.3）：0 = 关闭
         if (auto v = http->get("request_timeout"); !v.empty())
             cfg.http.request_timeout_sec = parse_duration_sec(v);
+        // multipart 最小分片（docs/gaps.md §5.7）：0 = 不限制
+        if (auto v = http->get("min_part_size"); !v.empty())
+            cfg.http.min_part_size = parse_size(v);
         if (auto v = http->get("transfer_stall_timeout"); !v.empty())
             cfg.http.transfer_stall_timeout_sec = parse_duration_sec(v);
         cfg.http.max_connections =

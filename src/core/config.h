@@ -39,6 +39,9 @@ struct HttpConfig {
     // 打断请求（挂起点抛 OperationCancelled → 504）。idle_timeout 只覆盖 socket
     // 系统调用，覆盖不到 handler 执行期。0 = 关闭
     int request_timeout_sec = 300;
+    // multipart 最小分片字节数（docs/gaps.md §5.7）：AWS 恒 5MiB，0 = 不限制。
+    // 前面挂着不守这条规则的工具链、或本实例只是另一个 lights3 的代理时可放开
+    uint64_t min_part_size = 5ull * 1024 * 1024;
     // 传输停滞上限：流式收发**整体**允许的无进展时长。四驱动的分块超时都是逐块
     // 重置的，每 59 秒发 1 字节的客户端可无限期占住连接。0 = 关闭
     int transfer_stall_timeout_sec = 300;

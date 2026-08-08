@@ -239,8 +239,9 @@ inline void run_backend_suite(IStorageBackend& b) {
     auto complete = [&](const std::string& id, std::vector<PartInfo> parts) {
         return sync_wait(b.complete_multipart("suite-bkt", "mp/joined.bin", id, parts));
     };
-    // 乱序 / ETag 不匹配 / 缺分片 / 空 parts
-    CHECK_THROWS_S3(complete(uid, {{2, r2.etag}, {1, r1.etag}}), S3ErrorCode::InvalidPart);
+    // 乱序 / ETag 不匹配 / 缺分片 / 空 parts。乱序有专属码（docs/gaps.md §5.7）：
+    // InvalidPart 会让客户端去重传分片，实际要做的是把列表排好序
+    CHECK_THROWS_S3(complete(uid, {{2, r2.etag}, {1, r1.etag}}), S3ErrorCode::InvalidPartOrder);
     CHECK_THROWS_S3(complete(uid, {{1, "deadbeef"}}), S3ErrorCode::InvalidPart);
     CHECK_THROWS_S3(complete(uid, {{1, r1.etag}, {3, r2.etag}}), S3ErrorCode::InvalidPart);
     CHECK_THROWS_S3(complete(uid, {}), S3ErrorCode::InvalidPart);

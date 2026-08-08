@@ -1,9 +1,11 @@
 // multipart handler：Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
 // （docs/s3-protocol.md §1；存储层语义见 docs/storage-backend.md §3.2）
 #include <charconv>
+#include <map>
 
 #include "core/util/time.h"
 #include "s3/handlers/common.h"
+#include "storage/multipart.h"
 #include "s3/service.h"
 #include "s3/xml.h"
 
@@ -31,6 +33,37 @@ std::string require_upload_id(const http::HttpRequest& req) {
     if (!v || v->empty())
         throw S3Error(S3ErrorCode::InvalidArgument, "Missing uploadId query parameter.");
     return *v;
+}
+
+// "scheme://host"：Location 要完整 URL（docs/gaps.md §5.7）。scheme 只能靠反代
+// 转述——直连时本实现是明文 HTTP，TLS 由前置代理终结（docs/s3-protocol.md）
+std::string request_base_url(const http::HttpRequest& req) {
+    std::string scheme = "http";
+    if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) scheme = *p;
+    std::string host = req.headers.get("Host").value_or("");
+    return scheme + "://" + host;
+}
+
+// 最小分片校验（docs/gaps.md §5.7）：末片除外。分片尺寸只有存储层知道，
+// complete 之前先列一次；缺失的分片不在这里报错，交给后端的 InvalidPart
+Task<void> check_min_part_sizes(storage::IStorageBackend& backend, const std::string& bucket,
+                                const std::string& key, const std::string& upload_id,
+                                const std::vector<storage::PartInfo>& parts, uint64_t min_size) {
+    if (min_size == 0) co_return;      // 旋钮关闭
+    if (parts.size() <= 1) co_return;  // 单片上传不受最小尺寸约束
+    auto have = co_await backend.list_parts(bucket, key, upload_id);
+    std::map<int, uint64_t> size_of;
+    for (auto& p : have) size_of[p.part_no] = p.size;
+    for (size_t i = 0; i + 1 < parts.size(); ++i) {  // 末片不校验
+        auto it = size_of.find(parts[i].part_no);
+        if (it == size_of.end()) continue;
+        if (it->second < min_size)
+            throw S3Error(S3ErrorCode::EntityTooSmall,
+                          "Your proposed upload is smaller than the minimum allowed size. "
+                          "Part " + std::to_string(parts[i].part_no) + " is " +
+                              std::to_string(it->second) + " bytes; the minimum is " +
+                              std::to_string(min_size) + " bytes.");
+    }
 }
 
 // "bytes=first-last"：两端必填、闭区间（AWS UploadPartCopy 语义，比 GET Range 的
@@ -135,22 +168,36 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     std::vector<storage::PartInfo> parts;
     for (auto& child : root.children) {
         if (child.name != "Part") continue;
+        // 分片数上界（docs/gaps.md §5.7）：此前无限追加，一份构造好的 XML 就能
+        // 让本请求把任意长的列表读进内存
+        if (parts.size() >= size_t(storage::kMaxParts))
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "The upload contains more than the maximum number of allowed parts.");
         storage::PartInfo p;
         std::string no = child.get("PartNumber");
         auto [ptr, ec] = std::from_chars(no.data(), no.data() + no.size(), p.part_no);
         if (ec != std::errc() || ptr != no.data() + no.size())
             throw S3Error(S3ErrorCode::MalformedXML, "Invalid PartNumber.");
+        // 上界复核：upload 时校验过，complete 的列表是另一份输入
+        storage::validate_part_number(p.part_no);
         p.etag = child.get("ETag");
         parts.push_back(std::move(p));
     }
+    storage::validate_part_order(parts);  // 乱序 → InvalidPartOrder，先于后端判定
 
-    auto result =
-        co_await router_.resolve(bucket).complete_multipart(bucket, key, upload_id, parts);
+    auto& backend = router_.resolve(bucket);
+    // 最小分片 5MiB（末片除外）：不校验则 10000 个 1 字节分片也能提交，complete
+    // 逐个 open/read/write 拼接是廉价的放大面。尺寸只有存储层知道，故先列一次
+    co_await check_min_part_sizes(backend, bucket, key, upload_id, parts, min_part_size_);
+
+    auto result = co_await backend.complete_multipart(bucket, key, upload_id, parts);
     metrics_.mpu_finished();
 
     XmlWriter w;
     w.open("CompleteMultipartUploadResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
-    w.element("Location", "/" + bucket + "/" + key);
+    // Location 回完整 URL（部分 Java SDK 直接当 URL 用）。用 req.path 重建可同时
+    // 覆盖 path-style 与 vhost 两种寻址——vhost 下 req.path 本就只有 key
+    w.element("Location", request_base_url(req) + req.path);
     w.element("Bucket", bucket);
     w.element("Key", key);
     w.element("ETag", quote_etag(result.etag));

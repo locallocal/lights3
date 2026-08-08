@@ -66,7 +66,11 @@ struct RemoteStack {
     explicit RemoteStack(std::string base_domain = "")
         : svc(make_router(mem), s3::SigV4Authenticator::build(auth_cfg()),
               std::move(base_domain)),
-          server([this](http::HttpRequest req) { return svc.dispatch(std::move(req)); }) {}
+          server([this](http::HttpRequest req) { return svc.dispatch(std::move(req)); }) {
+        // 后端一致性套件用的是几字节的分片：远端关掉 5MiB 最小分片限制，
+        // 否则测的就成了"本实现的 L2 规则"而非 cloudproxy 的转发行为
+        svc.set_min_part_size(0);
+    }
 
     static AuthConfig auth_cfg() {
         AuthConfig a;

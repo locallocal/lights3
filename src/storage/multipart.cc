@@ -47,9 +47,12 @@ void validate_part_order(std::span<const PartInfo> parts) {
         throw S3Error(S3ErrorCode::InvalidPart, "You must specify at least one part.");
     int prev = 0;
     for (auto& p : parts) {
+        // 乱序有专属错误码（docs/gaps.md §5.7）：InvalidPart 是"这个分片有问题"，
+        // 客户端据此会去重传分片；实际要做的是把列表排好序再提交
         if (p.part_no <= prev)
-            throw S3Error(S3ErrorCode::InvalidPart,
-                          "The list of parts was not in ascending order.");
+            throw S3Error(S3ErrorCode::InvalidPartOrder,
+                          "The list of parts was not in ascending order. Parts must be "
+                          "ordered by part number.");
         prev = p.part_no;
     }
 }

@@ -329,9 +329,10 @@ check "CopyObject" "0" \
        | grep -q 'CopyObjectResult'; echo $?)"
 check "Copy 内容一致" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
 
-# Multipart：两个 3MiB 分片（docs/s3-protocol.md §8 真实流程）
-dd if=/dev/urandom of="$WORK/p1" bs=1M count=3 2>/dev/null
-dd if=/dev/urandom of="$WORK/p2" bs=1M count=3 2>/dev/null
+# Multipart：两个 5MiB 分片（docs/s3-protocol.md §8 真实流程）。5MiB 是 AWS 对
+# 非末片的最小分片（docs/gaps.md §5.7）——此前用 3MiB，真打到 AWS 上同样会被拒
+dd if=/dev/urandom of="$WORK/p1" bs=1M count=5 2>/dev/null
+dd if=/dev/urandom of="$WORK/p2" bs=1M count=5 2>/dev/null
 INIT=$(s3curl -X POST "$BASE/mybucket/mpu.bin?uploads")
 UPLOAD_ID=$(echo "$INIT" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
 check "CreateMultipartUpload 返回 UploadId" "0" "$([[ -n "$UPLOAD_ID" ]]; echo $?)"
@@ -368,7 +369,7 @@ UPC_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$UE1</ET
 s3curl -o /dev/null -X POST --data-binary "$UPC_XML" "$BASE/mybucket/upc.bin?uploadId=$UPC_ID"
 s3curl -o "$WORK/upc.out" "$BASE/mybucket/upc.bin"
 check "UploadPartCopy 拼装内容一致" \
-    "$(cat "$WORK/p1" "$WORK/p2" | head -c $((6*1024*1024)) | cat - <(head -c 1048576 "$WORK/p1") | md5sum | cut -d' ' -f1)" \
+    "$(cat "$WORK/p1" "$WORK/p2" <(head -c 1048576 "$WORK/p1") | md5sum | cut -d' ' -f1)" \
     "$(md5sum "$WORK/upc.out" | cut -d' ' -f1)"
 check "UploadPartCopy 越界 range 拒绝" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT \
@@ -376,6 +377,26 @@ check "UploadPartCopy 越界 range 拒绝" "400" \
        -H 'x-amz-copy-source-range: bytes=0-99999999' \
        "$BASE/mybucket/upc.bin?partNumber=3&uploadId=$UPC_ID")"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/upc.bin"
+
+# 非末片小于 5MiB → EntityTooSmall（docs/gaps.md §5.7）
+INIT3=$(s3curl -X POST "$BASE/mybucket/small.bin?uploads")
+SM_ID=$(echo "$INIT3" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
+s3curl -o /dev/null -D "$WORK/hs1" --data-binary 'tiny-part-one' -X PUT \
+    "$BASE/mybucket/small.bin?partNumber=1&uploadId=$SM_ID"
+s3curl -o /dev/null -D "$WORK/hs2" --data-binary 'tiny-part-two' -X PUT \
+    "$BASE/mybucket/small.bin?partNumber=2&uploadId=$SM_ID"
+S1=$(tr -d '\r' < "$WORK/hs1" | sed -n 's/^etag: //Ip')
+S2=$(tr -d '\r' < "$WORK/hs2" | sed -n 's/^etag: //Ip')
+SM_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$S1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$S2</ETag></Part></CompleteMultipartUpload>"
+check "非末片过小 EntityTooSmall" "0" \
+    "$(s3curl -X POST --data-binary "$SM_XML" "$BASE/mybucket/small.bin?uploadId=$SM_ID" \
+        | grep -q 'EntityTooSmall'; echo $?)"
+# 乱序有专属错误码
+SM_REV="<CompleteMultipartUpload><Part><PartNumber>2</PartNumber><ETag>$S2</ETag></Part><Part><PartNumber>1</PartNumber><ETag>$S1</ETag></Part></CompleteMultipartUpload>"
+check "乱序 InvalidPartOrder" "0" \
+    "$(s3curl -X POST --data-binary "$SM_REV" "$BASE/mybucket/small.bin?uploadId=$SM_ID" \
+        | grep -q 'InvalidPartOrder'; echo $?)"
+s3curl -o /dev/null -X DELETE "$BASE/mybucket/small.bin?uploadId=$SM_ID"
 
 # DeleteObjects 批量删除（AWS 要求带 Content-MD5，docs/gaps.md §5.6）
 DEL_XML='<Delete><Object><Key>copy.txt</Key></Object><Object><Key>mpu.bin</Key></Object></Delete>'

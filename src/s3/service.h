@@ -17,6 +17,7 @@
 #include "s3/auth/sigv4.h"
 #include "s3/metrics.h"
 #include "storage/bucket_router.h"
+#include "storage/multipart.h"
 
 namespace lights3::s3 {
 
@@ -64,6 +65,13 @@ public:
     // 请求级超时（docs/gaps.md §3.3）：0 = 关闭。到点以协作式取消打断整条 handler
     // 链，挂起点抛 OperationCancelled → 503
     void set_request_timeout(std::chrono::milliseconds t) { request_timeout_ = t; }
+
+    // multipart 最小分片（docs/gaps.md §5.7）：默认 AWS 的 5MiB，0 = 不限制。
+    // 做成旋钮而非硬编码，是因为网关前面挂的工具链未必守这条规则（把小分片
+    // 上传打回去比让运维改工具更贵），也让"proxy 到另一个 lights3"的部署形态
+    // 不至于被两层各判一次
+    void set_min_part_size(uint64_t n) { min_part_size_ = n; }
+    uint64_t min_part_size() const { return min_part_size_; }
 
     // 显式分派表（docs/s3-protocol.md §2）：(method, scope, query-flag) → handler，声明序匹配
     enum class Scope { Service, Bucket, Object };
@@ -136,6 +144,7 @@ private:
     Metrics metrics_;
     std::function<ThreadPool::Stats()> pool_stats_;
     std::chrono::milliseconds request_timeout_{0};
+    uint64_t min_part_size_ = storage::kMinPartSize;
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
 

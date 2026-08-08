@@ -178,6 +178,7 @@ TEST(service_not_implemented_apis) {
 
 TEST(service_upload_part_copy) {
     auto svc = make_service_noauth();
+    svc.set_min_part_size(0);  // 本用例测流程，不测 5MiB 规则（见 service_multipart_constraints）
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/src.bin", "0123456789")));
 
@@ -298,6 +299,7 @@ TEST(service_with_auth) {
 
 TEST(service_multipart_flow) {
     auto svc = make_service_noauth();
+    svc.set_min_part_size(0);  // 本用例测流程，不测 5MiB 规则（见 service_multipart_constraints）
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
 
     // Create → UploadId
@@ -1068,4 +1070,52 @@ TEST(service_delete_objects_requires_digest) {
     // 带上正确摘要即放行
     CHECK_EQ(sync_wait(svc.dispatch(make_delete_req("/bkt", xml, {{"delete", ""}}))).status, 200);
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 404);
+}
+
+TEST(service_multipart_constraints) {
+    // §5.7：AWS 的几条硬约束此前一条都没有
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    auto put_part = [&](int no, const std::string& data) {
+        auto r = sync_wait(svc.dispatch(make_req(
+            "PUT", "/bkt/mp.bin", data, {{"partNumber", std::to_string(no)}, {"uploadId", uid}})));
+        std::string e = *r.headers.get("ETag");  // 去引号：complete 的 XML 里不带引号
+        if (e.size() >= 2 && e.front() == '"') e = e.substr(1, e.size() - 2);
+        return e;
+    };
+    std::string e1 = put_part(1, "small");                          // 5 字节，非末片
+    std::string e2 = put_part(2, "tail");
+    auto complete_xml = [](std::vector<std::pair<int, std::string>> ps) {
+        std::string x = "<CompleteMultipartUpload>";
+        for (auto& [n, e] : ps)
+            x += "<Part><PartNumber>" + std::to_string(n) + "</PartNumber><ETag>" + e +
+                 "</ETag></Part>";
+        return x + "</CompleteMultipartUpload>";
+    };
+
+    // 非末片小于 5MiB → EntityTooSmall（否则 10000 个 1 字节分片也能提交）
+    auto small = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}, {2, e2}}),
+                                                 {{"uploadId", uid}})));
+    CHECK_EQ(small.status, 400);
+    CHECK(contains(small.small_body, "<Code>EntityTooSmall</Code>"));
+
+    // 乱序 → InvalidPartOrder（此前是 InvalidPart，会让客户端去重传分片）
+    auto unordered = sync_wait(svc.dispatch(make_req(
+        "POST", "/bkt/mp.bin", complete_xml({{2, e2}, {1, e1}}), {{"uploadId", uid}})));
+    CHECK_EQ(unordered.status, 400);
+    CHECK(contains(unordered.small_body, "<Code>InvalidPartOrder</Code>"));
+
+    // 分片号越界在 complete 侧也要复核（upload 侧校验的是另一份输入）
+    auto oob = sync_wait(svc.dispatch(make_req(
+        "POST", "/bkt/mp.bin", complete_xml({{99999, e1}}), {{"uploadId", uid}})));
+    CHECK_EQ(oob.status, 400);
+
+    // 末片不受最小尺寸约束：单片上传照常成功，Location 是完整 URL
+    auto one = sync_wait(svc.dispatch(
+        make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}}), {{"uploadId", uid}})));
+    CHECK_EQ(one.status, 200);
+    CHECK(contains(one.small_body, "<Location>http://localhost/bkt/mp.bin</Location>"));
 }

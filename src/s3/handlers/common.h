@@ -16,19 +16,41 @@ namespace lights3::s3::handlers {
 
 inline std::string quote_etag(const std::string& etag) { return "\"" + etag + "\""; }
 
+// 单一所有者：本实现无多租户 owner 概念，ListAllMyBuckets 与 ListObjectsV2 的
+// fetch-owner 用同一个身份，免得两处各写一份字面量后漂移
+inline constexpr std::string_view kOwnerId = "lights3";
+
 inline std::string strip_quotes(std::string s) {
     if (s.size() >= 2 && s.front() == '"' && s.back() == '"') return s.substr(1, s.size() - 2);
     return s;
 }
 
-// PutObject / CreateMultipartUpload 共用：从请求头提取 Content-Type 与 x-amz-meta-*
+// TSV 与头部都以行为单位：元数据值里的 CR/LF 会撕开 sidecar 记录，也是响应头
+// 注入面。一等字段与 user-meta 同样拒收（docs/gaps.md §5.2）
+inline void reject_control_chars(std::string_view name, const std::string& v) {
+    if (v.find('\n') != std::string::npos || v.find('\r') != std::string::npos)
+        throw S3Error(S3ErrorCode::InvalidArgument,
+                      "Header '" + std::string(name) + "' must not contain line breaks.");
+}
+
+// PutObject / CreateMultipartUpload 共用：提取 Content-Type、x-amz-meta-*，以及
+// 六个 S3 一等元数据字段（docs/gaps.md §5.2）
 inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     storage::ObjectMeta meta;
     if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
+    for (auto& f : storage::kStdMetaFields) {
+        if (auto v = req.headers.get(f.header)) {
+            reject_control_chars(f.header, *v);
+            meta.*f.field = *v;
+        }
+    }
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
         for (char c : k) lk.push_back(http::HeaderMap::lower(c));
-        if (lk.rfind("x-amz-meta-", 0) == 0) meta.user_meta[lk.substr(11)] = v;
+        if (lk.rfind("x-amz-meta-", 0) == 0) {
+            reject_control_chars(k, v);
+            meta.user_meta[lk.substr(11)] = v;
+        }
     }
     return meta;
 }

@@ -445,7 +445,7 @@ TEST(duostore_gc_mpu_ttl_expiry) {
     CHECK_EQ(st.reclaims_acked, uint64_t(1));
     CHECK_EQ(st.files_removed, uint64_t(2));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
-    CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt")).size(), size_t(0));
+    CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt", {})).uploads.size(), size_t(0));
     {
         http::StringBodyReader part("x");
         CHECK_THROWS_S3(sync_wait(b->upload_part("bkt", "mpu", id, 2, part)),
@@ -465,7 +465,7 @@ TEST(duostore_gc_mpu_fresh_upload_survives) {
 
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.uploads_expired, uint64_t(0));
-    CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt")).size(), size_t(1));
+    CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt", {})).uploads.size(), size_t(1));
     sync_wait(b->close());
 
     // ttl=0：清理整体关闭，任何"已过期"的 upload 都不动
@@ -477,7 +477,7 @@ TEST(duostore_gc_mpu_fresh_upload_survives) {
     sync_wait(b2->create_multipart("bkt", "mpu", {}));
     auto st2 = sync_wait(b2->run_gc_once());
     CHECK_EQ(st2.uploads_expired, uint64_t(0));
-    CHECK_EQ(sync_wait(b2->list_multipart_uploads("bkt")).size(), size_t(1));
+    CHECK_EQ(sync_wait(b2->list_multipart_uploads("bkt", {})).uploads.size(), size_t(1));
     sync_wait(b2->close());
 }
 

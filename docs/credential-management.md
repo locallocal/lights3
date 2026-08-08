@@ -15,7 +15,7 @@
 **非目标（一期不做；标注项已在二期补齐，见 §10）**
 
 - IAM 式细粒度 policy——所有凭证仍等价于超级用户的数据面权限（见 §3 两级模型）。
-  二期补了轻量的 per-credential policy（bucket 白名单 + readonly，§10.4），仍非 IAM；
+  二期补了轻量的 per-credential policy（bucket / key 前缀 / 动作三维，§10.4），仍非 IAM；
 - STS 临时凭证 / 凭证轮换到期；
 - 多实例共享后端时的跨节点失效通知（限制见 §7）——二期以定期增量 reload 补齐（§10.3）。
 
@@ -29,7 +29,7 @@
 | --- | --- | --- |
 | `POST /-/admin/credentials` | 生成一对 AK/SK，可带 `?comment=` 备注 | `201` + JSON（唯一一次完整返回 SK） |
 | `GET /-/admin/credentials` | 列出全部凭证（含静态凭证，SK 掩码） | `200` + JSON 列表 |
-| `GET /-/admin/credentials/{ak}` | 查询单个凭证元数据；`?show-secret=true` 时返回明文 SK | `200` + JSON |
+| `GET /-/admin/credentials/{ak}` | 查询单个凭证元数据；`?show-secret=true` 时返回明文 SK（**仅动态/文件凭证**，静态凭证恒掩码，见 §10.5） | `200` + JSON |
 | `DELETE /-/admin/credentials/{ak}` | 吊销（仅限动态凭证，静态凭证归配置文件管） | `204` |
 
 响应用 JSON，序列化/解析引入 [nlohmann/json](https://github.com/nlohmann/json)
@@ -310,22 +310,44 @@ root 凭证 POST 生成 → 解析响应 JSON 取出新 AK/SK（sed/grep 提取�
 
 ### 10.4 per-credential policy
 
-刻意保持在"够用"档，不引入 IAM 的 statement/effect/action 语法：
+刻意保持在"够用"档，不引入 IAM 的 statement/effect/condition 语法，但具备
+bucket / key 前缀 / 动作三个维度（docs/gaps.md §5.10）：
 
 ```json
-{ "policy": { "buckets": ["logs-*", "backup"], "readonly": true } }
+{ "policy": { "buckets": ["logs-*", "backup"], "prefixes": ["tenant-a/"],
+              "actions": ["read", "write"] } }
 ```
 
-- `buckets`：bucket glob 白名单（fnmatch，同 bucket 路由规则）；空/缺省 = 全部；
-- `readonly`：true 时仅允许 GET/HEAD；
+- `buckets`：bucket glob 白名单（fnmatch **带 FNM_PATHNAME**，`*` 不跨 `/`）；
+  空/缺省 = 全部；
+- `prefixes`：key 前缀白名单；空/缺省 = 全部。有了它，多租户共桶不必再退化成
+  "一租户一桶"。只对与具体对象相关的操作生效——建桶、列桶内对象等桶级操作
+  与某个 key 无关，不受前缀限制；
+- `actions`：`read` / `write` / `delete` 的白名单；空/缺省时回落到 `readonly`。
+  动作按**后果**归类而非 HTTP 方法：`DeleteObjects` 是 POST 却算 `delete`，
+  `CreateMultipartUpload` 同为 POST 却算 `write`——方法维度分不开这两件事。
+  这一维补上了最常见的备份场景：只许写入、不许删除；
+- `readonly`：等价于 `actions: ["read"]`，为兼容保留；两者同时出现以 `actions` 为准；
 - 携带方式：`POST /-/admin/credentials` 的 JSON body
   `{"comment"?, "policy"?}`（`?comment=` 查询参数仍兼容，body 优先），或
   credentials_file 条目的 `policy` 字段；创建后不可改（无 update API，重建即可）；
-- 执行点：dispatch 验签通过、bucket 解析后统一 `authorize(ak, bucket, is_write)`
-  （src/s3/service.cc），非 GET/HEAD 即视为写。静态凭证与无 policy 凭证恒通过；
-  拒绝为 `AccessDenied`(403) 且先于 NoSuchBucket 等数据面错误暴露；
-- 校验从严：POST body / policy 出现未知字段直接 `InvalidRequest`——拼错的
-  限制字段被静默忽略等于放权；
-- 已知取舍：`ListBuckets` 对 policy 凭证放行且**不过滤**结果（只泄露桶名，
-  过滤需把 AK 下探到 handler，不值得）；吊销/policy 均不影响已通过验签的
-  在途请求（§7 语义）。
+- 执行点：dispatch 验签通过、bucket 解析后按**匹配到的路由**的动作判定
+  （`src/s3/service.cc`，判定输入是验签时刻的 policy 快照，见 §3.7）。静态凭证与
+  无 policy 凭证恒通过；拒绝为 `AccessDenied`(403) 且先于 NoSuchBucket 等数据面
+  错误暴露。路由匹配不上（方法不支持）时没有可判定的动作，直接走 405；
+- CopyObject / UploadPartCopy 的源在请求头里，不经上面的路径检查：对
+  **源桶 + 源 key** 单独做一次 `read` 授权，防止受限凭证借 copy 读白名单外数据；
+- 校验从严：POST body / policy 出现未知字段或未知动作名直接 `InvalidRequest`——
+  拼错的限制字段被静默忽略等于放权；
+- `ListBuckets` 结果**按 policy 过滤**：桶名本身就是攻击链第一步（配合曾经的
+  桶名混淆问题更是如此），受限凭证不该看到白名单外的桶存在；
+- 已知取舍：吊销/policy 均不影响已通过验签的在途请求（§7 语义）。
+
+### 10.5 静态凭证的 SK 不经 admin API 回传
+
+`?show-secret=true` 只对动态与文件凭证生效，静态（root）凭证恒返回掩码
+（docs/gaps.md §5.10）。理由是信任边界：静态 SK 来自配置文件/环境变量，能取回它
+等于把"能读配置文件"降级成"能发一次 HTTP GET"；而 root SK 又恰恰**无法**经
+admin API 吊销（`DELETE` 拒绝静态凭证），一旦泄露只能改配置重启。
+掩码也从"前 4 + 后 4"收紧为只留前 4 位——运维手挑的 SK 熵未必够，泄露两端毫无
+必要。任何 `?show-secret=true` 请求（无论是否给出 SK）都会记一条 WARN 审计日志。

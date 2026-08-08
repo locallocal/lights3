@@ -74,4 +74,61 @@ ListResult apply_listing(const std::vector<std::string>& keys, const ListOptions
     return out;
 }
 
+ListPartsResult apply_parts_page(std::vector<PartMeta> sorted, const ListPartsOptions& opt) {
+    ListPartsResult out;
+    if (opt.max_parts <= 0) return out;
+    for (auto& p : sorted) {
+        if (p.part_no <= opt.part_number_marker) continue;  // marker 是"严格大于"
+        if (out.parts.size() >= size_t(opt.max_parts)) {
+            out.is_truncated = true;
+            // 下一页从最后一个已返回的分片号之后开始
+            out.next_part_number_marker = out.parts.back().part_no;
+            return out;
+        }
+        out.parts.push_back(std::move(p));
+    }
+    return out;
+}
+
+ListUploadsResult apply_uploads_page(std::vector<UploadInfo> sorted,
+                                     const ListUploadsOptions& opt) {
+    ListUploadsResult out;
+    if (opt.max_uploads <= 0) return out;
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        const UploadInfo& u = sorted[i];
+        if (u.key.compare(0, opt.prefix.size(), opt.prefix) != 0) continue;
+        if (!upload_after_marker(u, opt)) continue;
+        // delimiter 分组：前缀之后首个 delimiter 之前的部分归为 CommonPrefix
+        std::string group;
+        if (!opt.delimiter.empty()) {
+            auto pos = u.key.find(opt.delimiter, opt.prefix.size());
+            if (pos != std::string::npos) group = u.key.substr(0, pos + opt.delimiter.size());
+        }
+
+        if (out.uploads.size() + out.common_prefixes.size() >= size_t(opt.max_uploads)) {
+            out.is_truncated = true;
+            return out;  // next_* 已记为上一轮产出项的位置
+        }
+
+        if (!group.empty()) {
+            out.common_prefixes.push_back(group);
+            // 跳过同组其余 upload，游标落在**组尾那一条**上——把组名本身当游标的话，
+            // "a/" < "a/x"，下一页会把整组再列一遍（apply_listing 同一处理）
+            while (i + 1 < sorted.size() &&
+                   sorted[i + 1].key.compare(0, group.size(), group) == 0)
+                ++i;
+            out.next_key_marker = sorted[i].key;
+            out.next_upload_id_marker = sorted[i].upload_id;
+        } else {
+            out.next_key_marker = u.key;
+            out.next_upload_id_marker = u.upload_id;
+            out.uploads.push_back(u);
+        }
+    }
+    // 未截断则不回 next_*（S3 只在 IsTruncated=true 时给）
+    out.next_key_marker.clear();
+    out.next_upload_id_marker.clear();
+    return out;
+}
+
 }  // namespace lights3::storage

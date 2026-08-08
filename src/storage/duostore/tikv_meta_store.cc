@@ -750,14 +750,27 @@ std::vector<PartRec> TikvMetaStore::list_parts(std::string_view b, std::string_v
     });
 }
 
-std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b) {
+std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
+                                                   std::string_view key_marker,
+                                                   std::string_view id_marker, int limit) {
     return guarded("list_uploads", [&] {
         uint64_t ts = client().get_ts();
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
         std::vector<UploadInfo> out;
         auto [lo, hi] = range_of('U', std::string(b) + '\0');
         size_t plen = lo.size();  // prefix + 'U' + b + '\0'
+        // 游标下推（docs/gaps.md §5.1）：键序即 (key, upload_id) 序，抬高 [lo,hi)
+        // 的下界即可跳过整段。尾部 '\0' 让下界落在该二元组之后
+        if (!key_marker.empty() || !id_marker.empty()) {
+            std::string from = lo;
+            from += std::string(key_marker);
+            from += '\0';
+            from += std::string(id_marker);
+            from += '\0';
+            if (from > lo) lo = std::move(from);
+        }
         scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
+            if (limit > 0 && out.size() >= size_t(limit)) return false;
             // rest = <key>\0<upload_id>，前缀扫天然按 (key, upload_id) 排序
             std::string_view rest = std::string_view(key).substr(plen);
             auto sep = rest.rfind('\0');

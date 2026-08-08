@@ -45,11 +45,51 @@ std::optional<storage::ByteRange> parse_range_header(const std::string& v) {
     return r;
 }
 
+// response-* 覆盖参数（docs/gaps.md §5.3）：presigned 下载链接最常用的就是
+// response-content-disposition（"点开就下载成这个文件名"）。
+// 前提：AWS 只对已认证请求生效——匿名可读对象若允许覆盖，一条链接就能把任意
+// Content-Disposition 挂到桶的域名下。本实现开启认证时，能走到 handler 的请求
+// 必然已验签；关闭认证时不存在这条边界。故无需再判身份，但值必须过滤 CR/LF：
+// query 值是攻击者可控的，直接塞进响应头就是响应拆分
+struct ResponseOverride {
+    const char* param;
+    const char* header;
+};
+constexpr ResponseOverride kResponseOverrides[] = {
+    {"response-content-type", "Content-Type"},
+    {"response-content-language", "Content-Language"},
+    {"response-expires", "Expires"},
+    {"response-cache-control", "Cache-Control"},
+    {"response-content-disposition", "Content-Disposition"},
+    {"response-content-encoding", "Content-Encoding"},
+};
+
+void apply_response_overrides(const http::HttpRequest& req, http::HttpResponse& resp) {
+    for (auto& o : kResponseOverrides) {
+        if (auto v = req.query_get(o.param)) {
+            reject_control_chars(o.param, *v);
+            resp.headers.set(o.header, *v);
+        }
+    }
+}
+
+// 304 的头集合（RFC 9110 §15.4.5，docs/gaps.md §5.9）：200 会发的缓存校验类头
+// 在 304 上必须照发，否则客户端刷新缓存条目时会把 Last-Modified 丢掉
+void fill_not_modified_headers(http::HttpResponse& resp, const storage::ObjectMeta& meta) {
+    resp.status = 304;
+    resp.headers.set("ETag", quote_etag(meta.etag));
+    resp.headers.set("Last-Modified", util::http_date(meta.last_modified));
+    if (!meta.cache_control.empty()) resp.headers.set("Cache-Control", meta.cache_control);
+}
+
 void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& meta) {
     resp.headers.set("ETag", quote_etag(meta.etag));
     resp.headers.set("Content-Type", meta.content_type);
     resp.headers.set("Last-Modified", util::http_date(meta.last_modified));
     resp.headers.set("Accept-Ranges", "bytes");
+    // 一等元数据原样回显（docs/gaps.md §5.2）；空 = 未设置，不发该头
+    for (auto& f : storage::kStdMetaFields)
+        if (!(meta.*f.field).empty()) resp.headers.set(f.header, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) resp.headers.set("x-amz-meta-" + k, v);
 }
 
@@ -154,8 +194,12 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
     if (directive == "REPLACE") {
         meta = meta_from_headers(req);
     } else {
-        meta.content_type = src_meta.content_type;
-        meta.user_meta = src_meta.user_meta;
+        // COPY：整份元数据随对象走。逐字段抄写曾经漏掉新增的一等字段（§5.2），
+        // 这里只把与新对象绑定的三项（key/size/etag）留给后端重算
+        meta = src_meta;
+        meta.key.clear();
+        meta.size = 0;
+        meta.etag.clear();
     }
 
     auto stream = co_await src_backend.get_object(src_bucket, src_key, std::nullopt);
@@ -187,11 +231,11 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         bool not_modified = false;
         check_read_preconditions(req, meta, not_modified);
         if (not_modified) {
-            resp.status = 304;
-            resp.headers.set("ETag", quote_etag(meta.etag));
+            fill_not_modified_headers(resp, meta);
             co_return resp;
         }
         fill_object_headers(resp, meta);
+        apply_response_overrides(req, resp);
         if (range && !if_range_matches(req, meta)) range.reset();
         if (range) {  // 与 GET 对齐：206 + Content-Range，无 body 只报长度
             auto [f, l] = storage::resolve_range(*range, meta.size);  // 不可满足 → 416
@@ -213,8 +257,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         bool not_modified = false;
         check_read_preconditions(req, meta, not_modified);
         if (not_modified) {
-            resp.status = 304;
-            resp.headers.set("ETag", quote_etag(meta.etag));
+            fill_not_modified_headers(resp, meta);
             co_return resp;
         }
         if (range && !if_range_matches(req, meta)) range.reset();
@@ -223,6 +266,8 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     auto stream = co_await backend.get_object(bucket, key, range);
 
     fill_object_headers(resp, stream.meta);
+    // 覆盖在 206/Content-Range 之前应用：那两个由本次传输决定，不接受客户端指定
+    apply_response_overrides(req, resp);
     uint64_t len = stream.meta.size;
     if (stream.range) {
         // 后端契约：返回的 range 须两端都已解析；漏填是后端缺陷，不能 UB 解引用
@@ -270,6 +315,21 @@ Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
 
 // DeleteObjects 批量删除（POST /bucket?delete，请求 XML ≤ 1MiB，至多 1000 key）
 Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::string bucket) {
+    // AWS 对本操作**要求**完整性头（docs/gaps.md §5.6）：批量删除是唯一一个
+    // "请求体被改写即静默多删对象"的操作，缺失即 400。摘要本身由 dispatch 装的
+    // ChecksumVerifyingReader 在读 body 时校验，这里只判"有没有声明"
+    constexpr std::string_view kChecksumPrefix = "x-amz-checksum-";
+    bool has_digest = req.headers.has("Content-MD5");
+    if (!has_digest)
+        for (auto& [k, v] : req.headers.items())
+            if (k.size() > kChecksumPrefix.size() &&
+                http::HeaderMap::ieq(std::string_view(k).substr(0, kChecksumPrefix.size()),
+                                     kChecksumPrefix))
+                has_digest = true;
+    if (!has_digest)
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "Missing required header for this request: Content-MD5 "
+                      "(or a x-amz-checksum-* header).");
     std::string body = co_await read_body(req);
     XmlNode root = xml_parse(body);
     if (root.name != "Delete")

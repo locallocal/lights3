@@ -1,0 +1,101 @@
+#include "core/util/checksum.h"
+
+#include <array>
+
+namespace lights3::util {
+
+namespace {
+
+// 反射式查表实现（~数百 MB/s）。RocksDB 内部有硬件加速的 crc32c，但非公开头文件——
+// 复用需把其源码目录加进 include 路径并绑定内部 API 跨 submodule 升级，权衡后不取；
+// 数据路径吞吐成为瓶颈时再升级为 slicing-by-8
+template <uint32_t kPoly>
+uint32_t table_crc(uint32_t crc, std::span<const std::byte> data) {
+    static const std::array<uint32_t, 256> table = [] {
+        std::array<uint32_t, 256> t{};
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? kPoly ^ (c >> 1) : c >> 1;
+            t[i] = c;
+        }
+        return t;
+    }();
+    crc = ~crc;
+    for (std::byte b : data) crc = table[(crc ^ uint32_t(b)) & 0xff] ^ (crc >> 8);
+    return ~crc;
+}
+
+constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+}  // namespace
+
+uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) {
+    return table_crc<0x82F63B78u>(crc, data);  // Castagnoli，反射多项式
+}
+
+uint32_t crc32_update(uint32_t crc, std::span<const std::byte> data) {
+    return table_crc<0xEDB88320u>(crc, data);  // IEEE 802.3，反射多项式
+}
+
+std::string base64_encode(std::span<const uint8_t> in) {
+    std::string out;
+    out.reserve((in.size() + 2) / 3 * 4);
+    size_t i = 0;
+    for (; i + 3 <= in.size(); i += 3) {
+        uint32_t v = (uint32_t(in[i]) << 16) | (uint32_t(in[i + 1]) << 8) | in[i + 2];
+        out.push_back(kB64[(v >> 18) & 63]);
+        out.push_back(kB64[(v >> 12) & 63]);
+        out.push_back(kB64[(v >> 6) & 63]);
+        out.push_back(kB64[v & 63]);
+    }
+    size_t rem = in.size() - i;
+    if (rem == 1) {
+        uint32_t v = uint32_t(in[i]) << 16;
+        out.push_back(kB64[(v >> 18) & 63]);
+        out.push_back(kB64[(v >> 12) & 63]);
+        out += "==";
+    } else if (rem == 2) {
+        uint32_t v = (uint32_t(in[i]) << 16) | (uint32_t(in[i + 1]) << 8);
+        out.push_back(kB64[(v >> 18) & 63]);
+        out.push_back(kB64[(v >> 12) & 63]);
+        out.push_back(kB64[(v >> 6) & 63]);
+        out += "=";
+    }
+    return out;
+}
+
+std::optional<std::string> base64_decode(std::string_view in) {
+    if (in.empty() || in.size() % 4 != 0) return std::nullopt;
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string out;
+    out.reserve(in.size() / 4 * 3);
+    for (size_t i = 0; i < in.size(); i += 4) {
+        int pad = 0;
+        int v[4];
+        for (int j = 0; j < 4; ++j) {
+            char c = in[i + j];
+            if (c == '=' && i + 4 == in.size() && j >= 2) {
+                v[j] = 0;
+                ++pad;
+            } else {
+                v[j] = val(c);
+                if (v[j] < 0 || pad > 0) return std::nullopt;  // '=' 只能出现在末尾
+            }
+        }
+        uint32_t x = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) | (uint32_t(v[2]) << 6) |
+                     uint32_t(v[3]);
+        out.push_back(char((x >> 16) & 0xff));
+        if (pad < 2) out.push_back(char((x >> 8) & 0xff));
+        if (pad < 1) out.push_back(char(x & 0xff));
+    }
+    return out;
+}
+
+}  // namespace lights3::util

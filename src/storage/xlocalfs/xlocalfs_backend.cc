@@ -89,8 +89,12 @@ Task<void> XLocalFsBackend::write_all(int fd, std::span<const std::byte> data, u
     }
 }
 
-Task<std::pair<uint64_t, std::string>> XLocalFsBackend::drain_to_tmp(http::BodyReader& body,
-                                                                     int fd) {
+// 结果经出参回传而不是 co_await 一个带 std::string 的 pair：body.read 抛异常时
+// （Content-MD5 不符、客户端断连），GCC 会对那个从未构造的绑定目标照跑析构，
+// 表现为 put 路径上的 double free / SEGV。出参在 co_await 之前就已构造好，
+// 展开时析构的是真实对象（docs/gaps.md §5.6 的用例即此形态）
+Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, int fd, uint64_t& total_out,
+                                         std::string& etag_out) {
     util::HashStream md5(util::HashStream::Algo::Md5);
     uint64_t total = 0;
     std::byte buf[64 * 1024];
@@ -101,7 +105,8 @@ Task<std::pair<uint64_t, std::string>> XLocalFsBackend::drain_to_tmp(http::BodyR
         co_await write_all(fd, std::span<const std::byte>(buf, n), total);
         total += n;
     }
-    co_return std::pair{total, md5.final_hex()};
+    total_out = total;
+    etag_out = md5.final_hex();
 }
 
 Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
@@ -118,7 +123,9 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open staging tmp");
 
-    auto [total, etag] = co_await drain_to_tmp(body, tmp.fd);
+    uint64_t total = 0;
+    std::string etag;
+    co_await drain_to_tmp(body, tmp.fd, total, etag);
     ::close(tmp.fd);
     tmp.fd = -1;
 
@@ -198,7 +205,9 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open part tmp");
 
-    auto [total, etag] = co_await drain_to_tmp(body, tmp.fd);
+    uint64_t total = 0;
+    std::string etag;
+    co_await drain_to_tmp(body, tmp.fd, total, etag);
     (void)total;
     co_await pool_->schedule();
     fsutil::fsync_file(tmp.fd);  // 同 localfs：分片数据先落盘，.md5 才是就绪证据

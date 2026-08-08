@@ -29,7 +29,10 @@ public:
 
 private:
     // 流式收 body 并经 io_uring 写入 staging 临时文件，返回 (字节数, MD5 hex)
-    Task<std::pair<uint64_t, std::string>> drain_to_tmp(http::BodyReader& body, int fd);
+    // 出参而非返回值：见 .cc 中的说明（co_await 结果里带 std::string 时，
+    // body 抛异常会让编译器析构从未构造的绑定目标）
+    Task<void> drain_to_tmp(http::BodyReader& body, int fd, uint64_t& total_out,
+                            std::string& etag_out);
     // 内核可能短写，循环续写直到写满；失败抛 InternalError
     Task<void> write_all(int fd, std::span<const std::byte> data, uint64_t off);
 

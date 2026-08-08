@@ -104,7 +104,15 @@ struct IMetaStore {
                           PartRec p) = 0;  // 同号旧分片同批入 GC 账
     virtual std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
                                             std::string_view id) = 0;
-    virtual std::vector<UploadInfo> list_uploads(std::string_view b) = 0;
+    // 分页提示（docs/gaps.md §5.1）：返回 (key, upload_id) 严格大于
+    // (key_marker, id_marker) 的项，升序；limit>0 时最多返回 limit 条。
+    // 提示可被忽略——引擎无法下推时返回全量即可，调用方（DuoStoreBackend）总会
+    // 再过一遍 apply_uploads_page，语义不依赖引擎是否下推。
+    // 注意调用方在 delimiter 非空时传 limit=0：分组要看到全貌才能判定截断
+    virtual std::vector<UploadInfo> list_uploads(std::string_view b,
+                                                 std::string_view key_marker = {},
+                                                 std::string_view id_marker = {},
+                                                 int limit = 0) = 0;
     virtual std::string complete_upload(std::string_view b, std::string_view k,
                                         std::string_view id,
                                         std::span<const PartInfo> parts) = 0;  // 返回总 ETag（§8）

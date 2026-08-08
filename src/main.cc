@@ -90,6 +90,7 @@ int main(int argc, char** argv) {
                                                        cfg.http.base_domain);
         service->set_pool_stats([pool] { return pool->stats(); });
         service->set_request_timeout(std::chrono::seconds(cfg.http.request_timeout_sec));
+        service->set_min_part_size(cfg.http.min_part_size);
         service->set_backend_metrics(metrics);
         service->set_credential_store(cred_store);
         // 二期后台任务（docs/credential-management.md §10.2/§10.3）：

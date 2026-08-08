@@ -499,6 +499,9 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
         {"bucket", std::string(bucket)},
         {"key", std::string(key)},
         {"content_type", meta.content_type}};
+    // 一等元数据也要跨 create→complete 存活（docs/gaps.md §5.2），键名与 sidecar 同源
+    for (auto& f : kStdMetaFields)
+        if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
     write_tsv(dir / "manifest", staging_ / "put", kv);
     co_return id;
@@ -648,40 +651,52 @@ Task<void> LocalFsBackend::abort_multipart(std::string_view bucket, std::string_
     co_return;
 }
 
-Task<std::vector<PartMeta>> LocalFsBackend::list_parts(std::string_view bucket,
-                                                       std::string_view key,
-                                                       std::string_view upload_id) {
+Task<ListPartsResult> LocalFsBackend::list_parts(std::string_view bucket, std::string_view key,
+                                                 std::string_view upload_id,
+                                                 const ListPartsOptions& opt) {
     co_await pool_->schedule();
     auto up = require_upload(staging_, bucket, key, upload_id,
                              load_manifest(staging_, upload_id));
-    std::vector<PartMeta> out;
+    // 目录枚举无序：先只取分片号排序，再对**本页**的那几个做 stat + 读 .md5。
+    // 此前对每个分片都 stat 一次并读一次 sidecar，翻页时白付 9999 次
+    std::vector<int> nos;
     for (auto& e : fs::directory_iterator(up.dir)) {
         std::string name = e.path().filename().string();
         // part.NNNNN（跳过 manifest 与 .md5 sidecar）
         if (name.rfind("part.", 0) != 0 || name.ends_with(".md5")) continue;
-        int no = 0;
         try {
-            no = std::stoi(name.substr(5));
+            int no = std::stoi(name.substr(5));
+            if (no > opt.part_number_marker) nos.push_back(no);
         } catch (...) {
             continue;
         }
+    }
+    std::sort(nos.begin(), nos.end());
+    // 多取一个用于判定 is_truncated，交给 apply_parts_page 统一裁剪
+    if (opt.max_parts > 0 && nos.size() > size_t(opt.max_parts) + 1)
+        nos.resize(size_t(opt.max_parts) + 1);
+    std::vector<PartMeta> out;
+    for (int no : nos) {
+        std::string name = part_file_name(no);
         struct stat st{};
-        if (::stat(e.path().c_str(), &st) != 0) continue;
+        if (::stat((up.dir / name).c_str(), &st) != 0) continue;
         std::string etag;
         for (auto& [k, v] : read_tsv(up.dir / (name + ".md5")))
             if (k == "md5") etag = v;
         out.push_back({no, static_cast<uint64_t>(st.st_size), etag,
                        std::chrono::system_clock::from_time_t(st.st_mtime)});
     }
-    std::sort(out.begin(), out.end(),
-              [](const PartMeta& a, const PartMeta& b) { return a.part_no < b.part_no; });
-    co_return out;
+    co_return apply_parts_page(std::move(out), opt);
 }
 
-Task<std::vector<UploadInfo>> LocalFsBackend::list_multipart_uploads(std::string_view bucket) {
+Task<ListUploadsResult> LocalFsBackend::list_multipart_uploads(std::string_view bucket,
+                                                               const ListUploadsOptions& opt) {
     co_await pool_->schedule();
     require_bucket(bucket);
-    std::vector<UploadInfo> out;
+    // mpu 是全实例共用的一层平目录：要知道每个 upload 属于哪个桶只能读它的
+    // manifest，因此无论 marker 落在哪里都得先全扫一遍（分页省的是响应体与
+    // 下游内存，省不掉这次扫描——布局改成 mpu/<bucket>/… 才能省，那是另一件事）
+    std::vector<UploadInfo> all;
     for (auto& e : fs::directory_iterator(staging_ / "mpu")) {
         if (!e.is_directory()) continue;
         std::string id = e.path().filename().string();
@@ -695,12 +710,12 @@ Task<std::vector<UploadInfo>> LocalFsBackend::list_multipart_uploads(std::string
         auto initiated = ::stat((e.path() / "manifest").c_str(), &st) == 0
                              ? std::chrono::system_clock::from_time_t(st.st_mtime)
                              : std::chrono::system_clock::now();
-        out.push_back({m_key, id, initiated});
+        all.push_back({m_key, id, initiated});
     }
-    std::sort(out.begin(), out.end(), [](const UploadInfo& a, const UploadInfo& b) {
+    std::sort(all.begin(), all.end(), [](const UploadInfo& a, const UploadInfo& b) {
         return std::tie(a.key, a.upload_id) < std::tie(b.key, b.upload_id);
     });
-    co_return out;
+    co_return apply_uploads_page(std::move(all), opt);
 }
 
 void LocalFsBackend::cleanup_stale_uploads() {

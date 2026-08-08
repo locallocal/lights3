@@ -23,8 +23,8 @@ see §10)**
 
 - IAM-style fine-grained policy — all credentials are still equivalent to
   superuser data-plane permissions (see §3, the two-level model).
-  Phase 2 added a lightweight per-credential policy (bucket whitelist +
-  readonly, §10.4), still not IAM;
+  Phase 2 added a lightweight per-credential policy (bucket / key prefix /
+  action, §10.4), still not IAM;
 - STS temporary credentials / credential rotation expiry;
 - Cross-node invalidation notifications when multiple instances share a backend
   (limitation in §7) — phase 2 fills this in with periodic incremental reload
@@ -41,7 +41,7 @@ and the caller must be a root credential** (defined in §3).
 | --- | --- | --- |
 | `POST /-/admin/credentials` | Generate an AK/SK pair, optional `?comment=` note | `201` + JSON (the one and only full return of the SK) |
 | `GET /-/admin/credentials` | List all credentials (including static ones, SK masked) | `200` + JSON list |
-| `GET /-/admin/credentials/{ak}` | Query a single credential's metadata; `?show-secret=true` returns the plaintext SK | `200` + JSON |
+| `GET /-/admin/credentials/{ak}` | Query a single credential's metadata; `?show-secret=true` returns the plaintext SK (**dynamic/file credentials only** — static ones stay masked, see §10.5) | `200` + JSON |
 | `DELETE /-/admin/credentials/{ak}` | Revoke (dynamic credentials only; static credentials belong to the config file) | `204` |
 
 Responses use JSON; serialization/parsing brings in
@@ -380,30 +380,64 @@ a minute-scale operational action anyway).
 
 ### 10.4 Per-Credential Policy
 
-Deliberately kept at the "good enough" tier; no IAM statement/effect/action
-syntax:
+Deliberately kept at the "good enough" tier — no IAM statement/effect/condition
+syntax — but with three dimensions: bucket, key prefix and action
+(docs/gaps.md §5.10):
 
 ```json
-{ "policy": { "buckets": ["logs-*", "backup"], "readonly": true } }
+{ "policy": { "buckets": ["logs-*", "backup"], "prefixes": ["tenant-a/"],
+              "actions": ["read", "write"] } }
 ```
 
-- `buckets`: bucket glob whitelist (fnmatch, same as the bucket routing rules);
-  empty/absent = all;
-- `readonly`: when true, only GET/HEAD are allowed;
+- `buckets`: bucket glob whitelist (fnmatch **with FNM_PATHNAME**, so `*` does
+  not cross `/`); empty/absent = all;
+- `prefixes`: key prefix whitelist; empty/absent = all. With it, multi-tenant
+  shared buckets no longer degrade into "one bucket per tenant". It only applies
+  to operations tied to a specific object — bucket-level operations such as
+  creating a bucket or listing its objects are not tied to a key and are not
+  restricted by prefixes;
+- `actions`: whitelist of `read` / `write` / `delete`; when empty/absent it
+  falls back to `readonly`. Actions are classified by **consequence**, not HTTP
+  method: `DeleteObjects` is a POST but counts as `delete`, while
+  `CreateMultipartUpload` is also a POST yet counts as `write` — the method
+  dimension cannot separate the two. This dimension covers the most common
+  backup case: may write, may not delete;
+- `readonly`: equivalent to `actions: ["read"]`, kept for compatibility; when
+  both appear, `actions` wins;
 - How it is carried: the JSON body of `POST /-/admin/credentials`
   `{"comment"?, "policy"?}` (`?comment=` as a query parameter stays compatible,
   body wins), or the `policy` field of a credentials_file entry; immutable
   after creation (no update API — recreate instead);
 - Enforcement point: after dispatch passes verification and resolves the
-  bucket, a single `authorize(ak, bucket, is_write)` (src/s3/service.cc);
-  anything other than GET/HEAD counts as a write. Static credentials and
-  credentials without a policy always pass; denial is `AccessDenied` (403) and
-  surfaces before data-plane errors such as NoSuchBucket;
-- Strict validation: an unknown field in the POST body / policy is an outright
-  `InvalidRequest` — a misspelled restriction field silently ignored would
-  amount to granting permission;
-- Known trade-offs: `ListBuckets` is allowed for policy credentials and the
-  result is **not filtered** (only bucket names leak; filtering would require
-  pushing the AK down into the handler — not worth it); neither revocation nor
-  policy affects in-flight requests that already passed verification (the §7
-  semantics).
+  bucket, the action of the **matched route** is checked against the policy
+  snapshot taken at verification time (`src/s3/service.cc`, see §3.7). Static
+  credentials and credentials without a policy always pass; denial is
+  `AccessDenied` (403) and surfaces before data-plane errors such as
+  NoSuchBucket. When no route matches (unsupported method) there is no action to
+  judge, so the request goes straight to 405;
+- CopyObject / UploadPartCopy carry their source in a header, bypassing the path
+  check above: the **source bucket + source key** get their own `read`
+  authorization, so a restricted credential cannot use a copy to read data
+  outside its whitelist;
+- Strict validation: an unknown field or unknown action name in the POST body /
+  policy is an outright `InvalidRequest` — a misspelled restriction field
+  silently ignored would amount to granting permission;
+- `ListBuckets` results are **filtered by policy**: bucket names are themselves
+  the first step of an attack chain, and a restricted credential should not learn
+  that buckets outside its whitelist exist;
+- Known trade-off: neither revocation nor policy affects in-flight requests that
+  already passed verification (the §7 semantics).
+
+### 10.5 Static Credential Secrets Are Never Returned by the Admin API
+
+`?show-secret=true` applies only to dynamic and file credentials; static (root)
+credentials always come back masked (docs/gaps.md §5.10). The reason is the trust
+boundary: a static SK comes from the config file or environment, so being able to
+retrieve it downgrades "can read the config file" to "can send one HTTP GET" —
+and a root SK is precisely the one that **cannot** be revoked through the admin
+API (`DELETE` refuses static credentials), so a leak can only be resolved by
+editing the config and restarting. The mask was also tightened from
+"first 4 + last 4" to just the first 4 characters — an operator-chosen SK does
+not necessarily have much entropy, and leaking both ends is needless. Every
+`?show-secret=true` request is recorded in a WARN audit log, whether or not a
+secret is returned.

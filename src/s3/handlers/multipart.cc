@@ -1,9 +1,12 @@
 // multipart handler：Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
 // （docs/s3-protocol.md §1；存储层语义见 docs/storage-backend.md §3.2）
 #include <charconv>
+#include <algorithm>
+#include <map>
 
 #include "core/util/time.h"
 #include "s3/handlers/common.h"
+#include "storage/multipart.h"
 #include "s3/service.h"
 #include "s3/xml.h"
 
@@ -31,6 +34,60 @@ std::string require_upload_id(const http::HttpRequest& req) {
     if (!v || v->empty())
         throw S3Error(S3ErrorCode::InvalidArgument, "Missing uploadId query parameter.");
     return *v;
+}
+
+// query 里的整数参数：缺省用 def，非法一律 400（静默当默认值会让客户端以为
+// 自己的分页生效了）
+int parse_int_param(const http::HttpRequest& req, const char* name, int def) {
+    auto v = req.query_get(name);
+    if (!v || v->empty()) return def;
+    int out = 0;
+    auto [p, ec] = std::from_chars(v->data(), v->data() + v->size(), out);
+    if (ec != std::errc() || p != v->data() + v->size())
+        throw S3Error(S3ErrorCode::InvalidArgument, std::string("Invalid ") + name + " value");
+    return out;
+}
+
+// max-* 与 ListObjects 的 max-keys 同款：负值 400，超出上限静默钳制——不钳制的话
+// max=INT_MAX 会把整表一次构造进内存
+int parse_max(const http::HttpRequest& req, const char* name, int cap) {
+    int v = parse_int_param(req, name, cap);
+    if (v < 0) throw S3Error(S3ErrorCode::InvalidArgument, std::string("Invalid ") + name + " value");
+    return std::min(v, cap);
+}
+
+// "scheme://host"：Location 要完整 URL（docs/gaps.md §5.7）。scheme 只能靠反代
+// 转述——直连时本实现是明文 HTTP，TLS 由前置代理终结（docs/s3-protocol.md）
+std::string request_base_url(const http::HttpRequest& req) {
+    std::string scheme = "http";
+    if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) scheme = *p;
+    std::string host = req.headers.get("Host").value_or("");
+    return scheme + "://" + host;
+}
+
+// 最小分片校验（docs/gaps.md §5.7）：末片除外。分片尺寸只有存储层知道，
+// complete 之前先列一次；缺失的分片不在这里报错，交给后端的 InvalidPart
+Task<void> check_min_part_sizes(storage::IStorageBackend& backend, const std::string& bucket,
+                                const std::string& key, const std::string& upload_id,
+                                const std::vector<storage::PartInfo>& parts, uint64_t min_size) {
+    if (min_size == 0) co_return;      // 旋钮关闭
+    if (parts.size() <= 1) co_return;  // 单片上传不受最小尺寸约束
+    // 取全量：分片数由协议封顶 10000，且这里要按分片号查表而非翻页
+    storage::ListPartsOptions all_opt;
+    all_opt.max_parts = storage::kMaxParts;
+    auto have = co_await backend.list_parts(bucket, key, upload_id, all_opt);
+    std::map<int, uint64_t> size_of;
+    for (auto& p : have.parts) size_of[p.part_no] = p.size;
+    for (size_t i = 0; i + 1 < parts.size(); ++i) {  // 末片不校验
+        auto it = size_of.find(parts[i].part_no);
+        if (it == size_of.end()) continue;
+        if (it->second < min_size)
+            throw S3Error(S3ErrorCode::EntityTooSmall,
+                          "Your proposed upload is smaller than the minimum allowed size. "
+                          "Part " + std::to_string(parts[i].part_no) + " is " +
+                              std::to_string(it->second) + " bytes; the minimum is " +
+                              std::to_string(min_size) + " bytes.");
+    }
 }
 
 // "bytes=first-last"：两端必填、闭区间（AWS UploadPartCopy 语义，比 GET Range 的
@@ -135,22 +192,36 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     std::vector<storage::PartInfo> parts;
     for (auto& child : root.children) {
         if (child.name != "Part") continue;
+        // 分片数上界（docs/gaps.md §5.7）：此前无限追加，一份构造好的 XML 就能
+        // 让本请求把任意长的列表读进内存
+        if (parts.size() >= size_t(storage::kMaxParts))
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "The upload contains more than the maximum number of allowed parts.");
         storage::PartInfo p;
         std::string no = child.get("PartNumber");
         auto [ptr, ec] = std::from_chars(no.data(), no.data() + no.size(), p.part_no);
         if (ec != std::errc() || ptr != no.data() + no.size())
             throw S3Error(S3ErrorCode::MalformedXML, "Invalid PartNumber.");
+        // 上界复核：upload 时校验过，complete 的列表是另一份输入
+        storage::validate_part_number(p.part_no);
         p.etag = child.get("ETag");
         parts.push_back(std::move(p));
     }
+    storage::validate_part_order(parts);  // 乱序 → InvalidPartOrder，先于后端判定
 
-    auto result =
-        co_await router_.resolve(bucket).complete_multipart(bucket, key, upload_id, parts);
+    auto& backend = router_.resolve(bucket);
+    // 最小分片 5MiB（末片除外）：不校验则 10000 个 1 字节分片也能提交，complete
+    // 逐个 open/read/write 拼接是廉价的放大面。尺寸只有存储层知道，故先列一次
+    co_await check_min_part_sizes(backend, bucket, key, upload_id, parts, min_part_size_);
+
+    auto result = co_await backend.complete_multipart(bucket, key, upload_id, parts);
     metrics_.mpu_finished();
 
     XmlWriter w;
     w.open("CompleteMultipartUploadResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
-    w.element("Location", "/" + bucket + "/" + key);
+    // Location 回完整 URL（部分 Java SDK 直接当 URL 用）。用 req.path 重建可同时
+    // 覆盖 path-style 与 vhost 两种寻址——vhost 下 req.path 本就只有 key
+    w.element("Location", request_base_url(req) + req.path);
     w.element("Bucket", bucket);
     w.element("Key", key);
     w.element("ETag", quote_etag(result.etag));
@@ -173,7 +244,15 @@ Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std:
 Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::string bucket,
                                                std::string key) {
     std::string upload_id = require_upload_id(req);
-    auto parts = co_await router_.resolve(bucket).list_parts(bucket, key, upload_id);
+    // 此前 max-parts / part-number-marker 一个都不读，还恒报 IsTruncated=false
+    //（docs/gaps.md §5.1）
+    storage::ListPartsOptions opt;
+    opt.max_parts = parse_max(req, "max-parts", 1000);
+    opt.part_number_marker = parse_int_param(req, "part-number-marker", 0);
+    if (opt.part_number_marker < 0)
+        throw S3Error(S3ErrorCode::InvalidArgument, "Invalid part-number-marker value");
+
+    auto res = co_await router_.resolve(bucket).list_parts(bucket, key, upload_id, opt);
 
     XmlWriter w;
     w.open("ListPartsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
@@ -181,9 +260,12 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
     w.element("Key", key);
     w.element("UploadId", upload_id);
     w.element("StorageClass", "STANDARD");
-    w.element("MaxParts", uint64_t(10000));
-    w.element("IsTruncated", "false");
-    for (auto& p : parts) {
+    w.element("PartNumberMarker", static_cast<uint64_t>(opt.part_number_marker));
+    if (res.is_truncated)
+        w.element("NextPartNumberMarker", static_cast<uint64_t>(res.next_part_number_marker));
+    w.element("MaxParts", static_cast<uint64_t>(opt.max_parts));
+    w.element("IsTruncated", res.is_truncated ? "true" : "false");
+    for (auto& p : res.parts) {
         w.open("Part");
         w.element("PartNumber", static_cast<uint64_t>(p.part_no));
         w.element("LastModified", util::iso8601(p.last_modified));
@@ -200,20 +282,48 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
 
 Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& req,
                                                            std::string bucket) {
-    (void)req;
-    auto uploads = co_await router_.resolve(bucket).list_multipart_uploads(bucket);
+    // 此前 `(void)req;`——prefix/delimiter/三个 marker/max-uploads 一个都不读，
+    // 却硬编码 MaxUploads=1000 与 IsTruncated=false 后返回全部 upload
+    storage::ListUploadsOptions opt;
+    opt.prefix = req.query_get("prefix").value_or("");
+    opt.delimiter = req.query_get("delimiter").value_or("");
+    opt.max_uploads = parse_max(req, "max-uploads", 1000);
+    opt.key_marker = req.query_get("key-marker").value_or("");
+    opt.upload_id_marker = req.query_get("upload-id-marker").value_or("");
+    // upload-id-marker 单独出现无意义（游标是二元组），AWS 同样按 400 处理
+    if (opt.key_marker.empty() && !opt.upload_id_marker.empty())
+        throw S3Error(S3ErrorCode::InvalidArgument,
+                      "upload-id-marker requires key-marker to be specified.");
+    if (!opt.delimiter.empty() && opt.delimiter != "/")
+        throw S3Error(S3ErrorCode::NotImplemented,
+                      "Only '/' is supported as a delimiter.");
+
+    auto res = co_await router_.resolve(bucket).list_multipart_uploads(bucket, opt);
 
     XmlWriter w;
     w.open("ListMultipartUploadsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
     w.element("Bucket", bucket);
-    w.element("MaxUploads", uint64_t(1000));
-    w.element("IsTruncated", "false");
-    for (auto& u : uploads) {
+    w.element("KeyMarker", opt.key_marker);
+    w.element("UploadIdMarker", opt.upload_id_marker);
+    if (res.is_truncated) {
+        w.element("NextKeyMarker", res.next_key_marker);
+        w.element("NextUploadIdMarker", res.next_upload_id_marker);
+    }
+    if (!opt.prefix.empty()) w.element("Prefix", opt.prefix);
+    if (!opt.delimiter.empty()) w.element("Delimiter", opt.delimiter);
+    w.element("MaxUploads", static_cast<uint64_t>(opt.max_uploads));
+    w.element("IsTruncated", res.is_truncated ? "true" : "false");
+    for (auto& u : res.uploads) {
         w.open("Upload");
         w.element("Key", u.key);
         w.element("UploadId", u.upload_id);
         w.element("Initiated", util::iso8601(u.initiated));
         w.element("StorageClass", "STANDARD");
+        w.close();
+    }
+    for (auto& p : res.common_prefixes) {
+        w.open("CommonPrefixes");
+        w.element("Prefix", p);
         w.close();
     }
     w.close();

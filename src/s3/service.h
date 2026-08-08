@@ -2,6 +2,7 @@
 #pragma once
 
 #include <chrono>
+#include <span>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -14,9 +15,11 @@
 #include "core/task.h"
 #include "core/thread_pool.h"
 #include "http/model.h"
+#include "s3/auth/policy.h"
 #include "s3/auth/sigv4.h"
 #include "s3/metrics.h"
 #include "storage/bucket_router.h"
+#include "storage/multipart.h"
 
 namespace lights3::s3 {
 
@@ -24,6 +27,9 @@ class CredentialStore;  // auth/credential_store.h（仅 admin handler 的 .cc �
 
 struct RequestContext {
     std::string request_id;
+    // x-amz-id-2 / <HostId>（docs/gaps.md §5.9）：AWS 支持工单要的两个 id 之一，
+    // 客户端只会转述它看到的这一对，日志侧必须能对上
+    std::string host_id;
     // 取消信号：客户端断连（driver 发现）、请求超时、进程 shutdown（docs/concurrency.md §5）；
     // 默认"永不取消"。长循环（流式读写每块之间）与 pool.schedule() 感知它
     CancelToken cancel;
@@ -62,10 +68,24 @@ public:
     // 链，挂起点抛 OperationCancelled → 503
     void set_request_timeout(std::chrono::milliseconds t) { request_timeout_ = t; }
 
+    // multipart 最小分片（docs/gaps.md §5.7）：默认 AWS 的 5MiB，0 = 不限制。
+    // 做成旋钮而非硬编码，是因为网关前面挂的工具链未必守这条规则（把小分片
+    // 上传打回去比让运维改工具更贵），也让"proxy 到另一个 lights3"的部署形态
+    // 不至于被两层各判一次
+    void set_min_part_size(uint64_t n) { min_part_size_ = n; }
+    uint64_t min_part_size() const { return min_part_size_; }
+
+    // 验签结果沿分派链传给 handler（docs/gaps.md §5.10）：ListBuckets 要按 policy
+    // 过滤结果，而 policy 此前只活在 dispatch 的局部变量里
+    struct RequestAuth {
+        std::string_view access_key;             // 认证关闭时为空
+        const CredentialPolicy* policy = nullptr;  // nullptr = 无限制
+    };
+
     // 显式分派表（docs/s3-protocol.md §2）：(method, scope, query-flag) → handler，声明序匹配
     enum class Scope { Service, Bucket, Object };
     using Handler = Task<http::HttpResponse> (*)(S3Service&, http::HttpRequest&, std::string,
-                                                 std::string);
+                                                 std::string, const RequestAuth&);
     struct Route {
         std::string_view method;
         Scope scope;
@@ -75,15 +95,24 @@ public:
         // 黑名单兜底的结构性问题是任何遗漏都静默降级成"读/写整对象"——
         // ?attributes 回整个对象体、?partNumber 回整个对象、response-* 被吞
         std::string_view extra_query;
+        // 本路由对应的动作（docs/gaps.md §5.10）：授权按它判定，而不是按 HTTP
+        // 方法猜——DeleteObjects 是 POST 却显然是删除，CreateMultipartUpload 同为
+        // POST 却是写入，方法维度根本分不开这两件事
+        Action action;
         Handler fn;
     };
 
+    // 分派表匹配（授权需在调用 handler 之前就知道动作，故与 route 分开）
+    static std::span<const Route> route_table();
+    const Route* match_route(const http::HttpRequest& req, Scope scope) const;
+
 private:
-    Task<http::HttpResponse> route(http::HttpRequest& req, std::string bucket, std::string key);
+    Task<http::HttpResponse> route(http::HttpRequest& req, std::string bucket, std::string key,
+                                   const RequestAuth& auth);
 
     // handlers/buckets.cc
-    Task<http::HttpResponse> list_buckets();
-    Task<http::HttpResponse> create_bucket(std::string bucket);
+    Task<http::HttpResponse> list_buckets(const RequestAuth& auth);
+    Task<http::HttpResponse> create_bucket(http::HttpRequest& req, std::string bucket);
     Task<http::HttpResponse> head_bucket(std::string bucket);
     Task<http::HttpResponse> delete_bucket(std::string bucket);
     Task<http::HttpResponse> get_bucket_location(std::string bucket);
@@ -133,6 +162,7 @@ private:
     Metrics metrics_;
     std::function<ThreadPool::Stats()> pool_stats_;
     std::chrono::milliseconds request_timeout_{0};
+    uint64_t min_part_size_ = storage::kMinPartSize;
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
 

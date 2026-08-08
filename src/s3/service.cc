@@ -8,6 +8,7 @@
 #include "core/log.h"
 #include "core/util/hex.h"
 #include "s3/auth/credential_store.h"
+#include "s3/checksum_guard.h"
 #include "s3/errors.h"
 #include "s3/handlers/common.h"
 #include "s3/router.h"
@@ -16,9 +17,13 @@ namespace lights3::s3 {
 
 namespace {
 
-std::string make_request_id() {
+std::mt19937_64& id_rng() {
     static thread_local std::mt19937_64 rng{std::random_device{}()};
-    uint64_t v = rng();
+    return rng;
+}
+
+std::string make_request_id() {
+    uint64_t v = id_rng()();
     uint8_t bytes[8];
     memcpy(bytes, &v, 8);
     std::string hex = util::to_hex(std::span(bytes, 8));
@@ -26,12 +31,22 @@ std::string make_request_id() {
     return hex;
 }
 
-http::HttpResponse error_response(const S3Error& e, const std::string& request_id,
-                                  bool head_only) {
+// x-amz-id-2 比 request id 长（AWS 是一串 base64）：这里同样用 hex，24 字节
+std::string make_host_id() {
+    uint8_t bytes[24];
+    for (size_t i = 0; i < sizeof(bytes); i += 8) {
+        uint64_t v = id_rng()();
+        memcpy(bytes + i, &v, 8);
+    }
+    return util::to_hex(std::span(bytes, sizeof(bytes)));
+}
+
+http::HttpResponse error_response(const S3Error& e, const RequestContext& ctx, bool head_only) {
     http::HttpResponse resp;
     resp.status = http_status(e.code);
     resp.headers.set("Content-Type", "application/xml");
-    if (!head_only) resp.small_body = error_xml(e, request_id);
+    for (auto& [k, v] : e.headers) resp.headers.set(k, v);
+    if (!head_only) resp.small_body = error_xml(e, ctx.request_id, ctx.host_id);
     return resp;
 }
 
@@ -117,6 +132,12 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
             if (!http::HeaderMap::ieq(v, "private")) refuse();
             continue;
         }
+        if (lk == "x-amz-storage-class") {
+            // 同理（docs/gaps.md §5.2）：只有 STANDARD 一种存储类，收下 GLACIER
+            // 再原样回显等于替存储层撒谎——对象根本没进任何归档层
+            if (!http::HeaderMap::ieq(v, "STANDARD")) refuse();
+            continue;
+        }
         for (auto p : kPrefixes)
             if (lk.rfind(p, 0) == 0) refuse();
         for (auto e : kExact)
@@ -197,7 +218,7 @@ S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) cons
 // ---------- 顶层入口 ----------
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
-    RequestContext ctx{make_request_id(), req.cancel};
+    RequestContext ctx{make_request_id(), make_host_id(), req.cancel};
     bool head = req.method == "HEAD";
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
@@ -242,6 +263,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // 按验签时的语义完成
             auto ident = auth_.verify(req);
             access_key = ident.access_key;
+            // Content-MD5 / x-amz-checksum-*（docs/gaps.md §5.6）：装在 verify 之后，
+            // 于是包在 sha256/aws-chunked 装饰器之外——摘要按解帧后的明文计算，
+            // 与客户端算的是同一份字节。与签名无关，认证关闭时同样生效
+            install_checksum_guard(req);
             bucket = std::move(addr.bucket);
             key = std::move(addr.key);
             // 用户请求的 bucket 名在此统一过完整校验，这是**唯一**的权威闸门
@@ -253,23 +278,31 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // （.sys）也只对 allow_reserved=true 的调用方开放——用户请求永远
             // 拿不到那个参数
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
-            // per-credential policy（docs/credential-management.md §10.4）：
-            // GET/HEAD 为读，其余（PUT/POST/DELETE）算写。判定输入是 verify
-            // 带出的快照，不再回 store 查表（§3.7）
+            // per-credential policy（docs/credential-management.md §10.4）：动作取自
+            // 匹配到的路由而非 HTTP 方法（docs/gaps.md §5.10）——DeleteObjects 是
+            // POST 却是删除，CreateMultipartUpload 同为 POST 却是写入，方法维度
+            // 分不开这两件事。判定输入是 verify 带出的快照，不回 store 查表（§3.7）
+            RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr};
             if (ident.policy) {
                 auto deny = [] {
                     throw S3Error(S3ErrorCode::AccessDenied,
                                   "Access denied by credential policy.");
                 };
-                if (!ident.policy->allows(bucket, req.method != "GET" && req.method != "HEAD"))
-                    deny();
-                // CopyObject / UploadPartCopy 的源在 header 里，不经上面的 bucket
-                // 检查：对源桶单独做一次"读"授权，防 policy 凭证借 copy 读白名单外数据
-                if (req.method == "PUT")
-                    if (auto src = req.headers.get("x-amz-copy-source"))
-                        if (!ident.policy->allows(handlers::parse_copy_source(*src).first,
-                                                  /*is_write=*/false))
-                            deny();
+                Scope scope = bucket.empty() ? Scope::Service
+                              : key.empty()  ? Scope::Bucket
+                                             : Scope::Object;
+                const Route* r = match_route(req, scope);
+                // 匹配不到路由就没有可判定的动作：交给 route() 去回 405，
+                // 未支持的方法本就不构成越权面
+                if (r) {
+                    if (!ident.policy->allows(bucket, key, r->action)) deny();
+                    // CopyObject / UploadPartCopy 的源在 header 里，不经上面的检查：
+                    // 对源桶+源 key 单独做一次读授权，防 policy 凭证借 copy 读白名单外数据
+                    if (auto src = req.headers.get("x-amz-copy-source")) {
+                        auto [sb, sk] = handlers::parse_copy_source(*src);
+                        if (!ident.policy->allows(sb, sk, Action::Read)) deny();
+                    }
+                }
             }
             // 请求级超时 + 取消接线（docs/gaps.md §3.1/§3.3）：req_src 为本请求专用，
             // 外部 token（进程关停，驱动接线后还有客户端断连）接到同一个源上——任一
@@ -283,9 +316,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 if (ctx.cancel.cancelled()) req_src.request_cancel();
             }
             if (request_timeout_.count() > 0)
-                resp = co_await with_timeout(route(req, bucket, key), request_timeout_, req_src);
+                resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout_, req_src);
             else
-                resp = co_await std::move(route(req, bucket, key).with_cancel(req_src.token()));
+                resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
         }
     } catch (const OperationCancelled&) {
         // 超时/断连/关停：503 让 SDK 重试。已在池线程上执行的阻塞系统调用不被抢占，
@@ -295,19 +328,19 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         metrics_.s3_error(S3ErrorCode::SlowDown);
         resp = error_response(
             S3Error(S3ErrorCode::SlowDown, "Request cancelled: timed out or server shutting down."),
-            ctx.request_id, head);
+            ctx, head);
     } catch (const S3Error& e) {
         metrics_.s3_error(e.code);
-        resp = error_response(public_error(e, ctx.request_id, req), ctx.request_id, head);
+        resp = error_response(public_error(e, ctx.request_id, req), ctx, head);
     } catch (const std::exception& e) {
         LOG_ERROR("req {} {} {} internal error: {}", ctx.request_id, req.method, req.path,
                   e.what());
         metrics_.s3_error(S3ErrorCode::InternalError);
         resp = error_response(
-            S3Error(S3ErrorCode::InternalError, "We encountered an internal error."),
-            ctx.request_id, head);
+            S3Error(S3ErrorCode::InternalError, "We encountered an internal error."), ctx, head);
     }
     resp.headers.set("x-amz-request-id", ctx.request_id);
+    resp.headers.set("x-amz-id-2", ctx.host_id);
     resp.headers.set("Server", "lights3");
 
     // 访问日志（docs/s3-protocol.md §7）：一行结构化，字段序对齐 S3 access log 精简版
@@ -333,28 +366,41 @@ bool flag_matches(const http::HttpRequest& req, std::string_view flag) {
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bucket,
-                                          std::string key) {
+// 表放在 route() 里是为了让 lambda 能取到私有 handler；match_route 与它共用同一份
+// 静态表（授权要在 handler 之前知道动作，见 dispatch）
+const S3Service::Route* S3Service::match_route(const http::HttpRequest& req, Scope scope) const {
+    for (auto& r : route_table())
+        if (r.method == req.method && r.scope == scope && flag_matches(req, r.flag)) return &r;
+    return nullptr;
+}
+
+// 分派表：放在成员函数里，无捕获 lambda 才能访问私有 handler。
+// match_route 与 route 共用这一份——授权要在 handler 之前就得知道动作
+std::span<const S3Service::Route> S3Service::route_table() {
     using Scope = S3Service::Scope;
-    // 表项按声明序匹配：带 query-flag 的在前，"" 兜底在后。
-    // 表定义在成员函数体内：lambda 由此获得私有 handler 的访问权
     static constexpr Route kRoutes[] = {
     // service 级
     {"GET", Scope::Service, "", "",
-     [](S3Service& s, http::HttpRequest&, std::string, std::string) {
-         return s.list_buckets();
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string, std::string,
+        const RequestAuth& auth) {
+         return s.list_buckets(auth);
      }},
 
     // bucket 级
     {"GET", Scope::Bucket, "location", "",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth&) {
          return s.get_bucket_location(std::move(b));
      }},
-    // 分页参数允许但忽略：handler 一次回全量且 IsTruncated=false，是完整的
-    // 答案（分页循环正确终止，cloudproxy 自己就这么发）。prefix/delimiter 不在
-    // 名单内——忽略它们会把过滤范围外的 upload 混进来，那才是静默误答
-    {"GET", Scope::Bucket, "uploads", "max-uploads key-marker upload-id-marker",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
+    // 五个参数现已全部生效（docs/gaps.md §5.1）：此前分页参数是"允许但忽略"、
+    // prefix/delimiter 干脆不放行（忽略它们会把过滤范围外的 upload 混进来）
+    {"GET", Scope::Bucket, "uploads",
+     "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth&) {
          return s.list_multipart_uploads(req, std::move(b));
      }},
     // ListObjectsV2 与 V1 兼容同入口。fetch-owner 允许但忽略：V2 缺省本就不回
@@ -362,68 +408,107 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
     {"GET", Scope::Bucket, "",
      "list-type prefix delimiter marker continuation-token start-after max-keys "
      "encoding-type fetch-owner",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
+     Action::Read,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth&) {
          return s.list_objects(req, std::move(b));
      }},
     {"PUT", Scope::Bucket, "", "",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
-         return s.create_bucket(std::move(b));
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth&) {
+         return s.create_bucket(req, std::move(b));
      }},
     {"HEAD", Scope::Bucket, "", "",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth&) {
          return s.head_bucket(std::move(b));
      }},
     {"DELETE", Scope::Bucket, "", "",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth&) {
          return s.delete_bucket(std::move(b));
      }},
     {"POST", Scope::Bucket, "delete", "",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth&) {
          return s.delete_objects(req, std::move(b));
      }},
 
     // object 级：multipart
     {"POST", Scope::Object, "uploads", "",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          return s.create_multipart(req, std::move(b), std::move(k));
      }},
     {"POST", Scope::Object, "uploadId", "",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          return s.complete_multipart(req, std::move(b), std::move(k));
      }},
     {"PUT", Scope::Object, "partNumber", "uploadId",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          return s.upload_part(req, std::move(b), std::move(k));
      }},
     {"GET", Scope::Object, "uploadId", "max-parts part-number-marker",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+     Action::Read,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          return s.list_parts(req, std::move(b), std::move(k));
      }},
     {"DELETE", Scope::Object, "uploadId", "",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          return s.abort_multipart(req, std::move(b), std::move(k));
      }},
 
     // object 级：数据面
     {"PUT", Scope::Object, "", "",  // PutObject / CopyObject（按 x-amz-copy-source 分流）
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          if (req.headers.has("x-amz-copy-source"))
              return s.copy_object(req, std::move(b), std::move(k));
          return s.put_object(req, std::move(b), std::move(k));
      }},
-    {"GET", Scope::Object, "", "",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+    // response-* 覆盖参数（docs/gaps.md §5.3）：presigned 下载链接最常用的一族
+    {"GET", Scope::Object, "",
+     "response-content-type response-content-language response-expires "
+     "response-cache-control response-content-disposition response-content-encoding",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          return s.get_object(req, std::move(b), std::move(k), false);
      }},
-    {"HEAD", Scope::Object, "", "",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
+    {"HEAD", Scope::Object, "",
+     "response-content-type response-content-language response-expires "
+     "response-cache-control response-content-disposition response-content-encoding",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
          return s.get_object(req, std::move(b), std::move(k), true);
      }},
     {"DELETE", Scope::Object, "", "",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string k) {
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
+        const RequestAuth&) {
          return s.delete_object(std::move(b), std::move(k));
      }},
     };
+    return kRoutes;
+}
+
+Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bucket,
+                                          std::string key, const RequestAuth& auth) {
+
 
     // 黑名单先行只为给已知子资源更明确的报错文案；结构性防线是下面按路由的
     // query 白名单（§3.5）与请求头检查（§3.4）
@@ -432,16 +517,27 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
     Scope scope = bucket.empty() ? Scope::Service
                   : key.empty() ? Scope::Bucket
                                 : Scope::Object;
-    for (auto& r : kRoutes) {
-        if (r.method != req.method || r.scope != scope) continue;
-        if (!flag_matches(req, r.flag)) continue;
+    if (const Route* r = match_route(req, scope)) {
         // 白名单（§3.5）：本路由名单外的 query key → 501。黑名单模型下任何遗漏
         // 都静默降级成"读/写整对象"（?attributes 回对象体、?partNumber 回整个
         // 对象、response-* 被吞），501 至少是诚实的
-        enforce_query_whitelist(req, r);
-        co_return co_await r.fn(*this, req, std::move(bucket), std::move(key));
+        enforce_query_whitelist(req, *r);
+        co_return co_await r->fn(*this, req, std::move(bucket), std::move(key), auth);
     }
-    throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.");
+    // 405 必须带 Allow（RFC 9110 §15.5.6，docs/gaps.md §5.9）：同 scope 下同样能
+    // 匹配本请求 query 的其余方法即为答案——名单由分派表本身给出，不会与之漂移
+    std::string allow;
+    for (auto& r : route_table()) {
+        if (r.scope != scope || !flag_matches(req, r.flag)) continue;
+        if (allow.find(r.method) != std::string::npos) continue;  // 同方法多路由只列一次
+        if (!allow.empty()) allow += ", ";
+        allow += r.method;
+    }
+    // HEAD 由 GET 路由承接的驱动/上游语义：列了 GET 就一并列 HEAD
+    if (allow.find("GET") != std::string::npos && allow.find("HEAD") == std::string::npos)
+        allow += ", HEAD";
+    throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.")
+        .with_header("Allow", allow);
 }
 
 // ---------- readyz（docs/s3-protocol.md §7：各后端探活）----------

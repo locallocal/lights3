@@ -26,7 +26,7 @@ S3Service::dispatch()                       src/s3/service.cc
   │    需要 payload 校验时把 req.body 再包一层（见 §2.1）
   │ ⑤ resolve_address()：virtual-host 或 path-style 解出 (bucket, key)
   │    '.' 开头 bucket 为内部保留名，统一拒绝（docs/credential-management.md §4.1）
-  │ ⑥ per-credential policy 授权：cred_store->authorize(ak, bucket, is_write)
+  │ ⑥ per-credential policy 授权：按匹配路由的动作判定 policy 快照
   │    （GET/HEAD 为读，其余为写；CopyObject/UploadPartCopy 另对源桶做一次
   │    读授权，见 docs/credential-management.md §10.4）
   ▼

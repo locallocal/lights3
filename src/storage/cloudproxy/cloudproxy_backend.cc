@@ -48,9 +48,11 @@ std::string format_range(const ByteRange& r) {
     return out;
 }
 
-// x-amz-meta-* 头（签名会把它们收进 SignedHeaders）
+// x-amz-meta-* 与一等元数据头（签名会把它们一并收进 SignedHeaders，无需改签名侧）
 std::vector<std::pair<std::string, std::string>> meta_headers(const ObjectMeta& meta) {
     std::vector<std::pair<std::string, std::string>> out;
+    for (auto& f : kStdMetaFields)
+        if (!(meta.*f.field).empty()) out.emplace_back(f.header, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) out.emplace_back("x-amz-meta-" + k, v);
     return out;
 }
@@ -85,6 +87,8 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
     if (res.has_header("Content-Type")) m.content_type = res.get_header_value("Content-Type");
     if (auto t = util::parse_http_date(res.get_header_value("Last-Modified")))
         m.last_modified = *t;
+    for (auto& f : kStdMetaFields)
+        if (res.has_header(f.header)) m.*f.field = res.get_header_value(f.header);
     for (auto& [k, v] : res.headers) {
         constexpr std::string_view kMetaPrefix = "x-amz-meta-";
         if (k.size() > kMetaPrefix.size() &&
@@ -903,79 +907,102 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
                              resource_of(bucket, key));
 }
 
-Task<std::vector<PartMeta>> CloudProxyBackend::list_parts(std::string_view bucket,
-                                                          std::string_view key,
-                                                          std::string_view upload_id) {
+// 契约带上分页位之后，这里由"累积全部页再返回"改为**转发一页**（docs/gaps.md
+// §5.1）：客户端的 marker 直接成为远端的 marker，远端的 IsTruncated 原样回传。
+// 此前为了满足裸 vector 契约必须把远端所有页拉完，客户端要第一页也得等全量
+Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
+                                                    std::string_view key,
+                                                    std::string_view upload_id,
+                                                    const ListPartsOptions& opt) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.object_path(key_path(key));
     auto resource = resource_of(bucket, key);
-    std::vector<PartMeta> out;
-    std::string marker;
-    for (;;) {
-        std::string query = "uploadId=" + qv(upload_id) + "&max-parts=1000";
-        if (!marker.empty()) query += "&part-number-marker=" + marker;
-        std::string full = path + "?" + query;
-        auto res = co_await control_io([&] {
-            return ctx_->with_retry("list_parts", [&](httplib::Client& c) {
-                return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
-            });
+    ListPartsResult out;
+    if (opt.max_parts <= 0) co_return out;
+
+    std::string query = "uploadId=" + qv(upload_id) +
+                        "&max-parts=" + std::to_string(opt.max_parts);
+    if (opt.part_number_marker > 0)
+        query += "&part-number-marker=" + std::to_string(opt.part_number_marker);
+    std::string full = path + "?" + query;
+    auto res = co_await control_io([&] {
+        return ctx_->with_retry("list_parts", [&](httplib::Client& c) {
+            return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
         });
-        if (!res) ctx_->throw_transport_error(res.error());
-        if (res->status != 200)
-            ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
-        auto root = s3::xml_parse(res->body);
-        for (auto& child : root.children) {
-            if (child.name != "Part") continue;
-            PartMeta p;
-            p.part_no = static_cast<int>(parse_u64(child.get("PartNumber")));
-            p.size = parse_u64(child.get("Size"));
-            p.etag = std::string(strip_etag_quotes(child.get("ETag")));
-            if (auto t = util::parse_iso8601(child.get("LastModified"))) p.last_modified = *t;
-            out.push_back(std::move(p));
-        }
-        if (root.get("IsTruncated") != "true") break;
-        marker = root.get("NextPartNumberMarker");
-        if (marker.empty()) break;
+    });
+    if (!res) ctx_->throw_transport_error(res.error());
+    if (res->status != 200)
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
+    auto root = s3::xml_parse(res->body);
+    for (auto& child : root.children) {
+        if (child.name != "Part") continue;
+        PartMeta p;
+        p.part_no = static_cast<int>(parse_u64(child.get("PartNumber")));
+        p.size = parse_u64(child.get("Size"));
+        p.etag = std::string(strip_etag_quotes(child.get("ETag")));
+        if (auto ts = util::parse_iso8601(child.get("LastModified"))) p.last_modified = *ts;
+        out.parts.push_back(std::move(p));
+    }
+    out.is_truncated = root.get("IsTruncated") == "true";
+    if (out.is_truncated) {
+        out.next_part_number_marker =
+            static_cast<int>(parse_u64(root.get("NextPartNumberMarker")));
+        // 远端截断了却不给游标：续传无从下手，宁可如实报到尾也不让客户端死循环
+        if (out.next_part_number_marker == 0 && !out.parts.empty())
+            out.next_part_number_marker = out.parts.back().part_no;
     }
     co_return out;
 }
 
-Task<std::vector<UploadInfo>> CloudProxyBackend::list_multipart_uploads(
-    std::string_view bucket) {
+Task<ListUploadsResult> CloudProxyBackend::list_multipart_uploads(
+    std::string_view bucket, const ListUploadsOptions& opt) {
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.bucket_path();
     auto resource = resource_of(bucket);
-    std::vector<UploadInfo> out;
-    std::string key_marker, id_marker;
-    for (;;) {
-        std::string query = "uploads&max-uploads=1000";
-        if (!key_marker.empty())
-            query += "&key-marker=" + qv(key_marker) + "&upload-id-marker=" + qv(id_marker);
-        std::string full = path + "?" + query;
-        auto res = co_await control_io([&] {
-            return ctx_->with_retry("list_uploads", [&](httplib::Client& c) {
-                return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
-            });
+    ListUploadsResult out;
+    if (opt.max_uploads <= 0) co_return out;
+
+    std::string query = "uploads&max-uploads=" + std::to_string(opt.max_uploads);
+    if (!opt.prefix.empty()) query += "&prefix=" + qv(opt.prefix);
+    if (!opt.delimiter.empty()) query += "&delimiter=" + qv(opt.delimiter);
+    if (!opt.key_marker.empty())
+        query += "&key-marker=" + qv(opt.key_marker) +
+                 "&upload-id-marker=" + qv(opt.upload_id_marker);
+    std::string full = path + "?" + query;
+    auto res = co_await control_io([&] {
+        return ctx_->with_retry("list_uploads", [&](httplib::Client& c) {
+            return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
         });
-        if (!res) ctx_->throw_transport_error(res.error());
-        if (res->status != 200)
-            ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket, resource);
-        auto root = s3::xml_parse(res->body);
-        for (auto& child : root.children) {
-            if (child.name != "Upload") continue;
+    });
+    if (!res) ctx_->throw_transport_error(res.error());
+    if (res->status != 200)
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket, resource);
+    auto root = s3::xml_parse(res->body);
+    for (auto& child : root.children) {
+        if (child.name == "Upload") {
             UploadInfo u;
             u.key = child.get("Key");
             u.upload_id = child.get("UploadId");
-            if (auto t = util::parse_iso8601(child.get("Initiated"))) u.initiated = *t;
-            out.push_back(std::move(u));
+            if (auto ts = util::parse_iso8601(child.get("Initiated"))) u.initiated = *ts;
+            out.uploads.push_back(std::move(u));
+        } else if (child.name == "CommonPrefixes") {
+            out.common_prefixes.push_back(child.get("Prefix"));
         }
-        if (root.get("IsTruncated") != "true") break;
-        key_marker = root.get("NextKeyMarker");
-        id_marker = root.get("NextUploadIdMarker");
-        if (key_marker.empty() && id_marker.empty()) break;
+    }
+    out.is_truncated = root.get("IsTruncated") == "true";
+    if (out.is_truncated) {
+        out.next_key_marker = root.get("NextKeyMarker");
+        out.next_upload_id_marker = root.get("NextUploadIdMarker");
+        // 同上：远端不给游标就别把 truncated 传下去，否则客户端原地打转
+        if (out.next_key_marker.empty() && !out.uploads.empty()) {
+            out.next_key_marker = out.uploads.back().key;
+            out.next_upload_id_marker = out.uploads.back().upload_id;
+        } else if (out.next_key_marker.empty()) {
+            out.is_truncated = false;
+        }
     }
     co_return out;
 }

@@ -502,13 +502,25 @@ std::vector<PartRec> RocksMetaStore::list_parts(std::string_view b, std::string_
     return scan_parts(b, k, id);
 }
 
-std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b) {
+std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b,
+                                                    std::string_view key_marker,
+                                                    std::string_view id_marker, int limit) {
     require_bucket_locked(b);  // 纯读，锁外 get 幂等安全
     std::string prefix = std::string(b) + '\0';
+    // 游标下推（docs/gaps.md §5.1）：key 编码本身就是 (key, upload_id) 序，
+    // seek 到 marker 之后即可，跳过的部分一条也不读
+    std::string seek = prefix;
+    if (!key_marker.empty() || !id_marker.empty()) {
+        seek += std::string(key_marker);
+        seek += '\0';
+        seek += std::string(id_marker);
+        seek += '\0';  // 尾部 '\0' 使 seek 落在该 (key,id) 之后
+    }
     std::vector<UploadInfo> out;
     auto it = std::unique_ptr<rocksdb::Iterator>(
         db()->NewIterator(rocksdb::ReadOptions(), cfs_[kUploads]));
-    for (it->Seek(prefix); it->Valid() && it->key().starts_with(slice(prefix)); it->Next()) {
+    for (it->Seek(seek); it->Valid() && it->key().starts_with(slice(prefix)); it->Next()) {
+        if (limit > 0 && out.size() >= size_t(limit)) break;
         // key = <bucket>\0<key>\0<upload_id>，前缀扫天然按 (key, upload_id) 排序
         std::string_view rest = strip_prefix(it->key(), prefix.size());
         auto sep = rest.rfind('\0');

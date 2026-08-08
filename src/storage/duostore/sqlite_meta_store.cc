@@ -91,8 +91,11 @@ constexpr const char* kUpGet = "SELECT val FROM uploads WHERE bucket=?1 AND key=
 constexpr const char* kUpPut = "INSERT INTO uploads(bucket,key,id,val) VALUES(?1,?2,?3,?4)";
 constexpr const char* kUpDel = "DELETE FROM uploads WHERE bucket=?1 AND key=?2 AND id=?3";
 constexpr const char* kUpAny = "SELECT 1 FROM uploads WHERE bucket=?1 LIMIT 1";
+// 复合游标下推（docs/gaps.md §5.1）：(key,id) > (?2,?3) 用行值比较，正好走
+// 主键序；?4<=0 表示不限条数（SQLite 的 LIMIT 负值即无限制）
 constexpr const char* kUpList =
-    "SELECT key,id,val FROM uploads WHERE bucket=?1 ORDER BY key,id";
+    "SELECT key,id,val FROM uploads WHERE bucket=?1 AND (key,id) > (?2,?3) "
+    "ORDER BY key,id LIMIT ?4";
 constexpr const char* kPartGet =
     "SELECT val FROM parts WHERE bucket=?1 AND key=?2 AND id=?3 AND part_no=?4";
 constexpr const char* kPartPut =
@@ -919,12 +922,17 @@ std::vector<PartRec> SqliteMetaStore::list_parts(std::string_view b, std::string
     return scan_parts(*lease, b, k, id);
 }
 
-std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b) {
+std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b,
+                                                     std::string_view key_marker,
+                                                     std::string_view id_marker, int limit) {
     auto lease = read_conn();
     require_bucket(*lease, b);
     std::vector<UploadInfo> out;
     Stmt st(*lease, kUpList);
     st.blob(1, b);
+    st.blob(2, key_marker);
+    st.blob(3, id_marker);
+    st.i64(4, limit > 0 ? limit : -1);
     while (st.step()) {
         auto rec = codec::decode_upload(std::string(st.col_blob(0)),
                                         std::string(st.col_blob(1)), st.col_blob(2));

@@ -20,13 +20,14 @@
 ## 速览
 
 - **第一部分 · 需要调整的实现**：P0 四条（§1）、高 二十余条（§2，其中 12 条展开、13 条列表）、中 三十余条（§3）、低 二十余条（§4）。
-- **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5）、存储引擎能力缺口 23 项（§6）、运维与工程能力缺口 10 项（§7）。
+- **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5，**已全部实现**）、存储引擎能力缺口 23 项（§6）、运维与工程能力缺口 10 项（§7）。
 - **第三部分 · 文档与实现的偏差**：15 条实现与承诺不符（含"改实现"与"改文档"两类），另有 7 条中英文档漂移（§8）。
 
 P0 四条**已于 2026-08-03 全部修复**（详见 §1），高危 25 条（§2 的 12 条展开 + §2.13 的 13 行）
 **已于 2026-08-06 全部修复**（详见 §2；其中 §2.6 的下推顺带解决了 §3.6），中危三十余条
 **已于 2026-08-08 全部修复**（详见 §3），低危 23 行**已于 2026-08-08 全部修复**（详见 §4）。
-第一部分至此清零；当前未修复的起点是第二部分的 §5 S3 协议缺口。
+第一部分至此清零。第二部分的 **§5 S3 协议缺口 10 小节已于 2026-08-09 全部实现**
+（详见 §5）；当前未修复的起点是 §6 存储引擎能力缺口。
 
 P0 四条按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
 
@@ -558,9 +559,12 @@ credstore_policy_snapshot_survives_revocation。
 
 # 第二部分 · 未实现的功能
 
-## 5. S3 协议缺口
+## 5. [✅已修复] S3 协议缺口
 
-### 5.1 分页缺失（高）
+> 本节 10 小节**已于 2026-08-09 全部实现**，各小节末尾为实际修法；
+> 凡写"**残留**"者为刻意不做，并给出理由。
+
+### 5.1 [✅已修复] 分页缺失（高）
 
 - **ListMultipartUploads**（`src/s3/handlers/multipart.cc:201-224`）：`(void)req;` —— `prefix`/`delimiter`/`key-marker`/`upload-id-marker`/`max-uploads` **一个都不读**，硬编码 `MaxUploads=1000` / `IsTruncated=false` 却返回全部 upload。5000 个活跃 upload 时客户端按 `IsTruncated` 判定已到尾，同时单请求把整表构造进内存。
 - **ListParts**（`:173-199`）：同样恒 `IsTruncated=false`，忽略 `part-number-marker`/`max-parts`。
@@ -568,38 +572,116 @@ credstore_policy_snapshot_survives_revocation。
 
 **建议**：接口加 `ListUploadsOptions`/`part_number_marker`+`max_parts` 与带 `is_truncated`/`next_*_marker` 的结果结构；过渡期至少在 L2 按 max 截断并**据实**置 `IsTruncated`，而不是谎报 false。
 
-### 5.2 对象元数据只保留 Content-Type 与 x-amz-meta-*（中）
+**✅已修复**（2026-08-09）：按建议做了完整版而非过渡版。契约新增
+`ListPartsOptions/Result` 与 `ListUploadsOptions/Result`（形态对齐既有的
+`ListOptions/ListResult`）；截断语义只写一份——`storage/listing.h` 的
+`apply_parts_page`/`apply_uploads_page`，六个后端共用，免得规则在每个后端里各长
+一个样。`max<=0` 一律"空且未截断"（空游标 + truncated 会让循环续传的客户端原地
+死循环）；delimiter 分组的续传游标落在**组尾那一条**而非组名（"a/" < "a/x"，
+用组名当游标会把整组再列一遍）。
+各后端按能力下推：sqlite 用 `(key,id) > (?,?)` 行值比较 + LIMIT，rocks/tikv 直接
+seek/抬高扫描下界，memory/localfs 排序后裁剪，**redis 无法下推**（uploads 存成
+hash，HSCAN 游标是桶序不是字典序）——如实忽略提示、全量扫完再裁剪，代码处注明
+省的是响应体不是扫描。cloudproxy 由"累积远端所有页"改为**转发一页**，客户端
+marker 直接成为远端 marker（此前要第一页也得等全量）。
+localfs 的 `list_parts` 顺带改成"先按分片号排序、只对本页 stat + 读 .md5"——此前
+每个分片都 stat 并读一次 sidecar，翻页白付 9999 次。
+**残留**：localfs 的 mpu 是全实例共用的平目录，判断归属必须读 manifest，因此
+无论 marker 在哪都得全扫一遍；要省得把布局改成 `mpu/<bucket>/…`，是另一件事。
+
+### 5.2 [✅已修复] 对象元数据只保留 Content-Type 与 x-amz-meta-*（中）
 
 `Cache-Control`、`Content-Disposition`、`Content-Encoding`、`Content-Language`、`Expires`、`x-amz-storage-class` 在 PUT/CreateMultipartUpload 时全部丢弃（`src/s3/handlers/common.h:25-34`），GET/HEAD 也不回（`objects.cc:45-51`）。这些是 S3 的一等对象元数据。丢 `Content-Encoding: gzip` 会让浏览器拿到无法解压的字节流。sidecar/xattr 已是 TSV，扩字段成本低。
 
-### 5.3 `response-*` 覆盖参数未实现（中）
+**✅已修复**（2026-08-09）：五个字段做成 `kStdMetaFields` 单一事实来源（头名 +
+持久化键名 + 成员指针），提取、回显、各后端序列化都遍历它——不会再出现"存了但
+不回"的半吊子。落到：localfs TSV（未知键本就忽略，存量 sidecar 逐字节不变）、
+MPU manifest（跨 create→complete 存活）、duostore codec 升 v2（新增自描述 kv 段
++ `read_ver` 兼容读 v1，存量记录原地可读；此前 `check_ver` 严格相等，加字段等于
+停机重写全量元数据）、cloudproxy 头透传（签名自动覆盖）、tiered 对账重建。
+CopyObject 的 COPY 分支改整份拷贝——逐字段抄写正是这类字段被漏掉的原因。值里的
+CR/LF 一律 400（TSV 按行存，也是响应头注入面）。
+**`x-amz-storage-class` 刻意不入此列**：本实现只有 STANDARD 一种存储类，收下
+GLACIER 再原样回显等于替存储层撒谎（对象根本没进任何归档层），非 STANDARD 直接
+501，与 `x-amz-acl` 的处理一致。
+
+### 5.3 [✅已修复] `response-*` 覆盖参数未实现（中）
 
 `response-content-type`、`response-content-disposition`、`response-cache-control`、`response-content-encoding`、`response-content-language`、`response-expires` 六个既不生效也不报错。其中 `response-content-disposition` 是 presigned 下载链接最常用的参数，而文档明确承诺支持 presigned GET。实现成本很低（直接 `resp.headers.set` 覆盖，注意仅已认证请求允许）。
 
-### 5.4 CreateBucket 从不读请求体（中）
+**✅已修复**（2026-08-09）：六个参数全部生效，在 206/Content-Range 之前应用
+（那两个由本次传输决定，不接受客户端指定），GET 与 HEAD 一致。query 值是攻击者
+可控的，塞进响应头前一律挡 CR/LF（响应拆分）。关于"仅已认证请求"：本实现开启
+认证时，能走到 handler 的请求必然已验签；关闭认证时不存在这条边界——故无需再判
+身份，代码处已注明这个前提。
+
+### 5.4 [✅已修复] CreateBucket 从不读请求体（中）
 
 `src/s3/handlers/buckets.cc:46-51` 连 `HttpRequest&` 参数都没有，`LocationConstraint` 从未解析。而 `docs/s3-protocol.md:93-95` 明确列出"需要解析请求 XML 的三处"包含 CreateBucket。后果：跨 region 的建桶请求静默成功，随后 `GetBucketLocation` 回显的却是本地配置 region。AWS 此时返回 `InvalidLocationConstraint`（错误码表里也没有这个码）。
 
-### 5.5 ListObjectsV2 的 owner 与 marker 语义（中）
+**✅已修复**（2026-08-09）：`create_bucket` 补 `HttpRequest&` 参数并解析
+`CreateBucketConfiguration/LocationConstraint`，与本端 region 不符即
+`InvalidLocationConstraint`(400) **且不建桶**；空 body 与空约束均按 us-east-1
+处理（S3 惯例：该 region 不写约束）。错误码随 §5.8 一并补入码表。
+
+### 5.5 [✅已修复] ListObjectsV2 的 owner 与 marker 语义（中）
 
 `fetch-owner=true` 被忽略且 `ObjectMeta` 根本没有 owner 字段；V2 请求带 `start-after` 时不回显 `<StartAfter>`；V1/V2 的三种 marker 被塌缩成同一个 `opt.start_after`，导致 V1 响应可能回显客户端从未发过的 `<Marker>`。
 
-### 5.6 Content-MD5 / x-amz-checksum-* 完全未实现（中）
+**✅已修复**（2026-08-09）：三种 marker 各归各版本——V2 认 continuation-token
+（同时出现时它胜出）与 start-after 并回显 `<StartAfter>`，V1 只认 marker；V1 请求
+带 start-after 不再生效，也不再回显没发过的值。`fetch-owner=true` 回 `<Owner>`，
+与 ListAllMyBuckets 共用 `kOwnerId`——本实现无多租户 owner 概念，与其给
+`ObjectMeta` 加一个恒定字段再穿过五个后端，不如在 handler 侧用同一个身份。
+
+### 5.6 [✅已修复] Content-MD5 / x-amz-checksum-* 完全未实现（中）
 
 全仓无任何 `Content-MD5` 处理。AWS **要求** DeleteObjects 带 `Content-MD5`，缺失返回 400——这里不校验，被中间设备改写的批量删除会被照单执行。PutObject/UploadPart 的 `Content-MD5` 不匹配时 AWS 返回 `BadDigest`，本实现完全忽略。`x-amz-content-sha256` 的校验链已很完善，只需在同一位置多挂一个 MD5 装饰器。
 
-### 5.7 Multipart 的 AWS 硬约束缺失（中）
+**✅已修复**（2026-08-09）：按建议加装饰器（`ChecksumVerifyingReader`，形态照搬
+`Sha256VerifyingReader`）。装在 dispatch 的 verify **之后**，于是包在
+sha256/aws-chunked 装饰器之外——摘要按解帧后的明文算，与客户端算的是同一份字节；
+与签名无关，认证关闭时同样生效。覆盖 Content-MD5 与
+`x-amz-checksum-{crc32,crc32c,sha1,sha256}`，一次声明多个则逐个校验。摘要不符
+`BadDigest`、格式非法 `InvalidDigest`——分开是因为混为一谈会让客户端分不清是自己
+算错了还是链路改写了 body。DeleteObjects 缺完整性头即 400（它是唯一一个"请求体
+被改写即静默多删对象"的操作）。
+配套：crc32c 从 duostore 上提到 `core/util/checksum.h`（S3 与 extent 校验同用一
+份），新增 crc32(IEEE) 与共享 base64（list_objects 的 token 编解码此前是私有的第
+二份实现）。
+**顺带修掉一个此前无人触发的崩溃**：xlocalfs 的 `auto [total, etag] = co_await
+drain_to_tmp(...)`，body 读到一半抛异常时 GCC 会对那个从未构造的绑定目标照跑
+`std::string` 析构——double free/SEGV（ASAN 确认）。此前只有客户端断连能触发，
+Content-MD5 让它变成一个普通请求就能打到的路径。backend_suite 因此补了
+"body 中途抛异常"的契约用例，对全部后端生效。
+
+### 5.7 [✅已修复] Multipart 的 AWS 硬约束缺失（中）
 
 - **最小分片 5 MiB**（末片除外）未校验 → 允许上传 10000 个 1 字节分片，complete 时逐个 open/read/write 拼接，是廉价的放大面（AWS 返回 `EntityTooSmall`）；
 - `complete_multipart` 不复核 part_no 上界、不限 `parts.size()`；
 - 分片乱序 AWS 返回 `InvalidPartOrder`，这里返回 `InvalidPart`；
 - `<Location>` 回相对路径而非完整 URL（部分 Java SDK 直接当 URL 用）。
 
-### 5.8 错误码词表缺口（低）
+**✅已修复**（2026-08-09）：四条全补。最小分片校验点放 **L2 而非存储层**——这是
+S3 协议规则不是存储规则，直接用后端 API 的调用方（含各后端一致性套件）不该被
+5MiB 绑住；尺寸只有存储层知道，故 complete 前先 list 一次。同时做成旋钮
+`http.min_part_size`（默认 5MiB，0=关）：网关前面挂的工具链未必守这条规则，且
+"proxy 到另一个 lights3"的部署形态不该被两层各判一次。乱序改
+`InvalidPartOrder`（`InvalidPart` 会让客户端去重传分片，实际要做的是把列表排好
+序）；complete 侧复核分片号上界与 parts 数量上限（此前无限追加，一份构造好的
+XML 就能让请求把任意长的列表读进内存）；`<Location>` 用 req.path 重建完整 URL，
+path-style 与 vhost 两种寻址一并覆盖，scheme 取 X-Forwarded-Proto。
+e2e 的 multipart 分片由 3MiB 改 5MiB——3MiB 打到真 AWS 上同样会被拒。
+
+### 5.8 [✅已修复] 错误码词表缺口（低）
 
 `src/s3/errors.h:15-39` 共 24 个码，缺 `InvalidLocationConstraint`、`BadDigest`/`InvalidDigest`、`EntityTooSmall`/`InvalidPartOrder`、`MissingContentLength`、`RequestTimeout`、`BucketAlreadyExists`、`TooManyBuckets`、`InvalidObjectState`、`PermanentRedirect`、`ExpiredToken`/`InvalidToken` 等。X-macro 结构使新增成本几乎为零。
 
-### 5.9 响应字段与协议细节（低）
+**✅已修复**（2026-08-09）：点名的 12 个码全部补入（`RequestTimeout` 本就有）。
+X-macro 同源派生枚举、状态码表、`kS3ErrorCodeCount` 与指标槽位，新码自动获得
+metrics 计数位，正反向映射不可能漂移。
+
+### 5.9 [✅已修复] 响应字段与协议细节（低）
 
 - `HeadBucket` 不回 `x-amz-bucket-region`（boto3 的跨区重定向依赖它）；
 - 错误 XML 无 `<HostId>`，响应头无 `x-amz-id-2`；
@@ -607,7 +689,17 @@ credstore_policy_snapshot_survives_revocation。
 - 304 响应只带 `ETag`，RFC 要求同时带 `Last-Modified`/`Cache-Control`；
 - presigned POST（浏览器表单上传）返回 405 而非文档承诺的 501。
 
-### 5.10 权限模型的表达力（中）
+**✅已修复**（2026-08-09）：HeadBucket 与 CreateBucket 回 `x-amz-bucket-region`；
+错误 XML 加 `<HostId>` + 响应头 `x-amz-id-2`（AWS 支持工单要的两个 id，客户端只会
+转述它看到的这一对，为此 `RequestContext` 增 host_id）；405 带 `Allow`，名单由分派
+表二次扫描得出、不会与表漂移（`S3Error` 为此增 headers 槽位承载这类必带头）；
+304 补 `Last-Modified`/`Cache-Control`。
+**残留**：presigned POST 仍是 405/403 而非 501。真正的表单上传既不带
+Authorization 头也不带 X-Amz-Algorithm（policy 与签名在 multipart 表单字段里），
+要回 501 得在验签之前识别它——那等于先实现半个 POST 表单解析器，与"明确不支持"
+的收益不相称，留待真要做 presigned POST 时一并处理。
+
+### 5.10 [✅已修复] 权限模型的表达力（中）
 
 `CredentialPolicy` 只有 `buckets` glob + `readonly`（`src/s3/auth/credential_store.h:31-35`）：
 - **无 key 前缀粒度** → 多租户共桶只能退化成"一租户一桶"；
@@ -617,6 +709,26 @@ credstore_policy_snapshot_survives_revocation。
 - policy 创建后不可改，实践中促使运维图省事直接用 root，反噬两级模型本身。
 
 另：root 静态凭证的**明文 SK 可经 admin API 取回**（`admin_credentials.cc:40-54` 的 `is_static()` 只挡了 comment/policy 两个字段）。这把"读配置文件/环境变量"的信任边界降级成一次 HTTP GET，而 root SK 无法经 admin API 吊销。`mask()` 还暴露 40 字符中的 8 个。建议对静态凭证强制 `with_secret = false`，并对 `?show-secret=true` 单独打审计日志。
+
+**✅已修复**（2026-08-09）：policy 从"bucket glob + readonly"扩到三维——
+`actions`（read/write/delete）、`prefixes`（key 前缀白名单）、`buckets`，
+`readonly` 保留为 `actions:["read"]` 的等价写法。动作按**后果**归类而非 HTTP
+方法：DeleteObjects 是 POST 却是删除、CreateMultipartUpload 同为 POST 却是写入，
+方法维度分不开这两件事——为此在分派表每条路由上标注 `Action`，并把匹配从
+`route()` 提出来（`match_route`），授权在调用 handler 之前就拿到动作。
+`fnmatch` 补 `FNM_PATHNAME`，`*` 不再跨 `/`。
+ListBuckets 改为按 policy 过滤：原取舍写的是"只泄露桶名，不值得"，但桶名正是
+攻击链第一步，且 §1.1 的桶名混淆修好后该取舍的前提已经变了；为此把验签结果沿
+分派表传给 handler（Handler 签名加一参，17 条路由机械改一遍）。
+静态凭证的明文 SK 不再经 admin API 回传（按建议），掩码收紧为只留前 4 位，任何
+`?show-secret=true` 都记 WARN 审计日志。CopyObject 的源侧授权顺带补齐为
+源桶 + 源 key（加了前缀粒度后只校验桶就漏了）。
+docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺带修掉两处早已
+失真的描述——执行点写的是 `authorize(ak,bucket,is_write)`，而实际自 §3.7 起就是对
+验签快照判定。
+**残留**：policy 创建后仍不可改（无 update API）。补 update 会牵动多实例增量同步
+——现同步模型只有增删两种，policy 编辑无法传播，得先给落盘对象加版本位，属另一
+件事。
 
 ## 6. 存储引擎能力缺口
 
@@ -723,8 +835,9 @@ credstore_policy_snapshot_survives_revocation。
 
 1. ~~**先修 P0 的四条**（1.1–1.4）。其中 1.1 的三处改动必须同批上线（单改一处不构成防线）。~~ ✅ 2026-08-03 完成。
 2. ~~**2.1 + 2.2 一起修**——两条都是"后台线程/关停期异常防线"，成本极低、收益立竿见影，且 2.2 的 TimerQueue 次生问题会让 2.1 的修复更难验证。~~ ✅ 2026-08-06 完成（§2 整节同批）。
-3. ~~**3.1 / 3.2 / `AsyncSemaphore` 取消是同一条链**（2.9 已单独修完）：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持（§2.13 只做了析构断言，`close()` 留在这里），否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。~~ ✅ 2026-08-07/08 完成（§3 整节，§4 随后）。**第一部分至此清零，下一站是 §5.1 的分页缺失**——ListMultipartUploads / ListParts 恒报 `IsTruncated=false` 是会让客户端漏读的谎报，在第二部分里最该先动。
+3. ~~**3.1 / 3.2 / `AsyncSemaphore` 取消是同一条链**（2.9 已单独修完）：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持（§2.13 只做了析构断言，`close()` 留在这里），否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。~~ ✅ 2026-08-07/08 完成（§3 整节，§4 随后）。
+   ~~**下一站是 §5.1 的分页缺失**~~ ✅ 2026-08-09 完成（§5 整节）。**当前下一站是 §6 存储引擎能力缺口**——其中 6.1 的 pack 老化/预算与第 4 条互为前置。
 4. **6.1 的 pack 老化/预算**——2.3 的存活账口径与压实判据已改，续做时以现判据为基线，避免再次推翻测试。
-5. **3.5 的白名单反转**一次性消掉 5.3、3.4 的一半与未来所有子资源漂移，性价比最高。
+5. ~~**3.5 的白名单反转**一次性消掉 5.3、3.4 的一半与未来所有子资源漂移，性价比最高。~~ ✅ 已完成；5.3 随 §5 实现后，白名单也已按新语义放行 `response-*`。
 6. 第 7 节的工程能力（CI、TLS、后端指标）不阻塞正确性修复，可并行推进。
 7. §2.13 的 httplib `Expect: 100-continue` 留有上游 API 限制（无法延迟应答），如需彻底解决要么换驱动、要么向 cpp-httplib 提 PR。

@@ -1,11 +1,12 @@
 // bucket 级与 service 级 handler
 #include "core/util/time.h"
+#include "s3/handlers/common.h"
 #include "s3/service.h"
 #include "s3/xml.h"
 
 namespace lights3::s3 {
 
-Task<http::HttpResponse> S3Service::list_buckets() {
+Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
     // 聚合各后端；同名去重（首个后端优先）
     std::vector<storage::BucketInfo> all;
     for (auto& [_, backend] : router_.backends()) {
@@ -13,6 +14,10 @@ Task<http::HttpResponse> S3Service::list_buckets() {
         for (auto& b : part) {
             // 内部保留名不出现在用户可见的列表里（docs/credential-management.md §4.1）
             if (b.name == storage::kSysBucketName) continue;
+            // 按 policy 过滤（docs/gaps.md §5.10）：此前不过滤是记在案的取舍
+            //（"只泄露桶名"），但桶名正是攻击链第一步——受限凭证不该看到
+            // 白名单外的桶存在
+            if (auth.policy && !auth.policy->allows_bucket(b.name)) continue;
             bool dup = false;
             for (auto& e : all)
                 if (e.name == b.name) dup = true;
@@ -25,8 +30,8 @@ Task<http::HttpResponse> S3Service::list_buckets() {
     XmlWriter w;
     w.open("ListAllMyBucketsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
     w.open("Owner");
-    w.element("ID", "lights3");
-    w.element("DisplayName", "lights3");
+    w.element("ID", std::string(handlers::kOwnerId));
+    w.element("DisplayName", std::string(handlers::kOwnerId));
     w.close();
     w.open("Buckets");
     for (auto& b : all) {
@@ -44,10 +49,31 @@ Task<http::HttpResponse> S3Service::list_buckets() {
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::create_bucket(std::string bucket) {
+// CreateBucket：解析 CreateBucketConfiguration/LocationConstraint（docs/gaps.md §5.4）。
+// 此前请求体从不读，跨 region 的建桶静默成功、随后 GetBucketLocation 回显的却是本地
+// region——客户端据此认定数据落在别处。空 body 与空 LocationConstraint 均按 us-east-1
+// 处理（S3 惯例：该 region 不写约束）
+Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::string bucket) {
+    std::string body = co_await handlers::read_body(req);
+    if (!body.empty()) {
+        XmlNode root = xml_parse(body);
+        if (root.name != "CreateBucketConfiguration")
+            throw S3Error(S3ErrorCode::MalformedXML,
+                          "The XML you provided was not well-formed or did not validate.");
+        std::string want = root.get("LocationConstraint");
+        const std::string& region = auth_.region();
+        // 空约束 = us-east-1；本实现只服务单一 region，不符即拒而非静默改写
+        if (want.empty()) want = "us-east-1";
+        if (want != region)
+            throw S3Error(S3ErrorCode::InvalidLocationConstraint,
+                          "The specified location-constraint '" + want +
+                              "' is not valid for this endpoint (region '" + region + "').",
+                          bucket);
+    }
     co_await router_.resolve(bucket).create_bucket(bucket);
     http::HttpResponse resp;
     resp.headers.set("Location", "/" + bucket);
+    resp.headers.set("x-amz-bucket-region", auth_.region());
     co_return resp;
 }
 
@@ -55,7 +81,10 @@ Task<http::HttpResponse> S3Service::head_bucket(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
     if (!exists)
         throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
-    co_return http::HttpResponse{};
+    // boto3 的跨区重定向依赖这个头（docs/gaps.md §5.9）
+    http::HttpResponse resp;
+    resp.headers.set("x-amz-bucket-region", auth_.region());
+    co_return resp;
 }
 
 Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket) {

@@ -1,4 +1,7 @@
 // L2 纯逻辑测试：mock HttpRequest + memory 后端走完整 dispatch（docs/architecture.md §2）
+#include <set>
+
+#include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "s3/service.h"
 #include "storage/memory/memory_backend.h"
@@ -34,6 +37,17 @@ http::HttpRequest make_req(std::string method, std::string path, std::string bod
     }
     req.headers.add("Host", "localhost");
     if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
+    return req;
+}
+
+// DeleteObjects 要求完整性头（§5.6）：测试里统一走这个构造器，免得每处各算一遍
+http::HttpRequest make_delete_req(std::string path, std::string body,
+                                  std::vector<std::pair<std::string, std::string>> query) {
+    auto req = make_req("POST", std::move(path), body, std::move(query));
+    util::HashStream h(util::HashStream::Algo::Md5);
+    h.update(std::span(reinterpret_cast<const uint8_t*>(body.data()), body.size()));
+    auto d = h.final_bytes();
+    req.headers.add("Content-MD5", util::base64_encode(std::span(d.data(), d.size())));
     return req;
 }
 
@@ -166,6 +180,7 @@ TEST(service_not_implemented_apis) {
 
 TEST(service_upload_part_copy) {
     auto svc = make_service_noauth();
+    svc.set_min_part_size(0);  // 本用例测流程，不测 5MiB 规则（见 service_multipart_constraints）
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/src.bin", "0123456789")));
 
@@ -286,6 +301,7 @@ TEST(service_with_auth) {
 
 TEST(service_multipart_flow) {
     auto svc = make_service_noauth();
+    svc.set_min_part_size(0);  // 本用例测流程，不测 5MiB 规则（见 service_multipart_constraints）
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
 
     // Create → UploadId
@@ -344,7 +360,7 @@ TEST(service_delete_objects_batch) {
 
     std::string xml = "<Delete><Object><Key>a</Key></Object>"
                       "<Object><Key>b</Key></Object></Delete>";
-    auto resp = sync_wait(svc.dispatch(make_req("POST", "/bkt", xml, {{"delete", ""}})));
+    auto resp = sync_wait(svc.dispatch(make_delete_req("/bkt", xml, {{"delete", ""}})));
     CHECK_EQ(resp.status, 200);
     auto body = body_of(resp);
     CHECK(contains(body, "<Deleted><Key>a</Key></Deleted>"));
@@ -354,7 +370,7 @@ TEST(service_delete_objects_batch) {
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/c"))).status, 200);
 
     // 坏 XML → MalformedXML
-    auto bad = sync_wait(svc.dispatch(make_req("POST", "/bkt", "<oops>", {{"delete", ""}})));
+    auto bad = sync_wait(svc.dispatch(make_delete_req("/bkt", "<oops>", {{"delete", ""}})));
     CHECK_EQ(bad.status, 400);
     CHECK(contains(bad.small_body, "MalformedXML"));
 }
@@ -720,18 +736,19 @@ TEST(service_query_whitelist) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
 
-    // 黑名单时代的确切漏项：都曾静默降级为"读整个对象"
-    for (auto q : {std::pair{"attributes", ""}, std::pair{"partNumber", "1"},
-                   std::pair{"response-content-type", "text/html"}}) {
+    // 黑名单时代的确切漏项：都曾静默降级为"读整个对象"。response-* 已于 §5.3
+    // 实现，不再在此列——未实现的子资源仍须 501
+    for (auto q : {std::pair{"attributes", ""}, std::pair{"partNumber", "1"}}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{q.first, q.second}})));
         CHECK_EQ(resp.status, 501);
         CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
     }
 
-    // 白名单内的参数不受影响；fetch-owner 允许但忽略（V2 缺省不回 Owner，等价 =false）
+    // 白名单内的参数不受影响；fetch-owner 已实现（§5.5），不再是"允许但忽略"
     auto ls = sync_wait(svc.dispatch(
         make_req("GET", "/bkt", "", {{"list-type", "2"}, {"prefix", ""}, {"fetch-owner", "true"}})));
     CHECK_EQ(ls.status, 200);
+    CHECK(contains(ls.small_body, "<Owner>"));
 
     // presigned 签名参数族全局放行（值不在此校验，SigV4 层负责）
     auto pre = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"}})));
@@ -822,21 +839,360 @@ TEST(service_delete_objects_malformed_inputs) {
 
     // 空列表与缺 <Key> 都是畸形请求：整批 MalformedXML，而不是 200 空结果
     auto empty = sync_wait(
-        svc.dispatch(make_req("POST", "/bkt", "<Delete></Delete>", {{"delete", ""}})));
+        svc.dispatch(make_delete_req("/bkt", "<Delete></Delete>", {{"delete", ""}})));
     CHECK_EQ(empty.status, 400);
     CHECK(contains(empty.small_body, "MalformedXML"));
 
     auto nokey = sync_wait(svc.dispatch(
-        make_req("POST", "/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
+        make_delete_req("/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
     CHECK_EQ(nokey.status, 400);
     CHECK(contains(nokey.small_body, "MalformedXML"));
 
     // <VersionId> 静默忽略会把"删指定版本"变成"删当前对象"：501 且对象未删
-    auto ver = sync_wait(svc.dispatch(make_req(
-        "POST", "/bkt",
-        "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>",
+    auto ver = sync_wait(svc.dispatch(make_delete_req(
+        "/bkt", "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>",
         {{"delete", ""}})));
     CHECK_EQ(ver.status, 501);
     CHECK(contains(ver.small_body, "NotImplemented"));
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
+}
+
+// ---- docs/gaps.md §5.2 / §5.3 / §5.5 / §5.9 ----
+
+TEST(service_first_class_object_metadata) {
+    // 一等元数据（§5.2）：此前 PUT 时全丢、GET/HEAD 也不回。丢 Content-Encoding
+    // 的后果不是"少个头"，是浏览器拿到无法解压的字节流
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto put = make_req("PUT", "/bkt/o.bin", "payload");
+    put.headers.add("Cache-Control", "max-age=42");
+    put.headers.add("Content-Disposition", "attachment; filename=\"r.bin\"");
+    put.headers.add("Content-Encoding", "gzip");
+    put.headers.add("Content-Language", "zh-CN");
+    put.headers.add("Expires", "Wed, 21 Oct 2026 07:28:00 GMT");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+
+    for (auto method : {"GET", "HEAD"}) {
+        auto r = sync_wait(svc.dispatch(make_req(method, "/bkt/o.bin")));
+        CHECK_EQ(r.status, 200);
+        CHECK_EQ(*r.headers.get("Cache-Control"), "max-age=42");
+        CHECK_EQ(*r.headers.get("Content-Disposition"), "attachment; filename=\"r.bin\"");
+        CHECK_EQ(*r.headers.get("Content-Encoding"), "gzip");
+        CHECK_EQ(*r.headers.get("Content-Language"), "zh-CN");
+        CHECK_EQ(*r.headers.get("Expires"), "Wed, 21 Oct 2026 07:28:00 GMT");
+    }
+
+    // CopyObject 的 COPY 指令必须整份带走（逐字段抄写曾漏掉新增字段）
+    auto cp = make_req("PUT", "/bkt/copy.bin");
+    cp.headers.add("x-amz-copy-source", "/bkt/o.bin");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(cp))).status, 200);
+    auto cg = sync_wait(svc.dispatch(make_req("GET", "/bkt/copy.bin")));
+    CHECK_EQ(*cg.headers.get("Content-Encoding"), "gzip");
+    CHECK_EQ(*cg.headers.get("Cache-Control"), "max-age=42");
+
+    // 头值里的 CR/LF 会撕开 sidecar 记录，也是响应头注入面
+    auto bad = make_req("PUT", "/bkt/bad.bin", "x");
+    bad.headers.add("Cache-Control", "a\r\nX-Injected: 1");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 400);
+
+    // 只有 STANDARD 一种存储类：收下 GLACIER 再回显等于替存储层撒谎
+    auto sc = make_req("PUT", "/bkt/sc.bin", "x");
+    sc.headers.add("x-amz-storage-class", "GLACIER");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(sc))).status, 501);
+    auto sc2 = make_req("PUT", "/bkt/sc2.bin", "x");
+    sc2.headers.add("x-amz-storage-class", "STANDARD");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(sc2))).status, 200);
+}
+
+TEST(service_response_override_params) {
+    // §5.3：presigned 下载链接最常用的一族，此前既不生效也不报错
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto put = make_req("PUT", "/bkt/o.bin", "payload");
+    put.headers.add("Content-Type", "application/octet-stream");
+    sync_wait(svc.dispatch(std::move(put)));
+
+    auto r = sync_wait(svc.dispatch(make_req(
+        "GET", "/bkt/o.bin", "",
+        {{"response-content-type", "text/plain"},
+         {"response-content-disposition", "attachment; filename=\"x.txt\""},
+         {"response-cache-control", "no-store"}})));
+    CHECK_EQ(r.status, 200);
+    CHECK_EQ(*r.headers.get("Content-Type"), "text/plain");  // 覆盖对象自身的值
+    CHECK_EQ(*r.headers.get("Content-Disposition"), "attachment; filename=\"x.txt\"");
+    CHECK_EQ(*r.headers.get("Cache-Control"), "no-store");
+    CHECK_EQ(body_of(r), "payload");  // 只改头，不改体
+
+    // query 值是攻击者可控的：塞进响应头前必须挡住 CR/LF（响应拆分）
+    auto inj = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt/o.bin", "", {{"response-content-type", "t\r\nX-Injected: 1"}})));
+    CHECK_EQ(inj.status, 400);
+}
+
+TEST(service_list_marker_semantics) {
+    // §5.5：三种 marker 此前塌缩成同一个 start_after
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    for (auto k : {"a", "b", "c"}) sync_wait(svc.dispatch(make_req("PUT", std::string("/bkt/") + k, "x")));
+
+    // V1 只认 marker：带 start-after 的 V1 请求不得生效，且回显的 <Marker> 必须是空
+    auto v1 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"start-after", "b"}})));
+    CHECK_EQ(v1.status, 200);
+    CHECK(contains(v1.small_body, "<Key>a</Key>"));      // start-after 未生效
+    CHECK(contains(v1.small_body, "<Marker></Marker>"));  // 不回显客户端没发过的值
+
+    auto v1m = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"marker", "b"}})));
+    CHECK(!contains(v1m.small_body, "<Key>a</Key>"));
+    CHECK(contains(v1m.small_body, "<Key>c</Key>"));
+    CHECK(contains(v1m.small_body, "<Marker>b</Marker>"));
+
+    // V2 认 start-after 并回显 <StartAfter>
+    auto v2 = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"start-after", "a"}})));
+    CHECK(!contains(v2.small_body, "<Key>a</Key>"));
+    CHECK(contains(v2.small_body, "<StartAfter>a</StartAfter>"));
+    CHECK(!contains(v2.small_body, "<Marker>"));
+
+    // V2 缺省不回 Owner；fetch-owner=true 才回
+    CHECK(!contains(v2.small_body, "<Owner>"));
+}
+
+TEST(service_response_protocol_details) {
+    // §5.9：HostId/x-amz-id-2、Allow、304 的 Last-Modified、HeadBucket 的 region
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto put = sync_wait(svc.dispatch(make_req("PUT", "/bkt/o.bin", "payload")));
+
+    auto err = sync_wait(svc.dispatch(make_req("GET", "/bkt/missing")));
+    CHECK(contains(err.small_body, "<HostId>"));
+    CHECK(err.headers.has("x-amz-id-2"));
+
+    auto hb = sync_wait(svc.dispatch(make_req("HEAD", "/bkt")));
+    CHECK_EQ(hb.status, 200);
+    CHECK(hb.headers.has("x-amz-bucket-region"));
+
+    // 405 必须带 Allow（RFC 9110 §15.5.6）
+    auto na = sync_wait(svc.dispatch(make_req("PATCH", "/bkt/o.bin")));
+    CHECK_EQ(na.status, 405);
+    CHECK(na.headers.has("Allow"));
+    CHECK(contains(*na.headers.get("Allow"), "GET"));
+
+    // 304 只带 ETag 不够，缓存条目会丢掉 Last-Modified
+    auto nm = make_req("GET", "/bkt/o.bin");
+    nm.headers.add("If-None-Match", *put.headers.get("ETag"));
+    auto r304 = sync_wait(svc.dispatch(std::move(nm)));
+    CHECK_EQ(r304.status, 304);
+    CHECK(r304.headers.has("ETag"));
+    CHECK(r304.headers.has("Last-Modified"));
+}
+
+TEST(service_create_bucket_location_constraint) {
+    // §5.4：此前请求体从不读，跨 region 建桶静默成功
+    auto svc = make_service_noauth();
+    auto ok = sync_wait(svc.dispatch(make_req(
+        "PUT", "/loc1", "<CreateBucketConfiguration><LocationConstraint></LocationConstraint>"
+                      "</CreateBucketConfiguration>")));
+    CHECK_EQ(ok.status, 200);  // 空约束 = us-east-1 = 本实现默认 region
+
+    auto bad = sync_wait(svc.dispatch(make_req(
+        "PUT", "/loc2", "<CreateBucketConfiguration><LocationConstraint>eu-west-1"
+                      "</LocationConstraint></CreateBucketConfiguration>")));
+    CHECK_EQ(bad.status, 400);
+    CHECK(contains(bad.small_body, "<Code>InvalidLocationConstraint</Code>"));
+    // 拒绝之后桶不得存在
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/loc2"))).status, 404);
+
+    // 无 body 仍按老路径放行
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/loc3"))).status, 200);
+}
+
+TEST(service_content_md5_and_checksums) {
+    // §5.6：Content-MD5 / x-amz-checksum-* 此前全仓无处理——被中间设备改写的
+    // 请求体会被照单全收
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto md5_b64 = [](std::string_view body) {
+        util::HashStream h(util::HashStream::Algo::Md5);
+        h.update(std::span(reinterpret_cast<const uint8_t*>(body.data()), body.size()));
+        auto d = h.final_bytes();
+        return util::base64_encode(std::span(d.data(), d.size()));
+    };
+
+    auto ok = make_req("PUT", "/bkt/a.bin", "hello");
+    ok.headers.add("Content-MD5", md5_b64("hello"));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(ok))).status, 200);
+
+    // 摘要不符 → BadDigest，且对象不得落盘（body.read 抛异常时后端不提交）
+    auto bad = make_req("PUT", "/bkt/b.bin", "hello");
+    bad.headers.add("Content-MD5", md5_b64("goodbye"));
+    auto bad_resp = sync_wait(svc.dispatch(std::move(bad)));
+    CHECK_EQ(bad_resp.status, 400);
+    CHECK(contains(bad_resp.small_body, "<Code>BadDigest</Code>"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/b.bin"))).status, 404);
+
+    // 格式非法与"摘要不符"必须分开：客户端要能分辨是自己算错还是链路改写
+    auto junk = make_req("PUT", "/bkt/c.bin", "hello");
+    junk.headers.add("Content-MD5", "not-base64!!");
+    auto junk_resp = sync_wait(svc.dispatch(std::move(junk)));
+    CHECK_EQ(junk_resp.status, 400);
+    CHECK(contains(junk_resp.small_body, "<Code>InvalidDigest</Code>"));
+
+    // 长度对不上（16 字节的 MD5 收到 4 字节）同样是 InvalidDigest
+    auto shortd = make_req("PUT", "/bkt/d.bin", "hello");
+    shortd.headers.add("Content-MD5", util::base64_encode(std::string_view("abcd")));
+    CHECK(contains(sync_wait(svc.dispatch(std::move(shortd))).small_body, "InvalidDigest"));
+
+    // x-amz-checksum-*：此前静默接受、从不校验
+    auto crc = make_req("PUT", "/bkt/e.bin", "hello");
+    uint32_t v = util::crc32c_of(std::string_view("hello"));
+    std::string be;
+    for (int s = 24; s >= 0; s -= 8) be.push_back(char((v >> s) & 0xff));
+    crc.headers.add("x-amz-checksum-crc32c", util::base64_encode(be));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(crc))).status, 200);
+
+    auto crc_bad = make_req("PUT", "/bkt/f.bin", "tampered");
+    crc_bad.headers.add("x-amz-checksum-crc32c", util::base64_encode(be));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(crc_bad))).status, 400);
+}
+
+TEST(service_delete_objects_requires_digest) {
+    // 批量删除是唯一"请求体被改写即静默多删对象"的操作，AWS 要求完整性头
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/a", "x")));
+
+    std::string xml = "<Delete><Object><Key>a</Key></Object></Delete>";
+    auto missing = sync_wait(svc.dispatch(make_req("POST", "/bkt", xml, {{"delete", ""}})));
+    CHECK_EQ(missing.status, 400);
+    CHECK(contains(missing.small_body, "Content-MD5"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);  // 未删
+
+    // 带上正确摘要即放行
+    CHECK_EQ(sync_wait(svc.dispatch(make_delete_req("/bkt", xml, {{"delete", ""}}))).status, 200);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 404);
+}
+
+TEST(service_multipart_constraints) {
+    // §5.7：AWS 的几条硬约束此前一条都没有
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    auto put_part = [&](int no, const std::string& data) {
+        auto r = sync_wait(svc.dispatch(make_req(
+            "PUT", "/bkt/mp.bin", data, {{"partNumber", std::to_string(no)}, {"uploadId", uid}})));
+        std::string e = *r.headers.get("ETag");  // 去引号：complete 的 XML 里不带引号
+        if (e.size() >= 2 && e.front() == '"') e = e.substr(1, e.size() - 2);
+        return e;
+    };
+    std::string e1 = put_part(1, "small");                          // 5 字节，非末片
+    std::string e2 = put_part(2, "tail");
+    auto complete_xml = [](std::vector<std::pair<int, std::string>> ps) {
+        std::string x = "<CompleteMultipartUpload>";
+        for (auto& [n, e] : ps)
+            x += "<Part><PartNumber>" + std::to_string(n) + "</PartNumber><ETag>" + e +
+                 "</ETag></Part>";
+        return x + "</CompleteMultipartUpload>";
+    };
+
+    // 非末片小于 5MiB → EntityTooSmall（否则 10000 个 1 字节分片也能提交）
+    auto small = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}, {2, e2}}),
+                                                 {{"uploadId", uid}})));
+    CHECK_EQ(small.status, 400);
+    CHECK(contains(small.small_body, "<Code>EntityTooSmall</Code>"));
+
+    // 乱序 → InvalidPartOrder（此前是 InvalidPart，会让客户端去重传分片）
+    auto unordered = sync_wait(svc.dispatch(make_req(
+        "POST", "/bkt/mp.bin", complete_xml({{2, e2}, {1, e1}}), {{"uploadId", uid}})));
+    CHECK_EQ(unordered.status, 400);
+    CHECK(contains(unordered.small_body, "<Code>InvalidPartOrder</Code>"));
+
+    // 分片号越界在 complete 侧也要复核（upload 侧校验的是另一份输入）
+    auto oob = sync_wait(svc.dispatch(make_req(
+        "POST", "/bkt/mp.bin", complete_xml({{99999, e1}}), {{"uploadId", uid}})));
+    CHECK_EQ(oob.status, 400);
+
+    // 末片不受最小尺寸约束：单片上传照常成功，Location 是完整 URL
+    auto one = sync_wait(svc.dispatch(
+        make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}}), {{"uploadId", uid}})));
+    CHECK_EQ(one.status, 200);
+    CHECK(contains(one.small_body, "<Location>http://localhost/bkt/mp.bin</Location>"));
+}
+
+TEST(service_multipart_listing_pagination) {
+    // §5.1：此前 ListParts/ListMultipartUploads 恒报 IsTruncated=false，
+    // 客户端据此判定"已到尾"——5000 个活跃 upload 只会看到第一页而毫不知情
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    for (int i = 1; i <= 3; ++i)
+        sync_wait(svc.dispatch(make_req("PUT", "/bkt/mp.bin", "x",
+                                        {{"partNumber", std::to_string(i)}, {"uploadId", uid}})));
+
+    // ListParts：max-parts 生效且据实报截断，游标能续
+    auto p1 = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt/mp.bin", "", {{"uploadId", uid}, {"max-parts", "2"}})));
+    std::string b1 = body_of(p1);
+    CHECK(contains(b1, "<IsTruncated>true</IsTruncated>"));
+    CHECK(contains(b1, "<MaxParts>2</MaxParts>"));
+    CHECK(contains(b1, "<NextPartNumberMarker>2</NextPartNumberMarker>"));
+    CHECK(contains(b1, "<PartNumber>1</PartNumber>"));
+    CHECK(!contains(b1, "<PartNumber>3</PartNumber>"));
+
+    auto p2 = sync_wait(svc.dispatch(make_req(
+        "GET", "/bkt/mp.bin", "",
+        {{"uploadId", uid}, {"max-parts", "2"}, {"part-number-marker", "2"}})));
+    std::string b2 = body_of(p2);
+    CHECK(contains(b2, "<IsTruncated>false</IsTruncated>"));
+    CHECK(contains(b2, "<PartNumber>3</PartNumber>"));
+    CHECK(!contains(b2, "<PartNumber>1</PartNumber>"));
+
+    // ListMultipartUploads：三个 upload，按 (key, upload_id) 翻页不重不漏
+    std::vector<std::string> keys{"a.bin", "b.bin", "c.bin"};
+    for (auto& k : keys)
+        sync_wait(svc.dispatch(make_req("POST", "/bkt/" + k, "", {{"uploads", ""}})));
+
+    std::set<std::string> seen;
+    std::string km, im;
+    int pages = 0;
+    for (;;) {
+        std::vector<std::pair<std::string, std::string>> q{{"uploads", ""}, {"max-uploads", "2"}};
+        if (!km.empty()) {
+            q.push_back({"key-marker", km});
+            q.push_back({"upload-id-marker", im});
+        }
+        auto page = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", q)));
+        CHECK_EQ(page.status, 200);
+        std::string body = body_of(page);
+        size_t pos = 0;
+        while ((pos = body.find("<Key>", pos)) != std::string::npos) {
+            size_t end = body.find("</Key>", pos);
+            CHECK(seen.insert(body.substr(pos + 5, end - pos - 5)).second);  // 不重复
+            pos = end;
+        }
+        if (++pages > 10) break;  // 防御：游标不前进就不该无限翻
+        if (!contains(body, "<IsTruncated>true</IsTruncated>")) break;
+        km = xelem(body, "NextKeyMarker");
+        im = xelem(body, "NextUploadIdMarker");
+        CHECK(!km.empty());
+    }
+    CHECK_EQ(seen.size(), size_t(4));  // a/b/c + mp.bin
+    CHECK(pages > 1);                  // 确实翻了页
+
+    // prefix 过滤与 delimiter 分组
+    auto pref = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"uploads", ""}, {"prefix", "a."}})));
+    CHECK(contains(body_of(pref), "<Key>a.bin</Key>"));
+    CHECK(!contains(body_of(pref), "<Key>b.bin</Key>"));
+
+    // upload-id-marker 单独出现无意义（游标是二元组）
+    auto bad = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
+    CHECK_EQ(bad.status, 400);
 }

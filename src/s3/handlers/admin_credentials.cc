@@ -22,10 +22,11 @@ http::HttpResponse json_response(int status, const json& j) {
     return resp;
 }
 
-// SK 掩码：前 4 + **** + 后 4（短 SK 全掩）
+// SK 掩码（docs/gaps.md §5.10）：只保留前 4 位。此前"前 4 + 后 4"在 40 字符里
+// 泄露 8 个，而静态凭证的 SK 是运维手挑的、熵未必够——泄露两端毫无必要
 std::string mask(const std::string& sk) {
-    if (sk.size() < 12) return "****";
-    return sk.substr(0, 4) + "****" + sk.substr(sk.size() - 4);
+    if (sk.size() < 8) return "****";
+    return sk.substr(0, 4) + "****";
 }
 
 const char* source_name(CredSource s) {
@@ -40,8 +41,13 @@ const char* source_name(CredSource s) {
 json to_json(const CredentialInfo& c, bool with_secret) {
     json j;
     j["access_key"] = c.access_key;
-    if (with_secret) j["secret_key"] = c.secret_key;
-    else j["secret_key_masked"] = mask(c.secret_key);
+    // 静态（root）凭证的明文 SK 永不经 admin API 回传（docs/gaps.md §5.10）：
+    // 它来自配置文件/环境变量，取回它等于把"能读配置"的信任边界降级成一次
+    // HTTP GET——而 root SK 又恰恰无法经 admin API 吊销，泄露了只能改配置重启
+    if (with_secret && !c.is_static())
+        j["secret_key"] = static_cast<const std::string&>(c.secret_key);
+    else
+        j["secret_key_masked"] = mask(c.secret_key);
     j["source"] = source_name(c.source);
     if (c.source == CredSource::kDynamic) {
         j["created_at"] = util::iso8601(c.created);
@@ -133,6 +139,10 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                 throw S3Error(S3ErrorCode::InvalidAccessKeyId,
                               "The specified access key does not exist.");
             bool show = req.query_get("show-secret").value_or("") == "true";
+            // 取回明文 SK 是高敏动作：无论给不给都留一条审计线索
+            if (show)
+                LOG_WARN("admin: plaintext secret requested for {} by root {}{}", c->access_key,
+                         access_key, c->is_static() ? " (static credential — refused)" : "");
             co_return json_response(200, to_json(*c, show));
         }
         if (req.method == "DELETE" && !rest.empty()) {

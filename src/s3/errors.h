@@ -6,6 +6,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace lights3::s3 {
 
@@ -15,28 +17,40 @@ namespace lights3::s3 {
 #define LIGHTS3_S3_ERROR_CODES(X)        \
     X(AccessDenied, 403)                 \
     X(AuthorizationHeaderMalformed, 400) \
+    X(BadDigest, 400)                    \
+    X(BucketAlreadyExists, 409)          \
     X(BucketAlreadyOwnedByYou, 409)      \
     X(BucketNotEmpty, 409)               \
     X(EntityTooLarge, 400)               \
+    X(EntityTooSmall, 400)               \
+    X(ExpiredToken, 400)                 \
     X(InternalError, 500)                \
     X(InvalidAccessKeyId, 403)           \
     X(InvalidArgument, 400)              \
     X(InvalidBucketName, 400)            \
+    X(InvalidDigest, 400)                \
+    X(InvalidLocationConstraint, 400)    \
+    X(InvalidObjectState, 403)           \
     X(InvalidPart, 400)                  \
+    X(InvalidPartOrder, 400)             \
     X(InvalidRange, 416)                 \
     X(InvalidRequest, 400)               \
+    X(InvalidToken, 400)                 \
     X(KeyTooLongError, 400)              \
     X(MalformedXML, 400)                 \
     X(MethodNotAllowed, 405)             \
+    X(MissingContentLength, 411)         \
     X(NoSuchBucket, 404)                 \
     X(NoSuchKey, 404)                    \
     X(NoSuchUpload, 404)                 \
     X(NotImplemented, 501)               \
+    X(PermanentRedirect, 301)            \
     X(PreconditionFailed, 412)           \
     X(RequestTimeout, 400)               \
     X(RequestTimeTooSkewed, 403)         \
     X(SignatureDoesNotMatch, 403)        \
     X(SlowDown, 503)                     \
+    X(TooManyBuckets, 400)               \
     X(XAmzContentSHA256Mismatch, 400)
 
 enum class S3ErrorCode {
@@ -56,9 +70,16 @@ struct S3Error : std::exception {
     S3ErrorCode code;
     std::string message;
     std::string resource;
+    // 少数错误按 RFC/S3 规定必须带响应头才算完整：405 的 Allow（RFC 9110 §15.5.6）、
+    // 重定向类的 x-amz-bucket-region。放在异常上，L2 统一渲染时贴回响应
+    std::vector<std::pair<std::string, std::string>> headers;
 
     S3Error(S3ErrorCode c, std::string msg, std::string res = "")
         : code(c), message(std::move(msg)), resource(std::move(res)) {}
+    S3Error& with_header(std::string k, std::string v) {
+        headers.emplace_back(std::move(k), std::move(v));
+        return *this;
+    }
     const char* what() const noexcept override { return message.c_str(); }
 };
 
@@ -67,7 +88,9 @@ const char* wire_code(S3ErrorCode code);
 // wire code → enum 反查（cloudproxy 透传远端错误用，docs/cloudproxy-backend.md §5.1）；未知返回 nullopt
 std::optional<S3ErrorCode> code_from_wire(std::string_view wire);
 
-// 标准 S3 错误响应 XML
-std::string error_xml(const S3Error& e, const std::string& request_id);
+// 标准 S3 错误响应 XML。host_id 为空则省略 <HostId>（驱动兜底响应无 L2 上下文，
+// 只有 request id 可给）——AWS 的 x-amz-id-2 与 HostId 同值，支持工单据此定位节点
+std::string error_xml(const S3Error& e, const std::string& request_id,
+                      const std::string& host_id = "");
 
 }  // namespace lights3::s3

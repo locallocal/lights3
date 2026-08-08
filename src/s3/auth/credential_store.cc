@@ -76,6 +76,36 @@ CredentialPolicy policy_from_json_obj(const json& j) {
                                   "policy.buckets entries must be non-empty strings.");
                 p.buckets.push_back(g.get<std::string>());
             }
+        } else if (k == "prefixes") {
+            // key 前缀白名单（docs/gaps.md §5.10）：没有它，多租户共桶只能退化成
+            // "一租户一桶"
+            if (!v.is_array())
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "policy.prefixes must be an array of key prefix strings.");
+            for (auto& g : v) {
+                if (!g.is_string() || g.get<std::string>().empty())
+                    throw S3Error(S3ErrorCode::InvalidRequest,
+                                  "policy.prefixes entries must be non-empty strings.");
+                p.prefixes.push_back(g.get<std::string>());
+            }
+        } else if (k == "actions") {
+            if (!v.is_array())
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "policy.actions must be an array of action names.");
+            for (auto& a : v) {
+                if (!a.is_string())
+                    throw S3Error(S3ErrorCode::InvalidRequest,
+                                  "policy.actions entries must be strings.");
+                auto act = action_from_name(a.get<std::string>());
+                if (!act)
+                    throw S3Error(S3ErrorCode::InvalidRequest,
+                                  "unknown policy action '" + a.get<std::string>() +
+                                      "' (expected read/write/delete).");
+                p.actions.push_back(*act);
+            }
+            if (p.actions.empty())
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "policy.actions must not be empty (omit the field for no limit).");
         } else if (k == "readonly") {
             if (!v.is_boolean())
                 throw S3Error(S3ErrorCode::InvalidRequest, "policy.readonly must be a boolean.");
@@ -91,7 +121,13 @@ CredentialPolicy policy_from_json_obj(const json& j) {
 json policy_to_json_obj(const CredentialPolicy& p) {
     json j = json::object();
     if (!p.buckets.empty()) j["buckets"] = p.buckets;
+    if (!p.prefixes.empty()) j["prefixes"] = p.prefixes;
     if (p.readonly) j["readonly"] = true;
+    if (!p.actions.empty()) {
+        json a = json::array();
+        for (auto act : p.actions) a.push_back(action_name(act));
+        j["actions"] = std::move(a);
+    }
     return j;
 }
 
@@ -219,14 +255,51 @@ std::string read_file_text(const std::string& path) {
 
 // ---------- policy ----------
 
-bool CredentialPolicy::allows(std::string_view bucket, bool is_write) const {
-    if (readonly && is_write) return false;
-    // bucket 为空 = 账户级操作（ListBuckets）：放行。注意 ListBuckets 结果不按
-    // policy 过滤（只见桶名，见 docs/credential-management.md §10.4 的取舍）
+const char* action_name(Action a) {
+    switch (a) {
+        case Action::Read: return "read";
+        case Action::Write: return "write";
+        case Action::Delete: return "delete";
+    }
+    return "read";
+}
+
+std::optional<Action> action_from_name(std::string_view s) {
+    if (s == "read") return Action::Read;
+    if (s == "write") return Action::Write;
+    if (s == "delete") return Action::Delete;
+    return std::nullopt;
+}
+
+bool CredentialPolicy::allows_action(Action a) const {
+    if (!actions.empty()) {
+        for (auto x : actions)
+            if (x == a) return true;
+        return false;
+    }
+    // 未列 actions 时回落到 readonly：true = 只读，false = 不限
+    return !readonly || a == Action::Read;
+}
+
+bool CredentialPolicy::allows_bucket(std::string_view bucket) const {
     if (buckets.empty() || bucket.empty()) return true;
     std::string b(bucket);
     for (auto& g : buckets)
-        if (::fnmatch(g.c_str(), b.c_str(), 0) == 0) return true;
+        // FNM_PATHNAME（docs/gaps.md §5.10）：不加的话 '*' 跨 '/'，同一套匹配器
+        // 用到 key 前缀上时 "logs/*" 会连 "logs/a/b" 一并放行
+        if (::fnmatch(g.c_str(), b.c_str(), FNM_PATHNAME) == 0) return true;
+    return false;
+}
+
+bool CredentialPolicy::allows(std::string_view bucket, std::string_view key,
+                              Action action) const {
+    if (!allows_action(action)) return false;
+    // bucket 为空 = 账户级操作（ListBuckets）：放行，结果由调用方按 policy 过滤
+    if (!allows_bucket(bucket)) return false;
+    // key 为空 = 本次判定与具体对象无关（建桶、列桶等），不校验前缀
+    if (prefixes.empty() || key.empty()) return true;
+    for (auto& pre : prefixes)
+        if (key.size() >= pre.size() && key.compare(0, pre.size(), pre) == 0) return true;
     return false;
 }
 
@@ -355,13 +428,13 @@ bool CredentialStore::is_root(std::string_view ak) const {
 }
 
 void CredentialStore::authorize(std::string_view ak, std::string_view bucket,
-                                bool is_write) const {
+                                std::string_view key, Action action) const {
     if (ak.empty()) return;  // 认证关闭
     std::shared_lock lk(mu_);
     auto it = creds_.find(ak);
     if (it == creds_.end()) return;  // 在途吊销竞态：已验签请求自然完成（§7）
     if (!it->second.policy) return;
-    if (!it->second.policy->allows(bucket, is_write))
+    if (!it->second.policy->allows(bucket, key, action))
         throw S3Error(S3ErrorCode::AccessDenied,
                       "Access denied by credential policy.");
 }

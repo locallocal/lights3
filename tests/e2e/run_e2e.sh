@@ -513,6 +513,27 @@ check "POST 未知字段被拒" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST --data-binary '{"bogus":1}' \
        "$BASE/-/admin/credentials")"
 
+# policy 的动作/前缀粒度与 ListBuckets 过滤（docs/gaps.md §5.10）
+check "ListBuckets 按 policy 过滤" "0" \
+    "$(polcurl "$BASE/" | grep -q '<Name>otherbkt</Name>' && echo 1 || echo 0)"
+BK_OUT=$(s3curl -X POST \
+    --data-binary '{"policy":{"buckets":["credbkt"],"actions":["read","write"],"prefixes":["keep/"]}}' \
+    "$BASE/-/admin/credentials")
+BK_AK=$(echo "$BK_OUT" | json_field access_key)
+BK_SK=$(echo "$BK_OUT" | json_field secret_key)
+bkcurl() {
+    curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$BK_AK:$BK_SK" "$@"
+}
+check "action 允许写" "200" \
+    "$(bkcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'v' "$BASE/credbkt/keep/a")"
+check "action 不含 delete 时删除被拒" "403" \
+    "$(bkcurl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/credbkt/keep/a")"
+check "前缀外写入被拒" "403" \
+    "$(bkcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'v' "$BASE/credbkt/other/a")"
+check "静态凭证 SK 不经 admin 回传" "0" \
+    "$(s3curl "$BASE/-/admin/credentials/$AK?show-secret=true" | grep -q '"secret_key"' && echo 1 || echo 0)"
+s3curl -o /dev/null -X DELETE "$BASE/credbkt/keep/a"
+
 # 优雅退出
 kill -TERM "$SRV_PID"
 EXITED=1

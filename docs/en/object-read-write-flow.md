@@ -34,7 +34,7 @@ S3Service::dispatch()                       src/s3/service.cc
   │ ⑤ resolve_address(): virtual-host or path-style resolves (bucket, key)
   │    buckets starting with '.' are internal reserved names, uniformly rejected
   │    (docs/credential-management.md §4.1)
-  │ ⑥ per-credential policy authorization: cred_store->authorize(ak, bucket, is_write)
+  │ ⑥ per-credential policy authorization: matched route action vs policy snapshot
   │    (GET/HEAD count as reads, everything else as writes; CopyObject/UploadPartCopy
   │    additionally run one read authorization against the source bucket,
   │    see docs/credential-management.md §10.4)

@@ -72,7 +72,8 @@ public:
     // S3Error(AccessDenied)；静态凭证/无 policy 恒通过，ak 为空（认证关闭）或
     // 查不到也放行。请求路径不再用它（dispatch 改用 verify 时刻的快照，§3.7），
     // 保留给运维/测试直接对表查询
-    void authorize(std::string_view ak, std::string_view bucket, bool is_write) const;
+    void authorize(std::string_view ak, std::string_view bucket, std::string_view key,
+                   Action action) const;
 
     // ---- 管理面（docs/credential-management.md §5.1）----
     // 先写 storage 成功再改内存（write-through）：崩溃时以 storage 为准，

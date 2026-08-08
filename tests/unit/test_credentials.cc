@@ -341,12 +341,12 @@ TEST(credstore_policy_enforced_and_persisted) {
     p.readonly = true;
     auto c = sync_wait(store->generate("scoped", p));
 
-    store->authorize(c.access_key, "logs-app", /*is_write=*/false);  // 命中 glob
-    store->authorize(c.access_key, "", false);                       // ListBuckets 放行
-    store->authorize(kRootAk, "anything", true);                     // root 无限制
-    CHECK_THROWS_S3(store->authorize(c.access_key, "logs-app", true),
+    store->authorize(c.access_key, "logs-app", "", Action::Read);  // 命中 glob
+    store->authorize(c.access_key, "", "", Action::Read);            // ListBuckets 放行
+    store->authorize(kRootAk, "anything", "", Action::Write);        // root 无限制
+    CHECK_THROWS_S3(store->authorize(c.access_key, "logs-app", "", Action::Write),
                     S3ErrorCode::AccessDenied);  // readonly
-    CHECK_THROWS_S3(store->authorize(c.access_key, "other", false),
+    CHECK_THROWS_S3(store->authorize(c.access_key, "other", "", Action::Read),
                     S3ErrorCode::AccessDenied);  // 白名单外
 
     auto info = load_store(be, root_cfg())->find(c.access_key);  // 持久化
@@ -374,7 +374,12 @@ TEST(admin_api_policy_flow) {
     CHECK_EQ(env.call("GET", "/logs-a/k", dyn).status, 200);
     CHECK_EQ(env.call("PUT", "/logs-a/new", dyn, {}, "x").status, 403);  // readonly
     CHECK_EQ(env.call("GET", "/private/k", dyn).status, 403);            // 白名单外
-    CHECK_EQ(env.call("GET", "/", dyn).status, 200);                     // ListBuckets
+    // ListBuckets 现按 policy 过滤（docs/gaps.md §5.10）：桶名正是攻击链第一步，
+    // 受限凭证不该看到白名单外的桶存在
+    auto lb = env.call("GET", "/", dyn);
+    CHECK_EQ(lb.status, 200);
+    CHECK(lb.small_body.find("<Name>logs-a</Name>") != std::string::npos);
+    CHECK(lb.small_body.find("<Name>private</Name>") == std::string::npos);
 
     // copy-source 也受 policy 约束（读旁路封堵，docs/todo.md §4）：可写的 scoped
     // 凭证从白名单外的桶 copy → 403，白名单内 → 200
@@ -416,7 +421,7 @@ TEST(credstore_file_provider_and_hot_reload) {
     CHECK(store->secret_for("FILEAKAAA").value_or("") == "file-secret-1");
     CHECK(!store->is_root("FILEAKAAA"));  // file 来源仅数据面
     CHECK(store->secret_for(kRootAk).value_or("") == kRootSk);  // 同 AK 静态优先
-    CHECK_THROWS_S3(store->authorize("FILEAKBBB", "b", true), S3ErrorCode::AccessDenied);
+    CHECK_THROWS_S3(store->authorize("FILEAKBBB", "b", "", Action::Write), S3ErrorCode::AccessDenied);
     CHECK_THROWS_S3(sync_wait(store->remove("FILEAKAAA")), S3ErrorCode::MethodNotAllowed);
     auto info = store->find("FILEAKAAA");
     CHECK(info && info->source == CredSource::kFile && info->comment == "from-file");
@@ -547,8 +552,88 @@ TEST(credstore_policy_snapshot_survives_revocation) {
 
     sync_wait(env.store->remove(c.access_key));
     // 在途请求继续用快照判定：写仍被拒、读仍放行，与验签时刻一致
-    CHECK(!ident.policy->allows("bkt", /*is_write=*/true));
-    CHECK(ident.policy->allows("bkt", /*is_write=*/false));
+    CHECK(!ident.policy->allows("bkt", "", Action::Write));
+    CHECK(ident.policy->allows("bkt", "", Action::Read));
     // 吊销后的新请求查不到 AK → InvalidAccessKeyId（fail-closed，而非不受限）
     CHECK(!env.store->lookup(c.access_key));
+}
+
+TEST(policy_action_and_prefix_granularity) {
+    // §5.10：此前只有 readonly 一个开关，"能写"必然"能删"；也没有 key 前缀粒度
+    SvcEnv env;
+    Credential root{kRootAk, kRootSk};
+    CHECK_EQ(env.call("PUT", "/data", root).status, 200);
+    CHECK_EQ(env.call("PUT", "/data/keep.txt", root, {}, "v").status, 200);
+    CHECK_EQ(env.call("PUT", "/data/tenant-a/x", root, {}, "v").status, 200);
+    CHECK_EQ(env.call("PUT", "/data/tenant-b/x", root, {}, "v").status, 200);
+
+    // 备份场景：能读能写、不能删
+    auto j = body_json(env.call("POST", "/-/admin/credentials", root, {},
+                                R"({"policy":{"actions":["read","write"]}})"));
+    Credential backup{j.at("access_key").get<std::string>(),
+                      j.at("secret_key").get<std::string>()};
+    CHECK_EQ(env.call("GET", "/data/keep.txt", backup).status, 200);
+    CHECK_EQ(env.call("PUT", "/data/new.txt", backup, {}, "x").status, 200);
+    CHECK_EQ(env.call("DELETE", "/data/keep.txt", backup).status, 403);
+    CHECK_EQ(env.call("GET", "/data/keep.txt", root).status, 200);  // 确实没删掉
+    // DeleteObjects 是 POST，但按动作归类同样属于删除——方法维度分不开这件事
+    CHECK_EQ(env.call("POST", "/data", backup, {{"delete", ""}},
+                      "<Delete><Object><Key>keep.txt</Key></Object></Delete>")
+                 .status,
+             403);
+    // 创建 multipart 属写，放行（同为 POST，方法维度分不开这两件事）
+    CHECK_EQ(env.call("POST", "/data/mp", backup, {{"uploads", ""}}).status, 200);
+
+    // 多租户共桶：key 前缀粒度
+    auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {},
+                                 R"({"policy":{"prefixes":["tenant-a/"]}})"));
+    Credential ta{j2.at("access_key").get<std::string>(),
+                  j2.at("secret_key").get<std::string>()};
+    CHECK_EQ(env.call("GET", "/data/tenant-a/x", ta).status, 200);
+    CHECK_EQ(env.call("GET", "/data/tenant-b/x", ta).status, 403);
+    CHECK_EQ(env.call("PUT", "/data/tenant-b/y", ta, {}, "x").status, 403);
+    CHECK_EQ(env.call("PUT", "/data/tenant-a/y", ta, {}, "x").status, 200);
+    // 桶级操作（列举）与具体对象无关，不受前缀限制
+    CHECK_EQ(env.call("GET", "/data", ta).status, 200);
+
+    // 非法动作名 → 400（拼错的限制字段被静默忽略等于放权）
+    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {},
+                      R"({"policy":{"actions":["destroy"]}})")
+                 .status,
+             400);
+    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {},
+                      R"({"policy":{"actions":[]}})")
+                 .status,
+             400);
+}
+
+TEST(policy_glob_does_not_cross_slash) {
+    // §5.10：fnmatch 不带 FNM_PATHNAME 时 '*' 跨 '/'，同一套匹配器用到前缀上
+    // 会让 "logs/*" 连 "logs/a/b" 一并放行
+    CredentialPolicy p;
+    p.buckets = {"logs-*"};
+    CHECK(p.allows_bucket("logs-app"));
+    CHECK(!p.allows_bucket("other"));
+    CredentialPolicy q;
+    q.buckets = {"a/*"};
+    CHECK(q.allows_bucket("a/b"));
+    CHECK(!q.allows_bucket("a/b/c"));  // '*' 不跨 '/'
+}
+
+TEST(admin_api_never_returns_static_secret) {
+    // §5.10：root 的明文 SK 可经一次 HTTP GET 取回，而它又无法经 admin API 吊销
+    SvcEnv env;
+    Credential root{kRootAk, kRootSk};
+    auto got = body_json(env.call("GET", std::string("/-/admin/credentials/") + kRootAk, root,
+                                  {{"show-secret", "true"}}));
+    CHECK(!got.contains("secret_key"));
+    CHECK(got.contains("secret_key_masked"));
+    CHECK(got.at("secret_key_masked").get<std::string>().find(kRootSk) == std::string::npos);
+
+    // 动态凭证不受影响：它由 API 签发，也能由 API 吊销
+    auto j = body_json(env.call("POST", "/-/admin/credentials", root, {}, "{}"));
+    std::string ak = j.at("access_key").get<std::string>();
+    auto dyn = body_json(env.call("GET", "/-/admin/credentials/" + ak, root,
+                                  {{"show-secret", "true"}}));
+    CHECK(dyn.contains("secret_key"));
 }

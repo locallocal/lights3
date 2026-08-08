@@ -6,7 +6,7 @@
 
 namespace lights3::s3 {
 
-Task<http::HttpResponse> S3Service::list_buckets() {
+Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
     // 聚合各后端；同名去重（首个后端优先）
     std::vector<storage::BucketInfo> all;
     for (auto& [_, backend] : router_.backends()) {
@@ -14,6 +14,10 @@ Task<http::HttpResponse> S3Service::list_buckets() {
         for (auto& b : part) {
             // 内部保留名不出现在用户可见的列表里（docs/credential-management.md §4.1）
             if (b.name == storage::kSysBucketName) continue;
+            // 按 policy 过滤（docs/gaps.md §5.10）：此前不过滤是记在案的取舍
+            //（"只泄露桶名"），但桶名正是攻击链第一步——受限凭证不该看到
+            // 白名单外的桶存在
+            if (auth.policy && !auth.policy->allows_bucket(b.name)) continue;
             bool dup = false;
             for (auto& e : all)
                 if (e.name == b.name) dup = true;

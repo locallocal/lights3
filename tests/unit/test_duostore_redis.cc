@@ -410,7 +410,7 @@ TEST(duostore_redis_list_uploads_hscan_batches) {
         std::string k = "k" + std::to_string(i % 40);  // 同 key 多 upload 混合
         expect.emplace(k, m.create_upload("many", k, {}));
     }
-    auto got = m.list_uploads("many");
+    auto got = m.list_uploads("many", {}, {}, 0);
     CHECK_EQ(got.size(), size_t(kUploads));
     for (size_t i = 1; i < got.size(); ++i)
         CHECK(std::pair(got[i - 1].key, got[i - 1].upload_id) <

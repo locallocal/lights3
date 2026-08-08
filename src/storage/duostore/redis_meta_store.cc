@@ -946,7 +946,15 @@ std::vector<PartRec> RedisMetaStore::list_parts(std::string_view b, std::string_
     return out;
 }
 
-std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b) {
+std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b,
+                                                    std::string_view key_marker,
+                                                    std::string_view id_marker, int limit) {
+    // 游标提示在这里只能忽略（docs/gaps.md §5.1）：uploads 存成 hash，HSCAN 的
+    // 游标是桶序不是字典序，没有"从某个 field 之后开始"的表达。全量 HSCAN 后
+    // 由调用方的 apply_uploads_page 裁剪——分页省的是响应体，省不掉这次扫描
+    (void)key_marker;
+    (void)id_marker;
+    (void)limit;
     require_bucket(b);
     // HSCAN 分批（R4，§2.2）：超大 uploads 表不再单命令整体物化。游标弱一致
     // （迭代中并发增删可能漏/重）对 ListMultipartUploads 可接受；map 兼做去重

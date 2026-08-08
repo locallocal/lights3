@@ -11,6 +11,7 @@
 #include "storage/duostore/codec.h"
 #include "storage/duostore/fs_data_store.h"
 #include "storage/duostore/rocks_meta_store.h"
+#include "storage/listing.h"
 #include "storage/multipart.h"
 
 #ifdef LIGHTS3_DUOSTORE_REDIS_META
@@ -1036,21 +1037,27 @@ Task<void> DuoStoreBackend::abort_multipart(std::string_view bucket, std::string
     meta_->abort_upload(bucket, key, upload_id);
 }
 
-Task<std::vector<PartMeta>> DuoStoreBackend::list_parts(std::string_view bucket,
-                                                        std::string_view key,
-                                                        std::string_view upload_id) {
+Task<ListPartsResult> DuoStoreBackend::list_parts(std::string_view bucket, std::string_view key,
+                                                  std::string_view upload_id,
+                                                  const ListPartsOptions& opt) {
     validate_object_key(key);
     co_await pool_->schedule();
-    std::vector<PartMeta> out;
+    // 分片数由协议封顶 10000，全量物化是有界的；分页只在这里裁剪
+    std::vector<PartMeta> all;
     for (const auto& p : meta_->list_parts(bucket, key, upload_id))
-        out.push_back({p.part_no, p.size, p.etag, codec::from_unix_ms(p.modified_ms)});
-    co_return out;
+        all.push_back({p.part_no, p.size, p.etag, codec::from_unix_ms(p.modified_ms)});
+    co_return apply_parts_page(std::move(all), opt);
 }
 
-Task<std::vector<UploadInfo>> DuoStoreBackend::list_multipart_uploads(
-    std::string_view bucket) {
+Task<ListUploadsResult> DuoStoreBackend::list_multipart_uploads(std::string_view bucket,
+                                                                const ListUploadsOptions& opt) {
     co_await pool_->schedule();
-    co_return meta_->list_uploads(bucket);
+    // 桶内 upload 数无上界，游标与条数下推给引擎（sqlite/rocks/tikv 真跳过，
+    // redis 只能全扫）。delimiter 非空时不能限条数：分组要看到全貌才判得出截断，
+    // 限了会把"还有更多"误报成到尾
+    int limit = opt.delimiter.empty() && opt.max_uploads > 0 ? opt.max_uploads + 1 : 0;
+    co_return apply_uploads_page(
+        meta_->list_uploads(bucket, opt.key_marker, opt.upload_id_marker, limit), opt);
 }
 
 // ---------- GC 一期（§9/§9.1）----------

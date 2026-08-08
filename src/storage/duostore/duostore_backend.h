@@ -207,9 +207,11 @@ public:
                                        std::span<const PartInfo> parts) override;
     Task<void> abort_multipart(std::string_view bucket, std::string_view key,
                                std::string_view upload_id) override;
-    Task<std::vector<PartMeta>> list_parts(std::string_view bucket, std::string_view key,
-                                           std::string_view upload_id) override;
-    Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) override;
+    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
+                                     std::string_view upload_id,
+                                     const ListPartsOptions& opt) override;
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
+                                                   const ListUploadsOptions& opt) override;
 
     Task<void> close() override;
 

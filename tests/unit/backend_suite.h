@@ -251,19 +251,67 @@ inline void run_backend_suite(IStorageBackend& b) {
                     S3ErrorCode::NoSuchUpload);
 
     // list_parts / list_multipart_uploads（docs/s3-protocol.md ListParts 支撑）
-    auto lparts = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid));
-    CHECK_EQ(lparts.size(), size_t(2));
-    CHECK_EQ(lparts[0].part_no, 1);
-    CHECK_EQ(lparts[0].etag, r1.etag);
-    CHECK_EQ(lparts[0].size, uint64_t(6));
-    CHECK_EQ(lparts[1].part_no, 2);
-    auto lups = sync_wait(b.list_multipart_uploads("suite-bkt"));
-    CHECK_EQ(lups.size(), size_t(1));
-    CHECK_EQ(lups[0].key, "mp/joined.bin");
-    CHECK_EQ(lups[0].upload_id, uid);
+    auto lparts = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid, {}));
+    CHECK_EQ(lparts.parts.size(), size_t(2));
+    CHECK(!lparts.is_truncated);
+    CHECK_EQ(lparts.parts[0].part_no, 1);
+    CHECK_EQ(lparts.parts[0].etag, r1.etag);
+    CHECK_EQ(lparts.parts[0].size, uint64_t(6));
+    CHECK_EQ(lparts.parts[1].part_no, 2);
+    auto lups = sync_wait(b.list_multipart_uploads("suite-bkt", {}));
+    CHECK_EQ(lups.uploads.size(), size_t(1));
+    CHECK(!lups.is_truncated);
+    CHECK_EQ(lups.uploads[0].key, "mp/joined.bin");
+    CHECK_EQ(lups.uploads[0].upload_id, uid);
     CHECK_THROWS_S3(sync_wait(b.list_parts("suite-bkt", "mp/joined.bin",
-                                           "00000000000000000000000000000000")),
+                                           "00000000000000000000000000000000", {})),
                     S3ErrorCode::NoSuchUpload);
+
+    // 分页（docs/gaps.md §5.1）：此前恒报 IsTruncated=false，客户端据此判定已到尾
+    {
+        ListPartsOptions po;
+        po.max_parts = 1;
+        auto page1 = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid, po));
+        CHECK_EQ(page1.parts.size(), size_t(1));
+        CHECK_EQ(page1.parts[0].part_no, 1);
+        CHECK(page1.is_truncated);
+        CHECK_EQ(page1.next_part_number_marker, 1);
+        // 用回传的游标续traversal，第二页到尾
+        po.part_number_marker = page1.next_part_number_marker;
+        auto page2 = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid, po));
+        CHECK_EQ(page2.parts.size(), size_t(1));
+        CHECK_EQ(page2.parts[0].part_no, 2);
+        CHECK(!page2.is_truncated);
+        // max=0 必须是"空且未截断"：空游标 + truncated 会让循环续传的客户端死循环
+        po.part_number_marker = 0;
+        po.max_parts = 0;
+        auto page0 = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid, po));
+        CHECK_EQ(page0.parts.size(), size_t(0));
+        CHECK(!page0.is_truncated);
+    }
+    {
+        // 再开一个 upload 才能翻页；两个 upload 的 (key, upload_id) 序稳定
+        std::string uid2 = sync_wait(b.create_multipart("suite-bkt", "mp/other.bin", {}));
+        ListUploadsOptions uo;
+        uo.max_uploads = 1;
+        auto up1 = sync_wait(b.list_multipart_uploads("suite-bkt", uo));
+        CHECK_EQ(up1.uploads.size(), size_t(1));
+        CHECK(up1.is_truncated);
+        CHECK(!up1.next_key_marker.empty());
+        uo.key_marker = up1.next_key_marker;
+        uo.upload_id_marker = up1.next_upload_id_marker;
+        auto up2 = sync_wait(b.list_multipart_uploads("suite-bkt", uo));
+        CHECK_EQ(up2.uploads.size(), size_t(1));
+        CHECK(!up2.is_truncated);
+        CHECK(up2.uploads[0].key != up1.uploads[0].key);  // 不重复
+        // prefix 过滤
+        ListUploadsOptions fo;
+        fo.prefix = "mp/other";
+        auto filtered = sync_wait(b.list_multipart_uploads("suite-bkt", fo));
+        CHECK_EQ(filtered.uploads.size(), size_t(1));
+        CHECK_EQ(filtered.uploads[0].key, "mp/other.bin");
+        sync_wait(b.abort_multipart("suite-bkt", "mp/other.bin", uid2));
+    }
 
     // ETag 允许带引号；总 ETag = md5(分片 md5 拼接)-N
     auto done = complete(uid, {{1, "\"" + r1.etag + "\""}, {2, r2.etag}});

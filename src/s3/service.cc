@@ -375,10 +375,10 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
      [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
          return s.get_bucket_location(std::move(b));
      }},
-    // 分页参数允许但忽略：handler 一次回全量且 IsTruncated=false，是完整的
-    // 答案（分页循环正确终止，cloudproxy 自己就这么发）。prefix/delimiter 不在
-    // 名单内——忽略它们会把过滤范围外的 upload 混进来，那才是静默误答
-    {"GET", Scope::Bucket, "uploads", "max-uploads key-marker upload-id-marker",
+    // 五个参数现已全部生效（docs/gaps.md §5.1）：此前分页参数是"允许但忽略"、
+    // prefix/delimiter 干脆不放行（忽略它们会把过滤范围外的 upload 混进来）
+    {"GET", Scope::Bucket, "uploads",
+     "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
          return s.list_multipart_uploads(req, std::move(b));
      }},

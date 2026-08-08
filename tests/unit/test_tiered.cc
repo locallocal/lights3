@@ -104,12 +104,14 @@ public:
                                std::string_view id) override {
         co_return co_await inner->abort_multipart(b, k, id);
     }
-    Task<std::vector<PartMeta>> list_parts(std::string_view b, std::string_view k,
-                                           std::string_view id) override {
-        co_return co_await inner->list_parts(b, k, id);
+    Task<ListPartsResult> list_parts(std::string_view b, std::string_view k,
+                                     std::string_view id,
+                                     const ListPartsOptions& opt) override {
+        co_return co_await inner->list_parts(b, k, id, opt);
     }
-    Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view b) override {
-        co_return co_await inner->list_multipart_uploads(b);
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view b,
+                                                   const ListUploadsOptions& opt) override {
+        co_return co_await inner->list_multipart_uploads(b, opt);
     }
 };
 

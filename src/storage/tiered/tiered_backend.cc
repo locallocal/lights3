@@ -399,13 +399,14 @@ Task<void> TieredBackend::abort_multipart(std::string_view bucket, std::string_v
                                           std::string_view upload_id) {
     co_return co_await local_->abort_multipart(bucket, key, upload_id);
 }
-Task<std::vector<PartMeta>> TieredBackend::list_parts(std::string_view bucket,
-                                                      std::string_view key,
-                                                      std::string_view upload_id) {
-    co_return co_await local_->list_parts(bucket, key, upload_id);
+Task<ListPartsResult> TieredBackend::list_parts(std::string_view bucket, std::string_view key,
+                                                std::string_view upload_id,
+                                                const ListPartsOptions& opt) {
+    co_return co_await local_->list_parts(bucket, key, upload_id, opt);
 }
-Task<std::vector<UploadInfo>> TieredBackend::list_multipart_uploads(std::string_view bucket) {
-    co_return co_await local_->list_multipart_uploads(bucket);
+Task<ListUploadsResult> TieredBackend::list_multipart_uploads(std::string_view bucket,
+                                                              const ListUploadsOptions& opt) {
+    co_return co_await local_->list_multipart_uploads(bucket, opt);
 }
 
 // ---------- 下沉（docs/tiered-storage.md §5）----------

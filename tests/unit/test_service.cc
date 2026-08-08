@@ -1,4 +1,6 @@
 // L2 纯逻辑测试：mock HttpRequest + memory 后端走完整 dispatch（docs/architecture.md §2）
+#include <set>
+
 #include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "s3/service.h"
@@ -1118,4 +1120,79 @@ TEST(service_multipart_constraints) {
         make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}}), {{"uploadId", uid}})));
     CHECK_EQ(one.status, 200);
     CHECK(contains(one.small_body, "<Location>http://localhost/bkt/mp.bin</Location>"));
+}
+
+TEST(service_multipart_listing_pagination) {
+    // §5.1：此前 ListParts/ListMultipartUploads 恒报 IsTruncated=false，
+    // 客户端据此判定"已到尾"——5000 个活跃 upload 只会看到第一页而毫不知情
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    for (int i = 1; i <= 3; ++i)
+        sync_wait(svc.dispatch(make_req("PUT", "/bkt/mp.bin", "x",
+                                        {{"partNumber", std::to_string(i)}, {"uploadId", uid}})));
+
+    // ListParts：max-parts 生效且据实报截断，游标能续
+    auto p1 = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt/mp.bin", "", {{"uploadId", uid}, {"max-parts", "2"}})));
+    std::string b1 = body_of(p1);
+    CHECK(contains(b1, "<IsTruncated>true</IsTruncated>"));
+    CHECK(contains(b1, "<MaxParts>2</MaxParts>"));
+    CHECK(contains(b1, "<NextPartNumberMarker>2</NextPartNumberMarker>"));
+    CHECK(contains(b1, "<PartNumber>1</PartNumber>"));
+    CHECK(!contains(b1, "<PartNumber>3</PartNumber>"));
+
+    auto p2 = sync_wait(svc.dispatch(make_req(
+        "GET", "/bkt/mp.bin", "",
+        {{"uploadId", uid}, {"max-parts", "2"}, {"part-number-marker", "2"}})));
+    std::string b2 = body_of(p2);
+    CHECK(contains(b2, "<IsTruncated>false</IsTruncated>"));
+    CHECK(contains(b2, "<PartNumber>3</PartNumber>"));
+    CHECK(!contains(b2, "<PartNumber>1</PartNumber>"));
+
+    // ListMultipartUploads：三个 upload，按 (key, upload_id) 翻页不重不漏
+    std::vector<std::string> keys{"a.bin", "b.bin", "c.bin"};
+    for (auto& k : keys)
+        sync_wait(svc.dispatch(make_req("POST", "/bkt/" + k, "", {{"uploads", ""}})));
+
+    std::set<std::string> seen;
+    std::string km, im;
+    int pages = 0;
+    for (;;) {
+        std::vector<std::pair<std::string, std::string>> q{{"uploads", ""}, {"max-uploads", "2"}};
+        if (!km.empty()) {
+            q.push_back({"key-marker", km});
+            q.push_back({"upload-id-marker", im});
+        }
+        auto page = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", q)));
+        CHECK_EQ(page.status, 200);
+        std::string body = body_of(page);
+        size_t pos = 0;
+        while ((pos = body.find("<Key>", pos)) != std::string::npos) {
+            size_t end = body.find("</Key>", pos);
+            CHECK(seen.insert(body.substr(pos + 5, end - pos - 5)).second);  // 不重复
+            pos = end;
+        }
+        if (++pages > 10) break;  // 防御：游标不前进就不该无限翻
+        if (!contains(body, "<IsTruncated>true</IsTruncated>")) break;
+        km = xelem(body, "NextKeyMarker");
+        im = xelem(body, "NextUploadIdMarker");
+        CHECK(!km.empty());
+    }
+    CHECK_EQ(seen.size(), size_t(4));  // a/b/c + mp.bin
+    CHECK(pages > 1);                  // 确实翻了页
+
+    // prefix 过滤与 delimiter 分组
+    auto pref = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"uploads", ""}, {"prefix", "a."}})));
+    CHECK(contains(body_of(pref), "<Key>a.bin</Key>"));
+    CHECK(!contains(body_of(pref), "<Key>b.bin</Key>"));
+
+    // upload-id-marker 单独出现无意义（游标是二元组）
+    auto bad = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
+    CHECK_EQ(bad.status, 400);
 }

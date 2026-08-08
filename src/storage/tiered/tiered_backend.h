@@ -101,9 +101,11 @@ public:
                                        std::span<const PartInfo> parts) override;
     Task<void> abort_multipart(std::string_view bucket, std::string_view key,
                                std::string_view upload_id) override;
-    Task<std::vector<PartMeta>> list_parts(std::string_view bucket, std::string_view key,
-                                           std::string_view upload_id) override;
-    Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) override;
+    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
+                                     std::string_view upload_id,
+                                     const ListPartsOptions& opt) override;
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
+                                                   const ListUploadsOptions& opt) override;
 
     // 停止后台定时任务、等待在途后台协程、落盘 atime 快照。不关闭子后端
     //（它们由 registry 独立持有，可能同时被直接路由）

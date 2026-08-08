@@ -272,29 +272,31 @@ Task<void> MemoryBackend::abort_multipart(std::string_view bucket, std::string_v
     co_return;
 }
 
-Task<std::vector<PartMeta>> MemoryBackend::list_parts(std::string_view bucket,
-                                                      std::string_view key,
-                                                      std::string_view upload_id) {
+Task<ListPartsResult> MemoryBackend::list_parts(std::string_view bucket, std::string_view key,
+                                                std::string_view upload_id,
+                                                const ListPartsOptions& opt) {
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);
-    std::vector<PartMeta> out;
-    out.reserve(up.parts.size());
-    for (auto& [no, p] : up.parts)
-        out.push_back({no, p.data.size(), p.etag, p.uploaded});
-    co_return out;
+    // parts 是 std::map<int,...>，遍历即升序；marker 之前的直接跳过
+    std::vector<PartMeta> all;
+    for (auto it = up.parts.upper_bound(opt.part_number_marker); it != up.parts.end(); ++it)
+        all.push_back({it->first, it->second.data.size(), it->second.etag, it->second.uploaded});
+    co_return apply_parts_page(std::move(all), opt);
 }
 
-Task<std::vector<UploadInfo>> MemoryBackend::list_multipart_uploads(std::string_view bucket) {
+Task<ListUploadsResult> MemoryBackend::list_multipart_uploads(std::string_view bucket,
+                                                              const ListUploadsOptions& opt) {
     validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     bucket_or_throw(std::string(bucket));
-    std::vector<UploadInfo> out;
+    // 索引按 upload_id 建，桶内枚举本就是全扫 + 排序，marker 只能在排序后应用
+    std::vector<UploadInfo> all;
     for (auto& [id, up] : uploads_)
-        if (up.bucket == bucket) out.push_back({up.key, id, up.initiated});
-    std::sort(out.begin(), out.end(), [](const UploadInfo& a, const UploadInfo& b) {
+        if (up.bucket == bucket) all.push_back({up.key, id, up.initiated});
+    std::sort(all.begin(), all.end(), [](const UploadInfo& a, const UploadInfo& b) {
         return std::tie(a.key, a.upload_id) < std::tie(b.key, b.upload_id);
     });
-    co_return out;
+    co_return apply_uploads_page(std::move(all), opt);
 }
 
 }  // namespace lights3::storage

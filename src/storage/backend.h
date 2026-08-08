@@ -125,6 +125,36 @@ struct UploadInfo {
     std::chrono::system_clock::time_point initiated;
 };
 
+// multipart 两个列表接口的分页（docs/gaps.md §5.1）。此前返回裸 vector 且
+// 恒报 IsTruncated=false：客户端据此判定"已到尾"，5000 个活跃 upload 只会看到
+// 前一页而毫不知情，同时单请求把整表构造进内存
+struct ListPartsOptions {
+    int max_parts = 1000;
+    int part_number_marker = 0;  // 只返回 part_no > 此值的分片（0 = 从头）
+};
+struct ListPartsResult {
+    std::vector<PartMeta> parts;  // 按 part_no 升序
+    bool is_truncated = false;
+    int next_part_number_marker = 0;  // 仅 is_truncated 时有意义
+};
+
+struct ListUploadsOptions {
+    std::string prefix;
+    std::string delimiter;  // 空或 "/"
+    int max_uploads = 1000;
+    // (key_marker, upload_id_marker) 组成复合游标：严格大于该二元组者才返回。
+    // upload_id_marker 为空时表示"key > key_marker"
+    std::string key_marker;
+    std::string upload_id_marker;
+};
+struct ListUploadsResult {
+    std::vector<UploadInfo> uploads;  // 按 (key, upload_id) 升序
+    std::vector<std::string> common_prefixes;
+    bool is_truncated = false;
+    std::string next_key_marker;
+    std::string next_upload_id_marker;
+};
+
 struct IStorageBackend {
     // ---- bucket ----
     virtual Task<void> create_bucket(std::string_view bucket) = 0;
@@ -163,12 +193,15 @@ struct IStorageBackend {
                                                std::span<const PartInfo> parts) = 0;
     virtual Task<void> abort_multipart(std::string_view bucket, std::string_view key,
                                        std::string_view upload_id) = 0;
-    // 按 part_no 升序；upload 不存在抛 NoSuchUpload
-    virtual Task<std::vector<PartMeta>> list_parts(std::string_view bucket,
-                                                   std::string_view key,
-                                                   std::string_view upload_id) = 0;
-    // 该 bucket 的活跃上传，按 (key, upload_id) 排序
-    virtual Task<std::vector<UploadInfo>> list_multipart_uploads(std::string_view bucket) = 0;
+    // 按 part_no 升序，据实报 is_truncated；upload 不存在抛 NoSuchUpload。
+    // 分页语义由 storage/listing.h 的 apply_parts_page 统一定义，实现可先按
+    // marker 下推再交给它，但不得自行另立一套截断规则
+    virtual Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
+                                             std::string_view upload_id,
+                                             const ListPartsOptions& opt) = 0;
+    // 该 bucket 的活跃上传，按 (key, upload_id) 升序，据实报 is_truncated
+    virtual Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
+                                                           const ListUploadsOptions& opt) = 0;
 
     virtual Task<void> close() { co_return; }
     virtual ~IStorageBackend() = default;

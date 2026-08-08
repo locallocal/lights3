@@ -377,11 +377,34 @@ check "UploadPartCopy 越界 range 拒绝" "400" \
        "$BASE/mybucket/upc.bin?partNumber=3&uploadId=$UPC_ID")"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/upc.bin"
 
-# DeleteObjects 批量删除
+# DeleteObjects 批量删除（AWS 要求带 Content-MD5，docs/gaps.md §5.6）
 DEL_XML='<Delete><Object><Key>copy.txt</Key></Object><Object><Key>mpu.bin</Key></Object></Delete>'
-DEL_OUT=$(s3curl -X POST --data-binary "$DEL_XML" "$BASE/mybucket?delete")
+DEL_MD5=$(printf '%s' "$DEL_XML" | openssl dgst -md5 -binary | openssl base64)
+check "DeleteObjects 缺完整性头 400" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST --data-binary "$DEL_XML" "$BASE/mybucket?delete")"
+check "DeleteObjects 摘要不符 400" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H "Content-MD5: $DEL_MD5" \
+        --data-binary "<Delete><Object><Key>copy.txt</Key></Object></Delete>" \
+        "$BASE/mybucket?delete")"
+DEL_OUT=$(s3curl -X POST -H "Content-MD5: $DEL_MD5" --data-binary "$DEL_XML" "$BASE/mybucket?delete")
 check "DeleteObjects 批量" "0" "$(echo "$DEL_OUT" | grep -q '<Deleted><Key>copy.txt</Key>'; echo $?)"
 check "批量删除生效" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/mpu.bin")"
+
+# PutObject 的 Content-MD5：不符 BadDigest，格式非法 InvalidDigest
+PUT_MD5=$(printf 'md5-checked' | openssl dgst -md5 -binary | openssl base64)
+check "PutObject Content-MD5 相符" "200" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT -H "Content-MD5: $PUT_MD5" \
+        --data-binary 'md5-checked' "$BASE/mybucket/md5ok.bin")"
+check "PutObject Content-MD5 不符" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT -H "Content-MD5: $PUT_MD5" \
+        --data-binary 'tampered!!!' "$BASE/mybucket/md5bad.bin")"
+check "PutObject Content-MD5 格式非法" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT -H 'Content-MD5: not-base64' \
+        --data-binary 'x' "$BASE/mybucket/md5junk.bin")"
+# 摘要不符/格式非法的两个对象不应落盘；相符的那个清掉，否则末尾 DeleteBucket 409
+check "摘要不符的对象未落盘" "404" \
+    "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/md5bad.bin")"
+s3curl -o /dev/null -X DELETE "$BASE/mybucket/md5ok.bin"
 
 # 观测端点
 check "metrics 输出" "0" \

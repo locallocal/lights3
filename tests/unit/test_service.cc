@@ -1,4 +1,5 @@
 // L2 纯逻辑测试：mock HttpRequest + memory 后端走完整 dispatch（docs/architecture.md §2）
+#include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "s3/service.h"
 #include "storage/memory/memory_backend.h"
@@ -34,6 +35,17 @@ http::HttpRequest make_req(std::string method, std::string path, std::string bod
     }
     req.headers.add("Host", "localhost");
     if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
+    return req;
+}
+
+// DeleteObjects 要求完整性头（§5.6）：测试里统一走这个构造器，免得每处各算一遍
+http::HttpRequest make_delete_req(std::string path, std::string body,
+                                  std::vector<std::pair<std::string, std::string>> query) {
+    auto req = make_req("POST", std::move(path), body, std::move(query));
+    util::HashStream h(util::HashStream::Algo::Md5);
+    h.update(std::span(reinterpret_cast<const uint8_t*>(body.data()), body.size()));
+    auto d = h.final_bytes();
+    req.headers.add("Content-MD5", util::base64_encode(std::span(d.data(), d.size())));
     return req;
 }
 
@@ -344,7 +356,7 @@ TEST(service_delete_objects_batch) {
 
     std::string xml = "<Delete><Object><Key>a</Key></Object>"
                       "<Object><Key>b</Key></Object></Delete>";
-    auto resp = sync_wait(svc.dispatch(make_req("POST", "/bkt", xml, {{"delete", ""}})));
+    auto resp = sync_wait(svc.dispatch(make_delete_req("/bkt", xml, {{"delete", ""}})));
     CHECK_EQ(resp.status, 200);
     auto body = body_of(resp);
     CHECK(contains(body, "<Deleted><Key>a</Key></Deleted>"));
@@ -354,7 +366,7 @@ TEST(service_delete_objects_batch) {
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/c"))).status, 200);
 
     // 坏 XML → MalformedXML
-    auto bad = sync_wait(svc.dispatch(make_req("POST", "/bkt", "<oops>", {{"delete", ""}})));
+    auto bad = sync_wait(svc.dispatch(make_delete_req("/bkt", "<oops>", {{"delete", ""}})));
     CHECK_EQ(bad.status, 400);
     CHECK(contains(bad.small_body, "MalformedXML"));
 }
@@ -823,19 +835,18 @@ TEST(service_delete_objects_malformed_inputs) {
 
     // 空列表与缺 <Key> 都是畸形请求：整批 MalformedXML，而不是 200 空结果
     auto empty = sync_wait(
-        svc.dispatch(make_req("POST", "/bkt", "<Delete></Delete>", {{"delete", ""}})));
+        svc.dispatch(make_delete_req("/bkt", "<Delete></Delete>", {{"delete", ""}})));
     CHECK_EQ(empty.status, 400);
     CHECK(contains(empty.small_body, "MalformedXML"));
 
     auto nokey = sync_wait(svc.dispatch(
-        make_req("POST", "/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
+        make_delete_req("/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
     CHECK_EQ(nokey.status, 400);
     CHECK(contains(nokey.small_body, "MalformedXML"));
 
     // <VersionId> 静默忽略会把"删指定版本"变成"删当前对象"：501 且对象未删
-    auto ver = sync_wait(svc.dispatch(make_req(
-        "POST", "/bkt",
-        "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>",
+    auto ver = sync_wait(svc.dispatch(make_delete_req(
+        "/bkt", "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>",
         {{"delete", ""}})));
     CHECK_EQ(ver.status, 501);
     CHECK(contains(ver.small_body, "NotImplemented"));
@@ -990,4 +1001,71 @@ TEST(service_create_bucket_location_constraint) {
 
     // 无 body 仍按老路径放行
     CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/loc3"))).status, 200);
+}
+
+TEST(service_content_md5_and_checksums) {
+    // §5.6：Content-MD5 / x-amz-checksum-* 此前全仓无处理——被中间设备改写的
+    // 请求体会被照单全收
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto md5_b64 = [](std::string_view body) {
+        util::HashStream h(util::HashStream::Algo::Md5);
+        h.update(std::span(reinterpret_cast<const uint8_t*>(body.data()), body.size()));
+        auto d = h.final_bytes();
+        return util::base64_encode(std::span(d.data(), d.size()));
+    };
+
+    auto ok = make_req("PUT", "/bkt/a.bin", "hello");
+    ok.headers.add("Content-MD5", md5_b64("hello"));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(ok))).status, 200);
+
+    // 摘要不符 → BadDigest，且对象不得落盘（body.read 抛异常时后端不提交）
+    auto bad = make_req("PUT", "/bkt/b.bin", "hello");
+    bad.headers.add("Content-MD5", md5_b64("goodbye"));
+    auto bad_resp = sync_wait(svc.dispatch(std::move(bad)));
+    CHECK_EQ(bad_resp.status, 400);
+    CHECK(contains(bad_resp.small_body, "<Code>BadDigest</Code>"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/b.bin"))).status, 404);
+
+    // 格式非法与"摘要不符"必须分开：客户端要能分辨是自己算错还是链路改写
+    auto junk = make_req("PUT", "/bkt/c.bin", "hello");
+    junk.headers.add("Content-MD5", "not-base64!!");
+    auto junk_resp = sync_wait(svc.dispatch(std::move(junk)));
+    CHECK_EQ(junk_resp.status, 400);
+    CHECK(contains(junk_resp.small_body, "<Code>InvalidDigest</Code>"));
+
+    // 长度对不上（16 字节的 MD5 收到 4 字节）同样是 InvalidDigest
+    auto shortd = make_req("PUT", "/bkt/d.bin", "hello");
+    shortd.headers.add("Content-MD5", util::base64_encode(std::string_view("abcd")));
+    CHECK(contains(sync_wait(svc.dispatch(std::move(shortd))).small_body, "InvalidDigest"));
+
+    // x-amz-checksum-*：此前静默接受、从不校验
+    auto crc = make_req("PUT", "/bkt/e.bin", "hello");
+    uint32_t v = util::crc32c_of(std::string_view("hello"));
+    std::string be;
+    for (int s = 24; s >= 0; s -= 8) be.push_back(char((v >> s) & 0xff));
+    crc.headers.add("x-amz-checksum-crc32c", util::base64_encode(be));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(crc))).status, 200);
+
+    auto crc_bad = make_req("PUT", "/bkt/f.bin", "tampered");
+    crc_bad.headers.add("x-amz-checksum-crc32c", util::base64_encode(be));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(crc_bad))).status, 400);
+}
+
+TEST(service_delete_objects_requires_digest) {
+    // 批量删除是唯一"请求体被改写即静默多删对象"的操作，AWS 要求完整性头
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt/a", "x")));
+
+    std::string xml = "<Delete><Object><Key>a</Key></Object></Delete>";
+    auto missing = sync_wait(svc.dispatch(make_req("POST", "/bkt", xml, {{"delete", ""}})));
+    CHECK_EQ(missing.status, 400);
+    CHECK(contains(missing.small_body, "Content-MD5"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);  // 未删
+
+    // 带上正确摘要即放行
+    CHECK_EQ(sync_wait(svc.dispatch(make_delete_req("/bkt", xml, {{"delete", ""}}))).status, 200);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 404);
 }

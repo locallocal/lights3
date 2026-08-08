@@ -8,6 +8,7 @@
 #include "core/log.h"
 #include "core/util/hex.h"
 #include "s3/auth/credential_store.h"
+#include "s3/checksum_guard.h"
 #include "s3/errors.h"
 #include "s3/handlers/common.h"
 #include "s3/router.h"
@@ -262,6 +263,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // 按验签时的语义完成
             auto ident = auth_.verify(req);
             access_key = ident.access_key;
+            // Content-MD5 / x-amz-checksum-*（docs/gaps.md §5.6）：装在 verify 之后，
+            // 于是包在 sha256/aws-chunked 装饰器之外——摘要按解帧后的明文计算，
+            // 与客户端算的是同一份字节。与签名无关，认证关闭时同样生效
+            install_checksum_guard(req);
             bucket = std::move(addr.bucket);
             key = std::move(addr.key);
             // 用户请求的 bucket 名在此统一过完整校验，这是**唯一**的权威闸门

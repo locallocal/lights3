@@ -118,7 +118,9 @@ struct HashStream::Impl {
 
 HashStream::HashStream(Algo algo) : impl_(std::make_unique<Impl>()) {
     impl_->ctx = EVP_MD_CTX_new();
-    const EVP_MD* md = (algo == Algo::Sha256) ? EVP_sha256() : EVP_md5();
+    const EVP_MD* md = (algo == Algo::Sha256)  ? EVP_sha256()
+                       : (algo == Algo::Sha1) ? EVP_sha1()
+                                              : EVP_md5();
     if (!impl_->ctx || !EVP_DigestInit_ex(impl_->ctx, md, nullptr))
         throw std::runtime_error("EVP_DigestInit failed");
 }
@@ -133,11 +135,16 @@ void HashStream::update(std::span<const uint8_t> data) {
 }
 
 std::string HashStream::final_hex() {
+    auto b = final_bytes();
+    return to_hex(std::span(b.data(), b.size()));
+}
+
+std::vector<uint8_t> HashStream::final_bytes() {
     uint8_t buf[EVP_MAX_MD_SIZE];
     unsigned int len = 0;
     if (!EVP_DigestFinal_ex(impl_->ctx, buf, &len))
         throw std::runtime_error("EVP_DigestFinal failed");
-    return to_hex(std::span(buf, len));
+    return std::vector<uint8_t>(buf, buf + len);
 }
 
 }  // namespace lights3::util

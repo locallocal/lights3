@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace lights3::util {
 
@@ -52,13 +53,14 @@ public:
 // 增量哈希（流式 body 校验 / ETag 计算）
 class HashStream {
 public:
-    enum class Algo { Sha256, Md5 };
+    enum class Algo { Sha256, Sha1, Md5 };
     explicit HashStream(Algo algo);
     ~HashStream();
     HashStream(const HashStream&) = delete;
 
     void update(std::span<const uint8_t> data);
-    std::string final_hex();  // 只能调用一次
+    std::string final_hex();                  // 只能调用一次
+    std::vector<uint8_t> final_bytes();       // 同上，二选一。base64 类摘要用它免去 hex 往返
 
 private:
     struct Impl;

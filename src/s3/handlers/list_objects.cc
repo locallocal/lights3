@@ -1,6 +1,7 @@
 // ListObjectsV2（GET /bucket?list-type=2；V1 请求按 V2 语义降级处理）
 #include <algorithm>
 
+#include "core/util/checksum.h"
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "s3/handlers/common.h"
@@ -16,68 +17,9 @@ namespace {
 // V2 continuation-token 的不透明化（docs/gaps.md §4）：V1 的 marker 语义上就是
 // key（响应会回显），V2 的 token 规范是不透明串——此前 V1 做了 URL 编码而 V2
 // 明文透传，两版本不一致且把内部键序直接暴露成 API。base64 一层对齐 AWS 形态
-constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-std::string token_encode(const std::string& in) {
-    std::string out;
-    out.reserve((in.size() + 2) / 3 * 4);
-    size_t i = 0;
-    for (; i + 3 <= in.size(); i += 3) {
-        uint32_t v = (uint32_t(uint8_t(in[i])) << 16) | (uint32_t(uint8_t(in[i + 1])) << 8) |
-                     uint8_t(in[i + 2]);
-        out.push_back(kB64[(v >> 18) & 63]);
-        out.push_back(kB64[(v >> 12) & 63]);
-        out.push_back(kB64[(v >> 6) & 63]);
-        out.push_back(kB64[v & 63]);
-    }
-    size_t rem = in.size() - i;
-    if (rem == 1) {
-        uint32_t v = uint32_t(uint8_t(in[i])) << 16;
-        out.push_back(kB64[(v >> 18) & 63]);
-        out.push_back(kB64[(v >> 12) & 63]);
-        out += "==";
-    } else if (rem == 2) {
-        uint32_t v = (uint32_t(uint8_t(in[i])) << 16) | (uint32_t(uint8_t(in[i + 1])) << 8);
-        out.push_back(kB64[(v >> 18) & 63]);
-        out.push_back(kB64[(v >> 12) & 63]);
-        out.push_back(kB64[(v >> 6) & 63]);
-        out += "=";
-    }
-    return out;
-}
-
+std::string token_encode(const std::string& in) { return util::base64_encode(in); }
 std::optional<std::string> token_decode(const std::string& in) {
-    if (in.empty() || in.size() % 4 != 0) return std::nullopt;
-    auto val = [](char c) -> int {
-        if (c >= 'A' && c <= 'Z') return c - 'A';
-        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-        if (c >= '0' && c <= '9') return c - '0' + 52;
-        if (c == '+') return 62;
-        if (c == '/') return 63;
-        return -1;
-    };
-    std::string out;
-    out.reserve(in.size() / 4 * 3);
-    for (size_t i = 0; i < in.size(); i += 4) {
-        int pad = 0;
-        int v[4];
-        for (int j = 0; j < 4; ++j) {
-            char c = in[i + j];
-            if (c == '=' && i + 4 == in.size() && j >= 2) {
-                v[j] = 0;
-                ++pad;
-            } else {
-                v[j] = val(c);
-                if (v[j] < 0 || pad > 0) return std::nullopt;  // '=' 只能在末尾
-            }
-        }
-        uint32_t x = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) | (uint32_t(v[2]) << 6) |
-                     uint32_t(v[3]);
-        out.push_back(char((x >> 16) & 0xff));
-        if (pad < 2) out.push_back(char((x >> 8) & 0xff));
-        if (pad < 1) out.push_back(char(x & 0xff));
-    }
-    return out;
+    return util::base64_decode(in);
 }
 
 }  // namespace

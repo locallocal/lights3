@@ -1,5 +1,7 @@
 #include "storage/duostore/codec.h"
 
+#include "core/util/checksum.h"
+
 #include <array>
 
 #include "s3/errors.h"
@@ -244,23 +246,10 @@ void read_std_meta(Cursor& c, ObjectMeta& m) {
 }  // namespace
 
 // ---- crc32c ----
-// 软件查表实现（~数百 MB/s）。RocksDB 内部有硬件加速版（util/crc32c.h），但
-// 非公开头文件——复用需把 rocksdb 源码目录加进 include 路径并绑定其内部 API
-// 跨 submodule 升级，权衡后不取；数据路径吞吐成为瓶颈时再升级为 slicing-by-8
-
+// 实现已上提到 core/util/checksum.h（S3 的 x-amz-checksum-crc32c 同用一份），
+// 这里保留 duostore 命名空间下的转发，调用点不动
 uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) {
-    static const std::array<uint32_t, 256> table = [] {
-        std::array<uint32_t, 256> t{};
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t c = i;
-            for (int k = 0; k < 8; ++k) c = (c & 1) ? 0x82F63B78u ^ (c >> 1) : c >> 1;
-            t[i] = c;
-        }
-        return t;
-    }();
-    crc = ~crc;
-    for (std::byte b : data) crc = table[(crc ^ uint32_t(b)) & 0xff] ^ (crc >> 8);
-    return ~crc;
+    return util::crc32c_update(crc, data);
 }
 
 // ---- key 编码 ----

@@ -280,6 +280,7 @@ add_library(lights3_core STATIC
   src/core/config.cc
   src/core/metrics.cc
   src/core/util/crypto.cc
+  src/core/util/checksum.cc
   src/core/util/uri.cc
   src/core/util/time.cc
   src/http/server.cc

@@ -47,6 +47,27 @@ inline PutResult put(IStorageBackend& b, const std::string& bkt, const std::stri
     return sync_wait(b.put_object(bkt, key, std::move(meta), body));
 }
 
+// 读到一半就抛的 body（Content-MD5 不符、客户端断连、传输停滞都是这个形态）。
+// backend.h 契约：body.read 抛异常时后端不得留下任何写入痕迹
+struct ThrowingBodyReader final : http::BodyReader {
+    explicit ThrowingBodyReader(std::string prefix, uint64_t declared)
+        : prefix_(std::move(prefix)), declared_(declared) {}
+    Task<size_t> read(std::span<std::byte> buf) override {
+        if (sent_ < prefix_.size()) {
+            size_t n = std::min(buf.size(), prefix_.size() - sent_);
+            memcpy(buf.data(), prefix_.data() + sent_, n);
+            sent_ += n;
+            co_return n;
+        }
+        throw s3::S3Error(s3::S3ErrorCode::BadDigest, "injected mid-body failure");
+    }
+    std::optional<uint64_t> length() const override { return declared_; }
+
+    std::string prefix_;
+    uint64_t declared_;
+    size_t sent_ = 0;
+};
+
 // 对一个后端实例跑完整一致性用例
 inline void run_backend_suite(IStorageBackend& b) {
     using s3::S3ErrorCode;
@@ -72,6 +93,21 @@ inline void run_backend_suite(IStorageBackend& b) {
     CHECK_EQ(got.meta.content_type, "text/plain");
     CHECK_EQ(got.meta.user_meta.at("color"), "red");
     CHECK_EQ(read_all(*got.body), "hello world");
+
+    // body 读到一半抛异常：异常须原样传出，且不得留下半个对象（backend.h 契约）。
+    // 这是 Content-MD5 不符（docs/gaps.md §5.6）与客户端断连共用的形态
+    {
+        ThrowingBodyReader bad("partial-", 64);
+        CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "torn.bin", ObjectMeta{}, bad)),
+                        S3ErrorCode::BadDigest);
+        CHECK_THROWS_S3(sync_wait(b.head_object("suite-bkt", "torn.bin")),
+                        S3ErrorCode::NoSuchKey);
+        // 覆盖写失败也不得破坏既有对象
+        ThrowingBodyReader bad2("partial-", 64);
+        CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "dir/a.txt", ObjectMeta{}, bad2)),
+                        S3ErrorCode::BadDigest);
+        CHECK_EQ(sync_wait(b.head_object("suite-bkt", "dir/a.txt")).etag, r.etag);
+    }
 
     // Range：中段 / 开区间 / 后缀 / 越界
     auto mid = sync_wait(b.get_object("suite-bkt", "dir/a.txt", ByteRange{6, 10}));

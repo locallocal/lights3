@@ -315,6 +315,21 @@ Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
 
 // DeleteObjects 批量删除（POST /bucket?delete，请求 XML ≤ 1MiB，至多 1000 key）
 Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::string bucket) {
+    // AWS 对本操作**要求**完整性头（docs/gaps.md §5.6）：批量删除是唯一一个
+    // "请求体被改写即静默多删对象"的操作，缺失即 400。摘要本身由 dispatch 装的
+    // ChecksumVerifyingReader 在读 body 时校验，这里只判"有没有声明"
+    constexpr std::string_view kChecksumPrefix = "x-amz-checksum-";
+    bool has_digest = req.headers.has("Content-MD5");
+    if (!has_digest)
+        for (auto& [k, v] : req.headers.items())
+            if (k.size() > kChecksumPrefix.size() &&
+                http::HeaderMap::ieq(std::string_view(k).substr(0, kChecksumPrefix.size()),
+                                     kChecksumPrefix))
+                has_digest = true;
+    if (!has_digest)
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "Missing required header for this request: Content-MD5 "
+                      "(or a x-amz-checksum-* header).");
     std::string body = co_await read_body(req);
     XmlNode root = xml_parse(body);
     if (root.name != "Delete")

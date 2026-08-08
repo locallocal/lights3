@@ -48,9 +48,11 @@ std::string format_range(const ByteRange& r) {
     return out;
 }
 
-// x-amz-meta-* 头（签名会把它们收进 SignedHeaders）
+// x-amz-meta-* 与一等元数据头（签名会把它们一并收进 SignedHeaders，无需改签名侧）
 std::vector<std::pair<std::string, std::string>> meta_headers(const ObjectMeta& meta) {
     std::vector<std::pair<std::string, std::string>> out;
+    for (auto& f : kStdMetaFields)
+        if (!(meta.*f.field).empty()) out.emplace_back(f.header, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) out.emplace_back("x-amz-meta-" + k, v);
     return out;
 }
@@ -85,6 +87,8 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
     if (res.has_header("Content-Type")) m.content_type = res.get_header_value("Content-Type");
     if (auto t = util::parse_http_date(res.get_header_value("Last-Modified")))
         m.last_modified = *t;
+    for (auto& f : kStdMetaFields)
+        if (res.has_header(f.header)) m.*f.field = res.get_header_value(f.header);
     for (auto& [k, v] : res.headers) {
         constexpr std::string_view kMetaPrefix = "x-amz-meta-";
         if (k.size() > kMetaPrefix.size() &&

@@ -16,9 +16,13 @@ namespace lights3::s3 {
 
 namespace {
 
-std::string make_request_id() {
+std::mt19937_64& id_rng() {
     static thread_local std::mt19937_64 rng{std::random_device{}()};
-    uint64_t v = rng();
+    return rng;
+}
+
+std::string make_request_id() {
+    uint64_t v = id_rng()();
     uint8_t bytes[8];
     memcpy(bytes, &v, 8);
     std::string hex = util::to_hex(std::span(bytes, 8));
@@ -26,12 +30,22 @@ std::string make_request_id() {
     return hex;
 }
 
-http::HttpResponse error_response(const S3Error& e, const std::string& request_id,
-                                  bool head_only) {
+// x-amz-id-2 比 request id 长（AWS 是一串 base64）：这里同样用 hex，24 字节
+std::string make_host_id() {
+    uint8_t bytes[24];
+    for (size_t i = 0; i < sizeof(bytes); i += 8) {
+        uint64_t v = id_rng()();
+        memcpy(bytes + i, &v, 8);
+    }
+    return util::to_hex(std::span(bytes, sizeof(bytes)));
+}
+
+http::HttpResponse error_response(const S3Error& e, const RequestContext& ctx, bool head_only) {
     http::HttpResponse resp;
     resp.status = http_status(e.code);
     resp.headers.set("Content-Type", "application/xml");
-    if (!head_only) resp.small_body = error_xml(e, request_id);
+    for (auto& [k, v] : e.headers) resp.headers.set(k, v);
+    if (!head_only) resp.small_body = error_xml(e, ctx.request_id, ctx.host_id);
     return resp;
 }
 
@@ -117,6 +131,12 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
             if (!http::HeaderMap::ieq(v, "private")) refuse();
             continue;
         }
+        if (lk == "x-amz-storage-class") {
+            // 同理（docs/gaps.md §5.2）：只有 STANDARD 一种存储类，收下 GLACIER
+            // 再原样回显等于替存储层撒谎——对象根本没进任何归档层
+            if (!http::HeaderMap::ieq(v, "STANDARD")) refuse();
+            continue;
+        }
         for (auto p : kPrefixes)
             if (lk.rfind(p, 0) == 0) refuse();
         for (auto e : kExact)
@@ -197,7 +217,7 @@ S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) cons
 // ---------- 顶层入口 ----------
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
-    RequestContext ctx{make_request_id(), req.cancel};
+    RequestContext ctx{make_request_id(), make_host_id(), req.cancel};
     bool head = req.method == "HEAD";
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
@@ -295,19 +315,19 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         metrics_.s3_error(S3ErrorCode::SlowDown);
         resp = error_response(
             S3Error(S3ErrorCode::SlowDown, "Request cancelled: timed out or server shutting down."),
-            ctx.request_id, head);
+            ctx, head);
     } catch (const S3Error& e) {
         metrics_.s3_error(e.code);
-        resp = error_response(public_error(e, ctx.request_id, req), ctx.request_id, head);
+        resp = error_response(public_error(e, ctx.request_id, req), ctx, head);
     } catch (const std::exception& e) {
         LOG_ERROR("req {} {} {} internal error: {}", ctx.request_id, req.method, req.path,
                   e.what());
         metrics_.s3_error(S3ErrorCode::InternalError);
         resp = error_response(
-            S3Error(S3ErrorCode::InternalError, "We encountered an internal error."),
-            ctx.request_id, head);
+            S3Error(S3ErrorCode::InternalError, "We encountered an internal error."), ctx, head);
     }
     resp.headers.set("x-amz-request-id", ctx.request_id);
+    resp.headers.set("x-amz-id-2", ctx.host_id);
     resp.headers.set("Server", "lights3");
 
     // 访问日志（docs/s3-protocol.md §7）：一行结构化，字段序对齐 S3 access log 精简版
@@ -366,8 +386,8 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
          return s.list_objects(req, std::move(b));
      }},
     {"PUT", Scope::Bucket, "", "",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
-         return s.create_bucket(std::move(b));
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string) {
+         return s.create_bucket(req, std::move(b));
      }},
     {"HEAD", Scope::Bucket, "", "",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string) {
@@ -411,11 +431,16 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
              return s.copy_object(req, std::move(b), std::move(k));
          return s.put_object(req, std::move(b), std::move(k));
      }},
-    {"GET", Scope::Object, "", "",
+    // response-* 覆盖参数（docs/gaps.md §5.3）：presigned 下载链接最常用的一族
+    {"GET", Scope::Object, "",
+     "response-content-type response-content-language response-expires "
+     "response-cache-control response-content-disposition response-content-encoding",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.get_object(req, std::move(b), std::move(k), false);
      }},
-    {"HEAD", Scope::Object, "", "",
+    {"HEAD", Scope::Object, "",
+     "response-content-type response-content-language response-expires "
+     "response-cache-control response-content-disposition response-content-encoding",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k) {
          return s.get_object(req, std::move(b), std::move(k), true);
      }},
@@ -441,7 +466,20 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
         enforce_query_whitelist(req, r);
         co_return co_await r.fn(*this, req, std::move(bucket), std::move(key));
     }
-    throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.");
+    // 405 必须带 Allow（RFC 9110 §15.5.6，docs/gaps.md §5.9）：同 scope 下同样能
+    // 匹配本请求 query 的其余方法即为答案——名单由分派表本身给出，不会与之漂移
+    std::string allow;
+    for (auto& r : kRoutes) {
+        if (r.scope != scope || !flag_matches(req, r.flag)) continue;
+        if (allow.find(r.method) != std::string::npos) continue;  // 同方法多路由只列一次
+        if (!allow.empty()) allow += ", ";
+        allow += r.method;
+    }
+    // HEAD 由 GET 路由承接的驱动/上游语义：列了 GET 就一并列 HEAD
+    if (allow.find("GET") != std::string::npos && allow.find("HEAD") == std::string::npos)
+        allow += ", HEAD";
+    throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.")
+        .with_header("Allow", allow);
 }
 
 // ---------- readyz（docs/s3-protocol.md §7：各后端探活）----------

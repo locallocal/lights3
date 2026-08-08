@@ -720,18 +720,19 @@ TEST(service_query_whitelist) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
 
-    // 黑名单时代的确切漏项：都曾静默降级为"读整个对象"
-    for (auto q : {std::pair{"attributes", ""}, std::pair{"partNumber", "1"},
-                   std::pair{"response-content-type", "text/html"}}) {
+    // 黑名单时代的确切漏项：都曾静默降级为"读整个对象"。response-* 已于 §5.3
+    // 实现，不再在此列——未实现的子资源仍须 501
+    for (auto q : {std::pair{"attributes", ""}, std::pair{"partNumber", "1"}}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{q.first, q.second}})));
         CHECK_EQ(resp.status, 501);
         CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
     }
 
-    // 白名单内的参数不受影响；fetch-owner 允许但忽略（V2 缺省不回 Owner，等价 =false）
+    // 白名单内的参数不受影响；fetch-owner 已实现（§5.5），不再是"允许但忽略"
     auto ls = sync_wait(svc.dispatch(
         make_req("GET", "/bkt", "", {{"list-type", "2"}, {"prefix", ""}, {"fetch-owner", "true"}})));
     CHECK_EQ(ls.status, 200);
+    CHECK(contains(ls.small_body, "<Owner>"));
 
     // presigned 签名参数族全局放行（值不在此校验，SigV4 层负责）
     auto pre = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"}})));
@@ -839,4 +840,154 @@ TEST(service_delete_objects_malformed_inputs) {
     CHECK_EQ(ver.status, 501);
     CHECK(contains(ver.small_body, "NotImplemented"));
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
+}
+
+// ---- docs/gaps.md §5.2 / §5.3 / §5.5 / §5.9 ----
+
+TEST(service_first_class_object_metadata) {
+    // 一等元数据（§5.2）：此前 PUT 时全丢、GET/HEAD 也不回。丢 Content-Encoding
+    // 的后果不是"少个头"，是浏览器拿到无法解压的字节流
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    auto put = make_req("PUT", "/bkt/o.bin", "payload");
+    put.headers.add("Cache-Control", "max-age=42");
+    put.headers.add("Content-Disposition", "attachment; filename=\"r.bin\"");
+    put.headers.add("Content-Encoding", "gzip");
+    put.headers.add("Content-Language", "zh-CN");
+    put.headers.add("Expires", "Wed, 21 Oct 2026 07:28:00 GMT");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+
+    for (auto method : {"GET", "HEAD"}) {
+        auto r = sync_wait(svc.dispatch(make_req(method, "/bkt/o.bin")));
+        CHECK_EQ(r.status, 200);
+        CHECK_EQ(*r.headers.get("Cache-Control"), "max-age=42");
+        CHECK_EQ(*r.headers.get("Content-Disposition"), "attachment; filename=\"r.bin\"");
+        CHECK_EQ(*r.headers.get("Content-Encoding"), "gzip");
+        CHECK_EQ(*r.headers.get("Content-Language"), "zh-CN");
+        CHECK_EQ(*r.headers.get("Expires"), "Wed, 21 Oct 2026 07:28:00 GMT");
+    }
+
+    // CopyObject 的 COPY 指令必须整份带走（逐字段抄写曾漏掉新增字段）
+    auto cp = make_req("PUT", "/bkt/copy.bin");
+    cp.headers.add("x-amz-copy-source", "/bkt/o.bin");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(cp))).status, 200);
+    auto cg = sync_wait(svc.dispatch(make_req("GET", "/bkt/copy.bin")));
+    CHECK_EQ(*cg.headers.get("Content-Encoding"), "gzip");
+    CHECK_EQ(*cg.headers.get("Cache-Control"), "max-age=42");
+
+    // 头值里的 CR/LF 会撕开 sidecar 记录，也是响应头注入面
+    auto bad = make_req("PUT", "/bkt/bad.bin", "x");
+    bad.headers.add("Cache-Control", "a\r\nX-Injected: 1");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 400);
+
+    // 只有 STANDARD 一种存储类：收下 GLACIER 再回显等于替存储层撒谎
+    auto sc = make_req("PUT", "/bkt/sc.bin", "x");
+    sc.headers.add("x-amz-storage-class", "GLACIER");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(sc))).status, 501);
+    auto sc2 = make_req("PUT", "/bkt/sc2.bin", "x");
+    sc2.headers.add("x-amz-storage-class", "STANDARD");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(sc2))).status, 200);
+}
+
+TEST(service_response_override_params) {
+    // §5.3：presigned 下载链接最常用的一族，此前既不生效也不报错
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto put = make_req("PUT", "/bkt/o.bin", "payload");
+    put.headers.add("Content-Type", "application/octet-stream");
+    sync_wait(svc.dispatch(std::move(put)));
+
+    auto r = sync_wait(svc.dispatch(make_req(
+        "GET", "/bkt/o.bin", "",
+        {{"response-content-type", "text/plain"},
+         {"response-content-disposition", "attachment; filename=\"x.txt\""},
+         {"response-cache-control", "no-store"}})));
+    CHECK_EQ(r.status, 200);
+    CHECK_EQ(*r.headers.get("Content-Type"), "text/plain");  // 覆盖对象自身的值
+    CHECK_EQ(*r.headers.get("Content-Disposition"), "attachment; filename=\"x.txt\"");
+    CHECK_EQ(*r.headers.get("Cache-Control"), "no-store");
+    CHECK_EQ(body_of(r), "payload");  // 只改头，不改体
+
+    // query 值是攻击者可控的：塞进响应头前必须挡住 CR/LF（响应拆分）
+    auto inj = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt/o.bin", "", {{"response-content-type", "t\r\nX-Injected: 1"}})));
+    CHECK_EQ(inj.status, 400);
+}
+
+TEST(service_list_marker_semantics) {
+    // §5.5：三种 marker 此前塌缩成同一个 start_after
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    for (auto k : {"a", "b", "c"}) sync_wait(svc.dispatch(make_req("PUT", std::string("/bkt/") + k, "x")));
+
+    // V1 只认 marker：带 start-after 的 V1 请求不得生效，且回显的 <Marker> 必须是空
+    auto v1 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"start-after", "b"}})));
+    CHECK_EQ(v1.status, 200);
+    CHECK(contains(v1.small_body, "<Key>a</Key>"));      // start-after 未生效
+    CHECK(contains(v1.small_body, "<Marker></Marker>"));  // 不回显客户端没发过的值
+
+    auto v1m = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"marker", "b"}})));
+    CHECK(!contains(v1m.small_body, "<Key>a</Key>"));
+    CHECK(contains(v1m.small_body, "<Key>c</Key>"));
+    CHECK(contains(v1m.small_body, "<Marker>b</Marker>"));
+
+    // V2 认 start-after 并回显 <StartAfter>
+    auto v2 = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"start-after", "a"}})));
+    CHECK(!contains(v2.small_body, "<Key>a</Key>"));
+    CHECK(contains(v2.small_body, "<StartAfter>a</StartAfter>"));
+    CHECK(!contains(v2.small_body, "<Marker>"));
+
+    // V2 缺省不回 Owner；fetch-owner=true 才回
+    CHECK(!contains(v2.small_body, "<Owner>"));
+}
+
+TEST(service_response_protocol_details) {
+    // §5.9：HostId/x-amz-id-2、Allow、304 的 Last-Modified、HeadBucket 的 region
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto put = sync_wait(svc.dispatch(make_req("PUT", "/bkt/o.bin", "payload")));
+
+    auto err = sync_wait(svc.dispatch(make_req("GET", "/bkt/missing")));
+    CHECK(contains(err.small_body, "<HostId>"));
+    CHECK(err.headers.has("x-amz-id-2"));
+
+    auto hb = sync_wait(svc.dispatch(make_req("HEAD", "/bkt")));
+    CHECK_EQ(hb.status, 200);
+    CHECK(hb.headers.has("x-amz-bucket-region"));
+
+    // 405 必须带 Allow（RFC 9110 §15.5.6）
+    auto na = sync_wait(svc.dispatch(make_req("PATCH", "/bkt/o.bin")));
+    CHECK_EQ(na.status, 405);
+    CHECK(na.headers.has("Allow"));
+    CHECK(contains(*na.headers.get("Allow"), "GET"));
+
+    // 304 只带 ETag 不够，缓存条目会丢掉 Last-Modified
+    auto nm = make_req("GET", "/bkt/o.bin");
+    nm.headers.add("If-None-Match", *put.headers.get("ETag"));
+    auto r304 = sync_wait(svc.dispatch(std::move(nm)));
+    CHECK_EQ(r304.status, 304);
+    CHECK(r304.headers.has("ETag"));
+    CHECK(r304.headers.has("Last-Modified"));
+}
+
+TEST(service_create_bucket_location_constraint) {
+    // §5.4：此前请求体从不读，跨 region 建桶静默成功
+    auto svc = make_service_noauth();
+    auto ok = sync_wait(svc.dispatch(make_req(
+        "PUT", "/loc1", "<CreateBucketConfiguration><LocationConstraint></LocationConstraint>"
+                      "</CreateBucketConfiguration>")));
+    CHECK_EQ(ok.status, 200);  // 空约束 = us-east-1 = 本实现默认 region
+
+    auto bad = sync_wait(svc.dispatch(make_req(
+        "PUT", "/loc2", "<CreateBucketConfiguration><LocationConstraint>eu-west-1"
+                      "</LocationConstraint></CreateBucketConfiguration>")));
+    CHECK_EQ(bad.status, 400);
+    CHECK(contains(bad.small_body, "<Code>InvalidLocationConstraint</Code>"));
+    // 拒绝之后桶不得存在
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/loc2"))).status, 404);
+
+    // 无 body 仍按老路径放行
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/loc3"))).status, 200);
 }

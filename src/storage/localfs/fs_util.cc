@@ -124,6 +124,9 @@ std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
         kv.emplace_back("remote.etag", tier.remote_etag);
         kv.emplace_back("remote.at", tier.remote_at);
     }
+    // 一等元数据（docs/gaps.md §5.2）：空值不落盘，存量 sidecar 因此逐字节不变
+    for (auto& f : kStdMetaFields)
+        if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
     return kv;
 }
@@ -255,6 +258,10 @@ static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier,
         else if (k == "remote.etag") tier.remote_etag = v;
         else if (k == "remote.at") tier.remote_at = v;
         else if (k.rfind("meta.", 0) == 0) meta.user_meta[k.substr(5)] = v;
+        else {
+            for (auto& f : kStdMetaFields)
+                if (k == f.store_key) meta.*f.field = v;
+        }
     }
 }
 
@@ -354,6 +361,10 @@ UploadState require_upload(const fs::path& staging, std::string_view bucket,
         else if (k == "key") m_key = v;
         else if (k == "content_type") up.meta.content_type = v;
         else if (k.rfind("meta.", 0) == 0) up.meta.user_meta[k.substr(5)] = v;
+        else {
+            for (auto& f : kStdMetaFields)
+                if (k == f.store_key) up.meta.*f.field = v;
+        }
     }
     if (manifest.empty() || m_bucket != bucket || m_key != key)
         throw S3Error(S3ErrorCode::NoSuchUpload,

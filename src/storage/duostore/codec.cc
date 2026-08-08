@@ -99,6 +99,14 @@ void check_ver(Cursor& c, uint8_t expect) {
     if (c.u8() != expect) corrupt("unsupported value version");
 }
 
+// 版本兼容读（docs/gaps.md §5.2）：v1 记录无一等元数据段，v2 起有。严格相等的
+// check_ver 让旧值一律变成 500 "corrupt"，升级得停机重写全量元数据
+uint8_t read_ver(Cursor& c, uint8_t max) {
+    uint8_t v = c.u8();
+    if (v == 0 || v > max) corrupt("unsupported value version");
+    return v;
+}
+
 // ---- extent run 编解码（§4.3）----
 // run = { u8 kind, u64 first_file_id, u32 count, u64 chunk_len, u64 last_len,
 //         u64 pack_offset, u32 crc[count] }
@@ -207,6 +215,30 @@ std::map<std::string, std::string> read_user_meta(Cursor& c) {
         m[std::move(k)] = std::string(c.str());
     }
     return m;
+}
+
+// 一等元数据段（v2 起）：自描述的 u16 n + (str k, str v)*，只写非空项。做成
+// kv 而非六个定长槽位，是为了让下次加字段不必再动版本号——未知键读到就丢
+void put_std_meta(std::string& s, const ObjectMeta& m) {
+    uint16_t n = 0;
+    for (auto& f : kStdMetaFields)
+        if (!(m.*f.field).empty()) ++n;
+    put_u16(s, n);
+    for (auto& f : kStdMetaFields)
+        if (!(m.*f.field).empty()) {
+            put_str(s, f.store_key);
+            put_str(s, m.*f.field);
+        }
+}
+
+void read_std_meta(Cursor& c, ObjectMeta& m) {
+    uint16_t n = c.u16();
+    for (uint16_t i = 0; i < n; ++i) {
+        std::string k(c.str());
+        std::string v(c.str());
+        for (auto& f : kStdMetaFields)
+            if (k == f.store_key) m.*f.field = std::move(v);
+    }
 }
 
 }  // namespace
@@ -318,24 +350,30 @@ int64_t decode_bucket(std::string_view v) {
 }
 
 // ---- object：u8 ver | u64 size | u64 mtime_ms | u64 version | str etag
-//              | str content_type | u16 n_meta (str k, str v)* | runs（§4.2）----
+//              | str content_type | u16 n_meta (str k, str v)*
+//              | [v2] u16 n_std (str k, str v)* | runs（§4.2）----
+// v1 = 无一等元数据段；读侧两版都认，写侧恒 v2（存量记录原地可读，无需重写）
+
+constexpr uint8_t kObjectVer = 2;
+constexpr uint8_t kUploadVer = 2;
 
 std::string encode_object(const ObjectRec& rec) {
     std::string s;
-    put_u8(s, 1);
+    put_u8(s, kObjectVer);
     put_u64(s, rec.meta.size);
     put_u64(s, uint64_t(to_unix_ms(rec.meta.last_modified)));
     put_u64(s, rec.version);
     put_str(s, rec.meta.etag);
     put_str(s, rec.meta.content_type);
     put_user_meta(s, rec.meta.user_meta);
+    put_std_meta(s, rec.meta);
     append_extent_runs(s, rec.data.extents);
     return s;
 }
 
 ObjectMeta decode_object_meta(std::string key, std::string_view v) {
     Cursor c{v};
-    check_ver(c, 1);
+    uint8_t ver = read_ver(c, kObjectVer);
     ObjectMeta m;
     m.key = std::move(key);
     m.size = c.u64();
@@ -344,6 +382,7 @@ ObjectMeta decode_object_meta(std::string key, std::string_view v) {
     m.etag = std::string(c.str());
     m.content_type = std::string(c.str());
     m.user_meta = read_user_meta(c);
+    if (ver >= 2) read_std_meta(c, m);
     skip_extent_runs(c);  // list 不需要定位信息，免物化大对象的 Extent 数组（§4.4）
     c.done();
     return m;
@@ -351,7 +390,7 @@ ObjectMeta decode_object_meta(std::string key, std::string_view v) {
 
 ObjectRec decode_object(std::string key, std::string_view v) {
     Cursor c{v};
-    check_ver(c, 1);
+    uint8_t ver = read_ver(c, kObjectVer);
     ObjectRec rec;
     rec.meta.key = std::move(key);
     rec.meta.size = c.u64();
@@ -360,31 +399,35 @@ ObjectRec decode_object(std::string key, std::string_view v) {
     rec.meta.etag = std::string(c.str());
     rec.meta.content_type = std::string(c.str());
     rec.meta.user_meta = read_user_meta(c);
+    if (ver >= 2) read_std_meta(c, rec.meta);
     rec.data.extents = read_extent_runs(c);
     c.done();
     return rec;
 }
 
-// ---- upload：u8 ver | i64 initiated_ms | str content_type | u16 n_meta kv* ----
+// ---- upload：u8 ver | i64 initiated_ms | str content_type | u16 n_meta kv*
+//              | [v2] u16 n_std kv* ----
 
 std::string encode_upload(const UploadRec& rec) {
     std::string s;
-    put_u8(s, 1);
+    put_u8(s, kUploadVer);
     put_u64(s, uint64_t(rec.initiated_ms));
     put_str(s, rec.meta.content_type);
     put_user_meta(s, rec.meta.user_meta);
+    put_std_meta(s, rec.meta);
     return s;
 }
 
 UploadRec decode_upload(std::string key, std::string upload_id, std::string_view v) {
     Cursor c{v};
-    check_ver(c, 1);
+    uint8_t ver = read_ver(c, kUploadVer);
     UploadRec rec;
     rec.upload_id = std::move(upload_id);
     rec.meta.key = std::move(key);
     rec.initiated_ms = int64_t(c.u64());
     rec.meta.content_type = std::string(c.str());
     rec.meta.user_meta = read_user_meta(c);
+    if (ver >= 2) read_std_meta(c, rec.meta);
     c.done();
     return rec;
 }

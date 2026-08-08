@@ -3,10 +3,13 @@
 
 #include "core/util/time.h"
 #include "core/util/uri.h"
+#include "s3/handlers/common.h"
 #include "s3/service.h"
 #include "s3/xml.h"
 
 namespace lights3::s3 {
+
+using handlers::kOwnerId;
 
 namespace {
 
@@ -109,18 +112,29 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     };
     // V2（?list-type=2）与 V1 的差异：KeyCount/ContinuationToken vs Marker
     bool v2 = req.query_get("list-type").value_or("") == "2";
-    // token 即 "start after this key"：V2 的 continuation-token 是本实现签发的
-    // 不透明串（base64），解不开即无效参数；start-after / V1 marker 是明文 key
-    if (auto tok = req.query_get("continuation-token"); v2 && tok) {
-        auto key = token_decode(*tok);
-        if (!key)
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "The continuation token provided is incorrect.");
-        opt.start_after = std::move(*key);
+    // 三种 marker 各归各版本（docs/gaps.md §5.5）：此前塌缩成同一个 start_after，
+    // 于是 V1 请求带 start-after 也生效、且响应回显出客户端从未发过的 <Marker>。
+    // V2 认 continuation-token（本实现签发的不透明串）与 start-after；V1 只认
+    // marker，两者都是"从此 key 之后开始"的明文语义
+    std::optional<std::string> start_after_param;  // 仅 V2，需原样回显
+    if (v2) {
+        if (auto tok = req.query_get("continuation-token")) {
+            auto key = token_decode(*tok);
+            if (!key)
+                throw S3Error(S3ErrorCode::InvalidArgument,
+                              "The continuation token provided is incorrect.");
+            opt.start_after = std::move(*key);
+            // AWS：两者同时出现时 continuation-token 胜出，start-after 被忽略
+            start_after_param = req.query_get("start-after");
+        } else if (auto sa = req.query_get("start-after")) {
+            opt.start_after = *sa;
+            start_after_param = *sa;
+        }
     } else {
-        opt.start_after = req.query_get("start-after")
-                              .value_or(req.query_get("marker").value_or(""));
+        opt.start_after = req.query_get("marker").value_or("");
     }
+    // fetch-owner=true（V2）：本实现只有单一所有者，与 ListAllMyBuckets 同源
+    bool fetch_owner = v2 && req.query_get("fetch-owner").value_or("") == "true";
 
     auto result = co_await router_.resolve(bucket).list_objects(bucket, opt);
 
@@ -136,6 +150,7 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
                   static_cast<uint64_t>(result.objects.size() + result.common_prefixes.size()));
         if (auto tok = req.query_get("continuation-token"))
             w.element("ContinuationToken", *tok);
+        if (start_after_param) w.element("StartAfter", enc(*start_after_param));
     } else {
         w.element("Marker", enc(opt.start_after));
     }
@@ -150,6 +165,12 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
         w.element("ETag", "\"" + o.etag + "\"");
         w.element("Size", o.size);
         w.element("StorageClass", "STANDARD");
+        if (fetch_owner) {
+            w.open("Owner");
+            w.element("ID", std::string(kOwnerId));
+            w.element("DisplayName", std::string(kOwnerId));
+            w.close();
+        }
         w.close();
     }
     for (auto& p : result.common_prefixes) {

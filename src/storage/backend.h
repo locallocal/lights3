@@ -34,6 +34,33 @@ struct ObjectMeta {
     std::string content_type = "binary/octet-stream";
     std::chrono::system_clock::time_point last_modified;
     std::map<std::string, std::string> user_meta;  // x-amz-meta-* 去前缀后的 kv
+
+    // S3 一等对象元数据（docs/gaps.md §5.2）：此前 PUT 时全部丢弃、GET 也不回。
+    // 丢 content_encoding=gzip 会让浏览器拿到无法解压的字节流——它们不是"额外的
+    // 用户元数据"，而是内容协商的一部分。空串 = 未设置，不回该头
+    std::string cache_control;
+    std::string content_disposition;
+    std::string content_encoding;
+    std::string content_language;
+    std::string expires;  // 原样保存的 HTTP-date 文本
+    // 注：x-amz-storage-class 不在此列。本实现只有 STANDARD 一种存储类，存下客户端
+    // 报的值再原样回显等于替存储层撒谎（对象明明在本地盘却回 GLACIER）；非 STANDARD
+    // 在 L2 直接 501，与 x-amz-acl 的处理一致（docs/gaps.md §5.2）
+};
+
+// 五个一等字段的单一事实来源：请求/响应头名 + 持久化键名 + 成员指针。提取、回显、
+// 各后端序列化都遍历这张表——新增一个字段只改这里，不会出现"存了但不回"的半吊子
+struct StdMetaField {
+    const char* header;              // S3 请求/响应头名
+    const char* store_key;           // 后端持久化用的键名
+    std::string ObjectMeta::* field;
+};
+inline constexpr StdMetaField kStdMetaFields[] = {
+    {"Cache-Control", "cache_control", &ObjectMeta::cache_control},
+    {"Content-Disposition", "content_disposition", &ObjectMeta::content_disposition},
+    {"Content-Encoding", "content_encoding", &ObjectMeta::content_encoding},
+    {"Content-Language", "content_language", &ObjectMeta::content_language},
+    {"Expires", "expires", &ObjectMeta::expires},
 };
 
 struct ObjectStream {

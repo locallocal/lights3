@@ -1020,6 +1020,8 @@ Task<void> TieredBackend::reconcile_orphan(std::string bucket, std::string key,
         nm.last_modified = cm.last_modified;
         if (auto ct = cm.user_meta.find("lights3-content-type"); ct != cm.user_meta.end())
             nm.content_type = ct->second;
+        // 一等元数据是真头（Cache-Control 等），云端原样存原样回，不必再冗余一份
+        for (auto& f : kStdMetaFields) nm.*f.field = cm.*f.field;
         for (auto& [mk, mv] : cm.user_meta)
             if (mk.rfind("lights3-", 0) != 0) nm.user_meta.emplace(mk, mv);
         std::error_code ec;

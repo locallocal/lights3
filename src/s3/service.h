@@ -24,6 +24,9 @@ class CredentialStore;  // auth/credential_store.h（仅 admin handler 的 .cc �
 
 struct RequestContext {
     std::string request_id;
+    // x-amz-id-2 / <HostId>（docs/gaps.md §5.9）：AWS 支持工单要的两个 id 之一，
+    // 客户端只会转述它看到的这一对，日志侧必须能对上
+    std::string host_id;
     // 取消信号：客户端断连（driver 发现）、请求超时、进程 shutdown（docs/concurrency.md §5）；
     // 默认"永不取消"。长循环（流式读写每块之间）与 pool.schedule() 感知它
     CancelToken cancel;
@@ -83,7 +86,7 @@ private:
 
     // handlers/buckets.cc
     Task<http::HttpResponse> list_buckets();
-    Task<http::HttpResponse> create_bucket(std::string bucket);
+    Task<http::HttpResponse> create_bucket(http::HttpRequest& req, std::string bucket);
     Task<http::HttpResponse> head_bucket(std::string bucket);
     Task<http::HttpResponse> delete_bucket(std::string bucket);
     Task<http::HttpResponse> get_bucket_location(std::string bucket);

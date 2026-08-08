@@ -499,6 +499,9 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
         {"bucket", std::string(bucket)},
         {"key", std::string(key)},
         {"content_type", meta.content_type}};
+    // 一等元数据也要跨 create→complete 存活（docs/gaps.md §5.2），键名与 sidecar 同源
+    for (auto& f : kStdMetaFields)
+        if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
     write_tsv(dir / "manifest", staging_ / "put", kv);
     co_return id;

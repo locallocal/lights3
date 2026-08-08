@@ -142,6 +142,7 @@ http:
   io_threads: 4            # 异步驱动的 io_context 线程数
   max_header_size: 16KiB
   idle_timeout: 60s
+  min_part_size: 5MiB      # multipart 非末片最小分片；0 = 不限制
   # base_domain: s3.local  # 非空时启用 virtual-host style 寻址
 
 runtime:

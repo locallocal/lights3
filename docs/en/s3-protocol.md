@@ -9,10 +9,10 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | Category | API | Notes |
 | --- | --- | --- |
 | Service | ListBuckets | Aggregates across backends |
-| Bucket | CreateBucket / DeleteBucket / HeadBucket | No region constraint; LocationConstraint is ignored but the configured region is echoed back |
-| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects (batch) / CopyObject | Get supports Range and conditional requests (If-Match/If-None-Match/If-Modified-Since) |
-| List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token |
-| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends |
+| Bucket | CreateBucket / DeleteBucket / HeadBucket | Single region: a CreateBucket LocationConstraint that disagrees with the configured region is `InvalidLocationConstraint`; HeadBucket/CreateBucket return `x-amz-bucket-region` |
+| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects (batch) / CopyObject | Get supports Range, conditional requests (If-Match/If-None-Match/If-Modified-Since) and the six `response-*` override parameters; Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires are persisted and echoed back; Content-MD5 and `x-amz-checksum-*` verify the request body, and DeleteObjects **requires** an integrity header |
+| List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner; V1 honours only marker, V2 only continuation-token and start-after |
+| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder` |
 
 Explicitly unsupported (returns `NotImplemented`): versioning, fine-grained ACL
 (only private is accepted), policy, website, lifecycle, SSE-C/KMS, Object Lock,

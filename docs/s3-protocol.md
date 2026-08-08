@@ -7,10 +7,10 @@
 | 类别 | API | 备注 |
 | --- | --- | --- |
 | Service | ListBuckets | 聚合各后端 |
-| Bucket | CreateBucket / DeleteBucket / HeadBucket | 无 region 约束，LocationConstraint 忽略但回显配置 region |
-| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects(批量) / CopyObject | Get 支持 Range 与条件请求（If-Match/If-None-Match/If-Modified-Since） |
-| List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token |
-| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端 |
+| Bucket | CreateBucket / DeleteBucket / HeadBucket | 单 region：CreateBucket 的 LocationConstraint 与配置 region 不符即 `InvalidLocationConstraint`；HeadBucket/CreateBucket 回 `x-amz-bucket-region` |
+| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects(批量) / CopyObject | Get 支持 Range、条件请求（If-Match/If-None-Match/If-Modified-Since）与六个 `response-*` 覆盖参数；Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires 随对象持久化并回显；Content-MD5 与 `x-amz-checksum-*` 校验请求体，DeleteObjects **要求**完整性头 |
+| List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner；V1 只认 marker，V2 只认 continuation-token 与 start-after |
+| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder` |
 
 明确不支持（返回 `NotImplemented`）：versioning、ACL 细粒度（只认
 private）、policy、website、lifecycle、SSE-C/KMS、Object Lock、

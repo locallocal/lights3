@@ -161,6 +161,7 @@ http:
   io_threads: 4            # io_context thread count for async drivers
   max_header_size: 16KiB
   idle_timeout: 60s
+  min_part_size: 5MiB      # minimum non-final multipart part; 0 disables
   # base_domain: s3.local  # non-empty enables virtual-host style addressing
 
 runtime:

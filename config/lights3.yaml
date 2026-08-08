@@ -10,6 +10,9 @@ http:
   io_threads: 4
   max_header_size: 16KiB
   idle_timeout: 60s
+  # multipart 非末片的最小分片（AWS 恒 5MiB）。0 = 不限制——前面挂着不守这条
+  # 规则的工具链、或本实例只是另一个 lights3 的代理时可放开
+  min_part_size: 5MiB
 
 runtime:
   io_threads: 16           # 阻塞 IO 线程池大小

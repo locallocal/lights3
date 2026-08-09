@@ -165,9 +165,34 @@ inline void run_backend_suite(IStorageBackend& b) {
                     S3ErrorCode::NoSuchBucket);
     CHECK_THROWS_S3(put(b, "suite-bkt", "../escape", "x"), S3ErrorCode::InvalidArgument);
     CHECK_THROWS_S3(put(b, "suite-bkt", "a/../b", "x"), S3ErrorCode::InvalidArgument);
-    // 单段超过文件名上限（255B）统一拒绝（docs/storage-backend.md §3.1）
-    CHECK_THROWS_S3(put(b, "suite-bkt", "a/" + std::string(300, 'x'), "x"),
+    // 单段 255B 上限已下沉为 localfs 专属（docs/gaps.md §6.3 validate_fs_object_key）；
+    // 共享层这里只保证 1024B 总长上限仍在
+    CHECK_THROWS_S3(put(b, "suite-bkt", std::string(1100, 'x'), "x"),
                     S3ErrorCode::KeyTooLongError);
+
+    // 目录标记对象（docs/gaps.md §6.3）：S3 控制台"新建文件夹"、s3fs/goofys/rclone
+    // 的目录语义都依赖它。所有后端统一支持——localfs 以目录内标记文件承载，
+    // 其余后端本就是平面 key 空间
+    {
+        auto pr = put(b, "suite-bkt", "folder/", "");
+        (void)pr;
+        auto head = sync_wait(b.head_object("suite-bkt", "folder/"));
+        CHECK_EQ(head.size, uint64_t(0));
+        auto g = sync_wait(b.get_object("suite-bkt", "folder/", std::nullopt));
+        CHECK_EQ(read_all(*g.body), "");
+        // 列举可见，且与其下真实对象共存
+        put(b, "suite-bkt", "folder/file.txt", "in-folder");
+        ListOptions lo;
+        lo.prefix = "folder/";
+        auto lr = sync_wait(b.list_objects("suite-bkt", lo));
+        CHECK_EQ(lr.objects.size(), size_t(2));
+        CHECK_EQ(lr.objects[0].key, "folder/");  // 字典序：目录标记在其内容之前
+        CHECK_EQ(lr.objects[1].key, "folder/file.txt");
+        sync_wait(b.delete_object("suite-bkt", "folder/file.txt"));
+        sync_wait(b.delete_object("suite-bkt", "folder/"));
+        CHECK_THROWS_S3(sync_wait(b.head_object("suite-bkt", "folder/")),
+                        S3ErrorCode::NoSuchKey);
+    }
 
     // list：prefix / delimiter / 分页
     put(b, "suite-bkt", "photos/2026/a.jpg", "1");

@@ -37,6 +37,42 @@ private:
 
 }  // namespace
 
+uint64_t MemoryBackend::used_bytes() const {
+    std::lock_guard lk(m_);
+    return used_bytes_;
+}
+
+// 容量闸门（docs/gaps.md §6.3）：此前本后端无任何上限——配错成生产后端就是把整个
+// 网关的数据放进堆里直到 OOM killer 介入。超限返回 503 SlowDown（可重试，且运维
+// 在指标上看得见），而不是让分配器决定谁死
+void MemoryBackend::reserve_locked(int64_t delta) {
+    if (delta > 0 && opt_.max_bytes) {
+        uint64_t want = used_bytes_ + uint64_t(delta);
+        if (want > opt_.max_bytes)
+            throw S3Error(S3ErrorCode::SlowDown,
+                          "memory backend is at its configured max_bytes capacity");
+    }
+    used_bytes_ = uint64_t(int64_t(used_bytes_) + delta);
+}
+
+// mpu 过期清理（docs/gaps.md §6.3）：本后端不接定时器（无后台线程是它作为单测
+// 夹具的一部分），改在 multipart 类操作入口顺带扫一遍——从不 complete/abort 的
+// 上传此前会永久占着内存
+void MemoryBackend::expire_uploads_locked() {
+    if (opt_.mpu_ttl_sec <= 0) return;
+    auto cutoff = std::chrono::system_clock::now() - std::chrono::seconds(opt_.mpu_ttl_sec);
+    for (auto it = uploads_.begin(); it != uploads_.end();) {
+        if (it->second.initiated >= cutoff) {
+            ++it;
+            continue;
+        }
+        int64_t freed = 0;
+        for (auto& [no, part] : it->second.parts) freed += int64_t(part.data.size());
+        reserve_locked(-freed);
+        it = uploads_.erase(it);
+    }
+}
+
 MemoryBackend::Bucket& MemoryBackend::bucket_or_throw(const std::string& name) {
     auto it = buckets_.find(name);
     if (it == buckets_.end())
@@ -119,7 +155,10 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
         }
     }
     PutResult r{meta.etag};
-    b.objects[std::string(key)] = Object{std::move(meta), std::move(blob)};
+    auto& slot = b.objects[std::string(key)];
+    int64_t old = slot.data ? int64_t(slot.data->size()) : 0;
+    reserve_locked(int64_t(blob->size()) - old);  // 超限抛出：slot 是刚插入的空对象
+    slot = Object{std::move(meta), std::move(blob)};
     co_return r;
 }
 
@@ -166,7 +205,10 @@ Task<void> MemoryBackend::delete_object(std::string_view bucket, std::string_vie
     validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
-    b.objects.erase(std::string(key));  // 幂等
+    if (auto it = b.objects.find(std::string(key)); it != b.objects.end()) {
+        reserve_locked(-int64_t(it->second.data ? it->second.data->size() : 0));
+        b.objects.erase(it);
+    }  // 幂等
     co_return;
 }
 
@@ -198,6 +240,7 @@ Task<std::string> MemoryBackend::create_multipart(std::string_view bucket, std::
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     std::lock_guard lk(m_);
+    expire_uploads_locked();
     bucket_or_throw(std::string(bucket));
     std::string id = new_upload_id();
     uploads_[id] = Upload{std::string(bucket), std::string(key), std::move(meta), {},
@@ -227,7 +270,9 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);  // 读 body 期间可能已被 abort
     // 同号重传 last-write-wins
-    up.parts[part_no] = Part{std::move(data), etag, std::chrono::system_clock::now()};
+    auto& slot = up.parts[part_no];
+    reserve_locked(int64_t(data.size()) - int64_t(slot.data.size()));
+    slot = Part{std::move(data), etag, std::chrono::system_clock::now()};
     co_return PutResult{etag};
 }
 
@@ -258,8 +303,15 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
     PutResult r{meta.etag};
-    b.objects[std::string(key)] =
-        Object{std::move(meta), std::make_shared<const std::string>(std::move(data))};
+    auto& slot = b.objects[std::string(key)];
+    int64_t old = slot.data ? int64_t(slot.data->size()) : 0;
+    // 拼接后的对象与分片同时驻留一瞬：先记新对象（可能超限而抛，此时上传仍在，
+    // 客户端可重试或 abort），成功后再释放分片
+    reserve_locked(int64_t(data.size()) - old);
+    slot = Object{std::move(meta), std::make_shared<const std::string>(std::move(data))};
+    int64_t freed = 0;
+    for (auto& [no, part] : up.parts) freed += int64_t(part.data.size());
+    reserve_locked(-freed);
     uploads_.erase(std::string(upload_id));
     co_return r;
 }
@@ -267,7 +319,10 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
 Task<void> MemoryBackend::abort_multipart(std::string_view bucket, std::string_view key,
                                           std::string_view upload_id) {
     std::lock_guard lk(m_);
-    upload_or_throw(bucket, key, upload_id);
+    auto& up = upload_or_throw(bucket, key, upload_id);
+    int64_t freed = 0;
+    for (auto& [no, part] : up.parts) freed += int64_t(part.data.size());
+    reserve_locked(-freed);
     uploads_.erase(std::string(upload_id));
     co_return;
 }
@@ -288,6 +343,7 @@ Task<ListUploadsResult> MemoryBackend::list_multipart_uploads(std::string_view b
                                                               const ListUploadsOptions& opt) {
     validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
+    expire_uploads_locked();
     bucket_or_throw(std::string(bucket));
     // 索引按 upload_id 建，桶内枚举本就是全扫 + 排序，marker 只能在排序后应用
     std::vector<UploadInfo> all;
@@ -297,6 +353,14 @@ Task<ListUploadsResult> MemoryBackend::list_multipart_uploads(std::string_view b
         return std::tie(a.key, a.upload_id) < std::tie(b.key, b.upload_id);
     });
     co_return apply_uploads_page(std::move(all), opt);
+}
+
+Task<void> MemoryBackend::close() {
+    std::lock_guard lk(m_);
+    buckets_.clear();
+    uploads_.clear();
+    used_bytes_ = 0;
+    co_return;
 }
 
 }  // namespace lights3::storage

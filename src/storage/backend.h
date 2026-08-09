@@ -216,7 +216,14 @@ inline constexpr std::string_view kSysBucketName = ".sys";
 // 请求调用它（allow_reserved=false），各后端数据面入口再调一次作纵深防御。
 // 用户请求永远拿不到 allow_reserved=true
 void validate_bucket_name(std::string_view bucket, bool allow_reserved = false);
+// AWS 通用约束：非空、≤1024B、无控制字符、无 '.'/'..' 段（后者对任何把 key 拼进
+// URL 路径的转发型后端都不安全——RFC 3986 的 dot-segment 归一会改写对象身份）
 void validate_object_key(std::string_view key);
+// 路径映射型后端（localfs/xlocalfs）的补充约束（docs/gaps.md §6.3）：无前导 '/'、
+// 无空段、单段 ≤255B。末尾 '/' 的目录标记对象**不在**禁止之列——localfs 以目录内
+// 的保留标记文件承载它，S3 控制台"新建文件夹"与 s3fs/goofys/rclone 的目录语义
+// 依赖这一形态。调用方须先调 validate_object_key
+void validate_fs_object_key(std::string_view key);
 
 // 后端内部校验的实参：后端必须能服务 CredentialStore 对 .sys 的读写，故这一层
 // 放行保留名。它校验的是**路径安全**（字符集、长度、无 '/' 与 NUL），保留名的

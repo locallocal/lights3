@@ -42,7 +42,8 @@ TmpFile::~TmpFile() {
 }
 
 void reject_reserved_key(std::string_view key) {
-    if (key.ends_with(kSidecarSuffix) || key.find(kBucketMarker) != std::string_view::npos)
+    if (key.ends_with(kSidecarSuffix) || key.find(kBucketMarker) != std::string_view::npos ||
+        key.find(kDirMarker) != std::string_view::npos)
         throw S3Error(S3ErrorCode::InvalidArgument, "Object key uses a reserved name");
 }
 
@@ -182,7 +183,7 @@ std::optional<std::string> get_meta_xattr(const fs::path& path) {
 }
 
 void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                        const fs::path& staging_put, std::string_view key) {
+                        const fs::path& staging_put, std::string_view key, bool prepared) {
     std::error_code ec;
     fs::create_directories(dest.parent_path(), ec);
     if (ec) {
@@ -206,8 +207,10 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     // 元数据先进数据文件的 xattr：这一次 rename 即同时提交数据与元数据，
     // 崩溃不可能留下"新 etag 配旧数据"的不一致对象（sidecar 随后写，仅供
     // 外部工具与不支持 xattr 的文件系统回落）
-    set_meta_xattr(tmp.path, meta, TierInfo{});
-    fsync_path(tmp.path);  // 数据内容先落盘，再接进目录树
+    if (!prepared) {
+        set_meta_xattr(tmp.path, meta, TierInfo{});
+        fsync_path(tmp.path);  // 数据内容先落盘，再接进目录树
+    }
     fs::rename(tmp.path, dest, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
     tmp.committed = true;

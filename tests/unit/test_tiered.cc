@@ -703,7 +703,9 @@ TEST(registry_per_backend_thread_pool) {
     CHECK(text.find("lights3_backend_pool_queue_depth{backend=\"fast\"}") !=
           std::string::npos);
     CHECK(text.find("lights3_backend_pool_completed{backend=\"fast\"}") != std::string::npos);
-    CHECK(text.find("{backend=\"mem\"}") == std::string::npos);  // 共享池后端无池指标
+    // 共享池后端无**池**指标（memory 后端自身的用量 gauge 不在此列）
+    CHECK(text.find("lights3_backend_pool_threads{backend=\"mem\"}") == std::string::npos);
+    CHECK(text.find("lights3_memory_backend_used_bytes{backend=\"mem\"}") != std::string::npos);
 
     // 非法 io_threads：非整数 / 0 都在构建期报错（fail fast）
     for (const char* bad : {"0", "many"}) {

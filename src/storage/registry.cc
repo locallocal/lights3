@@ -80,17 +80,46 @@ void ensure_registered() {
             });
         StorageRegistry::register_backend(
             "xlocalfs",
-            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope) {
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool,
+               MetricsScope) -> std::shared_ptr<IStorageBackend> {
                 auto [root, staging] = fs_backend_paths(cfg);
-                unsigned depth = cfg.params.count("queue_depth")
-                                     ? std::stoul(cfg.params.at("queue_depth"))
-                                     : 256;
-                return std::make_shared<XLocalFsBackend>(root, staging, std::move(pool),
-                                                         depth);
+                UringOptions uo;
+                if (cfg.params.count("queue_depth"))
+                    uo.entries = unsigned(std::stoul(cfg.params.at("queue_depth")));
+                if (cfg.params.count("sqpoll")) uo.sqpoll = parse_bool(cfg.params.at("sqpoll"));
+                if (cfg.params.count("sqpoll_idle"))
+                    uo.sqpoll_idle_ms = parse_duration_sec(cfg.params.at("sqpoll_idle")) * 1000;
+                try {
+                    return std::make_shared<XLocalFsBackend>(root, staging, pool, uo);
+                } catch (const std::exception& e) {
+                    // io_uring 不可用（老内核、容器 seccomp 挡掉 io_uring_setup、
+                    // memlock 配额不足）此前直接把进程带崩（docs/gaps.md §6.3）。
+                    // xlocalfs 与 localfs 的盘上布局、元数据语义完全相同——回落是
+                    // 无损的，只是失去异步 IO。响亮告警，不静默降级
+                    LOG_WARN("xlocalfs backend '{}': io_uring unavailable ({}); falling back "
+                             "to the localfs data path (same on-disk layout, synchronous IO)",
+                             cfg.name, e.what());
+                    return std::make_shared<LocalFsBackend>(root, staging, std::move(pool));
+                }
             });
         StorageRegistry::register_backend(
-            "memory", [](const BackendConfig&, std::shared_ptr<ThreadPool>, MetricsScope) {
-                return std::make_shared<MemoryBackend>();
+            "memory",
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool>, MetricsScope m) {
+                MemoryOptions mo;
+                if (cfg.params.count("max_bytes"))
+                    mo.max_bytes = parse_size(cfg.params.at("max_bytes"));
+                if (cfg.params.count("mpu_ttl"))
+                    mo.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
+                auto b = std::make_shared<MemoryBackend>(mo);
+                // 用量可观测（docs/gaps.md §6.3）：内存后端配错的代价是 OOM，
+                // 至少让"离上限还有多远"看得见。回调 gauge 渲染时才取值
+                m.gauge_callback("lights3_memory_backend_used_bytes",
+                                 "Bytes resident in the memory backend (objects + inflight parts)",
+                                 [w = std::weak_ptr<MemoryBackend>(b)] {
+                                     auto sp = w.lock();
+                                     return sp ? double(sp->used_bytes()) : 0.0;
+                                 });
+                return b;
             });
 #ifdef LIGHTS3_CLOUDPROXY
         StorageRegistry::register_backend(

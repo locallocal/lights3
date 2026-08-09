@@ -75,9 +75,23 @@ private:
 }  // namespace
 
 XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging,
-                                 std::shared_ptr<ThreadPool> pool, unsigned queue_depth)
+                                 std::shared_ptr<ThreadPool> pool, UringOptions uring_opt)
     : LocalFsBackend(std::move(root), std::move(staging), pool),
-      uring_(std::make_shared<UringEngine>(std::move(pool), queue_depth)) {}
+      uring_(std::make_shared<UringEngine>(std::move(pool), uring_opt)) {}
+
+// 提交段的数据落盘（docs/gaps.md §6.3）：此前这里是同步 fdatasync——把池线程钉在
+// 磁盘上等，正是 xlocalfs 存在的理由所要消除的。FSYNC SQE 走同一条完成路径，
+// 等待期间线程回池
+Task<void> XLocalFsBackend::sync_fd(int fd) {
+    if (!fsutil::fsync_enabled()) co_return;
+    if (!uring_->features().op_fsync) {
+        co_await pool_->schedule();
+        fsutil::fsync_file(fd);
+        co_return;
+    }
+    int r = co_await uring_->fdatasync(fd);
+    if (r < 0 && r != -EINVAL) throw_uring("io_uring fdatasync", r);  // EINVAL: fs 不支持
+}
 
 Task<void> XLocalFsBackend::write_all(int fd, std::span<const std::byte> data, uint64_t off) {
     while (!data.empty()) {
@@ -114,6 +128,7 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
                                             PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -126,13 +141,18 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     uint64_t total = 0;
     std::string etag;
     co_await drain_to_tmp(body, tmp.fd, total, etag);
-    ::close(tmp.fd);
-    tmp.fd = -1;
 
     meta.key = std::string(key);
     meta.size = total;
     meta.etag = etag;
     meta.last_modified = std::chrono::system_clock::now();
+
+    // commit_object_file 的前两步（写 xattr → 数据落盘）在这里自己做，次序不变，
+    // 只是把那次阻塞 fdatasync 换成 FSYNC SQE；随后以 prepared=true 提交
+    fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
+    co_await sync_fd(tmp.fd);
+    ::close(tmp.fd);
+    tmp.fd = -1;
 
     // 2. 冲突检查 + 数据 rename + sidecar 提交（同步调用，回到池线程）。
     // per-key 锁同 localfs：提交段的两次 rename 不得与同 key 并发写交错；
@@ -140,7 +160,8 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
     fsutil::check_put_condition(object_path(bucket, key), cond, key);
-    commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+    commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key,
+                       /*prepared=*/true);
     co_return PutResult{meta.etag};
 }
 
@@ -148,6 +169,7 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
                                                std::optional<ByteRange> range) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);  // 同 localfs：桶存在性是无条件前置，不能只在失败分支查
@@ -209,8 +231,8 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     std::string etag;
     co_await drain_to_tmp(body, tmp.fd, total, etag);
     (void)total;
+    co_await sync_fd(tmp.fd);  // 同 localfs：分片数据先落盘，.md5 才是就绪证据
     co_await pool_->schedule();
-    fsutil::fsync_file(tmp.fd);  // 同 localfs：分片数据先落盘，.md5 才是就绪证据
     ::close(tmp.fd);
     tmp.fd = -1;
 
@@ -281,19 +303,21 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
             total += static_cast<uint64_t>(n);
         }
     }
-    ::close(tmp.fd);
-    tmp.fd = -1;
-
     // 3. 提交（与 PUT 相同的原子路径），随后清理 mpu 目录
     ObjectMeta meta = std::move(up.meta);
     meta.key = std::string(key);
     meta.size = total;
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
+    fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
+    co_await sync_fd(tmp.fd);
+    ::close(tmp.fd);
+    tmp.fd = -1;
     {
         auto lk = co_await commit_lock(bucket, key).acquire();  // 同 PUT
         co_await pool_->schedule();
-        commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+        commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key,
+                           /*prepared=*/true);
     }
 
     std::error_code ec;

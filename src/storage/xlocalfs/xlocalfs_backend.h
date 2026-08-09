@@ -12,7 +12,7 @@ namespace lights3::storage {
 class XLocalFsBackend final : public LocalFsBackend {
 public:
     XLocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
-                    std::shared_ptr<ThreadPool> pool, unsigned queue_depth = 256);
+                    std::shared_ptr<ThreadPool> pool, UringOptions uring_opt = {});
 
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
@@ -35,6 +35,10 @@ private:
                             std::string& etag_out);
     // 内核可能短写，循环续写直到写满；失败抛 InternalError
     Task<void> write_all(int fd, std::span<const std::byte> data, uint64_t off);
+    // 数据落盘（docs/gaps.md §6.3）：走 io_uring 的 FSYNC SQE，提交段不再占池线程
+    // 阻塞在 fdatasync 上——这正是 xlocalfs 要消除的那类等待。内核不支持 FSYNC
+    // opcode（探测结果）或 LIGHTS3_FSYNC=0 时回落既有同步路径
+    Task<void> sync_fd(int fd);
 
     std::shared_ptr<UringEngine> uring_;
 };

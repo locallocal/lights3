@@ -56,7 +56,11 @@ fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const {
 }
 
 fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view key) const {
-    fs::path p = bucket_dir(bucket) / fs::path(std::string(key));
+    // 目录标记对象（docs/gaps.md §6.3）："a/b/" 在文件系统上没有对应的文件名，
+    // 落在目录内的保留标记文件上：<bucket>/a/b/.lights3-dir
+    std::string rel(key);
+    if (rel.ends_with('/')) rel += fsutil::kDirMarker;
+    fs::path p = bucket_dir(bucket) / fs::path(rel);
     // 纵深防御（docs/gaps.md §1.1）：bucket/key 已在 L2 与各入口校验过，路径不该
     // 逃出 root_。但 fs::path::operator/ 遇绝对路径右操作数会**替换整条路径**
     // （root_ / "/etc" == "/etc"），单点失误的代价是任意文件读——所以在真正
@@ -166,6 +170,7 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
                                            PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -214,6 +219,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
                                               std::optional<ByteRange> range) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     // 桶存在性是无条件前置：此前只在 open 失败分支才查，成功路径完全不检查桶，
@@ -263,6 +269,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
 Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -272,6 +279,7 @@ Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::strin
 Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_view key) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -329,6 +337,13 @@ struct ListWalker {
                 continue;
             }
             if (name == fsutil::kBucketMarker) continue;
+            // 目录标记对象（docs/gaps.md §6.3）：还原成 key "<rel>"（末尾已含 '/'）。
+            // 排序键取空串——它恰好排在同目录其它条目之前，与"全量收集 + 全排序"
+            // 下 "a/b/" < "a/b/x" 的次序一致
+            if (name == fsutil::kDirMarker) {
+                if (e.is_regular_file(tec)) es.push_back({std::string(), false});
+                continue;
+            }
             if (name.ends_with(fsutil::kSidecarSuffix)) {
                 // 孤儿 sidecar 自愈：delete_object 是"先删数据后删 sidecar"两步，
                 // 之间崩溃会遗留一直占空间的孤儿。剪枝后只覆盖被访问到的目录
@@ -387,6 +402,7 @@ std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
         std::string name = e.path().filename().string();
         std::error_code tec;
         if (e.is_directory(tec)) es.push_back({name + "/", true});
+        else if (name == fsutil::kDirMarker) es.push_back({std::string(), false});
         else if (name != fsutil::kBucketMarker && !name.ends_with(fsutil::kSidecarSuffix) &&
                  e.is_regular_file(tec))
             es.push_back({std::move(name), false});
@@ -466,7 +482,10 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
             truncate();
             return false;
         }
-        out.objects.push_back(load_meta(base / fs::path(key), key));
+        // 目录标记对象的数据文件是目录内的保留标记（object_path 同款映射）
+        fs::path data = key.ends_with('/') ? base / fs::path(key + fsutil::kDirMarker)
+                                           : base / fs::path(key);
+        out.objects.push_back(load_meta(data, key));
         last_emitted = std::move(key);
         last_is_group = false;
         ++count;
@@ -485,6 +504,7 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
                                                    std::string_view key, ObjectMeta meta) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);

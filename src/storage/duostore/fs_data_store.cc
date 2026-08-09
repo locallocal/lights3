@@ -459,10 +459,12 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         std::string header = build_pack_header(item.owner, item.payload.size(), crc);
         const uint64_t rec_size = header.size() + item.payload.size();
 
-        // 达到 pack_max_size 即封存、换新 pack_id；size>0 守卫保证单条超限 record
-        // （threshold==max 的边界配置）仍可独占一个 pack 落地。封存前先把本批未
-        // 同步的写落盘——seal 回调回报的 file_size 必须对应已持久的字节
-        if (slot->fd >= 0 && slot->size > 0 && slot->size + rec_size > opt_.pack_max_size) {
+        // 达到 pack_max_size 或已开启逾 pack_max_age 即封存、换新 pack_id；size>0
+        // 守卫保证单条超限 record（threshold==max 的边界配置）仍可独占一个 pack
+        // 落地。封存前先把本批未同步的写落盘——seal 回调回报的 file_size 必须对应
+        // 已持久的字节
+        if (slot->fd >= 0 && slot->size > 0 &&
+            (slot->size + rec_size > opt_.pack_max_size || slot_aged(*slot))) {
             sync_slot();
             close_slot_locked(*slot);
         }
@@ -481,6 +483,7 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
                 LOG_WARN("duostore: cannot lock active pack {} ({}); concurrent-writer "
                          "detection degraded", slot->id, std::strerror(errno));
             slot->size = 0;
+            slot->opened = std::chrono::steady_clock::now();  // 老化轮转起点（§6.1）
             // pack 创建低频（轮转粒度），目录立即 fsync（chunk 是会话末批量，§5.1）
             if (::fsync(dirfd) != 0) throw_errno("fsync pack shard dir");
         }
@@ -536,6 +539,36 @@ Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendIt
         out[i] = co_await w->finish();
     }
     co_return out;
+}
+
+bool FsDataStore::slot_aged(const ActivePack& slot) const {
+    if (opt_.pack_max_age_sec <= 0) return false;
+    return std::chrono::steady_clock::now() - slot.opened >=
+           std::chrono::seconds(opt_.pack_max_age_sec);
+}
+
+// 老化轮转（docs/gaps.md §6.1）：写路径只在"有下一条 record 要写"时才检查年龄，
+// 写入停止后 active pack 就永远停在那儿了——正是低写入量场景的形态。GC 每轮调
+// 一次本函数补上这个缺口。
+// 锁用 try_lock：拿不到说明该槽正在被写，它自己会在下一条 record 处轮转，GC 没
+// 有理由为此阻塞（也不该和业务写抢锁）
+Task<uint64_t> FsDataStore::seal_aged_packs(int64_t max_age_ms) {
+    co_await pool_->schedule();
+    uint64_t sealed = 0;
+    if (max_age_ms <= 0) co_return 0;
+    const auto max_age = std::chrono::milliseconds(max_age_ms);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& slot : packs_) {
+        std::unique_lock lk(slot->m, std::try_to_lock);
+        if (!lk.owns_lock()) continue;
+        // 持槽锁 ⇒ 无在途 append ⇒ 槽内字节已被 append_pack_records 末尾的
+        // fdatasync 持久化，封存回报的 file_size 对得上盘面
+        if (slot->fd < 0 || slot->size == 0 || now - slot->opened < max_age) continue;
+        close_slot_locked(*slot);
+        ++sealed;
+    }
+    flush_seals(/*rethrow=*/false);  // 同 append 路径：失败留队列，下次写/close 重试
+    co_return sealed;
 }
 
 void FsDataStore::close_slot_locked(ActivePack& slot) {

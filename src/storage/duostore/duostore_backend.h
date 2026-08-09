@@ -78,7 +78,9 @@ struct DuoGcStats {
     uint64_t skipped_pinned = 0;    // 所涉 file 有 pin 而跳过的 gcq 项数
     uint64_t packs_removed = 0;     // 整文件删除的空 pack 数（sealed 且 live_recs==0）
     uint64_t uploads_expired = 0;   // mpu_ttl 过期而内部 abort 的 multipart 数
+    uint64_t packs_sealed_aged = 0; // 老化封存的 active pack 数（§6.1）
     uint64_t packs_compacted = 0;   // 本轮顺扫（rewrite_pack）过的低存活 pack 数（P4 §9.2）
+    uint64_t packs_compact_deferred = 0;  // 够格但被本轮预算挤下的 pack 数（§6.1）
     uint64_t records_migrated = 0;  // 压实迁移成功换 ref 的 record 数
     uint64_t records_corrupt = 0;   // 压实顺扫检出的损坏 record 数（跳过 + 告警，不删）
 };
@@ -148,7 +150,15 @@ struct DuoStoreConfig {
     uint64_t pack_threshold = 128 << 10;   // ≤ 此值进 pack；0 = 关闭（全走 chunk）
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;
+    // active pack 老化封存（docs/gaps.md §6.1）：低写入量下只按容量封存会让 pack
+    // 永不轮转，其中的死区永远进不了压实候选集。0 = 关闭
+    int pack_max_age_sec = 3600;
     double pack_gc_ratio = 0.5;            // P4 压实生效
+    // 单轮压实预算（docs/gaps.md §6.1）：候选按可回收字节降序取前 N 个 / 累计
+    // file_size 不超过 max_bytes。无预算时"批量删除后单轮 GC 重写全部符合条件的
+    // pack"可持锁数小时；有预算则收益最高的先做，剩下的下一轮继续。0 = 不限
+    int gc_compact_max_packs = 16;
+    uint64_t gc_compact_max_bytes = 1ull << 30;
     // 多网关部署（docs/duostore-rados-data.md §8.3）：GC/孤儿扫描须单实例执行，
     // 非指定网关置 false（后台 worker 不排程；手动钩子保留供测试/运维）。共享
     // meta/data 的并发 GC 会互踩（重复压实/扫描），且他网关 GC 无从看见本网关
@@ -259,7 +269,9 @@ private:
     // GC 完成轮末尾一次性累计（run_gc_once 的 DuoGcStats → 单调计数器）
     std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_,
         m_gc_packs_removed_, m_gc_uploads_expired_, m_gc_packs_compacted_,
-        m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_, m_orphan_removed_;
+        m_gc_packs_sealed_aged_, m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_,
+        m_orphan_removed_;
+    std::shared_ptr<MetricGauge> m_gc_compact_deferred_;
     // GET 读路径 crc 失配计数（P5 corruption 指标）：数据面 reader 经 on_corruption
     // 回调递增——回调只捕获此 shared_ptr，reader 逃逸出 backend 生命周期仍安全
     std::shared_ptr<MetricCounter> m_read_corruption_;

@@ -105,6 +105,11 @@ struct IDataStore {
     // "有 pack 但忘了实现删除"的新引擎编译通过、GC 记了账却永不释放字节
     virtual Task<void> remove_pack(uint64_t pack_id) = 0;
     virtual Task<GcRewrite> rewrite_pack(uint64_t pack_id) = 0;      // 压实顺扫（§9.2）
+    // 老化轮转（docs/gaps.md §6.1）：封存"首条 record 已写入逾 max_age_ms"的 active
+    // pack，返回本次封存数。GC 每轮调用一次——只按容量封存时，低写入量下 active
+    // pack 永不轮转，其中被覆盖/删除的 record 进不了压实候选集，成为永不可回收的
+    // 死区。无 pack 实体的引擎默认 0（不是错误：没有 active pack 就没有老化问题）
+    virtual Task<uint64_t> seal_aged_packs(int64_t /*max_age_ms*/) { co_return 0; }
     // 孤儿扫描枚举（§9.3）：遍历数据面全部 chunk 类实体（fs = chunks/ 目录，rados =
     // namespace 对象列举，docs/duostore-rados-data.md §8.2——接口在 P4 定形，rados 实现
     // 排 C4），逐个回调 (file_id, mtime_ms)。孤儿判定（refs 反查/grace/pin）是调用方

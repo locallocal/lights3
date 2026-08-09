@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -607,6 +608,7 @@ DuoStoreConfig pack_cfg(const TmpDir& tmp, const char* name) {
     cfg.pack_threshold = 1024;
     cfg.pack_max_size = 64 << 10;
     cfg.pack_writers = 1;
+    cfg.pack_max_age_sec = 0;  // 老化轮转默认关：布局断言按容量轮转才确定
     cfg.meta_sync = false;
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
@@ -666,7 +668,7 @@ PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadP
     // ——压实用例的迁移 payload ≤ 阈值恒走 pack 路径，pins 传空即可
     auto data = std::make_unique<FsDataStore>(
         FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers, {}},
+                      cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
         pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
         [mp](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
@@ -1085,6 +1087,109 @@ TEST(duostore_compact_low_liveness_pack) {
     auto st3 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st3.packs_compacted, uint64_t(0));
     CHECK_EQ(st3.packs_removed, uint64_t(0));
+    sync_wait(h.b->close());
+}
+
+// 老化轮转（docs/gaps.md §6.1）：低写入量下 active pack 只按容量封存永不轮转，
+// 其中的死区进不了压实候选集。seal_aged_packs 把逾龄 active pack 封存，file_size
+// 如实回报（不是崩溃补封的 0），随后死区即可被压实回收
+TEST(duostore_pack_age_rotation_seals_idle_pack) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "age");
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    for (int i = 0; i < 3; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
+
+    uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
+    auto before = find_pack_stat(*h.meta, pid);
+    CHECK(before.has_value());
+    CHECK(!before->sealed);  // 远未达 pack_max_size：容量判据不会封存它
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(1));
+    auto after = find_pack_stat(*h.meta, pid);
+    CHECK(after.has_value());
+    CHECK(after->sealed);
+    CHECK(after->file_size > 0);  // 如实回报，不是重启补封的"未知 0"
+    CHECK_EQ(after->live_recs, int64_t(3));
+
+    // 幂等：无 active pack 可封时返回 0
+    CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(0));
+
+    // 封存后死区可回收：删到 1/3 存活即跌破 pack_gc_ratio，压实照常收敛
+    sync_wait(h.b->delete_object("bkt", "k0"));
+    sync_wait(h.b->delete_object("bkt", "k1"));
+    auto st = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st.packs_compacted, uint64_t(1));
+    CHECK_EQ(st.records_migrated, uint64_t(1));
+    auto g = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
+    CHECK_EQ(read_all(*g.body), patterned(600));
+    sync_wait(h.b->close());
+}
+
+// GC 轮内接线：pack_max_age 到点后 run_gc_once 自己会封存（不需要写入触发）
+TEST(duostore_pack_age_rotation_runs_in_gc) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "agegc");
+    cfg.pack_max_age_sec = 1;
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k0", patterned(600));
+    uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
+
+    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(0));  // 未到点
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(1));
+    CHECK(find_pack_stat(*h.meta, pid)->sealed);
+    sync_wait(h.b->close());
+}
+
+// 压实预算与优先级（docs/gaps.md §6.1）：单轮封顶 N 个，且按可回收字节降序取——
+// 此前是"一轮把全部符合条件的 pack 重写完"，批量删除后单轮可持锁数小时
+TEST(duostore_compact_budget_prioritises_by_reclaimable) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "budget");
+    cfg.pack_max_size = 2048;          // 600B record ≈ 629B，3 条即满轮转
+    cfg.gc_compact_max_packs = 1;      // 每轮只做一个
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    // 三个满 pack（k0-k2 / k3-k5 / k6-k8）+ 一个 active（k9）
+    for (int i = 0; i < 10; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
+    uint64_t p0 = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
+    uint64_t p1 = h.meta->get_object("bkt", "k3")->data.extents[0].file_id;
+    uint64_t p2 = h.meta->get_object("bkt", "k6")->data.extents[0].file_id;
+    CHECK(p0 != p1 && p1 != p2);
+
+    // p0 剩 2 条存活、p1 剩 1 条、p2 剩 1 条 —— 三者都够格，但可回收字节 p1/p2 > p0
+    sync_wait(h.b->delete_object("bkt", "k0"));
+    sync_wait(h.b->delete_object("bkt", "k1"));
+    sync_wait(h.b->delete_object("bkt", "k3"));
+    sync_wait(h.b->delete_object("bkt", "k4"));
+    sync_wait(h.b->delete_object("bkt", "k6"));
+    sync_wait(h.b->delete_object("bkt", "k7"));
+
+    auto st1 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st1.packs_compacted, uint64_t(1));       // 预算封顶
+    CHECK_EQ(st1.packs_compact_deferred, uint64_t(2));  // 其余顺延
+
+    auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st2.packs_compacted, uint64_t(1));
+    CHECK_EQ(st2.packs_compact_deferred, uint64_t(1));
+
+    auto st3 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st3.packs_compacted, uint64_t(1));
+    CHECK_EQ(st3.packs_compact_deferred, uint64_t(0));
+
+    // 收敛后数据完好
+    auto st4 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st4.packs_compacted, uint64_t(0));
+    for (int i : {2, 5, 8, 9}) {
+        auto g = sync_wait(h.b->get_object("bkt", "k" + std::to_string(i), std::nullopt));
+        CHECK_EQ(read_all(*g.body), patterned(600));
+    }
     sync_wait(h.b->close());
 }
 

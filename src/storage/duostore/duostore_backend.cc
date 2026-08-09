@@ -290,8 +290,12 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("pack_threshold")) c.pack_threshold = parse_size(*v);
     if (auto* v = get("pack_max_size")) c.pack_max_size = parse_size(*v);
     if (auto* v = get("pack_writers")) c.pack_writers = parse_int_param(name, "pack_writers", *v);
+    if (auto* v = get("pack_max_age")) c.pack_max_age_sec = parse_duration_sec(*v);
     if (auto* v = get("pack_gc_ratio"))
         c.pack_gc_ratio = parse_double_param(name, "pack_gc_ratio", *v);
+    if (auto* v = get("gc_compact_max_packs"))
+        c.gc_compact_max_packs = parse_int_param(name, "gc_compact_max_packs", *v);
+    if (auto* v = get("gc_compact_max_bytes")) c.gc_compact_max_bytes = parse_size(*v);
     if (auto* v = get("gc_enabled")) c.gc_enabled = parse_bool_param(name, "gc_enabled", *v);
     if (auto* v = get("gc_interval")) c.gc_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("gc_grace")) c.gc_grace_sec = parse_duration_sec(*v);
@@ -474,7 +478,10 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             {"pack_threshold", DuoDataKind::kFs},
             {"pack_max_size", DuoDataKind::kFs},
             {"pack_writers", DuoDataKind::kFs},
+            {"pack_max_age", DuoDataKind::kFs},
             {"pack_gc_ratio", DuoDataKind::kFs},
+            {"gc_compact_max_packs", DuoDataKind::kFs},
+            {"gc_compact_max_bytes", DuoDataKind::kFs},
             {"rados_conf", DuoDataKind::kRados},
             {"rados_client", DuoDataKind::kRados},
             {"rados_pool", DuoDataKind::kRados},
@@ -546,6 +553,12 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (!(c.pack_gc_ratio > 0.0 && c.pack_gc_ratio <= 1.0))
         throw std::runtime_error("duostore backend '" + name +
                                  "': pack_gc_ratio must be in (0,1]");
+    if (c.pack_max_age_sec < 0)
+        throw std::runtime_error("duostore backend '" + name +
+                                 "': pack_max_age must be >= 0 (0 = never rotate on age)");
+    if (c.gc_compact_max_packs < 0)
+        throw std::runtime_error("duostore backend '" + name +
+                                 "': gc_compact_max_packs must be >= 0 (0 = unlimited)");
     if (c.rocksdb_max_write_buffers < 1)
         throw std::runtime_error("duostore backend '" + name +
                                  "': rocksdb_max_write_buffers must be >= 1");
@@ -633,7 +646,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         data_ = std::make_unique<FsDataStore>(
             FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc,
                           cfg_.pack_threshold, cfg_.pack_max_size, cfg_.pack_writers,
-                          on_corruption},
+                          cfg_.pack_max_age_sec, on_corruption},
             pool_, alloc,
             [meta](uint64_t pack_id, uint64_t size) { meta->seal_pack(pack_id, size); },
             [meta, pins](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
@@ -673,6 +686,12 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
         "Multipart uploads aborted by GC after exceeding mpu_ttl");
     m_gc_packs_compacted_ = metrics.counter("lights3_duostore_gc_packs_compacted_total",
                                             "Low-liveness packs rewritten by GC compaction");
+    m_gc_packs_sealed_aged_ = metrics.counter(
+        "lights3_duostore_gc_packs_sealed_aged_total",
+        "Active packs sealed by age rotation (pack_max_age) instead of by capacity");
+    m_gc_compact_deferred_ = metrics.gauge(
+        "lights3_duostore_gc_compact_deferred",
+        "Compaction-eligible packs left over by the last round's budget (0 = budget not binding)");
     m_gc_records_migrated_ = metrics.counter(
         "lights3_duostore_gc_records_migrated_total",
         "Live pack records migrated (extent swap) during GC compaction");
@@ -1181,11 +1200,32 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         gcq_skips_.retry_at_ms = std::min(gcq_skips_.retry_at_ms, skips.retry_at_ms);
     }
 
+    // 2.5) active pack 老化封存（§6.1）：只按容量封存时，低写入量下 active pack
+    // 永不轮转，其中被覆盖/删除的 record 进不了下面的压实候选集。放在压实之前，
+    // 本轮封存的 pack 本轮就能被评估
+    if (cfg_.pack_max_age_sec > 0) {
+        try {
+            st.packs_sealed_aged =
+                co_await data_->seal_aged_packs(int64_t(cfg_.pack_max_age_sec) * 1000);
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore '{}': gc seal aged packs failed: {}", cfg_.name, e.what());
+        }
+    }
+
     // 3) pack 压实（P4 §9.2）：sealed、live>0 且存活率低于 pack_gc_ratio（或崩溃遗留
     // file_size 未知）的 pack 顺扫迁移存活 record；live 账随 swap 归零后由第 4 步整
     // 删变现。上轮压实后 live_recs 无推进的 pack（进行中 mpu 分片 / 旧格式 owner /
-    // 存活损坏 record）跳过重扫——账一有变化即自动重试
-    std::vector<uint64_t> rewritten;
+    // 存活损坏 record）跳过重扫——账一有变化即自动重试。
+    // 预算与优先级（§6.1）：先把全部候选连同可回收字节收齐，按收益降序排，再按
+    // "本轮最多 N 个 / 累计扫 M 字节"截断。此前是"一轮把符合条件的全部重写完"，
+    // 批量删除后单轮 GC 可持锁数小时且与业务写抢 pack 槽；剩下的下一轮继续做，
+    // 收益最高的先做保证空间尽快回落
+    struct CompactCand {
+        uint64_t pack_id = 0;
+        uint64_t file_size = 0;   // 0 = 未知（stat 不支持且崩溃遗留 seal(0)）
+        int64_t reclaimable = 0;  // file_size - live_bytes；未知大小恒 0
+    };
+    std::vector<CompactCand> cands;
     const int64_t compact_now = codec::to_unix_ms(std::chrono::system_clock::now());
     for (auto ps : meta_->pack_stats()) {
         if (!ps.sealed || ps.live_recs <= 0) continue;
@@ -1197,11 +1237,12 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                 ps.file_size = sz;
             }
         }
+        int64_t reclaimable = 0;
         if (ps.file_size > 0) {
             // live 计入 record 头后与 file_size 同口径（gaps §2.3a——只记 payload 时
             // 小对象 pack 100% 存活也恒低于阈值，压实永不收敛）。无可回收字节
             // （live ≥ file_size，含轻微低计的容差方向）或存活率过阈值都跳过
-            const int64_t reclaimable = int64_t(ps.file_size) - ps.live_bytes;
+            reclaimable = int64_t(ps.file_size) - ps.live_bytes;
             if (reclaimable <= 0 ||
                 double(ps.live_bytes) > cfg_.pack_gc_ratio * double(ps.file_size))
                 continue;
@@ -1210,20 +1251,49 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             it != compact_blocked_.end() && it->second.live_recs == ps.live_recs &&
             compact_now < it->second.retry_at_ms)
             continue;
+        cands.push_back({ps.pack_id, ps.file_size, reclaimable});
+    }
+    // 收益降序；大小未知的排最后（无从估算收益，且只在崩溃遗留下出现）。同收益
+    // 按 pack_id 定序，避免相邻轮次因排序不稳定而在同一批候选间来回摇摆
+    std::sort(cands.begin(), cands.end(), [](const CompactCand& a, const CompactCand& b) {
+        if ((a.file_size == 0) != (b.file_size == 0)) return b.file_size == 0;
+        if (a.reclaimable != b.reclaimable) return a.reclaimable > b.reclaimable;
+        return a.pack_id < b.pack_id;
+    });
+
+    std::vector<uint64_t> rewritten;
+    uint64_t scanned_bytes = 0;
+    for (size_t ci = 0; ci < cands.size(); ++ci) {
+        const auto& cd = cands[ci];
+        const bool over_count = cfg_.gc_compact_max_packs > 0 &&
+                                ci >= size_t(cfg_.gc_compact_max_packs);
+        // 字节预算按"已扫过的 pack 大小"计，且第一个候选恒放行——单个 pack 大于
+        // 整轮预算时若一律挡下，压实就永远不推进了
+        const bool over_bytes =
+            cfg_.gc_compact_max_bytes > 0 && ci > 0 && scanned_bytes >= cfg_.gc_compact_max_bytes;
+        if (over_count || over_bytes) {
+            st.packs_compact_deferred = cands.size() - ci;
+            break;
+        }
         try {
-            auto rw = co_await data_->rewrite_pack(ps.pack_id);
+            auto rw = co_await data_->rewrite_pack(cd.pack_id);
             ++st.packs_compacted;
+            scanned_bytes += cd.file_size > 0 ? cd.file_size : rw.file_size;
             st.records_migrated += rw.migrated;
             st.records_corrupt += rw.corrupt;
-            rewritten.push_back(ps.pack_id);
+            rewritten.push_back(cd.pack_id);
             // stat_pack 不支持的引擎（返回 0）：顺扫回报的 file_size 兜底回填（§9.2）
-            if (ps.file_size == 0 && rw.file_size > 0)
-                meta_->seal_pack(ps.pack_id, rw.file_size);
+            if (cd.file_size == 0 && rw.file_size > 0)
+                meta_->seal_pack(cd.pack_id, rw.file_size);
         } catch (const std::exception& e) {
-            LOG_WARN("duostore '{}': gc rewrite pack {} failed: {}", cfg_.name, ps.pack_id,
+            LOG_WARN("duostore '{}': gc rewrite pack {} failed: {}", cfg_.name, cd.pack_id,
                      e.what());
         }
     }
+    if (st.packs_compact_deferred)
+        LOG_INFO("duostore '{}': gc compaction budget reached ({} packs / {} bytes scanned), "
+                 "{} eligible pack(s) deferred to the next round", cfg_.name,
+                 st.packs_compacted, scanned_bytes, st.packs_compact_deferred);
 
     // 4) 空 pack 整删（§9.1/§9.2 步骤 4）：sealed 且 live_recs==0，且空置已逾
     // gc_grace（延迟 unlink：服务压实/删除瞬间已读出旧 ref 未及 pin 的读者）且无
@@ -1275,6 +1345,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     m_gc_packs_removed_->inc(st.packs_removed);
     m_gc_uploads_expired_->inc(st.uploads_expired);
     m_gc_packs_compacted_->inc(st.packs_compacted);
+    m_gc_packs_sealed_aged_->inc(st.packs_sealed_aged);
+    m_gc_compact_deferred_->set(int64_t(st.packs_compact_deferred));
     m_gc_records_migrated_->inc(st.records_migrated);
     m_gc_records_corrupt_->inc(st.records_corrupt);
     co_return st;

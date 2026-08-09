@@ -62,7 +62,8 @@ public:
     // 孤儿扫描枚举（C4，§8.2）：rados_nobjects_list_*（ioctx 已限 namespace）+
     // rados_stat；非本店命名（非 c.<016x>）的外来对象忽略
     Task<void> scan_chunks(
-        const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;
+        const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb)
+        override;
     Task<void> close() override;
 
     // 对象命名：c.<file_id:016x>（§3.1）；测试观察用

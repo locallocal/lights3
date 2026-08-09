@@ -702,9 +702,57 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
                                      "Completed orphan reconciliation scans");
     m_orphan_removed_ = metrics.counter("lights3_duostore_orphan_chunks_removed_total",
                                         "Unreferenced chunk files removed by orphan scans");
+    m_orphan_packs_removed_ = metrics.counter(
+        "lights3_duostore_orphan_packs_removed_total",
+        "Account-less pack files removed by orphan scans (created, no record ever committed)");
     m_orphan_refs_missing_ = metrics.gauge(
         "lights3_duostore_orphan_refs_missing",
         "Refs pointing at missing chunk files as of the last orphan scan (data loss signal)");
+    m_orphan_packstats_missing_ = metrics.gauge(
+        "lights3_duostore_orphan_packstats_missing",
+        "Pack accounts whose file is missing as of the last orphan scan (data loss signal)");
+
+    // 用量与空间放大（docs/gaps.md §6.1）：pack_bytes/pack_live_bytes 之比即放大率
+    // ——留给查询侧算，两个 gauge 各自独立可读（gauge 是整型，先算好比值会丢精度）
+    m_bytes_chunks_ = metrics.gauge("lights3_duostore_chunk_bytes",
+                                    "Total bytes of chunk entities on disk (last orphan scan)");
+    m_bytes_packs_ = metrics.gauge("lights3_duostore_pack_bytes",
+                                   "Total bytes of pack files on disk (last orphan scan)");
+    m_pack_accounted_bytes_ = metrics.gauge(
+        "lights3_duostore_pack_accounted_bytes",
+        "Sum of sealed pack file_size in the meta accounts (last GC round)");
+    m_pack_live_bytes_ = metrics.gauge(
+        "lights3_duostore_pack_live_bytes",
+        "Sum of live bytes across packs (last GC round); accounted/live = space amplification");
+    m_packs_total_ = metrics.gauge("lights3_duostore_packs",
+                                   "Packs with an account as of the last GC round");
+
+    // 回收是否追得上删除（§6.1）：深度只在全量轮更新——增量轮从上轮高位起扫，
+    // 看不到队头积压，用它刷新会周期性地把深度谎报成 0
+    m_gcq_depth_ = metrics.gauge(
+        "lights3_duostore_gcq_depth",
+        "Reclaim-queue entries seen by the last full GC scan (incremental rounds do not update)");
+    m_gcq_oldest_age_ = metrics.gauge(
+        "lights3_duostore_gcq_oldest_age_seconds",
+        "Age of the oldest reclaim-queue entry at the last full GC scan (0 = queue empty)");
+    // skipped 类是"本轮观测"而非累计：grace/pin 跳过项每轮重扫，单调计数会虚高
+    m_gc_skipped_grace_ = metrics.gauge("lights3_duostore_gc_skipped_grace",
+                                        "Reclaim entries skipped for gc_grace in the last round");
+    m_gc_skipped_pinned_ = metrics.gauge("lights3_duostore_gc_skipped_pinned",
+                                         "Reclaim entries skipped for pins in the last round");
+    m_gc_duration_ = metrics.histogram(
+        "lights3_duostore_gc_round_seconds", "Wall time of a completed GC round",
+        {0.01, 0.1, 0.5, 1, 5, 15, 60, 300, 1800});
+    // 回收来源分桶（codec gcq 的 reason 字节，§6.1）：定位压力来自覆盖写、批量
+    // 删除还是 mpu 弃件。注册全部取值——缺失的桶在 Prometheus 里读作"没数据"而
+    // 非"为 0"，会让"删除压力突然消失"和"从来没有过删除"看起来一样
+    for (auto r : {ReclaimReason::kUnknown, ReclaimReason::kOverwrite, ReclaimReason::kDelete,
+                   ReclaimReason::kPartOverwrite, ReclaimReason::kAbort,
+                   ReclaimReason::kComplete})
+        m_gc_reclaims_by_reason_[size_t(r)] = metrics.counter(
+            "lights3_duostore_gc_reclaims_by_reason_total",
+            "Reclaim queue entries acked, split by what enqueued them",
+            {{"reason", reclaim_reason_name(r)}});
     m_read_corruption_ = metrics.counter(
         "lights3_duostore_read_corruption_total",
         "Chunk/pack crc mismatches detected on the GET read path (P5 corruption metric)");
@@ -1098,6 +1146,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     DuoGcStats st;
     if (!scope.ok()) co_return st;                 // 正在关闭
     auto permit = co_await gc_sem_.acquire();      // 手动钩子 vs 后台 worker 互斥
+    const auto round_start = std::chrono::steady_clock::now();
 
     // 1) mpu_ttl 过期 multipart 清理（§8 末）：内部 abort，分片入 gcq 由下一步变现。
     // <=0 = 关闭（与 gc_interval 的 0 语义对齐——0 若解释为"立即过期"会把在途
@@ -1153,10 +1202,16 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         if (!skips.any || retry_at < skips.retry_at_ms) skips.retry_at_ms = retry_at;
         skips.any = true;
     };
+    // 队列深度与队头年龄（§6.1）：全量轮的观测即整队全貌，增量轮只看新入队项
+    uint64_t seen_entries = 0;
+    int64_t oldest_enqueue_ms = 0;
     for (;;) {
         auto batch = meta_->peek_reclaims(kGcBatch, next_seq, kGcBatchExtents);
         if (batch.empty()) break;
         next_seq = batch.back().first + 1;
+        seen_entries += batch.size();
+        if (oldest_enqueue_ms == 0 && !batch.empty())
+            oldest_enqueue_ms = batch.front().second.enqueue_ms;
         std::vector<uint64_t> acked;
         // 逐批取新鲜时间戳：上一步 abort 刚入队的项 enqueue_ms 晚于本函数入口时刻，
         // 用入口时刻判 grace 会把差值算成负数而误跳过（grace=0 应当立即可回收）
@@ -1184,6 +1239,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             }
             for (const auto& e : rc.extents)
                 if (e.kind != Extent::Kind::kPack) ++st.files_removed;
+            if (auto& c = m_gc_reclaims_by_reason_[size_t(rc.reason) < 6 ? size_t(rc.reason) : 0])
+                c->inc();
             acked.push_back(seq);
         }
         if (!acked.empty()) {
@@ -1194,6 +1251,12 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     gcq_hi_ = std::max(gcq_hi_, next_seq);
     if (full_scan) {
         gcq_skips_ = skips;  // 全量轮：水位以本轮观测整体重建
+        // 深度与队头年龄也只在全量轮刷新：增量轮从上轮高位起扫，看不到队头积压，
+        // 用它更新会把深度周期性地谎报成 0
+        m_gcq_depth_->set(int64_t(seen_entries));
+        m_gcq_oldest_age_->set(oldest_enqueue_ms == 0
+                                   ? 0
+                                   : std::max<int64_t>(0, (round_now - oldest_enqueue_ms) / 1000));
     } else if (skips.any) {
         // 增量轮：与既有水位合并（旧跳过项仍在队头未重访）
         gcq_skips_.lo_seq = std::min(gcq_skips_.lo_seq, skips.lo_seq);
@@ -1335,10 +1398,26 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         // 剪枝已销账的 pack，两张簿记表不随历史无界增长
         std::erase_if(pack_empty_since_, [&](const auto& kv) { return !known.count(kv.first); });
         std::erase_if(compact_blocked_, [&](const auto& kv) { return !known.count(kv.first); });
+
+        // 空间放大（§6.1）：accounted/live 之比。stats 是第 4 步开头取的快照，本轮
+        // 的整删已从盘上消失但仍在快照里——差一轮的滞后，对趋势观测无碍
+        int64_t accounted = 0, live = 0;
+        for (const auto& ps : stats) {
+            accounted += int64_t(ps.file_size);
+            live += ps.live_bytes;
+        }
+        m_pack_accounted_bytes_->set(accounted);
+        m_pack_live_bytes_->set(live);
+        m_packs_total_->set(int64_t(stats.size()));
     }
 
-    // 完成轮才计数（关闭态的早退不计）；skip 类不设计数器——grace/pin 跳过项
-    // 每轮重扫会重复累计，单调计数会虚高误导
+    // 完成轮才计数（关闭态的早退不计）；skip 类走 gauge 而非 counter——grace/pin
+    // 跳过项每轮重扫会重复累计，单调计数会虚高误导，"本轮还剩多少没回收成"才是
+    // 运维要看的量
+    m_gc_skipped_grace_->set(int64_t(st.skipped_grace));
+    m_gc_skipped_pinned_->set(int64_t(st.skipped_pinned));
+    m_gc_duration_->observe(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - round_start).count());
     m_gc_runs_->inc();
     m_gc_reclaims_->inc(st.reclaims_acked);
     m_gc_files_removed_->inc(st.files_removed);
@@ -1380,8 +1459,9 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
     std::vector<uint64_t> orphans;
-    co_await data_->scan_chunks([&](uint64_t id, int64_t mtime_ms) {
+    co_await data_->scan_chunks([&](uint64_t id, int64_t mtime_ms, uint64_t size) {
         ++st.chunks_scanned;
+        st.chunk_bytes += size;
         auto it = std::lower_bound(refs.begin(), refs.end(), id);
         if (it != refs.end() && *it == id) {
             ref_seen[size_t(it - refs.begin())] = true;
@@ -1422,9 +1502,68 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
                   "(data loss signal, keeping meta for manual inspection)", cfg_.name, refs[i]);
     }
 
+    // packs/ 双向对账（docs/gaps.md §6.1）：chunk 侧的孤儿扫描此前不覆盖 pack 实体，
+    // 而 pack 文件是"先建文件、首条 record 提交时才落 packstat 行"——恰在这个窗口
+    // 硬崩，文件在盘上、账里没有任何行，既永不回收也不可观测。
+    // pack 的存活判据比 chunk 更严：账外 ⇒ 候选，但还要过三道门——
+    //   ① mtime 逾 gc_grace（刚建的 active pack 首条 record 尚未提交）
+    //   ② 无 pin（在途读者）
+    //   ③ 无写锁（本进程或另一实例的 active pack；flock 是"有活着的写者"的唯一
+    //      可靠信号，与 abandon_stale_packs 同一判据）
+    // 反向的"packstat 在而文件缺"只告警不销账——与 refs_missing 同样是数据丢失征兆
+    {
+        std::vector<uint64_t> known;
+        for (const auto& ps : meta_->pack_stats()) known.push_back(ps.pack_id);
+        std::sort(known.begin(), known.end());
+        std::vector<bool> pack_seen(known.size(), false);
+        std::vector<uint64_t> orphan_packs;
+        co_await data_->scan_packs([&](uint64_t id, int64_t mtime_ms, uint64_t size) {
+            ++st.packs_scanned;
+            st.pack_bytes += size;
+            auto it = std::lower_bound(known.begin(), known.end(), id);
+            if (it != known.end() && *it == id) {
+                pack_seen[size_t(it - known.begin())] = true;
+                return;
+            }
+            if (now - mtime_ms < grace_ms || pins_->pinned_pack(id)) {
+                ++st.packs_skipped_active;
+                return;
+            }
+            orphan_packs.push_back(id);
+        });
+        for (uint64_t id : orphan_packs) {
+            // 写锁探测放在枚举之外：它要开 fd + flock，不该塞进枚举回调里逐个做
+            if (data_->pack_write_locked(id)) {
+                ++st.packs_skipped_active;
+                continue;
+            }
+            try {
+                co_await data_->remove_pack(id);
+                ++st.orphan_packs_removed;
+                LOG_WARN("duostore '{}': removed account-less pack file {:016x} "
+                         "(created but no record ever committed)", cfg_.name, id);
+            } catch (const std::exception& ex) {
+                LOG_WARN("duostore '{}': orphan pack unlink {:016x} failed: {}", cfg_.name, id,
+                         ex.what());
+            }
+        }
+        for (size_t i = 0; i < known.size(); ++i) {
+            if (pack_seen[i]) continue;
+            ++st.pack_stats_missing;
+            LOG_ERROR("duostore '{}': packstat for {:016x} but file missing "
+                      "(data loss signal, keeping meta for manual inspection)", cfg_.name,
+                      known[i]);
+        }
+    }
+
     m_orphan_runs_->inc();
     m_orphan_removed_->inc(st.orphans_removed);
+    m_orphan_packs_removed_->inc(st.orphan_packs_removed);
     m_orphan_refs_missing_->set(int64_t(st.refs_missing));
+    m_orphan_packstats_missing_->set(int64_t(st.pack_stats_missing));
+    // 用量（§6.1）：盘面实测字节，随孤儿扫描周期刷新（默认 1/d）
+    m_bytes_chunks_->set(int64_t(st.chunk_bytes));
+    m_bytes_packs_->set(int64_t(st.pack_bytes));
     co_return st;
 }
 

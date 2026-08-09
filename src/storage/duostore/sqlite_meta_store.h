@@ -134,7 +134,7 @@ private:
     bool apply_swap(Conn& c, std::string_view b, std::string_view k, uint64_t expect_version,
                     const DataRef& from, const DataRef& to);
     // gcq 入账：seq 由 AUTOINCREMENT 随事务分配，与业务写同批提交/回滚
-    void enqueue_reclaim(Conn& c, const DataRef& ref);
+    void enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason reason);
     std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k,
                                     std::string_view id);
     uint64_t alloc_id(std::string_view counter, IdRange& r, uint32_t n = 1);

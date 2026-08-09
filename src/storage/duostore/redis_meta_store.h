@@ -128,7 +128,7 @@ private:
                                           std::string_view id);
     uint64_t alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n = 1);
     // gcq 入账（§2.2）：member = be64(seq) ‖ encode_reclaim；seq 预派发保持脚本确定性
-    void enqueue_reclaim(RedisBatch& bt, const DataRef& ref);
+    void enqueue_reclaim(RedisBatch& bt, const DataRef& ref, ReclaimReason reason);
     void batch_refs(RedisBatch& bt, const DataRef& ref, bool add, std::string_view owner);
     // 同批维护 pack 存活账（pack:<id> HINCRBY，§2.2）。独立于 batch_refs：
     // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计

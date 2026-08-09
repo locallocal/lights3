@@ -92,6 +92,13 @@ struct DuoOrphanStats {
     uint64_t skipped_grace = 0;    // 无引用但 mtime 未逾 gc_grace（在途写入嫌疑）
     uint64_t skipped_pinned = 0;   // 无引用但有 pin（写侧 pin / 在途读者）
     uint64_t refs_missing = 0;     // 反向：refs 在而文件缺（数据丢失征兆，只告警不删 meta）
+    // packs/ 反向对账（docs/gaps.md §6.1）
+    uint64_t packs_scanned = 0;         // 盘面枚举到的 pack 文件数
+    uint64_t orphan_packs_removed = 0;  // 账外 pack 文件（建文件后、首条 record 提交前崩溃）
+    uint64_t packs_skipped_active = 0;  // 账外但被活着的写者持锁 / 未逾宽限 / 有 pin
+    uint64_t pack_stats_missing = 0;    // 反向：packstat 在而文件缺（数据丢失征兆）
+    uint64_t chunk_bytes = 0;           // 盘面 chunk 实体总字节（用量指标）
+    uint64_t pack_bytes = 0;            // 盘面 pack 文件总字节（用量指标）
 };
 
 // PackMigrateFn 的标准实现（§9.2 步骤 2-3；cfg 构造与测试注入组装共用）：owner
@@ -270,8 +277,14 @@ private:
     std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_,
         m_gc_packs_removed_, m_gc_uploads_expired_, m_gc_packs_compacted_,
         m_gc_packs_sealed_aged_, m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_,
-        m_orphan_removed_;
-    std::shared_ptr<MetricGauge> m_gc_compact_deferred_;
+        m_orphan_removed_, m_orphan_packs_removed_;
+    // 回收来源分桶（§6.1）：下标 = ReclaimReason
+    std::array<std::shared_ptr<MetricCounter>, 6> m_gc_reclaims_by_reason_;
+    std::shared_ptr<MetricGauge> m_gc_compact_deferred_, m_gcq_depth_, m_gcq_oldest_age_,
+        m_gc_skipped_grace_, m_gc_skipped_pinned_, m_bytes_chunks_, m_bytes_packs_,
+        m_pack_accounted_bytes_, m_pack_live_bytes_, m_packs_total_,
+        m_orphan_packstats_missing_;
+    std::shared_ptr<MetricHistogram> m_gc_duration_;
     // GET 读路径 crc 失配计数（P5 corruption 指标）：数据面 reader 经 on_corruption
     // 回调递增——回调只捕获此 shared_ptr，reader 逃逸出 backend 生命周期仍安全
     std::shared_ptr<MetricCounter> m_read_corruption_;

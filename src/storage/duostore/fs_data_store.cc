@@ -773,29 +773,44 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
     co_return st;
 }
 
-Task<void> FsDataStore::scan_chunks(
-    const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) {
+// chunks/ 与 packs/ 的布局同构（shard 目录 + <id:016x><suffix>），枚举逻辑共用
+Task<void> FsDataStore::scan_shard_tree(
+    const char* sub, const char* suffix,
+    const std::function<void(uint64_t, int64_t, uint64_t)>& cb) {
     co_await pool_->schedule();
     std::error_code ec;
-    std::filesystem::directory_iterator shards(opt_.root / "chunks", ec);
-    if (ec) co_return;  // 目录不存在 = 无 chunk
+    std::filesystem::directory_iterator shards(opt_.root / sub, ec);
+    if (ec) co_return;  // 目录不存在 = 无实体
+    const size_t suffix_len = std::strlen(suffix);
     for (const auto& sd : shards) {
         if (!sd.is_directory(ec) || ec) continue;
         std::filesystem::directory_iterator files(sd.path(), ec);
         if (ec) continue;
         for (const auto& f : files) {
-            // <file_id:016x>.chk；其余文件（临时/外来）不属本店，忽略
+            // <file_id:016x><suffix>；其余文件（临时/外来）不属本店，忽略
             std::string name = f.path().filename().string();
-            if (name.size() != 20 || name.compare(16, 4, ".chk") != 0) continue;
+            if (name.size() != 16 + suffix_len || name.compare(16, suffix_len, suffix) != 0)
+                continue;
             uint64_t id = 0;
             auto r = std::from_chars(name.data(), name.data() + 16, id, 16);
             if (r.ec != std::errc() || r.ptr != name.data() + 16) continue;
             struct stat sb;
             if (::stat(f.path().c_str(), &sb) != 0) continue;  // 并发 unlink 竞态容忍
-            cb(id, int64_t(sb.st_mtim.tv_sec) * 1000 + sb.st_mtim.tv_nsec / 1000000);
+            cb(id, int64_t(sb.st_mtim.tv_sec) * 1000 + sb.st_mtim.tv_nsec / 1000000,
+               uint64_t(sb.st_size));
         }
     }
     co_return;
+}
+
+Task<void> FsDataStore::scan_chunks(
+    const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) {
+    return scan_shard_tree("chunks", ".chk", cb);
+}
+
+Task<void> FsDataStore::scan_packs(
+    const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& cb) {
+    return scan_shard_tree("packs", ".pak", cb);
 }
 
 Task<void> FsDataStore::close() {

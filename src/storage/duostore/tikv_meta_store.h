@@ -148,7 +148,8 @@ private:
 
     uint64_t alloc_id(char kind, IdRange& r, uint32_t n = 1);
     // gcq 入账：seq 预派发（独立小事务），入账本身保持纯写 mutation
-    void enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref);
+    void enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref,
+                         ReclaimReason reason);
     void mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add,
                   std::string_view owner);
     // 同批维护 pack 存活账（唯一 delta 行，纯写无冲突）。独立于 mut_refs：

@@ -112,11 +112,21 @@ struct IDataStore {
     virtual Task<uint64_t> seal_aged_packs(int64_t /*max_age_ms*/) { co_return 0; }
     // 孤儿扫描枚举（§9.3）：遍历数据面全部 chunk 类实体（fs = chunks/ 目录，rados =
     // namespace 对象列举，docs/duostore-rados-data.md §8.2——接口在 P4 定形，rados 实现
-    // 排 C4），逐个回调 (file_id, mtime_ms)。孤儿判定（refs 反查/grace/pin）是调用方
-    // （DuoStoreBackend）的事——数据面只枚举，不做存活判断。纯虚（对齐 remove_pack
-    // 惯例）：不支持枚举的引擎显式抛错，绝不静默空扫谎报"无孤儿"
+    // 排 C4），逐个回调 (file_id, mtime_ms, size_bytes)。孤儿判定（refs 反查/grace/pin）
+    // 是调用方（DuoStoreBackend）的事——数据面只枚举，不做存活判断。size 供用量
+    // 指标累计（docs/gaps.md §6.1）：枚举本就要 stat，多带一个字段不增加系统调用。
+    // 纯虚（对齐 remove_pack 惯例）：不支持枚举的引擎显式抛错，绝不静默空扫谎报"无孤儿"
     virtual Task<void> scan_chunks(
-        const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) = 0;
+        const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) = 0;
+    // packs/ 的反向对账枚举（docs/gaps.md §6.1）：pack 文件在"建文件"时就存在，而
+    // packstat 行要到首条 record 提交才落账——恰在这个窗口硬崩，文件就永久泄漏且
+    // 不出现在任何账里（孤儿扫描此前只覆盖 chunk，看不见它）。语义同 scan_chunks：
+    // 只枚举，判定归调用方。无 pack 实体的引擎默认空扫（不是谎报——它压根没有
+    // packs/ 目录这个泄漏面）
+    virtual Task<void> scan_packs(
+        const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& /*cb*/) {
+        co_return;
+    }
     // "该 pack 是否正被某个活着的写者持有"（启动补封用，docs/gaps.md §1.4）。
     // fs 实现探测 active pack 的咨询锁；无 pack 实体或无从探测的引擎返回 false
     // （= 不阻止补封，与本改动前的行为一致）。**false 必须是保守方向**：返回

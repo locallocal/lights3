@@ -544,7 +544,7 @@ Task<GcRewrite> RadosDataStore::rewrite_pack(uint64_t pack_id) {
 }
 
 Task<void> RadosDataStore::scan_chunks(
-    const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) {
+    const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) {
     // C4（§8.2）：namespace 内全量列举（ioctx 已限定，多实例互不可见）→ 对象名解析
     // file_id → stat 取 mtime。列举/统计无 aio 版，低频（默认 1/d）在池线程同步
     // 阻塞可接受（对齐 fs 版整扫描驻池线程的先例）；孤儿判定（refs/grace/pin）
@@ -565,7 +565,7 @@ Task<void> RadosDataStore::scan_chunks(
         time_t mtime = 0;
         // 秒级 mtime 足够（宽限判定分钟级）；stat 失败 = 并发 remove 竞态，容忍跳过
         if (rados_stat(ctx, entry, &size, &mtime) != 0) continue;
-        cb(id, int64_t(mtime) * 1000);
+        cb(id, int64_t(mtime) * 1000, size);
     }
     rados_nobjects_list_close(lc);
     if (r != -ENOENT) {  // 列举正常收尾返回 -ENOENT

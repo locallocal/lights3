@@ -76,6 +76,8 @@ inline void case_gc_accounting(const MetaFactory& make) {
     CHECK_EQ(rs.size(), size_t(1));
     CHECK_EQ(rs[0].second.extents.at(0).file_id, id1);
     CHECK(rs[0].second.enqueue_ms > 0);  // 入队时刻回传（GC 消费端判 gc_grace，§9.1）
+    // 入账来源随记录落盘（docs/gaps.md §6.1）：GC 据此分桶计数
+    CHECK(rs[0].second.reason == ReclaimReason::kOverwrite);
     CHECK(!m->chunk_referenced(id1));
     CHECK(m->chunk_referenced(id2));
     CHECK_EQ(m->get_object("ms-gc", "k")->version, uint64_t(2));
@@ -86,6 +88,7 @@ inline void case_gc_accounting(const MetaFactory& make) {
     CHECK(!m->chunk_referenced(id2));
     auto rs2 = m->peek_reclaims(10);
     CHECK_EQ(rs2.size(), size_t(2));
+    CHECK(rs2[1].second.reason == ReclaimReason::kDelete);
     // min_seq 断点续扫（§9.1）：从第二项 seq 起 peek 只见后续；越过队尾即空
     auto tail = m->peek_reclaims(10, rs2[1].first);
     CHECK_EQ(tail.size(), size_t(1));
@@ -99,6 +102,63 @@ inline void case_gc_accounting(const MetaFactory& make) {
     m->ack_reclaims(rest);
     CHECK_EQ(m->peek_reclaims(10).size(), size_t(0));
     m->delete_bucket("ms-gc");
+    m->close();
+}
+
+// gcq 入账来源（docs/gaps.md §6.1）：六种来源各自落对应 reason，GC 才分得清
+// 回收压力来自覆盖写、批量删除还是 mpu 弃件。逐项断言而非计数——套件各用例共享
+// 底层存储，本例只看自己造出来的这几条
+inline void case_reclaim_reasons(const MetaFactory& make) {
+    auto m = make();
+    m->create_bucket("ms-reason");
+    drain_gcq(*m);
+
+    uint64_t pid = m->alloc_file_id(Extent::Kind::kPack);
+    lights3::storage::ObjectMeta meta;
+    auto id = m->create_upload("ms-reason", "k", meta);
+    auto part = [&](int no, uint64_t off, uint64_t len) {
+        PartRec p;
+        p.part_no = no;
+        p.size = len;
+        p.etag = "deadbeef";
+        p.data.extents = {pack_extent(pid, off, len)};
+        return p;
+    };
+    // 逐步造出：同号重传 → complete 未选中 → complete 覆盖同名对象 → abort → delete
+    m->put_object("ms-reason", "k", make_rec("k", {pack_extent(pid, 900, 10)}));
+    drain_gcq(*m);  // 上面这条只是为了让 complete 有旧对象可覆盖，不进断言
+
+    m->put_part("ms-reason", "k", id, part(1, 0, 100));
+    m->put_part("ms-reason", "k", id, part(1, 100, 100));  // 同号重传
+    m->put_part("ms-reason", "k", id, part(2, 200, 50));
+    std::vector<PartInfo> sel1 = {{1, "deadbeef"}};
+    m->complete_upload("ms-reason", "k", id, sel1);  // part2 未选中 + 覆盖旧对象
+
+    auto id2 = m->create_upload("ms-reason", "k2", meta);
+    m->put_part("ms-reason", "k2", id2, part(1, 400, 30));
+    m->abort_upload("ms-reason", "k2", id2);
+    CHECK(m->delete_object("ms-reason", "k"));
+
+    bool part_ovw = false, complete = false, overwrite = false, abort = false, del = false;
+    for (const auto& [seq, rc] : m->peek_reclaims(256)) {
+        (void)seq;
+        switch (rc.reason) {
+            case ReclaimReason::kPartOverwrite: part_ovw = true; break;
+            case ReclaimReason::kComplete: complete = true; break;
+            case ReclaimReason::kOverwrite: overwrite = true; break;
+            case ReclaimReason::kAbort: abort = true; break;
+            case ReclaimReason::kDelete: del = true; break;
+            case ReclaimReason::kUnknown: CHECK(false); break;  // 新账不该落 unknown
+        }
+    }
+    CHECK(part_ovw);
+    CHECK(complete);
+    CHECK(overwrite);
+    CHECK(abort);
+    CHECK(del);
+
+    drain_gcq(*m);
+    m->delete_bucket("ms-reason");
     m->close();
 }
 
@@ -425,6 +485,7 @@ inline void case_swap_extents_batch(const MetaFactory& make) {
 
 inline void run_meta_store_suite(const MetaFactory& make) {
     case_gc_accounting(make);
+    case_reclaim_reasons(make);
     case_alloc_monotonic_across_reopen(make);
     case_delete_bucket_blocks_on_mpu(make);
     case_list_max_keys_zero(make);

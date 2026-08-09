@@ -623,7 +623,7 @@ void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign,
     }
 }
 
-void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref) {
+void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // seq = AUTOINCREMENT rowid：随业务事务分配、同批提交/回滚——事务回滚不产生
     // 账外 seq，重启不回退不重发（sqlite_sequence 与业务同事务），免号段计数器。
@@ -633,6 +633,7 @@ void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref) {
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
         Reclaim r;
         r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        r.reason = reason;
         std::string v = codec::encode_reclaim(r, ts);
         Stmt st(c, kGcqPut);
         st.blob(1, v);
@@ -756,7 +757,7 @@ void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectR
     const int64_t ov = codec::pack_rec_overhead(b, k);
     write_pack_delta(c, rec.data, +1, ov);
     if (old) {
-        enqueue_reclaim(c, old->data);
+        enqueue_reclaim(c, old->data, ReclaimReason::kOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, ov);
     }
@@ -776,7 +777,7 @@ bool SqliteMetaStore::delete_object(std::string_view b, std::string_view k) {
         st.blob(1, b).blob(2, k);
         st.exec();
     }
-    enqueue_reclaim(c, old.data);
+    enqueue_reclaim(c, old.data, ReclaimReason::kDelete);
     write_refs(c, old.data, /*add=*/false, {});
     write_pack_delta(c, old.data, -1, codec::pack_rec_overhead(b, k));
     t.commit();
@@ -908,7 +909,7 @@ void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::stri
     const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
     write_pack_delta(c, p.data, +1, ov);
     if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
-        enqueue_reclaim(c, old->data);
+        enqueue_reclaim(c, old->data, ReclaimReason::kPartOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, ov);
     }
@@ -987,13 +988,13 @@ std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_vie
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
             write_pack_delta(c, p.data, +1, codec::pack_rec_overhead(b, k));
         } else {  // 未选中分片入 GC 账
-            enqueue_reclaim(c, p.data);
+            enqueue_reclaim(c, p.data, ReclaimReason::kComplete);
             write_refs(c, p.data, /*add=*/false, {});
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
     if (old) {  // 旧同名对象入 GC 账
-        enqueue_reclaim(c, old->data);
+        enqueue_reclaim(c, old->data, ReclaimReason::kOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, codec::pack_rec_overhead(b, k));
     }
@@ -1008,7 +1009,7 @@ void SqliteMetaStore::abort_upload(std::string_view b, std::string_view k,
     Txn t(c);
     require_upload_in(c, b, k, id);
     for (const auto& p : scan_parts(c, b, k, id)) {
-        enqueue_reclaim(c, p.data);
+        enqueue_reclaim(c, p.data, ReclaimReason::kAbort);
         write_refs(c, p.data, /*add=*/false, {});
         write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, p.part_no));
     }

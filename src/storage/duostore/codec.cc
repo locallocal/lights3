@@ -451,7 +451,7 @@ PartRec decode_part(int part_no, std::string_view v) {
 std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms) {
     std::string s;
     put_u8(s, 1);
-    put_u8(s, 0);  // reason：预留（覆盖/删除/abort，暂未区分）
+    put_u8(s, uint8_t(r.reason));
     put_u64(s, uint64_t(enqueue_ms));
     append_extent_runs(s, r.extents);
     return s;
@@ -460,10 +460,14 @@ std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms) {
 Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms) {
     Cursor c{v};
     check_ver(c, 1);
-    c.u8();  // reason
+    // reason 是 P4 之前就在编码里的预留字节且恒写 0，未知取值回落 kUnknown 即可
+    // ——不必抬版本号，旧账与新账在同一队列里天然共存
+    uint8_t reason = c.u8();
     int64_t ms = int64_t(c.u64());
     if (enqueue_ms) *enqueue_ms = ms;
-    Reclaim r{read_extent_runs(c), ms};
+    Reclaim r{read_extent_runs(c), ms,
+              reason <= uint8_t(ReclaimReason::kComplete) ? ReclaimReason(reason)
+                                                          : ReclaimReason::kUnknown};
     c.done();
     return r;
 }

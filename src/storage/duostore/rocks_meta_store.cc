@@ -214,7 +214,8 @@ void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef&
     }
 }
 
-void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref) {
+void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref,
+                                            ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // 超大 DataRef（TB 级对象 = 数十万 extent）拆成多条 gcq 项（docs/gaps.md §2.11）：
     // GC 单批的解码驻留内存有界；ack 逐条独立，拆分不改变崩溃语义（unlink 幂等）
@@ -223,6 +224,7 @@ void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const Da
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
         Reclaim r;
         r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        r.reason = reason;
         uint64_t seq = alloc_id(kCounterSeq, seqs_);
         batch.Put(cfs_[kGcq], codec::be64_key(seq), codec::encode_reclaim(r, ts));
     }
@@ -341,7 +343,7 @@ void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
     const int64_t ov = codec::pack_rec_overhead(b, k);
     batch_pack_delta(batch, rec.data, +1, ov);
     if (old) {
-        enqueue_reclaim_locked(batch, old->data);
+        enqueue_reclaim_locked(batch, old->data, ReclaimReason::kOverwrite);
         batch_refs(batch, old->data, /*add=*/false, {});
         batch_pack_delta(batch, old->data, -1, ov);
     }
@@ -358,7 +360,7 @@ bool RocksMetaStore::delete_object(std::string_view b, std::string_view k) {
 
     rocksdb::WriteBatch batch;
     batch.Delete(cfs_[kObjects], okey);
-    enqueue_reclaim_locked(batch, old.data);
+    enqueue_reclaim_locked(batch, old.data, ReclaimReason::kDelete);
     batch_refs(batch, old.data, /*add=*/false, {});
     batch_pack_delta(batch, old.data, -1, codec::pack_rec_overhead(b, k));
     commit(batch);
@@ -475,7 +477,7 @@ void RocksMetaStore::put_part(std::string_view b, std::string_view k, std::strin
     const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
     batch_pack_delta(batch, p.data, +1, ov);
     if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
-        enqueue_reclaim_locked(batch, old->data);
+        enqueue_reclaim_locked(batch, old->data, ReclaimReason::kPartOverwrite);
         batch_refs(batch, old->data, /*add=*/false, {});
         batch_pack_delta(batch, old->data, -1, ov);
     }
@@ -572,14 +574,14 @@ std::string RocksMetaStore::complete_upload(std::string_view b, std::string_view
                              codec::pack_rec_overhead_part(b, k, id, no));
             batch_pack_delta(batch, p.data, +1, codec::pack_rec_overhead(b, k));
         } else {  // 未选中分片入 GC 账
-            enqueue_reclaim_locked(batch, p.data);
+            enqueue_reclaim_locked(batch, p.data, ReclaimReason::kComplete);
             batch_refs(batch, p.data, /*add=*/false, {});
             batch_pack_delta(batch, p.data, -1,
                              codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
     if (old) {  // 旧同名对象入 GC 账
-        enqueue_reclaim_locked(batch, old->data);
+        enqueue_reclaim_locked(batch, old->data, ReclaimReason::kOverwrite);
         batch_refs(batch, old->data, /*add=*/false, {});
         batch_pack_delta(batch, old->data, -1, codec::pack_rec_overhead(b, k));
     }
@@ -598,7 +600,7 @@ void RocksMetaStore::abort_upload(std::string_view b, std::string_view k,
     bump_last_byte(pfx_end);
     batch.DeleteRange(cfs_[kParts], pfx, pfx_end);
     for (const auto& p : scan_parts(b, k, id)) {
-        enqueue_reclaim_locked(batch, p.data);
+        enqueue_reclaim_locked(batch, p.data, ReclaimReason::kAbort);
         batch_refs(batch, p.data, /*add=*/false, {});
         batch_pack_delta(batch, p.data, -1,
                          codec::pack_rec_overhead_part(b, k, id, p.part_no));

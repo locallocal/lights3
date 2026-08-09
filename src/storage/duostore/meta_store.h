@@ -41,9 +41,35 @@ struct PartRec {
     DataRef data;
 };
 
+// gcq 入账来源（docs/gaps.md §6.1）：GC 按来源分桶计数，才定位得到"回收压力来自
+// 覆盖写还是批量删除还是 mpu 弃件"。落盘为 codec gcq 记录的 reason 字节（此前恒写
+// 0 且解码即丢弃），旧账解出 kUnknown
+enum class ReclaimReason : uint8_t {
+    kUnknown = 0,        // P4 之前入队的旧账
+    kOverwrite = 1,      // put_object / complete_upload 覆盖同名对象的旧版本
+    kDelete = 2,         // delete_object
+    kPartOverwrite = 3,  // 同号分片重传（last-write-wins）
+    kAbort = 4,          // abort_upload（含 GC 的 mpu_ttl 过期清理）
+    kComplete = 5,       // complete_upload 未被选中的分片
+};
+
+// 指标标签与日志用；未知取值一律回落 "unknown"（旧账/未来新增来源）
+inline const char* reclaim_reason_name(ReclaimReason r) {
+    switch (r) {
+        case ReclaimReason::kOverwrite: return "overwrite";
+        case ReclaimReason::kDelete: return "delete";
+        case ReclaimReason::kPartOverwrite: return "part_overwrite";
+        case ReclaimReason::kAbort: return "abort";
+        case ReclaimReason::kComplete: return "complete";
+        case ReclaimReason::kUnknown: break;
+    }
+    return "unknown";
+}
+
 struct Reclaim {
     std::vector<Extent> extents;  // 待物理回收
     int64_t enqueue_ms = 0;       // 入队时刻（unix ms）；GC 消费端据此判 gc_grace（§9.1）
+    ReclaimReason reason = ReclaimReason::kUnknown;
 };
 
 struct PackStat {

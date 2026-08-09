@@ -72,7 +72,11 @@ public:
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
     Task<uint64_t> seal_aged_packs(int64_t max_age_ms) override;
     Task<void> scan_chunks(
-        const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;
+        const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb)
+        override;
+    Task<void> scan_packs(
+        const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& cb)
+        override;
     Task<void> close() override;
 
     // 布局路径（§5）；测试观察用
@@ -114,6 +118,10 @@ private:
         uint64_t id = 0;
         uint64_t size = 0;
     };
+    // chunks/ 与 packs/ 的 shard 目录枚举（布局同构，scan_chunks/scan_packs 共用）
+    Task<void> scan_shard_tree(const char* sub, const char* suffix,
+                               const std::function<void(uint64_t, int64_t, uint64_t)>& cb);
+
     bool slot_aged(const ActivePack& slot) const;  // 持 slot.m 调用；pack_max_age_sec<=0 恒 false
     void close_slot_locked(ActivePack& slot);      // 持 slot.m 调用
     // 提交积压的封存；失败放回队列（append 路径告警后续重试，close 路径上抛）

@@ -97,7 +97,8 @@ private:
     std::vector<PartRec> scan_parts(std::string_view b, std::string_view k,
                                     std::string_view id);
     uint64_t alloc_id(std::string_view counter_key, IdRange& r, uint32_t n = 1);
-    void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref);
+    void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref,
+                                ReclaimReason reason);
     // 同批维护 refs（chunk 引用表，§4.1）：add=写入 owner、否则删除
     void batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add,
                     std::string_view owner);

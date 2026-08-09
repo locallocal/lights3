@@ -1576,6 +1576,45 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     sync_wait(b2->close());
 }
 
+// packs/ 双向对账（docs/gaps.md §6.1）：pack 文件在"建文件"时就存在、packstat 行
+// 要到首条 record 提交才落账——恰在这个窗口硬崩，文件永久泄漏且不在任何账里。
+// 正向：账外 pack 文件逾宽限即删；反向：packstat 在而文件缺 → 只告警不销账
+TEST(duostore_orphan_scan_reconciles_packs) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "orphanpack");
+    cfg.orphan_scan_interval_sec = 0;
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k", patterned(600));
+    uint64_t live_pack = h.meta->get_object("bkt", "k")->data.extents[0].file_id;
+
+    // 账外 pack 文件（"建文件后、首条 record 提交前崩溃"的残迹）
+    fs::create_directories(cfg.root / "packs" / "ab");
+    std::ofstream(cfg.root / "packs" / "ab" / "000000000000abcd.pak") << "leaked";
+
+    auto st1 = sync_wait(h.b->run_orphan_scan_once());
+    CHECK_EQ(st1.packs_scanned, uint64_t(2));
+    CHECK_EQ(st1.orphan_packs_removed, uint64_t(1));
+    CHECK_EQ(st1.pack_stats_missing, uint64_t(0));
+    CHECK(st1.pack_bytes > 0);
+    CHECK(!fs::exists(cfg.root / "packs" / "ab" / "000000000000abcd.pak"));
+    // 在账 pack 不受扰——它还是本进程正在写的 active pack
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    CHECK_EQ(read_all(*sync_wait(h.b->get_object("bkt", "k", std::nullopt)).body),
+             patterned(600));
+
+    // 反向：手工删掉在账 pack 文件 → 计数 + 告警，packstat 保留供人工介入
+    sync_wait(h.b->close());  // 先关掉写者，否则删的是本进程持锁的 active pack
+    auto h2 = make_pack_backend(cfg, pool);
+    fs::remove(pack_file_path(cfg.root, live_pack));
+    auto st2 = sync_wait(h2.b->run_orphan_scan_once());
+    CHECK_EQ(st2.packs_scanned, uint64_t(0));
+    CHECK_EQ(st2.pack_stats_missing, uint64_t(1));
+    CHECK(find_pack_stat(*h2.meta, live_pack).has_value());  // 账未被动
+    sync_wait(h2.b->close());
+}
+
 namespace {
 
 // 可拦停的 body：吐出 first 后阻塞等 release，再吐 rest——制造"写入中、meta 未

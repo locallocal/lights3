@@ -302,6 +302,79 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     co_return out;
 }
 
+// 同后端 copy 快路径（docs/gaps.md §6.3）：此前 CopyObject 即使同在一个 localfs
+// 内也要"读进网关再写回"整份字节。copy_file_range 让搬运留在内核（页缓存直拷；
+// btrfs/xfs 的 reflink 上是 O(1) 元数据克隆）。不可用（跨设备 EXDEV、老内核
+// ENOSYS、文件系统不支持 EINVAL）返回 nullopt 回落流式路径——回落是语义等价的
+Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
+    std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
+    std::string_view dst_key, ObjectMeta meta) {
+    validate_bucket_name(src_bucket, kAllowReserved);
+    validate_bucket_name(dst_bucket, kAllowReserved);
+    for (auto k : {src_key, dst_key}) {
+        validate_object_key(k);
+        validate_fs_object_key(k);
+        reject_reserved_key(k);
+    }
+    co_await pool_->schedule();
+    require_bucket(src_bucket);
+    require_bucket(dst_bucket);
+
+    fs::path src = object_path(src_bucket, src_key);
+    fsutil::TierInfo tier;
+    ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);  // 缺→NoSuchKey
+    if (tier.tier != fsutil::Tier::kLocal) co_return std::nullopt;  // 数据不在本地（tiered stub）
+
+    int sfd = ::open(src.c_str(), O_RDONLY);
+    if (sfd < 0)
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(src_key));
+    struct stat st{};
+    if (::fstat(sfd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(sfd);
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(src_key));
+    }
+
+    TmpFile tmp{staging_ / "put" / next_tmp_name()};
+    tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (tmp.fd < 0) {
+        ::close(sfd);
+        throw_errno("open copy tmp");
+    }
+    uint64_t remaining = uint64_t(st.st_size);
+    off_t in_off = 0, out_off = 0;
+    while (remaining > 0) {
+        ssize_t n = ::copy_file_range(sfd, &in_off, tmp.fd, &out_off, remaining, 0);
+        if (n < 0) {
+            // 首字节前失败 = 机制不可用 → 回落；中途失败按 IO 错误处理
+            bool not_supported = (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
+                                  errno == EOPNOTSUPP) &&
+                                 in_off == 0;
+            int err = errno;
+            ::close(sfd);
+            if (not_supported) co_return std::nullopt;  // TmpFile RAII 丢弃
+            errno = err;
+            throw_errno("copy_file_range");
+        }
+        if (n == 0) break;  // 源被并发截断：以实际拷到的为准（下方以 fstat 校验）
+        remaining -= uint64_t(n);
+    }
+    ::close(sfd);
+    if (remaining != 0) co_return std::nullopt;  // 源变短（并发覆盖）：回落流式取一致快照
+
+    // 字节未变 ⇒ etag/size 恒等于源；REPLACE 的新 user_meta/content_type 已在
+    // meta 里（handler 组装），只补与内容绑定的三项
+    meta.key = std::string(dst_key);
+    meta.size = sm.size;
+    meta.etag = sm.etag;
+    meta.last_modified = std::chrono::system_clock::now();
+    auto lk = co_await commit_lock(dst_bucket, dst_key).acquire();
+    co_await pool_->schedule();
+    commit_object_file(object_path(dst_bucket, dst_key), tmp, meta, staging_ / "put", dst_key);
+    co_return PutResult{meta.etag};
+}
+
 Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);

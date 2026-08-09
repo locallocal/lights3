@@ -4,7 +4,11 @@
 // 推/拉模型；控制面短请求在共享池线程同步调用（docs/cloudproxy-backend.md §2.3）。
 #include "storage/cloudproxy/cloudproxy_backend.h"
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <chrono>
+#include <filesystem>
 #include <future>
 #include <optional>
 #include <semaphore>
@@ -18,6 +22,7 @@
 #include "http/pushpull.h"
 #include "s3/xml.h"
 #include "storage/cloudproxy/remote_client.h"
+#include "storage/localfs/fs_util.h"
 #include "storage/multipart.h"
 
 namespace lights3::storage {
@@ -494,10 +499,19 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     std::vector<std::pair<std::string, std::string>> extra, http::BodyReader& body,
     std::string resource, bool multipart_ctx) {
     auto len_opt = body.length();
-    // AWS 不接受裸 chunked 上行；无长度是罕见路径，首期不做 TRAILER 组帧（§3.2）
-    if (!len_opt)
-        throw S3Error(S3ErrorCode::NotImplemented,
-                      "cloudproxy: upload without content length is not supported");
+    // AWS 不接受裸 chunked 上行（§3.2）。无长度（chunked 且无
+    // x-amz-decoded-content-length）先 spool 到本地临时文件取得长度再上传
+    // （docs/gaps.md §6.2——此前直接 NotImplemented，这类 PUT 在本后端整个不可用）
+    if (!len_opt) {
+        if (ctx_->cfg.spool_max_bytes == 0)
+            throw S3Error(S3ErrorCode::NotImplemented,
+                          "cloudproxy: upload without content length is not supported "
+                          "(spool disabled)");
+        co_return co_await spool_and_upload(std::move(raw_path), std::move(raw_query),
+                                            std::move(host), std::move(content_type),
+                                            std::move(extra), body, std::move(resource),
+                                            multipart_ctx);
+    }
     const uint64_t len = *len_opt;
     std::string full = raw_query.empty() ? raw_path : raw_path + "?" + raw_query;
 
@@ -623,6 +637,112 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     }
     ctx->throw_remote_error(out->status, out->resp_body,
                             multipart_ctx ? ErrCtx::Upload : ErrCtx::Bucket, resource);
+}
+
+// 无长度上行的 spool（docs/gaps.md §6.2）：body 全量落临时文件（O_TMPFILE 匿名
+// inode，进程崩溃即自动回收；不支持的文件系统回退 unlink-after-open），得到长度
+// 后经 FdStreamReader 走已知长度的 stream_upload。代价是一次本地盘写读与到齐
+// 延迟——对"罕见路径可用性"的取舍
+Task<PutResult> CloudProxyBackend::spool_and_upload(
+    std::string raw_path, std::string raw_query, std::string host, std::string content_type,
+    std::vector<std::pair<std::string, std::string>> extra, http::BodyReader& body,
+    std::string resource, bool multipart_ctx) {
+    co_await pool_->schedule();
+    namespace fs = std::filesystem;
+    fs::path dir = ctx_->cfg.spool_dir.empty() ? fs::temp_directory_path()
+                                               : fs::path(ctx_->cfg.spool_dir);
+    int fd = ::open(dir.c_str(), O_TMPFILE | O_RDWR, 0600);
+    if (fd < 0) {
+        // O_TMPFILE 不被支持（老内核/NFS）：具名建后立即 unlink，同样无残留
+        fs::path p = dir / ("lights3-spool-" + std::to_string(::getpid()) + "-" +
+                            std::to_string(reinterpret_cast<uintptr_t>(&body)));
+        fd = ::open(p.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd < 0)
+            throw S3Error(S3ErrorCode::InternalError, "cloudproxy: cannot create spool file");
+        ::unlink(p.c_str());
+    }
+    struct FdGuard {
+        int fd;
+        ~FdGuard() { ::close(fd); }
+    } guard{fd};
+
+    uint64_t total = 0;
+    std::vector<std::byte> buf(256 * 1024);
+    for (;;) {
+        size_t n = co_await body.read(std::span(buf));
+        co_await pool_->schedule();  // read 可能把协程恢复到驱动线程；写盘回池
+        if (n == 0) break;
+        total += n;
+        if (total > ctx_->cfg.spool_max_bytes)
+            throw S3Error(S3ErrorCode::EntityTooLarge,
+                          "cloudproxy: unsized upload exceeds spool_max_bytes");
+        const char* p = reinterpret_cast<const char*>(buf.data());
+        size_t left = n;
+        while (left > 0) {
+            ssize_t w = ::write(fd, p, left);
+            if (w < 0) throw S3Error(S3ErrorCode::InternalError, "cloudproxy: spool write failed");
+            p += w;
+            left -= size_t(w);
+        }
+    }
+    // FdStreamReader 接管 fd 所有权；guard 让位
+    int owned = fd;
+    guard.fd = -1;
+    fsutil::FdStreamReader replay(owned, 0, total, pool_);
+    co_return co_await stream_upload(std::move(raw_path), std::move(raw_query), std::move(host),
+                                     std::move(content_type), std::move(extra), replay,
+                                     std::move(resource), multipart_ctx);
+}
+
+// 服务端 COPY（docs/gaps.md §6.2）：此前同 cloudproxy 后端内的 copy 会"下载到网关
+// 再传回去"，2 倍跨网流量与费用；远端本可一个 x-amz-copy-source 完成。恒发
+// REPLACE + 我方元数据——handler 已把 COPY/REPLACE 语义折算进 meta，远端只管照抄
+Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
+    std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
+    std::string_view dst_key, ObjectMeta meta) {
+    validate_object_key(src_key);
+    validate_object_key(dst_key);
+    auto src_rb = remote_bucket(src_bucket);
+    auto dst_rb = remote_bucket(dst_bucket);
+    auto tgt = ctx_->target(dst_rb);
+    auto path = tgt.object_path(key_path(dst_key));
+    auto resource = resource_of(dst_bucket, dst_key);
+
+    std::vector<std::pair<std::string, std::string>> extra = meta_headers(meta);
+    extra.emplace_back("x-amz-copy-source",
+                       "/" + util::aws_uri_encode(src_rb, /*encode_slash=*/false) +
+                           std::string(key_path(src_key)));
+    extra.emplace_back("x-amz-metadata-directive", "REPLACE");
+
+    auto res = co_await control_io([&] {
+        auto op_hist = ctx_->metrics.op_seconds("copy");
+        auto lease = ctx_->pool.acquire();
+        auto t0 = std::chrono::steady_clock::now();
+        auto headers = ctx_->signed_headers("PUT", path, "", extra,
+                                            util::sha256_hex(""), tgt.host);
+        auto r = lease.client().Put(path, headers, "", meta.content_type.empty()
+                                                          ? "application/octet-stream"
+                                                          : meta.content_type.c_str());
+        op_hist->observe(
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        return r;
+    });
+    if (!res) ctx_->throw_transport_error(res.error());
+    if (res->status != 200)
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource);
+    // COPY 与 complete 同款陷阱：慢 copy 会先回 200、错误在 body（§4.4）
+    s3::XmlNode root;
+    try {
+        root = s3::xml_parse(res->body);
+    } catch (...) {
+        throw S3Error(S3ErrorCode::InternalError,
+                      "cloudproxy: remote returned unparsable CopyObjectResult body");
+    }
+    if (root.name == "Error") {
+        auto code = map_remote_code(root.get("Code"));
+        throw S3Error(code.value_or(S3ErrorCode::InternalError), root.get("Message"), resource);
+    }
+    co_return PutResult{std::string(strip_etag_quotes(root.get("ETag")))};
 }
 
 Task<PutResult> CloudProxyBackend::put_object(std::string_view bucket, std::string_view key,

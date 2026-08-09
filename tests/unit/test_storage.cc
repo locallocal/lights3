@@ -234,6 +234,33 @@ TEST(xlocalfs_uring_batched_submit_under_concurrency) {
     eng->shutdown();
 }
 
+// 同后端 copy 快路径（docs/gaps.md §6.3）：copy_file_range 内核搬运，etag 恒等源；
+// REPLACE 语义的新 user_meta 生效
+TEST(localfs_copy_object_fast) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+    std::string data(700 * 1024, 'z');
+    for (size_t i = 0; i < data.size(); i += 11) data[i] = char('A' + (i % 26));
+    auto pr = put(b, "bkt", "src.bin", data);
+
+    ObjectMeta meta;
+    meta.content_type = "application/x-copied";
+    meta.user_meta["origin"] = "fast";
+    auto r = sync_wait(b.copy_object_fast("bkt", "src.bin", "bkt", "dst/copy.bin", meta));
+    CHECK(r.has_value());
+    CHECK_EQ(r->etag, pr.etag);  // 字节未变，etag 恒等于源
+    auto got = sync_wait(b.get_object("bkt", "dst/copy.bin", std::nullopt));
+    CHECK_EQ(read_all(*got.body), data);
+    CHECK_EQ(got.meta.content_type, std::string("application/x-copied"));
+    CHECK_EQ(got.meta.user_meta.at("origin"), std::string("fast"));
+
+    // 源不存在 → NoSuchKey（不是 nullopt——nullopt 会让 handler 白走一遍流式失败）
+    CHECK_THROWS_S3(sync_wait(b.copy_object_fast("bkt", "absent", "bkt", "d", {})),
+                    lights3::s3::S3ErrorCode::NoSuchKey);
+}
+
 TEST(localfs_atomic_layout) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);

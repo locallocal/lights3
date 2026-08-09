@@ -44,6 +44,14 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
+    // 同后端 copy 快路径（docs/gaps.md §6.3）：copy_file_range 内核侧搬运（支持
+    // reflink 的文件系统上是 O(1) 克隆），不经用户态缓冲。tier stub（数据不在
+    // 本地）返回 nullopt 回落流式路径
+    Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket,
+                                                    std::string_view src_key,
+                                                    std::string_view dst_bucket,
+                                                    std::string_view dst_key,
+                                                    ObjectMeta meta) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 

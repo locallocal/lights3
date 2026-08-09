@@ -17,6 +17,7 @@
 
 using namespace lights3;
 using namespace lights3::storage;
+using backend_suite::put;
 using backend_suite::read_all;
 using backend_suite::run_backend_suite;
 
@@ -495,18 +496,76 @@ TEST(cloudproxy_metrics_registered) {
           std::string::npos);
 }
 
-// 无长度 body（真 chunked）首期拒绝为 NotImplemented（docs/cloudproxy-backend.md §3.2）
-TEST(cloudproxy_chunked_upload_not_implemented) {
+// 无长度 body（真 chunked）经本地 spool 上传（docs/gaps.md §6.2）：先落临时文件
+// 取得长度再走已知长度路径；spool_max_bytes=0 保留旧的 NotImplemented 语义
+TEST(cloudproxy_chunked_upload_spools) {
     struct NoLenReader final : http::BodyReader {
-        Task<size_t> read(std::span<std::byte>) override { co_return 0; }
+        explicit NoLenReader(std::string d) : data_(std::move(d)) {}
+        Task<size_t> read(std::span<std::byte> buf) override {
+            size_t n = std::min(buf.size(), data_.size() - off_);
+            std::memcpy(buf.data(), data_.data() + off_, n);
+            off_ += n;
+            co_return n;
+        }
         std::optional<uint64_t> length() const override { return std::nullopt; }
+        std::string data_;
+        size_t off_ = 0;
     };
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(2);
     CloudProxyBackend b(remote.proxy_cfg(), pool);
-    NoLenReader body;
-    CHECK_THROWS_S3(sync_wait(b.put_object("bkt", "k", {}, body)),
+    sync_wait(b.create_bucket("bkt"));
+
+    std::string data(300 * 1024, 'q');  // 跨多个 64KiB 块
+    for (size_t i = 0; i < data.size(); i += 7) data[i] = char('a' + (i % 26));
+    NoLenReader body(data);
+    auto pr = sync_wait(b.put_object("bkt", "k", {}, body));
+    auto got = sync_wait(b.get_object("bkt", "k", std::nullopt));
+    CHECK_EQ(got.meta.size, uint64_t(data.size()));
+    std::string back = read_all(*got.body);
+    CHECK(back == data);
+    (void)pr;
+
+    // spool 上限：超限的无长度上行 EntityTooLarge，不落远端
+    auto small = remote.proxy_cfg();
+    small.spool_max_bytes = 1024;
+    CloudProxyBackend b2(small, pool);
+    NoLenReader big(std::string(4096, 'x'));
+    CHECK_THROWS_S3(sync_wait(b2.put_object("bkt", "k2", {}, big)),
+                    s3::S3ErrorCode::EntityTooLarge);
+
+    // spool 关闭：回到 NotImplemented
+    auto off = remote.proxy_cfg();
+    off.spool_max_bytes = 0;
+    CloudProxyBackend b3(off, pool);
+    NoLenReader nl(std::string("x"));
+    CHECK_THROWS_S3(sync_wait(b3.put_object("bkt", "k3", {}, nl)),
                     s3::S3ErrorCode::NotImplemented);
+}
+
+// 同后端服务端 COPY（docs/gaps.md §6.2）：x-amz-copy-source 一次远端调用完成，
+// 网关不搬运字节；REPLACE 语义带我方元数据
+TEST(cloudproxy_server_side_copy) {
+    RemoteStack remote;
+    auto pool = std::make_shared<ThreadPool>(2);
+    CloudProxyBackend b(remote.proxy_cfg(), pool);
+    sync_wait(b.create_bucket("bkt"));
+    std::string data = "server side copy payload";
+    put(b, "bkt", "src.txt", data);
+
+    ObjectMeta meta;
+    meta.content_type = "text/plain";
+    meta.user_meta["note"] = "copied";
+    auto r = sync_wait(b.copy_object_fast("bkt", "src.txt", "bkt", "dst.txt", meta));
+    CHECK(r.has_value());
+    auto got = sync_wait(b.get_object("bkt", "dst.txt", std::nullopt));
+    CHECK_EQ(read_all(*got.body), data);
+    CHECK_EQ(got.meta.etag, r->etag);
+    CHECK_EQ(got.meta.user_meta.at("note"), std::string("copied"));
+
+    // 源不存在 → NoSuchKey 原样映射
+    CHECK_THROWS_S3(sync_wait(b.copy_object_fast("bkt", "absent", "bkt", "d2", {})),
+                    s3::S3ErrorCode::NoSuchKey);
 }
 
 #endif  // LIGHTS3_CLOUDPROXY

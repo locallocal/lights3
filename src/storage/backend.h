@@ -174,6 +174,19 @@ struct IStorageBackend {
                                        ObjectMeta meta, http::BodyReader& body,
                                        PutCondition cond = {}) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;
+    // 同后端 copy 快路径（docs/gaps.md §6.3）：src 与 dst 都归本后端时由 CopyObject
+    // handler 先试本钩子。返回 nullopt = 无快路径/本次不可用（tier stub、跨设备等），
+    // 调用方回落"get_object 流式读 + put_object 流式写"——语义等价，只是多一趟
+    // 字节搬运（本地）或两趟跨网流量（云端）。meta 为最终对象元数据（REPLACE 已
+    // 由 handler 组好；COPY 抄自源），key/size/etag 由实现自源补齐——字节不变，
+    // etag 恒等于源
+    virtual Task<std::optional<PutResult>> copy_object_fast(std::string_view /*src_bucket*/,
+                                                            std::string_view /*src_key*/,
+                                                            std::string_view /*dst_bucket*/,
+                                                            std::string_view /*dst_key*/,
+                                                            ObjectMeta /*meta*/) {
+        co_return std::nullopt;
+    }
     // S3 语义：对不存在的 key 也返回成功（幂等删除）
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;

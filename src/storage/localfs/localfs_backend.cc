@@ -34,8 +34,9 @@ using fsutil::require_upload;
 using fsutil::throw_errno;
 using fsutil::write_tsv;
 
-LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool)
-    : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)) {
+LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool,
+                               LocalFsOptions opt)
+    : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)), opt_(opt) {
     fs::create_directories(root_);
     fs::create_directories(staging_ / "put");
     fs::create_directories(staging_ / "mpu");
@@ -43,6 +44,41 @@ LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<
     for (size_t i = 0; i < kLockStripes; ++i)
         commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
     cleanup_stale_uploads();
+    schedule_mpu_scan();
+}
+
+LocalFsBackend::~LocalFsBackend() {
+    if (!closed_) shutdown_background();
+}
+
+Task<void> LocalFsBackend::close() {
+    if (closed_.exchange(true)) co_return;
+    shutdown_background();
+    co_return;
+}
+
+// 周期清理（docs/gaps.md §6.3）：此前只在启动跑一次，跑数月不重启的网关会无限
+// 累积从未 complete/abort 的上传目录。完成后重臂（同 duostore worker）：扫描
+// 绝不重叠/堆积，慢扫只是顺延下次触发
+void LocalFsBackend::schedule_mpu_scan() {
+    if (opt_.mpu_ttl_sec <= 0 || opt_.mpu_scan_interval_sec <= 0) return;
+    bg_.if_open([&] {
+        mpu_timer_ = TimerQueue::instance().add(
+            std::chrono::seconds(opt_.mpu_scan_interval_sec), [this] {
+                bg_.spawn([](LocalFsBackend* self) -> Task<void> {
+                    co_await self->pool_->schedule();  // 目录遍历是阻塞 IO，进池
+                    self->cleanup_stale_uploads();
+                    self->schedule_mpu_scan();
+                }(this));
+            });
+    });
+}
+
+void LocalFsBackend::shutdown_background() {
+    bg_.begin_close();
+    // cancel 须在组锁外：TimerQueue::cancel 阻塞等在途回调，回调内要拿组锁
+    TimerQueue::instance().cancel(mpu_timer_);
+    bg_.wait_idle();
 }
 
 AsyncSemaphore& LocalFsBackend::commit_lock(std::string_view bucket, std::string_view key) {
@@ -747,7 +783,7 @@ void LocalFsBackend::cleanup_stale_uploads() {
         fs::path manifest = e.path() / "manifest";
         auto t = fs::exists(manifest, tec) ? fs::last_write_time(manifest, tec)
                                            : fs::last_write_time(e.path(), tec);
-        if (tec || now - t <= kMpuTtl) continue;
+        if (tec || now - t <= std::chrono::seconds(opt_.mpu_ttl_sec)) continue;
         fs::remove_all(e.path(), tec);
         if (!tec)
             LOG_INFO("localfs: removed stale multipart upload {}",

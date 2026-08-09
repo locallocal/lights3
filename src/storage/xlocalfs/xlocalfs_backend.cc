@@ -75,8 +75,9 @@ private:
 }  // namespace
 
 XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging,
-                                 std::shared_ptr<ThreadPool> pool, UringOptions uring_opt)
-    : LocalFsBackend(std::move(root), std::move(staging), pool),
+                                 std::shared_ptr<ThreadPool> pool, UringOptions uring_opt,
+                                 LocalFsOptions fs_opt)
+    : LocalFsBackend(std::move(root), std::move(staging), pool, fs_opt),
       uring_(std::make_shared<UringEngine>(std::move(pool), uring_opt)) {}
 
 // 提交段的数据落盘（docs/gaps.md §6.3）：此前这里是同步 fdatasync——把池线程钉在
@@ -327,7 +328,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
 
 Task<void> XLocalFsBackend::close() {
     uring_->shutdown();
-    co_return;
+    co_await LocalFsBackend::close();  // 撤 mpu 周期清理定时器（基类后台任务）
 }
 
 }  // namespace lights3::storage

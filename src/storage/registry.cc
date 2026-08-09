@@ -34,6 +34,16 @@ std::pair<std::string, std::string> fs_backend_paths(const BackendConfig& cfg) {
     return {root, staging};
 }
 
+// mpu_ttl / mpu_scan_interval（docs/gaps.md §6.3）：此前 7 天 TTL 硬编码且只在
+// 启动扫一次
+LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
+    LocalFsOptions o;
+    if (cfg.params.count("mpu_ttl")) o.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
+    if (cfg.params.count("mpu_scan_interval"))
+        o.mpu_scan_interval_sec = parse_duration_sec(cfg.params.at("mpu_scan_interval"));
+    return o;
+}
+
 // per-backend 独立 IO 池（docs/concurrency.md §3.1 预留的兑现，todo.md §3.2）：
 // params 带 io_threads（≥1）的后端获得专属 ThreadPool——云端慢请求占满共享池
 // 会饿死本地盘路径，池按 backend 隔离即互不牵制；缺省共享全局池（多数部署的
@@ -76,7 +86,8 @@ void ensure_registered() {
             "localfs",
             [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope) {
                 auto [root, staging] = fs_backend_paths(cfg);
-                return std::make_shared<LocalFsBackend>(root, staging, std::move(pool));
+                return std::make_shared<LocalFsBackend>(root, staging, std::move(pool),
+                                                        fs_backend_opts(cfg));
             });
         StorageRegistry::register_backend(
             "xlocalfs",
@@ -90,7 +101,8 @@ void ensure_registered() {
                 if (cfg.params.count("sqpoll_idle"))
                     uo.sqpoll_idle_ms = parse_duration_sec(cfg.params.at("sqpoll_idle")) * 1000;
                 try {
-                    return std::make_shared<XLocalFsBackend>(root, staging, pool, uo);
+                    return std::make_shared<XLocalFsBackend>(root, staging, pool, uo,
+                                                             fs_backend_opts(cfg));
                 } catch (const std::exception& e) {
                     // io_uring 不可用（老内核、容器 seccomp 挡掉 io_uring_setup、
                     // memlock 配额不足）此前直接把进程带崩（docs/gaps.md §6.3）。
@@ -99,7 +111,8 @@ void ensure_registered() {
                     LOG_WARN("xlocalfs backend '{}': io_uring unavailable ({}); falling back "
                              "to the localfs data path (same on-disk layout, synchronous IO)",
                              cfg.name, e.what());
-                    return std::make_shared<LocalFsBackend>(root, staging, std::move(pool));
+                    return std::make_shared<LocalFsBackend>(root, staging, std::move(pool),
+                                                            fs_backend_opts(cfg));
                 }
             });
         StorageRegistry::register_backend(

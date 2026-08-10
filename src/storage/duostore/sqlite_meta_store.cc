@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -353,10 +354,34 @@ void SqliteMetaStore::check_lineage(Conn& c) {
     if (app_id != kAppId)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore meta(sqlite): not a duostore meta database: " + opt_.path);
-    if (ver != kSchemaVersion)
+    // 版本演进策略与其余三引擎一致（docs/gaps.md §6.1）：更新的库拒绝降级运行，
+    // 更旧的库走迁移链逐级升（user_version 为整数谱系，无字符串前缀）
+    if (ver > kSchemaVersion)
         throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite): unsupported schema version " +
-                          std::to_string(ver));
+                      "duostore meta(sqlite): database schema v" + std::to_string(ver) +
+                          " is newer than this build (v" + std::to_string(kSchemaVersion) +
+                          "); refusing to run downgraded");
+    if (ver < kSchemaVersion) migrate_schema(c, ver);
+}
+
+// 迁移链（版本 n → n+1 的就地 SQL 变换；每步一个事务，含 user_version 盖章——
+// 中途崩溃重启后从断点续走）。新增布局变更时在此登记并把 kSchemaVersion +1
+void SqliteMetaStore::migrate_schema(Conn& c, int64_t ver) {
+    using MigrateFn = void (*)(Conn&);
+    static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
+        // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+    };
+    for (; ver < kSchemaVersion; ++ver) {
+        MigrateFn fn = nullptr;
+        for (auto& [from, f] : kSchemaMigrations)
+            if (from == ver) fn = f;
+        if (!fn) throw_no_migration(ver, kSchemaVersion, "duostore meta(sqlite)");
+        Txn t(c);
+        fn(c);
+        c.exec("PRAGMA user_version=" + std::to_string(ver + 1) + ";", "stamp schema");
+        t.commit();
+        LOG_INFO("duostore meta(sqlite): schema migrated v{} -> v{}", ver, ver + 1);
+    }
 }
 
 void SqliteMetaStore::init_schema(Conn& c) {
@@ -623,7 +648,7 @@ void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign,
     }
 }
 
-void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref) {
+void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // seq = AUTOINCREMENT rowid：随业务事务分配、同批提交/回滚——事务回滚不产生
     // 账外 seq，重启不回退不重发（sqlite_sequence 与业务同事务），免号段计数器。
@@ -633,6 +658,7 @@ void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref) {
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
         Reclaim r;
         r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        r.reason = reason;
         std::string v = codec::encode_reclaim(r, ts);
         Stmt st(c, kGcqPut);
         st.blob(1, v);
@@ -756,7 +782,7 @@ void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectR
     const int64_t ov = codec::pack_rec_overhead(b, k);
     write_pack_delta(c, rec.data, +1, ov);
     if (old) {
-        enqueue_reclaim(c, old->data);
+        enqueue_reclaim(c, old->data, ReclaimReason::kOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, ov);
     }
@@ -776,7 +802,7 @@ bool SqliteMetaStore::delete_object(std::string_view b, std::string_view k) {
         st.blob(1, b).blob(2, k);
         st.exec();
     }
-    enqueue_reclaim(c, old.data);
+    enqueue_reclaim(c, old.data, ReclaimReason::kDelete);
     write_refs(c, old.data, /*add=*/false, {});
     write_pack_delta(c, old.data, -1, codec::pack_rec_overhead(b, k));
     t.commit();
@@ -908,7 +934,7 @@ void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::stri
     const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
     write_pack_delta(c, p.data, +1, ov);
     if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
-        enqueue_reclaim(c, old->data);
+        enqueue_reclaim(c, old->data, ReclaimReason::kPartOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, ov);
     }
@@ -987,13 +1013,13 @@ std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_vie
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
             write_pack_delta(c, p.data, +1, codec::pack_rec_overhead(b, k));
         } else {  // 未选中分片入 GC 账
-            enqueue_reclaim(c, p.data);
+            enqueue_reclaim(c, p.data, ReclaimReason::kComplete);
             write_refs(c, p.data, /*add=*/false, {});
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
     if (old) {  // 旧同名对象入 GC 账
-        enqueue_reclaim(c, old->data);
+        enqueue_reclaim(c, old->data, ReclaimReason::kOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, codec::pack_rec_overhead(b, k));
     }
@@ -1008,7 +1034,7 @@ void SqliteMetaStore::abort_upload(std::string_view b, std::string_view k,
     Txn t(c);
     require_upload_in(c, b, k, id);
     for (const auto& p : scan_parts(c, b, k, id)) {
-        enqueue_reclaim(c, p.data);
+        enqueue_reclaim(c, p.data, ReclaimReason::kAbort);
         write_refs(c, p.data, /*add=*/false, {});
         write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, p.part_no));
     }

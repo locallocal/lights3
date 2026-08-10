@@ -8,6 +8,7 @@
 #include "core/thread_pool.h"
 #include "storage/localfs/fs_util.h"
 #include "storage/memory/memory_backend.h"
+#include "storage/bucket_router.h"
 #include "storage/registry.h"
 #include "storage/tiered/tiered_backend.h"
 #include "unit/backend_suite.h"
@@ -703,7 +704,9 @@ TEST(registry_per_backend_thread_pool) {
     CHECK(text.find("lights3_backend_pool_queue_depth{backend=\"fast\"}") !=
           std::string::npos);
     CHECK(text.find("lights3_backend_pool_completed{backend=\"fast\"}") != std::string::npos);
-    CHECK(text.find("{backend=\"mem\"}") == std::string::npos);  // 共享池后端无池指标
+    // 共享池后端无**池**指标（memory 后端自身的用量 gauge 不在此列）
+    CHECK(text.find("lights3_backend_pool_threads{backend=\"mem\"}") == std::string::npos);
+    CHECK(text.find("lights3_memory_backend_used_bytes{backend=\"mem\"}") != std::string::npos);
 
     // 非法 io_threads：非整数 / 0 都在构建期报错（fail fast）
     for (const char* bad : {"0", "many"}) {
@@ -716,4 +719,78 @@ TEST(registry_per_backend_thread_pool) {
         }
         CHECK(t);
     }
+}
+
+// quota 增量维护（docs/gaps.md §6.3）：PUT 就地累计估算并在超水位时提前踢一轮
+// scan——此前两轮 scan 之间（默认 1 小时）的配额超限完全不可见
+TEST(tiered_quota_incremental_kicks_early_scan) {
+    TieredConfig cfg;
+    cfg.cold_after_sec = 1 << 30;
+    cfg.quota_bytes = 100 * 1024;  // 高水位 85KiB，低水位 70KiB
+    Fixture f(cfg);
+    sync_wait(f.tiered->create_bucket("bkt"));
+    put(*f.tiered, "bkt", "seed.bin", make_data(10 * 1024));
+    sync_wait(f.tiered->scan_once());  // 校准估算账（首轮前不记增量）
+
+    // 三个 30K 的 PUT 把估算推过 85K；最后一个 PUT 应触发提前 scan（后台），
+    // 把冷端下沉到低水位以下
+    put(*f.tiered, "bkt", "a.bin", make_data(30 * 1024));
+    put(*f.tiered, "bkt", "b.bin", make_data(30 * 1024));
+    put(*f.tiered, "bkt", "c.bin", make_data(30 * 1024));
+    // 提前轮是后台协程：轮询等它把本地占用降下来（谁被下沉不作断言——
+    // atime 极近，选择是实现细节）
+    bool converged = false;
+    for (int i = 0; i < 100 && !converged; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        uint64_t local = 0;
+        for (auto& e : fs::recursive_directory_iterator(f.tmp.path / "data")) {
+            if (!e.is_regular_file()) continue;
+            std::string n = e.path().filename().string();
+            if (n == fsutil::kBucketMarker || n.ends_with(fsutil::kSidecarSuffix)) continue;
+            local += fs::file_size(e.path());
+        }
+        converged = local <= 70 * 1024;
+    }
+    CHECK(converged);
+}
+
+// bucket_router 构建期校验（docs/gaps.md §6.3）：坏 glob / 不可达规则在启动报错，
+// 否定规则生效
+TEST(bucket_router_validation_and_negation) {
+    auto mem1 = std::make_shared<MemoryBackend>();
+    auto mem2 = std::make_shared<MemoryBackend>();
+    std::map<std::string, std::shared_ptr<IStorageBackend>> backends{{"m1", mem1}, {"m2", mem2}};
+
+    auto build = [&](std::vector<BucketRule> rules) {
+        BucketsConfig cfg;
+        cfg.default_backend = "m1";
+        cfg.rules = std::move(rules);
+        return BucketRouter::build(cfg, backends);
+    };
+    auto throws = [&](std::vector<BucketRule> rules) {
+        try {
+            build(std::move(rules));
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+
+    // 未闭合字符类；桶名不可能出现的字面字符（大写/下划线）——静默永不匹配的规则
+    CHECK(throws({{"log[a-z", "m2"}}));
+    CHECK(throws({{"Logs-*", "m2"}}));
+    CHECK(throws({{"my_bucket", "m2"}}));
+    // 不可达：catch-all 之后的规则；重复规则
+    CHECK(throws({{"*", "m2"}, {"logs-*", "m1"}}));
+    CHECK(throws({{"logs-*", "m2"}, {"logs-*", "m1"}}));
+
+    // 正常路由 + 否定规则："!logs-*" = 除 logs-* 外全部
+    auto r = build({{"logs-*", "m2"}});
+    CHECK(&r.resolve("logs-app") == mem2.get());
+    CHECK(&r.resolve("data") == mem1.get());
+    auto rn = build({{"!logs-*", "m2"}});
+    CHECK(&rn.resolve("data") == mem2.get());
+    CHECK(&rn.resolve("logs-app") == mem1.get());
+    // 否定固定串自身是 catch-all，其后规则不可达
+    CHECK(throws({{"!onlyone", "m2"}, {"other-*", "m1"}}));
 }

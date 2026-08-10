@@ -173,6 +173,12 @@ private:
     Task<void> demote_quiet(std::string bucket, std::string key);
     Task<void> promote_quiet(std::string bucket, std::string key);
     Task<void> scan_and_gc();
+    // quota 增量维护（docs/gaps.md §6.3 / docs/tiered-storage.md）：PUT/DELETE 就地
+    // 增减估算值并在超水位时提前踢一轮 scan——此前只有周期遍历累计，两轮 scan
+    // 之间（默认 1 小时）的配额超限完全不可见。估算随 demote/promote 漂移（只偏
+    // 保守方向：下沉释放的字节仍计在账上），每轮 scan 第一遍以实测值校准
+    void note_local_delta(int64_t delta);
+    void maybe_kick_quota_scan();
     Task<void> snapshot_task();
     Task<void> reconcile_task();
     // 对账的孤儿处置（per-key 锁内复核后执行）；返回是否动了云端/本地
@@ -205,6 +211,8 @@ private:
     bool atime_dirty_ = false;
 
     std::atomic<uint64_t> gc_seq_{0};
+    std::atomic<int64_t> local_bytes_est_{-1};      // -1 = 尚未由 scan 校准
+    std::atomic<bool> quota_kick_inflight_{false};  // 提前踢的 scan 只并存一个
 
     BackgroundTaskGroup bg_{"tiered"};
     // 定时器 id 只在 bg_.if_open 内写入；begin_close 后不再变更（读侧无需加锁）。

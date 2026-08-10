@@ -34,8 +34,9 @@ using fsutil::require_upload;
 using fsutil::throw_errno;
 using fsutil::write_tsv;
 
-LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool)
-    : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)) {
+LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool,
+                               LocalFsOptions opt)
+    : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)), opt_(opt) {
     fs::create_directories(root_);
     fs::create_directories(staging_ / "put");
     fs::create_directories(staging_ / "mpu");
@@ -43,6 +44,41 @@ LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<
     for (size_t i = 0; i < kLockStripes; ++i)
         commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
     cleanup_stale_uploads();
+    schedule_mpu_scan();
+}
+
+LocalFsBackend::~LocalFsBackend() {
+    if (!closed_) shutdown_background();
+}
+
+Task<void> LocalFsBackend::close() {
+    if (closed_.exchange(true)) co_return;
+    shutdown_background();
+    co_return;
+}
+
+// 周期清理（docs/gaps.md §6.3）：此前只在启动跑一次，跑数月不重启的网关会无限
+// 累积从未 complete/abort 的上传目录。完成后重臂（同 duostore worker）：扫描
+// 绝不重叠/堆积，慢扫只是顺延下次触发
+void LocalFsBackend::schedule_mpu_scan() {
+    if (opt_.mpu_ttl_sec <= 0 || opt_.mpu_scan_interval_sec <= 0) return;
+    bg_.if_open([&] {
+        mpu_timer_ = TimerQueue::instance().add(
+            std::chrono::seconds(opt_.mpu_scan_interval_sec), [this] {
+                bg_.spawn([](LocalFsBackend* self) -> Task<void> {
+                    co_await self->pool_->schedule();  // 目录遍历是阻塞 IO，进池
+                    self->cleanup_stale_uploads();
+                    self->schedule_mpu_scan();
+                }(this));
+            });
+    });
+}
+
+void LocalFsBackend::shutdown_background() {
+    bg_.begin_close();
+    // cancel 须在组锁外：TimerQueue::cancel 阻塞等在途回调，回调内要拿组锁
+    TimerQueue::instance().cancel(mpu_timer_);
+    bg_.wait_idle();
 }
 
 AsyncSemaphore& LocalFsBackend::commit_lock(std::string_view bucket, std::string_view key) {
@@ -56,7 +92,11 @@ fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const {
 }
 
 fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view key) const {
-    fs::path p = bucket_dir(bucket) / fs::path(std::string(key));
+    // 目录标记对象（docs/gaps.md §6.3）："a/b/" 在文件系统上没有对应的文件名，
+    // 落在目录内的保留标记文件上：<bucket>/a/b/.lights3-dir
+    std::string rel(key);
+    if (rel.ends_with('/')) rel += fsutil::kDirMarker;
+    fs::path p = bucket_dir(bucket) / fs::path(rel);
     // 纵深防御（docs/gaps.md §1.1）：bucket/key 已在 L2 与各入口校验过，路径不该
     // 逃出 root_。但 fs::path::operator/ 遇绝对路径右操作数会**替换整条路径**
     // （root_ / "/etc" == "/etc"），单点失误的代价是任意文件读——所以在真正
@@ -166,6 +206,7 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
                                            PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -214,6 +255,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
                                               std::optional<ByteRange> range) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     // 桶存在性是无条件前置：此前只在 open 失败分支才查，成功路径完全不检查桶，
@@ -260,9 +302,83 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     co_return out;
 }
 
+// 同后端 copy 快路径（docs/gaps.md §6.3）：此前 CopyObject 即使同在一个 localfs
+// 内也要"读进网关再写回"整份字节。copy_file_range 让搬运留在内核（页缓存直拷；
+// btrfs/xfs 的 reflink 上是 O(1) 元数据克隆）。不可用（跨设备 EXDEV、老内核
+// ENOSYS、文件系统不支持 EINVAL）返回 nullopt 回落流式路径——回落是语义等价的
+Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
+    std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
+    std::string_view dst_key, ObjectMeta meta) {
+    validate_bucket_name(src_bucket, kAllowReserved);
+    validate_bucket_name(dst_bucket, kAllowReserved);
+    for (auto k : {src_key, dst_key}) {
+        validate_object_key(k);
+        validate_fs_object_key(k);
+        reject_reserved_key(k);
+    }
+    co_await pool_->schedule();
+    require_bucket(src_bucket);
+    require_bucket(dst_bucket);
+
+    fs::path src = object_path(src_bucket, src_key);
+    fsutil::TierInfo tier;
+    ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);  // 缺→NoSuchKey
+    if (tier.tier != fsutil::Tier::kLocal) co_return std::nullopt;  // 数据不在本地（tiered stub）
+
+    int sfd = ::open(src.c_str(), O_RDONLY);
+    if (sfd < 0)
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(src_key));
+    struct stat st{};
+    if (::fstat(sfd, &st) != 0 || !S_ISREG(st.st_mode)) {
+        ::close(sfd);
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(src_key));
+    }
+
+    TmpFile tmp{staging_ / "put" / next_tmp_name()};
+    tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (tmp.fd < 0) {
+        ::close(sfd);
+        throw_errno("open copy tmp");
+    }
+    uint64_t remaining = uint64_t(st.st_size);
+    off_t in_off = 0, out_off = 0;
+    while (remaining > 0) {
+        ssize_t n = ::copy_file_range(sfd, &in_off, tmp.fd, &out_off, remaining, 0);
+        if (n < 0) {
+            // 首字节前失败 = 机制不可用 → 回落；中途失败按 IO 错误处理
+            bool not_supported = (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
+                                  errno == EOPNOTSUPP) &&
+                                 in_off == 0;
+            int err = errno;
+            ::close(sfd);
+            if (not_supported) co_return std::nullopt;  // TmpFile RAII 丢弃
+            errno = err;
+            throw_errno("copy_file_range");
+        }
+        if (n == 0) break;  // 源被并发截断：以实际拷到的为准（下方以 fstat 校验）
+        remaining -= uint64_t(n);
+    }
+    ::close(sfd);
+    if (remaining != 0) co_return std::nullopt;  // 源变短（并发覆盖）：回落流式取一致快照
+
+    // 字节未变 ⇒ etag/size 恒等于源；REPLACE 的新 user_meta/content_type 已在
+    // meta 里（handler 组装），只补与内容绑定的三项
+    meta.key = std::string(dst_key);
+    meta.size = sm.size;
+    meta.etag = sm.etag;
+    meta.last_modified = std::chrono::system_clock::now();
+    auto lk = co_await commit_lock(dst_bucket, dst_key).acquire();
+    co_await pool_->schedule();
+    commit_object_file(object_path(dst_bucket, dst_key), tmp, meta, staging_ / "put", dst_key);
+    co_return PutResult{meta.etag};
+}
+
 Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -272,6 +388,7 @@ Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::strin
 Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_view key) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -329,6 +446,13 @@ struct ListWalker {
                 continue;
             }
             if (name == fsutil::kBucketMarker) continue;
+            // 目录标记对象（docs/gaps.md §6.3）：还原成 key "<rel>"（末尾已含 '/'）。
+            // 排序键取空串——它恰好排在同目录其它条目之前，与"全量收集 + 全排序"
+            // 下 "a/b/" < "a/b/x" 的次序一致
+            if (name == fsutil::kDirMarker) {
+                if (e.is_regular_file(tec)) es.push_back({std::string(), false});
+                continue;
+            }
             if (name.ends_with(fsutil::kSidecarSuffix)) {
                 // 孤儿 sidecar 自愈：delete_object 是"先删数据后删 sidecar"两步，
                 // 之间崩溃会遗留一直占空间的孤儿。剪枝后只覆盖被访问到的目录
@@ -387,6 +511,7 @@ std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
         std::string name = e.path().filename().string();
         std::error_code tec;
         if (e.is_directory(tec)) es.push_back({name + "/", true});
+        else if (name == fsutil::kDirMarker) es.push_back({std::string(), false});
         else if (name != fsutil::kBucketMarker && !name.ends_with(fsutil::kSidecarSuffix) &&
                  e.is_regular_file(tec))
             es.push_back({std::move(name), false});
@@ -466,7 +591,10 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
             truncate();
             return false;
         }
-        out.objects.push_back(load_meta(base / fs::path(key), key));
+        // 目录标记对象的数据文件是目录内的保留标记（object_path 同款映射）
+        fs::path data = key.ends_with('/') ? base / fs::path(key + fsutil::kDirMarker)
+                                           : base / fs::path(key);
+        out.objects.push_back(load_meta(data, key));
         last_emitted = std::move(key);
         last_is_group = false;
         ++count;
@@ -485,6 +613,7 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
                                                    std::string_view key, ObjectMeta meta) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
+    validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -727,7 +856,7 @@ void LocalFsBackend::cleanup_stale_uploads() {
         fs::path manifest = e.path() / "manifest";
         auto t = fs::exists(manifest, tec) ? fs::last_write_time(manifest, tec)
                                            : fs::last_write_time(e.path(), tec);
-        if (tec || now - t <= kMpuTtl) continue;
+        if (tec || now - t <= std::chrono::seconds(opt_.mpu_ttl_sec)) continue;
         fs::remove_all(e.path(), tec);
         if (!tec)
             LOG_INFO("localfs: removed stale multipart upload {}",

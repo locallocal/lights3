@@ -74,6 +74,15 @@ CloudProxyConfig CloudProxyConfig::from_params(
                                      *v);
         }
     }
+    if (auto* v = find(params, "spool_max_bytes")) {
+        try {
+            c.spool_max_bytes = parse_size(*v);
+        } catch (...) {
+            throw std::runtime_error("cloudproxy backend '" + name +
+                                     "': invalid spool_max_bytes: " + *v);
+        }
+    }
+    if (auto* v = find(params, "spool_dir")) c.spool_dir = *v;
     // 数值范围加载期钉死，杜绝运行期算术异常（如 backoff 溢出）
     auto require_range = [&](const char* k, int64_t v, int64_t lo, int64_t hi) {
         if (v < lo || v > hi)

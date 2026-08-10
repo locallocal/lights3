@@ -5,6 +5,7 @@
 #include <sys/time.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <map>
 #include <set>
@@ -27,7 +28,9 @@ namespace {
 constexpr const char* kCounterChunk = "ctr:chunk";
 constexpr const char* kCounterPack = "ctr:pack";
 constexpr const char* kCounterSeq = "ctr:seq";
-constexpr const char* kSchemaValue = "r1";  // 与 RocksDB 的 "1" 区分谱系（§2.2）
+// 与 RocksDB 的 "1" 区分谱系（§2.2）；版本演进策略见 meta_util.h parse_schema_marker
+constexpr int64_t kSchemaCurrent = 1;
+constexpr const char* kSchemaValue = "r1";  // = "r" + kSchemaCurrent（首建落此值）
 // CAS 重试上限（§3.2）：超限抛 InternalError——病态热点竞争时响亮失败优于活锁。
 // 无退避的紧循环会被对端的连续提交流饿死（多网关热 key），故重试前指数退避
 constexpr int kMaxCasRetries = 16;
@@ -409,7 +412,10 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         *sha = std::string(reply_str(r.get()));
     }
 
-    // schema（§2.2）：SET NX 抢注，已存在则校验谱系
+    // schema（§2.2）：SET NX 抢注，已存在则校验谱系 + 版本演进（docs/gaps.md §6.1：
+    // 存量版本 < 当前走迁移链，> 当前拒绝降级——升级后旧版网关开机即拒，天然挡住
+    // 混布回写坏新布局）。链上每步必须幂等：共享引擎无全局迁移锁，多台新版网关
+    // 同时开机会并发走链，幂等步互相无害
     auto r = run_on(c->ctx, {"SET", key("schema"), kSchemaValue, "NX"}, &err);
     if (!r) throw_internal("schema init", err);
     check_reply_error("schema init", r.get());
@@ -417,10 +423,29 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         auto got = run_on(c->ctx, {"GET", key("schema")}, &err);
         if (!got) throw_internal("schema check", err);
         check_reply_error("schema check", got.get());
-        if (got->type != REDIS_REPLY_STRING || reply_str(got.get()) != kSchemaValue)
+        if (got->type != REDIS_REPLY_STRING)
             throw S3Error(S3ErrorCode::InternalError,
                           "duostore redis meta: unsupported schema at prefix '" +
                               opt_.prefix + "'");
+        std::string stored(reply_str(got.get()));
+        int64_t ver = parse_schema_marker(stored, /*lineage=*/"r", kSchemaCurrent,
+                                          "duostore redis meta");
+        using MigrateFn = void (*)(RedisMetaStore&, Conn&);
+        static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
+            // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+        };
+        for (; ver < kSchemaCurrent; ++ver) {
+            MigrateFn fn = nullptr;
+            for (auto& [from, f] : kSchemaMigrations)
+                if (from == ver) fn = f;
+            if (!fn) throw_no_migration(ver, kSchemaCurrent, "duostore redis meta");
+            fn(*this, *c);
+            auto stamp = run_on(c->ctx, {"SET", key("schema"), "r" + std::to_string(ver + 1)},
+                                &err);
+            if (!stamp) throw_internal("schema stamp", err);
+            check_reply_error("schema stamp", stamp.get());
+            LOG_INFO("duostore redis meta: schema migrated v{} -> v{}", ver, ver + 1);
+        }
     }
 
     // AOF 探测（§6）：尽力而为——托管 Redis 可能禁用 CONFIG，失败仅提示
@@ -654,7 +679,8 @@ void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int si
     }
 }
 
-void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref) {
+void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref,
+                                     ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // seq 预派发（INCRBY 号段）使 gcq 入账成为纯写 op，脚本保持确定性（§4）。
     // CAS 重试会浪费 seq——无害，seq 只需唯一单调。
@@ -664,6 +690,7 @@ void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref) {
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
         Reclaim r;
         r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        r.reason = reason;
         uint64_t seq = alloc_id(kCounterSeq, seqs_);
         std::string member = codec::be64_key(seq);
         member += codec::encode_reclaim(r, ts);
@@ -791,7 +818,7 @@ void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
         const int64_t ov = codec::pack_rec_overhead(b, k);
         batch_pack_delta(bt, rec.data, +1, ov);
         if (old) {
-            enqueue_reclaim(bt, old->data);
+            enqueue_reclaim(bt, old->data, ReclaimReason::kOverwrite);
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, ov);
         }
@@ -812,7 +839,7 @@ bool RedisMetaStore::delete_object(std::string_view b, std::string_view k) {
         bt.expect_eq(objects_key(b), k, *oldv);
         bt.hdel(objects_key(b), k);
         bt.zrem(zindex_key(b), k);
-        enqueue_reclaim(bt, old.data);
+        enqueue_reclaim(bt, old.data, ReclaimReason::kDelete);
         batch_refs(bt, old.data, /*add=*/false, {});
         batch_pack_delta(bt, old.data, -1, codec::pack_rec_overhead(b, k));
         if (bt.commit()) return true;
@@ -903,7 +930,7 @@ void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::strin
         const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
         batch_pack_delta(bt, p.data, +1, ov);
         if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
-            enqueue_reclaim(bt, old->data);
+            enqueue_reclaim(bt, old->data, ReclaimReason::kPartOverwrite);
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, ov);
         }
@@ -1031,14 +1058,14 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
                                  codec::pack_rec_overhead_part(b, k, id, no));
                 batch_pack_delta(bt, p.data, +1, codec::pack_rec_overhead(b, k));
             } else {  // 未选中分片入 GC 账
-                enqueue_reclaim(bt, p.data);
+                enqueue_reclaim(bt, p.data, ReclaimReason::kComplete);
                 batch_refs(bt, p.data, /*add=*/false, {});
                 batch_pack_delta(bt, p.data, -1,
                                  codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
         if (old) {  // 旧同名对象入 GC 账
-            enqueue_reclaim(bt, old->data);
+            enqueue_reclaim(bt, old->data, ReclaimReason::kOverwrite);
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, codec::pack_rec_overhead(b, k));
         }
@@ -1066,7 +1093,7 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
         bt.hdel(uploads_key(b), ufield);
         bt.del(parts_key(b, k, id));
         for (const auto& [raw, p] : scanned) {
-            enqueue_reclaim(bt, p.data);
+            enqueue_reclaim(bt, p.data, ReclaimReason::kAbort);
             batch_refs(bt, p.data, /*add=*/false, {});
             batch_pack_delta(bt, p.data, -1,
                              codec::pack_rec_overhead_part(b, k, id, p.part_no));
@@ -1107,6 +1134,40 @@ void RedisMetaStore::ack_reclaim(uint64_t seq) {
     std::string s = std::to_string(seq);
     auto r = exec({"ZREMRANGEBYSCORE", gcq_key(), s, s}, /*read_retry=*/false);
     require_int("ack_reclaim", r.get());
+}
+
+// 批量销账（docs/gaps.md §6.1 四引擎矩阵）：此前未覆写，GC 每项一次 RTT——大批
+// 删除后单轮 ack 数千次往返。单脚本一次 RTT 全删；丢 ack 无害（gcq 残留重试、
+// unlink 幂等），脚本无需任何守卫
+void RedisMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
+    if (seqs.empty()) return;
+    static const char* kBody = R"lua(
+for i = 1, #ARGV do
+  redis.call('ZREMRANGEBYSCORE', KEYS[1], ARGV[i], ARGV[i])
+end
+return #ARGV
+)lua";
+    static const std::string kSha = sha1_hex(kBody);
+    std::vector<std::string> argv;
+    argv.reserve(seqs.size());
+    for (uint64_t s : seqs) argv.push_back(std::to_string(s));
+    auto r = eval(kSha, kBody, {gcq_key()}, std::move(argv), /*read_retry=*/false);
+    require_int("ack_reclaims", r.get());
+}
+
+// 多网关 GC 租约（docs/gaps.md §6.1）：SET NX 语义 + 同 owner 续租，单脚本原子。
+// TTL 由 Redis 过期承担——持有者崩溃后自然让位
+bool RedisMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
+    static const char* kBody = R"lua(
+local cur = redis.call('GET', KEYS[1])
+if cur and cur ~= ARGV[1] then return 0 end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+return 1
+)lua";
+    static const std::string kSha = sha1_hex(kBody);
+    auto r = eval(kSha, kBody, {key("gc_lease")},
+                  {std::string(owner), std::to_string(ttl_ms)}, /*read_retry=*/false);
+    return require_int("try_gc_lease", r.get()) == 1;
 }
 
 std::vector<PackStat> RedisMetaStore::pack_stats() {

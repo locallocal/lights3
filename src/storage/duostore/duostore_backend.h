@@ -24,6 +24,7 @@
 #include "core/timer.h"
 #include "storage/backend.h"
 #include "storage/duostore/data_store.h"
+#include "storage/duostore/meta_dump.h"
 #include "storage/duostore/meta_store.h"
 
 namespace lights3::storage {
@@ -78,7 +79,9 @@ struct DuoGcStats {
     uint64_t skipped_pinned = 0;    // 所涉 file 有 pin 而跳过的 gcq 项数
     uint64_t packs_removed = 0;     // 整文件删除的空 pack 数（sealed 且 live_recs==0）
     uint64_t uploads_expired = 0;   // mpu_ttl 过期而内部 abort 的 multipart 数
+    uint64_t packs_sealed_aged = 0; // 老化封存的 active pack 数（§6.1）
     uint64_t packs_compacted = 0;   // 本轮顺扫（rewrite_pack）过的低存活 pack 数（P4 §9.2）
+    uint64_t packs_compact_deferred = 0;  // 够格但被本轮预算挤下的 pack 数（§6.1）
     uint64_t records_migrated = 0;  // 压实迁移成功换 ref 的 record 数
     uint64_t records_corrupt = 0;   // 压实顺扫检出的损坏 record 数（跳过 + 告警，不删）
 };
@@ -90,6 +93,13 @@ struct DuoOrphanStats {
     uint64_t skipped_grace = 0;    // 无引用但 mtime 未逾 gc_grace（在途写入嫌疑）
     uint64_t skipped_pinned = 0;   // 无引用但有 pin（写侧 pin / 在途读者）
     uint64_t refs_missing = 0;     // 反向：refs 在而文件缺（数据丢失征兆，只告警不删 meta）
+    // packs/ 反向对账（docs/gaps.md §6.1）
+    uint64_t packs_scanned = 0;         // 盘面枚举到的 pack 文件数
+    uint64_t orphan_packs_removed = 0;  // 账外 pack 文件（建文件后、首条 record 提交前崩溃）
+    uint64_t packs_skipped_active = 0;  // 账外但被活着的写者持锁 / 未逾宽限 / 有 pin
+    uint64_t pack_stats_missing = 0;    // 反向：packstat 在而文件缺（数据丢失征兆）
+    uint64_t chunk_bytes = 0;           // 盘面 chunk 实体总字节（用量指标）
+    uint64_t pack_bytes = 0;            // 盘面 pack 文件总字节（用量指标）
 };
 
 // PackMigrateFn 的标准实现（§9.2 步骤 2-3；cfg 构造与测试注入组装共用）：owner
@@ -148,7 +158,15 @@ struct DuoStoreConfig {
     uint64_t pack_threshold = 128 << 10;   // ≤ 此值进 pack；0 = 关闭（全走 chunk）
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;
+    // active pack 老化封存（docs/gaps.md §6.1）：低写入量下只按容量封存会让 pack
+    // 永不轮转，其中的死区永远进不了压实候选集。0 = 关闭
+    int pack_max_age_sec = 3600;
     double pack_gc_ratio = 0.5;            // P4 压实生效
+    // 单轮压实预算（docs/gaps.md §6.1）：候选按可回收字节降序取前 N 个 / 累计
+    // file_size 不超过 max_bytes。无预算时"批量删除后单轮 GC 重写全部符合条件的
+    // pack"可持锁数小时；有预算则收益最高的先做，剩下的下一轮继续。0 = 不限
+    int gc_compact_max_packs = 16;
+    uint64_t gc_compact_max_bytes = 1ull << 30;
     // 多网关部署（docs/duostore-rados-data.md §8.3）：GC/孤儿扫描须单实例执行，
     // 非指定网关置 false（后台 worker 不排程；手动钩子保留供测试/运维）。共享
     // meta/data 的并发 GC 会互踩（重复压实/扫描），且他网关 GC 无从看见本网关
@@ -225,6 +243,13 @@ public:
     // 互斥——反向对账"文件必先于 ref 存在"的论证依赖 gcq 的 unlink→销账窗口不并发
     Task<duostore::DuoOrphanStats> run_orphan_scan_once();
 
+    // meta 备份/恢复与跨引擎迁移（docs/gaps.md §6.1；流格式与运维契约见
+    // meta_dump.h）。两者都与 GC/孤儿扫描持同一信号量互斥；停写由运维保证
+    //（main 的 --duostore_admin 入口在 server 起动前执行，天然无业务流量）。
+    // load 结束后强制跑一轮孤儿扫描——回收备份窗口内 data 侧多余的文件
+    Task<duostore::MetaDumpStats> run_meta_dump(std::ostream& out);
+    Task<duostore::MetaDumpStats> run_meta_load(std::istream& in);
+
     // 数据面直访（仅测试用）：验证 active pack 的写锁探测（docs/gaps.md §1.4）
     duostore::IDataStore& data_for_test() { return *data_; }
 
@@ -259,7 +284,15 @@ private:
     // GC 完成轮末尾一次性累计（run_gc_once 的 DuoGcStats → 单调计数器）
     std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_,
         m_gc_packs_removed_, m_gc_uploads_expired_, m_gc_packs_compacted_,
-        m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_, m_orphan_removed_;
+        m_gc_packs_sealed_aged_, m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_,
+        m_orphan_removed_, m_orphan_packs_removed_;
+    // 回收来源分桶（§6.1）：下标 = ReclaimReason
+    std::array<std::shared_ptr<MetricCounter>, 6> m_gc_reclaims_by_reason_;
+    std::shared_ptr<MetricGauge> m_gc_compact_deferred_, m_gcq_depth_, m_gcq_oldest_age_,
+        m_gc_skipped_grace_, m_gc_skipped_pinned_, m_bytes_chunks_, m_bytes_packs_,
+        m_pack_accounted_bytes_, m_pack_live_bytes_, m_packs_total_,
+        m_orphan_packstats_missing_;
+    std::shared_ptr<MetricHistogram> m_gc_duration_;
     // GET 读路径 crc 失配计数（P5 corruption 指标）：数据面 reader 经 on_corruption
     // 回调递增——回调只捕获此 shared_ptr，reader 逃逸出 backend 生命周期仍安全
     std::shared_ptr<MetricCounter> m_read_corruption_;
@@ -292,6 +325,9 @@ private:
     GcqSkips gcq_skips_;
     uint64_t gcq_hi_ = 0;          // 已扫过的 seq 高位（下一个未见 seq）
 
+    // 多网关 GC 租约的实例标识（§6.1）：进程内随机生成，重启换新即可——旧租约
+    // 由 TTL 过期让位。租约 TTL 取 max(2×gc_interval, 10min)，远大于单轮时长
+    std::string gc_owner_;
     BackgroundTaskGroup bg_{"duostore"};
     // 只在 bg_.if_open 内写、begin_close 后不变（读侧免锁）；0 = 未 arm（cancel(0) 安全）
     TimerQueue::Id gc_timer_ = 0;

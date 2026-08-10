@@ -221,9 +221,15 @@ Task<void> RadosDataStore::close() {
 
 // ---------- RadosChunkWriter：切片缓冲 + aio write_full 双缓冲流水（§4）----------
 
+// owner 归属 xattr 名（docs/gaps.md §6.1）：WriteHint.owner 此前被丢弃——meta 全
+// 灭的灾难恢复无从判定对象归属。三种 owner 形态（codec::parse_pack_owner）原样
+// 落值，离线打捞用 rados getxattr 反查
+constexpr char kOwnerXattr[] = "lights3.owner";
+
 class RadosChunkWriter final : public DataWriter {
 public:
-    explicit RadosChunkWriter(RadosDataStore* store) : store_(store) {}
+    RadosChunkWriter(RadosDataStore* store, std::string owner)
+        : store_(store), owner_(std::move(owner)) {}
 
     // 未 finish 即析构 = 丢弃（§4.3）：不等待在途单——其缓冲/额度由 completion
     // 回调落地时释放（AioPending 双引用），已写出对象成无主对象，由上层 remove
@@ -316,9 +322,23 @@ private:
         p->crc = codec::crc32c_of(std::span<const std::byte>(buf_));
         p->data = std::move(buf_);
         p->permit = std::move(permit_);
-        int r = rados_aio_write_full(ctx, RadosDataStore::object_name(p->file_id).c_str(),
+        int r;
+        if (!owner_.empty()) {
+            // 归属随对象落盘（§6.1）：单对象 write_op 原子——数据与 owner xattr
+            // 要么都在要么都不在，不产生"有对象无归属"的中间态
+            rados_write_op_t op = rados_create_write_op();
+            rados_write_op_write_full(op, reinterpret_cast<const char*>(p->data.data()),
+                                      p->data.size());
+            rados_write_op_setxattr(op, kOwnerXattr, owner_.data(), owner_.size());
+            r = rados_aio_write_op_operate(op, ctx, p->comp,
+                                           RadosDataStore::object_name(p->file_id).c_str(),
+                                           nullptr, 0);
+            rados_release_write_op(op);
+        } else {
+            r = rados_aio_write_full(ctx, RadosDataStore::object_name(p->file_id).c_str(),
                                      p->comp, reinterpret_cast<const char*>(p->data.data()),
                                      p->data.size());
+        }
         if (r < 0) {
             p->unref();
             p->unref();
@@ -356,6 +376,7 @@ private:
     AsyncSemaphore::Permit spare_permit_;
     AioPending* pending_ = nullptr;  // 在途单（至多 1：写第 N 片时接收 N+1）
     std::vector<uint64_t> pinned_;   // 本 writer 建立的写侧 pin（finish 后清空）
+    std::string owner_;              // 每片对象随写落 kOwnerXattr（空 = 不落）
     uint64_t run_next_ = 0, run_limit_ = 0;  // 本会话的连续 id run（§3.9 批取）
     uint32_t run_len_ = 0;
     bool finished_ = false;
@@ -476,9 +497,10 @@ private:
 // ---------- IDataStore ----------
 
 Task<std::unique_ptr<DataWriter>> RadosDataStore::open_writer(WriteHint hint) {
-    (void)hint;  // 未知长度流与已知长度流同一条缓冲切片路径（§3.3/§4.2）
-    io(conn_);   // close 守卫
-    co_return std::make_unique<RadosChunkWriter>(this);
+    // 未知长度流与已知长度流同一条缓冲切片路径（§3.3/§4.2）；content_length 无用
+    // 武之地，owner 随每片对象落 xattr（§6.1 灾难恢复归属）
+    io(conn_);  // close 守卫
+    co_return std::make_unique<RadosChunkWriter>(this, std::move(hint.owner));
 }
 
 Task<std::unique_ptr<http::BodyReader>> RadosDataStore::open_reader(DataRef ref, uint64_t first,
@@ -531,6 +553,12 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
     co_return;
 }
 
+// 无 pack 层是设计边界而非欠账（docs/gaps.md §6.1 定性）：pack 聚合针对的是本地
+// fs 的 per-file 成本（inode/fd/目录项），RADOS 侧小对象的放大由 BlueStore
+// min_alloc_size 与池副本策略承担，网关再叠一层 pack 只会引入跨对象压实与
+// 读改写放大（RADOS 对象本就不可 punch-hole）。小对象密集的部署应在池上配
+// EC/压缩，而非期待网关聚合
+
 Task<void> RadosDataStore::remove_pack(uint64_t pack_id) {
     // 无 pack：pack_stats 恒空，实际不会被调用（§3.3）；显式 no-op 而非接口默认
     (void)pack_id;
@@ -544,7 +572,7 @@ Task<GcRewrite> RadosDataStore::rewrite_pack(uint64_t pack_id) {
 }
 
 Task<void> RadosDataStore::scan_chunks(
-    const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) {
+    const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) {
     // C4（§8.2）：namespace 内全量列举（ioctx 已限定，多实例互不可见）→ 对象名解析
     // file_id → stat 取 mtime。列举/统计无 aio 版，低频（默认 1/d）在池线程同步
     // 阻塞可接受（对齐 fs 版整扫描驻池线程的先例）；孤儿判定（refs/grace/pin）
@@ -565,7 +593,7 @@ Task<void> RadosDataStore::scan_chunks(
         time_t mtime = 0;
         // 秒级 mtime 足够（宽限判定分钟级）；stat 失败 = 并发 remove 竞态，容忍跳过
         if (rados_stat(ctx, entry, &size, &mtime) != 0) continue;
-        cb(id, int64_t(mtime) * 1000);
+        cb(id, int64_t(mtime) * 1000, size);
     }
     rados_nobjects_list_close(lc);
     if (r != -ENOENT) {  // 列举正常收尾返回 -ENOENT

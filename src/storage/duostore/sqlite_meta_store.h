@@ -113,6 +113,7 @@ private:
     // 谱系校验（§2.2）：在任何写入（含 WAL journal 转换）之前执行——app_id/ver 全 0
     // 但 sqlite_master 非空 = 别人的库，拒绝且不留痕
     void check_lineage(Conn& c);
+    void migrate_schema(Conn& c, int64_t ver);  // 版本 < 当前时的迁移链（check_lineage 调用）
     void init_schema(Conn& c);
     Lease read_conn();                     // 池取；close 后抛 InternalError
     void release(std::unique_ptr<Conn> c);
@@ -134,7 +135,7 @@ private:
     bool apply_swap(Conn& c, std::string_view b, std::string_view k, uint64_t expect_version,
                     const DataRef& from, const DataRef& to);
     // gcq 入账：seq 由 AUTOINCREMENT 随事务分配，与业务写同批提交/回滚
-    void enqueue_reclaim(Conn& c, const DataRef& ref);
+    void enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason reason);
     std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k,
                                     std::string_view id);
     uint64_t alloc_id(std::string_view counter, IdRange& r, uint32_t n = 1);

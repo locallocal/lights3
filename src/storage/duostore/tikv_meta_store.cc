@@ -1,8 +1,11 @@
 #include "storage/duostore/tikv_meta_store.h"
 
+#include <charconv>
+
 #include <pingcap/Exception.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <limits>
 #include <map>
@@ -247,19 +250,24 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
     client_.store(client_owned_.get(), std::memory_order_release);
     // schema 谱系校验（§3.2）：Insert 表达"只允许首建"。多网关同前缀首次启动是
     // 受支持的合法竞态——冲突/撞键/结果不明（常量幂等写，重读即可判定）都进
-    // 退避重试循环收敛，不能单发即弃（其余写路径由 txn_retry 提供同款循环）
+    // 退避重试循环收敛，不能单发即弃（其余写路径由 txn_retry 提供同款循环）。
+    // 版本演进（docs/gaps.md §6.1）：存量版本 < 当前走迁移链（每步幂等——共享
+    // 引擎无全局迁移锁，多台新版网关并发走链互相无害；盖章 Put 竞态收敛到同一
+    // 值），> 当前拒绝降级——升级后旧版网关开机即拒，挡住混布回写坏新布局
     guarded("open schema", [&] {
+        const std::string marker = "t" + std::to_string(kSchemaCurrent);
         std::string skey = tkey('s', {});
         for (int attempt = 0;; ++attempt) {
             auto ts = client().get_ts();
             if (auto v = snap_get(ts, skey)) {
-                if (*v != "t1")
-                    throw S3Error(S3ErrorCode::InternalError,
-                                  "duostore tikv meta: unsupported schema " + *v);
+                int64_t ver = parse_schema_marker(*v, /*lineage=*/"t", kSchemaCurrent,
+                                                  "duostore tikv meta");
+                if (ver == kSchemaCurrent) return;
+                migrate_schema(ver);
                 return;
             }
             try {
-                client().commit(ts, {{TikvOp::kInsert, skey, "t1"}});
+                client().commit(ts, {{TikvOp::kInsert, skey, marker}});
                 return;
             } catch (const TikvAlreadyExist&) {  // 并发首建已成，下轮读出校验
             } catch (const TikvConflict&) {  // 并发首建进行中
@@ -293,6 +301,26 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
                                 [this] { return sp_stop_; });
             }
         });
+    }
+}
+
+// 迁移链（版本 n → n+1 的就地变换；每步幂等——并发走链的网关互相无害）。新增
+// 布局变更时在此登记并把 kSchemaCurrent +1——绝不允许"改布局不留迁移"
+void TikvMetaStore::migrate_schema(int64_t ver) {
+    using MigrateFn = void (*)(TikvMetaStore&);
+    static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
+        // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+    };
+    for (; ver < kSchemaCurrent; ++ver) {
+        MigrateFn fn = nullptr;
+        for (auto& [from, f] : kSchemaMigrations)
+            if (from == ver) fn = f;
+        if (!fn) throw_no_migration(ver, kSchemaCurrent, "duostore tikv meta");
+        fn(*this);
+        txn_retry("schema stamp", [&](uint64_t, std::vector<TikvMutation>& muts) {
+            muts.push_back({TikvOp::kPut, tkey('s', {}), "t" + std::to_string(ver + 1)});
+        });
+        LOG_INFO("duostore tikv meta: schema migrated v{} -> v{}", ver, ver + 1);
     }
 }
 
@@ -410,7 +438,8 @@ void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRe
     }
 }
 
-void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref) {
+void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref,
+                                    ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // 超大 DataRef 拆多条（docs/gaps.md §2.11）：GC 单批解码内存有界、单条 gcq
     // 值不逼近 raft entry 上限；ack 逐条独立、unlink 幂等，拆分不改变崩溃语义
@@ -419,6 +448,7 @@ void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataR
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
         Reclaim r;
         r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
+        r.reason = reason;
         uint64_t seq = alloc_id(kCtrSeq, seqs_);  // 预派发（独立小事务），入账保持纯写
         muts.push_back({TikvOp::kPut, gcq_key(seq), codec::encode_reclaim(r, ts)});
     }
@@ -571,7 +601,7 @@ void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec
         const int64_t ov = codec::pack_rec_overhead(b, k);
         mut_pack_delta(muts, rec.data, +1, ov);
         if (old) {
-            enqueue_reclaim(muts, old->data);
+            enqueue_reclaim(muts, old->data, ReclaimReason::kOverwrite);
             mut_refs(muts, old->data, /*add=*/false, {});
             mut_pack_delta(muts, old->data, -1, ov);
         }
@@ -586,7 +616,7 @@ bool TikvMetaStore::delete_object(std::string_view b, std::string_view k) {
         if (!vals[1]) return false;  // 幂等：muts 空，不发事务
         auto old = codec::decode_object(std::string(k), *vals[1]);
         muts.push_back({TikvOp::kDel, okey, {}});
-        enqueue_reclaim(muts, old.data);
+        enqueue_reclaim(muts, old.data, ReclaimReason::kDelete);
         mut_refs(muts, old.data, /*add=*/false, {});
         mut_pack_delta(muts, old.data, -1, codec::pack_rec_overhead(b, k));
         return true;
@@ -721,7 +751,7 @@ void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string
         const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
         mut_pack_delta(muts, p.data, +1, ov);
         if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
-            enqueue_reclaim(muts, old->data);
+            enqueue_reclaim(muts, old->data, ReclaimReason::kPartOverwrite);
             mut_refs(muts, old->data, /*add=*/false, {});
             mut_pack_delta(muts, old->data, -1, ov);
         }
@@ -822,14 +852,14 @@ std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view 
                                codec::pack_rec_overhead_part(b, k, id, no));
                 mut_pack_delta(muts, p.data, +1, codec::pack_rec_overhead(b, k));
             } else {  // 未选中分片入 GC 账
-                enqueue_reclaim(muts, p.data);
+                enqueue_reclaim(muts, p.data, ReclaimReason::kComplete);
                 mut_refs(muts, p.data, /*add=*/false, {});
                 mut_pack_delta(muts, p.data, -1,
                                codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
         if (old) {  // 旧同名对象入 GC 账
-            enqueue_reclaim(muts, old->data);
+            enqueue_reclaim(muts, old->data, ReclaimReason::kOverwrite);
             mut_refs(muts, old->data, /*add=*/false, {});
             mut_pack_delta(muts, old->data, -1, codec::pack_rec_overhead(b, k));
         }
@@ -845,7 +875,7 @@ void TikvMetaStore::abort_upload(std::string_view b, std::string_view k, std::st
             muts.push_back({TikvOp::kLock, upload_guard(b, k, id, s), {}});
         for (const auto& p : scan_parts(ts, b, k, id)) {
             muts.push_back({TikvOp::kDel, part_key(b, k, id, p.part_no), {}});
-            enqueue_reclaim(muts, p.data);
+            enqueue_reclaim(muts, p.data, ReclaimReason::kAbort);
             mut_refs(muts, p.data, /*add=*/false, {});
             mut_pack_delta(muts, p.data, -1,
                            codec::pack_rec_overhead_part(b, k, id, p.part_no));
@@ -879,6 +909,31 @@ std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t ma
 void TikvMetaStore::ack_reclaim(uint64_t seq) {
     txn_retry("ack_reclaim", [&](uint64_t, std::vector<TikvMutation>& muts) {
         muts.push_back({TikvOp::kDel, gcq_key(seq), {}});  // 盲删单 key，无跨 key 不变量
+    });
+}
+
+// 多网关 GC 租约（docs/gaps.md §6.1）：value = "<owner>\0<expiry_ms>"。快照读判定
+// + prewrite 冲突检测充当 CAS（读到即提交，§4.1）——两实例并发抢注只有一个提交
+// 成功，输者重试后读到新租约即退出。TTL 过期由墙钟判定（网关间时钟偏差应远小于
+// TTL；租约本就要求 ttl ≫ 单轮 GC 时长）
+bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
+    return txn_retry("try_gc_lease", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
+        std::string lk = tkey('L', "gc");
+        const int64_t now = now_ms();
+        if (auto v = snap_get(ts, lk)) {
+            auto nul = v->find('\0');
+            if (nul != std::string::npos) {
+                std::string_view cur(v->data(), nul);
+                int64_t expiry = 0;
+                std::from_chars(v->data() + nul + 1, v->data() + v->size(), expiry);
+                if (cur != owner && expiry > now) return false;  // 他人持有且未过期
+            }
+        }
+        std::string val(owner);
+        val += '\0';
+        val += std::to_string(now + ttl_ms);
+        muts.push_back({TikvOp::kPut, lk, std::move(val)});
+        return true;
     });
 }
 

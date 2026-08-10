@@ -202,9 +202,20 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
         meta.etag.clear();
     }
 
-    auto stream = co_await src_backend.get_object(src_bucket, src_key, std::nullopt);
-    auto result =
-        co_await router_.resolve(bucket).put_object(bucket, key, std::move(meta), *stream.body);
+    // 同后端快路径（docs/gaps.md §6.2/§6.3）：localfs 走内核 copy_file_range、
+    // cloudproxy 走远端服务端 COPY——都免掉"读进网关再写回"。nullopt = 该后端
+    // 无快路径或本次不可用（tier stub、跨设备），回落流式路径，语义等价
+    auto& dst_backend = router_.resolve(bucket);
+    storage::PutResult result;
+    std::optional<storage::PutResult> fast;
+    if (&src_backend == &dst_backend)
+        fast = co_await dst_backend.copy_object_fast(src_bucket, src_key, bucket, key, meta);
+    if (fast) {
+        result = std::move(*fast);
+    } else {
+        auto stream = co_await src_backend.get_object(src_bucket, src_key, std::nullopt);
+        result = co_await dst_backend.put_object(bucket, key, std::move(meta), *stream.body);
+    }
 
     XmlWriter w;
     w.open("CopyObjectResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");

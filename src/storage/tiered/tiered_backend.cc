@@ -337,11 +337,17 @@ Task<PutResult> TieredBackend::put_object(std::string_view bucket, std::string_v
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
     co_await pool_->schedule();
-    TierInfo prior = read_tier_only(local_->object_data_path(bucket, key));
+    fs::path dpath = local_->object_data_path(bucket, key);
+    TierInfo prior = read_tier_only(dpath);
+    struct stat st0{};
+    int64_t prior_size = ::stat(dpath.c_str(), &st0) == 0 ? int64_t(st0.st_size) : 0;
     // 条件透传给 local_：stub 的 sidecar 保留原 etag（HEAD 全本地，§6.1），
     // 本地 commit 锁内的检查对 demoted 对象同样权威
     auto r = co_await local_->put_object(bucket, key, std::move(meta), body, cond);
     touch_atime(bucket, key);
+    struct stat st1{};
+    if (::stat(dpath.c_str(), &st1) == 0) note_local_delta(int64_t(st1.st_size) - prior_size);
+    maybe_kick_quota_scan();
     // write-back：新数据只落本地，tier 回到 local；旧云副本成孤儿（§7.1）
     if (prior.tier != Tier::kLocal) enqueue_gc(bucket, key, prior.remote_etag);
     co_return r;
@@ -360,7 +366,10 @@ Task<void> TieredBackend::delete_object(std::string_view bucket, std::string_vie
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
     co_await pool_->schedule();
-    TierInfo prior = read_tier_only(local_->object_data_path(bucket, key));
+    fs::path dpath = local_->object_data_path(bucket, key);
+    TierInfo prior = read_tier_only(dpath);
+    struct stat st0{};
+    if (::stat(dpath.c_str(), &st0) == 0) note_local_delta(-int64_t(st0.st_size));
     co_await local_->delete_object(bucket, key);
     erase_atime(bucket, key);
     // 响应不等云端：云副本入 GC 异步删除（§7.2）
@@ -648,6 +657,7 @@ Task<void> TieredBackend::scan_once() {
         }
     }
     co_await drain_batch();
+    local_bytes_est_.store(int64_t(local_bytes), std::memory_order_relaxed);  // 增量账校准
 
     // 触发 2：空间水位（statvfs 为准，可选 quota 叠加）。statvfs 在判冷下沉之后
     // 现测；quota 账扣除判冷已释放的部分
@@ -1145,6 +1155,28 @@ void TieredBackend::save_atime_snapshot() {
     }
 }
 
+void TieredBackend::note_local_delta(int64_t delta) {
+    int64_t est = local_bytes_est_.load(std::memory_order_relaxed);
+    if (est < 0) return;  // 首轮 scan 未校准前不记（避免负数账）
+    local_bytes_est_.fetch_add(delta, std::memory_order_relaxed);
+}
+
+void TieredBackend::maybe_kick_quota_scan() {
+    if (cfg_.quota_bytes == 0) return;
+    int64_t est = local_bytes_est_.load(std::memory_order_relaxed);
+    if (est < 0 || double(est) <= cfg_.space_high_watermark * double(cfg_.quota_bytes)) return;
+    if (quota_kick_inflight_.exchange(true)) return;  // 已有提前轮在途
+    bool spawned = bg_.spawn([](TieredBackend* self) -> Task<void> {
+        struct Clear {
+            std::atomic<bool>& f;
+            ~Clear() { f.store(false); }
+        } clear{self->quota_kick_inflight_};
+        LOG_INFO("tiered: quota estimate above high watermark, starting early scan");
+        co_await self->scan_and_gc();
+    }(this));
+    if (!spawned) quota_kick_inflight_.store(false);  // 正在关闭
+}
+
 // ---------- 后台任务管理（core/background.h 等待组）----------
 
 void TieredBackend::schedule_scan() {
@@ -1210,6 +1242,7 @@ Task<void> TieredBackend::close() {
     // 阻塞等待在调用方线程上进行；后台任务在池线程收尾，不会互相占用
     bg_.wait_idle();
     save_atime_snapshot();
+    co_await local_->close();  // 撤基座 localfs 的 mpu 周期清理定时器
     co_return;
 }
 

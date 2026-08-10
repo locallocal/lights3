@@ -4,6 +4,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -29,6 +30,11 @@ struct FsDataOptions {
     uint64_t pack_threshold = 0;
     uint64_t pack_max_size = 128ull << 20;  // active pack 封存阈值
     int pack_writers = 4;                   // 并存 active pack 数
+    // 老化轮转（docs/gaps.md §6.1）：active pack 首条 record 写入后逾此时长即封存，
+    // 与容量阈值互补。低写入量下只按容量封存会让 active pack 永不轮转——其中被
+    // 覆盖/删除的 record 成为压实候选集之外的死区（最坏常驻 pack_max_size）。
+    // 0 = 关闭（只按容量与 close 封存，即本改动前的行为）
+    int pack_max_age_sec = 0;
     // 读路径 crc 失配上报（P5 corruption 指标；空 = 不上报）。reader 持本 options
     // 拷贝逃逸出 store 生命周期——回调不得引用 store/backend（装配侧只捕获计数器）
     std::function<void()> on_corruption;
@@ -64,8 +70,13 @@ public:
     bool pack_write_locked(uint64_t pack_id) override;
     uint64_t stat_pack(uint64_t pack_id) override;
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
+    Task<uint64_t> seal_aged_packs(int64_t max_age_ms) override;
     Task<void> scan_chunks(
-        const std::function<void(uint64_t file_id, int64_t mtime_ms)>& cb) override;
+        const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb)
+        override;
+    Task<void> scan_packs(
+        const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& cb)
+        override;
     Task<void> close() override;
 
     // 布局路径（§5）；测试观察用
@@ -83,6 +94,9 @@ private:
         int fd = -1;
         uint64_t id = 0;
         uint64_t size = 0;  // 当前追加偏移 = 文件大小
+        // 首条 record 落地时刻（steady_clock，老化轮转判据）。用单调钟而非墙钟：
+        // 判的是"这个 pack 开着多久了"，NTP 回拨不该让它永不轮转或立刻轮转
+        std::chrono::steady_clock::time_point opened{};
     };
 
     // 懒建 shard 目录 + dirfd 常驻缓存（写会话结束 fsync 目录用，§5.1）
@@ -104,7 +118,12 @@ private:
         uint64_t id = 0;
         uint64_t size = 0;
     };
-    void close_slot_locked(ActivePack& slot);  // 持 slot.m 调用
+    // chunks/ 与 packs/ 的 shard 目录枚举（布局同构，scan_chunks/scan_packs 共用）
+    Task<void> scan_shard_tree(const char* sub, const char* suffix,
+                               const std::function<void(uint64_t, int64_t, uint64_t)>& cb);
+
+    bool slot_aged(const ActivePack& slot) const;  // 持 slot.m 调用；pack_max_age_sec<=0 恒 false
+    void close_slot_locked(ActivePack& slot);      // 持 slot.m 调用
     // 提交积压的封存；失败放回队列（append 路径告警后续重试，close 路径上抛）
     void flush_seals(bool rethrow);
 

@@ -20,14 +20,15 @@
 ## 速览
 
 - **第一部分 · 需要调整的实现**：P0 四条（§1）、高 二十余条（§2，其中 12 条展开、13 条列表）、中 三十余条（§3）、低 二十余条（§4）。
-- **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5，**已全部实现**）、存储引擎能力缺口 23 项（§6）、运维与工程能力缺口 10 项（§7）。
+- **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5，**已全部实现**）、存储引擎能力缺口 23 项（§6，**已全部处理**——实现或定性为设计边界）、运维与工程能力缺口 10 项（§7）。
 - **第三部分 · 文档与实现的偏差**：15 条实现与承诺不符（含"改实现"与"改文档"两类），另有 7 条中英文档漂移（§8）。
 
 P0 四条**已于 2026-08-03 全部修复**（详见 §1），高危 25 条（§2 的 12 条展开 + §2.13 的 13 行）
 **已于 2026-08-06 全部修复**（详见 §2；其中 §2.6 的下推顺带解决了 §3.6），中危三十余条
 **已于 2026-08-08 全部修复**（详见 §3），低危 23 行**已于 2026-08-08 全部修复**（详见 §4）。
 第一部分至此清零。第二部分的 **§5 S3 协议缺口 10 小节已于 2026-08-09 全部实现**
-（详见 §5）；当前未修复的起点是 §6 存储引擎能力缺口。
+（详见 §5），**§6 存储引擎能力缺口 23 项已于 2026-08-11 全部处理**（详见 §6，
+含若干条按 workload 论证后的刻意保留）；当前未修复的起点是 §7 运维与工程能力缺口。
 
 P0 四条按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
 
@@ -730,9 +731,12 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 ——现同步模型只有增删两种，policy 编辑无法传播，得先给落盘对象加版本位，属另一
 件事。
 
-## 6. 存储引擎能力缺口
+## 6. [✅已修复] 存储引擎能力缺口
 
-### 6.1 duostore
+> 本节三小节**已于 2026-08-11 全部处理完毕**：各表格下方为逐行的实际修法；
+> 凡写"**刻意保留**"者为按 workload 论证后的设计边界，并给出理由。
+
+### 6.1 [✅已修复] duostore
 
 | 缺口 | 位置 | 说明 |
 | --- | --- | --- |
@@ -748,7 +752,65 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 | **TiKV 侧车边界**（中） | `tikv_client.cc:153-186` | 只有乐观 2PC，无悲观事务、无 lock TTL 续租、无大事务分片提交、批间无并发 |
 | gcq 的 reason 字段声明但未实现（低） | `codec.cc:406` | 回收来源不可区分，无法定位压力来源，也无法按来源施加不同 grace |
 
-### 6.2 cloudproxy
+**✅已修复**（2026-08-10/11，逐行）：
+
+- **pack 老化轮转**：新增 `pack_max_age`（默认 1h，0=关）。写路径在下一条 record
+  处顺带查年龄（与容量判据同一封存分支）；`IDataStore::seal_aged_packs` 供 GC
+  每轮补扫——写入停止后写路径不再被触达，恰是低写入量场景的形态。try_lock 拿不到
+  即跳过（该槽正被写，它自己会轮转），GC 不与业务写抢锁。
+- **压实预算与优先级**：先收齐候选连同可回收字节，按收益降序（大小未知的崩溃
+  遗留项排最后），再按 `gc_compact_max_packs`（默认 16）/`gc_compact_max_bytes`
+  （默认 1GiB）截断；首个候选恒放行（防单 pack 大于整轮预算时永不推进）。被挤下
+  的条数走 DuoGcStats/gauge/日志出口，不静默截断。
+- **RADOS 三缺**：写侧 pin 已随 §1.2 修复（分配即 pin，finish 移交调用方解除）；
+  `WriteHint.owner` 现随每片对象以单对象原子 write_op 落 `lights3.owner` xattr
+  （数据与归属要么都在要么都不在），离线打捞 getxattr 反查。
+  `remove_pack`/`rewrite_pack` 恒 no-op **刻意保留**：pack 聚合针对本地 fs 的
+  per-file 成本，RADOS 侧小对象放大由 BlueStore min_alloc_size 与池策略承担，
+  网关叠 pack 只会引入跨对象压实与读改写放大（论证注释在 rados_data_store.cc）。
+- **packs/ 反向对账**：`IDataStore::scan_packs` + 孤儿扫描双向化——账外 pack 过
+  三道门（mtime 逾 grace、无 pin、无 flock 写锁）后 unlink；账在文件缺只告警计数
+  绝不删 meta。chunks/packs 枚举收敛到一个 scan_shard_tree。
+- **四引擎能力矩阵**：redis 覆写 `ack_reclaims`（单 Lua 一次 RTT 批量销账，此前
+  逐条往返）；rocksdb 挂上引擎指标（estimate_num_keys / block_cache_usage /
+  sst_bytes / memtable_bytes，属性 gauge 渲染时现取）；`refs.owner` 三种历史形态
+  收敛为 `codec::parse_pack_owner` 唯一解析器（对象 / mpu 五段 / 旧 mpu 三段，
+  离线取证工具与压实回调同一入口），kLegacyPart/kUnknown 即"保守不迁"判据。
+- **schema 演进**：四引擎统一"存量 < 当前走迁移链、> 当前拒绝降级运行、乱码/异
+  谱系拒绝"（共享判定 `meta_util.h parse_schema_marker`；rocks/tikv/redis 各自
+  迁移链钩子，sqlite 走 user_version 同款）。链当前为空——record 级演进走 codec
+  `read_ver` 兼容读（§5.2 先例），链留给 CF/键布局变更；"改布局不留迁移"开机
+  响亮失败。共享引擎（redis/tikv）升级后旧版网关开机即拒，天然挡混布回写。
+- **备份/恢复与跨引擎迁移**：`meta_dump.{h,cc}` 以 IMetaStore 为中介逻辑
+  dump/load（自描述二进制流：桶/对象记录含 extent manifest + 封存 pack 账 +
+  计数 + crc32c），record 级重放天然兼作四引擎互迁。恢复端把 chunk/pack 计数器
+  烧号抬到已见最大 id 之上（防新写撞存量文件号）。入口
+  `lights3 --duostore_admin dump:<backend>:<file> / load:...`（server 起动前执行，
+  停写天然成立），load 内置强制孤儿扫描。备份顺序固化在 meta_dump.h 头注释：
+  先 data 后 meta；恢复先 data、load、孤儿扫描。刻意不入档：进行中 MPU
+  （upload_id 无法保值，跨迁移续传本就不成立）与 gcq（无入队原语）——两者的数据
+  在恢复侧无引用，孤儿扫描兜底回收；桶创建时间与对象 version 重打（无持久语义）。
+- **多网关 GC 边界**：`IMetaStore::try_gc_lease`——GC 与孤儿扫描每轮开始先取带
+  TTL 的租约（TTL = max(2×gc_interval, 10min)），共享引擎以原子 CAS 实现（redis
+  单 Lua、tikv 快照读+prewrite 冲突检测），同 owner 续租、他人持有即跳过本轮；
+  本地引擎单进程文件锁已独占，恒 true。误配两台同开 GC 从"互相 unlink"降级为
+  "一台干活一台跳过"。**残留**（无害方向）：空 pack 延迟删除的"首次见空"时刻
+  为进程内簿记，重启后重新计时——只推迟回收，不会误删。
+- **GC 可观测性**：gcq_depth / gcq_oldest_age（全量轮刷新，防增量轮谎报 0）、
+  skipped_grace/pinned 走 gauge（每轮重扫，counter 必然虚高）、
+  pack_accounted_bytes/pack_live_bytes（比值即空间放大率，留查询侧算）、
+  chunk_bytes/pack_bytes 用量、gc_round_seconds 直方图。
+- **TiKV 侧车**：四项**刻意保留**为设计边界（论证注释在 tikv_client.cc
+  Committer 上方）——meta 事务按构造有界（对象 value 6MiB 封顶、gcq 单项 4096
+  extent 拆分、万分片 complete 实测数十批），txn_lock_ttl 的 √MiB 伸缩已覆盖
+  TTL 需求，无需心跳续租；悲观事务在 client-c 无成熟 C++ 路径且本店无长事务；
+  批间并发要把 Backoffer/RegionCache 线程安全化，只惠及低频宽事务，不值——
+  未来出现常态宽事务时先拆事务而非并发化。
+- **gcq reason**：`ReclaimReason`（overwrite/delete/part_overwrite/abort/
+  complete）四引擎入队带上来源，GC 按 reason 分桶计数；旧账解出 unknown，不抬
+  版本号，新旧账同队列共存。
+
+### 6.2 [✅已修复] cloudproxy
 
 | 缺口 | 位置 | 说明 |
 | --- | --- | --- |
@@ -759,7 +821,21 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 
 > 注：cloudproxy 的正确性问题（阻塞事件循环、响应头等待无超时、200+body Error 不重试）已在 2026-08-02 的上一轮评审中修复，此处不再列出。本节的能力缺口由针对性扫描得出，覆盖深度低于其它子系统——**建议后续单独补一轮 cloudproxy 深读**。
 
-### 6.3 本地系与通用层
+**✅已修复**（2026-08-10，逐行）：
+
+- **无长度上行**：chunked 且无 decoded-content-length 的 PUT 由直接 NotImplemented
+  改为 spool 到本地临时文件（O_TMPFILE 匿名 inode，崩溃即回收；不支持则
+  unlink-after-open）取得长度后走既有 stream_upload。`spool_max_bytes` 封顶
+  （默认 5GiB = AWS 单 PUT 上限，0 = 保留旧拒绝语义）、`spool_dir` 可配。
+- **元数据透传**：经核对已被 §5.2 的 `kStdMetaFields` 透传覆盖；SSE/
+  storage-class/tagging 是该次改动**刻意 501** 的（收下再回显等于替存储层撒谎）。
+- **同后端 copy**：见 6.3 copy 快路径——cloudproxy 实现远端服务端 COPY
+  （`x-amz-copy-source` + REPLACE + 我方元数据头），一次远端调用完成，消掉
+  2 倍跨网流量；COPY 与 complete 同款"200 先回、错误在 body"陷阱按既有模式处理。
+- **分片上传无并发**：**刻意保留**——分片各自是独立客户端请求、本就并发，网关
+  无从并行化单条串行到来的 body；断点续传同理是客户端侧语义。
+
+### 6.3 [✅已修复] 本地系与通用层
 
 | 缺口 | 位置 | 说明 |
 | --- | --- | --- |
@@ -771,6 +847,40 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 | **bucket_router 表达力**（中） | `bucket_router.cc:24-28` | 只有 bucket glob 单维度，不支持按 key 前缀路由/否定规则/正则；不校验 glob 语法（写错的 pattern 静默永不匹配）；无"规则不可达"检测；每请求一次堆分配 + 线性 fnmatch |
 | **`validate_bucket_name` 缺 AWS 规则**（中） | `validate.cc:16-20` | 缺 IP 地址形式拒绝、保留前后缀（`xn--`/`sthree-`/`-s3alias` 等）、`.-`/`-.` 相邻拒绝 |
 | **tiered quota 无增量维护**（低） | `tiered_backend.cc:589` | 文档承诺"遍历累计 + 增量维护"，实现只有遍历累计 → PUT/DELETE 之间的配额超限要等下一轮 scan（默认 1 小时）才发现 |
+
+**✅已修复**（2026-08-10，逐行）：
+
+- **xlocalfs io_uring**：内核能力探测（IORING_REGISTER_PROBE，探不到 READ/WRITE
+  回落 READV/WRITEV）；`fsync()` awaitable 接入提交段（FSYNC SQE 替换阻塞
+  fdatasync，等待期间线程回池）；批量提交（"当班 flusher"代提 enter，N 条 SQE
+  一次系统调用）；SQPOLL 可选（建权失败回落普通模式）；setup 失败回落 localfs
+  （两者盘上布局相同，回落无损，WARN 留痕）。注册缓冲/固定文件未做——属吞吐
+  调优而非能力缺口，现测瓶颈在盘不在提交路径。
+- **copy 快路径**：`IStorageBackend::copy_object_fast` 钩子（默认 nullopt 回落
+  流式）。localfs/xlocalfs 用 `copy_file_range`（reflink 文件系统 O(1) 克隆），
+  EXDEV/ENOSYS/tier stub/并发截断均回落流式；cloudproxy 走远端服务端 COPY（见
+  6.2）。tiered/memory/duostore **刻意维持流式回落**：tiered 的 stub 语义与
+  duostore 的引用计数模型下快路径需另行设计，流式路径语义正确。
+- **MPU 周期清理**：`LocalFsOptions{mpu_ttl, mpu_scan_interval}`（配置键同名），
+  TimerQueue 完成后重臂周期扫，close/dtor 撤定时器等在途；xlocalfs/tiered 链回
+  基座。
+- **目录标记对象**：全后端支持 `PUT bucket/folder/`——localfs 映射为目录内保留
+  标记文件 `.lights3-dir`（全链路），其余后端本就是平面 key 空间。localfs 专属
+  路径规则（前导 '/'、空段、单段 255B）下沉为 `validate_fs_object_key`，共享层
+  不再让 memory/duostore/cloudproxy 陪绑；`.`/`..` 段留共享层（转发型后端拼 URL
+  时 dot-segment 归一会改写对象身份，不只是本地路径问题）。
+- **memory 硬限制**：`max_bytes` 容量闸门（超限 503 SlowDown，对象+在途分片
+  同账）、mpu_ttl 过期清理（入口顺带扫，不加后台线程）、close() 释放驻留、
+  used_bytes gauge 可观测。
+- **bucket_router**：坏 glob（未闭合字符类）与永不可能命中的 pattern（含桶名
+  字符集外的字面字符）构建期报错；不可达检测（跟在 catch-all 后、重复规则）；
+  `!pattern` 否定规则；每请求堆分配换栈缓冲（桶名 ≤63B）。key 前缀路由/正则
+  **刻意不做**：桶级操作无法跨后端聚合，一个桶横跨两后端破坏原子性语义（取舍
+  注释在头文件）。
+- **validate_bucket_name**：补齐 IPv4 形式、`.-`/`-.`、保留前缀
+  （xn--/sthree-/amzn-s3-demo-）与后缀（-s3alias/--ol-s3/--x-s3/.mrap）。
+- **tiered quota 增量维护**：PUT/DELETE 就地增减估算（stat 拿旧尺寸算净差），
+  超高水位提前踢 scan；估算漂移只偏保守方向，每轮 scan 以实测校准。
 
 ## 7. 运维与工程能力缺口
 
@@ -836,8 +946,8 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 1. ~~**先修 P0 的四条**（1.1–1.4）。其中 1.1 的三处改动必须同批上线（单改一处不构成防线）。~~ ✅ 2026-08-03 完成。
 2. ~~**2.1 + 2.2 一起修**——两条都是"后台线程/关停期异常防线"，成本极低、收益立竿见影，且 2.2 的 TimerQueue 次生问题会让 2.1 的修复更难验证。~~ ✅ 2026-08-06 完成（§2 整节同批）。
 3. ~~**3.1 / 3.2 / `AsyncSemaphore` 取消是同一条链**（2.9 已单独修完）：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持（§2.13 只做了析构断言，`close()` 留在这里），否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。~~ ✅ 2026-08-07/08 完成（§3 整节，§4 随后）。
-   ~~**下一站是 §5.1 的分页缺失**~~ ✅ 2026-08-09 完成（§5 整节）。**当前下一站是 §6 存储引擎能力缺口**——其中 6.1 的 pack 老化/预算与第 4 条互为前置。
-4. **6.1 的 pack 老化/预算**——2.3 的存活账口径与压实判据已改，续做时以现判据为基线，避免再次推翻测试。
+   ~~**下一站是 §5.1 的分页缺失**~~ ✅ 2026-08-09 完成（§5 整节）。~~**当前下一站是 §6 存储引擎能力缺口**~~ ✅ 2026-08-11 完成（§6 整节）。**当前下一站是 §7 运维与工程能力缺口**。
+4. ~~**6.1 的 pack 老化/预算**——2.3 的存活账口径与压实判据已改，续做时以现判据为基线，避免再次推翻测试。~~ ✅ 2026-08-10 完成（以现判据为基线，见 §6.1）。
 5. ~~**3.5 的白名单反转**一次性消掉 5.3、3.4 的一半与未来所有子资源漂移，性价比最高。~~ ✅ 已完成；5.3 随 §5 实现后，白名单也已按新语义放行 `response-*`。
 6. 第 7 节的工程能力（CI、TLS、后端指标）不阻塞正确性修复，可并行推进。
 7. §2.13 的 httplib `Expect: 100-continue` 留有上游 API 限制（无法延迟应答），如需彻底解决要么换驱动、要么向 cpp-httplib 提 PR。

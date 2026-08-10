@@ -41,9 +41,35 @@ struct PartRec {
     DataRef data;
 };
 
+// gcq 入账来源（docs/gaps.md §6.1）：GC 按来源分桶计数，才定位得到"回收压力来自
+// 覆盖写还是批量删除还是 mpu 弃件"。落盘为 codec gcq 记录的 reason 字节（此前恒写
+// 0 且解码即丢弃），旧账解出 kUnknown
+enum class ReclaimReason : uint8_t {
+    kUnknown = 0,        // P4 之前入队的旧账
+    kOverwrite = 1,      // put_object / complete_upload 覆盖同名对象的旧版本
+    kDelete = 2,         // delete_object
+    kPartOverwrite = 3,  // 同号分片重传（last-write-wins）
+    kAbort = 4,          // abort_upload（含 GC 的 mpu_ttl 过期清理）
+    kComplete = 5,       // complete_upload 未被选中的分片
+};
+
+// 指标标签与日志用；未知取值一律回落 "unknown"（旧账/未来新增来源）
+inline const char* reclaim_reason_name(ReclaimReason r) {
+    switch (r) {
+        case ReclaimReason::kOverwrite: return "overwrite";
+        case ReclaimReason::kDelete: return "delete";
+        case ReclaimReason::kPartOverwrite: return "part_overwrite";
+        case ReclaimReason::kAbort: return "abort";
+        case ReclaimReason::kComplete: return "complete";
+        case ReclaimReason::kUnknown: break;
+    }
+    return "unknown";
+}
+
 struct Reclaim {
     std::vector<Extent> extents;  // 待物理回收
     int64_t enqueue_ms = 0;       // 入队时刻（unix ms）；GC 消费端据此判 gc_grace（§9.1）
+    ReclaimReason reason = ReclaimReason::kUnknown;
 };
 
 struct PackStat {
@@ -164,6 +190,14 @@ struct IMetaStore {
             out.push_back(swap_extents(r.bucket, r.key, r.expect_version, r.from, r.to));
         return out;
     }
+    // 多网关 GC 租约（docs/gaps.md §6.1）：GC/孤儿扫描单实例此前只是 gc_enabled
+    // **约定**，误配两台同开 GC 会互相 unlink 对方判定的空 pack。每轮开始前取
+    // 租约：共享型引擎（redis/tikv）以带 TTL 的原子 CAS 实现——owner 相同即续租
+    // 刷新 TTL，他人持有且未过期返回 false（本轮跳过）；本地引擎（rocks/sqlite）
+    // 单进程文件锁已保证独占，默认恒 true。owner 为实例标识（进程内随机生成）。
+    // 崩溃的持有者由 TTL 过期自然让位——租约不解决 pin 表不共享的问题（进程内
+    // pin 他网关不可见），gc_grace ≥ 最长预期 GET 时长的部署约束仍然成立
+    virtual bool try_gc_lease(std::string_view /*owner*/, int64_t /*ttl_ms*/) { return true; }
     virtual bool chunk_referenced(uint64_t file_id) = 0;  // 孤儿扫描
     // 孤儿反向对账（§9.3）：遍历 refs 表全部 file_id（chunk/rados 同账，顺序不保证）。
     // 快照语义从宽：遍历期间的并发增删可见与否均可——调用方（孤儿扫描）对"文件在

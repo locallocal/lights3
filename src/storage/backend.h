@@ -174,6 +174,19 @@ struct IStorageBackend {
                                        ObjectMeta meta, http::BodyReader& body,
                                        PutCondition cond = {}) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;
+    // 同后端 copy 快路径（docs/gaps.md §6.3）：src 与 dst 都归本后端时由 CopyObject
+    // handler 先试本钩子。返回 nullopt = 无快路径/本次不可用（tier stub、跨设备等），
+    // 调用方回落"get_object 流式读 + put_object 流式写"——语义等价，只是多一趟
+    // 字节搬运（本地）或两趟跨网流量（云端）。meta 为最终对象元数据（REPLACE 已
+    // 由 handler 组好；COPY 抄自源），key/size/etag 由实现自源补齐——字节不变，
+    // etag 恒等于源
+    virtual Task<std::optional<PutResult>> copy_object_fast(std::string_view /*src_bucket*/,
+                                                            std::string_view /*src_key*/,
+                                                            std::string_view /*dst_bucket*/,
+                                                            std::string_view /*dst_key*/,
+                                                            ObjectMeta /*meta*/) {
+        co_return std::nullopt;
+    }
     // S3 语义：对不存在的 key 也返回成功（幂等删除）
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;
@@ -216,7 +229,14 @@ inline constexpr std::string_view kSysBucketName = ".sys";
 // 请求调用它（allow_reserved=false），各后端数据面入口再调一次作纵深防御。
 // 用户请求永远拿不到 allow_reserved=true
 void validate_bucket_name(std::string_view bucket, bool allow_reserved = false);
+// AWS 通用约束：非空、≤1024B、无控制字符、无 '.'/'..' 段（后者对任何把 key 拼进
+// URL 路径的转发型后端都不安全——RFC 3986 的 dot-segment 归一会改写对象身份）
 void validate_object_key(std::string_view key);
+// 路径映射型后端（localfs/xlocalfs）的补充约束（docs/gaps.md §6.3）：无前导 '/'、
+// 无空段、单段 ≤255B。末尾 '/' 的目录标记对象**不在**禁止之列——localfs 以目录内
+// 的保留标记文件承载它，S3 控制台"新建文件夹"与 s3fs/goofys/rclone 的目录语义
+// 依赖这一形态。调用方须先调 validate_object_key
+void validate_fs_object_key(std::string_view key);
 
 // 后端内部校验的实参：后端必须能服务 CredentialStore 对 .sys 的读写，故这一层
 // 放行保留名。它校验的是**路径安全**（字符集、长度、无 '/' 与 NUL），保留名的

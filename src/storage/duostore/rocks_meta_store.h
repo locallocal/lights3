@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "core/metrics.h"
 #include "storage/duostore/meta_store.h"
 
 namespace rocksdb {
@@ -29,10 +30,17 @@ struct RocksMetaOptions {
     size_t write_buffer_bytes = 64ull << 20;  // 每 CF memtable 容量
     int max_write_buffers = 2;                // 每 CF memtable 个数上限
     int max_background_jobs = 2;              // flush/compaction 后台线程总数
+    MetricsScope metrics;  // 空 scope = 孤立实例（测试直构零装配，docs/gaps.md §6.1）
 };
 
 class RocksMetaStore final : public IMetaStore {
 public:
+    // 当前 schema 版本（打开时按迁移链升级存量库，docs/gaps.md §6.1）
+    static constexpr int64_t kSchemaCurrent = 1;
+    // schema 标记合法性判定（migrate_schema 的纯前置，静态便于单测）：解析失败、
+    // 版本比本构建新（降级运行会静默写坏）均抛 InternalError；返回存量版本号
+    static int64_t validate_schema_marker(const std::string& stored);
+
     explicit RocksMetaStore(RocksMetaOptions opt);
     ~RocksMetaStore() override;
     RocksMetaStore(const RocksMetaStore&) = delete;
@@ -97,7 +105,9 @@ private:
     std::vector<PartRec> scan_parts(std::string_view b, std::string_view k,
                                     std::string_view id);
     uint64_t alloc_id(std::string_view counter_key, IdRange& r, uint32_t n = 1);
-    void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref);
+    void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref,
+                                ReclaimReason reason);
+    void migrate_schema(const std::string& stored);  // 版本判定 + 迁移链（ctor 调用）
     // 同批维护 refs（chunk 引用表，§4.1）：add=写入 owner、否则删除
     void batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add,
                     std::string_view owner);

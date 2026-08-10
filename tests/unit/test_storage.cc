@@ -1,5 +1,8 @@
 // 后端一致性套件：同一组用例参数化跑 memory / localfs / xlocalfs（docs/storage-backend.md §6）；
 // 套件本体在 unit/backend_suite.h（cloudproxy 测试同用，docs/cloudproxy-backend.md §10）
+#include <fcntl.h>
+
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -142,6 +145,120 @@ TEST(xlocalfs_large_object_roundtrip) {
     auto joined = sync_wait(b.get_object("bkt", "big/joined.bin", std::nullopt));
     CHECK(read_all(*joined.body) == data);
     sync_wait(b.close());
+}
+
+// 内核能力探测（docs/gaps.md §6.3）：此前无条件用 IORING_OP_READ/WRITE（5.6+），
+// 5.1–5.5 上每个 IO 都会拿到 -EINVAL。探测生效后老内核走 READV/WRITEV 回落——
+// 这里正向验证探测结论自洽，并把回落路径本身跑通（强制关掉 READ/WRITE 无从注入，
+// 改由 uring_forced_readv_roundtrip 用引擎直调覆盖）
+TEST(xlocalfs_feature_probe_is_self_consistent) {
+    auto pool = std::make_shared<ThreadPool>(2);
+    UringEngine eng(pool, UringOptions{});
+    const auto& f = eng.features();
+    CHECK(!f.describe().empty());
+    // 探测不可用时必须落到 5.1 保守基线（READV/WRITEV），绝不乐观假设 READ/WRITE
+    if (!f.probed) CHECK(!f.op_read_write);
+    eng.shutdown();
+}
+
+// READV/WRITEV 回落路径（老内核形态）：直接提交 READV/WRITEV opcode 走一遍读写，
+// 保证 iovec 组帧与偏移语义与 READ/WRITE 一致
+TEST(xlocalfs_uring_readv_writev_fallback_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto eng = std::make_shared<UringEngine>(pool, UringOptions{});
+    auto path = tmp.path / "rw.bin";
+    int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    CHECK(fd >= 0);
+
+    std::string payload = "readv/writev fallback payload";
+    auto io = [&]() -> Task<std::string> {
+        UringEngine::Awaitable w{*eng,   IORING_OP_WRITEV,
+                                 fd,    payload.data(),
+                                 unsigned(payload.size()), 0,
+                                 {},    {}};
+        int n = co_await w;
+        CHECK_EQ(n, int(payload.size()));
+        std::string out(payload.size(), '\0');
+        UringEngine::Awaitable r{*eng,  IORING_OP_READV,
+                                 fd,    out.data(),
+                                 unsigned(out.size()), 0,
+                                 {},    {}};
+        int m = co_await r;
+        CHECK_EQ(m, int(out.size()));
+        co_return out;
+    };
+    CHECK_EQ(sync_wait(io()), payload);
+    ::close(fd);
+    eng->shutdown();
+}
+
+// 批量提交（docs/gaps.md §6.3）：此前每条 SQE 一次 io_uring_enter。改为"当班
+// flusher 代提"后，并发提交会互相捎带——正确性判据是每条 co_await 都拿到自己的
+// 结果、无丢单无错配。SQ 深度取得比并发数小，顺带覆盖"SQ 满 → 等 flusher 推进"
+TEST(xlocalfs_uring_batched_submit_under_concurrency) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(8);
+    auto eng = std::make_shared<UringEngine>(pool, UringOptions{/*entries=*/8});
+    constexpr int kN = 16;  // 线程数按需最小：SQ 深度 8 已能覆盖"SQ 满 → 等 flusher"
+    std::vector<int> fds(kN, -1);
+    for (int i = 0; i < kN; ++i) {
+        auto p = tmp.path / ("c" + std::to_string(i) + ".bin");
+        fds[i] = ::open(p.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        CHECK(fds[i] >= 0);
+    }
+    // 每个 fd 写入独一无二的内容再读回：错配（A 的 CQE 喂给 B）立刻暴露
+    auto one = [&](int i) -> Task<bool> {
+        std::string want(4096, char('a' + (i % 26)));
+        want.replace(0, 8, std::to_string(1000000 + i));
+        int n = co_await eng->write(
+            fds[i], std::span<const std::byte>(
+                        reinterpret_cast<const std::byte*>(want.data()), want.size()),
+            0);
+        if (n != int(want.size())) co_return false;
+        std::string got(want.size(), '\0');
+        int m = co_await eng->read(
+            fds[i], std::span<std::byte>(reinterpret_cast<std::byte*>(got.data()), got.size()),
+            0);
+        co_return m == int(want.size()) && got == want;
+    };
+    std::vector<std::thread> ts;
+    std::atomic<int> ok{0};
+    for (int i = 0; i < kN; ++i)
+        ts.emplace_back([&, i] {
+            if (sync_wait(one(i))) ok.fetch_add(1);
+        });
+    for (auto& t : ts) t.join();
+    CHECK_EQ(ok.load(), kN);
+    for (int fd : fds) ::close(fd);
+    eng->shutdown();
+}
+
+// 同后端 copy 快路径（docs/gaps.md §6.3）：copy_file_range 内核搬运，etag 恒等源；
+// REPLACE 语义的新 user_meta 生效
+TEST(localfs_copy_object_fast) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+    std::string data(700 * 1024, 'z');
+    for (size_t i = 0; i < data.size(); i += 11) data[i] = char('A' + (i % 26));
+    auto pr = put(b, "bkt", "src.bin", data);
+
+    ObjectMeta meta;
+    meta.content_type = "application/x-copied";
+    meta.user_meta["origin"] = "fast";
+    auto r = sync_wait(b.copy_object_fast("bkt", "src.bin", "bkt", "dst/copy.bin", meta));
+    CHECK(r.has_value());
+    CHECK_EQ(r->etag, pr.etag);  // 字节未变，etag 恒等于源
+    auto got = sync_wait(b.get_object("bkt", "dst/copy.bin", std::nullopt));
+    CHECK_EQ(read_all(*got.body), data);
+    CHECK_EQ(got.meta.content_type, std::string("application/x-copied"));
+    CHECK_EQ(got.meta.user_meta.at("origin"), std::string("fast"));
+
+    // 源不存在 → NoSuchKey（不是 nullopt——nullopt 会让 handler 白走一遍流式失败）
+    CHECK_THROWS_S3(sync_wait(b.copy_object_fast("bkt", "absent", "bkt", "d", {})),
+                    lights3::s3::S3ErrorCode::NoSuchKey);
 }
 
 TEST(localfs_atomic_layout) {

@@ -18,6 +18,10 @@ namespace lights3::storage::fsutil {
 
 inline constexpr const char* kSidecarSuffix = ".lights3-meta";
 inline constexpr const char* kBucketMarker = ".lights3-bucket";
+// 目录标记对象（docs/gaps.md §6.3）：key 末尾的 '/' 在文件系统上没有对应的文件名，
+// 承载物是该目录下的这个保留文件——"a/b/" ⇔ <bucket>/a/b/.lights3-dir。列举时把它
+// 还原成 key "a/b/"（排序键取空串，恰好排在同目录其它 key 之前，与全排序一致）
+inline constexpr const char* kDirMarker = ".lights3-dir";
 // 数据文件的元数据扩展属性（内容 = sidecar 同款 TSV）：随 inode 走，与数据同一次
 // rename 提交，故不可能与它描述的数据错位（docs/storage-backend.md §3.1）
 inline constexpr const char* kMetaXattr = "user.lights3.meta";
@@ -42,6 +46,8 @@ void reject_reserved_key(std::string_view key);
 //（rename 只保证原子，不保证父目录已落盘；失败静默——不该拖垮写路径）
 void fsync_file(int fd);
 void fsync_dir(const std::filesystem::path& dir);
+// 开关本身（LIGHTS3_FSYNC）：xlocalfs 要据它决定是否提交 io_uring 的 FSYNC SQE
+bool fsync_enabled();
 
 // k<TAB>v 行格式，tmp+rename 原子写
 void write_tsv(const std::filesystem::path& dest, const std::filesystem::path& tmp_dir,
@@ -50,8 +56,12 @@ std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem:
 
 // 建父目录 + 目录冲突检查 + 先 sidecar 后数据 rename（docs/storage-backend.md §3.1 写入原子性）；
 // PUT 与 complete_multipart 共用
+// prepared=true 表示调用方已按 commit_object_file 的原次序自行完成"写 xattr →
+// 数据落盘"（xlocalfs 走 io_uring 的 FSYNC SQE 替掉那次阻塞 fdatasync），此处
+// 跳过这两步。rename、目录 fsync 与 sidecar 写入不变
 void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                        const std::filesystem::path& staging_put, std::string_view key);
+                        const std::filesystem::path& staging_put, std::string_view key,
+                        bool prepared = false);
 
 // 条件 PUT 的提交点校验（PutCondition 契约，storage/backend.h）：调用方必须持
 // 同 key 的 commit 锁，使检查与随后的 rename 提交原子。元数据经 xattr/sidecar
@@ -68,6 +78,11 @@ struct TierInfo {
     std::string remote_etag;  // 云端副本 ETag（去引号 hex；校验与 GC 用，不外泄）
     std::string remote_at;    // 上传时间（iso8601）
 };
+
+// 元数据写进数据文件的 xattr（commit_object_file 内部用；xlocalfs 为了把随后的
+// fdatasync 换成 io_uring 的 FSYNC SQE，需要自己按同样的次序先写 xattr）
+void set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta,
+                    const TierInfo& tier);
 
 // stat 数据文件 + 读元数据（xattr 优先，回落 sidecar）；tier != local 时 size 以
 // 元数据为准（stub 数据文件为 0 长度，docs/tiered-storage.md §4.1）。

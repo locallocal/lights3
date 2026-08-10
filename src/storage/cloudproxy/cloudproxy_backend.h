@@ -36,6 +36,10 @@ struct CloudProxyConfig {
     int max_connections = 16;
     bool verify_etag = true;             // docs/cloudproxy-backend.md §6：单段 PUT 与远端 ETag 比对 MD5
     size_t queue_cap_bytes = 1 << 20;    // 数据面 BlockQueue 容量（背压水位）
+    // 无长度上行的 spool（docs/gaps.md §6.2）：0 = 禁用（回到 NotImplemented）。
+    // 上限防滥用——spool 落网关本地盘，AWS 单 PUT 上限 5GiB 是自然默认
+    uint64_t spool_max_bytes = 5ull << 30;
+    std::string spool_dir;               // 空 = std::filesystem::temp_directory_path()
 
     // BackendConfig::params → 配置；非法值在配置加载期抛 std::runtime_error
     static CloudProxyConfig from_params(const std::string& name,
@@ -65,6 +69,13 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
+    // 同后端 copy 快路径（docs/gaps.md §6.2）：远端服务端 COPY（x-amz-copy-source）
+    // ——此前云端内部 copy 会"下载到网关再传回去"，2 倍跨网流量与费用
+    Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket,
+                                                    std::string_view src_key,
+                                                    std::string_view dst_bucket,
+                                                    std::string_view dst_key,
+                                                    ObjectMeta meta) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
@@ -99,6 +110,14 @@ private:
                                   std::vector<std::pair<std::string, std::string>> extra,
                                   http::BodyReader& body, std::string resource,
                                   bool multipart_ctx);
+    // 无长度上行（docs/gaps.md §6.2）：AWS 不接受裸 chunked，先 spool 到本地临时
+    // 文件取得长度再走 stream_upload——此前直接 NotImplemented，chunked 且无
+    // x-amz-decoded-content-length 的 PUT 在本后端整个不可用
+    Task<PutResult> spool_and_upload(std::string raw_path, std::string raw_query,
+                                     std::string host, std::string content_type,
+                                     std::vector<std::pair<std::string, std::string>> extra,
+                                     http::BodyReader& body, std::string resource,
+                                     bool multipart_ctx);
 
     std::shared_ptr<cloudproxy::RemoteContext> ctx_;
     std::shared_ptr<ThreadPool> pool_;

@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,7 @@
 #include "storage/duostore/codec.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_util.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
@@ -191,6 +193,64 @@ TEST(duostore_decode_object_meta_parity) {
     CHECK_EQ(lite.content_type, full.content_type);
     CHECK(lite.user_meta == full.user_meta);
     CHECK_EQ(codec::to_unix_ms(lite.last_modified), codec::to_unix_ms(full.last_modified));
+}
+
+// pack record owner 的规范解析（docs/gaps.md §6.1）：三种历史形态收敛到唯一入口
+TEST(duostore_parse_pack_owner_forms) {
+    using codec::PackOwner;
+    auto obj = codec::parse_pack_owner(std::string("bkt\0some/key", 12));
+    CHECK(obj.kind == PackOwner::Kind::kObject);
+    CHECK_EQ(std::string(obj.bucket), "bkt");
+    CHECK_EQ(std::string(obj.key), "some/key");
+
+    auto part = codec::parse_pack_owner(std::string("mpu\0b\0k\0uid42\0" "7", 15));
+    CHECK(part.kind == PackOwner::Kind::kPart);
+    CHECK_EQ(std::string(part.bucket), "b");
+    CHECK_EQ(std::string(part.key), "k");
+    CHECK_EQ(std::string(part.upload_id), "uid42");
+    CHECK_EQ(part.part_no, 7);
+
+    auto legacy = codec::parse_pack_owner(std::string("mpu\0uid42\0" "300", 13));
+    CHECK(legacy.kind == PackOwner::Kind::kLegacyPart);
+    CHECK_EQ(std::string(legacy.upload_id), "uid42");
+    CHECK_EQ(legacy.part_no, 300);
+
+    // 不成形态一律 kUnknown（压实对其保守不迁）：空串、段数不符、part_no 非数字
+    CHECK(codec::parse_pack_owner("").kind == PackOwner::Kind::kUnknown);
+    CHECK(codec::parse_pack_owner("solo").kind == PackOwner::Kind::kUnknown);
+    CHECK(codec::parse_pack_owner(std::string("mpu\0b\0k\0uid\0x7", 14)).kind ==
+          PackOwner::Kind::kUnknown);
+    CHECK(codec::parse_pack_owner(std::string("\0k", 2)).kind == PackOwner::Kind::kUnknown);
+}
+
+// schema 标记判定（docs/gaps.md §6.1 迁移钩子的纯前置）：等于当前直过、
+// 比本构建新拒绝（防降级静默写坏）、乱码拒绝
+TEST(duostore_rocks_schema_marker_validation) {
+    CHECK_EQ(RocksMetaStore::validate_schema_marker(
+                 std::to_string(RocksMetaStore::kSchemaCurrent)),
+             RocksMetaStore::kSchemaCurrent);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(
+                        std::to_string(RocksMetaStore::kSchemaCurrent + 1)),
+                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("banana"),
+                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("1x"),
+                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(""),
+                    s3::S3ErrorCode::InternalError);
+}
+
+// 共享判定 parse_schema_marker 的谱系前缀语义（redis "r"、tikv "t" 走同一入口）
+TEST(duostore_schema_marker_lineage_prefixes) {
+    CHECK_EQ(parse_schema_marker("r1", "r", 1, "t"), 1);
+    CHECK_EQ(parse_schema_marker("t1", "t", 1, "t"), 1);
+    CHECK_EQ(parse_schema_marker("r1", "r", 3, "t"), 1);  // 旧版本放行，交迁移链
+    CHECK_THROWS_S3(parse_schema_marker("r2", "r", 1, "t"),
+                    s3::S3ErrorCode::InternalError);  // 比本构建新
+    CHECK_THROWS_S3(parse_schema_marker("t1", "r", 1, "t"),
+                    s3::S3ErrorCode::InternalError);  // 谱系不符
+    CHECK_THROWS_S3(parse_schema_marker("r", "r", 1, "t"), s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(parse_schema_marker("r-1", "r", 1, "t"), s3::S3ErrorCode::InternalError);
 }
 
 // '\0' 分隔编码的防御纵深：含 NUL 的段进入 key 构造器必须响亮失败（§4.1）
@@ -607,6 +667,7 @@ DuoStoreConfig pack_cfg(const TmpDir& tmp, const char* name) {
     cfg.pack_threshold = 1024;
     cfg.pack_max_size = 64 << 10;
     cfg.pack_writers = 1;
+    cfg.pack_max_age_sec = 0;  // 老化轮转默认关：布局断言按容量轮转才确定
     cfg.meta_sync = false;
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
@@ -666,7 +727,7 @@ PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadP
     // ——压实用例的迁移 payload ≤ 阈值恒走 pack 路径，pins 传空即可
     auto data = std::make_unique<FsDataStore>(
         FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers, {}},
+                      cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
         pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
         [mp](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
@@ -1088,6 +1149,109 @@ TEST(duostore_compact_low_liveness_pack) {
     sync_wait(h.b->close());
 }
 
+// 老化轮转（docs/gaps.md §6.1）：低写入量下 active pack 只按容量封存永不轮转，
+// 其中的死区进不了压实候选集。seal_aged_packs 把逾龄 active pack 封存，file_size
+// 如实回报（不是崩溃补封的 0），随后死区即可被压实回收
+TEST(duostore_pack_age_rotation_seals_idle_pack) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "age");
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    for (int i = 0; i < 3; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
+
+    uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
+    auto before = find_pack_stat(*h.meta, pid);
+    CHECK(before.has_value());
+    CHECK(!before->sealed);  // 远未达 pack_max_size：容量判据不会封存它
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(1));
+    auto after = find_pack_stat(*h.meta, pid);
+    CHECK(after.has_value());
+    CHECK(after->sealed);
+    CHECK(after->file_size > 0);  // 如实回报，不是重启补封的"未知 0"
+    CHECK_EQ(after->live_recs, int64_t(3));
+
+    // 幂等：无 active pack 可封时返回 0
+    CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(0));
+
+    // 封存后死区可回收：删到 1/3 存活即跌破 pack_gc_ratio，压实照常收敛
+    sync_wait(h.b->delete_object("bkt", "k0"));
+    sync_wait(h.b->delete_object("bkt", "k1"));
+    auto st = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st.packs_compacted, uint64_t(1));
+    CHECK_EQ(st.records_migrated, uint64_t(1));
+    auto g = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
+    CHECK_EQ(read_all(*g.body), patterned(600));
+    sync_wait(h.b->close());
+}
+
+// GC 轮内接线：pack_max_age 到点后 run_gc_once 自己会封存（不需要写入触发）
+TEST(duostore_pack_age_rotation_runs_in_gc) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "agegc");
+    cfg.pack_max_age_sec = 1;
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k0", patterned(600));
+    uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
+
+    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(0));  // 未到点
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(1));
+    CHECK(find_pack_stat(*h.meta, pid)->sealed);
+    sync_wait(h.b->close());
+}
+
+// 压实预算与优先级（docs/gaps.md §6.1）：单轮封顶 N 个，且按可回收字节降序取——
+// 此前是"一轮把全部符合条件的 pack 重写完"，批量删除后单轮可持锁数小时
+TEST(duostore_compact_budget_prioritises_by_reclaimable) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "budget");
+    cfg.pack_max_size = 2048;          // 600B record ≈ 629B，3 条即满轮转
+    cfg.gc_compact_max_packs = 1;      // 每轮只做一个
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    // 三个满 pack（k0-k2 / k3-k5 / k6-k8）+ 一个 active（k9）
+    for (int i = 0; i < 10; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
+    uint64_t p0 = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
+    uint64_t p1 = h.meta->get_object("bkt", "k3")->data.extents[0].file_id;
+    uint64_t p2 = h.meta->get_object("bkt", "k6")->data.extents[0].file_id;
+    CHECK(p0 != p1 && p1 != p2);
+
+    // p0 剩 2 条存活、p1 剩 1 条、p2 剩 1 条 —— 三者都够格，但可回收字节 p1/p2 > p0
+    sync_wait(h.b->delete_object("bkt", "k0"));
+    sync_wait(h.b->delete_object("bkt", "k1"));
+    sync_wait(h.b->delete_object("bkt", "k3"));
+    sync_wait(h.b->delete_object("bkt", "k4"));
+    sync_wait(h.b->delete_object("bkt", "k6"));
+    sync_wait(h.b->delete_object("bkt", "k7"));
+
+    auto st1 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st1.packs_compacted, uint64_t(1));       // 预算封顶
+    CHECK_EQ(st1.packs_compact_deferred, uint64_t(2));  // 其余顺延
+
+    auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st2.packs_compacted, uint64_t(1));
+    CHECK_EQ(st2.packs_compact_deferred, uint64_t(1));
+
+    auto st3 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st3.packs_compacted, uint64_t(1));
+    CHECK_EQ(st3.packs_compact_deferred, uint64_t(0));
+
+    // 收敛后数据完好
+    auto st4 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st4.packs_compacted, uint64_t(0));
+    for (int i : {2, 5, 8, 9}) {
+        auto g = sync_wait(h.b->get_object("bkt", "k" + std::to_string(i), std::nullopt));
+        CHECK_EQ(read_all(*g.body), patterned(600));
+    }
+    sync_wait(h.b->close());
+}
+
 // 死 record 损坏不阻压实（§10）：存活账证明损坏者已死——存活者照常迁移、
 // live 归零后空 pack 整删（含损坏死区）不丢任何数据
 TEST(duostore_compact_corrupt_dead_record) {
@@ -1469,6 +1633,45 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     CHECK_EQ(st3.orphans_removed, uint64_t(0));
     CHECK_EQ(chunk_files_on_disk(cfg2.root), size_t(1));
     sync_wait(b2->close());
+}
+
+// packs/ 双向对账（docs/gaps.md §6.1）：pack 文件在"建文件"时就存在、packstat 行
+// 要到首条 record 提交才落账——恰在这个窗口硬崩，文件永久泄漏且不在任何账里。
+// 正向：账外 pack 文件逾宽限即删；反向：packstat 在而文件缺 → 只告警不销账
+TEST(duostore_orphan_scan_reconciles_packs) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "orphanpack");
+    cfg.orphan_scan_interval_sec = 0;
+    auto h = make_pack_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+    put(*h.b, "bkt", "k", patterned(600));
+    uint64_t live_pack = h.meta->get_object("bkt", "k")->data.extents[0].file_id;
+
+    // 账外 pack 文件（"建文件后、首条 record 提交前崩溃"的残迹）
+    fs::create_directories(cfg.root / "packs" / "ab");
+    std::ofstream(cfg.root / "packs" / "ab" / "000000000000abcd.pak") << "leaked";
+
+    auto st1 = sync_wait(h.b->run_orphan_scan_once());
+    CHECK_EQ(st1.packs_scanned, uint64_t(2));
+    CHECK_EQ(st1.orphan_packs_removed, uint64_t(1));
+    CHECK_EQ(st1.pack_stats_missing, uint64_t(0));
+    CHECK(st1.pack_bytes > 0);
+    CHECK(!fs::exists(cfg.root / "packs" / "ab" / "000000000000abcd.pak"));
+    // 在账 pack 不受扰——它还是本进程正在写的 active pack
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
+    CHECK_EQ(read_all(*sync_wait(h.b->get_object("bkt", "k", std::nullopt)).body),
+             patterned(600));
+
+    // 反向：手工删掉在账 pack 文件 → 计数 + 告警，packstat 保留供人工介入
+    sync_wait(h.b->close());  // 先关掉写者，否则删的是本进程持锁的 active pack
+    auto h2 = make_pack_backend(cfg, pool);
+    fs::remove(pack_file_path(cfg.root, live_pack));
+    auto st2 = sync_wait(h2.b->run_orphan_scan_once());
+    CHECK_EQ(st2.packs_scanned, uint64_t(0));
+    CHECK_EQ(st2.pack_stats_missing, uint64_t(1));
+    CHECK(find_pack_stat(*h2.meta, live_pack).has_value());  // 账未被动
+    sync_wait(h2.b->close());
 }
 
 namespace {

@@ -451,7 +451,7 @@ PartRec decode_part(int part_no, std::string_view v) {
 std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms) {
     std::string s;
     put_u8(s, 1);
-    put_u8(s, 0);  // reason：预留（覆盖/删除/abort，暂未区分）
+    put_u8(s, uint8_t(r.reason));
     put_u64(s, uint64_t(enqueue_ms));
     append_extent_runs(s, r.extents);
     return s;
@@ -460,10 +460,14 @@ std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms) {
 Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms) {
     Cursor c{v};
     check_ver(c, 1);
-    c.u8();  // reason
+    // reason 是 P4 之前就在编码里的预留字节且恒写 0，未知取值回落 kUnknown 即可
+    // ——不必抬版本号，旧账与新账在同一队列里天然共存
+    uint8_t reason = c.u8();
     int64_t ms = int64_t(c.u64());
     if (enqueue_ms) *enqueue_ms = ms;
-    Reclaim r{read_extent_runs(c), ms};
+    Reclaim r{read_extent_runs(c), ms,
+              reason <= uint8_t(ReclaimReason::kComplete) ? ReclaimReason(reason)
+                                                          : ReclaimReason::kUnknown};
     c.done();
     return r;
 }
@@ -481,6 +485,45 @@ int64_t decode_counter(std::string_view v) {
     int64_t d = int64_t(c.u64());
     c.done();
     return d;
+}
+
+PackOwner parse_pack_owner(std::string_view owner) {
+    std::vector<std::string_view> parts;
+    size_t pos = 0;
+    while (pos <= owner.size()) {
+        size_t nul = owner.find('\0', pos);
+        if (nul == std::string_view::npos) {
+            parts.push_back(owner.substr(pos));
+            break;
+        }
+        parts.push_back(owner.substr(pos, nul - pos));
+        pos = nul + 1;
+    }
+    PackOwner o;
+    auto parse_no = [](std::string_view s, int& out) {
+        int v = 0;
+        for (char c : s) {
+            if (c < '0' || c > '9') return false;
+            v = v * 10 + (c - '0');
+        }
+        out = v;
+        return !s.empty();
+    };
+    if (parts.size() == 2 && !parts[0].empty() && !parts[1].empty()) {
+        o.kind = PackOwner::Kind::kObject;
+        o.bucket = parts[0];
+        o.key = parts[1];
+    } else if (parts.size() == 5 && parts[0] == "mpu" && !parts[1].empty() &&
+               !parts[2].empty() && parse_no(parts[4], o.part_no)) {
+        o.kind = PackOwner::Kind::kPart;
+        o.bucket = parts[1];
+        o.key = parts[2];
+        o.upload_id = parts[3];
+    } else if (parts.size() == 3 && parts[0] == "mpu" && parse_no(parts[2], o.part_no)) {
+        o.kind = PackOwner::Kind::kLegacyPart;
+        o.upload_id = parts[1];
+    }
+    return o;
 }
 
 }  // namespace lights3::storage::duostore::codec

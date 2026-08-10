@@ -124,6 +124,19 @@ struct Batch {
     std::vector<std::string> keys;
 };
 
+// ---- 事务能力边界（docs/gaps.md §6.1 定性）----
+// 本侧车只做乐观 2PC，四项"缺失"是按 workload 论证后的刻意收窄，不是欠账：
+//   悲观事务：meta 事务全部短小（单对象 put 数键、swap 单键 CAS），冲突由
+//     txn_retry 的 16 轮指数退避收敛；client-c 的悲观路径（PessimisticLock +
+//     TTL manager）无成熟 C++ 实现，为不存在的长事务引入它是负收益。
+//   lock TTL 续租（TxnHeartBeat）：续租服务的是"prewrite 期间锁可能过期"的大
+//     事务。本店事务规模按构造有界——对象 value 6MiB 封顶（kMaxObjectValueBytes）、
+//     gcq 单项 4096 extent 拆分（kReclaimMaxExtents）、万分片 complete 实测最劣
+//     ~数十批——txn_lock_ttl 的 √MiB 伸缩（上限 20s）已覆盖，无需心跳线程。
+//   大事务分片提交：同上，事务有界性在入口处保证，不存在需要分片的事务。
+//   批间并发：prewrite/commit 逐批串行。并发要共享 Backoffer/RegionCache 的
+//     线程安全化（上游自身也是串行 + test-grade），收益只惠及低频宽事务
+//     （complete/delete_bucket），不值。若未来出现常态宽事务，先拆事务而非并发化
 class Committer {
 public:
     Committer(Cluster* cluster, uint64_t start_ts, const std::vector<TikvMutation>& muts,

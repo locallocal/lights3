@@ -487,4 +487,43 @@ int64_t decode_counter(std::string_view v) {
     return d;
 }
 
+PackOwner parse_pack_owner(std::string_view owner) {
+    std::vector<std::string_view> parts;
+    size_t pos = 0;
+    while (pos <= owner.size()) {
+        size_t nul = owner.find('\0', pos);
+        if (nul == std::string_view::npos) {
+            parts.push_back(owner.substr(pos));
+            break;
+        }
+        parts.push_back(owner.substr(pos, nul - pos));
+        pos = nul + 1;
+    }
+    PackOwner o;
+    auto parse_no = [](std::string_view s, int& out) {
+        int v = 0;
+        for (char c : s) {
+            if (c < '0' || c > '9') return false;
+            v = v * 10 + (c - '0');
+        }
+        out = v;
+        return !s.empty();
+    };
+    if (parts.size() == 2 && !parts[0].empty() && !parts[1].empty()) {
+        o.kind = PackOwner::Kind::kObject;
+        o.bucket = parts[0];
+        o.key = parts[1];
+    } else if (parts.size() == 5 && parts[0] == "mpu" && !parts[1].empty() &&
+               !parts[2].empty() && parse_no(parts[4], o.part_no)) {
+        o.kind = PackOwner::Kind::kPart;
+        o.bucket = parts[1];
+        o.key = parts[2];
+        o.upload_id = parts[3];
+    } else if (parts.size() == 3 && parts[0] == "mpu" && parse_no(parts[2], o.part_no)) {
+        o.kind = PackOwner::Kind::kLegacyPart;
+        o.upload_id = parts[1];
+    }
+    return o;
+}
+
 }  // namespace lights3::storage::duostore::codec

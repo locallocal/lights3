@@ -113,6 +113,7 @@ private:
     // 谱系校验（§2.2）：在任何写入（含 WAL journal 转换）之前执行——app_id/ver 全 0
     // 但 sqlite_master 非空 = 别人的库，拒绝且不留痕
     void check_lineage(Conn& c);
+    void migrate_schema(Conn& c, int64_t ver);  // 版本 < 当前时的迁移链（check_lineage 调用）
     void init_schema(Conn& c);
     Lease read_conn();                     // 池取；close 后抛 InternalError
     void release(std::unique_ptr<Conn> c);

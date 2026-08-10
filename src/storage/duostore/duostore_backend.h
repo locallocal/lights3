@@ -24,6 +24,7 @@
 #include "core/timer.h"
 #include "storage/backend.h"
 #include "storage/duostore/data_store.h"
+#include "storage/duostore/meta_dump.h"
 #include "storage/duostore/meta_store.h"
 
 namespace lights3::storage {
@@ -242,6 +243,13 @@ public:
     // 互斥——反向对账"文件必先于 ref 存在"的论证依赖 gcq 的 unlink→销账窗口不并发
     Task<duostore::DuoOrphanStats> run_orphan_scan_once();
 
+    // meta 备份/恢复与跨引擎迁移（docs/gaps.md §6.1；流格式与运维契约见
+    // meta_dump.h）。两者都与 GC/孤儿扫描持同一信号量互斥；停写由运维保证
+    //（main 的 --duostore_admin 入口在 server 起动前执行，天然无业务流量）。
+    // load 结束后强制跑一轮孤儿扫描——回收备份窗口内 data 侧多余的文件
+    Task<duostore::MetaDumpStats> run_meta_dump(std::ostream& out);
+    Task<duostore::MetaDumpStats> run_meta_load(std::istream& in);
+
     // 数据面直访（仅测试用）：验证 active pack 的写锁探测（docs/gaps.md §1.4）
     duostore::IDataStore& data_for_test() { return *data_; }
 
@@ -317,6 +325,9 @@ private:
     GcqSkips gcq_skips_;
     uint64_t gcq_hi_ = 0;          // 已扫过的 seq 高位（下一个未见 seq）
 
+    // 多网关 GC 租约的实例标识（§6.1）：进程内随机生成，重启换新即可——旧租约
+    // 由 TTL 过期让位。租约 TTL 取 max(2×gc_interval, 10min)，远大于单轮时长
+    std::string gc_owner_;
     BackgroundTaskGroup bg_{"duostore"};
     // 只在 bg_.if_open 内写、begin_close 后不变（读侧免锁）；0 = 未 arm（cancel(0) 安全）
     TimerQueue::Id gc_timer_ = 0;

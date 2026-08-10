@@ -421,4 +421,23 @@ TEST(duostore_redis_list_uploads_hscan_batches) {
     m.close();
 }
 
+// 多网关 GC 租约（docs/gaps.md §6.1）：同一 prefix 的两个实例只有一个抢到；
+// 同 owner 续租刷新 TTL；他人租约过期后可接管
+TEST(duostore_redis_gc_lease) {
+    REDIS_OR_SKIP();
+    std::string prefix = unique_prefix();
+    RedisMetaStore a(redis_opts(prefix)), b(redis_opts(prefix));
+    CHECK(a.try_gc_lease("owner-a", 60'000));
+    CHECK(!b.try_gc_lease("owner-b", 60'000));  // 他人持有且未过期
+    CHECK(a.try_gc_lease("owner-a", 60'000));   // 同 owner 续租
+    // 短租约过期后接管
+    RedisMetaStore c(redis_opts(unique_prefix()));
+    CHECK(c.try_gc_lease("x", 100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(c.try_gc_lease("y", 60'000));  // x 的租约已过期
+    a.close();
+    b.close();
+    c.close();
+}
+
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META

@@ -360,6 +360,7 @@ if(LIGHTS3_DUOSTORE)
   # 裁剪模板照 cloudproxy（docs/duostore-backend.md §13.3）
   target_sources(lights3_core PRIVATE
     src/storage/duostore/codec.cc
+    src/storage/duostore/meta_dump.cc
     src/storage/duostore/rocks_meta_store.cc
     src/storage/duostore/fs_data_store.cc
     src/storage/duostore/duostore_backend.cc

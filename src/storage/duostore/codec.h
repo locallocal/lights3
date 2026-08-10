@@ -80,6 +80,19 @@ Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms = nullptr);
 std::string encode_counter_delta(int64_t d);
 int64_t decode_counter(std::string_view v);
 
+// ---- pack record owner 的规范解析（docs/gaps.md §6.1）----
+// 三种历史形态此前散落在压实回调里逐处手解，离线取证工具无法复用。此处收敛为
+// 唯一解析器：对象 = "b\0k"；分片（P4 起）= "mpu\0b\0k\0id\0no"；
+// 旧分片（P4 前）= "mpu\0id\0no"（无 b/k，可归属性丢失——kLegacyPart 即
+// "保守不迁"的判据）。任何新增形态必须在此登记
+struct PackOwner {
+    enum class Kind { kObject, kPart, kLegacyPart, kUnknown } kind = Kind::kUnknown;
+    std::string_view bucket, key;  // kObject/kPart 有效（指向输入串）
+    std::string_view upload_id;    // kPart/kLegacyPart 有效
+    int part_no = 0;               // kPart/kLegacyPart 有效
+};
+PackOwner parse_pack_owner(std::string_view owner);
+
 // ---- pack record 头开销（fs_data_store §5.2：22B 固定头 + owner）----
 // pack 存活账（live_bytes）必须把 record 头计入、与 file_size 同口径：只记 payload
 // 时，小对象 pack 即使 100% 存活其 live/file_size 也恒低于 pack_gc_ratio，压实

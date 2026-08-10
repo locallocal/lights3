@@ -1,5 +1,8 @@
 #include "storage/duostore/rocks_meta_store.h"
 
+#include <array>
+#include <charconv>
+
 #include <rocksdb/cache.h>
 #include <rocksdb/db.h>
 #include <rocksdb/iterator.h>
@@ -115,22 +118,76 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
     if (!s.ok()) throw_status("open", s);
     db_.store(db, std::memory_order_release);
 
-    // schema 版本校验（§4.1）。Open 成功后任何失败都必须走 close()——
-    // 构造函数抛出时析构不会运行，否则 DB 句柄与 LOCK 文件泄漏
+    // schema 版本校验 + 迁移钩子（§4.1 / docs/gaps.md §6.1）。此前是"必须精确等于
+    // 当前常量"的硬校验——任何 value 布局变更都会让存量库无法启动。现在：
+    //   存量版本 == 当前 → 直过；
+    //   存量版本 < 当前  → 按注册的迁移链逐级升（kSchemaMigrations，当前为空——
+    //                       record 级演进走 codec 的 read_ver 兼容读，§5.2；本链
+    //                       留给未来的 CF/键布局变更），升完盖新版本号；
+    //   存量版本 > 当前  → 库来自更新的程序版本，明确拒绝（降级运行会静默写坏）。
+    // Open 成功后任何失败都必须走 close()——构造函数抛出时析构不会运行，否则
+    // DB 句柄与 LOCK 文件泄漏
     try {
         auto schema = get_raw(kDefault, "schema");
         if (!schema) {
             rocksdb::WriteBatch batch;
-            batch.Put(cfs_[kDefault], "schema", "1");
+            batch.Put(cfs_[kDefault], "schema", std::to_string(kSchemaCurrent));
             batch.Put(cfs_[kDefault], "instance", new_upload_id());
             commit(batch);
-        } else if (*schema != "1") {
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore meta: unsupported schema version " + *schema);
+        } else {
+            migrate_schema(*schema);
         }
     } catch (...) {
         close();
         throw;
+    }
+
+    // meta 引擎可观测（docs/gaps.md §6.1：默认引擎 rocksdb 此前完全无指标；
+    // redis/sqlite/tikv 各有 busy/corruption/conflict 计数）。属性 gauge 渲染时
+    // 现取；db 关闭后回 0（弱指针语义由 db_ 原子判空承担）
+    auto prop = [this](const char* name) -> double {
+        auto* d = db_.load(std::memory_order_acquire);
+        uint64_t v = 0;
+        if (d && d->GetAggregatedIntProperty(name, &v)) return double(v);
+        return 0;
+    };
+    opt_.metrics.gauge_callback("lights3_duostore_rocksdb_estimate_num_keys",
+                                "RocksDB estimated key count across all column families",
+                                [prop] { return prop("rocksdb.estimate-num-keys"); });
+    opt_.metrics.gauge_callback("lights3_duostore_rocksdb_block_cache_usage_bytes",
+                                "RocksDB block cache memory usage",
+                                [prop] { return prop("rocksdb.block-cache-usage"); });
+    opt_.metrics.gauge_callback("lights3_duostore_rocksdb_sst_bytes",
+                                "RocksDB total SST file size (meta store on-disk footprint)",
+                                [prop] { return prop("rocksdb.total-sst-files-size"); });
+    opt_.metrics.gauge_callback("lights3_duostore_rocksdb_memtable_bytes",
+                                "RocksDB active+immutable memtable memory",
+                                [prop] { return prop("rocksdb.cur-size-all-mem-tables"); });
+}
+
+int64_t RocksMetaStore::validate_schema_marker(const std::string& stored) {
+    return parse_schema_marker(stored, /*lineage=*/"", kSchemaCurrent, "duostore meta");
+}
+
+// 迁移链（版本 n → n+1 的就地变换；持 db 已开）。新增布局变更时在此登记，并把
+// kSchemaCurrent +1——绝不允许"改布局不留迁移"
+void RocksMetaStore::migrate_schema(const std::string& stored) {
+    int64_t ver = validate_schema_marker(stored);
+    if (ver == kSchemaCurrent) return;
+    using MigrateFn = void (*)(RocksMetaStore&);
+    static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
+        // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+    };
+    for (; ver < kSchemaCurrent; ++ver) {
+        MigrateFn fn = nullptr;
+        for (auto& [from, f] : kSchemaMigrations)
+            if (from == ver) fn = f;
+        if (!fn) throw_no_migration(ver, kSchemaCurrent, "duostore meta");
+        fn(*this);
+        rocksdb::WriteBatch batch;
+        batch.Put(cfs_[kDefault], "schema", std::to_string(ver + 1));
+        commit(batch);
+        LOG_INFO("duostore meta: schema migrated v{} -> v{}", ver, ver + 1);
     }
 }
 

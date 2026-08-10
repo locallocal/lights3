@@ -3,11 +3,13 @@
 // multipart 工具，不含任何存储引擎耦合。
 #pragma once
 
+#include <charconv>
 #include <chrono>
 #include <map>
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -20,6 +22,41 @@ namespace lights3::storage::duostore {
 // 把 DataRef 拆成多条 gcq 项入队，GC 消费端单批 peek 的解码内存驻留有界。ack 逐
 // 条独立、unlink 幂等，拆分不改变崩溃语义（§9.1 先物理删后销账的论证不变）
 inline constexpr size_t kReclaimMaxExtents = 4096;
+
+// ---- schema 标记的统一判定（docs/gaps.md §6.1：四引擎共享"演进而非硬拒"策略）----
+// 存量标记 = <谱系前缀><十进制版本>（rocks 前缀空、redis "r"、tikv "t"；sqlite 的
+// user_version 是纯整数，不经字符串解析但遵守同一比较策略）。返回存量版本号：
+//   谱系不符 / 乱码       → InternalError（拿错库，任何写入都可能毁数据）；
+//   版本比本构建新        → InternalError（降级运行会静默写坏新布局）；
+//   版本 ≤ 当前           → 返回，调用方对 < 当前的库走各自的迁移链。
+// engine 为报错前缀（沿用各引擎既有措辞，如 "duostore redis meta"）
+inline int64_t parse_schema_marker(const std::string& stored, std::string_view lineage,
+                                   int64_t current, const std::string& engine) {
+    int64_t ver = -1;
+    if (stored.size() > lineage.size() && stored.compare(0, lineage.size(), lineage) == 0) {
+        const char* b = stored.data() + lineage.size();
+        const char* e = stored.data() + stored.size();
+        auto r = std::from_chars(b, e, ver);
+        if (r.ec != std::errc() || r.ptr != e) ver = -1;
+    }
+    if (ver < 0)
+        throw s3::S3Error(s3::S3ErrorCode::InternalError,
+                          engine + ": unrecognized schema marker '" + stored + "'");
+    if (ver > current)
+        throw s3::S3Error(s3::S3ErrorCode::InternalError,
+                          engine + ": database schema '" + stored +
+                              "' is newer than this build (v" + std::to_string(current) +
+                              "); refusing to run downgraded");
+    return ver;
+}
+
+// 迁移链缺档的统一报错（"改布局不留迁移"是编程错误，开机响亮失败优于带病运行）
+[[noreturn]] inline void throw_no_migration(int64_t from, int64_t current,
+                                            const std::string& engine) {
+    throw s3::S3Error(s3::S3ErrorCode::InternalError,
+                      engine + ": no migration path from schema v" + std::to_string(from) +
+                          " to v" + std::to_string(current));
+}
 
 // 条件 PUT 的原子区检查（PutCondition 契约，storage/backend.h）：四引擎在各自
 // 事务内读到旧记录后调用；抛出即放弃提交（本地引擎回滚天然成立，redis 在

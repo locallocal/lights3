@@ -24,6 +24,7 @@
 #include "storage/duostore/codec.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_util.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
@@ -192,6 +193,64 @@ TEST(duostore_decode_object_meta_parity) {
     CHECK_EQ(lite.content_type, full.content_type);
     CHECK(lite.user_meta == full.user_meta);
     CHECK_EQ(codec::to_unix_ms(lite.last_modified), codec::to_unix_ms(full.last_modified));
+}
+
+// pack record owner 的规范解析（docs/gaps.md §6.1）：三种历史形态收敛到唯一入口
+TEST(duostore_parse_pack_owner_forms) {
+    using codec::PackOwner;
+    auto obj = codec::parse_pack_owner(std::string("bkt\0some/key", 12));
+    CHECK(obj.kind == PackOwner::Kind::kObject);
+    CHECK_EQ(std::string(obj.bucket), "bkt");
+    CHECK_EQ(std::string(obj.key), "some/key");
+
+    auto part = codec::parse_pack_owner(std::string("mpu\0b\0k\0uid42\0" "7", 15));
+    CHECK(part.kind == PackOwner::Kind::kPart);
+    CHECK_EQ(std::string(part.bucket), "b");
+    CHECK_EQ(std::string(part.key), "k");
+    CHECK_EQ(std::string(part.upload_id), "uid42");
+    CHECK_EQ(part.part_no, 7);
+
+    auto legacy = codec::parse_pack_owner(std::string("mpu\0uid42\0" "300", 13));
+    CHECK(legacy.kind == PackOwner::Kind::kLegacyPart);
+    CHECK_EQ(std::string(legacy.upload_id), "uid42");
+    CHECK_EQ(legacy.part_no, 300);
+
+    // 不成形态一律 kUnknown（压实对其保守不迁）：空串、段数不符、part_no 非数字
+    CHECK(codec::parse_pack_owner("").kind == PackOwner::Kind::kUnknown);
+    CHECK(codec::parse_pack_owner("solo").kind == PackOwner::Kind::kUnknown);
+    CHECK(codec::parse_pack_owner(std::string("mpu\0b\0k\0uid\0x7", 14)).kind ==
+          PackOwner::Kind::kUnknown);
+    CHECK(codec::parse_pack_owner(std::string("\0k", 2)).kind == PackOwner::Kind::kUnknown);
+}
+
+// schema 标记判定（docs/gaps.md §6.1 迁移钩子的纯前置）：等于当前直过、
+// 比本构建新拒绝（防降级静默写坏）、乱码拒绝
+TEST(duostore_rocks_schema_marker_validation) {
+    CHECK_EQ(RocksMetaStore::validate_schema_marker(
+                 std::to_string(RocksMetaStore::kSchemaCurrent)),
+             RocksMetaStore::kSchemaCurrent);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(
+                        std::to_string(RocksMetaStore::kSchemaCurrent + 1)),
+                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("banana"),
+                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("1x"),
+                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(""),
+                    s3::S3ErrorCode::InternalError);
+}
+
+// 共享判定 parse_schema_marker 的谱系前缀语义（redis "r"、tikv "t" 走同一入口）
+TEST(duostore_schema_marker_lineage_prefixes) {
+    CHECK_EQ(parse_schema_marker("r1", "r", 1, "t"), 1);
+    CHECK_EQ(parse_schema_marker("t1", "t", 1, "t"), 1);
+    CHECK_EQ(parse_schema_marker("r1", "r", 3, "t"), 1);  // 旧版本放行，交迁移链
+    CHECK_THROWS_S3(parse_schema_marker("r2", "r", 1, "t"),
+                    s3::S3ErrorCode::InternalError);  // 比本构建新
+    CHECK_THROWS_S3(parse_schema_marker("t1", "r", 1, "t"),
+                    s3::S3ErrorCode::InternalError);  // 谱系不符
+    CHECK_THROWS_S3(parse_schema_marker("r", "r", 1, "t"), s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(parse_schema_marker("r-1", "r", 1, "t"), s3::S3ErrorCode::InternalError);
 }
 
 // '\0' 分隔编码的防御纵深：含 NUL 的段进入 key 构造器必须响亮失败（§4.1）

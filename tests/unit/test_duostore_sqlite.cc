@@ -12,6 +12,7 @@
 #include <fstream>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,7 @@
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/rocks_meta_store.h"
 #include "storage/duostore/sqlite_meta_store.h"
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
@@ -497,6 +499,98 @@ TEST(duostore_sqlite_corruption_metric_counts_notadb) {
     CHECK(reg->render().find(
               "lights3_duostore_sqlite_corruption_total{backend=\"s4c\"} 1\n") !=
           std::string::npos);
+}
+
+// meta 备份/恢复兼跨引擎迁移（docs/gaps.md §6.1，meta_dump.h）：rocks 源 dump →
+// sqlite 目标 load，data 目录原地共用（恢复流程"先放 data 再 load meta"的单测
+// 化身）。断言：对象逐字节还原（pack 与多 chunk 两种 extent 都覆盖）、已删对象
+// 不复活、恢复后的新写不与存量文件号相撞（计数器抬升）
+TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    DuoStoreConfig cfg;
+    cfg.root = tmp.path / "duo";
+    cfg.chunk_size = 4096;      // 强制多 chunk manifest
+    cfg.pack_threshold = 1024;  // 小对象走 pack
+    cfg.gc_interval_sec = 0;    // 手动钩子；后台不抢
+    fs::create_directories(cfg.root);
+    auto mk_data = [&](IMetaStore* mp) {
+        return std::make_unique<FsDataStore>(
+            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                          cfg.pack_max_size, cfg.pack_writers, {}},
+            pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
+            [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
+    };
+    const std::string small(200, 's');    // pack record
+    const std::string big(10000, 'b');    // 3 chunk 文件
+    std::stringstream archive;
+    {
+        cfg.name = "migrate-src";
+        auto meta = std::make_unique<RocksMetaStore>(
+            RocksMetaOptions{(tmp.path / "meta-rocks").string(), false, 8ull << 20});
+        IMetaStore* mp = meta.get();
+        auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), mk_data(mp));
+        sync_wait(b->create_bucket("bkt"));
+        backend_suite::put(*b, "bkt", "small", small);
+        backend_suite::put(*b, "bkt", "big", big);
+        backend_suite::put(*b, "bkt", "doomed", "gone");
+        sync_wait(b->delete_object("bkt", "doomed"));  // 产生 gcq 账（刻意不入档）
+        auto st = sync_wait(b->run_meta_dump(archive));
+        CHECK_EQ(st.buckets, uint64_t(1));
+        CHECK_EQ(st.objects, uint64_t(2));
+        sync_wait(b->close());
+    }
+    {
+        cfg.name = "migrate-dst";
+        auto meta = std::make_unique<SqliteMetaStore>(sqlite_opts(tmp.path / "meta.sqlite3"));
+        IMetaStore* mp = meta.get();
+        auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), mk_data(mp));
+        auto st = sync_wait(b->run_meta_load(archive));  // 内置强制孤儿扫描
+        CHECK_EQ(st.objects, uint64_t(2));
+        auto g1 = sync_wait(b->get_object("bkt", "small", std::nullopt));
+        CHECK_EQ(backend_suite::read_all(*g1.body), small);
+        auto g2 = sync_wait(b->get_object("bkt", "big", std::nullopt));
+        CHECK_EQ(backend_suite::read_all(*g2.body), big);
+        CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "doomed")),
+                        s3::S3ErrorCode::NoSuchKey);
+        // 计数器抬升：新写分配的文件号不得与存量相撞（撞号 = 静默互写坏存量）
+        const std::string fresh(9000, 'n');
+        backend_suite::put(*b, "bkt", "fresh", fresh);
+        auto g3 = sync_wait(b->get_object("bkt", "fresh", std::nullopt));
+        CHECK_EQ(backend_suite::read_all(*g3.body), fresh);
+        auto g4 = sync_wait(b->get_object("bkt", "big", std::nullopt));
+        CHECK_EQ(backend_suite::read_all(*g4.body), big);  // 存量未被互写
+        sync_wait(b->close());
+    }
+}
+
+// schema 演进策略（docs/gaps.md §6.1）：user_version 比本构建新 → 拒绝降级运行；
+// 比当前旧且迁移链无档 → 响亮失败（"改布局不留迁移"是编程错误）。两种拒绝都
+// 不得污染库——修回真实版本后必须能正常重开
+TEST(duostore_sqlite_schema_version_policy) {
+    TmpDir tmp;
+    fs::path db = tmp.path / "meta.sqlite3";
+    {
+        SqliteMetaStore m(sqlite_opts(db));
+        m.create_bucket("x");
+        m.close();
+    }
+    auto set_user_version = [&](int64_t v) {
+        sqlite3* raw = nullptr;
+        CHECK_EQ(sqlite3_open(db.string().c_str(), &raw), SQLITE_OK);
+        std::string sql = "PRAGMA user_version=" + std::to_string(v);
+        CHECK_EQ(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
+        sqlite3_close(raw);
+    };
+    set_user_version(999);  // 未来版本：更新的程序写过的库
+    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)),
+                    s3::S3ErrorCode::InternalError);
+    set_user_version(1);  // 修回真实版本，库未被拒绝路径污染
+    {
+        SqliteMetaStore m(sqlite_opts(db));
+        CHECK(m.bucket_exists("x"));
+        m.close();
+    }
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_SQLITE_META

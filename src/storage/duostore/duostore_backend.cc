@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <random>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -92,26 +93,6 @@ bool PinTable::pinned_key(bool is_pack, uint64_t id) {
 
 // ---------- 压实迁移（P4 §9.2 步骤 2-3）----------
 
-namespace {
-
-// owner 按 '\0' 切段（各段来源 bucket/key/upload_id 均经校验不含 NUL，无歧义）
-std::vector<std::string_view> split_owner(std::string_view owner) {
-    std::vector<std::string_view> parts;
-    size_t pos = 0;
-    while (pos <= owner.size()) {
-        size_t nul = owner.find('\0', pos);
-        if (nul == std::string_view::npos) {
-            parts.push_back(owner.substr(pos));
-            break;
-        }
-        parts.push_back(owner.substr(pos, nul - pos));
-        pos = nul + 1;
-    }
-    return parts;
-}
-
-}  // namespace
-
 Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable* pins,
                                     std::vector<PackScanRecord> batch) {
     // owner 只是反查提示（§9.2）：对象 record 内嵌 "b\0k"；mpu record 内嵌
@@ -129,18 +110,13 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     std::vector<Group> groups;
     std::map<std::string, size_t> by_owner;  // "b\0k" -> groups 下标
     for (size_t i = 0; i < batch.size(); ++i) {
-        auto parts = split_owner(batch[i].owner);
-        std::string_view b, k;
-        if (parts.size() == 2) {
-            b = parts[0];
-            k = parts[1];
-        } else if (parts.size() == 5 && parts[0] == "mpu") {
-            b = parts[1];
-            k = parts[2];
-        } else {
+        // 规范解析器（docs/gaps.md §6.1：三种 owner 形态收敛到 codec，离线取证
+        // 工具复用同一入口）；kLegacyPart/kUnknown 无 b/k 可查，保守不迁
+        auto po = codec::parse_pack_owner(batch[i].owner);
+        if (po.kind != codec::PackOwner::Kind::kObject &&
+            po.kind != codec::PackOwner::Kind::kPart)
             continue;
-        }
-        if (b.empty() || k.empty()) continue;
+        std::string_view b = po.bucket, k = po.key;
         std::string gk = std::string(b) + '\0' + std::string(k);
         auto [it, fresh] = by_owner.try_emplace(std::move(gk), groups.size());
         if (fresh) groups.push_back({std::string(b), std::string(k), {}});
@@ -570,6 +546,15 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
 
 // ---------- 构造 / 关闭 ----------
 
+// GC 租约的实例标识：随机 64bit hex；重启换新即可，旧租约由 TTL 过期让位
+static std::string random_owner() {
+    std::random_device rd;
+    uint64_t v = (uint64_t(rd()) << 32) ^ rd();
+    char buf[17];
+    std::snprintf(buf, sizeof buf, "%016llx", (unsigned long long)v);
+    return buf;
+}
+
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
                                  MetricsScope metrics)
     : cfg_(std::move(cfg)), pool_(std::move(pool)) {
@@ -610,7 +595,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{
             cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache,
             cfg_.rocksdb_write_buffer, cfg_.rocksdb_max_write_buffers,
-            cfg_.rocksdb_max_background_jobs});
+            cfg_.rocksdb_max_background_jobs, metrics});
     IMetaStore* meta = meta_.get();  // 分配回调不延长 meta 生命周期：本类持有两者，先关 data
     auto alloc = [meta](Extent::Kind kind, uint32_t n) { return meta->alloc_file_run(kind, n); };
     // 读路径 crc 失配上报（P5 corruption 指标）：只捕获计数器 shared_ptr——reader
@@ -656,6 +641,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
                           [pins](uint64_t id) { pins->unpin_id(id); }});
         write_pins_ = true;
     }
+    gc_owner_ = random_owner();
     abandon_stale_packs();
     schedule_gc();
     schedule_orphan_scan();
@@ -667,6 +653,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     : cfg_(std::move(cfg)), pool_(std::move(pool)), meta_(std::move(meta)),
       data_(std::move(data)) {
     init_metrics(metrics);
+    gc_owner_ = random_owner();
     abandon_stale_packs();
     schedule_gc();
     schedule_orphan_scan();
@@ -1146,6 +1133,14 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     DuoGcStats st;
     if (!scope.ok()) co_return st;                 // 正在关闭
     auto permit = co_await gc_sem_.acquire();      // 手动钩子 vs 后台 worker 互斥
+    // 多网关租约（§6.1）：gc_enabled 只是约定，误配两台同开 GC 会互相 unlink 对方
+    // 判定的空 pack。共享型 meta（redis/tikv）在此原子抢注；本地引擎恒 true
+    const int64_t lease_ttl_ms =
+        std::max<int64_t>(2 * int64_t(cfg_.gc_interval_sec), 600) * 1000;
+    if (!meta_->try_gc_lease(gc_owner_, lease_ttl_ms)) {
+        LOG_INFO("duostore '{}': GC lease held by another instance, skipping round", cfg_.name);
+        co_return st;
+    }
     const auto round_start = std::chrono::steady_clock::now();
 
     // 1) mpu_ttl 过期 multipart 清理（§8 末）：内部 abort，分片入 gcq 由下一步变现。
@@ -1437,6 +1432,14 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     DuoOrphanStats st;
     if (!scope.ok()) co_return st;                 // 正在关闭
     auto permit = co_await gc_sem_.acquire();      // 与 GC/后台 worker 互斥（反向对账前提）
+    // 与 GC 同一把租约（§6.1）：孤儿扫描的 unlink 同样不能与他网关的 GC 并发
+    const int64_t lease_ttl_ms =
+        std::max<int64_t>(2 * int64_t(cfg_.gc_interval_sec), 600) * 1000;
+    if (!meta_->try_gc_lease(gc_owner_, lease_ttl_ms)) {
+        LOG_INFO("duostore '{}': GC lease held by another instance, skipping orphan scan",
+                 cfg_.name);
+        co_return st;
+    }
 
     // refs 快照先行：反向对账"文件必先于 ref 提交存在"（§6 数据先行）要求 R 先于
     // 盘面枚举采集——R 内的每个 id 在枚举开始前文件已在盘，缺失即真丢失。持
@@ -1564,6 +1567,32 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // 用量（§6.1）：盘面实测字节，随孤儿扫描周期刷新（默认 1/d）
     m_bytes_chunks_->set(int64_t(st.chunk_bytes));
     m_bytes_packs_->set(int64_t(st.pack_bytes));
+    co_return st;
+}
+
+Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_dump(std::ostream& out) {
+    co_await pool_->schedule();
+    BackgroundTaskGroup::Scope scope(bg_);
+    if (!scope.ok())
+        throw S3Error(S3ErrorCode::InternalError, "duostore meta dump: backend closing");
+    auto permit = co_await gc_sem_.acquire();  // 与 GC/孤儿扫描互斥（一致快照前提）
+    co_return duostore::dump_meta(*meta_, out);
+}
+
+Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_load(std::istream& in) {
+    co_await pool_->schedule();
+    duostore::MetaDumpStats st;
+    {
+        BackgroundTaskGroup::Scope scope(bg_);
+        if (!scope.ok())
+            throw S3Error(S3ErrorCode::InternalError, "duostore meta load: backend closing");
+        auto permit = co_await gc_sem_.acquire();
+        st = duostore::load_meta(*meta_, in);
+    }  // 信号量出块释放——下面的孤儿扫描要重取同一把
+    // 恢复固化流程的收尾（meta_dump.h 运维契约）：强制孤儿扫描回收备份窗口内
+    // data 侧多余的文件（gcq 与进行中 MPU 刻意不入档，其数据在此变现回收）
+    LOG_INFO("duostore '{}': meta load done, running forced orphan scan", cfg_.name);
+    co_await run_orphan_scan_once();
     co_return st;
 }
 

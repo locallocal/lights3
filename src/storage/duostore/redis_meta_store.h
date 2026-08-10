@@ -70,6 +70,8 @@ public:
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
+    void ack_reclaims(std::span<const uint64_t> seqs) override;
+    bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;

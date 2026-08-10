@@ -42,6 +42,9 @@ struct TikvMetaOptions {
 
 class TikvMetaStore final : public IMetaStore {
 public:
+    // 当前 schema 版本（标记 = "t" + 版本；打开时按迁移链升级存量库，docs/gaps.md §6.1）
+    static constexpr int64_t kSchemaCurrent = 1;
+
     explicit TikvMetaStore(TikvMetaOptions opt);
     ~TikvMetaStore() override;
     TikvMetaStore(const TikvMetaStore&) = delete;
@@ -75,6 +78,7 @@ public:
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
+    bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单事务批量销账
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
@@ -92,6 +96,8 @@ public:
     uint64_t update_gc_safepoint_once();
 
 private:
+    void migrate_schema(int64_t ver);  // 版本 < 当前时的迁移链（open schema 调用）
+
     // 号段预留（§5，与 RocksDB/Redis 版同构）：计数器 key 上的 RMW 小事务一次
     // +kIdSegment、内存派发。TiKV 提交即 raft 持久，无 Redis 版的空烧补偿
     struct IdRange {

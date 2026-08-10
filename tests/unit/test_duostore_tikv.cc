@@ -526,4 +526,22 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     reader_store.close();
 }
 
+// 多网关 GC 租约（docs/gaps.md §6.1，与 redis 版同语义）：同前缀两实例只有一个
+// 抢到；同 owner 续租；他人租约过期后可接管
+TEST(duostore_tikv_gc_lease) {
+    TIKV_OR_SKIP();
+    std::string prefix = unique_prefix();
+    TikvMetaStore a(tikv_opts(prefix)), b(tikv_opts(prefix));
+    CHECK(a.try_gc_lease("owner-a", 60'000));
+    CHECK(!b.try_gc_lease("owner-b", 60'000));  // 他人持有且未过期
+    CHECK(a.try_gc_lease("owner-a", 60'000));   // 同 owner 续租
+    TikvMetaStore c(tikv_opts(unique_prefix()));
+    CHECK(c.try_gc_lease("x", 100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK(c.try_gc_lease("y", 60'000));  // x 的租约已过期（墙钟判定）
+    a.close();
+    b.close();
+    c.close();
+}
+
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_TIKV_META

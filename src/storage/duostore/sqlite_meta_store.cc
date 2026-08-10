@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <array>
 #include <filesystem>
 #include <map>
 #include <set>
@@ -353,10 +354,34 @@ void SqliteMetaStore::check_lineage(Conn& c) {
     if (app_id != kAppId)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore meta(sqlite): not a duostore meta database: " + opt_.path);
-    if (ver != kSchemaVersion)
+    // 版本演进策略与其余三引擎一致（docs/gaps.md §6.1）：更新的库拒绝降级运行，
+    // 更旧的库走迁移链逐级升（user_version 为整数谱系，无字符串前缀）
+    if (ver > kSchemaVersion)
         throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite): unsupported schema version " +
-                          std::to_string(ver));
+                      "duostore meta(sqlite): database schema v" + std::to_string(ver) +
+                          " is newer than this build (v" + std::to_string(kSchemaVersion) +
+                          "); refusing to run downgraded");
+    if (ver < kSchemaVersion) migrate_schema(c, ver);
+}
+
+// 迁移链（版本 n → n+1 的就地 SQL 变换；每步一个事务，含 user_version 盖章——
+// 中途崩溃重启后从断点续走）。新增布局变更时在此登记并把 kSchemaVersion +1
+void SqliteMetaStore::migrate_schema(Conn& c, int64_t ver) {
+    using MigrateFn = void (*)(Conn&);
+    static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
+        // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+    };
+    for (; ver < kSchemaVersion; ++ver) {
+        MigrateFn fn = nullptr;
+        for (auto& [from, f] : kSchemaMigrations)
+            if (from == ver) fn = f;
+        if (!fn) throw_no_migration(ver, kSchemaVersion, "duostore meta(sqlite)");
+        Txn t(c);
+        fn(c);
+        c.exec("PRAGMA user_version=" + std::to_string(ver + 1) + ";", "stamp schema");
+        t.commit();
+        LOG_INFO("duostore meta(sqlite): schema migrated v{} -> v{}", ver, ver + 1);
+    }
 }
 
 void SqliteMetaStore::init_schema(Conn& c) {

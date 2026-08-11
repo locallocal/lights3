@@ -14,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <vector>
 
 #include "core/log.h"
 #include "core/task.h"
@@ -88,6 +89,7 @@ struct BodyState {
     bool after_chunk_data = false;  // 刚读完一个 chunk 的数据，下一行必须是 CRLF
     bool chunk_eof = false;
     bool error = false;
+    size_t trailer_max = 16 * 1024;  // 由 http.trailer_max_size 覆盖（docs/gaps.md §7）
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -133,7 +135,7 @@ struct BodyState {
                     if (!conn->read_line(t, 1024)) fail("client disconnected in trailers");
                     if (t.empty()) break;
                     trailer_bytes += t.size();
-                    if (trailer_bytes > driver::kTrailerMaxBytes) fail("trailer section too large");
+                    if (trailer_bytes > trailer_max) fail("trailer section too large");
                 }
                 chunk_eof = true;
                 return 0;
@@ -151,7 +153,7 @@ struct BodyState {
         return error || (chunked ? chunk_eof : remaining == 0);
     }
     // 响应后排空残余 body 以复用连接；过大/出错放弃（调用方随即关连接）
-    bool drain(uint64_t limit = driver::kDrainMaxBytes) {
+    bool drain(uint64_t limit) {
         // 从未回过 100-continue，客户端可能根本不会发 body，不能傻等
         if (need_continue) return false;
         std::byte tmp[driver::kScratchBytes];
@@ -235,7 +237,8 @@ bool spawn_conn_thread(std::function<void()> fn) {
     return true;
 }
 
-bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_alive) {
+bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_alive,
+                    size_t io_chunk = driver::kIoChunkBytes) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
     auto head = driver::render_response_head(resp, keep_alive, head_request);
     bool chunked = head.chunked;
@@ -244,8 +247,9 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
 
     if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());
 
-    // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
-    std::byte buf[driver::kIoChunkBytes];
+    // 流式响应：http.io_chunk_size 块拉取（docs/architecture.md 请求生命周期）。
+    // 块大小是运行期配置，缓冲改在堆上（栈数组需编译期大小）
+    std::vector<std::byte> buf(io_chunk);
     uint64_t written = 0;
     for (;;) {
         size_t n = 0;
@@ -266,7 +270,7 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
             int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
             if (!send_all(fd, sz, static_cast<size_t>(m))) return false;
         }
-        if (!send_all(fd, reinterpret_cast<const char*>(buf), n)) return false;
+        if (!send_all(fd, reinterpret_cast<const char*>(buf.data()), n)) return false;
         if (chunked && !send_all(fd, "\r\n", 2)) return false;
         written += n;
     }
@@ -349,6 +353,7 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
     BodyState body_state;
     body_state.conn = &reader;
     body_state.fd = fd;
+    body_state.trailer_max = sh.cfg.trailer_max_size;
     std::optional<uint64_t> content_length = framing.content_length;
     bool has_body = false;
     if (framing.chunked) {
@@ -381,10 +386,10 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
     if (body_state.error) keep_alive = false;
     else if (!body_state.at_eof()) {
         if (body_state.need_continue) keep_alive = false;
-        else if (keep_alive) keep_alive = body_state.drain();
+        else if (keep_alive) keep_alive = body_state.drain(sh.cfg.drain_limit);
     }
 
-    if (!write_response(fd, resp, head_request, keep_alive)) return false;
+    if (!write_response(fd, resp, head_request, keep_alive, sh.cfg.io_chunk_size)) return false;
     return keep_alive;
 }
 
@@ -406,6 +411,18 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
 class BuiltinServer final : public IHttpServer {
 public:
     explicit BuiltinServer(const HttpConfig& cfg) : shared_(std::make_shared<ConnShared>()) {
+        // TLS 不支持（docs/gaps.md §7）：配了必须当场报错——静默跑明文会让
+        // UNSIGNED-PAYLOAD 请求的完整性论证（依赖传输层加密）整个失效
+        if (!cfg.tls_cert.empty())
+            throw std::runtime_error(
+                "http driver 'builtin' does not support TLS; use 'httplib' or 'beast'");
+        // thread-per-connection 模型没有 IO 线程数的概念；显式配置说明用户在
+        // 预期一个不会发生的效果（docs/gaps.md §7）
+        if (cfg.io_threads_set)
+            LOG_WARN(
+                "builtin driver ignores http.io_threads={} (thread-per-connection model; "
+                "concurrency is bounded by http.max_connections={})",
+                cfg.io_threads, cfg.max_connections);
         shared_->cfg = cfg;
     }
     ~BuiltinServer() override {
@@ -525,10 +542,12 @@ public:
         // shared_ptr 持有共享状态，run() 返回乃至 server 析构后自行收尾，无悬空引用
         std::unique_lock lk(sh.m);
         for (int cfd : sh.idle) ::shutdown(cfd, SHUT_RDWR);
-        if (!sh.cv.wait_for(lk, driver::kShutdownGrace, [&] { return sh.active == 0; })) {
+        if (!sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_grace_sec),
+                            [&] { return sh.active == 0; })) {
             LOG_WARN("forcing {} connection(s) closed on shutdown", sh.active);
             for (int fd : sh.conns) ::shutdown(fd, SHUT_RDWR);
-            sh.cv.wait_for(lk, driver::kShutdownForceWait, [&] { return sh.active == 0; });
+            sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_force_wait_sec),
+                           [&] { return sh.active == 0; });
         }
         LOG_INFO("builtin http server stopped");
     }

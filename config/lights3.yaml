@@ -7,12 +7,26 @@ http:
   driver: builtin          # builtin | beast | httplib（需对应 CMake 选项编译进来）
   bind: 0.0.0.0
   port: 9000
-  io_threads: 4
+  io_threads: 4            # beast=IO 线程数 / httplib=线程池 / seastar=shard 数；
+                           # builtin（thread-per-connection）忽略并在显式配置时 WARN
   max_header_size: 16KiB
   idle_timeout: 60s
   # multipart 非末片的最小分片（AWS 恒 5MiB）。0 = 不限制——前面挂着不守这条
   # 规则的工具链、或本实例只是另一个 lights3 的代理时可放开
   min_part_size: 5MiB
+  # ---------- TLS（docs/gaps.md §7）----------
+  # 两个都给才启用 HTTPS；仅 httplib/beast 驱动支持，builtin/seastar 配置了
+  # 会启动报错（绝不静默跑明文）。SigV4 UNSIGNED-PAYLOAD 的完整性依赖传输层
+  # 加密，公网部署强烈建议开启（或由前置 LB 终结 TLS）
+  # tls_cert: /etc/lights3/server.crt   # PEM 证书链
+  # tls_key: /etc/lights3/server.key    # PEM 私钥
+  # ---------- 停机/背压边界（docs/gaps.md §7，值为默认值）----------
+  # drain_limit: 4MiB          # 回错前排空请求体上限（超过即关连接）
+  # trailer_max_size: 16KiB    # chunked trailer 区上限（builtin/seastar 手写解析器）
+  # io_chunk_size: 64KiB       # 流式读写块大小
+  # body_queue_cap: 256KiB     # 推转拉队列容量，即背压水位（仅 httplib）
+  # shutdown_grace: 10s        # 停机等在途请求的宽限
+  # shutdown_force_wait: 5s    # 强制断开后的二次等待
 
 runtime:
   io_threads: 16           # 阻塞 IO 线程池大小

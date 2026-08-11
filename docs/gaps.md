@@ -20,7 +20,7 @@
 ## 速览
 
 - **第一部分 · 需要调整的实现**：P0 四条（§1）、高 二十余条（§2，其中 12 条展开、13 条列表）、中 三十余条（§3）、低 二十余条（§4）。
-- **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5，**已全部实现**）、存储引擎能力缺口 23 项（§6，**已全部处理**——实现或定性为设计边界）、运维与工程能力缺口 10 项（§7）。
+- **第二部分 · 未实现的功能**：S3 协议缺口 10 项（§5，**已全部实现**）、存储引擎能力缺口 23 项（§6，**已全部处理**——实现或定性为设计边界）、运维与工程能力缺口 10 项（§7，**已全部处理**）。
 - **第三部分 · 文档与实现的偏差**：15 条实现与承诺不符（含"改实现"与"改文档"两类），另有 7 条中英文档漂移（§8）。
 
 P0 四条**已于 2026-08-03 全部修复**（详见 §1），高危 25 条（§2 的 12 条展开 + §2.13 的 13 行）
@@ -28,7 +28,9 @@ P0 四条**已于 2026-08-03 全部修复**（详见 §1），高危 25 条（§
 **已于 2026-08-08 全部修复**（详见 §3），低危 23 行**已于 2026-08-08 全部修复**（详见 §4）。
 第一部分至此清零。第二部分的 **§5 S3 协议缺口 10 小节已于 2026-08-09 全部实现**
 （详见 §5），**§6 存储引擎能力缺口 23 项已于 2026-08-11 全部处理**（详见 §6，
-含若干条按 workload 论证后的刻意保留）；当前未修复的起点是 §7 运维与工程能力缺口。
+含若干条按 workload 论证后的刻意保留），**§7 运维与工程能力缺口 10 项已于
+2026-08-12 全部处理**（详见 §7，顺带修复 §6.3 校验收紧引入的 cloudproxy 保留桶
+回归）；第二部分至此清零。当前未修复的起点是第三部分"文档与实现的偏差"。
 
 P0 四条按影响排：vhost bucket 名不校验（任意文件读 + 全部凭证泄露）、`data=rados` 缺写侧 pin（删在途数据）、tiered 缓存回填缺 fsync（掉电后静默返回零块）、多网关下封存他方 active pack（静默丢数据）。
 
@@ -882,7 +884,11 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 - **tiered quota 增量维护**：PUT/DELETE 就地增减估算（stat 拿旧尺寸算净差），
   超高水位提前踢 scan；估算漂移只偏保守方向，每轮 scan 以实测校准。
 
-## 7. 运维与工程能力缺口
+## 7. [✅已修复] 运维与工程能力缺口
+
+> 本节**已于 2026-08-12 全部处理完毕**：表格下方为逐行的实际修法。
+> 顺带修复了一条 §6.3 遗留回归（校验收紧后 cloudproxy 的保留桶远端名非法，
+> "cloudproxy 当默认后端 + 动态凭证"启动必炸，见下方最后一条）。
 
 | 缺口 | 说明 |
 | --- | --- |
@@ -896,6 +902,63 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 | **无字节数与 per-bucket 维度指标** | 无 bytes in/out 计数器，无按 bucket 的请求分布 |
 | **`http.io_threads` 语义随驱动漂移** | beast/httplib/seastar 消费它，**默认驱动 builtin 完全忽略**（thread-per-connection）。用户改了没效果且无任何提示 |
 | **停机/背压参数全部硬编码** | drain 上限 4MiB、宽限 10s、trailer 16KiB、块大小 64KiB、连接上限 4096、队列容量 256KiB 散落四个驱动，改要重编且容易漏（连接上限漏改就是例子） |
+
+**✅已修复**（2026-08-12，逐行）：
+
+- **TLS/HTTPS**：`http.tls_cert` + `http.tls_key`（PEM，两个都给才启用，只给一个
+  配置期报错）。httplib 走上游 `SSLServer`；beast 把会话循环模板化，明文与
+  `asio::ssl::stream`（握手/close_notify/底层超时齐备）共用同一份逻辑；
+  builtin/seastar 配置了 TLS 在**构造期直接抛错**——绝不"配了但静默跑明文"。
+  证书加载失败同样启动期抛。CMake 侧 `CPPHTTPLIB_OPENSSL_SUPPORT` 与
+  `OpenSSL::SSL` 随任一 httplib 消费者（驱动或 cloudproxy）目标级统一定义
+  （ODR 约束不变）。测试内嵌百年自签证书：TLS 往返（GET+流式 PUT）、明文客户
+  端打 TLS 端口必须握手失败、不支持驱动必须抛、坏证书必须抛，四用例齐备。
+- **CI**：`.github/workflows/ci.yml` 三变体矩阵（default / TSan / sqlite+redis
+  同编译），直接复用 `build.sh`（子模块按需 init 的逻辑不重写一份），ccache
+  按变体缓存对付 rocksdb 冷编译。seastar/tikv/rados 依赖重型系统工具链或外部
+  集群，**刻意保留**在本地按需验证（对应 e2e 在无依赖时本就 SKIP）。
+- **三后端零指标**：localfs/xlocalfs 接 `lights3_localfs_ops_total` /
+  `_op_errors_total`（op 八维全量预注册）+ `_op_seconds`（仅 put/get/list——
+  覆盖写盘/读盘/遍历三类代价形态即可定位盘退化，其余 op 同形不膨胀输出）；
+  埋点走协程帧内 RAII guard，异常展开自动计 error。xlocalfs 共用基类实例
+  （覆写入口重埋，不双计），io_uring 回落时 `lights3_xlocalfs_uring_fallback`
+  gauge 常驻置 1（此前只有启动日志一行，滚动即失踪）。tiered 接
+  `lights3_tiered_ops_total`/`_op_errors_total`（四个有分层逻辑的 op，纯委托
+  路径由 local 的指标覆盖）+ `get_source_total{local|cloud}`（缓存命中率即
+  tiered 最核心健康信号）+ demoted/promoted 计数（计在提交点，崩溃恢复补账
+  不虚高）+ `scan_seconds` 直方图 + GC 四项（runs/removed/failed 计数，
+  deferred 为本轮观测 gauge，取舍同 duostore 的 skipped 类）。
+- **线程池等待直方图**：补 `wait_sum_us` 后以标准 histogram 渲染进 `/-/metrics`
+  （`lights3_pool_wait_seconds`，桶界 1ms/10ms/100ms/1s）——concurrency.md §3.1
+  的专属池判据从此可执行。
+- **入口限流可观测**：`lights3_admission_capacity/available/waiting` 三 gauge
+  （main 装配期注入 `AsyncSemaphore::available()/waiting()`），压测时"卡在
+  准入还是卡在池"一眼可辨。
+- **关停挂死**：`wait_idle()` 语义仍是无限等（强杀在途任务只会换来 UAF），但
+  每 10s WARN 打出组名与剩余任务数；`TimerQueue` 停机后 `add()` 返回 0 并
+  WARN（0 与 `cancel(0)` 的 no-op 约定闭环），不再发"有效但永不触发"的 id。
+- **定时器耗时观测**：回调执行时长直方图（`lights3_timer_callback_seconds`）、
+  超 1s 慢回调计数 + 逐次 WARN、`lights3_timer_lag_seconds` 队头滞后 gauge
+  （"定时器被某个回调堵了 3 秒"直接读数）、pending/due 深度。
+- **字节数与 per-bucket**：`lights3_bytes_total{direction}` 全局 +
+  `lights3_bucket_requests_total` / `lights3_bucket_bytes_total{bucket,direction}`。
+  计数经 dispatch 内外层的 CountingBodyReader 装饰器——入向计 handler 实际
+  消费的 payload 字节，出向计驱动实际拉走的字节（流式响应写出发生在 dispatch
+  返回之后，只有装饰器能看到）。bucket 标签基数上限 512，溢出并入 `_other`。
+- **io_threads 漂移**：解析器打 `io_threads_set` 标记，builtin 在显式配置时
+  启动 WARN（并提示并发实际由 max_connections 决定）；示例配置逐驱动注明语义。
+- **停机/背压参数配置化**：`drain_limit` / `trailer_max_size` / `io_chunk_size` /
+  `body_queue_cap`（httplib 背压水位）/ `shutdown_grace` / `shutdown_force_wait`
+  进 `HttpConfig`（默认值即旧常量，带范围校验），四驱动改读配置；连接上限
+  §2.13 已修。`kScratchBytes` 等纯内部缓冲**刻意保留**为常量——不是运维会调
+  的量，配置面每多一个键都是认知成本。
+- **§6.3 遗留回归（顺带修复）**：校验收紧（`-.`/`.-` 相邻非法）后，cloudproxy
+  把保留桶 `.sys` 拼成 `<prefix>.sys`（如 `e2e-.sys`）被远端拒绝——真 AWS 同样
+  会拒，即"cloudproxy 当默认后端 + 动态凭证"组合启动必炸（e2e_cloudproxy 在
+  main 上稳定红）。修法：`remote_bucket()` 咽喉点把 `.sys` 恒定转写为
+  `lights3-sys`，该名字对本后端保留（用户桶恰叫此名会与远端凭证桶合流，读得
+  到 .sys 对象即凭证泄漏，入口拒绝）；`list_buckets` 反向还原为 `.sys` 交由
+  L2 的保留桶过滤，不冒充用户桶出现在列表里。
 
 ---
 
@@ -946,8 +1009,8 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 1. ~~**先修 P0 的四条**（1.1–1.4）。其中 1.1 的三处改动必须同批上线（单改一处不构成防线）。~~ ✅ 2026-08-03 完成。
 2. ~~**2.1 + 2.2 一起修**——两条都是"后台线程/关停期异常防线"，成本极低、收益立竿见影，且 2.2 的 TimerQueue 次生问题会让 2.1 的修复更难验证。~~ ✅ 2026-08-06 完成（§2 整节同批）。
 3. ~~**3.1 / 3.2 / `AsyncSemaphore` 取消是同一条链**（2.9 已单独修完）：接线取消之前必须先修 3.2（回调不在触发线程跑续体）与信号量取消支持（§2.13 只做了析构断言，`close()` 留在这里），否则接上 `with_timeout` 反而引入"定时器线程跑请求"的新故障模式。~~ ✅ 2026-08-07/08 完成（§3 整节，§4 随后）。
-   ~~**下一站是 §5.1 的分页缺失**~~ ✅ 2026-08-09 完成（§5 整节）。~~**当前下一站是 §6 存储引擎能力缺口**~~ ✅ 2026-08-11 完成（§6 整节）。**当前下一站是 §7 运维与工程能力缺口**。
+   ~~**下一站是 §5.1 的分页缺失**~~ ✅ 2026-08-09 完成（§5 整节）。~~**当前下一站是 §6 存储引擎能力缺口**~~ ✅ 2026-08-11 完成（§6 整节）。~~**当前下一站是 §7 运维与工程能力缺口**~~ ✅ 2026-08-12 完成（§7 整节 + §6.3 的 cloudproxy 保留桶回归）。**剩余：第三部分"文档与实现的偏差"与 §8 中英文档漂移**。
 4. ~~**6.1 的 pack 老化/预算**——2.3 的存活账口径与压实判据已改，续做时以现判据为基线，避免再次推翻测试。~~ ✅ 2026-08-10 完成（以现判据为基线，见 §6.1）。
 5. ~~**3.5 的白名单反转**一次性消掉 5.3、3.4 的一半与未来所有子资源漂移，性价比最高。~~ ✅ 已完成；5.3 随 §5 实现后，白名单也已按新语义放行 `response-*`。
-6. 第 7 节的工程能力（CI、TLS、后端指标）不阻塞正确性修复，可并行推进。
+6. ~~第 7 节的工程能力（CI、TLS、后端指标）不阻塞正确性修复，可并行推进。~~ ✅ 2026-08-12 完成。
 7. §2.13 的 httplib `Expect: 100-continue` 留有上游 API 限制（无法延迟应答），如需彻底解决要么换驱动、要么向 cpp-httplib 提 PR。

@@ -15,14 +15,11 @@
 
 namespace lights3::http::driver {
 
-// ---------- 四驱动共用的边界常量（docs/gaps.md §4）----------
-// 曾散落四处各写一份字面量，改一处漏三处（§2.13 的连接上限就是教训）
-inline constexpr uint64_t kDrainMaxBytes = 4 * 1024 * 1024;  // 回错前排空请求体上限
-inline constexpr size_t kTrailerMaxBytes = 16 * 1024;        // chunked trailer 区上限
-inline constexpr size_t kIoChunkBytes = 64 * 1024;           // 流式读写块大小
-inline constexpr size_t kScratchBytes = 16 * 1024;           // 排空/行解析等杂用缓冲
-inline constexpr std::chrono::seconds kShutdownGrace{10};    // 停机等在途请求的宽限
-inline constexpr std::chrono::seconds kShutdownForceWait{5}; // 强制断开后的二次等待
+// ---------- 驱动内部缓冲常量 ----------
+// 停机/背压边界（drain 上限、trailer 上限、块大小、停机宽限）已升级为 HttpConfig
+// 可配置项（docs/gaps.md §7），默认值收敛在 config.h；这里只剩纯内部量
+inline constexpr size_t kIoChunkBytes = 64 * 1024;  // 流式读写块大小（http.io_chunk_size 默认值）
+inline constexpr size_t kScratchBytes = 16 * 1024;  // 排空/行解析等杂用缓冲
 
 // 把请求行的 target（"/a%2Fb?x=1&y"）拆成中立模型的四个字段：
 // raw_path / raw_query 保留原文（SigV4 需要），path / query 为解码结果（保序）

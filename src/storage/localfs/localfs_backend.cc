@@ -35,8 +35,9 @@ using fsutil::throw_errno;
 using fsutil::write_tsv;
 
 LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool,
-                               LocalFsOptions opt)
+                               LocalFsOptions opt, MetricsScope metrics)
     : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)), opt_(opt) {
+    init_metrics(metrics);
     fs::create_directories(root_);
     fs::create_directories(staging_ / "put");
     fs::create_directories(staging_ / "mpu");
@@ -45,6 +46,36 @@ LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<
         commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
     cleanup_stale_uploads();
     schedule_mpu_scan();
+}
+
+void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
+    // op 维度全量预注册（同 duostore 的 reason 分桶理由）：缺失的序列在 Prometheus
+    // 里读作"没数据"而非"为 0"，会让"错误突然消失"和"从来没出过错"看起来一样。
+    // 空 scope 返回孤立实例（非空指针），热路径无需判空
+    static constexpr std::array<const char*, kOpCount> kOpNames = {
+        "put", "get", "head", "delete", "list", "copy", "upload_part", "complete_mpu"};
+    for (size_t i = 0; i < kOpCount; ++i) {
+        m_ops_[i] = metrics.counter("lights3_localfs_ops_total",
+                                    "Data-path operations finished (success and failure)",
+                                    {{"op", kOpNames[i]}});
+        m_op_errors_[i] = metrics.counter(
+            "lights3_localfs_op_errors_total",
+            "Data-path operations that exited via an error (any exception, incl. client 4xx)",
+            {{"op", kOpNames[i]}});
+    }
+    // 时延只测 put/get/list：它们覆盖"写盘、读盘、目录遍历"三类代价形态，足以
+    // 定位盘退化；其余 op 的时延与三者之一同形，逐个建直方图只膨胀 /-/metrics
+    for (Op op : {Op::kPut, Op::kGet, Op::kList})
+        m_op_seconds_[size_t(op)] = metrics.histogram(
+            "lights3_localfs_op_seconds", "Wall time of a data-path operation",
+            {0.001, 0.005, 0.02, 0.1, 0.5, 2, 10}, {{"op", kOpNames[size_t(op)]}});
+}
+
+void LocalFsBackend::record_op(Op op, double secs, bool ok) {
+    size_t i = size_t(op);
+    m_ops_[i]->inc();
+    if (!ok) m_op_errors_[i]->inc();
+    if (m_op_seconds_[i]) m_op_seconds_[i]->observe(secs);
 }
 
 LocalFsBackend::~LocalFsBackend() {
@@ -204,6 +235,7 @@ Task<std::vector<BucketInfo>> LocalFsBackend::list_buckets() {
 Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_view key,
                                            ObjectMeta meta, http::BodyReader& body,
                                            PutCondition cond) {
+    OpGuard g{this, Op::kPut};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
@@ -248,11 +280,15 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     co_await pool_->schedule();  // 锁唤醒可能在别的线程恢复，阻塞 IO 回池线程做
     fsutil::check_put_condition(object_path(bucket, key), cond, key);
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+    g.ok = true;
     co_return PutResult{meta.etag};
 }
 
 Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::string_view key,
                                               std::optional<ByteRange> range) {
+    // GET 的时延止于流句柄就绪（open + 元数据），不含 body 传输——后者由客户端
+    // 拉取节奏主导，混进来会把盘时延淹没在网络时延里
+    OpGuard g{this, Op::kGet};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
@@ -299,6 +335,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         ::close(fd);
         throw;
     }
+    g.ok = true;
     co_return out;
 }
 
@@ -309,6 +346,8 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
 Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
     std::string_view dst_key, ObjectMeta meta) {
+    // nullopt 回落（机制不可用/源并发变短）不是错误：语义等价的流式路径接手
+    OpGuard g{this, Op::kCopy};
     validate_bucket_name(src_bucket, kAllowReserved);
     validate_bucket_name(dst_bucket, kAllowReserved);
     for (auto k : {src_key, dst_key}) {
@@ -323,7 +362,10 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     fs::path src = object_path(src_bucket, src_key);
     fsutil::TierInfo tier;
     ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);  // 缺→NoSuchKey
-    if (tier.tier != fsutil::Tier::kLocal) co_return std::nullopt;  // 数据不在本地（tiered stub）
+    if (tier.tier != fsutil::Tier::kLocal) {  // 数据不在本地（tiered stub）
+        g.ok = true;
+        co_return std::nullopt;
+    }
 
     int sfd = ::open(src.c_str(), O_RDONLY);
     if (sfd < 0)
@@ -353,7 +395,10 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
                                  in_off == 0;
             int err = errno;
             ::close(sfd);
-            if (not_supported) co_return std::nullopt;  // TmpFile RAII 丢弃
+            if (not_supported) {  // TmpFile RAII 丢弃
+                g.ok = true;
+                co_return std::nullopt;
+            }
             errno = err;
             throw_errno("copy_file_range");
         }
@@ -361,7 +406,10 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
         remaining -= uint64_t(n);
     }
     ::close(sfd);
-    if (remaining != 0) co_return std::nullopt;  // 源变短（并发覆盖）：回落流式取一致快照
+    if (remaining != 0) {  // 源变短（并发覆盖）：回落流式取一致快照
+        g.ok = true;
+        co_return std::nullopt;
+    }
 
     // 字节未变 ⇒ etag/size 恒等于源；REPLACE 的新 user_meta/content_type 已在
     // meta 里（handler 组装），只补与内容绑定的三项
@@ -372,20 +420,25 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     auto lk = co_await commit_lock(dst_bucket, dst_key).acquire();
     co_await pool_->schedule();
     commit_object_file(object_path(dst_bucket, dst_key), tmp, meta, staging_ / "put", dst_key);
+    g.ok = true;
     co_return PutResult{meta.etag};
 }
 
 Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::string_view key) {
+    OpGuard g{this, Op::kHead};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
     require_bucket(bucket);
-    co_return load_meta(object_path(bucket, key), std::string(key));
+    auto m = load_meta(object_path(bucket, key), std::string(key));
+    g.ok = true;
+    co_return m;
 }
 
 Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_view key) {
+    OpGuard g{this, Op::kDelete};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
@@ -405,6 +458,7 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
         if (ec) break;
         dir = dir.parent_path();
     }
+    g.ok = true;
     co_return;
 }
 
@@ -537,6 +591,7 @@ std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
 }  // namespace
 
 Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
+    OpGuard g{this, Op::kList};
     validate_bucket_name(bucket, kAllowReserved);
     co_await pool_->schedule();
     require_bucket(bucket);
@@ -544,7 +599,10 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     fs::path base = bucket_dir(bucket);
     ListResult out;
     // S3：max-keys=0 返回空结果且 IsTruncated=false（与 apply_listing 一致）
-    if (opt.max_keys <= 0) co_return out;
+    if (opt.max_keys <= 0) {
+        g.ok = true;
+        co_return out;
+    }
 
     // prefix 剪枝：最后一个 '/' 之前的部分直接定位起始目录，不存在即无匹配
     std::string dir_rel;
@@ -552,7 +610,10 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
         dir_rel = opt.prefix.substr(0, slash + 1);
     fs::path start_dir = dir_rel.empty() ? base : base / fs::path(dir_rel);
     std::error_code ec;
-    if (!fs::is_directory(start_dir, ec)) co_return out;
+    if (!fs::is_directory(start_dir, ec)) {
+        g.ok = true;
+        co_return out;
+    }
 
     const std::string& delim = opt.delimiter;
     int count = 0;
@@ -601,6 +662,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
         return true;
     };
     walker.walk(start_dir, dir_rel);
+    g.ok = true;
     co_return out;
 }
 
@@ -639,6 +701,7 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
 Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string_view key,
                                             std::string_view upload_id, int part_no,
                                             http::BodyReader& body) {
+    OpGuard g{this, Op::kUploadPart};
     validate_part_number(part_no);
     co_await pool_->schedule();
     auto up = require_upload(staging_, bucket, key, upload_id,
@@ -686,6 +749,7 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
     tmp.committed = true;
     fsutil::fsync_dir(up.dir);
     write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
+    g.ok = true;
     co_return PutResult{etag};
 }
 
@@ -693,6 +757,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
                                                    std::string_view key,
                                                    std::string_view upload_id,
                                                    std::span<const PartInfo> parts) {
+    OpGuard g{this, Op::kCompleteMpu};
     validate_part_order(parts);
     co_await pool_->schedule();
     auto up = require_upload(staging_, bucket, key, upload_id,
@@ -766,6 +831,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
 
     std::error_code ec;
     fs::remove_all(up.dir, ec);
+    g.ok = true;
     co_return PutResult{meta.etag};
 }
 

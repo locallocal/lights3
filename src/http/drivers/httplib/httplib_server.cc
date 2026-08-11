@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <memory>
 #include <thread>
 
 #include "core/log.h"
@@ -40,6 +41,26 @@ void apply_fallback(httplib::Response& rs, const HttpResponse& src) {
 class HttplibServer final : public IHttpServer {
 public:
     explicit HttplibServer(const HttpConfig& cfg) : cfg_(cfg) {
+        // TLS（docs/gaps.md §7）：SSLServer 是 Server 的子类，构造期加载证书。
+        // 失败必须当场抛（is_valid() 为假时 listen 只会静默失败）
+        if (!cfg.tls_cert.empty()) {
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+            auto ssl = std::make_unique<httplib::SSLServer>(cfg.tls_cert.c_str(),
+                                                            cfg.tls_key.c_str());
+            if (!ssl->is_valid())
+                throw std::runtime_error("httplib driver: failed to load TLS cert/key (" +
+                                         cfg.tls_cert + ", " + cfg.tls_key + ")");
+            svr_ = std::move(ssl);
+            tls_ = true;
+#else
+            // CMake 侧任一 httplib 消费者（本驱动或 cloudproxy）开启即定义该宏，
+            // 走到这里说明构建配置被手工改过
+            throw std::runtime_error(
+                "httplib driver was built without CPPHTTPLIB_OPENSSL_SUPPORT; TLS unavailable");
+#endif
+        } else {
+            svr_ = std::make_unique<httplib::Server>();
+        }
         // 上游对**单行**头有编译期上限 CPPHTTPLIB_HEADER_MAX_LENGTH（8KiB），
         // 不可配。配置值大于它时超长单行仍会被上游先拒掉，行为与另三驱动不同——
         // 明确告警而不是让它悄悄生效
@@ -48,15 +69,15 @@ public:
                 "httplib driver: single header lines above {} bytes are rejected by the upstream "
                 "parser regardless of http.max_header_size={}",
                 int(CPPHTTPLIB_HEADER_MAX_LENGTH), cfg.max_header_size);
-        svr_.new_task_queue = [n = std::max(cfg.io_threads, 8)] {
+        svr_->new_task_queue = [n = std::max(cfg.io_threads, 8)] {
             return new httplib::ThreadPool(static_cast<size_t>(n));
         };
-        svr_.set_tcp_nodelay(true);
-        svr_.set_read_timeout(cfg.idle_timeout_sec);
-        svr_.set_write_timeout(cfg.idle_timeout_sec);
-        svr_.set_keep_alive_timeout(cfg.idle_timeout_sec);
-        svr_.set_keep_alive_max_count(1024);
-        svr_.set_exception_handler(
+        svr_->set_tcp_nodelay(true);
+        svr_->set_read_timeout(cfg.idle_timeout_sec);
+        svr_->set_write_timeout(cfg.idle_timeout_sec);
+        svr_->set_keep_alive_timeout(cfg.idle_timeout_sec);
+        svr_->set_keep_alive_max_count(1024);
+        svr_->set_exception_handler(
             [](const httplib::Request&, httplib::Response& rs, std::exception_ptr ep) {
                 std::string what;
                 try {
@@ -74,7 +95,7 @@ public:
         // 已知限制（本驱动定位功能验证，误发 100 后的无效 body 由 handle() 的
         // 4MiB 有界排空 + 关连接兜住）。此处能做的：消息边界违规在邀请客户端
         // 上传之前就以 400 拒绝，不再是"先回 100 再拒"
-        svr_.set_expect_100_continue_handler(
+        svr_->set_expect_100_continue_handler(
             [](const httplib::Request& rq, httplib::Response& rs) {
                 HeaderMap headers;
                 for (auto& [k, v] : rq.headers)
@@ -92,7 +113,7 @@ public:
         // 统一补成 S3 XML；body 非空说明是 handler 自己渲染的错误，不覆盖。
         // 路由 404 只可能是"方法没注册"（下面对全部业务方法注册了 ".*"），
         // 与另三驱动一致地翻译成 405 MethodNotAllowed
-        svr_.set_error_handler([](const httplib::Request&, httplib::Response& rs) {
+        svr_->set_error_handler([](const httplib::Request&, httplib::Response& rs) {
             using HR = httplib::Server::HandlerResponse;
             if (!rs.body.empty()) return HR::Unhandled;
             s3::S3ErrorCode code = s3::S3ErrorCode::InternalError;
@@ -119,28 +140,28 @@ public:
         };
         auto with_body = [this](const httplib::Request& rq, httplib::Response& rs,
                                 const httplib::ContentReader& cr) { handle(rq, rs, &cr); };
-        svr_.Get(pat, no_body);       // HEAD 由 httplib 复用 Get 路由
-        svr_.Options(pat, no_body);
-        svr_.Post(pat, with_body);
-        svr_.Put(pat, with_body);
-        svr_.Patch(pat, with_body);
-        svr_.Delete(pat, with_body);
+        svr_->Get(pat, no_body);       // HEAD 由 httplib 复用 Get 路由
+        svr_->Options(pat, no_body);
+        svr_->Post(pat, with_body);
+        svr_->Put(pat, with_body);
+        svr_->Patch(pat, with_body);
+        svr_->Delete(pat, with_body);
     }
 
     void set_handler(Handler h) override { handler_ = std::move(h); }
 
     void listen(const std::string& addr, uint16_t port) override {
         if (port == 0) {
-            int p = svr_.bind_to_any_port(addr);
+            int p = svr_->bind_to_any_port(addr);
             if (p <= 0) throw std::runtime_error("httplib bind failed on " + addr);
             port_ = static_cast<uint16_t>(p);
         } else {
-            if (!svr_.bind_to_port(addr, port))
+            if (!svr_->bind_to_port(addr, port))
                 throw std::runtime_error("httplib bind failed on " + addr + ":" +
                                          std::to_string(port));
             port_ = port;
         }
-        LOG_INFO("httplib http server listening on {}:{}", addr, port_);
+        LOG_INFO("httplib http{} server listening on {}:{}", tls_ ? "s" : "", addr, port_);
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -149,7 +170,7 @@ public:
         // shutdown 早于 run 的补偿（另三驱动同款）：不检查则该顺序下 stop() 是
         // no-op（is_running_ 未置位），listen 永不返回
         if (!stopping_.load()) {
-            svr_.listen_after_bind();  // 返回前 httplib 线程池已 join（在途请求跑完）
+            svr_->listen_after_bind();  // 返回前 httplib 线程池已 join（在途请求跑完）
         }
         LOG_INFO("httplib http server stopped");
     }
@@ -160,8 +181,8 @@ public:
         // 已在运行 → stop() 关监听 socket 使循环退出；尚未运行 → decommission()
         // 使随后的 listen_after_bind() 立即返回。上游 listen_internal 的
         // decommission 检查与 is_running_ 置位之间仍有纳秒级窗口，属上游 API 限制
-        svr_.stop();
-        svr_.decommission();
+        svr_->stop();
+        svr_->decommission();
     }
 
 private:
@@ -223,7 +244,7 @@ private:
         std::shared_ptr<BlockQueue> queue;
         std::thread pump;
         if (content_reader && (chunked || (content_length && *content_length > 0))) {
-            queue = std::make_shared<BlockQueue>(256 * 1024);
+            queue = std::make_shared<BlockQueue>(cfg_.body_queue_cap);
             req.body = std::make_unique<QueueBodyReader>(queue, content_length, &req_exec);
             pump = std::thread([content_reader, queue] {
                 bool ok = (*content_reader)(
@@ -251,7 +272,7 @@ private:
                     size_t n = queue->pop(std::span(tmp));
                     if (n == 0) break;
                     drained += n;
-                    if (drained > driver::kDrainMaxBytes) {
+                    if (drained > cfg_.drain_limit) {
                         queue->cancel();
                         break;
                     }
@@ -309,7 +330,7 @@ private:
         // reader 与复用缓冲的所有权都交给闭包（响应写出发生在本回调返回之后）；
         // 缓冲随闭包存活（docs/gaps.md §4：此前每 64KiB 块构造一次 vector）
         std::shared_ptr<BodyReader> body(std::move(resp.stream_body));
-        auto buf = std::make_shared<std::vector<std::byte>>(driver::kIoChunkBytes);
+        auto buf = std::make_shared<std::vector<std::byte>>(cfg_.io_chunk_size);
         if (resp.content_length) {
             rs.set_content_provider(
                 static_cast<size_t>(*resp.content_length), content_type,
@@ -346,7 +367,8 @@ private:
 
     HttpConfig cfg_;
     Handler handler_;
-    httplib::Server svr_;
+    std::unique_ptr<httplib::Server> svr_;  // TLS 时实为 SSLServer（构造函数决定）
+    bool tls_ = false;
     uint16_t port_ = 0;
     std::atomic<bool> stopping_{false};
 };

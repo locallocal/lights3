@@ -86,6 +86,30 @@ struct MetricsEndGuard {
     }
 };
 
+// 字节计数装饰器（docs/gaps.md §7）：入向包在 checksum/解帧装饰器之外（计的是
+// handler 实际消费的 payload 字节），出向包在 stream_body 之外（计的是驱动实际
+// 拉走的字节——流式响应的写出发生在 dispatch 返回之后，只有装饰器能看到）
+class CountingBodyReader final : public http::BodyReader {
+public:
+    CountingBodyReader(std::unique_ptr<http::BodyReader> inner, Metrics* m, std::string bucket,
+                       bool inbound)
+        : inner_(std::move(inner)), m_(m), bucket_(std::move(bucket)), inbound_(inbound) {}
+
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t n = co_await inner_->read(buf);
+        if (inbound_) m_->add_bytes_in(bucket_, n);
+        else m_->add_bytes_out(bucket_, n);
+        co_return n;
+    }
+    std::optional<uint64_t> length() const override { return inner_->length(); }
+
+private:
+    std::unique_ptr<http::BodyReader> inner_;
+    Metrics* m_;
+    std::string bucket_;
+    bool inbound_;
+};
+
 // 明确不支持的子资源（docs/s3-protocol.md §1）：显式 501，避免落进 List/Get 兜底造成误答
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",       "website",
@@ -246,7 +270,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.small_body = "ok\n";
             resp.headers.set("Content-Type", "text/plain");
         } else if (internal && internal_get("/-/metrics")) {
-            resp.small_body = metrics_.render(pool_stats_);
+            resp.small_body = metrics_.render(pool_stats_, admission_stats_, timer_stats_);
             // 后端级注册表（docs/todo.md §3.1）追加在 L2 请求指标之后
             if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
@@ -269,6 +293,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             install_checksum_guard(req);
             bucket = std::move(addr.bucket);
             key = std::move(addr.key);
+            // 入向字节计数（docs/gaps.md §7）：bucket 已解析，装饰在最外层
+            if (req.body)
+                req.body = std::make_unique<CountingBodyReader>(std::move(req.body), &metrics_,
+                                                                bucket, /*inbound=*/true);
             // 用户请求的 bucket 名在此统一过完整校验，这是**唯一**的权威闸门
             // （docs/gaps.md §1.1）。此前只查首字符是否为 '.'，而 vhost 寻址下
             // bucket 完全取自 Host 头、可含 '/' 甚至以 '/' 开头，配合 localfs 的
@@ -339,6 +367,15 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         resp = error_response(
             S3Error(S3ErrorCode::InternalError, "We encountered an internal error."), ctx, head);
     }
+    // per-bucket 请求分布与出向字节（docs/gaps.md §7）。流式响应的字节在
+    // dispatch 返回后才被驱动拉走，经装饰器计入；小响应此刻长度已知
+    metrics_.record_bucket_request(bucket);
+    if (resp.stream_body)
+        resp.stream_body = std::make_unique<CountingBodyReader>(std::move(resp.stream_body),
+                                                                &metrics_, bucket,
+                                                                /*inbound=*/false);
+    else
+        metrics_.add_bytes_out(bucket, resp.small_body.size());
     resp.headers.set("x-amz-request-id", ctx.request_id);
     resp.headers.set("x-amz-id-2", ctx.host_id);
     resp.headers.set("Server", "lights3");

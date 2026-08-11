@@ -49,6 +49,21 @@ struct HttpConfig {
     // 无上限时每连接的线程/协程帧/缓冲可耗尽内存
     int max_connections = 4096;
     std::string base_domain;  // 非空时启用 virtual-host style（docs/s3-protocol.md §2）
+    // TLS（docs/gaps.md §7）：cert/key 都给出即启用 HTTPS。SigV4 的 UNSIGNED-PAYLOAD
+    // 完整性依赖传输层加密，入站方向由这里承接。仅 httplib/beast 驱动支持；
+    // builtin/seastar 配置了 TLS 会在启动时报错——绝不"配了但静默跑明文"
+    std::string tls_cert;  // PEM 证书链路径
+    std::string tls_key;   // PEM 私钥路径
+    // builtin 驱动是 thread-per-connection，io_threads 对它无意义；显式配置时
+    // 启动 WARN 而不是静默忽略（docs/gaps.md §7）。解析器置位
+    bool io_threads_set = false;
+    // ---- 停机/背压边界（docs/gaps.md §7）：曾是四驱动各写一份的硬编码 ----
+    uint64_t drain_limit = 4 * 1024 * 1024;   // 回错前排空请求体上限
+    size_t trailer_max_size = 16 * 1024;      // chunked trailer 区上限（builtin/seastar）
+    size_t io_chunk_size = 64 * 1024;         // 流式读写块大小
+    size_t body_queue_cap = 256 * 1024;       // 推转拉体队列容量（仅 httplib，即背压水位）
+    int shutdown_grace_sec = 10;              // 停机等在途请求的宽限
+    int shutdown_force_wait_sec = 5;          // 强制断开后的二次等待
 };
 
 struct RuntimeConfig {

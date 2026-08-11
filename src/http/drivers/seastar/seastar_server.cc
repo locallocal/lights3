@@ -307,6 +307,7 @@ struct BodyState {
     bool after_chunk_data = false;  // 刚读完一个 chunk 的数据，下一行必须是 CRLF
     bool chunk_eof = false;
     bool error = false;
+    size_t trailer_max = 16 * 1024;  // 由 http.trailer_max_size 覆盖（docs/gaps.md §7）
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -357,7 +358,7 @@ struct BodyState {
                         fail("client disconnected in trailers");
                     if (t.empty()) break;
                     trailer_bytes += t.size();
-                    if (trailer_bytes > driver::kTrailerMaxBytes) fail("trailer section too large");
+                    if (trailer_bytes > trailer_max) fail("trailer section too large");
                 }
                 chunk_eof = true;
                 co_return 0;
@@ -374,7 +375,7 @@ struct BodyState {
     bool at_eof() const { return error || (chunked ? chunk_eof : remaining == 0); }
 
     // 响应前排空残余 body 以复用连接；过大/出错放弃（调用方随即关连接）
-    Task<bool> drain(uint64_t limit = driver::kDrainMaxBytes) {
+    Task<bool> drain(uint64_t limit) {
         // 从未回过 100-continue，客户端可能根本不会发 body，不能傻等
         if (need_continue) co_return false;
         std::vector<std::byte> tmp(driver::kScratchBytes);
@@ -449,6 +450,7 @@ struct ServerCore {
 };
 
 Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, bool keep,
+                          size_t io_chunk,
                           unsigned shard) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
     auto head = driver::render_response_head(resp, keep, head_request);
@@ -467,8 +469,8 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
         co_return false;  // 对端断连等写失败：关连接
     }
 
-    // 流式响应：64KiB 块拉取（docs/architecture.md 请求生命周期）
-    std::vector<std::byte> buf(driver::kIoChunkBytes);
+    // 流式响应：http.io_chunk_size 块拉取（docs/architecture.md 请求生命周期）
+    std::vector<std::byte> buf(io_chunk);
     uint64_t written = 0;
     for (;;) {
         size_t n = 0;
@@ -593,12 +595,14 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         auto framing = driver::parse_body_framing(req.headers);
         if (!framing.valid) {
             auto bad = driver::bad_request_response("Invalid message framing.");
-            co_await write_response(conn, bad, req.method == "HEAD", /*keep=*/false, shard);
+            co_await write_response(conn, bad, req.method == "HEAD", /*keep=*/false,
+                                    core->cfg.io_chunk_size, shard);
             break;
         }
         BodyState bstate;
         bstate.conn = &conn;
         bstate.shard = shard;
+        bstate.trailer_max = core->cfg.trailer_max_size;
         std::optional<uint64_t> content_length = framing.content_length;
         bool has_body = false;
         if (framing.chunked) {
@@ -631,10 +635,11 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         if (bstate.error) keep = false;
         else if (!bstate.at_eof()) {
             if (bstate.need_continue) keep = false;
-            else if (keep) keep = co_await bstate.drain();
+            else if (keep) keep = co_await bstate.drain(core->cfg.drain_limit);
         }
 
-        bool ok = co_await write_response(conn, resp, head_request, keep, shard);
+        bool ok = co_await write_response(conn, resp, head_request, keep,
+                                          core->cfg.io_chunk_size, shard);
         sess->in_flight = false;
         if (!ok) break;
     }
@@ -730,11 +735,12 @@ ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd
     co_await evfd.wait();
     co_await shutdown_sessions(core, /*idle_only=*/true);
 
-    size_t left = co_await wait_drained(core, driver::kShutdownGrace);
+    size_t left = co_await wait_drained(core, std::chrono::seconds(core->cfg.shutdown_grace_sec));
     if (left > 0) {
         LOG_WARN("forcing {} connection(s) closed on shutdown", left);
         co_await shutdown_sessions(core, /*idle_only=*/false);
-        left = co_await wait_drained(core, driver::kShutdownForceWait);
+        left = co_await wait_drained(core,
+                                     std::chrono::seconds(core->cfg.shutdown_force_wait_sec));
         if (left > 0) LOG_WARN("{} connection(s) still alive after force close", left);
     }
     core->notify_stopped();
@@ -807,7 +813,12 @@ uint16_t probe_free_port(const std::string& addr) {
 
 class SeastarServer final : public IHttpServer {
 public:
-    explicit SeastarServer(const HttpConfig& cfg) : cfg_(cfg) {}
+    explicit SeastarServer(const HttpConfig& cfg) : cfg_(cfg) {
+        // TLS 不支持（docs/gaps.md §7）：配了必须当场报错，绝不静默跑明文
+        if (!cfg.tls_cert.empty())
+            throw std::runtime_error(
+                "http driver 'seastar' does not support TLS; use 'httplib' or 'beast'");
+    }
 
     ~SeastarServer() override {
         // 引擎常驻，但本实例的 fiber 引用着 core_：未停净不能析构

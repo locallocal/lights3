@@ -274,9 +274,24 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
     co_return co_await Awaiter{&fn, &exec_};
 }
 
+// 保留桶 .sys 的远端转写名：'.' 开头在 S3 命名规则里非法，前缀拼接还会产生
+// "-." 相邻（"e2e-" + ".sys"），真 AWS 与 lights3 远端都会拒绝——直连拼接的
+// 结果是"cloudproxy 当默认后端 + 动态凭证"这一组合在启动期必炸
+inline constexpr std::string_view kRemoteSysBucket = "lights3-sys";
+
 std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
     validate_bucket_name(bucket, kAllowReserved);
-    std::string rb = ctx_->cfg.bucket_prefix + std::string(bucket);
+    std::string_view local = bucket;
+    if (bucket == kSysBucketName) {
+        local = kRemoteSysBucket;
+    } else if (bucket == kRemoteSysBucket) {
+        // 撞名防护：用户桶恰叫转写名会与远端凭证桶合流，读得到 .sys 对象即
+        // 凭证泄漏——该名字对本后端保留
+        throw S3Error(S3ErrorCode::InvalidBucketName,
+                      "bucket name is reserved by the cloudproxy backend",
+                      std::string(bucket));
+    }
+    std::string rb = ctx_->cfg.bucket_prefix + std::string(local);
     if (rb.size() > 63)
         throw S3Error(S3ErrorCode::InvalidBucketName,
                       "bucket name with cloudproxy bucket_prefix exceeds 63 bytes",
@@ -368,6 +383,9 @@ Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
                 continue;
             BucketInfo info;
             info.name = name.substr(prefix.size());
+            // 转写名还原（与 remote_bucket 对偶）：让上层看到的仍是 .sys，
+            // 由 L2 的保留桶过滤处理，而不是冒充一个用户桶出现在列表里
+            if (info.name == kRemoteSysBucket) info.name = kSysBucketName;
             if (auto t = util::parse_iso8601(b.get("CreationDate"))) info.created = *t;
             out.push_back(std::move(info));
         }

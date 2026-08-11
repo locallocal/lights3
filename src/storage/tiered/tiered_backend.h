@@ -3,6 +3,7 @@
 // 冷对象上传云端后本地 stub 化，访问时透明回读并 Tee 缓存回本地。
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -17,6 +18,7 @@
 
 #include "core/background.h"
 #include "core/config.h"
+#include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "core/timer.h"
@@ -68,10 +70,10 @@ public:
     static std::shared_ptr<TieredBackend> from_config(
         const BackendConfig& cfg,
         const std::map<std::string, std::shared_ptr<IStorageBackend>>& built,
-        std::shared_ptr<ThreadPool> pool);
+        std::shared_ptr<ThreadPool> pool, MetricsScope metrics = {});
 
     TieredBackend(std::shared_ptr<LocalFsBackend> local, std::shared_ptr<IStorageBackend> cloud,
-                  std::shared_ptr<ThreadPool> pool, TieredConfig cfg);
+                  std::shared_ptr<ThreadPool> pool, TieredConfig cfg, MetricsScope metrics = {});
     ~TieredBackend() override;
 
     // ---- bucket：全部委托 local（云侧 bucket 在首次下沉时惰性创建）----
@@ -135,6 +137,20 @@ private:
     friend class TeeCacheReader;
     friend struct InflightRelease;
 
+    // ---- 数据面记账（docs/gaps.md §7）：只测 tiered 自身有分层逻辑的四个 op，
+    // 纯委托的 multipart/head 等由 local_ 的 lights3_localfs_* 覆盖 ----
+    enum class Op : size_t { kGet, kPut, kDelete, kList };
+    static constexpr size_t kOpCount = 4;
+    void init_metrics(const MetricsScope& metrics);
+    void record_op(Op op, bool ok);
+    // 协程帧内 RAII（同 localfs 的 OpGuard）：异常展开也记账，ok 默认 false
+    struct OpGuard {
+        TieredBackend* self;
+        Op op;
+        bool ok = false;
+        ~OpGuard() { self->record_op(op, ok); }
+    };
+
     // ---- per-key 锁（docs/tiered-storage.md §7.3）：striped 异步互斥，只保护状态提交段 ----
     static constexpr size_t kLockStripes = 64;
     AsyncSemaphore& key_lock(std::string_view bucket, std::string_view key);
@@ -192,6 +208,14 @@ private:
     std::shared_ptr<IStorageBackend> cloud_;
     std::shared_ptr<ThreadPool> pool_;
     TieredConfig cfg_;
+
+    // 构造期领取的指标实例（同 duostore 范式），空 scope 时为孤立实例、调用无害
+    std::array<std::shared_ptr<MetricCounter>, kOpCount> m_ops_, m_op_errors_;
+    std::shared_ptr<MetricCounter> m_get_local_, m_get_cloud_;  // GET 流量来源分叉
+    std::shared_ptr<MetricCounter> m_demoted_, m_promoted_;
+    std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_removed_, m_gc_failed_;
+    std::shared_ptr<MetricGauge> m_gc_deferred_;  // 本轮观测值（非单调，见 init_metrics）
+    std::shared_ptr<MetricHistogram> m_scan_duration_;
     std::filesystem::path tier_dir_;  // <staging>/tier
     std::filesystem::path gc_dir_;    // <staging>/tier/gc
 

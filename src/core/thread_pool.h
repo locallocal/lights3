@@ -25,12 +25,16 @@ class ThreadPool {
 public:
     // 任务入队→开跑的等待时长直方图桶：<1ms <10ms <100ms <1s ≥1s
     static constexpr size_t kWaitBuckets = 5;
+    // 桶上界（秒），供 Prometheus 渲染（docs/gaps.md §7）；末桶 +Inf
+    static constexpr std::array<double, kWaitBuckets - 1> kWaitBucketBounds{0.001, 0.01, 0.1,
+                                                                           1.0};
 
     struct Stats {
         size_t queue_depth = 0;   // 就绪队列长度
         size_t backlogged = 0;    // 队列满被背压挡在等待列表的 schedule 任务数
         uint64_t completed = 0;   // 已执行完的任务数
         std::array<uint64_t, kWaitBuckets> wait_hist{};
+        uint64_t wait_sum_us = 0;  // 等待时长累计（微秒），histogram 的 _sum
     };
 
     explicit ThreadPool(size_t threads, size_t queue_capacity = 4096);
@@ -108,6 +112,7 @@ private:
     // 每任务免锁记账（docs/gaps.md §4：completed_ 每任务取一次锁与调度争用）
     std::atomic<uint64_t> completed_{0};
     std::array<std::atomic<uint64_t>, kWaitBuckets> wait_hist_{};
+    std::atomic<uint64_t> wait_sum_us_{0};
     std::vector<std::thread> workers_;
     bool stopping_ = false;
 };

@@ -225,3 +225,86 @@ TEST(config_undefined_env_is_an_error_unless_defaulted) {
         std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET:-debug}\n") + backends);
     CHECK_EQ(cfg.log_level, "debug");
 }
+
+TEST(config_tls_requires_both_cert_and_key) {
+    // 只给一半必是配错（docs/gaps.md §7）：静默忽略会让"以为开了 TLS"的
+    // 实例跑明文
+    auto one_sided = R"(
+http:
+  tls_cert: /etc/lights3/server.crt
+backends:
+  - name: d
+    type: memory
+)";
+    bool threw = false;
+    try {
+        Config::from_string(one_sided);
+    } catch (const std::exception& e) {
+        threw = std::string(e.what()).find("tls") != std::string::npos;
+    }
+    CHECK(threw);
+
+    auto both = R"(
+http:
+  tls_cert: /etc/lights3/server.crt
+  tls_key: /etc/lights3/server.key
+backends:
+  - name: d
+    type: memory
+)";
+    auto cfg = Config::from_string(both);
+    CHECK_EQ(cfg.http.tls_cert, "/etc/lights3/server.crt");
+    CHECK_EQ(cfg.http.tls_key, "/etc/lights3/server.key");
+}
+
+TEST(config_shutdown_backpressure_knobs) {
+    // 停机/背压边界（docs/gaps.md §7）：默认值 + 显式覆盖 + 范围校验
+    auto cfg = Config::from_string(R"(
+backends:
+  - name: d
+    type: memory
+)");
+    CHECK_EQ(cfg.http.drain_limit, 4u * 1024 * 1024);
+    CHECK_EQ(cfg.http.trailer_max_size, size_t(16 * 1024));
+    CHECK_EQ(cfg.http.io_chunk_size, size_t(64 * 1024));
+    CHECK_EQ(cfg.http.body_queue_cap, size_t(256 * 1024));
+    CHECK_EQ(cfg.http.shutdown_grace_sec, 10);
+    CHECK_EQ(cfg.http.shutdown_force_wait_sec, 5);
+    CHECK(!cfg.http.io_threads_set);
+
+    auto tuned = Config::from_string(R"(
+http:
+  io_threads: 4
+  drain_limit: 1MiB
+  trailer_max_size: 8KiB
+  io_chunk_size: 128KiB
+  body_queue_cap: 512KiB
+  shutdown_grace: 3s
+  shutdown_force_wait: 1s
+backends:
+  - name: d
+    type: memory
+)");
+    CHECK_EQ(tuned.http.drain_limit, 1u * 1024 * 1024);
+    CHECK_EQ(tuned.http.trailer_max_size, size_t(8 * 1024));
+    CHECK_EQ(tuned.http.io_chunk_size, size_t(128 * 1024));
+    CHECK_EQ(tuned.http.body_queue_cap, size_t(512 * 1024));
+    CHECK_EQ(tuned.http.shutdown_grace_sec, 3);
+    CHECK_EQ(tuned.http.shutdown_force_wait_sec, 1);
+    // 显式配置 io_threads 时置位（builtin 驱动据此 WARN 而非静默忽略）
+    CHECK(tuned.http.io_threads_set);
+
+    bool threw = false;
+    try {
+        Config::from_string(R"(
+http:
+  io_chunk_size: 1KiB
+backends:
+  - name: d
+    type: memory
+)");
+    } catch (const std::exception& e) {
+        threw = std::string(e.what()).find("io_chunk_size") != std::string::npos;
+    }
+    CHECK(threw);
+}

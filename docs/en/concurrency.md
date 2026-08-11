@@ -177,8 +177,8 @@ mutex + condvar. Two enqueue paths with deliberately different semantics:
   queue depth, backlog length, and completion counts are exposed via
   `/-/metrics` and are the main signals for capacity tuning; the
   enqueue-to-start wait-time histogram (<1ms / <10ms / <100ms / <1s / ≥1s)
-  is collected but not yet output via `/-/metrics` (`render` in
-  `s3/metrics.cc` still to be wired up);
+  is output as the `lights3_pool_wait_seconds` histogram — the direct data
+  source for the dedicated-pool criterion below;
 - `join()`: stops accepting new tasks, **drains the queue** (including the
   backlog), then waits for the threads to exit; `post/schedule` after join
   throws.
@@ -191,8 +191,9 @@ per-backend isolation keeps them out of each other's way (the Registry injects
 by parameter at construction time, `backend_pool` in `storage/registry.cc`).
 The shared default is the right choice for most deployments; isolation is a
 targeted measure to enable "after confirming starvation symptoms (the wait-time
-histogram shifting right)" — that histogram is not yet output via `/-/metrics`
-(see above), so currently only `queue_depth`/`backlogged` can tell; cloudproxy
+histogram shifting right)" — read the criterion straight off
+`lights3_pool_wait_seconds` in `/-/metrics` (a rightward shift is the
+starvation symptom); cloudproxy
 additionally has a local workaround with its private pump threads, see
 [cloudproxy-backend.md](cloudproxy-backend.md) §2.3. A dedicated pool lives and
 dies with the backend's shared_ptr (destruction joins it); the observability
@@ -260,8 +261,20 @@ inverted into a pull model by a pump thread through a bounded buffer queue
 
 ## 5. Cancellation and Timeouts
 
-Three cancellation sources: client disconnect (detected by the driver), request
-timeout, and process shutdown. Philosophy: **cooperative, no preemption** — a
+Two cancellation sources are wired: **request timeout**
+(`http.request_timeout`, `with_timeout` inside dispatch) and **process
+shutdown** (main.cc's shutdown source); both feed one request-level
+CancelSource that propagates down the Task promise chain automatically.
+**Client disconnect is deliberately not an independent cancellation source**:
+disconnects are sensed wherever the socket is touched — body reads throw,
+response writes fail and the result is discarded, and L2/L3 unwind via RAII; a
+long handler that never touches the socket (e.g. the metadata phase of a GET on
+a slow backend) is bounded by the request timeout. Independent detection would
+mean one extra watcher thread per connection on the synchronous drivers
+(builtin/httplib), and on async drivers a concurrent half-close watch that must
+not swallow the next pipelined request's bytes — on both sides the cost
+outweighs "runs at most until request_timeout".
+Philosophy: **cooperative, no preemption** — a
 blocking syscall in progress is left to return naturally, after which
 suspension points / long loops check the token and decide to stop. This is
 self-consistent with the thread-pool model.
@@ -335,7 +348,7 @@ Production consumers:
 
 | Site | Purpose |
 | --- | --- |
-| `main.cc` dispatch entry | `runtime.max_inflight_requests` global throttling; over-limit requests queue rather than being rejected; waiters woken via the pool executor |
+| `main.cc` dispatch entry | `runtime.max_inflight_requests` global throttling; over-limit requests queue rather than being rejected; waiters woken via the pool executor. For streaming responses the Permit is tied to `stream_body` (outermost wrapper) and released only when the driver finishes or discards the body — throttling covers the whole response transfer, not just the handler coroutine frame; shutdown draining judges in-flight via `available()`, so it counts mid-stream requests too |
 | tiered `transfers_` | `max_concurrent_transfers`: concurrency cap on sink/recall transfers (see [tiered-storage.md](tiered-storage.md) §5.1) |
 | tiered `key_locks_` | permits=1 used as an async mutex: striped per-key locks, protecting only the state-commit section (see [tiered-storage.md](tiered-storage.md) §7.3) |
 | rados `buffer_sem_` | `rados_buffer_total` overall write-buffer budget: first share via blocking acquire (backpressure), second share of the double buffer via try_acquire (see [duostore-rados-data.md](duostore-rados-data.md) §4.2) |

@@ -92,6 +92,10 @@ the S3 XML 500. Mapping:
 must store the SK reversibly (it cannot store only a hash); therefore
 "queries return plaintext" is unavoidable capability-wise — but masking by
 default eliminates the cheap leak surfaces: list pages, logs, terminal echoes.
+**Exception: static (root) credentials stay masked unconditionally** — they
+come from config/environment, their holder already has the original, and
+echoing them through the admin API only adds a leak surface; the
+"unavoidable" argument does not apply to them (§10.5).
 
 ## 3. Permission Model: Two-Level Credentials
 
@@ -253,7 +257,10 @@ already has that if-else chain).
   random space (2^80);
 - Revocation semantics: after deletion, **new requests** fail immediately;
   requests that already passed verification and are still in flight complete
-  naturally (same as AWS's eventually-consistent behavior);
+  under the **policy snapshot taken at verification time** (carried by
+  `VerifiedIdentity`, never re-queried from the store — a re-query landing in
+  the race window would make constraints like readonly vanish wholesale; same
+  as AWS's eventually-consistent behavior);
 - Multi-instance limitation: when multiple gateway instances share the same
   backend, there is no invalidation/addition notification between instances;
   each in-memory table is loaded only at startup by default. Phase 2 provides

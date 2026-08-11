@@ -1,4 +1,4 @@
-// L1: seastar 驱动 —— shard-per-core 异步模型（docs/http-adapter.md §3.4）。
+// L1: seastar 驱动 —— shard-per-core 异步模型（docs/http-adapter.md §3.3）。
 //
 // 与其他驱动的关键差异：seastar reactor 每进程只能启动一次，因此引擎是进程级
 // 单例（首次 listen() 拉起，atexit 收尾），每个 SeastarServer 实例只管理自己的

@@ -2,8 +2,12 @@
 // 用裸 TCP 客户端直接说 HTTP/1.1，验证驱动行为而非 L2 语义。
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <openssl/ssl.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
 #include <atomic>
@@ -800,4 +804,240 @@ TEST(http_driver_rejects_oversized_headers) {
         // 要么以错误状态拒绝，要么直接断连——都不能当作正常请求处理
         CHECK(!r.ok || r.status >= 400);
     });
+}
+
+
+// ---------- TLS（docs/gaps.md §7）----------
+// 自签测试证书（CN=localhost，SAN 含 127.0.0.1，有效期至 2126——嵌入源码换
+// 测试零外部依赖；客户端不做校验，证书内容无所谓过期外的时效性）
+constexpr const char* kTestTlsCert =
+    "-----BEGIN CERTIFICATE-----\n"
+    "MIIDJzCCAg+gAwIBAgIUQoKpxX6iKmcQaP/a3uSLGHSVf0MwDQYJKoZIhvcNAQEL\n"
+    "BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxMTE1MTAxM1oYDzIxMjYw\n"
+    "NzE4MTUxMDEzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB\n"
+    "AQUAA4IBDwAwggEKAoIBAQDGBT8CR7Rorh2TnTDRGaBWb5eJUZmQaB2ahQyn5DWM\n"
+    "Mx3zf8OwdTwv+cc1IcA++HufUuCf7OclMVgVITpXEg6smktNa8FFgWoUGLEuWAu4\n"
+    "yBHf4/MTlPZAGf5H/KXFXvTZp2BXK5sCgKXLy8jFY8/dcUkNXM5GHqapI6RD4UoS\n"
+    "t/bQ2+zELHbQmrK2bCM+yzcVFoDfczvCWiOcnzLJpb6SAJICMhlOS33ad2VZy0A0\n"
+    "skBipCuvyCMXklJj9T5YccOZZV4zfOERmp5U2Y1yT1B0GJ+PkAKj9AtPzlxv8L+l\n"
+    "l79pnpHzAt7NnkbFcH8KvF7GJjV8xI43ZXQEewel4x95AgMBAAGjbzBtMB0GA1Ud\n"
+    "DgQWBBQ6+g5anGZA+PW5Fu+sH5cWeUP9uzAfBgNVHSMEGDAWgBQ6+g5anGZA+PW5\n"
+    "Fu+sH5cWeUP9uzAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGCCWxvY2FsaG9z\n"
+    "dIcEfwAAATANBgkqhkiG9w0BAQsFAAOCAQEAINxixmt6ntEAdRZuhKhxmeTDrI01\n"
+    "10D1pc31g5RLD6Jsmi8MFEAB/Nf102Y1WxSmcYL3LwpsGjLhUeWkhHruFg4mP/Qg\n"
+    "fpd3ckOwPx6IEEp8oFWhJ6QzKFapMFY+ljBe/qFSpR9n3yYyh8y4B8qMNIRHsv5c\n"
+    "/Iok6dMtoAmdpveqK/KeXx1ilMAa5d49YPOtvrmoYeQCs6uLzxOtrGnQM3RuUUWd\n"
+    "/HwLopGiliKwaADD0tPN/xcHguaOnqPeKVi+5+2xmK4O1dwis1D3em9YcWu2vYq6\n"
+    "/6qRLDrGZSgFFGCMxmlS7DDhXF4IZYWEPXwm5+YsggIunzZ9yPffbGxxRQ==\n"
+    "-----END CERTIFICATE-----\n";
+
+constexpr const char* kTestTlsKey =
+    "-----BEGIN PRIVATE KEY-----\n"
+    "MIIEvwIBADANBgkqhkiG9w0BAQEFAASCBKkwggSlAgEAAoIBAQDGBT8CR7Rorh2T\n"
+    "nTDRGaBWb5eJUZmQaB2ahQyn5DWMMx3zf8OwdTwv+cc1IcA++HufUuCf7OclMVgV\n"
+    "ITpXEg6smktNa8FFgWoUGLEuWAu4yBHf4/MTlPZAGf5H/KXFXvTZp2BXK5sCgKXL\n"
+    "y8jFY8/dcUkNXM5GHqapI6RD4UoSt/bQ2+zELHbQmrK2bCM+yzcVFoDfczvCWiOc\n"
+    "nzLJpb6SAJICMhlOS33ad2VZy0A0skBipCuvyCMXklJj9T5YccOZZV4zfOERmp5U\n"
+    "2Y1yT1B0GJ+PkAKj9AtPzlxv8L+ll79pnpHzAt7NnkbFcH8KvF7GJjV8xI43ZXQE\n"
+    "ewel4x95AgMBAAECggEABzwxFeGzPOloCtO7xpdpporX1gm5bd+DUw5g3LVfrakU\n"
+    "TghZU4YpuNoxngEnEO3w4gyr83qbOfPJo1EA3JD8ILCXsdhvGf2SjTGB73QXroyp\n"
+    "1tzmwwyxQCeVpRadOHRMcjOVl1hwUW5hpcFNq0T8YZu2Zs12UHUlff5/mEbVTJB5\n"
+    "WePlN/Y9gTtHjvVG/bVqw5zpA7a63SyNmN7vfi7N8ZRASRkX9FziaKxBKOqmIKV+\n"
+    "nLCesfQw5Ddyv3y7Flgv5FCdXhOdIkhuxJUD6MxuvJNRRND2ABzRWnaq0J5e+Bmx\n"
+    "luMtuFSh4rLmsansw1iQXtnlUI8R4Y3hD/ppig87MQKBgQD+YFOo5oO7P/fM1OQz\n"
+    "Gq+SP/A4As+pDbxUhRZlUi+hT1wBVpc42HQy/LtV/MTNoT9XA5yck5le6vVShpur\n"
+    "+5OVSCYFTfqyk1na7K1sl406XuaUWN2hjeQQfFc+FQL2qqVQMWHyHnap7Az8+tJX\n"
+    "KQIq0sEG5u6H3xhANIBnv2hxEQKBgQDHSNQ7D6FnbO8Fu4Y5WVq8qCzi01IRe+6S\n"
+    "lavNrBm56vy1ezN9SKqiDKeuLo/oFlepfHnoKr958trFOPy6/CJZyzesvy7wUFrV\n"
+    "v9EqtKcdT8xt52KfMWNuVZOpE2QJJ+u6VBkniJGC2YudnFlJdmrUl4JMEzIYCwXC\n"
+    "xB6CQPDH6QKBgQC9GEJYljNq6Rx+aevRiY7mex1Jpd1U4F8VvXFulG/PzDyqygHU\n"
+    "QiPvGyzvuN1btvhs6MRtKNOkWalQVbw3VubY3C9XViZ8xUjQk4w/41EbCR0DPiRT\n"
+    "SjU1hBkej2QKlcQaHvuejsLLgiwNiy79mACCcPUI+nZrDo7qe5zQgttS4QKBgQCc\n"
+    "dgOaszTnvNEU0Rwa3pqsz+Ud2QfwDjtK/xO6EMrJ+0KZQbc1P94oCIOF76ywbQo6\n"
+    "WS5lJ1rZ5d/5RDq4m8hkc3asvBWgO5Z1h3oza05hZwt7plT5447LS4j5D+5UefFL\n"
+    "g0eUkFaeQyqofd5kHQLXEnUMQW3tDophVhUV8uKYMQKBgQCE0KN7o/QYvQEKdGlW\n"
+    "rSk7y23+MVZyUoiChKI1Vukw8cGBtWtOWWVGNsRI9rQcR1L7RQlzuhB3/I42Efks\n"
+    "+r0mcaH9yNajNK0JaryQgwe53IuYkY+3vlDr2Pily/ey+JZ7yBYqvjUkjW/25NHD\n"
+    "dfKnXoouOV+cpdjDRSyNsyESRA==\n"
+    "-----END PRIVATE KEY-----\n";
+
+struct TlsCertFiles {
+    std::string cert_path, key_path;
+    TlsCertFiles() {
+        char tmpl[] = "/tmp/lights3-tls-XXXXXX";
+        CHECK(mkdtemp(tmpl) != nullptr);
+        dir = tmpl;
+        cert_path = dir + "/cert.pem";
+        key_path = dir + "/key.pem";
+        write_file(cert_path, kTestTlsCert);
+        write_file(key_path, kTestTlsKey);
+    }
+    ~TlsCertFiles() {
+        ::unlink(cert_path.c_str());
+        ::unlink(key_path.c_str());
+        ::rmdir(dir.c_str());
+    }
+    static void write_file(const std::string& p, const char* content) {
+        FILE* f = fopen(p.c_str(), "w");
+        CHECK(f != nullptr);
+        fputs(content, f);
+        fclose(f);
+    }
+    std::string dir;
+};
+
+// 最小 TLS 客户端（OpenSSL 直连，不校验证书）：项目已链 libssl，
+// 不引额外依赖即可端到端验证 HTTPS
+struct TlsClient {
+    int fd = -1;
+    SSL_CTX* ctx = nullptr;
+    SSL* ssl = nullptr;
+
+    explicit TlsClient(uint16_t port) {
+        fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        CHECK(fd >= 0);
+        timeval tv{10, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        sockaddr_in sa{};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(port);
+        inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
+        CHECK(::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == 0);
+        ctx = SSL_CTX_new(TLS_client_method());
+        CHECK(ctx != nullptr);
+        ssl = SSL_new(ctx);
+        CHECK(ssl != nullptr);
+        SSL_set_fd(ssl, fd);
+        CHECK(SSL_connect(ssl) == 1);
+    }
+    ~TlsClient() {
+        if (ssl) {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+        }
+        if (ctx) SSL_CTX_free(ctx);
+        if (fd >= 0) ::close(fd);
+    }
+
+    void send_str(std::string_view s) { CHECK(SSL_write(ssl, s.data(), (int)s.size()) > 0); }
+
+    // 读整响应（Connection: close 场景）：读到对端关闭为止
+    std::string read_all() {
+        std::string out;
+        char buf[4096];
+        for (;;) {
+            int n = SSL_read(ssl, buf, sizeof(buf));
+            if (n <= 0) break;
+            out.append(buf, n);
+        }
+        return out;
+    }
+};
+
+TEST(http_driver_tls_round_trip) {
+    // TLS 只有 httplib/beast 支持（builtin/seastar 显式拒绝，见下一用例）
+    TlsCertFiles certs;
+    auto drivers = HttpServerFactory::drivers();
+    for (auto& d : drivers) {
+        if (d != "httplib" && d != "beast") continue;
+        try {
+            HttpConfig cfg;
+            cfg.driver = d;
+            cfg.io_threads = 2;
+            cfg.idle_timeout_sec = 5;
+            cfg.tls_cert = certs.cert_path;
+            cfg.tls_key = certs.key_path;
+            auto srv = HttpServerFactory::create(d, cfg);
+            srv->set_handler([](HttpRequest req) { return test_handler(std::move(req)); });
+            srv->listen("127.0.0.1", 0);
+            uint16_t port = srv->bound_port();
+            std::thread th([&] { srv->run(); });
+            {
+                TlsClient c(port);
+                c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+                std::string r = c.read_all();
+                CHECK(r.find("200") != std::string::npos);
+                CHECK(r.find("nobody") != std::string::npos);
+            }
+            {
+                // 带 body 的 PUT 走一遍：TLS 记录层下的流式读同样成立
+                TlsClient c(port);
+                std::string payload = make_pattern(1024);
+                c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 1024\r\n"
+                           "Connection: close\r\n\r\n" +
+                           payload);
+                std::string r = c.read_all();
+                CHECK(r.find(expected_sum(1024)) != std::string::npos);
+            }
+            srv->shutdown();
+            th.join();
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_tls_plaintext_client_rejected) {
+    // 明文客户端打到 TLS 端口：握手失败关连接，绝不能按明文 HTTP 应答
+    TlsCertFiles certs;
+    for (auto& d : HttpServerFactory::drivers()) {
+        if (d != "httplib" && d != "beast") continue;
+        HttpConfig cfg;
+        cfg.driver = d;
+        cfg.io_threads = 2;
+        cfg.idle_timeout_sec = 5;
+        cfg.tls_cert = certs.cert_path;
+        cfg.tls_key = certs.key_path;
+        auto srv = HttpServerFactory::create(d, cfg);
+        srv->set_handler([](HttpRequest req) { return test_handler(std::move(req)); });
+        srv->listen("127.0.0.1", 0);
+        std::thread th([&] { srv->run(); });
+        {
+            Client c(srv->bound_port());
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            auto r = c.read_response();
+            CHECK(!r.ok);  // 只能是断连（或 TLS alert 噪声），不能有 HTTP 200
+        }
+        srv->shutdown();
+        th.join();
+    }
+}
+
+TEST(http_driver_tls_unsupported_drivers_throw) {
+    // builtin/seastar 不支持 TLS：配置了必须当场抛错——静默跑明文会让
+    // UNSIGNED-PAYLOAD 的传输层完整性论证失效（docs/gaps.md §7）
+    TlsCertFiles certs;
+    for (auto& d : HttpServerFactory::drivers()) {
+        if (d != "builtin" && d != "seastar") continue;
+        HttpConfig cfg;
+        cfg.driver = d;
+        cfg.tls_cert = certs.cert_path;
+        cfg.tls_key = certs.key_path;
+        bool threw = false;
+        try {
+            HttpServerFactory::create(d, cfg);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
+TEST(http_driver_tls_bad_cert_throws) {
+    // 坏证书路径必须在构造/启动期抛，不能等第一个连接才发现
+    for (auto& d : HttpServerFactory::drivers()) {
+        if (d != "httplib" && d != "beast") continue;
+        HttpConfig cfg;
+        cfg.driver = d;
+        cfg.tls_cert = "/nonexistent/cert.pem";
+        cfg.tls_key = "/nonexistent/key.pem";
+        bool threw = false;
+        try {
+            HttpServerFactory::create(d, cfg);
+        } catch (const std::exception&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
 }

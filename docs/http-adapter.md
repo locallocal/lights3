@@ -98,6 +98,21 @@ struct HttpServerFactory {
   driver 负责在自己的执行环境里驱动这个协程直至完成
   （方式见 [concurrency.md](concurrency.md)）。
 
+### 2.1 TLS 与停机/背压参数（docs/gaps.md §7）
+
+- **TLS**：`http.tls_cert` + `http.tls_key`（PEM，两个都给才启用）。仅
+  httplib（`SSLServer`）与 beast（`asio::ssl::stream` 包一层 `tcp_stream`，
+  会话循环模板化对明文/TLS 同一份逻辑）支持；builtin/seastar 配置了 TLS 会在
+  构造期直接抛错——SigV4 `UNSIGNED-PAYLOAD` 的完整性依赖传输层加密，
+  "配了但静默跑明文"不可接受。证书加载失败同样在启动期抛出。
+- **可配置边界**（曾是四驱动各写一份的硬编码，默认值即旧常量）：
+  `drain_limit`（4MiB，回错前排空请求体上限）、`trailer_max_size`（16KiB）、
+  `io_chunk_size`（64KiB 流式块）、`body_queue_cap`（256KiB，仅 httplib 的
+  推转拉背压水位）、`shutdown_grace`（10s）、`shutdown_force_wait`（5s）。
+- `http.io_threads` 的语义随驱动漂移（beast=IO 线程数 / httplib=线程池下限 8 /
+  seastar=shard 数），**builtin 完全忽略**（thread-per-connection）——显式配置
+  时 builtin 启动 WARN 而非静默吞掉。
+
 ## 3. 各驱动实现要点
 
 ### 3.1 Boost.Beast（异步驱动，性能路径首选）

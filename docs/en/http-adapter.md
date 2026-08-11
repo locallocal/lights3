@@ -107,6 +107,25 @@ struct HttpServerFactory {
   its own execution environment
   (how: see [concurrency.md](concurrency.md)).
 
+### 2.1 TLS and Shutdown/Backpressure Knobs (docs/gaps.md §7)
+
+- **TLS**: `http.tls_cert` + `http.tls_key` (PEM; both required to enable). Only
+  httplib (`SSLServer`) and beast (`asio::ssl::stream` layered over `tcp_stream`;
+  the session loop is templated so plaintext/TLS share one implementation)
+  support it; builtin/seastar throw at construction when TLS is configured —
+  SigV4 `UNSIGNED-PAYLOAD` integrity relies on transport encryption, so
+  "configured but silently plaintext" is unacceptable. Certificate load failures
+  also throw at startup.
+- **Configurable boundaries** (formerly per-driver hard-coded constants; the
+  defaults are the old values): `drain_limit` (4MiB, request-body drain cap
+  before erroring), `trailer_max_size` (16KiB), `io_chunk_size` (64KiB streaming
+  chunk), `body_queue_cap` (256KiB, httplib-only push-to-pull backpressure
+  watermark), `shutdown_grace` (10s), `shutdown_force_wait` (5s).
+- `http.io_threads` semantics drift per driver (beast = IO threads / httplib =
+  thread-pool floor of 8 / seastar = shard count) and **builtin ignores it
+  entirely** (thread-per-connection) — builtin now WARNs at startup when it is
+  explicitly configured instead of silently swallowing it.
+
 ## 3. Implementation Notes per Driver
 
 ### 3.1 Boost.Beast (async driver, preferred performance path)

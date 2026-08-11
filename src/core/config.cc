@@ -255,6 +255,14 @@ void check_range(const std::string& key, int v, int lo, int hi) {
                                  std::to_string(hi) + "], got " + std::to_string(v));
 }
 
+// 尺寸类参数（parse_size 返回 64 位）：走 int 版会先截断再比较，超大值回绕成
+// 负数后报出来的"got"是错的
+void check_range(const std::string& key, long long v, long long lo, long long hi) {
+    if (v < lo || v > hi)
+        throw std::runtime_error("config: " + key + " must be in [" + std::to_string(lo) + "," +
+                                 std::to_string(hi) + "], got " + std::to_string(v));
+}
+
 }  // namespace
 
 Config Config::from_string(const std::string& text) {
@@ -271,8 +279,10 @@ Config Config::from_string(const std::string& text) {
                 throw std::runtime_error("config: http.port out of range: " + v);
             cfg.http.port = static_cast<uint16_t>(p);
         }
-        cfg.http.io_threads =
-            to_int("http.io_threads", http->get("io_threads"), cfg.http.io_threads);
+        if (auto v = http->get("io_threads"); !v.empty()) {
+            cfg.http.io_threads = to_int("http.io_threads", v, cfg.http.io_threads);
+            cfg.http.io_threads_set = true;  // builtin 驱动据此 WARN（docs/gaps.md §7）
+        }
         cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
         if (auto v = http->get("max_header_size"); !v.empty())
             cfg.http.max_header_size = parse_size(v);
@@ -289,6 +299,25 @@ Config Config::from_string(const std::string& text) {
         cfg.http.max_connections =
             to_int("http.max_connections", http->get("max_connections"), cfg.http.max_connections);
         check_range("http.max_connections", cfg.http.max_connections, 1, 1'000'000);
+        // TLS（docs/gaps.md §7）：两个都给才启用，只给一个必是配错
+        cfg.http.tls_cert = http->get("tls_cert", cfg.http.tls_cert);
+        cfg.http.tls_key = http->get("tls_key", cfg.http.tls_key);
+        if (cfg.http.tls_cert.empty() != cfg.http.tls_key.empty())
+            throw std::runtime_error(
+                "config: http.tls_cert and http.tls_key must be set together");
+        // 停机/背压边界（docs/gaps.md §7）
+        if (auto v = http->get("drain_limit"); !v.empty())
+            cfg.http.drain_limit = parse_size(v);
+        if (auto v = http->get("trailer_max_size"); !v.empty())
+            cfg.http.trailer_max_size = parse_size(v);
+        if (auto v = http->get("io_chunk_size"); !v.empty())
+            cfg.http.io_chunk_size = parse_size(v);
+        if (auto v = http->get("body_queue_cap"); !v.empty())
+            cfg.http.body_queue_cap = parse_size(v);
+        if (auto v = http->get("shutdown_grace"); !v.empty())
+            cfg.http.shutdown_grace_sec = parse_duration_sec(v);
+        if (auto v = http->get("shutdown_force_wait"); !v.empty())
+            cfg.http.shutdown_force_wait_sec = parse_duration_sec(v);
     }
     if (auto* rt = root.find("runtime")) {
         cfg.runtime.io_threads =
@@ -349,6 +378,18 @@ Config Config::from_string(const std::string& text) {
     check_range("runtime.max_inflight_requests", cfg.runtime.max_inflight_requests, 1, 1'000'000);
     check_range("http.request_timeout", cfg.http.request_timeout_sec, 0, 86400);
     check_range("http.transfer_stall_timeout", cfg.http.transfer_stall_timeout_sec, 0, 86400);
+    // 停机/背压边界（docs/gaps.md §7）。下界防"配成 0 后写循环空转/永不排空"，
+    // 上界防手滑单位（MiB 写成 GiB）直接吃光内存
+    check_range("http.drain_limit", static_cast<long long>(cfg.http.drain_limit),
+                64LL * 1024, 1'073'741'824LL);
+    check_range("http.trailer_max_size", static_cast<long long>(cfg.http.trailer_max_size),
+                1024LL, 1'048'576LL);
+    check_range("http.io_chunk_size", static_cast<long long>(cfg.http.io_chunk_size),
+                4096LL, 8LL * 1'048'576);
+    check_range("http.body_queue_cap", static_cast<long long>(cfg.http.body_queue_cap),
+                4096LL, 1'073'741'824LL);
+    check_range("http.shutdown_grace", cfg.http.shutdown_grace_sec, 0, 300);
+    check_range("http.shutdown_force_wait", cfg.http.shutdown_force_wait_sec, 0, 300);
     if (cfg.backends.empty()) throw std::runtime_error("config: no backends configured");
     if (cfg.buckets.default_backend.empty()) cfg.buckets.default_backend = cfg.backends[0].name;
     auto has_backend = [&](const std::string& n) {

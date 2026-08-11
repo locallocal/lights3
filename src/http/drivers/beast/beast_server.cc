@@ -10,6 +10,7 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/posix/stream_descriptor.hpp>
 #include <boost/asio/post.hpp>
+#include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/beast/core.hpp>
@@ -125,19 +126,28 @@ struct Session {
     explicit Session(tcp::socket&& s) : stream(std::move(s)) {}
 };
 
-// 每请求的 body 读取状态；归属会话协程帧（handler 内的 reader 销毁后仍要 drain）
+// TLS 会话流：引用底层 tcp_stream（归属 Session），自身活在会话协程帧上。
+// 超时仍打在底层 tcp_stream（beast::get_lowest_layer）——TLS 记录层之下的
+// 字节超时对握手/读写一体生效
+using TlsStream = asio::ssl::stream<beast::tcp_stream&>;
+
+// 每请求的 body 读取状态；归属会话协程帧（handler 内的 reader 销毁后仍要 drain）。
+// Stream = beast::tcp_stream（明文）或 TlsStream：async_read/async_write 经
+// 模板走到对应的记录层，其余逻辑完全一致
+template <class Stream>
 struct BodyCtx {
     bhttp::request_parser<bhttp::buffer_body>* parser;
-    beast::tcp_stream* stream;
+    Stream* stream;
     beast::flat_buffer* buffer;
     int idle_timeout_sec;
     bool need_100 = false;  // Expect: 100-continue 尚未答复，首次读 body 时才回
     bool errored = false;
 };
 
+template <class Stream>
 class BeastBodyReader final : public BodyReader {
 public:
-    BeastBodyReader(BodyCtx* ctx, std::optional<uint64_t> len) : ctx_(ctx), len_(len) {}
+    BeastBodyReader(BodyCtx<Stream>* ctx, std::optional<uint64_t> len) : ctx_(ctx), len_(len) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {
         co_await ResumeOn{ctx_->stream->get_executor()};
@@ -157,12 +167,13 @@ public:
         auto& body = ctx_->parser->get().body();
         body.data = buf.data();
         body.size = buf.size();
-        ctx_->stream->expires_after(std::chrono::seconds(ctx_->idle_timeout_sec));
+        beast::get_lowest_layer(*ctx_->stream)
+            .expires_after(std::chrono::seconds(ctx_->idle_timeout_sec));
         auto [ec, n] = co_await io_op([&](auto cb) {
             bhttp::async_read(*ctx_->stream, *ctx_->buffer, *ctx_->parser, std::move(cb));
         });
         (void)n;
-        ctx_->stream->expires_never();
+        beast::get_lowest_layer(*ctx_->stream).expires_never();
         if (ec == bhttp::error::need_buffer) ec = {};
         if (ec) fail(ec, "client disconnected mid-body");
         size_t got = buf.size() - body.size;
@@ -179,13 +190,29 @@ private:
         throw std::runtime_error(std::string("http body: ") + what + " (" + ec.message() + ")");
     }
 
-    BodyCtx* ctx_;
+    BodyCtx<Stream>* ctx_;
     std::optional<uint64_t> len_;
 };
 
 class BeastServer final : public IHttpServer {
 public:
-    explicit BeastServer(const HttpConfig& cfg) : cfg_(cfg) {}
+    explicit BeastServer(const HttpConfig& cfg) : cfg_(cfg) {
+        // TLS（docs/gaps.md §7）：证书在构造期加载，坏路径/坏 PEM 当场抛——
+        // 不能等到第一个连接握手才发现
+        if (!cfg.tls_cert.empty()) {
+            tls_ctx_.emplace(asio::ssl::context::tls_server);
+            tls_ctx_->set_options(asio::ssl::context::default_workarounds |
+                                  asio::ssl::context::no_sslv2 | asio::ssl::context::no_sslv3 |
+                                  asio::ssl::context::no_tlsv1 | asio::ssl::context::no_tlsv1_1);
+            try {
+                tls_ctx_->use_certificate_chain_file(cfg.tls_cert);
+                tls_ctx_->use_private_key_file(cfg.tls_key, asio::ssl::context::pem);
+            } catch (const std::exception& e) {
+                throw std::runtime_error("beast driver: failed to load TLS cert/key (" +
+                                         cfg.tls_cert + ", " + cfg.tls_key + "): " + e.what());
+            }
+        }
+    }
 
     ~BeastServer() override {
         if (event_fd_ >= 0 && !stop_event_) ::close(event_fd_);
@@ -225,7 +252,7 @@ public:
             uint64_t one = 1;
             [[maybe_unused]] ssize_t r = ::write(event_fd_, &one, sizeof(one));
         }
-        LOG_INFO("beast http server listening on {}:{}", addr, port_);
+        LOG_INFO("beast http{} server listening on {}:{}", tls_ctx_ ? "s" : "", addr, port_);
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -280,9 +307,45 @@ private:
         }
     }
 
+    // 会话入口：明文直接进请求循环；TLS 先握手，循环结束后回 close_notify。
+    // TlsStream 引用 Session 里的 tcp_stream、活在本协程帧——session_loop 完成
+    // 后才析构，无悬空
     Task<void> session_run(std::shared_ptr<Session> sess) {
-        auto& stream = sess->stream;
-        beast::get_lowest_layer(stream).socket().set_option(tcp::no_delay(true));
+        sess->stream.socket().set_option(tcp::no_delay(true));
+        auto idle = std::chrono::seconds(cfg_.idle_timeout_sec);
+        if (tls_ctx_) {
+            TlsStream tls(sess->stream, *tls_ctx_);
+            sess->stream.expires_after(idle);
+            auto [hec, hn] = co_await io_op([&](auto cb) {
+                tls.async_handshake(asio::ssl::stream_base::server,
+                                    [cb = std::move(cb)](beast::error_code e) mutable {
+                                        cb(e, size_t{0});
+                                    });
+            });
+            (void)hn;
+            sess->stream.expires_never();
+            if (hec) {
+                // 明文客户端打到 TLS 端口 / 探测流量：一行告警足矣，不进请求循环
+                LOG_WARN("TLS handshake failed from client: {}", hec.message());
+            } else {
+                co_await session_loop(sess, tls);
+                // 尽力而为的 close_notify（有超时兜底）；失败无所谓，随后照关 TCP
+                sess->stream.expires_after(idle);
+                co_await io_op([&](auto cb) {
+                    tls.async_shutdown(
+                        [cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
+                });
+                sess->stream.expires_never();
+            }
+        } else {
+            co_await session_loop(sess, sess->stream);
+        }
+        beast::error_code ig;
+        sess->stream.socket().shutdown(tcp::socket::shutdown_both, ig);
+    }
+
+    template <class Stream>
+    Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream) {
         beast::flat_buffer buffer;  // 跨 keep-alive 请求保留（parser 可能超读）
         bool keep = true;
 
@@ -293,13 +356,14 @@ private:
             // （s3/handlers/common.h），PUT 数据面 64KiB 块流式透传不落内存；
             // 对象大小上限未设（与其他驱动一致，属 S3 语义决策）
             parser.body_limit(boost::none);
-            stream.expires_after(std::chrono::seconds(cfg_.idle_timeout_sec));
+            beast::get_lowest_layer(stream).expires_after(
+                std::chrono::seconds(cfg_.idle_timeout_sec));
             {
                 auto [ec, n] = co_await io_op([&](auto cb) {
                     bhttp::async_read_header(stream, buffer, parser, std::move(cb));
                 });
                 (void)n;
-                stream.expires_never();
+                beast::get_lowest_layer(stream).expires_never();
                 if (ec) break;  // eof / 超时 / shutdown 关闭
             }
             sess->in_flight.store(true);
@@ -326,13 +390,13 @@ private:
                 break;
             }
 
-            BodyCtx bctx{&parser, &stream, &buffer, cfg_.idle_timeout_sec};
+            BodyCtx<Stream> bctx{&parser, &stream, &buffer, cfg_.idle_timeout_sec};
             if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
                 bctx.need_100 = true;
             std::optional<uint64_t> content_length;
             if (auto l = parser.content_length()) content_length = *l;
             if (!parser.is_done() || content_length)
-                req.body = std::make_unique<BeastBodyReader>(&bctx, content_length);
+                req.body = std::make_unique<BeastBodyReader<Stream>>(&bctx, content_length);
 
             bool head_request = req.method == "HEAD";
             bool client_keep = preq.keep_alive();
@@ -358,32 +422,33 @@ private:
             sess->in_flight.store(false);
             if (!ok) co_return;
         }
-        beast::error_code ig;
-        beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ig);
     }
 
-    Task<bool> drain_body(BodyCtx& ctx) {
+    template <class Stream>
+    Task<bool> drain_body(BodyCtx<Stream>& ctx) {
         std::vector<std::byte> tmp(driver::kScratchBytes);
         uint64_t drained = 0;
         while (!ctx.parser->is_done()) {
             auto& body = ctx.parser->get().body();
             body.data = tmp.data();
             body.size = tmp.size();
-            ctx.stream->expires_after(std::chrono::seconds(ctx.idle_timeout_sec));
+            beast::get_lowest_layer(*ctx.stream)
+                .expires_after(std::chrono::seconds(ctx.idle_timeout_sec));
             auto [ec, n] = co_await io_op([&](auto cb) {
                 bhttp::async_read(*ctx.stream, *ctx.buffer, *ctx.parser, std::move(cb));
             });
             (void)n;
-            ctx.stream->expires_never();
+            beast::get_lowest_layer(*ctx.stream).expires_never();
             if (ec == bhttp::error::need_buffer) ec = {};
             if (ec) co_return false;
             drained += tmp.size() - body.size;
-            if (drained > driver::kDrainMaxBytes) co_return false;  // 过大放弃，关连接
+            if (drained > cfg_.drain_limit) co_return false;  // 过大放弃，关连接
         }
         co_return true;
     }
 
-    Task<bool> write_response(beast::tcp_stream& stream, HttpResponse& resp, bool head_request,
+    template <class Stream>
+    Task<bool> write_response(Stream& stream, HttpResponse& resp, bool head_request,
                               bool keep) {
         bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
         auto idle = std::chrono::seconds(cfg_.idle_timeout_sec);
@@ -416,12 +481,12 @@ private:
                 res.set(bhttp::field::content_length, std::to_string(len));
                 if (!head_request) res.body() = std::move(resp.small_body);
             }
-            stream.expires_after(idle);
+            beast::get_lowest_layer(stream).expires_after(idle);
             auto [ec, n] = co_await io_op([&](auto cb) {
                 bhttp::async_write(stream, res, std::move(cb));
             });
             (void)n;
-            stream.expires_never();
+            beast::get_lowest_layer(stream).expires_never();
             co_return !ec;
         }
 
@@ -443,17 +508,17 @@ private:
         res.body().more = true;
 
         bhttp::response_serializer<bhttp::buffer_body> sr{res};
-        stream.expires_after(idle);
+        beast::get_lowest_layer(stream).expires_after(idle);
         {
             auto [ec, n] = co_await io_op([&](auto cb) {
                 bhttp::async_write_header(stream, sr, std::move(cb));
             });
             (void)n;
-            stream.expires_never();
+            beast::get_lowest_layer(stream).expires_never();
             if (ec) co_return false;
         }
 
-        std::vector<std::byte> buf(driver::kIoChunkBytes);
+        std::vector<std::byte> buf(cfg_.io_chunk_size);
         uint64_t written = 0;
         for (;;) {
             size_t n = 0;
@@ -485,12 +550,12 @@ private:
                 res.body().size = n;
                 res.body().more = true;
             }
-            stream.expires_after(idle);
+            beast::get_lowest_layer(stream).expires_after(idle);
             auto [ec, wrote] = co_await io_op([&](auto cb) {
                 bhttp::async_write(stream, sr, std::move(cb));
             });
             (void)wrote;
-            stream.expires_never();
+            beast::get_lowest_layer(stream).expires_never();
             if (ec == bhttp::error::need_buffer) ec = {};
             if (ec) co_return false;
             if (n == 0) break;
@@ -520,7 +585,7 @@ private:
             finish();
             return;
         }
-        grace_timer_.emplace(ctl_strand_, driver::kShutdownGrace);
+        grace_timer_.emplace(ctl_strand_, std::chrono::seconds(cfg_.shutdown_grace_sec));
         grace_timer_->async_wait([this](beast::error_code e) {
             if (e) return;
             std::vector<std::shared_ptr<Session>> rest;
@@ -530,7 +595,7 @@ private:
             }
             LOG_WARN("forcing {} connection(s) closed on shutdown", rest.size());
             for (auto& s : rest) close_session(s);
-            force_timer_.emplace(ctl_strand_, driver::kShutdownForceWait);
+            force_timer_.emplace(ctl_strand_, std::chrono::seconds(cfg_.shutdown_force_wait_sec));
             force_timer_->async_wait([this](beast::error_code e2) {
                 if (!e2) ioc_.stop();  // 最后兜底：卡死的会话不再等
             });
@@ -571,6 +636,7 @@ private:
 
     HttpConfig cfg_;
     Handler handler_;
+    std::optional<asio::ssl::context> tls_ctx_;  // 有值即 HTTPS（构造期加载证书）
     asio::io_context ioc_;
     // 控制面 strand：acceptor / stop_event / grace_timer / force_timer 的所有
     // 操作在此串行（数据面仍是每连接一个 strand）

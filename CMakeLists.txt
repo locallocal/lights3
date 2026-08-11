@@ -319,7 +319,9 @@ if(LIGHTS3_DRIVER_BUILTIN)
 endif()
 
 if(LIGHTS3_DRIVER_BEAST)
-  # Beast/Asio 均为 header-only；BOOST_ROOT 或系统路径均可
+  # Beast/Asio 均为 header-only；BOOST_ROOT 或系统路径均可。
+  # TLS（docs/gaps.md §7）：asio::ssl 需要 libssl
+  target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
   find_package(Boost 1.75 QUIET)
   if(NOT Boost_FOUND)
     find_path(LIGHTS3_BOOST_INCLUDE boost/beast.hpp
@@ -342,6 +344,10 @@ if(LIGHTS3_DRIVER_HTTPLIB)
   target_sources(lights3_core PRIVATE src/http/drivers/httplib/httplib_server.cc)
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_DRIVER_HTTPLIB)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
+  # 服务端 TLS（docs/gaps.md §7）需要 SSLServer。OPENSSL_SUPPORT 宏必须目标级
+  # 统一（ODR，见下方 cloudproxy 分支注释），因此这里同样以 PUBLIC 定义
+  target_compile_definitions(lights3_core PUBLIC CPPHTTPLIB_OPENSSL_SUPPORT)
+  target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
 endif()
 
 if(LIGHTS3_CLOUDPROXY)

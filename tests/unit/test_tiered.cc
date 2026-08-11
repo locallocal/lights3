@@ -676,7 +676,7 @@ TEST(tiered_registry_two_phase_build) {
     CHECK(threw);
 }
 
-// per-backend 独立 IO 池（todo.md §3.2）：io_threads 参数为该后端建专属池
+// per-backend 独立 IO 池（docs/concurrency.md §3.1）：io_threads 参数为该后端建专属池
 // （任意 type 通用键），池观测指标挂 backend 标签；未配置的后端共享全局池
 // （无该指标）；非法值配置期报错
 TEST(registry_per_backend_thread_pool) {

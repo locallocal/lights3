@@ -194,7 +194,7 @@ put_object(bucket, key, meta, body)：
 - nullopt（真 chunked 且无长度）：AWS S3 不接受裸 `Transfer-Encoding:
   chunked`（要求定长或 aws-chunked）。P4 决断：维持
   `NotImplemented`，不实现 `STREAMING-UNSIGNED-PAYLOAD-TRAILER` 出方向
-  组帧——罕见路径，收益不抵复杂度（todo.md §5.4 注明不做）。
+  组帧——罕见路径，收益不抵复杂度（记录为明确不做）。
 
 ### 3.3 Range GET 透传
 
@@ -363,7 +363,7 @@ S3 兼容网关的常见形态；lights3 作远端配 `http.base_domain` 即可�
 
 ### 8.2 指标（P4 已实现）
 
-经 MetricsScope（工厂第三参，todo.md §3.1）接入，`RemoteMetrics` 单点封装：
+经 MetricsScope（工厂第三参）接入，`RemoteMetrics` 单点封装：
 
 | 指标 | 类型/标签 | 语义 |
 | --- | --- | --- |

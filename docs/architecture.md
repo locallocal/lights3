@@ -204,7 +204,7 @@ lights3/
 │   │   ├── cancel.h          #   协作式取消原语
 │   │   ├── background.h/.cc  #   后台任务等待组（concurrency.md §7）
 │   │   ├── config.h/.cc      #   YAML 解析 + 类型化配置
-│   │   ├── metrics.h/.cc     #   后端级 metrics 注册表 + scope（todo.md §3.1）
+│   │   ├── metrics.h/.cc     #   后端级 metrics 注册表 + scope（backend=<name> 标签派发）
 │   │   ├── log.h             #   spdlog 门面
 │   │   └── util/             #   hex, crypto(OpenSSL SHA256/HMAC), uri, time
 │   ├── http/                 # L1

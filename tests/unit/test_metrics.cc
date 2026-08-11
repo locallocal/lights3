@@ -1,4 +1,4 @@
-// 后端级 metrics 注册机制单测（docs/todo.md §3.1）：实例复用/类型冲突/标签转义/
+// 后端级 metrics 注册机制单测（core/metrics.h）：实例复用/类型冲突/标签转义/
 // 直方图渲染/回调 gauge/空 scope 无害/并发递增冒烟
 #include <limits>
 #include <memory>

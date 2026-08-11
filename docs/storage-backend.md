@@ -233,7 +233,7 @@ meta / data 两侧均已有可选替换实现（各有专文，编译开关默�
    `StorageRegistry::register_backend("<type>", factory)` 注册，工厂签名
    `(const BackendConfig&, shared_ptr<ThreadPool>, MetricsScope)
    → shared_ptr<IStorageBackend>`。
-3. 后端级指标（可选，todo.md §3.1）：工厂收到的 `MetricsScope` 已带
+3. 后端级指标（可选）：工厂收到的 `MetricsScope` 已带
    `backend=<name>` 基础标签，透传给后端构造器、构造期领取实例
    （`scope.counter/gauge/histogram/gauge_callback`，`with()` 派生子件维度），
    热路径无锁递增，`GET /-/metrics` 自动追加输出。不消费指标时忽略该参即可；
@@ -241,7 +241,7 @@ meta / data 两侧均已有可选替换实现（各有专文，编译开关默�
 4. 配置 `backends[].type` 即可引用；通过通用的**后端一致性测试套件**
    （同一组用例参数化跑所有后端：CRUD、range、list 分页、multipart、
    并发 PUT 同 key、异常 key）验收。
-5. 通用键 `io_threads`（可选，todo.md §3.2）：任意后端配置即获得专属
+5. 通用键 `io_threads`（可选）：任意后端配置即获得专属
    IO 线程池而非共享全局池（Registry 在调用工厂前按参数注入，工厂/后端
    无感知）——慢后端（云端）占满共享池饿死快后端（本地盘）时的隔离
    手段，见 [concurrency.md](concurrency.md) §3.1。

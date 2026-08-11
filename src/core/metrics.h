@@ -1,4 +1,4 @@
-// 横切基础设施：后端级 metrics 注册机制（docs/todo.md §3.1）。
+// 横切基础设施：后端级 metrics 注册机制（装配见 docs/storage-backend.md §6）。
 // L2 请求维度指标仍由 s3::Metrics 负责；本文件让任意组件（存储后端及其
 // meta/data 子件）注册 counter / gauge / histogram，随 GET /-/metrics 以
 // Prometheus 文本格式追加输出。装配路径：main 建 MetricsRegistry →

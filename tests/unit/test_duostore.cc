@@ -405,7 +405,7 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     sync_wait(b->close());
 }
 
-// 后端级 metrics（docs/todo.md §3.1）：GC 计数经 MetricsScope 落注册表，
+// 后端级 metrics：GC 计数经 MetricsScope 落注册表，
 // backend 标签来自装配侧；直构（默认空 scope）路径由其余 GC 用例覆盖
 TEST(duostore_gc_metrics_registered) {
     TmpDir tmp;

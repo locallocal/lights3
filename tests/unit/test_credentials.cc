@@ -381,7 +381,7 @@ TEST(admin_api_policy_flow) {
     CHECK(lb.small_body.find("<Name>logs-a</Name>") != std::string::npos);
     CHECK(lb.small_body.find("<Name>private</Name>") == std::string::npos);
 
-    // copy-source 也受 policy 约束（读旁路封堵，docs/todo.md §4）：可写的 scoped
+    // copy-source 也受 policy 约束（读旁路封堵，docs/credential-management.md §10.4）：可写的 scoped
     // 凭证从白名单外的桶 copy → 403，白名单内 → 200
     auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {},
                                  R"({"policy":{"buckets":["logs-*"]}})"));

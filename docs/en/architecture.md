@@ -225,7 +225,7 @@ lights3/
 │   │   ├── cancel.h          #   cooperative cancellation primitives
 │   │   ├── background.h/.cc  #   background task wait group (concurrency.md §7)
 │   │   ├── config.h/.cc      #   YAML parsing + typed config
-│   │   ├── metrics.h/.cc     #   backend-level metrics registry + scope (todo.md §3.1)
+│   │   ├── metrics.h/.cc     #   backend-level metrics registry + scope (dispatched with a backend=<name> label)
 │   │   ├── log.h             #   spdlog facade
 │   │   └── util/             #   hex, crypto(OpenSSL SHA256/HMAC), uri, time
 │   ├── http/                 # L1

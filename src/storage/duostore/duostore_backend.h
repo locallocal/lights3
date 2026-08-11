@@ -191,7 +191,7 @@ struct DuoStoreConfig {
 
 class DuoStoreBackend final : public IStorageBackend {
 public:
-    // metrics 默认空 scope（docs/todo.md §3.1）：测试直构免装配，计数落孤立实例
+    // metrics 默认空 scope：测试直构免装配，计数落孤立实例
     DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
                     MetricsScope metrics = {});
     // 测试注入用：自组装 meta/data。注意 cfg.data_kind 须与注入的 data 引擎一致
@@ -268,7 +268,7 @@ private:
     void schedule_orphan_scan();  // 独立低频定时器（orphan_scan_interval；0 = 关）
     Task<void> orphan_tick();
     void shutdown_background();
-    // GC 计数指标注册（P5 指标项的 GC 切片，docs/todo.md §1.4；两个构造共用）
+    // GC 计数指标注册（两个构造共用）
     void init_metrics(const MetricsScope& metrics);
 
     DuoStoreConfig cfg_;

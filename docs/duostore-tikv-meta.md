@@ -580,4 +580,4 @@ tikv/client-c 回馈 2PC mutation op 扩展、`Snapshot::Get` not_found 重载�
 `@78a557e` 的两处消息串耦合持续有效（`tikv_client.cc` 对
 resolveLocksForWrite 裸 `Exception("write conflict")` 的兜底匹配，另有
 先行结构化判定压低依赖，文件头差异 7）——**升级指针时必须复查该消息串**。
-跟踪落 todo.md §2.4 尾巴。
+该上游回馈事项以本节为跟踪记录。

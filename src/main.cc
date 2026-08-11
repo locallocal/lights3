@@ -127,7 +127,7 @@ int main(int argc, char** argv) {
         Logger::init(parse_level(cfg.log_level));
 
         auto pool = std::make_shared<ThreadPool>(cfg.runtime.io_threads);
-        // 后端级 metrics 注册表（docs/todo.md §3.1）：build 给每个后端派发
+        // 后端级 metrics 注册表：build 给每个后端派发
         // backend=<name> 标签的 scope，/-/metrics 追加渲染
         auto metrics = std::make_shared<MetricsRegistry>();
         auto backends = storage::StorageRegistry::build(cfg.backends, pool, metrics);

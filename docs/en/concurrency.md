@@ -184,7 +184,7 @@ mutex + condvar. Two enqueue paths with deliberately different semantics:
   throws.
 
 localfs / xlocalfs / tiered / cloudproxy / duostore share this pool by default.
-**Per-backend dedicated pools** (todo.md §3.2, landed): any backend configured
+**Per-backend dedicated pools** (landed): any backend configured
 with `io_threads: N` (a generic key, [1,1024]) gets its own ThreadPool — when
 slow cloud requests fill the shared pool and starve the local-disk path,
 per-backend isolation keeps them out of each other's way (the Registry injects

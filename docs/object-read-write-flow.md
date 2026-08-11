@@ -105,16 +105,21 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 ② commit_object_file()              fs_util.cc:commit_object_file，原子提交原语
    create_directories(父目录)       失败 → key 与既有对象路径冲突（InvalidArgument）
    目标是目录 → key 与既有前缀冲突（InvalidArgument）
-   先写 sidecar：<data>.lights3-meta（后缀 fs_util.h:kSidecarSuffix；
-   TSV：etag/content_type/meta.*，自身也是 tmp+rename）
-   再 rename(tmp → 最终路径)        ← 提交点；rename 失败则回滚删 sidecar
+   元数据先写进 tmp 的 xattr user.lights3.meta（与 sidecar 同款 TSV）
+   fdatasync(tmp) → rename(tmp → 最终路径)  ← 提交点：一次 rename 同批提交数据与元数据
+   fsync(父目录) → 再写 sidecar：<data>.lights3-meta（fs_util.h:kSidecarSuffix；
+   外部工具可读 + 不支持 xattr 的文件系统回落，自身也是 tmp+rename）
 ```
 
 关键约定：
 
 - **ETag = 整体内容 MD5**（hex，不带引号存储，出口统一加引号）。
-- **sidecar 先于数据文件落位**：数据文件出现即可读到完整元数据，读侧不会
-  看到"有数据无 meta"的窗口；旧对象被覆盖时 sidecar 先换新也只是 meta 短暂超前。
+- **先数据后 sidecar**（元数据已随 xattr 同 rename 提交，见
+  [storage-backend.md](storage-backend.md) §3.1）：反序的崩溃窗口是
+  "sidecar 新 etag + 数据仍旧"——GET 返回的 body 与 ETag 不符，静默损坏；
+  本序仅余"数据新 + sidecar 旧"的窗口，而读侧 xattr 优先、sidecar 只是回落，
+  该窗口对支持 xattr 的文件系统不可见。提交段有 per-key 锁，两次 rename
+  之间不会有并发写者插入。
 - `TmpFile` 为 RAII：任何一步抛异常（含客户端断连使 `body.read` 抛错），
   析构时自动删除 staging 残留，`committed = true` 后才免删。
 - 客户端断连由驱动层 reader 以异常上抛（契约见 docs/http-adapter.md §4），
@@ -163,7 +168,9 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 co_await pool_->schedule()
 open(O_RDONLY)；失败时先 require_bucket() 区分 NoSuchBucket/NoSuchKey
 fstat 确认普通文件
-load_meta()：stat（size/mtime）+ 读 <data>.lights3-meta sidecar（etag/content_type/meta.*）
+load_meta()：已开 fd 的 fstat（size/mtime，绝不对路径二次 stat——并发覆盖后
+路径指向新 inode，meta 会与 fd 持有的 body 错位）+ 读元数据（该 fd 的 xattr
+优先，缺失回落 <data>.lights3-meta sidecar；etag/content_type/meta.*）
 resolve_range(range, size)：解析 a-b/a-/-n 为闭区间，不可满足 → InvalidRange(416)
 构造 FdBodyReader(fd, offset=f, remaining=len)   ← fd 所有权移交 reader
 ```
@@ -207,7 +214,7 @@ resolve_range(range, size)：解析 a-b/a-/-n 为闭区间，不可满足 → In
                     backend.put_object   backend.get_object
                              │                  │
               staging tmp 流式写+MD5      resp.stream_body
-              sidecar → rename 原子提交         │
+              xattr → rename → sidecar          │
                              │                  ▼
                              ▼          驱动 64KiB 拉取回写
                         ETag 响应        （Content-Length / chunked）
@@ -216,6 +223,6 @@ resolve_range(range, size)：解析 a-b/a-/-n 为闭区间，不可满足 → In
 设计要点回顾：
 
 - 全链路流式：内存占用与对象大小无关（每请求 O(64KiB) 缓冲）；
-- 写路径 staging + sidecar-先行 + rename，崩溃/断连不留半截对象；
+- 写路径 staging + xattr 同批 rename 提交 + sidecar 回落，崩溃/断连不留半截对象；
 - 读路径 fd 快照，读写并发互不阻塞、互不污染；
 - 阻塞 IO 一律经 `pool_->schedule()` 或 io_uring 与 HTTP 执行环境隔离。

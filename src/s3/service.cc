@@ -271,7 +271,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.headers.set("Content-Type", "text/plain");
         } else if (internal && internal_get("/-/metrics")) {
             resp.small_body = metrics_.render(pool_stats_, admission_stats_, timer_stats_);
-            // 后端级注册表（docs/todo.md §3.1）追加在 L2 请求指标之后
+            // 后端级注册表追加在 L2 请求指标之后
             if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
         } else if (internal && internal_get("/-/readyz")) {

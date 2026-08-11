@@ -125,19 +125,24 @@ require_bucket()                    ← no marker → NoSuchBucket
 ② commit_object_file()              fs_util.cc:commit_object_file, the atomic-commit primitive
    create_directories(parent dirs)  failure → key conflicts with an existing object path (InvalidArgument)
    target is a directory → key conflicts with an existing prefix (InvalidArgument)
-   write the sidecar first: <data>.lights3-meta (suffix fs_util.h:kSidecarSuffix;
-   TSV: etag/content_type/meta.*, itself also tmp+rename)
-   then rename(tmp → final path)    ← the commit point; on rename failure, roll back and delete the sidecar
+   metadata is first written into tmp's xattr user.lights3.meta (same TSV as the sidecar)
+   fdatasync(tmp) → rename(tmp → final path)  ← the commit point: one rename commits data and metadata together
+   fsync(parent dir) → then write the sidecar: <data>.lights3-meta (fs_util.h:kSidecarSuffix;
+   readable by external tools + fallback for filesystems without xattr, itself also tmp+rename)
 ```
 
 Key conventions:
 
 - **ETag = MD5 of the whole content** (hex, stored without quotes; quotes are
   added uniformly at the exits).
-- **The sidecar lands before the data file**: the moment the data file appears,
-  complete metadata is already readable — the read side never sees a
-  "data without meta" window; when an old object is overwritten, the sidecar
-  being replaced first only means the meta briefly runs ahead.
+- **Data first, then sidecar** (the metadata already committed with the data via
+  the xattr in the same rename, see [storage-backend.md](storage-backend.md)
+  §3.1): the reverse order's crash window is "sidecar with the new etag + data
+  still old" — GET returns a body that does not match its ETag, i.e. silent
+  corruption. This order leaves only a "new data + old sidecar" window, and
+  since the read side prefers the xattr (the sidecar is just a fallback), that
+  window is invisible on xattr-capable filesystems. The commit section holds a
+  per-key lock, so no concurrent writer can interleave between the two renames.
 - `TmpFile` is RAII: if any step throws (including a client disconnect making
   `body.read` throw), the destructor removes the staging residue; only after
   `committed = true` is it exempt from deletion.
@@ -202,7 +207,10 @@ Key conventions:
 co_await pool_->schedule()
 open(O_RDONLY); on failure, require_bucket() first to distinguish NoSuchBucket/NoSuchKey
 fstat to confirm a regular file
-load_meta(): stat (size/mtime) + read the <data>.lights3-meta sidecar (etag/content_type/meta.*)
+load_meta(): fstat of the already-open fd (size/mtime — never a second stat by
+path: after a concurrent overwrite the path points at a new inode and the meta
+would mismatch the body the fd holds) + read metadata (the fd's xattr first,
+falling back to the <data>.lights3-meta sidecar; etag/content_type/meta.*)
 resolve_range(range, size): resolve a-b/a-/-n into a closed interval; unsatisfiable → InvalidRange(416)
 construct FdBodyReader(fd, offset=f, remaining=len)   ← fd ownership moves into the reader
 ```
@@ -257,7 +265,7 @@ responses use `small_body` (a string), large responses use `stream_body`
                     backend.put_object   backend.get_object
                             │                  │
         staging tmp streamed write+MD5   resp.stream_body
-        sidecar → rename atomic commit         │
+        xattr → rename → sidecar               │
                             │                  ▼
                             ▼          driver pulls 64KiB chunks and writes back
                        ETag response     (Content-Length / chunked)
@@ -267,8 +275,8 @@ Design points recap:
 
 - streaming across the whole pipeline: memory footprint is independent of
   object size (O(64KiB) buffer per request);
-- write path: staging + sidecar-first + rename; crashes/disconnects leave no
-  half-written objects;
+- write path: staging + xattr committed in the same rename batch + sidecar as
+  fallback; crashes/disconnects leave no half-written objects;
 - read path: fd snapshot; concurrent reads and writes neither block nor
   pollute each other;
 - blocking IO is always isolated from the HTTP execution environment via

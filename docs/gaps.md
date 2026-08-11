@@ -913,10 +913,10 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
   `OpenSSL::SSL` 随任一 httplib 消费者（驱动或 cloudproxy）目标级统一定义
   （ODR 约束不变）。测试内嵌百年自签证书：TLS 往返（GET+流式 PUT）、明文客户
   端打 TLS 端口必须握手失败、不支持驱动必须抛、坏证书必须抛，四用例齐备。
-- **CI**：`.github/workflows/ci.yml` 三变体矩阵（default / TSan / sqlite+redis
-  同编译），直接复用 `build.sh`（子模块按需 init 的逻辑不重写一份），ccache
-  按变体缓存对付 rocksdb 冷编译。seastar/tikv/rados 依赖重型系统工具链或外部
-  集群，**刻意保留**在本地按需验证（对应 e2e 在无依赖时本就 SKIP）。
+- **CI**：曾以 `.github/workflows/ci.yml` 落地三变体矩阵（default / TSan /
+  sqlite+redis，复用 `build.sh` + ccache），后按维护者要求移除——本仓库不跑
+  GitHub Actions，验证以本地 `./build.sh --test`（及 TSan/变体构建目录）为准；
+  误提交的 CTest 输出目录 `Testing/` 一并移除并入 `.gitignore`。
 - **三后端零指标**：localfs/xlocalfs 接 `lights3_localfs_ops_total` /
   `_op_errors_total`（op 八维全量预注册）+ `_op_seconds`（仅 put/get/list——
   覆盖写盘/读盘/遍历三类代价形态即可定位盘退化，其余 op 同形不膨胀输出）；

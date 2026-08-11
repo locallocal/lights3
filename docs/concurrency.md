@@ -144,7 +144,8 @@ L2 逻辑，直到下一个挂起点。这省掉一次线程切换，代价就�
 - **指标**（`stats()`，见 [s3-protocol.md](s3-protocol.md) §7）：
   队列深度、backlog 长度、完成计数经 `/-/metrics` 暴露，是容量调优的
   主要信号；入队→开跑等待时长直方图（<1ms / <10ms / <100ms / <1s / ≥1s）
-  已采集、暂未经 `/-/metrics` 输出（`s3/metrics.cc` 的 `render` 待接入）；
+  以 `lights3_pool_wait_seconds` histogram 输出——它是下文专属池判据的
+  直接数据源；
 - `join()`：停止接收新任务，**排空队列**（含 backlog）后等待线程退出；
   join 后 `post/schedule` 抛异常。
 
@@ -154,8 +155,8 @@ localfs / xlocalfs / tiered / cloudproxy / duostore 默认共享此池。
 占满共享池饿死本地盘路径时，按 backend 隔离即互不牵制（Registry 构造时
 按参数注入，`storage/registry.cc` 的 `backend_pool`）。缺省共享是多数
 部署的正确选择，隔离是"确认了饿死征兆（等待时长直方图右移）再开"的
-定向手段——该直方图暂未经 `/-/metrics` 输出（见上），当前只能靠
-`queue_depth`/`backlogged` 判断；cloudproxy 另有私有 pump 线程的局部规避，见
+定向手段——判据直接读 `/-/metrics` 的 `lights3_pool_wait_seconds`
+（右移即饿死征兆）；cloudproxy 另有私有 pump 线程的局部规避，见
 [cloudproxy-backend.md](cloudproxy-backend.md) §2.3。专属池随后端
 shared_ptr 存亡（析构即 join）；观测指标
 `lights3_backend_pool_{threads,queue_depth,backlogged,completed}` 挂
@@ -209,7 +210,15 @@ httplib 的请求 body 是推模型，由 pump 线程经有界缓冲队列翻转
 
 ## 5. 取消与超时
 
-取消源有三：客户端断连（driver 发现）、请求超时、进程 shutdown。
+已接线的取消源有二：**请求超时**（`http.request_timeout`，dispatch 内
+`with_timeout`）与**进程 shutdown**（main.cc 的关停源）；两者汇入同一个
+请求级 CancelSource，沿 Task promise 自动下传。
+**客户端断连不做独立的取消源**（刻意）：断连的感知点在 socket 触碰处——
+body 读抛异常、响应写失败即丢弃结果，L2/L3 靠 RAII 回卷；不触碰 socket 的
+长 handler（如慢后端上的 GET 元数据阶段）由请求级超时兜底上限。独立侦测
+在同步驱动（builtin/httplib）意味着每连接再养一个侦测线程，异步驱动则要
+并发监听半关闭且不得误吞 pipelining 的下一请求字节——两侧成本都不抵
+"最多多跑到 request_timeout"的收益。
 哲学：**协作式，不追求抢占**——正在执行的阻塞 syscall 等它自然返回，
 返回后由挂起点/长循环检查 token 决定终止。这与线程池模型自洽。
 
@@ -269,7 +278,7 @@ duostore-rados-data.md §4.2）：嵌套的阻塞 acquire 会在全员各持一�
 
 | 位置 | 用途 |
 | --- | --- |
-| `main.cc` dispatch 入口 | `runtime.max_inflight_requests` 全局限流，超限请求排队而非拒绝；等待者经池 executor 唤醒 |
+| `main.cc` dispatch 入口 | `runtime.max_inflight_requests` 全局限流，超限请求排队而非拒绝；等待者经池 executor 唤醒。流式响应的 Permit 系在 `stream_body` 上（最外层包装），驱动读完/断连丢弃时才归还——限流覆盖响应传输全程，而非只覆盖 handler 协程帧；关停排空按 `available()` 判在途，因此也数得到流式传输中的请求 |
 | tiered `transfers_` | `max_concurrent_transfers`：下沉/回迁的并发传输上限（见 [tiered-storage.md](tiered-storage.md) §5.1） |
 | tiered `key_locks_` | permits=1 当异步互斥用：striped per-key 锁，只保护状态提交段（见 [tiered-storage.md](tiered-storage.md) §7.3） |
 | rados `buffer_sem_` | `rados_buffer_total` 写缓冲总额度：首份阻塞 acquire（背压），双缓冲第二份 try_acquire（见 [duostore-rados-data.md](duostore-rados-data.md) §4.2） |

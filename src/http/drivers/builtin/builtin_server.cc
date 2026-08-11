@@ -1,5 +1,5 @@
 // L1: builtin 驱动 —— 零依赖 POSIX socket HTTP/1.1，thread-per-connection 同步模型。
-// 演示插拔层的同步驱动接入方式（协程经 sync_wait 桥接，见 docs/http-adapter.md §3.2、docs/concurrency.md §4.2）。
+// 演示插拔层的同步驱动接入方式（协程经 sync_wait 桥接，见 docs/http-adapter.md §3.0、docs/concurrency.md §4.2）。
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>

@@ -13,8 +13,12 @@
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder` |
 
 明确不支持（返回 `NotImplemented`）：versioning、ACL 细粒度（只认
-private）、policy、website、lifecycle、SSE-C/KMS、Object Lock、
-presigned POST（presigned GET/PUT 的 query 签名**支持**，见 §3.4）。
+private）、policy、website、lifecycle、tagging、SSE-C/KMS、Object Lock、
+storage-class（只认 STANDARD）、presigned POST（presigned GET/PUT 的
+query 签名**支持**，见 §3.4）。拒绝面同时覆盖 query 子资源（白名单反转，
+名单外 → 501）与**请求头**（`x-amz-server-side-encryption*` /
+`x-amz-tagging` / `x-amz-object-lock-*` / `x-amz-grant-*` 等携带即 501，
+不再静默吞掉回 200）。
 
 ## 2. 路由与寻址
 
@@ -128,6 +132,11 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
   两处与 AWS 逐字对齐的边界：PUT `If-None-Match` 仅支持 `*`（AWS conditional
   writes 同样只支持 `*`，带 ETag → 501）；GET 多段 Range（含逗号）AWS 不支持，
   行为同 AWS——整个 Range 头忽略、返回 200 全量。
+  **原子性范围**：条件判定与提交同处后端自身的原子提交点（localfs 提交段
+  per-key 锁、duostore 元数据事务、cloudproxy 透传上游条件头），L2 只做
+  无锁快速失败预检——duostore/cloudproxy 形态下跨实例成立；localfs/xlocalfs
+  的互斥为**进程内**，多实例共享同一文件系统的部署不在支持范围
+  （[architecture.md](architecture.md) 的非目标：数据面单实例假设）。
 - **copy-source 的安全边界**：`x-amz-copy-source` 不走 dispatch 的路径拦截，
   两道检查分处两地：`.` 开头的保留 bucket（`.sys`）在 `parse_copy_source()`
   （src/s3/handlers/common.h）拒绝（InvalidBucketName）；per-credential
@@ -147,8 +156,12 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
   「按 API×后端分维度的请求直方图、后端错误率」仍待接入。
 - **健康检查**：`GET /-/healthz`（进程存活）与 `GET /-/readyz`
   （各后端探活：对所有后端一律 `co_await list_buckets()`，任一失败
-  返回 503 并在响应体中报告失败的后端名）。
-  `/-/` 前缀不与合法 bucket 名冲突（S3 bucket 命名不允许该形态）。
+  返回 503 并在响应体中报告失败的后端名）。三个读端点只认 GET/HEAD，
+  其余方法 405。
+  `/-/` 前缀不与合法 bucket 名冲突（S3 bucket 命名不允许该形态）——该论断
+  **仅对 path-style 寻址成立**，内部端点分流因此以"非 vhost"为前置：vhost
+  寻址下 `req.path` 整体是对象 key，`/-/metrics` 是合法键名，按普通对象
+  读写、不被内部端点遮蔽。
 
 ## 8. 测试策略
 

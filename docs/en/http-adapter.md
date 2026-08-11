@@ -67,6 +67,15 @@ Design notes:
   driver later supports `sendfile`, an optional `try_as_file()` interface can be
   added to `BodyReader` as a specialization without affecting existing
   implementations.
+- **HTTP/1.1 chunked trailers do not enter the neutral model**: `HttpRequest`
+  has no field for them; L1 reads them off with a bound and discards them during
+  de-framing (`http.trailer_max_size` caps injection; over the cap the
+  connection is closed). This is a deliberate trade-off: S3's streaming
+  checksums travel inside the body via aws-chunked encoding (the trailer of
+  `STREAMING-*-TRAILER` lives inside the aws-chunked frames and is parsed by
+  L2's signature decorator), not via HTTP-layer trailers; generic HTTP trailers
+  have no S3 consumer, and passing them through would only widen the attack
+  surface.
 
 ## 2. Server Interface and Factory
 
@@ -128,6 +137,23 @@ struct HttpServerFactory {
 
 ## 3. Implementation Notes per Driver
 
+### 3.0 builtin (default driver, zero-dependency POSIX sockets)
+
+- Positioning: the default driver and reference implementation. Hand-written
+  HTTP/1.1 parser (request line/headers/chunked de-framing all in-repo), zero
+  third-party dependencies; the security-side helpers (message-framing checks,
+  outbound header filtering) are shared with the other three drivers via
+  `drivers/common.h`.
+- Model: thread-per-connection, synchronous. One detached thread with a 512KiB
+  stack per connection; coroutines bridge via `sync_wait_pumping` (blocking body
+  reads run back on the connection thread, never occupying the shared pool);
+  concurrency is bounded by `http.max_connections`, and `http.io_threads` is
+  meaningless for it (a startup WARN fires when explicitly configured, §2.1).
+- IPv4/IPv6 dual stack (`::` defaults to v6only=0); the same config is
+  interchangeable with the other three drivers.
+- Limits: no TLS (configuring it throws at construction, §2.1); use beast for
+  the performance path.
+
 ### 3.1 Boost.Beast (async driver, preferred performance path)
 
 - Structure: N threads jointly running one `asio::io_context` (or per-thread
@@ -160,6 +186,22 @@ struct HttpServerFactory {
   pull-model `BodyReader`.
 - Positioning: for functional verification, low-concurrency scenarios, and quick
   troubleshooting; not the performance path.
+- **Known degradations** (upstream API limits; the driver conformance tests
+  accept them):
+  - `Expect: 100-continue` cannot be answered lazily — upstream offers only
+    "reply 100 immediately / reply 417 / close with the final response";
+    "suppress the automatic reply and let the handler decide" is not expressible
+    in v0.20. §3.1's lazy-reply promise degrades to an immediate reply for this
+    driver; framing violations are still rejected with 400 before inviting the
+    upload, and the useless body after a premature 100 is handled by bounded
+    draining + closing the connection.
+  - Single header lines have a compile-time cap `CPPHTTPLIB_HEADER_MAX_LENGTH`
+    (8KiB): when `http.max_header_size` exceeds it, over-long single lines are
+    still rejected by upstream first (startup WARN); the total-header cap is
+    enforced in-driver per the config.
+  - Unregistered methods cannot be forwarded to the handler: they are uniformly
+    rejected with 405 + S3 XML (the other three drivers forward them verbatim
+    for L2 to judge; both outcomes are allowed by contract item 7).
 
 ### 3.3 Seastar (shard-per-core async driver)
 
@@ -208,8 +250,21 @@ struct HttpServerFactory {
    result at the response-writing stage; L2/L3 clean up via RAII.
 4. After `shutdown()`, `run()` must return once "in-flight requests complete or
    time out".
-5. keep-alive and HTTP/1.1 chunked encoding/decoding are the driver's internal
-   responsibility; L2 is unaware of them.
+5. keep-alive, HTTP/1.1 chunked encoding/decoding, and the
+   length/encoding/connection-management headers are the driver's internal
+   responsibility; L2 is unaware of them. Outbound headers pass a shared filter
+   (illegal header names / values containing CR/LF are dropped).
+6. HEAD response framing headers are uniform across the four drivers: length
+   known → write Content-Length (the value a GET would return); length unknown →
+   write **neither** Content-Length nor Transfer-Encoding and close the
+   connection — writing 0 is a lie, and writing chunked promises chunk frames
+   that will never be sent.
+7. The accepted/rejected request sets are identical: message framing (CL/TE
+   conflict, duplicate CL, malformed chunks — request-smuggling preconditions),
+   `http.max_header_size`, the connection cap, and IPv4/IPv6 dual stack carry
+   the same semantics on all four drivers; httplib's two upstream residuals
+   (single-line header cap, unregistered methods) are declared as known
+   degradations in §3.2.
 
 The contract is guaranteed by a **driver conformance test** suite (parameterize
 all compiled drivers over the same set of cases: large-file PUT/GET, range,

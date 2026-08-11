@@ -15,8 +15,13 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder` |
 
 Explicitly unsupported (returns `NotImplemented`): versioning, fine-grained ACL
-(only private is accepted), policy, website, lifecycle, SSE-C/KMS, Object Lock,
-presigned POST (query signing for presigned GET/PUT **is supported**, see §3.4).
+(only private is accepted), policy, website, lifecycle, tagging, SSE-C/KMS,
+Object Lock, storage-class (only STANDARD is accepted), presigned POST (query
+signing for presigned GET/PUT **is supported**, see §3.4). The rejection
+surface covers both query subresources (inverted whitelist; anything off-list →
+501) and **request headers** (`x-amz-server-side-encryption*` /
+`x-amz-tagging` / `x-amz-object-lock-*` / `x-amz-grant-*` etc. → 501 when
+present, no longer silently swallowed with a 200).
 
 ## 2. Routing and Addressing
 
@@ -140,6 +145,14 @@ and the response leaks no internal information.
   (AWS conditional writes likewise only support `*`; with an ETag → 501); AWS does
   not support multi-range GET (with commas), and the behavior matches AWS — the
   entire Range header is ignored and a full 200 response is returned.
+  **Atomicity scope**: the conditional check and the commit share the backend's
+  own atomic commit point (localfs commit-section per-key lock, duostore
+  metadata transaction, cloudproxy passes the conditional headers upstream); L2
+  only does a lock-free fast-fail precheck. Cross-instance the guarantee holds
+  for duostore/cloudproxy; localfs/xlocalfs mutual exclusion is
+  **process-local**, and multi-instance deployments sharing one filesystem are
+  out of scope ([architecture.md](architecture.md) non-goal: the data plane
+  assumes a single instance).
 - **Security boundary of copy-source**: `x-amz-copy-source` does not pass through
   dispatch's path interception; two checks live in two places: reserved buckets
   starting with `.` (`.sys`) are rejected in `parse_copy_source()`
@@ -163,8 +176,13 @@ and the response leaks no internal information.
 - **Health checks**: `GET /-/healthz` (process liveness) and `GET /-/readyz`
   (per-backend probing: `co_await list_buckets()` uniformly against all backends;
   any failure returns 503 with the failing backend names reported in the body).
+  The three read endpoints accept only GET/HEAD; other methods get 405.
   The `/-/` prefix cannot collide with a legal bucket name (S3 bucket naming
-  disallows that shape).
+  disallows that shape) — this claim holds **only under path-style addressing**,
+  so the internal-endpoint branch is gated on "not vhost": under vhost
+  addressing `req.path` is the object key in its entirety, `/-/metrics` is a
+  legal key name and is read/written as an ordinary object, never shadowed by
+  the internal endpoints.
 
 ## 8. Testing Strategy
 

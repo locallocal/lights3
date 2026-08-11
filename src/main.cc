@@ -46,6 +46,29 @@ lights3::LogLevel parse_level(const std::string& s) {
     return lights3::LogLevel::Info;
 }
 
+// 把入口限流的 Permit 系进流式响应体的生命期（docs/gaps.md 第三部分 ·
+// concurrency.md §6）：permit 若只活在 handler 协程帧内，会在响应体开始传输
+// **之前**就归还——N 个大对象 GET 全部拿到 permit 又全部归还后仍在并发占用
+// 带宽与后端 IO，`max_inflight_requests` 约束不到请求的主要生命期；关停排空
+// 用 available() 判在途，同样会漏数流式传输中的请求。驱动读完/丢弃响应体时
+// 析构本 reader，permit 随之归还（析构可发生在驱动线程，与协程帧路径同语义：
+// 等待者经池 executor 唤醒，不在释放方调用栈上内联展开）
+class PermitBodyReader final : public lights3::http::BodyReader {
+public:
+    PermitBodyReader(std::unique_ptr<lights3::http::BodyReader> inner,
+                     lights3::AsyncSemaphore::Permit permit)
+        : inner_(std::move(inner)), permit_(std::move(permit)) {}
+
+    lights3::Task<size_t> read(std::span<std::byte> buf) override {
+        co_return co_await inner_->read(buf);
+    }
+    std::optional<uint64_t> length() const override { return inner_->length(); }
+
+private:
+    std::unique_ptr<lights3::http::BodyReader> inner_;
+    lights3::AsyncSemaphore::Permit permit_;
+};
+
 }  // namespace
 
 DEFINE_string(config, "config/lights3.yaml", "Path to the lights3 YAML config file");
@@ -194,6 +217,13 @@ int main(int argc, char** argv) {
                 req.body = http::guard_stalls(std::move(req.body), stall);
                 auto resp = co_await service->dispatch(std::move(req));
                 resp.stream_body = http::guard_stalls(std::move(resp.stream_body), stall);
+                // 流式响应把 permit 交给响应体（最外层包装）：驱动读完/断连丢弃
+                // 时才归还，限流因此覆盖响应传输全程。小响应（small_body）随
+                // co_return 归还——驱动写出一段内存的耗时有界，不值得为它把
+                // permit 也穿进驱动
+                if (resp.stream_body)
+                    resp.stream_body = std::make_unique<PermitBodyReader>(
+                        std::move(resp.stream_body), std::move(permit));
                 co_return resp;
             } catch (const OperationCancelled&) {
                 // 排队期间被关停/超时取消：503 让 SDK 重试

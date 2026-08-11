@@ -60,6 +60,11 @@ struct HttpResponse {
 - **不做零拷贝抽象过度设计**：统一以 `span<byte>` 块传递，块大小由调用方决定
   （默认 64KiB）。后续如某 driver 支持 `sendfile`，可给 `BodyReader` 增加
   `try_as_file()` 可选接口做特化，不影响现有实现。
+- **HTTP/1.1 chunked trailer 不进中立模型**：`HttpRequest` 无承接字段，L1 在
+  剥壳时有界读掉并丢弃（`http.trailer_max_size` 上限防灌注，超限断连）。这是
+  刻意取舍：S3 的流式校验和走 body 内 aws-chunked 编码（`STREAMING-*-TRAILER`
+  的 trailer 位于 aws-chunked 帧内，由 L2 的验签装饰器解析），不依赖 HTTP 层
+  trailer；通用 HTTP trailer 无 S3 消费方，透传只会扩大攻击面。
 
 ## 2. 服务器接口与工厂
 
@@ -115,6 +120,18 @@ struct HttpServerFactory {
 
 ## 3. 各驱动实现要点
 
+### 3.0 builtin（默认驱动，零依赖 POSIX socket）
+
+- 定位：默认驱动与参考实现。手写 HTTP/1.1 解析器（请求行/头/chunked 剥壳全在
+  仓内），零第三方依赖；消息边界校验、出站头过滤等安全侧辅助与另三驱动共享
+  `drivers/common.h` 同一套实现。
+- 模型：thread-per-connection 同步模型。每连接一个 512KiB 栈的分离线程，协程
+  经 `sync_wait_pumping` 桥接（body 的阻塞读切回连接线程执行，不占共享池）；
+  并发上限即 `http.max_connections`，`http.io_threads` 对它无意义（显式配置时
+  启动 WARN，见 §2.1）。
+- IPv4/IPv6 双栈（`::` 默认 v6only=0），同一份配置与另三驱动互换。
+- 限制：不支持 TLS（配置了在构造期报错，§2.1）；性能路径请用 beast。
+
 ### 3.1 Boost.Beast（异步驱动，性能路径首选）
 
 - 结构：N 个线程共跑一个 `asio::io_context`（或 per-thread io_context，
@@ -138,6 +155,16 @@ struct HttpServerFactory {
 - Body 适配：httplib 的 `ContentReader` 是推模型，用一个有界缓冲队列
   （单生产者单消费者，容量 2~4 块）翻转成拉模型的 `BodyReader`。
 - 定位：功能验证、低并发场景、快速排查问题时使用；不是性能路径。
+- **已知降级**（上游 API 限制，驱动一致性测试按此放行）：
+  - `Expect: 100-continue` 无法延迟应答——上游只有"立即回 100 / 回 417 / 以
+    最终响应关连接"三种出路，"抑制自动应答、handler 决定后再回 100"在 v0.20
+    不可表达。§3.1 的延迟应答承诺对本驱动降级为立即应答；消息边界违规仍在
+    邀请上传之前以 400 拒绝，误发 100 后的无效 body 由有界排空 + 关连接兜底。
+  - 单行头有编译期上限 `CPPHTTPLIB_HEADER_MAX_LENGTH`（8KiB）：
+    `http.max_header_size` 配置值大于它时，超长单行仍会被上游先拒（启动
+    WARN）；头部总量上限则按配置在驱动内补做。
+  - 未注册方法无法转发给 handler：统一以 405 + S3 XML 拒绝（另三驱动原样
+    转发交 L2 判定；两种结局均为契约 7 允许的形态）。
 
 ### 3.3 Seastar（shard-per-core 异步驱动）
 
@@ -172,7 +199,15 @@ struct HttpServerFactory {
 3. handler 完成前客户端断连：driver 使 `body->read()` 返回错误
    （以 exception 形式传播），并在响应写出阶段丢弃结果；L2/L3 靠 RAII 清理。
 4. `shutdown()` 后 `run()` 必须在"在途请求完成或超时"后返回。
-5. keep-alive、HTTP/1.1 chunked 编解码是 driver 内部职责，L2 不感知。
+5. keep-alive、HTTP/1.1 chunked 编解码、长度/编码/连接管理头是 driver 内部
+   职责，L2 不感知；出站头统一过滤（非法头名/含 CR/LF 的值直接丢弃）。
+6. HEAD 响应的框架头四驱动统一：长度已知 → 写 Content-Length（值即对应 GET
+   会返回的长度）；长度未知 → Content-Length 与 Transfer-Encoding **都不写**
+   并关连接——写 0 是撒谎，写 chunked 则承诺了不会发出的 chunk 帧。
+7. 接受/拒绝的请求集合一致：消息边界（CL/TE 冲突、重复 CL、坏 chunk 等走私
+   前置条件）、`http.max_header_size`、连接上限、IPv4/IPv6 双栈在四驱动同
+   语义；httplib 的两处上游残留（单行头上限、未注册方法）以 §3.2 已知降级
+   显式声明。
 
 契约用一套**驱动一致性测试**（parametrize 所有已编译 driver 跑同一组用例：
 大文件 PUT/GET、range、100-continue、中途断连、并发 shutdown）保证行为一致。

@@ -13,7 +13,7 @@
 
 namespace lights3::storage {
 
-// scope 携带 backend=<name> 基础标签（docs/todo.md §3.1）；工厂不消费指标时忽略即可
+// scope 携带 backend=<name> 基础标签；工厂不消费指标时忽略即可
 using BackendFactory = std::function<std::shared_ptr<IStorageBackend>(
     const BackendConfig&, std::shared_ptr<ThreadPool>, MetricsScope)>;
 

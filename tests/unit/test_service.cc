@@ -254,7 +254,7 @@ TEST(service_aws_aligned_edge_semantics) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
 
-    // 多段 Range：AWS 不支持，整个头忽略 → 200 全量（docs/todo.md §4）
+    // 多段 Range：AWS 不支持，整个头忽略 → 200 全量（docs/s3-protocol.md §6）
     auto multi = make_req("GET", "/bkt/k");
     multi.headers.add("Range", "bytes=0-1,3-4");
     auto resp = sync_wait(svc.dispatch(std::move(multi)));
@@ -504,7 +504,7 @@ TEST(service_observability_endpoints) {
     CHECK(contains(metrics.small_body, "lights3_inflight_requests"));
 }
 
-// 后端级 metrics 注册表（docs/todo.md §3.1）：注入后 /-/metrics 在 L2 请求指标
+// 后端级 metrics 注册表：注入后 /-/metrics 在 L2 请求指标
 // 之后追加渲染；未注入（上一用例）则只有 L2 部分
 TEST(service_backend_metrics_appended) {
     auto svc = make_service_noauth();

@@ -69,5 +69,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
   chunked 签名校验。
 - **bucket 级路由而非 object 级**：路由规则简单、可静态配置，避免元数据服务；
   object 级分层已按此思路以组合后端形式叠加实现（见 [tiered-storage.md](tiered-storage.md)）。
-- **元数据 sidecar 而非嵌入数据文件**：LocalFs 后端用 `.meta` sidecar JSON 存储
-  Content-Type、ETag、自定义元数据，保持数据文件与普通文件系统工具兼容。
+- **元数据 sidecar 而非嵌入数据文件**：LocalFs 后端用 `.lights3-meta` sidecar
+  （TSV，`fs_util.h:kSidecarSuffix`）存储 Content-Type、ETag、自定义元数据，
+  保持数据文件与普通文件系统工具兼容（xattr 同批提交为主，sidecar 兼作外部
+  工具可读与回落，见 [storage-backend.md](storage-backend.md) §3.1）。

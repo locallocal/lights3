@@ -154,3 +154,25 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
 设计上明确不支持（返回 NotImplemented，见 [s3-protocol.md](s3-protocol.md) §1）：
 versioning、ACL 细粒度（只认 private）、bucket policy、website、lifecycle、
 tagging/CORS、SSE-C/KMS、Object Lock、presigned POST。
+
+## 文档
+
+设计文档中文原文在 [docs/](README.md)，英文翻译在 [docs/en/](en/README.md)，
+章节编号与中文版一致（源码注释以 `docs/<name>.md §N` 形式引用章节）。
+
+| 文档（[中文](README.md) · [en](en/README.md)） | 内容 |
+| --- | --- |
+| [architecture](architecture.md) | 总体架构、分层、请求生命周期、代码布局 |
+| [http-adapter](http-adapter.md) | HTTP 插拔层：中立请求/响应模型、流式 body、各驱动要点 |
+| [concurrency](concurrency.md) | Task 协程、Executor 抽象、线程池、同步/异步驱动桥接 |
+| [storage-backend](storage-backend.md) | `IStorageBackend`、LocalFs/XLocalFs、bucket 路由、新增后端指南 |
+| [s3-protocol](s3-protocol.md) | API 范围、SigV4（含 presigned 与时钟偏移）、XML 编解码、错误、mint 门禁 |
+| [credential-management](credential-management.md) | AK/SK 管理 API、三来源模型、`.sys` 持久化、at-rest 加密、policy |
+| [object-read-write-flow](object-read-write-flow.md) | 端到端读写路径、BodyReader 链、staging 提交、fd 快照读 |
+| [tiered-storage](tiered-storage.md) | 冷数据下沉云端、stub 元数据、透明回读 |
+| [cloudproxy-backend](cloudproxy-backend.md) | 自签 SigV4 转发远端 S3、流式泵、重试 |
+| [duostore-backend](duostore-backend.md) | 元数据/数据分离引擎：RocksDB meta、chunk/pack、GC |
+| [duostore-redis-meta](duostore-redis-meta.md) | Redis IMetaStore：hiredis + Lua 守卫提交 |
+| [duostore-sqlite-meta](duostore-sqlite-meta.md) | SQLite IMetaStore：内嵌 amalgamation、WAL、读连接池 |
+| [duostore-rados-data](duostore-rados-data.md) | RADOS IDataStore：librados，chunk → rados 对象 |
+| [duostore-tikv-meta](duostore-tikv-meta.md) | TiKV IMetaStore：client-c + 2PC 侧车 |

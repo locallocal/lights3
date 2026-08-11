@@ -64,7 +64,7 @@ public:
         timer_stats_ = std::move(fn);
     }
 
-    // 后端级指标注册表（docs/todo.md §3.1，可选）：渲染追加在 L2 请求指标之后
+    // 后端级指标注册表（可选）：渲染追加在 L2 请求指标之后
     void set_backend_metrics(std::shared_ptr<MetricsRegistry> m) {
         backend_metrics_ = std::move(m);
     }

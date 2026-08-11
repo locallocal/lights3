@@ -1,4 +1,4 @@
-// TimerQueue 单测（docs/concurrency.md §2/§5；docs/todo.md §5.3 首批补齐）：
+// TimerQueue 单测（docs/concurrency.md §2/§5）：
 // 触发、到期顺序、撤销语义（未触发 true / 已触发或不存在 false）、析构不悬挂、
 // 更早条目插队唤醒。时序断言只用宽松上界（cv + 超时等待），避免慢机 flake。
 #include <atomic>

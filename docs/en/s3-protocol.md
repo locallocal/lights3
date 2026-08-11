@@ -157,7 +157,7 @@ and the response leaks no internal information.
   request counts / latency histograms (dimensioned by API and backend), in-flight
   request count, thread pool queue depth, active multipart count, backend error
   rate. Backend-level metrics are registered via the `core/metrics.h` registry
-  (`backend=<name>` label, todo.md §3.1) and appended after the L2 request metrics
+  (`backend=<name>` label) and appended after the L2 request metrics
   in the output; "per API x backend request histograms and backend error rate"
   are still pending.
 - **Health checks**: `GET /-/healthz` (process liveness) and `GET /-/readyz`

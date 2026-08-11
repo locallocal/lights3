@@ -697,5 +697,5 @@ sidecar's two message-string couplings to `@78a557e` stay in force
 (`tikv_client.cc`'s fallback match on resolveLocksForWrite's bare
 `Exception("write conflict")`, with a preceding structured classification that
 lowers the dependency, file-header difference 7) — **that message string must be
-re-checked whenever the pointer is upgraded**. Tracked as a todo.md §2.4
-loose end.
+re-checked whenever the pointer is upgraded**. This section is the tracking
+record for that upstream contribution.

@@ -44,7 +44,7 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     return o;
 }
 
-// per-backend 独立 IO 池（docs/concurrency.md §3.1 预留的兑现，todo.md §3.2）：
+// per-backend 独立 IO 池（docs/concurrency.md §3.1 预留的兑现）：
 // params 带 io_threads（≥1）的后端获得专属 ThreadPool——云端慢请求占满共享池
 // 会饿死本地盘路径，池按 backend 隔离即互不牵制；缺省共享全局池（多数部署的
 // 正确选择，隔离是"确认了饿死征兆再开"的定向手段）。通用键：任意 type 生效，

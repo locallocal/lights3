@@ -248,7 +248,7 @@ is recommended only for intranet/testing**; production should use HTTPS.
   `Transfer-Encoding: chunked` (it requires fixed length or aws-chunked). P4
   decision: keep `NotImplemented`; do not implement
   `STREAMING-UNSIGNED-PAYLOAD-TRAILER` outbound framing—a rare path whose
-  benefit does not justify the complexity (todo.md §5.4 records it as
+  benefit does not justify the complexity (recorded as explicitly
   won't-do).
 
 ### 3.3 Range GET Pass-Through
@@ -460,7 +460,7 @@ return, httplib reconnects automatically.
 
 ### 8.2 Metrics (Implemented in P4)
 
-Wired in via MetricsScope (the factory's third parameter, todo.md §3.1),
+Wired in via MetricsScope (the factory's third parameter),
 encapsulated at a single point in `RemoteMetrics`:
 
 | Metric | Type/labels | Semantics |

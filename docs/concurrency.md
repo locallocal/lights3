@@ -149,7 +149,7 @@ L2 逻辑，直到下一个挂起点。这省掉一次线程切换，代价就�
   join 后 `post/schedule` 抛异常。
 
 localfs / xlocalfs / tiered / cloudproxy / duostore 默认共享此池。
-**per-backend 独立池**（todo.md §3.2，已落地）：任意后端配置
+**per-backend 独立池**（已落地）：任意后端配置
 `io_threads: N`（通用键，[1,1024]）即获得专属 ThreadPool——云端慢请求
 占满共享池饿死本地盘路径时，按 backend 隔离即互不牵制（Registry 构造时
 按参数注入，`storage/registry.cc` 的 `backend_pool`）。缺省共享是多数

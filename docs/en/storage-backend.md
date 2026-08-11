@@ -132,18 +132,41 @@ Key decisions:
 - **Write atomicity**: PUT writes entirely to a staging temp file (computing MD5
   as the ETag while writing; SHA256 verification belongs to L2's signature
   decorator, not the backend), then `rename()`s to the final path once
-  verification passes (meta first, then data; the read side treats data as
-  authoritative); every failure path unlinks the temp file. Concurrent PUTs on
-  the same key use last-write-wins (consistent with S3 semantics); rename
+  verification passes; every failure path unlinks the temp file. Concurrent PUTs
+  on the same key use last-write-wins (consistent with S3 semantics); rename
   atomicity guarantees readers never see partial data.
+  - **Metadata commits in the same batch as data**: the metadata
+    (etag/content_type/user_meta/tier) is written into the data temp file's
+    extended attribute `user.lights3.meta` (same TSV as the sidecar) **before**
+    the rename, so **one rename commits data and metadata together** — the xattr
+    travels with the inode, and the etag you read can never describe another
+    inode's body. The sidecar file is still written (readable by external tools,
+    compatible with existing objects); the read side prefers the xattr and falls
+    back to the sidecar when absent. On filesystems without xattr support this
+    degrades to pure-sidecar semantics (commit order: data first, then sidecar).
+  - **Per-key lock over the commit section**: data and sidecar are still two
+    renames, so the commit section takes a striped async mutex (64 stripes,
+    shared by PUT and complete_multipart) to ensure the sidecar always describes
+    the write that finally landed. The lock covers only the commit section; body
+    reads/writes remain fully concurrent.
+  - **Durability**: the data tmp and sidecar tmp are `fdatasync`ed before the
+    rename, and the parent directory is `fsync`ed after it (directory entry on
+    disk). `LIGHTS3_FSYNC=0` turns this off (throughput-first deployments and
+    test fixtures); the default is on — a write that was already answered 200
+    not being lost on power failure is part of S3 semantics.
 
 ### 3.2 Implementation Notes per Operation
 
 - All posix calls execute after `co_await pool.schedule()`
   (see [concurrency.md](concurrency.md) §3).
-- **GET**: open + fstat + read sidecar; `FdBodyReader` performs `pread` through
-  the pool on every `read()` (with offset, naturally supporting Range); the fd is
-  held by RAII and closed automatically on cancellation/disconnect.
+- **GET**: open + fstat + read metadata (the fd's xattr, falling back to the
+  sidecar when absent). size/mtime always come from **fstat of the already-open
+  fd** — never a second stat by path: after a concurrent overwrite the path
+  points at a new inode, and a second stat would pair the meta with a body the
+  fd no longer describes (short reads/truncation). `FdBodyReader` performs
+  `pread` through the pool on every `read()` (with offset, naturally supporting
+  Range); the fd is held by RAII and closed automatically on
+  cancellation/disconnect.
 - **PUT**: loop `body.read(64KiB)` → in-pool write + incremental MD5 → rename.
   ETag = MD5 hex, matching S3 single-part upload.
 - **LIST**: recursive directory walk + prefix pruning (when the prefix contains
@@ -254,7 +277,7 @@ localfs disk layout); it can serve as its cloud side or stand alone.
    `StorageRegistry::register_backend("<type>", factory)`; the factory signature is
    `(const BackendConfig&, shared_ptr<ThreadPool>, MetricsScope)
    → shared_ptr<IStorageBackend>`.
-3. Backend-level metrics (optional, todo.md §3.1): the `MetricsScope` the factory
+3. Backend-level metrics (optional): the `MetricsScope` the factory
    receives already carries the `backend=<name>` base label; pass it through to
    the backend constructor and claim instances at construction time
    (`scope.counter/gauge/histogram/gauge_callback`, `with()` derives
@@ -266,7 +289,7 @@ localfs disk layout); it can serve as its cloud side or stand alone.
    **backend conformance test suite** (the same set of cases runs parameterized
    against all backends: CRUD, range, list pagination, multipart, concurrent PUT
    on the same key, abnormal keys).
-5. Generic key `io_threads` (optional, todo.md §3.2): configuring it on any
+5. Generic key `io_threads` (optional): configuring it on any
    backend gives it a dedicated IO thread pool rather than the shared global pool
    (the Registry injects it per the parameter before calling the factory; factory
    and backend are unaware) — an isolation lever for when a slow backend (cloud)

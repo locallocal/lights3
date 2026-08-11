@@ -3,11 +3,14 @@
 // PUT 经 <staging>/put/<uuid> 写入后 rename 原子落地。
 #pragma once
 
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <vector>
 
+#include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "core/background.h"
@@ -28,7 +31,8 @@ struct LocalFsOptions {
 class LocalFsBackend : public IStorageBackend {
 public:
     LocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
-                   std::shared_ptr<ThreadPool> pool, LocalFsOptions opt = {});
+                   std::shared_ptr<ThreadPool> pool, LocalFsOptions opt = {},
+                   MetricsScope metrics = {});
     ~LocalFsBackend() override;
     // 撤销周期清理定时器并等在途扫描（xlocalfs 覆写时必须链回本实现）
     Task<void> close() override;
@@ -90,6 +94,30 @@ protected:
     void require_bucket(std::string_view bucket) const;      // 不存在抛 NoSuchBucket
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
 
+    // ---- 数据面记账（docs/gaps.md §7）----
+    // 枚举值即指标数组下标；xlocalfs 覆写的数据面方法共用同一套实例（覆写不走
+    // 基类实现，各自在入口埋点，天然不双计）
+    enum class Op : size_t {
+        kPut, kGet, kHead, kDelete, kList, kCopy, kUploadPart, kCompleteMpu
+    };
+    static constexpr size_t kOpCount = 8;
+    void record_op(Op op, double secs, bool ok);
+    // 协程帧内 RAII：帧销毁（含异常展开）时记账，ok 默认 false——凡没走到成功
+    // 置位的退出路径（S3Error、errno 异常、body 断连）一律计入 error，不必在
+    // 每个 throw 前补代码
+    struct OpGuard {
+        LocalFsBackend* self;
+        Op op;
+        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+        bool ok = false;
+        ~OpGuard() {
+            self->record_op(op,
+                            std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                                          start).count(),
+                            ok);
+        }
+    };
+
     // 提交段的 per-key 串行化（striped，同 tiered 的 key_lock）：sidecar 与数据文件
     // 是两次 rename，不加锁时并发 PUT 同 key 可交错成"数据=A、sidecar(etag)=B"的
     // 撕裂对象。只护提交段，body 读写仍全并发；xlocalfs 继承同一把锁
@@ -101,11 +129,16 @@ protected:
     std::shared_ptr<ThreadPool> pool_;
 
 private:
+    void init_metrics(const MetricsScope& metrics);  // 构造期一次性领取（同 duostore 范式）
     void cleanup_stale_uploads();  // 清理超期（mpu_ttl）的 mpu 目录（启动 + 周期）
     void schedule_mpu_scan();      // 完成后重臂（同 duostore GC worker 形态）
     void shutdown_background();    // close/dtor 共用：撤定时器 + 等在途扫描
 
     LocalFsOptions opt_;
+    // op 维度全量预注册的实例（构造期领取，热路径只 inc/observe）；时延直方图
+    // 仅 put/get/list 三个下标非空，record_op 判空跳过
+    std::array<std::shared_ptr<MetricCounter>, kOpCount> m_ops_, m_op_errors_;
+    std::array<std::shared_ptr<MetricHistogram>, kOpCount> m_op_seconds_;
     std::vector<std::unique_ptr<AsyncSemaphore>> commit_locks_;
     BackgroundTaskGroup bg_{"localfs"};
     TimerQueue::Id mpu_timer_ = 0;  // 只在 bg_.if_open 内写；0 = 未 arm

@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "core/metrics.h"
+#include "core/timer.h"
+#include "s3/metrics.h"
 #include "unit/mini_test.h"
 
 using namespace lights3;
@@ -188,4 +190,69 @@ TEST(metrics_concurrent_smoke) {
     for (auto& t : ts) t.join();
     CHECK_EQ(c->value(), uint64_t(40000));
     CHECK_EQ(h->snapshot().count, uint64_t(40000));
+}
+
+// ---------- L2 请求指标的 §7 增量（docs/gaps.md §7）----------
+
+TEST(s3_metrics_renders_pool_wait_histogram) {
+    // concurrency.md §3.1 的专属池判据依赖该直方图；采集了必须能从 /-/metrics 读到
+    s3::Metrics m;
+    ThreadPool::Stats st;
+    st.wait_hist = {5, 3, 1, 0, 1};
+    st.wait_sum_us = 2'500'000;
+    auto out = m.render([st] { return st; });
+    CHECK(out.find("# TYPE lights3_pool_wait_seconds histogram") != std::string::npos);
+    CHECK(out.find("lights3_pool_wait_seconds_bucket{le=\"0.001\"} 5") != std::string::npos);
+    CHECK(out.find("lights3_pool_wait_seconds_bucket{le=\"+Inf\"} 10") != std::string::npos);
+    CHECK(out.find("lights3_pool_wait_seconds_sum 2.5") != std::string::npos);
+    CHECK(out.find("lights3_pool_wait_seconds_count 10") != std::string::npos);
+}
+
+TEST(s3_metrics_renders_admission_and_timer) {
+    s3::Metrics m;
+    auto out = m.render(
+        {}, [] { return s3::AdmissionStats{1024, 1000, 3}; },
+        [] {
+            TimerQueue::Stats st;
+            st.pending = 7;
+            st.due = 2;
+            st.fired = 100;
+            st.slow = 1;
+            st.exec_hist = {90, 8, 1, 1, 0};
+            st.exec_sum_us = 1'000'000;
+            st.lag_seconds = 3.5;
+            return st;
+        });
+    CHECK(out.find("lights3_admission_capacity 1024") != std::string::npos);
+    CHECK(out.find("lights3_admission_available 1000") != std::string::npos);
+    CHECK(out.find("lights3_admission_waiting 3") != std::string::npos);
+    CHECK(out.find("lights3_timer_pending 7") != std::string::npos);
+    CHECK(out.find("lights3_timer_lag_seconds 3.5") != std::string::npos);
+    CHECK(out.find("lights3_timer_slow_callbacks_total 1") != std::string::npos);
+    CHECK(out.find("lights3_timer_callback_seconds_bucket{le=\"+Inf\"} 100") !=
+          std::string::npos);
+}
+
+TEST(s3_metrics_bytes_and_per_bucket) {
+    s3::Metrics m;
+    m.record_bucket_request("photos");
+    m.add_bytes_in("photos", 1000);
+    m.add_bytes_out("photos", 2000);
+    m.add_bytes_out("", 50);  // service 级请求：只计全局
+    auto out = m.render({});
+    CHECK(out.find("lights3_bytes_total{direction=\"in\"} 1000") != std::string::npos);
+    CHECK(out.find("lights3_bytes_total{direction=\"out\"} 2050") != std::string::npos);
+    CHECK(out.find("lights3_bucket_requests_total{bucket=\"photos\"} 1") != std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"in\"} 1000") !=
+          std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"out\"} 2000") !=
+          std::string::npos);
+}
+
+TEST(s3_metrics_bucket_cardinality_capped) {
+    // 恶意/失控客户端扫 bucket 名不能把 /-/metrics 撑成 GiB 级标签基数
+    s3::Metrics m;
+    for (int i = 0; i < 600; ++i) m.record_bucket_request("bkt-" + std::to_string(i));
+    auto out = m.render({});
+    CHECK(out.find("lights3_bucket_requests_total{bucket=\"_other\"}") != std::string::npos);
 }

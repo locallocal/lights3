@@ -84,15 +84,15 @@ void ensure_registered() {
     static bool done = [] {
         StorageRegistry::register_backend(
             "localfs",
-            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope) {
+            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
                 auto [root, staging] = fs_backend_paths(cfg);
                 return std::make_shared<LocalFsBackend>(root, staging, std::move(pool),
-                                                        fs_backend_opts(cfg));
+                                                        fs_backend_opts(cfg), std::move(m));
             });
         StorageRegistry::register_backend(
             "xlocalfs",
             [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool,
-               MetricsScope) -> std::shared_ptr<IStorageBackend> {
+               MetricsScope m) -> std::shared_ptr<IStorageBackend> {
                 auto [root, staging] = fs_backend_paths(cfg);
                 UringOptions uo;
                 if (cfg.params.count("queue_depth"))
@@ -102,7 +102,7 @@ void ensure_registered() {
                     uo.sqpoll_idle_ms = parse_duration_sec(cfg.params.at("sqpoll_idle")) * 1000;
                 try {
                     return std::make_shared<XLocalFsBackend>(root, staging, pool, uo,
-                                                             fs_backend_opts(cfg));
+                                                             fs_backend_opts(cfg), m);
                 } catch (const std::exception& e) {
                     // io_uring 不可用（老内核、容器 seccomp 挡掉 io_uring_setup、
                     // memlock 配额不足）此前直接把进程带崩（docs/gaps.md §6.3）。
@@ -111,8 +111,13 @@ void ensure_registered() {
                     LOG_WARN("xlocalfs backend '{}': io_uring unavailable ({}); falling back "
                              "to the localfs data path (same on-disk layout, synchronous IO)",
                              cfg.name, e.what());
+                    // 告警只在启动刷一行日志，滚动后就没了踪迹；常驻 gauge 让
+                    // "以为在跑异步 IO 实际是同步回落"在监控面上一直可见
+                    m.gauge("lights3_xlocalfs_uring_fallback",
+                            "io_uring unavailable, fell back to localfs backend")
+                        ->set(1);
                     return std::make_shared<LocalFsBackend>(root, staging, std::move(pool),
-                                                            fs_backend_opts(cfg));
+                                                            fs_backend_opts(cfg), std::move(m));
                 }
             });
         StorageRegistry::register_backend(
@@ -223,8 +228,11 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
                 // 且持有池的 shared_ptr，漏登记则回滚后线程永不 join——正是本
                 // 守卫要防的场景（docs/gaps.md §3.9）
                 rollback.scopes.push_back(cfg.name);
+                // 池指标与后端自身指标共用同一 scope（注册表 get-or-create 幂等，
+                // 同 label 重复构造无害）
+                MetricsScope scope(metrics, {{"backend", cfg.name}});
                 out[cfg.name] = TieredBackend::from_config(
-                    cfg, out, backend_pool(cfg, pool, MetricsScope(metrics, {{"backend", cfg.name}})));
+                    cfg, out, backend_pool(cfg, pool, scope), scope);
                 it = deferred.erase(it);
                 progress = true;
             } else {

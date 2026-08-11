@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <stdexcept>
@@ -153,10 +154,12 @@ private:
 
 TieredBackend::TieredBackend(std::shared_ptr<LocalFsBackend> local,
                              std::shared_ptr<IStorageBackend> cloud,
-                             std::shared_ptr<ThreadPool> pool, TieredConfig cfg)
+                             std::shared_ptr<ThreadPool> pool, TieredConfig cfg,
+                             MetricsScope metrics)
     : local_(std::move(local)), cloud_(std::move(cloud)), pool_(std::move(pool)), cfg_(cfg),
       tier_dir_(local_->staging() / "tier"), gc_dir_(tier_dir_ / "gc"),
       transfers_(std::max(1, cfg.max_concurrent_transfers), &pool_exec_) {
+    init_metrics(metrics);
     fs::create_directories(gc_dir_);
     key_locks_.reserve(kLockStripes);
     for (size_t i = 0; i < kLockStripes; ++i)
@@ -179,6 +182,59 @@ TieredBackend::TieredBackend(std::shared_ptr<LocalFsBackend> local,
     schedule_reconcile();
 }
 
+void TieredBackend::init_metrics(const MetricsScope& metrics) {
+    // op 维度全量预注册（同 duostore 的 reason 分桶理由）：缺失的序列在 Prometheus
+    // 里读作"没数据"而非"为 0"。只挂 tiered 有分层逻辑的四个 op——纯委托路径
+    // 加一层同形计数只会与 local_ 的 lights3_localfs_* 重复
+    static constexpr std::array<const char*, kOpCount> kOpNames = {"get", "put", "delete",
+                                                                   "list"};
+    for (size_t i = 0; i < kOpCount; ++i) {
+        m_ops_[i] = metrics.counter("lights3_tiered_ops_total",
+                                    "Tier-aware operations finished (success and failure)",
+                                    {{"op", kOpNames[i]}});
+        m_op_errors_[i] = metrics.counter(
+            "lights3_tiered_op_errors_total",
+            "Tier-aware operations that exited via an error (any exception, incl. client 4xx)",
+            {{"op", kOpNames[i]}});
+    }
+    // GET 来源分叉：cloud 占比升高 = 缓存命中率恶化（判冷阈值过激或容量不足），
+    // 是 tiered 最核心的健康信号
+    const char* src_help =
+        "GET data source: served from local/cached data vs streamed through from the cloud";
+    m_get_local_ = metrics.counter("lights3_tiered_get_source_total", src_help,
+                                   {{"source", "local"}});
+    m_get_cloud_ = metrics.counter("lights3_tiered_get_source_total", src_help,
+                                   {{"source", "cloud"}});
+    m_demoted_ = metrics.counter("lights3_tiered_demoted_objects_total",
+                                 "Objects demoted to the cloud tier (stub committed)");
+    m_promoted_ = metrics.counter(
+        "lights3_tiered_promoted_objects_total",
+        "Objects rehydrated into the local cache (explicit promote + GET tee fill)");
+    m_scan_duration_ = metrics.histogram("lights3_tiered_scan_seconds",
+                                         "Wall time of a completed scan round",
+                                         {0.1, 1, 5, 30, 120, 600});
+    // GC 可观测性取舍：runs/removed/failed 是事件计数（单调，counter）；deferred
+    // 是"本轮看到多少条还在退避"——同一条目每轮重复出现，累计会虚高，按 duostore
+    // 的 skipped 类先例用 gauge 存本轮观测值。resolved 不单列：removed 之外的
+    // resolved 多为条目作废/云端本就没有，运维上没有独立动作与之对应
+    m_gc_runs_ = metrics.counter("lights3_tiered_gc_runs_total",
+                                 "Completed GC rounds over the orphan-copy queue");
+    m_gc_removed_ = metrics.counter("lights3_tiered_gc_removed_cloud_total",
+                                    "Orphan cloud copies actually deleted by GC");
+    m_gc_failed_ = metrics.counter(
+        "lights3_tiered_gc_failed_total",
+        "GC delete attempts that failed and were re-queued with exponential backoff");
+    m_gc_deferred_ = metrics.gauge(
+        "lights3_tiered_gc_deferred",
+        "Queue entries still in backoff as of the last GC round (not yet retried)");
+}
+
+void TieredBackend::record_op(Op op, bool ok) {
+    size_t i = size_t(op);
+    m_ops_[i]->inc();
+    if (!ok) m_op_errors_[i]->inc();
+}
+
 TieredBackend::~TieredBackend() {
     bg_.begin_close();
     // cancel 在组锁外（回调内要拿组锁，见 close()）；阻塞等在途回调返回后，
@@ -191,7 +247,7 @@ TieredBackend::~TieredBackend() {
 
 std::shared_ptr<TieredBackend> TieredBackend::from_config(
     const BackendConfig& cfg, const std::map<std::string, std::shared_ptr<IStorageBackend>>& built,
-    std::shared_ptr<ThreadPool> pool) {
+    std::shared_ptr<ThreadPool> pool, MetricsScope metrics) {
     auto param = [&](const char* k) -> std::string {
         auto it = cfg.params.find(k);
         return it == cfg.params.end() ? std::string{} : it->second;
@@ -249,7 +305,8 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
                                  "': gc_retry_base must be >= 1s and <= gc_retry_cap");
     if (tc.space_low_watermark > tc.space_high_watermark)
         throw std::runtime_error("tiered backend '" + cfg.name + "': low watermark > high");
-    return std::make_shared<TieredBackend>(std::move(local), std::move(cloud), std::move(pool), tc);
+    return std::make_shared<TieredBackend>(std::move(local), std::move(cloud), std::move(pool),
+                                           tc, std::move(metrics));
 }
 
 // ---------- bucket：委托 local ----------
@@ -272,6 +329,7 @@ Task<std::vector<BucketInfo>> TieredBackend::list_buckets() {
 
 Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::string_view key,
                                              std::optional<ByteRange> range) {
+    OpGuard g{this, Op::kGet};
     // tiered 自己拼本地路径（object_data_path），故不能只依赖 local_ 的入口校验
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
@@ -291,7 +349,11 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
 
         if (!have_meta || t.tier != Tier::kRemote) {
             try {
-                co_return co_await local_->get_object(bucket, key, range);
+                auto os = co_await local_->get_object(bucket, key, range);
+                // 来源计数在成功之后：StubRace 重试改走云端时不留半次 local 账
+                m_get_local_->inc();
+                g.ok = true;
+                co_return os;
             } catch (const fsutil::StubRace&) {
                 if (attempt >= 2) throw;
                 continue;  // open 与 stub 化竞态：重读 tier 后改走云端
@@ -300,6 +362,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
 
         // remote：云端流透传（docs/tiered-storage.md §6.2/§6.3），对外 meta 恒为本地原始值
         ObjectStream cs = co_await cloud_->get_object(bucket, key, range);
+        m_get_cloud_->inc();
         ObjectStream out;
         out.meta = m;
         out.range = cs.range;
@@ -307,6 +370,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
             out.body = std::move(cs.body);  // Range 不做部分缓存（§6.3）
             if (cfg_.cache_fill_on_range)
                 bg_.spawn(promote_quiet(std::string(bucket), std::string(key)));
+            g.ok = true;
             co_return out;
         }
         std::string ikey = make_ikey(bucket, key);
@@ -326,6 +390,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
         } else {
             out.body = std::move(cs.body);  // 空间不足或已有回填在途：纯透传
         }
+        g.ok = true;
         co_return out;
     }
 }
@@ -333,6 +398,7 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
 Task<PutResult> TieredBackend::put_object(std::string_view bucket, std::string_view key,
                                           ObjectMeta meta, http::BodyReader& body,
                                           PutCondition cond) {
+    OpGuard g{this, Op::kPut};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
@@ -350,6 +416,7 @@ Task<PutResult> TieredBackend::put_object(std::string_view bucket, std::string_v
     maybe_kick_quota_scan();
     // write-back：新数据只落本地，tier 回到 local；旧云副本成孤儿（§7.1）
     if (prior.tier != Tier::kLocal) enqueue_gc(bucket, key, prior.remote_etag);
+    g.ok = true;
     co_return r;
 }
 
@@ -362,6 +429,7 @@ Task<ObjectMeta> TieredBackend::head_object(std::string_view bucket, std::string
 }
 
 Task<void> TieredBackend::delete_object(std::string_view bucket, std::string_view key) {
+    OpGuard g{this, Op::kDelete};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     fsutil::reject_reserved_key(key);
@@ -374,12 +442,16 @@ Task<void> TieredBackend::delete_object(std::string_view bucket, std::string_vie
     erase_atime(bucket, key);
     // 响应不等云端：云副本入 GC 异步删除（§7.2）
     if (prior.tier != Tier::kLocal) enqueue_gc(bucket, key, prior.remote_etag);
+    g.ok = true;
     co_return;
 }
 
 Task<ListResult> TieredBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
+    OpGuard g{this, Op::kList};
     validate_bucket_name(bucket, kAllowReserved);
-    co_return co_await local_->list_objects(bucket, opt);  // stub 即 0 长度文件，遍历原样复用
+    auto r = co_await local_->list_objects(bucket, opt);  // stub 即 0 长度文件，遍历原样复用
+    g.ok = true;
+    co_return r;
 }
 
 // ---------- multipart：委托 local ----------
@@ -509,6 +581,9 @@ Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
     if (t1.tier == Tier::kRemote) co_return;  // 已由他人 stub 化
     fsutil::commit_stub(path, m1, TierInfo{Tier::kRemote, remote_etag, remote_at},
                         local_->staging() / "put");
+    // 只在 stub 真正落地时计数；上面的崩溃恢复补 stub 不算——那次下沉在崩溃前
+    // 已经计过一回，重启补账会虚高
+    m_demoted_->inc();
     co_return;
 }
 
@@ -587,6 +662,9 @@ Task<void> TieredBackend::commit_cache_fill(std::string bucket, std::string key,
         co_return;
     fsutil::commit_cached(path, tmp, m1, TierInfo{Tier::kCached, t1.remote_etag, t1.remote_at},
                           local_->staging() / "put");
+    // 计数放在提交点而非 promote_object 出口：这里是"数据真的回到本地"的唯一
+    // 汇合处（显式回迁与 GET Tee 回填共用），复核失败丢弃 tmp 的路径自然不计
+    m_promoted_->inc();
     co_return;
 }
 
@@ -594,6 +672,9 @@ Task<void> TieredBackend::commit_cache_fill(std::string bucket, std::string key,
 
 Task<void> TieredBackend::scan_once() {
     co_await pool_->schedule();
+    // 只测完整走完的轮次（同 duostore gc_round_seconds）：中途抛出的轮次时长
+    // 没有代表性，且失败已有 demote_quiet 的告警可循
+    const auto round_start = std::chrono::steady_clock::now();
     struct Evict {
         std::string bucket, key;
         int rank;  // cached=0（stub 化零成本）优先于 local=1（docs/tiered-storage.md §5.1）
@@ -730,6 +811,8 @@ Task<void> TieredBackend::scan_once() {
     }
 
     save_atime_snapshot();
+    m_scan_duration_->observe(
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - round_start).count());
     co_return;
 }
 
@@ -849,6 +932,12 @@ Task<TierGcStats> TieredBackend::run_gc_once() {
                      key, e.message, delay, attempts + 1);
         }
     }
+    // 事件量按本轮统计增量入账；deferred 是"本轮还剩多少条在退避"的观测值，
+    // 覆盖式 set（同一条目每轮重现，累计会虚高）
+    m_gc_runs_->inc();
+    m_gc_removed_->inc(st.removed_cloud);
+    m_gc_failed_->inc(st.failed);
+    m_gc_deferred_->set(int64_t(st.deferred));
     co_return st;
 }
 

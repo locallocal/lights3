@@ -170,6 +170,13 @@ int main(int argc, char** argv) {
         auto pool_exec = std::make_shared<ThreadPoolExecutor>(*pool);
         auto inflight = std::make_shared<AsyncSemaphore>(cfg.runtime.max_inflight_requests,
                                                          pool_exec.get());
+        // 准入闸门与定时器线程的可观测性（docs/gaps.md §7）：压测时"卡在准入"
+        // 还是"卡在池"、"定时器被慢回调堵了多久"都从 /-/metrics 直接读
+        service->set_admission_stats(
+            [inflight, cap = cfg.runtime.max_inflight_requests]() -> s3::AdmissionStats {
+                return {cap, inflight->available(), inflight->waiting()};
+            });
+        service->set_timer_stats([] { return TimerQueue::instance().stats(); });
         // 进程关停广播（docs/concurrency.md §5 的第三个取消源）：run() 返回后触发，
         // 在途请求从最近的可取消挂起点收敛，不必干等各自的 request_timeout
         auto shutdown_src = std::make_shared<CancelSource>();

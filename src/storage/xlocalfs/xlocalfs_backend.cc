@@ -76,8 +76,10 @@ private:
 
 XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging,
                                  std::shared_ptr<ThreadPool> pool, UringOptions uring_opt,
-                                 LocalFsOptions fs_opt)
-    : LocalFsBackend(std::move(root), std::move(staging), pool, fs_opt),
+                                 LocalFsOptions fs_opt, MetricsScope metrics)
+    // 指标透传基类：xlocalfs 与 localfs 的盘上语义相同，共用 lights3_localfs_*
+    // 名字空间即可按 backend 标签区分实例，不必再造一套同形指标
+    : LocalFsBackend(std::move(root), std::move(staging), pool, fs_opt, std::move(metrics)),
       uring_(std::make_shared<UringEngine>(std::move(pool), uring_opt)) {}
 
 // 提交段的数据落盘（docs/gaps.md §6.3）：此前这里是同步 fdatasync——把池线程钉在
@@ -127,6 +129,8 @@ Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, int fd, uint64_
 Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
                                             ObjectMeta meta, http::BodyReader& body,
                                             PutCondition cond) {
+    // 覆写不经基类实现，记账入口在此重埋（同一套基类实例，不会双计）
+    OpGuard g{this, Op::kPut};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
@@ -163,11 +167,14 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     fsutil::check_put_condition(object_path(bucket, key), cond, key);
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key,
                        /*prepared=*/true);
+    g.ok = true;
     co_return PutResult{meta.etag};
 }
 
 Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::string_view key,
                                                std::optional<ByteRange> range) {
+    // 同 localfs：时延止于流句柄就绪，不含 body 传输
+    OpGuard g{this, Op::kGet};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
@@ -212,12 +219,14 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
         ::close(fd);
         throw;
     }
+    g.ok = true;
     co_return out;
 }
 
 Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::string_view key,
                                              std::string_view upload_id, int part_no,
                                              http::BodyReader& body) {
+    OpGuard g{this, Op::kUploadPart};
     validate_part_number(part_no);
     co_await pool_->schedule();
     auto up = require_upload(staging_, bucket, key, upload_id,
@@ -253,6 +262,7 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     tmp.committed = true;
     fsutil::fsync_dir(up.dir);
     write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
+    g.ok = true;
     co_return PutResult{etag};
 }
 
@@ -260,6 +270,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
                                                     std::string_view key,
                                                     std::string_view upload_id,
                                                     std::span<const PartInfo> parts) {
+    OpGuard g{this, Op::kCompleteMpu};
     validate_part_order(parts);
     co_await pool_->schedule();
     auto up = require_upload(staging_, bucket, key, upload_id,
@@ -323,6 +334,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
 
     std::error_code ec;
     fs::remove_all(up.dir, ec);
+    g.ok = true;
     co_return PutResult{meta.etag};
 }
 

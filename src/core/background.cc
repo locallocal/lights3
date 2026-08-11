@@ -1,5 +1,6 @@
 #include "core/background.h"
 
+#include <chrono>
 #include <utility>
 
 #include "core/log.h"
@@ -77,8 +78,12 @@ void BackgroundTaskGroup::begin_close() {
 }
 
 void BackgroundTaskGroup::wait_idle() {
+    // 关停挂死排查（docs/gaps.md §7）：语义仍是无限等（强杀在途任务只会换来
+    // UAF），但每 10 秒把"卡在哪个组、还剩几个任务"写进日志——此前是裸 cv.wait，
+    // 停机挂死时 gdb 之外零线索
     std::unique_lock lk(m_);
-    cv_.wait(lk, [&] { return count_ == 0; });
+    while (!cv_.wait_for(lk, std::chrono::seconds(10), [&] { return count_ == 0; }))
+        LOG_WARN("{}: wait_idle still blocked, {} background task(s) in flight", name_, count_);
 }
 
 bool BackgroundTaskGroup::closing() const {

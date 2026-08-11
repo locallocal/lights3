@@ -73,6 +73,7 @@ ThreadPool::Stats ThreadPool::stats() const {
     st.completed = completed_.load(std::memory_order_relaxed);
     for (size_t i = 0; i < kWaitBuckets; ++i)
         st.wait_hist[i] = wait_hist_[i].load(std::memory_order_relaxed);
+    st.wait_sum_us = wait_sum_us_.load(std::memory_order_relaxed);
     return st;
 }
 
@@ -116,8 +117,12 @@ void ThreadPool::worker_loop() {
             }
         }
         // 计时与记账都在锁外（§4：wait_hist_ 曾在持锁段内取时间）
-        wait_hist_[wait_bucket(Clock::now() - item.enqueued)].fetch_add(
-            1, std::memory_order_relaxed);
+        auto waited = Clock::now() - item.enqueued;
+        wait_hist_[wait_bucket(waited)].fetch_add(1, std::memory_order_relaxed);
+        wait_sum_us_.fetch_add(
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(waited).count()),
+            std::memory_order_relaxed);
         // 异常防线：任务异常逃逸线程函数即 std::terminate（协程续体自身全捕获，
         // 这里兜的是裸 post 的阻塞任务）
         try {

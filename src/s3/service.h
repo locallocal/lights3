@@ -54,6 +54,16 @@ public:
     // /-/metrics 的线程池指标来源（可选，main 装配时注入）
     void set_pool_stats(std::function<ThreadPool::Stats()> fn) { pool_stats_ = std::move(fn); }
 
+    // 入口限流准入快照（docs/gaps.md §7，可选，main 装配时注入）
+    void set_admission_stats(std::function<AdmissionStats()> fn) {
+        admission_stats_ = std::move(fn);
+    }
+
+    // 定时器线程健康度（docs/gaps.md §7，可选）
+    void set_timer_stats(std::function<TimerQueue::Stats()> fn) {
+        timer_stats_ = std::move(fn);
+    }
+
     // 后端级指标注册表（docs/todo.md §3.1，可选）：渲染追加在 L2 请求指标之后
     void set_backend_metrics(std::shared_ptr<MetricsRegistry> m) {
         backend_metrics_ = std::move(m);
@@ -161,6 +171,8 @@ private:
     std::string base_domain_;
     Metrics metrics_;
     std::function<ThreadPool::Stats()> pool_stats_;
+    std::function<AdmissionStats()> admission_stats_;
+    std::function<TimerQueue::Stats()> timer_stats_;
     std::chrono::milliseconds request_timeout_{0};
     uint64_t min_part_size_ = storage::kMinPartSize;
     std::shared_ptr<MetricsRegistry> backend_metrics_;

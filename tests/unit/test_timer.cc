@@ -195,3 +195,46 @@ TEST(cancel_waits_for_due_but_unstarted_callback) {
     CHECK(!q.cancel(second));  // 返回 false = 已触发
     CHECK(second_ran.load());  // 且返回时确已执行完毕
 }
+
+TEST(timer_stats_track_fired_and_pending) {
+    // 定时器可观测性（docs/gaps.md §7）：pending/fired/耗时直方图有出口
+    TimerQueue q;
+    std::atomic<int> fired{0};
+    q.add(std::chrono::hours(1), [] {});  // 长挂：恒 pending
+    q.add(std::chrono::milliseconds(1), [&] { fired.fetch_add(1); });
+    for (int i = 0; i < 200 && fired.load() == 0; ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK_EQ(fired.load(), 1);
+    // 回调执行完成与记账之间无同步点，短暂轮询
+    TimerQueue::Stats st;
+    for (int i = 0; i < 200; ++i) {
+        st = q.stats();
+        if (st.fired == 1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK_EQ(st.fired, uint64_t(1));
+    CHECK_EQ(st.pending, size_t(1));
+    uint64_t total = 0;
+    for (auto v : st.exec_hist) total += v;
+    CHECK_EQ(total, uint64_t(1));
+    CHECK_EQ(st.slow, uint64_t(0));
+}
+
+TEST(timer_slow_callback_counted) {
+    TimerQueue q;
+    std::atomic<bool> done{false};
+    q.add(std::chrono::milliseconds(1), [&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+        done.store(true);
+    });
+    for (int i = 0; i < 600 && !done.load(); ++i)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(done.load());
+    TimerQueue::Stats st;
+    for (int i = 0; i < 200; ++i) {
+        st = q.stats();
+        if (st.slow == 1) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK_EQ(st.slow, uint64_t(1));
+}

@@ -31,6 +31,13 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
     bool wake = false;
     {
         std::lock_guard lk(m_);
+        // 停机后拒收（docs/gaps.md §7）：此前返回"有效但永不触发"的 id，析构期
+        // 竞态里排查者会盯着一个永远不会响的定时器。0 与 cancel(0) 的 no-op
+        // 约定闭环，调用方无需感知
+        if (stopping_) {
+            LOG_WARN("TimerQueue: add() after shutdown, timer dropped");
+            return 0;
+        }
         id = ++next_id_;
         auto deadline = Clock::now() + delay;
         items_.emplace(std::make_pair(deadline, id), std::move(fn));
@@ -45,9 +52,41 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
 
 bool TimerQueue::pending_locked(Id id) const {
     if (running_id_ == id) return true;
-    for (auto& [qid, fn] : due_)
-        if (qid == id) return true;
+    for (auto& item : due_)
+        if (item.id == id) return true;
     return false;
+}
+
+size_t TimerQueue::exec_bucket(Clock::duration d) {
+    using namespace std::chrono;
+    if (d < 10ms) return 0;
+    if (d < 100ms) return 1;
+    if (d < 1s) return 2;
+    if (d < 10s) return 3;
+    return 4;
+}
+
+TimerQueue::Stats TimerQueue::stats() const {
+    Stats st;
+    {
+        std::lock_guard lk(m_);
+        st.pending = items_.size();
+        st.due = due_.size();
+        // 队头滞后：正在执行的回调优先（它到期最早），否则看待执行队头
+        Clock::time_point head{};
+        if (running_id_ != 0) head = running_deadline_;
+        else if (!due_.empty()) head = due_.front().deadline;
+        if (head != Clock::time_point{}) {
+            auto lag = Clock::now() - head;
+            if (lag.count() > 0) st.lag_seconds = std::chrono::duration<double>(lag).count();
+        }
+    }
+    st.fired = fired_.load(std::memory_order_relaxed);
+    st.slow = slow_.load(std::memory_order_relaxed);
+    st.exec_sum_us = exec_sum_us_.load(std::memory_order_relaxed);
+    for (size_t i = 0; i < kExecBuckets; ++i)
+        st.exec_hist[i] = exec_hist_[i].load(std::memory_order_relaxed);
+    return st;
 }
 
 bool TimerQueue::cancel(Id id) {
@@ -85,7 +124,7 @@ void TimerQueue::loop() {
             continue;
         }
         Id id = first->first.second;
-        due_.emplace_back(id, std::move(first->second));
+        due_.push_back({id, deadline, std::move(first->second)});
         deadlines_.erase(id);
         items_.erase(first);
         fire_cv_.notify_one();
@@ -100,20 +139,34 @@ void TimerQueue::fire_loop() {
             if (stopping_) return;
             continue;
         }
-        auto [id, fn] = std::move(due_.front());
+        DueItem item = std::move(due_.front());
         due_.pop_front();
-        running_id_ = id;
+        running_id_ = item.id;
+        running_deadline_ = item.deadline;
         lk.unlock();
         // 锁外执行；期间的 cancel(id) 阻塞至此处返回（语义仍为 false"已触发"）。
         // 异常防线：回调抛出若逃逸线程函数即 terminate；且必须保证 running_id_
         // 复位 + notify 在任何路径都执行，否则 cancel(该 id) 永久阻塞——而 cancel
         // 正是各后端关停路径的第一步
+        auto t0 = Clock::now();
         try {
-            fn();
+            item.fn();
         } catch (const std::exception& e) {
             LOG_ERROR("TimerQueue: callback threw: {}", e.what());
         } catch (...) {
             LOG_ERROR("TimerQueue: callback threw unknown exception");
+        }
+        // 耗时记账（docs/gaps.md §7）：回调串行，慢回调直接推迟后续定时器——
+        // 超过 1s 除进直方图外单独点名，"定时器被堵了 3 秒"从此有日志可查
+        auto elapsed = Clock::now() - t0;
+        auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+        exec_hist_[exec_bucket(elapsed)].fetch_add(1, std::memory_order_relaxed);
+        exec_sum_us_.fetch_add(static_cast<uint64_t>(us), std::memory_order_relaxed);
+        fired_.fetch_add(1, std::memory_order_relaxed);
+        if (elapsed >= std::chrono::seconds(1)) {
+            slow_.fetch_add(1, std::memory_order_relaxed);
+            LOG_WARN("TimerQueue: callback took {:.3f}s, delaying subsequent timers",
+                     std::chrono::duration<double>(elapsed).count());
         }
         lk.lock();
         running_id_ = 0;

@@ -13,7 +13,7 @@ class XLocalFsBackend final : public LocalFsBackend {
 public:
     XLocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
                     std::shared_ptr<ThreadPool> pool, UringOptions uring_opt = {},
-                    LocalFsOptions fs_opt = {});
+                    LocalFsOptions fs_opt = {}, MetricsScope metrics = {});
 
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;

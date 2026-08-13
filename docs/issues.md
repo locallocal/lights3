@@ -14,7 +14,7 @@
 | build-tsan | ✅ | ✅ 11/11 | 全绿，无数据竞争报告 |
 | build-sqlite / build-redis / build-rados | ✅ | ✅ | 全绿 |
 | build-tikv | ✅ | ✅ 11/11 | 对 tiup playground 真实集群通过 |
-| **build-asan** | ❌ **unit_tests 崩溃** | — | 见 T1，ASan 报 stack-use-after-scope 后 abort |
+| **build-asan** | ✅（T1 修复后 307/307） | — | 原 unit_tests stack-use-after-scope 崩溃已修，见 T1 |
 
 > mint 兼容性集（`tests/e2e/run_mint.sh`）因本机无 docker 而 SKIP，属预期。
 
@@ -22,7 +22,7 @@
 
 ## 一、确证缺陷（已逐行核实）
 
-### 【高 · 已由 ASan 复现】T1. 单测 `duostore_parse_pack_owner_forms` 悬垂 string_view，ASan 构建崩溃
+### ~~【高 · 已由 ASan 复现】T1. 单测 `duostore_parse_pack_owner_forms` 悬垂 string_view，ASan 构建崩溃~~ ✅ 已修复（2026-08-13）
 - 位置：`tests/unit/test_duostore.cc:201-216`
 - 根因：`codec::parse_pack_owner(std::string_view)` 返回的 `PackOwner` 内 `bucket/key/upload_id`
   是指向**入参字节**的 `string_view`（`src/storage/duostore/codec.h:88-92` 注释明确"指向输入串"）。
@@ -30,8 +30,9 @@
   再读 `obj.bucket/obj.key` 即访问已销毁栈对象。
 - 后果：`build-asan` 下 `unit_tests` 在此处 `stack-use-after-scope` → abort，**其后所有用例不再执行**，
   ASan 回归门形同虚设。普通/ tsan 构建因不检测该类错误而"碰巧通过"。
-- 修法：先把每个输入串绑到具名局部变量（生命周期覆盖到断言结束），再调用 `parse_pack_owner`。
-- 严重度：**高**（阻断整个 ASan 测试矩阵）
+- 修复：三处会后读 `string_view` 成员的输入串（`obj/part/legacy`）已绑到具名局部变量
+  （`obj_in/part_in/legacy_in`），生命周期覆盖到断言结束。末尾几个只读 `.kind`（值成员）
+  的临时串调用不构成悬垂读取，保持原样。验证：`build-asan` 下 `unit_tests` 307/307 通过。
 
 ### 【高】T2. DeleteObjects 批量删除绕过 per-credential prefix 策略（破坏性越权）
 - 位置：`src/s3/service.cc:319-333`（授权判定）+ `src/s3/handlers/objects.cc:328-407`（handler）

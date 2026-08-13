@@ -437,8 +437,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
      "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth&) {
-         return s.list_multipart_uploads(req, std::move(b));
+        const RequestAuth& auth) {
+         return s.list_multipart_uploads(req, std::move(b), auth);
      }},
     // ListObjectsV2 与 V1 兼容同入口。fetch-owner 允许但忽略：V2 缺省本就不回
     // Owner，忽略等价于 =false，不属于"静默误答"
@@ -447,8 +447,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
      "encoding-type fetch-owner",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth&) {
-         return s.list_objects(req, std::move(b));
+        const RequestAuth& auth) {
+         return s.list_objects(req, std::move(b), auth);
      }},
     {"PUT", Scope::Bucket, "", "",
      Action::Write,
@@ -471,8 +471,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
     {"POST", Scope::Bucket, "delete", "",
      Action::Delete,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth&) {
-         return s.delete_objects(req, std::move(b));
+        const RequestAuth& auth) {
+         return s.delete_objects(req, std::move(b), auth);
      }},
 
     // object 级：multipart

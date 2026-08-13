@@ -298,8 +298,25 @@ bool CredentialPolicy::allows(std::string_view bucket, std::string_view key,
     if (!allows_bucket(bucket)) return false;
     // key 为空 = 本次判定与具体对象无关（建桶、列桶等），不校验前缀
     if (prefixes.empty() || key.empty()) return true;
+    return allows_key(key);
+}
+
+bool CredentialPolicy::allows_key(std::string_view key) const {
+    if (prefixes.empty()) return true;
     for (auto& pre : prefixes)
         if (key.size() >= pre.size() && key.compare(0, pre.size(), pre) == 0) return true;
+    return false;
+}
+
+bool CredentialPolicy::prefix_may_contain(std::string_view group_prefix) const {
+    if (prefixes.empty()) return true;
+    // 分组本身在白名单前缀内（"logs/2024/" vs 白名单 "logs/"），或白名单前缀
+    // 在分组更深处（分组 "logs/" vs 白名单 "logs/app1/"）——后者的分组虽然也
+    // 含白名单外的 key，但分组名只由白名单内也存在的层级结构导出，不构成泄露
+    for (auto& pre : prefixes) {
+        size_t n = std::min(pre.size(), group_prefix.size());
+        if (pre.compare(0, n, group_prefix.data(), n) == 0) return true;
+    }
     return false;
 }
 

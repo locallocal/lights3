@@ -514,8 +514,14 @@ check "POST 未知字段被拒" "400" \
        "$BASE/-/admin/credentials")"
 
 # policy 的动作/前缀粒度与 ListBuckets 过滤（docs/gaps.md §5.10）
+# 先用 root 建一个白名单外的真实桶：否则白名单外无任何真实桶，过滤即便整体
+# 失效该断言也恒通过（空断言）
+s3curl -o /dev/null -X PUT "$BASE/otherbkt"
+POL_LIST=$(polcurl "$BASE/")
 check "ListBuckets 按 policy 过滤" "0" \
-    "$(polcurl "$BASE/" | grep -q '<Name>otherbkt</Name>' && echo 1 || echo 0)"
+    "$(echo "$POL_LIST" | grep -q '<Name>otherbkt</Name>' && echo 1 || echo 0)"
+check "ListBuckets 白名单内可见" "0" \
+    "$(echo "$POL_LIST" | grep -q '<Name>credbkt</Name>' && echo 0 || echo 1)"
 BK_OUT=$(s3curl -X POST \
     --data-binary '{"policy":{"buckets":["credbkt"],"actions":["read","write"],"prefixes":["keep/"]}}' \
     "$BASE/-/admin/credentials")
@@ -530,6 +536,37 @@ check "action 不含 delete 时删除被拒" "403" \
     "$(bkcurl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/credbkt/keep/a")"
 check "前缀外写入被拒" "403" \
     "$(bkcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'v' "$BASE/credbkt/other/a")"
+
+# ListObjects 按 policy prefix 过滤：白名单外的真实对象不得被不带 prefix 的列举泄露
+s3curl -o /dev/null -X PUT --data-binary 'v' "$BASE/credbkt/other/x"
+PLIST=$(bkcurl "$BASE/credbkt")
+check "ListObjects 不含前缀外 key" "0" \
+    "$(echo "$PLIST" | grep -q '<Key>other/x</Key>' && echo 1 || echo 0)"
+check "ListObjects 含前缀内 key" "0" \
+    "$(echo "$PLIST" | grep -q '<Key>keep/a</Key>' && echo 0 || echo 1)"
+
+# DeleteObjects 逐 key 走 policy：批删接口不得绕过 prefix 白名单（与单删判定一致）
+DELP_OUT=$(s3curl -X POST \
+    --data-binary '{"policy":{"buckets":["credbkt"],"actions":["read","delete"],"prefixes":["keep/"]}}' \
+    "$BASE/-/admin/credentials")
+DELP_AK=$(echo "$DELP_OUT" | json_field access_key)
+DELP_SK=$(echo "$DELP_OUT" | json_field secret_key)
+delpcurl() {
+    curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$DELP_AK:$DELP_SK" "$@"
+}
+BATCH_XML='<Delete><Object><Key>other/x</Key></Object><Object><Key>keep/a</Key></Object></Delete>'
+BATCH_MD5=$(printf '%s' "$BATCH_XML" | openssl dgst -md5 -binary | openssl base64)
+BATCH_OUT=$(delpcurl -X POST -H "Content-MD5: $BATCH_MD5" --data-binary "$BATCH_XML" \
+    "$BASE/credbkt?delete")
+check "批删前缀外 key 返回 AccessDenied" "0" \
+    "$(echo "$BATCH_OUT" | grep -q '<Error><Key>other/x</Key><Code>AccessDenied</Code>' && echo 0 || echo 1)"
+check "批删前缀内 key 正常删除" "0" \
+    "$(echo "$BATCH_OUT" | grep -q '<Deleted><Key>keep/a</Key>' && echo 0 || echo 1)"
+check "前缀外对象未被批删" "200" \
+    "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/credbkt/other/x")"
+s3curl -o /dev/null -X DELETE "$BASE/credbkt/other/x"
+s3curl -o /dev/null -X DELETE "$BASE/otherbkt"
+
 check "静态凭证 SK 不经 admin 回传" "0" \
     "$(s3curl "$BASE/-/admin/credentials/$AK?show-secret=true" | grep -q '"secret_key"' && echo 1 || echo 0)"
 s3curl -o /dev/null -X DELETE "$BASE/credbkt/keep/a"

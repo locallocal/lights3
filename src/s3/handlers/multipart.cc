@@ -281,7 +281,8 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
 }
 
 Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& req,
-                                                           std::string bucket) {
+                                                           std::string bucket,
+                                                           const RequestAuth& auth) {
     // 此前 `(void)req;`——prefix/delimiter/三个 marker/max-uploads 一个都不读，
     // 却硬编码 MaxUploads=1000 与 IsTruncated=false 后返回全部 upload
     storage::ListUploadsOptions opt;
@@ -299,6 +300,16 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
                       "Only '/' is supported as a delimiter.");
 
     auto res = co_await router_.resolve(bucket).list_multipart_uploads(bucket, opt);
+
+    // policy prefix 过滤：同 list_objects——否则 prefix 受限凭证可枚举他租户
+    // 进行中 upload 的 key
+    if (auth.policy && !auth.policy->prefixes.empty()) {
+        std::erase_if(res.uploads,
+                      [&](const auto& u) { return !auth.policy->allows_key(u.key); });
+        std::erase_if(res.common_prefixes, [&](const std::string& p) {
+            return !auth.policy->prefix_may_contain(p);
+        });
+    }
 
     XmlWriter w;
     w.open("ListMultipartUploadsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");

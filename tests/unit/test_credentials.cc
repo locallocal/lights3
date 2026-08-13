@@ -5,6 +5,7 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "s3/auth/credential_store.h"
 #include "s3/service.h"
@@ -636,4 +637,51 @@ TEST(admin_api_never_returns_static_secret) {
     auto dyn = body_json(env.call("GET", "/-/admin/credentials/" + ak, root,
                                   {{"show-secret", "true"}}));
     CHECK(dyn.contains("secret_key"));
+}
+
+// 批删与列举的 policy 逐 key 复核：POST /bucket?delete 与 GET /bucket 都按
+// Bucket scope 授权（key 为空，prefix 校验被整体跳过），批删须对 XML 里每个
+// Key 按单删同一判定重审，列举须按 policy prefixes 过滤结果——否则 prefix
+// 受限凭证（多租户共桶）可越权删除/枚举白名单外的对象
+TEST(policy_prefix_batch_delete_and_listing) {
+    SvcEnv env;
+    Credential root{kRootAk, kRootSk};
+    CHECK_EQ(env.call("PUT", "/shared", root).status, 200);
+    CHECK_EQ(env.call("PUT", "/shared/logs/mine", root, {}, "v1").status, 200);
+    CHECK_EQ(env.call("PUT", "/shared/other/secret", root, {}, "v2").status, 200);
+
+    auto j = body_json(env.call(
+        "POST", "/-/admin/credentials", root, {},
+        R"({"policy":{"buckets":["shared"],"actions":["read","delete"],"prefixes":["logs/"]}})"));
+    Credential dyn{j.at("access_key").get<std::string>(),
+                   j.at("secret_key").get<std::string>()};
+
+    // 单删界桩：白名单外 403——批删的判定必须与它一致
+    CHECK_EQ(env.call("DELETE", "/shared/other/secret", dyn).status, 403);
+
+    // 列举不带 prefix：白名单外的 key 不得出现
+    auto lo = env.call("GET", "/shared", dyn);
+    CHECK_EQ(lo.status, 200);
+    CHECK(lo.small_body.find("logs/mine") != std::string::npos);
+    CHECK(lo.small_body.find("other/secret") == std::string::npos);
+    // delimiter 分组下白名单外的 CommonPrefixes 同样不得出现
+    auto lg = env.call("GET", "/shared", dyn, {{"delimiter", "/"}});
+    CHECK_EQ(lg.status, 200);
+    CHECK(lg.small_body.find("<Prefix>logs/</Prefix>") != std::string::npos);
+    CHECK(lg.small_body.find("<Prefix>other/</Prefix>") == std::string::npos);
+
+    // 批删混白名单内外：外面的逐 key AccessDenied 且对象仍在，里面的正常删
+    std::string xml = "<Delete><Object><Key>other/secret</Key></Object>"
+                      "<Object><Key>logs/mine</Key></Object></Delete>";
+    util::HashStream h(util::HashStream::Algo::Md5);
+    h.update(std::span(reinterpret_cast<const uint8_t*>(xml.data()), xml.size()));
+    auto d = h.final_bytes();
+    auto resp = env.call("POST", "/shared", dyn, {{"delete", ""}}, xml,
+                         {{"Content-MD5", util::base64_encode(std::span(d.data(), d.size()))}});
+    CHECK_EQ(resp.status, 200);
+    CHECK(resp.small_body.find("<Error><Key>other/secret</Key><Code>AccessDenied</Code>") !=
+          std::string::npos);
+    CHECK(resp.small_body.find("<Deleted><Key>logs/mine</Key>") != std::string::npos);
+    CHECK_EQ(env.call("GET", "/shared/other/secret", root).status, 200);  // 未被越权删除
+    CHECK_EQ(env.call("GET", "/shared/logs/mine", root).status, 404);
 }

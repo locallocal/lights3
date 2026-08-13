@@ -134,9 +134,11 @@ private:
     Task<http::HttpResponse> get_object(http::HttpRequest& req, std::string bucket,
                                         std::string key, bool head_only);
     Task<http::HttpResponse> delete_object(std::string bucket, std::string key);
-    Task<http::HttpResponse> delete_objects(http::HttpRequest& req, std::string bucket);
+    Task<http::HttpResponse> delete_objects(http::HttpRequest& req, std::string bucket,
+                                            const RequestAuth& auth);
     // handlers/list_objects.cc
-    Task<http::HttpResponse> list_objects(http::HttpRequest& req, std::string bucket);
+    Task<http::HttpResponse> list_objects(http::HttpRequest& req, std::string bucket,
+                                          const RequestAuth& auth);
     // handlers/multipart.cc
     Task<http::HttpResponse> create_multipart(http::HttpRequest& req, std::string bucket,
                                               std::string key);
@@ -148,7 +150,8 @@ private:
                                              std::string key);
     Task<http::HttpResponse> list_parts(http::HttpRequest& req, std::string bucket,
                                         std::string key);
-    Task<http::HttpResponse> list_multipart_uploads(http::HttpRequest& req, std::string bucket);
+    Task<http::HttpResponse> list_multipart_uploads(http::HttpRequest& req, std::string bucket,
+                                                    const RequestAuth& auth);
 
     Task<http::HttpResponse> readyz();
 

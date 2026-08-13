@@ -325,7 +325,8 @@ Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
 }  // namespace
 
 // DeleteObjects 批量删除（POST /bucket?delete，请求 XML ≤ 1MiB，至多 1000 key）
-Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::string bucket) {
+Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::string bucket,
+                                                   const RequestAuth& auth) {
     // AWS 对本操作**要求**完整性头（docs/gaps.md §5.6）：批量删除是唯一一个
     // "请求体被改写即静默多删对象"的操作，缺失即 400。摘要本身由 dispatch 装的
     // ChecksumVerifyingReader 在读 body 时校验，这里只判"有没有声明"
@@ -367,18 +368,30 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
         throw S3Error(S3ErrorCode::MalformedXML, "DeleteObjects accepts at most 1000 keys.");
 
     auto& backend = router_.resolve(bucket);
+    std::vector<std::optional<S3Error>> outcome(keys.size());
+    // 逐 key 复核 policy：dispatch 对本路由按 Bucket scope 授权（key 为空，prefix
+    // 校验被整体跳过），XML 里的每个 Key 必须在此按单删同一判定重审，否则
+    // prefix 受限凭证可借批量接口删除白名单外的对象
+    if (auth.policy)
+        for (size_t i = 0; i < keys.size(); ++i)
+            if (!auth.policy->allows(bucket, keys[i], Action::Delete))
+                outcome[i] =
+                    S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
     // 有界并发（docs/gaps.md §3.9）：串行 co_await 在 cloudproxy/duostore 上是
     // 1000 次串行 RTT。批大小压住对单后端的并发冲击，批间仍顺序推进
     constexpr size_t kBatch = 32;
-    std::vector<std::optional<S3Error>> outcome(keys.size());
-    for (size_t base = 0; base < keys.size(); base += kBatch) {
-        size_t n = std::min(kBatch, keys.size() - base);
+    std::vector<size_t> pending;
+    pending.reserve(keys.size());
+    for (size_t i = 0; i < keys.size(); ++i)
+        if (!outcome[i]) pending.push_back(i);
+    for (size_t base = 0; base < pending.size(); base += kBatch) {
+        size_t n = std::min(kBatch, pending.size() - base);
         std::vector<Task<std::optional<S3Error>>> batch;
         batch.reserve(n);
         for (size_t i = 0; i < n; ++i)
-            batch.push_back(delete_one(backend, bucket, keys[base + i]));
+            batch.push_back(delete_one(backend, bucket, keys[pending[base + i]]));
         auto res = co_await when_all(std::move(batch));
-        for (size_t i = 0; i < n; ++i) outcome[base + i] = std::move(res[i]);
+        for (size_t i = 0; i < n; ++i) outcome[pending[base + i]] = std::move(res[i]);
     }
 
     XmlWriter w;

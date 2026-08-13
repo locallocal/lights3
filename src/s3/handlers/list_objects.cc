@@ -24,7 +24,8 @@ std::optional<std::string> token_decode(const std::string& in) {
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::string bucket) {
+Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::string bucket,
+                                                 const RequestAuth& auth) {
     storage::ListOptions opt;
     opt.prefix = req.query_get("prefix").value_or("");
     opt.delimiter = req.query_get("delimiter").value_or("");
@@ -79,6 +80,18 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     bool fetch_owner = v2 && req.query_get("fetch-owner").value_or("") == "true";
 
     auto result = co_await router_.resolve(bucket).list_objects(bucket, opt);
+
+    // policy prefix 过滤：Bucket scope 授权时 key 为空、prefix 校验被跳过，而
+    // opt.prefix 完全客户端可控——不在此过滤的话，prefix 受限凭证（多租户共桶）
+    // 发不带 prefix 的 GET /bucket 即可枚举整桶所有 key。分页游标仍是后端的
+    //（页内条目可少于 max-keys，S3 语义允许）
+    if (auth.policy && !auth.policy->prefixes.empty()) {
+        std::erase_if(result.objects,
+                      [&](const auto& o) { return !auth.policy->allows_key(o.key); });
+        std::erase_if(result.common_prefixes, [&](const std::string& p) {
+            return !auth.policy->prefix_may_contain(p);
+        });
+    }
 
     XmlWriter w;
     w.open("ListBucketResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");

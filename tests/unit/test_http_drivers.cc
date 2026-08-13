@@ -133,11 +133,16 @@ struct TestServer {
     std::thread th;
     uint16_t port = 0;
 
-    explicit TestServer(const std::string& driver) {
+    // tls_cert/tls_key 非空即起 TLS 端口。断言失败的展开路径由析构保证 join——
+    // 用例内手写 joinable std::thread 的话，展开先析构线程即 std::terminate
+    explicit TestServer(const std::string& driver, const std::string& tls_cert = "",
+                        const std::string& tls_key = "") {
         HttpConfig cfg;
         cfg.driver = driver;
         cfg.io_threads = 2;
         cfg.idle_timeout_sec = 5;
+        cfg.tls_cert = tls_cert;
+        cfg.tls_key = tls_key;
         srv = HttpServerFactory::create(driver, cfg);
         srv->set_handler([](HttpRequest req) { return test_handler(std::move(req)); });
         srv->listen("127.0.0.1", 0);
@@ -942,19 +947,9 @@ TEST(http_driver_tls_round_trip) {
     for (auto& d : drivers) {
         if (d != "httplib" && d != "beast") continue;
         try {
-            HttpConfig cfg;
-            cfg.driver = d;
-            cfg.io_threads = 2;
-            cfg.idle_timeout_sec = 5;
-            cfg.tls_cert = certs.cert_path;
-            cfg.tls_key = certs.key_path;
-            auto srv = HttpServerFactory::create(d, cfg);
-            srv->set_handler([](HttpRequest req) { return test_handler(std::move(req)); });
-            srv->listen("127.0.0.1", 0);
-            uint16_t port = srv->bound_port();
-            std::thread th([&] { srv->run(); });
+            TestServer ts(d, certs.cert_path, certs.key_path);
             {
-                TlsClient c(port);
+                TlsClient c(ts.port);
                 c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
                 std::string r = c.read_all();
                 CHECK(r.find("200") != std::string::npos);
@@ -962,7 +957,7 @@ TEST(http_driver_tls_round_trip) {
             }
             {
                 // 带 body 的 PUT 走一遍：TLS 记录层下的流式读同样成立
-                TlsClient c(port);
+                TlsClient c(ts.port);
                 std::string payload = make_pattern(1024);
                 c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 1024\r\n"
                            "Connection: close\r\n\r\n" +
@@ -970,8 +965,6 @@ TEST(http_driver_tls_round_trip) {
                 std::string r = c.read_all();
                 CHECK(r.find(expected_sum(1024)) != std::string::npos);
             }
-            srv->shutdown();
-            th.join();
         } catch (const mini_test::Failure& f) {
             throw mini_test::Failure("[driver=" + d + "] " + f.what());
         }
@@ -983,24 +976,13 @@ TEST(http_driver_tls_plaintext_client_rejected) {
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
         if (d != "httplib" && d != "beast") continue;
-        HttpConfig cfg;
-        cfg.driver = d;
-        cfg.io_threads = 2;
-        cfg.idle_timeout_sec = 5;
-        cfg.tls_cert = certs.cert_path;
-        cfg.tls_key = certs.key_path;
-        auto srv = HttpServerFactory::create(d, cfg);
-        srv->set_handler([](HttpRequest req) { return test_handler(std::move(req)); });
-        srv->listen("127.0.0.1", 0);
-        std::thread th([&] { srv->run(); });
+        TestServer ts(d, certs.cert_path, certs.key_path);
         {
-            Client c(srv->bound_port());
+            Client c(ts.port);
             c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             auto r = c.read_response();
             CHECK(!r.ok);  // 只能是断连（或 TLS alert 噪声），不能有 HTTP 200
         }
-        srv->shutdown();
-        th.join();
     }
 }
 

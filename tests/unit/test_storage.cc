@@ -22,6 +22,7 @@
 
 using namespace lights3;
 using namespace lights3::storage;
+using s3::S3ErrorCode;
 using backend_suite::put;
 using backend_suite::read_all;
 using backend_suite::run_backend_suite;
@@ -32,6 +33,48 @@ using backend_suite::TmpDir;
 TEST(memory_backend_suite) {
     MemoryBackend b;
     run_backend_suite(b);
+}
+
+// 容量超限的写入不得残留"幽灵条目"：此前 put/complete 先 operator[] 插入 slot 再
+// 查容量，超限抛出后 map 里留下 data 为空指针的对象——后续 GET 空指针解引用崩溃
+//（远程可触发）、HEAD 回假元数据、list 列出幽灵 key。同时验证提前闸门：超大 body
+// 边读边判，不等全量缓冲完
+TEST(memory_backend_capacity_no_ghost) {
+    MemoryBackend b(MemoryOptions{/*max_bytes=*/64, /*mpu_ttl_sec=*/0});
+    sync_wait(b.create_bucket("bkt"));
+
+    CHECK_THROWS_S3(put(b, "bkt", "big", std::string(1024, 'x')), S3ErrorCode::SlowDown);
+    CHECK_THROWS_S3(sync_wait(b.get_object("bkt", "big", std::nullopt)),
+                    S3ErrorCode::NoSuchKey);
+    CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "big")), S3ErrorCode::NoSuchKey);
+    CHECK(sync_wait(b.list_objects("bkt", {})).objects.empty());
+    CHECK_EQ(b.used_bytes(), uint64_t{0});
+
+    put(b, "bkt", "small", "1234");  // 容量内正常写不受影响
+    CHECK_EQ(read_all(*sync_wait(b.get_object("bkt", "small", std::nullopt)).body), "1234");
+
+    // multipart 同型缺陷：超限的 upload_part 不残留幽灵分片
+    auto uid = sync_wait(b.create_multipart("bkt", "obj", {}));
+    {
+        http::StringBodyReader oversized(std::string(100, 'y'));
+        CHECK_THROWS_S3(sync_wait(b.upload_part("bkt", "obj", uid, 1, oversized)),
+                        S3ErrorCode::SlowDown);
+    }
+    CHECK(sync_wait(b.list_parts("bkt", "obj", uid, {})).parts.empty());
+    std::string p1(20, 'a'), p2(20, 'b');
+    http::StringBodyReader r1(p1), r2(p2);
+    auto e1 = sync_wait(b.upload_part("bkt", "obj", uid, 1, r1));
+    auto e2 = sync_wait(b.upload_part("bkt", "obj", uid, 2, r2));
+    // 拼接对象与分片瞬时同驻（44 + 40 > 64）：complete 超限抛出，但不得残留幽灵对象
+    CHECK_THROWS_S3(
+        sync_wait(b.complete_multipart("bkt", "obj", uid,
+                                       std::vector<PartInfo>{{1, e1.etag}, {2, e2.etag}})),
+        S3ErrorCode::SlowDown);
+    CHECK_THROWS_S3(sync_wait(b.get_object("bkt", "obj", std::nullopt)),
+                    S3ErrorCode::NoSuchKey);
+    // 上传在失败后仍完好：abort 正常回收分片账
+    sync_wait(b.abort_multipart("bkt", "obj", uid));
+    CHECK_EQ(b.used_bytes(), uint64_t{4});
 }
 
 TEST(localfs_backend_suite) {

@@ -93,6 +93,8 @@ private:
                             std::string_view upload_id);
     // 容量闸门（持 m_ 调用）：delta 为本次净增字节，超限抛 SlowDown 且不改账
     void reserve_locked(int64_t delta);
+    // 读 body 途中的提前闸门（不持 m_ 调用）：已用 + 本请求已缓冲超限即抛 SlowDown
+    void check_inflight(size_t buffered) const;
     void expire_uploads_locked();  // mpu_ttl 过期清理（持 m_）
 
     MemoryOptions opt_;

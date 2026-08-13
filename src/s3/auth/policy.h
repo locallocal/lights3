@@ -31,6 +31,11 @@ struct CredentialPolicy {
     bool allows(std::string_view bucket, std::string_view key, Action action) const;
     bool allows_action(Action a) const;
     bool allows_bucket(std::string_view bucket) const;
+    // 列举结果的 prefix 过滤（多租户共桶时 prefixes 是隔离边界）：
+    // allows_key = key 落在某白名单前缀内；prefix_may_contain = 列举返回的
+    // CommonPrefixes 分组下**可能**存在白名单内的 key（双向前缀关系任一成立）
+    bool allows_key(std::string_view key) const;
+    bool prefix_may_contain(std::string_view group_prefix) const;
 };
 
 // policy 的 JSON 字段约定

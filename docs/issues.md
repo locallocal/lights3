@@ -12,9 +12,11 @@
 |---|---|---|---|
 | build (RelWithDebInfo) | ✅ | ✅ 12/12 | 全绿 |
 | build-tsan | ✅ | ✅ 11/11 | 全绿，无数据竞争报告 |
-| build-sqlite / build-redis / build-rados | ✅ | ✅ | 全绿 |
-| build-tikv | ✅ | ✅ 11/11 | 对 tiup playground 真实集群通过 |
-| **build-asan** | ✅（T1 修复后 307/307） | — | 原 unit_tests stack-use-after-scope 崩溃已修，见 T1 |
+| build-sqlite / build-redis / build-rados | ✅ | ✅ 11/11 | 全绿 |
+| build-tikv | ✅ | ✅ 11/11 | 本轮未起 tiup 集群（真实集群用例 SKIP） |
+| build-asan | ✅ | ✅ 10/10 | T1 修复后全绿，T2–T9 修复后复测无报告 |
+
+> 上表为 T1–T9 全部修复后（2026-08-14）的复测结果。
 
 > mint 兼容性集（`tests/e2e/run_mint.sh`）因本机无 docker 而 SKIP，属预期。
 
@@ -34,7 +36,7 @@
   （`obj_in/part_in/legacy_in`），生命周期覆盖到断言结束。末尾几个只读 `.kind`（值成员）
   的临时串调用不构成悬垂读取，保持原样。验证：`build-asan` 下 `unit_tests` 307/307 通过。
 
-### 【高】T2. DeleteObjects 批量删除绕过 per-credential prefix 策略（破坏性越权）
+### ~~【高】T2. DeleteObjects 批量删除绕过 per-credential prefix 策略（破坏性越权）~~ ✅ 已修复（2026-08-14）
 - 位置：`src/s3/service.cc:319-333`（授权判定）+ `src/s3/handlers/objects.cc:328-407`（handler）
   + `src/s3/auth/credential_store.cc:294-304`（`allows`）
 - 根因链：
@@ -47,11 +49,14 @@
   `DELETE /bucket/other/secret` 会被 prefix 分支拒绝；但改用 `POST /bucket?delete` 提交
   `<Delete><Object><Key>other/secret</Key></Object></Delete>` **即可删除前缀白名单外的任意对象**。
   单删与批删授权结果不一致，构成越权删除。
-- 修法：`delete_objects` 逐 key 走 `ident.policy->allows(bucket, key, Action::Delete)`，
-  拒绝的 key 在结果 XML 里返回 `AccessDenied`。
+- 修复：`delete_objects` 签名增加 `RequestAuth`，提交删除前对 XML 里每个 Key 走
+  `auth.policy->allows(bucket, key, Action::Delete)`，拒绝的 key 在结果 XML 返回
+  `<Error><Code>AccessDenied</Code>`、不执行删除。回归：单测
+  `policy_prefix_batch_delete_and_listing`（test_credentials.cc）+ e2e
+  "批删前缀外 key 返回 AccessDenied / 前缀外对象未被批删"。
 - 严重度：**高**
 
-### 【高】T3. memory 后端容量超限的 PUT 残留空指针"幽灵对象"，后续 GET 空指针崩溃
+### ~~【高】T3. memory 后端容量超限的 PUT 残留空指针"幽灵对象"，后续 GET 空指针崩溃~~ ✅ 已修复（2026-08-14）
 - 位置：`src/storage/memory/memory_backend.cc:158-161`（put_object）、崩溃点 `:182`（get_object）；
   同型：`:274`（upload_part）、`:306-311`（complete_multipart）
 - 根因：put_object 提交段先 `auto& slot = b.objects[std::string(key)];`——对新 key 会插入
@@ -61,11 +66,13 @@
   `len = blob->size()` → 空指针解引用。
 - 后果：配置 `max_bytes` 的 memory 后端达容量上限 → 对新 key 发 PUT 得 503 → 任何客户端再
   GET 该 key → **进程段错误（远程可触发）**。HEAD 会返回假元数据、list 会列出幽灵 key。
-- 修法：容量检查通过后再插入 slot；或在 `reserve_locked` 抛出前不 emplace（先查后插），
-  失败路径 erase 掉刚插入的条目。
+- 修复：`put_object`/`upload_part`/`complete_multipart` 改为先 `find` 算旧值、
+  `reserve_locked` 通过后再 `insert_or_assign`——失败路径完全不 touch map。
+  `complete_multipart` 的 `up.meta` 由 move 改为拷贝（失败时上传须保持完好可重试）。
+  回归：单测 `memory_backend_capacity_no_ghost`（test_storage.cc）。
 - 严重度：**高**
 
-### 【中】T4. AsyncSemaphore 可取消 acquire 存在 UAF 窗口（注册取消回调后仍访问协程帧成员）
+### ~~【中】T4. AsyncSemaphore 可取消 acquire 存在 UAF 窗口（注册取消回调后仍访问协程帧成员）~~ ✅ 已修复（2026-08-14）
 - 位置：`src/core/semaphore.h:112-136`（`AcquireAwaiter::suspend_impl`），
   正确范式对照 `src/core/thread_pool.cc:139-177`
 - 根因：`suspend_impl` 于 `:118` `token.on_cancel_publish(...)` 注册回调后，`:120` 起继续读取
@@ -77,10 +84,12 @@
 - 后果：请求超时/断连触发的取消恰落在注册完成与后续帧访问之间（`co_await sem.acquire()` 用于
   localfs/tiered per-key commit 锁、入口限流、rados `buffer_sem_`）时内存损坏。窗口极窄，
   高并发 + 高取消率下可命中。
-- 修法：注册回调前把后续要用的 `sem`/`token`/`w` 等拷到局部变量，比照 thread_pool 版本。
+- 修复：比照 thread_pool 范式，注册回调前把 `&sem`/`w`/`token` 拷入局部
+  （`s`/`wp`/`tok`），注册后全部走局部变量，不再触碰帧内成员。验证：ASan/TSan
+  变体全量单测通过，无竞态/UAF 报告。
 - 严重度：**中**（窗口窄，但属 UAF）
 
-### 【中】T5. UringEngine 提交致命错误后 reaper 仍消费 CQE，解引用已销毁的 Op
+### ~~【中】T5. UringEngine 提交致命错误后 reaper 仍消费 CQE，解引用已销毁的 Op~~ ✅ 已修复（2026-08-14）
 - 位置：`src/storage/xlocalfs/uring.cc:254-268`（`flush_locked` 致命分支 + `fail_all_locked`）、
   `:309-333`（`reap_loop`）
 - 根因：`flush_locked` 遇 EINTR/EAGAIN/EBUSY 以外的 errno（如 ENOMEM）时，`fail_all_locked`
@@ -89,20 +98,24 @@
   → 写 `op->res` 并二次 `resume` 已结束协程 → 对已释放内存写入 + 二次 resume。
 - 后果：xlocalfs 有在途 IO 时某次 `io_uring_enter` 返回不可重试 errno → 后续任一正常 CQE 到达 →
   UAF/崩溃。前置条件罕见。
-- 修法：致命错误进入引擎级 poisoned 状态，reaper 对已 fail 的 Op（或引擎已关停）忽略 CQE，
-  或延后释放 Op 直到其 CQE 收妥。
+- 修复：reaper 触碰 `*op` 之前先在锁内按 `inflight_.erase(op) > 0` 确认该 Op 仍在
+  账上——被 `fail_all_locked` 唤醒过的 Op 其迟到 CQE 只摘账跳过，不写 `res`、
+  不二次 resume。另：`failed_` 毒化后 reaper 不再阻塞在 GETEVENTS（改 1ms 轮询
+  消化迟到 CQE），`stopped_` 置位即退出，堵住 shutdown join 等不到的路径。
 - 严重度：**中**
 
-### 【中】T6. memory 后端 max_bytes 闸门在全量缓冲 body 之后才检查，无法兑现 OOM 防护
+### ~~【中】T6. memory 后端 max_bytes 闸门在全量缓冲 body 之后才检查，无法兑现 OOM 防护~~ ✅ 已修复（2026-08-14）
 - 位置：`src/storage/memory/memory_backend.cc:122-131`（put_object 读 body）、`:259-267`（upload_part）
 - 根因：先把整个 body 追加进内存 `std::string data`，读完 EOF 才在提交段 `reserve_locked` 判容量。
   该选项文档目的是"超限返回 503 而不是让分配器决定谁死"，但对"在途缓冲"完全不设防。
 - 后果：单个超大 PUT（Content-Length 远超 max_bytes）或多个并发大 PUT，字节先全驻堆，容量检查
   尚未执行进程已被 OOM killer 杀。
-- 修法：读 body 循环内累计已缓冲字节，边读边比对 `max_bytes` 提前 503。
+- 修复：新增 `check_inflight(buffered)`，`put_object`/`upload_part` 读 body 循环内
+  按"已用 + 本请求已缓冲"边读边比对 `max_bytes`，超限提前抛 SlowDown（503）。
+  回归：`memory_backend_capacity_no_ghost` 用远超 max_bytes 的 body 验证提前拒绝。
 - 严重度：**中**
 
-### 【中】T7. dispatch 的 Bucket 级列举不按 policy prefix 过滤（租户 key 枚举）
+### ~~【中】T7. dispatch 的 Bucket 级列举不按 policy prefix 过滤（租户 key 枚举）~~ ✅ 已修复（2026-08-14）
 - 位置：`src/s3/handlers/list_objects.cc:27-129`、`src/s3/handlers/multipart.cc:283-334`；
   根因同 T2 的 `service.cc:319-326` + `credential_store.cc:300`
 - 根因：Bucket scope 授权 `key==""` 跳过 prefix 校验；`list_objects` 用客户端可控的
@@ -110,10 +123,14 @@
 - 后果：prefix 受限（多租户共桶）的只读凭证发 `GET /bucket`（不带 prefix）即可枚举整桶所有 key
   （含他租户），尽管 GET 具体对象会被 prefix 拦住。`list_multipart_uploads` 同理泄露所有进行中
   upload 的 key。prefix 无法作为租户隔离边界。
-- 修法：列举 handler 把 `policy.prefixes` 作为强制前缀下推，或对结果按 prefix 过滤。
+- 修复：`CredentialPolicy` 新增 `allows_key`/`prefix_may_contain`；`list_objects`
+  与 `list_multipart_uploads` 接收 `RequestAuth`，对结果按 policy prefixes 过滤
+  （objects/uploads 逐 key，CommonPrefixes 按双向前缀关系）。分页游标仍是后端的，
+  页内条目可少于 max-keys（S3 语义允许）。回归：单测
+  `policy_prefix_batch_delete_and_listing` + e2e "ListObjects 不含前缀外 key"。
 - 严重度：**中**
 
-### 【中】T8. TLS 单测手写 joinable 线程，断言失败时栈展开析构 → std::terminate
+### ~~【中】T8. TLS 单测手写 joinable 线程，断言失败时栈展开析构 → std::terminate~~ ✅ 已修复（2026-08-14）
 - 位置：`tests/unit/test_http_drivers.cc:955`（`http_driver_tls_round_trip`）、
   `:995`（`http_driver_tls_plaintext_client_rejected`）
 - 根因：两用例 `std::thread th([&]{ srv->run(); })` 未用带析构保护的 `TestServer` 夹具。
@@ -122,16 +139,18 @@
   之前先析构 `th`，catch 救不了。
 - 后果：任一 TLS 断言回归时不仅本例失败信息被 abort 吞掉，其后所有用例不再执行；进程 abort 使
   `RedisTestServer` 静态单例析构不运行，redis 变体下泄漏 redis-server 进程与 `/tmp/lights3-redis-test-*`。
-- 修法：改用带 RAII 停机/ join 的 `TestServer` 夹具，或在用例内用 jthread + 显式停机保证 join。
+- 修复：`TestServer` 夹具扩展可选 `tls_cert`/`tls_key` 参数，两 TLS 用例改用该
+  夹具——断言失败的展开路径由析构保证 shutdown + join。
 - 严重度：**中**
 
-### 【中】T9. e2e "ListBuckets 按 policy 过滤"是空断言，测不到声称行为
+### ~~【中】T9. e2e "ListBuckets 按 policy 过滤"是空断言，测不到声称行为~~ ✅ 已修复（2026-08-14）
 - 位置：`tests/e2e/run_e2e.sh:511-518`
 - 根因：断言 `polcurl "$BASE/"` 输出不含 `<Name>otherbkt</Name>`，但 `otherbkt` 从未被创建
   （`:511` 只是对不存在的桶 GET 拿 403）。即便 ListBuckets policy 过滤整个失效，该检查也恒通过
   （唯一存在的桶 `credbkt` 恰在白名单内，白名单外无任何真实桶）。
 - 后果：e2e 层对该行为的回归保护是虚假的（单测 `admin_api_policy_flow` 有真实覆盖，故不升高）。
-- 修法：先用 root 建一个白名单外的真实桶，再断言受限凭证 ListBuckets 看不到它。
+- 修复：先用 root 建真实的 `otherbkt` 再断言受限凭证看不到，并补"白名单内可见"
+  的对照断言；顺带在 e2e 补了 T2/T7 的行为断言（批删越权、列举 prefix 过滤）。
 - 严重度：**中**
 
 ---
@@ -176,9 +195,9 @@
 
 ## 建议处理顺序
 
-1. **T2 / T3**：可被外部触发的越权删除与远程崩溃，优先。
-2. **T1**：修好后 ASan 回归门才恢复有效，能兜住 T4/T5 这类 UAF 的将来回归。
-3. **T4 / T5**：UAF，按 thread_pool 的既有范式对齐。
-4. **T6 / T7 / T8 / T9**：DoS 面、租户隔离、测试可靠性。
+1. ~~**T2 / T3**：可被外部触发的越权删除与远程崩溃，优先。~~ ✅
+2. ~~**T1**：修好后 ASan 回归门才恢复有效，能兜住 T4/T5 这类 UAF 的将来回归。~~ ✅
+3. ~~**T4 / T5**：UAF，按 thread_pool 的既有范式对齐。~~ ✅
+4. ~~**T6 / T7 / T8 / T9**：DoS 面、租户隔离、测试可靠性。~~ ✅
 5. **T10 / T11**：补关键契约的行为测试（超时/上限、入口限流生命周期）。
 6. **T12–T20**：择机清理。

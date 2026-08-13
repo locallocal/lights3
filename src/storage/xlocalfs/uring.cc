@@ -317,22 +317,40 @@ void UringEngine::reap_loop() {
                 stop = true;  // shutdown 提交的 NOP 哨兵
             } else {
                 Op* op = reinterpret_cast<Op*>(static_cast<uintptr_t>(cqe.user_data));
-                LIGHTS3_TSAN_ACQUIRE(op);
-                op->res = cqe.res;
-                bool drained;
+                bool ours, drained;
                 {
+                    // 触碰 *op 之前先在账上确认它还在途：fail_all_locked 已把该 Op
+                    // 以 -EIO 唤醒过的话，其协程帧（连同 Op）随展开销毁，这条迟到
+                    // 的 CQE 只能摘账跳过——写 res / 二次 resume 都是 UAF
                     std::lock_guard lk(submit_mu_);
-                    inflight_.erase(op);
+                    ours = inflight_.erase(op) > 0;
                     drained = stopped_ && inflight_.empty();
                 }
                 if (drained) inflight_cv_.notify_all();
-                // 经线程池恢复；post 的内部锁保证 res 写入对恢复线程可见
-                pool_->post([h = op->h] { h.resume(); });
+                if (ours) {
+                    LIGHTS3_TSAN_ACQUIRE(op);
+                    op->res = cqe.res;
+                    // 经线程池恢复；post 的内部锁保证 res 写入对恢复线程可见
+                    pool_->post([h = op->h] { h.resume(); });
+                }
             }
             ++head;
         }
         store_release(cq_head_, head);
         if (stop) return;
+        {
+            // 引擎毒化（flush_locked 致命 errno）后不再阻塞等 CQE：在途 Op 已全部
+            // 被 -EIO 唤醒，这里只需轮询消化内核迟到的 CQE（上面按账跳过），
+            // shutdown 置 stopped_ 后退出——阻塞版 GETEVENTS 在无后续 CQE 时
+            // 会让 shutdown 的 join 永远等不到
+            std::unique_lock lk(submit_mu_);
+            if (failed_) {
+                if (stopped_) return;
+                lk.unlock();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+        }
         int ret = sys_io_uring_enter(ring_fd_, 0, 1, IORING_ENTER_GETEVENTS);
         if (ret < 0 && errno != EINTR && errno != EAGAIN && errno != EBUSY) {
             // 不可恢复错误：无声退出会让所有在途 co_await 永不 resume（GET 挂死、

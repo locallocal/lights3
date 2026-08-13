@@ -55,6 +55,15 @@ void MemoryBackend::reserve_locked(int64_t delta) {
     used_bytes_ = uint64_t(int64_t(used_bytes_) + delta);
 }
 
+// 读 body 途中的提前闸门：等 EOF 后再查容量的话，超大 body 的字节已全部驻堆，
+// OOM 防护在最需要时不生效。在途缓冲不计入 used_bytes_（提交时才 reserve），
+// 这里按"已用 + 本请求已缓冲"保守预判，超限即 503（与 reserve_locked 同语义）
+void MemoryBackend::check_inflight(size_t buffered) const {
+    if (opt_.max_bytes && used_bytes() + buffered > opt_.max_bytes)
+        throw S3Error(S3ErrorCode::SlowDown,
+                      "memory backend is at its configured max_bytes capacity");
+}
+
 // mpu 过期清理（docs/gaps.md §6.3）：本后端不接定时器（无后台线程是它作为单测
 // 夹具的一部分），改在 multipart 类操作入口顺带扫一遍——从不 complete/abort 的
 // 上传此前会永久占着内存
@@ -128,6 +137,7 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
         if (n == 0) break;
         md5.update(std::span(reinterpret_cast<const uint8_t*>(buf), n));
         data.append(reinterpret_cast<const char*>(buf), n);
+        check_inflight(data.size());
     }
     meta.key = std::string(key);
     meta.size = data.size();
@@ -155,10 +165,12 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
         }
     }
     PutResult r{meta.etag};
-    auto& slot = b.objects[std::string(key)];
-    int64_t old = slot.data ? int64_t(slot.data->size()) : 0;
-    reserve_locked(int64_t(blob->size()) - old);  // 超限抛出：slot 是刚插入的空对象
-    slot = Object{std::move(meta), std::move(blob)};
+    // 容量检查通过后才 touch map：operator[] 先插入的话，reserve 抛出时 map 里
+    // 残留 data 为空指针的幽灵条目，后续 GET 直接空指针解引用
+    auto it = b.objects.find(std::string(key));
+    int64_t old = it != b.objects.end() && it->second.data ? int64_t(it->second.data->size()) : 0;
+    reserve_locked(int64_t(blob->size()) - old);
+    b.objects.insert_or_assign(std::string(key), Object{std::move(meta), std::move(blob)});
     co_return r;
 }
 
@@ -264,15 +276,19 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
         if (n == 0) break;
         md5.update(std::span(reinterpret_cast<const uint8_t*>(buf), n));
         data.append(reinterpret_cast<const char*>(buf), n);
+        check_inflight(data.size());
     }
     std::string etag = md5.final_hex();
 
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);  // 读 body 期间可能已被 abort
-    // 同号重传 last-write-wins
-    auto& slot = up.parts[part_no];
-    reserve_locked(int64_t(data.size()) - int64_t(slot.data.size()));
-    slot = Part{std::move(data), etag, std::chrono::system_clock::now()};
+    // 同号重传 last-write-wins；容量检查通过后才 touch map（同 put_object，
+    // 否则 reserve 抛出时残留空 etag 的幽灵分片）
+    auto it = up.parts.find(part_no);
+    reserve_locked(int64_t(data.size()) -
+                   (it != up.parts.end() ? int64_t(it->second.data.size()) : 0));
+    up.parts.insert_or_assign(part_no,
+                              Part{std::move(data), etag, std::chrono::system_clock::now()});
     co_return PutResult{etag};
 }
 
@@ -297,18 +313,23 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
         md5s.push_back(it->second.etag);
     }
 
-    ObjectMeta meta = std::move(up.meta);
+    // 拷贝而非 move：下面 reserve 可能超限抛出，"上传仍在、客户端可重试或 abort"
+    // 的承诺要求 up.meta 在失败路径上保持完好
+    ObjectMeta meta = up.meta;
     meta.key = std::string(key);
     meta.size = data.size();
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
     PutResult r{meta.etag};
-    auto& slot = b.objects[std::string(key)];
-    int64_t old = slot.data ? int64_t(slot.data->size()) : 0;
     // 拼接后的对象与分片同时驻留一瞬：先记新对象（可能超限而抛，此时上传仍在，
-    // 客户端可重试或 abort），成功后再释放分片
+    // 客户端可重试或 abort），成功后再释放分片。容量检查通过后才 touch map
+    //（同 put_object，否则失败时残留空指针幽灵对象）
+    auto it = b.objects.find(std::string(key));
+    int64_t old = it != b.objects.end() && it->second.data ? int64_t(it->second.data->size()) : 0;
     reserve_locked(int64_t(data.size()) - old);
-    slot = Object{std::move(meta), std::make_shared<const std::string>(std::move(data))};
+    b.objects.insert_or_assign(
+        std::string(key),
+        Object{std::move(meta), std::make_shared<const std::string>(std::move(data))});
     int64_t freed = 0;
     for (auto& [no, part] : up.parts) freed += int64_t(part.data.size());
     reserve_locked(-freed);

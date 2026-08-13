@@ -113,25 +113,29 @@ public:
             // 被 release 抢跑 resume，落位写与 await_resume 的读形成数据竞争
             w = std::make_shared<Waiter>();
             w->h = h;
+            // 局部持有一切后续要用的东西（同 ThreadPool::ScheduleAwaiter）：取消
+            // 回调注册成功的那一刻起，协程随时可能在别的线程被 cancel_waiter 恢复
+            // 并连帧销毁——this/sem/token/w 全是帧内成员，注册后一概不可再碰
             auto* s = &sem;
             auto wp = w;
-            token.on_cancel_publish([s, wp] { s->cancel_waiter(wp); }, w->reg_id,
-                                    w->cancel_state);
-            bool pre_cancelled = token.cancelled();  // 注册前已取消：回调不会被调用
+            CancelToken tok = token;
+            tok.on_cancel_publish([s, wp] { s->cancel_waiter(wp); }, wp->reg_id,
+                                  wp->cancel_state);
+            bool pre_cancelled = tok.cancelled();  // 注册前已取消：回调不会被调用
             {
-                std::lock_guard lk(sem.m_);
-                if (sem.closed_ || pre_cancelled) {
+                std::lock_guard lk(s->m_);
+                if (s->closed_ || pre_cancelled) {
                     // 认领成功即由本协程自行抛出；认领失败说明取消回调正要 resume 我们
-                    if (w->claimed.exchange(true, std::memory_order_acq_rel)) return true;
-                    w->cancelled = true;
+                    if (wp->claimed.exchange(true, std::memory_order_acq_rel)) return true;
+                    wp->cancelled = true;
                     return false;
                 }
-                if (sem.permits_ > 0) {
-                    if (w->claimed.exchange(true, std::memory_order_acq_rel)) return true;
-                    --sem.permits_;
+                if (s->permits_ > 0) {
+                    if (wp->claimed.exchange(true, std::memory_order_acq_rel)) return true;
+                    --s->permits_;
                     return false;
                 }
-                sem.waiters_.push_back(w);
+                s->waiters_.push_back(wp);
             }
             return true;
         }

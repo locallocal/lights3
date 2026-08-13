@@ -198,19 +198,23 @@ TEST(duostore_decode_object_meta_parity) {
 // pack record owner 的规范解析（docs/gaps.md §6.1）：三种历史形态收敛到唯一入口
 TEST(duostore_parse_pack_owner_forms) {
     using codec::PackOwner;
-    auto obj = codec::parse_pack_owner(std::string("bkt\0some/key", 12));
+    // parse_pack_owner 返回指向入参字节的 string_view：输入串必须活到断言结束
+    const std::string obj_in("bkt\0some/key", 12);
+    auto obj = codec::parse_pack_owner(obj_in);
     CHECK(obj.kind == PackOwner::Kind::kObject);
     CHECK_EQ(std::string(obj.bucket), "bkt");
     CHECK_EQ(std::string(obj.key), "some/key");
 
-    auto part = codec::parse_pack_owner(std::string("mpu\0b\0k\0uid42\0" "7", 15));
+    const std::string part_in("mpu\0b\0k\0uid42\0" "7", 15);
+    auto part = codec::parse_pack_owner(part_in);
     CHECK(part.kind == PackOwner::Kind::kPart);
     CHECK_EQ(std::string(part.bucket), "b");
     CHECK_EQ(std::string(part.key), "k");
     CHECK_EQ(std::string(part.upload_id), "uid42");
     CHECK_EQ(part.part_no, 7);
 
-    auto legacy = codec::parse_pack_owner(std::string("mpu\0uid42\0" "300", 13));
+    const std::string legacy_in("mpu\0uid42\0" "300", 13);
+    auto legacy = codec::parse_pack_owner(legacy_in);
     CHECK(legacy.kind == PackOwner::Kind::kLegacyPart);
     CHECK_EQ(std::string(legacy.upload_id), "uid42");
     CHECK_EQ(legacy.part_no, 300);

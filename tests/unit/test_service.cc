@@ -1,6 +1,7 @@
 // L2 纯逻辑测试：mock HttpRequest + memory 后端走完整 dispatch（docs/architecture.md §2）
 #include <set>
 
+#include "core/semaphore.h"
 #include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "s3/service.h"
@@ -66,6 +67,20 @@ std::string body_of(http::HttpResponse& resp) {
 bool contains(const std::string& s, const std::string& sub) {
     return s.find(sub) != std::string::npos;
 }
+
+// 永不产出数据、但可被取消的 body：read() 挂在无许可的信号量上，请求超时的
+// 协作式取消从这个挂起点把它打断（docs/concurrency.md §5 的取消接线）
+class HangingReader final : public http::BodyReader {
+public:
+    Task<size_t> read(std::span<std::byte>) override {
+        auto p = co_await sem_.acquire();  // token 沿 Task promise 自动下传
+        co_return 0;
+    }
+    std::optional<uint64_t> length() const override { return std::nullopt; }
+
+private:
+    AsyncSemaphore sem_{0};
+};
 
 // 从响应 XML 中抽取首个 <tag>…</tag> 文本（测试用，够浅结构使用）
 std::string xelem(const std::string& xml, const std::string& tag) {
@@ -1195,4 +1210,30 @@ TEST(service_multipart_listing_pagination) {
     auto bad = sync_wait(svc.dispatch(
         make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
     CHECK_EQ(bad.status, 400);
+}
+
+// 请求级超时（config.h request_timeout_sec · docs/issues.md T10）：handler 执行期
+// 超时由协作式取消打断，503 SlowDown（可重试）收敛——此前该契约零测试
+TEST(service_request_timeout_cancels_and_returns_503) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    svc.set_request_timeout(std::chrono::seconds(1));
+
+    auto req = make_req("PUT", "/bkt/hung");
+    req.body = std::make_unique<HangingReader>();  // body 永不产出：超时必须能打断
+    auto t0 = std::chrono::steady_clock::now();
+    auto resp = sync_wait(svc.dispatch(std::move(req)));
+    CHECK_EQ(resp.status, 503);
+    CHECK(contains(body_of(resp), "<Code>SlowDown</Code>"));
+    // 到点即收敛（1s 超时 + 余量），不是靠别的超时兜底
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(5));
+
+    // 被打断的 PUT 无副作用
+    auto head = sync_wait(svc.dispatch(make_req("HEAD", "/bkt/hung")));
+    CHECK_EQ(head.status, 404);
+
+    // 超时关闭（0）时同一形态的请求不受影响——用有限 body 正常走完
+    svc.set_request_timeout(std::chrono::seconds(0));
+    auto ok = sync_wait(svc.dispatch(make_req("PUT", "/bkt/fine", "payload")));
+    CHECK_EQ(ok.status, 200);
 }

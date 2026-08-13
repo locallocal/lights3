@@ -453,6 +453,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_cloudproxy.cc
     tests/unit/test_service.cc
     tests/unit/test_http_drivers.cc
+    tests/unit/test_admission.cc
   )
   if(LIGHTS3_DUOSTORE)
     target_sources(unit_tests PRIVATE tests/unit/test_duostore.cc)

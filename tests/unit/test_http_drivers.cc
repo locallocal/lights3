@@ -116,8 +116,9 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         resp.small_body = "ok";
         co_return resp;
     }
-    if (req.path == "/slow") {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    if (req.path == "/slow") {  // ms 可调：shutdown 契约测试用它模拟在途请求
+        uint64_t ms = std::stoull(req.query_get("ms").value_or("500"));
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         resp.small_body = "done";
         co_return resp;
     }
@@ -143,6 +144,18 @@ struct TestServer {
         cfg.idle_timeout_sec = 5;
         cfg.tls_cert = tls_cert;
         cfg.tls_key = tls_key;
+        start(driver, cfg);
+    }
+    // 超时/上限契约测试用：tweak 在缺省配置上改写目标旋钮
+    TestServer(const std::string& driver, const std::function<void(HttpConfig&)>& tweak) {
+        HttpConfig cfg;
+        cfg.driver = driver;
+        cfg.io_threads = 2;
+        cfg.idle_timeout_sec = 5;
+        tweak(cfg);
+        start(driver, cfg);
+    }
+    void start(const std::string& driver, const HttpConfig& cfg) {
         srv = HttpServerFactory::create(driver, cfg);
         srv->set_handler([](HttpRequest req) { return test_handler(std::move(req)); });
         srv->listen("127.0.0.1", 0);
@@ -1022,4 +1035,120 @@ TEST(http_driver_tls_bad_cert_throws) {
         }
         CHECK(threw);
     }
+}
+
+// ---------- 超时 / 连接上限 / 停机契约（config.h §超时旋钮 · http-adapter.md §5，
+// docs/issues.md T10）：这组行为每驱动各自实现，最易各行其是，必须四驱动同断言 ----------
+
+TEST(http_driver_idle_timeout_closes_idle_connection) {
+    // 空闲连接（完成过请求的 keep-alive）须在 idle_timeout 后被服务端关闭；
+    // 完全不发数据的连接也由它兜底（stall guard 只管有 body 在传的）
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d, [](HttpConfig& c) { c.idle_timeout_sec = 1; });
+            Client c(ts.port);
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(c.read_response().ok);  // keep-alive 连接建立
+            auto t0 = std::chrono::steady_clock::now();
+            char b;
+            ssize_t n = ::recv(c.fd, &b, 1, 0);  // 阻塞等对端关闭（SO_RCVTIMEO=10s 兜底）
+            CHECK_EQ(n, ssize_t{0});             // 0=对端关闭；-1=驱动根本没关（超时）
+            CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8));
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_max_connections_rejects_excess) {
+    // 超限拒绝新连接（builtin/beast 关闭、seastar 丢弃），已建立的不受影响。
+    // httplib 的上限由其线程池隐式约束（config.h 注释明示），语义不同，跳过
+    for (auto& d : HttpServerFactory::drivers()) {
+        if (d == "httplib") continue;
+        try {
+            // seastar 按 shard 均摊：io_threads=1 保证单 shard 上限即全局上限
+            TestServer ts(d, [](HttpConfig& c) {
+                c.max_connections = 2;
+                c.io_threads = 1;
+            });
+            Client a(ts.port), b(ts.port);
+            a.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(a.read_response().ok);
+            b.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(b.read_response().ok);  // 两条 keep-alive 占满上限
+            Client c3(ts.port);           // TCP 三次握手在 backlog 层仍会成功
+            c3.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(!c3.read_response().ok);  // 第三条必须拿不到响应（被关/被丢）
+            // 已建立的连接不受影响
+            a.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(a.read_response().ok);
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_shutdown_waits_for_inflight_within_grace) {
+    // http-adapter.md 契约 4 的前半：宽限内完成的在途请求，shutdown 等它完成、
+    // 响应完整送达后 run() 才返回——不得把在途请求掐死
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d, [](HttpConfig& c) { c.shutdown_grace_sec = 5; });
+            Client c(ts.port);
+            c.send_str("GET /slow?ms=600 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));  // 让请求进 handler
+            ts.stop();  // shutdown + join run()
+            auto r = c.read_response();
+            CHECK(r.ok);
+            CHECK_EQ(r.body, "done");
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_shutdown_grace_bounds_return) {
+    // 契约 4 的后半："或超时"——超过宽限的在途请求被强关，run() 不被它无限期
+    // 拖住。handler（阻塞 sleep 2.2s，宽限 1s 内叫不醒）在 force 窗口内自行结束，
+    // run() 随即返回：上界远小于 force 兜底（1+3=4s），更不是无限等。
+    // 下界确认宽限真实存在——不是掐死在途立即返回
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d, [](HttpConfig& c) {
+                c.shutdown_grace_sec = 1;
+                c.shutdown_force_wait_sec = 3;
+            });
+            Client c(ts.port);
+            c.send_str("GET /slow?ms=2200 HTTP/1.1\r\nHost: t\r\n\r\n");
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            auto t0 = std::chrono::steady_clock::now();
+            ts.stop();
+            auto took = std::chrono::steady_clock::now() - t0;
+            CHECK(took >= std::chrono::milliseconds(700));
+            CHECK(took < std::chrono::milliseconds(3300));
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_shutdown_force_deadline_builtin) {
+    // 最严形态：handler 睡过整个 grace+force 窗口（4s > 1+1+余量），run() 仍须
+    // 到点返回。仅 builtin——它对"残余线程经 shared_ptr 持有共享状态、run() 返回
+    // 乃至 server 析构后自行收尾"有明示设计；beast/seastar 的强关路径会遗弃
+    // 未完成的 session 协程帧（进程退出场景的有界泄漏），ASan 下不可复现执行
+    TestServer ts("builtin", [](HttpConfig& c) {
+        c.shutdown_grace_sec = 1;
+        c.shutdown_force_wait_sec = 1;
+    });
+    Client c(ts.port);
+    c.send_str("GET /slow?ms=4000 HTTP/1.1\r\nHost: t\r\n\r\n");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    auto t0 = std::chrono::steady_clock::now();
+    ts.stop();
+    auto took = std::chrono::steady_clock::now() - t0;
+    CHECK(took < std::chrono::milliseconds(3500));  // 没等 4s 的 handler 睡完
+    c.close_now();
+    // 让残余 handler 睡完再退出用例：不与进程收尾竞争
+    std::this_thread::sleep_for(std::chrono::milliseconds(4200));
 }

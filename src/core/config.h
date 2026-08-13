@@ -36,8 +36,8 @@ struct HttpConfig {
     size_t max_header_size = 16 * 1024;
     int idle_timeout_sec = 60;
     // 请求级超时（docs/gaps.md §3.3）：从 handler 开始执行起计时，到点以协作式取消
-    // 打断请求（挂起点抛 OperationCancelled → 504）。idle_timeout 只覆盖 socket
-    // 系统调用，覆盖不到 handler 执行期。0 = 关闭
+    // 打断请求（挂起点抛 OperationCancelled → 503 SlowDown，SDK 可重试）。
+    // idle_timeout 只覆盖 socket 系统调用，覆盖不到 handler 执行期。0 = 关闭
     int request_timeout_sec = 300;
     // multipart 最小分片字节数（docs/gaps.md §5.7）：AWS 恒 5MiB，0 = 不限制。
     // 前面挂着不守这条规则的工具链、或本实例只是另一个 lights3 的代理时可放开

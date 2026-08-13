@@ -13,8 +13,8 @@
 #include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
+#include "http/admission.h"
 #include "http/server.h"
-#include "http/stall_guard.h"
 #include "s3/auth/credential_store.h"
 #include "s3/errors.h"
 #include "s3/service.h"
@@ -45,29 +45,6 @@ lights3::LogLevel parse_level(const std::string& s) {
     if (s == "error") return lights3::LogLevel::Error;
     return lights3::LogLevel::Info;
 }
-
-// 把入口限流的 Permit 系进流式响应体的生命期（docs/gaps.md 第三部分 ·
-// concurrency.md §6）：permit 若只活在 handler 协程帧内，会在响应体开始传输
-// **之前**就归还——N 个大对象 GET 全部拿到 permit 又全部归还后仍在并发占用
-// 带宽与后端 IO，`max_inflight_requests` 约束不到请求的主要生命期；关停排空
-// 用 available() 判在途，同样会漏数流式传输中的请求。驱动读完/丢弃响应体时
-// 析构本 reader，permit 随之归还（析构可发生在驱动线程，与协程帧路径同语义：
-// 等待者经池 executor 唤醒，不在释放方调用栈上内联展开）
-class PermitBodyReader final : public lights3::http::BodyReader {
-public:
-    PermitBodyReader(std::unique_ptr<lights3::http::BodyReader> inner,
-                     lights3::AsyncSemaphore::Permit permit)
-        : inner_(std::move(inner)), permit_(std::move(permit)) {}
-
-    lights3::Task<size_t> read(std::span<std::byte> buf) override {
-        co_return co_await inner_->read(buf);
-    }
-    std::optional<uint64_t> length() const override { return inner_->length(); }
-
-private:
-    std::unique_ptr<lights3::http::BodyReader> inner_;
-    lights3::AsyncSemaphore::Permit permit_;
-};
 
 }  // namespace
 
@@ -205,39 +182,10 @@ int main(int argc, char** argv) {
         auto shutdown_src = std::make_shared<CancelSource>();
         const int max_inflight = cfg.runtime.max_inflight_requests;
         auto stall = std::chrono::seconds(cfg.http.transfer_stall_timeout_sec);
-        server->set_handler([service, inflight, pool_exec, shutdown_src, stall](
-                                http::HttpRequest req) -> Task<http::HttpResponse> {
-            // driver 已挂上本连接的 token 时保留它，否则至少接上关停源
-            if (!req.cancel.valid()) req.cancel = shutdown_src->token();
-            CancelToken tok = req.cancel;
-            try {
-                auto permit = co_await inflight->acquire(tok);
-                // 传输停滞守卫（docs/gaps.md §3.3）：收发两个方向都包一层。装在
-                // L1/L2 交界处，四驱动一次性生效
-                req.body = http::guard_stalls(std::move(req.body), stall);
-                auto resp = co_await service->dispatch(std::move(req));
-                resp.stream_body = http::guard_stalls(std::move(resp.stream_body), stall);
-                // 流式响应把 permit 交给响应体（最外层包装）：驱动读完/断连丢弃
-                // 时才归还，限流因此覆盖响应传输全程。小响应（small_body）随
-                // co_return 归还——驱动写出一段内存的耗时有界，不值得为它把
-                // permit 也穿进驱动
-                if (resp.stream_body)
-                    resp.stream_body = std::make_unique<PermitBodyReader>(
-                        std::move(resp.stream_body), std::move(permit));
-                co_return resp;
-            } catch (const OperationCancelled&) {
-                // 排队期间被关停/超时取消：503 让 SDK 重试
-                http::HttpResponse r;
-                r.status = 503;
-                r.headers.set("Content-Type", "application/xml");
-                r.small_body = s3::error_xml(
-                    s3::S3Error(s3::S3ErrorCode::SlowDown,
-                                "Request cancelled while queued (server shutting down or "
-                                "request timed out)."),
-                    "-");
-                co_return r;
-            }
-        });
+        // 排队/Permit 生命周期/取消收敛的装配在 http/admission.h（与单测共用同一份）
+        server->set_handler(http::make_admission_handler(
+            inflight, stall, shutdown_src,
+            [service](http::HttpRequest req) { return service->dispatch(std::move(req)); }));
         server->listen(cfg.http.bind, cfg.http.port);
 
         // 信号 → self-pipe → 守护线程 shutdown（见 on_signal 的注释）

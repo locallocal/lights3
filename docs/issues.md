@@ -16,7 +16,7 @@
 | build-tikv | ✅ | ✅ 11/11 | 本轮未起 tiup 集群（真实集群用例 SKIP） |
 | build-asan | ✅ | ✅ 10/10 | T1 修复后全绿，T2–T9 修复后复测无报告 |
 
-> 上表为 T1–T9 全部修复后（2026-08-14）的复测结果。
+> 上表为 T1–T9 修复、T10/T11 测试补齐后（2026-08-14）的复测结果。
 
 > mint 兼容性集（`tests/e2e/run_mint.sh`）因本机无 docker 而 SKIP，属预期。
 
@@ -157,22 +157,48 @@
 
 ## 二、测试覆盖盲区（对照 docs/ 声称行为）
 
-### 【中】T10. 四驱动的超时 / 连接上限契约完全无测试
-- 对照：`src/core/config.h:38-50`（`request_timeout_sec`→504、`transfer_stall_timeout_sec`、
+### ~~【中】T10. 四驱动的超时 / 连接上限契约完全无测试~~ ✅ 已补齐（2026-08-14）
+- 对照：`src/core/config.h:38-50`（`request_timeout_sec`、`transfer_stall_timeout_sec`、
   `max_connections` 拒新连、`idle_timeout_sec` 空闲关连）与 `docs/http-adapter.md:201`
   （shutdown 须在"在途完成**或超时**"后返回）
-- 盲区：`grep` 全 tests/ 对 `request_timeout` / `transfer_stall` / `max_connections` / 504 **零命中**；
+- 盲区：`grep` 全 tests/ 对 `request_timeout` / `transfer_stall` / `max_connections` **零命中**；
   `idle_timeout` 只在夹具里被设置从未被断言；shutdown 只测了快乐路径。而这组行为的要点恰是
   "四驱动一致"（每驱动各自实现，最易各行其是）。慢客户端佯攻（每 59 秒 1 字节）正是注释点名的攻击形态。
+- 已补（test_http_drivers.cc / test_admission.cc / test_service.cc）：
+  - `http_driver_idle_timeout_closes_idle_connection`：空闲 keep-alive 连接在
+    idle_timeout 后被关，四驱动同断言；
+  - `http_driver_max_connections_rejects_excess`：超限第三连拿不到响应、已建立
+    连接不受影响（builtin/beast/seastar；httplib 上限由其线程池隐式约束，
+    config.h 明示语义不同，跳过）；
+  - `http_driver_shutdown_waits_for_inflight_within_grace`（宽限内等在途完成、
+    响应完整送达）+ `http_driver_shutdown_grace_bounds_return`（超宽限强关、
+    run() 有界返回，四驱动）+ `http_driver_shutdown_force_deadline_builtin`
+    （handler 睡过整个 grace+force 窗口 run() 仍到点返回；仅 builtin——
+    beast/seastar 强关路径遗弃未完成 session 帧，属进程退出场景的有界泄漏，
+    ASan 下不可复现执行，已在用例注释记录）；
+  - `stall_guard_kills_dripping_transfer` 等 3 例：滴灌式传输在窗口后被掐断、
+    窗口内推进 ≥64KiB 重置计时、EOF 不判定、window≤0 关闭；
+  - `service_request_timeout_cancels_and_returns_503`：handler 执行期超时由协作式
+    取消打断 → 503 SlowDown、无副作用、0 = 关闭。注：config.h 原注释声称
+    "→504"与实现（503 SlowDown，SDK 可重试）不符，注释已修正。
 - 严重度：**中**
 
-### 【中】T11. `runtime.max_inflight_requests` 入口限流（含 Permit 系进流式响应体）无行为测试
+### ~~【中】T11. `runtime.max_inflight_requests` 入口限流（含 Permit 系进流式响应体）无行为测试~~ ✅ 已补齐（2026-08-14）
 - 对照：`docs/concurrency.md:281`（全局限流、超限排队、Permit 系在 `stream_body`、读完/断连才归还、
   关停按 `available()` 判在途）；实现在 `src/main.cc` 装配层
 - 盲区：现有覆盖仅 config 解析（`test_config.cc:154`）与 metrics 渲染桩（假数据）。限流本体——
   超限排队、流式 GET 未读完时许可是否仍被占、断连时许可是否归还（泄漏一个就永久少一个额度）——
   零测试。这还是最近提交 `9b9edba` 刚改过的生命周期敏感逻辑，`main.cc` 装配路径整体不被单测触达。
-- 后果：Permit 泄漏类回归无从检出；泄漏型 bug 生产表现为额度耗尽后全站 hang。
+- 已补：准入装配从 main.cc 抽到 `src/http/admission.h`
+  （`PermitBodyReader` + `make_admission_handler`，main.cc 与单测装配同一份代码），
+  新增 `tests/unit/test_admission.cc` 六例行为测试：
+  - 小响应随 co_return 归还 permit；流式响应 handler 返回后 permit 仍被响应体
+    占用、读到 EOF 不归还、析构（读完/断连丢弃）才归还；
+  - 超限第二请求在信号量排队（dispatch 未执行），第一响应体丢弃后才放行，
+    额度完整归位（断连不归还即永久 hang——点名的泄漏形态）；
+  - 排队中被连接 token / 关停广播取消 → 503 SlowDown、不占额度；
+  - dispatch 抛异常 permit 不泄漏（RAII 覆盖异常路径）。
+  ASan/TSan 变体下全部通过，无竞态/泄漏报告。
 - 严重度：**中**（新改动 + 失败模式是整体 DoS，建议优先补）
 
 ---
@@ -199,5 +225,5 @@
 2. ~~**T1**：修好后 ASan 回归门才恢复有效，能兜住 T4/T5 这类 UAF 的将来回归。~~ ✅
 3. ~~**T4 / T5**：UAF，按 thread_pool 的既有范式对齐。~~ ✅
 4. ~~**T6 / T7 / T8 / T9**：DoS 面、租户隔离、测试可靠性。~~ ✅
-5. **T10 / T11**：补关键契约的行为测试（超时/上限、入口限流生命周期）。
+5. ~~**T10 / T11**：补关键契约的行为测试（超时/上限、入口限流生命周期）。~~ ✅
 6. **T12–T20**：择机清理。

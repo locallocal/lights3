@@ -56,11 +56,11 @@ struct Endpoint {
         } else if (url.rfind("http://", 0) == 0) {
             rest = url.substr(7);
         } else {
-            throw std::runtime_error("endpoint 须以 http:// 或 https:// 开头: " + url);
+            throw std::runtime_error("endpoint must start with http:// or https://: " + url);
         }
         if (!rest.empty() && rest.back() == '/') rest.pop_back();
         if (rest.empty() || rest.find('/') != std::string::npos)
-            throw std::runtime_error("endpoint 须为 scheme://host[:port]: " + url);
+            throw std::runtime_error("endpoint must be scheme://host[:port]: " + url);
         auto colon = rest.find(':');
         if (colon == std::string::npos) {
             ep.host = rest;
@@ -70,12 +70,12 @@ struct Endpoint {
             try {
                 ep.port = std::stoi(rest.substr(colon + 1));
             } catch (...) {
-                throw std::runtime_error("endpoint 端口非法: " + url);
+                throw std::runtime_error("endpoint has an invalid port: " + url);
             }
             if (ep.port < 1 || ep.port > 65535)
-                throw std::runtime_error("endpoint 端口非法: " + url);
+                throw std::runtime_error("endpoint has an invalid port: " + url);
         }
-        if (ep.host.empty()) throw std::runtime_error("endpoint host 为空: " + url);
+        if (ep.host.empty()) throw std::runtime_error("endpoint has an empty host: " + url);
         bool default_port = ep.port == (ep.https ? 443 : 80);
         ep.signed_host = default_port ? ep.host : ep.host + ":" + std::to_string(ep.port);
         ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" +
@@ -142,7 +142,7 @@ private:
 // 统一收尾：期望状态码 → 打印响应体（服务端已是缩进 JSON）；否则 stderr + 非零
 int finish(const httplib::Result& r, int expect, const std::string& ok_note = "") {
     if (!r) {
-        fprintf(stderr, "s3adm: 传输错误: %s\n", httplib::to_string(r.error()).c_str());
+        fprintf(stderr, "s3adm: transport error: %s\n", httplib::to_string(r.error()).c_str());
         return 1;
     }
     if (r->status != expect) {
@@ -165,7 +165,7 @@ std::string load_policy_arg(const std::string& arg) {
     std::string text = arg;
     if (!arg.empty() && arg.front() == '@') {  // @file：curl 惯例
         std::ifstream f(arg.substr(1));
-        if (!f) throw std::runtime_error("无法读取 policy 文件: " + arg.substr(1));
+        if (!f) throw std::runtime_error("cannot read policy file: " + arg.substr(1));
         std::ostringstream ss;
         ss << f.rdbuf();
         text = ss.str();
@@ -178,14 +178,14 @@ std::string load_policy_arg(const std::string& arg) {
 // 连接类公共选项：ccmd 每个子命令的选项集独立，逐个注册
 void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
     cmd->varp<std::string>("endpoint", "e", "http://127.0.0.1:9000",
-                           "lights3 endpoint（scheme://host[:port]）.");
-    cmd->var<std::string>("ak", "", "root（静态）AK；留空取环境变量 LIGHTS3_ADMIN_AK.");
+                           "lights3 endpoint (scheme://host[:port]).");
+    cmd->var<std::string>("ak", "", "root (static) access key; falls back to env LIGHTS3_ADMIN_AK.");
     cmd->var<std::string>("sk", "",
-                          "root（静态）SK；留空取环境变量 LIGHTS3_ADMIN_SK（推荐：argv "
-                          "对本机 ps 可见）.");
-    cmd->var<std::string>("region", "us-east-1", "SigV4 region，须与服务端 auth.region 一致.");
-    cmd->var<bool>("insecure", false, "https 时跳过服务端证书校验（自签名部署用）.");
-    cmd->var<int>("timeout-sec", 10, "连接/读/写超时（秒）.");
+                          "root (static) secret key; falls back to env LIGHTS3_ADMIN_SK "
+                          "(preferred: argv is visible to local ps).");
+    cmd->var<std::string>("region", "us-east-1", "SigV4 region; must match the server auth.region.");
+    cmd->var<bool>("insecure", false, "skip server certificate verification for https (self-signed deployments).");
+    cmd->var<int>("timeout-sec", 10, "connect/read/write timeout in seconds.");
 }
 
 // 读连接选项 + 环境变量兜底，构造客户端执行 fn；异常统一在此落成退出码
@@ -200,7 +200,7 @@ void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
             if (const char* e = std::getenv("LIGHTS3_ADMIN_SK")) sk = e;
         if (ak.empty() || sk.empty()) {
             fprintf(stderr,
-                    "s3adm: 缺少凭证。--ak/--sk 或环境变量 "
+                    "s3adm: missing credentials; pass --ak=/--sk= or set env "
                     "LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK\n");
             g_exit = 2;
             return;
@@ -208,7 +208,7 @@ void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
         auto ep = Endpoint::parse(cmd->var<std::string>("endpoint"));
 #ifndef CPPHTTPLIB_OPENSSL_SUPPORT
         if (ep.https) {
-            fprintf(stderr, "s3adm: 本构建未启用 OpenSSL，不支持 https endpoint\n");
+            fprintf(stderr, "s3adm: this build lacks OpenSSL support; https endpoints are unavailable\n");
             g_exit = 2;
             return;
         }
@@ -229,7 +229,7 @@ void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
 // 位置参数须恰为一个 AK；不满足打印子命令用法并置用法错误退出码
 bool one_ak_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& ak) {
     if (cmd->args().size() != 1) {
-        fprintf(stderr, "s3adm: 用法: %s\n", cmd->usage().c_str());
+        fprintf(stderr, "s3adm: usage: %s\n", cmd->usage().c_str());
         g_exit = 2;
         return false;
     }
@@ -240,8 +240,9 @@ bool one_ak_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& ak) {
 std::shared_ptr<ccmd::c_command> make_list() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "list", "s3adm list --endpoint=http://127.0.0.1:9000",
-        "s3adm list [options]", "列出全部凭证（SK 掩码，含静态与文件来源）.",
-        "列出全部凭证（SK 掩码）.",
+        "s3adm list [options]",
+        "List all credentials (secret keys masked; includes static and file-based ones).",
+        "list all credentials (secret keys masked).",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             run_admin(c, [](AdminClient& cli) { return finish(cli.get(kBase, ""), 200); });
         });
@@ -252,9 +253,9 @@ std::shared_ptr<ccmd::c_command> make_list() {
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "get", "s3adm get L3AKXXXX --show-secret", "s3adm get <ak> [options]",
-        "查询单个凭证元数据；--show-secret 取回明文 SK（仅动态/文件凭证，"
-        "高敏动作，服务端留审计日志）.",
-        "查询单个凭证.",
+        "Show one credential's metadata; --show-secret returns the plaintext secret key "
+        "(dynamic/file credentials only; sensitive - the server logs an audit line).",
+        "show one credential.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string ak;
             if (!one_ak_arg(c, ak)) return;
@@ -263,7 +264,7 @@ std::shared_ptr<ccmd::c_command> make_get() {
                 return finish(cli.get(ak_path(ak), show ? "show-secret=true" : ""), 200);
             });
         });
-    cmd->varp<bool>("show-secret", "s", false, "取回明文 SK（仅动态/文件凭证）.");
+    cmd->varp<bool>("show-secret", "s", false, "return the plaintext secret key (dynamic/file credentials only).");
     add_conn_flags(cmd);
     return cmd;
 }
@@ -273,13 +274,14 @@ std::shared_ptr<ccmd::c_command> make_create() {
         "create",
         R"(s3adm create --comment=tenant-a --policy='{"buckets":["tenant-a-*"]}')",
         "s3adm create [options]",
-        "生成一对租户 AK/SK（响应是唯一一次完整返回 SK 的机会）。--policy 传 "
-        "policy JSON（{\"buckets\":[...],\"prefixes\":[...],\"readonly\":bool,"
-        "\"actions\":[...]}）或 @file 从文件读.",
-        "生成一对租户 AK/SK.",
+        "Create a tenant access/secret key pair (the response is the only time the "
+        "full secret key is returned). --policy takes policy JSON "
+        "({\"buckets\":[...],\"prefixes\":[...],\"readonly\":bool,\"actions\":[...]}) "
+        "or @file to read it from a file.",
+        "create a tenant access/secret key pair.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!c->args().empty()) {
-                fprintf(stderr, "s3adm: 用法: %s\n", c->usage().c_str());
+                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
@@ -293,8 +295,8 @@ std::shared_ptr<ccmd::c_command> make_create() {
                 return finish(cli.post(kBase, body.dump()), 201);
             });
         });
-    cmd->varp<std::string>("comment", "c", "", "凭证备注.");
-    cmd->varp<std::string>("policy", "p", "", "policy JSON，或 @file 从文件读.");
+    cmd->varp<std::string>("comment", "c", "", "credential comment.");
+    cmd->varp<std::string>("policy", "p", "", "policy JSON, or @file to read from a file.");
     add_conn_flags(cmd);
     return cmd;
 }
@@ -302,7 +304,9 @@ std::shared_ptr<ccmd::c_command> make_create() {
 std::shared_ptr<ccmd::c_command> make_delete() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "delete", "s3adm delete L3AKXXXX", "s3adm delete <ak> [options]",
-        "吊销动态凭证（静态凭证归配置文件管，服务端拒绝）.", "吊销动态凭证.",
+        "Revoke a dynamic credential (static ones belong to the config file; the "
+        "server refuses them).",
+        "revoke a dynamic credential.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string ak;
             if (!one_ak_arg(c, ak)) return;
@@ -320,11 +324,11 @@ int main(int argc, char* argv[]) {
     auto root = std::make_shared<ccmd::c_command>(
         "s3adm", "s3adm list --endpoint=http://127.0.0.1:9000",
         "s3adm <command> [options]",
-        "用 root（静态）AK/SK 管理租户凭证，对接 /-/admin/credentials"
-        "（docs/credential-management.md）。凭证经各子命令的 --ak=/--sk= 或环境变量 "
-        "LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK 传入；选项须写在子命令之后，长选项取值"
-        "用 --name=value 形式.",
-        "lights3 租户凭证管理.",
+        "Manage tenant credentials via /-/admin/credentials with the root (static) "
+        "access/secret key (docs/credential-management.md). Credentials come from each "
+        "subcommand's --ak=/--sk= or from env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK. "
+        "Options must follow the subcommand; long options take values as --name=value.",
+        "manage lights3 tenant credentials.",
         // 裸 s3adm / s3adm -x：没有可执行的操作，打印帮助并按用法错误退出
         [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();

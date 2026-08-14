@@ -32,6 +32,14 @@
 | `GET /-/admin/credentials/{ak}` | 查询单个凭证元数据；`?show-secret=true` 时返回明文 SK（**仅动态/文件凭证**，静态凭证恒掩码，见 §10.5） | `200` + JSON |
 | `DELETE /-/admin/credentials/{ak}` | 吊销（仅限动态凭证，静态凭证归配置文件管） | `204` |
 
+配套运维 CLI：`s3adm`（`src/tools/s3adm.cc`，构建产物与 `lights3` 同目录，
+子命令框架为 `third_party/ccmd`）。四个子命令 `list` / `get <ak>` / `create` /
+`delete <ak>` 与上表一一对应，SigV4 自签名。root AK/SK 经 `--ak=`/`--sk=` 或
+环境变量 `LIGHTS3_ADMIN_AK`/`LIGHTS3_ADMIN_SK` 传入（SK 建议走环境变量，argv
+对本机 `ps` 可见）；选项须写在子命令之后、长选项取值用 `--name=value` 形式
+（ccmd 语义）；`get` 支持 `--show-secret`，`create` 支持 `--comment` 与
+`--policy`（内联 JSON 或 `@file`）。`s3adm help [command]` 查看用法。
+
 响应用 JSON，序列化/解析引入 [nlohmann/json](https://github.com/nlohmann/json)
 （header-only，git 子模块进 `third_party/`，与 gflags/spdlog/httplib 同一套
 管理方式，引入方式见 §5.4）。管理面是新造的 API，没有 S3 兼容包袱，JSON

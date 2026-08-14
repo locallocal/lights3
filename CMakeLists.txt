@@ -272,6 +272,9 @@ add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 # nlohmann/json：admin 凭证 API 的 JSON 编解码（header-only，docs/credential-management.md §5.4）
 add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
+# ccmd：s3adm 的子命令框架（header-only + 静态 cflag，仅运维工具用）
+add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
+
 # ---- 核心库：L2/L3/L4 + HTTP 边界 ----
 add_library(lights3_core STATIC
   src/core/background.cc
@@ -440,7 +443,7 @@ target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
 # CPPHTTPLIB_OPENSSL_SUPPORT 经 lights3_core 的 PUBLIC 定义传播，与核心库目标级
 # 一致（ODR）；未启用 httplib/cloudproxy 的裁剪构建下自动退化为仅 http
 add_executable(s3adm src/tools/s3adm.cc)
-target_link_libraries(s3adm PRIVATE lights3_core gflags::gflags
+target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(s3adm SYSTEM PRIVATE third_party)
 

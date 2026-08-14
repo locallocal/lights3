@@ -27,3 +27,6 @@
 [submodule "third_party/client-c"]
 	path = third_party/client-c
 	url = https://github.com/tikv/client-c.git
+[submodule "third_party/ccmd"]
+	path = third_party/ccmd
+	url = https://github.com/locallocal/ccmd

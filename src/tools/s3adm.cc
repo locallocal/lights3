@@ -1,13 +1,17 @@
 // 运维 CLI：s3adm —— 用运维面（root 静态凭证）的 AK/SK 管理租户凭证，
-// 对接 /-/admin/credentials（docs/credential-management.md §2/§3）：
-//   list / get / create / delete。请求经 SigV4 自签名（复用 s3/auth/sigv4 的
-// 签名端）+ httplib 同步客户端；响应原样打印服务端 JSON。
-#include <gflags/gflags.h>
+// 对接 /-/admin/credentials（docs/credential-management.md §2/§3）。
+// 子命令框架用 ccmd（third_party/ccmd）：list / get / create / delete 各为
+// 独立子命令、各持独立选项集——ccmd 的 root 选项不下传，连接类选项须写在
+// 子命令之后（s3adm list --endpoint=...），长选项取值只认 --name=value 形式。
+// 请求经 SigV4 自签名（复用 s3/auth/sigv4 的签名端）+ httplib 同步客户端；
+// 响应原样打印服务端 JSON。
+#include <ccmd.h>
 #include <httplib/httplib.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 
@@ -21,22 +25,6 @@
 #include "s3/auth/sigv4.h"
 #include "s3/errors.h"
 
-DEFINE_string(endpoint, "http://127.0.0.1:9000",
-              "lights3 endpoint（scheme://host[:port]）");
-DEFINE_string(ak, "", "root（静态）AK；留空取环境变量 LIGHTS3_ADMIN_AK");
-DEFINE_string(sk, "",
-              "root（静态）SK；留空取环境变量 LIGHTS3_ADMIN_SK。命令行参数对本机 "
-              "ps 可见，优先用环境变量传 SK");
-DEFINE_string(region, "us-east-1", "SigV4 region，须与服务端 auth.region 一致");
-DEFINE_string(comment, "", "create：凭证备注");
-DEFINE_string(policy, "",
-              "create：policy JSON（{\"buckets\":[...],\"prefixes\":[...],"
-              "\"readonly\":bool,\"actions\":[...]}），或 @file 从文件读");
-DEFINE_bool(show_secret, false,
-            "get：取回明文 SK（仅动态/文件凭证；高敏动作，服务端留审计日志）");
-DEFINE_bool(insecure, false, "https 时跳过服务端证书校验（自签名部署用）");
-DEFINE_int32(timeout_sec, 10, "连接/读/写超时（秒）");
-
 namespace {
 
 using lights3::Credential;
@@ -46,15 +34,8 @@ namespace util = lights3::util;
 
 constexpr const char* kBase = "/-/admin/credentials";
 
-constexpr const char* kUsage = R"(用法: s3adm [flags] <command> [args]
-
-命令:
-  list          列出全部凭证（SK 掩码）
-  get <ak>      查询单个凭证；--show_secret 取回明文 SK
-  create        生成一对租户 AK/SK；可带 --comment / --policy
-  delete <ak>   吊销动态凭证
-
-认证用 root（静态配置）AK/SK：--ak/--sk 或环境变量 LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK。)";
+// ccmd 回调无返回值，进程退出码经此带出（0 成功 / 1 请求失败 / 2 用法错误）
+int g_exit = 0;
 
 // 端点解析。signed_host 与 httplib 实际发出的 Host 头逐字节一致（默认端口只发
 // host，否则 host:port）——与 cloudproxy Endpoint::parse 同一约定，SigV4 的
@@ -105,18 +86,21 @@ struct Endpoint {
 
 class AdminClient {
 public:
-    AdminClient(const Endpoint& ep, Credential cred)
+    AdminClient(const Endpoint& ep, Credential cred, const std::string& region,
+                int timeout_sec, bool insecure)
         : ep_(ep),
           cli_(ep.base_url),
           auth_(s3::SigV4Authenticator::build(lights3::AuthConfig{
-              .credentials = {}, .region = FLAGS_region, .service = "s3"})),
+              .credentials = {}, .region = region, .service = "s3"})),
           cred_(std::move(cred)) {
-        auto t = std::chrono::seconds(FLAGS_timeout_sec);
+        auto t = std::chrono::seconds(timeout_sec);
         cli_.set_connection_timeout(t);
         cli_.set_read_timeout(t);
         cli_.set_write_timeout(t);
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-        if (ep.https) cli_.enable_server_certificate_verification(!FLAGS_insecure);
+        if (ep.https) cli_.enable_server_certificate_verification(!insecure);
+#else
+        (void)insecure;
 #endif
     }
 
@@ -191,67 +175,165 @@ std::string load_policy_arg(const std::string& arg) {
     return text;
 }
 
-}  // namespace
+// 连接类公共选项：ccmd 每个子命令的选项集独立，逐个注册
+void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
+    cmd->varp<std::string>("endpoint", "e", "http://127.0.0.1:9000",
+                           "lights3 endpoint（scheme://host[:port]）.");
+    cmd->var<std::string>("ak", "", "root（静态）AK；留空取环境变量 LIGHTS3_ADMIN_AK.");
+    cmd->var<std::string>("sk", "",
+                          "root（静态）SK；留空取环境变量 LIGHTS3_ADMIN_SK（推荐：argv "
+                          "对本机 ps 可见）.");
+    cmd->var<std::string>("region", "us-east-1", "SigV4 region，须与服务端 auth.region 一致.");
+    cmd->var<bool>("insecure", false, "https 时跳过服务端证书校验（自签名部署用）.");
+    cmd->var<int>("timeout-sec", 10, "连接/读/写超时（秒）.");
+}
 
-int main(int argc, char** argv) {
-    gflags::SetUsageMessage(kUsage);
-    gflags::ParseCommandLineFlags(&argc, &argv, true);
-    if (argc < 2) {
-        fprintf(stderr, "%s\n", kUsage);
-        return 2;
-    }
-    std::string cmd = argv[1];
-
-    std::string ak = FLAGS_ak;
-    std::string sk = FLAGS_sk;
-    if (ak.empty())
-        if (const char* e = std::getenv("LIGHTS3_ADMIN_AK")) ak = e;
-    if (sk.empty())
-        if (const char* e = std::getenv("LIGHTS3_ADMIN_SK")) sk = e;
-    if (ak.empty() || sk.empty()) {
-        fprintf(stderr,
-                "s3adm: 缺少凭证。--ak/--sk 或环境变量 LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK\n");
-        return 2;
-    }
-
+// 读连接选项 + 环境变量兜底，构造客户端执行 fn；异常统一在此落成退出码
+template <class Fn>
+void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
     try {
-        auto ep = Endpoint::parse(FLAGS_endpoint);
+        std::string ak = cmd->var<std::string>("ak");
+        std::string sk = cmd->var<std::string>("sk");
+        if (ak.empty())
+            if (const char* e = std::getenv("LIGHTS3_ADMIN_AK")) ak = e;
+        if (sk.empty())
+            if (const char* e = std::getenv("LIGHTS3_ADMIN_SK")) sk = e;
+        if (ak.empty() || sk.empty()) {
+            fprintf(stderr,
+                    "s3adm: 缺少凭证。--ak/--sk 或环境变量 "
+                    "LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK\n");
+            g_exit = 2;
+            return;
+        }
+        auto ep = Endpoint::parse(cmd->var<std::string>("endpoint"));
 #ifndef CPPHTTPLIB_OPENSSL_SUPPORT
         if (ep.https) {
             fprintf(stderr, "s3adm: 本构建未启用 OpenSSL，不支持 https endpoint\n");
-            return 2;
+            g_exit = 2;
+            return;
         }
 #endif
-        AdminClient cli(ep, Credential{ak, util::SecretString(std::move(sk))});
-
-        if (cmd == "list" && argc == 2) {
-            return finish(cli.get(kBase, ""), 200);
-        }
-        if (cmd == "get" && argc == 3) {
-            return finish(
-                cli.get(ak_path(argv[2]), FLAGS_show_secret ? "show-secret=true" : ""),
-                200);
-        }
-        if (cmd == "create" && argc == 2) {
-            json body = json::object();
-            if (!FLAGS_comment.empty()) body["comment"] = FLAGS_comment;
-            if (!FLAGS_policy.empty())
-                body["policy"] = json::parse(load_policy_arg(FLAGS_policy));
-            // 空对象也发 body：POST 语义单一，服务端对 {} 与无 body 同义
-            return finish(cli.post(kBase, body.dump()), 201);
-        }
-        if (cmd == "delete" && argc == 3) {
-            return finish(cli.del(ak_path(argv[2])), 204,
-                          std::string("revoked ") + argv[2]);
-        }
+        AdminClient cli(ep, Credential{ak, util::SecretString(std::move(sk))},
+                        cmd->var<std::string>("region"), cmd->var<int>("timeout-sec"),
+                        cmd->var<bool>("insecure"));
+        g_exit = fn(cli);
     } catch (const s3::S3Error& e) {
         fprintf(stderr, "s3adm: %s\n", e.message.c_str());
-        return 1;
+        g_exit = 1;
     } catch (const std::exception& e) {
         fprintf(stderr, "s3adm: %s\n", e.what());
-        return 1;
+        g_exit = 1;
     }
+}
 
-    fprintf(stderr, "s3adm: 未知命令或参数个数不对: %s\n\n%s\n", cmd.c_str(), kUsage);
-    return 2;
+// 位置参数须恰为一个 AK；不满足打印子命令用法并置用法错误退出码
+bool one_ak_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& ak) {
+    if (cmd->args().size() != 1) {
+        fprintf(stderr, "s3adm: 用法: %s\n", cmd->usage().c_str());
+        g_exit = 2;
+        return false;
+    }
+    ak = cmd->args().front();
+    return true;
+}
+
+std::shared_ptr<ccmd::c_command> make_list() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "list", "s3adm list --endpoint=http://127.0.0.1:9000",
+        "s3adm list [options]", "列出全部凭证（SK 掩码，含静态与文件来源）.",
+        "列出全部凭证（SK 掩码）.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            run_admin(c, [](AdminClient& cli) { return finish(cli.get(kBase, ""), 200); });
+        });
+    add_conn_flags(cmd);
+    return cmd;
+}
+
+std::shared_ptr<ccmd::c_command> make_get() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "get", "s3adm get L3AKXXXX --show-secret", "s3adm get <ak> [options]",
+        "查询单个凭证元数据；--show-secret 取回明文 SK（仅动态/文件凭证，"
+        "高敏动作，服务端留审计日志）.",
+        "查询单个凭证.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            std::string ak;
+            if (!one_ak_arg(c, ak)) return;
+            bool show = c->var<bool>("show-secret");
+            run_admin(c, [&](AdminClient& cli) {
+                return finish(cli.get(ak_path(ak), show ? "show-secret=true" : ""), 200);
+            });
+        });
+    cmd->varp<bool>("show-secret", "s", false, "取回明文 SK（仅动态/文件凭证）.");
+    add_conn_flags(cmd);
+    return cmd;
+}
+
+std::shared_ptr<ccmd::c_command> make_create() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "create",
+        R"(s3adm create --comment=tenant-a --policy='{"buckets":["tenant-a-*"]}')",
+        "s3adm create [options]",
+        "生成一对租户 AK/SK（响应是唯一一次完整返回 SK 的机会）。--policy 传 "
+        "policy JSON（{\"buckets\":[...],\"prefixes\":[...],\"readonly\":bool,"
+        "\"actions\":[...]}）或 @file 从文件读.",
+        "生成一对租户 AK/SK.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            if (!c->args().empty()) {
+                fprintf(stderr, "s3adm: 用法: %s\n", c->usage().c_str());
+                g_exit = 2;
+                return;
+            }
+            run_admin(c, [&](AdminClient& cli) {
+                json body = json::object();
+                auto comment = c->var<std::string>("comment");
+                auto policy = c->var<std::string>("policy");
+                if (!comment.empty()) body["comment"] = comment;
+                if (!policy.empty()) body["policy"] = json::parse(load_policy_arg(policy));
+                // 空对象也发 body：POST 语义单一，服务端对 {} 与无 body 同义
+                return finish(cli.post(kBase, body.dump()), 201);
+            });
+        });
+    cmd->varp<std::string>("comment", "c", "", "凭证备注.");
+    cmd->varp<std::string>("policy", "p", "", "policy JSON，或 @file 从文件读.");
+    add_conn_flags(cmd);
+    return cmd;
+}
+
+std::shared_ptr<ccmd::c_command> make_delete() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "delete", "s3adm delete L3AKXXXX", "s3adm delete <ak> [options]",
+        "吊销动态凭证（静态凭证归配置文件管，服务端拒绝）.", "吊销动态凭证.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            std::string ak;
+            if (!one_ak_arg(c, ak)) return;
+            run_admin(c, [&](AdminClient& cli) {
+                return finish(cli.del(ak_path(ak)), 204, "revoked " + ak);
+            });
+        });
+    add_conn_flags(cmd);
+    return cmd;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+    auto root = std::make_shared<ccmd::c_command>(
+        "s3adm", "s3adm list --endpoint=http://127.0.0.1:9000",
+        "s3adm <command> [options]",
+        "用 root（静态）AK/SK 管理租户凭证，对接 /-/admin/credentials"
+        "（docs/credential-management.md）。凭证经各子命令的 --ak=/--sk= 或环境变量 "
+        "LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK 传入；选项须写在子命令之后，长选项取值"
+        "用 --name=value 形式.",
+        "lights3 租户凭证管理.",
+        // 裸 s3adm / s3adm -x：没有可执行的操作，打印帮助并按用法错误退出
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            c->print_help();
+            g_exit = 2;
+        });
+    root->add_subcommand(make_list());
+    root->add_subcommand(make_get());
+    root->add_subcommand(make_create());
+    root->add_subcommand(make_delete());
+    root->execute(argc, argv);
+    return g_exit;
 }

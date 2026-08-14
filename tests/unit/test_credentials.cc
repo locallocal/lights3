@@ -1,5 +1,7 @@
 // docs/credential-management.md：CredentialStore 持久化/两级权限 + /-/admin/credentials 全流程
 // + 二期（§10）：at-rest 加密 / per-credential policy / 文件热加载 / 多实例增量同步
+#include <unistd.h>
+
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -409,7 +411,9 @@ TEST(admin_api_policy_flow) {
 
 TEST(credstore_file_provider_and_hot_reload) {
     namespace fs = std::filesystem;
-    auto path = fs::temp_directory_path() / "lights3-test-creds.json";
+    // 带 pid：多个构建变体的 unit_tests 并行跑时不得互相覆盖
+    auto path = fs::temp_directory_path() /
+                ("lights3-test-creds-" + std::to_string(::getpid()) + ".json");
     std::ofstream(path) << R"({"credentials":[
         {"access_key":"FILEAKAAA","secret_key":"file-secret-1","comment":"from-file"},
         {"access_key":"FILEAKBBB","secret_key":"file-secret-2","policy":{"readonly":true}},
@@ -476,7 +480,8 @@ TEST(sys_bucket_hidden_from_data_plane) {
 // fail-open 防护：纯文件形态下文件被清成空数组不得把凭证表清空（保留旧表 + degraded）
 TEST(credstore_file_reload_refuses_empty_table) {
     namespace fs = std::filesystem;
-    auto path = fs::temp_directory_path() / "lights3-test-empty-creds.json";
+    auto path = fs::temp_directory_path() /
+                ("lights3-test-empty-creds-" + std::to_string(::getpid()) + ".json");
     std::ofstream(path) << R"({"credentials":[
         {"access_key":"FILEAKAAA","secret_key":"file-secret-1"}]})";
     AuthConfig cfg;  // 无静态凭证：认证完全依赖文件

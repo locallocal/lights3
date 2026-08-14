@@ -1210,6 +1210,17 @@ TEST(service_multipart_listing_pagination) {
     auto bad = sync_wait(svc.dispatch(
         make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
     CHECK_EQ(bad.status, 400);
+
+    // encoding-type=url（docs/issues.md T13）：此前放行参数却从不编码，静默误答
+    sync_wait(svc.dispatch(make_req("POST", "/bkt/enc me.bin", "", {{"uploads", ""}})));
+    auto encp = sync_wait(svc.dispatch(make_req(
+        "GET", "/bkt", "", {{"uploads", ""}, {"encoding-type", "url"}, {"prefix", "enc "}})));
+    CHECK(contains(body_of(encp), "<EncodingType>url</EncodingType>"));
+    CHECK(contains(body_of(encp), "<Key>enc%20me.bin</Key>"));
+    CHECK(contains(body_of(encp), "<Prefix>enc%20</Prefix>"));
+    auto bad_enc = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt", "", {{"uploads", ""}, {"encoding-type", "zzz"}})));
+    CHECK_EQ(bad_enc.status, 400);
 }
 
 // 请求级超时（config.h request_timeout_sec · docs/issues.md T10）：handler 执行期

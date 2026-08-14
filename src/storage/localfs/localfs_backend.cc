@@ -448,8 +448,13 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
 
     fs::path path = object_path(bucket, key);
     std::error_code ec;
-    fs::remove(path, ec);                             // 幂等：不存在也算成功
+    // 幂等：不存在不是错误（remove 返回 false 且 ec 为空）；但 EACCES/EIO 等
+    // 真实失败必须上抛——静默 204 会让客户端确信已删除
+    fs::remove(path, ec);
+    if (ec) throw S3Error(S3ErrorCode::InternalError, "delete object: " + ec.message());
     fs::remove(path.string() + kSidecarSuffix, ec);
+    if (ec)
+        throw S3Error(S3ErrorCode::InternalError, "delete object sidecar: " + ec.message());
     // 清理空父目录直到 bucket 根
     fs::path dir = path.parent_path(), root = bucket_dir(bucket);
     while (dir != root && dir.string().size() > root.string().size()) {

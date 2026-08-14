@@ -47,6 +47,9 @@ public:
     }
 
     bool available = false;
+    // 实例归属：仅自起的私有 redis 允许 SCRIPT FLUSH / CLIENT KILL 这类服务器
+    // 全局操作；外部实例（LIGHTS3_TEST_REDIS_URI）按约定只靠 key 前缀隔离
+    bool owned = false;
     std::string uri;
 
     // 直连服务端发管理命令（SCRIPT FLUSH 等测试注入用）
@@ -95,6 +98,7 @@ private:
                 redisFree(ctx);
                 if (ok) {
                     available = true;
+                    owned = true;
                     return;
                 }
             }
@@ -164,6 +168,15 @@ RedisMetaOptions redis_opts(const std::string& prefix) {
 #define REDIS_OR_SKIP()                                                       \
     if (!RedisTestServer::instance().available) {                             \
         printf("       [SKIP] redis-server not available\n");                \
+        return;                                                               \
+    }
+
+// 需要 SCRIPT FLUSH / CLIENT KILL 等服务器全局注入的用例：指向外部共享实例时
+// 跳过——既不打断他人，也避免他人连接使 reconnects 精确断言失真
+#define OWNED_REDIS_OR_SKIP()                                                 \
+    REDIS_OR_SKIP();                                                          \
+    if (!RedisTestServer::instance().owned) {                                 \
+        printf("       [SKIP] external redis: server-wide commands not allowed\n"); \
         return;                                                               \
     }
 
@@ -242,7 +255,7 @@ TEST(duostore_redis_multi_gateway_shared_meta) {
 
 // NOSCRIPT 自愈（§3.5）：SCRIPT FLUSH 后提交与 list 照常（回退 EVAL 重载）
 TEST(duostore_redis_noscript_selfheal) {
-    REDIS_OR_SKIP();
+    OWNED_REDIS_OR_SKIP();
     RedisMetaStore m(redis_opts(unique_prefix()));
     m.create_bucket("heal");
     m.put_object("heal", "k1", make_rec("k1", {}));
@@ -355,7 +368,7 @@ TEST(duostore_redis_config_wait_replicas) {
 // 连接后——纯读换新连接重试（reconnects 递增），提交类单命令 IO 失败 = 结果
 // 不明 → InternalError（盲重试禁令），store 不失能（下次调用新建连接照常）
 TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
-    REDIS_OR_SKIP();
+    OWNED_REDIS_OR_SKIP();
     auto reg = std::make_shared<MetricsRegistry>();
     auto opts = redis_opts(unique_prefix());
     opts.metrics = MetricsScope(reg, {{"backend", "r4"}});

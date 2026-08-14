@@ -5,6 +5,7 @@
 #include <map>
 
 #include "core/util/time.h"
+#include "core/util/uri.h"
 #include "s3/handlers/common.h"
 #include "storage/multipart.h"
 #include "s3/service.h"
@@ -298,6 +299,18 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
     if (!opt.delimiter.empty() && opt.delimiter != "/")
         throw S3Error(S3ErrorCode::NotImplemented,
                       "Only '/' is supported as a delimiter.");
+    // encoding-type=url：与 list_objects 同一语义——此前放行了参数却从不编码，
+    // 静默误答
+    bool encode_url = false;
+    if (auto et = req.query_get("encoding-type")) {
+        if (*et != "url")
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Invalid Encoding Method specified in Request");
+        encode_url = true;
+    }
+    auto enc = [&](const std::string& s) {
+        return encode_url ? util::aws_uri_encode(s, /*encode_slash=*/false) : s;
+    };
 
     auto res = co_await router_.resolve(bucket).list_multipart_uploads(bucket, opt);
 
@@ -314,19 +327,20 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
     XmlWriter w;
     w.open("ListMultipartUploadsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
     w.element("Bucket", bucket);
-    w.element("KeyMarker", opt.key_marker);
+    w.element("KeyMarker", enc(opt.key_marker));
     w.element("UploadIdMarker", opt.upload_id_marker);
     if (res.is_truncated) {
-        w.element("NextKeyMarker", res.next_key_marker);
+        w.element("NextKeyMarker", enc(res.next_key_marker));
         w.element("NextUploadIdMarker", res.next_upload_id_marker);
     }
-    if (!opt.prefix.empty()) w.element("Prefix", opt.prefix);
-    if (!opt.delimiter.empty()) w.element("Delimiter", opt.delimiter);
+    if (!opt.prefix.empty()) w.element("Prefix", enc(opt.prefix));
+    if (!opt.delimiter.empty()) w.element("Delimiter", enc(opt.delimiter));
+    if (encode_url) w.element("EncodingType", "url");
     w.element("MaxUploads", static_cast<uint64_t>(opt.max_uploads));
     w.element("IsTruncated", res.is_truncated ? "true" : "false");
     for (auto& u : res.uploads) {
         w.open("Upload");
-        w.element("Key", u.key);
+        w.element("Key", enc(u.key));
         w.element("UploadId", u.upload_id);
         w.element("Initiated", util::iso8601(u.initiated));
         w.element("StorageClass", "STANDARD");
@@ -334,7 +348,7 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
     }
     for (auto& p : res.common_prefixes) {
         w.open("CommonPrefixes");
-        w.element("Prefix", p);
+        w.element("Prefix", enc(p));
         w.close();
     }
     w.close();

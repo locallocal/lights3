@@ -45,6 +45,17 @@ TEST(xml_parse_entities_cdata_comments) {
     CHECK_EQ(root.get("D"), "t");
 }
 
+// 补充平面数字字符引用（docs/issues.md T12）：&#x1F600; 等 5-6 位十六进制引用
+// 曾被长度护栏误拒成 MalformedXML
+TEST(xml_parse_supplementary_plane_char_refs) {
+    auto root = xml_parse("<R><A>&#x1F600;</A><B>&#x10FFFF;</B><C>&#1114111;</C></R>");
+    CHECK_EQ(root.get("A"), "\xF0\x9F\x98\x80");  // U+1F600
+    CHECK_EQ(root.get("B"), "\xF4\x8F\xBF\xBF");  // U+10FFFF
+    CHECK_EQ(root.get("C"), "\xF4\x8F\xBF\xBF");  // 十进制同码点
+    // 护栏仍在：离谱长度的引用照旧拒绝
+    CHECK_THROWS_S3(xml_parse("<A>&#x000000000000000041;</A>"), S3ErrorCode::MalformedXML);
+}
+
 TEST(xml_parse_malformed) {
     CHECK_THROWS_S3(xml_parse("<A><B></A></B>"), S3ErrorCode::MalformedXML);
     CHECK_THROWS_S3(xml_parse("<A>unterminated"), S3ErrorCode::MalformedXML);

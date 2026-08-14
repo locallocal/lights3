@@ -205,17 +205,19 @@
 
 ## 三、轻微问题
 
+> ✅ T12–T20 已全部修复（2026-08-14）。T12/T13 补了回归测试（`test_xml.cc` 补充平面字符引用、`test_service.cc` ListMultipartUploads encoding-type）；T19 改为外部实例（`LIGHTS3_TEST_REDIS_URI`）时跳过需要服务器全局命令的两个用例。
+
 | 编号 | 位置 | 问题 | 严重度 |
 |---|---|---|---|
-| T12 | `src/s3/xml.cc:174-177` | 数字字符引用长度上限 `>8` 误拒 6 位十六进制补充平面码点（`&#x1F600;`），合法 XML 被 400 MalformedXML | 低 |
-| T13 | `src/s3/handlers/multipart.cc:283-334` | `list_multipart_uploads` 放行了 `encoding-type` 却从不读取/编码输出（`list_objects` 是 honor 的），`encoding-type=url` 静默误答 | 低 |
-| T14 | `src/storage/localfs/localfs_backend.cc:449-452` | `delete_object` 不检查 `fs::remove` 的 `ec`，EACCES/EIO 等真实失败也返回 204，且 sidecar 可能删一半致数据/元数据不一致 | 低 |
-| T15 | `src/storage/tiered/tiered_backend.cc:114-129` | `TeeCacheReader` EOF 分支 `commit_cache_fill` 未捕获异常（取消/ENOSPC），客户端已收完全部数据却在收尾处得到失败，违背同函数的降级设计 | 低 |
-| T16 | `src/storage/duostore/rados_data_store.cc:306-313` | `RadosChunkWriter::start_flush` 在 `make_pending()` 之后才 `alloc_`，号段分配抛异常时泄漏 `AioPending` 与 rados completion（每次失败泄漏一份） | 低 |
-| T17 | `tests/unit/test_concurrency.cc:385-386` | `semaphore_acquire_is_cancellable` 用固定 20ms sleep 替代条件等待，TSan/慢机下 flake（同文件 `:411` 有正确自旋范式） | 低 |
-| T18 | `tests/unit/test_credentials.cc:411,478` | 固定 `/tmp/lights3-test-creds.json` 无 pid/随机量，并行跑多个构建变体的 unit_tests 会互相覆盖 | 低 |
-| T19 | `tests/unit/test_duostore_redis.cc:249,371,377` | `SCRIPT FLUSH` / `CLIENT KILL TYPE normal` 是服务器全局操作，与"外部实例靠 key 前缀隔离"约定矛盾，指向共享 redis 时打断他人并使 `reconnects_total==1` 精确断言失真 | 低 |
-| T20 | `build.sh:117` | `set -u` 下空数组 `"${CMAKE_ARGS[@]}"` 在 bash < 4.4 报 unbound（同行 `CMAKE_EXTRA` 已做保护，只护了一半），老发行版可移植性隐患 | 低 |
+| ~~T12~~ ✅ | `src/s3/xml.cc:174-177` | 数字字符引用长度上限 `>8` 误拒 6 位十六进制补充平面码点（`&#x1F600;`），合法 XML 被 400 MalformedXML | 低 |
+| ~~T13~~ ✅ | `src/s3/handlers/multipart.cc:283-334` | `list_multipart_uploads` 放行了 `encoding-type` 却从不读取/编码输出（`list_objects` 是 honor 的），`encoding-type=url` 静默误答 | 低 |
+| ~~T14~~ ✅ | `src/storage/localfs/localfs_backend.cc:449-452` | `delete_object` 不检查 `fs::remove` 的 `ec`，EACCES/EIO 等真实失败也返回 204，且 sidecar 可能删一半致数据/元数据不一致 | 低 |
+| ~~T15~~ ✅ | `src/storage/tiered/tiered_backend.cc:114-129` | `TeeCacheReader` EOF 分支 `commit_cache_fill` 未捕获异常（取消/ENOSPC），客户端已收完全部数据却在收尾处得到失败，违背同函数的降级设计 | 低 |
+| ~~T16~~ ✅ | `src/storage/duostore/rados_data_store.cc:306-313` | `RadosChunkWriter::start_flush` 在 `make_pending()` 之后才 `alloc_`，号段分配抛异常时泄漏 `AioPending` 与 rados completion（每次失败泄漏一份） | 低 |
+| ~~T17~~ ✅ | `tests/unit/test_concurrency.cc:385-386` | `semaphore_acquire_is_cancellable` 用固定 20ms sleep 替代条件等待，TSan/慢机下 flake（同文件 `:411` 有正确自旋范式） | 低 |
+| ~~T18~~ ✅ | `tests/unit/test_credentials.cc:411,478` | 固定 `/tmp/lights3-test-creds.json` 无 pid/随机量，并行跑多个构建变体的 unit_tests 会互相覆盖 | 低 |
+| ~~T19~~ ✅ | `tests/unit/test_duostore_redis.cc:249,371,377` | `SCRIPT FLUSH` / `CLIENT KILL TYPE normal` 是服务器全局操作，与"外部实例靠 key 前缀隔离"约定矛盾，指向共享 redis 时打断他人并使 `reconnects_total==1` 精确断言失真 | 低 |
+| ~~T20~~ ✅ | `build.sh:117` | `set -u` 下空数组 `"${CMAKE_ARGS[@]}"` 在 bash < 4.4 报 unbound（同行 `CMAKE_EXTRA` 已做保护，只护了一半），老发行版可移植性隐患 | 低 |
 
 ---
 
@@ -226,4 +228,4 @@
 3. ~~**T4 / T5**：UAF，按 thread_pool 的既有范式对齐。~~ ✅
 4. ~~**T6 / T7 / T8 / T9**：DoS 面、租户隔离、测试可靠性。~~ ✅
 5. ~~**T10 / T11**：补关键契约的行为测试（超时/上限、入口限流生命周期）。~~ ✅
-6. **T12–T20**：择机清理。
+6. ~~**T12–T20**：择机清理。~~ ✅

@@ -118,9 +118,19 @@ public:
                 tmp_->fd = -1;
                 // 单段对象比对 MD5；multipart 对象只能校验字节数（etag 为 -N 形式）
                 bool multipart = meta_.etag.find('-') != std::string::npos;
-                if (multipart || md5_.final_hex() == meta_.etag)
-                    co_await owner_->commit_cache_fill(bucket_, key_, meta_, tier_, *tmp_);
-                else
+                if (multipart || md5_.final_hex() == meta_.etag) {
+                    // 客户端此刻已收完全部数据：提交失败（取消/ENOSPC）只能弃缓存
+                    // 降级，不得把异常漏进响应收尾变成"传输失败"
+                    try {
+                        co_await owner_->commit_cache_fill(bucket_, key_, meta_, tier_, *tmp_);
+                    } catch (const std::exception& e) {
+                        LOG_WARN("tiered: cache fill commit failed for {}/{}: {}, cache dropped",
+                                 bucket_, key_, e.what());
+                    } catch (...) {
+                        LOG_WARN("tiered: cache fill commit failed for {}/{}, cache dropped",
+                                 bucket_, key_);
+                    }
+                } else
                     LOG_WARN("tiered: cloud data checksum mismatch for {}/{}, cache dropped",
                              bucket_, key_);
             }

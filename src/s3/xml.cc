@@ -173,7 +173,9 @@ private:
 
     void parse_entity(std::string& out) {
         auto semi = s_.find(';', pos_);
-        if (semi == std::string_view::npos || semi - pos_ > 8) bad("malformed entity");
+        // 长度护栏只拒明显垃圾：最长合法引用 &#x10FFFF; / &#1114111; 的
+        // semi-pos_ 为 9，留少量前导零余量（XML 允许 &#x0010FFFF;）
+        if (semi == std::string_view::npos || semi - pos_ > 16) bad("malformed entity");
         std::string_view e = s_.substr(pos_ + 1, semi - pos_ - 1);
         pos_ = semi + 1;
         if (e == "lt") out.push_back('<');

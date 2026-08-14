@@ -114,7 +114,8 @@ if [[ -n $SAN ]]; then
                  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=$SAN")
 fi
 
-cmake -B "$BUILD_DIR" "${CMAKE_ARGS[@]}" ${CMAKE_EXTRA[@]+"${CMAKE_EXTRA[@]}"}
+# 两个数组都做空数组保护：bash < 4.4 在 set -u 下展开空数组报 unbound
+cmake -B "$BUILD_DIR" ${CMAKE_ARGS[@]+"${CMAKE_ARGS[@]}"} ${CMAKE_EXTRA[@]+"${CMAKE_EXTRA[@]}"}
 cmake --build "$BUILD_DIR" -j "$JOBS"
 
 if [[ $RUN_TEST -eq 1 ]]; then

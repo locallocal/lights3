@@ -303,21 +303,23 @@ private:
     Task<void> start_flush() {
         co_await store_->pool_->schedule();  // crc 计算（CPU）不占 HTTP 驱动线程
         rados_ioctx_t ctx = io(store_->conn_);
-        AioPending* p = make_pending(store_->exec_, store_->m_lat_write_);
         // 几何增长批取连续 run（docs/gaps.md §3.9，与 fs ChunkWriter 同策略）：
-        // 并发写者交错派发会让 manifest 的 run 编码失效
+        // 并发写者交错派发会让 manifest 的 run 编码失效。号段分配与 pin 必须先于
+        // make_pending：alloc_/pin_one 可抛，此时尚无 AioPending/completion 需回收
         if (run_next_ == run_limit_) {
             run_len_ = run_len_ == 0 ? 1 : std::min<uint32_t>(run_len_ * 2, kMaxIdRun);
             run_next_ = store_->alloc_(Extent::Kind::kRados, run_len_);
             run_limit_ = run_next_ + run_len_;
         }
-        p->file_id = run_next_++;
+        const uint64_t file_id = run_next_++;
         // 分配即 pin（docs/gaps.md §1.2）：本片对象在 T0 落地，而整个 PUT 要到
         // T0+Δ 才提交 meta。Δ 超过 gc_grace 时孤儿扫描会看到"refs 里没有、mtime
         // 逾宽限、无 pin"的对象直接删掉，PUT 随后提交成功即得到引用已删数据的
         // 坏对象。pin 一直持有到 finish 后由调用方解除，或本 writer 析构时解除
-        store_->opt_.pins.pin_one(p->file_id);
-        pinned_.push_back(p->file_id);
+        store_->opt_.pins.pin_one(file_id);
+        pinned_.push_back(file_id);
+        AioPending* p = make_pending(store_->exec_, store_->m_lat_write_);
+        p->file_id = file_id;
         p->len = buf_.size();
         p->crc = codec::crc32c_of(std::span<const std::byte>(buf_));
         p->data = std::move(buf_);

@@ -382,7 +382,7 @@ TEST(semaphore_acquire_is_cancellable) {
             cancelled = true;
         }
     });
-    std::this_thread::sleep_for(20ms);  // 让它排进等待队列
+    while (sem.waiting() < 1) std::this_thread::sleep_for(1ms);  // 等它排进等待队列
     CHECK_EQ(sem.waiting(), size_t(1));
     src.request_cancel();
     waiter.join();

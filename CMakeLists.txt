@@ -435,6 +435,15 @@ endif()
 add_executable(lights3 src/main.cc)
 target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
 
+# ---- 运维工具 ----
+# s3adm：/-/admin/credentials 的 CLI 客户端（docs/credential-management.md §2）。
+# CPPHTTPLIB_OPENSSL_SUPPORT 经 lights3_core 的 PUBLIC 定义传播，与核心库目标级
+# 一致（ODR）；未启用 httplib/cloudproxy 的裁剪构建下自动退化为仅 http
+add_executable(s3adm src/tools/s3adm.cc)
+target_link_libraries(s3adm PRIVATE lights3_core gflags::gflags
+                                    nlohmann_json::nlohmann_json)
+target_include_directories(s3adm SYSTEM PRIVATE third_party)
+
 # ---- 测试 ----
 if(LIGHTS3_BUILD_TESTS)
   enable_testing()

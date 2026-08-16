@@ -1,11 +1,12 @@
 // Ops CLI: s3adm — manages tenant credentials with the ops-plane (root
 // static credential) AK/SK, talking to /-/admin/credentials
 // (docs/credential-management.md §2/§3).
-// The subcommand framework is ccmd (third_party/ccmd): list / get / create /
-// delete are independent subcommands, each with its own option set — ccmd's
-// root options do not propagate down, connection options must follow the
-// subcommand (s3adm list --endpoint=...), and long options only accept
-// values in --name=value form.
+// The subcommand framework is ccmd (third_party/ccmd): credential operations
+// live under the `cred` command group (cred list / get / create / delete),
+// each with its own option set — ccmd's root options do not propagate down,
+// connection options must follow the leaf subcommand
+// (s3adm cred list --endpoint=...), and long options only accept values in
+// --name=value form.
 // Requests are SigV4 self-signed (reusing the signing side of s3/auth/sigv4)
 // + the httplib synchronous client; responses print the server's JSON verbatim.
 #include <ccmd.h>
@@ -243,8 +244,8 @@ bool one_ak_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& ak) {
 
 std::shared_ptr<ccmd::c_command> make_list() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "list", "s3adm list --endpoint=http://127.0.0.1:9000",
-        "s3adm list [options]",
+        "list", "s3adm cred list --endpoint=http://127.0.0.1:9000",
+        "s3adm cred list [options]",
         "List all credentials (secret keys masked; includes static and file-based ones).",
         "list all credentials (secret keys masked).",
         [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -256,7 +257,7 @@ std::shared_ptr<ccmd::c_command> make_list() {
 
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "get", "s3adm get L3AKXXXX --show-secret", "s3adm get <ak> [options]",
+        "get", "s3adm cred get L3AKXXXX --show-secret", "s3adm cred get <ak> [options]",
         "Show one credential's metadata; --show-secret returns the plaintext secret key "
         "(dynamic/file credentials only; sensitive - the server logs an audit line).",
         "show one credential.",
@@ -276,8 +277,8 @@ std::shared_ptr<ccmd::c_command> make_get() {
 std::shared_ptr<ccmd::c_command> make_create() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "create",
-        R"(s3adm create --comment=tenant-a --policy='{"buckets":["tenant-a-*"]}')",
-        "s3adm create [options]",
+        R"(s3adm cred create --comment=tenant-a --policy='{"buckets":["tenant-a-*"]}')",
+        "s3adm cred create [options]",
         "Create a tenant access/secret key pair (the response is the only time the "
         "full secret key is returned). --policy takes policy JSON "
         "({\"buckets\":[...],\"prefixes\":[...],\"readonly\":bool,\"actions\":[...]}) "
@@ -307,7 +308,7 @@ std::shared_ptr<ccmd::c_command> make_create() {
 
 std::shared_ptr<ccmd::c_command> make_delete() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "delete", "s3adm delete L3AKXXXX", "s3adm delete <ak> [options]",
+        "delete", "s3adm cred delete L3AKXXXX", "s3adm cred delete <ak> [options]",
         "Revoke a dynamic credential (static ones belong to the config file; the "
         "server refuses them).",
         "revoke a dynamic credential.",
@@ -322,26 +323,45 @@ std::shared_ptr<ccmd::c_command> make_delete() {
     return cmd;
 }
 
+// `cred` command group: pure dispatcher, holds no options of its own.
+// Bare `s3adm cred` / `s3adm cred -x` has nothing actionable to run, so it
+// prints its own help and exits as a usage error (same convention as root).
+std::shared_ptr<ccmd::c_command> make_cred() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "cred", "s3adm cred list --endpoint=http://127.0.0.1:9000",
+        "s3adm cred <command> [options]",
+        "Manage tenant credentials via /-/admin/credentials with the root (static) "
+        "access/secret key (docs/credential-management.md). Credentials come from each "
+        "subcommand's --ak=/--sk= or from env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK. "
+        "Options must follow the leaf subcommand; long options take values as "
+        "--name=value.",
+        "manage tenant credentials.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            c->print_help();
+            g_exit = 2;
+        });
+    cmd->add_subcommand(make_list());
+    cmd->add_subcommand(make_get());
+    cmd->add_subcommand(make_create());
+    cmd->add_subcommand(make_delete());
+    return cmd;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
     auto root = std::make_shared<ccmd::c_command>(
-        "s3adm", "s3adm list --endpoint=http://127.0.0.1:9000",
+        "s3adm", "s3adm cred list --endpoint=http://127.0.0.1:9000",
         "s3adm <command> [options]",
-        "Manage tenant credentials via /-/admin/credentials with the root (static) "
-        "access/secret key (docs/credential-management.md). Credentials come from each "
-        "subcommand's --ak=/--sk= or from env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK. "
-        "Options must follow the subcommand; long options take values as --name=value.",
-        "manage lights3 tenant credentials.",
+        "lights3 ops CLI (docs/credential-management.md). Credential management "
+        "lives under the `cred` command group; run `s3adm help cred` for details.",
+        "lights3 ops CLI.",
         // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a usage error
         [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;
         });
-    root->add_subcommand(make_list());
-    root->add_subcommand(make_get());
-    root->add_subcommand(make_create());
-    root->add_subcommand(make_delete());
+    root->add_subcommand(make_cred());
     root->execute(argc, argv);
     return g_exit;
 }

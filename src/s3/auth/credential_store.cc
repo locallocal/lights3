@@ -24,15 +24,15 @@ namespace {
 
 using nlohmann::json;
 
-// ---------- CSPRNG 生成（docs/credential-management.md §6）----------
+// ---------- CSPRNG generation (docs/credential-management.md §6) ----------
 
 void fill_random(uint8_t* buf, size_t n) {
-    // getentropy 单次上限 256 字节，这里最多 30 字节
+    // getentropy caps a single call at 256 bytes; at most 30 bytes here
     if (::getentropy(buf, n) != 0)
         throw std::runtime_error("getentropy failed: cannot generate credentials");
 }
 
-// AK：L3AK + 16 位 base32（A-Z2-7），共 20 字符，对齐 AWS AKIA… 形态
+// AK: L3AK + 16 base32 chars (A-Z2-7), 20 characters total, aligned with the AWS AKIA... shape
 std::string random_access_key() {
     static constexpr char kBase32[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     uint8_t raw[16];
@@ -42,7 +42,7 @@ std::string random_access_key() {
     return ak;
 }
 
-// SK：30 随机字节 base64 → 40 字符，对齐 AWS SK 长度
+// SK: 30 random bytes base64 -> 40 characters, aligned with the AWS SK length
 std::string random_secret_key() {
     static constexpr char kBase64[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -59,7 +59,7 @@ std::string random_secret_key() {
     return sk;
 }
 
-// ---------- policy JSON 约定（docs/credential-management.md §10.4）----------
+// ---------- policy JSON conventions (docs/credential-management.md §10.4) ----------
 
 CredentialPolicy policy_from_json_obj(const json& j) {
     if (!j.is_object())
@@ -77,8 +77,8 @@ CredentialPolicy policy_from_json_obj(const json& j) {
                 p.buckets.push_back(g.get<std::string>());
             }
         } else if (k == "prefixes") {
-            // key 前缀白名单（docs/gaps.md §5.10）：没有它，多租户共桶只能退化成
-            // "一租户一桶"
+            // Key prefix allowlist (docs/gaps.md §5.10): without it, multi-tenant shared buckets degrade into
+            // "one bucket per tenant"
             if (!v.is_array())
                 throw S3Error(S3ErrorCode::InvalidRequest,
                               "policy.prefixes must be an array of key prefix strings.");
@@ -111,7 +111,7 @@ CredentialPolicy policy_from_json_obj(const json& j) {
                 throw S3Error(S3ErrorCode::InvalidRequest, "policy.readonly must be a boolean.");
             p.readonly = v.get<bool>();
         } else {
-            // 未知字段严格拒绝：静默忽略拼错的限制字段等于放权
+            // Unknown fields strictly rejected: silently ignoring a misspelled restriction field grants access
             throw S3Error(S3ErrorCode::InvalidRequest, "unknown policy field '" + k + "'.");
         }
     }
@@ -131,7 +131,7 @@ json policy_to_json_obj(const CredentialPolicy& p) {
     return j;
 }
 
-// ---------- 落盘格式（docs/credential-management.md §4.2 / §10.1）----------
+// ---------- On-disk format (docs/credential-management.md §4.2 / §10.1) ----------
 
 std::string object_key(std::string_view ak) {
     return std::string(kCredPrefix) + std::string(ak);
@@ -146,21 +146,22 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
             std::span(reinterpret_cast<const uint8_t*>(sealed.data()), sealed.size()));
     } else {
         j["version"] = 1;
-        // v1 是无 master key 时的明文形态，SK 本来就要落盘；这一份 json 缓冲无从擦除
+        // v1 is the plaintext form without a master key; the SK has to hit disk anyway, and this json buffer cannot be wiped
         j["sk"] = static_cast<const std::string&>(c.secret_key);
     }
-    j["created"] = util::iso8601(c.created);  // 给人看
+    j["created"] = util::iso8601(c.created);  // for humans
     j["created_unix"] = std::chrono::duration_cast<std::chrono::seconds>(
                             c.created.time_since_epoch())
-                            .count();  // 供解析（iso8601 无现成反解）
+                            .count();  // for parsing (no ready-made inverse for iso8601)
     j["comment"] = c.comment;
     if (c.policy) j["policy"] = policy_to_json_obj(*c.policy);
     return j.dump(2) + "\n";
 }
 
-// JSON 损坏返回 nullopt（跳过不阻塞启动）；version=2 而无 key / 解密失败抛
-// runtime_error——那是配置错误，静默丢凭证会把用户锁在门外，宁可拦下启动。
-// was_plaintext: 对象仍为 v1 明文（load 时据此做 v1→v2 升级）
+// Corrupt JSON returns nullopt (skipped without blocking startup); version=2 with no key / failed decryption
+// throws runtime_error -- that is a configuration error, and silently dropping credentials would lock users out;
+// better to block startup.
+// was_plaintext: the object is still v1 plaintext (load uses this for the v1->v2 upgrade)
 std::optional<CredentialInfo> deserialize(std::string_view ak, const std::string& body,
                                           const std::optional<util::Aes256Key>& key,
                                           bool* was_plaintext = nullptr) {
@@ -197,7 +198,7 @@ std::optional<CredentialInfo> deserialize(std::string_view ak, const std::string
         return c;
     } catch (const json::exception&) {
         return std::nullopt;
-    } catch (const S3Error&) {  // policy 字段损坏 = 对象损坏
+    } catch (const S3Error&) {  // corrupt policy field = corrupt object
         return std::nullopt;
     }
 }
@@ -215,9 +216,9 @@ Task<std::string> read_all(http::BodyReader& body, size_t max_size = 64 * 1024) 
     co_return out;
 }
 
-// ---------- credentials_file 解析（docs/credential-management.md §10.2）----------
+// ---------- credentials_file parsing (docs/credential-management.md §10.2) ----------
 // {"credentials": [{"access_key","secret_key","comment"?,"policy"?}]}
-// 失败抛 runtime_error（启动时 fail-fast；热加载时由调用方告警并保留旧表）
+// Failure throws runtime_error (fail-fast at startup; on hot reload the caller warns and keeps the old table)
 
 std::vector<CredentialInfo> parse_credentials_file_text(const std::string& text,
                                                         const std::string& path) {
@@ -277,7 +278,7 @@ bool CredentialPolicy::allows_action(Action a) const {
             if (x == a) return true;
         return false;
     }
-    // 未列 actions 时回落到 readonly：true = 只读，false = 不限
+    // Without actions listed, fall back to readonly: true = read-only, false = unrestricted
     return !readonly || a == Action::Read;
 }
 
@@ -285,8 +286,8 @@ bool CredentialPolicy::allows_bucket(std::string_view bucket) const {
     if (buckets.empty() || bucket.empty()) return true;
     std::string b(bucket);
     for (auto& g : buckets)
-        // FNM_PATHNAME（docs/gaps.md §5.10）：不加的话 '*' 跨 '/'，同一套匹配器
-        // 用到 key 前缀上时 "logs/*" 会连 "logs/a/b" 一并放行
+        // FNM_PATHNAME (docs/gaps.md §5.10): without it '*' crosses '/', and when the same matcher is applied
+        // to key prefixes, "logs/*" would admit "logs/a/b" as well
         if (::fnmatch(g.c_str(), b.c_str(), FNM_PATHNAME) == 0) return true;
     return false;
 }
@@ -294,9 +295,9 @@ bool CredentialPolicy::allows_bucket(std::string_view bucket) const {
 bool CredentialPolicy::allows(std::string_view bucket, std::string_view key,
                               Action action) const {
     if (!allows_action(action)) return false;
-    // bucket 为空 = 账户级操作（ListBuckets）：放行，结果由调用方按 policy 过滤
+    // Empty bucket = account-level operation (ListBuckets): admitted; results are policy-filtered by the caller
     if (!allows_bucket(bucket)) return false;
-    // key 为空 = 本次判定与具体对象无关（建桶、列桶等），不校验前缀
+    // Empty key = this check is unrelated to a specific object (create bucket, list bucket, etc.); prefixes not checked
     if (prefixes.empty() || key.empty()) return true;
     return allows_key(key);
 }
@@ -310,9 +311,10 @@ bool CredentialPolicy::allows_key(std::string_view key) const {
 
 bool CredentialPolicy::prefix_may_contain(std::string_view group_prefix) const {
     if (prefixes.empty()) return true;
-    // 分组本身在白名单前缀内（"logs/2024/" vs 白名单 "logs/"），或白名单前缀
-    // 在分组更深处（分组 "logs/" vs 白名单 "logs/app1/"）——后者的分组虽然也
-    // 含白名单外的 key，但分组名只由白名单内也存在的层级结构导出，不构成泄露
+    // Either the group itself lies within an allowlisted prefix ("logs/2024/" vs allowlist "logs/"), or the
+    // allowlisted prefix lies deeper inside the group (group "logs/" vs allowlist "logs/app1/") -- the latter
+    // group also contains keys outside the allowlist, but the group name derives only from hierarchy that also
+    // exists inside the allowlist, so it is not a leak
     for (auto& pre : prefixes) {
         size_t n = std::min(pre.size(), group_prefix.size());
         if (pre.compare(0, n, group_prefix.data(), n) == 0) return true;
@@ -330,7 +332,7 @@ CredentialPolicy parse_policy_json(const std::string& text) {
 
 std::string policy_to_json(const CredentialPolicy& p) { return policy_to_json_obj(p).dump(); }
 
-// ---------- 加载（docs/credential-management.md §5.1 / §10）----------
+// ---------- Loading (docs/credential-management.md §5.1 / §10) ----------
 
 Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
     std::shared_ptr<storage::IStorageBackend> backend, const AuthConfig& cfg) {
@@ -338,7 +340,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
     store->backend_ = std::move(backend);
     store->cfg_ = cfg;
 
-    // master key（§10.1）：64 hex → 32 字节；格式错误直接 fail-fast
+    // master key (§10.1): 64 hex -> 32 bytes; malformed input fails fast
     if (const char* env = std::getenv(kMasterKeyEnv); env && *env) {
         auto bytes = util::from_hex(env);
         if (bytes.size() != sizeof(util::Aes256Key))
@@ -350,8 +352,8 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
         store->master_key_ = k;
     }
 
-    // 动态凭证：.sys 不存在 = 从未生成过
-    std::vector<std::string> plaintext_aks;  // v1 对象，load 后升级为 v2（§10.1）
+    // Dynamic credentials: no .sys = none ever generated
+    std::vector<std::string> plaintext_aks;  // v1 objects, upgraded to v2 after load (§10.1)
     if (co_await store->backend_->bucket_exists(kSysBucket)) {
         store->sys_bucket_ready_ = true;
         storage::ListOptions opt;
@@ -379,7 +381,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
     }
     size_t dynamic_count = store->creds_.size();
 
-    // v1 → v2 升级：设置了 master key 后，存量明文对象就地重写为加密格式
+    // v1 -> v2 upgrade: once a master key is set, existing plaintext objects are rewritten in place in encrypted form
     for (auto& ak : plaintext_aks) {
         auto it = store->creds_.find(ak);
         storage::ObjectMeta meta;
@@ -392,7 +394,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
         LOG_INFO("re-encrypted {} plaintext credential object(s) with {}",
                  plaintext_aks.size(), kMasterKeyEnv);
 
-    // 外部凭证文件（§10.2）：启动时解析失败 fail-fast（热加载失败才容忍保留旧表）
+    // External credentials file (§10.2): a parse failure at startup fails fast (only hot-reload failures tolerate keeping the old table)
     if (!cfg.credentials_file.empty()) {
         std::error_code ec;
         auto mtime = std::filesystem::last_write_time(cfg.credentials_file, ec);
@@ -407,7 +409,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
         LOG_INFO("loaded {} credential(s) from {}", n, cfg.credentials_file);
     }
 
-    // 静态表：同 AK 时静态优先（docs/credential-management.md §5.1）
+    // Static table: on same AK, static wins (docs/credential-management.md §5.1)
     for (auto& c : cfg.credentials) {
         CredentialInfo info;
         info.access_key = c.access_key;
@@ -424,7 +426,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
     co_return store;
 }
 
-// ---------- 查表（验签热路径）----------
+// ---------- Lookup (verification hot path) ----------
 
 std::optional<CredentialLookup> CredentialStore::lookup(std::string_view ak) const {
     std::shared_lock lk(mu_);
@@ -446,10 +448,10 @@ bool CredentialStore::is_root(std::string_view ak) const {
 
 void CredentialStore::authorize(std::string_view ak, std::string_view bucket,
                                 std::string_view key, Action action) const {
-    if (ak.empty()) return;  // 认证关闭
+    if (ak.empty()) return;  // auth disabled
     std::shared_lock lk(mu_);
     auto it = creds_.find(ak);
-    if (it == creds_.end()) return;  // 在途吊销竞态：已验签请求自然完成（§7）
+    if (it == creds_.end()) return;  // in-flight revocation race: already-verified requests complete naturally (§7)
     if (!it->second.policy) return;
     if (!it->second.policy->allows(bucket, key, action))
         throw S3Error(S3ErrorCode::AccessDenied,
@@ -468,10 +470,10 @@ std::vector<CredentialInfo> CredentialStore::list() const {
     std::vector<CredentialInfo> out;
     out.reserve(creds_.size());
     for (auto& [_, c] : creds_) out.push_back(c);
-    return out;  // map 本身按 AK 有序
+    return out;  // the map is already ordered by AK
 }
 
-// ---------- 管理面 ----------
+// ---------- Admin plane ----------
 
 Task<CredentialInfo> CredentialStore::generate(std::string comment,
                                                std::optional<CredentialPolicy> policy) {
@@ -489,7 +491,7 @@ Task<CredentialInfo> CredentialStore::generate(std::string comment,
     }
     c.secret_key = random_secret_key();
 
-    // 惰性建桶（幂等；已存在的并发竞态吞掉 AlreadyOwned 即可）
+    // Lazy bucket creation (idempotent; concurrent already-exists races just swallow AlreadyOwned)
     if (!sys_bucket_ready_) {
         try {
             co_await backend_->create_bucket(kSysBucket);
@@ -499,7 +501,7 @@ Task<CredentialInfo> CredentialStore::generate(std::string comment,
         sys_bucket_ready_ = true;
     }
 
-    // 先持久化后生效（write-through）
+    // Persist first, then take effect (write-through)
     storage::ObjectMeta meta;
     meta.content_type = "application/json";
     http::StringBodyReader body(serialize(c, master_key_));
@@ -528,18 +530,18 @@ Task<void> CredentialStore::remove(std::string_view ak) {
             throw S3Error(S3ErrorCode::MethodNotAllowed,
                           "File-sourced credentials are managed via the credentials file.");
     }
-    // tombstone 先于 delete 落表：与 sync_now 的 list 交错时（list 早于 delete 生效、
-    // emplace 晚于下面的 erase），新增分支据此拒绝把刚吊销的 AK 拉回内存
+    // The tombstone is recorded before the delete: when interleaved with sync_now's list (list takes effect
+    // before delete, emplace after the erase below), the add branch uses it to refuse pulling the just-revoked AK back into memory
     {
         std::unique_lock lk(mu_);
         tombstones_[std::string(ak)] = std::chrono::steady_clock::now();
     }
-    // 先删存储（幂等）再删内存；失败则内存保留，与存储一致
+    // Delete from storage first (idempotent), then memory; on failure memory is kept, consistent with storage
     try {
         co_await backend_->delete_object(kSysBucket, object_key(ak));
     } catch (...) {
         std::unique_lock lk(mu_);
-        tombstones_.erase(std::string(ak));  // 未吊销成功，不得挡住后续 sync
+        tombstones_.erase(std::string(ak));  // revocation failed, must not block subsequent sync
         throw;
     }
     {
@@ -549,13 +551,13 @@ Task<void> CredentialStore::remove(std::string_view ak) {
     LOG_INFO("revoked credential {}", ak);
 }
 
-// ---------- 文件热加载（§10.2）----------
+// ---------- File hot reload (§10.2) ----------
 
 void CredentialStore::apply_file_credentials(std::vector<CredentialInfo> creds) {
     std::unique_lock lk(mu_);
-    // fail-open 防护（README §1.2）：拒绝把非空表清成空表——文件被误编辑成
-    // `{"credentials": []}` 是合法 JSON，照单全收会让 enabled() 依赖的表变空。
-    // 保留旧表、置 degraded（readyz 转 503），文件修好后下一轮恢复
+    // fail-open guard (README §1.2): refuse to wipe a non-empty table to empty -- a file mis-edited into
+    // `{"credentials": []}` is valid JSON, and accepting it would empty the table enabled() depends on.
+    // Keep the old table, set degraded (readyz turns 503); the next round recovers once the file is fixed
     if (!creds_.empty() && creds.empty() &&
         std::all_of(creds_.begin(), creds_.end(),
                     [](auto& kv) { return kv.second.source == CredSource::kFile; })) {
@@ -565,7 +567,7 @@ void CredentialStore::apply_file_credentials(std::vector<CredentialInfo> creds) 
         return;
     }
     degraded_.store(false, std::memory_order_relaxed);
-    // 整体替换 file 来源的条目：旧文件里删掉的凭证随之失效
+    // Wholesale replacement of file-sourced entries: credentials removed from the old file are invalidated with it
     for (auto it = creds_.begin(); it != creds_.end();)
         it = (it->second.source == CredSource::kFile) ? creds_.erase(it) : std::next(it);
     for (auto& c : creds) {
@@ -588,7 +590,7 @@ void CredentialStore::reload_file_now() {
     std::error_code ec;
     auto mtime = std::filesystem::last_write_time(cfg_.credentials_file, ec);
     if (ec) {
-        // 文件暂时不可见（编辑器原子替换的中间态等）：保留旧表下轮再试
+        // File temporarily invisible (mid-state of an editor's atomic replace, etc.): keep the old table and retry next round
         LOG_WARN("credentials file {} not readable ({}): keeping previous table",
                  cfg_.credentials_file, ec.message());
         return;
@@ -601,17 +603,17 @@ void CredentialStore::reload_file_now() {
         file_mtime_ = mtime;
         LOG_INFO("reloaded {} credential(s) from {}", n, cfg_.credentials_file);
     } catch (const std::exception& e) {
-        // 热加载失败保留旧表：宁可旧凭证多活一轮，不可解析错误清空全表
+        // Hot reload failure keeps the old table: better that old credentials live one more round than a parse error wiping the whole table
         LOG_ERROR("credentials file reload failed: {}", e.what());
     }
 }
 
-// ---------- 多实例增量同步（§10.3）----------
+// ---------- Multi-instance incremental sync (§10.3) ----------
 
 Task<void> CredentialStore::sync_now() {
-    // 内存快照须在 list 之前采集：write-through 保证快照里的动态凭证在快照时刻
-    // 已持久化，因此"快照有 + list 无"只能是别处吊销；list 期间/之后本实例新生成
-    // 的凭证不在快照里，不会被误删
+    // The memory snapshot must be taken before the list: write-through guarantees every dynamic credential in the
+    // snapshot was persisted at snapshot time, so "in snapshot + not in list" can only mean revoked elsewhere;
+    // credentials newly generated by this instance during/after the list are not in the snapshot and cannot be wrongly deleted
     std::vector<std::string> snapshot;
     {
         std::shared_lock lk(mu_);
@@ -619,7 +621,7 @@ Task<void> CredentialStore::sync_now() {
             if (c.source == CredSource::kDynamic) snapshot.push_back(ak);
     }
 
-    // 存储上现存的动态凭证 AK 全集
+    // Full set of dynamic-credential AKs currently in storage
     std::set<std::string, std::less<>> on_storage;
     if (co_await backend_->bucket_exists(kSysBucket)) {
         storage::ListOptions opt;
@@ -634,8 +636,8 @@ Task<void> CredentialStore::sync_now() {
     }
     size_t added = 0, removed = 0;
 
-    // tombstone 清理与快照：过期条目剔除；近期吊销的 AK 在新增分支跳过
-    //（remove 与本轮 list 交错时对象可能仍被 list 到，不加防护会复活已吊销凭证）
+    // Tombstone cleanup and snapshot: expired entries are dropped; recently revoked AKs are skipped by the add branch
+    // (when remove interleaves with this round's list, the object may still be listed; without the guard a revoked credential would be resurrected)
     const auto now = std::chrono::steady_clock::now();
     const auto ttl = std::chrono::seconds(std::max(60, 2 * cfg_.sync_interval_sec));
     std::set<std::string, std::less<>> recently_revoked;
@@ -651,7 +653,7 @@ Task<void> CredentialStore::sync_now() {
         }
     }
 
-    // 新增：storage 有、内存无 → 拉取入表
+    // Additions: in storage, not in memory -> pull into the table
     for (auto& ak : on_storage) {
         if (find(ak)) continue;
         if (recently_revoked.contains(ak)) continue;
@@ -668,13 +670,13 @@ Task<void> CredentialStore::sync_now() {
             std::unique_lock lk(mu_);
             if (creds_.emplace(c->access_key, std::move(*c)).second) ++added;
         } catch (const std::exception& e) {
-            // 运行期不因单个对象拉取失败中断同步（与启动 fail-fast 不同）
+            // At runtime, a single failed object fetch does not abort the sync (unlike startup's fail-fast)
             LOG_WARN("sync: failed to load credential {}: {}", ak, e.what());
         }
     }
 
-    // 消失：快照里的动态凭证不在 storage 上 → 别处已吊销，本地失效。
-    // fail-open 防护（README §1.2）：.sys 被外部整体清空时不把表清成空表
+    // Disappearances: a dynamic credential in the snapshot but not in storage -> revoked elsewhere, invalidate locally.
+    // fail-open guard (README §1.2): if .sys is wiped externally, do not empty the table
     for (auto& ak : snapshot) {
         if (on_storage.contains(ak)) continue;
         std::unique_lock lk(mu_);
@@ -694,10 +696,10 @@ Task<void> CredentialStore::sync_now() {
         LOG_INFO("credential sync: {} added, {} revoked", added, removed);
 }
 
-// ---------- 后台任务装配（§10.2/§10.3；模式同 duostore GC：完成后重臂不重叠）----------
+// ---------- Background task assembly (§10.2/§10.3; same pattern as duostore GC: re-arm after completion, no overlap) ----------
 
 Task<void> CredentialStore::file_tick() {
-    co_await pool_->schedule();  // 定时器线程只做派发，文件 IO 挪到池线程
+    co_await pool_->schedule();  // the timer thread only dispatches; file IO moves to a pool thread
     std::exception_ptr err;
     try {
         std::error_code ec;
@@ -707,7 +709,7 @@ Task<void> CredentialStore::file_tick() {
         err = std::current_exception();
     }
     schedule_file_reload();
-    if (err) std::rethrow_exception(err);  // 交 BackgroundTaskGroup 记日志
+    if (err) std::rethrow_exception(err);  // hand off to BackgroundTaskGroup for logging
 }
 
 Task<void> CredentialStore::sync_tick() {
@@ -747,7 +749,7 @@ void CredentialStore::start_background(std::shared_ptr<ThreadPool> pool) {
 
 void CredentialStore::shutdown_background() {
     bg_.begin_close();
-    // cancel 须在组锁外调用（TimerQueue::cancel 阻塞等在途回调，回调内要拿组锁）
+    // cancel must be called outside the group lock (TimerQueue::cancel blocks on in-flight callbacks, which take the group lock)
     TimerQueue::instance().cancel(file_timer_);
     TimerQueue::instance().cancel(sync_timer_);
     bg_.wait_idle();

@@ -1,8 +1,10 @@
-// L1: Boost.Beast 驱动 —— 异步模型（docs/http-adapter.md §3.1）。
-// N 个线程共跑一个 io_context；每连接一个会话协程（每连接一个 strand）。
-// 会话协程直接使用项目自己的 Task<void>：asio 异步操作经 awaiter 适配挂起/恢复，
-// 与 docs/concurrency.md §4.1 的衔接点语义一致（handler 的续体回到连接 strand 上运行），
-// 只是无需在 asio::awaitable 与 Task 两套协程类型之间转换。
+// L1: Boost.Beast driver — asynchronous model (docs/http-adapter.md §3.1).
+// N threads share one io_context; one session coroutine per connection (one
+// strand per connection). Session coroutines use the project's own Task<void>
+// directly: asio async operations are adapted to suspend/resume via awaiters,
+// matching the junction-point semantics of docs/concurrency.md §4.1 (the
+// handler's continuation runs back on the connection strand), just without
+// converting between the asio::awaitable and Task coroutine types.
 #include <sys/eventfd.h>
 #include <unistd.h>
 
@@ -36,11 +38,12 @@ namespace {
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
-namespace bhttp = boost::beast::http;  // 避免与 lights3::http 同名
+namespace bhttp = boost::beast::http;  // Avoids clashing with lights3::http
 using tcp = asio::ip::tcp;
 
-// 把 (error_code, size_t) 形式的 asio 异步操作适配为 awaiter；
-// 完成回调在发起操作的 I/O 对象 executor（连接 strand）上运行并 resume 协程
+// Adapts (error_code, size_t)-shaped asio async operations into an awaiter;
+// the completion callback runs on the initiating I/O object's executor (the
+// connection strand) and resumes the coroutine
 template <class Init>
 struct IoAwaiter {
     Init init;
@@ -63,8 +66,9 @@ IoAwaiter<std::decay_t<Init>> io_op(Init&& init) {
     return {std::forward<Init>(init)};
 }
 
-// 把续体投递回指定 executor：handler/stream_body 可能在池线程 resume，
-// 发起下一个 socket 操作前必须切回连接 strand
+// Posts the continuation back onto the given executor: handler/stream_body
+// may resume on a pool thread, and we must switch back to the connection
+// strand before starting the next socket operation
 struct ResumeOn {
     asio::any_io_executor ex;
     bool await_ready() const noexcept { return false; }
@@ -82,7 +86,7 @@ struct AcceptAwaiter {
 
     bool await_ready() const noexcept { return false; }
     void await_suspend(std::coroutine_handle<> h) {
-        // 每连接一个 strand：该 socket 的所有完成回调都在 strand 上串行执行
+        // One strand per connection: all of this socket's completion callbacks run serialized on the strand
         acc.async_accept(asio::make_strand(ioc), [this, h](beast::error_code e, tcp::socket s) {
             ec = e;
             sock.emplace(std::move(s));
@@ -94,14 +98,14 @@ struct AcceptAwaiter {
     }
 };
 
-// 脱缰启动 Task<void>：驱动在自己的执行环境里把 handler 协程跑到完成的入口
+// Fire-and-forget launch of a Task<void>: the driver's entry point for running the handler coroutine to completion in its own execution environment
 struct Detached {
     struct promise_type {
         Detached get_return_object() { return {}; }
         std::suspend_never initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // spawn_detached 已兜底
+        void unhandled_exception() { std::terminate(); }  // spawn_detached already catches everything
     };
 };
 
@@ -112,8 +116,8 @@ Detached spawn_detached(Task<void> t, Done done) {
     } catch (const std::exception& e) {
         LOG_ERROR("beast session escaped exception: {}", e.what());
     } catch (...) {
-        // 非 std::exception 也必须兜住，否则打到 promise 的
-        // unhandled_exception 就是 terminate
+        // Non-std::exception must be caught too; otherwise it hits the
+        // promise's unhandled_exception, which means terminate
         LOG_ERROR("beast session escaped non-standard exception");
     }
     done();
@@ -126,21 +130,23 @@ struct Session {
     explicit Session(tcp::socket&& s) : stream(std::move(s)) {}
 };
 
-// TLS 会话流：引用底层 tcp_stream（归属 Session），自身活在会话协程帧上。
-// 超时仍打在底层 tcp_stream（beast::get_lowest_layer）——TLS 记录层之下的
-// 字节超时对握手/读写一体生效
+// TLS session stream: references the underlying tcp_stream (owned by
+// Session) and itself lives on the session coroutine frame. Timeouts still
+// apply to the underlying tcp_stream (beast::get_lowest_layer) — byte
+// timeouts below the TLS record layer cover handshake and reads/writes alike
 using TlsStream = asio::ssl::stream<beast::tcp_stream&>;
 
-// 每请求的 body 读取状态；归属会话协程帧（handler 内的 reader 销毁后仍要 drain）。
-// Stream = beast::tcp_stream（明文）或 TlsStream：async_read/async_write 经
-// 模板走到对应的记录层，其余逻辑完全一致
+// Per-request body-read state; owned by the session coroutine frame (still
+// needs draining after the handler's reader is destroyed).
+// Stream = beast::tcp_stream (plaintext) or TlsStream: async_read/async_write
+// reach the corresponding record layer via the template; all other logic is identical
 template <class Stream>
 struct BodyCtx {
     bhttp::request_parser<bhttp::buffer_body>* parser;
     Stream* stream;
     beast::flat_buffer* buffer;
     int idle_timeout_sec;
-    bool need_100 = false;  // Expect: 100-continue 尚未答复，首次读 body 时才回
+    bool need_100 = false;  // Expect: 100-continue not yet answered; reply only on the first body read
     bool errored = false;
 };
 
@@ -152,7 +158,7 @@ public:
     Task<size_t> read(std::span<std::byte> buf) override {
         co_await ResumeOn{ctx_->stream->get_executor()};
         if (ctx_->errored) throw std::runtime_error("http body: read after connection error");
-        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/http-adapter.md §3.1）
+        // Deferred 100-continue: the client is told to send only once the handler decides it wants the body (docs/http-adapter.md §3.1)
         if (ctx_->need_100) {
             ctx_->need_100 = false;
             bhttp::response<bhttp::empty_body> cont{bhttp::status::continue_, 11};
@@ -197,8 +203,9 @@ private:
 class BeastServer final : public IHttpServer {
 public:
     explicit BeastServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS（docs/gaps.md §7）：证书在构造期加载，坏路径/坏 PEM 当场抛——
-        // 不能等到第一个连接握手才发现
+        // TLS (docs/gaps.md §7): certificates are loaded at construction; a
+        // bad path / bad PEM throws right here — must not be discovered only
+        // at the first connection's handshake
         if (!cfg.tls_cert.empty()) {
             tls_ctx_.emplace(asio::ssl::context::tls_server);
             tls_ctx_->set_options(asio::ssl::context::default_workarounds |
@@ -224,9 +231,10 @@ public:
         beast::error_code ec;
         auto address = asio::ip::make_address(addr, ec);
         if (ec) throw std::runtime_error("bad bind address: " + addr);
-        // 控制面对象（acceptor/stop_event/grace 定时器）统一挂 ctl_strand_：
-        // asio I/O 对象非线程安全，accept 循环与停机编排原本在两个线程上并发
-        // 访问同一 acceptor/timer
+        // Control-plane objects (acceptor/stop_event/grace timers) all hang
+        // off ctl_strand_: asio I/O objects are not thread-safe, and the
+        // accept loop and shutdown orchestration used to access the same
+        // acceptor/timer concurrently from two threads
         acceptor_.emplace(ctl_strand_);
         tcp::endpoint ep{address, port};
         acceptor_->open(ep.protocol());
@@ -235,7 +243,7 @@ public:
         acceptor_->listen(asio::socket_base::max_listen_connections);
         port_ = acceptor_->local_endpoint().port();
 
-        // shutdown() 只写 eventfd（async-signal-safe），停机编排全部在 io 线程内完成
+        // shutdown() only writes the eventfd (async-signal-safe); shutdown orchestration happens entirely on io threads
         event_fd_ = ::eventfd(0, EFD_CLOEXEC);
         if (event_fd_ < 0) throw std::runtime_error("eventfd() failed");
         stop_event_.emplace(ctl_strand_, event_fd_);
@@ -246,8 +254,9 @@ public:
 
         work_.emplace(asio::make_work_guard(ioc_));
         spawn_detached(accept_loop(), [] {});
-        // shutdown() 早于 listen() 到达时 event_fd_ 还是 -1，信号被吞：
-        // 此处补发，保证随后的 run() 能返回
+        // When shutdown() arrives before listen(), event_fd_ is still -1 and
+        // the signal is swallowed: re-emit it here so the subsequent run()
+        // can return
         if (stopping_.load()) {
             uint64_t one = 1;
             [[maybe_unused]] ssize_t r = ::write(event_fd_, &one, sizeof(one));
@@ -267,8 +276,10 @@ public:
         LOG_INFO("beast http server stopped");
     }
 
-    // 仅做 async-signal-safe 操作，可在信号处理器中调用。
-    // exchange 保证只写一次 eventfd：finish() 之后 fd 号可能已被复用，不能再写
+    // Performs only async-signal-safe operations; callable from a signal
+    // handler. The exchange guarantees the eventfd is written only once:
+    // after finish() the fd number may have been reused and must not be
+    // written again
     void shutdown() override {
         if (stopping_.exchange(true)) return;
         if (event_fd_ >= 0) {
@@ -283,7 +294,7 @@ private:
             auto [ec, sock] = co_await AcceptAwaiter{*acceptor_, ioc_, {}, {}};
             if (ec) {
                 if (stopping_.load() || ec == asio::error::operation_aborted) break;
-                // 暂态错误（EMFILE 等 fd 耗尽）立即重试会忙等自旋，退避后继续
+                // Retrying transient errors (fd exhaustion like EMFILE) immediately would busy-spin; back off, then continue
                 LOG_WARN("accept failed: {}, throttling", ec.message());
                 asio::steady_timer backoff(ctl_strand_, std::chrono::milliseconds(100));
                 co_await io_op([&](auto cb) {
@@ -296,10 +307,10 @@ private:
             {
                 std::lock_guard lk(m_);
                 if (stopping_.load()) break;
-                // 并发连接上限（四驱动统一）：无上限时每连接的协程帧/缓冲可耗尽内存
+                // Concurrent-connection cap (uniform across the four drivers): without one, per-connection coroutine frames/buffers can exhaust memory
                 if (sessions_.size() >= static_cast<size_t>(cfg_.max_connections)) {
                     LOG_WARN("connection limit ({}) reached, rejecting", cfg_.max_connections);
-                    continue;  // sess 随作用域析构即关闭 socket
+                    continue;  // sess closes the socket as it leaves scope
                 }
                 sessions_.insert(sess);
             }
@@ -307,9 +318,10 @@ private:
         }
     }
 
-    // 会话入口：明文直接进请求循环；TLS 先握手，循环结束后回 close_notify。
-    // TlsStream 引用 Session 里的 tcp_stream、活在本协程帧——session_loop 完成
-    // 后才析构，无悬空
+    // Session entry: plaintext goes straight into the request loop; TLS
+    // handshakes first and sends close_notify after the loop ends. TlsStream
+    // references the tcp_stream in Session and lives on this coroutine frame
+    // — destroyed only after session_loop completes, so nothing dangles
     Task<void> session_run(std::shared_ptr<Session> sess) {
         sess->stream.socket().set_option(tcp::no_delay(true));
         auto idle = std::chrono::seconds(cfg_.idle_timeout_sec);
@@ -325,11 +337,11 @@ private:
             (void)hn;
             sess->stream.expires_never();
             if (hec) {
-                // 明文客户端打到 TLS 端口 / 探测流量：一行告警足矣，不进请求循环
+                // Plaintext client hitting the TLS port / probe traffic: one warning line suffices; skip the request loop
                 LOG_WARN("TLS handshake failed from client: {}", hec.message());
             } else {
                 co_await session_loop(sess, tls);
-                // 尽力而为的 close_notify（有超时兜底）；失败无所谓，随后照关 TCP
+                // Best-effort close_notify (with a timeout backstop); failure is fine, TCP gets closed right after anyway
                 sess->stream.expires_after(idle);
                 co_await io_op([&](auto cb) {
                     tls.async_shutdown(
@@ -346,15 +358,17 @@ private:
 
     template <class Stream>
     Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream) {
-        beast::flat_buffer buffer;  // 跨 keep-alive 请求保留（parser 可能超读）
+        beast::flat_buffer buffer;  // Kept across keep-alive requests (the parser may over-read)
         bool keep = true;
 
         while (keep && !stopping_.load()) {
             bhttp::request_parser<bhttp::buffer_body> parser;
             parser.header_limit(static_cast<uint32_t>(cfg_.max_header_size));
-            // 大小限制是 L2 的职责：XML 类请求经 read_body 限 1MiB
-            // （s3/handlers/common.h），PUT 数据面 64KiB 块流式透传不落内存；
-            // 对象大小上限未设（与其他驱动一致，属 S3 语义决策）
+            // Size limits are L2's responsibility: XML-style requests are
+            // capped at 1MiB via read_body (s3/handlers/common.h), and the
+            // PUT data plane streams through in 64KiB chunks without landing
+            // in memory; no object-size cap is set (consistent with the other
+            // drivers — an S3-semantics decision)
             parser.body_limit(boost::none);
             beast::get_lowest_layer(stream).expires_after(
                 std::chrono::seconds(cfg_.idle_timeout_sec));
@@ -364,7 +378,7 @@ private:
                 });
                 (void)n;
                 beast::get_lowest_layer(stream).expires_never();
-                if (ec) break;  // eof / 超时 / shutdown 关闭
+                if (ec) break;  // eof / timeout / closed by shutdown
             }
             sess->in_flight.store(true);
 
@@ -381,9 +395,11 @@ private:
                 if (!epc) req.remote_addr = ep.address().to_string();
             }
 
-            // 消息边界校验（drivers/common.h parse_body_framing）：beast 自身
-            // 的解析对 CL/TE 冲突等更宽松，且本实现不解码 chunked 以外的传输
-            // 编码，一律在 L1 拒绝，保证四个驱动接受/拒绝的请求集合一致
+            // Message framing validation (drivers/common.h parse_body_framing):
+            // beast's own parsing is more lenient about CL/TE conflicts etc.,
+            // and this implementation decodes no transfer encoding other than
+            // chunked — reject all of it at L1, so all four drivers
+            // accept/reject the same request set
             if (!driver::parse_body_framing(req.headers).valid) {
                 auto bad = driver::bad_request_response("Invalid message framing.");
                 co_await write_response(stream, bad, /*head_request=*/false, /*keep=*/false);
@@ -404,15 +420,16 @@ private:
             try {
                 resp = co_await handler_(std::move(req));
             } catch (const std::exception& e) {
-                // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
+                // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2)
                 resp = driver::internal_error_response(e.what());
                 keep = false;
             }
-            co_await ResumeOn{stream.get_executor()};  // handler 可能在池线程 resume
+            co_await ResumeOn{stream.get_executor()};  // The handler may resume on a pool thread
 
             if (stopping_.load() || !client_keep) keep = false;
-            // 复用连接前必须排空未消费的 body；从未回过 100-continue 则客户端
-            // 可能根本不会发 body，不能傻等，直接关连接
+            // The unconsumed body must be drained before reusing the
+            // connection; if 100-continue was never sent, the client may
+            // never send a body — do not wait blindly, just close
             if (!parser.is_done()) {
                 if (bctx.need_100 || bctx.errored) keep = false;
                 else if (keep) keep = co_await drain_body(bctx);
@@ -442,7 +459,7 @@ private:
             if (ec == bhttp::error::need_buffer) ec = {};
             if (ec) co_return false;
             drained += tmp.size() - body.size;
-            if (drained > cfg_.drain_limit) co_return false;  // 过大放弃，关连接
+            if (drained > cfg_.drain_limit) co_return false;  // Too large; give up and close the connection
         }
         co_return true;
     }
@@ -453,23 +470,28 @@ private:
         bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
         auto idle = std::chrono::seconds(cfg_.idle_timeout_sec);
 
-        // 小响应 / HEAD / 无 body 状态码：整消息一次写出
+        // Small response / HEAD / bodyless status code: write the whole message at once
         if (!resp.stream_body || head_request || no_body_status) {
             bhttp::response<bhttp::string_body> res;
             res.result(static_cast<unsigned>(resp.status));
             res.version(11);
-            // 统一出站头过滤（drivers/common.h，契约 5）：beast 的
-            // try_create_new_element 只校验长度不查 CR/LF，直接 insert 是四驱动中
-            // 唯一的响应拆分注入面（后端元数据可来自上游 S3 / duostore 元数据存
-            // 储，不在 L1 入站过滤范围内）；超长头还会抛异常导致连响应都不发
+            // Unified outbound-header filtering (drivers/common.h, contract
+            // 5): beast's try_create_new_element only checks length, not
+            // CR/LF, so a direct insert was the one response-splitting
+            // injection surface among the four drivers (backend metadata can
+            // come from upstream S3 / duostore metadata storage, outside L1
+            // inbound filtering); an over-long header would also throw and
+            // prevent any response from being sent at all
             driver::emit_headers(resp.headers, [&](const std::string& k, const std::string& v) {
                 res.insert(k, v);
             });
             if (!resp.headers.has("Date"))
                 res.set(bhttp::field::date, util::http_date(std::chrono::system_clock::now()));
-            // HEAD 且长度未知（流式无 content_length）：不写 Content-Length 也不写
-            // Transfer-Encoding，改为关连接（drivers/common.h 的契约 6，四驱动统一）。
-            // 旧行为写 Content-Length: 0 是撒谎——GET 并不返回 0 字节
+            // HEAD with unknown length (streaming without content_length):
+            // write neither Content-Length nor Transfer-Encoding; close the
+            // connection instead (drivers/common.h contract 6, uniform across
+            // the four drivers). The old behavior of writing
+            // Content-Length: 0 was a lie — GET does not return 0 bytes
             bool head_unknown_len = head_request && !driver::head_length_known(resp);
             if (head_unknown_len) keep = false;
             res.keep_alive(keep);
@@ -490,7 +512,7 @@ private:
             co_return !ec;
         }
 
-        // 流式响应：serializer + buffer_body，64KiB 块拉取（docs/architecture.md 请求生命周期）
+        // Streaming response: serializer + buffer_body, pulled in 64KiB chunks (docs/architecture.md request lifecycle)
         bhttp::response<bhttp::buffer_body> res;
         res.result(static_cast<unsigned>(resp.status));
         res.version(11);
@@ -526,11 +548,13 @@ private:
                 n = co_await resp.stream_body->read(std::span(buf));
             } catch (const std::exception& e) {
                 LOG_ERROR("stream body read failed mid-response: {}", e.what());
-                co_return false;  // 响应头已发出，只能断连（契约 3：丢弃结果）
+                co_return false;  // Response head already sent; can only disconnect (contract 3: discard the result)
             }
             co_await ResumeOn{stream.get_executor()};
-            // 定长响应字节对账（与另三驱动一致）：写多会破坏消息边界；写少不能
-            // 保持 keep-alive——客户端会把下个响应的状态行当作本次 body 剩余部分
+            // Byte accounting for fixed-length responses (consistent with the
+            // other three drivers): writing too much breaks message framing;
+            // writing too little must not stay keep-alive — the client would
+            // read the next response's status line as the rest of this body
             if (resp.content_length && written + n > *resp.content_length) {
                 LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})",
                           written, n, *resp.content_length);
@@ -563,7 +587,7 @@ private:
         co_return true;
     }
 
-    // ---- 优雅停机编排（契约 4：run() 在在途请求完成或超时后返回）----
+    // ---- Graceful shutdown orchestration (contract 4: run() returns after in-flight requests finish or time out) ----
 
     void on_stop_signal() {
         beast::error_code ig;
@@ -572,15 +596,16 @@ private:
         bool empty;
         {
             std::lock_guard lk(m_);
-            // 此前结束的会话不会触发 finish()（见 on_session_done），
-            // 保证 acceptor 一定先于 finish() 关闭，否则挂起的 async_accept
-            // 会让 io_context 永远有工作，run() 无法返回
+            // Sessions that ended before this do not trigger finish() (see
+            // on_session_done), guaranteeing the acceptor closes before
+            // finish(); otherwise the pending async_accept would keep the
+            // io_context busy forever and run() could not return
             stop_handled_ = true;
             for (auto& s : sessions_)
                 if (!s->in_flight.load()) idle.push_back(s);
             empty = sessions_.empty();
         }
-        for (auto& s : idle) close_session(s);  // 空闲 keep-alive 连接直接掐掉
+        for (auto& s : idle) close_session(s);  // Idle keep-alive connections get cut directly
         if (empty) {
             finish();
             return;
@@ -597,13 +622,13 @@ private:
             for (auto& s : rest) close_session(s);
             force_timer_.emplace(ctl_strand_, std::chrono::seconds(cfg_.shutdown_force_wait_sec));
             force_timer_->async_wait([this](beast::error_code e2) {
-                if (!e2) ioc_.stop();  // 最后兜底：卡死的会话不再等
+                if (!e2) ioc_.stop();  // Last resort: stop waiting for stuck sessions
             });
         });
     }
 
     void close_session(const std::shared_ptr<Session>& s) {
-        // socket 非线程安全：关闭动作投递到该连接自己的 strand 上执行
+        // Sockets are not thread-safe: the close is posted onto the connection's own strand
         asio::post(s->stream.get_executor(), [s] { s->stream.close(); });
     }
 
@@ -612,9 +637,11 @@ private:
         {
             std::lock_guard lk(m_);
             sessions_.erase(sess);
-            // stop_handled_ 之前不 finish：shutdown() 刚置位 stopping_ 而
-            // eventfd 事件尚未处理时，最后一个会话结束不能抢跑（否则 finish
-            // 会关掉 stop eventfd，on_stop_signal 被跳过，acceptor 永不关闭）
+            // No finish() before stop_handled_: when shutdown() has just set
+            // stopping_ but the eventfd event is not yet processed, the last
+            // session ending must not jump the gun (otherwise finish would
+            // close the stop eventfd, on_stop_signal would be skipped, and
+            // the acceptor would never close)
             finish_now = stop_handled_ && sessions_.empty();
         }
         if (finish_now) finish();
@@ -622,24 +649,25 @@ private:
 
     void finish() {
         std::call_once(finish_once_, [this] {
-            // 收尾动作触碰 grace/force 定时器与 stop_event，须与 on_stop_signal
-            // 同 strand 串行
+            // The wrap-up touches the grace/force timers and stop_event, so
+            // it must serialize on the same strand as on_stop_signal
             asio::post(ctl_strand_, [this] {
                 if (grace_timer_) grace_timer_->cancel();
                 if (force_timer_) force_timer_->cancel();
                 beast::error_code ig;
                 if (stop_event_) stop_event_->close(ig);
-                work_.reset();  // io_context 排空后 run() 返回
+                work_.reset();  // run() returns once the io_context drains
             });
         });
     }
 
     HttpConfig cfg_;
     Handler handler_;
-    std::optional<asio::ssl::context> tls_ctx_;  // 有值即 HTTPS（构造期加载证书）
+    std::optional<asio::ssl::context> tls_ctx_;  // Present means HTTPS (certificates loaded at construction)
     asio::io_context ioc_;
-    // 控制面 strand：acceptor / stop_event / grace_timer / force_timer 的所有
-    // 操作在此串行（数据面仍是每连接一个 strand）
+    // Control-plane strand: all operations on acceptor / stop_event /
+    // grace_timer / force_timer serialize here (the data plane still has one
+    // strand per connection)
     asio::strand<asio::io_context::executor_type> ctl_strand_ = asio::make_strand(ioc_);
     std::optional<asio::executor_work_guard<asio::io_context::executor_type>> work_;
     std::optional<tcp::acceptor> acceptor_;
@@ -651,7 +679,7 @@ private:
     uint16_t port_ = 0;
     std::atomic<bool> stopping_{false};
     std::mutex m_;
-    bool stop_handled_ = false;  // on_stop_signal 已执行（guarded by m_）
+    bool stop_handled_ = false;  // on_stop_signal has run (guarded by m_)
     std::set<std::shared_ptr<Session>> sessions_;
     std::once_flag finish_once_;
 };

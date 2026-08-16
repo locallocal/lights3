@@ -1,9 +1,12 @@
-// L3: IMetaStore 的 TiKV 实现（docs/duostore-tikv-meta.md）。
-// 提交类操作 = 快照读（start_ts）+ C++ 组 mutation 批 + 乐观 2PC 提交（tikv_client
-// 侧车），WriteConflict → 取新 ts 重读重试（§4.1）；只读前置条件（bucket 存在性、
-// 空检查、upload 存在性）的写偏斜用守卫分片 Op::Lock 物化（§4.3）。2PC 原子性对
-// 任意进程成立——多网关共享同一 PD 即共享 meta，不持业务互斥（§4.5，仅号段小锁）。
-// value 编码 100% 复用 codec.cc（§3.1）；持久化 = raft 多数派，meta_sync 无意义（§7.1）。
+// L3: TiKV implementation of IMetaStore (docs/duostore-tikv-meta.md).
+// Committing operations = snapshot read (start_ts) + mutation batch assembled in C++ +
+// optimistic 2PC commit (tikv_client sidecar); WriteConflict → take a new ts, re-read
+// and retry (§4.1). Write skew on read-only preconditions (bucket existence, emptiness
+// check, upload existence) is materialized via guard-shard Op::Lock (§4.3). 2PC
+// atomicity holds across arbitrary processes — multiple gateways sharing the same PD
+// share the meta, with no business-level mutex held (§4.5, only the small id-segment
+// lock). Value encoding is 100% reused from codec.cc (§3.1); durability = raft
+// majority, so meta_sync is meaningless (§7.1).
 #pragma once
 
 #include <atomic>
@@ -23,26 +26,29 @@
 namespace lights3::storage::duostore {
 
 struct TikvMetaOptions {
-    std::vector<std::string> pd_endpoints;  // meta=tikv 时必填
-    std::string prefix = "duo:";            // 全部 key 前缀（多实例/测试隔离，§3.1）
-    // mTLS 三件套（可选，三者同给才启用，§9）
+    std::vector<std::string> pd_endpoints;  // required when meta=tikv
+    std::string prefix = "duo:";            // prefix for all keys (multi-instance/test isolation, §3.1)
+    // mTLS triple (optional; enabled only when all three are given, §9)
     std::string ca_path;
     std::string cert_path;
     std::string key_path;
-    // 退避预算参数化（§6.1，T5）：>0 覆盖侧车路径的库默认；0 = 库默认
+    // Parameterized backoff budget (§6.1, T5): >0 overrides the library default on sidecar paths; 0 = library default
     int backoff_budget_ms = 0;
-    // GC safepoint 推进（§7.3，T5）：纯 KV 集群长期运行的硬需求。interval=0 关闭
-    //（直构测试/共 TiDB 部署）；开启后后台每 interval 秒推进 safepoint 至
-    // now − retention（service safepoint 声明 + 集群 safepoint 推进两步，多网关
-    // 并发推进经 PD min/单调语义天然收敛）
+    // GC safepoint advancement (§7.3, T5): a hard requirement for long-running pure-KV
+    // clusters. interval=0 disables it (directly-constructed tests / deployments shared
+    // with TiDB); when enabled, a background worker advances the safepoint to
+    // now − retention every interval seconds (two steps: service safepoint declaration +
+    // cluster safepoint push; concurrent advancement by multiple gateways naturally
+    // converges via PD's min/monotonic semantics)
     int gc_safepoint_interval_s = 0;
-    int gc_retention_s = 600;  // 保留窗口：只需覆盖最长 list/事务时长（§7.3）
-    MetricsScope metrics;  // 冲突重试 / safepoint 计数（T5；空 scope 即孤立实例）
+    int gc_retention_s = 600;  // retention window: only needs to cover the longest list/transaction duration (§7.3)
+    MetricsScope metrics;  // conflict retry / safepoint counters (T5; empty scope means isolated instances)
 };
 
 class TikvMetaStore final : public IMetaStore {
 public:
-    // 当前 schema 版本（标记 = "t" + 版本；打开时按迁移链升级存量库，docs/gaps.md §6.1）
+    // Current schema version (marker = "t" + version; existing stores are upgraded
+    // along the migration chain at open, docs/gaps.md §6.1)
     static constexpr int64_t kSchemaCurrent = 1;
 
     explicit TikvMetaStore(TikvMetaOptions opt);
@@ -79,7 +85,7 @@ public:
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
     bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
-    void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单事务批量销账
+    void ack_reclaims(std::span<const uint64_t> seqs) override;  // batch write-off in one transaction
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
@@ -89,31 +95,37 @@ public:
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
 
-    // GC safepoint 单轮推进（§7.3；后台 worker 每 tick 调用，测试直调）：
-    // service safepoint 声明 now − retention 并取回全体服务 min → 以 min 推进
-    // 集群 safepoint。返回推进后的集群 safepoint（TSO 格式）；失败抛 pingcap
-    // 异常（worker 捕获计数，下轮重试）
+    // Single round of GC safepoint advancement (§7.3; called by the background worker
+    // each tick, and directly by tests): declare the service safepoint at
+    // now − retention and get back the min across all services → push the cluster
+    // safepoint with that min. Returns the cluster safepoint after the push (TSO
+    // format); on failure throws a pingcap exception (the worker catches and counts
+    // it, retrying next round)
     uint64_t update_gc_safepoint_once();
 
 private:
-    void migrate_schema(int64_t ver);  // 版本 < 当前时的迁移链（open schema 调用）
+    void migrate_schema(int64_t ver);  // migration chain for version < current (called by open schema)
 
-    // 号段预留（§5，与 RocksDB/Redis 版同构）：计数器 key 上的 RMW 小事务一次
-    // +kIdSegment、内存派发。TiKV 提交即 raft 持久，无 Redis 版的空烧补偿
+    // Id-segment reservation (§5, isomorphic to the RocksDB/Redis versions): a small
+    // RMW transaction on the counter key adds +kIdSegment at a time, then dispatches
+    // from memory. A TiKV commit is raft-durable, so no burn-on-crash compensation
+    // like the Redis version
     struct IdRange {
         uint64_t next = 0, limit = 0;
     };
     static constexpr uint64_t kIdSegment = 4096;
-    // 守卫分片数（§4.3）：并发 put 相撞概率 1/16，delete_bucket/complete/abort
-    // 写全量 16 个分片物化写偏斜冲突
+    // Number of guard shards (§4.3): concurrent puts collide with probability 1/16;
+    // delete_bucket/complete/abort write all 16 shards to materialize the write-skew
+    // conflict
     static constexpr uint32_t kGuardShards = 16;
 
-    // 存活客户端。close 契约 = 无在途调用（DuoStoreBackend close 顺序保证）；
-    // 原子指针使违约的 close 后调用确定性地抛 InternalError 而非 TOCTOU 数据
-    // 竞争（rocks 版 db_ 同型守卫）
+    // Live client. The close contract = no in-flight calls (guaranteed by
+    // DuoStoreBackend's close ordering); the atomic pointer makes a
+    // contract-violating call after close deterministically throw InternalError
+    // instead of a TOCTOU data race (same guard shape as the rocks version's db_)
     TikvClient& client();
 
-    // ---- key 构造（§3.2：prefix + 单字符表标签 + codec 复合段）----
+    // ---- key construction (§3.2: prefix + one-char table tag + codec composite segment) ----
     std::string tkey(char tag, std::string_view rest) const;
     std::string bucket_key(std::string_view b) const;                  // 'B'
     std::string bucket_guard(std::string_view b, uint32_t shard) const;  // 'b'
@@ -126,70 +138,78 @@ private:
     std::string refs_key(uint64_t file_id) const;                   // 'R'
     std::string gcq_key(uint64_t seq) const;                        // 'G'
     std::string counter_key(char kind) const;                       // 'C'
-    // pack 存活账（'S' 表，§3.2）：delta 行 S<be64 id>d<be64 delta_id>（值 =
-    // le64 bytes ‖ le64 recs）+ 封存行 S<be64 id>s（值 = le64 file_size）。
-    // 每次业务事务写唯一 delta 行——读改写共享账行会让同 active-pack 的小对象
-    // PUT prewrite 互相冲突（§3.2 预警的物化解法）；折叠见 pack_stats()
+    // Pack liveness ledger ('S' table, §3.2): delta rows S<be64 id>d<be64 delta_id>
+    // (value = le64 bytes ‖ le64 recs) + seal row S<be64 id>s (value = le64
+    // file_size). Each business transaction writes a unique delta row —
+    // read-modify-write of a shared ledger row would make small-object PUT prewrites
+    // on the same active pack conflict with each other (the materialized solution to
+    // the §3.2 warning); folding is in pack_stats()
     std::string pack_delta_key(uint64_t pack_id, uint64_t delta_id) const;
     std::string pack_seal_key(uint64_t pack_id) const;
-    // [lo, hi) 前缀区间（bucket 名/上层校验保证复合段无 NUL 歧义）
+    // [lo, hi) prefix range (bucket names / upper-layer validation guarantee the composite segment has no NUL ambiguity)
     std::pair<std::string, std::string> range_of(char tag, std::string_view rest) const;
 
-    // ---- 事务与读辅助（.cc 内实现）----
-    // 乐观重试循环（§4.1）：每轮新 start_ts → body(ts, muts) 读算组批 → commit；
-    // muts 空 = 纯读/提前返回，不发事务。冲突指数退避 100µs..6.4ms，16 次上限
+    // ---- Transaction and read helpers (implemented in the .cc) ----
+    // Optimistic retry loop (§4.1): each round takes a new start_ts → body(ts, muts)
+    // reads/computes and assembles the batch → commit; empty muts = pure read / early
+    // return, no transaction sent. Conflicts back off exponentially 100µs..6.4ms, 16 attempts max
     template <typename Body>
     auto txn_retry(const char* what, Body&& body);
-    // 纯读重试一次（§6.4）；pingcap 异常 → S3Error(InternalError) 的统一翻译
+    // Pure reads retry once (§6.4); unified translation of pingcap exceptions → S3Error(InternalError)
     template <typename Fn>
     auto guarded(const char* what, Fn&& fn);
 
     std::optional<std::string> snap_get(uint64_t ver, const std::string& key);
-    // 批量快照读（一次 KvBatchGet 往返换逐 key 串行 Get），重试语义同 snap_get
+    // Batched snapshot read (one KvBatchGet round trip instead of serial per-key
+    // Gets), retry semantics same as snap_get
     std::vector<std::optional<std::string>> snap_get_many(uint64_t ver,
                                                           const std::vector<std::string>& keys);
-    // 分页扫全量 [lo, hi)（每页 1024），escape：callback 返回 false 提前停
+    // Paged scan of the full [lo, hi) (1024 per page); escape: callback returning false stops early
     template <typename Fn>
     void scan_range(uint64_t ver, std::string lo, const std::string& hi, Fn&& cb);
 
     uint64_t alloc_id(char kind, IdRange& r, uint32_t n = 1);
-    // gcq 入账：seq 预派发（独立小事务），入账本身保持纯写 mutation
+    // gcq ledger entry: seq is pre-dispatched (independent small transaction), so the
+    // entry itself stays a pure-write mutation
     void enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref,
                          ReclaimReason reason);
     void mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add,
                   std::string_view owner);
-    // 同批维护 pack 存活账（唯一 delta 行，纯写无冲突）。独立于 mut_refs：
-    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
-    // rec_overhead：每条 record 的头开销（codec::pack_rec_overhead*），live_bytes
-    // 与 file_size 同口径（docs/gaps.md §2.3a）
+    // Maintains the pack liveness ledger in the same batch (unique delta rows,
+    // pure-write, no conflict). Independent of mut_refs: complete's refs transfer
+    // (owner rewrite) must be a no-op for packs — mixing them would double-count.
+    // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes
+    // uses the same accounting basis as file_size (docs/gaps.md §2.3a)
     void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign,
                         int64_t rec_overhead);
-    // parts 全量读（按 part_no 升序，be16 尾缀天然有序）
+    // Full read of parts (ascending by part_no; the be16 suffix is naturally ordered)
     std::vector<PartRec> scan_parts(uint64_t ver, std::string_view b, std::string_view k,
                                     std::string_view id);
 
     TikvMetaOptions opt_;
     std::unique_ptr<TikvClient> client_owned_;
-    std::atomic<TikvClient*> client_{nullptr};  // close 后置空（见 client() 注释）
+    std::atomic<TikvClient*> client_{nullptr};  // nulled after close (see client() comment)
 
-    // T5 指标（构造期注册，0 值可见）
+    // T5 metrics (registered at construction; zero values are visible)
     std::shared_ptr<MetricCounter> m_conflict_retries_;
     std::shared_ptr<MetricCounter> m_safepoint_failures_;
-    std::shared_ptr<MetricGauge> m_safepoint_ms_;  // 最近推进的集群 safepoint（物理 ms）
+    std::shared_ptr<MetricGauge> m_safepoint_ms_;  // most recently pushed cluster safepoint (physical ms)
 
-    // safepoint worker（§7.3）：cv 等待可即时唤醒退出；close() 先停 worker 再摘
-    // client（worker 经 client() 取句柄，摘早了会把正常退出路径变成 500 抛掷）
+    // safepoint worker (§7.3): the cv wait can be woken immediately for exit; close()
+    // stops the worker before detaching the client (the worker gets its handle via
+    // client(); detaching too early turns the normal exit path into a 500 throw)
     std::thread sp_thread_;
     std::mutex sp_mu_;
     std::condition_variable sp_cv_;
     bool sp_stop_ = false;
 
-    // 号段派发独立小锁（alloc 在数据面每个 chunk 打开时调用，不排队业务提交）；
-    // 段耗尽的网络续段在锁外进行（alloc_id 注释）
+    // Separate small lock for id-segment dispatch (alloc is called on the data plane
+    // each time a chunk opens; it must not queue behind business commits); network
+    // segment renewal on exhaustion happens outside the lock (see alloc_id comment)
     std::mutex alloc_mu_;
-    IdRange file_ids_[2];  // 按 Extent::Kind 下标
+    IdRange file_ids_[2];  // indexed by Extent::Kind
     IdRange seqs_;         // gcq seq
-    IdRange pack_deltas_;  // pack 账 delta 行 id（唯一性即可，'d' 计数器）
+    IdRange pack_deltas_;  // pack ledger delta row id (uniqueness suffices, 'd' counter)
 };
 
 }  // namespace lights3::storage::duostore

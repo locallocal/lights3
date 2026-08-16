@@ -1,8 +1,10 @@
-// L3: IMetaStore 的 SQLite 实现（docs/duostore-sqlite-meta.md）。
-// 提交类操作 = 单 SQL 事务（BEGIN IMMEDIATE + RAII guard，§3.2），复合不变量在
-// 事务隔离域内读-校验-写，零窗口；进程内一把 std::mutex 序列化写者（写连接唯一，
-// §3.1/§3.4）。纯读走读连接池，WAL 模式下与写者并行。value 编码 100% 复用
-// codec.cc（§2.1）；单进程独占，多进程共享 meta 为非目标（§1）。
+// L3: SQLite implementation of IMetaStore (docs/duostore-sqlite-meta.md).
+// Commit-class operations = a single SQL transaction (BEGIN IMMEDIATE + RAII guard,
+// §3.2); compound invariants are read-checked-written inside the transaction's
+// isolation domain, with zero window. One in-process std::mutex serializes writers
+// (single write connection, §3.1/§3.4). Pure reads go through a read connection pool
+// and run in parallel with the writer under WAL mode. Value encoding reuses codec.cc
+// 100% (§2.1); single-process exclusive — multi-process shared meta is a non-goal (§1).
 #pragma once
 
 #include <cstdint>
@@ -19,12 +21,12 @@
 namespace lights3::storage::duostore {
 
 struct SqliteMetaOptions {
-    std::string path;                  // DB 文件路径（单文件部署，§1）
-    bool sync = true;                  // 提交是否持久：synchronous FULL/NORMAL（§6）
-    size_t cache_bytes = 64ull << 20;  // 页缓存容量（PRAGMA cache_size，§8）
-    int pool_size = 8;                 // 读连接池上限（§3.1）
-    int busy_timeout_ms = 5000;        // busy handler 等待（§5.2；不进 YAML，测试可调短）
-    MetricsScope metrics;              // BUSY / corruption 计数（S4；空 scope 即孤立实例）
+    std::string path;                  // DB file path (single-file deployment, §1)
+    bool sync = true;                  // durable commits: synchronous FULL/NORMAL (§6)
+    size_t cache_bytes = 64ull << 20;  // page cache capacity (PRAGMA cache_size, §8)
+    int pool_size = 8;                 // read connection pool cap (§3.1)
+    int busy_timeout_ms = 5000;        // busy handler wait (§5.2; not in YAML, tests may shorten)
+    MetricsScope metrics;              // BUSY / corruption counters (S4; empty scope = isolated instance)
 };
 
 class SqliteMetaStore final : public IMetaStore {
@@ -62,35 +64,39 @@ public:
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
-    void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单事务单 fsync（§3.3）
+    void ack_reclaims(std::span<const uint64_t> seqs) override;  // one txn, one fsync (§3.3)
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
-    // 单事务单 fsync（压实批量化，gaps §2.13）；逐项 CAS 独立
+    // One txn, one fsync (batched compaction, gaps §2.13); per-item CAS is independent
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
 
-    // 测试专用（§9 S4 一致视图专项）：list_objects 每次调用在发出第一个条目后
-    // 调一次该钩子——钩子内从其他连接并发提交，验证 list 读事务的 WAL snapshot
+    // Test-only (§9 S4 consistent-view case): each list_objects call invokes this hook
+    // once after emitting the first entry — the hook commits concurrently from another
+    // connection, validating the list read transaction's WAL snapshot
     void set_list_pause_for_test(std::function<void()> hook) {
         list_pause_for_test_ = std::move(hook);
     }
 
 private:
-    struct Conn;  // sqlite3* + prepared statement 常驻缓存（.cc 内定义，头文件不泄漏 sqlite3 类型）
+    struct Conn;  // sqlite3* + resident prepared-statement cache (defined in the .cc; header leaks no sqlite3 types)
     class Stmt;
 
-    // close() 的共用体：graceful=false 用于构造失败清理——只释放连接与文件锁，
-    // 不跑 optimize/checkpoint 收尾（库没开利索，收尾必然失败且重复计 corruption）
+    // Shared body of close(): graceful=false is for constructor-failure cleanup — it
+    // only releases connections and the file lock, skipping the optimize/checkpoint
+    // wrap-up (the db never opened cleanly, so the wrap-up would inevitably fail and
+    // double-count corruption)
     void shutdown(bool graceful);
     class Txn;
 
-    // 读连接租借 RAII（§3.1）：析构归还池；close 后归还即销毁。
-    // 特殊成员在 .cc 定义（unique_ptr<Conn> 需要完整类型）
+    // RAII lease of a read connection (§3.1): destructor returns it to the pool;
+    // returning after close destroys it. Special members are defined in the .cc
+    // (unique_ptr<Conn> needs the complete type)
     struct Lease {
         SqliteMetaStore* store = nullptr;
         std::unique_ptr<Conn> conn;
@@ -100,68 +106,79 @@ private:
         Conn& operator*() const;
     };
 
-    // 号段预留（§4，与 RocksMetaStore 同构）：counters 一次 +kIdSegment、内存派发。
-    // gcq seq 不走号段——AUTOINCREMENT rowid 随业务事务分配，天然事务性（§2.2）
+    // Id-segment reservation (§4, isomorphic to RocksMetaStore): counters bumped by
+    // +kIdSegment at a time, dispensed from memory. gcq seq does not use segments —
+    // the AUTOINCREMENT rowid is allocated with the business transaction, naturally
+    // transactional (§2.2)
     struct IdRange {
         uint64_t next = 0, limit = 0;
     };
     static constexpr uint64_t kIdSegment = 4096;
 
-    std::unique_ptr<Conn> open_raw();      // 仅 open + busy_timeout（谱系校验前不碰文件）
+    std::unique_ptr<Conn> open_raw();      // open + busy_timeout only (no file writes before lineage check)
     void apply_pragmas(Conn& c, bool full_sync);
     std::unique_ptr<Conn> open_conn(bool full_sync);  // open_raw + apply_pragmas
-    // 谱系校验（§2.2）：在任何写入（含 WAL journal 转换）之前执行——app_id/ver 全 0
-    // 但 sqlite_master 非空 = 别人的库，拒绝且不留痕
+    // Lineage check (§2.2): runs before any write (including the WAL journal
+    // conversion) — app_id/ver both 0 but sqlite_master non-empty = someone else's
+    // database; refuse without leaving a trace
     void check_lineage(Conn& c);
-    void migrate_schema(Conn& c, int64_t ver);  // 版本 < 当前时的迁移链（check_lineage 调用）
+    void migrate_schema(Conn& c, int64_t ver);  // migration chain for version < current (called by check_lineage)
     void init_schema(Conn& c);
-    Lease read_conn();                     // 池取；close 后抛 InternalError
+    Lease read_conn();                     // take from pool; throws InternalError after close
     void release(std::unique_ptr<Conn> c);
-    Conn& wconn();                         // 写连接；须持 mu_；close 后抛 InternalError
+    Conn& wconn();                         // write connection; mu_ must be held; throws InternalError after close
 
     void require_bucket(Conn& c, std::string_view b);
     std::optional<std::string> object_raw(Conn& c, std::string_view b, std::string_view k);
     UploadRec require_upload_in(Conn& c, std::string_view b, std::string_view k,
                                 std::string_view id);
-    // 同批维护 refs（chunk 引用表）：add=写入 owner、否则删除
+    // Maintain refs (chunk reference table) in the same batch: add=write owner, else delete
     void write_refs(Conn& c, const DataRef& ref, bool add, std::string_view owner);
-    // 同批维护 pack 存活账（pack_stats 表算术 UPDATE，§2.2）。独立于 write_refs：
-    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
-    // rec_overhead：每条 record 的头开销（codec::pack_rec_overhead*），live_bytes
-    // 与 file_size 同口径（docs/gaps.md §2.3a）
+    // Maintain pack liveness accounting in the same batch (arithmetic UPDATE on the
+    // pack_stats table, §2.2). Independent of write_refs: complete's refs transfer
+    // (owner rewrite) must be a no-op for packs — mixing them would double-count.
+    // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes
+    // uses the same accounting basis as file_size (docs/gaps.md §2.3a)
     void write_pack_delta(Conn& c, const DataRef& ref, int sign, int64_t rec_overhead);
-    // swap 的单项 CAS 核心（持 mu_、在调用方事务内执行）：校验通过即落写返回 true；
-    // 不符返回 false 不落写。swap_extents / swap_extents_batch 共用
+    // Single-item CAS core of swap (mu_ held, runs inside the caller's transaction):
+    // on successful validation writes and returns true; on mismatch returns false
+    // without writing. Shared by swap_extents / swap_extents_batch
     bool apply_swap(Conn& c, std::string_view b, std::string_view k, uint64_t expect_version,
                     const DataRef& from, const DataRef& to);
-    // gcq 入账：seq 由 AUTOINCREMENT 随事务分配，与业务写同批提交/回滚
+    // gcq bookkeeping: seq is allocated by AUTOINCREMENT with the transaction,
+    // committing/rolling back in the same batch as the business write
     void enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason reason);
     std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k,
                                     std::string_view id);
     uint64_t alloc_id(std::string_view counter, IdRange& r, uint32_t n = 1);
 
     SqliteMetaOptions opt_;
-    // 单进程独占的 fail-fast enforcement（§1；对应 RocksDB 的 LOCK 文件）：
-    // <path>.lock 上的 flock(LOCK_EX|LOCK_NB)，构造取、close 释放
+    // Fail-fast enforcement of single-process exclusivity (§1; counterpart of
+    // RocksDB's LOCK file): flock(LOCK_EX|LOCK_NB) on <path>.lock, acquired in the
+    // constructor, released by close()
     int lock_fd_ = -1;
 
-    // 一把互斥序列化全部提交类操作（wc_ 上的事务恒在 mu_ 内，§3.4）。提交（含
-    // sync=true 的 WAL fsync）在锁内完成，写吞吐上限 ≈ 1/fsync 延迟——与 RocksDB
-    // 版同一取舍（P1 级接受，不做 group commit）
+    // One mutex serializes all commit-class operations (transactions on wc_ always
+    // run inside mu_, §3.4). The commit (including the WAL fsync when sync=true)
+    // completes inside the lock, so write throughput caps at ≈ 1/fsync latency —
+    // same trade-off as the RocksDB version (accepted at P1; no group commit)
     std::mutex mu_;
-    std::unique_ptr<Conn> wc_;  // 专用写连接（BEGIN IMMEDIATE 事务恒在此连接）
-    // 号段专用连接，恒 synchronous=FULL（独立于 opt_.sync，§4）；alloc_mu_ 保护
-    // IdRange 与本连接。锁序 alloc_mu_ → mu_（预留期间持 mu_ 挡开业务写者，
-    // docs/gaps.md §3.9）；alloc 由数据面在业务事务之外调用，无反向嵌套
+    std::unique_ptr<Conn> wc_;  // dedicated write connection (BEGIN IMMEDIATE txns always on it)
+    // Dedicated id-segment connection, always synchronous=FULL (independent of
+    // opt_.sync, §4); alloc_mu_ protects the IdRange and this connection. Lock order
+    // alloc_mu_ → mu_ (mu_ is held during reservation to keep business writers out,
+    // docs/gaps.md §3.9); alloc is called by the data plane outside business
+    // transactions, so no reverse nesting
     std::mutex alloc_mu_;
     std::unique_ptr<Conn> ac_;
-    IdRange file_ids_[2];  // 按 Extent::Kind 下标
+    IdRange file_ids_[2];  // indexed by Extent::Kind
 
     std::mutex pool_mu_;
     std::vector<std::unique_ptr<Conn>> idle_;
     bool closed_ = false;
 
-    // S4 指标（构造期注册，0 值可见）；连接持 shared_ptr 副本在错误路径递增
+    // S4 metrics (registered at construction, visible at value 0); connections hold
+    // shared_ptr copies and increment them on error paths
     std::shared_ptr<MetricCounter> m_busy_;
     std::shared_ptr<MetricCounter> m_corrupt_;
 

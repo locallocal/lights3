@@ -1,5 +1,6 @@
-// L4: 配置加载。内置一个覆盖本项目配置形态的 YAML 子集解析器：
-// 嵌套 map、"- " 列表、标量、注释、${ENV} 展开。不支持 flow style/锚点/多行标量。
+// L4: config loading. Includes a built-in YAML-subset parser covering the shapes this
+// project's config uses: nested maps, "- " lists, scalars, comments, ${ENV} expansion.
+// No flow style / anchors / multi-line scalars.
 #pragma once
 
 #include <cstdint>
@@ -12,22 +13,22 @@
 
 namespace lights3 {
 
-// ---------- YAML 子集节点 ----------
+// ---------- YAML subset node ----------
 struct YamlNode {
     enum class Type { Scalar, Map, List };
     Type type = Type::Scalar;
     std::string scalar;
-    std::vector<std::pair<std::string, YamlNode>> map;  // 保序
+    std::vector<std::pair<std::string, YamlNode>> map;  // order-preserving
     std::vector<YamlNode> list;
 
     const YamlNode* find(const std::string& key) const;
-    // 取子标量，不存在返回 def
+    // Get a child scalar; returns def if absent
     std::string get(const std::string& key, const std::string& def = "") const;
 };
 
-YamlNode yaml_parse(const std::string& text);  // 语法错误抛 std::runtime_error
+YamlNode yaml_parse(const std::string& text);  // throws std::runtime_error on syntax errors
 
-// ---------- 类型化配置 ----------
+// ---------- Typed configuration ----------
 struct HttpConfig {
     std::string driver = "builtin";
     std::string bind = "0.0.0.0";
@@ -35,35 +36,45 @@ struct HttpConfig {
     int io_threads = 4;
     size_t max_header_size = 16 * 1024;
     int idle_timeout_sec = 60;
-    // 请求级超时（docs/gaps.md §3.3）：从 handler 开始执行起计时，到点以协作式取消
-    // 打断请求（挂起点抛 OperationCancelled → 503 SlowDown，SDK 可重试）。
-    // idle_timeout 只覆盖 socket 系统调用，覆盖不到 handler 执行期。0 = 关闭
+    // Per-request timeout (docs/gaps.md §3.3): the clock starts when the handler
+    // begins executing; on expiry the request is interrupted via cooperative
+    // cancellation (suspension points throw OperationCancelled -> 503 SlowDown,
+    // retryable by SDKs). idle_timeout only covers socket syscalls, not the
+    // handler execution window. 0 = disabled
     int request_timeout_sec = 300;
-    // multipart 最小分片字节数（docs/gaps.md §5.7）：AWS 恒 5MiB，0 = 不限制。
-    // 前面挂着不守这条规则的工具链、或本实例只是另一个 lights3 的代理时可放开
+    // Minimum multipart part size in bytes (docs/gaps.md §5.7): AWS fixes it at
+    // 5MiB, 0 = no limit. Relax it when a toolchain that ignores this rule sits in
+    // front, or when this instance is merely a proxy for another lights3
     uint64_t min_part_size = 5ull * 1024 * 1024;
-    // 传输停滞上限：流式收发**整体**允许的无进展时长。四驱动的分块超时都是逐块
-    // 重置的，每 59 秒发 1 字节的客户端可无限期占住连接。0 = 关闭
+    // Transfer stall limit: the total no-progress duration allowed for streaming
+    // send/receive **as a whole**. All four drivers reset their per-chunk timeouts
+    // chunk by chunk, so a client sending 1 byte every 59 seconds could hold a
+    // connection indefinitely. 0 = disabled
     int transfer_stall_timeout_sec = 300;
-    // 并发连接硬上限（四驱动统一；httplib 由其线程池隐式约束）：超限拒绝新连接，
-    // 无上限时每连接的线程/协程帧/缓冲可耗尽内存
+    // Hard cap on concurrent connections (uniform across the four drivers; httplib
+    // is implicitly constrained by its thread pool): new connections are rejected
+    // above the limit; without one, per-connection threads/coroutine frames/buffers
+    // can exhaust memory
     int max_connections = 4096;
-    std::string base_domain;  // 非空时启用 virtual-host style（docs/s3-protocol.md §2）
-    // TLS（docs/gaps.md §7）：cert/key 都给出即启用 HTTPS。SigV4 的 UNSIGNED-PAYLOAD
-    // 完整性依赖传输层加密，入站方向由这里承接。仅 httplib/beast 驱动支持；
-    // builtin/seastar 配置了 TLS 会在启动时报错——绝不"配了但静默跑明文"
-    std::string tls_cert;  // PEM 证书链路径
-    std::string tls_key;   // PEM 私钥路径
-    // builtin 驱动是 thread-per-connection，io_threads 对它无意义；显式配置时
-    // 启动 WARN 而不是静默忽略（docs/gaps.md §7）。解析器置位
+    std::string base_domain;  // non-empty enables virtual-host style (docs/s3-protocol.md §2)
+    // TLS (docs/gaps.md §7): HTTPS is enabled when both cert and key are given.
+    // SigV4's UNSIGNED-PAYLOAD integrity relies on transport-layer encryption, and
+    // this covers the inbound direction. Only the httplib/beast drivers support it;
+    // builtin/seastar error out at startup if TLS is configured — never
+    // "configured but silently running plaintext"
+    std::string tls_cert;  // path to PEM certificate chain
+    std::string tls_key;   // path to PEM private key
+    // The builtin driver is thread-per-connection, so io_threads is meaningless for
+    // it; when explicitly configured, WARN at startup instead of silently ignoring
+    // (docs/gaps.md §7). Set by the parser
     bool io_threads_set = false;
-    // ---- 停机/背压边界（docs/gaps.md §7）：曾是四驱动各写一份的硬编码 ----
-    uint64_t drain_limit = 4 * 1024 * 1024;   // 回错前排空请求体上限
-    size_t trailer_max_size = 16 * 1024;      // chunked trailer 区上限（builtin/seastar）
-    size_t io_chunk_size = 64 * 1024;         // 流式读写块大小
-    size_t body_queue_cap = 256 * 1024;       // 推转拉体队列容量（仅 httplib，即背压水位）
-    int shutdown_grace_sec = 10;              // 停机等在途请求的宽限
-    int shutdown_force_wait_sec = 5;          // 强制断开后的二次等待
+    // ---- Shutdown/backpressure knobs (docs/gaps.md §7): formerly hard-coded once per driver ----
+    uint64_t drain_limit = 4 * 1024 * 1024;   // max request body drained before returning an error
+    size_t trailer_max_size = 16 * 1024;      // chunked trailer section limit (builtin/seastar)
+    size_t io_chunk_size = 64 * 1024;         // streaming read/write chunk size
+    size_t body_queue_cap = 256 * 1024;       // push-to-pull body queue capacity (httplib only, i.e. the backpressure watermark)
+    int shutdown_grace_sec = 10;              // grace period waiting for in-flight requests on shutdown
+    int shutdown_force_wait_sec = 5;          // second wait after forced disconnect
 };
 
 struct RuntimeConfig {
@@ -73,23 +84,23 @@ struct RuntimeConfig {
 
 struct Credential {
     std::string access_key;
-    util::SecretString secret_key;  // 析构即擦除（docs/gaps.md §4）
+    util::SecretString secret_key;  // wiped on destruction (docs/gaps.md §4)
 };
 
 struct AuthConfig {
-    std::vector<Credential> credentials;  // 为空则关闭认证（demo/测试用）
+    std::vector<Credential> credentials;  // empty disables auth (for demos/tests)
     std::string region = "us-east-1";
     std::string service = "s3";
-    // 凭证管理二期（docs/credential-management.md §10）
-    std::string credentials_file;          // 外部凭证文件（JSON，热加载）；空 = 不启用
-    int credentials_file_reload_sec = 30;  // 文件 mtime 轮询周期；0 = 仅启动时加载
-    int sync_interval_sec = 0;             // 多实例：定期增量 reload .sys；0 = 关闭
+    // Credential management phase 2 (docs/credential-management.md §10)
+    std::string credentials_file;          // external credentials file (JSON, hot-reloaded); empty = disabled
+    int credentials_file_reload_sec = 30;  // file mtime polling period; 0 = load at startup only
+    int sync_interval_sec = 0;             // multi-instance: periodic incremental reload of .sys; 0 = disabled
 };
 
 struct BackendConfig {
     std::string name;
     std::string type;                            // localfs | memory | ...
-    std::map<std::string, std::string> params;   // root/staging/endpoint/... 由各后端解释
+    std::map<std::string, std::string> params;   // root/staging/endpoint/... interpreted by each backend
 };
 
 struct BucketRule {
@@ -114,9 +125,9 @@ struct Config {
     static Config from_string(const std::string& yaml_text);
 };
 
-// "16KiB" / "1MB" / "60s" / "true" 之类的解析辅助
+// Parsing helpers for values like "16KiB" / "1MB" / "60s" / "true"
 size_t parse_size(const std::string& s);
 int parse_duration_sec(const std::string& s);
-bool parse_bool(const std::string& s);  // true/1/yes/on | false/0/no/off，其余抛 runtime_error
+bool parse_bool(const std::string& s);  // true/1/yes/on | false/0/no/off; anything else throws runtime_error
 
 }  // namespace lights3

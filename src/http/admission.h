@@ -1,9 +1,13 @@
-// L1/L2 边界：dispatch 入口限流装配（docs/concurrency.md §6）
+// L1/L2 boundary: dispatch-entry admission control assembly (docs/concurrency.md §6)
 //
-// 曾内联在 main.cc 装配层——排队、Permit 系进流式响应体、断连归还、排队被取消
-// 回 503 这整条生命周期敏感路径不被单测触达（docs/issues.md T11）。Permit 泄漏
-// 一个就永久少一个额度，生产表现为额度耗尽后全站 hang；这类回归必须有行为测试
-// 兜住。抽成独立头让 main.cc 与单测装配同一份代码。
+// This used to be inlined in the main.cc assembly layer — the whole
+// lifetime-sensitive path (queueing, tying the Permit into the streaming
+// response body, returning it on disconnect, 503 when cancelled while queued)
+// was unreachable from unit tests (docs/issues.md T11). Leaking a single
+// Permit permanently loses one slot; in production that shows up as a
+// site-wide hang once the quota is exhausted, so this class of regression
+// must be caught by behavioral tests. Extracted into a standalone header so
+// main.cc and the unit tests assemble the same code.
 #pragma once
 
 #include <chrono>
@@ -18,13 +22,18 @@
 
 namespace lights3::http {
 
-// 把入口限流的 Permit 系进流式响应体的生命期（docs/gaps.md 第三部分 ·
-// concurrency.md §6）：permit 若只活在 handler 协程帧内，会在响应体开始传输
-// **之前**就归还——N 个大对象 GET 全部拿到 permit 又全部归还后仍在并发占用
-// 带宽与后端 IO，`max_inflight_requests` 约束不到请求的主要生命期；关停排空
-// 用 available() 判在途，同样会漏数流式传输中的请求。驱动读完/丢弃响应体时
-// 析构本 reader，permit 随之归还（析构可发生在驱动线程，与协程帧路径同语义：
-// 等待者经池 executor 唤醒，不在释放方调用栈上内联展开）
+// Ties the admission-control Permit to the streaming response body's lifetime
+// (docs/gaps.md part 3, concurrency.md §6): if the permit only lived in the
+// handler coroutine frame, it would be returned **before** the response body
+// starts transferring — N large-object GETs could all acquire and all release
+// their permits yet still concurrently consume bandwidth and backend IO, so
+// `max_inflight_requests` would not constrain the request's main lifetime;
+// shutdown draining that uses available() to count in-flight work would
+// likewise miss requests mid-stream. When the driver finishes reading or
+// discards the response body, this reader is destroyed and the permit is
+// returned with it (destruction may happen on a driver thread, with the same
+// semantics as the coroutine-frame path: waiters are woken via the pool
+// executor, not inlined on the releasing call stack)
 class PermitBodyReader final : public BodyReader {
 public:
     PermitBodyReader(std::unique_ptr<BodyReader> inner, AsyncSemaphore::Permit permit)
@@ -40,15 +49,21 @@ private:
     AsyncSemaphore::Permit permit_;
 };
 
-// 组装带准入限流 + 传输停滞守卫的驱动 handler：
-// - 超限的请求在 inflight 上排队（FIFO）而非拒绝；排队中被取消（关停广播 /
-//   请求超时 / 驱动断连）以 503 SlowDown 收敛，SDK 可重试；
-// - 驱动已挂上本连接 token 时保留，否则接上 shutdown_src 的关停源；
-// - 流式响应把 permit 交给响应体（最外层包装）：驱动读完/断连丢弃时才归还，
-//   限流因此覆盖响应传输全程。小响应（small_body）随 co_return 归还——驱动
-//   写出一段内存的耗时有界，不值得为它把 permit 也穿进驱动；
-// - 传输停滞守卫（docs/gaps.md §3.3）收发两个方向都包一层，装在 L1/L2 交界处
-//   四驱动一次性生效；stall <= 0 时关闭
+// Assembles the driver handler with admission control + transfer stall guard:
+// - Requests over the limit queue on inflight (FIFO) instead of being
+//   rejected; cancellation while queued (shutdown broadcast / request timeout
+//   / driver disconnect) resolves to 503 SlowDown, which SDKs can retry;
+// - If the driver already attached this connection's token, it is kept;
+//   otherwise the shutdown_src cancel source is attached;
+// - Streaming responses hand the permit to the response body (outermost
+//   wrapper): it is only returned when the driver finishes reading or drops
+//   it on disconnect, so admission control covers the entire response
+//   transfer. Small responses (small_body) return the permit at co_return —
+//   the driver's time to write out a chunk of memory is bounded, not worth
+//   threading the permit into the driver for;
+// - The transfer stall guard (docs/gaps.md §3.3) wraps both directions,
+//   installed at the L1/L2 boundary so it covers all four drivers at once;
+//   disabled when stall <= 0
 inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
                                       std::chrono::seconds stall,
                                       std::shared_ptr<CancelSource> shutdown_src,

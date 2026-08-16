@@ -1,4 +1,4 @@
-// L4: 进程级定时器线程；with_timeout 等超时原语的底座（docs/concurrency.md §2/§5）
+// L4: process-wide timer thread; the foundation for timeout primitives like with_timeout (docs/concurrency.md §2/§5)
 #pragma once
 
 #include <array>
@@ -25,52 +25,64 @@ public:
 
     static TimerQueue& instance();
 
-    // 回调执行时长直方图桶：<10ms <100ms <1s <10s ≥10s（docs/gaps.md §7）。
-    // 回调串行执行，慢回调直接推迟后续定时器——桶界因此比线程池的等待桶更粗
+    // Callback execution time histogram buckets: <10ms <100ms <1s <10s >=10s
+    // (docs/gaps.md §7). Callbacks run serially, so a slow callback directly delays
+    // subsequent timers — hence the bucket boundaries are coarser than the thread
+    // pool's wait buckets
     static constexpr size_t kExecBuckets = 5;
 
     struct Stats {
-        size_t pending = 0;        // 未到期定时器数
-        size_t due = 0;            // 已到期、还排在回调线程前面的数量
-        uint64_t fired = 0;        // 已执行完的回调总数
-        uint64_t slow = 0;         // 超过 1s 的回调数（每次伴随一条 WARN 日志）
+        size_t pending = 0;        // timers not yet due
+        size_t due = 0;            // timers due but still queued ahead of the callback thread
+        uint64_t fired = 0;        // total callbacks fully executed
+        uint64_t slow = 0;         // callbacks exceeding 1s (each accompanied by a WARN log)
         std::array<uint64_t, kExecBuckets> exec_hist{};
-        uint64_t exec_sum_us = 0;  // 回调执行时长累计（微秒）
-        // 队头滞后：最早的已到期/在执行回调已经迟了多久（秒，0 = 无积压）。
-        // "定时器被某个回调堵了 3 秒"直接读这个数
+        uint64_t exec_sum_us = 0;  // cumulative callback execution time (microseconds)
+        // Head-of-queue lag: how late the earliest due/executing callback already is
+        // (seconds, 0 = no backlog). "Timers were blocked 3 seconds by some callback"
+        // reads straight off this number
         double lag_seconds = 0;
     };
     Stats stats() const;
 
-    // delay 后调用 fn。fn 在**专用回调线程**上执行，与到期判定的调度线程分离
-    // （docs/gaps.md §3.2）：request_cancel 会就地展开被取消的协程链，跑在调度
-    // 线程上会让全进程定时器在展开期间停摆。回调之间仍是串行的，单个慢回调会
-    // 推迟后续回调（但不再推迟到期判定），因此 fn 仍应避免阻塞 IO。
-    // 停机后（析构已开始）返回 0——"有效但永不触发"的 id 是排查陷阱
-    // （docs/gaps.md §7）；cancel(0) 恒为安全 no-op，调用方无需区分
+    // Call fn after delay. fn runs on a **dedicated callback thread**, separate from
+    // the scheduling thread that determines expiry (docs/gaps.md §3.2): request_cancel
+    // unwinds the cancelled coroutine chain in place, and running that on the
+    // scheduling thread would stall every timer in the process during the unwind.
+    // Callbacks are still serial with each other, so a single slow callback delays
+    // subsequent callbacks (but no longer delays expiry determination); fn should
+    // therefore still avoid blocking IO.
+    // After shutdown (destruction already begun) returns 0 — a "valid but
+    // never-firing" id is a debugging trap (docs/gaps.md §7); cancel(0) is always a
+    // safe no-op, so callers need not distinguish
     Id add(Clock::duration delay, std::function<void()> fn);
 
-    // 撤销定时器：未触发返回 true；已触发/不存在返回 false。若该回调**已到期但尚未
-    // 执行完**（在待执行队列里或正在执行），阻塞等它收敛——调用方 cancel 返回后即可
-    // 安全析构回调捕获的资源，无需自备"已触发未执行"窗口的生命期守卫。回调线程上
-    // （回调内）自撤销不等待（防自死锁）。注意：回调内不得持有 cancel 调用方等待
-    // 期间所持的锁（锁序约束同一般 cv 等待）
+    // Cancel a timer: returns true if it has not fired; false if already fired /
+    // nonexistent. If the callback is **due but not yet finished** (in the pending
+    // queue or currently executing), block until it settles — once cancel returns,
+    // the caller can safely destroy resources captured by the callback, with no need
+    // for its own lifetime guard over the "fired but not yet executed" window.
+    // Self-cancellation on the callback thread (from inside a callback) does not wait
+    // (prevents self-deadlock). Note: a callback must not hold locks that the
+    // cancelling caller holds while waiting (the usual lock-ordering constraint for
+    // cv waits)
     bool cancel(Id id);
 
 private:
-    void loop();       // 调度线程：只做到期判定与出队
-    void fire_loop();  // 回调线程：串行执行到期回调
+    void loop();       // scheduling thread: only determines expiry and dequeues
+    void fire_loop();  // callback thread: executes due callbacks serially
     bool pending_locked(Id id) const;
     static size_t exec_bucket(Clock::duration d);
 
     mutable std::mutex m_;
-    std::condition_variable cv_;       // 调度线程
-    std::condition_variable fire_cv_;  // 回调线程
-    std::condition_variable done_cv_;  // 回调执行完毕的通知（cancel 阻塞等待用）
-    // 按 (到期时间, id) 排序的待触发表；deadlines_ 提供按 id 反查
+    std::condition_variable cv_;       // scheduling thread
+    std::condition_variable fire_cv_;  // callback thread
+    std::condition_variable done_cv_;  // callback-finished notification (for cancel's blocking wait)
+    // Pending table ordered by (deadline, id); deadlines_ provides reverse lookup by id
     std::map<std::pair<Clock::time_point, Id>, std::function<void()>> items_;
     std::map<Id, Clock::time_point> deadlines_;
-    // 已到期、待回调线程执行；deadline 随行携带，供 stats() 计算队头滞后
+    // Due, awaiting the callback thread; the deadline travels along so stats() can
+    // compute head-of-queue lag
     struct DueItem {
         Id id;
         Clock::time_point deadline;
@@ -78,14 +90,16 @@ private:
     };
     std::deque<DueItem> due_;
     Id next_id_ = 0;
-    Id running_id_ = 0;  // 正在执行的回调 id（0 = 无）
+    Id running_id_ = 0;  // id of the currently executing callback (0 = none)
     bool stopping_ = false;
-    // 回调耗时观测（docs/gaps.md §7）；原子存储，stats() 读取不与回调争锁
+    // Callback duration observability (docs/gaps.md §7); atomic storage, so stats()
+    // reads without contending on locks with callbacks
     std::array<std::atomic<uint64_t>, kExecBuckets> exec_hist_{};
     std::atomic<uint64_t> exec_sum_us_{0};
     std::atomic<uint64_t> fired_{0};
     std::atomic<uint64_t> slow_{0};
-    // 正在执行回调的原定到期时刻（running_id_ != 0 时有效；guarded by m_）
+    // Original deadline of the currently executing callback (valid when
+    // running_id_ != 0; guarded by m_)
     Clock::time_point running_deadline_{};
     std::thread thread_;
     std::thread fire_thread_;

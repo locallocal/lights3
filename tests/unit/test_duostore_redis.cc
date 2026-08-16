@@ -1,8 +1,8 @@
-// RedisMetaStore 专项单测（docs/duostore-redis-meta.md §9）：meta 一致性套件、
-// 注入组合跑后端套件、前缀隔离、NOSCRIPT 自愈、swap_extents CAS、多网关共 meta、
-// 并发 CAS 收敛。真实 redis 获取：探测 PATH 中的 redis-server，以 unix socket
-// 拉起私有实例（--save '' --appendonly no）；找不到则显式 SKIP（不算失败）。
-// LIGHTS3_TEST_REDIS_URI 可覆盖为外部实例（隔离靠每用例随机 key 前缀）。
+// RedisMetaStore dedicated unit tests (docs/duostore-redis-meta.md §9): meta consistency suite,
+// backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS, multiple gateways sharing meta,
+// concurrent CAS convergence. Obtaining a real redis: probe for redis-server in PATH and start a private instance
+// on a unix socket (--save '' --appendonly no); if none is found, SKIP explicitly (not a failure).
+// LIGHTS3_TEST_REDIS_URI can override with an external instance (isolation relies on a random per-case key prefix).
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_REDIS_META)
 
 #include <hiredis.h>
@@ -36,9 +36,9 @@ using namespace lights3::storage::duostore;
 
 namespace {
 
-// 私有 redis-server 的进程级单例：首个用例惰性拉起，进程退出时回收。
-// unix socket 免端口分配冲突；--appendonly no（单测不测崩溃语义，与 rocks
-// 单测 sync=false 同一取舍）。
+// Process-level singleton for the private redis-server: lazily started by the first test case, reaped at process exit.
+// A unix socket avoids port allocation conflicts; --appendonly no (unit tests do not test crash semantics, the same tradeoff
+// as sync=false in the rocks unit tests).
 class RedisTestServer {
 public:
     static RedisTestServer& instance() {
@@ -47,12 +47,12 @@ public:
     }
 
     bool available = false;
-    // 实例归属：仅自起的私有 redis 允许 SCRIPT FLUSH / CLIENT KILL 这类服务器
-    // 全局操作；外部实例（LIGHTS3_TEST_REDIS_URI）按约定只靠 key 前缀隔离
+    // Instance ownership: only the self-started private redis allows server-global operations such as SCRIPT FLUSH /
+    // CLIENT KILL; an external instance (LIGHTS3_TEST_REDIS_URI) is by convention isolated only via key prefixes
     bool owned = false;
     std::string uri;
 
-    // 直连服务端发管理命令（SCRIPT FLUSH 等测试注入用）
+    // Send admin commands directly to the server (SCRIPT FLUSH etc., for test injection)
     bool raw_command(const char* cmd) {
         redisContext* ctx = connect_raw();
         if (!ctx) return false;
@@ -76,7 +76,7 @@ private:
         sock_ = dir_ + "/redis.sock";
         pid_ = fork();
         if (pid_ == 0) {
-            // 子进程：日志留在临时目录便于排障；execlp 失败即退出（父侧超时判 skip）
+            // Child process: keep logs in the temp dir for troubleshooting; exit if execlp fails (parent side times out and skips)
             std::string logfile = dir_ + "/redis.log";
             if (FILE* f = fopen(logfile.c_str(), "w")) {
                 dup2(fileno(f), 1);
@@ -89,7 +89,7 @@ private:
         }
         if (pid_ < 0) return;
         uri = "unix://" + sock_;
-        // 就绪轮询：PING 通即可用（≤5s）
+        // Readiness polling: usable once PING succeeds (<=5s)
         for (int i = 0; i < 50; ++i) {
             if (redisContext* ctx = connect_raw()) {
                 auto* r = static_cast<redisReply*>(redisCommand(ctx, "PING"));
@@ -103,7 +103,7 @@ private:
                 }
             }
             int status = 0;
-            if (waitpid(pid_, &status, WNOHANG) == pid_) {  // exec 失败/启动即死
+            if (waitpid(pid_, &status, WNOHANG) == pid_) {  // exec failed / died right at startup
                 pid_ = -1;
                 break;
             }
@@ -128,7 +128,7 @@ private:
         if (uri.rfind("unix://", 0) == 0)
             ctx = redisConnectUnixWithTimeout(uri.c_str() + 7, tv);
         else if (uri.rfind("redis://", 0) == 0) {
-            // 覆盖实例只支持最简 host:port 形态（测试注入用）
+            // The override instance only supports the simplest host:port form (for test injection)
             std::string rest = uri.substr(8);
             if (auto slash = rest.find('/'); slash != std::string::npos) rest.resize(slash);
             std::string host = rest;
@@ -150,7 +150,7 @@ private:
     pid_t pid_ = -1;
 };
 
-// 每用例独立前缀：多套用例（以及外部覆盖实例上的多次运行）互不污染（§2.1）
+// Independent prefix per test case: multiple suites (and repeated runs against an external override instance) do not pollute each other (§2.1)
 std::string unique_prefix() {
     static std::atomic<int> counter{0};
     return "t" + std::to_string(getpid()) + "-" + std::to_string(counter++) + ":";
@@ -171,8 +171,8 @@ RedisMetaOptions redis_opts(const std::string& prefix) {
         return;                                                               \
     }
 
-// 需要 SCRIPT FLUSH / CLIENT KILL 等服务器全局注入的用例：指向外部共享实例时
-// 跳过——既不打断他人，也避免他人连接使 reconnects 精确断言失真
+// Cases that need server-global injection such as SCRIPT FLUSH / CLIENT KILL: skip when pointing at an external shared
+// instance -- this neither disrupts others nor lets other connections distort the exact reconnects assertion
 #define OWNED_REDIS_OR_SKIP()                                                 \
     REDIS_OR_SKIP();                                                          \
     if (!RedisTestServer::instance().owned) {                                 \
@@ -186,7 +186,7 @@ using meta_store_suite::make_rec;
 
 }  // namespace
 
-// 同一 meta 语义基线（与 RocksMetaStore 共享套件，docs/duostore-redis-meta.md §9.1）
+// Same meta semantics baseline (suite shared with RocksMetaStore, docs/duostore-redis-meta.md §9.1)
 TEST(duostore_redis_meta_store_suite) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -194,7 +194,7 @@ TEST(duostore_redis_meta_store_suite) {
         [&] { return std::make_unique<RedisMetaStore>(redis_opts(prefix)); });
 }
 
-// 注入组合（RedisMetaStore + FsDataStore）跑后端一致性套件（§9.3）
+// Run the backend consistency suite over the injected combination (RedisMetaStore + FsDataStore) (§9.3)
 TEST(duostore_redis_backend_suite) {
     REDIS_OR_SKIP();
     TmpDir tmp;
@@ -215,7 +215,7 @@ TEST(duostore_redis_backend_suite) {
     sync_wait(b->close());
 }
 
-// 前缀隔离（§2.1）：两个 store 共用一个 server，互不可见
+// Prefix isolation (§2.1): two stores share one server yet cannot see each other
 TEST(duostore_redis_prefix_isolation) {
     REDIS_OR_SKIP();
     RedisMetaStore a(redis_opts(unique_prefix()));
@@ -229,7 +229,7 @@ TEST(duostore_redis_prefix_isolation) {
     b.close();
 }
 
-// 多网关共 meta（§3.4）：同前缀的两个实例即共享元数据；号段派发互不碰撞
+// Multiple gateways sharing meta (§3.4): two instances with the same prefix share metadata; segment allocation never collides
 TEST(duostore_redis_multi_gateway_shared_meta) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -241,7 +241,7 @@ TEST(duostore_redis_multi_gateway_shared_meta) {
     CHECK(g1.get_object("shared", "k").has_value());
     CHECK_THROWS_S3(g2.create_bucket("shared"), s3::S3ErrorCode::BucketAlreadyOwnedByYou);
 
-    // 两网关各取一批 file_id：全局唯一（INCRBY 号段，§4）
+    // Each gateway takes a batch of file_ids: globally unique (INCRBY segments, §4)
     std::set<uint64_t> ids;
     for (int i = 0; i < 5000; ++i) {
         CHECK(ids.insert(g1.alloc_file_id(Extent::Kind::kChunk)).second);
@@ -253,22 +253,22 @@ TEST(duostore_redis_multi_gateway_shared_meta) {
     g2.close();
 }
 
-// NOSCRIPT 自愈（§3.5）：SCRIPT FLUSH 后提交与 list 照常（回退 EVAL 重载）
+// NOSCRIPT self-healing (§3.5): after SCRIPT FLUSH, commit and list work as usual (fall back to EVAL reload)
 TEST(duostore_redis_noscript_selfheal) {
     OWNED_REDIS_OR_SKIP();
     RedisMetaStore m(redis_opts(unique_prefix()));
     m.create_bucket("heal");
     m.put_object("heal", "k1", make_rec("k1", {}));
     CHECK(RedisTestServer::instance().raw_command("SCRIPT FLUSH"));
-    m.put_object("heal", "k2", make_rec("k2", {}));  // 提交脚本自愈
-    auto r = m.list_objects("heal", {});             // list 脚本自愈
+    m.put_object("heal", "k2", make_rec("k2", {}));  // commit script self-heals
+    auto r = m.list_objects("heal", {});             // list script self-heals
     CHECK_EQ(r.objects.size(), size_t(2));
     for (auto k : {"k1", "k2"}) m.delete_object("heal", k);
     m.delete_bucket("heal");
     m.close();
 }
 
-// swap_extents 的 CAS 放弃路径（§3.3/§9.2）：version 或 extents 不符 → false 不落写
+// swap_extents CAS abandon path (§3.3/§9.2): version or extents mismatch -> false, nothing is written
 TEST(duostore_redis_swap_extents_cas) {
     REDIS_OR_SKIP();
     RedisMetaStore m(redis_opts(unique_prefix()));
@@ -279,7 +279,7 @@ TEST(duostore_redis_swap_extents_cas) {
     DataRef to{{chunk_extent(id2, 8)}};
     m.put_object("swap", "k", make_rec("k", from.extents));  // version=1
 
-    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version 不符
+    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version mismatch
     CHECK(m.chunk_referenced(id1));
     CHECK(!m.chunk_referenced(id2));
 
@@ -290,15 +290,15 @@ TEST(duostore_redis_swap_extents_cas) {
     CHECK(!m.chunk_referenced(id1));
     CHECK(m.chunk_referenced(id2));
 
-    // 换过之后旧 from 过期 → 再换必失败
+    // After a swap the old from is stale -> swapping again must fail
     CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));
     CHECK(m.delete_object("swap", "k"));
     m.delete_bucket("swap");
     m.close();
 }
 
-// 并发 CAS 收敛（§3.2）：两个"网关"对同一 key 竞争覆盖写——version 严格计数、
-// refs 只剩最终 extent、gcq 恰好 (总写数-1) 条（每次覆盖旧 ref 入账一次）
+// Concurrent CAS convergence (§3.2): two "gateways" race to overwrite the same key -- version counts strictly,
+// refs keeps only the final extent, gcq has exactly (total writes - 1) entries (each overwrite books the old ref once)
 TEST(duostore_redis_concurrent_cas_converges) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -307,7 +307,7 @@ TEST(duostore_redis_concurrent_cas_converges) {
     g1.create_bucket("race");
     constexpr int kPerWriter = 25;
 
-    // 线程内异常经 exception_ptr 传回主线程重抛（否则 terminate 掩盖断言信息）
+    // Exceptions in threads are carried back via exception_ptr and rethrown on the main thread (otherwise terminate hides the assertion info)
     std::exception_ptr errs[2];
     auto writer = [&](RedisMetaStore& m, std::exception_ptr& err) {
         try {
@@ -338,7 +338,7 @@ TEST(duostore_redis_concurrent_cas_converges) {
     g2.close();
 }
 
-// close 后调用干净失败（500），而非崩溃（§5.5）
+// Calls after close fail cleanly (500) instead of crashing (§5.5)
 TEST(duostore_redis_closed_store_throws) {
     REDIS_OR_SKIP();
     RedisMetaStore m(redis_opts(unique_prefix()));
@@ -346,7 +346,7 @@ TEST(duostore_redis_closed_store_throws) {
     CHECK_THROWS_S3(m.bucket_exists("x"), s3::S3ErrorCode::InternalError);
 }
 
-// R4 配置：redis_wait_replicas 解析 + 范围校验（纯解析，无需真实 server）
+// R4 config: redis_wait_replicas parsing + range validation (pure parsing, no real server needed)
 TEST(duostore_redis_config_wait_replicas) {
     std::map<std::string, std::string> p{{"root", "/tmp/duo-redis-cfg"},
                                          {"meta", "redis"},
@@ -364,9 +364,9 @@ TEST(duostore_redis_config_wait_replicas) {
     CHECK(threw);
 }
 
-// R4 指标 + 重连边界（§5.3/§3.5）：构造期注册 0 值可见；CLIENT KILL 杀掉池中
-// 连接后——纯读换新连接重试（reconnects 递增），提交类单命令 IO 失败 = 结果
-// 不明 → InternalError（盲重试禁令），store 不失能（下次调用新建连接照常）
+// R4 metrics + reconnect edge cases (§5.3/§3.5): zero values registered at construction are visible; after CLIENT KILL kills a pooled
+// connection -- pure reads retry on a fresh connection (reconnects increments), while an IO failure on a commit-class single command = outcome
+// unknown -> InternalError (blind-retry ban), and the store is not disabled (the next call creates a new connection as usual)
 TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
     OWNED_REDIS_OR_SKIP();
     auto reg = std::make_shared<MetricsRegistry>();
@@ -382,23 +382,23 @@ TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
 
     m.create_bucket("kill");
     CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
-    CHECK(m.bucket_exists("kill"));  // 纯读：坏连接丢弃、重连重试成功
+    CHECK(m.bucket_exists("kill"));  // pure read: bad connection dropped, reconnect and retry succeed
     CHECK(reg->render().find(
               "lights3_duostore_redis_reconnects_total{backend=\"r4\"} 1\n") !=
           std::string::npos);
 
     CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
     CHECK_THROWS_S3(m.ack_reclaim(1), s3::S3ErrorCode::InternalError);
-    m.delete_bucket("kill");  // 坏连接已弃，新建连接照常
+    m.delete_bucket("kill");  // bad connection already discarded, a fresh connection works as usual
     m.close();
 }
 
-// R4 wait_replicas（§6）：standalone（0 副本）下 WAIT 达不到副本数仅 WARN 不
-// 报错——写已在主上生效，报错会误导客户端重试。timeout 调短控制用例时长
+// R4 wait_replicas (§6): on standalone (0 replicas), WAIT falling short of the replica count only WARNs instead of
+// erroring -- the write already took effect on the primary, and an error would mislead clients into retrying. timeout shortened to bound case duration
 TEST(duostore_redis_wait_replicas_no_replica_tolerated) {
     REDIS_OR_SKIP();
     auto opts = redis_opts(unique_prefix());
-    opts.timeout_ms = 400;  // WAIT 超时取半 = 200ms/次提交
+    opts.timeout_ms = 400;  // WAIT timeout is halved = 200ms per commit
     opts.wait_replicas = 1;
     RedisMetaStore m(opts);
     m.create_bucket("wr");
@@ -411,16 +411,16 @@ TEST(duostore_redis_wait_replicas_no_replica_tolerated) {
     m.close();
 }
 
-// R4 list_uploads HSCAN 分批（§2.2）：uploads 表超过 listpack 阈值与单批
-// COUNT 后仍完整返回、(key, upload_id) 字典序、内容与登记一致
+// R4 list_uploads HSCAN batching (§2.2): the uploads table still returns completely beyond the listpack threshold and a single-batch
+// COUNT, in (key, upload_id) lexicographic order, with contents matching what was registered
 TEST(duostore_redis_list_uploads_hscan_batches) {
     REDIS_OR_SKIP();
     RedisMetaStore m(redis_opts(unique_prefix()));
     m.create_bucket("many");
-    constexpr int kUploads = 600;  // > hash-max-listpack-entries(128) 转真 hashtable，> COUNT 512 跨批
+    constexpr int kUploads = 600;  // > hash-max-listpack-entries(128) converts to a real hashtable, > COUNT 512 spans batches
     std::set<std::pair<std::string, std::string>> expect;
     for (int i = 0; i < kUploads; ++i) {
-        std::string k = "k" + std::to_string(i % 40);  // 同 key 多 upload 混合
+        std::string k = "k" + std::to_string(i % 40);  // multiple uploads mixed on the same key
         expect.emplace(k, m.create_upload("many", k, {}));
     }
     auto got = m.list_uploads("many", {}, {}, 0);
@@ -434,20 +434,20 @@ TEST(duostore_redis_list_uploads_hscan_batches) {
     m.close();
 }
 
-// 多网关 GC 租约（docs/gaps.md §6.1）：同一 prefix 的两个实例只有一个抢到；
-// 同 owner 续租刷新 TTL；他人租约过期后可接管
+// Multi-gateway GC lease (docs/gaps.md §6.1): of two instances with the same prefix only one wins the lease;
+// the same owner renewing refreshes the TTL; another owner's expired lease can be taken over
 TEST(duostore_redis_gc_lease) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
     RedisMetaStore a(redis_opts(prefix)), b(redis_opts(prefix));
     CHECK(a.try_gc_lease("owner-a", 60'000));
-    CHECK(!b.try_gc_lease("owner-b", 60'000));  // 他人持有且未过期
-    CHECK(a.try_gc_lease("owner-a", 60'000));   // 同 owner 续租
-    // 短租约过期后接管
+    CHECK(!b.try_gc_lease("owner-b", 60'000));  // held by another and not expired
+    CHECK(a.try_gc_lease("owner-a", 60'000));   // same owner renews
+    // Takeover after a short lease expires
     RedisMetaStore c(redis_opts(unique_prefix()));
     CHECK(c.try_gc_lease("x", 100));
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    CHECK(c.try_gc_lease("y", 60'000));  // x 的租约已过期
+    CHECK(c.try_gc_lease("y", 60'000));  // x's lease has expired
     a.close();
     b.close();
     c.close();

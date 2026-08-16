@@ -1,8 +1,9 @@
-// 入口限流装配的行为测试（docs/concurrency.md §6 · docs/issues.md T11）：
-// 超限排队、Permit 系进流式响应体（读完/断连丢弃才归还）、排队被取消回 503。
-// 被测对象是 http/admission.h——与 main.cc 装配的同一份代码；此前这条
-// 生命周期敏感路径完全不被单测触达，Permit 泄漏类回归（额度耗尽全站 hang）
-// 无从检出。另含传输停滞守卫（stall_guard.h）的判定行为。
+// Behavioral tests for the ingress admission-control assembly (docs/concurrency.md §6 · docs/issues.md T11):
+// queueing when over the limit, the Permit tied into the streaming response body (returned only when fully read
+// or dropped on disconnect), and a cancelled queued request returning 503. The unit under test is
+// http/admission.h -- the same code main.cc assembles; previously this lifetime-sensitive path had no unit-test
+// coverage at all, so Permit-leak regressions (quota exhaustion hanging the whole site) were undetectable.
+// Also covers the transfer stall guard's (stall_guard.h) decision behavior.
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -17,7 +18,7 @@ using namespace std::chrono_literals;
 
 namespace {
 
-// 固定字节流：可控长度的流式响应体
+// Fixed byte stream: a streaming response body of controllable length
 class ZeroReader final : public BodyReader {
 public:
     explicit ZeroReader(uint64_t size) : size_(size) {}
@@ -33,7 +34,7 @@ private:
     uint64_t size_, pos_ = 0;
 };
 
-// 装配一套与 main.cc 相同形态的准入 handler（cap 个许可 + 池 executor 唤醒）
+// Assemble an admission handler in the same shape as main.cc (cap permits + pool executor wakeups)
 struct AdmissionEnv {
     std::shared_ptr<ThreadPool> pool = std::make_shared<ThreadPool>(2);
     std::shared_ptr<ThreadPoolExecutor> exec = std::make_shared<ThreadPoolExecutor>(*pool);
@@ -48,7 +49,7 @@ struct AdmissionEnv {
     HttpResponse call(HttpRequest req = {}) { return sync_wait(handler(std::move(req))); }
 };
 
-// 自旋等待谓词成立（同 test_concurrency.cc 的正确范式，不用固定 sleep）
+// Spin-wait until the predicate holds (same correct pattern as test_concurrency.cc, no fixed sleeps)
 template <class F>
 bool eventually(F&& pred, std::chrono::milliseconds limit = 5000ms) {
     auto deadline = std::chrono::steady_clock::now() + limit;
@@ -61,7 +62,7 @@ bool eventually(F&& pred, std::chrono::milliseconds limit = 5000ms) {
 
 }  // namespace
 
-// 小响应（small_body）：permit 随 handler co_return 归还，不穿进驱动
+// Small response (small_body): the permit is returned when the handler co_returns, and does not travel into the driver
 TEST(admission_small_body_releases_permit_on_return) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         HttpResponse r;
@@ -73,8 +74,8 @@ TEST(admission_small_body_releases_permit_on_return) {
     CHECK_EQ(env.inflight->available(), 1L);
 }
 
-// 流式响应：handler 返回后 permit 仍被响应体占用（这正是"约束覆盖响应传输
-// 全程"的要点），读到 EOF 不归还，析构（驱动读完/断连丢弃）才归还
+// Streaming response: after the handler returns, the permit is still held by the response body (this is exactly the
+// point of "the limit covers the whole response transfer"); reading to EOF does not return it, only destruction (driver finished reading / dropped on disconnect) does
 TEST(admission_streaming_body_holds_permit_until_dropped) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         HttpResponse r;
@@ -83,20 +84,20 @@ TEST(admission_streaming_body_holds_permit_until_dropped) {
     });
     auto resp = env.call();
     CHECK(resp.stream_body != nullptr);
-    CHECK_EQ(env.inflight->available(), 0L);  // permit 在响应体手里
+    CHECK_EQ(env.inflight->available(), 0L);  // the permit is held by the response body
 
     std::byte buf[256];
     CHECK_EQ(sync_wait(resp.stream_body->read(std::span(buf))), size_t{128});
     CHECK_EQ(sync_wait(resp.stream_body->read(std::span(buf))), size_t{0});  // EOF
-    CHECK_EQ(env.inflight->available(), 0L);  // 读完仍未归还：归还点是析构
+    CHECK_EQ(env.inflight->available(), 0L);  // still not returned after reading everything: the return point is destruction
 
-    resp.stream_body.reset();  // 驱动丢弃响应体（读完或断连同一路径）
+    resp.stream_body.reset();  // driver drops the response body (finished reading and disconnect share this path)
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
 }
 
-// 超限排队：第二个请求在信号量上排队（FIFO）而非拒绝，第一个的响应体被丢弃
-// （断连语义）后它才拿到许可跑完。断连不归还 permit 的话这里永久 hang——
-// 正是 T11 点名的泄漏型回归形态
+// Over-limit queueing: the second request queues on the semaphore (FIFO) instead of being rejected, and only gets
+// a permit to run after the first one's response body is dropped (disconnect semantics). If disconnect did not
+// return the permit this would hang forever -- exactly the leak-type regression shape T11 calls out
 TEST(admission_over_limit_queues_until_streaming_peer_disconnects) {
     std::atomic<int> dispatched{0};
     AdmissionEnv env(1, [&](HttpRequest) -> Task<HttpResponse> {
@@ -106,7 +107,7 @@ TEST(admission_over_limit_queues_until_streaming_peer_disconnects) {
         co_return r;
     });
 
-    auto first = env.call();  // 占住唯一许可
+    auto first = env.call();  // holds the only permit
     CHECK_EQ(dispatched.load(), 1);
 
     std::atomic<bool> second_done{false};
@@ -116,33 +117,33 @@ TEST(admission_over_limit_queues_until_streaming_peer_disconnects) {
         second_done = true;
         resp.stream_body.reset();
     });
-    // 第二个请求应停在排队处：dispatch 未被调用
+    // The second request should be stuck queueing: dispatch has not been called
     CHECK(eventually([&] { return env.inflight->waiting() == 1; }));
     CHECK_EQ(dispatched.load(), 1);
     CHECK(!second_done.load());
 
-    first.stream_body.reset();  // 模拟客户端断连/驱动丢弃 → permit 归还
+    first.stream_body.reset();  // simulate client disconnect / driver drop -> permit returned
     second.join();
     CHECK_EQ(dispatched.load(), 2);
     CHECK(second_done.load());
-    // 第二个响应体也已析构，额度完整归位（无泄漏）
+    // The second response body has also been destroyed, the full quota is back (no leak)
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
 }
 
-// 排队期间被取消（关停广播/请求超时/断连）：503 SlowDown 收敛，且不占额度
+// Cancelled while queued (shutdown broadcast / request timeout / disconnect): resolves to 503 SlowDown, and takes no quota
 TEST(admission_queued_request_cancelled_returns_503) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         HttpResponse r;
         r.stream_body = std::make_unique<ZeroReader>(64);
         co_return r;
     });
-    auto first = env.call();  // 占住唯一许可
+    auto first = env.call();  // holds the only permit
 
     CancelSource src;
     std::atomic<bool> got_503{false};
     std::thread second([&] {
         HttpRequest req;
-        req.cancel = src.token();  // 驱动挂上的连接 token 应被保留使用
+        req.cancel = src.token();  // the connection token the driver attached should be kept and used
         auto resp = env.call(std::move(req));
         got_503 = resp.status == 503 &&
                   resp.small_body.find("<Code>SlowDown</Code>") != std::string::npos;
@@ -153,13 +154,13 @@ TEST(admission_queued_request_cancelled_returns_503) {
     CHECK(got_503.load());
     CHECK_EQ(env.inflight->waiting(), size_t{0});
 
-    // 取消者不占额度：许可仍在第一个响应体手里，丢弃后完整归位
+    // The cancelled requester takes no quota: the permit is still held by the first response body, and fully returns once dropped
     first.stream_body.reset();
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
 }
 
-// 关停源兜底：请求未带 token 时接上 shutdown_src，关停广播让排队者以 503 浮出
-//（main.cc 关停用 available() 判在途、close() 唤醒排队者的前提）
+// Shutdown-source fallback: a request without a token is attached to shutdown_src, and the shutdown broadcast
+// surfaces queued requests as 503 (the premise for main.cc's shutdown using available() to detect in-flight work and close() to wake the queued)
 TEST(admission_shutdown_broadcast_cancels_queued) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         HttpResponse r;
@@ -170,7 +171,7 @@ TEST(admission_shutdown_broadcast_cancels_queued) {
 
     std::atomic<bool> got_503{false};
     std::thread second([&] {
-        auto resp = env.call();  // 不带 token → 接 shutdown_src
+        auto resp = env.call();  // no token -> attached to shutdown_src
         got_503 = resp.status == 503;
     });
     CHECK(eventually([&] { return env.inflight->waiting() == 1; }));
@@ -181,7 +182,7 @@ TEST(admission_shutdown_broadcast_cancels_queued) {
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
 }
 
-// dispatch 抛异常：permit 不泄漏（RAII 覆盖异常路径）
+// dispatch throws: the permit does not leak (RAII covers the exception path)
 TEST(admission_dispatch_exception_releases_permit) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         throw std::runtime_error("dispatch boom");
@@ -197,11 +198,11 @@ TEST(admission_dispatch_exception_releases_permit) {
     CHECK_EQ(env.inflight->available(), 1L);
 }
 
-// ---------- 传输停滞守卫（stall_guard.h，docs/issues.md T10 的 transfer_stall 契约）----------
+// ---------- Transfer stall guard (stall_guard.h, the transfer_stall contract of docs/issues.md T10) ----------
 
 namespace {
 
-// 每次 read 给 1 字节的"滴灌"reader——注释点名的攻击形态（每 59 秒 1 字节）
+// A "drip" reader yielding 1 byte per read -- the attack shape called out in the comments (1 byte every 59 seconds)
 class DripReader final : public BodyReader {
 public:
     Task<size_t> read(std::span<std::byte> buf) override {
@@ -215,32 +216,32 @@ public:
 }  // namespace
 
 TEST(stall_guard_kills_dripping_transfer) {
-    // 窗口 1 秒：滴灌式推进（远低于窗口内 64KiB）在窗口过后必须被掐断
+    // 1-second window: drip-style progress (far below 64KiB per window) must be cut off once the window passes
     auto guarded = guard_stalls(std::make_unique<DripReader>(), 1s);
     std::byte b[1];
-    CHECK_EQ(sync_wait(guarded->read(std::span(b))), size_t{1});  // 窗口内不误杀
+    CHECK_EQ(sync_wait(guarded->read(std::span(b))), size_t{1});  // no false kill within the window
     std::this_thread::sleep_for(1100ms);
     CHECK_THROWS_S3(sync_wait(guarded->read(std::span(b))), s3::S3ErrorCode::RequestTimeout);
 }
 
 TEST(stall_guard_progress_resets_window) {
-    // 窗口内推进 ≥ 64KiB 即重置计时：真正慢但在传的连接不受影响
+    // Progress of >= 64KiB within the window resets the timer: genuinely slow but still-transferring connections are unaffected
     auto guarded = guard_stalls(std::make_unique<ZeroReader>(256 * 1024), 1s);
     std::vector<std::byte> buf(StallGuardReader::kMinProgressBytes);
-    CHECK_EQ(sync_wait(guarded->read(std::span(buf))), buf.size());  // 一次推满一个窗口量
+    CHECK_EQ(sync_wait(guarded->read(std::span(buf))), buf.size());  // one read fills a full window's worth
     std::this_thread::sleep_for(1100ms);
-    // 上一读已重置计时，这一读的窗口从重置点起算——不因绝对时长被杀
+    // The previous read reset the timer; this read's window counts from the reset point -- not killed for absolute elapsed time
     CHECK_EQ(sync_wait(guarded->read(std::span(buf))), buf.size());
 }
 
 TEST(stall_guard_eof_and_disabled_passthrough) {
-    // EOF 不判定停滞
+    // EOF is not judged a stall
     auto guarded = guard_stalls(std::make_unique<ZeroReader>(0), 1s);
     std::byte b[8];
     CHECK_EQ(sync_wait(guarded->read(std::span(b))), size_t{0});
-    // window <= 0 = 关闭：原样返回，不包裹
+    // window <= 0 = disabled: returned as-is, not wrapped
     auto raw = guard_stalls(std::make_unique<DripReader>(), 0s);
     CHECK(dynamic_cast<StallGuardReader*>(raw.get()) == nullptr);
-    // 空 reader 原样透传（响应无 body 的路径）
+    // A null reader passes through as-is (the no-body response path)
     CHECK(guard_stalls(nullptr, 1s) == nullptr);
 }

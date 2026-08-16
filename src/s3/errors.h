@@ -1,5 +1,5 @@
-// S3 错误码单一事实来源：code → (HTTP status, wire code)（docs/s3-protocol.md §5）
-// L3 存储层也抛 S3Error（约定见 docs/storage-backend.md §1），因此本头文件不含 HTTP 模型依赖。
+// Single source of truth for S3 error codes: code -> (HTTP status, wire code) (docs/s3-protocol.md §5)
+// The L3 storage layer also throws S3Error (convention in docs/storage-backend.md §1), so this header has no HTTP model dependency.
 #pragma once
 
 #include <exception>
@@ -11,9 +11,9 @@
 
 namespace lights3::s3 {
 
-// X-macro 单一事实来源：X(枚举名, HTTP 状态)。wire code 即枚举名字符串。
-// 枚举、http_status()、wire_code()、code_from_wire() 全部由此派生——新增
-// 错误码只改这一处，正反向映射不可能漂移。保持字母序。
+// X-macro single source of truth: X(enum name, HTTP status). The wire code is the enum name string.
+// The enum, http_status(), wire_code(), and code_from_wire() are all derived from it -- adding an
+// error code touches only this one place, so forward and reverse mappings cannot drift. Keep alphabetical order.
 #define LIGHTS3_S3_ERROR_CODES(X)        \
     X(AccessDenied, 403)                 \
     X(AuthorizationHeaderMalformed, 400) \
@@ -59,7 +59,7 @@ enum class S3ErrorCode {
 #undef LIGHTS3_S3_ERROR_ENUM
 };
 
-// 码表大小（与枚举同源）：错误计数用定长原子数组按枚举值下标，免锁
+// Code table size (same source as the enum): error counters use a fixed-size atomic array indexed by enum value, lock-free
 inline constexpr size_t kS3ErrorCodeCount = 0
 #define LIGHTS3_S3_ERROR_COUNT(name, status) +1
     LIGHTS3_S3_ERROR_CODES(LIGHTS3_S3_ERROR_COUNT)
@@ -70,8 +70,8 @@ struct S3Error : std::exception {
     S3ErrorCode code;
     std::string message;
     std::string resource;
-    // 少数错误按 RFC/S3 规定必须带响应头才算完整：405 的 Allow（RFC 9110 §15.5.6）、
-    // 重定向类的 x-amz-bucket-region。放在异常上，L2 统一渲染时贴回响应
+    // A few errors are only complete with specific response headers per RFC/S3: Allow for 405 (RFC 9110 §15.5.6),
+    // x-amz-bucket-region for redirect-class errors. Carried on the exception; L2 attaches them to the response during unified rendering
     std::vector<std::pair<std::string, std::string>> headers;
 
     S3Error(S3ErrorCode c, std::string msg, std::string res = "")
@@ -85,11 +85,11 @@ struct S3Error : std::exception {
 
 int http_status(S3ErrorCode code);
 const char* wire_code(S3ErrorCode code);
-// wire code → enum 反查（cloudproxy 透传远端错误用，docs/cloudproxy-backend.md §5.1）；未知返回 nullopt
+// wire code -> enum reverse lookup (used by cloudproxy to pass through remote errors, docs/cloudproxy-backend.md §5.1); returns nullopt for unknown codes
 std::optional<S3ErrorCode> code_from_wire(std::string_view wire);
 
-// 标准 S3 错误响应 XML。host_id 为空则省略 <HostId>（驱动兜底响应无 L2 上下文，
-// 只有 request id 可给）——AWS 的 x-amz-id-2 与 HostId 同值，支持工单据此定位节点
+// Standard S3 error response XML. Empty host_id omits <HostId> (the driver's fallback response has no L2 context,
+// only a request id to offer) -- AWS's x-amz-id-2 equals HostId, and support tickets use it to locate the node
 std::string error_xml(const S3Error& e, const std::string& request_id,
                       const std::string& host_id = "");
 

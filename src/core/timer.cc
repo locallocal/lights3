@@ -10,8 +10,9 @@ TimerQueue::~TimerQueue() {
     {
         std::lock_guard lk(m_);
         stopping_ = true;
-        // 进程收尾：已到期未执行的回调整体丢弃（对象正在析构，跑它们只会碰到
-        // 已亡状态）。等在 cancel() 里的调用方随之放行
+        // Process teardown: due-but-unexecuted callbacks are dropped wholesale (the
+        // object is being destroyed; running them would only touch dead state).
+        // Callers waiting in cancel() are released accordingly
         due_.clear();
     }
     cv_.notify_all();
@@ -31,9 +32,10 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
     bool wake = false;
     {
         std::lock_guard lk(m_);
-        // 停机后拒收（docs/gaps.md §7）：此前返回"有效但永不触发"的 id，析构期
-        // 竞态里排查者会盯着一个永远不会响的定时器。0 与 cancel(0) 的 no-op
-        // 约定闭环，调用方无需感知
+        // Refuse after shutdown (docs/gaps.md §7): previously this returned a
+        // "valid but never-firing" id, and in destruction-time races the
+        // investigator would stare at a timer that never rings. 0 closes the loop
+        // with the cancel(0) no-op convention, so callers need not be aware
         if (stopping_) {
             LOG_WARN("TimerQueue: add() after shutdown, timer dropped");
             return 0;
@@ -42,11 +44,13 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
         auto deadline = Clock::now() + delay;
         items_.emplace(std::make_pair(deadline, id), std::move(fn));
         deadlines_.emplace(id, deadline);
-        // 只有成为最早到期者才需要叫醒调度线程重算等待时长；其余情况它醒来也只会
-        // 按原 deadline 继续睡（docs/gaps.md §4：此前每次 add 都 notify_all）
+        // Only when this becomes the earliest deadline does the scheduling thread
+        // need waking to recompute its wait; in all other cases it would wake only
+        // to go back to sleep until the original deadline (docs/gaps.md §4:
+        // previously every add did notify_all)
         wake = items_.begin()->first == std::make_pair(deadline, id);
     }
-    if (wake) cv_.notify_one();  // 锁外唤醒：持锁 notify 会让被唤线程立刻撞上锁
+    if (wake) cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately collide with the lock
     return id;
 }
 
@@ -72,7 +76,8 @@ TimerQueue::Stats TimerQueue::stats() const {
         std::lock_guard lk(m_);
         st.pending = items_.size();
         st.due = due_.size();
-        // 队头滞后：正在执行的回调优先（它到期最早），否则看待执行队头
+        // Head-of-queue lag: the executing callback takes precedence (it has the
+        // earliest deadline), otherwise look at the head of the pending queue
         Clock::time_point head{};
         if (running_id_ != 0) head = running_deadline_;
         else if (!due_.empty()) head = due_.front().deadline;
@@ -97,16 +102,21 @@ bool TimerQueue::cancel(Id id) {
         deadlines_.erase(it);
         return true;
     }
-    // 已触发：若还在待执行队列里或正在执行，等它收敛（回调线程上自撤销除外——
-    // 等自己必死锁），调用方由此获得"cancel 返回后回调必不再运行"的析构安全保证
-    //（见头注）。id 0 非法（分配从 1 起，也是 running_id_ 的空闲值），直接 no-op
+    // Already fired: if still in the pending queue or currently executing, wait for
+    // it to settle (except self-cancellation on the callback thread — waiting on
+    // yourself is certain deadlock); this gives the caller the destruction-safety
+    // guarantee that "after cancel returns, the callback never runs again" (see the
+    // header comment). id 0 is invalid (allocation starts at 1, and it is also
+    // running_id_'s idle value), so it is a direct no-op
     if (id != 0 && std::this_thread::get_id() != fire_thread_.get_id())
         done_cv_.wait(lk, [&] { return !pending_locked(id); });
     return false;
 }
 
-// 调度线程：只做到期判定，到期项交给回调线程。这里绝不执行回调——回调可能是
-// request_cancel，会就地展开整条被取消的协程链，跑在本线程上即全进程定时器停摆
+// Scheduling thread: only determines expiry and hands due items to the callback
+// thread. Callbacks are never executed here — a callback may be request_cancel,
+// which unwinds the whole cancelled coroutine chain in place, and running that on
+// this thread would stall every timer in the process
 void TimerQueue::loop() {
     std::unique_lock lk(m_);
     for (;;) {
@@ -116,8 +126,9 @@ void TimerQueue::loop() {
             continue;
         }
         auto first = items_.begin();
-        // deadline 必须按值取出：wait_until 持引用等待，等待期间锁已释放，
-        // 并发 cancel() 删掉该节点后醒来重比时间会读已释放内存
+        // The deadline must be taken by value: wait_until would wait holding a
+        // reference while the lock is released, and if a concurrent cancel() erases
+        // the node, re-comparing the time on wakeup would read freed memory
         auto deadline = first->first.first;
         if (deadline > Clock::now()) {
             cv_.wait_until(lk, deadline);
@@ -144,10 +155,12 @@ void TimerQueue::fire_loop() {
         running_id_ = item.id;
         running_deadline_ = item.deadline;
         lk.unlock();
-        // 锁外执行；期间的 cancel(id) 阻塞至此处返回（语义仍为 false"已触发"）。
-        // 异常防线：回调抛出若逃逸线程函数即 terminate；且必须保证 running_id_
-        // 复位 + notify 在任何路径都执行，否则 cancel(该 id) 永久阻塞——而 cancel
-        // 正是各后端关停路径的第一步
+        // Executed outside the lock; a cancel(id) meanwhile blocks until this
+        // returns (semantics remain false, "already fired"). Exception firewall: a
+        // callback exception escaping the thread function means terminate; and the
+        // running_id_ reset + notify must execute on every path, or cancel(that id)
+        // blocks forever — and cancel is exactly the first step of every backend's
+        // shutdown path
         auto t0 = Clock::now();
         try {
             item.fn();
@@ -156,8 +169,10 @@ void TimerQueue::fire_loop() {
         } catch (...) {
             LOG_ERROR("TimerQueue: callback threw unknown exception");
         }
-        // 耗时记账（docs/gaps.md §7）：回调串行，慢回调直接推迟后续定时器——
-        // 超过 1s 除进直方图外单独点名，"定时器被堵了 3 秒"从此有日志可查
+        // Duration accounting (docs/gaps.md §7): callbacks are serial, so a slow
+        // callback directly delays subsequent timers — beyond 1s it is called out
+        // individually on top of the histogram, so "timers were blocked 3 seconds"
+        // is henceforth traceable in the logs
         auto elapsed = Clock::now() - t0;
         auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
         exec_hist_[exec_bucket(elapsed)].fetch_add(1, std::memory_order_relaxed);

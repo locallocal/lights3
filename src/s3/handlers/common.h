@@ -1,4 +1,4 @@
-// handler 间共享的小工具（仅 handlers/ 内部使用）
+// Small utilities shared between handlers (internal to handlers/ only)
 #pragma once
 
 #include <chrono>
@@ -16,8 +16,8 @@ namespace lights3::s3::handlers {
 
 inline std::string quote_etag(const std::string& etag) { return "\"" + etag + "\""; }
 
-// 单一所有者：本实现无多租户 owner 概念，ListAllMyBuckets 与 ListObjectsV2 的
-// fetch-owner 用同一个身份，免得两处各写一份字面量后漂移
+// Single owner: this implementation has no multi-tenant owner concept; ListAllMyBuckets and ListObjectsV2's
+// fetch-owner use the same identity, so two hand-written literals cannot drift apart
 inline constexpr std::string_view kOwnerId = "lights3";
 
 inline std::string strip_quotes(std::string s) {
@@ -25,16 +25,16 @@ inline std::string strip_quotes(std::string s) {
     return s;
 }
 
-// TSV 与头部都以行为单位：元数据值里的 CR/LF 会撕开 sidecar 记录，也是响应头
-// 注入面。一等字段与 user-meta 同样拒收（docs/gaps.md §5.2）
+// Both TSV and headers are line-oriented: CR/LF in metadata values would tear sidecar records apart, and is
+// also a response-header injection surface. First-class fields are rejected just like user-meta (docs/gaps.md §5.2)
 inline void reject_control_chars(std::string_view name, const std::string& v) {
     if (v.find('\n') != std::string::npos || v.find('\r') != std::string::npos)
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "Header '" + std::string(name) + "' must not contain line breaks.");
 }
 
-// PutObject / CreateMultipartUpload 共用：提取 Content-Type、x-amz-meta-*，以及
-// 六个 S3 一等元数据字段（docs/gaps.md §5.2）
+// Shared by PutObject / CreateMultipartUpload: extracts Content-Type, x-amz-meta-*, and
+// the six first-class S3 metadata fields (docs/gaps.md §5.2)
 inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     storage::ObjectMeta meta;
     if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
@@ -55,12 +55,12 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     return meta;
 }
 
-// HTTP 时间头按秒粒度比较（Last-Modified 序列化即秒精度）
+// HTTP time headers compare at second granularity (Last-Modified serializes at second precision)
 inline int64_t to_epoch_sec(util::SysTime t) {
     return std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
 }
 
-// CopyObject / UploadPartCopy 共用的源条件（x-amz-copy-source-if-*）：任一不满足即 412
+// Source conditions shared by CopyObject / UploadPartCopy (x-amz-copy-source-if-*): any unmet condition yields 412
 inline void check_copy_preconditions(const http::HttpRequest& req,
                                      const storage::ObjectMeta& src) {
     auto fail = [] {
@@ -95,14 +95,14 @@ inline std::pair<std::string, std::string> parse_copy_source(const std::string& 
     if (slash == std::string::npos || slash == 0 || slash + 1 >= s.size())
         throw S3Error(S3ErrorCode::InvalidArgument, "Invalid x-amz-copy-source header.");
     std::string bucket = s.substr(0, slash);
-    // copy-source 走 header，不经 dispatch 的 bucket 闸门，须在此独立校验——否则
-    // CopyObject 能把 .sys 里的凭证对象拷进用户可读的对象。用与 dispatch 同一个
-    // 校验函数（此前是第三份独立的 '.' 前缀启发式，三份副本各自演化是漂移源头）
+    // copy-source arrives via header and bypasses dispatch's bucket gate, so it must be validated here independently --
+    // otherwise CopyObject could copy credential objects from .sys into user-readable objects. Uses the same
+    // validation function as dispatch (previously a third independent '.'-prefix heuristic; three copies evolving separately was a drift source)
     storage::validate_bucket_name(bucket);
     return {std::move(bucket), s.substr(slash + 1)};
 }
 
-// 读整个请求体（XML 请求限 1MiB，docs/s3-protocol.md §4）；超限抛 MalformedXML
+// Read the entire request body (XML requests capped at 1MiB, docs/s3-protocol.md §4); over the cap throws MalformedXML
 inline Task<std::string> read_body(http::HttpRequest& req, size_t max_size = 1024 * 1024) {
     std::string out;
     if (!req.body) co_return out;

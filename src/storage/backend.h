@@ -1,5 +1,5 @@
-// L2/L3 边界：存储后端接口（见 docs/storage-backend.md）
-// 错误约定：后端抛 s3::S3Error，不感知 HTTP。
+// L2/L3 boundary: storage backend interface (see docs/storage-backend.md)
+// Error convention: backends throw s3::S3Error and are unaware of HTTP.
 #pragma once
 
 #include <chrono>
@@ -18,41 +18,46 @@
 
 namespace lights3::storage {
 
-// HTTP Range 的三种形态：a-b(first,last) / a-(first) / -n(仅 last，后缀 n 字节)
+// The three forms of an HTTP Range: a-b(first,last) / a-(first) / -n(last only, suffix of n bytes)
 struct ByteRange {
     std::optional<uint64_t> first;
     std::optional<uint64_t> last;
 };
 
-// 按对象大小解析为闭区间 [first,last]；不可满足时抛 InvalidRange(416)
+// Resolve against the object size into a closed interval [first,last]; throws InvalidRange(416) if unsatisfiable
 std::pair<uint64_t, uint64_t> resolve_range(const ByteRange& r, uint64_t size);
 
 struct ObjectMeta {
     std::string key;
     uint64_t size = 0;
-    std::string etag;  // 未加引号的 hex
+    std::string etag;  // hex without quotes
     std::string content_type = "binary/octet-stream";
     std::chrono::system_clock::time_point last_modified;
-    std::map<std::string, std::string> user_meta;  // x-amz-meta-* 去前缀后的 kv
+    std::map<std::string, std::string> user_meta;  // x-amz-meta-* kv pairs with the prefix stripped
 
-    // S3 一等对象元数据（docs/gaps.md §5.2）：此前 PUT 时全部丢弃、GET 也不回。
-    // 丢 content_encoding=gzip 会让浏览器拿到无法解压的字节流——它们不是"额外的
-    // 用户元数据"，而是内容协商的一部分。空串 = 未设置，不回该头
+    // First-class S3 object metadata (docs/gaps.md §5.2): previously all dropped on PUT and
+    // never returned on GET. Dropping content_encoding=gzip leaves browsers with a byte
+    // stream they cannot decompress -- these are not "extra user metadata" but part of
+    // content negotiation. Empty string = unset, header is not returned
     std::string cache_control;
     std::string content_disposition;
     std::string content_encoding;
     std::string content_language;
-    std::string expires;  // 原样保存的 HTTP-date 文本
-    // 注：x-amz-storage-class 不在此列。本实现只有 STANDARD 一种存储类，存下客户端
-    // 报的值再原样回显等于替存储层撒谎（对象明明在本地盘却回 GLACIER）；非 STANDARD
-    // 在 L2 直接 501，与 x-amz-acl 的处理一致（docs/gaps.md §5.2）
+    std::string expires;  // HTTP-date text stored verbatim
+    // Note: x-amz-storage-class is deliberately absent. This implementation has only the
+    // STANDARD storage class; storing the client-reported value and echoing it back would
+    // make the storage layer lie (the object sits on local disk yet reports GLACIER);
+    // non-STANDARD gets a direct 501 at L2, consistent with the handling of x-amz-acl
+    // (docs/gaps.md §5.2)
 };
 
-// 五个一等字段的单一事实来源：请求/响应头名 + 持久化键名 + 成员指针。提取、回显、
-// 各后端序列化都遍历这张表——新增一个字段只改这里，不会出现"存了但不回"的半吊子
+// Single source of truth for the five first-class fields: request/response header name +
+// persistence key name + member pointer. Extraction, echoing, and each backend's
+// serialization all iterate this table -- adding a field only touches this spot, avoiding
+// the half-done "stored but never returned" state
 struct StdMetaField {
-    const char* header;              // S3 请求/响应头名
-    const char* store_key;           // 后端持久化用的键名
+    const char* header;              // S3 request/response header name
+    const char* store_key;           // key name used for backend persistence
     std::string ObjectMeta::* field;
 };
 inline constexpr StdMetaField kStdMetaFields[] = {
@@ -64,21 +69,25 @@ inline constexpr StdMetaField kStdMetaFields[] = {
 };
 
 struct ObjectStream {
-    ObjectMeta meta;                         // size 为对象全长
-    std::unique_ptr<http::BodyReader> body;  // 已按 range 裁剪
-    std::optional<ByteRange> range;          // 实际生效的 range（已解析 suffix/裁剪）
+    ObjectMeta meta;                         // size is the full object length
+    std::unique_ptr<http::BodyReader> body;  // already trimmed to the range
+    std::optional<ByteRange> range;          // the effective range (suffix resolved / clamped)
 };
 
 struct PutResult {
     std::string etag;
 };
 
-// 条件 PUT（docs/s3-protocol.md §6）：检查与提交必须在后端自身的原子提交点内
-// 完成（commit 临界区 / 元数据 CAS）——L2 层"先 head 再 put"的窗口内并发写会让
-// 防覆盖/乐观并发语义双双失效，且跨实例不成立。
-// 语义：if_none_match（对应 If-None-Match: *）要求对象不存在，违反抛
-// PreconditionFailed；if_match_etag 要求当前 ETag 相等，不等抛 PreconditionFailed、
-// 对象不存在抛 NoSuchKey。两者互斥（L2 保证）。条件失败时后端不得留下任何写入痕迹。
+// Conditional PUT (docs/s3-protocol.md §6): the check and the commit must both happen
+// inside the backend's own atomic commit point (commit critical section / metadata CAS)
+// -- a concurrent write inside an L2-level "head then put" window would break both the
+// overwrite-protection and optimistic-concurrency semantics, and cross-instance it does
+// not hold at all.
+// Semantics: if_none_match (maps to If-None-Match: *) requires the object not to exist,
+// violation throws PreconditionFailed; if_match_etag requires the current ETag to be equal,
+// mismatch throws PreconditionFailed and a missing object throws NoSuchKey. The two are
+// mutually exclusive (guaranteed by L2). On condition failure the backend must leave no
+// trace of the write.
 struct PutCondition {
     bool if_none_match = false;
     std::optional<std::string> if_match_etag;
@@ -87,9 +96,9 @@ struct PutCondition {
 
 struct ListOptions {
     std::string prefix;
-    std::string delimiter;    // 空或 "/"
+    std::string delimiter;    // empty or "/"
     int max_keys = 1000;
-    std::string start_after;  // continuation-token / start-after（key 值）
+    std::string start_after;  // continuation-token / start-after (a key value)
 };
 
 struct ListResult {
@@ -104,13 +113,13 @@ struct BucketInfo {
     std::chrono::system_clock::time_point created;
 };
 
-// CompleteMultipartUpload 请求中的一项：客户端声明的分片号与 ETag
+// One entry of a CompleteMultipartUpload request: part number and ETag declared by the client
 struct PartInfo {
     int part_no = 0;
-    std::string etag;  // 允许带引号，比较前统一去除
+    std::string etag;  // may be quoted; quotes are stripped before comparison
 };
 
-// ListParts 返回项
+// ListParts result entry
 struct PartMeta {
     int part_no = 0;
     uint64_t size = 0;
@@ -118,37 +127,38 @@ struct PartMeta {
     std::chrono::system_clock::time_point last_modified;
 };
 
-// ListMultipartUploads 返回项
+// ListMultipartUploads result entry
 struct UploadInfo {
     std::string key;
     std::string upload_id;
     std::chrono::system_clock::time_point initiated;
 };
 
-// multipart 两个列表接口的分页（docs/gaps.md §5.1）。此前返回裸 vector 且
-// 恒报 IsTruncated=false：客户端据此判定"已到尾"，5000 个活跃 upload 只会看到
-// 前一页而毫不知情，同时单请求把整表构造进内存
+// Pagination for the two multipart listing APIs (docs/gaps.md §5.1). They used to return
+// bare vectors with IsTruncated always false: clients took that as "reached the end", so
+// with 5000 active uploads they would only ever see the first page without knowing it,
+// while a single request built the whole table in memory
 struct ListPartsOptions {
     int max_parts = 1000;
-    int part_number_marker = 0;  // 只返回 part_no > 此值的分片（0 = 从头）
+    int part_number_marker = 0;  // only return parts with part_no > this value (0 = from the start)
 };
 struct ListPartsResult {
-    std::vector<PartMeta> parts;  // 按 part_no 升序
+    std::vector<PartMeta> parts;  // ascending by part_no
     bool is_truncated = false;
-    int next_part_number_marker = 0;  // 仅 is_truncated 时有意义
+    int next_part_number_marker = 0;  // meaningful only when is_truncated
 };
 
 struct ListUploadsOptions {
     std::string prefix;
-    std::string delimiter;  // 空或 "/"
+    std::string delimiter;  // empty or "/"
     int max_uploads = 1000;
-    // (key_marker, upload_id_marker) 组成复合游标：严格大于该二元组者才返回。
-    // upload_id_marker 为空时表示"key > key_marker"
+    // (key_marker, upload_id_marker) form a composite cursor: only entries strictly greater
+    // than the pair are returned. An empty upload_id_marker means "key > key_marker"
     std::string key_marker;
     std::string upload_id_marker;
 };
 struct ListUploadsResult {
-    std::vector<UploadInfo> uploads;  // 按 (key, upload_id) 升序
+    std::vector<UploadInfo> uploads;  // ascending by (key, upload_id)
     std::vector<std::string> common_prefixes;
     bool is_truncated = false;
     std::string next_key_marker;
@@ -158,28 +168,32 @@ struct ListUploadsResult {
 struct IStorageBackend {
     // ---- bucket ----
     virtual Task<void> create_bucket(std::string_view bucket) = 0;
-    virtual Task<void> delete_bucket(std::string_view bucket) = 0;  // 须为空
+    virtual Task<void> delete_bucket(std::string_view bucket) = 0;  // must be empty
     virtual Task<bool> bucket_exists(std::string_view bucket) = 0;
     virtual Task<std::vector<BucketInfo>> list_buckets() = 0;
 
     // ---- object ----
     virtual Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                           std::optional<ByteRange> range) = 0;
-    // body 契约（put_object / upload_part 同）：实现必须把 body 读到 EOF（read 返回
-    // 0）为止，不得读满 length() 即停——上层的验签装饰器（x-amz-content-sha256 /
-    // aws-chunked 签名链）挂在读满与 EOF 处，跳过尾部读取会跳过校验；
-    // body.read 抛异常 ⇒ 后端不得提交对象（staging 丢弃 / 远端传输中止）；
-    // cond.active() 时按 PutCondition 契约在提交点原子校验
+    // body contract (same for put_object / upload_part): implementations must read body to
+    // EOF (read returns 0), not stop once length() bytes are consumed -- the upper layer's
+    // verification decorators (x-amz-content-sha256 / aws-chunked signature chain) hook in
+    // at full-read and EOF, so skipping the trailing read skips the check;
+    // body.read throwing => the backend must not commit the object (staging discarded /
+    // remote transfer aborted);
+    // when cond.active(), validate atomically at the commit point per the PutCondition contract
     virtual Task<PutResult> put_object(std::string_view bucket, std::string_view key,
                                        ObjectMeta meta, http::BodyReader& body,
                                        PutCondition cond = {}) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;
-    // 同后端 copy 快路径（docs/gaps.md §6.3）：src 与 dst 都归本后端时由 CopyObject
-    // handler 先试本钩子。返回 nullopt = 无快路径/本次不可用（tier stub、跨设备等），
-    // 调用方回落"get_object 流式读 + put_object 流式写"——语义等价，只是多一趟
-    // 字节搬运（本地）或两趟跨网流量（云端）。meta 为最终对象元数据（REPLACE 已
-    // 由 handler 组好；COPY 抄自源），key/size/etag 由实现自源补齐——字节不变，
-    // etag 恒等于源
+    // Same-backend copy fast path (docs/gaps.md §6.3): when src and dst both belong to this
+    // backend, the CopyObject handler tries this hook first. Returning nullopt = no fast
+    // path / unavailable this time (tier stub, cross-device, etc.); the caller falls back
+    // to "get_object streaming read + put_object streaming write" -- semantically
+    // equivalent, just one extra byte copy (local) or two extra network trips (cloud).
+    // meta is the final object metadata (REPLACE already assembled by the handler; COPY
+    // copied from the source); key/size/etag are filled in from the source by the
+    // implementation -- bytes are unchanged, so etag always equals the source's
     virtual Task<std::optional<PutResult>> copy_object_fast(std::string_view /*src_bucket*/,
                                                             std::string_view /*src_key*/,
                                                             std::string_view /*dst_bucket*/,
@@ -187,32 +201,34 @@ struct IStorageBackend {
                                                             ObjectMeta /*meta*/) {
         co_return std::nullopt;
     }
-    // S3 语义：对不存在的 key 也返回成功（幂等删除）
+    // S3 semantics: also return success for a non-existent key (idempotent delete)
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;
 
-    // ---- multipart（docs/storage-backend.md §1/§3.2）----
-    // 返回 upload_id；meta 为期望的 content_type/user_meta，complete 时生效
+    // ---- multipart (docs/storage-backend.md §1/§3.2) ----
+    // Returns upload_id; meta carries the desired content_type/user_meta, applied at complete
     virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                                ObjectMeta meta) = 0;
-    // part_no ∈ [1,10000]；同号重传 last-write-wins；返回该分片的 ETag（内容 MD5）
+    // part_no ∈ [1,10000]; re-uploading the same number is last-write-wins; returns the
+    // part's ETag (content MD5)
     virtual Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
                                         std::string_view upload_id, int part_no,
                                         http::BodyReader& body) = 0;
-    // parts 须分片号严格递增且 ETag 与已上传分片一致；
-    // 总 ETag = md5(各分片 md5 二进制拼接)-N（与 S3 规则一致）
+    // parts must have strictly increasing part numbers and ETags matching the uploaded parts;
+    // total ETag = md5(concatenation of each part's binary md5)-N (same rule as S3)
     virtual Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
                                                std::string_view upload_id,
                                                std::span<const PartInfo> parts) = 0;
     virtual Task<void> abort_multipart(std::string_view bucket, std::string_view key,
                                        std::string_view upload_id) = 0;
-    // 按 part_no 升序，据实报 is_truncated；upload 不存在抛 NoSuchUpload。
-    // 分页语义由 storage/listing.h 的 apply_parts_page 统一定义，实现可先按
-    // marker 下推再交给它，但不得自行另立一套截断规则
+    // Ascending by part_no, report is_truncated truthfully; missing upload throws NoSuchUpload.
+    // Pagination semantics are defined once by apply_parts_page in storage/listing.h;
+    // implementations may push the marker down first and then hand off to it, but must not
+    // invent their own truncation rules
     virtual Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
                                              std::string_view upload_id,
                                              const ListPartsOptions& opt) = 0;
-    // 该 bucket 的活跃上传，按 (key, upload_id) 升序，据实报 is_truncated
+    // Active uploads of the bucket, ascending by (key, upload_id), report is_truncated truthfully
     virtual Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
                                                            const ListUploadsOptions& opt) = 0;
 
@@ -220,27 +236,32 @@ struct IStorageBackend {
     virtual ~IStorageBackend() = default;
 };
 
-// 内部保留 bucket 名（凭证持久化，docs/credential-management.md §4.1）。
-// 只有 allow_reserved=true 的校验调用能通过——即只有 CredentialStore
+// Internal reserved bucket name (credential persistence, docs/credential-management.md §4.1).
+// Only validation calls with allow_reserved=true may pass -- i.e. only CredentialStore
 inline constexpr std::string_view kSysBucketName = ".sys";
 
-// bucket/key 合法性校验（各后端共用），非法时抛 S3Error。
-// bucket 校验是**唯一**的保留名与路径安全防线：L2 的 dispatch 在路由前对每个
-// 请求调用它（allow_reserved=false），各后端数据面入口再调一次作纵深防御。
-// 用户请求永远拿不到 allow_reserved=true
+// bucket/key validity checks (shared by all backends); throws S3Error when invalid.
+// The bucket check is the **only** defense line for reserved names and path safety: L2's
+// dispatch calls it for every request before routing (allow_reserved=false), and each
+// backend's data-plane entry calls it again as defense in depth.
+// User requests can never obtain allow_reserved=true
 void validate_bucket_name(std::string_view bucket, bool allow_reserved = false);
-// AWS 通用约束：非空、≤1024B、无控制字符、无 '.'/'..' 段（后者对任何把 key 拼进
-// URL 路径的转发型后端都不安全——RFC 3986 的 dot-segment 归一会改写对象身份）
+// AWS general constraints: non-empty, ≤1024B, no control characters, no '.'/'..' segments
+// (the latter is unsafe for any forwarding backend that splices the key into a URL path --
+// RFC 3986 dot-segment normalization would rewrite the object's identity)
 void validate_object_key(std::string_view key);
-// 路径映射型后端（localfs/xlocalfs）的补充约束（docs/gaps.md §6.3）：无前导 '/'、
-// 无空段、单段 ≤255B。末尾 '/' 的目录标记对象**不在**禁止之列——localfs 以目录内
-// 的保留标记文件承载它，S3 控制台"新建文件夹"与 s3fs/goofys/rclone 的目录语义
-// 依赖这一形态。调用方须先调 validate_object_key
+// Additional constraints for path-mapping backends (localfs/xlocalfs) (docs/gaps.md §6.3):
+// no leading '/', no empty segments, each segment ≤255B. Trailing-'/' directory-marker
+// objects are **not** forbidden -- localfs represents them with a reserved marker file
+// inside the directory; the S3 console's "create folder" and the directory semantics of
+// s3fs/goofys/rclone depend on this form. Callers must call validate_object_key first
 void validate_fs_object_key(std::string_view key);
 
-// 后端内部校验的实参：后端必须能服务 CredentialStore 对 .sys 的读写，故这一层
-// 放行保留名。它校验的是**路径安全**（字符集、长度、无 '/' 与 NUL），保留名的
-// 拦截由 L2 dispatch 负责（那里恒用默认的 allow_reserved=false）
+// Argument for backends' internal validation: backends must be able to serve
+// CredentialStore's reads/writes of .sys, so this layer admits the reserved name. What it
+// validates is **path safety** (character set, length, no '/' or NUL); blocking the
+// reserved name is the job of L2 dispatch (which always uses the default
+// allow_reserved=false)
 inline constexpr bool kAllowReserved = true;
 
 }  // namespace lights3::storage

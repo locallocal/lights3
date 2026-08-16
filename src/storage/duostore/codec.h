@@ -1,7 +1,9 @@
-// L3: DuoStore 的 RocksDB key/value 编解码与 crc32c（docs/duostore-backend.md §4）。
-// key 编码：'\0' 分隔（共享校验层已拒绝 key 含 NUL，bucket 名限 [a-z0-9.-]，§4.1）；
-// value 编码：手写小端二进制，首字节版本号（§4.2）；extent 数组经 run 编码（§4.3）。
-// 损坏的持久化值统一抛 s3::S3Error(InternalError)。
+// L3: DuoStore's RocksDB key/value codec and crc32c (docs/duostore-backend.md §4).
+// Key encoding: '\0'-separated (the shared validation layer already rejects keys
+// containing NUL, and bucket names are limited to [a-z0-9.-], §4.1);
+// value encoding: hand-written little-endian binary, first byte is the version (§4.2);
+// the extent array uses run encoding (§4.3).
+// Corrupt persisted values uniformly throw s3::S3Error(InternalError).
 #pragma once
 
 #include <chrono>
@@ -15,14 +17,14 @@
 
 namespace lights3::storage::duostore::codec {
 
-// ---- crc32c（Castagnoli）：链式增量，crc32c_of(a||b) == crc32c_update(crc32c_of(a), b) ----
+// ---- crc32c (Castagnoli): chained/incremental, crc32c_of(a||b) == crc32c_update(crc32c_of(a), b) ----
 uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data);
 inline uint32_t crc32c_of(std::span<const std::byte> data) { return crc32c_update(0, data); }
 inline uint32_t crc32c_of(std::string_view s) {
     return crc32c_of(std::span(reinterpret_cast<const std::byte*>(s.data()), s.size()));
 }
 
-// ---- 时间戳（ObjectMeta 的 time_point ↔ 持久化的 unix ms）----
+// ---- timestamps (ObjectMeta's time_point ↔ persisted unix ms) ----
 inline int64_t to_unix_ms(std::chrono::system_clock::time_point tp) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(tp.time_since_epoch()).count();
 }
@@ -30,19 +32,21 @@ inline std::chrono::system_clock::time_point from_unix_ms(int64_t ms) {
     return std::chrono::system_clock::time_point(std::chrono::milliseconds(ms));
 }
 
-// ---- key 编码（§4.1）----
+// ---- key encoding (§4.1) ----
 std::string object_key(std::string_view bucket, std::string_view key);
 std::string upload_key(std::string_view bucket, std::string_view key, std::string_view id);
 std::string parts_prefix(std::string_view bucket, std::string_view key, std::string_view id);
 std::string part_key(std::string_view bucket, std::string_view key, std::string_view id,
                      int part_no);
-int part_no_of_key(std::string_view parts_cf_key);  // 尾部 be16
+int part_no_of_key(std::string_view parts_cf_key);  // trailing be16
 
-std::string be64_key(uint64_t v);       // refs / gcq 的 big-endian key
+std::string be64_key(uint64_t v);       // big-endian key for refs / gcq
 uint64_t parse_be64(std::string_view k);
 
-// delimiter 跳组的后继 seek 点（主文档 §4.4）：最后一个非 0xff 字节 +1、截断其后；
-// 全 0xff 返回 false（组尾是 delimiter，实际不可达）。各 meta store 实现共用。
+// Successor seek point for delimiter group skipping (main doc §4.4): increment the
+// last non-0xff byte and truncate after it; return false when all bytes are 0xff
+// (the group tail is the delimiter, unreachable in practice). Shared by all meta
+// store implementations.
 inline bool bump_last_byte(std::string& s) {
     for (size_t i = s.size(); i-- > 0;) {
         if (uint8_t(s[i]) != 0xff) {
@@ -54,53 +58,61 @@ inline bool bump_last_byte(std::string& s) {
     return false;
 }
 
-// ---- extent run 编解码（§4.3；供测试观察 run 压缩效果）----
+// ---- extent run codec (§4.3; exposed so tests can observe run compression) ----
 std::string encode_extents(const std::vector<Extent>& extents);
 std::vector<Extent> decode_extents(std::string_view v);
 
-// ---- value 编解码 ----
+// ---- value codec ----
 std::string encode_bucket(int64_t created_ms);
 int64_t decode_bucket(std::string_view v);
 
-std::string encode_object(const ObjectRec& rec);  // key 不入 value（在 CF key）
+std::string encode_object(const ObjectRec& rec);  // key not stored in value (it is the CF key)
 ObjectRec decode_object(std::string key, std::string_view v);
-// 仅解码 ObjectMeta（list 用，§4.4）：算术跳过 extent runs，免物化大对象的 Extent 数组
+// Decode only ObjectMeta (for list, §4.4): arithmetically skips the extent runs,
+// avoiding materializing a large object's Extent array
 ObjectMeta decode_object_meta(std::string key, std::string_view v);
 
-std::string encode_upload(const UploadRec& rec);  // key/upload_id 不入 value
+std::string encode_upload(const UploadRec& rec);  // key/upload_id not stored in value
 UploadRec decode_upload(std::string key, std::string upload_id, std::string_view v);
 
-std::string encode_part(const PartRec& rec);  // part_no 不入 value（在 CF key）
+std::string encode_part(const PartRec& rec);  // part_no not stored in value (it is in the CF key)
 PartRec decode_part(int part_no, std::string_view v);
 
 std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms);
 Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms = nullptr);
 
-// stats CF 计数器（merge operator 的操作数与全量值同格式：8B 小端 i64）
+// stats CF counters (merge operator operands and full values share one format: 8B little-endian i64)
 std::string encode_counter_delta(int64_t d);
 int64_t decode_counter(std::string_view v);
 
-// ---- pack record owner 的规范解析（docs/gaps.md §6.1）----
-// 三种历史形态此前散落在压实回调里逐处手解，离线取证工具无法复用。此处收敛为
-// 唯一解析器：对象 = "b\0k"；分片（P4 起）= "mpu\0b\0k\0id\0no"；
-// 旧分片（P4 前）= "mpu\0id\0no"（无 b/k，可归属性丢失——kLegacyPart 即
-// "保守不迁"的判据）。任何新增形态必须在此登记
+// ---- canonical parsing of pack record owner (docs/gaps.md §6.1) ----
+// Three historical forms used to be hand-parsed ad hoc inside the compaction
+// callbacks, unusable by offline forensics tools. Consolidated here into the one
+// parser: object = "b\0k"; part (since P4) = "mpu\0b\0k\0id\0no";
+// legacy part (pre-P4) = "mpu\0id\0no" (no b/k, attributability lost — kLegacyPart
+// is the "conservatively do not migrate" criterion). Any new form must be
+// registered here
 struct PackOwner {
     enum class Kind { kObject, kPart, kLegacyPart, kUnknown } kind = Kind::kUnknown;
-    std::string_view bucket, key;  // kObject/kPart 有效（指向输入串）
-    std::string_view upload_id;    // kPart/kLegacyPart 有效
-    int part_no = 0;               // kPart/kLegacyPart 有效
+    std::string_view bucket, key;  // valid for kObject/kPart (points into the input string)
+    std::string_view upload_id;    // valid for kPart/kLegacyPart
+    int part_no = 0;               // valid for kPart/kLegacyPart
 };
 PackOwner parse_pack_owner(std::string_view owner);
 
-// ---- pack record 头开销（fs_data_store §5.2：22B 固定头 + owner）----
-// pack 存活账（live_bytes）必须把 record 头计入、与 file_size 同口径：只记 payload
-// 时，小对象 pack 即使 100% 存活其 live/file_size 也恒低于 pack_gc_ratio，压实
-// 陷入"全量重写→迁走→新 pack 再重写"的永久循环（docs/gaps.md §2.3a）。
-// 头长按 owner 形态算：对象 record 为 "b\0k"，分片 record 为 "mpu\0b\0k\0id\0no"。
-// complete 把选中分片的账从分片口径重平衡到对象口径（refs 转移同批），保证
-// "对象删除 → 账归零"的守恒；盘上 record 仍是 mpu 形态，与账的头长差为轻微
-// 低计——保守方向（live 略低估 ⇒ 略多压实一次即转成对象形态，随后精确）
+// ---- pack record header overhead (fs_data_store §5.2: 22B fixed header + owner) ----
+// The pack liveness account (live_bytes) must include the record header, same
+// basis as file_size: if only payload is counted, a pack of small objects has
+// live/file_size permanently below pack_gc_ratio even at 100% liveness, and
+// compaction falls into a permanent "full rewrite → migrate away → rewrite in the
+// new pack" loop (docs/gaps.md §2.3a).
+// Header length depends on the owner form: object records are "b\0k", part
+// records are "mpu\0b\0k\0id\0no". complete rebalances the selected parts'
+// accounting from part basis to object basis (refs transfer in the same batch),
+// preserving the "object deleted → account reaches zero" invariant; the on-disk
+// record stays in mpu form, and the header-length difference vs. the account is a
+// slight undercount — the conservative direction (live slightly underestimated ⇒
+// one extra compaction converts it to object form, exact thereafter)
 inline constexpr int64_t kPackRecHeaderFixed = 22;
 inline int64_t pack_rec_overhead(std::string_view b, std::string_view k) {
     return kPackRecHeaderFixed + int64_t(b.size()) + 1 + int64_t(k.size());

@@ -30,7 +30,7 @@ std::string lower(std::string s) {
     return s;
 }
 
-// 值 trim + 连续空白折叠（SigV4 canonical headers 规则；引号内的空白原样保留）
+// Value trim + consecutive whitespace folding (SigV4 canonical headers rule; whitespace inside quotes kept verbatim)
 std::string canonical_header_value(const std::string& v) {
     std::string out;
     bool in_space = false, in_quotes = false;
@@ -62,7 +62,7 @@ std::vector<std::string> split(const std::string& s, char sep) {
     return out;
 }
 
-// 原始 query 串 → canonical query（解码后重编码、排序；可排除某个 key）
+// Raw query string -> canonical query (decode then re-encode, sort; one key may be excluded)
 std::string canonical_query(const std::string& raw_query, std::string_view exclude = "") {
     std::vector<std::pair<std::string, std::string>> params;
     if (!raw_query.empty()) {
@@ -125,14 +125,15 @@ AuthFields parse_auth_header(const std::string& value) {
     return f;
 }
 
-// 流式校验 SHA256 的装饰器。校验不绑 EOF：读满自报 length() 即比对（cloudproxy
-// 等消费者只读 length() 字节、不再多读一次到 EOF），EOF 路径兜底无长度的情况。
-// 比对失败抛出时最后一块数据尚未交付下游——配合 backend.h 的"抛异常不得提交"契约。
+// Streaming SHA256-verifying decorator. Verification is not tied to EOF: it compares once the self-reported
+// length() is fully read (consumers like cloudproxy read exactly length() bytes and never do an extra read to EOF);
+// the EOF path covers the no-length case.
+// On mismatch, the exception fires before the last chunk is delivered downstream -- working with backend.h's "throw means no commit" contract.
 class Sha256VerifyingReader final : public http::BodyReader {
 public:
     Sha256VerifyingReader(std::unique_ptr<http::BodyReader> inner, std::string expected_hex)
         : inner_(std::move(inner)),
-          expected_(lower(std::move(expected_hex))),  // AWS 摘要恒小写，容忍大写输入
+          expected_(lower(std::move(expected_hex))),  // AWS digests are always lowercase; tolerate uppercase input
           hash_(util::HashStream::Algo::Sha256) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {
@@ -171,10 +172,10 @@ bool is_hex_digest(const std::string& s) {
     return true;
 }
 
-// HMAC 链派生签名密钥：date → region → service → "aws4_request"
+// HMAC chain derives the signing key: date -> region -> service -> "aws4_request"
 util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::string& date,
                                       const std::string& region, const std::string& service) {
-    util::SecretString init = "AWS4" + secret_key;  // SK 派生物，出作用域即擦
+    util::SecretString init = "AWS4" + secret_key;  // SK derivative, wiped when it leaves scope
     auto k = util::hmac_sha256(
         std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
     k = util::hmac_sha256(k, region);
@@ -182,11 +183,11 @@ util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::
     return util::hmac_sha256(k, "aws4_request");
 }
 
-// aws-chunked 剥壳装饰器（docs/s3-protocol.md §3.2）：
-// 逐 chunk 解析 "<hex-size>[;chunk-signature=<sig>]\r\n<data>\r\n"，向下游只暴露纯数据。
-// signed 模式验证签名链：sig_n = HMAC(key, "AWS4-HMAC-SHA256-PAYLOAD" \n amz_date \n scope
+// aws-chunked de-framing decorator (docs/s3-protocol.md §3.2):
+// parses "<hex-size>[;chunk-signature=<sig>]\r\n<data>\r\n" chunk by chunk, exposing only pure data downstream.
+// signed mode verifies the signature chain: sig_n = HMAC(key, "AWS4-HMAC-SHA256-PAYLOAD" \n amz_date \n scope
 //                                   \n sig_{n-1} \n sha256("") \n sha256(chunk_data))；
-// 0 号尾 chunk 同样验证；其后的 trailer 行（-TRAILER 变体）读掉不校验。
+// The zero-size final chunk is verified too; trailer lines after it (-TRAILER variants) are consumed without verification.
 class ChunkedSigV4BodyReader final : public http::BodyReader {
 public:
     ChunkedSigV4BodyReader(std::unique_ptr<http::BodyReader> inner, bool signed_chunks,
@@ -204,7 +205,7 @@ public:
     Task<size_t> read(std::span<std::byte> out) override {
         while (state_ != State::Done) {
             if (state_ == State::Header) {
-                if (!co_await parse_header()) continue;  // 需要更多数据
+                if (!co_await parse_header()) continue;  // needs more data
             } else if (state_ == State::Data) {
                 if (chunk_remaining_ == 0) {
                     co_await finish_chunk();
@@ -220,14 +221,14 @@ public:
                 buf_.erase(0, n);
                 chunk_remaining_ -= n;
                 delivered_ += n;
-                // 校验不绑 EOF：交付满声明长度后同步走完末块验签、0 号尾块与
-                // trailer——只读 length() 字节即停的消费者（cloudproxy）同样执行
-                // 完整校验；失败时本次 n 字节不交付
+                // Verification is not tied to EOF: after delivering the declared length, synchronously finish the
+                // last-chunk verification, the zero-size final chunk, and the trailer -- consumers that stop after
+                // exactly length() bytes (cloudproxy) still get full verification; on failure, these n bytes are not delivered
                 if (chunk_remaining_ == 0 && decoded_length_ &&
                     delivered_ == *decoded_length_)
                     co_await drain_to_done();
                 co_return n;
-            } else {  // Trailer：读掉剩余输入（trailer 头与结尾空行）
+            } else {  // Trailer: consume the remaining input (trailer headers and the trailing blank line)
                 buf_.clear();
                 if (!co_await fill()) state_ = State::Done;
             }
@@ -256,8 +257,9 @@ private:
         co_return true;
     }
 
-    // 数据交付完毕后驱动状态机到 Done：验末块签名、解析 0 号尾块、消费 trailer。
-    // 若解析出的下一块仍带数据（实际数据多于声明长度）→ 长度对账失败
+    // After all data is delivered, drive the state machine to Done: verify the last chunk's signature, parse the
+    // zero-size final chunk, consume the trailer. If the next parsed chunk still carries data (actual data exceeds
+    // the declared length) -> length reconciliation fails
     Task<void> drain_to_done() {
         while (state_ != State::Done) {
             if (state_ == State::Header) {
@@ -275,7 +277,7 @@ private:
         }
     }
 
-    // 返回 false 表示还需 fill；解析出 header 后切到 Data
+    // Returns false when more fill is needed; switches to Data once a header is parsed
     Task<bool> parse_header() {
         auto eol = buf_.find("\r\n");
         if (eol == std::string::npos) {
@@ -313,7 +315,7 @@ private:
         co_return true;
     }
 
-    // 当前 chunk 数据读完：验证签名、消费结尾 CRLF（尾 chunk 无 CRLF，直接进 Trailer）
+    // Current chunk data fully read: verify the signature, consume the trailing CRLF (the final chunk has no CRLF, goes straight to Trailer)
     Task<void> finish_chunk() {
         if (signed_) {
             std::string data_hash = chunk_hash_->final_hex();
@@ -358,7 +360,7 @@ private:
 
 namespace {
 
-// build() 的默认实现：配置文件静态表，构造后只读
+// Default implementation for build(): static table from the config file, read-only after construction
 class StaticCredentialProvider final : public ICredentialProvider {
 public:
     explicit StaticCredentialProvider(const AuthConfig& cfg) {
@@ -367,7 +369,7 @@ public:
     std::optional<CredentialLookup> lookup(std::string_view ak) const override {
         auto it = creds_.find(ak);
         if (it == creds_.end()) return std::nullopt;
-        // 静态凭证恒无限制（root 语义，docs/credential-management.md §3）
+        // Static credentials are always unrestricted (root semantics, docs/credential-management.md §3)
         return CredentialLookup{it->second, std::nullopt};
     }
     bool has_credentials() const override { return !creds_.empty(); }
@@ -393,8 +395,8 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
                                               const std::string& signed_headers,
                                               const std::string& payload_hash,
                                               bool presigned) const {
-    // canonical headers（按 SignedHeaders 列表取值；列表须已排序；
-    // 同名头按出现序逗号合并——SigV4 规则）
+    // canonical headers (values taken per the SignedHeaders list; the list must already be sorted;
+    // same-name headers comma-joined in order of appearance -- SigV4 rule)
     std::string canon_headers;
     for (auto& name : split(signed_headers, ';')) {
         std::string joined;
@@ -412,8 +414,8 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
     }
 
     std::string canonical_uri = req.raw_path.empty() ? "/" : req.raw_path;
-    // 仅 presigned 请求把 X-Amz-Signature 排除出 canonical query；header 认证的
-    // 请求带这个 query 参数时按普通参数参与签名（与 AWS 一致）
+    // Only presigned requests exclude X-Amz-Signature from the canonical query; when a header-authenticated
+    // request carries this query parameter it is signed as an ordinary parameter (matching AWS)
     std::string presigned_exclude = presigned ? "X-Amz-Signature" : "";
     std::ostringstream canonical;
     canonical << req.method << "\n"
@@ -454,15 +456,15 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
         throw S3Error(S3ErrorCode::AccessDenied, "Missing Authorization header");
     }
 
-    // scope 检查
+    // scope check
     if (f.terminal != "aws4_request" || f.service != service_ || f.region != region_)
         malformed("credential scope does not match this endpoint (" + region_ + "/" + service_ +
                   ")");
     if (f.amz_date.substr(0, 8) != f.date)
         malformed("credential date does not match x-amz-date");
 
-    // host 必须在 SignedHeaders 内（AWS 规定；vhost 下 bucket 取自 Host，
-    // 不绑 host 的签名换个 Host 头即可跨桶重放）——presigned 同样强制
+    // host must be in SignedHeaders (AWS requirement; under vhost the bucket comes from Host, and a signature
+    // not bound to host could be replayed cross-bucket by swapping the Host header) -- enforced for presigned too
     {
         bool host_signed = false;
         for (auto& n : split(f.signed_headers, ';'))
@@ -473,8 +475,8 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
     auto t = util::parse_amz_date(f.amz_date);
     if (!t) malformed("cannot parse x-amz-date");
     if (f.presigned) {
-        // presigned 按 X-Amz-Expires 判有效期（docs/s3-protocol.md §3.4）。过期只约束
-        // 过去一侧；签发时间不得超前服务器 15min（防未来时间戳把有效期无限外推）
+        // presigned validity is judged by X-Amz-Expires (docs/s3-protocol.md §3.4). Expiry only constrains the
+        // past side; the issue time must not lead the server by more than 15min (prevents future timestamps from extending validity indefinitely)
         if (*t - clock() > std::chrono::seconds(kMaxClockSkewSec))
             throw S3Error(S3ErrorCode::AccessDenied, "Request is not valid yet");
         auto exp = req.query_get("X-Amz-Expires");
@@ -496,15 +498,15 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
                 "The difference between the request time and the server's time is too large.");
     }
 
-    // 凭证：一次查表同时带出 SK 与 policy 快照（docs/gaps.md §3.7）——授权判定
-    // 用这份快照，凭证在本请求在途期间被吊销也按验签时刻的语义完成
+    // Credentials: one lookup returns both the SK and the policy snapshot (docs/gaps.md §3.7) -- authorization
+    // uses this snapshot, so even if the credential is revoked while this request is in flight, it completes with verify-time semantics
     auto cred = provider_->lookup(f.access_key);
     if (!cred)
         throw S3Error(S3ErrorCode::InvalidAccessKeyId,
                       "The AWS access key ID you provided does not exist in our records.");
     const std::string& secret_key = cred->secret_key;
 
-    // payload hash（streaming 变体在 canonical request 中按字面值参与签名）
+    // payload hash (streaming variants participate in the canonical request by their literal value)
     std::string payload_hash;
     bool chunked_signed = false, chunked_unsigned = false;
     if (f.presigned) {
@@ -535,10 +537,10 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
                       "The request signature we calculated does not match the signature you "
                       "provided.");
 
-    // 流式 payload 校验（docs/s3-protocol.md §3.2/§3.3）
+    // Streaming payload verification (docs/s3-protocol.md §3.2/§3.3)
     if ((chunked_signed || chunked_unsigned) && req.body) {
-        // AWS 对 streaming 变体强制该头；缺失时 decoded 长度未知，"读满即校验"
-        // 无从触发，也无法向后端报告长度
+        // AWS mandates this header for streaming variants; without it the decoded length is unknown, the
+        // "verify when fully read" trigger cannot fire, and the length cannot be reported to the backend
         auto dl = req.headers.get("x-amz-decoded-content-length");
         if (!dl)
             throw S3Error(S3ErrorCode::InvalidRequest,
@@ -555,8 +557,8 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
             derive_signing_key(secret_key, f.date, f.region, f.service), f.signature,
             f.amz_date, scope, decoded_len);
     } else if (is_hex_digest(payload_hash) && req.body) {
-        // 声明空摘要（sha256("")）也照样包校验：不查实际 body 是否为空的话，
-        // 空摘要 + 非空 body 会把 body 脱出签名保护
+        // A declared empty digest (sha256("")) still gets wrapped for verification: without checking that the
+        // actual body is empty, empty digest + non-empty body would slip the body out of signature protection
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);
     }
     return {std::move(f.access_key), std::move(cred->policy)};
@@ -569,7 +571,7 @@ void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred,
     req.headers.set("x-amz-date", amz_date);
     req.headers.set("x-amz-content-sha256", payload_hash);
 
-    // SignedHeaders：host + 全部 x-amz-*（排序）
+    // SignedHeaders: host + all x-amz-* (sorted)
     std::vector<std::string> names;
     for (auto& [k, _] : req.headers.items()) {
         std::string lk = lower(k);

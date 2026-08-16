@@ -1,7 +1,7 @@
-// cloudproxy 单测（docs/cloudproxy-backend.md §10）：in-process 双栈自举，不 mock httplib——
-// 测试内起 lights3 自己的 HTTP server + S3Service + MemoryBackend 当"远端"，
-// CloudProxyBackend 指向它跑一致性套件；同时覆盖自签 sign() 与本地 verify()
-// 的互操作。专项用例用裸 handler server 构造错误映射/重试/取消/校验路径。
+// cloudproxy unit tests (docs/cloudproxy-backend.md §10): in-process dual-stack bootstrap, no httplib mocking --
+// the test starts lights3's own HTTP server + S3Service + MemoryBackend as the "remote",
+// and points CloudProxyBackend at it to run the conformance suite; also covers interop between our own
+// sign() and local verify(). Dedicated cases use a bare handler server to construct error-mapping/retry/cancel/validation paths.
 #ifdef LIGHTS3_CLOUDPROXY
 
 #include <atomic>
@@ -34,7 +34,7 @@ std::string pick_driver() {
     return ds.front();
 }
 
-// 任意 handler 的 in-process HTTP server
+// In-process HTTP server for an arbitrary handler
 struct HandlerServer {
     std::unique_ptr<http::IHttpServer> srv;
     std::thread th;
@@ -57,8 +57,8 @@ struct HandlerServer {
     }
 };
 
-// "远端"完整栈：S3Service + MemoryBackend + 静态凭证；base_domain 非空时远端
-// 受理 virtual-hosted 寻址（Host: <bucket>.<base_domain>）
+// The full "remote" stack: S3Service + MemoryBackend + static credentials; with a non-empty base_domain the
+// remote accepts virtual-hosted addressing (Host: <bucket>.<base_domain>)
 struct RemoteStack {
     std::shared_ptr<MemoryBackend> mem = std::make_shared<MemoryBackend>();
     s3::S3Service svc;
@@ -68,8 +68,8 @@ struct RemoteStack {
         : svc(make_router(mem), s3::SigV4Authenticator::build(auth_cfg()),
               std::move(base_domain)),
           server([this](http::HttpRequest req) { return svc.dispatch(std::move(req)); }) {
-        // 后端一致性套件用的是几字节的分片：远端关掉 5MiB 最小分片限制，
-        // 否则测的就成了"本实现的 L2 规则"而非 cloudproxy 的转发行为
+        // The backend conformance suite uses parts of a few bytes: turn off the remote's 5MiB minimum-part limit,
+        // otherwise we would be testing "this implementation's L2 rules" instead of cloudproxy's forwarding behavior
         svc.set_min_part_size(0);
     }
 
@@ -98,7 +98,7 @@ struct RemoteStack {
     }
 };
 
-// 裸 handler 用的 cloudproxy 配置
+// cloudproxy configuration for the bare handler servers
 CloudProxyConfig cfg_for(uint16_t port, int retry_max = 0) {
     CloudProxyConfig c;
     c.endpoint = "http://127.0.0.1:" + std::to_string(port);
@@ -119,7 +119,7 @@ http::HttpResponse xml_error(int status, const std::string& code) {
 
 }  // namespace
 
-// 一致性套件 + sign()/verify() 互操作（远端全程验签）
+// Conformance suite + sign()/verify() interop (the remote verifies signatures throughout)
 TEST(cloudproxy_backend_suite) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -127,33 +127,33 @@ TEST(cloudproxy_backend_suite) {
     run_backend_suite(b);
 }
 
-// bucket_prefix 映射与 list_buckets 过滤（docs/cloudproxy-backend.md §4.2/§4.3）
+// bucket_prefix mapping and list_buckets filtering (docs/cloudproxy-backend.md §4.2/§4.3)
 TEST(cloudproxy_bucket_prefix_mapping) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
     CloudProxyBackend b(remote.proxy_cfg("px-"), pool);
 
     sync_wait(b.create_bucket("mapped"));
-    // 远端真实 bucket 名带前缀
+    // The remote's real bucket name carries the prefix
     CHECK(sync_wait(remote.mem->bucket_exists("px-mapped")));
-    // 远端账号下的无关 bucket 不出现在代理视图
+    // Unrelated buckets under the remote account do not appear in the proxy view
     sync_wait(remote.mem->create_bucket("unrelated"));
     auto buckets = sync_wait(b.list_buckets());
     CHECK_EQ(buckets.size(), size_t(1));
     CHECK_EQ(buckets[0].name, "mapped");
 
-    // 前缀 + 本地名超 63 字节：请求期拒绝（"px-" + 61 = 64）
+    // Prefix + local name over 63 bytes: rejected at request time ("px-" + 61 = 64)
     CHECK_THROWS_S3(sync_wait(b.create_bucket(std::string(61, 'a'))),
                     s3::S3ErrorCode::InvalidBucketName);
     sync_wait(b.delete_bucket("mapped"));
 }
 
-// 错误映射矩阵（docs/cloudproxy-backend.md §5.1）
+// Error-mapping matrix (docs/cloudproxy-backend.md §5.1)
 TEST(cloudproxy_error_mapping) {
     using s3::S3ErrorCode;
     std::atomic<int> mode{0};
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
-        // 排空 body，避免驱动层断连噪音
+        // Drain the body to avoid driver-level disconnect noise
         if (req.body) {
             std::byte buf[4096];
             while (co_await req.body->read(std::span(buf)) > 0) {}
@@ -162,7 +162,7 @@ TEST(cloudproxy_error_mapping) {
             case 0: co_return xml_error(403, "AccessDenied");
             case 1: co_return xml_error(503, "SlowDown");
             case 2: {
-                http::HttpResponse r;  // 404 且体不可解析
+                http::HttpResponse r;  // 404 with an unparseable body
                 r.status = 404;
                 co_return r;
             }
@@ -173,21 +173,21 @@ TEST(cloudproxy_error_mapping) {
     auto pool = std::make_shared<ThreadPool>(2);
     CloudProxyBackend b(cfg_for(remote.port), pool);
 
-    // 远端 403 是网关凭证故障 → InternalError，不透传 AccessDenied
+    // A remote 403 is a gateway credential fault -> InternalError, AccessDenied is not passed through
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::InternalError);
     mode = 1;
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::SlowDown);
-    mode = 2;  // 404 无体：按操作上下文补语义
+    mode = 2;  // 404 without a body: semantics filled in from the operation context
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::NoSuchKey);
     CHECK(!sync_wait(b.bucket_exists("bkt")));
     mode = 3;
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::InternalError);
-    mode = 4;  // 4xx 可解析 → wire code 原样透传
+    mode = 4;  // parseable 4xx -> wire code passed through as-is
     CHECK_THROWS_S3(sync_wait(b.get_object("bkt", "k", std::nullopt)),
                     S3ErrorCode::InvalidPart);
 }
 
-// bucket_exists 的 HEAD 403 例外：视为存在（docs/cloudproxy-backend.md §4.3）
+// The HEAD 403 exception for bucket_exists: treated as existing (docs/cloudproxy-backend.md §4.3)
 TEST(cloudproxy_head_bucket_403_means_exists) {
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
         co_return xml_error(403, "AccessDenied");
@@ -197,7 +197,7 @@ TEST(cloudproxy_head_bucket_403_means_exists) {
     CHECK(sync_wait(b.bucket_exists("bkt")));
 }
 
-// 幂等请求对 5xx 的指数退避重试（docs/cloudproxy-backend.md §5.2）
+// Exponential-backoff retry of idempotent requests on 5xx (docs/cloudproxy-backend.md §5.2)
 TEST(cloudproxy_retry_on_5xx) {
     std::atomic<int> hits{0};
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
@@ -209,9 +209,9 @@ TEST(cloudproxy_retry_on_5xx) {
     auto pool = std::make_shared<ThreadPool>(2);
     CloudProxyBackend b(cfg_for(remote.port, /*retry_max=*/3), pool);
     CHECK(sync_wait(b.bucket_exists("bkt")));
-    CHECK_EQ(hits.load(), 3);  // 2 次 503 + 1 次成功
+    CHECK_EQ(hits.load(), 3);  // 2 times 503 + 1 success
 
-    // 重试耗尽 → 映射为 SlowDown
+    // Retries exhausted -> mapped to SlowDown
     HandlerServer always503([&](http::HttpRequest) -> Task<http::HttpResponse> {
         co_return xml_error(503, "SlowDown");
     });
@@ -219,22 +219,22 @@ TEST(cloudproxy_retry_on_5xx) {
     CHECK_THROWS_S3(sync_wait(b2.head_object("bkt", "k")), s3::S3ErrorCode::SlowDown);
 }
 
-// 远端不可达：重试耗尽后 InternalError 而非挂死（docs/cloudproxy-backend.md §9.6）
+// Remote unreachable: InternalError after retries are exhausted, rather than hanging (docs/cloudproxy-backend.md §9.6)
 TEST(cloudproxy_unreachable_endpoint) {
     auto pool = std::make_shared<ThreadPool>(2);
-    // 端口 1：几乎必然连接拒绝
+    // Port 1: almost certainly connection refused
     CloudProxyConfig c = cfg_for(1, /*retry_max=*/1);
     c.connect_timeout_ms = 300;
     CloudProxyBackend b(std::move(c), pool);
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), s3::S3ErrorCode::InternalError);
 }
 
-// GET 中途取消：reader 提前析构 → 远端流被中止，连接不腐化（docs/cloudproxy-backend.md §3.1）
+// GET cancelled midway: the reader is destroyed early -> the remote stream is aborted, the connection does not rot (docs/cloudproxy-backend.md §3.1)
 TEST(cloudproxy_get_cancel_mid_stream) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = remote.proxy_cfg();
-    cfg.queue_cap_bytes = 64 * 1024;  // 小队列，保证 pump 阻塞在 push
+    cfg.queue_cap_bytes = 64 * 1024;  // small queue, guaranteeing the pump blocks on push
     CloudProxyBackend b(cfg, pool);
 
     sync_wait(b.create_bucket("big"));
@@ -245,9 +245,9 @@ TEST(cloudproxy_get_cancel_mid_stream) {
         auto got = sync_wait(b.get_object("big", "blob", std::nullopt));
         std::byte buf[8192];
         CHECK(sync_wait(got.body->read(std::span(buf))) > 0);
-        // 只读一点即丢弃 —— 析构应 cancel 队列并 join pump，不挂死
+        // Read only a little then drop -- destruction should cancel the queue and join the pump, without hanging
     }
-    // 后端仍可用
+    // The backend is still usable
     auto meta = sync_wait(b.head_object("big", "blob"));
     CHECK_EQ(meta.size, uint64_t(data.size()));
     auto again = sync_wait(b.get_object("big", "blob", std::nullopt));
@@ -256,7 +256,7 @@ TEST(cloudproxy_get_cancel_mid_stream) {
     sync_wait(b.delete_bucket("big"));
 }
 
-// ETag 端到端校验：远端回错误 ETag → InternalError（docs/cloudproxy-backend.md §6）
+// End-to-end ETag verification: the remote returns a wrong ETag -> InternalError (docs/cloudproxy-backend.md §6)
 TEST(cloudproxy_etag_verify_failure) {
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         if (req.body) {
@@ -273,7 +273,7 @@ TEST(cloudproxy_etag_verify_failure) {
     CHECK_THROWS_S3(sync_wait(b.put_object("bkt", "k", {}, body)),
                     s3::S3ErrorCode::InternalError);
 
-    // verify_etag=false 时放行（远端 SSE 场景）
+    // Allowed through when verify_etag=false (remote SSE scenario)
     auto cfg = cfg_for(remote.port);
     cfg.verify_etag = false;
     CloudProxyBackend b2(std::move(cfg), pool);
@@ -282,7 +282,7 @@ TEST(cloudproxy_etag_verify_failure) {
     CHECK_EQ(r.etag, "00000000000000000000000000000000");
 }
 
-// S3 特有的"200 OK 但 body 是 <Error>"（docs/cloudproxy-backend.md §4.4 complete 的著名坑）
+// S3's peculiar "200 OK but the body is <Error>" (the famous complete pitfall, docs/cloudproxy-backend.md §4.4)
 TEST(cloudproxy_complete_200_with_error_body) {
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         if (req.body) {
@@ -298,7 +298,7 @@ TEST(cloudproxy_complete_200_with_error_body) {
                     s3::S3ErrorCode::InvalidPart);
 }
 
-// Range 三形态透传 + 远端忽略 Range 回 200 的降级（docs/cloudproxy-backend.md §3.3）
+// Pass-through of the three Range forms + degradation when the remote ignores Range and returns 200 (docs/cloudproxy-backend.md §3.3)
 TEST(cloudproxy_range_forms) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -309,11 +309,11 @@ TEST(cloudproxy_range_forms) {
     auto r1 = sync_wait(b.get_object("rng", "k", ByteRange{2, 5}));
     CHECK_EQ(read_all(*r1.body), "2345");
     CHECK(r1.range.has_value());
-    CHECK_EQ(r1.meta.size, uint64_t(10));  // size 恒为对象全长
+    CHECK_EQ(r1.meta.size, uint64_t(10));  // size is always the full object length
     CHECK_EQ(*r1.range->first, uint64_t(2));
     CHECK_EQ(*r1.range->last, uint64_t(5));
 
-    // 非标远端忽略 Range 回 200 → 按全量处理，range 置空
+    // A non-conforming remote ignores Range and returns 200 -> treated as full content, range cleared
     HandlerServer ignore_range([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         (void)req;
         http::HttpResponse r;
@@ -327,7 +327,7 @@ TEST(cloudproxy_range_forms) {
     CHECK_EQ(read_all(*r2.body), "0123456789");
 }
 
-// 分页边界：组尾 token 不得吞掉与"前缀上界"同名的字面 key（docs/cloudproxy-backend.md §4.2）
+// Pagination boundary: the group-tail token must not swallow a literal key equal to the "prefix upper bound" (docs/cloudproxy-backend.md §4.2)
 TEST(cloudproxy_list_pagination_boundary_key) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -335,7 +335,7 @@ TEST(cloudproxy_list_pagination_boundary_key) {
     sync_wait(b.create_bucket("pgb"));
     backend_suite::put(b, "pgb", "a/1", "x");
     backend_suite::put(b, "pgb", "a/2", "y");
-    backend_suite::put(b, "pgb", "a0", "z");  // "a0" == "a/" 末字符 +1，曾被跳过
+    backend_suite::put(b, "pgb", "a0", "z");  // "a0" == "a/" with the last character +1, was once skipped
 
     ListOptions opt;
     opt.delimiter = "/";
@@ -354,18 +354,18 @@ TEST(cloudproxy_list_pagination_boundary_key) {
     CHECK_EQ(keys[0], "a0");
 }
 
-// 不合契约的远端响应必须报错，不得静默截断（docs/cloudproxy-backend.md §3.3 / backend.h size 契约）
+// Non-conforming remote responses must error, never silently truncate (docs/cloudproxy-backend.md §3.3 / backend.h size contract)
 TEST(cloudproxy_rejects_nonconforming_remote_responses) {
     std::atomic<int> mode{0};
     HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
         http::HttpResponse r;
         if (mode.load() == 0) {
-            // RFC 合法但总长未知的 206：不可按全量语义处理
+            // A 206 that is RFC-legal but with unknown total length: must not be handled with full-content semantics
             r.status = 206;
             r.headers.set("Content-Range", "bytes 0-4/*");
             r.small_body = "01234";
         } else {
-            // 200 chunked 无 Content-Length：对象全长不可知
+            // 200 chunked without Content-Length: the full object length is unknowable
             r.stream_body = std::make_unique<http::StringBodyReader>("payload");
         }
         co_return r;
@@ -379,7 +379,7 @@ TEST(cloudproxy_rejects_nonconforming_remote_responses) {
                     s3::S3ErrorCode::InternalError);
 }
 
-// 配置加载期校验：前缀位置规则 / 数值范围 / queue_cap 解析（docs/cloudproxy-backend.md §4.3/§7）
+// Config load-time validation: prefix placement rules / numeric ranges / queue_cap parsing (docs/cloudproxy-backend.md §4.3/§7)
 TEST(cloudproxy_config_load_validation) {
     auto expect_reject = [](std::map<std::string, std::string> params) {
         params.emplace("endpoint", "http://127.0.0.1:1");
@@ -391,21 +391,21 @@ TEST(cloudproxy_config_load_validation) {
         }
         CHECK(threw);
     };
-    expect_reject({{"bucket_prefix", "-stage-"}});    // 拼接后首字符非法
-    expect_reject({{"bucket_prefix", "a..b-"}});      // 拼接后含 ".."
+    expect_reject({{"bucket_prefix", "-stage-"}});    // first character invalid after concatenation
+    expect_reject({{"bucket_prefix", "a..b-"}});      // contains ".." after concatenation
     expect_reject({{"retry_base_ms", "0"}});
     expect_reject({{"retry_base_ms", "-5"}});
     expect_reject({{"retry_max", "100"}});
-    expect_reject({{"queue_cap", "1KiB"}});           // 低于下限
+    expect_reject({{"queue_cap", "1KiB"}});           // below the lower bound
     expect_reject({{"max_connections", "0"}});
 
     auto ok = CloudProxyConfig::from_params(
         "t", {{"endpoint", "http://127.0.0.1:1"}, {"queue_cap", "64KiB"},
               {"bucket_prefix", "px-"}});
     CHECK_EQ(ok.queue_cap_bytes, size_t(64 * 1024));
-    CHECK(ok.force_path_style && !ok.control_in_pump);  // 默认值
+    CHECK(ok.force_path_style && !ok.control_in_pump);  // defaults
 
-    // P4 剩余（docs/cloudproxy-backend.md §2.3/§7）：两键均可解析，vhost 不再报错
+    // P4 remainder (docs/cloudproxy-backend.md §2.3/§7): both keys parse, vhost no longer errors
     auto ok2 = CloudProxyConfig::from_params(
         "t", {{"endpoint", "http://127.0.0.1:1"}, {"force_path_style", "false"},
               {"control_in_pump", "true"}});
@@ -414,11 +414,11 @@ TEST(cloudproxy_config_load_validation) {
     expect_reject({{"control_in_pump", "not-a-bool"}});
 }
 
-// virtual-hosted style（docs/cloudproxy-backend.md §7）：连接恒指 endpoint，仅
-// Host/签名与路径按 bucket 变化；远端以 base_domain 受理 vhost，全套件过 =
-// 寻址/签名/分页/multipart 在 vhost 下全部自洽
+// virtual-hosted style (docs/cloudproxy-backend.md §7): connections always target the endpoint, only
+// Host/signature and path vary by bucket; the remote accepts vhost via base_domain, and passing the full suite =
+// addressing/signing/pagination/multipart are all self-consistent under vhost
 TEST(cloudproxy_virtual_hosted_style) {
-    RemoteStack remote("127.0.0.1");  // 远端 vhost 域 = <bucket>.127.0.0.1
+    RemoteStack remote("127.0.0.1");  // remote vhost domain = <bucket>.127.0.0.1
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = remote.proxy_cfg();
     cfg.force_path_style = false;
@@ -426,9 +426,9 @@ TEST(cloudproxy_virtual_hosted_style) {
     run_backend_suite(b);
 }
 
-// control_in_pump=true（docs/cloudproxy-backend.md §2.3）：控制面走一次性私有
-// 线程，语义与池线程路径完全一致（全套件过）；随后两模式对拍 HEAD 时延，
-// 输出压测数（默认值论证的数据来源，无断言——本机 loopback 只作量级参考）
+// control_in_pump=true (docs/cloudproxy-backend.md §2.3): the control plane uses a one-shot private
+// thread, semantically identical to the pool-thread path (the full suite passes); then the two modes are compared
+// on HEAD latency, printing benchmark numbers (the data source for the default-value argument, no assertions -- local loopback is only an order-of-magnitude reference)
 TEST(cloudproxy_control_in_pump_suite_and_bench) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -458,7 +458,7 @@ TEST(cloudproxy_control_in_pump_suite_and_bench) {
            pump_us);
 }
 
-// §8.2 指标：构造期 0 值可见；请求时延/错误映射/池等待落账（空 scope 后端不受影响）
+// §8.2 metrics: zero values visible at construction; request latency/error mapping/pool waits recorded (a backend with an empty scope is unaffected)
 TEST(cloudproxy_metrics_registered) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -477,8 +477,8 @@ TEST(cloudproxy_metrics_registered) {
     sync_wait(b.head_object("bkt", "k"));
     bool threw = false;
     try {
-        // GET 缺失 key：远端回 404 + XML 错误体 → 按 wire code 计 NoSuchKey
-        // （HEAD 无错误体，只会归 http_404 桶）
+        // GET of a missing key: the remote returns 404 + XML error body -> counted as NoSuchKey by wire code
+        // (HEAD has no error body and would only fall into the http_404 bucket)
         sync_wait(b.get_object("bkt", "missing", std::nullopt));
     } catch (const s3::S3Error&) {
         threw = true;
@@ -496,8 +496,8 @@ TEST(cloudproxy_metrics_registered) {
           std::string::npos);
 }
 
-// 无长度 body（真 chunked）经本地 spool 上传（docs/gaps.md §6.2）：先落临时文件
-// 取得长度再走已知长度路径；spool_max_bytes=0 保留旧的 NotImplemented 语义
+// A length-less body (true chunked) uploads via a local spool (docs/gaps.md §6.2): first written to a temp file
+// to obtain the length, then goes down the known-length path; spool_max_bytes=0 keeps the old NotImplemented semantics
 TEST(cloudproxy_chunked_upload_spools) {
     struct NoLenReader final : http::BodyReader {
         explicit NoLenReader(std::string d) : data_(std::move(d)) {}
@@ -516,7 +516,7 @@ TEST(cloudproxy_chunked_upload_spools) {
     CloudProxyBackend b(remote.proxy_cfg(), pool);
     sync_wait(b.create_bucket("bkt"));
 
-    std::string data(300 * 1024, 'q');  // 跨多个 64KiB 块
+    std::string data(300 * 1024, 'q');  // spans multiple 64KiB chunks
     for (size_t i = 0; i < data.size(); i += 7) data[i] = char('a' + (i % 26));
     NoLenReader body(data);
     auto pr = sync_wait(b.put_object("bkt", "k", {}, body));
@@ -526,7 +526,7 @@ TEST(cloudproxy_chunked_upload_spools) {
     CHECK(back == data);
     (void)pr;
 
-    // spool 上限：超限的无长度上行 EntityTooLarge，不落远端
+    // Spool cap: a length-less upload over the cap gets EntityTooLarge, nothing lands on the remote
     auto small = remote.proxy_cfg();
     small.spool_max_bytes = 1024;
     CloudProxyBackend b2(small, pool);
@@ -534,7 +534,7 @@ TEST(cloudproxy_chunked_upload_spools) {
     CHECK_THROWS_S3(sync_wait(b2.put_object("bkt", "k2", {}, big)),
                     s3::S3ErrorCode::EntityTooLarge);
 
-    // spool 关闭：回到 NotImplemented
+    // Spool disabled: back to NotImplemented
     auto off = remote.proxy_cfg();
     off.spool_max_bytes = 0;
     CloudProxyBackend b3(off, pool);
@@ -543,8 +543,8 @@ TEST(cloudproxy_chunked_upload_spools) {
                     s3::S3ErrorCode::NotImplemented);
 }
 
-// 同后端服务端 COPY（docs/gaps.md §6.2）：x-amz-copy-source 一次远端调用完成，
-// 网关不搬运字节；REPLACE 语义带我方元数据
+// Same-backend server-side COPY (docs/gaps.md §6.2): x-amz-copy-source completes in one remote call,
+// the gateway moves no bytes; REPLACE semantics carry our metadata
 TEST(cloudproxy_server_side_copy) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -563,7 +563,7 @@ TEST(cloudproxy_server_side_copy) {
     CHECK_EQ(got.meta.etag, r->etag);
     CHECK_EQ(got.meta.user_meta.at("note"), std::string("copied"));
 
-    // 源不存在 → NoSuchKey 原样映射
+    // Source missing -> NoSuchKey mapped as-is
     CHECK_THROWS_S3(sync_wait(b.copy_object_fast("bkt", "absent", "bkt", "d2", {})),
                     s3::S3ErrorCode::NoSuchKey);
 }

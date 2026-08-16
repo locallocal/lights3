@@ -8,11 +8,13 @@ namespace lights3::storage {
 
 namespace {
 
-// glob 语法校验（docs/gaps.md §6.3）：fnmatch 对坏 pattern 不报错只报"不匹配"，
-// 写错的规则会静默永不命中——桶被悄悄路由去默认后端，数据落错引擎后再迁移就是
-// 一次全量搬运。能在构建期确定的错误一律构建期拒绝：
-// ① 未闭合的 '[' 字符类；② pattern 含桶名字符集（小写/数字/'-'/'.'）之外的
-// 字面字符（大写、'_'、'/' 等）——合法桶名永远不可能命中它
+// Glob syntax validation (docs/gaps.md §6.3): fnmatch does not report a bad pattern as an
+// error, only as "no match", so a mistyped rule silently never matches -- the bucket is
+// quietly routed to the default backend, and migrating the data once it lands in the wrong
+// engine means a full copy. Any error determinable at build time is rejected at build time:
+// (1) unclosed '[' character class; (2) pattern contains literal characters outside the
+// bucket-name character set (lowercase/digits/'-'/'.') -- uppercase, '_', '/', etc. --
+// which a valid bucket name can never match
 void validate_glob(const std::string& pattern) {
     auto fail = [&](const std::string& why) {
         throw std::runtime_error("bucket rule glob '" + pattern + "': " + why);
@@ -27,7 +29,7 @@ void validate_glob(const std::string& pattern) {
         }
         if (c == '[') {
             in_class = true;
-            // '[]a]' 形式：紧跟的 ']' 是字面成员，不闭类
+            // '[]a]' form: an immediately following ']' is a literal member, does not close the class
             if (i + 1 < pattern.size() && pattern[i + 1] == ']') ++i;
             continue;
         }
@@ -40,7 +42,8 @@ void validate_glob(const std::string& pattern) {
 }
 
 bool glob_match(const std::string& glob, std::string_view bucket) {
-    // 桶名 ≤ 63 字节（validate_bucket_name），栈缓冲免去每请求堆分配
+    // Bucket names are ≤ 63 bytes (validate_bucket_name); a stack buffer avoids a heap
+    // allocation per request
     char buf[64];
     size_t n = std::min(bucket.size(), sizeof(buf) - 1);
     bucket.copy(buf, n);
@@ -62,12 +65,13 @@ BucketRouter BucketRouter::build(
     };
     bool saw_catch_all = false;
     for (auto& rule : cfg.rules) {
-        // 否定规则（docs/gaps.md §6.3）："!pattern" = 不匹配 pattern 的桶命中本规则
+        // Negated rule (docs/gaps.md §6.3): "!pattern" = buckets NOT matching pattern hit this rule
         bool negate = !rule.match.empty() && rule.match.front() == '!';
         std::string glob = negate ? rule.match.substr(1) : rule.match;
         validate_glob(glob);
-        // 不可达检测：声明序匹配下，排在 catch-all 之后的规则永远轮不到——
-        // 这是配置错误（多半是把默认规则写在了前面），静默忽略只会让人困惑
+        // Unreachability check: with declaration-order matching, a rule placed after a
+        // catch-all can never be reached -- that is a configuration error (most likely the
+        // default rule was written first), and ignoring it silently only breeds confusion
         if (saw_catch_all)
             throw std::runtime_error("bucket rule '" + rule.match +
                                      "' is unreachable: it follows a catch-all rule");
@@ -78,7 +82,7 @@ BucketRouter BucketRouter::build(
         if (!negate && (glob == "*" || glob == "**")) saw_catch_all = true;
         if (negate && glob.find_first_of("*?[") == std::string::npos &&
             glob.find('\\') == std::string::npos) {
-            // "!固定串" 对除一个名字外的所有桶都命中——它自己也是 catch-all
+            // "!fixed-string" matches every bucket except one name -- it is itself a catch-all
             saw_catch_all = true;
         }
         r.rules_.push_back({std::move(glob), negate, find(rule.backend)});

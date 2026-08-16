@@ -1,6 +1,7 @@
-// L3: meta store 实现共享的纯计算 helper（docs/duostore-backend.md §2.1："实现间
-// 重复的 S3 语义用共享 helper 压到最低"）。仅依赖 meta_store.h 的记录类型与
-// multipart 工具，不含任何存储引擎耦合。
+// L3: pure-computation helpers shared by the meta store implementations
+// (docs/duostore-backend.md §2.1: "S3 semantics duplicated across implementations
+// are minimized via shared helpers"). Depends only on the record types from
+// meta_store.h and the multipart utilities; no storage-engine coupling.
 #pragma once
 
 #include <charconv>
@@ -18,18 +19,24 @@
 
 namespace lights3::storage::duostore {
 
-// gcq 单项 extent 上限（docs/gaps.md §2.11）：删除 TB 级对象（数十万 extent）时
-// 把 DataRef 拆成多条 gcq 项入队，GC 消费端单批 peek 的解码内存驻留有界。ack 逐
-// 条独立、unlink 幂等，拆分不改变崩溃语义（§9.1 先物理删后销账的论证不变）
+// Per-item extent cap for gcq entries (docs/gaps.md §2.11): when deleting TB-scale
+// objects (hundreds of thousands of extents), split the DataRef into multiple gcq
+// items so the GC consumer's decoded memory residency per peek batch stays bounded.
+// Acks are independent per item and unlink is idempotent, so splitting does not
+// change crash semantics (the §9.1 argument — physical delete first, then settle
+// the accounting — still holds)
 inline constexpr size_t kReclaimMaxExtents = 4096;
 
-// ---- schema 标记的统一判定（docs/gaps.md §6.1：四引擎共享"演进而非硬拒"策略）----
-// 存量标记 = <谱系前缀><十进制版本>（rocks 前缀空、redis "r"、tikv "t"；sqlite 的
-// user_version 是纯整数，不经字符串解析但遵守同一比较策略）。返回存量版本号：
-//   谱系不符 / 乱码       → InternalError（拿错库，任何写入都可能毁数据）；
-//   版本比本构建新        → InternalError（降级运行会静默写坏新布局）；
-//   版本 ≤ 当前           → 返回，调用方对 < 当前的库走各自的迁移链。
-// engine 为报错前缀（沿用各引擎既有措辞，如 "duostore redis meta"）
+// ---- Unified schema-marker check (docs/gaps.md §6.1: the four engines share the
+// "evolve rather than hard-reject" policy) ----
+// Stored marker = <lineage prefix><decimal version> (rocks prefix empty, redis "r",
+// tikv "t"; sqlite's user_version is a plain integer that skips string parsing but
+// follows the same comparison policy). Returns the stored version number:
+//   lineage mismatch / garbage  → InternalError (wrong database; any write could destroy data);
+//   version newer than build    → InternalError (running downgraded would silently corrupt the newer layout);
+//   version ≤ current           → returned; for versions < current the caller runs its own migration chain.
+// engine is the error-message prefix (reusing each engine's existing wording, e.g.
+// "duostore redis meta")
 inline int64_t parse_schema_marker(const std::string& stored, std::string_view lineage,
                                    int64_t current, const std::string& engine) {
     int64_t ver = -1;
@@ -50,7 +57,9 @@ inline int64_t parse_schema_marker(const std::string& stored, std::string_view l
     return ver;
 }
 
-// 迁移链缺档的统一报错（"改布局不留迁移"是编程错误，开机响亮失败优于带病运行）
+// Unified error for a gap in the migration chain ("changing the layout without
+// leaving a migration" is a programming error; failing loudly at startup beats
+// running impaired)
 [[noreturn]] inline void throw_no_migration(int64_t from, int64_t current,
                                             const std::string& engine) {
     throw s3::S3Error(s3::S3ErrorCode::InternalError,
@@ -58,9 +67,11 @@ inline int64_t parse_schema_marker(const std::string& stored, std::string_view l
                           " to v" + std::to_string(current));
 }
 
-// 条件 PUT 的原子区检查（PutCondition 契约，storage/backend.h）：四引擎在各自
-// 事务内读到旧记录后调用；抛出即放弃提交（本地引擎回滚天然成立，redis 在
-// 组 batch 前、tikv 在填 mutation 前调用，均不会发出任何写）
+// Atomic-section check for conditional PUT (PutCondition contract, storage/backend.h):
+// the four engines call this after reading the old record inside their own
+// transaction; throwing abandons the commit (rollback holds naturally for local
+// engines; redis calls it before assembling the batch and tikv before filling
+// mutations, so neither issues any write)
 inline void check_put_condition(const PutCondition& cond, const std::optional<ObjectRec>& old,
                                 std::string_view key) {
     if (!cond.active()) return;
@@ -79,10 +90,13 @@ inline void check_put_condition(const PutCondition& cond, const std::optional<Ob
     }
 }
 
-// complete_upload 的分片选择与对象拼装（RocksDB/Redis/SQLite 三实现原为逐字相同
-// 的块）：逐项 ETag 校验（缺失/不符抛 InvalidPart）、按提交顺序拼接 extent、累加
-// size、合成总 ETag 与 last_modified。selected 输出选中分片号，供调用方做 refs
-// 转移与未选中分片的 GC 落账分流。version 由调用方在读到旧对象后另行设置。
+// Part selection and object assembly for complete_upload (formerly a verbatim-
+// identical block across the RocksDB/Redis/SQLite implementations): per-item ETag
+// validation (missing/mismatched throws InvalidPart), extents concatenated in
+// submission order, sizes accumulated, combined ETag and last_modified synthesized.
+// selected outputs the chosen part numbers so the caller can route refs transfer
+// vs. GC accounting for unselected parts. version is set separately by the caller
+// after reading the old object.
 inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const PartInfo> parts,
                                            const std::map<int, PartRec>& stored,
                                            std::set<int>& selected) {
@@ -107,20 +121,24 @@ inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const Part
     return rec;
 }
 
-// 压实换 ref（swap_extents，§9.2）的 refs 差集。
+// Refs set-difference for compaction ref swap (swap_extents, §9.2).
 //
-// refs 表按 file_id 是 last-wins 语义：对同一 file_id"先 Put 后 Delete"（四引擎的
-// WriteBatch / Lua 顺序 / SQL 顺序 / TiKV 后者胜都如此）净效果是删除。而压实只替换
-// 一个 pack extent，to 与 from **共享全部未迁移的 chunk extent**——整表 add(to) 再
-// 整表 remove(from) 会抹掉这些仍被对象引用的 chunk 的 refs 表项，孤儿扫描随后
-// unlink 活数据（不可恢复的数据丢失）。
+// The refs table is last-wins per file_id: for the same file_id, "Put then Delete"
+// (true of all four engines — WriteBatch / Lua order / SQL order / TiKV
+// latter-wins) nets out to a delete. Compaction replaces only one pack extent, and
+// to shares **all un-migrated chunk extents** with from — so add(to) over the whole
+// set followed by remove(from) over the whole set would erase the refs entries of
+// chunks still referenced by the object, and the orphan scan would then unlink live
+// data (unrecoverable data loss).
 //
-// 只对真正新增（to−from）与真正消失（from−to）的 file_id 操作，顺序即无关，同时
-// 省掉无谓 mutation。pack 存活账是加法语义（同 pack 的 +1/-1 自然抵消），不受影响，
-// 故本 helper 只服务 refs 一侧；kPack extent 不入 refs，在此一并滤掉。
+// Operating only on file_ids that are genuinely added (to−from) or genuinely gone
+// (from−to) makes ordering irrelevant and also skips pointless mutations. Pack
+// liveness accounting is additive (same-pack +1/-1 cancels naturally) and is
+// unaffected, so this helper serves only the refs side; kPack extents never enter
+// refs and are filtered out here as well.
 struct RefsDelta {
-    DataRef added;    // 需 Put refs 的 extent
-    DataRef removed;  // 需 Delete refs 的 extent
+    DataRef added;    // extents needing a refs Put
+    DataRef removed;  // extents needing a refs Delete
 };
 
 inline RefsDelta refs_delta(const DataRef& from, const DataRef& to) {

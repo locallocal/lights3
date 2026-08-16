@@ -1,4 +1,4 @@
-// XML 解析器（docs/s3-protocol.md §4：浅结构请求 XML）
+// XML parser (docs/s3-protocol.md §4: shallow-structure request XML)
 #include "s3/errors.h"
 #include "s3/xml.h"
 #include "unit/mini_test.h"
@@ -20,7 +20,7 @@ TEST(xml_parse_delete_objects_shape) {
         if (c.name == "Object") keys.push_back(c.get("Key"));
     CHECK_EQ(keys.size(), size_t(2));
     CHECK_EQ(keys[0], "dir/a.txt");
-    CHECK_EQ(keys[1], "b & c.bin");  // 实体解码
+    CHECK_EQ(keys[1], "b & c.bin");  // entity decoding
 }
 
 TEST(xml_parse_complete_multipart_shape) {
@@ -45,14 +45,14 @@ TEST(xml_parse_entities_cdata_comments) {
     CHECK_EQ(root.get("D"), "t");
 }
 
-// 补充平面数字字符引用（docs/issues.md T12）：&#x1F600; 等 5-6 位十六进制引用
-// 曾被长度护栏误拒成 MalformedXML
+// Supplementary-plane numeric character references (docs/issues.md T12): 5-6 digit hex references like &#x1F600;
+// were once wrongly rejected as MalformedXML by the length guard
 TEST(xml_parse_supplementary_plane_char_refs) {
     auto root = xml_parse("<R><A>&#x1F600;</A><B>&#x10FFFF;</B><C>&#1114111;</C></R>");
     CHECK_EQ(root.get("A"), "\xF0\x9F\x98\x80");  // U+1F600
     CHECK_EQ(root.get("B"), "\xF4\x8F\xBF\xBF");  // U+10FFFF
-    CHECK_EQ(root.get("C"), "\xF4\x8F\xBF\xBF");  // 十进制同码点
-    // 护栏仍在：离谱长度的引用照旧拒绝
+    CHECK_EQ(root.get("C"), "\xF4\x8F\xBF\xBF");  // same code point, decimal form
+    // Guard still in place: absurdly long references are rejected as before
     CHECK_THROWS_S3(xml_parse("<A>&#x000000000000000041;</A>"), S3ErrorCode::MalformedXML);
 }
 

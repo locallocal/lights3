@@ -1,5 +1,6 @@
-// L3: DuoStore 元数据/数据两侧唯一的耦合点（docs/duostore-backend.md §3.1）。
-// meta 把 DataRef 当不透明定位信息存取，data 只负责按它读写。
+// L3: the single coupling point between DuoStore's metadata and data sides
+// (docs/duostore-backend.md §3.1). meta stores/loads DataRef as opaque location
+// info; data just reads/writes according to it.
 #pragma once
 
 #include <cstdint>
@@ -8,23 +9,24 @@
 namespace lights3::storage::duostore {
 
 struct Extent {
-    // kRados：file_id 映射 rados 对象名（docs/duostore-rados-data.md §3.1）
+    // kRados: file_id maps to the rados object name (docs/duostore-rados-data.md §3.1)
     enum class Kind : uint8_t { kChunk = 0, kPack = 1, kRados = 2 };
     Kind kind = Kind::kChunk;
-    uint64_t file_id = 0;  // chunk / pack 文件号（全局单调分配，§4.5）
-    uint64_t offset = 0;   // pack 内 payload 起始偏移；chunk/rados 恒 0
-    uint64_t length = 0;   // 本段字节数
-    uint32_t crc32c = 0;   // 本段内容校验和
+    uint64_t file_id = 0;  // chunk / pack file number (globally monotonic allocation, §4.5)
+    uint64_t offset = 0;   // payload start offset within the pack; always 0 for chunk/rados
+    uint64_t length = 0;   // byte count of this extent
+    uint32_t crc32c = 0;   // content checksum of this extent
 
     bool operator==(const Extent&) const = default;
 };
 
-// alloc_file_run 单次批取上限（docs/gaps.md §3.9）：写者几何增长到此封顶，
-// 远小于各引擎号段（kIdSegment=4096），单写会话最坏浪费 kMaxIdRun-1 个 id
+// Per-call batch cap for alloc_file_run (docs/gaps.md §3.9): writers grow
+// geometrically up to this cap, far below each engine's id segment
+// (kIdSegment=4096); a single write session wastes at most kMaxIdRun-1 ids
 inline constexpr uint32_t kMaxIdRun = 64;
 
 struct DataRef {
-    std::vector<Extent> extents;  // 空 = 0 字节对象；持久化用 run 编码（§4.3）
+    std::vector<Extent> extents;  // empty = 0-byte object; persisted via run encoding (§4.3)
 
     uint64_t total() const {
         uint64_t sum = 0;

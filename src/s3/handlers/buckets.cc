@@ -1,4 +1,4 @@
-// bucket 级与 service 级 handler
+// Bucket-level and service-level handlers
 #include "core/util/time.h"
 #include "s3/handlers/common.h"
 #include "s3/service.h"
@@ -7,16 +7,16 @@
 namespace lights3::s3 {
 
 Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
-    // 聚合各后端；同名去重（首个后端优先）
+    // Aggregate across backends; deduplicate by name (first backend wins)
     std::vector<storage::BucketInfo> all;
     for (auto& [_, backend] : router_.backends()) {
         auto part = co_await backend->list_buckets();
         for (auto& b : part) {
-            // 内部保留名不出现在用户可见的列表里（docs/credential-management.md §4.1）
+            // Internal reserved names never appear in the user-visible list (docs/credential-management.md §4.1)
             if (b.name == storage::kSysBucketName) continue;
-            // 按 policy 过滤（docs/gaps.md §5.10）：此前不过滤是记在案的取舍
-            //（"只泄露桶名"），但桶名正是攻击链第一步——受限凭证不该看到
-            // 白名单外的桶存在
+            // Filter by policy (docs/gaps.md §5.10): not filtering was previously a documented trade-off
+            // ("only bucket names leak"), but bucket names are exactly step one of an attack chain -- restricted
+            // credentials should not see that buckets outside their allowlist exist
             if (auth.policy && !auth.policy->allows_bucket(b.name)) continue;
             bool dup = false;
             for (auto& e : all)
@@ -49,10 +49,10 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
     co_return resp;
 }
 
-// CreateBucket：解析 CreateBucketConfiguration/LocationConstraint（docs/gaps.md §5.4）。
-// 此前请求体从不读，跨 region 的建桶静默成功、随后 GetBucketLocation 回显的却是本地
-// region——客户端据此认定数据落在别处。空 body 与空 LocationConstraint 均按 us-east-1
-// 处理（S3 惯例：该 region 不写约束）
+// CreateBucket: parses CreateBucketConfiguration/LocationConstraint (docs/gaps.md §5.4).
+// Previously the request body was never read, so cross-region bucket creation silently succeeded while a later
+// GetBucketLocation echoed the local region -- leading clients to conclude the data lived elsewhere. Empty body
+// and empty LocationConstraint are both treated as us-east-1 (S3 convention: that region writes no constraint)
 Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::string bucket) {
     std::string body = co_await handlers::read_body(req);
     if (!body.empty()) {
@@ -62,7 +62,7 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
                           "The XML you provided was not well-formed or did not validate.");
         std::string want = root.get("LocationConstraint");
         const std::string& region = auth_.region();
-        // 空约束 = us-east-1；本实现只服务单一 region，不符即拒而非静默改写
+        // Empty constraint = us-east-1; this implementation serves a single region, mismatches are rejected rather than silently rewritten
         if (want.empty()) want = "us-east-1";
         if (want != region)
             throw S3Error(S3ErrorCode::InvalidLocationConstraint,
@@ -81,7 +81,7 @@ Task<http::HttpResponse> S3Service::head_bucket(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
     if (!exists)
         throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
-    // boto3 的跨区重定向依赖这个头（docs/gaps.md §5.9）
+    // boto3's cross-region redirect depends on this header (docs/gaps.md §5.9)
     http::HttpResponse resp;
     resp.headers.set("x-amz-bucket-region", auth_.region());
     co_return resp;
@@ -94,13 +94,13 @@ Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket) {
     co_return resp;
 }
 
-// GetBucketLocation：回显配置 region（docs/s3-protocol.md §1：LocationConstraint 无 region 约束）
+// GetBucketLocation: echoes the configured region (docs/s3-protocol.md §1: LocationConstraint carries no region constraint)
 Task<http::HttpResponse> S3Service::get_bucket_location(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
     if (!exists)
         throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
     XmlWriter w;
-    // us-east-1 按 S3 惯例返回空 LocationConstraint
+    // us-east-1 returns an empty LocationConstraint per S3 convention
     const std::string& region = auth_.region();
     w.open("LocationConstraint", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
     if (region != "us-east-1") w.text(region);

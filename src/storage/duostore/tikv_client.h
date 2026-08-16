@@ -1,8 +1,10 @@
-// L3: TiKV 客户端侧车（docs/duostore-tikv-meta.md §6.3）。client-c 的事务提交层
-// test-grade（mutation 只有 Put、commit 异常路径含 TODO），本文件以其公开的传输
-// 基建（Cluster/RegionCache/RegionClient/Backoffer/LockResolver）为地基，实现带
-// op（Put/Del/Lock/Insert）的乐观 2PC 提交器——不 fork submodule，保持上游 pristine；
-// 待上游合入等价能力后本侧车退役。pingcap 头（拖 grpc/Poco）全部锁在 .cc。
+// L3: TiKV client sidecar (docs/duostore-tikv-meta.md §6.3). client-c's transaction
+// commit layer is test-grade (mutations are Put-only, commit error paths contain TODOs),
+// so this file builds on its public transport infrastructure
+// (Cluster/RegionCache/RegionClient/Backoffer/LockResolver) to implement an optimistic
+// 2PC committer with ops (Put/Del/Lock/Insert) — we do not fork the submodule, keeping
+// upstream pristine; this sidecar retires once upstream lands equivalent capability.
+// pingcap headers (which drag in grpc/Poco) are all confined to the .cc.
 #pragma once
 
 #include <cstdint>
@@ -19,42 +21,44 @@ struct Cluster;
 namespace lights3::storage::duostore {
 
 struct TikvOptions {
-    std::vector<std::string> pd_endpoints;  // "host:port" 列表
-    // mTLS 三件套（可选，三者同时给定才启用，docs/duostore-tikv-meta.md §9）
+    std::vector<std::string> pd_endpoints;  // list of "host:port"
+    // mTLS triple (optional; enabled only when all three are given, docs/duostore-tikv-meta.md §9)
     std::string ca_path;
     std::string cert_path;
     std::string key_path;
-    // 退避预算参数化（§6.1，T5）：>0 时替换**侧车路径**（2PC 提交、batch_get、
-    // last_key、safepoint RPC）的库默认预算（ms）；commit 用 2×（对齐上游
-    // commitMaxBackoff ≈ 2×prewrite 的比例）。0 = 库默认。上游 Snapshot/Scanner
-    // 内部自建的 Backoffer 不受控——全局单调用超时列上游改进项（§11 T5）
+    // Parameterized backoff budget (§6.1, T5): when >0, replaces the library-default
+    // budget (ms) for the **sidecar paths** (2PC commit, batch_get, last_key, safepoint
+    // RPCs); commit uses 2x (matching upstream's commitMaxBackoff ≈ 2x prewrite ratio).
+    // 0 = library default. Backoffers built internally by upstream Snapshot/Scanner are
+    // not controlled — a global per-call timeout is listed as an upstream improvement (§11 T5)
     int backoff_budget_ms = 0;
 };
 
-// mutation op（kvrpcpb::Op 子集，§4.4 用到的四种）
+// mutation op (subset of kvrpcpb::Op, the four used by §4.4)
 enum class TikvOp : uint8_t {
     kPut,
     kDel,
-    kLock,    // 占位锁记录：物化只读前置条件的写偏斜冲突（§4.3 守卫分片）
-    kInsert,  // put + 必须不存在（create_bucket → BucketAlreadyOwnedByYou）
+    kLock,    // placeholder lock record: materializes write-skew conflicts for read-only preconditions (§4.3 guard shards)
+    kInsert,  // put + must-not-exist (create_bucket → BucketAlreadyOwnedByYou)
 };
 
 struct TikvMutation {
     TikvOp op;
     std::string key;
-    std::string value;  // kDel/kLock 恒空
+    std::string value;  // always empty for kDel/kLock
 };
 
-// ---- 提交结果分类（§4.1/§4.6；meta store 依类别决定重试/映射）----
-// WriteConflict / prewrite 锁竞争超预算：明确未提交，取新 start_ts 重读重试
+// ---- Commit outcome classification (§4.1/§4.6; the meta store decides retry/mapping by category) ----
+// WriteConflict / prewrite lock contention over budget: definitely not committed;
+// take a new start_ts, re-read and retry
 struct TikvConflict {
     std::string what;
 };
-// Op::Insert 撞已存在 key：明确未提交（唯一使用点 create_bucket）
+// Op::Insert hit an already-existing key: definitely not committed (sole call site: create_bucket)
 struct TikvAlreadyExist {
     std::string key;
 };
-// primary commit 结果不明（盲重试禁令，§4.6）：一律上抛 InternalError
+// primary commit outcome unknown (blind-retry ban, §4.6): always rethrown as InternalError
 struct TikvUndetermined {
     std::string what;
 };
@@ -66,52 +70,60 @@ public:
     TikvClient(const TikvClient&) = delete;
     TikvClient& operator=(const TikvClient&) = delete;
 
-    // PD TSO（事务 start_ts / list 快照版本）
+    // PD TSO (transaction start_ts / list snapshot version)
     uint64_t get_ts();
 
-    // 单 key 快照读；不存在返回 nullopt（client-c Get 以空串表缺，codec 值恒
-    // 非空使该消歧无损，§3.1）
+    // Single-key snapshot read; returns nullopt when absent (client-c Get signals
+    // absence with an empty string; codec values are never empty so this
+    // disambiguation is lossless, §3.1)
     std::optional<std::string> get(uint64_t version, const std::string& key);
 
-    // 批量快照读（KvBatchGet，按 region 分组）；返回与 keys 等长、同序的值数组。
-    // 带锁的 key 退化为单 key Get 兜底（内部解析锁）
+    // Batched snapshot read (KvBatchGet, grouped by region); returns a value array of
+    // the same length and order as keys. Locked keys fall back to single-key Get
+    // (which resolves locks internally)
     std::vector<std::optional<std::string>> batch_get(uint64_t version,
                                                       const std::vector<std::string>& keys);
 
-    // 范围扫 [begin, end)，最多 limit 条（end 空 = 无上界）。limit 精确下推为
-    // 扫描批大小——存在性探测（limit=1）只取 1 条，不隐式多拉。同一 version 的
-    // 多次调用构成一致视图（MVCC，§3.3）
+    // Range scan [begin, end), at most limit entries (empty end = no upper bound).
+    // limit is pushed down exactly as the scan batch size — an existence probe
+    // (limit=1) fetches just 1 entry, no implicit over-fetch. Multiple calls at the
+    // same version form a consistent view (MVCC, §3.3)
     std::vector<std::pair<std::string, std::string>> scan(uint64_t version,
                                                           const std::string& begin,
                                                           const std::string& end, size_t limit);
 
-    // [lo, hi) 内最后一个 key；无则 nullopt。key-only 反向扫：region 定位走
-    // 缓存 + 通常 1 次 RPC——list 组尾 token 的 O(1) 原语（§3.3，对应 RocksDB
-    // 版的 SeekForPrev；client-c Scanner 未封装 reverse，此处用裸 KvScan）
+    // Last key within [lo, hi); nullopt if none. Key-only reverse scan: region lookup
+    // goes through the cache + typically 1 RPC — the O(1) primitive for list group-tail
+    // tokens (§3.3, counterpart of the RocksDB version's SeekForPrev; client-c Scanner
+    // does not wrap reverse, so raw KvScan is used here)
     std::optional<std::string> last_key(uint64_t version, const std::string& lo,
                                         const std::string& hi);
 
-    // 乐观 2PC 提交（§4）。muts 非空；primary = muts[0].key。同 key 多条
-    // mutation 按出现序合并、后者胜（对齐 WriteBatch 按序覆盖语义——Percolator
-    // 每 key 只允许一个 op）。异常：
-    //   TikvConflict      —— 写写冲突/锁竞争，安全重试
-    //   TikvAlreadyExist  —— Insert 撞键，安全失败
-    //   TikvUndetermined  —— primary commit 结果不明，禁止盲重试
-    //   pingcap::Exception —— 其余（网络/集群），prewrite 阶段者明确未提交
+    // Optimistic 2PC commit (§4). muts must be non-empty; primary = muts[0].key.
+    // Multiple mutations on the same key merge in order of appearance, last one wins
+    // (matching WriteBatch's in-order-overwrite semantics — Percolator allows only one
+    // op per key). Exceptions:
+    //   TikvConflict      — write-write conflict / lock contention, safe to retry
+    //   TikvAlreadyExist  — Insert hit an existing key, safe to fail
+    //   TikvUndetermined  — primary commit outcome unknown, blind retry forbidden
+    //   pingcap::Exception — everything else (network/cluster); those from the
+    //                        prewrite phase are definitely not committed
     void commit(uint64_t start_ts, const std::vector<TikvMutation>& muts);
 
-    // ---- GC safepoint（§7.3；PD RPC 直连侧车——client-c 未封装该三件）----
-    // 注册/续租本服务的 service safepoint（TTL 秒；PD 侧过期自动摘除）并返回
-    // 全体服务的最小值。语义：声明"本服务不再读 safe_point 之前的版本"
+    // ---- GC safepoint (§7.3; direct PD RPC sidecar — client-c does not wrap these three) ----
+    // Register/renew this service's service safepoint (TTL in seconds; PD removes it
+    // automatically on expiry) and return the minimum across all services. Semantics:
+    // declare "this service no longer reads versions before safe_point"
     uint64_t update_service_gc_safepoint(const std::string& service_id, int64_t ttl_s,
                                          uint64_t safe_point);
-    // 推进集群 GC safepoint（PD 端单调只进不退，落后值原样返回当前值）。
-    // 入参恒应为 update_service_gc_safepoint 返回的 min——越过任一存活服务
-    // 的声明即破坏其快照
+    // Advance the cluster GC safepoint (monotonic forward-only on the PD side; a
+    // lagging value just returns the current value unchanged). The argument must
+    // always be the min returned by update_service_gc_safepoint — going past any live
+    // service's declaration breaks its snapshot
     uint64_t update_gc_safepoint(uint64_t safe_point);
     uint64_t get_gc_safepoint();
 
-    // 测试钩子：暴露底层集群（splitRegion 制造多 region 等，§10）
+    // Test hook: exposes the underlying cluster (splitRegion to create multiple regions etc., §10)
     pingcap::kv::Cluster* cluster();
 
 private:

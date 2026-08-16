@@ -8,9 +8,11 @@ namespace lights3::util {
 
 namespace {
 
-// system_clock 纳秒精度下 int64 只覆盖约 1677–2262 年，超界经 from_time_t
-// 放大为纳秒时有符号溢出（UB）。各 parse 先拒掉范围外年份（月/日等字段被
-// %2d 限制在两位数内，timegm 归一化后最多再外推数年，不会越过安全边界）
+// At system_clock's nanosecond precision, int64 covers only roughly the years
+// 1677–2262; values beyond that overflow signed arithmetic (UB) when from_time_t
+// scales them to nanoseconds. Each parse rejects out-of-range years up front
+// (month/day fields are limited to two digits by %2d, and timegm normalization
+// extrapolates by at most a few years, never crossing the safe boundary)
 constexpr int kMinYear = 1970;
 constexpr int kMaxYear = 2200;
 
@@ -34,7 +36,7 @@ std::optional<SysTime> parse_http_date(const std::string& s) {
                                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     char mon[4] = {0};
     std::tm tm{};
-    // "Tue, 14 Jul 2026 08:00:00 GMT"（星期与 GMT 后缀不严格校验）
+    // "Tue, 14 Jul 2026 08:00:00 GMT" (weekday and GMT suffix are not strictly validated)
     if (sscanf(s.c_str(), "%*3s, %2d %3s %4d %2d:%2d:%2d", &tm.tm_mday, mon, &tm.tm_year,
                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
         return std::nullopt;
@@ -59,7 +61,7 @@ std::string iso8601(SysTime t) {
 
 std::optional<SysTime> parse_iso8601(const std::string& s) {
     std::tm tm{};
-    // "2026-07-14T08:00:00[.sss]Z"（小数秒与 Z 后缀不严格校验）
+    // "2026-07-14T08:00:00[.sss]Z" (fractional seconds and Z suffix are not strictly validated)
     if (sscanf(s.c_str(), "%4d-%2d-%2dT%2d:%2d:%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
                &tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6)
         return std::nullopt;
@@ -81,7 +83,7 @@ std::string amz_date(SysTime t) {
 
 std::optional<SysTime> parse_amz_date(const std::string& s) {
     std::tm tm{};
-    // 格式固定 "YYYYMMDDTHHMMSSZ"（16 字符）：%n 校验 'Z' 在场、长度校验拒尾部垃圾
+    // Fixed format "YYYYMMDDTHHMMSSZ" (16 chars): %n verifies the 'Z' is present, the length check rejects trailing garbage
     int consumed = 0;
     if (sscanf(s.c_str(), "%4d%2d%2dT%2d%2d%2dZ%n", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
                &tm.tm_hour, &tm.tm_min, &tm.tm_sec, &consumed) != 6 ||

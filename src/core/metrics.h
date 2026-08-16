@@ -1,9 +1,11 @@
-// 横切基础设施：后端级 metrics 注册机制（装配见 docs/storage-backend.md §6）。
-// L2 请求维度指标仍由 s3::Metrics 负责；本文件让任意组件（存储后端及其
-// meta/data 子件）注册 counter / gauge / histogram，随 GET /-/metrics 以
-// Prometheus 文本格式追加输出。装配路径：main 建 MetricsRegistry →
-// StorageRegistry::build 给每个后端派发带 backend=<name> 基础标签的
-// MetricsScope → 后端在构造期领取实例、热路径无锁递增。
+// Cross-cutting infrastructure: backend-level metrics registration (wiring in
+// docs/storage-backend.md §6). L2 request-dimension metrics remain the job of
+// s3::Metrics; this file lets any component (storage backends and their meta/data
+// subcomponents) register counters / gauges / histograms, appended to the
+// GET /-/metrics output in Prometheus text format. Wiring path: main creates the
+// MetricsRegistry -> StorageRegistry::build hands each backend a MetricsScope
+// carrying the backend=<name> base label -> the backend obtains instances during
+// construction and increments lock-free on the hot path.
 #pragma once
 
 #include <atomic>
@@ -18,11 +20,12 @@
 
 namespace lights3 {
 
-// 标签集：渲染按传入序输出（scope 基础标签在前）。值渲染时按 Prometheus
-// 文本格式转义，键须为合法标签名（调用方保证）
+// Label set: rendered in the order given (scope base labels first). Values are
+// escaped per the Prometheus text format when rendered; keys must be valid label
+// names (caller's responsibility)
 using MetricLabels = std::vector<std::pair<std::string, std::string>>;
 
-// 单调计数器；inc 为 relaxed 原子，热路径可安全调用
+// Monotonic counter; inc is a relaxed atomic, safe to call on the hot path
 class MetricCounter {
 public:
     void inc(uint64_t n = 1) { v_.fetch_add(n, std::memory_order_relaxed); }
@@ -43,7 +46,8 @@ private:
     std::atomic<int64_t> v_{0};
 };
 
-// 直方图：构造时定升序桶上界（渲染补 +Inf 末桶），observe 无锁
+// Histogram: ascending bucket upper bounds fixed at construction (rendering adds
+// the +Inf last bucket); observe is lock-free
 class MetricHistogram {
 public:
     explicit MetricHistogram(std::vector<double> bounds)
@@ -58,7 +62,7 @@ public:
     }
 
     struct Snapshot {
-        std::vector<uint64_t> buckets;  // 与 bounds 对齐 + 末位溢出桶，非累计
+        std::vector<uint64_t> buckets;  // aligned with bounds + trailing overflow bucket, non-cumulative
         double sum = 0;
         uint64_t count = 0;
     };
@@ -72,9 +76,11 @@ private:
     std::atomic<uint64_t> count_{0};
 };
 
-// 注册表：同名同标签 get-or-create 返回同一实例（幂等，重启弃用等重复注册
-// 无害）；同名不同类型/桶界视为装配错误抛 std::runtime_error。实例以
-// shared_ptr 双持有——注册表供渲染、调用方供热路径，二者生命期互不牵制
+// Registry: get-or-create with the same name and labels returns the same instance
+// (idempotent — duplicate registration from restarts/abandonment is harmless);
+// the same name with a different type/bucket bounds is a wiring error and throws
+// std::runtime_error. Instances are doubly held via shared_ptr — the registry for
+// rendering, the caller for the hot path — so neither lifetime constrains the other
 class MetricsRegistry {
 public:
     std::shared_ptr<MetricCounter> counter(const std::string& name, const std::string& help,
@@ -84,16 +90,21 @@ public:
     std::shared_ptr<MetricHistogram> histogram(const std::string& name, const std::string& help,
                                                std::vector<double> bounds,
                                                const MetricLabels& labels = {});
-    // 回调 gauge：渲染时拉取瞬时值（队列深度类指标免常驻原子）；回调在渲染
-    // 线程执行，须自带线程安全且不得阻塞。同名同标签后注册者覆盖前者
+    // Callback gauge: pulls the instantaneous value at render time (queue-depth-style
+    // metrics avoid a resident atomic); the callback runs on the rendering thread,
+    // must be thread-safe on its own, and must not block. Later registration with
+    // the same name and labels overrides the earlier one
     void gauge_callback(const std::string& name, const std::string& help,
                         std::function<double()> fn, const MetricLabels& labels = {});
 
-    // 撤销某个标签值下的全部序列（含回调 gauge）。用于装配失败回滚：孤儿实例的
-    // 回调闭包会持着已弃用对象的 shared_ptr，留在表里会一直渲染陈旧值
+    // Remove all series under a given label value (callback gauges included). Used
+    // for rollback on wiring failure: an orphaned instance's callback closure holds
+    // a shared_ptr to the abandoned object, and left in the table it would keep
+    // rendering stale values
     void remove_labeled(const std::string& label_key, const std::string& label_value);
 
-    // Prometheus 文本格式；家族按名字序、子实例按标签串序，输出稳定可断言
+    // Prometheus text format; families in name order, child instances in label-string
+    // order, so the output is stable and assertable
     std::string render() const;
 
 private:
@@ -101,22 +112,24 @@ private:
     struct Family {
         Kind kind{};
         std::string help;
-        std::vector<double> bounds;  // histogram 家族级桶界
-        // key = 规范化标签串（如 backend="a",op="get"）
+        std::vector<double> bounds;  // family-level histogram bucket bounds
+        // key = normalized label string (e.g. backend="a",op="get")
         std::map<std::string, std::shared_ptr<MetricCounter>> counters;
         std::map<std::string, std::shared_ptr<MetricGauge>> gauges;
         std::map<std::string, std::shared_ptr<MetricHistogram>> histograms;
         std::map<std::string, std::function<double()>> callbacks;
     };
-    Family& family_of(const std::string& name, Kind kind, const std::string& help);  // 须持锁
+    Family& family_of(const std::string& name, Kind kind, const std::string& help);  // lock must be held
 
     mutable std::mutex m_;
     std::map<std::string, Family> families_;
 };
 
-// 后端视角的注册句柄：携带注册表 + 基础标签（backend=<name>），后端内部再按需
-// 追加维度标签（op/code 等）。默认构造为空 scope——返回未注册的孤立实例，
-// 调用无害，测试直构后端无需装配 metrics
+// Registration handle from the backend's point of view: carries the registry plus
+// base labels (backend=<name>); the backend appends dimension labels (op/code etc.)
+// as needed. Default construction gives an empty scope — it returns unregistered,
+// isolated instances, calls are harmless, and tests constructing backends directly
+// need not wire up metrics
 class MetricsScope {
 public:
     MetricsScope() = default;
@@ -133,7 +146,7 @@ public:
     void gauge_callback(const std::string& name, const std::string& help,
                         std::function<double()> fn, const MetricLabels& extra = {}) const;
 
-    // 派生子 scope（如 meta/data 子件维度）：基础标签追加 extra
+    // Derive a child scope (e.g. the meta/data subcomponent dimension): base labels with extra appended
     MetricsScope with(const MetricLabels& extra) const;
 
     explicit operator bool() const { return reg_ != nullptr; }

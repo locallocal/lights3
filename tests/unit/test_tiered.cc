@@ -1,6 +1,6 @@
-// 分层存储后端单测（docs/tiered-storage.md §10 P1–P4 验收）：
-// 一致性套件、tier 状态机、覆盖/删除入 GC、scanner 判冷与崩溃恢复、空间兜底。
-// 云侧用 MemoryBackend 充当（经计数包装断言云端调用次数）。
+// Tiered storage backend unit tests (docs/tiered-storage.md §10 P1-P4 acceptance):
+// consistency suite, tier state machine, overwrite/delete entering GC, scanner cold detection and crash recovery, space fallback.
+// The cloud side is played by MemoryBackend (wrapped with counters to assert the number of cloud calls).
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -39,8 +39,8 @@ PutResult put(IStorageBackend& b, const std::string& bkt, const std::string& key
 
 using TmpDir = backend_suite::TmpDir;
 
-// 计数包装：断言 tiered 何时真正触碰云端；fail_cloud 模拟云端不可达（GC 退避/
-// 对账失败路径注入）
+// Counting wrapper: asserts when tiered actually touches the cloud; fail_cloud simulates an unreachable cloud (injection for the
+// GC backoff / reconciliation failure paths)
 class CountingCloud final : public IStorageBackend {
 public:
     std::shared_ptr<MemoryBackend> inner = std::make_shared<MemoryBackend>();
@@ -124,7 +124,7 @@ struct Fixture {
     std::shared_ptr<TieredBackend> tiered;
 
     explicit Fixture(TieredConfig cfg = {}) {
-        cfg.scan_interval_sec = 0;  // 关闭后台定时任务，用手动钩子驱动
+        cfg.scan_interval_sec = 0;  // disable the background periodic task, drive via the manual hook
         local = std::make_shared<LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
         tiered = std::make_shared<TieredBackend>(local, cloud, pool, cfg);
     }
@@ -161,32 +161,32 @@ std::string make_data(size_t n) {
 
 }  // namespace
 
-// 状态机：local → remote（下沉）→ cached（GET 回迁）→ remote（二次判冷零上传）
+// State machine: local -> remote (demotion) -> cached (GET promotion) -> remote (second cold pass with zero upload)
 TEST(tiered_demote_get_cache_cycle) {
     Fixture f;
     std::string data = make_data(200 * 1024);
     sync_wait(f.tiered->create_bucket("bkt"));
     auto pr = put(*f.tiered, "bkt", "dir/cold.bin", data);
 
-    // 下沉：本地变 0 长度 stub，sidecar tier=remote，云端恰好一份
+    // Demotion: local becomes a 0-length stub, sidecar tier=remote, exactly one copy in the cloud
     sync_wait(f.tiered->demote_object("bkt", "dir/cold.bin"));
     CHECK_EQ(f.disk_size("bkt", "dir/cold.bin"), uint64_t(0));
     CHECK(f.tier_of("bkt", "dir/cold.bin").tier == fsutil::Tier::kRemote);
     CHECK_EQ(f.cloud->puts.load(), 1);
 
-    // HEAD 完全本地完成：size/etag 为原始值，不触碰云端
+    // HEAD completes fully locally: size/etag are the original values, cloud untouched
     int heads_before = f.cloud->heads.load();
     auto hm = sync_wait(f.tiered->head_object("bkt", "dir/cold.bin"));
     CHECK_EQ(hm.size, uint64_t(data.size()));
     CHECK_EQ(hm.etag, pr.etag);
     CHECK_EQ(f.cloud->heads.load(), heads_before);
 
-    // List 识别 stub 的 size
+    // List recognizes the stub's size
     auto lr = sync_wait(f.tiered->list_objects("bkt", {}));
     CHECK_EQ(lr.objects.size(), size_t(1));
     CHECK_EQ(lr.objects[0].size, uint64_t(data.size()));
 
-    // 透明回读：数据/ETag 与下沉前一致；EOF 后 Tee 缓存提交为 cached
+    // Transparent read-back: data/ETag identical to before demotion; after EOF the Tee cache commits as cached
     auto got = sync_wait(f.tiered->get_object("bkt", "dir/cold.bin", std::nullopt));
     CHECK_EQ(got.meta.etag, pr.etag);
     CHECK(read_all(*got.body) == data);
@@ -194,19 +194,19 @@ TEST(tiered_demote_get_cache_cycle) {
     CHECK(f.tier_of("bkt", "dir/cold.bin").tier == fsutil::Tier::kCached);
     CHECK_EQ(f.disk_size("bkt", "dir/cold.bin"), uint64_t(data.size()));
 
-    // cached 命中本地，不再触碰云端
+    // cached hits locally, cloud no longer touched
     auto again = sync_wait(f.tiered->get_object("bkt", "dir/cold.bin", std::nullopt));
     CHECK(read_all(*again.body) == data);
     CHECK_EQ(f.cloud->gets.load(), 1);
 
-    // cached 再判冷：校验云副本后直接 stub 化，零上传流量
+    // cached judged cold again: after verifying the cloud copy, stub directly with zero upload traffic
     sync_wait(f.tiered->demote_object("bkt", "dir/cold.bin"));
     CHECK(f.tier_of("bkt", "dir/cold.bin").tier == fsutil::Tier::kRemote);
     CHECK_EQ(f.disk_size("bkt", "dir/cold.bin"), uint64_t(0));
     CHECK_EQ(f.cloud->puts.load(), 1);
 }
 
-// Range GET 命中 remote：直接透传云端，不产生部分缓存
+// Range GET hitting remote: passed straight through from the cloud, no partial cache is created
 TEST(tiered_range_get_passthrough) {
     TieredConfig cfg;
     cfg.cache_fill_on_range = false;
@@ -220,18 +220,18 @@ TEST(tiered_range_get_passthrough) {
                                               ByteRange{uint64_t(1000), uint64_t(2999)}));
     CHECK(read_all(*mid.body) == data.substr(1000, 2000));
     CHECK(mid.range.has_value());
-    CHECK_EQ(mid.meta.size, uint64_t(data.size()));  // 206 的总长取本地 meta
+    CHECK_EQ(mid.meta.size, uint64_t(data.size()));  // the 206 total length comes from local meta
     CHECK(f.tier_of("bkt", "r.bin").tier == fsutil::Tier::kRemote);
     CHECK_EQ(f.disk_size("bkt", "r.bin"), uint64_t(0));
 
-    // 手动整对象回迁（Range 后台回迁走同一路径）
+    // Manual whole-object promotion (background promotion after Range takes the same path)
     sync_wait(f.tiered->promote_object("bkt", "r.bin"));
     CHECK(f.tier_of("bkt", "r.bin").tier == fsutil::Tier::kCached);
     auto whole = sync_wait(f.tiered->get_object("bkt", "r.bin", std::nullopt));
     CHECK(read_all(*whole.body) == data);
 }
 
-// multipart 对象（etag 带 -N）：下沉按字节数校验，回读后 ETag 恒为 -N 形式
+// multipart object (etag with -N): demotion verifies by byte count, ETag stays in -N form after read-back
 TEST(tiered_multipart_object_demote) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -247,15 +247,15 @@ TEST(tiered_multipart_object_demote) {
     sync_wait(f.tiered->demote_object("bkt", "mp.bin"));
     auto t = f.tier_of("bkt", "mp.bin");
     CHECK(t.tier == fsutil::Tier::kRemote);
-    CHECK(t.remote_etag != cr.etag);  // 云端 etag 独立记录，不外泄
+    CHECK(t.remote_etag != cr.etag);  // the cloud etag is recorded separately, never leaks out
 
     auto got = sync_wait(f.tiered->get_object("bkt", "mp.bin", std::nullopt));
-    CHECK_EQ(got.meta.etag, cr.etag);  // 对外 ETag 恒等原则
+    CHECK_EQ(got.meta.etag, cr.etag);  // externally the ETag is invariant
     CHECK(read_all(*got.body) == p1 + p2);
     CHECK(f.tier_of("bkt", "mp.bin").tier == fsutil::Tier::kCached);
 }
 
-// PUT 覆盖 remote：tier 回 local，旧云副本入 GC 并被异步删除
+// PUT overwriting remote: tier returns to local, the old cloud copy enters GC and is deleted asynchronously
 TEST(tiered_overwrite_and_delete_gc) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -263,7 +263,7 @@ TEST(tiered_overwrite_and_delete_gc) {
     sync_wait(f.tiered->demote_object("bkt", "o.bin"));
     CHECK_EQ(f.gc_entries(), size_t(0));
 
-    // PUT 覆盖：写回本地，云副本成孤儿
+    // PUT overwrite: written back locally, the cloud copy becomes an orphan
     std::string v2 = make_data(32 * 1024);
     put(*f.tiered, "bkt", "o.bin", v2);
     CHECK(f.tier_of("bkt", "o.bin").tier == fsutil::Tier::kLocal);
@@ -271,9 +271,9 @@ TEST(tiered_overwrite_and_delete_gc) {
     sync_wait(f.tiered->run_gc_once());
     CHECK_EQ(f.gc_entries(), size_t(0));
     CHECK_THROWS_S3(sync_wait(f.cloud->inner->get_object("bkt", "o.bin", std::nullopt)),
-                    s3::S3ErrorCode::NoSuchKey);  // 孤儿已删
+                    s3::S3ErrorCode::NoSuchKey);  // orphan deleted
 
-    // DELETE remote：本地立即删（不等云端），云副本经 GC 删除
+    // DELETE remote: local deleted immediately (without waiting for the cloud), the cloud copy is deleted via GC
     sync_wait(f.tiered->demote_object("bkt", "o.bin"));
     sync_wait(f.tiered->delete_object("bkt", "o.bin"));
     CHECK(!fs::exists(f.data_path("bkt", "o.bin")));
@@ -284,38 +284,38 @@ TEST(tiered_overwrite_and_delete_gc) {
                     s3::S3ErrorCode::NoSuchKey);
 }
 
-// GC 绝不删活副本：同 key 重新下沉后，旧的过期条目直接作废
+// GC never deletes a live copy: after the same key is demoted again, the old expired entry is simply voided
 TEST(tiered_gc_never_deletes_live_copy) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
     std::string data = make_data(16 * 1024);
     put(*f.tiered, "bkt", "live.bin", data);
     sync_wait(f.tiered->demote_object("bkt", "live.bin"));
-    put(*f.tiered, "bkt", "live.bin", data);  // 覆盖（同内容）→ 旧副本入 GC
+    put(*f.tiered, "bkt", "live.bin", data);  // overwrite (same content) -> old copy enters GC
     CHECK_EQ(f.gc_entries(), size_t(1));
-    sync_wait(f.tiered->demote_object("bkt", "live.bin"));  // 再下沉：云端又是活副本
+    sync_wait(f.tiered->demote_object("bkt", "live.bin"));  // demote again: the cloud copy is live again
 
     sync_wait(f.tiered->run_gc_once());
     CHECK_EQ(f.gc_entries(), size_t(0));
-    // 活副本未被误删，对象仍可读
+    // The live copy was not deleted by mistake, the object is still readable
     auto got = sync_wait(f.tiered->get_object("bkt", "live.bin", std::nullopt));
     CHECK(read_all(*got.body) == data);
 }
 
-// GC 云端不可达：条目指数退避（attempts/retry_at 持久化在 TSV，重启不清零），
-// 到点后恢复变现（todo §3.4；docs/tiered-storage.md §9）
+// GC with the cloud unreachable: entries back off exponentially (attempts/retry_at persisted in the TSV, not reset on restart),
+// and resume liquidation once due (todo §3.4; docs/tiered-storage.md §9)
 TEST(tiered_gc_retry_exponential_backoff) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
     put(*f.tiered, "bkt", "g.bin", make_data(8 * 1024));
     sync_wait(f.tiered->demote_object("bkt", "g.bin"));
-    sync_wait(f.tiered->delete_object("bkt", "g.bin"));  // 云副本入 GC
+    sync_wait(f.tiered->delete_object("bkt", "g.bin"));  // cloud copy enters GC
     CHECK_EQ(f.gc_entries(), size_t(1));
 
     f.cloud->fail_cloud = true;
     auto st1 = sync_wait(f.tiered->run_gc_once());
     CHECK_EQ(st1.failed, uint64_t(1));
-    CHECK_EQ(f.gc_entries(), size_t(1));  // 条目保留
+    CHECK_EQ(f.gc_entries(), size_t(1));  // entry retained
 
     fs::path entry;
     for (auto& e : fs::directory_iterator(f.tmp.path / "staging/tier/gc")) entry = e.path();
@@ -330,13 +330,13 @@ TEST(tiered_gc_retry_exponential_backoff) {
     int64_t ra1 = std::stoll(kv1["retry_at"]);
     CHECK(ra1 - now >= 50 && ra1 - now <= 70);  // base=60s
 
-    // 未到点：本轮跳过，云端零访问
+    // Not due yet: skipped this round, zero cloud accesses
     int heads_before = f.cloud->heads.load();
     auto st2 = sync_wait(f.tiered->run_gc_once());
     CHECK_EQ(st2.deferred, uint64_t(1));
     CHECK_EQ(f.cloud->heads.load(), heads_before);
 
-    // 手动拨回到点（模拟退避窗口过去）、仍失败 → attempts=2、退避翻倍（≈120s）
+    // Manually dial the clock past the due point (simulating the backoff window elapsing), still failing -> attempts=2, backoff doubles (~=120s)
     auto rewind = [&] {
         auto kv = read_entry();
         std::ofstream out(entry, std::ios::trunc);
@@ -352,7 +352,7 @@ TEST(tiered_gc_retry_exponential_backoff) {
     int64_t ra2 = std::stoll(kv2["retry_at"]);
     CHECK(ra2 - now >= 110 && ra2 - now <= 130);
 
-    // 云端恢复 + 到点 → 变现收敛
+    // Cloud recovers + due -> liquidation converges
     f.cloud->fail_cloud = false;
     rewind();
     auto st4 = sync_wait(f.tiered->run_gc_once());
@@ -361,8 +361,8 @@ TEST(tiered_gc_retry_exponential_backoff) {
     CHECK_EQ(f.gc_entries(), size_t(0));
 }
 
-// 对账正向（docs/tiered-storage.md §9）：人为误删的 stub 从 lights3-* 冗余头重建；
-// 无冗余头的外来对象跳过不动
+// Reconciliation forward direction (docs/tiered-storage.md §9): a manually mis-deleted stub is rebuilt from the lights3-* redundant headers;
+// foreign objects without the redundant headers are skipped untouched
 TEST(tiered_reconcile_rebuilds_lost_stub) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -374,10 +374,10 @@ TEST(tiered_reconcile_rebuilds_lost_stub) {
     auto orig = sync_wait(f.tiered->head_object("bkt", "dir/lost.bin"));
     sync_wait(f.tiered->demote_object("bkt", "dir/lost.bin"));
 
-    // 人为误删本地 stub + sidecar（§9 故障行）
+    // Manually mis-delete the local stub + sidecar (the failure row of §9)
     fs::remove(f.data_path("bkt", "dir/lost.bin"));
     fs::remove(fs::path(f.data_path("bkt", "dir/lost.bin").string() + fsutil::kSidecarSuffix));
-    // 外来对象：直接写进云端 bucket，无 lights3 冗余头
+    // Foreign object: written directly into the cloud bucket, no lights3 redundant headers
     {
         http::StringBodyReader b2("foreign");
         sync_wait(f.cloud->inner->put_object("bkt", "foreign.bin", {}, b2));
@@ -390,7 +390,7 @@ TEST(tiered_reconcile_rebuilds_lost_stub) {
     CHECK_EQ(st.orphans_deleted, uint64_t(0));
     CHECK_EQ(st.refs_missing, uint64_t(0));
 
-    // 重建的 stub：meta 完整还原，走云端可读
+    // The rebuilt stub: meta fully restored, readable via the cloud
     CHECK(f.tier_of("bkt", "dir/lost.bin").tier == fsutil::Tier::kRemote);
     auto m = sync_wait(f.tiered->head_object("bkt", "dir/lost.bin"));
     CHECK_EQ(m.etag, orig.etag);
@@ -400,16 +400,16 @@ TEST(tiered_reconcile_rebuilds_lost_stub) {
     auto got = sync_wait(f.tiered->get_object("bkt", "dir/lost.bin", std::nullopt));
     CHECK(read_all(*got.body) == data);
     got.body.reset();
-    // 外来对象原样保留，且未生成本地对象
+    // The foreign object is preserved as is, and no local object was created
     CHECK_EQ(sync_wait(f.cloud->inner->head_object("bkt", "foreign.bin")).size, uint64_t(7));
     CHECK_THROWS_S3(sync_wait(f.tiered->head_object("bkt", "foreign.bin")),
                     s3::S3ErrorCode::NoSuchKey);
-    // 收敛：再跑一轮无重建
+    // Convergence: another round rebuilds nothing
     auto st2 = sync_wait(f.tiered->run_reconcile_once());
     CHECK_EQ(st2.stubs_rebuilt, uint64_t(0));
 }
 
-// 对账删除模式 + GC 待删不复活 + 本地 local 级陈旧副本清理（§9）
+// Reconciliation delete mode + GC pending entries do not resurrect + cleanup of stale cloud copies for local-tier objects (§9)
 TEST(tiered_reconcile_delete_mode_and_stale_copy) {
     TieredConfig cfg;
     cfg.reconcile_delete_orphans = true;
@@ -418,16 +418,16 @@ TEST(tiered_reconcile_delete_mode_and_stale_copy) {
     std::string data = make_data(4 * 1024);
     put(*f.tiered, "bkt", "o.bin", data);
     sync_wait(f.tiered->demote_object("bkt", "o.bin"));
-    sync_wait(f.tiered->delete_object("bkt", "o.bin"));  // GC 排队，云副本暂在
+    sync_wait(f.tiered->delete_object("bkt", "o.bin"));  // GC queued, cloud copy still present for now
     CHECK_EQ(f.gc_entries(), size_t(1));
 
-    // GC 待删条目在 → 对账既不重建也不删（防复活刚 DELETE 的对象），等 GC 变现
+    // A pending GC entry exists -> reconciliation neither rebuilds nor deletes (prevents resurrecting a just-DELETEd object), waits for GC to liquidate
     auto st1 = sync_wait(f.tiered->run_reconcile_once());
     CHECK_EQ(st1.cloud_objects, uint64_t(1));
     CHECK_EQ(st1.stubs_rebuilt + st1.orphans_deleted, uint64_t(0));
     sync_wait(f.tiered->run_gc_once());
 
-    // 纯孤儿（无 GC 条目）：delete 模式下即便带 lights3 头也删除
+    // A pure orphan (no GC entry): in delete mode it is deleted even with lights3 headers
     {
         http::StringBodyReader b2("orphan");
         ObjectMeta om;
@@ -439,35 +439,35 @@ TEST(tiered_reconcile_delete_mode_and_stale_copy) {
     CHECK_THROWS_S3(sync_wait(f.cloud->inner->head_object("bkt", "orphan.bin")),
                     s3::S3ErrorCode::NoSuchKey);
 
-    // 本地已回到 local 的陈旧云副本（GC 丢单形态）：删除恒安全（本地全量在手）
+    // A stale cloud copy whose local object is back to local (the GC lost-entry shape): deletion is always safe (local holds the full data)
     put(*f.tiered, "bkt", "s.bin", data);
     sync_wait(f.tiered->demote_object("bkt", "s.bin"));
-    put(*f.tiered, "bkt", "s.bin", make_data(2 * 1024));  // 覆盖 → 旧副本入 GC
+    put(*f.tiered, "bkt", "s.bin", make_data(2 * 1024));  // overwrite -> old copy enters GC
     for (auto& e : fs::directory_iterator(f.tmp.path / "staging/tier/gc"))
-        fs::remove(e.path());  // 模拟 GC 丢单
+        fs::remove(e.path());  // simulate a lost GC entry
     auto st3 = sync_wait(f.tiered->run_reconcile_once());
     CHECK_EQ(st3.orphans_deleted, uint64_t(1));
-    CHECK(f.tier_of("bkt", "s.bin").tier == fsutil::Tier::kLocal);  // 本地不动
+    CHECK(f.tier_of("bkt", "s.bin").tier == fsutil::Tier::kLocal);  // local untouched
     auto got = sync_wait(f.tiered->get_object("bkt", "s.bin", std::nullopt));
     CHECK(read_all(*got.body) == make_data(2 * 1024));
 }
 
-// 对账反向（§9）：本地 remote、云端无 → 告警计数，绝不删 stub
+// Reconciliation reverse direction (§9): local remote, nothing in the cloud -> alarm counter, never delete the stub
 TEST(tiered_reconcile_reverse_alarm_keeps_stub) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
     put(*f.tiered, "bkt", "r.bin", make_data(4 * 1024));
     sync_wait(f.tiered->demote_object("bkt", "r.bin"));
-    sync_wait(f.cloud->inner->delete_object("bkt", "r.bin"));  // 越过 GC 删云副本
+    sync_wait(f.cloud->inner->delete_object("bkt", "r.bin"));  // delete the cloud copy bypassing GC
 
     auto st = sync_wait(f.tiered->run_reconcile_once());
     CHECK_EQ(st.refs_missing, uint64_t(1));
-    CHECK(f.tier_of("bkt", "r.bin").tier == fsutil::Tier::kRemote);  // stub 保留
+    CHECK(f.tier_of("bkt", "r.bin").tier == fsutil::Tier::kRemote);  // stub retained
     auto lr = sync_wait(f.tiered->list_objects("bkt", {}));
-    CHECK_EQ(lr.objects.size(), size_t(1));  // 供人工介入
+    CHECK_EQ(lr.objects.size(), size_t(1));  // for manual intervention
 }
 
-// 对账/退避配置解析：合法参数落 config；非法 reconcile_orphans / gc_retry 范围报错
+// Reconciliation/backoff config parsing: valid parameters land in config; invalid reconcile_orphans / gc_retry ranges error out
 TEST(tiered_reconcile_config_validation) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -506,7 +506,7 @@ TEST(tiered_reconcile_config_validation) {
     }
 }
 
-// scanner：cold_after=0 全量判冷下沉；崩溃恢复（remote 但数据未回收）补做 stub 化
+// scanner: cold_after=0 demotes everything as cold; crash recovery (remote but data not reclaimed) finishes the stub conversion
 TEST(tiered_scanner_cold_and_crash_recovery) {
     TieredConfig cfg;
     cfg.cold_after_sec = 0;
@@ -521,8 +521,8 @@ TEST(tiered_scanner_cold_and_crash_recovery) {
     CHECK(f.tier_of("bkt", "b/y.bin").tier == fsutil::Tier::kRemote);
     CHECK_EQ(f.cloud->puts.load(), 2);
 
-    // 模拟 §5.2 b/c 之间崩溃：GET 回迁成 cached 后，把 sidecar 手动改回 remote
-    //（等价于 sidecar 已提交 remote、数据文件还是全量的状态）
+    // Simulate a crash between §5.2 b/c: after a GET promotes to cached, manually flip the sidecar back to remote
+    // (equivalent to the state where the sidecar committed remote but the data file is still full)
     auto got = sync_wait(f.tiered->get_object("bkt", "a/x.bin", std::nullopt));
     CHECK(read_all(*got.body) == d1);
     CHECK(f.tier_of("bkt", "a/x.bin").tier == fsutil::Tier::kCached);
@@ -541,20 +541,20 @@ TEST(tiered_scanner_cold_and_crash_recovery) {
     }
     CHECK(f.disk_size("bkt", "a/x.bin") > 0);
 
-    sync_wait(f.tiered->scan_once());  // 特征"remote 但 stat size>0" → 补回收
+    sync_wait(f.tiered->scan_once());  // signature "remote but stat size>0" -> finish the reclamation
     CHECK_EQ(f.disk_size("bkt", "a/x.bin"), uint64_t(0));
     CHECK(f.tier_of("bkt", "a/x.bin").tier == fsutil::Tier::kRemote);
-    CHECK_EQ(f.cloud->puts.load(), 2);  // 恢复不重传
+    CHECK_EQ(f.cloud->puts.load(), 2);  // recovery does not re-upload
 
-    // 数据仍可读（云端为准）
+    // Data still readable (cloud is authoritative)
     auto again = sync_wait(f.tiered->get_object("bkt", "a/x.bin", std::nullopt));
     CHECK(read_all(*again.body) == d1);
 }
 
-// 空间兜底（需求 3）：余量不足时 GET 纯透传，不缓存、不失败
+// Space fallback (requirement 3): with insufficient headroom, GET is pure passthrough -- no caching, no failure
 TEST(tiered_space_fallback_passthrough) {
     TieredConfig cfg;
-    cfg.min_free_bytes = ~uint64_t(0) / 2;  // 永远"空间不足"
+    cfg.min_free_bytes = ~uint64_t(0) / 2;  // permanently "out of space"
     Fixture f(cfg);
     std::string data = make_data(80 * 1024);
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -562,26 +562,26 @@ TEST(tiered_space_fallback_passthrough) {
     sync_wait(f.tiered->demote_object("bkt", "p.bin"));
 
     auto got = sync_wait(f.tiered->get_object("bkt", "p.bin", std::nullopt));
-    CHECK(read_all(*got.body) == data);  // 读路径不因缓存失败而失败
-    CHECK(f.tier_of("bkt", "p.bin").tier == fsutil::Tier::kRemote);  // 未缓存
+    CHECK(read_all(*got.body) == data);  // the read path does not fail because caching failed
+    CHECK(f.tier_of("bkt", "p.bin").tier == fsutil::Tier::kRemote);  // not cached
     CHECK_EQ(f.disk_size("bkt", "p.bin"), uint64_t(0));
 
-    // 回迁同样放弃，但对象保持可读
+    // Promotion likewise gives up, but the object stays readable
     sync_wait(f.tiered->promote_object("bkt", "p.bin"));
     CHECK(f.tier_of("bkt", "p.bin").tier == fsutil::Tier::kRemote);
 }
 
-// quota 水位回收：先 cached（零上传）再 local，降到低水位即停
+// Quota watermark reclamation: cached first (zero upload) then local, stops once below the low watermark
 TEST(tiered_quota_watermark_eviction) {
     TieredConfig cfg;
-    cfg.cold_after_sec = 1 << 30;      // 判冷不触发，只测水位
-    cfg.quota_bytes = 100 * 1024;      // 高水位 85KiB，低水位 70KiB
+    cfg.cold_after_sec = 1 << 30;      // cold detection never triggers, testing watermarks only
+    cfg.quota_bytes = 100 * 1024;      // high watermark 85KiB, low watermark 70KiB
     Fixture f(cfg);
     sync_wait(f.tiered->create_bucket("bkt"));
     std::string a = make_data(40 * 1024), b = make_data(50 * 1024);
     put(*f.tiered, "bkt", "hot.bin", a);   // 40K local
-    put(*f.tiered, "bkt", "warm.bin", b);  // 50K local → 合计 90K > 85K
-    // 先把 warm 变 cached：下沉后读回（此时 warm atime 最新）
+    put(*f.tiered, "bkt", "warm.bin", b);  // 50K local -> 90K total > 85K
+    // First turn warm into cached: demote then read back (warm's atime is now the freshest)
     sync_wait(f.tiered->demote_object("bkt", "warm.bin"));
     auto got = sync_wait(f.tiered->get_object("bkt", "warm.bin", std::nullopt));
     CHECK(read_all(*got.body) == b);
@@ -589,13 +589,13 @@ TEST(tiered_quota_watermark_eviction) {
 
     int puts_before = f.cloud->puts.load();
     sync_wait(f.tiered->scan_once());
-    // 90K→85K 超限，需回收到 70K：cached 的 warm(50K) 首选牺牲，回收后 40K 达标
+    // 90K->85K exceeded, must reclaim down to 70K: cached warm (50K) is the preferred victim; after reclaiming, 40K passes
     CHECK(f.tier_of("bkt", "warm.bin").tier == fsutil::Tier::kRemote);
-    CHECK(f.tier_of("bkt", "hot.bin").tier == fsutil::Tier::kLocal);  // local 无需上传
-    CHECK_EQ(f.cloud->puts.load(), puts_before);  // 零上传流量
+    CHECK(f.tier_of("bkt", "hot.bin").tier == fsutil::Tier::kLocal);  // local needs no upload
+    CHECK_EQ(f.cloud->puts.load(), puts_before);  // zero upload traffic
 }
 
-// registry 两阶段构建：tiered 引用叶子后端；循环/未知引用与非法 local 报错
+// Two-phase registry construction: tiered references leaf backends; cycles/unknown references and an invalid local error out
 TEST(tiered_registry_two_phase_build) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -616,8 +616,8 @@ TEST(tiered_registry_two_phase_build) {
           tiered->config().space_high_watermark < 0.86);
     sync_wait(tiered->close());
 
-    // 水位解析（gaps §3.9）："1%" 是 1%——旧实现丢弃 "%" 后 1.0 不触发 /100，
-    // 被解析成 100%，(used-low) 转负回绕后把整个桶全部下沉
+    // Watermark parsing (gaps §3.9): "1%" means 1% -- the old implementation dropped the "%" and then 1.0 skipped the /100,
+    // parsing as 100%; (used-low) went negative, wrapped around, and demoted the entire bucket
     std::vector<BackendConfig> pct = cfgs;
     pct[2].params["space_high_watermark"] = "5%";
     pct[2].params["space_low_watermark"] = "1%";
@@ -628,7 +628,7 @@ TEST(tiered_registry_two_phase_build) {
           t2->config().space_high_watermark < 0.051);
     sync_wait(t2->close());
 
-    // 越界值在启动期报错，而不是运行期回绕
+    // Out-of-range values error at startup instead of wrapping at runtime
     std::vector<BackendConfig> oob = cfgs;
     oob[2].params["space_high_watermark"] = "150%";
     bool oob_threw = false;
@@ -639,7 +639,7 @@ TEST(tiered_registry_two_phase_build) {
     }
     CHECK(oob_threw);
 
-    // 未知引用
+    // Unknown reference
     std::vector<BackendConfig> bad1 = {
         {"t", "tiered", {{"local", "nope"}, {"cloud", "mem"}}}};
     bool threw = false;
@@ -650,7 +650,7 @@ TEST(tiered_registry_two_phase_build) {
     }
     CHECK(threw);
 
-    // local 必须为 localfs 系
+    // local must be of the localfs family
     std::vector<BackendConfig> bad2 = {
         {"mem", "memory", {}},
         {"mem2", "memory", {}},
@@ -663,7 +663,7 @@ TEST(tiered_registry_two_phase_build) {
     }
     CHECK(threw);
 
-    // tiered 互相引用（循环）
+    // tiered referencing each other (a cycle)
     std::vector<BackendConfig> bad3 = {
         {"a", "tiered", {{"local", "b"}, {"cloud", "b"}}},
         {"b", "tiered", {{"local", "a"}, {"cloud", "a"}}}};
@@ -676,9 +676,9 @@ TEST(tiered_registry_two_phase_build) {
     CHECK(threw);
 }
 
-// per-backend 独立 IO 池（docs/concurrency.md §3.1）：io_threads 参数为该后端建专属池
-// （任意 type 通用键），池观测指标挂 backend 标签；未配置的后端共享全局池
-// （无该指标）；非法值配置期报错
+// Per-backend dedicated IO pool (docs/concurrency.md §3.1): the io_threads parameter builds a dedicated pool for that backend
+// (a generic key for any type), pool observability metrics carry the backend label; backends without it share the global pool
+// (no such metric); invalid values error at configuration time
 TEST(registry_per_backend_thread_pool) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -692,7 +692,7 @@ TEST(registry_per_backend_thread_pool) {
     auto out = StorageRegistry::build(cfgs, pool, metrics);
     CHECK_EQ(out.size(), size_t(2));
 
-    // 冒烟：专属池后端正常读写（IO 全走专属池）
+    // Smoke: the dedicated-pool backend reads and writes normally (all IO goes through the dedicated pool)
     auto& fast = *out.at("fast");
     sync_wait(fast.create_bucket("bkt"));
     backend_suite::put(fast, "bkt", "k", "hello dedicated pool");
@@ -704,11 +704,11 @@ TEST(registry_per_backend_thread_pool) {
     CHECK(text.find("lights3_backend_pool_queue_depth{backend=\"fast\"}") !=
           std::string::npos);
     CHECK(text.find("lights3_backend_pool_completed{backend=\"fast\"}") != std::string::npos);
-    // 共享池后端无**池**指标（memory 后端自身的用量 gauge 不在此列）
+    // The shared-pool backend has no **pool** metrics (the memory backend's own usage gauge is not among these)
     CHECK(text.find("lights3_backend_pool_threads{backend=\"mem\"}") == std::string::npos);
     CHECK(text.find("lights3_memory_backend_used_bytes{backend=\"mem\"}") != std::string::npos);
 
-    // 非法 io_threads：非整数 / 0 都在构建期报错（fail fast）
+    // Invalid io_threads: non-integer / 0 both error at build time (fail fast)
     for (const char* bad : {"0", "many"}) {
         std::vector<BackendConfig> bc = {{"m", "memory", {{"io_threads", bad}}}};
         bool t = false;
@@ -721,24 +721,24 @@ TEST(registry_per_backend_thread_pool) {
     }
 }
 
-// quota 增量维护（docs/gaps.md §6.3）：PUT 就地累计估算并在超水位时提前踢一轮
-// scan——此前两轮 scan 之间（默认 1 小时）的配额超限完全不可见
+// Incremental quota maintenance (docs/gaps.md §6.3): PUT accumulates the estimate in place and kicks an early scan round when
+// over the watermark -- previously a quota breach between two scans (default 1 hour) was completely invisible
 TEST(tiered_quota_incremental_kicks_early_scan) {
     TieredConfig cfg;
     cfg.cold_after_sec = 1 << 30;
-    cfg.quota_bytes = 100 * 1024;  // 高水位 85KiB，低水位 70KiB
+    cfg.quota_bytes = 100 * 1024;  // high watermark 85KiB, low watermark 70KiB
     Fixture f(cfg);
     sync_wait(f.tiered->create_bucket("bkt"));
     put(*f.tiered, "bkt", "seed.bin", make_data(10 * 1024));
-    sync_wait(f.tiered->scan_once());  // 校准估算账（首轮前不记增量）
+    sync_wait(f.tiered->scan_once());  // calibrate the estimate ledger (no increments recorded before the first round)
 
-    // 三个 30K 的 PUT 把估算推过 85K；最后一个 PUT 应触发提前 scan（后台），
-    // 把冷端下沉到低水位以下
+    // Three 30K PUTs push the estimate past 85K; the last PUT should trigger an early scan (in the background)
+    // that demotes the cold end below the low watermark
     put(*f.tiered, "bkt", "a.bin", make_data(30 * 1024));
     put(*f.tiered, "bkt", "b.bin", make_data(30 * 1024));
     put(*f.tiered, "bkt", "c.bin", make_data(30 * 1024));
-    // 提前轮是后台协程：轮询等它把本地占用降下来（谁被下沉不作断言——
-    // atime 极近，选择是实现细节）
+    // The early round is a background coroutine: poll until it brings local usage down (no assertion on who gets demoted --
+    // atimes are extremely close, the choice is an implementation detail)
     bool converged = false;
     for (int i = 0; i < 100 && !converged; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -754,8 +754,8 @@ TEST(tiered_quota_incremental_kicks_early_scan) {
     CHECK(converged);
 }
 
-// bucket_router 构建期校验（docs/gaps.md §6.3）：坏 glob / 不可达规则在启动报错，
-// 否定规则生效
+// bucket_router build-time validation (docs/gaps.md §6.3): bad globs / unreachable rules error at startup,
+// negation rules take effect
 TEST(bucket_router_validation_and_negation) {
     auto mem1 = std::make_shared<MemoryBackend>();
     auto mem2 = std::make_shared<MemoryBackend>();
@@ -776,21 +776,21 @@ TEST(bucket_router_validation_and_negation) {
         return false;
     };
 
-    // 未闭合字符类；桶名不可能出现的字面字符（大写/下划线）——静默永不匹配的规则
+    // Unclosed character class; literal characters impossible in bucket names (uppercase/underscore) -- rules that silently never match
     CHECK(throws({{"log[a-z", "m2"}}));
     CHECK(throws({{"Logs-*", "m2"}}));
     CHECK(throws({{"my_bucket", "m2"}}));
-    // 不可达：catch-all 之后的规则；重复规则
+    // Unreachable: rules after a catch-all; duplicate rules
     CHECK(throws({{"*", "m2"}, {"logs-*", "m1"}}));
     CHECK(throws({{"logs-*", "m2"}, {"logs-*", "m1"}}));
 
-    // 正常路由 + 否定规则："!logs-*" = 除 logs-* 外全部
+    // Normal routing + negation rule: "!logs-*" = everything except logs-*
     auto r = build({{"logs-*", "m2"}});
     CHECK(&r.resolve("logs-app") == mem2.get());
     CHECK(&r.resolve("data") == mem1.get());
     auto rn = build({{"!logs-*", "m2"}});
     CHECK(&rn.resolve("data") == mem2.get());
     CHECK(&rn.resolve("logs-app") == mem1.get());
-    // 否定固定串自身是 catch-all，其后规则不可达
+    // A negated fixed string is itself a catch-all; rules after it are unreachable
     CHECK(throws({{"!onlyone", "m2"}, {"other-*", "m1"}}));
 }

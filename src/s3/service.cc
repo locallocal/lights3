@@ -31,7 +31,7 @@ std::string make_request_id() {
     return hex;
 }
 
-// x-amz-id-2 比 request id 长（AWS 是一串 base64）：这里同样用 hex，24 字节
+// x-amz-id-2 is longer than the request id (AWS uses a base64 string): hex here as well, 24 bytes
 std::string make_host_id() {
     uint8_t bytes[24];
     for (size_t i = 0; i < sizeof(bytes); i += 8) {
@@ -50,8 +50,8 @@ http::HttpResponse error_response(const S3Error& e, const RequestContext& ctx, b
     return resp;
 }
 
-// InternalError/SlowDown 的原始文案可能含上游 endpoint 等内部拓扑（cloudproxy
-// 传输错误直接拼 endpoint）：原文只进日志（经 request_id 关联），响应体固定文案
+// Raw InternalError/SlowDown text may contain internal topology such as upstream endpoints (cloudproxy
+// transport errors embed the endpoint directly): the original goes to the log only (correlated via request_id), the response body uses fixed wording
 S3Error public_error(const S3Error& e, const std::string& request_id,
                      const http::HttpRequest& req) {
     if (e.code == S3ErrorCode::InternalError) {
@@ -66,8 +66,8 @@ S3Error public_error(const S3Error& e, const std::string& request_id,
     return e;
 }
 
-// request_start/request_end 的 RAII 配对：请求协程被驱动提前销毁（客户端断连、
-// 关停）时也执行 request_end，inflight 计数不泄漏；该路径以 499 记入状态分布
+// RAII pairing of request_start/request_end: request_end also runs when the driver destroys the request
+// coroutine early (client disconnect, shutdown), so the inflight count does not leak; that path is recorded as 499 in the status distribution
 struct MetricsEndGuard {
     Metrics& m;
     std::string method;
@@ -86,9 +86,9 @@ struct MetricsEndGuard {
     }
 };
 
-// 字节计数装饰器（docs/gaps.md §7）：入向包在 checksum/解帧装饰器之外（计的是
-// handler 实际消费的 payload 字节），出向包在 stream_body 之外（计的是驱动实际
-// 拉走的字节——流式响应的写出发生在 dispatch 返回之后，只有装饰器能看到）
+// Byte-counting decorators (docs/gaps.md §7): inbound wraps outside the checksum/de-framing decorators
+// (counting the payload bytes the handler actually consumes); outbound wraps outside stream_body (counting the
+// bytes the driver actually pulls -- streaming responses are written after dispatch returns, and only a decorator can see them)
 class CountingBodyReader final : public http::BodyReader {
 public:
     CountingBodyReader(std::unique_ptr<http::BodyReader> inner, Metrics* m, std::string bucket,
@@ -110,7 +110,7 @@ private:
     bool inbound_;
 };
 
-// 明确不支持的子资源（docs/s3-protocol.md §1）：显式 501，避免落进 List/Get 兜底造成误答
+// Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",       "website",
     "lifecycle",   "tagging",      "cors",           "encryption",     "object-lock",
@@ -128,15 +128,15 @@ void reject_unsupported_subresource(const http::HttpRequest& req) {
                               "' is not implemented.");
 }
 
-// 明确不支持的**请求头**（docs/gaps.md §3.4）：SSE/SSE-C、tagging、object-lock、
-// ACL 授权类此前被静默吞掉——200 但语义未兑现，合规场景下客户端会据此认为对象
-// 已加密/已锁定。命中即 501；x-amz-acl 单独放行 private（即本实现的实际语义）
+// Explicitly unsupported **request headers** (docs/gaps.md §3.4): SSE/SSE-C, tagging, object-lock, and
+// ACL-grant classes used to be silently swallowed -- 200 with the semantics unfulfilled; in compliance scenarios
+// clients would conclude the object is encrypted/locked. A hit is 501; x-amz-acl alone admits private (this implementation's actual semantics)
 void reject_unsupported_headers(const http::HttpRequest& req) {
     constexpr std::string_view kPrefixes[] = {
-        "x-amz-server-side-encryption",  // SSE 与 SSE-C 全家（含 -customer-*、-aws-kms-*）
-        "x-amz-copy-source-server-side-encryption",  // 拷贝源侧的 SSE-C 三头
+        "x-amz-server-side-encryption",  // the whole SSE and SSE-C family (including -customer-*, -aws-kms-*)
+        "x-amz-copy-source-server-side-encryption",  // the three SSE-C headers on the copy source side
         "x-amz-object-lock-",                        // mode / retain-until-date / legal-hold
-        "x-amz-grant-",                              // ACL grant 五头，与 x-amz-acl 同类
+        "x-amz-grant-",                              // the five ACL grant headers, same class as x-amz-acl
     };
     constexpr std::string_view kExact[] = {
         "x-amz-tagging",
@@ -151,14 +151,14 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
                           "The request header '" + lk + "' is not implemented.");
         };
         if (lk == "x-amz-acl") {
-            // private = 本实现的唯一语义，接受；其余（public-read 等）静默接受
-            // 等于谎报"已公开授权"
+            // private = this implementation's only semantics, accepted; silently accepting the rest
+            // (public-read etc.) would falsely claim "publicly granted"
             if (!http::HeaderMap::ieq(v, "private")) refuse();
             continue;
         }
         if (lk == "x-amz-storage-class") {
-            // 同理（docs/gaps.md §5.2）：只有 STANDARD 一种存储类，收下 GLACIER
-            // 再原样回显等于替存储层撒谎——对象根本没进任何归档层
+            // Likewise (docs/gaps.md §5.2): STANDARD is the only storage class; accepting GLACIER and echoing
+            // it back would lie on behalf of the storage layer -- the object never entered any archive tier
             if (!http::HeaderMap::ieq(v, "STANDARD")) refuse();
             continue;
         }
@@ -169,13 +169,13 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
     }
 }
 
-// query 白名单（docs/gaps.md §3.5）：所有路由共同允许的 key——presigned 签名
-// 参数族 + SDK 溯源参数。key 区分大小写（与 SigV4 canonical query 一致）
+// Query allowlist (docs/gaps.md §3.5): keys permitted on all routes -- the presigned signature parameter
+// family + SDK tracing parameters. Keys are case-sensitive (consistent with the SigV4 canonical query)
 constexpr std::string_view kCommonQueryKeys[] = {
     "X-Amz-Algorithm",     "X-Amz-Credential", "X-Amz-Date",
     "X-Amz-Expires",       "X-Amz-Signature",  "X-Amz-SignedHeaders",
     "X-Amz-Security-Token", "X-Amz-Content-Sha256",
-    "x-id",  // aws-sdk-js v3 给每个操作附带的溯源参数，无语义
+    "x-id",  // tracing parameter aws-sdk-js v3 attaches to every operation, no semantics
 };
 
 bool word_in(std::string_view list, std::string_view w) {
@@ -214,13 +214,13 @@ S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) cons
     if (!base_domain_.empty()) {
         if (auto host = req.headers.get("Host")) {
             std::string h = *host;
-            // 域名大小写不敏感（RFC 4343）：不归一化则 Host: B.GW.EXAMPLE.COM
-            // 静默降级成 path-style，同一 URL 两种大小写指向不同资源，且 policy
-            // 判定的 bucket 输入被客户端控制
+            // Domain names are case-insensitive (RFC 4343): without normalization, Host: B.GW.EXAMPLE.COM
+            // silently degrades to path-style, the same URL in two cases points at different resources, and the
+            // bucket input to policy decisions is client-controlled
             for (char& c : h)
                 if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-            // 去端口：Host 可为 "name:port" 或 "[v6]:port"，IPv6 字面量内的 ':'
-            // 不是端口分隔符（rfind 会把 "[::1]" 截成 "[:"）
+            // Strip the port: Host may be "name:port" or "[v6]:port", and ':' inside an IPv6 literal is not a
+            // port separator (rfind would truncate "[::1]" to "[:")
             if (!h.empty() && h.front() == '[') {
                 if (auto rb = h.find(']'); rb != std::string::npos) h.resize(rb + 1);
             } else if (auto colon = h.rfind(':'); colon != std::string::npos) {
@@ -239,7 +239,7 @@ S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) cons
     return {std::move(bucket), std::move(key), /*vhost=*/false};
 }
 
-// ---------- 顶层入口 ----------
+// ---------- Top-level entry ----------
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     RequestContext ctx{make_request_id(), make_host_id(), req.cancel};
@@ -252,13 +252,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::string bucket, key;
     http::HttpResponse resp;
     try {
-        // 先解析寻址再分流内部端点（docs/gaps.md §3.8）：vhost 下 req.path 是 key，
-        // "/-/metrics" 可能是 mybucket 里的合法对象——按 path 精确比较会把
-        // GET 变成匿名 metrics、PUT 变成"200 但对象没写"的静默丢数据。
-        // 只有 path 寻址（非 vhost）下的 /-/ 前缀才进入内部分支
+        // Resolve addressing before steering to internal endpoints (docs/gaps.md §3.8): under vhost, req.path is
+        // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
+        // GET into anonymous metrics and a PUT into "200 but the object was never written" silent data loss.
+        // Only the /-/ prefix under path addressing (non-vhost) enters the internal branch
         auto addr = resolve_address(req);
         bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
-        // 读端点只认 GET/HEAD（探活器常用 HEAD）；此前 PUT /-/metrics 也回 200
+        // Read endpoints accept only GET/HEAD (probes commonly use HEAD); previously PUT /-/metrics also returned 200
         auto internal_get = [&](std::string_view ep) {
             if (req.path != ep) return false;
             if (req.method != "GET" && req.method != "HEAD")
@@ -271,45 +271,45 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.headers.set("Content-Type", "text/plain");
         } else if (internal && internal_get("/-/metrics")) {
             resp.small_body = metrics_.render(pool_stats_, admission_stats_, timer_stats_);
-            // 后端级注册表追加在 L2 请求指标之后
+            // The backend-level registry is appended after the L2 request metrics
             if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
         } else if (internal && internal_get("/-/readyz")) {
             resp = co_await readyz();
         } else if (internal && (req.path == "/-/admin/credentials" ||
                                 req.path.rfind("/-/admin/credentials/", 0) == 0)) {
-            // 边界必须落在 '/'：裸前缀匹配会把 /-/admin/credentialsXYZ 也放进管理面
+            // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
             resp = co_await admin_credentials(req, access_key);
         } else {
-            // 授权用验签时刻的 policy 快照（docs/gaps.md §3.7）：验签后回 store
-            // 二次查表的话，凭证被 sync/remove 删掉的竞态窗口里 policy 会整体
-            // 消失——readonly 凭证在窗口内变成不受限凭证。快照让在途请求严格
-            // 按验签时的语义完成
+            // Authorization uses the verify-time policy snapshot (docs/gaps.md §3.7): with a second store lookup
+            // after verification, the policy would vanish entirely in the race window where sync/remove deletes
+            // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
+            // in-flight requests complete strictly with verify-time semantics
             auto ident = auth_.verify(req);
             access_key = ident.access_key;
-            // Content-MD5 / x-amz-checksum-*（docs/gaps.md §5.6）：装在 verify 之后，
-            // 于是包在 sha256/aws-chunked 装饰器之外——摘要按解帧后的明文计算，
-            // 与客户端算的是同一份字节。与签名无关，认证关闭时同样生效
+            // Content-MD5 / x-amz-checksum-* (docs/gaps.md §5.6): installed after verify, hence wrapping outside
+            // the sha256/aws-chunked decorators -- digests are computed over the de-framed plaintext, the same
+            // bytes the client computed over. Independent of the signature; also effective with auth disabled
             install_checksum_guard(req);
             bucket = std::move(addr.bucket);
             key = std::move(addr.key);
-            // 入向字节计数（docs/gaps.md §7）：bucket 已解析，装饰在最外层
+            // Inbound byte counting (docs/gaps.md §7): bucket already resolved, decorated at the outermost layer
             if (req.body)
                 req.body = std::make_unique<CountingBodyReader>(std::move(req.body), &metrics_,
                                                                 bucket, /*inbound=*/true);
-            // 用户请求的 bucket 名在此统一过完整校验，这是**唯一**的权威闸门
-            // （docs/gaps.md §1.1）。此前只查首字符是否为 '.'，而 vhost 寻址下
-            // bucket 完全取自 Host 头、可含 '/' 甚至以 '/' 开头，配合 localfs 的
-            // root_/bucket/key 拼接（fs::path 遇绝对路径会替换整条路径）即任意
-            // 文件读；path-style 侧还能用 %00 让首字符变成 NUL 绕过保留名检查。
-            // validate_bucket_name 的字符集规则一次堵死两条入口，保留名
-            // （.sys）也只对 allow_reserved=true 的调用方开放——用户请求永远
-            // 拿不到那个参数
+            // User-requested bucket names pass full validation here, the **single** authoritative gate
+            // (docs/gaps.md §1.1). Previously only the first character was checked for '.', while under vhost
+            // addressing the bucket comes entirely from the Host header and may contain '/' or even start with
+            // '/', which combined with localfs's root_/bucket/key concatenation (fs::path replaces the whole path
+            // on an absolute component) means arbitrary file reads; on the path-style side, %00 could turn the
+            // first character into NUL to bypass the reserved-name check. validate_bucket_name's character-set
+            // rules close both entrances at once, and reserved names (.sys) are only available to callers with
+            // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
-            // per-credential policy（docs/credential-management.md §10.4）：动作取自
-            // 匹配到的路由而非 HTTP 方法（docs/gaps.md §5.10）——DeleteObjects 是
-            // POST 却是删除，CreateMultipartUpload 同为 POST 却是写入，方法维度
-            // 分不开这两件事。判定输入是 verify 带出的快照，不回 store 查表（§3.7）
+            // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
+            // route, not the HTTP method (docs/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
+            // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
+            // The decision input is the snapshot verify returned, never a store lookup (§3.7)
             RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr};
             if (ident.policy) {
                 auto deny = [] {
@@ -320,23 +320,23 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                               : key.empty()  ? Scope::Bucket
                                              : Scope::Object;
                 const Route* r = match_route(req, scope);
-                // 匹配不到路由就没有可判定的动作：交给 route() 去回 405，
-                // 未支持的方法本就不构成越权面
+                // No matched route means no action to decide on: leave it to route() to return 405;
+                // unsupported methods are not a privilege-escalation surface anyway
                 if (r) {
                     if (!ident.policy->allows(bucket, key, r->action)) deny();
-                    // CopyObject / UploadPartCopy 的源在 header 里，不经上面的检查：
-                    // 对源桶+源 key 单独做一次读授权，防 policy 凭证借 copy 读白名单外数据
+                    // CopyObject / UploadPartCopy carry the source in a header, bypassing the check above:
+                    // do a separate read authorization for the source bucket+key, so policy credentials cannot use copy to read data outside the allowlist
                     if (auto src = req.headers.get("x-amz-copy-source")) {
                         auto [sb, sk] = handlers::parse_copy_source(*src);
                         if (!ident.policy->allows(sb, sk, Action::Read)) deny();
                     }
                 }
             }
-            // 请求级超时 + 取消接线（docs/gaps.md §3.1/§3.3）：req_src 为本请求专用，
-            // 外部 token（进程关停，驱动接线后还有客户端断连）接到同一个源上——任一
-            // 触发都让整条 L2/L3 链从最近的可取消挂起点（pool.schedule /
-            // semaphore.acquire）以 OperationCancelled 收敛。token 沿 Task promise
-            // 自动下传，无需逐个 handler/后端改签名
+            // Per-request timeout + cancellation wiring (docs/gaps.md §3.1/§3.3): req_src is dedicated to this
+            // request; external tokens (process shutdown, plus client disconnect once the driver is wired) attach
+            // to the same source -- any trigger converges the whole L2/L3 chain with OperationCancelled from the
+            // nearest cancellable suspension point (pool.schedule / semaphore.acquire). The token propagates down
+            // the Task promise automatically, no per-handler/backend signature changes needed
             CancelSource req_src;
             CancelRegistration link;
             if (ctx.cancel.valid()) {
@@ -349,8 +349,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
         }
     } catch (const OperationCancelled&) {
-        // 超时/断连/关停：503 让 SDK 重试。已在池线程上执行的阻塞系统调用不被抢占，
-        // 本响应只代表"网关不再等它"（docs/concurrency.md §5 的协作式语义）
+        // Timeout/disconnect/shutdown: 503 lets SDKs retry. Blocking syscalls already running on pool threads are
+        // not preempted; this response only means "the gateway stops waiting for it" (the cooperative semantics of docs/concurrency.md §5)
         LOG_WARN("req {} {} {} cancelled (timeout or shutdown)", ctx.request_id, req.method,
                  req.path);
         metrics_.s3_error(S3ErrorCode::SlowDown);
@@ -367,8 +367,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         resp = error_response(
             S3Error(S3ErrorCode::InternalError, "We encountered an internal error."), ctx, head);
     }
-    // per-bucket 请求分布与出向字节（docs/gaps.md §7）。流式响应的字节在
-    // dispatch 返回后才被驱动拉走，经装饰器计入；小响应此刻长度已知
+    // per-bucket request distribution and outbound bytes (docs/gaps.md §7). Streaming response bytes are pulled
+    // by the driver after dispatch returns and counted via the decorator; small responses have a known length by now
     metrics_.record_bucket_request(bucket);
     if (resp.stream_body)
         resp.stream_body = std::make_unique<CountingBodyReader>(std::move(resp.stream_body),
@@ -380,7 +380,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     resp.headers.set("x-amz-id-2", ctx.host_id);
     resp.headers.set("Server", "lights3");
 
-    // 访问日志（docs/s3-protocol.md §7）：一行结构化，字段序对齐 S3 access log 精简版
+    // Access log (docs/s3-protocol.md §7): one structured line, field order aligned with a slimmed-down S3 access log
     double secs = mguard.finish(resp.status);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
     LOG_INFO("access {} {} {} {} {} {} {}ms", ctx.request_id,
@@ -389,7 +389,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     co_return resp;
 }
 
-// ---------- 显式分派表（docs/s3-protocol.md §2）----------
+// ---------- Explicit dispatch table (docs/s3-protocol.md §2) ----------
 
 namespace {
 
@@ -403,20 +403,20 @@ bool flag_matches(const http::HttpRequest& req, std::string_view flag) {
 
 }  // namespace
 
-// 表放在 route() 里是为了让 lambda 能取到私有 handler；match_route 与它共用同一份
-// 静态表（授权要在 handler 之前知道动作，见 dispatch）
+// The table lives in route() so the lambdas can reach private handlers; match_route shares the same static
+// table (authorization must know the action before the handler, see dispatch)
 const S3Service::Route* S3Service::match_route(const http::HttpRequest& req, Scope scope) const {
     for (auto& r : route_table())
         if (r.method == req.method && r.scope == scope && flag_matches(req, r.flag)) return &r;
     return nullptr;
 }
 
-// 分派表：放在成员函数里，无捕获 lambda 才能访问私有 handler。
-// match_route 与 route 共用这一份——授权要在 handler 之前就得知道动作
+// Dispatch table: inside a member function so capture-free lambdas can access private handlers.
+// match_route and route share this one copy -- authorization must know the action before the handler runs
 std::span<const S3Service::Route> S3Service::route_table() {
     using Scope = S3Service::Scope;
     static constexpr Route kRoutes[] = {
-    // service 级
+    // Service level
     {"GET", Scope::Service, "", "",
      Action::Read,
      [](S3Service& s, http::HttpRequest&, std::string, std::string,
@@ -424,15 +424,15 @@ std::span<const S3Service::Route> S3Service::route_table() {
          return s.list_buckets(auth);
      }},
 
-    // bucket 级
+    // Bucket level
     {"GET", Scope::Bucket, "location", "",
      Action::Read,
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth&) {
          return s.get_bucket_location(std::move(b));
      }},
-    // 五个参数现已全部生效（docs/gaps.md §5.1）：此前分页参数是"允许但忽略"、
-    // prefix/delimiter 干脆不放行（忽略它们会把过滤范围外的 upload 混进来）
+    // All five parameters now take effect (docs/gaps.md §5.1): previously pagination parameters were "allowed
+    // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
     {"GET", Scope::Bucket, "uploads",
      "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
      Action::Read,
@@ -440,8 +440,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
         const RequestAuth& auth) {
          return s.list_multipart_uploads(req, std::move(b), auth);
      }},
-    // ListObjectsV2 与 V1 兼容同入口。fetch-owner 允许但忽略：V2 缺省本就不回
-    // Owner，忽略等价于 =false，不属于"静默误答"
+    // ListObjectsV2 and V1 compatibility share one entry. fetch-owner allowed but ignored: V2 omits Owner by
+    // default, so ignoring equals =false and is not a "silent wrong answer"
     {"GET", Scope::Bucket, "",
      "list-type prefix delimiter marker continuation-token start-after max-keys "
      "encoding-type fetch-owner",
@@ -475,7 +475,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
          return s.delete_objects(req, std::move(b), auth);
      }},
 
-    // object 级：multipart
+    // Object level: multipart
     {"POST", Scope::Object, "uploads", "",
      Action::Write,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
@@ -507,8 +507,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
          return s.abort_multipart(req, std::move(b), std::move(k));
      }},
 
-    // object 级：数据面
-    {"PUT", Scope::Object, "", "",  // PutObject / CopyObject（按 x-amz-copy-source 分流）
+    // Object level: data plane
+    {"PUT", Scope::Object, "", "",  // PutObject / CopyObject (steered by x-amz-copy-source)
      Action::Write,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
@@ -516,7 +516,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
              return s.copy_object(req, std::move(b), std::move(k));
          return s.put_object(req, std::move(b), std::move(k));
      }},
-    // response-* 覆盖参数（docs/gaps.md §5.3）：presigned 下载链接最常用的一族
+    // response-* override parameters (docs/gaps.md §5.3): the family most used in presigned download links
     {"GET", Scope::Object, "",
      "response-content-type response-content-language response-expires "
      "response-cache-control response-content-disposition response-content-encoding",
@@ -547,44 +547,44 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
                                           std::string key, const RequestAuth& auth) {
 
 
-    // 黑名单先行只为给已知子资源更明确的报错文案；结构性防线是下面按路由的
-    // query 白名单（§3.5）与请求头检查（§3.4）
+    // The blocklist goes first only to give known subresources a clearer error message; the structural defenses
+    // are the per-route query allowlist below (§3.5) and the request-header check (§3.4)
     reject_unsupported_subresource(req);
     reject_unsupported_headers(req);
     Scope scope = bucket.empty() ? Scope::Service
                   : key.empty() ? Scope::Bucket
                                 : Scope::Object;
     if (const Route* r = match_route(req, scope)) {
-        // 白名单（§3.5）：本路由名单外的 query key → 501。黑名单模型下任何遗漏
-        // 都静默降级成"读/写整对象"（?attributes 回对象体、?partNumber 回整个
-        // 对象、response-* 被吞），501 至少是诚实的
+        // Allowlist (§3.5): a query key outside this route's list -> 501. Under a blocklist model, any omission
+        // silently degrades into "read/write the whole object" (?attributes returns the object body, ?partNumber
+        // returns the whole object, response-* gets swallowed); 501 is at least honest
         enforce_query_whitelist(req, *r);
         co_return co_await r->fn(*this, req, std::move(bucket), std::move(key), auth);
     }
-    // 405 必须带 Allow（RFC 9110 §15.5.6，docs/gaps.md §5.9）：同 scope 下同样能
-    // 匹配本请求 query 的其余方法即为答案——名单由分派表本身给出，不会与之漂移
+    // 405 must carry Allow (RFC 9110 §15.5.6, docs/gaps.md §5.9): the answer is the other methods in the same
+    // scope that would also match this request's query -- the list comes from the dispatch table itself, so it cannot drift from it
     std::string allow;
     for (auto& r : route_table()) {
         if (r.scope != scope || !flag_matches(req, r.flag)) continue;
-        if (allow.find(r.method) != std::string::npos) continue;  // 同方法多路由只列一次
+        if (allow.find(r.method) != std::string::npos) continue;  // multiple routes per method listed once
         if (!allow.empty()) allow += ", ";
         allow += r.method;
     }
-    // HEAD 由 GET 路由承接的驱动/上游语义：列了 GET 就一并列 HEAD
+    // Driver/upstream semantics where HEAD is served by GET routes: listing GET lists HEAD along with it
     if (allow.find("GET") != std::string::npos && allow.find("HEAD") == std::string::npos)
         allow += ", HEAD";
     throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.")
         .with_header("Allow", allow);
 }
 
-// ---------- readyz（docs/s3-protocol.md §7：各后端探活）----------
+// ---------- readyz (docs/s3-protocol.md §7: per-backend liveness probes) ----------
 
 Task<http::HttpResponse> S3Service::readyz() {
     http::HttpResponse resp;
     resp.headers.set("Content-Type", "text/plain");
 
-    // 端点匿名可达而探测对每个后端发真实调用（cloudproxy 是计费的远端
-    // ListBuckets）：结果短缓存 + 单飞，匿名循环打不出放大流量
+    // The endpoint is anonymously reachable while the probe issues real calls to every backend (cloudproxy is a
+    // billed remote ListBuckets): short result cache + single-flight, so an anonymous loop cannot generate amplified traffic
     constexpr auto kTtl = std::chrono::seconds(5);
     {
         std::lock_guard lk(readyz_mu_);
@@ -597,7 +597,7 @@ Task<http::HttpResponse> S3Service::readyz() {
         }
         readyz_inflight_ = true;
     }
-    // 协程被提前销毁（断连）也要复位单飞标记，否则 readyz 永久返回旧值
+    // The single-flight flag must also reset if the coroutine is destroyed early (disconnect), or readyz returns stale values forever
     struct InflightReset {
         S3Service* s;
         ~InflightReset() {
@@ -614,12 +614,12 @@ Task<http::HttpResponse> S3Service::readyz() {
             report += name + " ok\n";
         } catch (const std::exception& e) {
             ok = false;
-            // 异常文本可能含上游 endpoint 等拓扑：只进日志，不回给匿名调用方
+            // Exception text may contain topology such as upstream endpoints: log only, never returned to anonymous callers
             LOG_WARN("readyz: backend {} probe failed: {}", name, e.what());
             report += name + " FAIL\n";
         }
     }
-    // 凭证表清空防护触发过（fail-open 防护，README §1.2）：报不健康引导运维介入
+    // The credential-table wipe guard has fired (fail-open guard, README §1.2): report unhealthy to prompt ops intervention
     if (cred_store_ && cred_store_->degraded()) {
         ok = false;
         report += "credential-store DEGRADED\n";

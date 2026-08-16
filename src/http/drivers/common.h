@@ -1,4 +1,4 @@
-// L1: 各 HTTP 驱动共享的适配辅助（不属于 L1/L2 边界，仅驱动内部复用）
+// L1: adapter helpers shared by the HTTP drivers (not part of the L1/L2 boundary; driver-internal reuse only)
 #pragma once
 
 #include <chrono>
@@ -15,14 +15,16 @@
 
 namespace lights3::http::driver {
 
-// ---------- 驱动内部缓冲常量 ----------
-// 停机/背压边界（drain 上限、trailer 上限、块大小、停机宽限）已升级为 HttpConfig
-// 可配置项（docs/gaps.md §7），默认值收敛在 config.h；这里只剩纯内部量
-inline constexpr size_t kIoChunkBytes = 64 * 1024;  // 流式读写块大小（http.io_chunk_size 默认值）
-inline constexpr size_t kScratchBytes = 16 * 1024;  // 排空/行解析等杂用缓冲
+// ---------- Driver-internal buffer constants ----------
+// Shutdown/backpressure bounds (drain cap, trailer cap, chunk size, shutdown
+// grace) have been promoted to HttpConfig options (docs/gaps.md §7), with
+// defaults consolidated in config.h; only purely internal values remain here
+inline constexpr size_t kIoChunkBytes = 64 * 1024;  // Streaming read/write chunk size (default of http.io_chunk_size)
+inline constexpr size_t kScratchBytes = 16 * 1024;  // Scratch buffer for draining, line parsing, etc.
 
-// 把请求行的 target（"/a%2Fb?x=1&y"）拆成中立模型的四个字段：
-// raw_path / raw_query 保留原文（SigV4 需要），path / query 为解码结果（保序）
+// Splits the request-line target ("/a%2Fb?x=1&y") into the neutral model's
+// four fields: raw_path / raw_query keep the original text (needed for SigV4),
+// path / query are the decoded results (order-preserving)
 inline void parse_target(std::string_view target, HttpRequest& req) {
     auto qpos = target.find('?');
     req.raw_path = std::string(qpos == std::string_view::npos ? target : target.substr(0, qpos));
@@ -45,10 +47,10 @@ inline void parse_target(std::string_view target, HttpRequest& req) {
     }
 }
 
-// ---------- HTTP/1.1 消息边界（framing）辅助：builtin/seastar 手写解析器共用 ----------
+// ---------- HTTP/1.1 message framing helpers: shared by the builtin/seastar hand-written parsers ----------
 
-// Content-Length：1*DIGIT，拒空/符号/前导空白/尾部垃圾/溢出
-// （stoull 会接受 "-1" 回绕成 2^64-1、"5abc" 截成 5，都是走私/挂死向量）
+// Content-Length: 1*DIGIT; rejects empty/signs/leading whitespace/trailing garbage/overflow
+// (stoull would accept "-1" wrapping to 2^64-1 and truncate "5abc" to 5 — both smuggling/hang vectors)
 inline bool parse_content_length(std::string_view s, uint64_t& out) {
     if (s.empty()) return false;
     uint64_t v = 0;
@@ -61,7 +63,7 @@ inline bool parse_content_length(std::string_view s, uint64_t& out) {
     return true;
 }
 
-// chunk-size 行：1*HEXDIG，之后只允许 ";ext"（忽略扩展内容）；拒空/符号/空白/溢出
+// chunk-size line: 1*HEXDIG, followed only by an optional ";ext" (extension content ignored); rejects empty/signs/whitespace/overflow
 inline bool parse_chunk_size(std::string_view line, uint64_t& out) {
     size_t i = 0;
     uint64_t v = 0;
@@ -75,18 +77,21 @@ inline bool parse_chunk_size(std::string_view line, uint64_t& out) {
         if (v > (UINT64_MAX >> 4)) return false;
         v = (v << 4) | static_cast<uint64_t>(d);
     }
-    if (i == 0) return false;                             // 无 hex 数字
-    if (i < line.size() && line[i] != ';') return false;  // 尾部垃圾
+    if (i == 0) return false;                             // No hex digits
+    if (i < line.size() && line[i] != ';') return false;  // Trailing garbage
     out = v;
     return true;
 }
 
-// 请求 body 边界判定（RFC 9112 §6.1/§6.3）。以下情形一律 valid=false（调用方
-// 应拒绝请求并关连接，宽松放行任何一种都是请求走私前置条件）：
-//  - Transfer-Encoding 与 Content-Length 同现（CL.TE 走私）
-//  - 多个 TE 头、或 TE 值不是全等 "chunked"（本实现不解码其他编码，
-//    放过则 chunked body 会被当作下一个请求行解析）
-//  - 多个 Content-Length 且值不一致；或 CL 值非纯数字
+// Request body framing determination (RFC 9112 §6.1/§6.3). All of the
+// following yield valid=false (the caller should reject the request and close
+// the connection; leniently allowing any of them is a request-smuggling
+// precondition):
+//  - Transfer-Encoding together with Content-Length (CL.TE smuggling)
+//  - Multiple TE headers, or a TE value that is not exactly "chunked" (this
+//    implementation does not decode other encodings; letting it through would
+//    make the chunked body get parsed as the next request line)
+//  - Multiple Content-Length headers with differing values; or a non-numeric CL value
 struct BodyFraming {
     bool valid = false;
     bool chunked = false;
@@ -102,7 +107,7 @@ inline BodyFraming parse_body_framing(const HeaderMap& headers) {
             ++te_count;
             te = v;
         } else if (HeaderMap::ieq(k, "Content-Length")) {
-            if (cl && *cl != v) return f;  // 两个不同长度：断帧分歧
+            if (cl && *cl != v) return f;  // Two differing lengths: framing disagreement
             cl = v;
         }
     }
@@ -121,9 +126,11 @@ inline BodyFraming parse_body_framing(const HeaderMap& headers) {
     return f;
 }
 
-// 驱动兜底响应的 request id（docs/gaps.md §4）：400/500 恰是最需要日志关联的两类
-// 错误，此前既无 x-amz-request-id 头也无 XML 里的 RequestId。此时 L2 dispatch
-// 根本没跑，id 只能在驱动侧生成（非安全用途，PRNG 足够）
+// Request id for driver fallback responses (docs/gaps.md §4): 400/500 are
+// precisely the two error classes that most need log correlation, yet
+// previously carried neither an x-amz-request-id header nor a RequestId in
+// the XML. L2 dispatch never ran at this point, so the id can only be
+// generated on the driver side (not security-sensitive, a PRNG suffices)
 inline std::string fallback_request_id() {
     static thread_local std::mt19937_64 rng{std::random_device{}()};
     char buf[17];
@@ -132,9 +139,12 @@ inline std::string fallback_request_id() {
     return std::string(buf, 16);
 }
 
-// 契约 2（docs/http-adapter.md §4）：handler 逃逸异常时驱动统一回 500 + S3 InternalError XML。
-// 日志在这里打而不在调用方：客户端手里只有 request id，只有同一处同时写出 id 与
-// 现场，那张纸条才能换回日志——四驱动因此都不必各记一份
+// Contract 2 (docs/http-adapter.md §4): when an exception escapes the handler,
+// every driver uniformly returns 500 + S3 InternalError XML. The log is
+// written here rather than at the caller: the client only holds the request
+// id, and only a single place that writes both the id and the context makes
+// that slip of paper redeemable for logs — so none of the four drivers has to
+// log its own copy
 inline HttpResponse internal_error_response(std::string_view detail = {}) {
     s3::S3Error err(s3::S3ErrorCode::InternalError, "We encountered an internal error.");
     std::string rid = fallback_request_id();
@@ -148,8 +158,10 @@ inline HttpResponse internal_error_response(std::string_view detail = {}) {
     return resp;
 }
 
-// 消息边界违规（CL/TE 冲突、重复 CL、坏 chunk 等）：RFC 9112 §6.1 要求 400 或
-// 关连接。手写解析器的驱动两者都做：回 400 再关，避免客户端把关连接读成截断响应
+// Message framing violations (CL/TE conflict, duplicate CL, bad chunk, etc.):
+// RFC 9112 §6.1 requires 400 or closing the connection. Drivers with
+// hand-written parsers do both: return 400 then close, so the client does not
+// read the closed connection as a truncated response
 inline HttpResponse bad_request_response(const char* why) {
     s3::S3Error err(s3::S3ErrorCode::InvalidRequest, why);
     std::string rid = fallback_request_id();
@@ -162,7 +174,7 @@ inline HttpResponse bad_request_response(const char* why) {
     return resp;
 }
 
-// 上游驱动自产的错误响应（httplib 的路由/头部拒绝等）：仍需带 id 才能回捞
+// Error responses produced by the upstream driver itself (httplib routing/header rejections, etc.): still need an id to be traceable
 inline HttpResponse upstream_error_response(s3::S3ErrorCode code, const char* why) {
     s3::S3Error err(code, why);
     std::string rid = fallback_request_id();
@@ -196,15 +208,18 @@ inline const char* reason_phrase(int status) {
     }
 }
 
-// 自己拼 HTTP/1.1 报文的驱动（builtin/seastar）共用的响应头渲染。
-// body 形态在此统一决定：定长走 Content-Length，流式无长度走 chunked。
+// Response-head rendering shared by drivers that assemble HTTP/1.1 messages
+// themselves (builtin/seastar). The body form is decided uniformly here:
+// fixed length uses Content-Length, streaming without a length uses chunked.
 struct ResponseHead {
-    std::string text;      // 状态行 + 全部头部 + 空行
-    bool chunked = false;  // body 需按 chunked 编码写出
+    std::string text;      // Status line + all headers + blank line
+    bool chunked = false;  // Body must be written with chunked encoding
 };
 
-// 出站头能否原样写入报文：头名须是合法 token 片段（无空白/冒号/CR/LF），
-// 头值不得含 CR/LF（否则是响应拆分注入面）。不合规的头直接丢弃
+// Whether an outbound header can be written into the message as-is: the name
+// must be a valid token fragment (no whitespace/colon/CR/LF), and the value
+// must not contain CR/LF (otherwise a response-splitting injection surface).
+// Non-conforming headers are simply dropped
 inline bool header_emittable(const std::string& k, const std::string& v) {
     if (k.empty()) return false;
     for (char c : k)
@@ -214,9 +229,12 @@ inline bool header_emittable(const std::string& k, const std::string& v) {
     return true;
 }
 
-// 出站头统一过滤（四驱动同一套规则，契约 5）：长度/编码/连接管理是驱动的职责
-// 由各驱动自行追加，放行会产生重复 Content-Length 等断帧漏洞；不可安全写入报文
-// 的头（CR/LF 注入面）直接丢弃。set(k, v) 由驱动适配自己的响应对象
+// Unified outbound-header filtering (one rule set for all four drivers,
+// contract 5): length/encoding/connection management is the driver's job and
+// appended by each driver itself — letting these through would create framing
+// holes like duplicate Content-Length; headers that cannot be safely written
+// into the message (CR/LF injection surface) are dropped. set(k, v) is how
+// each driver adapts to its own response object
 template <class SetFn>
 inline void emit_headers(const HeaderMap& headers, SetFn&& set) {
     for (auto& [k, v] : headers.items()) {
@@ -228,13 +246,16 @@ inline void emit_headers(const HeaderMap& headers, SetFn&& set) {
     }
 }
 
-// HEAD 响应的框架头（契约 6，四驱动统一）：HEAD 不写 body，因此
-//  - 长度已知 → 写 Content-Length（值即对应 GET 会返回的长度）
-//  - 长度未知（流式、无 content_length）→ **两个都不写**并关连接。
-//    写 Content-Length: 0 是撒谎（GET 并不返回 0 字节，beast/httplib 旧行为）；
-//    写 Transfer-Encoding: chunked 则要求随后有 chunk 帧，而 HEAD 不发 body
-//    （builtin/seastar 旧行为）。L2 的 HEAD 路径总会给出长度，这条只是兜底，
-//    但四驱动必须给同一个答案
+// Framing headers for HEAD responses (contract 6, uniform across the four
+// drivers): HEAD writes no body, therefore
+//  - Length known -> write Content-Length (the value the corresponding GET
+//    would return)
+//  - Length unknown (streaming, no content_length) -> write **neither** and
+//    close the connection. Writing Content-Length: 0 is a lie (GET does not
+//    return 0 bytes; old beast/httplib behavior); writing Transfer-Encoding:
+//    chunked would require chunk frames to follow, but HEAD sends no body
+//    (old builtin/seastar behavior). L2's HEAD path always provides a length,
+//    so this is only a fallback — but all four drivers must give the same answer
 inline bool head_length_known(const HttpResponse& resp) {
     return resp.content_length.has_value() || !resp.stream_body;
 }

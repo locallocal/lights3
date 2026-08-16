@@ -1,4 +1,4 @@
-// L2 入口：S3Service::dispatch（认证 → 路由 → handler → 错误映射）
+// L2 entry point: S3Service::dispatch (auth -> routing -> handler -> error mapping)
 #pragma once
 
 #include <chrono>
@@ -23,96 +23,96 @@
 
 namespace lights3::s3 {
 
-class CredentialStore;  // auth/credential_store.h（仅 admin handler 的 .cc 需要完整定义）
+class CredentialStore;  // auth/credential_store.h (only the admin handler's .cc needs the full definition)
 
 struct RequestContext {
     std::string request_id;
-    // x-amz-id-2 / <HostId>（docs/gaps.md §5.9）：AWS 支持工单要的两个 id 之一，
-    // 客户端只会转述它看到的这一对，日志侧必须能对上
+    // x-amz-id-2 / <HostId> (docs/gaps.md §5.9): one of the two ids AWS support tickets ask for; clients only
+    // relay the pair they saw, so the log side must be able to match it
     std::string host_id;
-    // 取消信号：客户端断连（driver 发现）、请求超时、进程 shutdown（docs/concurrency.md §5）；
-    // 默认"永不取消"。长循环（流式读写每块之间）与 pool.schedule() 感知它
+    // Cancellation signal: client disconnect (detected by the driver), request timeout, process shutdown (docs/concurrency.md §5);
+    // defaults to "never cancelled". Long loops (between chunks of streaming reads/writes) and pool.schedule() observe it
     CancelToken cancel;
 };
 
 class S3Service {
 public:
-    // base_domain 非空时启用 virtual-host style 寻址（docs/s3-protocol.md §2）
+    // Non-empty base_domain enables virtual-host style addressing (docs/s3-protocol.md §2)
     S3Service(storage::BucketRouter router, SigV4Authenticator auth,
               std::string base_domain = "")
         : router_(std::move(router)),
           auth_(std::move(auth)),
           base_domain_(std::move(base_domain)) {
-        // Host 匹配统一按小写进行（resolve_address），配置侧同样归一化
+        // Host matching is done uniformly in lowercase (resolve_address); the config side normalizes the same way
         for (char& c : base_domain_)
             if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
     }
 
-    // 顶层入口：内部捕获一切异常并映射为 S3 错误响应，不向 L1 抛出
+    // Top-level entry: catches all exceptions internally and maps them to S3 error responses, never throws to L1
     Task<http::HttpResponse> dispatch(http::HttpRequest req);
 
-    // /-/metrics 的线程池指标来源（可选，main 装配时注入）
+    // Thread pool metrics source for /-/metrics (optional, injected during main assembly)
     void set_pool_stats(std::function<ThreadPool::Stats()> fn) { pool_stats_ = std::move(fn); }
 
-    // 入口限流准入快照（docs/gaps.md §7，可选，main 装配时注入）
+    // Ingress throttling admission snapshot (docs/gaps.md §7, optional, injected during main assembly)
     void set_admission_stats(std::function<AdmissionStats()> fn) {
         admission_stats_ = std::move(fn);
     }
 
-    // 定时器线程健康度（docs/gaps.md §7，可选）
+    // Timer thread health (docs/gaps.md §7, optional)
     void set_timer_stats(std::function<TimerQueue::Stats()> fn) {
         timer_stats_ = std::move(fn);
     }
 
-    // 后端级指标注册表（可选）：渲染追加在 L2 请求指标之后
+    // Backend-level metrics registry (optional): rendered appended after the L2 request metrics
     void set_backend_metrics(std::shared_ptr<MetricsRegistry> m) {
         backend_metrics_ = std::move(m);
     }
 
-    // 动态凭证管理（docs/credential-management.md）：未注入时 /-/admin/credentials 一律 AccessDenied
+    // Dynamic credential management (docs/credential-management.md): when not injected, /-/admin/credentials is always AccessDenied
     void set_credential_store(std::shared_ptr<CredentialStore> s) {
         cred_store_ = std::move(s);
     }
 
-    // 请求级超时（docs/gaps.md §3.3）：0 = 关闭。到点以协作式取消打断整条 handler
-    // 链，挂起点抛 OperationCancelled → 503
+    // Per-request timeout (docs/gaps.md §3.3): 0 = disabled. On expiry, cooperative cancellation interrupts the
+    // whole handler chain; suspension points throw OperationCancelled -> 503
     void set_request_timeout(std::chrono::milliseconds t) { request_timeout_ = t; }
 
-    // multipart 最小分片（docs/gaps.md §5.7）：默认 AWS 的 5MiB，0 = 不限制。
-    // 做成旋钮而非硬编码，是因为网关前面挂的工具链未必守这条规则（把小分片
-    // 上传打回去比让运维改工具更贵），也让"proxy 到另一个 lights3"的部署形态
-    // 不至于被两层各判一次
+    // Minimum multipart part size (docs/gaps.md §5.7): defaults to AWS's 5MiB, 0 = unlimited.
+    // A knob rather than hardcoded because toolchains in front of the gateway may not honor the rule
+    // (bouncing small-part uploads costs more than making ops fix the tool), and so that a
+    // "proxy to another lights3" deployment is not judged once per layer
     void set_min_part_size(uint64_t n) { min_part_size_ = n; }
     uint64_t min_part_size() const { return min_part_size_; }
 
-    // 验签结果沿分派链传给 handler（docs/gaps.md §5.10）：ListBuckets 要按 policy
-    // 过滤结果，而 policy 此前只活在 dispatch 的局部变量里
+    // Verification result passed down the dispatch chain to handlers (docs/gaps.md §5.10): ListBuckets must
+    // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
-        std::string_view access_key;             // 认证关闭时为空
-        const CredentialPolicy* policy = nullptr;  // nullptr = 无限制
+        std::string_view access_key;             // empty when auth is disabled
+        const CredentialPolicy* policy = nullptr;  // nullptr = unrestricted
     };
 
-    // 显式分派表（docs/s3-protocol.md §2）：(method, scope, query-flag) → handler，声明序匹配
+    // Explicit dispatch table (docs/s3-protocol.md §2): (method, scope, query-flag) -> handler, matched in declaration order
     enum class Scope { Service, Bucket, Object };
     using Handler = Task<http::HttpResponse> (*)(S3Service&, http::HttpRequest&, std::string,
                                                  std::string, const RequestAuth&);
     struct Route {
         std::string_view method;
         Scope scope;
-        std::string_view flag;  // ""=兜底；"k" 按 query 存在匹配；"k=v" 按值匹配
-        // query 白名单（docs/gaps.md §3.5）：本路由额外允许的 query key（空格分隔）。
-        // flag 键与 presigned 签名参数天然允许；出现名单外的 key → 501。
-        // 黑名单兜底的结构性问题是任何遗漏都静默降级成"读/写整对象"——
-        // ?attributes 回整个对象体、?partNumber 回整个对象、response-* 被吞
+        std::string_view flag;  // "" = fallback; "k" matches on query presence; "k=v" matches on value
+        // Query allowlist (docs/gaps.md §3.5): extra query keys this route permits (space-separated).
+        // The flag key and presigned signature params are inherently allowed; a key outside the list -> 501.
+        // The structural flaw of a blocklist fallback is that any omission silently degrades into
+        // "read/write the whole object" -- ?attributes returns the whole object body, ?partNumber returns the whole object, response-* gets swallowed
         std::string_view extra_query;
-        // 本路由对应的动作（docs/gaps.md §5.10）：授权按它判定，而不是按 HTTP
-        // 方法猜——DeleteObjects 是 POST 却显然是删除，CreateMultipartUpload 同为
-        // POST 却是写入，方法维度根本分不开这两件事
+        // The action this route corresponds to (docs/gaps.md §5.10): authorization is decided by it, not guessed
+        // from the HTTP method -- DeleteObjects is a POST yet clearly a delete, CreateMultipartUpload is also a
+        // POST yet a write; the method dimension simply cannot separate the two
         Action action;
         Handler fn;
     };
 
-    // 分派表匹配（授权需在调用 handler 之前就知道动作，故与 route 分开）
+    // Dispatch table matching (authorization needs to know the action before the handler is called, hence separate from route)
     static std::span<const Route> route_table();
     const Route* match_route(const http::HttpRequest& req, Scope scope) const;
 
@@ -155,14 +155,14 @@ private:
 
     Task<http::HttpResponse> readyz();
 
-    // handlers/admin_credentials.cc（docs/credential-management.md §2）：内部完成验签与 root 判定，
-    // 错误渲染成 JSON 体；access_key 出参供访问日志
+    // handlers/admin_credentials.cc (docs/credential-management.md §2): performs verification and root check
+    // internally, renders errors as JSON bodies; access_key out-param feeds the access log
     Task<http::HttpResponse> admin_credentials(http::HttpRequest& req,
                                                std::string& access_key);
 
-    // virtual-host style：Host 匹配 *.base_domain 时把 bucket 前置到路径解析。
-    // vhost 标记供内部端点分流用（docs/gaps.md §3.8）：vhost 下 req.path 是 key，
-    // "/-/metrics" 可能是 mybucket 里的合法对象键，不得被内部端点遮蔽
+    // virtual-host style: when Host matches *.base_domain, the bucket is prepended for path parsing.
+    // The vhost flag steers internal-endpoint routing (docs/gaps.md §3.8): under vhost, req.path is the key,
+    // and "/-/metrics" may be a legitimate object key in mybucket that internal endpoints must not shadow
     struct Address {
         std::string bucket, key;
         bool vhost = false;
@@ -181,11 +181,11 @@ private:
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
 
-    // /-/readyz 结果短缓存（匿名可达，探测对每个后端发真实调用：不加缓存
-    // 可被匿名循环放大成对上游的计费/限流调用）
+    // Short cache for /-/readyz results (anonymously reachable, and the probe issues real calls to every backend:
+    // without a cache, an anonymous loop can amplify into billed/rate-limited upstream calls)
     std::mutex readyz_mu_;
     std::chrono::steady_clock::time_point readyz_at_{};
-    int readyz_status_ = 0;  // 0 = 尚无结果
+    int readyz_status_ = 0;  // 0 = no result yet
     std::string readyz_body_;
     bool readyz_inflight_ = false;
 };

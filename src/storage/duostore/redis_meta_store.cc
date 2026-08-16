@@ -24,15 +24,16 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// 计数器 key 后缀（§2.2）：file_id 号段与 gcq seq
+// Counter key suffixes (§2.2): file_id segments and gcq seq
 constexpr const char* kCounterChunk = "ctr:chunk";
 constexpr const char* kCounterPack = "ctr:pack";
 constexpr const char* kCounterSeq = "ctr:seq";
-// 与 RocksDB 的 "1" 区分谱系（§2.2）；版本演进策略见 meta_util.h parse_schema_marker
+// Distinguishes lineage from RocksDB's "1" (§2.2); see meta_util.h parse_schema_marker for the version evolution policy
 constexpr int64_t kSchemaCurrent = 1;
-constexpr const char* kSchemaValue = "r1";  // = "r" + kSchemaCurrent（首建落此值）
-// CAS 重试上限（§3.2）：超限抛 InternalError——病态热点竞争时响亮失败优于活锁。
-// 无退避的紧循环会被对端的连续提交流饿死（多网关热 key），故重试前指数退避
+constexpr const char* kSchemaValue = "r1";  // = "r" + kSchemaCurrent (written on first creation)
+// CAS retry cap (§3.2): throw InternalError past the cap — under pathological hotspot contention,
+// failing loudly beats a livelock. A tight loop without backoff would be starved by a peer's
+// continuous commit stream (hot key across multiple gateways), so back off exponentially before retrying
 constexpr int kMaxCasRetries = 16;
 
 [[noreturn]] void throw_internal(const char* what, const std::string& detail) {
@@ -41,7 +42,7 @@ constexpr int kMaxCasRetries = 16;
                   std::string("duostore redis meta: ") + what + ": " + detail);
 }
 
-// 提交类 IO 失败 = 事务可能已生效（§3.5）：用可区分类型上抛，调用方据此不删数据
+// Commit-class IO failure = the transaction may already have taken effect (§3.5): throw a distinguishable type so callers know not to delete data
 [[noreturn]] void throw_undetermined(const char* what, const std::string& detail) {
     LOG_ERROR("duostore redis meta: {}: commit result undetermined: {}", what, detail);
     throw UndeterminedCommit(std::string("duostore redis meta: ") + what +
@@ -64,8 +65,8 @@ std::string sha1_hex(std::string_view data) {
     return out;
 }
 
-// ---- 守卫式提交脚本（§3.2）：check 与 op 均为定长 4 元组，任一 check 失败
-// 立即返回 0（不写任何东西）。value 对脚本不透明——只做字节级比对（§3.1）。
+// ---- Guarded-commit script (§3.2): checks and ops are both fixed-size 4-tuples; if any check
+// fails, return 0 immediately (write nothing). Values are opaque to the script — byte-level comparison only (§3.1).
 constexpr const char* kCommitScript = R"lua(
 local i = 1
 local nc = tonumber(ARGV[i]); i = i + 1
@@ -85,9 +86,11 @@ for _ = 1, nc do
   elseif t == 'zcard0' then
     if redis.call('ZCARD', key) ~= 0 then return 0 end
   else
-    -- 一次 HGETALL 取整表（docs/gaps.md §3.9）：此前 HKEYS + 逐 field HGET，
-    -- 万分片 complete = 1 万次 redis.call，脚本原子执行期间独占整个 Redis。
-    -- 排序/拼接仍在 Lua 内做（与 C++ 侧 scan_parts 的 part_no 数值序对齐）
+    -- Fetch the whole hash with a single HGETALL (docs/gaps.md §3.9): previously HKEYS +
+    -- one HGET per field, so completing a 10k-part upload meant 10k redis.calls while the
+    -- script's atomic execution monopolized the entire Redis instance.
+    -- Sorting/concatenation still happens in Lua (matches the numeric part_no ordering of
+    -- scan_parts on the C++ side)
     local flat = redis.call('HGETALL', key)
     local fields, byf = {}, {}
     for j = 1, #flat, 2 do
@@ -117,11 +120,11 @@ end
 return 1
 )lua";
 
-// ---- list_objects 脚本（§2.3）：算法照搬 rocks_meta_store.cc §4.4——seek 起点
-// max(prefix, start_after)、delimiter 组末字节 +1 跳组、token 落组尾。整个循环
-// 在单脚本内执行 = 1 RTT + 一致视图。KEYS[1]=oz(ZSET) KEYS[2]=o(HASH)；
-// ARGV = prefix, start_after, delimiter, max_keys。
-// 返回 { truncated, next_token, {k1,v1,...}, {group,...} }
+// ---- list_objects script (§2.3): algorithm copied from rocks_meta_store.cc §4.4 — seek start
+// is max(prefix, start_after), skip a delimiter group by bumping its last byte +1, token lands
+// at the group tail. The whole loop runs inside one script = 1 RTT + consistent view.
+// KEYS[1]=oz(ZSET) KEYS[2]=o(HASH); ARGV = prefix, start_after, delimiter, max_keys.
+// Returns { truncated, next_token, {k1,v1,...}, {group,...} }
 constexpr const char* kListScript = R"lua(
 local oz, oh = KEYS[1], KEYS[2]
 local prefix, start_after, delim = ARGV[1], ARGV[2], ARGV[3]
@@ -143,10 +146,12 @@ local min
 if start_after ~= '' and start_after >= prefix then min = '(' .. start_after
 else min = '[' .. prefix end
 
--- 分页扫描（docs/gaps.md §3.9）：此前逐 key 一次 ZRANGEBYLEX + 一次 HGET，
--- list 1000 key = 2000 次 redis.call，脚本原子执行期间独占整个 Redis。
--- 现在按页取 key（组跳跃时弃页重 seek），value 末尾分批 HMGET——脚本内
--- 全程同一原子执行，一致视图不变
+-- Paged scan (docs/gaps.md §3.9): previously one ZRANGEBYLEX + one HGET per key, so
+-- listing 1000 keys meant 2000 redis.calls while the script's atomic execution
+-- monopolized the entire Redis instance. Now keys are fetched a page at a time
+-- (dropping the page and re-seeking on group skips) and values are batch-HMGET'd at
+-- the end -- everything still runs in one atomic execution, so the consistent view
+-- is unchanged
 local PAGE = 200
 local page, pi = {}, 1
 while true do
@@ -188,7 +193,7 @@ end
 local objs = {}
 local i = 1
 while i <= #keys do
-  local j = math.min(i + 499, #keys)  -- unpack 受 Lua C 栈上限约束，分批
+  local j = math.min(i + 499, #keys)  -- unpack is bounded by the Lua C stack limit; batch
   local vals = redis.call('HMGET', oh, unpack(keys, i, j))
   for x = 1, j - i + 1 do
     if vals[x] then
@@ -203,7 +208,7 @@ return { truncated, next_token, objs, groups }
 
 }  // namespace
 
-// ---------- 连接与 reply ----------
+// ---------- Connection and reply ----------
 
 struct RedisMetaStore::Conn {
     redisContext* ctx = nullptr;
@@ -216,7 +221,7 @@ void RedisReplyDeleter::operator()(redisReply* r) const { freeReplyObject(r); }
 
 namespace {
 
-// 单连接上执行一条命令；连接层失败（IO/超时/协议）返回空并带回 errstr
+// Run one command on a single connection; a connection-level failure (IO/timeout/protocol) returns null and reports errstr
 RedisReplyPtr run_on(redisContext* ctx, const std::vector<std::string>& args,
                      std::string* err) {
     std::vector<const char*> argv(args.size());
@@ -235,7 +240,7 @@ RedisReplyPtr run_on(redisContext* ctx, const std::vector<std::string>& args,
     return RedisReplyPtr(r);
 }
 
-// REDIS_REPLY_ERROR → InternalError（携带 server 错误文本，§5.3）
+// REDIS_REPLY_ERROR → InternalError (carrying the server error text, §5.3)
 void check_reply_error(const char* what, const redisReply* r) {
     if (r->type == REDIS_REPLY_ERROR)
         throw_internal(what, std::string(r->str, r->len));
@@ -251,16 +256,18 @@ std::string_view reply_str(const redisReply* r) { return {r->str, r->len}; }
 
 }  // namespace
 
-// ---------- RedisBatch：guarded-commit 组装器（§3.2，镜像 WriteBatch 的追加接口）----------
+// ---------- RedisBatch: guarded-commit assembler (§3.2, mirrors WriteBatch's append interface) ----------
 
 class RedisBatch {
 public:
     explicit RedisBatch(RedisMetaStore& store) : store_(store) {}
 
-    // CAS 见证上送 SHA1 指纹而非整份旧值（docs/gaps.md §3.9）：大 manifest 的
-    // 见证从 MB 级降到 40 字节，重试轮不再整份重发；比对在脚本内对存量值做
-    // redis.sha1hex。SHA1 碰撞需要对同一 field 的两份既有合法编码值做
-    // 选择前缀攻击，收益是撞掉自己的一次 CAS——非防护目标
+    // The CAS witness ships a SHA1 fingerprint instead of the whole old value (docs/gaps.md
+    // §3.9): for large manifests the witness shrinks from MB-scale to 40 bytes and retry rounds
+    // no longer resend the full value; the comparison runs redis.sha1hex on the stored value
+    // inside the script. A SHA1 collision would require a chosen-prefix attack on two existing
+    // validly-encoded values of the same field, and the payoff is merely defeating one's own CAS
+    // — not a protection target
     void expect_eq(const std::string& key, std::string_view field, std::string_view expected) {
         add_check("eq", key, field, sha1_hex(expected));
     }
@@ -292,8 +299,8 @@ public:
     }
     void del(const std::string& key) { add_op("del", key, {}, {}); }
 
-    // 一次 EVALSHA 提交：全部 check 通过并落写返回 true；任一失败（并发修改）
-    // 返回 false，调用方重读重建重试（§3.2 CAS 循环）
+    // Single EVALSHA commit: returns true when all checks pass and the writes land; any check
+    // failure (concurrent modification) returns false and the caller re-reads, rebuilds, retries (§3.2 CAS loop)
     bool commit() {
         std::vector<std::string> argv;
         argv.reserve(2 + checks_.size() + ops_.size());
@@ -307,7 +314,7 @@ public:
     }
 
 private:
-    // KEYS 表去重（脚本内以 1-based 下标引用）
+    // Dedup the KEYS table (referenced by 1-based index inside the script)
     std::string key_idx(const std::string& key) {
         for (size_t i = 0; i < keys_.size(); ++i)
             if (keys_[i] == key) return std::to_string(i + 1);
@@ -331,21 +338,22 @@ private:
 
     RedisMetaStore& store_;
     std::vector<std::string> keys_;
-    std::vector<std::string> checks_;  // 展平的 4 元组
+    std::vector<std::string> checks_;  // flattened 4-tuples
     std::vector<std::string> ops_;
 };
 
-// ---------- 构造 / 关闭 ----------
+// ---------- Construction / shutdown ----------
 
 void RedisMetaStore::cas_backoff(int attempt) {
     if (attempt == 0) return;
-    m_cas_retries_->inc();  // 上一轮 commit 守卫失败，本轮即重试
-    int shift = std::min(attempt - 1, 6);  // 100µs … 6.4ms，16 次合计 ≈ 80ms
+    m_cas_retries_->inc();  // the previous commit round failed its guard; this round is the retry
+    int shift = std::min(attempt - 1, 6);  // 100µs … 6.4ms, 16 attempts total ≈ 80ms
     std::this_thread::sleep_for(std::chrono::microseconds(100 << shift));
 }
 
 RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
-    // R4 指标：构造期注册即 0 值可见；空 scope 返回孤立实例，测试直构零装配成本
+    // R4 metrics: registering at construction makes zero values visible; an empty scope returns
+    // detached instances, so direct construction in tests has zero wiring cost
     m_cas_retries_ = opt_.metrics.counter(
         "lights3_duostore_redis_cas_retries_total",
         "Guarded-commit rounds retried after a CAS check failed (concurrent modification)");
@@ -353,7 +361,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         "lights3_duostore_redis_reconnects_total",
         "Connections re-established after a pooled redis connection went bad");
 
-    // URI 解析（§8）：redis://[user][:pass]@host[:port][/db] 或 unix://<path>
+    // URI parsing (§8): redis://[user][:pass]@host[:port][/db] or unix://<path>
     const std::string& uri = opt_.uri;
     auto bad_uri = [&] {
         throw std::runtime_error("duostore redis meta: invalid redis_uri: " + uri);
@@ -380,7 +388,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
             std::string userinfo = rest.substr(0, at);
             rest = rest.substr(at + 1);
             if (auto colon = userinfo.find(':'); colon != std::string::npos)
-                password_ = userinfo.substr(colon + 1);  // user 段忽略（无 ACL 需求）
+                password_ = userinfo.substr(colon + 1);  // user part ignored (no ACL requirement)
         }
         if (auto colon = rest.rfind(':'); colon != std::string::npos) {
             std::string port = rest.substr(colon + 1);
@@ -400,10 +408,10 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
     }
     if (opt_.pool_size < 1) opt_.pool_size = 1;
 
-    auto c = make_conn();  // 不可达在此响亮失败
+    auto c = make_conn();  // an unreachable server fails loudly here
     std::string err;
 
-    // 脚本预载（§3.5）：SHA 内容寻址，server 重启/SCRIPT FLUSH 后 NOSCRIPT 自愈重载
+    // Script preload (§3.5): SHAs are content-addressed; after a server restart/SCRIPT FLUSH, NOSCRIPT self-heals by reloading
     for (auto [body, sha] : {std::pair{kCommitScript, &sha_commit_},
                              std::pair{kListScript, &sha_list_}}) {
         auto r = run_on(c->ctx, {"SCRIPT", "LOAD", body}, &err);
@@ -412,10 +420,13 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         *sha = std::string(reply_str(r.get()));
     }
 
-    // schema（§2.2）：SET NX 抢注，已存在则校验谱系 + 版本演进（docs/gaps.md §6.1：
-    // 存量版本 < 当前走迁移链，> 当前拒绝降级——升级后旧版网关开机即拒，天然挡住
-    // 混布回写坏新布局）。链上每步必须幂等：共享引擎无全局迁移锁，多台新版网关
-    // 同时开机会并发走链，幂等步互相无害
+    // schema (§2.2): claim with SET NX; if it already exists, validate lineage + run version
+    // evolution (docs/gaps.md §6.1: a stored version < current walks the migration chain,
+    // > current rejects the downgrade — after an upgrade, old-version gateways are refused at
+    // startup, naturally preventing mixed deployments from writing back and corrupting the new
+    // layout). Every step in the chain must be idempotent: the shared engine has no global
+    // migration lock, so multiple new-version gateways booting at once walk the chain
+    // concurrently, and idempotent steps are mutually harmless
     auto r = run_on(c->ctx, {"SET", key("schema"), kSchemaValue, "NX"}, &err);
     if (!r) throw_internal("schema init", err);
     check_reply_error("schema init", r.get());
@@ -432,7 +443,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
                                           "duostore redis meta");
         using MigrateFn = void (*)(RedisMetaStore&, Conn&);
         static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
-            // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+            // {{1, &migrate_v1_to_v2}}  // example: once registered, v1 stores auto-upgrade at startup
         };
         for (; ver < kSchemaCurrent; ++ver) {
             MigrateFn fn = nullptr;
@@ -448,14 +459,14 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         }
     }
 
-    // AOF 探测（§6）：尽力而为——托管 Redis 可能禁用 CONFIG，失败仅提示
+    // AOF probe (§6): best-effort — managed Redis may disable CONFIG; failure only logs a hint
     if (auto probe = run_on(c->ctx, {"CONFIG", "GET", "appendonly"}, &err)) {
         if (probe->type == REDIS_REPLY_ARRAY && probe->elements == 2 &&
             reply_str(probe->element[1]) != "yes")
-            LOG_WARN("duostore redis meta: appendonly=no —— 崩溃可回档，部署要求 AOF"
-                     "（docs/duostore-redis-meta.md §6）");
+            LOG_WARN("duostore redis meta: appendonly=no -- a crash may roll back data; "
+                     "deployment requires AOF (docs/duostore-redis-meta.md §6)");
     } else {
-        LOG_INFO("duostore redis meta: CONFIG GET 不可用，跳过 AOF 探测");
+        LOG_INFO("duostore redis meta: CONFIG GET unavailable, skipping AOF probe");
     }
 
     release(std::move(c));
@@ -472,10 +483,10 @@ RedisMetaStore::~RedisMetaStore() {
 void RedisMetaStore::close() {
     std::lock_guard lk(pool_mu_);
     closed_ = true;
-    idle_.clear();  // redisFree 全部空闲连接；close 后调用在 acquire() 干净失败（500）
+    idle_.clear();  // redisFree all idle connections; calls after close fail cleanly in acquire() (500)
 }
 
-// ---------- 连接池（§5.2）----------
+// ---------- Connection pool (§5.2) ----------
 
 std::unique_ptr<RedisMetaStore::Conn> RedisMetaStore::make_conn() {
     timeval tv{opt_.timeout_ms / 1000, (opt_.timeout_ms % 1000) * 1000};
@@ -491,7 +502,7 @@ std::unique_ptr<RedisMetaStore::Conn> RedisMetaStore::make_conn() {
     conn->ctx = ctx;
     redisSetTimeout(ctx, tv);
 
-    // 重连状态补齐顺序（§5.4）：AUTH → SELECT（脚本是 server 级，无需逐连接加载）
+    // Reconnect state replay order (§5.4): AUTH → SELECT (scripts are server-level; no per-connection load needed)
     std::string err;
     if (!password_.empty()) {
         auto r = run_on(ctx, {"AUTH", password_}, &err);
@@ -522,11 +533,11 @@ std::unique_ptr<RedisMetaStore::Conn> RedisMetaStore::acquire() {
 
 void RedisMetaStore::release(std::unique_ptr<Conn> c) {
     std::lock_guard lk(pool_mu_);
-    if (closed_ || idle_.size() >= size_t(opt_.pool_size)) return;  // 直接 redisFree
+    if (closed_ || idle_.size() >= size_t(opt_.pool_size)) return;  // redisFree directly
     idle_.push_back(std::move(c));
 }
 
-// ---------- 命令执行 ----------
+// ---------- Command execution ----------
 
 RedisMetaStore::ReplyPtr RedisMetaStore::exec(const std::vector<std::string>& args,
                                               bool read_retry) {
@@ -534,29 +545,32 @@ RedisMetaStore::ReplyPtr RedisMetaStore::exec(const std::vector<std::string>& ar
     std::string err;
     auto r = run_on(c->ctx, args, &err);
     if (!r && read_retry) {
-        // 纯读：坏连接（多半是池中陈旧连接）丢弃，换新连接重试一次（§5.3）
+        // Read-only: drop the bad connection (usually a stale pooled one) and retry once on a fresh connection (§5.3)
         c = make_conn();
         m_reconnects_->inc();
         r = run_on(c->ctx, args, &err);
     }
     if (!r) {
-        // 纯读重试后仍失败 = 明确失败；提交类到这里 = 结果不明：不盲重试（§3.5），
-        // 抛可区分类型（调用方不得兜底删数据）交上层客户端重试
+        // Read-only still failing after the retry = definite failure; a commit-class command
+        // reaching here = result unknown: no blind retry (§3.5) — throw a distinguishable type
+        // (callers must not clean up by deleting data) and leave retrying to the upstream client
         const char* what = args.empty() ? "exec" : args[0].c_str();
         if (read_retry) throw_internal(what, err);
         throw_undetermined(what, err);
     }
-    // 提交类（!read_retry）成功后同连接 WAIT（§6）——WAIT 只对本连接此前的写生效
+    // After a successful commit-class command (!read_retry), WAIT on the same connection (§6) — WAIT only covers writes previously issued on this connection
     if (!read_retry && opt_.wait_replicas > 0 && !wait_for_replicas(*c))
-        return r;  // 连接已坏：不归还池（写本身已成功）
+        return r;  // connection is bad: do not return it to the pool (the write itself succeeded)
     release(std::move(c));
     return r;
 }
 
 bool RedisMetaStore::wait_for_replicas(Conn& c) {
-    // 超时取命令超时的一半：server 需先于客户端读超时返回（否则连接被误判坏）。
-    // 副本数不足仅 WARN——写已在主上生效，报错会误导 S3 客户端重试（complete
-    // 类重试还会得到假 NoSuchUpload）；WAIT 只保证复制送达、不保证副本 fsync
+    // Timeout is half the command timeout: the server must reply before the client's read
+    // timeout (otherwise the connection is misjudged as bad). Insufficient replicas only WARN —
+    // the write already took effect on the primary, and erroring would mislead S3 clients into
+    // retrying (complete-class retries would even get a spurious NoSuchUpload); WAIT only
+    // guarantees replication delivery, not replica fsync
     int timeout = std::max(1, opt_.timeout_ms / 2);
     std::string err;
     auto r = run_on(c.ctx, {"WAIT", std::to_string(opt_.wait_replicas),
@@ -589,7 +603,7 @@ RedisMetaStore::ReplyPtr RedisMetaStore::eval(const std::string& sha, const char
     auto r = exec(cmd, read_retry);
     if (r->type == REDIS_REPLY_ERROR &&
         std::string_view(r->str, r->len).rfind("NOSCRIPT", 0) == 0) {
-        // server 重启 / SCRIPT FLUSH：脚本明确未执行，重载后重发安全（§3.5）
+        // server restart / SCRIPT FLUSH: the script definitively did not run; reloading and resending is safe (§3.5)
         auto loaded = exec({"SCRIPT", "LOAD", body}, /*read_retry=*/true);
         check_reply_error("script reload", loaded.get());
         r = exec(cmd, read_retry);
@@ -597,7 +611,7 @@ RedisMetaStore::ReplyPtr RedisMetaStore::eval(const std::string& sha, const char
     return r;
 }
 
-// ---------- key 构造（§2.2）----------
+// ---------- Key construction (§2.2) ----------
 
 std::string RedisMetaStore::key(std::string_view suffix) const {
     std::string k = opt_.prefix;
@@ -616,7 +630,7 @@ std::string RedisMetaStore::uploads_key(std::string_view b) const {
 }
 std::string RedisMetaStore::parts_key(std::string_view b, std::string_view k,
                                       std::string_view id) const {
-    // pt:<b>\0<key>\0<id>；段合法性由共享校验层 + codec 键构造器保证（§2.1）
+    // pt:<b>\0<key>\0<id>; segment validity is guaranteed by the shared validation layer + codec key builders (§2.1)
     std::string s = key("pt:");
     s += codec::upload_key(b, k, id);
     return s;
@@ -627,7 +641,7 @@ std::string RedisMetaStore::pack_key(uint64_t pack_id) const {
     return key("pack:" + std::to_string(pack_id));
 }
 
-// ---------- 高层辅助 ----------
+// ---------- High-level helpers ----------
 
 std::optional<std::string> RedisMetaStore::hget_raw(const std::string& k,
                                                     std::string_view field) {
@@ -653,8 +667,8 @@ std::optional<std::string> RedisMetaStore::upload_raw(std::string_view b, std::s
 void RedisMetaStore::batch_refs(RedisBatch& bt, const DataRef& ref, bool add,
                                 std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack) continue;  // pack 存活走 stats 账（P2）；
-                                                      // chunk/rados 皆按 file_id 入 refs
+        if (e.kind == Extent::Kind::kPack) continue;  // pack liveness is tracked via stats (P2);
+                                                      // chunk/rados both enter refs by file_id
         if (add)
             bt.hset(refs_key(), std::to_string(e.file_id), owner);
         else
@@ -664,8 +678,9 @@ void RedisMetaStore::batch_refs(RedisBatch& bt, const DataRef& ref, bool add,
 
 void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign,
                                       int64_t rec_overhead) {
-    // 同 pack 多 extent 先聚合，每 pack 两条 HINCRBY（§9.1 随业务脚本同批增减）；
-    // 每条 record 计 payload + 头开销，与 file_size 同口径（docs/gaps.md §2.3a）
+    // Aggregate multiple extents of the same pack first, then two HINCRBYs per pack (§9.1,
+    // adjusted in the same batch as the business script); each record counts payload + header
+    // overhead, the same accounting basis as file_size (docs/gaps.md §2.3a)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
@@ -682,9 +697,10 @@ void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int si
 void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref,
                                      ReclaimReason reason) {
     if (ref.extents.empty()) return;
-    // seq 预派发（INCRBY 号段）使 gcq 入账成为纯写 op，脚本保持确定性（§4）。
-    // CAS 重试会浪费 seq——无害，seq 只需唯一单调。
-    // 超大 DataRef 拆多条（docs/gaps.md §2.11）：GC 单批解码内存有界，ack 独立无害
+    // Pre-allocating seq (INCRBY segments) makes gcq enqueueing a pure write op, keeping the
+    // script deterministic (§4). CAS retries waste seqs — harmless, seqs only need to be unique
+    // and monotonic. Oversized DataRefs are split into multiple entries (docs/gaps.md §2.11):
+    // GC per-batch decode memory stays bounded, and independent acks are harmless
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
@@ -702,9 +718,11 @@ uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r, u
     n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
     std::lock_guard lk(alloc_mu_);
     if (r.limit - r.next < n) {
-        // 首次预留空烧一个号段（§4 缓解 2）：跳过 AOF everysec 崩溃窗口内可能
-        // 已派发、但计数器回滚丢失的 id。崩溃/重启浪费号段无害（只需唯一单调）；
-        // 换段弃置的残段同理（run 批派发要求段内连续，docs/gaps.md §3.9）
+        // The first reservation burns one extra segment (§4 mitigation 2): skips ids that may
+        // have been handed out within the AOF everysec crash window but lost to counter
+        // rollback. Wasting segments on crash/restart is harmless (only uniqueness and
+        // monotonicity are needed); likewise the residue discarded on a segment switch
+        // (run batch allocation requires contiguity within a segment, docs/gaps.md §3.9)
         uint64_t take = r.burned ? kIdSegment : 2 * kIdSegment;
         auto reply = exec({"INCRBY", key(counter_suffix), std::to_string(take)},
                           /*read_retry=*/false);
@@ -719,7 +737,7 @@ uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r, u
 }
 
 uint64_t RedisMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
-    // kRados 与 kChunk 共号段（同 rocks 版论证：refs 不分 kind，防跨 kind id 碰撞）
+    // kRados shares the segment with kChunk (same rationale as the rocks version: refs are not split by kind, so this prevents cross-kind id collisions)
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCounterChunk : kCounterPack,
                     file_ids_[size_t(kind)], n);
@@ -728,7 +746,7 @@ uint64_t RedisMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
 // ---------- bucket ----------
 
 void RedisMetaStore::create_bucket(std::string_view b) {
-    // HSETNX 单命令即原子（§2.2），无需脚本
+    // HSETNX is atomic as a single command (§2.2), no script needed
     auto r = exec({"HSETNX", buckets_key(), std::string(b), codec::encode_bucket(now_ms())},
                   /*read_retry=*/false);
     if (require_int("create_bucket", r.get()) == 0)
@@ -740,8 +758,9 @@ void RedisMetaStore::delete_bucket(std::string_view b) {
     for (int attempt = 0; attempt < kMaxCasRetries; ++attempt) {
         cas_backoff(attempt);
         require_bucket(b);
-        // 预检给出精确错误码；原子性由脚本内 hlen0 复查保证（§3.3：空检查同时
-        // 覆盖 objects 与进行中 multipart，对齐 AWS）
+        // The precheck yields precise error codes; atomicity is guaranteed by the hlen0 recheck
+        // inside the script (§3.3: the emptiness check covers both objects and in-progress
+        // multipart uploads, matching AWS)
         for (const auto& k : {objects_key(b), uploads_key(b)}) {
             auto r = exec({"HLEN", k}, /*read_retry=*/true);
             if (require_int("delete_bucket", r.get()) != 0)
@@ -801,13 +820,14 @@ void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
         auto oldv = hget_raw(objects_key(b), k);
         std::optional<ObjectRec> old;
         if (oldv) old = codec::decode_object(std::string(k), *oldv);
-        // 检查基于本轮 CAS 见证的旧值：并发写者插入会使 expect_eq/expect_absent
-        // 失败重试，重试轮重新检查——检查与提交对外原子（PutCondition 契约）
+        // The check is based on this round's CAS-witnessed old value: a concurrent writer's
+        // insert makes expect_eq/expect_absent fail and retry, and the retry round re-checks —
+        // check and commit are externally atomic (PutCondition contract)
         check_put_condition(cond, old, k);
         rec.version = old ? old->version + 1 : 1;
 
         RedisBatch bt(*this);
-        bt.expect_exists(buckets_key(), b);  // 桶存在性与提交同脚本原子（§3.3）
+        bt.expect_exists(buckets_key(), b);  // bucket existence is atomic with the commit, same script (§3.3)
         if (oldv)
             bt.expect_eq(objects_key(b), k, *oldv);
         else
@@ -832,7 +852,7 @@ bool RedisMetaStore::delete_object(std::string_view b, std::string_view k) {
         cas_backoff(attempt);
         require_bucket(b);
         auto oldv = hget_raw(objects_key(b), k);
-        if (!oldv) return false;  // 幂等（对象存在时桶必非空，无需桶守卫）
+        if (!oldv) return false;  // idempotent (when the object exists the bucket is necessarily non-empty; no bucket guard needed)
         auto old = codec::decode_object(std::string(k), *oldv);
 
         RedisBatch bt(*this);
@@ -850,7 +870,7 @@ bool RedisMetaStore::delete_object(std::string_view b, std::string_view k) {
 ListResult RedisMetaStore::list_objects(std::string_view b, const ListOptions& opt) {
     require_bucket(b);
     ListResult out;
-    // S3：max-keys=0 返回空且 IsTruncated=false（与各后端一致）
+    // S3: max-keys=0 returns empty with IsTruncated=false (consistent across backends)
     if (opt.max_keys <= 0) return out;
 
     auto r = eval(sha_list_, kListScript, {zindex_key(b), objects_key(b)},
@@ -907,7 +927,7 @@ UploadRec RedisMetaStore::require_upload(std::string_view b, std::string_view k,
 
 void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::string_view id,
                               PartRec p) {
-    require_upload(b, k, id);  // 语义校验（含 id 格式）；原子性由脚本守卫复查
+    require_upload(b, k, id);  // semantic validation (incl. id format); atomicity is rechecked by the script guards
     std::string ufield = std::string(k) + '\0' + std::string(id);
     std::string pkey = parts_key(b, k, id);
     std::string pfield = std::to_string(p.part_no);
@@ -919,7 +939,7 @@ void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::strin
         if (oldv) old = codec::decode_part(p.part_no, *oldv);
 
         RedisBatch bt(*this);
-        // upload 存在则桶删不掉（§3.3）——只需守卫 upload；value 不可变，exists 即够
+        // While the upload exists the bucket cannot be deleted (§3.3) — only the upload needs guarding; its value is immutable, so exists suffices
         bt.expect_exists(uploads_key(b), ufield);
         if (oldv)
             bt.expect_eq(pkey, pfield, *oldv);
@@ -929,13 +949,13 @@ void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::strin
         batch_refs(bt, p.data, /*add=*/true, owner);
         const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
         batch_pack_delta(bt, p.data, +1, ov);
-        if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
+        if (old) {  // same-number re-upload is last-write-wins: the old part enters GC accounting in the same batch
             enqueue_reclaim(bt, old->data, ReclaimReason::kPartOverwrite);
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, ov);
         }
         if (bt.commit()) return;
-        if (!upload_raw(b, k, id))  // 并发 complete/abort 赢了
+        if (!upload_raw(b, k, id))  // a concurrent complete/abort won
             throw S3Error(S3ErrorCode::NoSuchUpload,
                           "The specified multipart upload does not exist.", std::string(id));
     }
@@ -976,16 +996,18 @@ std::vector<PartRec> RedisMetaStore::list_parts(std::string_view b, std::string_
 std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b,
                                                     std::string_view key_marker,
                                                     std::string_view id_marker, int limit) {
-    // 游标提示在这里只能忽略（docs/gaps.md §5.1）：uploads 存成 hash，HSCAN 的
-    // 游标是桶序不是字典序，没有"从某个 field 之后开始"的表达。全量 HSCAN 后
-    // 由调用方的 apply_uploads_page 裁剪——分页省的是响应体，省不掉这次扫描
+    // Cursor hints can only be ignored here (docs/gaps.md §5.1): uploads are stored as a hash,
+    // HSCAN's cursor is bucket-ordered not lexicographic, and there is no way to express
+    // "start after some field". After the full HSCAN, the caller's apply_uploads_page trims —
+    // pagination saves response body size, not this scan
     (void)key_marker;
     (void)id_marker;
     (void)limit;
     require_bucket(b);
-    // HSCAN 分批（R4，§2.2）：超大 uploads 表不再单命令整体物化。游标弱一致
-    // （迭代中并发增删可能漏/重）对 ListMultipartUploads 可接受；map 兼做去重
-    // （HSCAN 可能重复返回同 field）与 field 字节序排序 = (key, upload_id) 序
+    // HSCAN in batches (R4, §2.2): huge uploads tables are no longer materialized by a single
+    // command. The cursor's weak consistency (concurrent add/remove during iteration may
+    // miss/duplicate) is acceptable for ListMultipartUploads; the map doubles as dedup (HSCAN
+    // may return the same field twice) and byte-order sorting of fields = (key, upload_id) order
     std::map<std::string, std::string> rows;
     std::string cursor = "0";
     do {
@@ -1009,8 +1031,9 @@ std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b,
     return out;
 }
 
-// §8：complete 是纯元数据事务，零数据搬运——与 rocks 版同一套 helper；parts 集合
-// 的"读取后未变"用 sha1 整体指纹守卫（§3.3），脚本内 redis.sha1hex 重算比对
+// §8: complete is a pure metadata transaction, zero data movement — same helpers as the rocks
+// version; "unchanged since read" for the parts set is guarded by a whole-set sha1 fingerprint
+// (§3.3), recomputed and compared via redis.sha1hex inside the script
 std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view k,
                                             std::string_view id,
                                             std::span<const PartInfo> parts) {
@@ -1023,7 +1046,7 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
 
         auto scanned = scan_parts(b, k, id);
         std::string concat;
-        for (const auto& [raw, p] : scanned) concat += raw;  // part_no 升序（脚本同序）
+        for (const auto& [raw, p] : scanned) concat += raw;  // ascending part_no (same order as the script)
         std::string fingerprint = sha1_hex(concat);
         std::map<int, PartRec> stored;
         for (auto& [raw, p] : scanned) stored.emplace(p.part_no, std::move(p));
@@ -1050,28 +1073,29 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
         bt.del(parts_key(b, k, id));
         for (const auto& [no, p] : stored) {
             if (selected.count(no)) {
-                // refs 转移到对象。pack 账存活不变，但口径从分片重平衡为对象
-                // （-分片头开销 +对象头开销，recs 一减一增相抵）：保证后续对象
-                // 删除按对象口径扣减后账精确归零
+                // refs transfer to the object. Pack liveness stays unchanged, but the
+                // accounting basis rebalances from part to object (-part header overhead
+                // +object header overhead; recs -1/+1 cancel out): ensures a later object
+                // delete, debited on the object basis, zeroes the account exactly
                 batch_refs(bt, p.data, /*add=*/true, okey_owner);
                 batch_pack_delta(bt, p.data, -1,
                                  codec::pack_rec_overhead_part(b, k, id, no));
                 batch_pack_delta(bt, p.data, +1, codec::pack_rec_overhead(b, k));
-            } else {  // 未选中分片入 GC 账
+            } else {  // unselected parts enter GC accounting
                 enqueue_reclaim(bt, p.data, ReclaimReason::kComplete);
                 batch_refs(bt, p.data, /*add=*/false, {});
                 batch_pack_delta(bt, p.data, -1,
                                  codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
-        if (old) {  // 旧同名对象入 GC 账
+        if (old) {  // the old same-name object enters GC accounting
             enqueue_reclaim(bt, old->data, ReclaimReason::kOverwrite);
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, codec::pack_rec_overhead(b, k));
         }
         if (bt.commit()) return rec.meta.etag;
-        // 守卫失败：重读分类——upload 消失 → NoSuchUpload（require_upload 抛出），
-        // 其余（并发 put_part / 对象覆盖）→ 重试
+        // Guard failed: re-read to classify — upload gone → NoSuchUpload (thrown by
+        // require_upload), everything else (concurrent put_part / object overwrite) → retry
     }
     throw_internal("complete_upload", "too many CAS retries");
 }
@@ -1085,7 +1109,7 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
         auto scanned = scan_parts(b, k, id);
         std::string concat;
         for (const auto& [raw, p] : scanned) concat += raw;
-        std::string fingerprint = sha1_hex(concat);  // 防并发 put_part 的分片漏账
+        std::string fingerprint = sha1_hex(concat);  // prevents unaccounted parts from a concurrent put_part
 
         RedisBatch bt(*this);
         bt.expect_exists(uploads_key(b), ufield);
@@ -1103,13 +1127,13 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
     throw_internal("abort_upload", "too many CAS retries");
 }
 
-// ---------- GC 记账 ----------
+// ---------- GC accounting ----------
 
 std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t max,
                                                                         uint64_t min_seq,
                                                                         size_t max_extents) {
     if (max == 0) return {};
-    // score = seq（≪ 2^53，double 精确），min_seq 起始闭区间
+    // score = seq (≪ 2^53, exact as double); the range is inclusive starting at min_seq
     auto r = exec({"ZRANGEBYSCORE", gcq_key(), std::to_string(min_seq), "+inf", "LIMIT", "0",
                    std::to_string(max)},
                   /*read_retry=*/true);
@@ -1120,9 +1144,9 @@ std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t m
     for (size_t i = 0; i < r->elements; ++i) {
         auto member = reply_str(r->element[i]);
         if (member.size() < 8) throw_internal("peek_reclaims", "bad gcq member");
-        uint64_t seq = codec::parse_be64(member.substr(0, 8));  // member 前 8 字节即 seq
+        uint64_t seq = codec::parse_be64(member.substr(0, 8));  // first 8 bytes of the member are the seq
         out.emplace_back(seq, codec::decode_reclaim(member.substr(8)));
-        // 累计 extent 上限（gaps §2.11）：至少返回 1 项（多取的 member 就地丢弃）
+        // Cumulative extent cap (gaps §2.11): return at least 1 entry (over-fetched members are dropped in place)
         extents += out.back().second.extents.size();
         if (extents >= max_extents) break;
     }
@@ -1130,15 +1154,16 @@ std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t m
 }
 
 void RedisMetaStore::ack_reclaim(uint64_t seq) {
-    // 盲删单命令即原子（seq ≪ 2^53，score double 精确，§2.2）
+    // Blind delete is atomic as a single command (seq ≪ 2^53, score exact as double, §2.2)
     std::string s = std::to_string(seq);
     auto r = exec({"ZREMRANGEBYSCORE", gcq_key(), s, s}, /*read_retry=*/false);
     require_int("ack_reclaim", r.get());
 }
 
-// 批量销账（docs/gaps.md §6.1 四引擎矩阵）：此前未覆写，GC 每项一次 RTT——大批
-// 删除后单轮 ack 数千次往返。单脚本一次 RTT 全删；丢 ack 无害（gcq 残留重试、
-// unlink 幂等），脚本无需任何守卫
+// Batched ack (docs/gaps.md §6.1 four-engine matrix): previously not overridden, GC paid one RTT
+// per entry — thousands of round trips per ack round after a large delete. One script, one RTT
+// deletes them all; a lost ack is harmless (gcq leftovers get retried, unlink is idempotent),
+// so the script needs no guards at all
 void RedisMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
     if (seqs.empty()) return;
     static const char* kBody = R"lua(
@@ -1155,8 +1180,8 @@ return #ARGV
     require_int("ack_reclaims", r.get());
 }
 
-// 多网关 GC 租约（docs/gaps.md §6.1）：SET NX 语义 + 同 owner 续租，单脚本原子。
-// TTL 由 Redis 过期承担——持有者崩溃后自然让位
+// Multi-gateway GC lease (docs/gaps.md §6.1): SET NX semantics + same-owner renewal, atomic in a
+// single script. TTL is handled by Redis expiry — a crashed holder naturally yields
 bool RedisMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
     static const char* kBody = R"lua(
 local cur = redis.call('GET', KEYS[1])
@@ -1171,10 +1196,10 @@ return 1
 }
 
 std::vector<PackStat> RedisMetaStore::pack_stats() {
-    // SCAN MATCH <prefix>pack:*（游标遍历，不阻塞 server）+ 逐 key HGETALL。
-    // GC 低频路径，逐 key 往返可接受；返回含 live=0 与未封存项
+    // SCAN MATCH <prefix>pack:* (cursor iteration, does not block the server) + per-key HGETALL.
+    // Low-frequency GC path, per-key round trips acceptable; returns entries with live=0 and unsealed ones
     std::string pattern;
-    for (char ch : key("pack:")) {  // glob 元字符转义（prefix 可含任意字节）
+    for (char ch : key("pack:")) {  // escape glob metacharacters (the prefix may contain arbitrary bytes)
         if (ch == '*' || ch == '?' || ch == '[' || ch == ']' || ch == '\\')
             pattern.push_back('\\');
         pattern.push_back(ch);
@@ -1197,7 +1222,7 @@ std::vector<PackStat> RedisMetaStore::pack_stats() {
             try {
                 id = std::stoull(kstr.substr(skip));
             } catch (const std::exception&) {
-                continue;  // 非本店格式（前缀撞车），跳过
+                continue;  // not this store's format (prefix collision), skip
             }
             auto h = exec({"HGETALL", kstr}, /*read_retry=*/true);
             check_reply_error("pack_stats hgetall", h.get());
@@ -1226,7 +1251,7 @@ std::vector<PackStat> RedisMetaStore::pack_stats() {
 }
 
 void RedisMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
-    // HSET sealed 恒置 1（幂等）；file_size=0 走 HSETNX——不覆盖已知 size（契约）
+    // HSET always sets sealed=1 (idempotent); file_size=0 goes through HSETNX — never overwrite a known size (contract)
     auto r = exec({"HSET", pack_key(pack_id), "sealed", "1"}, /*read_retry=*/false);
     require_int("seal_pack", r.get());
     if (file_size > 0) {
@@ -1251,23 +1276,26 @@ bool RedisMetaStore::swap_extents(std::string_view b, std::string_view k,
     auto oldv = hget_raw(objects_key(b), k);
     if (!oldv) return false;
     auto rec = codec::decode_object(std::string(k), *oldv);
-    // 乐观校验：version 或 extent 不符 = 期间被覆盖/删除 → 放弃（§9.2）
+    // Optimistic validation: version or extent mismatch = overwritten/deleted in the meantime → give up (§9.2)
     if (rec.version != expect_version || rec.data.extents != from.extents) return false;
     rec.data = to;
     rec.version += 1;
 
     RedisBatch bt(*this);
-    // 整段旧原始字节即天然 CAS（§3.3）：任何并发改动都 bump version → 守卫失败。
-    // 失败不重试——语义上等同 version 不符，放弃本条（新写入自会记账）
+    // The whole old raw byte string is a natural CAS (§3.3): any concurrent change bumps the
+    // version → guard fails. No retry on failure — semantically the same as a version mismatch,
+    // give up on this entry (the new write does its own accounting)
     bt.expect_eq(objects_key(b), k, *oldv);
     bt.hset(objects_key(b), k, codec::encode_object(rec));
-    // refs 按差集操作（meta_util.h refs_delta）：Lua 内 hset→hdel 对同一 field
-    // 净效果是删除，整加再整删会抹掉未迁移 chunk 的 refs → 孤儿扫描误删活数据
+    // refs operate on the set difference (meta_util.h refs_delta): in Lua, hset→hdel on the same
+    // field nets out to a delete; add-all-then-delete-all would wipe refs of unmigrated chunks →
+    // the orphan scan would delete live data by mistake
     auto rd = refs_delta(from, to);
     batch_refs(bt, rd.added, /*add=*/true, okey_owner);
     batch_refs(bt, rd.removed, /*add=*/false, {});
-    // 压实换 ref：账随 extent 迁移（§9.2）；两侧都按对象口径（迁出旧 record 若为
-    // mpu 形态则轻微低扣，保守方向）
+    // Compaction swaps refs: the accounting migrates with the extents (§9.2); both sides use the
+    // object basis (if the migrated-out old record was in mpu form this slightly under-debits —
+    // the conservative direction)
     const int64_t ov = codec::pack_rec_overhead(b, k);
     batch_pack_delta(bt, to, +1, ov);
     batch_pack_delta(bt, from, -1, ov);
@@ -1280,7 +1308,7 @@ bool RedisMetaStore::chunk_referenced(uint64_t file_id) {
 }
 
 void RedisMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
-    // HSCAN 分批遍历 refs HASH（游标快照弱一致，孤儿扫描容忍）；field = 十进制 file_id
+    // HSCAN iterates the refs HASH in batches (the cursor snapshot is weakly consistent, tolerated by the orphan scan); field = decimal file_id
     std::string cursor = "0";
     do {
         auto r = exec({"HSCAN", refs_key(), cursor, "COUNT", "512"}, /*read_retry=*/true);
@@ -1289,12 +1317,12 @@ void RedisMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
             throw_internal("scan_refs", "unexpected HSCAN reply");
         cursor = std::string(reply_str(r->element[0]));
         const redisReply* kv = r->element[1];
-        for (size_t i = 0; i + 1 < kv->elements; i += 2) {  // field,value 对；只取 field
+        for (size_t i = 0; i + 1 < kv->elements; i += 2) {  // field,value pairs; only the field is used
             uint64_t id = 0;
             try {
                 id = std::stoull(std::string(reply_str(kv->element[i])));
             } catch (const std::exception&) {
-                continue;  // 非本店格式（前缀撞车），跳过
+                continue;  // not this store's format (prefix collision), skip
             }
             cb(id);
         }

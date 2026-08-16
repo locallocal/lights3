@@ -23,18 +23,20 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// 文件谱系（§2.2）：application_id 标记"这是 duostore 的 sqlite meta 文件"，
-// user_version 是 schema 版本——SQLite 自带机制，零表实现
+// File lineage (§2.2): application_id marks "this is a duostore sqlite meta file",
+// user_version is the schema version — SQLite built-in mechanisms, zero tables needed
 constexpr int64_t kAppId = 0x4C335351;  // "L3SQ"
 constexpr int64_t kSchemaVersion = 1;
 
-// counters 表只存 file_id 号段（'chunk' / 'pack'）；gcq seq 走 AUTOINCREMENT（§2.2）
+// The counters table stores only file_id segments ('chunk' / 'pack'); gcq seq uses AUTOINCREMENT (§2.2)
 constexpr const char* kCtrChunk = "chunk";
 constexpr const char* kCtrPack = "pack";
 
-// 建表 DDL（§2.2）：key 列一律 BLOB（memcmp 序 = S3 字典序）、STRICT 强制列型、
-// 主键即聚簇索引（WITHOUT ROWID）。counters 种子不进 DDL——用绑定语句从
-// kCtrChunk/kCtrPack 常量落 seed（init_schema），单一事实源，免手工 hex
+// Table-creation DDL (§2.2): key columns are all BLOB (memcmp order = S3
+// lexicographic order), STRICT enforces column types, primary key doubles as the
+// clustered index (WITHOUT ROWID). counters seeds are not in the DDL — they are
+// written via bound statements from the kCtrChunk/kCtrPack constants (init_schema):
+// single source of truth, no hand-written hex
 constexpr const char* kSchemaDdl = R"(
 CREATE TABLE IF NOT EXISTS buckets(
   name BLOB PRIMARY KEY,
@@ -69,8 +71,9 @@ CREATE TABLE IF NOT EXISTS pack_stats(
 ) STRICT;
 )";
 
-// SQL 常量（§5.3）：每连接以字面量地址为键常驻缓存 prepared statement；
-// 参数一律 ?N 绑定，禁止拼接（BLOB 截断源 + 注入面）
+// SQL constants (§5.3): each connection keeps a resident prepared-statement cache
+// keyed by the literal's address; all parameters are bound via ?N — string
+// concatenation is forbidden (BLOB truncation source + injection surface)
 constexpr const char* kBegin = "BEGIN";
 constexpr const char* kBeginImmediate = "BEGIN IMMEDIATE";
 constexpr const char* kCommit = "COMMIT";
@@ -92,8 +95,9 @@ constexpr const char* kUpGet = "SELECT val FROM uploads WHERE bucket=?1 AND key=
 constexpr const char* kUpPut = "INSERT INTO uploads(bucket,key,id,val) VALUES(?1,?2,?3,?4)";
 constexpr const char* kUpDel = "DELETE FROM uploads WHERE bucket=?1 AND key=?2 AND id=?3";
 constexpr const char* kUpAny = "SELECT 1 FROM uploads WHERE bucket=?1 LIMIT 1";
-// 复合游标下推（docs/gaps.md §5.1）：(key,id) > (?2,?3) 用行值比较，正好走
-// 主键序；?4<=0 表示不限条数（SQLite 的 LIMIT 负值即无限制）
+// Composite-cursor pushdown (docs/gaps.md §5.1): (key,id) > (?2,?3) uses row-value
+// comparison, which follows primary-key order exactly; ?4<=0 means unlimited rows
+// (a negative LIMIT in SQLite means no limit)
 constexpr const char* kUpList =
     "SELECT key,id,val FROM uploads WHERE bucket=?1 AND (key,id) > (?2,?3) "
     "ORDER BY key,id LIMIT ?4";
@@ -115,12 +119,13 @@ constexpr const char* kCtrReserve =
     "UPDATE counters SET val=val+?1 WHERE name=?2 RETURNING val";
 constexpr const char* kCtrSeed = "INSERT OR IGNORE INTO counters(name,val) VALUES(?1,0)";
 constexpr const char* kAnyTable = "SELECT 1 FROM sqlite_master LIMIT 1";
-// pack 存活账（§2.2：原生数值列，算术 UPDATE 即增量记账，事务内与业务写同批）
+// Pack liveness accounting (§2.2: native numeric columns, arithmetic UPDATE gives
+// incremental accounting, batched with the business write inside the transaction)
 constexpr const char* kPackDelta =
     "INSERT INTO pack_stats(pack_id,live_bytes,live_recs) VALUES(?1,?2,?3) "
     "ON CONFLICT(pack_id) DO UPDATE SET live_bytes=live_bytes+excluded.live_bytes,"
     "live_recs=live_recs+excluded.live_recs";
-// 封存（幂等）：file_size=0 表示未知，不得覆盖已记录的非零值（IMetaStore 契约）
+// Seal (idempotent): file_size=0 means unknown and must not overwrite a recorded non-zero value (IMetaStore contract)
 constexpr const char* kPackSeal =
     "INSERT INTO pack_stats(pack_id,file_size,sealed) VALUES(?1,?2,1) "
     "ON CONFLICT(pack_id) DO UPDATE SET sealed=1,file_size=CASE WHEN "
@@ -131,16 +136,17 @@ constexpr const char* kPackDrop = "DELETE FROM pack_stats WHERE pack_id=?1";
 
 int64_t now_ms() { return codec::to_unix_ms(std::chrono::system_clock::now()); }
 
-using codec::bump_last_byte;  // delimiter 跳组后继（codec.h，meta store 实现共用）
+using codec::bump_last_byte;  // successor for delimiter group skipping (codec.h, shared by meta store impls)
 
 }  // namespace
 
-// ---------- 连接 / 语句 / 事务基元 ----------
+// ---------- Connection / statement / transaction primitives ----------
 
 struct SqliteMetaStore::Conn {
     sqlite3* db = nullptr;
-    std::map<const char*, sqlite3_stmt*> stmts;  // key = SQL 字面量地址（§5.3）
-    // S4 指标：错误分类计数（§5.4）。open_raw 赋值；空 scope 下为孤立实例，恒非空
+    std::map<const char*, sqlite3_stmt*> stmts;  // key = SQL literal address (§5.3)
+    // S4 metrics: error-classification counters (§5.4). Assigned by open_raw;
+    // isolated instances under an empty scope, always non-null
     std::shared_ptr<MetricCounter> busy;
     std::shared_ptr<MetricCounter> corrupt;
 
@@ -150,8 +156,10 @@ struct SqliteMetaStore::Conn {
             LOG_ERROR("duostore meta(sqlite): close connection: {}", sqlite3_errmsg(db));
     }
 
-    // 错误分类（§5.4 表的指标切片）：BUSY = busy_timeout 耗尽仍拿不到锁（进程外
-    // 有人碰库 / 号段饥饿）；CORRUPT/NOTADB = 数据丢失征兆，单列 corruption 告警
+    // Error classification (metric slices for the §5.4 table): BUSY = busy_timeout
+    // exhausted without getting the lock (someone outside the process touching the
+    // db / id-segment starvation); CORRUPT/NOTADB = data-loss signal, tracked as a
+    // dedicated corruption alert
     void classify_error() const {
         if (!db) return;
         int rc = sqlite3_extended_errcode(db) & 0xff;
@@ -180,7 +188,7 @@ struct SqliteMetaStore::Conn {
         return st;
     }
 
-    // 固定语句直通（PRAGMA / BEGIN / DDL 等）；允许多语句脚本
+    // Direct execution of fixed statements (PRAGMA / BEGIN / DDL etc.); multi-statement scripts allowed
     void exec(const std::string& sql, const char* what) {
         char* err = nullptr;
         if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &err) != SQLITE_OK) {
@@ -194,9 +202,10 @@ struct SqliteMetaStore::Conn {
     }
 };
 
-// prepared statement 的单次使用 RAII：bind → step*，析构 reset + clear_bindings。
-// 绑定一律 SQLITE_TRANSIENT（sqlite 自拷贝）——省去与 reseek/异常路径纠缠的
-// 生命周期约定，meta 值体量小，拷贝成本可忽略
+// Single-use RAII around a prepared statement: bind → step*, destructor does
+// reset + clear_bindings. Bindings always use SQLITE_TRANSIENT (sqlite copies) —
+// avoiding lifetime contracts entangled with reseek/exception paths; meta values
+// are small, so the copy cost is negligible
 class SqliteMetaStore::Stmt {
 public:
     Stmt(Conn& c, const char* sql) : c_(c), s_(c.get(sql)) {}
@@ -207,7 +216,7 @@ public:
     Stmt(const Stmt&) = delete;
 
     Stmt& blob(int i, std::string_view v) {
-        // 空串必须给非空指针：bind_blob(nullptr) 语义是 SQL NULL，不是零长 BLOB
+        // An empty string must pass a non-null pointer: bind_blob(nullptr) means SQL NULL, not a zero-length BLOB
         if (sqlite3_bind_blob(s_, i, v.empty() ? "" : v.data(), int(v.size()),
                               SQLITE_TRANSIENT) != SQLITE_OK)
             c_.raise("bind blob");
@@ -218,25 +227,26 @@ public:
         return *this;
     }
 
-    bool step() {  // true = 有行，false = 结束
+    bool step() {  // true = row available, false = done
         int rc = sqlite3_step(s_);
         if (rc == SQLITE_ROW) return true;
         if (rc == SQLITE_DONE) return false;
         c_.raise("step");
     }
-    // BUSY 容忍变体（仅号段路径用，§4）：nullopt = SQLITE_BUSY——单语句自动提交
-    // 事务在取写锁阶段失败，明确未执行，重试安全；其余语义同 step()
+    // BUSY-tolerant variant (id-segment path only, §4): nullopt = SQLITE_BUSY — the
+    // single-statement autocommit transaction failed while acquiring the write lock,
+    // so it definitely did not execute and retrying is safe; otherwise same as step()
     std::optional<bool> step_busy() {
         int rc = sqlite3_step(s_);
         if (rc == SQLITE_ROW) return true;
         if (rc == SQLITE_DONE) return false;
         if (rc == SQLITE_BUSY) {
-            if (c_.busy) c_.busy->inc();  // 每轮饥饿计一次（S4 指标）
+            if (c_.busy) c_.busy->inc();  // count once per starvation round (S4 metric)
             return std::nullopt;
         }
         c_.raise("step");
     }
-    void exec() {  // 跑到底（DML / RETURNING 排空）
+    void exec() {  // run to completion (DML / draining RETURNING)
         while (step()) {
         }
     }
@@ -253,9 +263,11 @@ private:
     sqlite3_stmt* s_;
 };
 
-// 事务 RAII（§3.2）：写事务 BEGIN IMMEDIATE（进程内已被 mu_ 序列化，永不 BUSY）、
-// 读事务 BEGIN（WAL snapshot，一致视图）；析构未 commit 即 ROLLBACK——语义错误
-// 抛 S3Error 穿出方法时事务自动回滚，杜绝半程状态残留
+// Transaction RAII (§3.2): write transactions use BEGIN IMMEDIATE (already
+// serialized in-process by mu_, so never BUSY), read transactions use BEGIN
+// (WAL snapshot, consistent view); destruction without commit means ROLLBACK — when
+// a semantic error throws S3Error out of a method the transaction rolls back
+// automatically, ruling out half-done state residue
 class SqliteMetaStore::Txn {
 public:
     explicit Txn(Conn& c, bool immediate = true) : c_(c) {
@@ -288,7 +300,7 @@ SqliteMetaStore::Lease::~Lease() {
     if (store && conn) store->release(std::move(conn));
 }
 
-// ---------- 打开 / schema / 关闭 ----------
+// ---------- Open / schema / close ----------
 
 std::unique_ptr<SqliteMetaStore::Conn> SqliteMetaStore::open_raw() {
     auto c = std::make_unique<Conn>();
@@ -301,21 +313,24 @@ std::unique_ptr<SqliteMetaStore::Conn> SqliteMetaStore::open_raw() {
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore meta(sqlite): open " + opt_.path + ": " + msg);
     }
-    // 防御纵深：进程内本不该长 BUSY（§5.2）；测试用 busy_timeout_ms 调短做注入
+    // Defense in depth: in-process code should never see prolonged BUSY (§5.2); tests shorten busy_timeout_ms for injection
     sqlite3_busy_timeout(c->db, opt_.busy_timeout_ms);
     return c;
 }
 
 void SqliteMetaStore::apply_pragmas(Conn& c, bool full_sync) {
-    // 页缓存按连接生效——把 cache_bytes 预算摊到全部连接（1 写 + 1 alloc +
-    // pool_size 读），使 sqlite_cache 语义 = 进程级总预算（对齐 rocksdb_block_cache
-    // 的角色，§8）；地板 256KiB 兜底任何整除边角（负值单位 KiB）。
-    // journal_mode 是库的持久属性，首连接写入文件头
+    // The page cache is per-connection — spread the cache_bytes budget across all
+    // connections (1 write + 1 alloc + pool_size readers) so sqlite_cache means the
+    // process-level total budget (matching the role of rocksdb_block_cache, §8);
+    // a 256KiB floor covers any division edge cases (negative value is in KiB).
+    // journal_mode is a persistent property of the database, written into the file
+    // header by the first connection
     size_t per_conn_kib =
         std::max<size_t>(opt_.cache_bytes / size_t(opt_.pool_size + 2) / 1024, 256);
-    // journal_size_limit（S4 调优，§6）：auto-checkpoint（默认 1000 页）搬空 WAL 后
-    // 把 -wal 文件截回上限——否则运行期 WAL 恒驻高水位尺寸。其余保持默认（评估
-    // 结论见 §6：checkpoint 策略与 optimize 时机不加码）
+    // journal_size_limit (S4 tuning, §6): after auto-checkpoint (default 1000 pages)
+    // drains the WAL, truncate the -wal file back to the limit — otherwise the WAL
+    // stays at its high-water size for the whole run. Everything else keeps defaults
+    // (assessment in §6: no extra checkpoint policy or optimize scheduling)
     c.exec("PRAGMA journal_mode=WAL;"
            "PRAGMA synchronous=" + std::string(full_sync ? "FULL" : "NORMAL") + ";" +
            "PRAGMA cache_size=-" + std::to_string(per_conn_kib) + ";" +
@@ -342,8 +357,10 @@ void SqliteMetaStore::check_lineage(Conn& c) {
         if (st.step()) ver = st.col_i64(0);
     }
     if (app_id == 0 && ver == 0) {
-        // 无谱系标记：野生 SQLite 库的常态恰是 app_id=0/ver=0——有表即别人的库，
-        // 拒绝（此刻尚未做任何写入或 WAL 转换，文件不留痕）；真空库才允许建表
+        // No lineage mark: a random SQLite database typically has exactly
+        // app_id=0/ver=0 — if tables exist it is someone else's database, so refuse
+        // (no write or WAL conversion has happened yet, the file is untouched);
+        // only a truly empty database may get our schema
         Stmt st(c, kAnyTable);
         if (st.step())
             throw S3Error(S3ErrorCode::InternalError,
@@ -354,8 +371,9 @@ void SqliteMetaStore::check_lineage(Conn& c) {
     if (app_id != kAppId)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore meta(sqlite): not a duostore meta database: " + opt_.path);
-    // 版本演进策略与其余三引擎一致（docs/gaps.md §6.1）：更新的库拒绝降级运行，
-    // 更旧的库走迁移链逐级升（user_version 为整数谱系，无字符串前缀）
+    // Version-evolution policy matches the other three engines (docs/gaps.md §6.1):
+    // a newer database refuses to run downgraded, an older one climbs the migration
+    // chain step by step (user_version is an integer lineage, no string prefix)
     if (ver > kSchemaVersion)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore meta(sqlite): database schema v" + std::to_string(ver) +
@@ -364,12 +382,14 @@ void SqliteMetaStore::check_lineage(Conn& c) {
     if (ver < kSchemaVersion) migrate_schema(c, ver);
 }
 
-// 迁移链（版本 n → n+1 的就地 SQL 变换；每步一个事务，含 user_version 盖章——
-// 中途崩溃重启后从断点续走）。新增布局变更时在此登记并把 kSchemaVersion +1
+// Migration chain (in-place SQL transforms from version n → n+1; one transaction
+// per step, including the user_version stamp — after a mid-way crash, restart
+// resumes from the breakpoint). Register new layout changes here and bump
+// kSchemaVersion by 1
 void SqliteMetaStore::migrate_schema(Conn& c, int64_t ver) {
     using MigrateFn = void (*)(Conn&);
     static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
-        // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+        // {{1, &migrate_v1_to_v2}}  // example: once registered, v1 databases upgrade automatically at startup
     };
     for (; ver < kSchemaVersion; ++ver) {
         MigrateFn fn = nullptr;
@@ -390,7 +410,7 @@ void SqliteMetaStore::init_schema(Conn& c) {
         Stmt st(c, "PRAGMA user_version");
         if (st.step()) ver = st.col_i64(0);
     }
-    if (ver != 0) return;  // 已是本店库（check_lineage 校验过版本）
+    if (ver != 0) return;  // already our database (version validated by check_lineage)
     Txn t(c);
     c.exec(kSchemaDdl, "create schema");
     for (const char* n : {kCtrChunk, kCtrPack}) {
@@ -405,8 +425,9 @@ void SqliteMetaStore::init_schema(Conn& c) {
 }
 
 SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
-    // S4 指标：先于任何连接注册——打开路径的 NOTADB/CORRUPT（拿错文件、坏库）
-    // 也要计入；空 scope 返回孤立实例，测试直构零装配成本
+    // S4 metrics: registered before any connection — NOTADB/CORRUPT on the open
+    // path (wrong file, broken database) must also be counted; an empty scope
+    // returns isolated instances, so tests construct directly with zero wiring cost
     m_busy_ = opt_.metrics.counter(
         "lights3_duostore_sqlite_busy_total",
         "Statements that saw SQLITE_BUSY (busy_timeout exhausted: external writer "
@@ -415,13 +436,15 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
         "lights3_duostore_sqlite_corruption_total",
         "SQLITE_CORRUPT/SQLITE_NOTADB errors observed (data loss signal)");
 
-    // 父目录由本店自建（文件归属本店，覆盖所有调用方；失败留给 open 报错）
+    // The parent directory is created by this store itself (the file belongs to us,
+    // covering every caller; failures are left for open to report)
     std::error_code ec;
     auto parent = std::filesystem::path(opt_.path).parent_path();
     if (!parent.empty()) std::filesystem::create_directories(parent, ec);
 
-    // 单进程独占 fail-fast（§1 前提的 enforcement，对应 RocksDB 的 LOCK 文件）。
-    // 不用 PRAGMA locking_mode=EXCLUSIVE——那是连接级锁，会与自身连接池互斥
+    // Single-process exclusive fail-fast (enforcement of the §1 premise, counterpart
+    // of RocksDB's LOCK file). PRAGMA locking_mode=EXCLUSIVE is not used — that is a
+    // connection-level lock and would exclude our own connection pool
     std::string lock_path = opt_.path + ".lock";
     lock_fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
     if (lock_fd_ < 0)
@@ -434,13 +457,14 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
                       "duostore meta(sqlite): " + opt_.path +
                           " is locked by another process (single-process store)");
     }
-    // 取锁成功后任何失败都必须走 close()——构造函数抛出时析构不运行，锁与连接泄漏
+    // After the lock is taken, any failure must go through close() — the destructor
+    // does not run when the constructor throws, leaking the lock and connections
     try {
         wc_ = open_raw();
-        check_lineage(*wc_);         // 谱系校验先于任何写入/WAL 转换（§2.2）
+        check_lineage(*wc_);         // lineage check before any write/WAL conversion (§2.2)
         apply_pragmas(*wc_, opt_.sync);
         init_schema(*wc_);
-        ac_ = open_conn(/*full_sync=*/true);  // 号段连接恒 FULL（§4）
+        ac_ = open_conn(/*full_sync=*/true);  // id-segment connection is always FULL (§4)
     } catch (...) {
         shutdown(/*graceful=*/false);
         throw;
@@ -462,12 +486,15 @@ void SqliteMetaStore::shutdown(bool graceful) {
     closed_ = true;
     idle_.clear();
     ac_.reset();
-    if (wc_ && !graceful) wc_.reset();  // 构造失败清理：库没开利索，不跑优雅收尾
+    if (wc_ && !graceful) wc_.reset();  // constructor-failure cleanup: db never opened cleanly, skip graceful wrap-up
     if (wc_) {
-        // 干净关闭（§5.3）：WAL 合并回主文件并截断，目录里只剩单个 DB 文件——
-        // 冷备 = 拷这一个文件。走 checkpoint_v2 而非 PRAGMA：被读者阻塞时 PRAGMA
-        // 经 sqlite3_exec 返回 OK、busy 标志只在被丢弃的结果行里——静默失败；
-        // v2 的返回码 + 残留帧数可检测，未截干净必须告警（冷备契约会丢最近提交）
+        // Clean shutdown (§5.3): merge the WAL back into the main file and truncate,
+        // leaving a single DB file in the directory — cold backup = copy that one
+        // file. Use checkpoint_v2 rather than PRAGMA: when blocked by a reader the
+        // PRAGMA returns OK via sqlite3_exec and the busy flag sits only in the
+        // discarded result row — a silent failure; v2's return code + residual frame
+        // count are detectable, and an incomplete truncation must be warned about
+        // (the cold-backup contract would lose recent commits)
         try {
             wc_->exec("PRAGMA optimize", "optimize");
         } catch (const std::exception& e) {
@@ -483,19 +510,22 @@ void SqliteMetaStore::shutdown(bool graceful) {
         wc_.reset();
     }
     if (lock_fd_ >= 0) {
-        ::close(lock_fd_);  // 释放 flock（§1 单进程独占）
+        ::close(lock_fd_);  // release the flock (§1 single-process exclusivity)
         lock_fd_ = -1;
     }
 }
 
 SqliteMetaStore::Conn& SqliteMetaStore::wconn() {
-    // close 后抛 InternalError——防御纵深，误用变 500 而非崩溃（契约仍是
-    // close 须在在途请求完成后调用）
+    // Throw InternalError after close — defense in depth: misuse becomes a 500
+    // instead of a crash (the contract remains that close must be called after
+    // in-flight requests finish)
     if (!wc_)
         throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): store is closed");
-    // 防御：COMMIT 与兜底 ROLLBACK 相继失败（Txn 析构吞异常）会残留开放事务——
-    // 带着它进新提交撞 "transaction within a transaction" 且永久化（写连接唯一、
-    // 不重建）。先补一次 ROLLBACK，仍失败则本次抛 500，绝不带残留事务继续
+    // Defense: if COMMIT and the fallback ROLLBACK both fail (the Txn destructor
+    // swallows the exception) an open transaction lingers — entering a new commit
+    // with it hits "transaction within a transaction" and becomes permanent (the
+    // write connection is unique and never rebuilt). Issue an extra ROLLBACK first;
+    // if that also fails, throw a 500 now — never continue with a lingering txn
     if (!sqlite3_get_autocommit(wc_->db)) Stmt(*wc_, kRollback).exec();
     return *wc_;
 }
@@ -513,9 +543,11 @@ SqliteMetaStore::Lease SqliteMetaStore::read_conn() {
         }
     }
     if (!c) {
-        c = open_conn(/*full_sync=*/false);  // 纯读连接，sync 档位无关
-        // TOCTOU 防御：建连期间 close() 可能已完成（checkpoint + 截断）——丢弃
-        // 新连接（析构即关，末连接关闭会清掉重建的 -wal/-shm）并按已关闭失败
+        c = open_conn(/*full_sync=*/false);  // read-only connection, sync level irrelevant
+        // TOCTOU defense: close() may have completed (checkpoint + truncate) while
+        // the connection was being opened — discard the new connection (destruction
+        // closes it; closing the last connection removes the recreated -wal/-shm)
+        // and fail as already-closed
         std::lock_guard lk(pool_mu_);
         if (closed_)
             throw S3Error(S3ErrorCode::InternalError,
@@ -525,10 +557,13 @@ SqliteMetaStore::Lease SqliteMetaStore::read_conn() {
 }
 
 void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
-    // 开放事务残留（Txn 回滚也失败的极端路径）不得裸回池：后续裸读会永远读该
-    // 冻结 snapshot（静默陈旧）、事务方法撞嵌套 BEGIN。S4 评估后由"直接销毁"
-    // 改为先补 ROLLBACK——成功即恢复 autocommit，连接可安全复用（省一次重建）；
-    // 仍失败才销毁（重建成本兜底正确性）
+    // A lingering open transaction (the extreme path where the Txn rollback also
+    // failed) must not go back into the pool as-is: subsequent bare reads would
+    // forever see that frozen snapshot (silent staleness) and transactional methods
+    // would hit nested BEGIN. After S4 assessment, changed from "destroy outright"
+    // to issuing a ROLLBACK first — on success autocommit is restored and the
+    // connection can be reused safely (saving a rebuild); only if that still fails
+    // is it destroyed (rebuild cost backstops correctness)
     if (c && !sqlite3_get_autocommit(c->db)) {
         try {
             Stmt(*c, kRollback).exec();
@@ -539,24 +574,30 @@ void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
         }
     }
     std::lock_guard lk(pool_mu_);
-    if (!c || closed_ || int(idle_.size()) >= opt_.pool_size) return;  // 直接销毁
+    if (!c || closed_ || int(idle_.size()) >= opt_.pool_size) return;  // destroy outright
     idle_.push_back(std::move(c));
 }
 
-// ---------- 号段（§4）----------
+// ---------- Id segments (§4) ----------
 
 uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_t n) {
     n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
-    std::lock_guard lk(alloc_mu_);  // 锁序 alloc_mu_ → mu_；无反向嵌套（alloc_mu_ 只在此处）
-    if (r.limit - r.next < n) {  // 换段弃置残段（run 批派发要求段内连续，docs/gaps.md §3.9）
-        // 号段预留必须先于派发持久化——专用连接恒 synchronous=FULL（独立于
-        // opt_.sync），否则崩溃丢预留后重启重发已用 file_id，与已落盘的 chunk
-        // 文件 O_EXCL 冲突。崩溃浪费号段无害（file_id 只需唯一单调，不需连续）。
-        // 与业务写事务的库级写锁互斥改为**确定性**的（docs/gaps.md §3.9）：预留
-        // 期间持 mu_——进程内唯一写者被挡在门外，不可能再靠 busy_timeout 与
-        // 自家业务事务抽签（busy handler 不公平排队，写热点下连输 4 轮 = 20 秒
-        // 后把正常 PUT 变成 500）。有界重试保留，只针对绕过单进程锁的外部写者
-        //（flock 拦不住裸 sqlite3 工具，§5.4 表的 BUSY 行）
+    std::lock_guard lk(alloc_mu_);  // lock order alloc_mu_ → mu_; no reverse nesting (alloc_mu_ only taken here)
+    if (r.limit - r.next < n) {  // discard the remainder when switching segments (run batch dispatch requires contiguity within a segment, docs/gaps.md §3.9)
+        // The segment reservation must be persisted before dispensing — the dedicated
+        // connection is always synchronous=FULL (independent of opt_.sync); otherwise
+        // a crash losing the reservation would re-issue used file_ids after restart,
+        // colliding via O_EXCL with chunk files already on disk. Wasting a segment on
+        // crash is harmless (file_ids only need to be unique and monotonic, not
+        // contiguous). Mutual exclusion with business write transactions on the
+        // db-level write lock is made **deterministic** (docs/gaps.md §3.9): mu_ is
+        // held during reservation — the process's only writer is kept out, so we can
+        // no longer end up in a busy_timeout lottery against our own business
+        // transactions (the busy handler queues unfairly; under write hotspots,
+        // losing 4 rounds in a row = 20 seconds turns a normal PUT into a 500).
+        // Bounded retries are kept, but only for external writers that bypass the
+        // single-process lock (flock cannot stop a bare sqlite3 tool; the BUSY row
+        // of the §5.4 table)
         if (!ac_)
             throw S3Error(S3ErrorCode::InternalError,
                           "duostore meta(sqlite): store is closed");
@@ -577,7 +618,7 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_
                 throw S3Error(S3ErrorCode::InternalError,
                               "duostore meta(sqlite): counter vanished");
             hi = uint64_t(st.col_i64(0));
-            st.exec();  // RETURNING 排空到 DONE，语句完成才提交
+            st.exec();  // drain RETURNING to DONE; the statement commits only when complete
             break;
         }
         r.limit = hi;
@@ -589,13 +630,14 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_
 }
 
 uint64_t SqliteMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
-    // kRados 与 kChunk 共号段（同 rocks 版论证：refs 不分 kind，防跨 kind id 碰撞）
+    // kRados shares the segment with kChunk (same argument as the rocks version:
+    // refs does not distinguish kind, preventing cross-kind id collisions)
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack,
                     file_ids_[size_t(kind)], n);
 }
 
-// ---------- 事务内共用件 ----------
+// ---------- Shared in-transaction pieces ----------
 
 void SqliteMetaStore::require_bucket(Conn& c, std::string_view b) {
     Stmt st(c, kBucketGet);
@@ -616,8 +658,8 @@ std::optional<std::string> SqliteMetaStore::object_raw(Conn& c, std::string_view
 void SqliteMetaStore::write_refs(Conn& c, const DataRef& ref, bool add,
                                  std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack) continue;  // pack 存活走 pack_stats 账（P2）；
-                                                      // chunk/rados 皆按 file_id 入 refs
+        if (e.kind == Extent::Kind::kPack) continue;  // pack liveness goes through pack_stats (P2);
+                                                      // chunk/rados both enter refs by file_id
         if (add) {
             Stmt st(c, kRefPut);
             st.i64(1, int64_t(e.file_id)).blob(2, owner);
@@ -632,8 +674,10 @@ void SqliteMetaStore::write_refs(Conn& c, const DataRef& ref, bool add,
 
 void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign,
                                        int64_t rec_overhead) {
-    // 同 pack 多 extent 先聚合，每 pack 一条算术 UPDATE（§9.1 随业务事务同批增减）；
-    // 每条 record 计 payload + 头开销，与 file_size 同口径（docs/gaps.md §2.3a）
+    // Aggregate multiple extents of the same pack first, then one arithmetic UPDATE
+    // per pack (§9.1: increments/decrements batched with the business transaction);
+    // each record counts payload + header overhead, same accounting basis as
+    // file_size (docs/gaps.md §2.3a)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
@@ -650,9 +694,12 @@ void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign,
 
 void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason reason) {
     if (ref.extents.empty()) return;
-    // seq = AUTOINCREMENT rowid：随业务事务分配、同批提交/回滚——事务回滚不产生
-    // 账外 seq，重启不回退不重发（sqlite_sequence 与业务同事务），免号段计数器。
-    // 超大 DataRef 拆多条（docs/gaps.md §2.11）：GC 单批解码内存有界，ack 独立无害
+    // seq = AUTOINCREMENT rowid: allocated with the business transaction, committed/
+    // rolled back in the same batch — a rolled-back transaction produces no
+    // off-the-books seq, and restart neither rewinds nor re-issues (sqlite_sequence
+    // shares the business transaction), sparing an id-segment counter. Oversized
+    // DataRefs split into multiple entries (docs/gaps.md §2.11): GC per-batch decode
+    // memory stays bounded, and independent acks are harmless
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
@@ -673,7 +720,7 @@ std::vector<PartRec> SqliteMetaStore::scan_parts(Conn& c, std::string_view b,
     st.blob(1, b).blob(2, k).blob(3, id);
     while (st.step())
         out.push_back(codec::decode_part(int(st.col_i64(0)), st.col_blob(1)));
-    return out;  // part_no 数值列天然升序
+    return out;  // the numeric part_no column is naturally ascending
 }
 
 UploadRec SqliteMetaStore::require_upload_in(Conn& c, std::string_view b, std::string_view k,
@@ -713,8 +760,10 @@ void SqliteMetaStore::delete_bucket(std::string_view b) {
     Conn& c = wconn();
     Txn t(c);
     require_bucket(c, b);
-    // 空检查覆盖 objects 与 uploads（有进行中 multipart 即 BucketNotEmpty，对齐
-    // AWS——与 RocksDB 版同一论证：否则桶删后 put_part 仍可写、refs 永久泄漏）
+    // The emptiness check covers both objects and uploads (an in-progress multipart
+    // means BucketNotEmpty, matching AWS — same argument as the RocksDB version:
+    // otherwise put_part could still write after bucket deletion and refs would
+    // leak permanently)
     for (const char* sql : {kObjAny, kUpAny}) {
         Stmt st(c, sql);
         st.blob(1, b);
@@ -742,7 +791,7 @@ std::vector<BucketInfo> SqliteMetaStore::list_buckets() {
     while (st.step())
         out.push_back({std::string(st.col_blob(0)),
                        codec::from_unix_ms(codec::decode_bucket(st.col_blob(1)))});
-    return out;  // 主键 B-tree 免费提供 name 序
+    return out;  // the primary-key B-tree provides name order for free
 }
 
 // ---------- object ----------
@@ -769,7 +818,7 @@ void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectR
     require_bucket(c, b);
     std::optional<ObjectRec> old;
     if (auto v = object_raw(c, b, k)) old = codec::decode_object(std::string(k), *v);
-    check_put_condition(cond, old, k);  // 事务内检查，抛出即回滚（PutCondition 契约）
+    check_put_condition(cond, old, k);  // checked in-transaction; throwing rolls back (PutCondition contract)
     rec.version = old ? old->version + 1 : 1;
 
     std::string owner = std::string(b) + '/' + std::string(k);
@@ -795,7 +844,7 @@ bool SqliteMetaStore::delete_object(std::string_view b, std::string_view k) {
     Txn t(c);
     require_bucket(c, b);
     auto v = object_raw(c, b, k);
-    if (!v) return false;  // 幂等；Txn 析构回滚（只读到这一步，无写可回）
+    if (!v) return false;  // idempotent; Txn destructor rolls back (read-only up to here, nothing to undo)
     auto old = codec::decode_object(std::string(k), *v);
     {
         Stmt st(c, kObjDel);
@@ -809,24 +858,28 @@ bool SqliteMetaStore::delete_object(std::string_view b, std::string_view k) {
     return true;
 }
 
-// §2.3：主键范围扫 + delimiter 跳组，整个循环包在一个读事务里（WAL snapshot，
-// 一致视图）。算法与 RocksDB 版逐行对应，迭代原语从 Iterator 换成范围 SELECT
+// §2.3: primary-key range scan + delimiter group skipping, with the whole loop
+// wrapped in one read transaction (WAL snapshot, consistent view). The algorithm
+// corresponds line-by-line to the RocksDB version, with the iteration primitive
+// swapped from Iterator to a range SELECT
 ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& opt) {
     auto lease = read_conn();
     Conn& c = *lease;
     Txn t(c, /*immediate=*/false);
     require_bucket(c, b);
     ListResult out;
-    // S3：max-keys=0 返回空且 IsTruncated=false
+    // S3: max-keys=0 returns empty with IsTruncated=false
     if (opt.max_keys <= 0) {
         t.commit();
         return out;
     }
     const std::string& prefix = opt.prefix;
     const std::string& delim = opt.delimiter;
-    // seek 起点 = max(prefix, start_after 的后继)：起点恰为 start_after 时要严格
-    // 大于——BLOB memcmp 序下 key > s ⇔ key >= s+'\0'，追加 NUL 即后继，单条
-    // >= 语句通吃（对应 RocksDB 版"start_after 命中自身再 Next 一步"）
+    // Seek start = max(prefix, successor of start_after): when the start is exactly
+    // start_after we need strictly-greater — under BLOB memcmp order,
+    // key > s ⇔ key >= s+'\0', so appending NUL gives the successor and a single
+    // >= statement covers everything (corresponds to the RocksDB version's
+    // "start_after hits itself, then one extra Next")
     std::string seek = std::max(prefix, opt.start_after);
     if (!opt.start_after.empty() && opt.start_after >= prefix) seek.push_back('\0');
 
@@ -840,8 +893,9 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
     std::string last_emitted;
     int count = 0;
     bool paused = false;
-    // 一致视图注入点（§9 S4 测试专用）：首个条目发出后调一次——钩子内从写连接
-    // 并发提交，本读事务的 WAL snapshot 必须岿然不动
+    // Consistent-view injection point (§9 S4, test-only): called once after the
+    // first entry is emitted — the hook commits concurrently from the write
+    // connection, and this read transaction's WAL snapshot must remain unmoved
     auto pause_hook = [&] {
         if (paused || !list_pause_for_test_) return;
         paused = true;
@@ -849,7 +903,7 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
     };
     while (it->step()) {
         std::string uk(it->col_blob(0));
-        if (uk.compare(0, prefix.size(), prefix) != 0) break;  // 出前缀区间即止
+        if (uk.compare(0, prefix.size(), prefix) != 0) break;  // stop once past the prefix range
         if (count >= opt.max_keys) {
             out.is_truncated = true;
             out.next_token = last_emitted;
@@ -862,8 +916,10 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
                 out.common_prefixes.push_back(group);
                 ++count;
                 pause_hook();
-                // 组末字节 +1 = 后继 seek 点，跳过整组；token 语义须落组尾 →
-                // 反向单查组内最后一条 key（对应 RocksDB SeekForPrev）
+                // Group's last byte +1 = successor seek point, skipping the whole
+                // group; token semantics must land on the group tail → one reverse
+                // lookup for the last key inside the group (corresponds to RocksDB
+                // SeekForPrev)
                 std::string target = group;
                 if (!bump_last_byte(target)) break;
                 {
@@ -880,7 +936,7 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
         ++count;
         pause_hook();
     }
-    it.reset();  // 先收语句再收事务
+    it.reset();  // finish the statement before finishing the transaction
     t.commit();
     return out;
 }
@@ -933,7 +989,7 @@ void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::stri
     write_refs(c, p.data, /*add=*/true, owner);
     const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
     write_pack_delta(c, p.data, +1, ov);
-    if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
+    if (old) {  // same-number re-upload is last-write-wins: old part enters GC accounting in the same batch
         enqueue_reclaim(c, old->data, ReclaimReason::kPartOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, ov);
@@ -964,11 +1020,12 @@ std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b,
                                         std::string(st.col_blob(1)), st.col_blob(2));
         out.push_back({rec.meta.key, rec.upload_id, codec::from_unix_ms(rec.initiated_ms)});
     }
-    return out;  // 主键序 = (key, upload_id) 序
+    return out;  // primary-key order = (key, upload_id) order
 }
 
-// complete 是纯元数据事务，零数据搬运（主文档 §8）；parts 集合在同一事务内读取，
-// 天然最新——无 Redis 版的 sha1 指纹、无 RocksDB 版的锁内重扫概念（§3.4）
+// complete is a pure metadata transaction, zero data movement (main doc §8); the
+// parts set is read inside the same transaction and is therefore naturally fresh —
+// no Redis-version sha1 fingerprint, no RocksDB-version in-lock rescan concept (§3.4)
 std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_view k,
                                              std::string_view id,
                                              std::span<const PartInfo> parts) {
@@ -1000,25 +1057,27 @@ std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_vie
         st.exec();
     }
     {
-        Stmt st(c, kPartDelAll);  // 整前缀一条语句（对应 RocksDB DeleteRange）
+        Stmt st(c, kPartDelAll);  // whole prefix in one statement (corresponds to RocksDB DeleteRange)
         st.blob(1, b).blob(2, k).blob(3, id);
         st.exec();
     }
     for (const auto& [no, p] : stored) {
         if (selected.count(no)) {
-            // refs 转移：owner 改写为对象。pack 账存活不变，但口径从分片重平衡为
-            // 对象（-分片头开销 +对象头开销，recs 一减一增相抵）：保证后续对象
-            // 删除按对象口径扣减后账精确归零
+            // refs transfer: owner rewritten to the object. Pack liveness is
+            // unchanged, but the accounting basis is rebalanced from part to object
+            // (-part header overhead +object header overhead; recs cancel with one
+            // decrement and one increment): guarantees a later object deletion,
+            // deducting on the object basis, brings the account exactly to zero
             write_refs(c, p.data, /*add=*/true, owner);
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
             write_pack_delta(c, p.data, +1, codec::pack_rec_overhead(b, k));
-        } else {  // 未选中分片入 GC 账
+        } else {  // unselected parts enter GC accounting
             enqueue_reclaim(c, p.data, ReclaimReason::kComplete);
             write_refs(c, p.data, /*add=*/false, {});
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
-    if (old) {  // 旧同名对象入 GC 账
+    if (old) {  // old same-name object enters GC accounting
         enqueue_reclaim(c, old->data, ReclaimReason::kOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, codec::pack_rec_overhead(b, k));
@@ -1049,7 +1108,7 @@ void SqliteMetaStore::abort_upload(std::string_view b, std::string_view k,
     t.commit();
 }
 
-// ---------- GC 记账 ----------
+// ---------- GC accounting ----------
 
 std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t max,
                                                                          uint64_t min_seq,
@@ -1062,7 +1121,7 @@ std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t 
     size_t extents = 0;
     while (st.step()) {
         out.emplace_back(uint64_t(st.col_i64(0)), codec::decode_reclaim(st.col_blob(1)));
-        // 累计 extent 上限（gaps §2.11）：至少返回 1 项
+        // Cumulative extent cap (gaps §2.11): at least 1 item is returned
         extents += out.back().second.extents.size();
         if (extents >= max_extents) break;
     }
@@ -1070,9 +1129,12 @@ std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t 
 }
 
 void SqliteMetaStore::ack_reclaim(uint64_t seq) {
-    // 单语句盲删，但写连接唯一——必须持 mu_（否则语句会插进另一线程的开放事务；
-    // SQLite 单写者约束下"GC 销账不排队业务提交"的 RocksDB 版性质不可保留）。
-    // 每条 ack 是一次独立提交（sync=true 时含 fsync）——批量销账走 ack_reclaims
+    // Single-statement blind delete, but the write connection is unique — mu_ must
+    // be held (otherwise the statement would slip into another thread's open
+    // transaction; under SQLite's single-writer constraint, the RocksDB version's
+    // property that "GC settlement does not queue behind business commits" cannot
+    // be preserved). Each ack is an independent commit (including an fsync when
+    // sync=true) — batch settlement goes through ack_reclaims
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Stmt st(c, kGcqDel);
@@ -1082,7 +1144,8 @@ void SqliteMetaStore::ack_reclaim(uint64_t seq) {
 
 void SqliteMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
     if (seqs.empty()) return;
-    // 覆写接口默认的逐条转发：单事务单 fsync，GC 每周期一次提交而非 N 次（§3.3）
+    // Overrides the interface's default per-item forwarding: one transaction, one
+    // fsync — GC commits once per cycle instead of N times (§3.3)
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
@@ -1095,7 +1158,8 @@ void SqliteMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
 }
 
 std::vector<PackStat> SqliteMetaStore::pack_stats() {
-    // 返回全部有账 pack（含 live=0 与未封存项——空 pack 整删与重启补封依赖）
+    // Returns every pack with an account (including live=0 and unsealed entries —
+    // whole-pack deletion of empty packs and restart re-sealing depend on them)
     auto lease = read_conn();
     std::vector<PackStat> out;
     Stmt st(*lease, kPackList);
@@ -1106,8 +1170,9 @@ std::vector<PackStat> SqliteMetaStore::pack_stats() {
 }
 
 void SqliteMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
-    // 单语句 upsert（幂等；0 不覆盖已知 size——kPackSeal 的 CASE 分支）；写连接
-    // 唯一，须持 mu_（同 ack_reclaim 论证）
+    // Single-statement upsert (idempotent; 0 never overwrites a known size — the
+    // CASE branch in kPackSeal); the write connection is unique, so mu_ must be
+    // held (same argument as ack_reclaim)
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Stmt st(c, kPackSeal);
@@ -1129,7 +1194,7 @@ bool SqliteMetaStore::apply_swap(Conn& c, std::string_view b, std::string_view k
     auto v = object_raw(c, b, k);
     if (!v) return false;
     auto rec = codec::decode_object(std::string(k), *v);
-    // 乐观校验：version 或 extent 不符 = 期间被覆盖/删除 → 放弃（主文档 §9.2）
+    // Optimistic check: version or extent mismatch = overwritten/deleted in the meantime → abandon (main doc §9.2)
     if (rec.version != expect_version || rec.data.extents != from.extents) return false;
     rec.data = to;
     rec.version += 1;
@@ -1139,13 +1204,15 @@ bool SqliteMetaStore::apply_swap(Conn& c, std::string_view b, std::string_view k
         st.exec();
     }
     std::string owner = std::string(b) + '/' + std::string(k);
-    // refs 按差集操作（meta_util.h refs_delta）：整加再整删会删掉 to/from 共享的
-    // 未迁移 chunk 的 refs 表项 → 孤儿扫描误删活数据
+    // refs operated on as a set difference (meta_util.h refs_delta): add-all then
+    // remove-all would delete the refs entries of un-migrated chunks shared by
+    // to/from → the orphan scan would wrongly delete live data
     auto rd = refs_delta(from, to);
     write_refs(c, rd.added, /*add=*/true, owner);
     write_refs(c, rd.removed, /*add=*/false, {});
-    // 压实换 ref：账随 extent 迁移（§9.2）；两侧都按对象口径（迁出旧 record 若为
-    // mpu 形态则轻微低扣，保守方向）
+    // Compaction ref swap: accounting migrates with the extents (§9.2); both sides
+    // use the object basis (if the outgoing old record was in mpu form this slightly
+    // under-deducts — the conservative direction)
     const int64_t ov = codec::pack_rec_overhead(b, k);
     write_pack_delta(c, to, +1, ov);
     write_pack_delta(c, from, -1, ov);
@@ -1158,14 +1225,16 @@ bool SqliteMetaStore::swap_extents(std::string_view b, std::string_view k,
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
-    if (!apply_swap(c, b, k, expect_version, from, to)) return false;  // Txn 析构回滚
+    if (!apply_swap(c, b, k, expect_version, from, to)) return false;  // Txn destructor rolls back
     t.commit();
     return true;
 }
 
 std::vector<bool> SqliteMetaStore::swap_extents_batch(std::span<const SwapReq> reqs) {
-    // 压实批量化（gaps §2.13）：整批一个事务一次 fsync——逐条 swap 每条一次独立
-    // 提交且与业务写争同一把库级写锁。逐项 CAS 独立：失败项不落写、不殃及其余
+    // Batched compaction (gaps §2.13): the whole batch is one transaction with one
+    // fsync — per-item swap would commit independently per item while contending
+    // with business writes for the same db-level write lock. Per-item CAS stays
+    // independent: a failed item writes nothing and does not affect the rest
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     std::vector<bool> out;
@@ -1177,7 +1246,7 @@ std::vector<bool> SqliteMetaStore::swap_extents_batch(std::span<const SwapReq> r
         any = any || ok;
         out.push_back(ok);
     }
-    if (any) t.commit();  // 全失败：Txn 析构回滚（无写可回滚，纯 no-op）
+    if (any) t.commit();  // all failed: Txn destructor rolls back (nothing written, pure no-op)
     return out;
 }
 
@@ -1189,7 +1258,8 @@ bool SqliteMetaStore::chunk_referenced(uint64_t file_id) {
 }
 
 void SqliteMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
-    // 读连接迭代（WAL 下单语句自带一致快照）；孤儿扫描容忍弱一致视图
+    // Iterate on a read connection (under WAL a single statement carries its own
+    // consistent snapshot); the orphan scan tolerates a weakly consistent view
     auto lease = read_conn();
     Stmt st(*lease, kRefScan);
     while (st.step()) cb(uint64_t(st.col_i64(0)));

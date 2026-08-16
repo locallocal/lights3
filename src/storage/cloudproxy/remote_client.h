@@ -1,6 +1,7 @@
-// cloudproxy 内部头：ClientPool（httplib::Client 连接池）+ 通用签名管线 +
-// 错误映射与重试（docs/cloudproxy-backend.md §2.2/§5/§8.1）。包含 httplib，只允许被
-// src/storage/cloudproxy/*.cc 与 lights3_core 内部 TU include。
+// cloudproxy internal header: ClientPool (httplib::Client connection pool) + generic
+// signing pipeline + error mapping and retry (docs/cloudproxy-backend.md §2.2/§5/§8.1).
+// Includes httplib; may only be included by src/storage/cloudproxy/*.cc and TUs internal
+// to lights3_core.
 #pragma once
 
 #include <httplib/httplib.h>
@@ -19,37 +20,39 @@
 
 namespace lights3::storage::cloudproxy {
 
-// SigV4 的 UNSIGNED-PAYLOAD 字面值（docs/cloudproxy-backend.md §3.2）
+// SigV4's UNSIGNED-PAYLOAD literal (docs/cloudproxy-backend.md §3.2)
 inline constexpr const char* kUnsignedPayload = "UNSIGNED-PAYLOAD";
 
 struct Endpoint {
     bool https = false;
     std::string host;
-    int port = 0;             // 显式或按 scheme 默认
-    std::string signed_host;  // 与 httplib 实际发出的 Host 头逐字节一致（docs/cloudproxy-backend.md §2.2）
-    std::string base_url;     // scheme://host:port，httplib universal Client 入参
+    int port = 0;             // explicit, or defaulted per scheme
+    std::string signed_host;  // byte-identical to the Host header httplib actually sends (docs/cloudproxy-backend.md §2.2)
+    std::string base_url;     // scheme://host:port, input to httplib's universal Client
 
-    static Endpoint parse(const std::string& url);  // 非法抛 std::runtime_error
+    static Endpoint parse(const std::string& url);  // throws std::runtime_error on invalid input
 };
 
-// 寻址目标（docs/cloudproxy-backend.md §7）：path-style = "/bucket/…" + endpoint Host；
-// virtual-hosted = "/…" + "<bucket>.<endpoint-host>" Host。两种风格下 TCP 连接与
-// SNI 恒指 endpoint（ClientPool 不分化），仅 Host/签名与路径变化
+// Addressing target (docs/cloudproxy-backend.md §7): path-style = "/bucket/..." + endpoint
+// Host; virtual-hosted = "/..." + "<bucket>.<endpoint-host>" Host. In both styles the TCP
+// connection and SNI always point at the endpoint (ClientPool does not specialize); only
+// Host/signature and path vary
 struct Target {
-    std::string prefix;  // path-style 为 "/<rb>"（已编码）；vhost 为空
-    std::string host;    // 进 Host 头与 SigV4 的值
+    std::string prefix;  // "/<rb>" (already encoded) for path-style; empty for vhost
+    std::string host;    // value that goes into the Host header and SigV4
     std::string bucket_path() const { return prefix.empty() ? "/" : prefix; }
     std::string object_path(std::string_view encoded_key_path) const {
         return prefix + std::string(encoded_key_path);
     }
 };
 
-// 远端观测指标（docs/cloudproxy-backend.md §8.2）：空 scope 时全部为孤立实例，
-// 调用无害。error 计数按远端码动态注册（get-or-create），码集有界：wire code
-// 词表 + "http_<status>" + "transport"
+// Remote observability metrics (docs/cloudproxy-backend.md §8.2): with an empty scope all
+// are orphan instances and calls are harmless. Error counts are registered dynamically per
+// remote code (get-or-create); the code set is bounded: the wire-code vocabulary +
+// "http_<status>" + "transport"
 struct RemoteMetrics {
     explicit RemoteMetrics(const MetricsScope& scope);
-    std::shared_ptr<MetricHistogram> op_seconds(const char* op) const;  // 按 op 缓存注册
+    std::shared_ptr<MetricHistogram> op_seconds(const char* op) const;  // cached registration per op
     void count_retry(const char* op) const;
     void count_error(const std::string& code) const;
     std::shared_ptr<MetricCounter> etag_mismatch;
@@ -57,12 +60,13 @@ struct RemoteMetrics {
 
 private:
     MetricsScope scope_;
-    mutable std::mutex m_;  // op/code → 实例缓存（免每次进注册表全局锁）
+    mutable std::mutex m_;  // op/code -> instance cache (avoids the registry's global lock on every call)
     mutable std::map<std::string, std::shared_ptr<MetricHistogram>> ops_;
     mutable std::map<std::string, std::shared_ptr<MetricCounter>> retries_, errors_;
 };
 
-// 互斥保护的空闲栈式连接池；httplib::Client 非线程安全，独占租借（docs/cloudproxy-backend.md §8.1）
+// Mutex-protected idle-stack connection pool; httplib::Client is not thread-safe, so
+// leases are exclusive (docs/cloudproxy-backend.md §8.1)
 class ClientPool {
 public:
     ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep,
@@ -84,7 +88,7 @@ public:
         std::unique_ptr<httplib::Client> client_;
     };
 
-    Lease acquire();  // 到上限阻塞等待；等待超 request_timeout 抛 SlowDown
+    Lease acquire();  // blocks when at the cap; throws SlowDown if the wait exceeds request_timeout
 
 private:
     friend class Lease;
@@ -93,18 +97,20 @@ private:
 
     const CloudProxyConfig cfg_;
     const Endpoint ep_;
-    std::shared_ptr<MetricHistogram> wait_hist_;  // acquire 等待时长（§8.2；可空）
+    std::shared_ptr<MetricHistogram> wait_hist_;  // acquire wait duration (§8.2; may be null)
     std::mutex m_;
     std::condition_variable cv_;
     std::vector<std::unique_ptr<httplib::Client>> idle_;
     int total_ = 0;
 };
 
-// 错误映射的 404 上下文（docs/cloudproxy-backend.md §5.1：404 且体不可解析时按操作补语义）
+// 404 context for error mapping (docs/cloudproxy-backend.md §5.1: on a 404 with an
+// unparsable body, fill in semantics based on the operation)
 enum class ErrCtx { None, Key, Bucket, Upload };
 
-// 远端 wire code → 本地 S3ErrorCode，含近义别名（BucketAlreadyExists、
-// TooManyRequests 等）；throw_remote_error 与 complete 的 200-错误体路径共用
+// Remote wire code -> local S3ErrorCode, including near-synonym aliases
+// (BucketAlreadyExists, TooManyRequests, etc.); shared by throw_remote_error and
+// complete's 200-with-error-body path
 std::optional<s3::S3ErrorCode> map_remote_code(std::string_view wire);
 
 struct RemoteContext {
@@ -117,18 +123,20 @@ struct RemoteContext {
               AuthConfig{.credentials = {}, .region = cfg.region, .service = "s3"})),
           cred{cfg.access_key, cfg.secret_key} {}
 
-    // 寻址（docs/cloudproxy-backend.md §7）：按 force_path_style 给出路径前缀与 Host
+    // Addressing (docs/cloudproxy-backend.md §7): yields the path prefix and Host per force_path_style
     Target target(const std::string& remote_bucket) const;
 
-    // 构造最小 HttpRequest 只为签名，再搬运为 httplib::Headers（docs/cloudproxy-backend.md §2.2）。
-    // extra 中的 x-amz-* 自动进 SignedHeaders；Content-Type 走 httplib 参数，勿放这里。
-    // host 空 = endpoint Host；vhost 请求传 Target::host
+    // Build a minimal HttpRequest solely for signing, then carry it over as
+    // httplib::Headers (docs/cloudproxy-backend.md §2.2). x-amz-* entries in extra
+    // automatically enter SignedHeaders; Content-Type goes through the httplib parameter,
+    // do not put it here. Empty host = endpoint Host; vhost requests pass Target::host
     httplib::Headers signed_headers(
         const std::string& method, const std::string& raw_path, const std::string& raw_query,
         const std::vector<std::pair<std::string, std::string>>& extra,
         const std::string& payload_hash, const std::string& host = "") const;
 
-    // 远端错误 → 本地 S3Error（docs/cloudproxy-backend.md §5.1 映射矩阵单点实现）
+    // Remote error -> local S3Error (single-point implementation of the
+    // docs/cloudproxy-backend.md §5.1 mapping matrix)
     [[noreturn]] void throw_remote_error(int status, const std::string& body, ErrCtx ctx,
                                          std::string_view resource) const;
     [[noreturn]] void throw_transport_error(httplib::Error err) const;
@@ -142,16 +150,18 @@ struct RemoteContext {
                e == httplib::Error::SSLConnection || e == httplib::Error::Read ||
                e == httplib::Error::Write;
     }
-    // 连接建立阶段的错误（PUT 类可安全重试的子集，docs/cloudproxy-backend.md §5.2）
+    // Connection-establishment-stage errors (the subset safely retryable for PUT-like ops,
+    // docs/cloudproxy-backend.md §5.2)
     static bool connection_stage_error(httplib::Error e) {
         return e == httplib::Error::Connection || e == httplib::Error::ConnectionTimeout ||
                e == httplib::Error::SSLConnection;
     }
-    void backoff(int attempt) const;  // base × 2^n + 抖动
+    void backoff(int attempt) const;  // base x 2^n + jitter
 
-    // 幂等请求的统一重试执行：fn 拿租借的 client 发一次请求；
-    // 传输层错误 / 5xx / 429 按策略重试，耗尽后返回最后一次 Result。
-    // op 进 §8.2 指标：每次远端往返各记一次时延，重试另计
+    // Unified retry execution for idempotent requests: fn takes the leased client and sends
+    // one request; transport errors / 5xx / 429 are retried per policy, and after exhaustion
+    // the last Result is returned. op feeds the §8.2 metrics: each remote round trip records
+    // its own latency, retries are counted separately
     template <class F>
     httplib::Result with_retry(const char* op, F&& fn) {
         auto hist = metrics.op_seconds(op);
@@ -180,9 +190,11 @@ struct RemoteContext {
     Credential cred;
 };
 
-// 跳过整个 common prefix 组的 start-after 值（docs/cloudproxy-backend.md §4.2）：prefix 用 0xff
-// 填充到 key 长度上限。排他语义下组内 key 全部 <= 该值被跳过，组外后继 key
-// 全部 > 该值不遗漏。（"末字符 +1"的旧方案会把与边界串同名的字面 key 一并跳掉）
+// start-after value that skips an entire common-prefix group (docs/cloudproxy-backend.md
+// §4.2): the prefix is padded with 0xff up to the key length limit. Under exclusive
+// semantics every key inside the group is <= this value and gets skipped, while every
+// successor key outside the group is > it and none are missed. (The old "last char +1"
+// scheme would also skip a literal key identical to the boundary string)
 std::string group_skip_token(std::string_view prefix);
 
 }  // namespace lights3::storage::cloudproxy

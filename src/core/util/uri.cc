@@ -46,7 +46,7 @@ std::string percent_decode_query(std::string_view s) {
                 continue;
             }
         }
-        // 只有未编码的字面 '+' 才是 form 空格；%2B 解码所得的 '+' 不受影响
+        // Only an unencoded literal '+' is a form space; a '+' produced by decoding %2B is unaffected
         if (s[i] == '+') {
             out.push_back(' ');
             continue;

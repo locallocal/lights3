@@ -9,23 +9,27 @@ namespace lights3 {
 
 namespace {
 
-// 自销毁的顶层协程：驱动一个后台 Task 并在结束时回调（异常只记日志）
+// Self-destroying top-level coroutine: drives one background Task and invokes a
+// callback at the end (exceptions are only logged)
 struct Detached {
     struct promise_type {
         Detached get_return_object() { return {}; }
         std::suspend_never initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // 协程体内已全捕获
+        void unhandled_exception() { std::terminate(); }  // coroutine body catches everything
     };
 };
 
 Detached run_detached(const char* name, Task<void> t, std::function<void()> done) {
     {
-        // 被等待任务的协程帧必须在 done() **之前**销毁：done() 一旦执行，
-        // wait_idle() 就会放行持有方开始析构后端/线程池等资源，而任务帧内的局部量
-        // 此刻才刚要销毁，会去碰这些已亡对象（docs/gaps.md §3.9）。协程参数 t 是
-        // 帧的一部分（随帧销毁，晚于 done），故先移进本作用域的局部量
+        // The awaited task's coroutine frame must be destroyed **before** done():
+        // once done() runs, wait_idle() releases the owner to start destroying the
+        // backend/thread pool and other resources, while locals inside the task
+        // frame are only just about to be destroyed and would touch those dead
+        // objects (docs/gaps.md §3.9). The coroutine parameter t is part of the
+        // frame (destroyed with it, after done), hence moved into a local of this
+        // scope first
         Task<void> task = std::move(t);
         try {
             co_await std::move(task);
@@ -49,7 +53,8 @@ bool BackgroundTaskGroup::spawn(Task<void> t) {
     try {
         run_detached(name_, std::move(t), [this] { on_done(); });
     } catch (...) {
-        // 帧分配失败：计数已加而 done 回调永不执行，不回补则 wait_idle() 永久阻塞
+        // Frame allocation failed: the count was already incremented and the done
+        // callback will never run; without compensating, wait_idle() blocks forever
         on_done();
         throw;
     }
@@ -78,9 +83,11 @@ void BackgroundTaskGroup::begin_close() {
 }
 
 void BackgroundTaskGroup::wait_idle() {
-    // 关停挂死排查（docs/gaps.md §7）：语义仍是无限等（强杀在途任务只会换来
-    // UAF），但每 10 秒把"卡在哪个组、还剩几个任务"写进日志——此前是裸 cv.wait，
-    // 停机挂死时 gdb 之外零线索
+    // Shutdown-hang diagnostics (docs/gaps.md §7): the semantics are still an
+    // unbounded wait (force-killing in-flight tasks would only buy a UAF), but every
+    // 10 seconds "which group is stuck, how many tasks remain" is written to the log
+    // — previously this was a bare cv.wait, leaving zero clues outside gdb when
+    // shutdown hung
     std::unique_lock lk(m_);
     while (!cv_.wait_for(lk, std::chrono::seconds(10), [&] { return count_ == 0; }))
         LOG_WARN("{}: wait_idle still blocked, {} background task(s) in flight", name_, count_);

@@ -19,7 +19,7 @@ inline std::string to_hex(std::span<const uint8_t> data) {
     return out;
 }
 
-// 非法字符或奇数长度返回空 vector（调用方据此判定格式错误）
+// Returns an empty vector on invalid characters or odd length (callers use this to detect malformed input)
 inline std::vector<uint8_t> from_hex(std::string_view hex) {
     auto val = [](char c) -> int {
         if (c >= '0' && c <= '9') return c - '0';

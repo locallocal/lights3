@@ -1,7 +1,10 @@
-// L1/L3 共享：推模型 ↔ 拉模型的翻转组件（docs/cloudproxy-backend.md §3.1，自 httplib 驱动提取）。
-// BlockQueue：按字节限容的有界缓冲，单生产者/单消费者；容量即背压。
-// 生产者 push 返回 false 表示消费方已 cancel；消费者 pop 返回 0 表示 EOF，
-// close(ok=false) 后的 pop 以异常传播（对应"对端中途失败"契约）。
+// Shared by L1/L3: push-model <-> pull-model inversion components
+// (docs/cloudproxy-backend.md §3.1, extracted from the httplib driver).
+// BlockQueue: bounded buffer capped by bytes, single-producer/single-consumer;
+// the capacity is the backpressure. Producer push returning false means the
+// consumer has cancelled; consumer pop returning 0 means EOF, and pop after
+// close(ok=false) propagates as an exception (matching the "peer failed
+// mid-transfer" contract).
 #pragma once
 
 #include <condition_variable>
@@ -22,7 +25,7 @@ class BlockQueue {
 public:
     explicit BlockQueue(size_t cap_bytes) : cap_(cap_bytes) {}
 
-    // 生产者；返回 false 表示消费方已取消（推送方收到 false 即中止传输）
+    // Producer; false means the consumer has cancelled (the pusher aborts the transfer on false)
     bool push(const char* data, size_t n) {
         std::unique_lock lk(m_);
         cv_push_.wait(lk, [&] { return bytes_ < cap_ || cancelled_; });
@@ -40,13 +43,13 @@ public:
         cv_pop_.notify_all();
     }
 
-    // 消费者；0 = EOF；生产方中途失败、或队列已 cancel 且无余量时以异常传播
+    // Consumer; 0 = EOF; throws if the producer failed mid-transfer, or the queue was cancelled with nothing left
     size_t pop(std::span<std::byte> buf) {
         std::unique_lock lk(m_);
         cv_pop_.wait(lk, [&] { return !blocks_.empty() || closed_ || cancelled_; });
         if (blocks_.empty()) {
-            // cancel 后不能再等生产者（它见到 cancelled 即停止 push），
-            // 也不能报成正常 EOF
+            // After cancel we must not keep waiting for the producer (it stops
+            // pushing once it sees cancelled), nor report a normal EOF
             if (cancelled_ && !closed_)
                 throw std::runtime_error("http body: transfer cancelled");
             if (!ok_) throw std::runtime_error("http body: peer disconnected mid-body");
@@ -69,8 +72,9 @@ public:
         std::lock_guard lk(m_);
         cancelled_ = true;
         cv_push_.notify_all();
-        // 挂在 pop 上的消费者同样要唤醒：本组件是共享件（cloudproxy 也用），
-        // 先 cancel 再 pop（或另一线程 cancel）不能让消费者永久阻塞
+        // Consumers blocked in pop must be woken too: this is a shared component
+        // (cloudproxy uses it as well), and cancel-before-pop (or cancel from
+        // another thread) must not leave the consumer blocked forever
         cv_pop_.notify_all();
     }
 
@@ -88,9 +92,11 @@ private:
 
 class QueueBodyReader : public BodyReader {
 public:
-    // request_thread 非空时（httplib 驱动，docs/gaps.md §2.10）：pop 的 cv 阻塞
-    // 先切回请求自己的线程（它正闲在 sync_wait_pumping 里），不占共享池线程；
-    // 空则就地阻塞（cloudproxy 的 pump 方向本就在池线程按块让出，见调用方注释）
+    // When request_thread is non-null (httplib driver, docs/gaps.md §2.10): the
+    // cv-blocking pop first switches back to the request's own thread (which is
+    // idling in sync_wait_pumping), so it does not occupy a shared pool thread;
+    // when null, it blocks in place (cloudproxy's pump direction already yields
+    // per block on a pool thread, see the caller's comment)
     QueueBodyReader(std::shared_ptr<BlockQueue> q, std::optional<uint64_t> len,
                     IExecutor* request_thread = nullptr)
         : q_(std::move(q)), len_(len), exec_(request_thread) {}

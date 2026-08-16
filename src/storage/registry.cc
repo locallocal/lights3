@@ -24,7 +24,7 @@ std::map<std::string, BackendFactory>& registry() {
     return r;
 }
 
-// localfs 与 xlocalfs 共用的 root/staging 参数解析
+// root/staging parameter parsing shared by localfs and xlocalfs
 std::pair<std::string, std::string> fs_backend_paths(const BackendConfig& cfg) {
     auto root = cfg.params.count("root") ? cfg.params.at("root") : "";
     if (root.empty())
@@ -34,8 +34,8 @@ std::pair<std::string, std::string> fs_backend_paths(const BackendConfig& cfg) {
     return {root, staging};
 }
 
-// mpu_ttl / mpu_scan_interval（docs/gaps.md §6.3）：此前 7 天 TTL 硬编码且只在
-// 启动扫一次
+// mpu_ttl / mpu_scan_interval (docs/gaps.md §6.3): previously the 7-day TTL was hardcoded
+// and only scanned once at startup
 LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     LocalFsOptions o;
     if (cfg.params.count("mpu_ttl")) o.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
@@ -44,15 +44,19 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     return o;
 }
 
-// per-backend 独立 IO 池（docs/concurrency.md §3.1 预留的兑现）：
-// params 带 io_threads（≥1）的后端获得专属 ThreadPool——云端慢请求占满共享池
-// 会饿死本地盘路径，池按 backend 隔离即互不牵制；缺省共享全局池（多数部署的
-// 正确选择，隔离是"确认了饿死征兆再开"的定向手段）。通用键：任意 type 生效，
-// 各后端 from_params 对未知键不设防、无需逐个登记。
-// 生命周期：后端持 shared_ptr，析构即 join（ThreadPool dtor）；指标回调闭包
-// 亦持一份，注册表存活期 stats() 恒可安全调用（join 后只读）。
-// 观测：专属池以 gauge 回调挂 backend 标签（渲染时拉取瞬时值），与全局池的
-// lights3_pool_*（s3::Metrics 无标签渲染）名字空间错开，避免同名双 TYPE 行
+// Per-backend dedicated IO pool (fulfilling the reservation in docs/concurrency.md §3.1):
+// a backend whose params carry io_threads (>=1) gets its own ThreadPool -- slow cloud
+// requests filling the shared pool would starve the local-disk path; isolating pools per
+// backend keeps them from dragging each other down. Default is the shared global pool (the
+// right choice for most deployments; isolation is a targeted measure to "enable once
+// starvation symptoms are confirmed"). Generic key: effective for any type; each backend's
+// from_params does not guard against unknown keys, so no per-backend registration needed.
+// Lifetime: the backend holds the shared_ptr, destruction joins (ThreadPool dtor); the
+// metrics callback closures also hold a copy, so stats() stays safe to call for the
+// registry's lifetime (read-only after join).
+// Observability: the dedicated pool hangs gauge callbacks with the backend label (instant
+// values pulled at render time), namespaced apart from the global pool's lights3_pool_*
+// (rendered by s3::Metrics without labels) to avoid duplicate TYPE lines of the same name
 std::shared_ptr<ThreadPool> backend_pool(const BackendConfig& cfg,
                                          const std::shared_ptr<ThreadPool>& shared,
                                          const MetricsScope& scope) {
@@ -104,15 +108,17 @@ void ensure_registered() {
                     return std::make_shared<XLocalFsBackend>(root, staging, pool, uo,
                                                              fs_backend_opts(cfg), m);
                 } catch (const std::exception& e) {
-                    // io_uring 不可用（老内核、容器 seccomp 挡掉 io_uring_setup、
-                    // memlock 配额不足）此前直接把进程带崩（docs/gaps.md §6.3）。
-                    // xlocalfs 与 localfs 的盘上布局、元数据语义完全相同——回落是
-                    // 无损的，只是失去异步 IO。响亮告警，不静默降级
+                    // io_uring being unavailable (old kernel, container seccomp blocking
+                    // io_uring_setup, insufficient memlock quota) used to crash the whole
+                    // process (docs/gaps.md §6.3). xlocalfs and localfs share the exact
+                    // same on-disk layout and metadata semantics -- the fallback is
+                    // lossless, only async IO is lost. Warn loudly, no silent degradation
                     LOG_WARN("xlocalfs backend '{}': io_uring unavailable ({}); falling back "
                              "to the localfs data path (same on-disk layout, synchronous IO)",
                              cfg.name, e.what());
-                    // 告警只在启动刷一行日志，滚动后就没了踪迹；常驻 gauge 让
-                    // "以为在跑异步 IO 实际是同步回落"在监控面上一直可见
+                    // The warning is a single log line at startup that vanishes after
+                    // rotation; a persistent gauge keeps "thought we were running async IO
+                    // but actually fell back to sync" visible on the monitoring plane
                     m.gauge("lights3_xlocalfs_uring_fallback",
                             "io_uring unavailable, fell back to localfs backend")
                         ->set(1);
@@ -129,8 +135,9 @@ void ensure_registered() {
                 if (cfg.params.count("mpu_ttl"))
                     mo.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
                 auto b = std::make_shared<MemoryBackend>(mo);
-                // 用量可观测（docs/gaps.md §6.3）：内存后端配错的代价是 OOM，
-                // 至少让"离上限还有多远"看得见。回调 gauge 渲染时才取值
+                // Usage observability (docs/gaps.md §6.3): a misconfigured memory backend
+                // costs an OOM, so at least make "how far from the limit" visible. The
+                // callback gauge reads the value only at render time
                 m.gauge_callback("lights3_memory_backend_used_bytes",
                                  "Bytes resident in the memory backend (objects + inflight parts)",
                                  [w = std::weak_ptr<MemoryBackend>(b)] {
@@ -172,7 +179,8 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool,
     std::shared_ptr<MetricsRegistry> metrics) {
     ensure_registered();
-    // 两阶段构建（docs/tiered-storage.md §2）：先构造全部叶子后端，再按依赖迭代构造组合后端
+    // Two-phase build (docs/tiered-storage.md §2): construct all leaf backends first, then
+    // construct composite backends iteratively by dependency
     std::map<std::string, std::shared_ptr<IStorageBackend>> out;
     std::vector<const BackendConfig*> deferred;
     {
@@ -181,10 +189,12 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
             if (!names.insert(cfg.name).second)
                 throw std::runtime_error("duplicate backend name: " + cfg.name);
     }
-    // 构建中途失败要回滚：已建的后端各自持一个专属 ThreadPool（线程已起）与一组
-    // 指标 gauge 回调（闭包持池的 shared_ptr）。直接让异常穿出去会留下孤儿池与
-    // 读陈旧 stats 的回调，且 main 走不到 close() 路径。守卫在异常路径清空 out
-    // （后端析构 → 池 join）并撤掉本次注册的指标
+    // A mid-build failure must roll back: already-built backends each hold a dedicated
+    // ThreadPool (threads already started) and a set of metric gauge callbacks (closures
+    // holding the pool's shared_ptr). Letting the exception escape directly would leave
+    // orphan pools and callbacks reading stale stats, and main never reaches the close()
+    // path. The guard clears out on the exception path (backend dtor -> pool join) and
+    // removes the metrics registered by this build
     struct BuildRollback {
         std::map<std::string, std::shared_ptr<IStorageBackend>>* out;
         MetricsRegistry* metrics;
@@ -192,7 +202,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
         bool done = false;
         ~BuildRollback() {
             if (done) return;
-            if (metrics)  // 测试装配可不带注册表
+            if (metrics)  // test harnesses may run without a registry
                 for (auto& name : scopes) metrics->remove_labeled("backend", name);
             out->clear();
         }
@@ -206,13 +216,15 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
         auto it = registry().find(cfg.type);
         if (it == registry().end())
             throw std::runtime_error("unknown storage backend type: " + cfg.type);
-        // 每后端一个 scope：实例级 backend=<name> 标签，工厂内按需再加维度
+        // One scope per backend: instance-level backend=<name> label; factories add more
+        // dimensions as needed
         MetricsScope scope(metrics, {{"backend", cfg.name}});
         rollback.scopes.push_back(cfg.name);
         out[cfg.name] = it->second(cfg, backend_pool(cfg, pool, scope), scope);
     }
-    // tiered 引用 name 已就绪即可构造；tiered 套 tiered 按依赖序解开，解不开
-    // 的（循环/未知引用）视为配置错误
+    // A tiered backend can be constructed once its referenced names are ready; tiered
+    // nesting tiered unwinds in dependency order, and anything that cannot be unwound
+    // (cycles / unknown references) is a configuration error
     bool progress = true;
     while (!deferred.empty() && progress) {
         progress = false;
@@ -223,13 +235,16 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
             if (local.empty() || cloud.empty())
                 throw std::runtime_error("tiered backend '" + cfg.name + "' needs local + cloud");
             if (out.count(local) && out.count(cloud)) {
-                // 组合后端同样支持专属池（tiered 自身的下沉/回迁传输走它）。
-                // scope 先登记再构造：tiered 构建抛出时它的 gauge 回调已经注册
-                // 且持有池的 shared_ptr，漏登记则回滚后线程永不 join——正是本
-                // 守卫要防的场景（docs/gaps.md §3.9）
+                // Composite backends support a dedicated pool too (tiered's own
+                // demotion/promotion transfers run on it).
+                // Register the scope before constructing: if the tiered build throws, its
+                // gauge callbacks are already registered and hold the pool's shared_ptr;
+                // missing the registration means the threads never join after rollback --
+                // exactly the scenario this guard exists to prevent (docs/gaps.md §3.9)
                 rollback.scopes.push_back(cfg.name);
-                // 池指标与后端自身指标共用同一 scope（注册表 get-or-create 幂等，
-                // 同 label 重复构造无害）
+                // Pool metrics and the backend's own metrics share the same scope (the
+                // registry's get-or-create is idempotent; re-constructing with the same
+                // label is harmless)
                 MetricsScope scope(metrics, {{"backend", cfg.name}});
                 out[cfg.name] = TieredBackend::from_config(
                     cfg, out, backend_pool(cfg, pool, scope), scope);
@@ -243,7 +258,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     if (!deferred.empty())
         throw std::runtime_error("tiered backend '" + deferred.front()->name +
                                  "' has unknown or circular local/cloud reference");
-    rollback.done = true;  // 全部就绪：撤销守卫，交出后端表
+    rollback.done = true;  // everything ready: disarm the guard, hand over the backend table
     return out;
 }
 

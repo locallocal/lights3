@@ -6,9 +6,11 @@ namespace lights3::util {
 
 namespace {
 
-// 反射式查表实现（~数百 MB/s）。RocksDB 内部有硬件加速的 crc32c，但非公开头文件——
-// 复用需把其源码目录加进 include 路径并绑定内部 API 跨 submodule 升级，权衡后不取；
-// 数据路径吞吐成为瓶颈时再升级为 slicing-by-8
+// Reflected table-driven implementation (~hundreds of MB/s). RocksDB has a
+// hardware-accelerated crc32c internally, but not as a public header — reusing it
+// would mean adding its source tree to the include path and binding to an internal
+// API across submodule upgrades; on balance, not taken. Upgrade to slicing-by-8
+// when data-path throughput becomes the bottleneck
 template <uint32_t kPoly>
 uint32_t table_crc(uint32_t crc, std::span<const std::byte> data) {
     static const std::array<uint32_t, 256> table = [] {
@@ -30,11 +32,11 @@ constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 }  // namespace
 
 uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) {
-    return table_crc<0x82F63B78u>(crc, data);  // Castagnoli，反射多项式
+    return table_crc<0x82F63B78u>(crc, data);  // Castagnoli, reflected polynomial
 }
 
 uint32_t crc32_update(uint32_t crc, std::span<const std::byte> data) {
-    return table_crc<0xEDB88320u>(crc, data);  // IEEE 802.3，反射多项式
+    return table_crc<0xEDB88320u>(crc, data);  // IEEE 802.3, reflected polynomial
 }
 
 std::string base64_encode(std::span<const uint8_t> in) {
@@ -86,7 +88,7 @@ std::optional<std::string> base64_decode(std::string_view in) {
                 ++pad;
             } else {
                 v[j] = val(c);
-                if (v[j] < 0 || pad > 0) return std::nullopt;  // '=' 只能出现在末尾
+                if (v[j] < 0 || pad > 0) return std::nullopt;  // '=' may only appear at the end
             }
         }
         uint32_t x = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) | (uint32_t(v[2]) << 6) |

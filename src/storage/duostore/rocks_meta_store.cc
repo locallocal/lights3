@@ -29,15 +29,16 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// 计数器 key（stats CF，§4.1）：file_id 号段与 gcq seq
+// Counter keys (stats CF, §4.1): file_id segments and gcq seq
 constexpr const char* kCounterChunk = "c0";
 constexpr const char* kCounterPack = "c1";
 constexpr const char* kCounterSeq = "q";
 
-// pack 存活账 key（stats CF，§4.1 的 p<be64 pack_id> 按字段展开为子 key）：
-// 'b' = live_bytes（merge 计数）、'r' = live_recs（merge 计数）、
-// 's' = 封存标记（plain Put，值 = 8B 小端 file_size；存在即 sealed）。
-// 同 pack 的三个 key 前缀相邻，pack_stats() 一次前缀扫聚合
+// Pack liveness accounting keys (stats CF; §4.1's p<be64 pack_id> expanded into
+// per-field sub-keys): 'b' = live_bytes (merge counter), 'r' = live_recs (merge
+// counter), 's' = seal marker (plain Put, value = 8B little-endian file_size;
+// presence means sealed). The three keys of one pack share a prefix and are
+// adjacent, so pack_stats() aggregates them in a single prefix scan
 std::string pack_stat_key(uint64_t pack_id, char field) {
     std::string k = "p";
     k += codec::be64_key(pack_id);
@@ -55,7 +56,8 @@ rocksdb::Slice slice(std::string_view s) { return {s.data(), s.size()}; }
 
 int64_t now_ms() { return codec::to_unix_ms(std::chrono::system_clock::now()); }
 
-// stats CF 的计数器 merge：8B 小端 i64 增量累加（§4.5 号段预留、pack 存活账 P2 扩展）
+// Counter merge for the stats CF: accumulates 8B little-endian i64 deltas (§4.5 id
+// segment reservation; extended for pack liveness accounting in P2)
 class CounterMerge final : public rocksdb::AssociativeMergeOperator {
 public:
     bool Merge(const rocksdb::Slice& /*key*/, const rocksdb::Slice* existing,
@@ -79,12 +81,12 @@ struct SnapshotGuard {
     }
 };
 
-// user key（去掉 CF key 里的 "<bucket>\0" 前缀）
+// User key (strips the "<bucket>\0" prefix from the CF key)
 std::string_view strip_prefix(const rocksdb::Slice& k, size_t prefix_len) {
     return {k.data() + prefix_len, k.size() - prefix_len};
 }
 
-using codec::bump_last_byte;  // delimiter 跳组后继（codec.h，meta store 实现共用）
+using codec::bump_last_byte;  // successor for delimiter group skipping (codec.h, shared by meta store impls)
 
 }  // namespace
 
@@ -101,7 +103,7 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
 
     rocksdb::ColumnFamilyOptions cf_opt;
     cf_opt.table_factory = table_factory;
-    cf_opt.compression = rocksdb::kNoCompression;  // 压缩全关（§13.3）
+    cf_opt.compression = rocksdb::kNoCompression;  // compression fully disabled (§13.3)
     cf_opt.write_buffer_size = opt_.write_buffer_bytes;
     cf_opt.max_write_buffer_number = opt_.max_write_buffers;
     rocksdb::ColumnFamilyOptions stats_opt = cf_opt;
@@ -118,15 +120,22 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
     if (!s.ok()) throw_status("open", s);
     db_.store(db, std::memory_order_release);
 
-    // schema 版本校验 + 迁移钩子（§4.1 / docs/gaps.md §6.1）。此前是"必须精确等于
-    // 当前常量"的硬校验——任何 value 布局变更都会让存量库无法启动。现在：
-    //   存量版本 == 当前 → 直过；
-    //   存量版本 < 当前  → 按注册的迁移链逐级升（kSchemaMigrations，当前为空——
-    //                       record 级演进走 codec 的 read_ver 兼容读，§5.2；本链
-    //                       留给未来的 CF/键布局变更），升完盖新版本号；
-    //   存量版本 > 当前  → 库来自更新的程序版本，明确拒绝（降级运行会静默写坏）。
-    // Open 成功后任何失败都必须走 close()——构造函数抛出时析构不会运行，否则
-    // DB 句柄与 LOCK 文件泄漏
+    // Schema version check + migration hook (§4.1 / docs/gaps.md §6.1). This used to
+    // be a hard "must exactly equal the current constant" check — any value-layout
+    // change would make existing databases fail to start. Now:
+    //   stored version == current → pass through;
+    //   stored version < current  → upgrade step by step via the registered migration
+    //                               chain (kSchemaMigrations, currently empty —
+    //                               record-level evolution goes through codec's
+    //                               read_ver compatible reads, §5.2; this chain is
+    //                               reserved for future CF/key-layout changes), then
+    //                               stamp the new version number;
+    //   stored version > current  → the DB comes from a newer program version; reject
+    //                               explicitly (running downgraded would silently
+    //                               corrupt writes).
+    // Any failure after a successful Open must go through close() — the destructor
+    // does not run when the constructor throws, otherwise the DB handle and LOCK
+    // file leak
     try {
         auto schema = get_raw(kDefault, "schema");
         if (!schema) {
@@ -142,9 +151,11 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
         throw;
     }
 
-    // meta 引擎可观测（docs/gaps.md §6.1：默认引擎 rocksdb 此前完全无指标；
-    // redis/sqlite/tikv 各有 busy/corruption/conflict 计数）。属性 gauge 渲染时
-    // 现取；db 关闭后回 0（弱指针语义由 db_ 原子判空承担）
+    // Meta engine observability (docs/gaps.md §6.1: the default engine rocksdb
+    // previously had no metrics at all; redis/sqlite/tikv each have busy/corruption/
+    // conflict counters). Property gauges are read live at render time; they return 0
+    // after the db is closed (weak-pointer semantics carried by the atomic null check
+    // on db_)
     auto prop = [this](const char* name) -> double {
         auto* d = db_.load(std::memory_order_acquire);
         uint64_t v = 0;
@@ -169,14 +180,15 @@ int64_t RocksMetaStore::validate_schema_marker(const std::string& stored) {
     return parse_schema_marker(stored, /*lineage=*/"", kSchemaCurrent, "duostore meta");
 }
 
-// 迁移链（版本 n → n+1 的就地变换；持 db 已开）。新增布局变更时在此登记，并把
-// kSchemaCurrent +1——绝不允许"改布局不留迁移"
+// Migration chain (in-place transform from version n to n+1; called with the db
+// already open). Register new layout changes here and bump kSchemaCurrent by 1 —
+// "changing the layout without leaving a migration" is never allowed
 void RocksMetaStore::migrate_schema(const std::string& stored) {
     int64_t ver = validate_schema_marker(stored);
     if (ver == kSchemaCurrent) return;
     using MigrateFn = void (*)(RocksMetaStore&);
     static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
-        // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+        // {{1, &migrate_v1_to_v2}}  // example: once registered, v1 DBs upgrade automatically on startup
     };
     for (; ver < kSchemaCurrent; ++ver) {
         MigrateFn fn = nullptr;
@@ -201,7 +213,8 @@ RocksMetaStore::~RocksMetaStore() {
 
 void RocksMetaStore::close() {
     std::lock_guard lk(mu_);
-    // 先摘 db_：close 返回后的调用在 db() 处干净失败（500），而非解引用悬垂指针
+    // Detach db_ first: calls after close() returns fail cleanly in db() (500)
+    // instead of dereferencing a dangling pointer
     rocksdb::DB* db = db_.exchange(nullptr, std::memory_order_acq_rel);
     if (!db) return;
     for (auto* h : cfs_) db->DestroyColumnFamilyHandle(h);
@@ -211,7 +224,7 @@ void RocksMetaStore::close() {
     delete db;
 }
 
-// ---------- 基础封装 ----------
+// ---------- basic wrappers ----------
 
 rocksdb::DB* RocksMetaStore::db() const {
     auto* d = db_.load(std::memory_order_acquire);
@@ -221,7 +234,7 @@ rocksdb::DB* RocksMetaStore::db() const {
 }
 
 std::optional<std::string> RocksMetaStore::get_raw(int cf, std::string_view key) {
-    auto* d = db();  // 先取句柄再碰 cfs_（close 置空 db_ 先于清理 cfs_）
+    auto* d = db();  // fetch the handle before touching cfs_ (close nulls db_ before clearing cfs_)
     std::string v;
     auto s = d->Get(rocksdb::ReadOptions(), cfs_[cf], slice(key), &v);
     if (s.IsNotFound()) return std::nullopt;
@@ -245,8 +258,8 @@ void RocksMetaStore::require_bucket_locked(std::string_view b) {
 void RocksMetaStore::batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add,
                                 std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack) continue;  // pack 存活走 stats 账（P2）；
-                                                      // chunk/rados 皆按 file_id 入 refs
+        if (e.kind == Extent::Kind::kPack) continue;  // pack liveness goes through the stats accounting (P2);
+                                                      // chunk/rados both enter refs by file_id
         if (add)
             batch.Put(cfs_[kRefs], codec::be64_key(e.file_id), slice(owner));
         else
@@ -256,8 +269,10 @@ void RocksMetaStore::batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, 
 
 void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref,
                                       int sign, int64_t rec_overhead) {
-    // 同 pack 多 extent 先聚合，每 pack 两次 merge（§9.1：随业务事务同批增减）；
-    // 每条 record 计 payload + 头开销，与 file_size 同口径（docs/gaps.md §2.3a）
+    // Aggregate multiple extents of the same pack first, then two merges per pack
+    // (§9.1: incremented/decremented in the same batch as the business transaction);
+    // each record counts payload + header overhead, matching the file_size accounting
+    // basis (docs/gaps.md §2.3a)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
@@ -274,8 +289,10 @@ void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef&
 void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref,
                                             ReclaimReason reason) {
     if (ref.extents.empty()) return;
-    // 超大 DataRef（TB 级对象 = 数十万 extent）拆成多条 gcq 项（docs/gaps.md §2.11）：
-    // GC 单批的解码驻留内存有界；ack 逐条独立，拆分不改变崩溃语义（unlink 幂等）
+    // Split oversized DataRefs (TB-scale objects = hundreds of thousands of extents)
+    // into multiple gcq entries (docs/gaps.md §2.11): decoded resident memory per GC
+    // batch stays bounded; acks are independent per entry, and splitting does not
+    // change crash semantics (unlink is idempotent)
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
@@ -289,12 +306,16 @@ void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const Da
 
 uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r, uint32_t n) {
     n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
-    std::lock_guard lk(alloc_mu_);  // 独立于 mu_：常见路径是纯内存 next += n
+    std::lock_guard lk(alloc_mu_);  // independent of mu_: the common path is a pure in-memory next += n
     if (r.limit - r.next < n) {
-        // 号段预留必须先于派发持久化，且恒 WAL fsync（独立于 meta_sync）——
-        // 否则崩溃丢预留后重启重发已用 file_id，与已落盘的 chunk 文件
-        // O_EXCL 冲突（§6.3 的"仍自洽"依赖这里恒 sync）。崩溃浪费号段无害；
-        // 换段弃置的残段同理（run 批派发要求段内连续，docs/gaps.md §3.9）
+        // The segment reservation must be persisted before ids are handed out, and
+        // always with WAL fsync (independent of meta_sync) — otherwise a crash that
+        // loses the reservation makes restart re-issue already-used file_ids, which
+        // then collide with chunk files already on disk via O_EXCL (§6.3's "still
+        // self-consistent" depends on the unconditional sync here). Wasting a segment
+        // on crash is harmless; likewise the leftover discarded when switching
+        // segments (run batch dispatch requires contiguity within a segment,
+        // docs/gaps.md §3.9)
         rocksdb::WriteBatch batch;
         batch.Merge(cfs_[kStats], slice(counter_key),
                     codec::encode_counter_delta(int64_t(kIdSegment)));
@@ -314,8 +335,10 @@ uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r, uint
 }
 
 uint64_t RocksMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
-    // kRados 与 kChunk 共号段：refs 表按裸 file_id 记账不分 kind，独立计数器会在
-    // 同一 meta 上切换 data 引擎（fs↔rados）时产生跨 kind id 碰撞
+    // kRados shares the id segment with kChunk: the refs table accounts by bare
+    // file_id without distinguishing kind, so separate counters would produce
+    // cross-kind id collisions when switching the data engine (fs<->rados) on the
+    // same meta store
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCounterChunk : kCounterPack,
                     file_ids_[size_t(kind)], n);
@@ -336,10 +359,12 @@ void RocksMetaStore::create_bucket(std::string_view b) {
 void RocksMetaStore::delete_bucket(std::string_view b) {
     std::lock_guard lk(mu_);
     require_bucket_locked(b);
-    // 空检查：objects 或 uploads 任一非空即拒绝（AWS 对有进行中 MPU 的桶同样
-    // 拒绝删除）。uploads 检查同时封死"桶删后 put_part 继续写入、refs 永久
-    // 泄漏、重建桶复活幽灵上传"整类问题——upload 存在则桶删不掉，put_part
-    // 的 require_upload 就足以保证桶还在
+    // Emptiness check: reject if either objects or uploads is non-empty (AWS also
+    // refuses to delete a bucket with in-progress MPUs). The uploads check also
+    // closes off the whole class of "put_part keeps writing after bucket deletion,
+    // refs leak permanently, recreating the bucket resurrects ghost uploads"
+    // problems — while an upload exists the bucket cannot be deleted, so put_part's
+    // require_upload alone suffices to guarantee the bucket still exists
     std::string prefix = std::string(b) + '\0';
     auto* d = db();
     for (int cf : {int(kObjects), int(kUploads)}) {
@@ -367,7 +392,7 @@ std::vector<BucketInfo> RocksMetaStore::list_buckets() {
         out.push_back({it->key().ToString(), codec::from_unix_ms(created)});
     }
     if (!it->status().ok()) throw_status("list_buckets", it->status());
-    return out;  // key 字节序即字典序
+    return out;  // key byte order is lexicographic order
 }
 
 // ---------- object ----------
@@ -391,7 +416,7 @@ void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
     std::string okey = codec::object_key(b, k);
     std::optional<ObjectRec> old;
     if (auto oldv = get_raw(kObjects, okey)) old = codec::decode_object(std::string(k), *oldv);
-    check_put_condition(cond, old, k);  // 与提交同锁（PutCondition 契约）
+    check_put_condition(cond, old, k);  // same lock as the commit (PutCondition contract)
     rec.version = old ? old->version + 1 : 1;
 
     rocksdb::WriteBatch batch;
@@ -424,14 +449,15 @@ bool RocksMetaStore::delete_object(std::string_view b, std::string_view k) {
     return true;
 }
 
-// §4.4：objects CF 原生有序迭代，delimiter 组用 Seek 跳过整组
+// §4.4: the objects CF iterates in natural sorted order; delimiter groups are
+// skipped wholesale with Seek
 ListResult RocksMetaStore::list_objects(std::string_view b, const ListOptions& opt) {
-    require_bucket_locked(b);  // 纯读，锁外 get 幂等安全
+    require_bucket_locked(b);  // pure read; the lock-free get is idempotent and safe
     ListResult out;
-    // S3：max-keys=0 返回空且 IsTruncated=false（与 apply_listing 一致）
+    // S3: max-keys=0 returns empty with IsTruncated=false (consistent with apply_listing)
     if (opt.max_keys <= 0) return out;
     std::string base = std::string(b) + '\0';
-    std::string upper = std::string(b) + '\x01';  // bucket 名无 NUL，'\0'+1 即桶区间上界
+    std::string upper = std::string(b) + '\x01';  // bucket names contain no NUL, so '\0'+1 is the bucket range upper bound
 
     rocksdb::ReadOptions ro;
     auto* d = db();
@@ -447,13 +473,13 @@ ListResult RocksMetaStore::list_objects(std::string_view b, const ListOptions& o
     it->Seek(seek);
     if (!opt.start_after.empty() && it->Valid() &&
         it->key() == slice(base + opt.start_after))
-        it->Next();  // start_after 命中自身再走一步
+        it->Next();  // step past start_after when it matches itself
 
     std::string last_emitted;
     int count = 0;
     while (it->Valid()) {
         std::string_view uk = strip_prefix(it->key(), base.size());
-        if (uk.compare(0, prefix.size(), prefix) != 0) break;  // 出前缀区间即止
+        if (uk.compare(0, prefix.size(), prefix) != 0) break;  // stop once past the prefix range
         if (count >= opt.max_keys) {
             out.is_truncated = true;
             out.next_token = last_emitted;
@@ -465,10 +491,13 @@ ListResult RocksMetaStore::list_objects(std::string_view b, const ListOptions& o
                 std::string group(uk.substr(0, pos + delim.size()));
                 out.common_prefixes.push_back(group);
                 ++count;
-                // Seek 跳过整组（相对 localfs 目录遍历的实质优势，§4.4）；
-                // token 语义须落在组尾 → Prev 取组内最后一个 key。
-                // 不变量：Seek 落在 !Valid（组是桶内最后一段）时 last_emitted
-                // 保持旧值，但此时循环必然不经截断分支退出，旧值不会被读到
+                // Seek skips the whole group (the substantive advantage over
+                // localfs directory traversal, §4.4); token semantics must land at
+                // the group tail -> Prev fetches the last key inside the group.
+                // Invariant: when Seek lands on !Valid (the group is the last
+                // stretch of the bucket) last_emitted keeps its old value, but the
+                // loop then necessarily exits without taking the truncation branch,
+                // so the stale value is never read
                 std::string target = base + group;
                 if (!bump_last_byte(target)) break;
                 it->Seek(target);
@@ -533,7 +562,7 @@ void RocksMetaStore::put_part(std::string_view b, std::string_view k, std::strin
     batch_refs(batch, p.data, /*add=*/true, pkey);
     const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
     batch_pack_delta(batch, p.data, +1, ov);
-    if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
+    if (old) {  // same-number re-upload is last-write-wins: the old part enters the GC ledger in the same batch
         enqueue_reclaim_locked(batch, old->data, ReclaimReason::kPartOverwrite);
         batch_refs(batch, old->data, /*add=*/false, {});
         batch_pack_delta(batch, old->data, -1, ov);
@@ -552,7 +581,7 @@ std::vector<PartRec> RocksMetaStore::scan_parts(std::string_view b, std::string_
         out.push_back(codec::decode_part(no, {it->value().data(), it->value().size()}));
     }
     if (!it->status().ok()) throw_status("scan parts", it->status());
-    return out;  // be16 part_no 保证升序（§4.1）
+    return out;  // be16 part_no guarantees ascending order (§4.1)
 }
 
 std::vector<PartRec> RocksMetaStore::list_parts(std::string_view b, std::string_view k,
@@ -564,23 +593,24 @@ std::vector<PartRec> RocksMetaStore::list_parts(std::string_view b, std::string_
 std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b,
                                                     std::string_view key_marker,
                                                     std::string_view id_marker, int limit) {
-    require_bucket_locked(b);  // 纯读，锁外 get 幂等安全
+    require_bucket_locked(b);  // pure read; the lock-free get is idempotent and safe
     std::string prefix = std::string(b) + '\0';
-    // 游标下推（docs/gaps.md §5.1）：key 编码本身就是 (key, upload_id) 序，
-    // seek 到 marker 之后即可，跳过的部分一条也不读
+    // Cursor pushdown (docs/gaps.md §5.1): the key encoding is already in
+    // (key, upload_id) order, so seeking past the marker suffices — not a single
+    // skipped entry is read
     std::string seek = prefix;
     if (!key_marker.empty() || !id_marker.empty()) {
         seek += std::string(key_marker);
         seek += '\0';
         seek += std::string(id_marker);
-        seek += '\0';  // 尾部 '\0' 使 seek 落在该 (key,id) 之后
+        seek += '\0';  // trailing '\0' makes the seek land just after that (key,id)
     }
     std::vector<UploadInfo> out;
     auto it = std::unique_ptr<rocksdb::Iterator>(
         db()->NewIterator(rocksdb::ReadOptions(), cfs_[kUploads]));
     for (it->Seek(seek); it->Valid() && it->key().starts_with(slice(prefix)); it->Next()) {
         if (limit > 0 && out.size() >= size_t(limit)) break;
-        // key = <bucket>\0<key>\0<upload_id>，前缀扫天然按 (key, upload_id) 排序
+        // key = <bucket>\0<key>\0<upload_id>; the prefix scan is naturally sorted by (key, upload_id)
         std::string_view rest = strip_prefix(it->key(), prefix.size());
         auto sep = rest.rfind('\0');
         if (sep == std::string_view::npos) continue;
@@ -593,7 +623,8 @@ std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b,
     return out;
 }
 
-// §8：complete 是纯元数据事务，零数据搬运——按序拼接各 part 的 extent runs
+// §8: complete is a pure metadata transaction with zero data movement — it
+// concatenates each part's extent runs in order
 std::string RocksMetaStore::complete_upload(std::string_view b, std::string_view k,
                                             std::string_view id,
                                             std::span<const PartInfo> parts) {
@@ -615,29 +646,32 @@ std::string RocksMetaStore::complete_upload(std::string_view b, std::string_view
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kObjects], okey, codec::encode_object(rec));
     batch.Delete(cfs_[kUploads], codec::upload_key(b, k, id));
-    // 整段 DeleteRange 清 parts（免逐 part 重建 key 串、万分片时批次膨胀）；
-    // gcq/refs 记账仍需逐 part 的 extents
+    // Clear parts with a single DeleteRange (avoids rebuilding key strings per part
+    // and batch bloat with ten-thousand-part uploads); gcq/refs accounting still
+    // needs each part's extents
     std::string pfx = codec::parts_prefix(b, k, id);
     std::string pfx_end = pfx;
     bump_last_byte(pfx_end);
     batch.DeleteRange(cfs_[kParts], pfx, pfx_end);
     for (const auto& [no, p] : stored) {
         if (selected.count(no)) {
-            // refs 转移：owner 改写为对象。pack 账存活不变，但口径从分片重平衡为
-            // 对象（-分片头开销 +对象头开销，recs 一减一增相抵）：保证后续对象
-            // 删除按对象口径扣减后账精确归零
+            // refs transfer: owner is rewritten to the object. Pack liveness stays
+            // unchanged, but the accounting basis is rebalanced from part to object
+            // (-part header overhead +object header overhead; recs cancel out with
+            // one decrement and one increment): this guarantees that a later object
+            // deletion, deducting on the object basis, zeroes the ledger exactly
             batch_refs(batch, p.data, /*add=*/true, okey);
             batch_pack_delta(batch, p.data, -1,
                              codec::pack_rec_overhead_part(b, k, id, no));
             batch_pack_delta(batch, p.data, +1, codec::pack_rec_overhead(b, k));
-        } else {  // 未选中分片入 GC 账
+        } else {  // unselected parts enter the GC ledger
             enqueue_reclaim_locked(batch, p.data, ReclaimReason::kComplete);
             batch_refs(batch, p.data, /*add=*/false, {});
             batch_pack_delta(batch, p.data, -1,
                              codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
-    if (old) {  // 旧同名对象入 GC 账
+    if (old) {  // the old same-name object enters the GC ledger
         enqueue_reclaim_locked(batch, old->data, ReclaimReason::kOverwrite);
         batch_refs(batch, old->data, /*add=*/false, {});
         batch_pack_delta(batch, old->data, -1, codec::pack_rec_overhead(b, k));
@@ -665,7 +699,7 @@ void RocksMetaStore::abort_upload(std::string_view b, std::string_view k,
     commit(batch);
 }
 
-// ---------- GC 记账 ----------
+// ---------- GC accounting ----------
 
 std::vector<std::pair<uint64_t, Reclaim>> RocksMetaStore::peek_reclaims(size_t max,
                                                                         uint64_t min_seq,
@@ -679,7 +713,7 @@ std::vector<std::pair<uint64_t, Reclaim>> RocksMetaStore::peek_reclaims(size_t m
         uint64_t seq = codec::parse_be64({it->key().data(), it->key().size()});
         out.emplace_back(seq,
                          codec::decode_reclaim({it->value().data(), it->value().size()}));
-        // 累计 extent 上限（gaps §2.11）：至少返回 1 项（拆分前遗留的超大单项）
+        // Cumulative extent cap (gaps §2.11): return at least 1 entry (oversized single entries left from before splitting)
         extents += out.back().second.extents.size();
         if (extents >= max_extents) break;
     }
@@ -688,7 +722,8 @@ std::vector<std::pair<uint64_t, Reclaim>> RocksMetaStore::peek_reclaims(size_t m
 }
 
 void RocksMetaStore::ack_reclaim(uint64_t seq) {
-    // 盲删单 key，无跨 key 不变量——不占 mu_，GC 销账不排队业务提交的 fsync
+    // Blind single-key delete with no cross-key invariant — does not take mu_, so GC
+    // write-off does not queue behind business commits' fsync
     rocksdb::WriteBatch batch;
     batch.Delete(cfs_[kGcq], codec::be64_key(seq));
     commit(batch);
@@ -696,14 +731,16 @@ void RocksMetaStore::ack_reclaim(uint64_t seq) {
 
 void RocksMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
     if (seqs.empty()) return;
-    rocksdb::WriteBatch batch;  // 单批单提交（覆写接口默认的逐条转发）
+    rocksdb::WriteBatch batch;  // one batch, one commit (overrides the interface's default per-entry forwarding)
     for (uint64_t s : seqs) batch.Delete(cfs_[kGcq], codec::be64_key(s));
     commit(batch);
 }
 
 std::vector<PackStat> RocksMetaStore::pack_stats() {
-    // stats CF 前缀扫 'p'：同 pack 的 b/r/s 子 key 相邻，边扫边聚合。返回含
-    // live=0 与未封存项（空 pack 整删与重启补封依赖能看见它们）
+    // Prefix scan 'p' over the stats CF: a pack's b/r/s sub-keys are adjacent, so we
+    // aggregate while scanning. The result includes live=0 and unsealed entries
+    // (whole-pack deletion of empty packs and re-sealing on restart depend on seeing
+    // them)
     std::vector<PackStat> out;
     auto it = std::unique_ptr<rocksdb::Iterator>(
         db()->NewIterator(rocksdb::ReadOptions(), cfs_[kStats]));
@@ -728,16 +765,17 @@ std::vector<PackStat> RocksMetaStore::pack_stats() {
 }
 
 void RocksMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
-    std::lock_guard lk(mu_);  // 读改写（保留已记录 size），与并发 seal 序列化
+    std::lock_guard lk(mu_);  // read-modify-write (keeps an already-recorded size), serialized against concurrent seals
     std::string skey = pack_stat_key(pack_id, 's');
-    if (file_size == 0 && get_raw(kStats, skey)) return;  // 幂等：0 不覆盖已知 size
+    if (file_size == 0 && get_raw(kStats, skey)) return;  // idempotent: 0 does not overwrite a known size
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kStats], skey, codec::encode_counter_delta(int64_t(file_size)));
     commit(batch);
 }
 
 void RocksMetaStore::drop_pack_stat(uint64_t pack_id) {
-    // 盲删三个子 key，无跨 key 不变量——同 ack_reclaim 不占 mu_
+    // Blind delete of the three sub-keys with no cross-key invariant — like
+    // ack_reclaim, does not take mu_
     rocksdb::WriteBatch batch;
     for (char f : {'b', 'r', 's'}) batch.Delete(cfs_[kStats], pack_stat_key(pack_id, f));
     commit(batch);
@@ -750,18 +788,22 @@ bool RocksMetaStore::stage_swap_locked(rocksdb::WriteBatch& batch, std::string_v
     auto v = get_raw(kObjects, okey);
     if (!v) return false;
     auto rec = codec::decode_object(std::string(k), *v);
-    // 乐观校验：version 或 extent 不符 = 期间被覆盖/删除 → 放弃（§9.2）
+    // Optimistic check: version or extent mismatch = overwritten/deleted in the
+    // meantime -> give up (§9.2)
     if (rec.version != expect_version || rec.data.extents != from.extents) return false;
     rec.data = to;
     rec.version += 1;
     batch.Put(cfs_[kObjects], okey, codec::encode_object(rec));
-    // refs 按差集操作：to/from 共享未迁移的 chunk，整加再整删在 last-wins 下
-    // 净效果是删除，会抹掉活数据的 refs（meta_util.h refs_delta 详述）
+    // refs operate on the set difference: to/from share the not-yet-migrated
+    // chunks, and add-all-then-delete-all under last-wins nets out to a delete,
+    // which would wipe the refs of live data (detailed at meta_util.h refs_delta)
     auto rd = refs_delta(from, to);
     batch_refs(batch, rd.added, /*add=*/true, okey);
     batch_refs(batch, rd.removed, /*add=*/false, {});
-    // 压实换 ref：账随 extent 迁移（§9.2）；两侧都按对象口径（迁出的旧 record 若
-    // 是 mpu 形态则轻微低扣，保守方向——见 codec.h pack_rec_overhead 注释）
+    // Compaction ref swap: the ledger migrates with the extents (§9.2); both sides
+    // use the object basis (if the migrated-out old record was in mpu form this
+    // slightly under-deducts, which is the conservative direction — see the
+    // pack_rec_overhead comment in codec.h)
     const int64_t ov = codec::pack_rec_overhead(b, k);
     batch_pack_delta(batch, to, +1, ov);
     batch_pack_delta(batch, from, -1, ov);
@@ -779,8 +821,9 @@ bool RocksMetaStore::swap_extents(std::string_view b, std::string_view k,
 }
 
 std::vector<bool> RocksMetaStore::swap_extents_batch(std::span<const SwapReq> reqs) {
-    // 压实批量化（gaps §2.13）：整批一次 WriteBatch 提交。逐项 CAS 独立——失败项
-    // 只是不入批，不殃及其余
+    // Batched compaction (gaps §2.13): the whole batch commits in one WriteBatch.
+    // Per-item CAS is independent — a failed item simply stays out of the batch and
+    // does not affect the rest
     std::lock_guard lk(mu_);
     std::vector<bool> out;
     out.reserve(reqs.size());
@@ -800,7 +843,8 @@ bool RocksMetaStore::chunk_referenced(uint64_t file_id) {
 }
 
 void RocksMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
-    // 纯读走迭代器快照（§4.4 同款），不占 mu_；孤儿扫描容忍弱一致视图
+    // Pure read via iterator snapshot (same as §4.4), does not take mu_; the orphan
+    // scan tolerates a weakly consistent view
     auto it = std::unique_ptr<rocksdb::Iterator>(
         db()->NewIterator(rocksdb::ReadOptions(), cfs_[kRefs]));
     for (it->SeekToFirst(); it->Valid(); it->Next())

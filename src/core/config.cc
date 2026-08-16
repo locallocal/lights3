@@ -11,18 +11,19 @@
 
 namespace lights3 {
 
-// ---------------- YAML 子集解析 ----------------
+// ---------------- YAML subset parsing ----------------
 namespace {
 
 struct Line {
     int indent = 0;
-    int lineno = 0;    // 原始行号（1 起），用于报错定位
-    std::string text;  // 去掉缩进与注释后的内容
+    int lineno = 0;    // original line number (1-based), for error reporting
+    std::string text;  // content with indentation and comments stripped
 };
 
-// ${VAR} → 环境变量值。未定义即报错：静默展开成空串会把"环境变量名写错"变成
-// "凭证/路径悄悄变空"，错误在启动后很久才以别的面貌出现（docs/gaps.md §3.9）。
-// 确实可选的值写 ${VAR:-默认值}
+// ${VAR} -> environment variable value. Undefined is an error: silently expanding
+// to an empty string turns "misspelled env var name" into "credential/path quietly
+// went empty", and the failure resurfaces in a different guise long after startup
+// (docs/gaps.md §3.9). For genuinely optional values write ${VAR:-default}
 std::string expand_env(const std::string& s) {
     std::string out;
     for (size_t i = 0; i < s.size();) {
@@ -77,8 +78,9 @@ std::vector<Line> to_lines(const std::string& text) {
         if (indent < raw.size() && raw[indent] == '\t')
             throw std::runtime_error("yaml: tab indentation not supported");
         std::string content = raw.substr(indent);
-        // 注释：行首 # 或引号外的 " #"。引号内的 " #" 不是注释——裸 find(" #")
-        // 会把 secret_key: "a #b" 截成 "a，密钥静默变短（docs/gaps.md §3.9）
+        // Comments: a leading # or an unquoted " #". A " #" inside quotes is not a
+        // comment — a naive find(" #") would truncate secret_key: "a #b" to "a,
+        // silently shortening the key (docs/gaps.md §3.9)
         if (!content.empty() && content[0] == '#') {
             content.clear();
         } else {
@@ -109,8 +111,9 @@ public:
     YamlNode parse() {
         if (lines_.empty()) return YamlNode{YamlNode::Type::Map, {}, {}, {}};
         YamlNode root = parse_block(lines_[0].indent, 0);
-        // 缩进不匹配的行会让各层块循环全部退出而非被消费；
-        // 不检查则静默丢弃（可选参数丢了配置无声失效），这里一律报错
+        // A line with mismatched indentation makes every block loop exit instead of
+        // consuming it; without this check it is silently dropped (a lost optional
+        // parameter fails without a sound), so always report an error here
         if (i_ < lines_.size())
             throw std::runtime_error("yaml: unexpected indent at line " +
                                      std::to_string(lines_[i_].lineno));
@@ -118,9 +121,9 @@ public:
     }
 
 private:
-    static constexpr int kMaxDepth = 64;  // 病态深嵌套输入防栈溢出
+    static constexpr int kMaxDepth = 64;  // guards against stack overflow on pathologically deep input
 
-    // 解析从当前行开始、缩进恰为 indent 的块
+    // Parse the block starting at the current line whose indentation is exactly `indent`
     YamlNode parse_block(int indent, int depth) {
         if (depth > kMaxDepth)
             throw std::runtime_error("yaml: nesting too deep at line " +
@@ -130,7 +133,8 @@ private:
             node.type = YamlNode::Type::List;
             while (i_ < lines_.size() && lines_[i_].indent == indent &&
                    lines_[i_].text.rfind("- ", 0) == 0) {
-                // 把 "- xxx" 视为缩进 indent+2 的一行，与后续同缩进行组成 item
+                // Treat "- xxx" as a line indented at indent+2; together with
+                // following lines at the same indentation it forms one item
                 lines_[i_].text = lines_[i_].text.substr(2);
                 lines_[i_].indent = indent + 2;
                 node.list.push_back(parse_block(indent + 2, depth + 1));
@@ -153,7 +157,8 @@ private:
                 child.scalar = expand_env(unquote(val));
                 node.map.emplace_back(std::move(key), std::move(child));
             } else {
-                // 嵌套块：取下一行缩进（须更深），无内容则视为空 map
+                // Nested block: use the next line's indentation (must be deeper);
+                // no content means an empty map
                 if (i_ < lines_.size() && lines_[i_].indent > indent) {
                     node.map.emplace_back(std::move(key),
                                           parse_block(lines_[i_].indent, depth + 1));
@@ -185,10 +190,10 @@ std::string YamlNode::get(const std::string& key, const std::string& def) const 
 
 YamlNode yaml_parse(const std::string& text) { return Parser(to_lines(text)).parse(); }
 
-// ---------------- 尺寸/时长 ----------------
+// ---------------- Sizes / durations ----------------
 
 size_t parse_size(const std::string& s) {
-    // stoull 接受 "-1" 并回绕成 2^64-1，须显式拒绝负号
+    // stoull accepts "-1" and wraps it to 2^64-1, so reject the minus sign explicitly
     if (s.find('-') != std::string::npos)
         throw std::runtime_error("negative size not allowed: " + s);
     size_t pos = 0;
@@ -213,7 +218,7 @@ int parse_duration_sec(const std::string& s) {
     if (unit.empty() || unit == "s") mult = 1;
     else if (unit == "m") mult = 60;
     else if (unit == "h") mult = 3600;
-    else if (unit == "d") mult = 86400;  // tiered 的 cold_after（docs/tiered-storage.md §8）
+    else if (unit == "d") mult = 86400;  // tiered storage's cold_after (docs/tiered-storage.md §8)
     else throw std::runtime_error("bad duration unit: " + s);
     if (num < 0 || num > INT_MAX / mult)
         throw std::runtime_error("duration out of range: " + s);
@@ -226,13 +231,14 @@ bool parse_bool(const std::string& s) {
     throw std::runtime_error("bad bool value: " + s);
 }
 
-// ---------------- 类型化配置 ----------------
+// ---------------- Typed configuration ----------------
 
 namespace {
 
-// 带上下文的整数解析：裸 stoi 对非法值抛的是无参 std::invalid_argument("stoi")，
-// 运维拿到的报错里既没有键名也没有原值（docs/gaps.md §3.9）。同时拒绝尾随垃圾
-// （"8x" 不再被当成 8）与越界
+// Integer parsing with context: bare stoi throws a bare std::invalid_argument("stoi")
+// on bad input, so the error the operator sees carries neither the key name nor the
+// original value (docs/gaps.md §3.9). Also rejects trailing garbage ("8x" is no
+// longer treated as 8) and out-of-range values
 int to_int(const std::string& key, const std::string& s, int def) {
     if (s.empty()) return def;
     size_t pos = 0;
@@ -255,8 +261,9 @@ void check_range(const std::string& key, int v, int lo, int hi) {
                                  std::to_string(hi) + "], got " + std::to_string(v));
 }
 
-// 尺寸类参数（parse_size 返回 64 位）：走 int 版会先截断再比较，超大值回绕成
-// 负数后报出来的"got"是错的
+// Size-typed parameters (parse_size returns 64 bits): the int overload would
+// truncate before comparing, and after a huge value wraps to negative the reported
+// "got" would be wrong
 void check_range(const std::string& key, long long v, long long lo, long long hi) {
     if (v < lo || v > hi)
         throw std::runtime_error("config: " + key + " must be in [" + std::to_string(lo) + "," +
@@ -274,24 +281,24 @@ Config Config::from_string(const std::string& text) {
         cfg.http.bind = http->get("bind", cfg.http.bind);
         if (auto v = http->get("port"); !v.empty()) {
             int p = std::stoi(v);
-            // 0 合法：让内核分配空闲端口（e2e/单测夹具即用此约定）
+            // 0 is legal: let the kernel pick a free port (the e2e/unit-test fixtures rely on this convention)
             if (p < 0 || p > 65535)
                 throw std::runtime_error("config: http.port out of range: " + v);
             cfg.http.port = static_cast<uint16_t>(p);
         }
         if (auto v = http->get("io_threads"); !v.empty()) {
             cfg.http.io_threads = to_int("http.io_threads", v, cfg.http.io_threads);
-            cfg.http.io_threads_set = true;  // builtin 驱动据此 WARN（docs/gaps.md §7）
+            cfg.http.io_threads_set = true;  // the builtin driver WARNs based on this (docs/gaps.md §7)
         }
         cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
         if (auto v = http->get("max_header_size"); !v.empty())
             cfg.http.max_header_size = parse_size(v);
         if (auto v = http->get("idle_timeout"); !v.empty())
             cfg.http.idle_timeout_sec = parse_duration_sec(v);
-        // 请求级超时与传输停滞上限（docs/gaps.md §3.3）：0 = 关闭
+        // Per-request timeout and transfer stall limit (docs/gaps.md §3.3): 0 = disabled
         if (auto v = http->get("request_timeout"); !v.empty())
             cfg.http.request_timeout_sec = parse_duration_sec(v);
-        // multipart 最小分片（docs/gaps.md §5.7）：0 = 不限制
+        // Minimum multipart part size (docs/gaps.md §5.7): 0 = no limit
         if (auto v = http->get("min_part_size"); !v.empty())
             cfg.http.min_part_size = parse_size(v);
         if (auto v = http->get("transfer_stall_timeout"); !v.empty())
@@ -299,13 +306,13 @@ Config Config::from_string(const std::string& text) {
         cfg.http.max_connections =
             to_int("http.max_connections", http->get("max_connections"), cfg.http.max_connections);
         check_range("http.max_connections", cfg.http.max_connections, 1, 1'000'000);
-        // TLS（docs/gaps.md §7）：两个都给才启用，只给一个必是配错
+        // TLS (docs/gaps.md §7): enabled only when both are given; giving just one is surely a misconfiguration
         cfg.http.tls_cert = http->get("tls_cert", cfg.http.tls_cert);
         cfg.http.tls_key = http->get("tls_key", cfg.http.tls_key);
         if (cfg.http.tls_cert.empty() != cfg.http.tls_key.empty())
             throw std::runtime_error(
                 "config: http.tls_cert and http.tls_key must be set together");
-        // 停机/背压边界（docs/gaps.md §7）
+        // Shutdown/backpressure knobs (docs/gaps.md §7)
         if (auto v = http->get("drain_limit"); !v.empty())
             cfg.http.drain_limit = parse_size(v);
         if (auto v = http->get("trailer_max_size"); !v.empty())
@@ -353,8 +360,9 @@ Config Config::from_string(const std::string& text) {
             }
             if (bc.name.empty() || bc.type.empty())
                 throw std::runtime_error("config: backend needs name + type");
-            // 重名后端：注册表按名建表，后者静默覆盖前者，桶路由指向的是哪一个
-            // 取决于插入顺序——启动即报错
+            // Duplicate backend names: the registry keys by name, so the later one
+            // silently overwrites the earlier one and which one bucket routing hits
+            // depends on insertion order — error out at startup
             for (auto& prev : cfg.backends)
                 if (prev.name == bc.name)
                     throw std::runtime_error("config: duplicate backend name '" + bc.name + "'");
@@ -370,16 +378,19 @@ Config Config::from_string(const std::string& text) {
     }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
 
-    // 一致性检查。线程数上界与 per-backend 的同名参数取齐（[1,1024]）：
-    // 没有上界时一个手滑的 io_threads: 100000 会在启动时直接把进程拖垮
+    // Consistency checks. Thread-count upper bounds align with the per-backend
+    // parameters of the same name ([1,1024]): without an upper bound, a fat-fingered
+    // io_threads: 100000 would bring the process down right at startup
     check_range("http.io_threads", cfg.http.io_threads, 1, 1024);
     check_range("runtime.io_threads", cfg.runtime.io_threads, 1, 1024);
-    // <= 0 会让第一个请求在信号量上永久挂起，须启动时报错而非静默挂死
+    // <= 0 would leave the very first request suspended on the semaphore forever;
+    // must fail at startup instead of silently hanging
     check_range("runtime.max_inflight_requests", cfg.runtime.max_inflight_requests, 1, 1'000'000);
     check_range("http.request_timeout", cfg.http.request_timeout_sec, 0, 86400);
     check_range("http.transfer_stall_timeout", cfg.http.transfer_stall_timeout_sec, 0, 86400);
-    // 停机/背压边界（docs/gaps.md §7）。下界防"配成 0 后写循环空转/永不排空"，
-    // 上界防手滑单位（MiB 写成 GiB）直接吃光内存
+    // Shutdown/backpressure knobs (docs/gaps.md §7). Lower bounds guard against
+    // "configured to 0 -> write loop spins / never drains"; upper bounds guard
+    // against a slipped unit (MiB written as GiB) eating all memory outright
     check_range("http.drain_limit", static_cast<long long>(cfg.http.drain_limit),
                 64LL * 1024, 1'073'741'824LL);
     check_range("http.trailer_max_size", static_cast<long long>(cfg.http.trailer_max_size),

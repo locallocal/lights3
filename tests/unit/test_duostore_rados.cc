@@ -1,11 +1,12 @@
-// RadosDataStore 专项单测（docs/duostore-rados-data.md §11）：注入组合跑后端套件、
-// 多 chunk roundtrip 与跨 extent Range、未知长度流式、remove 幂等、namespace 隔离、
-// 信号量背压、refs 在而对象缺的告警路径、位腐检出、close 守卫；C3 双缓冲流水
-//（含串行退化）、C4 孤儿扫描（正向/反向/grace/外来对象）与 op 指标。
-// 真实集群获取：环境变量 LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL 同时
-// 设置才跑（可选 LIGHTS3_TEST_RADOS_CLIENT，默认 client.admin），否则显式 SKIP
-// （不算失败，机制同 test_duostore_redis.cc）。隔离：每用例唯一 rados_namespace，
-// teardown 列举本 namespace 全部对象删除——多套测试可共用一个 pool。
+// Dedicated RadosDataStore unit tests (docs/duostore-rados-data.md §11): the injected combination runs the backend
+// suite, multi-chunk roundtrip and cross-extent Range, unknown-length streaming, idempotent remove, namespace
+// isolation, semaphore backpressure, the alarm path for refs-present-but-object-missing, bitrot detection, close
+// guard; C3 double-buffered pipeline (including serial degradation), C4 orphan scan (forward/reverse/grace/foreign
+// objects) and op metrics.
+// Real-cluster acquisition: runs only when the environment variables LIGHTS3_TEST_RADOS_CONF +
+// LIGHTS3_TEST_RADOS_POOL are both set (optional LIGHTS3_TEST_RADOS_CLIENT, default client.admin), otherwise an
+// explicit SKIP (not a failure; same mechanism as test_duostore_redis.cc). Isolation: a unique rados_namespace per
+// case, and teardown lists and deletes all objects in that namespace -- multiple test suites can share one pool.
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_RADOS_DATA)
 
 #include <rados/librados.h>
@@ -63,7 +64,7 @@ private:
         return;                                                                               \
     }
 
-// 每用例唯一 namespace（对应 redis_prefix 手法，§11.2）
+// A unique namespace per case (the counterpart of the redis_prefix technique, §11.2)
 std::string unique_ns() {
     static std::atomic<int> counter{0};
     return "t" + std::to_string(getpid()) + "-" + std::to_string(counter++);
@@ -80,7 +81,7 @@ RadosDataOptions rados_opts(const std::string& ns, uint64_t chunk_size = 8ull <<
     return o;
 }
 
-// 直连集群的观察/注入/清扫通道（librados C API）：列举 namespace、越过 store 删改对象
+// Direct-to-cluster channel for observation/injection/cleanup (librados C API): list the namespace, delete/modify objects bypassing the store
 struct RadosRaw {
     rados_t cluster = nullptr;
     rados_ioctx_t io = nullptr;
@@ -115,7 +116,7 @@ struct RadosRaw {
     }
 };
 
-// namespace 清扫的 RAII（用例正常/异常路径都清，pool 可复用）
+// RAII for namespace cleanup (cleans on both normal and exceptional case paths, the pool stays reusable)
 struct NsCleaner {
     std::string ns;
     explicit NsCleaner(std::string n) : ns(std::move(n)) {}
@@ -127,13 +128,13 @@ struct NsCleaner {
     }
 };
 
-// file_id 自给的分配器（直连 data store 的用例不需要 meta）
+// Self-contained file_id allocator (cases talking directly to the data store need no meta)
 RadosDataStore::FileIdAlloc counter_alloc() {
     auto next = std::make_shared<std::atomic<uint64_t>>(1);
     return [next](Extent::Kind, uint32_t n) { return next->fetch_add(n); };
 }
 
-// 未知长度流（chunked）：length() = nullopt，走"缓冲至 EOF"的同一切片路径（§3.3）
+// Unknown-length stream (chunked): length() = nullopt, takes the same "buffer until EOF" slicing path (§3.3)
 struct ChunkedBody final : http::BodyReader {
     std::string data;
     size_t pos = 0;
@@ -157,7 +158,7 @@ std::string patterned(size_t n) {
 
 }  // namespace
 
-// 注入组合（RocksMetaStore + RadosDataStore）跑后端一致性套件（§11.3）
+// The injected combination (RocksMetaStore + RadosDataStore) runs the backend conformance suite (§11.3)
 TEST(duostore_rados_backend_suite) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -178,7 +179,7 @@ TEST(duostore_rados_backend_suite) {
     sync_wait(b->close());
 }
 
-// 多 chunk 大对象 roundtrip 与跨 extent Range（§11.4）；对象名/个数落位、0 字节对象
+// Multi-chunk large-object roundtrip and cross-extent Range (§11.4); object names/count land correctly, 0-byte object
 TEST(duostore_rados_multichunk_roundtrip_and_layout) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -192,7 +193,7 @@ TEST(duostore_rados_multichunk_roundtrip_and_layout) {
     cfg.name = "rados-multi";
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
-    // 4KiB 切片强制多对象 manifest
+    // 4KiB slicing forces a multi-object manifest
     auto data = std::make_unique<RadosDataStore>(
         rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -205,17 +206,17 @@ TEST(duostore_rados_multichunk_roundtrip_and_layout) {
     CHECK_EQ(got.meta.etag, pr.etag);
     CHECK_EQ(read_all(*got.body), body);
 
-    // Range 跨对象边界（4096/8192 两个切点都覆盖）
+    // Range crossing object boundaries (covers both cut points, 4096 and 8192)
     auto mid = sync_wait(b->get_object("bkt", "big", ByteRange{4000, 8500}));
     CHECK_EQ(read_all(*mid.body), body.substr(4000, 4501));
 
-    // 布局：10000B / 4KiB = 3 个 rados 对象，名字 c.<016x>
+    // Layout: 10000B / 4KiB = 3 rados objects, named c.<016x>
     RadosRaw raw(ns);
     auto objs = raw.list();
     CHECK_EQ(objs.size(), size_t(3));
     for (const auto& o : objs) CHECK(o.rfind("c.", 0) == 0 && o.size() == 18);
 
-    // 0 字节对象：空 DataRef，不产生 rados 对象
+    // 0-byte object: empty DataRef, produces no rados object
     put(*b, "bkt", "empty", "");
     auto empty = sync_wait(b->get_object("bkt", "empty", std::nullopt));
     CHECK_EQ(empty.meta.size, uint64_t(0));
@@ -224,7 +225,7 @@ TEST(duostore_rados_multichunk_roundtrip_and_layout) {
     sync_wait(b->close());
 }
 
-// 未知长度流式（§11.4）：EOF 落在 chunk_size 两侧各一例 + 恰好整切点一例
+// Unknown-length streaming (§11.4): one case with EOF on each side of chunk_size + one exactly on the cut point
 TEST(duostore_rados_unknown_length_stream) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -243,7 +244,7 @@ TEST(duostore_rados_unknown_length_stream) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
-    size_t sizes[] = {100, 4096, 5000};  // < 切点 / 恰好切点 / > 切点
+    size_t sizes[] = {100, 4096, 5000};  // < cut point / exactly the cut point / > cut point
     for (size_t n : sizes) {
         std::string body = patterned(n);
         ChunkedBody reader(body);
@@ -252,12 +253,12 @@ TEST(duostore_rados_unknown_length_stream) {
         CHECK_EQ(got.meta.size, uint64_t(n));
         CHECK_EQ(read_all(*got.body), body);
     }
-    // 对象数：100→1、4096→1、5000→2
+    // Object counts: 100 -> 1, 4096 -> 1, 5000 -> 2
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(4));
     sync_wait(b->close());
 }
 
-// remove 幂等（双删，§11.4）与 namespace 隔离（§3.2）
+// Idempotent remove (double delete, §11.4) and namespace isolation (§3.2)
 TEST(duostore_rados_remove_idempotent_and_ns_isolation) {
     RADOS_OR_SKIP();
     std::string ns_a = unique_ns(), ns_b = unique_ns();
@@ -273,17 +274,17 @@ TEST(duostore_rados_remove_idempotent_and_ns_isolation) {
     CHECK_EQ(ref.total(), uint64_t(9000));
     CHECK_EQ(ref.extents.size(), size_t(3));
     CHECK_EQ(RadosRaw(ns_a).list().size(), size_t(3));
-    // 隔离：同 pool 另一 namespace 不可见
+    // Isolation: not visible from another namespace in the same pool
     CHECK_EQ(RadosRaw(ns_b).list().size(), size_t(0));
 
     sync_wait(a.remove(ref.extents));
     CHECK_EQ(RadosRaw(ns_a).list().size(), size_t(0));
-    sync_wait(a.remove(ref.extents));  // 双删：-ENOENT 幂等忽略
+    sync_wait(a.remove(ref.extents));  // double delete: -ENOENT idempotently ignored
     sync_wait(a.close());
     sync_wait(other.close());
 }
 
-// buffer 信号量背压（§4.2/§11.4）：并发 PUT 数 > 缓冲额度数，不死锁、全部完成
+// Buffer semaphore backpressure (§4.2/§11.4): concurrent PUTs > buffer quota slots, no deadlock, all complete
 TEST(duostore_rados_buffer_backpressure) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -298,7 +299,7 @@ TEST(duostore_rados_buffer_backpressure) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto opts = rados_opts(ns, 4096);
-    opts.buffer_total = 2 * 4096;  // 2 份额度，6 路并发
+    opts.buffer_total = 2 * 4096;  // 2 quota slots, 6-way concurrency
     auto data = std::make_unique<RadosDataStore>(
         opts, pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -325,7 +326,7 @@ TEST(duostore_rados_buffer_backpressure) {
     sync_wait(b->close());
 }
 
-// refs 在而对象缺（§6.3/§11.4）：手工 rados 删对象注入 → GET 500，非静默空读
+// Refs present but object missing (§6.3/§11.4): injected by manually deleting the rados object -> GET 500, not a silent empty read
 TEST(duostore_rados_missing_object_alarm) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -345,13 +346,13 @@ TEST(duostore_rados_missing_object_alarm) {
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", std::string(1000, 'x'));
 
-    RadosRaw(ns).remove_all();  // 越过 store 删数据面对象，meta refs 仍在
+    RadosRaw(ns).remove_all();  // delete data-plane objects bypassing the store, meta refs remain
     auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
     CHECK_THROWS_S3(read_all(*got.body), s3::S3ErrorCode::InternalError);
     sync_wait(b->close());
 }
 
-// verify_chunk_crc=true：位腐（越过 store 改写对象内容）在 GET 时检出 500（§5/§11.4）
+// verify_chunk_crc=true: bitrot (object content rewritten bypassing the store) is detected at GET as 500 (§5/§11.4)
 TEST(duostore_rados_get_detects_bitrot) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -373,7 +374,7 @@ TEST(duostore_rados_get_detects_bitrot) {
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", std::string(1000, 'x'));
 
-    // 注入位腐：同名同长改写一个字节
+    // Inject bitrot: rewrite one byte, same name and length
     RadosRaw raw(ns);
     auto objs = raw.list();
     CHECK_EQ(objs.size(), size_t(1));
@@ -385,7 +386,7 @@ TEST(duostore_rados_get_detects_bitrot) {
     sync_wait(b->close());
 }
 
-// 覆盖/删除后 run_gc_once 收敛（§11.4，随主线 P3 后补）：rados 对象消失、gcq 清空
+// run_gc_once converges after overwrite/delete (§11.4, backfilled with mainline P3): rados objects disappear, gcq drains
 TEST(duostore_rados_gc_reclaims_after_delete) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -398,7 +399,7 @@ TEST(duostore_rados_gc_reclaims_after_delete) {
     DuoStoreConfig cfg;
     cfg.name = "rados-gc";
     cfg.root = tmp.path / "duo";
-    cfg.gc_interval_sec = 0;  // 后台关闭，专测手动钩子
+    cfg.gc_interval_sec = 0;  // background off, tests the manual hook specifically
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
@@ -406,8 +407,8 @@ TEST(duostore_rados_gc_reclaims_after_delete) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
-    put(*b, "bkt", "k", patterned(10000));  // 3 对象
-    put(*b, "bkt", "k", patterned(5000));   // 覆盖：旧 3 入 gcq，新 2
+    put(*b, "bkt", "k", patterned(10000));  // 3 objects
+    put(*b, "bkt", "k", patterned(5000));   // overwrite: old 3 enter gcq, new 2
     sync_wait(b->delete_object("bkt", "k"));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(5));
 
@@ -416,14 +417,14 @@ TEST(duostore_rados_gc_reclaims_after_delete) {
     CHECK_EQ(st.files_removed, uint64_t(5));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(0));
 
-    // 收敛：再跑一轮零动作
+    // Convergence: another round performs zero actions
     auto st2 = sync_wait(b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(0));
     sync_wait(b->close());
 }
 
-// 并发 GET 持 pin 时 GC 跳过（§8.1/§11.4：rados 无 POSIX 已打开 fd 兜底，pin 是
-// 读侧唯一防线，必测）：读中删除 + GC 不 remove；读完内容完整；解 pin 后回收
+// GC skips while a concurrent GET holds the pin (§8.1/§11.4: rados has no POSIX open-fd safety net, the pin is
+// the read side's only defense, must be tested): delete during read + GC does not remove; content intact after reading; reclaimed once unpinned
 TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -456,24 +457,24 @@ TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
     CHECK_EQ(st1.skipped_pinned, uint64_t(1));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(3));
 
-    std::string rest = read_all(*got.body);  // 无 -ENOENT
+    std::string rest = read_all(*got.body);  // no -ENOENT
     CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n0) + rest, body);
 
-    got.body.reset();  // 析构解 pin
+    got.body.reset();  // destruction releases the pin
     auto st2 = sync_wait(b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(1));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(0));
     sync_wait(b->close());
 }
 
-// C3 双缓冲流水（§4.2）：多 chunk 流经"写 N 收 N+1"路径 roundtrip 不变形；
-// buffer_total = chunk_size（try_acquire 恒失败）时退化为单缓冲串行，结果同一。
-// crc 全程开启（全量读逐段校验），extent 账目与对象数落位
+// C3 double-buffered pipeline (§4.2): a multi-chunk stream through the "write N while collecting N+1" path
+// roundtrips without distortion; with buffer_total = chunk_size (try_acquire always fails) it degrades to
+// single-buffer serial with the same result. CRC on throughout (full read verifies segment by segment), extent accounting and object counts land correctly
 TEST(duostore_rados_pipeline_multi_chunk_stream) {
     RADOS_OR_SKIP();
     auto pool = std::make_shared<ThreadPool>(4);
-    std::string body = patterned(100000);  // 100000B / 4KiB = 25 对象
-    for (uint64_t buffer_total : {8 * 4096ull, 4096ull}) {  // 流水 / 串行退化
+    std::string body = patterned(100000);  // 100000B / 4KiB = 25 objects
+    for (uint64_t buffer_total : {8 * 4096ull, 4096ull}) {  // pipelined / serial degradation
         std::string ns = unique_ns();
         NsCleaner cleaner(ns);
         auto opts = rados_opts(ns, 4096);
@@ -481,7 +482,7 @@ TEST(duostore_rados_pipeline_multi_chunk_stream) {
         opts.verify_chunk_crc = true;
         RadosDataStore d(opts, pool, counter_alloc());
         auto w = sync_wait(d.open_writer({std::nullopt}));
-        // 7000B 步长写入：写边界与 chunk 边界交错，覆盖跨片搬运
+        // Writes in 7000B strides: write boundaries interleave with chunk boundaries, covering cross-slice copying
         std::span<const std::byte> rest(reinterpret_cast<const std::byte*>(body.data()),
                                         body.size());
         while (!rest.empty()) {
@@ -499,8 +500,8 @@ TEST(duostore_rados_pipeline_multi_chunk_stream) {
     }
 }
 
-// C4 孤儿扫描（§8.2）：写对象不提交 meta → 正向回收；外来命名对象不归本店；
-// 反向 refs 在而对象缺只告警；grace 内孤儿不动
+// C4 orphan scan (§8.2): objects written without committing meta -> forward reclaim; objects with foreign names
+// do not belong to this store; reverse refs-present-but-object-missing only warns; orphans within grace are untouched
 TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -513,7 +514,7 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     DuoStoreConfig cfg;
     cfg.name = "rados-orphan";
     cfg.root = tmp.path / "duo";
-    cfg.data_kind = DuoDataKind::kRados;  // 孤儿 unlink 的 extent kind 由此决定
+    cfg.data_kind = DuoDataKind::kRados;  // determines the extent kind for orphan unlink
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
@@ -521,35 +522,35 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
         rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 对象在册
+    put(*b, "bkt", "k", patterned(10000));  // 3 objects on the books
 
-    // 孤儿注入：直连 data store 写对象、不提交 meta（崩溃残留形态）；id 取远端避开号段
+    // Orphan injection: write objects directly to the data store without committing meta (crash-residue shape); ids taken far away to avoid the id segment
     {
         auto far = std::make_shared<std::atomic<uint64_t>>(0xabc0);
         RadosDataStore orphan_src(rados_opts(ns, 4096), pool,
                                   [far](Extent::Kind, uint32_t n) { return far->fetch_add(n); });
         auto w = sync_wait(orphan_src.open_writer({std::nullopt}));
-        std::string junk = patterned(5000);  // 2 对象
+        std::string junk = patterned(5000);  // 2 objects
         sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(junk.data()),
                                      junk.size())));
-        (void)sync_wait(w->finish());  // DataRef 落地即弃——meta 无账
+        (void)sync_wait(w->finish());  // DataRef discarded as soon as it lands -- meta has no record
         sync_wait(orphan_src.close());
     }
-    // 外来对象：非 c.<016x> 命名，枚举忽略（§8.2）
+    // Foreign object: not named c.<016x>, ignored by enumeration (§8.2)
     RadosRaw raw(ns);
     CHECK(rados_write_full(raw.io, "not-ours", "x", 1) == 0);
 
     auto st1 = sync_wait(b->run_orphan_scan_once());
-    CHECK_EQ(st1.chunks_scanned, uint64_t(5));  // 3 在册 + 2 孤儿；外来对象不计
+    CHECK_EQ(st1.chunks_scanned, uint64_t(5));  // 3 on the books + 2 orphans; foreign objects not counted
     CHECK_EQ(st1.orphans_removed, uint64_t(2));
     CHECK_EQ(st1.refs_missing, uint64_t(0));
     auto after = raw.list();
-    CHECK_EQ(after.size(), size_t(4));  // 3 在册 + not-ours
+    CHECK_EQ(after.size(), size_t(4));  // 3 on the books + not-ours
     auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
     CHECK_EQ(read_all(*got.body), patterned(10000));
     got.body.reset();
 
-    // 反向：越过 store 删一个在册对象 → 只告警计数，meta 保持（人工介入线索）
+    // Reverse: delete one on-the-books object bypassing the store -> only a warning count, meta kept (a lead for manual intervention)
     for (const auto& o : raw.list())
         if (o.rfind("c.", 0) == 0) {
             CHECK(rados_remove(raw.io, o.c_str()) == 0);
@@ -559,10 +560,10 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     CHECK_EQ(st2.chunks_scanned, uint64_t(2));
     CHECK_EQ(st2.orphans_removed, uint64_t(0));
     CHECK_EQ(st2.refs_missing, uint64_t(1));
-    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta 未被动
+    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta untouched
     sync_wait(b->close());
 
-    // grace 挡新写：宽限内的无引用对象不动（在途写入嫌疑）
+    // Grace shields fresh writes: unreferenced objects within the grace period are untouched (suspected in-flight writes)
     std::string ns2 = unique_ns();
     NsCleaner cleaner2(ns2);
     TmpDir tmp2;
@@ -592,7 +593,7 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     sync_wait(b2->close());
 }
 
-// C4 op 指标（§10）：构造期 0 值可见；write_full/read/remove 落账，错误恒 0
+// C4 op metrics (§10): zero values visible at construction; write_full/read/remove recorded, errors stay 0
 TEST(duostore_rados_op_metrics_registered) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
@@ -607,7 +608,7 @@ TEST(duostore_rados_op_metrics_registered) {
     CHECK(text0.find("lights3_duostore_rados_op_errors_total") != std::string::npos);
 
     auto w = sync_wait(d.open_writer({std::nullopt}));
-    std::string body = patterned(9000);  // 3 对象
+    std::string body = patterned(9000);  // 3 objects
     sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
     DataRef ref = sync_wait(w->finish());
     auto r = sync_wait(d.open_reader(ref, 0, ref.total() - 1));
@@ -624,7 +625,7 @@ TEST(duostore_rados_op_metrics_registered) {
     sync_wait(d.close());
 }
 
-// close 后调用干净失败（500）而非崩溃（§6.5 守卫）
+// Calls after close fail cleanly (500) rather than crashing (§6.5 guard)
 TEST(duostore_rados_closed_store_throws) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();

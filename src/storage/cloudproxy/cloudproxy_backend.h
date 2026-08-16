@@ -1,6 +1,7 @@
-// L3: CloudProxyBackend —— 映射公有云的代理后端（docs/cloudproxy-backend.md）。
-// 自签 SigV4 + vendored httplib 直连远端 S3 兼容端点；本头文件不暴露 httplib 类型
-// （httplib 细节全部收在 remote_client.h/.cc 内部）。
+// L3: CloudProxyBackend -- proxy backend mapping onto a public cloud (docs/cloudproxy-backend.md).
+// Self-signed SigV4 + vendored httplib connecting directly to a remote S3-compatible
+// endpoint; this header exposes no httplib types (all httplib details are contained inside
+// remote_client.h/.cc).
 #pragma once
 
 #include <map>
@@ -19,13 +20,15 @@ struct CloudProxyConfig {
     std::string region = "us-east-1";
     std::string access_key;
     std::string secret_key;
-    std::string bucket_prefix;  // 远端 bucket = 前缀 + 本地名
-    // false = virtual-hosted style（docs/cloudproxy-backend.md §7）：连接与 SNI 恒指
-    // endpoint，仅 Host/签名与路径按 bucket 变化——要求远端在 endpoint 证书下受理
-    // vhost Host（AWS 区域端点/S3 兼容网关的常见形态）
+    std::string bucket_prefix;  // remote bucket = prefix + local name
+    // false = virtual-hosted style (docs/cloudproxy-backend.md §7): connection and SNI always
+    // point at the endpoint; only Host/signature and path vary per bucket -- requires the
+    // remote to accept vhost Hosts under the endpoint certificate (the common shape for AWS
+    // regional endpoints / S3-compatible gateways)
     bool force_path_style = true;
-    // 控制面短请求走私有线程而非共享池（docs/cloudproxy-backend.md §2.3）：高 RTT
-    // 远端不占池线程；代价 = 每控制请求一次线程创建。压测结论默认 false（见 §2.3）
+    // Short control-plane requests use a private thread instead of the shared pool
+    // (docs/cloudproxy-backend.md §2.3): a high-RTT remote does not hold a pool thread; the
+    // cost = one thread creation per control request. Benchmarks say default false (see §2.3)
     bool control_in_pump = false;
     bool tls_verify = true;
     std::string ca_cert;
@@ -34,26 +37,27 @@ struct CloudProxyConfig {
     int retry_max = 3;
     int retry_base_ms = 100;
     int max_connections = 16;
-    bool verify_etag = true;             // docs/cloudproxy-backend.md §6：单段 PUT 与远端 ETag 比对 MD5
-    size_t queue_cap_bytes = 1 << 20;    // 数据面 BlockQueue 容量（背压水位）
-    // 无长度上行的 spool（docs/gaps.md §6.2）：0 = 禁用（回到 NotImplemented）。
-    // 上限防滥用——spool 落网关本地盘，AWS 单 PUT 上限 5GiB 是自然默认
+    bool verify_etag = true;             // docs/cloudproxy-backend.md §6: single-part PUT compares MD5 against the remote ETag
+    size_t queue_cap_bytes = 1 << 20;    // data-plane BlockQueue capacity (backpressure watermark)
+    // Spool for length-less uploads (docs/gaps.md §6.2): 0 = disabled (back to
+    // NotImplemented). The cap guards against abuse -- the spool lands on the gateway's
+    // local disk, and AWS's 5GiB single-PUT limit is the natural default
     uint64_t spool_max_bytes = 5ull << 30;
-    std::string spool_dir;               // 空 = std::filesystem::temp_directory_path()
+    std::string spool_dir;               // empty = std::filesystem::temp_directory_path()
 
-    // BackendConfig::params → 配置；非法值在配置加载期抛 std::runtime_error
+    // BackendConfig::params -> config; invalid values throw std::runtime_error at config-load time
     static CloudProxyConfig from_params(const std::string& name,
                                         const std::map<std::string, std::string>& params);
 };
 
 namespace cloudproxy {
-struct RemoteContext;  // remote_client.h：ClientPool + 签名管线 + 错误映射
+struct RemoteContext;  // remote_client.h: ClientPool + signing pipeline + error mapping
 }
 
 class CloudProxyBackend final : public IStorageBackend {
 public:
-    // metrics 默认空 scope（docs/cloudproxy-backend.md §8.2）：测试直构免装配，
-    // 计数落孤立实例
+    // metrics defaults to an empty scope (docs/cloudproxy-backend.md §8.2): tests construct
+    // directly without wiring, counts land on orphan instances
     CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<ThreadPool> pool,
                       MetricsScope metrics = {});
     ~CloudProxyBackend() override;
@@ -69,8 +73,9 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
-    // 同后端 copy 快路径（docs/gaps.md §6.2）：远端服务端 COPY（x-amz-copy-source）
-    // ——此前云端内部 copy 会"下载到网关再传回去"，2 倍跨网流量与费用
+    // Same-backend copy fast path (docs/gaps.md §6.2): remote server-side COPY
+    // (x-amz-copy-source) -- previously an intra-cloud copy would "download to the gateway
+    // and upload back", doubling cross-network traffic and cost
     Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket,
                                                     std::string_view src_key,
                                                     std::string_view dst_bucket,
@@ -96,23 +101,27 @@ public:
                                                    const ListUploadsOptions& opt) override;
 
 private:
-    // 本地名校验 + 前缀映射；映射后超 63 字节抛 InvalidBucketName
+    // Local-name validation + prefix mapping; throws InvalidBucketName if the mapped name
+    // exceeds 63 bytes
     std::string remote_bucket(std::string_view bucket) const;
-    // 控制面阻塞段执行环境（docs/cloudproxy-backend.md §2.3）：缺省池线程；
-    // control_in_pump=true 走一次性私有线程。定义在 .cc（仅本 TU 使用）
+    // Execution environment for control-plane blocking sections (docs/cloudproxy-backend.md
+    // §2.3): pool thread by default; control_in_pump=true uses a one-shot private thread.
+    // Defined in the .cc (used only in that TU)
     template <class Fn>
     Task<std::invoke_result_t<Fn>> control_io(Fn fn);
-    // PUT / upload_part 共用的流式上行（docs/cloudproxy-backend.md §3.2）。resource 为客户端视角的
-    // "/bucket/key"（进错误 XML，不泄漏带前缀的远端路径）；multipart_ctx 决定
-    // 无错误体 404 的语义兜底（Upload / Bucket）
+    // Streaming upload shared by PUT / upload_part (docs/cloudproxy-backend.md §3.2).
+    // resource is the client-view "/bucket/key" (goes into the error XML; does not leak the
+    // prefixed remote path); multipart_ctx decides the semantic fallback for a body-less 404
+    // (Upload / Bucket)
     Task<PutResult> stream_upload(std::string raw_path, std::string raw_query,
                                   std::string host, std::string content_type,
                                   std::vector<std::pair<std::string, std::string>> extra,
                                   http::BodyReader& body, std::string resource,
                                   bool multipart_ctx);
-    // 无长度上行（docs/gaps.md §6.2）：AWS 不接受裸 chunked，先 spool 到本地临时
-    // 文件取得长度再走 stream_upload——此前直接 NotImplemented，chunked 且无
-    // x-amz-decoded-content-length 的 PUT 在本后端整个不可用
+    // Length-less upload (docs/gaps.md §6.2): AWS rejects bare chunked, so spool to a local
+    // temp file first to obtain the length, then go through stream_upload -- previously this
+    // was a flat NotImplemented, making chunked PUTs without x-amz-decoded-content-length
+    // entirely unusable on this backend
     Task<PutResult> spool_and_upload(std::string raw_path, std::string raw_query,
                                      std::string host, std::string content_type,
                                      std::vector<std::pair<std::string, std::string>> extra,
@@ -121,7 +130,7 @@ private:
 
     std::shared_ptr<cloudproxy::RemoteContext> ctx_;
     std::shared_ptr<ThreadPool> pool_;
-    ThreadPoolExecutor exec_{*pool_};  // control_in_pump 私有线程完成后的续体投递（§2.3）
+    ThreadPoolExecutor exec_{*pool_};  // continuation posting after a control_in_pump private thread finishes (§2.3)
 };
 
 }  // namespace lights3::storage

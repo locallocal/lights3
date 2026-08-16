@@ -1,5 +1,6 @@
-// L4: 阻塞 IO 线程池；协程经 co_await pool.schedule() 切入池线程
-// （docs/concurrency.md §3：有界队列 + 背压、深度/等待时长指标、§5 取消）
+// L4: blocking-IO thread pool; coroutines hop onto pool threads via
+// co_await pool.schedule() (docs/concurrency.md §3: bounded queue + backpressure,
+// depth/wait-time metrics, §5 cancellation)
 #pragma once
 
 #include <array>
@@ -23,39 +24,43 @@ namespace lights3 {
 
 class ThreadPool {
 public:
-    // 任务入队→开跑的等待时长直方图桶：<1ms <10ms <100ms <1s ≥1s
+    // Histogram buckets for enqueue-to-start wait time: <1ms <10ms <100ms <1s >=1s
     static constexpr size_t kWaitBuckets = 5;
-    // 桶上界（秒），供 Prometheus 渲染（docs/gaps.md §7）；末桶 +Inf
+    // Bucket upper bounds (seconds) for Prometheus rendering (docs/gaps.md §7); last bucket is +Inf
     static constexpr std::array<double, kWaitBuckets - 1> kWaitBucketBounds{0.001, 0.01, 0.1,
                                                                            1.0};
 
     struct Stats {
-        size_t queue_depth = 0;   // 就绪队列长度
-        size_t backlogged = 0;    // 队列满被背压挡在等待列表的 schedule 任务数
-        uint64_t completed = 0;   // 已执行完的任务数
+        size_t queue_depth = 0;   // ready queue length
+        size_t backlogged = 0;    // schedule tasks held on the wait list by backpressure when the queue is full
+        uint64_t completed = 0;   // tasks fully executed
         std::array<uint64_t, kWaitBuckets> wait_hist{};
-        uint64_t wait_sum_us = 0;  // 等待时长累计（微秒），histogram 的 _sum
+        uint64_t wait_sum_us = 0;  // cumulative wait time (microseconds), the histogram's _sum
     };
 
     explicit ThreadPool(size_t threads, size_t queue_capacity = 4096);
     ~ThreadPool();
     ThreadPool(const ThreadPool&) = delete;
 
-    // 无界入队：续体投递（executor post）不可失败也不可等待；
-    // join 后调用不抛（noexcept 消费方），改为记 ERROR 并在调用方线程就地执行
+    // Unbounded enqueue: continuation delivery (executor post) may neither fail nor
+    // wait; calling after join does not throw (noexcept consumers) — instead it logs
+    // ERROR and runs in place on the calling thread
     void post(std::function<void()> fn);
-    void join();  // 停止接收新任务，排空队列并等待线程退出
+    void join();  // stop accepting new tasks, drain the queue, and wait for threads to exit
     size_t size() const { return workers_.size(); }
     Stats stats() const;
 
     struct ScheduleAwaiter {
-        // 挂起状态放独立共享块：池任务与取消回调竞争 resume，
-        // 败者仍持有引用，不能指向可能已随协程恢复而销毁的 awaiter/协程帧
+        // Suspension state lives in a separate shared block: the pool task and the
+        // cancel callback race to resume; the loser still holds a reference, which
+        // must not point into an awaiter/coroutine frame that may already be
+        // destroyed once the coroutine resumes
         struct Slot {
             std::coroutine_handle<> h;
             std::atomic<bool> claimed{false};
-            bool cancelled = false;  // 仅 claim 成功者写，resume 后同线程读
-            // 取消回调的注销信息：reg_id 由 on_cancel_publish 在注册临界区内落位
+            bool cancelled = false;  // written only by the successful claimer, read on the same thread after resume
+            // Deregistration info for the cancel callback: reg_id is written by
+            // on_cancel_publish inside the registration critical section
             std::atomic<uint64_t> reg_id{0};
             std::shared_ptr<detail::CancelState> cancel_state;
         };
@@ -65,9 +70,10 @@ public:
         std::shared_ptr<Slot> slot;
 
         bool await_ready() const noexcept { return false; }
-        // 未显式传 token 时从调用方协程的 promise 继承（core/task.h 的 PromiseBase
-        // 沿 co_await 链传递）——存量的 co_await pool_->schedule() 因此无需改调用点
-        // 就能感知请求级取消（docs/gaps.md §3.1）
+        // When no token is passed explicitly, inherit from the calling coroutine's
+        // promise (core/task.h's PromiseBase propagates it down the co_await chain) —
+        // existing co_await pool_->schedule() call sites thus pick up request-level
+        // cancellation without modification (docs/gaps.md §3.1)
         template <class P>
         bool await_suspend(std::coroutine_handle<P> h) {
             if constexpr (requires {
@@ -84,8 +90,10 @@ public:
             if (slot->cancelled) throw OperationCancelled();
         }
     };
-    // token 取消时：仍在排队的任务被以 OperationCancelled 异常 resume（docs/concurrency.md §5）；
-    // 已在池线程上执行的阻塞段不被抢占，等其自然返回后由调用方检查 token
+    // On token cancellation: tasks still queued are resumed with an
+    // OperationCancelled exception (docs/concurrency.md §5); a blocking section
+    // already running on a pool thread is not preempted — the caller checks the
+    // token after it returns naturally
     ScheduleAwaiter schedule(CancelToken token = {}) { return {*this, std::move(token), nullptr}; }
 
 private:
@@ -95,21 +103,25 @@ private:
         std::chrono::steady_clock::time_point enqueued;
     };
 
-    // schedule() 路径：队列满时挂到背压等待列表，由 worker 腾出空位后放行
+    // schedule() path: when the queue is full, park on the backpressure wait list;
+    // a worker releases it once space frees up
     void enqueue_bounded(std::function<void()> fn);
     void worker_loop();
     static size_t wait_bucket(std::chrono::steady_clock::duration d);
 
     mutable std::mutex m_;
     std::condition_variable cv_;
-    // 续体投递（post）与阻塞任务（schedule）分队列（docs/gaps.md §4）：post 的
-    // 契约是"不可失败不可等待"，共用一个 4096 队列时压力下续体要排在 4096 个
-    // IO 之后。worker 恒先取续体队列——续体是让出过线程的既有工作，天然优先
-    std::deque<Item> cont_queue_;  // post：无界
-    std::deque<Item> queue_;       // schedule：capacity_ 有界
+    // Continuation delivery (post) and blocking tasks (schedule) use separate queues
+    // (docs/gaps.md §4): post's contract is "may neither fail nor wait", and with a
+    // shared 4096 queue a continuation would queue behind 4096 IOs under pressure.
+    // Workers always drain the continuation queue first — continuations are existing
+    // work that already yielded the thread, hence naturally higher priority
+    std::deque<Item> cont_queue_;  // post: unbounded
+    std::deque<Item> queue_;       // schedule: bounded by capacity_
     std::deque<Item> backlog_;
     size_t capacity_;
-    // 每任务免锁记账（docs/gaps.md §4：completed_ 每任务取一次锁与调度争用）
+    // Lock-free per-task accounting (docs/gaps.md §4: completed_ taking a lock per
+    // task contends with scheduling)
     std::atomic<uint64_t> completed_{0};
     std::array<std::atomic<uint64_t>, kWaitBuckets> wait_hist_{};
     std::atomic<uint64_t> wait_sum_us_{0};

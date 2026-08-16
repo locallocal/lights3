@@ -1,4 +1,4 @@
-// 微型测试框架：环境无 gtest，用注册表 + 断言宏覆盖单测需求
+// Minimal test framework: no gtest in this environment, so a registry + assertion macros cover unit-test needs
 #pragma once
 
 #include <cstdio>
@@ -56,9 +56,9 @@ inline int run_all() {
     return failed == 0 ? 0 : 1;
 }
 
-// ---- 子进程模式（崩溃注入用）----
-// 测试进程带参重启自身（execv /proc/self/exe <mode> ...）进入注册的子例程，
-// 子例程以 _exit / 被 SIGKILL 收尾模拟 kill -9；父进程重开状态目录验证收敛
+// ---- Child-process mode (for crash injection) ----
+// The test process restarts itself with arguments (execv /proc/self/exe <mode> ...) to enter a registered child routine;
+// the child routine ends with _exit / being SIGKILLed to simulate kill -9; the parent reopens the state directory and verifies convergence
 
 using ChildFn = int (*)(int argc, char** argv);
 
@@ -76,7 +76,7 @@ struct ChildRegistrar {
     ChildRegistrar(const char* name, ChildFn fn) { child_registry().push_back({name, fn}); }
 };
 
-inline int run_child(int argc, char** argv) {  // argv[1] = 子模式名
+inline int run_child(int argc, char** argv) {  // argv[1] = child mode name
     for (auto& c : child_registry())
         if (std::string(argv[1]) == c.name) return c.fn(argc, argv);
     fprintf(stderr, "unknown child mode: %s\n", argv[1]);

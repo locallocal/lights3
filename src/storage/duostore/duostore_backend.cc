@@ -37,7 +37,7 @@ using s3::S3Error;
 using s3::S3ErrorCode;
 using namespace duostore;
 
-// ---------- PinTable（§7）----------
+// ---------- PinTable (§7) ----------
 
 namespace duostore {
 
@@ -81,7 +81,7 @@ void PinTable::unpin_key(bool is_pack, uint64_t id) {
     std::lock_guard lk(s.m);
     auto& refs = is_pack ? s.pack_refs : s.chunk_refs;
     auto it = refs.find(id);
-    if (it == refs.end()) return;  // 不应发生；防御性容忍
+    if (it == refs.end()) return;  // should not happen; tolerated defensively
     if (--it->second <= 0) refs.erase(it);
 }
 
@@ -91,27 +91,33 @@ bool PinTable::pinned_key(bool is_pack, uint64_t id) {
     return (is_pack ? s.pack_refs : s.chunk_refs).count(id) != 0;
 }
 
-// ---------- 压实迁移（P4 §9.2 步骤 2-3）----------
+// ---------- compaction migration (P4 §9.2 steps 2-3) ----------
 
 Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable* pins,
                                     std::vector<PackScanRecord> batch) {
-    // owner 只是反查提示（§9.2）：对象 record 内嵌 "b\0k"；mpu record 内嵌
-    // "mpu\0b\0k\0id\0no"——complete 后分片归属 b/k 的对象（refs 转移不改 record），
-    // 提示仍然可用。进行中 mpu 的分片（对象上查不到 from）与 P4 之前的旧格式
-    // "mpu\0id\0no"（无 b/k 可查）都保守不迁：live 账不动，pack 本轮不删，
-    // 分别待 complete/abort 后自然解锁与永久搁置（重写盘上旧 record 非目标）
+    // The owner is only a reverse-lookup hint (§9.2): object records embed
+    // "b\0k"; mpu records embed "mpu\0b\0k\0id\0no" — after complete, the part
+    // belongs to the object at b/k (the refs transfer does not modify the
+    // record), so the hint remains usable. Parts of an in-flight mpu (from not
+    // found on the object) and the pre-P4 legacy format "mpu\0id\0no" (no b/k to
+    // look up) are both conservatively not migrated: the live account is
+    // untouched and the pack is not deleted this round; the former unblocks
+    // naturally after complete/abort, the latter is shelved permanently
+    // (rewriting old records on disk is a non-goal)
 
-    // 1) 按 owner 聚合（gaps §2.13）：同一对象在同一 pack 的多条 record 一次
-    // get_object + 一次换 ref，替代逐条整份 manifest 重写的 O(n²)
+    // 1) Aggregate by owner (gaps §2.13): multiple records of one object in the
+    // same pack do a single get_object + a single ref swap, replacing the O(n²)
+    // of rewriting the whole manifest per record
     struct Group {
         std::string b, k;
-        std::vector<size_t> recs;  // batch 下标，扫描序
+        std::vector<size_t> recs;  // batch indices, in scan order
     };
     std::vector<Group> groups;
-    std::map<std::string, size_t> by_owner;  // "b\0k" -> groups 下标
+    std::map<std::string, size_t> by_owner;  // "b\0k" -> groups index
     for (size_t i = 0; i < batch.size(); ++i) {
-        // 规范解析器（docs/gaps.md §6.1：三种 owner 形态收敛到 codec，离线取证
-        // 工具复用同一入口）；kLegacyPart/kUnknown 无 b/k 可查，保守不迁
+        // Canonical parser (docs/gaps.md §6.1: the three owner forms converge in
+        // codec, offline forensics tools reuse the same entry point);
+        // kLegacyPart/kUnknown have no b/k to look up, conservatively not migrated
         auto po = codec::parse_pack_owner(batch[i].owner);
         if (po.kind != codec::PackOwner::Kind::kObject &&
             po.kind != codec::PackOwner::Kind::kPart)
@@ -123,18 +129,20 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
         groups[it->second].recs.push_back(i);
     }
 
-    // 2) 逐组反查存活：from 与当前 manifest 逐位置配对（同 extent 不会出现两次——
-    // manifest 由互异 record 拼成；防御起见仍标记已配对位置）
+    // 2) Reverse-check liveness per group: pair from with the current manifest
+    // position by position (the same extent cannot appear twice — the manifest is
+    // assembled from distinct records; positions are still marked as paired for
+    // defense)
     struct LiveRec {
-        size_t group;      // groups 下标
-        size_t manifest_i; // 该组 manifest 中被替换的位置
-        size_t rec_i;      // batch 下标
+        size_t group;      // groups index
+        size_t manifest_i; // position replaced within that group's manifest
+        size_t rec_i;      // batch index
     };
     std::vector<LiveRec> live;
     std::vector<std::optional<ObjectRec>> group_rec(groups.size());
     for (size_t g = 0; g < groups.size(); ++g) {
         auto rec = meta.get_object(groups[g].b, groups[g].k);
-        if (!rec) continue;  // 对象不存在 = 全部死区/进行中 mpu，保守不迁
+        if (!rec) continue;  // object missing = all dead region / in-flight mpu, conservatively not migrated
         std::vector<bool> used(rec->data.extents.size(), false);
         for (size_t ri : groups[g].recs)
             for (size_t i = 0; i < rec->data.extents.size(); ++i)
@@ -147,9 +155,10 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     }
     if (live.empty()) co_return 0;
 
-    // 3) 存活 payload 批量追加（fs 实现单槽锁 + 单 fdatasync）；新 record 的 owner
-    // 统一写对象形态。open_writer 同款分流语义——阈值缩小或 pack 关停时落 chunk
-    // 同样正确
+    // 3) Batch-append live payloads (single slot lock + single fdatasync in the
+    // fs implementation); new records' owners uniformly use the object form.
+    // Same routing semantics as open_writer — landing in chunks after a threshold
+    // shrink or with packs disabled is equally correct
     std::vector<std::string> owners(live.size());
     std::vector<PackAppendItem> items(live.size());
     for (size_t i = 0; i < live.size(); ++i) {
@@ -159,13 +168,14 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     }
     std::vector<DataRef> nrefs = co_await data.write_batch(items);
 
-    // 4) 逐组拼新 manifest（多处替换一次完成）→ 批量换 ref
+    // 4) Assemble the new manifest per group (multiple replacements in one pass)
+    // → batch ref swap
     std::vector<SwapReq> reqs;
     std::vector<size_t> req_group;
     reqs.reserve(groups.size());
     for (size_t g = 0; g < groups.size(); ++g) {
         if (!group_rec[g]) continue;
-        std::map<size_t, size_t> repl;  // manifest 位置 -> live 下标
+        std::map<size_t, size_t> repl;  // manifest position -> live index
         for (size_t i = 0; i < live.size(); ++i)
             if (live[i].group == g) repl[live[i].manifest_i] = i;
         if (repl.empty()) continue;
@@ -184,9 +194,12 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     }
     std::vector<bool> ok = meta.swap_extents_batch(reqs);
 
-    // 5) 失败组清理 + 写侧 pin 对称解除。期间被覆盖/删除：追加的新 record 成死区
-    // （无账，随未来压实回收）；chunk 类残留显式清（refs 从未建立，删之即净）。
-    // pin：swap 成功即 refs 在账，失败则文件已删——两况都解
+    // 5) Clean up failed groups + symmetric write-side unpin. Overwritten/deleted
+    // in the meantime: appended new records become dead regions (no account,
+    // reclaimed by future compaction); chunk-kind residue is cleaned explicitly
+    // (refs were never established, deleting them is clean).
+    // Pins: on swap success refs are on the books, on failure the file is already
+    // deleted — unpin in both cases
     uint64_t migrated = 0;
     std::vector<bool> group_ok(groups.size(), false);
     for (size_t r = 0; r < reqs.size(); ++r) group_ok[req_group[r]] = ok[r];
@@ -209,18 +222,19 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
 
 }  // namespace duostore
 
-// ---------- 配置解析（§11）----------
+// ---------- configuration parsing (§11) ----------
 
 namespace {
 
-// 全部标量解析统一诊断格式与严格性（拒绝尾部垃圾）；配置错误一律 runtime_error
+// All scalar parsing shares one diagnostic format and strictness (trailing
+// garbage rejected); configuration errors are always runtime_error
 [[noreturn]] void bad_param(const std::string& name, const char* key, const std::string& v) {
     throw std::runtime_error("duostore backend '" + name + "': invalid " + key + ": " + v);
 }
 
 bool parse_bool_param(const std::string& name, const char* key, const std::string& v) {
     try {
-        return parse_bool(v);  // 共享 token 集（core/config.h）
+        return parse_bool(v);  // shared token set (core/config.h)
     } catch (...) {
         bad_param(name, key, v);
     }
@@ -289,7 +303,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         c.rocksdb_max_background_jobs =
             parse_int_param(name, "rocksdb_max_background_jobs", *v);
 
-    // meta 引擎选择（docs/duostore-redis-meta.md §8 / docs/duostore-sqlite-meta.md §8）
+    // meta engine selection (docs/duostore-redis-meta.md §8 / docs/duostore-sqlite-meta.md §8)
     if (auto* v = get("meta")) {
         if (*v == "rocksdb") {
             c.meta_kind = DuoMetaKind::kRocksDb;
@@ -343,26 +357,28 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
                                      "': redis_wait_replicas must be in [0,256]");
     }
 
-    // sqlite meta（docs/duostore-sqlite-meta.md §8）：meta_sync 沿用（本地引擎，
-    // 持久化档位归本进程管，映射 synchronous FULL/NORMAL）
+    // sqlite meta (docs/duostore-sqlite-meta.md §8): meta_sync carries over (local
+    // engine, the durability level belongs to this process, mapped to synchronous
+    // FULL/NORMAL)
     if (auto* v = get("sqlite_path"); v && !v->empty()) c.sqlite_path = *v;
     else c.sqlite_path = c.root / "meta.sqlite3";
     if (auto* v = get("sqlite_cache")) c.sqlite_cache = parse_size(*v);
     if (c.meta_kind == DuoMetaKind::kSqlite) {
-        // 进程级总预算，按连接摊分后仍需有意义（docs/duostore-sqlite-meta.md §8）
+        // Process-wide total budget; must remain meaningful after splitting across connections (docs/duostore-sqlite-meta.md §8)
         if (c.sqlite_cache < (1ull << 20))
             throw std::runtime_error("duostore backend '" + name +
                                      "': sqlite_cache must be >= 1MiB");
     }
 
-    // tikv meta（docs/duostore-tikv-meta.md §9）：pd_endpoints 逗号分隔；持久化 =
-    // raft 多数派，meta_sync 无意义（归属表下方单列 WARN）
+    // tikv meta (docs/duostore-tikv-meta.md §9): pd_endpoints comma-separated;
+    // durability = raft majority, so meta_sync is meaningless (WARNed separately
+    // below the ownership table)
     if (auto* v = get("pd_endpoints")) {
         std::string_view rest = *v;
         while (!rest.empty()) {
             auto comma = rest.find(',');
             std::string_view ep = rest.substr(0, comma);
-            // 修剪空白（YAML 里 "a:2379, b:2379" 的书写习惯）
+            // Trim whitespace (the "a:2379, b:2379" writing habit in YAML)
             while (!ep.empty() && (ep.front() == ' ' || ep.front() == '\t')) ep.remove_prefix(1);
             while (!ep.empty() && (ep.back() == ' ' || ep.back() == '\t')) ep.remove_suffix(1);
             if (!ep.empty()) c.pd_endpoints.emplace_back(ep);
@@ -382,7 +398,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         if (c.pd_endpoints.empty())
             throw std::runtime_error("duostore backend '" + name +
                                      "': meta=tikv needs pd_endpoints");
-        // mTLS 三件套要么全给要么全空（ClusterConfig 以 ca 非空为启用判据）
+        // The mTLS triple is either all given or all empty (ClusterConfig treats a non-empty ca as the enable criterion)
         int given = int(!c.tikv_ca.empty()) + int(!c.tikv_cert.empty()) + int(!c.tikv_key.empty());
         if (given != 0 && given != 3)
             throw std::runtime_error("duostore backend '" + name +
@@ -390,15 +406,16 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         if (c.tikv_backoff_ms < 0)
             throw std::runtime_error("duostore backend '" + name +
                                      "': tikv_backoff_ms must be >= 0 (0 = library default)");
-        // interval 0 = 关闭推进（共 TiDB 集群时由 TiDB 治理，§7.3 部署矩阵）；
-        // 开启时 retention 必须为正——safepoint 推到 now 会砍掉在途快照
+        // interval 0 = advancing disabled (governed by TiDB when sharing a TiDB
+        // cluster, §7.3 deployment matrix); when enabled, retention must be
+        // positive — pushing the safepoint to now would cut off in-flight snapshots
         if (c.tikv_gc_interval_sec < 0 || c.tikv_gc_retention_sec <= 0)
             throw std::runtime_error(
                 "duostore backend '" + name +
                 "': tikv_gc_interval must be >= 0 and tikv_gc_retention > 0");
     }
 
-    // data 引擎选择（docs/duostore-rados-data.md §10，对偶 meta 分支）
+    // data engine selection (docs/duostore-rados-data.md §10, dual of the meta branch)
     if (auto* v = get("data")) {
         if (*v == "fs") {
             c.data_kind = DuoDataKind::kFs;
@@ -427,7 +444,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
         if (c.rados_pool.empty())
             throw std::runtime_error("duostore backend '" + name +
                                      "': data=rados needs rados_pool");
-        // 上限对齐 osd_max_object_size 默认 128MiB（docs/duostore-rados-data.md §3.4）
+        // Upper bound matches the osd_max_object_size default of 128MiB (docs/duostore-rados-data.md §3.4)
         if (c.rados_chunk_size < 4096 || c.rados_chunk_size > (128ull << 20))
             throw std::runtime_error("duostore backend '" + name +
                                      "': rados_chunk_size must be in [4KiB,128MiB]");
@@ -442,9 +459,11 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
                                      "': rados_op_timeout must be >= 0");
     }
 
-    // data 引擎专属键：出现但不属于选中引擎 → WARN（同下 meta 键归属表的机制；
-    // docs/duostore-rados-data.md §10——data=rados 下 chunk_size 被 rados_chunk_size
-    // 取代、pack_* 全部忽略；verify_chunk_crc 为两引擎共有）
+    // data-engine-owned keys: present but not belonging to the selected engine →
+    // WARN (same mechanism as the meta key ownership table below;
+    // docs/duostore-rados-data.md §10 — under data=rados, chunk_size is superseded
+    // by rados_chunk_size and all pack_* are ignored; verify_chunk_crc is shared
+    // by both engines)
     {
         static constexpr struct {
             const char* key;
@@ -474,10 +493,12 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
                          kind_name);
     }
 
-    // meta 引擎专属键：出现但不属于选中引擎 → WARN（键→归属表；新引擎加行即可，
-    // 免去每个分支各自维护对方键清单的 O(kinds²) 漏网）。meta_sync 为 rocksdb 与
-    // sqlite 共有、redis / tikv 下忽略（持久化语义分别归 Redis AOF 与 raft 多数派
-    // 承担），单列处理
+    // meta-engine-owned keys: present but not belonging to the selected engine →
+    // WARN (a key→ownership table; a new engine just adds rows, avoiding the
+    // O(kinds²) leaks of every branch maintaining the other engines' key lists).
+    // meta_sync is shared by rocksdb and sqlite, ignored under redis / tikv
+    // (durability semantics are borne by Redis AOF and raft majority
+    // respectively), handled separately
     {
         static constexpr struct {
             const char* key;
@@ -512,7 +533,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             if (mk.kind != c.meta_kind && params.count(mk.key))
                 LOG_WARN("duostore backend '{}': {} ignored with meta={}", name, mk.key,
                          kind_name);
-        // redis：持久化语义归 Redis 侧 AOF；tikv：提交即 raft 多数派，恒等效 sync
+        // redis: durability semantics belong to Redis-side AOF; tikv: a commit is a raft majority, always equivalent to sync
         if ((c.meta_kind == DuoMetaKind::kRedis || c.meta_kind == DuoMetaKind::kTikv) &&
             params.count("meta_sync"))
             LOG_WARN("duostore backend '{}': meta_sync ignored with meta={}", name, kind_name);
@@ -544,9 +565,10 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     return c;
 }
 
-// ---------- 构造 / 关闭 ----------
+// ---------- construction / shutdown ----------
 
-// GC 租约的实例标识：随机 64bit hex；重启换新即可，旧租约由 TTL 过期让位
+// Instance identity for the GC lease: random 64-bit hex; a restart simply gets a
+// new one, the old lease yields via TTL expiry
 static std::string random_owner() {
     std::random_device rd;
     uint64_t v = (uint64_t(rd()) << 32) ^ rd();
@@ -596,10 +618,11 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
             cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache,
             cfg_.rocksdb_write_buffer, cfg_.rocksdb_max_write_buffers,
             cfg_.rocksdb_max_background_jobs, metrics});
-    IMetaStore* meta = meta_.get();  // 分配回调不延长 meta 生命周期：本类持有两者，先关 data
+    IMetaStore* meta = meta_.get();  // the alloc callback does not extend meta's lifetime: this class owns both, data closes first
     auto alloc = [meta](Extent::Kind kind, uint32_t n) { return meta->alloc_file_run(kind, n); };
-    // 读路径 crc 失配上报（P5 corruption 指标）：只捕获计数器 shared_ptr——reader
-    // 持 options 拷贝逃逸出 backend 生命周期后回调仍安全
+    // Read-path crc mismatch reporting (P5 corruption metric): captures only the
+    // counter shared_ptr — the callback stays safe after readers holding options
+    // copies escape the backend's lifetime
     auto on_corruption = [c = m_read_corruption_] { c->inc(); };
 #ifdef LIGHTS3_DUOSTORE_RADOS_DATA
     if (cfg_.data_kind == DuoDataKind::kRados) {
@@ -614,9 +637,11 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         ro.op_timeout_sec = cfg_.rados_op_timeout_sec;
         ro.verify_chunk_crc = cfg_.verify_chunk_crc;
         ro.on_corruption = on_corruption;
-        ro.metrics = metrics;  // op 延迟/错误指标（C4，docs/duostore-rados-data.md §10）
-        // 写侧 pin 与 fs 路径同源注入（docs/gaps.md §1.2）：此前 rados 分支整条
-        // 缺失，孤儿扫描会删掉在途大对象已落地的分片
+        ro.metrics = metrics;  // op latency/error metrics (C4, docs/duostore-rados-data.md §10)
+        // Write-side pins injected from the same source as the fs path
+        // (docs/gaps.md §1.2): the rados branch used to miss this entirely, and
+        // the orphan scan would delete the already-landed parts of an in-flight
+        // large object
         auto rpins = pins_;
         ro.pins = ChunkPinHooks{[rpins](uint64_t id) { rpins->pin_id(id); },
                                 [rpins](uint64_t id) { rpins->unpin_id(id); }};
@@ -625,8 +650,10 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     }
 #endif
     if (!data_) {
-        // 压实迁移与写侧 pin 钩子（P4）：迁移标准实现 + pin 表同源注入。回调不捕获
-        // this（meta/pins 生命周期由本类持有与 shared_ptr 保证），测试注入组装同款
+        // Compaction migration and write-side pin hooks (P4): the standard
+        // migration implementation + pin table injected from the same source.
+        // Callbacks do not capture this (meta/pins lifetimes are guaranteed by
+        // this class's ownership and shared_ptr); test-injection assembly is identical
         auto pins = pins_;
         data_ = std::make_unique<FsDataStore>(
             FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc,
@@ -699,8 +726,10 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
         "lights3_duostore_orphan_packstats_missing",
         "Pack accounts whose file is missing as of the last orphan scan (data loss signal)");
 
-    // 用量与空间放大（docs/gaps.md §6.1）：pack_bytes/pack_live_bytes 之比即放大率
-    // ——留给查询侧算，两个 gauge 各自独立可读（gauge 是整型，先算好比值会丢精度）
+    // Usage and space amplification (docs/gaps.md §6.1): the ratio
+    // pack_bytes/pack_live_bytes is the amplification factor — left for the query
+    // side to compute, the two gauges each stay independently readable (gauges are
+    // integral; a precomputed ratio would lose precision)
     m_bytes_chunks_ = metrics.gauge("lights3_duostore_chunk_bytes",
                                     "Total bytes of chunk entities on disk (last orphan scan)");
     m_bytes_packs_ = metrics.gauge("lights3_duostore_pack_bytes",
@@ -714,15 +743,17 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
     m_packs_total_ = metrics.gauge("lights3_duostore_packs",
                                    "Packs with an account as of the last GC round");
 
-    // 回收是否追得上删除（§6.1）：深度只在全量轮更新——增量轮从上轮高位起扫，
-    // 看不到队头积压，用它刷新会周期性地把深度谎报成 0
+    // Whether reclamation keeps up with deletion (§6.1): depth updates only on
+    // full rounds — incremental rounds scan from the previous high watermark and
+    // cannot see backlog at the queue head; refreshing from them would
+    // periodically misreport the depth as 0
     m_gcq_depth_ = metrics.gauge(
         "lights3_duostore_gcq_depth",
         "Reclaim-queue entries seen by the last full GC scan (incremental rounds do not update)");
     m_gcq_oldest_age_ = metrics.gauge(
         "lights3_duostore_gcq_oldest_age_seconds",
         "Age of the oldest reclaim-queue entry at the last full GC scan (0 = queue empty)");
-    // skipped 类是"本轮观测"而非累计：grace/pin 跳过项每轮重扫，单调计数会虚高
+    // The skipped family is a per-round observation, not cumulative: grace/pin skips are rescanned every round, a monotonic counter would inflate
     m_gc_skipped_grace_ = metrics.gauge("lights3_duostore_gc_skipped_grace",
                                         "Reclaim entries skipped for gc_grace in the last round");
     m_gc_skipped_pinned_ = metrics.gauge("lights3_duostore_gc_skipped_pinned",
@@ -730,9 +761,11 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
     m_gc_duration_ = metrics.histogram(
         "lights3_duostore_gc_round_seconds", "Wall time of a completed GC round",
         {0.01, 0.1, 0.5, 1, 5, 15, 60, 300, 1800});
-    // 回收来源分桶（codec gcq 的 reason 字节，§6.1）：定位压力来自覆盖写、批量
-    // 删除还是 mpu 弃件。注册全部取值——缺失的桶在 Prometheus 里读作"没数据"而
-    // 非"为 0"，会让"删除压力突然消失"和"从来没有过删除"看起来一样
+    // Reclamation source buckets (the reason byte of codec's gcq, §6.1):
+    // pinpoints whether pressure comes from overwrites, bulk deletes, or mpu
+    // abandonment. Register every value — a missing bucket reads as "no data" in
+    // Prometheus rather than "zero", which would make "delete pressure suddenly
+    // vanished" look the same as "there were never any deletes"
     for (auto r : {ReclaimReason::kUnknown, ReclaimReason::kOverwrite, ReclaimReason::kDelete,
                    ReclaimReason::kPartOverwrite, ReclaimReason::kAbort,
                    ReclaimReason::kComplete})
@@ -745,18 +778,23 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
         "Chunk/pack crc mismatches detected on the GET read path (P5 corruption metric)");
 }
 
-// 重启弃用 active pack（§5.2）：数据面从不复用旧 active pack（新号段 + O_EXCL），
-// 上代崩溃/析构遗留的 unsealed 账在此补封——否则它们永远进不了空 pack 整删与
-// P4 压实的候选集。file_size 以 0 补（未知；压实顺扫时可再 stat），seal_pack
-// 契约保证 0 不覆盖已知值
+// Discard active packs on restart (§5.2): the data plane never reuses old active
+// packs (new id segment + O_EXCL), so unsealed accounts left by the previous
+// generation's crash/destruction are catch-up sealed here — otherwise they can
+// never enter the candidate sets for whole empty-pack deletion and P4 compaction.
+// file_size is backfilled as 0 (unknown; the compaction scan can stat again), and
+// the seal_pack contract guarantees 0 never overwrites a known value
 void DuoStoreBackend::abandon_stale_packs() {
-    // 只补封"确实无人在写"的 pack（docs/gaps.md §1.4）：多网关共享同一 meta +
-    // 同一 data root 时（redis/tikv meta 的误配，或滚动重启期间新旧进程重叠），
-    // 无条件补封会把**另一实例正在写**的 active pack 标成 sealed → 它随即成为
-    // 压实候选被整体重写，账一度归零还会被 remove_pack 整删，而对方仍持 fd 继续
-    // 追加，写入落到已删 inode = 静默数据丢失。
-    // 两道门：从网关（gc_enabled=false）根本不该碰别人的账；主网关则逐个探测
-    // active pack 的写锁
+    // Only catch-up seal packs that "truly nobody is writing" (docs/gaps.md §1.4):
+    // with multiple gateways sharing the same meta + the same data root (a
+    // redis/tikv meta misconfiguration, or old/new processes overlapping during a
+    // rolling restart), unconditional sealing would mark an active pack **another
+    // instance is writing** as sealed → it immediately becomes a compaction
+    // candidate and is wholly rewritten, and once its account hits zero it even
+    // gets remove_pack'd, while the other side still holds the fd and keeps
+    // appending — writes land on a deleted inode = silent data loss.
+    // Two gates: a secondary gateway (gc_enabled=false) should not touch others'
+    // accounts at all; the primary gateway probes each active pack's write lock
     if (!cfg_.gc_enabled) {
         LOG_INFO("duostore '{}': gc_enabled=false, skipping stale-pack sealing "
                  "(another instance owns GC)", cfg_.name);
@@ -777,14 +815,15 @@ void DuoStoreBackend::abandon_stale_packs() {
             LOG_WARN("duostore '{}': {} unsealed pack(s) are being written by another "
                      "process, left untouched ({} sealed)", cfg_.name, in_use, sealed);
     } catch (const std::exception& e) {
-        // 补封失败不阻断启动（下次启动/GC 重试机会仍在），但要响亮留痕
+        // A sealing failure does not block startup (retry chances remain at the next startup/GC), but must leave a loud trace
         LOG_WARN("duostore '{}': sealing stale packs failed: {}", cfg_.name, e.what());
     }
 }
 
 DuoStoreBackend::~DuoStoreBackend() {
-    // 正路是先 sync_wait(close())；兜底：撤定时器 + 等在途 GC（防回调用后释放的 this），
-    // 再同步关 meta（RocksDB 干净落盘）
+    // The normal path is sync_wait(close()) first; fallback: cancel timers + wait
+    // for in-flight GC (preventing callbacks using a freed this), then close meta
+    // synchronously (RocksDB lands cleanly)
     if (closed_) return;
     shutdown_background();
     if (meta_) meta_->close();
@@ -792,9 +831,9 @@ DuoStoreBackend::~DuoStoreBackend() {
 
 Task<void> DuoStoreBackend::close() {
     if (closed_.exchange(true)) co_return;
-    // 撤销 GC 定时器、等待在途 GC 协程结束（§9 生命周期）
+    // Cancel the GC timers, wait for in-flight GC coroutines to end (§9 lifecycle)
     shutdown_background();
-    co_await data_->close();  // 封存 active pack（P2）
+    co_await data_->close();  // seal active packs (P2)
     co_await pool_->schedule();
     meta_->close();
 }
@@ -808,7 +847,7 @@ void DuoStoreBackend::require_bucket(std::string_view bucket) {
 ObjectRec DuoStoreBackend::require_object(std::string_view bucket, std::string_view key) {
     auto rec = meta_->get_object(bucket, key);
     if (!rec) {
-        require_bucket(bucket);  // 区分 NoSuchBucket / NoSuchKey
+        require_bucket(bucket);  // distinguish NoSuchBucket / NoSuchKey
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
     }
@@ -847,8 +886,10 @@ struct Pumped {
     std::string md5;
 };
 
-// PUT/upload_part 共用泵送循环（§6.1 ③④）：流式写数据面，边写边算 MD5。
-// owner 进 pack record 头（§5.2）：对象 = "bucket\0key"、分片 = "mpu\0<id>\0<no>"
+// Pump loop shared by PUT/upload_part (§6.1 ③④): streams to the data plane,
+// computing MD5 as it writes.
+// The owner goes into the pack record header (§5.2): object = "bucket\0key",
+// part = "mpu\0<id>\0<no>"
 Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string owner) {
     auto writer = co_await data.open_writer({body.length(), std::move(owner)});
     util::HashStream md5(util::HashStream::Algo::Md5);
@@ -865,8 +906,9 @@ Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string own
     co_return out;
 }
 
-// pin 持有的读包装（§7）：构造前 pin 已登记，析构解除。自包含——reader 随 HTTP
-// 响应逃逸出 backend 生命周期，经 shared_ptr 持 pin 表
+// Pin-holding read wrapper (§7): pins are registered before construction,
+// released on destruction. Self-contained — the reader escapes the backend's
+// lifetime along with the HTTP response, holding the pin table via shared_ptr
 class PinnedReader final : public http::BodyReader {
 public:
     PinnedReader(std::unique_ptr<http::BodyReader> inner, std::shared_ptr<PinTable> pins,
@@ -883,10 +925,12 @@ private:
     std::vector<PinTable::Handle> ids_;
 };
 
-// 写侧 pin 的对称解除（§9.3）：ChunkWriter 分配即 pin（孤儿扫描不回收在途写入），
-// finish 后所有权移交调用方——本守卫在 meta 提交或兜底删除之后（协程帧退出时）
-// 解除。仅 cfg 构造装配了 ChunkPinHooks 时生效（write_pins_）：注入构造无钩子，
-// 盲解会误减并发读者的 pin
+// Symmetric release of write-side pins (§9.3): ChunkWriter pins on allocation
+// (the orphan scan does not reclaim in-flight writes), and after finish ownership
+// transfers to the caller — this guard releases after the meta commit or fallback
+// deletion (when the coroutine frame exits). Effective only when the cfg
+// constructor assembled ChunkPinHooks (write_pins_): the injection constructor
+// has no hooks, and blind release would wrongly decrement concurrent readers' pins
 struct WritePinRelease {
     duostore::PinTable* pins = nullptr;
     std::vector<uint64_t> ids;
@@ -903,11 +947,15 @@ struct WritePinRelease {
     }
 };
 
-// meta 提交失败时兜底删除已产出数据（§6.1 ⑤）；co_await 不能出现在 catch 块内，
-// 清理经 exception_ptr 移出 handler。兜底失败也无害——落入孤儿扫描。
-// 例外：UndeterminedCommit（redis 连接断 / tikv primary commit 超时）意味着事务
-// **可能已生效**——此时删数据会毁掉已被对象引用的内容，产生指向已删数据的坏对象。
-// 结果不明一律不删，把数据留给孤儿扫描按"refs 无引用"自然收敛
+// Fallback deletion of produced data when the meta commit fails (§6.1 ⑤);
+// co_await cannot appear inside a catch block, so cleanup is moved out of the
+// handler via exception_ptr. A failed fallback is also harmless — it falls to the
+// orphan scan.
+// Exception: UndeterminedCommit (redis connection dropped / tikv primary commit
+// timeout) means the transaction **may have taken effect** — deleting the data
+// then would destroy content already referenced by the object, producing a bad
+// object pointing at deleted data. When the outcome is unknown, never delete;
+// leave the data for the orphan scan to converge naturally via "no refs"
 template <class Commit>
 Task<void> commit_or_discard(IDataStore& data, const DataRef& ref, Commit commit) {
     std::exception_ptr err;
@@ -939,7 +987,7 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     co_await pool_->schedule();
-    require_bucket(bucket);  // 预检；正式检查在提交事务内复查（§6.1 ②）
+    require_bucket(bucket);  // precheck; the authoritative check is redone inside the commit transaction (§6.1 ②)
 
     auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
@@ -950,8 +998,9 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     rec.meta.etag = pumped.md5;
     rec.meta.last_modified = std::chrono::system_clock::now();
     rec.data = pumped.ref;
-    // 提交点；旧 DataRef 同批入 gcq。条件检查在 meta 事务原子区内完成，
-    // 失败抛出走 discard 路径回收已落的数据 extent
+    // Commit point; the old DataRef enters gcq in the same batch. The condition
+    // check completes inside the meta transaction's atomic region; a throw on
+    // failure takes the discard path to reclaim already-landed data extents
     co_await commit_or_discard(*data_, pumped.ref,
                                [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
     co_return PutResult{pumped.md5};
@@ -976,9 +1025,12 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
     if (len == 0) {
         out.body = std::make_unique<http::StringBodyReader>("");
     } else {
-        // 先 pin 后开 reader（§7）：meta 读出与 pin 之间的微窗口由 gc_grace 兜底。
-        // 只 pin [first,last] 命中的 extent——Range GET 不为整对象的 manifest 买单。
-        // open_reader 失败须解 pin（co_await 不能进 catch，经 exception_ptr 移出）
+        // Pin before opening the reader (§7): the micro-window between the meta
+        // read and the pin is covered by gc_grace.
+        // Only pin extents hit by [first,last] — a Range GET does not pay for the
+        // whole object's manifest.
+        // On open_reader failure the pins must be released (co_await cannot go in
+        // a catch, moved out via exception_ptr)
         std::vector<Extent> hit;
         uint64_t off = 0;
         for (const auto& e : rec.data.extents) {
@@ -1006,10 +1058,10 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
 Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
-    // meta-only 读（docs/gaps.md §3.9）：HEAD 不为整份 manifest 买单
+    // meta-only read (docs/gaps.md §3.9): HEAD does not pay for the whole manifest
     auto meta = meta_->head_object(bucket, key);
     if (!meta) {
-        require_bucket(bucket);  // 区分 NoSuchBucket / NoSuchKey
+        require_bucket(bucket);  // distinguish NoSuchBucket / NoSuchKey
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
     }
@@ -1019,7 +1071,7 @@ Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::stri
 Task<void> DuoStoreBackend::delete_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
-    meta_->delete_object(bucket, key);  // 幂等（不存在返回 false）；物理回收由 GC 异步变现（§6.2）
+    meta_->delete_object(bucket, key);  // idempotent (returns false if absent); physical reclamation realized asynchronously by GC (§6.2)
 }
 
 Task<ListResult> DuoStoreBackend::list_objects(std::string_view bucket,
@@ -1028,7 +1080,7 @@ Task<ListResult> DuoStoreBackend::list_objects(std::string_view bucket,
     co_return meta_->list_objects(bucket, opt);
 }
 
-// ---------- multipart（§8）----------
+// ---------- multipart (§8) ----------
 
 Task<std::string> DuoStoreBackend::create_multipart(std::string_view bucket,
                                                     std::string_view key, ObjectMeta meta) {
@@ -1042,13 +1094,14 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
                                              std::string_view upload_id, int part_no,
                                              http::BodyReader& body) {
     validate_part_number(part_no);
-    validate_object_key(key);  // key 进 '\0' 分隔编码（§4.1），multipart 入口同样校验
+    validate_object_key(key);  // the key enters the '\0'-separated encoding (§4.1), so the multipart entry validates too
     co_await pool_->schedule();
-    meta_->require_upload(bucket, key, upload_id);  // 前置校验；提交时复查
+    meta_->require_upload(bucket, key, upload_id);  // precheck; redone at commit
 
-    // mpu owner 带 b/k（P4 §9.2）：complete 后分片 record 的归属对象可凭此反查，
-    // 压实不因 upload 消亡而失去提示（P4 前的旧格式 "mpu\0id\0no" 无从反查，遇之
-    // 保守不迁）
+    // The mpu owner carries b/k (P4 §9.2): after complete, the part record's
+    // owning object can be reverse-looked-up from it, so compaction does not lose
+    // the hint when the upload goes away (the pre-P4 legacy format "mpu\0id\0no"
+    // cannot be reverse-looked-up; on encountering it, conservatively do not migrate)
     std::string owner = "mpu";
     owner += '\0';
     owner += bucket;
@@ -1066,7 +1119,7 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     p.etag = pumped.md5;
     p.modified_ms = codec::to_unix_ms(std::chrono::system_clock::now());
     p.data = pumped.ref;
-    // 读 body 期间上传可能已被 abort → 提交失败即兜底删数据
+    // The upload may have been aborted while reading the body → a commit failure triggers fallback data deletion
     co_await commit_or_discard(*data_, pumped.ref, [&] {
         meta_->put_part(bucket, key, upload_id, std::move(p));
     });
@@ -1080,7 +1133,7 @@ Task<PutResult> DuoStoreBackend::complete_multipart(std::string_view bucket,
     validate_part_order(parts);
     validate_object_key(key);
     co_await pool_->schedule();
-    // 纯元数据事务，零数据搬运：O(#parts) vs localfs 串接的 O(总字节)（§8）
+    // Pure metadata transaction, zero data movement: O(#parts) vs localfs concatenation's O(total bytes) (§8)
     co_return PutResult{meta_->complete_upload(bucket, key, upload_id, parts)};
 }
 
@@ -1096,7 +1149,7 @@ Task<ListPartsResult> DuoStoreBackend::list_parts(std::string_view bucket, std::
                                                   const ListPartsOptions& opt) {
     validate_object_key(key);
     co_await pool_->schedule();
-    // 分片数由协议封顶 10000，全量物化是有界的；分页只在这里裁剪
+    // Part count is protocol-capped at 10000, so full materialization is bounded; pagination trims only here
     std::vector<PartMeta> all;
     for (const auto& p : meta_->list_parts(bucket, key, upload_id))
         all.push_back({p.part_no, p.size, p.etag, codec::from_unix_ms(p.modified_ms)});
@@ -1106,35 +1159,42 @@ Task<ListPartsResult> DuoStoreBackend::list_parts(std::string_view bucket, std::
 Task<ListUploadsResult> DuoStoreBackend::list_multipart_uploads(std::string_view bucket,
                                                                 const ListUploadsOptions& opt) {
     co_await pool_->schedule();
-    // 桶内 upload 数无上界，游标与条数下推给引擎（sqlite/rocks/tikv 真跳过，
-    // redis 只能全扫）。delimiter 非空时不能限条数：分组要看到全貌才判得出截断，
-    // 限了会把"还有更多"误报成到尾
+    // Uploads per bucket are unbounded, so the cursor and count are pushed down to
+    // the engine (sqlite/rocks/tikv truly skip, redis can only full-scan). With a
+    // non-empty delimiter the count cannot be limited: grouping needs the full
+    // picture to judge truncation, and limiting would misreport "there is more"
+    // as end-of-list
     int limit = opt.delimiter.empty() && opt.max_uploads > 0 ? opt.max_uploads + 1 : 0;
     co_return apply_uploads_page(
         meta_->list_uploads(bucket, opt.key_marker, opt.upload_id_marker, limit), opt);
 }
 
-// ---------- GC 一期（§9/§9.1）----------
+// ---------- GC phase one (§9/§9.1) ----------
 
 namespace {
 
-constexpr size_t kGcBatch = 256;  // 单轮 peek 批量；批间 ack 后推进，防大积压单批爆内存
-// 批内累计 extent 上限（gaps §2.11）：按条数批在"删过 TB 级对象"的账面下单批可达
-// GB 级驻留——enqueue 侧已按 kReclaimMaxExtents 拆分，这里对拆分前遗留的旧账兜底
+constexpr size_t kGcBatch = 256;  // per-round peek batch; advance after ack between batches, preventing one batch of a large backlog from blowing memory
+// Cumulative per-batch extent cap (gaps §2.11): count-based batching under a
+// "deleted TB-scale objects" ledger can reach GB-scale residency per batch — the
+// enqueue side already splits by kReclaimMaxExtents; this covers legacy entries
+// from before the split
 constexpr size_t kGcBatchExtents = 32768;
 
 }  // namespace
 
 Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     co_await pool_->schedule();
-    // 登记为在途：close() 经 bg_.wait_idle() 等本轮结束后才拆 meta_/data_——
-    // 手动钩子与后台 worker 同一套账，不存在"只查一次 closed_"的 TOCTOU 窗口
+    // Register as in-flight: close() waits via bg_.wait_idle() for this round to
+    // end before tearing down meta_/data_ — manual hooks and the background
+    // worker share one ledger, so there is no "check closed_ only once" TOCTOU window
     BackgroundTaskGroup::Scope scope(bg_);
     DuoGcStats st;
-    if (!scope.ok()) co_return st;                 // 正在关闭
-    auto permit = co_await gc_sem_.acquire();      // 手动钩子 vs 后台 worker 互斥
-    // 多网关租约（§6.1）：gc_enabled 只是约定，误配两台同开 GC 会互相 unlink 对方
-    // 判定的空 pack。共享型 meta（redis/tikv）在此原子抢注；本地引擎恒 true
+    if (!scope.ok()) co_return st;                 // shutting down
+    auto permit = co_await gc_sem_.acquire();      // manual hook vs background worker mutual exclusion
+    // Multi-gateway lease (§6.1): gc_enabled is only a convention; two
+    // misconfigured instances both running GC would unlink each other's
+    // determined-empty packs. Shared meta (redis/tikv) claims atomically here;
+    // local engines always return true
     const int64_t lease_ttl_ms =
         std::max<int64_t>(2 * int64_t(cfg_.gc_interval_sec), 600) * 1000;
     if (!meta_->try_gc_lease(gc_owner_, lease_ttl_ms)) {
@@ -1143,15 +1203,17 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     }
     const auto round_start = std::chrono::steady_clock::now();
 
-    // 1) mpu_ttl 过期 multipart 清理（§8 末）：内部 abort，分片入 gcq 由下一步变现。
-    // <=0 = 关闭（与 gc_interval 的 0 语义对齐——0 若解释为"立即过期"会把在途
-    // multipart 全部静默 abort，是配置脚枪）
+    // 1) mpu_ttl-expired multipart cleanup (end of §8): internal abort, parts
+    // enter gcq to be realized in the next step. <=0 = disabled (aligned with
+    // gc_interval's 0 semantics — interpreting 0 as "expire immediately" would
+    // silently abort every in-flight multipart, a configuration footgun)
     const int64_t ttl_ms = int64_t(cfg_.mpu_ttl_sec) * 1000;
     if (ttl_ms > 0) {
         const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
-        // list_buckets/list_uploads 亦须在 try 内：与并发 DeleteBucket 竞态时
-        // list_uploads 抛 NoSuchBucket，逃出去会把本轮的 gcq 消费/压实/孤儿扫描
-        // （步骤 2-4）全部跳过，回收白白顺延一个 gc_interval
+        // list_buckets/list_uploads must also be inside the try: racing a
+        // concurrent DeleteBucket, list_uploads throws NoSuchBucket; letting it
+        // escape would skip this round's gcq consumption/compaction/orphan scan
+        // (steps 2-4) entirely, needlessly deferring reclamation by one gc_interval
         try {
             for (const auto& bk : meta_->list_buckets()) {
                 std::vector<UploadInfo> uploads;
@@ -1160,7 +1222,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                 } catch (const std::exception& e) {
                     LOG_WARN("duostore '{}': gc list uploads of bucket {} failed: {}",
                              cfg_.name, bk.name, e.what());
-                    continue;  // 桶已删/暂时不可读：跳过该桶，不影响其余步骤
+                    continue;  // bucket deleted/temporarily unreadable: skip it without affecting the other steps
                 }
                 for (const auto& u : uploads) {
                     if (now - codec::to_unix_ms(u.initiated) < ttl_ms) continue;
@@ -1168,7 +1230,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                         meta_->abort_upload(bk.name, u.key, u.upload_id);
                         ++st.uploads_expired;
                     } catch (const std::exception& e) {
-                        // 与并发 complete/abort 竞争丢 NoSuchUpload 属正常；其余记 WARN 下轮重试
+                        // Losing to a concurrent complete/abort with NoSuchUpload is normal; anything else logs WARN and retries next round
                         LOG_WARN("duostore '{}': gc abort expired upload {} failed: {}",
                                  cfg_.name, u.upload_id, e.what());
                     }
@@ -1179,25 +1241,29 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         }
     }
 
-    // 2) gcq 消费（§9.1）：逾 gc_grace 且无 pin 的项，先物理删、后销账——反序在删
-    // 与销之间崩溃会产生永久孤儿的账外文件；正序崩溃只是 gcq 残留，重试 unlink 幂等。
-    // 按 next_seq 断点续扫：被 grace/pin 跳过的队头项不重扫（不卡轮、不重复计数、
-    // 无二次解码），扫到队尾即一轮结束。
-    // 跨轮水位（gaps §2.13）：上轮跳过项全部未到可重试时刻的轮次，从上轮高位起扫
-    // ——队头 grace 积压不再每轮重复 peek+解码
+    // 2) gcq consumption (§9.1): for entries beyond gc_grace and unpinned,
+    // physically delete first, settle after — the reverse order crashing between
+    // delete and settle would produce permanently orphaned off-ledger files;
+    // crashing in this order only leaves gcq residue, and the retried unlink is
+    // idempotent. Resume by next_seq: queue-head entries skipped for grace/pin are
+    // not rescanned (no stuck rounds, no double counting, no second decode);
+    // reaching the queue tail ends the round.
+    // Cross-round watermark (gaps §2.13): in rounds where none of the previous
+    // round's skips have reached their retry time, scan from the previous high
+    // watermark — queue-head grace backlog no longer gets re-peeked+decoded every round
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
     const int64_t round_now = codec::to_unix_ms(std::chrono::system_clock::now());
     uint64_t next_seq = 0;
     if (gcq_skips_.any)
         next_seq = round_now < gcq_skips_.retry_at_ms ? gcq_hi_ : gcq_skips_.lo_seq;
     const bool full_scan = !gcq_skips_.any || next_seq == gcq_skips_.lo_seq;
-    GcqSkips skips;  // 本轮新增的跳过项
+    GcqSkips skips;  // skips newly added this round
     auto note_skip = [&skips](uint64_t seq, int64_t retry_at) {
         if (!skips.any || seq < skips.lo_seq) skips.lo_seq = seq;
         if (!skips.any || retry_at < skips.retry_at_ms) skips.retry_at_ms = retry_at;
         skips.any = true;
     };
-    // 队列深度与队头年龄（§6.1）：全量轮的观测即整队全貌，增量轮只看新入队项
+    // Queue depth and head age (§6.1): a full round's observation is the whole queue; incremental rounds see only newly enqueued entries
     uint64_t seen_entries = 0;
     int64_t oldest_enqueue_ms = 0;
     for (;;) {
@@ -1208,28 +1274,32 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         if (oldest_enqueue_ms == 0 && !batch.empty())
             oldest_enqueue_ms = batch.front().second.enqueue_ms;
         std::vector<uint64_t> acked;
-        // 逐批取新鲜时间戳：上一步 abort 刚入队的项 enqueue_ms 晚于本函数入口时刻，
-        // 用入口时刻判 grace 会把差值算成负数而误跳过（grace=0 应当立即可回收）
+        // Take a fresh timestamp per batch: entries just enqueued by the previous
+        // step's abort have enqueue_ms later than this function's entry time;
+        // judging grace with the entry time would compute a negative difference
+        // and wrongly skip (grace=0 should be immediately reclaimable)
         const int64_t batch_now = codec::to_unix_ms(std::chrono::system_clock::now());
         for (const auto& [seq, rc] : batch) {
             if (batch_now - rc.enqueue_ms < grace_ms) {
                 ++st.skipped_grace;
-                note_skip(seq, rc.enqueue_ms + grace_ms);  // 确定性下界
+                note_skip(seq, rc.enqueue_ms + grace_ms);  // deterministic lower bound
                 continue;
             }
             if (pins_->any_pinned(rc.extents)) {
                 ++st.skipped_pinned;
-                note_skip(seq, batch_now);  // pin 何时释放未知：下一轮即重试
+                note_skip(seq, batch_now);  // when the pin releases is unknown: retry next round
                 continue;
             }
             try {
-                // chunk/rados extent 物理 unlink；pack record 为死区随压实回收（data
-                // 侧 remove 内部跳过），存活账已在业务事务扣减 → 直接销账
+                // chunk/rados extents get a physical unlink; pack records become
+                // dead regions reclaimed by compaction (the data-side remove skips
+                // them internally), and the liveness account was already debited in
+                // the business transaction → settle directly
                 co_await data_->remove(rc.extents);
             } catch (const std::exception& e) {
                 LOG_WARN("duostore '{}': gc remove (seq {}) failed: {}", cfg_.name, seq,
                          e.what());
-                note_skip(seq, batch_now);  // 不销账，gcq 残留下轮重试
+                note_skip(seq, batch_now);  // do not settle; the gcq residue retries next round
                 continue;
             }
             for (const auto& e : rc.extents)
@@ -1239,28 +1309,31 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             acked.push_back(seq);
         }
         if (!acked.empty()) {
-            meta_->ack_reclaims(acked);  // 批量销账（单事务/单批，接口注释的成本论证）
+            meta_->ack_reclaims(acked);  // batch settle (one transaction/batch; cost argument in the interface comment)
             st.reclaims_acked += acked.size();
         }
     }
     gcq_hi_ = std::max(gcq_hi_, next_seq);
     if (full_scan) {
-        gcq_skips_ = skips;  // 全量轮：水位以本轮观测整体重建
-        // 深度与队头年龄也只在全量轮刷新：增量轮从上轮高位起扫，看不到队头积压，
-        // 用它更新会把深度周期性地谎报成 0
+        gcq_skips_ = skips;  // full round: the watermark is rebuilt wholesale from this round's observation
+        // Depth and head age also refresh only on full rounds: incremental rounds
+        // scan from the previous high watermark and cannot see queue-head backlog;
+        // updating from them would periodically misreport the depth as 0
         m_gcq_depth_->set(int64_t(seen_entries));
         m_gcq_oldest_age_->set(oldest_enqueue_ms == 0
                                    ? 0
                                    : std::max<int64_t>(0, (round_now - oldest_enqueue_ms) / 1000));
     } else if (skips.any) {
-        // 增量轮：与既有水位合并（旧跳过项仍在队头未重访）
+        // Incremental round: merge with the existing watermark (old skips still sit unvisited at the queue head)
         gcq_skips_.lo_seq = std::min(gcq_skips_.lo_seq, skips.lo_seq);
         gcq_skips_.retry_at_ms = std::min(gcq_skips_.retry_at_ms, skips.retry_at_ms);
     }
 
-    // 2.5) active pack 老化封存（§6.1）：只按容量封存时，低写入量下 active pack
-    // 永不轮转，其中被覆盖/删除的 record 进不了下面的压实候选集。放在压实之前，
-    // 本轮封存的 pack 本轮就能被评估
+    // 2.5) Age-based sealing of active packs (§6.1): with capacity-only sealing
+    // under low write volume, an active pack never rotates and its
+    // overwritten/deleted records cannot enter the compaction candidate set
+    // below. Placed before compaction so packs sealed this round can be evaluated
+    // this round
     if (cfg_.pack_max_age_sec > 0) {
         try {
             st.packs_sealed_aged =
@@ -1270,25 +1343,31 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         }
     }
 
-    // 3) pack 压实（P4 §9.2）：sealed、live>0 且存活率低于 pack_gc_ratio（或崩溃遗留
-    // file_size 未知）的 pack 顺扫迁移存活 record；live 账随 swap 归零后由第 4 步整
-    // 删变现。上轮压实后 live_recs 无推进的 pack（进行中 mpu 分片 / 旧格式 owner /
-    // 存活损坏 record）跳过重扫——账一有变化即自动重试。
-    // 预算与优先级（§6.1）：先把全部候选连同可回收字节收齐，按收益降序排，再按
-    // "本轮最多 N 个 / 累计扫 M 字节"截断。此前是"一轮把符合条件的全部重写完"，
-    // 批量删除后单轮 GC 可持锁数小时且与业务写抢 pack 槽；剩下的下一轮继续做，
-    // 收益最高的先做保证空间尽快回落
+    // 3) Pack compaction (P4 §9.2): packs that are sealed, live>0, with liveness
+    // below pack_gc_ratio (or crash-leftover unknown file_size) get a sequential
+    // scan migrating live records; once the live account hits zero via swaps, step
+    // 4 realizes the whole deletion. Packs whose live_recs made no progress since
+    // the last compaction (in-flight mpu parts / legacy-format owner / live
+    // corrupt records) skip rescanning — any account change retries automatically.
+    // Budget and priority (§6.1): first collect all candidates with their
+    // reclaimable bytes, sort by yield descending, then truncate by "at most N
+    // this round / cumulative M bytes scanned". Previously it was "one round
+    // rewrites everything eligible"; after a bulk delete a single GC round could
+    // hold the lock for hours and contend with business writes for pack slots.
+    // The rest continue next round, and doing the highest-yield first ensures
+    // space falls back as quickly as possible
     struct CompactCand {
         uint64_t pack_id = 0;
-        uint64_t file_size = 0;   // 0 = 未知（stat 不支持且崩溃遗留 seal(0)）
-        int64_t reclaimable = 0;  // file_size - live_bytes；未知大小恒 0
+        uint64_t file_size = 0;   // 0 = unknown (stat unsupported and crash-leftover seal(0))
+        int64_t reclaimable = 0;  // file_size - live_bytes; always 0 for unknown size
     };
     std::vector<CompactCand> cands;
     const int64_t compact_now = codec::to_unix_ms(std::chrono::system_clock::now());
     for (auto ps : meta_->pack_stats()) {
         if (!ps.sealed || ps.live_recs <= 0) continue;
-        // 崩溃遗留 seal(0) 的分母先回填（gaps §2.3b）：一次 stat 即得，免得每次非
-        // 优雅退出都把全部 active pack 无条件推进全量顺扫重写
+        // Backfill the denominator of crash-leftover seal(0) first (gaps §2.3b):
+        // one stat suffices, so every ungraceful exit does not unconditionally
+        // push all active packs into full sequential-scan rewrites
         if (ps.file_size == 0) {
             if (uint64_t sz = data_->stat_pack(ps.pack_id); sz > 0) {
                 meta_->seal_pack(ps.pack_id, sz);
@@ -1297,9 +1376,12 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         }
         int64_t reclaimable = 0;
         if (ps.file_size > 0) {
-            // live 计入 record 头后与 file_size 同口径（gaps §2.3a——只记 payload 时
-            // 小对象 pack 100% 存活也恒低于阈值，压实永不收敛）。无可回收字节
-            // （live ≥ file_size，含轻微低计的容差方向）或存活率过阈值都跳过
+            // live includes record headers, same basis as file_size (gaps §2.3a —
+            // counting only payload, a pack of small objects stays below the
+            // threshold even at 100% liveness and compaction never converges).
+            // Skip when there are no reclaimable bytes (live ≥ file_size,
+            // including the slight-undercount tolerance direction) or liveness is
+            // above the threshold
             reclaimable = int64_t(ps.file_size) - ps.live_bytes;
             if (reclaimable <= 0 ||
                 double(ps.live_bytes) > cfg_.pack_gc_ratio * double(ps.file_size))
@@ -1311,8 +1393,9 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             continue;
         cands.push_back({ps.pack_id, ps.file_size, reclaimable});
     }
-    // 收益降序；大小未知的排最后（无从估算收益，且只在崩溃遗留下出现）。同收益
-    // 按 pack_id 定序，避免相邻轮次因排序不稳定而在同一批候选间来回摇摆
+    // Yield descending; unknown sizes go last (yield cannot be estimated, and they
+    // only appear as crash leftovers). Ties are ordered by pack_id, so adjacent
+    // rounds do not oscillate among the same candidates due to unstable sorting
     std::sort(cands.begin(), cands.end(), [](const CompactCand& a, const CompactCand& b) {
         if ((a.file_size == 0) != (b.file_size == 0)) return b.file_size == 0;
         if (a.reclaimable != b.reclaimable) return a.reclaimable > b.reclaimable;
@@ -1325,8 +1408,9 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         const auto& cd = cands[ci];
         const bool over_count = cfg_.gc_compact_max_packs > 0 &&
                                 ci >= size_t(cfg_.gc_compact_max_packs);
-        // 字节预算按"已扫过的 pack 大小"计，且第一个候选恒放行——单个 pack 大于
-        // 整轮预算时若一律挡下，压实就永远不推进了
+        // The byte budget counts "pack sizes already scanned", and the first
+        // candidate always passes — if a single pack larger than the whole round's
+        // budget were always blocked, compaction would never make progress
         const bool over_bytes =
             cfg_.gc_compact_max_bytes > 0 && ci > 0 && scanned_bytes >= cfg_.gc_compact_max_bytes;
         if (over_count || over_bytes) {
@@ -1340,7 +1424,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             st.records_migrated += rw.migrated;
             st.records_corrupt += rw.corrupt;
             rewritten.push_back(cd.pack_id);
-            // stat_pack 不支持的引擎（返回 0）：顺扫回报的 file_size 兜底回填（§9.2）
+            // Engines without stat_pack support (returning 0): backfill from the file_size the sequential scan reports (§9.2)
             if (cd.file_size == 0 && rw.file_size > 0)
                 meta_->seal_pack(cd.pack_id, rw.file_size);
         } catch (const std::exception& e) {
@@ -1353,9 +1437,11 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                  "{} eligible pack(s) deferred to the next round", cfg_.name,
                  st.packs_compacted, scanned_bytes, st.packs_compact_deferred);
 
-    // 4) 空 pack 整删（§9.1/§9.2 步骤 4）：sealed 且 live_recs==0，且空置已逾
-    // gc_grace（延迟 unlink：服务压实/删除瞬间已读出旧 ref 未及 pin 的读者）且无
-    // pin → 整文件 unlink → 销 packstat（顺序铁律同 gcq：先物理删、后销账）
+    // 4) Whole empty-pack deletion (§9.1/§9.2 step 4): sealed with live_recs==0,
+    // empty for longer than gc_grace (delayed unlink: serving readers who read
+    // the old ref at the instant of compaction/deletion without having pinned
+    // yet) and unpinned → unlink the whole file → drop the packstat (same iron
+    // ordering as gcq: physical delete first, settle after)
     {
         const int64_t pack_now = codec::to_unix_ms(std::chrono::system_clock::now());
         auto stats = meta_->pack_stats();
@@ -1379,7 +1465,9 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                          e.what());
             }
         }
-        // 压实阻塞记账：迁移后仍有 live = 本轮未能全迁 → 记当前账 + 冷却窗
+        // Compaction-blocked accounting: live records remaining after migration
+        // means this round couldn't move everything → record the current tally
+        // plus a cooldown window
         for (uint64_t pid : rewritten) {
             int64_t live = 0;
             for (const auto& ps : stats)
@@ -1390,12 +1478,15 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             if (live > 0) compact_blocked_[pid] = {live, pack_now + grace_ms};
             else compact_blocked_.erase(pid);
         }
-        // 剪枝已销账的 pack，两张簿记表不随历史无界增长
+        // Prune packs whose accounting entries are gone so the two bookkeeping
+        // maps don't grow without bound over history
         std::erase_if(pack_empty_since_, [&](const auto& kv) { return !known.count(kv.first); });
         std::erase_if(compact_blocked_, [&](const auto& kv) { return !known.count(kv.first); });
 
-        // 空间放大（§6.1）：accounted/live 之比。stats 是第 4 步开头取的快照，本轮
-        // 的整删已从盘上消失但仍在快照里——差一轮的滞后，对趋势观测无碍
+        // Space amplification (§6.1): the accounted/live ratio. `stats` is the
+        // snapshot taken at the start of step 4, so whole-pack deletions from
+        // this round are already gone from disk but still present in the
+        // snapshot — a one-round lag, harmless for trend observation
         int64_t accounted = 0, live = 0;
         for (const auto& ps : stats) {
             accounted += int64_t(ps.file_size);
@@ -1406,9 +1497,11 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         m_packs_total_->set(int64_t(stats.size()));
     }
 
-    // 完成轮才计数（关闭态的早退不计）；skip 类走 gauge 而非 counter——grace/pin
-    // 跳过项每轮重扫会重复累计，单调计数会虚高误导，"本轮还剩多少没回收成"才是
-    // 运维要看的量
+    // Only completed rounds are counted (early exits during shutdown are not);
+    // the skip metrics are gauges rather than counters — grace/pin skips are
+    // re-counted on every rescan, so a monotonic counter would inflate
+    // misleadingly, and "how much is still left unreclaimed this round" is what
+    // operators actually want to see
     m_gc_skipped_grace_->set(int64_t(st.skipped_grace));
     m_gc_skipped_pinned_->set(int64_t(st.skipped_pinned));
     m_gc_duration_->observe(
@@ -1430,9 +1523,12 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     co_await pool_->schedule();
     BackgroundTaskGroup::Scope scope(bg_);
     DuoOrphanStats st;
-    if (!scope.ok()) co_return st;                 // 正在关闭
-    auto permit = co_await gc_sem_.acquire();      // 与 GC/后台 worker 互斥（反向对账前提）
-    // 与 GC 同一把租约（§6.1）：孤儿扫描的 unlink 同样不能与他网关的 GC 并发
+    if (!scope.ok()) co_return st;                 // shutting down
+    auto permit = co_await gc_sem_.acquire();      // mutual exclusion with GC/background
+                                                   // workers (prerequisite for the reverse
+                                                   // reconciliation)
+    // Same lease as GC (§6.1): the orphan scan's unlinks likewise must not run
+    // concurrently with another gateway's GC
     const int64_t lease_ttl_ms =
         std::max<int64_t>(2 * int64_t(cfg_.gc_interval_sec), 600) * 1000;
     if (!meta_->try_gc_lease(gc_owner_, lease_ttl_ms)) {
@@ -1441,24 +1537,35 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
         co_return st;
     }
 
-    // refs 快照先行：反向对账"文件必先于 ref 提交存在"（§6 数据先行）要求 R 先于
-    // 盘面枚举采集——R 内的每个 id 在枚举开始前文件已在盘，缺失即真丢失。持
-    // gc_sem_ 排除了 gcq 的 unlink→销账窗口，业务路径不存在"有 refs 的文件被删"。
-    // 注意：refs 不分 kChunk/kRados（共号段账），本扫描以当前 data 引擎的枚举为盘
-    // 面真相——同一 meta 切换 data 引擎的部署形态不在孤儿扫描支持范围。
-    // 内存形态（docs/gaps.md §3.9）：此前 refs/on_disk 两个哈希集合 + disk 全量
-    // 向量同时驻留（1 亿 chunk ≈ 4–5GB）；改为 refs 有序向量（8B/项）+ 盘面流式
-    // 判定 + 命中位图（1bit/项），峰值降一个数量级
+    // Refs snapshot comes first: the reverse reconciliation's invariant "files
+    // must exist on disk before their ref commits" (§6 data-first) requires
+    // collecting R before the on-disk enumeration — for every id in R the file
+    // was already on disk before enumeration began, so a miss is a real loss.
+    // Holding gc_sem_ excludes gcq's unlink→settle window, and no business path
+    // ever deletes a file that still has refs.
+    // Note: refs make no kChunk/kRados distinction (shared id-range accounting);
+    // this scan treats the current data engine's enumeration as the on-disk
+    // truth — a deployment that switches data engines under the same meta is
+    // outside the orphan scan's supported scope.
+    // Memory footprint (docs/gaps.md §3.9): previously the refs/on_disk hash
+    // sets plus a full disk vector were resident simultaneously (100M chunks
+    // ≈ 4–5GB); replaced by a sorted refs vector (8B/entry) + streaming on-disk
+    // classification + a hit bitmap (1 bit/entry), cutting the peak by an order
+    // of magnitude
     std::vector<uint64_t> refs;
     meta_->scan_refs([&](uint64_t id) { refs.push_back(id); });
     std::sort(refs.begin(), refs.end());
     refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
-    std::vector<bool> ref_seen(refs.size(), false);  // 反向对账：盘面命中标记
+    std::vector<bool> ref_seen(refs.size(), false);  // reverse reconciliation: on-disk hit marks
 
-    // 正向（§9.3）判定内联进枚举回调：无引用、mtime 逾 gc_grace、无 pin（写侧
-    // pin 覆盖超长流式 PUT，mtime 宽限对其不充分）→ 记为候选。now 取扫描起点，
-    // 宽限窗口只会偏严（安全方向）；快照后新提交的引用仍由删除前的
-    // chunk_referenced 现点复查兜住（grace=0 的测试形态下快照必然过时）
+    // Forward pass (§9.3) classification inlined into the enumeration callback:
+    // no reference, mtime older than gc_grace, and no pin (the write-side pin
+    // covers very long streaming PUTs, for which the mtime grace alone is
+    // insufficient) → record as a candidate. `now` is taken at scan start, so
+    // the grace window can only err on the strict (safe) side; references
+    // committed after the snapshot are still caught by the point-in-time
+    // chunk_referenced recheck before deletion (with grace=0 in test setups the
+    // snapshot is necessarily stale)
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
     std::vector<uint64_t> orphans;
@@ -1482,9 +1589,11 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     });
 
     for (uint64_t id : orphans) {
-        if (meta_->chunk_referenced(id)) continue;  // 扫描间隙提交的新引用
-        // kind 随 data 引擎（C4）：RadosDataStore::remove 只认 kRados（异种 extent
-        // 视为引擎切换遗留跳过），kChunk 硬编码会让 rados 孤儿删除静默空转
+        if (meta_->chunk_referenced(id)) continue;  // new reference committed in the scan gap
+        // kind follows the data engine (C4): RadosDataStore::remove only
+        // accepts kRados (foreign-kind extents are skipped as engine-switch
+        // leftovers), so hardcoding kChunk would make rados orphan deletion
+        // silently a no-op
         Extent e{cfg_.data_kind == DuoDataKind::kRados ? Extent::Kind::kRados
                                                        : Extent::Kind::kChunk,
                  id, 0, 0, 0};
@@ -1497,7 +1606,8 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
         }
     }
 
-    // 反向（§9.3）：refs 在而文件缺 = 数据丢失征兆 → 告警计数，绝不静默删 meta
+    // Reverse pass (§9.3): a ref present with the file missing is a data-loss
+    // signal → alert and count, never silently delete the meta
     for (size_t i = 0; i < refs.size(); ++i) {
         if (ref_seen[i]) continue;
         ++st.refs_missing;
@@ -1505,15 +1615,21 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
                   "(data loss signal, keeping meta for manual inspection)", cfg_.name, refs[i]);
     }
 
-    // packs/ 双向对账（docs/gaps.md §6.1）：chunk 侧的孤儿扫描此前不覆盖 pack 实体，
-    // 而 pack 文件是"先建文件、首条 record 提交时才落 packstat 行"——恰在这个窗口
-    // 硬崩，文件在盘上、账里没有任何行，既永不回收也不可观测。
-    // pack 的存活判据比 chunk 更严：账外 ⇒ 候选，但还要过三道门——
-    //   ① mtime 逾 gc_grace（刚建的 active pack 首条 record 尚未提交）
-    //   ② 无 pin（在途读者）
-    //   ③ 无写锁（本进程或另一实例的 active pack；flock 是"有活着的写者"的唯一
-    //      可靠信号，与 abandon_stale_packs 同一判据）
-    // 反向的"packstat 在而文件缺"只告警不销账——与 refs_missing 同样是数据丢失征兆
+    // packs/ two-way reconciliation (docs/gaps.md §6.1): the chunk-side orphan
+    // scan previously did not cover pack entities, yet a pack file is "create
+    // the file first, write the packstat row only when the first record
+    // commits" — a hard crash exactly in that window leaves the file on disk
+    // with no accounting row at all: never reclaimed and never observable.
+    // The liveness test for packs is stricter than for chunks: unaccounted ⇒
+    // candidate, but it must still pass three gates —
+    //   1) mtime older than gc_grace (a freshly created active pack whose first
+    //      record hasn't committed yet)
+    //   2) no pin (in-flight readers)
+    //   3) no write lock (an active pack of this process or another instance;
+    //      flock is the only reliable signal of "a live writer exists", the
+    //      same criterion abandon_stale_packs uses)
+    // The reverse case — packstat present but file missing — only alerts and
+    // never drops the accounting, a data-loss signal just like refs_missing
     {
         std::vector<uint64_t> known;
         for (const auto& ps : meta_->pack_stats()) known.push_back(ps.pack_id);
@@ -1535,7 +1651,9 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
             orphan_packs.push_back(id);
         });
         for (uint64_t id : orphan_packs) {
-            // 写锁探测放在枚举之外：它要开 fd + flock，不该塞进枚举回调里逐个做
+            // Write-lock probing stays outside the enumeration: it opens an fd
+            // and takes flock, which shouldn't be done per entry inside the
+            // enumeration callback
             if (data_->pack_write_locked(id)) {
                 ++st.packs_skipped_active;
                 continue;
@@ -1564,7 +1682,8 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     m_orphan_packs_removed_->inc(st.orphan_packs_removed);
     m_orphan_refs_missing_->set(int64_t(st.refs_missing));
     m_orphan_packstats_missing_->set(int64_t(st.pack_stats_missing));
-    // 用量（§6.1）：盘面实测字节，随孤儿扫描周期刷新（默认 1/d）
+    // Usage (§6.1): bytes measured from disk, refreshed on the orphan-scan
+    // cadence (default once per day)
     m_bytes_chunks_->set(int64_t(st.chunk_bytes));
     m_bytes_packs_->set(int64_t(st.pack_bytes));
     co_return st;
@@ -1575,7 +1694,8 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_dump(std::ostream& out) 
     BackgroundTaskGroup::Scope scope(bg_);
     if (!scope.ok())
         throw S3Error(S3ErrorCode::InternalError, "duostore meta dump: backend closing");
-    auto permit = co_await gc_sem_.acquire();  // 与 GC/孤儿扫描互斥（一致快照前提）
+    auto permit = co_await gc_sem_.acquire();  // mutual exclusion with GC/orphan scan
+                                               // (prerequisite for a consistent snapshot)
     co_return duostore::dump_meta(*meta_, out);
 }
 
@@ -1588,16 +1708,19 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_load(std::istream& in) {
             throw S3Error(S3ErrorCode::InternalError, "duostore meta load: backend closing");
         auto permit = co_await gc_sem_.acquire();
         st = duostore::load_meta(*meta_, in);
-    }  // 信号量出块释放——下面的孤儿扫描要重取同一把
-    // 恢复固化流程的收尾（meta_dump.h 运维契约）：强制孤儿扫描回收备份窗口内
-    // data 侧多余的文件（gcq 与进行中 MPU 刻意不入档，其数据在此变现回收）
+    }  // semaphore released at block exit — the orphan scan below must re-acquire the same one
+    // Tail end of the restore-and-solidify flow (operational contract in
+    // meta_dump.h): a forced orphan scan reclaims the extra data-side files
+    // from the backup window (gcq and in-flight MPUs are deliberately excluded
+    // from the dump; their data is cashed in and reclaimed here)
     LOG_INFO("duostore '{}': meta load done, running forced orphan scan", cfg_.name);
     co_await run_orphan_scan_once();
     co_return st;
 }
 
 Task<void> DuoStoreBackend::gc_tick() {
-    // 完成后重臂（而非触发时）：GC 轮次绝不重叠/堆积——慢轮只是顺延下次触发
+    // Re-arm on completion (not on trigger): GC rounds never overlap or pile
+    // up — a slow round merely pushes back the next trigger
     std::exception_ptr err;
     try {
         co_await run_gc_once();
@@ -1605,18 +1728,20 @@ Task<void> DuoStoreBackend::gc_tick() {
         err = std::current_exception();
     }
     schedule_gc();
-    if (err) std::rethrow_exception(err);  // 交 BackgroundTaskGroup 记日志
+    if (err) std::rethrow_exception(err);  // let BackgroundTaskGroup log it
 }
 
 void DuoStoreBackend::schedule_gc() {
     if (!cfg_.gc_enabled) {
-        // 多网关非指定实例（docs/duostore-rados-data.md §8.3）；手动钩子保留。
-        // 构造期各到达一次（gc_tick 不会再入），响亮留痕防"忘了哪台在跑 GC"
+        // Multi-gateway non-designated instance (docs/duostore-rados-data.md
+        // §8.3); the manual hooks remain available. Reached once per timer at
+        // construction (gc_tick never re-enters), and logs loudly so nobody
+        // forgets which box is running GC
         LOG_INFO("duostore '{}': background GC/orphan scan disabled by gc_enabled=false "
                  "(multi-gateway secondary)", cfg_.name);
         return;
     }
-    if (cfg_.gc_interval_sec <= 0) return;  // 0 = 关闭后台 GC（测试用手动钩子）
+    if (cfg_.gc_interval_sec <= 0) return;  // 0 = background GC disabled (manual hooks for tests)
     bg_.if_open([&] {
         gc_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.gc_interval_sec),
                                                [this] { bg_.spawn(gc_tick()); });
@@ -1624,7 +1749,7 @@ void DuoStoreBackend::schedule_gc() {
 }
 
 Task<void> DuoStoreBackend::orphan_tick() {
-    // 完成后重臂（同 gc_tick）：扫描轮次绝不重叠/堆积
+    // Re-arm on completion (same as gc_tick): scan rounds never overlap or pile up
     std::exception_ptr err;
     try {
         co_await run_orphan_scan_once();
@@ -1632,12 +1757,12 @@ Task<void> DuoStoreBackend::orphan_tick() {
         err = std::current_exception();
     }
     schedule_orphan_scan();
-    if (err) std::rethrow_exception(err);  // 交 BackgroundTaskGroup 记日志
+    if (err) std::rethrow_exception(err);  // let BackgroundTaskGroup log it
 }
 
 void DuoStoreBackend::schedule_orphan_scan() {
-    if (!cfg_.gc_enabled) return;                    // 与 GC 同门控（§8.3 单实例执行）
-    if (cfg_.orphan_scan_interval_sec <= 0) return;  // 0 = 关闭（测试用手动钩子）
+    if (!cfg_.gc_enabled) return;                    // same gate as GC (§8.3 single-instance execution)
+    if (cfg_.orphan_scan_interval_sec <= 0) return;  // 0 = disabled (manual hooks for tests)
     bg_.if_open([&] {
         orphan_timer_ = TimerQueue::instance().add(
             std::chrono::seconds(cfg_.orphan_scan_interval_sec),
@@ -1647,11 +1772,14 @@ void DuoStoreBackend::schedule_orphan_scan() {
 
 void DuoStoreBackend::shutdown_background() {
     bg_.begin_close();
-    // cancel 须在组锁外调用：TimerQueue::cancel 阻塞等在途回调，而回调内要拿组锁
-    // （bg_.spawn）——begin_close 后两个 timer id 不再变更，读取无需加锁
+    // cancel must be called outside the group lock: TimerQueue::cancel blocks
+    // waiting for in-flight callbacks, and the callbacks take the group lock
+    // (bg_.spawn) — after begin_close the two timer ids never change again, so
+    // reading them needs no lock
     TimerQueue::instance().cancel(gc_timer_);
     TimerQueue::instance().cancel(orphan_timer_);
-    // 阻塞等待在调用方线程上进行；在途 GC 在池线程收尾，不会互相占用（同 tiered close）
+    // The blocking wait happens on the caller's thread; in-flight GC finishes
+    // up on pool threads, so neither holds up the other (same as tiered close)
     bg_.wait_idle();
 }
 

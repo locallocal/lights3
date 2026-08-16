@@ -1,6 +1,6 @@
-// SqliteMetaStore 专项单测（docs/duostore-sqlite-meta.md §9）：meta 一致性套件、
-// 注入组合跑后端套件、BLOB key 排序（非 UTF-8 字节）、重开持久性、冷备单文件、
-// swap_extents CAS、文件谱系校验。零外部依赖——无 Redis 版的探测/SKIP 路径。
+// SqliteMetaStore dedicated unit tests (docs/duostore-sqlite-meta.md §9): meta consistency suite,
+// backend suite over the injected combination, BLOB key ordering (non-UTF-8 bytes), reopen durability, single-file cold backup,
+// swap_extents CAS, file lineage validation. Zero external dependencies -- no probe/SKIP path like the Redis version.
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_SQLITE_META)
 
 #include <signal.h>
@@ -38,7 +38,7 @@ using meta_store_suite::chunk_extent;
 using meta_store_suite::make_rec;
 
 SqliteMetaOptions sqlite_opts(const fs::path& file) {
-    // 单测不需要 fsync（崩溃语义另测；号段连接内部恒 FULL 不受此影响）
+    // Unit tests need no fsync (crash semantics are tested separately; the segment connection is internally always FULL, unaffected by this)
     SqliteMetaOptions o;
     o.path = file.string();
     o.sync = false;
@@ -49,8 +49,8 @@ SqliteMetaOptions sqlite_opts(const fs::path& file) {
 
 }  // namespace
 
-// 同一 meta 语义基线（与 RocksMetaStore / RedisMetaStore 共享套件，§9.1）；
-// factory 反复 open/close 同一 DB 文件，天然覆盖重启语义（号段不回退、schema 校验）
+// Same meta semantics baseline (suite shared with RocksMetaStore / RedisMetaStore, §9.1);
+// the factory repeatedly opens/closes the same DB file, naturally covering restart semantics (segments never roll back, schema validation)
 TEST(duostore_sqlite_meta_store_suite) {
     TmpDir tmp;
     meta_store_suite::run_meta_store_suite([&] {
@@ -58,7 +58,7 @@ TEST(duostore_sqlite_meta_store_suite) {
     });
 }
 
-// 注入组合（SqliteMetaStore + FsDataStore）跑后端一致性套件（§9.2）
+// Run the backend consistency suite over the injected combination (SqliteMetaStore + FsDataStore) (§9.2)
 TEST(duostore_sqlite_backend_suite) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -78,20 +78,20 @@ TEST(duostore_sqlite_backend_suite) {
     sync_wait(b->close());
 }
 
-// BLOB key = memcmp 序（§2.1）：高位字节 / 非 UTF-8 序列的 key 排序与分页 token
+// BLOB key = memcmp order (§2.1): ordering and pagination tokens for keys with high-bit bytes / non-UTF-8 sequences
 TEST(duostore_sqlite_binary_key_ordering) {
     TmpDir tmp;
     SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
     m.create_bucket("bin");
-    // memcmp 升序（字面量拆开写避免 \x 贪婪吞掉后续 hex 字符）
+    // memcmp ascending (literals split up so \x does not greedily swallow following hex characters)
     std::vector<std::string> keys = {
-        std::string("a\x01") + "b",        // 0x01 控制字节
+        std::string("a\x01") + "b",        // 0x01 control byte
         "a\x7f",                           // DEL
-        "a\xc3\x28",                       // 非法 UTF-8 序列
-        "a\xff",                           // 0xff（TEXT 存储下常见的坑位）
+        "a\xc3\x28",                       // invalid UTF-8 sequence
+        "a\xff",                           // 0xff (a classic pitfall under TEXT storage)
         "b",
     };
-    for (auto it = keys.rbegin(); it != keys.rend(); ++it)  // 乱序写入
+    for (auto it = keys.rbegin(); it != keys.rend(); ++it)  // write out of order
         m.put_object("bin", *it, make_rec(*it, {}));
 
     ListOptions opt;
@@ -125,7 +125,7 @@ TEST(duostore_sqlite_binary_key_ordering) {
     m.close();
 }
 
-// 重开持久性：对象/桶/version 原样保留（WAL 回放 + 单文件即全部状态）
+// Reopen durability: objects/buckets/version preserved intact (WAL replay + the single file is the entire state)
 TEST(duostore_sqlite_persistence_across_reopen) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -148,12 +148,12 @@ TEST(duostore_sqlite_persistence_across_reopen) {
         CHECK_EQ(rec->data.extents.at(0).file_id, id2);
         CHECK(m.chunk_referenced(id2));
         CHECK(!m.chunk_referenced(id1));
-        CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(1));  // 覆盖写的旧账仍在
+        CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(1));  // the overwrite's old ledger entry is still there
         m.close();
     }
 }
 
-// 冷备 = 干净 close 后拷单文件（§6）：无 -wal/-shm 残留，副本开出即完整数据
+// Cold backup = copy the single file after a clean close (§6): no -wal/-shm residue, the copy opens with complete data
 TEST(duostore_sqlite_cold_backup_single_file) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -173,7 +173,7 @@ TEST(duostore_sqlite_cold_backup_single_file) {
     m.close();
 }
 
-// 桶重复创建 → BucketAlreadyOwnedByYou（§3.3）
+// Duplicate bucket creation -> BucketAlreadyOwnedByYou (§3.3)
 TEST(duostore_sqlite_create_bucket_duplicate) {
     TmpDir tmp;
     SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
@@ -183,7 +183,7 @@ TEST(duostore_sqlite_create_bucket_duplicate) {
     m.close();
 }
 
-// swap_extents 的乐观放弃路径（§3.3 / 主文档 §9.2）：不符 → false 且事务回滚不落写
+// swap_extents optimistic abandon path (§3.3 / main doc §9.2): mismatch -> false, and the transaction rolls back writing nothing
 TEST(duostore_sqlite_swap_extents_cas) {
     TmpDir tmp;
     SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
@@ -194,7 +194,7 @@ TEST(duostore_sqlite_swap_extents_cas) {
     DataRef to{{chunk_extent(id2, 8)}};
     m.put_object("swap", "k", make_rec("k", from.extents));  // version=1
 
-    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version 不符
+    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version mismatch
     CHECK(m.chunk_referenced(id1));
     CHECK(!m.chunk_referenced(id2));
 
@@ -205,14 +205,14 @@ TEST(duostore_sqlite_swap_extents_cas) {
     CHECK(!m.chunk_referenced(id1));
     CHECK(m.chunk_referenced(id2));
 
-    // 换过之后旧 from 过期 → 再换必失败
+    // After a swap the old from is stale -> swapping again must fail
     CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));
     CHECK(m.delete_object("swap", "k"));
     m.delete_bucket("swap");
     m.close();
 }
 
-// 文件谱系（§2.2）：拿错文件（非 SQLite / application_id 不符）→ 响亮拒绝
+// File lineage (§2.2): wrong file (not SQLite / application_id mismatch) -> loud rejection
 TEST(duostore_sqlite_rejects_foreign_file) {
     TmpDir tmp;
     fs::path garbage = tmp.path / "not-a-db.sqlite3";
@@ -224,8 +224,8 @@ TEST(duostore_sqlite_rejects_foreign_file) {
                     s3::S3ErrorCode::InternalError);
 }
 
-// 文件谱系（§2.2）：app_id=0/ver=0 但已有表 = 别人的 SQLite 库（野生库常态）——
-// 拒绝且不留痕：不建表、不盖章、不做 WAL 转换
+// File lineage (§2.2): app_id=0/ver=0 but tables already exist = somebody else's SQLite database (typical in the wild) --
+// reject without leaving a trace: no table creation, no stamping, no WAL conversion
 TEST(duostore_sqlite_rejects_foreign_populated_db) {
     TmpDir tmp;
     fs::path foreign = tmp.path / "foreign.sqlite3";
@@ -239,7 +239,7 @@ TEST(duostore_sqlite_rejects_foreign_populated_db) {
     CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(foreign)),
                     s3::S3ErrorCode::InternalError);
 
-    // 未被污染：无盖章（app_id 仍 0）、无 duostore 表、journal 未转 WAL
+    // Unpolluted: no stamp (app_id still 0), no duostore tables, journal not converted to WAL
     CHECK_EQ(sqlite3_open(foreign.string().c_str(), &db), SQLITE_OK);
     auto query_i64 = [&](const char* sql) {
         sqlite3_stmt* st = nullptr;
@@ -254,8 +254,8 @@ TEST(duostore_sqlite_rejects_foreign_populated_db) {
     sqlite3_close(db);
 }
 
-// 单进程独占 fail-fast（§1）：第二个实例（同进程模拟第二进程的 open）被 flock
-// 拒绝；close 释放锁后可重开
+// Single-process exclusivity fail-fast (§1): a second instance (same process simulating a second process's open) is rejected
+// by flock; reopening works after close releases the lock
 TEST(duostore_sqlite_single_process_lock) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -263,12 +263,12 @@ TEST(duostore_sqlite_single_process_lock) {
     CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)),
                     s3::S3ErrorCode::InternalError);
     a.close();
-    SqliteMetaStore b(sqlite_opts(db));  // 锁已释放
+    SqliteMetaStore b(sqlite_opts(db));  // lock has been released
     CHECK(!b.bucket_exists("x"));
     b.close();
 }
 
-// close 后调用干净失败（500），而非崩溃（§5.3）
+// Calls after close fail cleanly (500) instead of crashing (§5.3)
 TEST(duostore_sqlite_closed_store_throws) {
     TmpDir tmp;
     SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
@@ -277,11 +277,11 @@ TEST(duostore_sqlite_closed_store_throws) {
     CHECK_THROWS_S3(m.create_bucket("x"), s3::S3ErrorCode::InternalError);
 }
 
-// ---------- S4 崩溃模拟（§9/§10 S4：kill 后 WAL 回放对账）----------
-// 子进程（execv 自身进 duostore-sqlite-crash-child 模式）以 sync=true 循环提交
-// 并逐行回报（行在 COMMIT 的 WAL fsync 之后才写出）；父进程随机时刻 SIGKILL。
-// 重启后：凡回报过的提交必在（持久性契约）、refs↔objects 双向对账收敛、gcq
-// 无幻账、号段不回退、integrity_check 干净——WAL 回放的完整验收
+// ---------- S4 crash simulation (§9/§10 S4: WAL replay reconciliation after kill) ----------
+// The child process (execv of ourselves into duostore-sqlite-crash-child mode) commits in a loop with sync=true
+// and reports line by line (each line is written only after the COMMIT's WAL fsync); the parent SIGKILLs at a random moment.
+// After restart: every reported commit must exist (durability contract), refs<->objects reconcile both ways, gcq has
+// no phantom entries, segments never roll back, integrity_check is clean -- the full acceptance test for WAL replay
 
 namespace {
 
@@ -289,7 +289,7 @@ int sqlite_crash_child(int argc, char** argv) {
     if (argc < 3) return 2;
     SqliteMetaOptions o;
     o.path = argv[2];
-    o.sync = true;  // 崩溃语义主角：提交点 = WAL fsync（§6）
+    o.sync = true;  // the star of crash semantics: commit point = WAL fsync (§6)
     SqliteMetaStore m(o);
     m.create_bucket("bkt");
     for (int i = 0;; ++i) {
@@ -333,17 +333,17 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
     int fd = -1;
     pid_t pid = spawn_sqlite_crash_child(db, &fd);
 
-    // 等到首个提交回报后再随机点开杀（保证测试非空转）
+    // Wait for the first reported commit before killing at a random point (guarantees the test is not a no-op)
     std::string buf;
     char ch;
     while (buf.find('\n') == std::string::npos && ::read(fd, &ch, 1) == 1) buf.push_back(ch);
     CHECK(buf.find('\n') != std::string::npos);
-    usleep((100 + unsigned(::getpid()) % 300) * 1000);  // 100-400ms 随机窗口
+    usleep((100 + unsigned(::getpid()) % 300) * 1000);  // 100-400ms random window
     CHECK_EQ(::kill(pid, SIGKILL), 0);
     int stat = 0;
     CHECK(::waitpid(pid, &stat, 0) == pid);
     CHECK(WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL);
-    for (;;) {  // 排空管道；只认完整行
+    for (;;) {  // drain the pipe; only complete lines count
         char rb[4096];
         ssize_t n = ::read(fd, rb, sizeof rb);
         if (n <= 0) break;
@@ -353,7 +353,7 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
     std::vector<std::pair<int, uint64_t>> reported;  // (i, file_id)
     for (size_t pos = 0; pos < buf.size();) {
         size_t nl = buf.find('\n', pos);
-        if (nl == std::string::npos) break;  // 尾部半行：不作数
+        if (nl == std::string::npos) break;  // trailing partial line: does not count
         std::string line = buf.substr(pos, nl - pos);
         pos = nl + 1;
         if (line.rfind("ok ", 0) != 0) continue;
@@ -363,12 +363,12 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
                               std::stoull(line.substr(sp + 1)));
     }
     CHECK(!reported.empty());
-    CHECK(fs::exists(db.string() + "-wal"));  // 未 close：WAL 待回放
+    CHECK(fs::exists(db.string() + "-wal"));  // not closed: WAL awaiting replay
 
     uint64_t max_id = 0;
     {
         SqliteMetaStore m(sqlite_opts(db));
-        // 回报过的提交必在，且账目正确
+        // Every reported commit must exist, with correct bookkeeping
         for (const auto& [i, id] : reported) {
             auto rec = m.get_object("bkt", "k" + std::to_string(i));
             CHECK(rec.has_value());
@@ -377,8 +377,8 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
             CHECK(m.chunk_referenced(id));
             max_id = std::max(max_id, id);
         }
-        // 对账：refs 表 = 全部存活对象 extents 的并集（可能含已提交未回报的尾部
-        // 对象——同样要成立；无孤儿 ref、无漏 ref）
+        // Reconciliation: the refs table = the union of all surviving objects' extents (may include committed-but-unreported
+        // tail objects -- which must hold too; no orphan refs, no missing refs)
         std::set<uint64_t> live;
         ListOptions lo;
         for (;;) {
@@ -394,13 +394,13 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
         std::set<uint64_t> refs;
         m.scan_refs([&](uint64_t id) { refs.insert(id); });
         CHECK(live == refs);
-        // 唯一 key 无覆盖写 → gcq 必空（无幻账）
+        // Unique keys with no overwrites -> gcq must be empty (no phantom entries)
         CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(0));
-        // 号段不回退：崩溃后新派发的 id 严格大于一切已用 id（counters 连接恒 FULL）
+        // Segments never roll back: ids allocated after the crash are strictly greater than every used id (the counters connection is always FULL)
         CHECK(m.alloc_file_id(Extent::Kind::kChunk) > max_id);
         m.close();
     }
-    // 干净 close 后底层库物理完好
+    // After a clean close the underlying database is physically intact
     sqlite3* raw = nullptr;
     CHECK_EQ(sqlite3_open(db.string().c_str(), &raw), SQLITE_OK);
     sqlite3_stmt* st = nullptr;
@@ -412,8 +412,8 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
     sqlite3_close(raw);
 }
 
-// S4 一致视图注入（§2.3/§9）：list 迭代中途从写连接并发提交——本次 list 的 WAL
-// snapshot 必须岿然不动（插入不可见、删除仍可见、覆盖不串台）；下一次 list 见新态
+// S4 consistent-view injection (§2.3/§9): commit concurrently from the write connection mid-iteration of a list -- this list's WAL
+// snapshot must stand rock solid (inserts invisible, deletions still visible, overwrites do not bleed through); the next list sees the new state
 TEST(duostore_sqlite_list_consistent_view_under_concurrent_write) {
     TmpDir tmp;
     SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
@@ -423,22 +423,22 @@ TEST(duostore_sqlite_list_consistent_view_under_concurrent_write) {
     int fired = 0;
     m.set_list_pause_for_test([&] {
         ++fired;
-        m.put_object("iso", "bb", make_rec("bb", {}));  // 未访问区间插入
-        CHECK(m.delete_object("iso", "d"));             // 未访问 key 删除
-        m.put_object("iso", "a", make_rec("a", {}));    // 已访问 key 覆盖
+        m.put_object("iso", "bb", make_rec("bb", {}));  // insert in an unvisited range
+        CHECK(m.delete_object("iso", "d"));             // delete an unvisited key
+        m.put_object("iso", "a", make_rec("a", {}));    // overwrite an already-visited key
     });
     auto r1 = m.list_objects("iso", {});
     CHECK_EQ(fired, 1);
-    CHECK_EQ(r1.objects.size(), size_t(4));  // snapshot：恰是 a b c d
+    CHECK_EQ(r1.objects.size(), size_t(4));  // snapshot: exactly a b c d
     const char* want1[] = {"a", "b", "c", "d"};
     for (size_t i = 0; i < 4; ++i) CHECK_EQ(r1.objects[i].key, std::string(want1[i]));
 
     m.set_list_pause_for_test(nullptr);
-    auto r2 = m.list_objects("iso", {});  // 新视图：bb 可见、d 没了
+    auto r2 = m.list_objects("iso", {});  // new view: bb visible, d gone
     CHECK_EQ(r2.objects.size(), size_t(4));
     const char* want2[] = {"a", "b", "bb", "c"};
     for (size_t i = 0; i < 4; ++i) CHECK_EQ(r2.objects[i].key, std::string(want2[i]));
-    // 覆盖写生效于快照之外：a 的 version 已 bump
+    // The overwrite took effect outside the snapshot: a's version has been bumped
     CHECK_EQ(m.get_object("iso", "a")->version, uint64_t(2));
 
     for (const char* k : {"a", "b", "bb", "c"}) CHECK(m.delete_object("iso", k));
@@ -446,9 +446,9 @@ TEST(duostore_sqlite_list_consistent_view_under_concurrent_write) {
     m.close();
 }
 
-// S4 指标：BUSY 计数——外部裸连接持写锁（flock 只拦本店实例，正好扮演"进程外
-// 来客"，§5.4 表的 BUSY 行）：单语句写 busy_timeout 耗尽 → 500 计 1；号段预留
-// 有界重试 4 轮全饥饿 → 500 计 4；锁释放后恢复。busy_timeout_ms 调短控制时长
+// S4 metrics: BUSY counter -- an external raw connection holds the write lock (flock only blocks our own instances, so it
+// plays the "out-of-process visitor" perfectly, the BUSY row of the §5.4 table): a single-statement write exhausting busy_timeout -> 500 counts 1;
+// segment reservation starving through all 4 bounded retry rounds -> 500 counts 4; recovers after the lock is released. busy_timeout_ms shortened to bound the duration
 TEST(duostore_sqlite_busy_metric_counts_starvation) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -457,7 +457,7 @@ TEST(duostore_sqlite_busy_metric_counts_starvation) {
     opts.busy_timeout_ms = 100;
     opts.metrics = MetricsScope(reg, {{"backend", "s4"}});
     SqliteMetaStore m(opts);
-    // 构造期注册：0 值可见
+    // Registered at construction: zero value visible
     CHECK(reg->render().find(
               "lights3_duostore_sqlite_busy_total{backend=\"s4\"} 0\n") != std::string::npos);
     CHECK(reg->render().find(
@@ -469,17 +469,17 @@ TEST(duostore_sqlite_busy_metric_counts_starvation) {
     CHECK_EQ(sqlite3_exec(ext, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
     CHECK_THROWS_S3(m.seal_pack(1, 0), s3::S3ErrorCode::InternalError);          // +1
     CHECK_THROWS_S3(m.alloc_file_id(Extent::Kind::kChunk),
-                    s3::S3ErrorCode::InternalError);                             // +4（4 轮饥饿）
+                    s3::S3ErrorCode::InternalError);                             // +4 (4 starved rounds)
     CHECK_EQ(sqlite3_exec(ext, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
     sqlite3_close(ext);
 
-    m.seal_pack(1, 0);  // 锁释放后恢复
+    m.seal_pack(1, 0);  // recovers after the lock is released
     CHECK(reg->render().find(
               "lights3_duostore_sqlite_busy_total{backend=\"s4\"} 5\n") != std::string::npos);
     m.close();
 }
 
-// S4 指标：corruption 计数——文件头写花后重开，打开路径的 NOTADB 计入并响亮拒绝
+// S4 metrics: corruption counter -- reopen after scribbling the file header; the open path's NOTADB is counted and loudly rejected
 TEST(duostore_sqlite_corruption_metric_counts_notadb) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -490,7 +490,7 @@ TEST(duostore_sqlite_corruption_metric_counts_notadb) {
     }
     {
         std::fstream f(db, std::ios::in | std::ios::out | std::ios::binary);
-        f.write("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", 32);  // 覆写 SQLite 文件头魔数
+        f.write("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", 32);  // overwrite the SQLite file header magic
     }
     auto reg = std::make_shared<MetricsRegistry>();
     auto opts = sqlite_opts(db);
@@ -501,18 +501,18 @@ TEST(duostore_sqlite_corruption_metric_counts_notadb) {
           std::string::npos);
 }
 
-// meta 备份/恢复兼跨引擎迁移（docs/gaps.md §6.1，meta_dump.h）：rocks 源 dump →
-// sqlite 目标 load，data 目录原地共用（恢复流程"先放 data 再 load meta"的单测
-// 化身）。断言：对象逐字节还原（pack 与多 chunk 两种 extent 都覆盖）、已删对象
-// 不复活、恢复后的新写不与存量文件号相撞（计数器抬升）
+// meta backup/restore doubling as cross-engine migration (docs/gaps.md §6.1, meta_dump.h): rocks source dump ->
+// sqlite target load, data directory shared in place (the unit-test incarnation of the restore procedure "place data first,
+// then load meta"). Asserts: objects restored byte for byte (both pack and multi-chunk extents covered), deleted objects
+// do not resurrect, new writes after restore do not collide with existing file numbers (counter is raised)
 TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     DuoStoreConfig cfg;
     cfg.root = tmp.path / "duo";
-    cfg.chunk_size = 4096;      // 强制多 chunk manifest
-    cfg.pack_threshold = 1024;  // 小对象走 pack
-    cfg.gc_interval_sec = 0;    // 手动钩子；后台不抢
+    cfg.chunk_size = 4096;      // force multi-chunk manifests
+    cfg.pack_threshold = 1024;  // small objects go to pack
+    cfg.gc_interval_sec = 0;    // manual hook; no background contention
     fs::create_directories(cfg.root);
     auto mk_data = [&](IMetaStore* mp) {
         return std::make_unique<FsDataStore>(
@@ -522,7 +522,7 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
             [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     };
     const std::string small(200, 's');    // pack record
-    const std::string big(10000, 'b');    // 3 chunk 文件
+    const std::string big(10000, 'b');    // a 3-chunk file
     std::stringstream archive;
     {
         cfg.name = "migrate-src";
@@ -534,7 +534,7 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
         backend_suite::put(*b, "bkt", "small", small);
         backend_suite::put(*b, "bkt", "big", big);
         backend_suite::put(*b, "bkt", "doomed", "gone");
-        sync_wait(b->delete_object("bkt", "doomed"));  // 产生 gcq 账（刻意不入档）
+        sync_wait(b->delete_object("bkt", "doomed"));  // create a gcq entry (deliberately not archived)
         auto st = sync_wait(b->run_meta_dump(archive));
         CHECK_EQ(st.buckets, uint64_t(1));
         CHECK_EQ(st.objects, uint64_t(2));
@@ -545,7 +545,7 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
         auto meta = std::make_unique<SqliteMetaStore>(sqlite_opts(tmp.path / "meta.sqlite3"));
         IMetaStore* mp = meta.get();
         auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), mk_data(mp));
-        auto st = sync_wait(b->run_meta_load(archive));  // 内置强制孤儿扫描
+        auto st = sync_wait(b->run_meta_load(archive));  // built-in forced orphan scan
         CHECK_EQ(st.objects, uint64_t(2));
         auto g1 = sync_wait(b->get_object("bkt", "small", std::nullopt));
         CHECK_EQ(backend_suite::read_all(*g1.body), small);
@@ -553,20 +553,20 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
         CHECK_EQ(backend_suite::read_all(*g2.body), big);
         CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "doomed")),
                         s3::S3ErrorCode::NoSuchKey);
-        // 计数器抬升：新写分配的文件号不得与存量相撞（撞号 = 静默互写坏存量）
+        // Counter raised: file numbers allocated by new writes must not collide with existing ones (a collision = silently clobbering existing data)
         const std::string fresh(9000, 'n');
         backend_suite::put(*b, "bkt", "fresh", fresh);
         auto g3 = sync_wait(b->get_object("bkt", "fresh", std::nullopt));
         CHECK_EQ(backend_suite::read_all(*g3.body), fresh);
         auto g4 = sync_wait(b->get_object("bkt", "big", std::nullopt));
-        CHECK_EQ(backend_suite::read_all(*g4.body), big);  // 存量未被互写
+        CHECK_EQ(backend_suite::read_all(*g4.body), big);  // existing data not clobbered
         sync_wait(b->close());
     }
 }
 
-// schema 演进策略（docs/gaps.md §6.1）：user_version 比本构建新 → 拒绝降级运行；
-// 比当前旧且迁移链无档 → 响亮失败（"改布局不留迁移"是编程错误）。两种拒绝都
-// 不得污染库——修回真实版本后必须能正常重开
+// Schema evolution policy (docs/gaps.md §6.1): user_version newer than this build -> refuse to run downgraded;
+// older than current with no migration in the chain -> loud failure ("changing layout without leaving a migration" is a programming error).
+// Neither rejection may pollute the database -- after restoring the real version it must reopen normally
 TEST(duostore_sqlite_schema_version_policy) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -582,10 +582,10 @@ TEST(duostore_sqlite_schema_version_policy) {
         CHECK_EQ(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
     };
-    set_user_version(999);  // 未来版本：更新的程序写过的库
+    set_user_version(999);  // future version: a database written by a newer program
     CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)),
                     s3::S3ErrorCode::InternalError);
-    set_user_version(1);  // 修回真实版本，库未被拒绝路径污染
+    set_user_version(1);  // restore the real version; the database was not polluted by the rejection paths
     {
         SqliteMetaStore m(sqlite_opts(db));
         CHECK(m.bucket_exists("x"));

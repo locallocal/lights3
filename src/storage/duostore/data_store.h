@@ -1,5 +1,5 @@
-// L3: DuoStore 数据侧接口（docs/duostore-backend.md §3.3）。协程 Task<T>；
-// 各实现自行决定内部是否切池线程。
+// L3: DuoStore data-side interface (docs/duostore-backend.md §3.3). Coroutine Task<T>;
+// each implementation decides for itself whether to hop to a pool thread internally.
 #pragma once
 
 #include <cstdint>
@@ -17,58 +17,69 @@
 namespace lights3::storage::duostore {
 
 struct WriteHint {
-    std::optional<uint64_t> content_length;  // body.length()，chunked 时 nullopt
-    // pack record 内嵌的归属（§5.2："bucket\0key" 或 "mpu\0<id>\0<part_no>"）：
-    // 压实顺扫反查存活与灾难恢复离线打捞用；无 pack 的引擎忽略
+    std::optional<uint64_t> content_length;  // body.length(); nullopt when chunked
+    // Ownership embedded in the pack record (§5.2: "bucket\0key" or "mpu\0<id>\0<part_no>"):
+    // used by the compaction sequential scan for reverse liveness lookup and by
+    // offline disaster-recovery salvage; engines without packs ignore it
     std::string owner;
 };
 
 struct DataWriter {
     virtual Task<void> write(std::span<const std::byte> buf) = 0;
-    virtual Task<DataRef> finish() = 0;  // 落盘后返回定位；未 finish 即析构 = 丢弃
+    virtual Task<DataRef> finish() = 0;  // returns the location after persisting; destruction without finish = discard
     virtual ~DataWriter() = default;
 };
 
-// P4 压实顺扫的结果统计（docs/duostore-backend.md §9.2）
+// Result statistics of the P4 compaction sequential scan (docs/duostore-backend.md §9.2)
 struct GcRewrite {
-    uint64_t scanned = 0;    // 完整解析（含 crc 通过）的 record 数
-    uint64_t migrated = 0;   // 存活确认并成功换 ref 的 record 数
-    uint64_t corrupt = 0;    // magic/头/crc 损坏的 record 数（torn tail 不计——重启弃用的预期形态）
-    uint64_t file_size = 0;  // 实际文件大小；崩溃遗留 seal(0) 的 pack 借此回填存活率分母
+    uint64_t scanned = 0;    // records fully parsed (including crc pass)
+    uint64_t migrated = 0;   // records confirmed live and successfully ref-swapped
+    uint64_t corrupt = 0;    // records with corrupt magic/header/crc (torn tail excluded — the expected form discarded on restart)
+    uint64_t file_size = 0;  // actual file size; packs left as seal(0) by a crash use this to backfill the liveness-ratio denominator
 };
 
 struct IDataStore;
 
-// 压实顺扫交给迁移回调的一条候选 record（§9.2）
+// One candidate record handed by the compaction sequential scan to the migration callback (§9.2)
 struct PackScanRecord {
     std::string owner;
     Extent from;
     std::vector<std::byte> payload;
 };
 
-// 压实迁移回调（§9.2，DuoStoreBackend 装配）：数据面顺扫攒 K 条 record 一次交付
-// （docs/gaps.md §2.13 批量化——逐条交付时每条一次 fdatasync + 一次 meta 提交，
-// 128MiB pack ≈ 1000 次，与业务写抢同一把写锁）。回调负责 owner 反查存活 + 批量
-// 追加回本 store（write_batch，一次持久化屏障）+ 按 owner 聚合换 ref（同一对象的
-// 多条 record 一次 swap，消掉整份 manifest 的 O(n²) 重写）。返回成功迁移的 record
-// 数；死区或存活但暂不可迁（进行中 mpu 等）不计入，数据面一律不动原 record——
-// pack 的删除恒走"live 账归零 + 空 pack 整删"路径，误判不丢数据。
-// 标准实现见 duostore_backend.h 的 migrate_pack_records
+// Compaction migration callback (§9.2, wired up by DuoStoreBackend): the data
+// plane's sequential scan accumulates K records and delivers them in one call
+// (docs/gaps.md §2.13 batching — per-record delivery costs one fdatasync + one
+// meta commit each, ≈ 1000 for a 128MiB pack, contending with business writes for
+// the same write lock). The callback is responsible for owner reverse-lookup of
+// liveness + batch-appending back into this store (write_batch, one persistence
+// barrier) + swapping refs aggregated by owner (multiple records of the same
+// object in one swap, eliminating the O(n²) rewrite of the whole manifest).
+// Returns the number of successfully migrated records; dead regions and records
+// that are live but temporarily unmigratable (in-flight mpu etc.) are not counted,
+// and the data plane never touches the original record — pack deletion always
+// goes through the "live account reaches zero + delete the whole empty pack"
+// path, so a misjudgment loses no data.
+// See migrate_pack_records in duostore_backend.h for the standard implementation
 using PackMigrateFn = std::function<Task<uint64_t>(IDataStore& self,
                                                    std::vector<PackScanRecord>&& batch)>;
 
-// write_batch 的输入项（压实迁移专用）：payload 由调用方持有到调用返回
+// Input item for write_batch (compaction migration only): payload is held by the
+// caller until the call returns
 struct PackAppendItem {
     std::string_view owner;
     std::span<const std::byte> payload;
 };
 
-// 写侧 pin 钩子（§9.3）：孤儿扫描不得回收"写入中尚未提交 meta"的 chunk——慢流式
-// PUT 的早期 chunk mtime 可远逾 gc_grace，仅靠 mtime 宽限不充分。writer 在分配
-// file_id 时 pin、未 finish 即析构时解 pin；finish 之后的解 pin 责任移交调用方
-// （DuoStoreBackend 在 meta 提交 / 兜底删除之后解除）。
-// **每个产出 chunk 类实体的 data store 都必须接**：漏接的引擎会让孤儿扫描把在途
-// 大对象已落地的分片当无引用文件删掉（docs/gaps.md §1.2）
+// Write-side pin hooks (§9.3): the orphan scan must not reclaim chunks that are
+// "mid-write with meta not yet committed" — early chunks of a slow streaming PUT
+// can have mtimes far beyond gc_grace, so an mtime grace alone is insufficient.
+// The writer pins when allocating a file_id and unpins if destroyed without
+// finish; after finish, unpin responsibility transfers to the caller
+// (DuoStoreBackend releases it after the meta commit / fallback deletion).
+// **Every data store that produces chunk-like entities must hook this up**: an
+// engine that misses it lets the orphan scan delete the already-landed parts of
+// an in-flight large object as unreferenced files (docs/gaps.md §1.2)
 struct ChunkPinHooks {
     std::function<void(uint64_t)> pin;
     std::function<void(uint64_t)> unpin;
@@ -83,9 +94,10 @@ struct ChunkPinHooks {
 
 struct IDataStore {
     virtual Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) = 0;
-    // 批量写（压实迁移专用，docs/gaps.md §2.13）：K 条 payload 一次落地，返回与
-    // 输入等长的 DataRef 列表。默认逐条 open_writer（语义不变）；fs 实现覆写为
-    // 单次槽锁 + 单次 fdatasync 的 pack 批量追加
+    // Batch write (compaction migration only, docs/gaps.md §2.13): K payloads
+    // landed in one call, returns a DataRef list of the same length as the input.
+    // Default is per-item open_writer (semantics unchanged); the fs implementation
+    // overrides with a pack batch append using a single slot lock + a single fdatasync
     virtual Task<std::vector<DataRef>> write_batch(std::span<const PackAppendItem> items) {
         std::vector<DataRef> out;
         out.reserve(items.size());
@@ -96,45 +108,64 @@ struct IDataStore {
         }
         co_return out;
     }
-    // [first,last] 为 resolve_range 后的闭区间；返回流式 BodyReader（length()=last-first+1）
+    // [first,last] is the closed interval after resolve_range; returns a streaming BodyReader (length()=last-first+1)
     virtual Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
                                                                uint64_t last) = 0;
-    virtual Task<void> remove(std::span<const Extent> extents) = 0;  // 幂等（ENOENT 忽略）
-    // 整 pack 文件删除（§9.1：sealed 且 live_recs==0 的 pack）；幂等。纯虚：无 pack
-    // 实体的引擎显式写 no-op override（对齐 rewrite_pack 惯例）——静默接口默认会让
-    // "有 pack 但忘了实现删除"的新引擎编译通过、GC 记了账却永不释放字节
+    virtual Task<void> remove(std::span<const Extent> extents) = 0;  // idempotent (ENOENT ignored)
+    // Whole pack file deletion (§9.1: packs that are sealed with live_recs==0);
+    // idempotent. Pure virtual: engines without pack entities write an explicit
+    // no-op override (matching the rewrite_pack convention) — a silent interface
+    // default would let a new engine that "has packs but forgot to implement
+    // deletion" compile, with GC keeping accounts but never freeing bytes
     virtual Task<void> remove_pack(uint64_t pack_id) = 0;
-    virtual Task<GcRewrite> rewrite_pack(uint64_t pack_id) = 0;      // 压实顺扫（§9.2）
-    // 老化轮转（docs/gaps.md §6.1）：封存"首条 record 已写入逾 max_age_ms"的 active
-    // pack，返回本次封存数。GC 每轮调用一次——只按容量封存时，低写入量下 active
-    // pack 永不轮转，其中被覆盖/删除的 record 进不了压实候选集，成为永不可回收的
-    // 死区。无 pack 实体的引擎默认 0（不是错误：没有 active pack 就没有老化问题）
+    virtual Task<GcRewrite> rewrite_pack(uint64_t pack_id) = 0;      // compaction sequential scan (§9.2)
+    // Age-based rotation (docs/gaps.md §6.1): seals active packs whose first
+    // record was written more than max_age_ms ago, returns the number sealed this
+    // time. GC calls it once per round — with capacity-only sealing, an active
+    // pack never rotates under low write volume, and its overwritten/deleted
+    // records never enter the compaction candidate set, becoming a permanently
+    // unreclaimable dead region. Engines without pack entities default to 0 (not
+    // an error: no active pack means no aging problem)
     virtual Task<uint64_t> seal_aged_packs(int64_t /*max_age_ms*/) { co_return 0; }
-    // 孤儿扫描枚举（§9.3）：遍历数据面全部 chunk 类实体（fs = chunks/ 目录，rados =
-    // namespace 对象列举，docs/duostore-rados-data.md §8.2——接口在 P4 定形，rados 实现
-    // 排 C4），逐个回调 (file_id, mtime_ms, size_bytes)。孤儿判定（refs 反查/grace/pin）
-    // 是调用方（DuoStoreBackend）的事——数据面只枚举，不做存活判断。size 供用量
-    // 指标累计（docs/gaps.md §6.1）：枚举本就要 stat，多带一个字段不增加系统调用。
-    // 纯虚（对齐 remove_pack 惯例）：不支持枚举的引擎显式抛错，绝不静默空扫谎报"无孤儿"
+    // Orphan-scan enumeration (§9.3): iterates all chunk-like entities on the data
+    // plane (fs = the chunks/ directory, rados = namespace object listing,
+    // docs/duostore-rados-data.md §8.2 — the interface was finalized in P4, the
+    // rados implementation is scheduled for C4), calling back
+    // (file_id, mtime_ms, size_bytes) for each. Orphan determination
+    // (refs reverse-lookup/grace/pin) is the caller's (DuoStoreBackend's) job —
+    // the data plane only enumerates, no liveness judgment. size feeds usage
+    // metric accumulation (docs/gaps.md §6.1): enumeration needs a stat anyway, so
+    // one extra field adds no system calls.
+    // Pure virtual (matching the remove_pack convention): engines that do not
+    // support enumeration throw explicitly, never silently scan nothing and
+    // falsely report "no orphans"
     virtual Task<void> scan_chunks(
         const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) = 0;
-    // packs/ 的反向对账枚举（docs/gaps.md §6.1）：pack 文件在"建文件"时就存在，而
-    // packstat 行要到首条 record 提交才落账——恰在这个窗口硬崩，文件就永久泄漏且
-    // 不出现在任何账里（孤儿扫描此前只覆盖 chunk，看不见它）。语义同 scan_chunks：
-    // 只枚举，判定归调用方。无 pack 实体的引擎默认空扫（不是谎报——它压根没有
-    // packs/ 目录这个泄漏面）
+    // Reverse reconciliation enumeration of packs/ (docs/gaps.md §6.1): the pack
+    // file exists as soon as it is created, but the packstat row is only recorded
+    // when the first record commits — a hard crash exactly in that window leaks
+    // the file permanently, appearing in no account (the orphan scan previously
+    // covered only chunks and could not see it). Same semantics as scan_chunks:
+    // enumeration only, determination belongs to the caller. Engines without pack
+    // entities default to an empty scan (not a false report — they simply have no
+    // packs/ directory as a leak surface)
     virtual Task<void> scan_packs(
         const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& /*cb*/) {
         co_return;
     }
-    // "该 pack 是否正被某个活着的写者持有"（启动补封用，docs/gaps.md §1.4）。
-    // fs 实现探测 active pack 的咨询锁；无 pack 实体或无从探测的引擎返回 false
-    // （= 不阻止补封，与本改动前的行为一致）。**false 必须是保守方向**：返回
-    // true 只会让补封推迟到下次启动，返回 false 却可能封掉别人正在写的 pack
+    // "Is this pack currently held by a live writer" (for startup catch-up
+    // sealing, docs/gaps.md §1.4). The fs implementation probes the active pack's
+    // advisory lock; engines without pack entities or with no way to probe return
+    // false (= do not block catch-up sealing, same behavior as before this
+    // change). **false must be the conservative direction**: returning true only
+    // postpones catch-up sealing to the next startup, while returning false could
+    // seal a pack someone else is actively writing
     virtual bool pack_write_locked(uint64_t /*pack_id*/) { return false; }
-    // pack 文件实际大小（docs/gaps.md §2.3b）：崩溃遗留 seal(0) 的账在 GC 判定前
-    // 借此回填分母，免得 file_size 未知的 pack 无条件进全量重写。0 = 未知/不支持
-    // （调用方退回原有的"顺扫回填"路径）
+    // Actual pack file size (docs/gaps.md §2.3b): accounts left as seal(0) by a
+    // crash use this to backfill the denominator before the GC decision, so a
+    // pack with unknown file_size does not unconditionally go into full rewrite.
+    // 0 = unknown/unsupported (the caller falls back to the original
+    // "sequential-scan backfill" path)
     virtual uint64_t stat_pack(uint64_t /*pack_id*/) { return 0; }
     virtual Task<void> close() = 0;
     virtual ~IDataStore() = default;

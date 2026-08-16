@@ -1,10 +1,10 @@
-// TikvMetaStore 专项单测（docs/duostore-tikv-meta.md §10）：meta 一致性套件、
-// 注入组合跑后端套件、前缀隔离、多网关共 meta、写偏斜守卫物化（Op::Lock 语义
-// 冒烟）、swap_extents CAS、并发冲突收敛、close 守卫。
-// 真实集群获取：环境变量 LIGHTS3_TEST_PD_ADDR（逗号分隔 PD 地址，指向 tiup
-// playground / 既有测试集群）设置才跑，否则显式 SKIP（不算失败，机制同
-// test_duostore_rados.cc）。隔离：每用例唯一 tikv_prefix——集群可复用、多套
-// 测试互不污染（版本垃圾由集群 GC safepoint 治理，§7.3）。
+// TikvMetaStore dedicated unit tests (docs/duostore-tikv-meta.md §10): meta consistency suite,
+// backend suite over the injected combination, prefix isolation, multiple gateways sharing meta, write-skew guard materialization (Op::Lock semantics
+// smoke test), swap_extents CAS, concurrent conflict convergence, close guard.
+// Obtaining a real cluster: runs only if the env var LIGHTS3_TEST_PD_ADDR is set (comma-separated PD addresses pointing at a tiup
+// playground / existing test cluster), otherwise SKIP explicitly (not a failure, same mechanism as
+// test_duostore_rados.cc). Isolation: a unique tikv_prefix per test case -- the cluster is reusable and multiple
+// test suites do not pollute each other (version garbage is handled by the cluster GC safepoint, §7.3).
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_TIKV_META)
 
 #include <unistd.h>
@@ -50,8 +50,8 @@ private:
         while (!rest.empty()) {
             auto comma = rest.find(',');
             auto ep = rest.substr(0, comma);
-            // 修剪空白：与 duostore_backend.cc 的 pd_endpoints 解析同规则
-            //（"a:2379, b:2379" 书写风格两条路径行为一致）
+            // Trim whitespace: same rule as the pd_endpoints parsing in duostore_backend.cc
+            // (the "a:2379, b:2379" writing style behaves identically on both paths)
             while (!ep.empty() && (ep.front() == ' ' || ep.front() == '\t')) ep.remove_prefix(1);
             while (!ep.empty() && (ep.back() == ' ' || ep.back() == '\t')) ep.remove_suffix(1);
             if (!ep.empty()) pd_endpoints.emplace_back(ep);
@@ -68,7 +68,7 @@ private:
         return;                                                               \
     }
 
-// 每用例唯一前缀：集群可复用，多套用例/多次运行互不污染（§3.1）
+// Unique prefix per test case: the cluster is reusable, multiple suites/runs do not pollute each other (§3.1)
 std::string unique_prefix() {
     static std::atomic<int> counter{0};
     return "t" + std::to_string(getpid()) + "-" + std::to_string(counter++) + ":";
@@ -87,7 +87,7 @@ using meta_store_suite::make_rec;
 
 }  // namespace
 
-// 同一 meta 语义基线（与 RocksMetaStore 共享套件，docs/duostore-tikv-meta.md §10）
+// Same meta semantics baseline (suite shared with RocksMetaStore, docs/duostore-tikv-meta.md §10)
 TEST(duostore_tikv_meta_store_suite) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -95,7 +95,7 @@ TEST(duostore_tikv_meta_store_suite) {
         [&] { return std::make_unique<TikvMetaStore>(tikv_opts(prefix)); });
 }
 
-// 注入组合（TikvMetaStore + FsDataStore）跑后端一致性套件（§10）
+// Run the backend consistency suite over the injected combination (TikvMetaStore + FsDataStore) (§10)
 TEST(duostore_tikv_backend_suite) {
     TIKV_OR_SKIP();
     TmpDir tmp;
@@ -116,7 +116,7 @@ TEST(duostore_tikv_backend_suite) {
     sync_wait(b->close());
 }
 
-// 前缀隔离（§3.1）：两个 store 共用一个集群，互不可见
+// Prefix isolation (§3.1): two stores share one cluster yet cannot see each other
 TEST(duostore_tikv_prefix_isolation) {
     TIKV_OR_SKIP();
     TikvMetaStore a(tikv_opts(unique_prefix()));
@@ -130,7 +130,7 @@ TEST(duostore_tikv_prefix_isolation) {
     b.close();
 }
 
-// 多网关共 meta（§4.5）：同前缀两实例即共享元数据；号段派发全局唯一
+// Multiple gateways sharing meta (§4.5): two instances with the same prefix share metadata; segment allocation is globally unique
 TEST(duostore_tikv_multi_gateway_shared_meta) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -142,7 +142,7 @@ TEST(duostore_tikv_multi_gateway_shared_meta) {
     CHECK(g1.get_object("shared", "k").has_value());
     CHECK_THROWS_S3(g2.create_bucket("shared"), s3::S3ErrorCode::BucketAlreadyOwnedByYou);
 
-    // 两网关各取一批 file_id：全局唯一（计数器 RMW 号段，§5）
+    // Each gateway takes a batch of file_ids: globally unique (counter RMW segments, §5)
     std::set<uint64_t> ids;
     for (int i = 0; i < 5000; ++i) {
         CHECK(ids.insert(g1.alloc_file_id(Extent::Kind::kChunk)).second);
@@ -154,9 +154,9 @@ TEST(duostore_tikv_multi_gateway_shared_meta) {
     g2.close();
 }
 
-// 写偏斜守卫物化（§4.3，T1 验证项：Op::Lock 记录参与后续 prewrite 冲突检测）：
-// put_object 与 delete_bucket 并发竞争，任何交错下不得出现"桶已删而对象残留"
-// 的幽灵状态——守卫失效时此不变量在若干轮内必被打破
+// Write-skew guard materialization (§4.3, T1 verification item: Op::Lock records participate in subsequent prewrite conflict detection):
+// put_object and delete_bucket race concurrently; under any interleaving the ghost state "bucket deleted yet object
+// remains" must never appear -- with the guard broken this invariant is violated within a few rounds
 TEST(duostore_tikv_write_skew_guard) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -170,7 +170,7 @@ TEST(duostore_tikv_write_skew_guard) {
             try {
                 a.put_object(bkt, "k", make_rec("k", {}));
             } catch (const s3::S3Error& e) {
-                if (e.code != s3::S3ErrorCode::NoSuchBucket)  // 删桶胜出的合法失败
+                if (e.code != s3::S3ErrorCode::NoSuchBucket)  // legitimate failure when bucket deletion wins
                     errs[0] = std::current_exception();
             }
         });
@@ -178,7 +178,7 @@ TEST(duostore_tikv_write_skew_guard) {
             try {
                 b.delete_bucket(bkt);
             } catch (const s3::S3Error& e) {
-                if (e.code != s3::S3ErrorCode::BucketNotEmpty)  // put 胜出的合法失败
+                if (e.code != s3::S3ErrorCode::BucketNotEmpty)  // legitimate failure when the put wins
                     errs[1] = std::current_exception();
             }
         });
@@ -188,22 +188,22 @@ TEST(duostore_tikv_write_skew_guard) {
             if (e) std::rethrow_exception(e);
 
         if (!a.bucket_exists(bkt)) {
-            // 桶删成功 ⇒ put 必须没有落下幽灵对象（get_object 不查桶，能看见残留）
+            // Bucket deletion succeeded => the put must not have left a ghost object (get_object does not check the bucket, so it can see residue)
             CHECK(!a.get_object(bkt, "k").has_value());
         } else {
-            // put 胜出 ⇒ 对象在、桶在；清理后桶可删
+            // put wins => object exists, bucket exists; the bucket is deletable after cleanup
             CHECK(a.get_object(bkt, "k").has_value());
             CHECK(a.delete_object(bkt, "k"));
             a.delete_bucket(bkt);
         }
     }
-    // 清理 GC 账（本用例的 reclaim 无数据面文件，直接销账）
+    // Clean up the GC ledger (this case's reclaims have no data-plane files, so write them off directly)
     for (auto& [seq, r] : a.peek_reclaims(1000, 0)) a.ack_reclaim(seq);
     a.close();
     b.close();
 }
 
-// put_part 与 abort_upload 并发（§4.3 上传守卫）：abort 胜出后不得残留孤儿 part
+// put_part racing abort_upload (§4.3 upload guard): after abort wins there must be no orphan part left
 TEST(duostore_tikv_part_abort_guard) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -221,7 +221,7 @@ TEST(duostore_tikv_part_abort_guard) {
                 p.etag = "d41d8cd98f00b204e9800998ecf8427e";
                 a.put_part("pg", "k", id, p);
             } catch (const s3::S3Error& e) {
-                if (e.code != s3::S3ErrorCode::NoSuchUpload)  // abort 胜出的合法失败
+                if (e.code != s3::S3ErrorCode::NoSuchUpload)  // legitimate failure when abort wins
                     errs[0] = std::current_exception();
             }
         });
@@ -236,9 +236,9 @@ TEST(duostore_tikv_part_abort_guard) {
         t2.join();
         for (auto& e : errs)
             if (e) std::rethrow_exception(e);
-        // abort 已提交（无并发 complete，必成功）⇒ upload 消失；孤儿 part 检测：
-        // 守卫失效时 put_part 可落在 abort 之后，part 行残留、refs 泄漏——经
-        // chunk_referenced 观察（本用例 part 无 extent，退化为 list 语义检查）
+        // abort committed (no concurrent complete, so it must succeed) => the upload is gone; orphan part detection:
+        // with the guard broken, put_part can land after the abort, leaving a residual part row and leaked refs -- observed
+        // via chunk_referenced (this case's parts have no extents, so it degrades to a list semantics check)
         CHECK_THROWS_S3(a.list_parts("pg", "k", id), s3::S3ErrorCode::NoSuchUpload);
     }
     a.delete_bucket("pg");
@@ -247,25 +247,25 @@ TEST(duostore_tikv_part_abort_guard) {
     b.close();
 }
 
-// 单值体积保护（gaps §2.12）：manifest 超过 raft entry 承载即 fail-fast 抛
-// EntityTooLarge（400），而非 prewrite 永久失败的 500——写不进也删不掉最伤
+// Single-value size protection (gaps §2.12): a manifest exceeding what a raft entry can carry fail-fasts with
+// EntityTooLarge (400) instead of a 500 from a permanently failing prewrite -- unable to write yet unable to delete hurts most
 TEST(duostore_tikv_object_manifest_size_guard) {
     TIKV_OR_SKIP();
     TikvMetaStore m(tikv_opts(unique_prefix()));
     m.create_bucket("etl");
     std::vector<Extent> huge;
     huge.reserve(200'001);
-    // 交错 id 破坏 run 编码（病态形态），条数越过 kMaxObjectExtents
+    // Interleaved ids break the run encoding (pathological shape); the count exceeds kMaxObjectExtents
     for (size_t i = 0; i < 200'001; ++i)
         huge.push_back(chunk_extent(i * 2 + 1, 1));
     CHECK_THROWS_S3(m.put_object("etl", "k", make_rec("k", std::move(huge))),
                     s3::S3ErrorCode::EntityTooLarge);
-    CHECK(!m.get_object("etl", "k").has_value());  // 未落写
+    CHECK(!m.get_object("etl", "k").has_value());  // nothing was written
     m.delete_bucket("etl");
     m.close();
 }
 
-// swap_extents 的 CAS 放弃路径（§4.4/主文档 §9.2）：version/extents 不符 → false 不落写
+// swap_extents CAS abandon path (§4.4/main doc §9.2): version/extents mismatch -> false, nothing is written
 TEST(duostore_tikv_swap_extents_cas) {
     TIKV_OR_SKIP();
     TikvMetaStore m(tikv_opts(unique_prefix()));
@@ -276,7 +276,7 @@ TEST(duostore_tikv_swap_extents_cas) {
     DataRef to{{chunk_extent(id2, 8)}};
     m.put_object("swap", "k", make_rec("k", from.extents));  // version=1
 
-    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version 不符
+    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version mismatch
     CHECK(m.chunk_referenced(id1));
     CHECK(!m.chunk_referenced(id2));
 
@@ -287,15 +287,15 @@ TEST(duostore_tikv_swap_extents_cas) {
     CHECK(!m.chunk_referenced(id1));
     CHECK(m.chunk_referenced(id2));
 
-    // 换过之后旧 from 过期 → 再换必失败
+    // After a swap the old from is stale -> swapping again must fail
     CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));
     CHECK(m.delete_object("swap", "k"));
     m.delete_bucket("swap");
     m.close();
 }
 
-// 并发冲突收敛（§4.1）：两个"网关"对同一 key 竞争覆盖写——WriteConflict 重试
-// 保证可串行化：version 严格计数、refs 只剩最终 extent、gcq 恰 (总写数-1) 条
+// Concurrent conflict convergence (§4.1): two "gateways" race to overwrite the same key -- WriteConflict retries
+// guarantee serializability: version counts strictly, refs keeps only the final extent, gcq has exactly (total writes - 1) entries
 TEST(duostore_tikv_concurrent_conflict_converges) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -304,7 +304,7 @@ TEST(duostore_tikv_concurrent_conflict_converges) {
     g1.create_bucket("race");
     constexpr int kPerWriter = 25;
 
-    // 线程内异常经 exception_ptr 传回主线程重抛（否则 terminate 掩盖断言信息）
+    // Exceptions in threads are carried back via exception_ptr and rethrown on the main thread (otherwise terminate hides the assertion info)
     std::exception_ptr errs[2];
     auto writer = [&](TikvMetaStore& m, std::exception_ptr& err) {
         try {
@@ -336,7 +336,7 @@ TEST(duostore_tikv_concurrent_conflict_converges) {
     g2.close();
 }
 
-// close 后调用干净失败（500），而非崩溃（防御纵深惯例）
+// Calls after close fail cleanly (500) instead of crashing (defense-in-depth convention)
 TEST(duostore_tikv_closed_store_throws) {
     TIKV_OR_SKIP();
     TikvMetaStore m(tikv_opts(unique_prefix()));
@@ -344,9 +344,9 @@ TEST(duostore_tikv_closed_store_throws) {
     CHECK_THROWS_S3(m.bucket_exists("x"), s3::S3ErrorCode::InternalError);
 }
 
-// ---------- T5 专项（§11）----------
+// ---------- T5 specials (§11) ----------
 
-// 从 Prometheus 渲染文本中取指定序列的值（找不到返回 -1）
+// Extract a given series' value from the Prometheus rendered text (returns -1 if not found)
 namespace {
 long long metric_value(const std::string& render, const std::string& series) {
     auto pos = render.find(series + " ");
@@ -355,9 +355,9 @@ long long metric_value(const std::string& render, const std::string& series) {
 }
 }  // namespace
 
-// T5 指标：冲突重试计数——两网关热点 key 竞争覆盖写，WriteConflict 重试轮次
-// 落 lights3_duostore_tikv_txn_conflict_retries_total；构造期注册 0 值可见。
-// 顺带冒烟退避预算参数化（backoff_budget_ms 缩到 5s，功能路径全通）
+// T5 metrics: conflict retry counter -- two gateways race overwriting a hot key; WriteConflict retry rounds land in
+// lights3_duostore_tikv_txn_conflict_retries_total; the zero value registered at construction is visible.
+// Also smoke-tests backoff budget parameterization (backoff_budget_ms shrunk to 5s, all functional paths pass)
 TEST(duostore_tikv_conflict_metric_counts) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -376,8 +376,8 @@ TEST(duostore_tikv_conflict_metric_counts) {
 
     TikvMetaStore g2(tikv_opts(prefix));
     g1.create_bucket("cm");
-    // 冲突是并发交错的产物，单批可能恰好错开——有界轮次跑到观察为止（每轮
-    // 2×15 次热点覆盖写，正常一两轮内必现）
+    // Conflicts are a product of concurrent interleaving; a single batch may happen to miss -- run bounded rounds until observed
+    // (2x15 hot-key overwrites per round; normally shows up within a round or two)
     long long retries = 0;
     for (int round = 0; round < 20 && retries <= 0; ++round) {
         std::exception_ptr errs[2];
@@ -397,7 +397,7 @@ TEST(duostore_tikv_conflict_metric_counts) {
         retries = metric_value(
             reg->render(), "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}");
     }
-    CHECK(retries > 0);  // 计数只增不减
+    CHECK(retries > 0);  // the counter only ever increases
 
     CHECK(g1.delete_object("cm", "hot"));
     g1.delete_bucket("cm");
@@ -406,13 +406,13 @@ TEST(duostore_tikv_conflict_metric_counts) {
     g2.close();
 }
 
-// T5 GC safepoint（§7.3）：单轮推进 = service safepoint 声明 + 集群 safepoint
-// 推进，返回值 >0 且跨轮单调；worker 模式（interval>0）后台自动推进，close 干净停
+// T5 GC safepoint (§7.3): a single-round advance = service safepoint declaration + cluster safepoint
+// advance, returns >0 and is monotonic across rounds; worker mode (interval>0) advances automatically in the background, close stops cleanly
 TEST(duostore_tikv_gc_safepoint_advances) {
     TIKV_OR_SKIP();
     auto reg = std::make_shared<MetricsRegistry>();
     auto opts = tikv_opts(unique_prefix());
-    opts.gc_retention_s = 60;  // 集群共享：保留 60s 窗口，不动别的用例的在途快照
+    opts.gc_retention_s = 60;  // shared cluster: keep a 60s window, do not disturb other cases' in-flight snapshots
     opts.metrics = MetricsScope(reg, {{"backend", "t5sp"}});
     TikvMetaStore m(opts);
     CHECK_EQ(metric_value(reg->render(),
@@ -422,14 +422,14 @@ TEST(duostore_tikv_gc_safepoint_advances) {
     CHECK(sp1 > 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     uint64_t sp2 = m.update_gc_safepoint_once();
-    CHECK(sp2 >= sp1);  // PD 端单调只进
-    // gauge = 最近推进的集群 safepoint 物理 ms
+    CHECK(sp2 >= sp1);  // monotonic, forward-only on the PD side
+    // gauge = physical ms of the most recently advanced cluster safepoint
     CHECK_EQ(metric_value(reg->render(),
                           "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"),
              (long long)(sp2 >> 18));
     m.close();
 
-    // worker 模式：首 tick 立即推进——轮询等 gauge 非零（上限 10s），close 即停
+    // Worker mode: the first tick advances immediately -- poll until the gauge is nonzero (10s cap), close stops it
     auto wopts = tikv_opts(unique_prefix());
     wopts.gc_safepoint_interval_s = 1;
     wopts.gc_retention_s = 60;
@@ -445,12 +445,12 @@ TEST(duostore_tikv_gc_safepoint_advances) {
     w.close();
 }
 
-// T5 万分片 complete 专项（§6.3）：10000 分片的 complete_upload 是全实现最大
-// 事务（对象 + upload 删 + 全量守卫 + 万级 part 删/refs 转移 ≈ 2 万 mutation）。
-// 验证：prewrite/commit 在伸缩 lock_ttl（txn_lock_ttl，√MiB 放大）内收敛；并发
-// 读者全程驱动 LockResolver 对在途 primary 做 TTL 判定——TTL 不足时会把
-// prewrite 中的事务判死回滚，complete 无法成功。TTLManager 心跳不接线的评估
-// 依据也在此：事务规模有上界（S3 万分片顶格），伸缩 TTL 足够覆盖
+// T5 ten-thousand-part complete special (§6.3): a complete_upload of 10000 parts is the largest transaction in the whole
+// implementation (object + upload deletion + full guard + ten-thousand-scale part deletion/refs transfer ~= 20k mutations).
+// Verifies: prewrite/commit converge within the scaled lock_ttl (txn_lock_ttl, sqrt(MiB) amplification); concurrent
+// readers drive the LockResolver's TTL judgment on the in-flight primary the whole time -- with insufficient TTL they would
+// judge the prewriting transaction dead and roll it back, and complete could not succeed. The rationale for not wiring up
+// the TTLManager heartbeat is also here: transaction size is bounded (S3 caps at 10k parts), the scaled TTL is enough to cover it
 TEST(duostore_tikv_bulk_complete_10k_parts) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -463,7 +463,7 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     constexpr int kParts = 10000;
     const char* kEtag = "d41d8cd98f00b204e9800998ecf8427e";
     std::vector<uint64_t> ids(kParts + 1, 0);
-    // 8 线程按 part_no 残差类分工：守卫按 part_no % 16 分片，残差类互斥 → 零误撞
+    // 8 threads split work by part_no residue class: the guard shards by part_no % 16, residue classes are disjoint -> zero false collisions
     std::exception_ptr errs[8];
     std::vector<std::thread> ths;
     for (int t = 0; t < 8; ++t) {
@@ -488,7 +488,7 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     for (auto& e : errs)
         if (e) std::rethrow_exception(e);
 
-    // 并发读者：complete 期间持续读同 key，驱动锁解析路径对 primary 判 TTL
+    // Concurrent readers: keep reading the same key during complete, driving the lock-resolution path to judge the primary's TTL
     std::atomic<bool> stop{false};
     std::thread reader([&] {
         while (!stop.load(std::memory_order_relaxed)) reader_store.get_object("big", "k");
@@ -515,7 +515,7 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     CHECK(m.chunk_referenced(ids[kParts]));
     CHECK_THROWS_S3(m.list_parts("big", "k", id), s3::S3ErrorCode::NoSuchUpload);
 
-    // 清理：删除对象（第二个万级 mutation 事务）→ refs 清空、GC 账销掉
+    // Cleanup: delete the object (a second ten-thousand-scale mutation transaction) -> refs emptied, GC ledger written off
     CHECK(m.delete_object("big", "k"));
     CHECK(!m.chunk_referenced(ids[1]));
     m.delete_bucket("big");
@@ -526,19 +526,19 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     reader_store.close();
 }
 
-// 多网关 GC 租约（docs/gaps.md §6.1，与 redis 版同语义）：同前缀两实例只有一个
-// 抢到；同 owner 续租；他人租约过期后可接管
+// Multi-gateway GC lease (docs/gaps.md §6.1, same semantics as the redis version): of two instances with the same prefix only one
+// wins; the same owner renews; another owner's expired lease can be taken over
 TEST(duostore_tikv_gc_lease) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
     TikvMetaStore a(tikv_opts(prefix)), b(tikv_opts(prefix));
     CHECK(a.try_gc_lease("owner-a", 60'000));
-    CHECK(!b.try_gc_lease("owner-b", 60'000));  // 他人持有且未过期
-    CHECK(a.try_gc_lease("owner-a", 60'000));   // 同 owner 续租
+    CHECK(!b.try_gc_lease("owner-b", 60'000));  // held by another and not expired
+    CHECK(a.try_gc_lease("owner-a", 60'000));   // same owner renews
     TikvMetaStore c(tikv_opts(unique_prefix()));
     CHECK(c.try_gc_lease("x", 100));
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    CHECK(c.try_gc_lease("y", 60'000));  // x 的租约已过期（墙钟判定）
+    CHECK(c.try_gc_lease("y", 60'000));  // x's lease has expired (wall-clock judgment)
     a.close();
     b.close();
     c.close();

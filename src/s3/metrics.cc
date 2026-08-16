@@ -86,7 +86,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     os << "# TYPE lights3_s3_errors_total counter\n";
     for (size_t i = 0; i < kS3ErrorCodeCount; ++i) {
         uint64_t n = errors_[i].load(std::memory_order_relaxed);
-        // 只渲染出现过的码（与旧 map 行为一致，避免 25 行恒零序列）
+        // Only render codes that have occurred (matches the old map behavior; avoids 25 always-zero series)
         if (n > 0)
             os << "lights3_s3_errors_total{code=\"" << wire_code(S3ErrorCode(i)) << "\"} "
                << n << "\n";
@@ -97,7 +97,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     uint64_t finished = mpu_finished_.load(std::memory_order_relaxed);
     os << "lights3_multipart_active " << (created > finished ? created - finished : 0) << "\n";
 
-    // 字节数与 per-bucket 维度（docs/gaps.md §7）
+    // Byte counts and per-bucket dimension (docs/gaps.md §7)
     os << "# TYPE lights3_bytes_total counter\n";
     os << "lights3_bytes_total{direction=\"in\"} "
        << bytes_in_.load(std::memory_order_relaxed) << "\n";
@@ -128,8 +128,8 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_backlogged " << st.backlogged << "\n";
         os << "# TYPE lights3_pool_completed_total counter\n";
         os << "lights3_pool_completed_total " << st.completed << "\n";
-        // 等待时长直方图（docs/gaps.md §7）：docs/concurrency.md §3.1 把"该直方图
-        // 右移"定为开启 per-backend 专属池的唯一判据，此前采集了却从不输出
+        // Wait-duration histogram (docs/gaps.md §7): docs/concurrency.md §3.1 defines "this histogram
+        // shifting right" as the sole criterion for enabling dedicated per-backend pools; it used to be collected but never emitted
         os << "# TYPE lights3_pool_wait_seconds histogram\n";
         uint64_t wcum = 0;
         for (size_t i = 0; i < ThreadPool::kWaitBucketBounds.size(); ++i) {
@@ -143,7 +143,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_wait_seconds_count " << wcum << "\n";
     }
 
-    // 入口限流排队深度（docs/gaps.md §7）：inflight 信号量是全进程唯一准入闸门
+    // Ingress throttling queue depth (docs/gaps.md §7): the inflight semaphore is the process-wide sole admission gate
     if (admission) {
         auto st = admission();
         os << "# TYPE lights3_admission_capacity gauge\n";
@@ -154,8 +154,8 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_admission_waiting " << st.waiting << "\n";
     }
 
-    // 定时器线程健康度（docs/gaps.md §7）：慢回调连锁推迟 tiered 扫描 /
-    // duostore GC / 凭证同步，队头滞后与耗时直方图是唯一的发现渠道
+    // Timer thread health (docs/gaps.md §7): slow callbacks cascade into delaying tiered scans /
+    // duostore GC / credential sync; head-of-queue lag and the duration histogram are the only way to detect it
     if (timer_stats) {
         auto st = timer_stats();
         os << "# TYPE lights3_timer_pending gauge\n";

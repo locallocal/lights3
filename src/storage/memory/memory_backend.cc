@@ -15,7 +15,8 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// 共享底层数据的只读 reader：锁外流式吐给客户端，put 覆盖也不影响在途 GET
+// Read-only reader sharing the underlying data: streams to the client outside the lock,
+// and a put overwrite does not affect in-flight GETs
 class SharedBlobReader final : public http::BodyReader {
 public:
     SharedBlobReader(std::shared_ptr<const std::string> blob, size_t off, size_t len)
@@ -42,9 +43,10 @@ uint64_t MemoryBackend::used_bytes() const {
     return used_bytes_;
 }
 
-// 容量闸门（docs/gaps.md §6.3）：此前本后端无任何上限——配错成生产后端就是把整个
-// 网关的数据放进堆里直到 OOM killer 介入。超限返回 503 SlowDown（可重试，且运维
-// 在指标上看得见），而不是让分配器决定谁死
+// Capacity gate (docs/gaps.md §6.3): previously this backend had no limit at all --
+// misconfigured as a production backend it would put the entire gateway's data into the
+// heap until the OOM killer stepped in. Over the limit returns 503 SlowDown (retryable,
+// and visible to operators on the metrics) rather than letting the allocator decide who dies
 void MemoryBackend::reserve_locked(int64_t delta) {
     if (delta > 0 && opt_.max_bytes) {
         uint64_t want = used_bytes_ + uint64_t(delta);
@@ -55,18 +57,21 @@ void MemoryBackend::reserve_locked(int64_t delta) {
     used_bytes_ = uint64_t(int64_t(used_bytes_) + delta);
 }
 
-// 读 body 途中的提前闸门：等 EOF 后再查容量的话，超大 body 的字节已全部驻堆，
-// OOM 防护在最需要时不生效。在途缓冲不计入 used_bytes_（提交时才 reserve），
-// 这里按"已用 + 本请求已缓冲"保守预判，超限即 503（与 reserve_locked 同语义）
+// Early gate while reading the body: if capacity were checked only after EOF, an oversized
+// body's bytes would already all be resident in the heap, and OOM protection would fail
+// exactly when it is needed most. In-flight buffers do not count toward used_bytes_
+// (reserve happens at commit); here we conservatively pre-check "used + this request's
+// buffered bytes" and return 503 over the limit (same semantics as reserve_locked)
 void MemoryBackend::check_inflight(size_t buffered) const {
     if (opt_.max_bytes && used_bytes() + buffered > opt_.max_bytes)
         throw S3Error(S3ErrorCode::SlowDown,
                       "memory backend is at its configured max_bytes capacity");
 }
 
-// mpu 过期清理（docs/gaps.md §6.3）：本后端不接定时器（无后台线程是它作为单测
-// 夹具的一部分），改在 multipart 类操作入口顺带扫一遍——从不 complete/abort 的
-// 上传此前会永久占着内存
+// mpu expiry cleanup (docs/gaps.md §6.3): this backend takes no timer (having no
+// background threads is part of its role as a unit-test fixture), so it sweeps as a side
+// task at multipart operation entry points instead -- uploads never completed/aborted used
+// to occupy memory forever
 void MemoryBackend::expire_uploads_locked() {
     if (opt_.mpu_ttl_sec <= 0) return;
     auto cutoff = std::chrono::system_clock::now() - std::chrono::seconds(opt_.mpu_ttl_sec);
@@ -128,7 +133,7 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
                                           PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
-    // 先流式读完 body（不持锁），再提交
+    // Read the body to the end first (without the lock), then commit
     std::string data;
     std::byte buf[64 * 1024];
     util::HashStream md5(util::HashStream::Algo::Md5);
@@ -147,7 +152,7 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
 
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
-    // 条件检查与提交同锁（PutCondition 契约）
+    // Condition check and commit under the same lock (PutCondition contract)
     if (cond.active()) {
         auto it = b.objects.find(std::string(key));
         if (cond.if_none_match && it != b.objects.end())
@@ -165,8 +170,9 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
         }
     }
     PutResult r{meta.etag};
-    // 容量检查通过后才 touch map：operator[] 先插入的话，reserve 抛出时 map 里
-    // 残留 data 为空指针的幽灵条目，后续 GET 直接空指针解引用
+    // Only touch the map after the capacity check passes: if operator[] inserted first,
+    // a throw from reserve would leave a ghost entry with a null data pointer in the map,
+    // and a later GET would dereference a null pointer
     auto it = b.objects.find(std::string(key));
     int64_t old = it != b.objects.end() && it->second.data ? int64_t(it->second.data->size()) : 0;
     reserve_locked(int64_t(blob->size()) - old);
@@ -180,8 +186,9 @@ Task<ObjectStream> MemoryBackend::get_object(std::string_view bucket, std::strin
     ObjectStream out;
     std::shared_ptr<const std::string> blob;
     {
-        // 锁内只取 meta 与数据块的 shared_ptr（docs/gaps.md §3.9）：此前在全局
-        // 锁内整体拷贝对象（1GB 对象 = 2GB 驻留 + 全程锁住所有 bucket）
+        // Inside the lock, grab only the meta and the data block's shared_ptr
+        // (docs/gaps.md §3.9): previously the object was copied wholesale under the global
+        // lock (1GB object = 2GB resident + all buckets locked for the duration)
         std::lock_guard lk(m_);
         auto& b = bucket_or_throw(std::string(bucket));
         auto it = b.objects.find(std::string(key));
@@ -220,7 +227,7 @@ Task<void> MemoryBackend::delete_object(std::string_view bucket, std::string_vie
     if (auto it = b.objects.find(std::string(key)); it != b.objects.end()) {
         reserve_locked(-int64_t(it->second.data ? it->second.data->size() : 0));
         b.objects.erase(it);
-    }  // 幂等
+    }  // idempotent
     co_return;
 }
 
@@ -231,7 +238,8 @@ Task<ListResult> MemoryBackend::list_objects(std::string_view bucket, const List
     std::vector<std::string> keys;
     keys.reserve(b.objects.size());
     for (auto& [k, _] : b.objects) keys.push_back(k);
-    // at() 而非 operator[]：后者对不存在的 key 会静默插入空对象（docs/gaps.md §3.9）
+    // at() rather than operator[]: the latter silently inserts an empty object for a
+    // missing key (docs/gaps.md §3.9)
     co_return apply_listing(keys, opt, [&](const std::string& k) { return b.objects.at(k).meta; });
 }
 
@@ -266,7 +274,7 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
     validate_part_number(part_no);
     {
         std::lock_guard lk(m_);
-        upload_or_throw(bucket, key, upload_id);  // 早失败；不持锁读 body
+        upload_or_throw(bucket, key, upload_id);  // fail early; read the body without the lock
     }
     std::string data;
     std::byte buf[64 * 1024];
@@ -281,9 +289,10 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
     std::string etag = md5.final_hex();
 
     std::lock_guard lk(m_);
-    auto& up = upload_or_throw(bucket, key, upload_id);  // 读 body 期间可能已被 abort
-    // 同号重传 last-write-wins；容量检查通过后才 touch map（同 put_object，
-    // 否则 reserve 抛出时残留空 etag 的幽灵分片）
+    auto& up = upload_or_throw(bucket, key, upload_id);  // may have been aborted while reading the body
+    // Same-number re-upload is last-write-wins; only touch the map after the capacity
+    // check passes (same as put_object, otherwise a throw from reserve leaves a ghost part
+    // with an empty etag)
     auto it = up.parts.find(part_no);
     reserve_locked(int64_t(data.size()) -
                    (it != up.parts.end() ? int64_t(it->second.data.size()) : 0));
@@ -313,17 +322,20 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
         md5s.push_back(it->second.etag);
     }
 
-    // 拷贝而非 move：下面 reserve 可能超限抛出，"上传仍在、客户端可重试或 abort"
-    // 的承诺要求 up.meta 在失败路径上保持完好
+    // Copy rather than move: the reserve below may throw on over-limit, and the promise
+    // that "the upload survives, the client may retry or abort" requires up.meta to stay
+    // intact on the failure path
     ObjectMeta meta = up.meta;
     meta.key = std::string(key);
     meta.size = data.size();
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
     PutResult r{meta.etag};
-    // 拼接后的对象与分片同时驻留一瞬：先记新对象（可能超限而抛，此时上传仍在，
-    // 客户端可重试或 abort），成功后再释放分片。容量检查通过后才 touch map
-    //（同 put_object，否则失败时残留空指针幽灵对象）
+    // The concatenated object and the parts are resident simultaneously for a moment:
+    // account the new object first (may throw on over-limit, in which case the upload
+    // survives and the client may retry or abort), release the parts only after success.
+    // Only touch the map after the capacity check passes (same as put_object, otherwise a
+    // failure leaves a null-pointer ghost object)
     auto it = b.objects.find(std::string(key));
     int64_t old = it != b.objects.end() && it->second.data ? int64_t(it->second.data->size()) : 0;
     reserve_locked(int64_t(data.size()) - old);
@@ -353,7 +365,8 @@ Task<ListPartsResult> MemoryBackend::list_parts(std::string_view bucket, std::st
                                                 const ListPartsOptions& opt) {
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);
-    // parts 是 std::map<int,...>，遍历即升序；marker 之前的直接跳过
+    // parts is a std::map<int,...>, so iteration is already ascending; entries before the
+    // marker are skipped directly
     std::vector<PartMeta> all;
     for (auto it = up.parts.upper_bound(opt.part_number_marker); it != up.parts.end(); ++it)
         all.push_back({it->first, it->second.data.size(), it->second.etag, it->second.uploaded});
@@ -366,7 +379,8 @@ Task<ListUploadsResult> MemoryBackend::list_multipart_uploads(std::string_view b
     std::lock_guard lk(m_);
     expire_uploads_locked();
     bucket_or_throw(std::string(bucket));
-    // 索引按 upload_id 建，桶内枚举本就是全扫 + 排序，marker 只能在排序后应用
+    // The index is keyed by upload_id, so per-bucket enumeration is inherently a full scan
+    // + sort; the marker can only be applied after sorting
     std::vector<UploadInfo> all;
     for (auto& [id, up] : uploads_)
         if (up.bucket == bucket) all.push_back({up.key, id, up.initiated});

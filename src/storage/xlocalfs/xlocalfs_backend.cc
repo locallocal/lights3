@@ -42,8 +42,8 @@ struct FdGuard {
     }
 };
 
-// io_uring pread 流式读取（带偏移，天然支持 Range）；
-// 完成续体经线程池恢复，读盘期间不占任何线程
+// io_uring pread streaming reads (with an offset, so Range comes naturally);
+// completion continuations resume via the thread pool, occupying no thread while reading disk
 class UringBodyReader final : public http::BodyReader {
 public:
     UringBodyReader(int fd, uint64_t offset, uint64_t remaining,
@@ -56,7 +56,7 @@ public:
         size_t want = std::min<uint64_t>(buf.size(), remaining_);
         int n = co_await eng_->read(fd_, buf.first(want), offset_);
         if (n < 0) throw_uring("io_uring read", n);
-        if (n == 0) remaining_ = 0;  // 文件被外部截断，提前 EOF
+        if (n == 0) remaining_ = 0;  // file truncated externally, early EOF
         offset_ += static_cast<uint64_t>(n);
         remaining_ -= static_cast<uint64_t>(n);
         co_return static_cast<size_t>(n);
@@ -77,14 +77,16 @@ private:
 XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging,
                                  std::shared_ptr<ThreadPool> pool, UringOptions uring_opt,
                                  LocalFsOptions fs_opt, MetricsScope metrics)
-    // 指标透传基类：xlocalfs 与 localfs 的盘上语义相同，共用 lights3_localfs_*
-    // 名字空间即可按 backend 标签区分实例，不必再造一套同形指标
+    // Metrics pass through to the base class: xlocalfs and localfs share on-disk semantics,
+    // so sharing the lights3_localfs_* namespace and distinguishing instances by backend
+    // label is enough -- no need for a duplicate set of identical metrics
     : LocalFsBackend(std::move(root), std::move(staging), pool, fs_opt, std::move(metrics)),
       uring_(std::make_shared<UringEngine>(std::move(pool), uring_opt)) {}
 
-// 提交段的数据落盘（docs/gaps.md §6.3）：此前这里是同步 fdatasync——把池线程钉在
-// 磁盘上等，正是 xlocalfs 存在的理由所要消除的。FSYNC SQE 走同一条完成路径，
-// 等待期间线程回池
+// Data persistence in the commit phase (docs/gaps.md §6.3): this used to be a synchronous
+// fdatasync -- pinning a pool thread waiting on disk, exactly what xlocalfs exists to
+// eliminate. The FSYNC SQE takes the same completion path, and the thread returns to the
+// pool while waiting
 Task<void> XLocalFsBackend::sync_fd(int fd) {
     if (!fsutil::fsync_enabled()) co_return;
     if (!uring_->features().op_fsync) {
@@ -93,7 +95,7 @@ Task<void> XLocalFsBackend::sync_fd(int fd) {
         co_return;
     }
     int r = co_await uring_->fdatasync(fd);
-    if (r < 0 && r != -EINVAL) throw_uring("io_uring fdatasync", r);  // EINVAL: fs 不支持
+    if (r < 0 && r != -EINVAL) throw_uring("io_uring fdatasync", r);  // EINVAL: fs unsupported
 }
 
 Task<void> XLocalFsBackend::write_all(int fd, std::span<const std::byte> data, uint64_t off) {
@@ -106,10 +108,11 @@ Task<void> XLocalFsBackend::write_all(int fd, std::span<const std::byte> data, u
     }
 }
 
-// 结果经出参回传而不是 co_await 一个带 std::string 的 pair：body.read 抛异常时
-// （Content-MD5 不符、客户端断连），GCC 会对那个从未构造的绑定目标照跑析构，
-// 表现为 put 路径上的 double free / SEGV。出参在 co_await 之前就已构造好，
-// 展开时析构的是真实对象（docs/gaps.md §5.6 的用例即此形态）
+// Results come back through out-params rather than co_await-ing a pair carrying a
+// std::string: when body.read throws (Content-MD5 mismatch, client disconnect), GCC still
+// runs the destructor on the never-constructed binding target, presenting as a double free /
+// SEGV on the put path. Out-params are fully constructed before the co_await, so unwinding
+// destroys real objects (the test case in docs/gaps.md §5.6 is exactly this shape)
 Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, int fd, uint64_t& total_out,
                                          std::string& etag_out) {
     util::HashStream md5(util::HashStream::Algo::Md5);
@@ -129,7 +132,8 @@ Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, int fd, uint64_
 Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
                                             ObjectMeta meta, http::BodyReader& body,
                                             PutCondition cond) {
-    // 覆写不经基类实现，记账入口在此重埋（同一套基类实例，不会双计）
+    // This override bypasses the base implementation, so the accounting entry point is
+    // re-planted here (same base-class instance, no double counting)
     OpGuard g{this, Op::kPut};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
@@ -138,7 +142,7 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     co_await pool_->schedule();
     require_bucket(bucket);
 
-    // 1. 流式经 io_uring 写入 staging 临时文件，边写边算 MD5
+    // 1. Stream into the staging temp file via io_uring, computing MD5 as we write
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open staging tmp");
@@ -152,16 +156,18 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     meta.etag = etag;
     meta.last_modified = std::chrono::system_clock::now();
 
-    // commit_object_file 的前两步（写 xattr → 数据落盘）在这里自己做，次序不变，
-    // 只是把那次阻塞 fdatasync 换成 FSYNC SQE；随后以 prepared=true 提交
+    // The first two steps of commit_object_file (write xattr -> persist data) are done here
+    // ourselves, in the same order, only swapping that blocking fdatasync for an FSYNC SQE;
+    // then commit with prepared=true
     fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
     co_await sync_fd(tmp.fd);
     ::close(tmp.fd);
     tmp.fd = -1;
 
-    // 2. 冲突检查 + 数据 rename + sidecar 提交（同步调用，回到池线程）。
-    // per-key 锁同 localfs：提交段的两次 rename 不得与同 key 并发写交错；
-    // 条件 PUT 检查同在锁内（PutCondition 契约）
+    // 2. Conflict check + data rename + sidecar commit (synchronous calls, back on a pool
+    // thread). Per-key lock as in localfs: the commit phase's two renames must not interleave
+    // with concurrent writes to the same key; the conditional-PUT check is inside the same
+    // lock (PutCondition contract)
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
     fsutil::check_put_condition(object_path(bucket, key), cond, key);
@@ -173,14 +179,15 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
 
 Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::string_view key,
                                                std::optional<ByteRange> range) {
-    // 同 localfs：时延止于流句柄就绪，不含 body 传输
+    // Same as localfs: latency measurement stops when the stream handle is ready, excluding
+    // body transfer
     OpGuard g{this, Op::kGet};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
-    require_bucket(bucket);  // 同 localfs：桶存在性是无条件前置，不能只在失败分支查
+    require_bucket(bucket);  // same as localfs: bucket existence is an unconditional precondition, not something to check only on failure paths
 
     fs::path path = object_path(bucket, key);
     int fd = ::open(path.c_str(), O_RDONLY);
@@ -197,9 +204,11 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     ObjectStream out;
     try {
         fsutil::TierInfo tier;
-        // 同 localfs：用 fd 的 fstat，避免并发覆盖写后 meta 与 body 来自不同 inode
+        // Same as localfs: use the fd's fstat, so a concurrent overwrite cannot leave meta
+        // and body coming from different inodes
         out.meta = fsutil::load_object_meta_stat(path, std::string(key), st, &tier);
-        // 同 localfs：open 与读 sidecar 之间被 stub 化 → 报给 tiered 改走云端
+        // Same as localfs: stubbed between open and sidecar read -> report to tiered so it
+        // goes to the cloud instead
         if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
             static_cast<uint64_t>(st.st_size) != out.meta.size)
             throw fsutil::StubRace(std::string(key));
@@ -214,7 +223,7 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
         }
         auto reader = std::make_unique<UringBodyReader>(fd, f, len, uring_);
         reader->set_total(len);
-        out.body = std::move(reader);  // fd 所有权交给 reader
+        out.body = std::move(reader);  // fd ownership transfers to the reader
     } catch (...) {
         ::close(fd);
         throw;
@@ -232,7 +241,7 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     auto up = require_upload(staging_, bucket, key, upload_id,
                              load_manifest(staging_, upload_id));
 
-    // 流式经 io_uring 写 staging 临时文件，边写边算分片 MD5（同 PUT）
+    // Stream into the staging temp file via io_uring, computing the part MD5 as we write (same as PUT)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open part tmp");
@@ -241,18 +250,19 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     std::string etag;
     co_await drain_to_tmp(body, tmp.fd, total, etag);
     (void)total;
-    co_await sync_fd(tmp.fd);  // 同 localfs：分片数据先落盘，.md5 才是就绪证据
+    co_await sync_fd(tmp.fd);  // same as localfs: part data persists first; only then is .md5 the readiness proof
     co_await pool_->schedule();
     ::close(tmp.fd);
     tmp.fd = -1;
 
-    // 顺序：先数据 rename、后写 .md5（同号重传 last-write-wins，rename 覆盖）；
-    // 理由同 localfs——反序会在掉电后留下合法 .md5 配零块数据
+    // Order: data rename first, then write .md5 (re-upload of the same number is
+    // last-write-wins, rename overwrites); rationale as in localfs -- the reverse order
+    // could leave a valid .md5 paired with zero data blocks after a power loss
     std::string name = part_file_name(part_no);
     std::error_code ec;
     fs::rename(tmp.path, up.dir / name, ec);
     if (ec) {
-        // 读 body 期间上传可能已被 abort（目录被删）
+        // The upload may have been aborted (directory removed) while we were reading the body
         if (!fs::exists(up.dir))
             throw S3Error(S3ErrorCode::NoSuchUpload,
                           "The specified multipart upload does not exist.",
@@ -277,7 +287,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
                              load_manifest(staging_, upload_id));
     require_bucket(bucket);
 
-    // 1. 校验每个声明的分片：存在且 ETag 匹配
+    // 1. Validate each declared part: it exists and the ETag matches
     std::vector<std::string> md5s;
     std::vector<fs::path> paths;
     md5s.reserve(parts.size());
@@ -296,7 +306,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
         paths.push_back(up.dir / name);
     }
 
-    // 2. 按声明顺序经 io_uring 读写拼接到最终临时文件
+    // 2. Concatenate into the final temp file in declared order, reading and writing via io_uring
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open complete tmp");
@@ -315,7 +325,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
             total += static_cast<uint64_t>(n);
         }
     }
-    // 3. 提交（与 PUT 相同的原子路径），随后清理 mpu 目录
+    // 3. Commit (same atomic path as PUT), then clean up the mpu directory
     ObjectMeta meta = std::move(up.meta);
     meta.key = std::string(key);
     meta.size = total;
@@ -326,7 +336,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     ::close(tmp.fd);
     tmp.fd = -1;
     {
-        auto lk = co_await commit_lock(bucket, key).acquire();  // 同 PUT
+        auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT
         co_await pool_->schedule();
         commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key,
                            /*prepared=*/true);
@@ -340,7 +350,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
 
 Task<void> XLocalFsBackend::close() {
     uring_->shutdown();
-    co_await LocalFsBackend::close();  // 撤 mpu 周期清理定时器（基类后台任务）
+    co_await LocalFsBackend::close();  // cancel the periodic mpu cleanup timer (base-class background task)
 }
 
 }  // namespace lights3::storage

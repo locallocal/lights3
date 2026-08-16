@@ -1,8 +1,9 @@
-// L3: IMetaStore 的 Redis 实现（docs/duostore-redis-meta.md）。
-// 提交类操作 = 一个通用守卫式提交 Lua 脚本（check-and-commit）+ 客户端乐观 CAS
-// 重试（§3.2）；脚本在 Redis 服务端单线程原子执行——脚本原子性即全局原子性，
-// 多网关共享同一 redis 即共享 meta，不持业务互斥（§3.4，仅保留号段派发小锁）。
-// value 编码 100% 复用 codec.cc（§2.1）；不支持 Redis Cluster（§1 非目标）。
+// L3: Redis implementation of IMetaStore (docs/duostore-redis-meta.md).
+// Commit-class operations = one generic guarded-commit Lua script (check-and-commit) + client-
+// side optimistic CAS retry (§3.2); the script executes atomically on the single-threaded Redis
+// server — script atomicity is global atomicity, so multiple gateways sharing one redis share
+// the meta, holding no business mutexes (§3.4, only the small id-segment allocation lock stays).
+// Value encoding is 100% reused from codec.cc (§2.1); Redis Cluster is unsupported (§1 non-goal).
 #pragma once
 
 #include <cstdint>
@@ -20,12 +21,12 @@ struct redisReply;
 namespace lights3::storage::duostore {
 
 struct RedisMetaOptions {
-    std::string uri;              // redis://[:pass@]host[:port][/db] 或 unix://<path>
-    std::string prefix = "duo:";  // 全部 key 的前缀（§2.1 多实例/测试隔离）
-    int timeout_ms = 3000;        // 建连 + 单命令超时（§5.4）
-    int pool_size = 8;            // 连接池大小（§5.2）
-    int wait_replicas = 0;        // 提交类命令后 WAIT 的副本数（§6；0 = 不等待）
-    MetricsScope metrics;         // CAS 重试 / 重连计数（R4；空 scope 即孤立实例）
+    std::string uri;              // redis://[:pass@]host[:port][/db] or unix://<path>
+    std::string prefix = "duo:";  // prefix for all keys (§2.1 multi-instance/test isolation)
+    int timeout_ms = 3000;        // connect + per-command timeout (§5.4)
+    int pool_size = 8;            // connection pool size (§5.2)
+    int wait_replicas = 0;        // replicas to WAIT for after commit-class commands (§6; 0 = no wait)
+    MetricsScope metrics;         // CAS retry / reconnect counters (R4; empty scope = detached instances)
 };
 
 class RedisBatch;
@@ -84,35 +85,38 @@ public:
 private:
     friend class RedisBatch;
 
-    struct Conn;  // hiredis 连接（.cc 内定义，头文件不泄漏 hiredis 类型）
+    struct Conn;  // hiredis connection (defined in the .cc; the header leaks no hiredis types)
     using ReplyPtr = RedisReplyPtr;
 
-    // 号段预留（§4，与 RocksMetaStore 同构）：INCRBY 一次 +kIdSegment、内存派发。
-    // burned：首次预留额外空烧一个号段，跳过 AOF everysec 丢失窗口内可能已派发的 id
+    // Id-segment reservation (§4, isomorphic to RocksMetaStore): one INCRBY of +kIdSegment, then
+    // in-memory handout. burned: the first reservation burns one extra segment to skip ids
+    // possibly handed out within the AOF everysec loss window
     struct IdRange {
         uint64_t next = 0, limit = 0;
         bool burned = false;
     };
     static constexpr uint64_t kIdSegment = 4096;
 
-    // ---- 连接池（§5.2）：mutex 保护的空闲栈，RAII 取还 ----
+    // ---- Connection pool (§5.2): mutex-protected idle stack, RAII acquire/release ----
     std::unique_ptr<Conn> acquire();
     void release(std::unique_ptr<Conn> c);
-    std::unique_ptr<Conn> make_conn();  // 建连 + AUTH/SELECT（§5.4）
+    std::unique_ptr<Conn> make_conn();  // connect + AUTH/SELECT (§5.4)
 
-    // 命令执行（一律 redisCommandArgv，二进制安全，§5.1）。read_retry：纯读允许
-    // 换新连接重试一次；提交类 IO 失败 = 结果不明 → InternalError（§3.5 盲重试禁令）
+    // Command execution (always redisCommandArgv, binary-safe, §5.1). read_retry: read-only may
+    // retry once on a fresh connection; commit-class IO failure = result unknown → InternalError
+    // (§3.5 no-blind-retry rule)
     ReplyPtr exec(const std::vector<std::string>& args, bool read_retry);
-    // 提交类命令成功后在同一连接上 WAIT（§6，wait_replicas > 0 时）；副本数不足
-    // 仅 WARN——写已在主上生效，报错会误导客户端重试。返回 false = 连接已坏（弃用）
+    // After a successful commit-class command, WAIT on the same connection (§6, when
+    // wait_replicas > 0); insufficient replicas only WARN — the write already took effect on the
+    // primary, and erroring would mislead the client into retrying. Returns false = connection bad (discard)
     bool wait_for_replicas(Conn& c);
-    // CAS 重试退避（§3.2）：attempt > 0 计入重试指标
+    // CAS retry backoff (§3.2): attempt > 0 counts toward the retry metric
     void cas_backoff(int attempt);
-    // EVALSHA + NOSCRIPT 自愈（脚本明确未执行，重载后重发安全，§3.5）
+    // EVALSHA + NOSCRIPT self-heal (the script definitively did not run; reload-and-resend is safe, §3.5)
     ReplyPtr eval(const std::string& sha, const char* body, std::vector<std::string> keys,
                   std::vector<std::string> argv, bool read_retry);
 
-    // ---- key 构造（§2.2；prefix + '\0' 分隔复合段）----
+    // ---- Key construction (§2.2; prefix + '\0'-separated compound segments) ----
     std::string key(std::string_view suffix) const;
     std::string buckets_key() const;
     std::string objects_key(std::string_view b) const;   // o:<b>   HASH
@@ -121,35 +125,36 @@ private:
     std::string parts_key(std::string_view b, std::string_view k, std::string_view id) const;
     std::string refs_key() const;
     std::string gcq_key() const;
-    std::string pack_key(uint64_t pack_id) const;  // pack:<id> HASH（§2.2 pack 存活账）
+    std::string pack_key(uint64_t pack_id) const;  // pack:<id> HASH (§2.2 pack liveness accounting)
 
-    // ---- 高层辅助 ----
-    void require_bucket(std::string_view b);  // 缺 → NoSuchBucket（纯读预检）
+    // ---- High-level helpers ----
+    void require_bucket(std::string_view b);  // missing → NoSuchBucket (read-only precheck)
     std::optional<std::string> hget_raw(const std::string& k, std::string_view field);
     std::optional<std::string> upload_raw(std::string_view b, std::string_view k,
                                           std::string_view id);
     uint64_t alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n = 1);
-    // gcq 入账（§2.2）：member = be64(seq) ‖ encode_reclaim；seq 预派发保持脚本确定性
+    // gcq enqueue (§2.2): member = be64(seq) ‖ encode_reclaim; seq pre-allocation keeps the script deterministic
     void enqueue_reclaim(RedisBatch& bt, const DataRef& ref, ReclaimReason reason);
     void batch_refs(RedisBatch& bt, const DataRef& ref, bool add, std::string_view owner);
-    // 同批维护 pack 存活账（pack:<id> HINCRBY，§2.2）。独立于 batch_refs：
-    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
-    // rec_overhead：每条 record 的头开销（codec::pack_rec_overhead*），live_bytes
-    // 与 file_size 同口径（docs/gaps.md §2.3a）
+    // Maintains the pack liveness account in the same batch (pack:<id> HINCRBY, §2.2). Separate
+    // from batch_refs: complete's refs transfer (owner rewrite) must be a no-op for packs —
+    // merging them would double-count.
+    // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes uses the
+    // same accounting basis as file_size (docs/gaps.md §2.3a)
     void batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign, int64_t rec_overhead);
-    // 读 parts HASH：raw value（sha1 指纹用）+ 解码记录，按 part_no 升序
+    // Read the parts HASH: raw values (for the sha1 fingerprint) + decoded records, ascending by part_no
     std::vector<std::pair<std::string, PartRec>> scan_parts(std::string_view b,
                                                             std::string_view k,
                                                             std::string_view id);
 
     RedisMetaOptions opt_;
-    // 解析后的连接地址（构造时解析一次）
+    // Parsed connection address (parsed once at construction)
     std::string host_;
     int port_ = 6379;
     std::string unix_path_;
     std::string password_;
     int db_ = 0;
-    // 脚本 SHA（构造时 SCRIPT LOAD；内容寻址，重载得到相同值）
+    // Script SHAs (SCRIPT LOAD at construction; content-addressed, reloading yields the same value)
     std::string sha_commit_;
     std::string sha_list_;
 
@@ -157,12 +162,12 @@ private:
     std::vector<std::unique_ptr<Conn>> idle_;
     bool closed_ = false;
 
-    // 号段派发独立小锁（alloc 在数据面每个 chunk 打开时调用，不排队业务提交）
+    // Separate small lock for id-segment handout (alloc is called on the data plane whenever a chunk opens; must not queue behind business commits)
     std::mutex alloc_mu_;
-    IdRange file_ids_[2];  // 按 Extent::Kind 下标
+    IdRange file_ids_[2];  // indexed by Extent::Kind
     IdRange seqs_;         // gcq seq
 
-    // R4 指标（构造期注册，0 值可见）
+    // R4 metrics (registered at construction; zero values visible)
     std::shared_ptr<MetricCounter> m_cas_retries_;
     std::shared_ptr<MetricCounter> m_reconnects_;
 };

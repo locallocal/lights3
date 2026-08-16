@@ -1,5 +1,6 @@
-// L3: localfs 系后端共用的落盘原语（tmp 文件、TSV sidecar/manifest、原子提交）。
-// localfs 与 xlocalfs 共享同一磁盘布局（docs/storage-backend.md §3.1/§3.2），差异仅在数据面 IO 方式。
+// L3: on-disk primitives shared by the localfs family of backends (tmp files, TSV
+// sidecar/manifest, atomic commit).
+// localfs and xlocalfs share the same disk layout (docs/storage-backend.md §3.1/§3.2); they differ only in data-plane IO style.
 #pragma once
 
 #include <sys/stat.h>
@@ -18,17 +19,20 @@ namespace lights3::storage::fsutil {
 
 inline constexpr const char* kSidecarSuffix = ".lights3-meta";
 inline constexpr const char* kBucketMarker = ".lights3-bucket";
-// 目录标记对象（docs/gaps.md §6.3）：key 末尾的 '/' 在文件系统上没有对应的文件名，
-// 承载物是该目录下的这个保留文件——"a/b/" ⇔ <bucket>/a/b/.lights3-dir。列举时把它
-// 还原成 key "a/b/"（排序键取空串，恰好排在同目录其它 key 之前，与全排序一致）
+// Directory-marker object (docs/gaps.md §6.3): a trailing '/' in a key has no
+// corresponding file name on the filesystem; its carrier is this reserved file inside the
+// directory -- "a/b/" ⇔ <bucket>/a/b/.lights3-dir. Listing restores it to the key "a/b/"
+// (its sort key is the empty string, so it sorts right before the other keys in the same
+// directory, consistent with the total order)
 inline constexpr const char* kDirMarker = ".lights3-dir";
-// 数据文件的元数据扩展属性（内容 = sidecar 同款 TSV）：随 inode 走，与数据同一次
-// rename 提交，故不可能与它描述的数据错位（docs/storage-backend.md §3.1）
+// Metadata extended attribute on the data file (content = same TSV as the sidecar):
+// travels with the inode and is committed by the same rename as the data, so it can never
+// be misaligned with the data it describes (docs/storage-backend.md §3.1)
 inline constexpr const char* kMetaXattr = "user.lights3.meta";
 
 std::string next_tmp_name();
 
-// 未提交则析构时删除
+// Deleted on destruction if not committed
 struct TmpFile {
     std::filesystem::path path;
     int fd = -1;
@@ -36,88 +40,99 @@ struct TmpFile {
     ~TmpFile();
 };
 
-// key 不得使用内部保留名（sidecar/marker），避免与数据文件冲突
+// Keys must not use internal reserved names (sidecar/marker), to avoid clashing with data files
 void reject_reserved_key(std::string_view key);
 
 [[noreturn]] void throw_errno(const std::string& what);
 
-// 持久性原语（LIGHTS3_FSYNC=0 时全部为 no-op，docs/storage-backend.md §3.1）：
-// fsync_file 对已打开 fd 做 fdatasync（失败抛错）；fsync_dir 使目录项持久
-//（rename 只保证原子，不保证父目录已落盘；失败静默——不该拖垮写路径）
+// Durability primitives (all no-ops when LIGHTS3_FSYNC=0, docs/storage-backend.md §3.1):
+// fsync_file runs fdatasync on an open fd (throws on failure); fsync_dir persists the
+// directory entry (rename only guarantees atomicity, not that the parent directory has
+// been persisted; failure is silent -- it should not take down the write path)
 void fsync_file(int fd);
 void fsync_dir(const std::filesystem::path& dir);
-// 开关本身（LIGHTS3_FSYNC）：xlocalfs 要据它决定是否提交 io_uring 的 FSYNC SQE
+// The switch itself (LIGHTS3_FSYNC): xlocalfs uses it to decide whether to submit
+// io_uring's FSYNC SQE
 bool fsync_enabled();
 
-// k<TAB>v 行格式，tmp+rename 原子写
+// k<TAB>v line format, atomic tmp+rename write
 void write_tsv(const std::filesystem::path& dest, const std::filesystem::path& tmp_dir,
                const std::vector<std::pair<std::string, std::string>>& kv);
 std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem::path& path);
 
-// 建父目录 + 目录冲突检查 + 先 sidecar 后数据 rename（docs/storage-backend.md §3.1 写入原子性）；
-// PUT 与 complete_multipart 共用
-// prepared=true 表示调用方已按 commit_object_file 的原次序自行完成"写 xattr →
-// 数据落盘"（xlocalfs 走 io_uring 的 FSYNC SQE 替掉那次阻塞 fdatasync），此处
-// 跳过这两步。rename、目录 fsync 与 sidecar 写入不变
+// Create parent dirs + directory-conflict check + sidecar-then-data rename
+// (docs/storage-backend.md §3.1 write atomicity); shared by PUT and complete_multipart
+// prepared=true means the caller already performed "write xattr → persist data" in
+// commit_object_file's original order itself (xlocalfs replaces that blocking fdatasync
+// with io_uring's FSYNC SQE), so those two steps are skipped here. The rename, directory
+// fsync, and sidecar write are unchanged
 void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                         const std::filesystem::path& staging_put, std::string_view key,
                         bool prepared = false);
 
-// 条件 PUT 的提交点校验（PutCondition 契约，storage/backend.h）：调用方必须持
-// 同 key 的 commit 锁，使检查与随后的 rename 提交原子。元数据经 xattr/sidecar
-// 读取，对 tier stub 同样权威（stub 保留原 etag），tiered 直接复用本检查
+// Commit-point check for conditional PUT (PutCondition contract, storage/backend.h): the
+// caller must hold the commit lock for the same key so the check and the following rename
+// commit are atomic. Metadata is read via xattr/sidecar and is equally authoritative for
+// tier stubs (a stub keeps the original etag); tiered reuses this check directly
 void check_put_condition(const std::filesystem::path& data_path, const PutCondition& cond,
                          std::string_view key);
 
-// ---- 分层存储的 sidecar 扩展（docs/tiered-storage.md §4）----
+// ---- Sidecar extensions for tiered storage (docs/tiered-storage.md §4) ----
 
 enum class Tier { kLocal, kRemote, kCached };
 
 struct TierInfo {
     Tier tier = Tier::kLocal;
-    std::string remote_etag;  // 云端副本 ETag（去引号 hex；校验与 GC 用，不外泄）
-    std::string remote_at;    // 上传时间（iso8601）
+    std::string remote_etag;  // cloud replica ETag (unquoted hex; for verification and GC, never exposed)
+    std::string remote_at;    // upload time (iso8601)
 };
 
-// 元数据写进数据文件的 xattr（commit_object_file 内部用；xlocalfs 为了把随后的
-// fdatasync 换成 io_uring 的 FSYNC SQE，需要自己按同样的次序先写 xattr）
+// Write metadata into the data file's xattr (used inside commit_object_file; xlocalfs
+// needs to write the xattr itself first in the same order, so it can swap the subsequent
+// fdatasync for io_uring's FSYNC SQE)
 void set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta,
                     const TierInfo& tier);
 
-// stat 数据文件 + 读元数据（xattr 优先，回落 sidecar）；tier != local 时 size 以
-// 元数据为准（stub 数据文件为 0 长度，docs/tiered-storage.md §4.1）。
-// 缺失/非普通文件抛 NoSuchKey。
+// stat the data file + read metadata (xattr first, fall back to sidecar); when
+// tier != local the size comes from the metadata (a stub data file has zero length,
+// docs/tiered-storage.md §4.1).
+// Missing / not a regular file throws NoSuchKey.
 ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key,
                             TierInfo* tier_out = nullptr);
 
-// 同上，但复用调用方已持有的 stat 结果。GET 须用**已打开 fd 的 fstat**：对路径
-// 二次 stat 会在并发覆盖写后拿到新对象的 size/etag 却配着旧 inode 的 body
-// （size 变大 → pread 提前 EOF 短包；变小 → body 被截断），静默损坏
+// Same as above, but reuses a stat result the caller already holds. GET must use **fstat
+// on the already-open fd**: a second stat on the path after a concurrent overwrite would
+// pick up the new object's size/etag while paired with the old inode's body (size grew →
+// pread hits early EOF, short body; shrank → body truncated), silent corruption
 ObjectMeta load_object_meta_stat(const std::filesystem::path& data_path, std::string key,
                                  const struct stat& st, TierInfo* tier_out = nullptr);
 
-// GET 在 open(data) 与读 sidecar 之间对象被 stub 化：持有的 fd 是 0 长度新
-// inode，而 sidecar 宣称 size>0。TieredBackend 捕获后改走云端重试；
-// 独立 localfs 遇到（误配到 tiered 布局）则按 InternalError 映射 500。
+// The object got stubbed between GET's open(data) and reading the sidecar: the held fd is
+// a 0-length new inode while the sidecar claims size>0. TieredBackend catches this and
+// retries via the cloud; a standalone localfs hitting it (misconfigured onto a tiered
+// layout) maps it to InternalError 500.
 struct StubRace : s3::S3Error {
     explicit StubRace(std::string key)
         : S3Error(s3::S3ErrorCode::InternalError, "object is a tier stub", std::move(key)) {}
 };
 
-// stub 化提交（docs/tiered-storage.md §5.2 步骤 b/c）：先写 tier=remote 的 sidecar，
-// 再用 0 长度 tmp rename 盖过数据文件。幂等；调用方须持 per-key 锁。
+// Stubbing commit (docs/tiered-storage.md §5.2 steps b/c): first write the tier=remote
+// sidecar, then rename a 0-length tmp over the data file. Idempotent; the caller must hold
+// the per-key lock.
 void commit_stub(const std::filesystem::path& dest, const ObjectMeta& meta, const TierInfo& tier,
                  const std::filesystem::path& staging_put);
 
-// 缓存回填提交（docs/tiered-storage.md §6.2）：先 rename 数据 tmp、再写 tier=cached 的 sidecar
-//（中间崩溃时 sidecar 仍为 remote，读走云端不受影响）。
-// dest 此前必为 stub（父目录已存在），不再做目录冲突检查。
+// Cache backfill commit (docs/tiered-storage.md §6.2): rename the data tmp first, then
+// write the tier=cached sidecar
+// (on a crash in between, the sidecar still says remote and reads keep going to the cloud unaffected).
+// dest must previously be a stub (parent directory already exists), so no directory-conflict check.
 void commit_cached(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                    const TierInfo& tier, const std::filesystem::path& staging_put);
 
-// pread 流式读取；每块经线程池执行（阻塞 IO 不占 HTTP 执行环境）。
-// fd 所有权移交本 reader；文件被外部截断时提前 EOF。
-// localfs GET 与 tiered 下沉上传共用。
+// pread streaming reader; each chunk runs on the thread pool (blocking IO stays off the
+// HTTP execution environment).
+// fd ownership transfers to this reader; early EOF if the file is truncated externally.
+// Shared by localfs GET and tiered demotion upload.
 class FdStreamReader final : public http::BodyReader {
 public:
     FdStreamReader(int fd, uint64_t offset, uint64_t remaining, std::shared_ptr<ThreadPool> pool)
@@ -136,21 +151,22 @@ private:
     std::shared_ptr<ThreadPool> pool_;
 };
 
-// ---- multipart 布局（docs/storage-backend.md §3.2）：<staging>/mpu/<id>/{manifest, part.NNNNN, .md5} ----
+// ---- multipart layout (docs/storage-backend.md §3.2): <staging>/mpu/<id>/{manifest, part.NNNNN, .md5} ----
 
 std::string part_file_name(int part_no);
 
 struct UploadState {
     std::filesystem::path dir;
-    ObjectMeta meta;  // manifest 中记录的 content_type / user_meta
+    ObjectMeta meta;  // content_type / user_meta recorded in the manifest
 };
 
-// upload_id 合法性 + manifest 存在 + bucket/key 匹配，任一不满足视为 NoSuchUpload
+// upload_id validity + manifest existence + bucket/key match; any failure counts as NoSuchUpload
 UploadState require_upload(const std::filesystem::path& staging, std::string_view bucket,
                            std::string_view key, std::string_view upload_id,
                            const std::vector<std::pair<std::string, std::string>>& manifest);
 
-// 读 manifest 前先做 id 格式与存在性检查（id 会拼进路径，格式校验兼防逃逸）
+// Check the id's format and existence before reading the manifest (the id is spliced into
+// a path, so format validation doubles as escape prevention)
 std::vector<std::pair<std::string, std::string>> load_manifest(
     const std::filesystem::path& staging, std::string_view upload_id);
 

@@ -1,5 +1,5 @@
-// L1: builtin 驱动 —— 零依赖 POSIX socket HTTP/1.1，thread-per-connection 同步模型。
-// 演示插拔层的同步驱动接入方式（协程经 sync_wait 桥接，见 docs/http-adapter.md §3.0、docs/concurrency.md §4.2）。
+// L1: builtin driver — zero-dependency POSIX socket HTTP/1.1, thread-per-connection synchronous model.
+// Demonstrates how a synchronous driver plugs into the adapter layer (coroutines bridged via sync_wait; see docs/http-adapter.md §3.0, docs/concurrency.md §4.2).
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -37,15 +37,15 @@ bool send_all(int fd, const char* data, size_t len) {
     return true;
 }
 
-// 带缓冲的连接读取器；请求头解析与 body 读取共用。
-// buf 不做零初始化（docs/gaps.md §4）：pos/end 界定有效区，每连接 memset 16KiB
-// 纯属浪费
+// Buffered connection reader; shared by request-header parsing and body reads.
+// buf is not zero-initialized (docs/gaps.md §4): pos/end delimit the valid
+// region, and memset-ing 16KiB per connection is pure waste
 struct ConnReader {
     int fd = -1;
     char buf[driver::kScratchBytes];
     size_t pos = 0, end = 0;
 
-    // 读一行（含 \n 之前的内容，去掉 \r\n）；失败/超限返回 false
+    // Reads one line (content before \n, with \r\n stripped); returns false on failure/over-limit
     bool read_line(std::string& line, size_t max_len) {
         line.clear();
         for (;;) {
@@ -77,19 +77,20 @@ struct ConnReader {
     }
 };
 
-// body 读取状态归属连接（handler 内的 reader 销毁后，连接仍需 drain 残余字节）
-// 契约（docs/http-adapter.md §4）：正常 EOF 返回 0；客户端断连/坏 chunked 以异常传播。
+// Body-read state belongs to the connection (after the handler's reader is
+// destroyed, the connection still needs to drain leftover bytes).
+// Contract (docs/http-adapter.md §4): normal EOF returns 0; client disconnect / bad chunked propagate as exceptions.
 struct BodyState {
     ConnReader* conn = nullptr;
     int fd = -1;
-    bool need_continue = false;   // Expect: 100-continue 尚未答复，首次读时才回
+    bool need_continue = false;   // Expect: 100-continue not yet answered; reply only on first read
     bool chunked = false;
-    uint64_t remaining = 0;       // 定长模式：剩余字节
-    uint64_t chunk_left = 0;      // chunked 模式：当前 chunk 剩余
-    bool after_chunk_data = false;  // 刚读完一个 chunk 的数据，下一行必须是 CRLF
+    uint64_t remaining = 0;       // Fixed-length mode: bytes remaining
+    uint64_t chunk_left = 0;      // chunked mode: remaining in the current chunk
+    bool after_chunk_data = false;  // Just finished a chunk's data; next line must be CRLF
     bool chunk_eof = false;
     bool error = false;
-    size_t trailer_max = 16 * 1024;  // 由 http.trailer_max_size 覆盖（docs/gaps.md §7）
+    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/gaps.md §7)
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -98,8 +99,9 @@ struct BodyState {
 
     size_t read_some(std::byte* dst, size_t want) {
         if (error) fail("read after connection error");
-        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/http-adapter.md §3.1），
-        // 认证失败等场景可以在不接收 body 的情况下直接拒绝
+        // Deferred 100-continue: the client is told to send only once the
+        // handler decides it wants the body (docs/http-adapter.md §3.1);
+        // cases like auth failure can reject outright without receiving the body
         if (need_continue) {
             need_continue = false;
             if (!send_all(fd, "HTTP/1.1 100 Continue\r\n\r\n", 25))
@@ -117,8 +119,9 @@ struct BodyState {
             if (chunk_eof) return 0;
             std::string line;
             if (after_chunk_data) {
-                // chunk 数据后必须紧跟一个 CRLF，且只允许一个：任意"看似 hex"
-                // 的垃圾或多余空行都不能被当作下一个 chunk size 静默吞掉
+                // Chunk data must be followed by exactly one CRLF: any
+                // "hex-looking" garbage or extra blank line must not be
+                // silently swallowed as the next chunk size
                 if (!conn->read_line(line, 2)) fail("client disconnected mid-body");
                 if (!line.empty()) fail("missing CRLF after chunk data");
                 after_chunk_data = false;
@@ -127,8 +130,10 @@ struct BodyState {
             uint64_t sz = 0;
             if (!driver::parse_chunk_size(line, sz)) fail("malformed chunk size");
             if (sz == 0) {
-                // 末 chunk：吃掉 trailer 直到空行。总量设上限防无限 trailer 灌注；
-                // 读失败是 body 截断，必须报错而非当正常 EOF
+                // Final chunk: consume trailers until the blank line. The
+                // total is capped to prevent unbounded trailer flooding; a
+                // read failure is body truncation and must be an error, not a
+                // normal EOF
                 std::string t;
                 size_t trailer_bytes = 0;
                 for (;;) {
@@ -152,9 +157,10 @@ struct BodyState {
     bool at_eof() const {
         return error || (chunked ? chunk_eof : remaining == 0);
     }
-    // 响应后排空残余 body 以复用连接；过大/出错放弃（调用方随即关连接）
+    // Drains leftover body after the response so the connection can be
+    // reused; gives up if too large or on error (the caller then closes the connection)
     bool drain(uint64_t limit) {
-        // 从未回过 100-continue，客户端可能根本不会发 body，不能傻等
+        // 100-continue was never sent, so the client may never send a body; do not wait blindly
         if (need_continue) return false;
         std::byte tmp[driver::kScratchBytes];
         uint64_t drained = 0;
@@ -177,9 +183,11 @@ public:
     SocketBodyReader(BodyState* st, std::optional<uint64_t> len, PumpExecutor* conn_exec)
         : st_(st), len_(len), conn_exec_(conn_exec) {}
     Task<size_t> read(std::span<std::byte> buf) override {
-        // 阻塞 recv 切回连接自己的线程执行（docs/gaps.md §2.10）：handler 协程链
-        // 跑在共享 ThreadPool 上，就地 recv 会把池线程堵在慢速客户端上——16 个
-        // 慢速上传即可占死全部池线程；连接线程此刻正闲在 sync_wait_pumping 里
+        // The blocking recv switches back to the connection's own thread
+        // (docs/gaps.md §2.10): the handler coroutine chain runs on the
+        // shared ThreadPool, and recv-ing in place would pin pool threads on
+        // slow clients — 16 slow uploads could occupy every pool thread; the
+        // connection thread is idling in sync_wait_pumping at this moment
         co_await resume_on(*conn_exec_);
         co_return st_->read_some(buf.data(), buf.size());
     }
@@ -191,8 +199,10 @@ private:
     PumpExecutor* conn_exec_;
 };
 
-// 连接线程共享的服务器状态：run() 可能在残余连接线程退出前返回（强杀等待超时），
-// 线程经 shared_ptr 持有本结构，服务器对象析构后仍安全（否则析构期 UAF）
+// Server state shared with connection threads: run() may return before
+// leftover connection threads exit (force-kill wait timed out); threads hold
+// this struct via shared_ptr, so it stays safe after the server object is
+// destroyed (otherwise a use-after-free during destruction)
 struct ConnShared {
     HttpConfig cfg;
     Handler handler;
@@ -200,16 +210,20 @@ struct ConnShared {
     std::mutex m;
     std::condition_variable cv;
     std::set<int> conns;
-    // 正在 keep-alive 等待下一请求的连接（docs/gaps.md §4）：停机时这些可以
-    // 立即掐断，宽限只留给在途请求——此前不区分，空闲连接也让停机干等 10 秒
+    // Connections in keep-alive waiting for the next request (docs/gaps.md
+    // §4): these can be cut immediately on shutdown, with the grace period
+    // reserved for in-flight requests — previously there was no distinction
+    // and idle connections made shutdown wait a pointless 10 seconds
     std::set<int> idle;
     int active = 0;
 };
 
-// 连接线程用 512KiB 栈显式创建（docs/gaps.md §4）：std::thread 走默认 8MiB，
-// × max_connections(4096) = 32GiB 虚拟地址空间预留，而实测栈峰值 ~100KiB
-//（协程帧在堆上，栈只承载解析与阻塞 IO 调用链）。detached：生命周期由闭包里的
-// shared_ptr 管，与旧 std::thread(...).detach() 相同
+// Connection threads are created explicitly with a 512KiB stack (docs/gaps.md
+// §4): std::thread uses the default 8MiB, x max_connections(4096) = 32GiB of
+// reserved virtual address space, while the measured stack peak is ~100KiB
+// (coroutine frames live on the heap; the stack only carries parsing and the
+// blocking IO call chain). Detached: lifetime is managed by the shared_ptr in
+// the closure, same as the old std::thread(...).detach()
 bool spawn_conn_thread(std::function<void()> fn) {
     constexpr size_t kConnThreadStack = 512 * 1024;
     struct Ctx {
@@ -247,8 +261,10 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
 
     if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());
 
-    // 流式响应：http.io_chunk_size 块拉取（docs/architecture.md 请求生命周期）。
-    // 块大小是运行期配置，缓冲改在堆上（栈数组需编译期大小）
+    // Streaming response: pulled in http.io_chunk_size chunks
+    // (docs/architecture.md request lifecycle). The chunk size is a runtime
+    // setting, so the buffer moved to the heap (a stack array needs a
+    // compile-time size)
     std::vector<std::byte> buf(io_chunk);
     uint64_t written = 0;
     for (;;) {
@@ -257,7 +273,7 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
             n = sync_wait(resp.stream_body->read(std::span(buf)));
         } catch (const std::exception& e) {
             LOG_ERROR("stream body read failed mid-response: {}", e.what());
-            return false;  // 响应头已发出，只能断连
+            return false;  // Response head already sent; can only disconnect
         }
         if (n == 0) break;
         if (!chunked && resp.content_length && written + n > *resp.content_length) {
@@ -275,7 +291,7 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
         written += n;
     }
     if (chunked) return send_all(fd, "0\r\n\r\n", 5);
-    // 定长响应写少了不能保持 keep-alive：客户端会把下个响应头当作本次 body 剩余
+    // A fixed-length response that wrote too little must not stay keep-alive: the client would read the next response head as the rest of this body
     if (resp.content_length && written != *resp.content_length) {
         LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
                   *resp.content_length);
@@ -284,13 +300,14 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
     return true;
 }
 
-// 处理一个请求；返回 false 表示连接应关闭
+// Handles one request; false means the connection should be closed
 bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& peer,
                bool& keep_alive) {
     const size_t max_line = sh.cfg.max_header_size;
 
-    // 请求行读到之前本连接是"空闲 keep-alive"：登记进 idle，停机扫荡直接掐；
-    // 读到首字节即转在途（享受停机宽限）
+    // Until the request line is read, this connection is "idle keep-alive":
+    // register it in idle so the shutdown sweep cuts it directly; on the
+    // first byte read it becomes in-flight (entitled to the shutdown grace)
     std::string line;
     {
         std::lock_guard lk(sh.m);
@@ -317,14 +334,14 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
         driver::parse_target(target, req);
     }
 
-    // 头部
+    // Headers
     size_t header_bytes = 0;
     for (;;) {
         if (!reader.read_line(line, max_line)) return false;
         if (line.empty()) break;
         header_bytes += line.size();
         if (header_bytes > sh.cfg.max_header_size) return false;
-        // 裸 CR 不得留在头名/头值里（read_line 只剥行尾的单个 \r）
+        // A bare CR must not remain in the header name/value (read_line only strips the single trailing \r)
         if (line.find('\r') != std::string::npos) return false;
         auto colon = line.find(':');
         if (colon == std::string::npos || colon == 0) return false;
@@ -337,13 +354,14 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
     }
 
     if (req.headers.has("Connection")) {
-        // 列表头：Connection: close, Upgrade 是合法写法，全等比较会漏判 close
+        // List header: "Connection: close, Upgrade" is valid; full-equality comparison would miss the close
         if (req.headers.has_token("Connection", "close")) keep_alive = false;
         else if (req.headers.has_token("Connection", "keep-alive")) keep_alive = true;
     }
 
-    // body 边界：CL/TE 冲突、重复 CL、非法值一律拒绝关连接（请求走私前置条件，
-    // 见 drivers/common.h parse_body_framing）
+    // Body framing: CL/TE conflict, duplicate CL, and invalid values are all
+    // rejected with the connection closed (request-smuggling preconditions,
+    // see drivers/common.h parse_body_framing)
     auto framing = driver::parse_body_framing(req.headers);
     if (!framing.valid) {
         auto bad = driver::bad_request_response("Invalid message framing.");
@@ -372,17 +390,19 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
     bool head_request = req.method == "HEAD";
     HttpResponse resp;
     try {
-        // pumping 变体：等待期间连接线程运行 conn_exec 队列，承接 body 的阻塞读
+        // Pumping variant: while waiting, the connection thread runs the conn_exec queue, taking over the body's blocking reads
         resp = sync_wait_pumping(conn_exec, sh.handler(std::move(req)));
     } catch (const std::exception& e) {
-        // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2：500 + InternalError XML）
+        // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2: 500 + InternalError XML)
         resp = driver::internal_error_response(e.what());
         keep_alive = false;
     }
 
-    // 复用连接前必须排空未消费的 body。body 出过错则流已失步（残余字节会被
-    // 当下一个请求解析），必须关连接；从未回过 100-continue 则客户端可能根本
-    // 不会发 body，不能傻等，同样关连接
+    // The unconsumed body must be drained before reusing the connection. If
+    // the body errored, the stream is out of sync (leftover bytes would be
+    // parsed as the next request), so the connection must close; if
+    // 100-continue was never sent, the client may never send a body — do not
+    // wait blindly, close as well
     if (body_state.error) keep_alive = false;
     else if (!body_state.at_eof()) {
         if (body_state.need_continue) keep_alive = false;
@@ -401,7 +421,7 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     ConnReader reader;
-    reader.fd = fd;  // 逐字段赋值：聚合初始化会把未列出的 buf 值初始化（memset 16KiB）
+    reader.fd = fd;  // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset 16KiB)
     bool keep_alive = true;
     while (keep_alive && !sh.stopping.load()) {
         if (!serve_one(sh, fd, reader, peer, keep_alive)) break;
@@ -411,13 +431,16 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
 class BuiltinServer final : public IHttpServer {
 public:
     explicit BuiltinServer(const HttpConfig& cfg) : shared_(std::make_shared<ConnShared>()) {
-        // TLS 不支持（docs/gaps.md §7）：配了必须当场报错——静默跑明文会让
-        // UNSIGNED-PAYLOAD 请求的完整性论证（依赖传输层加密）整个失效
+        // TLS unsupported (docs/gaps.md §7): configuring it must fail on the
+        // spot — silently running plaintext would void the entire integrity
+        // argument for UNSIGNED-PAYLOAD requests (which relies on
+        // transport-layer encryption)
         if (!cfg.tls_cert.empty())
             throw std::runtime_error(
                 "http driver 'builtin' does not support TLS; use 'httplib' or 'beast'");
-        // thread-per-connection 模型没有 IO 线程数的概念；显式配置说明用户在
-        // 预期一个不会发生的效果（docs/gaps.md §7）
+        // The thread-per-connection model has no notion of an IO thread
+        // count; configuring it explicitly means the user expects an effect
+        // that will not happen (docs/gaps.md §7)
         if (cfg.io_threads_set)
             LOG_WARN(
                 "builtin driver ignores http.io_threads={} (thread-per-connection model; "
@@ -432,9 +455,10 @@ public:
     void set_handler(Handler h) override { shared_->handler = std::move(h); }
 
     void listen(const std::string& addr, uint16_t port) override {
-        // IPv4/IPv6 双支持：此前写死 AF_INET + inet_pton(AF_INET)，配置里写
-        // bind: "::" 会直接抛 "bad bind address"，而 beast/httplib 都能起
-        // （同一份配置换驱动就起不来）
+        // Dual IPv4/IPv6 support: previously hard-coded AF_INET +
+        // inet_pton(AF_INET), so bind: "::" in the config threw
+        // "bad bind address" outright while beast/httplib started fine
+        // (the same config failed to start when swapping drivers)
         sockaddr_storage ss{};
         socklen_t sslen = 0;
         int family = AF_INET;
@@ -456,7 +480,7 @@ public:
         if (listen_fd_ < 0) throw std::runtime_error("socket() failed");
         int one = 1;
         setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        // "::" 默认双栈（v6only=0），与 beast/httplib 的行为对齐
+        // "::" defaults to dual-stack (v6only=0), matching beast/httplib behavior
         if (family == AF_INET6) {
             int off = 0;
             setsockopt(listen_fd_, IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof(off));
@@ -477,8 +501,9 @@ public:
 
     void run() override {
         auto& sh = *shared_;
-        // shutdown() 可能先于 run() 甚至先于 listen() 到达：入循环前先看一眼，
-        // 否则信号已被吞掉，accept 会永久阻塞
+        // shutdown() may arrive before run() or even before listen(): check
+        // once before entering the loop, otherwise the signal has already
+        // been swallowed and accept blocks forever
         while (!sh.stopping.load()) {
             sockaddr_storage peer{};
             socklen_t plen = sizeof(peer);
@@ -487,7 +512,7 @@ public:
                 if (sh.stopping.load()) break;
                 if (errno == EINTR || errno == ECONNABORTED) continue;
                 if (errno == EMFILE || errno == ENFILE) {
-                    // fd 耗尽是暂态（在途连接会释放），退避后继续而非停止 accept
+                    // fd exhaustion is transient (in-flight connections will release some); back off and continue rather than stop accepting
                     LOG_WARN("accept: {}, throttling", strerror(errno));
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     continue;
@@ -508,8 +533,10 @@ public:
                           sizeof(ip));
             {
                 std::lock_guard lk(sh.m);
-                // 并发连接硬上限（cfg.max_connections，四驱动统一）：thread-per-
-                // connection 模型无上限时每连接一线程可耗尽内存/线程数
+                // Hard cap on concurrent connections (cfg.max_connections,
+                // uniform across the four drivers): without a cap, the
+                // thread-per-connection model's one-thread-per-connection can
+                // exhaust memory/thread counts
                 if (sh.active >= sh.cfg.max_connections) {
                     LOG_WARN("connection limit ({}) reached, rejecting {}",
                              sh.cfg.max_connections, ip);
@@ -528,8 +555,9 @@ public:
                 if (--sp->active == 0) sp->cv.notify_all();
             });
             if (!spawned) {
-                // 线程创建失败（资源耗尽）：回滚计数并拒绝该连接，不能让异常
-                // 穿出 run() 终结进程
+                // Thread creation failed (resource exhaustion): roll back the
+                // count and reject this connection; an exception must not
+                // escape run() and kill the process
                 LOG_ERROR("failed to spawn connection thread");
                 std::lock_guard lk(sh.m);
                 sh.conns.erase(fd);
@@ -537,9 +565,12 @@ public:
                 if (--sh.active == 0) sh.cv.notify_all();
             }
         }
-        // 优雅退出：空闲 keep-alive 连接立即掐断（它们只是在等下一个请求，
-        // docs/gaps.md §4），宽限只留给在途请求；超时再强制断开全部。残余线程经
-        // shared_ptr 持有共享状态，run() 返回乃至 server 析构后自行收尾，无悬空引用
+        // Graceful exit: idle keep-alive connections are cut immediately
+        // (they are only waiting for the next request, docs/gaps.md §4), with
+        // the grace period reserved for in-flight requests; on timeout, force
+        // all of them closed. Leftover threads hold the shared state via
+        // shared_ptr and finish up on their own after run() returns or even
+        // after the server is destroyed — no dangling references
         std::unique_lock lk(sh.m);
         for (int cfd : sh.idle) ::shutdown(cfd, SHUT_RDWR);
         if (!sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_grace_sec),
@@ -552,7 +583,7 @@ public:
         LOG_INFO("builtin http server stopped");
     }
 
-    // 仅做 async-signal-safe 操作，可在信号处理器中调用
+    // Performs only async-signal-safe operations; callable from a signal handler
     void shutdown() override {
         shared_->stopping.store(true);
         if (listen_fd_ >= 0) ::shutdown(listen_fd_, SHUT_RDWR);

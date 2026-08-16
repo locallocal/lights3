@@ -1,7 +1,9 @@
-// L3: xlocalfs——localfs 的 io_uring 数据面变体（见 docs/storage-backend.md §3.3）。
-// 磁盘布局与元数据逻辑完全复用 LocalFsBackend；GET 流式读、PUT/分片流式写、
-// complete 拼接中的字节搬运改经 io_uring 异步执行，不再占用池线程等待磁盘。
-// 目录遍历与元数据操作仍走线程池（io_uring 无 getdents 等目录原语）。
+// L3: xlocalfs -- io_uring data-plane variant of localfs (see docs/storage-backend.md §3.3).
+// Disk layout and metadata logic are fully reused from LocalFsBackend; the byte transfers in
+// GET streaming reads, PUT/part streaming writes, and complete-time concatenation go through
+// io_uring asynchronously instead, no longer tying up pool threads waiting on disk.
+// Directory traversal and metadata operations still use the thread pool (io_uring has no
+// directory primitives such as getdents).
 #pragma once
 
 #include "storage/localfs/localfs_backend.h"
@@ -26,19 +28,22 @@ public:
     Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
                                        std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;
-    Task<void> close() override;  // 停止 uring 收割线程
+    Task<void> close() override;  // stop the uring reaper thread
 
 private:
-    // 流式收 body 并经 io_uring 写入 staging 临时文件，返回 (字节数, MD5 hex)
-    // 出参而非返回值：见 .cc 中的说明（co_await 结果里带 std::string 时，
-    // body 抛异常会让编译器析构从未构造的绑定目标）
+    // Stream in the body and write it to the staging temp file via io_uring, yielding
+    // (byte count, MD5 hex).
+    // Out-params instead of a return value: see the note in the .cc (when a co_await result
+    // carries a std::string, a throw from body makes the compiler destroy a never-constructed
+    // binding target)
     Task<void> drain_to_tmp(http::BodyReader& body, int fd, uint64_t& total_out,
                             std::string& etag_out);
-    // 内核可能短写，循环续写直到写满；失败抛 InternalError
+    // The kernel may short-write; loop until everything is written; throw InternalError on failure
     Task<void> write_all(int fd, std::span<const std::byte> data, uint64_t off);
-    // 数据落盘（docs/gaps.md §6.3）：走 io_uring 的 FSYNC SQE，提交段不再占池线程
-    // 阻塞在 fdatasync 上——这正是 xlocalfs 要消除的那类等待。内核不支持 FSYNC
-    // opcode（探测结果）或 LIGHTS3_FSYNC=0 时回落既有同步路径
+    // Data persistence (docs/gaps.md §6.3): use io_uring's FSYNC SQE so the submit phase no
+    // longer blocks a pool thread in fdatasync -- exactly the kind of wait xlocalfs is meant
+    // to eliminate. Falls back to the existing synchronous path when the kernel lacks the
+    // FSYNC opcode (per probe) or LIGHTS3_FSYNC=0
     Task<void> sync_fd(int fd);
 
     std::shared_ptr<UringEngine> uring_;

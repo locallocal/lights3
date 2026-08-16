@@ -1,7 +1,9 @@
-// CloudProxyBackend 实现（docs/cloudproxy-backend.md）。
-// 通用管线：构造最小 HttpRequest 签名 → 搬运 headers → ClientPool 发送 → 映射错误。
-// 数据面经 http/pushpull.h 的 BlockQueue 在私有 pump 线程与 handler 协程间翻转
-// 推/拉模型；控制面短请求在共享池线程同步调用（docs/cloudproxy-backend.md §2.3）。
+// CloudProxyBackend implementation (docs/cloudproxy-backend.md).
+// Generic pipeline: build a minimal HttpRequest for signing -> carry over headers ->
+// send via ClientPool -> map errors. The data plane flips the push/pull model between a
+// private pump thread and the handler coroutine through http/pushpull.h's BlockQueue;
+// short control-plane requests call synchronously on shared pool threads
+// (docs/cloudproxy-backend.md §2.3).
 #include "storage/cloudproxy/cloudproxy_backend.h"
 
 #include <fcntl.h>
@@ -33,12 +35,12 @@ using namespace cloudproxy;
 
 namespace {
 
-// ETag 引号处理与 md5 形态判定复用共享助手（storage/multipart.h、util::from_hex）
+// ETag quote handling and md5-shape detection reuse shared helpers (storage/multipart.h, util::from_hex)
 
 bool is_md5_hex(const std::string& s) { return util::from_hex(s).size() == 16; }
 
-// key 的路径段（"/key" 编码后）；bucket 段由 Target::prefix 承载（path-style 含
-// "/<rb>"、vhost 为空，docs/cloudproxy-backend.md §7）
+// The key's path segment ("/key" after encoding); the bucket segment is carried by
+// Target::prefix ("/<rb>" for path-style, empty for vhost, docs/cloudproxy-backend.md §7)
 std::string key_path(std::string_view key) {
     return "/" + util::aws_uri_encode(key, /*encode_slash=*/false);
 }
@@ -53,7 +55,8 @@ std::string format_range(const ByteRange& r) {
     return out;
 }
 
-// x-amz-meta-* 与一等元数据头（签名会把它们一并收进 SignedHeaders，无需改签名侧）
+// x-amz-meta-* and first-class metadata headers (signing sweeps them into SignedHeaders
+// automatically; no signing-side changes needed)
 std::vector<std::pair<std::string, std::string>> meta_headers(const ObjectMeta& meta) {
     std::vector<std::pair<std::string, std::string>> out;
     for (auto& f : kStdMetaFields)
@@ -70,8 +73,9 @@ uint64_t parse_u64(const std::string& s) {
     }
 }
 
-// 对象全长必须可知（backend.h 契约：meta.size 为对象全长）；远端不给
-// Content-Length（如 chunked 响应）时宁可报错，不得以 0 长度静默截断
+// The full object length must be known (backend.h contract: meta.size is the full object
+// length); when the remote gives no Content-Length (e.g. chunked responses), prefer erroring
+// out over silently truncating to length 0
 uint64_t require_content_length(const httplib::Response& res) {
     if (!res.has_header("Content-Length"))
         throw S3Error(S3ErrorCode::InternalError,
@@ -107,7 +111,8 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
     return m;
 }
 
-// GET 头部到达后交付给等待协程的载荷（docs/cloudproxy-backend.md §3.1 ①）
+// Payload delivered to the waiting coroutine once the GET headers arrive
+// (docs/cloudproxy-backend.md §3.1 step 1)
 struct GetHead {
     ObjectMeta meta;
     std::optional<ByteRange> range;
@@ -119,9 +124,10 @@ GetHead head_from_response(std::string_view key, const httplib::Response& res) {
     h.meta = meta_from_response(key, res);
     h.body_len = h.meta.size;
     if (res.status == 206) {
-        // Content-Range: bytes a-b/total —— meta.size 为对象全长（接口约定）。
-        // 解析不了（含 RFC 允许的 "bytes a-b/*" 未知总长形态）必须报错：
-        // 静默走全量语义会把部分内容当完整对象回给客户端
+        // Content-Range: bytes a-b/total -- meta.size is the full object length (interface
+        // contract). An unparsable value (including the RFC-permitted "bytes a-b/*"
+        // unknown-total form) must be an error: silently falling back to full-object
+        // semantics would return partial content to the client as a complete object
         std::string cr = res.get_header_value("Content-Range");
         unsigned long long a = 0, b = 0, total = 0;
         if (sscanf(cr.c_str(), "bytes %llu-%llu/%llu", &a, &b, &total) != 3)
@@ -135,10 +141,11 @@ GetHead head_from_response(std::string_view key, const httplib::Response& res) {
     return h;
 }
 
-// 从另一线程中止一次在途的 httplib 传输。cancel 队列只能解开阻塞在 push 的
-// pump；若 pump 正阻塞在 socket 读/写（远端停滞），必须 client.stop() 打断，
-// 否则中止方要陪绑到 read/write timeout（默认 60s）。被 stop 的连接归还池后
-// 由 httplib 在下次请求时自动重连。
+// Abort an in-flight httplib transfer from another thread. Cancelling the queue only
+// unblocks a pump stuck in push; if the pump is blocked in a socket read/write (remote
+// stalled), client.stop() must interrupt it, or the aborter is held hostage until the
+// read/write timeout (default 60s). A stopped connection, once returned to the pool, is
+// reconnected automatically by httplib on the next request.
 struct TransferAbort {
     std::mutex m;
     httplib::Client* active = nullptr;
@@ -164,8 +171,8 @@ struct TransferAbort {
     }
 };
 
-// 析构即 cancel + 打断在途传输 + join pump：客户端断连/handler 异常时
-// 中止远端传输（docs/cloudproxy-backend.md §3.1）
+// Destruction = cancel + interrupt the in-flight transfer + join the pump: aborts the
+// remote transfer on client disconnect / handler exception (docs/cloudproxy-backend.md §3.1)
 class PumpBodyReader final : public http::BodyReader {
 public:
     PumpBodyReader(std::shared_ptr<http::BlockQueue> q, std::optional<uint64_t> len,
@@ -178,10 +185,12 @@ public:
         abort_->abort();
         if (pump_.joinable()) pump_.join();
     }
-    // QueueBodyReader::pop 是 cv 阻塞：远端慢于客户端时（cloudproxy 常态）几乎
-    // 每次读都要等 pump 推数。调用方可能是 beast 的 io 线程 / seastar reactor
-    // shard（读协程在那里恢复），在其上阻塞会让整个事件循环停摆——先切池线程再
-    // 阻塞，与项目内其余流式 reader 的约定一致（出方向 stream_upload 已如此）
+    // QueueBodyReader::pop blocks on a cv: when the remote is slower than the client (the
+    // cloudproxy norm) almost every read waits for the pump to push data. The caller may be
+    // beast's io thread / a seastar reactor shard (where the reading coroutine resumes), and
+    // blocking there stalls the whole event loop -- switch to a pool thread before blocking,
+    // consistent with the other streaming readers in the project (the outbound
+    // stream_upload already does this)
     Task<size_t> read(std::span<std::byte> buf) override {
         co_await pool_->schedule();
         co_return co_await inner_.read(buf);
@@ -202,13 +211,14 @@ std::string resource_of(std::string_view bucket, std::string_view key = "") {
     return r;
 }
 
-// 总 ETag 规则复用 combined_etag（docs/cloudproxy-backend.md §5.2 complete 歧义消解用）
+// The total-ETag rule reuses combined_etag (used by docs/cloudproxy-backend.md §5.2
+// complete ambiguity resolution)
 std::string expected_total_etag(std::span<const PartInfo> parts) {
     std::vector<std::string> md5s;
     md5s.reserve(parts.size());
     for (auto& p : parts) {
         std::string hex(strip_etag_quotes(p.etag));
-        if (!is_md5_hex(hex)) return "";  // 非 md5 形态的分片 etag：无法预测
+        if (!is_md5_hex(hex)) return "";  // non-md5-shaped part etag: unpredictable
         md5s.push_back(std::move(hex));
     }
     return combined_etag(md5s);
@@ -216,7 +226,7 @@ std::string expected_total_etag(std::span<const PartInfo> parts) {
 
 }  // namespace
 
-// ---------- 构造 ----------
+// ---------- Construction ----------
 
 CloudProxyBackend::CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<ThreadPool> pool,
                                      MetricsScope metrics)
@@ -231,11 +241,13 @@ CloudProxyBackend::CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<Threa
 
 CloudProxyBackend::~CloudProxyBackend() = default;
 
-// 控制面阻塞段的执行环境（docs/cloudproxy-backend.md §2.3）：缺省切共享池线程
-// （单次占用 ~ 一次远端往返 + 重试退避）；control_in_pump=true 起一次性私有线程
-// （与数据面 pump 同族），完成后续体经池 executor 恢复——高 RTT 远端不占池线程，
-// 代价是每控制请求一次线程创建（~几十 µs，压测见 §2.3）。fn 为纯阻塞函数，
-// 不得内含 co_await；异常经 exception_ptr 原样透传
+// Execution environment for control-plane blocking sections (docs/cloudproxy-backend.md
+// §2.3): by default switch to a shared pool thread (each occupancy ~ one remote round trip
+// + retry backoff); control_in_pump=true spawns a one-shot private thread (same family as
+// the data-plane pump), and on completion the continuation resumes via the pool executor --
+// a high-RTT remote does not hold a pool thread, at the cost of one thread creation per
+// control request (~tens of microseconds, benchmarks in §2.3). fn is a purely blocking
+// function and must not contain co_await; exceptions pass through verbatim via exception_ptr
 template <class Fn>
 Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
     using R = std::invoke_result_t<Fn>;
@@ -249,11 +261,12 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
         std::optional<R> result;
         std::exception_ptr err;
         std::thread th;
-        std::binary_semaphore gate{0};  // 闸住线程体：th 移动赋值完成前不得跑
+        std::binary_semaphore gate{0};  // gate the thread body: it must not run before the move-assignment to th completes
         bool await_ready() const noexcept { return false; }
         void await_suspend(std::coroutine_handle<> h) {
-            // 不闸会竞态：极快的 fn 会在 `th = ...` 赋值收尾前就 post，池线程
-            // 恢复协程并析构本 awaiter（读 th），与本线程的移动赋值互踩
+            // Without the gate there is a race: a very fast fn could post before the
+            // `th = ...` assignment finishes; the pool thread resumes the coroutine and
+            // destroys this awaiter (reading th), trampling the move-assignment on this thread
             th = std::thread([this, h] {
                 gate.acquire();
                 try {
@@ -261,12 +274,12 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
                 } catch (...) {
                     err = std::current_exception();
                 }
-                ex->post(h);  // 私有线程只投递，业务续行回池线程
+                ex->post(h);  // the private thread only posts; business logic continues on a pool thread
             });
-            gate.release();  // 此后不得再触碰任何成员（协程可能已在池线程恢复）
+            gate.release();  // must not touch any member after this (the coroutine may have already resumed on a pool thread)
         }
         R await_resume() {
-            th.join();  // post 后线程即收尾，join 仅微秒级
+            th.join();  // the thread wraps up right after post; the join is only microseconds
             if (err) std::rethrow_exception(err);
             return std::move(*result);
         }
@@ -274,9 +287,11 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
     co_return co_await Awaiter{&fn, &exec_};
 }
 
-// 保留桶 .sys 的远端转写名：'.' 开头在 S3 命名规则里非法，前缀拼接还会产生
-// "-." 相邻（"e2e-" + ".sys"），真 AWS 与 lights3 远端都会拒绝——直连拼接的
-// 结果是"cloudproxy 当默认后端 + 动态凭证"这一组合在启动期必炸
+// Remote transliterated name for the reserved bucket .sys: a leading '.' is illegal under
+// S3 naming rules, and prefix concatenation would also produce adjacent "-." ("e2e-" +
+// ".sys"), which both real AWS and a lights3 remote reject -- with naive concatenation, the
+// "cloudproxy as default backend + dynamic credentials" combination is guaranteed to blow
+// up at startup
 inline constexpr std::string_view kRemoteSysBucket = "lights3-sys";
 
 std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
@@ -285,8 +300,9 @@ std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
     if (bucket == kSysBucketName) {
         local = kRemoteSysBucket;
     } else if (bucket == kRemoteSysBucket) {
-        // 撞名防护：用户桶恰叫转写名会与远端凭证桶合流，读得到 .sys 对象即
-        // 凭证泄漏——该名字对本后端保留
+        // Name-collision guard: a user bucket that happens to bear the transliterated name
+        // would merge with the remote credential bucket, and being able to read .sys
+        // objects means credential leakage -- the name is reserved for this backend
         throw S3Error(S3ErrorCode::InvalidBucketName,
                       "bucket name is reserved by the cloudproxy backend",
                       std::string(bucket));
@@ -299,7 +315,7 @@ std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
     return rb;
 }
 
-// ---------- bucket 操作（docs/cloudproxy-backend.md §4.3）----------
+// ---------- Bucket operations (docs/cloudproxy-backend.md §4.3) ----------
 
 Task<void> CloudProxyBackend::create_bucket(std::string_view bucket) {
     auto rb = remote_bucket(bucket);
@@ -354,7 +370,8 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
     if (res->status / 100 == 2) co_return true;
     if (res->status == 404) co_return false;
     if (res->status == 403) {
-        // AWS HeadBucket 语义：存在但无权也是 403，视为存在（docs/cloudproxy-backend.md §4.3）
+        // AWS HeadBucket semantics: exists-but-unauthorized is also 403; treat as existing
+        // (docs/cloudproxy-backend.md §4.3)
         LOG_WARN("cloudproxy: HEAD bucket {} returned 403, treating as exists", rb);
         co_return true;
     }
@@ -362,7 +379,7 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
 }
 
 Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
-    // 服务级操作恒走 endpoint 本身，与寻址风格无关
+    // Service-level operations always go to the endpoint itself, regardless of addressing style
     auto res = co_await control_io([&] {
         return ctx_->with_retry("list_buckets", [&](httplib::Client& c) {
             return c.Get("/", ctx_->signed_headers("GET", "/", "", {}, ""));
@@ -378,13 +395,15 @@ Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
         for (auto& b : buckets->children) {
             if (b.name != "Bucket") continue;
             std::string name = b.get("Name");
-            // 只保留带前缀的，剥前缀返回；其余是远端账号下的无关 bucket
+            // Keep only prefixed names and return them with the prefix stripped; the rest
+            // are unrelated buckets under the remote account
             if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0)
                 continue;
             BucketInfo info;
             info.name = name.substr(prefix.size());
-            // 转写名还原（与 remote_bucket 对偶）：让上层看到的仍是 .sys，
-            // 由 L2 的保留桶过滤处理，而不是冒充一个用户桶出现在列表里
+            // Reverse the transliteration (dual of remote_bucket): the upper layer still
+            // sees .sys, handled by L2's reserved-bucket filtering, rather than the name
+            // showing up in the listing masquerading as a user bucket
             if (info.name == kRemoteSysBucket) info.name = kSysBucketName;
             if (auto t = util::parse_iso8601(b.get("CreationDate"))) info.created = *t;
             out.push_back(std::move(info));
@@ -393,7 +412,7 @@ Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
     co_return out;
 }
 
-// ---------- 对象数据面（docs/cloudproxy-backend.md §3）----------
+// ---------- Object data plane (docs/cloudproxy-backend.md §3) ----------
 
 Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::string_view key,
                                                  std::optional<ByteRange> range) {
@@ -413,10 +432,11 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
     auto fut = prom->get_future();
     std::string keycopy(key);
 
-    // pump：ResponseHandler 到达即交付 meta；ContentReceiver 推转拉进队列（§3.1）
+    // pump: the ResponseHandler delivers meta on arrival; the ContentReceiver converts push
+    // to pull through the queue (§3.1)
     std::thread pump([ctx, queue, abortst, prom, path, extra, resource, keycopy,
                       host = t.host] {
-        auto op_hist = ctx->metrics.op_seconds("get");  // §8.2：整段传输为一次观测
+        auto op_hist = ctx->metrics.op_seconds("get");  // §8.2: the whole transfer is one observation
         bool delivered = false;
         try {
             for (int attempt = 0;; ++attempt) {
@@ -436,8 +456,9 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                                 prom->set_value(std::move(h));
                                 return true;
                             } catch (...) {
-                                // 首部不合契约（如 206 缺 Content-Range）：
-                                // 交付异常并中止传输，绝不静默按全量语义走
+                                // Headers violate the contract (e.g. 206 missing
+                                // Content-Range): deliver the exception and abort the
+                                // transfer; never silently proceed with full-object semantics
                                 delivered = true;
                                 prom->set_exception(std::current_exception());
                                 return false;
@@ -453,10 +474,10 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                                          std::chrono::steady_clock::now() - t0)
                                          .count());
                     if (delivered) {
-                        queue->close(static_cast<bool>(res));  // res 空 = 传输中途失败
+                        queue->close(static_cast<bool>(res));  // empty res = transfer failed midway
                         return;
                     }
-                    // headers 未交付：重试或交付映射后的异常
+                    // Headers not delivered: retry or deliver the mapped exception
                     bool retry = (!res ? RemoteContext::retryable_transport(res.error())
                                        : ctx->retryable_status(res->status)) &&
                                  attempt < ctx->cfg.retry_max;
@@ -471,11 +492,11 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                         return;
                     }
                     ctx->metrics.count_retry("get");
-                }  // 先归还连接再退避
+                }  // return the connection before backing off
                 ctx->backoff(attempt);
             }
         } catch (...) {
-            // acquire 超时等意外：视交付阶段选择传播路径
+            // Surprises such as acquire timeout: choose the propagation path by delivery stage
             if (!delivered)
                 prom->set_exception(std::current_exception());
             else
@@ -485,14 +506,17 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
 
     GetHead head;
     try {
-        // 池线程阻塞等首部；pump 在私有线程推进，无互等（§2.3）。等待须有上界
-        //（docs §3.1：超时 = request_timeout）——滴流远端否则可让单次 Get 永不完成，
-        // 并发 GET ≈ 池大小时把共享池占满、全局停摆。留一份连接建立预算的余量：
-        // 重试链最坏是 (retry_max+1) 轮，每轮的实际 IO 由 httplib 自身超时兜住
+        // A pool thread blocks waiting for headers; the pump advances on a private thread,
+        // no mutual waiting (§2.3). The wait must be bounded (docs §3.1: timeout =
+        // request_timeout) -- otherwise a trickling remote can keep a single Get from ever
+        // completing, and with concurrent GETs ~ pool size the shared pool fills up and
+        // everything stalls. Leave headroom for the connection-establishment budget: the
+        // retry chain is at worst (retry_max+1) rounds, and each round's actual IO is
+        // backstopped by httplib's own timeouts
         auto budget = std::chrono::milliseconds(ctx_->cfg.request_timeout_ms) *
                       (ctx_->cfg.retry_max + 1);
         if (fut.wait_for(budget) != std::future_status::ready) {
-            abortst->abort();   // 打断在途 socket 读写，别陪绑到 httplib 超时
+            abortst->abort();   // interrupt in-flight socket IO; do not sit out httplib's timeout
             queue->cancel();
             pump.join();
             ctx_->metrics.count_error("transport");
@@ -517,9 +541,10 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     std::vector<std::pair<std::string, std::string>> extra, http::BodyReader& body,
     std::string resource, bool multipart_ctx) {
     auto len_opt = body.length();
-    // AWS 不接受裸 chunked 上行（§3.2）。无长度（chunked 且无
-    // x-amz-decoded-content-length）先 spool 到本地临时文件取得长度再上传
-    // （docs/gaps.md §6.2——此前直接 NotImplemented，这类 PUT 在本后端整个不可用）
+    // AWS rejects bare chunked uploads (§3.2). Without a length (chunked and no
+    // x-amz-decoded-content-length), spool to a local temp file first to obtain the length,
+    // then upload (docs/gaps.md §6.2 -- previously a flat NotImplemented, making such PUTs
+    // entirely unusable on this backend)
     if (!len_opt) {
         if (ctx_->cfg.spool_max_bytes == 0)
             throw S3Error(S3ErrorCode::NotImplemented,
@@ -548,14 +573,15 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     };
     auto out = std::make_shared<Outcome>();
 
-    // pump：拉转拉，Provider 从队列取数写 DataSink（§3.2）
+    // pump: pull-to-pull, the Provider takes data from the queue and writes the DataSink (§3.2)
     const char* op = multipart_ctx ? "upload_part" : "put";
     std::thread pump([ctx, queue, abortst, out, raw_path, raw_query, host, full, content_type,
                       extra, len, op] {
-        auto op_hist = ctx->metrics.op_seconds(op);  // §8.2：整段传输为一次观测
+        auto op_hist = ctx->metrics.op_seconds(op);  // §8.2: the whole transfer is one observation
         try {
             for (int attempt = 0;; ++attempt) {
-                // pump 单线程读写即可，无需原子：仅用于连接阶段重试判定
+                // Single-threaded reads/writes within the pump suffice, no atomics needed:
+                // only used for the connection-stage retry decision
                 bool provider_called = false;
                 auto lease = ctx->pool.acquire();
                 abortst->arm(lease.client());
@@ -572,9 +598,9 @@ Task<PutResult> CloudProxyBackend::stream_upload(
                         try {
                             n = queue->pop(std::span(buf, want));
                         } catch (...) {
-                            return false;  // 生产方（客户端上行）中途失败
+                            return false;  // producer (client upstream) failed midway
                         }
-                        if (n == 0) return false;  // EOF 早于 Content-Length：中止
+                        if (n == 0) return false;  // EOF before Content-Length: abort
                         return sink.write(reinterpret_cast<const char*>(buf), n);
                     },
                     content_type);
@@ -582,8 +608,9 @@ Task<PutResult> CloudProxyBackend::stream_upload(
                 op_hist->observe(std::chrono::duration<double>(
                                      std::chrono::steady_clock::now() - t0)
                                      .count());
-                // 仅连接建立阶段失败且 Provider 从未被调用（队列未被消费）可重试
-                // （§5.2）；已被主动中止的传输不重试
+                // Retry only when the failure is in the connection-establishment stage and
+                // the Provider was never called (queue unconsumed) (§5.2); a deliberately
+                // aborted transfer is not retried
                 if (!res && !provider_called && !abortst->is_aborted() &&
                     RemoteContext::connection_stage_error(res.error()) &&
                     attempt < ctx->cfg.retry_max) {
@@ -604,22 +631,25 @@ Task<PutResult> CloudProxyBackend::stream_upload(
         } catch (...) {
             out->exc = std::current_exception();
         }
-        queue->cancel();  // 解除生产者可能的 push 阻塞
+        queue->cancel();  // release the producer from a possible push block
     });
 
-    // 生产者：handler 协程链驱动 body.read，增量 MD5（§6 端到端校验）
+    // Producer: the handler coroutine chain drives body.read, with incremental MD5
+    // (§6 end-to-end verification)
     util::HashStream md5(util::HashStream::Algo::Md5);
     uint64_t sent = 0;
     bool remote_gone = false;
     std::exception_ptr read_err;
     std::vector<std::byte> buf(64 * 1024);
     try {
-        // 读到 EOF（n==0）为止而非 sent==len 即停：storage-backend 契约要求把 body
-        // 读干——验签装饰器（sha256/chunked 校验）挂在读满/EOF 处，读满自停会跳过校验
+        // Read until EOF (n==0) rather than stopping at sent==len: the storage-backend
+        // contract requires draining the body -- the verification decorators (sha256/chunked
+        // checks) hook at full-read/EOF, and stopping at full-read would skip them
         for (;;) {
             size_t n = co_await body.read(std::span(buf));
-            // body.read 可能把协程恢复到 L1 驱动线程（beast 经对称转移回 strand）；
-            // push 会因背压阻塞，必须回池线程再做，不得占住事件循环（§2.3）
+            // body.read may resume the coroutine on an L1 driver thread (beast returns to
+            // the strand via symmetric transfer); push can block on backpressure, so it must
+            // be done back on a pool thread, never holding the event loop (§2.3)
             co_await pool_->schedule();
             if (n == 0) break;
             md5.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
@@ -633,19 +663,20 @@ Task<PutResult> CloudProxyBackend::stream_upload(
         read_err = std::current_exception();
     }
     queue->close(!read_err && !remote_gone && sent == len);
-    // 上行断流时 pump 可能正阻塞在 socket 写等远端收数：主动打断，别陪绑超时
+    // When the upstream breaks, the pump may be blocked in a socket write waiting for the
+    // remote to accept data: interrupt proactively, do not sit out the timeout
     if (read_err) abortst->abort();
-    co_await pool_->schedule();  // join 最长等一个远端响应周期，同样不占驱动线程
+    co_await pool_->schedule();  // the join waits at most one remote response cycle, likewise off the driver thread
     pump.join();
 
     if (out->exc) std::rethrow_exception(out->exc);
-    if (read_err) std::rethrow_exception(read_err);  // 客户端上行断流
+    if (read_err) std::rethrow_exception(read_err);  // client upstream broke off
     if (!out->has_response) ctx->throw_transport_error(out->err);
     if (out->status / 100 == 2) {
         std::string etag(strip_etag_quotes(out->etag));
         if (ctx->cfg.verify_etag && is_md5_hex(etag)) {
             if (etag != md5.final_hex()) {
-                ctx->metrics.etag_mismatch->inc();  // §8.2：在途损坏信号
+                ctx->metrics.etag_mismatch->inc();  // §8.2: in-transit corruption signal
                 throw S3Error(S3ErrorCode::InternalError,
                               "cloudproxy: upload corrupted in transit (remote etag != "
                               "local md5)");
@@ -657,10 +688,11 @@ Task<PutResult> CloudProxyBackend::stream_upload(
                             multipart_ctx ? ErrCtx::Upload : ErrCtx::Bucket, resource);
 }
 
-// 无长度上行的 spool（docs/gaps.md §6.2）：body 全量落临时文件（O_TMPFILE 匿名
-// inode，进程崩溃即自动回收；不支持的文件系统回退 unlink-after-open），得到长度
-// 后经 FdStreamReader 走已知长度的 stream_upload。代价是一次本地盘写读与到齐
-// 延迟——对"罕见路径可用性"的取舍
+// Spool for length-less uploads (docs/gaps.md §6.2): the body lands fully in a temp file
+// (O_TMPFILE anonymous inode, auto-reclaimed on process crash; filesystems without support
+// fall back to unlink-after-open); once the length is known, go through the known-length
+// stream_upload via FdStreamReader. The cost is one local disk write/read plus
+// full-arrival latency -- a trade-off for "rare-path availability"
 Task<PutResult> CloudProxyBackend::spool_and_upload(
     std::string raw_path, std::string raw_query, std::string host, std::string content_type,
     std::vector<std::pair<std::string, std::string>> extra, http::BodyReader& body,
@@ -671,7 +703,8 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
                                                : fs::path(ctx_->cfg.spool_dir);
     int fd = ::open(dir.c_str(), O_TMPFILE | O_RDWR, 0600);
     if (fd < 0) {
-        // O_TMPFILE 不被支持（老内核/NFS）：具名建后立即 unlink，同样无残留
+        // O_TMPFILE unsupported (old kernels/NFS): create named, then unlink immediately;
+        // equally leaves no residue
         fs::path p = dir / ("lights3-spool-" + std::to_string(::getpid()) + "-" +
                             std::to_string(reinterpret_cast<uintptr_t>(&body)));
         fd = ::open(p.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
@@ -688,7 +721,7 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
     std::vector<std::byte> buf(256 * 1024);
     for (;;) {
         size_t n = co_await body.read(std::span(buf));
-        co_await pool_->schedule();  // read 可能把协程恢复到驱动线程；写盘回池
+        co_await pool_->schedule();  // read may resume the coroutine on a driver thread; write to disk back on the pool
         if (n == 0) break;
         total += n;
         if (total > ctx_->cfg.spool_max_bytes)
@@ -703,7 +736,7 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
             left -= size_t(w);
         }
     }
-    // FdStreamReader 接管 fd 所有权；guard 让位
+    // FdStreamReader takes over fd ownership; the guard steps aside
     int owned = fd;
     guard.fd = -1;
     fsutil::FdStreamReader replay(owned, 0, total, pool_);
@@ -712,9 +745,11 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
                                      std::move(resource), multipart_ctx);
 }
 
-// 服务端 COPY（docs/gaps.md §6.2）：此前同 cloudproxy 后端内的 copy 会"下载到网关
-// 再传回去"，2 倍跨网流量与费用；远端本可一个 x-amz-copy-source 完成。恒发
-// REPLACE + 我方元数据——handler 已把 COPY/REPLACE 语义折算进 meta，远端只管照抄
+// Server-side COPY (docs/gaps.md §6.2): previously a copy within the same cloudproxy
+// backend would "download to the gateway and upload back", doubling cross-network traffic
+// and cost, when the remote could have done it with one x-amz-copy-source. Always send
+// REPLACE + our metadata -- the handler has already folded COPY/REPLACE semantics into
+// meta, and the remote just copies it verbatim
 Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
     std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
     std::string_view dst_key, ObjectMeta meta) {
@@ -748,7 +783,7 @@ Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
         ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource);
-    // COPY 与 complete 同款陷阱：慢 copy 会先回 200、错误在 body（§4.4）
+    // COPY shares complete's trap: a slow copy returns 200 first with the error in the body (§4.4)
     s3::XmlNode root;
     try {
         root = s3::xml_parse(res->body);
@@ -769,9 +804,10 @@ Task<PutResult> CloudProxyBackend::put_object(std::string_view bucket, std::stri
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
-    // 条件写透传给上游（S3 conditional writes）：检查与提交的原子性只能由持有
-    // 对象的一方保证，代理侧任何 head+put 组合都守不住。上游若不支持会以
-    // 4xx/501 拒绝，由 throw_remote_error 原样映射；412 → PreconditionFailed
+    // Conditional writes pass through to the upstream (S3 conditional writes): only the
+    // party holding the object can guarantee check-and-commit atomicity; no head+put
+    // combination on the proxy side can. An upstream without support rejects with 4xx/501,
+    // mapped verbatim by throw_remote_error; 412 -> PreconditionFailed
     auto extra = meta_headers(meta);
     if (cond.if_none_match) extra.emplace_back("If-None-Match", "*");
     if (cond.if_match_etag) extra.emplace_back("If-Match", "\"" + *cond.if_match_etag + "\"");
@@ -793,7 +829,8 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 200) co_return meta_from_response(key, *res);
-    // HEAD 无错误体：404 按上下文补 NoSuchKey（docs/cloudproxy-backend.md §4.1/§5.1）
+    // HEAD has no error body: a 404 gets NoSuchKey filled in from context
+    // (docs/cloudproxy-backend.md §4.1/§5.1)
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
@@ -808,12 +845,12 @@ Task<void> CloudProxyBackend::delete_object(std::string_view bucket, std::string
         });
     });
     if (!res) ctx_->throw_transport_error(res.error());
-    // 204 与 404 都视为成功（S3 幂等删除语义）
+    // Both 204 and 404 count as success (S3 idempotent delete semantics)
     if (res->status / 100 == 2 || res->status == 404) co_return;
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
-// ---------- list（docs/cloudproxy-backend.md §4.2：恒用 start-after 分页）----------
+// ---------- list (docs/cloudproxy-backend.md §4.2: always paginate with start-after) ----------
 
 Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
                                                  const ListOptions& opt) {
@@ -854,7 +891,8 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
     }
     out.is_truncated = root.get("IsTruncated") == "true";
     if (out.is_truncated) {
-        // token = 本页最后一个元素；组（common prefix）用其字典序上界跳过整组
+        // token = the last element of this page; for a group (common prefix), use its
+        // lexicographic upper bound to skip the whole group
         if (last_prefix > last_key)
             out.next_token = group_skip_token(last_prefix);
         else
@@ -863,7 +901,7 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
     co_return out;
 }
 
-// ---------- multipart 透传（docs/cloudproxy-backend.md §4.4）----------
+// ---------- multipart passthrough (docs/cloudproxy-backend.md §4.4) ----------
 
 Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
                                                       std::string_view key, ObjectMeta meta) {
@@ -874,8 +912,9 @@ Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
     std::string query = "uploads";
     std::string full = path + "?" + query;
     auto extra = meta_headers(meta);
-    // 注：create 重试可能在远端留空孤儿 upload（§5.2 已知权衡，业界通行做法）——
-    // 建议远端账号配 AbortIncompleteMultipartUpload 生命周期规则
+    // Note: create retries may leave empty orphan uploads on the remote (a known §5.2
+    // trade-off, standard industry practice) -- recommend configuring an
+    // AbortIncompleteMultipartUpload lifecycle rule on the remote account
     auto res = co_await control_io([&] {
         return ctx_->with_retry("create_multipart", [&](httplib::Client& c) {
             return c.Post(full, ctx_->signed_headers("POST", path, query, extra, "", t.host),
@@ -931,8 +970,9 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
     const std::string body = w.str();
     const std::string body_hash = util::sha256_hex(body);
 
-    // 重试循环整段提取为阻塞函数：control_in_pump=true 时连同退避一起在私有
-    // 线程执行（§2.3）；歧义消解要 co_await head_object，留在协程侧
+    // The whole retry loop is extracted into a blocking function: with control_in_pump=true
+    // it runs, backoff included, on a private thread (§2.3); ambiguity resolution needs
+    // co_await head_object and stays on the coroutine side
     struct CompleteOutcome {
         std::string etag;
         std::exception_ptr ambiguous;
@@ -955,10 +995,12 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             }();
             bool retry = !res ? RemoteContext::retryable_transport(res.error())
                               : ctx_->retryable_status(res->status);
-            // S3 特有：complete 耗时长时先回 200，错误在 body 里（§4.4）。body 里的
-            // InternalError/SlowDown 与同名 HTTP 状态是一回事，同样值得重试——不重试
-            // 就直接变成对客户端的 500，客户端重试再走 NoSuchUpload 歧义消解，白白
-            // 多一轮往返。重试后的 NoSuchUpload 由下面的 retried 分支消解
+            // S3 quirk: a long-running complete returns 200 first with the error in the
+            // body (§4.4). InternalError/SlowDown in the body are the same thing as their
+            // namesake HTTP statuses and equally worth retrying -- not retrying turns
+            // straight into a 500 for the client, whose retry then goes through the
+            // NoSuchUpload ambiguity resolution, wasting a round trip. A post-retry
+            // NoSuchUpload is resolved by the retried branch below
             if (!retry && res && res->status == 200 &&
                 res->body.find("<Error") != std::string::npos) {
                 try {
@@ -968,7 +1010,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
                         retry = code == S3ErrorCode::InternalError ||
                                 code == S3ErrorCode::SlowDown;
                     }
-                } catch (...) {  // 解析不了：留给下面的统一处置
+                } catch (...) {  // unparsable: leave it to the unified handling below
                 }
             }
             if (retry && attempt < ctx_->cfg.retry_max) {
@@ -981,7 +1023,8 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             try {
                 if (res->status != 200)
                     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
-                // S3 特有：complete 耗时长时先回 200，错误在 body 里（docs/cloudproxy-backend.md §4.4）
+                // S3 quirk: a long-running complete returns 200 first with the error in the
+                // body (docs/cloudproxy-backend.md §4.4)
                 s3::XmlNode root;
                 try {
                     root = s3::xml_parse(res->body);
@@ -997,7 +1040,8 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
                 }
                 etag_out = std::string(strip_etag_quotes(root.get("ETag")));
             } catch (const S3Error& e) {
-                // 重试后收 NoSuchUpload：前一次可能实际已成功 → HEAD 验证（docs/cloudproxy-backend.md §5.2）
+                // NoSuchUpload after a retry: the previous attempt may have actually
+                // succeeded -> verify with HEAD (docs/cloudproxy-backend.md §5.2)
                 if (e.code == S3ErrorCode::NoSuchUpload && retried) {
                     ambiguous_nosuch = std::current_exception();
                     break;
@@ -1045,9 +1089,11 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
                              resource_of(bucket, key));
 }
 
-// 契约带上分页位之后，这里由"累积全部页再返回"改为**转发一页**（docs/gaps.md
-// §5.1）：客户端的 marker 直接成为远端的 marker，远端的 IsTruncated 原样回传。
-// 此前为了满足裸 vector 契约必须把远端所有页拉完，客户端要第一页也得等全量
+// Now that the contract carries pagination fields, this changed from "accumulate all pages
+// then return" to forwarding a single page (docs/gaps.md §5.1): the client's marker becomes
+// the remote's marker directly, and the remote's IsTruncated is passed back verbatim.
+// Previously the bare-vector contract forced pulling every remote page, so a client wanting
+// just the first page still waited for everything
 Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
                                                     std::string_view key,
                                                     std::string_view upload_id,
@@ -1087,7 +1133,8 @@ Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
     if (out.is_truncated) {
         out.next_part_number_marker =
             static_cast<int>(parse_u64(root.get("NextPartNumberMarker")));
-        // 远端截断了却不给游标：续传无从下手，宁可如实报到尾也不让客户端死循环
+        // Remote truncated but gave no cursor: continuation has nothing to go on; better to
+        // report honestly to the end than let the client loop forever
         if (out.next_part_number_marker == 0 && !out.parts.empty())
             out.next_part_number_marker = out.parts.back().part_no;
     }
@@ -1134,7 +1181,8 @@ Task<ListUploadsResult> CloudProxyBackend::list_multipart_uploads(
     if (out.is_truncated) {
         out.next_key_marker = root.get("NextKeyMarker");
         out.next_upload_id_marker = root.get("NextUploadIdMarker");
-        // 同上：远端不给游标就别把 truncated 传下去，否则客户端原地打转
+        // As above: if the remote gives no cursor, do not pass truncated along, or the
+        // client spins in place
         if (out.next_key_marker.empty() && !out.uploads.empty()) {
             out.next_key_marker = out.uploads.back().key;
             out.next_upload_id_marker = out.uploads.back().upload_id;

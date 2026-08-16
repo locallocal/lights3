@@ -1,6 +1,8 @@
-// L4: 协作式取消原语（docs/concurrency.md §5）
-// CancelSource 触发、CancelToken 观察；取消以 OperationCancelled 异常从挂起点浮出。
-// 不追求抢占：正在执行的阻塞调用等其自然返回，返回后由挂起点/长循环检查 token。
+// L4: cooperative cancellation primitives (docs/concurrency.md §5)
+// CancelSource triggers, CancelToken observes; cancellation surfaces as an
+// OperationCancelled exception thrown from suspension points.
+// No preemption is attempted: a blocking call in progress returns naturally, after
+// which suspension points / long loops check the token.
 #pragma once
 
 #include <atomic>
@@ -25,10 +27,12 @@ namespace detail {
 
 class CancelState {
 public:
-    // 回调契约（docs/concurrency.md §5）：**必须轻量**。取消源常常是 TimerQueue 的
-    // 单线程定时器线程，回调里直接 resume 续体会把整条请求链跑在定时器线程上、
-    // 期间全进程定时器停摆（docs/gaps.md §3.2）。需要恢复协程的消费方一律经
-    // executor 投递（见 ThreadPool::ScheduleAwaiter / AsyncSemaphore::AcquireAwaiter）
+    // Callback contract (docs/concurrency.md §5): **must be lightweight**. The
+    // cancellation source is often TimerQueue's single timer thread, and resuming a
+    // continuation directly inside a callback would run the whole request chain on
+    // the timer thread, stalling every timer in the process meanwhile (docs/gaps.md
+    // §3.2). Consumers that need to resume coroutines always go through an executor
+    // (see ThreadPool::ScheduleAwaiter / AsyncSemaphore::AcquireAwaiter)
     void request_cancel() {
         std::map<uint64_t, std::function<void()>> cbs;
         {
@@ -38,8 +42,9 @@ public:
             firing_ = true;
             firing_thread_ = std::this_thread::get_id();
         }
-        // 锁外执行，回调内可再操作 token。FiringGuard 保证任何路径（含回调抛出）
-        // 都复位 firing_ 并唤醒等在 remove_callback 里的注销方
+        // Executed outside the lock, so callbacks may operate on the token again.
+        // FiringGuard guarantees that every path (including a throwing callback)
+        // resets firing_ and wakes deregistering callers waiting in remove_callback
         struct FiringGuard {
             CancelState* self;
             ~FiringGuard() {
@@ -55,7 +60,8 @@ public:
 
     bool cancelled() const { return cancelled_.load(std::memory_order_acquire); }
 
-    // 已取消则不注册并返回 0；调用方注册后须自查 cancelled() 补上竞态窗口
+    // If already cancelled, does not register and returns 0; after registering, the
+    // caller must check cancelled() itself to cover the race window
     uint64_t add_callback(std::function<void()> fn) {
         std::lock_guard lk(m_);
         if (cancelled_.load(std::memory_order_relaxed)) return 0;
@@ -64,9 +70,12 @@ public:
         return id;
     }
 
-    // 同上，但在同一临界区内把注销所需的 (state, id) 写入调用方提供的存储：
-    // request_cancel 与本函数互斥，保证回调可被触发之前两者均已落位。
-    // 否则"注册后、落位前"被取消回调抢跑 resume，落位写与使用方读形成数据竞争
+    // Same as above, but writes the (state, id) needed for deregistration into
+    // caller-provided storage within the same critical section: request_cancel and
+    // this function are mutually exclusive, guaranteeing both are in place before
+    // the callback can fire. Otherwise the cancel callback could win the race and
+    // resume in the window "after registration, before the writes land", making
+    // those writes race with the consumer's reads
     uint64_t add_callback_publish(std::function<void()> fn, std::atomic<uint64_t>& out_id,
                                   std::shared_ptr<CancelState>& out_state,
                                   std::shared_ptr<CancelState> self) {
@@ -82,9 +91,12 @@ public:
         return id;
     }
 
-    // 注销：返回后保证该回调不会再被执行——若取消正在触发中（回调批次锁外执行），
-    // 阻塞等这一批跑完，与 TimerQueue::cancel 同语义（docs/gaps.md §3.9）。
-    // 触发线程上（回调内）自注销不等待，防自死锁；等待期间不得持有回调所需的锁
+    // Deregister: on return, the callback is guaranteed to never run again — if
+    // cancellation is currently firing (the callback batch runs outside the lock),
+    // block until the batch finishes, same semantics as TimerQueue::cancel
+    // (docs/gaps.md §3.9). Self-deregistration on the firing thread (from inside a
+    // callback) does not wait, preventing self-deadlock; while waiting, do not hold
+    // locks the callbacks need
     void remove_callback(uint64_t id) {
         if (id == 0) return;
         std::unique_lock lk(m_);
@@ -98,14 +110,15 @@ private:
     std::mutex m_;
     std::condition_variable fired_cv_;
     uint64_t next_id_ = 0;
-    bool firing_ = false;              // 回调批次正在锁外执行
-    std::thread::id firing_thread_{};  // 执行该批次的线程
+    bool firing_ = false;              // callback batch is executing outside the lock
+    std::thread::id firing_thread_{};  // thread executing that batch
     std::map<uint64_t, std::function<void()>> callbacks_;
 };
 
 }  // namespace detail
 
-// 取消回调的注册句柄：析构/reset 时解除注册（对已触发的注册解除是空操作）
+// Registration handle for a cancel callback: deregisters on destruction/reset
+// (deregistering an already-fired registration is a no-op)
 class CancelRegistration {
 public:
     CancelRegistration() = default;
@@ -135,7 +148,8 @@ private:
     uint64_t id_ = 0;
 };
 
-// 观察端。默认构造为"永不取消"，可自由拷贝随 RequestContext 传递
+// Observer side. Default construction is "never cancelled"; freely copyable and
+// passed along with the RequestContext
 class CancelToken {
 public:
     CancelToken() = default;
@@ -145,19 +159,23 @@ public:
     void throw_if_cancelled() const {
         if (cancelled()) throw OperationCancelled();
     }
-    // 是否绑定了真实的取消源（默认构造的"永不取消" token 为 false）。
-    // 协程链沿 Task 继承 token 时用它判断"本级是否已有 token"（core/task.h）
+    // Whether a real cancellation source is bound (false for the default-constructed
+    // "never cancelled" token). Used when the coroutine chain inherits tokens along
+    // Tasks to decide "does this level already have a token" (core/task.h)
     bool valid() const { return state_ != nullptr; }
 
-    // 注意：若注册时已取消，回调不会被调用（返回空句柄）——调用方随后自查 cancelled()
+    // Note: if already cancelled at registration time, the callback will not be
+    // invoked (an empty handle is returned) — the caller then checks cancelled() itself
     CancelRegistration on_cancel(std::function<void()> fn) const {
         if (!state_) return {};
         uint64_t id = state_->add_callback(std::move(fn));
         return id ? CancelRegistration(state_, id) : CancelRegistration{};
     }
 
-    // 供"回调会跨线程 resume 使用方"的场景：注销所需的 (out_state, out_id)
-    // 在注册临界区内落位，回调可被触发前即已就绪。返回是否注册成功
+    // For scenarios where "the callback will resume the consumer across threads":
+    // the (out_state, out_id) needed for deregistration are written inside the
+    // registration critical section, ready before the callback can fire. Returns
+    // whether registration succeeded
     bool on_cancel_publish(std::function<void()> fn, std::atomic<uint64_t>& out_id,
                            std::shared_ptr<detail::CancelState>& out_state) const {
         if (!state_) {
@@ -171,7 +189,7 @@ private:
     std::shared_ptr<detail::CancelState> state_;
 };
 
-// 触发端：客户端断连（driver 发现）、请求超时、进程 shutdown
+// Trigger side: client disconnect (detected by the driver), request timeout, process shutdown
 class CancelSource {
 public:
     CancelSource() : state_(std::make_shared<detail::CancelState>()) {}

@@ -18,16 +18,19 @@ namespace {
                   std::string("duostore: corrupt meta value: ") + what);
 }
 
-// '\0' 分隔编码成立的前提（§4.1）：共享校验层已拒绝 key 含 NUL、bucket 名限
-// [a-z0-9.-]。这里是防御纵深——任何含 NUL 的段进入 key 编码都意味着上游校验被
-// 绕过，继续编码会产生跨记录 key 碰撞（静默数据损坏），必须响亮失败。
+// Precondition for the '\0'-separated encoding (§4.1): the shared validation
+// layer already rejects keys containing NUL and limits bucket names to
+// [a-z0-9.-]. This is defense in depth — any segment containing NUL reaching key
+// encoding means upstream validation was bypassed; continuing to encode would
+// produce cross-record key collisions (silent data corruption), so we must fail
+// loudly.
 void require_no_nul(std::string_view part) {
     if (part.find('\0') != std::string_view::npos)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore: key component contains NUL (validation bypassed)");
 }
 
-// ---- 小端整数与带长度前缀字符串 ----
+// ---- little-endian integers and length-prefixed strings ----
 
 void put_u8(std::string& s, uint8_t v) { s.push_back(char(v)); }
 void put_u16(std::string& s, uint16_t v) {
@@ -39,8 +42,9 @@ void put_u32(std::string& s, uint32_t v) {
 void put_u64(std::string& s, uint64_t v) {
     for (int i = 0; i < 8; ++i) s.push_back(char(v >> (8 * i)));
 }
-// 编码侧超限是**请求**问题而非库损坏（docs/gaps.md §4）：用户提交超长
-// user-meta 应得到 400，而不是 500 "corrupt meta value"
+// An over-limit on the encode side is a **request** problem, not library
+// corruption (docs/gaps.md §4): a user submitting oversized user-meta should get
+// a 400, not a 500 "corrupt meta value"
 [[noreturn]] void too_large(const char* what) {
     throw S3Error(S3ErrorCode::InvalidArgument,
                   std::string("Metadata field too large: ") + what);
@@ -101,19 +105,23 @@ void check_ver(Cursor& c, uint8_t expect) {
     if (c.u8() != expect) corrupt("unsupported value version");
 }
 
-// 版本兼容读（docs/gaps.md §5.2）：v1 记录无一等元数据段，v2 起有。严格相等的
-// check_ver 让旧值一律变成 500 "corrupt"，升级得停机重写全量元数据
+// Version-tolerant read (docs/gaps.md §5.2): v1 records have no first-class
+// metadata section, v2 onwards does. A strict-equality check_ver would turn all
+// old values into 500 "corrupt", forcing a downtime rewrite of all metadata on
+// upgrade
 uint8_t read_ver(Cursor& c, uint8_t max) {
     uint8_t v = c.u8();
     if (v == 0 || v > max) corrupt("unsupported value version");
     return v;
 }
 
-// ---- extent run 编解码（§4.3）----
+// ---- extent run codec (§4.3) ----
 // run = { u8 kind, u64 first_file_id, u32 count, u64 chunk_len, u64 last_len,
 //         u64 pack_offset, u32 crc[count] }
-// 合并条件：同 kind（chunk/rados，二者形态同构）连续 file_id 且前一段为满长
-// （run 中除末段外长度必须一致）；pack extent 不合并（count 恒 1）。
+// Merge condition: same kind (chunk/rados — the two are isomorphic in shape),
+// consecutive file_id, and the previous extent at full length (all but the last
+// extent of a run must have equal length); pack extents never merge (count is
+// always 1).
 
 void append_extent_runs(std::string& out, const std::vector<Extent>& extents) {
     struct Run {
@@ -152,7 +160,7 @@ void append_extent_runs(std::string& out, const std::vector<Extent>& extents) {
     }
 }
 
-// 算术跳过 runs 段（run 头定长 33B + 4B×count 的 crc 数组），不物化 Extent
+// Arithmetically skip the runs section (fixed 33B run header + 4B×count crc array) without materializing Extents
 void skip_extent_runs(Cursor& c) {
     uint32_t n_runs = c.u32();
     if (size_t(n_runs) * 33 > c.s.size() - c.pos) corrupt("run count beyond payload");
@@ -169,8 +177,10 @@ void skip_extent_runs(Cursor& c) {
 
 std::vector<Extent> read_extent_runs(Cursor& c) {
     uint32_t n_runs = c.u32();
-    // n_runs 是裸 u32：每个 run 至少占 33B 头，先按剩余载荷卡掉离谱值。否则
-    // 损坏的长度字段要先把 out 撑到几十万条，才轮到 need() 在半路抛（§4）
+    // n_runs is a raw u32: each run takes at least a 33B header, so reject absurd
+    // values against the remaining payload first. Otherwise a corrupt length field
+    // would inflate out to hundreds of thousands of entries before need() finally
+    // throws midway (§4)
     if (size_t(n_runs) * 33 > c.s.size() - c.pos) corrupt("run count beyond payload");
     std::vector<Extent> out;
     out.reserve(n_runs);
@@ -180,8 +190,9 @@ std::vector<Extent> read_extent_runs(Cursor& c) {
         uint64_t first_id = c.u64();
         uint32_t count = c.u32();
         if (count == 0) corrupt("empty run");
-        // 编码约定 pack 不合并（count 恒 1）；count 还必须被剩余 crc 数组字节
-        // 覆盖——损坏值不得解出一串假 extent（docs/gaps.md §4）
+        // The encoding convention says packs never merge (count is always 1);
+        // count must also be covered by the remaining crc array bytes — a corrupt
+        // value must not decode into a string of fake extents (docs/gaps.md §4)
         if (kind == uint8_t(Extent::Kind::kPack) && count != 1) corrupt("pack run count");
         if (size_t(count) * 4 > c.s.size() - c.pos) corrupt("run count beyond payload");
         uint64_t chunk_len = c.u64();
@@ -219,8 +230,9 @@ std::map<std::string, std::string> read_user_meta(Cursor& c) {
     return m;
 }
 
-// 一等元数据段（v2 起）：自描述的 u16 n + (str k, str v)*，只写非空项。做成
-// kv 而非六个定长槽位，是为了让下次加字段不必再动版本号——未知键读到就丢
+// First-class metadata section (since v2): self-describing u16 n + (str k, str v)*,
+// only non-empty entries are written. Made kv rather than six fixed slots so the
+// next field addition needs no version bump — unknown keys are dropped on read
 void put_std_meta(std::string& s, const ObjectMeta& m) {
     uint16_t n = 0;
     for (auto& f : kStdMetaFields)
@@ -246,13 +258,14 @@ void read_std_meta(Cursor& c, ObjectMeta& m) {
 }  // namespace
 
 // ---- crc32c ----
-// 实现已上提到 core/util/checksum.h（S3 的 x-amz-checksum-crc32c 同用一份），
-// 这里保留 duostore 命名空间下的转发，调用点不动
+// The implementation was hoisted into core/util/checksum.h (shared with S3's
+// x-amz-checksum-crc32c); the forwarder under the duostore namespace is kept
+// here so call sites stay untouched
 uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) {
     return util::crc32c_update(crc, data);
 }
 
-// ---- key 编码 ----
+// ---- key encoding ----
 
 std::string object_key(std::string_view bucket, std::string_view key) {
     require_no_nul(bucket);
@@ -282,7 +295,7 @@ std::string parts_prefix(std::string_view bucket, std::string_view key, std::str
 std::string part_key(std::string_view bucket, std::string_view key, std::string_view id,
                      int part_no) {
     std::string s = parts_prefix(bucket, key, id);
-    s.push_back(char(uint8_t(part_no >> 8)));  // big-endian：升序即 part_no 升序
+    s.push_back(char(uint8_t(part_no >> 8)));  // big-endian: byte order ascending == part_no ascending
     s.push_back(char(uint8_t(part_no)));
     return s;
 }
@@ -306,7 +319,7 @@ uint64_t parse_be64(std::string_view k) {
     return v;
 }
 
-// ---- extent 数组（供测试观察 run 压缩）----
+// ---- extent array (exposed so tests can observe run compression) ----
 
 std::string encode_extents(const std::vector<Extent>& extents) {
     std::string s;
@@ -338,10 +351,11 @@ int64_t decode_bucket(std::string_view v) {
     return ms;
 }
 
-// ---- object：u8 ver | u64 size | u64 mtime_ms | u64 version | str etag
+// ---- object: u8 ver | u64 size | u64 mtime_ms | u64 version | str etag
 //              | str content_type | u16 n_meta (str k, str v)*
-//              | [v2] u16 n_std (str k, str v)* | runs（§4.2）----
-// v1 = 无一等元数据段；读侧两版都认，写侧恒 v2（存量记录原地可读，无需重写）
+//              | [v2] u16 n_std (str k, str v)* | runs (§4.2) ----
+// v1 = no first-class metadata section; the read side accepts both versions, the
+// write side always emits v2 (existing records stay readable in place, no rewrite)
 
 constexpr uint8_t kObjectVer = 2;
 constexpr uint8_t kUploadVer = 2;
@@ -372,7 +386,7 @@ ObjectMeta decode_object_meta(std::string key, std::string_view v) {
     m.content_type = std::string(c.str());
     m.user_meta = read_user_meta(c);
     if (ver >= 2) read_std_meta(c, m);
-    skip_extent_runs(c);  // list 不需要定位信息，免物化大对象的 Extent 数组（§4.4）
+    skip_extent_runs(c);  // list needs no location info; avoids materializing a large object's Extent array (§4.4)
     c.done();
     return m;
 }
@@ -394,7 +408,7 @@ ObjectRec decode_object(std::string key, std::string_view v) {
     return rec;
 }
 
-// ---- upload：u8 ver | i64 initiated_ms | str content_type | u16 n_meta kv*
+// ---- upload: u8 ver | i64 initiated_ms | str content_type | u16 n_meta kv*
 //              | [v2] u16 n_std kv* ----
 
 std::string encode_upload(const UploadRec& rec) {
@@ -421,7 +435,7 @@ UploadRec decode_upload(std::string key, std::string upload_id, std::string_view
     return rec;
 }
 
-// ---- part：u8 ver | u64 size | str md5 | i64 modified_ms | runs ----
+// ---- part: u8 ver | u64 size | str md5 | i64 modified_ms | runs ----
 
 std::string encode_part(const PartRec& rec) {
     std::string s;
@@ -446,7 +460,7 @@ PartRec decode_part(int part_no, std::string_view v) {
     return rec;
 }
 
-// ---- gcq：u8 ver | u8 reason | i64 enqueue_ms | runs ----
+// ---- gcq: u8 ver | u8 reason | i64 enqueue_ms | runs ----
 
 std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms) {
     std::string s;
@@ -460,8 +474,9 @@ std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms) {
 Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms) {
     Cursor c{v};
     check_ver(c, 1);
-    // reason 是 P4 之前就在编码里的预留字节且恒写 0，未知取值回落 kUnknown 即可
-    // ——不必抬版本号，旧账与新账在同一队列里天然共存
+    // reason is a reserved byte that existed in the encoding before P4 and was
+    // always written as 0; unknown values simply fall back to kUnknown — no
+    // version bump needed, old and new entries naturally coexist in the same queue
     uint8_t reason = c.u8();
     int64_t ms = int64_t(c.u64());
     if (enqueue_ms) *enqueue_ms = ms;
@@ -472,7 +487,7 @@ Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms) {
     return r;
 }
 
-// ---- stats 计数器 ----
+// ---- stats counters ----
 
 std::string encode_counter_delta(int64_t d) {
     std::string s;

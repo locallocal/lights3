@@ -1,16 +1,22 @@
-// L1: seastar 驱动 —— shard-per-core 异步模型（docs/http-adapter.md §3.3）。
+// L1: seastar driver — shard-per-core asynchronous model (docs/http-adapter.md §3.3).
 //
-// 与其他驱动的关键差异：seastar reactor 每进程只能启动一次，因此引擎是进程级
-// 单例（首次 listen() 拉起，atexit 收尾），每个 SeastarServer 实例只管理自己的
-// listener 与连接。单测里驱动会被反复建/销，全部复用同一 reactor。
+// Key difference from the other drivers: the seastar reactor can only start
+// once per process, so the engine is a process-level singleton (brought up by
+// the first listen(), wound down via atexit), and each SeastarServer instance
+// manages only its own listener and connections. Unit tests create/destroy
+// drivers repeatedly, all reusing the same reactor.
 //
-// 会话协程直接使用项目自己的 Task<void>（同 beast 驱动的做法）：
-//  - seastar::future 经 FutAwaiter 适配挂起/恢复，resume 发生在本 shard；
-//  - handler/stream_body 可能在池线程 resume，发起下一个 socket 操作前必须
-//    经 ResumeOnShard 切回本 shard（跨线程投递走 seastar::alien）。
+// Session coroutines use the project's own Task<void> directly (same approach
+// as the beast driver):
+//  - seastar::future is adapted to suspend/resume via FutAwaiter, with resume
+//    happening on this shard;
+//  - handler/stream_body may resume on a pool thread, and must switch back to
+//    this shard via ResumeOnShard before starting the next socket operation
+//    (cross-thread posting goes through seastar::alien).
 //
-// 构建要求 SEASTAR_DEFAULT_ALLOCATOR（见根 CMakeLists）：进程里 reactor 之外
-// 还有自有线程池，统一用系统分配器绕开 seastar allocator 的线程归属约束。
+// The build requires SEASTAR_DEFAULT_ALLOCATOR (see root CMakeLists): the
+// process has its own thread pools outside the reactor, so using the system
+// allocator throughout sidesteps the seastar allocator's thread-affinity constraints.
 #include <unistd.h>
 
 #include <seastar/core/alien.hh>
@@ -53,7 +59,7 @@ namespace {
 
 namespace ss = seastar;
 
-// ---------- 进程级引擎单例 ----------
+// ---------- Process-level engine singleton ----------
 
 class SeastarEngine {
 public:
@@ -62,7 +68,7 @@ public:
         return e;
     }
 
-    // 首次调用拉起 reactor（smp = io_threads）；之后复用，smp 不可再改
+    // The first call brings up the reactor (smp = io_threads); later calls reuse it, and smp can no longer change
     void ensure_started(int io_threads) {
         std::lock_guard lk(m_);
         if (started_) {
@@ -76,7 +82,7 @@ public:
         auto fut = ready->get_future();
         thread_ = std::thread([this, ready] { engine_thread(ready); });
         try {
-            fut.get();  // 启动失败（依赖缺失、smp 超核数等）以异常抛给调用方
+            fut.get();  // Startup failures (missing dependency, smp above core count, etc.) are thrown to the caller
         } catch (...) {
             thread_.join();
             throw;
@@ -89,8 +95,10 @@ public:
     unsigned shards() const { return shards_; }
 
 private:
-    // reactor 主协程（shard0）：登记 alien 入口、通知启动完成，然后睡在
-    // eventfd 上直到 stop()。成员协程 + 值参数：帧不引用任何短命 lambda 对象
+    // Reactor main coroutine (shard0): registers the alien entry point,
+    // signals startup completion, then sleeps on the eventfd until stop().
+    // Member coroutine + by-value parameters: the frame references no
+    // short-lived lambda objects
     ss::future<> engine_main(std::shared_ptr<std::promise<void>> ready) {
         alien_ = &ss::engine().alien();
         shards_ = ss::smp::count;
@@ -104,7 +112,7 @@ private:
     void engine_thread(std::shared_ptr<std::promise<void>> ready) {
         ss::app_template::config cfg;
         cfg.name = "lights3-seastar";
-        cfg.auto_handle_sigint_sigterm = false;  // 信号处理归 main 管
+        cfg.auto_handle_sigint_sigterm = false;  // Signal handling belongs to main
         ss::app_template app(std::move(cfg));
 
         std::string smp_arg = std::to_string(smp_);
@@ -118,7 +126,7 @@ private:
             if (!ready_signaled_.exchange(true)) ready->set_exception(std::current_exception());
             return;
         }
-        // app.run 正常返回但从未进入主函数（如参数错误）：把失败带回 ensure_started
+        // app.run returned normally without ever entering the main function (e.g. bad arguments): carry the failure back to ensure_started
         if (!ready_signaled_.exchange(true))
             ready->set_exception(std::make_exception_ptr(
                 std::runtime_error("seastar engine failed to start (see stderr)")));
@@ -144,10 +152,11 @@ private:
     int stop_fd_ = -1;
 };
 
-// ---------- Task<T> 与 seastar 的衔接 ----------
+// ---------- Bridging Task<T> and seastar ----------
 
-// 在 lights3 协程里 co_await 一个 seastar::future；resume 在本 shard 的
-// reactor 上下文中发生（then_wrapped 的续体），异常经 get() 原样重抛
+// co_await a seastar::future from within a lights3 coroutine; resume happens
+// in this shard's reactor context (then_wrapped's continuation), and
+// exceptions are rethrown as-is via get()
 template <class T>
 struct FutAwaiter {
     ss::future<T> fut;
@@ -167,7 +176,7 @@ struct FutAwaiter {
         });
     }
     T await_resume() {
-        // future<> 的 get() 返回内部占位类型而非 void，不能直接 return
+        // future<>'s get() returns an internal placeholder type rather than void; cannot return it directly
         if constexpr (std::is_void_v<T>)
             done->get();
         else
@@ -180,8 +189,9 @@ FutAwaiter<T> fut_await(ss::future<T> f) {
     return {std::move(f), std::nullopt};
 }
 
-// 把续体投递回指定 shard：handler/stream_body 可能在池线程 resume，
-// 发起下一个 socket 操作前必须切回连接所在 shard（对应 beast 的 ResumeOn）
+// Posts the continuation back onto the given shard: handler/stream_body may
+// resume on a pool thread, and we must switch back to the connection's shard
+// before starting the next socket operation (counterpart of beast's ResumeOn)
 struct ResumeOnShard {
     unsigned shard;
 
@@ -195,14 +205,14 @@ struct ResumeOnShard {
     void await_resume() const noexcept {}
 };
 
-// 脱缰启动 Task<void>：与 beast 驱动同款（session 协程的驱动入口）
+// Fire-and-forget launch of a Task<void>: same as the beast driver (the driver's entry point for session coroutines)
 struct Detached {
     struct promise_type {
         Detached get_return_object() { return {}; }
         std::suspend_never initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // spawn_detached 已兜底
+        void unhandled_exception() { std::terminate(); }  // spawn_detached already catches everything
     };
 };
 
@@ -213,26 +223,28 @@ Detached spawn_detached(Task<void> t, Done done) {
     } catch (const std::exception& e) {
         LOG_ERROR("seastar session escaped exception: {}", e.what());
     } catch (...) {
-        // 非 std::exception 也必须兜住，否则打到 promise 的
-        // unhandled_exception 就是 terminate
+        // Non-std::exception must be caught too; otherwise it hits the
+        // promise's unhandled_exception, which means terminate
         LOG_ERROR("seastar session escaped non-standard exception");
     }
     done();
 }
 
-// ---------- 连接与会话 ----------
+// ---------- Connections and sessions ----------
 
-// 带缓冲的连接读取器 + 写出口；请求头解析与 body 读取共用。
-// 所有方法只能在连接所在 shard 上调用。
+// Buffered connection reader + write outlet; shared by request-header parsing
+// and body reads. All methods may only be called on the connection's shard.
 struct SeaConn {
     ss::connected_socket cs;
     ss::input_stream<char> in;
     ss::output_stream<char> out;
     ss::temporary_buffer<char> buf;
     size_t pos = 0;
-    // 空闲超时：每个挂起的 socket 操作都在定时器保护下进行（slowloris 防护，
-    // 覆盖请求行/头块/body 读与响应写全程，而非只有请求行那一次读）。
-    // 到点回调关读写两端，挂起的操作以 EOF/异常醒来，会话自然收尾
+    // Idle timeout: every pending socket operation runs under the timer's
+    // protection (slowloris defense, covering the request line, header block,
+    // body reads, and response writes — not just the single request-line
+    // read). The expiry callback shuts down both directions, pending
+    // operations wake to EOF/exception, and the session winds down naturally
     ss::timer<>* idle = nullptr;
     std::chrono::seconds idle_timeout{0};
 
@@ -249,7 +261,7 @@ struct SeaConn {
     explicit SeaConn(ss::connected_socket s)
         : cs(std::move(s)), in(cs.input()), out(cs.output()) {}
 
-    // 保证缓冲非空；EOF 返回 false
+    // Ensures the buffer is non-empty; returns false on EOF
     Task<bool> fill() {
         while (pos == buf.size()) {
             ArmGuard g(*this);
@@ -260,7 +272,7 @@ struct SeaConn {
         co_return true;
     }
 
-    // 读一行（去掉 \r\n）；EOF/超限返回 false
+    // Reads one line (with \r\n stripped); returns false on EOF/over-limit
     Task<bool> read_line(std::string& line, size_t max_len) {
         line.clear();
         for (;;) {
@@ -295,19 +307,20 @@ struct SeaConn {
     }
 };
 
-// body 读取状态归属会话协程帧（handler 内的 reader 销毁后，连接仍需 drain）。
-// 契约（docs/http-adapter.md §4）：正常 EOF 返回 0；客户端断连/坏 chunked 以异常传播。
+// Body-read state belongs to the session coroutine frame (after the handler's
+// reader is destroyed, the connection still needs to drain).
+// Contract (docs/http-adapter.md §4): normal EOF returns 0; client disconnect / bad chunked propagate as exceptions.
 struct BodyState {
     SeaConn* conn = nullptr;
     unsigned shard = 0;
-    bool need_continue = false;  // Expect: 100-continue 尚未答复，首次读时才回
+    bool need_continue = false;  // Expect: 100-continue not yet answered; reply only on first read
     bool chunked = false;
     uint64_t remaining = 0;
     uint64_t chunk_left = 0;
-    bool after_chunk_data = false;  // 刚读完一个 chunk 的数据，下一行必须是 CRLF
+    bool after_chunk_data = false;  // Just finished a chunk's data; next line must be CRLF
     bool chunk_eof = false;
     bool error = false;
-    size_t trailer_max = 16 * 1024;  // 由 http.trailer_max_size 覆盖（docs/gaps.md §7）
+    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/gaps.md §7)
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -315,9 +328,9 @@ struct BodyState {
     }
 
     Task<size_t> read_some(std::byte* dst, size_t want) {
-        co_await ResumeOnShard{shard};  // 消费方可能在池线程 resume
+        co_await ResumeOnShard{shard};  // The consumer may resume on a pool thread
         if (error) fail("read after connection error");
-        // 延迟 100-continue：handler 决定要 body 了才叫客户端发（docs/http-adapter.md §3.1）
+        // Deferred 100-continue: the client is told to send only once the handler decides it wants the body (docs/http-adapter.md §3.1)
         if (need_continue) {
             need_continue = false;
             try {
@@ -339,8 +352,9 @@ struct BodyState {
             if (chunk_eof) co_return 0;
             std::string line;
             if (after_chunk_data) {
-                // chunk 数据后必须紧跟一个 CRLF，且只允许一个：任意"看似 hex"
-                // 的垃圾或多余空行都不能被当作下一个 chunk size 静默吞掉
+                // Chunk data must be followed by exactly one CRLF: any
+                // "hex-looking" garbage or extra blank line must not be
+                // silently swallowed as the next chunk size
                 if (!co_await conn->read_line(line, 2)) fail("client disconnected mid-body");
                 if (!line.empty()) fail("missing CRLF after chunk data");
                 after_chunk_data = false;
@@ -349,8 +363,10 @@ struct BodyState {
             uint64_t sz = 0;
             if (!driver::parse_chunk_size(line, sz)) fail("malformed chunk size");
             if (sz == 0) {
-                // 末 chunk：吃掉 trailer 直到空行。总量设上限防无限 trailer
-                // 灌注；读失败是 body 截断，必须报错而非当正常 EOF
+                // Final chunk: consume trailers until the blank line. The
+                // total is capped to prevent unbounded trailer flooding; a
+                // read failure is body truncation and must be an error, not a
+                // normal EOF
                 std::string t;
                 size_t trailer_bytes = 0;
                 for (;;) {
@@ -374,9 +390,10 @@ struct BodyState {
 
     bool at_eof() const { return error || (chunked ? chunk_eof : remaining == 0); }
 
-    // 响应前排空残余 body 以复用连接；过大/出错放弃（调用方随即关连接）
+    // Drains leftover body before the response so the connection can be
+    // reused; gives up if too large or on error (the caller then closes the connection)
     Task<bool> drain(uint64_t limit) {
-        // 从未回过 100-continue，客户端可能根本不会发 body，不能傻等
+        // 100-continue was never sent, so the client may never send a body; do not wait blindly
         if (need_continue) co_return false;
         std::vector<std::byte> tmp(driver::kScratchBytes);
         uint64_t drained = 0;
@@ -409,19 +426,19 @@ private:
 
 struct Session {
     SeaConn conn;
-    bool in_flight = false;  // 仅在本 shard 上读写
+    bool in_flight = false;  // Read/written only on this shard
 
     explicit Session(ss::connected_socket s) : conn(std::move(s)) {}
 };
 
-// 每 shard 一份；除构造外只在所属 shard 上触碰
+// One per shard; touched only on its owning shard except during construction
 struct ShardState {
     std::optional<ss::server_socket> listener;
     std::set<std::shared_ptr<Session>> sessions;
     bool stopping = false;
 };
 
-// 跨线程共享的服务器核心：shards[i] 的内容仅由 shard i 触碰
+// Server core shared across threads: the contents of shards[i] are touched only by shard i
 struct ServerCore {
     HttpConfig cfg;
     Handler handler;
@@ -466,10 +483,10 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
             co_return true;
         }
     } catch (...) {
-        co_return false;  // 对端断连等写失败：关连接
+        co_return false;  // Write failure such as peer disconnect: close the connection
     }
 
-    // 流式响应：http.io_chunk_size 块拉取（docs/architecture.md 请求生命周期）
+    // Streaming response: pulled in http.io_chunk_size chunks (docs/architecture.md request lifecycle)
     std::vector<std::byte> buf(io_chunk);
     uint64_t written = 0;
     for (;;) {
@@ -478,7 +495,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
             n = co_await resp.stream_body->read(std::span(buf));
         } catch (const std::exception& e) {
             LOG_ERROR("stream body read failed mid-response: {}", e.what());
-            co_return false;  // 响应头已发出，只能断连（契约 3：丢弃结果）
+            co_return false;  // Response head already sent; can only disconnect (contract 3: discard the result)
         }
         co_await ResumeOnShard{shard};
         try {
@@ -486,8 +503,9 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
                 if (head.chunked) {
                     co_await conn.write("0\r\n\r\n", 5);
                 } else if (resp.content_length && written != *resp.content_length) {
-                    // 定长响应写少了不能保持 keep-alive：客户端会把下个响应头
-                    // 当作本次 body 剩余 → 响应错位
+                    // A fixed-length response that wrote too little must not
+                    // stay keep-alive: the client would read the next response
+                    // head as the rest of this body -> responses misaligned
                     LOG_ERROR("stream body short of declared Content-Length ({} != {})",
                               written, *resp.content_length);
                     co_return false;
@@ -519,9 +537,11 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                        std::string peer, unsigned shard) {
     auto& conn = sess->conn;
     conn.cs.set_nodelay(true);
-    // 空闲/慢速超时：到点关读写两端，挂起的操作醒来见 EOF/异常，会话自然收尾。
-    // 定时器由 SeaConn 在每个挂起的 socket 操作期间武装（ArmGuard），覆盖
-    // 请求行、头块、body 读与响应写全程（slowloris 防护）
+    // Idle/slow timeout: on expiry both directions are shut down, pending
+    // operations wake to EOF/exception, and the session winds down naturally.
+    // The timer is armed by SeaConn during every pending socket operation
+    // (ArmGuard), covering the request line, header block, body reads, and
+    // response writes end to end (slowloris defense)
     ss::timer<> idle_timer([sess] {
         try {
             sess->conn.cs.shutdown_input();
@@ -532,7 +552,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     conn.idle_timeout = std::chrono::seconds(core->cfg.idle_timeout_sec);
     bool keep = true;
 
-    // 对端 RST 等 socket 错误从 seastar future 以异常浮出：兜住后统一走关流收尾
+    // Socket errors such as a peer RST surface from seastar futures as exceptions: catch them and take the unified stream-close wrap-up
     try {
     while (keep && !core->stopping.load(std::memory_order_relaxed)) {
         const size_t max_line = core->cfg.max_header_size;
@@ -553,7 +573,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
             driver::parse_target(target, req);
         }
 
-        // 头部
+        // Headers
         bool bad = false;
         size_t header_bytes = 0;
         for (;;) {
@@ -567,7 +587,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                 bad = true;
                 break;
             }
-            // 裸 CR 不得留在头名/头值里（read_line 只剥行尾的单个 \r）
+            // A bare CR must not remain in the header name/value (read_line only strips the single trailing \r)
             auto colon = line.find(':');
             if (colon == std::string::npos || colon == 0 ||
                 line.find('\r') != std::string::npos) {
@@ -585,13 +605,14 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         sess->in_flight = true;
 
         if (req.headers.has("Connection")) {
-            // 列表头：Connection: close, Upgrade 是合法写法，全等比较会漏判 close
+            // List header: "Connection: close, Upgrade" is valid; full-equality comparison would miss the close
             if (req.headers.has_token("Connection", "close")) keep = false;
             else if (req.headers.has_token("Connection", "keep-alive")) keep = true;
         }
 
-        // body 边界：CL/TE 冲突、重复 CL、非法值一律拒绝关连接（请求走私前置
-        // 条件，见 drivers/common.h parse_body_framing）
+        // Body framing: CL/TE conflict, duplicate CL, and invalid values are
+        // all rejected with the connection closed (request-smuggling
+        // preconditions, see drivers/common.h parse_body_framing)
         auto framing = driver::parse_body_framing(req.headers);
         if (!framing.valid) {
             auto bad = driver::bad_request_response("Invalid message framing.");
@@ -622,16 +643,18 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         try {
             resp = co_await core->handler(std::move(req));
         } catch (const std::exception& e) {
-            // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
+            // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2)
             resp = driver::internal_error_response(e.what());
             keep = false;
         }
-        co_await ResumeOnShard{shard};  // handler 可能在池线程 resume
+        co_await ResumeOnShard{shard};  // The handler may resume on a pool thread
 
         if (core->stopping.load(std::memory_order_relaxed)) keep = false;
-        // 复用连接前必须排空未消费的 body。body 出过错则流已失步（残余字节会
-        // 被当下一个请求解析），必须关连接；从未回过 100-continue 则客户端可能
-        // 根本不会发 body，不能傻等，同样关连接
+        // The unconsumed body must be drained before reusing the connection.
+        // If the body errored, the stream is out of sync (leftover bytes
+        // would be parsed as the next request), so the connection must close;
+        // if 100-continue was never sent, the client may never send a body —
+        // do not wait blindly, close as well
         if (bstate.error) keep = false;
         else if (!bstate.at_eof()) {
             if (bstate.need_continue) keep = false;
@@ -647,9 +670,9 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         LOG_DEBUG("seastar session ended with error: {}", e.what());
     }
     idle_timer.cancel();
-    conn.idle = nullptr;  // 定时器即将随本帧销毁，不得再被 ArmGuard 触碰
+    conn.idle = nullptr;  // The timer is about to be destroyed with this frame; ArmGuard must not touch it again
     sess->in_flight = false;
-    // output_stream 必须显式 close（flush + 释放），失败（对端已断）忽略
+    // output_stream must be closed explicitly (flush + release); failure (peer already gone) is ignored
     try {
         co_await fut_await(conn.out.close());
     } catch (...) {}
@@ -658,17 +681,17 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     } catch (...) {}
 }
 
-// accept 循环：每 shard 一个，abort_accept() 使 accept() 以异常返回而退出
+// Accept loop: one per shard; abort_accept() makes accept() return with an exception and exit
 ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<ShardState> st,
                          unsigned shard) {
     while (!st->stopping) {
         std::optional<ss::accept_result> ar;
-        bool retry = false;  // co_await 不能写在 catch 块里，先记标志再退避
+        bool retry = false;  // co_await cannot appear inside a catch block; record a flag, then back off
         try {
             ar.emplace(co_await st->listener->accept());
         } catch (const std::exception& e) {
-            if (st->stopping) break;  // abort_accept 的正常退出路径
-            // 暂态错误（fd 耗尽等）退避后继续，不能永久停止 accept
+            if (st->stopping) break;  // Normal exit path of abort_accept
+            // Transient errors (fd exhaustion etc.): back off and continue; accepting must not stop permanently
             LOG_WARN("seastar accept failed: {}, throttling", e.what());
             retry = true;
         } catch (...) {
@@ -678,9 +701,11 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
             co_await ss::sleep(std::chrono::milliseconds(100));
             continue;
         }
-        if (st->stopping) break;  // 竞态窗口内接入的连接直接丢弃（析构即关闭）
-        // 并发连接上限（cfg.max_connections，四驱动统一）：按 shard 均摊，超限
-        // 丢弃新连接（ar 析构即关闭），无上限时每连接的协程帧/缓冲可耗尽内存
+        if (st->stopping) break;  // Connections landing in the race window are simply dropped (closed on destruction)
+        // Concurrent-connection cap (cfg.max_connections, uniform across the
+        // four drivers): apportioned per shard; over the limit new
+        // connections are dropped (ar closes on destruction) — without a
+        // cap, per-connection coroutine frames/buffers can exhaust memory
         size_t shard_cap = std::max<size_t>(
             1, static_cast<size_t>(core->cfg.max_connections) / ss::smp::count);
         if (st->sessions.size() >= shard_cap) {
@@ -719,7 +744,7 @@ ss::future<> shutdown_sessions(std::shared_ptr<ServerCore> core, bool idle_only)
     }
 }
 
-// 等待全部会话结束，最多 grace；返回残余会话数
+// Waits for all sessions to end, up to grace; returns the number of sessions left
 ss::future<size_t> wait_drained(std::shared_ptr<ServerCore> core, std::chrono::seconds grace) {
     auto deadline = std::chrono::steady_clock::now() + grace;
     for (;;) {
@@ -729,8 +754,9 @@ ss::future<size_t> wait_drained(std::shared_ptr<ServerCore> core, std::chrono::s
     }
 }
 
-// 优雅停机编排（契约 4）：停 accept → 掐空闲连接 → 等在途请求（10s 宽限）
-// → 强制断开 → 再等 5s → 无论如何让 run() 返回
+// Graceful shutdown orchestration (contract 4): stop accepting -> cut idle
+// connections -> wait for in-flight requests (10s grace) -> force disconnect
+// -> wait another 5s -> make run() return no matter what
 ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd evfd) {
     co_await evfd.wait();
     co_await shutdown_sessions(core, /*idle_only=*/true);
@@ -746,18 +772,22 @@ ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd
     core->notify_stopped();
 }
 
-// 在 shard0 上装配整台服务器：各 shard 建 listener + accept 循环，再挂
-// 停机 watcher；返回停机 eventfd 的写端 fd。
-// 自由协程函数 + 值参数：帧不依赖调用方的 lambda 对象存活（协程 lambda 的
-// 捕获在 lambda 对象销毁后即悬空，alien/smp 的投递闭包都活不过首次挂起）
+// Assembles the whole server on shard0: each shard creates its listener +
+// accept loop, then the shutdown watcher is attached; returns the write-end
+// fd of the shutdown eventfd.
+// Free coroutine function + by-value parameters: the frame does not depend on
+// the caller's lambda object staying alive (a coroutine lambda's captures
+// dangle once the lambda object is destroyed, and the alien/smp posting
+// closures do not outlive the first suspension)
 ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr, uint16_t p) {
     for (unsigned s = 0; s < ss::smp::count; ++s) {
         co_await ss::smp::submit_to(s, [core, &addr, p, s] {
             auto st = std::make_shared<ShardState>();
             ss::listen_options lo;
             lo.reuse_address = true;
-            // inet_address 同时接受 v4/v6 字面量：写死 ipv4_addr 时配置里的
-            // bind: "::" 直接抛错，而 beast/httplib 都能起（docs/gaps.md §3.9）
+            // inet_address accepts both v4/v6 literals: with ipv4_addr
+            // hard-coded, bind: "::" in the config threw outright while
+            // beast/httplib started fine (docs/gaps.md §3.9)
             st->listener =
                 ss::engine().listen(ss::socket_address(ss::inet_address(addr), p), lo);
             core->shards[s] = st;
@@ -768,15 +798,16 @@ ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr,
     int wfd = evfd.get_write_fd();
     (void)stop_watcher(core, std::move(evfd)).handle_exception([core](std::exception_ptr) {
         LOG_ERROR("seastar stop watcher failed unexpectedly");
-        core->notify_stopped();  // 无论如何不能让 run() 卡死
+        core->notify_stopped();  // run() must never hang, no matter what
     });
     co_return wfd;
 }
 
-// port=0 时先用一次性 socket 解析实际端口：posix 栈的跨 shard 连接分发按
-// listen 时传入的地址配对，各 shard 必须用同一个具体端口号监听
+// When port=0, resolve the actual port first with a throwaway socket: the
+// posix stack's cross-shard connection dispatch is paired by the address
+// passed to listen, so every shard must listen on the same concrete port number
 uint16_t probe_free_port(const std::string& addr) {
-    // 同 listen：地址族按字面量判定，v6 也要能探端口
+    // Same as listen: the address family is decided from the literal, and v6 must be probeable too
     sockaddr_storage ss{};
     socklen_t sslen = 0;
     int family = AF_INET;
@@ -814,22 +845,23 @@ uint16_t probe_free_port(const std::string& addr) {
 class SeastarServer final : public IHttpServer {
 public:
     explicit SeastarServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS 不支持（docs/gaps.md §7）：配了必须当场报错，绝不静默跑明文
+        // TLS unsupported (docs/gaps.md §7): configuring it must fail on the spot; never silently run plaintext
         if (!cfg.tls_cert.empty())
             throw std::runtime_error(
                 "http driver 'seastar' does not support TLS; use 'httplib' or 'beast'");
     }
 
     ~SeastarServer() override {
-        // 引擎常驻，但本实例的 fiber 引用着 core_：未停净不能析构
+        // The engine is resident, but this instance's fibers reference core_: cannot destruct before fully stopped
         if (core_ && !core_->is_stopped()) {
             shutdown();
             core_->wait_stopped();
         }
     }
 
-    // listen() 之后调用也生效（core_ 同步更新，与其他驱动"请求期读 handler"
-    // 的时序语义对齐）；但与在途请求并发调用仍属 API 误用
+    // Calling after listen() also takes effect (core_ is updated in sync,
+    // matching the other drivers' "handler read at request time" timing
+    // semantics); calling concurrently with in-flight requests is still API misuse
     void set_handler(Handler h) override {
         handler_ = std::move(h);
         if (core_) core_->handler = handler_;
@@ -851,8 +883,9 @@ public:
         }).get();
 
         port_ = p;
-        // shutdown() 早于 listen() 到达时 stop_fd_ 还是 -1，信号被吞：
-        // 此处补发，保证随后的 run() 能返回
+        // When shutdown() arrives before listen(), stop_fd_ is still -1 and
+        // the signal is swallowed: re-emit it here so the subsequent run()
+        // can return
         if (stopping_.load()) {
             uint64_t one = 1;
             [[maybe_unused]] ssize_t r = ::write(stop_fd_, &one, sizeof(one));
@@ -867,8 +900,10 @@ public:
         LOG_INFO("seastar http server stopped");
     }
 
-    // 仅做 async-signal-safe 操作，可在信号处理器中调用。
-    // exchange 保证只写一次 eventfd：停净后 fd 已随 watcher 销毁，不能再写
+    // Performs only async-signal-safe operations; callable from a signal
+    // handler. The exchange guarantees the eventfd is written only once:
+    // after a full stop the fd is destroyed with the watcher and must not be
+    // written again
     void shutdown() override {
         if (stopping_.exchange(true)) return;
         if (core_) core_->stopping.store(true);

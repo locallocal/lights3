@@ -1,5 +1,6 @@
-// L3: IDataStore 的本地文件系统实现（docs/duostore-backend.md §5）。
-// chunk 路径（定长切片 + shard 目录，P1）+ pack 聚合（append-only record，P2）。
+// L3: local-filesystem implementation of IDataStore (docs/duostore-backend.md §5).
+// Chunk path (fixed-size slicing + shard directories, P1) + pack aggregation
+// (append-only records, P2).
 #pragma once
 
 #include <array>
@@ -18,25 +19,32 @@
 namespace lights3::storage::duostore {
 
 struct FsDataOptions {
-    std::filesystem::path root;  // chunks/ packs/ 在其下（§5）
+    std::filesystem::path root;  // chunks/ and packs/ live underneath (§5)
     uint64_t chunk_size = 8ull << 20;
-    // GET 链路 chunk crc 校验（默认关，§7）：只对"从段首完整读到段尾"的 chunk
-    // 生效——Range 命中中段的部分读无从校验，完整性主责在 GC/对账路径。
-    // pack record 恒校验 crc（整段读入，与本开关无关）
+    // Chunk crc verification on the GET path (default off, §7): only applies to
+    // chunks read completely from start to end — a partial read of a Range hitting
+    // the middle of an extent cannot be verified; primary responsibility for
+    // integrity lies with the GC/reconciliation paths.
+    // pack records always verify crc (read in whole, independent of this switch)
     bool verify_chunk_crc = false;
-    // pack 聚合（§5.2）：对象/分片 ≤ pack_threshold 进 pack；0 = 关闭（全走 chunk）。
-    // 默认 0 保持 FsDataStore 单独构造（测试）时的 P1 行为，DuoStoreBackend 从
-    // 配置注入真实默认（128KiB）
+    // Pack aggregation (§5.2): objects/parts ≤ pack_threshold go into packs;
+    // 0 = disabled (everything goes through chunks).
+    // Default 0 keeps the P1 behavior when FsDataStore is constructed standalone
+    // (tests); DuoStoreBackend injects the real default (128KiB) from config
     uint64_t pack_threshold = 0;
-    uint64_t pack_max_size = 128ull << 20;  // active pack 封存阈值
-    int pack_writers = 4;                   // 并存 active pack 数
-    // 老化轮转（docs/gaps.md §6.1）：active pack 首条 record 写入后逾此时长即封存，
-    // 与容量阈值互补。低写入量下只按容量封存会让 active pack 永不轮转——其中被
-    // 覆盖/删除的 record 成为压实候选集之外的死区（最坏常驻 pack_max_size）。
-    // 0 = 关闭（只按容量与 close 封存，即本改动前的行为）
+    uint64_t pack_max_size = 128ull << 20;  // active pack sealing threshold
+    int pack_writers = 4;                   // number of concurrent active packs
+    // Age-based rotation (docs/gaps.md §6.1): an active pack is sealed once its
+    // first record was written longer than this ago, complementing the capacity
+    // threshold. With capacity-only sealing under low write volume, an active pack
+    // never rotates — its overwritten/deleted records become a dead region outside
+    // the compaction candidate set (up to pack_max_size resident in the worst case).
+    // 0 = disabled (seal only on capacity and close, i.e. behavior before this change)
     int pack_max_age_sec = 0;
-    // 读路径 crc 失配上报（P5 corruption 指标；空 = 不上报）。reader 持本 options
-    // 拷贝逃逸出 store 生命周期——回调不得引用 store/backend（装配侧只捕获计数器）
+    // Reporting of crc mismatches on the read path (P5 corruption metric; empty =
+    // no reporting). Readers hold a copy of these options that escapes the store's
+    // lifetime — the callback must not reference the store/backend (the assembly
+    // side captures only a counter)
     std::function<void()> on_corruption;
 };
 
@@ -45,23 +53,29 @@ class FsPackedWriter;
 
 class FsDataStore final : public IDataStore {
 public:
-    // file_id 分配回调（持久单调，由 IMetaStore::alloc_file_run 提供）：返回
-    // 连续 run [first, first+n) 的首 id。写者按几何增长批取，同对象的 chunk id
-    // 连续，manifest 的 run 编码才有效（docs/gaps.md §3.9）
+    // file_id allocation callback (persistently monotonic, provided by
+    // IMetaStore::alloc_file_run): returns the first id of a contiguous run
+    // [first, first+n). Writers batch-allocate with geometric growth; chunk ids of
+    // the same object stay contiguous, which is what makes the manifest's run
+    // encoding effective (docs/gaps.md §3.9)
     using FileIdAlloc = std::function<uint64_t(Extent::Kind, uint32_t)>;
-    // pack 封存回调（IMetaStore::seal_pack）：轮转与 close 时回报最终文件大小。
-    // 崩溃（未回调）遗留的 unsealed pack 由 DuoStoreBackend 启动时补封（§5.2）
+    // Pack sealing callback (IMetaStore::seal_pack): reports the final file size
+    // on rotation and close. Unsealed packs left behind by a crash (callback never
+    // ran) are catch-up sealed by DuoStoreBackend at startup (§5.2)
     using PackSeal = std::function<void(uint64_t pack_id, uint64_t file_size)>;
 
-    // migrate（§9.2）：压实迁移回调，空 = rewrite_pack 只扫不迁（统计仍产出）
+    // migrate (§9.2): compaction migration callback; empty = rewrite_pack scans
+    // without migrating (statistics are still produced)
     FsDataStore(FsDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc,
                 PackSeal seal = {}, PackMigrateFn migrate = {}, ChunkPinHooks pins = {});
     ~FsDataStore() override;
     FsDataStore(const FsDataStore&) = delete;
 
     Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) override;
-    // 批量写覆写（压实迁移，docs/gaps.md §2.13）：pack 适格项一次槽锁 + 一次
-    // fdatasync 批量追加；超阈值/pack 关闭的项退回逐条 open_writer 路径
+    // Batch-write override (compaction migration, docs/gaps.md §2.13):
+    // pack-eligible items are batch-appended with one slot lock + one fdatasync;
+    // items over the threshold / with packs disabled fall back to the per-item
+    // open_writer path
     Task<std::vector<DataRef>> write_batch(std::span<const PackAppendItem> items) override;
     Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
                                                         uint64_t last) override;
@@ -79,7 +93,7 @@ public:
         override;
     Task<void> close() override;
 
-    // 布局路径（§5）；测试观察用
+    // Layout paths (§5); for test observation
     std::filesystem::path chunk_path(uint64_t file_id) const;
     std::filesystem::path pack_path(uint64_t pack_id) const;
 
@@ -87,44 +101,55 @@ private:
     friend class ChunkWriter;
     friend class FsPackedWriter;
 
-    // active pack 槽（§5.2）：各带互斥与追加偏移，writer 轮询取锁追加。锁模型
-    // 成立的前提：payload ≤ pack_threshold，临界区是一次小 pwrite + fdatasync
+    // Active pack slot (§5.2): each carries a mutex and append offset; writers
+    // round-robin over slots, taking the lock to append. The lock model holds
+    // because payload ≤ pack_threshold and the critical section is one small
+    // pwrite + fdatasync
     struct ActivePack {
         std::mutex m;
         int fd = -1;
         uint64_t id = 0;
-        uint64_t size = 0;  // 当前追加偏移 = 文件大小
-        // 首条 record 落地时刻（steady_clock，老化轮转判据）。用单调钟而非墙钟：
-        // 判的是"这个 pack 开着多久了"，NTP 回拨不该让它永不轮转或立刻轮转
+        uint64_t size = 0;  // current append offset = file size
+        // Moment the first record landed (steady_clock, criterion for age-based
+        // rotation). Monotonic clock rather than wall clock: the question is "how
+        // long has this pack been open", and an NTP step must not make it never
+        // rotate or rotate immediately
         std::chrono::steady_clock::time_point opened{};
     };
 
-    // 懒建 shard 目录 + dirfd 常驻缓存（写会话结束 fsync 目录用，§5.1）
+    // Lazily create shard directories + resident dirfd cache (for fsyncing the
+    // directory at the end of a write session, §5.1)
     int shard_dirfd(unsigned shard) { return subdir_fd(chunk_dirfds_, "chunks", shard); }
     int pack_dirfd(unsigned shard) { return subdir_fd(pack_dirfds_, "packs", shard); }
     int subdir_fd(std::array<int, 256>& fds, const char* sub, unsigned shard);
 
-    // 追加一条 pack record（阻塞 IO，须在池线程调用）；返回指向 payload 的 extent
+    // Append one pack record (blocking IO, must be called on a pool thread);
+    // returns an extent pointing at the payload
     Extent append_pack_record(std::string_view owner, std::span<const std::byte> payload);
-    // 批量追加（write_batch 的 pack 路径）：单次槽锁内逐条 pwrite、末尾一次
-    // fdatasync（§2.13 批量化——中途轮转封存前会先把未同步的写落盘）
+    // Batch append (write_batch's pack path): per-item pwrite inside a single slot
+    // lock, one fdatasync at the end (§2.13 batching — a mid-batch rotation seal
+    // first flushes the unsynced writes to disk)
     std::vector<Extent> append_pack_records(std::span<const PackAppendItem> items);
 
-    // 封存拆两步（docs/gaps.md §3.9）：锁内只关 fd/清槽状态并把 (id,size) 入
-    // seal_retry_，seal_ 的 meta 提交（可能是网络 RTT/fsync）在 flush_seals 里
-    // 锁外执行。此前 seal_ 在 slot 互斥内跑会堵死该槽；抛出时 fd 已置 -1 而
-    // size 未清，下一次写会开新 pack 覆盖槽状态，旧 pack 从此永远不被封存
+    // Sealing split in two steps (docs/gaps.md §3.9): inside the lock only close
+    // the fd / clear slot state and push (id,size) onto seal_retry_; seal_'s meta
+    // commit (possibly a network RTT/fsync) runs outside the lock in flush_seals.
+    // Previously seal_ running inside the slot mutex would block that slot; on
+    // throw the fd was already -1 but size not cleared, the next write opened a
+    // new pack overwriting the slot state, and the old pack was never sealed
     struct PendingSeal {
         uint64_t id = 0;
         uint64_t size = 0;
     };
-    // chunks/ 与 packs/ 的 shard 目录枚举（布局同构，scan_chunks/scan_packs 共用）
+    // Shard directory enumeration for chunks/ and packs/ (isomorphic layout,
+    // shared by scan_chunks/scan_packs)
     Task<void> scan_shard_tree(const char* sub, const char* suffix,
                                const std::function<void(uint64_t, int64_t, uint64_t)>& cb);
 
-    bool slot_aged(const ActivePack& slot) const;  // 持 slot.m 调用；pack_max_age_sec<=0 恒 false
-    void close_slot_locked(ActivePack& slot);      // 持 slot.m 调用
-    // 提交积压的封存；失败放回队列（append 路径告警后续重试，close 路径上抛）
+    bool slot_aged(const ActivePack& slot) const;  // call with slot.m held; always false when pack_max_age_sec<=0
+    void close_slot_locked(ActivePack& slot);      // call with slot.m held
+    // Commit backlogged seals; failures go back onto the queue (the append path
+    // warns and retries later, the close path rethrows)
     void flush_seals(bool rethrow);
 
     FsDataOptions opt_;
@@ -136,10 +161,10 @@ private:
     std::mutex dir_mu_;
     std::array<int, 256> chunk_dirfds_;
     std::array<int, 256> pack_dirfds_;
-    std::vector<std::unique_ptr<ActivePack>> packs_;  // pack_writers 个槽
-    std::atomic<unsigned> pack_rr_{0};                // 轮询游标
+    std::vector<std::unique_ptr<ActivePack>> packs_;  // pack_writers slots
+    std::atomic<unsigned> pack_rr_{0};                // round-robin cursor
     std::mutex seal_mu_;
-    std::vector<PendingSeal> seal_retry_;  // 已关 fd、meta 尚未确认封存的 pack
+    std::vector<PendingSeal> seal_retry_;  // packs with fd closed but sealing not yet confirmed in meta
 };
 
 }  // namespace lights3::storage::duostore

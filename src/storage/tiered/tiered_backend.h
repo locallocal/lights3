@@ -1,6 +1,7 @@
-// L3: 分层存储组合后端（docs/tiered-storage.md）
-// 组合 local（须为 localfs/xlocalfs，共享磁盘布局）与 cloud（任意 IStorageBackend）：
-// 冷对象上传云端后本地 stub 化，访问时透明回读并 Tee 缓存回本地。
+// L3: tiered-storage composite backend (docs/tiered-storage.md)
+// Composes local (must be localfs/xlocalfs, sharing the disk layout) with cloud (any
+// IStorageBackend): cold objects are uploaded to the cloud and stubbed locally, then
+// transparently read back on access and Tee-cached back to local.
 #pragma once
 
 #include <array>
@@ -28,45 +29,48 @@
 namespace lights3::storage {
 
 struct TieredConfig {
-    int64_t cold_after_sec = 30 * 24 * 3600;  // 判冷阈值（docs/tiered-storage.md §5.1）
-    int64_t scan_interval_sec = 3600;         // 0 = 关闭后台任务（测试用手动钩子）
-    double space_high_watermark = 0.85;       // 触发空间回收
-    double space_low_watermark = 0.70;        // 回收目标
-    uint64_t min_free_bytes = 1ull << 30;     // 缓存回填所需最小余量（需求 3）
-    bool cache_fill_on_range = true;          // Range 命中 remote 时后台整对象回迁
+    int64_t cold_after_sec = 30 * 24 * 3600;  // coldness threshold (docs/tiered-storage.md §5.1)
+    int64_t scan_interval_sec = 3600;         // 0 = disable the background task (manual hook for tests)
+    double space_high_watermark = 0.85;       // triggers space reclamation
+    double space_low_watermark = 0.70;        // reclamation target
+    uint64_t min_free_bytes = 1ull << 30;     // minimum headroom required for cache fill (requirement 3)
+    bool cache_fill_on_range = true;          // background whole-object promotion when a Range hits remote
     int max_concurrent_transfers = 4;
-    uint64_t quota_bytes = 0;                 // 0 = 不启用逻辑配额
-    // GC 失败条目的指数退避（docs/tiered-storage.md §9）：delay = base × 2^attempts，
-    // 钳制到 cap；条目级持久化（attempts/retry_at 随 TSV 落盘，重启不清零）
+    uint64_t quota_bytes = 0;                 // 0 = logical quota disabled
+    // Exponential backoff for failed GC entries (docs/tiered-storage.md §9): delay =
+    // base x 2^attempts, clamped to cap; persisted per entry (attempts/retry_at land in the
+    // TSV, not reset by restart)
     int64_t gc_retry_base_sec = 60;
     int64_t gc_retry_cap_sec = 3600;
-    // 对账（§9）：默认每日；0 = 关闭（测试用手动钩子）。孤儿处置默认重建 stub
-    //（绝不销毁数据；删除模式回收云端存储费但误判即丢副本）
+    // Reconciliation (§9): daily by default; 0 = off (manual hook for tests). Orphan
+    // handling defaults to rebuilding the stub (never destroys data; delete mode saves
+    // cloud storage cost but a misjudgment loses the replica)
     int64_t reconcile_interval_sec = 86400;
     bool reconcile_delete_orphans = false;
 };
 
-// run_gc_once() 的统计（退避/测试断言用）
+// Statistics for run_gc_once() (for backoff / test assertions)
 struct TierGcStats {
-    uint64_t resolved = 0;       // 条目落地移除（删除成功 / 云端本就没有 / 活引用作废 / 损坏）
-    uint64_t removed_cloud = 0;  // 实际删除的云端孤儿副本
-    uint64_t deferred = 0;       // 退避未到点，本轮跳过
-    uint64_t failed = 0;         // 本轮失败，已按指数退避重排
+    uint64_t resolved = 0;       // entries conclusively removed (delete succeeded / cloud never had it / live reference invalidated / corrupt)
+    uint64_t removed_cloud = 0;  // orphan cloud replicas actually deleted
+    uint64_t deferred = 0;       // backoff not yet due, skipped this round
+    uint64_t failed = 0;         // failed this round, rescheduled with exponential backoff
 };
 
-// run_reconcile_once() 的双向对账统计（docs/tiered-storage.md §9）
+// Bidirectional reconciliation statistics for run_reconcile_once() (docs/tiered-storage.md §9)
 struct TierReconcileStats {
-    uint64_t cloud_objects = 0;    // 云端遍历到的对象数
-    uint64_t stubs_rebuilt = 0;    // 云端有、本地无 → 从冗余头重建 stub
-    uint64_t orphans_deleted = 0;  // 云端孤儿删除（delete 模式，或本地 local 级的陈旧副本）
-    uint64_t orphans_skipped = 0;  // 不可裁决（无 lights3 冗余头 / etag 歧义）→ 告警跳过
-    uint64_t refs_missing = 0;     // 本地 remote、云端无 → 告警（数据丢失，绝不删 stub）
+    uint64_t cloud_objects = 0;    // objects visited in the cloud walk
+    uint64_t stubs_rebuilt = 0;    // cloud has it, local does not -> stub rebuilt from redundant headers
+    uint64_t orphans_deleted = 0;  // cloud orphans deleted (delete mode, or stale replicas at the local `local` tier)
+    uint64_t orphans_skipped = 0;  // undecidable (no lights3 redundant headers / etag ambiguity) -> warn and skip
+    uint64_t refs_missing = 0;     // local remote, cloud missing -> warn (data loss; never delete the stub)
 };
 
 class TieredBackend final : public IStorageBackend,
                             public std::enable_shared_from_this<TieredBackend> {
 public:
-    // StorageRegistry 两阶段构建入口：params 里的 local/cloud 以 name 引用已构造后端
+    // StorageRegistry two-phase construction entry: local/cloud in params reference
+    // already-built backends by name
     static std::shared_ptr<TieredBackend> from_config(
         const BackendConfig& cfg,
         const std::map<std::string, std::shared_ptr<IStorageBackend>>& built,
@@ -76,13 +80,13 @@ public:
                   std::shared_ptr<ThreadPool> pool, TieredConfig cfg, MetricsScope metrics = {});
     ~TieredBackend() override;
 
-    // ---- bucket：全部委托 local（云侧 bucket 在首次下沉时惰性创建）----
+    // ---- bucket: fully delegated to local (the cloud-side bucket is created lazily on first demotion) ----
     Task<void> create_bucket(std::string_view bucket) override;
     Task<void> delete_bucket(std::string_view bucket) override;
     Task<bool> bucket_exists(std::string_view bucket) override;
     Task<std::vector<BucketInfo>> list_buckets() override;
 
-    // ---- object：tier 感知（docs/tiered-storage.md §6/§7）----
+    // ---- object: tier-aware (docs/tiered-storage.md §6/§7) ----
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
     Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
@@ -92,7 +96,7 @@ public:
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
-    // ---- multipart：全部委托 local；complete 覆盖旧云副本时入 GC ----
+    // ---- multipart: fully delegated to local; when complete overwrites an old cloud replica it goes to GC ----
     Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                        ObjectMeta meta) override;
     Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
@@ -109,26 +113,32 @@ public:
     Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
                                                    const ListUploadsOptions& opt) override;
 
-    // 停止后台定时任务、等待在途后台协程、落盘 atime 快照。不关闭子后端
-    //（它们由 registry 独立持有，可能同时被直接路由）
+    // Stop background timers, wait for in-flight background coroutines, persist the atime
+    // snapshot. Does not close the child backends (they are held independently by the
+    // registry and may be routed to directly at the same time)
     Task<void> close() override;
 
-    // ---- 后台任务与测试钩子（docs/tiered-storage.md §10 P1"手动触发"）----
-    // 单对象下沉：local → remote（上传+stub 化）或 cached → remote（零流量 stub 化）。
-    // 前置不满足（已 remote / 在途任务）静默返回；被并发写打败时云副本入 GC
+    // ---- Background tasks and test hooks (docs/tiered-storage.md §10 P1 "manual trigger") ----
+    // Single-object demotion: local -> remote (upload + stubbing) or cached -> remote
+    // (zero-traffic stubbing). Returns silently when preconditions fail (already remote /
+    // task in flight); if beaten by a concurrent write, the cloud replica goes to GC
     Task<void> demote_object(std::string bucket, std::string key);
-    // 单对象整体回迁：remote → cached（云端 GET → staging → 校验 → 提交）；
-    // Range GET 命中 remote 时由后台调用（single-flight）
+    // Single-object whole promotion: remote -> cached (cloud GET -> staging -> verify ->
+    // commit); called in the background when a Range GET hits remote (single-flight)
     Task<void> promote_object(std::string bucket, std::string key);
-    // 一轮扫描：判冷 + 空间水位回收 + 崩溃恢复（remote 但数据未回收）+ atime 快照
+    // One scan round: coldness detection + space-watermark reclamation + crash recovery
+    // (remote but data not reclaimed) + atime snapshot
     Task<void> scan_once();
-    // 消费一轮 GC 队列：删除孤儿云副本（校验 etag，绝不删活副本）；失败条目按
-    // 指数退避重排（attempts/retry_at 持久化在条目 TSV，重启不清零）
+    // Consume one round of the GC queue: delete orphan cloud replicas (verify etag, never
+    // delete a live replica); failed entries are rescheduled with exponential backoff
+    // (attempts/retry_at persisted in the entry TSV, not reset by restart)
     Task<TierGcStats> run_gc_once();
-    // 双向对账（docs/tiered-storage.md §9，低频默认每日）：云端有本地无 → 从
-    // lights3-* 冗余头重建 stub（默认）或删除（reconcile_delete_orphans）；本地
-    // remote 云端无 → 告警绝不删 stub。GC 队列快照 + inflight 守卫防误判
-    //（待删副本不是孤儿、下沉在途不是孤儿——重建会复活刚 DELETE 的对象）
+    // Bidirectional reconciliation (docs/tiered-storage.md §9, low-frequency, daily by
+    // default): cloud has it, local does not -> rebuild the stub from lights3-* redundant
+    // headers (default) or delete (reconcile_delete_orphans); local remote, cloud missing
+    // -> warn, never delete the stub. GC queue snapshot + inflight guards prevent
+    // misjudgment (a replica pending deletion is not an orphan, an in-flight demotion is
+    // not an orphan -- rebuilding would resurrect a just-DELETEd object)
     Task<TierReconcileStats> run_reconcile_once();
 
     const TieredConfig& config() const { return cfg_; }
@@ -137,13 +147,15 @@ private:
     friend class TeeCacheReader;
     friend struct InflightRelease;
 
-    // ---- 数据面记账（docs/gaps.md §7）：只测 tiered 自身有分层逻辑的四个 op，
-    // 纯委托的 multipart/head 等由 local_ 的 lights3_localfs_* 覆盖 ----
+    // ---- Data-plane accounting (docs/gaps.md §7): measure only the four ops where tiered
+    // itself has tiering logic; purely delegated multipart/head etc. are covered by
+    // local_'s lights3_localfs_* ----
     enum class Op : size_t { kGet, kPut, kDelete, kList };
     static constexpr size_t kOpCount = 4;
     void init_metrics(const MetricsScope& metrics);
     void record_op(Op op, bool ok);
-    // 协程帧内 RAII（同 localfs 的 OpGuard）：异常展开也记账，ok 默认 false
+    // RAII within the coroutine frame (like localfs's OpGuard): accounts even during
+    // exception unwinding, ok defaults to false
     struct OpGuard {
         TieredBackend* self;
         Op op;
@@ -151,11 +163,11 @@ private:
         ~OpGuard() { self->record_op(op, ok); }
     };
 
-    // ---- per-key 锁（docs/tiered-storage.md §7.3）：striped 异步互斥，只保护状态提交段 ----
+    // ---- per-key locks (docs/tiered-storage.md §7.3): striped async mutexes, protecting only the state-commit section ----
     static constexpr size_t kLockStripes = 64;
     AsyncSemaphore& key_lock(std::string_view bucket, std::string_view key);
 
-    // ---- 在途表：single-flight 缓存回填 + 保护下沉上传不被 GC 误删 ----
+    // ---- In-flight table: single-flight cache fill + protects demotion uploads from erroneous GC deletion ----
     bool inflight_try_begin(const std::string& ikey);
     void inflight_end(const std::string& ikey);
     bool inflight_contains(const std::string& ikey);
@@ -163,44 +175,50 @@ private:
         return std::string(bucket) + "/" + std::string(key);
     }
 
-    // ---- TierIndex：atime 表（docs/tiered-storage.md §4.3）----
+    // ---- TierIndex: atime table (docs/tiered-storage.md §4.3) ----
     void touch_atime(std::string_view bucket, std::string_view key);
     void erase_atime(std::string_view bucket, std::string_view key);
     int64_t atime_or(const std::string& ikey, int64_t fallback);
     void load_atime_snapshot();
     void save_atime_snapshot();
 
-    // ---- GC 队列（docs/tiered-storage.md §7.2）：<staging>/tier/gc/<seq> 每项一个 TSV ----
+    // ---- GC queue (docs/tiered-storage.md §7.2): <staging>/tier/gc/<seq>, one TSV per entry ----
     void enqueue_gc(std::string_view bucket, std::string_view key, std::string_view remote_etag);
 
-    // 云侧 bucket 惰性创建（并发下 AlreadyOwned 视为成功）
+    // Lazy cloud-side bucket creation (AlreadyOwned under concurrency counts as success)
     Task<void> ensure_cloud_bucket(std::string_view bucket);
-    // 缓存回填提交：per-key 锁内复核 sidecar 仍为同一 remote 版本后 rename+sidecar
+    // Cache-fill commit: re-verify under the per-key lock that the sidecar is still the
+    // same remote version, then rename+sidecar
     Task<void> commit_cache_fill(std::string bucket, std::string key, ObjectMeta expect,
                                  fsutil::TierInfo expect_tier, fsutil::TmpFile& tmp);
-    // statvfs 余量预检（docs/tiered-storage.md §6.2 步骤②）
+    // statvfs headroom precheck (docs/tiered-storage.md §6.2 step 2)
     bool cache_space_ok(uint64_t size) const;
 
-    // 后台协程管理：core/background.h 等待组（spawn 计数 + close() 等待归零）
+    // Background coroutine management: core/background.h wait group (spawn counting +
+    // close() waits for zero)
     void schedule_scan();
     void schedule_snapshot();
-    void schedule_reconcile();  // 独立低频定时器（reconcile_interval；0 = 关）
+    void schedule_reconcile();  // independent low-frequency timer (reconcile_interval; 0 = off)
 
     Task<void> demote_quiet(std::string bucket, std::string key);
     Task<void> promote_quiet(std::string bucket, std::string key);
     Task<void> scan_and_gc();
-    // quota 增量维护（docs/gaps.md §6.3 / docs/tiered-storage.md）：PUT/DELETE 就地
-    // 增减估算值并在超水位时提前踢一轮 scan——此前只有周期遍历累计，两轮 scan
-    // 之间（默认 1 小时）的配额超限完全不可见。估算随 demote/promote 漂移（只偏
-    // 保守方向：下沉释放的字节仍计在账上），每轮 scan 第一遍以实测值校准
+    // Incremental quota maintenance (docs/gaps.md §6.3 / docs/tiered-storage.md):
+    // PUT/DELETE adjust the estimate in place and kick an early scan round past the
+    // watermark -- previously only the periodic walk accumulated, so quota overruns between
+    // two scans (default 1 hour) were completely invisible. The estimate drifts with
+    // demote/promote (only in the conservative direction: bytes freed by demotion stay on
+    // the books), and the first pass of each scan recalibrates against measured values
     void note_local_delta(int64_t delta);
     void maybe_kick_quota_scan();
     Task<void> snapshot_task();
     Task<void> reconcile_task();
-    // 对账的孤儿处置（per-key 锁内复核后执行）；返回是否动了云端/本地
+    // Reconciliation's orphan handling (executed after re-verification under the per-key
+    // lock); reports whether the cloud/local side was touched
     Task<void> reconcile_orphan(std::string bucket, std::string key, std::string cloud_etag,
                                 bool local_is_live, TierReconcileStats& st);
-    // 反向裁决：本地 remote/cached 引用在云端缺失/etag 不符时 HEAD 现点复核再告警
+    // Reverse adjudication: when a local remote/cached reference is missing in the cloud or
+    // its etag mismatches, re-verify with a HEAD at the current point before warning
     Task<void> reconcile_ref_missing(std::string bucket, std::string key, fsutil::TierInfo t,
                                      TierReconcileStats& st);
 
@@ -209,41 +227,44 @@ private:
     std::shared_ptr<ThreadPool> pool_;
     TieredConfig cfg_;
 
-    // 构造期领取的指标实例（同 duostore 范式），空 scope 时为孤立实例、调用无害
+    // Metric instances claimed at construction (same paradigm as duostore); with an empty
+    // scope they are orphan instances and calls are harmless
     std::array<std::shared_ptr<MetricCounter>, kOpCount> m_ops_, m_op_errors_;
-    std::shared_ptr<MetricCounter> m_get_local_, m_get_cloud_;  // GET 流量来源分叉
+    std::shared_ptr<MetricCounter> m_get_local_, m_get_cloud_;  // GET traffic source split
     std::shared_ptr<MetricCounter> m_demoted_, m_promoted_;
     std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_removed_, m_gc_failed_;
-    std::shared_ptr<MetricGauge> m_gc_deferred_;  // 本轮观测值（非单调，见 init_metrics）
+    std::shared_ptr<MetricGauge> m_gc_deferred_;  // per-round observation (non-monotonic, see init_metrics)
     std::shared_ptr<MetricHistogram> m_scan_duration_;
     std::filesystem::path tier_dir_;  // <staging>/tier
     std::filesystem::path gc_dir_;    // <staging>/tier/gc
 
-    // 信号量统一传池 executor：release 时把等待者续体投回池线程，根除"就地
-    // resume 把阻塞 IO 压在 HTTP 响应线程"的路径（docs/gaps.md §2.4）
+    // Semaphores uniformly take the pool executor: release posts the waiter's continuation
+    // back to a pool thread, eradicating the path where "in-place resume pins blocking IO
+    // on the HTTP response thread" (docs/gaps.md §2.4)
     ThreadPoolExecutor pool_exec_{*pool_};
     std::vector<std::unique_ptr<AsyncSemaphore>> key_locks_;
-    AsyncSemaphore transfers_;  // max_concurrent_transfers 限流（docs/tiered-storage.md §5.1）
+    AsyncSemaphore transfers_;  // max_concurrent_transfers throttle (docs/tiered-storage.md §5.1)
 
     std::mutex inflight_m_;
     std::set<std::string> inflight_;
 
     std::mutex atime_m_;
-    std::unordered_map<std::string, int64_t> atime_;  // ikey → epoch 秒
-    // 自上次快照以来表是否变过（docs/gaps.md §4）：没变就不重写，空闲实例不再
-    // 每 5 分钟对着同一份内容做一遍全量写 + fsync
+    std::unordered_map<std::string, int64_t> atime_;  // ikey -> epoch seconds
+    // Whether the table changed since the last snapshot (docs/gaps.md §4): if unchanged,
+    // do not rewrite -- idle instances no longer do a full write + fsync of the same
+    // content every 5 minutes
     bool atime_dirty_ = false;
 
     std::atomic<uint64_t> gc_seq_{0};
-    std::atomic<int64_t> local_bytes_est_{-1};      // -1 = 尚未由 scan 校准
-    std::atomic<bool> quota_kick_inflight_{false};  // 提前踢的 scan 只并存一个
+    std::atomic<int64_t> local_bytes_est_{-1};      // -1 = not yet calibrated by scan
+    std::atomic<bool> quota_kick_inflight_{false};  // only one early-kicked scan at a time
 
     BackgroundTaskGroup bg_{"tiered"};
-    // 定时器 id 只在 bg_.if_open 内写入；begin_close 后不再变更（读侧无需加锁）。
-    // 未 arm 时为 0：TimerQueue id 从 1 起，cancel(0) 为安全 no-op
+    // Timer ids are written only inside bg_.if_open; unchanged after begin_close (readers
+    // need no lock). 0 when not armed: TimerQueue ids start at 1, cancel(0) is a safe no-op
     TimerQueue::Id scan_timer_ = 0;
-    TimerQueue::Id snap_timer_ = 0;       // atime 快照周期（§4.3，固定 5 min）
-    TimerQueue::Id reconcile_timer_ = 0;  // 对账周期（§9，默认 1d）
+    TimerQueue::Id snap_timer_ = 0;       // atime snapshot period (§4.3, fixed 5 min)
+    TimerQueue::Id reconcile_timer_ = 0;  // reconciliation period (§9, default 1d)
 };
 
 }  // namespace lights3::storage

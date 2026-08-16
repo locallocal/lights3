@@ -1,6 +1,7 @@
-// L3: IMetaStore 的 RocksDB 实现（docs/duostore-backend.md §4）。
-// 提交类操作 = 单 WriteBatch（§4.5）；跨 key 复合不变量用一把 std::mutex 序列化，
-// 纯读（get/list，走 snapshot）不加锁。
+// L3: RocksDB implementation of IMetaStore (docs/duostore-backend.md §4).
+// Commit-type operations = a single WriteBatch (§4.5); compound cross-key
+// invariants are serialized with one std::mutex, while pure reads (get/list, via
+// snapshot) take no lock.
 #pragma once
 
 #include <atomic>
@@ -23,22 +24,26 @@ namespace lights3::storage::duostore {
 
 struct RocksMetaOptions {
     std::string path;
-    bool sync = true;                        // 提交是否 WAL fsync（§6.3 meta_sync）
+    bool sync = true;                        // whether commits WAL-fsync (§6.3 meta_sync)
     size_t block_cache_bytes = 64ull << 20;
-    // 调参外露（P5，docs/duostore-backend.md §11）；默认值 = RocksDB 自身默认，
-    // 不改变既有部署行为。压缩恒关（§13.3），不外露
-    size_t write_buffer_bytes = 64ull << 20;  // 每 CF memtable 容量
-    int max_write_buffers = 2;                // 每 CF memtable 个数上限
-    int max_background_jobs = 2;              // flush/compaction 后台线程总数
-    MetricsScope metrics;  // 空 scope = 孤立实例（测试直构零装配，docs/gaps.md §6.1）
+    // Tuning knobs exposed (P5, docs/duostore-backend.md §11); defaults = RocksDB's
+    // own defaults, so existing deployments keep their behavior. Compression is
+    // always off (§13.3) and not exposed
+    size_t write_buffer_bytes = 64ull << 20;  // memtable capacity per CF
+    int max_write_buffers = 2;                // max memtable count per CF
+    int max_background_jobs = 2;              // total flush/compaction background threads
+    MetricsScope metrics;  // empty scope = isolated instance (tests construct directly with zero wiring, docs/gaps.md §6.1)
 };
 
 class RocksMetaStore final : public IMetaStore {
 public:
-    // 当前 schema 版本（打开时按迁移链升级存量库，docs/gaps.md §6.1）
+    // Current schema version (existing DBs are upgraded via the migration chain on
+    // open, docs/gaps.md §6.1)
     static constexpr int64_t kSchemaCurrent = 1;
-    // schema 标记合法性判定（migrate_schema 的纯前置，静态便于单测）：解析失败、
-    // 版本比本构建新（降级运行会静默写坏）均抛 InternalError；返回存量版本号
+    // Schema marker validity check (pure precondition of migrate_schema; static for
+    // easy unit testing): parse failure, or a version newer than this build (running
+    // downgraded would silently corrupt writes), both throw InternalError; returns
+    // the stored version number
     static int64_t validate_schema_marker(const std::string& stored);
 
     explicit RocksMetaStore(RocksMetaOptions opt);
@@ -74,30 +79,32 @@ public:
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
-    void ack_reclaims(std::span<const uint64_t> seqs) override;  // 单 WriteBatch
+    void ack_reclaims(std::span<const uint64_t> seqs) override;  // single WriteBatch
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
     bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                       const DataRef& from, const DataRef& to) override;
-    // 单 WriteBatch 单提交（压实批量化，gaps §2.13）；逐项 CAS 独立
+    // Single WriteBatch, single commit (batched compaction, gaps §2.13); per-item CAS is independent
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
 
 private:
-    // CF 下标（§4.1 表）
+    // CF indices (table in §4.1)
     enum Cf { kDefault = 0, kBuckets, kObjects, kUploads, kParts, kRefs, kGcq, kStats, kNumCf };
 
-    // 号段预留（§4.5）：stats 计数器一次 merge +kIdSegment、内存派发
+    // Id segment reservation (§4.5): one merge of +kIdSegment on the stats counter,
+    // then in-memory dispatch
     struct IdRange {
         uint64_t next = 0, limit = 0;
     };
     static constexpr uint64_t kIdSegment = 4096;
 
-    // close 后（db_ 为空）抛 InternalError——防御纵深，把误用变成 500 而非段错误；
-    // 契约仍是 close 须在在途请求完成后调用（§9 生命周期）
+    // Throws InternalError after close (db_ is null) — defense in depth, turning
+    // misuse into a 500 instead of a segfault; the contract is still that close
+    // must be called after in-flight requests finish (§9 lifecycle)
     rocksdb::DB* db() const;
     std::optional<std::string> get_raw(int cf, std::string_view key);
     void commit(rocksdb::WriteBatch& batch);
@@ -107,32 +114,39 @@ private:
     uint64_t alloc_id(std::string_view counter_key, IdRange& r, uint32_t n = 1);
     void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref,
                                 ReclaimReason reason);
-    void migrate_schema(const std::string& stored);  // 版本判定 + 迁移链（ctor 调用）
-    // 同批维护 refs（chunk 引用表，§4.1）：add=写入 owner、否则删除
+    void migrate_schema(const std::string& stored);  // version check + migration chain (called by ctor)
+    // Maintain refs (chunk reference table, §4.1) in the same batch: add = write the
+    // owner, otherwise delete
     void batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add,
                     std::string_view owner);
-    // 同批维护 pack 存活账（stats CF 增量 merge，§9.1）。独立于 batch_refs：
-    // complete 的 refs 转移（owner 改写）对 pack 必须是 no-op，混在一起会双计
-    // rec_overhead：每条 record 的头开销（codec::pack_rec_overhead*），live_bytes
-    // 与 file_size 同口径（docs/gaps.md §2.3a）
+    // Maintain the pack liveness ledger (incremental merge on the stats CF, §9.1)
+    // in the same batch. Separate from batch_refs: complete's refs transfer (owner
+    // rewrite) must be a no-op for packs, and mixing them would double-count.
+    // rec_overhead: per-record header overhead (codec::pack_rec_overhead*);
+    // live_bytes uses the same accounting basis as file_size (docs/gaps.md §2.3a)
     void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign,
                           int64_t rec_overhead);
-    // swap 的单项 CAS 核心（持 mu_ 调用）：校验通过即把整组 mutation 追加进 batch
-    // 并返回 true；不符返回 false 不动 batch。swap_extents / swap_extents_batch 共用
+    // Single-item CAS core of swap (called holding mu_): on successful validation it
+    // appends the whole mutation set to the batch and returns true; on mismatch it
+    // returns false without touching the batch. Shared by swap_extents /
+    // swap_extents_batch
     bool stage_swap_locked(rocksdb::WriteBatch& batch, std::string_view b, std::string_view k,
                           uint64_t expect_version, const DataRef& from, const DataRef& to);
 
     RocksMetaOptions opt_;
     std::atomic<rocksdb::DB*> db_{nullptr};
     std::vector<rocksdb::ColumnFamilyHandle*> cfs_;
-    // 一把互斥序列化全部提交类操作。注意：提交（含 meta_sync=true 的 WAL fsync）
-    // 在锁内执行，写路径吞吐上限 ≈ 1/fsync 延迟且 RocksDB group commit 失效——
-    // P1 接受；竞争成为瓶颈时的升级路径是 TransactionDB（§4.5，不做，仅注明）
+    // One mutex serializes all commit-type operations. Note: the commit (including
+    // the WAL fsync when meta_sync=true) runs inside the lock, so write-path
+    // throughput caps at ~1/fsync-latency and RocksDB group commit is defeated —
+    // accepted for P1; the upgrade path when contention becomes the bottleneck is
+    // TransactionDB (§4.5; not done, just noted)
     std::mutex mu_;
-    // 号段派发独立小锁：alloc 在数据面每个 chunk 打开时调用（fs_data_store），
-    // 不能排在业务提交的 WAL fsync 之后。锁序恒 mu_ → alloc_mu_，无环
+    // Separate small lock for id segment dispatch: alloc is called on the data
+    // plane every time a chunk is opened (fs_data_store) and must not queue behind
+    // business commits' WAL fsync. Lock order is always mu_ -> alloc_mu_, no cycle
     std::mutex alloc_mu_;
-    IdRange file_ids_[2];  // 按 Extent::Kind 下标
+    IdRange file_ids_[2];  // indexed by Extent::Kind
     IdRange seqs_;         // gcq seq
 };
 

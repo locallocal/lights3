@@ -23,14 +23,14 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// librados 返回负 errno；InternalError 统一出口（仿 fs/rocks 版 throw_status，§6.3）
+// librados returns negative errno; unified InternalError exit (modeled on the fs/rocks throw_status, §6.3)
 [[noreturn]] void throw_rados(const char* what, int ret) {
     LOG_ERROR("duostore-rados: {} failed: {} (errno {})", what, std::strerror(-ret), -ret);
     throw S3Error(S3ErrorCode::InternalError,
                   std::string("duostore-rados: ") + what + " failed");
 }
 
-rados_ioctx_t io(const std::shared_ptr<RadosDataStore::Conn>& c);  // fwd（定义见下）
+rados_ioctx_t io(const std::shared_ptr<RadosDataStore::Conn>& c);  // fwd (defined below)
 
 }  // namespace
 
@@ -54,28 +54,32 @@ void RadosDataStore::Conn::shutdown() {
 namespace {
 
 rados_ioctx_t io(const std::shared_ptr<RadosDataStore::Conn>& c) {
-    // close 后任何调用干净地抛 500 而非崩溃（§6.5 守卫，仿 rocks 版 db()）
+    // After close, any call throws a clean 500 rather than crashing (§6.5 guard, modeled on the rocks db())
     if (!c || c->closed.load(std::memory_order_acquire))
         throw S3Error(S3ErrorCode::InternalError, "duostore-rados: store is closed");
     return static_cast<rados_ioctx_t>(c->ioctx);
 }
 
-// ---------- aio 协程桥接（§6.2）----------
-// 在途单：一次 rados_aio_* 的完成会合点。completion 回调跑在 librados finisher
-// 线程，纪律 = 只记录结果并把停车的续体投递回本进程池 executor，绝不在 ceph
-// 线程上继续业务逻辑（阻塞它会反压 librados 内部管线）。
-// 堆分配 + 双引用（发起方/回调）：写侧流水允许"发起后先不等待"，发起方弃单
-//（writer 未 finish 即析构）时缓冲与额度都活到回调落地——librados 在途读写的
-// 内存恒有效，额度记账与实际驻留内存恒一致。
+// ---------- aio-to-coroutine bridge (§6.2) ----------
+// In-flight ticket: the rendezvous point for one rados_aio_* completion. The
+// completion callback runs on a librados finisher thread; the discipline is to
+// only record the result and post the parked continuation back to this process's
+// pool executor, never continuing business logic on a ceph thread (blocking it
+// backpressures librados's internal pipeline).
+// Heap-allocated + two references (initiator/callback): the write-side pipeline
+// allows "submit without waiting"; when the initiator abandons the ticket
+// (writer destroyed without finish), the buffer and the permit both live until
+// the callback lands — memory librados is still reading/writing stays valid, and
+// permit accounting always matches actual resident memory.
 struct AioPending {
-    static constexpr uintptr_t kDone = 1;  // state：0 → 等待者 handle 地址 → kDone
+    static constexpr uintptr_t kDone = 1;  // state: 0 → waiter's handle address → kDone
     std::atomic<uintptr_t> state{0};
     std::atomic<int> ret{0};
     IExecutor* ex = nullptr;
     rados_completion_t comp = nullptr;
-    std::shared_ptr<MetricHistogram> lat;  // 可空；提交 → 回调的耗时
+    std::shared_ptr<MetricHistogram> lat;  // nullable; time from submit to callback
     std::chrono::steady_clock::time_point t0;
-    // 写侧专用：在途缓冲的所有权 + 其记账额度 + 收账元数据
+    // Write-side only: ownership of the in-flight buffer + its accounted permit + settlement metadata
     std::vector<std::byte> data;
     AsyncSemaphore::Permit permit;
     uint64_t file_id = 0;
@@ -99,14 +103,16 @@ struct AioPending {
                     .count());
         IExecutor* ex = p->ex;
         uintptr_t prev = p->state.exchange(kDone, std::memory_order_acq_rel);
-        p->unref();  // 此后不得再触碰 p：停车的等待者恢复后即可能释放最后一个引用
+        p->unref();  // must not touch p after this: a parked waiter may release the last reference once resumed
         if (prev)
             ex->post(std::coroutine_handle<>::from_address(reinterpret_cast<void*>(prev)));
     }
 };
 
-// co_await AioAwait{p}：回调未到则停车（由回调经 executor 投递恢复，§6.2 纪律），
-// 已到则不挂起就地续行。返回 op 的 rados 返回值，语义处置归调用方
+// co_await AioAwait{p}: parks if the callback has not arrived yet (resumed by the
+// callback posting through the executor, §6.2 discipline); if it has, continues
+// in place without suspending. Returns the op's rados return value; semantic
+// handling belongs to the caller
 struct AioAwait {
     AioPending* p;
     bool await_ready() const noexcept {
@@ -121,8 +127,9 @@ struct AioAwait {
     int await_resume() const noexcept { return p->ret.load(std::memory_order_relaxed); }
 };
 
-// 新建在途单并绑 completion；提交动作由调用方执行（op 形参不一）。提交即失败
-//（返回负值）时回调不会来，调用方须 unref 两次回收
+// Create a new in-flight ticket and bind its completion; submission is performed
+// by the caller (op signatures differ). If submission itself fails (negative
+// return), the callback will never come and the caller must unref twice to reclaim
 AioPending* make_pending(IExecutor& ex, std::shared_ptr<MetricHistogram> lat) {
     auto* p = new AioPending;
     p->ex = &ex;
@@ -132,8 +139,8 @@ AioPending* make_pending(IExecutor& ex, std::shared_ptr<MetricHistogram> lat) {
     return p;
 }
 
-// 本店对象名 c.<016x> 解析；其余（外来/异版本）不归本店（§8.2，对齐 fs 版对
-// 非 *.chk 文件的处置）
+// Parse our object name c.<016x>; everything else (foreign/other version) does
+// not belong to this store (§8.2, matching the fs version's handling of non-*.chk files)
 bool parse_object_name(const char* name, uint64_t& id) {
     if (std::strlen(name) != 18 || name[0] != 'c' || name[1] != '.') return false;
     auto r = std::from_chars(name + 2, name + 18, id, 16);
@@ -142,14 +149,14 @@ bool parse_object_name(const char* name, uint64_t& id) {
 
 }  // namespace
 
-// ---------- 构造 / 关闭 ----------
+// ---------- construction / shutdown ----------
 
 RadosDataStore::RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool> pool,
                                FileIdAlloc alloc)
     : conn_(std::make_shared<Conn>()), opt_(std::move(opt)), pool_(std::move(pool)),
       alloc_(std::move(alloc)), exec_(*pool_),
       buffer_sem_(std::max<long>(1, long(opt_.buffer_total / opt_.chunk_size)), &exec_) {
-    // op 延迟/错误指标（C4，§10）：构造期注册 0 值可见；空 scope 返回孤立实例
+    // op latency/error metrics (C4, §10): registered at construction so zero values are visible; an empty scope yields an isolated instance
     const std::vector<double> bounds{0.001, 0.005, 0.02, 0.1, 0.5, 2, 10};
     auto lat = [&](const char* op) {
         return opt_.metrics.histogram(
@@ -169,7 +176,7 @@ RadosDataStore::RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool>
     m_err_remove_ = err("remove");
     m_err_scan_ = err("scan");
 
-    // 建连序列（§6.1）：失败即构造失败——配置/环境错误在启动期暴露（fail fast）
+    // Connection sequence (§6.1): failure means construction failure — configuration/environment errors surface at startup (fail fast)
     auto fail = [this](const char* what, int ret) {
         conn_->shutdown();
         throw std::runtime_error(std::string("duostore-rados: ") + what + " failed: " +
@@ -185,7 +192,7 @@ RadosDataStore::RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool>
     if ((r = rados_conf_set(cluster, "client_mount_timeout", mount_timeout.c_str())) < 0)
         fail("rados_conf_set client_mount_timeout", r);
     if (opt_.op_timeout_sec > 0) {
-        // 非 0 时 -ETIMEDOUT 的 op 结果不明——writer 进 failed 态处置（§4.4/§6.4）
+        // When non-zero, a -ETIMEDOUT op's outcome is indeterminate — the writer enters failed state to handle it (§4.4/§6.4)
         std::string op_timeout = std::to_string(opt_.op_timeout_sec);
         if ((r = rados_conf_set(cluster, "rados_osd_op_timeout", op_timeout.c_str())) < 0)
             fail("rados_conf_set rados_osd_op_timeout", r);
@@ -195,21 +202,25 @@ RadosDataStore::RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool>
     if ((r = rados_ioctx_create(cluster, opt_.pool.c_str(), &ioctx)) < 0)
         fail("rados_ioctx_create", r);
     conn_->ioctx = ioctx;
-    // ioctx 属性（namespace）此后不再变更——单 ioctx 进程级共享的线程安全前提（§6.1）
+    // ioctx attributes (namespace) never change after this — the thread-safety precondition for process-wide sharing of a single ioctx (§6.1)
     rados_ioctx_set_namespace(ioctx, opt_.ns.c_str());
 }
 
 RadosDataStore::~RadosDataStore() {
-    // 兜底（正路先 close()）：弃单在途写的回调引用本方 exec_/buffer_sem_，flush
-    // 连回调一起等完后才可析构成员；Conn 仍由最后一个持有者（含逃逸 reader）释放
+    // Fallback (normal path calls close() first): callbacks of abandoned in-flight
+    // writes reference our exec_/buffer_sem_, so flush must wait for the callbacks
+    // too before members may be destroyed; Conn is still released by the last
+    // holder (including escaped readers)
     if (conn_ && !conn_->closed.load(std::memory_order_acquire))
         rados_aio_flush(static_cast<rados_ioctx_t>(conn_->ioctx));
 }
 
 Task<void> RadosDataStore::close() {
-    // 在途写清尾（§6.5）：rados_aio_flush 连 completion 回调一起等完——弃单 writer
-    // 的缓冲/额度归还随之落地，此后 ceph 线程不再触碰 exec_/buffer_sem_。读侧在途
-    // op 由逃逸 reader 自身的 Conn 引用兜住；置 closed 后新 op 干净地抛 500
+    // Drain in-flight writes (§6.5): rados_aio_flush waits for the completion
+    // callbacks too — buffer/permit returns of abandoned writers land with it,
+    // after which ceph threads never touch exec_/buffer_sem_ again. Read-side
+    // in-flight ops are covered by the escaped reader's own Conn reference; after
+    // closed is set, new ops throw a clean 500
     if (conn_ && !conn_->closed.load(std::memory_order_acquire)) {
         co_await pool_->schedule();
         rados_aio_flush(static_cast<rados_ioctx_t>(conn_->ioctx));
@@ -219,11 +230,12 @@ Task<void> RadosDataStore::close() {
     co_return;
 }
 
-// ---------- RadosChunkWriter：切片缓冲 + aio write_full 双缓冲流水（§4）----------
+// ---------- RadosChunkWriter: slice buffering + aio write_full double-buffered pipeline (§4) ----------
 
-// owner 归属 xattr 名（docs/gaps.md §6.1）：WriteHint.owner 此前被丢弃——meta 全
-// 灭的灾难恢复无从判定对象归属。三种 owner 形态（codec::parse_pack_owner）原样
-// 落值，离线打捞用 rados getxattr 反查
+// Owner xattr name (docs/gaps.md §6.1): WriteHint.owner used to be dropped —
+// disaster recovery with all meta lost had no way to determine object ownership.
+// The three owner forms (codec::parse_pack_owner) are stored verbatim as the
+// value; offline salvage reverse-looks-up via rados getxattr
 constexpr char kOwnerXattr[] = "lights3.owner";
 
 class RadosChunkWriter final : public DataWriter {
@@ -231,20 +243,23 @@ public:
     RadosChunkWriter(RadosDataStore* store, std::string owner)
         : store_(store), owner_(std::move(owner)) {}
 
-    // 未 finish 即析构 = 丢弃（§4.3）：不等待在途单——其缓冲/额度由 completion
-    // 回调落地时释放（AioPending 双引用），已写出对象成无主对象，由上层 remove
-    // 兜底或孤儿扫描回收；析构中不做网络 IO
+    // Destruction without finish = discard (§4.3): does not wait for the in-flight
+    // ticket — its buffer/permit are released when the completion callback lands
+    // (AioPending's two references); already-written objects become ownerless,
+    // reclaimed by the caller's fallback remove or the orphan scan; no network IO
+    // in the destructor
     ~RadosChunkWriter() override {
         if (pending_) pending_->unref();
-        // 未 finish 即丢弃：本 writer 建立的 pin 无人接手，就地解除（finish 成功
-        // 时 pinned_ 已清空，不会误解调用方接手的那批）
+        // Discard without finish: pins this writer established have no one to take
+        // them over, so release in place (after a successful finish, pinned_ is
+        // already cleared, so the batch handed to the caller is never mistakenly released)
         for (uint64_t id : pinned_) store_->opt_.pins.unpin_one(id);
     }
 
     Task<void> write(std::span<const std::byte> buf) override {
         require_usable();
         if (!permit_) {
-            // 首次 write 获取缓冲额度；耗尽则挂起，背压沿协程链传导回 socket 读循环（§4.2）
+            // First write acquires a buffer permit; when exhausted it suspends, and backpressure propagates along the coroutine chain back to the socket read loop (§4.2)
             permit_ = co_await store_->buffer_sem_.acquire();
             buf_.reserve(store_->opt_.chunk_size);
         }
@@ -259,13 +274,13 @@ public:
     Task<DataRef> finish() override {
         require_usable();
         if (pending_) co_await harvest_pending();
-        // 小对象/末段：缓冲至 EOF 的退化情形（§4.2），尾片立等；总长 0 = 空 DataRef
+        // Small object / final slice: the degenerate buffered-until-EOF case (§4.2), the tail slice waits synchronously; total length 0 = empty DataRef
         if (!buf_.empty()) {
             co_await start_flush();
             co_await harvest_pending();
         }
         finished_ = true;
-        pinned_.clear();  // 解 pin 责任随 DataRef 移交调用方（同 fs 版语义）
+        pinned_.clear();  // unpin responsibility transfers to the caller with the DataRef (same semantics as the fs version)
         co_return DataRef{std::move(extents_)};
     }
 
@@ -276,10 +291,13 @@ private:
                           "duostore-rados: writer reused after finish/failure");
     }
 
-    // 缓冲满：收上一单（至多 1 单在途，extent 顺序天然保序）→ 发起本片 → 备好
-    // 下一片的缓冲。双缓冲流水（C3，§4.2）：优先复用刚收回的缓冲；首片则 try
-    // 第二份额度——拿不到绝不排队（各 writer 已持一份时嵌套阻塞等待会互等死锁），
-    // 退化为单缓冲串行（C1 行为），背压语义不变
+    // Buffer full: harvest the previous ticket (at most 1 in flight, so extent
+    // order is naturally preserved) → submit this slice → prepare the next slice's
+    // buffer. Double-buffered pipeline (C3, §4.2): prefer reusing the buffer just
+    // reclaimed; for the first slice, try_acquire a second permit — never queue
+    // when it fails (nested blocking waits while every writer already holds one
+    // permit would deadlock in mutual waiting), instead degrade to
+    // single-buffered serial (C1 behavior), backpressure semantics unchanged
     Task<void> flush_chunk() {
         if (pending_) co_await harvest_pending();
         co_await start_flush();
@@ -291,31 +309,37 @@ private:
             buf_ = {};
             buf_.reserve(store_->opt_.chunk_size);
         } else {
-            co_await harvest_pending();  // 串行退化：立等本片落地，收回缓冲继续
+            co_await harvest_pending();  // serial degradation: wait for this slice to land, reclaim the buffer, continue
             permit_ = std::move(spare_permit_);
             buf_ = std::move(spare_);
         }
     }
 
-    // 发起当前缓冲的 write_full（不等待）：单对象 op 原子（无 torn chunk）且回执
-    // 即全副本持久（§4.1/§4.3）。缓冲与额度所有权移交在途单——弃单时 librados
-    // 仍在读的内存与其记账额度都活到回调落地
+    // Submit a write_full of the current buffer (without waiting): a single-object
+    // op is atomic (no torn chunks) and its ack means durability on all replicas
+    // (§4.1/§4.3). Buffer and permit ownership transfer to the in-flight ticket —
+    // if abandoned, the memory librados is still reading and its accounted permit
+    // both live until the callback lands
     Task<void> start_flush() {
-        co_await store_->pool_->schedule();  // crc 计算（CPU）不占 HTTP 驱动线程
+        co_await store_->pool_->schedule();  // crc computation (CPU) stays off the HTTP driver thread
         rados_ioctx_t ctx = io(store_->conn_);
-        // 几何增长批取连续 run（docs/gaps.md §3.9，与 fs ChunkWriter 同策略）：
-        // 并发写者交错派发会让 manifest 的 run 编码失效。号段分配与 pin 必须先于
-        // make_pending：alloc_/pin_one 可抛，此时尚无 AioPending/completion 需回收
+        // Batch-allocate contiguous runs with geometric growth (docs/gaps.md §3.9,
+        // same strategy as fs ChunkWriter): interleaved dispatch across concurrent
+        // writers would defeat the manifest's run encoding. Segment allocation and
+        // pinning must precede make_pending: alloc_/pin_one can throw, and at that
+        // point there is no AioPending/completion yet to reclaim
         if (run_next_ == run_limit_) {
             run_len_ = run_len_ == 0 ? 1 : std::min<uint32_t>(run_len_ * 2, kMaxIdRun);
             run_next_ = store_->alloc_(Extent::Kind::kRados, run_len_);
             run_limit_ = run_next_ + run_len_;
         }
         const uint64_t file_id = run_next_++;
-        // 分配即 pin（docs/gaps.md §1.2）：本片对象在 T0 落地，而整个 PUT 要到
-        // T0+Δ 才提交 meta。Δ 超过 gc_grace 时孤儿扫描会看到"refs 里没有、mtime
-        // 逾宽限、无 pin"的对象直接删掉，PUT 随后提交成功即得到引用已删数据的
-        // 坏对象。pin 一直持有到 finish 后由调用方解除，或本 writer 析构时解除
+        // Pin upon allocation (docs/gaps.md §1.2): this slice's object lands at T0,
+        // but the whole PUT commits meta only at T0+Δ. If Δ exceeds gc_grace, the
+        // orphan scan sees an object that is "absent from refs, mtime beyond grace,
+        // unpinned" and deletes it outright; the PUT then commits successfully and
+        // yields a bad object referencing deleted data. The pin is held until the
+        // caller releases it after finish, or until this writer's destructor releases it
         store_->opt_.pins.pin_one(file_id);
         pinned_.push_back(file_id);
         AioPending* p = make_pending(store_->exec_, store_->m_lat_write_);
@@ -326,8 +350,9 @@ private:
         p->permit = std::move(permit_);
         int r;
         if (!owner_.empty()) {
-            // 归属随对象落盘（§6.1）：单对象 write_op 原子——数据与 owner xattr
-            // 要么都在要么都不在，不产生"有对象无归属"的中间态
+            // Ownership persisted with the object (§6.1): a single-object write_op
+            // is atomic — data and the owner xattr are either both present or both
+            // absent, never the intermediate "object without ownership" state
             rados_write_op_t op = rados_create_write_op();
             rados_write_op_write_full(op, reinterpret_cast<const char*>(p->data.data()),
                                       p->data.size());
@@ -351,8 +376,9 @@ private:
         pending_ = p;
     }
 
-    // 等待在途单落地并收账：成功 → extent 入列、缓冲/额度收回备用；失败进 failed
-    // 态不重试不复用（§4.4）
+    // Wait for the in-flight ticket to land and settle: success → extent enqueued,
+    // buffer/permit reclaimed for reuse; failure enters failed state, no retry, no
+    // reuse (§4.4)
     Task<void> harvest_pending() {
         AioPending* p = std::exchange(pending_, nullptr);
         int r = co_await AioAwait{p};
@@ -371,26 +397,28 @@ private:
     }
 
     RadosDataStore* store_;
-    std::vector<std::byte> buf_;    // 接收中的活跃缓冲（额度 = permit_）
-    std::vector<std::byte> spare_;  // 上一单收回的缓冲（额度 = spare_permit_）
+    std::vector<std::byte> buf_;    // active buffer being filled (permit = permit_)
+    std::vector<std::byte> spare_;  // buffer reclaimed from the previous ticket (permit = spare_permit_)
     std::vector<Extent> extents_;
     AsyncSemaphore::Permit permit_;
     AsyncSemaphore::Permit spare_permit_;
-    AioPending* pending_ = nullptr;  // 在途单（至多 1：写第 N 片时接收 N+1）
-    std::vector<uint64_t> pinned_;   // 本 writer 建立的写侧 pin（finish 后清空）
-    std::string owner_;              // 每片对象随写落 kOwnerXattr（空 = 不落）
-    uint64_t run_next_ = 0, run_limit_ = 0;  // 本会话的连续 id run（§3.9 批取）
+    AioPending* pending_ = nullptr;  // in-flight ticket (at most 1: receiving slice N+1 while writing slice N)
+    std::vector<uint64_t> pinned_;   // write-side pins this writer established (cleared after finish)
+    std::string owner_;              // each slice object gets kOwnerXattr on write (empty = skip)
+    uint64_t run_next_ = 0, run_limit_ = 0;  // this session's contiguous id run (§3.9 batch allocation)
     uint32_t run_len_ = 0;
     bool finished_ = false;
     bool failed_ = false;
 };
 
-// ---------- RadosExtentReader：多对象链流式读（§5）----------
-// 结构对照 fs 版 ExtentChainReader。自包含：持 Conn 的 shared_ptr 而非 store 指针
-// ——ObjectStream 会随 HTTP 响应逃逸出 backend 生命周期。无 fd 概念，逐次按名
-// aio 读（C3：发起后停车，completion 经自持的池 executor 恢复，池线程不再阻塞
-// 等网络）；rados 无"已打开 fd 不受 unlink 影响"的 POSIX 兜底，GC 竞态防护全靠
-// pin+grace（§8.1）。
+// ---------- RadosExtentReader: multi-object-chain streaming read (§5) ----------
+// Structure mirrors the fs version's ExtentChainReader. Self-contained: holds a
+// shared_ptr to Conn rather than a store pointer — the ObjectStream escapes the
+// backend's lifetime along with the HTTP response. No fd concept; reads by name
+// via aio one at a time (C3: park after submit, completion resumes through the
+// self-held pool executor, pool threads no longer block waiting on the network);
+// rados has no POSIX "an open fd is unaffected by unlink" fallback, so GC race
+// protection relies entirely on pin+grace (§8.1).
 
 namespace {
 
@@ -421,16 +449,18 @@ public:
         rados_ioctx_t ctx = io(conn_);
         const Extent& e = extents_[idx_];
         if (at_start_) {
-            // crc 校验只在"从段首完整读到段尾"时可行（Range 命中中段无从校验，§5）
+            // crc verification is only feasible when reading the full extent from start to end (a Range hitting the middle cannot be verified, §5)
             crc_active_ = verify_crc_ && cur_off_ == 0 && remaining_ >= e.length;
             crc_acc_ = 0;
             at_start_ = false;
         }
         size_t want = size_t(std::min<uint64_t>({buf.size(), e.length - cur_off_, remaining_}));
         AioPending* p = make_pending(exec_, lat_);
-        // 与写侧同一策略的缓冲移交（docs/gaps.md §3.9）：aio 写入在途单自有的
-        // 缓冲，完成后再拷给调用方。直写 buf 的话，读超时/取消把协程帧连同调用
-        // 方缓冲一起销毁后，远端 completion 仍会写穿已释放内存
+        // Buffer handover with the same strategy as the write side (docs/gaps.md
+        // §3.9): the aio reads into the ticket's own buffer, copied to the caller
+        // after completion. If it wrote into buf directly, a read timeout/cancel
+        // destroying the coroutine frame along with the caller's buffer would let
+        // the remote completion still write through freed memory
         p->data.resize(want);
         int r = rados_aio_read(ctx, RadosDataStore::object_name(e.file_id).c_str(), p->comp,
                                reinterpret_cast<char*>(p->data.data()), want, cur_off_);
@@ -440,11 +470,11 @@ public:
             err_->inc();
             throw_rados("aio_read submit", r);
         }
-        int n = co_await AioAwait{p};  // completion → 池线程恢复（§6.2）
+        int n = co_await AioAwait{p};  // completion → resumed on a pool thread (§6.2)
         if (n > 0) std::memcpy(buf.data(), p->data.data(), std::min(size_t(n), want));
         p->unref();
         if (n == -ENOENT) {
-            // refs 在而对象缺 = 数据丢失征兆，或 pin/grace 失效（§6.3；主文档 §10 同款）
+            // refs present but object missing = sign of data loss, or pin/grace failure (§6.3; same as main doc §10)
             err_->inc();
             LOG_ERROR("duostore-rados: extent object {} missing",
                       RadosDataStore::object_name(e.file_id));
@@ -479,7 +509,7 @@ public:
 private:
     std::shared_ptr<RadosDataStore::Conn> conn_;
     std::shared_ptr<ThreadPool> pool_;
-    ThreadPoolExecutor exec_;  // aio 恢复投递；自持（reader 逃逸出 store 生命周期）
+    ThreadPoolExecutor exec_;  // aio resume posting; self-held (the reader escapes the store's lifetime)
     bool verify_crc_;
     std::function<void()> on_corruption_;
     std::shared_ptr<MetricHistogram> lat_;
@@ -499,9 +529,10 @@ private:
 // ---------- IDataStore ----------
 
 Task<std::unique_ptr<DataWriter>> RadosDataStore::open_writer(WriteHint hint) {
-    // 未知长度流与已知长度流同一条缓冲切片路径（§3.3/§4.2）；content_length 无用
-    // 武之地，owner 随每片对象落 xattr（§6.1 灾难恢复归属）
-    io(conn_);  // close 守卫
+    // Unknown-length and known-length streams share the same buffered-slicing path
+    // (§3.3/§4.2); content_length has no use here, and owner is persisted as an
+    // xattr on each slice object (§6.1 disaster-recovery ownership)
+    io(conn_);  // close guard
     co_return std::make_unique<RadosChunkWriter>(this, std::move(hint.owner));
 }
 
@@ -510,8 +541,8 @@ Task<std::unique_ptr<http::BodyReader>> RadosDataStore::open_reader(DataRef ref,
     uint64_t total = ref.total();
     if (first > last || last >= total)
         throw S3Error(S3ErrorCode::InternalError,
-                      "duostore-rados: reader range beyond manifest");  // 调用方已 resolve_range
-    io(conn_);  // close 守卫
+                      "duostore-rados: reader range beyond manifest");  // caller already ran resolve_range
+    io(conn_);  // close guard
     co_return std::make_unique<RadosExtentReader>(conn_, pool_, opt_.verify_chunk_crc,
                                                   opt_.on_corruption, m_lat_read_, m_err_read_,
                                                   std::move(ref.extents), first, last);
@@ -519,10 +550,12 @@ Task<std::unique_ptr<http::BodyReader>> RadosDataStore::open_reader(DataRef ref,
 
 Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
     co_await pool_->schedule();
-    rados_ioctx_t ctx = io(conn_);  // close 守卫（空 extents 也生效）
-    // C3：窗口化并发 aio remove——GC 大 manifest（TiB 级对象数十万 extent）不无界
-    // 压集群；-ENOENT 幂等忽略（§7.3），其余负值收齐本批后抛首个（先收后抛，
-    // 在途单不悬空）
+    rados_ioctx_t ctx = io(conn_);  // close guard (effective even for empty extents)
+    // C3: windowed concurrent aio removes — GC of a large manifest (TiB-scale
+    // objects, hundreds of thousands of extents) does not press the cluster
+    // unboundedly; -ENOENT is idempotently ignored (§7.3), other negatives are
+    // collected for the whole batch then the first is thrown (collect before
+    // throw, so no in-flight ticket dangles)
     constexpr size_t kWindow = 16;
     size_t i = 0;
     while (i < extents.size()) {
@@ -531,7 +564,7 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
         int first_err = 0;
         for (; i < extents.size() && n < kWindow; ++i) {
             const auto& e = extents[i];
-            if (e.kind != Extent::Kind::kRados) continue;  // 异种 extent（数据引擎切换遗留）不归本店
+            if (e.kind != Extent::Kind::kRados) continue;  // foreign-kind extents (leftovers from a data engine switch) do not belong to this store
             AioPending* p = make_pending(exec_, m_lat_remove_);
             int r = rados_aio_remove(ctx, object_name(e.file_id).c_str(), p->comp);
             if (r < 0) {
@@ -555,30 +588,35 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
     co_return;
 }
 
-// 无 pack 层是设计边界而非欠账（docs/gaps.md §6.1 定性）：pack 聚合针对的是本地
-// fs 的 per-file 成本（inode/fd/目录项），RADOS 侧小对象的放大由 BlueStore
-// min_alloc_size 与池副本策略承担，网关再叠一层 pack 只会引入跨对象压实与
-// 读改写放大（RADOS 对象本就不可 punch-hole）。小对象密集的部署应在池上配
-// EC/压缩，而非期待网关聚合
+// The absence of a pack layer is a design boundary, not a debt (as characterized
+// in docs/gaps.md §6.1): pack aggregation targets the local fs's per-file cost
+// (inode/fd/directory entry), while small-object amplification on the RADOS side
+// is borne by BlueStore's min_alloc_size and the pool's replication policy;
+// stacking another pack layer at the gateway would only introduce cross-object
+// compaction and read-modify-write amplification (RADOS objects cannot be
+// punch-holed anyway). Small-object-heavy deployments should configure
+// EC/compression on the pool rather than expect gateway aggregation
 
 Task<void> RadosDataStore::remove_pack(uint64_t pack_id) {
-    // 无 pack：pack_stats 恒空，实际不会被调用（§3.3）；显式 no-op 而非接口默认
+    // No packs: pack_stats is always empty, so this is never actually called (§3.3); explicit no-op rather than an interface default
     (void)pack_id;
     co_return;
 }
 
 Task<GcRewrite> RadosDataStore::rewrite_pack(uint64_t pack_id) {
-    // 无 pack：meta 永无 kRados 的 pack 记录，压实候选恒空，实际不会被调用（§3.3）
+    // No packs: meta never has a kRados pack record, the compaction candidate set is always empty, so this is never actually called (§3.3)
     (void)pack_id;
     co_return GcRewrite{};
 }
 
 Task<void> RadosDataStore::scan_chunks(
     const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) {
-    // C4（§8.2）：namespace 内全量列举（ioctx 已限定，多实例互不可见）→ 对象名解析
-    // file_id → stat 取 mtime。列举/统计无 aio 版，低频（默认 1/d）在池线程同步
-    // 阻塞可接受（对齐 fs 版整扫描驻池线程的先例）；孤儿判定（refs/grace/pin）
-    // 是调用方的事，本店只枚举
+    // C4 (§8.2): full listing within the namespace (ioctx already scoped, multiple
+    // instances invisible to each other) → parse file_id from the object name →
+    // stat for mtime. Listing/stat have no aio variants; low frequency (default
+    // 1/day) makes synchronous blocking on a pool thread acceptable (matching the
+    // fs version's precedent of the whole scan residing on a pool thread); orphan
+    // determination (refs/grace/pin) is the caller's job, this store only enumerates
     co_await pool_->schedule();
     rados_ioctx_t ctx = io(conn_);
     rados_list_ctx_t lc = nullptr;
@@ -593,12 +631,12 @@ Task<void> RadosDataStore::scan_chunks(
         if (!parse_object_name(entry, id)) continue;
         uint64_t size = 0;
         time_t mtime = 0;
-        // 秒级 mtime 足够（宽限判定分钟级）；stat 失败 = 并发 remove 竞态，容忍跳过
+        // Second-resolution mtime suffices (grace determination is minute-scale); stat failure = concurrent-remove race, tolerated and skipped
         if (rados_stat(ctx, entry, &size, &mtime) != 0) continue;
         cb(id, int64_t(mtime) * 1000, size);
     }
     rados_nobjects_list_close(lc);
-    if (r != -ENOENT) {  // 列举正常收尾返回 -ENOENT
+    if (r != -ENOENT) {  // listing ends normally with -ENOENT
         m_err_scan_->inc();
         throw_rados("nobjects_list_next", r);
     }

@@ -1,5 +1,6 @@
-// L1/L2 边界：HTTP 中立模型（见 docs/http-adapter.md）
-// 本头文件只依赖标准库与 core/task.h，任何 HTTP 库的类型都不得出现在这里。
+// L1/L2 boundary: HTTP-neutral model (see docs/http-adapter.md)
+// This header depends only on the standard library and core/task.h; no HTTP
+// library types may appear here.
 #pragma once
 
 #include <cstddef>
@@ -16,7 +17,7 @@
 
 namespace lights3::http {
 
-// 大小写不敏感、保序的头部表
+// Case-insensitive, order-preserving header table
 class HeaderMap {
 public:
     void add(std::string key, std::string value) {
@@ -30,8 +31,9 @@ public:
             }
         add(key, std::move(value));
     }
-    // 首个匹配头的指针，不存在返回 nullptr。L1/L2 每请求要查十几次头，
-    // get() 的 optional<string> 每次都拷一份值——判存在/比较时用这个
+    // Pointer to the first matching header, nullptr if absent. L1/L2 look up
+    // a dozen-plus headers per request, and get()'s optional<string> copies
+    // the value each time — use this for existence checks / comparisons
     const std::string* find(std::string_view key) const {
         for (auto& [k, v] : items_)
             if (ieq(k, key)) return &v;
@@ -43,8 +45,10 @@ public:
     }
     bool has(std::string_view key) const { return find(key) != nullptr; }
 
-    // 同名头可以出现多次（Set-Cookie、逗号可拆的列表头等）。只取首个会漏判，
-    // 调用方此前只能自己遍历 items()（parse_body_framing 就是这么绕开 get 的）
+    // A header name may appear multiple times (Set-Cookie, comma-splittable
+    // list headers, etc.). Taking only the first misses cases; callers
+    // previously had to iterate items() themselves (parse_body_framing worked
+    // around get that way)
     std::vector<const std::string*> get_all(std::string_view key) const {
         std::vector<const std::string*> out;
         for (auto& [k, v] : items_)
@@ -58,7 +62,7 @@ public:
         return n;
     }
 
-    // 删除全部同名头，返回删除条数
+    // Removes all headers with this name, returns the number removed
     size_t remove(std::string_view key) {
         size_t before = items_.size();
         std::erase_if(items_, [&](const auto& kv) { return ieq(kv.first, key); });
@@ -67,8 +71,9 @@ public:
 
     const std::vector<std::pair<std::string, std::string>>& items() const { return items_; }
 
-    // 逗号分隔的列表头里是否含某个 token（大小写不敏感，忽略两侧空白）。
-    // Connection 之类的列表头用全等比较会漏判 "close, Upgrade" 这种合法写法
+    // Whether a comma-separated list header contains a token (case-insensitive,
+    // surrounding whitespace ignored). Comparing list headers like Connection
+    // for full equality would miss valid forms such as "close, Upgrade"
     bool has_token(std::string_view key, std::string_view token) const {
         for (auto& [k, v] : items_) {
             if (!ieq(k, key)) continue;
@@ -98,14 +103,14 @@ private:
     std::vector<std::pair<std::string, std::string>> items_;
 };
 
-// 流式请求/响应体：拉模型。返回读到的字节数；0 表示 EOF。
+// Streaming request/response body: pull model. Returns bytes read; 0 means EOF.
 struct BodyReader {
     virtual Task<size_t> read(std::span<std::byte> buf) = 0;
-    virtual std::optional<uint64_t> length() const = 0;  // chunked 时 nullopt
+    virtual std::optional<uint64_t> length() const = 0;  // nullopt when chunked
     virtual ~BodyReader() = default;
 };
 
-// 内存串的 BodyReader（小 body、单测用）
+// BodyReader over an in-memory string (small bodies, unit tests)
 class StringBodyReader final : public BodyReader {
 public:
     explicit StringBodyReader(std::string data) : data_(std::move(data)) {}
@@ -126,15 +131,17 @@ private:
 
 struct HttpRequest {
     std::string method;    // "GET" "PUT" ...
-    std::string raw_path;  // 未解码（SigV4 canonical URI 需要）
-    std::string raw_query; // 未解码原始 query 串（SigV4 需要）
-    std::string path;      // 已解码
-    std::vector<std::pair<std::string, std::string>> query;  // 已解码、保序
+    std::string raw_path;  // Undecoded (needed for the SigV4 canonical URI)
+    std::string raw_query; // Undecoded raw query string (needed for SigV4)
+    std::string path;      // Decoded
+    std::vector<std::pair<std::string, std::string>> query;  // Decoded, order-preserving
     HeaderMap headers;
     std::string remote_addr;
-    std::unique_ptr<BodyReader> body;  // 可能为 nullptr（无 body）
-    // 取消信号（docs/concurrency.md §5）：驱动/装配层挂上本请求的 token，L2 把它
-    // 与请求级超时并到同一个源，整条协程链据此收敛。默认"永不取消"
+    std::unique_ptr<BodyReader> body;  // May be nullptr (no body)
+    // Cancellation signal (docs/concurrency.md §5): the driver/assembly layer
+    // attaches this request's token, L2 merges it with the request-level
+    // timeout into one source, and the whole coroutine chain unwinds from it.
+    // Defaults to "never cancelled"
     CancelToken cancel;
 
     std::optional<std::string> query_get(std::string_view key) const {
@@ -148,10 +155,10 @@ struct HttpRequest {
 struct HttpResponse {
     int status = 200;
     HeaderMap headers;
-    // body 二选一：小响应用 small_body；大响应用 stream_body
+    // Body is one of the two: small_body for small responses, stream_body for large ones
     std::string small_body;
     std::unique_ptr<BodyReader> stream_body;
-    std::optional<uint64_t> content_length;  // stream_body 时给出，否则驱动走 chunked
+    std::optional<uint64_t> content_length;  // Set with stream_body; otherwise the driver uses chunked
 };
 
 }  // namespace lights3::http

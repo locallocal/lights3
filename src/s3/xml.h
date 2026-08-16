@@ -1,4 +1,4 @@
-// L2: 小型 XML 生成器与解析器（S3 请求/响应结构浅且模式固定，不引入 XML 库）
+// L2: small XML generator and parser (S3 request/response structures are shallow and fixed-shape; no XML library dependency)
 #pragma once
 
 #include <cstdint>
@@ -10,17 +10,17 @@ namespace lights3::s3 {
 
 std::string xml_escape(const std::string& s);
 
-// ---------- 解析（docs/s3-protocol.md §4：仅 CompleteMultipartUpload / DeleteObjects 等浅结构）----------
-// 支持：元素嵌套、文本、实体（lt gt amp quot apos #dd #xhh）、注释、XML 声明、CDATA。
-// 属性被跳过（S3 请求 XML 只有 xmlns）。格式错误或超过 max_size 抛 S3Error{MalformedXML}。
+// ---------- Parsing (docs/s3-protocol.md §4: only shallow structures such as CompleteMultipartUpload / DeleteObjects) ----------
+// Supports: nested elements, text, entities (lt gt amp quot apos #dd #xhh), comments, XML declaration, CDATA.
+// Attributes are skipped (S3 request XML only carries xmlns). Malformed input or exceeding max_size throws S3Error{MalformedXML}.
 
 struct XmlNode {
     std::string name;
-    std::string text;  // 直接文本（拼接、去首尾空白）
+    std::string text;  // direct text (concatenated, leading/trailing whitespace trimmed)
     std::vector<XmlNode> children;
 
-    const XmlNode* find(std::string_view child_name) const;   // 首个同名子节点
-    std::string get(std::string_view child_name) const;       // 子节点文本，缺省 ""
+    const XmlNode* find(std::string_view child_name) const;   // first child with the given name
+    std::string get(std::string_view child_name) const;       // child node text, "" if absent
 };
 
 XmlNode xml_parse(std::string_view input, size_t max_size = 1024 * 1024);

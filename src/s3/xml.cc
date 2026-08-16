@@ -17,9 +17,9 @@ std::string xml_escape(const std::string& s) {
             case '"': out += "&quot;"; break;
             case '\'': out += "&apos;"; break;
             default:
-                // XML 1.0 禁止绝大多数 C0 控制字符（连字符引用都不合法）：直接
-                // 丢弃，出口兜底防反射（docs/gaps.md §4——<Resource> 会回显
-                // 请求侧字符串，上游校验之外仍要保证输出恒为合法 XML）
+                // XML 1.0 forbids most C0 control characters (even character references are illegal):
+                // drop them outright, an output-side safety net against reflection (docs/gaps.md §4 -- <Resource> echoes
+                // request-side strings; beyond upstream validation, output must always remain valid XML)
                 if (static_cast<unsigned char>(c) < 0x20 && c != '\t' && c != '\n' &&
                     c != '\r')
                     break;
@@ -29,7 +29,7 @@ std::string xml_escape(const std::string& s) {
     return out;
 }
 
-// ---------- 解析 ----------
+// ---------- Parsing ----------
 
 namespace {
 
@@ -66,7 +66,7 @@ private:
         pos_ = at + end.size();
     }
 
-    // 根元素前后与元素间的杂项：空白、声明、注释、DOCTYPE（跳过，不展开实体）
+    // Misc content before/after the root element and between elements: whitespace, declarations, comments, DOCTYPE (skipped, entities not expanded)
     void skip_misc() {
         for (;;) {
             skip_ws();
@@ -91,14 +91,14 @@ private:
         return std::string(s_.substr(start, pos_ - start));
     }
 
-    // 已定位到 '<'；解析整个元素（含子元素与文本）
+    // Positioned at '<'; parse the whole element (including children and text)
     XmlNode parse_element() {
         if (++depth_ > 32) bad("nesting too deep");
         ++pos_;  // '<'
         XmlNode node;
         node.name = parse_name();
 
-        // 属性统一跳过（S3 请求 XML 只有 xmlns）
+        // Attributes are uniformly skipped (S3 request XML only carries xmlns)
         for (;;) {
             skip_ws();
             if (eof()) bad("unterminated start tag");
@@ -109,12 +109,12 @@ private:
             if (starts_with("/>")) {
                 pos_ += 2;
                 --depth_;
-                return node;  // 自闭合
+                return node;  // self-closing
             }
             parse_attribute();
         }
 
-        // 内容
+        // Content
         std::string text;
         for (;;) {
             if (eof()) bad("unterminated element <" + node.name + ">");
@@ -173,8 +173,8 @@ private:
 
     void parse_entity(std::string& out) {
         auto semi = s_.find(';', pos_);
-        // 长度护栏只拒明显垃圾：最长合法引用 &#x10FFFF; / &#1114111; 的
-        // semi-pos_ 为 9，留少量前导零余量（XML 允许 &#x0010FFFF;）
+        // The length guard only rejects obvious garbage: for the longest legal references &#x10FFFF; / &#1114111;
+        // semi-pos_ is 9; leave a little slack for leading zeros (XML allows &#x0010FFFF;)
         if (semi == std::string_view::npos || semi - pos_ > 16) bad("malformed entity");
         std::string_view e = s_.substr(pos_ + 1, semi - pos_ - 1);
         pos_ = semi + 1;

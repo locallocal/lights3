@@ -5,8 +5,10 @@
 
 namespace lights3::http {
 
-// 编译进来的驱动在这里挂接注册（静态库中靠 static 初始化注册会被链接器丢弃，
-// 因此采用显式注册；新驱动在 CMake 定义宏并在此声明即可）
+// Compiled-in drivers are hooked up and registered here (static-initializer
+// registration in a static library gets discarded by the linker, so we use
+// explicit registration; for a new driver, define the macro in CMake and
+// declare it here)
 #ifdef LIGHTS3_DRIVER_BUILTIN
 void register_builtin_driver();
 #endif

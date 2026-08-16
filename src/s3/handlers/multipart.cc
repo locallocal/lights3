@@ -1,5 +1,5 @@
-// multipart handler：Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
-// （docs/s3-protocol.md §1；存储层语义见 docs/storage-backend.md §3.2）
+// multipart handler: Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
+// (docs/s3-protocol.md §1; storage-layer semantics in docs/storage-backend.md §3.2)
 #include <charconv>
 #include <algorithm>
 #include <map>
@@ -37,8 +37,8 @@ std::string require_upload_id(const http::HttpRequest& req) {
     return *v;
 }
 
-// query 里的整数参数：缺省用 def，非法一律 400（静默当默认值会让客户端以为
-// 自己的分页生效了）
+// Integer query parameters: default to def when absent, any invalid value is 400 (silently falling back to the
+// default would let clients believe their pagination took effect)
 int parse_int_param(const http::HttpRequest& req, const char* name, int def) {
     auto v = req.query_get(name);
     if (!v || v->empty()) return def;
@@ -49,16 +49,16 @@ int parse_int_param(const http::HttpRequest& req, const char* name, int def) {
     return out;
 }
 
-// max-* 与 ListObjects 的 max-keys 同款：负值 400，超出上限静默钳制——不钳制的话
-// max=INT_MAX 会把整表一次构造进内存
+// max-* mirrors ListObjects' max-keys: negative is 400, above the cap is silently clamped -- without clamping,
+// max=INT_MAX would build the whole table in memory at once
 int parse_max(const http::HttpRequest& req, const char* name, int cap) {
     int v = parse_int_param(req, name, cap);
     if (v < 0) throw S3Error(S3ErrorCode::InvalidArgument, std::string("Invalid ") + name + " value");
     return std::min(v, cap);
 }
 
-// "scheme://host"：Location 要完整 URL（docs/gaps.md §5.7）。scheme 只能靠反代
-// 转述——直连时本实现是明文 HTTP，TLS 由前置代理终结（docs/s3-protocol.md）
+// "scheme://host": Location must be a full URL (docs/gaps.md §5.7). The scheme can only be relayed by the reverse
+// proxy -- on direct connections this implementation is plaintext HTTP, TLS is terminated by a front proxy (docs/s3-protocol.md)
 std::string request_base_url(const http::HttpRequest& req) {
     std::string scheme = "http";
     if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) scheme = *p;
@@ -66,20 +66,20 @@ std::string request_base_url(const http::HttpRequest& req) {
     return scheme + "://" + host;
 }
 
-// 最小分片校验（docs/gaps.md §5.7）：末片除外。分片尺寸只有存储层知道，
-// complete 之前先列一次；缺失的分片不在这里报错，交给后端的 InvalidPart
+// Minimum part size check (docs/gaps.md §5.7): last part exempt. Only the storage layer knows part sizes,
+// so list once before complete; missing parts are not reported here but left to the backend's InvalidPart
 Task<void> check_min_part_sizes(storage::IStorageBackend& backend, const std::string& bucket,
                                 const std::string& key, const std::string& upload_id,
                                 const std::vector<storage::PartInfo>& parts, uint64_t min_size) {
-    if (min_size == 0) co_return;      // 旋钮关闭
-    if (parts.size() <= 1) co_return;  // 单片上传不受最小尺寸约束
-    // 取全量：分片数由协议封顶 10000，且这里要按分片号查表而非翻页
+    if (min_size == 0) co_return;      // knob disabled
+    if (parts.size() <= 1) co_return;  // single-part uploads are exempt from the minimum size
+    // Fetch everything: the protocol caps part count at 10000, and this needs lookup by part number, not paging
     storage::ListPartsOptions all_opt;
     all_opt.max_parts = storage::kMaxParts;
     auto have = co_await backend.list_parts(bucket, key, upload_id, all_opt);
     std::map<int, uint64_t> size_of;
     for (auto& p : have.parts) size_of[p.part_no] = p.size;
-    for (size_t i = 0; i + 1 < parts.size(); ++i) {  // 末片不校验
+    for (size_t i = 0; i + 1 < parts.size(); ++i) {  // last part not checked
         auto it = size_of.find(parts[i].part_no);
         if (it == size_of.end()) continue;
         if (it->second < min_size)
@@ -91,8 +91,8 @@ Task<void> check_min_part_sizes(storage::IStorageBackend& backend, const std::st
     }
 }
 
-// "bytes=first-last"：两端必填、闭区间（AWS UploadPartCopy 语义，比 GET Range 的
-// 宽松解析严格——suffix/开区间形式在这里都是 InvalidArgument）
+// "bytes=first-last": both ends required, closed interval (AWS UploadPartCopy semantics, stricter than GET Range's
+// lenient parsing -- suffix/open-ended forms are all InvalidArgument here)
 storage::ByteRange parse_copy_source_range(const std::string& v, uint64_t src_size) {
     auto bad = [] {
         throw S3Error(S3ErrorCode::InvalidArgument,
@@ -146,8 +146,9 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
     int part_no = parse_part_number(req);
     std::string upload_id = require_upload_id(req);
 
-    // UploadPartCopy（docs/s3-protocol.md §1）：源经 head 校验条件头后按 range 流式
-    // 读出，作为 part body 写入目标 upload；源/目标可在不同后端（同 CopyObject）
+    // UploadPartCopy (docs/s3-protocol.md §1): after conditional headers are checked via head, the source is
+    // streamed out by range and written into the target upload as the part body; source/target may be on
+    // different backends (same as CopyObject)
     if (auto src_hdr = req.headers.get("x-amz-copy-source")) {
         auto [src_bucket, src_key] = parse_copy_source(*src_hdr);
         auto& src_backend = router_.resolve(src_bucket);
@@ -193,8 +194,8 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     std::vector<storage::PartInfo> parts;
     for (auto& child : root.children) {
         if (child.name != "Part") continue;
-        // 分片数上界（docs/gaps.md §5.7）：此前无限追加，一份构造好的 XML 就能
-        // 让本请求把任意长的列表读进内存
+        // Part count upper bound (docs/gaps.md §5.7): previously unbounded appends, so one crafted XML could
+        // make this request read an arbitrarily long list into memory
         if (parts.size() >= size_t(storage::kMaxParts))
             throw S3Error(S3ErrorCode::InvalidRequest,
                           "The upload contains more than the maximum number of allowed parts.");
@@ -203,16 +204,17 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
         auto [ptr, ec] = std::from_chars(no.data(), no.data() + no.size(), p.part_no);
         if (ec != std::errc() || ptr != no.data() + no.size())
             throw S3Error(S3ErrorCode::MalformedXML, "Invalid PartNumber.");
-        // 上界复核：upload 时校验过，complete 的列表是另一份输入
+        // Re-check the upper bound: validated at upload time, but complete's list is a separate input
         storage::validate_part_number(p.part_no);
         p.etag = child.get("ETag");
         parts.push_back(std::move(p));
     }
-    storage::validate_part_order(parts);  // 乱序 → InvalidPartOrder，先于后端判定
+    storage::validate_part_order(parts);  // out of order -> InvalidPartOrder, decided before the backend
 
     auto& backend = router_.resolve(bucket);
-    // 最小分片 5MiB（末片除外）：不校验则 10000 个 1 字节分片也能提交，complete
-    // 逐个 open/read/write 拼接是廉价的放大面。尺寸只有存储层知道，故先列一次
+    // Minimum part size 5MiB (last part exempt): without the check, 10000 one-byte parts could be committed, and
+    // complete's per-part open/read/write concatenation is a cheap amplification surface. Only the storage layer
+    // knows sizes, hence the upfront listing
     co_await check_min_part_sizes(backend, bucket, key, upload_id, parts, min_part_size_);
 
     auto result = co_await backend.complete_multipart(bucket, key, upload_id, parts);
@@ -220,8 +222,8 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
 
     XmlWriter w;
     w.open("CompleteMultipartUploadResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
-    // Location 回完整 URL（部分 Java SDK 直接当 URL 用）。用 req.path 重建可同时
-    // 覆盖 path-style 与 vhost 两种寻址——vhost 下 req.path 本就只有 key
+    // Location returns a full URL (some Java SDKs use it directly as a URL). Rebuilding from req.path covers both
+    // path-style and vhost addressing -- under vhost, req.path already contains only the key
     w.element("Location", request_base_url(req) + req.path);
     w.element("Bucket", bucket);
     w.element("Key", key);
@@ -245,7 +247,7 @@ Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std:
 Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::string bucket,
                                                std::string key) {
     std::string upload_id = require_upload_id(req);
-    // 此前 max-parts / part-number-marker 一个都不读，还恒报 IsTruncated=false
+    // Previously neither max-parts nor part-number-marker was read, and IsTruncated=false was always reported
     //（docs/gaps.md §5.1）
     storage::ListPartsOptions opt;
     opt.max_parts = parse_max(req, "max-parts", 1000);
@@ -284,23 +286,23 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
 Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& req,
                                                            std::string bucket,
                                                            const RequestAuth& auth) {
-    // 此前 `(void)req;`——prefix/delimiter/三个 marker/max-uploads 一个都不读，
-    // 却硬编码 MaxUploads=1000 与 IsTruncated=false 后返回全部 upload
+    // Previously `(void)req;` -- none of prefix/delimiter/the three markers/max-uploads was read,
+    // yet MaxUploads=1000 and IsTruncated=false were hardcoded and every upload returned
     storage::ListUploadsOptions opt;
     opt.prefix = req.query_get("prefix").value_or("");
     opt.delimiter = req.query_get("delimiter").value_or("");
     opt.max_uploads = parse_max(req, "max-uploads", 1000);
     opt.key_marker = req.query_get("key-marker").value_or("");
     opt.upload_id_marker = req.query_get("upload-id-marker").value_or("");
-    // upload-id-marker 单独出现无意义（游标是二元组），AWS 同样按 400 处理
+    // upload-id-marker alone is meaningless (the cursor is a pair); AWS likewise treats it as 400
     if (opt.key_marker.empty() && !opt.upload_id_marker.empty())
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "upload-id-marker requires key-marker to be specified.");
     if (!opt.delimiter.empty() && opt.delimiter != "/")
         throw S3Error(S3ErrorCode::NotImplemented,
                       "Only '/' is supported as a delimiter.");
-    // encoding-type=url：与 list_objects 同一语义——此前放行了参数却从不编码，
-    // 静默误答
+    // encoding-type=url: same semantics as list_objects -- previously the parameter was accepted but nothing
+    // was ever encoded, a silent wrong answer
     bool encode_url = false;
     if (auto et = req.query_get("encoding-type")) {
         if (*et != "url")
@@ -314,8 +316,8 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
 
     auto res = co_await router_.resolve(bucket).list_multipart_uploads(bucket, opt);
 
-    // policy prefix 过滤：同 list_objects——否则 prefix 受限凭证可枚举他租户
-    // 进行中 upload 的 key
+    // Policy prefix filtering: same as list_objects -- otherwise a prefix-restricted credential could enumerate
+    // other tenants' in-progress upload keys
     if (auth.policy && !auth.policy->prefixes.empty()) {
         std::erase_if(res.uploads,
                       [&](const auto& u) { return !auth.policy->allows_key(u.key); });

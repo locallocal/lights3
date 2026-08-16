@@ -1,9 +1,12 @@
-// L3: bucket → 后端路由（glob 规则，声明序匹配，见 docs/storage-backend.md §2）。
-// 构建期校验（docs/gaps.md §6.3）：glob 语法坏 / 含桶名不可能出现的字面字符 /
-// 规则不可达（跟在 catch-all 之后、与先前规则重复）都在启动时报错——写错的
-// pattern 静默永不匹配会把桶悄悄路由去默认后端。"!pattern" 为否定规则。
-// key 前缀路由刻意不做：桶级操作（list/delete-bucket）无法跨后端聚合，允许一个
-// 桶横跨两个后端会破坏它们的原子性与一致性语义
+// L3: bucket → backend routing (glob rules, matched in declaration order, see
+// docs/storage-backend.md §2).
+// Build-time validation (docs/gaps.md §6.3): bad glob syntax / literal characters
+// impossible in a bucket name / unreachable rules (placed after a catch-all, or duplicating
+// an earlier rule) all fail at startup -- a mistyped pattern that silently never matches
+// would quietly route the bucket to the default backend. "!pattern" is a negated rule.
+// Key-prefix routing is deliberately not offered: bucket-level operations
+// (list/delete-bucket) cannot be aggregated across backends, and letting one bucket span
+// two backends would break their atomicity and consistency semantics
 #pragma once
 
 #include <map>
@@ -25,13 +28,14 @@ public:
     const std::map<std::string, std::shared_ptr<IStorageBackend>>& backends() const {
         return backends_;
     }
-    // 内部数据（如凭证持久化，docs/credential-management.md §4.1）固定落在默认后端
+    // Internal data (e.g. credential persistence, docs/credential-management.md §4.1)
+    // always lands on the default backend
     std::shared_ptr<IStorageBackend> default_backend() const { return default_; }
 
 private:
     struct Rule {
         std::string glob;
-        bool negate = false;  // "!pattern"：不匹配 pattern 的桶命中本规则
+        bool negate = false;  // "!pattern": buckets NOT matching pattern hit this rule
         std::shared_ptr<IStorageBackend> backend;
     };
     std::vector<Rule> rules_;

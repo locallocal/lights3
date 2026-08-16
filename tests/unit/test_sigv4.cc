@@ -1,4 +1,4 @@
-// SigV4：AWS 官方测试向量（get-vanilla）+ 自签自验 + 篡改检测
+// SigV4: official AWS test vector (get-vanilla) + sign-then-verify round trip + tamper detection
 #include "core/util/crypto.h"
 #include "core/util/hex.h"
 #include "core/util/time.h"
@@ -12,14 +12,14 @@ using namespace lights3::s3;
 
 namespace {
 
-// AWS SigV4 官方测试套件 get-vanilla 的固定时刻
+// Fixed timestamp from the official AWS SigV4 test suite get-vanilla
 util::SysTime vector_time() { return *util::parse_amz_date("20150830T123600Z"); }
 
 AuthConfig vector_auth_config() {
     AuthConfig cfg;
     cfg.credentials = {{"AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}};
     cfg.region = "us-east-1";
-    cfg.service = "service";  // 官方向量的 service 名
+    cfg.service = "service";  // service name used by the official vector
     return cfg;
 }
 
@@ -44,14 +44,14 @@ TEST(sigv4_official_get_vanilla_vector) {
     auto auth = SigV4Authenticator::build(vector_auth_config());
     auth.clock = vector_time;
     auto req = vector_request();
-    auth.verify(req);  // 不抛即通过
+    auth.verify(req);  // passing = no throw
 }
 
 TEST(sigv4_rejects_tampered_signature) {
     auto auth = SigV4Authenticator::build(vector_auth_config());
     auth.clock = vector_time;
     auto req = vector_request();
-    // 篡改路径 → 签名不再匹配
+    // Tamper with the path -> signature no longer matches
     req.raw_path = "/other";
     req.path = "/other";
     CHECK_THROWS_S3(auth.verify(req), S3ErrorCode::SignatureDoesNotMatch);
@@ -89,7 +89,7 @@ TEST(sigv4_sign_then_verify_roundtrip) {
     cfg.service = "s3";
     auto auth = SigV4Authenticator::build(cfg);
 
-    // 带 query 与 body 的 PUT：签名端 → 验签端闭环
+    // PUT with query and body: signing side -> verifying side round trip
     std::string body = "hello lights3";
     http::HttpRequest req;
     req.method = "PUT";
@@ -102,7 +102,7 @@ TEST(sigv4_sign_then_verify_roundtrip) {
     auth.sign(req, cfg.credentials[0], util::sha256_hex(body));
     auth.verify(req);
 
-    // verify 应包装 body 做流式 SHA256 校验，读到 EOF 不抛
+    // verify should wrap the body for streaming SHA256 validation; reading to EOF must not throw
     std::byte buf[64];
     while (sync_wait(req.body->read(std::span(buf))) > 0) {}
 }
@@ -117,10 +117,10 @@ TEST(sigv4_detects_payload_mismatch) {
     req.raw_path = "/bkt/x";
     req.path = "/bkt/x";
     req.headers.add("Host", "localhost");
-    // 声明的 payload hash 与实际 body 不符
+    // Declared payload hash does not match the actual body
     req.body = std::make_unique<http::StringBodyReader>("actual body");
     auth.sign(req, cfg.credentials[0], util::sha256_hex("declared body"));
-    auth.verify(req);  // 头签名一致，先通过
+    auth.verify(req);  // header signature matches, passes at first
 
     std::byte buf[64];
     bool thrown = false;
@@ -133,7 +133,7 @@ TEST(sigv4_detects_payload_mismatch) {
     CHECK(thrown);
 }
 
-// ---------- docs/s3-protocol.md §3.2/§3.4：aws-chunked 与 presigned ----------
+// ---------- docs/s3-protocol.md §3.2/§3.4: aws-chunked and presigned ----------
 
 namespace {
 
@@ -157,8 +157,8 @@ std::string read_all_body(http::BodyReader& r) {
     return out;
 }
 
-// 构造一个签名正确的 aws-chunked 请求；tamper 时篡改第二个 chunk 的数据；
-// bad_final 时把 0 号尾块签名换成垃圾（末块校验路径）
+// Build a correctly signed aws-chunked request; on tamper, corrupt the second chunk's data;
+// on bad_final, replace the zero-length trailer chunk's signature with garbage (final-chunk validation path)
 http::HttpRequest make_chunked_request(SigV4Authenticator& auth, const Credential& cred,
                                        bool tamper, bool bad_final = false) {
     http::HttpRequest req;
@@ -200,7 +200,7 @@ TEST(sigv4_chunked_streaming_payload) {
 
     auto req = make_chunked_request(auth, cfg.credentials[0], false);
     auth.verify(req);
-    // 剥壳后是纯数据流；EOF 处校验解码长度（11 字节）
+    // After unwrapping it is a pure data stream; decoded length (11 bytes) is validated at EOF
     CHECK_EQ(read_all_body(*req.body), "hello world");
     CHECK_EQ(*req.body->length(), uint64_t(11));
 }
@@ -211,7 +211,7 @@ TEST(sigv4_chunked_rejects_tampered_chunk) {
     auto auth = SigV4Authenticator::build(cfg);
 
     auto req = make_chunked_request(auth, cfg.credentials[0], true);
-    auth.verify(req);  // 头签名仍一致
+    auth.verify(req);  // header signature still matches
     bool thrown = false;
     try {
         read_all_body(*req.body);
@@ -222,9 +222,9 @@ TEST(sigv4_chunked_rejects_tampered_chunk) {
     CHECK(thrown);
 }
 
-// ---------- 评审发现的回归用例 ----------
+// ---------- Regression cases found in review ----------
 
-// 校验不绑 EOF：消费者只读满 length() 字节（cloudproxy 的消费模式）也必须检出 mismatch
+// Validation must not be tied to EOF: a consumer that reads exactly length() bytes (cloudproxy's consumption pattern) must also detect the mismatch
 TEST(sigv4_payload_mismatch_detected_without_eof_read) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -253,7 +253,7 @@ TEST(sigv4_payload_mismatch_detected_without_eof_read) {
     CHECK(thrown);
 }
 
-// chunked 同理：读满 decoded length 即触发末块/0 号尾块验签，无需再读一次 EOF
+// Same for chunked: reading the full decoded length triggers final-chunk/zero-trailer verification, no extra EOF read needed
 TEST(sigv4_chunked_final_signature_checked_without_eof_read) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -273,7 +273,7 @@ TEST(sigv4_chunked_final_signature_checked_without_eof_read) {
     CHECK(thrown);
 }
 
-// streaming 变体缺 x-amz-decoded-content-length → InvalidRequest（AWS 强制该头）
+// Streaming variant missing x-amz-decoded-content-length -> InvalidRequest (AWS mandates this header)
 TEST(sigv4_chunked_requires_decoded_length) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -289,7 +289,7 @@ TEST(sigv4_chunked_requires_decoded_length) {
     CHECK_THROWS_S3(auth.verify(req), S3ErrorCode::InvalidRequest);
 }
 
-// 声明空摘要（sha256("")）+ 非空 body：body 不得脱离签名保护
+// Declared empty digest (sha256("")) + non-empty body: the body must not escape signature protection
 TEST(sigv4_empty_digest_with_nonempty_body_rejected) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -313,7 +313,7 @@ TEST(sigv4_empty_digest_with_nonempty_body_rejected) {
     CHECK(thrown);
 }
 
-// 大写 hex 摘要：签名按字面值参与，内容比对大小写不敏感 → 正确 body 应通过
+// Uppercase hex digest: the signature uses the literal value, content comparison is case-insensitive -> a correct body should pass
 TEST(sigv4_uppercase_hex_digest_accepted) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -331,10 +331,10 @@ TEST(sigv4_uppercase_hex_digest_accepted) {
     req.body = std::make_unique<http::StringBodyReader>(body);
     auth.sign(req, cfg.credentials[0], upper);
     auth.verify(req);
-    CHECK_EQ(read_all_body(*req.body), body);  // 不抛 = 校验通过
+    CHECK_EQ(read_all_body(*req.body), body);  // no throw = validation passed
 }
 
-// host 不在 SignedHeaders → 拒绝（vhost 下不绑 host 的签名可换 Host 头跨桶重放）
+// host not in SignedHeaders -> reject (under vhost, a signature not bound to host could be replayed across buckets by swapping the Host header)
 TEST(sigv4_requires_host_in_signed_headers) {
     auto auth = SigV4Authenticator::build(vector_auth_config());
     auth.clock = vector_time;
@@ -346,7 +346,7 @@ TEST(sigv4_requires_host_in_signed_headers) {
     CHECK_THROWS_S3(auth.verify(req), S3ErrorCode::AuthorizationHeaderMalformed);
 }
 
-// parse_amz_date 严格消费：缺 Z / 尾部垃圾 / 年份超界一律拒绝
+// parse_amz_date strict consumption: missing Z / trailing garbage / out-of-range year are all rejected
 TEST(amz_date_strict_parse) {
     CHECK(util::parse_amz_date("20260714T000000Z").has_value());
     CHECK(!util::parse_amz_date("20260714T000000").has_value());
@@ -386,18 +386,18 @@ TEST(sigv4_presigned_url_expiry) {
         return req;
     };
 
-    // 有效期内（60s < 300s）；presigned 不受 15min 偏移限制
+    // Within validity (60s < 300s); presigned is not subject to the 15min skew limit
     auth.clock = [] { return *util::parse_amz_date("20260714T000100Z"); };
     auto ok = make();
     auth.verify(ok);
 
-    // 过期（600s > 300s）→ AccessDenied
+    // Expired (600s > 300s) -> AccessDenied
     auth.clock = [] { return *util::parse_amz_date("20260714T001000Z"); };
     auto expired = make();
     CHECK_THROWS_S3(auth.verify(expired), S3ErrorCode::AccessDenied);
 
-    // 签发时间超前（docs/s3-protocol.md §3.4）：X-Amz-Date 比 now 晚 16min → 未生效拒绝；
-    // 15min 内的时钟偏移放行
+    // Issued in the future (docs/s3-protocol.md §3.4): X-Amz-Date 16min later than now -> rejected as not yet effective;
+    // clock skew within 15min is allowed
     auth.clock = [] { return *util::parse_amz_date("20260713T234400Z"); };
     auto future = make();
     CHECK_THROWS_S3(auth.verify(future), S3ErrorCode::AccessDenied);
@@ -406,16 +406,16 @@ TEST(sigv4_presigned_url_expiry) {
     auth.verify(skewed);
 }
 
-// ---------- percent_decode 语义拆分（gaps §2.13）----------
+// ---------- percent_decode semantic split (gaps §2.13) ----------
 
 TEST(percent_decode_preserves_literal_plus) {
-    // path / copy-source / canonical query：'+' 是合法字面字符
+    // path / copy-source / canonical query: '+' is a legal literal character
     CHECK_EQ(util::percent_decode("a+b.txt"), "a+b.txt");
     CHECK_EQ(util::percent_decode("a%2Bb%20c"), "a+b c");
 }
 
 TEST(percent_decode_query_form_semantics) {
-    // query 参数：裸 '+' 是 form 空格，%2B 解出的 '+' 不受影响
+    // query parameters: a bare '+' is a form-encoded space; a '+' decoded from %2B is unaffected
     CHECK_EQ(util::percent_decode_query("a+b"), "a b");
     CHECK_EQ(util::percent_decode_query("a%2Bb"), "a+b");
     CHECK_EQ(util::percent_decode_query("a%20b+c"), "a b c");

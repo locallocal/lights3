@@ -1,4 +1,4 @@
-// object 级 handler：Put/Get/Head/Delete/Copy/DeleteObjects 与条件请求（docs/s3-protocol.md §1/§6）
+// Object-level handlers: Put/Get/Head/Delete/Copy/DeleteObjects and conditional requests (docs/s3-protocol.md §1/§6)
 #include <charconv>
 
 #include "core/log.h"
@@ -14,11 +14,11 @@ using namespace handlers;
 
 namespace {
 
-// "bytes=a-b" / "bytes=a-" / "bytes=-n"；malformed 时忽略（S3 行为）
+// "bytes=a-b" / "bytes=a-" / "bytes=-n"; ignored when malformed (S3 behavior)
 std::optional<storage::ByteRange> parse_range_header(const std::string& v) {
     if (v.rfind("bytes=", 0) != 0) return std::nullopt;
     std::string spec = v.substr(6);
-    if (spec.find(',') != std::string::npos) return std::nullopt;  // 多段 range 不支持
+    if (spec.find(',') != std::string::npos) return std::nullopt;  // multi-range not supported
     auto dash = spec.find('-');
     if (dash == std::string::npos) return std::nullopt;
     auto to_u64 = [](std::string_view s) -> std::optional<uint64_t> {
@@ -39,18 +39,19 @@ std::optional<storage::ByteRange> parse_range_header(const std::string& v) {
         r.last = to_u64(b);
         if (!r.last) return std::nullopt;
     }
-    // "bytes=5-3" 是语法非法（RFC 9110 §14.1.1 要求 last >= first）：整个头按
-    // 无效忽略、回 200 整对象——此前落到 resolve_range 变成 416（docs/gaps.md §4）
+    // "bytes=5-3" is syntactically invalid (RFC 9110 §14.1.1 requires last >= first): the whole header is
+    // ignored as invalid and 200 with the full object returned -- previously it fell into resolve_range and became 416 (docs/gaps.md §4)
     if (r.first && r.last && *r.last < *r.first) return std::nullopt;
     return r;
 }
 
-// response-* 覆盖参数（docs/gaps.md §5.3）：presigned 下载链接最常用的就是
-// response-content-disposition（"点开就下载成这个文件名"）。
-// 前提：AWS 只对已认证请求生效——匿名可读对象若允许覆盖，一条链接就能把任意
-// Content-Disposition 挂到桶的域名下。本实现开启认证时，能走到 handler 的请求
-// 必然已验签；关闭认证时不存在这条边界。故无需再判身份，但值必须过滤 CR/LF：
-// query 值是攻击者可控的，直接塞进响应头就是响应拆分
+// response-* override parameters (docs/gaps.md §5.3): the most common use in presigned download links is
+// response-content-disposition ("clicking downloads it under this filename").
+// Premise: AWS honors these only for authenticated requests -- if anonymously readable objects allowed overrides,
+// a single link could hang an arbitrary Content-Disposition off the bucket's domain. With auth enabled here, any
+// request reaching a handler has already been verified; with auth disabled, that boundary does not exist. So no
+// extra identity check is needed, but values must be filtered for CR/LF:
+// query values are attacker-controlled, and inserting them straight into response headers is response splitting
 struct ResponseOverride {
     const char* param;
     const char* header;
@@ -73,8 +74,8 @@ void apply_response_overrides(const http::HttpRequest& req, http::HttpResponse& 
     }
 }
 
-// 304 的头集合（RFC 9110 §15.4.5，docs/gaps.md §5.9）：200 会发的缓存校验类头
-// 在 304 上必须照发，否则客户端刷新缓存条目时会把 Last-Modified 丢掉
+// Header set for 304 (RFC 9110 §15.4.5, docs/gaps.md §5.9): cache-validation headers that a 200 would send
+// must also be sent on 304, otherwise clients refreshing a cache entry drop the Last-Modified
 void fill_not_modified_headers(http::HttpResponse& resp, const storage::ObjectMeta& meta) {
     resp.status = 304;
     resp.headers.set("ETag", quote_etag(meta.etag));
@@ -87,13 +88,13 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
     resp.headers.set("Content-Type", meta.content_type);
     resp.headers.set("Last-Modified", util::http_date(meta.last_modified));
     resp.headers.set("Accept-Ranges", "bytes");
-    // 一等元数据原样回显（docs/gaps.md §5.2）；空 = 未设置，不发该头
+    // First-class metadata echoed verbatim (docs/gaps.md §5.2); empty = unset, header not sent
     for (auto& f : storage::kStdMetaFields)
         if (!(meta.*f.field).empty()) resp.headers.set(f.header, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) resp.headers.set("x-amz-meta-" + k, v);
 }
 
-// GET/HEAD 条件请求（docs/s3-protocol.md §6，优先级遵循 RFC 7232：
+// GET/HEAD conditional requests (docs/s3-protocol.md §6, precedence follows RFC 7232:
 // If-Match > If-Unmodified-Since；If-None-Match > If-Modified-Since）
 void check_read_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& meta,
                               bool& not_modified) {
@@ -120,8 +121,8 @@ bool has_read_preconditions(const http::HttpRequest& req) {
            req.headers.has("If-Modified-Since") || req.headers.has("If-Unmodified-Since");
 }
 
-// If-Range（RFC 7233 §3.2）：验证器（强 ETag 或 HTTP-date 精确匹配 Last-Modified）
-// 命中才生效 Range，否则忽略 Range 回整对象
+// If-Range (RFC 7233 §3.2): Range takes effect only when the validator (strong ETag, or HTTP-date exactly
+// matching Last-Modified) hits; otherwise Range is ignored and the full object returned
 bool if_range_matches(const http::HttpRequest& req, const storage::ObjectMeta& meta) {
     auto v = req.headers.get("If-Range");
     if (!v) return true;
@@ -136,11 +137,11 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
                                                std::string key) {
     auto& backend = router_.resolve(bucket);
 
-    // PUT 条件请求（docs/s3-protocol.md §6）：If-None-Match:* 防覆盖，If-Match 乐观并发。
-    // "检查 + 提交"由后端在其原子提交点完成（PutCondition 契约，backend.h）——此处
-    // 只做一次无锁 head 预检，让明显失败的请求不必上传完整 body 就能拿到 412/404。
-    // 预检非原子，不承担正确性；曾经的 L2 条带锁跨整个 body 上传，64 条慢速连接
-    // 即可堵死全网关条件写，且多实例部署下本就守不住
+    // PUT conditional requests (docs/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is optimistic concurrency.
+    // "Check + commit" is done by the backend at its atomic commit point (PutCondition contract, backend.h) -- here
+    // only one lock-free head precheck is done, so obviously failing requests get their 412/404 without uploading the full body.
+    // The precheck is non-atomic and carries no correctness burden; the old L2 striped lock spanned the entire body
+    // upload, so 64 slow connections could block all conditional writes gateway-wide, and it could never hold in multi-instance deployments anyway
     storage::PutCondition cond;
     if (auto v = req.headers.get("If-None-Match")) {
         if (*v != "*")
@@ -159,7 +160,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
                           "At least one of the pre-conditions you specified did not hold");
     } else if (auto v2 = req.headers.get("If-Match")) {
         cond.if_match_etag = strip_quotes(*v2);
-        auto cur = co_await backend.head_object(bucket, key);  // 缺失 → NoSuchKey(404)
+        auto cur = co_await backend.head_object(bucket, key);  // missing -> NoSuchKey(404)
         if (*cond.if_match_etag != cur.etag)
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
@@ -194,17 +195,17 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
     if (directive == "REPLACE") {
         meta = meta_from_headers(req);
     } else {
-        // COPY：整份元数据随对象走。逐字段抄写曾经漏掉新增的一等字段（§5.2），
-        // 这里只把与新对象绑定的三项（key/size/etag）留给后端重算
+        // COPY: the whole metadata set travels with the object. Field-by-field copying once missed newly added
+        // first-class fields (§5.2); here only the three items bound to the new object (key/size/etag) are left for the backend to recompute
         meta = src_meta;
         meta.key.clear();
         meta.size = 0;
         meta.etag.clear();
     }
 
-    // 同后端快路径（docs/gaps.md §6.2/§6.3）：localfs 走内核 copy_file_range、
-    // cloudproxy 走远端服务端 COPY——都免掉"读进网关再写回"。nullopt = 该后端
-    // 无快路径或本次不可用（tier stub、跨设备），回落流式路径，语义等价
+    // Same-backend fast path (docs/gaps.md §6.2/§6.3): localfs uses kernel copy_file_range,
+    // cloudproxy uses remote server-side COPY -- both skip "read into the gateway then write back". nullopt = the
+    // backend has no fast path or it is unavailable this time (tier stub, cross-device); falls back to the streaming path, semantically equivalent
     auto& dst_backend = router_.resolve(bucket);
     storage::PutResult result;
     std::optional<storage::PutResult> fast;
@@ -238,7 +239,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     http::HttpResponse resp;
     if (head_only) {
         auto meta = co_await backend.head_object(bucket, key);
-        // 前置条件先于 Range 判定（RFC 7232 优先级：412/304 压过 416）
+        // Preconditions are decided before Range (RFC 7232 precedence: 412/304 beats 416)
         bool not_modified = false;
         check_read_preconditions(req, meta, not_modified);
         if (not_modified) {
@@ -248,21 +249,21 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         fill_object_headers(resp, meta);
         apply_response_overrides(req, resp);
         if (range && !if_range_matches(req, meta)) range.reset();
-        if (range) {  // 与 GET 对齐：206 + Content-Range，无 body 只报长度
-            auto [f, l] = storage::resolve_range(*range, meta.size);  // 不可满足 → 416
+        if (range) {  // aligned with GET: 206 + Content-Range, no body, length only
+            auto [f, l] = storage::resolve_range(*range, meta.size);  // unsatisfiable -> 416
             resp.status = 206;
             resp.headers.set("Content-Range", "bytes " + std::to_string(f) + "-" +
                                                   std::to_string(l) + "/" +
                                                   std::to_string(meta.size));
             resp.content_length = l - f + 1;
         } else {
-            resp.content_length = meta.size;  // 无 body，驱动只发 Content-Length
+            resp.content_length = meta.size;  // no body, the driver sends only Content-Length
         }
         co_return resp;
     }
 
-    // 条件头存在时先 head 判定再建流：412/304 先于 range 的 416（RFC 7232），
-    // 也避免 cloudproxy 之类后端先向上游拉取对象再整个丢弃
+    // When conditional headers are present, decide via head before opening the stream: 412/304 comes before
+    // range's 416 (RFC 7232), and it also avoids backends like cloudproxy pulling the object from upstream only to discard it all
     if (has_read_preconditions(req) || (range && req.headers.has("If-Range"))) {
         auto meta = co_await backend.head_object(bucket, key);
         bool not_modified = false;
@@ -277,11 +278,11 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     auto stream = co_await backend.get_object(bucket, key, range);
 
     fill_object_headers(resp, stream.meta);
-    // 覆盖在 206/Content-Range 之前应用：那两个由本次传输决定，不接受客户端指定
+    // Overrides are applied before 206/Content-Range: those two are determined by this transfer and cannot be client-specified
     apply_response_overrides(req, resp);
     uint64_t len = stream.meta.size;
     if (stream.range) {
-        // 后端契约：返回的 range 须两端都已解析；漏填是后端缺陷，不能 UB 解引用
+        // Backend contract: the returned range must have both ends resolved; leaving one unset is a backend defect, no UB dereference
         if (!stream.range->first || !stream.range->last)
             throw S3Error(S3ErrorCode::InternalError,
                           "storage backend returned an unresolved range");
@@ -305,9 +306,9 @@ Task<http::HttpResponse> S3Service::delete_object(std::string bucket, std::strin
 
 namespace {
 
-// 单 key 删除，异常收敛为结果值（docs/gaps.md §3.9）：批内任何 key 失败都不得
-// 中断整批——已删的 key 必须出现在响应里，否则客户端无从得知哪些删成了。
-// 独立函数而非捕获 lambda：协程挂起期间 lambda 临时对象已析构，捕获即悬垂
+// Single-key deletion with exceptions folded into a result value (docs/gaps.md §3.9): no key failure may abort
+// the batch -- already-deleted keys must appear in the response, or clients cannot tell which deletions succeeded.
+// A standalone function rather than a capturing lambda: the lambda temporary is destroyed while the coroutine is suspended, so captures would dangle
 Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
                                         const std::string& bucket, const std::string& key) {
     try {
@@ -316,7 +317,7 @@ Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
     } catch (const S3Error& e) {
         co_return e;
     } catch (const std::exception& e) {
-        // 非 S3 异常（后端传输/存储错误）：原始文案只进日志
+        // Non-S3 exceptions (backend transport/storage errors): raw text goes to the log only
         LOG_ERROR("DeleteObjects: key {} failed: {}", key, e.what());
         co_return S3Error(S3ErrorCode::InternalError, "We encountered an internal error.");
     }
@@ -324,12 +325,12 @@ Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
 
 }  // namespace
 
-// DeleteObjects 批量删除（POST /bucket?delete，请求 XML ≤ 1MiB，至多 1000 key）
+// DeleteObjects batch deletion (POST /bucket?delete, request XML <= 1MiB, at most 1000 keys)
 Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::string bucket,
                                                    const RequestAuth& auth) {
-    // AWS 对本操作**要求**完整性头（docs/gaps.md §5.6）：批量删除是唯一一个
-    // "请求体被改写即静默多删对象"的操作，缺失即 400。摘要本身由 dispatch 装的
-    // ChecksumVerifyingReader 在读 body 时校验，这里只判"有没有声明"
+    // AWS **requires** an integrity header for this operation (docs/gaps.md §5.6): batch deletion is the one
+    // operation where "a rewritten request body silently deletes extra objects"; absence is 400. The digest itself
+    // is verified while reading the body by the ChecksumVerifyingReader that dispatch installs; here only "is one declared" is checked
     constexpr std::string_view kChecksumPrefix = "x-amz-checksum-";
     bool has_digest = req.headers.has("Content-MD5");
     if (!has_digest)
@@ -351,13 +352,13 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
     std::vector<std::string> keys;
     for (auto& child : root.children) {
         if (child.name != "Object") continue;
-        // 缺 <Key>/空 Key 是畸形请求，整批拒绝（与 AWS 一致）——不是逐 key 报错
+        // Missing <Key>/empty Key is a malformed request, the whole batch is rejected (matching AWS) -- not per-key errors
         std::string k = child.get("Key");
         if (k.empty())
             throw S3Error(S3ErrorCode::MalformedXML,
                           "Each <Object> must contain a non-empty <Key>.");
-        // <VersionId> 静默忽略的话，"删指定版本"会变成"删当前对象"——比报错
-        // 危险得多（docs/gaps.md §3.9）
+        // Silently ignoring <VersionId> would turn "delete a specific version" into "delete the current object" --
+        // far more dangerous than erroring (docs/gaps.md §3.9)
         if (!child.get("VersionId").empty())
             throw S3Error(S3ErrorCode::NotImplemented, "Versioning is not implemented.");
         keys.push_back(std::move(k));
@@ -369,16 +370,16 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
 
     auto& backend = router_.resolve(bucket);
     std::vector<std::optional<S3Error>> outcome(keys.size());
-    // 逐 key 复核 policy：dispatch 对本路由按 Bucket scope 授权（key 为空，prefix
-    // 校验被整体跳过），XML 里的每个 Key 必须在此按单删同一判定重审，否则
-    // prefix 受限凭证可借批量接口删除白名单外的对象
+    // Re-check policy per key: dispatch authorizes this route at Bucket scope (key empty, prefix check skipped
+    // entirely), so every Key in the XML must be re-judged here with the same decision as single delete, otherwise
+    // a prefix-restricted credential could use the batch interface to delete objects outside its allowlist
     if (auth.policy)
         for (size_t i = 0; i < keys.size(); ++i)
             if (!auth.policy->allows(bucket, keys[i], Action::Delete))
                 outcome[i] =
                     S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
-    // 有界并发（docs/gaps.md §3.9）：串行 co_await 在 cloudproxy/duostore 上是
-    // 1000 次串行 RTT。批大小压住对单后端的并发冲击，批间仍顺序推进
+    // Bounded concurrency (docs/gaps.md §3.9): serial co_await on cloudproxy/duostore means
+    // 1000 sequential RTTs. The batch size caps the concurrency hit on a single backend; batches still proceed in order
     constexpr size_t kBatch = 32;
     std::vector<size_t> pending;
     pending.reserve(keys.size());

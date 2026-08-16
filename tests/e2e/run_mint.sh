@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# MinIO mint 兼容性测试集（docs/s3-protocol.md §8）：起真实 lights3 进程，
-# 用 minio/mint 容器对打。mint 依赖 docker——不可用时显式 SKIP（与
-# duostore-rados/tikv e2e 的探测模式一致，本机无 docker 权限不算失败）。
+# MinIO mint compatibility test suite (docs/s3-protocol.md §8): start a real lights3
+# process and run the minio/mint container against it. mint depends on docker --
+# explicit SKIP when unavailable (same probing pattern as the duostore-rados/tikv e2e;
+# lacking docker permission on this machine does not count as failure).
 #
-# 用法: run_mint.sh <path-to-lights3-binary> [mint 测试名...]
-#   测试名透传给 mint（如 s3cmd awscli aws-sdk-go）；不传则跑全集。
-#   注意：全集覆盖 versioning/tagging 等 lights3 明确不支持的 API，预期部分
-#   失败；建议以核心子集（s3cmd、awscli）作回归门槛，随协议覆盖扩集。
+# Usage: run_mint.sh <path-to-lights3-binary> [mint test names...]
+#   Test names are passed through to mint (e.g. s3cmd awscli aws-sdk-go); with none
+#   given, the full suite runs.
+#   Note: the full suite covers APIs lights3 explicitly does not support
+#   (versioning/tagging etc.), so partial failures are expected; use the core subset
+#   (s3cmd, awscli) as the regression gate and grow it with protocol coverage.
 set -u
 
 BIN="${1:?usage: run_mint.sh <path-to-lights3-binary> [mint tests...]}"
@@ -63,8 +66,8 @@ done
 [[ -z "$PORT" ]] && { echo "lights3 did not report port"; cat "$WORK/server.log"; exit 1; }
 echo "lights3 up: 127.0.0.1:$PORT (pid $SRV_PID)"
 
-# --network host：容器内直接访问宿主机端口（linux）；mint 结果落在容器内
-# /mint/log，挂出来便于失败排查
+# --network host: the container reaches host ports directly (linux); mint results land
+# in /mint/log inside the container, mounted out for failure triage
 mkdir -p "$WORK/mint-log"
 docker run --rm --network host \
     -e "SERVER_ENDPOINT=127.0.0.1:$PORT" \

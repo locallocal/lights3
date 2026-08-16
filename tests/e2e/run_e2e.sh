@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# e2e：起真实 lights3 进程（localfs 后端 + SigV4 认证），用 curl --aws-sigv4 全流程验证
+# e2e: start a real lights3 process (localfs backend + SigV4 auth) and verify the full flow with curl --aws-sigv4
 set -u
 
 BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
-# localfs | xlocalfs | tiered（localfs+memory，docs/tiered-storage.md）
-# | cloudproxy | tiered-cloudproxy（双实例：实例 B 充当"云端"，docs/cloudproxy-backend.md §10）
+# localfs | xlocalfs | tiered (localfs+memory, docs/tiered-storage.md)
+# | cloudproxy | tiered-cloudproxy (two instances: instance B acts as the "cloud", docs/cloudproxy-backend.md §10)
 BACKEND="${3:-localfs}"
 AK=E2EACCESSKEY
 SK=e2e-secret-key
@@ -20,7 +20,7 @@ cleanup() {
     [[ -n "${RSRV_PID:-}" ]] && wait "$RSRV_PID" 2>/dev/null
     [[ -n "${REDIS_PID:-}" ]] && kill "$REDIS_PID" 2>/dev/null
     [[ -n "${REDIS_PID:-}" ]] && wait "$REDIS_PID" 2>/dev/null
-    # rados 数据面对象清扫（best-effort；GC 变现前 DELETE 只记账不删对象）
+    # rados data-plane object cleanup (best-effort; before GC materializes, DELETE only records and does not remove objects)
     if [[ -n "${RADOS_NS:-}" ]] && command -v rados >/dev/null; then
         rados -c "$LIGHTS3_TEST_RADOS_CONF" -p "$LIGHTS3_TEST_RADOS_POOL" \
             --namespace "$RADOS_NS" ls 2>/dev/null | while read -r obj; do
@@ -32,7 +32,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------- duostore-redis 场景：拉起私有 redis（docs/duostore-redis-meta.md §9）----------
+# ---------- duostore-redis scenario: spawn a private redis (docs/duostore-redis-meta.md §9) ----------
 REDIS_PID=""
 if [[ "$BACKEND" == "duostore-redis" ]]; then
     if ! command -v redis-server >/dev/null; then
@@ -51,35 +51,38 @@ if [[ "$BACKEND" == "duostore-redis" ]]; then
     echo "redis up: $WORK/redis.sock (pid $REDIS_PID)"
 fi
 
-# ---------- duostore-rados 场景：探测真实集群（docs/duostore-rados-data.md §11）----------
-# 集群无法像 redis 一样随手拉起（mon+osd+cephx 全套依赖）；环境变量
-# LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL 同时设置才跑，否则显式 SKIP
+# ---------- duostore-rados scenario: probe for a real cluster (docs/duostore-rados-data.md §11) ----------
+# A cluster cannot be spun up casually like redis (full mon+osd+cephx dependency set);
+# runs only when both env vars LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL are set, otherwise explicit SKIP
 RADOS_NS=""
 if [[ "$BACKEND" == "duostore-rados" ]]; then
     if [[ -z "${LIGHTS3_TEST_RADOS_CONF:-}" || -z "${LIGHTS3_TEST_RADOS_POOL:-}" ]]; then
         echo "[SKIP] duostore-rados: LIGHTS3_TEST_RADOS_CONF/LIGHTS3_TEST_RADOS_POOL not set"
         exit 0
     fi
-    RADOS_NS="e2e-$$-$RANDOM"  # 唯一 namespace 隔离，pool 可复用
+    RADOS_NS="e2e-$$-$RANDOM"  # unique namespace isolation, the pool can be reused
     echo "rados: conf=$LIGHTS3_TEST_RADOS_CONF pool=$LIGHTS3_TEST_RADOS_POOL ns=$RADOS_NS"
 fi
 
-# ---------- duostore-tikv 场景：探测真实集群（docs/duostore-tikv-meta.md §10）----------
-# PD+TiKV 无法随手拉起（tiup/多进程依赖）；LIGHTS3_TEST_PD_ADDR 设置才跑，否则显式 SKIP。
-# 集群侧残留：TxnKV 无客户端可及的按前缀清删（tikv-ctl 不假设在场），每次运行留下
-# 的键有界且前缀唯一——用例自删桶/对象，残留仅 schema、计数器与已销账 gcq 的版本
-# 垃圾，随集群 GC safepoint 回收（docs/duostore-tikv-meta.md §7.3）
+# ---------- duostore-tikv scenario: probe for a real cluster (docs/duostore-tikv-meta.md §10) ----------
+# PD+TiKV cannot be spun up casually (tiup/multi-process dependencies); runs only when
+# LIGHTS3_TEST_PD_ADDR is set, otherwise explicit SKIP.
+# Cluster-side residue: TxnKV has no client-reachable delete-by-prefix (tikv-ctl is not
+# assumed present); the keys left per run are bounded and prefix-unique -- the cases
+# delete their own buckets/objects, so the residue is only schema, counters, and version
+# garbage of already-settled gcq entries, reclaimed as the cluster GC safepoint advances
+# (docs/duostore-tikv-meta.md §7.3)
 TIKV_PREFIX=""
 if [[ "$BACKEND" == "duostore-tikv" ]]; then
     if [[ -z "${LIGHTS3_TEST_PD_ADDR:-}" ]]; then
         echo "[SKIP] duostore-tikv: LIGHTS3_TEST_PD_ADDR not set"
         exit 0
     fi
-    TIKV_PREFIX="e2e-$$-$RANDOM:"  # 唯一前缀隔离，集群可复用
+    TIKV_PREFIX="e2e-$$-$RANDOM:"  # unique prefix isolation, the cluster can be reused
     echo "tikv: pd=$LIGHTS3_TEST_PD_ADDR prefix=$TIKV_PREFIX"
 fi
 
-# ---------- cloudproxy 场景：先起"云端"实例 B（自身也是 lights3）----------
+# ---------- cloudproxy scenario: first start the "cloud" instance B (itself also lights3) ----------
 CLOUD_AK=E2ECLOUDKEY
 CLOUD_SK=e2e-cloud-secret
 RPORT=""
@@ -119,7 +122,7 @@ EOF
     echo "remote (cloud) instance up: 127.0.0.1:$RPORT (pid $RSRV_PID)"
 fi
 
-check() {  # check <描述> <期望> <实际>
+check() {  # check <description> <expected> <actual>
     if [[ "$2" == "$3" ]]; then
         echo "[ OK ] $1"
         PASS=$((PASS+1))
@@ -129,8 +132,8 @@ check() {  # check <描述> <期望> <实际>
     fi
 }
 
-# ---------- 配置与启动 ----------
-# 外部凭证文件（credential-management.md §10.2）：热加载 provider，仅数据面
+# ---------- Config and startup ----------
+# External credentials file (credential-management.md §10.2): hot-reload provider, data plane only
 FILE_AK=E2EFILEKEY
 FILE_SK=e2e-file-secret
 cat > "$WORK/creds.json" <<EOF
@@ -262,21 +265,21 @@ done
 BASE="http://127.0.0.1:$PORT"
 echo "server up: $BASE (pid $SRV_PID)"
 
-s3curl() {  # s3curl <curl args...> —— 带 SigV4 签名
+s3curl() {  # s3curl <curl args...> -- with SigV4 signing
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" "$@"
 }
 
-# ---------- 用例 ----------
-check "healthz（免认证）" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/healthz")"
-check "未签名请求被拒" "403" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/mybucket")"
-check "错误密钥被拒" "403" \
+# ---------- Test cases ----------
+check "healthz (no auth)" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/healthz")"
+check "unsigned request rejected" "403" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/mybucket")"
+check "wrong secret rejected" "403" \
     "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:wrong-secret" -o /dev/null -w '%{http_code}' "$BASE/mybucket" -X PUT)"
 
 check "CreateBucket" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/mybucket")"
 check "HeadBucket" "200" "$(s3curl -o /dev/null -w '%{http_code}' -I "$BASE/mybucket")"
-check "重复创建 409" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/mybucket")"
+check "duplicate create 409" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/mybucket")"
 
-# 5MB 随机文件 PUT/GET 往返
+# 5MB random file PUT/GET round trip
 dd if=/dev/urandom of="$WORK/big.bin" bs=1M count=5 2>/dev/null
 MD5=$(md5sum "$WORK/big.bin" | cut -d' ' -f1)
 check "PutObject(5MB)" "200" \
@@ -284,21 +287,21 @@ check "PutObject(5MB)" "200" \
        -H 'Content-Type: application/x-lights3-test' "$BASE/mybucket/dir/big.bin")"
 
 s3curl -o "$WORK/big.out" "$BASE/mybucket/dir/big.bin"
-check "GetObject 内容一致" "$MD5" "$(md5sum "$WORK/big.out" | cut -d' ' -f1)"
+check "GetObject content matches" "$MD5" "$(md5sum "$WORK/big.out" | cut -d' ' -f1)"
 
 HEAD_OUT=$(s3curl -I "$BASE/mybucket/dir/big.bin")
 check "HeadObject ETag=MD5" "\"$MD5\"" "$(echo "$HEAD_OUT" | tr -d '\r' | sed -n 's/^etag: //Ip')"
-check "HeadObject Content-Type 保留" "application/x-lights3-test" \
+check "HeadObject Content-Type preserved" "application/x-lights3-test" \
     "$(echo "$HEAD_OUT" | tr -d '\r' | sed -n 's/^content-type: //Ip')"
 check "HeadObject Content-Length" "5242880" \
     "$(echo "$HEAD_OUT" | tr -d '\r' | sed -n 's/^content-length: //Ip')"
 
-# Range 下载
+# Range download
 s3curl -o "$WORK/part.out" -r 1024-2047 "$BASE/mybucket/dir/big.bin"
 dd if="$WORK/big.bin" of="$WORK/part.ref" bs=1 skip=1024 count=1024 2>/dev/null
-check "Range 下载(1KiB@1KiB)" "$(md5sum "$WORK/part.ref" | cut -d' ' -f1)" \
+check "Range download (1KiB@1KiB)" "$(md5sum "$WORK/part.ref" | cut -d' ' -f1)" \
     "$(md5sum "$WORK/part.out" | cut -d' ' -f1)"
-check "Range 响应 206" "206" \
+check "Range response 206" "206" \
     "$(s3curl -o /dev/null -w '%{http_code}' -r 0-99 "$BASE/mybucket/dir/big.bin")"
 
 # List
@@ -308,17 +311,17 @@ LIST=$(s3curl "$BASE/mybucket?list-type=2&delimiter=%2F")
 echo "$LIST" | grep -q '<Key>top.txt</Key>' && echo "$LIST" | grep -q '<Prefix>dir/</Prefix>'
 check "ListObjectsV2 + delimiter" "0" "$?"
 LIST2=$(s3curl "$BASE/mybucket?list-type=2&prefix=dir%2F")
-check "ListObjectsV2 prefix 计数" "2" "$(echo "$LIST2" | grep -o '<Key>' | wc -l)"
+check "ListObjectsV2 prefix count" "2" "$(echo "$LIST2" | grep -o '<Key>' | wc -l)"
 
 # ListBuckets
-check "ListBuckets 包含 bucket" "0" \
+check "ListBuckets contains bucket" "0" \
     "$(s3curl "$BASE/" | grep -q '<Name>mybucket</Name>'; echo $?)"
 
-# GetBucketLocation（MinIO SDK 等客户端依赖）
+# GetBucketLocation (clients like the MinIO SDK depend on it)
 check "GetBucketLocation" "0" \
     "$(s3curl "$BASE/mybucket?location" | grep -q 'LocationConstraint'; echo $?)"
 
-# 条件请求：If-None-Match 命中 → 304
+# Conditional request: If-None-Match hit -> 304
 ETAG=$(s3curl -I "$BASE/mybucket/top.txt" | tr -d '\r' | sed -n 's/^etag: //Ip')
 check "If-None-Match 304" "304" \
     "$(s3curl -o /dev/null -w '%{http_code}' -H "If-None-Match: $ETAG" "$BASE/mybucket/top.txt")"
@@ -327,38 +330,38 @@ check "If-None-Match 304" "304" \
 check "CopyObject" "0" \
     "$(s3curl -X PUT -H 'x-amz-copy-source: /mybucket/top.txt' "$BASE/mybucket/copy.txt" \
        | grep -q 'CopyObjectResult'; echo $?)"
-check "Copy 内容一致" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
+check "Copy content matches" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
 
-# Multipart：两个 5MiB 分片（docs/s3-protocol.md §8 真实流程）。5MiB 是 AWS 对
-# 非末片的最小分片（docs/gaps.md §5.7）——此前用 3MiB，真打到 AWS 上同样会被拒
+# Multipart: two 5MiB parts (real flow, docs/s3-protocol.md §8). 5MiB is AWS's minimum
+# for non-final parts (docs/gaps.md §5.7) -- 3MiB was used before, which real AWS would reject too
 dd if=/dev/urandom of="$WORK/p1" bs=1M count=5 2>/dev/null
 dd if=/dev/urandom of="$WORK/p2" bs=1M count=5 2>/dev/null
 INIT=$(s3curl -X POST "$BASE/mybucket/mpu.bin?uploads")
 UPLOAD_ID=$(echo "$INIT" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
-check "CreateMultipartUpload 返回 UploadId" "0" "$([[ -n "$UPLOAD_ID" ]]; echo $?)"
+check "CreateMultipartUpload returns UploadId" "0" "$([[ -n "$UPLOAD_ID" ]]; echo $?)"
 s3curl -o /dev/null -D "$WORK/h1" --data-binary "@$WORK/p1" -X PUT \
     "$BASE/mybucket/mpu.bin?partNumber=1&uploadId=$UPLOAD_ID"
 s3curl -o /dev/null -D "$WORK/h2" --data-binary "@$WORK/p2" -X PUT \
     "$BASE/mybucket/mpu.bin?partNumber=2&uploadId=$UPLOAD_ID"
 E1=$(tr -d '\r' < "$WORK/h1" | sed -n 's/^etag: //Ip')
 E2=$(tr -d '\r' < "$WORK/h2" | sed -n 's/^etag: //Ip')
-check "ListParts 含两个分片" "2" \
+check "ListParts has two parts" "2" \
     "$(s3curl "$BASE/mybucket/mpu.bin?uploadId=$UPLOAD_ID" | grep -o '<PartNumber>' | wc -l)"
 COMPLETE_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$E1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$E2</ETag></Part></CompleteMultipartUpload>"
 DONE=$(s3curl -X POST --data-binary "$COMPLETE_XML" "$BASE/mybucket/mpu.bin?uploadId=$UPLOAD_ID")
-check "CompleteMultipartUpload 拼接 ETag(-2)" "0" \
+check "CompleteMultipartUpload composite ETag(-2)" "0" \
     "$(echo "$DONE" | grep -q -- '-2&quot;</ETag>'; echo $?)"
 s3curl -o "$WORK/mpu.out" "$BASE/mybucket/mpu.bin"
-check "Multipart 下载内容一致" \
+check "Multipart download content matches" \
     "$(cat "$WORK/p1" "$WORK/p2" | md5sum | cut -d' ' -f1)" \
     "$(md5sum "$WORK/mpu.out" | cut -d' ' -f1)"
 
-# UploadPartCopy（docs/s3-protocol.md §1）：整段 copy + range copy 再拼装
+# UploadPartCopy (docs/s3-protocol.md §1): full-object copy + range copy, then assemble
 INIT2=$(s3curl -X POST "$BASE/mybucket/upc.bin?uploads")
 UPC_ID=$(echo "$INIT2" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
 UPC1=$(s3curl -X PUT -H 'x-amz-copy-source: /mybucket/mpu.bin' \
     "$BASE/mybucket/upc.bin?partNumber=1&uploadId=$UPC_ID")
-check "UploadPartCopy 整段" "0" "$(echo "$UPC1" | grep -q 'CopyPartResult'; echo $?)"
+check "UploadPartCopy full object" "0" "$(echo "$UPC1" | grep -q 'CopyPartResult'; echo $?)"
 UPC2=$(s3curl -X PUT -H 'x-amz-copy-source: /mybucket/mpu.bin' \
     -H 'x-amz-copy-source-range: bytes=0-1048575' \
     "$BASE/mybucket/upc.bin?partNumber=2&uploadId=$UPC_ID")
@@ -368,17 +371,17 @@ UE2=$(echo "$UPC2" | sed -n 's/.*<ETag>\(.*\)<\/ETag>.*/\1/p')
 UPC_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$UE1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$UE2</ETag></Part></CompleteMultipartUpload>"
 s3curl -o /dev/null -X POST --data-binary "$UPC_XML" "$BASE/mybucket/upc.bin?uploadId=$UPC_ID"
 s3curl -o "$WORK/upc.out" "$BASE/mybucket/upc.bin"
-check "UploadPartCopy 拼装内容一致" \
+check "UploadPartCopy assembled content matches" \
     "$(cat "$WORK/p1" "$WORK/p2" <(head -c 1048576 "$WORK/p1") | md5sum | cut -d' ' -f1)" \
     "$(md5sum "$WORK/upc.out" | cut -d' ' -f1)"
-check "UploadPartCopy 越界 range 拒绝" "400" \
+check "UploadPartCopy out-of-range rejected" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT \
        -H 'x-amz-copy-source: /mybucket/mpu.bin' \
        -H 'x-amz-copy-source-range: bytes=0-99999999' \
        "$BASE/mybucket/upc.bin?partNumber=3&uploadId=$UPC_ID")"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/upc.bin"
 
-# 非末片小于 5MiB → EntityTooSmall（docs/gaps.md §5.7）
+# Non-final part smaller than 5MiB -> EntityTooSmall (docs/gaps.md §5.7)
 INIT3=$(s3curl -X POST "$BASE/mybucket/small.bin?uploads")
 SM_ID=$(echo "$INIT3" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
 s3curl -o /dev/null -D "$WORK/hs1" --data-binary 'tiny-part-one' -X PUT \
@@ -388,111 +391,112 @@ s3curl -o /dev/null -D "$WORK/hs2" --data-binary 'tiny-part-two' -X PUT \
 S1=$(tr -d '\r' < "$WORK/hs1" | sed -n 's/^etag: //Ip')
 S2=$(tr -d '\r' < "$WORK/hs2" | sed -n 's/^etag: //Ip')
 SM_XML="<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>$S1</ETag></Part><Part><PartNumber>2</PartNumber><ETag>$S2</ETag></Part></CompleteMultipartUpload>"
-check "非末片过小 EntityTooSmall" "0" \
+check "undersized non-final part EntityTooSmall" "0" \
     "$(s3curl -X POST --data-binary "$SM_XML" "$BASE/mybucket/small.bin?uploadId=$SM_ID" \
         | grep -q 'EntityTooSmall'; echo $?)"
-# 乱序有专属错误码
+# Out-of-order parts have a dedicated error code
 SM_REV="<CompleteMultipartUpload><Part><PartNumber>2</PartNumber><ETag>$S2</ETag></Part><Part><PartNumber>1</PartNumber><ETag>$S1</ETag></Part></CompleteMultipartUpload>"
-check "乱序 InvalidPartOrder" "0" \
+check "out-of-order InvalidPartOrder" "0" \
     "$(s3curl -X POST --data-binary "$SM_REV" "$BASE/mybucket/small.bin?uploadId=$SM_ID" \
         | grep -q 'InvalidPartOrder'; echo $?)"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/small.bin?uploadId=$SM_ID"
 
-# DeleteObjects 批量删除（AWS 要求带 Content-MD5，docs/gaps.md §5.6）
+# DeleteObjects batch deletion (AWS requires Content-MD5, docs/gaps.md §5.6)
 DEL_XML='<Delete><Object><Key>copy.txt</Key></Object><Object><Key>mpu.bin</Key></Object></Delete>'
 DEL_MD5=$(printf '%s' "$DEL_XML" | openssl dgst -md5 -binary | openssl base64)
-check "DeleteObjects 缺完整性头 400" "400" \
+check "DeleteObjects missing integrity header 400" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST --data-binary "$DEL_XML" "$BASE/mybucket?delete")"
-check "DeleteObjects 摘要不符 400" "400" \
+check "DeleteObjects digest mismatch 400" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H "Content-MD5: $DEL_MD5" \
         --data-binary "<Delete><Object><Key>copy.txt</Key></Object></Delete>" \
         "$BASE/mybucket?delete")"
 DEL_OUT=$(s3curl -X POST -H "Content-MD5: $DEL_MD5" --data-binary "$DEL_XML" "$BASE/mybucket?delete")
-check "DeleteObjects 批量" "0" "$(echo "$DEL_OUT" | grep -q '<Deleted><Key>copy.txt</Key>'; echo $?)"
-check "批量删除生效" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/mpu.bin")"
+check "DeleteObjects batch" "0" "$(echo "$DEL_OUT" | grep -q '<Deleted><Key>copy.txt</Key>'; echo $?)"
+check "batch delete took effect" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/mpu.bin")"
 
-# PutObject 的 Content-MD5：不符 BadDigest，格式非法 InvalidDigest
+# PutObject's Content-MD5: mismatch -> BadDigest, malformed -> InvalidDigest
 PUT_MD5=$(printf 'md5-checked' | openssl dgst -md5 -binary | openssl base64)
-check "PutObject Content-MD5 相符" "200" \
+check "PutObject Content-MD5 match" "200" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT -H "Content-MD5: $PUT_MD5" \
         --data-binary 'md5-checked' "$BASE/mybucket/md5ok.bin")"
-check "PutObject Content-MD5 不符" "400" \
+check "PutObject Content-MD5 mismatch" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT -H "Content-MD5: $PUT_MD5" \
         --data-binary 'tampered!!!' "$BASE/mybucket/md5bad.bin")"
-check "PutObject Content-MD5 格式非法" "400" \
+check "PutObject Content-MD5 malformed" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT -H 'Content-MD5: not-base64' \
         --data-binary 'x' "$BASE/mybucket/md5junk.bin")"
-# 摘要不符/格式非法的两个对象不应落盘；相符的那个清掉，否则末尾 DeleteBucket 409
-check "摘要不符的对象未落盘" "404" \
+# The two objects with mismatched/malformed digests must not be persisted; clean up the
+# matching one, otherwise the final DeleteBucket returns 409
+check "mismatched-digest object not persisted" "404" \
     "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/md5bad.bin")"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/md5ok.bin"
 
-# 观测端点
-check "metrics 输出" "0" \
+# Observability endpoints
+check "metrics output" "0" \
     "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_requests_total'; echo $?)"
 check "readyz" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/readyz")"
 
-# 不支持的子资源 → 501
-check "?acl 显式 501" "501" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket?acl")"
+# Unsupported subresource -> 501
+check "?acl explicit 501" "501" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket?acl")"
 
-# 删除与 404
+# Deletion and 404
 check "DeleteObject" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/mybucket/dir/big.bin")"
-check "删后 GET 404" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/dir/big.bin")"
+check "GET after delete 404" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/mybucket/dir/big.bin")"
 GET404=$(s3curl "$BASE/mybucket/dir/big.bin")
-check "404 错误 XML" "0" "$(echo "$GET404" | grep -q '<Code>NoSuchKey</Code>'; echo $?)"
+check "404 error XML" "0" "$(echo "$GET404" | grep -q '<Code>NoSuchKey</Code>'; echo $?)"
 
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/dir/small.txt"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/top.txt"
 check "DeleteBucket" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/mybucket")"
 
-# ---------- 动态凭证管理（docs/credential-management.md）----------
-json_field() {  # json_field <key> —— 从 stdin 的缩进 JSON 里提取字符串字段
+# ---------- Dynamic credential management (docs/credential-management.md) ----------
+json_field() {  # json_field <key> -- extract a string field from the indented JSON on stdin
     sed -n "s/.*\"$1\": \"\([^\"]*\)\".*/\1/p" | head -1
 }
 
 CRED_OUT=$(s3curl -X POST "$BASE/-/admin/credentials?comment=e2e")
 DYN_AK=$(echo "$CRED_OUT" | json_field access_key)
 DYN_SK=$(echo "$CRED_OUT" | json_field secret_key)
-check "生成动态凭证" "0" "$([[ -n "$DYN_AK" && -n "$DYN_SK" ]]; echo $?)"
+check "create dynamic credential" "0" "$([[ -n "$DYN_AK" && -n "$DYN_SK" ]]; echo $?)"
 
-dyncurl() {  # 用动态凭证签名
+dyncurl() {  # sign with the dynamic credential
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$DYN_AK:$DYN_SK" "$@"
 }
-check "动态凭证 CreateBucket" "200" \
+check "dynamic credential CreateBucket" "200" \
     "$(dyncurl -o /dev/null -w '%{http_code}' -X PUT "$BASE/credbkt")"
-check "动态凭证 PutObject" "200" \
+check "dynamic credential PutObject" "200" \
     "$(dyncurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'cred-data' "$BASE/credbkt/k")"
-check "动态凭证 GetObject" "cred-data" "$(dyncurl "$BASE/credbkt/k")"
+check "dynamic credential GetObject" "cred-data" "$(dyncurl "$BASE/credbkt/k")"
 
 LIST_CREDS=$(s3curl "$BASE/-/admin/credentials")
-check "凭证列表含新 AK" "0" "$(echo "$LIST_CREDS" | grep -q "$DYN_AK"; echo $?)"
-check "凭证列表 SK 掩码" "1" "$(echo "$LIST_CREDS" | grep -q "$DYN_SK"; echo $?)"
-check "show-secret 取回 SK" "$DYN_SK" \
+check "credential list contains new AK" "0" "$(echo "$LIST_CREDS" | grep -q "$DYN_AK"; echo $?)"
+check "credential list masks SK" "1" "$(echo "$LIST_CREDS" | grep -q "$DYN_SK"; echo $?)"
+check "show-secret returns SK" "$DYN_SK" \
     "$(s3curl "$BASE/-/admin/credentials/$DYN_AK?show-secret=true" | json_field secret_key)"
-check "动态凭证调 admin 被拒" "403" \
+check "dynamic credential admin call rejected" "403" \
     "$(dyncurl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/credentials")"
 
-# 第二个凭证只用于重启后的持久化验证
+# The second credential is only for the post-restart persistence check
 CRED2_OUT=$(s3curl -X POST "$BASE/-/admin/credentials?comment=survivor")
 AK2=$(echo "$CRED2_OUT" | json_field access_key)
 SK2=$(echo "$CRED2_OUT" | json_field secret_key)
 
-check "吊销动态凭证" "204" \
+check "revoke dynamic credential" "204" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/-/admin/credentials/$DYN_AK")"
-check "吊销后数据面被拒" "403" \
+check "data plane rejected after revocation" "403" \
     "$(dyncurl -o /dev/null -w '%{http_code}' "$BASE/credbkt/k")"
-check ".sys 对用户不可达" "400" \
+check ".sys unreachable by users" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/.sys/credentials/$AK2")"
-check "ListBuckets 不含 .sys" "1" "$(s3curl "$BASE/" | grep -qF '.sys'; echo $?)"
+check "ListBuckets excludes .sys" "1" "$(s3curl "$BASE/" | grep -qF '.sys'; echo $?)"
 
-# ---------- 二期：文件凭证 + per-credential policy（credential-management.md §10）----------
-filecurl() {  # 用 credentials_file 里的凭证签名
+# ---------- Phase 2: file credentials + per-credential policy (credential-management.md §10) ----------
+filecurl() {  # sign with the credential from credentials_file
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$FILE_AK:$FILE_SK" "$@"
 }
-check "文件凭证数据面可用" "cred-data" "$(filecurl "$BASE/credbkt/k")"
-check "文件凭证调 admin 被拒" "403" \
+check "file credential works on data plane" "cred-data" "$(filecurl "$BASE/credbkt/k")"
+check "file credential admin call rejected" "403" \
     "$(filecurl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/credentials")"
-check "文件凭证不可经 API 吊销" "405" \
+check "file credential not revocable via API" "405" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/-/admin/credentials/$FILE_AK")"
 
 POL_OUT=$(s3curl -X POST \
@@ -500,27 +504,28 @@ POL_OUT=$(s3curl -X POST \
     "$BASE/-/admin/credentials")
 POL_AK=$(echo "$POL_OUT" | json_field access_key)
 POL_SK=$(echo "$POL_OUT" | json_field secret_key)
-check "生成带 policy 的凭证" "0" "$([[ -n "$POL_AK" && -n "$POL_SK" ]]; echo $?)"
+check "create credential with policy" "0" "$([[ -n "$POL_AK" && -n "$POL_SK" ]]; echo $?)"
 polcurl() {
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$POL_AK:$POL_SK" "$@"
 }
-check "policy 白名单内读放行" "cred-data" "$(polcurl "$BASE/credbkt/k")"
-check "policy readonly 写被拒" "403" \
+check "policy allows read inside whitelist" "cred-data" "$(polcurl "$BASE/credbkt/k")"
+check "policy readonly write rejected" "403" \
     "$(polcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'x' "$BASE/credbkt/blocked")"
-check "policy 白名单外被拒" "403" \
+check "policy rejects outside whitelist" "403" \
     "$(polcurl -o /dev/null -w '%{http_code}' "$BASE/otherbkt/x")"
-check "POST 未知字段被拒" "400" \
+check "POST unknown field rejected" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST --data-binary '{"bogus":1}' \
        "$BASE/-/admin/credentials")"
 
-# policy 的动作/前缀粒度与 ListBuckets 过滤（docs/gaps.md §5.10）
-# 先用 root 建一个白名单外的真实桶：否则白名单外无任何真实桶，过滤即便整体
-# 失效该断言也恒通过（空断言）
+# Action/prefix granularity of policies and ListBuckets filtering (docs/gaps.md §5.10)
+# First create a real bucket outside the whitelist as root: otherwise no real bucket
+# exists outside the whitelist and the assertion would pass vacuously even if filtering
+# were entirely broken (empty assertion)
 s3curl -o /dev/null -X PUT "$BASE/otherbkt"
 POL_LIST=$(polcurl "$BASE/")
-check "ListBuckets 按 policy 过滤" "0" \
+check "ListBuckets filtered by policy" "0" \
     "$(echo "$POL_LIST" | grep -q '<Name>otherbkt</Name>' && echo 1 || echo 0)"
-check "ListBuckets 白名单内可见" "0" \
+check "ListBuckets shows whitelisted bucket" "0" \
     "$(echo "$POL_LIST" | grep -q '<Name>credbkt</Name>' && echo 0 || echo 1)"
 BK_OUT=$(s3curl -X POST \
     --data-binary '{"policy":{"buckets":["credbkt"],"actions":["read","write"],"prefixes":["keep/"]}}' \
@@ -530,22 +535,22 @@ BK_SK=$(echo "$BK_OUT" | json_field secret_key)
 bkcurl() {
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$BK_AK:$BK_SK" "$@"
 }
-check "action 允许写" "200" \
+check "action allows write" "200" \
     "$(bkcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'v' "$BASE/credbkt/keep/a")"
-check "action 不含 delete 时删除被拒" "403" \
+check "delete rejected when action lacks delete" "403" \
     "$(bkcurl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/credbkt/keep/a")"
-check "前缀外写入被拒" "403" \
+check "write outside prefix rejected" "403" \
     "$(bkcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'v' "$BASE/credbkt/other/a")"
 
-# ListObjects 按 policy prefix 过滤：白名单外的真实对象不得被不带 prefix 的列举泄露
+# ListObjects filtered by policy prefix: real objects outside the whitelist must not leak through a listing without a prefix
 s3curl -o /dev/null -X PUT --data-binary 'v' "$BASE/credbkt/other/x"
 PLIST=$(bkcurl "$BASE/credbkt")
-check "ListObjects 不含前缀外 key" "0" \
+check "ListObjects excludes keys outside prefix" "0" \
     "$(echo "$PLIST" | grep -q '<Key>other/x</Key>' && echo 1 || echo 0)"
-check "ListObjects 含前缀内 key" "0" \
+check "ListObjects includes keys inside prefix" "0" \
     "$(echo "$PLIST" | grep -q '<Key>keep/a</Key>' && echo 0 || echo 1)"
 
-# DeleteObjects 逐 key 走 policy：批删接口不得绕过 prefix 白名单（与单删判定一致）
+# DeleteObjects applies the policy per key: the batch-delete API must not bypass the prefix whitelist (same judgment as single delete)
 DELP_OUT=$(s3curl -X POST \
     --data-binary '{"policy":{"buckets":["credbkt"],"actions":["read","delete"],"prefixes":["keep/"]}}' \
     "$BASE/-/admin/credentials")
@@ -558,32 +563,33 @@ BATCH_XML='<Delete><Object><Key>other/x</Key></Object><Object><Key>keep/a</Key><
 BATCH_MD5=$(printf '%s' "$BATCH_XML" | openssl dgst -md5 -binary | openssl base64)
 BATCH_OUT=$(delpcurl -X POST -H "Content-MD5: $BATCH_MD5" --data-binary "$BATCH_XML" \
     "$BASE/credbkt?delete")
-check "批删前缀外 key 返回 AccessDenied" "0" \
+check "batch delete returns AccessDenied for key outside prefix" "0" \
     "$(echo "$BATCH_OUT" | grep -q '<Error><Key>other/x</Key><Code>AccessDenied</Code>' && echo 0 || echo 1)"
-check "批删前缀内 key 正常删除" "0" \
+check "batch delete removes key inside prefix" "0" \
     "$(echo "$BATCH_OUT" | grep -q '<Deleted><Key>keep/a</Key>' && echo 0 || echo 1)"
-check "前缀外对象未被批删" "200" \
+check "object outside prefix not batch-deleted" "200" \
     "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/credbkt/other/x")"
 s3curl -o /dev/null -X DELETE "$BASE/credbkt/other/x"
 s3curl -o /dev/null -X DELETE "$BASE/otherbkt"
 
-check "静态凭证 SK 不经 admin 回传" "0" \
+check "static credential SK not returned via admin" "0" \
     "$(s3curl "$BASE/-/admin/credentials/$AK?show-secret=true" | grep -q '"secret_key"' && echo 1 || echo 0)"
 s3curl -o /dev/null -X DELETE "$BASE/credbkt/keep/a"
 
-# 优雅退出
+# Graceful shutdown
 kill -TERM "$SRV_PID"
 EXITED=1
 for _ in $(seq 1 50); do
     kill -0 "$SRV_PID" 2>/dev/null || { EXITED=0; break; }
     sleep 0.1
 done
-check "SIGTERM 优雅退出" "0" "$EXITED"
+check "SIGTERM graceful shutdown" "0" "$EXITED"
 wait "$SRV_PID" 2>/dev/null
 SRV_PID=""
 
-# ---------- 重启：动态凭证持久化验证（docs/credential-management.md §8）----------
-# 带 master key 重启：load 时 v1 明文对象就地升级为 v2 加密（§10.1），验签仍可用
+# ---------- Restart: dynamic credential persistence check (docs/credential-management.md §8) ----------
+# Restart with a master key: v1 plaintext objects are upgraded in place to v2 encrypted
+# at load time (§10.1), signature verification keeps working
 MASTER_KEY=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server2.log" 2>&1 &
 SRV_PID=$!
@@ -594,20 +600,20 @@ for _ in $(seq 1 50); do
     kill -0 "$SRV_PID" 2>/dev/null || break
     sleep 0.1
 done
-check "重启后 server 就绪" "0" "$([[ -n "$PORT" ]]; echo $?)"
+check "server ready after restart" "0" "$([[ -n "$PORT" ]]; echo $?)"
 BASE="http://127.0.0.1:$PORT"
-check "重启后动态凭证仍可用" "200" \
+check "dynamic credential still works after restart" "200" \
     "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" \
        -o /dev/null -w '%{http_code}' -I "$BASE/credbkt")"
-check "重启后已吊销凭证仍被拒" "403" \
+check "revoked credential still rejected after restart" "403" \
     "$(dyncurl -o /dev/null -w '%{http_code}' "$BASE/credbkt/k")"
-check "master key 下 show-secret 可逆" "$SK2" \
+check "show-secret reversible under master key" "$SK2" \
     "$(s3curl "$BASE/-/admin/credentials/$AK2?show-secret=true" | json_field secret_key)"
 if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
-    # localfs 才能直接翻 .sys 对象文件：升级后不应再有明文 SK 落盘
-    check "凭证对象已加密（无明文 SK）" "1" \
+    # Only localfs lets us inspect the .sys object files directly: after the upgrade no plaintext SK should remain on disk
+    check "credential object encrypted (no plaintext SK)" "1" \
         "$(grep -rqF "$SK2" "$WORK/data" 2>/dev/null; echo $?)"
-    check "凭证对象含 sk_enc" "0" \
+    check "credential object contains sk_enc" "0" \
         "$(grep -rq 'sk_enc' "$WORK/data" 2>/dev/null; echo $?)"
 fi
 kill -TERM "$SRV_PID"

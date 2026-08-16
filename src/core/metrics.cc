@@ -11,12 +11,14 @@ namespace lights3 {
 
 namespace {
 
-// 浮点按最短往返表示渲染（docs/gaps.md §4）：ostream 默认 6 位有效数字会把
-// ≥1e6 的桶界渲成 "1.04858e+06"，相近桶界折叠成重复 le 序列时 Prometheus
-// 直接拒绝整个 target
+// Render floats in shortest round-trip form (docs/gaps.md §4): ostream's default
+// 6 significant digits would render bucket bounds >=1e6 as "1.04858e+06", and when
+// nearby bounds collapse into duplicate le sequences Prometheus rejects the entire
+// target outright
 std::string fmt_double(double v) {
-    // 非有限值必须用 Prometheus 的拼写：to_chars 会写出 "inf"/"-inf"/"nan"，
-    // 抓取端同样以整个 target 报废收场——与桶界折叠是同一个失败模式
+    // Non-finite values must use Prometheus's spelling: to_chars would emit
+    // "inf"/"-inf"/"nan", and the scraper likewise ends up scrapping the whole
+    // target — the same failure mode as bucket-bound collapse
     if (std::isnan(v)) return "NaN";
     if (std::isinf(v)) return v > 0 ? "+Inf" : "-Inf";
     char buf[32];
@@ -24,8 +26,8 @@ std::string fmt_double(double v) {
     return std::string(buf, p);
 }
 
-// # HELP 文本转义（docs/gaps.md §4：标签值有转义，help 此前没有）：
-// 规范要求 \ → \\、换行 → \n
+// # HELP text escaping (docs/gaps.md §4: label values were escaped, help
+// previously was not): the spec requires \ -> \\ and newline -> \n
 std::string escape_help(const std::string& v) {
     std::string out;
     out.reserve(v.size());
@@ -40,7 +42,7 @@ std::string escape_help(const std::string& v) {
     return out;
 }
 
-// Prometheus 文本格式的标签值转义：\ → \\、" → \"、换行 → \n
+// Label value escaping for the Prometheus text format: \ -> \\, " -> \", newline -> \n
 void append_escaped(std::string& out, const std::string& v) {
     for (char c : v) {
         if (c == '\\')
@@ -54,7 +56,7 @@ void append_escaped(std::string& out, const std::string& v) {
     }
 }
 
-// 规范化标签串（无花括号）：backend="a",op="get"；空标签集为空串
+// Normalized label string (no braces): backend="a",op="get"; empty label set yields an empty string
 std::string label_str(const MetricLabels& labels) {
     std::string s;
     for (const auto& [k, v] : labels) {
@@ -67,7 +69,8 @@ std::string label_str(const MetricLabels& labels) {
     return s;
 }
 
-// 序列名 + 标签：name{...}；直方图桶行需在已有标签后续接 le，走 extra 形参
+// Series name + labels: name{...}; histogram bucket lines append le after the
+// existing labels via the extra parameter
 std::string series(const std::string& name, const std::string& labels,
                    const std::string& extra = "") {
     std::string all = labels;
@@ -108,7 +111,8 @@ MetricsRegistry::Family& MetricsRegistry::family_of(const std::string& name, Kin
                                  kind_str(int(kind)) + ", was " +
                                  kind_str(int(it->second.kind)));
     } else if (!help.empty() && it->second.help != help) {
-        // 保留首次 help（同族只渲染一行 # HELP），但不再静默（docs/gaps.md §4）
+        // Keep the first help (a family renders only one # HELP line), but no longer
+        // silently (docs/gaps.md §4)
         LOG_WARN("metric '{}' re-registered with different help text; keeping the first",
                  name);
     }
@@ -160,8 +164,8 @@ void MetricsRegistry::remove_labeled(const std::string& label_key,
     append_escaped(needle, label_value);
     needle += '"';
     auto hit = [&](const std::string& ls) {
-        // 标签串形如 a="1",backend="x"：匹配须落在分隔边界上，防 backend="x" 命中
-        // backend="xy" 这类前缀重名
+        // Label strings look like a="1",backend="x": a match must land on separator
+        // boundaries, so backend="x" cannot hit prefix look-alikes such as backend="xy"
         for (size_t at = ls.find(needle); at != std::string::npos;
              at = ls.find(needle, at + 1)) {
             bool left_ok = at == 0 || ls[at - 1] == ',';
@@ -186,10 +190,13 @@ void MetricsRegistry::remove_labeled(const std::string& label_key,
 }
 
 std::string MetricsRegistry::render() const {
-    // 回调 gauge 在锁外求值：回调可能耗时甚至反过来触碰注册表（锁内调用会死锁）。
-    // 先持锁抄回调清单 → 锁外求值 → 再持锁渲染，同名样本紧跟其 # TYPE 行
-    // （Prometheus 文本格式的家族分组要求）。两次持锁间新注册的回调本轮缺值，
-    // 跳过样本、下轮补上
+    // Callback gauges are evaluated outside the lock: a callback may be slow or even
+    // touch the registry in turn (calling under the lock would deadlock). First copy
+    // the callback list under the lock -> evaluate outside -> render under the lock
+    // again, so same-name samples follow directly after their # TYPE line (the
+    // family-grouping requirement of the Prometheus text format). Callbacks newly
+    // registered between the two lock holds lack a value this round: skip the
+    // sample, pick it up next round
     std::vector<std::tuple<std::string, std::string, std::function<double()>>> cbs;
     {
         std::lock_guard lk(m_);

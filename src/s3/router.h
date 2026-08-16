@@ -1,4 +1,4 @@
-// L2: URL → (bucket, key) 解析（path-style；virtual-host style 二期）
+// L2: URL -> (bucket, key) parsing (path-style; virtual-host style in phase 2)
 #pragma once
 
 #include <string>

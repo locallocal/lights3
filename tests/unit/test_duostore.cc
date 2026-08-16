@@ -1,9 +1,10 @@
-// DuoStore 专项单测（docs/duostore-backend.md §14）：编解码 roundtrip 与 run 边界、
-// 跨 chunk 读写、位腐检出、GC 一期（P3）、pack 聚合（P2：分流/chunked 缓冲/轮转
-// 封存/record 格式/crc/重启弃用/空 pack 整删）。meta 语义用例（GC 记账、号段单调、
-// pack 存活账等）已接口化为 meta_store_suite（docs/duostore-redis-meta.md §9），
-// RocksMetaStore 在此恒跑，redis/sqlite/tikv 在各自测试文件条件跑。
-// 压实/崩溃注入专项随 P4 增补。
+// Dedicated DuoStore unit tests (docs/duostore-backend.md §14): codec roundtrip and run boundaries,
+// cross-chunk read/write, bitrot detection, GC phase one (P3), pack aggregation (P2: routing / chunked
+// buffering / rotation sealing / record format / crc / abandonment on restart / whole-empty-pack deletion).
+// Meta-semantics cases (GC accounting, monotonic id segments, pack liveness accounting, etc.) have been
+// interfaced out as meta_store_suite (docs/duostore-redis-meta.md §9); RocksMetaStore always runs here,
+// redis/sqlite/tikv run conditionally in their own test files.
+// Compaction / crash-injection specials added with P4.
 #ifdef LIGHTS3_DUOSTORE
 
 #include <sys/wait.h>
@@ -42,7 +43,7 @@ namespace {
 using backend_suite::TmpDir;
 
 RocksMetaOptions meta_opts(const TmpDir& tmp) {
-    // 单测不需要 WAL fsync（崩溃语义有专项，P4）
+    // Unit tests do not need WAL fsync (crash semantics have their own specials, P4)
     return {(tmp.path / "meta").string(), /*sync=*/false, /*block_cache=*/8ull << 20};
 }
 
@@ -63,9 +64,9 @@ ObjectRec make_rec(std::string key, std::vector<Extent> extents) {
 }  // namespace
 
 TEST(duostore_crc32c_vectors) {
-    // RFC 3720 附录 B 向量：crc32c("123456789") = 0xE3069283
+    // RFC 3720 Appendix B vector: crc32c("123456789") = 0xE3069283
     CHECK_EQ(codec::crc32c_of(std::string_view("123456789")), 0xE3069283u);
-    // 链式增量 == 一次性
+    // Chained incremental == one-shot
     uint32_t chained = codec::crc32c_of(std::string_view("12345"));
     std::string_view rest = "6789";
     chained = codec::crc32c_update(
@@ -75,7 +76,7 @@ TEST(duostore_crc32c_vectors) {
 }
 
 TEST(duostore_extent_run_roundtrip) {
-    // 连续 file_id 的定长 chunk（末块短）压成单 run：4B n_runs + 37B run 头 + 5×4B crc
+    // Fixed-length chunks with consecutive file_ids (last block short) compress into a single run: 4B n_runs + 37B run header + 5×4B crc
     std::vector<Extent> ex;
     for (uint64_t i = 0; i < 5; ++i)
         ex.push_back(chunk_extent(100 + i, i == 4 ? 1000 : 8192, uint32_t(i)));
@@ -83,22 +84,22 @@ TEST(duostore_extent_run_roundtrip) {
     CHECK_EQ(enc.size(), size_t(4 + 37 + 5 * 4));
     CHECK(codec::decode_extents(enc) == ex);
 
-    // file_id 不连续 → 分裂为新 run
+    // Non-consecutive file_id -> splits into a new run
     ex.push_back(chunk_extent(200, 8192, 9));
     CHECK(codec::decode_extents(codec::encode_extents(ex)) == ex);
 
-    // 中段短块阻断合并（run 内除末段外必须满长）
+    // A short block in the middle blocks merging (within a run all but the last segment must be full-length)
     std::vector<Extent> mixed = {chunk_extent(1, 8192, 1), chunk_extent(2, 100, 2),
                                  chunk_extent(3, 8192, 3)};
     CHECK(codec::decode_extents(codec::encode_extents(mixed)) == mixed);
 
-    // pack extent 不合并且保留 offset
+    // Pack extents do not merge and keep their offset
     std::vector<Extent> packs = {{Extent::Kind::kPack, 7, 4096, 100, 42},
                                  {Extent::Kind::kPack, 7, 8192, 50, 43}};
     CHECK(codec::decode_extents(codec::encode_extents(packs)) == packs);
 
-    // kRados 与 kChunk 同构合并（docs/duostore-rados-data.md §3.1）：连续 id 压单
-    // run；异 kind 相邻不合并
+    // kRados merges isomorphically to kChunk (docs/duostore-rados-data.md §3.1): consecutive ids compress into a
+    // single run; adjacent extents of different kinds do not merge
     std::vector<Extent> rados;
     for (uint64_t i = 0; i < 4; ++i)
         rados.push_back({Extent::Kind::kRados, 500 + i, 0, i == 3 ? 100 : 8192, uint32_t(i)});
@@ -108,7 +109,7 @@ TEST(duostore_extent_run_roundtrip) {
                                  {Extent::Kind::kRados, 601, 0, 8192, 2}};
     CHECK(codec::decode_extents(codec::encode_extents(cross)) == cross);
 
-    // 空 = 0 字节对象
+    // Empty = 0-byte object
     CHECK(codec::decode_extents(codec::encode_extents({})).empty());
 }
 
@@ -157,20 +158,20 @@ TEST(duostore_value_codec_roundtrip) {
     CHECK(r2.extents == r.extents);
     CHECK_EQ(enq, int64_t(777));
 
-    // part key 尾部 be16 升序
+    // part key trailing be16 is ascending
     CHECK(codec::part_key("b", "k", "id", 2) < codec::part_key("b", "k", "id", 300));
     CHECK_EQ(codec::part_no_of_key(codec::part_key("b", "k", "id", 300)), 300);
 }
 
-// meta 语义基线（GC 记账、号段单调、MPU 挡桶删、max-keys=0、delimiter 分页）：
-// 接口化套件，RocksMetaStore 恒跑；RedisMetaStore 同一套件见 test_duostore_redis.cc
+// Meta-semantics baseline (GC accounting, monotonic id segments, MPU blocking bucket delete, max-keys=0, delimiter
+// pagination): the interfaced suite, RocksMetaStore always runs; the same suite for RedisMetaStore is in test_duostore_redis.cc
 TEST(duostore_meta_store_suite_rocksdb) {
     TmpDir tmp;
     meta_store_suite::run_meta_store_suite(
         [&] { return std::make_unique<RocksMetaStore>(meta_opts(tmp)); });
 }
 
-// RocksDB 实现细节：pack 计数器从 0 起（Redis 版首段空烧，绝对值是实现自由度）
+// RocksDB implementation detail: the pack counter starts at 0 (the Redis version burns its first segment; the absolute value is an implementation freedom)
 TEST(duostore_alloc_pack_counter_starts_at_zero) {
     TmpDir tmp;
     RocksMetaStore m(meta_opts(tmp));
@@ -178,7 +179,7 @@ TEST(duostore_alloc_pack_counter_starts_at_zero) {
     m.close();
 }
 
-// decode_object_meta（list 的免物化路径）与 decode_object().meta 逐字段一致
+// decode_object_meta (list's materialization-free path) matches decode_object().meta field by field
 TEST(duostore_decode_object_meta_parity) {
     ObjectRec rec = make_rec("k", {chunk_extent(1, 8192, 1), chunk_extent(2, 100, 2)});
     rec.meta.content_type = "text/x-parity";
@@ -195,10 +196,10 @@ TEST(duostore_decode_object_meta_parity) {
     CHECK_EQ(codec::to_unix_ms(lite.last_modified), codec::to_unix_ms(full.last_modified));
 }
 
-// pack record owner 的规范解析（docs/gaps.md §6.1）：三种历史形态收敛到唯一入口
+// Canonical parsing of the pack record owner (docs/gaps.md §6.1): three historical forms converge on a single entry point
 TEST(duostore_parse_pack_owner_forms) {
     using codec::PackOwner;
-    // parse_pack_owner 返回指向入参字节的 string_view：输入串必须活到断言结束
+    // parse_pack_owner returns string_views into the argument's bytes: the input string must outlive the assertions
     const std::string obj_in("bkt\0some/key", 12);
     auto obj = codec::parse_pack_owner(obj_in);
     CHECK(obj.kind == PackOwner::Kind::kObject);
@@ -219,7 +220,7 @@ TEST(duostore_parse_pack_owner_forms) {
     CHECK_EQ(std::string(legacy.upload_id), "uid42");
     CHECK_EQ(legacy.part_no, 300);
 
-    // 不成形态一律 kUnknown（压实对其保守不迁）：空串、段数不符、part_no 非数字
+    // Malformed inputs are all kUnknown (compaction conservatively does not migrate them): empty string, wrong segment count, non-numeric part_no
     CHECK(codec::parse_pack_owner("").kind == PackOwner::Kind::kUnknown);
     CHECK(codec::parse_pack_owner("solo").kind == PackOwner::Kind::kUnknown);
     CHECK(codec::parse_pack_owner(std::string("mpu\0b\0k\0uid\0x7", 14)).kind ==
@@ -227,8 +228,8 @@ TEST(duostore_parse_pack_owner_forms) {
     CHECK(codec::parse_pack_owner(std::string("\0k", 2)).kind == PackOwner::Kind::kUnknown);
 }
 
-// schema 标记判定（docs/gaps.md §6.1 迁移钩子的纯前置）：等于当前直过、
-// 比本构建新拒绝（防降级静默写坏）、乱码拒绝
+// Schema marker validation (the pure precondition of the migration hook, docs/gaps.md §6.1): equal to current
+// passes straight through, newer than this build is rejected (prevents a downgrade silently corrupting writes), garbage is rejected
 TEST(duostore_rocks_schema_marker_validation) {
     CHECK_EQ(RocksMetaStore::validate_schema_marker(
                  std::to_string(RocksMetaStore::kSchemaCurrent)),
@@ -244,27 +245,27 @@ TEST(duostore_rocks_schema_marker_validation) {
                     s3::S3ErrorCode::InternalError);
 }
 
-// 共享判定 parse_schema_marker 的谱系前缀语义（redis "r"、tikv "t" 走同一入口）
+// Lineage-prefix semantics of the shared parse_schema_marker check (redis "r" and tikv "t" use the same entry point)
 TEST(duostore_schema_marker_lineage_prefixes) {
     CHECK_EQ(parse_schema_marker("r1", "r", 1, "t"), 1);
     CHECK_EQ(parse_schema_marker("t1", "t", 1, "t"), 1);
-    CHECK_EQ(parse_schema_marker("r1", "r", 3, "t"), 1);  // 旧版本放行，交迁移链
+    CHECK_EQ(parse_schema_marker("r1", "r", 3, "t"), 1);  // an old version passes, handed to the migration chain
     CHECK_THROWS_S3(parse_schema_marker("r2", "r", 1, "t"),
-                    s3::S3ErrorCode::InternalError);  // 比本构建新
+                    s3::S3ErrorCode::InternalError);  // newer than this build
     CHECK_THROWS_S3(parse_schema_marker("t1", "r", 1, "t"),
-                    s3::S3ErrorCode::InternalError);  // 谱系不符
+                    s3::S3ErrorCode::InternalError);  // lineage mismatch
     CHECK_THROWS_S3(parse_schema_marker("r", "r", 1, "t"), s3::S3ErrorCode::InternalError);
     CHECK_THROWS_S3(parse_schema_marker("r-1", "r", 1, "t"), s3::S3ErrorCode::InternalError);
 }
 
-// '\0' 分隔编码的防御纵深：含 NUL 的段进入 key 构造器必须响亮失败（§4.1）
+// Defense in depth for the '\0'-delimited encoding: a segment containing NUL entering a key constructor must fail loudly (§4.1)
 TEST(duostore_codec_rejects_nul_key) {
     std::string nul_key("k\0x", 3);
     CHECK_THROWS_S3(codec::object_key("b", nul_key), s3::S3ErrorCode::InternalError);
     CHECK_THROWS_S3(codec::upload_key("b", "k", nul_key), s3::S3ErrorCode::InternalError);
 }
 
-// 跨 chunk 的写读与 Range（4KiB chunk 强制多 chunk manifest）；chunk 文件布局落位
+// Cross-chunk write/read and Range (4KiB chunks force a multi-chunk manifest); chunk file layout lands correctly
 TEST(duostore_multichunk_roundtrip_and_layout) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -273,7 +274,7 @@ TEST(duostore_multichunk_roundtrip_and_layout) {
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
     cfg.chunk_size = 4096;
-    cfg.pack_threshold = 0;  // 本用例专测 chunk 布局（pack 专项在下方）
+    cfg.pack_threshold = 0;  // this case tests chunk layout specifically (pack specials are below)
     cfg.meta_sync = false;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
     sync_wait(b->create_bucket("bkt"));
@@ -287,17 +288,17 @@ TEST(duostore_multichunk_roundtrip_and_layout) {
     CHECK_EQ(got.meta.etag, pr.etag);
     CHECK_EQ(read_all(*got.body), data);
 
-    // Range 跨 chunk 边界（4096/8192 两个切点都覆盖）
+    // Range across chunk boundaries (covers both cut points, 4096 and 8192)
     auto mid = sync_wait(b->get_object("bkt", "big", ByteRange{4000, 8500}));
     CHECK_EQ(read_all(*mid.body), data.substr(4000, 4501));
 
-    // 布局：10000B / 4KiB = 3 个 chunk 文件落在 chunks/<ss>/ 下
+    // Layout: 10000B / 4KiB = 3 chunk files land under chunks/<ss>/
     size_t chunk_files = 0;
     for (auto& e : fs::recursive_directory_iterator(tmp.path / "duo" / "chunks"))
         if (e.is_regular_file() && e.path().extension() == ".chk") ++chunk_files;
     CHECK_EQ(chunk_files, size_t(3));
 
-    // 0 字节对象：空 DataRef
+    // 0-byte object: empty DataRef
     put(*b, "bkt", "empty", "");
     auto empty = sync_wait(b->get_object("bkt", "empty", std::nullopt));
     CHECK_EQ(empty.meta.size, uint64_t(0));
@@ -309,7 +310,7 @@ TEST(duostore_multichunk_roundtrip_and_layout) {
     sync_wait(b->close());
 }
 
-// verify_chunk_crc=true：位腐的 chunk 在 GET 时被检出（500），而非静默吐坏数据（§7）
+// verify_chunk_crc=true: a bitrotted chunk is detected at GET (500) instead of silently serving bad data (§7)
 TEST(duostore_get_detects_chunk_bitrot) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -317,14 +318,14 @@ TEST(duostore_get_detects_chunk_bitrot) {
     cfg.name = "crc";
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
-    cfg.pack_threshold = 0;  // 走 chunk：pack 恒校验 crc，有独立用例
+    cfg.pack_threshold = 0;  // take the chunk path: packs always verify crc and have their own case
     cfg.meta_sync = false;
     cfg.verify_chunk_crc = true;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", std::string(1000, 'x'));
 
-    // 注入位腐：翻转唯一 chunk 文件中段的一个字节
+    // Inject bitrot: flip one byte in the middle of the only chunk file
     fs::path chunk;
     for (auto& e : fs::recursive_directory_iterator(tmp.path / "duo" / "chunks"))
         if (e.is_regular_file() && e.path().extension() == ".chk") chunk = e.path();
@@ -339,12 +340,12 @@ TEST(duostore_get_detects_chunk_bitrot) {
     sync_wait(b->close());
 }
 
-// ---------- GC 一期专项（§9/§15 P3 验收：覆盖/删除/abort 后收敛 + GET vs GC）----------
+// ---------- GC phase-one specials (§9/§15 P3 acceptance: convergence after overwrite/delete/abort + GET vs GC) ----------
 
 namespace {
 
-// GC 专项统一配置：4KiB chunk 强制多 chunk、pack 关闭（chunk unlink 语义专测；
-// pack 侧 GC 有独立用例）、grace=0 立即可回收、后台 worker 关闭（专测手动钩子）
+// Uniform config for the GC specials: 4KiB chunks force multi-chunk, pack disabled (chunk unlink semantics tested
+// specifically; pack-side GC has its own cases), grace=0 for immediate reclaimability, background worker off (tests the manual hook specifically)
 DuoStoreConfig gc_cfg(const TmpDir& tmp, const char* name) {
     DuoStoreConfig cfg;
     cfg.name = name;
@@ -375,7 +376,7 @@ std::string patterned(size_t n) {
 
 }  // namespace
 
-// 覆盖 + 删除后 run_gc_once 收敛：chunk 物理消失、gcq 清空、再跑一轮零动作
+// run_gc_once converges after overwrite + delete: chunks physically disappear, gcq drains, another round performs zero actions
 TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -383,8 +384,8 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
 
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunk
-    put(*b, "bkt", "k", patterned(5000));   // 覆盖：旧 3 chunk 入 gcq，新 2 chunk
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
+    put(*b, "bkt", "k", patterned(5000));   // overwrite: old 3 chunks enter gcq, new 2 chunks
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(5));
 
     auto st1 = sync_wait(b->run_gc_once());
@@ -392,7 +393,7 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     CHECK_EQ(st1.files_removed, uint64_t(3));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(2));
     {
-        // 存活版本不受影响（作用域内读完即析构——reader 存活期间持 pin）
+        // The live version is unaffected (read and destroyed within the scope -- the reader holds a pin while alive)
         auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
         CHECK_EQ(read_all(*got.body), patterned(5000));
     }
@@ -402,15 +403,15 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     CHECK_EQ(st2.files_removed, uint64_t(2));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
 
-    // 收敛：空 gcq 再跑一轮零动作
+    // Convergence: another round on the empty gcq performs zero actions
     auto st3 = sync_wait(b->run_gc_once());
     CHECK_EQ(st3.reclaims_acked, uint64_t(0));
     CHECK_EQ(st3.files_removed, uint64_t(0));
     sync_wait(b->close());
 }
 
-// 后端级 metrics：GC 计数经 MetricsScope 落注册表，
-// backend 标签来自装配侧；直构（默认空 scope）路径由其余 GC 用例覆盖
+// Backend-level metrics: GC counts land in the registry via MetricsScope,
+// the backend label comes from the assembly side; the direct-construction (default empty scope) path is covered by the other GC cases
 TEST(duostore_gc_metrics_registered) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -419,7 +420,7 @@ TEST(duostore_gc_metrics_registered) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool,
                                                MetricsScope(reg, {{"backend", "gcm"}}));
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunk
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
     sync_wait(b->delete_object("bkt", "k"));
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.reclaims_acked, uint64_t(1));
@@ -433,7 +434,7 @@ TEST(duostore_gc_metrics_registered) {
     sync_wait(b->close());
 }
 
-// gc_grace 防御纵深（§7/§9.1）：未逾宽限期的项跳过——不销账、文件保留
+// gc_grace defense in depth (§7/§9.1): items not yet past the grace period are skipped -- no ack, files kept
 TEST(duostore_gc_grace_defers_reclaim) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -451,8 +452,8 @@ TEST(duostore_gc_grace_defers_reclaim) {
     sync_wait(b->close());
 }
 
-// 并发 GET vs GC（§7 pin 计数；§15 P3 验收"无 ENOENT"）：读中对象被删，pin 挡
-// GC 不 unlink；读完整校验内容；reader 析构解 pin 后下一轮回收
+// Concurrent GET vs GC (§7 pin counting; §15 P3 acceptance "no ENOENT"): the object is deleted mid-read, the pin
+// keeps GC from unlinking; the full content is verified after reading; the next round reclaims once the reader's destruction releases the pin
 TEST(duostore_gc_pin_blocks_unlink_during_get) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -463,7 +464,7 @@ TEST(duostore_gc_pin_blocks_unlink_during_get) {
     put(*b, "bkt", "k", body);
 
     auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
-    // 读一小段（首 chunk 已打开），后续 chunk 依赖懒打开——正是 pin 防护的窗口
+    // Read a small piece (the first chunk is open), later chunks rely on lazy opening -- exactly the window the pin protects
     std::byte buf[100];
     size_t n0 = sync_wait(got.body->read(std::span(buf)));
     CHECK(n0 > 0);
@@ -474,38 +475,38 @@ TEST(duostore_gc_pin_blocks_unlink_during_get) {
     CHECK_EQ(st1.reclaims_acked, uint64_t(0));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(3));
 
-    // 剩余部分完整读出，无 ENOENT / 500
+    // The remainder reads out intact, no ENOENT / 500
     std::string rest = read_all(*got.body);
     CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n0) + rest, body);
 
-    got.body.reset();  // 析构解 pin
+    got.body.reset();  // destruction releases the pin
     auto st2 = sync_wait(b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(1));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
     sync_wait(b->close());
 }
 
-// abort 后 GC 收敛 + mpu_ttl 过期清理（§8 末）：过期 upload 内部 abort，分片
-// 同轮变现；abort 后的 upload_id 干净失效
+// GC converges after abort + mpu_ttl expiry cleanup (end of §8): an expired upload is aborted internally, its parts
+// are reclaimed in the same round; the aborted upload_id is cleanly invalidated
 TEST(duostore_gc_mpu_ttl_expiry) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = gc_cfg(tmp, "gc-mpu");
-    cfg.mpu_ttl_sec = 1;  // 最小正 ttl（0 = 关闭清理，非"立即过期"）
+    cfg.mpu_ttl_sec = 1;  // smallest positive ttl (0 = cleanup disabled, not "expire immediately")
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
 
     auto id = sync_wait(b->create_multipart("bkt", "mpu", {}));
     {
-        http::StringBodyReader part(patterned(6000));  // 2 chunk
+        http::StringBodyReader part(patterned(6000));  // 2 chunks
         sync_wait(b->upload_part("bkt", "mpu", id, 1, part));
     }
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(2));
 
-    usleep(1100 * 1000);  // 越过 1s ttl
+    usleep(1100 * 1000);  // past the 1s ttl
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.uploads_expired, uint64_t(1));
-    // abort 入 gcq 的分片在同一轮消费（mpu 清理先于 gcq 消费）
+    // Parts entered into the gcq by the abort are consumed in the same round (mpu cleanup precedes gcq consumption)
     CHECK_EQ(st.reclaims_acked, uint64_t(1));
     CHECK_EQ(st.files_removed, uint64_t(2));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
@@ -518,7 +519,7 @@ TEST(duostore_gc_mpu_ttl_expiry) {
     sync_wait(b->close());
 }
 
-// mpu_ttl=0 = 关闭清理（与 gc_interval 的 0 语义对齐）；未过期 upload 也不受影响
+// mpu_ttl=0 = cleanup disabled (aligned with gc_interval's 0 semantics); a non-expired upload is unaffected either way
 TEST(duostore_gc_mpu_fresh_upload_survives) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -532,7 +533,7 @@ TEST(duostore_gc_mpu_fresh_upload_survives) {
     CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt", {})).uploads.size(), size_t(1));
     sync_wait(b->close());
 
-    // ttl=0：清理整体关闭，任何"已过期"的 upload 都不动
+    // ttl=0: cleanup entirely off, even an "already expired" upload is untouched
     TmpDir tmp2;
     auto cfg2 = gc_cfg(tmp2, "gc-mpu-off");
     cfg2.mpu_ttl_sec = 0;
@@ -545,8 +546,8 @@ TEST(duostore_gc_mpu_fresh_upload_survives) {
     sync_wait(b2->close());
 }
 
-// gcq 断点续扫（§9.1）：整批被 pin 的队头不卡整轮——后续积压仍被回收，且跳过
-// 项只计一次
+// gcq resumable scan (§9.1): a fully pinned batch at the queue head does not stall the whole round -- the backlog
+// behind it still gets reclaimed, and skipped items are counted only once
 TEST(duostore_gc_skipped_head_does_not_stall_round) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -554,7 +555,7 @@ TEST(duostore_gc_skipped_head_does_not_stall_round) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
 
-    // 257 个单 chunk 对象：前 256 个读者持 pin（占满一个 peek 批），第 257 个可回收
+    // 257 single-chunk objects: readers hold pins on the first 256 (filling a full peek batch), the 257th is reclaimable
     constexpr int kN = 257;
     for (int i = 0; i < kN; ++i)
         put(*b, "bkt", "k" + std::to_string(i), patterned(64));
@@ -564,18 +565,18 @@ TEST(duostore_gc_skipped_head_does_not_stall_round) {
     for (int i = 0; i < kN; ++i) sync_wait(b->delete_object("bkt", "k" + std::to_string(i)));
 
     auto st = sync_wait(b->run_gc_once());
-    CHECK_EQ(st.skipped_pinned, uint64_t(kN - 1));  // 每项只计一次
-    CHECK_EQ(st.reclaims_acked, uint64_t(1));       // 队头全 pin 不挡队尾变现
+    CHECK_EQ(st.skipped_pinned, uint64_t(kN - 1));  // each item counted only once
+    CHECK_EQ(st.reclaims_acked, uint64_t(1));       // a fully pinned head does not block reclaiming the tail
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(kN - 1));
 
-    readers.clear();  // 解 pin 后全量收敛
+    readers.clear();  // full convergence once unpinned
     auto st2 = sync_wait(b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(kN - 1));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
     sync_wait(b->close());
 }
 
-// 后台 worker（§9）：gc_interval=1s 周期自动变现；close 撤定时器、等在途 GC
+// Background worker (§9): reclaims automatically on a gc_interval=1s cadence; close cancels the timer and waits for in-flight GC
 TEST(duostore_gc_background_worker_runs) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -587,7 +588,7 @@ TEST(duostore_gc_background_worker_runs) {
     sync_wait(b->delete_object("bkt", "k"));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(3));
 
-    // 至多等 15s 收敛（正常 1-2 个周期）
+    // Wait at most 15s to converge (normally 1-2 cycles)
     bool converged = false;
     for (int i = 0; i < 150 && !converged; ++i) {
         if (chunk_files_on_disk(cfg.root) == 0) converged = true;
@@ -597,8 +598,8 @@ TEST(duostore_gc_background_worker_runs) {
     sync_wait(b->close());
 }
 
-// 生命周期：远期定时器被 close 干净撤销；不 close 直接析构走 dtor 兜底——两条
-// 路径都不得悬挂/用后释放（asan/tsan 矩阵覆盖）
+// Lifecycle: a far-future timer is cleanly cancelled by close; destructing without close takes the dtor fallback --
+// neither path may hang or use-after-free (covered by the asan/tsan matrix)
 TEST(duostore_gc_close_and_dtor_cancel_worker) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -614,12 +615,12 @@ TEST(duostore_gc_close_and_dtor_cancel_worker) {
         cfg.root = tmp.path / "duo2";
         cfg.meta_path = cfg.root / "meta";
         cfg.gc_interval_sec = 300;
-        DuoStoreBackend b(cfg, pool);  // 析构兜底路径
+        DuoStoreBackend b(cfg, pool);  // dtor fallback path
     }
 }
 
-// close 与手动 run_gc_once 并发：手动钩子经等待组登记在途，close 等它结束后才拆
-// meta/data；关闭后的手动钩子拒绝进入、返回零统计（asan/tsan 矩阵下验证无 UAF）
+// close concurrent with the manual run_gc_once: the manual hook registers in-flight via the wait group, and close
+// waits for it before tearing down meta/data; after close the manual hook refuses entry and returns zero stats (verified UAF-free under the asan/tsan matrix)
 TEST(duostore_gc_manual_hook_vs_close) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -635,11 +636,11 @@ TEST(duostore_gc_manual_hook_vs_close) {
     std::thread closer([&] { sync_wait(b->close()); });
     gc.join();
     closer.join();
-    auto st = sync_wait(b->run_gc_once());  // 已关闭：拒绝进入
+    auto st = sync_wait(b->run_gc_once());  // already closed: refuses entry
     CHECK_EQ(st.reclaims_acked, uint64_t(0));
 }
 
-// FsDataStore::remove_pack：整 pack 文件删除幂等（§9.1；手工造文件，不走写路径）
+// FsDataStore::remove_pack: whole-pack-file deletion is idempotent (§9.1; file crafted by hand, not via the write path)
 TEST(duostore_fs_remove_pack_idempotent) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -652,16 +653,16 @@ TEST(duostore_fs_remove_pack_idempotent) {
     CHECK(fs::exists(p));
     sync_wait(d.remove_pack(7));
     CHECK(!fs::exists(p));
-    sync_wait(d.remove_pack(7));  // 双删幂等（ENOENT 忽略）
+    sync_wait(d.remove_pack(7));  // double delete is idempotent (ENOENT ignored)
     sync_wait(d.close());
 }
 
-// ---------- P2 pack 聚合专项（§5.2/§5.3/§14）----------
+// ---------- P2 pack aggregation specials (§5.2/§5.3/§14) ----------
 
 namespace {
 
-// pack 专项统一配置：1KiB 阈值 + 单 writer（布局断言确定性）；chunk 4KiB；
-// GC 手动钩子、grace=0
+// Uniform config for the pack specials: 1KiB threshold + single writer (deterministic layout assertions); 4KiB chunks;
+// manual GC hook, grace=0
 DuoStoreConfig pack_cfg(const TmpDir& tmp, const char* name) {
     DuoStoreConfig cfg;
     cfg.name = name;
@@ -671,7 +672,7 @@ DuoStoreConfig pack_cfg(const TmpDir& tmp, const char* name) {
     cfg.pack_threshold = 1024;
     cfg.pack_max_size = 64 << 10;
     cfg.pack_writers = 1;
-    cfg.pack_max_age_sec = 0;  // 老化轮转默认关：布局断言按容量轮转才确定
+    cfg.pack_max_age_sec = 0;  // age rotation off by default: layout assertions are only deterministic with capacity-based rotation
     cfg.meta_sync = false;
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
@@ -699,7 +700,7 @@ fs::path sole_pack_file(const fs::path& root) {
     return found;
 }
 
-// 长度未知的流（chunked PUT 模拟）：length() 恒 nullopt，逼出缓冲/分流路径（§5.3）
+// Unknown-length stream (simulated chunked PUT): length() is always nullopt, forcing the buffering/routing path (§5.3)
 class UnknownLenReader final : public http::BodyReader {
 public:
     explicit UnknownLenReader(std::string data) : data_(std::move(data)) {}
@@ -716,10 +717,10 @@ private:
     size_t off_ = 0;
 };
 
-// 注入组装：拿得到 meta 裸指针以断言 pack 存活账（backend 持有所有权）
+// Injected assembly: keeps a raw meta pointer to assert pack liveness accounting (the backend owns it)
 struct PackHarness {
     std::shared_ptr<DuoStoreBackend> b;
-    RocksMetaStore* meta = nullptr;  // 生命周期随 b
+    RocksMetaStore* meta = nullptr;  // lifetime follows b
 };
 
 PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadPool> pool) {
@@ -727,8 +728,8 @@ PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadP
     auto meta = std::make_unique<RocksMetaStore>(
         RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
     auto* mp = meta.get();
-    // 迁移回调同 cfg 构造的装配（migrate_pack_record 标准实现）；写侧 pin 钩子不接
-    // ——压实用例的迁移 payload ≤ 阈值恒走 pack 路径，pins 传空即可
+    // Migration callback matches the cfg-constructed assembly (the standard migrate_pack_record implementation); the
+    // write-side pin hook is not wired -- the compaction cases' migration payloads are <= the threshold and always take the pack path, so passing empty pins suffices
     auto data = std::make_unique<FsDataStore>(
         FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
                       cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
@@ -751,8 +752,8 @@ std::optional<PackStat> find_pack_stat(IMetaStore& m, uint64_t pack_id) {
 
 }  // namespace
 
-// 分流 + 布局 + record 格式（§5.2）：≤ 阈值进同一 active pack 追加（零 chunk）、
-// magic/owner 落盘、> 阈值走 chunk、GET 全量与 Range、存活账随写累计
+// Routing + layout + record format (§5.2): <= threshold appends into the same active pack (zero chunks),
+// magic/owner persisted, > threshold takes the chunk path, GET full and Range, liveness accounting accumulates with writes
 TEST(duostore_pack_layout_roundtrip_and_stats) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -763,23 +764,23 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     std::string d1 = patterned(600), d2 = patterned(500);
     put(*h.b, "bkt", "k1", d1);
     put(*h.b, "bkt", "k2", d2);
-    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));  // 同一 active pack 追加
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));  // appended into the same active pack
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
 
-    // record 格式落盘：文件以 "LP3R" magic 起头，owner = "bucket\0key" 内嵌
+    // Record format on disk: the file starts with the "LP3R" magic, owner = "bucket\0key" embedded
     std::string raw = read_file(sole_pack_file(cfg.root));
     CHECK_EQ(raw.substr(0, 4), "LP3R");
     CHECK(raw.find(std::string("bkt\0k1", 6)) != std::string::npos);
     CHECK(raw.find(std::string("bkt\0k2", 6)) != std::string::npos);
 
-    // 读回：全量 + 跨 record 无关的 Range（payload 内切片）
+    // Read back: full + a Range unrelated to record boundaries (slicing within the payload)
     auto g1 = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
     CHECK_EQ(read_all(*g1.body), d1);
     auto g2 = sync_wait(h.b->get_object("bkt", "k2", ByteRange{100, 299}));
     CHECK_EQ(read_all(*g2.body), d2.substr(100, 200));
 
-    // 存活账（meta 侧）：2 record，payload 1100B + 每条 28B record 头（22 固定 +
-    // "bkt\0kN" owner，§2.3a 与 file_size 同口径），未封存
+    // Liveness accounting (meta side): 2 records, payload 1100B + a 28B record header each (22 fixed +
+    // "bkt\0kN" owner, §2.3a same accounting basis as file_size), not sealed
     auto rec = h.meta->get_object("bkt", "k1");
     CHECK(rec.has_value());
     CHECK_EQ(size_t(rec->data.extents.size()), size_t(1));
@@ -791,7 +792,7 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     CHECK_EQ(ps->live_recs, int64_t(2));
     CHECK(!ps->sealed);
 
-    // 大于阈值 → chunk 路径（pack 无新增）
+    // Larger than the threshold -> chunk path (nothing new in the pack)
     std::string big = patterned(2000);
     put(*h.b, "bkt", "big", big);
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
@@ -799,8 +800,8 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     auto g3 = sync_wait(h.b->get_object("bkt", "big", std::nullopt));
     CHECK_EQ(read_all(*g3.body), big);
 
-    // multipart 小分片同样进 pack，owner = "mpu\0<b>\0<k>\0<id>\0<no>"（P4 §9.2：
-    // 带 b/k 才能在 complete 后反查归属对象）
+    // Small multipart parts also go into the pack, owner = "mpu\0<b>\0<k>\0<id>\0<no>" (P4 §9.2:
+    // only with b/k can the owning object be looked up after complete)
     auto id = sync_wait(h.b->create_multipart("bkt", "mp", {}));
     {
         http::StringBodyReader body(patterned(300));
@@ -812,8 +813,8 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     sync_wait(h.b->close());
 }
 
-// chunked（长度未知）PUT 的缓冲分流（§5.3）：恰 == 阈值整体进 pack；超阈值缓冲
-// 落盘转 chunk 流式路径，内容完整
+// Buffered routing of a chunked (unknown-length) PUT (§5.3): exactly == the threshold goes into the pack whole;
+// over the threshold the buffer spills to disk and switches to the streaming chunk path, content intact
 TEST(duostore_pack_chunked_put_buffer_and_spill) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -821,7 +822,7 @@ TEST(duostore_pack_chunked_put_buffer_and_spill) {
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
 
-    std::string exact = patterned(1024);  // == pack_threshold：EOF 时整体进 pack
+    std::string exact = patterned(1024);  // == pack_threshold: goes into the pack whole at EOF
     {
         UnknownLenReader body(exact);
         sync_wait(h.b->put_object("bkt", "fit", {}, body));
@@ -831,7 +832,7 @@ TEST(duostore_pack_chunked_put_buffer_and_spill) {
     auto g1 = sync_wait(h.b->get_object("bkt", "fit", std::nullopt));
     CHECK_EQ(read_all(*g1.body), exact);
 
-    std::string spill = patterned(10000);  // 超阈值：缓冲落盘 + 转 chunk（3×4KiB）
+    std::string spill = patterned(10000);  // over the threshold: buffer spills to disk + switches to chunks (3×4KiB)
     {
         UnknownLenReader body(spill);
         sync_wait(h.b->put_object("bkt", "spill", {}, body));
@@ -844,17 +845,17 @@ TEST(duostore_pack_chunked_put_buffer_and_spill) {
     sync_wait(h.b->close());
 }
 
-// 轮转封存（§5.2）：达 pack_max_size 即 sealed（file_size 回报）、换新 pack_id；
-// close() 封存余下 active pack
+// Rotation sealing (§5.2): sealed on reaching pack_max_size (file_size reported), switches to a new pack_id;
+// close() seals the remaining active pack
 TEST(duostore_pack_rotation_seals_and_close_seals_rest) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "pack-rot");
-    cfg.pack_max_size = 2048;  // record ≈ 600+29 → 每 pack 3 条即满
+    cfg.pack_max_size = 2048;  // record ≈ 600+29 -> each pack fills at 3 records
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     for (int i = 0; i < 4; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
-    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // 3 + 1 分布
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // 3 + 1 distribution
 
     auto stats = h.meta->pack_stats();
     CHECK_EQ(stats.size(), size_t(2));
@@ -862,7 +863,7 @@ TEST(duostore_pack_rotation_seals_and_close_seals_rest) {
     for (const auto& ps : stats) {
         if (ps.sealed) {
             ++sealed;
-            CHECK(ps.file_size > 0);  // 轮转封存回报最终文件大小
+            CHECK(ps.file_size > 0);  // rotation sealing reports the final file size
             CHECK_EQ(ps.live_recs, int64_t(3));
         } else {
             ++active;
@@ -871,18 +872,18 @@ TEST(duostore_pack_rotation_seals_and_close_seals_rest) {
     }
     CHECK_EQ(sealed, size_t(1));
     CHECK_EQ(active, size_t(1));
-    for (int i = 0; i < 4; ++i) {  // 跨 pack 全部可读
+    for (int i = 0; i < 4; ++i) {  // all readable across packs
         auto g = sync_wait(h.b->get_object("bkt", "k" + std::to_string(i), std::nullopt));
         CHECK_EQ(read_all(*g.body), patterned(600));
     }
 
     IMetaStore* mp = h.meta;
-    sync_wait(h.b->close());  // 封存余下 active pack（§9 生命周期：close 内 data 先于 meta）
-    (void)mp;                 // close 后 meta 已关，账的复核放重启用例
+    sync_wait(h.b->close());  // seals the remaining active pack (§9 lifecycle: within close, data before meta)
+    (void)mp;                 // meta is closed after close; re-checking the accounting is left to the restart cases
 }
 
-// pack record 恒校验 crc（§7）：payload 位腐在 GET 时被检出（500），与
-// verify_chunk_crc 开关无关
+// Pack records always verify crc (§7): payload bitrot is detected at GET (500), independent of the
+// verify_chunk_crc switch
 TEST(duostore_pack_get_detects_bitrot) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -895,7 +896,7 @@ TEST(duostore_pack_get_detects_bitrot) {
     CHECK(!p.empty());
     {
         std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
-        f.seekp(-10, std::ios::end);  // payload 尾部（头在文件首）
+        f.seekp(-10, std::ios::end);  // payload tail (the header is at the start of the file)
         f.put('!');
     }
     auto got = sync_wait(h.b->get_object("bkt", "k", std::nullopt));
@@ -903,8 +904,8 @@ TEST(duostore_pack_get_detects_bitrot) {
     sync_wait(h.b->close());
 }
 
-// P5 corruption 指标：GET 读路径 crc 失配经 on_corruption 回调落注册表——chunk 与
-// pack 两处接入各计一次（cfg 构造装配；注入组装不接钩子，其余位腐用例不计数）
+// P5 corruption metric: crc mismatches on the GET read path land in the registry via the on_corruption callback --
+// the chunk and pack integration points each count once (cfg-constructed assembly; the injected assembly does not wire the hook, so the other bitrot cases do not count)
 TEST(duostore_read_corruption_metric) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -914,11 +915,11 @@ TEST(duostore_read_corruption_metric) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool,
                                                MetricsScope(reg, {{"backend", "corrupt"}}));
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "small", patterned(600));  // ≤ 阈值：pack record
-    put(*b, "bkt", "big", patterned(5000));   // > 阈值：2 chunk（chunk_size 4KiB）
+    put(*b, "bkt", "small", patterned(600));  // <= threshold: pack record
+    put(*b, "bkt", "big", patterned(5000));   // > threshold: 2 chunks (chunk_size 4KiB)
     CHECK(reg->render().find(
               "lights3_duostore_read_corruption_total{backend=\"corrupt\"} 0\n") !=
-          std::string::npos);  // 构造期即注册，0 值可见
+          std::string::npos);  // registered at construction, zero value visible
 
     fs::path chunk;
     for (auto& e : fs::recursive_directory_iterator(cfg.root / "chunks"))
@@ -936,7 +937,7 @@ TEST(duostore_read_corruption_metric) {
     CHECK(!p.empty());
     {
         std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
-        f.seekp(-10, std::ios::end);  // payload 尾部（头在 record 首）
+        f.seekp(-10, std::ios::end);  // payload tail (the header is at the start of the record)
         f.put('!');
     }
     auto got2 = sync_wait(b->get_object("bkt", "small", std::nullopt));
@@ -948,7 +949,7 @@ TEST(duostore_read_corruption_metric) {
     sync_wait(b->close());
 }
 
-// P5 RocksDB 调参外露：尺寸/整数解析 + 范围校验（≥1）
+// P5 exposed RocksDB tuning: size/integer parsing + range validation (>=1)
 TEST(duostore_config_rocksdb_tuning_params) {
     std::map<std::string, std::string> p{{"root", "/tmp/duo-cfg"},
                                          {"rocksdb_write_buffer", "8MiB"},
@@ -969,13 +970,13 @@ TEST(duostore_config_rocksdb_tuning_params) {
     CHECK(threw);
 }
 
-// 多网关单实例执行门控（C4，docs/duostore-rados-data.md §8.3）：gc_enabled=false
-// 只停后台 worker/孤儿扫描的排程，手动钩子（测试/运维通道）不受门控
+// Single-instance execution gating for multiple gateways (C4, docs/duostore-rados-data.md §8.3): gc_enabled=false
+// only stops the scheduling of the background worker/orphan scan; the manual hooks (test/ops channel) are not gated
 TEST(duostore_config_gc_enabled_gates_background_only) {
     std::map<std::string, std::string> p{{"root", "/tmp/duo-cfg"}, {"gc_enabled", "false"}};
     auto c = DuoStoreConfig::from_params("t", p);
     CHECK(!c.gc_enabled);
-    CHECK(DuoStoreConfig::from_params("t", {{"root", "/tmp/duo-cfg"}}).gc_enabled);  // 默认开
+    CHECK(DuoStoreConfig::from_params("t", {{"root", "/tmp/duo-cfg"}}).gc_enabled);  // on by default
     p["gc_enabled"] = "not-a-bool";
     bool threw = false;
     try {
@@ -985,7 +986,7 @@ TEST(duostore_config_gc_enabled_gates_background_only) {
     }
     CHECK(threw);
 
-    // 行为：gc_enabled=false + gc_interval>0 也不排后台 worker；手动钩子照常回收
+    // Behavior: gc_enabled=false + gc_interval>0 still schedules no background worker; the manual hook reclaims as usual
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = gc_cfg(tmp, "gc-gated");
@@ -998,48 +999,48 @@ TEST(duostore_config_gc_enabled_gates_background_only) {
     sync_wait(b->delete_object("bkt", "k"));
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.reclaims_acked, uint64_t(1));
-    CHECK_EQ(st.files_removed, uint64_t(2));  // 5000B / 4KiB = 2 chunk
+    CHECK_EQ(st.files_removed, uint64_t(2));  // 5000B / 4KiB = 2 chunks
     auto ost = sync_wait(b->run_orphan_scan_once());
     CHECK_EQ(ost.orphans_removed, uint64_t(0));
     sync_wait(b->close());
 }
 
-// 空 pack 整删（§9.1）：sealed 且 live_recs==0 → unlink + 销 packstat；pin 挡整删。
-// pack record 的 gcq 变现不计 files_removed（死区随压实回收）
+// Whole-empty-pack deletion (§9.1): sealed and live_recs==0 -> unlink + clear the packstat; the pin blocks whole
+// deletion. Reclaiming pack records from the gcq does not count files_removed (dead space is reclaimed by compaction)
 TEST(duostore_pack_gc_empty_pack_removal_respects_pin) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "pack-gc");
-    cfg.pack_max_size = 1024;  // 单 record 即满：写第二个对象时封存第一个 pack
+    cfg.pack_max_size = 1024;  // one record fills it: writing the second object seals the first pack
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     put(*h.b, "bkt", "k1", patterned(600));  // pack P1
-    put(*h.b, "bkt", "k2", patterned(600));  // P1 封存，P2 active
+    put(*h.b, "bkt", "k2", patterned(600));  // P1 sealed, P2 active
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     uint64_t p1 = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
-    auto got = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));  // 持 pin
-    sync_wait(h.b->delete_object("bkt", "k1"));  // live_recs(P1) → 0
+    auto got = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));  // holds a pin
+    sync_wait(h.b->delete_object("bkt", "k1"));  // live_recs(P1) -> 0
 
     auto st1 = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st1.skipped_pinned, uint64_t(1));  // gcq 项被 pin 挡
-    CHECK_EQ(st1.packs_removed, uint64_t(0));   // 空 pack 整删同样被 pin 挡
+    CHECK_EQ(st1.skipped_pinned, uint64_t(1));  // the gcq item is blocked by the pin
+    CHECK_EQ(st1.packs_removed, uint64_t(0));   // whole-empty-pack deletion is blocked by the pin as well
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
-    CHECK_EQ(read_all(*got.body), patterned(600));  // 读者不受影响
+    CHECK_EQ(read_all(*got.body), patterned(600));  // the reader is unaffected
 
-    got.body.reset();  // 解 pin
+    got.body.reset();  // release the pin
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(1));
-    CHECK_EQ(st2.files_removed, uint64_t(0));  // pack record 不计物理删除
-    CHECK_EQ(st2.packs_removed, uint64_t(1));  // 整文件 unlink
+    CHECK_EQ(st2.files_removed, uint64_t(0));  // pack records do not count as physical deletions
+    CHECK_EQ(st2.packs_removed, uint64_t(1));  // whole-file unlink
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
-    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat 已销
+    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat cleared
     sync_wait(h.b->close());
 }
 
-// 重启弃用 active pack（§5.2）：不 close 直接析构（崩溃等价）→ 重开同 root 后
-// 上代 active pack 被补封（sealed/size 未知=0）、旧对象仍可读、新写入走新 pack、
-// 旧对象删净后整 pack 回收
+// Restart abandons the active pack (§5.2): destructing without close (crash-equivalent) -> after reopening the same
+// root, the previous generation's active pack is back-sealed (sealed/size unknown=0), old objects stay readable, new
+// writes go to a new pack, and once the old objects are all deleted the whole pack is reclaimed
 TEST(duostore_pack_restart_abandons_active) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1049,44 +1050,44 @@ TEST(duostore_pack_restart_abandons_active) {
         sync_wait(h.b->create_bucket("bkt"));
         put(*h.b, "bkt", "old", patterned(600));
         CHECK(!h.meta->pack_stats()[0].sealed);
-        // 不 close：析构兜底（active pack 不封存，等价崩溃遗留）
+        // No close: dtor fallback (the active pack is not sealed, equivalent to crash leftovers)
     }
     {
-        // torn tail 注入（§5.2/§6.2）：崩溃可能在 append 中途留下半截 record——
-        // 无引用即死区，不得影响已提交对象的读取
+        // Torn tail injection (§5.2/§6.2): a crash may leave half a record mid-append --
+        // unreferenced means dead space, and it must not affect reading committed objects
         std::ofstream f(sole_pack_file(cfg.root), std::ios::binary | std::ios::app);
-        f << "LP3R" << std::string(7, '\x5a');  // magic + 截断的头
+        f << "LP3R" << std::string(7, '\x5a');  // magic + truncated header
     }
     auto h = make_pack_backend(cfg, pool);
     auto stats = h.meta->pack_stats();
     CHECK_EQ(stats.size(), size_t(1));
-    CHECK(stats[0].sealed);  // 构造时补封（abandon_stale_packs）
-    CHECK_EQ(stats[0].file_size, uint64_t(0));  // 大小未知，0 占位
+    CHECK(stats[0].sealed);  // back-sealed at construction (abandon_stale_packs)
+    CHECK_EQ(stats[0].file_size, uint64_t(0));  // size unknown, 0 placeholder
     uint64_t p1 = stats[0].pack_id;
 
     auto g = sync_wait(h.b->get_object("bkt", "old", std::nullopt));
-    CHECK_EQ(read_all(*g.body), patterned(600));  // 旧 pack 只是弃用，不影响读
+    CHECK_EQ(read_all(*g.body), patterned(600));  // the old pack is merely abandoned, reads are unaffected
     g.body.reset();
 
-    put(*h.b, "bkt", "fresh", patterned(600));  // 新写入开新 pack（不复用旧 active）
+    put(*h.b, "bkt", "fresh", patterned(600));  // a new write opens a new pack (does not reuse the old active)
     uint64_t p2 = h.meta->get_object("bkt", "fresh")->data.extents[0].file_id;
     CHECK(p2 != p1);
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     sync_wait(h.b->delete_object("bkt", "old"));
     auto st = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st.packs_removed, uint64_t(1));  // 补封后旧 pack 才进得了整删候选
+    CHECK_EQ(st.packs_removed, uint64_t(1));  // only after back-sealing can the old pack become a whole-deletion candidate
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
     auto g2 = sync_wait(h.b->get_object("bkt", "fresh", std::nullopt));
     CHECK_EQ(read_all(*g2.body), patterned(600));
     sync_wait(h.b->close());
 }
 
-// ---------- P4 压实专项（§9.2/§15 P4 验收：低存活压实全绿）----------
+// ---------- P4 compaction specials (§9.2/§15 P4 acceptance: low-liveness compaction all green) ----------
 
 namespace {
 
-// pack 文件路径（与 FsDataStore 布局约定一致；测试直算免持 store 指针）
+// Pack file path (matches the FsDataStore layout convention; computed directly in the test to avoid holding a store pointer)
 fs::path pack_file_path(const fs::path& root, uint64_t pack_id) {
     char ss[3], name[32];
     std::snprintf(ss, sizeof ss, "%02x", unsigned((pack_id >> 8) & 0xff));
@@ -1105,21 +1106,21 @@ void corrupt_file_at(const fs::path& p, uint64_t off) {
 
 }  // namespace
 
-// 低存活压实收敛：存活率高不触发；跌破 pack_gc_ratio 后顺扫迁移存活 record 到
-// active pack、swap 换 ref、空 pack 同轮整删（grace=0）；对象读取无缝
+// Low-liveness compaction converges: high liveness does not trigger it; once below pack_gc_ratio, a sequential scan
+// migrates live records to the active pack, swap replaces the ref, and the empty pack is whole-deleted in the same round (grace=0); object reads are seamless
 TEST(duostore_compact_low_liveness_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact");
-    cfg.pack_max_size = 2048;  // 600B record ≈ 629B，3 条即满轮转
+    cfg.pack_max_size = 2048;  // 600B record ≈ 629B, fills and rotates at 3 records
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     for (int i = 0; i < 4; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
-    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // P1 封存（k0-k2），P2 active（k3）
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // P1 sealed (k0-k2), P2 active (k3)
 
     uint64_t p1 = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
 
-    // 存活 3/3 与 2/3（0.64 ≥ 0.5）都不触发压实
+    // Liveness 3/3 and 2/3 (0.64 >= 0.5) both do not trigger compaction
     auto st0 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st0.packs_compacted, uint64_t(0));
     sync_wait(h.b->delete_object("bkt", "k0"));
@@ -1127,7 +1128,7 @@ TEST(duostore_compact_low_liveness_pack) {
     CHECK_EQ(st1.packs_compacted, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
-    // 存活 1/3（0.32 < 0.5）→ 压实：k2 迁移、P1 空、同轮整删
+    // Liveness 1/3 (0.32 < 0.5) -> compaction: k2 migrates, P1 empties, whole-deleted in the same round
     sync_wait(h.b->delete_object("bkt", "k1"));
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.packs_compacted, uint64_t(1));
@@ -1135,9 +1136,9 @@ TEST(duostore_compact_low_liveness_pack) {
     CHECK_EQ(st2.records_corrupt, uint64_t(0));
     CHECK_EQ(st2.packs_removed, uint64_t(1));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
-    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat 已销
+    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat cleared
 
-    // 换 ref 后 k2 指向新 pack 且逐字节正确；k3 不受扰
+    // After the ref swap, k2 points at the new pack and is byte-for-byte correct; k3 is undisturbed
     auto rec = h.meta->get_object("bkt", "k2");
     CHECK(rec.has_value());
     CHECK(rec->data.extents[0].file_id != p1);
@@ -1146,16 +1147,16 @@ TEST(duostore_compact_low_liveness_pack) {
     auto g3 = sync_wait(h.b->get_object("bkt", "k3", std::nullopt));
     CHECK_EQ(read_all(*g3.body), patterned(600));
 
-    // 收敛：再跑一轮零动作
+    // Convergence: another round performs zero actions
     auto st3 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st3.packs_compacted, uint64_t(0));
     CHECK_EQ(st3.packs_removed, uint64_t(0));
     sync_wait(h.b->close());
 }
 
-// 老化轮转（docs/gaps.md §6.1）：低写入量下 active pack 只按容量封存永不轮转，
-// 其中的死区进不了压实候选集。seal_aged_packs 把逾龄 active pack 封存，file_size
-// 如实回报（不是崩溃补封的 0），随后死区即可被压实回收
+// Age rotation (docs/gaps.md §6.1): under low write volume an active pack sealed only by capacity never rotates,
+// and its dead space can never enter the compaction candidate set. seal_aged_packs seals over-age active packs,
+// reporting file_size truthfully (not the crash back-seal's 0), after which the dead space can be reclaimed by compaction
 TEST(duostore_pack_age_rotation_seals_idle_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1167,20 +1168,20 @@ TEST(duostore_pack_age_rotation_seals_idle_pack) {
     uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
     auto before = find_pack_stat(*h.meta, pid);
     CHECK(before.has_value());
-    CHECK(!before->sealed);  // 远未达 pack_max_size：容量判据不会封存它
+    CHECK(!before->sealed);  // far from pack_max_size: the capacity criterion would never seal it
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(1));
     auto after = find_pack_stat(*h.meta, pid);
     CHECK(after.has_value());
     CHECK(after->sealed);
-    CHECK(after->file_size > 0);  // 如实回报，不是重启补封的"未知 0"
+    CHECK(after->file_size > 0);  // reported truthfully, not the restart back-seal's "unknown 0"
     CHECK_EQ(after->live_recs, int64_t(3));
 
-    // 幂等：无 active pack 可封时返回 0
+    // Idempotent: returns 0 when there is no active pack to seal
     CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(0));
 
-    // 封存后死区可回收：删到 1/3 存活即跌破 pack_gc_ratio，压实照常收敛
+    // After sealing the dead space is reclaimable: deleting down to 1/3 liveness drops below pack_gc_ratio, compaction converges as usual
     sync_wait(h.b->delete_object("bkt", "k0"));
     sync_wait(h.b->delete_object("bkt", "k1"));
     auto st = sync_wait(h.b->run_gc_once());
@@ -1191,7 +1192,7 @@ TEST(duostore_pack_age_rotation_seals_idle_pack) {
     sync_wait(h.b->close());
 }
 
-// GC 轮内接线：pack_max_age 到点后 run_gc_once 自己会封存（不需要写入触发）
+// Wiring inside the GC round: once pack_max_age is due, run_gc_once seals by itself (no write needed to trigger it)
 TEST(duostore_pack_age_rotation_runs_in_gc) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1202,31 +1203,31 @@ TEST(duostore_pack_age_rotation_runs_in_gc) {
     put(*h.b, "bkt", "k0", patterned(600));
     uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
 
-    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(0));  // 未到点
+    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(0));  // not due yet
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(1));
     CHECK(find_pack_stat(*h.meta, pid)->sealed);
     sync_wait(h.b->close());
 }
 
-// 压实预算与优先级（docs/gaps.md §6.1）：单轮封顶 N 个，且按可回收字节降序取——
-// 此前是"一轮把全部符合条件的 pack 重写完"，批量删除后单轮可持锁数小时
+// Compaction budget and priority (docs/gaps.md §6.1): capped at N per round, taken in descending order of
+// reclaimable bytes -- previously it was "rewrite every eligible pack in one round", and after a bulk delete a single round could hold the lock for hours
 TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "budget");
-    cfg.pack_max_size = 2048;          // 600B record ≈ 629B，3 条即满轮转
-    cfg.gc_compact_max_packs = 1;      // 每轮只做一个
+    cfg.pack_max_size = 2048;          // 600B record ≈ 629B, fills and rotates at 3 records
+    cfg.gc_compact_max_packs = 1;      // only one per round
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
-    // 三个满 pack（k0-k2 / k3-k5 / k6-k8）+ 一个 active（k9）
+    // Three full packs (k0-k2 / k3-k5 / k6-k8) + one active (k9)
     for (int i = 0; i < 10; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
     uint64_t p0 = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
     uint64_t p1 = h.meta->get_object("bkt", "k3")->data.extents[0].file_id;
     uint64_t p2 = h.meta->get_object("bkt", "k6")->data.extents[0].file_id;
     CHECK(p0 != p1 && p1 != p2);
 
-    // p0 剩 2 条存活、p1 剩 1 条、p2 剩 1 条 —— 三者都够格，但可回收字节 p1/p2 > p0
+    // p0 keeps 2 live records, p1 keeps 1, p2 keeps 1 -- all three qualify, but reclaimable bytes p1/p2 > p0
     sync_wait(h.b->delete_object("bkt", "k0"));
     sync_wait(h.b->delete_object("bkt", "k1"));
     sync_wait(h.b->delete_object("bkt", "k3"));
@@ -1235,8 +1236,8 @@ TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     sync_wait(h.b->delete_object("bkt", "k7"));
 
     auto st1 = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st1.packs_compacted, uint64_t(1));       // 预算封顶
-    CHECK_EQ(st1.packs_compact_deferred, uint64_t(2));  // 其余顺延
+    CHECK_EQ(st1.packs_compacted, uint64_t(1));       // budget cap
+    CHECK_EQ(st1.packs_compact_deferred, uint64_t(2));  // the rest are deferred
 
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.packs_compacted, uint64_t(1));
@@ -1246,7 +1247,7 @@ TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     CHECK_EQ(st3.packs_compacted, uint64_t(1));
     CHECK_EQ(st3.packs_compact_deferred, uint64_t(0));
 
-    // 收敛后数据完好
+    // Data intact after convergence
     auto st4 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st4.packs_compacted, uint64_t(0));
     for (int i : {2, 5, 8, 9}) {
@@ -1256,27 +1257,27 @@ TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     sync_wait(h.b->close());
 }
 
-// 死 record 损坏不阻压实（§10）：存活账证明损坏者已死——存活者照常迁移、
-// live 归零后空 pack 整删（含损坏死区）不丢任何数据
+// A corrupt dead record does not block compaction (§10): the liveness accounting proves the corrupt one is dead --
+// the survivors migrate as usual, and once live reaches zero the empty pack (corrupt dead space included) is whole-deleted without losing any data
 TEST(duostore_compact_corrupt_dead_record) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact-cdead");
-    cfg.pack_max_size = 1400;  // 2 条即满（第 3 条触发轮转封存）
+    cfg.pack_max_size = 1400;  // fills at 2 records (the 3rd triggers rotation sealing)
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     put(*h.b, "bkt", "k1", patterned(600));
     put(*h.b, "bkt", "k2", patterned(600));
-    auto old2 = h.meta->get_object("bkt", "k2")->data.extents[0];  // 覆盖前的 P1 定位
-    put(*h.b, "bkt", "k2", patterned(500));  // 第 3 条 → P1 封存，新值进 P2；旧 k2 成死区
+    auto old2 = h.meta->get_object("bkt", "k2")->data.extents[0];  // P1 location before the overwrite
+    put(*h.b, "bkt", "k2", patterned(500));  // 3rd record -> P1 sealed, the new value goes to P2; old k2 becomes dead space
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
-    corrupt_file_at(pack_file_path(cfg.root, old2.file_id), old2.offset + 10);  // 损坏死区
+    corrupt_file_at(pack_file_path(cfg.root, old2.file_id), old2.offset + 10);  // corrupt the dead space
     auto st = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st.packs_compacted, uint64_t(1));
-    CHECK_EQ(st.records_corrupt, uint64_t(1));   // 死区损坏：告警跳过
-    CHECK_EQ(st.records_migrated, uint64_t(1));  // 存活 k1 照常迁移
-    CHECK_EQ(st.packs_removed, uint64_t(1));     // live 归零 → 空 pack（含死区）整删
+    CHECK_EQ(st.records_corrupt, uint64_t(1));   // corrupt dead space: warn and skip
+    CHECK_EQ(st.records_migrated, uint64_t(1));  // live k1 migrates as usual
+    CHECK_EQ(st.packs_removed, uint64_t(1));     // live reaches zero -> whole-delete the empty pack (dead space included)
     auto g1 = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
     CHECK_EQ(read_all(*g1.body), patterned(600));
     auto g2 = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
@@ -1284,46 +1285,46 @@ TEST(duostore_compact_corrupt_dead_record) {
     sync_wait(h.b->close());
 }
 
-// 存活 record 损坏 → 迁移不了、live 不归零 → 保留原 pack 不删（人工介入，§10）；
-// 账无推进 + 冷却窗内不重扫（compact_blocked 记忆）
+// A corrupt live record -> cannot migrate, live never reaches zero -> the original pack is kept, not deleted (manual
+// intervention, §10); no accounting progress + no re-scan within the cooldown window (compact_blocked memory)
 TEST(duostore_compact_corrupt_live_record_keeps_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact-clive");
     cfg.pack_max_size = 1400;
-    cfg.gc_grace_sec = 3600;  // 冷却窗生效（也用于验证跳过重扫）
+    cfg.gc_grace_sec = 3600;  // cooldown window in effect (also used to verify the re-scan is skipped)
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     put(*h.b, "bkt", "k1", patterned(600));
     put(*h.b, "bkt", "k2", patterned(600));
-    put(*h.b, "bkt", "filler", patterned(600));  // P1 封存
-    sync_wait(h.b->delete_object("bkt", "k1"));  // P1 存活 1/2 → 候选
+    put(*h.b, "bkt", "filler", patterned(600));  // P1 sealed
+    sync_wait(h.b->delete_object("bkt", "k1"));  // P1 liveness 1/2 -> candidate
 
     auto live2 = h.meta->get_object("bkt", "k2")->data.extents[0];
-    corrupt_file_at(pack_file_path(cfg.root, live2.file_id), live2.offset + 10);  // 损坏存活者
+    corrupt_file_at(pack_file_path(cfg.root, live2.file_id), live2.offset + 10);  // corrupt the survivor
 
     auto st1 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st1.packs_compacted, uint64_t(1));
     CHECK_EQ(st1.records_corrupt, uint64_t(1));
     CHECK_EQ(st1.records_migrated, uint64_t(0));
-    CHECK_EQ(st1.packs_removed, uint64_t(0));  // live>0：pack 保留（不丢注定要人工救的数据）
+    CHECK_EQ(st1.packs_removed, uint64_t(0));  // live>0: the pack is kept (do not lose data destined for manual rescue)
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
-    // 账无推进 + 冷却窗内：下一轮跳过重扫
+    // No accounting progress + within the cooldown window: the next round skips the re-scan
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.packs_compacted, uint64_t(0));
     sync_wait(h.b->close());
 }
 
-// mpu 分片的压实（§9.2 owner 提示）：进行中 upload 的 pack 分片不可迁（保守阻塞、
-// pack 保留）；complete 后凭 owner 内嵌的 b/k 反查归属对象 → 迁移解锁、pack 回收
+// Compaction of mpu parts (§9.2 owner hint): pack parts of an in-progress upload cannot migrate (conservatively
+// blocked, pack kept); after complete, the b/k embedded in the owner looks up the owning object -> migration unlocks, pack reclaimed
 TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact-mpu");
     cfg.pack_max_size = 1400;
-    // live 计头后（§2.3a）分片 record 的 owner 头较长：删 f1 后存活占比 ≈ 0.52，
-    // 阈值抬到 0.6 保持"该 pack 是压实候选"的测试语境
+    // With headers counted in live (§2.3a), a part record's owner header is longer: after deleting f1 the live
+    // ratio is ≈ 0.52, so the threshold is raised to 0.6 to keep the "this pack is a compaction candidate" test context
     cfg.pack_gc_ratio = 0.6;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
@@ -1335,20 +1336,20 @@ TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
         etag = sync_wait(h.b->upload_part("bkt", "mp", id, 1, body)).etag;
     }
     put(*h.b, "bkt", "f1", patterned(600));
-    put(*h.b, "bkt", "f2", patterned(600));  // P1（part+f1）封存，f2 进 P2
+    put(*h.b, "bkt", "f2", patterned(600));  // P1 (part+f1) sealed, f2 goes to P2
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
-    sync_wait(h.b->delete_object("bkt", "f1"));  // P1 存活 = 进行中分片 1 条 → 候选
+    sync_wait(h.b->delete_object("bkt", "f1"));  // P1 liveness = 1 in-progress part -> candidate
 
     auto st1 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st1.packs_compacted, uint64_t(1));
-    CHECK_EQ(st1.records_migrated, uint64_t(0));  // 进行中 mpu：对象不存在 → 保守不迁
+    CHECK_EQ(st1.records_migrated, uint64_t(0));  // in-progress mpu: the object does not exist -> conservatively not migrated
     CHECK_EQ(st1.packs_removed, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     std::vector<PartInfo> parts = {{1, etag}};
     sync_wait(h.b->complete_multipart("bkt", "mp", id, parts));
 
-    // complete 后（grace=0 无冷却）：owner 的 b/k 提示反查对象成功 → 迁移 + 整删
+    // After complete (grace=0, no cooldown): the owner's b/k hint successfully looks up the object -> migrate + whole-delete
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.records_migrated, uint64_t(1));
     CHECK_EQ(st2.packs_removed, uint64_t(1));
@@ -1358,9 +1359,9 @@ TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
     sync_wait(h.b->close());
 }
 
-// 混合对象（chunk + pack extent）压实后 chunk 的 refs 必须留存（storage.md 高危
-// 第一条）：swap_extents 的 to/from 共享未迁移的 chunk，整加再整删在 refs 的
-// last-wins 语义下净效果是删除 → 孤儿扫描随后 unlink 活数据
+// After compacting a mixed object (chunk + pack extents), the chunk refs must survive (storage.md top-risk item
+// number one): swap_extents' to/from share the unmigrated chunk; add-all-then-delete-all under the refs
+// last-wins semantics nets out to a delete -> the orphan scan would then unlink live data
 TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1369,7 +1370,7 @@ TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
 
-    // 混合 MPU：part1 大（走 chunk）、part2 小（走 pack）
+    // Mixed MPU: part1 large (chunk path), part2 small (pack path)
     std::string big = patterned(6000), small = patterned(600);
     auto id = sync_wait(h.b->create_multipart("bkt", "mixed", {}));
     std::string e1, e2;
@@ -1390,22 +1391,22 @@ TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
         if (e.kind == Extent::Kind::kPack) has_pack = true;
         else chunk_ids.push_back(e.file_id);
     }
-    CHECK(has_pack && !chunk_ids.empty());  // 确实是混合对象
+    CHECK(has_pack && !chunk_ids.empty());  // it really is a mixed object
     for (uint64_t cid : chunk_ids) CHECK(h.meta->chunk_referenced(cid));
 
-    // 让该 pack 存活率跌破阈值 → 压实迁移那一个 pack extent
+    // Drop that pack's liveness below the threshold -> compaction migrates that one pack extent
     put(*h.b, "bkt", "f1", patterned(600));
-    put(*h.b, "bkt", "f2", patterned(600));  // 触发轮转封存
+    put(*h.b, "bkt", "f2", patterned(600));  // triggers rotation sealing
     sync_wait(h.b->delete_object("bkt", "f1"));
     auto st = sync_wait(h.b->run_gc_once());
     CHECK(st.records_migrated >= uint64_t(1));
 
-    // 未迁移的 chunk 仍被对象引用：refs 表项不得被 swap 抹掉
+    // The unmigrated chunks are still referenced by the object: the refs entries must not be wiped by the swap
     auto after = h.meta->get_object("bkt", "mixed");
     CHECK(after.has_value());
     for (uint64_t cid : chunk_ids) CHECK(h.meta->chunk_referenced(cid));
 
-    // 孤儿扫描不得把它们当无引用文件删掉，对象内容仍逐字节正确
+    // The orphan scan must not delete them as unreferenced files; the object content is still byte-for-byte correct
     auto os = sync_wait(h.b->run_orphan_scan_once());
     CHECK_EQ(os.orphans_removed, uint64_t(0));
     auto g = sync_wait(h.b->get_object("bkt", "mixed", std::nullopt));
@@ -1413,28 +1414,28 @@ TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
     sync_wait(h.b->close());
 }
 
-// P0 §1.4：另一实例正在写的 active pack 不得被补封（补封 → 压实全量重写 →
-// 账归零后整删，而对方仍持 fd 追加 = 静默数据丢失）。用第二个 FsDataStore 持有
-// 同一 root 上的 active pack 模拟"另一个网关"，验证 pack_write_locked 能识别
+// P0 §1.4: an active pack another instance is writing must not be back-sealed (back-seal -> full compaction
+// rewrite -> whole-deletion once the accounting zeroes out, while the other side still appends via its fd = silent
+// data loss). A second FsDataStore holding an active pack on the same root simulates "another gateway", verifying pack_write_locked can detect it
 TEST(duostore_active_pack_of_other_writer_not_sealed) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "pack-owner");
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
-    put(*h.b, "bkt", "k1", patterned(600));  // 建一个 active（未封存）pack
+    put(*h.b, "bkt", "k1", patterned(600));  // creates an active (unsealed) pack
 
     uint64_t pack_id = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
     auto stats = h.meta->pack_stats();
     bool unsealed = false;
     for (const auto& ps : stats)
         if (ps.pack_id == pack_id && !ps.sealed) unsealed = true;
-    CHECK(unsealed);  // 前提：该 pack 确实处于 active 态
+    CHECK(unsealed);  // premise: the pack really is in the active state
 
-    // 本实例持有写锁 → 探测应报 "正被写"
+    // This instance holds the write lock -> the probe should report "being written"
     CHECK(h.b->data_for_test().pack_write_locked(pack_id));
 
-    // 关掉本实例（fd 关闭 → 锁释放）后，同一 pack 不再被判为在写
+    // After closing this instance (fd closed -> lock released), the same pack is no longer judged as being written
     sync_wait(h.b->close());
     FsDataOptions probe_opt{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc,
                             cfg.pack_threshold, cfg.pack_max_size, cfg.pack_writers, {}};
@@ -1443,8 +1444,8 @@ TEST(duostore_active_pack_of_other_writer_not_sealed) {
     sync_wait(probe.close());
 }
 
-// 崩溃遗留 pack 的分母回填（gaps §2.3b）：补封 seal(0) 后首轮 GC 用 stat_pack 一次
-// stat 回填 file_size——健康存活率的 pack 不再无条件进全量顺扫重写
+// Denominator backfill for crash-leftover packs (gaps §2.3b): after the seal(0) back-seal, the first GC round uses
+// one stat_pack stat to backfill file_size -- packs with healthy liveness no longer unconditionally enter the full sequential-scan rewrite
 TEST(duostore_gc_stat_backfills_crash_leftover_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1454,16 +1455,16 @@ TEST(duostore_gc_stat_backfills_crash_leftover_pack) {
         sync_wait(h.b->create_bucket("bkt"));
         put(*h.b, "bkt", "k1", patterned(600));
         put(*h.b, "bkt", "k2", patterned(600));
-        // 不 close：析构兜底（等价崩溃遗留，重开后补封 seal(0)）
+        // No close: dtor fallback (equivalent to crash leftovers, back-sealed seal(0) on reopen)
     }
     auto h = make_pack_backend(cfg, pool);
     uint64_t pid = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
     auto ps0 = find_pack_stat(*h.meta, pid);
     CHECK(ps0->sealed);
-    CHECK_EQ(ps0->file_size, uint64_t(0));  // 补封时大小未知
+    CHECK_EQ(ps0->file_size, uint64_t(0));  // size unknown at back-seal time
 
     auto st = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st.packs_compacted, uint64_t(0));  // 100% 存活：回填后按存活率跳过重写
+    CHECK_EQ(st.packs_compacted, uint64_t(0));  // 100% live: after the backfill the liveness ratio skips the rewrite
     auto ps1 = find_pack_stat(*h.meta, pid);
     CHECK_EQ(ps1->file_size, uint64_t(fs::file_size(pack_file_path(cfg.root, pid))));
 
@@ -1472,8 +1473,8 @@ TEST(duostore_gc_stat_backfills_crash_leftover_pack) {
     sync_wait(h.b->close());
 }
 
-// rewrite_pack 顺扫语义（store 级，无迁移回调）：统计、file_size 回报、torn tail
-// 静默止扫（重启弃用的预期形态）、magic 损坏响亮止扫
+// rewrite_pack sequential-scan semantics (store level, no migration callback): stats, file_size reporting, torn tail
+// stops the scan silently (the expected shape of restart abandonment), corrupted magic stops the scan loudly
 TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -1492,27 +1493,27 @@ TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
     CHECK_EQ(e1.file_id, e2.file_id);
     uint64_t real_size = fs::file_size(pack_file_path(tmp.path / "duo", e1.file_id));
     {
-        // torn tail 注入：截断的 record 头（崩溃残迹）
+        // Torn tail injection: a truncated record header (crash residue)
         std::ofstream f(pack_file_path(tmp.path / "duo", e1.file_id),
                         std::ios::binary | std::ios::app);
         f << "LP3R" << std::string(7, '\x5a');
     }
     auto rw = sync_wait(d.rewrite_pack(e1.file_id));
     CHECK_EQ(rw.scanned, uint64_t(2));
-    CHECK_EQ(rw.migrated, uint64_t(0));  // 无迁移回调：只扫不迁
-    CHECK_EQ(rw.corrupt, uint64_t(0));   // torn tail 不计损坏
+    CHECK_EQ(rw.migrated, uint64_t(0));  // no migration callback: scan only, no migration
+    CHECK_EQ(rw.corrupt, uint64_t(0));   // torn tail does not count as corruption
     CHECK_EQ(rw.file_size, real_size + 11);
 
-    corrupt_file_at(pack_file_path(tmp.path / "duo", e1.file_id), 0);  // magic 损坏
+    corrupt_file_at(pack_file_path(tmp.path / "duo", e1.file_id), 0);  // corrupt the magic
     auto rw2 = sync_wait(d.rewrite_pack(e1.file_id));
-    CHECK_EQ(rw2.scanned, uint64_t(0));  // 无法重同步：响亮止扫
+    CHECK_EQ(rw2.scanned, uint64_t(0));  // cannot resynchronize: stops the scan loudly
     CHECK_EQ(rw2.corrupt, uint64_t(1));
     sync_wait(d.close());
     meta.close();
 }
 
-// P4 前旧格式 mpu owner（"mpu\0<id>\0<no>"，无 b/k）：不可反查 → 保守不迁，
-// pack 保留、对象照常可读；新格式（带 b/k）经对象反查正常迁移——两代盘面共存安全
+// Pre-P4 legacy mpu owner format ("mpu\0<id>\0<no>", no b/k): cannot be looked up -> conservatively not migrated,
+// pack kept, object stays readable; the new format (with b/k) migrates normally via object lookup -- two on-disk generations coexist safely
 TEST(duostore_compact_legacy_mpu_owner_blocks) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -1529,7 +1530,7 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
                 std::span(reinterpret_cast<const std::byte*>(data.data()), data.size())));
             return sync_wait(w->finish()).extents.at(0);
         };
-        // 旧格式（模拟 P4 前遗留盘面）与新格式各一条，都归属 complete 后的对象
+        // One record each in the legacy format (simulating a pre-P4 leftover disk) and the new format, both belonging to completed objects
         auto legacy = write_rec(std::string("mpu\0oldid\0001", 11), patterned(300));
         auto modern =
             write_rec(std::string("mpu\0bkt\0knew\0newid\0001", 20), patterned(400));
@@ -1548,7 +1549,7 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
         r2.meta.last_modified = std::chrono::system_clock::now();
         r2.data.extents = {modern};
         meta.put_object("bkt", "knew", std::move(r2));
-        sync_wait(d1.close());  // 封存 pack（迁移目标须是另一个 active pack）
+        sync_wait(d1.close());  // seals the pack (the migration target must be a different active pack)
     }
     FsDataStore d2(opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
                    [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); },
@@ -1557,10 +1558,10 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
                    });
     auto rw = sync_wait(d2.rewrite_pack(pack_id));
     CHECK_EQ(rw.scanned, uint64_t(2));
-    CHECK_EQ(rw.migrated, uint64_t(1));  // 新格式迁移；旧格式保守搁置
-    CHECK(meta.get_object("bkt", "kold")->data.extents[0].file_id == pack_id);  // ref 未动
-    CHECK(meta.get_object("bkt", "knew")->data.extents[0].file_id != pack_id);  // 已换 ref
-    // 两个对象都可读且内容正确
+    CHECK_EQ(rw.migrated, uint64_t(1));  // new format migrates; legacy format conservatively shelved
+    CHECK(meta.get_object("bkt", "kold")->data.extents[0].file_id == pack_id);  // ref untouched
+    CHECK(meta.get_object("bkt", "knew")->data.extents[0].file_id != pack_id);  // ref swapped
+    // Both objects are readable with correct content
     auto read_obj = [&](const char* k, size_t n) {
         auto rec = meta.get_object("bkt", k);
         auto r = sync_wait(d2.open_reader(rec->data, 0, n - 1));
@@ -1572,19 +1573,21 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
     meta.close();
 }
 
-// ---------- P4 孤儿扫描专项（§9.3）----------
+// ---------- P4 orphan scan suite (§9.3) ----------
 
-// 正向：盘上无引用且逾宽限 → unlink（在册对象不受扰）；反向：refs 在而文件缺 →
-// 告警计数、绝不删 meta；grace 挡新写
+// Forward: file on disk with no ref and past grace → unlink (recorded objects
+// untouched). Reverse: ref exists but file missing → alert counter only, never
+// delete meta. Grace shields fresh writes.
 TEST(duostore_orphan_scan_forward_and_reverse) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = gc_cfg(tmp, "orphan");
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunk 在册
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunks on record
 
-    // 孤儿注入：崩溃残留形态（盘上有文件、meta 无账）；id 取远端避开号段
+    // Inject an orphan shaped like crash residue (file on disk, no meta record);
+    // pick a far-away id to stay clear of the allocated range
     fs::create_directories(cfg.root / "chunks" / "ab");
     std::ofstream(cfg.root / "chunks" / "ab" / "000000000000abcd.chk") << patterned(100);
 
@@ -1598,14 +1601,16 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     CHECK_EQ(read_all(*g.body), patterned(10000));
     g.body.reset();
 
-    // 反向：手工删一个在册 chunk 文件 → 只告警计数，meta 保持（人工介入线索）
+    // Reverse: manually delete a recorded chunk file → alert counter only, meta
+    // kept (as a lead for manual intervention)
     uint64_t lost = 0;
     {
         auto rec = sync_wait(b->head_object("bkt", "k"));
         (void)rec;
     }
     {
-        // 经孤儿扫描枚举拿到一个在册 id（与 refs 交集必非空）
+        // Grab a recorded id via the orphan-scan enumeration (the intersection
+        // with refs is necessarily non-empty)
         fs::path victim;
         for (auto& e : fs::recursive_directory_iterator(cfg.root / "chunks"))
             if (e.is_regular_file() && e.path().extension() == ".chk") {
@@ -1621,10 +1626,10 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     CHECK_EQ(st2.orphans_removed, uint64_t(0));
     CHECK_EQ(st2.refs_missing, uint64_t(1));
     (void)lost;
-    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta 未被动
+    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta untouched
     sync_wait(b->close());
 
-    // grace 挡新写：宽限内的无引用文件不动
+    // Grace shields fresh writes: unreferenced files within the grace window stay
     TmpDir tmp2;
     auto cfg2 = gc_cfg(tmp2, "orphan-grace");
     cfg2.gc_grace_sec = 3600;
@@ -1639,9 +1644,11 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     sync_wait(b2->close());
 }
 
-// packs/ 双向对账（docs/gaps.md §6.1）：pack 文件在"建文件"时就存在、packstat 行
-// 要到首条 record 提交才落账——恰在这个窗口硬崩，文件永久泄漏且不在任何账里。
-// 正向：账外 pack 文件逾宽限即删；反向：packstat 在而文件缺 → 只告警不销账
+// packs/ two-way reconciliation (docs/gaps.md §6.1): the pack file exists as soon
+// as it is created, but the packstat row only lands when the first record
+// commits — a hard crash inside that window leaks the file forever with no
+// record anywhere. Forward: unrecorded pack file past grace is deleted.
+// Reverse: packstat exists but file missing → alert only, never drop the record.
 TEST(duostore_orphan_scan_reconciles_packs) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1652,7 +1659,8 @@ TEST(duostore_orphan_scan_reconciles_packs) {
     put(*h.b, "bkt", "k", patterned(600));
     uint64_t live_pack = h.meta->get_object("bkt", "k")->data.extents[0].file_id;
 
-    // 账外 pack 文件（"建文件后、首条 record 提交前崩溃"的残迹）
+    // Unrecorded pack file (residue of "crashed after file creation, before the
+    // first record committed")
     fs::create_directories(cfg.root / "packs" / "ab");
     std::ofstream(cfg.root / "packs" / "ab" / "000000000000abcd.pak") << "leaked";
 
@@ -1662,26 +1670,29 @@ TEST(duostore_orphan_scan_reconciles_packs) {
     CHECK_EQ(st1.pack_stats_missing, uint64_t(0));
     CHECK(st1.pack_bytes > 0);
     CHECK(!fs::exists(cfg.root / "packs" / "ab" / "000000000000abcd.pak"));
-    // 在账 pack 不受扰——它还是本进程正在写的 active pack
+    // Recorded pack untouched — it is still the active pack this process is writing
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
     CHECK_EQ(read_all(*sync_wait(h.b->get_object("bkt", "k", std::nullopt)).body),
              patterned(600));
 
-    // 反向：手工删掉在账 pack 文件 → 计数 + 告警，packstat 保留供人工介入
-    sync_wait(h.b->close());  // 先关掉写者，否则删的是本进程持锁的 active pack
+    // Reverse: manually delete the recorded pack file → count + alert, packstat
+    // kept for manual intervention
+    sync_wait(h.b->close());  // shut down the writer first, or we'd delete the
+                              // active pack this process holds locked
     auto h2 = make_pack_backend(cfg, pool);
     fs::remove(pack_file_path(cfg.root, live_pack));
     auto st2 = sync_wait(h2.b->run_orphan_scan_once());
     CHECK_EQ(st2.packs_scanned, uint64_t(0));
     CHECK_EQ(st2.pack_stats_missing, uint64_t(1));
-    CHECK(find_pack_stat(*h2.meta, live_pack).has_value());  // 账未被动
+    CHECK(find_pack_stat(*h2.meta, live_pack).has_value());  // record untouched
     sync_wait(h2.b->close());
 }
 
 namespace {
 
-// 可拦停的 body：吐出 first 后阻塞等 release，再吐 rest——制造"写入中、meta 未
-// 提交"的长窗口（写侧 pin 的防护对象，§9.3）
+// Gateable body: emits `first`, then blocks until release() before emitting
+// `rest` — creates a long "write in flight, meta not yet committed" window
+// (exactly what the write-side pin protects, §9.3)
 class GatedReader final : public http::BodyReader {
 public:
     GatedReader(std::string first, std::string rest)
@@ -1702,7 +1713,8 @@ public:
             co_return n;
         }
         if (stage_ == 1) {
-            gate_.acquire();  // 阻塞池线程直至 release()（池 >1 线程，扫描不受阻）
+            gate_.acquire();  // blocks a pool thread until release() (pool has >1
+                              // thread, so the scan is not blocked)
             stage_ = 2;
         }
         size_t n = std::min(buf.size(), rest_.size() - off_);
@@ -1723,8 +1735,10 @@ private:
 
 }  // namespace
 
-// 写侧 pin（§9.3）：慢流式 PUT 已落盘、未提交 meta 的 chunk 不被孤儿扫描误删
-// ——mtime 宽限对超长写不充分，pin 是硬防线（grace=0 下唯一防线）
+// Write-side pin (§9.3): chunks of a slow streaming PUT that are on disk but not
+// yet committed to meta must not be mistakenly deleted by the orphan scan — the
+// mtime grace is insufficient for very long writes; the pin is the hard defense
+// (and the only one when grace=0)
 TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1736,20 +1750,22 @@ TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
     GatedReader body(body_data.substr(0, 5000), body_data.substr(5000));
     std::thread writer([&] { sync_wait(b->put_object("bkt", "slow", {}, body)); });
 
-    // 等首个 chunk 落盘（4096 切片：5000B → chunk0 封存 + chunk1 在写）
+    // Wait for the first chunk to hit disk (4096 slicing: 5000B → chunk0 sealed +
+    // chunk1 being written)
     for (int i = 0; i < 200 && chunk_files_on_disk(cfg.root) < 1; ++i) usleep(20 * 1000);
     size_t on_disk = chunk_files_on_disk(cfg.root);
     CHECK(on_disk >= 1);
 
     auto st1 = sync_wait(b->run_orphan_scan_once());
-    CHECK(st1.skipped_pinned >= 1);  // grace=0：写侧 pin 是唯一防线
+    CHECK(st1.skipped_pinned >= 1);  // grace=0: the write-side pin is the only defense
     CHECK_EQ(st1.orphans_removed, uint64_t(0));
     CHECK(chunk_files_on_disk(cfg.root) >= on_disk);
 
     body.release();
     writer.join();
 
-    // 提交后：refs 在账、pin 已解，再扫零动作；内容完整
+    // After commit: refs on record, pin released; rescanning takes zero actions
+    // and the content is intact
     auto st2 = sync_wait(b->run_orphan_scan_once());
     CHECK_EQ(st2.orphans_removed, uint64_t(0));
     CHECK_EQ(st2.skipped_pinned, uint64_t(0));
@@ -1759,10 +1775,12 @@ TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
     sync_wait(b->close());
 }
 
-// ---------- P4 崩溃注入（§15 P4 验收：kill -9 重启收敛）----------
-// 子进程（execv 自身进 duostore-crash-child 模式）在指定点 _exit / 被 SIGKILL
-// ——两者对进程状态等价（无析构无 flush）；父进程重开同 root 验证：已提交对象
-// 逐字节存活（meta_sync=true 的提交契约）、GC + 孤儿扫描把残迹收敛到零
+// ---------- P4 crash injection (§15 P4 acceptance: kill -9, restart, converge) ----------
+// A child process (execv of self into duostore-crash-child mode) _exits at a
+// chosen point / gets SIGKILLed — equivalent for process state (no destructors,
+// no flush). The parent reopens the same root and verifies: committed objects
+// survive byte-for-byte (the meta_sync=true commit contract), and GC + orphan
+// scan converge the residue to zero.
 
 namespace {
 
@@ -1775,14 +1793,15 @@ DuoStoreConfig crash_cfg(const fs::path& root) {
     cfg.pack_threshold = 1024;
     cfg.pack_max_size = 64 << 10;
     cfg.pack_writers = 1;
-    cfg.meta_sync = true;  // 崩溃语义主角：提交点 = WAL fsync（§6）
+    cfg.meta_sync = true;  // the crash-semantics linchpin: commit point = WAL fsync (§6)
     cfg.gc_interval_sec = 0;
     cfg.orphan_scan_interval_sec = 0;
     cfg.gc_grace_sec = 0;
     return cfg;
 }
 
-// 吐满 limit 字节后在 read() 内 _exit——PUT 泵送中途崩溃（数据半落盘、meta 无账）
+// _exits inside read() after emitting `limit` bytes — a crash mid-way through a
+// PUT pump (data partially on disk, no meta record)
 class ExitMidwayReader final : public http::BodyReader {
 public:
     ExitMidwayReader(std::string data, size_t limit) : data_(std::move(data)), limit_(limit) {}
@@ -1809,7 +1828,8 @@ int duostore_crash_child(int argc, char** argv) {
     auto b = std::make_shared<DuoStoreBackend>(crash_cfg(root), pool);
     sync_wait(b->create_bucket("bkt"));
     if (mode == "commit") {
-        // pack 小对象 + 多 chunk 大对象 + multipart complete，各提交路径全走一遍
+        // Small pack object + multi-chunk large object + multipart complete:
+        // exercise every commit path once
         put(*b, "bkt", "small", patterned(600));
         put(*b, "bkt", "big", patterned(10000));
         auto id = sync_wait(b->create_multipart("bkt", "mp", {}));
@@ -1823,13 +1843,14 @@ int duostore_crash_child(int argc, char** argv) {
         put(*b, "bkt", "before", patterned(600));
         ExitMidwayReader body(patterned(20000), 9000);
         sync_wait(b->put_object("bkt", "victim", {}, body));
-        return 3;  // 不可达：body 在 9000 字节处 _exit
+        return 3;  // unreachable: the body _exits at byte 9000
     } else if (mode == "afterdelete") {
         put(*b, "bkt", "gone", patterned(10000));
-        sync_wait(b->delete_object("bkt", "gone"));  // gcq 已入账、文件未回收
+        sync_wait(b->delete_object("bkt", "gone"));  // gcq entry recorded, files not yet reclaimed
     } else if (mode == "spin") {
-        // 循环提交并回报；父进程随机时刻 SIGKILL。行在 put 返回（WAL fsync）后才
-        // 写出——凡父进程读到整行，重启后该对象必须存在
+        // Commit in a loop and report each one; the parent SIGKILLs at a random
+        // moment. The line is written only after put returns (WAL fsync) — any
+        // full line the parent reads means the object must exist after restart
         for (int i = 0;; ++i) {
             size_t n = (i % 2) ? 600 : 10000;
             put(*b, "bkt", "k" + std::to_string(i), patterned(n));
@@ -1839,7 +1860,8 @@ int duostore_crash_child(int argc, char** argv) {
     } else {
         return 2;
     }
-    ::_exit(0);  // 等价 kill -9：不 close、不析构（WAL 重放与 active pack 弃用留给重启）
+    ::_exit(0);  // equivalent to kill -9: no close, no destructors (WAL replay and
+                 // active-pack abandonment are left to the restart)
 }
 
 mini_test::ChildRegistrar crash_child_reg("duostore-crash-child", duostore_crash_child);
@@ -1877,11 +1899,13 @@ int wait_child(pid_t pid) {
 
 std::string expect_body(int i) { return patterned((i % 2) ? 600 : 10000); }
 
-// 重启收敛验证：GC + 孤儿扫描跑到不动点后，再各跑一轮零动作
+// Restart-convergence check: run GC + orphan scan to a fixed point, then one
+// more round of each must take zero actions
 void verify_converged(DuoStoreBackend& b) {
     sync_wait(b.run_gc_once());
     sync_wait(b.run_orphan_scan_once());
-    sync_wait(b.run_gc_once());  // 压实解锁的空 pack 等二阶效应再变现一轮
+    sync_wait(b.run_gc_once());  // one more round to realize second-order effects
+                                 // (e.g. empty packs unlocked by compaction)
     auto gc = sync_wait(b.run_gc_once());
     CHECK_EQ(gc.reclaims_acked, uint64_t(0));
     CHECK_EQ(gc.files_removed, uint64_t(0));
@@ -1900,8 +1924,10 @@ void check_body(DuoStoreBackend& b, const std::string& key, const std::string& w
 
 }  // namespace
 
-// 提交后崩溃：pack/多 chunk/multipart 三条提交路径的对象重启后逐字节存活；
-// 崩溃残迹（未封存 active pack、孤儿）收敛到零；收敛后（含压实迁移）内容仍正确
+// Crash after commit: objects from all three commit paths (pack / multi-chunk /
+// multipart) survive byte-for-byte across restart; crash residue (unsealed
+// active pack, orphans) converges to zero; content stays correct after
+// convergence (including compaction migration)
 TEST(duostore_crash_after_commit_recovers_all) {
     TmpDir tmp;
     fs::path root = tmp.path / "duo";
@@ -1913,14 +1939,16 @@ TEST(duostore_crash_after_commit_recovers_all) {
     check_body(*b, "big", patterned(10000));
     check_body(*b, "mp", patterned(6000) + patterned(6000));
     verify_converged(*b);
-    check_body(*b, "small", patterned(600));  // 复核：收敛（含压实迁移）不动内容
+    check_body(*b, "small", patterned(600));  // recheck: convergence (incl. compaction
+                                              // migration) leaves content untouched
     check_body(*b, "big", patterned(10000));
     check_body(*b, "mp", patterned(6000) + patterned(6000));
     sync_wait(b->close());
 }
 
-// PUT 泵送中途崩溃：victim 无账（NoSuchKey），半落盘 chunk 成孤儿被扫净；
-// 先行提交的对象不受扰
+// Crash mid-way through a PUT pump: victim has no record (NoSuchKey), the
+// half-landed chunks become orphans and are swept clean; previously committed
+// objects are untouched
 TEST(duostore_crash_mid_put_leaves_no_garbage) {
     TmpDir tmp;
     fs::path root = tmp.path / "duo";
@@ -1930,17 +1958,19 @@ TEST(duostore_crash_mid_put_leaves_no_garbage) {
     auto b = std::make_shared<DuoStoreBackend>(crash_cfg(root), pool);
     CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "victim")), s3::S3ErrorCode::NoSuchKey);
     check_body(*b, "before", patterned(600));
-    // 9000B / 4096 切片 → 2 个封存 chunk + 1 个在写 chunk 全部无账
+    // 9000B / 4096 slicing → 2 sealed chunks + 1 in-flight chunk, all unrecorded
     auto os = sync_wait(b->run_orphan_scan_once());
     CHECK_EQ(os.orphans_removed, uint64_t(3));
     CHECK_EQ(os.refs_missing, uint64_t(0));
-    CHECK_EQ(chunk_files_on_disk(root), size_t(0));  // before 是 pack 对象，chunks/ 应净
+    CHECK_EQ(chunk_files_on_disk(root), size_t(0));  // "before" is a pack object, so
+                                                     // chunks/ should be clean
     verify_converged(*b);
     check_body(*b, "before", patterned(600));
     sync_wait(b->close());
 }
 
-// 删除入账后崩溃：gcq 残账重启后由 GC 变现（先物理删后销账的崩溃安全侧）
+// Crash after the delete is recorded: the leftover gcq entry is realized by GC
+// after restart (physical delete before record removal is the crash-safe side)
 TEST(duostore_crash_after_delete_converges) {
     TmpDir tmp;
     fs::path root = tmp.path / "duo";
@@ -1951,30 +1981,32 @@ TEST(duostore_crash_after_delete_converges) {
     CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "gone")), s3::S3ErrorCode::NoSuchKey);
     auto gc = sync_wait(b->run_gc_once());
     CHECK_EQ(gc.reclaims_acked, uint64_t(1));
-    CHECK_EQ(gc.files_removed, uint64_t(3));  // 10000B / 4096 → 3 chunk
+    CHECK_EQ(gc.files_removed, uint64_t(3));  // 10000B / 4096 → 3 chunks
     CHECK_EQ(chunk_files_on_disk(root), size_t(0));
     verify_converged(*b);
     sync_wait(b->close());
 }
 
-// 随机时刻 SIGKILL：凡子进程回报过的提交（行在 WAL fsync 后写出）重启后必须
-// 逐字节存在——真 kill -9 下的持久性契约；残迹照常收敛
+// SIGKILL at a random moment: every commit the child reported (line written
+// after WAL fsync) must exist byte-for-byte after restart — the durability
+// contract under a real kill -9; residue converges as usual
 TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
     TmpDir tmp;
     fs::path root = tmp.path / "duo";
     int fd = -1;
     pid_t pid = spawn_crash_child("spin", root, &fd);
 
-    // 等到首个提交回报后再随机点开杀（保证测试非空转）
+    // Wait for the first reported commit before killing at a random point
+    // (guarantees the test is not a no-op)
     std::string buf;
     char c;
     while (buf.find('\n') == std::string::npos && ::read(fd, &c, 1) == 1) buf.push_back(c);
     CHECK(buf.find('\n') != std::string::npos);
-    usleep((200 + unsigned(::getpid()) % 500) * 1000);  // 200-700ms 随机窗口
+    usleep((200 + unsigned(::getpid()) % 500) * 1000);  // 200-700ms random window
     CHECK_EQ(::kill(pid, SIGKILL), 0);
     int stat = wait_child(pid);
     CHECK(WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL);
-    // 排空管道；只认完整行
+    // Drain the pipe; only complete lines count
     for (;;) {
         char rb[4096];
         ssize_t n = ::read(fd, rb, sizeof rb);
@@ -1985,7 +2017,7 @@ TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
     std::vector<int> committed;
     for (size_t pos = 0; pos < buf.size();) {
         size_t nl = buf.find('\n', pos);
-        if (nl == std::string::npos) break;  // 尾部半行：不作数
+        if (nl == std::string::npos) break;  // trailing partial line: doesn't count
         std::string line = buf.substr(pos, nl - pos);
         pos = nl + 1;
         if (line.rfind("ok ", 0) == 0) committed.push_back(std::stoi(line.substr(3)));
@@ -2000,8 +2032,10 @@ TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
     sync_wait(b->close());
 }
 
-// gaps §3.9：chunk id 按几何 run 批取——即使分配器被并发写者穿插烧号（run 之间
-// 不连续），同对象的 chunk id 在每个 run 内仍连续，manifest 的 run 编码不失效
+// gaps §3.9: chunk ids are batch-allocated in geometric runs — even when
+// concurrent writers interleave and burn ids in the allocator (runs are not
+// contiguous with each other), an object's chunk ids stay contiguous within
+// each run, so the manifest's run encoding remains valid
 TEST(duostore_chunk_ids_batched_in_runs) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -2009,19 +2043,20 @@ TEST(duostore_chunk_ids_batched_in_runs) {
     FsDataStore d(FsDataOptions{tmp.path / "duo", 64, false, 0, 128ull << 20, 4, {}}, pool,
                   [&](Extent::Kind, uint32_t n) {
                       uint64_t f = next_id;
-                      next_id += n + 7;  // 模拟并发写者在两次批取之间消耗 id
+                      next_id += n + 7;  // simulate concurrent writers consuming ids
+                                         // between two batch grabs
                       return f;
                   });
     auto w = sync_wait(d.open_writer({std::nullopt, "t/runs"}));
-    std::string body(64 * 7, 'x');  // 7 个 chunk：run 序列 1, 2, 4
+    std::string body(64 * 7, 'x');  // 7 chunks: run sequence 1, 2, 4
     sync_wait(
         w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
     auto ref = sync_wait(w->finish());
     CHECK_EQ(ref.extents.size(), size_t(7));
-    CHECK_EQ(ref.extents[2].file_id, ref.extents[1].file_id + 1);  // run(2) 内连续
-    for (size_t i = 4; i <= 6; ++i)                                // run(4) 内连续
+    CHECK_EQ(ref.extents[2].file_id, ref.extents[1].file_id + 1);  // contiguous within run(2)
+    for (size_t i = 4; i <= 6; ++i)                                // contiguous within run(4)
         CHECK_EQ(ref.extents[i].file_id, ref.extents[3].file_id + (i - 3));
-    CHECK(ref.extents[1].file_id != ref.extents[0].file_id + 1);  // 穿插确实发生了
+    CHECK(ref.extents[1].file_id != ref.extents[0].file_id + 1);  // interleaving really happened
     sync_wait(d.close());
 }
 

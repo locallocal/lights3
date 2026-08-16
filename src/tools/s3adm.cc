@@ -1,10 +1,13 @@
-// 运维 CLI：s3adm —— 用运维面（root 静态凭证）的 AK/SK 管理租户凭证，
-// 对接 /-/admin/credentials（docs/credential-management.md §2/§3）。
-// 子命令框架用 ccmd（third_party/ccmd）：list / get / create / delete 各为
-// 独立子命令、各持独立选项集——ccmd 的 root 选项不下传，连接类选项须写在
-// 子命令之后（s3adm list --endpoint=...），长选项取值只认 --name=value 形式。
-// 请求经 SigV4 自签名（复用 s3/auth/sigv4 的签名端）+ httplib 同步客户端；
-// 响应原样打印服务端 JSON。
+// Ops CLI: s3adm — manages tenant credentials with the ops-plane (root
+// static credential) AK/SK, talking to /-/admin/credentials
+// (docs/credential-management.md §2/§3).
+// The subcommand framework is ccmd (third_party/ccmd): list / get / create /
+// delete are independent subcommands, each with its own option set — ccmd's
+// root options do not propagate down, connection options must follow the
+// subcommand (s3adm list --endpoint=...), and long options only accept
+// values in --name=value form.
+// Requests are SigV4 self-signed (reusing the signing side of s3/auth/sigv4)
+// + the httplib synchronous client; responses print the server's JSON verbatim.
 #include <ccmd.h>
 #include <httplib/httplib.h>
 
@@ -34,12 +37,13 @@ namespace util = lights3::util;
 
 constexpr const char* kBase = "/-/admin/credentials";
 
-// ccmd 回调无返回值，进程退出码经此带出（0 成功 / 1 请求失败 / 2 用法错误）
+// ccmd callbacks return nothing; the process exit code is carried out through this (0 success / 1 request failure / 2 usage error)
 int g_exit = 0;
 
-// 端点解析。signed_host 与 httplib 实际发出的 Host 头逐字节一致（默认端口只发
-// host，否则 host:port）——与 cloudproxy Endpoint::parse 同一约定，SigV4 的
-// SignedHeaders 含 host，二者不一致即 SignatureDoesNotMatch
+// Endpoint parsing. signed_host matches the Host header httplib actually
+// sends byte for byte (default port sends only host, otherwise host:port) —
+// the same convention as cloudproxy Endpoint::parse; SigV4's SignedHeaders
+// includes host, and any mismatch means SignatureDoesNotMatch
 struct Endpoint {
     bool https = false;
     std::string host;
@@ -109,7 +113,7 @@ public:
                         sign("GET", path, query, ""));
     }
     httplib::Result post(const std::string& path, const std::string& body) {
-        // Content-Type 不进 SignedHeaders（sign 只收 host + x-amz-*），走 httplib 参数
+        // Content-Type does not go into SignedHeaders (sign only takes host + x-amz-*); passed as an httplib parameter
         return cli_.Post(path, sign("POST", path, "", util::sha256_hex(body)), body,
                          "application/json");
     }
@@ -118,8 +122,8 @@ public:
     }
 
 private:
-    // 构造最小 HttpRequest 只为签名（与 cloudproxy RemoteContext::signed_headers
-    // 同一手法）：payload_hash 空 = 空 body
+    // Builds a minimal HttpRequest solely for signing (same technique as
+    // cloudproxy RemoteContext::signed_headers): empty payload_hash = empty body
     httplib::Headers sign(const std::string& method, const std::string& raw_path,
                           const std::string& raw_query, const std::string& payload_hash) {
         lights3::http::HttpRequest req;
@@ -139,7 +143,7 @@ private:
     Credential cred_;
 };
 
-// 统一收尾：期望状态码 → 打印响应体（服务端已是缩进 JSON）；否则 stderr + 非零
+// Unified wrap-up: expected status code -> print the response body (already indented JSON from the server); otherwise stderr + nonzero
 int finish(const httplib::Result& r, int expect, const std::string& ok_note = "") {
     if (!r) {
         fprintf(stderr, "s3adm: transport error: %s\n", httplib::to_string(r.error()).c_str());
@@ -163,19 +167,19 @@ std::string ak_path(const std::string& ak) {
 
 std::string load_policy_arg(const std::string& arg) {
     std::string text = arg;
-    if (!arg.empty() && arg.front() == '@') {  // @file：curl 惯例
+    if (!arg.empty() && arg.front() == '@') {  // @file: curl convention
         std::ifstream f(arg.substr(1));
         if (!f) throw std::runtime_error("cannot read policy file: " + arg.substr(1));
         std::ostringstream ss;
         ss << f.rdbuf();
         text = ss.str();
     }
-    // 客户端先过一遍服务端同款解析，本地报错快于一次往返
+    // The client runs the same parsing as the server first; a local error is faster than a round trip
     s3::parse_policy_json(text);
     return text;
 }
 
-// 连接类公共选项：ccmd 每个子命令的选项集独立，逐个注册
+// Common connection options: each ccmd subcommand's option set is independent, so register them one by one
 void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
     cmd->varp<std::string>("endpoint", "e", "http://127.0.0.1:9000",
                            "lights3 endpoint (scheme://host[:port]).");
@@ -188,7 +192,7 @@ void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
     cmd->var<int>("timeout-sec", 10, "connect/read/write timeout in seconds.");
 }
 
-// 读连接选项 + 环境变量兜底，构造客户端执行 fn；异常统一在此落成退出码
+// Reads connection options + env-var fallback, builds the client and runs fn; exceptions all land here as exit codes
 template <class Fn>
 void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
     try {
@@ -226,7 +230,7 @@ void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
     }
 }
 
-// 位置参数须恰为一个 AK；不满足打印子命令用法并置用法错误退出码
+// Positional arguments must be exactly one AK; otherwise print the subcommand usage and set the usage-error exit code
 bool one_ak_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& ak) {
     if (cmd->args().size() != 1) {
         fprintf(stderr, "s3adm: usage: %s\n", cmd->usage().c_str());
@@ -291,7 +295,7 @@ std::shared_ptr<ccmd::c_command> make_create() {
                 auto policy = c->var<std::string>("policy");
                 if (!comment.empty()) body["comment"] = comment;
                 if (!policy.empty()) body["policy"] = json::parse(load_policy_arg(policy));
-                // 空对象也发 body：POST 语义单一，服务端对 {} 与无 body 同义
+                // Send the body even when the object is empty: POST semantics stay uniform, and the server treats {} the same as no body
                 return finish(cli.post(kBase, body.dump()), 201);
             });
         });
@@ -329,7 +333,7 @@ int main(int argc, char* argv[]) {
         "subcommand's --ak=/--sk= or from env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK. "
         "Options must follow the subcommand; long options take values as --name=value.",
         "manage lights3 tenant credentials.",
-        // 裸 s3adm / s3adm -x：没有可执行的操作，打印帮助并按用法错误退出
+        // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a usage error
         [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;

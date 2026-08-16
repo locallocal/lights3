@@ -4,9 +4,10 @@ project(lights3 CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 if(NOT CMAKE_BUILD_TYPE)
-  # 必须进缓存：seastar 子目录会 set(CMAKE_BUILD_TYPE ... CACHE)，若此处只是
-  # 普通变量，会被其自家默认值（Debug + sanitizers）顶掉。CMake 启动时会预置
-  # 一个空的 CMAKE_BUILD_TYPE 缓存项，不带 FORCE 的 set(CACHE) 覆盖不了它
+  # Must go into the cache: the seastar subdirectory does set(CMAKE_BUILD_TYPE ... CACHE),
+  # and a plain variable here would be clobbered by its own default (Debug + sanitizers).
+  # CMake pre-seeds an empty CMAKE_BUILD_TYPE cache entry at startup, and a
+  # set(CACHE) without FORCE cannot override it
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 add_compile_options(-Wall -Wextra)
@@ -14,14 +15,14 @@ add_compile_options(-Wall -Wextra)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
-# gflags：命令行参数解析（git submodule，静态链接进主程序）
+# gflags: command-line flag parsing (git submodule, statically linked into the main binary)
 set(GFLAGS_BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
 set(GFLAGS_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(GFLAGS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(GFLAGS_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/gflags EXCLUDE_FROM_ALL)
 
-# HTTP 驱动的编译期裁剪（docs/architecture.md §6 依赖策略）
+# Compile-time trimming of HTTP drivers (dependency policy, docs/architecture.md §6)
 option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
 option(LIGHTS3_DRIVER_HTTPLIB "Build the cpp-httplib sync HTTP driver (vendored header)" ON)
@@ -35,8 +36,8 @@ option(LIGHTS3_DUOSTORE_TIKV_META "Build the TiKV-backed IMetaStore for duostore
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DUOSTORE)
-  # RocksDB 裁剪预设（docs/duostore-backend.md §13.3，仿 gflags/seastar 模板）
-  set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # 仓库已有 gflags 目标；仅 rocksdb 工具需要——OFF 防目标冲突
+  # RocksDB trimming presets (docs/duostore-backend.md §13.3, modeled on the gflags/seastar template)
+  set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # the repo already has a gflags target; only rocksdb tools need it -- OFF avoids target clashes
   set(WITH_TESTS OFF CACHE BOOL "" FORCE)
   set(WITH_ALL_TESTS OFF CACHE BOOL "" FORCE)
   set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "" FORCE)
@@ -44,16 +45,16 @@ if(LIGHTS3_DUOSTORE)
   set(WITH_CORE_TOOLS OFF CACHE BOOL "" FORCE)
   set(WITH_TRACE_TOOLS OFF CACHE BOOL "" FORCE)
   set(ROCKSDB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-  set(WITH_SNAPPY OFF CACHE BOOL "" FORCE)      # 压缩全关：元数据体量小，换零外部依赖
+  set(WITH_SNAPPY OFF CACHE BOOL "" FORCE)      # all compression off: metadata is small, traded for zero external deps
   set(WITH_LZ4 OFF CACHE BOOL "" FORCE)
   set(WITH_ZLIB OFF CACHE BOOL "" FORCE)
   set(WITH_ZSTD OFF CACHE BOOL "" FORCE)
-  set(WITH_LIBURING OFF CACHE BOOL "" FORCE)    # 机器无 liburing 开发头（seastar 同款注释）
-  set(PORTABLE ON CACHE BOOL "" FORCE)          # 不用 -march=native
-  set(USE_RTTI 1 CACHE BOOL "" FORCE)           # lights3 全程异常 + RTTI
+  set(WITH_LIBURING OFF CACHE BOOL "" FORCE)    # machine has no liburing dev headers (same note as seastar)
+  set(PORTABLE ON CACHE BOOL "" FORCE)          # no -march=native
+  set(USE_RTTI 1 CACHE BOOL "" FORCE)           # lights3 uses exceptions + RTTI throughout
   set(FAIL_ON_WARNINGS OFF CACHE BOOL "" FORCE)
-  # add_subdirectory 的 SYSTEM 关键字需 CMake >= 3.25（本项目最低 3.20）；
-  # 老版本会把 SYSTEM 误解析为 binary_dir 参数，必须按版本分支
+  # add_subdirectory's SYSTEM keyword needs CMake >= 3.25 (this project's minimum is 3.20);
+  # older versions misparse SYSTEM as the binary_dir argument, so branch on version
   if(CMAKE_VERSION VERSION_LESS 3.25)
     add_subdirectory(third_party/rocksdb EXCLUDE_FROM_ALL)
   else()
@@ -65,10 +66,10 @@ if(LIGHTS3_DUOSTORE_REDIS_META)
   if(NOT LIGHTS3_DUOSTORE)
     message(FATAL_ERROR "LIGHTS3_DUOSTORE_REDIS_META requires LIGHTS3_DUOSTORE")
   endif()
-  # hiredis 裁剪预设（docs/duostore-redis-meta.md §7.2）
-  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)  # hiredis 默认 shared；全仓惯例静态
+  # hiredis trimming presets (docs/duostore-redis-meta.md §7.2)
+  set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)  # hiredis defaults to shared; repo-wide convention is static
   set(DISABLE_TESTS ON CACHE BOOL "" FORCE)
-  set(ENABLE_SSL OFF CACHE BOOL "" FORCE)         # 首期不启用 TLS（§5.5）
+  set(ENABLE_SSL OFF CACHE BOOL "" FORCE)         # TLS not enabled in the first phase (§5.5)
   set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
   if(CMAKE_VERSION VERSION_LESS 3.25)
     add_subdirectory(third_party/hiredis EXCLUDE_FROM_ALL)
@@ -81,10 +82,11 @@ if(LIGHTS3_DUOSTORE_SQLITE_META)
   if(NOT LIGHTS3_DUOSTORE)
     message(FATAL_ERROR "LIGHTS3_DUOSTORE_SQLITE_META requires LIGHTS3_DUOSTORE")
   endif()
-  # sqlite 的 canonical 源码树不含现成 amalgamation，需 configure && make sqlite3.c
-  # 生成（脚本跑在 tclsh 上，新树无 tclsh 时以内置 jimsh 自举；
-  # docs/duostore-sqlite-meta.md §7）。out-of-tree 生成到 build 目录，
-  # DEPENDS VERSION 使 submodule 升级触发重生成
+  # sqlite's canonical source tree ships no prebuilt amalgamation; it must be generated
+  # via configure && make sqlite3.c (the script runs on tclsh, bootstrapping with the
+  # bundled jimsh on a fresh tree without tclsh; docs/duostore-sqlite-meta.md §7).
+  # Generated out-of-tree into the build dir; DEPENDS on VERSION makes a submodule
+  # upgrade trigger regeneration
   set(SQLITE_GEN_DIR ${CMAKE_BINARY_DIR}/sqlite-amalgamation)
   add_custom_command(
     OUTPUT ${SQLITE_GEN_DIR}/sqlite3.c ${SQLITE_GEN_DIR}/sqlite3.h
@@ -95,9 +97,9 @@ if(LIGHTS3_DUOSTORE_SQLITE_META)
     DEPENDS ${CMAKE_SOURCE_DIR}/third_party/sqlite/VERSION
     COMMENT "Generating SQLite amalgamation (third_party/sqlite)"
     VERBATIM)
-  # 编译期选项 = 官方 Recommended Compile-time Options 裁剪
-  # （docs/duostore-sqlite-meta.md §5.1）；THREADSAFE=1（serialized）是防御纵深
-  enable_language(C)  # 项目本体 CXX-only，amalgamation 是唯一 C 编译单元
+  # Compile-time options = trimmed set of the official Recommended Compile-time Options
+  # (docs/duostore-sqlite-meta.md §5.1); THREADSAFE=1 (serialized) is defense in depth
+  enable_language(C)  # the project itself is CXX-only; the amalgamation is the sole C translation unit
   add_library(lights3_sqlite3 STATIC ${SQLITE_GEN_DIR}/sqlite3.c)
   target_include_directories(lights3_sqlite3 PUBLIC ${SQLITE_GEN_DIR})
   target_compile_definitions(lights3_sqlite3 PRIVATE
@@ -105,16 +107,17 @@ if(LIGHTS3_DUOSTORE_SQLITE_META)
     SQLITE_DEFAULT_MEMSTATUS=0 SQLITE_LIKE_DOESNT_MATCH_BLOBS
     SQLITE_MAX_EXPR_DEPTH=0 SQLITE_OMIT_DEPRECATED
     SQLITE_OMIT_SHARED_CACHE SQLITE_USE_ALLOCA)
-  target_compile_options(lights3_sqlite3 PRIVATE -w)  # 第三方生成物不受 -Wall -Wextra 约束
+  target_compile_options(lights3_sqlite3 PRIVATE -w)  # third-party generated code is exempt from -Wall -Wextra
 endif()
 
 if(LIGHTS3_DUOSTORE_RADOS_DATA)
   if(NOT LIGHTS3_DUOSTORE)
     message(FATAL_ERROR "LIGHTS3_DUOSTORE_RADOS_DATA requires LIGHTS3_DUOSTORE")
   endif()
-  # librados 取系统包，不作 submodule（Ceph 仓库数 GiB 级，docs/duostore-rados-data.md §9.1）：
-  # pkg-config 优先，退 find_path/find_library；无 sudo 环境可 dpkg -x 解包
-  # librados-dev/librados2 到 ~/.local/opt/ceph，或 LIGHTS3_RADOS_ROOT 显式指过去
+  # librados comes from the system package, not a submodule (the Ceph repo is several GiB,
+  # docs/duostore-rados-data.md §9.1): prefer pkg-config, fall back to find_path/find_library;
+  # without sudo, dpkg -x can unpack librados-dev/librados2 into ~/.local/opt/ceph,
+  # or point LIGHTS3_RADOS_ROOT there explicitly
   find_package(PkgConfig QUIET)
   if(PKG_CONFIG_FOUND)
     pkg_check_modules(RADOS QUIET rados)
@@ -136,15 +139,17 @@ if(LIGHTS3_DUOSTORE_RADOS_DATA)
                           "install librados-dev or set LIGHTS3_RADOS_ROOT")
     endif()
   endif()
-  # deb 布局把 DT_NEEDED 的 libceph-common 装在 <libdir>/ceph 私有目录，且 librados
-  # 自带的 RUNPATH 是绝对路径 /usr/lib/...——非系统前缀（~/.local 解包）需补
-  # rpath-link（链接期解析 libceph-common 及其传递依赖：boost/rdmacm 等同前缀解包件）
-  # 与 rpath（运行期加载）
+  # The deb layout installs the DT_NEEDED libceph-common into the private <libdir>/ceph
+  # directory, and librados' own RUNPATH is the absolute path /usr/lib/... -- non-system
+  # prefixes (~/.local unpacks) need extra rpath-link (link-time resolution of libceph-common
+  # and its transitive deps: boost/rdmacm etc. unpacked under the same prefix)
+  # plus rpath (runtime loading)
   get_filename_component(LIGHTS3_RADOS_LIBDIR ${LIGHTS3_RADOS_LIB} DIRECTORY)
   if(EXISTS "${LIGHTS3_RADOS_LIBDIR}/ceph" AND NOT LIGHTS3_RADOS_LIBDIR MATCHES "^/usr/lib")
-    # --disable-new-dtags：发 DT_RPATH 而非 DT_RUNPATH——librados 自带的 RUNPATH
-    # 指绝对系统路径，加载其 NEEDED 的 libceph-common 时不看可执行文件的 RUNPATH
-    # （RUNPATH 不传递），只有旧式 RPATH 对整棵依赖树生效
+    # --disable-new-dtags: emit DT_RPATH instead of DT_RUNPATH -- librados' own RUNPATH
+    # points at absolute system paths, and when loading its NEEDED libceph-common the
+    # executable's RUNPATH is not consulted (RUNPATH does not propagate); only the
+    # old-style RPATH applies to the whole dependency tree
     set(LIGHTS3_RADOS_LINKOPTS
         "-Wl,--disable-new-dtags"
         "-Wl,-rpath-link,${LIGHTS3_RADOS_LIBDIR}/ceph"
@@ -158,20 +163,22 @@ if(LIGHTS3_DUOSTORE_TIKV_META)
   if(NOT LIGHTS3_DUOSTORE)
     message(FATAL_ERROR "LIGHTS3_DUOSTORE_TIKV_META requires LIGHTS3_DUOSTORE")
   endif()
-  # client-c 依赖 gRPC/protobuf（构建期还需 protoc + grpc_cpp_plugin 生成 kvproto）
-  # /Poco/abseil，取系统包；无 sudo 环境 apt-get download + dpkg -x 解包到
-  # ~/.local/opt/tikv-deps（docs/duostore-tikv-meta.md §8.2），或用
-  # LIGHTS3_TIKV_DEPS_ROOT 显式指解包前缀（<root>/bin/protoc、<root>/include、
-  # <root>/lib/<arch>）。client-c 的依赖发现均带 if(NOT ...) 守卫，父作用域预置
-  # 变量即整体短路其 find 模块
+  # client-c depends on gRPC/protobuf (build time additionally needs protoc +
+  # grpc_cpp_plugin to generate kvproto) /Poco/abseil, taken from system packages;
+  # without sudo, apt-get download + dpkg -x unpack into ~/.local/opt/tikv-deps
+  # (docs/duostore-tikv-meta.md §8.2), or set LIGHTS3_TIKV_DEPS_ROOT explicitly to the
+  # unpack prefix (<root>/bin/protoc, <root>/include, <root>/lib/<arch>). All of
+  # client-c's dependency discovery is guarded by if(NOT ...), so pre-seeding variables
+  # in the parent scope short-circuits its find modules wholesale
   if(NOT LIGHTS3_TIKV_DEPS_ROOT AND EXISTS "$ENV{HOME}/.local/opt/tikv-deps/usr")
     set(LIGHTS3_TIKV_DEPS_ROOT "$ENV{HOME}/.local/opt/tikv-deps/usr")
   endif()
   if(LIGHTS3_TIKV_DEPS_ROOT)
     set(LIGHTS3_TIKV_LIBDIR "${LIGHTS3_TIKV_DEPS_ROOT}/lib/${CMAKE_LIBRARY_ARCHITECTURE}")
     set(LIGHTS3_TIKV_INCLUDE "${LIGHTS3_TIKV_DEPS_ROOT}/include")
-    # 解包的 protoc / grpc_cpp_plugin 运行时依赖同树 so——生成 LD_LIBRARY_PATH
-    # wrapper，kvproto 的 codegen custom command 经变量引用拿到的就是 wrapper
+    # The unpacked protoc / grpc_cpp_plugin depend at runtime on .so files from the same
+    # tree -- generate LD_LIBRARY_PATH wrappers; what kvproto's codegen custom command
+    # gets through the variable references is the wrapper
     foreach(tool protoc grpc_cpp_plugin)
       file(WRITE "${CMAKE_BINARY_DIR}/tikv-tools/${tool}"
            "#!/bin/sh\nexport LD_LIBRARY_PATH='${LIGHTS3_TIKV_LIBDIR}'\nexec '${LIGHTS3_TIKV_DEPS_ROOT}/bin/${tool}' \"$@\"\n")
@@ -193,18 +200,20 @@ if(LIGHTS3_DUOSTORE_TIKV_META)
     set(Poco_Net_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libPocoNet.so")
     set(Poco_JSON_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libPocoJSON.so")
     set(Poco_Util_LIBRARY "${LIGHTS3_TIKV_LIBDIR}/libPocoUtil.so")
-    # kvproto 链 absl::synchronization——用解包树的 absl config（与解包 grpc 同 ABI）
+    # kvproto links absl::synchronization -- use the unpacked tree's absl config (same ABI as the unpacked grpc)
     find_package(absl REQUIRED CONFIG PATHS "${LIGHTS3_TIKV_LIBDIR}/cmake/absl" NO_DEFAULT_PATH)
-    # 链接期解析 grpc/Poco 的 NEEDED（absl/re2/cares 同树解包）+ 运行期加载：
-    # RUNPATH 不传递到依赖树深处，须旧式 RPATH 对整棵树生效（librados 同款论证）
+    # Link-time resolution of grpc/Poco's NEEDED (absl/re2/cares unpacked in the same tree)
+    # + runtime loading: RUNPATH does not propagate deep into the dependency tree, so the
+    # old-style RPATH must apply to the whole tree (same argument as librados)
     set(LIGHTS3_TIKV_LINKOPTS
         "-Wl,--disable-new-dtags"
         "-Wl,-rpath-link,${LIGHTS3_TIKV_LIBDIR}"
         "-Wl,-rpath,${LIGHTS3_TIKV_LIBDIR}")
   else()
-    # 系统包路线：Poco 用 client-c 自带的 FindPoco 在父作用域先找（其变量同时
-    # 短路 client-c 内部的 find_poco），absl 走系统 config。模块路径用毕即还原
-    # （client-c 的 FindgRPC/FindPoco 及其捆绑 FPHSA 不能泄漏给后续 find_package）
+    # System-package route: find Poco first in the parent scope using client-c's bundled
+    # FindPoco (its variables also short-circuit client-c's internal find_poco); absl uses
+    # the system config. Restore the module path right after use (client-c's
+    # FindgRPC/FindPoco and their bundled FPHSA must not leak into later find_package calls)
     set(LIGHTS3_SAVED_MODULE_PATH "${CMAKE_MODULE_PATH}")
     list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/third_party/client-c/cmake/Modules")
     find_package(Poco REQUIRED Foundation Net JSON Util)
@@ -212,29 +221,33 @@ if(LIGHTS3_DUOSTORE_TIKV_META)
     set(CMAKE_MODULE_PATH "${LIGHTS3_SAVED_MODULE_PATH}")
     unset(LIGHTS3_SAVED_MODULE_PATH)
   endif()
-  # 非空即阻断 client-c 内建 abseil-cpp submodule 与 kvproto 的 find_abseil——
-  # 统一用上面 find 到的 absl，避免与 grpc 所链 absl 双份共存
+  # Any non-empty value blocks client-c's built-in abseil-cpp submodule and kvproto's
+  # find_abseil -- uniformly use the absl found above, avoiding a second absl copy
+  # coexisting with the one grpc links
   set(ABSL_ROOT_DIR "/usr")
-  set(ENABLE_TESTS OFF)  # client-c 自带 gtest 用例（上游 #104：ON 已知构建断裂）
+  set(ENABLE_TESTS OFF)  # client-c ships gtest cases (upstream #104: ON is known to break the build)
   if(CMAKE_VERSION VERSION_LESS 3.25)
     add_subdirectory(third_party/client-c EXCLUDE_FROM_ALL)
   else()
     add_subdirectory(third_party/client-c EXCLUDE_FROM_ALL SYSTEM)
   endif()
-  # 上游 kv_client 欠链/欠传：只链 PocoFoundation，而 pd/coprocessor 源码实际
-  # 用到 Net/JSON/Util 符号；Poco include 也未进其传递 include
+  # Upstream kv_client under-links/under-propagates: it links only PocoFoundation while
+  # the pd/coprocessor sources actually use Net/JSON/Util symbols; the Poco includes
+  # are also missing from its transitive include dirs
   target_link_libraries(kv_client ${Poco_Net_LIBRARY} ${Poco_JSON_LIBRARY} ${Poco_Util_LIBRARY})
   if(LIGHTS3_TIKV_DEPS_ROOT)
     target_include_directories(kv_client SYSTEM PUBLIC "${LIGHTS3_TIKV_INCLUDE}")
   endif()
-  # 第三方源码不受 -Wall -Wextra 约束（sqlite 同款惯例）
+  # Third-party sources are exempt from -Wall -Wextra (same convention as sqlite)
   target_compile_options(kv_client PRIVATE -w)
   target_compile_options(kvproto PRIVATE -w)
   target_compile_options(fiu PRIVATE -w)
-  # 依赖预置/短路变量只为 client-c 子目录配置服务（target 属性已固化），用毕
-  # 即清——顶层目录作用域的 Protobuf_*/gRPC_* 会短路后续兄弟子目录（如 seastar
-  # 的 SeastarDependencies 走 module 模式 FindProtobuf）的依赖发现，静默造成
-  # 跨依赖树 ABI 混链
+  # The pre-seeded/short-circuit dependency variables serve only the client-c
+  # subdirectory configure step (target properties are already baked in), so clear them
+  # right after use -- Protobuf_*/gRPC_* in the top-level directory scope would
+  # short-circuit dependency discovery in later sibling subdirectories (e.g. seastar's
+  # SeastarDependencies going through module-mode FindProtobuf), silently causing
+  # cross-dependency-tree ABI mixing
   unset(Protobuf_INCLUDE_DIR)
   unset(Protobuf_LIBRARY)
   unset(Protobuf_PROTOC_EXECUTABLE)
@@ -251,8 +264,9 @@ if(LIGHTS3_DUOSTORE_TIKV_META)
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
-  # seastar 依赖较重（编译版 Boost、fmt、c-ares、lz4、yaml-cpp、protobuf、ragel、
-  # xfs 头）；无 root 的机器可解包到 ~/.local/opt/seastar-deps（apt-get download + dpkg -x）
+  # seastar's dependencies are heavy (compiled Boost, fmt, c-ares, lz4, yaml-cpp,
+  # protobuf, ragel, xfs headers); machines without root can unpack them into
+  # ~/.local/opt/seastar-deps (apt-get download + dpkg -x)
   if(EXISTS "$ENV{HOME}/.local/opt/seastar-deps")
     list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local/opt/seastar-deps")
     list(APPEND CMAKE_PROGRAM_PATH "$ENV{HOME}/.local/opt/seastar-deps/bin")
@@ -260,22 +274,23 @@ if(LIGHTS3_DRIVER_SEASTAR)
   if(EXISTS "$ENV{HOME}/.local/opt/boost-1.90")
     list(APPEND CMAKE_PREFIX_PATH "$ENV{HOME}/.local/opt/boost-1.90")
   endif()
-  # spdlog 自带的 bundled fmt(v12) 与 seastar 用的 fmt(v11) 的 include 守卫同名，
-  # 同一 TU 里先到者屏蔽后者，产生 ABI 撕裂的未定义符号——seastar 开启时全项目
-  # 统一用 seastar 那份外部 fmt
+  # spdlog's bundled fmt (v12) and the fmt seastar uses (v11) have identically named
+  # include guards; within one TU whichever comes first shadows the other, producing
+  # ABI-torn undefined symbols -- with seastar enabled the whole project uniformly
+  # uses seastar's external fmt copy
   set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "" FORCE)
 endif()
 
-# spdlog：日志实现（git submodule，静态库；core/log.h 为门面）
+# spdlog: logging implementation (git submodule, static lib; core/log.h is the facade)
 add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 
-# nlohmann/json：admin 凭证 API 的 JSON 编解码（header-only，docs/credential-management.md §5.4）
+# nlohmann/json: JSON encode/decode for the admin credential API (header-only, docs/credential-management.md §5.4)
 add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
-# ccmd：s3adm 的子命令框架（header-only + 静态 cflag，仅运维工具用）
+# ccmd: subcommand framework for s3adm (header-only + static cflag, ops tooling only)
 add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
 
-# ---- 核心库：L2/L3/L4 + HTTP 边界 ----
+# ---- Core library: L2/L3/L4 + HTTP boundary ----
 add_library(lights3_core STATIC
   src/core/background.cc
   src/core/thread_pool.cc
@@ -313,7 +328,7 @@ add_library(lights3_core STATIC
 )
 target_include_directories(lights3_core PUBLIC src)
 target_link_libraries(lights3_core PUBLIC OpenSSL::Crypto Threads::Threads spdlog::spdlog)
-# JSON 只在 admin handler / CredentialStore 的 .cc 里用，不进公共头（docs/credential-management.md §5.4）
+# JSON is used only in the admin handler / CredentialStore .cc files, never in public headers (docs/credential-management.md §5.4)
 target_link_libraries(lights3_core PRIVATE nlohmann_json::nlohmann_json)
 
 if(LIGHTS3_DRIVER_BUILTIN)
@@ -322,8 +337,8 @@ if(LIGHTS3_DRIVER_BUILTIN)
 endif()
 
 if(LIGHTS3_DRIVER_BEAST)
-  # Beast/Asio 均为 header-only；BOOST_ROOT 或系统路径均可。
-  # TLS（docs/gaps.md §7）：asio::ssl 需要 libssl
+  # Beast/Asio are both header-only; BOOST_ROOT or the system path both work.
+  # TLS (docs/gaps.md §7): asio::ssl needs libssl
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
   find_package(Boost 1.75 QUIET)
   if(NOT Boost_FOUND)
@@ -347,8 +362,8 @@ if(LIGHTS3_DRIVER_HTTPLIB)
   target_sources(lights3_core PRIVATE src/http/drivers/httplib/httplib_server.cc)
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_DRIVER_HTTPLIB)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
-  # 服务端 TLS（docs/gaps.md §7）需要 SSLServer。OPENSSL_SUPPORT 宏必须目标级
-  # 统一（ODR，见下方 cloudproxy 分支注释），因此这里同样以 PUBLIC 定义
+  # Server-side TLS (docs/gaps.md §7) needs SSLServer. The OPENSSL_SUPPORT macro must be
+  # uniform target-wide (ODR, see the cloudproxy branch comment below), hence also defined PUBLIC here
   target_compile_definitions(lights3_core PUBLIC CPPHTTPLIB_OPENSSL_SUPPORT)
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
 endif()
@@ -358,15 +373,15 @@ if(LIGHTS3_CLOUDPROXY)
     src/storage/cloudproxy/remote_client.cc
     src/storage/cloudproxy/cloudproxy_backend.cc
   )
-  # OPENSSL_SUPPORT 必须目标级统一：httplib_server.cc 与 cloudproxy 的 TU 一开一关
-  # 是 ODR 违规（docs/cloudproxy-backend.md §8.3）
+  # OPENSSL_SUPPORT must be uniform target-wide: having it on in httplib_server.cc but
+  # off in the cloudproxy TUs is an ODR violation (docs/cloudproxy-backend.md §8.3)
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_CLOUDPROXY CPPHTTPLIB_OPENSSL_SUPPORT)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
 endif()
 
 if(LIGHTS3_DUOSTORE)
-  # 裁剪模板照 cloudproxy（docs/duostore-backend.md §13.3）
+  # Trimming template follows cloudproxy (docs/duostore-backend.md §13.3)
   target_sources(lights3_core PRIVATE
     src/storage/duostore/codec.cc
     src/storage/duostore/meta_dump.cc
@@ -408,11 +423,11 @@ if(LIGHTS3_DUOSTORE)
 endif()
 
 if(LIGHTS3_DRIVER_SEASTAR)
-  # beast 块的 find_package(Boost QUIET) 走老式 FindBoost 时会把
-  # Boost_USE_DEBUG_RUNTIME 默认置 TRUE，污染 BoostConfig 的变体选择
+  # When the beast block's find_package(Boost QUIET) goes through legacy FindBoost it
+  # defaults Boost_USE_DEBUG_RUNTIME to TRUE, polluting BoostConfig's variant selection
   set(Boost_USE_DEBUG_RUNTIME OFF)
-  # 顶层的 -Wall -Wextra 会漏进子目录，撞上 seastar 自己的 -Werror；
-  # 用 seastar 提供的旋钮把它的告警降回非致命
+  # The top-level -Wall -Wextra leaks into subdirectories and collides with seastar's
+  # own -Werror; use seastar's provided knob to demote its warnings back to non-fatal
   set(Seastar_CXX_FLAGS "-Wno-error" CACHE STRING "" FORCE)
   set(Seastar_APPS OFF CACHE BOOL "" FORCE)
   set(Seastar_DEMOS OFF CACHE BOOL "" FORCE)
@@ -420,34 +435,36 @@ if(LIGHTS3_DRIVER_SEASTAR)
   set(Seastar_TESTING OFF CACHE BOOL "" FORCE)
   set(Seastar_HWLOC OFF CACHE BOOL "" FORCE)
   set(Seastar_DPDK OFF CACHE BOOL "" FORCE)
-  set(Seastar_IO_URING OFF CACHE BOOL "" FORCE)  # 机器无 liburing 开发头
+  set(Seastar_IO_URING OFF CACHE BOOL "" FORCE)  # machine has no liburing dev headers
   set(Seastar_LTTNG OFF CACHE BOOL "" FORCE)
   set(Seastar_INSTALL OFF CACHE BOOL "" FORCE)
-  # seastar 子目录把 CMAKE_CXX_STANDARD 的缓存默认为 26；显式钉在与项目一致的 20
+  # The seastar subdirectory defaults the CMAKE_CXX_STANDARD cache to 26; pin it explicitly to 20 to match the project
   set(CMAKE_CXX_STANDARD 20 CACHE STRING "" FORCE)
   add_subdirectory(third_party/seastar EXCLUDE_FROM_ALL SYSTEM)
-  # 进程里 reactor 之外还有自有线程池，跨线程 new/free 常态化：
-  # 强制 seastar 用系统分配器，绕开其自带 allocator 的线程归属约束
+  # The process has its own thread pools besides the reactor, making cross-thread
+  # new/free routine: force seastar onto the system allocator, bypassing its own
+  # allocator's thread-ownership constraints
   target_compile_definitions(seastar PUBLIC SEASTAR_DEFAULT_ALLOCATOR)
   target_sources(lights3_core PRIVATE src/http/drivers/seastar/seastar_server.cc)
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_DRIVER_SEASTAR)
   target_link_libraries(lights3_core PRIVATE seastar)
 endif()
 
-# ---- 主程序 ----
+# ---- Main executable ----
 add_executable(lights3 src/main.cc)
 target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
 
-# ---- 运维工具 ----
-# s3adm：/-/admin/credentials 的 CLI 客户端（docs/credential-management.md §2）。
-# CPPHTTPLIB_OPENSSL_SUPPORT 经 lights3_core 的 PUBLIC 定义传播，与核心库目标级
-# 一致（ODR）；未启用 httplib/cloudproxy 的裁剪构建下自动退化为仅 http
+# ---- Ops tooling ----
+# s3adm: CLI client for /-/admin/credentials (docs/credential-management.md §2).
+# CPPHTTPLIB_OPENSSL_SUPPORT propagates via lights3_core's PUBLIC definition, staying
+# target-level consistent with the core library (ODR); in trimmed builds without
+# httplib/cloudproxy it automatically degrades to http-only
 add_executable(s3adm src/tools/s3adm.cc)
 target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(s3adm SYSTEM PRIVATE third_party)
 
-# ---- 测试 ----
+# ---- Tests ----
 if(LIGHTS3_BUILD_TESTS)
   enable_testing()
   add_executable(unit_tests
@@ -470,24 +487,25 @@ if(LIGHTS3_BUILD_TESTS)
   if(LIGHTS3_DUOSTORE)
     target_sources(unit_tests PRIVATE tests/unit/test_duostore.cc)
     if(LIGHTS3_DUOSTORE_REDIS_META)
-      # redis 用例需 hiredis 头（测试 harness 直连拉起的私有 redis-server）
+      # redis cases need hiredis headers (the test harness connects directly to the private redis-server it spawns)
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_redis.cc)
       target_link_libraries(unit_tests PRIVATE hiredis::hiredis)
     endif()
     if(LIGHTS3_DUOSTORE_SQLITE_META)
-      # sqlite 用例需 sqlite3.h（测试 harness 直接构造"别人的库"做谱系拒绝校验）
+      # sqlite cases need sqlite3.h (the test harness directly builds "someone else's database" to verify lineage rejection)
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_sqlite.cc)
       target_link_libraries(unit_tests PRIVATE lights3_sqlite3)
     endif()
     if(LIGHTS3_DUOSTORE_RADOS_DATA)
-      # rados 用例需 librados 头（namespace 清扫 + 故障注入直连集群）；无集群时
-      # 用例全部显式 SKIP（docs/duostore-rados-data.md §11）
+      # rados cases need librados headers (namespace cleanup + fault injection connect to
+      # the cluster directly); without a cluster all cases SKIP explicitly (docs/duostore-rados-data.md §11)
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_rados.cc)
       target_include_directories(unit_tests SYSTEM PRIVATE ${LIGHTS3_RADOS_INCLUDE})
     endif()
     if(LIGHTS3_DUOSTORE_TIKV_META)
-      # tikv 用例需真实 PD/TiKV 集群（LIGHTS3_TEST_PD_ADDR），缺则显式 SKIP
-      # （docs/duostore-tikv-meta.md §10）；专项用例直连 kv_client 做守卫/冲突验证
+      # tikv cases need a real PD/TiKV cluster (LIGHTS3_TEST_PD_ADDR), otherwise explicit
+      # SKIP (docs/duostore-tikv-meta.md §10); dedicated cases talk to kv_client directly
+      # for guard/conflict verification
       target_sources(unit_tests PRIVATE tests/unit/test_duostore_tikv.cc)
       target_link_libraries(unit_tests PRIVATE kv_client)
     endif()
@@ -496,7 +514,7 @@ if(LIGHTS3_BUILD_TESTS)
   target_include_directories(unit_tests PRIVATE tests)
   add_test(NAME unit_tests COMMAND unit_tests)
 
-  # e2e 按驱动参数化：同一组真实 S3 流程用例跑每个已编译驱动
+  # e2e parameterized by driver: the same set of real S3 flow cases runs against every compiled driver
   if(LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_builtin
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh $<TARGET_FILE:lights3> builtin)
@@ -513,50 +531,50 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_seastar
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh $<TARGET_FILE:lights3> seastar)
   endif()
-  # xlocalfs 后端复用同一组 e2e 用例（io_uring 数据面）
+  # The xlocalfs backend reuses the same e2e cases (io_uring data plane)
   if(LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_xlocalfs
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin xlocalfs)
-    # tiered 组合后端（localfs+memory，docs/tiered-storage.md）同样跑全协议用例
+    # The tiered composite backend (localfs+memory, docs/tiered-storage.md) also runs the full protocol cases
     add_test(NAME e2e_tiered
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin tiered)
   endif()
-  # cloudproxy 双实例场景（docs/cloudproxy-backend.md §10）：实例 B 充当"云端"，A 经 cloudproxy 代理；
-  # tiered-cloudproxy 即 docs/tiered-storage.md P5 组合（tiered 的 cloud 侧接真实 CloudProxyBackend）
-  # duostore 后端（RocksDB meta + chunk/pack 数据面）跑同一组 e2e 用例
+  # cloudproxy two-instance scenario (docs/cloudproxy-backend.md §10): instance B acts as the "cloud", A proxies through cloudproxy;
+  # tiered-cloudproxy is the docs/tiered-storage.md P5 combination (tiered's cloud side wired to a real CloudProxyBackend)
+  # The duostore backend (RocksDB meta + chunk/pack data plane) runs the same e2e cases
   if(LIGHTS3_DUOSTORE AND LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_duostore
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin duostore)
-    # tiered 组合（docs/duostore-backend.md §13.1/§15 P5）：duostore 作 tiered 的
-    # cloud 侧（cloud 只经 IStorageBackend 抽象，复证组件关系）
+    # tiered combination (docs/duostore-backend.md §13.1/§15 P5): duostore as tiered's
+    # cloud side (cloud goes only through the IStorageBackend abstraction, re-validating the component relationship)
     add_test(NAME e2e_tiered_duostore
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin tiered-duostore)
-    # duostore + Redis meta（docs/duostore-redis-meta.md §9）：脚本内探测
-    # redis-server，缺则显式 SKIP
+    # duostore + Redis meta (docs/duostore-redis-meta.md §9): the script probes for
+    # redis-server, explicit SKIP if missing
     if(LIGHTS3_DUOSTORE_REDIS_META)
       add_test(NAME e2e_duostore_redis
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-redis)
     endif()
-    # duostore + SQLite meta（docs/duostore-sqlite-meta.md §9）：零外部依赖
+    # duostore + SQLite meta (docs/duostore-sqlite-meta.md §9): zero external deps
     if(LIGHTS3_DUOSTORE_SQLITE_META)
       add_test(NAME e2e_duostore_sqlite
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-sqlite)
     endif()
-    # duostore + RADOS data（docs/duostore-rados-data.md §11）：脚本内探测
-    # LIGHTS3_TEST_RADOS_CONF/POOL，缺则显式 SKIP（真实集群依赖）
+    # duostore + RADOS data (docs/duostore-rados-data.md §11): the script probes
+    # LIGHTS3_TEST_RADOS_CONF/POOL, explicit SKIP if missing (real cluster dependency)
     if(LIGHTS3_DUOSTORE_RADOS_DATA)
       add_test(NAME e2e_duostore_rados
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                        $<TARGET_FILE:lights3> builtin duostore-rados)
     endif()
-    # duostore + TiKV meta（docs/duostore-tikv-meta.md §10）：脚本内探测
-    # LIGHTS3_TEST_PD_ADDR，缺则显式 SKIP（真实集群依赖）
+    # duostore + TiKV meta (docs/duostore-tikv-meta.md §10): the script probes
+    # LIGHTS3_TEST_PD_ADDR, explicit SKIP if missing (real cluster dependency)
     if(LIGHTS3_DUOSTORE_TIKV_META)
       add_test(NAME e2e_duostore_tikv
                COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh

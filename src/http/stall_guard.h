@@ -1,12 +1,16 @@
-// L1/L2 边界：传输停滞守卫（docs/gaps.md §3.3）
+// L1/L2 boundary: transfer stall guard (docs/gaps.md §3.3)
 //
-// 四个驱动的超时都是**逐块重置**的：只要客户端每个周期发一个字节，读超时就永远
-// 不到点，一条连接可以被无限期占住（收发两个方向同样）。这里按"每个窗口至少推进
-// kMinProgressBytes 字节"判定停滞——真正慢但在传的连接不受影响，滴灌式的会被掐断。
+// All four drivers reset their timeouts **per chunk**: as long as the client
+// sends one byte per cycle the read timeout never fires, and a connection can
+// be held indefinitely (same for both directions). Here we detect a stall as
+// "less than kMinProgressBytes advanced within each window" — genuinely slow
+// but progressing connections are unaffected, while drip-feed ones get cut off.
 //
-// 装在 BodyReader 外层而不是各驱动内部：一处包裹即对四驱动同时生效，且请求体与
-// 响应体共用同一套判据。注意它只在 read() 返回时判定，不打断已阻塞的系统调用——
-// 完全不发数据的连接由驱动的 idle_timeout 负责。
+// Wrapped around BodyReader rather than inside each driver: one wrapper covers
+// all four drivers at once, and request and response bodies share the same
+// criterion. Note it only evaluates when read() returns; it does not interrupt
+// a blocked syscall — connections sending no data at all are handled by the
+// driver's idle_timeout.
 #pragma once
 
 #include <chrono>
@@ -22,7 +26,7 @@ namespace lights3::http {
 
 class StallGuardReader final : public BodyReader {
 public:
-    // 一个窗口内累计推进达到该字节数即视为"有进展"，重置计时
+    // Accumulating this many bytes within one window counts as "progress" and resets the timer
     static constexpr uint64_t kMinProgressBytes = 64 * 1024;
 
     StallGuardReader(std::unique_ptr<BodyReader> inner, std::chrono::seconds window)
@@ -30,7 +34,7 @@ public:
 
     Task<size_t> read(std::span<std::byte> buf) override {
         size_t n = co_await inner_->read(buf);
-        if (n == 0) co_return 0;  // EOF：不判定
+        if (n == 0) co_return 0;  // EOF: no stall check
         moved_ += n;
         auto now = Clock::now();
         if (moved_ >= kMinProgressBytes) {
@@ -54,7 +58,7 @@ private:
     uint64_t moved_ = 0;
 };
 
-// window <= 0 时原样返回（关闭该保护）
+// Returns the reader unchanged when window <= 0 (guard disabled)
 inline std::unique_ptr<BodyReader> guard_stalls(std::unique_ptr<BodyReader> inner,
                                                 std::chrono::seconds window) {
     if (!inner || window.count() <= 0) return inner;

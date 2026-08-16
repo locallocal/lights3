@@ -1,4 +1,4 @@
-// L4: 日志门面 —— 由 spdlog 实现（stderr sink，UTC 时间戳，fmt 风格占位符）
+// L4: logging facade — implemented by spdlog (stderr sink, UTC timestamps, fmt-style placeholders)
 #pragma once
 
 #include <spdlog/sinks/stdout_color_sinks.h>

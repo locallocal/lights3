@@ -22,7 +22,7 @@ namespace lights3::storage {
 using s3::S3Error;
 using s3::S3ErrorCode;
 
-// 落盘原语在 fs_util 中，与 xlocalfs 共用
+// On-disk primitives live in fs_util, shared with xlocalfs
 using fsutil::TmpFile;
 using fsutil::commit_object_file;
 using fsutil::load_manifest;
@@ -49,9 +49,11 @@ LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<
 }
 
 void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
-    // op 维度全量预注册（同 duostore 的 reason 分桶理由）：缺失的序列在 Prometheus
-    // 里读作"没数据"而非"为 0"，会让"错误突然消失"和"从来没出过错"看起来一样。
-    // 空 scope 返回孤立实例（非空指针），热路径无需判空
+    // Full pre-registration across the op dimension (same reasoning as duostore's reason
+    // buckets): a missing series reads as "no data" rather than "zero" in Prometheus,
+    // making "errors suddenly vanished" look identical to "never had errors".
+    // An empty scope returns detached instances (non-null pointers), so the hot path never
+    // checks for null
     static constexpr std::array<const char*, kOpCount> kOpNames = {
         "put", "get", "head", "delete", "list", "copy", "upload_part", "complete_mpu"};
     for (size_t i = 0; i < kOpCount; ++i) {
@@ -63,8 +65,10 @@ void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
             "Data-path operations that exited via an error (any exception, incl. client 4xx)",
             {{"op", kOpNames[i]}});
     }
-    // 时延只测 put/get/list：它们覆盖"写盘、读盘、目录遍历"三类代价形态，足以
-    // 定位盘退化；其余 op 的时延与三者之一同形，逐个建直方图只膨胀 /-/metrics
+    // Latency is measured only for put/get/list: they cover the three cost shapes "disk
+    // write, disk read, directory walk", enough to localize disk degradation; the other
+    // ops' latency mirrors one of the three, and a histogram for each would only bloat
+    // /-/metrics
     for (Op op : {Op::kPut, Op::kGet, Op::kList})
         m_op_seconds_[size_t(op)] = metrics.histogram(
             "lights3_localfs_op_seconds", "Wall time of a data-path operation",
@@ -88,16 +92,17 @@ Task<void> LocalFsBackend::close() {
     co_return;
 }
 
-// 周期清理（docs/gaps.md §6.3）：此前只在启动跑一次，跑数月不重启的网关会无限
-// 累积从未 complete/abort 的上传目录。完成后重臂（同 duostore worker）：扫描
-// 绝不重叠/堆积，慢扫只是顺延下次触发
+// Periodic cleanup (docs/gaps.md §6.3): previously ran only once at startup, so a gateway
+// running for months without a restart would accumulate never-completed/aborted upload
+// directories without bound. Re-arms after completion (same as the duostore worker): scans
+// never overlap/pile up, a slow scan just pushes back the next trigger
 void LocalFsBackend::schedule_mpu_scan() {
     if (opt_.mpu_ttl_sec <= 0 || opt_.mpu_scan_interval_sec <= 0) return;
     bg_.if_open([&] {
         mpu_timer_ = TimerQueue::instance().add(
             std::chrono::seconds(opt_.mpu_scan_interval_sec), [this] {
                 bg_.spawn([](LocalFsBackend* self) -> Task<void> {
-                    co_await self->pool_->schedule();  // 目录遍历是阻塞 IO，进池
+                    co_await self->pool_->schedule();  // directory walk is blocking IO, go to the pool
                     self->cleanup_stale_uploads();
                     self->schedule_mpu_scan();
                 }(this));
@@ -107,7 +112,8 @@ void LocalFsBackend::schedule_mpu_scan() {
 
 void LocalFsBackend::shutdown_background() {
     bg_.begin_close();
-    // cancel 须在组锁外：TimerQueue::cancel 阻塞等在途回调，回调内要拿组锁
+    // cancel must happen outside the group lock: TimerQueue::cancel blocks on in-flight
+    // callbacks, and the callback takes the group lock
     TimerQueue::instance().cancel(mpu_timer_);
     bg_.wait_idle();
 }
@@ -123,15 +129,18 @@ fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const {
 }
 
 fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view key) const {
-    // 目录标记对象（docs/gaps.md §6.3）："a/b/" 在文件系统上没有对应的文件名，
-    // 落在目录内的保留标记文件上：<bucket>/a/b/.lights3-dir
+    // Directory-marker object (docs/gaps.md §6.3): "a/b/" has no corresponding file name
+    // on the filesystem; it lands on the reserved marker file inside the directory:
+    // <bucket>/a/b/.lights3-dir
     std::string rel(key);
     if (rel.ends_with('/')) rel += fsutil::kDirMarker;
     fs::path p = bucket_dir(bucket) / fs::path(rel);
-    // 纵深防御（docs/gaps.md §1.1）：bucket/key 已在 L2 与各入口校验过，路径不该
-    // 逃出 root_。但 fs::path::operator/ 遇绝对路径右操作数会**替换整条路径**
-    // （root_ / "/etc" == "/etc"），单点失误的代价是任意文件读——所以在真正
-    // 触碰文件系统之前再确认一次。lexically_normal 折叠 ".."，无需触盘
+    // Defense in depth (docs/gaps.md §1.1): bucket/key were already validated at L2 and at
+    // each entry point, so the path should never escape root_. But fs::path::operator/
+    // with an absolute right-hand operand **replaces the entire path**
+    // (root_ / "/etc" == "/etc"), and the cost of a single slip is arbitrary file reads --
+    // so confirm once more before actually touching the filesystem. lexically_normal
+    // collapses "..", no disk access required
     fs::path norm = p.lexically_normal();
     fs::path base = root_.lexically_normal();
     auto [it, _] = std::mismatch(base.begin(), base.end(), norm.begin(), norm.end());
@@ -148,7 +157,8 @@ void LocalFsBackend::require_bucket(std::string_view bucket) const {
 }
 
 ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key) const {
-    // tier 感知（stub 的 size 以 sidecar 为准）在共享实现里处理（docs/tiered-storage.md §4.1）
+    // Tier awareness (a stub's size comes from the sidecar) is handled in the shared
+    // implementation (docs/tiered-storage.md §4.1)
     return fsutil::load_object_meta(data_path, std::move(key));
 }
 
@@ -164,14 +174,16 @@ Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "create bucket dir: " + ec.message());
-    // marker 与两级目录项都 fsync（docs/gaps.md §4）：对象写路径是严格 fsync 的，
-    // 掉电后"桶消失而客户端已收到 200、甚至桶里对象还在"的倒挂不可接受。
-    // 桶目录自己的 dirent 记在 root 里，只 fsync 桶目录换不来这条记录的持久性
+    // fsync the marker and both levels of directory entries (docs/gaps.md §4): the object
+    // write path is strictly fsynced, and the inversion of "bucket vanished after power
+    // loss while the client already got a 200 -- with objects still in it, even" is
+    // unacceptable. The bucket directory's own dirent lives in root, so fsyncing only the
+    // bucket directory does not buy that record's durability
     fs::path marker = dir / kBucketMarker;
     int fd = ::open(marker.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) throw_errno("create bucket marker");
     try {
-        fsutil::fsync_file(fd);  // 走统一开关，与对象写路径同进退
+        fsutil::fsync_file(fd);  // uses the shared switch, moves in lockstep with the object write path
     } catch (...) {
         ::close(fd);
         throw;
@@ -192,15 +204,18 @@ Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
             throw S3Error(S3ErrorCode::BucketNotEmpty,
                           "The bucket you tried to delete is not empty", std::string(bucket));
     }
-    // 抛异常重载会把 filesystem_error（非 S3Error）直接漏成 500；且 marker 删除
-    // 后目录若删不掉（空检查与 remove 之间并发写入落了对象），桶从 list/exists
-    // 里消失而数据仍在——不可见也删不掉（docs/gaps.md §3.9）
+    // The throwing overloads would leak filesystem_error (not an S3Error) straight through
+    // as a 500; and if the directory cannot be removed after the marker is deleted (a
+    // concurrent write landed an object between the emptiness check and remove), the
+    // bucket disappears from list/exists while the data remains -- invisible and
+    // undeletable (docs/gaps.md §3.9)
     std::error_code ec;
     fs::remove(dir / kBucketMarker, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "delete bucket marker: " + ec.message());
     fs::remove(dir, ec);
     if (ec) {
-        // 目录非空即并发写赢了竞态：把 marker 恢复回来让桶保持可见，报 NotEmpty
+        // Non-empty directory means a concurrent write won the race: restore the marker so
+        // the bucket stays visible, report NotEmpty
         std::ofstream marker(dir / kBucketMarker);
         throw S3Error(S3ErrorCode::BucketNotEmpty,
                       "The bucket you tried to delete is not empty", std::string(bucket));
@@ -243,7 +258,7 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     co_await pool_->schedule();
     require_bucket(bucket);
 
-    // 1. 流式写入 staging 临时文件，边写边算 MD5
+    // 1. Stream into a staging tmp file, computing MD5 as we write
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open staging tmp");
@@ -273,11 +288,13 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     meta.etag = md5.final_hex();
     meta.last_modified = std::chrono::system_clock::now();
 
-    // 2. 冲突检查 + 数据 rename + sidecar 提交。per-key 锁：提交段是两次
-    // rename，并发同 key PUT 交错会产生"数据=A、etag=B"的撕裂对象。
-    // 条件 PUT 的检查同在锁内（PutCondition 契约）：检查与提交对并发写者原子
+    // 2. Conflict check + data rename + sidecar commit. Per-key lock: the commit section
+    // is two renames, and interleaved concurrent PUTs of the same key would produce a torn
+    // "data=A, etag=B" object.
+    // The conditional PUT check sits inside the same lock (PutCondition contract): check
+    // and commit are atomic with respect to concurrent writers
     auto lk = co_await commit_lock(bucket, key).acquire();
-    co_await pool_->schedule();  // 锁唤醒可能在别的线程恢复，阻塞 IO 回池线程做
+    co_await pool_->schedule();  // the lock wakeup may resume on another thread; do blocking IO back on a pool thread
     fsutil::check_put_condition(object_path(bucket, key), cond, key);
     commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
     g.ok = true;
@@ -286,16 +303,18 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
 
 Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::string_view key,
                                               std::optional<ByteRange> range) {
-    // GET 的时延止于流句柄就绪（open + 元数据），不含 body 传输——后者由客户端
-    // 拉取节奏主导，混进来会把盘时延淹没在网络时延里
+    // GET latency stops at stream-handle readiness (open + metadata), excluding body
+    // transfer -- the latter is dominated by the client's pull pace, and mixing it in
+    // would drown disk latency in network latency
     OpGuard g{this, Op::kGet};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
-    // 桶存在性是无条件前置：此前只在 open 失败分支才查，成功路径完全不检查桶，
-    // 于是任何能构造出落在 root_ 之外的路径的 bucket 都能直接读到文件
+    // Bucket existence is an unconditional precondition: previously it was only checked on
+    // the open-failure branch, so the success path never checked the bucket at all, and
+    // any bucket that could construct a path outside root_ could read files directly
     require_bucket(bucket);
 
     fs::path path = object_path(bucket, key);
@@ -313,11 +332,14 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     ObjectStream out;
     try {
         fsutil::TierInfo tier;
-        // 用已打开 fd 的 fstat（而非对路径二次 stat）：并发覆盖写后路径指向新
-        // inode，size/mtime 会与 fd 持有的旧 body 错位（短包或截断，静默损坏）
+        // Use fstat on the already-open fd (not a second stat on the path): after a
+        // concurrent overwrite the path points at a new inode, and size/mtime would be
+        // misaligned with the old body the fd holds (short read or truncation, silent
+        // corruption)
         out.meta = fsutil::load_object_meta_stat(path, std::string(key), st, &tier);
-        // open 与读 sidecar 之间被 stub 化：fd 指向 0 长度新 inode，无法兑现
-        // sidecar 宣称的 size——报给 tiered 改走云端（docs/tiered-storage.md §7.3 冲突矩阵）
+        // Stubbed between open and reading the sidecar: the fd points at a 0-length new
+        // inode and cannot deliver the size the sidecar claims -- report it so tiered
+        // retries via the cloud (docs/tiered-storage.md §7.3 conflict matrix)
         if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
             static_cast<uint64_t>(st.st_size) != out.meta.size)
             throw fsutil::StubRace(std::string(key));
@@ -330,7 +352,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         } else if (out.meta.size == 0) {
             len = 0;
         }
-        out.body = std::make_unique<fsutil::FdStreamReader>(fd, f, len, pool_);  // fd 所有权移交
+        out.body = std::make_unique<fsutil::FdStreamReader>(fd, f, len, pool_);  // fd ownership transferred
     } catch (...) {
         ::close(fd);
         throw;
@@ -339,14 +361,16 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     co_return out;
 }
 
-// 同后端 copy 快路径（docs/gaps.md §6.3）：此前 CopyObject 即使同在一个 localfs
-// 内也要"读进网关再写回"整份字节。copy_file_range 让搬运留在内核（页缓存直拷；
-// btrfs/xfs 的 reflink 上是 O(1) 元数据克隆）。不可用（跨设备 EXDEV、老内核
-// ENOSYS、文件系统不支持 EINVAL）返回 nullopt 回落流式路径——回落是语义等价的
+// Same-backend copy fast path (docs/gaps.md §6.3): previously CopyObject moved every byte
+// "into the gateway and back out" even within one localfs. copy_file_range keeps the move
+// in the kernel (direct page-cache copy; O(1) metadata clone on btrfs/xfs reflink).
+// Unavailable (cross-device EXDEV, old-kernel ENOSYS, filesystem EINVAL) returns nullopt
+// to fall back to the streaming path -- the fallback is semantically equivalent
 Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
     std::string_view dst_key, ObjectMeta meta) {
-    // nullopt 回落（机制不可用/源并发变短）不是错误：语义等价的流式路径接手
+    // The nullopt fallback (mechanism unavailable / source concurrently shortened) is not
+    // an error: the semantically equivalent streaming path takes over
     OpGuard g{this, Op::kCopy};
     validate_bucket_name(src_bucket, kAllowReserved);
     validate_bucket_name(dst_bucket, kAllowReserved);
@@ -361,8 +385,8 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
 
     fs::path src = object_path(src_bucket, src_key);
     fsutil::TierInfo tier;
-    ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);  // 缺→NoSuchKey
-    if (tier.tier != fsutil::Tier::kLocal) {  // 数据不在本地（tiered stub）
+    ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);  // missing → NoSuchKey
+    if (tier.tier != fsutil::Tier::kLocal) {  // data not local (tiered stub)
         g.ok = true;
         co_return std::nullopt;
     }
@@ -389,30 +413,32 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     while (remaining > 0) {
         ssize_t n = ::copy_file_range(sfd, &in_off, tmp.fd, &out_off, remaining, 0);
         if (n < 0) {
-            // 首字节前失败 = 机制不可用 → 回落；中途失败按 IO 错误处理
+            // Failure before the first byte = mechanism unavailable → fall back; mid-way
+            // failure is treated as an IO error
             bool not_supported = (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
                                   errno == EOPNOTSUPP) &&
                                  in_off == 0;
             int err = errno;
             ::close(sfd);
-            if (not_supported) {  // TmpFile RAII 丢弃
+            if (not_supported) {  // TmpFile RAII discards
                 g.ok = true;
                 co_return std::nullopt;
             }
             errno = err;
             throw_errno("copy_file_range");
         }
-        if (n == 0) break;  // 源被并发截断：以实际拷到的为准（下方以 fstat 校验）
+        if (n == 0) break;  // source truncated concurrently: go with what was actually copied (verified below via fstat)
         remaining -= uint64_t(n);
     }
     ::close(sfd);
-    if (remaining != 0) {  // 源变短（并发覆盖）：回落流式取一致快照
+    if (remaining != 0) {  // source shrank (concurrent overwrite): fall back to streaming for a consistent snapshot
         g.ok = true;
         co_return std::nullopt;
     }
 
-    // 字节未变 ⇒ etag/size 恒等于源；REPLACE 的新 user_meta/content_type 已在
-    // meta 里（handler 组装），只补与内容绑定的三项
+    // Bytes unchanged ⇒ etag/size always equal the source's; REPLACE's new
+    // user_meta/content_type are already in meta (assembled by the handler), only the
+    // three content-bound fields are filled in
     meta.key = std::string(dst_key);
     meta.size = sm.size;
     meta.etag = sm.etag;
@@ -448,14 +474,15 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
 
     fs::path path = object_path(bucket, key);
     std::error_code ec;
-    // 幂等：不存在不是错误（remove 返回 false 且 ec 为空）；但 EACCES/EIO 等
-    // 真实失败必须上抛——静默 204 会让客户端确信已删除
+    // Idempotent: absence is not an error (remove returns false with an empty ec); but
+    // real failures like EACCES/EIO must propagate -- a silent 204 would convince the
+    // client the delete happened
     fs::remove(path, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "delete object: " + ec.message());
     fs::remove(path.string() + kSidecarSuffix, ec);
     if (ec)
         throw S3Error(S3ErrorCode::InternalError, "delete object sidecar: " + ec.message());
-    // 清理空父目录直到 bucket 根
+    // Clean up empty parent directories up to the bucket root
     fs::path dir = path.parent_path(), root = bucket_dir(bucket);
     while (dir != root && dir.string().size() > root.string().size()) {
         if (!fs::is_empty(dir, ec) || ec) break;
@@ -469,19 +496,21 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
 
 namespace {
 
-// list_objects 的有序目录遍历（docs/gaps.md §2.7 剪枝）。
-// 目录条目的排序键：文件用 name，目录用 name+"/"——其下所有 key 均以该串为前缀，
-// 混排后的输出顺序与"全量收集 + 全排序"逐字节一致，无需物化整棵树。
+// Ordered directory walk for list_objects (docs/gaps.md §2.7 pruning).
+// Sort key of a directory entry: files use name, directories use name+"/" -- every key
+// underneath has that string as a prefix, so the interleaved output order matches
+// "collect everything + full sort" byte for byte, without materializing the whole tree.
 struct ListWalker {
     const std::string& prefix;
-    const std::string& start_after;  // 仅严格大于此 key 的条目可见
-    // 返回 false 即整体终止（截断）；回调可设置 skip_prefix 以跳过 delimiter 组
+    const std::string& start_after;  // only entries strictly greater than this key are visible
+    // Returning false terminates the whole walk (truncation); the callback may set
+    // skip_prefix to skip a delimiter group
     std::function<bool(std::string&&)> on_key;
-    std::string skip_prefix;  // 非空：凡以此为前缀的 key/子树整体跳过
+    std::string skip_prefix;  // non-empty: every key/subtree with this prefix is skipped wholesale
     bool stopped = false;
 
-    // 子树（key 前缀 q）是否可能含有匹配的 key：与 prefix 相交，
-    // 且 start_after 不整体大于该子树的全部 key
+    // Whether the subtree (key prefix q) may contain matching keys: it intersects prefix,
+    // and start_after is not greater than every key of the subtree
     bool subtree_may_match(const std::string& q) const {
         size_t n = std::min(q.size(), prefix.size());
         if (q.compare(0, n, prefix, 0, n) != 0) return false;
@@ -489,10 +518,10 @@ struct ListWalker {
         return true;
     }
 
-    // rel：该目录对应的 key 前缀（"" 或 "a/b/"）
+    // rel: the key prefix this directory corresponds to ("" or "a/b/")
     void walk(const fs::path& dir, const std::string& rel) {
         struct Entry {
-            std::string sort_key;  // 文件：name；目录：name+"/"
+            std::string sort_key;  // file: name; directory: name+"/"
             bool is_dir;
         };
         std::vector<Entry> es;
@@ -505,17 +534,19 @@ struct ListWalker {
                 continue;
             }
             if (name == fsutil::kBucketMarker) continue;
-            // 目录标记对象（docs/gaps.md §6.3）：还原成 key "<rel>"（末尾已含 '/'）。
-            // 排序键取空串——它恰好排在同目录其它条目之前，与"全量收集 + 全排序"
-            // 下 "a/b/" < "a/b/x" 的次序一致
+            // Directory-marker object (docs/gaps.md §6.3): restored to the key "<rel>"
+            // (already ends with '/'). Its sort key is the empty string -- it sorts right
+            // before the other entries in the same directory, matching the
+            // "collect everything + full sort" order where "a/b/" < "a/b/x"
             if (name == fsutil::kDirMarker) {
                 if (e.is_regular_file(tec)) es.push_back({std::string(), false});
                 continue;
             }
             if (name.ends_with(fsutil::kSidecarSuffix)) {
-                // 孤儿 sidecar 自愈：delete_object 是"先删数据后删 sidecar"两步，
-                // 之间崩溃会遗留一直占空间的孤儿。剪枝后只覆盖被访问到的目录
-                //（best-effort，未访问部分留待后续 list）
+                // Orphan sidecar self-healing: delete_object is a two-step
+                // "data first, then sidecar", and a crash in between leaves an orphan that
+                // occupies space forever. With pruning this only covers visited
+                // directories (best-effort; unvisited parts wait for a later list)
                 std::string data = e.path().string();
                 data.resize(data.size() - std::strlen(fsutil::kSidecarSuffix));
                 if (!fs::exists(data, tec)) fs::remove(e.path(), tec);
@@ -528,9 +559,10 @@ struct ListWalker {
 
         for (auto& e : es) {
             if (stopped) return;
-            std::string q = rel + e.sort_key;  // 文件：完整 key；目录：子树前缀
-            // delimiter 组跳过：整项落在组内直接略过；组前缀在子树内部继续
-            //（skip_prefix 比 q 长且以 q 开头）时仍需下钻
+            std::string q = rel + e.sort_key;  // file: full key; directory: subtree prefix
+            // Delimiter group skipping: an item fully inside the group is skipped
+            // outright; when the group prefix continues into the subtree (skip_prefix is
+            // longer than q and starts with q) we still need to descend
             if (!skip_prefix.empty()) {
                 if (q.compare(0, skip_prefix.size(), skip_prefix) == 0) continue;
                 if (!(e.is_dir && skip_prefix.compare(0, q.size(), q) == 0))
@@ -543,7 +575,7 @@ struct ListWalker {
                 continue;
             }
             if (q.compare(0, prefix.size(), prefix) != 0) {
-                if (q > prefix) return;  // 已排序：出 prefix 区间即止（本目录层面）
+                if (q > prefix) return;  // sorted: stop once past the prefix range (at this directory level)
                 continue;
             }
             if (!start_after.empty() && q <= start_after) continue;
@@ -555,9 +587,10 @@ struct ListWalker {
     }
 };
 
-// 以 want 为前缀的最大 key（降序扫描，首个命中即最大）；无则空串。
-// 截断边界落在 common prefix 上时用它求组尾，保持 next_token 语义
-//（"组内最后一个 key"）与全量实现一致
+// The greatest key with prefix want (descending scan, first hit is the greatest); empty
+// string if none. When the truncation boundary lands on a common prefix, this finds the
+// group tail, keeping the next_token semantics ("last key inside the group") consistent
+// with the full implementation
 std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
                                 const std::string& want) {
     struct Entry {
@@ -580,7 +613,8 @@ std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
     for (auto& e : es) {
         std::string q = rel + e.sort_key;
         if (e.is_dir) {
-            // 子树整体在组内（q 以 want 开头），或组前缀穿过该子树（want 以 q 开头）
+            // The whole subtree is inside the group (q starts with want), or the group
+            // prefix passes through the subtree (want starts with q)
             if (q.compare(0, want.size(), want) != 0 && want.compare(0, q.size(), q) != 0)
                 continue;
             fs::path sub = dir / e.sort_key.substr(0, e.sort_key.size() - 1);
@@ -603,13 +637,14 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
 
     fs::path base = bucket_dir(bucket);
     ListResult out;
-    // S3：max-keys=0 返回空结果且 IsTruncated=false（与 apply_listing 一致）
+    // S3: max-keys=0 returns an empty result with IsTruncated=false (consistent with apply_listing)
     if (opt.max_keys <= 0) {
         g.ok = true;
         co_return out;
     }
 
-    // prefix 剪枝：最后一个 '/' 之前的部分直接定位起始目录，不存在即无匹配
+    // Prefix pruning: the part before the last '/' locates the starting directory
+    // directly; if it doesn't exist there is no match
     std::string dir_rel;
     if (auto slash = opt.prefix.rfind('/'); slash != std::string::npos)
         dir_rel = opt.prefix.substr(0, slash + 1);
@@ -622,13 +657,14 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
 
     const std::string& delim = opt.delimiter;
     int count = 0;
-    std::string last_emitted;   // 最后发出的条目（key 或组名）
+    std::string last_emitted;   // last emitted entry (key or group name)
     bool last_is_group = false;
 
     ListWalker walker{opt.prefix, opt.start_after, nullptr, {}, false};
     auto truncate = [&] {
         out.is_truncated = true;
-        // 组尾即 token（与全量实现一致）；并发删除使组消失时回落组名本身
+        // The group tail is the token (consistent with the full implementation); if a
+        // concurrent delete made the group vanish, fall back to the group name itself
         if (last_is_group) {
             std::string tail = max_key_with_prefix(start_dir, dir_rel, last_emitted);
             out.next_token = tail.empty() ? last_emitted : tail;
@@ -646,7 +682,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
                     return false;
                 }
                 out.common_prefixes.push_back(group);
-                walker.skip_prefix = group;  // 同组其余 key/子树整体剪掉
+                walker.skip_prefix = group;  // prune the rest of the group's keys/subtrees wholesale
                 last_emitted = std::move(group);
                 last_is_group = true;
                 ++count;
@@ -657,7 +693,8 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
             truncate();
             return false;
         }
-        // 目录标记对象的数据文件是目录内的保留标记（object_path 同款映射）
+        // A directory-marker object's data file is the reserved marker inside the
+        // directory (same mapping as object_path)
         fs::path data = key.ends_with('/') ? base / fs::path(key + fsutil::kDirMarker)
                                            : base / fs::path(key);
         out.objects.push_back(load_meta(data, key));
@@ -671,10 +708,11 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     co_return out;
 }
 
-// ---------- multipart（docs/storage-backend.md §3.2）----------
-// 布局：<staging>/mpu/<upload_id>/{manifest, part.NNNNN, part.NNNNN.md5}
-// 分片先 fsync 数据、后写 .md5：.md5 的出现即分片数据已持久（complete 信任
-// .md5 不重算校验和，该信任必须以此顺序为前提）
+// ---------- multipart (docs/storage-backend.md §3.2) ----------
+// Layout: <staging>/mpu/<upload_id>/{manifest, part.NNNNN, part.NNNNN.md5}
+// A part fsyncs its data first, then writes .md5: the presence of .md5 means the part data
+// is durable (complete trusts .md5 without recomputing the checksum, and that trust
+// requires this ordering)
 
 Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
                                                    std::string_view key, ObjectMeta meta) {
@@ -695,7 +733,8 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
         {"bucket", std::string(bucket)},
         {"key", std::string(key)},
         {"content_type", meta.content_type}};
-    // 一等元数据也要跨 create→complete 存活（docs/gaps.md §5.2），键名与 sidecar 同源
+    // First-class metadata must also survive create→complete (docs/gaps.md §5.2); key
+    // names share their source with the sidecar
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
@@ -712,7 +751,7 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
     auto up = require_upload(staging_, bucket, key, upload_id,
                              load_manifest(staging_, upload_id));
 
-    // 流式写 staging 临时文件，边写边算分片 MD5（同 PUT）
+    // Stream into a staging tmp file, computing the part MD5 as we write (same as PUT)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open part tmp");
@@ -732,19 +771,21 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
             left -= static_cast<size_t>(w);
         }
     }
-    fsutil::fsync_file(tmp.fd);  // 分片数据先落盘：.md5 的出现才是数据已持久的证据
+    fsutil::fsync_file(tmp.fd);  // part data persisted first: only then is .md5's presence evidence of durable data
     ::close(tmp.fd);
     tmp.fd = -1;
     std::string etag = md5.final_hex();
 
-    // 顺序：先数据 rename、后写 .md5（同号重传 last-write-wins，rename 覆盖）。
-    // 反序（旧实现）下"分片 200 → 掉电"会留下 fsync 过的 .md5 配零块数据，
-    // 而 complete 信任 .md5 不重算，产出 ETag 合法、内容为零块的对象
+    // Order: data rename first, .md5 written after (same-number re-upload is
+    // last-write-wins, rename overwrites). In the reverse order (old implementation),
+    // "part 200 → power loss" leaves an fsynced .md5 paired with zero-block data, and
+    // since complete trusts .md5 without recomputation it would produce an object with a
+    // valid ETag and zero-block content
     std::string name = part_file_name(part_no);
     std::error_code ec;
     fs::rename(tmp.path, up.dir / name, ec);
     if (ec) {
-        // 读 body 期间上传可能已被 abort（目录被删）
+        // The upload may have been aborted (directory removed) while the body was being read
         if (!fs::exists(up.dir))
             throw S3Error(S3ErrorCode::NoSuchUpload,
                           "The specified multipart upload does not exist.",
@@ -769,7 +810,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
                              load_manifest(staging_, upload_id));
     require_bucket(bucket);
 
-    // 1. 校验每个声明的分片：存在且 ETag 匹配
+    // 1. Validate every declared part: exists and ETag matches
     std::vector<std::string> md5s;
     std::vector<fs::path> paths;
     md5s.reserve(parts.size());
@@ -788,7 +829,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
         paths.push_back(up.dir / name);
     }
 
-    // 2. 按声明顺序拼接到最终临时文件
+    // 2. Concatenate into the final tmp file in declared order
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open complete tmp");
@@ -822,14 +863,14 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     ::close(tmp.fd);
     tmp.fd = -1;
 
-    // 3. 提交（与 PUT 相同的原子路径），随后清理 mpu 目录
+    // 3. Commit (same atomic path as PUT), then clean up the mpu directory
     ObjectMeta meta = std::move(up.meta);
     meta.key = std::string(key);
     meta.size = total;
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
     {
-        auto lk = co_await commit_lock(bucket, key).acquire();  // 同 PUT：提交段串行化
+        auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT: serialize the commit section
         co_await pool_->schedule();
         commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
     }
@@ -857,12 +898,13 @@ Task<ListPartsResult> LocalFsBackend::list_parts(std::string_view bucket, std::s
     co_await pool_->schedule();
     auto up = require_upload(staging_, bucket, key, upload_id,
                              load_manifest(staging_, upload_id));
-    // 目录枚举无序：先只取分片号排序，再对**本页**的那几个做 stat + 读 .md5。
-    // 此前对每个分片都 stat 一次并读一次 sidecar，翻页时白付 9999 次
+    // Directory enumeration is unordered: first collect and sort only the part numbers,
+    // then stat + read .md5 only for **this page's** entries. Previously every part got a
+    // stat and a sidecar read, wasting 9999 of them per page turn
     std::vector<int> nos;
     for (auto& e : fs::directory_iterator(up.dir)) {
         std::string name = e.path().filename().string();
-        // part.NNNNN（跳过 manifest 与 .md5 sidecar）
+        // part.NNNNN (skip the manifest and .md5 sidecars)
         if (name.rfind("part.", 0) != 0 || name.ends_with(".md5")) continue;
         try {
             int no = std::stoi(name.substr(5));
@@ -872,7 +914,8 @@ Task<ListPartsResult> LocalFsBackend::list_parts(std::string_view bucket, std::s
         }
     }
     std::sort(nos.begin(), nos.end());
-    // 多取一个用于判定 is_truncated，交给 apply_parts_page 统一裁剪
+    // Fetch one extra to determine is_truncated, then hand off to apply_parts_page for the
+    // uniform trim
     if (opt.max_parts > 0 && nos.size() > size_t(opt.max_parts) + 1)
         nos.resize(size_t(opt.max_parts) + 1);
     std::vector<PartMeta> out;
@@ -893,9 +936,11 @@ Task<ListUploadsResult> LocalFsBackend::list_multipart_uploads(std::string_view 
                                                                const ListUploadsOptions& opt) {
     co_await pool_->schedule();
     require_bucket(bucket);
-    // mpu 是全实例共用的一层平目录：要知道每个 upload 属于哪个桶只能读它的
-    // manifest，因此无论 marker 落在哪里都得先全扫一遍（分页省的是响应体与
-    // 下游内存，省不掉这次扫描——布局改成 mpu/<bucket>/… 才能省，那是另一件事）
+    // mpu is a single flat directory shared by the whole instance: knowing which bucket an
+    // upload belongs to requires reading its manifest, so wherever the marker falls we
+    // must scan everything first (pagination saves response size and downstream memory,
+    // not this scan -- only a layout change to mpu/<bucket>/… would save it, and that is a
+    // separate matter)
     std::vector<UploadInfo> all;
     for (auto& e : fs::directory_iterator(staging_ / "mpu")) {
         if (!e.is_directory()) continue;

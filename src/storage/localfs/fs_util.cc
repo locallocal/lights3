@@ -51,8 +51,9 @@ void throw_errno(const std::string& what) {
     throw S3Error(S3ErrorCode::InternalError, what + ": " + std::strerror(errno));
 }
 
-// 持久性开关（docs/storage-backend.md §3.1）：默认开——已 200 应答的写掉电不丢是
-// S3 语义的一部分。吞吐优先的部署可用 LIGHTS3_FSYNC=0 关掉（测试夹具亦用它提速）
+// Durability switch (docs/storage-backend.md §3.1): on by default -- a write already
+// acknowledged with 200 surviving power loss is part of S3 semantics. Throughput-first
+// deployments can turn it off with LIGHTS3_FSYNC=0 (test fixtures also use it for speed)
 bool fsync_enabled() {
     static const bool on = [] {
         const char* v = std::getenv("LIGHTS3_FSYNC");
@@ -63,15 +64,16 @@ bool fsync_enabled() {
 
 void fsync_file(int fd) {
     if (!fsync_enabled()) return;
-    if (::fdatasync(fd) != 0 && errno != EINVAL)  // EINVAL: 目标 fs 不支持，忽略
+    if (::fdatasync(fd) != 0 && errno != EINVAL)  // EINVAL: target fs unsupported, ignore
         throw_errno("fdatasync");
 }
 
 void fsync_dir(const fs::path& dir) {
     if (!fsync_enabled()) return;
-    // 目录项落盘：rename 本身只保证原子，不保证父目录已持久化
+    // Persist the directory entry: rename itself only guarantees atomicity, not that the
+    // parent directory has been persisted
     int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return;  // 目录不可读不该拖垮写路径
+    if (fd < 0) return;  // an unreadable directory should not take down the write path
     ::fsync(fd);
     ::close(fd);
 }
@@ -93,7 +95,7 @@ void write_tsv(const fs::path& dest, const fs::path& tmp_dir,
         for (auto& [k, v] : kv) f << k << "\t" << v << "\n";
         if (!f.flush()) throw_errno("write meta");
     }
-    fsync_path(tmp);  // 内容先落盘，再让 rename 把它接进目录树
+    fsync_path(tmp);  // persist the content first, then let rename splice it into the tree
     std::error_code ec;
     fs::rename(tmp, dest, ec);
     if (ec) {
@@ -125,7 +127,8 @@ std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
         kv.emplace_back("remote.etag", tier.remote_etag);
         kv.emplace_back("remote.at", tier.remote_at);
     }
-    // 一等元数据（docs/gaps.md §5.2）：空值不落盘，存量 sidecar 因此逐字节不变
+    // First-class metadata (docs/gaps.md §5.2): empty values are not written, so existing
+    // sidecars stay byte-for-byte identical
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
@@ -138,21 +141,25 @@ std::string kv_to_tsv(const std::vector<std::pair<std::string, std::string>>& kv
     return out;
 }
 
-// tier=local 时不写 tier/size/remote.* 键：与存量 sidecar 格式保持一致
+// When tier=local, do not write the tier/size/remote.* keys: keeps the format of existing
+// sidecars unchanged
 static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
                           const fs::path& staging_dir,
                           const TierInfo& tier = TierInfo{}) {
     write_tsv(sidecar, staging_dir, meta_kv(meta, tier));
 }
 
-// 元数据随数据文件一同原子提交（docs/storage-backend.md §3.1）：把 sidecar 的 TSV
-// 同时写进数据文件的扩展属性，rename 一次即同时提交数据与元数据——sidecar 与数据
-// 是两次 rename，中间崩溃会留下"新 etag + 旧数据"（或反之）的不一致对象，而 xattr
-// 随 inode 走，绝不可能与它所描述的数据错位。sidecar 继续写（外部工具/存量兼容，
-// 也是不支持 xattr 的文件系统上的唯一来源）。
-// 失败（ENOTSUP/E2BIG 等）降级为 sidecar-only，不拖垮写路径——但必须留痕：
-// 降级意味着退回"两次 rename"一致性模型，静默发生的话运维无从得知
-//（docs/gaps.md §3.9）。同类 errno 只告警一次，防写路径刷屏
+// Metadata committed atomically together with the data file (docs/storage-backend.md
+// §3.1): write the sidecar's TSV into the data file's extended attribute as well, so one
+// rename commits data and metadata at once -- sidecar and data are two renames, and a
+// crash in between leaves an inconsistent object of "new etag + old data" (or vice versa),
+// whereas the xattr travels with the inode and can never be misaligned with the data it
+// describes. The sidecar is still written (external tools / legacy compatibility, and the
+// only source on filesystems without xattr support).
+// Failure (ENOTSUP/E2BIG etc.) degrades to sidecar-only without taking down the write path
+// -- but must leave a trace: degradation means falling back to the "two-rename"
+// consistency model, and if it happens silently operators have no way to know
+// (docs/gaps.md §3.9). Warn only once per errno kind to avoid flooding the write path
 void set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier) {
     std::string blob = kv_to_tsv(meta_kv(meta, tier));
     if (::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0) != 0) {
@@ -165,14 +172,16 @@ void set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo
     }
 }
 
-// 返回 nullopt = 无 xattr（存量对象 / 不支持的文件系统）→ 调用方回落 sidecar
+// Returns nullopt = no xattr (legacy object / unsupported filesystem) → caller falls back
+// to the sidecar
 std::optional<std::string> get_meta_xattr(const fs::path& path) {
     char buf[8192];
     ssize_t n = ::getxattr(path.c_str(), kMetaXattr, buf, sizeof(buf));
     if (n >= 0) return std::string(buf, static_cast<size_t>(n));
     if (errno != ERANGE) return std::nullopt;
-    // 超出栈缓冲：按实际大小重取。此处静默回落 sidecar 的话，读到的可能是
-    // 一次崩溃窗口里的旧元数据——xattr 存在即以它为准（docs/gaps.md §3.9）
+    // Exceeds the stack buffer: refetch at the actual size. Silently falling back to the
+    // sidecar here could read stale metadata from a crash window -- if the xattr exists,
+    // it is authoritative (docs/gaps.md §3.9)
     ssize_t sz = ::getxattr(path.c_str(), kMetaXattr, nullptr, 0);
     if (sz < 0) return std::nullopt;
     std::string out(static_cast<size_t>(sz), '\0');
@@ -187,8 +196,9 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     std::error_code ec;
     fs::create_directories(dest.parent_path(), ec);
     if (ec) {
-        // 只有"前缀撞上既有文件"是客户端错误；ENOSPC/EACCES/EIO 一律 500——
-        // 映射成 400 的话客户端不会重试、运维拿不到磁盘满的信号（docs/gaps.md §3.9）
+        // Only "prefix collides with an existing file" is a client error; ENOSPC/EACCES/EIO
+        // are all 500 -- mapping them to 400 means clients won't retry and operators never
+        // get the disk-full signal (docs/gaps.md §3.9)
         if (ec == std::errc::not_a_directory || ec == std::errc::file_exists)
             throw S3Error(S3ErrorCode::InvalidArgument,
                           "Object key conflicts with an existing object path", std::string(key));
@@ -199,17 +209,21 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "Object key conflicts with an existing key prefix", std::string(key));
 
-    // 顺序：先数据后 sidecar（与 commit_cached 一致）。反序（旧实现）的崩溃窗口是
-    // "sidecar 新 etag/size + 数据仍旧"——GET 返回的 body 与 ETag 不符，静默损坏；
-    // 本序的窗口是"数据新 + sidecar 旧"，读到的是旧 etag 配新 body，同样不一致但
-    // 有 GET 时校验的余地，且覆盖写场景下更常见的是两者皆新。调用方持 per-key 锁
-    // 保证这一对 rename 之间无并发写者插入（撕裂由锁消除，此处只余单写者崩溃窗口）
-    // 元数据先进数据文件的 xattr：这一次 rename 即同时提交数据与元数据，
-    // 崩溃不可能留下"新 etag 配旧数据"的不一致对象（sidecar 随后写，仅供
-    // 外部工具与不支持 xattr 的文件系统回落）
+    // Order: data first, then sidecar (consistent with commit_cached). The reverse order
+    // (old implementation) had a crash window of "sidecar with new etag/size + old data"
+    // -- GET returns a body that does not match the ETag, silent corruption; this order's
+    // window is "new data + old sidecar", reading an old etag with a new body, still
+    // inconsistent but at least verifiable at GET time, and in the overwrite case the
+    // common outcome is both being new. The caller holds the per-key lock so no concurrent
+    // writer can slip between this pair of renames (tearing is eliminated by the lock;
+    // only the single-writer crash window remains).
+    // Metadata goes into the data file's xattr first: that single rename then commits data
+    // and metadata together, so a crash can never leave an inconsistent "new etag with old
+    // data" object (the sidecar is written afterwards, only for external tools and as the
+    // fallback on filesystems without xattr support)
     if (!prepared) {
         set_meta_xattr(tmp.path, meta, TierInfo{});
-        fsync_path(tmp.path);  // 数据内容先落盘，再接进目录树
+        fsync_path(tmp.path);  // persist the data content first, then splice it into the tree
     }
     fs::rename(tmp.path, dest, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
@@ -242,9 +256,9 @@ void check_put_condition(const fs::path& data_path, const PutCondition& cond,
     }
 }
 
-// ---- 分层存储扩展（docs/tiered-storage.md §4）----
+// ---- Tiered storage extensions (docs/tiered-storage.md §4) ----
 
-// 元数据 TSV 解析（xattr 与 sidecar 同一格式）
+// Metadata TSV parsing (xattr and sidecar share the same format)
 static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier,
                            uint64_t& declared_size) {
     std::string line;
@@ -284,8 +298,9 @@ ObjectMeta load_object_meta_stat(const fs::path& data_path, std::string key,
 
     TierInfo tier;
     uint64_t declared_size = 0;
-    // xattr 优先：它与数据同一次 rename 提交，绝不会描述别的 inode 的内容；
-    // 缺失（存量对象 / 文件系统不支持 / tiered 的 stub-cached 提交）回落 sidecar
+    // xattr takes priority: it was committed in the same rename as the data and can never
+    // describe another inode's content; when absent (legacy object / filesystem
+    // unsupported / tiered's stub-cached commit) fall back to the sidecar
     if (auto blob = get_meta_xattr(data_path)) {
         std::istringstream in(*blob);
         parse_meta_tsv(in, meta, tier, declared_size);
@@ -293,7 +308,8 @@ ObjectMeta load_object_meta_stat(const fs::path& data_path, std::string key,
         std::ifstream f(data_path.string() + kSidecarSuffix, std::ios::binary);
         parse_meta_tsv(f, meta, tier, declared_size);
     }
-    // stub 数据文件为 0 长度，真实大小以元数据为准；local 沿用 stat（兼容存量）
+    // A stub data file has zero length; the real size comes from the metadata; local keeps
+    // using stat (legacy compatibility)
     if (tier.tier != Tier::kLocal) meta.size = declared_size;
     if (tier_out) *tier_out = tier;
     return meta;
@@ -315,15 +331,18 @@ void commit_stub(const fs::path& dest, const ObjectMeta& meta, const TierInfo& t
 
 void commit_cached(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                    const TierInfo& tier, const fs::path& staging_put) {
-    // 与 stub 化相反：先 rename 数据、后写 sidecar。中间崩溃时 sidecar 仍为
-    // remote（读走云端，正确），数据文件由 scanner 按"remote 但 size>0"回收；
-    // 反序则存在 sidecar=cached 而数据仍为 0 长度 stub 的截断窗口。
+    // The opposite of stubbing: rename the data first, then write the sidecar. On a crash
+    // in between, the sidecar still says remote (reads go to the cloud, correct), and the
+    // data file is reclaimed by the scanner via "remote but size>0"; the reverse order has
+    // a truncation window where sidecar=cached while the data is still a 0-length stub.
     //
-    // 数据必须在 rename 之前落盘：随后写的 sidecar 是 fsync 过的，若数据块还在
-    // page cache 就掉电，重启后 sidecar 说 tier=cached/size=N 而文件是 N 字节的
-    // 零块——rename 已提交 inode size，get_object 的 StubRace 检查（比 st_size
-    // 与声明 size）因此通过，把零块当对象内容返回且 ETag 正确。与
-    // commit_object_file 的顺序逐字对齐
+    // The data must be persisted before the rename: the sidecar written afterwards is
+    // fsynced, so if the data blocks are still in the page cache at power loss, after
+    // restart the sidecar says tier=cached/size=N while the file is N bytes of zeros --
+    // rename already committed the inode size, so get_object's StubRace check (comparing
+    // st_size with the declared size) passes and the zero blocks are returned as object
+    // content with a correct-looking ETag. Aligned word-for-word with
+    // commit_object_file's ordering
     fsync_path(tmp.path);
     std::error_code ec;
     fs::rename(tmp.path, dest, ec);
@@ -341,7 +360,7 @@ Task<size_t> FdStreamReader::read(std::span<std::byte> buf) {
     size_t want = std::min<uint64_t>(buf.size(), remaining_);
     ssize_t n = ::pread(fd_, buf.data(), want, static_cast<off_t>(offset_));
     if (n < 0) throw_errno("pread");
-    if (n == 0) remaining_ = 0;  // 文件被外部截断，提前 EOF
+    if (n == 0) remaining_ = 0;  // file truncated externally, early EOF
     offset_ += static_cast<uint64_t>(n);
     remaining_ -= static_cast<uint64_t>(n);
     co_return static_cast<size_t>(n);

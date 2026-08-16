@@ -19,7 +19,7 @@ ThreadPool::ThreadPool(size_t threads, size_t queue_capacity)
 ThreadPool::~ThreadPool() { join(); }
 
 void ThreadPool::post(std::function<void()> fn) {
-    auto now = Clock::now();  // 取时间在锁外：入队侧同样不该把时钟读进临界区
+    auto now = Clock::now();  // read the clock outside the lock: the enqueue side should not bring clock reads into the critical section either
     bool queued = false;
     {
         std::lock_guard lk(m_);
@@ -29,18 +29,20 @@ void ThreadPool::post(std::function<void()> fn) {
         }
     }
     if (queued) {
-        cv_.notify_one();  // 唤醒放在锁外：持锁 notify 会让被唤线程立刻撞上锁
+        cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately collide with the lock
         return;
     }
-    // join 后的续体投递不可失败：消费方（FinalAwaiter::await_suspend、Permit 析构）
-    // 都是 noexcept 上下文，抛出即 std::terminate。就地执行让残余请求链在调用方
-    // 线程上收尾（schedule() 保留抛出语义，它有 co_await 承接点）
+    // Continuation delivery after join must not fail: the consumers
+    // (FinalAwaiter::await_suspend, Permit's destructor) are all noexcept contexts,
+    // where throwing means std::terminate. Running inline lets the remaining request
+    // chain finish on the calling thread (schedule() keeps its throwing semantics,
+    // as it has a co_await site to catch it)
     LOG_ERROR("ThreadPool: post after join, running task inline on caller thread");
     fn();
 }
 
 void ThreadPool::enqueue_bounded(std::function<void()> fn) {
-    auto now = Clock::now();  // 同 post：时钟读取不进临界区
+    auto now = Clock::now();  // same as post: clock reads stay out of the critical section
     {
         std::lock_guard lk(m_);
         if (stopping_) throw std::runtime_error("ThreadPool: schedule after join");
@@ -96,9 +98,10 @@ void ThreadPool::worker_loop() {
                        !backlog_.empty();
             });
             if (cont_queue_.empty() && queue_.empty() && backlog_.empty())
-                return;  // stopping 且已排空
-            // 续体优先（§4）：它是让出过线程的既有工作，排在新阻塞任务后面
-            // 会把"挂起-恢复"变成"挂起-排长队"
+                return;  // stopping and fully drained
+            // Continuations first (§4): they are existing work that already yielded
+            // the thread; queuing them behind new blocking tasks would turn
+            // "suspend-resume" into "suspend-wait-in-a-long-line"
             if (!cont_queue_.empty()) {
                 item = std::move(cont_queue_.front());
                 cont_queue_.pop_front();
@@ -109,22 +112,24 @@ void ThreadPool::worker_loop() {
                 }
                 item = std::move(queue_.front());
                 queue_.pop_front();
-                // 腾出的空位放行一个背压等待者（保序：等待列表也是 FIFO）
+                // The freed slot releases one backpressure waiter (order-preserving: the wait list is FIFO too)
                 if (!backlog_.empty() && queue_.size() < capacity_) {
                     queue_.push_back(std::move(backlog_.front()));
                     backlog_.pop_front();
                 }
             }
         }
-        // 计时与记账都在锁外（§4：wait_hist_ 曾在持锁段内取时间）
+        // Timing and accounting both happen outside the lock (§4: wait_hist_ used to
+        // read the clock while holding the lock)
         auto waited = Clock::now() - item.enqueued;
         wait_hist_[wait_bucket(waited)].fetch_add(1, std::memory_order_relaxed);
         wait_sum_us_.fetch_add(
             static_cast<uint64_t>(
                 std::chrono::duration_cast<std::chrono::microseconds>(waited).count()),
             std::memory_order_relaxed);
-        // 异常防线：任务异常逃逸线程函数即 std::terminate（协程续体自身全捕获，
-        // 这里兜的是裸 post 的阻塞任务）
+        // Exception firewall: a task exception escaping the thread function means
+        // std::terminate (coroutine continuations catch everything themselves; this
+        // covers blocking tasks from bare post)
         try {
             item.fn();
         } catch (const std::exception& e) {
@@ -139,8 +144,9 @@ void ThreadPool::worker_loop() {
 bool ThreadPool::ScheduleAwaiter::suspend_impl(std::coroutine_handle<> h) {
     slot = std::make_shared<Slot>();
     slot->h = h;
-    // 局部持有一切后续要用的东西：取消回调注册成功后，协程随时可能在
-    // 别的线程恢复并销毁本 awaiter（this 不再可用）
+    // Hold everything needed later in locals: once the cancel callback registers
+    // successfully, the coroutine may resume on another thread at any time and
+    // destroy this awaiter (this is no longer usable)
     auto s = slot;
     ThreadPool& p = pool;
     CancelToken tok = token;
@@ -149,31 +155,38 @@ bool ThreadPool::ScheduleAwaiter::suspend_impl(std::coroutine_handle<> h) {
         [s] {
             if (!s->claimed.exchange(true, std::memory_order_acq_rel)) {
                 s->cancelled = true;
-                // 就地 resume：恢复后立即从 await_resume 抛 OperationCancelled，
-                // 做的只是异常展开（展开中不可能 co_await，遇到挂起点即交还本线程），
-                // 是有界工作。**不能**改投线程池——取消最需要生效的场景正是池被占满，
-                // 那时 post 的续体排在阻塞任务后面，取消变成空头支票（docs/gaps.md
-                // §3.2 的建议按字面实现会死锁，见 test_concurrency 的相应用例）。
-                // 触发线程侧的防线在 TimerQueue：回调跑在专用回调线程上，展开不会
-                // 停摆到期判定
+                // Resume in place: the resumed coroutine immediately throws
+                // OperationCancelled from await_resume, doing nothing but exception
+                // unwinding (no co_await is possible during unwinding — hitting a
+                // suspension point hands the thread back), which is bounded work.
+                // **Must not** be re-posted to the thread pool — the scenario where
+                // cancellation matters most is precisely a saturated pool, where the
+                // posted continuation would queue behind blocking tasks and
+                // cancellation becomes an empty promise (implementing docs/gaps.md
+                // §3.2's suggestion literally deadlocks; see the corresponding case
+                // in test_concurrency). The firing-thread-side defense lives in
+                // TimerQueue: callbacks run on a dedicated callback thread, so
+                // unwinding does not stall expiry determination
                 s->h.resume();
             }
         },
         s->reg_id, s->cancel_state);
-    // 对已取消的 token 不会注册回调；补检查覆盖注册前已取消的竞态
+    // No callback is registered on an already-cancelled token; this follow-up check
+    // covers the cancelled-before-registration race
     if (tok.cancelled() && !s->claimed.exchange(true, std::memory_order_acq_rel)) {
         s->cancelled = true;
-        return false;  // 不挂起，await_resume 就地抛出
+        return false;  // do not suspend; await_resume throws in place
     }
     try {
         p.enqueue_bounded([s] {
             if (!s->claimed.exchange(true, std::memory_order_acq_rel)) s->h.resume();
         });
     } catch (...) {
-        // join 后 schedule：先认领再抛，堵住取消回调的二次 resume；
-        // 若已被取消回调认领则由它 resume，这里按已挂起处理
+        // schedule after join: claim before throwing to block a second resume from
+        // the cancel callback; if the cancel callback already claimed it, it will
+        // resume, so treat this as suspended
         if (s->claimed.exchange(true, std::memory_order_acq_rel)) return true;
-        throw;  // await_suspend 抛出 → 协程未挂起，异常在 co_await 处浮出
+        throw;  // await_suspend throws -> the coroutine did not suspend, and the exception surfaces at the co_await
     }
     return true;
 }

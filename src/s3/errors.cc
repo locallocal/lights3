@@ -10,7 +10,7 @@ struct Entry {
     const char* code;
 };
 
-// 与枚举同源生成（errors.h 的 LIGHTS3_S3_ERROR_CODES），按枚举值索引
+// Generated from the same source as the enum (LIGHTS3_S3_ERROR_CODES in errors.h), indexed by enum value
 constexpr Entry kEntries[] = {
 #define LIGHTS3_S3_ERROR_ENTRY(name, st) {st, #name},
     LIGHTS3_S3_ERROR_CODES(LIGHTS3_S3_ERROR_ENTRY)

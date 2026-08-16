@@ -13,7 +13,7 @@
 
 namespace lights3::storage {
 
-// ---------- 配置 ----------
+// ---------- Configuration ----------
 
 namespace {
 
@@ -38,7 +38,7 @@ bool bool_param(const std::map<std::string, std::string>& p, const char* k, bool
     auto* v = find(p, k);
     if (!v) return def;
     try {
-        return parse_bool(*v);  // 共享 token 集（core/config.h），与 duostore 一致
+        return parse_bool(*v);  // shared token set (core/config.h), consistent with duostore
     } catch (...) {
         throw std::runtime_error("cloudproxy backend '" + name + "': invalid " + k + ": " + *v);
     }
@@ -83,7 +83,8 @@ CloudProxyConfig CloudProxyConfig::from_params(
         }
     }
     if (auto* v = find(params, "spool_dir")) c.spool_dir = *v;
-    // 数值范围加载期钉死，杜绝运行期算术异常（如 backoff 溢出）
+    // Numeric ranges are pinned down at load time, ruling out runtime arithmetic surprises
+    // (e.g. backoff overflow)
     auto require_range = [&](const char* k, int64_t v, int64_t lo, int64_t hi) {
         if (v < lo || v > hi)
             throw std::runtime_error("cloudproxy backend '" + name + "': " + k + "=" +
@@ -96,11 +97,14 @@ CloudProxyConfig CloudProxyConfig::from_params(
     require_range("retry_base_ms", c.retry_base_ms, 1, 60'000);
     require_range("max_connections", c.max_connections, 1, 4096);
     require_range("queue_cap", static_cast<int64_t>(c.queue_cap_bytes), 4096, 1 << 30);
-    // virtual-hosted style（force_path_style=false）：连接与 SNI 恒指 endpoint，仅
-    // Host/签名与路径按 bucket 变化（docs/cloudproxy-backend.md §7）；含 '.' 的
-    // bucket 名在 TLS 泛域名证书下会失配，属部署侧约束，不在此拦截
-    // 拼接名整体按 S3 规则校验（docs/cloudproxy-backend.md §4.3）："aaa" 代表最短合法本地名，
-    // 覆盖前缀引入的字符集/首字符/".."/长度问题，注定非法的前缀在加载期即报错
+    // virtual-hosted style (force_path_style=false): connection and SNI always point at the
+    // endpoint; only Host/signature and path vary per bucket (docs/cloudproxy-backend.md §7);
+    // bucket names containing '.' will mismatch under TLS wildcard certificates -- a
+    // deployment-side constraint, not blocked here
+    // The concatenated name is validated as a whole against S3 rules
+    // (docs/cloudproxy-backend.md §4.3): "aaa" stands for the shortest legal local name,
+    // covering charset/leading-char/".."/length issues the prefix introduces; a prefix that
+    // is doomed to be invalid errors out at load time
     if (!c.bucket_prefix.empty()) {
         try {
             validate_bucket_name(c.bucket_prefix + "aaa");
@@ -109,7 +113,7 @@ CloudProxyConfig CloudProxyConfig::from_params(
                                      c.bucket_prefix + "': " + e.message);
         }
     }
-    cloudproxy::Endpoint::parse(c.endpoint);  // 提前校验，错误在加载期暴露
+    cloudproxy::Endpoint::parse(c.endpoint);  // validate early, surfacing errors at load time
     return c;
 }
 
@@ -154,7 +158,8 @@ Endpoint Endpoint::parse(const std::string& url) {
     }
     if (ep.host.empty())
         throw std::runtime_error("cloudproxy endpoint has empty host: " + url);
-    // httplib 的 Host 头：默认端口只发 host，否则 host:port（docs/cloudproxy-backend.md §2.2 一致性陷阱）
+    // httplib's Host header: default port sends host only, otherwise host:port (the
+    // consistency trap of docs/cloudproxy-backend.md §2.2)
     bool default_port = ep.port == (ep.https ? 443 : 80);
     ep.signed_host = default_port ? ep.host : ep.host + ":" + std::to_string(ep.port);
     ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" +
@@ -162,7 +167,7 @@ Endpoint Endpoint::parse(const std::string& url) {
     return ep;
 }
 
-// ---------- 指标（docs/cloudproxy-backend.md §8.2）----------
+// ---------- Metrics (docs/cloudproxy-backend.md §8.2) ----------
 
 RemoteMetrics::RemoteMetrics(const MetricsScope& scope) : scope_(scope) {
     etag_mismatch = scope.counter(
@@ -226,8 +231,8 @@ std::unique_ptr<httplib::Client> ClientPool::make_client() const {
 ClientPool::Lease ClientPool::acquire() {
     auto start = std::chrono::steady_clock::now();
     auto deadline = start + std::chrono::milliseconds(cfg_.request_timeout_ms);
-    // 等待时长观测（§8.2）：Lease 发出或 SlowDown 抛出都记账——排队恶化是
-    // max_connections 调优的直接信号
+    // Wait-time observation (§8.2): recorded both when a Lease is issued and when SlowDown
+    // is thrown -- worsening queueing is the direct signal for tuning max_connections
     auto observe = [&] {
         if (wait_hist_)
             wait_hist_->observe(std::chrono::duration<double>(
@@ -249,7 +254,8 @@ ClientPool::Lease ClientPool::acquire() {
             try {
                 return Lease(this, make_client());
             } catch (...) {
-                // 回滚槽位并唤醒等待者，异常（如 bad_alloc）不得永久缩池
+                // Roll back the slot and wake waiters; an exception (e.g. bad_alloc) must
+                // not shrink the pool permanently
                 std::lock_guard g(m_);
                 --total_;
                 cv_.notify_one();
@@ -271,14 +277,15 @@ void ClientPool::release(std::unique_ptr<httplib::Client> c) {
     cv_.notify_one();
 }
 
-// ---------- 寻址与签名管线 ----------
+// ---------- Addressing and signing pipeline ----------
 
 Target RemoteContext::target(const std::string& remote_bucket) const {
     if (cfg.force_path_style)
         return {"/" + util::aws_uri_encode(remote_bucket, /*encode_slash=*/false),
                 ep.signed_host};
-    // virtual-hosted（§7）：Host = <rb>.<endpoint-host>[:port]，路径不含 bucket。
-    // httplib 只在 Host 缺席时自设，本管线恒显式携带签名后的 Host，无需改连接
+    // virtual-hosted (§7): Host = <rb>.<endpoint-host>[:port], path excludes the bucket.
+    // httplib only sets Host itself when it is absent; this pipeline always carries the
+    // signed Host explicitly, so no connection changes are needed
     return {"", remote_bucket + "." + ep.signed_host};
 }
 
@@ -298,11 +305,11 @@ httplib::Headers RemoteContext::signed_headers(
     return out;
 }
 
-// ---------- 错误映射（docs/cloudproxy-backend.md §5.1）----------
+// ---------- Error mapping (docs/cloudproxy-backend.md §5.1) ----------
 
 std::optional<S3ErrorCode> map_remote_code(std::string_view wire) {
     if (auto c = s3::code_from_wire(wire)) return c;
-    // 本地词表没有的近义码
+    // Near-synonym codes absent from the local vocabulary
     if (wire == "BucketAlreadyExists") return S3ErrorCode::BucketAlreadyOwnedByYou;
     if (wire == "TooManyRequests" || wire == "RequestLimitExceeded")
         return S3ErrorCode::SlowDown;
@@ -320,19 +327,20 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
                 remote_msg = root.get("Message");
             }
         } catch (...) {
-            // 体不可解析：按状态码兜底
+            // Unparsable body: fall back to the status code
         }
     }
     auto res = std::string(resource);
-    // 错误映射计数（§8.2）：优先远端 wire code，不可解析按状态码归桶
+    // Error-mapping counters (§8.2): prefer the remote wire code; bucket by status code when unparsable
     metrics.count_error(remote_code.empty() ? "http_" + std::to_string(status) : remote_code);
 
-    // 429/503/SlowDown → 本地 503，客户端可退避重试
+    // 429/503/SlowDown -> local 503; clients may back off and retry
     if (status == 429 || status == 503 || remote_code == "SlowDown")
         throw S3Error(S3ErrorCode::SlowDown,
                       remote_msg.empty() ? "remote replied slow down" : remote_msg, res);
 
-    // 403 是网关云凭证/权限故障，不透传 AccessDenied 误导客户端排查自身凭证
+    // A 403 is a gateway cloud-credential/permission fault; do not pass AccessDenied
+    // through and mislead clients into debugging their own credentials
     if (status == 403) {
         LOG_WARN("cloudproxy: remote returned 403 ({}) for {} — check gateway cloud "
                  "credentials",
@@ -346,8 +354,9 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
             if (auto code = map_remote_code(remote_code))
                 throw S3Error(*code, remote_msg.empty() ? remote_code : remote_msg, res);
         }
-        // 条件写被上游拒绝（If-None-Match/If-Match 透传，backend.h PutCondition）：
-        // 体不可解析时也要按语义映射，不能落进 InternalError
+        // Conditional write rejected upstream (If-None-Match/If-Match passthrough,
+        // backend.h PutCondition): even with an unparsable body it must be mapped by
+        // semantics, not dropped into InternalError
         if (status == 412)
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           remote_msg.empty()
@@ -369,9 +378,10 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
                     break;
             }
         }
-        // 未知 4xx 不折成 500（docs/gaps.md §3.9）：SDK 对 500 自动重试，会把
-        // InvalidObjectState 这类确定性拒绝变成无限重试循环。映射为本地 400
-        //（InvalidRequest 不经 public_error 抹文案），远端码与原文随消息带出
+        // Unknown 4xx must not collapse into 500 (docs/gaps.md §3.9): SDKs auto-retry 500s,
+        // turning deterministic rejections like InvalidObjectState into infinite retry
+        // loops. Map to a local 400 (InvalidRequest is not scrubbed by public_error), with
+        // the remote code and original text carried in the message
         throw S3Error(S3ErrorCode::InvalidRequest,
                       "remote rejected request: " + std::to_string(status) +
                           (remote_code.empty() ? "" : " " + remote_code) +
@@ -379,7 +389,7 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
                       res);
     }
 
-    // 5xx / 其他：本地 500（不引入 502，S3 错误词表本无 BadGateway）
+    // 5xx / everything else: local 500 (no 502 introduced; the S3 error vocabulary has no BadGateway)
     throw S3Error(S3ErrorCode::InternalError,
                   "remote returned " + std::to_string(status) +
                       (remote_code.empty() ? "" : " (" + remote_code + ")"),
@@ -387,7 +397,7 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
 }
 
 void RemoteContext::throw_transport_error(httplib::Error err) const {
-    metrics.count_error("transport");  // §8.2：连接/DNS/超时类归一桶，细节进 message
+    metrics.count_error("transport");  // §8.2: connection/DNS/timeout classes share one bucket, details go into the message
     throw S3Error(S3ErrorCode::InternalError,
                   "cloudproxy: request to " + cfg.endpoint +
                       " failed: " + httplib::to_string(err));
@@ -395,19 +405,21 @@ void RemoteContext::throw_transport_error(httplib::Error err) const {
 
 void RemoteContext::backoff(int attempt) const {
     thread_local std::mt19937 rng{std::random_device{}()};
-    // 64 位算术 + 上限钳制：配置极值不得溢出为负喂给 uniform_int_distribution（UB）
+    // 64-bit arithmetic + upper clamp: extreme config values must not overflow negative and
+    // feed uniform_int_distribution (UB)
     int64_t base = static_cast<int64_t>(cfg.retry_base_ms) << std::min(attempt, 10);
     base = std::clamp<int64_t>(base, 0, 60'000);
     std::uniform_int_distribution<int64_t> jitter(0, base);
     std::this_thread::sleep_for(std::chrono::milliseconds(base + jitter(rng)));
 }
 
-// ---------- 分页辅助 ----------
+// ---------- Pagination helpers ----------
 
 std::string group_skip_token(std::string_view prefix) {
-    // 1024 = S3 / validate_object_key 共同的 key 字节上限：任何组内合法 key
-    // 都 <= prefix+0xff…（1024 字节），而首个分歧字节 > prefix 对应位的组外
-    // key 一定 > 该值 —— 不重不漏
+    // 1024 = the key byte limit shared by S3 / validate_object_key: every legal key inside
+    // the group is <= prefix+0xff... (1024 bytes), while any key outside the group whose
+    // first divergent byte is > the corresponding prefix byte is necessarily > this value
+    // -- no duplicates, no omissions
     constexpr size_t kMaxKeyBytes = 1024;
     std::string t(prefix);
     if (t.size() < kMaxKeyBytes) t.append(kMaxKeyBytes - t.size(), '\xff');

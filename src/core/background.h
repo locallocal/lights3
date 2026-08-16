@@ -1,19 +1,25 @@
-// L4: 后台任务等待组（docs/concurrency.md §7）：自销毁顶层协程驱动 + close 时
-// 等待在途任务清零。自 TieredBackend / DuoStoreBackend 的逐字重复私有机制提炼
-// （生命期关键路径只维护一份）。
+// L4: background task wait group (docs/concurrency.md §7): self-destroying
+// top-level coroutine driver + close waits for in-flight tasks to drain to zero.
+// Extracted from the verbatim-duplicated private mechanisms in TieredBackend /
+// DuoStoreBackend (the lifetime-critical path is maintained in one place only).
 //
-// 用法（backend 后台 worker 的固定形态）：
-//   spawn(task)            —— 定时器回调里派生后台协程（closing 后拒绝）
-//   enter()/exit()         —— 调用方驱动的协程（如手动 GC 钩子）登记为在途，
-//                             close 会等它结束后才拆资源；enter 返回 false = 正在
-//                             关闭，调用方应立即返回
-//   if_open(fn)            —— 与 closing 判定原子地执行 fn（典型：登记定时器 id）
-//   begin_close()          —— 置 closing；此后 spawn/enter/if_open 全部拒绝
-//   wait_idle()            —— 阻塞等在途任务清零（调用方线程；任务在池线程收尾）
+// Usage (the fixed shape of a backend's background worker):
+//   spawn(task)            —— spawn a background coroutine from a timer callback
+//                             (rejected after closing)
+//   enter()/exit()         —— register a caller-driven coroutine (e.g. a manual GC
+//                             hook) as in-flight; close waits for it to finish
+//                             before tearing down resources; enter returning false
+//                             = closing, and the caller should return immediately
+//   if_open(fn)            —— run fn atomically with the closing check (typical:
+//                             recording a timer id)
+//   begin_close()          —— set closing; from then on spawn/enter/if_open all refuse
+//   wait_idle()            —— block until in-flight tasks drain to zero (caller
+//                             thread; tasks finish on pool threads)
 //
-// close 惯例序：begin_close() → 锁外 cancel 定时器（TimerQueue::cancel 阻塞等
-// 在途回调，不得持本组锁调用——回调内 spawn/if_open 要拿组锁，持锁 cancel 即死锁）
-// → wait_idle() → 拆资源。
+// Conventional close order: begin_close() -> cancel timers outside the lock
+// (TimerQueue::cancel blocks on in-flight callbacks and must not be called holding
+// this group's lock — spawn/if_open inside a callback take the group lock, so
+// cancelling under the lock deadlocks) -> wait_idle() -> tear down resources.
 #pragma once
 
 #include <condition_variable>
@@ -26,19 +32,22 @@ namespace lights3 {
 
 class BackgroundTaskGroup {
 public:
-    // name 用于后台任务失败日志的前缀（须为静态生存期字符串）
+    // name prefixes background-task failure logs (must be a string with static lifetime)
     explicit BackgroundTaskGroup(const char* name) : name_(name) {}
     BackgroundTaskGroup(const BackgroundTaskGroup&) = delete;
 
-    // 派生自销毁后台协程；closing 后返回 false（任务被丢弃不执行）。
-    // 任务异常在内部捕获并记 WARN，不外抛
+    // Spawn a self-destroying background coroutine; returns false after closing
+    // (the task is dropped, not executed). Task exceptions are caught internally
+    // and logged as WARN, never propagated
     bool spawn(Task<void> t);
 
-    // 调用方驱动的协程登记为在途；与 begin_close 原子互斥。配对 exit()（建议 Scope）
+    // Register a caller-driven coroutine as in-flight; atomically exclusive with
+    // begin_close. Pair with exit() (Scope recommended)
     bool enter();
     void exit();
 
-    // RAII 登记：ok() 为 false 表示正在关闭，调用方应立即返回
+    // RAII registration: ok() being false means closing is in progress and the
+    // caller should return immediately
     class Scope {
     public:
         explicit Scope(BackgroundTaskGroup& g) : g_(g.enter() ? &g : nullptr) {}
@@ -52,8 +61,9 @@ public:
         BackgroundTaskGroup* g_;
     };
 
-    // 与 closing 判定原子地执行 fn（closing 时不执行返回 false）；典型用于
-    // "检查未关闭 + 登记定时器 id"须一步完成的场景
+    // Run fn atomically with the closing check (when closing, fn is not run and
+    // false is returned); typically for scenarios where "check not closed +
+    // record the timer id" must happen in one step
     bool if_open(const std::function<void()>& fn);
 
     void begin_close();

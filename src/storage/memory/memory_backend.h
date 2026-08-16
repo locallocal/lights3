@@ -1,6 +1,7 @@
-// L3: 内存后端 —— 单测与 demo 用，语义与 LocalFs 对齐。
-// 它同时被注册为一等后端（storage/registry.cc），配错了就是把整个网关的数据放进
-// 一个无上限的堆里；故带容量闸门与 mpu 过期清理（docs/gaps.md §6.3）
+// L3: in-memory backend -- for unit tests and demos, semantics aligned with LocalFs.
+// It is also registered as a first-class backend (storage/registry.cc); misconfiguring it
+// means putting the entire gateway's data into an unbounded heap, hence the capacity gate
+// and mpu expiry cleanup (docs/gaps.md §6.3)
 #pragma once
 
 #include <chrono>
@@ -14,11 +15,13 @@
 namespace lights3::storage {
 
 struct MemoryOptions {
-    // 容量上限（对象 + 在途分片的字节和）。0 = 不限——单测与 demo 的默认，
-    // 保持既有行为；生产配置应显式给值，超限的写返回 503 SlowDown
+    // Capacity cap (byte sum of objects + in-flight parts). 0 = unlimited -- the default
+    // for unit tests and demos, preserving existing behavior; production configs should
+    // set an explicit value; writes over the limit return 503 SlowDown
     uint64_t max_bytes = 0;
-    // 未 complete/abort 的 multipart 过期时长。0 = 不过期。清理在 multipart 类
-    // 操作入口顺带做（本后端不接定时器：无后台线程是它作为单测夹具的一部分）
+    // Expiry for multipart uploads never completed/aborted. 0 = never expire. Cleanup
+    // piggybacks on multipart operation entry points (this backend takes no timer: having
+    // no background threads is part of its role as a unit-test fixture)
     int mpu_ttl_sec = 24 * 3600;
 };
 
@@ -27,7 +30,7 @@ public:
     MemoryBackend() = default;
     explicit MemoryBackend(MemoryOptions opt) : opt_(opt) {}
 
-    // 用量（测试与 registry 指标回调用）
+    // Usage (for tests and the registry's metrics callback)
     uint64_t used_bytes() const;
     Task<void> create_bucket(std::string_view bucket) override;
     Task<void> delete_bucket(std::string_view bucket) override;
@@ -58,50 +61,56 @@ public:
                                      const ListPartsOptions& opt) override;
     Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
                                                    const ListUploadsOptions& opt) override;
-    // 释放全部驻留（关停即归还内存；此前无 close，进程收尾前一直占着）
+    // Release everything resident (shutdown returns the memory; previously there was no
+    // close and it stayed occupied until process teardown)
     Task<void> close() override;
 
 private:
-    // data 为不可变共享块（docs/gaps.md §3.9）：get_object 在锁内只取一次
-    // shared_ptr，大对象不再在全局锁内整体拷贝。put 覆盖同 key 时旧块由仍在
-    // 流式读它的 GET 持有，读完自然释放——天然的快照隔离。
-    // 剩余临界区都是 O(map 操作)，故本后端不接线程池：demo/单测定位下把
-    // 微秒级锁放在事件循环线程上是有意的取舍
+    // data is an immutable shared block (docs/gaps.md §3.9): get_object only grabs the
+    // shared_ptr once inside the lock; large objects are no longer copied wholesale under
+    // the global lock. When put overwrites the same key, the old block is held by GETs
+    // still streaming it and is released naturally when they finish -- snapshot isolation
+    // for free.
+    // The remaining critical sections are O(map operation), so this backend takes no
+    // thread pool: in a demo/unit-test setting, keeping the microsecond-scale lock on the
+    // event-loop thread is a deliberate trade-off
     struct Object {
         ObjectMeta meta;
         std::shared_ptr<const std::string> data;
     };
     struct Bucket {
         BucketInfo info;
-        std::map<std::string, Object> objects;  // key 有序
+        std::map<std::string, Object> objects;  // keys ordered
     };
     struct Part {
         std::string data;
-        std::string etag;  // 分片内容 MD5 hex
+        std::string etag;  // part content MD5 hex
         std::chrono::system_clock::time_point uploaded;
     };
     struct Upload {
         std::string bucket;
         std::string key;
         ObjectMeta meta;
-        std::map<int, Part> parts;  // part_no 有序
+        std::map<int, Part> parts;  // part_no ordered
         std::chrono::system_clock::time_point initiated;
     };
 
     Bucket& bucket_or_throw(const std::string& name);
     Upload& upload_or_throw(std::string_view bucket, std::string_view key,
                             std::string_view upload_id);
-    // 容量闸门（持 m_ 调用）：delta 为本次净增字节，超限抛 SlowDown 且不改账
+    // Capacity gate (called holding m_): delta is this call's net byte increase; over the
+    // limit throws SlowDown without touching the books
     void reserve_locked(int64_t delta);
-    // 读 body 途中的提前闸门（不持 m_ 调用）：已用 + 本请求已缓冲超限即抛 SlowDown
+    // Early gate while reading the body (called without m_): throws SlowDown once
+    // used + this request's buffered bytes exceed the limit
     void check_inflight(size_t buffered) const;
-    void expire_uploads_locked();  // mpu_ttl 过期清理（持 m_）
+    void expire_uploads_locked();  // mpu_ttl expiry cleanup (holding m_)
 
     MemoryOptions opt_;
     mutable std::mutex m_;
-    uint64_t used_bytes_ = 0;  // 对象 + 在途分片的字节和（m_ 保护）
+    uint64_t used_bytes_ = 0;  // byte sum of objects + in-flight parts (guarded by m_)
     std::map<std::string, Bucket> buckets_;
-    std::map<std::string, Upload> uploads_;  // upload_id → 状态
+    std::map<std::string, Upload> uploads_;  // upload_id → state
 };
 
 }  // namespace lights3::storage

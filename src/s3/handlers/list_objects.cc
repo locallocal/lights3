@@ -1,4 +1,4 @@
-// ListObjectsV2（GET /bucket?list-type=2；V1 请求按 V2 语义降级处理）
+// ListObjectsV2 (GET /bucket?list-type=2; V1 requests are handled degraded to V2 semantics)
 #include <algorithm>
 
 #include "core/util/checksum.h"
@@ -14,9 +14,10 @@ using handlers::kOwnerId;
 
 namespace {
 
-// V2 continuation-token 的不透明化（docs/gaps.md §4）：V1 的 marker 语义上就是
-// key（响应会回显），V2 的 token 规范是不透明串——此前 V1 做了 URL 编码而 V2
-// 明文透传，两版本不一致且把内部键序直接暴露成 API。base64 一层对齐 AWS 形态
+// Opacifying the V2 continuation-token (docs/gaps.md §4): V1's marker is semantically a key
+// (echoed in the response), while the V2 token is by spec an opaque string -- previously V1 was URL-encoded
+// but V2 passed through in plaintext, inconsistent across versions and exposing the internal key order as API.
+// A base64 layer aligns with the AWS shape
 std::string token_encode(const std::string& in) { return util::base64_encode(in); }
 std::optional<std::string> token_decode(const std::string& in) {
     return util::base64_decode(in);
@@ -37,12 +38,12 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
         }
         if (opt.max_keys < 0)
             throw S3Error(S3ErrorCode::InvalidArgument, "Invalid max-keys value");
-        // S3 语义：上限 1000，超出静默钳制——不钳制时 max-keys=INT_MAX 会把
-        // 整桶列表一次性构造进内存（数百 MB XML，单请求 OOM 面）
+        // S3 semantics: cap at 1000, silently clamp beyond it -- without clamping, max-keys=INT_MAX would
+        // build the whole bucket listing in memory at once (hundreds of MB of XML, a single-request OOM surface)
         opt.max_keys = std::min(opt.max_keys, 1000);
     }
-    // encoding-type=url（S3 语义）：响应里的 key/prefix 等经 URL 编码返回；
-    // 其他取值拒绝
+    // encoding-type=url (S3 semantics): key/prefix etc. in the response are returned URL-encoded;
+    // other values are rejected
     bool encode_url = false;
     if (auto et = req.query_get("encoding-type")) {
         if (*et != "url")
@@ -53,13 +54,13 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     auto enc = [&](const std::string& s) {
         return encode_url ? util::aws_uri_encode(s, /*encode_slash=*/false) : s;
     };
-    // V2（?list-type=2）与 V1 的差异：KeyCount/ContinuationToken vs Marker
+    // V2 (?list-type=2) vs V1 differences: KeyCount/ContinuationToken vs Marker
     bool v2 = req.query_get("list-type").value_or("") == "2";
-    // 三种 marker 各归各版本（docs/gaps.md §5.5）：此前塌缩成同一个 start_after，
-    // 于是 V1 请求带 start-after 也生效、且响应回显出客户端从未发过的 <Marker>。
-    // V2 认 continuation-token（本实现签发的不透明串）与 start-after；V1 只认
-    // marker，两者都是"从此 key 之后开始"的明文语义
-    std::optional<std::string> start_after_param;  // 仅 V2，需原样回显
+    // The three markers each belong to their own version (docs/gaps.md §5.5): previously they collapsed into a
+    // single start_after, so a V1 request with start-after took effect and the response echoed a <Marker> the
+    // client never sent. V2 accepts continuation-token (the opaque string this implementation issues) plus
+    // start-after; V1 accepts only marker; both carry the plaintext "start after this key" semantics
+    std::optional<std::string> start_after_param;  // V2 only, must be echoed verbatim
     if (v2) {
         if (auto tok = req.query_get("continuation-token")) {
             auto key = token_decode(*tok);
@@ -67,7 +68,7 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
                 throw S3Error(S3ErrorCode::InvalidArgument,
                               "The continuation token provided is incorrect.");
             opt.start_after = std::move(*key);
-            // AWS：两者同时出现时 continuation-token 胜出，start-after 被忽略
+            // AWS: when both are present, continuation-token wins and start-after is ignored
             start_after_param = req.query_get("start-after");
         } else if (auto sa = req.query_get("start-after")) {
             opt.start_after = *sa;
@@ -76,15 +77,15 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     } else {
         opt.start_after = req.query_get("marker").value_or("");
     }
-    // fetch-owner=true（V2）：本实现只有单一所有者，与 ListAllMyBuckets 同源
+    // fetch-owner=true (V2): this implementation has a single owner, same source as ListAllMyBuckets
     bool fetch_owner = v2 && req.query_get("fetch-owner").value_or("") == "true";
 
     auto result = co_await router_.resolve(bucket).list_objects(bucket, opt);
 
-    // policy prefix 过滤：Bucket scope 授权时 key 为空、prefix 校验被跳过，而
-    // opt.prefix 完全客户端可控——不在此过滤的话，prefix 受限凭证（多租户共桶）
-    // 发不带 prefix 的 GET /bucket 即可枚举整桶所有 key。分页游标仍是后端的
-    //（页内条目可少于 max-keys，S3 语义允许）
+    // Policy prefix filtering: with Bucket-scope authorization the key is empty and the prefix check is skipped,
+    // while opt.prefix is fully client-controlled -- without filtering here, a prefix-restricted credential
+    // (multi-tenant shared bucket) could enumerate every key in the bucket via GET /bucket with no prefix.
+    // The pagination cursor remains the backend's (a page may hold fewer entries than max-keys, allowed by S3 semantics)
     if (auth.policy && !auth.policy->prefixes.empty()) {
         std::erase_if(result.objects,
                       [&](const auto& o) { return !auth.policy->allows_key(o.key); });

@@ -1,6 +1,6 @@
 // per-credential policy（docs/credential-management.md §10.4）。
-// 独立成头：验签层（sigv4.h）要在 verify 时刻带出 policy 快照（docs/gaps.md §3.7），
-// 而 credential_store.h 依赖 sigv4.h——放回去就成环了。
+// Standalone header: the signature layer (sigv4.h) must carry a policy snapshot at verify time (docs/gaps.md §3.7),
+// while credential_store.h depends on sigv4.h -- moving this back would create a cycle.
 #pragma once
 
 #include <optional>
@@ -10,38 +10,38 @@
 
 namespace lights3::s3 {
 
-// 动作粒度（docs/gaps.md §5.10）：此前只有 readonly 一个开关，于是"能写"必然
-// "能删"——给不出备份场景最常见的那条策略（只许写入、不许删除）。
-// 归类按"造成的后果"而非 HTTP 方法：DeleteObjects 是 POST，却显然属于 Delete
+// Action granularity (docs/gaps.md §5.10): previously the only switch was readonly, so "can write" implied
+// "can delete" -- making it impossible to express the most common backup policy (write-only, no delete).
+// Classification is by consequence, not HTTP method: DeleteObjects is a POST yet clearly belongs to Delete
 enum class Action { Read, Write, Delete };
 
 const char* action_name(Action a);
-// 解析 JSON 里的动作名；未知名字返回 nullopt（调用方转 InvalidRequest）
+// Parse an action name from JSON; unknown names return nullopt (caller converts to InvalidRequest)
 std::optional<Action> action_from_name(std::string_view s);
 
-// 缺省（nullopt）= 无限制
+// Default (nullopt) = unrestricted
 struct CredentialPolicy {
-    std::vector<std::string> buckets;   // bucket glob 白名单；空 = 全部
-    std::vector<std::string> prefixes;  // key 前缀白名单；空 = 全部（§5.10）
-    bool readonly = false;              // 等价于 actions = [read]，保留兼容
-    std::vector<Action> actions;        // 空 = 由 readonly 决定
+    std::vector<std::string> buckets;   // bucket glob allowlist; empty = all
+    std::vector<std::string> prefixes;  // key prefix allowlist; empty = all (§5.10)
+    bool readonly = false;              // equivalent to actions = [read], kept for compatibility
+    std::vector<Action> actions;        // empty = determined by readonly
 
-    // bucket 为空表示账户级操作（ListBuckets）。key 为空表示"本次判定与具体
-    // 对象无关"（建桶、列桶内对象等），此时不校验 prefixes
+    // Empty bucket means an account-level operation (ListBuckets). Empty key means "this check is
+    // unrelated to a specific object" (create bucket, list objects in a bucket, etc.); prefixes are not checked then
     bool allows(std::string_view bucket, std::string_view key, Action action) const;
     bool allows_action(Action a) const;
     bool allows_bucket(std::string_view bucket) const;
-    // 列举结果的 prefix 过滤（多租户共桶时 prefixes 是隔离边界）：
-    // allows_key = key 落在某白名单前缀内；prefix_may_contain = 列举返回的
-    // CommonPrefixes 分组下**可能**存在白名单内的 key（双向前缀关系任一成立）
+    // Prefix filtering for listing results (with multi-tenant shared buckets, prefixes are the isolation boundary):
+    // allows_key = the key falls under some allowlisted prefix; prefix_may_contain = the CommonPrefixes group
+    // returned by a listing **may** contain allowlisted keys (either direction of the prefix relation holds)
     bool allows_key(std::string_view key) const;
     bool prefix_may_contain(std::string_view group_prefix) const;
 };
 
-// policy 的 JSON 字段约定
+// JSON field conventions for policy
 // （{"buckets": [...], "prefixes": [...], "readonly": bool, "actions": [...]}），
-// admin handler、落盘对象与 credentials_file 共用一套；实现在 credential_store.cc
-//（nlohmann 不进头文件）。字段非法/未知抛 S3Error(InvalidRequest)
+// Shared by the admin handler, on-disk objects, and credentials_file; implemented in credential_store.cc
+// (nlohmann stays out of headers). Invalid/unknown fields throw S3Error(InvalidRequest)
 CredentialPolicy parse_policy_json(const std::string& text);
 std::string policy_to_json(const CredentialPolicy& p);
 

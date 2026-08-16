@@ -1,4 +1,4 @@
-// L1: HTTP 服务器接口与驱动工厂（见 docs/http-adapter.md）
+// L1: HTTP server interface and driver factory (see docs/http-adapter.md)
 #pragma once
 
 #include <functional>
@@ -15,9 +15,9 @@ using Handler = std::function<Task<HttpResponse>(HttpRequest)>;
 struct IHttpServer {
     virtual void set_handler(Handler h) = 0;
     virtual void listen(const std::string& addr, uint16_t port) = 0;
-    virtual void run() = 0;                 // 阻塞运行直至 shutdown
-    virtual void shutdown() = 0;            // 线程安全 & 信号安全
-    virtual uint16_t bound_port() const = 0;  // listen 后实际端口（port=0 时有用）
+    virtual void run() = 0;                 // Blocks until shutdown
+    virtual void shutdown() = 0;            // Thread-safe & signal-safe
+    virtual uint16_t bound_port() const = 0;  // Actual port after listen (useful when port=0)
     virtual ~IHttpServer() = default;
 };
 

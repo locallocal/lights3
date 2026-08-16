@@ -1,177 +1,182 @@
-# LightS3 示例配置（docs/architecture.md §5）
-# 默认生效的是最下方 backends 里未注释的 localfs；其余后端均以注释形式给出
-# 全量参数（值为默认值，标「必填」的除外），取消注释即可切换。
-# 注意：内置 YAML parser 为简化版（不支持 tab 缩进/flow style/锚点，src/core/config.cc）。
-# 尺寸单位：B/KiB/MiB/GiB（KB/MB/GB/K/M/G 同义）；时长单位：s/m/h/d。
+# LightS3 sample config (docs/architecture.md §5)
+# What takes effect by default is the uncommented localfs entry under backends at the
+# bottom; every other backend is given as commented-out full parameter sets (values are
+# the defaults, except those marked "required") — uncomment to switch.
+# Note: the built-in YAML parser is simplified (no tab indentation/flow style/anchors, src/core/config.cc).
+# Size units: B/KiB/MiB/GiB (KB/MB/GB/K/M/G are synonyms); duration units: s/m/h/d.
 http:
-  driver: builtin          # builtin | beast | httplib（需对应 CMake 选项编译进来）
+  driver: builtin          # builtin | beast | httplib (must be compiled in via the matching CMake option)
   bind: 0.0.0.0
   port: 9000
-  io_threads: 4            # beast=IO 线程数 / httplib=线程池 / seastar=shard 数；
-                           # builtin（thread-per-connection）忽略并在显式配置时 WARN
+  io_threads: 4            # beast=IO thread count / httplib=thread pool / seastar=shard count;
+                           # builtin (thread-per-connection) ignores it and WARNs when set explicitly
   max_header_size: 16KiB
   idle_timeout: 60s
-  # multipart 非末片的最小分片（AWS 恒 5MiB）。0 = 不限制——前面挂着不守这条
-  # 规则的工具链、或本实例只是另一个 lights3 的代理时可放开
+  # Minimum size for non-final multipart parts (AWS fixes it at 5MiB). 0 = no limit —
+  # relax it when fronted by toolchains that don't honor this rule, or when this
+  # instance is merely a proxy for another lights3
   min_part_size: 5MiB
-  # ---------- TLS（docs/gaps.md §7）----------
-  # 两个都给才启用 HTTPS；仅 httplib/beast 驱动支持，builtin/seastar 配置了
-  # 会启动报错（绝不静默跑明文）。SigV4 UNSIGNED-PAYLOAD 的完整性依赖传输层
-  # 加密，公网部署强烈建议开启（或由前置 LB 终结 TLS）
-  # tls_cert: /etc/lights3/server.crt   # PEM 证书链
-  # tls_key: /etc/lights3/server.key    # PEM 私钥
-  # ---------- 停机/背压边界（docs/gaps.md §7，值为默认值）----------
-  # drain_limit: 4MiB          # 回错前排空请求体上限（超过即关连接）
-  # trailer_max_size: 16KiB    # chunked trailer 区上限（builtin/seastar 手写解析器）
-  # io_chunk_size: 64KiB       # 流式读写块大小
-  # body_queue_cap: 256KiB     # 推转拉队列容量，即背压水位（仅 httplib）
-  # shutdown_grace: 10s        # 停机等在途请求的宽限
-  # shutdown_force_wait: 5s    # 强制断开后的二次等待
+  # ---------- TLS (docs/gaps.md §7) ----------
+  # HTTPS is enabled only when both are given; only the httplib/beast drivers support
+  # it, builtin/seastar error out at startup if configured (never silently run
+  # plaintext). SigV4 UNSIGNED-PAYLOAD integrity relies on transport-layer encryption;
+  # strongly recommended for public deployments (or terminate TLS at a fronting LB)
+  # tls_cert: /etc/lights3/server.crt   # PEM certificate chain
+  # tls_key: /etc/lights3/server.key    # PEM private key
+  # ---------- Shutdown/backpressure boundaries (docs/gaps.md §7, values are defaults) ----------
+  # drain_limit: 4MiB          # max request body drained before erroring (beyond it, close the connection)
+  # trailer_max_size: 16KiB    # chunked trailer section cap (builtin/seastar hand-written parsers)
+  # io_chunk_size: 64KiB       # streaming read/write block size
+  # body_queue_cap: 256KiB     # push-to-pull queue capacity, i.e. backpressure watermark (httplib only)
+  # shutdown_grace: 10s        # grace period waiting for in-flight requests on shutdown
+  # shutdown_force_wait: 5s    # second wait after forced disconnect
 
 runtime:
-  io_threads: 16           # 阻塞 IO 线程池大小
+  io_threads: 16           # blocking IO thread pool size
   max_inflight_requests: 1024
 
 auth:
   credentials:
     - access_key: AKIDEXAMPLE
-      secret_key: ${LIGHTS3_SECRET_1}   # 环境变量引用；留空则拒绝所有请求
+      secret_key: ${LIGHTS3_SECRET_1}   # env var reference; if empty, all requests are rejected
   region: us-east-1
-  # ---------- 凭证管理二期（docs/credential-management.md §10）----------
-  # 动态凭证 SK 的 at-rest 加密不在此配置：设环境变量 LIGHTS3_MASTER_KEY
-  # （64 个 hex 字符，如 `openssl rand -hex 32`）即启用，存量明文对象启动时自动升级。
-  # credentials_file: /etc/lights3/creds.json  # 外部凭证文件（热加载，仅数据面）。
-  #                                            # 格式：{"credentials": [{"access_key",
+  # ---------- Credential management phase 2 (docs/credential-management.md §10) ----------
+  # At-rest encryption of dynamic credential SKs is not configured here: set the env var
+  # LIGHTS3_MASTER_KEY (64 hex chars, e.g. `openssl rand -hex 32`) to enable it;
+  # existing plaintext objects are upgraded automatically at startup.
+  # credentials_file: /etc/lights3/creds.json  # external credentials file (hot reload, data plane only).
+  #                                            # Format: {"credentials": [{"access_key",
   #                                            # "secret_key", "comment"?, "policy"?}]}
-  # credentials_file_reload: 30s               # 文件 mtime 轮询周期；0s = 仅启动时加载
-  # sync_interval: 0s                          # 多实例共享后端时定期增量 reload .sys
-  #                                            # （新增拉取/吊销失效）；0s = 关闭（单实例默认）
+  # credentials_file_reload: 30s               # file mtime polling period; 0s = load at startup only
+  # sync_interval: 0s                          # with a shared multi-instance backend, periodic incremental
+  #                                            # reload of .sys (pick up additions/revocations); 0s = off (single-instance default)
 
 backends:
-  # ---------- localfs / xlocalfs：本地文件系统（docs/storage-backend.md）----------
+  # ---------- localfs / xlocalfs: local filesystem (docs/storage-backend.md) ----------
   - name: localdata
-    type: localfs                      # localfs | xlocalfs（io_uring 数据面）| memory
+    type: localfs                      # localfs | xlocalfs (io_uring data plane) | memory
     root: ./data/objects
-    staging: ./data/staging            # 须与 root 同一文件系统（rename 原子性）；
-                                       # 默认 <root>/.lights3-staging
-    # queue_depth: 256                 # 仅 xlocalfs：io_uring SQ 深度
+    staging: ./data/staging            # must be on the same filesystem as root (rename atomicity);
+                                       # default <root>/.lights3-staging
+    # queue_depth: 256                 # xlocalfs only: io_uring SQ depth
 
-  # ---------- duostore：元数据 KV + chunk/pack 数据引擎（docs/duostore-backend.md）----------
-  # meta 引擎四选一：rocksdb（默认）| redis | sqlite | tikv；
-  # data 引擎二选一：fs（默认）| rados。
-  # redis/sqlite/tikv/rados 须以对应 CMake 选项编译进来（LIGHTS3_DUOSTORE_*，
-  # build.sh 的 --redis/--sqlite/--rados/--tikv）。非选中引擎的专属键会被忽略并 WARN。
+  # ---------- duostore: metadata KV + chunk/pack data engine (docs/duostore-backend.md) ----------
+  # meta engine, pick one of four: rocksdb (default) | redis | sqlite | tikv;
+  # data engine, pick one of two: fs (default) | rados.
+  # redis/sqlite/tikv/rados must be compiled in via the matching CMake options
+  # (LIGHTS3_DUOSTORE_*, build.sh's --redis/--sqlite/--rados/--tikv). Keys specific to
+  # a non-selected engine are ignored with a WARN.
   # - name: duodata
   #   type: duostore
-  #   root: ./data/duostore            # 必填；meta/ chunks/ packs/ 均在其下
-  #   verify_chunk_crc: false          # 读路径校验 chunk CRC（两种 data 引擎共用）
-  #   # -- 后台 GC 与孤儿扫描（均已生效；docs/duostore-backend.md §9）--
-  #   gc_interval: 300s                # 回收周期；0s = 关闭后台 GC
-  #   gc_enabled: true                 # false = 多网关非指定实例（§8.3 单实例执行 GC）
-  #   gc_grace: 300s                   # 延迟删除宽限（读并发防御纵深）
+  #   root: ./data/duostore            # required; meta/ chunks/ packs/ all live under it
+  #   verify_chunk_crc: false          # read-path chunk CRC verification (shared by both data engines)
+  #   # -- Background GC and orphan scan (all effective; docs/duostore-backend.md §9) --
+  #   gc_interval: 300s                # reclaim period; 0s = disable background GC
+  #   gc_enabled: true                 # false = non-designated instance in a multi-gateway setup (§8.3 single instance runs GC)
+  #   gc_grace: 300s                   # delayed-deletion grace (defense in depth against concurrent reads)
   #   orphan_scan_interval: 1d
-  #   mpu_ttl: 7d                      # 未完成 multipart upload 的清理期限；0 = 关闭
+  #   mpu_ttl: 7d                      # cleanup deadline for incomplete multipart uploads; 0 = off
   #
-  #   # -- meta = rocksdb（默认，docs/duostore-backend.md）--
+  #   # -- meta = rocksdb (default, docs/duostore-backend.md) --
   #   meta: rocksdb
-  #   meta_path: ./data/duostore/meta  # 默认 <root>/meta（可单独指到 SSD）
+  #   meta_path: ./data/duostore/meta  # default <root>/meta (can point to an SSD separately)
   #   rocksdb_block_cache: 64MiB
-  #   rocksdb_write_buffer: 64MiB      # 每 CF memtable 容量（RocksDB 默认 64MiB）
-  #   rocksdb_max_write_buffers: 2     # 每 CF memtable 个数上限（≥1）
-  #   rocksdb_max_background_jobs: 2   # flush/compaction 后台线程总数（≥1）
-  #   meta_sync: true                  # 每次提交 fsync WAL（rocksdb/sqlite 共用）
+  #   rocksdb_write_buffer: 64MiB      # per-CF memtable capacity (RocksDB default 64MiB)
+  #   rocksdb_max_write_buffers: 2     # per-CF memtable count cap (>=1)
+  #   rocksdb_max_background_jobs: 2   # total flush/compaction background threads (>=1)
+  #   meta_sync: true                  # fsync WAL on every commit (shared by rocksdb/sqlite)
   #
-  #   # -- meta = redis（docs/duostore-redis-meta.md §8）--
+  #   # -- meta = redis (docs/duostore-redis-meta.md §8) --
   #   # meta: redis
-  #   # redis_uri: redis://127.0.0.1:6379  # 必填；也支持 unix:///path/redis.sock
-  #   # redis_prefix: "duo:"               # key 前缀（多实例/测试隔离）
-  #   # redis_timeout: 3s                  # 建连 + 单命令超时
-  #   # redis_pool_size: 8                 # 连接池大小 [1,256]
-  #   # redis_wait_replicas: 0             # 提交后 WAIT 的副本数 [0,256]（0=不等待；
-  #                                        # Sentinel 主从缩小 failover 丢写窗口，副本不足仅 WARN）
+  #   # redis_uri: redis://127.0.0.1:6379  # required; unix:///path/redis.sock also supported
+  #   # redis_prefix: "duo:"               # key prefix (multi-instance/test isolation)
+  #   # redis_timeout: 3s                  # connect + per-command timeout
+  #   # redis_pool_size: 8                 # connection pool size [1,256]
+  #   # redis_wait_replicas: 0             # replicas to WAIT for after commit [0,256] (0=no wait;
+  #                                        # with Sentinel primaries/replicas this narrows the failover lost-write window, insufficient replicas only WARN)
   #
-  #   # -- meta = sqlite（docs/duostore-sqlite-meta.md §8）--
+  #   # -- meta = sqlite (docs/duostore-sqlite-meta.md §8) --
   #   # meta: sqlite
-  #   # sqlite_path: ./data/duostore/meta.sqlite3   # 默认 <root>/meta.sqlite3
-  #   # sqlite_cache: 64MiB                # 进程级页缓存总预算（>= 1MiB）
-  #   # meta_sync: true                    # 映射 PRAGMA synchronous FULL/NORMAL
+  #   # sqlite_path: ./data/duostore/meta.sqlite3   # default <root>/meta.sqlite3
+  #   # sqlite_cache: 64MiB                # process-level page cache total budget (>= 1MiB)
+  #   # meta_sync: true                    # maps to PRAGMA synchronous FULL/NORMAL
   #
-  #   # -- meta = tikv（docs/duostore-tikv-meta.md §9）--
+  #   # -- meta = tikv (docs/duostore-tikv-meta.md §9) --
   #   # meta: tikv
-  #   # pd_endpoints: "127.0.0.1:2379"     # 必填；逗号分隔多个 PD
-  #   # tikv_prefix: "duo:"                # key 前缀（多实例/测试隔离）
-  #   # tikv_ca: /path/ca.pem              # mTLS 三件套：要么全给要么全不给
+  #   # pd_endpoints: "127.0.0.1:2379"     # required; comma-separated multiple PDs
+  #   # tikv_prefix: "duo:"                # key prefix (multi-instance/test isolation)
+  #   # tikv_ca: /path/ca.pem              # mTLS trio: all three or none
   #   # tikv_cert: /path/client.pem
   #   # tikv_key: /path/client-key.pem
-  #   # tikv_gc_interval: 60s              # GC safepoint 推进周期（纯 KV 集群必需；
-  #                                        # 共 TiDB 集群设 0 关闭，§7.3）
-  #   # tikv_gc_retention: 10m             # safepoint 保留窗口（now − retention，须为正）
-  #   # tikv_backoff_ms: 0                 # 侧车路径退避预算（0 = client-c 库默认）
+  #   # tikv_gc_interval: 60s              # GC safepoint advance period (required for pure KV clusters;
+  #                                        # set 0 to disable when sharing a TiDB cluster, §7.3)
+  #   # tikv_gc_retention: 10m             # safepoint retention window (now − retention, must be positive)
+  #   # tikv_backoff_ms: 0                 # sidecar-path backoff budget (0 = client-c library default)
   #
-  #   # -- data = fs（默认）：chunk/pack 本地引擎（docs/duostore-backend.md）--
+  #   # -- data = fs (default): chunk/pack local engine (docs/duostore-backend.md) --
   #   data: fs
   #   chunk_size: 8MiB
-  #   pack_threshold: 128KiB           # ≤ 该值的对象进 pack；0 = 关闭（全走 chunk）
-  #   pack_max_size: 128MiB            # active pack 封存阈值（轮转换新 pack）
-  #   pack_writers: 4                  # 并存 active pack 数（1-64）
-  #   pack_gc_ratio: 0.5               # 存活率低于此值触发压实（P4 生效）
+  #   pack_threshold: 128KiB           # objects <= this go into packs; 0 = off (everything via chunks)
+  #   pack_max_size: 128MiB            # active pack sealing threshold (rotate to a new pack)
+  #   pack_writers: 4                  # concurrent active packs (1-64)
+  #   pack_gc_ratio: 0.5               # live ratio below this triggers compaction (effective in P4)
   #
-  #   # -- data = rados（docs/duostore-rados-data.md §10）--
+  #   # -- data = rados (docs/duostore-rados-data.md §10) --
   #   # data: rados
-  #   # rados_pool: lights3                # 必填
+  #   # rados_pool: lights3                # required
   #   # rados_conf: /etc/ceph/ceph.conf
   #   # rados_client: client.admin
-  #   # rados_namespace: ""                # pool 内逻辑隔离（多实例/测试）
-  #   # rados_chunk_size: 8MiB             # [4KiB, 128MiB]（对齐 osd_max_object_size）
-  #   # rados_buffer_total: 256MiB         # 写缓冲总额（>= rados_chunk_size）
+  #   # rados_namespace: ""                # logical isolation within the pool (multi-instance/test)
+  #   # rados_chunk_size: 8MiB             # [4KiB, 128MiB] (aligned with osd_max_object_size)
+  #   # rados_buffer_total: 256MiB         # total write buffer (>= rados_chunk_size)
   #   # rados_connect_timeout: 5s
-  #   # rados_op_timeout: 0s               # 0 = 不设 op 超时
+  #   # rados_op_timeout: 0s               # 0 = no op timeout
 
-  # ---------- cloudproxy：转发到远端 S3（docs/cloudproxy-backend.md）----------
-  # 需 LIGHTS3_CLOUDPROXY=ON（默认开）。
+  # ---------- cloudproxy: forward to a remote S3 (docs/cloudproxy-backend.md) ----------
+  # Requires LIGHTS3_CLOUDPROXY=ON (default on).
   # - name: cloudpx
   #   type: cloudproxy
-  #   endpoint: https://s3.example.com   # 必填；scheme://host[:port]
+  #   endpoint: https://s3.example.com   # required; scheme://host[:port]
   #   region: us-east-1
   #   access_key: ${REMOTE_AK}
   #   secret_key: ${REMOTE_SK}
-  #   bucket_prefix: ""                  # 远端 bucket = 前缀 + 本地名
-  #   force_path_style: true             # false = virtual-hosted style（已支持，§7 部署约束）
+  #   bucket_prefix: ""                  # remote bucket = prefix + local name
+  #   force_path_style: true             # false = virtual-hosted style (supported, §7 deployment constraints)
   #   tls_verify: true
-  #   ca_cert: ""                        # 自签远端的 CA 证书路径
+  #   ca_cert: ""                        # CA certificate path for self-signed remotes
   #   connect_timeout_ms: 5000
   #   request_timeout_ms: 60000
   #   retry_max: 3                       # [0,16]
-  #   retry_base_ms: 100                 # 指数退避基数
+  #   retry_base_ms: 100                 # exponential backoff base
   #   max_connections: 16
-  #   verify_etag: true                  # 单段 PUT 与远端 ETag 比对 MD5（§6）
-  #   queue_cap: 1MiB                    # 数据面队列容量（背压水位）[4KiB,1GiB]
-  #   control_in_pump: false             # true = 控制面小请求也走 pump 线程（§8.2）
-  #   io_threads: 8                      # 后端专属线程池（通用键，所有后端可用；
-  #                                      # 缺省共享 runtime.io_threads 的池）
+  #   verify_etag: true                  # compare single-part PUT MD5 against the remote ETag (§6)
+  #   queue_cap: 1MiB                    # data-plane queue capacity (backpressure watermark) [4KiB,1GiB]
+  #   control_in_pump: false             # true = small control-plane requests also go through the pump thread (§8.2)
+  #   io_threads: 8                      # backend-dedicated thread pool (generic key, available to all backends;
+  #                                      # default shares runtime.io_threads' pool)
 
-  # ---------- tiered：本地缓存 + 云端沉降（docs/tiered-storage.md）----------
-  # local/cloud 按 name 引用本列表中的其他后端；local 须为 localfs/xlocalfs。
+  # ---------- tiered: local cache + cloud sink (docs/tiered-storage.md) ----------
+  # local/cloud reference other backends in this list by name; local must be localfs/xlocalfs.
   # - name: tierdata
   #   type: tiered
-  #   local: localdata                   # 必填
-  #   cloud: cloudpx                     # 必填
-  #   cold_after: 30d                    # 判冷阈值
-  #   scan_interval: 1h                  # 0s = 关闭后台扫描
-  #   space_high_watermark: 85%          # 触发空间回收
-  #   space_low_watermark: 70%           # 回收目标
-  #   min_free_bytes: 1GiB               # 缓存回填所需最小余量
-  #   cache_fill_on_range: true          # Range 命中云端时后台整对象回迁
+  #   local: localdata                   # required
+  #   cloud: cloudpx                     # required
+  #   cold_after: 30d                    # coldness threshold
+  #   scan_interval: 1h                  # 0s = disable background scan
+  #   space_high_watermark: 85%          # triggers space reclaim
+  #   space_low_watermark: 70%           # reclaim target
+  #   min_free_bytes: 1GiB               # minimum headroom required for cache fill
+  #   cache_fill_on_range: true          # on a Range hit in the cloud, refill the whole object in the background
   #   max_concurrent_transfers: 4
-  #   quota_bytes: 0                     # 逻辑配额；0 = 不启用
-  #   gc_retry_base: 60s                 # 云端删除失败的指数退避基数（§9）
-  #   gc_retry_cap: 1h                   # 退避上限
-  #   reconcile_interval: 0s             # 索引/云端对账周期；0s = 关闭（§9）
-  #   reconcile_orphans: rebuild         # rebuild = 重建索引项 | delete = 删云端孤儿
+  #   quota_bytes: 0                     # logical quota; 0 = disabled
+  #   gc_retry_base: 60s                 # exponential backoff base for failed cloud deletions (§9)
+  #   gc_retry_cap: 1h                   # backoff cap
+  #   reconcile_interval: 0s             # index/cloud reconciliation period; 0s = off (§9)
+  #   reconcile_orphans: rebuild         # rebuild = recreate index entries | delete = remove cloud orphans
 
 buckets:
   default_backend: localdata
-  rules: []                # 按声明序 glob 匹配（docs/storage-backend.md §2）
+  rules: []                # glob-matched in declaration order (docs/storage-backend.md §2)
   # rules:
   #   - match: "archive-*"               # fnmatch glob
   #     backend: tierdata

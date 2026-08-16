@@ -17,16 +17,19 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// 流格式：magic 后是逐记录的 tag + 定长/长度前缀字段（全部小端），'E' 收尾：
+// Stream format: after the magic come per-record tag + fixed-length /
+// length-prefixed fields (all little-endian), terminated by 'E':
 //   'B' u32 len | bucket
 //   'O' u32 blen u32 klen u32 vlen | bucket key value(codec::encode_object)
-//   'S' u64 pack_id u64 file_size          （仅封存 pack）
+//   'S' u64 pack_id u64 file_size          (sealed packs only)
 //   'E' u64 n_buckets u64 n_objects u64 n_packs u32 crc
-// crc32c 覆盖 magic 之后、crc 字段之前的全部字节（含 'E' 与三个计数）
+// crc32c covers every byte after the magic and before the crc field (including
+// 'E' and the three counts)
 constexpr char kMagic[] = "L3DUOMETA1\n";
 constexpr size_t kMagicLen = sizeof(kMagic) - 1;
-// 单字段长度上限（防御：拿错文件时长度字段是随机字节，不给分配器喂 4GiB）。
-// 对象 value 的合法上限约 26MiB（65 万 extent 的 manifest，meta_store.h §3.9）
+// Per-field length cap (defensive: with the wrong file the length field is random
+// bytes; don't feed the allocator 4GiB). The legitimate upper bound for an object
+// value is about 26MiB (a 650k-extent manifest, meta_store.h §3.9)
 constexpr uint32_t kMaxFieldLen = 256u << 20;
 
 struct CrcWriter {
@@ -118,7 +121,7 @@ MetaDumpStats dump_meta(IMetaStore& src, std::ostream& out) {
             auto res = src.list_objects(b.name, opt);
             for (const auto& om : res.objects) {
                 auto rec = src.get_object(b.name, om.key);
-                if (!rec) continue;  // 停写是运维契约；并发删除仅防御性跳过
+                if (!rec) continue;  // writes-stopped is the operational contract; a concurrent delete is skipped only defensively
                 auto val = codec::encode_object(*rec);
                 w.u8('O');
                 w.str32(b.name);
@@ -131,7 +134,7 @@ MetaDumpStats dump_meta(IMetaStore& src, std::ostream& out) {
         }
     }
     for (const auto& ps : src.pack_stats()) {
-        if (!ps.sealed) continue;  // 未封存 pack 的账由对象重放重建，账随重启封存
+        if (!ps.sealed) continue;  // unsealed packs' ledger is rebuilt by object replay; the ledger gets sealed on restart
         w.u8('S');
         w.u64(ps.pack_id);
         w.u64(ps.file_size);
@@ -157,8 +160,9 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
                       "duostore meta load: not a duostore meta archive");
     CrcReader r{in};
     MetaDumpStats st;
-    // 已见最大 file_id（kChunk 与 kRados 共号段，见 alloc_file_run 各实现）；
-    // 有无见过用 +1 哨兵表达：0 也是合法 id
+    // Largest file_id seen (kChunk and kRados share the id segment, see the
+    // alloc_file_run implementations); "seen at all" is expressed via a +1
+    // sentinel: 0 is also a valid id
     uint64_t next_chunk = 0, next_pack = 0;
     for (;;) {
         uint8_t tag = r.u8();
@@ -168,7 +172,7 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
                 dst.create_bucket(b);
             } catch (const S3Error& e) {
                 if (e.code != S3ErrorCode::BucketAlreadyOwnedByYou) throw;
-                // 幂等：中断后重跑 load 落到已建的桶
+                // Idempotent: a load rerun after interruption lands on an already-created bucket
             }
             ++st.buckets;
         } else if (tag == 'O') {
@@ -191,7 +195,7 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
             ++st.sealed_packs;
         } else if (tag == 'E') {
             uint64_t nb = r.u64(), no = r.u64(), np = r.u64();
-            uint32_t want = r.crc;  // 计数字段之后、crc 字段之前的累计值
+            uint32_t want = r.crc;  // accumulated value after the count fields, before the crc field
             uint8_t b[4];
             r.raw(b, 4);
             uint32_t got = uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 |
@@ -208,11 +212,14 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
                           "duostore meta load: unknown record tag " + std::to_string(tag));
         }
     }
-    // 计数器抬升：恢复后的新写不得分配 ≤ 已见最大 id 的文件号（数据侧文件已存在，
-    // 撞号 = 静默互写）。经接口烧号段抬高——alloc 单调递增，循环必然终止
+    // Counter raising: post-restore new writes must not allocate file numbers <=
+    // the largest id seen (the data-side files already exist; an id collision =
+    // silent mutual overwrite). Raised by burning id segments through the
+    // interface — alloc is monotonically increasing, so the loop necessarily
+    // terminates
     for (auto [kind, floor] : {std::pair{Extent::Kind::kChunk, next_chunk},
                                std::pair{Extent::Kind::kPack, next_pack}}) {
-        if (floor == 0) continue;  // 本类 extent 一个都没见过
+        if (floor == 0) continue;  // no extent of this kind was ever seen
         for (;;) {
             uint64_t got = dst.alloc_file_run(kind, 1);
             if (got >= floor) break;

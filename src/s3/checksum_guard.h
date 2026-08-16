@@ -1,11 +1,11 @@
-// L2: 请求体完整性校验（docs/gaps.md §5.6）。Content-MD5 与 x-amz-checksum-*
-// 都是"客户端预先声明 body 摘要"，与 x-amz-content-sha256 的区别在于它们独立于
-// 签名：认证关闭时同样生效，作用是挡住传输途中被改写的请求体。
+// L2: request body integrity verification (docs/gaps.md §5.6). Content-MD5 and x-amz-checksum-*
+// are both "client pre-declares the body digest"; unlike x-amz-content-sha256 they are independent of
+// the signature: they still apply when auth is disabled, catching request bodies rewritten in transit.
 //
-// 形态照搬 sigv4.cc 的 Sha256VerifyingReader：读满自报 length() 即比对
-//（cloudproxy 等消费者只读 length() 字节、不再多读一次到 EOF），EOF 路径兜底
-// 无长度的情况；比对失败抛出时最后一块尚未交付下游，配合 backend.h 的
-//"body.read 抛异常则后端不得提交"契约。
+// Shape mirrors Sha256VerifyingReader in sigv4.cc: compare once the self-reported length() is fully read
+// (consumers like cloudproxy read exactly length() bytes and never do an extra read to EOF); the EOF path
+// covers the no-length case. On mismatch the exception is thrown before the last chunk is delivered downstream,
+// working with backend.h's contract that "if body.read throws, the backend must not commit".
 #pragma once
 
 #include <memory>
@@ -23,12 +23,12 @@
 
 namespace lights3::s3 {
 
-// 一次声明可以带多个摘要（Content-MD5 + 某个 x-amz-checksum-*），全部都要校验
+// One declaration may carry multiple digests (Content-MD5 + some x-amz-checksum-*); all must be verified
 struct ExpectedDigest {
     enum class Algo { Md5, Sha1, Sha256, Crc32, Crc32c };
     Algo algo;
-    std::string header;    // 报错时回指具体是哪个头
-    std::string expected;  // 已解码的原始字节
+    std::string header;    // points back to the specific header when reporting errors
+    std::string expected;  // decoded raw bytes
 };
 
 class ChecksumVerifyingReader final : public http::BodyReader {
@@ -51,7 +51,7 @@ public:
                         util::HashStream::Algo::Sha256));
                     break;
                 default:
-                    hashes_.push_back(nullptr);  // crc 系走 crcs_
+                    hashes_.push_back(nullptr);  // crc family goes through crcs_
                     break;
             }
             crcs_.push_back(0);
@@ -91,7 +91,7 @@ private:
                 auto b = hashes_[i]->final_bytes();
                 got.assign(b.begin(), b.end());
             } else {
-                for (int s = 24; s >= 0; s -= 8)  // crc 按大端 4 字节比对（AWS 形态）
+                for (int s = 24; s >= 0; s -= 8)  // crc compared as 4 big-endian bytes (AWS format)
                     got.push_back(char((crcs_[i] >> s) & 0xff));
             }
             if (got != expected_[i].expected)
@@ -109,9 +109,9 @@ private:
     bool done_ = false;
 };
 
-// 请求头里声明的摘要。格式非法（非 base64 / 长度不对）是 InvalidDigest(400)，
-// 与"摘要不符"的 BadDigest 分开——把两者混为一谈会让客户端分不清是自己算错了
-// 还是链路改写了 body
+// Digests declared in request headers. Malformed format (not base64 / wrong length) is InvalidDigest(400),
+// kept separate from BadDigest for "digest mismatch" -- conflating the two leaves clients unable to tell
+// whether they computed it wrong or the transport rewrote the body
 inline std::vector<ExpectedDigest> parse_expected_digests(const http::HttpRequest& req) {
     struct Spec {
         const char* header;
@@ -138,8 +138,8 @@ inline std::vector<ExpectedDigest> parse_expected_digests(const http::HttpReques
     return out;
 }
 
-// body 为空（GET/DELETE 等）时声明的摘要同样要校验：空 body 的 MD5 是确定值，
-// 声明不符照样是 BadDigest
+// Digests declared with an empty body (GET/DELETE etc.) are verified too: the MD5 of an empty body is a
+// fixed value, and a mismatching declaration is still BadDigest
 inline void install_checksum_guard(http::HttpRequest& req) {
     auto expected = parse_expected_digests(req);
     if (expected.empty()) return;

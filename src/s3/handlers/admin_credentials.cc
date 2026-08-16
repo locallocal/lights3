@@ -1,6 +1,6 @@
-// L2: /-/admin/credentials —— 动态凭证管理 API（docs/credential-management.md §2）。
-// 与数据面不同：响应与错误均为 JSON；错误在本 handler 内捕获渲染，
-// 不走 dispatch 外层的 S3 XML 错误路径。
+// L2: /-/admin/credentials -- dynamic credential management API (docs/credential-management.md §2).
+// Unlike the data plane: responses and errors are both JSON; errors are caught and rendered inside this handler,
+// never taking dispatch's outer S3 XML error path.
 #include <nlohmann/json.hpp>
 
 #include "core/log.h"
@@ -22,8 +22,9 @@ http::HttpResponse json_response(int status, const json& j) {
     return resp;
 }
 
-// SK 掩码（docs/gaps.md §5.10）：只保留前 4 位。此前"前 4 + 后 4"在 40 字符里
-// 泄露 8 个，而静态凭证的 SK 是运维手挑的、熵未必够——泄露两端毫无必要
+// SK masking (docs/gaps.md §5.10): keep only the first 4 characters. The previous "first 4 + last 4" leaked
+// 8 of 40 characters, and static-credential SKs are hand-picked by operators with possibly insufficient entropy --
+// leaking both ends is entirely unnecessary
 std::string mask(const std::string& sk) {
     if (sk.size() < 8) return "****";
     return sk.substr(0, 4) + "****";
@@ -41,9 +42,10 @@ const char* source_name(CredSource s) {
 json to_json(const CredentialInfo& c, bool with_secret) {
     json j;
     j["access_key"] = c.access_key;
-    // 静态（root）凭证的明文 SK 永不经 admin API 回传（docs/gaps.md §5.10）：
-    // 它来自配置文件/环境变量，取回它等于把"能读配置"的信任边界降级成一次
-    // HTTP GET——而 root SK 又恰恰无法经 admin API 吊销，泄露了只能改配置重启
+    // The plaintext SK of static (root) credentials is never returned via the admin API (docs/gaps.md §5.10):
+    // it comes from a config file/environment variable, and retrieving it would downgrade the "can read config"
+    // trust boundary to a single HTTP GET -- and the root SK is exactly the one that cannot be revoked via the
+    // admin API; if leaked, the only remedy is changing config and restarting
     if (with_secret && !c.is_static())
         j["secret_key"] = static_cast<const std::string&>(c.secret_key);
     else
@@ -59,8 +61,8 @@ json to_json(const CredentialInfo& c, bool with_secret) {
     return j;
 }
 
-// POST body（可选）：{"comment": "...", "policy": {"buckets": [...], "readonly": bool}}
-// 未知顶层字段与非法 policy 严格拒绝（InvalidRequest）
+// POST body (optional): {"comment": "...", "policy": {"buckets": [...], "readonly": bool}}
+// Unknown top-level fields and invalid policy are strictly rejected (InvalidRequest)
 struct CreateRequest {
     std::string comment;
     std::optional<CredentialPolicy> policy;
@@ -92,7 +94,7 @@ Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
         if (k == "comment") {
             if (!v.is_string())
                 throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
-            out.comment = v.get<std::string>();  // body 优先于 ?comment=
+            out.comment = v.get<std::string>();  // body takes precedence over ?comment=
         } else if (k == "policy") {
             out.policy = parse_policy_json(v.dump());
         } else {
@@ -109,13 +111,13 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
     constexpr std::string_view kBase = "/-/admin/credentials";
     try {
         access_key = auth_.verify(req).access_key;
-        // 两级模型（docs/credential-management.md §3）：仅 root（静态凭证）可用；认证关闭时
-        // verify 返回空 ak，同样落到 AccessDenied——没有 root 就没有管理面
+        // Two-tier model (docs/credential-management.md §3): only root (static credentials) may use this; with auth
+        // disabled, verify returns an empty ak, which also falls to AccessDenied -- no root, no admin plane
         if (!cred_store_ || !cred_store_->is_root(access_key))
             throw S3Error(S3ErrorCode::AccessDenied,
                           "Admin API requires a root (statically configured) credential.");
 
-        // 子路径：/-/admin/credentials[/{ak}]
+        // Subpath: /-/admin/credentials[/{ak}]
         std::string rest = req.path.substr(kBase.size());
         if (!rest.empty() && rest.front() == '/') rest.erase(0, 1);
         if (rest.find('/') != std::string::npos)
@@ -139,7 +141,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                 throw S3Error(S3ErrorCode::InvalidAccessKeyId,
                               "The specified access key does not exist.");
             bool show = req.query_get("show-secret").value_or("") == "true";
-            // 取回明文 SK 是高敏动作：无论给不给都留一条审计线索
+            // Retrieving the plaintext SK is highly sensitive: leave an audit trail whether or not it is granted
             if (show)
                 LOG_WARN("admin: plaintext secret requested for {} by root {}{}", c->access_key,
                          access_key, c->is_static() ? " (static credential — refused)" : "");
@@ -157,7 +159,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
         metrics_.s3_error(e.code);
         json j;
         j["code"] = wire_code(e.code);
-        // 内部错误原始文案可能含后端拓扑：只进日志，响应用固定文案
+        // Raw internal error text may contain backend topology: log only; the response uses fixed wording
         if (e.code == S3ErrorCode::InternalError) {
             LOG_ERROR("admin api {} {} internal error: {}", req.method, req.path, e.message);
             j["message"] = "We encountered an internal error.";
@@ -166,8 +168,8 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
         }
         co_return json_response(http_status(e.code), j);
     } catch (const std::exception& e) {
-        // generate() 的 getentropy/put 失败等 runtime_error：本 handler 承诺
-        // 错误一律渲染 JSON，不得逃到外层的 S3 XML 路径
+        // runtime_error such as getentropy/put failures from generate(): this handler promises all errors
+        // render as JSON and must never escape to the outer S3 XML path
         LOG_ERROR("admin api {} {} internal error: {}", req.method, req.path, e.what());
         metrics_.s3_error(S3ErrorCode::InternalError);
         json j;

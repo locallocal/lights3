@@ -1,5 +1,5 @@
-// L2: AWS Signature V4 认证（见 docs/s3-protocol.md §3）
-// 自实现验签 + 签名（签名端供单测与后续 cloudproxy 转发复用）。
+// L2: AWS Signature V4 authentication (see docs/s3-protocol.md §3)
+// Self-implemented verification + signing (the signing side is reused by unit tests and later by cloudproxy forwarding).
 #pragma once
 
 #include <atomic>
@@ -18,13 +18,13 @@
 
 namespace lights3::s3 {
 
-// 凭证查表接口（docs/s3-protocol.md §3.5、docs/credential-management.md §5.2）：验签热路径同步调用，实现须线程安全。
-// build() 默认包一个静态表实现；CredentialStore 实现本接口后经 set_provider 注入。
-// 一次查表同时带出 SK 与 policy 快照（docs/gaps.md §3.7）：verify 之后再回store 查
-// policy 的话，凭证可能已被 sync/remove 删除——那样查不到不是"无限制"而是竞态窗口
+// Credential lookup interface (docs/s3-protocol.md §3.5, docs/credential-management.md §5.2): called synchronously on the verification hot path; implementations must be thread-safe.
+// build() wraps a static-table implementation by default; CredentialStore implements this interface and is injected via set_provider.
+// A single lookup returns both the SK and a policy snapshot (docs/gaps.md §3.7): querying the store again for the
+// policy after verify risks the credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race window
 struct CredentialLookup {
-    util::SecretString secret_key;  // 析构即擦除（docs/gaps.md §4）
-    std::optional<CredentialPolicy> policy;  // 查表时刻的快照；nullopt = 无限制
+    util::SecretString secret_key;  // wiped on destruction (docs/gaps.md §4)
+    std::optional<CredentialPolicy> policy;  // snapshot at lookup time; nullopt = unrestricted
 };
 
 struct ICredentialProvider {
@@ -32,7 +32,7 @@ struct ICredentialProvider {
     virtual std::optional<CredentialLookup> lookup(std::string_view access_key) const = 0;
     virtual bool has_credentials() const = 0;
 
-    // 便捷取 SK（测试/签名侧）；热路径请直接 lookup 免二次查表
+    // Convenience SK accessor (tests/signing side); hot path should call lookup directly to avoid a second lookup
     std::optional<util::SecretString> secret_for(std::string_view access_key) const {
         auto l = lookup(access_key);
         if (!l) return std::nullopt;
@@ -40,19 +40,20 @@ struct ICredentialProvider {
     }
 };
 
-// verify 的结果：请求方身份 + 验签那一刻的 policy 快照。授权判定必须用这份快照
-// 而不是回 store 二次查表——在途吊销竞态下二次查表落空会让 policy 整体消失
-// （readonly 凭证在窗口内变成不受限凭证，docs/gaps.md §3.7）
+// Result of verify: the requester's identity + the policy snapshot from the moment of verification. Authorization
+// decisions must use this snapshot rather than a second store lookup -- under an in-flight revocation race, a
+// missed second lookup would make the policy vanish entirely
+// (a readonly credential becomes unrestricted within the window, docs/gaps.md §3.7)
 struct VerifiedIdentity {
-    std::string access_key;                  // 认证关闭时为空（供访问日志）
-    std::optional<CredentialPolicy> policy;  // nullopt = 无限制
+    std::string access_key;                  // empty when auth is disabled (for access logs)
+    std::optional<CredentialPolicy> policy;  // nullopt = unrestricted
 };
 
 class SigV4Authenticator {
 public:
     static SigV4Authenticator build(const AuthConfig& cfg);
 
-    // require_auth_ 为 atomic（不可隐式拷贝/移动）：装配期按值搬运须显式定义
+    // require_auth_ is atomic (not implicitly copyable/movable): moving by value during assembly needs explicit definitions
     SigV4Authenticator() = default;
     SigV4Authenticator(SigV4Authenticator&& o) noexcept
         : clock(std::move(o.clock)),
@@ -72,9 +73,10 @@ public:
         if (provider_ && provider_->has_credentials()) require_auth_.store(true);
     }
 
-    // 认证开关只升不降（防 fail-open）：一旦观察到
-    // 凭证表非空即固化为"必须认证"，运行期表被清空不再放行匿名（此后未知 AK 走
-    // InvalidAccessKeyId，fail-closed）；表由空变非空仍即时开启（首个动态凭证生成即生效）
+    // The auth switch only ratchets up, never down (prevents fail-open): once the credential table is observed
+    // non-empty, "auth required" is latched, and a table emptied at runtime no longer admits anonymous requests
+    // (unknown AKs then get InvalidAccessKeyId, fail-closed); a table going from empty to non-empty still enables
+    // auth immediately (the first generated dynamic credential takes effect at once)
     bool enabled() const {
         if (require_auth_.load(std::memory_order_relaxed)) return true;
         bool has = provider_ && provider_->has_credentials();
@@ -83,29 +85,29 @@ public:
     }
     const std::string& region() const { return region_; }
 
-    // 验签失败抛 S3Error；返回请求方身份与验签时刻的 policy 快照。
-    // 通过后如需 payload 校验，把 req.body 包装为流式校验 reader：
-    //  - hex 摘要 → SHA256 校验（EOF 不匹配抛 XAmzContentSHA256Mismatch）
-    //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] → aws-chunked 剥壳 +
-    //    逐 chunk 签名链验证（docs/s3-protocol.md §3.2）
-    //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER → 仅剥壳
+    // Verification failure throws S3Error; returns the requester identity and the policy snapshot at verify time.
+    // If payload verification is needed after passing, wrap req.body in a streaming verifying reader:
+    //  - hex digest -> SHA256 verification (mismatch at EOF throws XAmzContentSHA256Mismatch)
+    //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] -> aws-chunked de-framing +
+    //    per-chunk signature chain verification (docs/s3-protocol.md §3.2)
+    //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER -> de-framing only
     VerifiedIdentity verify(http::HttpRequest& req) const;
 
-    // presigned URL 的 X-Amz-Expires 上限（7 天，与 S3 一致）
+    // X-Amz-Expires cap for presigned URLs (7 days, matching S3)
     static constexpr long kMaxPresignExpires = 7 * 24 * 3600;
 
-    // 为请求补充 x-amz-date / x-amz-content-sha256 / Authorization
-    // （payload_hash 传空则按空 body 计算）
+    // Adds x-amz-date / x-amz-content-sha256 / Authorization to the request
+    // (empty payload_hash computes as an empty body)
     void sign(http::HttpRequest& req, const Credential& cred,
               std::string payload_hash = "") const;
 
-    // 时钟可注入（单测固定时间）
+    // Injectable clock (fixed time in unit tests)
     std::function<util::SysTime()> clock = [] { return std::chrono::system_clock::now(); };
 
     static constexpr int kMaxClockSkewSec = 15 * 60;
 
 private:
-    // presigned=true 时把 X-Amz-Signature 排除出 canonical query（仅 presigned 请求）
+    // With presigned=true, X-Amz-Signature is excluded from the canonical query (presigned requests only)
     std::string signature_for(const http::HttpRequest& req, const std::string& secret_key,
                               const std::string& amz_date, const std::string& scope,
                               const std::string& signed_headers,

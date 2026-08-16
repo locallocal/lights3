@@ -1,8 +1,10 @@
-// L1: cpp-httplib 驱动 —— 同步模型，thread-per-request（docs/http-adapter.md §3.2）。
-// 请求线程 sync_wait(handler(req)) 阻塞至协程完成；home executor 为 inline。
-// httplib 的 ContentReader 是推模型，由 pump 线程经有界缓冲队列翻转成拉模型，
-// 队列容量即背压：存储写得慢，pump 就停在 push，socket 停止收数据。
-// 定位：功能验证、低并发场景；不是性能路径。
+// L1: cpp-httplib driver — synchronous model, thread-per-request (docs/http-adapter.md §3.2).
+// The request thread blocks in sync_wait(handler(req)) until the coroutine
+// completes; the home executor is inline. httplib's ContentReader is a push
+// model, inverted into a pull model by a pump thread through a bounded buffer
+// queue; the queue capacity is the backpressure: if storage writes slowly, the
+// pump stalls in push and the socket stops receiving.
+// Positioning: functional validation, low-concurrency scenarios; not a performance path.
 #include <httplib/httplib.h>
 
 #include <atomic>
@@ -21,17 +23,19 @@ namespace lights3::http {
 
 namespace {
 
-// 推转拉的 BlockQueue / QueueBodyReader 已提取为共享组件（http/pushpull.h，
-// cloudproxy 后端同用，docs/cloudproxy-backend.md §3.1）
+// The push-to-pull BlockQueue / QueueBodyReader have been extracted into a
+// shared component (http/pushpull.h, also used by the cloudproxy backend,
+// docs/cloudproxy-backend.md §3.1)
 
-// httplib 在 process_request 里塞进 headers 的连接信息伪头，不属于 HTTP 报文
+// Connection-info pseudo-headers httplib injects into headers in process_request; not part of the HTTP message
 bool is_pseudo_header(const std::string& k) {
     return k == "REMOTE_ADDR" || k == "REMOTE_PORT" || k == "LOCAL_ADDR" || k == "LOCAL_PORT";
 }
 
-// 兜底响应搬进 httplib::Response（docs/gaps.md §4）：此前各处只搬 status 与 body，
-// x-amz-request-id 头被丢在 HttpResponse 里——XML 里有 id 而头里没有，恰是另三驱动
-// 都不会出现的不一致
+// Copies a fallback response into httplib::Response (docs/gaps.md §4):
+// previously each call site copied only status and body, leaving the
+// x-amz-request-id header behind in HttpResponse — id in the XML but not in
+// the headers, an inconsistency none of the other three drivers exhibit
 void apply_fallback(httplib::Response& rs, const HttpResponse& src) {
     rs.status = src.status;
     rs.set_content(src.small_body, "application/xml");
@@ -41,8 +45,9 @@ void apply_fallback(httplib::Response& rs, const HttpResponse& src) {
 class HttplibServer final : public IHttpServer {
 public:
     explicit HttplibServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS（docs/gaps.md §7）：SSLServer 是 Server 的子类，构造期加载证书。
-        // 失败必须当场抛（is_valid() 为假时 listen 只会静默失败）
+        // TLS (docs/gaps.md §7): SSLServer is a subclass of Server and loads
+        // the certificate at construction. Failure must throw right here
+        // (when is_valid() is false, listen just fails silently)
         if (!cfg.tls_cert.empty()) {
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
             auto ssl = std::make_unique<httplib::SSLServer>(cfg.tls_cert.c_str(),
@@ -53,17 +58,20 @@ public:
             svr_ = std::move(ssl);
             tls_ = true;
 #else
-            // CMake 侧任一 httplib 消费者（本驱动或 cloudproxy）开启即定义该宏，
-            // 走到这里说明构建配置被手工改过
+            // The macro is defined whenever any httplib consumer (this driver
+            // or cloudproxy) is enabled on the CMake side; reaching here means
+            // the build configuration was hand-edited
             throw std::runtime_error(
                 "httplib driver was built without CPPHTTPLIB_OPENSSL_SUPPORT; TLS unavailable");
 #endif
         } else {
             svr_ = std::make_unique<httplib::Server>();
         }
-        // 上游对**单行**头有编译期上限 CPPHTTPLIB_HEADER_MAX_LENGTH（8KiB），
-        // 不可配。配置值大于它时超长单行仍会被上游先拒掉，行为与另三驱动不同——
-        // 明确告警而不是让它悄悄生效
+        // Upstream has a compile-time limit on a **single** header line,
+        // CPPHTTPLIB_HEADER_MAX_LENGTH (8KiB), not configurable. When the
+        // configured value exceeds it, over-long single lines are still
+        // rejected by upstream first — behavior differing from the other three
+        // drivers — so warn explicitly instead of letting it apply silently
         if (cfg.max_header_size > CPPHTTPLIB_HEADER_MAX_LENGTH)
             LOG_WARN(
                 "httplib driver: single header lines above {} bytes are rejected by the upstream "
@@ -89,12 +97,16 @@ public:
                 }
                 apply_fallback(rs, driver::internal_error_response(what));
             });
-        // Expect: 100-continue（docs/http-adapter.md §3.1 要求延迟应答）。
-        // 上游 API 只有三种出路：立即回 100 / 回 417 / 以最终响应关连接——
-        // "抑制自动应答、handler 决定后再回 100"在 v0.20 不可表达，属该驱动的
-        // 已知限制（本驱动定位功能验证，误发 100 后的无效 body 由 handle() 的
-        // 4MiB 有界排空 + 关连接兜住）。此处能做的：消息边界违规在邀请客户端
-        // 上传之前就以 400 拒绝，不再是"先回 100 再拒"
+        // Expect: 100-continue (docs/http-adapter.md §3.1 requires deferred
+        // reply). The upstream API offers only three outcomes: reply 100
+        // immediately / reply 417 / close the connection with a final
+        // response — "suppress the automatic reply and send 100 after the
+        // handler decides" is not expressible in v0.20; a known limitation of
+        // this driver (it targets functional validation, and the useless body
+        // after a mistaken 100 is contained by handle()'s 4MiB bounded drain
+        // + connection close). What we can do here: reject framing violations
+        // with 400 before inviting the client to upload, instead of
+        // "reply 100 first, then reject"
         svr_->set_expect_100_continue_handler(
             [](const httplib::Request& rq, httplib::Response& rs) {
                 HeaderMap headers;
@@ -103,16 +115,19 @@ public:
                 if (!driver::parse_body_framing(headers).valid) {
                     auto bad = driver::bad_request_response("Invalid message framing.");
                     apply_fallback(rs, bad);
-                    return bad.status;  // 非 100/417：上游发出该响应并关连接
+                    return bad.status;  // Not 100/417: upstream sends this response and closes the connection
                 }
                 return static_cast<int>(httplib::StatusCode::Continue_100);
             });
 
-        // 上游自产的错误响应（未注册方法 → 路由 404、请求行/头非法 → 400 等）
-        // 此前直接回 httplib 的非 S3 报文，破坏"四驱动接受/拒绝集合一致"。这里
-        // 统一补成 S3 XML；body 非空说明是 handler 自己渲染的错误，不覆盖。
-        // 路由 404 只可能是"方法没注册"（下面对全部业务方法注册了 ".*"），
-        // 与另三驱动一致地翻译成 405 MethodNotAllowed
+        // Error responses produced by upstream itself (unregistered method ->
+        // routing 404, invalid request line/headers -> 400, etc.) previously
+        // went out as httplib's non-S3 messages, breaking "all four drivers
+        // accept/reject the same set". Normalize them into S3 XML here; a
+        // non-empty body means the handler rendered its own error, so leave
+        // it alone. A routing 404 can only mean "method not registered"
+        // (".*" is registered below for all business methods), so translate
+        // it to 405 MethodNotAllowed like the other three drivers
         svr_->set_error_handler([](const httplib::Request&, httplib::Response& rs) {
             using HR = httplib::Server::HandlerResponse;
             if (!rs.body.empty()) return HR::Unhandled;
@@ -127,7 +142,7 @@ public:
                 case 505: code = s3::S3ErrorCode::NotImplemented; break;
                 default: if (rs.status < 500) code = s3::S3ErrorCode::InvalidRequest; break;
             }
-            int status = rs.status;  // 上面已按上游语义定好，不能被兜底的映射覆盖
+            int status = rs.status;  // Already set per upstream semantics above; must not be overridden by the fallback mapping
             apply_fallback(rs,
                            driver::upstream_error_response(code, "Request rejected by the HTTP layer."));
             rs.status = status;
@@ -140,7 +155,7 @@ public:
         };
         auto with_body = [this](const httplib::Request& rq, httplib::Response& rs,
                                 const httplib::ContentReader& cr) { handle(rq, rs, &cr); };
-        svr_->Get(pat, no_body);       // HEAD 由 httplib 复用 Get 路由
+        svr_->Get(pat, no_body);       // HEAD reuses the Get route in httplib
         svr_->Options(pat, no_body);
         svr_->Post(pat, with_body);
         svr_->Put(pat, with_body);
@@ -167,20 +182,24 @@ public:
     uint16_t bound_port() const override { return port_; }
 
     void run() override {
-        // shutdown 早于 run 的补偿（另三驱动同款）：不检查则该顺序下 stop() 是
-        // no-op（is_running_ 未置位），listen 永不返回
+        // Compensates for shutdown arriving before run (same as the other
+        // three drivers): without this check, stop() in that ordering is a
+        // no-op (is_running_ not yet set) and listen never returns
         if (!stopping_.load()) {
-            svr_->listen_after_bind();  // 返回前 httplib 线程池已 join（在途请求跑完）
+            svr_->listen_after_bind();  // httplib's thread pool is joined before returning (in-flight requests finished)
         }
         LOG_INFO("httplib http server stopped");
     }
 
     void shutdown() override {
         stopping_.store(true);
-        // 顺序敏感：stop() 会把 is_decommissioned 复位，必须先 stop 后 decommission。
-        // 已在运行 → stop() 关监听 socket 使循环退出；尚未运行 → decommission()
-        // 使随后的 listen_after_bind() 立即返回。上游 listen_internal 的
-        // decommission 检查与 is_running_ 置位之间仍有纳秒级窗口，属上游 API 限制
+        // Order-sensitive: stop() resets is_decommissioned, so it must come
+        // before decommission. Already running -> stop() closes the listening
+        // socket so the loop exits; not yet running -> decommission() makes
+        // the subsequent listen_after_bind() return immediately. A
+        // nanosecond-scale window still exists between upstream
+        // listen_internal's decommission check and setting is_running_ —
+        // an upstream API limitation
         svr_->stop();
         svr_->decommission();
     }
@@ -188,7 +207,7 @@ public:
 private:
     void handle(const httplib::Request& rq, httplib::Response& rs,
                 const httplib::ContentReader* content_reader) {
-        // Range 由 L2 处理并直接回 206；清掉 ranges 防止 httplib 对 2xx 响应二次切片
+        // Range is handled by L2, which replies 206 directly; clear ranges so httplib does not re-slice 2xx responses
         const_cast<httplib::Request&>(rq).ranges.clear();
 
         HttpRequest req;
@@ -198,48 +217,56 @@ private:
             if (!is_pseudo_header(k)) req.headers.add(k, v);
         req.remote_addr = rq.remote_addr;
 
-        // 消息边界校验（drivers/common.h parse_body_framing）：httplib 自身对
-        // CL/TE 冲突、非数字 Content-Length 等更宽松，一律在 L1 拒绝并关连接，
-        // 保证四个驱动接受/拒绝的请求集合一致
+        // Message framing validation (drivers/common.h parse_body_framing):
+        // httplib itself is more lenient about CL/TE conflicts, non-numeric
+        // Content-Length, etc.; reject all of them at L1 and close the
+        // connection, so all four drivers accept/reject the same request set
         auto reject = [&](const char* why) {
             apply_fallback(rs, driver::bad_request_response(why));
-            rs.set_header("Connection", "close");  // 边界已存疑，不复用连接
+            rs.set_header("Connection", "close");  // Framing is suspect; do not reuse the connection
         };
         auto framing = driver::parse_body_framing(req.headers);
         if (!framing.valid) {
             reject("Invalid message framing.");
             return;
         }
-        // http.max_header_size 此前被本驱动完全忽略（另三驱动都按它拒收），
-        // 四驱动的接受集合因此不一致。上游只有编译期的单行上限
-        // CPPHTTPLIB_HEADER_MAX_LENGTH，配置值在这里补做整体校验
+        // http.max_header_size was previously ignored entirely by this driver
+        // (the other three all reject by it), making the four drivers'
+        // accepted sets inconsistent. Upstream only has the compile-time
+        // single-line cap CPPHTTPLIB_HEADER_MAX_LENGTH; the configured value
+        // gets an aggregate check here
         size_t header_bytes = 0;
         for (auto& [k, v] : rq.headers)
             if (!is_pseudo_header(k)) header_bytes += k.size() + v.size() + 4;  // ": " + CRLF
         if (header_bytes > cfg_.max_header_size) {
             apply_fallback(rs, driver::upstream_error_response(s3::S3ErrorCode::InvalidRequest,
                                                               "Request header fields too large."));
-            rs.status = 431;  // InvalidRequest 映射 400，此处按上游语义回 431
+            rs.status = 431;  // InvalidRequest maps to 400; reply 431 here per upstream semantics
             rs.set_header("Connection", "close");
             return;
         }
         std::optional<uint64_t> content_length = framing.content_length;
         bool chunked = framing.chunked;
-        // Connection 是 token 列表：上游只做全等比较，"close, Upgrade" 会被当成
-        // keep-alive，响应里也不会带 Connection: close（另三驱动都按 token 判定）。
-        // 这里自行判定并补上响应头，客户端据此关连接
+        // Connection is a token list: upstream only compares for full
+        // equality, so "close, Upgrade" would be treated as keep-alive and
+        // the response would lack Connection: close (the other three drivers
+        // all match by token). Decide here ourselves and add the response
+        // header so the client closes the connection
         bool client_wants_close = req.headers.has_token("Connection", "close");
 
-        // httplib 不给 GET/OPTIONS 路由提供 ContentReader：带非零 body 的这类
-        // 请求无法满足 BodyReader 契约（length() 报 N 但立即 EOF），直接 400
+        // httplib provides no ContentReader for GET/OPTIONS routes: such
+        // requests with a non-zero body cannot satisfy the BodyReader
+        // contract (length() reports N but EOF is immediate), so reply 400
         if (!content_reader && ((content_length && *content_length > 0) || chunked)) {
             reject("Request body is not supported for this method.");
             return;
         }
 
-        // 推转拉：pump 线程驱动 ContentReader 往队列灌；请求线程在
-        // sync_wait_pumping 里运行 req_exec 队列，body 的 cv 阻塞切回请求线程
-        // 执行（docs/gaps.md §2.10），不占共享池线程
+        // Push-to-pull: the pump thread drives the ContentReader to fill the
+        // queue; the request thread runs the req_exec queue inside
+        // sync_wait_pumping, and the body's cv blocking switches back to the
+        // request thread to execute (docs/gaps.md §2.10), not occupying a
+        // shared pool thread
         PumpExecutor req_exec;
         std::shared_ptr<BlockQueue> queue;
         std::thread pump;
@@ -259,12 +286,12 @@ private:
         try {
             resp = sync_wait_pumping(req_exec, handler_(std::move(req)));
         } catch (const std::exception& e) {
-            // L2 会兜底一切异常，到这里说明 L2 之外出了问题（契约 2）
+            // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2)
             resp = driver::internal_error_response(e.what());
         }
 
         if (pump.joinable()) {
-            // handler 可能没读完 body：有限排空以保住连接，过大则取消（连接随后关闭）
+            // The handler may not have read the whole body: drain a bounded amount to keep the connection, cancel if too large (connection closes afterwards)
             try {
                 std::byte tmp[driver::kScratchBytes];
                 uint64_t drained = 0;
@@ -278,7 +305,7 @@ private:
                     }
                 }
             } catch (...) {
-                // 客户端断连：pump 已收尾
+                // Client disconnected: the pump has already wrapped up
             }
             queue->cancel();
             pump.join();
@@ -296,9 +323,9 @@ private:
             if (HeaderMap::ieq(k, "Content-Type")) {
                 content_type = v;
                 has_content_type = true;
-                continue;  // set_content 系列会写入，避免重复
+                continue;  // The set_content family writes it; avoid duplication
             }
-            // 长度/编码/连接管理是 httplib 的内部职责（契约 5）
+            // Length/encoding/connection management is httplib's internal responsibility (contract 5)
             if (HeaderMap::ieq(k, "Content-Length") || HeaderMap::ieq(k, "Transfer-Encoding") ||
                 HeaderMap::ieq(k, "Connection") || HeaderMap::ieq(k, "Keep-Alive"))
                 continue;
@@ -308,9 +335,11 @@ private:
             rs.set_header("Date", util::http_date(std::chrono::system_clock::now()));
 
         if (head_request) {
-            // HEAD 不经 set_content 系列（httplib 不写 body），头部直接给出。
-            // 长度未知（流式无 content_length）时两个框架头都不写并关连接
-            //（drivers/common.h 契约 6，四驱动统一）——写 0 是撒谎
+            // HEAD skips the set_content family (httplib writes no body); the
+            // headers are set directly. When the length is unknown (streaming
+            // without content_length), write neither framing header and close
+            // the connection (drivers/common.h contract 6, uniform across the
+            // four drivers) — writing 0 would be a lie
             if (has_content_type) rs.set_header("Content-Type", content_type);
             if (driver::head_length_known(resp))
                 rs.set_header("Content-Length",
@@ -326,9 +355,11 @@ private:
             return;
         }
 
-        // 流式响应：httplib 的 content provider 本身是拉模型，逐块 sync_wait 即可。
-        // reader 与复用缓冲的所有权都交给闭包（响应写出发生在本回调返回之后）；
-        // 缓冲随闭包存活（docs/gaps.md §4：此前每 64KiB 块构造一次 vector）
+        // Streaming response: httplib's content provider is itself a pull
+        // model, so sync_wait per chunk suffices. Ownership of the reader and
+        // the reused buffer goes to the closure (the response is written out
+        // after this callback returns); the buffer lives with the closure
+        // (docs/gaps.md §4: previously a vector was constructed per 64KiB chunk)
         std::shared_ptr<BodyReader> body(std::move(resp.stream_body));
         auto buf = std::make_shared<std::vector<std::byte>>(cfg_.io_chunk_size);
         if (resp.content_length) {
@@ -341,9 +372,9 @@ private:
                         n = sync_wait(body->read(std::span(buf->data(), want)));
                     } catch (const std::exception& e) {
                         LOG_ERROR("stream body read failed mid-response: {}", e.what());
-                        return false;  // 响应头已发出，只能断连（契约 3）
+                        return false;  // Response head already sent; can only disconnect (contract 3)
                     }
-                    if (n == 0) return false;  // 长度未到就 EOF，视为错误
+                    if (n == 0) return false;  // EOF before the length is reached counts as an error
                     return sink.write(reinterpret_cast<const char*>(buf->data()), n);
                 });
         } else {
@@ -367,7 +398,7 @@ private:
 
     HttpConfig cfg_;
     Handler handler_;
-    std::unique_ptr<httplib::Server> svr_;  // TLS 时实为 SSLServer（构造函数决定）
+    std::unique_ptr<httplib::Server> svr_;  // Actually an SSLServer under TLS (decided in the constructor)
     bool tls_ = false;
     uint16_t port_ = 0;
     std::atomic<bool> stopping_{false};

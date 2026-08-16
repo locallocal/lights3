@@ -1,4 +1,4 @@
-// L2: 请求指标（docs/s3-protocol.md §7），GET /-/metrics 以 Prometheus 文本格式输出
+// L2: request metrics (docs/s3-protocol.md §7), emitted by GET /-/metrics in Prometheus text format
 #pragma once
 
 #include <array>
@@ -16,23 +16,23 @@
 
 namespace lights3::s3 {
 
-// 入口限流（runtime.max_inflight_requests 信号量）的准入快照（docs/gaps.md §7）：
-// 压测时"卡在准入"还是"卡在池"靠这两个数区分
+// Admission snapshot of ingress throttling (the runtime.max_inflight_requests semaphore) (docs/gaps.md §7):
+// under load testing, these two numbers distinguish "stuck at admission" from "stuck in the pool"
 struct AdmissionStats {
-    long capacity = 0;   // 总许可数
-    long available = 0;  // 剩余许可（capacity - available = 在途）
-    size_t waiting = 0;  // 排在信号量上的请求数
+    long capacity = 0;   // total permits
+    long available = 0;  // remaining permits (capacity - available = in flight)
+    size_t waiting = 0;  // requests queued on the semaphore
 };
 
 class Metrics {
 public:
-    // 延迟直方图桶上界（秒），末桶为 +Inf
+    // Latency histogram bucket upper bounds (seconds); last bucket is +Inf
     static constexpr std::array<double, 6> kLatencyBuckets{0.005, 0.02, 0.1, 0.5, 2.0, 10.0};
 
     void request_start() { inflight_.fetch_add(1, std::memory_order_relaxed); }
     void request_end(std::string_view method, int status, double seconds);
-    // 免锁（docs/gaps.md §4：此前每个错误响应抢一把全局互斥）：码集有界且与
-    // 枚举同源，定长原子数组按枚举值下标
+    // Lock-free (docs/gaps.md §4: previously every error response contended on one global mutex): the code set
+    // is bounded and shares its source with the enum; fixed-size atomic array indexed by enum value
     void s3_error(S3ErrorCode code) {
         errors_[size_t(code)].fetch_add(1, std::memory_order_relaxed);
     }
@@ -40,13 +40,13 @@ public:
     void mpu_created() { mpu_created_.fetch_add(1, std::memory_order_relaxed); }
     void mpu_finished() { mpu_finished_.fetch_add(1, std::memory_order_relaxed); }
 
-    // 字节数与 per-bucket 维度（docs/gaps.md §7）。bucket 可为空（service 级
-    // 请求只计全局）；跟踪的 bucket 数有上限，溢出并入 "_other" 防标签基数爆炸
+    // Byte counts and per-bucket dimension (docs/gaps.md §7). bucket may be empty (service-level
+    // requests count only globally); tracked bucket count is capped, overflow folds into "_other" to prevent label cardinality explosion
     void add_bytes_in(std::string_view bucket, uint64_t n);
     void add_bytes_out(std::string_view bucket, uint64_t n);
     void record_bucket_request(std::string_view bucket);
 
-    // pool_stats / admission / timer_stats 均可空（未接线时省略对应指标）
+    // pool_stats / admission / timer_stats may each be empty (corresponding metrics omitted when not wired up)
     std::string render(const std::function<ThreadPool::Stats()>& pool_stats,
                        const std::function<AdmissionStats()>& admission = {},
                        const std::function<TimerQueue::Stats()>& timer_stats = {}) const;
@@ -63,12 +63,12 @@ private:
         uint64_t bytes_in = 0;
         uint64_t bytes_out = 0;
     };
-    // 上锁返回槽位；超过上限的新 bucket 共享 "_other" 槽
+    // Returns the slot under lock; new buckets beyond the cap share the "_other" slot
     BucketStats& bucket_slot_locked(std::string_view bucket);
 
     std::atomic<uint64_t> inflight_{0};
     std::atomic<uint64_t> by_method_[kMethodCount]{};
-    std::atomic<uint64_t> by_status_class_[6]{};  // 1xx..5xx（下标 = 百位数）
+    std::atomic<uint64_t> by_status_class_[6]{};  // 1xx..5xx (index = hundreds digit)
     std::atomic<uint64_t> latency_hist_[kLatencyBuckets.size() + 1]{};
     std::atomic<uint64_t> latency_sum_us_{0};
     std::atomic<uint64_t> latency_count_{0};
@@ -77,12 +77,12 @@ private:
     std::atomic<uint64_t> bytes_in_{0};
     std::atomic<uint64_t> bytes_out_{0};
 
-    // per-bucket 表：热路径每 64KiB 块一次加锁，临界区只有 map 查找 + 整数加，
-    // 与请求主路径的免锁原子计数不同档但可接受（bucket 维度天然要有名字做键）
+    // per-bucket table: hot path locks once per 64KiB chunk, critical section is just a map lookup + integer add;
+    // a tier below the request main path's lock-free atomics but acceptable (the bucket dimension inherently needs a name key)
     mutable std::mutex bucket_m_;
     std::map<std::string, BucketStats, std::less<>> by_bucket_;
 
-    std::atomic<uint64_t> errors_[kS3ErrorCodeCount]{};  // 按 S3ErrorCode 下标
+    std::atomic<uint64_t> errors_[kS3ErrorCodeCount]{};  // indexed by S3ErrorCode
 };
 
 }  // namespace lights3::s3

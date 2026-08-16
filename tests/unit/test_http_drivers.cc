@@ -1,5 +1,5 @@
-// 驱动一致性测试（docs/http-adapter.md §4）：所有已编译 driver 跑同一组契约用例。
-// 用裸 TCP 客户端直接说 HTTP/1.1，验证驱动行为而非 L2 语义。
+// Driver consistency tests (docs/http-adapter.md §4): every compiled driver runs the same set of contract cases.
+// A raw TCP client speaks HTTP/1.1 directly, verifying driver behavior rather than L2 semantics.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <openssl/ssl.h>
@@ -28,7 +28,7 @@ using namespace lights3::http;
 
 namespace {
 
-// ---------- 测试 handler ----------
+// ---------- Test handler ----------
 
 std::atomic<bool> g_disconnect_seen{false};
 
@@ -65,7 +65,7 @@ Task<HttpResponse> consume_and_sum(HttpRequest req, HttpResponse resp) {
         for (size_t i = 0; i < n; ++i) sum += std::to_integer<uint8_t>(buf[i]);
         total += n;
     }
-    // 契约 1：EOF 后再调用仍返回 0
+    // Contract 1: calls after EOF still return 0
     size_t again = co_await req.body->read(std::span(buf));
     resp.small_body = std::to_string(total) + ":" + std::to_string(sum) + ":" +
                       (again == 0 ? "eof-ok" : "eof-bad");
@@ -76,7 +76,7 @@ Task<HttpResponse> test_handler(HttpRequest req) {
     HttpResponse resp;
     resp.headers.set("Content-Type", "text/plain");
 
-    if (req.path == "/method") {  // 回显方法：验证 L1 是否原样转发未知方法
+    if (req.path == "/method") {  // echo the method: verifies whether L1 forwards unknown methods verbatim
         resp.small_body = req.method;
         co_return resp;
     }
@@ -89,7 +89,7 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         try {
             co_return co_await consume_and_sum(std::move(req), std::move(resp));
         } catch (const std::exception&) {
-            g_disconnect_seen.store(true);  // 契约 3：断连以异常传播到消费方
+            g_disconnect_seen.store(true);  // contract 3: disconnect propagates to the consumer as an exception
             throw;
         }
     }
@@ -99,24 +99,24 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         if (req.path == "/stream") resp.content_length = size;
         co_return resp;
     }
-    if (req.path == "/short") {  // 后端截断：声明 size，实际只给一半
+    if (req.path == "/short") {  // backend truncation: declares size but delivers only half
         uint64_t size = std::stoull(req.query_get("size").value_or("0"));
         resp.stream_body = std::make_unique<PatternReader>(size / 2);
         resp.content_length = size;
         co_return resp;
     }
-    if (req.path == "/noread") {  // 故意不消费 body（100-continue 拒绝场景）
+    if (req.path == "/noread") {  // deliberately do not consume the body (100-continue rejection scenario)
         resp.small_body = "ok";
         co_return resp;
     }
-    if (req.path == "/badheader") {  // 出站头注入面：CR/LF 值与非法头名必须被丢弃
+    if (req.path == "/badheader") {  // outbound header injection surface: CR/LF values and illegal header names must be dropped
         resp.headers.set("X-Evil", "a\r\nInjected: 1");
         resp.headers.set("Bad Name", "v");
         resp.headers.set("X-Fine", "ok");
         resp.small_body = "ok";
         co_return resp;
     }
-    if (req.path == "/slow") {  // ms 可调：shutdown 契约测试用它模拟在途请求
+    if (req.path == "/slow") {  // ms tunable: the shutdown contract tests use it to simulate in-flight requests
         uint64_t ms = std::stoull(req.query_get("ms").value_or("500"));
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         resp.small_body = "done";
@@ -127,15 +127,15 @@ Task<HttpResponse> test_handler(HttpRequest req) {
     co_return resp;
 }
 
-// ---------- 服务器夹具 ----------
+// ---------- Server fixture ----------
 
 struct TestServer {
     std::unique_ptr<IHttpServer> srv;
     std::thread th;
     uint16_t port = 0;
 
-    // tls_cert/tls_key 非空即起 TLS 端口。断言失败的展开路径由析构保证 join——
-    // 用例内手写 joinable std::thread 的话，展开先析构线程即 std::terminate
+    // A non-empty tls_cert/tls_key starts the TLS port. The unwind path of a failed assertion is joined by the destructor --
+    // with a hand-written joinable std::thread in a test case, unwinding would destroy the thread first, i.e. std::terminate
     explicit TestServer(const std::string& driver, const std::string& tls_cert = "",
                         const std::string& tls_key = "") {
         HttpConfig cfg;
@@ -146,7 +146,7 @@ struct TestServer {
         cfg.tls_key = tls_key;
         start(driver, cfg);
     }
-    // 超时/上限契约测试用：tweak 在缺省配置上改写目标旋钮
+    // For timeout/limit contract tests: tweak rewrites the target knob on the default config
     TestServer(const std::string& driver, const std::function<void(HttpConfig&)>& tweak) {
         HttpConfig cfg;
         cfg.driver = driver;
@@ -171,7 +171,7 @@ struct TestServer {
     }
 };
 
-// ---------- 裸 TCP HTTP 客户端 ----------
+// ---------- Raw TCP HTTP client ----------
 
 struct Resp {
     bool ok = false;
@@ -295,7 +295,7 @@ struct Client {
                 if (!read_line(line)) return r;
                 if (line.empty()) continue;
                 size_t sz = std::stoull(line, nullptr, 16);
-                if (sz == 0) {  // trailer 直到空行
+                if (sz == 0) {  // trailers until the empty line
                     while (read_line(line) && !line.empty()) {}
                     r.ok = true;
                     return r;
@@ -307,7 +307,7 @@ struct Client {
             r.ok = read_n(r.body, std::stoull(cl));
             return r;
         }
-        // 无长度信息：读到连接关闭
+        // No length information: read until the connection closes
         for (;;) {
             if (pos < end) {
                 r.body.append(buf + pos, end - pos);
@@ -322,7 +322,7 @@ struct Client {
         return r;
     }
 
-    // 读一个完整响应，自动跳过 1xx 中间应答
+    // Read one complete response, automatically skipping 1xx interim replies
     Resp read_response(bool head_request = false) {
         Head h;
         for (;;) {
@@ -344,7 +344,7 @@ std::string expected_sum(uint64_t n) {
 }
 
 void for_each_driver(const std::function<void(const std::string&)>& fn) {
-    signal(SIGPIPE, SIG_IGN);  // 断连场景驱动可能写已关闭的 socket
+    signal(SIGPIPE, SIG_IGN);  // in disconnect scenarios the driver may write to an already-closed socket
     auto drivers = HttpServerFactory::drivers();
     CHECK(!drivers.empty());
     for (auto& d : drivers) {
@@ -360,7 +360,7 @@ void for_each_driver(const std::function<void(const std::string&)>& fn) {
 
 }  // namespace
 
-// ---------- 用例 ----------
+// ---------- Test cases ----------
 
 TEST(http_driver_registry_complete) {
     auto ds = HttpServerFactory::drivers();
@@ -433,7 +433,7 @@ TEST(http_driver_chunked_request) {
         c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n");
         auto data = make_pattern(size);
         size_t sent = 0;
-        while (sent < data.size()) {  // 分不规则块发送
+        while (sent < data.size()) {  // send in irregular pieces
             size_t n = std::min<size_t>(data.size() - sent, 40000);
             char hdr[32];
             snprintf(hdr, sizeof(hdr), "%zx\r\n", n);
@@ -458,7 +458,7 @@ TEST(http_driver_expect_100_continue) {
         c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: " +
                    std::to_string(size) + "\r\n\r\n");
         Client::Head h;
-        CHECK(c.read_head(h));  // 所有驱动最终都会给 100（beast 在 handler 首读时才回）
+        CHECK(c.read_head(h));  // all drivers eventually send 100 (beast replies only at the handler's first read)
         CHECK_EQ(h.status, 100);
         c.send_str(make_pattern(size));
         auto r = c.read_response();
@@ -474,8 +474,8 @@ TEST(http_driver_expect_100_rejected_without_body) {
         Client c(ts.port);
         c.send_str("PUT /noread HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\n"
                    "Content-Length: 1000000\r\n\r\n");
-        // handler 不读 body 直接回复。延迟 100 的驱动（builtin/beast）直接给最终响应，
-        // 客户端无需上传 1MB；httplib 会先回 100，客户端按协议把 body 发完
+        // The handler replies without reading the body. Drivers that delay the 100 (builtin/beast) send the final response directly,
+        // so the client need not upload 1MB; httplib sends 100 first and the client finishes the body per protocol
         Client::Head h;
         CHECK(c.read_head(h));
         if (h.status == 100) {
@@ -500,7 +500,7 @@ TEST(http_driver_handler_exception_500_xml) {
         c.send_str("GET /throw HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r = c.read_response();
         CHECK(r.ok);
-        CHECK_EQ(r.status, 500);  // 契约 2：500 + S3 InternalError XML
+        CHECK_EQ(r.status, 500);  // contract 2: 500 + S3 InternalError XML
         CHECK(r.body.find("<Code>InternalError</Code>") != std::string::npos);
     });
 }
@@ -513,9 +513,9 @@ TEST(http_driver_keep_alive) {
         auto r1 = c.read_response();
         CHECK(r1.ok);
         CHECK_EQ(r1.status, 200);
-        CHECK_EQ(r1.body, "nobody");  // GET 无 body：req.body 为 nullptr
+        CHECK_EQ(r1.body, "nobody");  // GET has no body: req.body is nullptr
         c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\nhello");
-        auto r2 = c.read_response();  // 同一连接第二个请求
+        auto r2 = c.read_response();  // second request on the same connection
         CHECK(r2.ok);
         CHECK_EQ(r2.status, 200);
         uint64_t hsum = 0;
@@ -528,7 +528,7 @@ TEST(http_driver_unconsumed_body_then_reuse) {
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
-        // handler 不读 body；驱动必须排空后才能复用连接
+        // The handler does not read the body; the driver must drain it before the connection can be reused
         std::string body = make_pattern(100 * 1000);
         c.send_str("PUT /noread HTTP/1.1\r\nHost: t\r\nContent-Length: " +
                    std::to_string(body.size()) + "\r\n\r\n");
@@ -552,12 +552,12 @@ TEST(http_driver_mid_body_disconnect) {
         {
             Client c(ts.port);
             c.send_str("PUT /disc HTTP/1.1\r\nHost: t\r\nContent-Length: 1000000\r\n\r\n");
-            c.send_str(make_pattern(1000));  // 只发 1KB 就断
+            c.send_str(make_pattern(1000));  // send only 1KB then disconnect
         }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!g_disconnect_seen.load() && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        CHECK(g_disconnect_seen.load());  // 契约 3：断连传播为 body->read() 异常
+        CHECK(g_disconnect_seen.load());  // contract 3: disconnect propagates as a body->read() exception
     });
 }
 
@@ -566,41 +566,41 @@ TEST(http_driver_concurrent_shutdown) {
         TestServer ts(d);
         Client c(ts.port);
         c.send_str("GET /slow HTTP/1.1\r\nHost: t\r\n\r\n");
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));  // 请求已在途
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));  // request is in flight
         auto t0 = std::chrono::steady_clock::now();
         ts.srv->shutdown();
-        auto r = c.read_response();  // 契约 4：在途请求必须完成
+        auto r = c.read_response();  // contract 4: the in-flight request must complete
         CHECK(r.ok);
         CHECK_EQ(r.status, 200);
         CHECK_EQ(r.body, "done");
         c.close_now();
-        ts.th.join();  // run() 在在途请求完成后返回
+        ts.th.join();  // run() returns after the in-flight request completes
         auto elapsed = std::chrono::steady_clock::now() - t0;
         CHECK(elapsed < std::chrono::seconds(8));
     });
 }
 
-// ---------- 消息边界（framing）：请求走私防护 ----------
+// ---------- Message boundaries (framing): request smuggling protection ----------
 //
-// RFC 9112 §6.1：边界有歧义的请求必须 400 或关连接。对所有驱动统一断言两件事：
-//   1) 第一个响应不是成功（错误状态码，或连接直接关闭）；
-//   2) 攻击载荷里夹带的第二个请求不被当作独立请求应答（走私未发生）。
+// RFC 9112 §6.1: requests with ambiguous boundaries must get a 400 or a closed connection. Two things are asserted uniformly across drivers:
+//   1) the first response is not a success (an error status, or the connection simply closed);
+//   2) the second request embedded in the attack payload is not answered as an independent request (no smuggling happened).
 void check_framing_rejected(const std::string& driver, const std::string& raw) {
     TestServer ts(driver);
     Client c(ts.port);
     c.send_str(raw);
     auto r1 = c.read_response();
-    // ok=false 表示驱动直接关连接，也是允许的处置方式
+    // ok=false means the driver closed the connection outright, also an acceptable disposition
     if (r1.ok) CHECK(r1.status >= 400);
-    // 夹带的 GET /small 若被独立应答，会得到 200 + "nobody"
+    // If the embedded GET /small were answered independently, it would get 200 + "nobody"
     auto r2 = c.read_response();
     CHECK(!(r2.ok && r2.status == 200 && r2.body == "nobody"));
 }
 
 TEST(http_driver_rejects_cl_te_conflict) {
     for_each_driver([](const std::string& d) {
-        // CL.TE 走私：前置代理按 Content-Length 断帧，后端按 chunked 断帧时，
-        // "GET /small" 会成为下一个请求
+        // CL.TE smuggling: when a front proxy frames by Content-Length while the backend frames by chunked,
+        // "GET /small" would become the next request
         check_framing_rejected(d,
                                "POST /sum HTTP/1.1\r\nHost: t\r\n"
                                "Content-Length: 6\r\nTransfer-Encoding: chunked\r\n\r\n"
@@ -619,7 +619,7 @@ TEST(http_driver_rejects_duplicate_content_length) {
 
 TEST(http_driver_rejects_negative_content_length) {
     for_each_driver([](const std::string& d) {
-        // stoull("-1") 回绕成 2^64-1：驱动会"永远等 body"，连接挂死
+        // stoull("-1") wraps to 2^64-1: the driver would "wait for the body forever", hanging the connection
         check_framing_rejected(d,
                                "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Length: -1\r\n\r\n"
                                "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
@@ -628,7 +628,7 @@ TEST(http_driver_rejects_negative_content_length) {
 
 TEST(http_driver_rejects_content_length_trailing_garbage) {
     for_each_driver([](const std::string& d) {
-        // stoull("5abc") 截成 5：声明与实际断帧脱节
+        // stoull("5abc") truncates to 5: the declaration and the actual framing diverge
         check_framing_rejected(d,
                                "POST /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 5abc\r\n\r\n"
                                "GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
@@ -637,7 +637,7 @@ TEST(http_driver_rejects_content_length_trailing_garbage) {
 
 TEST(http_driver_rejects_non_chunked_transfer_encoding) {
     for_each_driver([](const std::string& d) {
-        // "gzip, chunked" 不被识别为 chunked 时，body 会被当作下一个请求行解析
+        // If "gzip, chunked" is not recognized as chunked, the body would be parsed as the next request line
         check_framing_rejected(d,
                                "POST /sum HTTP/1.1\r\nHost: t\r\n"
                                "Transfer-Encoding: gzip, chunked\r\n\r\n"
@@ -647,7 +647,7 @@ TEST(http_driver_rejects_non_chunked_transfer_encoding) {
 
 TEST(http_driver_rejects_bad_chunk_size) {
     for_each_driver([](const std::string& d) {
-        // chunk size "-1"：stoull 接受负号，body 长度脱离声明
+        // Chunk size "-1": stoull accepts the minus sign, the body length escapes the declaration
         check_framing_rejected(d,
                                "POST /sum HTTP/1.1\r\nHost: t\r\n"
                                "Transfer-Encoding: chunked\r\n\r\n"
@@ -658,7 +658,7 @@ TEST(http_driver_rejects_bad_chunk_size) {
 
 TEST(http_driver_rejects_missing_crlf_after_chunk) {
     for_each_driver([](const std::string& d) {
-        // chunk 数据后不是 CRLF 而是"看似 hex"的垃圾：不得被当作下一个 chunk size
+        // After the chunk data comes not CRLF but "hex-looking" garbage: it must not be treated as the next chunk size
         check_framing_rejected(d,
                                "POST /sum HTTP/1.1\r\nHost: t\r\n"
                                "Transfer-Encoding: chunked\r\n\r\n"
@@ -671,12 +671,12 @@ TEST(http_driver_truncated_stream_closes_connection) {
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
-        // 后端只给出声明长度的一半：驱动必须断连，否则客户端会把下一个响应头
-        // 当作本次 body 的剩余部分（响应错位）
+        // The backend delivers only half the declared length: the driver must disconnect, otherwise the client would treat the next
+        // response head as the remainder of this body (response misalignment)
         c.send_str("GET /short?size=100000 HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r = c.read_response();
-        CHECK(!r.ok);  // 声明的字节数读不满，连接被关闭
-        // 连接确已不可复用：后续请求得不到响应
+        CHECK(!r.ok);  // the declared byte count cannot be read in full, the connection is closed
+        // The connection is indeed unusable: subsequent requests get no response
         c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r2 = c.read_response();
         CHECK(!r2.ok);
@@ -690,7 +690,7 @@ TEST(http_driver_response_headers_not_duplicated) {
         c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r = c.read_response();
         CHECK(r.ok);
-        // 驱动自管的头只能出现一次：重复 Content-Length 即断帧漏洞
+        // Driver-managed headers may appear only once: a duplicate Content-Length is a framing hole
         auto count = [&](const char* name) {
             int n = 0;
             for (auto& [k, v] : r.headers)
@@ -711,7 +711,7 @@ TEST(http_driver_filters_header_injection) {
         auto r = c.read_response();
         CHECK(r.ok);
         CHECK_EQ(r.status, 200);
-        // CR/LF 值（响应拆分注入面）与非法头名整体丢弃，正常头保留
+        // CR/LF values (a response-splitting injection surface) and illegal header names are dropped entirely, normal headers kept
         CHECK(!r.header("Injected"));
         CHECK(!r.header("X-Evil"));
         CHECK(!r.header("Bad Name"));
@@ -720,7 +720,7 @@ TEST(http_driver_filters_header_injection) {
     });
 }
 
-// ---------- pushpull：共享的推转拉组件 ----------
+// ---------- pushpull: the shared push-to-pull component ----------
 
 TEST(block_queue_cancel_wakes_blocked_consumer) {
     auto q = std::make_shared<BlockQueue>(64 * 1024);
@@ -734,15 +734,15 @@ TEST(block_queue_cancel_wakes_blocked_consumer) {
         }
         done.store(true);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // 确保已阻塞在 pop
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // make sure it is blocked in pop
     CHECK(!done.load());
-    q->cancel();  // 必须同时唤醒 pop 侧，否则消费者永久阻塞
+    q->cancel();  // must also wake the pop side, otherwise the consumer blocks forever
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!done.load() && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     consumer.join();
     CHECK(done.load());
-    CHECK(threw.load());  // cancel 不是正常 EOF，以异常传播
+    CHECK(threw.load());  // cancel is not a normal EOF, it propagates as an exception
 }
 
 TEST(block_queue_normal_eof_still_returns_zero) {
@@ -751,8 +751,8 @@ TEST(block_queue_normal_eof_still_returns_zero) {
     q->close(true);
     std::byte buf[16];
     CHECK_EQ(q->pop(std::span(buf)), size_t(5));
-    CHECK_EQ(q->pop(std::span(buf)), size_t(0));  // 正常 EOF
-    // close 之后再 cancel（消费端析构的常规顺序）不得把 EOF 变成异常
+    CHECK_EQ(q->pop(std::span(buf)), size_t(0));  // normal EOF
+    // cancel after close (the usual order in the consumer's destructor) must not turn EOF into an exception
     q->cancel();
     CHECK_EQ(q->pop(std::span(buf)), size_t(0));
 }
@@ -765,7 +765,7 @@ TEST(http_driver_head_request) {
         auto r = c.read_response(/*head_request=*/true);
         CHECK(r.ok);
         CHECK_EQ(r.status, 200);
-        // HEAD 不发 body：连接上应能直接跑下一个请求
+        // HEAD sends no body: the next request should run directly on the connection
         c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r2 = c.read_response();
         CHECK(r2.ok);
@@ -773,11 +773,11 @@ TEST(http_driver_head_request) {
     });
 }
 
-// ---------- 驱动一致性（gaps §3.9）----------
+// ---------- Driver consistency (gaps §3.9) ----------
 
 TEST(http_driver_connection_close_token_list) {
-    // Connection: close, Upgrade —— 合法的 token 列表。全等比较会漏判 close，
-    // 服务端继续复用连接而客户端已经准备关闭
+    // Connection: close, Upgrade -- a legal token list. An exact-equality comparison would miss the close, so the
+    // server keeps reusing the connection while the client is already about to close it
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
@@ -793,9 +793,9 @@ TEST(http_driver_connection_close_token_list) {
 }
 
 TEST(http_driver_unknown_method_forwarded_or_s3_xml) {
-    // 未知方法只有两种合法结局：原样交给 handler 由 L2 判定（builtin/beast/
-    // seastar），或被驱动拒绝但给出 **S3 XML**（httplib 无法路由未注册方法，
-    // 此前直接回上游自己的报文，破坏四驱动一致性）
+    // An unknown method has only two legitimate outcomes: handed verbatim to the handler for L2 to judge (builtin/beast/
+    // seastar), or rejected by the driver but with **S3 XML** (httplib cannot route unregistered methods and previously
+    // replied upstream with its own message, breaking four-driver consistency)
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
@@ -803,7 +803,7 @@ TEST(http_driver_unknown_method_forwarded_or_s3_xml) {
         auto r = c.read_response();
         CHECK(r.ok);
         if (r.status < 400) {
-            CHECK_EQ(r.body, "BREW");  // 转发给了 handler
+            CHECK_EQ(r.body, "BREW");  // forwarded to the handler
         } else {
             CHECK(r.body.find("<Error>") != std::string::npos);
             CHECK(r.body.find("<Code>") != std::string::npos);
@@ -812,22 +812,22 @@ TEST(http_driver_unknown_method_forwarded_or_s3_xml) {
 }
 
 TEST(http_driver_rejects_oversized_headers) {
-    // http.max_header_size：httplib 此前完全忽略该配置，四驱动接受集合不一致
+    // http.max_header_size: httplib previously ignored this setting entirely, making the four drivers' acceptance sets inconsistent
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
         std::string big(64 * 1024, 'x');
         c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nX-Pad: " + big + "\r\n\r\n");
         auto r = c.read_response();
-        // 要么以错误状态拒绝，要么直接断连——都不能当作正常请求处理
+        // Either reject with an error status or disconnect outright -- neither may be treated as a normal request
         CHECK(!r.ok || r.status >= 400);
     });
 }
 
 
 // ---------- TLS（docs/gaps.md §7）----------
-// 自签测试证书（CN=localhost，SAN 含 127.0.0.1，有效期至 2126——嵌入源码换
-// 测试零外部依赖；客户端不做校验，证书内容无所谓过期外的时效性）
+// Self-signed test certificate (CN=localhost, SAN includes 127.0.0.1, valid until 2126 -- embedded in source so the
+// tests have zero external dependencies; the client does no validation, so apart from expiry the certificate content does not matter)
 constexpr const char* kTestTlsCert =
     "-----BEGIN CERTIFICATE-----\n"
     "MIIDJzCCAg+gAwIBAgIUQoKpxX6iKmcQaP/a3uSLGHSVf0MwDQYJKoZIhvcNAQEL\n"
@@ -904,8 +904,8 @@ struct TlsCertFiles {
     std::string dir;
 };
 
-// 最小 TLS 客户端（OpenSSL 直连，不校验证书）：项目已链 libssl，
-// 不引额外依赖即可端到端验证 HTTPS
+// Minimal TLS client (direct OpenSSL, no certificate validation): the project already links libssl,
+// so HTTPS can be verified end to end without extra dependencies
 struct TlsClient {
     int fd = -1;
     SSL_CTX* ctx = nullptr;
@@ -940,7 +940,7 @@ struct TlsClient {
 
     void send_str(std::string_view s) { CHECK(SSL_write(ssl, s.data(), (int)s.size()) > 0); }
 
-    // 读整响应（Connection: close 场景）：读到对端关闭为止
+    // Read the whole response (Connection: close scenario): until the peer closes
     std::string read_all() {
         std::string out;
         char buf[4096];
@@ -954,7 +954,7 @@ struct TlsClient {
 };
 
 TEST(http_driver_tls_round_trip) {
-    // TLS 只有 httplib/beast 支持（builtin/seastar 显式拒绝，见下一用例）
+    // Only httplib/beast support TLS (builtin/seastar reject explicitly, see the next case)
     TlsCertFiles certs;
     auto drivers = HttpServerFactory::drivers();
     for (auto& d : drivers) {
@@ -969,7 +969,7 @@ TEST(http_driver_tls_round_trip) {
                 CHECK(r.find("nobody") != std::string::npos);
             }
             {
-                // 带 body 的 PUT 走一遍：TLS 记录层下的流式读同样成立
+                // Run a PUT with a body too: streaming reads under the TLS record layer hold as well
                 TlsClient c(ts.port);
                 std::string payload = make_pattern(1024);
                 c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 1024\r\n"
@@ -985,7 +985,7 @@ TEST(http_driver_tls_round_trip) {
 }
 
 TEST(http_driver_tls_plaintext_client_rejected) {
-    // 明文客户端打到 TLS 端口：握手失败关连接，绝不能按明文 HTTP 应答
+    // A plaintext client hitting the TLS port: handshake fails and the connection closes, it must never answer as plaintext HTTP
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
         if (d != "httplib" && d != "beast") continue;
@@ -994,14 +994,14 @@ TEST(http_driver_tls_plaintext_client_rejected) {
             Client c(ts.port);
             c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             auto r = c.read_response();
-            CHECK(!r.ok);  // 只能是断连（或 TLS alert 噪声），不能有 HTTP 200
+            CHECK(!r.ok);  // only a disconnect (or TLS alert noise) is possible, never an HTTP 200
         }
     }
 }
 
 TEST(http_driver_tls_unsupported_drivers_throw) {
-    // builtin/seastar 不支持 TLS：配置了必须当场抛错——静默跑明文会让
-    // UNSIGNED-PAYLOAD 的传输层完整性论证失效（docs/gaps.md §7）
+    // builtin/seastar do not support TLS: if configured they must throw on the spot -- silently running plaintext would void
+    // the transport-layer integrity argument for UNSIGNED-PAYLOAD (docs/gaps.md §7)
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
         if (d != "builtin" && d != "seastar") continue;
@@ -1020,7 +1020,7 @@ TEST(http_driver_tls_unsupported_drivers_throw) {
 }
 
 TEST(http_driver_tls_bad_cert_throws) {
-    // 坏证书路径必须在构造/启动期抛，不能等第一个连接才发现
+    // A bad certificate path must throw at construction/startup, not be discovered at the first connection
     for (auto& d : HttpServerFactory::drivers()) {
         if (d != "httplib" && d != "beast") continue;
         HttpConfig cfg;
@@ -1037,22 +1037,22 @@ TEST(http_driver_tls_bad_cert_throws) {
     }
 }
 
-// ---------- 超时 / 连接上限 / 停机契约（config.h §超时旋钮 · http-adapter.md §5，
-// docs/issues.md T10）：这组行为每驱动各自实现，最易各行其是，必须四驱动同断言 ----------
+// ---------- Timeouts / connection limit / shutdown contract (config.h timeout knobs section / http-adapter.md §5,
+// docs/issues.md T10): each driver implements these behaviors on its own, most prone to divergence, must be asserted across all four ----------
 
 TEST(http_driver_idle_timeout_closes_idle_connection) {
-    // 空闲连接（完成过请求的 keep-alive）须在 idle_timeout 后被服务端关闭；
-    // 完全不发数据的连接也由它兜底（stall guard 只管有 body 在传的）
+    // An idle connection (keep-alive that has completed a request) must be closed by the server after idle_timeout;
+    // a connection that never sends data is also covered by it (the stall guard only handles bodies in transfer)
     for (auto& d : HttpServerFactory::drivers()) {
         try {
             TestServer ts(d, [](HttpConfig& c) { c.idle_timeout_sec = 1; });
             Client c(ts.port);
             c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
-            CHECK(c.read_response().ok);  // keep-alive 连接建立
+            CHECK(c.read_response().ok);  // keep-alive connection established
             auto t0 = std::chrono::steady_clock::now();
             char b;
-            ssize_t n = ::recv(c.fd, &b, 1, 0);  // 阻塞等对端关闭（SO_RCVTIMEO=10s 兜底）
-            CHECK_EQ(n, ssize_t{0});             // 0=对端关闭；-1=驱动根本没关（超时）
+            ssize_t n = ::recv(c.fd, &b, 1, 0);  // block waiting for the peer to close (SO_RCVTIMEO=10s as backstop)
+            CHECK_EQ(n, ssize_t{0});             // 0=peer closed; -1=the driver never closed (timeout)
             CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8));
         } catch (const mini_test::Failure& f) {
             throw mini_test::Failure("[driver=" + d + "] " + f.what());
@@ -1061,12 +1061,12 @@ TEST(http_driver_idle_timeout_closes_idle_connection) {
 }
 
 TEST(http_driver_max_connections_rejects_excess) {
-    // 超限拒绝新连接（builtin/beast 关闭、seastar 丢弃），已建立的不受影响。
-    // httplib 的上限由其线程池隐式约束（config.h 注释明示），语义不同，跳过
+    // Over the limit, new connections are refused (builtin/beast close, seastar discards), established ones are unaffected.
+    // httplib's limit is implicitly constrained by its thread pool (as the config.h comment states), different semantics, skipped
     for (auto& d : HttpServerFactory::drivers()) {
         if (d == "httplib") continue;
         try {
-            // seastar 按 shard 均摊：io_threads=1 保证单 shard 上限即全局上限
+            // seastar splits per shard: io_threads=1 ensures the single-shard limit is the global limit
             TestServer ts(d, [](HttpConfig& c) {
                 c.max_connections = 2;
                 c.io_threads = 1;
@@ -1075,11 +1075,11 @@ TEST(http_driver_max_connections_rejects_excess) {
             a.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             CHECK(a.read_response().ok);
             b.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
-            CHECK(b.read_response().ok);  // 两条 keep-alive 占满上限
-            Client c3(ts.port);           // TCP 三次握手在 backlog 层仍会成功
+            CHECK(b.read_response().ok);  // two keep-alive connections fill the limit
+            Client c3(ts.port);           // the TCP three-way handshake still succeeds at the backlog layer
             c3.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
-            CHECK(!c3.read_response().ok);  // 第三条必须拿不到响应（被关/被丢）
-            // 已建立的连接不受影响
+            CHECK(!c3.read_response().ok);  // the third must get no response (closed/discarded)
+            // Established connections are unaffected
             a.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             CHECK(a.read_response().ok);
         } catch (const mini_test::Failure& f) {
@@ -1089,14 +1089,14 @@ TEST(http_driver_max_connections_rejects_excess) {
 }
 
 TEST(http_driver_shutdown_waits_for_inflight_within_grace) {
-    // http-adapter.md 契约 4 的前半：宽限内完成的在途请求，shutdown 等它完成、
-    // 响应完整送达后 run() 才返回——不得把在途请求掐死
+    // First half of http-adapter.md contract 4: for an in-flight request finishing within the grace period, shutdown waits for it
+    // and run() returns only after the response is fully delivered -- in-flight requests must not be strangled
     for (auto& d : HttpServerFactory::drivers()) {
         try {
             TestServer ts(d, [](HttpConfig& c) { c.shutdown_grace_sec = 5; });
             Client c(ts.port);
             c.send_str("GET /slow?ms=600 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));  // 让请求进 handler
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let the request enter the handler
             ts.stop();  // shutdown + join run()
             auto r = c.read_response();
             CHECK(r.ok);
@@ -1108,10 +1108,10 @@ TEST(http_driver_shutdown_waits_for_inflight_within_grace) {
 }
 
 TEST(http_driver_shutdown_grace_bounds_return) {
-    // 契约 4 的后半："或超时"——超过宽限的在途请求被强关，run() 不被它无限期
-    // 拖住。handler（阻塞 sleep 2.2s，宽限 1s 内叫不醒）在 force 窗口内自行结束，
-    // run() 随即返回：上界远小于 force 兜底（1+3=4s），更不是无限等。
-    // 下界确认宽限真实存在——不是掐死在途立即返回
+    // Second half of contract 4: "or timeout" -- an in-flight request exceeding the grace period is force-closed, and run() is not
+    // dragged out indefinitely by it. The handler (a blocking 2.2s sleep, unwakeable within the 1s grace) finishes on its own within
+    // the force window, and run() returns right after: the upper bound is far below the force backstop (1+3=4s), let alone unbounded.
+    // The lower bound confirms the grace period really exists -- not strangling in-flight requests and returning immediately
     for (auto& d : HttpServerFactory::drivers()) {
         try {
             TestServer ts(d, [](HttpConfig& c) {
@@ -1133,10 +1133,10 @@ TEST(http_driver_shutdown_grace_bounds_return) {
 }
 
 TEST(http_driver_shutdown_force_deadline_builtin) {
-    // 最严形态：handler 睡过整个 grace+force 窗口（4s > 1+1+余量），run() 仍须
-    // 到点返回。仅 builtin——它对"残余线程经 shared_ptr 持有共享状态、run() 返回
-    // 乃至 server 析构后自行收尾"有明示设计；beast/seastar 的强关路径会遗弃
-    // 未完成的 session 协程帧（进程退出场景的有界泄漏），ASan 下不可复现执行
+    // The strictest shape: the handler sleeps through the whole grace+force window (4s > 1+1+margin), run() must still return
+    // on time. builtin only -- it has an explicit design for "leftover threads hold shared state via shared_ptr and clean up on
+    // their own after run() returns or even after server destruction"; the force-close paths of beast/seastar abandon
+    // unfinished session coroutine frames (a bounded leak in the process-exit scenario), not reproducibly executable under ASan
     TestServer ts("builtin", [](HttpConfig& c) {
         c.shutdown_grace_sec = 1;
         c.shutdown_force_wait_sec = 1;
@@ -1147,8 +1147,8 @@ TEST(http_driver_shutdown_force_deadline_builtin) {
     auto t0 = std::chrono::steady_clock::now();
     ts.stop();
     auto took = std::chrono::steady_clock::now() - t0;
-    CHECK(took < std::chrono::milliseconds(3500));  // 没等 4s 的 handler 睡完
+    CHECK(took < std::chrono::milliseconds(3500));  // did not wait out the handler's 4s sleep
     c.close_now();
-    // 让残余 handler 睡完再退出用例：不与进程收尾竞争
+    // Let the leftover handler finish sleeping before the case exits: no race with process teardown
     std::this_thread::sleep_for(std::chrono::milliseconds(4200));
 }

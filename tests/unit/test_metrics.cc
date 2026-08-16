@@ -1,5 +1,5 @@
-// 后端级 metrics 注册机制单测（core/metrics.h）：实例复用/类型冲突/标签转义/
-// 直方图渲染/回调 gauge/空 scope 无害/并发递增冒烟
+// Unit tests for the backend-level metrics registration mechanism (core/metrics.h): instance reuse/type conflicts/label escaping/
+// histogram rendering/callback gauges/harmless empty scope/concurrent-increment smoke test
 #include <limits>
 #include <memory>
 #include <string>
@@ -41,7 +41,7 @@ TEST(metrics_counter_gauge_render) {
 
 TEST(metrics_get_or_create_identity) {
     MetricsRegistry reg;
-    // 同名同标签 → 同实例（重复注册幂等）；同名异标签 → 家族内新子实例
+    // Same name and labels -> same instance (repeated registration is idempotent); same name, different labels -> new child instance within the family
     auto a = reg.counter("lights3_test_total", "", {{"k", "a"}});
     auto a2 = reg.counter("lights3_test_total", "", {{"k", "a"}});
     auto b = reg.counter("lights3_test_total", "", {{"k", "b"}});
@@ -52,11 +52,11 @@ TEST(metrics_get_or_create_identity) {
     auto out = reg.render();
     CHECK(contains(out, "lights3_test_total{k=\"a\"} 3\n"));
     CHECK(contains(out, "lights3_test_total{k=\"b\"} 1\n"));
-    // # TYPE 每家族只出一次
+    // # TYPE emitted only once per family
     CHECK_EQ(out.find("# TYPE lights3_test_total"),
              out.rfind("# TYPE lights3_test_total"));
 
-    // 同名不同类型 = 装配错误
+    // Same name with different types = assembly error
     bool thrown = false;
     try {
         reg.gauge("lights3_test_total", "");
@@ -79,7 +79,7 @@ TEST(metrics_histogram_render) {
     h->observe(0.05);
     h->observe(0.05);
     h->observe(0.5);
-    h->observe(30);  // 溢出桶
+    h->observe(30);  // overflow bucket
     auto out = reg.render();
     CHECK(contains(out, "# TYPE lights3_test_seconds histogram\n"));
     CHECK(contains(out, "lights3_test_seconds_bucket{op=\"get\",le=\"0.1\"} 2\n"));
@@ -88,7 +88,7 @@ TEST(metrics_histogram_render) {
     CHECK(contains(out, "lights3_test_seconds_count{op=\"get\"} 4\n"));
     CHECK(contains(out, "lights3_test_seconds_sum{op=\"get\"} 30.6\n"));
 
-    // 同名直方图桶界不一致 = 装配错误
+    // Same-name histograms with inconsistent bucket bounds = assembly error
     bool thrown = false;
     try {
         reg.histogram("lights3_test_seconds", "lat", {0.5, 5.0}, {{"op", "put"}});
@@ -99,8 +99,8 @@ TEST(metrics_histogram_render) {
 }
 
 TEST(metrics_nonfinite_render) {
-    // 非有限值必须用 Prometheus 的拼写（docs/gaps.md §4）：to_chars 直出的
-    // "inf"/"nan" 会让抓取端拒收整个 target，与桶界折叠是同一个失败模式
+    // Non-finite values must use the Prometheus spelling (docs/gaps.md §4): the raw to_chars output
+    // "inf"/"nan" would make the scraper reject the entire target, same failure mode as bucket-bound collapsing
     MetricsRegistry reg;
     reg.gauge_callback("lights3_test_nf_pos", "cb",
                        [] { return std::numeric_limits<double>::infinity(); });
@@ -117,16 +117,16 @@ TEST(metrics_nonfinite_render) {
 }
 
 TEST(metrics_large_bucket_bounds_render) {
-    // ≥1e6 的桶界曾被 6 位有效数字渲成 "1.04858e+06"，相近桶界还会折叠成重复
-    // 的 le 序列——Prometheus 对重复 le 直接拒收整个 target
+    // Bucket bounds >= 1e6 were once rendered with 6 significant digits as "1.04858e+06", and nearby bounds could even collapse
+    // into duplicate le sequences -- Prometheus rejects the entire target on a duplicate le
     MetricsRegistry reg;
     auto h = reg.histogram("lights3_test_bytes", "sz", {1048576.0, 1048577.0, 1e9});
     h->observe(1.0);
     auto out = reg.render();
     CHECK(contains(out, "le=\"1048576\""));
-    CHECK(contains(out, "le=\"1048577\""));  // 与上一桶不得折叠成同一个 le
+    CHECK(contains(out, "le=\"1048577\""));  // must not collapse into the same le as the previous bucket
     CHECK(!contains(out, "e+06"));
-    // 最短往返允许指数写法（1e+09 精确回读，Prometheus 也认），要害是不丢精度
+    // Shortest round-trip allows exponent notation (1e+09 reads back exactly, Prometheus accepts it); the key point is no precision loss
     CHECK(contains(out, "le=\"1e+09\""));
 }
 
@@ -136,9 +136,9 @@ TEST(metrics_gauge_callback) {
     reg.gauge_callback("lights3_test_cb_depth", "cb", [&] { return double(depth); },
                        {{"backend", "b1"}});
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 3\n"));
-    depth = 9;  // 渲染时拉取瞬时值
+    depth = 9;  // instantaneous value pulled at render time
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 9\n"));
-    // 同名同标签后注册者覆盖
+    // With the same name and labels, the later registrant overrides
     reg.gauge_callback("lights3_test_cb_depth", "cb", [] { return 1.0; },
                        {{"backend", "b1"}});
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 1\n"));
@@ -148,19 +148,19 @@ TEST(metrics_scope_base_labels) {
     auto reg = std::make_shared<MetricsRegistry>();
     MetricsScope scope(reg, {{"backend", "duo1"}});
     scope.counter("lights3_test_scoped_total", "", {{"op", "gc"}})->inc(5);
-    // 派生子 scope 追加维度
+    // A derived child scope appends dimensions
     scope.with({{"engine", "redis"}}).counter("lights3_test_engine_total", "")->inc();
     auto out = reg->render();
     CHECK(contains(out, "lights3_test_scoped_total{backend=\"duo1\",op=\"gc\"} 5\n"));
     CHECK(contains(out, "lights3_test_engine_total{backend=\"duo1\",engine=\"redis\"} 1\n"));
-    // scope 与直连注册表取同名同标签 → 同实例
+    // Scope and direct registry lookup with the same name and labels -> same instance
     auto direct = reg->counter("lights3_test_scoped_total", "",
                                {{"backend", "duo1"}, {"op", "gc"}});
     CHECK_EQ(direct->value(), uint64_t(5));
 }
 
 TEST(metrics_empty_scope_harmless) {
-    // 空 scope（测试直构后端的默认径）：实例可用但不注册、不渲染
+    // Empty scope (default path for directly constructed backends in tests): instance usable but not registered, not rendered
     MetricsScope scope;
     CHECK(!scope);
     auto c = scope.counter("lights3_test_orphan_total", "");
@@ -182,7 +182,7 @@ TEST(metrics_concurrent_smoke) {
             for (int i = 0; i < 10000; ++i) {
                 c->inc();
                 h->observe(t % 2 ? 0.1 : 1.0);
-                // 并发 get-or-create 与渲染也不得撕裂
+                // Concurrent get-or-create and rendering must not tear either
                 reg.counter("lights3_test_conc_total", "")->value();
                 if (i % 2000 == 0) reg.render();
             }
@@ -192,10 +192,10 @@ TEST(metrics_concurrent_smoke) {
     CHECK_EQ(h->snapshot().count, uint64_t(40000));
 }
 
-// ---------- L2 请求指标的 §7 增量（docs/gaps.md §7）----------
+// ---------- §7 increment for L2 request metrics (docs/gaps.md §7) ----------
 
 TEST(s3_metrics_renders_pool_wait_histogram) {
-    // concurrency.md §3.1 的专属池判据依赖该直方图；采集了必须能从 /-/metrics 读到
+    // The dedicated-pool criterion of concurrency.md §3.1 depends on this histogram; once collected it must be readable from /-/metrics
     s3::Metrics m;
     ThreadPool::Stats st;
     st.wait_hist = {5, 3, 1, 0, 1};
@@ -238,7 +238,7 @@ TEST(s3_metrics_bytes_and_per_bucket) {
     m.record_bucket_request("photos");
     m.add_bytes_in("photos", 1000);
     m.add_bytes_out("photos", 2000);
-    m.add_bytes_out("", 50);  // service 级请求：只计全局
+    m.add_bytes_out("", 50);  // service-level request: counts only toward the global
     auto out = m.render({});
     CHECK(out.find("lights3_bytes_total{direction=\"in\"} 1000") != std::string::npos);
     CHECK(out.find("lights3_bytes_total{direction=\"out\"} 2050") != std::string::npos);
@@ -250,7 +250,7 @@ TEST(s3_metrics_bytes_and_per_bucket) {
 }
 
 TEST(s3_metrics_bucket_cardinality_capped) {
-    // 恶意/失控客户端扫 bucket 名不能把 /-/metrics 撑成 GiB 级标签基数
+    // A malicious/runaway client scanning bucket names must not inflate /-/metrics into GiB-scale label cardinality
     s3::Metrics m;
     for (int i = 0; i < 600; ++i) m.record_bucket_request("bkt-" + std::to_string(i));
     auto out = m.render({});

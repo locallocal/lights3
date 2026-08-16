@@ -86,13 +86,14 @@ std::optional<std::string> aes256gcm_open(const Aes256Key& key, std::string_view
 
     std::string out(ct_len, '\0');
     int n = 0;
-    // 失败路径擦除已解出的部分明文（tag 校验在 Final，Update 阶段字节已可读）
+    // Failure paths wipe the partially decrypted plaintext (tag verification happens
+    // in Final; bytes are already readable during the Update phase)
     if (!EVP_DecryptUpdate(c.ctx, reinterpret_cast<uint8_t*>(out.data()), &n,
                            p + kGcmNonceLen, static_cast<int>(ct_len))) {
         secure_wipe(out);
         return std::nullopt;
     }
-    // tag 校验在 Final：失败 = 密文被篡改或密钥不符
+    // Tag verification happens in Final: failure = tampered ciphertext or wrong key
     uint8_t tag[kGcmTagLen];
     memcpy(tag, p + kGcmNonceLen + ct_len, kGcmTagLen);
     if (!EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_SET_TAG, kGcmTagLen, tag)) {

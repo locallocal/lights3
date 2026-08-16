@@ -1,4 +1,4 @@
-// Task<T> / sync_wait / ThreadPool 协程原语
+// Task<T> / sync_wait / ThreadPool coroutine primitives
 #include <atomic>
 #include <set>
 #include <stdexcept>
@@ -96,7 +96,7 @@ TEST(pump_executor_runs_resume_on_caller_thread) {
     ThreadPool pool(2);
     PumpExecutor ex;
     auto caller = std::this_thread::get_id();
-    // 任务链先跳到池线程，再经 resume_on 切回请求线程（阻塞读的切换路径）
+    // The task chain first hops to a pool thread, then switches back to the request thread via resume_on (the blocking-read switch path)
     auto t = [](ThreadPool& p, PumpExecutor& e,
                 std::thread::id caller) -> Task<bool> {
         co_await p.schedule();
@@ -127,8 +127,8 @@ TEST(pump_executor_value_and_exception) {
 }
 
 TEST(task_moved_from_throws_not_segv) {
-    // moved-from 的 Task 上调用曾是空指针解引用（docs/gaps.md §4）：四个入口
-    // 都改抛 logic_error，take_result 一并覆盖（sync_wait 之外还有直接调用者）
+    // Calling on a moved-from Task used to be a null-pointer dereference (docs/gaps.md §4): all four entry
+    // points now throw logic_error; take_result is covered too (it has direct callers besides sync_wait)
     auto make = []() -> Task<int> { co_return 1; };
     auto count_throws = [](auto&& fn) {
         try {
@@ -150,7 +150,7 @@ TEST(task_moved_from_throws_not_segv) {
     CHECK(count_throws([&] { v.start(nullptr); }));
     CHECK(count_throws([&] { v.take_result(); }));
 
-    // 未被搬走的那一份仍然正常
+    // The copy that was not moved away still works normally
     CHECK_EQ(sync_wait(std::move(moved_a)), 1);
     sync_wait(std::move(moved_v));
 }

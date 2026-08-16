@@ -1,4 +1,4 @@
-// YAML 子集解析与类型化配置
+// YAML-subset parsing and typed configuration
 #include <cstdlib>
 
 #include "core/config.h"
@@ -8,7 +8,7 @@ using namespace lights3;
 
 namespace {
 const char* kSample = R"(
-# 注释行
+# comment line
 http:
   driver: builtin
   port: 9100
@@ -27,7 +27,7 @@ auth:
 backends:
   - name: localdata
     type: localfs
-    root: /tmp/l3data          # 行内注释
+    root: /tmp/l3data          # inline comment
   - name: mem
     type: memory
 
@@ -51,7 +51,7 @@ TEST(config_parses_sample) {
 
     CHECK_EQ(cfg.auth.credentials.size(), size_t(1));
     CHECK_EQ(cfg.auth.credentials[0].access_key, "AK1");
-    CHECK_EQ(cfg.auth.credentials[0].secret_key, "sekrit");  // ${ENV} 展开
+    CHECK_EQ(cfg.auth.credentials[0].secret_key, "sekrit");  // ${ENV} expansion
     CHECK_EQ(cfg.auth.region, "us-west-2");
 
     CHECK_EQ(cfg.backends.size(), size_t(2));
@@ -87,7 +87,7 @@ TEST(config_defaults) {
     auto cfg = Config::from_string("backends:\n  - name: m\n    type: memory\n");
     CHECK_EQ(cfg.http.driver, "builtin");
     CHECK_EQ(static_cast<int>(cfg.http.port), 9000);
-    CHECK_EQ(cfg.buckets.default_backend, "m");  // 缺省取第一个后端
+    CHECK_EQ(cfg.buckets.default_backend, "m");  // defaults to the first backend
     CHECK(cfg.auth.credentials.empty());
 }
 
@@ -112,28 +112,28 @@ bool throws(F&& fn) {
 }  // namespace
 
 TEST(parse_size_rejects_negative_and_overflow) {
-    CHECK(throws([] { parse_size("-1"); }));            // stoull 回绕成 2^64-1
-    CHECK(throws([] { parse_size("20000000000G"); }));  // << 30 回绕
+    CHECK(throws([] { parse_size("-1"); }));            // stoull wraps around to 2^64-1
+    CHECK(throws([] { parse_size("20000000000G"); }));  // << 30 wraps around
     CHECK_EQ(parse_size("0"), size_t(0));
 }
 
 TEST(parse_duration_rejects_negative_and_overflow) {
-    CHECK(throws([] { parse_duration_sec("30000000h"); }));  // int 乘法溢出
+    CHECK(throws([] { parse_duration_sec("30000000h"); }));  // int multiplication overflow
     CHECK(throws([] { parse_duration_sec("-5s"); }));
     CHECK_EQ(parse_duration_sec("24h"), 86400);
     CHECK_EQ(parse_duration_sec("2d"), 172800);
 }
 
 TEST(yaml_rejects_unexpected_indent) {
-    // 列表项参数多缩进两格：此前被静默丢弃，现在报错
+    // A list-item parameter indented two spaces too far: previously silently dropped, now an error
     CHECK(throws([] {
         yaml_parse("backends:\n  - name: a\n      type: memory\n");
     }));
-    // 列表项参数少缩进：同样报错而非丢弃
+    // A list-item parameter under-indented: also an error rather than being dropped
     CHECK(throws([] {
         yaml_parse("backends:\n  - name: a\n type: memory\n");
     }));
-    // 正常嵌套不受影响
+    // Normal nesting is unaffected
     auto n = yaml_parse("backends:\n  - name: a\n    type: memory\n");
     CHECK_EQ(n.find("backends")->list.size(), size_t(1));
 }
@@ -146,7 +146,7 @@ TEST(config_rejects_out_of_range_values) {
     CHECK(throws([&] {
         Config::from_string(std::string("http:\n  port: -1\n") + backends);
     }));
-    // port 0 合法：内核分配空闲端口
+    // port 0 is valid: the kernel assigns a free port
     CHECK_EQ(static_cast<int>(
                  Config::from_string(std::string("http:\n  port: 0\n") + backends).http.port),
              0);
@@ -161,11 +161,11 @@ TEST(config_rejects_out_of_range_values) {
     }));
 }
 
-// ---------- 校验缺口（gaps §3.9）----------
+// ---------- Validation gaps (gaps §3.9) ----------
 
 TEST(config_rejects_absurd_thread_counts) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
-    // 上界与 per-backend 的同名参数取齐 [1,1024]：手滑的 100000 会在启动时把进程拖垮
+    // Upper bound aligned with the per-backend parameter of the same name [1,1024]: a fat-fingered 100000 would drag the process down at startup
     CHECK(throws([&] {
         Config::from_string(std::string("runtime:\n  io_threads: 100000\n") + backends);
     }));
@@ -185,10 +185,10 @@ TEST(config_int_errors_name_the_key_and_value) {
     } catch (const std::exception& e) {
         msg = e.what();
     }
-    // 裸 stoi 只会报 "stoi"：既没有键名也没有原值
+    // Bare stoi would only report "stoi": neither the key name nor the original value
     CHECK(msg.find("runtime.io_threads") != std::string::npos);
     CHECK(msg.find("eight") != std::string::npos);
-    // 尾随垃圾不再被当成合法前缀
+    // Trailing garbage is no longer treated as a valid prefix
     CHECK(throws([&] {
         Config::from_string(std::string("runtime:\n  io_threads: 8x\n") + backends);
     }));
@@ -206,9 +206,9 @@ TEST(config_keeps_hash_inside_quotes) {
     auto cfg = Config::from_string(
         "auth:\n  credentials:\n    - access_key: AK\n      secret_key: \"a #b c\"\n"
         "backends:\n  - name: m\n    type: memory\n");
-    // 引号内的 " #" 不是注释：裸 find(" #") 会把密钥静默截短
+    // " #" inside quotes is not a comment: a bare find(" #") would silently truncate the secret
     CHECK_EQ(cfg.auth.credentials[0].secret_key, "a #b c");
-    // 引号外的行内注释仍照常剥离
+    // Inline comments outside quotes are still stripped as usual
     auto n = yaml_parse("a: b   # trailing\n");
     CHECK_EQ(n.get("a"), "b");
 }
@@ -216,19 +216,19 @@ TEST(config_keeps_hash_inside_quotes) {
 TEST(config_undefined_env_is_an_error_unless_defaulted) {
     unsetenv("LIGHTS3_DEFINITELY_UNSET");
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
-    // 静默展开成空串会把"变量名写错"变成"值悄悄变空"
+    // Silently expanding to an empty string would turn "misspelled variable name" into "value quietly becomes empty"
     CHECK(throws([&] {
         Config::from_string(std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET}\n") + backends);
     }));
-    // 确实可选的写 ${VAR:-默认值}
+    // Genuinely optional values are written ${VAR:-default}
     auto cfg = Config::from_string(
         std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET:-debug}\n") + backends);
     CHECK_EQ(cfg.log_level, "debug");
 }
 
 TEST(config_tls_requires_both_cert_and_key) {
-    // 只给一半必是配错（docs/gaps.md §7）：静默忽略会让"以为开了 TLS"的
-    // 实例跑明文
+    // Providing only one half is necessarily a misconfiguration (docs/gaps.md §7): silently ignoring it would let
+    // an instance that "thinks TLS is on" run in plaintext
     auto one_sided = R"(
 http:
   tls_cert: /etc/lights3/server.crt
@@ -258,7 +258,7 @@ backends:
 }
 
 TEST(config_shutdown_backpressure_knobs) {
-    // 停机/背压边界（docs/gaps.md §7）：默认值 + 显式覆盖 + 范围校验
+    // Shutdown/backpressure boundaries (docs/gaps.md §7): defaults + explicit overrides + range validation
     auto cfg = Config::from_string(R"(
 backends:
   - name: d
@@ -291,7 +291,7 @@ backends:
     CHECK_EQ(tuned.http.body_queue_cap, size_t(512 * 1024));
     CHECK_EQ(tuned.http.shutdown_grace_sec, 3);
     CHECK_EQ(tuned.http.shutdown_force_wait_sec, 1);
-    // 显式配置 io_threads 时置位（builtin 驱动据此 WARN 而非静默忽略）
+    // Set when io_threads is configured explicitly (the builtin driver uses this to WARN instead of silently ignoring it)
     CHECK(tuned.http.io_threads_set);
 
     bool threw = false;

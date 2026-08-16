@@ -25,17 +25,18 @@ using s3::S3ErrorCode;
 
 namespace {
 
-// 计数器 kind 字符（'C' 表内）：chunk / pack 号段、gcq seq 与 pack 账 delta 行 id
+// Counter kind chars (within the 'C' table): chunk / pack id segments, gcq seq and pack ledger delta row id
 constexpr char kCtrChunk = '0';
 constexpr char kCtrPack = '1';
 constexpr char kCtrSeq = 'q';
 constexpr char kCtrPackDelta = 'd';
 
-// pack 账 delta 行折叠阈值（§3.2）：单 pack 的 delta 行超过此数即在 pack_stats()
-// 顺带折叠为一行——低频 GC 路径承担合并，业务写路径保持纯写无冲突
+// Fold threshold for pack ledger delta rows (§3.2): once a single pack has more delta
+// rows than this, pack_stats() folds them into one row in passing — the low-frequency
+// GC path bears the merge cost, keeping the business write path pure-write and conflict-free
 constexpr size_t kPackFoldThreshold = 16;
 
-// delta 行值：le64 live_bytes ‖ le64 live_recs（encode_counter_delta 的 8B 编码 ×2）
+// Delta row value: le64 live_bytes ‖ le64 live_recs (encode_counter_delta's 8B encoding x2)
 std::string encode_pack_delta(int64_t bytes, int64_t recs) {
     return codec::encode_counter_delta(bytes) + codec::encode_counter_delta(recs);
 }
@@ -46,11 +47,12 @@ std::pair<int64_t, int64_t> decode_pack_delta(std::string_view v) {
     return {codec::decode_counter(v.substr(0, 8)), codec::decode_counter(v.substr(8, 8))};
 }
 
-// 冲突重试（§4.1，与 Redis 版 CAS 循环同构）：指数退避 100µs 起、上限 6.4ms、
-// 最多 16 次——超限即病态热点竞争，响亮失败优于活锁
+// Conflict retry (§4.1, isomorphic to the Redis version's CAS loop): exponential
+// backoff starting at 100µs, capped at 6.4ms, at most 16 attempts — exceeding that
+// means pathological hotspot contention; failing loudly beats livelock
 constexpr int kMaxTxnRetries = 16;
 
-// 分页扫描的单页条数（Scanner 内部每批 256，此处是我方聚合页）
+// Entries per page for paged scans (the Scanner batches 256 internally; this is our aggregation page)
 constexpr size_t kScanPage = 1024;
 
 int64_t now_ms() { return codec::to_unix_ms(std::chrono::system_clock::now()); }
@@ -60,11 +62,14 @@ void conflict_backoff(int attempt) {
     std::this_thread::sleep_for(us);
 }
 
-// 对象 manifest 单值体积保护（docs/gaps.md §2.12）：TiKV 单值受 raft entry 上限
-// （默认 8MiB）约束，超限的 PUT/complete 会**永久失败**且已存在的对象删不掉。
-// 编码后 fail-fast 抛 EntityTooLarge（400，可操作：客户端换 multipart/加大分片）
-// ——比让 prewrite 反复撞 raft 上限的 500 诚实。上限留 2MiB 余量给 proto 包装；
-// extent 数上限拦同量级的病态 manifest（run 编码失效的交错 id 形态 ≈ 30B/extent）
+// Single-value size guard for object manifests (docs/gaps.md §2.12): a single TiKV
+// value is bounded by the raft entry limit (8MiB by default); an over-limit
+// PUT/complete would **fail permanently** and an existing such object could not be
+// deleted. Fail-fast after encoding with EntityTooLarge (400, actionable: client
+// switches to multipart / larger parts) — more honest than a 500 from prewrite
+// repeatedly hitting the raft limit. The cap leaves 2MiB of headroom for proto
+// wrapping; the extent-count cap blocks pathological manifests of the same magnitude
+// (interleaved-id shapes that defeat run encoding, ≈ 30B/extent)
 constexpr size_t kMaxObjectValueBytes = 6ull << 20;
 constexpr size_t kMaxObjectExtents = 200'000;
 
@@ -92,7 +97,7 @@ void check_object_value(std::string_view k, size_t n_extents, size_t encoded_byt
                   std::string(id));
 }
 
-// FNV-1a：守卫分片散列（§4.3）。只需稳定散布，不需抗碰撞
+// FNV-1a: guard shard hashing (§4.3). Only needs stable dispersion, not collision resistance
 uint64_t fnv1a(std::string_view k) {
     uint64_t h = 1469598103934665603ull;
     for (unsigned char c : k) h = (h ^ c) * 1099511628211ull;
@@ -101,7 +106,7 @@ uint64_t fnv1a(std::string_view k) {
 
 }  // namespace
 
-// ---------- key 构造（§3.2）----------
+// ---------- Key construction (§3.2) ----------
 
 std::string TikvMetaStore::tkey(char tag, std::string_view rest) const {
     std::string k;
@@ -170,14 +175,14 @@ std::pair<std::string, std::string> TikvMetaStore::range_of(char tag,
                                                             std::string_view rest) const {
     std::string lo = tkey(tag, rest);
     std::string hi = lo;
-    codec::bump_last_byte(hi);  // key 尾字节非 0xff（表标签/复合段构造保证）
+    codec::bump_last_byte(hi);  // last key byte is never 0xff (guaranteed by table tag / composite segment construction)
     return {std::move(lo), std::move(hi)};
 }
 
-// ---------- 事务与读辅助 ----------
+// ---------- Transaction and read helpers ----------
 
-// 统一异常翻译（§6.4）：S3Error 透传；Undetermined = 结果不明（§4.6 盲重试禁令）；
-// 其余 pingcap 异常 → InternalError
+// Unified exception translation (§6.4): S3Error passes through; Undetermined = outcome
+// unknown (§4.6 blind-retry ban); remaining pingcap exceptions → InternalError
 template <typename Fn>
 auto TikvMetaStore::guarded(const char* what, Fn&& fn) {
     try {
@@ -185,7 +190,8 @@ auto TikvMetaStore::guarded(const char* what, Fn&& fn) {
     } catch (const S3Error&) {
         throw;
     } catch (const TikvUndetermined& u) {
-        // 可区分类型上抛：事务可能已生效，调用方不得兜底物理删数据（§4.6）
+        // Rethrown as a distinguishable type: the transaction may have taken effect;
+        // callers must not fall back to physically deleting data (§4.6)
         LOG_ERROR("duostore tikv meta: {}: commit result undetermined: {}", what, u.what);
         throw UndeterminedCommit(std::string("duostore tikv meta: ") + what +
                                  ": commit result undetermined: " + u.what);
@@ -194,9 +200,10 @@ auto TikvMetaStore::guarded(const char* what, Fn&& fn) {
     }
 }
 
-// 乐观重试循环（§4.1）：body(ts, muts) 在 start_ts 快照上读算、组 mutation 批；
-// muts 空 = 无需提交（纯读判定/幂等提前返回）。WriteConflict / prewrite 锁竞争
-// 超预算 = 明确未提交 → 退避重试；其余异常经 guarded 翻译
+// Optimistic retry loop (§4.1): body(ts, muts) reads/computes on the start_ts snapshot
+// and assembles the mutation batch; empty muts = nothing to commit (pure-read decision /
+// idempotent early return). WriteConflict / prewrite lock contention over budget =
+// definitely not committed → back off and retry; other exceptions are translated by guarded
 template <typename Body>
 auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
     using R = std::invoke_result_t<Body&, uint64_t, std::vector<TikvMutation>&>;
@@ -204,14 +211,14 @@ auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
         for (int attempt = 0;; ++attempt) {
             uint64_t ts = client().get_ts();
             std::vector<TikvMutation> muts;
-            // 提交成功（或 muts 空的纯读判定）→ true；冲突退避 → false 重试
+            // Commit succeeded (or pure-read decision with empty muts) → true; conflict backoff → false to retry
             auto committed = [&] {
                 if (muts.empty()) return true;
                 try {
                     client().commit(ts, muts);
                     return true;
                 } catch (const TikvConflict& c) {
-                    m_conflict_retries_->inc();  // 每轮冲突重试计一次（T5 指标）
+                    m_conflict_retries_->inc();  // count once per conflict retry round (T5 metric)
                     if (attempt + 1 >= kMaxTxnRetries)
                         throw_internal(what, "txn conflict storm: " + c.what);
                     conflict_backoff(attempt);
@@ -229,11 +236,12 @@ auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
     });
 }
 
-// ---------- 构造 / 关闭 ----------
+// ---------- Construction / shutdown ----------
 
 TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
-    // T5 指标：先于任何网络调用注册——schema init 的冲突重试也要计入；
-    // 空 scope 返回孤立实例，测试直构零装配成本
+    // T5 metrics: registered before any network call — conflict retries during schema
+    // init must count too; an empty scope returns isolated instances, so directly
+    // constructed tests have zero wiring cost
     m_conflict_retries_ = opt_.metrics.counter(
         "lights3_duostore_tikv_txn_conflict_retries_total",
         "Optimistic txn retries after WriteConflict/lock contention (one per retry round)");
@@ -248,12 +256,18 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
                                                              opt_.cert_path, opt_.key_path,
                                                              opt_.backoff_budget_ms});
     client_.store(client_owned_.get(), std::memory_order_release);
-    // schema 谱系校验（§3.2）：Insert 表达"只允许首建"。多网关同前缀首次启动是
-    // 受支持的合法竞态——冲突/撞键/结果不明（常量幂等写，重读即可判定）都进
-    // 退避重试循环收敛，不能单发即弃（其余写路径由 txn_retry 提供同款循环）。
-    // 版本演进（docs/gaps.md §6.1）：存量版本 < 当前走迁移链（每步幂等——共享
-    // 引擎无全局迁移锁，多台新版网关并发走链互相无害；盖章 Put 竞态收敛到同一
-    // 值），> 当前拒绝降级——升级后旧版网关开机即拒，挡住混布回写坏新布局
+    // Schema lineage check (§3.2): Insert expresses "first creation only". Multiple
+    // gateways first-starting on the same prefix is a supported, legitimate race —
+    // conflict / key collision / unknown outcome (a constant idempotent write,
+    // decidable by re-reading) all go through the backoff retry loop to converge;
+    // one-shot-and-give-up is not allowed (other write paths get the same loop from
+    // txn_retry). Version evolution (docs/gaps.md §6.1): existing version < current
+    // walks the migration chain (each step idempotent — the shared engine has no
+    // global migration lock, and multiple new-version gateways walking the chain
+    // concurrently are harmless to each other; racing stamp Puts converge to the same
+    // value); > current refuses downgrade — after an upgrade, old-version gateways are
+    // rejected at boot, blocking mixed deployments from writing back and corrupting
+    // the new layout
     guarded("open schema", [&] {
         const std::string marker = "t" + std::to_string(kSchemaCurrent);
         std::string skey = tkey('s', {});
@@ -269,10 +283,10 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
             try {
                 client().commit(ts, {{TikvOp::kInsert, skey, marker}});
                 return;
-            } catch (const TikvAlreadyExist&) {  // 并发首建已成，下轮读出校验
-            } catch (const TikvConflict&) {  // 并发首建进行中
+            } catch (const TikvAlreadyExist&) {  // concurrent first creation succeeded; read and verify next round
+            } catch (const TikvConflict&) {  // concurrent first creation in progress
                 m_conflict_retries_->inc();
-            } catch (const TikvUndetermined&) {  // 写入的是常量，下轮重读判定
+            } catch (const TikvUndetermined&) {  // the write is a constant; re-read next round to decide
             }
             if (attempt + 1 >= kMaxTxnRetries)
                 throw S3Error(S3ErrorCode::InternalError,
@@ -281,9 +295,10 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
         }
     });
 
-    // GC safepoint worker（§7.3）：首 tick 立即推进，之后每 interval 一轮；失败
-    // 计数并下轮重试（PD leader 切换等瞬态）。interval=0 = 关闭（测试直构 /
-    // 共 TiDB 集群部署）
+    // GC safepoint worker (§7.3): pushes immediately on the first tick, then one round
+    // per interval; failures are counted and retried next round (transients like PD
+    // leader switches). interval=0 = disabled (directly constructed tests /
+    // deployments sharing a TiDB cluster)
     if (opt_.gc_safepoint_interval_s > 0) {
         sp_thread_ = std::thread([this] {
             std::unique_lock lk(sp_mu_);
@@ -304,12 +319,14 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
     }
 }
 
-// 迁移链（版本 n → n+1 的就地变换；每步幂等——并发走链的网关互相无害）。新增
-// 布局变更时在此登记并把 kSchemaCurrent +1——绝不允许"改布局不留迁移"
+// Migration chain (in-place transform from version n → n+1; each step idempotent —
+// gateways walking the chain concurrently are harmless to each other). Register new
+// layout changes here and bump kSchemaCurrent by 1 — "changing the layout without
+// leaving a migration" is never allowed
 void TikvMetaStore::migrate_schema(int64_t ver) {
     using MigrateFn = void (*)(TikvMetaStore&);
     static constexpr std::array<std::pair<int64_t, MigrateFn>, 0> kSchemaMigrations{
-        // {{1, &migrate_v1_to_v2}}  // 示例：登记后 v1 库开机自动升
+        // {{1, &migrate_v1_to_v2}}  // example: once registered, v1 stores auto-upgrade at boot
     };
     for (; ver < kSchemaCurrent; ++ver) {
         MigrateFn fn = nullptr;
@@ -325,24 +342,29 @@ void TikvMetaStore::migrate_schema(int64_t ver) {
 }
 
 uint64_t TikvMetaStore::update_gc_safepoint_once() {
-    // TSO = physical_ms << 18 | logical：retention 直接在 ts 域上减（ms << 18）
+    // TSO = physical_ms << 18 | logical: retention is subtracted directly in the ts domain (ms << 18)
     uint64_t now = client().get_ts();
     uint64_t retention = (uint64_t(opt_.gc_retention_s) * 1000) << 18;
     uint64_t target = now > retention ? now - retention : 0;
-    // 1) 注册本网关的 service safepoint。service id 同前缀共享：多网关互相覆盖
-    //    无妨（都声明 ~now−retention，PD 取 min 后仍然安全）；TTL 3×interval——
-    //    推进停摆的网关过两轮自动摘除，不悬吊集群 GC
+    // 1) Register this gateway's service safepoint. The service id is shared per
+    //    prefix: gateways overwriting each other is fine (all declare ~now−retention,
+    //    still safe after PD takes the min); TTL is 3x interval — a gateway whose
+    //    advancement stalls is auto-removed after two rounds, never dangling cluster GC
     int64_t ttl_s = std::max<int64_t>(3 * opt_.gc_safepoint_interval_s, 60);
     client().update_service_gc_safepoint("lights3-duostore:" + opt_.prefix, ttl_s, target);
-    // 2) 顶替 TiDB 的 gc_worker 角色（§7.3 纯 KV 部署的本义）：PD 对缺失的
-    //    gc_worker 以当前集群 safepoint 永久占位（无限 TTL）——不推它 min 恒被
-    //    钉死。gc_worker 项 PD 强制无限 TTL。共 TiDB 集群须关本推进器
-    //   （interval=0），否则与真 gc_worker 竞写（单调语义下无害但无谓）
+    // 2) Take over TiDB's gc_worker role (the whole point of §7.3 for pure-KV
+    //    deployments): PD permanently placeholds a missing gc_worker at the current
+    //    cluster safepoint (infinite TTL) — without pushing it, the min stays pinned
+    //    forever. PD forces infinite TTL for the gc_worker entry. Clusters shared with
+    //    TiDB must disable this pusher (interval=0), otherwise it races writes with
+    //    the real gc_worker (harmless under monotonic semantics but pointless)
     uint64_t min_sp = client().update_service_gc_safepoint(
         "gc_worker", std::numeric_limits<int64_t>::max(), target);
-    // 3) 以 min 推进集群 safepoint：min 覆盖全体存活服务（含 BR/CDC 类外部
-    //    服务），不越过任何服务声明的快照；PD 端单调只进，落后值原样返回当前值
-    //    ——多网关并发推进天然收敛
+    // 3) Push the cluster safepoint with the min: the min covers all live services
+    //    (including external ones like BR/CDC), never passing any service's declared
+    //    snapshot; PD is monotonic forward-only and returns the current value
+    //    unchanged for lagging inputs — concurrent advancement by multiple gateways
+    //    naturally converges
     uint64_t cluster_sp = client().update_gc_safepoint(min_sp);
     m_safepoint_ms_->set(int64_t(cluster_sp >> 18));
     return cluster_sp;
@@ -357,16 +379,18 @@ TikvMetaStore::~TikvMetaStore() {
 }
 
 void TikvMetaStore::close() {
-    // 先停 safepoint worker：其经 client() 取句柄，摘句柄早于停线程会把正常
-    // 退出路径变成 500 抛掷
+    // Stop the safepoint worker first: it gets its handle via client(); detaching the
+    // handle before stopping the thread would turn the normal exit path into a 500 throw
     {
         std::lock_guard lk(sp_mu_);
         sp_stop_ = true;
     }
     sp_cv_.notify_all();
     if (sp_thread_.joinable()) sp_thread_.join();
-    // 再摘句柄再析构：close 后调用在 client() 处确定性抛 500（rocks 版同型）；
-    // Cluster 析构停后台线程，须在无在途调用后进行（DuoStoreBackend close 顺序保证）
+    // Then detach the handle, then destruct: calls after close deterministically
+    // throw 500 at client() (same shape as the rocks version); Cluster destruction
+    // stops background threads and must happen after there are no in-flight calls
+    // (guaranteed by DuoStoreBackend's close ordering)
     TikvClient* c = client_.exchange(nullptr, std::memory_order_acq_rel);
     if (!c) return;
     client_owned_.reset();
@@ -379,7 +403,7 @@ TikvClient& TikvMetaStore::client() {
 }
 
 std::optional<std::string> TikvMetaStore::snap_get(uint64_t ver, const std::string& key) {
-    // 纯读重试一次（§6.4）：client-c 内部已带退避，这里只兜一次瞬时抖动
+    // Pure reads retry once (§6.4): client-c already backs off internally; this only catches one transient hiccup
     try {
         return client().get(ver, key);
     } catch (const pingcap::Exception& e) {
@@ -405,14 +429,14 @@ void TikvMetaStore::scan_range(uint64_t ver, std::string lo, const std::string& 
         for (auto& kv : page)
             if (!cb(kv.first, kv.second)) return;
         if (page.size() < kScanPage) return;
-        lo = page.back().first + '\0';  // 字节序后继，无缝续页
+        lo = page.back().first + '\0';  // byte-order successor, seamless page continuation
     }
 }
 
 void TikvMetaStore::mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add,
                              std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack) continue;  // pack 存活走 stats 账（P2）
+        if (e.kind == Extent::Kind::kPack) continue;  // pack liveness goes through the stats ledger (P2)
         if (add)
             muts.push_back({TikvOp::kPut, refs_key(e.file_id), std::string(owner)});
         else
@@ -422,13 +446,15 @@ void TikvMetaStore::mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref
 
 void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref,
                                    int sign, int64_t rec_overhead) {
-    // 同 pack 多 extent 先聚合，每 pack 一条唯一 delta 行（id 预派发，入账纯写——
-    // 共享账行的读改写会让同 active-pack 的并发小对象 PUT prewrite 冲突，§3.2）
+    // Aggregate multiple extents of the same pack first; one unique delta row per pack
+    // (id pre-dispatched, the ledger entry is pure-write — read-modify-write of a
+    // shared ledger row would make concurrent small-object PUT prewrites on the same
+    // active pack conflict, §3.2)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
         auto& [bytes, recs] = agg[e.file_id];
-        bytes += sign * (int64_t(e.length) + rec_overhead);  // 头开销同口径（§2.3a）
+        bytes += sign * (int64_t(e.length) + rec_overhead);  // header overhead on the same accounting basis (§2.3a)
         recs += sign;
     }
     for (const auto& [id, d] : agg) {
@@ -441,15 +467,17 @@ void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRe
 void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref,
                                     ReclaimReason reason) {
     if (ref.extents.empty()) return;
-    // 超大 DataRef 拆多条（docs/gaps.md §2.11）：GC 单批解码内存有界、单条 gcq
-    // 值不逼近 raft entry 上限；ack 逐条独立、unlink 幂等，拆分不改变崩溃语义
+    // Oversized DataRefs are split into multiple entries (docs/gaps.md §2.11): keeps
+    // GC per-batch decode memory bounded and a single gcq value away from the raft
+    // entry limit; acks are per-entry independent and unlink is idempotent, so
+    // splitting does not change crash semantics
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
         size_t n = std::min(kReclaimMaxExtents, ref.extents.size() - i);
         Reclaim r;
         r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
         r.reason = reason;
-        uint64_t seq = alloc_id(kCtrSeq, seqs_);  // 预派发（独立小事务），入账保持纯写
+        uint64_t seq = alloc_id(kCtrSeq, seqs_);  // pre-dispatched (independent small txn); the ledger entry stays pure-write
         muts.push_back({TikvOp::kPut, gcq_key(seq), codec::encode_reclaim(r, ts)});
     }
 }
@@ -457,17 +485,20 @@ void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataR
 uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r, uint32_t n) {
     n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
     {
-        std::lock_guard lk(alloc_mu_);  // 常见路径：纯内存 next += n
+        std::lock_guard lk(alloc_mu_);  // common path: pure in-memory next += n
         if (r.limit - r.next >= n) {
             uint64_t first = r.next;
             r.next += n;
             return first;
         }
     }
-    // 段耗尽：计数器 RMW 小事务（§5）在锁外进行——TSO + 2PC + 冲突重试可达
-    // 数十 ms，锁内会把所有 kind 的派发一并串行卡死。并发续段者经 WriteConflict
-    // 仲裁各拿到不相交段；落败方整段弃置无害（id 只需唯一单调，不需连续）。
-    // raft 多数派持久，无 Redis 版的崩溃回滚补偿
+    // Segment exhausted: the counter RMW small transaction (§5) runs outside the
+    // lock — TSO + 2PC + conflict retries can take tens of ms, and doing it inside
+    // the lock would serialize and stall dispatch for all kinds at once. Concurrent
+    // renewers are arbitrated by WriteConflict and each get disjoint segments; the
+    // loser discarding its whole segment is harmless (ids only need to be unique and
+    // monotonic, not contiguous). Raft-majority durable, so no crash-rollback
+    // compensation like the Redis version
     std::string ck = counter_key(kind);
     uint64_t hi;
     try {
@@ -482,17 +513,21 @@ uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r, uint32_t n) {
                 return next_hi;
             });
     } catch (const UndeterminedCommit& u) {
-        // 号段计数器事务"结果不明"只意味着可能烧掉一段 id（空洞无害），而**外层
-        // 业务事务确定未提交**——本函数在组 mutation 阶段被调用，业务 commit 还没
-        // 发生。原样透传会被 commit_or_discard 当成"业务提交结果不明"而拒绝清理
-        // 已落的数据 extent，制造无谓孤儿（docs/gaps.md §3.9）。降为确定性失败
+        // An "outcome unknown" on the id-segment counter transaction only means a
+        // segment of ids may be burned (holes are harmless), while the **outer
+        // business transaction is definitely not committed** — this function is
+        // called during mutation assembly, before the business commit happens.
+        // Passing it through as-is would make commit_or_discard treat it as
+        // "business commit outcome unknown" and refuse to clean up already-written
+        // data extents, creating needless orphans (docs/gaps.md §3.9). Downgrade to
+        // a deterministic failure
         throw S3Error(S3ErrorCode::InternalError,
                       std::string("duostore tikv meta: id segment reservation failed "
                                   "(business txn not committed): ") +
                           u.what());
     }
     std::lock_guard lk(alloc_mu_);
-    if (r.limit - r.next < n) {  // 他人已续上且够用则用其段，本段弃置（空洞无害，同上）
+    if (r.limit - r.next < n) {  // if someone else renewed and it suffices, use theirs; discard ours (holes harmless, as above)
         r.limit = hi;
         r.next = hi - kIdSegment;
     }
@@ -502,7 +537,8 @@ uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r, uint32_t n) {
 }
 
 uint64_t TikvMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
-    // kRados 与 kChunk 共号段（rocks 版同一论证：refs 按裸 file_id 记账不分 kind）
+    // kRados and kChunk share a segment (same argument as the rocks version: refs are
+    // accounted by raw file_id regardless of kind)
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
     return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack,
                     file_ids_[size_t(kind)], n);
@@ -513,7 +549,7 @@ uint64_t TikvMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
 void TikvMetaStore::create_bucket(std::string_view b) {
     try {
         txn_retry("create_bucket", [&](uint64_t, std::vector<TikvMutation>& muts) {
-            // Insert 协议级表达"必须不存在"（§4.4）——无需读，撞键即结构化拒绝
+            // Insert expresses "must not exist" at the protocol level (§4.4) — no read needed; a key collision is a structured rejection
             muts.push_back({TikvOp::kInsert, bucket_key(b), codec::encode_bucket(now_ms())});
         });
     } catch (const TikvAlreadyExist&) {
@@ -525,16 +561,18 @@ void TikvMetaStore::create_bucket(std::string_view b) {
 void TikvMetaStore::delete_bucket(std::string_view b) {
     txn_retry("delete_bucket", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
-        // 空检查（同快照）：objects / uploads 任一非空即拒绝（对齐 AWS；uploads
-        // 检查同时封死"桶删后 put_part 复活幽灵上传"，rocks 版同一论证）
+        // Emptiness check (same snapshot): reject if either objects or uploads is
+        // non-empty (matching AWS; the uploads check also seals off "put_part reviving
+        // a ghost upload after bucket deletion", same argument as the rocks version)
         for (char tag : {'O', 'U'}) {
             auto [lo, hi] = range_of(tag, std::string(b) + '\0');
             if (!client().scan(ts, lo, hi, 1).empty())
                 throw S3Error(S3ErrorCode::BucketNotEmpty,
                               "The bucket you tried to delete is not empty", std::string(b));
         }
-        // Del 桶 + 全量守卫分片：与并发 put_object/create_upload 的守卫 Lock
-        // 构成写写冲突，物化空检查的写偏斜（§4.3）
+        // Del the bucket + all guard shards: forms a write-write conflict with the
+        // guard Locks of concurrent put_object/create_upload, materializing the
+        // emptiness check's write skew (§4.3)
         muts.push_back({TikvOp::kDel, bucket_key(b), {}});
         for (uint32_t s = 0; s < kGuardShards; ++s)
             muts.push_back({TikvOp::kLock, bucket_guard(b, s), {}});
@@ -556,7 +594,7 @@ std::vector<BucketInfo> TikvMetaStore::list_buckets() {
             out.push_back({k.substr(plen), codec::from_unix_ms(codec::decode_bucket(v))});
             return true;
         });
-        return out;  // key 字节序即字典序
+        return out;  // key byte order is lexicographic order
     });
 }
 
@@ -582,17 +620,19 @@ void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec
                                PutCondition cond) {
     txn_retry("put_object", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         std::string okey = object_key(b, k);
-        auto vals = snap_get_many(ts, {bucket_key(b), okey});  // 一次往返读全前置
+        auto vals = snap_get_many(ts, {bucket_key(b), okey});  // read all preconditions in one round trip
         if (!vals[0]) throw_no_bucket(b);
         std::optional<ObjectRec> old;
         if (vals[1]) old = codec::decode_object(std::string(k), *vals[1]);
-        // 快照读 + 提交时写写冲突检测：并发覆盖会使本事务冲突重试，重试轮以新
-        // 快照重新检查——检查与提交对外原子（PutCondition 契约）。抛出时 muts
-        // 未发出任何 RPC
+        // Snapshot read + write-write conflict detection at commit: a concurrent
+        // overwrite makes this transaction conflict-retry, and the retry round
+        // re-checks on a fresh snapshot — check and commit are externally atomic
+        // (the PutCondition contract). When this throws, muts has issued no RPC
         check_put_condition(cond, old, k);
         rec.version = old ? old->version + 1 : 1;
 
-        // primary = 对象键（写写冲突的语义焦点）；守卫 Lock 物化桶存在性检查（§4.3）
+        // primary = the object key (semantic focus of write-write conflicts); guard
+        // Lock materializes the bucket existence check (§4.3)
         std::string oval = codec::encode_object(rec);
         check_object_value(k, rec.data.extents.size(), oval.size());  // §2.12 fail-fast
         muts.push_back({TikvOp::kPut, okey, std::move(oval)});
@@ -613,7 +653,7 @@ bool TikvMetaStore::delete_object(std::string_view b, std::string_view k) {
         std::string okey = object_key(b, k);
         auto vals = snap_get_many(ts, {bucket_key(b), okey});
         if (!vals[0]) throw_no_bucket(b);
-        if (!vals[1]) return false;  // 幂等：muts 空，不发事务
+        if (!vals[1]) return false;  // idempotent: muts empty, no transaction sent
         auto old = codec::decode_object(std::string(k), *vals[1]);
         muts.push_back({TikvOp::kDel, okey, {}});
         enqueue_reclaim(muts, old.data, ReclaimReason::kDelete);
@@ -623,21 +663,24 @@ bool TikvMetaStore::delete_object(std::string_view b, std::string_view k) {
     });
 }
 
-// §3.3：Snapshot 一致视图 + 分页扫，算法照搬 rocks 版（主文档 §4.4）；delimiter
-// 组末字节 +1 重 seek 跳过整组（每组一次 RTT）。组尾 token 无反向扫原语，延迟到
-// 截断恰落组上时对该组做一次前向扫描取尾 key（每次 list 至多一次、组通常远小于桶）
+// §3.3: Snapshot consistent view + paged scan, algorithm copied from the rocks version
+// (main doc §4.4); delimiter groups skip the whole group by bumping the last byte and
+// re-seeking (one RTT per group). There is no reverse-scan primitive for the group-tail
+// token, so it is deferred: only when truncation lands exactly on a group is one
+// forward scan done on that group to fetch its tail key (at most once per list; groups
+// are usually far smaller than the bucket)
 ListResult TikvMetaStore::list_objects(std::string_view b, const ListOptions& opt) {
     return guarded("list_objects", [&] {
         ListResult out;
-        uint64_t ts = client().get_ts();  // 整次 list 的一致视图（跨分页/跳组）
+        uint64_t ts = client().get_ts();  // consistent view for the whole list (across pages/group skips)
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
-        if (opt.max_keys <= 0) return out;  // S3：max-keys=0 空且不截断
+        if (opt.max_keys <= 0) return out;  // S3: max-keys=0 returns empty and not truncated
 
         auto [base, upper] = range_of('O', std::string(b) + '\0');
         const std::string& prefix = opt.prefix;
         const std::string& delim = opt.delimiter;
 
-        // 简易游标：页缓冲 + 续页（delimiter 需要随时改 seek 点，回调式不贴合）
+        // Simple cursor: page buffer + continuation (delimiter needs to change the seek point at will; a callback style doesn't fit)
         std::vector<std::pair<std::string, std::string>> page;
         size_t idx = 0;
         bool eof = false;
@@ -657,20 +700,21 @@ ListResult TikvMetaStore::list_objects(std::string_view b, const ListOptions& op
 
         seek(base + std::max(prefix, opt.start_after));
         if (!opt.start_after.empty() && !eof && page[idx].first == base + opt.start_after)
-            advance();  // start_after 命中自身再走一步
+            advance();  // start_after matched itself, step once more
 
         std::string last_emitted;
-        std::string last_group;  // 非空 = 最近一次输出是 delimiter 组
+        std::string last_group;  // non-empty = the most recent output was a delimiter group
         int count = 0;
         while (!eof) {
             std::string_view uk(page[idx].first);
             uk.remove_prefix(base.size());
-            if (uk.compare(0, prefix.size(), prefix) != 0) break;  // 出前缀区间即止
+            if (uk.compare(0, prefix.size(), prefix) != 0) break;  // stop once outside the prefix range
             if (count >= opt.max_keys) {
                 out.is_truncated = true;
                 if (!last_group.empty()) {
-                    // 截断恰落组上：key-only 反向扫取组尾（rocks 版 SeekForPrev 的
-                    // 对应物，O(1) RPC，不随组大小放大）
+                    // Truncation landed exactly on a group: key-only reverse scan for
+                    // the group tail (counterpart of the rocks version's SeekForPrev,
+                    // O(1) RPCs, does not scale with group size)
                     std::string glo = base + last_group;
                     std::string ghi = glo;
                     codec::bump_last_byte(ghi);
@@ -689,7 +733,7 @@ ListResult TikvMetaStore::list_objects(std::string_view b, const ListOptions& op
                     ++count;
                     std::string target = base + group;
                     if (!codec::bump_last_byte(target)) break;
-                    seek(target);  // 跳过整组（同快照，一致性不破）
+                    seek(target);  // skip the whole group (same snapshot, consistency intact)
                     continue;
                 }
             }
@@ -716,7 +760,7 @@ std::string TikvMetaStore::create_upload(std::string_view b, std::string_view k,
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
         muts.push_back(
             {TikvOp::kPut, upload_key(b, k, rec.upload_id), codec::encode_upload(rec)});
-        // 守卫：物化 delete_bucket 空检查的写偏斜（§4.3，同 put_object）
+        // Guard: materializes the write skew of delete_bucket's emptiness check (§4.3, same as put_object)
         muts.push_back({TikvOp::kLock, bucket_guard(b, uint32_t(fnv1a(k) % kGuardShards)), {}});
     });
     return rec.upload_id;
@@ -743,14 +787,16 @@ void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string
         if (vals[1]) old = codec::decode_part(p.part_no, *vals[1]);
 
         muts.push_back({TikvOp::kPut, pkey, codec::encode_part(p)});
-        // 守卫：物化 complete/abort 删 upload 时的写偏斜（§4.3）；按 part_no 分片，
-        // 同 upload 并发传不同号分片互不阻塞（1/16 概率误撞，重试廉价）
+        // Guard: materializes the write skew when complete/abort deletes the upload
+        // (§4.3); sharded by part_no, so concurrent uploads of different part numbers
+        // within the same upload don't block each other (1/16 false-collision
+        // probability, retries are cheap)
         muts.push_back(
             {TikvOp::kLock, upload_guard(b, k, id, uint32_t(p.part_no) % kGuardShards), {}});
         mut_refs(muts, p.data, /*add=*/true, pkey);
         const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
         mut_pack_delta(muts, p.data, +1, ov);
-        if (old) {  // 同号重传 last-write-wins：旧分片同批入 GC 账
+        if (old) {  // same-number re-upload is last-write-wins: the old part enters the GC ledger in the same batch
             enqueue_reclaim(muts, old->data, ReclaimReason::kPartOverwrite);
             mut_refs(muts, old->data, /*add=*/false, {});
             mut_pack_delta(muts, old->data, -1, ov);
@@ -768,7 +814,7 @@ std::vector<PartRec> TikvMetaStore::scan_parts(uint64_t ver, std::string_view b,
         out.push_back(codec::decode_part(no, v));
         return true;
     });
-    return out;  // be16 part_no 保证升序
+    return out;  // be16 part_no guarantees ascending order
 }
 
 std::vector<PartRec> TikvMetaStore::list_parts(std::string_view b, std::string_view k,
@@ -776,7 +822,7 @@ std::vector<PartRec> TikvMetaStore::list_parts(std::string_view b, std::string_v
     return guarded("list_parts", [&] {
         uint64_t ts = client().get_ts();
         if (!is_valid_upload_id(id) || !snap_get(ts, upload_key(b, k, id))) throw_no_upload(id);
-        return scan_parts(ts, b, k, id);  // 同快照：upload 校验与 parts 读一致
+        return scan_parts(ts, b, k, id);  // same snapshot: upload check consistent with parts read
     });
 }
 
@@ -789,8 +835,9 @@ std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
         std::vector<UploadInfo> out;
         auto [lo, hi] = range_of('U', std::string(b) + '\0');
         size_t plen = lo.size();  // prefix + 'U' + b + '\0'
-        // 游标下推（docs/gaps.md §5.1）：键序即 (key, upload_id) 序，抬高 [lo,hi)
-        // 的下界即可跳过整段。尾部 '\0' 让下界落在该二元组之后
+        // Cursor pushdown (docs/gaps.md §5.1): key order is (key, upload_id) order, so
+        // raising the lower bound of [lo,hi) skips the whole segment. The trailing
+        // '\0' places the lower bound just past that pair
         if (!key_marker.empty() || !id_marker.empty()) {
             std::string from = lo;
             from += std::string(key_marker);
@@ -801,7 +848,7 @@ std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
         }
         scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
             if (limit > 0 && out.size() >= size_t(limit)) return false;
-            // rest = <key>\0<upload_id>，前缀扫天然按 (key, upload_id) 排序
+            // rest = <key>\0<upload_id>; the prefix scan is naturally sorted by (key, upload_id)
             std::string_view rest = std::string_view(key).substr(plen);
             auto sep = rest.rfind('\0');
             if (sep == std::string_view::npos) return true;
@@ -814,8 +861,10 @@ std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
     });
 }
 
-// §8（主文档）：complete 纯元数据事务，零数据搬运。parts 全部进写集（逐个 Del）
-// → 与并发同号 put_part 的冲突由 prewrite 天然校验；新号 put_part 由 Ug 守卫物化
+// §8 (main doc): complete is a pure metadata transaction, zero data movement. All
+// parts enter the write set (Del one by one) → conflicts with concurrent same-number
+// put_part are naturally checked by prewrite; new-number put_part is materialized by
+// the Ug guard
 std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view k,
                                            std::string_view id,
                                            std::span<const PartInfo> parts) {
@@ -844,21 +893,23 @@ std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view 
         for (const auto& [no, p] : stored) {
             muts.push_back({TikvOp::kDel, part_key(b, k, id, no), {}});
             if (selected.count(no)) {
-                // refs 转移：owner 改写为对象。pack 账存活不变，但口径从分片重
-                // 平衡为对象（-分片头开销 +对象头开销，recs 相抵）：保证后续对象
-                // 删除按对象口径扣减后账精确归零
+                // refs transfer: owner rewritten to the object. Pack ledger liveness
+                // is unchanged, but the accounting basis is rebalanced from part to
+                // object (-part header overhead +object header overhead, recs cancel
+                // out): guarantees a later object delete, deducting on the object
+                // basis, zeroes the ledger exactly
                 mut_refs(muts, p.data, /*add=*/true, okey);
                 mut_pack_delta(muts, p.data, -1,
                                codec::pack_rec_overhead_part(b, k, id, no));
                 mut_pack_delta(muts, p.data, +1, codec::pack_rec_overhead(b, k));
-            } else {  // 未选中分片入 GC 账
+            } else {  // unselected parts enter the GC ledger
                 enqueue_reclaim(muts, p.data, ReclaimReason::kComplete);
                 mut_refs(muts, p.data, /*add=*/false, {});
                 mut_pack_delta(muts, p.data, -1,
                                codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
-        if (old) {  // 旧同名对象入 GC 账
+        if (old) {  // the old same-name object enters the GC ledger
             enqueue_reclaim(muts, old->data, ReclaimReason::kOverwrite);
             mut_refs(muts, old->data, /*add=*/false, {});
             mut_pack_delta(muts, old->data, -1, codec::pack_rec_overhead(b, k));
@@ -883,7 +934,7 @@ void TikvMetaStore::abort_upload(std::string_view b, std::string_view k, std::st
     });
 }
 
-// ---------- GC 记账 ----------
+// ---------- GC accounting ----------
 
 std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t max,
                                                                        uint64_t min_seq,
@@ -892,13 +943,13 @@ std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t ma
         std::vector<std::pair<uint64_t, Reclaim>> out;
         uint64_t ts = client().get_ts();
         auto [lo, hi] = range_of('G', {});
-        (void)lo;  // 起点用 gcq_key(min_seq)：min_seq=0 时即 'G' 段首，等价 lo
+        (void)lo;  // start from gcq_key(min_seq): with min_seq=0 that is the head of the 'G' segment, equivalent to lo
         size_t plen = opt_.prefix.size() + 1;
         size_t extents = 0;
         for (auto& [key, v] : client().scan(ts, gcq_key(min_seq), hi, max)) {
             uint64_t seq = codec::parse_be64(std::string_view(key).substr(plen));
             out.emplace_back(seq, codec::decode_reclaim(v));
-            // 累计 extent 上限（gaps §2.11）：至少返回 1 项（多扫的 kv 就地丢弃）
+            // Cumulative extent cap (gaps §2.11): returns at least 1 item (over-scanned kv discarded in place)
             extents += out.back().second.extents.size();
             if (extents >= max_extents) break;
         }
@@ -908,14 +959,16 @@ std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t ma
 
 void TikvMetaStore::ack_reclaim(uint64_t seq) {
     txn_retry("ack_reclaim", [&](uint64_t, std::vector<TikvMutation>& muts) {
-        muts.push_back({TikvOp::kDel, gcq_key(seq), {}});  // 盲删单 key，无跨 key 不变量
+        muts.push_back({TikvOp::kDel, gcq_key(seq), {}});  // blind delete of a single key, no cross-key invariants
     });
 }
 
-// 多网关 GC 租约（docs/gaps.md §6.1）：value = "<owner>\0<expiry_ms>"。快照读判定
-// + prewrite 冲突检测充当 CAS（读到即提交，§4.1）——两实例并发抢注只有一个提交
-// 成功，输者重试后读到新租约即退出。TTL 过期由墙钟判定（网关间时钟偏差应远小于
-// TTL；租约本就要求 ttl ≫ 单轮 GC 时长）
+// Multi-gateway GC lease (docs/gaps.md §6.1): value = "<owner>\0<expiry_ms>".
+// Snapshot-read decision + prewrite conflict detection acts as a CAS
+// (read-then-commit, §4.1) — of two instances racing to claim, only one commit
+// succeeds; the loser retries, reads the new lease, and backs out. TTL expiry is
+// judged by wall clock (inter-gateway clock skew should be far smaller than the TTL;
+// the lease already requires ttl ≫ a single GC round's duration)
 bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
     return txn_retry("try_gc_lease", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         std::string lk = tkey('L', "gc");
@@ -926,7 +979,7 @@ bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
                 std::string_view cur(v->data(), nul);
                 int64_t expiry = 0;
                 std::from_chars(v->data() + nul + 1, v->data() + v->size(), expiry);
-                if (cur != owner && expiry > now) return false;  // 他人持有且未过期
+                if (cur != owner && expiry > now) return false;  // held by someone else and not expired
             }
         }
         std::string val(owner);
@@ -945,12 +998,14 @@ void TikvMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
 }
 
 std::vector<PackStat> TikvMetaStore::pack_stats() {
-    // 'S' 表前缀扫（同 pack 的 delta/seal 行相邻：'d' < 's'），边扫边聚合。
-    // 顺带折叠（§3.2 delta 行方案的另一半）：单 pack delta 行超阈值即合并为一行
-    // ——GC 低频路径承担合并，业务写路径保持纯写无冲突
+    // 'S' table prefix scan (a pack's delta/seal rows are adjacent: 'd' < 's'),
+    // aggregating as it scans. Folds in passing (the other half of the §3.2 delta-row
+    // scheme): once a single pack's delta rows exceed the threshold they are merged
+    // into one row — the low-frequency GC path bears the merge, keeping the business
+    // write path pure-write and conflict-free
     struct Acc {
         PackStat ps;
-        std::vector<std::string> delta_keys;  // 折叠候选
+        std::vector<std::string> delta_keys;  // fold candidates
     };
     std::vector<Acc> accs;
     guarded("pack_stats", [&] {
@@ -959,7 +1014,7 @@ std::vector<PackStat> TikvMetaStore::pack_stats() {
         size_t plen = opt_.prefix.size() + 1;  // prefix + 'S'
         scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
             std::string_view rest = std::string_view(key).substr(plen);
-            if (rest.size() < 9) return true;  // 非本店格式，跳过
+            if (rest.size() < 9) return true;  // not our format, skip
             uint64_t id = codec::parse_be64(rest.substr(0, 8));
             if (accs.empty() || accs.back().ps.pack_id != id) {
                 accs.emplace_back();
@@ -980,15 +1035,17 @@ std::vector<PackStat> TikvMetaStore::pack_stats() {
     });
     for (Acc& a : accs) {
         if (a.delta_keys.size() <= kPackFoldThreshold) continue;
-        // 折叠为一行：删除已读到的 delta 行 + 写合并行（新 delta_id）。并发业务
-        // 事务只会新增其他 key 的行，不冲突；并发折叠（多网关）经 txn_retry 的
-        // 写写冲突仲裁——失败方重读重算，收敛无双计
+        // Fold into one row: delete the delta rows already read + write a merged row
+        // (new delta_id). Concurrent business transactions only add rows with other
+        // keys, no conflict; concurrent folds (multiple gateways) are arbitrated by
+        // txn_retry's write-write conflict — the loser re-reads and recomputes,
+        // converging without double-counting
         try {
             txn_retry("fold pack stats", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
                 int64_t bytes = 0, recs = 0;
                 for (const auto& dk : a.delta_keys) {
                     auto v = snap_get(ts, dk);
-                    if (!v) {  // 他人已折叠：放弃（清 muts 防半程提交丢账）
+                    if (!v) {  // someone else already folded: give up (clear muts to avoid a half-way commit losing ledger entries)
                         muts.clear();
                         return;
                     }
@@ -1013,17 +1070,18 @@ std::vector<PackStat> TikvMetaStore::pack_stats() {
 
 void TikvMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
     txn_retry("seal_pack", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
-        // 幂等；file_size=0 不覆盖已有记录（IMetaStore 契约）
+        // Idempotent; file_size=0 does not overwrite an existing record (IMetaStore contract)
         std::string skey = pack_seal_key(pack_id);
-        if (file_size == 0 && snap_get(ts, skey)) return;  // muts 空，不发事务
+        if (file_size == 0 && snap_get(ts, skey)) return;  // muts empty, no transaction sent
         muts.push_back({TikvOp::kPut, skey, codec::encode_counter_delta(int64_t(file_size))});
     });
 }
 
 void TikvMetaStore::drop_pack_stat(uint64_t pack_id) {
     txn_retry("drop_pack_stat", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
-        // 删除该 pack 的全部账行（delta + seal）。前提：live_recs==0 且 pack 已删，
-        // 不再有并发追加——快照读到的即全集
+        // Delete all ledger rows of this pack (delta + seal). Precondition:
+        // live_recs==0 and the pack is already deleted, so no more concurrent
+        // appends — what the snapshot reads is the complete set
         auto [lo, hi] = range_of('S', codec::be64_key(pack_id));
         scan_range(ts, lo, hi, [&](const std::string& key, const std::string&) {
             muts.push_back({TikvOp::kDel, key, {}});
@@ -1040,19 +1098,23 @@ bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k,
         auto v = snap_get(ts, okey);
         if (!v) return false;
         auto rec = codec::decode_object(std::string(k), *v);
-        // 乐观校验：version/extent 不符 = 期间被覆盖/删除 → 放弃（muts 空不发事务）；
-        // 校验通过后的"读到即提交"由 prewrite 对 okey 的冲突检测保证（§4.1 天然 CAS）
+        // Optimistic check: version/extent mismatch = overwritten/deleted in the
+        // meantime → give up (muts empty, no transaction sent); after the check
+        // passes, "read-then-commit" is guaranteed by prewrite's conflict detection
+        // on okey (§4.1 natural CAS)
         if (rec.version != expect_version || rec.data.extents != from.extents) return false;
         rec.data = to;
         rec.version += 1;
         muts.push_back({TikvOp::kPut, okey, codec::encode_object(rec)});
-        // refs 按差集操作（meta_util.h refs_delta）：同 key 多 mutation 在
-        // TiKV 是"后者胜"，整加再整删会抹掉未迁移 chunk 的 refs → 误删活数据
+        // refs operate on the set difference (meta_util.h refs_delta): multiple
+        // mutations on the same key in TiKV are "last one wins" — add-all then
+        // delete-all would wipe the refs of unmigrated chunks → live data wrongly deleted
         auto rd = refs_delta(from, to);
         mut_refs(muts, rd.added, /*add=*/true, okey);
         mut_refs(muts, rd.removed, /*add=*/false, {});
-        // 压实换 ref：账随 extent 迁移（§9.2）；两侧都按对象口径（迁出旧 record
-        // 若为 mpu 形态则轻微低扣，保守方向）
+        // Compaction swaps refs: the ledger migrates with the extents (§9.2); both
+        // sides use the object accounting basis (if the migrated-out old record is in
+        // mpu form this slightly under-deducts, the conservative direction)
         const int64_t ov = codec::pack_rec_overhead(b, k);
         mut_pack_delta(muts, to, +1, ov);
         mut_pack_delta(muts, from, -1, ov);
@@ -1066,7 +1128,8 @@ bool TikvMetaStore::chunk_referenced(uint64_t file_id) {
 }
 
 void TikvMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
-    // 'R' 前缀快照分页扫（孤儿扫描容忍弱一致视图）；key 尾部 = be64 file_id
+    // Paged snapshot scan of the 'R' prefix (orphan scanning tolerates a weakly
+    // consistent view); key tail = be64 file_id
     guarded("scan_refs", [&] {
         auto [lo, hi] = range_of('R', {});
         const size_t suffix = codec::be64_key(0).size();

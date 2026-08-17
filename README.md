@@ -125,6 +125,24 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range downlo
 
 Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
 
+## Install as a systemd service
+
+Build the binaries, then run the installer as root:
+
+```bash
+./build.sh -DLIGHTS3_BUILD_TESTS=OFF
+sudo ./scripts/install.sh
+sudo /usr/local/sbin/lights3ctl status
+```
+
+The installer creates a dedicated `lights3` system user, installs the server
+under `/usr/local/bin`, and runs it with `/etc/lights3/lights3.yaml` from the
+`/var/lib/lights3` working directory. On the first install it also writes random
+credentials to `/etc/lights3/lights3.env`; both that file and an existing YAML
+configuration are preserved on upgrades. Use `lights3ctl help` for start, stop,
+restart, status, and journal commands. Pass `--no-start` if the configuration
+must be adjusted before the first launch.
+
 ## Current scope
 
 - **Architecture**: four layers (HTTP Adapter / S3 Protocol / Storage / Core)

@@ -1,0 +1,41 @@
+[Unit]
+Description=LightS3 S3-compatible object storage server
+Documentation=https://github.com/locallocal/lights3
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=lights3
+Group=lights3
+WorkingDirectory=/var/lib/lights3
+EnvironmentFile=/etc/lights3/lights3.env
+ExecStart=/usr/local/bin/lights3 --config=/etc/lights3/lights3.yaml
+
+# LightS3 handles SIGTERM and drains in-flight requests before exiting.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=10min
+Restart=on-failure
+RestartSec=5s
+
+# Runtime limits and baseline hardening. ProtectSystem=full keeps /var, /srv,
+# and other data mounts writable so configurations are not restricted to the
+# default /var/lib/lights3 storage directory.
+LimitNOFILE=1048576
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+RestrictSUIDSGID=true
+StateDirectory=lights3
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

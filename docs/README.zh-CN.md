@@ -113,6 +113,22 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
 
 或使用 aws cli：`aws --endpoint-url http://127.0.0.1:9000 s3 ls`。
 
+## 作为 systemd 服务安装
+
+先构建二进制，再以 root 权限运行安装脚本：
+
+```bash
+./build.sh -DLIGHTS3_BUILD_TESTS=OFF
+sudo ./scripts/install.sh
+sudo /usr/local/sbin/lights3ctl status
+```
+
+安装脚本会创建专用的 `lights3` 系统用户，把服务安装到 `/usr/local/bin`，
+并以 `/var/lib/lights3` 为工作目录读取 `/etc/lights3/lights3.yaml`。首次安装
+还会在 `/etc/lights3/lights3.env` 中生成随机凭证；升级安装不会覆盖已有的
+配置和凭证。可通过 `lights3ctl help` 查看启停、重启、状态及日志命令；若需
+先调整配置再启动，请向安装脚本传入 `--no-start`。
+
 ## 当前实现范围
 
 - **架构**：四层（HTTP Adapter / S3 Protocol / Storage / Core），依赖单向；

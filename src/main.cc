@@ -1,9 +1,9 @@
-// Process entry point: flag parsing + Application lifecycle (src/app.h).
+// Process entry point: flag parsing + Application lifecycle (src/app/app.h).
 // Assembly and startup/shutdown ordering live in lights3::Application
 // (docs/architecture.md §4)
 #include <gflags/gflags.h>
 
-#include "app.h"
+#include "app/app.h"
 #include "core/log.h"
 #ifdef LIGHTS3_DUOSTORE
 #include <fstream>

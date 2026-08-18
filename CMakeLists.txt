@@ -292,6 +292,7 @@ add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
 
 # ---- Core library: L2/L3/L4 + HTTP boundary ----
 add_library(lights3_core STATIC
+  src/app.cc
   src/core/background.cc
   src/core/thread_pool.cc
   src/core/timer.cc

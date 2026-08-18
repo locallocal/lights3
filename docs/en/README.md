@@ -29,6 +29,7 @@ the inside. The design emphasizes three points:
 | [architecture.md](architecture.md) | Overall architecture, layering, request lifecycle, code layout |
 | [http-adapter.md](http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, adapter notes |
 | [concurrency.md](concurrency.md) | Concurrency model: Task coroutines, Executor abstraction, thread pool, unifying sync/async HTTP libraries |
+| [coroutine-internals.md](coroutine-internals.md) | Coroutine internals: Task promise layout & symmetric transfer, top-level drivers, when_all/with_timeout, cancellation race protocols and lifetime rules |
 | [storage-backend.md](storage-backend.md) | Storage backend abstraction, LocalFs/XLocalFs, DuoStore overview and new-backend guide, bucket routing |
 | [s3-protocol.md](s3-protocol.md) | S3 protocol: API scope, SigV4 (incl. presigned & clock skew), Multipart Upload, error mapping, mint compatibility gate |
 | [credential-management.md](credential-management.md) | Credential management: AK/SK generate/query/revoke API, three credential sources (static root / file / dynamic), `.sys` persistence; phase 2: at-rest SK encryption, hot-reloaded credentials file, multi-instance sync, per-credential policy |

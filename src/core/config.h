@@ -108,11 +108,21 @@ struct BucketRule {
     std::string backend;
 };
 
-// Static website hosting phase 1 (docs/static-website.md): buckets listed here
-// accept anonymous GET/HEAD object reads. Exact names only, no globs — a
-// pattern typo must not silently make extra buckets public.
+// Static website hosting (docs/static-website.md): buckets listed here accept
+// anonymous GET/HEAD object reads. Exact names only, no globs — a pattern typo
+// must not silently make extra buckets public.
+struct WebsiteBucket {
+    std::string bucket;
+    // Appended when the anonymous key is empty or ends with '/' (phase ②). Must not
+    // contain '/' (AWS rule: a slash would map "docs/" outside that directory)
+    std::string index_suffix = "index.html";
+    // Object served as the body of anonymous 4xx/5xx responses, keeping the original
+    // status code; empty = built-in minimal HTML page
+    std::string error_key;
+};
+
 struct WebsiteConfig {
-    std::vector<std::string> buckets;
+    std::vector<WebsiteBucket> buckets;
 };
 
 struct BucketsConfig {

@@ -44,6 +44,10 @@ struct ObjectMeta {
     std::string content_encoding;
     std::string content_language;
     std::string expires;  // HTTP-date text stored verbatim
+    // Website redirect (docs/static-website.md phase ③): echoed as a header on GET/HEAD
+    // like the fields above; the anonymous website plane additionally answers 301 with
+    // it as Location. Value must start with '/', 'http://' or 'https://' (checked at PUT)
+    std::string website_redirect;
     // Note: x-amz-storage-class is deliberately absent. This implementation has only the
     // STANDARD storage class; storing the client-reported value and echoing it back would
     // make the storage layer lie (the object sits on local disk yet reports GLACIER);
@@ -66,6 +70,7 @@ inline constexpr StdMetaField kStdMetaFields[] = {
     {"Content-Encoding", "content_encoding", &ObjectMeta::content_encoding},
     {"Content-Language", "content_language", &ObjectMeta::content_language},
     {"Expires", "expires", &ObjectMeta::expires},
+    {"x-amz-website-redirect-location", "website_redirect", &ObjectMeta::website_redirect},
 };
 
 struct ObjectStream {

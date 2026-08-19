@@ -7,6 +7,7 @@
 #include <httplib/httplib.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 
@@ -69,9 +70,10 @@ public:
     // Signs the literal UNSIGNED-PAYLOAD instead of hashing the body (the
     // server uses the header value verbatim in the canonical request), so
     // benchmark uploads do not pay a client-side SHA-256 per request
-    httplib::Result put_unsigned(const std::string& path, const std::string& body);
+    httplib::Result put_unsigned(const std::string& path, const std::string& body,
+                                 const std::string& query = "");
     httplib::Result post_json(const std::string& path, const std::string& body);
-    httplib::Result del(const std::string& path);
+    httplib::Result del(const std::string& path, const std::string& query = "");
 
 private:
     // Builds a minimal HttpRequest solely for signing (same technique as
@@ -84,5 +86,26 @@ private:
     lights3::s3::SigV4Authenticator auth_;
     lights3::Credential cred_;
 };
+
+// Unified wrap-up: expected status code -> print the response body verbatim (or ok_note
+// when the body is empty); otherwise stderr + exit code 1
+int finish(const httplib::Result& r, int expect, const std::string& ok_note = "");
+
+// Reads connection options + env-var fallback, builds the client and runs fn; exceptions all land here as exit codes
+template <class Fn>
+void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
+    try {
+        ConnOpts conn;
+        if (!read_conn_opts(cmd, conn)) return;
+        SignedClient cli(conn);
+        g_exit = fn(cli);
+    } catch (const lights3::s3::S3Error& e) {
+        fprintf(stderr, "s3adm: %s\n", e.message.c_str());
+        g_exit = 1;
+    } catch (const std::exception& e) {
+        fprintf(stderr, "s3adm: %s\n", e.what());
+        g_exit = 1;
+    }
+}
 
 }  // namespace s3adm

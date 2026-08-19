@@ -8,7 +8,7 @@
 |------|------|------|
 | ① | 按桶匿名只读（§1–§2） | **已实现** |
 | ② | index / error 文档语义、匿名错误页 HTML 化（§3） | **已实现** |
-| ③ | `?website` 动态 API（持久化到 `.sys`）、`x-amz-website-redirect-location` | 规划中 |
+| ③ | `?website` 动态 API（持久化到 `.sys`）、`x-amz-website-redirect-location`（§4） | **已实现** |
 
 ## 1. 配置与匿名读语义
 
@@ -68,14 +68,33 @@ policy（仅该桶、仅 Read）进入正常授权链。除此之外一切不变
 - 签名请求不受影响，错误仍为 XML；取消/超时路径（503 SlowDown）也
   维持 XML——那是给 SDK 的重试信号，不是页面。
 
-## 4. 后续阶段（设计要点备忘）
+## 4. 动态 API 与对象级重定向（阶段③）
 
-- **阶段③**：`PUT/GET/DELETE /bucket?website`（root 凭证专属）持久化
-  到 `.sys/website/<bucket>`，多实例复用凭证管理的 `sync_interval`
-  收敛模式；`x-amz-website-redirect-location` 加入 `kStdMetaFields`
-  存储，网站面读到即 301；实现后同步从 501 黑名单删除对应项。
-  可选项：`GET /prefix`（无尾斜杠）在 `prefix/index` 存在时 302 到
-  `/prefix/`（对齐 AWS 网站端点）。
-- 寻址：阶段①②在**同一端点**上触发（匿名 + website 桶即网站语义，
+- **`PUT/GET/DELETE /bucket?website`**（AWS XML 形状：`IndexDocument.Suffix`
+  / `ErrorDocument.Key`；`RoutingRules`/`RedirectAllRequestsTo` 明确 501）。
+  仅 root（静态凭证）可用——网站配置会把桶公开成匿名可读，这是运维决策
+  而非租户决策，两级模型与 admin 面一致。校验规则与 YAML 侧完全相同；
+  PUT 到不存在的桶回 `NoSuchBucket`；DELETE 幂等（无配置也是 204）。
+  运维入口：`s3adm website get/set/delete <bucket>`。
+- **持久化与多实例**：动态条目写入 `.sys/website/<bucket>`（JSON，
+  write-through：先存储后内存），重启自动恢复；`auth.sync_interval`
+  开启周期增量同步（新增/变更拉入、消失的动态条目移除，tombstone 防
+  删除与列举交错时的复活——完全照抄凭证管理模式，但**无**空表保护：
+  website 表清空只会关闭匿名访问，不存在锁死风险）。YAML 静态条目
+  优先于同名动态条目（WARN），且拒绝经 API 修改（405，配置文件所有）。
+- **`x-amz-website-redirect-location`**：随 `kStdMetaFields` 存储/回显
+  （自描述 kv 序列化，存量数据零迁移）。匿名面读到该对象即 **301 +
+  Location**（不下发对象体）；签名（REST）请求照常拿对象体 + 回显头，
+  与 AWS 一致。值必须以 `/`、`http://` 或 `https://` 开头（PUT 时 400
+  拒绝——该值会原样落进 Location 头，自由 scheme 是注入面）。注意
+  path-style 部署下 `/` 开头的目标相对**主机根**而非桶根，站内跳转要
+  写成 `/bucket/key`（vhost 部署下即桶根，与 AWS 网站端点一致）。
+- 501 黑名单已同步删除 `website` 子资源与该请求头两项。
+
+## 5. 未尽事项（可选备忘）
+
+- `GET /prefix`（无尾斜杠）在 `prefix/index` 存在时 302 到 `/prefix/`
+  （对齐 AWS 网站端点）。
+- 寻址：阶段①②③在**同一端点**上触发（匿名 + website 桶即网站语义，
   path-style 可用）；严格对齐 AWS 双端点模型的独立
   `website_base_domain` 留作可选项。

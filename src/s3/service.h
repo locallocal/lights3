@@ -18,6 +18,7 @@
 #include "s3/auth/policy.h"
 #include "s3/auth/sigv4.h"
 #include "s3/metrics.h"
+#include "s3/website_store.h"
 #include "storage/bucket_router.h"
 #include "storage/multipart.h"
 
@@ -88,8 +89,14 @@ public:
     // Static website hosting (docs/static-website.md): buckets accepting anonymous
     // GET/HEAD object reads, with index/error document semantics. Names are validated
     // here (startup) with the same gate as user requests — a config entry for a reserved
-    // bucket (.sys) must fail loudly, not sit dormant until dispatch happens to reject it
+    // bucket (.sys) must fail loudly, not sit dormant until dispatch happens to reject it.
+    // Convenience for tests/static-only assemblies: wraps the entries in a
+    // non-persistent WebsiteStore (the ?website API then rejects mutations)
     void set_website_buckets(std::vector<WebsiteBucket> buckets);
+    // Full store (phase ③): static entries + .sys-persisted dynamic entries + sync
+    void set_website_store(std::shared_ptr<WebsiteStore> store) {
+        website_store_ = std::move(store);
+    }
 
     // Verification result passed down the dispatch chain to handlers (docs/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
@@ -130,6 +137,12 @@ private:
     Task<http::HttpResponse> list_buckets(const RequestAuth& auth);
     Task<http::HttpResponse> create_bucket(http::HttpRequest& req, std::string bucket);
     Task<http::HttpResponse> head_bucket(std::string bucket);
+    // ?website subresource (docs/static-website.md phase ③, root credential only)
+    Task<http::HttpResponse> get_bucket_website(std::string bucket, const RequestAuth& auth);
+    Task<http::HttpResponse> put_bucket_website(http::HttpRequest& req, std::string bucket,
+                                                const RequestAuth& auth);
+    Task<http::HttpResponse> delete_bucket_website(std::string bucket,
+                                                   const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket(std::string bucket);
     Task<http::HttpResponse> get_bucket_location(std::string bucket);
     // handlers/objects.cc
@@ -179,9 +192,11 @@ private:
     // material at all (neither Authorization header nor presigned query parameters),
     // GET/HEAD on a listed website bucket (docs/static-website.md). Bucket-scope reads
     // are admitted here because the index rewrite in dispatch turns them into object
-    // reads; anything still non-object after the rewrite is refused by the route gate
-    bool anonymous_website_read(const http::HttpRequest& req, const Address& addr) const;
-    const WebsiteBucket* website_lookup(const std::string& bucket) const;
+    // reads; anything still non-object after the rewrite is refused by the route gate.
+    // The snapshot is taken once per request in dispatch: pointers into it must stay
+    // valid across co_awaits even if a concurrent ?website PUT swaps the store
+    bool anonymous_website_read(const http::HttpRequest& req, const Address& addr,
+                                const WebsiteStore::Snapshot& snap) const;
     // Anonymous error page (docs/static-website.md phase ②): the configured error
     // object's content under the ORIGINAL status code, or a built-in HTML page
     Task<http::HttpResponse> website_error_page(const S3Error& e, const WebsiteBucket& site,
@@ -198,7 +213,7 @@ private:
     uint64_t min_part_size_ = storage::kMinPartSize;
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
-    std::vector<WebsiteBucket> website_buckets_;  // sorted by bucket; empty = website hosting off
+    std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off
 
     // Short cache for /-/readyz results (anonymously reachable, and the probe issues real calls to every backend:
     // without a cache, an anonymous loop can amplify into billed/rate-limited upstream calls)

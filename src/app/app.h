@@ -15,6 +15,7 @@
 #include "http/server.h"
 #include "s3/auth/credential_store.h"
 #include "s3/service.h"
+#include "s3/website_store.h"
 #include "storage/backend.h"
 
 namespace lights3 {
@@ -65,6 +66,7 @@ private:
     std::shared_ptr<MetricsRegistry> metrics_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
     std::shared_ptr<s3::CredentialStore> cred_store_;
+    std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::S3Service> service_;
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;
     std::shared_ptr<AsyncSemaphore> inflight_;

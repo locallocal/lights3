@@ -4,7 +4,9 @@
 #include "core/semaphore.h"
 #include "core/util/checksum.h"
 #include "core/util/crypto.h"
+#include "s3/auth/credential_store.h"
 #include "s3/service.h"
+#include "s3/website_store.h"
 #include "storage/memory/memory_backend.h"
 #include "unit/mini_test.h"
 
@@ -465,6 +467,155 @@ TEST(service_website_index_and_error_documents) {
     // object read whose query whitelist then rejects the parameter (501)
     auto lt = sync_wait(svc.dispatch(make_req("GET", "/site/", "", {{"list-type", "2"}})));
     CHECK_EQ(lt.status, 501);
+}
+
+// Static website hosting phase 3 (docs/static-website.md §4): ?website dynamic API —
+// root-only, persisted to .sys/website/<bucket>, multi-instance sync
+TEST(service_bucket_website_api) {
+    auto backend = std::make_shared<storage::MemoryBackend>();
+    AuthConfig acfg;
+    acfg.credentials = {{"ROOTAK", "root-sk"}};
+    auto auth = SigV4Authenticator::build(acfg);
+    auto cred_store = sync_wait(CredentialStore::load(backend, acfg));
+    auth.set_provider(cred_store);
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+    BucketsConfig bcfg;
+    bcfg.default_backend = "mem";
+    S3Service svc(storage::BucketRouter::build(bcfg, std::move(bmap)), auth);
+    svc.set_credential_store(cred_store);
+    auto wstore = sync_wait(WebsiteStore::load(backend, {}));
+    svc.set_website_store(wstore);
+
+    auto signed_req = [&](std::string method, std::string path, std::string body = "",
+                          std::vector<std::pair<std::string, std::string>> query = {}) {
+        auto r = make_req(std::move(method), std::move(path), body, std::move(query));
+        auth.sign(r, acfg.credentials[0], body.empty() ? "" : util::sha256_hex(body));
+        return r;
+    };
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop"))).status, 200);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop/index.html", "<h1>shop</h1>")))
+                 .status,
+             200);
+
+    const std::string xml =
+        "<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
+        "<ErrorDocument><Key>error.html</Key></ErrorDocument></WebsiteConfiguration>";
+
+    // Unsigned mutation never rides the anonymous path (PUT is not GET/HEAD)
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/shop", xml, {{"website", ""}}))).status,
+             403);
+    // No configuration yet: anonymous read is refused, GET ?website is 404
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/shop/index.html"))).status, 403);
+    auto none = sync_wait(svc.dispatch(signed_req("GET", "/shop", "", {{"website", ""}})));
+    CHECK_EQ(none.status, 404);
+    CHECK(contains(none.small_body, "NoSuchWebsiteConfiguration"));
+
+    // Root PUT ?website enables the site; GET round-trips the XML
+    CHECK_EQ(
+        sync_wait(svc.dispatch(signed_req("PUT", "/shop", xml, {{"website", ""}}))).status,
+        200);
+    auto got = sync_wait(svc.dispatch(signed_req("GET", "/shop", "", {{"website", ""}})));
+    CHECK_EQ(got.status, 200);
+    CHECK(contains(got.small_body, "<Suffix>index.html</Suffix>"));
+    CHECK(contains(got.small_body, "<Key>error.html</Key>"));
+    auto anon = sync_wait(svc.dispatch(make_req("GET", "/shop/")));
+    CHECK_EQ(anon.status, 200);
+    CHECK_EQ(body_of(anon), "<h1>shop</h1>");
+
+    // Persistence: a fresh store loaded from the same backend sees the entry
+    auto store2 = sync_wait(WebsiteStore::load(backend, {}));
+    CHECK(WebsiteStore::find(store2->snapshot(), "shop") != nullptr);
+
+    // Rejections: RoutingRules → 501, bad suffix → 400, nonexistent bucket → 404
+    const std::string routed =
+        "<WebsiteConfiguration><IndexDocument><Suffix>i.html</Suffix></IndexDocument>"
+        "<RoutingRules></RoutingRules></WebsiteConfiguration>";
+    CHECK_EQ(
+        sync_wait(svc.dispatch(signed_req("PUT", "/shop", routed, {{"website", ""}}))).status,
+        501);
+    const std::string badsfx =
+        "<WebsiteConfiguration><IndexDocument><Suffix>a/b.html</Suffix></IndexDocument>"
+        "</WebsiteConfiguration>";
+    CHECK_EQ(
+        sync_wait(svc.dispatch(signed_req("PUT", "/shop", badsfx, {{"website", ""}}))).status,
+        400);
+    auto nob = sync_wait(svc.dispatch(signed_req("PUT", "/nobucket", xml, {{"website", ""}})));
+    CHECK_EQ(nob.status, 404);
+    CHECK(contains(nob.small_body, "NoSuchBucket"));
+
+    // DELETE revokes: anonymous reverts to 403, GET ?website back to 404, and a second
+    // DELETE stays 204 (idempotent)
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/shop", "", {{"website", ""}})))
+                 .status,
+             204);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/shop/index.html"))).status, 403);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("GET", "/shop", "", {{"website", ""}})))
+                 .status,
+             404);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/shop", "", {{"website", ""}})))
+                 .status,
+             204);
+
+    // Multi-instance sync: the removal converges into the second store; a re-add is
+    // picked up on its next tick
+    sync_wait(store2->sync_now());
+    CHECK(WebsiteStore::find(store2->snapshot(), "shop") == nullptr);
+    CHECK_EQ(
+        sync_wait(svc.dispatch(signed_req("PUT", "/shop", xml, {{"website", ""}}))).status,
+        200);
+    sync_wait(store2->sync_now());
+    CHECK(WebsiteStore::find(store2->snapshot(), "shop") != nullptr);
+
+    // Statically configured buckets refuse mutation (config file owns them)
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/fixed"))).status, 200);
+    svc.set_website_store(WebsiteStore::make_static({{"fixed", "index.html", ""}}));
+    CHECK_EQ(
+        sync_wait(svc.dispatch(signed_req("PUT", "/fixed", xml, {{"website", ""}}))).status,
+        405);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/fixed", "", {{"website", ""}})))
+                 .status,
+             405);
+}
+
+// Static website hosting phase 3: x-amz-website-redirect-location — stored/echoed like
+// the other first-class fields, and a 301 on the anonymous plane
+TEST(service_website_redirect_location) {
+    AuthConfig acfg;
+    acfg.credentials = {{"TESTAK", "test-sk"}};
+    auto auth = SigV4Authenticator::build(acfg);
+    S3Service svc(make_router(), auth);
+    svc.set_website_buckets({{"site", "index.html", ""}});
+
+    auto mkb = make_req("PUT", "/site");
+    auth.sign(mkb, acfg.credentials[0]);
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(mkb))).status, 200);
+    auto put = make_req("PUT", "/site/go", "placeholder");
+    put.headers.add("x-amz-website-redirect-location", "/target.html");
+    auth.sign(put, acfg.credentials[0], util::sha256_hex("placeholder"));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+
+    // Signed (REST) GET: header echoed, body served normally — AWS parity
+    auto sget = make_req("GET", "/site/go");
+    auth.sign(sget, acfg.credentials[0]);
+    auto sresp = sync_wait(svc.dispatch(std::move(sget)));
+    CHECK_EQ(sresp.status, 200);
+    CHECK_EQ(sresp.headers.get("x-amz-website-redirect-location").value_or(""), "/target.html");
+    CHECK_EQ(body_of(sresp), "placeholder");
+
+    // Anonymous plane: 301 + Location, no body; HEAD identical
+    auto aresp = sync_wait(svc.dispatch(make_req("GET", "/site/go")));
+    CHECK_EQ(aresp.status, 301);
+    CHECK_EQ(aresp.headers.get("Location").value_or(""), "/target.html");
+    CHECK(body_of(aresp).empty());
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/site/go"))).status, 301);
+
+    // The value lands verbatim in a Location header: free-form schemes are refused at PUT
+    auto bad = make_req("PUT", "/site/evil", "x");
+    bad.headers.add("x-amz-website-redirect-location", "javascript:alert(1)");
+    auth.sign(bad, acfg.credentials[0], util::sha256_hex("x"));
+    auto bresp = sync_wait(svc.dispatch(std::move(bad)));
+    CHECK_EQ(bresp.status, 400);
+    CHECK(contains(bresp.small_body, "InvalidArgument"));
 }
 
 // ---------- Additional coverage for docs/s3-protocol.md ----------

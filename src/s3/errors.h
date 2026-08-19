@@ -42,6 +42,7 @@ namespace lights3::s3 {
     X(MissingContentLength, 411)         \
     X(NoSuchBucket, 404)                 \
     X(NoSuchKey, 404)                    \
+    X(NoSuchWebsiteConfiguration, 404)   \
     X(NoSuchUpload, 404)                 \
     X(NotImplemented, 501)               \
     X(PermanentRedirect, 301)            \

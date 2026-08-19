@@ -310,7 +310,9 @@ add_library(lights3_core STATIC
   src/s3/metrics.cc
   src/s3/auth/sigv4.cc
   src/s3/auth/credential_store.cc
+  src/s3/website_store.cc
   src/s3/handlers/admin_credentials.cc
+  src/s3/handlers/bucket_website.cc
   src/s3/handlers/buckets.cc
   src/s3/handlers/objects.cc
   src/s3/handlers/list_objects.cc
@@ -461,7 +463,8 @@ target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
 # target-level consistent with the core library (ODR); in trimmed builds without
 # httplib/cloudproxy it automatically degrades to http-only
 add_executable(s3adm src/tools/s3adm.cc src/tools/s3adm_common.cc
-                     src/tools/s3adm_cred.cc src/tools/s3adm_bench.cc)
+                     src/tools/s3adm_cred.cc src/tools/s3adm_bench.cc
+                     src/tools/s3adm_website.cc)
 target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(s3adm SYSTEM PRIVATE third_party)

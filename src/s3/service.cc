@@ -113,7 +113,7 @@ private:
 
 // Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
-    "acl",         "policy",       "versioning",     "versions",       "website",
+    "acl",         "policy",       "versioning",     "versions",
     "lifecycle",   "tagging",      "cors",           "encryption",     "object-lock",
     "legal-hold",  "retention",    "torrent",        "replication",    "logging",
     "notification", "requestPayment", "accelerate",  "analytics",      "inventory",
@@ -139,9 +139,10 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         "x-amz-object-lock-",                        // mode / retain-until-date / legal-hold
         "x-amz-grant-",                              // the five ACL grant headers, same class as x-amz-acl
     };
+    // x-amz-website-redirect-location left this list with docs/static-website.md phase ③:
+    // it is now a first-class metadata field (kStdMetaFields)
     constexpr std::string_view kExact[] = {
         "x-amz-tagging",
-        "x-amz-website-redirect-location",
     };
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
@@ -246,16 +247,7 @@ void S3Service::set_website_buckets(std::vector<WebsiteBucket> buckets) {
     // Same gate as user requests (allow_reserved defaults to false): an entry for .sys or
     // a malformed name is a config error and must fail at startup, not lie dormant
     for (auto& b : buckets) storage::validate_bucket_name(b.bucket);
-    website_buckets_ = std::move(buckets);
-    std::sort(website_buckets_.begin(), website_buckets_.end(),
-              [](const WebsiteBucket& a, const WebsiteBucket& b) { return a.bucket < b.bucket; });
-}
-
-const WebsiteBucket* S3Service::website_lookup(const std::string& bucket) const {
-    auto it = std::lower_bound(
-        website_buckets_.begin(), website_buckets_.end(), bucket,
-        [](const WebsiteBucket& w, const std::string& b) { return w.bucket < b; });
-    return it != website_buckets_.end() && it->bucket == bucket ? &*it : nullptr;
+    website_store_ = WebsiteStore::make_static(std::move(buckets));
 }
 
 namespace {
@@ -319,8 +311,9 @@ Task<http::HttpResponse> S3Service::website_error_page(const S3Error& e,
     co_return resp;
 }
 
-bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Address& addr) const {
-    if (website_buckets_.empty()) return false;
+bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Address& addr,
+                                       const WebsiteStore::Snapshot& snap) const {
+    if (!snap || snap->empty()) return false;
     if (req.method != "GET" && req.method != "HEAD") return false;
     // Any signature material at all — Authorization header or any presigned query
     // parameter, even a partial/malformed set — always goes through verification: a bad
@@ -333,7 +326,7 @@ bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Addre
     // Service scope stays out (ListBuckets must never be anonymous); an empty key is
     // admitted — the index rewrite in dispatch resolves it to an object read
     if (addr.bucket.empty()) return false;
-    return website_lookup(addr.bucket) != nullptr;
+    return WebsiteStore::find(snap, addr.bucket) != nullptr;
 }
 
 // ---------- Top-level entry ----------
@@ -350,7 +343,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     http::HttpResponse resp;
     // Set when the request took the anonymous website path: its errors render as the
     // site's error page instead of XML. The page fetch itself must happen after the
-    // catch blocks — co_await is not allowed inside a coroutine's catch handler
+    // catch blocks — co_await is not allowed inside a coroutine's catch handler.
+    // web_snap keeps anon_site's pointee alive: a concurrent ?website PUT swaps the
+    // store's snapshot mid-request, but never mutates a published one
+    WebsiteStore::Snapshot web_snap;
     const WebsiteBucket* anon_site = nullptr;
     std::optional<S3Error> website_err;
     try {
@@ -389,7 +385,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // header as AccessDenied; when auth is globally disabled verify() admits
             // everything anyway and the anonymous branch changes nothing (the synthesized
             // read-only policy would only be stricter than "unrestricted")
-            bool anon = auth_.enabled() && anonymous_website_read(req, addr);
+            if (website_store_) web_snap = website_store_->snapshot();
+            bool anon = auth_.enabled() && anonymous_website_read(req, addr, web_snap);
             // Authorization uses the verify-time policy snapshot (docs/gaps.md §3.7): with a second store lookup
             // after verification, the policy would vanish entirely in the race window where sync/remove deletes
             // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
@@ -416,7 +413,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
             if (anon) {
-                anon_site = website_lookup(bucket);
+                anon_site = WebsiteStore::find(web_snap, bucket);
                 // Index document (docs/static-website.md phase ②): an empty key (bucket
                 // root, with or without trailing slash) or a directory-style key
                 // ("docs/") maps to the index object. Rewriting before the route gate
@@ -486,6 +483,18 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout_, req_src);
             else
                 resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
+            // Object-level website redirect (docs/static-website.md phase ③): on the
+            // anonymous plane, x-amz-website-redirect-location turns the response into a
+            // 301 — the header value was prefix-validated at PUT, so it is Location-safe.
+            // Signed (REST) requests keep the object body + echo header, matching AWS
+            if (anon_site && (resp.status == 200 || resp.status == 206)) {
+                if (auto loc = resp.headers.get("x-amz-website-redirect-location")) {
+                    http::HttpResponse redirect;
+                    redirect.status = 301;
+                    redirect.headers.set("Location", *loc);
+                    resp = std::move(redirect);
+                }
+            }
         }
     } catch (const OperationCancelled&) {
         // Timeout/disconnect/shutdown: 503 lets SDKs retry. Blocking syscalls already running on pool threads are
@@ -579,6 +588,26 @@ std::span<const S3Service::Route> S3Service::route_table() {
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth&) {
          return s.get_bucket_location(std::move(b));
+     }},
+    // ?website subresource (docs/static-website.md phase ③): flagged routes must precede
+    // the flagless fallbacks of the same method, or PUT /bucket?website would create a bucket
+    {"GET", Scope::Bucket, "website", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.get_bucket_website(std::move(b), auth);
+     }},
+    {"PUT", Scope::Bucket, "website", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.put_bucket_website(req, std::move(b), auth);
+     }},
+    {"DELETE", Scope::Bucket, "website", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.delete_bucket_website(std::move(b), auth);
      }},
     // All five parameters now take effect (docs/gaps.md §5.1): previously pagination parameters were "allowed
     // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)

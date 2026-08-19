@@ -12,9 +12,12 @@
 | List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner；V1 只认 marker，V2 只认 continuation-token 与 start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder` |
 
+静态网站托管**已支持**（docs/static-website.md）：按桶匿名 GET/HEAD 对象读、
+index/error 文档、`?website` 动态配置 API（root 专属）与
+`x-amz-website-redirect-location`。
+
 明确不支持（返回 `NotImplemented`）：versioning、ACL 细粒度（只认
-private）、policy、website 子资源（但静态网站托管的**匿名对象读**已支持，
-按桶配置开启，见 docs/static-website.md）、lifecycle、tagging、SSE-C/KMS、Object Lock、
+private）、policy、lifecycle、tagging、SSE-C/KMS、Object Lock、
 storage-class（只认 STANDARD）、presigned POST（presigned GET/PUT 的
 query 签名**支持**，见 §3.4）。拒绝面同时覆盖 query 子资源（白名单反转，
 名单外 → 501）与**请求头**（`x-amz-server-side-encryption*` /

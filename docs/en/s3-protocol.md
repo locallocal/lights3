@@ -14,10 +14,12 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner; V1 honours only marker, V2 only continuation-token and start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder` |
 
+Static website hosting **is supported** (docs/static-website.md): per-bucket
+anonymous GET/HEAD object reads, index/error documents, the root-only
+`?website` configuration API, and `x-amz-website-redirect-location`.
+
 Explicitly unsupported (returns `NotImplemented`): versioning, fine-grained ACL
-(only private is accepted), policy, the website subresource (but **anonymous
-object reads** for static website hosting are supported, enabled per bucket in
-config — see docs/static-website.md), lifecycle, tagging, SSE-C/KMS,
+(only private is accepted), policy, lifecycle, tagging, SSE-C/KMS,
 Object Lock, storage-class (only STANDARD is accepted), presigned POST (query
 signing for presigned GET/PUT **is supported**, see §3.4). The rejection
 surface covers both query subresources (inverted whitelist; anything off-list →

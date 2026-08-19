@@ -123,8 +123,10 @@ httplib::Result SignedClient::head(const std::string& path) {
     return cli_.Head(path, sign("HEAD", path, "", ""));
 }
 
-httplib::Result SignedClient::put_unsigned(const std::string& path, const std::string& body) {
-    return cli_.Put(path, sign("PUT", path, "", "UNSIGNED-PAYLOAD"), body,
+httplib::Result SignedClient::put_unsigned(const std::string& path, const std::string& body,
+                                           const std::string& query) {
+    return cli_.Put(path + (query.empty() ? "" : "?" + query),
+                    sign("PUT", path, query, "UNSIGNED-PAYLOAD"), body,
                     "application/octet-stream");
 }
 
@@ -134,8 +136,26 @@ httplib::Result SignedClient::post_json(const std::string& path, const std::stri
                      "application/json");
 }
 
-httplib::Result SignedClient::del(const std::string& path) {
-    return cli_.Delete(path, sign("DELETE", path, "", ""));
+httplib::Result SignedClient::del(const std::string& path, const std::string& query) {
+    return cli_.Delete(path + (query.empty() ? "" : "?" + query),
+                       sign("DELETE", path, query, ""));
+}
+
+int finish(const httplib::Result& r, int expect, const std::string& ok_note) {
+    if (!r) {
+        fprintf(stderr, "s3adm: transport error: %s\n", httplib::to_string(r.error()).c_str());
+        return 1;
+    }
+    if (r->status != expect) {
+        fprintf(stderr, "s3adm: HTTP %d\n%s", r->status, r->body.c_str());
+        if (!r->body.empty() && r->body.back() != '\n') fputc('\n', stderr);
+        return 1;
+    }
+    if (!r->body.empty())
+        fputs(r->body.c_str(), stdout);
+    else if (!ok_note.empty())
+        printf("%s\n", ok_note.c_str());
+    return 0;
 }
 
 httplib::Headers SignedClient::sign(const std::string& method, const std::string& raw_path,

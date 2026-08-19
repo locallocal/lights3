@@ -11,6 +11,7 @@
 #include "tools/s3adm_bench.h"
 #include "tools/s3adm_common.h"
 #include "tools/s3adm_cred.h"
+#include "tools/s3adm_website.h"
 
 namespace s3adm {
 
@@ -24,8 +25,8 @@ int main(int argc, char* argv[]) {
         "s3adm", "s3adm cred list --endpoint=http://127.0.0.1:9000",
         "s3adm <command> [options]",
         "lights3 ops CLI (docs/credential-management.md). Credential management "
-        "lives under the `cred` command group, benchmarking under `bench`; run "
-        "`s3adm help <command>` for details.",
+        "lives under the `cred` command group, benchmarking under `bench`, bucket "
+        "website configuration under `website`; run `s3adm help <command>` for details.",
         "lights3 ops CLI.",
         // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a usage error
         [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -34,6 +35,7 @@ int main(int argc, char* argv[]) {
         });
     root->add_subcommand(s3adm::make_cred());
     root->add_subcommand(s3adm::make_bench());
+    root->add_subcommand(s3adm::make_website());
     root->execute(argc, argv);
     return s3adm::g_exit;
 }

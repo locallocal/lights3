@@ -9,7 +9,7 @@ gaps are closed in three phases:
 |-------|---------|--------|
 | ① | Per-bucket anonymous read-only (§1–§2) | **Implemented** |
 | ② | index / error document semantics, HTML error pages for anonymous (§3) | **Implemented** |
-| ③ | Dynamic `?website` API (persisted to `.sys`), `x-amz-website-redirect-location` | Planned |
+| ③ | Dynamic `?website` API (persisted to `.sys`), `x-amz-website-redirect-location` (§4) | **Implemented** |
 
 ## 1. Configuration and anonymous read semantics
 
@@ -87,17 +87,43 @@ read-only policy (that bucket only, Read only). Everything else is unchanged:
   path (503 SlowDown) also stays XML — that is retry signaling for SDKs,
   not a page.
 
-## 4. Later phases (design notes)
+## 4. Dynamic API and object-level redirects (phase ③)
 
-- **Phase ③**: `PUT/GET/DELETE /bucket?website` (root credential only)
-  persisted to `.sys/website/<bucket>`, multi-instance convergence reusing
-  credential management's `sync_interval` pattern;
-  `x-amz-website-redirect-location` joins `kStdMetaFields` for storage and
-  the website plane answers 301 when it is set; on implementation the
-  corresponding entries leave the 501 blocklists. Optional: `GET /prefix`
-  (no trailing slash) 302-redirects to `/prefix/` when `prefix/index`
-  exists (aligning with the AWS website endpoint).
-- Addressing: phases ①② trigger on the **same endpoint** (anonymous +
+- **`PUT/GET/DELETE /bucket?website`** (AWS XML shape: `IndexDocument.Suffix`
+  / `ErrorDocument.Key`; `RoutingRules`/`RedirectAllRequestsTo` are an
+  explicit 501). Root (static credential) only — website configuration makes
+  a bucket anonymously readable, an operator decision rather than a tenant
+  one, matching the admin plane's two-tier model. Validation matches the
+  YAML side exactly; PUT on a nonexistent bucket is `NoSuchBucket`; DELETE
+  is idempotent (204 with or without a configuration). Ops entry point:
+  `s3adm website get/set/delete <bucket>`.
+- **Persistence and multi-instance**: dynamic entries are written to
+  `.sys/website/<bucket>` (JSON, write-through: storage first, then memory)
+  and restored on restart; `auth.sync_interval` enables periodic incremental
+  sync (new/changed entries pulled in, vanished dynamic entries dropped,
+  tombstones bridge the delete/list interleaving — the credential-management
+  pattern verbatim, minus the empty-table guard: an emptied website table
+  only closes anonymous access, nothing can get locked out). Static YAML
+  entries win over same-name dynamic ones (WARN) and refuse API mutation
+  (405 — the config file owns them).
+- **`x-amz-website-redirect-location`**: stored/echoed via `kStdMetaFields`
+  (self-describing kv serialization, zero migration for existing data). On
+  the anonymous plane an object carrying it answers **301 + Location**
+  without the body; signed (REST) requests get the body plus the echoed
+  header, matching AWS. The value must start with `/`, `http://` or
+  `https://` (400 at PUT — it lands verbatim in a Location header, free-form
+  schemes are an injection surface). Note that under path-style addressing a
+  `/`-prefixed target is relative to the **host root**, not the bucket:
+  write in-site targets as `/bucket/key` (under vhost it is the bucket root,
+  same as the AWS website endpoint).
+- The `website` subresource and the redirect header both left the 501
+  blocklists.
+
+## 5. Remaining options (notes)
+
+- `GET /prefix` (no trailing slash) 302-redirecting to `/prefix/` when
+  `prefix/index` exists (aligning with the AWS website endpoint).
+- Addressing: phases ①②③ trigger on the **same endpoint** (anonymous +
   website bucket = website semantics, works path-style); a separate
   `website_base_domain` strictly mirroring AWS's dual-endpoint model remains
   an option.

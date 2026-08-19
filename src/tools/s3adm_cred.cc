@@ -31,23 +31,8 @@ namespace util = lights3::util;
 
 constexpr const char* kBase = "/-/admin/credentials";
 
-// Unified wrap-up: expected status code -> print the response body (already indented JSON from the server); otherwise stderr + nonzero
-int finish(const httplib::Result& r, int expect, const std::string& ok_note = "") {
-    if (!r) {
-        fprintf(stderr, "s3adm: transport error: %s\n", httplib::to_string(r.error()).c_str());
-        return 1;
-    }
-    if (r->status != expect) {
-        fprintf(stderr, "s3adm: HTTP %d\n%s", r->status, r->body.c_str());
-        if (!r->body.empty() && r->body.back() != '\n') fputc('\n', stderr);
-        return 1;
-    }
-    if (!r->body.empty())
-        fputs(r->body.c_str(), stdout);
-    else if (!ok_note.empty())
-        printf("%s\n", ok_note.c_str());
-    return 0;
-}
+using s3adm::finish;
+using s3adm::run_admin;
 
 std::string ak_path(const std::string& ak) {
     return std::string(kBase) + "/" + util::aws_uri_encode(ak, /*encode_slash=*/true);
@@ -65,23 +50,6 @@ std::string load_policy_arg(const std::string& arg) {
     // The client runs the same parsing as the server first; a local error is faster than a round trip
     s3::parse_policy_json(text);
     return text;
-}
-
-// Reads connection options + env-var fallback, builds the client and runs fn; exceptions all land here as exit codes
-template <class Fn>
-void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
-    try {
-        s3adm::ConnOpts conn;
-        if (!s3adm::read_conn_opts(cmd, conn)) return;
-        SignedClient cli(conn);
-        g_exit = fn(cli);
-    } catch (const s3::S3Error& e) {
-        fprintf(stderr, "s3adm: %s\n", e.message.c_str());
-        g_exit = 1;
-    } catch (const std::exception& e) {
-        fprintf(stderr, "s3adm: %s\n", e.what());
-        g_exit = 1;
-    }
 }
 
 // Positional arguments must be exactly one AK; otherwise print the subcommand usage and set the usage-error exit code

@@ -54,6 +54,10 @@ auth:
 # ---------- Static website hosting (docs/static-website.md) ----------
 # Buckets listed here accept anonymous GET/HEAD object reads (no listing, no
 # subresources, response-* overrides refused). Exact names only, no globs.
+# Entries here are static: immutable via the API and they win over same-name
+# dynamic ones. Buckets can also be enabled at runtime via the root-only
+# ?website API (`s3adm website set <bucket>`), persisted to .sys/website/ and
+# hot-synced across instances via auth.sync_interval.
 # website:
 #   - bucket: my-site
 #     index_suffix: index.html   # appended when the key is empty or ends with '/'; no '/' allowed

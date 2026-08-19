@@ -52,6 +52,15 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
             meta.user_meta[lk.substr(11)] = v;
         }
     }
+    // AWS constraint on the redirect target (docs/static-website.md phase ③): the value is
+    // served verbatim as a Location header on the anonymous website plane, so free-form
+    // schemes (javascript:, data:) must never get in
+    if (!meta.website_redirect.empty() && meta.website_redirect.front() != '/' &&
+        meta.website_redirect.rfind("http://", 0) != 0 &&
+        meta.website_redirect.rfind("https://", 0) != 0)
+        throw S3Error(S3ErrorCode::InvalidArgument,
+                      "x-amz-website-redirect-location must start with '/', 'http://' or "
+                      "'https://'.");
     return meta;
 }
 

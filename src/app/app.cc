@@ -62,6 +62,12 @@ void Application::start_server() {
     bool auth_enabled = auth.enabled();
     if (!auth_enabled)
         LOG_WARN("no credentials configured: authentication is DISABLED");
+    // Static website hosting (docs/static-website.md): the store always exists — even
+    // with an empty YAML list, PUT ?website can add sites at runtime. Static names get
+    // the same validation gate as user requests (reserved names fail startup)
+    for (auto& w : cfg_.website.buckets) storage::validate_bucket_name(w.bucket);
+    website_store_ =
+        sync_wait(s3::WebsiteStore::load(router.default_backend(), cfg_.website.buckets));
     service_ = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
                                                cfg_.http.base_domain);
     service_->set_pool_stats([pool = pool_] { return pool->stats(); });
@@ -69,18 +75,16 @@ void Application::start_server() {
     service_->set_min_part_size(cfg_.http.min_part_size);
     service_->set_backend_metrics(metrics_);
     service_->set_credential_store(cred_store_);
-    // Static website hosting (docs/static-website.md): with auth disabled the
-    // listing is pointless (everything is already open) -- warn instead of silently accepting
-    if (!cfg_.website.buckets.empty()) {
-        service_->set_website_buckets(cfg_.website.buckets);
-        if (!auth_enabled)
-            LOG_WARN("website: buckets configured but authentication is disabled; "
-                     "all buckets are already anonymously accessible");
-    }
+    service_->set_website_store(website_store_);
+    if (!cfg_.website.buckets.empty() && !auth_enabled)
+        LOG_WARN("website: buckets configured but authentication is disabled; "
+                 "all buckets are already anonymously accessible");
     // Phase-2 background tasks (docs/credential-management.md
     // §10.2/§10.3): credentials_file hot-reload polling + periodic
     // multi-instance incremental sync (both gated by config)
     cred_store_->start_background(pool_);
+    // Website entries share the same multi-instance sync knob (docs/static-website.md §4)
+    website_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
 
     server_ = http::HttpServerFactory::create(cfg_.http.driver, cfg_.http);
     // Dispatch-entry admission control (docs/concurrency.md §6):
@@ -191,8 +195,9 @@ void Application::shutdown() noexcept {
     try {
         // Timers / in-flight sync must wind down before the thread pool
         if (cred_store_) cred_store_->shutdown_background();
+        if (website_store_) website_store_->shutdown_background();
     } catch (const std::exception& e) {
-        LOG_ERROR("credential store background shutdown failed: {}", e.what());
+        LOG_ERROR("store background shutdown failed: {}", e.what());
     }
     close_backends();
     // The backends' shared_ptrs are still held by service (via router)
@@ -206,6 +211,7 @@ void Application::shutdown() noexcept {
     pool_exec_.reset();
     shutdown_src_.reset();
     cred_store_.reset();
+    website_store_.reset();
     backends_.clear();
     if (pool_) {
         try {

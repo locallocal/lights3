@@ -13,7 +13,8 @@
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder` |
 
 明确不支持（返回 `NotImplemented`）：versioning、ACL 细粒度（只认
-private）、policy、website、lifecycle、tagging、SSE-C/KMS、Object Lock、
+private）、policy、website 子资源（但静态网站托管的**匿名对象读**已支持，
+按桶配置开启，见 docs/static-website.md）、lifecycle、tagging、SSE-C/KMS、Object Lock、
 storage-class（只认 STANDARD）、presigned POST（presigned GET/PUT 的
 query 签名**支持**，见 §3.4）。拒绝面同时覆盖 query 子资源（白名单反转，
 名单外 → 501）与**请求头**（`x-amz-server-side-encryption*` /

@@ -59,7 +59,8 @@ void Application::start_server() {
     // Dynamic credentials (docs/credential-management.md): loaded from the default backend, replacing the static lookup table
     cred_store_ = sync_wait(s3::CredentialStore::load(router.default_backend(), cfg_.auth));
     auth.set_provider(cred_store_);
-    if (!auth.enabled())
+    bool auth_enabled = auth.enabled();
+    if (!auth_enabled)
         LOG_WARN("no credentials configured: authentication is DISABLED");
     service_ = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
                                                cfg_.http.base_domain);
@@ -68,6 +69,14 @@ void Application::start_server() {
     service_->set_min_part_size(cfg_.http.min_part_size);
     service_->set_backend_metrics(metrics_);
     service_->set_credential_store(cred_store_);
+    // Static website hosting phase 1 (docs/static-website.md): with auth disabled the
+    // listing is pointless (everything is already open) -- warn instead of silently accepting
+    if (!cfg_.website.buckets.empty()) {
+        service_->set_website_buckets(cfg_.website.buckets);
+        if (!auth_enabled)
+            LOG_WARN("website: buckets configured but authentication is disabled; "
+                     "all buckets are already anonymously accessible");
+    }
     // Phase-2 background tasks (docs/credential-management.md
     // §10.2/§10.3): credentials_file hot-reload polling + periodic
     // multi-instance incremental sync (both gated by config)

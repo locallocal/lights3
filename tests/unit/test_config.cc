@@ -83,6 +83,29 @@ buckets:
     CHECK(thrown);
 }
 
+TEST(config_website_buckets) {
+    auto cfg = Config::from_string(
+        "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+        "  - bucket: site-a\n  - bucket: site-b\n");
+    CHECK_EQ(cfg.website.buckets.size(), size_t(2));
+    CHECK_EQ(cfg.website.buckets[0], "site-a");
+    CHECK_EQ(cfg.website.buckets[1], "site-b");
+
+    // Empty bucket and duplicates are startup errors
+    for (const char* bad :
+         {"backends:\n  - name: m\n    type: memory\nwebsite:\n  - bucket: \"\"\n",
+          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: dup\n  - bucket: dup\n"}) {
+        bool thrown = false;
+        try {
+            Config::from_string(bad);
+        } catch (const std::exception&) {
+            thrown = true;
+        }
+        CHECK(thrown);
+    }
+}
+
 TEST(config_defaults) {
     auto cfg = Config::from_string("backends:\n  - name: m\n    type: memory\n");
     CHECK_EQ(cfg.http.driver, "builtin");

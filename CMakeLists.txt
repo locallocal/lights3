@@ -460,7 +460,7 @@ target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
 # CPPHTTPLIB_OPENSSL_SUPPORT propagates via lights3_core's PUBLIC definition, staying
 # target-level consistent with the core library (ODR); in trimmed builds without
 # httplib/cloudproxy it automatically degrades to http-only
-add_executable(s3adm src/tools/s3adm.cc)
+add_executable(s3adm src/tools/s3adm.cc src/tools/s3adm_cred.cc)
 target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(s3adm SYSTEM PRIVATE third_party)

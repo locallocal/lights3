@@ -133,6 +133,14 @@ bool if_range_matches(const http::HttpRequest& req, const storage::ObjectMeta& m
 
 }  // namespace
 
+namespace handlers {
+bool has_response_override(const http::HttpRequest& req) {
+    for (auto& o : kResponseOverrides)
+        if (req.query_has(o.param)) return true;
+    return false;
+}
+}  // namespace handlers
+
 Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket,
                                                std::string key) {
     auto& backend = router_.resolve(bucket);

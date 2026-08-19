@@ -316,6 +316,70 @@ TEST(service_with_auth) {
     CHECK_EQ(hz.status, 200);
 }
 
+// Static website hosting phase 1 (docs/static-website.md): anonymous GET/HEAD object
+// reads on listed buckets only; everything else keeps requiring a signature
+TEST(service_website_anonymous_read) {
+    AuthConfig acfg;
+    acfg.credentials = {{"TESTAK", "test-sk"}};
+    auto auth = SigV4Authenticator::build(acfg);
+    S3Service svc(make_router(), auth);
+    svc.set_website_buckets({"site"});
+
+    // Owner provisions bucket + object over signed requests
+    auto mkb = make_req("PUT", "/site");
+    auth.sign(mkb, acfg.credentials[0]);
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(mkb))).status, 200);
+    auto put = make_req("PUT", "/site/index.html", "<h1>hi</h1>");
+    put.headers.add("Content-Type", "text/html");
+    auth.sign(put, acfg.credentials[0], util::sha256_hex("<h1>hi</h1>"));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+
+    // Anonymous GET/HEAD succeed, stored Content-Type comes back
+    auto got = sync_wait(svc.dispatch(make_req("GET", "/site/index.html")));
+    CHECK_EQ(got.status, 200);
+    CHECK_EQ(body_of(got), "<h1>hi</h1>");
+    CHECK_EQ(got.headers.get("Content-Type").value_or(""), "text/html");
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/site/index.html"))).status, 200);
+
+    // Missing object surfaces the real 404, not AccessDenied
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/nope"))).status, 404);
+
+    // Anonymous never lists: bucket scope (ListObjectsV2) and service scope stay 403
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site"))).status, 403);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/"))).status, 403);
+
+    // Buckets outside the website list are untouched
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/other/obj"))).status, 403);
+
+    // Writes stay authenticated-only
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/site/x", "data"))).status, 403);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("DELETE", "/site/index.html"))).status, 403);
+
+    // A query flag steers to a different operation (?uploadId = ListParts): denied
+    auto lp = sync_wait(
+        svc.dispatch(make_req("GET", "/site/index.html", "", {{"uploadId", "u1"}})));
+    CHECK_EQ(lp.status, 403);
+
+    // response-* overrides are refused for anonymous requests (objects.cc §5.3 risk)
+    auto ov = sync_wait(svc.dispatch(make_req(
+        "GET", "/site/index.html", "", {{"response-content-disposition", "attachment"}})));
+    CHECK_EQ(ov.status, 400);
+    CHECK(contains(ov.small_body, "InvalidRequest"));
+
+    // Signature material always verifies: a bad signature stays SignatureDoesNotMatch,
+    // it must not silently degrade into an anonymous success
+    auto bad = make_req("GET", "/site/index.html");
+    auth.sign(bad, Credential{"TESTAK", util::SecretString("wrong-sk")});
+    auto badresp = sync_wait(svc.dispatch(std::move(bad)));
+    CHECK_EQ(badresp.status, 403);
+    CHECK(contains(badresp.small_body, "SignatureDoesNotMatch"));
+
+    // Partial presigned parameters do not degrade to anonymous either
+    auto part = sync_wait(svc.dispatch(
+        make_req("GET", "/site/index.html", "", {{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"}})));
+    CHECK(part.status != 200);
+}
+
 // ---------- Additional coverage for docs/s3-protocol.md ----------
 
 

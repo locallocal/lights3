@@ -55,6 +55,12 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     return meta;
 }
 
+// True when the request carries any response-* override parameter (docs/gaps.md §5.3;
+// the list lives next to apply_response_overrides in objects.cc). dispatch uses this to
+// refuse overrides on anonymous website reads — on a public bucket a crafted link could
+// otherwise hang an arbitrary Content-Disposition off the bucket's domain.
+bool has_response_override(const http::HttpRequest& req);
+
 // HTTP time headers compare at second granularity (Last-Modified serializes at second precision)
 inline int64_t to_epoch_sec(util::SysTime t) {
     return std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();

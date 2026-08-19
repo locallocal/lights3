@@ -1,5 +1,6 @@
 #include "s3/service.h"
 
+#include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cstring>
@@ -239,6 +240,33 @@ S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) cons
     return {std::move(bucket), std::move(key), /*vhost=*/false};
 }
 
+// ---------- Static website hosting phase 1 (docs/static-website.md) ----------
+
+void S3Service::set_website_buckets(const std::vector<std::string>& buckets) {
+    // Same gate as user requests (allow_reserved defaults to false): an entry for .sys or
+    // a malformed name is a config error and must fail at startup, not lie dormant
+    for (auto& b : buckets) storage::validate_bucket_name(b);
+    website_buckets_ = buckets;
+    std::sort(website_buckets_.begin(), website_buckets_.end());
+}
+
+bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Address& addr) const {
+    if (website_buckets_.empty()) return false;
+    if (req.method != "GET" && req.method != "HEAD") return false;
+    // Any signature material at all — Authorization header or any presigned query
+    // parameter, even a partial/malformed set — always goes through verification: a bad
+    // signature must stay an auth error, not silently degrade into an anonymous success
+    // (which would both mask client misconfiguration and let expired links "work")
+    if (req.headers.has("Authorization")) return false;
+    if (req.query_has("X-Amz-Algorithm") || req.query_has("X-Amz-Signature") ||
+        req.query_has("X-Amz-Credential"))
+        return false;
+    // Object scope only: service/bucket-level reads (ListBuckets, ListObjectsV2) would
+    // make every public bucket enumerable
+    if (addr.bucket.empty() || addr.key.empty()) return false;
+    return std::binary_search(website_buckets_.begin(), website_buckets_.end(), addr.bucket);
+}
+
 // ---------- Top-level entry ----------
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
@@ -281,11 +309,18 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
             resp = co_await admin_credentials(req, access_key);
         } else {
+            // Static website hosting phase 1 (docs/static-website.md): requests with no
+            // signature material may read objects from explicitly listed website buckets
+            // anonymously. Decided before verify -- verify treats a missing Authorization
+            // header as AccessDenied; when auth is globally disabled verify() admits
+            // everything anyway and the anonymous branch changes nothing (the synthesized
+            // read-only policy would only be stricter than "unrestricted")
+            bool anon = auth_.enabled() && anonymous_website_read(req, addr);
             // Authorization uses the verify-time policy snapshot (docs/gaps.md §3.7): with a second store lookup
             // after verification, the policy would vanish entirely in the race window where sync/remove deletes
             // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
             // in-flight requests complete strictly with verify-time semantics
-            auto ident = auth_.verify(req);
+            auto ident = anon ? VerifiedIdentity{} : auth_.verify(req);
             access_key = ident.access_key;
             // Content-MD5 / x-amz-checksum-* (docs/gaps.md §5.6): installed after verify, hence wrapping outside
             // the sha256/aws-chunked decorators -- digests are computed over the de-framed plaintext, the same
@@ -306,6 +341,29 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // rules close both entrances at once, and reserved names (.sys) are only available to callers with
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
+            if (anon) {
+                // Anonymous scope is pinned by route, not just policy: only the bare
+                // GET/HEAD object routes (flag == "", Action::Read) qualify -- a query
+                // flag steers to a different operation (?uploadId is ListParts), and
+                // those stay authenticated-only along with all listing
+                const Route* r = match_route(req, Scope::Object);
+                if (!r || !r->flag.empty() || r->action != Action::Read)
+                    throw S3Error(S3ErrorCode::AccessDenied,
+                                  "Anonymous access is limited to object reads.");
+                // response-* overrides are refused for anonymous requests (AWS does the
+                // same): on a public bucket a crafted link could otherwise hang an
+                // arbitrary Content-Disposition off the bucket's domain (objects.cc §5.3)
+                if (handlers::has_response_override(req))
+                    throw S3Error(S3ErrorCode::InvalidRequest,
+                                  "Request specific response headers cannot be used for "
+                                  "anonymous requests.");
+                // Defense in depth: the standard policy block below re-checks bucket/key
+                // through the same allows() path every credential goes through
+                CredentialPolicy p;
+                p.buckets = {bucket};
+                p.readonly = true;
+                ident.policy = std::move(p);
+            }
             // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
             // route, not the HTTP method (docs/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
             // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.

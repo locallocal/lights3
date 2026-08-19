@@ -85,6 +85,12 @@ public:
     void set_min_part_size(uint64_t n) { min_part_size_ = n; }
     uint64_t min_part_size() const { return min_part_size_; }
 
+    // Static website hosting phase 1 (docs/static-website.md): buckets accepting anonymous
+    // GET/HEAD object reads. Names are validated here (startup) with the same gate as user
+    // requests — a config entry for a reserved bucket (.sys) must fail loudly, not sit
+    // dormant until dispatch happens to reject it per request
+    void set_website_buckets(const std::vector<std::string>& buckets);
+
     // Verification result passed down the dispatch chain to handlers (docs/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
@@ -169,6 +175,11 @@ private:
     };
     Address resolve_address(const http::HttpRequest& req) const;
 
+    // True when the request may take the anonymous website-read path: no signature
+    // material at all (neither Authorization header nor presigned query parameters),
+    // GET/HEAD on an object of a listed website bucket (docs/static-website.md)
+    bool anonymous_website_read(const http::HttpRequest& req, const Address& addr) const;
+
     storage::BucketRouter router_;
     SigV4Authenticator auth_;
     std::string base_domain_;
@@ -180,6 +191,7 @@ private:
     uint64_t min_part_size_ = storage::kMinPartSize;
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
+    std::vector<std::string> website_buckets_;  // sorted; empty = website hosting off
 
     // Short cache for /-/readyz results (anonymously reachable, and the probe issues real calls to every backend:
     // without a cache, an anonymous loop can amplify into billed/rate-limited upstream calls)

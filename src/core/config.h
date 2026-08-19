@@ -108,6 +108,13 @@ struct BucketRule {
     std::string backend;
 };
 
+// Static website hosting phase 1 (docs/static-website.md): buckets listed here
+// accept anonymous GET/HEAD object reads. Exact names only, no globs — a
+// pattern typo must not silently make extra buckets public.
+struct WebsiteConfig {
+    std::vector<std::string> buckets;
+};
+
 struct BucketsConfig {
     std::string default_backend;
     std::vector<BucketRule> rules;
@@ -119,6 +126,7 @@ struct Config {
     AuthConfig auth;
     std::vector<BackendConfig> backends;
     BucketsConfig buckets;
+    WebsiteConfig website;
     std::string log_level = "info";
 
     static Config load(const std::string& path);

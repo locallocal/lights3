@@ -376,6 +376,18 @@ Config Config::from_string(const std::string& text) {
                 cfg.buckets.rules.push_back({r.get("match"), r.get("backend")});
         }
     }
+    if (auto* web = root.find("website"); web && web->type == YamlNode::Type::List) {
+        for (auto& w : web->list) {
+            std::string b = w.get("bucket");
+            if (b.empty()) throw std::runtime_error("config: website entry needs bucket");
+            // Duplicates rejected like backend names: a copy-pasted entry usually means
+            // the second one was meant to be a different bucket
+            for (auto& prev : cfg.website.buckets)
+                if (prev == b)
+                    throw std::runtime_error("config: duplicate website bucket '" + b + "'");
+            cfg.website.buckets.push_back(std::move(b));
+        }
+    }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
 
     // Consistency checks. Thread-count upper bounds align with the per-backend

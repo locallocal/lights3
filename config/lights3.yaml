@@ -51,6 +51,12 @@ auth:
   # sync_interval: 0s                          # with a shared multi-instance backend, periodic incremental
   #                                            # reload of .sys (pick up additions/revocations); 0s = off (single-instance default)
 
+# ---------- Static website hosting phase 1 (docs/static-website.md) ----------
+# Buckets listed here accept anonymous GET/HEAD object reads (no listing, no
+# subresources, response-* overrides refused). Exact names only, no globs.
+# website:
+#   - bucket: my-site
+
 backends:
   # ---------- localfs / xlocalfs: local filesystem (docs/storage-backend.md) ----------
   - name: localdata

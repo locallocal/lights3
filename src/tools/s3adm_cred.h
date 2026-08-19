@@ -9,10 +9,6 @@
 
 namespace s3adm {
 
-// ccmd callbacks return nothing; the process exit code is carried out through
-// this (0 success / 1 request failure / 2 usage error). Defined in s3adm.cc.
-extern int g_exit;
-
 // Builds the `cred` command group (cred list / get / create / delete).
 std::shared_ptr<ccmd::c_command> make_cred();
 

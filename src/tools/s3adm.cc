@@ -1,12 +1,15 @@
 // Ops CLI: s3adm — lights3 operations tooling built on the ccmd subcommand
 // framework (third_party/ccmd). This file holds only the root command and
-// main; each command group lives in its own file (cred: s3adm_cred.cc).
+// main; each command group lives in its own file (cred: s3adm_cred.cc,
+// bench: s3adm_bench.cc; shared client/flags: s3adm_common.cc).
 // ccmd's root options do not propagate down — options must follow the leaf
 // subcommand, and long options only accept values in --name=value form.
 #include <ccmd.h>
 
 #include <memory>
 
+#include "tools/s3adm_bench.h"
+#include "tools/s3adm_common.h"
 #include "tools/s3adm_cred.h"
 
 namespace s3adm {
@@ -21,7 +24,8 @@ int main(int argc, char* argv[]) {
         "s3adm", "s3adm cred list --endpoint=http://127.0.0.1:9000",
         "s3adm <command> [options]",
         "lights3 ops CLI (docs/credential-management.md). Credential management "
-        "lives under the `cred` command group; run `s3adm help cred` for details.",
+        "lives under the `cred` command group, benchmarking under `bench`; run "
+        "`s3adm help <command>` for details.",
         "lights3 ops CLI.",
         // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a usage error
         [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -29,6 +33,7 @@ int main(int argc, char* argv[]) {
             s3adm::g_exit = 2;
         });
     root->add_subcommand(s3adm::make_cred());
+    root->add_subcommand(s3adm::make_bench());
     root->execute(argc, argv);
     return s3adm::g_exit;
 }

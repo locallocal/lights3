@@ -86,16 +86,28 @@ buckets:
 TEST(config_website_buckets) {
     auto cfg = Config::from_string(
         "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-        "  - bucket: site-a\n  - bucket: site-b\n");
+        "  - bucket: site-a\n"
+        "  - bucket: site-b\n    index_suffix: home.htm\n    error_key: errors/404.html\n");
     CHECK_EQ(cfg.website.buckets.size(), size_t(2));
-    CHECK_EQ(cfg.website.buckets[0], "site-a");
-    CHECK_EQ(cfg.website.buckets[1], "site-b");
+    CHECK_EQ(cfg.website.buckets[0].bucket, "site-a");
+    CHECK_EQ(cfg.website.buckets[0].index_suffix, "index.html");  // default
+    CHECK_EQ(cfg.website.buckets[0].error_key, "");
+    CHECK_EQ(cfg.website.buckets[1].bucket, "site-b");
+    CHECK_EQ(cfg.website.buckets[1].index_suffix, "home.htm");
+    CHECK_EQ(cfg.website.buckets[1].error_key, "errors/404.html");
 
-    // Empty bucket and duplicates are startup errors
+    // Startup errors: empty bucket, duplicates, index_suffix with '/', empty
+    // index_suffix, error_key with a leading '/'
     for (const char* bad :
          {"backends:\n  - name: m\n    type: memory\nwebsite:\n  - bucket: \"\"\n",
           "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: dup\n  - bucket: dup\n"}) {
+          "  - bucket: dup\n  - bucket: dup\n",
+          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: b\n    index_suffix: sub/index.html\n",
+          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: b\n    index_suffix: \"\"\n",
+          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: b\n    error_key: /error.html\n"}) {
         bool thrown = false;
         try {
             Config::from_string(bad);

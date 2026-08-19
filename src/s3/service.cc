@@ -240,14 +240,83 @@ S3Service::Address S3Service::resolve_address(const http::HttpRequest& req) cons
     return {std::move(bucket), std::move(key), /*vhost=*/false};
 }
 
-// ---------- Static website hosting phase 1 (docs/static-website.md) ----------
+// ---------- Static website hosting (docs/static-website.md) ----------
 
-void S3Service::set_website_buckets(const std::vector<std::string>& buckets) {
+void S3Service::set_website_buckets(std::vector<WebsiteBucket> buckets) {
     // Same gate as user requests (allow_reserved defaults to false): an entry for .sys or
     // a malformed name is a config error and must fail at startup, not lie dormant
-    for (auto& b : buckets) storage::validate_bucket_name(b);
-    website_buckets_ = buckets;
-    std::sort(website_buckets_.begin(), website_buckets_.end());
+    for (auto& b : buckets) storage::validate_bucket_name(b.bucket);
+    website_buckets_ = std::move(buckets);
+    std::sort(website_buckets_.begin(), website_buckets_.end(),
+              [](const WebsiteBucket& a, const WebsiteBucket& b) { return a.bucket < b.bucket; });
+}
+
+const WebsiteBucket* S3Service::website_lookup(const std::string& bucket) const {
+    auto it = std::lower_bound(
+        website_buckets_.begin(), website_buckets_.end(), bucket,
+        [](const WebsiteBucket& w, const std::string& b) { return w.bucket < b; });
+    return it != website_buckets_.end() && it->bucket == bucket ? &*it : nullptr;
+}
+
+namespace {
+// The built-in error page embeds the S3Error message, and some messages quote request
+// input (query parameter names, keys) — unescaped they would be an XSS surface on the
+// bucket's own origin
+std::string html_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;"; break;
+            case '>': out += "&gt;"; break;
+            case '"': out += "&quot;"; break;
+            default: out += c;
+        }
+    }
+    return out;
+}
+}  // namespace
+
+// Anonymous website errors keep the ORIGINAL status code while serving the configured
+// error object as the body (a 404 that answered 200 would poison caches and mislead
+// crawlers). A missing/unreadable error object falls back to the built-in page — the
+// site owner's misconfiguration must not turn a 404 into a 500 — and the error object
+// is read directly from the backend, so this never re-enters dispatch (no recursion)
+Task<http::HttpResponse> S3Service::website_error_page(const S3Error& e,
+                                                       const WebsiteBucket& site,
+                                                       bool head_only) {
+    http::HttpResponse resp;
+    resp.status = http_status(e.code);
+    for (auto& [k, v] : e.headers) resp.headers.set(k, v);  // e.g. Allow on 405
+    if (!site.error_key.empty()) {
+        try {
+            auto& backend = router_.resolve(site.bucket);
+            if (head_only) {
+                auto meta = co_await backend.head_object(site.bucket, site.error_key);
+                resp.headers.set("Content-Type", meta.content_type);
+                resp.content_length = meta.size;
+            } else {
+                auto stream =
+                    co_await backend.get_object(site.bucket, site.error_key, std::nullopt);
+                resp.headers.set("Content-Type", stream.meta.content_type);
+                resp.content_length = stream.meta.size;
+                resp.stream_body = std::move(stream.body);
+            }
+            co_return resp;
+        } catch (const std::exception& err) {
+            LOG_WARN("website: error document {}/{} unreadable ({}), serving built-in page",
+                     site.bucket, site.error_key, err.what());
+        }
+    }
+    resp.headers.set("Content-Type", "text/html; charset=utf-8");
+    if (!head_only) {
+        std::string title = std::to_string(resp.status) + " " + wire_code(e.code);
+        resp.small_body = "<!DOCTYPE html><html><head><title>" + title +
+                          "</title></head><body><h1>" + title + "</h1><p>" +
+                          html_escape(e.message) + "</p></body></html>\n";
+    }
+    co_return resp;
 }
 
 bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Address& addr) const {
@@ -261,10 +330,10 @@ bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Addre
     if (req.query_has("X-Amz-Algorithm") || req.query_has("X-Amz-Signature") ||
         req.query_has("X-Amz-Credential"))
         return false;
-    // Object scope only: service/bucket-level reads (ListBuckets, ListObjectsV2) would
-    // make every public bucket enumerable
-    if (addr.bucket.empty() || addr.key.empty()) return false;
-    return std::binary_search(website_buckets_.begin(), website_buckets_.end(), addr.bucket);
+    // Service scope stays out (ListBuckets must never be anonymous); an empty key is
+    // admitted — the index rewrite in dispatch resolves it to an object read
+    if (addr.bucket.empty()) return false;
+    return website_lookup(addr.bucket) != nullptr;
 }
 
 // ---------- Top-level entry ----------
@@ -279,6 +348,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::string access_key;
     std::string bucket, key;
     http::HttpResponse resp;
+    // Set when the request took the anonymous website path: its errors render as the
+    // site's error page instead of XML. The page fetch itself must happen after the
+    // catch blocks — co_await is not allowed inside a coroutine's catch handler
+    const WebsiteBucket* anon_site = nullptr;
+    std::optional<S3Error> website_err;
     try {
         // Resolve addressing before steering to internal endpoints (docs/gaps.md §3.8): under vhost, req.path is
         // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
@@ -342,6 +416,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
             if (anon) {
+                anon_site = website_lookup(bucket);
+                // Index document (docs/static-website.md phase ②): an empty key (bucket
+                // root, with or without trailing slash) or a directory-style key
+                // ("docs/") maps to the index object. Rewriting before the route gate
+                // also turns what would be a bucket-scope listing into a plain object
+                // read -- anonymous listing stays impossible by construction
+                if (key.empty() || key.back() == '/') key += anon_site->index_suffix;
                 // Anonymous scope is pinned by route, not just policy: only the bare
                 // GET/HEAD object routes (flag == "", Action::Read) qualify -- a query
                 // flag steers to a different operation (?uploadId is ListParts), and
@@ -417,14 +498,24 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             ctx, head);
     } catch (const S3Error& e) {
         metrics_.s3_error(e.code);
-        resp = error_response(public_error(e, ctx.request_id, req), ctx, head);
+        if (anon_site)
+            website_err = public_error(e, ctx.request_id, req);
+        else
+            resp = error_response(public_error(e, ctx.request_id, req), ctx, head);
     } catch (const std::exception& e) {
         LOG_ERROR("req {} {} {} internal error: {}", ctx.request_id, req.method, req.path,
                   e.what());
         metrics_.s3_error(S3ErrorCode::InternalError);
-        resp = error_response(
-            S3Error(S3ErrorCode::InternalError, "We encountered an internal error."), ctx, head);
+        S3Error internal(S3ErrorCode::InternalError, "We encountered an internal error.");
+        if (anon_site)
+            website_err = std::move(internal);
+        else
+            resp = error_response(internal, ctx, head);
     }
+    // Anonymous website errors render as the site's error page (original status kept,
+    // XML only for signed requests). Fetched here because catch blocks cannot co_await;
+    // the cancelled path above intentionally stays XML -- 503/SlowDown is retry signaling
+    if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
     // per-bucket request distribution and outbound bytes (docs/gaps.md §7). Streaming response bytes are pulled
     // by the driver after dispatch returns and counted via the decorator; small responses have a known length by now
     metrics_.record_bucket_request(bucket);

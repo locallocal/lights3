@@ -378,14 +378,27 @@ Config Config::from_string(const std::string& text) {
     }
     if (auto* web = root.find("website"); web && web->type == YamlNode::Type::List) {
         for (auto& w : web->list) {
-            std::string b = w.get("bucket");
-            if (b.empty()) throw std::runtime_error("config: website entry needs bucket");
+            WebsiteBucket wb;
+            wb.bucket = w.get("bucket");
+            wb.index_suffix = w.get("index_suffix", wb.index_suffix);
+            wb.error_key = w.get("error_key");
+            if (wb.bucket.empty()) throw std::runtime_error("config: website entry needs bucket");
+            // AWS rule: the index suffix is non-empty and contains no '/' — with a slash,
+            // "docs/" would map to a key outside that directory
+            if (wb.index_suffix.empty() || wb.index_suffix.find('/') != std::string::npos)
+                throw std::runtime_error(
+                    "config: website index_suffix must be non-empty and contain no '/'");
+            // Keys never start with '/' (the path form "/bucket/key" strips it); a leading
+            // slash here would make the error object silently unreachable
+            if (!wb.error_key.empty() && wb.error_key.front() == '/')
+                throw std::runtime_error("config: website error_key must not start with '/'");
             // Duplicates rejected like backend names: a copy-pasted entry usually means
             // the second one was meant to be a different bucket
             for (auto& prev : cfg.website.buckets)
-                if (prev == b)
-                    throw std::runtime_error("config: duplicate website bucket '" + b + "'");
-            cfg.website.buckets.push_back(std::move(b));
+                if (prev.bucket == wb.bucket)
+                    throw std::runtime_error("config: duplicate website bucket '" + wb.bucket +
+                                             "'");
+            cfg.website.buckets.push_back(std::move(wb));
         }
     }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);

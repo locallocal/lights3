@@ -323,7 +323,7 @@ TEST(service_website_anonymous_read) {
     acfg.credentials = {{"TESTAK", "test-sk"}};
     auto auth = SigV4Authenticator::build(acfg);
     S3Service svc(make_router(), auth);
-    svc.set_website_buckets({"site"});
+    svc.set_website_buckets({{"site", "index.html", ""}});
 
     // Owner provisions bucket + object over signed requests
     auto mkb = make_req("PUT", "/site");
@@ -344,8 +344,11 @@ TEST(service_website_anonymous_read) {
     // Missing object surfaces the real 404, not AccessDenied
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/nope"))).status, 404);
 
-    // Anonymous never lists: bucket scope (ListObjectsV2) and service scope stay 403
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site"))).status, 403);
+    // Bucket root serves the index document since phase ② (no listing — the key
+    // rewrite turns it into a plain object read); service scope stays 403
+    auto idx = sync_wait(svc.dispatch(make_req("GET", "/site")));
+    CHECK_EQ(idx.status, 200);
+    CHECK_EQ(body_of(idx), "<h1>hi</h1>");
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/"))).status, 403);
 
     // Buckets outside the website list are untouched
@@ -378,6 +381,90 @@ TEST(service_website_anonymous_read) {
     auto part = sync_wait(svc.dispatch(
         make_req("GET", "/site/index.html", "", {{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"}})));
     CHECK(part.status != 200);
+}
+
+// Static website hosting phase 2 (docs/static-website.md): index/error document
+// semantics for anonymous requests; signed requests keep XML errors
+TEST(service_website_index_and_error_documents) {
+    AuthConfig acfg;
+    acfg.credentials = {{"TESTAK", "test-sk"}};
+    auto auth = SigV4Authenticator::build(acfg);
+    S3Service svc(make_router(), auth);
+    svc.set_website_buckets({{"site", "index.html", "error.html"}, {"bare", "home.htm", ""}});
+
+    auto signed_put = [&](const std::string& path, const std::string& body, const char* ct) {
+        auto req = make_req("PUT", path, body);
+        req.headers.add("Content-Type", ct);
+        auth.sign(req, acfg.credentials[0], util::sha256_hex(body));
+        CHECK_EQ(sync_wait(svc.dispatch(std::move(req))).status, 200);
+    };
+    for (const char* b : {"/site", "/bare"}) {
+        auto req = make_req("PUT", b);
+        auth.sign(req, acfg.credentials[0]);
+        CHECK_EQ(sync_wait(svc.dispatch(std::move(req))).status, 200);
+    }
+    signed_put("/site/index.html", "<h1>root</h1>", "text/html");
+    signed_put("/site/docs/index.html", "<h1>docs</h1>", "text/html");
+    signed_put("/site/error.html", "<h1>custom error</h1>", "text/html");
+    signed_put("/bare/home.htm", "<h1>bare home</h1>", "text/html");
+
+    // Index document: bucket root with and without the trailing slash, directory keys,
+    // and a per-bucket custom suffix
+    auto root = sync_wait(svc.dispatch(make_req("GET", "/site/")));
+    CHECK_EQ(root.status, 200);
+    CHECK_EQ(body_of(root), "<h1>root</h1>");
+    auto noslash = sync_wait(svc.dispatch(make_req("GET", "/site")));
+    CHECK_EQ(noslash.status, 200);
+    CHECK_EQ(body_of(noslash), "<h1>root</h1>");
+    auto docs = sync_wait(svc.dispatch(make_req("GET", "/site/docs/")));
+    CHECK_EQ(docs.status, 200);
+    CHECK_EQ(body_of(docs), "<h1>docs</h1>");
+    auto bare = sync_wait(svc.dispatch(make_req("GET", "/bare/")));
+    CHECK_EQ(bare.status, 200);
+    CHECK_EQ(body_of(bare), "<h1>bare home</h1>");
+
+    // Error document: original status kept, body/Content-Type from the error object
+    auto miss = sync_wait(svc.dispatch(make_req("GET", "/site/nope.html")));
+    CHECK_EQ(miss.status, 404);
+    CHECK_EQ(body_of(miss), "<h1>custom error</h1>");
+    CHECK_EQ(miss.headers.get("Content-Type").value_or(""), "text/html");
+    // ...including denied operations (?uploadId steers to ListParts → 403)
+    auto denied =
+        sync_wait(svc.dispatch(make_req("GET", "/site/x", "", {{"uploadId", "u"}})));
+    CHECK_EQ(denied.status, 403);
+    CHECK_EQ(body_of(denied), "<h1>custom error</h1>");
+
+    // HEAD keeps status and headers, no body
+    auto h = sync_wait(svc.dispatch(make_req("HEAD", "/site/nope.html")));
+    CHECK_EQ(h.status, 404);
+    CHECK(body_of(h).empty());
+
+    // No error_key → built-in HTML page, message included
+    auto bmiss = sync_wait(svc.dispatch(make_req("GET", "/bare/nope")));
+    CHECK_EQ(bmiss.status, 404);
+    CHECK(contains(bmiss.headers.get("Content-Type").value_or(""), "text/html"));
+    CHECK(contains(body_of(bmiss), "404 NoSuchKey"));
+
+    // Configured error object missing → built-in fallback, status intact (never a 500)
+    auto del = make_req("DELETE", "/site/error.html");
+    auth.sign(del, acfg.credentials[0]);
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(del))).status, 204);
+    auto fb = sync_wait(svc.dispatch(make_req("GET", "/site/nope.html")));
+    CHECK_EQ(fb.status, 404);
+    CHECK(contains(body_of(fb), "404 NoSuchKey"));
+
+    // Signed requests keep XML errors even on website buckets
+    auto sreq = make_req("GET", "/site/nope.html");
+    auth.sign(sreq, acfg.credentials[0]);
+    auto sresp = sync_wait(svc.dispatch(std::move(sreq)));
+    CHECK_EQ(sresp.status, 404);
+    CHECK_EQ(sresp.headers.get("Content-Type").value_or(""), "application/xml");
+    CHECK(contains(sresp.small_body, "NoSuchKey"));
+
+    // ?list-type=2 never becomes an anonymous listing: the key rewrite makes it an
+    // object read whose query whitelist then rejects the parameter (501)
+    auto lt = sync_wait(svc.dispatch(make_req("GET", "/site/", "", {{"list-type", "2"}})));
+    CHECK_EQ(lt.status, 501);
 }
 
 // ---------- Additional coverage for docs/s3-protocol.md ----------

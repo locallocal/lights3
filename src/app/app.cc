@@ -69,7 +69,7 @@ void Application::start_server() {
     service_->set_min_part_size(cfg_.http.min_part_size);
     service_->set_backend_metrics(metrics_);
     service_->set_credential_store(cred_store_);
-    // Static website hosting phase 1 (docs/static-website.md): with auth disabled the
+    // Static website hosting (docs/static-website.md): with auth disabled the
     // listing is pointless (everything is already open) -- warn instead of silently accepting
     if (!cfg_.website.buckets.empty()) {
         service_->set_website_buckets(cfg_.website.buckets);

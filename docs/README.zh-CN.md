@@ -102,6 +102,8 @@ export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
 ./build/lights3 --config=config/lights3.yaml
 ```
 
+运维 CLI `s3adm`（凭证、桶网站配置、压测）与 `lights3` 完整命令树见 [cli.md](cli.md)。
+
 用任意 S3 客户端访问（示例用 curl 的 SigV4 支持）：
 
 ```bash
@@ -193,3 +195,4 @@ tagging/CORS、SSE-C/KMS、Object Lock、presigned POST。
 | [duostore-sqlite-meta](duostore-sqlite-meta.md) | SQLite IMetaStore：内嵌 amalgamation、WAL、读连接池 |
 | [duostore-rados-data](duostore-rados-data.md) | RADOS IDataStore：librados，chunk → rados 对象 |
 | [duostore-tikv-meta](duostore-tikv-meta.md) | TiKV IMetaStore：client-c + 2PC 侧车 |
+| [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load、cred/website/bench |

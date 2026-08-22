@@ -75,7 +75,7 @@ policy（仅该桶、仅 Read）进入正常授权链。除此之外一切不变
   仅 root（静态凭证）可用——网站配置会把桶公开成匿名可读，这是运维决策
   而非租户决策，两级模型与 admin 面一致。校验规则与 YAML 侧完全相同；
   PUT 到不存在的桶回 `NoSuchBucket`；DELETE 幂等（无配置也是 204）。
-  运维入口：`s3adm website get/set/delete <bucket>`。
+  运维入口：`s3adm website get/set/delete <bucket>`（[cli.md §3.3](cli.md)）。
 - **持久化与多实例**：动态条目写入 `.sys/website/<bucket>`（JSON，
   write-through：先存储后内存），重启自动恢复；`auth.sync_interval`
   开启周期增量同步（新增/变更拉入、消失的动态条目移除，tombstone 防

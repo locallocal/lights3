@@ -114,6 +114,9 @@ export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
 ./build/lights3 --config=config/lights3.yaml
 ```
 
+The ops CLI `s3adm` (credentials, bucket websites, benchmarks) and the full
+`lights3` command tree are documented in [docs/en/cli.md](docs/en/cli.md).
+
 Access it with any S3 client (the examples below use curl's SigV4 support):
 
 ```bash
@@ -222,3 +225,4 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [duostore-sqlite-meta](docs/en/duostore-sqlite-meta.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
 | [duostore-rados-data](docs/en/duostore-rados-data.md) | RADOS IDataStore: librados, chunk → rados objects |
 | [duostore-tikv-meta](docs/en/duostore-tikv-meta.md) | TiKV IMetaStore: client-c + 2PC sidecar |
+| [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load, cred/website/bench |

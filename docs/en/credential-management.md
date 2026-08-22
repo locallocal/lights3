@@ -44,6 +44,18 @@ and the caller must be a root credential** (defined in §3).
 | `GET /-/admin/credentials/{ak}` | Query a single credential's metadata; `?show-secret=true` returns the plaintext SK (**dynamic/file credentials only** — static ones stay masked, see §10.5) | `200` + JSON |
 | `DELETE /-/admin/credentials/{ak}` | Revoke (dynamic credentials only; static credentials belong to the config file) | `204` |
 
+Companion ops CLI: `s3adm` (`src/tools/s3adm.cc`, built next to `lights3`,
+subcommand framework `third_party/ccmd`). Credential operations live in the
+`cred` command group; its four subcommands `cred list` / `cred get <ak>` /
+`cred create` / `cred delete <ak>` map one-to-one onto the table above and
+sign with SigV4 themselves. The root AK/SK come from `--ak=`/`--sk=` or the
+env vars `LIGHTS3_ADMIN_AK`/`LIGHTS3_ADMIN_SK` (prefer env for the SK: argv is
+visible to local `ps`); options must follow the leaf subcommand and long
+options take values as `--name=value` (ccmd semantics); `cred get` supports
+`--show-secret`, `cred create` supports `--comment` and `--policy` (inline
+JSON or `@file`). Full reference: [cli.md §3.2](cli.md), or
+`s3adm help cred [command]`.
+
 Responses use JSON; serialization/parsing brings in
 [nlohmann/json](https://github.com/nlohmann/json) (header-only, git submodule
 under `third_party/`, managed the same way as ccmd/spdlog/httplib; the

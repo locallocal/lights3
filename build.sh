@@ -89,9 +89,11 @@ fi
 # compression disabled it has zero system-level deps, so no lazy fetch,
 # docs/duostore-backend.md §13.2); the seastar clone is huge, fetch only when needed
 # (its bundled dpdk submodule is unused at build time, so no recursive init)
-LIGHT_MODULES=(third_party/gflags third_party/spdlog third_party/httplib third_party/json
+LIGHT_MODULES=(third_party/spdlog third_party/httplib third_party/json
                third_party/rocksdb third_party/hiredis third_party/sqlite)
 git submodule update --init "${LIGHT_MODULES[@]}"
+# ccmd (command-line framework for lights3 + s3adm) nests its cflag dependency
+git submodule update --init --recursive third_party/ccmd
 if [[ $SEASTAR -eq 1 ]]; then
     git submodule update --init third_party/seastar
 fi

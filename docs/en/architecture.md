@@ -109,7 +109,7 @@ The assembly flow in `src/main.cc` (logging and error handling omitted):
 
 ```cpp
 int main(int argc, char** argv) {
-    // gflags parses --config, Config::load reads the YAML
+    // ccmd parses --config (no subcommand = start the server; `lights3 duostore dump|load` is the ops entry), Config::load reads the YAML
     auto cfg      = Config::load(FLAGS_config);
     Logger::init(parse_level(cfg.log_level));
     auto pool     = std::make_shared<ThreadPool>(cfg.runtime.io_threads);
@@ -261,11 +261,11 @@ lights3/
 ├── tests/
 │   ├── unit/                 # L2/L3 pure-logic tests (mock http + in-memory backend)
 │   └── e2e/                  # start a real process, drive requests with the aws cli
-└── third_party/              # httplib/gflags/spdlog/json etc. as submodules
+└── third_party/              # httplib/ccmd/spdlog/json etc. as submodules
 ```
 
 Dependency policy: the core (core/s3/storage) depends on the standard library +
-OpenSSL (SigV4 needs SHA256/HMAC) + spdlog (logging) + gflags (command line) +
+OpenSSL (SigV4 needs SHA256/HMAC) + spdlog (logging) + ccmd (command line, bundles cflag) +
 nlohmann/json (admin credential API, kept out of public headers); each HTTP
 driver plus the cloudproxy and duostore backends are isolated behind CMake
 options (`LIGHTS3_DRIVER_BEAST`, `LIGHTS3_CLOUDPROXY`, `LIGHTS3_DUOSTORE`

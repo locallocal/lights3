@@ -549,7 +549,7 @@ build.sh 的 `LIGHT_MODULES` 加入 rocksdb **始终 init**——与 seastar 的
 ### 13.3 CMake 预设（仿 gflags/seastar 模板）
 
 ```cmake
-set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # 仓库已有 gflags 目标；仅 rocksdb 工具需要——OFF 防目标冲突
+set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # 仅 rocksdb 工具需要 gflags；仓库不再携带它
 set(WITH_TESTS OFF CACHE BOOL "" FORCE)
 set(WITH_ALL_TESTS OFF CACHE BOOL "" FORCE)
 set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "" FORCE)

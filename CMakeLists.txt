@@ -15,13 +15,6 @@ add_compile_options(-Wall -Wextra)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
-# gflags: command-line flag parsing (git submodule, statically linked into the main binary)
-set(GFLAGS_BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
-set(GFLAGS_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(GFLAGS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-set(GFLAGS_BUILD_PACKAGING OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/gflags EXCLUDE_FROM_ALL)
-
 # Compile-time trimming of HTTP drivers (dependency policy, docs/architecture.md §6)
 option(LIGHTS3_DRIVER_BUILTIN "Build the built-in POSIX socket HTTP driver" ON)
 option(LIGHTS3_DRIVER_BEAST "Build the Boost.Beast async HTTP driver (requires Boost headers)" ON)
@@ -37,7 +30,7 @@ option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 
 if(LIGHTS3_DUOSTORE)
   # RocksDB trimming presets (docs/duostore-backend.md §13.3, modeled on the gflags/seastar template)
-  set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # the repo already has a gflags target; only rocksdb tools need it -- OFF avoids target clashes
+  set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # only rocksdb tools need gflags; the repo does not ship it
   set(WITH_TESTS OFF CACHE BOOL "" FORCE)
   set(WITH_ALL_TESTS OFF CACHE BOOL "" FORCE)
   set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "" FORCE)
@@ -287,7 +280,9 @@ add_subdirectory(third_party/spdlog EXCLUDE_FROM_ALL)
 # nlohmann/json: JSON encode/decode for the admin credential API (header-only, docs/credential-management.md §5.4)
 add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
-# ccmd: subcommand framework for s3adm (header-only + static cflag, ops tooling only)
+# ccmd: command/subcommand framework (git submodule, header-only + static cflag; needs
+# --recursive init for its cflag submodule). Used by the lights3 entry point
+# (src/main.cc: --config + `duostore dump|load`) and the s3adm ops CLI
 add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
 
 # ---- Core library: L2/L3/L4 + HTTP boundary ----
@@ -455,7 +450,7 @@ endif()
 
 # ---- Main executable ----
 add_executable(lights3 src/main.cc)
-target_link_libraries(lights3 PRIVATE lights3_core gflags::gflags)
+target_link_libraries(lights3 PRIVATE lights3_core ccmd::ccmd)
 
 # ---- Ops tooling ----
 # s3adm: CLI client for /-/admin/credentials (docs/credential-management.md §2).

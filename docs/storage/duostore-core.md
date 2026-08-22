@@ -403,7 +403,7 @@ inode = 静默丢数据。封存失败仅 WARN 不阻启动。随后生成随机
 extent manifest）与已封存 pack 账；load 逐条经 `put_object` 重放——记录级
 重放天然兼作四引擎间的 meta 迁移工具，value 布局差异被接口吸收。backend 层
 入口 `run_meta_dump` / `run_meta_load` 持 `gc_sem_`（写静默由运维保证：
-`--duostore_admin` 入口在服务启动前运行）。
+`lights3 duostore dump|load <backend> <file> [--config=<path>]` 入口在服务启动前运行）。
 
 **流格式**（`meta_dump.cc:dump_meta`）：magic `"L3DUOMETA1\n"` 后按 tag：
 

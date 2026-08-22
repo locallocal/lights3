@@ -39,8 +39,8 @@
 `LIGHTS3_ADMIN_AK`/`LIGHTS3_ADMIN_SK` 传入（SK 建议走环境变量，argv 对本机
 `ps` 可见）；选项须写在叶子子命令之后、长选项取值用 `--name=value` 形式
 （ccmd 语义）；`cred get` 支持 `--show-secret`，`cred create` 支持
-`--comment` 与 `--policy`（内联 JSON 或 `@file`）。`s3adm help cred
-[command]` 查看用法。
+`--comment` 与 `--policy`（内联 JSON 或 `@file`）。完整命令参考见
+[cli.md §3.2](cli.md)，或 `s3adm help cred [command]`。
 
 响应用 JSON，序列化/解析引入 [nlohmann/json](https://github.com/nlohmann/json)
 （header-only，git 子模块进 `third_party/`，与 ccmd/spdlog/httplib 同一套

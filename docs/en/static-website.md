@@ -96,7 +96,7 @@ read-only policy (that bucket only, Read only). Everything else is unchanged:
   one, matching the admin plane's two-tier model. Validation matches the
   YAML side exactly; PUT on a nonexistent bucket is `NoSuchBucket`; DELETE
   is idempotent (204 with or without a configuration). Ops entry point:
-  `s3adm website get/set/delete <bucket>`.
+  `s3adm website get/set/delete <bucket>` ([cli.md §3.3](cli.md)).
 - **Persistence and multi-instance**: dynamic entries are written to
   `.sys/website/<bucket>` (JSON, write-through: storage first, then memory)
   and restored on restart; `auth.sync_interval` enables periodic incremental

@@ -43,7 +43,7 @@
 [command]` 查看用法。
 
 响应用 JSON，序列化/解析引入 [nlohmann/json](https://github.com/nlohmann/json)
-（header-only，git 子模块进 `third_party/`，与 gflags/spdlog/httplib 同一套
+（header-only，git 子模块进 `third_party/`，与 ccmd/spdlog/httplib 同一套
 管理方式，引入方式见 §5.4）。管理面是新造的 API，没有 S3 兼容包袱，JSON
 对人和脚本都更友好；数据面 S3 协议继续走 `s3/xml.cc`，两者互不影响。示例：
 
@@ -199,7 +199,7 @@ dispatch 中 `/-/admin/` 分支插在现有匿名 `/-/` 端点之后、S3 寻址
 - git 子模块：`third_party/json`（header-only，无编译产物）；
 - CMake：`add_subdirectory(third_party/json EXCLUDE_FROM_ALL)` 后
   `target_link_libraries(lights3_core PRIVATE nlohmann_json::nlohmann_json)`，
-  与 gflags/spdlog 的接入方式一致；
+  与 ccmd/spdlog 的接入方式一致；
 - build.sh 的常规子模块列表（`LIGHT_MODULES`）追加一项；
 - 使用面收敛在 admin handler 与 `CredentialStore` 的序列化处，不向
   L1/L3/L4 头文件泄漏（`#include <nlohmann/json.hpp>` 只出现在 .cc）。

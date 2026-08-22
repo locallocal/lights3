@@ -628,7 +628,7 @@ lazy fetching is needed.
 ### 13.3 CMake presets (modeled on the gflags/seastar template)
 
 ```cmake
-set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # the repo already has a gflags target; only rocksdb tools need it — OFF prevents target clashes
+set(WITH_GFLAGS OFF CACHE BOOL "" FORCE)      # only rocksdb tools need gflags; the repo does not ship it
 set(WITH_TESTS OFF CACHE BOOL "" FORCE)
 set(WITH_ALL_TESTS OFF CACHE BOOL "" FORCE)
 set(WITH_BENCHMARK_TOOLS OFF CACHE BOOL "" FORCE)

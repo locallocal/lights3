@@ -59,7 +59,7 @@
 依赖：g++ ≥ 13（C++20 协程）、CMake ≥ 3.20、OpenSSL；
 beast 驱动需要 Boost 头文件（≥ 1.75，header-only，无需编译库；
 找不到系统 Boost 时可用 `BOOST_ROOT` 指向头文件目录，或 `-DLIGHTS3_DRIVER_BEAST=OFF` 裁剪）。
-gflags、spdlog、httplib、nlohmann/json、rocksdb、hiredis、sqlite 以 git 子模块
+ccmd、spdlog、httplib、nlohmann/json、rocksdb、hiredis、sqlite 以 git 子模块
 置于 `third_party/`，首次构建前需初始化（rocksdb 为必需——DuoStore 后端默认
 开启；hiredis/sqlite 供其可选 meta 引擎）。
 
@@ -70,9 +70,10 @@ gflags、spdlog、httplib、nlohmann/json、rocksdb、hiredis、sqlite 以 git �
 或手动：
 
 ```bash
-git submodule update --init third_party/gflags third_party/spdlog \
+git submodule update --init third_party/spdlog \
     third_party/httplib third_party/json third_party/rocksdb \
     third_party/hiredis third_party/sqlite
+git submodule update --init --recursive third_party/ccmd   # 内嵌 cflag
 cmake -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure   # 单测 + 每驱动/每后端 e2e（e2e 需要 curl ≥ 7.75）
@@ -98,7 +99,7 @@ tests/e2e/run_mint.sh build/lights3 s3cmd awscli
 export LIGHTS3_SECRET_1=my-secret
 # 可选：动态凭证 SK 落盘 AES-256-GCM 加密；启用后缺 key/错 key 会启动失败
 export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
-./build/lights3 --config config/lights3.yaml
+./build/lights3 --config=config/lights3.yaml
 ```
 
 用任意 S3 客户端访问（示例用 curl 的 SigV4 支持）：

@@ -95,7 +95,7 @@ L2 是纯逻辑层：不含任何 socket、epoll、具体 HTTP 库或存储 SDK 
 
 ```cpp
 int main(int argc, char** argv) {
-    // gflags 解析 --config，Config::load 读 YAML
+    // ccmd 解析 --config（无子命令即启动服务；`lights3 duostore dump|load` 为运维入口），Config::load 读 YAML
     auto cfg      = Config::load(FLAGS_config);
     Logger::init(parse_level(cfg.log_level));
     auto pool     = std::make_shared<ThreadPool>(cfg.runtime.io_threads);
@@ -240,11 +240,11 @@ lights3/
 ├── tests/
 │   ├── unit/                 # L2/L3 纯逻辑测试（mock http + 内存后端）
 │   └── e2e/                  # 起真实进程，用 aws cli 打请求
-└── third_party/              # httplib/gflags/spdlog/json 等子模块
+└── third_party/              # httplib/ccmd/spdlog/json 等子模块
 ```
 
 依赖策略：核心（core/s3/storage）依赖标准库 + OpenSSL（SigV4 需要
-SHA256/HMAC）+ spdlog（日志）+ gflags（命令行）+ nlohmann/json（admin
+SHA256/HMAC）+ spdlog（日志）+ ccmd（命令行，含 cflag）+ nlohmann/json（admin
 凭证 API，不进公共头）；各 HTTP driver 与 cloudproxy、duostore 后端通过
 CMake 选项（`LIGHTS3_DRIVER_BEAST`、`LIGHTS3_CLOUDPROXY`、`LIGHTS3_DUOSTORE`
 及其子开关 `LIGHTS3_DUOSTORE_REDIS_META` / `LIGHTS3_DUOSTORE_SQLITE_META` /

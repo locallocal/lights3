@@ -66,7 +66,7 @@ Requirements: g++ ≥ 13 (C++20 coroutines), CMake ≥ 3.20, OpenSSL.
 The beast driver needs Boost headers (≥ 1.75, header-only, no compiled
 libraries; if system Boost is not found, point `BOOST_ROOT` at the header
 directory, or disable the driver with `-DLIGHTS3_DRIVER_BEAST=OFF`).
-gflags, spdlog, httplib, nlohmann/json, rocksdb, hiredis and sqlite are git
+ccmd, spdlog, httplib, nlohmann/json, rocksdb, hiredis and sqlite are git
 submodules under `third_party/` and must be initialized before the first
 build (rocksdb is required — the DuoStore backend is on by default; hiredis
 and sqlite serve its optional meta engines).
@@ -78,9 +78,10 @@ and sqlite serve its optional meta engines).
 or manually:
 
 ```bash
-git submodule update --init third_party/gflags third_party/spdlog \
+git submodule update --init third_party/spdlog \
     third_party/httplib third_party/json third_party/rocksdb \
     third_party/hiredis third_party/sqlite
+git submodule update --init --recursive third_party/ccmd   # nests cflag
 cmake -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure   # unit tests + per-driver and per-backend e2e
@@ -110,7 +111,7 @@ export LIGHTS3_SECRET_1=my-secret
 # optional: encrypt dynamically generated secret keys at rest (AES-256-GCM).
 # Once enabled, starting without the key (or with a wrong one) fails fast.
 export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
-./build/lights3 --config config/lights3.yaml
+./build/lights3 --config=config/lights3.yaml
 ```
 
 Access it with any S3 client (the examples below use curl's SigV4 support):

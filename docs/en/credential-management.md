@@ -46,7 +46,7 @@ and the caller must be a root credential** (defined in §3).
 
 Responses use JSON; serialization/parsing brings in
 [nlohmann/json](https://github.com/nlohmann/json) (header-only, git submodule
-under `third_party/`, managed the same way as gflags/spdlog/httplib; the
+under `third_party/`, managed the same way as ccmd/spdlog/httplib; the
 integration is in §5.4). The admin plane is a newly minted API with no S3
 compatibility baggage, and JSON is friendlier to both humans and scripts; the
 data-plane S3 protocol keeps going through `s3/xml.cc`, and the two never
@@ -226,7 +226,7 @@ already has that if-else chain).
 - git submodule: `third_party/json` (header-only, no build artifacts);
 - CMake: `add_subdirectory(third_party/json EXCLUDE_FROM_ALL)` then
   `target_link_libraries(lights3_core PRIVATE nlohmann_json::nlohmann_json)`,
-  consistent with how gflags/spdlog are wired in;
+  consistent with how ccmd/spdlog are wired in;
 - build.sh's regular submodule list (`LIGHT_MODULES`) gains one entry;
 - The usage surface is confined to the admin handler and `CredentialStore`'s
   serialization; it does not leak into L1/L3/L4 headers

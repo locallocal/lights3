@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | Service | ListBuckets | 聚合各后端 |
 | Bucket | CreateBucket / DeleteBucket / HeadBucket | 单 region：CreateBucket 的 LocationConstraint 与配置 region 不符即 `InvalidLocationConstraint`；HeadBucket/CreateBucket 回 `x-amz-bucket-region` |
-| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects(批量) / CopyObject | Get 支持 Range、条件请求（If-Match/If-None-Match/If-Modified-Since）与六个 `response-*` 覆盖参数；Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires 随对象持久化并回显；Content-MD5 与 `x-amz-checksum-*` 校验请求体，DeleteObjects **要求**完整性头 |
+| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects(批量) / CopyObject | Get 支持 Range、条件请求（If-Match/If-None-Match/If-Modified-Since）与六个 `response-*` 覆盖参数；Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires 随对象持久化并回显；Content-MD5 与 `x-amz-checksum-*`（crc32/crc32c/crc64nvme/sha1/sha256，头部或 aws-chunked trailer 形态均可）校验请求体，DeleteObjects **要求**完整性头 |
 | List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner；V1 只认 marker，V2 只认 continuation-token 与 start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder` |
 
@@ -70,13 +70,25 @@ query 签名**支持**，见 §3.4）。拒绝面同时覆盖 query 子资源（
 | 十六进制摘要 | 流式收 body 时增量算 SHA256，收完比对，不符 → XAmzContentSHA256Mismatch。注意：**必须在 body 全部消费后才能给出 2xx**，因此 PUT 的成功响应天然在校验之后 |
 | `UNSIGNED-PAYLOAD` | 跳过 body 校验（HTTPS 下常见），仅验头签名 |
 | `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` | aws-chunked 编码：在 L2 提供 `ChunkedSigV4BodyReader` 装饰器，逐 chunk 剥壳并验证 chunk 签名链，向下游暴露纯数据流。放在 L2 而非 driver，所有 driver 免费获得支持 |
+| `STREAMING-*-TRAILER` 两变体 | 2025 起 SDK 的默认上传形态：`STREAMING-UNSIGNED-PAYLOAD-TRAILER`（chunk 不签名，靠 trailer 校验和保完整性）与 `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER`（chunk 签名链 + trailer 签名）。trailer 段按行严格解析并双向对照 `x-amz-trailer` 声明（未声明的 trailer 拒绝、声明了没到的也拒绝），声明的 `x-amz-checksum-*` 对解码后全量 payload 校验（错格式 InvalidDigest / 不匹配 BadDigest）；signed 变体还验 `x-amz-trailer-signature`（`AWS4-HMAC-SHA256-TRAILER` string-to-sign，对规范化 trailer 串哈希，链在末 chunk 签名之后）。trailer 段上限 16KiB |
 
-### 3.3 与流式模型的配合
+### 3.3 与流式模型的配合（含 trailing checksum）
 
 签名校验装饰器模式：`Sha256VerifyingReader` 包装原始 `BodyReader`，
 透传数据同时累积摘要；存储层消费的就是这个装饰后的 reader。校验失败时
 `complete()` 抛异常 → handler 走错误路径 → LocalFs 的 staging 临时文件
 被 RAII 清理，不会留下半个对象。
+
+Trailing checksum 的分工：头部声明的 `Content-MD5` / `x-amz-checksum-*` 由
+`ChecksumVerifyingReader`（checksum_guard.h）在 chunked 剥壳装饰器**之外**
+校验；`x-amz-trailer` 声明的校验和的期望值到 payload 结束才出现，因此在
+`ChunkedSigV4BodyReader` **内部**边解码边累积摘要、解析出 trailer 后比对，
+两处共用同一张算法表（crc32 / crc32c / crc64nvme / sha1 / sha256，
+`checksum_spec`）与 `StreamingDigest` 增量摘要器。
+`x-amz-checksum-algorithm` / `x-amz-sdk-checksum-algorithm` 声明也被强制：
+未知算法 InvalidRequest；带 body 的请求声明了算法却既无对应头也无对应
+trailer 声明 → InvalidRequest（无 body 的声明如 CreateMultipartUpload 放行，
+分片各自带各自的校验和）。
 
 ### 3.4 Presigned URL
 

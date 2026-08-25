@@ -29,13 +29,13 @@
 
 | # | 条目 | 现状 | 价值 | 难度 | 入口 |
 | --- | --- | --- | --- | --- | --- |
-| 1.1 | **aws-chunked trailer 校验和完全不验** | `ChunkedSigV4BodyReader` 的 `Trailer` 状态对 trailer 行只做 `buf_.clear() + fill()` 丢弃（头注释自认）。后果：`STREAMING-UNSIGNED-PAYLOAD-TRAILER` + `x-amz-trailer: x-amz-checksum-crc32` 这条**新版 aws-cli/boto3 的默认上传路径端到端零完整性校验**（unsigned 模式下签名也不覆盖 body）。需解析 trailer 行 → 复用 `ChecksumVerifyingReader` 的算法表；signed 变体还要验 `AWS4-HMAC-SHA256-TRAILER` 签名 | 高 | 中 | `src/s3/auth/sigv4.cc`（Trailer 状态机）、`src/s3/checksum_guard.h` |
+| 1.1 | ~~aws-chunked trailer 校验和完全不验~~ **已完成（2026-08-26）** | -TRAILER 两变体的 trailer 段现按行严格解析并与 `x-amz-trailer` 声明双向对照，声明的校验和对解码后 payload 校验，signed 变体验 `x-amz-trailer-signature`（见 [s3-protocol.md](s3-protocol.md) §3.2/§3.3） | — | — | `src/s3/auth/sigv4.cc`、`src/s3/checksum_guard.h` |
 | 1.2 | **配置校验缺口簇** | ① `http.max_header_size` 无上界，beast 侧 `parser.header_limit(uint32_t)` 遇 `4GiB` 截断为 0，拒绝一切请求；② `http.idle_timeout` 无范围校验且 `0` 语义在驱动间相反（builtin=永不超时，beast=立即超时）；③ `http.port` 是唯一走裸 `std::stoi` 的字段（`9000abc` 静默取 9000）；④ `log.level` 拼错（如 `warning`）静默降级 info；⑤ `buckets.rules[].match/backend` 空值不校验；⑥ 无跨项一致性检查（如 `transfer_stall_timeout > request_timeout` 时 stall 永不生效） | 高 | 低（逐条补 `check_range`/`to_int`） | `src/core/config.cc:282-303,404`、`src/http/drivers/beast/beast_server.cc` |
 | 1.3 | **`X-Amz-Security-Token` 静默忽略** | query 侧被列进 `kCommonQueryKeys` 白名单放行，header 侧不在任何拒绝名单——带 STS 临时凭证的客户端最终得到误导性的 `InvalidAccessKeyId`。至少先改成显式 501（半天工作量）；真做 STS 见 §2.8 | 中-高 | 低 | `src/s3/service.cc`（`kCommonQueryKeys` / `reject_unsupported_headers`） |
 | 1.4 | **stall guard 与 `io_chunk_size` 下界耦合可误杀** | `kMinProgressBytes` 硬编码 64KiB；若 `io_chunk_size` 配到 4KiB（合法下界），单次 read 永远 <64KiB，每个 window 都可能误判停滞、正常慢客户端被掐断。改为 `min(kMinProgressBytes, io_chunk_size)` 或提为配置项 | 中 | 低 | `src/http/stall_guard.h`、`src/core/config.cc` |
 | 1.5 | **请求延迟直方图上界 10s，P99 失真** | `kLatencyBuckets` 最大桶 10s，而 `request_timeout` 默认 300s：10s–300s 的请求全落 `+Inf` 桶，大对象场景 P99 完全不可读。加 30/60/300 三个桶即可 | 中 | 极低 | `src/s3/metrics.h` |
 | 1.6 | **文档漂移** | ① 中英 README 的"明确不支持"清单仍列 **website**，与已落地的 [static-website.md](static-website.md) 直接矛盾；② 全仓 **340+ 处**源码/文档注释引用已删除的 `docs/gaps.md` / `docs/issues.md`（这些注释承载"为什么这么写"的论证，建议从 git 历史恢复为 `docs/archive/gaps.md` 归档并批量改路径，其次是内联被引段落）；③ `cli.md` 扩展约定笔误：`add_conn_opts` 实为 `add_conn_flags` | 中-高 | 低-中 | `README.md:203`、`docs/README.zh-CN.md`、全仓 `grep -rn gaps.md`、`docs/cli.md` |
-| 1.7 | **`x-amz-checksum-algorithm` 头静默忽略** | 不校验也不 501（不匹配五个精确校验头名，也不在拒绝名单），与 1.3 同属原则一致性问题 | 中 | 极低 | `src/s3/checksum_guard.h`、`src/s3/service.cc` |
+| 1.7 | ~~`x-amz-checksum-algorithm` 头静默忽略~~ **已完成（2026-08-26）** | `x-amz-checksum-algorithm` / `x-amz-sdk-checksum-algorithm` 现强制校验：未知算法或"声明了却没提供对应摘要"→ InvalidRequest（无 body 的声明放行） | — | — | `src/s3/checksum_guard.h` |
 
 ## 2. S3 协议层
 
@@ -56,7 +56,7 @@
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| `crc64nvme` 算法 | 缺失；AWS 2025 起 SDK 的新默认算法，现在遇到会静默忽略 | 中-高 | 低（一个 CRC 表 + 枚举项） |
+| ~~`crc64nvme` 算法~~ **已完成（2026-08-26）** | 头部与 trailer 两种形态均支持（`util::crc64nvme_update` + `checksum_spec` 表项） | — | — |
 | 校验和持久化 + 回显 | `ObjectMeta` 无 checksum 字段；GET/HEAD 不回 `x-amz-checksum-*`，不支持 `x-amz-checksum-mode`，multipart 无 composite（`-N`）形式——"上传时校验、读取时可复核"的闭环只做了一半 | 中 | 中（扩 `ObjectMeta` + 各后端序列化；duostore codec 自描述 kv 段已有扩展先例） |
 
 ### 2.3 网站托管收尾（[static-website.md](static-website.md) §"未尽事项"）
@@ -390,7 +390,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 ### P0 — 立即（bug 修复与文档一致性，合计约一周）
 
-1. trailer 校验和空洞 + `crc64nvme` + `x-amz-checksum-algorithm`（§1.1/§2.2/§1.7，一次闭合新版 SDK 上传路径）
+1. ~~trailer 校验和空洞 + `crc64nvme` + `x-amz-checksum-algorithm`（§1.1/§2.2/§1.7，一次闭合新版 SDK 上传路径）~~ **已完成（2026-08-26）**
 2. 配置校验缺口簇（§1.2）+ stall guard 误杀（§1.4）+ 延迟桶上界（§1.5）
 3. `X-Amz-Security-Token` 显式 501（§1.3）
 4. 文档漂移三件套：README website、gaps.md 断链归档恢复、cli.md 笔误（§1.6）

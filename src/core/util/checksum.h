@@ -23,6 +23,14 @@ inline uint32_t crc32c_of(std::string_view s) {
 uint32_t crc32_update(uint32_t crc, std::span<const std::byte> data);
 inline uint32_t crc32_of(std::span<const std::byte> data) { return crc32_update(0, data); }
 
+// crc64/nvme (x-amz-checksum-crc64nvme, the AWS SDK default algorithm since 2025):
+// NVMe 1.4+ 64-bit CRC, reflected; same chained-incremental contract as the crc32 pair
+uint64_t crc64nvme_update(uint64_t crc, std::span<const std::byte> data);
+inline uint64_t crc64nvme_of(std::span<const std::byte> data) { return crc64nvme_update(0, data); }
+inline uint64_t crc64nvme_of(std::string_view s) {
+    return crc64nvme_of(std::span(reinterpret_cast<const std::byte*>(s.data()), s.size()));
+}
+
 // Standard base64 (with padding). decode is strict: a length not a multiple of 4,
 // characters outside the alphabet, or a non-trailing '=' all yield nullopt —
 // lenient decoding would conflate "malformed input" with "digest mismatch"

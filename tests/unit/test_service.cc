@@ -1405,6 +1405,68 @@ TEST(service_content_md5_and_checksums) {
     CHECK_EQ(sync_wait(svc.dispatch(std::move(crc_bad))).status, 400);
 }
 
+TEST(util_crc64nvme_vector) {
+    // CRC-64/NVME catalog check value ("123456789" -> 0xAE8B14860A799888) + incremental chaining
+    CHECK_EQ(util::crc64nvme_of(std::string_view("123456789")), 0xAE8B14860A799888ull);
+    auto part = util::crc64nvme_of(std::string_view("12345"));
+    CHECK_EQ(util::crc64nvme_update(
+                 part, std::span(reinterpret_cast<const std::byte*>("6789"), 4)),
+             0xAE8B14860A799888ull);
+}
+
+TEST(service_checksum_crc64nvme) {
+    // The post-2025 SDK default algorithm, previously silently ignored
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    uint64_t v = util::crc64nvme_of(std::string_view("hello"));
+    std::string be;
+    for (int s = 56; s >= 0; s -= 8) be.push_back(char((v >> s) & 0xff));
+    auto ok = make_req("PUT", "/bkt/a.bin", "hello");
+    ok.headers.add("x-amz-checksum-crc64nvme", util::base64_encode(be));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(ok))).status, 200);
+
+    auto bad = make_req("PUT", "/bkt/b.bin", "tampered");
+    bad.headers.add("x-amz-checksum-crc64nvme", util::base64_encode(be));
+    auto resp = sync_wait(svc.dispatch(std::move(bad)));
+    CHECK_EQ(resp.status, 400);
+    CHECK(contains(resp.small_body, "<Code>BadDigest</Code>"));
+}
+
+TEST(service_checksum_algorithm_header) {
+    // x-amz-checksum-algorithm / x-amz-sdk-checksum-algorithm were silently swallowed before:
+    // the client asked for an integrity check the gateway never performed
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    // Declared + matching digest header -> verified upload
+    uint32_t v = util::crc32c_of(std::string_view("hello"));
+    std::string be;
+    for (int s = 24; s >= 0; s -= 8) be.push_back(char((v >> s) & 0xff));
+    auto ok = make_req("PUT", "/bkt/a.bin", "hello");
+    ok.headers.add("x-amz-sdk-checksum-algorithm", "CRC32C");
+    ok.headers.add("x-amz-checksum-crc32c", util::base64_encode(be));
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(ok))).status, 200);
+
+    // Unknown algorithm value -> InvalidRequest, not silence
+    auto unknown = make_req("PUT", "/bkt/b.bin", "hello");
+    unknown.headers.add("x-amz-checksum-algorithm", "MD99");
+    auto resp = sync_wait(svc.dispatch(std::move(unknown)));
+    CHECK_EQ(resp.status, 400);
+    CHECK(contains(resp.small_body, "<Code>InvalidRequest</Code>"));
+
+    // Declared with a body but no digest anywhere (header or trailer) -> InvalidRequest
+    auto missing = make_req("PUT", "/bkt/c.bin", "hello");
+    missing.headers.add("x-amz-sdk-checksum-algorithm", "CRC32");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(missing))).status, 400);
+
+    // Body-less declaration (the CreateMultipartUpload shape) is accepted -- each part
+    // carries and gets verified against its own digest
+    auto create = make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}});
+    create.headers.add("x-amz-checksum-algorithm", "CRC32");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(create))).status, 200);
+}
+
 TEST(service_delete_objects_requires_digest) {
     // Batch delete is the only operation where a rewritten request body silently deletes extra
     // objects; AWS requires an integrity header

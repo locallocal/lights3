@@ -1,4 +1,5 @@
 // SigV4: official AWS test vector (get-vanilla) + sign-then-verify round trip + tamper detection
+#include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "core/util/hex.h"
 #include "core/util/time.h"
@@ -218,6 +219,248 @@ TEST(sigv4_chunked_rejects_tampered_chunk) {
     } catch (const S3Error& e) {
         thrown = true;
         CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::SignatureDoesNotMatch));
+    }
+    CHECK(thrown);
+}
+
+// ---------- docs/s3-protocol.md §3.3: -TRAILER variants (trailing checksums) ----------
+
+namespace {
+
+std::string hex_size(size_t n) {
+    std::ostringstream os;
+    os << std::hex << n;
+    return os.str();
+}
+
+std::string be_bytes(uint64_t v, int bytes) {
+    std::string out;
+    for (int s = (bytes - 1) * 8; s >= 0; s -= 8) out.push_back(char((v >> s) & 0xff));
+    return out;
+}
+
+// STREAMING-UNSIGNED-PAYLOAD-TRAILER: the default upload path of post-2025 SDKs -- chunks are
+// unsigned, the trailing checksum is the only end-to-end integrity cover
+http::HttpRequest make_unsigned_trailer_request(SigV4Authenticator& auth, const Credential& cred,
+                                                const std::string& payload,
+                                                const std::string& declared_name,
+                                                const std::string& trailer_line) {
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = "/bkt/big";
+    req.path = "/bkt/big";
+    req.headers.add("Host", "localhost");
+    req.headers.add("x-amz-decoded-content-length", std::to_string(payload.size()));
+    if (!declared_name.empty()) req.headers.add("x-amz-trailer", declared_name);
+    auth.sign(req, cred, "STREAMING-UNSIGNED-PAYLOAD-TRAILER");
+
+    std::string half1 = payload.substr(0, payload.size() / 2);
+    std::string half2 = payload.substr(payload.size() / 2);
+    std::string body;
+    for (auto& c : {half1, half2})
+        if (!c.empty()) body += hex_size(c.size()) + "\r\n" + c + "\r\n";
+    body += "0\r\n" + trailer_line + "\r\n\r\n";  // trailer section ends with a blank line
+    req.body = std::make_unique<http::StringBodyReader>(std::move(body));
+    return req;
+}
+
+std::string crc32_trailer_value(const std::string& payload) {
+    return util::base64_encode(
+        be_bytes(util::crc32_update(
+                     0, std::span(reinterpret_cast<const std::byte*>(payload.data()),
+                                  payload.size())),
+                 4));
+}
+
+}  // namespace
+
+TEST(sigv4_unsigned_trailer_checksum_verified) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    std::string payload = "hello trailer world";
+
+    auto ok = make_unsigned_trailer_request(
+        auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
+        "x-amz-checksum-crc32:" + crc32_trailer_value(payload));
+    auth.verify(ok);
+    CHECK_EQ(read_all_body(*ok.body), payload);
+
+    // crc64nvme goes through the same path (the post-2025 SDK default algorithm)
+    auto v64 = util::base64_encode(be_bytes(util::crc64nvme_of(payload), 8));
+    auto ok64 = make_unsigned_trailer_request(auth, cfg.credentials[0], payload,
+                                              "x-amz-checksum-crc64nvme",
+                                              "x-amz-checksum-crc64nvme:" + v64);
+    auth.verify(ok64);
+    CHECK_EQ(read_all_body(*ok64.body), payload);
+}
+
+TEST(sigv4_unsigned_trailer_checksum_mismatch) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    std::string payload = "hello trailer world";
+
+    // Trailer carries the checksum of different bytes -> BadDigest before EOF is reported
+    auto req = make_unsigned_trailer_request(
+        auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
+        "x-amz-checksum-crc32:" + crc32_trailer_value("tampered payload!!!"));
+    auth.verify(req);
+    bool thrown = false;
+    try {
+        read_all_body(*req.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::BadDigest));
+    }
+    CHECK(thrown);
+
+    // Not-base64 trailer value -> InvalidDigest, distinct from the mismatch case
+    auto junk = make_unsigned_trailer_request(auth, cfg.credentials[0], payload,
+                                              "x-amz-checksum-crc32",
+                                              "x-amz-checksum-crc32:not-base64!!");
+    auth.verify(junk);
+    thrown = false;
+    try {
+        read_all_body(*junk.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::InvalidDigest));
+    }
+    CHECK(thrown);
+}
+
+TEST(sigv4_trailer_declaration_enforced_both_ways) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+    std::string payload = "hello trailer world";
+
+    // Declared crc32 but the body carries crc32c -> both "missing declared" and "undeclared"
+    auto swapped = make_unsigned_trailer_request(
+        auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
+        "x-amz-checksum-crc32c:" + crc32_trailer_value(payload));
+    auth.verify(swapped);
+    bool thrown = false;
+    try {
+        read_all_body(*swapped.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::InvalidRequest));
+    }
+    CHECK(thrown);
+
+    // Unknown checksum trailer name is 501 at verify time, not silently skipped
+    auto unknown = make_unsigned_trailer_request(auth, cfg.credentials[0], payload,
+                                                 "x-amz-checksum-md99",
+                                                 "x-amz-checksum-md99:AAAA");
+    CHECK_THROWS_S3(auth.verify(unknown), S3ErrorCode::NotImplemented);
+
+    // x-amz-trailer without a -TRAILER payload type -> InvalidRequest at verify time
+    http::HttpRequest plain;
+    plain.method = "PUT";
+    plain.raw_path = "/bkt/x";
+    plain.path = "/bkt/x";
+    plain.headers.add("Host", "localhost");
+    plain.headers.add("x-amz-trailer", "x-amz-checksum-crc32");
+    plain.body = std::make_unique<http::StringBodyReader>("data");
+    auth.sign(plain, cfg.credentials[0], util::sha256_hex("data"));
+    CHECK_THROWS_S3(auth.verify(plain), S3ErrorCode::InvalidRequest);
+}
+
+// STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER: chunk signature chain + trailer signature
+// ("AWS4-HMAC-SHA256-TRAILER" string-to-sign over the canonicalized trailers)
+namespace {
+
+http::HttpRequest make_signed_trailer_request(SigV4Authenticator& auth, const Credential& cred,
+                                              const std::string& checksum_value,
+                                              bool bad_trailer_sig, bool omit_trailer_sig) {
+    http::HttpRequest req;
+    req.method = "PUT";
+    req.raw_path = "/bkt/big";
+    req.path = "/bkt/big";
+    req.headers.add("Host", "localhost");
+    req.headers.add("x-amz-decoded-content-length", "11");
+    req.headers.add("x-amz-trailer", "x-amz-checksum-crc32");
+    auth.sign(req, cred, "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER");
+
+    std::string authz = *req.headers.get("Authorization");
+    std::string seed = authz.substr(authz.find("Signature=") + 10);
+    std::string amz_date = *req.headers.get("x-amz-date");
+    std::string date = amz_date.substr(0, 8);
+    std::string scope = date + "/us-east-1/s3/aws4_request";
+    auto key = test_signing_key(cred.secret_key, date);
+
+    auto chunk_sig = [&](const std::string& prev, const std::string& data) {
+        std::string sts = "AWS4-HMAC-SHA256-PAYLOAD\n" + amz_date + "\n" + scope + "\n" +
+                          prev + "\n" + util::sha256_hex("") + "\n" + util::sha256_hex(data);
+        return util::to_hex(util::hmac_sha256(key, sts));
+    };
+    std::string s1 = chunk_sig(seed, "hello ");
+    std::string s2 = chunk_sig(s1, "world");
+    std::string s3 = chunk_sig(s2, "");
+    std::string trailer_line = "x-amz-checksum-crc32:" + checksum_value;
+    std::string tsig_sts = "AWS4-HMAC-SHA256-TRAILER\n" + amz_date + "\n" + scope + "\n" + s3 +
+                           "\n" + util::sha256_hex(trailer_line + "\n");
+    std::string tsig = bad_trailer_sig ? std::string(64, '0')
+                                       : util::to_hex(util::hmac_sha256(key, tsig_sts));
+    std::string body = "6;chunk-signature=" + s1 + "\r\nhello \r\n" +
+                       "5;chunk-signature=" + s2 + "\r\nworld\r\n" +
+                       "0;chunk-signature=" + s3 + "\r\n" + trailer_line + "\r\n";
+    if (!omit_trailer_sig) body += "x-amz-trailer-signature:" + tsig + "\r\n";
+    body += "\r\n";
+    req.body = std::make_unique<http::StringBodyReader>(std::move(body));
+    return req;
+}
+
+}  // namespace
+
+TEST(sigv4_signed_trailer_verified) {
+    AuthConfig cfg;
+    cfg.credentials = {{"TESTAK", "test-secret-key"}};
+    auto auth = SigV4Authenticator::build(cfg);
+
+    auto ok = make_signed_trailer_request(auth, cfg.credentials[0],
+                                          crc32_trailer_value("hello world"), false, false);
+    auth.verify(ok);
+    CHECK_EQ(read_all_body(*ok.body), "hello world");
+
+    // Corrupt trailer signature -> SignatureDoesNotMatch (checked before the checksum)
+    auto bad = make_signed_trailer_request(auth, cfg.credentials[0],
+                                           crc32_trailer_value("hello world"), true, false);
+    auth.verify(bad);
+    bool thrown = false;
+    try {
+        read_all_body(*bad.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::SignatureDoesNotMatch));
+    }
+    CHECK(thrown);
+
+    // Correctly signed but wrong checksum (client-side digest bug) -> BadDigest
+    auto mismatch = make_signed_trailer_request(auth, cfg.credentials[0],
+                                                crc32_trailer_value("other bytes"), false, false);
+    auth.verify(mismatch);
+    thrown = false;
+    try {
+        read_all_body(*mismatch.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::BadDigest));
+    }
+    CHECK(thrown);
+
+    // Missing x-amz-trailer-signature in the signed variant -> InvalidRequest
+    auto omitted = make_signed_trailer_request(auth, cfg.credentials[0],
+                                               crc32_trailer_value("hello world"), false, true);
+    auth.verify(omitted);
+    thrown = false;
+    try {
+        read_all_body(*omitted.body);
+    } catch (const S3Error& e) {
+        thrown = true;
+        CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::InvalidRequest));
     }
     CHECK(thrown);
 }

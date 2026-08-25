@@ -5,9 +5,11 @@
 #include <map>
 #include <sstream>
 
+#include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "core/util/hex.h"
 #include "core/util/uri.h"
+#include "s3/checksum_guard.h"
 
 namespace lights3::s3 {
 
@@ -183,24 +185,41 @@ util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::
     return util::hmac_sha256(k, "aws4_request");
 }
 
-// aws-chunked de-framing decorator (docs/s3-protocol.md §3.2):
+// A trailer declared via x-amz-trailer: the digest of the whole decoded payload arrives *after* the
+// data, so it is verified here rather than by the header-driven ChecksumVerifyingReader
+struct DeclaredTrailer {
+    std::string name;  // lowercase x-amz-checksum-*
+    ExpectedDigest::Algo algo;
+    size_t bytes;
+};
+
+// aws-chunked de-framing decorator (docs/s3-protocol.md §3.2/§3.3):
 // parses "<hex-size>[;chunk-signature=<sig>]\r\n<data>\r\n" chunk by chunk, exposing only pure data downstream.
 // signed mode verifies the signature chain: sig_n = HMAC(key, "AWS4-HMAC-SHA256-PAYLOAD" \n amz_date \n scope
 //                                   \n sig_{n-1} \n sha256("") \n sha256(chunk_data))；
-// The zero-size final chunk is verified too; trailer lines after it (-TRAILER variants) are consumed without verification.
+// The zero-size final chunk is verified too. For the -TRAILER variants the trailer section after it is
+// parsed strictly: declared checksum trailers are verified against the decoded payload, and the signed
+// variant additionally verifies x-amz-trailer-signature ("AWS4-HMAC-SHA256-TRAILER" string-to-sign over
+// the canonicalized trailers, chained onto the final chunk signature).
 class ChunkedSigV4BodyReader final : public http::BodyReader {
 public:
     ChunkedSigV4BodyReader(std::unique_ptr<http::BodyReader> inner, bool signed_chunks,
                            util::Sha256Digest signing_key, std::string seed_signature,
                            std::string amz_date, std::string scope,
-                           std::optional<uint64_t> decoded_length)
+                           std::optional<uint64_t> decoded_length, bool trailer_expected,
+                           bool trailer_signed, std::vector<DeclaredTrailer> declared_trailers)
         : inner_(std::move(inner)),
           signed_(signed_chunks),
           key_(signing_key),
           prev_sig_(std::move(seed_signature)),
           amz_date_(std::move(amz_date)),
           scope_(std::move(scope)),
-          decoded_length_(decoded_length) {}
+          decoded_length_(decoded_length),
+          trailer_expected_(trailer_expected),
+          trailer_signed_(trailer_signed),
+          declared_(std::move(declared_trailers)) {
+        for (auto& d : declared_) trailer_digests_.emplace_back(d.algo);
+    }
 
     Task<size_t> read(std::span<std::byte> out) override {
         while (state_ != State::Done) {
@@ -218,6 +237,8 @@ public:
                 if (chunk_hash_)
                     chunk_hash_->update(
                         std::span(reinterpret_cast<const uint8_t*>(buf_.data()), n));
+                for (auto& d : trailer_digests_)
+                    d.update(std::span<const std::byte>(out.data(), n));
                 buf_.erase(0, n);
                 chunk_remaining_ -= n;
                 delivered_ += n;
@@ -228,9 +249,8 @@ public:
                     delivered_ == *decoded_length_)
                     co_await drain_to_done();
                 co_return n;
-            } else {  // Trailer: consume the remaining input (trailer headers and the trailing blank line)
-                buf_.clear();
-                if (!co_await fill()) state_ = State::Done;
+            } else {  // Trailer
+                co_await consume_trailer();
             }
         }
         if (decoded_length_ && delivered_ != *decoded_length_)
@@ -271,9 +291,88 @@ private:
                         "Decoded body size does not match x-amz-decoded-content-length.");
                 co_await finish_chunk();
             } else {  // Trailer
-                buf_.clear();
-                if (!co_await fill()) state_ = State::Done;
+                co_await consume_trailer();
             }
+        }
+    }
+
+    // -TRAILER variants: parse "name:value\r\n"* + blank line strictly, then verify. The plain
+    // -PAYLOAD variants keep the historical lenient behavior -- drain to EOF ignoring residue
+    // (the chunk signature chain already covers every delivered byte)
+    Task<void> consume_trailer() {
+        if (!trailer_expected_) {
+            buf_.clear();
+            if (!co_await fill()) state_ = State::Done;
+            co_return;
+        }
+        for (;;) {
+            auto eol = buf_.find("\r\n");
+            if (eol == std::string::npos) {
+                if (trailer_bytes_ + buf_.size() > kTrailerMax)
+                    malformed_body("trailer too long");
+                if (!co_await fill()) malformed_body("truncated trailer");
+                continue;
+            }
+            std::string line = buf_.substr(0, eol);
+            buf_.erase(0, eol + 2);
+            if (line.empty()) break;  // end of the trailer section
+            trailer_bytes_ += line.size() + 2;
+            if (trailer_bytes_ > kTrailerMax) malformed_body("trailer too long");
+            auto colon = line.find(':');
+            if (colon == std::string::npos) malformed_body("malformed trailer line");
+            std::string name = lower(line.substr(0, colon));
+            std::string value = line.substr(colon + 1);
+            value.erase(0, value.find_first_not_of(" \t"));
+            if (auto end = value.find_last_not_of(" \t"); end != std::string::npos)
+                value.resize(end + 1);
+            if (!trailers_.emplace(std::move(name), std::move(value)).second)
+                malformed_body("duplicate trailer");
+        }
+        verify_trailer();
+        // Residue after the blank line (if any) stays undelivered and unread -- same
+        // indifference the lenient path has always shown
+        state_ = State::Done;
+    }
+
+    void verify_trailer() {
+        if (trailer_signed_) {
+            auto it = trailers_.find("x-amz-trailer-signature");
+            if (it == trailers_.end()) malformed_body("missing x-amz-trailer-signature");
+            // Canonicalized trailers: "name:value\n" each, sorted by name (std::map order),
+            // the signature line itself excluded
+            std::string canon;
+            for (auto& [n, v] : trailers_)
+                if (n != "x-amz-trailer-signature") canon += n + ":" + v + "\n";
+            std::string sts = std::string("AWS4-HMAC-SHA256-TRAILER\n") + amz_date_ + "\n" +
+                              scope_ + "\n" + prev_sig_ + "\n" + util::sha256_hex(canon);
+            if (!constant_time_eq(util::to_hex(util::hmac_sha256(key_, sts)), it->second))
+                throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
+                              "Trailer signature does not match.");
+            trailers_.erase(it);
+        } else if (trailers_.count("x-amz-trailer-signature")) {
+            malformed_body("unexpected x-amz-trailer-signature");
+        }
+        // Exact match against the x-amz-trailer declaration in both directions: an undeclared
+        // trailer is outside every integrity promise; a missing declared one would silently skip
+        // the very check the client asked for
+        for (auto& d : declared_)
+            if (!trailers_.count(d.name)) malformed_body("missing declared trailer");
+        for (auto& [n, v] : trailers_) {
+            bool declared = false;
+            for (auto& d : declared_)
+                if (d.name == n) declared = true;
+            if (!declared) malformed_body("undeclared trailer");
+        }
+        for (size_t i = 0; i < declared_.size(); ++i) {
+            auto& d = declared_[i];
+            auto raw = util::base64_decode(trailers_[d.name]);
+            if (!raw || raw->size() != d.bytes)
+                throw S3Error(S3ErrorCode::InvalidDigest,
+                              "The " + d.name + " trailer you specified is not valid.");
+            if (trailer_digests_[i].final_raw() != *raw)
+                throw S3Error(S3ErrorCode::BadDigest,
+                              "The " + d.name +
+                                  " you specified did not match what we received.");
         }
     }
 
@@ -347,6 +446,9 @@ private:
     std::string scope_;
     std::optional<uint64_t> decoded_length_;
 
+    // Trailer size cap: same 16KiB bound L1 applies to HTTP trailers (http-adapter.md §1)
+    static constexpr size_t kTrailerMax = 16 * 1024;
+
     std::string buf_;
     State state_ = State::Header;
     uint64_t chunk_remaining_ = 0;
@@ -354,6 +456,13 @@ private:
     bool final_chunk_ = false;
     std::string chunk_sig_;
     std::optional<util::HashStream> chunk_hash_;
+
+    bool trailer_expected_;
+    bool trailer_signed_;
+    std::vector<DeclaredTrailer> declared_;
+    std::vector<StreamingDigest> trailer_digests_;  // over the decoded payload, one per declared
+    std::map<std::string, std::string> trailers_;   // parsed trailer lines (sorted for canon)
+    size_t trailer_bytes_ = 0;
 };
 
 }  // namespace
@@ -508,7 +617,7 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
 
     // payload hash (streaming variants participate in the canonical request by their literal value)
     std::string payload_hash;
-    bool chunked_signed = false, chunked_unsigned = false;
+    bool chunked_signed = false, chunked_unsigned = false, trailer_variant = false;
     if (f.presigned) {
         payload_hash = "UNSIGNED-PAYLOAD";
     } else if (auto h = req.headers.get("x-amz-content-sha256")) {
@@ -521,6 +630,8 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
         else if (payload_hash.rfind("STREAMING-", 0) == 0)
             throw S3Error(S3ErrorCode::NotImplemented,
                           "This streaming payload type is not supported.");
+        trailer_variant = payload_hash.size() >= 8 &&
+                          payload_hash.compare(payload_hash.size() - 8, 8, "-TRAILER") == 0;
     } else {
         bool has_body = req.body && req.body->length().value_or(0) > 0;
         if (has_body)
@@ -536,6 +647,29 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
         throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
                       "The request signature we calculated does not match the signature you "
                       "provided.");
+
+    // x-amz-trailer declaration (docs/s3-protocol.md §3.3). Validated regardless of body presence:
+    // a declaration the payload type cannot carry, or one naming a checksum this implementation
+    // cannot verify, must fail loudly rather than upload with silently-skipped integrity
+    std::vector<DeclaredTrailer> declared_trailers;
+    for (auto& name : parse_declared_trailers(req)) {
+        if (!trailer_variant)
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "x-amz-trailer requires a STREAMING-*-TRAILER payload type.");
+        auto* spec = checksum_spec(name);
+        if (!spec) {
+            if (name.rfind("x-amz-checksum-", 0) == 0)
+                throw S3Error(S3ErrorCode::NotImplemented,
+                              "The trailing checksum '" + name + "' is not implemented.");
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "The trailer '" + name + "' is not supported.");
+        }
+        for (auto& d : declared_trailers)
+            if (d.name == name)
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "Duplicate trailer declared: " + name);
+        declared_trailers.push_back({std::move(name), spec->algo, spec->bytes});
+    }
 
     // Streaming payload verification (docs/s3-protocol.md §3.2/§3.3)
     if ((chunked_signed || chunked_unsigned) && req.body) {
@@ -555,7 +689,9 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
         req.body = std::make_unique<ChunkedSigV4BodyReader>(
             std::move(req.body), chunked_signed,
             derive_signing_key(secret_key, f.date, f.region, f.service), f.signature,
-            f.amz_date, scope, decoded_len);
+            f.amz_date, scope, decoded_len, trailer_variant,
+            /*trailer_signed=*/chunked_signed && trailer_variant,
+            std::move(declared_trailers));
     } else if (is_hex_digest(payload_hash) && req.body) {
         // A declared empty digest (sha256("")) still gets wrapped for verification: without checking that the
         // actual body is empty, empty digest + non-empty body would slip the body out of signature protection

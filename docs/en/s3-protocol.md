@@ -10,7 +10,7 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | --- | --- | --- |
 | Service | ListBuckets | Aggregates across backends |
 | Bucket | CreateBucket / DeleteBucket / HeadBucket | Single region: a CreateBucket LocationConstraint that disagrees with the configured region is `InvalidLocationConstraint`; HeadBucket/CreateBucket return `x-amz-bucket-region` |
-| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects (batch) / CopyObject | Get supports Range, conditional requests (If-Match/If-None-Match/If-Modified-Since) and the six `response-*` override parameters; Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires are persisted and echoed back; Content-MD5 and `x-amz-checksum-*` verify the request body, and DeleteObjects **requires** an integrity header |
+| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects (batch) / CopyObject | Get supports Range, conditional requests (If-Match/If-None-Match/If-Modified-Since) and the six `response-*` override parameters; Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires are persisted and echoed back; Content-MD5 and `x-amz-checksum-*` (crc32/crc32c/crc64nvme/sha1/sha256, in header or aws-chunked trailer form) verify the request body, and DeleteObjects **requires** an integrity header |
 | List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner; V1 honours only marker, V2 only continuation-token and start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder` |
 
@@ -73,14 +73,30 @@ Implemented in-house (the protocol is public and stable; avoids pulling in a who
 | Hex digest | Compute SHA256 incrementally while streaming the body; compare when done; mismatch → XAmzContentSHA256Mismatch. Note: **a 2xx may only be issued after the body is fully consumed**, so PUT's success response naturally comes after verification |
 | `UNSIGNED-PAYLOAD` | Skip body verification (common under HTTPS); only the header signature is verified |
 | `STREAMING-AWS4-HMAC-SHA256-PAYLOAD` | aws-chunked encoding: L2 provides a `ChunkedSigV4BodyReader` decorator that strips the framing chunk by chunk and verifies the chunk signature chain, exposing a pure data stream downstream. Placed in L2 rather than the driver, so all drivers get support for free |
+| The two `STREAMING-*-TRAILER` variants | The default upload shape of post-2025 SDKs: `STREAMING-UNSIGNED-PAYLOAD-TRAILER` (unsigned chunks, integrity carried by the trailing checksum) and `STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER` (chunk signature chain + trailer signature). The trailer section is parsed strictly line by line and matched against the `x-amz-trailer` declaration in both directions (an undeclared trailer is rejected, and so is a declared one that never arrives); declared `x-amz-checksum-*` trailers are verified against the full decoded payload (malformed → InvalidDigest, mismatch → BadDigest); the signed variant additionally verifies `x-amz-trailer-signature` (the `AWS4-HMAC-SHA256-TRAILER` string-to-sign over the hash of the canonicalized trailers, chained onto the final chunk signature). The trailer section is capped at 16KiB |
 
-### 3.3 Interplay with the Streaming Model
+### 3.3 Interplay with the Streaming Model (incl. trailing checksums)
 
 Signature verification uses the decorator pattern: `Sha256VerifyingReader` wraps the
 raw `BodyReader`, passing data through while accumulating the digest; the storage
 layer consumes this decorated reader. On verification failure, `complete()` throws
 → the handler takes the error path → LocalFs's staging temp file is cleaned up
 by RAII, leaving no half-written object behind.
+
+Division of labor for trailing checksums: header-declared `Content-MD5` /
+`x-amz-checksum-*` are verified by `ChecksumVerifyingReader` (checksum_guard.h)
+**outside** the chunked de-framing decorator; for checksums declared via
+`x-amz-trailer` the expected value only arrives after the payload, so
+`ChunkedSigV4BodyReader` accumulates digests over the decoded stream **inside**
+and compares once the trailer is parsed. Both share one algorithm table
+(crc32 / crc32c / crc64nvme / sha1 / sha256, `checksum_spec`) and the
+`StreamingDigest` incremental digester.
+The `x-amz-checksum-algorithm` / `x-amz-sdk-checksum-algorithm` declarations are
+enforced too: an unknown algorithm is InvalidRequest; a request with a body that
+declares an algorithm but supplies neither the matching header nor a matching
+trailer declaration is InvalidRequest (a body-less declaration, e.g.
+CreateMultipartUpload, is accepted — each part carries and is verified against
+its own checksum).
 
 ### 3.4 Presigned URL
 

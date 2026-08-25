@@ -27,6 +27,23 @@ uint32_t table_crc(uint32_t crc, std::span<const std::byte> data) {
     return ~crc;
 }
 
+// 64-bit twin of table_crc; same reflected table-driven shape, same ~crc chaining trick
+template <uint64_t kPoly>
+uint64_t table_crc64(uint64_t crc, std::span<const std::byte> data) {
+    static const std::array<uint64_t, 256> table = [] {
+        std::array<uint64_t, 256> t{};
+        for (uint64_t i = 0; i < 256; ++i) {
+            uint64_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? kPoly ^ (c >> 1) : c >> 1;
+            t[i] = c;
+        }
+        return t;
+    }();
+    crc = ~crc;
+    for (std::byte b : data) crc = table[(crc ^ uint64_t(b)) & 0xff] ^ (crc >> 8);
+    return ~crc;
+}
+
 constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 }  // namespace
@@ -37,6 +54,10 @@ uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) {
 
 uint32_t crc32_update(uint32_t crc, std::span<const std::byte> data) {
     return table_crc<0xEDB88320u>(crc, data);  // IEEE 802.3, reflected polynomial
+}
+
+uint64_t crc64nvme_update(uint64_t crc, std::span<const std::byte> data) {
+    return table_crc64<0x9A6C9329AC4BC9B5ull>(crc, data);  // NVMe, reflected polynomial
 }
 
 std::string base64_encode(std::span<const uint8_t> in) {

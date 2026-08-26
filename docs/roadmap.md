@@ -30,7 +30,7 @@
 | # | 条目 | 现状 | 价值 | 难度 | 入口 |
 | --- | --- | --- | --- | --- | --- |
 | 1.1 | ~~aws-chunked trailer 校验和完全不验~~ **已完成（2026-08-26）** | -TRAILER 两变体的 trailer 段现按行严格解析并与 `x-amz-trailer` 声明双向对照，声明的校验和对解码后 payload 校验，signed 变体验 `x-amz-trailer-signature`（见 [s3-protocol.md](s3-protocol.md) §3.2/§3.3） | — | — | `src/s3/auth/sigv4.cc`、`src/s3/checksum_guard.h` |
-| 1.2 | **配置校验缺口簇** | ① `http.max_header_size` 无上界，beast 侧 `parser.header_limit(uint32_t)` 遇 `4GiB` 截断为 0，拒绝一切请求；② `http.idle_timeout` 无范围校验且 `0` 语义在驱动间相反（builtin=永不超时，beast=立即超时）；③ `http.port` 是唯一走裸 `std::stoi` 的字段（`9000abc` 静默取 9000）；④ `log.level` 拼错（如 `warning`）静默降级 info；⑤ `buckets.rules[].match/backend` 空值不校验；⑥ 无跨项一致性检查（如 `transfer_stall_timeout > request_timeout` 时 stall 永不生效） | 高 | 低（逐条补 `check_range`/`to_int`） | `src/core/config.cc:282-303,404`、`src/http/drivers/beast/beast_server.cc` |
+| 1.2 | ~~配置校验缺口簇~~ **已完成（2026-08-27）** | ① `max_header_size` 限 `[1KiB,1MiB]`（远低于 beast `header_limit(uint32_t)` 截断阈值）；② `idle_timeout` 限 `[1s,86400s]`，`0` 因驱动语义相反直接拒绝；③ `http.port` 改走 `to_int`（尾随垃圾报错）；④ `log.level` 白名单 debug\|info\|warn\|error，拼错启动即报错；⑤ `buckets.rules[].match/backend` 空值拒绝；⑥ 跨项检查：`transfer_stall_timeout > request_timeout`（且后者启用）启动报错 | — | — | `src/core/config.cc`、`tests/unit/test_config.cc` |
 | 1.3 | **`X-Amz-Security-Token` 静默忽略** | query 侧被列进 `kCommonQueryKeys` 白名单放行，header 侧不在任何拒绝名单——带 STS 临时凭证的客户端最终得到误导性的 `InvalidAccessKeyId`。至少先改成显式 501（半天工作量）；真做 STS 见 §2.8 | 中-高 | 低 | `src/s3/service.cc`（`kCommonQueryKeys` / `reject_unsupported_headers`） |
 | 1.4 | **stall guard 与 `io_chunk_size` 下界耦合可误杀** | `kMinProgressBytes` 硬编码 64KiB；若 `io_chunk_size` 配到 4KiB（合法下界），单次 read 永远 <64KiB，每个 window 都可能误判停滞、正常慢客户端被掐断。改为 `min(kMinProgressBytes, io_chunk_size)` 或提为配置项 | 中 | 低 | `src/http/stall_guard.h`、`src/core/config.cc` |
 | 1.5 | **请求延迟直方图上界 10s，P99 失真** | `kLatencyBuckets` 最大桶 10s，而 `request_timeout` 默认 300s：10s–300s 的请求全落 `+Inf` 桶，大对象场景 P99 完全不可读。加 30/60/300 三个桶即可 | 中 | 极低 | `src/s3/metrics.h` |
@@ -391,7 +391,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 ### P0 — 立即（bug 修复与文档一致性，合计约一周）
 
 1. ~~trailer 校验和空洞 + `crc64nvme` + `x-amz-checksum-algorithm`（§1.1/§2.2/§1.7，一次闭合新版 SDK 上传路径）~~ **已完成（2026-08-26）**
-2. 配置校验缺口簇（§1.2）+ stall guard 误杀（§1.4）+ 延迟桶上界（§1.5）
+2. ~~配置校验缺口簇（§1.2）~~ **已完成（2026-08-27）** + stall guard 误杀（§1.4）+ 延迟桶上界（§1.5）
 3. `X-Amz-Security-Token` 显式 501（§1.3）
 4. 文档漂移三件套：README website、gaps.md 断链归档恢复、cli.md 笔误（§1.6）
 5. `--version`、`--check-config`、ListParts encoding-type 等极低成本小项

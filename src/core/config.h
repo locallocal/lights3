@@ -34,7 +34,12 @@ struct HttpConfig {
     std::string bind = "0.0.0.0";
     uint16_t port = 9000;
     int io_threads = 4;
+    // Validated to [1KiB, 1MiB]: beast passes it into parser.header_limit(uint32_t),
+    // where an unbounded value like 4GiB would truncate to 0 and reject every request
     size_t max_header_size = 16 * 1024;
+    // Validated to [1s, 86400s]. 0 is rejected: drivers disagree on its meaning
+    // (builtin's SO_RCVTIMEO 0 = never time out, beast's expires_after(0s) = expire
+    // immediately), so "no idle timeout" is not a supported configuration
     int idle_timeout_sec = 60;
     // Per-request timeout (docs/gaps.md §3.3): the clock starts when the handler
     // begins executing; on expiry the request is interrupted via cooperative
@@ -49,7 +54,9 @@ struct HttpConfig {
     // Transfer stall limit: the total no-progress duration allowed for streaming
     // send/receive **as a whole**. All four drivers reset their per-chunk timeouts
     // chunk by chunk, so a client sending 1 byte every 59 seconds could hold a
-    // connection indefinitely. 0 = disabled
+    // connection indefinitely. 0 = disabled. Must not exceed request_timeout when
+    // both are enabled — the request timeout would always fire first and the stall
+    // guard could never take effect (rejected at load)
     int transfer_stall_timeout_sec = 300;
     // Hard cap on concurrent connections (uniform across the four drivers; httplib
     // is implicitly constrained by its thread pool): new connections are rejected

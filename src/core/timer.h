@@ -26,7 +26,7 @@ public:
     static TimerQueue& instance();
 
     // Callback execution time histogram buckets: <10ms <100ms <1s <10s >=10s
-    // (docs/gaps.md §7). Callbacks run serially, so a slow callback directly delays
+    // (docs/archive/gaps.md §7). Callbacks run serially, so a slow callback directly delays
     // subsequent timers — hence the bucket boundaries are coarser than the thread
     // pool's wait buckets
     static constexpr size_t kExecBuckets = 5;
@@ -46,14 +46,14 @@ public:
     Stats stats() const;
 
     // Call fn after delay. fn runs on a **dedicated callback thread**, separate from
-    // the scheduling thread that determines expiry (docs/gaps.md §3.2): request_cancel
+    // the scheduling thread that determines expiry (docs/archive/gaps.md §3.2): request_cancel
     // unwinds the cancelled coroutine chain in place, and running that on the
     // scheduling thread would stall every timer in the process during the unwind.
     // Callbacks are still serial with each other, so a single slow callback delays
     // subsequent callbacks (but no longer delays expiry determination); fn should
     // therefore still avoid blocking IO.
     // After shutdown (destruction already begun) returns 0 — a "valid but
-    // never-firing" id is a debugging trap (docs/gaps.md §7); cancel(0) is always a
+    // never-firing" id is a debugging trap (docs/archive/gaps.md §7); cancel(0) is always a
     // safe no-op, so callers need not distinguish
     Id add(Clock::duration delay, std::function<void()> fn);
 
@@ -92,7 +92,7 @@ private:
     Id next_id_ = 0;
     Id running_id_ = 0;  // id of the currently executing callback (0 = none)
     bool stopping_ = false;
-    // Callback duration observability (docs/gaps.md §7); atomic storage, so stats()
+    // Callback duration observability (docs/archive/gaps.md §7); atomic storage, so stats()
     // reads without contending on locks with callbacks
     std::array<std::atomic<uint64_t>, kExecBuckets> exec_hist_{};
     std::atomic<uint64_t> exec_sum_us_{0};

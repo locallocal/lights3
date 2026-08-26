@@ -17,7 +17,7 @@ namespace lights3::http::driver {
 
 // ---------- Driver-internal buffer constants ----------
 // Shutdown/backpressure bounds (drain cap, trailer cap, chunk size, shutdown
-// grace) have been promoted to HttpConfig options (docs/gaps.md §7), with
+// grace) have been promoted to HttpConfig options (docs/archive/gaps.md §7), with
 // defaults consolidated in config.h; only purely internal values remain here
 inline constexpr size_t kIoChunkBytes = 64 * 1024;  // Streaming read/write chunk size (default of http.io_chunk_size)
 inline constexpr size_t kScratchBytes = 16 * 1024;  // Scratch buffer for draining, line parsing, etc.
@@ -126,7 +126,7 @@ inline BodyFraming parse_body_framing(const HeaderMap& headers) {
     return f;
 }
 
-// Request id for driver fallback responses (docs/gaps.md §4): 400/500 are
+// Request id for driver fallback responses (docs/archive/gaps.md §4): 400/500 are
 // precisely the two error classes that most need log correlation, yet
 // previously carried neither an x-amz-request-id header nor a RequestId in
 // the XML. L2 dispatch never ran at this point, so the id can only be

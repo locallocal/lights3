@@ -26,7 +26,7 @@ void validate_part_order(std::span<const PartInfo> parts);
 // part_no ∈ [1,kMaxParts], otherwise throws InvalidArgument
 void validate_part_number(int part_no);
 
-// AWS hard limits (docs/gaps.md §5.7). The minimum part size is only judged at complete,
+// AWS hard limits (docs/archive/gaps.md §5.7). The minimum part size is only judged at complete,
 // and it is an S3 protocol rule rather than a storage rule -- so the check lives at L2
 // (handlers/multipart.cc) and the storage layer imposes no limit: callers using the
 // backend API directly (including each backend's consistency suite) are not bound by 5MiB

@@ -29,7 +29,7 @@ Files involved:
 2. **Frame ownership = RAII**: `Task` exclusively owns the
    `coroutine_handle` and `destroy()`s it in the destructor. Any operation on a
    moved-from `Task` throws `std::logic_error` (far more diagnosable than a
-   null-pointer dereference, docs/gaps.md §4).
+   null-pointer dereference, docs/archive/gaps.md §4).
 3. **The result lives inline in the promise**: `Task<T>::promise_type` stores a
    `std::variant<monostate, T, exception_ptr>`; `await_resume()`/`take_result()`
    rethrow on the exception alternative — exceptions propagate naturally along
@@ -76,7 +76,7 @@ The on-demand inheritance of `cont_executor` and `cancel` is the linchpin: one
 `task.with_cancel(token)` at the request entry point (see
 `S3Service::dispatch`) makes every `co_await pool_->schedule()` and
 `co_await sem.acquire()` across the whole L2/L3 chain cancellation-aware —
-**without threading the token through 40+ signatures** (docs/gaps.md §3.1). The
+**without threading the token through 40+ signatures** (docs/archive/gaps.md §3.1). The
 awaiters probe the caller's promise with a `requires` constraint:
 
 ```cpp
@@ -106,7 +106,7 @@ complete before unlocking or it would touch a destroyed cv.
 ### 2.2 sync_wait_pumping: the request thread doubles as an executor
 
 Under the synchronous drivers, plain `sync_wait` would leave the request thread
-idle-blocked for the whole request. `sync_wait_pumping` (docs/gaps.md §2.10)
+idle-blocked for the whole request. `sync_wait_pumping` (docs/archive/gaps.md §2.10)
 instead:
 
 1. `detail::pump_run` (a self-destroying wrapper coroutine with
@@ -134,7 +134,7 @@ comments stress repeatedly:
   `done()`**: once `done()` runs, `wait_idle()` releases the owner to start
   tearing down the backend/thread pool, while the coroutine parameter `t`
   belongs to the frame and would be destroyed after `done()` — hence it is
-  moved into a local of an inner scope first (docs/gaps.md §3.9).
+  moved into a local of an inner scope first (docs/archive/gaps.md §3.9).
 
 ## 3. The executor abstraction and thread switching
 
@@ -207,7 +207,7 @@ and the next suspension point notices).
 
 Callback contract: **must be lightweight**. The cancellation source is often
 TimerQueue's callback thread; resuming a whole request chain inline there would
-stall every subsequent timer (docs/gaps.md §3.2).
+stall every subsequent timer (docs/archive/gaps.md §3.2).
 
 ## 6. The race protocol of cancellable suspension points (Slot/Waiter claim)
 
@@ -239,7 +239,7 @@ Key points:
    doing only the bounded work of exception unwinding. Posting to the pool
    instead would make the cancellation notice queue behind blocking tasks in
    exactly the scenario that needs it most — a saturated pool; implementing
-   docs/gaps.md §3.2's suggestion literally deadlocks (see the corresponding
+   docs/archive/gaps.md §3.2's suggestion literally deadlocks (see the corresponding
    case in test_concurrency). The firing-thread-side defense lives in
    TimerQueue: callbacks run on a dedicated callback thread, so unwinding does
    not stall expiry determination.

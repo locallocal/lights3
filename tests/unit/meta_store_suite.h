@@ -76,7 +76,7 @@ inline void case_gc_accounting(const MetaFactory& make) {
     CHECK_EQ(rs.size(), size_t(1));
     CHECK_EQ(rs[0].second.extents.at(0).file_id, id1);
     CHECK(rs[0].second.enqueue_ms > 0);  // enqueue timestamp returned (GC consumer checks gc_grace, §9.1)
-    // The entry's origin is persisted with the record (docs/gaps.md §6.1): GC buckets its counts by it
+    // The entry's origin is persisted with the record (docs/archive/gaps.md §6.1): GC buckets its counts by it
     CHECK(rs[0].second.reason == ReclaimReason::kOverwrite);
     CHECK(!m->chunk_referenced(id1));
     CHECK(m->chunk_referenced(id2));
@@ -105,7 +105,7 @@ inline void case_gc_accounting(const MetaFactory& make) {
     m->close();
 }
 
-// gcq entry origins (docs/gaps.md §6.1): each of the six origins records its own reason so GC can tell
+// gcq entry origins (docs/archive/gaps.md §6.1): each of the six origins records its own reason so GC can tell
 // whether reclaim pressure comes from overwrites, bulk deletes, or abandoned mpu parts. Assert per item
 // rather than by count -- the suite's cases share the underlying storage, and this case only looks at the entries it created
 inline void case_reclaim_reasons(const MetaFactory& make) {

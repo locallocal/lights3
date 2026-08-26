@@ -336,7 +336,7 @@ endif()
 
 if(LIGHTS3_DRIVER_BEAST)
   # Beast/Asio are both header-only; BOOST_ROOT or the system path both work.
-  # TLS (docs/gaps.md §7): asio::ssl needs libssl
+  # TLS (docs/archive/gaps.md §7): asio::ssl needs libssl
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
   find_package(Boost 1.75 QUIET)
   if(NOT Boost_FOUND)
@@ -360,7 +360,7 @@ if(LIGHTS3_DRIVER_HTTPLIB)
   target_sources(lights3_core PRIVATE src/http/drivers/httplib/httplib_server.cc)
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_DRIVER_HTTPLIB)
   target_include_directories(lights3_core SYSTEM PRIVATE third_party)
-  # Server-side TLS (docs/gaps.md §7) needs SSLServer. The OPENSSL_SUPPORT macro must be
+  # Server-side TLS (docs/archive/gaps.md §7) needs SSLServer. The OPENSSL_SUPPORT macro must be
   # uniform target-wide (ODR, see the cloudproxy branch comment below), hence also defined PUBLIC here
   target_compile_definitions(lights3_core PUBLIC CPPHTTPLIB_OPENSSL_SUPPORT)
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)

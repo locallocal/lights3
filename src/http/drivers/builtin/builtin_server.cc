@@ -38,7 +38,7 @@ bool send_all(int fd, const char* data, size_t len) {
 }
 
 // Buffered connection reader; shared by request-header parsing and body reads.
-// buf is not zero-initialized (docs/gaps.md §4): pos/end delimit the valid
+// buf is not zero-initialized (docs/archive/gaps.md §4): pos/end delimit the valid
 // region, and memset-ing 16KiB per connection is pure waste
 struct ConnReader {
     int fd = -1;
@@ -90,7 +90,7 @@ struct BodyState {
     bool after_chunk_data = false;  // Just finished a chunk's data; next line must be CRLF
     bool chunk_eof = false;
     bool error = false;
-    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/gaps.md §7)
+    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -184,7 +184,7 @@ public:
         : st_(st), len_(len), conn_exec_(conn_exec) {}
     Task<size_t> read(std::span<std::byte> buf) override {
         // The blocking recv switches back to the connection's own thread
-        // (docs/gaps.md §2.10): the handler coroutine chain runs on the
+        // (docs/archive/gaps.md §2.10): the handler coroutine chain runs on the
         // shared ThreadPool, and recv-ing in place would pin pool threads on
         // slow clients — 16 slow uploads could occupy every pool thread; the
         // connection thread is idling in sync_wait_pumping at this moment
@@ -210,7 +210,7 @@ struct ConnShared {
     std::mutex m;
     std::condition_variable cv;
     std::set<int> conns;
-    // Connections in keep-alive waiting for the next request (docs/gaps.md
+    // Connections in keep-alive waiting for the next request (docs/archive/gaps.md
     // §4): these can be cut immediately on shutdown, with the grace period
     // reserved for in-flight requests — previously there was no distinction
     // and idle connections made shutdown wait a pointless 10 seconds
@@ -218,7 +218,7 @@ struct ConnShared {
     int active = 0;
 };
 
-// Connection threads are created explicitly with a 512KiB stack (docs/gaps.md
+// Connection threads are created explicitly with a 512KiB stack (docs/archive/gaps.md
 // §4): std::thread uses the default 8MiB, x max_connections(4096) = 32GiB of
 // reserved virtual address space, while the measured stack peak is ~100KiB
 // (coroutine frames live on the heap; the stack only carries parsing and the
@@ -431,7 +431,7 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
 class BuiltinServer final : public IHttpServer {
 public:
     explicit BuiltinServer(const HttpConfig& cfg) : shared_(std::make_shared<ConnShared>()) {
-        // TLS unsupported (docs/gaps.md §7): configuring it must fail on the
+        // TLS unsupported (docs/archive/gaps.md §7): configuring it must fail on the
         // spot — silently running plaintext would void the entire integrity
         // argument for UNSIGNED-PAYLOAD requests (which relies on
         // transport-layer encryption)
@@ -440,7 +440,7 @@ public:
                 "http driver 'builtin' does not support TLS; use 'httplib' or 'beast'");
         // The thread-per-connection model has no notion of an IO thread
         // count; configuring it explicitly means the user expects an effect
-        // that will not happen (docs/gaps.md §7)
+        // that will not happen (docs/archive/gaps.md §7)
         if (cfg.io_threads_set)
             LOG_WARN(
                 "builtin driver ignores http.io_threads={} (thread-per-connection model; "
@@ -566,7 +566,7 @@ public:
             }
         }
         // Graceful exit: idle keep-alive connections are cut immediately
-        // (they are only waiting for the next request, docs/gaps.md §4), with
+        // (they are only waiting for the next request, docs/archive/gaps.md §4), with
         // the grace period reserved for in-flight requests; on timeout, force
         // all of them closed. Leftover threads hold the shared state via
         // shared_ptr and finish up on their own after run() returns or even

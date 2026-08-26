@@ -45,7 +45,7 @@ TEST(xml_parse_entities_cdata_comments) {
     CHECK_EQ(root.get("D"), "t");
 }
 
-// Supplementary-plane numeric character references (docs/issues.md T12): 5-6 digit hex references like &#x1F600;
+// Supplementary-plane numeric character references (docs/archive/issues.md T12): 5-6 digit hex references like &#x1F600;
 // were once wrongly rejected as MalformedXML by the length guard
 TEST(xml_parse_supplementary_plane_char_refs) {
     auto root = xml_parse("<R><A>&#x1F600;</A><B>&#x10FFFF;</B><C>&#1114111;</C></R>");

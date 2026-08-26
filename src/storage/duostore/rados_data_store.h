@@ -37,7 +37,7 @@ struct RadosDataOptions {
     // op latency/error metrics (C4, §10); an empty scope means an isolated
     // instance — tests construct directly without assembly
     MetricsScope metrics;
-    // Write-side pins (docs/gaps.md §1.2): pin upon allocating a file_id, unpin on
+    // Write-side pins (docs/archive/gaps.md §1.2): pin upon allocating a file_id, unpin on
     // destruction without finish. Without this, the early parts of a large-object
     // PUT get deleted by the orphan scan as unreferenced files before the meta commit
     ChunkPinHooks pins;
@@ -48,7 +48,7 @@ class RadosChunkWriter;
 class RadosDataStore final : public IDataStore {
 public:
     // Returns the first id of a contiguous run [first, first+n)
-    // (IMetaStore::alloc_file_run, docs/gaps.md §3.9: only contiguous ids make the
+    // (IMetaStore::alloc_file_run, docs/archive/gaps.md §3.9: only contiguous ids make the
     // manifest's run encoding effective)
     using FileIdAlloc = std::function<uint64_t(Extent::Kind, uint32_t)>;
 

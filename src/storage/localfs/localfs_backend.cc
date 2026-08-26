@@ -92,7 +92,7 @@ Task<void> LocalFsBackend::close() {
     co_return;
 }
 
-// Periodic cleanup (docs/gaps.md §6.3): previously ran only once at startup, so a gateway
+// Periodic cleanup (docs/archive/gaps.md §6.3): previously ran only once at startup, so a gateway
 // running for months without a restart would accumulate never-completed/aborted upload
 // directories without bound. Re-arms after completion (same as the duostore worker): scans
 // never overlap/pile up, a slow scan just pushes back the next trigger
@@ -129,13 +129,13 @@ fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const {
 }
 
 fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view key) const {
-    // Directory-marker object (docs/gaps.md §6.3): "a/b/" has no corresponding file name
+    // Directory-marker object (docs/archive/gaps.md §6.3): "a/b/" has no corresponding file name
     // on the filesystem; it lands on the reserved marker file inside the directory:
     // <bucket>/a/b/.lights3-dir
     std::string rel(key);
     if (rel.ends_with('/')) rel += fsutil::kDirMarker;
     fs::path p = bucket_dir(bucket) / fs::path(rel);
-    // Defense in depth (docs/gaps.md §1.1): bucket/key were already validated at L2 and at
+    // Defense in depth (docs/archive/gaps.md §1.1): bucket/key were already validated at L2 and at
     // each entry point, so the path should never escape root_. But fs::path::operator/
     // with an absolute right-hand operand **replaces the entire path**
     // (root_ / "/etc" == "/etc"), and the cost of a single slip is arbitrary file reads --
@@ -174,7 +174,7 @@ Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "create bucket dir: " + ec.message());
-    // fsync the marker and both levels of directory entries (docs/gaps.md §4): the object
+    // fsync the marker and both levels of directory entries (docs/archive/gaps.md §4): the object
     // write path is strictly fsynced, and the inversion of "bucket vanished after power
     // loss while the client already got a 200 -- with objects still in it, even" is
     // unacceptable. The bucket directory's own dirent lives in root, so fsyncing only the
@@ -208,7 +208,7 @@ Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
     // as a 500; and if the directory cannot be removed after the marker is deleted (a
     // concurrent write landed an object between the emptiness check and remove), the
     // bucket disappears from list/exists while the data remains -- invisible and
-    // undeletable (docs/gaps.md §3.9)
+    // undeletable (docs/archive/gaps.md §3.9)
     std::error_code ec;
     fs::remove(dir / kBucketMarker, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "delete bucket marker: " + ec.message());
@@ -361,7 +361,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     co_return out;
 }
 
-// Same-backend copy fast path (docs/gaps.md §6.3): previously CopyObject moved every byte
+// Same-backend copy fast path (docs/archive/gaps.md §6.3): previously CopyObject moved every byte
 // "into the gateway and back out" even within one localfs. copy_file_range keeps the move
 // in the kernel (direct page-cache copy; O(1) metadata clone on btrfs/xfs reflink).
 // Unavailable (cross-device EXDEV, old-kernel ENOSYS, filesystem EINVAL) returns nullopt
@@ -496,7 +496,7 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
 
 namespace {
 
-// Ordered directory walk for list_objects (docs/gaps.md §2.7 pruning).
+// Ordered directory walk for list_objects (docs/archive/gaps.md §2.7 pruning).
 // Sort key of a directory entry: files use name, directories use name+"/" -- every key
 // underneath has that string as a prefix, so the interleaved output order matches
 // "collect everything + full sort" byte for byte, without materializing the whole tree.
@@ -534,7 +534,7 @@ struct ListWalker {
                 continue;
             }
             if (name == fsutil::kBucketMarker) continue;
-            // Directory-marker object (docs/gaps.md §6.3): restored to the key "<rel>"
+            // Directory-marker object (docs/archive/gaps.md §6.3): restored to the key "<rel>"
             // (already ends with '/'). Its sort key is the empty string -- it sorts right
             // before the other entries in the same directory, matching the
             // "collect everything + full sort" order where "a/b/" < "a/b/x"
@@ -733,7 +733,7 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
         {"bucket", std::string(bucket)},
         {"key", std::string(key)},
         {"content_type", meta.content_type}};
-    // First-class metadata must also survive create→complete (docs/gaps.md §5.2); key
+    // First-class metadata must also survive create→complete (docs/archive/gaps.md §5.2); key
     // names share their source with the sidecar
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);

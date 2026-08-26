@@ -358,7 +358,7 @@ TEST(config_undefined_env_is_an_error_unless_defaulted) {
 }
 
 TEST(config_tls_requires_both_cert_and_key) {
-    // Providing only one half is necessarily a misconfiguration (docs/gaps.md §7): silently ignoring it would let
+    // Providing only one half is necessarily a misconfiguration (docs/archive/gaps.md §7): silently ignoring it would let
     // an instance that "thinks TLS is on" run in plaintext
     auto one_sided = R"(
 http:
@@ -389,7 +389,7 @@ backends:
 }
 
 TEST(config_shutdown_backpressure_knobs) {
-    // Shutdown/backpressure boundaries (docs/gaps.md §7): defaults + explicit overrides + range validation
+    // Shutdown/backpressure boundaries (docs/archive/gaps.md §7): defaults + explicit overrides + range validation
     auto cfg = Config::from_string(R"(
 backends:
   - name: d

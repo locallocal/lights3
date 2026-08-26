@@ -32,13 +32,13 @@ struct RocksMetaOptions {
     size_t write_buffer_bytes = 64ull << 20;  // memtable capacity per CF
     int max_write_buffers = 2;                // max memtable count per CF
     int max_background_jobs = 2;              // total flush/compaction background threads
-    MetricsScope metrics;  // empty scope = isolated instance (tests construct directly with zero wiring, docs/gaps.md §6.1)
+    MetricsScope metrics;  // empty scope = isolated instance (tests construct directly with zero wiring, docs/archive/gaps.md §6.1)
 };
 
 class RocksMetaStore final : public IMetaStore {
 public:
     // Current schema version (existing DBs are upgraded via the migration chain on
-    // open, docs/gaps.md §6.1)
+    // open, docs/archive/gaps.md §6.1)
     static constexpr int64_t kSchemaCurrent = 1;
     // Schema marker validity check (pure precondition of migrate_schema; static for
     // easy unit testing): parse failure, or a version newer than this build (running
@@ -123,7 +123,7 @@ private:
     // in the same batch. Separate from batch_refs: complete's refs transfer (owner
     // rewrite) must be a no-op for packs, and mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*);
-    // live_bytes uses the same accounting basis as file_size (docs/gaps.md §2.3a)
+    // live_bytes uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
     void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign,
                           int64_t rec_overhead);
     // Single-item CAS core of swap (called holding mu_): on successful validation it

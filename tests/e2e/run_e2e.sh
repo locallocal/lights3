@@ -333,7 +333,7 @@ check "CopyObject" "0" \
 check "Copy content matches" "y" "$(s3curl "$BASE/mybucket/copy.txt")"
 
 # Multipart: two 5MiB parts (real flow, docs/s3-protocol.md §8). 5MiB is AWS's minimum
-# for non-final parts (docs/gaps.md §5.7) -- 3MiB was used before, which real AWS would reject too
+# for non-final parts (docs/archive/gaps.md §5.7) -- 3MiB was used before, which real AWS would reject too
 dd if=/dev/urandom of="$WORK/p1" bs=1M count=5 2>/dev/null
 dd if=/dev/urandom of="$WORK/p2" bs=1M count=5 2>/dev/null
 INIT=$(s3curl -X POST "$BASE/mybucket/mpu.bin?uploads")
@@ -381,7 +381,7 @@ check "UploadPartCopy out-of-range rejected" "400" \
        "$BASE/mybucket/upc.bin?partNumber=3&uploadId=$UPC_ID")"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/upc.bin"
 
-# Non-final part smaller than 5MiB -> EntityTooSmall (docs/gaps.md §5.7)
+# Non-final part smaller than 5MiB -> EntityTooSmall (docs/archive/gaps.md §5.7)
 INIT3=$(s3curl -X POST "$BASE/mybucket/small.bin?uploads")
 SM_ID=$(echo "$INIT3" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
 s3curl -o /dev/null -D "$WORK/hs1" --data-binary 'tiny-part-one' -X PUT \
@@ -401,7 +401,7 @@ check "out-of-order InvalidPartOrder" "0" \
         | grep -q 'InvalidPartOrder'; echo $?)"
 s3curl -o /dev/null -X DELETE "$BASE/mybucket/small.bin?uploadId=$SM_ID"
 
-# DeleteObjects batch deletion (AWS requires Content-MD5, docs/gaps.md §5.6)
+# DeleteObjects batch deletion (AWS requires Content-MD5, docs/archive/gaps.md §5.6)
 DEL_XML='<Delete><Object><Key>copy.txt</Key></Object><Object><Key>mpu.bin</Key></Object></Delete>'
 DEL_MD5=$(printf '%s' "$DEL_XML" | openssl dgst -md5 -binary | openssl base64)
 check "DeleteObjects missing integrity header 400" "400" \
@@ -517,7 +517,7 @@ check "POST unknown field rejected" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST --data-binary '{"bogus":1}' \
        "$BASE/-/admin/credentials")"
 
-# Action/prefix granularity of policies and ListBuckets filtering (docs/gaps.md §5.10)
+# Action/prefix granularity of policies and ListBuckets filtering (docs/archive/gaps.md §5.10)
 # First create a real bucket outside the whitelist as root: otherwise no real bucket
 # exists outside the whitelist and the assertion would pass vacuously even if filtering
 # were entirely broken (empty assertion)

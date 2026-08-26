@@ -25,7 +25,7 @@
    打标记、再被移动传递，不存在"已经跑起来才绑定"的竞态。
 2. **帧所有权 = RAII**：`Task` 独占 `coroutine_handle`，析构时 `destroy()`。
    moved-from 的 `Task` 上任何操作都抛 `std::logic_error`（比空指针解引用可诊断，
-   docs/gaps.md §4）。
+   docs/archive/gaps.md §4）。
 3. **结果内联在 promise 里**：`Task<T>::promise_type` 用
    `std::variant<monostate, T, exception_ptr>` 存结果，`await_resume()`/
    `take_result()` 取值时 rethrow 异常——异常沿 co_await 链自然传播，无需错误码。
@@ -66,7 +66,7 @@ move 走。
 `cont_executor` 与 `cancel` 的按需继承是整个设计的支点：请求入口处一次
 `task.with_cancel(token)`（见 `S3Service::dispatch`），之后 L2/L3 全链条的
 `co_await pool_->schedule()`、`co_await sem.acquire()` 都自动感知取消，**不需要把
-token 穿透 40+ 个函数签名**（docs/gaps.md §3.1）。awaiter 侧靠 `requires` 约束探测
+token 穿透 40+ 个函数签名**（docs/archive/gaps.md §3.1）。awaiter 侧靠 `requires` 约束探测
 调用者 promise 是否携带 token：
 
 ```cpp
@@ -93,7 +93,7 @@ notify 必须在解锁前完成，否则会触碰已析构的 cv。`PumpExecutor
 ### 2.2 sync_wait_pumping：请求线程兼职 executor
 
 同步驱动下如果用 `sync_wait`，请求线程在整个请求期间闲置阻塞。
-`sync_wait_pumping`（docs/gaps.md §2.10）改为：
+`sync_wait_pumping`（docs/archive/gaps.md §2.10）改为：
 
 1. `detail::pump_run`（自毁式包装协程，`initial/final_suspend` 均 `suspend_never`）
    立即启动顶层 task，结果/异常写进调用者栈上的 `out/err`，最后 `ex.finish()`；
@@ -112,7 +112,7 @@ notify 必须在解锁前完成，否则会触碰已析构的 cv。`PumpExecutor
   线程并自毁时，ramp（编译器生成的启动代码）可能还在触碰帧——真实数据竞争。
 - **`background.cc::run_detached` 里 task 帧必须先于 `done()` 销毁**：`done()` 一旦
   执行，`wait_idle()` 就放行 owner 去拆后端/线程池；协程参数 `t` 属于帧、销毁在
-  `done()` 之后，所以先 move 进内层作用域的局部变量（docs/gaps.md §3.9）。
+  `done()` 之后，所以先 move 进内层作用域的局部变量（docs/archive/gaps.md §3.9）。
 
 ## 3. Executor 抽象与线程切换
 
@@ -168,7 +168,7 @@ latch（when_all 帧可能已在 resume 里销毁）。
   消费者的读构成竞争。
 
 回调契约：**必须轻量**。取消源常是 TimerQueue 的回调线程，回调里内联 resume 整条
-请求链会拖住后续所有定时器（docs/gaps.md §3.2）。
+请求链会拖住后续所有定时器（docs/archive/gaps.md §3.2）。
 
 ## 6. 可取消挂起点的竞态协议（Slot/Waiter claim）
 
@@ -193,7 +193,7 @@ latch（when_all 帧可能已在 resume 里销毁）。
    别的线程被恢复并连帧销毁。
 3. **取消路径就地 resume 是有意为之**：被恢复的协程立刻从 `await_resume` 抛
    `OperationCancelled`，只做异常展开这种有界工作。若 post 回线程池，"池饱和"这个
-   最需要取消的场景里，取消通知反而排在阻塞任务后面——照 gaps.md §3.2 字面实现会
+   最需要取消的场景里，取消通知反而排在阻塞任务后面——照 archive/gaps.md §3.2 字面实现会
    死锁（见 test_concurrency 对应用例）。点火线程侧的防护在 TimerQueue：回调跑在
    专职回调线程，展开不阻塞到期判定。
 4. **正常唤醒方跳过已被取消认领的等待者**：`AsyncSemaphore::release_one` 弹出

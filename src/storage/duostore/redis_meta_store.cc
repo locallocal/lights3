@@ -86,7 +86,7 @@ for _ = 1, nc do
   elseif t == 'zcard0' then
     if redis.call('ZCARD', key) ~= 0 then return 0 end
   else
-    -- Fetch the whole hash with a single HGETALL (docs/gaps.md §3.9): previously HKEYS +
+    -- Fetch the whole hash with a single HGETALL (docs/archive/gaps.md §3.9): previously HKEYS +
     -- one HGET per field, so completing a 10k-part upload meant 10k redis.calls while the
     -- script's atomic execution monopolized the entire Redis instance.
     -- Sorting/concatenation still happens in Lua (matches the numeric part_no ordering of
@@ -146,7 +146,7 @@ local min
 if start_after ~= '' and start_after >= prefix then min = '(' .. start_after
 else min = '[' .. prefix end
 
--- Paged scan (docs/gaps.md §3.9): previously one ZRANGEBYLEX + one HGET per key, so
+-- Paged scan (docs/archive/gaps.md §3.9): previously one ZRANGEBYLEX + one HGET per key, so
 -- listing 1000 keys meant 2000 redis.calls while the script's atomic execution
 -- monopolized the entire Redis instance. Now keys are fetched a page at a time
 -- (dropping the page and re-seeking on group skips) and values are batch-HMGET'd at
@@ -262,7 +262,7 @@ class RedisBatch {
 public:
     explicit RedisBatch(RedisMetaStore& store) : store_(store) {}
 
-    // The CAS witness ships a SHA1 fingerprint instead of the whole old value (docs/gaps.md
+    // The CAS witness ships a SHA1 fingerprint instead of the whole old value (docs/archive/gaps.md
     // §3.9): for large manifests the witness shrinks from MB-scale to 40 bytes and retry rounds
     // no longer resend the full value; the comparison runs redis.sha1hex on the stored value
     // inside the script. A SHA1 collision would require a chosen-prefix attack on two existing
@@ -421,7 +421,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
     }
 
     // schema (§2.2): claim with SET NX; if it already exists, validate lineage + run version
-    // evolution (docs/gaps.md §6.1: a stored version < current walks the migration chain,
+    // evolution (docs/archive/gaps.md §6.1: a stored version < current walks the migration chain,
     // > current rejects the downgrade — after an upgrade, old-version gateways are refused at
     // startup, naturally preventing mixed deployments from writing back and corrupting the new
     // layout). Every step in the chain must be idempotent: the shared engine has no global
@@ -680,7 +680,7 @@ void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int si
                                       int64_t rec_overhead) {
     // Aggregate multiple extents of the same pack first, then two HINCRBYs per pack (§9.1,
     // adjusted in the same batch as the business script); each record counts payload + header
-    // overhead, the same accounting basis as file_size (docs/gaps.md §2.3a)
+    // overhead, the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
@@ -699,7 +699,7 @@ void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref,
     if (ref.extents.empty()) return;
     // Pre-allocating seq (INCRBY segments) makes gcq enqueueing a pure write op, keeping the
     // script deterministic (§4). CAS retries waste seqs — harmless, seqs only need to be unique
-    // and monotonic. Oversized DataRefs are split into multiple entries (docs/gaps.md §2.11):
+    // and monotonic. Oversized DataRefs are split into multiple entries (docs/archive/gaps.md §2.11):
     // GC per-batch decode memory stays bounded, and independent acks are harmless
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {
@@ -722,7 +722,7 @@ uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r, u
         // have been handed out within the AOF everysec crash window but lost to counter
         // rollback. Wasting segments on crash/restart is harmless (only uniqueness and
         // monotonicity are needed); likewise the residue discarded on a segment switch
-        // (run batch allocation requires contiguity within a segment, docs/gaps.md §3.9)
+        // (run batch allocation requires contiguity within a segment, docs/archive/gaps.md §3.9)
         uint64_t take = r.burned ? kIdSegment : 2 * kIdSegment;
         auto reply = exec({"INCRBY", key(counter_suffix), std::to_string(take)},
                           /*read_retry=*/false);
@@ -996,7 +996,7 @@ std::vector<PartRec> RedisMetaStore::list_parts(std::string_view b, std::string_
 std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b,
                                                     std::string_view key_marker,
                                                     std::string_view id_marker, int limit) {
-    // Cursor hints can only be ignored here (docs/gaps.md §5.1): uploads are stored as a hash,
+    // Cursor hints can only be ignored here (docs/archive/gaps.md §5.1): uploads are stored as a hash,
     // HSCAN's cursor is bucket-ordered not lexicographic, and there is no way to express
     // "start after some field". After the full HSCAN, the caller's apply_uploads_page trims —
     // pagination saves response body size, not this scan
@@ -1160,7 +1160,7 @@ void RedisMetaStore::ack_reclaim(uint64_t seq) {
     require_int("ack_reclaim", r.get());
 }
 
-// Batched ack (docs/gaps.md §6.1 four-engine matrix): previously not overridden, GC paid one RTT
+// Batched ack (docs/archive/gaps.md §6.1 four-engine matrix): previously not overridden, GC paid one RTT
 // per entry — thousands of round trips per ack round after a large delete. One script, one RTT
 // deletes them all; a lost ack is harmless (gcq leftovers get retried, unlink is idempotent),
 // so the script needs no guards at all
@@ -1180,7 +1180,7 @@ return #ARGV
     require_int("ack_reclaims", r.get());
 }
 
-// Multi-gateway GC lease (docs/gaps.md §6.1): SET NX semantics + same-owner renewal, atomic in a
+// Multi-gateway GC lease (docs/archive/gaps.md §6.1): SET NX semantics + same-owner renewal, atomic in a
 // single script. TTL is handled by Redis expiry — a crashed holder naturally yields
 bool RedisMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
     static const char* kBody = R"lua(

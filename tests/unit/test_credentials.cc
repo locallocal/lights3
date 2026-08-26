@@ -377,7 +377,7 @@ TEST(admin_api_policy_flow) {
     CHECK_EQ(env.call("GET", "/logs-a/k", dyn).status, 200);
     CHECK_EQ(env.call("PUT", "/logs-a/new", dyn, {}, "x").status, 403);  // readonly
     CHECK_EQ(env.call("GET", "/private/k", dyn).status, 403);            // outside the allowlist
-    // ListBuckets is now filtered by policy (docs/gaps.md §5.10): bucket names are precisely the first step
+    // ListBuckets is now filtered by policy (docs/archive/gaps.md §5.10): bucket names are precisely the first step
     // of an attack chain, and a restricted credential should not see that buckets outside its allowlist exist
     auto lb = env.call("GET", "/", dyn);
     CHECK_EQ(lb.status, 200);

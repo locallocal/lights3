@@ -11,7 +11,7 @@ namespace lights3 {
 
 namespace {
 
-// Render floats in shortest round-trip form (docs/gaps.md §4): ostream's default
+// Render floats in shortest round-trip form (docs/archive/gaps.md §4): ostream's default
 // 6 significant digits would render bucket bounds >=1e6 as "1.04858e+06", and when
 // nearby bounds collapse into duplicate le sequences Prometheus rejects the entire
 // target outright
@@ -26,7 +26,7 @@ std::string fmt_double(double v) {
     return std::string(buf, p);
 }
 
-// # HELP text escaping (docs/gaps.md §4: label values were escaped, help
+// # HELP text escaping (docs/archive/gaps.md §4: label values were escaped, help
 // previously was not): the spec requires \ -> \\ and newline -> \n
 std::string escape_help(const std::string& v) {
     std::string out;
@@ -112,7 +112,7 @@ MetricsRegistry::Family& MetricsRegistry::family_of(const std::string& name, Kin
                                  kind_str(int(it->second.kind)));
     } else if (!help.empty() && it->second.help != help) {
         // Keep the first help (a family renders only one # HELP line), but no longer
-        // silently (docs/gaps.md §4)
+        // silently (docs/archive/gaps.md §4)
         LOG_WARN("metric '{}' re-registered with different help text; keeping the first",
                  name);
     }

@@ -1,5 +1,5 @@
 // L3: backup/restore and cross-engine migration for duostore meta
-// (docs/gaps.md §6.1). Logical dump/load mediated by IMetaStore: dump writes all
+// (docs/archive/gaps.md §6.1). Logical dump/load mediated by IMetaStore: dump writes all
 // bucket/object records (including extent manifests) and the sealed pack ledger
 // into a self-describing binary stream; load replays them one by one through
 // put_object — record-level replay naturally doubles as the meta migration tool

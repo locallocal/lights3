@@ -97,7 +97,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     uint64_t finished = mpu_finished_.load(std::memory_order_relaxed);
     os << "lights3_multipart_active " << (created > finished ? created - finished : 0) << "\n";
 
-    // Byte counts and per-bucket dimension (docs/gaps.md §7)
+    // Byte counts and per-bucket dimension (docs/archive/gaps.md §7)
     os << "# TYPE lights3_bytes_total counter\n";
     os << "lights3_bytes_total{direction=\"in\"} "
        << bytes_in_.load(std::memory_order_relaxed) << "\n";
@@ -128,7 +128,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_backlogged " << st.backlogged << "\n";
         os << "# TYPE lights3_pool_completed_total counter\n";
         os << "lights3_pool_completed_total " << st.completed << "\n";
-        // Wait-duration histogram (docs/gaps.md §7): docs/concurrency.md §3.1 defines "this histogram
+        // Wait-duration histogram (docs/archive/gaps.md §7): docs/concurrency.md §3.1 defines "this histogram
         // shifting right" as the sole criterion for enabling dedicated per-backend pools; it used to be collected but never emitted
         os << "# TYPE lights3_pool_wait_seconds histogram\n";
         uint64_t wcum = 0;
@@ -143,7 +143,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_wait_seconds_count " << wcum << "\n";
     }
 
-    // Ingress throttling queue depth (docs/gaps.md §7): the inflight semaphore is the process-wide sole admission gate
+    // Ingress throttling queue depth (docs/archive/gaps.md §7): the inflight semaphore is the process-wide sole admission gate
     if (admission) {
         auto st = admission();
         os << "# TYPE lights3_admission_capacity gauge\n";
@@ -154,7 +154,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_admission_waiting " << st.waiting << "\n";
     }
 
-    // Timer thread health (docs/gaps.md §7): slow callbacks cascade into delaying tiered scans /
+    // Timer thread health (docs/archive/gaps.md §7): slow callbacks cascade into delaying tiered scans /
     // duostore GC / credential sync; head-of-queue lag and the duration histogram are the only way to detect it
     if (timer_stats) {
         auto st = timer_stats();

@@ -90,7 +90,7 @@ TEST(many_concurrent_tasks) {
     CHECK_EQ(sum.load(), 31 * 32);  // 2 * (0+1+...+31)
 }
 
-// ---------- sync_wait_pumping / PumpExecutor（docs/gaps.md §2.10）----------
+// ---------- sync_wait_pumping / PumpExecutor（docs/archive/gaps.md §2.10）----------
 
 TEST(pump_executor_runs_resume_on_caller_thread) {
     ThreadPool pool(2);
@@ -127,7 +127,7 @@ TEST(pump_executor_value_and_exception) {
 }
 
 TEST(task_moved_from_throws_not_segv) {
-    // Calling on a moved-from Task used to be a null-pointer dereference (docs/gaps.md §4): all four entry
+    // Calling on a moved-from Task used to be a null-pointer dereference (docs/archive/gaps.md §4): all four entry
     // points now throw logic_error; take_result is covered too (it has direct callers besides sync_wait)
     auto make = []() -> Task<int> { co_return 1; };
     auto count_throws = [](auto&& fn) {

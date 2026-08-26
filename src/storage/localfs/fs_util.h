@@ -19,7 +19,7 @@ namespace lights3::storage::fsutil {
 
 inline constexpr const char* kSidecarSuffix = ".lights3-meta";
 inline constexpr const char* kBucketMarker = ".lights3-bucket";
-// Directory-marker object (docs/gaps.md §6.3): a trailing '/' in a key has no
+// Directory-marker object (docs/archive/gaps.md §6.3): a trailing '/' in a key has no
 // corresponding file name on the filesystem; its carrier is this reserved file inside the
 // directory -- "a/b/" ⇔ <bucket>/a/b/.lights3-dir. Listing restores it to the key "a/b/"
 // (its sort key is the empty string, so it sorts right before the other keys in the same

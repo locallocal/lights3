@@ -168,10 +168,12 @@ sudo /usr/local/sbin/lights3ctl status
   （含 Range 与条件请求）、CopyObject、DeleteObjects 批量、
   ListObjectsV2（prefix/delimiter/分页）、Multipart Upload
   （create/upload/upload-part-copy/list/complete/abort；UploadPartCopy 支持
-  `x-amz-copy-source-range` 与 copy-source 条件头，源与目标可在不同后端）
+  `x-amz-copy-source-range` 与 copy-source 条件头，源与目标可在不同后端）；
+  静态网站托管（显式列出的 bucket 匿名 GET/HEAD + index/error 文档，
+  [static-website.md](static-website.md)）
 
 设计上明确不支持（返回 NotImplemented，见 [s3-protocol.md](s3-protocol.md) §1）：
-versioning、ACL 细粒度（只认 private）、bucket policy、website、lifecycle、
+versioning、ACL 细粒度（只认 private）、bucket policy、lifecycle、
 tagging/CORS、SSE-C/KMS、Object Lock、presigned POST。
 
 ## 文档

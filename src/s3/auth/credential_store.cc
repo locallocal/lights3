@@ -77,7 +77,7 @@ CredentialPolicy policy_from_json_obj(const json& j) {
                 p.buckets.push_back(g.get<std::string>());
             }
         } else if (k == "prefixes") {
-            // Key prefix allowlist (docs/gaps.md §5.10): without it, multi-tenant shared buckets degrade into
+            // Key prefix allowlist (docs/archive/gaps.md §5.10): without it, multi-tenant shared buckets degrade into
             // "one bucket per tenant"
             if (!v.is_array())
                 throw S3Error(S3ErrorCode::InvalidRequest,
@@ -286,7 +286,7 @@ bool CredentialPolicy::allows_bucket(std::string_view bucket) const {
     if (buckets.empty() || bucket.empty()) return true;
     std::string b(bucket);
     for (auto& g : buckets)
-        // FNM_PATHNAME (docs/gaps.md §5.10): without it '*' crosses '/', and when the same matcher is applied
+        // FNM_PATHNAME (docs/archive/gaps.md §5.10): without it '*' crosses '/', and when the same matcher is applied
         // to key prefixes, "logs/*" would admit "logs/a/b" as well
         if (::fnmatch(g.c_str(), b.c_str(), FNM_PATHNAME) == 0) return true;
     return false;

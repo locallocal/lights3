@@ -32,7 +32,7 @@ enum class CredSource { kStatic, kFile, kDynamic };
 
 struct CredentialInfo {
     std::string access_key;
-    util::SecretString secret_key;  // wiped on destruction (docs/gaps.md §4)
+    util::SecretString secret_key;  // wiped on destruction (docs/archive/gaps.md §4)
     CredSource source = CredSource::kDynamic;
     std::string comment;
     std::chrono::system_clock::time_point created;
@@ -61,7 +61,7 @@ public:
     ~CredentialStore() { shutdown_background(); }
 
     // ---- ICredentialProvider (verification hot path, read lock) ----
-    // SK and policy snapshot returned in one call (docs/gaps.md §3.7): dispatch's authorization uses the
+    // SK and policy snapshot returned in one call (docs/archive/gaps.md §3.7): dispatch's authorization uses the
     // snapshot returned by verify, so an in-flight revocation cannot make the policy vanish
     std::optional<CredentialLookup> lookup(std::string_view ak) const override;
     bool has_credentials() const override;

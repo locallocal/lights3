@@ -40,12 +40,12 @@ std::optional<storage::ByteRange> parse_range_header(const std::string& v) {
         if (!r.last) return std::nullopt;
     }
     // "bytes=5-3" is syntactically invalid (RFC 9110 §14.1.1 requires last >= first): the whole header is
-    // ignored as invalid and 200 with the full object returned -- previously it fell into resolve_range and became 416 (docs/gaps.md §4)
+    // ignored as invalid and 200 with the full object returned -- previously it fell into resolve_range and became 416 (docs/archive/gaps.md §4)
     if (r.first && r.last && *r.last < *r.first) return std::nullopt;
     return r;
 }
 
-// response-* override parameters (docs/gaps.md §5.3): the most common use in presigned download links is
+// response-* override parameters (docs/archive/gaps.md §5.3): the most common use in presigned download links is
 // response-content-disposition ("clicking downloads it under this filename").
 // Premise: AWS honors these only for authenticated requests -- if anonymously readable objects allowed overrides,
 // a single link could hang an arbitrary Content-Disposition off the bucket's domain. With auth enabled here, any
@@ -74,7 +74,7 @@ void apply_response_overrides(const http::HttpRequest& req, http::HttpResponse& 
     }
 }
 
-// Header set for 304 (RFC 9110 §15.4.5, docs/gaps.md §5.9): cache-validation headers that a 200 would send
+// Header set for 304 (RFC 9110 §15.4.5, docs/archive/gaps.md §5.9): cache-validation headers that a 200 would send
 // must also be sent on 304, otherwise clients refreshing a cache entry drop the Last-Modified
 void fill_not_modified_headers(http::HttpResponse& resp, const storage::ObjectMeta& meta) {
     resp.status = 304;
@@ -88,7 +88,7 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
     resp.headers.set("Content-Type", meta.content_type);
     resp.headers.set("Last-Modified", util::http_date(meta.last_modified));
     resp.headers.set("Accept-Ranges", "bytes");
-    // First-class metadata echoed verbatim (docs/gaps.md §5.2); empty = unset, header not sent
+    // First-class metadata echoed verbatim (docs/archive/gaps.md §5.2); empty = unset, header not sent
     for (auto& f : storage::kStdMetaFields)
         if (!(meta.*f.field).empty()) resp.headers.set(f.header, meta.*f.field);
     for (auto& [k, v] : meta.user_meta) resp.headers.set("x-amz-meta-" + k, v);
@@ -211,7 +211,7 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
         meta.etag.clear();
     }
 
-    // Same-backend fast path (docs/gaps.md §6.2/§6.3): localfs uses kernel copy_file_range,
+    // Same-backend fast path (docs/archive/gaps.md §6.2/§6.3): localfs uses kernel copy_file_range,
     // cloudproxy uses remote server-side COPY -- both skip "read into the gateway then write back". nullopt = the
     // backend has no fast path or it is unavailable this time (tier stub, cross-device); falls back to the streaming path, semantically equivalent
     auto& dst_backend = router_.resolve(bucket);
@@ -314,7 +314,7 @@ Task<http::HttpResponse> S3Service::delete_object(std::string bucket, std::strin
 
 namespace {
 
-// Single-key deletion with exceptions folded into a result value (docs/gaps.md §3.9): no key failure may abort
+// Single-key deletion with exceptions folded into a result value (docs/archive/gaps.md §3.9): no key failure may abort
 // the batch -- already-deleted keys must appear in the response, or clients cannot tell which deletions succeeded.
 // A standalone function rather than a capturing lambda: the lambda temporary is destroyed while the coroutine is suspended, so captures would dangle
 Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
@@ -336,7 +336,7 @@ Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
 // DeleteObjects batch deletion (POST /bucket?delete, request XML <= 1MiB, at most 1000 keys)
 Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::string bucket,
                                                    const RequestAuth& auth) {
-    // AWS **requires** an integrity header for this operation (docs/gaps.md §5.6): batch deletion is the one
+    // AWS **requires** an integrity header for this operation (docs/archive/gaps.md §5.6): batch deletion is the one
     // operation where "a rewritten request body silently deletes extra objects"; absence is 400. The digest itself
     // is verified while reading the body by the ChecksumVerifyingReader that dispatch installs; here only "is one declared" is checked
     constexpr std::string_view kChecksumPrefix = "x-amz-checksum-";
@@ -366,7 +366,7 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
             throw S3Error(S3ErrorCode::MalformedXML,
                           "Each <Object> must contain a non-empty <Key>.");
         // Silently ignoring <VersionId> would turn "delete a specific version" into "delete the current object" --
-        // far more dangerous than erroring (docs/gaps.md §3.9)
+        // far more dangerous than erroring (docs/archive/gaps.md §3.9)
         if (!child.get("VersionId").empty())
             throw S3Error(S3ErrorCode::NotImplemented, "Versioning is not implemented.");
         keys.push_back(std::move(k));
@@ -386,7 +386,7 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
             if (!auth.policy->allows(bucket, keys[i], Action::Delete))
                 outcome[i] =
                     S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
-    // Bounded concurrency (docs/gaps.md §3.9): serial co_await on cloudproxy/duostore means
+    // Bounded concurrency (docs/archive/gaps.md §3.9): serial co_await on cloudproxy/duostore means
     // 1000 sequential RTTs. The batch size caps the concurrency hit on a single backend; batches still proceed in order
     constexpr size_t kBatch = 32;
     std::vector<size_t> pending;

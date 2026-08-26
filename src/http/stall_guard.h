@@ -1,4 +1,4 @@
-// L1/L2 boundary: transfer stall guard (docs/gaps.md §3.3)
+// L1/L2 boundary: transfer stall guard (docs/archive/gaps.md §3.3)
 //
 // All four drivers reset their timeouts **per chunk**: as long as the client
 // sends one byte per cycle the read timeout never fires, and a connection can
@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 
 #include "http/model.h"
@@ -26,24 +27,31 @@ namespace lights3::http {
 
 class StallGuardReader final : public BodyReader {
 public:
-    // Accumulating this many bytes within one window counts as "progress" and resets the timer
+    // Accumulating this many bytes within one window counts as "progress" and resets
+    // the timer. Callers must clamp it to the actual read chunk size: with
+    // io_chunk_size configured below 64KiB, a single read can never reach this
+    // default, and every window would misjudge a healthy slow connection as stalled
     static constexpr uint64_t kMinProgressBytes = 64 * 1024;
 
-    StallGuardReader(std::unique_ptr<BodyReader> inner, std::chrono::seconds window)
-        : inner_(std::move(inner)), window_(window), mark_(Clock::now()) {}
+    StallGuardReader(std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
+                     uint64_t min_progress = kMinProgressBytes)
+        : inner_(std::move(inner)),
+          window_(window),
+          min_progress_(min_progress ? min_progress : 1),
+          mark_(Clock::now()) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {
         size_t n = co_await inner_->read(buf);
         if (n == 0) co_return 0;  // EOF: no stall check
         moved_ += n;
         auto now = Clock::now();
-        if (moved_ >= kMinProgressBytes) {
+        if (moved_ >= min_progress_) {
             moved_ = 0;
             mark_ = now;
         } else if (now - mark_ > window_) {
             throw s3::S3Error(s3::S3ErrorCode::RequestTimeout,
-                              "Transfer stalled: less than 64 KiB moved within the transfer "
-                              "stall timeout.");
+                              "Transfer stalled: less than " + std::to_string(min_progress_) +
+                                  " bytes moved within the transfer stall timeout.");
         }
         co_return n;
     }
@@ -54,15 +62,17 @@ private:
     using Clock = std::chrono::steady_clock;
     std::unique_ptr<BodyReader> inner_;
     std::chrono::seconds window_;
+    uint64_t min_progress_;
     Clock::time_point mark_;
     uint64_t moved_ = 0;
 };
 
 // Returns the reader unchanged when window <= 0 (guard disabled)
-inline std::unique_ptr<BodyReader> guard_stalls(std::unique_ptr<BodyReader> inner,
-                                                std::chrono::seconds window) {
+inline std::unique_ptr<BodyReader> guard_stalls(
+    std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
+    uint64_t min_progress = StallGuardReader::kMinProgressBytes) {
     if (!inner || window.count() <= 0) return inner;
-    return std::make_unique<StallGuardReader>(std::move(inner), window);
+    return std::make_unique<StallGuardReader>(std::move(inner), window, min_progress);
 }
 
 }  // namespace lights3::http

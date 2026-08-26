@@ -83,7 +83,7 @@ XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging,
     : LocalFsBackend(std::move(root), std::move(staging), pool, fs_opt, std::move(metrics)),
       uring_(std::make_shared<UringEngine>(std::move(pool), uring_opt)) {}
 
-// Data persistence in the commit phase (docs/gaps.md §6.3): this used to be a synchronous
+// Data persistence in the commit phase (docs/archive/gaps.md §6.3): this used to be a synchronous
 // fdatasync -- pinning a pool thread waiting on disk, exactly what xlocalfs exists to
 // eliminate. The FSYNC SQE takes the same completion path, and the thread returns to the
 // pool while waiting
@@ -112,7 +112,7 @@ Task<void> XLocalFsBackend::write_all(int fd, std::span<const std::byte> data, u
 // std::string: when body.read throws (Content-MD5 mismatch, client disconnect), GCC still
 // runs the destructor on the never-constructed binding target, presenting as a double free /
 // SEGV on the put path. Out-params are fully constructed before the co_await, so unwinding
-// destroys real objects (the test case in docs/gaps.md §5.6 is exactly this shape)
+// destroys real objects (the test case in docs/archive/gaps.md §5.6 is exactly this shape)
 Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, int fd, uint64_t& total_out,
                                          std::string& etag_out) {
     util::HashStream md5(util::HashStream::Algo::Md5);

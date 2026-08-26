@@ -130,7 +130,7 @@ public:
 
 private:
     void open_next_chunk() {
-        // Batch-allocate contiguous runs with geometric growth (docs/gaps.md §3.9):
+        // Batch-allocate contiguous runs with geometric growth (docs/archive/gaps.md §3.9):
         // handing out ids one by one to concurrent writers interleaves the chunk
         // ids of the same object, defeating the manifest's run encoding and
         // bloating it instead. The first chunk takes 1 (zero waste for small
@@ -464,7 +464,7 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         lk = std::unique_lock(slot->m);
     }
 
-    // Batching (docs/gaps.md §2.13): per-item pwrite within the batch, fdatasync
+    // Batching (docs/archive/gaps.md §2.13): per-item pwrite within the batch, fdatasync
     // converges to one at the batch end. A crash can only lose records "not yet
     // returned to the caller" — swap/meta commits all happen after this function
     // returns, equivalent to a torn tail (§5.2's expected discard-on-restart form)
@@ -504,7 +504,7 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
             // another instance starting up uses it to distinguish "packs left by my
             // previous generation" from "packs someone else is writing", avoiding
             // catch-up sealing the latter and then rewriting or even deleting it as
-            // a low-liveness pack (docs/gaps.md §1.4)
+            // a low-liveness pack (docs/archive/gaps.md §1.4)
             if (::flock(slot->fd, LOCK_EX | LOCK_NB) != 0)
                 LOG_WARN("duostore: cannot lock active pack {} ({}); concurrent-writer "
                          "detection degraded", slot->id, std::strerror(errno));
@@ -532,7 +532,7 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         slot->size += rec_size;
     }
     sync_slot();
-    // The seal's meta commit is submitted outside the slot lock (docs/gaps.md
+    // The seal's meta commit is submitted outside the slot lock (docs/archive/gaps.md
     // §3.9); failure only warns, and (id,size) stays in the queue for later
     // writes/close to retry — this batch's own writes are already safely on disk
     lk.unlock();
@@ -576,7 +576,7 @@ bool FsDataStore::slot_aged(const ActivePack& slot) const {
            std::chrono::seconds(opt_.pack_max_age_sec);
 }
 
-// Age-based rotation (docs/gaps.md §6.1): the write path only checks age when
+// Age-based rotation (docs/archive/gaps.md §6.1): the write path only checks age when
 // "there is a next record to write"; once writes stop, the active pack sits there
 // forever — exactly the low-write-volume scenario. GC calls this function once
 // per round to fill that gap.
@@ -655,7 +655,7 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
         if (e.kind != Extent::Kind::kChunk) {
             // Engine mismatch (fs data engine received a kRados extent): silently
             // skipping would let GC spin uselessly with no way to notice
-            // (docs/gaps.md §4). Warn once to keep the reclaim loop from flooding logs
+            // (docs/archive/gaps.md §4). Warn once to keep the reclaim loop from flooding logs
             static std::atomic<bool> warned{false};
             if (!warned.exchange(true))
                 LOG_ERROR("duostore-fs: remove() got extent kind {} — data/meta engine "

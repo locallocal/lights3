@@ -1,6 +1,6 @@
 // L3: bucket → backend routing (glob rules, matched in declaration order, see
 // docs/storage-backend.md §2).
-// Build-time validation (docs/gaps.md §6.3): bad glob syntax / literal characters
+// Build-time validation (docs/archive/gaps.md §6.3): bad glob syntax / literal characters
 // impossible in a bucket name / unreachable rules (placed after a catch-all, or duplicating
 // an earlier rule) all fail at startup -- a mistyped pattern that silently never matches
 // would quietly route the bucket to the default backend. "!pattern" is a negated rule.

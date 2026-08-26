@@ -401,7 +401,7 @@ a minute-scale operational action anyway).
 
 Deliberately kept at the "good enough" tier — no IAM statement/effect/condition
 syntax — but with three dimensions: bucket, key prefix and action
-(docs/gaps.md §5.10):
+(docs/archive/gaps.md §5.10):
 
 ```json
 { "policy": { "buckets": ["logs-*", "backup"], "prefixes": ["tenant-a/"],
@@ -450,7 +450,7 @@ syntax — but with three dimensions: bucket, key prefix and action
 ### 10.5 Static Credential Secrets Are Never Returned by the Admin API
 
 `?show-secret=true` applies only to dynamic and file credentials; static (root)
-credentials always come back masked (docs/gaps.md §5.10). The reason is the trust
+credentials always come back masked (docs/archive/gaps.md §5.10). The reason is the trust
 boundary: a static SK comes from the config file or environment, so being able to
 retrieve it downgrades "can read the config file" to "can send one HTTP GET" —
 and a root SK is precisely the one that **cannot** be revoked through the admin

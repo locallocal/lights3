@@ -87,7 +87,7 @@ struct MetricsEndGuard {
     }
 };
 
-// Byte-counting decorators (docs/gaps.md §7): inbound wraps outside the checksum/de-framing decorators
+// Byte-counting decorators (docs/archive/gaps.md §7): inbound wraps outside the checksum/de-framing decorators
 // (counting the payload bytes the handler actually consumes); outbound wraps outside stream_body (counting the
 // bytes the driver actually pulls -- streaming responses are written after dispatch returns, and only a decorator can see them)
 class CountingBodyReader final : public http::BodyReader {
@@ -129,7 +129,7 @@ void reject_unsupported_subresource(const http::HttpRequest& req) {
                               "' is not implemented.");
 }
 
-// Explicitly unsupported **request headers** (docs/gaps.md §3.4): SSE/SSE-C, tagging, object-lock, and
+// Explicitly unsupported **request headers** (docs/archive/gaps.md §3.4): SSE/SSE-C, tagging, object-lock, and
 // ACL-grant classes used to be silently swallowed -- 200 with the semantics unfulfilled; in compliance scenarios
 // clients would conclude the object is encrypted/locked. A hit is 501; x-amz-acl alone admits private (this implementation's actual semantics)
 void reject_unsupported_headers(const http::HttpRequest& req) {
@@ -159,7 +159,7 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
             continue;
         }
         if (lk == "x-amz-storage-class") {
-            // Likewise (docs/gaps.md §5.2): STANDARD is the only storage class; accepting GLACIER and echoing
+            // Likewise (docs/archive/gaps.md §5.2): STANDARD is the only storage class; accepting GLACIER and echoing
             // it back would lie on behalf of the storage layer -- the object never entered any archive tier
             if (!http::HeaderMap::ieq(v, "STANDARD")) refuse();
             continue;
@@ -171,12 +171,24 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
     }
 }
 
-// Query allowlist (docs/gaps.md §3.5): keys permitted on all routes -- the presigned signature parameter
-// family + SDK tracing parameters. Keys are case-sensitive (consistent with the SigV4 canonical query)
+// STS temporary credentials (roadmap §1.3; real STS support is §2.8): the token used
+// to be silently dropped on both sides — the query key sat in kCommonQueryKeys, the
+// header in no reject list — so an SDK holding STS credentials sailed through to the
+// permanent-key lookup and got a misleading InvalidAccessKeyId. Refuse before verify:
+// 501 is at least honest about the capability gap
+void reject_sts_token(const http::HttpRequest& req) {
+    if (req.query_has("X-Amz-Security-Token") || req.headers.has("x-amz-security-token"))
+        throw S3Error(S3ErrorCode::NotImplemented,
+                      "STS temporary credentials (X-Amz-Security-Token) are not implemented.");
+}
+
+// Query allowlist (docs/archive/gaps.md §3.5): keys permitted on all routes -- the presigned signature parameter
+// family + SDK tracing parameters. Keys are case-sensitive (consistent with the SigV4 canonical query).
+// X-Amz-Security-Token is deliberately absent: STS is rejected up front by reject_sts_token
 constexpr std::string_view kCommonQueryKeys[] = {
     "X-Amz-Algorithm",     "X-Amz-Credential", "X-Amz-Date",
     "X-Amz-Expires",       "X-Amz-Signature",  "X-Amz-SignedHeaders",
-    "X-Amz-Security-Token", "X-Amz-Content-Sha256",
+    "X-Amz-Content-Sha256",
     "x-id",  // tracing parameter aws-sdk-js v3 attaches to every operation, no semantics
 };
 
@@ -350,7 +362,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     const WebsiteBucket* anon_site = nullptr;
     std::optional<S3Error> website_err;
     try {
-        // Resolve addressing before steering to internal endpoints (docs/gaps.md §3.8): under vhost, req.path is
+        // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path is
         // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
         // GET into anonymous metrics and a PUT into "200 but the object was never written" silent data loss.
         // Only the /-/ prefix under path addressing (non-vhost) enters the internal branch
@@ -385,26 +397,29 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // header as AccessDenied; when auth is globally disabled verify() admits
             // everything anyway and the anonymous branch changes nothing (the synthesized
             // read-only policy would only be stricter than "unrestricted")
+            // Must run before verify: past it, an unknown (temporary) access key turns
+            // into InvalidAccessKeyId and the real cause is hidden (roadmap §1.3)
+            reject_sts_token(req);
             if (website_store_) web_snap = website_store_->snapshot();
             bool anon = auth_.enabled() && anonymous_website_read(req, addr, web_snap);
-            // Authorization uses the verify-time policy snapshot (docs/gaps.md §3.7): with a second store lookup
+            // Authorization uses the verify-time policy snapshot (docs/archive/gaps.md §3.7): with a second store lookup
             // after verification, the policy would vanish entirely in the race window where sync/remove deletes
             // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
             // in-flight requests complete strictly with verify-time semantics
             auto ident = anon ? VerifiedIdentity{} : auth_.verify(req);
             access_key = ident.access_key;
-            // Content-MD5 / x-amz-checksum-* (docs/gaps.md §5.6): installed after verify, hence wrapping outside
+            // Content-MD5 / x-amz-checksum-* (docs/archive/gaps.md §5.6): installed after verify, hence wrapping outside
             // the sha256/aws-chunked decorators -- digests are computed over the de-framed plaintext, the same
             // bytes the client computed over. Independent of the signature; also effective with auth disabled
             install_checksum_guard(req);
             bucket = std::move(addr.bucket);
             key = std::move(addr.key);
-            // Inbound byte counting (docs/gaps.md §7): bucket already resolved, decorated at the outermost layer
+            // Inbound byte counting (docs/archive/gaps.md §7): bucket already resolved, decorated at the outermost layer
             if (req.body)
                 req.body = std::make_unique<CountingBodyReader>(std::move(req.body), &metrics_,
                                                                 bucket, /*inbound=*/true);
             // User-requested bucket names pass full validation here, the **single** authoritative gate
-            // (docs/gaps.md §1.1). Previously only the first character was checked for '.', while under vhost
+            // (docs/archive/gaps.md §1.1). Previously only the first character was checked for '.', while under vhost
             // addressing the bucket comes entirely from the Host header and may contain '/' or even start with
             // '/', which combined with localfs's root_/bucket/key concatenation (fs::path replaces the whole path
             // on an absolute component) means arbitrary file reads; on the path-style side, %00 could turn the
@@ -443,7 +458,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 ident.policy = std::move(p);
             }
             // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
-            // route, not the HTTP method (docs/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
+            // route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
             // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
             // The decision input is the snapshot verify returned, never a store lookup (§3.7)
             RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr};
@@ -468,7 +483,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     }
                 }
             }
-            // Per-request timeout + cancellation wiring (docs/gaps.md §3.1/§3.3): req_src is dedicated to this
+            // Per-request timeout + cancellation wiring (docs/archive/gaps.md §3.1/§3.3): req_src is dedicated to this
             // request; external tokens (process shutdown, plus client disconnect once the driver is wired) attach
             // to the same source -- any trigger converges the whole L2/L3 chain with OperationCancelled from the
             // nearest cancellable suspension point (pool.schedule / semaphore.acquire). The token propagates down
@@ -525,7 +540,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // XML only for signed requests). Fetched here because catch blocks cannot co_await;
     // the cancelled path above intentionally stays XML -- 503/SlowDown is retry signaling
     if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
-    // per-bucket request distribution and outbound bytes (docs/gaps.md §7). Streaming response bytes are pulled
+    // per-bucket request distribution and outbound bytes (docs/archive/gaps.md §7). Streaming response bytes are pulled
     // by the driver after dispatch returns and counted via the decorator; small responses have a known length by now
     metrics_.record_bucket_request(bucket);
     if (resp.stream_body)
@@ -609,7 +624,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
         const RequestAuth& auth) {
          return s.delete_bucket_website(std::move(b), auth);
      }},
-    // All five parameters now take effect (docs/gaps.md §5.1): previously pagination parameters were "allowed
+    // All five parameters now take effect (docs/archive/gaps.md §5.1): previously pagination parameters were "allowed
     // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
     {"GET", Scope::Bucket, "uploads",
      "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
@@ -694,7 +709,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
              return s.copy_object(req, std::move(b), std::move(k));
          return s.put_object(req, std::move(b), std::move(k));
      }},
-    // response-* override parameters (docs/gaps.md §5.3): the family most used in presigned download links
+    // response-* override parameters (docs/archive/gaps.md §5.3): the family most used in presigned download links
     {"GET", Scope::Object, "",
      "response-content-type response-content-language response-expires "
      "response-cache-control response-content-disposition response-content-encoding",
@@ -739,7 +754,7 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
         enforce_query_whitelist(req, *r);
         co_return co_await r->fn(*this, req, std::move(bucket), std::move(key), auth);
     }
-    // 405 must carry Allow (RFC 9110 §15.5.6, docs/gaps.md §5.9): the answer is the other methods in the same
+    // 405 must carry Allow (RFC 9110 §15.5.6, docs/archive/gaps.md §5.9): the answer is the other methods in the same
     // scope that would also match this request's query -- the list comes from the dispatch table itself, so it cannot drift from it
     std::string allow;
     for (auto& r : route_table()) {

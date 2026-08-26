@@ -54,7 +54,7 @@ void validate_bucket_name(std::string_view b, bool allow_reserved) {
     if (b.front() == '-' || b.front() == '.' || b.back() == '-' || b.back() == '.') fail();
     if (b.find("..") != std::string_view::npos) fail();
     // The following three rules were the previously missing parts of AWS naming rules
-    // (docs/gaps.md §6.3). They are not pedantry: buckets admitted here could not be
+    // (docs/archive/gaps.md §6.3). They are not pedantry: buckets admitted here could not be
     // created on real S3, so the "get it working on lights3 first, migrate to S3 later"
     // path would break at the very last moment
     if (b.find(".-") != std::string_view::npos || b.find("-.") != std::string_view::npos) fail();
@@ -73,7 +73,7 @@ void validate_bucket_name(std::string_view b, bool allow_reserved) {
 }
 
 // The shared validation layer keeps only the AWS constraints that hold for every backend
-// (docs/gaps.md §6.3): previously it also rejected the AWS-legal leading '/', empty
+// (docs/archive/gaps.md §6.3): previously it also rejected the AWS-legal leading '/', empty
 // segments ("a//b", directory marker "folder/"), and the 255B single-segment cap -- three
 // rules born from localfs's path mapping that stripped memory/duostore/cloudproxy of
 // compatibility along with it (the S3 console's "create folder" and the directory

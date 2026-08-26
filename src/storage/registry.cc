@@ -34,7 +34,7 @@ std::pair<std::string, std::string> fs_backend_paths(const BackendConfig& cfg) {
     return {root, staging};
 }
 
-// mpu_ttl / mpu_scan_interval (docs/gaps.md §6.3): previously the 7-day TTL was hardcoded
+// mpu_ttl / mpu_scan_interval (docs/archive/gaps.md §6.3): previously the 7-day TTL was hardcoded
 // and only scanned once at startup
 LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     LocalFsOptions o;
@@ -110,7 +110,7 @@ void ensure_registered() {
                 } catch (const std::exception& e) {
                     // io_uring being unavailable (old kernel, container seccomp blocking
                     // io_uring_setup, insufficient memlock quota) used to crash the whole
-                    // process (docs/gaps.md §6.3). xlocalfs and localfs share the exact
+                    // process (docs/archive/gaps.md §6.3). xlocalfs and localfs share the exact
                     // same on-disk layout and metadata semantics -- the fallback is
                     // lossless, only async IO is lost. Warn loudly, no silent degradation
                     LOG_WARN("xlocalfs backend '{}': io_uring unavailable ({}); falling back "
@@ -135,7 +135,7 @@ void ensure_registered() {
                 if (cfg.params.count("mpu_ttl"))
                     mo.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
                 auto b = std::make_shared<MemoryBackend>(mo);
-                // Usage observability (docs/gaps.md §6.3): a misconfigured memory backend
+                // Usage observability (docs/archive/gaps.md §6.3): a misconfigured memory backend
                 // costs an OOM, so at least make "how far from the limit" visible. The
                 // callback gauge reads the value only at render time
                 m.gauge_callback("lights3_memory_backend_used_bytes",
@@ -240,7 +240,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
                 // Register the scope before constructing: if the tiered build throws, its
                 // gauge callbacks are already registered and hold the pool's shared_ptr;
                 // missing the registration means the threads never join after rollback --
-                // exactly the scenario this guard exists to prevent (docs/gaps.md §3.9)
+                // exactly the scenario this guard exists to prevent (docs/archive/gaps.md §3.9)
                 rollback.scopes.push_back(cfg.name);
                 // Pool metrics and the backend's own metrics share the same scope (the
                 // registry's get-or-create is idempotent; re-constructing with the same

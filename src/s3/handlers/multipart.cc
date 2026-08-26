@@ -57,7 +57,7 @@ int parse_max(const http::HttpRequest& req, const char* name, int cap) {
     return std::min(v, cap);
 }
 
-// "scheme://host": Location must be a full URL (docs/gaps.md §5.7). The scheme can only be relayed by the reverse
+// "scheme://host": Location must be a full URL (docs/archive/gaps.md §5.7). The scheme can only be relayed by the reverse
 // proxy -- on direct connections this implementation is plaintext HTTP, TLS is terminated by a front proxy (docs/s3-protocol.md)
 std::string request_base_url(const http::HttpRequest& req) {
     std::string scheme = "http";
@@ -66,7 +66,7 @@ std::string request_base_url(const http::HttpRequest& req) {
     return scheme + "://" + host;
 }
 
-// Minimum part size check (docs/gaps.md §5.7): last part exempt. Only the storage layer knows part sizes,
+// Minimum part size check (docs/archive/gaps.md §5.7): last part exempt. Only the storage layer knows part sizes,
 // so list once before complete; missing parts are not reported here but left to the backend's InvalidPart
 Task<void> check_min_part_sizes(storage::IStorageBackend& backend, const std::string& bucket,
                                 const std::string& key, const std::string& upload_id,
@@ -194,7 +194,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     std::vector<storage::PartInfo> parts;
     for (auto& child : root.children) {
         if (child.name != "Part") continue;
-        // Part count upper bound (docs/gaps.md §5.7): previously unbounded appends, so one crafted XML could
+        // Part count upper bound (docs/archive/gaps.md §5.7): previously unbounded appends, so one crafted XML could
         // make this request read an arbitrarily long list into memory
         if (parts.size() >= size_t(storage::kMaxParts))
             throw S3Error(S3ErrorCode::InvalidRequest,
@@ -248,7 +248,7 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
                                                std::string key) {
     std::string upload_id = require_upload_id(req);
     // Previously neither max-parts nor part-number-marker was read, and IsTruncated=false was always reported
-    //（docs/gaps.md §5.1）
+    //（docs/archive/gaps.md §5.1）
     storage::ListPartsOptions opt;
     opt.max_parts = parse_max(req, "max-parts", 1000);
     opt.part_number_marker = parse_int_param(req, "part-number-marker", 0);

@@ -41,13 +41,13 @@ struct HttpConfig {
     // (builtin's SO_RCVTIMEO 0 = never time out, beast's expires_after(0s) = expire
     // immediately), so "no idle timeout" is not a supported configuration
     int idle_timeout_sec = 60;
-    // Per-request timeout (docs/gaps.md §3.3): the clock starts when the handler
+    // Per-request timeout (docs/archive/gaps.md §3.3): the clock starts when the handler
     // begins executing; on expiry the request is interrupted via cooperative
     // cancellation (suspension points throw OperationCancelled -> 503 SlowDown,
     // retryable by SDKs). idle_timeout only covers socket syscalls, not the
     // handler execution window. 0 = disabled
     int request_timeout_sec = 300;
-    // Minimum multipart part size in bytes (docs/gaps.md §5.7): AWS fixes it at
+    // Minimum multipart part size in bytes (docs/archive/gaps.md §5.7): AWS fixes it at
     // 5MiB, 0 = no limit. Relax it when a toolchain that ignores this rule sits in
     // front, or when this instance is merely a proxy for another lights3
     uint64_t min_part_size = 5ull * 1024 * 1024;
@@ -64,7 +64,7 @@ struct HttpConfig {
     // can exhaust memory
     int max_connections = 4096;
     std::string base_domain;  // non-empty enables virtual-host style (docs/s3-protocol.md §2)
-    // TLS (docs/gaps.md §7): HTTPS is enabled when both cert and key are given.
+    // TLS (docs/archive/gaps.md §7): HTTPS is enabled when both cert and key are given.
     // SigV4's UNSIGNED-PAYLOAD integrity relies on transport-layer encryption, and
     // this covers the inbound direction. Only the httplib/beast drivers support it;
     // builtin/seastar error out at startup if TLS is configured — never
@@ -73,9 +73,9 @@ struct HttpConfig {
     std::string tls_key;   // path to PEM private key
     // The builtin driver is thread-per-connection, so io_threads is meaningless for
     // it; when explicitly configured, WARN at startup instead of silently ignoring
-    // (docs/gaps.md §7). Set by the parser
+    // (docs/archive/gaps.md §7). Set by the parser
     bool io_threads_set = false;
-    // ---- Shutdown/backpressure knobs (docs/gaps.md §7): formerly hard-coded once per driver ----
+    // ---- Shutdown/backpressure knobs (docs/archive/gaps.md §7): formerly hard-coded once per driver ----
     uint64_t drain_limit = 4 * 1024 * 1024;   // max request body drained before returning an error
     size_t trailer_max_size = 16 * 1024;      // chunked trailer section limit (builtin/seastar)
     size_t io_chunk_size = 64 * 1024;         // streaming read/write chunk size
@@ -91,7 +91,7 @@ struct RuntimeConfig {
 
 struct Credential {
     std::string access_key;
-    util::SecretString secret_key;  // wiped on destruction (docs/gaps.md §4)
+    util::SecretString secret_key;  // wiped on destruction (docs/archive/gaps.md §4)
 };
 
 struct AuthConfig {

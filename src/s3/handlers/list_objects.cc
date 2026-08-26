@@ -14,7 +14,7 @@ using handlers::kOwnerId;
 
 namespace {
 
-// Opacifying the V2 continuation-token (docs/gaps.md §4): V1's marker is semantically a key
+// Opacifying the V2 continuation-token (docs/archive/gaps.md §4): V1's marker is semantically a key
 // (echoed in the response), while the V2 token is by spec an opaque string -- previously V1 was URL-encoded
 // but V2 passed through in plaintext, inconsistent across versions and exposing the internal key order as API.
 // A base64 layer aligns with the AWS shape
@@ -56,7 +56,7 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     };
     // V2 (?list-type=2) vs V1 differences: KeyCount/ContinuationToken vs Marker
     bool v2 = req.query_get("list-type").value_or("") == "2";
-    // The three markers each belong to their own version (docs/gaps.md §5.5): previously they collapsed into a
+    // The three markers each belong to their own version (docs/archive/gaps.md §5.5): previously they collapsed into a
     // single start_after, so a V1 request with start-after took effect and the response echoed a <Marker> the
     // client never sent. V2 accepts continuation-token (the opaque string this implementation issues) plus
     // start-after; V1 accepts only marker; both carry the plaintext "start after this key" semantics

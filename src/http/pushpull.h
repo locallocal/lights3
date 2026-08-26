@@ -92,7 +92,7 @@ private:
 
 class QueueBodyReader : public BodyReader {
 public:
-    // When request_thread is non-null (httplib driver, docs/gaps.md §2.10): the
+    // When request_thread is non-null (httplib driver, docs/archive/gaps.md §2.10): the
     // cv-blocking pop first switches back to the request's own thread (which is
     // idling in sync_wait_pumping), so it does not occupy a shared pool thread;
     // when null, it blocks in place (cloudproxy's pump direction already yields

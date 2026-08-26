@@ -203,7 +203,7 @@ private:
 class BeastServer final : public IHttpServer {
 public:
     explicit BeastServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS (docs/gaps.md §7): certificates are loaded at construction; a
+        // TLS (docs/archive/gaps.md §7): certificates are loaded at construction; a
         // bad path / bad PEM throws right here — must not be discovered only
         // at the first connection's handshake
         if (!cfg.tls_cert.empty()) {

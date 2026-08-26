@@ -104,7 +104,7 @@ struct DuoOrphanStats {
     uint64_t skipped_grace = 0;    // unreferenced but mtime not yet beyond gc_grace (suspected in-flight write)
     uint64_t skipped_pinned = 0;   // unreferenced but pinned (write-side pin / in-flight reader)
     uint64_t refs_missing = 0;     // reverse: refs present but file missing (sign of data loss; warn only, never delete meta)
-    // Reverse reconciliation of packs/ (docs/gaps.md §6.1)
+    // Reverse reconciliation of packs/ (docs/archive/gaps.md §6.1)
     uint64_t packs_scanned = 0;         // pack files enumerated on disk
     uint64_t orphan_packs_removed = 0;  // unaccounted pack files (crash after file creation, before the first record committed)
     uint64_t packs_skipped_active = 0;  // unaccounted but lock-held by a live writer / within grace / pinned
@@ -175,12 +175,12 @@ struct DuoStoreConfig {
     uint64_t pack_threshold = 128 << 10;   // ≤ this goes into packs; 0 = disabled (everything via chunks)
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;
-    // Age-based sealing of active packs (docs/gaps.md §6.1): with capacity-only
+    // Age-based sealing of active packs (docs/archive/gaps.md §6.1): with capacity-only
     // sealing under low write volume a pack never rotates, and its dead regions
     // never enter the compaction candidate set. 0 = disabled
     int pack_max_age_sec = 3600;
     double pack_gc_ratio = 0.5;            // effective with P4 compaction
-    // Per-round compaction budget (docs/gaps.md §6.1): candidates sorted by
+    // Per-round compaction budget (docs/archive/gaps.md §6.1): candidates sorted by
     // reclaimable bytes descending, take the top N / cumulative file_size at most
     // max_bytes. Without a budget, "one GC round rewriting every eligible pack
     // after a bulk delete" can hold the lock for hours; with one, the
@@ -274,7 +274,7 @@ public:
     // depends on the gcq's unlink→settle window not running concurrently
     Task<duostore::DuoOrphanStats> run_orphan_scan_once();
 
-    // meta backup/restore and cross-engine migration (docs/gaps.md §6.1; stream
+    // meta backup/restore and cross-engine migration (docs/archive/gaps.md §6.1; stream
     // format and ops contract in meta_dump.h). Both hold the same semaphore as
     // GC/orphan scan; write quiescence is guaranteed by ops (main's
     // --duostore_admin entry runs before the server starts, so naturally no
@@ -284,7 +284,7 @@ public:
     Task<duostore::MetaDumpStats> run_meta_load(std::istream& in);
 
     // Direct data-plane access (tests only): verifies the active pack's write-lock
-    // probing (docs/gaps.md §1.4)
+    // probing (docs/archive/gaps.md §1.4)
     duostore::IDataStore& data_for_test() { return *data_; }
 
 private:

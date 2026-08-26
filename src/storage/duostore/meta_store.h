@@ -45,7 +45,7 @@ struct PartRec {
     DataRef data;
 };
 
-// gcq entry source (docs/gaps.md §6.1): only with per-source bucketed counters can
+// gcq entry source (docs/archive/gaps.md §6.1): only with per-source bucketed counters can
 // GC pinpoint whether "reclaim pressure comes from overwrites, bulk deletes, or
 // abandoned mpu parts". Persisted as the reason byte of the codec gcq record
 // (previously always written as 0 and discarded on decode); old entries decode to
@@ -121,7 +121,7 @@ struct IMetaStore {
 
     // ---- object ----
     virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
-    // Meta only, no manifest (docs/gaps.md §3.9): HEAD/precondition reads go here.
+    // Meta only, no manifest (docs/archive/gaps.md §3.9): HEAD/precondition reads go here.
     // decode_object materializes the entire extent vector (650k extents ≈ 26MB)
     // only to discard it immediately; decode_object_meta decodes just the
     // fixed-length header
@@ -144,7 +144,7 @@ struct IMetaStore {
                           PartRec p) = 0;  // the old same-number part enters the GC ledger in the same batch
     virtual std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
                                             std::string_view id) = 0;
-    // Pagination hint (docs/gaps.md §5.1): return entries with (key, upload_id)
+    // Pagination hint (docs/archive/gaps.md §5.1): return entries with (key, upload_id)
     // strictly greater than (key_marker, id_marker), in ascending order; with
     // limit>0 return at most limit entries. The hint may be ignored — an engine
     // that cannot push it down can just return everything, since the caller
@@ -163,7 +163,7 @@ struct IMetaStore {
                               std::string_view id) = 0;
 
     // ---- resource allocation and GC accounting (§9) ----
-    // Batch dispatch (docs/gaps.md §3.9): returns the first id of a contiguous run
+    // Batch dispatch (docs/archive/gaps.md §3.9): returns the first id of a contiguous run
     // [first, first+n); durably monotonic, segment-reserved. With per-id dispatch,
     // concurrent writers interleave one object's chunk ids and the manifest's run
     // encoding becomes useless (it actually bloats 28% after encoding); writers
@@ -176,7 +176,7 @@ struct IMetaStore {
     // The GC consumer resumes scanning from the min_seq checkpoint: head entries
     // skipped by grace/pin and not yet acked cannot stall the whole round or get
     // double-counted (§9.1). max_extents = cap on cumulative extents per batch
-    // (docs/gaps.md §2.11: a 256-entry count-based batch can resident GB-scale in
+    // (docs/archive/gaps.md §2.11: a 256-entry count-based batch can resident GB-scale in
     // the worst case): close the batch early once the cap is reached, but return at
     // least 1 entry (oversized single entries left from before splitting must still
     // be consumable)
@@ -209,7 +209,7 @@ struct IMetaStore {
     virtual void drop_pack_stat(uint64_t pack_id) = 0;
     virtual bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
                               const DataRef& from, const DataRef& to) = 0;  // compaction ref swap
-    // Batch ref swap (docs/gaps.md §2.13 batched compaction): independent CAS per
+    // Batch ref swap (docs/archive/gaps.md §2.13 batched compaction): independent CAS per
     // item, returns per-item success/failure. Forwards entry by entry by default;
     // local engines (rocks/sqlite) override with a single-batch/single-transaction
     // commit — per-entry sqlite swap is one fsync per entry and contends for the
@@ -224,7 +224,7 @@ struct IMetaStore {
             out.push_back(swap_extents(r.bucket, r.key, r.expect_version, r.from, r.to));
         return out;
     }
-    // Multi-gateway GC lease (docs/gaps.md §6.1): single-instance GC/orphan-scan
+    // Multi-gateway GC lease (docs/archive/gaps.md §6.1): single-instance GC/orphan-scan
     // was previously only a gc_enabled **convention** — two machines misconfigured
     // with GC both on would unlink each other's empty-pack verdicts. Take the lease
     // before each round: shared engines (redis/tikv) implement it as an atomic CAS

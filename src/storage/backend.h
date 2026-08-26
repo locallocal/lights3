@@ -35,7 +35,7 @@ struct ObjectMeta {
     std::chrono::system_clock::time_point last_modified;
     std::map<std::string, std::string> user_meta;  // x-amz-meta-* kv pairs with the prefix stripped
 
-    // First-class S3 object metadata (docs/gaps.md §5.2): previously all dropped on PUT and
+    // First-class S3 object metadata (docs/archive/gaps.md §5.2): previously all dropped on PUT and
     // never returned on GET. Dropping content_encoding=gzip leaves browsers with a byte
     // stream they cannot decompress -- these are not "extra user metadata" but part of
     // content negotiation. Empty string = unset, header is not returned
@@ -52,7 +52,7 @@ struct ObjectMeta {
     // STANDARD storage class; storing the client-reported value and echoing it back would
     // make the storage layer lie (the object sits on local disk yet reports GLACIER);
     // non-STANDARD gets a direct 501 at L2, consistent with the handling of x-amz-acl
-    // (docs/gaps.md §5.2)
+    // (docs/archive/gaps.md §5.2)
 };
 
 // Single source of truth for the five first-class fields: request/response header name +
@@ -139,7 +139,7 @@ struct UploadInfo {
     std::chrono::system_clock::time_point initiated;
 };
 
-// Pagination for the two multipart listing APIs (docs/gaps.md §5.1). They used to return
+// Pagination for the two multipart listing APIs (docs/archive/gaps.md §5.1). They used to return
 // bare vectors with IsTruncated always false: clients took that as "reached the end", so
 // with 5000 active uploads they would only ever see the first page without knowing it,
 // while a single request built the whole table in memory
@@ -191,7 +191,7 @@ struct IStorageBackend {
                                        ObjectMeta meta, http::BodyReader& body,
                                        PutCondition cond = {}) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;
-    // Same-backend copy fast path (docs/gaps.md §6.3): when src and dst both belong to this
+    // Same-backend copy fast path (docs/archive/gaps.md §6.3): when src and dst both belong to this
     // backend, the CopyObject handler tries this hook first. Returning nullopt = no fast
     // path / unavailable this time (tier stub, cross-device, etc.); the caller falls back
     // to "get_object streaming read + put_object streaming write" -- semantically
@@ -255,7 +255,7 @@ void validate_bucket_name(std::string_view bucket, bool allow_reserved = false);
 // (the latter is unsafe for any forwarding backend that splices the key into a URL path --
 // RFC 3986 dot-segment normalization would rewrite the object's identity)
 void validate_object_key(std::string_view key);
-// Additional constraints for path-mapping backends (localfs/xlocalfs) (docs/gaps.md §6.3):
+// Additional constraints for path-mapping backends (localfs/xlocalfs) (docs/archive/gaps.md §6.3):
 // no leading '/', no empty segments, each segment ≤255B. Trailing-'/' directory-marker
 // objects are **not** forbidden -- localfs represents them with a reserved marker file
 // inside the directory; the S3 console's "create folder" and the directory semantics of

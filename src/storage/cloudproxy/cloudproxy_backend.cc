@@ -543,7 +543,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     auto len_opt = body.length();
     // AWS rejects bare chunked uploads (§3.2). Without a length (chunked and no
     // x-amz-decoded-content-length), spool to a local temp file first to obtain the length,
-    // then upload (docs/gaps.md §6.2 -- previously a flat NotImplemented, making such PUTs
+    // then upload (docs/archive/gaps.md §6.2 -- previously a flat NotImplemented, making such PUTs
     // entirely unusable on this backend)
     if (!len_opt) {
         if (ctx_->cfg.spool_max_bytes == 0)
@@ -688,7 +688,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(
                             multipart_ctx ? ErrCtx::Upload : ErrCtx::Bucket, resource);
 }
 
-// Spool for length-less uploads (docs/gaps.md §6.2): the body lands fully in a temp file
+// Spool for length-less uploads (docs/archive/gaps.md §6.2): the body lands fully in a temp file
 // (O_TMPFILE anonymous inode, auto-reclaimed on process crash; filesystems without support
 // fall back to unlink-after-open); once the length is known, go through the known-length
 // stream_upload via FdStreamReader. The cost is one local disk write/read plus
@@ -745,7 +745,7 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
                                      std::move(resource), multipart_ctx);
 }
 
-// Server-side COPY (docs/gaps.md §6.2): previously a copy within the same cloudproxy
+// Server-side COPY (docs/archive/gaps.md §6.2): previously a copy within the same cloudproxy
 // backend would "download to the gateway and upload back", doubling cross-network traffic
 // and cost, when the remote could have done it with one x-amz-copy-source. Always send
 // REPLACE + our metadata -- the handler has already folded COPY/REPLACE semantics into
@@ -1090,7 +1090,7 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
 }
 
 // Now that the contract carries pagination fields, this changed from "accumulate all pages
-// then return" to forwarding a single page (docs/gaps.md §5.1): the client's marker becomes
+// then return" to forwarding a single page (docs/archive/gaps.md §5.1): the client's marker becomes
 // the remote's marker directly, and the remote's IsTruncated is passed back verbatim.
 // Previously the bare-vector contract forced pulling every remote page, so a client wanting
 // just the first page still waited for everything

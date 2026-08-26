@@ -219,7 +219,7 @@ head+put 组合都不行；不支持的上游回 4xx/501 原样映射，412 →
 
 ### 5.1 无长度上传：spool_and_upload
 
-`cloudproxy_backend.cc:CloudProxyBackend::spool_and_upload`（docs/gaps.md
+`cloudproxy_backend.cc:CloudProxyBackend::spool_and_upload`（docs/archive/gaps.md
 §6.2 的补课，此前是一刀切 NotImplemented）：AWS 拒绝裸 chunked，故先把
 body 全量落到本地临时文件取得长度，再走定长 `stream_upload`：
 
@@ -264,7 +264,7 @@ body 全量落到本地临时文件取得长度，再走定长 `stream_upload`�
 
 ### 6.3 copy_object_fast：远端服务端 COPY
 
-`cloudproxy_backend.cc:CloudProxyBackend::copy_object_fast`（docs/gaps.md
+`cloudproxy_backend.cc:CloudProxyBackend::copy_object_fast`（docs/archive/gaps.md
 §6.2：此前同后端复制要"下到网关再传回去"，双倍跨网流量）：PUT 目标路径 +
 `x-amz-copy-source: /<src_rb>/<src_key>` + **恒
 `x-amz-metadata-directive: REPLACE`**（handler 已把 COPY/REPLACE 语义折叠进
@@ -286,7 +286,7 @@ CopyObjectResult 的 ETag 去引号返回。
 - `complete_multipart`：见 §7.3（含 200-错误体与歧义消解）；
 - `abort_multipart`：DELETE `?uploadId=`，非 2xx → `ErrCtx::Upload`
   （404 → NoSuchUpload）；
-- `list_parts` / `list_multipart_uploads`：单页转发（docs/gaps.md §5.1：
+- `list_parts` / `list_multipart_uploads`：单页转发（docs/archive/gaps.md §5.1：
   客户端 marker 直译远端 marker，IsTruncated 原样回传，不再全量聚页）。
   防自旋兜底：远端报截断却不给游标时，用本页末元素补游标；连末元素都没有
   则把 is_truncated 改为 false——宁可诚实报"到头"也不让客户端原地打转。
@@ -311,7 +311,7 @@ CopyObjectResult 的 ETag 去引号返回。
    解析也不得掉进 500）；404 按 `remote_client.h:ErrCtx` 上下文补语义
    （Key→NoSuchKey / Bucket→NoSuchBucket / Upload→NoSuchUpload）；仍未命中
    的未知 4xx → `InvalidRequest`（本地 400）并把远端码与原文带进
-   message——**不塌缩成 500**（docs/gaps.md §3.9：SDK 自动重试 500，会把
+   message——**不塌缩成 500**（docs/archive/gaps.md §3.9：SDK 自动重试 500，会把
    InvalidObjectState 这类确定性拒绝变成无限重试）；
 5. 5xx / 其余 → `InternalError`（不引入 502：S3 词表无 BadGateway）。
 

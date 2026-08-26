@@ -162,7 +162,7 @@ bool ThreadPool::ScheduleAwaiter::suspend_impl(std::coroutine_handle<> h) {
                 // **Must not** be re-posted to the thread pool — the scenario where
                 // cancellation matters most is precisely a saturated pool, where the
                 // posted continuation would queue behind blocking tasks and
-                // cancellation becomes an empty promise (implementing docs/gaps.md
+                // cancellation becomes an empty promise (implementing docs/archive/gaps.md
                 // §3.2's suggestion literally deadlocks; see the corresponding case
                 // in test_concurrency). The firing-thread-side defense lives in
                 // TimerQueue: callbacks run on a dedicated callback thread, so

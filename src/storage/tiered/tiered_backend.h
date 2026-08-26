@@ -147,7 +147,7 @@ private:
     friend class TeeCacheReader;
     friend struct InflightRelease;
 
-    // ---- Data-plane accounting (docs/gaps.md §7): measure only the four ops where tiered
+    // ---- Data-plane accounting (docs/archive/gaps.md §7): measure only the four ops where tiered
     // itself has tiering logic; purely delegated multipart/head etc. are covered by
     // local_'s lights3_localfs_* ----
     enum class Op : size_t { kGet, kPut, kDelete, kList };
@@ -203,7 +203,7 @@ private:
     Task<void> demote_quiet(std::string bucket, std::string key);
     Task<void> promote_quiet(std::string bucket, std::string key);
     Task<void> scan_and_gc();
-    // Incremental quota maintenance (docs/gaps.md §6.3 / docs/tiered-storage.md):
+    // Incremental quota maintenance (docs/archive/gaps.md §6.3 / docs/tiered-storage.md):
     // PUT/DELETE adjust the estimate in place and kick an early scan round past the
     // watermark -- previously only the periodic walk accumulated, so quota overruns between
     // two scans (default 1 hour) were completely invisible. The estimate drifts with
@@ -240,7 +240,7 @@ private:
 
     // Semaphores uniformly take the pool executor: release posts the waiter's continuation
     // back to a pool thread, eradicating the path where "in-place resume pins blocking IO
-    // on the HTTP response thread" (docs/gaps.md §2.4)
+    // on the HTTP response thread" (docs/archive/gaps.md §2.4)
     ThreadPoolExecutor pool_exec_{*pool_};
     std::vector<std::unique_ptr<AsyncSemaphore>> key_locks_;
     AsyncSemaphore transfers_;  // max_concurrent_transfers throttle (docs/tiered-storage.md §5.1)
@@ -250,7 +250,7 @@ private:
 
     std::mutex atime_m_;
     std::unordered_map<std::string, int64_t> atime_;  // ikey -> epoch seconds
-    // Whether the table changed since the last snapshot (docs/gaps.md §4): if unchanged,
+    // Whether the table changed since the last snapshot (docs/archive/gaps.md §4): if unchanged,
     // do not rewrite -- idle instances no longer do a full write + fsync of the same
     // content every 5 minutes
     bool atime_dirty_ = false;

@@ -30,7 +30,7 @@ std::string aes256gcm_seal(const Aes256Key& key, std::string_view plaintext);
 std::optional<std::string> aes256gcm_open(const Aes256Key& key, std::string_view sealed);
 
 // Zeroization the compiler cannot elide (OPENSSL_cleanse): temporary strings of
-// decrypted SKs are wiped in place after use (docs/gaps.md §4 — for a system doing
+// decrypted SKs are wiped in place after use (docs/archive/gaps.md §4 — for a system doing
 // SK at-rest encryption, lingering plaintext is a missing link in the defense chain)
 void secure_wipe(std::string& s);
 

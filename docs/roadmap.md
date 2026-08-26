@@ -1,7 +1,8 @@
 # 优化与功能规划（Roadmap）
 
 > 基于 2026-08-25 的全仓走读（源码 + 设计文档 + git 历史）。此前的评审底账
-> `gaps.md` / `issues.md` 已全部清零并删除，本文是接续它们的新规划底账：
+> `gaps.md` / `issues.md` 已全部清零并归档至 [archive/](archive/gaps.md)，
+> 本文是接续它们的新规划底账：
 > 只收录"尚未做"与"值得做"的事，不重复已落地能力（能力边界见根
 > README「Current scope」与 [s3-protocol.md](s3-protocol.md) §1）。
 >
@@ -31,10 +32,10 @@
 | --- | --- | --- | --- | --- | --- |
 | 1.1 | ~~aws-chunked trailer 校验和完全不验~~ **已完成（2026-08-26）** | -TRAILER 两变体的 trailer 段现按行严格解析并与 `x-amz-trailer` 声明双向对照，声明的校验和对解码后 payload 校验，signed 变体验 `x-amz-trailer-signature`（见 [s3-protocol.md](s3-protocol.md) §3.2/§3.3） | — | — | `src/s3/auth/sigv4.cc`、`src/s3/checksum_guard.h` |
 | 1.2 | ~~配置校验缺口簇~~ **已完成（2026-08-27）** | ① `max_header_size` 限 `[1KiB,1MiB]`（远低于 beast `header_limit(uint32_t)` 截断阈值）；② `idle_timeout` 限 `[1s,86400s]`，`0` 因驱动语义相反直接拒绝；③ `http.port` 改走 `to_int`（尾随垃圾报错）；④ `log.level` 白名单 debug\|info\|warn\|error，拼错启动即报错；⑤ `buckets.rules[].match/backend` 空值拒绝；⑥ 跨项检查：`transfer_stall_timeout > request_timeout`（且后者启用）启动报错 | — | — | `src/core/config.cc`、`tests/unit/test_config.cc` |
-| 1.3 | **`X-Amz-Security-Token` 静默忽略** | query 侧被列进 `kCommonQueryKeys` 白名单放行，header 侧不在任何拒绝名单——带 STS 临时凭证的客户端最终得到误导性的 `InvalidAccessKeyId`。至少先改成显式 501（半天工作量）；真做 STS 见 §2.8 | 中-高 | 低 | `src/s3/service.cc`（`kCommonQueryKeys` / `reject_unsupported_headers`） |
-| 1.4 | **stall guard 与 `io_chunk_size` 下界耦合可误杀** | `kMinProgressBytes` 硬编码 64KiB；若 `io_chunk_size` 配到 4KiB（合法下界），单次 read 永远 <64KiB，每个 window 都可能误判停滞、正常慢客户端被掐断。改为 `min(kMinProgressBytes, io_chunk_size)` 或提为配置项 | 中 | 低 | `src/http/stall_guard.h`、`src/core/config.cc` |
-| 1.5 | **请求延迟直方图上界 10s，P99 失真** | `kLatencyBuckets` 最大桶 10s，而 `request_timeout` 默认 300s：10s–300s 的请求全落 `+Inf` 桶，大对象场景 P99 完全不可读。加 30/60/300 三个桶即可 | 中 | 极低 | `src/s3/metrics.h` |
-| 1.6 | **文档漂移** | ① 中英 README 的"明确不支持"清单仍列 **website**，与已落地的 [static-website.md](static-website.md) 直接矛盾；② 全仓 **340+ 处**源码/文档注释引用已删除的 `docs/gaps.md` / `docs/issues.md`（这些注释承载"为什么这么写"的论证，建议从 git 历史恢复为 `docs/archive/gaps.md` 归档并批量改路径，其次是内联被引段落）；③ `cli.md` 扩展约定笔误：`add_conn_opts` 实为 `add_conn_flags` | 中-高 | 低-中 | `README.md:203`、`docs/README.zh-CN.md`、全仓 `grep -rn gaps.md`、`docs/cli.md` |
+| 1.3 | ~~`X-Amz-Security-Token` 静默忽略~~ **已完成（2026-08-27）** | query/header 两侧现均在 verify 之前被 `reject_sts_token` 显式拒绝（501 NotImplemented，报文点名 STS 不支持），token 已从 `kCommonQueryKeys` 白名单移除；真做 STS 见 §2.8 | — | — | `src/s3/service.cc`（`reject_sts_token`） |
+| 1.4 | ~~stall guard 与 `io_chunk_size` 下界耦合可误杀~~ **已完成（2026-08-27）** | 进度阈值参数化为 `min(kMinProgressBytes, io_chunk_size)`（app.cc 装配处收敛），`io_chunk_size` 配到 4KiB 时不再每 window 误判停滞 | — | — | `src/http/stall_guard.h`、`src/http/admission.h`、`src/app/app.cc` |
+| 1.5 | ~~请求延迟直方图上界 10s，P99 失真~~ **已完成（2026-08-27）** | `kLatencyBuckets` 增加 30/60/300 三桶，覆盖到 `request_timeout` 默认值（300s）的大对象区间 | — | — | `src/s3/metrics.h` |
+| 1.6 | ~~文档漂移~~ **已完成（2026-08-27）** | ① 中英 README 的"明确不支持"清单已移除 website 并补上静态网站托管能力项；② `gaps.md` / `issues.md` 已从 git 历史恢复归档为 `docs/archive/`，全仓 380+ 处引用批量改为 `docs/archive/<name>.md` 路径；③ `cli.md` 中英两版 `add_conn_opts` 笔误已改为 `add_conn_flags` | — | — | `docs/archive/`、`README.md`、`docs/README.zh-CN.md`、`docs/cli.md` |
 | 1.7 | ~~`x-amz-checksum-algorithm` 头静默忽略~~ **已完成（2026-08-26）** | `x-amz-checksum-algorithm` / `x-amz-sdk-checksum-algorithm` 现强制校验：未知算法或"声明了却没提供对应摘要"→ InvalidRequest（无 body 的声明放行） | — | — | `src/s3/checksum_guard.h` |
 
 ## 2. S3 协议层
@@ -391,9 +392,9 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 ### P0 — 立即（bug 修复与文档一致性，合计约一周）
 
 1. ~~trailer 校验和空洞 + `crc64nvme` + `x-amz-checksum-algorithm`（§1.1/§2.2/§1.7，一次闭合新版 SDK 上传路径）~~ **已完成（2026-08-26）**
-2. ~~配置校验缺口簇（§1.2）~~ **已完成（2026-08-27）** + stall guard 误杀（§1.4）+ 延迟桶上界（§1.5）
-3. `X-Amz-Security-Token` 显式 501（§1.3）
-4. 文档漂移三件套：README website、gaps.md 断链归档恢复、cli.md 笔误（§1.6）
+2. ~~配置校验缺口簇（§1.2）+ stall guard 误杀（§1.4）+ 延迟桶上界（§1.5）~~ **已完成（2026-08-27）**
+3. ~~`X-Amz-Security-Token` 显式 501（§1.3）~~ **已完成（2026-08-27）**
+4. ~~文档漂移三件套：README website、gaps.md 断链归档恢复、cli.md 笔误（§1.6）~~ **已完成（2026-08-27）**
 5. `--version`、`--check-config`、ListParts encoding-type 等极低成本小项
 
 ### P1 — 近期（高价值 / 低-中难度）

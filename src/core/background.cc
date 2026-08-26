@@ -27,7 +27,7 @@ Detached run_detached(const char* name, Task<void> t, std::function<void()> done
         // once done() runs, wait_idle() releases the owner to start destroying the
         // backend/thread pool and other resources, while locals inside the task
         // frame are only just about to be destroyed and would touch those dead
-        // objects (docs/gaps.md §3.9). The coroutine parameter t is part of the
+        // objects (docs/archive/gaps.md §3.9). The coroutine parameter t is part of the
         // frame (destroyed with it, after done), hence moved into a local of this
         // scope first
         Task<void> task = std::move(t);
@@ -83,7 +83,7 @@ void BackgroundTaskGroup::begin_close() {
 }
 
 void BackgroundTaskGroup::wait_idle() {
-    // Shutdown-hang diagnostics (docs/gaps.md §7): the semantics are still an
+    // Shutdown-hang diagnostics (docs/archive/gaps.md §7): the semantics are still an
     // unbounded wait (force-killing in-flight tasks would only buy a UAF), but every
     // 10 seconds "which group is stuck, how many tasks remain" is written to the log
     // — previously this was a bare cv.wait, leaving zero clues outside gdb when

@@ -190,7 +190,7 @@ TEST(xlocalfs_large_object_roundtrip) {
     sync_wait(b.close());
 }
 
-// Kernel capability probing (docs/gaps.md §6.3): previously IORING_OP_READ/WRITE (5.6+) was used unconditionally, so on
+// Kernel capability probing (docs/archive/gaps.md §6.3): previously IORING_OP_READ/WRITE (5.6+) was used unconditionally, so on
 // 5.1-5.5 every IO got -EINVAL. With probing in effect, old kernels take the READV/WRITEV fallback --
 // here we positively verify the probe conclusion is self-consistent and exercise the fallback path itself (forcing READ/WRITE
 // off cannot be injected, so uring_forced_readv_roundtrip covers it via direct engine calls instead)
@@ -236,7 +236,7 @@ TEST(xlocalfs_uring_readv_writev_fallback_roundtrip) {
     eng->shutdown();
 }
 
-// Batched submission (docs/gaps.md §6.3): previously one io_uring_enter per SQE. After switching to "the on-duty
+// Batched submission (docs/archive/gaps.md §6.3): previously one io_uring_enter per SQE. After switching to "the on-duty
 // flusher submits on behalf of others", concurrent submissions piggyback on each other -- the correctness criterion is that every
 // co_await gets its own result, with no lost or mismatched completions. SQ depth is set below the concurrency, also covering "SQ full -> wait for the flusher to make progress"
 TEST(xlocalfs_uring_batched_submit_under_concurrency) {
@@ -277,7 +277,7 @@ TEST(xlocalfs_uring_batched_submit_under_concurrency) {
     eng->shutdown();
 }
 
-// Same-backend copy fast path (docs/gaps.md §6.3): copy_file_range in-kernel transfer, etag identical to the source;
+// Same-backend copy fast path (docs/archive/gaps.md §6.3): copy_file_range in-kernel transfer, etag identical to the source;
 // new user_meta with REPLACE semantics takes effect
 TEST(localfs_copy_object_fast) {
     TmpDir tmp;

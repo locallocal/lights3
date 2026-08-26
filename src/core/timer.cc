@@ -32,7 +32,7 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
     bool wake = false;
     {
         std::lock_guard lk(m_);
-        // Refuse after shutdown (docs/gaps.md §7): previously this returned a
+        // Refuse after shutdown (docs/archive/gaps.md §7): previously this returned a
         // "valid but never-firing" id, and in destruction-time races the
         // investigator would stare at a timer that never rings. 0 closes the loop
         // with the cancel(0) no-op convention, so callers need not be aware
@@ -46,7 +46,7 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
         deadlines_.emplace(id, deadline);
         // Only when this becomes the earliest deadline does the scheduling thread
         // need waking to recompute its wait; in all other cases it would wake only
-        // to go back to sleep until the original deadline (docs/gaps.md §4:
+        // to go back to sleep until the original deadline (docs/archive/gaps.md §4:
         // previously every add did notify_all)
         wake = items_.begin()->first == std::make_pair(deadline, id);
     }
@@ -169,7 +169,7 @@ void TimerQueue::fire_loop() {
         } catch (...) {
             LOG_ERROR("TimerQueue: callback threw unknown exception");
         }
-        // Duration accounting (docs/gaps.md §7): callbacks are serial, so a slow
+        // Duration accounting (docs/archive/gaps.md §7): callbacks are serial, so a slow
         // callback directly delays subsequent timers — beyond 1s it is called out
         // individually on top of the histogram, so "timers were blocked 3 seconds"
         // is henceforth traceable in the logs

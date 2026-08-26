@@ -434,7 +434,7 @@ TEST(duostore_redis_list_uploads_hscan_batches) {
     m.close();
 }
 
-// Multi-gateway GC lease (docs/gaps.md §6.1): of two instances with the same prefix only one wins the lease;
+// Multi-gateway GC lease (docs/archive/gaps.md §6.1): of two instances with the same prefix only one wins the lease;
 // the same owner renewing refreshes the TTL; another owner's expired lease can be taken over
 TEST(duostore_redis_gc_lease) {
     REDIS_OR_SKIP();

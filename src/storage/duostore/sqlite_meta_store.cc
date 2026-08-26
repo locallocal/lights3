@@ -95,7 +95,7 @@ constexpr const char* kUpGet = "SELECT val FROM uploads WHERE bucket=?1 AND key=
 constexpr const char* kUpPut = "INSERT INTO uploads(bucket,key,id,val) VALUES(?1,?2,?3,?4)";
 constexpr const char* kUpDel = "DELETE FROM uploads WHERE bucket=?1 AND key=?2 AND id=?3";
 constexpr const char* kUpAny = "SELECT 1 FROM uploads WHERE bucket=?1 LIMIT 1";
-// Composite-cursor pushdown (docs/gaps.md §5.1): (key,id) > (?2,?3) uses row-value
+// Composite-cursor pushdown (docs/archive/gaps.md §5.1): (key,id) > (?2,?3) uses row-value
 // comparison, which follows primary-key order exactly; ?4<=0 means unlimited rows
 // (a negative LIMIT in SQLite means no limit)
 constexpr const char* kUpList =
@@ -371,7 +371,7 @@ void SqliteMetaStore::check_lineage(Conn& c) {
     if (app_id != kAppId)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore meta(sqlite): not a duostore meta database: " + opt_.path);
-    // Version-evolution policy matches the other three engines (docs/gaps.md §6.1):
+    // Version-evolution policy matches the other three engines (docs/archive/gaps.md §6.1):
     // a newer database refuses to run downgraded, an older one climbs the migration
     // chain step by step (user_version is an integer lineage, no string prefix)
     if (ver > kSchemaVersion)
@@ -583,14 +583,14 @@ void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
 uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_t n) {
     n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
     std::lock_guard lk(alloc_mu_);  // lock order alloc_mu_ → mu_; no reverse nesting (alloc_mu_ only taken here)
-    if (r.limit - r.next < n) {  // discard the remainder when switching segments (run batch dispatch requires contiguity within a segment, docs/gaps.md §3.9)
+    if (r.limit - r.next < n) {  // discard the remainder when switching segments (run batch dispatch requires contiguity within a segment, docs/archive/gaps.md §3.9)
         // The segment reservation must be persisted before dispensing — the dedicated
         // connection is always synchronous=FULL (independent of opt_.sync); otherwise
         // a crash losing the reservation would re-issue used file_ids after restart,
         // colliding via O_EXCL with chunk files already on disk. Wasting a segment on
         // crash is harmless (file_ids only need to be unique and monotonic, not
         // contiguous). Mutual exclusion with business write transactions on the
-        // db-level write lock is made **deterministic** (docs/gaps.md §3.9): mu_ is
+        // db-level write lock is made **deterministic** (docs/archive/gaps.md §3.9): mu_ is
         // held during reservation — the process's only writer is kept out, so we can
         // no longer end up in a busy_timeout lottery against our own business
         // transactions (the busy handler queues unfairly; under write hotspots,
@@ -677,7 +677,7 @@ void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign,
     // Aggregate multiple extents of the same pack first, then one arithmetic UPDATE
     // per pack (§9.1: increments/decrements batched with the business transaction);
     // each record counts payload + header overhead, same accounting basis as
-    // file_size (docs/gaps.md §2.3a)
+    // file_size (docs/archive/gaps.md §2.3a)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
@@ -698,7 +698,7 @@ void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason
     // rolled back in the same batch — a rolled-back transaction produces no
     // off-the-books seq, and restart neither rewinds nor re-issues (sqlite_sequence
     // shares the business transaction), sparing an id-segment counter. Oversized
-    // DataRefs split into multiple entries (docs/gaps.md §2.11): GC per-batch decode
+    // DataRefs split into multiple entries (docs/archive/gaps.md §2.11): GC per-batch decode
     // memory stays bounded, and independent acks are harmless
     const int64_t ts = now_ms();
     for (size_t i = 0; i < ref.extents.size(); i += kReclaimMaxExtents) {

@@ -607,7 +607,7 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
                 "The difference between the request time and the server's time is too large.");
     }
 
-    // Credentials: one lookup returns both the SK and the policy snapshot (docs/gaps.md §3.7) -- authorization
+    // Credentials: one lookup returns both the SK and the policy snapshot (docs/archive/gaps.md §3.7) -- authorization
     // uses this snapshot, so even if the credential is revoked while this request is in flight, it completes with verify-time semantics
     auto cred = provider_->lookup(f.access_key);
     if (!cred)

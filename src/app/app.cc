@@ -21,7 +21,7 @@ namespace {
 // (async-signal-safe); the real shutdown is executed by a watchdog thread.
 // Calling server->shutdown() directly in the handler is unsafe — the httplib
 // driver's implementation takes an internal lock, and a signal landing on a
-// thread already holding that lock self-deadlocks (docs/gaps.md §3.9)
+// thread already holding that lock self-deadlocks (docs/archive/gaps.md §3.9)
 int g_sig_pipe[2] = {-1, -1};
 
 void on_signal(int sig) {
@@ -95,7 +95,7 @@ void Application::start_server() {
     inflight_ = std::make_shared<AsyncSemaphore>(cfg_.runtime.max_inflight_requests,
                                                  pool_exec_.get());
     // Observability for the admission gate and the timer thread
-    // (docs/gaps.md §7): under load testing, "stuck at admission" vs
+    // (docs/archive/gaps.md §7): under load testing, "stuck at admission" vs
     // "stuck in the pool" and "how long the timer was blocked by a slow
     // callback" can all be read straight from /-/metrics
     service_->set_admission_stats(
@@ -110,9 +110,15 @@ void Application::start_server() {
     shutdown_src_ = std::make_shared<CancelSource>();
     auto stall = std::chrono::seconds(cfg_.http.transfer_stall_timeout_sec);
     // Assembly of queueing / Permit lifetime / cancellation convergence lives in http/admission.h (shared with the unit tests)
+    // The stall guard's progress threshold must not exceed the streaming chunk size:
+    // with io_chunk_size configured below 64KiB, a single read could never count as
+    // progress and every window would kill a healthy slow connection (roadmap §1.4)
+    auto stall_progress = std::min<uint64_t>(http::StallGuardReader::kMinProgressBytes,
+                                             cfg_.http.io_chunk_size);
     server_->set_handler(http::make_admission_handler(
         inflight_, stall, shutdown_src_,
-        [service = service_](http::HttpRequest req) { return service->dispatch(std::move(req)); }));
+        [service = service_](http::HttpRequest req) { return service->dispatch(std::move(req)); },
+        stall_progress));
     server_->listen(cfg_.http.bind, cfg_.http.port);
 }
 
@@ -148,7 +154,7 @@ int Application::run() {
 
     // run() returning does **not** mean in-flight requests have reached
     // zero (drivers return unconditionally after grace + force close,
-    // docs/gaps.md §2.1). Broadcast cancellation first so in-flight
+    // docs/archive/gaps.md §2.1). Broadcast cancellation first so in-flight
     // requests converge from their suspension points, then wait for
     // permits to return; otherwise the backend close() in shutdown() would
     // touch the same backend concurrently with still-running requests
@@ -204,7 +210,7 @@ void Application::shutdown() noexcept {
     // and handler (via server), so clearing backends_ alone triggers
     // no destruction. Release in reverse ownership order so backend
     // destruction happens **before** pool->join() — destructors still use
-    // the pool (docs/gaps.md §3.9)
+    // the pool (docs/archive/gaps.md §3.9)
     server_.reset();
     service_.reset();
     inflight_.reset();  // holds a raw pointer into pool_exec_; must go first

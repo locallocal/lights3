@@ -1,4 +1,4 @@
-// L2: request body integrity verification (docs/gaps.md §5.6). Content-MD5 and x-amz-checksum-*
+// L2: request body integrity verification (docs/archive/gaps.md §5.6). Content-MD5 and x-amz-checksum-*
 // are both "client pre-declares the body digest"; unlike x-amz-content-sha256 they are independent of
 // the signature: they still apply when auth is disabled, catching request bodies rewritten in transit.
 //

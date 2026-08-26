@@ -16,14 +16,14 @@ http:
   # relax it when fronted by toolchains that don't honor this rule, or when this
   # instance is merely a proxy for another lights3
   min_part_size: 5MiB
-  # ---------- TLS (docs/gaps.md §7) ----------
+  # ---------- TLS (docs/archive/gaps.md §7) ----------
   # HTTPS is enabled only when both are given; only the httplib/beast drivers support
   # it, builtin/seastar error out at startup if configured (never silently run
   # plaintext). SigV4 UNSIGNED-PAYLOAD integrity relies on transport-layer encryption;
   # strongly recommended for public deployments (or terminate TLS at a fronting LB)
   # tls_cert: /etc/lights3/server.crt   # PEM certificate chain
   # tls_key: /etc/lights3/server.key    # PEM private key
-  # ---------- Shutdown/backpressure boundaries (docs/gaps.md §7, values are defaults) ----------
+  # ---------- Shutdown/backpressure boundaries (docs/archive/gaps.md §7, values are defaults) ----------
   # drain_limit: 4MiB          # max request body drained before erroring (beyond it, close the connection)
   # trailer_max_size: 16KiB    # chunked trailer section cap (builtin/seastar hand-written parsers)
   # io_chunk_size: 64KiB       # streaming read/write block size

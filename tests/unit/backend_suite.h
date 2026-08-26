@@ -95,7 +95,7 @@ inline void run_backend_suite(IStorageBackend& b) {
     CHECK_EQ(read_all(*got.body), "hello world");
 
     // Body throws mid-read: the exception must propagate as-is, and no partial object may be left behind (backend.h contract).
-    // This is the shape shared by Content-MD5 mismatch (docs/gaps.md §5.6) and client disconnect
+    // This is the shape shared by Content-MD5 mismatch (docs/archive/gaps.md §5.6) and client disconnect
     {
         ThrowingBodyReader bad("partial-", 64);
         CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "torn.bin", ObjectMeta{}, bad)),
@@ -165,12 +165,12 @@ inline void run_backend_suite(IStorageBackend& b) {
                     S3ErrorCode::NoSuchBucket);
     CHECK_THROWS_S3(put(b, "suite-bkt", "../escape", "x"), S3ErrorCode::InvalidArgument);
     CHECK_THROWS_S3(put(b, "suite-bkt", "a/../b", "x"), S3ErrorCode::InvalidArgument);
-    // The 255B per-segment limit has been pushed down to localfs only (docs/gaps.md §6.3 validate_fs_object_key);
+    // The 255B per-segment limit has been pushed down to localfs only (docs/archive/gaps.md §6.3 validate_fs_object_key);
     // the shared layer here only guarantees the 1024B total-length limit still holds
     CHECK_THROWS_S3(put(b, "suite-bkt", std::string(1100, 'x'), "x"),
                     S3ErrorCode::KeyTooLongError);
 
-    // Directory marker objects (docs/gaps.md §6.3): the S3 console's "create folder" and the directory
+    // Directory marker objects (docs/archive/gaps.md §6.3): the S3 console's "create folder" and the directory
     // semantics of s3fs/goofys/rclone all depend on them. All backends support them uniformly -- localfs
     // carries them as a marker file inside the directory, the other backends are flat key spaces anyway
     {
@@ -264,7 +264,7 @@ inline void run_backend_suite(IStorageBackend& b) {
     auto complete = [&](const std::string& id, std::vector<PartInfo> parts) {
         return sync_wait(b.complete_multipart("suite-bkt", "mp/joined.bin", id, parts));
     };
-    // Out of order / ETag mismatch / missing part / empty parts. Out-of-order has its own code (docs/gaps.md §5.7):
+    // Out of order / ETag mismatch / missing part / empty parts. Out-of-order has its own code (docs/archive/gaps.md §5.7):
     // InvalidPart would make clients re-upload parts, when what is actually needed is sorting the list
     CHECK_THROWS_S3(complete(uid, {{2, r2.etag}, {1, r1.etag}}), S3ErrorCode::InvalidPartOrder);
     CHECK_THROWS_S3(complete(uid, {{1, "deadbeef"}}), S3ErrorCode::InvalidPart);
@@ -292,7 +292,7 @@ inline void run_backend_suite(IStorageBackend& b) {
                                            "00000000000000000000000000000000", {})),
                     S3ErrorCode::NoSuchUpload);
 
-    // Pagination (docs/gaps.md §5.1): this used to always report IsTruncated=false, which clients take to mean the end was reached
+    // Pagination (docs/archive/gaps.md §5.1): this used to always report IsTruncated=false, which clients take to mean the end was reached
     {
         ListPartsOptions po;
         po.max_parts = 1;

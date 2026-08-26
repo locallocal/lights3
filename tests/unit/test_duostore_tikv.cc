@@ -526,7 +526,7 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     reader_store.close();
 }
 
-// Multi-gateway GC lease (docs/gaps.md §6.1, same semantics as the redis version): of two instances with the same prefix only one
+// Multi-gateway GC lease (docs/archive/gaps.md §6.1, same semantics as the redis version): of two instances with the same prefix only one
 // wins; the same owner renews; another owner's expired lease can be taken over
 TEST(duostore_tikv_gc_lease) {
     TIKV_OR_SKIP();

@@ -116,7 +116,7 @@ struct HttpServerFactory {
   its own execution environment
   (how: see [concurrency.md](concurrency.md)).
 
-### 2.1 TLS and Shutdown/Backpressure Knobs (docs/gaps.md §7)
+### 2.1 TLS and Shutdown/Backpressure Knobs (docs/archive/gaps.md §7)
 
 - **TLS**: `http.tls_cert` + `http.tls_key` (PEM; both required to enable). Only
   httplib (`SSLServer`) and beast (`asio::ssl::stream` layered over `tcp_stream`;

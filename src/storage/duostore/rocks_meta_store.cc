@@ -120,7 +120,7 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
     if (!s.ok()) throw_status("open", s);
     db_.store(db, std::memory_order_release);
 
-    // Schema version check + migration hook (§4.1 / docs/gaps.md §6.1). This used to
+    // Schema version check + migration hook (§4.1 / docs/archive/gaps.md §6.1). This used to
     // be a hard "must exactly equal the current constant" check — any value-layout
     // change would make existing databases fail to start. Now:
     //   stored version == current → pass through;
@@ -151,7 +151,7 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
         throw;
     }
 
-    // Meta engine observability (docs/gaps.md §6.1: the default engine rocksdb
+    // Meta engine observability (docs/archive/gaps.md §6.1: the default engine rocksdb
     // previously had no metrics at all; redis/sqlite/tikv each have busy/corruption/
     // conflict counters). Property gauges are read live at render time; they return 0
     // after the db is closed (weak-pointer semantics carried by the atomic null check
@@ -272,7 +272,7 @@ void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef&
     // Aggregate multiple extents of the same pack first, then two merges per pack
     // (§9.1: incremented/decremented in the same batch as the business transaction);
     // each record counts payload + header overhead, matching the file_size accounting
-    // basis (docs/gaps.md §2.3a)
+    // basis (docs/archive/gaps.md §2.3a)
     std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
@@ -290,7 +290,7 @@ void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const Da
                                             ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // Split oversized DataRefs (TB-scale objects = hundreds of thousands of extents)
-    // into multiple gcq entries (docs/gaps.md §2.11): decoded resident memory per GC
+    // into multiple gcq entries (docs/archive/gaps.md §2.11): decoded resident memory per GC
     // batch stays bounded; acks are independent per entry, and splitting does not
     // change crash semantics (unlink is idempotent)
     const int64_t ts = now_ms();
@@ -315,7 +315,7 @@ uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r, uint
         // self-consistent" depends on the unconditional sync here). Wasting a segment
         // on crash is harmless; likewise the leftover discarded when switching
         // segments (run batch dispatch requires contiguity within a segment,
-        // docs/gaps.md §3.9)
+        // docs/archive/gaps.md §3.9)
         rocksdb::WriteBatch batch;
         batch.Merge(cfs_[kStats], slice(counter_key),
                     codec::encode_counter_delta(int64_t(kIdSegment)));
@@ -595,7 +595,7 @@ std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b,
                                                     std::string_view id_marker, int limit) {
     require_bucket_locked(b);  // pure read; the lock-free get is idempotent and safe
     std::string prefix = std::string(b) + '\0';
-    // Cursor pushdown (docs/gaps.md §5.1): the key encoding is already in
+    // Cursor pushdown (docs/archive/gaps.md §5.1): the key encoding is already in
     // (key, upload_id) order, so seeking past the marker suffices — not a single
     // skipped entry is read
     std::string seek = prefix;

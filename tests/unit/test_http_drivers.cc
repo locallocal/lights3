@@ -825,7 +825,7 @@ TEST(http_driver_rejects_oversized_headers) {
 }
 
 
-// ---------- TLS（docs/gaps.md §7）----------
+// ---------- TLS（docs/archive/gaps.md §7）----------
 // Self-signed test certificate (CN=localhost, SAN includes 127.0.0.1, valid until 2126 -- embedded in source so the
 // tests have zero external dependencies; the client does no validation, so apart from expiry the certificate content does not matter)
 constexpr const char* kTestTlsCert =
@@ -1001,7 +1001,7 @@ TEST(http_driver_tls_plaintext_client_rejected) {
 
 TEST(http_driver_tls_unsupported_drivers_throw) {
     // builtin/seastar do not support TLS: if configured they must throw on the spot -- silently running plaintext would void
-    // the transport-layer integrity argument for UNSIGNED-PAYLOAD (docs/gaps.md §7)
+    // the transport-layer integrity argument for UNSIGNED-PAYLOAD (docs/archive/gaps.md §7)
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
         if (d != "builtin" && d != "seastar") continue;
@@ -1038,7 +1038,7 @@ TEST(http_driver_tls_bad_cert_throws) {
 }
 
 // ---------- Timeouts / connection limit / shutdown contract (config.h timeout knobs section / http-adapter.md §5,
-// docs/issues.md T10): each driver implements these behaviors on its own, most prone to divergence, must be asserted across all four ----------
+// docs/archive/issues.md T10): each driver implements these behaviors on its own, most prone to divergence, must be asserted across all four ----------
 
 TEST(http_driver_idle_timeout_closes_idle_connection) {
     // An idle connection (keep-alive that has completed a request) must be closed by the server after idle_timeout;

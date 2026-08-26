@@ -103,7 +103,7 @@ struct HttpServerFactory {
   driver 负责在自己的执行环境里驱动这个协程直至完成
   （方式见 [concurrency.md](concurrency.md)）。
 
-### 2.1 TLS 与停机/背压参数（docs/gaps.md §7）
+### 2.1 TLS 与停机/背压参数（docs/archive/gaps.md §7）
 
 - **TLS**：`http.tls_cert` + `http.tls_key`（PEM，两个都给才启用）。仅
   httplib（`SSLServer`）与 beast（`asio::ssl::stream` 包一层 `tcp_stream`，

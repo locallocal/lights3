@@ -99,7 +99,7 @@ TEST(metrics_histogram_render) {
 }
 
 TEST(metrics_nonfinite_render) {
-    // Non-finite values must use the Prometheus spelling (docs/gaps.md §4): the raw to_chars output
+    // Non-finite values must use the Prometheus spelling (docs/archive/gaps.md §4): the raw to_chars output
     // "inf"/"nan" would make the scraper reject the entire target, same failure mode as bucket-bound collapsing
     MetricsRegistry reg;
     reg.gauge_callback("lights3_test_nf_pos", "cb",
@@ -192,7 +192,7 @@ TEST(metrics_concurrent_smoke) {
     CHECK_EQ(h->snapshot().count, uint64_t(40000));
 }
 
-// ---------- §7 increment for L2 request metrics (docs/gaps.md §7) ----------
+// ---------- §7 increment for L2 request metrics (docs/archive/gaps.md §7) ----------
 
 TEST(s3_metrics_renders_pool_wait_histogram) {
     // The dedicated-pool criterion of concurrency.md §3.1 depends on this histogram; once collected it must be readable from /-/metrics

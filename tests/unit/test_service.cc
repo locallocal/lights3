@@ -823,6 +823,9 @@ TEST(service_observability_endpoints) {
     CHECK_EQ(metrics.status, 200);
     CHECK(contains(metrics.small_body, "lights3_requests_total"));
     CHECK(contains(metrics.small_body, "lights3_request_duration_seconds_bucket"));
+    // roadmap §1.5: the histogram must cover up to the request_timeout default (300s),
+    // otherwise everything over 10s piles into +Inf and large-object P99 is unreadable
+    CHECK(contains(metrics.small_body, "le=\"300\""));
     CHECK(contains(metrics.small_body, "lights3_inflight_requests"));
 }
 
@@ -979,7 +982,7 @@ TEST(service_vhost_bucket_name_validated) {
         CHECK_EQ(resp.status, 400);
         CHECK(contains(resp.small_body, "InvalidBucketName"));
     }
-    // Domain names are case-insensitive (RFC 4343, docs/gaps.md §2.13): an uppercase Host
+    // Domain names are case-insensitive (RFC 4343, docs/archive/gaps.md §2.13): an uppercase Host
     // normalizes to the same bucket as lowercase ("upper" doesn't exist → 404), rather than
     // falling back to path-style or rejecting the uppercase bucket name -- either would make
     // the same URL point to different resources depending on case
@@ -1058,6 +1061,27 @@ TEST(service_unsupported_headers_rejected) {
     // ACL values are 501
     CHECK_EQ(try_put("x-amz-acl", "private").status, 200);
     CHECK_EQ(try_put("x-amz-acl", "public-read").status, 501);
+}
+
+// ---------- roadmap §1.3: STS temporary credentials are explicitly refused ----------
+TEST(service_sts_token_explicit_501) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+
+    // Header side: previously in no reject list — silently dropped, and with auth
+    // enabled the permanent-key lookup then surfaced a misleading InvalidAccessKeyId
+    auto req = make_req("GET", "/bkt/k");
+    req.headers.add("x-amz-security-token", "FwoGZXIvYXdzEXAMPLETOKEN");
+    auto resp = sync_wait(svc.dispatch(std::move(req)));
+    CHECK_EQ(resp.status, 501);
+    CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
+    CHECK(contains(resp.small_body, "X-Amz-Security-Token"));
+
+    // Query side: previously whitelisted in kCommonQueryKeys and silently ignored
+    auto q = sync_wait(
+        svc.dispatch(make_req("GET", "/bkt/k", "", {{"X-Amz-Security-Token", "tok"}})));
+    CHECK_EQ(q.status, 501);
+    CHECK(contains(q.small_body, "<Code>NotImplemented</Code>"));
 }
 
 // ---------- gaps §3.5: query whitelist; unknown params get 501 instead of a silent wrong answer ----------
@@ -1195,7 +1219,7 @@ TEST(service_delete_objects_malformed_inputs) {
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
 }
 
-// ---- docs/gaps.md §5.2 / §5.3 / §5.5 / §5.9 ----
+// ---- docs/archive/gaps.md §5.2 / §5.3 / §5.5 / §5.9 ----
 
 TEST(service_first_class_object_metadata) {
     // First-class metadata (§5.2): previously all of it was dropped on PUT and never returned by
@@ -1612,7 +1636,7 @@ TEST(service_multipart_listing_pagination) {
         make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
     CHECK_EQ(bad.status, 400);
 
-    // encoding-type=url (docs/issues.md T13): previously the parameter was accepted but never
+    // encoding-type=url (docs/archive/issues.md T13): previously the parameter was accepted but never
     // encoded -- a silent wrong answer
     sync_wait(svc.dispatch(make_req("POST", "/bkt/enc me.bin", "", {{"uploads", ""}})));
     auto encp = sync_wait(svc.dispatch(make_req(
@@ -1625,7 +1649,7 @@ TEST(service_multipart_listing_pagination) {
     CHECK_EQ(bad_enc.status, 400);
 }
 
-// Per-request timeout (config.h request_timeout_sec · docs/issues.md T10): a timeout during
+// Per-request timeout (config.h request_timeout_sec · docs/archive/issues.md T10): a timeout during
 // handler execution is broken by cooperative cancellation and converges to 503 SlowDown
 // (retryable) -- this contract previously had zero tests
 TEST(service_request_timeout_cancels_and_returns_503) {

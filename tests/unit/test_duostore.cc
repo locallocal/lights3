@@ -196,7 +196,7 @@ TEST(duostore_decode_object_meta_parity) {
     CHECK_EQ(codec::to_unix_ms(lite.last_modified), codec::to_unix_ms(full.last_modified));
 }
 
-// Canonical parsing of the pack record owner (docs/gaps.md §6.1): three historical forms converge on a single entry point
+// Canonical parsing of the pack record owner (docs/archive/gaps.md §6.1): three historical forms converge on a single entry point
 TEST(duostore_parse_pack_owner_forms) {
     using codec::PackOwner;
     // parse_pack_owner returns string_views into the argument's bytes: the input string must outlive the assertions
@@ -228,7 +228,7 @@ TEST(duostore_parse_pack_owner_forms) {
     CHECK(codec::parse_pack_owner(std::string("\0k", 2)).kind == PackOwner::Kind::kUnknown);
 }
 
-// Schema marker validation (the pure precondition of the migration hook, docs/gaps.md §6.1): equal to current
+// Schema marker validation (the pure precondition of the migration hook, docs/archive/gaps.md §6.1): equal to current
 // passes straight through, newer than this build is rejected (prevents a downgrade silently corrupting writes), garbage is rejected
 TEST(duostore_rocks_schema_marker_validation) {
     CHECK_EQ(RocksMetaStore::validate_schema_marker(
@@ -1154,7 +1154,7 @@ TEST(duostore_compact_low_liveness_pack) {
     sync_wait(h.b->close());
 }
 
-// Age rotation (docs/gaps.md §6.1): under low write volume an active pack sealed only by capacity never rotates,
+// Age rotation (docs/archive/gaps.md §6.1): under low write volume an active pack sealed only by capacity never rotates,
 // and its dead space can never enter the compaction candidate set. seal_aged_packs seals over-age active packs,
 // reporting file_size truthfully (not the crash back-seal's 0), after which the dead space can be reclaimed by compaction
 TEST(duostore_pack_age_rotation_seals_idle_pack) {
@@ -1210,7 +1210,7 @@ TEST(duostore_pack_age_rotation_runs_in_gc) {
     sync_wait(h.b->close());
 }
 
-// Compaction budget and priority (docs/gaps.md §6.1): capped at N per round, taken in descending order of
+// Compaction budget and priority (docs/archive/gaps.md §6.1): capped at N per round, taken in descending order of
 // reclaimable bytes -- previously it was "rewrite every eligible pack in one round", and after a bulk delete a single round could hold the lock for hours
 TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     TmpDir tmp;
@@ -1644,7 +1644,7 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     sync_wait(b2->close());
 }
 
-// packs/ two-way reconciliation (docs/gaps.md §6.1): the pack file exists as soon
+// packs/ two-way reconciliation (docs/archive/gaps.md §6.1): the pack file exists as soon
 // as it is created, but the packstat row only lands when the first record
 // commits — a hard crash inside that window leaks the file forever with no
 // record anywhere. Forward: unrecorded pack file past grace is deleted.

@@ -115,7 +115,7 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     std::vector<Group> groups;
     std::map<std::string, size_t> by_owner;  // "b\0k" -> groups index
     for (size_t i = 0; i < batch.size(); ++i) {
-        // Canonical parser (docs/gaps.md §6.1: the three owner forms converge in
+        // Canonical parser (docs/archive/gaps.md §6.1: the three owner forms converge in
         // codec, offline forensics tools reuse the same entry point);
         // kLegacyPart/kUnknown have no b/k to look up, conservatively not migrated
         auto po = codec::parse_pack_owner(batch[i].owner);
@@ -639,7 +639,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         ro.on_corruption = on_corruption;
         ro.metrics = metrics;  // op latency/error metrics (C4, docs/duostore-rados-data.md §10)
         // Write-side pins injected from the same source as the fs path
-        // (docs/gaps.md §1.2): the rados branch used to miss this entirely, and
+        // (docs/archive/gaps.md §1.2): the rados branch used to miss this entirely, and
         // the orphan scan would delete the already-landed parts of an in-flight
         // large object
         auto rpins = pins_;
@@ -726,7 +726,7 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
         "lights3_duostore_orphan_packstats_missing",
         "Pack accounts whose file is missing as of the last orphan scan (data loss signal)");
 
-    // Usage and space amplification (docs/gaps.md §6.1): the ratio
+    // Usage and space amplification (docs/archive/gaps.md §6.1): the ratio
     // pack_bytes/pack_live_bytes is the amplification factor — left for the query
     // side to compute, the two gauges each stay independently readable (gauges are
     // integral; a precomputed ratio would lose precision)
@@ -785,7 +785,7 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
 // file_size is backfilled as 0 (unknown; the compaction scan can stat again), and
 // the seal_pack contract guarantees 0 never overwrites a known value
 void DuoStoreBackend::abandon_stale_packs() {
-    // Only catch-up seal packs that "truly nobody is writing" (docs/gaps.md §1.4):
+    // Only catch-up seal packs that "truly nobody is writing" (docs/archive/gaps.md §1.4):
     // with multiple gateways sharing the same meta + the same data root (a
     // redis/tikv meta misconfiguration, or old/new processes overlapping during a
     // rolling restart), unconditional sealing would mark an active pack **another
@@ -1058,7 +1058,7 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
 Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
-    // meta-only read (docs/gaps.md §3.9): HEAD does not pay for the whole manifest
+    // meta-only read (docs/archive/gaps.md §3.9): HEAD does not pay for the whole manifest
     auto meta = meta_->head_object(bucket, key);
     if (!meta) {
         require_bucket(bucket);  // distinguish NoSuchBucket / NoSuchKey
@@ -1547,7 +1547,7 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // this scan treats the current data engine's enumeration as the on-disk
     // truth — a deployment that switches data engines under the same meta is
     // outside the orphan scan's supported scope.
-    // Memory footprint (docs/gaps.md §3.9): previously the refs/on_disk hash
+    // Memory footprint (docs/archive/gaps.md §3.9): previously the refs/on_disk hash
     // sets plus a full disk vector were resident simultaneously (100M chunks
     // ≈ 4–5GB); replaced by a sorted refs vector (8B/entry) + streaming on-disk
     // classification + a hit bitmap (1 bit/entry), cutting the peak by an order
@@ -1615,7 +1615,7 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
                   "(data loss signal, keeping meta for manual inspection)", cfg_.name, refs[i]);
     }
 
-    // packs/ two-way reconciliation (docs/gaps.md §6.1): the chunk-side orphan
+    // packs/ two-way reconciliation (docs/archive/gaps.md §6.1): the chunk-side orphan
     // scan previously did not cover pack entities, yet a pack file is "create
     // the file first, write the packstat row only when the first record
     // commits" — a hard crash exactly in that window leaves the file on disk

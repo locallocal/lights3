@@ -133,7 +133,7 @@ struct Batch {
     std::vector<std::string> keys;
 };
 
-// ---- Transaction capability boundary (docs/gaps.md §6.1 assessment) ----
+// ---- Transaction capability boundary (docs/archive/gaps.md §6.1 assessment) ----
 // This sidecar does optimistic 2PC only; the four "missing" items are deliberate narrowing
 // argued from the workload, not debt:
 //   Pessimistic transactions: meta transactions are all short (a single-object put touches a few
@@ -241,7 +241,7 @@ private:
         return batches;
     }
 
-    // Explicit work stack instead of recursion (docs/gaps.md §4): redo triggered by region
+    // Explicit work stack instead of recursion (docs/archive/gaps.md §4): redo triggered by region
     // split/migration used to recurse (prewrite_batch → prewrite_keys → …); the backoff budget
     // bounds time, not stack depth, which is unbounded under frequent region churn. false =
     // this batch hit a region error; its keys go back on the stack to re-resolve routing and redo
@@ -321,7 +321,7 @@ private:
         }
     }
 
-    // Work stack isomorphic to prewrite_keys (docs/gaps.md §4)
+    // Work stack isomorphic to prewrite_keys (docs/archive/gaps.md §4)
     void commit_keys(Backoffer& bo, const std::vector<std::string>& keys, bool primary_phase) {
         std::vector<std::vector<std::string>> work;
         work.push_back(keys);
@@ -628,7 +628,7 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
 
 namespace {
 
-// Per-transaction size protection (docs/gaps.md §2.12) — fail-fast before any RPC:
+// Per-transaction size protection (docs/archive/gaps.md §2.12) — fail-fast before any RPC:
 // - Single-value cap: TiKV raft-entry-max-size defaults to 8MiB; an over-limit prewrite is bound
 //   to fail and **fails on every retry** (the object cannot be written, existing accounting
 //   entries cannot be deleted). 2MiB headroom is left for proto wrapping.

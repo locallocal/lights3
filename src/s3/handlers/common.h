@@ -26,7 +26,7 @@ inline std::string strip_quotes(std::string s) {
 }
 
 // Both TSV and headers are line-oriented: CR/LF in metadata values would tear sidecar records apart, and is
-// also a response-header injection surface. First-class fields are rejected just like user-meta (docs/gaps.md §5.2)
+// also a response-header injection surface. First-class fields are rejected just like user-meta (docs/archive/gaps.md §5.2)
 inline void reject_control_chars(std::string_view name, const std::string& v) {
     if (v.find('\n') != std::string::npos || v.find('\r') != std::string::npos)
         throw S3Error(S3ErrorCode::InvalidArgument,
@@ -34,7 +34,7 @@ inline void reject_control_chars(std::string_view name, const std::string& v) {
 }
 
 // Shared by PutObject / CreateMultipartUpload: extracts Content-Type, x-amz-meta-*, and
-// the six first-class S3 metadata fields (docs/gaps.md §5.2)
+// the six first-class S3 metadata fields (docs/archive/gaps.md §5.2)
 inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     storage::ObjectMeta meta;
     if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
@@ -64,7 +64,7 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     return meta;
 }
 
-// True when the request carries any response-* override parameter (docs/gaps.md §5.3;
+// True when the request carries any response-* override parameter (docs/archive/gaps.md §5.3;
 // the list lives next to apply_response_overrides in objects.cc). dispatch uses this to
 // refuse overrides on anonymous website reads — on a public bucket a crafted link could
 // otherwise hang an arbitrary Content-Disposition off the bucket's domain.

@@ -378,7 +378,7 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
                     break;
             }
         }
-        // Unknown 4xx must not collapse into 500 (docs/gaps.md §3.9): SDKs auto-retry 500s,
+        // Unknown 4xx must not collapse into 500 (docs/archive/gaps.md §3.9): SDKs auto-retry 500s,
         // turning deterministic rejections like InvalidObjectState into infinite retry
         // loops. Map to a local 400 (InvalidRequest is not scrubbed by public_error), with
         // the remote code and original text carried in the message

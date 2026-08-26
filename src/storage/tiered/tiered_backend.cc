@@ -283,7 +283,7 @@ std::shared_ptr<TieredBackend> TieredBackend::from_config(
         // The "%" suffix must participate in the decision: "1%" means 1%. The old code
         // dropped the suffix, so 1.0 did not trigger the /100, a 1% low watermark parsed as
         // 100%, and (used-low) went negative, wrapped around, and demoted the entire bucket
-        // (docs/gaps.md §3.9). "85%"/"85" and "0.85" are all accepted
+        // (docs/archive/gaps.md §3.9). "85%"/"85" and "0.85" are all accepted
         if (suffixed || v > 1.0) v /= 100.0;
         if (!(v > 0.0 && v <= 1.0))
             throw std::runtime_error("tiered backend '" + cfg.name + "': watermark '" + s +
@@ -680,7 +680,7 @@ Task<void> TieredBackend::commit_cache_fill(std::string bucket, std::string key,
                                             ObjectMeta expect, TierInfo expect_tier,
                                             fsutil::TmpFile& tmp) {
     auto lk = co_await key_lock(bucket, key).acquire();
-    // Critical path (docs/gaps.md §2.4): this function is co_awaited by TeeCacheReader when
+    // Critical path (docs/archive/gaps.md §2.4): this function is co_awaited by TeeCacheReader when
     // the client reads EOF; without switching back to a pool thread, the whole rename + two
     // fsyncs + sidecar write would land directly on the HTTP response thread
     co_await pool_->schedule();
@@ -727,7 +727,7 @@ Task<void> TieredBackend::scan_once() {
 
     const int64_t now = ::time(nullptr);
     std::set<std::string> chosen;
-    // Bounded coroutine frames (docs/gaps.md §2.13): transfers_ only limits execution
+    // Bounded coroutine frames (docs/archive/gaps.md §2.13): transfers_ only limits execution
     // concurrency, not frame count; this used to materialize all objects and construct N
     // frames at once. Changed to batched co_await, so the number of simultaneously live
     // frames is fixed
@@ -850,7 +850,7 @@ Task<void> TieredBackend::scan_once() {
         // Eviction candidates cannot cover the gap (disk consumed by things outside this
         // backend, or every object is smaller than the watermark gap): previously each
         // round silently recomputed and freed 0 bytes, completely invisible to operators
-        // (docs/gaps.md §4)
+        // (docs/archive/gaps.md §4)
         if (need > 0)
             LOG_WARN("tiered: space watermark still exceeded after eviction round, "
                      "{} bytes short — disk consumed outside this backend, or no "
@@ -1023,7 +1023,7 @@ Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
         if (!be.is_directory() || !fs::exists(be.path() / fsutil::kBucketMarker)) continue;
         std::string bucket = be.path().filename().string();
 
-        // Two-cursor ordered merge (docs/gaps.md §2.13): local and cloud are both paged in
+        // Two-cursor ordered merge (docs/archive/gaps.md §2.13): local and cloud are both paged in
         // key lexicographic order, completing both reconciliation directions in O(page)
         // memory -- previously both full key sets were materialized in memory (~1.5-2GB for
         // tens of millions of objects). Local existence is judged by the data file (list is
@@ -1285,7 +1285,7 @@ void TieredBackend::load_atime_snapshot() {
 void TieredBackend::save_atime_snapshot() {
     std::vector<std::pair<std::string, std::string>> kv;
     {
-        // Boundedness (docs/gaps.md §4: deletions bypassing this backend would grow the
+        // Boundedness (docs/archive/gaps.md §4: deletions bypassing this backend would grow the
         // table without bound, and the snapshot is a full rewrite): records older than the
         // coldness threshold are dropped outright -- the object has already reached
         // coldness eligibility, and after losing atime the mtime fallback reaches the same

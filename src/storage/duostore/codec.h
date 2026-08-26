@@ -85,7 +85,7 @@ Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms = nullptr);
 std::string encode_counter_delta(int64_t d);
 int64_t decode_counter(std::string_view v);
 
-// ---- canonical parsing of pack record owner (docs/gaps.md §6.1) ----
+// ---- canonical parsing of pack record owner (docs/archive/gaps.md §6.1) ----
 // Three historical forms used to be hand-parsed ad hoc inside the compaction
 // callbacks, unusable by offline forensics tools. Consolidated here into the one
 // parser: object = "b\0k"; part (since P4) = "mpu\0b\0k\0id\0no";
@@ -105,7 +105,7 @@ PackOwner parse_pack_owner(std::string_view owner);
 // basis as file_size: if only payload is counted, a pack of small objects has
 // live/file_size permanently below pack_gc_ratio even at 100% liveness, and
 // compaction falls into a permanent "full rewrite → migrate away → rewrite in the
-// new pack" loop (docs/gaps.md §2.3a).
+// new pack" loop (docs/archive/gaps.md §2.3a).
 // Header length depends on the owner form: object records are "b\0k", part
 // records are "mpu\0b\0k\0id\0no". complete rebalances the selected parts'
 // accounting from part basis to object basis (refs transfer in the same batch),

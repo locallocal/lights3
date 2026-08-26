@@ -151,7 +151,7 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
   RocksDB 版按次覆写 sync 标志更干净）；崩溃丢预留会重发已用 file_id、与已落盘
   chunk 的 O_EXCL 冲突，故必须先持久后派发。
 - **锁序 `alloc_mu_ → mu_`**：预留期间持 `mu_` 把进程内唯一写者挡在门外
-  （docs/gaps.md §3.9）——否则号段 UPDATE 与业务事务在 db 级写锁上打 busy_timeout
+  （docs/archive/gaps.md §3.9）——否则号段 UPDATE 与业务事务在 db 级写锁上打 busy_timeout
   彩票（busy handler 不公平排队，写热点下连输 4 轮 = 20s，正常 PUT 变 500）。有界
   重试保留（`step_busy` ≤4 轮）但只针对绕过 flock 的进程外来客（裸 sqlite3 工具），
   超限抛 InternalError"id reservation starved"。alloc 由数据面在业务事务之外调用，
@@ -175,7 +175,7 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
   `sqlite_meta_store.h:SqliteMetaStore::set_list_pause_for_test` 在发出首条后回调
   一次，供并发提交注入验证 snapshot 岿然不动（设计文档 §9 S4）。
 - **`list_uploads`**：`kUpList` 用**行值比较** `(key,id) > (?2,?3)` 做复合游标下推
-  （恰为主键序；docs/gaps.md §5.1），`LIMIT ?4`（≤0 绑 −1 = 不限）。
+  （恰为主键序；docs/archive/gaps.md §5.1），`LIMIT ?4`（≤0 绑 −1 = 不限）。
 - `list_parts`/`scan_parts`：`kPartScan` 按 `part_no` 数值序；`list_buckets`：
   `kBucketList` 主键序免费排序。
 - `peek_reclaims`：`kGcqPeek`（`seq>=? ORDER BY seq LIMIT ?`）+ 累计 extent 上限
@@ -191,7 +191,7 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
 `sqlite_meta_store.cc:SqliteMetaStore::migrate_schema` 沿 `kSchemaMigrations` 迁移链
 逐级升级——**每步一个事务，含 `PRAGMA user_version` 盖章**，中途崩溃重启从断点续走；
 缺迁移路径经 `meta_util.h:throw_no_migration` 响亮失败。策略与其余三引擎统一
-（docs/gaps.md §6.1）；记录级演进仍走 codec 的 `read_ver` 容错读，此链保留给表/列
+（docs/archive/gaps.md §6.1）；记录级演进仍走 codec 的 `read_ver` 容错读，此链保留给表/列
 布局变更。
 
 ## 8. 错误映射与损坏指标

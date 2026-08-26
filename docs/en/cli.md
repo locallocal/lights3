@@ -201,7 +201,7 @@ s3adm bench list-buckets -j 16
 
 - One source file per command group (`s3adm_<group>.cc/.h`, `make_<group>()`
   returns the group root), added in `s3adm.cc` via `add_subcommand`;
-  connection options are reused through `add_conn_opts` / `read_conn_opts`
+  connection options are reused through `add_conn_flags` / `read_conn_opts`
   in `s3adm_common.h`.
 - Callbacks return nothing; the exit code travels through `s3adm::g_exit`
   following the 0/1/2 convention in §1; positionals are read from `c->args()`

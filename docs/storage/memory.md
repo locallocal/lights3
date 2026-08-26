@@ -88,7 +88,7 @@ Range（不满足抛 416），构造 `memory_backend.cc:SharedBlobReader`——�
 `nullopt`），CopyObject 由 L2 handler 走"`get_object` 流式读 + `put_object` 流式写"
 的通用回退。语义等价，只多一次内存拷贝——对内存后端可接受。
 
-## 5. 容量闸门（docs/gaps.md §6.3）
+## 5. 容量闸门（docs/archive/gaps.md §6.3）
 
 两道闸，语义一致（超限抛 503 `SlowDown`）：
 

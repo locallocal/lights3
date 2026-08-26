@@ -232,7 +232,7 @@ Task<void> RadosDataStore::close() {
 
 // ---------- RadosChunkWriter: slice buffering + aio write_full double-buffered pipeline (§4) ----------
 
-// Owner xattr name (docs/gaps.md §6.1): WriteHint.owner used to be dropped —
+// Owner xattr name (docs/archive/gaps.md §6.1): WriteHint.owner used to be dropped —
 // disaster recovery with all meta lost had no way to determine object ownership.
 // The three owner forms (codec::parse_pack_owner) are stored verbatim as the
 // value; offline salvage reverse-looks-up via rados getxattr
@@ -323,7 +323,7 @@ private:
     Task<void> start_flush() {
         co_await store_->pool_->schedule();  // crc computation (CPU) stays off the HTTP driver thread
         rados_ioctx_t ctx = io(store_->conn_);
-        // Batch-allocate contiguous runs with geometric growth (docs/gaps.md §3.9,
+        // Batch-allocate contiguous runs with geometric growth (docs/archive/gaps.md §3.9,
         // same strategy as fs ChunkWriter): interleaved dispatch across concurrent
         // writers would defeat the manifest's run encoding. Segment allocation and
         // pinning must precede make_pending: alloc_/pin_one can throw, and at that
@@ -334,7 +334,7 @@ private:
             run_limit_ = run_next_ + run_len_;
         }
         const uint64_t file_id = run_next_++;
-        // Pin upon allocation (docs/gaps.md §1.2): this slice's object lands at T0,
+        // Pin upon allocation (docs/archive/gaps.md §1.2): this slice's object lands at T0,
         // but the whole PUT commits meta only at T0+Δ. If Δ exceeds gc_grace, the
         // orphan scan sees an object that is "absent from refs, mtime beyond grace,
         // unpinned" and deletes it outright; the PUT then commits successfully and
@@ -456,7 +456,7 @@ public:
         }
         size_t want = size_t(std::min<uint64_t>({buf.size(), e.length - cur_off_, remaining_}));
         AioPending* p = make_pending(exec_, lat_);
-        // Buffer handover with the same strategy as the write side (docs/gaps.md
+        // Buffer handover with the same strategy as the write side (docs/archive/gaps.md
         // §3.9): the aio reads into the ticket's own buffer, copied to the caller
         // after completion. If it wrote into buf directly, a read timeout/cancel
         // destroying the coroutine frame along with the caller's buffer would let
@@ -589,7 +589,7 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
 }
 
 // The absence of a pack layer is a design boundary, not a debt (as characterized
-// in docs/gaps.md §6.1): pack aggregation targets the local fs's per-file cost
+// in docs/archive/gaps.md §6.1): pack aggregation targets the local fs's per-file cost
 // (inode/fd/directory entry), while small-object amplification on the RADOS side
 // is borne by BlueStore's min_alloc_size and the pool's replication policy;
 // stacking another pack layer at the gateway would only introduce cross-object

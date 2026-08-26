@@ -325,7 +325,7 @@ root 凭证 POST 生成 → 解析响应 JSON 取出新 AK/SK（sed/grep 提取�
 ### 10.4 per-credential policy
 
 刻意保持在"够用"档，不引入 IAM 的 statement/effect/condition 语法，但具备
-bucket / key 前缀 / 动作三个维度（docs/gaps.md §5.10）：
+bucket / key 前缀 / 动作三个维度（docs/archive/gaps.md §5.10）：
 
 ```json
 { "policy": { "buckets": ["logs-*", "backup"], "prefixes": ["tenant-a/"],
@@ -360,7 +360,7 @@ bucket / key 前缀 / 动作三个维度（docs/gaps.md §5.10）：
 ### 10.5 静态凭证的 SK 不经 admin API 回传
 
 `?show-secret=true` 只对动态与文件凭证生效，静态（root）凭证恒返回掩码
-（docs/gaps.md §5.10）。理由是信任边界：静态 SK 来自配置文件/环境变量，能取回它
+（docs/archive/gaps.md §5.10）。理由是信任边界：静态 SK 来自配置文件/环境变量，能取回它
 等于把"能读配置文件"降级成"能发一次 HTTP GET"；而 root SK 又恰恰**无法**经
 admin API 吊销（`DELETE` 拒绝静态凭证），一旦泄露只能改配置重启。
 掩码也从"前 4 + 后 4"收紧为只留前 4 位——运维手挑的 SK 熵未必够，泄露两端毫无

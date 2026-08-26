@@ -168,12 +168,12 @@ public:
     // Usage: auto permit = co_await sem.acquire();
     // On cancellation (request timeout / disconnect / process shutdown), a queued
     // acquire surfaces as OperationCancelled — the max_inflight_requests queue is
-    // exactly where a request is most likely to hang for a long time (docs/gaps.md §3.1)
+    // exactly where a request is most likely to hang for a long time (docs/archive/gaps.md §3.1)
     AcquireAwaiter acquire(CancelToken token = {}) { return {*this, std::move(token), {}, false}; }
 
     // Wake all waiters with cancellation semantics and reject subsequent acquires.
     // Calling this before destruction lets the owner satisfy the "no waiters at
-    // destruction" contract (docs/gaps.md §2.13 leftover)
+    // destruction" contract (docs/archive/gaps.md §2.13 leftover)
     void close() {
         std::deque<std::shared_ptr<Waiter>> ws;
         {

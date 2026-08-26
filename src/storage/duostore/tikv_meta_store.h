@@ -48,7 +48,7 @@ struct TikvMetaOptions {
 class TikvMetaStore final : public IMetaStore {
 public:
     // Current schema version (marker = "t" + version; existing stores are upgraded
-    // along the migration chain at open, docs/gaps.md §6.1)
+    // along the migration chain at open, docs/archive/gaps.md §6.1)
     static constexpr int64_t kSchemaCurrent = 1;
 
     explicit TikvMetaStore(TikvMetaOptions opt);
@@ -179,7 +179,7 @@ private:
     // pure-write, no conflict). Independent of mut_refs: complete's refs transfer
     // (owner rewrite) must be a no-op for packs — mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes
-    // uses the same accounting basis as file_size (docs/gaps.md §2.3a)
+    // uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
     void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign,
                         int64_t rec_overhead);
     // Full read of parts (ascending by part_no; the be16 suffix is naturally ordered)

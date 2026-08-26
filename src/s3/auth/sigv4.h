@@ -20,10 +20,10 @@ namespace lights3::s3 {
 
 // Credential lookup interface (docs/s3-protocol.md §3.5, docs/credential-management.md §5.2): called synchronously on the verification hot path; implementations must be thread-safe.
 // build() wraps a static-table implementation by default; CredentialStore implements this interface and is injected via set_provider.
-// A single lookup returns both the SK and a policy snapshot (docs/gaps.md §3.7): querying the store again for the
+// A single lookup returns both the SK and a policy snapshot (docs/archive/gaps.md §3.7): querying the store again for the
 // policy after verify risks the credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race window
 struct CredentialLookup {
-    util::SecretString secret_key;  // wiped on destruction (docs/gaps.md §4)
+    util::SecretString secret_key;  // wiped on destruction (docs/archive/gaps.md §4)
     std::optional<CredentialPolicy> policy;  // snapshot at lookup time; nullopt = unrestricted
 };
 
@@ -43,7 +43,7 @@ struct ICredentialProvider {
 // Result of verify: the requester's identity + the policy snapshot from the moment of verification. Authorization
 // decisions must use this snapshot rather than a second store lookup -- under an in-flight revocation race, a
 // missed second lookup would make the policy vanish entirely
-// (a readonly credential becomes unrestricted within the window, docs/gaps.md §3.7)
+// (a readonly credential becomes unrestricted within the window, docs/archive/gaps.md §3.7)
 struct VerifiedIdentity {
     std::string access_key;                  // empty when auth is disabled (for access logs)
     std::optional<CredentialPolicy> policy;  // nullopt = unrestricted

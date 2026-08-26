@@ -93,7 +93,7 @@ fdatasync——换成 io_uring 异步提交：磁盘等待期间**不占用任�
      DATASYNC 标志写 `sqe.fsync_flags` 而非 `len`（两者在 sqe union 的不同偏移），
      最后 `store_release` 推进 `sq_tail_`；
    - 调 `uring.cc:UringEngine::flush_locked` 提交。
-3. `flush_locked` 是**批量提交**的核心（docs/gaps.md §6.3）：若已有线程在
+3. `flush_locked` 是**批量提交**的核心（docs/archive/gaps.md §6.3）：若已有线程在
    `io_uring_enter` 中（`flushing_` 为真），本次直接返回——自己的 SQE 落在值班者
    的提交窗口 `[submitted_, sq_tail_)` 内被捎带，高并发下 N 个 SQE 合并成一次
    enter。值班者循环 enter 直到 `submitted_` 追平 tail，enter 期间放锁；
@@ -169,7 +169,7 @@ xlocalfs 抽成 `XLocalFsBackend::drain_to_tmp`：MD5 更新仍在（恢复后�
 
 `drain_to_tmp` 用**出参**而非返回 `pair<uint64_t,string>`：`body.read` 抛异常
 （Content-MD5 不匹配、客户端断连）时，GCC 会对**从未构造**的绑定目标跑析构，
-表现为 put 路径 double free / SEGV（docs/gaps.md §5.6 的测试用例正是此形状）；
+表现为 put 路径 double free / SEGV（docs/archive/gaps.md §5.6 的测试用例正是此形状）；
 出参在 `co_await` 前已完整构造，展开销毁的是真实对象。
 
 提交期差异集中在持久化一步：`XLocalFsBackend::sync_fd` 用 FSYNC SQE
@@ -217,7 +217,7 @@ PUT 走同一 `prepared=true` 提交（xattr → FSYNC SQE → commit_lock 内 r
 1. **先置 `stopped_` 拒绝新提交**——否则「排空」无从谈起；
 2. **等在途 CQE 清零**（`inflight_cv_`，上限 10s）：CQE 完成序**不保证** NOP
    哨兵排在既有读写之后，不排空就 munmap 会让内核继续往已释放的用户缓冲写
-   （UAF，docs/gaps.md §2.9）。超时只告警不死等——进程退出不可因此死锁，风险
+   （UAF，docs/archive/gaps.md §2.9）。超时只告警不死等——进程退出不可因此死锁，风险
    此刻已无法消除，至少留下证据；
 3. 提交 `user_data=0` 的 **NOP 哨兵**唤醒并终止 reaper，join 之。引擎已
    `failed_` 时跳过 2/3 中的等待与哨兵（reaper 处于轮询退出路径）。

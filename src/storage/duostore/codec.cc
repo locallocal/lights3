@@ -43,7 +43,7 @@ void put_u64(std::string& s, uint64_t v) {
     for (int i = 0; i < 8; ++i) s.push_back(char(v >> (8 * i)));
 }
 // An over-limit on the encode side is a **request** problem, not library
-// corruption (docs/gaps.md §4): a user submitting oversized user-meta should get
+// corruption (docs/archive/gaps.md §4): a user submitting oversized user-meta should get
 // a 400, not a 500 "corrupt meta value"
 [[noreturn]] void too_large(const char* what) {
     throw S3Error(S3ErrorCode::InvalidArgument,
@@ -105,7 +105,7 @@ void check_ver(Cursor& c, uint8_t expect) {
     if (c.u8() != expect) corrupt("unsupported value version");
 }
 
-// Version-tolerant read (docs/gaps.md §5.2): v1 records have no first-class
+// Version-tolerant read (docs/archive/gaps.md §5.2): v1 records have no first-class
 // metadata section, v2 onwards does. A strict-equality check_ver would turn all
 // old values into 500 "corrupt", forcing a downtime rewrite of all metadata on
 // upgrade
@@ -192,7 +192,7 @@ std::vector<Extent> read_extent_runs(Cursor& c) {
         if (count == 0) corrupt("empty run");
         // The encoding convention says packs never merge (count is always 1);
         // count must also be covered by the remaining crc array bytes — a corrupt
-        // value must not decode into a string of fake extents (docs/gaps.md §4)
+        // value must not decode into a string of fake extents (docs/archive/gaps.md §4)
         if (kind == uint8_t(Extent::Kind::kPack) && count != 1) corrupt("pack run count");
         if (size_t(count) * 4 > c.s.size() - c.pos) corrupt("run count beyond payload");
         uint64_t chunk_len = c.u64();

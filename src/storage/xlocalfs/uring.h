@@ -1,7 +1,7 @@
 // L3: minimal io_uring wrapper over raw syscalls (no liburing dependency; dependency policy
 // in docs/architecture.md §6). Single ring: a submit-side mutex serializes SQE filling, and
 // io_uring_enter is batched on behalf of everyone by the "on-duty flusher"
-// (docs/gaps.md §6.3); a dedicated reaper thread waits for CQEs and, on completion, posts the
+// (docs/archive/gaps.md §6.3); a dedicated reaper thread waits for CQEs and, on completion, posts the
 // coroutine continuation to the thread pool for resumption (so subsequent synchronous
 // persistence calls naturally run on pool threads).
 #pragma once
@@ -26,7 +26,7 @@ namespace lights3::storage {
 
 struct UringOptions {
     unsigned entries = 256;  // SQ depth
-    // SQPOLL (docs/gaps.md §6.3): the kernel polls the SQ, so in the common case submission
+    // SQPOLL (docs/archive/gaps.md §6.3): the kernel polls the SQ, so in the common case submission
     // never enters the kernel (only a wakeup enter after the poll thread has gone to sleep).
     // The cost is a resident kernel thread, and before 5.11 it needs CAP_SYS_ADMIN -- on
     // setup failure it automatically falls back to normal mode rather than preventing the
@@ -35,7 +35,7 @@ struct UringOptions {
     int sqpoll_idle_ms = 100;
 };
 
-// Kernel capability probe results (docs/gaps.md §6.3): the previous implementation used
+// Kernel capability probe results (docs/archive/gaps.md §6.3): the previous implementation used
 // IORING_OP_READ/WRITE unconditionally, but those opcodes only exist since 5.6 -- on
 // 5.1-5.5 kernels every IO would get -EINVAL, presenting as "io_uring sets up fine but all
 // reads/writes fail". After probing, old kernels fall back to READV/WRITEV (single iovec)
@@ -59,7 +59,7 @@ public:
     // new submissions and wait for in-flight CQEs to drain (with a timeout warning) before
     // posting the sentinel -- CQE ordering does not guarantee the sentinel comes after the
     // existing reads/writes, and munmap-ing without draining would let the kernel keep
-    // writing into freed user buffers (docs/gaps.md §2.9)
+    // writing into freed user buffers (docs/archive/gaps.md §2.9)
     void shutdown();
 
     const UringFeatures& features() const { return feat_; }
@@ -124,7 +124,7 @@ private:
     // confirmed the SQ has room)
     void push_sqe_locked(uint8_t opcode, int fd, const void* addr, unsigned len, uint64_t off,
                          uint64_t user_data);
-    // Hand [submitted_, sq_tail_) to the kernel (batched submission, docs/gaps.md §6.3).
+    // Hand [submitted_, sq_tail_) to the kernel (batched submission, docs/archive/gaps.md §6.3).
     // Callers other than the on-duty flusher return immediately -- their SQEs are carried
     // along by the one on duty, saving their own io_uring_enter. Returns 0 = success;
     // >0 = unrecoverable errno (at that point failed_ is set and all in-flight Ops except

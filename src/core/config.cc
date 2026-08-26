@@ -23,7 +23,7 @@ struct Line {
 // ${VAR} -> environment variable value. Undefined is an error: silently expanding
 // to an empty string turns "misspelled env var name" into "credential/path quietly
 // went empty", and the failure resurfaces in a different guise long after startup
-// (docs/gaps.md §3.9). For genuinely optional values write ${VAR:-default}
+// (docs/archive/gaps.md §3.9). For genuinely optional values write ${VAR:-default}
 std::string expand_env(const std::string& s) {
     std::string out;
     for (size_t i = 0; i < s.size();) {
@@ -80,7 +80,7 @@ std::vector<Line> to_lines(const std::string& text) {
         std::string content = raw.substr(indent);
         // Comments: a leading # or an unquoted " #". A " #" inside quotes is not a
         // comment — a naive find(" #") would truncate secret_key: "a #b" to "a,
-        // silently shortening the key (docs/gaps.md §3.9)
+        // silently shortening the key (docs/archive/gaps.md §3.9)
         if (!content.empty() && content[0] == '#') {
             content.clear();
         } else {
@@ -237,7 +237,7 @@ namespace {
 
 // Integer parsing with context: bare stoi throws a bare std::invalid_argument("stoi")
 // on bad input, so the error the operator sees carries neither the key name nor the
-// original value (docs/gaps.md §3.9). Also rejects trailing garbage ("8x" is no
+// original value (docs/archive/gaps.md §3.9). Also rejects trailing garbage ("8x" is no
 // longer treated as 8) and out-of-range values
 int to_int(const std::string& key, const std::string& s, int def) {
     if (s.empty()) return def;
@@ -287,17 +287,17 @@ Config Config::from_string(const std::string& text) {
         }
         if (auto v = http->get("io_threads"); !v.empty()) {
             cfg.http.io_threads = to_int("http.io_threads", v, cfg.http.io_threads);
-            cfg.http.io_threads_set = true;  // the builtin driver WARNs based on this (docs/gaps.md §7)
+            cfg.http.io_threads_set = true;  // the builtin driver WARNs based on this (docs/archive/gaps.md §7)
         }
         cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
         if (auto v = http->get("max_header_size"); !v.empty())
             cfg.http.max_header_size = parse_size(v);
         if (auto v = http->get("idle_timeout"); !v.empty())
             cfg.http.idle_timeout_sec = parse_duration_sec(v);
-        // Per-request timeout and transfer stall limit (docs/gaps.md §3.3): 0 = disabled
+        // Per-request timeout and transfer stall limit (docs/archive/gaps.md §3.3): 0 = disabled
         if (auto v = http->get("request_timeout"); !v.empty())
             cfg.http.request_timeout_sec = parse_duration_sec(v);
-        // Minimum multipart part size (docs/gaps.md §5.7): 0 = no limit
+        // Minimum multipart part size (docs/archive/gaps.md §5.7): 0 = no limit
         if (auto v = http->get("min_part_size"); !v.empty())
             cfg.http.min_part_size = parse_size(v);
         if (auto v = http->get("transfer_stall_timeout"); !v.empty())
@@ -305,13 +305,13 @@ Config Config::from_string(const std::string& text) {
         cfg.http.max_connections =
             to_int("http.max_connections", http->get("max_connections"), cfg.http.max_connections);
         check_range("http.max_connections", cfg.http.max_connections, 1, 1'000'000);
-        // TLS (docs/gaps.md §7): enabled only when both are given; giving just one is surely a misconfiguration
+        // TLS (docs/archive/gaps.md §7): enabled only when both are given; giving just one is surely a misconfiguration
         cfg.http.tls_cert = http->get("tls_cert", cfg.http.tls_cert);
         cfg.http.tls_key = http->get("tls_key", cfg.http.tls_key);
         if (cfg.http.tls_cert.empty() != cfg.http.tls_key.empty())
             throw std::runtime_error(
                 "config: http.tls_cert and http.tls_key must be set together");
-        // Shutdown/backpressure knobs (docs/gaps.md §7)
+        // Shutdown/backpressure knobs (docs/archive/gaps.md §7)
         if (auto v = http->get("drain_limit"); !v.empty())
             cfg.http.drain_limit = parse_size(v);
         if (auto v = http->get("trailer_max_size"); !v.empty())
@@ -445,7 +445,7 @@ Config Config::from_string(const std::string& text) {
             std::to_string(cfg.http.transfer_stall_timeout_sec) +
             "s) exceeds http.request_timeout (" + std::to_string(cfg.http.request_timeout_sec) +
             "s) — the stall guard would never fire; lower it or set it to 0 to disable");
-    // Shutdown/backpressure knobs (docs/gaps.md §7). Lower bounds guard against
+    // Shutdown/backpressure knobs (docs/archive/gaps.md §7). Lower bounds guard against
     // "configured to 0 -> write loop spins / never drains"; upper bounds guard
     // against a slipped unit (MiB written as GiB) eating all memory outright
     check_range("http.drain_limit", static_cast<long long>(cfg.http.drain_limit),

@@ -40,7 +40,7 @@ private:
                             std::string& etag_out);
     // The kernel may short-write; loop until everything is written; throw InternalError on failure
     Task<void> write_all(int fd, std::span<const std::byte> data, uint64_t off);
-    // Data persistence (docs/gaps.md §6.3): use io_uring's FSYNC SQE so the submit phase no
+    // Data persistence (docs/archive/gaps.md §6.3): use io_uring's FSYNC SQE so the submit phase no
     // longer blocks a pool thread in fdatasync -- exactly the kind of wait xlocalfs is meant
     // to eliminate. Falls back to the existing synchronous path when the kernel lacks the
     // FSYNC opcode (per probe) or LIGHTS3_FSYNC=0

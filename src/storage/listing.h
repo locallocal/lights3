@@ -14,7 +14,7 @@ namespace lights3::storage {
 ListResult apply_listing(const std::vector<std::string>& sorted_keys, const ListOptions& opt,
                          const std::function<ObjectMeta(const std::string&)>& fetch);
 
-// Pagination semantics for the two multipart listings (docs/gaps.md §5.1): one shared
+// Pagination semantics for the two multipart listings (docs/archive/gaps.md §5.1): one shared
 // implementation for all backends, so the "truncation rules" don't grow six different
 // shapes across six backends.
 // Inputs must already be sorted per their contracts (parts ascending by part_no, uploads

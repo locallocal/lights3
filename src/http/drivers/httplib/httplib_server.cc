@@ -32,7 +32,7 @@ bool is_pseudo_header(const std::string& k) {
     return k == "REMOTE_ADDR" || k == "REMOTE_PORT" || k == "LOCAL_ADDR" || k == "LOCAL_PORT";
 }
 
-// Copies a fallback response into httplib::Response (docs/gaps.md §4):
+// Copies a fallback response into httplib::Response (docs/archive/gaps.md §4):
 // previously each call site copied only status and body, leaving the
 // x-amz-request-id header behind in HttpResponse — id in the XML but not in
 // the headers, an inconsistency none of the other three drivers exhibit
@@ -45,7 +45,7 @@ void apply_fallback(httplib::Response& rs, const HttpResponse& src) {
 class HttplibServer final : public IHttpServer {
 public:
     explicit HttplibServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS (docs/gaps.md §7): SSLServer is a subclass of Server and loads
+        // TLS (docs/archive/gaps.md §7): SSLServer is a subclass of Server and loads
         // the certificate at construction. Failure must throw right here
         // (when is_valid() is false, listen just fails silently)
         if (!cfg.tls_cert.empty()) {
@@ -265,7 +265,7 @@ private:
         // Push-to-pull: the pump thread drives the ContentReader to fill the
         // queue; the request thread runs the req_exec queue inside
         // sync_wait_pumping, and the body's cv blocking switches back to the
-        // request thread to execute (docs/gaps.md §2.10), not occupying a
+        // request thread to execute (docs/archive/gaps.md §2.10), not occupying a
         // shared pool thread
         PumpExecutor req_exec;
         std::shared_ptr<BlockQueue> queue;
@@ -359,7 +359,7 @@ private:
         // model, so sync_wait per chunk suffices. Ownership of the reader and
         // the reused buffer goes to the closure (the response is written out
         // after this callback returns); the buffer lives with the closure
-        // (docs/gaps.md §4: previously a vector was constructed per 64KiB chunk)
+        // (docs/archive/gaps.md §4: previously a vector was constructed per 64KiB chunk)
         std::shared_ptr<BodyReader> body(std::move(resp.stream_body));
         auto buf = std::make_shared<std::vector<std::byte>>(cfg_.io_chunk_size);
         if (resp.content_length) {

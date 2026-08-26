@@ -138,7 +138,7 @@ private:
     // pack_stats table, §2.2). Independent of write_refs: complete's refs transfer
     // (owner rewrite) must be a no-op for packs — mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes
-    // uses the same accounting basis as file_size (docs/gaps.md §2.3a)
+    // uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
     void write_pack_delta(Conn& c, const DataRef& ref, int sign, int64_t rec_overhead);
     // Single-item CAS core of swap (mu_ held, runs inside the caller's transaction):
     // on successful validation writes and returns true; on mismatch returns false
@@ -167,7 +167,7 @@ private:
     // Dedicated id-segment connection, always synchronous=FULL (independent of
     // opt_.sync, §4); alloc_mu_ protects the IdRange and this connection. Lock order
     // alloc_mu_ → mu_ (mu_ is held during reservation to keep business writers out,
-    // docs/gaps.md §3.9); alloc is called by the data plane outside business
+    // docs/archive/gaps.md §3.9); alloc is called by the data plane outside business
     // transactions, so no reverse nesting
     std::mutex alloc_mu_;
     std::unique_ptr<Conn> ac_;

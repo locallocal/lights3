@@ -16,7 +16,7 @@
 
 namespace lights3::s3 {
 
-// Admission snapshot of ingress throttling (the runtime.max_inflight_requests semaphore) (docs/gaps.md §7):
+// Admission snapshot of ingress throttling (the runtime.max_inflight_requests semaphore) (docs/archive/gaps.md §7):
 // under load testing, these two numbers distinguish "stuck at admission" from "stuck in the pool"
 struct AdmissionStats {
     long capacity = 0;   // total permits
@@ -27,11 +27,15 @@ struct AdmissionStats {
 class Metrics {
 public:
     // Latency histogram bucket upper bounds (seconds); last bucket is +Inf
-    static constexpr std::array<double, 6> kLatencyBuckets{0.005, 0.02, 0.1, 0.5, 2.0, 10.0};
+    // 30/60/300 cover the large-object band: request_timeout defaults to 300s, and
+    // with a 10s top bucket everything from 10s to 300s piled into +Inf — P99 for
+    // big transfers was unreadable (roadmap §1.5)
+    static constexpr std::array<double, 9> kLatencyBuckets{0.005, 0.02, 0.1,  0.5, 2.0,
+                                                           10.0,  30.0, 60.0, 300.0};
 
     void request_start() { inflight_.fetch_add(1, std::memory_order_relaxed); }
     void request_end(std::string_view method, int status, double seconds);
-    // Lock-free (docs/gaps.md §4: previously every error response contended on one global mutex): the code set
+    // Lock-free (docs/archive/gaps.md §4: previously every error response contended on one global mutex): the code set
     // is bounded and shares its source with the enum; fixed-size atomic array indexed by enum value
     void s3_error(S3ErrorCode code) {
         errors_[size_t(code)].fetch_add(1, std::memory_order_relaxed);
@@ -40,7 +44,7 @@ public:
     void mpu_created() { mpu_created_.fetch_add(1, std::memory_order_relaxed); }
     void mpu_finished() { mpu_finished_.fetch_add(1, std::memory_order_relaxed); }
 
-    // Byte counts and per-bucket dimension (docs/gaps.md §7). bucket may be empty (service-level
+    // Byte counts and per-bucket dimension (docs/archive/gaps.md §7). bucket may be empty (service-level
     // requests count only globally); tracked bucket count is capped, overflow folds into "_other" to prevent label cardinality explosion
     void add_bytes_in(std::string_view bucket, uint64_t n);
     void add_bytes_out(std::string_view bucket, uint64_t n);

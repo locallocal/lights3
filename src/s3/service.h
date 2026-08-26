@@ -28,7 +28,7 @@ class CredentialStore;  // auth/credential_store.h (only the admin handler's .cc
 
 struct RequestContext {
     std::string request_id;
-    // x-amz-id-2 / <HostId> (docs/gaps.md §5.9): one of the two ids AWS support tickets ask for; clients only
+    // x-amz-id-2 / <HostId> (docs/archive/gaps.md §5.9): one of the two ids AWS support tickets ask for; clients only
     // relay the pair they saw, so the log side must be able to match it
     std::string host_id;
     // Cancellation signal: client disconnect (detected by the driver), request timeout, process shutdown (docs/concurrency.md §5);
@@ -55,12 +55,12 @@ public:
     // Thread pool metrics source for /-/metrics (optional, injected during main assembly)
     void set_pool_stats(std::function<ThreadPool::Stats()> fn) { pool_stats_ = std::move(fn); }
 
-    // Ingress throttling admission snapshot (docs/gaps.md §7, optional, injected during main assembly)
+    // Ingress throttling admission snapshot (docs/archive/gaps.md §7, optional, injected during main assembly)
     void set_admission_stats(std::function<AdmissionStats()> fn) {
         admission_stats_ = std::move(fn);
     }
 
-    // Timer thread health (docs/gaps.md §7, optional)
+    // Timer thread health (docs/archive/gaps.md §7, optional)
     void set_timer_stats(std::function<TimerQueue::Stats()> fn) {
         timer_stats_ = std::move(fn);
     }
@@ -75,11 +75,11 @@ public:
         cred_store_ = std::move(s);
     }
 
-    // Per-request timeout (docs/gaps.md §3.3): 0 = disabled. On expiry, cooperative cancellation interrupts the
+    // Per-request timeout (docs/archive/gaps.md §3.3): 0 = disabled. On expiry, cooperative cancellation interrupts the
     // whole handler chain; suspension points throw OperationCancelled -> 503
     void set_request_timeout(std::chrono::milliseconds t) { request_timeout_ = t; }
 
-    // Minimum multipart part size (docs/gaps.md §5.7): defaults to AWS's 5MiB, 0 = unlimited.
+    // Minimum multipart part size (docs/archive/gaps.md §5.7): defaults to AWS's 5MiB, 0 = unlimited.
     // A knob rather than hardcoded because toolchains in front of the gateway may not honor the rule
     // (bouncing small-part uploads costs more than making ops fix the tool), and so that a
     // "proxy to another lights3" deployment is not judged once per layer
@@ -98,7 +98,7 @@ public:
         website_store_ = std::move(store);
     }
 
-    // Verification result passed down the dispatch chain to handlers (docs/gaps.md §5.10): ListBuckets must
+    // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
         std::string_view access_key;             // empty when auth is disabled
@@ -113,12 +113,12 @@ public:
         std::string_view method;
         Scope scope;
         std::string_view flag;  // "" = fallback; "k" matches on query presence; "k=v" matches on value
-        // Query allowlist (docs/gaps.md §3.5): extra query keys this route permits (space-separated).
+        // Query allowlist (docs/archive/gaps.md §3.5): extra query keys this route permits (space-separated).
         // The flag key and presigned signature params are inherently allowed; a key outside the list -> 501.
         // The structural flaw of a blocklist fallback is that any omission silently degrades into
         // "read/write the whole object" -- ?attributes returns the whole object body, ?partNumber returns the whole object, response-* gets swallowed
         std::string_view extra_query;
-        // The action this route corresponds to (docs/gaps.md §5.10): authorization is decided by it, not guessed
+        // The action this route corresponds to (docs/archive/gaps.md §5.10): authorization is decided by it, not guessed
         // from the HTTP method -- DeleteObjects is a POST yet clearly a delete, CreateMultipartUpload is also a
         // POST yet a write; the method dimension simply cannot separate the two
         Action action;
@@ -180,7 +180,7 @@ private:
                                                std::string& access_key);
 
     // virtual-host style: when Host matches *.base_domain, the bucket is prepended for path parsing.
-    // The vhost flag steers internal-endpoint routing (docs/gaps.md §3.8): under vhost, req.path is the key,
+    // The vhost flag steers internal-endpoint routing (docs/archive/gaps.md §3.8): under vhost, req.path is the key,
     // and "/-/metrics" may be a legitimate object key in mybucket that internal endpoints must not shadow
     struct Address {
         std::string bucket, key;

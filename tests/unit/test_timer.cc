@@ -197,7 +197,7 @@ TEST(cancel_waits_for_due_but_unstarted_callback) {
 }
 
 TEST(timer_stats_track_fired_and_pending) {
-    // Timer observability (docs/gaps.md §7): pending/fired/latency histogram have an outlet
+    // Timer observability (docs/archive/gaps.md §7): pending/fired/latency histogram have an outlet
     TimerQueue q;
     std::atomic<int> fired{0};
     q.add(std::chrono::hours(1), [] {});  // long-hanging: permanently pending

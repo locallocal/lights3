@@ -496,7 +496,7 @@ TEST(cloudproxy_metrics_registered) {
           std::string::npos);
 }
 
-// A length-less body (true chunked) uploads via a local spool (docs/gaps.md §6.2): first written to a temp file
+// A length-less body (true chunked) uploads via a local spool (docs/archive/gaps.md §6.2): first written to a temp file
 // to obtain the length, then goes down the known-length path; spool_max_bytes=0 keeps the old NotImplemented semantics
 TEST(cloudproxy_chunked_upload_spools) {
     struct NoLenReader final : http::BodyReader {
@@ -543,7 +543,7 @@ TEST(cloudproxy_chunked_upload_spools) {
                     s3::S3ErrorCode::NotImplemented);
 }
 
-// Same-backend server-side COPY (docs/gaps.md §6.2): x-amz-copy-source completes in one remote call,
+// Same-backend server-side COPY (docs/archive/gaps.md §6.2): x-amz-copy-source completes in one remote call,
 // the gateway moves no bytes; REPLACE semantics carry our metadata
 TEST(cloudproxy_server_side_copy) {
     RemoteStack remote;

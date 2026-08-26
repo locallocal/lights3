@@ -30,7 +30,7 @@ public:
     // Callback contract (docs/concurrency.md §5): **must be lightweight**. The
     // cancellation source is often TimerQueue's single timer thread, and resuming a
     // continuation directly inside a callback would run the whole request chain on
-    // the timer thread, stalling every timer in the process meanwhile (docs/gaps.md
+    // the timer thread, stalling every timer in the process meanwhile (docs/archive/gaps.md
     // §3.2). Consumers that need to resume coroutines always go through an executor
     // (see ThreadPool::ScheduleAwaiter / AsyncSemaphore::AcquireAwaiter)
     void request_cancel() {
@@ -94,7 +94,7 @@ public:
     // Deregister: on return, the callback is guaranteed to never run again — if
     // cancellation is currently firing (the callback batch runs outside the lock),
     // block until the batch finishes, same semantics as TimerQueue::cancel
-    // (docs/gaps.md §3.9). Self-deregistration on the firing thread (from inside a
+    // (docs/archive/gaps.md §3.9). Self-deregistration on the firing thread (from inside a
     // callback) does not wait, preventing self-deadlock; while waiting, do not hold
     // locks the callbacks need
     void remove_callback(uint64_t id) {

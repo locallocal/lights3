@@ -3,7 +3,7 @@
 // This used to be inlined in the main.cc assembly layer — the whole
 // lifetime-sensitive path (queueing, tying the Permit into the streaming
 // response body, returning it on disconnect, 503 when cancelled while queued)
-// was unreachable from unit tests (docs/issues.md T11). Leaking a single
+// was unreachable from unit tests (docs/archive/issues.md T11). Leaking a single
 // Permit permanently loses one slot; in production that shows up as a
 // site-wide hang once the quota is exhausted, so this class of regression
 // must be caught by behavioral tests. Extracted into a standalone header so
@@ -23,7 +23,7 @@
 namespace lights3::http {
 
 // Ties the admission-control Permit to the streaming response body's lifetime
-// (docs/gaps.md part 3, concurrency.md §6): if the permit only lived in the
+// (docs/archive/gaps.md part 3, concurrency.md §6): if the permit only lived in the
 // handler coroutine frame, it would be returned **before** the response body
 // starts transferring — N large-object GETs could all acquire and all release
 // their permits yet still concurrently consume bandwidth and backend IO, so
@@ -61,22 +61,24 @@ private:
 //   transfer. Small responses (small_body) return the permit at co_return —
 //   the driver's time to write out a chunk of memory is bounded, not worth
 //   threading the permit into the driver for;
-// - The transfer stall guard (docs/gaps.md §3.3) wraps both directions,
+// - The transfer stall guard (docs/archive/gaps.md §3.3) wraps both directions,
 //   installed at the L1/L2 boundary so it covers all four drivers at once;
 //   disabled when stall <= 0
 inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
                                       std::chrono::seconds stall,
                                       std::shared_ptr<CancelSource> shutdown_src,
-                                      Handler dispatch) {
-    return [inflight, stall, shutdown_src,
+                                      Handler dispatch,
+                                      uint64_t stall_min_progress =
+                                          StallGuardReader::kMinProgressBytes) {
+    return [inflight, stall, shutdown_src, stall_min_progress,
             dispatch = std::move(dispatch)](HttpRequest req) -> Task<HttpResponse> {
         if (!req.cancel.valid()) req.cancel = shutdown_src->token();
         CancelToken tok = req.cancel;
         try {
             auto permit = co_await inflight->acquire(tok);
-            req.body = guard_stalls(std::move(req.body), stall);
+            req.body = guard_stalls(std::move(req.body), stall, stall_min_progress);
             auto resp = co_await dispatch(std::move(req));
-            resp.stream_body = guard_stalls(std::move(resp.stream_body), stall);
+            resp.stream_body = guard_stalls(std::move(resp.stream_body), stall, stall_min_progress);
             if (resp.stream_body)
                 resp.stream_body = std::make_unique<PermitBodyReader>(
                     std::move(resp.stream_body), std::move(permit));

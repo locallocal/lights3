@@ -8,7 +8,7 @@ namespace lights3::storage {
 
 namespace {
 
-// Glob syntax validation (docs/gaps.md §6.3): fnmatch does not report a bad pattern as an
+// Glob syntax validation (docs/archive/gaps.md §6.3): fnmatch does not report a bad pattern as an
 // error, only as "no match", so a mistyped rule silently never matches -- the bucket is
 // quietly routed to the default backend, and migrating the data once it lands in the wrong
 // engine means a full copy. Any error determinable at build time is rejected at build time:
@@ -65,7 +65,7 @@ BucketRouter BucketRouter::build(
     };
     bool saw_catch_all = false;
     for (auto& rule : cfg.rules) {
-        // Negated rule (docs/gaps.md §6.3): "!pattern" = buckets NOT matching pattern hit this rule
+        // Negated rule (docs/archive/gaps.md §6.3): "!pattern" = buckets NOT matching pattern hit this rule
         bool negate = !rule.match.empty() && rule.match.front() == '!';
         std::string glob = negate ? rule.match.substr(1) : rule.match;
         validate_glob(glob);

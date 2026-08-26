@@ -127,7 +127,7 @@ std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
         kv.emplace_back("remote.etag", tier.remote_etag);
         kv.emplace_back("remote.at", tier.remote_at);
     }
-    // First-class metadata (docs/gaps.md §5.2): empty values are not written, so existing
+    // First-class metadata (docs/archive/gaps.md §5.2): empty values are not written, so existing
     // sidecars stay byte-for-byte identical
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
@@ -159,7 +159,7 @@ static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
 // Failure (ENOTSUP/E2BIG etc.) degrades to sidecar-only without taking down the write path
 // -- but must leave a trace: degradation means falling back to the "two-rename"
 // consistency model, and if it happens silently operators have no way to know
-// (docs/gaps.md §3.9). Warn only once per errno kind to avoid flooding the write path
+// (docs/archive/gaps.md §3.9). Warn only once per errno kind to avoid flooding the write path
 void set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier) {
     std::string blob = kv_to_tsv(meta_kv(meta, tier));
     if (::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0) != 0) {
@@ -181,7 +181,7 @@ std::optional<std::string> get_meta_xattr(const fs::path& path) {
     if (errno != ERANGE) return std::nullopt;
     // Exceeds the stack buffer: refetch at the actual size. Silently falling back to the
     // sidecar here could read stale metadata from a crash window -- if the xattr exists,
-    // it is authoritative (docs/gaps.md §3.9)
+    // it is authoritative (docs/archive/gaps.md §3.9)
     ssize_t sz = ::getxattr(path.c_str(), kMetaXattr, nullptr, 0);
     if (sz < 0) return std::nullopt;
     std::string out(static_cast<size_t>(sz), '\0');
@@ -198,7 +198,7 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     if (ec) {
         // Only "prefix collides with an existing file" is a client error; ENOSPC/EACCES/EIO
         // are all 500 -- mapping them to 400 means clients won't retry and operators never
-        // get the disk-full signal (docs/gaps.md §3.9)
+        // get the disk-full signal (docs/archive/gaps.md §3.9)
         if (ec == std::errc::not_a_directory || ec == std::errc::file_exists)
             throw S3Error(S3ErrorCode::InvalidArgument,
                           "Object key conflicts with an existing object path", std::string(key));

@@ -26,7 +26,7 @@ class ThreadPool {
 public:
     // Histogram buckets for enqueue-to-start wait time: <1ms <10ms <100ms <1s >=1s
     static constexpr size_t kWaitBuckets = 5;
-    // Bucket upper bounds (seconds) for Prometheus rendering (docs/gaps.md §7); last bucket is +Inf
+    // Bucket upper bounds (seconds) for Prometheus rendering (docs/archive/gaps.md §7); last bucket is +Inf
     static constexpr std::array<double, kWaitBuckets - 1> kWaitBucketBounds{0.001, 0.01, 0.1,
                                                                            1.0};
 
@@ -73,7 +73,7 @@ public:
         // When no token is passed explicitly, inherit from the calling coroutine's
         // promise (core/task.h's PromiseBase propagates it down the co_await chain) —
         // existing co_await pool_->schedule() call sites thus pick up request-level
-        // cancellation without modification (docs/gaps.md §3.1)
+        // cancellation without modification (docs/archive/gaps.md §3.1)
         template <class P>
         bool await_suspend(std::coroutine_handle<P> h) {
             if constexpr (requires {
@@ -112,7 +112,7 @@ private:
     mutable std::mutex m_;
     std::condition_variable cv_;
     // Continuation delivery (post) and blocking tasks (schedule) use separate queues
-    // (docs/gaps.md §4): post's contract is "may neither fail nor wait", and with a
+    // (docs/archive/gaps.md §4): post's contract is "may neither fail nor wait", and with a
     // shared 4096 queue a continuation would queue behind 4096 IOs under pressure.
     // Workers always drain the continuation queue first — continuations are existing
     // work that already yielded the thread, hence naturally higher priority
@@ -120,7 +120,7 @@ private:
     std::deque<Item> queue_;       // schedule: bounded by capacity_
     std::deque<Item> backlog_;
     size_t capacity_;
-    // Lock-free per-task accounting (docs/gaps.md §4: completed_ taking a lock per
+    // Lock-free per-task accounting (docs/archive/gaps.md §4: completed_ taking a lock per
     // task contends with scheduling)
     std::atomic<uint64_t> completed_{0};
     std::array<std::atomic<uint64_t>, kWaitBuckets> wait_hist_{};

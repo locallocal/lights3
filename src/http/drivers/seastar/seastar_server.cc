@@ -320,7 +320,7 @@ struct BodyState {
     bool after_chunk_data = false;  // Just finished a chunk's data; next line must be CRLF
     bool chunk_eof = false;
     bool error = false;
-    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/gaps.md §7)
+    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -787,7 +787,7 @@ ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr,
             lo.reuse_address = true;
             // inet_address accepts both v4/v6 literals: with ipv4_addr
             // hard-coded, bind: "::" in the config threw outright while
-            // beast/httplib started fine (docs/gaps.md §3.9)
+            // beast/httplib started fine (docs/archive/gaps.md §3.9)
             st->listener =
                 ss::engine().listen(ss::socket_address(ss::inet_address(addr), p), lo);
             core->shards[s] = st;
@@ -845,7 +845,7 @@ uint16_t probe_free_port(const std::string& addr) {
 class SeastarServer final : public IHttpServer {
 public:
     explicit SeastarServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS unsupported (docs/gaps.md §7): configuring it must fail on the spot; never silently run plaintext
+        // TLS unsupported (docs/archive/gaps.md §7): configuring it must fail on the spot; never silently run plaintext
         if (!cfg.tls_cert.empty())
             throw std::runtime_error(
                 "http driver 'seastar' does not support TLS; use 'httplib' or 'beast'");

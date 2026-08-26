@@ -182,7 +182,7 @@ s3adm bench list-buckets -j 16
 
 - 每个命令组一个源文件（`s3adm_<group>.cc/.h`，`make_<group>()` 返回根节点），
   在 `s3adm.cc` 中 `add_subcommand`；连接选项经 `s3adm_common.h` 的
-  `add_conn_opts` / `read_conn_opts` 复用。
+  `add_conn_flags` / `read_conn_opts` 复用。
 - 回调无返回值，退出码通过 `s3adm::g_exit` 传出，遵守 §1 的 0/1/2 约定；
   位置参数经 `c->args()` 读取并自行校验数量。
 - 服务进程侧的运维入口放在 `src/main.cc` 的命令树下（如 `duostore`），

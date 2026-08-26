@@ -39,7 +39,7 @@ struct CloudProxyConfig {
     int max_connections = 16;
     bool verify_etag = true;             // docs/cloudproxy-backend.md §6: single-part PUT compares MD5 against the remote ETag
     size_t queue_cap_bytes = 1 << 20;    // data-plane BlockQueue capacity (backpressure watermark)
-    // Spool for length-less uploads (docs/gaps.md §6.2): 0 = disabled (back to
+    // Spool for length-less uploads (docs/archive/gaps.md §6.2): 0 = disabled (back to
     // NotImplemented). The cap guards against abuse -- the spool lands on the gateway's
     // local disk, and AWS's 5GiB single-PUT limit is the natural default
     uint64_t spool_max_bytes = 5ull << 30;
@@ -73,7 +73,7 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
-    // Same-backend copy fast path (docs/gaps.md §6.2): remote server-side COPY
+    // Same-backend copy fast path (docs/archive/gaps.md §6.2): remote server-side COPY
     // (x-amz-copy-source) -- previously an intra-cloud copy would "download to the gateway
     // and upload back", doubling cross-network traffic and cost
     Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket,
@@ -118,7 +118,7 @@ private:
                                   std::vector<std::pair<std::string, std::string>> extra,
                                   http::BodyReader& body, std::string resource,
                                   bool multipart_ctx);
-    // Length-less upload (docs/gaps.md §6.2): AWS rejects bare chunked, so spool to a local
+    // Length-less upload (docs/archive/gaps.md §6.2): AWS rejects bare chunked, so spool to a local
     // temp file first to obtain the length, then go through stream_upload -- previously this
     // was a flat NotImplemented, making chunked PUTs without x-amz-decoded-content-length
     // entirely unusable on this backend

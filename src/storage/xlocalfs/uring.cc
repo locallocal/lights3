@@ -145,7 +145,7 @@ UringEngine::UringEngine(std::shared_ptr<ThreadPool> pool, UringOptions opt)
     reaper_ = std::thread([this] { reap_loop(); });
 }
 
-// Capability probing (docs/gaps.md §6.3): IORING_REGISTER_PROBE is available since 5.6,
+// Capability probing (docs/archive/gaps.md §6.3): IORING_REGISTER_PROBE is available since 5.6,
 // exactly the version where IORING_OP_READ/WRITE landed -- probe failure is treated as
 // 5.1-5.5 and falls back to READV/WRITEV. Probe honestly instead of "try once and check for
 // -EINVAL": that failure would land on some real request

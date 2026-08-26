@@ -18,7 +18,7 @@ std::string xml_escape(const std::string& s) {
             case '\'': out += "&apos;"; break;
             default:
                 // XML 1.0 forbids most C0 control characters (even character references are illegal):
-                // drop them outright, an output-side safety net against reflection (docs/gaps.md §4 -- <Resource> echoes
+                // drop them outright, an output-side safety net against reflection (docs/archive/gaps.md §4 -- <Resource> echoes
                 // request-side strings; beyond upstream validation, output must always remain valid XML)
                 if (static_cast<unsigned char>(c) < 0x20 && c != '\t' && c != '\n' &&
                     c != '\r')

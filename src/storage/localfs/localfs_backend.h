@@ -23,7 +23,7 @@ namespace lights3::storage {
 // Inheritable by xlocalfs: the data plane (GET/PUT/parts/concatenation) is virtual, layout
 // and metadata logic are reused
 struct LocalFsOptions {
-    // Orphaned multipart cleanup (docs/gaps.md §6.3): previously kMpuTtl was hardcoded to
+    // Orphaned multipart cleanup (docs/archive/gaps.md §6.3): previously kMpuTtl was hardcoded to
     // 7 days and only scanned once at startup -- a gateway running for months without a
     // restart would accumulate never-completed/aborted upload directories without bound
     int mpu_ttl_sec = 7 * 86400;          // 0 = no cleanup
@@ -51,7 +51,7 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
-    // Same-backend copy fast path (docs/gaps.md §6.3): copy_file_range moves data in the
+    // Same-backend copy fast path (docs/archive/gaps.md §6.3): copy_file_range moves data in the
     // kernel (an O(1) clone on reflink-capable filesystems), bypassing user-space buffers.
     // Tier stubs (data not local) return nullopt to fall back to the streaming path
     Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket,
@@ -97,7 +97,7 @@ protected:
     void require_bucket(std::string_view bucket) const;      // throws NoSuchBucket if missing
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
 
-    // ---- Data-plane accounting (docs/gaps.md §7) ----
+    // ---- Data-plane accounting (docs/archive/gaps.md §7) ----
     // Enum values are the metric array indices; the data-plane methods xlocalfs overrides
     // share the same instances (overrides don't go through the base implementation, each
     // instruments at its own entry, so no double counting by construction)

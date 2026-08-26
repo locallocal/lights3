@@ -49,7 +49,7 @@ struct PackScanRecord {
 
 // Compaction migration callback (§9.2, wired up by DuoStoreBackend): the data
 // plane's sequential scan accumulates K records and delivers them in one call
-// (docs/gaps.md §2.13 batching — per-record delivery costs one fdatasync + one
+// (docs/archive/gaps.md §2.13 batching — per-record delivery costs one fdatasync + one
 // meta commit each, ≈ 1000 for a 128MiB pack, contending with business writes for
 // the same write lock). The callback is responsible for owner reverse-lookup of
 // liveness + batch-appending back into this store (write_batch, one persistence
@@ -79,7 +79,7 @@ struct PackAppendItem {
 // (DuoStoreBackend releases it after the meta commit / fallback deletion).
 // **Every data store that produces chunk-like entities must hook this up**: an
 // engine that misses it lets the orphan scan delete the already-landed parts of
-// an in-flight large object as unreferenced files (docs/gaps.md §1.2)
+// an in-flight large object as unreferenced files (docs/archive/gaps.md §1.2)
 struct ChunkPinHooks {
     std::function<void(uint64_t)> pin;
     std::function<void(uint64_t)> unpin;
@@ -94,7 +94,7 @@ struct ChunkPinHooks {
 
 struct IDataStore {
     virtual Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) = 0;
-    // Batch write (compaction migration only, docs/gaps.md §2.13): K payloads
+    // Batch write (compaction migration only, docs/archive/gaps.md §2.13): K payloads
     // landed in one call, returns a DataRef list of the same length as the input.
     // Default is per-item open_writer (semantics unchanged); the fs implementation
     // overrides with a pack batch append using a single slot lock + a single fdatasync
@@ -119,7 +119,7 @@ struct IDataStore {
     // deletion" compile, with GC keeping accounts but never freeing bytes
     virtual Task<void> remove_pack(uint64_t pack_id) = 0;
     virtual Task<GcRewrite> rewrite_pack(uint64_t pack_id) = 0;      // compaction sequential scan (§9.2)
-    // Age-based rotation (docs/gaps.md §6.1): seals active packs whose first
+    // Age-based rotation (docs/archive/gaps.md §6.1): seals active packs whose first
     // record was written more than max_age_ms ago, returns the number sealed this
     // time. GC calls it once per round — with capacity-only sealing, an active
     // pack never rotates under low write volume, and its overwritten/deleted
@@ -134,14 +134,14 @@ struct IDataStore {
     // (file_id, mtime_ms, size_bytes) for each. Orphan determination
     // (refs reverse-lookup/grace/pin) is the caller's (DuoStoreBackend's) job —
     // the data plane only enumerates, no liveness judgment. size feeds usage
-    // metric accumulation (docs/gaps.md §6.1): enumeration needs a stat anyway, so
+    // metric accumulation (docs/archive/gaps.md §6.1): enumeration needs a stat anyway, so
     // one extra field adds no system calls.
     // Pure virtual (matching the remove_pack convention): engines that do not
     // support enumeration throw explicitly, never silently scan nothing and
     // falsely report "no orphans"
     virtual Task<void> scan_chunks(
         const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) = 0;
-    // Reverse reconciliation enumeration of packs/ (docs/gaps.md §6.1): the pack
+    // Reverse reconciliation enumeration of packs/ (docs/archive/gaps.md §6.1): the pack
     // file exists as soon as it is created, but the packstat row is only recorded
     // when the first record commits — a hard crash exactly in that window leaks
     // the file permanently, appearing in no account (the orphan scan previously
@@ -154,14 +154,14 @@ struct IDataStore {
         co_return;
     }
     // "Is this pack currently held by a live writer" (for startup catch-up
-    // sealing, docs/gaps.md §1.4). The fs implementation probes the active pack's
+    // sealing, docs/archive/gaps.md §1.4). The fs implementation probes the active pack's
     // advisory lock; engines without pack entities or with no way to probe return
     // false (= do not block catch-up sealing, same behavior as before this
     // change). **false must be the conservative direction**: returning true only
     // postpones catch-up sealing to the next startup, while returning false could
     // seal a pack someone else is actively writing
     virtual bool pack_write_locked(uint64_t /*pack_id*/) { return false; }
-    // Actual pack file size (docs/gaps.md §2.3b): accounts left as seal(0) by a
+    // Actual pack file size (docs/archive/gaps.md §2.3b): accounts left as seal(0) by a
     // crash use this to backfill the denominator before the GC decision, so a
     // pack with unknown file_size does not unconditionally go into full rewrite.
     // 0 = unknown/unsupported (the caller falls back to the original

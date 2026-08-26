@@ -20,7 +20,7 @@ struct Extent {
     bool operator==(const Extent&) const = default;
 };
 
-// Per-call batch cap for alloc_file_run (docs/gaps.md §3.9): writers grow
+// Per-call batch cap for alloc_file_run (docs/archive/gaps.md §3.9): writers grow
 // geometrically up to this cap, far below each engine's id segment
 // (kIdSegment=4096); a single write session wastes at most kMaxIdRun-1 ids
 inline constexpr uint32_t kMaxIdRun = 64;

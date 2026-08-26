@@ -1,7 +1,7 @@
 // L3: in-memory backend -- for unit tests and demos, semantics aligned with LocalFs.
 // It is also registered as a first-class backend (storage/registry.cc); misconfiguring it
 // means putting the entire gateway's data into an unbounded heap, hence the capacity gate
-// and mpu expiry cleanup (docs/gaps.md §6.3)
+// and mpu expiry cleanup (docs/archive/gaps.md §6.3)
 #pragma once
 
 #include <chrono>
@@ -66,7 +66,7 @@ public:
     Task<void> close() override;
 
 private:
-    // data is an immutable shared block (docs/gaps.md §3.9): get_object only grabs the
+    // data is an immutable shared block (docs/archive/gaps.md §3.9): get_object only grabs the
     // shared_ptr once inside the lock; large objects are no longer copied wholesale under
     // the global lock. When put overwrites the same key, the old block is held by GETs
     // still streaming it and is released naturally when they finish -- snapshot isolation

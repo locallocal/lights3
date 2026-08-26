@@ -19,7 +19,7 @@
 
 namespace lights3::storage::duostore {
 
-// Per-item extent cap for gcq entries (docs/gaps.md §2.11): when deleting TB-scale
+// Per-item extent cap for gcq entries (docs/archive/gaps.md §2.11): when deleting TB-scale
 // objects (hundreds of thousands of extents), split the DataRef into multiple gcq
 // items so the GC consumer's decoded memory residency per peek batch stays bounded.
 // Acks are independent per item and unlink is idempotent, so splitting does not
@@ -27,7 +27,7 @@ namespace lights3::storage::duostore {
 // the accounting — still holds)
 inline constexpr size_t kReclaimMaxExtents = 4096;
 
-// ---- Unified schema-marker check (docs/gaps.md §6.1: the four engines share the
+// ---- Unified schema-marker check (docs/archive/gaps.md §6.1: the four engines share the
 // "evolve rather than hard-reject" policy) ----
 // Stored marker = <lineage prefix><decimal version> (rocks prefix empty, redis "r",
 // tikv "t"; sqlite's user_version is a plain integer that skips string parsing but

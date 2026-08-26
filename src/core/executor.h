@@ -23,7 +23,7 @@ struct InlineExecutor final : IExecutor {
 };
 
 // Request-thread executor for the synchronous drivers (thread-per-request/
-// connection) (docs/gaps.md §2.10): instead of idling in sync_wait, the request
+// connection) (docs/archive/gaps.md §2.10): instead of idling in sync_wait, the request
 // thread runs this queue via sync_wait_pumping (task.h); the body reader switches
 // blocking reads back onto the request thread via resume_on, so a slow client
 // clogs only its own connection thread, not shared pool threads. One instance per

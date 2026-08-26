@@ -140,7 +140,7 @@ private:
     // from batch_refs: complete's refs transfer (owner rewrite) must be a no-op for packs —
     // merging them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes uses the
-    // same accounting basis as file_size (docs/gaps.md §2.3a)
+    // same accounting basis as file_size (docs/archive/gaps.md §2.3a)
     void batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign, int64_t rec_overhead);
     // Read the parts HASH: raw values (for the sha1 fingerprint) + decoded records, ascending by part_no
     std::vector<std::pair<std::string, PartRec>> scan_parts(std::string_view b,

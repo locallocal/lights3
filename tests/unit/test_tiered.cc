@@ -721,7 +721,7 @@ TEST(registry_per_backend_thread_pool) {
     }
 }
 
-// Incremental quota maintenance (docs/gaps.md §6.3): PUT accumulates the estimate in place and kicks an early scan round when
+// Incremental quota maintenance (docs/archive/gaps.md §6.3): PUT accumulates the estimate in place and kicks an early scan round when
 // over the watermark -- previously a quota breach between two scans (default 1 hour) was completely invisible
 TEST(tiered_quota_incremental_kicks_early_scan) {
     TieredConfig cfg;
@@ -754,7 +754,7 @@ TEST(tiered_quota_incremental_kicks_early_scan) {
     CHECK(converged);
 }
 
-// bucket_router build-time validation (docs/gaps.md §6.3): bad globs / unreachable rules error at startup,
+// bucket_router build-time validation (docs/archive/gaps.md §6.3): bad globs / unreachable rules error at startup,
 // negation rules take effect
 TEST(bucket_router_validation_and_negation) {
     auto mem1 = std::make_shared<MemoryBackend>();

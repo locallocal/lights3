@@ -229,6 +229,102 @@ TEST(config_int_errors_name_the_key_and_value) {
     }));
 }
 
+// ---------- Validation gaps, second round (docs/roadmap.md §1.2) ----------
+
+TEST(config_port_rejects_trailing_garbage) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // port was the last field going through bare stoi: "9000abc" silently became 9000
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  port: 9000abc\n") + backends);
+    }));
+    std::string msg;
+    try {
+        Config::from_string(std::string("http:\n  port: nine\n") + backends);
+    } catch (const std::exception& e) {
+        msg = e.what();
+    }
+    CHECK(msg.find("http.port") != std::string::npos);
+    CHECK(msg.find("nine") != std::string::npos);
+}
+
+TEST(config_max_header_size_bounded) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // 4GiB truncates to 0 in beast's parser.header_limit(uint32_t) and rejects everything
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  max_header_size: 4GiB\n") + backends);
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  max_header_size: 512\n") + backends);
+    }));
+    CHECK_EQ(Config::from_string(std::string("http:\n  max_header_size: 1MiB\n") + backends)
+                 .http.max_header_size,
+             size_t(1024 * 1024));
+}
+
+TEST(config_idle_timeout_rejects_zero) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // 0 means "never" to builtin but "expire immediately" to beast — rejected rather
+    // than silently meaning opposite things per driver
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  idle_timeout: 0s\n") + backends);
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  idle_timeout: 2d\n") + backends);
+    }));
+    CHECK_EQ(Config::from_string(std::string("http:\n  idle_timeout: 24h\n") + backends)
+                 .http.idle_timeout_sec,
+             86400);
+}
+
+TEST(config_log_level_rejects_typos) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // "warning" used to silently downgrade to info — the operator thinks the level took effect
+    CHECK(throws([&] {
+        Config::from_string(std::string("log:\n  level: warning\n") + backends);
+    }));
+    for (const char* ok : {"debug", "info", "warn", "error"})
+        CHECK_EQ(Config::from_string(std::string("log:\n  level: ") + ok + "\n" + backends)
+                     .log_level,
+                 ok);
+}
+
+TEST(config_bucket_rule_rejects_empty_fields) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // An empty glob can never match a bucket name; an empty backend surfaced as unknown backend ""
+    CHECK(throws([&] {
+        Config::from_string(std::string(backends) +
+                            "buckets:\n  rules:\n    - match: \"\"\n      backend: m\n");
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string(backends) +
+                            "buckets:\n  rules:\n    - match: \"a-*\"\n      backend: \"\"\n");
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string(backends) + "buckets:\n  rules:\n    - match: \"a-*\"\n");
+    }));
+}
+
+TEST(config_stall_timeout_must_not_exceed_request_timeout) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    // request_timeout always fires first, so a longer stall window can never take effect
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  request_timeout: 60s\n"
+                                        "  transfer_stall_timeout: 120s\n") +
+                            backends);
+    }));
+    // Equal is fine, and a disabled request_timeout (0) lifts the constraint
+    CHECK_EQ(Config::from_string(std::string("http:\n  request_timeout: 60s\n"
+                                             "  transfer_stall_timeout: 60s\n") +
+                                 backends)
+                 .http.transfer_stall_timeout_sec,
+             60);
+    CHECK_EQ(Config::from_string(std::string("http:\n  request_timeout: 0s\n"
+                                             "  transfer_stall_timeout: 3600s\n") +
+                                 backends)
+                 .http.transfer_stall_timeout_sec,
+             3600);
+}
+
 TEST(config_rejects_duplicate_backend_name) {
     CHECK(throws([] {
         Config::from_string(

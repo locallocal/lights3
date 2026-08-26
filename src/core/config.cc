@@ -280,10 +280,9 @@ Config Config::from_string(const std::string& text) {
         cfg.http.driver = http->get("driver", cfg.http.driver);
         cfg.http.bind = http->get("bind", cfg.http.bind);
         if (auto v = http->get("port"); !v.empty()) {
-            int p = std::stoi(v);
+            int p = to_int("http.port", v, cfg.http.port);
             // 0 is legal: let the kernel pick a free port (the e2e/unit-test fixtures rely on this convention)
-            if (p < 0 || p > 65535)
-                throw std::runtime_error("config: http.port out of range: " + v);
+            check_range("http.port", p, 0, 65535);
             cfg.http.port = static_cast<uint16_t>(p);
         }
         if (auto v = http->get("io_threads"); !v.empty()) {
@@ -372,8 +371,15 @@ Config Config::from_string(const std::string& text) {
     if (auto* bk = root.find("buckets")) {
         cfg.buckets.default_backend = bk->get("default_backend");
         if (auto* rules = bk->find("rules"); rules && rules->type == YamlNode::Type::List) {
-            for (auto& r : rules->list)
-                cfg.buckets.rules.push_back({r.get("match"), r.get("backend")});
+            for (auto& r : rules->list) {
+                BucketRule rule{r.get("match"), r.get("backend")};
+                // An empty glob can never match a valid bucket name, and an empty
+                // backend would surface as 'unknown backend ""' — both mean the rule
+                // is mangled, so name the actual problem
+                if (rule.match.empty() || rule.backend.empty())
+                    throw std::runtime_error("config: buckets.rules entry needs match + backend");
+                cfg.buckets.rules.push_back(std::move(rule));
+            }
         }
     }
     if (auto* web = root.find("website"); web && web->type == YamlNode::Type::List) {
@@ -402,6 +408,13 @@ Config Config::from_string(const std::string& text) {
         }
     }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
+    // parse_level in app.cc maps anything unknown to Info, so a misspelled level
+    // ("warning", "trace") would silently downgrade — the operator believes debug
+    // logging is on while it is not. Reject it here instead
+    if (cfg.log_level != "debug" && cfg.log_level != "info" && cfg.log_level != "warn" &&
+        cfg.log_level != "error")
+        throw std::runtime_error("config: log.level must be one of debug|info|warn|error, got '" +
+                                 cfg.log_level + "'");
 
     // Consistency checks. Thread-count upper bounds align with the per-backend
     // parameters of the same name ([1,1024]): without an upper bound, a fat-fingered
@@ -411,8 +424,27 @@ Config Config::from_string(const std::string& text) {
     // <= 0 would leave the very first request suspended on the semaphore forever;
     // must fail at startup instead of silently hanging
     check_range("runtime.max_inflight_requests", cfg.runtime.max_inflight_requests, 1, 1'000'000);
+    // beast feeds this into parser.header_limit(uint32_t): an unbounded value like
+    // 4GiB truncates to 0 there and every request is rejected with "header too big".
+    // The upper bound also guards a slipped unit (KiB written as GiB); the lower
+    // bound keeps room for a request line plus SigV4 auth headers
+    check_range("http.max_header_size", static_cast<long long>(cfg.http.max_header_size),
+                1024LL, 1'048'576LL);
+    // 0 means "never time out" to builtin (SO_RCVTIMEO of 0 disables the timeout)
+    // but "already expired" to beast (expires_after(0s)) — rather than silently
+    // picking one meaning per driver, reject it: an idle timeout must be positive
+    check_range("http.idle_timeout", cfg.http.idle_timeout_sec, 1, 86400);
     check_range("http.request_timeout", cfg.http.request_timeout_sec, 0, 86400);
     check_range("http.transfer_stall_timeout", cfg.http.transfer_stall_timeout_sec, 0, 86400);
+    // Cross-item consistency: the per-request timeout always fires first, so a stall
+    // window longer than it is a knob that looks configured but can never take effect
+    if (cfg.http.request_timeout_sec > 0 &&
+        cfg.http.transfer_stall_timeout_sec > cfg.http.request_timeout_sec)
+        throw std::runtime_error(
+            "config: http.transfer_stall_timeout (" +
+            std::to_string(cfg.http.transfer_stall_timeout_sec) +
+            "s) exceeds http.request_timeout (" + std::to_string(cfg.http.request_timeout_sec) +
+            "s) — the stall guard would never fire; lower it or set it to 0 to disable");
     // Shutdown/backpressure knobs (docs/gaps.md §7). Lower bounds guard against
     // "configured to 0 -> write loop spins / never drains"; upper bounds guard
     // against a slipped unit (MiB written as GiB) eating all memory outright

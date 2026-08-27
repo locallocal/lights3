@@ -67,6 +67,7 @@ private:
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;
+    std::shared_ptr<s3::CorsStore> cors_store_;
     std::shared_ptr<s3::S3Service> service_;
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;
     std::shared_ptr<AsyncSemaphore> inflight_;

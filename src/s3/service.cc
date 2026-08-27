@@ -114,7 +114,7 @@ private:
 // Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",
-    "lifecycle",   "tagging",      "cors",           "encryption",     "object-lock",
+    "lifecycle",   "tagging",      "encryption",     "object-lock",
     "legal-hold",  "retention",    "torrent",        "replication",    "logging",
     "notification", "requestPayment", "accelerate",  "analytics",      "inventory",
     "intelligent-tiering", "metrics", "ownershipControls", "publicAccessBlock",
@@ -390,6 +390,15 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                 req.path.rfind("/-/admin/credentials/", 0) == 0)) {
             // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
             resp = co_await admin_credentials(req, access_key);
+        } else if (req.method == "OPTIONS") {
+            // CORS preflight (roadmap §2.1): decided before signature verification —
+            // browsers attach no signature material to preflights; the preflighted
+            // request itself is verified as usual when it arrives. The handler answers
+            // purely from the rule table (no object access), so nothing is disclosed
+            // beyond "this origin/method pair is allowed"
+            bucket = addr.bucket;
+            if (!bucket.empty()) storage::validate_bucket_name(bucket);
+            resp = co_await cors_preflight(req, bucket);
         } else {
             // Static website hosting phase 1 (docs/static-website.md): requests with no
             // signature material may read objects from explicitly listed website buckets
@@ -540,6 +549,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // XML only for signed requests). Fetched here because catch blocks cannot co_await;
     // the cancelled path above intentionally stays XML -- 503/SlowDown is retry signaling
     if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
+    // CORS actual-request headers (roadmap §2.1): injected on success and error alike —
+    // the browser needs Allow-Origin to surface either response to the page. Preflight
+    // (OPTIONS) builds its own full header set in the handler
+    if (req.method != "OPTIONS") apply_cors_headers(req, bucket, resp);
     // per-bucket request distribution and outbound bytes (docs/archive/gaps.md §7). Streaming response bytes are pulled
     // by the driver after dispatch returns and counted via the decorator; small responses have a known length by now
     metrics_.record_bucket_request(bucket);
@@ -623,6 +636,25 @@ std::span<const S3Service::Route> S3Service::route_table() {
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_bucket_website(std::move(b), auth);
+     }},
+    // ?cors subresource (roadmap §2.1, root credential only, same model as ?website)
+    {"GET", Scope::Bucket, "cors", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.get_bucket_cors(std::move(b), auth);
+     }},
+    {"PUT", Scope::Bucket, "cors", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.put_bucket_cors(req, std::move(b), auth);
+     }},
+    {"DELETE", Scope::Bucket, "cors", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.delete_bucket_cors(std::move(b), auth);
      }},
     // All five parameters now take effect (docs/archive/gaps.md §5.1): previously pagination parameters were "allowed
     // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)

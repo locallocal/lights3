@@ -1759,3 +1759,184 @@ TEST(service_list_uploads_arbitrary_delimiter) {
     CHECK(contains(b, "<Key>y</Key>"));
     CHECK(!contains(b, "<Key>x|1</Key>"));
 }
+
+// ---- roadmap §2.1: CORS ----
+
+namespace {
+// Shared env for CORS tests: root credential + cors store on a memory backend
+struct CorsEnv {
+    std::shared_ptr<storage::MemoryBackend> backend = std::make_shared<storage::MemoryBackend>();
+    AuthConfig acfg = root_acfg();
+    SigV4Authenticator auth = SigV4Authenticator::build(acfg);
+    std::shared_ptr<CredentialStore> cred_store;
+    std::shared_ptr<CorsStore> cors_store;
+    std::unique_ptr<S3Service> svc;
+
+    static AuthConfig root_acfg() {
+        AuthConfig a;
+        a.credentials = {{"ROOTAK", "root-sk"}};
+        return a;
+    }
+
+    CorsEnv() {
+        cred_store = sync_wait(CredentialStore::load(backend, acfg));
+        auth.set_provider(cred_store);
+        std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+        BucketsConfig bcfg;
+        bcfg.default_backend = "mem";
+        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)),
+                                          auth);
+        svc->set_credential_store(cred_store);
+        cors_store = sync_wait(CorsStore::load(backend));
+        svc->set_cors_store(cors_store);
+    }
+    http::HttpResponse call(http::HttpRequest req) {
+        return sync_wait(svc->dispatch(std::move(req)));
+    }
+    http::HttpResponse signed_call(std::string method, std::string path, std::string body = "",
+                                   std::vector<std::pair<std::string, std::string>> query = {}) {
+        auto r = make_req(std::move(method), std::move(path), body, std::move(query));
+        auth.sign(r, acfg.credentials[0], body.empty() ? "" : util::sha256_hex(body));
+        return call(std::move(r));
+    }
+};
+
+const std::string kCorsXml =
+    "<CORSConfiguration><CORSRule>"
+    "<AllowedOrigin>http://app.example.com</AllowedOrigin>"
+    "<AllowedMethod>GET</AllowedMethod><AllowedMethod>PUT</AllowedMethod>"
+    "<AllowedHeader>*</AllowedHeader>"
+    "<ExposeHeader>ETag</ExposeHeader>"
+    "<MaxAgeSeconds>300</MaxAgeSeconds>"
+    "</CORSRule><CORSRule>"
+    "<AllowedOrigin>*</AllowedOrigin>"
+    "<AllowedMethod>HEAD</AllowedMethod>"
+    "</CORSRule></CORSConfiguration>";
+}  // namespace
+
+TEST(service_cors_config_api) {
+    CorsEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+
+    // No configuration yet: GET ?cors is 404 with its own code
+    auto none = env.signed_call("GET", "/site", "", {{"cors", ""}});
+    CHECK_EQ(none.status, 404);
+    CHECK(contains(none.small_body, "NoSuchCORSConfiguration"));
+
+    // Unsigned mutation is refused (auth on), root PUT succeeds, GET round-trips
+    CHECK_EQ(env.call(make_req("PUT", "/site", kCorsXml, {{"cors", ""}})).status, 403);
+    CHECK_EQ(env.signed_call("PUT", "/site", kCorsXml, {{"cors", ""}}).status, 200);
+    auto got = env.signed_call("GET", "/site", "", {{"cors", ""}});
+    CHECK_EQ(got.status, 200);
+    CHECK(contains(got.small_body, "<AllowedOrigin>http://app.example.com</AllowedOrigin>"));
+    CHECK(contains(got.small_body, "<MaxAgeSeconds>300</MaxAgeSeconds>"));
+
+    // Persistence: a fresh store loaded from the same backend sees the rules
+    auto store2 = sync_wait(CorsStore::load(env.backend));
+    auto snap2 = store2->snapshot();
+    CHECK(CorsStore::find(snap2, "site") != nullptr);
+    CHECK_EQ(CorsStore::find(snap2, "site")->size(), size_t{2});
+
+    // Rejections: unsupported method, double wildcard, empty config, missing bucket
+    CHECK_EQ(env.signed_call("PUT", "/site",
+                             "<CORSConfiguration><CORSRule>"
+                             "<AllowedOrigin>*</AllowedOrigin>"
+                             "<AllowedMethod>PATCH</AllowedMethod>"
+                             "</CORSRule></CORSConfiguration>",
+                             {{"cors", ""}})
+                 .status,
+             400);
+    CHECK_EQ(env.signed_call("PUT", "/site",
+                             "<CORSConfiguration><CORSRule>"
+                             "<AllowedOrigin>http://*.a.*</AllowedOrigin>"
+                             "<AllowedMethod>GET</AllowedMethod>"
+                             "</CORSRule></CORSConfiguration>",
+                             {{"cors", ""}})
+                 .status,
+             400);
+    CHECK_EQ(env.signed_call("PUT", "/site", "<CORSConfiguration></CORSConfiguration>",
+                             {{"cors", ""}})
+                 .status,
+             400);
+    CHECK_EQ(env.signed_call("PUT", "/nobucket", kCorsXml, {{"cors", ""}}).status, 404);
+
+    // DELETE revokes, idempotent
+    CHECK_EQ(env.signed_call("DELETE", "/site", "", {{"cors", ""}}).status, 204);
+    CHECK_EQ(env.signed_call("GET", "/site", "", {{"cors", ""}}).status, 404);
+    CHECK_EQ(env.signed_call("DELETE", "/site", "", {{"cors", ""}}).status, 204);
+}
+
+TEST(service_cors_preflight) {
+    CorsEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site", kCorsXml, {{"cors", ""}}).status, 200);
+
+    auto preflight = [&](std::string path, std::string origin, std::string method,
+                         std::string headers = "") {
+        auto r = make_req("OPTIONS", std::move(path));
+        if (!origin.empty()) r.headers.add("Origin", origin);
+        if (!method.empty()) r.headers.add("Access-Control-Request-Method", method);
+        if (!headers.empty()) r.headers.add("Access-Control-Request-Headers", headers);
+        return env.call(std::move(r));
+    };
+
+    // Matching rule: unsigned OPTIONS answers 200 with the full CORS header set
+    auto ok = preflight("/site/some/key.js", "http://app.example.com", "PUT",
+                        "content-type, x-amz-meta-x");
+    CHECK_EQ(ok.status, 200);
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""),
+             "http://app.example.com");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Credentials").value_or(""), "true");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Methods").value_or(""), "GET, PUT");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Headers").value_or(""),
+             "content-type, x-amz-meta-x");
+    CHECK_EQ(ok.headers.get("Access-Control-Expose-Headers").value_or(""), "ETag");
+    CHECK_EQ(ok.headers.get("Access-Control-Max-Age").value_or(""), "300");
+
+    // Wildcard-origin rule: Allow-Origin is literally '*', no credentials header
+    auto star = preflight("/site/k", "http://other.net", "HEAD");
+    CHECK_EQ(star.status, 200);
+    CHECK_EQ(star.headers.get("Access-Control-Allow-Origin").value_or(""), "*");
+    CHECK(!star.headers.has("Access-Control-Allow-Credentials"));
+
+    // Refusals: method not allowed for this origin, missing ACRM, bucket without config
+    CHECK_EQ(preflight("/site/k", "http://other.net", "DELETE").status, 403);
+    CHECK_EQ(preflight("/site/k", "http://app.example.com", "").status, 403);
+    CHECK_EQ(env.signed_call("PUT", "/plain").status, 200);
+    CHECK_EQ(preflight("/plain/k", "http://app.example.com", "GET").status, 403);
+}
+
+TEST(service_cors_actual_request_headers) {
+    CorsEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site/o.txt", "data").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site", kCorsXml, {{"cors", ""}}).status, 200);
+
+    auto with_origin = [&](std::string method, std::string path, std::string origin) {
+        auto r = make_req(std::move(method), std::move(path));
+        r.headers.add("Origin", std::move(origin));
+        env.auth.sign(r, env.acfg.credentials[0], "");
+        return env.call(std::move(r));
+    };
+
+    // Matching origin: Allow-Origin + Expose-Headers + Vary injected on success
+    auto ok = with_origin("GET", "/site/o.txt", "http://app.example.com");
+    CHECK_EQ(ok.status, 200);
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""),
+             "http://app.example.com");
+    CHECK_EQ(ok.headers.get("Access-Control-Expose-Headers").value_or(""), "ETag");
+    CHECK_EQ(ok.headers.get("Vary").value_or(""), "Origin");
+
+    // ...and on errors too (the browser cannot surface the 404 without it)
+    auto err = with_origin("GET", "/site/missing", "http://app.example.com");
+    CHECK_EQ(err.status, 404);
+    CHECK_EQ(err.headers.get("Access-Control-Allow-Origin").value_or(""),
+             "http://app.example.com");
+
+    // Non-matching origin or method: no CORS headers
+    auto other = with_origin("GET", "/site/o.txt", "http://evil.net");
+    CHECK_EQ(other.status, 200);
+    CHECK(!other.headers.has("Access-Control-Allow-Origin"));
+    auto del = with_origin("DELETE", "/site/o.txt", "http://other.net");  // '*' rule is HEAD-only
+    CHECK(!del.headers.has("Access-Control-Allow-Origin"));
+}

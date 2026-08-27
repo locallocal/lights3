@@ -17,6 +17,7 @@
 #include "http/model.h"
 #include "s3/auth/policy.h"
 #include "s3/auth/sigv4.h"
+#include "s3/cors_store.h"
 #include "s3/metrics.h"
 #include "s3/website_store.h"
 #include "storage/bucket_router.h"
@@ -98,6 +99,10 @@ public:
         website_store_ = std::move(store);
     }
 
+    // CORS (roadmap §2.1): per-bucket rules persisted in .sys/cors/, managed via
+    // ?cors (root only). Not injected = no preflight answers, no CORS headers
+    void set_cors_store(std::shared_ptr<CorsStore> store) { cors_store_ = std::move(store); }
+
     // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
@@ -143,6 +148,18 @@ private:
                                                 const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_website(std::string bucket,
                                                    const RequestAuth& auth);
+    // handlers/bucket_cors.cc (roadmap §2.1, root credential only)
+    Task<http::HttpResponse> get_bucket_cors(std::string bucket, const RequestAuth& auth);
+    Task<http::HttpResponse> put_bucket_cors(http::HttpRequest& req, std::string bucket,
+                                             const RequestAuth& auth);
+    Task<http::HttpResponse> delete_bucket_cors(std::string bucket, const RequestAuth& auth);
+    // OPTIONS preflight: dispatched before signature verification (browsers never sign
+    // preflights); answers purely from the CORS rule table, no object access
+    Task<http::HttpResponse> cors_preflight(http::HttpRequest& req, std::string bucket);
+    // Cross-origin actual requests: Allow-Origin/Expose-Headers injection on both
+    // success and error responses
+    void apply_cors_headers(const http::HttpRequest& req, const std::string& bucket,
+                            http::HttpResponse& resp);
     Task<http::HttpResponse> delete_bucket(std::string bucket);
     Task<http::HttpResponse> get_bucket_location(std::string bucket);
     // handlers/objects.cc
@@ -214,6 +231,7 @@ private:
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off
+    std::shared_ptr<CorsStore> cors_store_;        // null = CORS off (OPTIONS -> 403)
 
     // Short cache for /-/readyz results (anonymously reachable, and the probe issues real calls to every backend:
     // without a cache, an anonymous loop can amplify into billed/rate-limited upstream calls)

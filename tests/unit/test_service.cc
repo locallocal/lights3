@@ -39,6 +39,9 @@ http::HttpRequest make_req(std::string method, std::string path, std::string bod
         req.raw_query += k + "=" + v;
     }
     req.headers.add("Host", "localhost");
+    // Real drivers always see Content-Length (or Transfer-Encoding) on body-bearing
+    // requests; PutObject/UploadPart reject its absence with 411 (roadmap §2.5)
+    req.headers.add("Content-Length", std::to_string(body.size()));
     if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
     return req;
 }
@@ -185,8 +188,8 @@ TEST(service_not_implemented_apis) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     // Explicitly unsupported subresources (docs/s3-protocol.md §1) get an explicit 501 instead of
-    // falling into the List/Get catch-all
-    for (auto* sub : {"acl", "policy", "versioning", "lifecycle", "tagging"}) {
+    // falling into the List/Get catch-all (lifecycle/tagging graduated with roadmap §2.4/§2.5)
+    for (auto* sub : {"acl", "policy", "versioning", "encryption", "replication"}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{sub, ""}})));
         CHECK_EQ(resp.status, 501);
         CHECK(contains(resp.small_body, "NotImplemented"));
@@ -526,13 +529,14 @@ TEST(service_bucket_website_api) {
     auto store2 = sync_wait(WebsiteStore::load(backend, {}));
     CHECK(WebsiteStore::find(store2->snapshot(), "shop") != nullptr);
 
-    // Rejections: RoutingRules → 501, bad suffix → 400, nonexistent bucket → 404
+    // Rejections: empty RoutingRules → 400 (rules are supported since roadmap §2.3,
+    // but an empty container is a malformed config), bad suffix → 400, missing bucket → 404
     const std::string routed =
         "<WebsiteConfiguration><IndexDocument><Suffix>i.html</Suffix></IndexDocument>"
         "<RoutingRules></RoutingRules></WebsiteConfiguration>";
     CHECK_EQ(
         sync_wait(svc.dispatch(signed_req("PUT", "/shop", routed, {{"website", ""}}))).status,
-        501);
+        400);
     const std::string badsfx =
         "<WebsiteConfiguration><IndexDocument><Suffix>a/b.html</Suffix></IndexDocument>"
         "</WebsiteConfiguration>";
@@ -1050,8 +1054,9 @@ TEST(service_unsupported_headers_rejected) {
         req.headers.add(std::move(header), std::move(value));
         return sync_wait(svc.dispatch(std::move(req)));
     };
+    // x-amz-tagging left this list with roadmap §2.5 (now a first-class metadata field)
     for (const char* h : {"x-amz-server-side-encryption",
-                          "x-amz-server-side-encryption-customer-algorithm", "x-amz-tagging",
+                          "x-amz-server-side-encryption-customer-algorithm",
                           "x-amz-object-lock-mode", "x-amz-grant-read"}) {
         auto resp = try_put(h, "whatever");
         CHECK_EQ(resp.status, 501);
@@ -1063,25 +1068,21 @@ TEST(service_unsupported_headers_rejected) {
     CHECK_EQ(try_put("x-amz-acl", "public-read").status, 501);
 }
 
-// ---------- roadmap §1.3: STS temporary credentials are explicitly refused ----------
-TEST(service_sts_token_explicit_501) {
+// ---------- roadmap §2.6: STS tokens are now first-class (real flow tested in test_credentials.cc) ----------
+TEST(service_sts_token_no_longer_501) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
 
-    // Header side: previously in no reject list — silently dropped, and with auth
-    // enabled the permanent-key lookup then surfaced a misleading InvalidAccessKeyId
-    auto req = make_req("GET", "/bkt/k");
+    // With auth disabled everything is open anyway; the point here is that the token
+    // no longer trips the 501 gates (header check and query allowlist)
+    auto req = make_req("GET", "/bkt/nothere");
     req.headers.add("x-amz-security-token", "FwoGZXIvYXdzEXAMPLETOKEN");
     auto resp = sync_wait(svc.dispatch(std::move(req)));
-    CHECK_EQ(resp.status, 501);
-    CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
-    CHECK(contains(resp.small_body, "X-Amz-Security-Token"));
+    CHECK_EQ(resp.status, 404);  // NoSuchKey, not NotImplemented
 
-    // Query side: previously whitelisted in kCommonQueryKeys and silently ignored
     auto q = sync_wait(
-        svc.dispatch(make_req("GET", "/bkt/k", "", {{"X-Amz-Security-Token", "tok"}})));
-    CHECK_EQ(q.status, 501);
-    CHECK(contains(q.small_body, "<Code>NotImplemented</Code>"));
+        svc.dispatch(make_req("GET", "/bkt/nothere", "", {{"X-Amz-Security-Token", "tok"}})));
+    CHECK_EQ(q.status, 404);
 }
 
 // ---------- gaps §3.5: query whitelist; unknown params get 501 instead of a silent wrong answer ----------
@@ -1091,9 +1092,9 @@ TEST(service_query_whitelist) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
 
     // Exact gaps from the blacklist era: each silently degraded to "read the whole object".
-    // response-* was implemented in §5.3 and is no longer listed here -- unimplemented
+    // response-* was implemented in §5.3, partNumber in roadmap §2.5 -- unimplemented
     // subresources must still 501
-    for (auto q : {std::pair{"attributes", ""}, std::pair{"partNumber", "1"}}) {
+    for (auto q : {std::pair{"attributes", ""}, std::pair{"restore", ""}}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{q.first, q.second}})));
         CHECK_EQ(resp.status, 501);
         CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
@@ -1675,4 +1676,783 @@ TEST(service_request_timeout_cancels_and_returns_503) {
     svc.set_request_timeout(std::chrono::seconds(0));
     auto ok = sync_wait(svc.dispatch(make_req("PUT", "/bkt/fine", "payload")));
     CHECK_EQ(ok.status, 200);
+}
+
+// ---- roadmap §2.5: low-cost protocol gaps ----
+
+TEST(service_list_type_3_rejected) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/ltbkt")));
+    // An unknown listing protocol version must not silently degrade to V1 semantics
+    auto bad = sync_wait(svc.dispatch(make_req("GET", "/ltbkt", "", {{"list-type", "3"}})));
+    CHECK_EQ(bad.status, 400);
+    CHECK(contains(body_of(bad), "<Code>InvalidArgument</Code>"));
+    auto ok = sync_wait(svc.dispatch(make_req("GET", "/ltbkt", "", {{"list-type", "2"}})));
+    CHECK_EQ(ok.status, 200);
+}
+
+TEST(service_missing_content_length_411) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/mcl")));
+
+    // PUT with neither Content-Length nor Transfer-Encoding: 411, no object committed
+    auto put = make_req("PUT", "/mcl/obj", "data");
+    put.headers.remove("Content-Length");
+    auto resp = sync_wait(svc.dispatch(std::move(put)));
+    CHECK_EQ(resp.status, 411);
+    CHECK(contains(body_of(resp), "<Code>MissingContentLength</Code>"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/mcl/obj"))).status, 404);
+
+    // Transfer-Encoding is valid body framing -- not 411
+    auto te = make_req("PUT", "/mcl/obj", "data");
+    te.headers.remove("Content-Length");
+    te.headers.add("Transfer-Encoding", "chunked");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(te))).status, 200);
+
+    // UploadPart enforces the same rule
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/mcl/mp", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    auto part = make_req("PUT", "/mcl/mp", "x", {{"partNumber", "1"}, {"uploadId", uid}});
+    part.headers.remove("Content-Length");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(part))).status, 411);
+}
+
+TEST(service_list_parts_encoding_type) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/enc")));
+    auto init =
+        sync_wait(svc.dispatch(make_req("POST", "/enc/a b/c.bin", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    sync_wait(svc.dispatch(
+        make_req("PUT", "/enc/a b/c.bin", "x", {{"partNumber", "1"}, {"uploadId", uid}})));
+
+    // encoding-type=url: Key comes back URL-encoded (slash preserved), EncodingType echoed
+    auto lp = sync_wait(svc.dispatch(
+        make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "url"}})));
+    CHECK_EQ(lp.status, 200);
+    std::string b = body_of(lp);
+    CHECK(contains(b, "<Key>a%20b/c.bin</Key>"));
+    CHECK(contains(b, "<EncodingType>url</EncodingType>"));
+
+    // Other values rejected, same as the two bucket listings
+    auto bad = sync_wait(svc.dispatch(
+        make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "xml"}})));
+    CHECK_EQ(bad.status, 400);
+}
+
+TEST(service_list_uploads_arbitrary_delimiter) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/deli")));
+    for (const char* k : {"x|1", "x|2", "y"})
+        sync_wait(svc.dispatch(make_req("POST", std::string("/deli/") + k, "", {{"uploads", ""}})));
+
+    // Non-'/' delimiters group generically (previously 501)
+    auto resp = sync_wait(
+        svc.dispatch(make_req("GET", "/deli", "", {{"uploads", ""}, {"delimiter", "|"}})));
+    CHECK_EQ(resp.status, 200);
+    std::string b = body_of(resp);
+    CHECK(contains(b, "<Prefix>x|</Prefix>"));
+    CHECK(contains(b, "<Key>y</Key>"));
+    CHECK(!contains(b, "<Key>x|1</Key>"));
+}
+
+// ---- roadmap §2.1: CORS ----
+
+namespace {
+// Shared env for CORS tests: root credential + cors store on a memory backend
+struct CorsEnv {
+    std::shared_ptr<storage::MemoryBackend> backend = std::make_shared<storage::MemoryBackend>();
+    AuthConfig acfg = root_acfg();
+    SigV4Authenticator auth = SigV4Authenticator::build(acfg);
+    std::shared_ptr<CredentialStore> cred_store;
+    std::shared_ptr<CorsStore> cors_store;
+    std::unique_ptr<S3Service> svc;
+
+    static AuthConfig root_acfg() {
+        AuthConfig a;
+        a.credentials = {{"ROOTAK", "root-sk"}};
+        return a;
+    }
+
+    CorsEnv() {
+        cred_store = sync_wait(CredentialStore::load(backend, acfg));
+        auth.set_provider(cred_store);
+        std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+        BucketsConfig bcfg;
+        bcfg.default_backend = "mem";
+        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)),
+                                          auth);
+        svc->set_credential_store(cred_store);
+        cors_store = sync_wait(CorsStore::load(backend));
+        svc->set_cors_store(cors_store);
+    }
+    http::HttpResponse call(http::HttpRequest req) {
+        return sync_wait(svc->dispatch(std::move(req)));
+    }
+    http::HttpResponse signed_call(std::string method, std::string path, std::string body = "",
+                                   std::vector<std::pair<std::string, std::string>> query = {}) {
+        auto r = make_req(std::move(method), std::move(path), body, std::move(query));
+        auth.sign(r, acfg.credentials[0], body.empty() ? "" : util::sha256_hex(body));
+        return call(std::move(r));
+    }
+};
+
+const std::string kCorsXml =
+    "<CORSConfiguration><CORSRule>"
+    "<AllowedOrigin>http://app.example.com</AllowedOrigin>"
+    "<AllowedMethod>GET</AllowedMethod><AllowedMethod>PUT</AllowedMethod>"
+    "<AllowedHeader>*</AllowedHeader>"
+    "<ExposeHeader>ETag</ExposeHeader>"
+    "<MaxAgeSeconds>300</MaxAgeSeconds>"
+    "</CORSRule><CORSRule>"
+    "<AllowedOrigin>*</AllowedOrigin>"
+    "<AllowedMethod>HEAD</AllowedMethod>"
+    "</CORSRule></CORSConfiguration>";
+}  // namespace
+
+TEST(service_cors_config_api) {
+    CorsEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+
+    // No configuration yet: GET ?cors is 404 with its own code
+    auto none = env.signed_call("GET", "/site", "", {{"cors", ""}});
+    CHECK_EQ(none.status, 404);
+    CHECK(contains(none.small_body, "NoSuchCORSConfiguration"));
+
+    // Unsigned mutation is refused (auth on), root PUT succeeds, GET round-trips
+    CHECK_EQ(env.call(make_req("PUT", "/site", kCorsXml, {{"cors", ""}})).status, 403);
+    CHECK_EQ(env.signed_call("PUT", "/site", kCorsXml, {{"cors", ""}}).status, 200);
+    auto got = env.signed_call("GET", "/site", "", {{"cors", ""}});
+    CHECK_EQ(got.status, 200);
+    CHECK(contains(got.small_body, "<AllowedOrigin>http://app.example.com</AllowedOrigin>"));
+    CHECK(contains(got.small_body, "<MaxAgeSeconds>300</MaxAgeSeconds>"));
+
+    // Persistence: a fresh store loaded from the same backend sees the rules
+    auto store2 = sync_wait(CorsStore::load(env.backend));
+    auto snap2 = store2->snapshot();
+    CHECK(CorsStore::find(snap2, "site") != nullptr);
+    CHECK_EQ(CorsStore::find(snap2, "site")->size(), size_t{2});
+
+    // Rejections: unsupported method, double wildcard, empty config, missing bucket
+    CHECK_EQ(env.signed_call("PUT", "/site",
+                             "<CORSConfiguration><CORSRule>"
+                             "<AllowedOrigin>*</AllowedOrigin>"
+                             "<AllowedMethod>PATCH</AllowedMethod>"
+                             "</CORSRule></CORSConfiguration>",
+                             {{"cors", ""}})
+                 .status,
+             400);
+    CHECK_EQ(env.signed_call("PUT", "/site",
+                             "<CORSConfiguration><CORSRule>"
+                             "<AllowedOrigin>http://*.a.*</AllowedOrigin>"
+                             "<AllowedMethod>GET</AllowedMethod>"
+                             "</CORSRule></CORSConfiguration>",
+                             {{"cors", ""}})
+                 .status,
+             400);
+    CHECK_EQ(env.signed_call("PUT", "/site", "<CORSConfiguration></CORSConfiguration>",
+                             {{"cors", ""}})
+                 .status,
+             400);
+    CHECK_EQ(env.signed_call("PUT", "/nobucket", kCorsXml, {{"cors", ""}}).status, 404);
+
+    // DELETE revokes, idempotent
+    CHECK_EQ(env.signed_call("DELETE", "/site", "", {{"cors", ""}}).status, 204);
+    CHECK_EQ(env.signed_call("GET", "/site", "", {{"cors", ""}}).status, 404);
+    CHECK_EQ(env.signed_call("DELETE", "/site", "", {{"cors", ""}}).status, 204);
+}
+
+TEST(service_cors_preflight) {
+    CorsEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site", kCorsXml, {{"cors", ""}}).status, 200);
+
+    auto preflight = [&](std::string path, std::string origin, std::string method,
+                         std::string headers = "") {
+        auto r = make_req("OPTIONS", std::move(path));
+        if (!origin.empty()) r.headers.add("Origin", origin);
+        if (!method.empty()) r.headers.add("Access-Control-Request-Method", method);
+        if (!headers.empty()) r.headers.add("Access-Control-Request-Headers", headers);
+        return env.call(std::move(r));
+    };
+
+    // Matching rule: unsigned OPTIONS answers 200 with the full CORS header set
+    auto ok = preflight("/site/some/key.js", "http://app.example.com", "PUT",
+                        "content-type, x-amz-meta-x");
+    CHECK_EQ(ok.status, 200);
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""),
+             "http://app.example.com");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Credentials").value_or(""), "true");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Methods").value_or(""), "GET, PUT");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Headers").value_or(""),
+             "content-type, x-amz-meta-x");
+    CHECK_EQ(ok.headers.get("Access-Control-Expose-Headers").value_or(""), "ETag");
+    CHECK_EQ(ok.headers.get("Access-Control-Max-Age").value_or(""), "300");
+
+    // Wildcard-origin rule: Allow-Origin is literally '*', no credentials header
+    auto star = preflight("/site/k", "http://other.net", "HEAD");
+    CHECK_EQ(star.status, 200);
+    CHECK_EQ(star.headers.get("Access-Control-Allow-Origin").value_or(""), "*");
+    CHECK(!star.headers.has("Access-Control-Allow-Credentials"));
+
+    // Refusals: method not allowed for this origin, missing ACRM, bucket without config
+    CHECK_EQ(preflight("/site/k", "http://other.net", "DELETE").status, 403);
+    CHECK_EQ(preflight("/site/k", "http://app.example.com", "").status, 403);
+    CHECK_EQ(env.signed_call("PUT", "/plain").status, 200);
+    CHECK_EQ(preflight("/plain/k", "http://app.example.com", "GET").status, 403);
+}
+
+TEST(service_cors_actual_request_headers) {
+    CorsEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site/o.txt", "data").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site", kCorsXml, {{"cors", ""}}).status, 200);
+
+    auto with_origin = [&](std::string method, std::string path, std::string origin) {
+        auto r = make_req(std::move(method), std::move(path));
+        r.headers.add("Origin", std::move(origin));
+        env.auth.sign(r, env.acfg.credentials[0], "");
+        return env.call(std::move(r));
+    };
+
+    // Matching origin: Allow-Origin + Expose-Headers + Vary injected on success
+    auto ok = with_origin("GET", "/site/o.txt", "http://app.example.com");
+    CHECK_EQ(ok.status, 200);
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""),
+             "http://app.example.com");
+    CHECK_EQ(ok.headers.get("Access-Control-Expose-Headers").value_or(""), "ETag");
+    CHECK_EQ(ok.headers.get("Vary").value_or(""), "Origin");
+
+    // ...and on errors too (the browser cannot surface the 404 without it)
+    auto err = with_origin("GET", "/site/missing", "http://app.example.com");
+    CHECK_EQ(err.status, 404);
+    CHECK_EQ(err.headers.get("Access-Control-Allow-Origin").value_or(""),
+             "http://app.example.com");
+
+    // Non-matching origin or method: no CORS headers
+    auto other = with_origin("GET", "/site/o.txt", "http://evil.net");
+    CHECK_EQ(other.status, 200);
+    CHECK(!other.headers.has("Access-Control-Allow-Origin"));
+    auto del = with_origin("DELETE", "/site/o.txt", "http://other.net");  // '*' rule is HEAD-only
+    CHECK(!del.headers.has("Access-Control-Allow-Origin"));
+}
+
+// ---- roadmap §2.3: website hosting finishing touches ----
+
+namespace {
+// Full-auth env with a website store (dynamic, backed by the shared memory backend)
+struct WebEnv {
+    std::shared_ptr<storage::MemoryBackend> backend = std::make_shared<storage::MemoryBackend>();
+    AuthConfig acfg = CorsEnv::root_acfg();
+    SigV4Authenticator auth = SigV4Authenticator::build(acfg);
+    std::shared_ptr<CredentialStore> cred_store;
+    std::shared_ptr<WebsiteStore> wstore;
+    std::unique_ptr<S3Service> svc;
+
+    explicit WebEnv(std::vector<WebsiteBucket> statics = {}) {
+        cred_store = sync_wait(CredentialStore::load(backend, acfg));
+        auth.set_provider(cred_store);
+        std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+        BucketsConfig bcfg;
+        bcfg.default_backend = "mem";
+        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)),
+                                          auth);
+        svc->set_credential_store(cred_store);
+        wstore = sync_wait(WebsiteStore::load(backend, std::move(statics)));
+        svc->set_website_store(wstore);
+    }
+    http::HttpResponse call(http::HttpRequest req) {
+        return sync_wait(svc->dispatch(std::move(req)));
+    }
+    http::HttpResponse signed_call(std::string method, std::string path, std::string body = "",
+                                   std::vector<std::pair<std::string, std::string>> query = {}) {
+        auto r = make_req(std::move(method), std::move(path), body, std::move(query));
+        auth.sign(r, acfg.credentials[0], body.empty() ? "" : util::sha256_hex(body));
+        return call(std::move(r));
+    }
+};
+}  // namespace
+
+TEST(service_website_slash_redirect) {
+    WebEnv env({{.bucket = "site"}});
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site/docs/index.html", "<p>docs</p>").status, 200);
+
+    // /docs (no trailing slash, no such object, directory index exists) → 302 /site/docs/
+    auto r = env.call(make_req("GET", "/site/docs"));
+    CHECK_EQ(r.status, 302);
+    CHECK_EQ(r.headers.get("Location").value_or(""), "/site/docs/");
+    // ...and following it serves the index
+    auto idx = env.call(make_req("GET", "/site/docs/"));
+    CHECK_EQ(idx.status, 200);
+    CHECK_EQ(body_of(idx), "<p>docs</p>");
+    // No directory index behind it → the original 404 stands (built-in error page)
+    auto miss = env.call(make_req("GET", "/site/nope"));
+    CHECK_EQ(miss.status, 404);
+    // An existing object without a trailing slash is served normally, no redirect
+    CHECK_EQ(env.signed_call("PUT", "/site/plain.txt", "x").status, 200);
+    CHECK_EQ(env.call(make_req("GET", "/site/plain.txt")).status, 200);
+}
+
+TEST(service_website_redirect_all) {
+    WebEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/spa").status, 200);
+    const std::string xml =
+        "<WebsiteConfiguration><RedirectAllRequestsTo>"
+        "<HostName>app.example.org</HostName><Protocol>https</Protocol>"
+        "</RedirectAllRequestsTo></WebsiteConfiguration>";
+    CHECK_EQ(env.signed_call("PUT", "/spa", xml, {{"website", ""}}).status, 200);
+    // Round-trip
+    auto got = env.signed_call("GET", "/spa", "", {{"website", ""}});
+    CHECK(contains(got.small_body, "<HostName>app.example.org</HostName>"));
+    CHECK(contains(got.small_body, "<Protocol>https</Protocol>"));
+
+    // Every anonymous request answers 301 to the target host, key preserved
+    auto r = env.call(make_req("GET", "/spa/deep/link.html"));
+    CHECK_EQ(r.status, 301);
+    CHECK_EQ(r.headers.get("Location").value_or(""), "https://app.example.org/deep/link.html");
+    auto root = env.call(make_req("GET", "/spa/"));
+    CHECK_EQ(root.status, 301);
+    CHECK_EQ(root.headers.get("Location").value_or(""), "https://app.example.org/");
+
+    // Combining RedirectAllRequestsTo with IndexDocument is rejected
+    const std::string both =
+        "<WebsiteConfiguration><RedirectAllRequestsTo><HostName>h</HostName>"
+        "</RedirectAllRequestsTo><IndexDocument><Suffix>i.html</Suffix></IndexDocument>"
+        "</WebsiteConfiguration>";
+    CHECK_EQ(env.signed_call("PUT", "/spa", both, {{"website", ""}}).status, 400);
+}
+
+TEST(service_website_routing_rules) {
+    WebEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    const std::string xml =
+        "<WebsiteConfiguration>"
+        "<IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
+        "<RoutingRules>"
+        "<RoutingRule><Condition><KeyPrefixEquals>docs/</KeyPrefixEquals></Condition>"
+        "<Redirect><ReplaceKeyPrefixWith>documents/</ReplaceKeyPrefixWith></Redirect>"
+        "</RoutingRule>"
+        "<RoutingRule><Condition><KeyPrefixEquals>img/</KeyPrefixEquals>"
+        "<HttpErrorCodeReturnedEquals>404</HttpErrorCodeReturnedEquals></Condition>"
+        "<Redirect><ReplaceKeyWith>missing.png</ReplaceKeyWith>"
+        "<HttpRedirectCode>302</HttpRedirectCode></Redirect></RoutingRule>"
+        "</RoutingRules></WebsiteConfiguration>";
+    CHECK_EQ(env.signed_call("PUT", "/site", xml, {{"website", ""}}).status, 200);
+    auto got = env.signed_call("GET", "/site", "", {{"website", ""}});
+    CHECK(contains(got.small_body, "<KeyPrefixEquals>docs/</KeyPrefixEquals>"));
+    CHECK(contains(got.small_body, "<HttpRedirectCode>302</HttpRedirectCode>"));
+
+    // Prefix rule: redirected before any object access (object existence irrelevant)
+    auto pre = env.call(make_req("GET", "/site/docs/guide.html"));
+    CHECK_EQ(pre.status, 301);
+    CHECK_EQ(pre.headers.get("Location").value_or(""), "/site/documents/guide.html");
+
+    // Error rule: 404 under img/ → 302 to the fallback key; signed requests unaffected
+    auto err = env.call(make_req("GET", "/site/img/gone.png"));
+    CHECK_EQ(err.status, 302);
+    CHECK_EQ(err.headers.get("Location").value_or(""), "/site/missing.png");
+    CHECK_EQ(env.signed_call("GET", "/site/img/gone.png").status, 404);
+
+    // Unmatched error falls through to the (built-in) error page
+    CHECK_EQ(env.call(make_req("GET", "/site/other/gone")).status, 404);
+}
+
+TEST(service_website_rate_limit) {
+    WebEnv env({{.bucket = "lim", .max_rps = 2}});
+    CHECK_EQ(env.signed_call("PUT", "/lim").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/lim/f.txt", "x").status, 200);
+
+    // Burst = rps: two anonymous reads pass, the third inside the same instant is 503
+    CHECK_EQ(env.call(make_req("GET", "/lim/f.txt")).status, 200);
+    CHECK_EQ(env.call(make_req("GET", "/lim/f.txt")).status, 200);
+    auto limited = env.call(make_req("GET", "/lim/f.txt"));
+    CHECK_EQ(limited.status, 503);
+    CHECK(contains(body_of(limited), "<Code>SlowDown</Code>"));  // XML, not the error page
+
+    // Signed requests are not rate-limited (the limiter guards the anonymous plane)
+    CHECK_EQ(env.signed_call("GET", "/lim/f.txt").status, 200);
+}
+
+TEST(service_website_anon_gates) {
+    WebEnv env({{.bucket = "gate"}});
+    CHECK_EQ(env.signed_call("PUT", "/gate").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/gate/f.txt", "data").status, 200);
+
+    // Partial/malformed presigned material must go through verification, never degrade
+    // to an anonymous success
+    auto partial = env.call(make_req("GET", "/gate/f.txt", "", {{"X-Amz-Signature", "abc"}}));
+    CHECK_EQ(partial.status, 403);
+    CHECK(!contains(body_of(partial), "data"));
+
+    // Writes and deletes never ride the anonymous plane
+    CHECK_EQ(env.call(make_req("DELETE", "/gate/f.txt")).status, 403);
+    auto put = make_req("PUT", "/gate/f.txt", "evil");
+    CHECK_EQ(env.call(std::move(put)).status, 403);
+    auto still = env.call(make_req("GET", "/gate/f.txt"));
+    CHECK_EQ(body_of(still), "data");
+
+    // Query-flag routes (?uploadId is ListParts) stay authenticated-only
+    CHECK_EQ(env.call(make_req("GET", "/gate/f.txt", "", {{"uploadId", "u1"}})).status, 403);
+    // response-* overrides refused anonymously
+    CHECK_EQ(env.call(make_req("GET", "/gate/f.txt", "",
+                               {{"response-content-disposition", "attachment"}}))
+                 .status,
+             400);
+}
+
+// ---- roadmap §2.2: checksum persistence + echo ----
+
+TEST(service_checksum_persist_and_echo) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/ckb")));
+
+    // PUT with a verified header-form checksum: echoed on the PUT response and persisted
+    auto put = make_req("PUT", "/ckb/o.bin", "hello");
+    put.headers.add("x-amz-checksum-crc32", "NhCmhg==");
+    auto pr = sync_wait(svc.dispatch(std::move(put)));
+    CHECK_EQ(pr.status, 200);
+    CHECK_EQ(pr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+
+    // GET/HEAD with x-amz-checksum-mode: ENABLED echo value + type
+    auto get = make_req("GET", "/ckb/o.bin");
+    get.headers.add("x-amz-checksum-mode", "ENABLED");
+    auto gr = sync_wait(svc.dispatch(std::move(get)));
+    CHECK_EQ(gr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+    CHECK_EQ(gr.headers.get("x-amz-checksum-type").value_or(""), "FULL_OBJECT");
+    auto head = make_req("HEAD", "/ckb/o.bin");
+    head.headers.add("x-amz-checksum-mode", "enabled");  // case-insensitive
+    auto hr = sync_wait(svc.dispatch(std::move(head)));
+    CHECK_EQ(hr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+
+    // Without the mode header: no echo; ranged GET: no echo either (partial bytes)
+    auto plain = sync_wait(svc.dispatch(make_req("GET", "/ckb/o.bin")));
+    CHECK(!plain.headers.has("x-amz-checksum-crc32"));
+    auto ranged = make_req("GET", "/ckb/o.bin");
+    ranged.headers.add("x-amz-checksum-mode", "ENABLED");
+    ranged.headers.add("Range", "bytes=0-1");
+    auto rr = sync_wait(svc.dispatch(std::move(ranged)));
+    CHECK_EQ(rr.status, 206);
+    CHECK(!rr.headers.has("x-amz-checksum-crc32"));
+
+    // A checksum header that fails verification never commits (guard wiring intact)
+    auto bad = make_req("PUT", "/ckb/bad.bin", "hello");
+    bad.headers.add("x-amz-checksum-crc32", "OncRQw==");  // crc32("world")
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 400);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/ckb/bad.bin"))).status, 404);
+
+    // Two different checksum headers on one request are refused
+    auto dup = make_req("PUT", "/ckb/dup.bin", "hello");
+    dup.headers.add("x-amz-checksum-crc32", "NhCmhg==");
+    dup.headers.add("x-amz-checksum-sha256",
+                    "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(dup))).status, 400);
+
+    // Copy preserves the checksum (bytes unchanged)
+    auto cp = make_req("PUT", "/ckb/copy.bin");
+    cp.headers.add("x-amz-copy-source", "/ckb/o.bin");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(cp))).status, 200);
+    auto cg = make_req("GET", "/ckb/copy.bin");
+    cg.headers.add("x-amz-checksum-mode", "ENABLED");
+    auto cgr = sync_wait(svc.dispatch(std::move(cg)));
+    CHECK_EQ(cgr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+}
+
+TEST(service_checksum_multipart_composite) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/ckm")));
+
+    // Create declares the algorithm; CRC64NVME (full-object only) is an honest 501
+    auto init64 = make_req("POST", "/ckm/o.bin", "", {{"uploads", ""}});
+    init64.headers.add("x-amz-checksum-algorithm", "CRC64NVME");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(init64))).status, 501);
+
+    auto init = make_req("POST", "/ckm/o.bin", "", {{"uploads", ""}});
+    init.headers.add("x-amz-checksum-algorithm", "CRC32");
+    auto ir = sync_wait(svc.dispatch(std::move(init)));
+    CHECK_EQ(ir.status, 200);
+    std::string uid = xelem(body_of(ir), "UploadId");
+
+    auto up = [&](int no, std::string data, std::string ck) {
+        auto r = make_req("PUT", "/ckm/o.bin", std::move(data),
+                          {{"partNumber", std::to_string(no)}, {"uploadId", uid}});
+        r.headers.add("x-amz-checksum-crc32", ck);
+        return sync_wait(svc.dispatch(std::move(r)));
+    };
+    auto p1 = up(1, "hello", "NhCmhg==");
+    CHECK_EQ(p1.status, 200);
+    CHECK_EQ(p1.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+    std::string etag1 = p1.headers.get("ETag").value_or("");
+    auto p2 = up(2, "world", "OncRQw==");
+    CHECK_EQ(p2.status, 200);
+    std::string etag2 = p2.headers.get("ETag").value_or("");
+
+    // ListParts reports the stored per-part checksums
+    auto lp = sync_wait(svc.dispatch(make_req("GET", "/ckm/o.bin", "", {{"uploadId", uid}})));
+    std::string lpb = body_of(lp);
+    CHECK(contains(lpb, "<ChecksumCRC32>NhCmhg==</ChecksumCRC32>"));
+    CHECK(contains(lpb, "<ChecksumCRC32>OncRQw==</ChecksumCRC32>"));
+
+    // Complete with a WRONG per-part checksum claim: BadDigest, nothing committed
+    std::string bad_xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                          etag1 + "</ETag><ChecksumCRC32>OncRQw==</ChecksumCRC32></Part>" +
+                          "<Part><PartNumber>2</PartNumber><ETag>" + etag2 +
+                          "</ETag></Part></CompleteMultipartUpload>";
+    auto bad = sync_wait(
+        svc.dispatch(make_req("POST", "/ckm/o.bin", bad_xml, {{"uploadId", uid}})));
+    CHECK_EQ(bad.status, 400);
+    CHECK(contains(body_of(bad), "BadDigest"));
+
+    // Correct complete: composite = crc32(raw1 || raw2) + "-2"
+    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                      etag1 + "</ETag><ChecksumCRC32>NhCmhg==</ChecksumCRC32></Part>" +
+                      "<Part><PartNumber>2</PartNumber><ETag>" + etag2 +
+                      "</ETag><ChecksumCRC32>OncRQw==</ChecksumCRC32></Part>"
+                      "</CompleteMultipartUpload>";
+    auto done = sync_wait(
+        svc.dispatch(make_req("POST", "/ckm/o.bin", xml, {{"uploadId", uid}})));
+    CHECK_EQ(done.status, 200);
+    std::string db = body_of(done);
+    CHECK(contains(db, "<ChecksumCRC32>wpn7tg==-2</ChecksumCRC32>"));
+    CHECK(contains(db, "<ChecksumType>COMPOSITE</ChecksumType>"));
+
+    // GET with mode echoes the composite + type, and the parts-count layout persisted
+    auto get = make_req("GET", "/ckm/o.bin");
+    get.headers.add("x-amz-checksum-mode", "ENABLED");
+    auto gr = sync_wait(svc.dispatch(std::move(get)));
+    CHECK_EQ(gr.headers.get("x-amz-checksum-crc32").value_or(""), "wpn7tg==-2");
+    CHECK_EQ(gr.headers.get("x-amz-checksum-type").value_or(""), "COMPOSITE");
+    CHECK_EQ(body_of(gr), "helloworld");
+}
+
+// ---- roadmap §2.5: GET/HEAD ?partNumber ----
+TEST(service_get_object_part_number) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/pnb")));
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/pnb/mp", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    std::string etags[2];
+    const char* datas[2] = {"hello", "world"};
+    for (int i = 0; i < 2; ++i) {
+        auto r = sync_wait(svc.dispatch(make_req(
+            "PUT", "/pnb/mp", datas[i], {{"partNumber", std::to_string(i + 1)}, {"uploadId", uid}})));
+        etags[i] = r.headers.get("ETag").value_or("");
+    }
+    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                      etags[0] + "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" +
+                      etags[1] + "</ETag></Part></CompleteMultipartUpload>";
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("POST", "/pnb/mp", xml, {{"uploadId", uid}})))
+                 .status,
+             200);
+
+    // Part 2 = bytes 5-9 of the 10-byte object
+    auto g2 = sync_wait(svc.dispatch(make_req("GET", "/pnb/mp", "", {{"partNumber", "2"}})));
+    CHECK_EQ(g2.status, 206);
+    CHECK_EQ(body_of(g2), "world");
+    CHECK_EQ(g2.headers.get("Content-Range").value_or(""), "bytes 5-9/10");
+    CHECK_EQ(g2.headers.get("x-amz-mp-parts-count").value_or(""), "2");
+
+    auto h1 = sync_wait(svc.dispatch(make_req("HEAD", "/pnb/mp", "", {{"partNumber", "1"}})));
+    CHECK_EQ(h1.status, 206);
+    CHECK_EQ(h1.content_length.value_or(0), uint64_t{5});
+    CHECK_EQ(h1.headers.get("x-amz-mp-parts-count").value_or(""), "2");
+
+    // Out-of-range part → 416 InvalidPartNumber; Range + partNumber → 400
+    auto g3 = sync_wait(svc.dispatch(make_req("GET", "/pnb/mp", "", {{"partNumber", "3"}})));
+    CHECK_EQ(g3.status, 416);
+    CHECK(contains(body_of(g3), "InvalidPartNumber"));
+    auto both = make_req("GET", "/pnb/mp", "", {{"partNumber", "1"}});
+    both.headers.add("Range", "bytes=0-1");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(both))).status, 400);
+
+    // Single-part object behaves as one part
+    sync_wait(svc.dispatch(make_req("PUT", "/pnb/simple", "abc")));
+    auto s1 = sync_wait(svc.dispatch(make_req("GET", "/pnb/simple", "", {{"partNumber", "1"}})));
+    CHECK_EQ(s1.status, 206);
+    CHECK_EQ(body_of(s1), "abc");
+    CHECK_EQ(s1.headers.get("x-amz-mp-parts-count").value_or(""), "1");
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/pnb/simple", "", {{"partNumber", "2"}})))
+                 .status,
+             416);
+}
+
+// ---- roadmap §2.5: object tagging ----
+TEST(service_object_tagging) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/tagb")));
+
+    // Tags at write time via x-amz-tagging (percent-encoded pairs)
+    auto put = make_req("PUT", "/tagb/o.txt", "data");
+    put.headers.add("x-amz-tagging", "env=prod&team=data%20eng");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+
+    // GET answers the count, never the values as a header
+    auto get = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt")));
+    CHECK_EQ(get.headers.get("x-amz-tagging-count").value_or(""), "2");
+    CHECK(!get.headers.has("x-amz-tagging"));
+
+    // GET ?tagging returns the decoded XML tag set
+    auto gt = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
+    CHECK_EQ(gt.status, 200);
+    std::string b = body_of(gt);
+    CHECK(contains(b, "<Key>env</Key>"));
+    CHECK(contains(b, "<Value>prod</Value>"));
+    CHECK(contains(b, "<Value>data eng</Value>"));
+
+    // PUT ?tagging replaces the set in place
+    const std::string one =
+        "<Tagging><TagSet><Tag><Key>only</Key><Value>v1</Value></Tag></TagSet></Tagging>";
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", one, {{"tagging", ""}})))
+                 .status,
+             200);
+    auto gt2 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
+    std::string b2 = body_of(gt2);
+    CHECK(contains(b2, "<Key>only</Key>"));
+    CHECK(!contains(b2, "<Key>env</Key>"));
+    auto get2 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt")));
+    CHECK_EQ(get2.headers.get("x-amz-tagging-count").value_or(""), "1");
+
+    // DELETE ?tagging clears; count header disappears
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("DELETE", "/tagb/o.txt", "", {{"tagging", ""}})))
+                 .status,
+             204);
+    auto gt3 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
+    CHECK(contains(body_of(gt3), "<TagSet></TagSet>"));
+    CHECK(!sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt"))).headers
+               .has("x-amz-tagging-count"));
+
+    // Validation: 11 tags and duplicate keys are refused on both planes
+    std::string many;
+    for (int i = 0; i < 11; ++i) many += (i ? "&k" : "k") + std::to_string(i) + "=v";
+    auto bad = make_req("PUT", "/tagb/bad", "x");
+    bad.headers.add("x-amz-tagging", many);
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 400);
+    auto dup = make_req("PUT", "/tagb/bad", "x");
+    dup.headers.add("x-amz-tagging", "a=1&a=2");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(dup))).status, 400);
+    const std::string dupxml =
+        "<Tagging><TagSet><Tag><Key>a</Key><Value>1</Value></Tag>"
+        "<Tag><Key>a</Key><Value>2</Value></Tag></TagSet></Tagging>";
+    CHECK_EQ(
+        sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", dupxml, {{"tagging", ""}})))
+            .status,
+        400);
+
+    // Missing object → 404
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/tagb/none", "", {{"tagging", ""}})))
+                 .status,
+             404);
+}
+
+// ---- roadmap §2.4: lifecycle minimal subset ----
+
+TEST(service_bucket_lifecycle_api) {
+    CorsEnv env;  // root credential + memory backend; lifecycle store added on top
+    auto lstore = sync_wait(LifecycleStore::load(env.backend));
+    env.svc->set_lifecycle_store(lstore);
+    CHECK_EQ(env.signed_call("PUT", "/data").status, 200);
+
+    // No configuration yet → 404 with its own code; unsigned mutation refused
+    auto none = env.signed_call("GET", "/data", "", {{"lifecycle", ""}});
+    CHECK_EQ(none.status, 404);
+    CHECK(contains(none.small_body, "NoSuchLifecycleConfiguration"));
+
+    const std::string xml =
+        "<LifecycleConfiguration>"
+        "<Rule><ID>logs</ID><Filter><Prefix>logs/</Prefix></Filter><Status>Enabled</Status>"
+        "<Expiration><Days>30</Days></Expiration></Rule>"
+        "<Rule><Status>Enabled</Status>"
+        "<AbortIncompleteMultipartUpload><DaysAfterInitiation>7</DaysAfterInitiation>"
+        "</AbortIncompleteMultipartUpload></Rule>"
+        "</LifecycleConfiguration>";
+    CHECK_EQ(env.call(make_req("PUT", "/data", xml, {{"lifecycle", ""}})).status, 403);
+    CHECK_EQ(env.signed_call("PUT", "/data", xml, {{"lifecycle", ""}}).status, 200);
+    auto got = env.signed_call("GET", "/data", "", {{"lifecycle", ""}});
+    CHECK_EQ(got.status, 200);
+    CHECK(contains(got.small_body, "<Prefix>logs/</Prefix>"));
+    CHECK(contains(got.small_body, "<Days>30</Days>"));
+    CHECK(contains(got.small_body, "<DaysAfterInitiation>7</DaysAfterInitiation>"));
+
+    // Persistence across a reload
+    auto lstore2 = sync_wait(LifecycleStore::load(env.backend));
+    auto snap2 = lstore2->snapshot();
+    CHECK(LifecycleStore::find(snap2, "data") != nullptr);
+    CHECK_EQ(LifecycleStore::find(snap2, "data")->size(), size_t{2});
+
+    // Unsupported elements answer 501, malformed shapes 400
+    auto expect = [&](const char* rule_xml, int status) {
+        std::string full = std::string("<LifecycleConfiguration>") + rule_xml +
+                           "</LifecycleConfiguration>";
+        CHECK_EQ(env.signed_call("PUT", "/data", full, {{"lifecycle", ""}}).status, status);
+    };
+    expect("<Rule><Status>Enabled</Status><Transition><Days>1</Days>"
+           "<StorageClass>GLACIER</StorageClass></Transition></Rule>", 501);
+    expect("<Rule><Filter><Tag><Key>k</Key><Value>v</Value></Tag></Filter>"
+           "<Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule>", 501);
+    expect("<Rule><Status>Enabled</Status><Expiration>"
+           "<Date>2030-01-01T00:00:00Z</Date></Expiration></Rule>", 501);
+    expect("<Rule><Status>Enabled</Status></Rule>", 400);           // no action
+    expect("<Rule><Expiration><Days>1</Days></Expiration></Rule>", 400);  // no Status
+    expect("<Rule><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule>",
+           400);
+
+    // DELETE revokes, idempotent
+    CHECK_EQ(env.signed_call("DELETE", "/data", "", {{"lifecycle", ""}}).status, 204);
+    CHECK_EQ(env.signed_call("GET", "/data", "", {{"lifecycle", ""}}).status, 404);
+    CHECK_EQ(env.signed_call("DELETE", "/data", "", {{"lifecycle", ""}}).status, 204);
+}
+
+TEST(lifecycle_runner_pass) {
+    auto backend = std::make_shared<storage::MemoryBackend>();
+    auto store = sync_wait(LifecycleStore::load(backend));
+    sync_wait(backend->create_bucket("lcb"));
+    auto put = [&](const char* key) {
+        http::StringBodyReader body("x");
+        sync_wait(backend->put_object("lcb", key, storage::ObjectMeta{}, body));
+    };
+    put("old/a.log");
+    put("old/b.log");
+    put("keep/c.txt");
+    auto uid = sync_wait(backend->create_multipart("lcb", "old/mp.bin", {}));
+    http::StringBodyReader pbody("part");
+    sync_wait(backend->upload_part("lcb", "old/mp.bin", uid, 1, pbody));
+
+    std::vector<LifecycleRule> rules;
+    rules.push_back({.id = "exp", .prefix = "old/", .expiration_days = 7});
+    rules.back().abort_incomplete_days = 3;
+    sync_wait(store->put("lcb", rules));
+
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+    BucketsConfig bcfg;
+    bcfg.default_backend = "mem";
+    LifecycleRunner runner(storage::BucketRouter::build(bcfg, std::move(bmap)), store);
+
+    // Nothing is old enough yet: a pass is a no-op
+    auto s0 = sync_wait(runner.run_once());
+    CHECK_EQ(s0.objects_expired, uint64_t{0});
+    CHECK_EQ(s0.uploads_aborted, uint64_t{0});
+
+    // Ten days later: the prefixed objects expire and the stale upload is aborted;
+    // out-of-prefix objects survive
+    runner.set_now_for_tests(
+        [] { return std::chrono::system_clock::now() + std::chrono::hours(24 * 10); });
+    auto s1 = sync_wait(runner.run_once());
+    CHECK_EQ(s1.objects_expired, uint64_t{2});
+    CHECK_EQ(s1.uploads_aborted, uint64_t{1});
+    CHECK_THROWS_S3(sync_wait(backend->head_object("lcb", "old/a.log")),
+                    S3ErrorCode::NoSuchKey);
+    CHECK_EQ(sync_wait(backend->head_object("lcb", "keep/c.txt")).size, uint64_t{1});
+    auto uploads = sync_wait(backend->list_multipart_uploads("lcb", {}));
+    CHECK_EQ(uploads.uploads.size(), size_t{0});
+
+    // Disabled rules never fire
+    rules[0].enabled = false;
+    sync_wait(store->put("lcb", rules));
+    put("old/late.log");
+    auto s2 = sync_wait(runner.run_once());
+    CHECK_EQ(s2.objects_expired, uint64_t{0});
 }

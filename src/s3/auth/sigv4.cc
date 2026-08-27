@@ -542,7 +542,9 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
     return util::to_hex(util::hmac_sha256(k, sts));
 }
 
-VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
+VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
+                                                 std::string_view service,
+                                                 const std::string* explicit_payload_hash) const {
     if (!enabled()) return {};
 
     AuthFields f;
@@ -566,9 +568,9 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
     }
 
     // scope check
-    if (f.terminal != "aws4_request" || f.service != service_ || f.region != region_)
-        malformed("credential scope does not match this endpoint (" + region_ + "/" + service_ +
-                  ")");
+    if (f.terminal != "aws4_request" || f.service != service || f.region != region_)
+        malformed("credential scope does not match this endpoint (" + region_ + "/" +
+                  std::string(service) + ")");
     if (f.amz_date.substr(0, 8) != f.date)
         malformed("credential date does not match x-amz-date");
 
@@ -615,10 +617,36 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
                       "The AWS access key ID you provided does not exist in our records.");
     const std::string& secret_key = cred->secret_key;
 
+    // STS session credentials (roadmap §2.6): a session AK is only usable with its
+    // matching token; a token alongside a permanent AK is equally invalid. Token match
+    // is judged before expiry so a wrong token never reads as merely "expired"
+    {
+        std::optional<std::string> req_token;
+        if (auto h = req.headers.get("x-amz-security-token")) req_token = *h;
+        else if (auto q = req.query_get("X-Amz-Security-Token")) req_token = *q;
+        if (cred->session_token) {
+            if (!req_token)
+                throw S3Error(S3ErrorCode::AccessDenied,
+                              "Session credentials require the X-Amz-Security-Token "
+                              "header or query parameter.");
+            if (!constant_time_eq(*req_token, *cred->session_token))
+                throw S3Error(S3ErrorCode::InvalidToken,
+                              "The security token included in the request is invalid.");
+            if (cred->session_expires && clock() > *cred->session_expires)
+                throw S3Error(S3ErrorCode::ExpiredToken,
+                              "The provided security token has expired.");
+        } else if (req_token) {
+            throw S3Error(S3ErrorCode::InvalidToken,
+                          "The security token included in the request is invalid.");
+        }
+    }
+
     // payload hash (streaming variants participate in the canonical request by their literal value)
     std::string payload_hash;
     bool chunked_signed = false, chunked_unsigned = false, trailer_variant = false;
-    if (f.presigned) {
+    if (explicit_payload_hash) {
+        payload_hash = *explicit_payload_hash;  // STS form POST: caller hashed the body
+    } else if (f.presigned) {
         payload_hash = "UNSIGNED-PAYLOAD";
     } else if (auto h = req.headers.get("x-amz-content-sha256")) {
         payload_hash = *h;
@@ -692,7 +720,7 @@ VerifiedIdentity SigV4Authenticator::verify(http::HttpRequest& req) const {
             f.amz_date, scope, decoded_len, trailer_variant,
             /*trailer_signed=*/chunked_signed && trailer_variant,
             std::move(declared_trailers));
-    } else if (is_hex_digest(payload_hash) && req.body) {
+    } else if (!explicit_payload_hash && is_hex_digest(payload_hash) && req.body) {
         // A declared empty digest (sha256("")) still gets wrapped for verification: without checking that the
         // actual body is empty, empty digest + non-empty body would slip the body out of signature protection
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);

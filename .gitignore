@@ -6,3 +6,4 @@ build-rados
 build-tikv
 build-sqlite
 Testing
+.claude/

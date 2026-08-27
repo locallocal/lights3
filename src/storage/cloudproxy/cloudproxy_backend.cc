@@ -61,6 +61,14 @@ std::vector<std::pair<std::string, std::string>> meta_headers(const ObjectMeta& 
     std::vector<std::pair<std::string, std::string>> out;
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) out.emplace_back(f.header, meta.*f.field);
+    // Header-form checksum forwarded so the remote stores/verifies it too (roadmap §2.2).
+    // Trailer-form values (checksum_pending) cannot be sent — headers leave before the
+    // body is read — so they stop at this gateway's verification (documented limitation)
+    if (!meta.checksum_algorithm.empty() && !meta.checksum_value.empty()) {
+        std::string h = "x-amz-checksum-";
+        for (char c : meta.checksum_algorithm) h.push_back(http::HeaderMap::lower(c));
+        out.emplace_back(std::move(h), meta.checksum_value);
+    }
     for (auto& [k, v] : meta.user_meta) out.emplace_back("x-amz-meta-" + k, v);
     return out;
 }
@@ -98,6 +106,24 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
         m.last_modified = *t;
     for (auto& f : kStdMetaFields)
         if (res.has_header(f.header)) m.*f.field = res.get_header_value(f.header);
+    // Remote checksum echo (roadmap §2.2): present when the request carried
+    // x-amz-checksum-mode: ENABLED (GET/HEAD below always send it)
+    for (auto& [k, v] : res.headers) {
+        constexpr std::string_view kCk = "x-amz-checksum-";
+        if (k.size() > kCk.size() &&
+            http::HeaderMap::ieq(std::string_view(k).substr(0, kCk.size()), kCk)) {
+            std::string algo = k.substr(kCk.size());
+            for (char& c : algo) c = http::HeaderMap::lower(c);
+            if (algo == "type") {
+                m.checksum_type = v;
+            } else if (algo == "crc32" || algo == "crc32c" || algo == "crc64nvme" ||
+                       algo == "sha1" || algo == "sha256") {
+                for (char& c : algo) c = char(toupper(static_cast<unsigned char>(c)));
+                m.checksum_algorithm = std::move(algo);
+                m.checksum_value = v;
+            }
+        }
+    }
     for (auto& [k, v] : res.headers) {
         constexpr std::string_view kMetaPrefix = "x-amz-meta-";
         if (k.size() > kMetaPrefix.size() &&
@@ -423,6 +449,7 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
     auto resource = resource_of(bucket, key);
     std::vector<std::pair<std::string, std::string>> extra;
     if (range) extra.emplace_back("Range", format_range(*range));
+    extra.emplace_back("x-amz-checksum-mode", "ENABLED");  // capture the remote checksum (§2.2)
 
     co_await pool_->schedule();
     auto ctx = ctx_;
@@ -824,13 +851,114 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
     auto path = t.object_path(key_path(key));
     auto res = co_await control_io([&] {
         return ctx_->with_retry("head", [&](httplib::Client& c) {
-            return c.Head(path, ctx_->signed_headers("HEAD", path, "", {}, "", t.host));
+            return c.Head(path, ctx_->signed_headers(
+                                    "HEAD", path, "",
+                                    {{"x-amz-checksum-mode", "ENABLED"}},  // §2.2
+                                    "", t.host));
         });
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 200) co_return meta_from_response(key, *res);
     // HEAD has no error body: a 404 gets NoSuchKey filled in from context
     // (docs/cloudproxy-backend.md §4.1/§5.1)
+    ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
+}
+
+Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolve_object_part(
+    std::string_view bucket, std::string_view key, int part_no) {
+    validate_object_key(key);
+    auto rb = remote_bucket(bucket);
+    auto t = ctx_->target(rb);
+    auto path = t.object_path(key_path(key));
+    std::string query = "partNumber=" + std::to_string(part_no);
+    std::string full = path + "?" + query;
+    auto res = co_await control_io([&] {
+        return ctx_->with_retry("head_part", [&](httplib::Client& c) {
+            return c.Head(full, ctx_->signed_headers("HEAD", path, query, {}, "", t.host));
+        });
+    });
+    if (!res) ctx_->throw_transport_error(res.error());
+    if (res->status == 416)
+        throw S3Error(S3ErrorCode::InvalidPartNumber,
+                      "The requested partnumber is not satisfiable", std::string(key));
+    if (res->status != 200 && res->status != 206)
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key,
+                                 resource_of(bucket, key));
+    int count = 1;
+    if (res->has_header("x-amz-mp-parts-count")) {
+        try {
+            count = std::stoi(res->get_header_value("x-amz-mp-parts-count"));
+        } catch (...) {
+        }
+    }
+    ObjectPartExtent pe;
+    pe.parts_count = count;
+    if (res->status == 206) {
+        std::string cr = res->get_header_value("Content-Range");
+        unsigned long long a = 0, b = 0, total = 0;
+        if (sscanf(cr.c_str(), "bytes %llu-%llu/%llu", &a, &b, &total) != 3)
+            throw S3Error(S3ErrorCode::InternalError,
+                          "cloudproxy: remote part HEAD has unparsable Content-Range: " + cr);
+        pe.offset = a;
+        pe.size = b - a + 1;
+    } else {
+        pe.offset = 0;
+        pe.size = require_content_length(*res);
+    }
+    co_return pe;
+}
+
+Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
+                                                 std::string_view key, std::string tagging) {
+    validate_object_key(key);
+    auto rb = remote_bucket(bucket);
+    auto t = ctx_->target(rb);
+    auto path = t.object_path(key_path(key));
+    std::string query = "tagging";
+    std::string full = path + "?" + query;
+    if (tagging.empty()) {  // DeleteObjectTagging upstream
+        auto res = co_await control_io([&] {
+            return ctx_->with_retry("delete_tagging", [&](httplib::Client& c) {
+                return c.Delete(full,
+                                ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
+            });
+        });
+        if (!res) ctx_->throw_transport_error(res.error());
+        if (res->status / 100 == 2) co_return;
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key,
+                                 resource_of(bucket, key));
+    }
+    // Rebuild the Tagging XML from the canonical encoded form
+    s3::XmlWriter w;
+    w.open("Tagging");
+    w.open("TagSet");
+    size_t pos = 0;
+    while (pos < tagging.size()) {
+        size_t amp = tagging.find('&', pos);
+        if (amp == std::string::npos) amp = tagging.size();
+        std::string item = tagging.substr(pos, amp - pos);
+        auto eq = item.find('=');
+        w.open("Tag");
+        w.element("Key", util::percent_decode(eq == std::string::npos ? item
+                                                                      : item.substr(0, eq)));
+        w.element("Value",
+                  eq == std::string::npos ? "" : util::percent_decode(item.substr(eq + 1)));
+        w.close();
+        pos = amp + 1;
+    }
+    w.close();
+    w.close();
+    const std::string body = w.str();
+    const std::string body_hash = util::sha256_hex(body);
+    auto res = co_await control_io([&] {
+        return ctx_->with_retry("put_tagging", [&](httplib::Client& c) {
+            return c.Put(full,
+                         ctx_->signed_headers("PUT", path, query, {}, body_hash, t.host),
+                         body, "application/xml");
+        });
+    });
+    if (!res) ctx_->throw_transport_error(res.error());
+    if (res->status / 100 == 2) co_return;
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
@@ -912,6 +1040,8 @@ Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
     std::string query = "uploads";
     std::string full = path + "?" + query;
     auto extra = meta_headers(meta);
+    if (!meta.checksum_algorithm.empty())
+        extra.emplace_back("x-amz-checksum-algorithm", meta.checksum_algorithm);
     // Note: create retries may leave empty orphan uploads on the remote (a known §5.2
     // trade-off, standard industry practice) -- recommend configuring an
     // AbortIncompleteMultipartUpload lifecycle rule on the remote account
@@ -935,15 +1065,26 @@ Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
 
 Task<PutResult> CloudProxyBackend::upload_part(std::string_view bucket, std::string_view key,
                                                std::string_view upload_id, int part_no,
-                                               http::BodyReader& body) {
+                                               http::BodyReader& body,
+                                               const std::optional<PartChecksum>& checksum) {
     validate_object_key(key);
     validate_part_number(part_no);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     std::string query =
         "partNumber=" + std::to_string(part_no) + "&uploadId=" + qv(upload_id);
-    co_return co_await stream_upload(t.object_path(key_path(key)), query, t.host, "", {},
-                                     body, resource_of(bucket, key), /*multipart_ctx=*/true);
+    // Header-form part checksum forwarded so the remote verifies/stores it too (§2.2);
+    // trailer-form values arrive after the headers left — this gateway verified them,
+    // the remote just is not told (documented limitation)
+    std::vector<std::pair<std::string, std::string>> extra;
+    if (checksum && !checksum->value.empty()) {
+        std::string h = "x-amz-checksum-";
+        for (char c : checksum->algorithm) h.push_back(http::HeaderMap::lower(c));
+        extra.emplace_back(std::move(h), checksum->value);
+    }
+    co_return co_await stream_upload(t.object_path(key_path(key)), query, t.host, "",
+                                     std::move(extra), body, resource_of(bucket, key),
+                                     /*multipart_ctx=*/true);
 }
 
 Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
@@ -964,6 +1105,13 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
         w.open("Part");
         w.element("PartNumber", static_cast<uint64_t>(p.part_no));
         w.element("ETag", "\"" + std::string(strip_etag_quotes(p.etag)) + "\"");
+        // Client-declared part checksum forwarded verbatim; the remote re-validates (§2.2)
+        if (!p.checksum_algorithm.empty() && !p.checksum_value.empty()) {
+            std::string tag = "Checksum";
+            for (char c : p.checksum_algorithm)
+                tag.push_back(c);  // wire names are already uppercase
+            w.element(tag, p.checksum_value);
+        }
         w.close();
     }
     w.close();
@@ -975,11 +1123,13 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
     // co_await head_object and stays on the coroutine side
     struct CompleteOutcome {
         std::string etag;
+        std::string checksum_algorithm, checksum_value, checksum_type;
         std::exception_ptr ambiguous;
     };
     auto outcome = co_await control_io([&]() -> CompleteOutcome {
         auto op_hist = ctx_->metrics.op_seconds("complete_multipart");
         std::string etag_out;
+        std::string checksum_algo, checksum_val, checksum_type;
         std::exception_ptr ambiguous_nosuch;
         for (int attempt = 0;; ++attempt) {
             auto res = [&] {
@@ -1039,6 +1189,16 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
                                   root.get("Message"), resource);
                 }
                 etag_out = std::string(strip_etag_quotes(root.get("ETag")));
+                for (std::string_view a :
+                     {"CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"}) {
+                    std::string v = root.get("Checksum" + std::string(a));
+                    if (!v.empty()) {
+                        checksum_algo = std::string(a);
+                        checksum_val = std::move(v);
+                        checksum_type = root.get("ChecksumType");
+                        break;
+                    }
+                }
             } catch (const S3Error& e) {
                 // NoSuchUpload after a retry: the previous attempt may have actually
                 // succeeded -> verify with HEAD (docs/cloudproxy-backend.md §5.2)
@@ -1050,7 +1210,8 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             }
             break;
         }
-        return {std::move(etag_out), ambiguous_nosuch};
+        return {std::move(etag_out), std::move(checksum_algo), std::move(checksum_val),
+                std::move(checksum_type), ambiguous_nosuch};
     });
     std::string etag_out = std::move(outcome.etag);
     if (outcome.ambiguous) {
@@ -1067,7 +1228,8 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
         if (!completed_before) std::rethrow_exception(outcome.ambiguous);
         etag_out = expect;
     }
-    co_return PutResult{etag_out};
+    co_return PutResult{etag_out, outcome.checksum_algorithm, outcome.checksum_value,
+                        outcome.checksum_type};
 }
 
 Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::string_view key,

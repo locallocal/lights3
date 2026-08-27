@@ -2,13 +2,17 @@
 #pragma once
 
 #include <chrono>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "core/task.h"
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "http/model.h"
+#include "s3/checksum_guard.h"
 #include "s3/errors.h"
 #include "storage/backend.h"
 
@@ -33,8 +37,47 @@ inline void reject_control_chars(std::string_view name, const std::string& v) {
                       "Header '" + std::string(name) + "' must not contain line breaks.");
 }
 
+// Object tagging (roadmap §2.5): "k=v&k2=v2", both sides percent-encoded. AWS limits:
+// at most 10 tags, unique keys, key 1..128 chars, value 0..256 chars (decoded)
+inline std::vector<std::pair<std::string, std::string>> parse_tagging(const std::string& s) {
+    std::vector<std::pair<std::string, std::string>> out;
+    auto bad = [](const std::string& why) {
+        throw S3Error(S3ErrorCode::InvalidArgument, "Invalid tag set: " + why);
+    };
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t amp = s.find('&', pos);
+        if (amp == std::string::npos) amp = s.size();
+        std::string item = s.substr(pos, amp - pos);
+        if (item.empty()) bad("empty tag entry");
+        auto eq = item.find('=');
+        std::string k = util::percent_decode(eq == std::string::npos ? item : item.substr(0, eq));
+        std::string v = eq == std::string::npos ? "" : util::percent_decode(item.substr(eq + 1));
+        if (k.empty() || k.size() > 128) bad("tag keys must be 1-128 characters");
+        if (v.size() > 256) bad("tag values must be at most 256 characters");
+        for (auto& [ek, ev] : out)
+            if (ek == k) bad("duplicate tag key '" + k + "'");
+        out.emplace_back(std::move(k), std::move(v));
+        if (out.size() > 10) bad("an object may carry at most 10 tags");
+        pos = amp + 1;
+    }
+    return out;
+}
+
+// Canonical stored form: strict aws_uri_encode on both sides — the safe character set
+// keeps every text serializer (TSV/kv) intact regardless of what the client encoded
+inline std::string encode_tagging(const std::vector<std::pair<std::string, std::string>>& tags) {
+    std::string out;
+    for (auto& [k, v] : tags) {
+        if (!out.empty()) out += '&';
+        out += util::aws_uri_encode(k, /*encode_slash=*/true) + "=" +
+               util::aws_uri_encode(v, /*encode_slash=*/true);
+    }
+    return out;
+}
+
 // Shared by PutObject / CreateMultipartUpload: extracts Content-Type, x-amz-meta-*, and
-// the six first-class S3 metadata fields (docs/archive/gaps.md §5.2)
+// the first-class S3 metadata fields (docs/archive/gaps.md §5.2), incl. x-amz-tagging
 inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     storage::ObjectMeta meta;
     if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
@@ -61,6 +104,8 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "x-amz-website-redirect-location must start with '/', 'http://' or "
                       "'https://'.");
+    // x-amz-tagging validated and re-encoded canonically (roadmap §2.5)
+    if (!meta.tagging.empty()) meta.tagging = encode_tagging(parse_tagging(meta.tagging));
     return meta;
 }
 
@@ -115,6 +160,71 @@ inline std::pair<std::string, std::string> parse_copy_source(const std::string& 
     // validation function as dispatch (previously a third independent '.'-prefix heuristic; three copies evolving separately was a drift source)
     storage::validate_bucket_name(bucket);
     return {std::move(bucket), s.substr(slash + 1)};
+}
+
+// Attach the request's declared checksum to the outgoing meta (roadmap §2.2): the
+// header form fills the value up front (verification happens at body EOF, before any
+// backend commit); the trailer form installs a DigestCaptureReader plus a pending slot
+// the backend serializes once the body drains
+inline void attach_request_checksum(http::HttpRequest& req, storage::ObjectMeta& meta) {
+    auto rc = request_checksum(req);
+    if (!rc) return;
+    meta.checksum_algorithm = checksum_wire_name(*rc->spec);
+    meta.checksum_type = "FULL_OBJECT";
+    if (!rc->trailer) {
+        meta.checksum_value = rc->value;
+        return;
+    }
+    auto slot = std::make_shared<std::string>();
+    meta.checksum_pending = slot;
+    if (!req.body) req.body = std::make_unique<http::StringBodyReader>("");
+    req.body =
+        std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
+}
+
+// UploadPart variant: same extraction, result travels as the upload_part checksum
+// parameter and lands in the part record
+inline std::optional<storage::PartChecksum> extract_part_checksum(http::HttpRequest& req) {
+    auto rc = request_checksum(req);
+    if (!rc) return std::nullopt;
+    storage::PartChecksum pc;
+    pc.algorithm = checksum_wire_name(*rc->spec);
+    if (!rc->trailer) {
+        pc.value = rc->value;
+        return pc;
+    }
+    auto slot = std::make_shared<std::string>();
+    pc.pending = slot;
+    if (!req.body) req.body = std::make_unique<http::StringBodyReader>("");
+    req.body =
+        std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
+    return pc;
+}
+
+// GET/HEAD checksum echo (roadmap §2.2): only under an explicit
+// x-amz-checksum-mode: ENABLED, and only for full-object responses (AWS omits the
+// checksum on ranged GETs — a full-object digest against partial bytes would mislead)
+inline void apply_checksum_echo(const http::HttpRequest& req, const storage::ObjectMeta& meta,
+                                http::HttpResponse& resp) {
+    if (resp.status == 206) return;
+    auto v = req.headers.get("x-amz-checksum-mode");
+    if (!v || !http::HeaderMap::ieq(*v, "ENABLED")) return;
+    if (meta.checksum_value.empty() || meta.checksum_algorithm.empty()) return;
+    std::string h = "x-amz-checksum-";
+    for (char c : meta.checksum_algorithm) h.push_back(http::HeaderMap::lower(c));
+    resp.headers.set(h, meta.checksum_value);
+    resp.headers.set("x-amz-checksum-type",
+                     meta.checksum_type.empty() ? "FULL_OBJECT" : meta.checksum_type);
+}
+
+// PutObject/UploadPart require a request framing that carries a body (roadmap §2.5): a PUT
+// with neither Content-Length nor Transfer-Encoding has no body per RFC 9112 §6.3 --
+// silently committing an empty object out of a client bug is data loss, 411 is the honest
+// answer (MissingContentLength was previously dead code in the error table)
+inline void require_content_length(const http::HttpRequest& req) {
+    if (!req.headers.has("Content-Length") && !req.headers.has("Transfer-Encoding"))
+        throw S3Error(S3ErrorCode::MissingContentLength,
+                      "You must provide the Content-Length HTTP header.");
 }
 
 // Read the entire request body (XML requests capped at 1MiB, docs/s3-protocol.md §4); over the cap throws MalformedXML

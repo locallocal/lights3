@@ -1092,7 +1092,8 @@ Task<std::string> DuoStoreBackend::create_multipart(std::string_view bucket,
 
 Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::string_view key,
                                              std::string_view upload_id, int part_no,
-                                             http::BodyReader& body) {
+                                             http::BodyReader& body,
+                                             const std::optional<PartChecksum>& checksum) {
     validate_part_number(part_no);
     validate_object_key(key);  // the key enters the '\0'-separated encoding (§4.1), so the multipart entry validates too
     co_await pool_->schedule();
@@ -1119,6 +1120,10 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     p.etag = pumped.md5;
     p.modified_ms = codec::to_unix_ms(std::chrono::system_clock::now());
     p.data = pumped.ref;
+    if (checksum) {  // resolved() only after pump_body drained the body (trailer form)
+        p.checksum_algorithm = checksum->algorithm;
+        p.checksum_value = checksum->resolved();
+    }
     // The upload may have been aborted while reading the body → a commit failure triggers fallback data deletion
     co_await commit_or_discard(*data_, pumped.ref, [&] {
         meta_->put_part(bucket, key, upload_id, std::move(p));
@@ -1134,7 +1139,15 @@ Task<PutResult> DuoStoreBackend::complete_multipart(std::string_view bucket,
     validate_object_key(key);
     co_await pool_->schedule();
     // Pure metadata transaction, zero data movement: O(#parts) vs localfs concatenation's O(total bytes) (§8)
-    co_return PutResult{meta_->complete_upload(bucket, key, upload_id, parts)};
+    PutResult r{meta_->complete_upload(bucket, key, upload_id, parts)};
+    // Composite checksum echo (roadmap §2.2): assemble persisted it with the object;
+    // one meta read fetches it back for the response
+    if (auto m = meta_->head_object(bucket, key); m && !m->checksum_value.empty()) {
+        r.checksum_algorithm = m->checksum_algorithm;
+        r.checksum_value = m->checksum_value;
+        r.checksum_type = m->checksum_type;
+    }
+    co_return r;
 }
 
 Task<void> DuoStoreBackend::abort_multipart(std::string_view bucket, std::string_view key,
@@ -1152,7 +1165,8 @@ Task<ListPartsResult> DuoStoreBackend::list_parts(std::string_view bucket, std::
     // Part count is protocol-capped at 10000, so full materialization is bounded; pagination trims only here
     std::vector<PartMeta> all;
     for (const auto& p : meta_->list_parts(bucket, key, upload_id))
-        all.push_back({p.part_no, p.size, p.etag, codec::from_unix_ms(p.modified_ms)});
+        all.push_back({p.part_no, p.size, p.etag, codec::from_unix_ms(p.modified_ms),
+                       p.checksum_algorithm, p.checksum_value});
     co_return apply_parts_page(std::move(all), opt);
 }
 

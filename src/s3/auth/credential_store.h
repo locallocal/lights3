@@ -37,6 +37,12 @@ struct CredentialInfo {
     std::string comment;
     std::chrono::system_clock::time_point created;
     std::optional<CredentialPolicy> policy;  // file/dynamic only; static credentials are always unrestricted
+    // Edit propagation (roadmap §2.5): rev is a monotonic edit counter persisted in the
+    // JSON (distinct from "version", which encodes the encryption format); storage_etag
+    // is the credential object's ETag as last seen by this instance — sync re-reads an
+    // AK only when the listed ETag differs, so policy edits propagate cheaply
+    uint64_t rev = 1;
+    std::string storage_etag;
 
     bool is_static() const { return source == CredSource::kStatic; }
 };
@@ -84,6 +90,32 @@ public:
     // Nonexistent -> InvalidAccessKeyId; static/file credentials -> MethodNotAllowed (managed by config/file)
     Task<void> remove(std::string_view ak);
 
+    // In-place edit of a dynamic credential (roadmap §2.5): fields present are replaced
+    // (set_policy + empty policy = clear). Write-through with a rev bump; other
+    // instances pick the edit up via the sync ETag comparison. Same source rules as
+    // remove (static/file -> MethodNotAllowed, missing -> InvalidAccessKeyId)
+    struct Update {
+        std::optional<std::string> comment;
+        bool set_policy = false;
+        std::optional<CredentialPolicy> policy;  // meaningful only when set_policy
+    };
+    Task<CredentialInfo> update(std::string_view ak, Update upd);
+
+    // ---- STS session credentials (roadmap §2.6) ----
+    // In-memory only (single-instance; sessions are short-lived by design): AssumeRole
+    // mints a session AK/SK/token with a TTL, inheriting the CALLER's policy — this
+    // implementation has no role catalog, so a session can never exceed the identity
+    // that minted it. Session AKs are L3SA-prefixed and are never root; a session
+    // cannot mint further sessions. Expired entries are swept opportunistically
+    struct SessionCredential {
+        std::string access_key;         // L3SA + 16 base32 chars
+        util::SecretString secret_key;
+        std::string token;              // opaque base64
+        std::chrono::system_clock::time_point expires;
+    };
+    SessionCredential mint_session(std::string_view parent_ak, int duration_sec);
+    size_t session_count() const;
+
     std::optional<CredentialInfo> find(std::string_view ak) const;
     std::vector<CredentialInfo> list() const;  // sorted by AK
 
@@ -118,6 +150,14 @@ private:
 
     mutable std::shared_mutex mu_;
     std::map<std::string, CredentialInfo, std::less<>> creds_;
+    // STS sessions (roadmap §2.6): ak -> {sk, token, expiry, policy snapshot}
+    struct SessionEntry {
+        util::SecretString secret_key;
+        std::string token;
+        std::chrono::system_clock::time_point expires;
+        std::optional<CredentialPolicy> policy;
+    };
+    std::map<std::string, SessionEntry, std::less<>> sessions_;
     // AKs this instance just revoked -> revocation time (guarded by mu_). sync_now's add branch skips recent
     // tombstones: when remove's delete_object interleaves with sync's list, the list may still see the revoked
     // object, and without a tombstone it would be pulled back into memory, resurrected for one sync cycle

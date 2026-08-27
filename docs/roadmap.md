@@ -40,60 +40,63 @@
 
 ## 2. S3 协议层
 
-现有拒绝面（子资源黑名单 + 头前缀拒绝 + per-route query 白名单反转）结构
-健全，未支持能力都会正确回 501 而非静默错误，扩展时保持这一纪律。
+**本节全部条目已完成（2026-08-28）。** 现有拒绝面（子资源黑名单 + 头前缀
+拒绝 + per-route query 白名单反转）结构健全，未支持能力都会正确回 501 而
+非静默错误，扩展时保持了这一纪律。
 
-### 2.1 高价值：CORS（website 的头号配套缺口）
+### 2.1 ~~高价值：CORS（website 的头号配套缺口）~~ **已完成（2026-08-28）**
 
-静态网站托管已完整落地，但 `?cors` 子资源 501、且 **`OPTIONS` 方法在分派表
-中无条目**（落到 405 而非预检应答）——浏览器 JS/SPA 直连网关必然失败，也堵
-死了 web 直传 presigned PUT 的路径。实现面：`?cors` 三个 handler + XML 编解
-码 + OPTIONS 预检路由 + 响应头注入；持久化可完全复用 `WebsiteStore` 的
-`.sys` write-through + tombstone 同步模式。
-**价值：高；难度：中。** 入口：`src/s3/service.cc`、新增
-`src/s3/handlers/bucket_cors.cc`、`src/s3/website_store.*`（作模板）。
+`?cors` 三 handler + XML 编解码 + OPTIONS 预检（验签之前分派）+ 实际请求
+响应头注入均已落地；持久化经由从 WebsiteStore 模式提取的
+`SysConfigStore<Traits>` 模板（`.sys/cors/<bucket>` write-through +
+tombstone 同步，lifecycle 复用同一模板）。root 专属，同 ?website 两级模型。
+入口：`src/s3/handlers/bucket_cors.cc`、`src/s3/cors_store.*`、
+`src/s3/sys_config_store.h`。
 
 ### 2.2 checksum 闭环（配合 §1.1 一次做完）
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
 | ~~`crc64nvme` 算法~~ **已完成（2026-08-26）** | 头部与 trailer 两种形态均支持（`util::crc64nvme_update` + `checksum_spec` 表项） | — | — |
-| 校验和持久化 + 回显 | `ObjectMeta` 无 checksum 字段；GET/HEAD 不回 `x-amz-checksum-*`，不支持 `x-amz-checksum-mode`，multipart 无 composite（`-N`）形式——"上传时校验、读取时可复核"的闭环只做了一半 | 中 | 中（扩 `ObjectMeta` + 各后端序列化；duostore codec 自描述 kv 段已有扩展先例） |
+| ~~校验和持久化 + 回显~~ **已完成（2026-08-28）** | `ObjectMeta` 增 checksum_algorithm/value/type + part_sizes（trailer 形态经 pending 槽在 body 读尽后落值）；六后端序列化齐备（duostore 走自描述 kv 零迁移、part 记录 v2）；GET/HEAD 认 `x-amz-checksum-mode: ENABLED`；multipart 复合 `-N` 由已验证分片值计算（CRC64NVME/FULL_OBJECT → 501） | — | — |
 
 ### 2.3 网站托管收尾（[static-website.md](static-website.md) §"未尽事项"）
 
 | 条目 | 价值 | 难度 |
 | --- | --- | --- |
-| `GET /prefix` 无尾斜杠时 302 补斜杠到 `/prefix/`（AWS 行为；现直接进 error 文档，是站点最常见的体感差异） | 中 | 低 |
-| `RedirectAllRequestsTo`（SPA 常用）/ `RoutingRules` | 低-中 | 低 / 中 |
-| per-bucket 限速（匿名 GET 无签名成本，公开桶=免费带宽放大面；文档已自陈留待后续） | 中 | 中 |
-| website 匿名面的专项单测（签名材料检测、路由限定、`response-*` 拒绝、index 改写各闸门；当前 `tests/` 无一条 website 用例） | 高 | 低 |
+| ~~`GET /prefix` 无尾斜杠时 302 补斜杠~~ **已完成（2026-08-28）**（`prefix/<index>` 存在时 302，否则保留原错误） | — | — |
+| ~~`RedirectAllRequestsTo` / `RoutingRules`~~ **已完成（2026-08-28）**（XML/JSON 全量；prefix 规则取对象前评估、错误码规则先于 error 文档；见 [static-website.md](static-website.md) §6） | — | — |
+| ~~per-bucket 限速~~ **已完成（2026-08-28）**（`website[].max_rps` 令牌桶，超限轻量 XML 503，签名请求不受限） | — | — |
+| ~~website 匿名面的专项单测~~ **已完成（2026-08-28）**（签名材料检测、路由限定、`response-*` 拒绝、302/重定向规则/限速全覆盖，`test_service.cc`） | — | — |
 
-### 2.4 Lifecycle 最小子集
+### 2.4 ~~Lifecycle 最小子集~~ **已完成（2026-08-28）**
 
-完整 Lifecycle 价值一般，但 **`AbortIncompleteMultipartUpload` 规则最实用
-——当前僵尸 MPU 的暂存垃圾永不自动回收**。可先只做它 + `Expiration`，复用
-`TimerQueue` + `BackgroundTaskGroup`。
-**价值：中；难度：中。** 入口：`src/storage/multipart.*`、`src/core/timer.h`。
+`?lifecycle` API（root 专属）+ `LifecycleRunner` 周期扫描
+（`lifecycle.scan_interval`，默认 1h）：`Expiration.Days` 过期删除 +
+`AbortIncompleteMultipartUpload.DaysAfterInitiation` 清僵尸 MPU（prefix 过
+滤）；Transition/tag 过滤/Date 形态 → 501。入口：`src/s3/lifecycle.*`、
+`src/s3/handlers/bucket_lifecycle.cc`。
 
 ### 2.5 其他中小项
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| Object Tagging（`?tagging` + `x-amz-tagging`） | 501；是 Lifecycle 按 tag 过滤/成本分摊的前置 | 中 | 中 |
-| policy 创建后不可改（无 update API） | 需先给落盘凭证对象加版本位使多实例同步能传播编辑（`WebsiteStore::sync_now` 有现成范式） | 中 | 中 |
-| ListParts 缺 `encoding-type`（会被白名单打成 501） | SDK 偶发透传即 501 | 低-中 | 极低 |
-| `list-type=3` 被静默当 V1 处理 | 应回 InvalidArgument | 低 | 极低 |
-| `GET object?partNumber=N` + `x-amz-mp-parts-count` | 大对象并行下载的 SDK 优化路径 | 低-中 | 中 |
-| `MissingContentLength`(411) 是死码 | 错误码表有、无人抛 | 低 | 极低 |
-| ListMultipartUploads 仅支持 `delimiter="/"` | 其余 501 | 低 | 低 |
+| ~~Object Tagging~~ **已完成（2026-08-28）** | `x-amz-tagging` 写入即持久化（canonical 编码走 kStdMetaFields 非回显行）；`?tagging` 三 API + `x-amz-tagging-count`；就地改标签 duostore 诚实 501（无 meta 原地更新原语），其余后端可用 | — | — |
+| ~~policy 创建后不可改~~ **已完成（2026-08-28）** | `PUT /-/admin/credentials/<ak>` 改 policy/comment（`policy: null` 清除）；落盘对象带 `rev` 计数 + 实例侧 storage ETag，sync 据此传播编辑 | — | — |
+| ~~ListParts 缺 `encoding-type`~~ **已完成（2026-08-28）** | 白名单放行 + Key URL 编码 + EncodingType 回显 | — | — |
+| ~~`list-type=3` 静默当 V1~~ **已完成（2026-08-28）** | 未知 list-type → InvalidArgument | — | — |
+| ~~`GET object?partNumber=N`~~ **已完成（2026-08-28）** | complete 记录 `part_sizes`；206 + Content-Range + `x-amz-mp-parts-count`；cloudproxy 远端 HEAD ?partNumber 解析；旧 multipart 对象（无布局）诚实 501 | — | — |
+| ~~`MissingContentLength`(411) 死码~~ **已完成（2026-08-28）** | PutObject/UploadPart 缺 Content-Length/Transfer-Encoding → 411 | — | — |
+| ~~ListMultipartUploads 仅支持 `delimiter="/"`~~ **已完成（2026-08-28）** | 分组本就是通用 substring 实现，撤掉 L2 的 501 限制 | — | — |
 
-### 2.6 长期：STS 会话凭证
+### 2.6 ~~长期：STS 会话凭证~~ **已完成（2026-08-28）**
 
-真实现（非仅 501）的价值在 EKS IRSA / assume-role 默认路径：`AssumeRole`
-端点 + 带 TTL 的会话凭证表。`CredentialStore` 的三来源模型和
-`ExpiredToken`/`InvalidToken` 错误码已就位，地基比看上去好。
-**价值：中；难度：中。**
+`AssumeRole` 端点（`POST /` form、service scope `sts`）+ 带 TTL 的内存会
+话凭证表（L3SA 前缀，policy 继承调用者、session 不能再 assume）；数据面
+token 验证（不符 InvalidToken / 过期 ExpiredToken），
+`X-Amz-Security-Token` 回归 query 白名单。会话表单实例内存态（会话短命，
+多实例共享留作后续）。入口：`src/s3/handlers/sts.cc`、
+`src/s3/auth/credential_store.*`、`sigv4.*`。
 
 ## 3. 存储层
 
@@ -395,14 +398,14 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 2. ~~配置校验缺口簇（§1.2）+ stall guard 误杀（§1.4）+ 延迟桶上界（§1.5）~~ **已完成（2026-08-27）**
 3. ~~`X-Amz-Security-Token` 显式 501（§1.3）~~ **已完成（2026-08-27）**
 4. ~~文档漂移三件套：README website、gaps.md 断链归档恢复、cli.md 笔误（§1.6）~~ **已完成（2026-08-27）**
-5. `--version`、`--check-config`、ListParts encoding-type 等极低成本小项
+5. `--version`、`--check-config` 极低成本小项（ListParts encoding-type 已随 §2.5 完成，2026-08-28）
 
 ### P1 — 近期（高价值 / 低-中难度）
 
 1. Grafana dashboard + Prometheus 告警规则（§5.5，零 C++）
 2. mint 挂 ctest + website e2e/单测 + s3adm 进 e2e（§6.1）
 3. API×后端分维指标 + 后端耗时（§5.1）；异步日志 + 慢日志（§5.2）
-4. CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）
+4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
 5. cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3）
 6. 后台任务 CLI 化（§3.2）；DuoGcStats 接指标（§3.7）；xattr 降级 gauge（§3.5）
 7. fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）
@@ -416,7 +419,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
 4. builtin/seastar TLS + 证书热重载（§4.1）
 5. 配置热重载安全子集（§4.4）
-6. Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）
+6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**
 7. localfs listing 优化 + 元数据缓存层（§3.5/§3.8）
 8. tiered 扫描增量化 + prefix 策略（§3.6）
 9. 故障注入体系 + soak（§6.1）；traceparent 透传（§5.4）
@@ -426,7 +429,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 1. xlocalfs 单流多在途流水线 + fixed buffers（§3.4）
 2. 配额 → 租户实体化（§3.9②③）
-3. STS 会话凭证（§2.6）
+3. ~~STS 会话凭证（§2.6）~~ **已完成（2026-08-28）**
 4. TiKV 事务层生产化 / 多网关 read-lease / meta 在线备份（§3.7）
 5. versioning（duostore 侧切入）、SSE-C/SSE-S3（§2.2/§7）
 6. tiered local 侧抽象化容纳 duostore、Range 部分缓存（§3.6）

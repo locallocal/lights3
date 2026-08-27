@@ -9,6 +9,7 @@
 | ① | 按桶匿名只读（§1–§2） | **已实现** |
 | ② | index / error 文档语义、匿名错误页 HTML 化（§3） | **已实现** |
 | ③ | `?website` 动态 API（持久化到 `.sys`）、`x-amz-website-redirect-location`（§4） | **已实现** |
+| ④ | 302 补斜杠、RedirectAllRequestsTo / RoutingRules、按桶匿名限速（§6，roadmap §2.3） | **已实现** |
 
 ## 1. 配置与匿名读语义
 
@@ -46,17 +47,19 @@ policy（仅该桶、仅 Read）进入正常授权链。除此之外一切不变
 - 鉴权全局关闭（未配置任何凭证）时本特性不参与——一切本来就是开放的；
   配置了 website 列表会打 WARN 提醒。
 - 匿名请求的 access_key 为空（与"鉴权关闭"共用访问日志约定）。
-- 放大面：匿名 GET 无签名成本，现有 `runtime.max_inflight_requests`
-  是唯一闸门；per-bucket 限速留待后续。
+- 放大面：匿名 GET 无签名成本，除全局 `runtime.max_inflight_requests`
+  外，`website[].max_rps`（0=不限，令牌桶、burst=rps）按桶限制匿名请求
+  速率——超限回**轻量 XML 503**（不取 error 文档，否则限速器保护的正是
+  它要花掉的那次后端读）；签名请求不受限。
 
 ## 3. index / error 文档语义（仅匿名请求）
 
 - **index**：key 为空（桶根，带不带尾斜杠都算）或以 `/` 结尾（目录式
   key，如 `docs/`）→ 追加 `index_suffix` 再走 GetObject。
   `GET /my-site` 与 `GET /my-site/` 都返回 `index.html`。
-  注：`GET /my-site/docs`（无尾斜杠且该 key 不存在）不做 AWS 网站端点
-  的 302 补斜杠重定向，直接进入 error 文档路径——需要时站点内链接写
-  成带斜杠即可；302 语义留给阶段③评估。
+  `GET /my-site/docs`（无尾斜杠、key 不存在）在 `docs/<index_suffix>`
+  存在时 **302 到 `/my-site/docs/`**（对齐 AWS 网站端点；roadmap §2.3），
+  否则照常进 error 文档路径。
 - **error**：匿名请求抛出任何 S3 错误（404/403/501/500…）时，若配置了
   `error_key`，以该对象为响应体、Content-Type 用 error 对象自己的，
   **保留原状态码**——404 用 200 包装会污染缓存、误导爬虫。error 对象
@@ -71,7 +74,7 @@ policy（仅该桶、仅 Read）进入正常授权链。除此之外一切不变
 ## 4. 动态 API 与对象级重定向（阶段③）
 
 - **`PUT/GET/DELETE /bucket?website`**（AWS XML 形状：`IndexDocument.Suffix`
-  / `ErrorDocument.Key`；`RoutingRules`/`RedirectAllRequestsTo` 明确 501）。
+  / `ErrorDocument.Key` / `RedirectAllRequestsTo` / `RoutingRules`，见 §6）。
   仅 root（静态凭证）可用——网站配置会把桶公开成匿名可读，这是运维决策
   而非租户决策，两级模型与 admin 面一致。校验规则与 YAML 侧完全相同；
   PUT 到不存在的桶回 `NoSuchBucket`；DELETE 幂等（无配置也是 204）。
@@ -93,8 +96,23 @@ policy（仅该桶、仅 Read）进入正常授权链。除此之外一切不变
 
 ## 5. 未尽事项（可选备忘）
 
-- `GET /prefix`（无尾斜杠）在 `prefix/index` 存在时 302 到 `/prefix/`
-  （对齐 AWS 网站端点）。
-- 寻址：阶段①②③在**同一端点**上触发（匿名 + website 桶即网站语义，
+- 寻址：各阶段在**同一端点**上触发（匿名 + website 桶即网站语义，
   path-style 可用）；严格对齐 AWS 双端点模型的独立
   `website_base_domain` 留作可选项。
+
+## 6. 重定向与限速（阶段④，roadmap §2.3）
+
+- **RedirectAllRequestsTo**（HostName + 可选 Protocol，XML 与 YAML
+  `redirect_all_host`/`redirect_all_protocol` 双入口）：与
+  IndexDocument/ErrorDocument/RoutingRules 互斥（AWS 形状）；命中的桶每个
+  匿名请求都 301 到 `<protocol>://<host>/<key>`，protocol 缺省跟随请求
+  scheme（`X-Forwarded-Proto`，直连为 http）。
+- **RoutingRules**（XML API 专属，≤50 条，首条命中生效）：
+  Condition 支持 `KeyPrefixEquals` 与 `HttpErrorCodeReturnedEquals`
+  （4xx/5xx）；Redirect 支持 Protocol/HostName/ReplaceKeyPrefixWith/
+  ReplaceKeyWith（两个 Replace 互斥）/HttpRedirectCode（3xx，默认 301）。
+  仅带前缀条件的规则在**取对象之前**按原始 key 评估；带错误码条件的规则
+  在错误发生时评估，优先于 302 补斜杠与 error 文档。HostName/Protocol 均
+  缺省时生成本网关相对路径（path-style 下带 `/bucket` 前缀）。
+- **按桶匿名限速**：`website[].max_rps`（YAML/JSON；AWS XML 无此字段，
+  不经 `?website` API 暴露），见 §2。

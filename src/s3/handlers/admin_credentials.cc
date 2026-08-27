@@ -53,6 +53,7 @@ json to_json(const CredentialInfo& c, bool with_secret) {
     j["source"] = source_name(c.source);
     if (c.source == CredSource::kDynamic) {
         j["created_at"] = util::iso8601(c.created);
+        j["rev"] = c.rev;  // edit counter (roadmap §2.5)
     }
     if (!c.is_static()) {
         if (!c.comment.empty()) j["comment"] = c.comment;
@@ -146,6 +147,53 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                 LOG_WARN("admin: plaintext secret requested for {} by root {}{}", c->access_key,
                          access_key, c->is_static() ? " (static credential — refused)" : "");
             co_return json_response(200, to_json(*c, show));
+        }
+        if (req.method == "PUT" && !rest.empty()) {
+            // Update a dynamic credential in place (roadmap §2.5): fields present in the
+            // body are replaced — "policy": null clears the policy, an absent field is
+            // kept. Multi-instance propagation via the sync rev/ETag comparison
+            std::string text;
+            if (req.body) {
+                std::byte buf[16 * 1024];
+                for (;;) {
+                    size_t n = co_await req.body->read(std::span(buf));
+                    if (n == 0) break;
+                    if (text.size() + n > 64 * 1024)
+                        throw S3Error(S3ErrorCode::InvalidRequest, "Request body too large.");
+                    text.append(reinterpret_cast<const char*>(buf), n);
+                }
+            }
+            if (text.empty())
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "Update requires a JSON body with comment and/or policy.");
+            json j;
+            try {
+                j = json::parse(text);
+            } catch (const json::exception&) {
+                throw S3Error(S3ErrorCode::InvalidRequest, "Request body is not valid JSON.");
+            }
+            if (!j.is_object())
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "Request body must be a JSON object.");
+            CredentialStore::Update upd;
+            for (auto& [k, v] : j.items()) {
+                if (k == "comment") {
+                    if (!v.is_string())
+                        throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
+                    upd.comment = v.get<std::string>();
+                } else if (k == "policy") {
+                    upd.set_policy = true;
+                    if (!v.is_null()) upd.policy = parse_policy_json(v.dump());
+                } else {
+                    throw S3Error(S3ErrorCode::InvalidRequest, "unknown field '" + k + "'.");
+                }
+            }
+            if (!upd.comment && !upd.set_policy)
+                throw S3Error(S3ErrorCode::InvalidRequest,
+                              "Update requires at least one of comment or policy.");
+            auto c = co_await cred_store_->update(rest, std::move(upd));
+            LOG_INFO("admin: credential {} updated by root {}", rest, access_key);
+            co_return json_response(200, to_json(c, /*with_secret=*/false));
         }
         if (req.method == "DELETE" && !rest.empty()) {
             co_await cred_store_->remove(rest);

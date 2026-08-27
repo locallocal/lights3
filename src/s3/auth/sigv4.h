@@ -25,6 +25,12 @@ namespace lights3::s3 {
 struct CredentialLookup {
     util::SecretString secret_key;  // wiped on destruction (docs/archive/gaps.md §4)
     std::optional<CredentialPolicy> policy;  // snapshot at lookup time; nullopt = unrestricted
+    // STS session credentials (roadmap §2.6): set for session AKs. verify() then
+    // requires a matching X-Amz-Security-Token (mismatch -> InvalidToken) and refuses
+    // past-expiry requests (ExpiredToken). Returned by the same single lookup so the
+    // §3.7 snapshot invariant holds for sessions too
+    std::optional<std::string> session_token;
+    std::optional<std::chrono::system_clock::time_point> session_expires;
 };
 
 struct ICredentialProvider {
@@ -91,7 +97,15 @@ public:
     //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] -> aws-chunked de-framing +
     //    per-chunk signature chain verification (docs/s3-protocol.md §3.2)
     //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER -> de-framing only
-    VerifiedIdentity verify(http::HttpRequest& req) const;
+    VerifiedIdentity verify(http::HttpRequest& req) const {
+        return verify_impl(req, service_, nullptr);
+    }
+    // STS AssumeRole endpoint (roadmap §2.6): scope service "sts", payload hash computed
+    // by the caller from the already-read form body (generic SigV4 carries the hash only
+    // inside the canonical request, not as an x-amz-content-sha256 header)
+    VerifiedIdentity verify_sts(http::HttpRequest& req, const std::string& payload_hash) const {
+        return verify_impl(req, "sts", &payload_hash);
+    }
 
     // X-Amz-Expires cap for presigned URLs (7 days, matching S3)
     static constexpr long kMaxPresignExpires = 7 * 24 * 3600;
@@ -107,6 +121,11 @@ public:
     static constexpr int kMaxClockSkewSec = 15 * 60;
 
 private:
+    // service = expected credential scope service; explicit_payload_hash != nullptr
+    // supplies the hash directly (STS form POST) and skips body decorators — the caller
+    // already consumed and hashed the body
+    VerifiedIdentity verify_impl(http::HttpRequest& req, std::string_view service,
+                                 const std::string* explicit_payload_hash) const;
     // With presigned=true, X-Amz-Signature is excluded from the canonical query (presigned requests only)
     std::string signature_for(const http::HttpRequest& req, const std::string& secret_key,
                               const std::string& amz_date, const std::string& scope,

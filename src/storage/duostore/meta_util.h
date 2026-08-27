@@ -103,6 +103,7 @@ inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const Part
     ObjectRec rec;
     rec.meta = std::move(meta);
     std::vector<std::string> md5s;
+    std::vector<PartDigest> digests;
     for (const auto& pi : parts) {
         auto sit = stored.find(pi.part_no);
         if (sit == stored.end() || sit->second.etag != strip_etag_quotes(pi.etag))
@@ -113,11 +114,17 @@ inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const Part
         md5s.push_back(sit->second.etag);
         selected.insert(pi.part_no);
         rec.meta.size += sit->second.size;
+        rec.meta.part_sizes.push_back(sit->second.size);  // GET ?partNumber layout (§2.5)
+        digests.push_back({sit->second.checksum_algorithm, sit->second.checksum_value});
         const auto& ex = sit->second.data.extents;
         rec.data.extents.insert(rec.data.extents.end(), ex.begin(), ex.end());
     }
     rec.meta.etag = combined_etag(md5s);
     rec.meta.last_modified = std::chrono::system_clock::now();
+    // Composite checksum from stored, verified per-part values (roadmap §2.2); the
+    // result lands in rec.meta and is re-read by the backend for the response echo
+    PutResult composite_echo;
+    apply_composite_checksum(digests, rec.meta, composite_echo);
     return rec;
 }
 

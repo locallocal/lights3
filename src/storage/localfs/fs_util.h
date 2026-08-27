@@ -119,6 +119,12 @@ struct StubRace : s3::S3Error {
 // Stubbing commit (docs/tiered-storage.md §5.2 steps b/c): first write the tier=remote
 // sidecar, then rename a 0-length tmp over the data file. Idempotent; the caller must hold
 // the per-key lock.
+// In-place metadata rewrite for an existing object (roadmap §2.5 ?tagging): xattr
+// first (authoritative), sidecar after — same consistency model as commit paths.
+// Caller holds the per-key commit lock
+void rewrite_object_meta(const std::filesystem::path& data_path, const ObjectMeta& meta,
+                         const TierInfo& tier, const std::filesystem::path& staging_put);
+
 void commit_stub(const std::filesystem::path& dest, const ObjectMeta& meta, const TierInfo& tier,
                  const std::filesystem::path& staging_put);
 

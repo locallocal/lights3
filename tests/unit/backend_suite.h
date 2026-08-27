@@ -69,7 +69,9 @@ struct ThrowingBodyReader final : http::BodyReader {
 };
 
 // Run the full conformance cases against one backend instance
-inline void run_backend_suite(IStorageBackend& b) {
+// checksum_roundtrip=false for proxy backends whose test double does not implement the
+// remote side of checksum storage (a real remote S3/lights3 does)
+inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true) {
     using s3::S3ErrorCode;
 
     // Bucket lifecycle
@@ -93,6 +95,62 @@ inline void run_backend_suite(IStorageBackend& b) {
     CHECK_EQ(got.meta.content_type, "text/plain");
     CHECK_EQ(got.meta.user_meta.at("color"), "red");
     CHECK_EQ(read_all(*got.body), "hello world");
+
+    // Checksum persistence round trip (roadmap §2.2): the verified value must survive
+    // each backend's serialization; multipart composes the stored per-part values
+    if (checksum_roundtrip) {
+        ObjectMeta cm;
+        cm.checksum_algorithm = "CRC32";
+        cm.checksum_value = "NhCmhg==";  // crc32("hello"), base64 big-endian
+        cm.checksum_type = "FULL_OBJECT";
+        put(b, "suite-bkt", "ck.bin", "hello", cm);
+        auto hm = sync_wait(b.head_object("suite-bkt", "ck.bin"));
+        CHECK_EQ(hm.checksum_algorithm, "CRC32");
+        CHECK_EQ(hm.checksum_value, "NhCmhg==");
+        CHECK_EQ(hm.checksum_type, "FULL_OBJECT");
+
+        ObjectMeta um;
+        um.checksum_algorithm = "CRC32";
+        um.checksum_type = "COMPOSITE";
+        auto uid = sync_wait(b.create_multipart("suite-bkt", "ckm.bin", um));
+        PartChecksum c1{"CRC32", "NhCmhg==", nullptr};
+        PartChecksum c2{"CRC32", "OncRQw==", nullptr};  // crc32("world")
+        http::StringBodyReader p1("hello"), p2("world");
+        auto r1 = sync_wait(b.upload_part("suite-bkt", "ckm.bin", uid, 1, p1, c1));
+        auto r2 = sync_wait(b.upload_part("suite-bkt", "ckm.bin", uid, 2, p2, c2));
+        auto lp = sync_wait(b.list_parts("suite-bkt", "ckm.bin", uid, {}));
+        CHECK_EQ(lp.parts.at(0).checksum_algorithm, "CRC32");
+        CHECK_EQ(lp.parts.at(0).checksum_value, "NhCmhg==");
+        std::vector<PartInfo> pis{{1, r1.etag, "", ""}, {2, r2.etag, "", ""}};
+        auto cr = sync_wait(b.complete_multipart("suite-bkt", "ckm.bin", uid, pis));
+        CHECK_EQ(cr.checksum_value, "wpn7tg==-2");  // crc32(raw1 || raw2) + "-2"
+        CHECK_EQ(cr.checksum_type, "COMPOSITE");
+        auto cmm = sync_wait(b.head_object("suite-bkt", "ckm.bin"));
+        CHECK_EQ(cmm.checksum_algorithm, "CRC32");
+        CHECK_EQ(cmm.checksum_value, "wpn7tg==-2");
+        CHECK_EQ(cmm.part_sizes.size(), size_t{2});
+        CHECK_EQ(cmm.part_sizes.at(0), uint64_t{5});
+        sync_wait(b.delete_object("suite-bkt", "ck.bin"));
+        sync_wait(b.delete_object("suite-bkt", "ckm.bin"));
+
+        // Tagging round trip (roadmap §2.5): write-time tags persist everywhere; the
+        // in-place mutation is allowed to answer an honest 501 (duostore has no
+        // meta-only update primitive yet)
+        ObjectMeta tm;
+        tm.tagging = "env=prod&team=data%20eng";
+        put(b, "suite-bkt", "tg.bin", "x", tm);
+        CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging,
+                 "env=prod&team=data%20eng");
+        try {
+            sync_wait(b.set_object_tagging("suite-bkt", "tg.bin", "k3=v3"));
+            CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging, "k3=v3");
+            sync_wait(b.set_object_tagging("suite-bkt", "tg.bin", ""));
+            CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging, "");
+        } catch (const s3::S3Error& e) {
+            CHECK(e.code == S3ErrorCode::NotImplemented);
+        }
+        sync_wait(b.delete_object("suite-bkt", "tg.bin"));
+    }
 
     // Body throws mid-read: the exception must propagate as-is, and no partial object may be left behind (backend.h contract).
     // This is the shape shared by Content-MD5 mismatch (docs/archive/gaps.md §5.6) and client disconnect

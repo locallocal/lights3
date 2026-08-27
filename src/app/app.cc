@@ -68,6 +68,14 @@ void Application::start_server() {
     for (auto& w : cfg_.website.buckets) storage::validate_bucket_name(w.bucket);
     website_store_ =
         sync_wait(s3::WebsiteStore::load(router.default_backend(), cfg_.website.buckets));
+    // CORS rules (roadmap §2.1): dynamic-only (?cors API), persisted next to the
+    // website entries in .sys
+    cors_store_ = sync_wait(s3::CorsStore::load(router.default_backend()));
+    // Lifecycle rules (roadmap §2.4): stored next to cors/website; the runner gets its
+    // own router copy (S3Service owns the primary by value)
+    lifecycle_store_ = sync_wait(s3::LifecycleStore::load(router.default_backend()));
+    lifecycle_runner_ = std::make_unique<s3::LifecycleRunner>(
+        storage::BucketRouter::build(cfg_.buckets, backends_), lifecycle_store_);
     service_ = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
                                                cfg_.http.base_domain);
     service_->set_pool_stats([pool = pool_] { return pool->stats(); });
@@ -76,6 +84,8 @@ void Application::start_server() {
     service_->set_backend_metrics(metrics_);
     service_->set_credential_store(cred_store_);
     service_->set_website_store(website_store_);
+    service_->set_cors_store(cors_store_);
+    service_->set_lifecycle_store(lifecycle_store_);
     if (!cfg_.website.buckets.empty() && !auth_enabled)
         LOG_WARN("website: buckets configured but authentication is disabled; "
                  "all buckets are already anonymously accessible");
@@ -83,8 +93,12 @@ void Application::start_server() {
     // §10.2/§10.3): credentials_file hot-reload polling + periodic
     // multi-instance incremental sync (both gated by config)
     cred_store_->start_background(pool_);
-    // Website entries share the same multi-instance sync knob (docs/static-website.md §4)
+    // Website/CORS entries share the same multi-instance sync knob (docs/static-website.md §4)
     website_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    cors_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    lifecycle_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    // Enforcement scan (lifecycle.scan_interval, 0 = disabled)
+    lifecycle_runner_->start_background(pool_, cfg_.lifecycle.scan_interval_sec);
 
     server_ = http::HttpServerFactory::create(cfg_.http.driver, cfg_.http);
     // Dispatch-entry admission control (docs/concurrency.md §6):
@@ -202,6 +216,9 @@ void Application::shutdown() noexcept {
         // Timers / in-flight sync must wind down before the thread pool
         if (cred_store_) cred_store_->shutdown_background();
         if (website_store_) website_store_->shutdown_background();
+        if (cors_store_) cors_store_->shutdown_background();
+        if (lifecycle_runner_) lifecycle_runner_->shutdown_background();
+        if (lifecycle_store_) lifecycle_store_->shutdown_background();
     } catch (const std::exception& e) {
         LOG_ERROR("store background shutdown failed: {}", e.what());
     }
@@ -218,6 +235,9 @@ void Application::shutdown() noexcept {
     shutdown_src_.reset();
     cred_store_.reset();
     website_store_.reset();
+    cors_store_.reset();
+    lifecycle_runner_.reset();
+    lifecycle_store_.reset();
     backends_.clear();
     if (pool_) {
         try {

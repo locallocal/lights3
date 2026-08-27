@@ -92,9 +92,11 @@ public:
                                        ObjectMeta m) override {
         co_return co_await inner->create_multipart(b, k, std::move(m));
     }
+    using IStorageBackend::upload_part;
     Task<PutResult> upload_part(std::string_view b, std::string_view k, std::string_view id,
-                                int no, http::BodyReader& body) override {
-        co_return co_await inner->upload_part(b, k, id, no, body);
+                                int no, http::BodyReader& body,
+                                const std::optional<PartChecksum>& checksum) override {
+        co_return co_await inner->upload_part(b, k, id, no, body, checksum);
     }
     Task<PutResult> complete_multipart(std::string_view b, std::string_view k,
                                        std::string_view id,

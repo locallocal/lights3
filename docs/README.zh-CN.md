@@ -169,12 +169,19 @@ sudo /usr/local/sbin/lights3ctl status
   ListObjectsV2（prefix/delimiter/分页）、Multipart Upload
   （create/upload/upload-part-copy/list/complete/abort；UploadPartCopy 支持
   `x-amz-copy-source-range` 与 copy-source 条件头，源与目标可在不同后端）；
-  静态网站托管（显式列出的 bucket 匿名 GET/HEAD + index/error 文档，
-  [static-website.md](static-website.md)）
+  静态网站托管（显式列出的 bucket 匿名 GET/HEAD + index/error 文档、
+  RedirectAllRequestsTo/RoutingRules、无尾斜杠 302、按桶匿名限速，
+  [static-website.md](static-website.md)）；CORS（`?cors` + OPTIONS 预检 +
+  响应头注入）；对象标签（`?tagging` + `x-amz-tagging` +
+  `x-amz-tagging-count`）；Lifecycle 最小子集（Expiration.Days +
+  AbortIncompleteMultipartUpload，周期执行扫描）；校验和持久化与回显
+  （`x-amz-checksum-*` 随对象存储、GET/HEAD `x-amz-checksum-mode: ENABLED`、
+  multipart 复合 `-N` 校验和）；`GET ?partNumber` + `x-amz-mp-parts-count`；
+  STS AssumeRole 会话凭证（SigV4 `sts` scope，数据面带 token 验证与 TTL）
 
 设计上明确不支持（返回 NotImplemented，见 [s3-protocol.md](s3-protocol.md) §1）：
-versioning、ACL 细粒度（只认 private）、bucket policy、lifecycle、
-tagging/CORS、SSE-C/KMS、Object Lock、presigned POST。
+versioning、ACL 细粒度（只认 private）、bucket policy、lifecycle
+Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 
 ## 文档
 

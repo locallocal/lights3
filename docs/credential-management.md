@@ -30,6 +30,7 @@
 | `POST /-/admin/credentials` | 生成一对 AK/SK，可带 `?comment=` 备注 | `201` + JSON（唯一一次完整返回 SK） |
 | `GET /-/admin/credentials` | 列出全部凭证（含静态凭证，SK 掩码） | `200` + JSON 列表 |
 | `GET /-/admin/credentials/{ak}` | 查询单个凭证元数据；`?show-secret=true` 时返回明文 SK（**仅动态/文件凭证**，静态凭证恒掩码，见 §10.5） | `200` + JSON |
+| `PUT /-/admin/credentials/{ak}` | 就地修改动态凭证的 policy/comment（roadmap §2.5）：body 出现的字段被替换，`"policy": null` 清除；落盘 `rev` 计数 +1，多实例经 sync 的 ETag/rev 对比传播编辑 | `200` + JSON（SK 掩码） |
 | `DELETE /-/admin/credentials/{ak}` | 吊销（仅限动态凭证，静态凭证归配置文件管） | `204` |
 
 配套运维 CLI：`s3adm`（`src/tools/s3adm.cc`，构建产物与 `lights3` 同目录，

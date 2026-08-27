@@ -28,10 +28,32 @@ std::string serialize(const WebsiteBucket& w) {
     json j;
     j["index_suffix"] = w.index_suffix;
     if (!w.error_key.empty()) j["error_key"] = w.error_key;
+    if (!w.redirect_all_host.empty()) {
+        j["redirect_all_host"] = w.redirect_all_host;
+        if (!w.redirect_all_protocol.empty())
+            j["redirect_all_protocol"] = w.redirect_all_protocol;
+    }
+    if (!w.routing_rules.empty()) {
+        json rules = json::array();
+        for (auto& r : w.routing_rules) {
+            json jr;
+            if (!r.key_prefix_equals.empty()) jr["key_prefix_equals"] = r.key_prefix_equals;
+            if (r.http_error_code_equals) jr["http_error_code_equals"] = r.http_error_code_equals;
+            if (!r.protocol.empty()) jr["protocol"] = r.protocol;
+            if (!r.host_name.empty()) jr["host_name"] = r.host_name;
+            if (r.replace_key_prefix_with)
+                jr["replace_key_prefix_with"] = *r.replace_key_prefix_with;
+            if (r.replace_key_with) jr["replace_key_with"] = *r.replace_key_with;
+            if (r.http_redirect_code != 301) jr["http_redirect_code"] = r.http_redirect_code;
+            rules.push_back(std::move(jr));
+        }
+        j["routing_rules"] = std::move(rules);
+    }
+    if (w.max_rps) j["max_rps"] = w.max_rps;
     return j.dump();
 }
 
-// nullopt on malformed content; the same shape rules as the YAML side apply here —
+// nullopt on malformed content; the same shape rules as the YAML/XML sides apply here —
 // an object hand-edited into an invalid suffix must not become live config
 std::optional<WebsiteBucket> deserialize(const std::string& bucket, const std::string& body) {
     try {
@@ -43,6 +65,30 @@ std::optional<WebsiteBucket> deserialize(const std::string& bucket, const std::s
         if (w.index_suffix.empty() || w.index_suffix.find('/') != std::string::npos)
             return std::nullopt;
         if (!w.error_key.empty() && w.error_key.front() == '/') return std::nullopt;
+        w.redirect_all_host = j.value("redirect_all_host", "");
+        w.redirect_all_protocol = j.value("redirect_all_protocol", "");
+        if (!w.redirect_all_protocol.empty() && w.redirect_all_protocol != "http" &&
+            w.redirect_all_protocol != "https")
+            return std::nullopt;
+        if (j.contains("routing_rules")) {
+            for (auto& jr : j["routing_rules"]) {
+                WebsiteRoutingRule r;
+                r.key_prefix_equals = jr.value("key_prefix_equals", "");
+                r.http_error_code_equals = jr.value("http_error_code_equals", 0);
+                r.protocol = jr.value("protocol", "");
+                r.host_name = jr.value("host_name", "");
+                if (jr.contains("replace_key_prefix_with"))
+                    r.replace_key_prefix_with = jr["replace_key_prefix_with"].get<std::string>();
+                if (jr.contains("replace_key_with"))
+                    r.replace_key_with = jr["replace_key_with"].get<std::string>();
+                r.http_redirect_code = jr.value("http_redirect_code", 301);
+                if (r.replace_key_prefix_with && r.replace_key_with) return std::nullopt;
+                if (r.http_redirect_code < 300 || r.http_redirect_code > 399)
+                    return std::nullopt;
+                w.routing_rules.push_back(std::move(r));
+            }
+        }
+        w.max_rps = j.value("max_rps", 0u);
         return w;
     } catch (...) {
         return std::nullopt;
@@ -251,8 +297,7 @@ Task<void> WebsiteStore::sync_now() {
             if (it == dynamic_.end()) {
                 dynamic_.emplace(b, std::move(w));
                 ++added;
-            } else if (it->second.index_suffix != w.index_suffix ||
-                       it->second.error_key != w.error_key) {
+            } else if (!(it->second == w)) {  // full-entry compare: rules/redirect/rate too
                 it->second = std::move(w);
                 ++added;
             }

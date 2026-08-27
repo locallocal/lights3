@@ -53,7 +53,48 @@ struct ObjectMeta {
     // make the storage layer lie (the object sits on local disk yet reports GLACIER);
     // non-STANDARD gets a direct 501 at L2, consistent with the handling of x-amz-acl
     // (docs/archive/gaps.md §5.2)
+
+    // Checksum closure (roadmap §2.2): the client-declared, gateway-verified checksum
+    // persists with the object and is echoed on GET/HEAD under x-amz-checksum-mode.
+    // algorithm is the uppercase wire name (CRC32/CRC32C/CRC64NVME/SHA1/SHA256), value
+    // is base64 (composite values carry the "-N" suffix), type is FULL_OBJECT or
+    // COMPOSITE. All empty = no checksum recorded
+    std::string checksum_algorithm;
+    std::string checksum_value;
+    std::string checksum_type;
+    // Trailer-form uploads (STREAMING-*-TRAILER) declare the checksum after the payload:
+    // the L2 capture decorator fills this slot when the body reaches EOF — which the
+    // put_object contract guarantees happens before the backend commits. Serializers
+    // read through resolved_checksum_value(); never persisted itself
+    std::shared_ptr<const std::string> checksum_pending;
+    // Multipart part layout recorded at complete (roadmap §2.5 GET ?partNumber):
+    // part_sizes[i] is the size of part i+1. Empty = single-part or unknown (objects
+    // completed before this field existed)
+    std::vector<uint64_t> part_sizes;
+
+    // Object tagging (roadmap §2.5): canonical URL-encoded "k=v&k2=v2" (both sides
+    // aws_uri_encoded — safe for every text serializer), empty = no tags. Rides
+    // kStdMetaFields for extraction/persistence but is never echoed as a header
+    // (GET answers x-amz-tagging-count instead; ?tagging returns the XML)
+    std::string tagging;
 };
+
+// The value a serializer must persist: header-form checksums sit in checksum_value from
+// the start; trailer-form values land in checksum_pending once the body is drained
+inline std::string resolved_checksum_value(const ObjectMeta& m) {
+    if (!m.checksum_value.empty()) return m.checksum_value;
+    return m.checksum_pending ? *m.checksum_pending : std::string();
+}
+// In-place variant for backends that keep the ObjectMeta struct as-is (memory backend)
+inline void finalize_checksum(ObjectMeta& m) {
+    if (m.checksum_value.empty() && m.checksum_pending) m.checksum_value = *m.checksum_pending;
+    m.checksum_pending.reset();
+}
+
+// part_sizes wire form shared by every text serializer (localfs TSV, duostore std-kv):
+// comma-joined decimal. Bounded by kMaxParts (10000 entries ≈ 100KB worst case)
+std::string join_part_sizes(const std::vector<uint64_t>& sizes);
+std::vector<uint64_t> parse_part_sizes(std::string_view s);
 
 // Single source of truth for the five first-class fields: request/response header name +
 // persistence key name + member pointer. Extraction, echoing, and each backend's
@@ -63,6 +104,9 @@ struct StdMetaField {
     const char* header;              // S3 request/response header name
     const char* store_key;           // key name used for backend persistence
     std::string ObjectMeta::* field;
+    // false = persisted/extracted via the table but not echoed as a response header
+    // (tagging answers via x-amz-tagging-count / ?tagging instead)
+    bool echo = true;
 };
 inline constexpr StdMetaField kStdMetaFields[] = {
     {"Cache-Control", "cache_control", &ObjectMeta::cache_control},
@@ -71,6 +115,7 @@ inline constexpr StdMetaField kStdMetaFields[] = {
     {"Content-Language", "content_language", &ObjectMeta::content_language},
     {"Expires", "expires", &ObjectMeta::expires},
     {"x-amz-website-redirect-location", "website_redirect", &ObjectMeta::website_redirect},
+    {"x-amz-tagging", "tagging", &ObjectMeta::tagging, /*echo=*/false},
 };
 
 struct ObjectStream {
@@ -81,6 +126,11 @@ struct ObjectStream {
 
 struct PutResult {
     std::string etag;
+    // Filled by complete_multipart when a composite checksum was computed from the
+    // stored per-part values (roadmap §2.2); the handler echoes it in the response XML
+    std::string checksum_algorithm;
+    std::string checksum_value;
+    std::string checksum_type;
 };
 
 // Conditional PUT (docs/s3-protocol.md §6): the check and the commit must both happen
@@ -101,7 +151,7 @@ struct PutCondition {
 
 struct ListOptions {
     std::string prefix;
-    std::string delimiter;    // empty or "/"
+    std::string delimiter;    // arbitrary string ("" = no grouping); grouping is a generic substring find
     int max_keys = 1000;
     std::string start_after;  // continuation-token / start-after (a key value)
 };
@@ -122,6 +172,23 @@ struct BucketInfo {
 struct PartInfo {
     int part_no = 0;
     std::string etag;  // may be quoted; quotes are stripped before comparison
+    // Optional client-declared part checksum from the complete XML (roadmap §2.2):
+    // validated at L2 against the stored per-part value; never trusted as a source
+    std::string checksum_algorithm;
+    std::string checksum_value;  // base64
+};
+
+// Client-declared, gateway-verified checksum accompanying an UploadPart body
+// (roadmap §2.2): persisted with the part record so complete can compute the
+// composite ("-N") object checksum from verified values only
+struct PartChecksum {
+    std::string algorithm;  // uppercase wire name: CRC32 / CRC32C / SHA1 / SHA256
+    std::string value;      // base64; empty for trailer-form uploads until the body drains
+    std::shared_ptr<const std::string> pending;  // trailer capture slot (see ObjectMeta)
+    std::string resolved() const {
+        if (!value.empty()) return value;
+        return pending ? *pending : std::string();
+    }
 };
 
 // ListParts result entry
@@ -130,6 +197,9 @@ struct PartMeta {
     uint64_t size = 0;
     std::string etag;
     std::chrono::system_clock::time_point last_modified;
+    // Verified checksum recorded at upload time; empty = the part carried none
+    std::string checksum_algorithm;
+    std::string checksum_value;  // base64
 };
 
 // ListMultipartUploads result entry
@@ -155,7 +225,7 @@ struct ListPartsResult {
 
 struct ListUploadsOptions {
     std::string prefix;
-    std::string delimiter;  // empty or "/"
+    std::string delimiter;  // arbitrary string ("" = no grouping), same semantics as ListOptions
     int max_uploads = 1000;
     // (key_marker, upload_id_marker) form a composite cursor: only entries strictly greater
     // than the pair are returned. An empty upload_id_marker means "key > key_marker"
@@ -206,6 +276,33 @@ struct IStorageBackend {
                                                             ObjectMeta /*meta*/) {
         co_return std::nullopt;
     }
+    // GET ?partNumber support (roadmap §2.5): byte extent of one part of a completed
+    // multipart object. The default resolves nothing — L2 falls back to the part_sizes
+    // layout in ObjectMeta; proxy backends whose remote owns the layout (cloudproxy)
+    // override this with a remote lookup. nullopt = layout unknown here
+    struct ObjectPartExtent {
+        uint64_t offset = 0;
+        uint64_t size = 0;
+        int parts_count = 0;
+    };
+    virtual Task<std::optional<ObjectPartExtent>> resolve_object_part(
+        std::string_view /*bucket*/, std::string_view /*key*/, int /*part_no*/) {
+        co_return std::nullopt;
+    }
+
+    // PUT/DELETE ?tagging (roadmap §2.5): replace an existing object's tag set in place
+    // (canonical URL-encoded form; empty = delete all tags) without rewriting the data.
+    // Default is an honest 501 — backends whose meta lives inside an atomic data commit
+    // record (duostore) have no in-place meta update primitive yet; tags supplied at
+    // PUT/CreateMultipartUpload time still persist everywhere via ObjectMeta.tagging
+    virtual Task<void> set_object_tagging(std::string_view /*bucket*/, std::string_view /*key*/,
+                                          std::string /*tagging*/) {
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented,
+                          "In-place object tag modification is not implemented for this "
+                          "storage backend; set x-amz-tagging when writing the object.");
+        co_return;  // unreachable; keeps this a coroutine
+    }
+
     // S3 semantics: also return success for a non-existent key (idempotent delete)
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;
@@ -215,10 +312,23 @@ struct IStorageBackend {
     virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                                ObjectMeta meta) = 0;
     // part_no ∈ [1,10000]; re-uploading the same number is last-write-wins; returns the
-    // part's ETag (content MD5)
+    // part's ETag (content MD5). checksum (roadmap §2.2): nullopt = no checksum declared;
+    // implementations persist checksum->resolved() with the part record AFTER draining
+    // the body (trailer-form values only exist by then). Overrides must re-export the
+    // convenience overload with `using IStorageBackend::upload_part;`
     virtual Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
                                         std::string_view upload_id, int part_no,
-                                        http::BodyReader& body) = 0;
+                                        http::BodyReader& body,
+                                        const std::optional<PartChecksum>& checksum) = 0;
+    // A coroutine, not a plain forwarder: the checksum argument must outlive the inner
+    // coroutine's suspension points, so it lives in this wrapper's frame (a temporary
+    // bound to the inner call's reference parameter would dangle)
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
+                                std::string_view upload_id, int part_no,
+                                http::BodyReader& body) {
+        std::optional<PartChecksum> none;
+        co_return co_await upload_part(bucket, key, upload_id, part_no, body, none);
+    }
     // parts must have strictly increasing part numbers and ETags matching the uploaded parts;
     // total ETag = md5(concatenation of each part's binary md5)-N (same rule as S3)
     virtual Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,

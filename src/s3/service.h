@@ -4,6 +4,7 @@
 #include <chrono>
 #include <span>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -17,6 +18,8 @@
 #include "http/model.h"
 #include "s3/auth/policy.h"
 #include "s3/auth/sigv4.h"
+#include "s3/cors_store.h"
+#include "s3/lifecycle.h"
 #include "s3/metrics.h"
 #include "s3/website_store.h"
 #include "storage/bucket_router.h"
@@ -98,6 +101,16 @@ public:
         website_store_ = std::move(store);
     }
 
+    // CORS (roadmap §2.1): per-bucket rules persisted in .sys/cors/, managed via
+    // ?cors (root only). Not injected = no preflight answers, no CORS headers
+    void set_cors_store(std::shared_ptr<CorsStore> store) { cors_store_ = std::move(store); }
+
+    // Lifecycle (roadmap §2.4): ?lifecycle rule management (root only); enforcement
+    // lives in LifecycleRunner, wired separately in the app assembly
+    void set_lifecycle_store(std::shared_ptr<LifecycleStore> store) {
+        lifecycle_store_ = std::move(store);
+    }
+
     // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
@@ -143,6 +156,24 @@ private:
                                                 const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_website(std::string bucket,
                                                    const RequestAuth& auth);
+    // handlers/bucket_cors.cc (roadmap §2.1, root credential only)
+    Task<http::HttpResponse> get_bucket_cors(std::string bucket, const RequestAuth& auth);
+    Task<http::HttpResponse> put_bucket_cors(http::HttpRequest& req, std::string bucket,
+                                             const RequestAuth& auth);
+    Task<http::HttpResponse> delete_bucket_cors(std::string bucket, const RequestAuth& auth);
+    // handlers/bucket_lifecycle.cc (roadmap §2.4, root credential only)
+    Task<http::HttpResponse> get_bucket_lifecycle(std::string bucket, const RequestAuth& auth);
+    Task<http::HttpResponse> put_bucket_lifecycle(http::HttpRequest& req, std::string bucket,
+                                                  const RequestAuth& auth);
+    Task<http::HttpResponse> delete_bucket_lifecycle(std::string bucket,
+                                                     const RequestAuth& auth);
+    // OPTIONS preflight: dispatched before signature verification (browsers never sign
+    // preflights); answers purely from the CORS rule table, no object access
+    Task<http::HttpResponse> cors_preflight(http::HttpRequest& req, std::string bucket);
+    // Cross-origin actual requests: Allow-Origin/Expose-Headers injection on both
+    // success and error responses
+    void apply_cors_headers(const http::HttpRequest& req, const std::string& bucket,
+                            http::HttpResponse& resp);
     Task<http::HttpResponse> delete_bucket(std::string bucket);
     Task<http::HttpResponse> get_bucket_location(std::string bucket);
     // handlers/objects.cc
@@ -153,6 +184,11 @@ private:
     Task<http::HttpResponse> get_object(http::HttpRequest& req, std::string bucket,
                                         std::string key, bool head_only);
     Task<http::HttpResponse> delete_object(std::string bucket, std::string key);
+    // ?tagging subresource (roadmap §2.5)
+    Task<http::HttpResponse> get_object_tagging(std::string bucket, std::string key);
+    Task<http::HttpResponse> put_object_tagging(http::HttpRequest& req, std::string bucket,
+                                                std::string key);
+    Task<http::HttpResponse> delete_object_tagging(std::string bucket, std::string key);
     Task<http::HttpResponse> delete_objects(http::HttpRequest& req, std::string bucket,
                                             const RequestAuth& auth);
     // handlers/list_objects.cc
@@ -173,6 +209,11 @@ private:
                                                     const RequestAuth& auth);
 
     Task<http::HttpResponse> readyz();
+
+    // handlers/sts.cc (roadmap §2.6): AssumeRole at POST / (path-style deployments),
+    // verified with service scope "sts"; errors render in the STS XML shape
+    Task<http::HttpResponse> sts_endpoint(http::HttpRequest& req, const RequestContext& ctx,
+                                          std::string& access_key);
 
     // handlers/admin_credentials.cc (docs/credential-management.md §2): performs verification and root check
     // internally, renders errors as JSON bodies; access_key out-param feeds the access log
@@ -202,6 +243,10 @@ private:
     Task<http::HttpResponse> website_error_page(const S3Error& e, const WebsiteBucket& site,
                                                 bool head_only);
 
+    // Per-bucket anonymous rate limit (roadmap §2.3): token bucket, burst = rps.
+    // false = over the limit, the caller answers 503 SlowDown without touching storage
+    bool website_rate_admit(const std::string& bucket, uint32_t rps);
+
     storage::BucketRouter router_;
     SigV4Authenticator auth_;
     std::string base_domain_;
@@ -214,6 +259,17 @@ private:
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off
+    std::shared_ptr<CorsStore> cors_store_;        // null = CORS off (OPTIONS -> 403)
+    std::shared_ptr<LifecycleStore> lifecycle_store_;  // null = ?lifecycle unavailable
+
+    // Anonymous website rate limiting (roadmap §2.3): one token bucket per website
+    // bucket; entries are bounded by the number of configured website buckets
+    struct RateBucket {
+        double tokens = 0;
+        std::chrono::steady_clock::time_point last{};
+    };
+    std::mutex rate_mu_;
+    std::map<std::string, RateBucket> rate_;
 
     // Short cache for /-/readyz results (anonymously reachable, and the probe issues real calls to every backend:
     // without a cache, an anonymous loop can amplify into billed/rate-limited upstream calls)

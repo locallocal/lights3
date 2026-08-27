@@ -66,28 +66,49 @@ std::string request_base_url(const http::HttpRequest& req) {
     return scheme + "://" + host;
 }
 
-// Minimum part size check (docs/archive/gaps.md §5.7): last part exempt. Only the storage layer knows part sizes,
-// so list once before complete; missing parts are not reported here but left to the backend's InvalidPart
-Task<void> check_min_part_sizes(storage::IStorageBackend& backend, const std::string& bucket,
-                                const std::string& key, const std::string& upload_id,
-                                const std::vector<storage::PartInfo>& parts, uint64_t min_size) {
-    if (min_size == 0) co_return;      // knob disabled
-    if (parts.size() <= 1) co_return;  // single-part uploads are exempt from the minimum size
+// Pre-complete validation over one listing: minimum part size (docs/archive/gaps.md §5.7,
+// last part exempt) plus declared-checksum cross-check (roadmap §2.2 — the complete XML's
+// Checksum values are client claims and must match the stored, upload-time-verified
+// ones; a mismatch is BadDigest, a claim against a checksum-less part is InvalidPart).
+// Missing parts are not reported here but left to the backend's InvalidPart
+Task<void> check_parts_before_complete(storage::IStorageBackend& backend,
+                                       const std::string& bucket, const std::string& key,
+                                       const std::string& upload_id,
+                                       const std::vector<storage::PartInfo>& parts,
+                                       uint64_t min_size) {
+    bool need_sizes = min_size > 0 && parts.size() > 1;
+    bool need_checksums = false;
+    for (auto& p : parts)
+        if (!p.checksum_value.empty()) need_checksums = true;
+    if (!need_sizes && !need_checksums) co_return;
     // Fetch everything: the protocol caps part count at 10000, and this needs lookup by part number, not paging
     storage::ListPartsOptions all_opt;
     all_opt.max_parts = storage::kMaxParts;
     auto have = co_await backend.list_parts(bucket, key, upload_id, all_opt);
-    std::map<int, uint64_t> size_of;
-    for (auto& p : have.parts) size_of[p.part_no] = p.size;
-    for (size_t i = 0; i + 1 < parts.size(); ++i) {  // last part not checked
-        auto it = size_of.find(parts[i].part_no);
-        if (it == size_of.end()) continue;
-        if (it->second < min_size)
+    std::map<int, const storage::PartMeta*> by_no;
+    for (auto& p : have.parts) by_no[p.part_no] = &p;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        auto it = by_no.find(parts[i].part_no);
+        if (it == by_no.end()) continue;
+        if (need_sizes && i + 1 < parts.size() && it->second->size < min_size)  // last part exempt
             throw S3Error(S3ErrorCode::EntityTooSmall,
                           "Your proposed upload is smaller than the minimum allowed size. "
                           "Part " + std::to_string(parts[i].part_no) + " is " +
-                              std::to_string(it->second) + " bytes; the minimum is " +
+                              std::to_string(it->second->size) + " bytes; the minimum is " +
                               std::to_string(min_size) + " bytes.");
+        if (!parts[i].checksum_value.empty()) {
+            if (it->second->checksum_value.empty())
+                throw S3Error(S3ErrorCode::InvalidPart,
+                              "Part " + std::to_string(parts[i].part_no) +
+                                  " was uploaded without a checksum but the complete "
+                                  "request declares one.");
+            if (it->second->checksum_algorithm != parts[i].checksum_algorithm ||
+                it->second->checksum_value != parts[i].checksum_value)
+                throw S3Error(S3ErrorCode::BadDigest,
+                              "The Checksum" + parts[i].checksum_algorithm + " of part " +
+                                  std::to_string(parts[i].part_no) +
+                                  " did not match what we received.");
+        }
     }
 }
 
@@ -125,8 +146,34 @@ storage::ByteRange parse_copy_source_range(const std::string& v, uint64_t src_si
 
 Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std::string bucket,
                                                      std::string key) {
+    auto meta = meta_from_headers(req);
+    // Declared checksum algorithm survives create→complete (roadmap §2.2). Only the
+    // COMPOSITE form is implemented: CRC64NVME (full-object only per AWS) and an
+    // explicit FULL_OBJECT request get an honest 501 instead of a silently absent
+    // checksum at complete time
+    for (std::string_view h : {"x-amz-checksum-algorithm", "x-amz-sdk-checksum-algorithm"}) {
+        auto v = req.headers.get(h);
+        if (!v) continue;  // unknown values were already rejected by the dispatch guard
+        std::string algo;
+        for (char c : *v) algo.push_back(char(toupper(static_cast<unsigned char>(c))));
+        if (algo == "CRC64NVME")
+            throw S3Error(S3ErrorCode::NotImplemented,
+                          "Full-object multipart checksums (CRC64NVME) are not implemented; "
+                          "use CRC32, CRC32C, SHA1 or SHA256 (composite).");
+        meta.checksum_algorithm = algo;
+        meta.checksum_type = "COMPOSITE";
+    }
+    if (auto t = req.headers.get("x-amz-checksum-type")) {
+        if (http::HeaderMap::ieq(*t, "FULL_OBJECT"))
+            throw S3Error(S3ErrorCode::NotImplemented,
+                          "Full-object multipart checksums are not implemented; only "
+                          "COMPOSITE is supported.");
+        if (!http::HeaderMap::ieq(*t, "COMPOSITE"))
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "Invalid x-amz-checksum-type value: " + *t);
+    }
     auto upload_id =
-        co_await router_.resolve(bucket).create_multipart(bucket, key, meta_from_headers(req));
+        co_await router_.resolve(bucket).create_multipart(bucket, key, std::move(meta));
     metrics_.mpu_created();
 
     XmlWriter w;
@@ -173,13 +220,24 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
         co_return resp;
     }
 
+    require_content_length(req);  // 411 (roadmap §2.5); UploadPartCopy above is body-less and exempt
+    // Declared part checksum persists with the part record (roadmap §2.2)
+    auto part_checksum = extract_part_checksum(req);
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
-    auto result =
-        co_await router_.resolve(bucket).upload_part(bucket, key, upload_id, part_no, body);
+    auto result = co_await router_.resolve(bucket).upload_part(bucket, key, upload_id, part_no,
+                                                               body, part_checksum);
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));
+    if (part_checksum) {  // body drained: trailer-form value is resolvable now
+        std::string v = part_checksum->resolved();
+        if (!v.empty()) {
+            std::string h = "x-amz-checksum-";
+            for (char c : part_checksum->algorithm) h.push_back(http::HeaderMap::lower(c));
+            resp.headers.set(h, v);
+        }
+    }
     co_return resp;
 }
 
@@ -207,6 +265,17 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
         // Re-check the upper bound: validated at upload time, but complete's list is a separate input
         storage::validate_part_number(p.part_no);
         p.etag = child.get("ETag");
+        // Optional per-part checksum claims (roadmap §2.2): cross-checked against the
+        // stored values before the backend commit
+        for (std::string_view a : {"CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"}) {
+            std::string v = child.get("Checksum" + std::string(a));
+            if (v.empty()) continue;
+            if (!p.checksum_value.empty())
+                throw S3Error(S3ErrorCode::MalformedXML,
+                              "A Part may declare at most one checksum value.");
+            p.checksum_algorithm = std::string(a);
+            p.checksum_value = std::move(v);
+        }
         parts.push_back(std::move(p));
     }
     storage::validate_part_order(parts);  // out of order -> InvalidPartOrder, decided before the backend
@@ -214,8 +283,9 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     auto& backend = router_.resolve(bucket);
     // Minimum part size 5MiB (last part exempt): without the check, 10000 one-byte parts could be committed, and
     // complete's per-part open/read/write concatenation is a cheap amplification surface. Only the storage layer
-    // knows sizes, hence the upfront listing
-    co_await check_min_part_sizes(backend, bucket, key, upload_id, parts, min_part_size_);
+    // knows sizes, hence the upfront listing; declared part checksums cross-check in the same pass
+    co_await check_parts_before_complete(backend, bucket, key, upload_id, parts,
+                                         min_part_size_);
 
     auto result = co_await backend.complete_multipart(bucket, key, upload_id, parts);
     metrics_.mpu_finished();
@@ -228,6 +298,12 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     w.element("Bucket", bucket);
     w.element("Key", key);
     w.element("ETag", quote_etag(result.etag));
+    // Composite checksum echo (roadmap §2.2): present when every part carried one
+    if (!result.checksum_value.empty()) {
+        w.element("Checksum" + result.checksum_algorithm, result.checksum_value);
+        w.element("ChecksumType",
+                  result.checksum_type.empty() ? "COMPOSITE" : result.checksum_type);
+    }
     w.close();
     http::HttpResponse resp;
     resp.headers.set("Content-Type", "application/xml");
@@ -255,12 +331,23 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
     if (opt.part_number_marker < 0)
         throw S3Error(S3ErrorCode::InvalidArgument, "Invalid part-number-marker value");
 
+    // encoding-type=url (roadmap §2.5): SDKs occasionally pass it through; before it entered
+    // the allowlist the whole request was 501. Same semantics as the two bucket listings
+    bool encode_url = false;
+    if (auto et = req.query_get("encoding-type")) {
+        if (*et != "url")
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Invalid Encoding Method specified in Request");
+        encode_url = true;
+    }
+
     auto res = co_await router_.resolve(bucket).list_parts(bucket, key, upload_id, opt);
 
     XmlWriter w;
     w.open("ListPartsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
     w.element("Bucket", bucket);
-    w.element("Key", key);
+    w.element("Key", encode_url ? util::aws_uri_encode(key, /*encode_slash=*/false) : key);
+    if (encode_url) w.element("EncodingType", "url");
     w.element("UploadId", upload_id);
     w.element("StorageClass", "STANDARD");
     w.element("PartNumberMarker", static_cast<uint64_t>(opt.part_number_marker));
@@ -274,6 +361,9 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
         w.element("LastModified", util::iso8601(p.last_modified));
         w.element("ETag", quote_etag(p.etag));
         w.element("Size", p.size);
+        // Stored per-part checksum (roadmap §2.2)
+        if (!p.checksum_value.empty() && !p.checksum_algorithm.empty())
+            w.element("Checksum" + p.checksum_algorithm, p.checksum_value);
         w.close();
     }
     w.close();
@@ -298,9 +388,6 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
     if (opt.key_marker.empty() && !opt.upload_id_marker.empty())
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "upload-id-marker requires key-marker to be specified.");
-    if (!opt.delimiter.empty() && opt.delimiter != "/")
-        throw S3Error(S3ErrorCode::NotImplemented,
-                      "Only '/' is supported as a delimiter.");
     // encoding-type=url: same semantics as list_objects -- previously the parameter was accepted but nothing
     // was ever encoded, a silent wrong answer
     bool encode_url = false;

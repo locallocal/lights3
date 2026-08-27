@@ -32,6 +32,7 @@ namespace lights3::s3 {
     X(InvalidLocationConstraint, 400)    \
     X(InvalidObjectState, 403)           \
     X(InvalidPart, 400)                  \
+    X(InvalidPartNumber, 416)            \
     X(InvalidPartOrder, 400)             \
     X(InvalidRange, 416)                 \
     X(InvalidRequest, 400)               \
@@ -41,7 +42,9 @@ namespace lights3::s3 {
     X(MethodNotAllowed, 405)             \
     X(MissingContentLength, 411)         \
     X(NoSuchBucket, 404)                 \
+    X(NoSuchCORSConfiguration, 404)      \
     X(NoSuchKey, 404)                    \
+    X(NoSuchLifecycleConfiguration, 404) \
     X(NoSuchWebsiteConfiguration, 404)   \
     X(NoSuchUpload, 404)                 \
     X(NotImplemented, 501)               \

@@ -215,6 +215,81 @@ inline void validate_checksum_algorithm(const http::HttpRequest& req) {
     }
 }
 
+// ---- Checksum persistence support (roadmap §2.2) ----
+
+// Uppercase wire name ("CRC32C") from a spec entry (header is "x-amz-checksum-crc32c")
+inline std::string checksum_wire_name(const ChecksumSpec& sp) {
+    std::string out;
+    for (char c : sp.header.substr(sizeof("x-amz-checksum-") - 1))
+        out.push_back(char(toupper(static_cast<unsigned char>(c))));
+    return out;
+}
+
+// The request's declared checksum, either as a header (value known now) or as a
+// declared aws-chunked trailer (value known only once the body drains). More than one
+// declared algorithm is refused, matching AWS ("Expecting a single x-amz-checksum-...")
+// — persistence records exactly one checksum per object
+struct RequestChecksum {
+    const ChecksumSpec* spec = nullptr;
+    std::string value;   // base64; empty for the trailer form
+    bool trailer = false;
+};
+inline std::optional<RequestChecksum> request_checksum(const http::HttpRequest& req) {
+    std::optional<RequestChecksum> out;
+    auto add = [&](const ChecksumSpec* sp, std::string value, bool trailer) {
+        if (out && out->spec != sp)
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "Expecting a single x-amz-checksum- header. Multiple checksum "
+                          "types are not allowed.");
+        if (!out) out = RequestChecksum{sp, std::move(value), trailer};
+    };
+    for (auto& sp : kChecksumSpecs)
+        if (auto v = req.headers.get(sp.header)) add(&sp, *v, false);
+    for (auto& t : parse_declared_trailers(req))
+        if (const auto* sp = checksum_spec(t)) add(sp, "", true);
+    return out;
+}
+
+// Recomputes the declared algorithm's digest over the de-framed payload and drops the
+// base64 value into `out` at EOF. Used for trailer-form uploads, where the client's
+// value is verified inside ChunkedSigV4BodyReader but never surfaces to the handler:
+// both digests cover the same bytes, and a client/transport mismatch throws in the
+// chunked reader before any backend commit — so the recomputed value is exactly the
+// verified one. The cost is one extra (cheap, usually CRC) digest pass
+class DigestCaptureReader final : public http::BodyReader {
+public:
+    DigestCaptureReader(std::unique_ptr<http::BodyReader> inner, ExpectedDigest::Algo algo,
+                        std::shared_ptr<std::string> out)
+        : inner_(std::move(inner)), digest_(algo), out_(std::move(out)) {}
+
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t n = co_await inner_->read(buf);
+        if (n > 0) {
+            digest_.update(std::span(buf.data(), n));
+            consumed_ += n;
+            if (auto len = inner_->length(); len && consumed_ >= *len) finish();
+        } else {
+            finish();
+        }
+        co_return n;
+    }
+    std::optional<uint64_t> length() const override { return inner_->length(); }
+
+private:
+    void finish() {
+        if (done_) return;
+        done_ = true;
+        auto raw = digest_.final_raw();
+        *out_ = util::base64_encode(
+            std::span(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()));
+    }
+    std::unique_ptr<http::BodyReader> inner_;
+    StreamingDigest digest_;
+    std::shared_ptr<std::string> out_;
+    uint64_t consumed_ = 0;
+    bool done_ = false;
+};
+
 // Digests declared with an empty body (GET/DELETE etc.) are verified too: the MD5 of an empty body is a
 // fixed value, and a mismatching declaration is still BadDigest
 inline void install_checksum_guard(http::HttpRequest& req) {

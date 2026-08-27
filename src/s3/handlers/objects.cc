@@ -1,10 +1,12 @@
 // Object-level handlers: Put/Get/Head/Delete/Copy/DeleteObjects and conditional requests (docs/s3-protocol.md §1/§6)
+#include <algorithm>
 #include <charconv>
 
 #include "core/log.h"
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "s3/handlers/common.h"
+#include "storage/multipart.h"
 #include "s3/service.h"
 #include "s3/xml.h"
 
@@ -88,9 +90,16 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
     resp.headers.set("Content-Type", meta.content_type);
     resp.headers.set("Last-Modified", util::http_date(meta.last_modified));
     resp.headers.set("Accept-Ranges", "bytes");
-    // First-class metadata echoed verbatim (docs/archive/gaps.md §5.2); empty = unset, header not sent
+    // First-class metadata echoed verbatim (docs/archive/gaps.md §5.2); empty = unset, header
+    // not sent. Non-echo fields (tagging) answer through their own channels instead
     for (auto& f : storage::kStdMetaFields)
-        if (!(meta.*f.field).empty()) resp.headers.set(f.header, meta.*f.field);
+        if (f.echo && !(meta.*f.field).empty()) resp.headers.set(f.header, meta.*f.field);
+    // x-amz-tagging-count (roadmap §2.5): number of tags, never the values
+    if (!meta.tagging.empty()) {
+        size_t n = 1 + static_cast<size_t>(std::count(meta.tagging.begin(),
+                                                      meta.tagging.end(), '&'));
+        resp.headers.set("x-amz-tagging-count", std::to_string(n));
+    }
     for (auto& [k, v] : meta.user_meta) resp.headers.set("x-amz-meta-" + k, v);
 }
 
@@ -143,6 +152,7 @@ bool has_response_override(const http::HttpRequest& req) {
 
 Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket,
                                                std::string key) {
+    require_content_length(req);  // 411 (roadmap §2.5); CopyObject is body-less and exempt
     auto& backend = router_.resolve(bucket);
 
     // PUT conditional requests (docs/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is optimistic concurrency.
@@ -174,12 +184,29 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
                           "At least one of the pre-conditions you specified did not hold");
     }
 
+    // Declared checksum persists with the object (roadmap §2.2): header form is known
+    // now; trailer form resolves through the pending slot once the body drains
+    storage::ObjectMeta meta = meta_from_headers(req);
+    attach_request_checksum(req, meta);
+    std::string cs_algo = meta.checksum_algorithm;
+    std::string cs_value = meta.checksum_value;
+    auto cs_pending = meta.checksum_pending;
+
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
-    auto result = co_await backend.put_object(bucket, key, meta_from_headers(req), body, cond);
+    auto result = co_await backend.put_object(bucket, key, std::move(meta), body, cond);
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));
+    // Response echo (AWS PutObject behavior): the body is drained by now, so the
+    // trailer-form value is readable from the capture slot
+    if (cs_value.empty() && cs_pending) cs_value = *cs_pending;
+    if (!cs_algo.empty() && !cs_value.empty()) {
+        std::string h = "x-amz-checksum-";
+        for (char c : cs_algo) h.push_back(http::HeaderMap::lower(c));
+        resp.headers.set(h, cs_value);
+        resp.headers.set("x-amz-checksum-type", "FULL_OBJECT");
+    }
     co_return resp;
 }
 
@@ -202,6 +229,13 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
     storage::ObjectMeta meta;
     if (directive == "REPLACE") {
         meta = meta_from_headers(req);
+        // The bytes are unchanged by a copy, so the source's checksum and part layout
+        // still describe the new object (roadmap §2.2/§2.5); REPLACE only swaps the
+        // user-editable metadata
+        meta.checksum_algorithm = src_meta.checksum_algorithm;
+        meta.checksum_value = src_meta.checksum_value;
+        meta.checksum_type = src_meta.checksum_type;
+        meta.part_sizes = src_meta.part_sizes;
     } else {
         // COPY: the whole metadata set travels with the object. Field-by-field copying once missed newly added
         // first-class fields (§5.2); here only the three items bound to the new object (key/size/etag) are left for the backend to recompute
@@ -244,6 +278,51 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     std::optional<storage::ByteRange> range;
     if (auto v = req.headers.get("Range")) range = parse_range_header(*v);
 
+    // GET/HEAD ?partNumber (roadmap §2.5): one part of a completed multipart object,
+    // resolved to a byte range from the part_sizes layout recorded at complete (or a
+    // proxy backend's remote lookup). Objects completed before layout tracking get an
+    // honest 501 rather than a silently wrong full-object answer
+    std::optional<int> part_no;
+    int parts_count = 0;
+    if (auto v = req.query_get("partNumber")) {
+        int no = 0;
+        auto [p, ec] = std::from_chars(v->data(), v->data() + v->size(), no);
+        if (ec != std::errc() || p != v->data() + v->size() || no < 1 ||
+            no > storage::kMaxParts)
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Part number must be an integer between 1 and 10000.");
+        if (range)
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "Cannot specify both Range header and partNumber query parameter.");
+        part_no = no;
+        auto meta = co_await backend.head_object(bucket, key);
+        uint64_t off = 0, sz = 0;
+        if (!meta.part_sizes.empty()) {
+            parts_count = static_cast<int>(meta.part_sizes.size());
+            if (no > parts_count)
+                throw S3Error(S3ErrorCode::InvalidPartNumber,
+                              "The requested partnumber is not satisfiable", key);
+            for (int i = 0; i < no - 1; ++i) off += meta.part_sizes[size_t(i)];
+            sz = meta.part_sizes[size_t(no - 1)];
+        } else if (auto pe = co_await backend.resolve_object_part(bucket, key, no)) {
+            parts_count = pe->parts_count;
+            off = pe->offset;
+            sz = pe->size;
+        } else if (meta.etag.find('-') != std::string::npos) {
+            throw S3Error(S3ErrorCode::NotImplemented,
+                          "The part layout of this object was not recorded (uploaded "
+                          "before part-layout tracking).",
+                          key);
+        } else {
+            parts_count = 1;
+            if (no > 1)
+                throw S3Error(S3ErrorCode::InvalidPartNumber,
+                              "The requested partnumber is not satisfiable", key);
+            sz = meta.size;
+        }
+        if (sz > 0) range = storage::ByteRange{off, off + sz - 1};
+    }
+
     http::HttpResponse resp;
     if (head_only) {
         auto meta = co_await backend.head_object(bucket, key);
@@ -267,6 +346,8 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         } else {
             resp.content_length = meta.size;  // no body, the driver sends only Content-Length
         }
+        if (part_no) resp.headers.set("x-amz-mp-parts-count", std::to_string(parts_count));
+        apply_checksum_echo(req, meta, resp);  // §2.2 (no-op on 206)
         co_return resp;
     }
 
@@ -302,11 +383,73 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     }
     resp.content_length = len;
     resp.stream_body = std::move(stream.body);
+    if (part_no) resp.headers.set("x-amz-mp-parts-count", std::to_string(parts_count));
+    apply_checksum_echo(req, stream.meta, resp);  // §2.2 (no-op on 206)
     co_return resp;
 }
 
 Task<http::HttpResponse> S3Service::delete_object(std::string bucket, std::string key) {
     co_await router_.resolve(bucket).delete_object(bucket, key);
+    http::HttpResponse resp;
+    resp.status = 204;
+    co_return resp;
+}
+
+// ---- ?tagging subresource (roadmap §2.5) ----
+
+Task<http::HttpResponse> S3Service::get_object_tagging(std::string bucket, std::string key) {
+    auto meta = co_await router_.resolve(bucket).head_object(bucket, key);
+    XmlWriter w;
+    w.open("Tagging", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
+    w.open("TagSet");
+    for (auto& [k, v] : parse_tagging(meta.tagging)) {
+        w.open("Tag");
+        w.element("Key", k);
+        w.element("Value", v);
+        w.close();
+    }
+    w.close();
+    w.close();
+    http::HttpResponse resp;
+    resp.headers.set("Content-Type", "application/xml");
+    resp.small_body = w.str();
+    co_return resp;
+}
+
+Task<http::HttpResponse> S3Service::put_object_tagging(http::HttpRequest& req,
+                                                       std::string bucket, std::string key) {
+    std::string body = co_await read_body(req);
+    auto root = xml_parse(body);
+    if (root.name != "Tagging")
+        throw S3Error(S3ErrorCode::MalformedXML, "Expected <Tagging> root element.");
+    const XmlNode* set = root.find("TagSet");
+    if (!set)
+        throw S3Error(S3ErrorCode::MalformedXML, "Tagging must contain a TagSet element.");
+    std::vector<std::pair<std::string, std::string>> tags;
+    for (auto& t : set->children) {
+        if (t.name != "Tag") continue;
+        std::string k = t.get("Key");
+        if (k.empty() || k.size() > 128)
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Tag keys must be 1-128 characters long.");
+        std::string v = t.get("Value");
+        if (v.size() > 256)
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Tag values must be at most 256 characters long.");
+        for (auto& [ek, ev] : tags)
+            if (ek == k)
+                throw S3Error(S3ErrorCode::InvalidArgument, "Duplicate tag key '" + k + "'.");
+        tags.emplace_back(std::move(k), std::move(v));
+        if (tags.size() > 10)
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "An object may carry at most 10 tags.");
+    }
+    co_await router_.resolve(bucket).set_object_tagging(bucket, key, encode_tagging(tags));
+    co_return http::HttpResponse{};
+}
+
+Task<http::HttpResponse> S3Service::delete_object_tagging(std::string bucket, std::string key) {
+    co_await router_.resolve(bucket).set_object_tagging(bucket, key, "");
     http::HttpResponse resp;
     resp.status = 204;
     co_return resp;

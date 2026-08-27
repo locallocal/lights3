@@ -306,8 +306,13 @@ add_library(lights3_core STATIC
   src/s3/auth/sigv4.cc
   src/s3/auth/credential_store.cc
   src/s3/website_store.cc
+  src/s3/cors_store.cc
+  src/s3/lifecycle.cc
   src/s3/handlers/admin_credentials.cc
   src/s3/handlers/bucket_website.cc
+  src/s3/handlers/bucket_cors.cc
+  src/s3/handlers/bucket_lifecycle.cc
+  src/s3/handlers/sts.cc
   src/s3/handlers/buckets.cc
   src/s3/handlers/objects.cc
   src/s3/handlers/list_objects.cc

@@ -439,3 +439,35 @@ backends:
     }
     CHECK(threw);
 }
+
+// roadmap §2.3: website redirect_all + max_rps knobs
+TEST(config_website_redirect_and_rate) {
+    auto cfg = Config::from_string(
+        "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+        "  - bucket: spa\n    redirect_all_host: app.example.org\n"
+        "    redirect_all_protocol: https\n"
+        "  - bucket: lim\n    max_rps: 50\n");
+    CHECK_EQ(cfg.website.buckets[0].redirect_all_host, "app.example.org");
+    CHECK_EQ(cfg.website.buckets[0].redirect_all_protocol, "https");
+    CHECK_EQ(cfg.website.buckets[1].max_rps, 50u);
+    CHECK_EQ(cfg.website.buckets[1].redirect_all_host, "");
+
+    // Rejections: bad protocol, protocol without host, out-of-range / garbage max_rps
+    for (const char* bad :
+         {"backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: b\n    redirect_all_host: h\n    redirect_all_protocol: ftp\n",
+          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: b\n    redirect_all_protocol: https\n",
+          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: b\n    max_rps: -1\n",
+          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+          "  - bucket: b\n    max_rps: 10x\n"}) {
+        bool thrown = false;
+        try {
+            Config::from_string(bad);
+        } catch (const std::exception&) {
+            thrown = true;
+        }
+        CHECK(thrown);
+    }
+}

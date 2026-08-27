@@ -10,22 +10,28 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | --- | --- | --- |
 | Service | ListBuckets | Aggregates across backends |
 | Bucket | CreateBucket / DeleteBucket / HeadBucket | Single region: a CreateBucket LocationConstraint that disagrees with the configured region is `InvalidLocationConstraint`; HeadBucket/CreateBucket return `x-amz-bucket-region` |
-| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects (batch) / CopyObject | Get supports Range, conditional requests (If-Match/If-None-Match/If-Modified-Since) and the six `response-*` override parameters; Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires are persisted and echoed back; Content-MD5 and `x-amz-checksum-*` (crc32/crc32c/crc64nvme/sha1/sha256, in header or aws-chunked trailer form) verify the request body, and DeleteObjects **requires** an integrity header |
+| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects (batch) / CopyObject | Get supports Range, conditional requests (If-Match/If-None-Match/If-Modified-Since), the six `response-*` override parameters and `?partNumber` (206 + `x-amz-mp-parts-count`; the part layout is recorded in `part_sizes` at complete); Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires are persisted and echoed back; Content-MD5 and `x-amz-checksum-*` (crc32/crc32c/crc64nvme/sha1/sha256, in header or aws-chunked trailer form) verify the request body **and persist with the object** — GET/HEAD echo them under `x-amz-checksum-mode: ENABLED` (with `x-amz-checksum-type`; not on ranged/partNumber 206); DeleteObjects **requires** an integrity header |
+| Tagging | GetObjectTagging / PutObjectTagging / DeleteObjectTagging | `x-amz-tagging` at write time persists on every backend; `x-amz-tagging-count` echoed; in-place tag mutation works on memory/localfs/xlocalfs/tiered/cloudproxy, duostore answers an honest 501 (no meta-only update primitive) |
+| CORS | GetBucketCors / PutBucketCors / DeleteBucketCors + OPTIONS preflight | Root only (same two-tier model as ?website); rules persist to `.sys/cors/<bucket>`; preflight is dispatched **before** signature verification (browsers never sign OPTIONS); actual requests (success and error responses alike) get Allow-Origin/Expose-Headers/Vary injected |
+| Lifecycle | GetBucketLifecycle / PutBucketLifecycle / DeleteBucketLifecycle | Root only; minimal subset: Expiration.Days + AbortIncompleteMultipartUpload.DaysAfterInitiation (prefix filters); enforced periodically (`lifecycle.scan_interval`, default 1h, 0 = off); Transitions/tag filters/Date forms → 501 |
+| STS | AssumeRole | `POST /` (path-style deployments) with a form body, SigV4 service scope `sts`; session credentials (L3SA-prefixed AK/SK/token, TTL 900–43200s) inherit the **caller's** policy (no role catalog — a session can never exceed the identity that minted it); in-memory single-instance, sessions cannot assume again |
 | List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner; V1 honours only marker, V2 only continuation-token and start-after |
-| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder` |
+| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated; both accept encoding-type, and uploads accepts arbitrary delimiters); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder`; per-part checksums persist with the part records, complete computes the composite (`-N`) checksum from **verified** stored values (COMPOSITE; CRC64NVME/explicit FULL_OBJECT → 501) and cross-checks any Checksum* claims in the XML (mismatch → BadDigest) |
 
 Static website hosting **is supported** (docs/static-website.md): per-bucket
 anonymous GET/HEAD object reads, index/error documents, the root-only
 `?website` configuration API, and `x-amz-website-redirect-location`.
 
 Explicitly unsupported (returns `NotImplemented`): versioning, fine-grained ACL
-(only private is accepted), policy, lifecycle, tagging, SSE-C/KMS,
-Object Lock, storage-class (only STANDARD is accepted), presigned POST (query
-signing for presigned GET/PUT **is supported**, see §3.4). The rejection
-surface covers both query subresources (inverted whitelist; anything off-list →
-501) and **request headers** (`x-amz-server-side-encryption*` /
-`x-amz-tagging` / `x-amz-object-lock-*` / `x-amz-grant-*` etc. → 501 when
-present, no longer silently swallowed with a 200).
+(only private is accepted), bucket policy, lifecycle transitions/tag filters,
+SSE-C/KMS, Object Lock, storage-class (only STANDARD is accepted), presigned
+POST (query signing for presigned GET/PUT **is supported**, see §3.4). The
+rejection surface covers both query subresources (inverted whitelist; anything
+off-list → 501) and **request headers** (`x-amz-server-side-encryption*` /
+`x-amz-object-lock-*` / `x-amz-grant-*` etc. → 501 when present, no longer
+silently swallowed with a 200). PutObject/UploadPart without
+Content-Length/Transfer-Encoding → 411 `MissingContentLength`; `list-type=3` →
+`InvalidArgument`.
 
 ## 2. Routing and Addressing
 

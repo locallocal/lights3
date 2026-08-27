@@ -8,6 +8,7 @@
 
 #include "core/log.h"
 #include "core/util/hex.h"
+#include "core/util/uri.h"
 #include "s3/auth/credential_store.h"
 #include "s3/checksum_guard.h"
 #include "s3/errors.h"
@@ -114,7 +115,7 @@ private:
 // Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",
-    "lifecycle",   "tagging",      "cors",           "encryption",     "object-lock",
+    "encryption",  "object-lock",
     "legal-hold",  "retention",    "torrent",        "replication",    "logging",
     "notification", "requestPayment", "accelerate",  "analytics",      "inventory",
     "intelligent-tiering", "metrics", "ownershipControls", "publicAccessBlock",
@@ -139,11 +140,8 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         "x-amz-object-lock-",                        // mode / retain-until-date / legal-hold
         "x-amz-grant-",                              // the five ACL grant headers, same class as x-amz-acl
     };
-    // x-amz-website-redirect-location left this list with docs/static-website.md phase ③:
-    // it is now a first-class metadata field (kStdMetaFields)
-    constexpr std::string_view kExact[] = {
-        "x-amz-tagging",
-    };
+    // x-amz-website-redirect-location left this list with docs/static-website.md phase ③,
+    // x-amz-tagging with roadmap §2.5: both are first-class metadata fields now
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
         lk.reserve(k.size());
@@ -166,29 +164,17 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         }
         for (auto p : kPrefixes)
             if (lk.rfind(p, 0) == 0) refuse();
-        for (auto e : kExact)
-            if (lk == e) refuse();
     }
-}
-
-// STS temporary credentials (roadmap §1.3; real STS support is §2.8): the token used
-// to be silently dropped on both sides — the query key sat in kCommonQueryKeys, the
-// header in no reject list — so an SDK holding STS credentials sailed through to the
-// permanent-key lookup and got a misleading InvalidAccessKeyId. Refuse before verify:
-// 501 is at least honest about the capability gap
-void reject_sts_token(const http::HttpRequest& req) {
-    if (req.query_has("X-Amz-Security-Token") || req.headers.has("x-amz-security-token"))
-        throw S3Error(S3ErrorCode::NotImplemented,
-                      "STS temporary credentials (X-Amz-Security-Token) are not implemented.");
 }
 
 // Query allowlist (docs/archive/gaps.md §3.5): keys permitted on all routes -- the presigned signature parameter
 // family + SDK tracing parameters. Keys are case-sensitive (consistent with the SigV4 canonical query).
-// X-Amz-Security-Token is deliberately absent: STS is rejected up front by reject_sts_token
+// X-Amz-Security-Token joined the list with real STS support (roadmap §2.6): presigned
+// URLs minted from session credentials carry it, and verify validates it
 constexpr std::string_view kCommonQueryKeys[] = {
     "X-Amz-Algorithm",     "X-Amz-Credential", "X-Amz-Date",
     "X-Amz-Expires",       "X-Amz-Signature",  "X-Amz-SignedHeaders",
-    "X-Amz-Content-Sha256",
+    "X-Amz-Content-Sha256", "X-Amz-Security-Token",
     "x-id",  // tracing parameter aws-sdk-js v3 attaches to every operation, no semantics
 };
 
@@ -282,6 +268,105 @@ std::string html_escape(const std::string& s) {
 }
 }  // namespace
 
+// ---- Website redirects (roadmap §2.3: RedirectAllRequestsTo / RoutingRules / slash) ----
+
+namespace {
+
+// Scheme can only be relayed by a reverse proxy (same reasoning as request_base_url in
+// multipart.cc): direct connections are plaintext HTTP here
+std::string req_scheme(const http::HttpRequest& req) {
+    if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) return *p;
+    return "http";
+}
+
+http::HttpResponse redirect_response(int status, std::string location) {
+    http::HttpResponse r;
+    r.status = status;
+    r.headers.set("Location", std::move(location));
+    return r;
+}
+
+// Location for a website redirect target. Empty host+protocol stays on this gateway as
+// a relative path (bucket prefix added under path-style addressing); anything else
+// becomes an absolute URL. The key is percent-encoded — it flows into a header
+std::string website_location(const http::HttpRequest& req, const std::string& bucket,
+                             bool vhost, const std::string& protocol, const std::string& host,
+                             const std::string& key) {
+    std::string path = "/" + util::aws_uri_encode(key, /*encode_slash=*/false);
+    if (host.empty() && protocol.empty()) {
+        return vhost ? path : "/" + bucket + path;
+    }
+    std::string h = host.empty() ? req.headers.get("Host").value_or("") : host;
+    std::string p = protocol.empty() ? req_scheme(req) : protocol;
+    // Redirecting back to this gateway keeps its own addressing style; an external
+    // host is addressed at its root
+    if (host.empty() && !vhost) path = "/" + bucket + path;
+    return p + "://" + h + path;
+}
+
+// error_status == 0 selects the pre-request phase (rules without an error-code
+// condition); a non-zero status selects error-phase rules with that exact code.
+// First match wins (AWS evaluates rules in order)
+const WebsiteRoutingRule* match_routing_rule(const std::vector<WebsiteRoutingRule>& rules,
+                                             const std::string& key, int error_status) {
+    for (auto& r : rules) {
+        if (r.http_error_code_equals != error_status) continue;
+        if (!r.key_prefix_equals.empty() && key.rfind(r.key_prefix_equals, 0) != 0) continue;
+        return &r;
+    }
+    return nullptr;
+}
+
+http::HttpResponse routing_redirect(const http::HttpRequest& req,
+                                    const WebsiteRoutingRule& rule, const std::string& key,
+                                    const std::string& bucket, bool vhost) {
+    std::string new_key = key;
+    if (rule.replace_key_with) {
+        new_key = *rule.replace_key_with;
+    } else if (rule.replace_key_prefix_with) {
+        // substr is safe: the rule matched, so key starts with the condition prefix
+        new_key = *rule.replace_key_prefix_with + key.substr(rule.key_prefix_equals.size());
+    }
+    return redirect_response(
+        rule.http_redirect_code,
+        website_location(req, bucket, vhost, rule.protocol, rule.host_name, new_key));
+}
+
+// Pre-request redirects, evaluated on the ORIGINAL key before the index rewrite:
+// RedirectAllRequestsTo first (exclusive with everything else by construction), then
+// prefix-only routing rules. nullopt = proceed with the normal read
+std::optional<http::HttpResponse> website_redirect_response(const http::HttpRequest& req,
+                                                            const WebsiteBucket& site,
+                                                            const std::string& key,
+                                                            const std::string& bucket,
+                                                            bool vhost) {
+    if (!site.redirect_all_host.empty())
+        return redirect_response(301,
+                                 website_location(req, bucket, vhost, site.redirect_all_protocol,
+                                                  site.redirect_all_host, key));
+    if (const auto* r = match_routing_rule(site.routing_rules, key, 0))
+        return routing_redirect(req, *r, key, bucket, vhost);
+    return std::nullopt;
+}
+
+}  // namespace
+
+bool S3Service::website_rate_admit(const std::string& bucket, uint32_t rps) {
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard lk(rate_mu_);
+    auto& b = rate_[bucket];
+    if (b.last.time_since_epoch().count() == 0) {
+        b.tokens = rps;  // fresh bucket starts full (burst = rps)
+    } else {
+        b.tokens = std::min<double>(
+            rps, b.tokens + std::chrono::duration<double>(now - b.last).count() * rps);
+    }
+    b.last = now;
+    if (b.tokens < 1.0) return false;
+    b.tokens -= 1.0;
+    return true;
+}
+
 // Anonymous website errors keep the ORIGINAL status code while serving the configured
 // error object as the body (a 404 that answered 200 would poison caches and mislead
 // crawlers). A missing/unreadable error object falls back to the built-in page — the
@@ -361,12 +446,17 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     WebsiteStore::Snapshot web_snap;
     const WebsiteBucket* anon_site = nullptr;
     std::optional<S3Error> website_err;
+    // Original (pre-index-rewrite) key + addressing style, kept for the redirect
+    // evaluation in the error path below (addr itself lives inside the try block)
+    std::string anon_orig_key;
+    bool vhost = false;
     try {
         // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path is
         // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
         // GET into anonymous metrics and a PUT into "200 but the object was never written" silent data loss.
         // Only the /-/ prefix under path addressing (non-vhost) enters the internal branch
         auto addr = resolve_address(req);
+        vhost = addr.vhost;
         bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
         // Read endpoints accept only GET/HEAD (probes commonly use HEAD); previously PUT /-/metrics also returned 200
         auto internal_get = [&](std::string_view ep) {
@@ -390,6 +480,22 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                 req.path.rfind("/-/admin/credentials/", 0) == 0)) {
             // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
             resp = co_await admin_credentials(req, access_key);
+        } else if (!addr.vhost && req.path == "/" && req.method == "POST") {
+            // STS AssumeRole (roadmap §2.6): SDKs pointed at this gateway as their STS
+            // endpoint POST a form body to the service root. Path-style only — under
+            // vhost addressing "/" is a bucket root and stays on the S3 plane. The
+            // handler does its own verification (service scope "sts") and renders
+            // errors in the STS XML shape
+            resp = co_await sts_endpoint(req, ctx, access_key);
+        } else if (req.method == "OPTIONS") {
+            // CORS preflight (roadmap §2.1): decided before signature verification —
+            // browsers attach no signature material to preflights; the preflighted
+            // request itself is verified as usual when it arrives. The handler answers
+            // purely from the rule table (no object access), so nothing is disclosed
+            // beyond "this origin/method pair is allowed"
+            bucket = addr.bucket;
+            if (!bucket.empty()) storage::validate_bucket_name(bucket);
+            resp = co_await cors_preflight(req, bucket);
         } else {
             // Static website hosting phase 1 (docs/static-website.md): requests with no
             // signature material may read objects from explicitly listed website buckets
@@ -397,9 +503,6 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // header as AccessDenied; when auth is globally disabled verify() admits
             // everything anyway and the anonymous branch changes nothing (the synthesized
             // read-only policy would only be stricter than "unrestricted")
-            // Must run before verify: past it, an unknown (temporary) access key turns
-            // into InvalidAccessKeyId and the real cause is hidden (roadmap §1.3)
-            reject_sts_token(req);
             if (website_store_) web_snap = website_store_->snapshot();
             bool anon = auth_.enabled() && anonymous_website_read(req, addr, web_snap);
             // Authorization uses the verify-time policy snapshot (docs/archive/gaps.md §3.7): with a second store lookup
@@ -427,8 +530,25 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // rules close both entrances at once, and reserved names (.sys) are only available to callers with
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
+            // Set when the anonymous plane answered with a redirect before any object
+            // access (RedirectAllRequestsTo / prefix RoutingRules, roadmap §2.3):
+            // routing and policy are skipped entirely
+            std::optional<http::HttpResponse> early;
             if (anon) {
-                anon_site = WebsiteStore::find(web_snap, bucket);
+                const WebsiteBucket* site = WebsiteStore::find(web_snap, bucket);
+                // Per-bucket anonymous rate limit (roadmap §2.3): decided before
+                // anon_site is set, so the rejection stays a cheap XML 503 — serving
+                // the error document would spend the very backend read the limiter
+                // exists to protect
+                if (site->max_rps && !website_rate_admit(bucket, site->max_rps))
+                    throw S3Error(S3ErrorCode::SlowDown, "Please reduce your request rate.");
+                anon_site = site;
+                anon_orig_key = key;
+                // RedirectAllRequestsTo + prefix-only RoutingRules: evaluated on the
+                // original key, before the index rewrite and before any object access
+                if (auto redirect = website_redirect_response(req, *site, key, bucket, vhost)) {
+                    early = std::move(*redirect);
+                } else {
                 // Index document (docs/static-website.md phase ②): an empty key (bucket
                 // root, with or without trailing slash) or a directory-style key
                 // ("docs/") maps to the index object. Rewriting before the route gate
@@ -456,7 +576,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 p.buckets = {bucket};
                 p.readonly = true;
                 ident.policy = std::move(p);
+                }
             }
+            if (early) {
+                resp = std::move(*early);
+            } else {
             // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
             // route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
             // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
@@ -510,6 +634,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     resp = std::move(redirect);
                 }
             }
+            }  // !early
         }
     } catch (const OperationCancelled&) {
         // Timeout/disconnect/shutdown: 503 lets SDKs retry. Blocking syscalls already running on pool threads are
@@ -539,7 +664,40 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // Anonymous website errors render as the site's error page (original status kept,
     // XML only for signed requests). Fetched here because catch blocks cannot co_await;
     // the cancelled path above intentionally stays XML -- 503/SlowDown is retry signaling
-    if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
+    if (website_err) {
+        // Error-phase RoutingRules first (roadmap §2.3): explicit configuration wins
+        // over both the slash redirect and the error document
+        if (const auto* r = match_routing_rule(anon_site->routing_rules, anon_orig_key,
+                                               http_status(website_err->code))) {
+            resp = routing_redirect(req, *r, anon_orig_key, bucket, vhost);
+            website_err.reset();
+        } else if (website_err->code == S3ErrorCode::NoSuchKey && !anon_orig_key.empty() &&
+                   anon_orig_key.back() != '/') {
+            // AWS website-endpoint behavior (roadmap §2.3): GET /prefix without the
+            // trailing slash 302-redirects to /prefix/ when the directory-style index
+            // object exists — the most common felt difference from AWS for real sites
+            bool have_index = false;
+            try {
+                co_await router_.resolve(bucket).head_object(
+                    bucket, anon_orig_key + "/" + anon_site->index_suffix);
+                have_index = true;
+            } catch (const std::exception&) {
+                // any failure (NoSuchKey included) keeps the original error
+            }
+            if (have_index) {
+                std::string loc = (vhost ? "/" : "/" + bucket + "/") +
+                                  util::aws_uri_encode(anon_orig_key, /*encode_slash=*/false) +
+                                  "/";
+                resp = redirect_response(302, std::move(loc));
+                website_err.reset();
+            }
+        }
+        if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
+    }
+    // CORS actual-request headers (roadmap §2.1): injected on success and error alike —
+    // the browser needs Allow-Origin to surface either response to the page. Preflight
+    // (OPTIONS) builds its own full header set in the handler
+    if (req.method != "OPTIONS") apply_cors_headers(req, bucket, resp);
     // per-bucket request distribution and outbound bytes (docs/archive/gaps.md §7). Streaming response bytes are pulled
     // by the driver after dispatch returns and counted via the decorator; small responses have a known length by now
     metrics_.record_bucket_request(bucket);
@@ -624,6 +782,44 @@ std::span<const S3Service::Route> S3Service::route_table() {
         const RequestAuth& auth) {
          return s.delete_bucket_website(std::move(b), auth);
      }},
+    // ?lifecycle subresource (roadmap §2.4, root credential only, same model as ?website)
+    {"GET", Scope::Bucket, "lifecycle", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.get_bucket_lifecycle(std::move(b), auth);
+     }},
+    {"PUT", Scope::Bucket, "lifecycle", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.put_bucket_lifecycle(req, std::move(b), auth);
+     }},
+    {"DELETE", Scope::Bucket, "lifecycle", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.delete_bucket_lifecycle(std::move(b), auth);
+     }},
+    // ?cors subresource (roadmap §2.1, root credential only, same model as ?website)
+    {"GET", Scope::Bucket, "cors", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.get_bucket_cors(std::move(b), auth);
+     }},
+    {"PUT", Scope::Bucket, "cors", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.put_bucket_cors(req, std::move(b), auth);
+     }},
+    {"DELETE", Scope::Bucket, "cors", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.delete_bucket_cors(std::move(b), auth);
+     }},
     // All five parameters now take effect (docs/archive/gaps.md §5.1): previously pagination parameters were "allowed
     // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
     {"GET", Scope::Bucket, "uploads",
@@ -668,6 +864,26 @@ std::span<const S3Service::Route> S3Service::route_table() {
          return s.delete_objects(req, std::move(b), auth);
      }},
 
+    // ?tagging subresource (roadmap §2.5)
+    {"GET", Scope::Object, "tagging", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
+        const RequestAuth&) {
+         return s.get_object_tagging(std::move(b), std::move(k));
+     }},
+    {"PUT", Scope::Object, "tagging", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
+         return s.put_object_tagging(req, std::move(b), std::move(k));
+     }},
+    {"DELETE", Scope::Object, "tagging", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
+        const RequestAuth&) {
+         return s.delete_object_tagging(std::move(b), std::move(k));
+     }},
+
     // Object level: multipart
     {"POST", Scope::Object, "uploads", "",
      Action::Write,
@@ -687,7 +903,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
         const RequestAuth&) {
          return s.upload_part(req, std::move(b), std::move(k));
      }},
-    {"GET", Scope::Object, "uploadId", "max-parts part-number-marker",
+    {"GET", Scope::Object, "uploadId", "max-parts part-number-marker encoding-type",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
@@ -710,9 +926,12 @@ std::span<const S3Service::Route> S3Service::route_table() {
          return s.put_object(req, std::move(b), std::move(k));
      }},
     // response-* override parameters (docs/archive/gaps.md §5.3): the family most used in presigned download links
+    // partNumber (roadmap §2.5): reads one part of a completed multipart object; ranges
+    // resolve from the part_sizes layout recorded at complete
     {"GET", Scope::Object, "",
      "response-content-type response-content-language response-expires "
-     "response-cache-control response-content-disposition response-content-encoding",
+     "response-cache-control response-content-disposition response-content-encoding "
+     "partNumber",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
@@ -720,7 +939,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
      }},
     {"HEAD", Scope::Object, "",
      "response-content-type response-content-language response-expires "
-     "response-cache-control response-content-disposition response-content-encoding",
+     "response-cache-control response-content-disposition response-content-encoding "
+     "partNumber",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {

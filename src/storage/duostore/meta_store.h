@@ -43,6 +43,9 @@ struct PartRec {
     std::string etag;  // MD5 of the part content (unquoted hex)
     int64_t modified_ms = 0;
     DataRef data;
+    // Verified part checksum (roadmap §2.2), codec part-record v2; empty = none
+    std::string checksum_algorithm;
+    std::string checksum_value;  // base64
 };
 
 // gcq entry source (docs/archive/gaps.md §6.1): only with per-source bucketed counters can

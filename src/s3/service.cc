@@ -8,6 +8,7 @@
 
 #include "core/log.h"
 #include "core/util/hex.h"
+#include "core/util/uri.h"
 #include "s3/auth/credential_store.h"
 #include "s3/checksum_guard.h"
 #include "s3/errors.h"
@@ -282,6 +283,105 @@ std::string html_escape(const std::string& s) {
 }
 }  // namespace
 
+// ---- Website redirects (roadmap §2.3: RedirectAllRequestsTo / RoutingRules / slash) ----
+
+namespace {
+
+// Scheme can only be relayed by a reverse proxy (same reasoning as request_base_url in
+// multipart.cc): direct connections are plaintext HTTP here
+std::string req_scheme(const http::HttpRequest& req) {
+    if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) return *p;
+    return "http";
+}
+
+http::HttpResponse redirect_response(int status, std::string location) {
+    http::HttpResponse r;
+    r.status = status;
+    r.headers.set("Location", std::move(location));
+    return r;
+}
+
+// Location for a website redirect target. Empty host+protocol stays on this gateway as
+// a relative path (bucket prefix added under path-style addressing); anything else
+// becomes an absolute URL. The key is percent-encoded — it flows into a header
+std::string website_location(const http::HttpRequest& req, const std::string& bucket,
+                             bool vhost, const std::string& protocol, const std::string& host,
+                             const std::string& key) {
+    std::string path = "/" + util::aws_uri_encode(key, /*encode_slash=*/false);
+    if (host.empty() && protocol.empty()) {
+        return vhost ? path : "/" + bucket + path;
+    }
+    std::string h = host.empty() ? req.headers.get("Host").value_or("") : host;
+    std::string p = protocol.empty() ? req_scheme(req) : protocol;
+    // Redirecting back to this gateway keeps its own addressing style; an external
+    // host is addressed at its root
+    if (host.empty() && !vhost) path = "/" + bucket + path;
+    return p + "://" + h + path;
+}
+
+// error_status == 0 selects the pre-request phase (rules without an error-code
+// condition); a non-zero status selects error-phase rules with that exact code.
+// First match wins (AWS evaluates rules in order)
+const WebsiteRoutingRule* match_routing_rule(const std::vector<WebsiteRoutingRule>& rules,
+                                             const std::string& key, int error_status) {
+    for (auto& r : rules) {
+        if (r.http_error_code_equals != error_status) continue;
+        if (!r.key_prefix_equals.empty() && key.rfind(r.key_prefix_equals, 0) != 0) continue;
+        return &r;
+    }
+    return nullptr;
+}
+
+http::HttpResponse routing_redirect(const http::HttpRequest& req,
+                                    const WebsiteRoutingRule& rule, const std::string& key,
+                                    const std::string& bucket, bool vhost) {
+    std::string new_key = key;
+    if (rule.replace_key_with) {
+        new_key = *rule.replace_key_with;
+    } else if (rule.replace_key_prefix_with) {
+        // substr is safe: the rule matched, so key starts with the condition prefix
+        new_key = *rule.replace_key_prefix_with + key.substr(rule.key_prefix_equals.size());
+    }
+    return redirect_response(
+        rule.http_redirect_code,
+        website_location(req, bucket, vhost, rule.protocol, rule.host_name, new_key));
+}
+
+// Pre-request redirects, evaluated on the ORIGINAL key before the index rewrite:
+// RedirectAllRequestsTo first (exclusive with everything else by construction), then
+// prefix-only routing rules. nullopt = proceed with the normal read
+std::optional<http::HttpResponse> website_redirect_response(const http::HttpRequest& req,
+                                                            const WebsiteBucket& site,
+                                                            const std::string& key,
+                                                            const std::string& bucket,
+                                                            bool vhost) {
+    if (!site.redirect_all_host.empty())
+        return redirect_response(301,
+                                 website_location(req, bucket, vhost, site.redirect_all_protocol,
+                                                  site.redirect_all_host, key));
+    if (const auto* r = match_routing_rule(site.routing_rules, key, 0))
+        return routing_redirect(req, *r, key, bucket, vhost);
+    return std::nullopt;
+}
+
+}  // namespace
+
+bool S3Service::website_rate_admit(const std::string& bucket, uint32_t rps) {
+    auto now = std::chrono::steady_clock::now();
+    std::lock_guard lk(rate_mu_);
+    auto& b = rate_[bucket];
+    if (b.last.time_since_epoch().count() == 0) {
+        b.tokens = rps;  // fresh bucket starts full (burst = rps)
+    } else {
+        b.tokens = std::min<double>(
+            rps, b.tokens + std::chrono::duration<double>(now - b.last).count() * rps);
+    }
+    b.last = now;
+    if (b.tokens < 1.0) return false;
+    b.tokens -= 1.0;
+    return true;
+}
+
 // Anonymous website errors keep the ORIGINAL status code while serving the configured
 // error object as the body (a 404 that answered 200 would poison caches and mislead
 // crawlers). A missing/unreadable error object falls back to the built-in page — the
@@ -361,12 +461,17 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     WebsiteStore::Snapshot web_snap;
     const WebsiteBucket* anon_site = nullptr;
     std::optional<S3Error> website_err;
+    // Original (pre-index-rewrite) key + addressing style, kept for the redirect
+    // evaluation in the error path below (addr itself lives inside the try block)
+    std::string anon_orig_key;
+    bool vhost = false;
     try {
         // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path is
         // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
         // GET into anonymous metrics and a PUT into "200 but the object was never written" silent data loss.
         // Only the /-/ prefix under path addressing (non-vhost) enters the internal branch
         auto addr = resolve_address(req);
+        vhost = addr.vhost;
         bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
         // Read endpoints accept only GET/HEAD (probes commonly use HEAD); previously PUT /-/metrics also returned 200
         auto internal_get = [&](std::string_view ep) {
@@ -436,8 +541,25 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // rules close both entrances at once, and reserved names (.sys) are only available to callers with
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
+            // Set when the anonymous plane answered with a redirect before any object
+            // access (RedirectAllRequestsTo / prefix RoutingRules, roadmap §2.3):
+            // routing and policy are skipped entirely
+            std::optional<http::HttpResponse> early;
             if (anon) {
-                anon_site = WebsiteStore::find(web_snap, bucket);
+                const WebsiteBucket* site = WebsiteStore::find(web_snap, bucket);
+                // Per-bucket anonymous rate limit (roadmap §2.3): decided before
+                // anon_site is set, so the rejection stays a cheap XML 503 — serving
+                // the error document would spend the very backend read the limiter
+                // exists to protect
+                if (site->max_rps && !website_rate_admit(bucket, site->max_rps))
+                    throw S3Error(S3ErrorCode::SlowDown, "Please reduce your request rate.");
+                anon_site = site;
+                anon_orig_key = key;
+                // RedirectAllRequestsTo + prefix-only RoutingRules: evaluated on the
+                // original key, before the index rewrite and before any object access
+                if (auto redirect = website_redirect_response(req, *site, key, bucket, vhost)) {
+                    early = std::move(*redirect);
+                } else {
                 // Index document (docs/static-website.md phase ②): an empty key (bucket
                 // root, with or without trailing slash) or a directory-style key
                 // ("docs/") maps to the index object. Rewriting before the route gate
@@ -465,7 +587,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 p.buckets = {bucket};
                 p.readonly = true;
                 ident.policy = std::move(p);
+                }
             }
+            if (early) {
+                resp = std::move(*early);
+            } else {
             // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
             // route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
             // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
@@ -519,6 +645,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     resp = std::move(redirect);
                 }
             }
+            }  // !early
         }
     } catch (const OperationCancelled&) {
         // Timeout/disconnect/shutdown: 503 lets SDKs retry. Blocking syscalls already running on pool threads are
@@ -548,7 +675,36 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // Anonymous website errors render as the site's error page (original status kept,
     // XML only for signed requests). Fetched here because catch blocks cannot co_await;
     // the cancelled path above intentionally stays XML -- 503/SlowDown is retry signaling
-    if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
+    if (website_err) {
+        // Error-phase RoutingRules first (roadmap §2.3): explicit configuration wins
+        // over both the slash redirect and the error document
+        if (const auto* r = match_routing_rule(anon_site->routing_rules, anon_orig_key,
+                                               http_status(website_err->code))) {
+            resp = routing_redirect(req, *r, anon_orig_key, bucket, vhost);
+            website_err.reset();
+        } else if (website_err->code == S3ErrorCode::NoSuchKey && !anon_orig_key.empty() &&
+                   anon_orig_key.back() != '/') {
+            // AWS website-endpoint behavior (roadmap §2.3): GET /prefix without the
+            // trailing slash 302-redirects to /prefix/ when the directory-style index
+            // object exists — the most common felt difference from AWS for real sites
+            bool have_index = false;
+            try {
+                co_await router_.resolve(bucket).head_object(
+                    bucket, anon_orig_key + "/" + anon_site->index_suffix);
+                have_index = true;
+            } catch (const std::exception&) {
+                // any failure (NoSuchKey included) keeps the original error
+            }
+            if (have_index) {
+                std::string loc = (vhost ? "/" : "/" + bucket + "/") +
+                                  util::aws_uri_encode(anon_orig_key, /*encode_slash=*/false) +
+                                  "/";
+                resp = redirect_response(302, std::move(loc));
+                website_err.reset();
+            }
+        }
+        if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
+    }
     // CORS actual-request headers (roadmap §2.1): injected on success and error alike —
     // the browser needs Allow-Origin to surface either response to the page. Preflight
     // (OPTIONS) builds its own full header set in the handler

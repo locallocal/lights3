@@ -398,6 +398,22 @@ Config Config::from_string(const std::string& text) {
             // slash here would make the error object silently unreachable
             if (!wb.error_key.empty() && wb.error_key.front() == '/')
                 throw std::runtime_error("config: website error_key must not start with '/'");
+            // RedirectAllRequestsTo (roadmap §2.3): host enables it, protocol optional.
+            // A protocol without a host is a half-configured redirect — reject rather
+            // than silently ignoring it
+            wb.redirect_all_host = w.get("redirect_all_host");
+            wb.redirect_all_protocol = w.get("redirect_all_protocol");
+            if (!wb.redirect_all_protocol.empty() && wb.redirect_all_protocol != "http" &&
+                wb.redirect_all_protocol != "https")
+                throw std::runtime_error(
+                    "config: website redirect_all_protocol must be http or https");
+            if (!wb.redirect_all_protocol.empty() && wb.redirect_all_host.empty())
+                throw std::runtime_error(
+                    "config: website redirect_all_protocol requires redirect_all_host");
+            // Anonymous rate limit (roadmap §2.3): 0 = unlimited
+            int rps = to_int("website.max_rps", w.get("max_rps"), 0);
+            check_range("website.max_rps", rps, 0, 1'000'000);
+            wb.max_rps = static_cast<uint32_t>(rps);
             // Duplicates rejected like backend names: a copy-pasted entry usually means
             // the second one was meant to be a different bucket
             for (auto& prev : cfg.website.buckets)

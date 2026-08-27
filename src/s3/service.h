@@ -4,6 +4,7 @@
 #include <chrono>
 #include <span>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -219,6 +220,10 @@ private:
     Task<http::HttpResponse> website_error_page(const S3Error& e, const WebsiteBucket& site,
                                                 bool head_only);
 
+    // Per-bucket anonymous rate limit (roadmap §2.3): token bucket, burst = rps.
+    // false = over the limit, the caller answers 503 SlowDown without touching storage
+    bool website_rate_admit(const std::string& bucket, uint32_t rps);
+
     storage::BucketRouter router_;
     SigV4Authenticator auth_;
     std::string base_domain_;
@@ -232,6 +237,15 @@ private:
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off
     std::shared_ptr<CorsStore> cors_store_;        // null = CORS off (OPTIONS -> 403)
+
+    // Anonymous website rate limiting (roadmap §2.3): one token bucket per website
+    // bucket; entries are bounded by the number of configured website buckets
+    struct RateBucket {
+        double tokens = 0;
+        std::chrono::steady_clock::time_point last{};
+    };
+    std::mutex rate_mu_;
+    std::map<std::string, RateBucket> rate_;
 
     // Short cache for /-/readyz results (anonymously reachable, and the probe issues real calls to every backend:
     // without a cache, an anonymous loop can amplify into billed/rate-limited upstream calls)

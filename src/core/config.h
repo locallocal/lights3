@@ -118,6 +118,24 @@ struct BucketRule {
 // Static website hosting (docs/static-website.md): buckets listed here accept
 // anonymous GET/HEAD object reads. Exact names only, no globs — a pattern typo
 // must not silently make extra buckets public.
+// RoutingRules entry (roadmap §2.3, AWS WebsiteConfiguration shape). Both condition
+// fields optional (both empty = matches everything); redirect fields empty = keep the
+// request's value. Managed via the ?website XML API; not exposed in YAML (static
+// sites needing rules can be created dynamically)
+struct WebsiteRoutingRule {
+    // Condition
+    std::string key_prefix_equals;
+    int http_error_code_equals = 0;  // 0 = unset; else matched against the error status
+    // Redirect
+    std::string protocol;                                // "http"/"https"; "" = request scheme
+    std::string host_name;                               // "" = this gateway
+    std::optional<std::string> replace_key_prefix_with;  // exclusive with replace_key_with
+    std::optional<std::string> replace_key_with;
+    int http_redirect_code = 301;
+
+    bool operator==(const WebsiteRoutingRule&) const = default;
+};
+
 struct WebsiteBucket {
     std::string bucket;
     // Appended when the anonymous key is empty or ends with '/' (phase ②). Must not
@@ -126,6 +144,18 @@ struct WebsiteBucket {
     // Object served as the body of anonymous 4xx/5xx responses, keeping the original
     // status code; empty = built-in minimal HTML page
     std::string error_key;
+    // RedirectAllRequestsTo (roadmap §2.3): every anonymous request answers 301 to
+    // <protocol>://<host><path>; exclusive with index/error/rules (AWS shape).
+    // Non-empty host enables it; empty protocol follows the request scheme
+    std::string redirect_all_host;
+    std::string redirect_all_protocol;
+    std::vector<WebsiteRoutingRule> routing_rules;
+    // Anonymous request rate limit, requests/second (roadmap §2.3: anonymous GET has
+    // no signature cost — a public bucket is otherwise a free bandwidth amplifier).
+    // 0 = unlimited. YAML/JSON only; the AWS XML shape has no such field
+    uint32_t max_rps = 0;
+
+    bool operator==(const WebsiteBucket&) const = default;
 };
 
 struct WebsiteConfig {

@@ -14,17 +14,51 @@ namespace lights3::s3 {
 
 namespace {
 
-// AWS XML shape: <WebsiteConfiguration><IndexDocument><Suffix>…</Suffix></IndexDocument>
-// [<ErrorDocument><Key>…</Key></ErrorDocument>]</WebsiteConfiguration>
+// AWS XML shape: <WebsiteConfiguration> with either <RedirectAllRequestsTo> alone, or
+// <IndexDocument> [+ <ErrorDocument>] [+ <RoutingRules>] (roadmap §2.3)
 std::string website_xml(const WebsiteBucket& w) {
     XmlWriter x;
     x.open("WebsiteConfiguration", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
+    if (!w.redirect_all_host.empty()) {
+        x.open("RedirectAllRequestsTo");
+        x.element("HostName", w.redirect_all_host);
+        if (!w.redirect_all_protocol.empty()) x.element("Protocol", w.redirect_all_protocol);
+        x.close();
+        x.close();
+        return x.str();
+    }
     x.open("IndexDocument");
     x.element("Suffix", w.index_suffix);
     x.close();
     if (!w.error_key.empty()) {
         x.open("ErrorDocument");
         x.element("Key", w.error_key);
+        x.close();
+    }
+    if (!w.routing_rules.empty()) {
+        x.open("RoutingRules");
+        for (auto& r : w.routing_rules) {
+            x.open("RoutingRule");
+            if (!r.key_prefix_equals.empty() || r.http_error_code_equals) {
+                x.open("Condition");
+                if (!r.key_prefix_equals.empty())
+                    x.element("KeyPrefixEquals", r.key_prefix_equals);
+                if (r.http_error_code_equals)
+                    x.element("HttpErrorCodeReturnedEquals",
+                              static_cast<uint64_t>(r.http_error_code_equals));
+                x.close();
+            }
+            x.open("Redirect");
+            if (!r.protocol.empty()) x.element("Protocol", r.protocol);
+            if (!r.host_name.empty()) x.element("HostName", r.host_name);
+            if (r.replace_key_prefix_with)
+                x.element("ReplaceKeyPrefixWith", *r.replace_key_prefix_with);
+            if (r.replace_key_with) x.element("ReplaceKeyWith", *r.replace_key_with);
+            if (r.http_redirect_code != 301)
+                x.element("HttpRedirectCode", static_cast<uint64_t>(r.http_redirect_code));
+            x.close();
+            x.close();
+        }
         x.close();
     }
     x.close();
@@ -39,13 +73,27 @@ WebsiteBucket parse_website_xml(const std::string& body, std::string bucket) {
         throw S3Error(S3ErrorCode::MalformedXML,
                       "The XML you provided was not well-formed or did not validate "
                       "against our published schema.");
-    // Silently accepting these would break the site's routing expectations — refuse
-    // loudly (same philosophy as the header/subresource 501 lists)
-    if (root.find("RoutingRules") || root.find("RedirectAllRequestsTo"))
-        throw S3Error(S3ErrorCode::NotImplemented,
-                      "RoutingRules and RedirectAllRequestsTo are not implemented.");
     WebsiteBucket w;
     w.bucket = std::move(bucket);
+    // RedirectAllRequestsTo is exclusive with everything else (AWS shape): a config
+    // carrying both has ambiguous intent and is rejected rather than half-honored
+    if (auto* ra = root.find("RedirectAllRequestsTo")) {
+        if (root.find("IndexDocument") || root.find("ErrorDocument") ||
+            root.find("RoutingRules"))
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "RedirectAllRequestsTo cannot be combined with IndexDocument, "
+                          "ErrorDocument or RoutingRules.");
+        w.redirect_all_host = ra->get("HostName");
+        if (w.redirect_all_host.empty())
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "RedirectAllRequestsTo.HostName is required.");
+        w.redirect_all_protocol = ra->get("Protocol");
+        if (!w.redirect_all_protocol.empty() && w.redirect_all_protocol != "http" &&
+            w.redirect_all_protocol != "https")
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "RedirectAllRequestsTo.Protocol must be http or https.");
+        return w;
+    }
     auto* idx = root.find("IndexDocument");
     if (!idx)
         throw S3Error(S3ErrorCode::InvalidArgument, "IndexDocument is required.");
@@ -58,6 +106,69 @@ WebsiteBucket parse_website_xml(const std::string& body, std::string bucket) {
         if (w.error_key.empty() || w.error_key.front() == '/')
             throw S3Error(S3ErrorCode::InvalidArgument,
                           "ErrorDocument.Key must be non-empty and must not start with '/'.");
+    }
+    if (auto* rules = root.find("RoutingRules")) {
+        for (auto& rr : rules->children) {
+            if (rr.name != "RoutingRule") continue;
+            if (w.routing_rules.size() >= 50)  // AWS quota
+                throw S3Error(S3ErrorCode::InvalidArgument,
+                              "RoutingRules may contain at most 50 rules.");
+            WebsiteRoutingRule r;
+            if (auto* cond = rr.find("Condition")) {
+                r.key_prefix_equals = cond->get("KeyPrefixEquals");
+                std::string code = cond->get("HttpErrorCodeReturnedEquals");
+                if (!code.empty()) {
+                    try {
+                        r.http_error_code_equals = std::stoi(code);
+                    } catch (...) {
+                        throw S3Error(S3ErrorCode::InvalidArgument,
+                                      "Invalid HttpErrorCodeReturnedEquals value.");
+                    }
+                    if (r.http_error_code_equals < 400 || r.http_error_code_equals > 599)
+                        throw S3Error(S3ErrorCode::InvalidArgument,
+                                      "HttpErrorCodeReturnedEquals must be a 4xx or 5xx "
+                                      "status code.");
+                }
+            }
+            auto* red = rr.find("Redirect");
+            if (!red)
+                throw S3Error(S3ErrorCode::InvalidArgument,
+                              "Each RoutingRule must contain a Redirect.");
+            r.protocol = red->get("Protocol");
+            if (!r.protocol.empty() && r.protocol != "http" && r.protocol != "https")
+                throw S3Error(S3ErrorCode::InvalidArgument,
+                              "Redirect.Protocol must be http or https.");
+            r.host_name = red->get("HostName");
+            if (auto* n = red->find("ReplaceKeyPrefixWith")) r.replace_key_prefix_with = n->text;
+            if (auto* n = red->find("ReplaceKeyWith")) r.replace_key_with = n->text;
+            if (r.replace_key_prefix_with && r.replace_key_with)
+                throw S3Error(S3ErrorCode::InvalidArgument,
+                              "ReplaceKeyPrefixWith and ReplaceKeyWith are mutually "
+                              "exclusive.");
+            std::string code = red->get("HttpRedirectCode");
+            if (!code.empty()) {
+                try {
+                    r.http_redirect_code = std::stoi(code);
+                } catch (...) {
+                    throw S3Error(S3ErrorCode::InvalidArgument,
+                                  "Invalid HttpRedirectCode value.");
+                }
+                if (r.http_redirect_code < 300 || r.http_redirect_code > 399)
+                    throw S3Error(S3ErrorCode::InvalidArgument,
+                                  "HttpRedirectCode must be a 3xx status code.");
+            }
+            // A Redirect with no effect at all (no host/protocol/key change) loops back
+            // to the same resource — reject the no-op
+            if (r.protocol.empty() && r.host_name.empty() && !r.replace_key_prefix_with &&
+                !r.replace_key_with)
+                throw S3Error(S3ErrorCode::InvalidArgument,
+                              "Redirect must specify at least one of Protocol, HostName, "
+                              "ReplaceKeyPrefixWith or ReplaceKeyWith.");
+            w.routing_rules.push_back(std::move(r));
+        }
+        if (w.routing_rules.empty())
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "RoutingRules must contain at least one RoutingRule.");
     }
     return w;
 }

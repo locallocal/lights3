@@ -529,13 +529,14 @@ TEST(service_bucket_website_api) {
     auto store2 = sync_wait(WebsiteStore::load(backend, {}));
     CHECK(WebsiteStore::find(store2->snapshot(), "shop") != nullptr);
 
-    // Rejections: RoutingRules → 501, bad suffix → 400, nonexistent bucket → 404
+    // Rejections: empty RoutingRules → 400 (rules are supported since roadmap §2.3,
+    // but an empty container is a malformed config), bad suffix → 400, missing bucket → 404
     const std::string routed =
         "<WebsiteConfiguration><IndexDocument><Suffix>i.html</Suffix></IndexDocument>"
         "<RoutingRules></RoutingRules></WebsiteConfiguration>";
     CHECK_EQ(
         sync_wait(svc.dispatch(signed_req("PUT", "/shop", routed, {{"website", ""}}))).status,
-        501);
+        400);
     const std::string badsfx =
         "<WebsiteConfiguration><IndexDocument><Suffix>a/b.html</Suffix></IndexDocument>"
         "</WebsiteConfiguration>";
@@ -1939,4 +1940,168 @@ TEST(service_cors_actual_request_headers) {
     CHECK(!other.headers.has("Access-Control-Allow-Origin"));
     auto del = with_origin("DELETE", "/site/o.txt", "http://other.net");  // '*' rule is HEAD-only
     CHECK(!del.headers.has("Access-Control-Allow-Origin"));
+}
+
+// ---- roadmap §2.3: website hosting finishing touches ----
+
+namespace {
+// Full-auth env with a website store (dynamic, backed by the shared memory backend)
+struct WebEnv {
+    std::shared_ptr<storage::MemoryBackend> backend = std::make_shared<storage::MemoryBackend>();
+    AuthConfig acfg = CorsEnv::root_acfg();
+    SigV4Authenticator auth = SigV4Authenticator::build(acfg);
+    std::shared_ptr<CredentialStore> cred_store;
+    std::shared_ptr<WebsiteStore> wstore;
+    std::unique_ptr<S3Service> svc;
+
+    explicit WebEnv(std::vector<WebsiteBucket> statics = {}) {
+        cred_store = sync_wait(CredentialStore::load(backend, acfg));
+        auth.set_provider(cred_store);
+        std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+        BucketsConfig bcfg;
+        bcfg.default_backend = "mem";
+        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)),
+                                          auth);
+        svc->set_credential_store(cred_store);
+        wstore = sync_wait(WebsiteStore::load(backend, std::move(statics)));
+        svc->set_website_store(wstore);
+    }
+    http::HttpResponse call(http::HttpRequest req) {
+        return sync_wait(svc->dispatch(std::move(req)));
+    }
+    http::HttpResponse signed_call(std::string method, std::string path, std::string body = "",
+                                   std::vector<std::pair<std::string, std::string>> query = {}) {
+        auto r = make_req(std::move(method), std::move(path), body, std::move(query));
+        auth.sign(r, acfg.credentials[0], body.empty() ? "" : util::sha256_hex(body));
+        return call(std::move(r));
+    }
+};
+}  // namespace
+
+TEST(service_website_slash_redirect) {
+    WebEnv env({{.bucket = "site"}});
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/site/docs/index.html", "<p>docs</p>").status, 200);
+
+    // /docs (no trailing slash, no such object, directory index exists) → 302 /site/docs/
+    auto r = env.call(make_req("GET", "/site/docs"));
+    CHECK_EQ(r.status, 302);
+    CHECK_EQ(r.headers.get("Location").value_or(""), "/site/docs/");
+    // ...and following it serves the index
+    auto idx = env.call(make_req("GET", "/site/docs/"));
+    CHECK_EQ(idx.status, 200);
+    CHECK_EQ(body_of(idx), "<p>docs</p>");
+    // No directory index behind it → the original 404 stands (built-in error page)
+    auto miss = env.call(make_req("GET", "/site/nope"));
+    CHECK_EQ(miss.status, 404);
+    // An existing object without a trailing slash is served normally, no redirect
+    CHECK_EQ(env.signed_call("PUT", "/site/plain.txt", "x").status, 200);
+    CHECK_EQ(env.call(make_req("GET", "/site/plain.txt")).status, 200);
+}
+
+TEST(service_website_redirect_all) {
+    WebEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/spa").status, 200);
+    const std::string xml =
+        "<WebsiteConfiguration><RedirectAllRequestsTo>"
+        "<HostName>app.example.org</HostName><Protocol>https</Protocol>"
+        "</RedirectAllRequestsTo></WebsiteConfiguration>";
+    CHECK_EQ(env.signed_call("PUT", "/spa", xml, {{"website", ""}}).status, 200);
+    // Round-trip
+    auto got = env.signed_call("GET", "/spa", "", {{"website", ""}});
+    CHECK(contains(got.small_body, "<HostName>app.example.org</HostName>"));
+    CHECK(contains(got.small_body, "<Protocol>https</Protocol>"));
+
+    // Every anonymous request answers 301 to the target host, key preserved
+    auto r = env.call(make_req("GET", "/spa/deep/link.html"));
+    CHECK_EQ(r.status, 301);
+    CHECK_EQ(r.headers.get("Location").value_or(""), "https://app.example.org/deep/link.html");
+    auto root = env.call(make_req("GET", "/spa/"));
+    CHECK_EQ(root.status, 301);
+    CHECK_EQ(root.headers.get("Location").value_or(""), "https://app.example.org/");
+
+    // Combining RedirectAllRequestsTo with IndexDocument is rejected
+    const std::string both =
+        "<WebsiteConfiguration><RedirectAllRequestsTo><HostName>h</HostName>"
+        "</RedirectAllRequestsTo><IndexDocument><Suffix>i.html</Suffix></IndexDocument>"
+        "</WebsiteConfiguration>";
+    CHECK_EQ(env.signed_call("PUT", "/spa", both, {{"website", ""}}).status, 400);
+}
+
+TEST(service_website_routing_rules) {
+    WebEnv env;
+    CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
+    const std::string xml =
+        "<WebsiteConfiguration>"
+        "<IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
+        "<RoutingRules>"
+        "<RoutingRule><Condition><KeyPrefixEquals>docs/</KeyPrefixEquals></Condition>"
+        "<Redirect><ReplaceKeyPrefixWith>documents/</ReplaceKeyPrefixWith></Redirect>"
+        "</RoutingRule>"
+        "<RoutingRule><Condition><KeyPrefixEquals>img/</KeyPrefixEquals>"
+        "<HttpErrorCodeReturnedEquals>404</HttpErrorCodeReturnedEquals></Condition>"
+        "<Redirect><ReplaceKeyWith>missing.png</ReplaceKeyWith>"
+        "<HttpRedirectCode>302</HttpRedirectCode></Redirect></RoutingRule>"
+        "</RoutingRules></WebsiteConfiguration>";
+    CHECK_EQ(env.signed_call("PUT", "/site", xml, {{"website", ""}}).status, 200);
+    auto got = env.signed_call("GET", "/site", "", {{"website", ""}});
+    CHECK(contains(got.small_body, "<KeyPrefixEquals>docs/</KeyPrefixEquals>"));
+    CHECK(contains(got.small_body, "<HttpRedirectCode>302</HttpRedirectCode>"));
+
+    // Prefix rule: redirected before any object access (object existence irrelevant)
+    auto pre = env.call(make_req("GET", "/site/docs/guide.html"));
+    CHECK_EQ(pre.status, 301);
+    CHECK_EQ(pre.headers.get("Location").value_or(""), "/site/documents/guide.html");
+
+    // Error rule: 404 under img/ → 302 to the fallback key; signed requests unaffected
+    auto err = env.call(make_req("GET", "/site/img/gone.png"));
+    CHECK_EQ(err.status, 302);
+    CHECK_EQ(err.headers.get("Location").value_or(""), "/site/missing.png");
+    CHECK_EQ(env.signed_call("GET", "/site/img/gone.png").status, 404);
+
+    // Unmatched error falls through to the (built-in) error page
+    CHECK_EQ(env.call(make_req("GET", "/site/other/gone")).status, 404);
+}
+
+TEST(service_website_rate_limit) {
+    WebEnv env({{.bucket = "lim", .max_rps = 2}});
+    CHECK_EQ(env.signed_call("PUT", "/lim").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/lim/f.txt", "x").status, 200);
+
+    // Burst = rps: two anonymous reads pass, the third inside the same instant is 503
+    CHECK_EQ(env.call(make_req("GET", "/lim/f.txt")).status, 200);
+    CHECK_EQ(env.call(make_req("GET", "/lim/f.txt")).status, 200);
+    auto limited = env.call(make_req("GET", "/lim/f.txt"));
+    CHECK_EQ(limited.status, 503);
+    CHECK(contains(body_of(limited), "<Code>SlowDown</Code>"));  // XML, not the error page
+
+    // Signed requests are not rate-limited (the limiter guards the anonymous plane)
+    CHECK_EQ(env.signed_call("GET", "/lim/f.txt").status, 200);
+}
+
+TEST(service_website_anon_gates) {
+    WebEnv env({{.bucket = "gate"}});
+    CHECK_EQ(env.signed_call("PUT", "/gate").status, 200);
+    CHECK_EQ(env.signed_call("PUT", "/gate/f.txt", "data").status, 200);
+
+    // Partial/malformed presigned material must go through verification, never degrade
+    // to an anonymous success
+    auto partial = env.call(make_req("GET", "/gate/f.txt", "", {{"X-Amz-Signature", "abc"}}));
+    CHECK_EQ(partial.status, 403);
+    CHECK(!contains(body_of(partial), "data"));
+
+    // Writes and deletes never ride the anonymous plane
+    CHECK_EQ(env.call(make_req("DELETE", "/gate/f.txt")).status, 403);
+    auto put = make_req("PUT", "/gate/f.txt", "evil");
+    CHECK_EQ(env.call(std::move(put)).status, 403);
+    auto still = env.call(make_req("GET", "/gate/f.txt"));
+    CHECK_EQ(body_of(still), "data");
+
+    // Query-flag routes (?uploadId is ListParts) stay authenticated-only
+    CHECK_EQ(env.call(make_req("GET", "/gate/f.txt", "", {{"uploadId", "u1"}})).status, 403);
+    // response-* overrides refused anonymously
+    CHECK_EQ(env.call(make_req("GET", "/gate/f.txt", "",
+                               {{"response-content-disposition", "attachment"}}))
+                 .status,
+             400);
 }

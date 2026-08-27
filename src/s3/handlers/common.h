@@ -117,6 +117,16 @@ inline std::pair<std::string, std::string> parse_copy_source(const std::string& 
     return {std::move(bucket), s.substr(slash + 1)};
 }
 
+// PutObject/UploadPart require a request framing that carries a body (roadmap §2.5): a PUT
+// with neither Content-Length nor Transfer-Encoding has no body per RFC 9112 §6.3 --
+// silently committing an empty object out of a client bug is data loss, 411 is the honest
+// answer (MissingContentLength was previously dead code in the error table)
+inline void require_content_length(const http::HttpRequest& req) {
+    if (!req.headers.has("Content-Length") && !req.headers.has("Transfer-Encoding"))
+        throw S3Error(S3ErrorCode::MissingContentLength,
+                      "You must provide the Content-Length HTTP header.");
+}
+
 // Read the entire request body (XML requests capped at 1MiB, docs/s3-protocol.md §4); over the cap throws MalformedXML
 inline Task<std::string> read_body(http::HttpRequest& req, size_t max_size = 1024 * 1024) {
     std::string out;

@@ -39,6 +39,9 @@ http::HttpRequest make_req(std::string method, std::string path, std::string bod
         req.raw_query += k + "=" + v;
     }
     req.headers.add("Host", "localhost");
+    // Real drivers always see Content-Length (or Transfer-Encoding) on body-bearing
+    // requests; PutObject/UploadPart reject its absence with 411 (roadmap §2.5)
+    req.headers.add("Content-Length", std::to_string(body.size()));
     if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
     return req;
 }
@@ -1675,4 +1678,84 @@ TEST(service_request_timeout_cancels_and_returns_503) {
     svc.set_request_timeout(std::chrono::seconds(0));
     auto ok = sync_wait(svc.dispatch(make_req("PUT", "/bkt/fine", "payload")));
     CHECK_EQ(ok.status, 200);
+}
+
+// ---- roadmap §2.5: low-cost protocol gaps ----
+
+TEST(service_list_type_3_rejected) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/ltbkt")));
+    // An unknown listing protocol version must not silently degrade to V1 semantics
+    auto bad = sync_wait(svc.dispatch(make_req("GET", "/ltbkt", "", {{"list-type", "3"}})));
+    CHECK_EQ(bad.status, 400);
+    CHECK(contains(body_of(bad), "<Code>InvalidArgument</Code>"));
+    auto ok = sync_wait(svc.dispatch(make_req("GET", "/ltbkt", "", {{"list-type", "2"}})));
+    CHECK_EQ(ok.status, 200);
+}
+
+TEST(service_missing_content_length_411) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/mcl")));
+
+    // PUT with neither Content-Length nor Transfer-Encoding: 411, no object committed
+    auto put = make_req("PUT", "/mcl/obj", "data");
+    put.headers.remove("Content-Length");
+    auto resp = sync_wait(svc.dispatch(std::move(put)));
+    CHECK_EQ(resp.status, 411);
+    CHECK(contains(body_of(resp), "<Code>MissingContentLength</Code>"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/mcl/obj"))).status, 404);
+
+    // Transfer-Encoding is valid body framing -- not 411
+    auto te = make_req("PUT", "/mcl/obj", "data");
+    te.headers.remove("Content-Length");
+    te.headers.add("Transfer-Encoding", "chunked");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(te))).status, 200);
+
+    // UploadPart enforces the same rule
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/mcl/mp", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    auto part = make_req("PUT", "/mcl/mp", "x", {{"partNumber", "1"}, {"uploadId", uid}});
+    part.headers.remove("Content-Length");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(part))).status, 411);
+}
+
+TEST(service_list_parts_encoding_type) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/enc")));
+    auto init =
+        sync_wait(svc.dispatch(make_req("POST", "/enc/a b/c.bin", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    sync_wait(svc.dispatch(
+        make_req("PUT", "/enc/a b/c.bin", "x", {{"partNumber", "1"}, {"uploadId", uid}})));
+
+    // encoding-type=url: Key comes back URL-encoded (slash preserved), EncodingType echoed
+    auto lp = sync_wait(svc.dispatch(
+        make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "url"}})));
+    CHECK_EQ(lp.status, 200);
+    std::string b = body_of(lp);
+    CHECK(contains(b, "<Key>a%20b/c.bin</Key>"));
+    CHECK(contains(b, "<EncodingType>url</EncodingType>"));
+
+    // Other values rejected, same as the two bucket listings
+    auto bad = sync_wait(svc.dispatch(
+        make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "xml"}})));
+    CHECK_EQ(bad.status, 400);
+}
+
+TEST(service_list_uploads_arbitrary_delimiter) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/deli")));
+    for (const char* k : {"x|1", "x|2", "y"})
+        sync_wait(svc.dispatch(make_req("POST", std::string("/deli/") + k, "", {{"uploads", ""}})));
+
+    // Non-'/' delimiters group generically (previously 501)
+    auto resp = sync_wait(
+        svc.dispatch(make_req("GET", "/deli", "", {{"uploads", ""}, {"delimiter", "|"}})));
+    CHECK_EQ(resp.status, 200);
+    std::string b = body_of(resp);
+    CHECK(contains(b, "<Prefix>x|</Prefix>"));
+    CHECK(contains(b, "<Key>y</Key>"));
+    CHECK(!contains(b, "<Key>x|1</Key>"));
 }

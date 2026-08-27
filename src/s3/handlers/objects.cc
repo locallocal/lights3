@@ -143,6 +143,7 @@ bool has_response_override(const http::HttpRequest& req) {
 
 Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket,
                                                std::string key) {
+    require_content_length(req);  // 411 (roadmap §2.5); CopyObject is body-less and exempt
     auto& backend = router_.resolve(bucket);
 
     // PUT conditional requests (docs/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is optimistic concurrency.

@@ -687,7 +687,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
         const RequestAuth&) {
          return s.upload_part(req, std::move(b), std::move(k));
      }},
-    {"GET", Scope::Object, "uploadId", "max-parts part-number-marker",
+    {"GET", Scope::Object, "uploadId", "max-parts part-number-marker encoding-type",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {

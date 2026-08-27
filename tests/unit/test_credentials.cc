@@ -70,6 +70,8 @@ struct SvcEnv {
             req.raw_query += k + (v.empty() ? "" : "=" + v);
         }
         req.headers.add("Host", "localhost");
+        // Real drivers always carry Content-Length on body-bearing requests (411 otherwise)
+        req.headers.add("Content-Length", std::to_string(body.size()));
         for (auto& [k, v] : headers) req.headers.add(k, v);
         std::string hash = util::sha256_hex(body);
         if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));

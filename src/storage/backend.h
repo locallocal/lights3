@@ -101,7 +101,7 @@ struct PutCondition {
 
 struct ListOptions {
     std::string prefix;
-    std::string delimiter;    // empty or "/"
+    std::string delimiter;    // arbitrary string ("" = no grouping); grouping is a generic substring find
     int max_keys = 1000;
     std::string start_after;  // continuation-token / start-after (a key value)
 };
@@ -155,7 +155,7 @@ struct ListPartsResult {
 
 struct ListUploadsOptions {
     std::string prefix;
-    std::string delimiter;  // empty or "/"
+    std::string delimiter;  // arbitrary string ("" = no grouping), same semantics as ListOptions
     int max_uploads = 1000;
     // (key_marker, upload_id_marker) form a composite cursor: only entries strictly greater
     // than the pair are returned. An empty upload_id_marker means "key > key_marker"

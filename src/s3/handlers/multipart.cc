@@ -173,6 +173,7 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
         co_return resp;
     }
 
+    require_content_length(req);  // 411 (roadmap §2.5); UploadPartCopy above is body-less and exempt
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
     auto result =
@@ -255,12 +256,23 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
     if (opt.part_number_marker < 0)
         throw S3Error(S3ErrorCode::InvalidArgument, "Invalid part-number-marker value");
 
+    // encoding-type=url (roadmap §2.5): SDKs occasionally pass it through; before it entered
+    // the allowlist the whole request was 501. Same semantics as the two bucket listings
+    bool encode_url = false;
+    if (auto et = req.query_get("encoding-type")) {
+        if (*et != "url")
+            throw S3Error(S3ErrorCode::InvalidArgument,
+                          "Invalid Encoding Method specified in Request");
+        encode_url = true;
+    }
+
     auto res = co_await router_.resolve(bucket).list_parts(bucket, key, upload_id, opt);
 
     XmlWriter w;
     w.open("ListPartsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
     w.element("Bucket", bucket);
-    w.element("Key", key);
+    w.element("Key", encode_url ? util::aws_uri_encode(key, /*encode_slash=*/false) : key);
+    if (encode_url) w.element("EncodingType", "url");
     w.element("UploadId", upload_id);
     w.element("StorageClass", "STANDARD");
     w.element("PartNumberMarker", static_cast<uint64_t>(opt.part_number_marker));
@@ -298,9 +310,6 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
     if (opt.key_marker.empty() && !opt.upload_id_marker.empty())
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "upload-id-marker requires key-marker to be specified.");
-    if (!opt.delimiter.empty() && opt.delimiter != "/")
-        throw S3Error(S3ErrorCode::NotImplemented,
-                      "Only '/' is supported as a delimiter.");
     // encoding-type=url: same semantics as list_objects -- previously the parameter was accepted but nothing
     // was ever encoded, a silent wrong answer
     bool encode_url = false;

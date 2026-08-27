@@ -320,10 +320,14 @@ struct IStorageBackend {
                                         std::string_view upload_id, int part_no,
                                         http::BodyReader& body,
                                         const std::optional<PartChecksum>& checksum) = 0;
+    // A coroutine, not a plain forwarder: the checksum argument must outlive the inner
+    // coroutine's suspension points, so it lives in this wrapper's frame (a temporary
+    // bound to the inner call's reference parameter would dangle)
     Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
                                 std::string_view upload_id, int part_no,
                                 http::BodyReader& body) {
-        return upload_part(bucket, key, upload_id, part_no, body, std::nullopt);
+        std::optional<PartChecksum> none;
+        co_return co_await upload_part(bucket, key, upload_id, part_no, body, none);
     }
     // parts must have strictly increasing part numbers and ETags matching the uploaded parts;
     // total ETag = md5(concatenation of each part's binary md5)-N (same rule as S3)

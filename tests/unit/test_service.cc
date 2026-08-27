@@ -2105,3 +2105,128 @@ TEST(service_website_anon_gates) {
                  .status,
              400);
 }
+
+// ---- roadmap §2.2: checksum persistence + echo ----
+
+TEST(service_checksum_persist_and_echo) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/ckb")));
+
+    // PUT with a verified header-form checksum: echoed on the PUT response and persisted
+    auto put = make_req("PUT", "/ckb/o.bin", "hello");
+    put.headers.add("x-amz-checksum-crc32", "NhCmhg==");
+    auto pr = sync_wait(svc.dispatch(std::move(put)));
+    CHECK_EQ(pr.status, 200);
+    CHECK_EQ(pr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+
+    // GET/HEAD with x-amz-checksum-mode: ENABLED echo value + type
+    auto get = make_req("GET", "/ckb/o.bin");
+    get.headers.add("x-amz-checksum-mode", "ENABLED");
+    auto gr = sync_wait(svc.dispatch(std::move(get)));
+    CHECK_EQ(gr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+    CHECK_EQ(gr.headers.get("x-amz-checksum-type").value_or(""), "FULL_OBJECT");
+    auto head = make_req("HEAD", "/ckb/o.bin");
+    head.headers.add("x-amz-checksum-mode", "enabled");  // case-insensitive
+    auto hr = sync_wait(svc.dispatch(std::move(head)));
+    CHECK_EQ(hr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+
+    // Without the mode header: no echo; ranged GET: no echo either (partial bytes)
+    auto plain = sync_wait(svc.dispatch(make_req("GET", "/ckb/o.bin")));
+    CHECK(!plain.headers.has("x-amz-checksum-crc32"));
+    auto ranged = make_req("GET", "/ckb/o.bin");
+    ranged.headers.add("x-amz-checksum-mode", "ENABLED");
+    ranged.headers.add("Range", "bytes=0-1");
+    auto rr = sync_wait(svc.dispatch(std::move(ranged)));
+    CHECK_EQ(rr.status, 206);
+    CHECK(!rr.headers.has("x-amz-checksum-crc32"));
+
+    // A checksum header that fails verification never commits (guard wiring intact)
+    auto bad = make_req("PUT", "/ckb/bad.bin", "hello");
+    bad.headers.add("x-amz-checksum-crc32", "OncRQw==");  // crc32("world")
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 400);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/ckb/bad.bin"))).status, 404);
+
+    // Two different checksum headers on one request are refused
+    auto dup = make_req("PUT", "/ckb/dup.bin", "hello");
+    dup.headers.add("x-amz-checksum-crc32", "NhCmhg==");
+    dup.headers.add("x-amz-checksum-sha256",
+                    "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(dup))).status, 400);
+
+    // Copy preserves the checksum (bytes unchanged)
+    auto cp = make_req("PUT", "/ckb/copy.bin");
+    cp.headers.add("x-amz-copy-source", "/ckb/o.bin");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(cp))).status, 200);
+    auto cg = make_req("GET", "/ckb/copy.bin");
+    cg.headers.add("x-amz-checksum-mode", "ENABLED");
+    auto cgr = sync_wait(svc.dispatch(std::move(cg)));
+    CHECK_EQ(cgr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+}
+
+TEST(service_checksum_multipart_composite) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/ckm")));
+
+    // Create declares the algorithm; CRC64NVME (full-object only) is an honest 501
+    auto init64 = make_req("POST", "/ckm/o.bin", "", {{"uploads", ""}});
+    init64.headers.add("x-amz-checksum-algorithm", "CRC64NVME");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(init64))).status, 501);
+
+    auto init = make_req("POST", "/ckm/o.bin", "", {{"uploads", ""}});
+    init.headers.add("x-amz-checksum-algorithm", "CRC32");
+    auto ir = sync_wait(svc.dispatch(std::move(init)));
+    CHECK_EQ(ir.status, 200);
+    std::string uid = xelem(body_of(ir), "UploadId");
+
+    auto up = [&](int no, std::string data, std::string ck) {
+        auto r = make_req("PUT", "/ckm/o.bin", std::move(data),
+                          {{"partNumber", std::to_string(no)}, {"uploadId", uid}});
+        r.headers.add("x-amz-checksum-crc32", ck);
+        return sync_wait(svc.dispatch(std::move(r)));
+    };
+    auto p1 = up(1, "hello", "NhCmhg==");
+    CHECK_EQ(p1.status, 200);
+    CHECK_EQ(p1.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
+    std::string etag1 = p1.headers.get("ETag").value_or("");
+    auto p2 = up(2, "world", "OncRQw==");
+    CHECK_EQ(p2.status, 200);
+    std::string etag2 = p2.headers.get("ETag").value_or("");
+
+    // ListParts reports the stored per-part checksums
+    auto lp = sync_wait(svc.dispatch(make_req("GET", "/ckm/o.bin", "", {{"uploadId", uid}})));
+    std::string lpb = body_of(lp);
+    CHECK(contains(lpb, "<ChecksumCRC32>NhCmhg==</ChecksumCRC32>"));
+    CHECK(contains(lpb, "<ChecksumCRC32>OncRQw==</ChecksumCRC32>"));
+
+    // Complete with a WRONG per-part checksum claim: BadDigest, nothing committed
+    std::string bad_xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                          etag1 + "</ETag><ChecksumCRC32>OncRQw==</ChecksumCRC32></Part>" +
+                          "<Part><PartNumber>2</PartNumber><ETag>" + etag2 +
+                          "</ETag></Part></CompleteMultipartUpload>";
+    auto bad = sync_wait(
+        svc.dispatch(make_req("POST", "/ckm/o.bin", bad_xml, {{"uploadId", uid}})));
+    CHECK_EQ(bad.status, 400);
+    CHECK(contains(body_of(bad), "BadDigest"));
+
+    // Correct complete: composite = crc32(raw1 || raw2) + "-2"
+    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                      etag1 + "</ETag><ChecksumCRC32>NhCmhg==</ChecksumCRC32></Part>" +
+                      "<Part><PartNumber>2</PartNumber><ETag>" + etag2 +
+                      "</ETag><ChecksumCRC32>OncRQw==</ChecksumCRC32></Part>"
+                      "</CompleteMultipartUpload>";
+    auto done = sync_wait(
+        svc.dispatch(make_req("POST", "/ckm/o.bin", xml, {{"uploadId", uid}})));
+    CHECK_EQ(done.status, 200);
+    std::string db = body_of(done);
+    CHECK(contains(db, "<ChecksumCRC32>wpn7tg==-2</ChecksumCRC32>"));
+    CHECK(contains(db, "<ChecksumType>COMPOSITE</ChecksumType>"));
+
+    // GET with mode echoes the composite + type, and the parts-count layout persisted
+    auto get = make_req("GET", "/ckm/o.bin");
+    get.headers.add("x-amz-checksum-mode", "ENABLED");
+    auto gr = sync_wait(svc.dispatch(std::move(get)));
+    CHECK_EQ(gr.headers.get("x-amz-checksum-crc32").value_or(""), "wpn7tg==-2");
+    CHECK_EQ(gr.headers.get("x-amz-checksum-type").value_or(""), "COMPOSITE");
+    CHECK_EQ(body_of(gr), "helloworld");
+}

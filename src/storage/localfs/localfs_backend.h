@@ -66,9 +66,10 @@ public:
     // and then takes the same atomic rename commit as PUT (docs/storage-backend.md §3.2)
     Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                        ObjectMeta meta) override;
+    using IStorageBackend::upload_part;
     Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                std::string_view upload_id, int part_no,
-                                http::BodyReader& body) override;
+                                std::string_view upload_id, int part_no, http::BodyReader& body,
+                                const std::optional<PartChecksum>& checksum) override;
     Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
                                        std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;

@@ -234,7 +234,17 @@ std::map<std::string, std::string> read_user_meta(Cursor& c) {
 // only non-empty entries are written. Made kv rather than six fixed slots so the
 // next field addition needs no version bump — unknown keys are dropped on read
 void put_std_meta(std::string& s, const ObjectMeta& m) {
-    uint16_t n = 0;
+    // Checksum closure + multipart layout (roadmap §2.2/§2.5) ride the self-describing
+    // kv section exactly as its header comment invites — no version bump needed.
+    // Trailer-form checksum values resolve from checksum_pending (body drained by now)
+    std::vector<std::pair<std::string_view, std::string>> extra;
+    if (!m.checksum_algorithm.empty())
+        extra.emplace_back("checksum_algorithm", m.checksum_algorithm);
+    if (std::string cv = resolved_checksum_value(m); !cv.empty())
+        extra.emplace_back("checksum_value", std::move(cv));
+    if (!m.checksum_type.empty()) extra.emplace_back("checksum_type", m.checksum_type);
+    if (!m.part_sizes.empty()) extra.emplace_back("part_sizes", join_part_sizes(m.part_sizes));
+    uint16_t n = uint16_t(extra.size());
     for (auto& f : kStdMetaFields)
         if (!(m.*f.field).empty()) ++n;
     put_u16(s, n);
@@ -243,6 +253,10 @@ void put_std_meta(std::string& s, const ObjectMeta& m) {
             put_str(s, f.store_key);
             put_str(s, m.*f.field);
         }
+    for (auto& [k, v] : extra) {
+        put_str(s, k);
+        put_str(s, v);
+    }
 }
 
 void read_std_meta(Cursor& c, ObjectMeta& m) {
@@ -250,8 +264,13 @@ void read_std_meta(Cursor& c, ObjectMeta& m) {
     for (uint16_t i = 0; i < n; ++i) {
         std::string k(c.str());
         std::string v(c.str());
-        for (auto& f : kStdMetaFields)
-            if (k == f.store_key) m.*f.field = std::move(v);
+        if (k == "checksum_algorithm") m.checksum_algorithm = std::move(v);
+        else if (k == "checksum_value") m.checksum_value = std::move(v);
+        else if (k == "checksum_type") m.checksum_type = std::move(v);
+        else if (k == "part_sizes") m.part_sizes = parse_part_sizes(v);
+        else
+            for (auto& f : kStdMetaFields)
+                if (k == f.store_key) m.*f.field = std::move(v);
     }
 }
 
@@ -435,26 +454,34 @@ UploadRec decode_upload(std::string key, std::string upload_id, std::string_view
     return rec;
 }
 
-// ---- part: u8 ver | u64 size | str md5 | i64 modified_ms | runs ----
+// ---- part: u8 ver | u64 size | str md5 | i64 modified_ms
+//            | [v2] str checksum_algorithm, str checksum_value | runs ----
+// v2 adds the verified part checksum (roadmap §2.2); v1 records stay readable
 
 std::string encode_part(const PartRec& rec) {
     std::string s;
-    put_u8(s, 1);
+    put_u8(s, 2);
     put_u64(s, rec.size);
     put_str(s, rec.etag);
     put_u64(s, uint64_t(rec.modified_ms));
+    put_str(s, rec.checksum_algorithm);
+    put_str(s, rec.checksum_value);
     append_extent_runs(s, rec.data.extents);
     return s;
 }
 
 PartRec decode_part(int part_no, std::string_view v) {
     Cursor c{v};
-    check_ver(c, 1);
+    uint8_t ver = read_ver(c, 2);
     PartRec rec;
     rec.part_no = part_no;
     rec.size = c.u64();
     rec.etag = std::string(c.str());
     rec.modified_ms = int64_t(c.u64());
+    if (ver >= 2) {
+        rec.checksum_algorithm = std::string(c.str());
+        rec.checksum_value = std::string(c.str());
+    }
     rec.data.extents = read_extent_runs(c);
     c.done();
     return rec;

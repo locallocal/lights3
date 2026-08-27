@@ -124,7 +124,8 @@ TEST(cloudproxy_backend_suite) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
     CloudProxyBackend b(remote.proxy_cfg(), pool);
-    run_backend_suite(b);
+    // checksum round trip skipped: the httplib test double does not store checksums
+    run_backend_suite(b, /*checksum_roundtrip=*/false);
 }
 
 // bucket_prefix mapping and list_buckets filtering (docs/cloudproxy-backend.md §4.2/§4.3)
@@ -423,7 +424,8 @@ TEST(cloudproxy_virtual_hosted_style) {
     auto cfg = remote.proxy_cfg();
     cfg.force_path_style = false;
     CloudProxyBackend b(cfg, pool);
-    run_backend_suite(b);
+    // checksum round trip skipped: the httplib test double does not store checksums
+    run_backend_suite(b, /*checksum_roundtrip=*/false);
 }
 
 // control_in_pump=true (docs/cloudproxy-backend.md §2.3): the control plane uses a one-shot private
@@ -435,7 +437,8 @@ TEST(cloudproxy_control_in_pump_suite_and_bench) {
     auto cfg = remote.proxy_cfg();
     cfg.control_in_pump = true;
     CloudProxyBackend b(cfg, pool);
-    run_backend_suite(b);
+    // checksum round trip skipped: the httplib test double does not store checksums
+    run_backend_suite(b, /*checksum_roundtrip=*/false);
 
     auto bench = [&](bool in_pump) {
         auto c = remote.proxy_cfg("bench-");

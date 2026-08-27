@@ -2,6 +2,8 @@
 #pragma once
 
 #include <chrono>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -9,6 +11,7 @@
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "http/model.h"
+#include "s3/checksum_guard.h"
 #include "s3/errors.h"
 #include "storage/backend.h"
 
@@ -115,6 +118,61 @@ inline std::pair<std::string, std::string> parse_copy_source(const std::string& 
     // validation function as dispatch (previously a third independent '.'-prefix heuristic; three copies evolving separately was a drift source)
     storage::validate_bucket_name(bucket);
     return {std::move(bucket), s.substr(slash + 1)};
+}
+
+// Attach the request's declared checksum to the outgoing meta (roadmap §2.2): the
+// header form fills the value up front (verification happens at body EOF, before any
+// backend commit); the trailer form installs a DigestCaptureReader plus a pending slot
+// the backend serializes once the body drains
+inline void attach_request_checksum(http::HttpRequest& req, storage::ObjectMeta& meta) {
+    auto rc = request_checksum(req);
+    if (!rc) return;
+    meta.checksum_algorithm = checksum_wire_name(*rc->spec);
+    meta.checksum_type = "FULL_OBJECT";
+    if (!rc->trailer) {
+        meta.checksum_value = rc->value;
+        return;
+    }
+    auto slot = std::make_shared<std::string>();
+    meta.checksum_pending = slot;
+    if (!req.body) req.body = std::make_unique<http::StringBodyReader>("");
+    req.body =
+        std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
+}
+
+// UploadPart variant: same extraction, result travels as the upload_part checksum
+// parameter and lands in the part record
+inline std::optional<storage::PartChecksum> extract_part_checksum(http::HttpRequest& req) {
+    auto rc = request_checksum(req);
+    if (!rc) return std::nullopt;
+    storage::PartChecksum pc;
+    pc.algorithm = checksum_wire_name(*rc->spec);
+    if (!rc->trailer) {
+        pc.value = rc->value;
+        return pc;
+    }
+    auto slot = std::make_shared<std::string>();
+    pc.pending = slot;
+    if (!req.body) req.body = std::make_unique<http::StringBodyReader>("");
+    req.body =
+        std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
+    return pc;
+}
+
+// GET/HEAD checksum echo (roadmap §2.2): only under an explicit
+// x-amz-checksum-mode: ENABLED, and only for full-object responses (AWS omits the
+// checksum on ranged GETs — a full-object digest against partial bytes would mislead)
+inline void apply_checksum_echo(const http::HttpRequest& req, const storage::ObjectMeta& meta,
+                                http::HttpResponse& resp) {
+    if (resp.status == 206) return;
+    auto v = req.headers.get("x-amz-checksum-mode");
+    if (!v || !http::HeaderMap::ieq(*v, "ENABLED")) return;
+    if (meta.checksum_value.empty() || meta.checksum_algorithm.empty()) return;
+    std::string h = "x-amz-checksum-";
+    for (char c : meta.checksum_algorithm) h.push_back(http::HeaderMap::lower(c));
+    resp.headers.set(h, meta.checksum_value);
+    resp.headers.set("x-amz-checksum-type",
+                     meta.checksum_type.empty() ? "FULL_OBJECT" : meta.checksum_type);
 }
 
 // PutObject/UploadPart require a request framing that carries a body (roadmap §2.5): a PUT

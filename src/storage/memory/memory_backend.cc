@@ -148,6 +148,7 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
     meta.size = data.size();
     meta.etag = md5.final_hex();
     meta.last_modified = std::chrono::system_clock::now();
+    finalize_checksum(meta);  // trailer-form value exists now that the body is drained (§2.2)
     auto blob = std::make_shared<const std::string>(std::move(data));
 
     std::lock_guard lk(m_);
@@ -270,7 +271,8 @@ Task<std::string> MemoryBackend::create_multipart(std::string_view bucket, std::
 
 Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_view key,
                                            std::string_view upload_id, int part_no,
-                                           http::BodyReader& body) {
+                                           http::BodyReader& body,
+                                           const std::optional<PartChecksum>& checksum) {
     validate_part_number(part_no);
     {
         std::lock_guard lk(m_);
@@ -296,8 +298,12 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
     auto it = up.parts.find(part_no);
     reserve_locked(int64_t(data.size()) -
                    (it != up.parts.end() ? int64_t(it->second.data.size()) : 0));
-    up.parts.insert_or_assign(part_no,
-                              Part{std::move(data), etag, std::chrono::system_clock::now()});
+    Part part{std::move(data), etag, std::chrono::system_clock::now(), "", ""};
+    if (checksum) {  // resolved() only after the body was drained above (trailer form)
+        part.checksum_algorithm = checksum->algorithm;
+        part.checksum_value = checksum->resolved();
+    }
+    up.parts.insert_or_assign(part_no, std::move(part));
     co_return PutResult{etag};
 }
 
@@ -311,6 +317,8 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
 
     std::string data;
     std::vector<std::string> md5s;
+    std::vector<PartDigest> digests;
+    std::vector<uint64_t> sizes;
     for (auto& p : parts) {
         auto it = up.parts.find(p.part_no);
         if (it == up.parts.end() || it->second.etag != strip_etag_quotes(p.etag))
@@ -320,6 +328,8 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
                           std::string(key));
         data += it->second.data;
         md5s.push_back(it->second.etag);
+        sizes.push_back(it->second.data.size());
+        digests.push_back({it->second.checksum_algorithm, it->second.checksum_value});
     }
 
     // Copy rather than move: the reserve below may throw on over-limit, and the promise
@@ -330,7 +340,10 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
     meta.size = data.size();
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
+    meta.part_sizes = std::move(sizes);  // GET ?partNumber layout (roadmap §2.5)
     PutResult r{meta.etag};
+    // Composite checksum from the stored, verified per-part values (roadmap §2.2)
+    apply_composite_checksum(digests, meta, r);
     // The concatenated object and the parts are resident simultaneously for a moment:
     // account the new object first (may throw on over-limit, in which case the upload
     // survives and the client may retry or abort), release the parts only after success.
@@ -369,7 +382,8 @@ Task<ListPartsResult> MemoryBackend::list_parts(std::string_view bucket, std::st
     // marker are skipped directly
     std::vector<PartMeta> all;
     for (auto it = up.parts.upper_bound(opt.part_number_marker); it != up.parts.end(); ++it)
-        all.push_back({it->first, it->second.data.size(), it->second.etag, it->second.uploaded});
+        all.push_back({it->first, it->second.data.size(), it->second.etag, it->second.uploaded,
+                       it->second.checksum_algorithm, it->second.checksum_value});
     co_return apply_parts_page(std::move(all), opt);
 }
 

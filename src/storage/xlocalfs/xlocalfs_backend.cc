@@ -234,7 +234,8 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
 
 Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::string_view key,
                                              std::string_view upload_id, int part_no,
-                                             http::BodyReader& body) {
+                                             http::BodyReader& body,
+                                             const std::optional<PartChecksum>& checksum) {
     OpGuard g{this, Op::kUploadPart};
     validate_part_number(part_no);
     co_await pool_->schedule();
@@ -271,7 +272,13 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     }
     tmp.committed = true;
     fsutil::fsync_dir(up.dir);
-    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
+    // Verified part checksum rides in the .md5 kv sidecar (roadmap §2.2, same as localfs)
+    std::vector<std::pair<std::string, std::string>> pkv{{"md5", etag}};
+    if (checksum && !checksum->resolved().empty()) {
+        pkv.emplace_back("checksum_algorithm", checksum->algorithm);
+        pkv.emplace_back("checksum_value", checksum->resolved());
+    }
+    write_tsv(up.dir / (name + ".md5"), staging_ / "put", pkv);
     g.ok = true;
     co_return PutResult{etag};
 }
@@ -290,12 +297,17 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     // 1. Validate each declared part: it exists and the ETag matches
     std::vector<std::string> md5s;
     std::vector<fs::path> paths;
+    std::vector<PartDigest> digests;
     md5s.reserve(parts.size());
     for (auto& p : parts) {
         std::string name = part_file_name(p.part_no);
         std::string stored;
-        for (auto& [k, v] : read_tsv(up.dir / (name + ".md5")))
+        PartDigest digest;
+        for (auto& [k, v] : read_tsv(up.dir / (name + ".md5"))) {
             if (k == "md5") stored = v;
+            else if (k == "checksum_algorithm") digest.algorithm = v;
+            else if (k == "checksum_value") digest.value = v;
+        }
         if (stored.empty() || !fs::exists(up.dir / name) ||
             stored != strip_etag_quotes(p.etag))
             throw S3Error(S3ErrorCode::InvalidPart,
@@ -303,6 +315,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
                           "ETag did not match.",
                           std::string(key));
         md5s.push_back(stored);
+        digests.push_back(std::move(digest));
         paths.push_back(up.dir / name);
     }
 
@@ -311,6 +324,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open complete tmp");
     uint64_t total = 0;
+    std::vector<uint64_t> sizes;  // per-part layout for GET ?partNumber (roadmap §2.5)
     std::byte buf[256 * 1024];
     for (auto& path : paths) {
         FdGuard in{::open(path.c_str(), O_RDONLY)};
@@ -324,6 +338,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
             off += static_cast<uint64_t>(n);
             total += static_cast<uint64_t>(n);
         }
+        sizes.push_back(off);
     }
     // 3. Commit (same atomic path as PUT), then clean up the mpu directory
     ObjectMeta meta = std::move(up.meta);
@@ -331,6 +346,9 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     meta.size = total;
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
+    meta.part_sizes = std::move(sizes);
+    PutResult result{meta.etag};
+    apply_composite_checksum(digests, meta, result);  // roadmap §2.2
     fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
     co_await sync_fd(tmp.fd);
     ::close(tmp.fd);
@@ -345,7 +363,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     std::error_code ec;
     fs::remove_all(up.dir, ec);
     g.ok = true;
-    co_return PutResult{meta.etag};
+    co_return result;
 }
 
 Task<void> XLocalFsBackend::close() {

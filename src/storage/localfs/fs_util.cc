@@ -131,6 +131,16 @@ std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
     // sidecars stay byte-for-byte identical
     for (auto& f : kStdMetaFields)
         if (!(meta.*f.field).empty()) kv.emplace_back(f.store_key, meta.*f.field);
+    // Checksum closure (roadmap §2.2): persisted only when a verified value exists —
+    // trailer-form values live in checksum_pending until the body is drained, which the
+    // commit ordering guarantees has happened by now
+    if (std::string cv = resolved_checksum_value(meta); !cv.empty()) {
+        kv.emplace_back("checksum_algorithm", meta.checksum_algorithm);
+        kv.emplace_back("checksum_value", cv);
+        if (!meta.checksum_type.empty()) kv.emplace_back("checksum_type", meta.checksum_type);
+    }
+    if (!meta.part_sizes.empty())
+        kv.emplace_back("part_sizes", join_part_sizes(meta.part_sizes));
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
     return kv;
 }
@@ -274,6 +284,10 @@ static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier,
         else if (k == "size") std::from_chars(v.data(), v.data() + v.size(), declared_size);
         else if (k == "remote.etag") tier.remote_etag = v;
         else if (k == "remote.at") tier.remote_at = v;
+        else if (k == "checksum_algorithm") meta.checksum_algorithm = v;
+        else if (k == "checksum_value") meta.checksum_value = v;
+        else if (k == "checksum_type") meta.checksum_type = v;
+        else if (k == "part_sizes") meta.part_sizes = parse_part_sizes(v);
         else if (k.rfind("meta.", 0) == 0) meta.user_meta[k.substr(5)] = v;
         else {
             for (auto& f : kStdMetaFields)
@@ -382,6 +396,7 @@ UploadState require_upload(const fs::path& staging, std::string_view bucket,
         if (k == "bucket") m_bucket = v;
         else if (k == "key") m_key = v;
         else if (k == "content_type") up.meta.content_type = v;
+        else if (k == "checksum_algorithm") up.meta.checksum_algorithm = v;
         else if (k.rfind("meta.", 0) == 0) up.meta.user_meta[k.substr(5)] = v;
         else {
             for (auto& f : kStdMetaFields)

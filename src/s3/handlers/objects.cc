@@ -175,12 +175,29 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
                           "At least one of the pre-conditions you specified did not hold");
     }
 
+    // Declared checksum persists with the object (roadmap §2.2): header form is known
+    // now; trailer form resolves through the pending slot once the body drains
+    storage::ObjectMeta meta = meta_from_headers(req);
+    attach_request_checksum(req, meta);
+    std::string cs_algo = meta.checksum_algorithm;
+    std::string cs_value = meta.checksum_value;
+    auto cs_pending = meta.checksum_pending;
+
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
-    auto result = co_await backend.put_object(bucket, key, meta_from_headers(req), body, cond);
+    auto result = co_await backend.put_object(bucket, key, std::move(meta), body, cond);
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));
+    // Response echo (AWS PutObject behavior): the body is drained by now, so the
+    // trailer-form value is readable from the capture slot
+    if (cs_value.empty() && cs_pending) cs_value = *cs_pending;
+    if (!cs_algo.empty() && !cs_value.empty()) {
+        std::string h = "x-amz-checksum-";
+        for (char c : cs_algo) h.push_back(http::HeaderMap::lower(c));
+        resp.headers.set(h, cs_value);
+        resp.headers.set("x-amz-checksum-type", "FULL_OBJECT");
+    }
     co_return resp;
 }
 
@@ -203,6 +220,13 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
     storage::ObjectMeta meta;
     if (directive == "REPLACE") {
         meta = meta_from_headers(req);
+        // The bytes are unchanged by a copy, so the source's checksum and part layout
+        // still describe the new object (roadmap §2.2/§2.5); REPLACE only swaps the
+        // user-editable metadata
+        meta.checksum_algorithm = src_meta.checksum_algorithm;
+        meta.checksum_value = src_meta.checksum_value;
+        meta.checksum_type = src_meta.checksum_type;
+        meta.part_sizes = src_meta.part_sizes;
     } else {
         // COPY: the whole metadata set travels with the object. Field-by-field copying once missed newly added
         // first-class fields (§5.2); here only the three items bound to the new object (key/size/etag) are left for the backend to recompute
@@ -268,6 +292,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         } else {
             resp.content_length = meta.size;  // no body, the driver sends only Content-Length
         }
+        apply_checksum_echo(req, meta, resp);  // §2.2 (no-op on 206)
         co_return resp;
     }
 
@@ -303,6 +328,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     }
     resp.content_length = len;
     resp.stream_body = std::move(stream.body);
+    apply_checksum_echo(req, stream.meta, resp);  // §2.2 (no-op on 206)
     co_return resp;
 }
 

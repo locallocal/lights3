@@ -733,6 +733,8 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
         {"bucket", std::string(bucket)},
         {"key", std::string(key)},
         {"content_type", meta.content_type}};
+    if (!meta.checksum_algorithm.empty())
+        kv.emplace_back("checksum_algorithm", meta.checksum_algorithm);
     // First-class metadata must also survive create→complete (docs/archive/gaps.md §5.2); key
     // names share their source with the sidecar
     for (auto& f : kStdMetaFields)
@@ -744,7 +746,8 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
 
 Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string_view key,
                                             std::string_view upload_id, int part_no,
-                                            http::BodyReader& body) {
+                                            http::BodyReader& body,
+                                            const std::optional<PartChecksum>& checksum) {
     OpGuard g{this, Op::kUploadPart};
     validate_part_number(part_no);
     co_await pool_->schedule();
@@ -794,7 +797,14 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
     }
     tmp.committed = true;
     fsutil::fsync_dir(up.dir);
-    write_tsv(up.dir / (name + ".md5"), staging_ / "put", {{"md5", etag}});
+    // The .md5 sidecar is already a kv file: the verified part checksum rides along
+    // (roadmap §2.2); resolved() only after the body was drained above (trailer form)
+    std::vector<std::pair<std::string, std::string>> pkv{{"md5", etag}};
+    if (checksum && !checksum->resolved().empty()) {
+        pkv.emplace_back("checksum_algorithm", checksum->algorithm);
+        pkv.emplace_back("checksum_value", checksum->resolved());
+    }
+    write_tsv(up.dir / (name + ".md5"), staging_ / "put", pkv);
     g.ok = true;
     co_return PutResult{etag};
 }
@@ -813,12 +823,17 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     // 1. Validate every declared part: exists and ETag matches
     std::vector<std::string> md5s;
     std::vector<fs::path> paths;
+    std::vector<PartDigest> digests;
     md5s.reserve(parts.size());
     for (auto& p : parts) {
         std::string name = part_file_name(p.part_no);
         std::string stored;
-        for (auto& [k, v] : read_tsv(up.dir / (name + ".md5")))
+        PartDigest digest;
+        for (auto& [k, v] : read_tsv(up.dir / (name + ".md5"))) {
             if (k == "md5") stored = v;
+            else if (k == "checksum_algorithm") digest.algorithm = v;
+            else if (k == "checksum_value") digest.value = v;
+        }
         if (stored.empty() || !fs::exists(up.dir / name) ||
             stored != strip_etag_quotes(p.etag))
             throw S3Error(S3ErrorCode::InvalidPart,
@@ -826,6 +841,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
                           "ETag did not match.",
                           std::string(key));
         md5s.push_back(stored);
+        digests.push_back(std::move(digest));
         paths.push_back(up.dir / name);
     }
 
@@ -834,8 +850,10 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open complete tmp");
     uint64_t total = 0;
+    std::vector<uint64_t> sizes;  // per-part layout for GET ?partNumber (roadmap §2.5)
     std::vector<char> buf(256 * 1024);
     for (auto& path : paths) {
+        uint64_t part_bytes = 0;
         int in = ::open(path.c_str(), O_RDONLY);
         if (in < 0) throw_errno("open part");
         for (;;) {
@@ -857,8 +875,10 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
                 left -= static_cast<size_t>(w);
             }
             total += static_cast<uint64_t>(n);
+            part_bytes += static_cast<uint64_t>(n);
         }
         ::close(in);
+        sizes.push_back(part_bytes);
     }
     ::close(tmp.fd);
     tmp.fd = -1;
@@ -869,6 +889,10 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     meta.size = total;
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
+    meta.part_sizes = std::move(sizes);
+    PutResult result{meta.etag};
+    // Composite checksum from the stored, verified per-part values (roadmap §2.2)
+    apply_composite_checksum(digests, meta, result);
     {
         auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT: serialize the commit section
         co_await pool_->schedule();
@@ -878,7 +902,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     std::error_code ec;
     fs::remove_all(up.dir, ec);
     g.ok = true;
-    co_return PutResult{meta.etag};
+    co_return result;
 }
 
 Task<void> LocalFsBackend::abort_multipart(std::string_view bucket, std::string_view key,
@@ -923,11 +947,14 @@ Task<ListPartsResult> LocalFsBackend::list_parts(std::string_view bucket, std::s
         std::string name = part_file_name(no);
         struct stat st{};
         if (::stat((up.dir / name).c_str(), &st) != 0) continue;
-        std::string etag;
-        for (auto& [k, v] : read_tsv(up.dir / (name + ".md5")))
+        std::string etag, calgo, cval;
+        for (auto& [k, v] : read_tsv(up.dir / (name + ".md5"))) {
             if (k == "md5") etag = v;
+            else if (k == "checksum_algorithm") calgo = v;
+            else if (k == "checksum_value") cval = v;
+        }
         out.push_back({no, static_cast<uint64_t>(st.st_size), etag,
-                       std::chrono::system_clock::from_time_t(st.st_mtime)});
+                       std::chrono::system_clock::from_time_t(st.st_mtime), calgo, cval});
     }
     co_return apply_parts_page(std::move(out), opt);
 }

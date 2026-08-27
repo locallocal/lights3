@@ -312,6 +312,7 @@ add_library(lights3_core STATIC
   src/s3/handlers/bucket_website.cc
   src/s3/handlers/bucket_cors.cc
   src/s3/handlers/bucket_lifecycle.cc
+  src/s3/handlers/sts.cc
   src/s3/handlers/buckets.cc
   src/s3/handlers/objects.cc
   src/s3/handlers/list_objects.cc

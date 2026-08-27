@@ -1068,25 +1068,21 @@ TEST(service_unsupported_headers_rejected) {
     CHECK_EQ(try_put("x-amz-acl", "public-read").status, 501);
 }
 
-// ---------- roadmap §1.3: STS temporary credentials are explicitly refused ----------
-TEST(service_sts_token_explicit_501) {
+// ---------- roadmap §2.6: STS tokens are now first-class (real flow tested in test_credentials.cc) ----------
+TEST(service_sts_token_no_longer_501) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
 
-    // Header side: previously in no reject list — silently dropped, and with auth
-    // enabled the permanent-key lookup then surfaced a misleading InvalidAccessKeyId
-    auto req = make_req("GET", "/bkt/k");
+    // With auth disabled everything is open anyway; the point here is that the token
+    // no longer trips the 501 gates (header check and query allowlist)
+    auto req = make_req("GET", "/bkt/nothere");
     req.headers.add("x-amz-security-token", "FwoGZXIvYXdzEXAMPLETOKEN");
     auto resp = sync_wait(svc.dispatch(std::move(req)));
-    CHECK_EQ(resp.status, 501);
-    CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
-    CHECK(contains(resp.small_body, "X-Amz-Security-Token"));
+    CHECK_EQ(resp.status, 404);  // NoSuchKey, not NotImplemented
 
-    // Query side: previously whitelisted in kCommonQueryKeys and silently ignored
     auto q = sync_wait(
-        svc.dispatch(make_req("GET", "/bkt/k", "", {{"X-Amz-Security-Token", "tok"}})));
-    CHECK_EQ(q.status, 501);
-    CHECK(contains(q.small_body, "<Code>NotImplemented</Code>"));
+        svc.dispatch(make_req("GET", "/bkt/nothere", "", {{"X-Amz-Security-Token", "tok"}})));
+    CHECK_EQ(q.status, 404);
 }
 
 // ---------- gaps §3.5: query whitelist; unknown params get 501 instead of a silent wrong answer ----------

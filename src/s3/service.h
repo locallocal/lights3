@@ -210,6 +210,11 @@ private:
 
     Task<http::HttpResponse> readyz();
 
+    // handlers/sts.cc (roadmap §2.6): AssumeRole at POST / (path-style deployments),
+    // verified with service scope "sts"; errors render in the STS XML shape
+    Task<http::HttpResponse> sts_endpoint(http::HttpRequest& req, const RequestContext& ctx,
+                                          std::string& access_key);
+
     // handlers/admin_credentials.cc (docs/credential-management.md §2): performs verification and root check
     // internally, renders errors as JSON bodies; access_key out-param feeds the access log
     Task<http::HttpResponse> admin_credentials(http::HttpRequest& req,

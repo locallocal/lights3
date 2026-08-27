@@ -167,24 +167,14 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
     }
 }
 
-// STS temporary credentials (roadmap §1.3; real STS support is §2.8): the token used
-// to be silently dropped on both sides — the query key sat in kCommonQueryKeys, the
-// header in no reject list — so an SDK holding STS credentials sailed through to the
-// permanent-key lookup and got a misleading InvalidAccessKeyId. Refuse before verify:
-// 501 is at least honest about the capability gap
-void reject_sts_token(const http::HttpRequest& req) {
-    if (req.query_has("X-Amz-Security-Token") || req.headers.has("x-amz-security-token"))
-        throw S3Error(S3ErrorCode::NotImplemented,
-                      "STS temporary credentials (X-Amz-Security-Token) are not implemented.");
-}
-
 // Query allowlist (docs/archive/gaps.md §3.5): keys permitted on all routes -- the presigned signature parameter
 // family + SDK tracing parameters. Keys are case-sensitive (consistent with the SigV4 canonical query).
-// X-Amz-Security-Token is deliberately absent: STS is rejected up front by reject_sts_token
+// X-Amz-Security-Token joined the list with real STS support (roadmap §2.6): presigned
+// URLs minted from session credentials carry it, and verify validates it
 constexpr std::string_view kCommonQueryKeys[] = {
     "X-Amz-Algorithm",     "X-Amz-Credential", "X-Amz-Date",
     "X-Amz-Expires",       "X-Amz-Signature",  "X-Amz-SignedHeaders",
-    "X-Amz-Content-Sha256",
+    "X-Amz-Content-Sha256", "X-Amz-Security-Token",
     "x-id",  // tracing parameter aws-sdk-js v3 attaches to every operation, no semantics
 };
 
@@ -490,6 +480,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                 req.path.rfind("/-/admin/credentials/", 0) == 0)) {
             // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
             resp = co_await admin_credentials(req, access_key);
+        } else if (!addr.vhost && req.path == "/" && req.method == "POST") {
+            // STS AssumeRole (roadmap §2.6): SDKs pointed at this gateway as their STS
+            // endpoint POST a form body to the service root. Path-style only — under
+            // vhost addressing "/" is a bucket root and stays on the S3 plane. The
+            // handler does its own verification (service scope "sts") and renders
+            // errors in the STS XML shape
+            resp = co_await sts_endpoint(req, ctx, access_key);
         } else if (req.method == "OPTIONS") {
             // CORS preflight (roadmap §2.1): decided before signature verification —
             // browsers attach no signature material to preflights; the preflighted
@@ -506,9 +503,6 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // header as AccessDenied; when auth is globally disabled verify() admits
             // everything anyway and the anonymous branch changes nothing (the synthesized
             // read-only policy would only be stricter than "unrestricted")
-            // Must run before verify: past it, an unknown (temporary) access key turns
-            // into InvalidAccessKeyId and the real cause is hidden (roadmap §1.3)
-            reject_sts_token(req);
             if (website_store_) web_snap = website_store_->snapshot();
             bool anon = auth_.enabled() && anonymous_website_read(req, addr, web_snap);
             // Authorization uses the verify-time policy snapshot (docs/archive/gaps.md §3.7): with a second store lookup

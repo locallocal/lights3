@@ -13,6 +13,7 @@
 #include <stdexcept>
 
 #include "core/log.h"
+#include "core/util/checksum.h"
 #include "core/util/hex.h"
 #include "core/util/time.h"
 #include "http/model.h"
@@ -435,8 +436,15 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
 std::optional<CredentialLookup> CredentialStore::lookup(std::string_view ak) const {
     std::shared_lock lk(mu_);
     auto it = creds_.find(ak);
-    if (it == creds_.end()) return std::nullopt;
-    return CredentialLookup{it->second.secret_key, it->second.policy};
+    if (it != creds_.end())
+        return CredentialLookup{it->second.secret_key, it->second.policy};
+    // STS sessions (roadmap §2.6): expired entries are still returned — verify turns
+    // them into ExpiredToken, which tells the SDK to re-assume; a plain
+    // InvalidAccessKeyId would read as a configuration error
+    auto sit = sessions_.find(ak);
+    if (sit == sessions_.end()) return std::nullopt;
+    return CredentialLookup{sit->second.secret_key, sit->second.policy, sit->second.token,
+                            sit->second.expires};
 }
 
 bool CredentialStore::has_credentials() const {
@@ -602,6 +610,46 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
     }
     LOG_INFO("updated credential {} (rev {})", c.access_key, c.rev);
     co_return c;
+}
+
+// ---------- STS sessions (roadmap §2.6) ----------
+
+CredentialStore::SessionCredential CredentialStore::mint_session(std::string_view parent_ak,
+                                                                 int duration_sec) {
+    // Bound the table: sessions are memory-only, and an unauthenticated caller cannot
+    // reach here, but a runaway client must not grow the map without limit
+    constexpr size_t kMaxSessions = 100000;
+
+    SessionCredential out;
+    out.access_key = "L3SA" + random_access_key().substr(4);  // session-prefixed AK shape
+    out.secret_key = random_secret_key();
+    {
+        uint8_t raw[48];
+        fill_random(raw, sizeof(raw));
+        out.token = util::base64_encode(std::span(raw, sizeof(raw)));
+    }
+    out.expires = std::chrono::system_clock::now() + std::chrono::seconds(duration_sec);
+
+    std::unique_lock lk(mu_);
+    // Opportunistic sweep of expired sessions (they are also harmless in place:
+    // verify answers ExpiredToken for them)
+    auto now = std::chrono::system_clock::now();
+    std::erase_if(sessions_, [&](auto& kv) { return kv.second.expires < now; });
+    if (sessions_.size() >= kMaxSessions)
+        throw S3Error(S3ErrorCode::SlowDown, "Too many active sessions; retry later.");
+    auto pit = creds_.find(parent_ak);
+    // A session AK lives in sessions_, not creds_: a session can never assume again
+    if (pit == creds_.end())
+        throw S3Error(S3ErrorCode::AccessDenied,
+                      "Session credentials cannot call AssumeRole.");
+    sessions_[out.access_key] =
+        SessionEntry{out.secret_key, out.token, out.expires, pit->second.policy};
+    return out;
+}
+
+size_t CredentialStore::session_count() const {
+    std::shared_lock lk(mu_);
+    return sessions_.size();
 }
 
 // ---------- File hot reload (§10.2) ----------

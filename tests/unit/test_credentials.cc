@@ -785,3 +785,133 @@ TEST(credstore_update_propagates_via_sync) {
     sync_wait(b->sync_now());
     CHECK_EQ(b->find(c.access_key)->rev, uint64_t{2});
 }
+
+// ---- roadmap §2.6: STS session credentials ----
+
+namespace {
+std::string xtext(const std::string& xml, const std::string& tag) {
+    auto open = "<" + tag + ">", close = "</" + tag + ">";
+    auto b = xml.find(open);
+    if (b == std::string::npos) return "";
+    b += open.size();
+    auto e = xml.find(close, b);
+    return e == std::string::npos ? "" : xml.substr(b, e - b);
+}
+
+http::HttpResponse sts_call(SvcEnv& env, const Credential& cred, const std::string& form,
+                            const std::string& token = "") {
+    AuthConfig sts_cfg = root_cfg();
+    sts_cfg.service = "sts";
+    auto sts_signer = SigV4Authenticator::build(sts_cfg);
+    http::HttpRequest req;
+    req.method = "POST";
+    req.raw_path = "/";
+    req.path = "/";
+    req.headers.add("Host", "localhost");
+    req.headers.add("Content-Type", "application/x-www-form-urlencoded");
+    req.headers.add("Content-Length", std::to_string(form.size()));
+    if (!token.empty()) req.headers.add("x-amz-security-token", token);
+    req.body = std::make_unique<http::StringBodyReader>(form);
+    sts_signer.sign(req, cred, util::sha256_hex(form));
+    return sync_wait(env.svc->dispatch(std::move(req)));
+}
+}  // namespace
+
+TEST(sts_assume_role_flow) {
+    SvcEnv env;
+    Credential root{kRootAk, kRootSk};
+    const std::string form =
+        "Action=AssumeRole&Version=2011-06-15&RoleArn=arn:aws:iam::0:role/app"
+        "&RoleSessionName=ci&DurationSeconds=900";
+
+    auto resp = sts_call(env, root, form);
+    CHECK_EQ(resp.status, 200);
+    const std::string& b = resp.small_body;
+    Credential sess{xtext(b, "AccessKeyId"), xtext(b, "SecretAccessKey")};
+    std::string token = xtext(b, "SessionToken");
+    CHECK_EQ(sess.access_key.substr(0, 4), "L3SA");
+    CHECK_EQ(std::string(sess.secret_key).size(), size_t{40});
+    CHECK(!token.empty());
+    CHECK(!xtext(b, "Expiration").empty());
+    CHECK_EQ(env.store->session_count(), size_t{1});
+
+    // The session works on the data plane with its token (inherits root = unrestricted)
+    std::vector<std::pair<std::string, std::string>> tok{{"x-amz-security-token", token}};
+    CHECK_EQ(env.call("PUT", "/stsb", sess, {}, "", tok).status, 200);
+    CHECK_EQ(env.call("PUT", "/stsb/k", sess, {}, "hello", tok).status, 200);
+    CHECK_EQ(env.call("GET", "/stsb/k", sess, {}, "", tok).status, 200);
+
+    // Missing token → AccessDenied; wrong token → InvalidToken (both 4xx, never a
+    // silent anonymous downgrade)
+    CHECK_EQ(env.call("GET", "/stsb/k", sess).status, 403);
+    auto badtok = env.call("GET", "/stsb/k", sess, {}, "",
+                           {{"x-amz-security-token", "wrong-token"}});
+    CHECK_EQ(badtok.status, 400);
+    CHECK(badtok.small_body.find("InvalidToken") != std::string::npos);
+
+    // A token alongside a permanent key is invalid too
+    auto mixed = env.call("GET", "/stsb/k", root, {}, "", {{"x-amz-security-token", token}});
+    CHECK_EQ(mixed.status, 400);
+
+    // A session cannot assume again
+    auto again = sts_call(env, sess, form, token);
+    CHECK_EQ(again.status, 403);
+    CHECK(again.small_body.find("ErrorResponse") != std::string::npos);
+
+    // Unsupported actions answer 501 in the STS error shape
+    auto other = sts_call(env, root, "Action=GetCallerIdentity&Version=2011-06-15");
+    CHECK_EQ(other.status, 501);
+    CHECK(other.small_body.find("<Code>NotImplemented</Code>") != std::string::npos);
+    // Out-of-range duration
+    CHECK_EQ(sts_call(env, root, "Action=AssumeRole&DurationSeconds=60").status, 400);
+}
+
+TEST(sts_session_policy_and_expiry) {
+    SvcEnv env;
+    Credential root{kRootAk, kRootSk};
+    CHECK_EQ(env.call("PUT", "/boxa", root).status, 200);
+    CHECK_EQ(env.call("PUT", "/boxb", root).status, 200);
+
+    // A policy-restricted dynamic credential mints a session bounded by the same policy
+    CredentialPolicy p;
+    p.buckets = {"boxa"};
+    auto dyn = sync_wait(env.store->generate("restricted", p));
+    Credential dcred{dyn.access_key, dyn.secret_key};
+    auto resp = sts_call(env, dcred, "Action=AssumeRole&DurationSeconds=900");
+    CHECK_EQ(resp.status, 200);
+    Credential sess{xtext(resp.small_body, "AccessKeyId"),
+                    xtext(resp.small_body, "SecretAccessKey")};
+    std::string token = xtext(resp.small_body, "SessionToken");
+    std::vector<std::pair<std::string, std::string>> tok{{"x-amz-security-token", token}};
+    CHECK_EQ(env.call("PUT", "/boxa/k", sess, {}, "v", tok).status, 200);
+    CHECK_EQ(env.call("PUT", "/boxb/k", sess, {}, "v", tok).status, 403);
+
+    // Expiry: verify with a shifted clock answers ExpiredToken (retry signal), not
+    // InvalidAccessKeyId (configuration error)
+    auto auth2 = SigV4Authenticator::build(root_cfg());
+    auth2.set_provider(env.store);
+    http::HttpRequest req;
+    req.method = "GET";
+    req.raw_path = "/boxa/k";
+    req.path = "/boxa/k";
+    req.headers.add("Host", "localhost");
+    req.headers.add("x-amz-security-token", token);
+    auth2.sign(req, sess);
+    auto verify_at = [&](std::chrono::hours shift) {
+        auto a = SigV4Authenticator::build(root_cfg());
+        a.set_provider(env.store);
+        a.clock = [shift] { return std::chrono::system_clock::now() + shift; };
+        return a;
+    };
+    CHECK_EQ(verify_at(std::chrono::hours(0)).verify(req).access_key, sess.access_key);
+    // Re-sign with the shifted clock so only the session expiry (not clock skew) trips
+    auto shifted = verify_at(std::chrono::hours(2));
+    http::HttpRequest req2;
+    req2.method = "GET";
+    req2.raw_path = "/boxa/k";
+    req2.path = "/boxa/k";
+    req2.headers.add("Host", "localhost");
+    req2.headers.add("x-amz-security-token", token);
+    shifted.sign(req2, sess);
+    CHECK_THROWS_S3(shifted.verify(req2), S3ErrorCode::ExpiredToken);
+}

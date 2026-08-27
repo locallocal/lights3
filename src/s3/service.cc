@@ -115,7 +115,7 @@ private:
 // Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",
-    "lifecycle",   "encryption",   "object-lock",
+    "encryption",  "object-lock",
     "legal-hold",  "retention",    "torrent",        "replication",    "logging",
     "notification", "requestPayment", "accelerate",  "analytics",      "inventory",
     "intelligent-tiering", "metrics", "ownershipControls", "publicAccessBlock",
@@ -787,6 +787,25 @@ std::span<const S3Service::Route> S3Service::route_table() {
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_bucket_website(std::move(b), auth);
+     }},
+    // ?lifecycle subresource (roadmap §2.4, root credential only, same model as ?website)
+    {"GET", Scope::Bucket, "lifecycle", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.get_bucket_lifecycle(std::move(b), auth);
+     }},
+    {"PUT", Scope::Bucket, "lifecycle", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.put_bucket_lifecycle(req, std::move(b), auth);
+     }},
+    {"DELETE", Scope::Bucket, "lifecycle", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.delete_bucket_lifecycle(std::move(b), auth);
      }},
     // ?cors subresource (roadmap §2.1, root credential only, same model as ?website)
     {"GET", Scope::Bucket, "cors", "",

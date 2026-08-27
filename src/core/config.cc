@@ -423,6 +423,12 @@ Config Config::from_string(const std::string& text) {
             cfg.website.buckets.push_back(std::move(wb));
         }
     }
+    if (auto* lc = root.find("lifecycle")) {
+        if (std::string v = lc->get("scan_interval"); !v.empty())
+            cfg.lifecycle.scan_interval_sec = parse_duration_sec(v);
+        // Upper bound one week: beyond that the operator almost certainly wanted "off" (0)
+        check_range("lifecycle.scan_interval", cfg.lifecycle.scan_interval_sec, 0, 604800);
+    }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
     // parse_level in app.cc maps anything unknown to Info, so a misspelled level
     // ("warning", "trace") would silently downgrade — the operator believes debug

@@ -162,6 +162,12 @@ struct WebsiteConfig {
     std::vector<WebsiteBucket> buckets;
 };
 
+// Lifecycle enforcement (roadmap §2.4): how often the runner walks the rule table.
+// 0 = enforcement disabled (the ?lifecycle API still works; rules just never fire)
+struct LifecycleConfig {
+    int scan_interval_sec = 3600;
+};
+
 struct BucketsConfig {
     std::string default_backend;
     std::vector<BucketRule> rules;
@@ -174,6 +180,7 @@ struct Config {
     std::vector<BackendConfig> backends;
     BucketsConfig buckets;
     WebsiteConfig website;
+    LifecycleConfig lifecycle;
     std::string log_level = "info";
 
     static Config load(const std::string& path);

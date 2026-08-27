@@ -68,6 +68,8 @@ private:
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::CorsStore> cors_store_;
+    std::shared_ptr<s3::LifecycleStore> lifecycle_store_;
+    std::unique_ptr<s3::LifecycleRunner> lifecycle_runner_;
     std::shared_ptr<s3::S3Service> service_;
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;
     std::shared_ptr<AsyncSemaphore> inflight_;

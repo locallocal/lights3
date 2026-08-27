@@ -44,6 +44,7 @@ namespace lights3::s3 {
     X(NoSuchBucket, 404)                 \
     X(NoSuchCORSConfiguration, 404)      \
     X(NoSuchKey, 404)                    \
+    X(NoSuchLifecycleConfiguration, 404) \
     X(NoSuchWebsiteConfiguration, 404)   \
     X(NoSuchUpload, 404)                 \
     X(NotImplemented, 501)               \

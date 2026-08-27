@@ -188,8 +188,8 @@ TEST(service_not_implemented_apis) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     // Explicitly unsupported subresources (docs/s3-protocol.md §1) get an explicit 501 instead of
-    // falling into the List/Get catch-all
-    for (auto* sub : {"acl", "policy", "versioning", "lifecycle", "tagging"}) {
+    // falling into the List/Get catch-all (lifecycle/tagging graduated with roadmap §2.4/§2.5)
+    for (auto* sub : {"acl", "policy", "versioning", "encryption", "replication"}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{sub, ""}})));
         CHECK_EQ(resp.status, 501);
         CHECK(contains(resp.small_body, "NotImplemented"));
@@ -2350,4 +2350,113 @@ TEST(service_object_tagging) {
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/tagb/none", "", {{"tagging", ""}})))
                  .status,
              404);
+}
+
+// ---- roadmap §2.4: lifecycle minimal subset ----
+
+TEST(service_bucket_lifecycle_api) {
+    CorsEnv env;  // root credential + memory backend; lifecycle store added on top
+    auto lstore = sync_wait(LifecycleStore::load(env.backend));
+    env.svc->set_lifecycle_store(lstore);
+    CHECK_EQ(env.signed_call("PUT", "/data").status, 200);
+
+    // No configuration yet → 404 with its own code; unsigned mutation refused
+    auto none = env.signed_call("GET", "/data", "", {{"lifecycle", ""}});
+    CHECK_EQ(none.status, 404);
+    CHECK(contains(none.small_body, "NoSuchLifecycleConfiguration"));
+
+    const std::string xml =
+        "<LifecycleConfiguration>"
+        "<Rule><ID>logs</ID><Filter><Prefix>logs/</Prefix></Filter><Status>Enabled</Status>"
+        "<Expiration><Days>30</Days></Expiration></Rule>"
+        "<Rule><Status>Enabled</Status>"
+        "<AbortIncompleteMultipartUpload><DaysAfterInitiation>7</DaysAfterInitiation>"
+        "</AbortIncompleteMultipartUpload></Rule>"
+        "</LifecycleConfiguration>";
+    CHECK_EQ(env.call(make_req("PUT", "/data", xml, {{"lifecycle", ""}})).status, 403);
+    CHECK_EQ(env.signed_call("PUT", "/data", xml, {{"lifecycle", ""}}).status, 200);
+    auto got = env.signed_call("GET", "/data", "", {{"lifecycle", ""}});
+    CHECK_EQ(got.status, 200);
+    CHECK(contains(got.small_body, "<Prefix>logs/</Prefix>"));
+    CHECK(contains(got.small_body, "<Days>30</Days>"));
+    CHECK(contains(got.small_body, "<DaysAfterInitiation>7</DaysAfterInitiation>"));
+
+    // Persistence across a reload
+    auto lstore2 = sync_wait(LifecycleStore::load(env.backend));
+    auto snap2 = lstore2->snapshot();
+    CHECK(LifecycleStore::find(snap2, "data") != nullptr);
+    CHECK_EQ(LifecycleStore::find(snap2, "data")->size(), size_t{2});
+
+    // Unsupported elements answer 501, malformed shapes 400
+    auto expect = [&](const char* rule_xml, int status) {
+        std::string full = std::string("<LifecycleConfiguration>") + rule_xml +
+                           "</LifecycleConfiguration>";
+        CHECK_EQ(env.signed_call("PUT", "/data", full, {{"lifecycle", ""}}).status, status);
+    };
+    expect("<Rule><Status>Enabled</Status><Transition><Days>1</Days>"
+           "<StorageClass>GLACIER</StorageClass></Transition></Rule>", 501);
+    expect("<Rule><Filter><Tag><Key>k</Key><Value>v</Value></Tag></Filter>"
+           "<Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule>", 501);
+    expect("<Rule><Status>Enabled</Status><Expiration>"
+           "<Date>2030-01-01T00:00:00Z</Date></Expiration></Rule>", 501);
+    expect("<Rule><Status>Enabled</Status></Rule>", 400);           // no action
+    expect("<Rule><Expiration><Days>1</Days></Expiration></Rule>", 400);  // no Status
+    expect("<Rule><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule>",
+           400);
+
+    // DELETE revokes, idempotent
+    CHECK_EQ(env.signed_call("DELETE", "/data", "", {{"lifecycle", ""}}).status, 204);
+    CHECK_EQ(env.signed_call("GET", "/data", "", {{"lifecycle", ""}}).status, 404);
+    CHECK_EQ(env.signed_call("DELETE", "/data", "", {{"lifecycle", ""}}).status, 204);
+}
+
+TEST(lifecycle_runner_pass) {
+    auto backend = std::make_shared<storage::MemoryBackend>();
+    auto store = sync_wait(LifecycleStore::load(backend));
+    sync_wait(backend->create_bucket("lcb"));
+    auto put = [&](const char* key) {
+        http::StringBodyReader body("x");
+        sync_wait(backend->put_object("lcb", key, storage::ObjectMeta{}, body));
+    };
+    put("old/a.log");
+    put("old/b.log");
+    put("keep/c.txt");
+    auto uid = sync_wait(backend->create_multipart("lcb", "old/mp.bin", {}));
+    http::StringBodyReader pbody("part");
+    sync_wait(backend->upload_part("lcb", "old/mp.bin", uid, 1, pbody));
+
+    std::vector<LifecycleRule> rules;
+    rules.push_back({.id = "exp", .prefix = "old/", .expiration_days = 7});
+    rules.back().abort_incomplete_days = 3;
+    sync_wait(store->put("lcb", rules));
+
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
+    BucketsConfig bcfg;
+    bcfg.default_backend = "mem";
+    LifecycleRunner runner(storage::BucketRouter::build(bcfg, std::move(bmap)), store);
+
+    // Nothing is old enough yet: a pass is a no-op
+    auto s0 = sync_wait(runner.run_once());
+    CHECK_EQ(s0.objects_expired, uint64_t{0});
+    CHECK_EQ(s0.uploads_aborted, uint64_t{0});
+
+    // Ten days later: the prefixed objects expire and the stale upload is aborted;
+    // out-of-prefix objects survive
+    runner.set_now_for_tests(
+        [] { return std::chrono::system_clock::now() + std::chrono::hours(24 * 10); });
+    auto s1 = sync_wait(runner.run_once());
+    CHECK_EQ(s1.objects_expired, uint64_t{2});
+    CHECK_EQ(s1.uploads_aborted, uint64_t{1});
+    CHECK_THROWS_S3(sync_wait(backend->head_object("lcb", "old/a.log")),
+                    S3ErrorCode::NoSuchKey);
+    CHECK_EQ(sync_wait(backend->head_object("lcb", "keep/c.txt")).size, uint64_t{1});
+    auto uploads = sync_wait(backend->list_multipart_uploads("lcb", {}));
+    CHECK_EQ(uploads.uploads.size(), size_t{0});
+
+    // Disabled rules never fire
+    rules[0].enabled = false;
+    sync_wait(store->put("lcb", rules));
+    put("old/late.log");
+    auto s2 = sync_wait(runner.run_once());
+    CHECK_EQ(s2.objects_expired, uint64_t{0});
 }

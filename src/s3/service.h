@@ -19,6 +19,7 @@
 #include "s3/auth/policy.h"
 #include "s3/auth/sigv4.h"
 #include "s3/cors_store.h"
+#include "s3/lifecycle.h"
 #include "s3/metrics.h"
 #include "s3/website_store.h"
 #include "storage/bucket_router.h"
@@ -104,6 +105,12 @@ public:
     // ?cors (root only). Not injected = no preflight answers, no CORS headers
     void set_cors_store(std::shared_ptr<CorsStore> store) { cors_store_ = std::move(store); }
 
+    // Lifecycle (roadmap §2.4): ?lifecycle rule management (root only); enforcement
+    // lives in LifecycleRunner, wired separately in the app assembly
+    void set_lifecycle_store(std::shared_ptr<LifecycleStore> store) {
+        lifecycle_store_ = std::move(store);
+    }
+
     // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
@@ -154,6 +161,12 @@ private:
     Task<http::HttpResponse> put_bucket_cors(http::HttpRequest& req, std::string bucket,
                                              const RequestAuth& auth);
     Task<http::HttpResponse> delete_bucket_cors(std::string bucket, const RequestAuth& auth);
+    // handlers/bucket_lifecycle.cc (roadmap §2.4, root credential only)
+    Task<http::HttpResponse> get_bucket_lifecycle(std::string bucket, const RequestAuth& auth);
+    Task<http::HttpResponse> put_bucket_lifecycle(http::HttpRequest& req, std::string bucket,
+                                                  const RequestAuth& auth);
+    Task<http::HttpResponse> delete_bucket_lifecycle(std::string bucket,
+                                                     const RequestAuth& auth);
     // OPTIONS preflight: dispatched before signature verification (browsers never sign
     // preflights); answers purely from the CORS rule table, no object access
     Task<http::HttpResponse> cors_preflight(http::HttpRequest& req, std::string bucket);
@@ -242,6 +255,7 @@ private:
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off
     std::shared_ptr<CorsStore> cors_store_;        // null = CORS off (OPTIONS -> 403)
+    std::shared_ptr<LifecycleStore> lifecycle_store_;  // null = ?lifecycle unavailable
 
     // Anonymous website rate limiting (roadmap §2.3): one token bucket per website
     // bucket; entries are bounded by the number of configured website buckets

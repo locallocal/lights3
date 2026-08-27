@@ -42,6 +42,7 @@ and the caller must be a root credential** (defined in §3).
 | `POST /-/admin/credentials` | Generate an AK/SK pair, optional `?comment=` note | `201` + JSON (the one and only full return of the SK) |
 | `GET /-/admin/credentials` | List all credentials (including static ones, SK masked) | `200` + JSON list |
 | `GET /-/admin/credentials/{ak}` | Query a single credential's metadata; `?show-secret=true` returns the plaintext SK (**dynamic/file credentials only** — static ones stay masked, see §10.5) | `200` + JSON |
+| `PUT /-/admin/credentials/{ak}` | Edit a dynamic credential's policy/comment in place (roadmap §2.5): fields present in the body are replaced, `"policy": null` clears; the persisted `rev` counter bumps and other instances pick the edit up via the sync ETag/rev comparison | `200` + JSON (SK masked) |
 | `DELETE /-/admin/credentials/{ak}` | Revoke (dynamic credentials only; static credentials belong to the config file) | `204` |
 
 Companion ops CLI: `s3adm` (`src/tools/s3adm.cc`, built next to `lights3`,

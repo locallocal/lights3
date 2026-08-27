@@ -198,12 +198,21 @@ must be adjusted before the first launch.
   `x-amz-copy-source-range` and copy-source conditional headers, and the
   source may live on a different backend than the destination); static website
   hosting for explicitly listed buckets (anonymous GET/HEAD with index/error
-  documents, [docs/en/static-website.md](docs/en/static-website.md))
+  documents, RedirectAllRequestsTo/RoutingRules, trailing-slash 302, per-bucket
+  anonymous rate limiting, [docs/en/static-website.md](docs/en/static-website.md));
+  CORS (`?cors` + OPTIONS preflight + response header injection); object tagging
+  (`?tagging` + `x-amz-tagging` + `x-amz-tagging-count`); lifecycle minimal
+  subset (Expiration.Days + AbortIncompleteMultipartUpload with a periodic
+  enforcement scan); checksum persistence and echo (`x-amz-checksum-*` stored
+  with the object, `x-amz-checksum-mode: ENABLED` on GET/HEAD, composite `-N`
+  multipart checksums); `GET ?partNumber` with `x-amz-mp-parts-count`; STS
+  AssumeRole session credentials (SigV4 `sts` scope, token-verified data-plane
+  requests with TTL)
 
 Not supported by design (returns NotImplemented; see
 [docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1): versioning, fine-grained
-ACL (only "private" is accepted), bucket policy, lifecycle,
-tagging/CORS, SSE-C/KMS, Object Lock, and presigned POST.
+ACL (only "private" is accepted), bucket policy, lifecycle
+transitions/tag filters, SSE-C/KMS, Object Lock, and presigned POST.
 
 ## Documentation
 

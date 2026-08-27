@@ -63,6 +63,19 @@ auth:
 #     index_suffix: index.html   # appended when the key is empty or ends with '/'; no '/' allowed
 #     error_key: error.html      # served as anonymous 4xx/5xx body (original status kept);
 #                                # omit for a built-in minimal HTML error page
+#     max_rps: 0                 # anonymous requests/second for this bucket (token bucket,
+#                                # burst = rps); 0 = unlimited (roadmap §2.3)
+#     redirect_all_host: ""      # non-empty: every anonymous request 301s to this host
+#     redirect_all_protocol: ""  # http|https; empty = follow the request scheme
+#   RoutingRules and CORS/lifecycle rules are managed via the ?website / ?cors /
+#   ?lifecycle APIs (root only) and persisted under .sys/.
+
+# ---------- Lifecycle enforcement (roadmap §2.4) ----------
+# How often the runner walks buckets with ?lifecycle rules, expiring objects
+# (Expiration.Days) and aborting stale multipart uploads
+# (AbortIncompleteMultipartUpload.DaysAfterInitiation).
+# lifecycle:
+#   scan_interval: 1h            # 0s = enforcement off (the API still stores rules)
 
 backends:
   # ---------- localfs / xlocalfs: local filesystem (docs/storage-backend.md) ----------

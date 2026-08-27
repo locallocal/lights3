@@ -8,21 +8,26 @@
 | --- | --- | --- |
 | Service | ListBuckets | 聚合各后端 |
 | Bucket | CreateBucket / DeleteBucket / HeadBucket | 单 region：CreateBucket 的 LocationConstraint 与配置 region 不符即 `InvalidLocationConstraint`；HeadBucket/CreateBucket 回 `x-amz-bucket-region` |
-| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects(批量) / CopyObject | Get 支持 Range、条件请求（If-Match/If-None-Match/If-Modified-Since）与六个 `response-*` 覆盖参数；Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires 随对象持久化并回显；Content-MD5 与 `x-amz-checksum-*`（crc32/crc32c/crc64nvme/sha1/sha256，头部或 aws-chunked trailer 形态均可）校验请求体，DeleteObjects **要求**完整性头 |
+| Object | PutObject / GetObject / HeadObject / DeleteObject / DeleteObjects(批量) / CopyObject | Get 支持 Range、条件请求（If-Match/If-None-Match/If-Modified-Since）、六个 `response-*` 覆盖参数与 `?partNumber`（206 + `x-amz-mp-parts-count`，分片布局在 complete 时记入 `part_sizes`）；Cache-Control/Content-Disposition/Content-Encoding/Content-Language/Expires 随对象持久化并回显；Content-MD5 与 `x-amz-checksum-*`（crc32/crc32c/crc64nvme/sha1/sha256，头部或 aws-chunked trailer 形态均可）校验请求体并**随对象持久化**，GET/HEAD 带 `x-amz-checksum-mode: ENABLED` 回显（含 `x-amz-checksum-type`；Range/partNumber 206 不回显）；DeleteObjects **要求**完整性头 |
+| Tagging | GetObjectTagging / PutObjectTagging / DeleteObjectTagging | `x-amz-tagging` 写入时带标签（各后端均持久化）；`x-amz-tagging-count` 回显；就地改标签（PUT/DELETE ?tagging）在 memory/localfs/xlocalfs/tiered/cloudproxy 可用，duostore 诚实 501（无 meta 原地更新原语） |
+| CORS | GetBucketCors / PutBucketCors / DeleteBucketCors + OPTIONS 预检 | root 专属（与 ?website 同两级模型）；规则持久化 `.sys/cors/<bucket>`；预检在验签**之前**分派（浏览器不给 OPTIONS 签名）；实际请求（成功与错误响应）注入 Allow-Origin/Expose-Headers/Vary |
+| Lifecycle | GetBucketLifecycle / PutBucketLifecycle / DeleteBucketLifecycle | root 专属；最小子集：Expiration.Days + AbortIncompleteMultipartUpload.DaysAfterInitiation（prefix 过滤）；`lifecycle.scan_interval`（默认 1h，0=关）周期执行；Transition/按 tag 过滤/Date 形态 → 501 |
+| STS | AssumeRole | `POST /`（path-style 部署）form 表单、SigV4 service scope `sts`；会话凭证（L3SA 前缀 AK/SK/token + TTL 900–43200s）继承**调用者**的 policy（无角色目录，永不越权）；内存态单实例、session 不能再 AssumeRole |
 | List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner；V1 只认 marker，V2 只认 continuation-token 与 start-after |
-| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder` |
+| Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated；两者均支持 encoding-type，uploads 的 delimiter 任意）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder`；分片校验和随 part 记录持久化，complete 由**已验证**的分片值算复合（`-N`）校验和（COMPOSITE；CRC64NVME/显式 FULL_OBJECT → 501），complete XML 的 Checksum* 声明与存量对照（不符 BadDigest） |
 
 静态网站托管**已支持**（docs/static-website.md）：按桶匿名 GET/HEAD 对象读、
 index/error 文档、`?website` 动态配置 API（root 专属）与
 `x-amz-website-redirect-location`。
 
 明确不支持（返回 `NotImplemented`）：versioning、ACL 细粒度（只认
-private）、policy、lifecycle、tagging、SSE-C/KMS、Object Lock、
-storage-class（只认 STANDARD）、presigned POST（presigned GET/PUT 的
-query 签名**支持**，见 §3.4）。拒绝面同时覆盖 query 子资源（白名单反转，
-名单外 → 501）与**请求头**（`x-amz-server-side-encryption*` /
-`x-amz-tagging` / `x-amz-object-lock-*` / `x-amz-grant-*` 等携带即 501，
-不再静默吞掉回 200）。
+private）、bucket policy、lifecycle Transition/按 tag 过滤、SSE-C/KMS、
+Object Lock、storage-class（只认 STANDARD）、presigned POST（presigned
+GET/PUT 的 query 签名**支持**，见 §3.4）。拒绝面同时覆盖 query 子资源
+（白名单反转，名单外 → 501）与**请求头**（`x-amz-server-side-encryption*` /
+`x-amz-object-lock-*` / `x-amz-grant-*` 等携带即 501，不再静默吞掉回 200）。
+PutObject/UploadPart 缺 Content-Length/Transfer-Encoding → 411
+`MissingContentLength`；`list-type=3` → `InvalidArgument`。
 
 ## 2. 路由与寻址
 
@@ -97,7 +102,16 @@ trailer 声明 → InvalidRequest（无 body 的声明如 CreateMultipartUpload 
 `X-Amz-Date` 超前服务器 15min 以上同样拒绝（AccessDenied "Request is not
 valid yet"），防未来时间戳把有效期无限外推。
 
-### 3.5 凭证管理
+### 3.5 凭证管理与 STS 会话
+
+STS 会话凭证（roadmap §2.6）：`AssumeRole` 铸造 `L3SA` 前缀的会话
+AK/SK/token（TTL 900–43200s），policy 继承调用者快照；数据面请求需带
+`x-amz-security-token`（header 或 presigned query）——token 不符
+`InvalidToken`、过期 `ExpiredToken`（重试信号）、永久 AK 携带 token 同样
+拒绝。会话表为内存态（单实例语义，会话本就短命），session 不入 `.sys`、
+不能是 root、不能再 AssumeRole。
+
+
 
 配置文件静态 AK/SK 表（secret 支持环境变量引用）是一期形态；二期已落地
 三来源模型（static=root / file / dynamic）、凭证文件热加载与轻量的

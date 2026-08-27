@@ -10,6 +10,7 @@ gaps are closed in three phases:
 | ① | Per-bucket anonymous read-only (§1–§2) | **Implemented** |
 | ② | index / error document semantics, HTML error pages for anonymous (§3) | **Implemented** |
 | ③ | Dynamic `?website` API (persisted to `.sys`), `x-amz-website-redirect-location` (§4) | **Implemented** |
+| ④ | Trailing-slash 302, RedirectAllRequestsTo / RoutingRules, per-bucket anonymous rate limiting (roadmap §2.3; Chinese original §6) | **Implemented** |
 
 ## 1. Configuration and anonymous read semantics
 
@@ -57,9 +58,12 @@ read-only policy (that bucket only, Read only). Everything else is unchanged:
   website list logs a WARN as a reminder.
 - Anonymous requests carry an empty access_key (sharing the access-log
   convention with "auth disabled").
-- Amplification: anonymous GETs cost no signature work;
-  `runtime.max_inflight_requests` is the only throttle today, per-bucket rate
-  limiting is future work.
+- Amplification: anonymous GETs cost no signature work; besides the global
+  `runtime.max_inflight_requests`, `website[].max_rps` (0 = unlimited; token
+  bucket, burst = rps) rate-limits anonymous requests per bucket — over-limit
+  answers a lightweight XML 503 (never the error document: fetching it would
+  spend exactly the backend read the limiter protects). Signed requests are
+  not rate-limited.
 
 ## 3. index / error document semantics (anonymous requests only)
 
@@ -67,10 +71,10 @@ read-only policy (that bucket only, Read only). Everything else is unchanged:
   slash) or ends with `/` (directory-style keys such as `docs/`) → append
   `index_suffix`, then run GetObject. `GET /my-site` and `GET /my-site/`
   both return `index.html`.
-  Note: `GET /my-site/docs` (no trailing slash, key missing) does **not**
-  issue the AWS website endpoint's 302 add-slash redirect — it goes straight
-  to the error document path. Write in-site links with the trailing slash;
-  the 302 semantics are a phase ③ candidate.
+  `GET /my-site/docs` (no trailing slash, key missing) answers **302 to
+  `/my-site/docs/`** when `docs/<index_suffix>` exists (AWS website-endpoint
+  behavior, roadmap §2.3); otherwise it goes to the error document path as
+  before.
 - **error**: when an anonymous request throws any S3 error (404/403/501/
   500…), and `error_key` is configured, that object becomes the response
   body with its own Content-Type while **keeping the original status code**
@@ -90,8 +94,15 @@ read-only policy (that bucket only, Read only). Everything else is unchanged:
 ## 4. Dynamic API and object-level redirects (phase ③)
 
 - **`PUT/GET/DELETE /bucket?website`** (AWS XML shape: `IndexDocument.Suffix`
-  / `ErrorDocument.Key`; `RoutingRules`/`RedirectAllRequestsTo` are an
-  explicit 501). Root (static credential) only — website configuration makes
+  / `ErrorDocument.Key` / `RedirectAllRequestsTo` / `RoutingRules`; the
+  latter two are implemented since roadmap §2.3 — see §6 of the Chinese
+  original: `RedirectAllRequestsTo` is exclusive with everything else and
+  301s every anonymous request; `RoutingRules` (≤50, first match wins)
+  evaluate prefix-only conditions before the object read and error-code
+  conditions before the error document; `GET /prefix` without a trailing
+  slash 302-redirects when the directory index exists; `website[].max_rps`
+  adds per-bucket anonymous rate limiting). Root (static credential) only —
+  website configuration makes
   a bucket anonymously readable, an operator decision rather than a tenant
   one, matching the admin plane's two-tier model. Validation matches the
   YAML side exactly; PUT on a nonexistent bucket is `NoSuchBucket`; DELETE

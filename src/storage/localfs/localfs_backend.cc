@@ -708,6 +708,25 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     co_return out;
 }
 
+Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::string_view key,
+                                              std::string tagging) {
+    validate_bucket_name(bucket, kAllowReserved);
+    validate_object_key(key);
+    validate_fs_object_key(key);
+    reject_reserved_key(key);
+    co_await pool_->schedule();
+    require_bucket(bucket);
+    // Same per-key serialization as PUT commits: a concurrent overwrite must not
+    // interleave with the xattr/sidecar rewrite pair
+    auto lk = co_await commit_lock(bucket, key).acquire();
+    co_await pool_->schedule();
+    fs::path p = object_path(bucket, key);
+    fsutil::TierInfo tier;
+    ObjectMeta meta = load_object_meta(p, std::string(key), &tier);  // missing -> NoSuchKey
+    meta.tagging = std::move(tagging);
+    fsutil::rewrite_object_meta(p, meta, tier, staging_ / "put");
+}
+
 // ---------- multipart (docs/storage-backend.md §3.2) ----------
 // Layout: <staging>/mpu/<upload_id>/{manifest, part.NNNNN, part.NNNNN.md5}
 // A part fsyncs its data first, then writes .md5: the presence of .md5 means the part data

@@ -154,6 +154,7 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
                             c.created.time_since_epoch())
                             .count();  // for parsing (no ready-made inverse for iso8601)
     j["comment"] = c.comment;
+    j["rev"] = c.rev;  // monotonic edit counter (roadmap §2.5), independent of "version"
     if (c.policy) j["policy"] = policy_to_json_obj(*c.policy);
     return j.dump(2) + "\n";
 }
@@ -194,6 +195,7 @@ std::optional<CredentialInfo> deserialize(std::string_view ak, const std::string
         c.created = std::chrono::system_clock::time_point(
             std::chrono::seconds(j.value("created_unix", int64_t{0})));
         c.comment = j.value("comment", "");
+        c.rev = j.value("rev", uint64_t{1});
         if (j.contains("policy")) c.policy = policy_from_json_obj(j.at("policy"));
         return c;
     } catch (const json::exception&) {
@@ -370,6 +372,7 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
                 if (auto c = deserialize(ak, body, store->master_key_, &was_plaintext)) {
                     if (was_plaintext && store->master_key_)
                         plaintext_aks.push_back(c->access_key);
+                    c->storage_etag = obj.etag;  // sync change detection (roadmap §2.5)
                     store->creds_.emplace(c->access_key, std::move(*c));
                 } else {
                     LOG_WARN("skipping malformed credential object {}/{}", kSysBucket, obj.key);
@@ -387,8 +390,9 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
         storage::ObjectMeta meta;
         meta.content_type = "application/json";
         http::StringBodyReader body(serialize(it->second, store->master_key_));
-        co_await store->backend_->put_object(kSysBucket, object_key(ak), std::move(meta),
-                                             body);
+        auto pr = co_await store->backend_->put_object(kSysBucket, object_key(ak),
+                                                       std::move(meta), body);
+        it->second.storage_etag = pr.etag;
     }
     if (!plaintext_aks.empty())
         LOG_INFO("re-encrypted {} plaintext credential object(s) with {}",
@@ -505,7 +509,9 @@ Task<CredentialInfo> CredentialStore::generate(std::string comment,
     storage::ObjectMeta meta;
     meta.content_type = "application/json";
     http::StringBodyReader body(serialize(c, master_key_));
-    co_await backend_->put_object(kSysBucket, object_key(c.access_key), std::move(meta), body);
+    auto pr =
+        co_await backend_->put_object(kSysBucket, object_key(c.access_key), std::move(meta), body);
+    c.storage_etag = pr.etag;
 
     {
         std::unique_lock lk(mu_);
@@ -549,6 +555,53 @@ Task<void> CredentialStore::remove(std::string_view ak) {
         creds_.erase(std::string(ak));
     }
     LOG_INFO("revoked credential {}", ak);
+}
+
+Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
+    CredentialInfo c;
+    {
+        std::shared_lock lk(mu_);
+        auto it = creds_.find(ak);
+        if (it == creds_.end())
+            throw S3Error(S3ErrorCode::InvalidAccessKeyId,
+                          "The specified access key does not exist.");
+        if (it->second.source == CredSource::kStatic)
+            throw S3Error(S3ErrorCode::MethodNotAllowed,
+                          "Static credentials are managed via the config file.");
+        if (it->second.source == CredSource::kFile)
+            throw S3Error(S3ErrorCode::MethodNotAllowed,
+                          "File-sourced credentials are managed via the credentials file.");
+        c = it->second;
+    }
+    if (upd.comment) c.comment = std::move(*upd.comment);
+    if (upd.set_policy) c.policy = std::move(upd.policy);
+    ++c.rev;
+
+    // Write-through, same ordering as generate: storage first, then memory
+    storage::ObjectMeta meta;
+    meta.content_type = "application/json";
+    http::StringBodyReader body(serialize(c, master_key_));
+    auto pr =
+        co_await backend_->put_object(kSysBucket, object_key(c.access_key), std::move(meta), body);
+    c.storage_etag = pr.etag;
+    {
+        std::unique_lock lk(mu_);
+        auto it = creds_.find(ak);
+        // Concurrently revoked while we were writing: do not resurrect — remove the
+        // object this update just re-created and report the miss
+        if (it == creds_.end() || it->second.source != CredSource::kDynamic) {
+            lk.unlock();
+            try {
+                co_await backend_->delete_object(kSysBucket, object_key(c.access_key));
+            } catch (...) {
+            }
+            throw S3Error(S3ErrorCode::InvalidAccessKeyId,
+                          "The specified access key does not exist.");
+        }
+        it->second = c;
+    }
+    LOG_INFO("updated credential {} (rev {})", c.access_key, c.rev);
+    co_return c;
 }
 
 // ---------- File hot reload (§10.2) ----------
@@ -621,15 +674,17 @@ Task<void> CredentialStore::sync_now() {
             if (c.source == CredSource::kDynamic) snapshot.push_back(ak);
     }
 
-    // Full set of dynamic-credential AKs currently in storage
-    std::set<std::string, std::less<>> on_storage;
+    // Full set of dynamic-credential AKs currently in storage, with the listed object
+    // ETag: an ETag differing from the one this instance last saw means the credential
+    // was edited elsewhere (policy update, roadmap §2.5) and must be re-read
+    std::map<std::string, std::string, std::less<>> on_storage;  // ak -> etag
     if (co_await backend_->bucket_exists(kSysBucket)) {
         storage::ListOptions opt;
         opt.prefix = std::string(kCredPrefix);
         for (;;) {
             auto page = co_await backend_->list_objects(kSysBucket, opt);
             for (auto& obj : page.objects)
-                on_storage.insert(obj.key.substr(kCredPrefix.size()));
+                on_storage.emplace(obj.key.substr(kCredPrefix.size()), obj.etag);
             if (!page.is_truncated) break;
             opt.start_after = page.next_token;
         }
@@ -653,10 +708,16 @@ Task<void> CredentialStore::sync_now() {
         }
     }
 
-    // Additions: in storage, not in memory -> pull into the table
-    for (auto& ak : on_storage) {
-        if (find(ak)) continue;
-        if (recently_revoked.contains(ak)) continue;
+    // Additions and edits: in storage but not in memory -> pull in; in memory with a
+    // different storage ETag -> re-read and replace (edit made elsewhere, roadmap §2.5)
+    for (auto& [ak, etag] : on_storage) {
+        bool changed = false;
+        if (auto cur = find(ak)) {
+            if (cur->source != CredSource::kDynamic) continue;  // static/file shadows it
+            if (etag.empty() || cur->storage_etag == etag) continue;  // unchanged
+            changed = true;
+        }
+        if (!changed && recently_revoked.contains(ak)) continue;
         try {
             auto stream = co_await backend_->get_object(kSysBucket, object_key(ak),
                                                         std::nullopt);
@@ -667,8 +728,21 @@ Task<void> CredentialStore::sync_now() {
                          kCredPrefix, ak);
                 continue;
             }
+            c->storage_etag = etag;
             std::unique_lock lk(mu_);
-            if (creds_.emplace(c->access_key, std::move(*c)).second) ++added;
+            if (changed) {
+                auto it = creds_.find(ak);
+                // Replace only a still-dynamic entry with a strictly newer rev — an
+                // equal-rev ETag drift (e.g. a v1->v2 re-encryption) keeps local state
+                if (it != creds_.end() && it->second.source == CredSource::kDynamic &&
+                    c->rev >= it->second.rev) {
+                    bool newer = c->rev > it->second.rev;
+                    it->second = std::move(*c);
+                    if (newer) ++added;
+                }
+            } else if (creds_.emplace(c->access_key, std::move(*c)).second) {
+                ++added;
+            }
         } catch (const std::exception& e) {
             // At runtime, a single failed object fetch does not abort the sync (unlike startup's fail-fast)
             LOG_WARN("sync: failed to load credential {}: {}", ak, e.what());

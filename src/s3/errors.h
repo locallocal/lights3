@@ -32,6 +32,7 @@ namespace lights3::s3 {
     X(InvalidLocationConstraint, 400)    \
     X(InvalidObjectState, 403)           \
     X(InvalidPart, 400)                  \
+    X(InvalidPartNumber, 416)            \
     X(InvalidPartOrder, 400)             \
     X(InvalidRange, 416)                 \
     X(InvalidRequest, 400)               \

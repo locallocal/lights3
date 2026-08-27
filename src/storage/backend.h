@@ -71,6 +71,12 @@ struct ObjectMeta {
     // part_sizes[i] is the size of part i+1. Empty = single-part or unknown (objects
     // completed before this field existed)
     std::vector<uint64_t> part_sizes;
+
+    // Object tagging (roadmap §2.5): canonical URL-encoded "k=v&k2=v2" (both sides
+    // aws_uri_encoded — safe for every text serializer), empty = no tags. Rides
+    // kStdMetaFields for extraction/persistence but is never echoed as a header
+    // (GET answers x-amz-tagging-count instead; ?tagging returns the XML)
+    std::string tagging;
 };
 
 // The value a serializer must persist: header-form checksums sit in checksum_value from
@@ -98,6 +104,9 @@ struct StdMetaField {
     const char* header;              // S3 request/response header name
     const char* store_key;           // key name used for backend persistence
     std::string ObjectMeta::* field;
+    // false = persisted/extracted via the table but not echoed as a response header
+    // (tagging answers via x-amz-tagging-count / ?tagging instead)
+    bool echo = true;
 };
 inline constexpr StdMetaField kStdMetaFields[] = {
     {"Cache-Control", "cache_control", &ObjectMeta::cache_control},
@@ -106,6 +115,7 @@ inline constexpr StdMetaField kStdMetaFields[] = {
     {"Content-Language", "content_language", &ObjectMeta::content_language},
     {"Expires", "expires", &ObjectMeta::expires},
     {"x-amz-website-redirect-location", "website_redirect", &ObjectMeta::website_redirect},
+    {"x-amz-tagging", "tagging", &ObjectMeta::tagging, /*echo=*/false},
 };
 
 struct ObjectStream {
@@ -266,6 +276,33 @@ struct IStorageBackend {
                                                             ObjectMeta /*meta*/) {
         co_return std::nullopt;
     }
+    // GET ?partNumber support (roadmap §2.5): byte extent of one part of a completed
+    // multipart object. The default resolves nothing — L2 falls back to the part_sizes
+    // layout in ObjectMeta; proxy backends whose remote owns the layout (cloudproxy)
+    // override this with a remote lookup. nullopt = layout unknown here
+    struct ObjectPartExtent {
+        uint64_t offset = 0;
+        uint64_t size = 0;
+        int parts_count = 0;
+    };
+    virtual Task<std::optional<ObjectPartExtent>> resolve_object_part(
+        std::string_view /*bucket*/, std::string_view /*key*/, int /*part_no*/) {
+        co_return std::nullopt;
+    }
+
+    // PUT/DELETE ?tagging (roadmap §2.5): replace an existing object's tag set in place
+    // (canonical URL-encoded form; empty = delete all tags) without rewriting the data.
+    // Default is an honest 501 — backends whose meta lives inside an atomic data commit
+    // record (duostore) have no in-place meta update primitive yet; tags supplied at
+    // PUT/CreateMultipartUpload time still persist everywhere via ObjectMeta.tagging
+    virtual Task<void> set_object_tagging(std::string_view /*bucket*/, std::string_view /*key*/,
+                                          std::string /*tagging*/) {
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented,
+                          "In-place object tag modification is not implemented for this "
+                          "storage backend; set x-amz-tagging when writing the object.");
+        co_return;  // unreachable; keeps this a coroutine
+    }
+
     // S3 semantics: also return success for a non-existent key (idempotent delete)
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;

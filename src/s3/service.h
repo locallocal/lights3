@@ -171,6 +171,11 @@ private:
     Task<http::HttpResponse> get_object(http::HttpRequest& req, std::string bucket,
                                         std::string key, bool head_only);
     Task<http::HttpResponse> delete_object(std::string bucket, std::string key);
+    // ?tagging subresource (roadmap §2.5)
+    Task<http::HttpResponse> get_object_tagging(std::string bucket, std::string key);
+    Task<http::HttpResponse> put_object_tagging(http::HttpRequest& req, std::string bucket,
+                                                std::string key);
+    Task<http::HttpResponse> delete_object_tagging(std::string bucket, std::string key);
     Task<http::HttpResponse> delete_objects(http::HttpRequest& req, std::string bucket,
                                             const RequestAuth& auth);
     // handlers/list_objects.cc

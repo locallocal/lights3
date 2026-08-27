@@ -37,6 +37,12 @@ struct CredentialInfo {
     std::string comment;
     std::chrono::system_clock::time_point created;
     std::optional<CredentialPolicy> policy;  // file/dynamic only; static credentials are always unrestricted
+    // Edit propagation (roadmap §2.5): rev is a monotonic edit counter persisted in the
+    // JSON (distinct from "version", which encodes the encryption format); storage_etag
+    // is the credential object's ETag as last seen by this instance — sync re-reads an
+    // AK only when the listed ETag differs, so policy edits propagate cheaply
+    uint64_t rev = 1;
+    std::string storage_etag;
 
     bool is_static() const { return source == CredSource::kStatic; }
 };
@@ -83,6 +89,17 @@ public:
                                   std::optional<CredentialPolicy> policy = std::nullopt);
     // Nonexistent -> InvalidAccessKeyId; static/file credentials -> MethodNotAllowed (managed by config/file)
     Task<void> remove(std::string_view ak);
+
+    // In-place edit of a dynamic credential (roadmap §2.5): fields present are replaced
+    // (set_policy + empty policy = clear). Write-through with a rev bump; other
+    // instances pick the edit up via the sync ETag comparison. Same source rules as
+    // remove (static/file -> MethodNotAllowed, missing -> InvalidAccessKeyId)
+    struct Update {
+        std::optional<std::string> comment;
+        bool set_policy = false;
+        std::optional<CredentialPolicy> policy;  // meaningful only when set_policy
+    };
+    Task<CredentialInfo> update(std::string_view ak, Update upd);
 
     std::optional<CredentialInfo> find(std::string_view ak) const;
     std::vector<CredentialInfo> list() const;  // sorted by AK

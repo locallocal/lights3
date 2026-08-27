@@ -132,6 +132,24 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         CHECK_EQ(cmm.part_sizes.at(0), uint64_t{5});
         sync_wait(b.delete_object("suite-bkt", "ck.bin"));
         sync_wait(b.delete_object("suite-bkt", "ckm.bin"));
+
+        // Tagging round trip (roadmap §2.5): write-time tags persist everywhere; the
+        // in-place mutation is allowed to answer an honest 501 (duostore has no
+        // meta-only update primitive yet)
+        ObjectMeta tm;
+        tm.tagging = "env=prod&team=data%20eng";
+        put(b, "suite-bkt", "tg.bin", "x", tm);
+        CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging,
+                 "env=prod&team=data%20eng");
+        try {
+            sync_wait(b.set_object_tagging("suite-bkt", "tg.bin", "k3=v3"));
+            CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging, "k3=v3");
+            sync_wait(b.set_object_tagging("suite-bkt", "tg.bin", ""));
+            CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging, "");
+        } catch (const s3::S3Error& e) {
+            CHECK(e.code == S3ErrorCode::NotImplemented);
+        }
+        sync_wait(b.delete_object("suite-bkt", "tg.bin"));
     }
 
     // Body throws mid-read: the exception must propagate as-is, and no partial object may be left behind (backend.h contract).

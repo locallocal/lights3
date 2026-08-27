@@ -73,6 +73,14 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
+    // GET ?partNumber (roadmap §2.5): the remote owns the part layout — resolved with a
+    // HEAD ?partNumber=N upstream (Content-Range + x-amz-mp-parts-count)
+    Task<std::optional<ObjectPartExtent>> resolve_object_part(std::string_view bucket,
+                                                              std::string_view key,
+                                                              int part_no) override;
+    // ?tagging forwarded to the remote (roadmap §2.5)
+    Task<void> set_object_tagging(std::string_view bucket, std::string_view key,
+                                  std::string tagging) override;
     // Same-backend copy fast path (docs/archive/gaps.md §6.2): remote server-side COPY
     // (x-amz-copy-source) -- previously an intra-cloud copy would "download to the gateway
     // and upload back", doubling cross-network traffic and cost

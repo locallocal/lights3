@@ -221,6 +221,20 @@ Task<ObjectMeta> MemoryBackend::head_object(std::string_view bucket, std::string
     co_return it->second.meta;
 }
 
+Task<void> MemoryBackend::set_object_tagging(std::string_view bucket, std::string_view key,
+                                             std::string tagging) {
+    validate_bucket_name(bucket, kAllowReserved);
+    validate_object_key(key);
+    std::lock_guard lk(m_);
+    auto& b = bucket_or_throw(std::string(bucket));
+    auto it = b.objects.find(std::string(key));
+    if (it == b.objects.end())
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(key));
+    it->second.meta.tagging = std::move(tagging);
+    co_return;
+}
+
 Task<void> MemoryBackend::delete_object(std::string_view bucket, std::string_view key) {
     validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);

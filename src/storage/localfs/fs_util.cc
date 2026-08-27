@@ -242,6 +242,12 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
 }
 
+void rewrite_object_meta(const fs::path& data_path, const ObjectMeta& meta,
+                         const TierInfo& tier, const fs::path& staging_put) {
+    set_meta_xattr(data_path, meta, tier);
+    write_sidecar(fs::path(data_path.string() + kSidecarSuffix), meta, staging_put, tier);
+}
+
 void check_put_condition(const fs::path& data_path, const PutCondition& cond,
                          std::string_view key) {
     if (!cond.active()) return;

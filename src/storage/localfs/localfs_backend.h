@@ -60,6 +60,9 @@ public:
                                                     std::string_view dst_key,
                                                     ObjectMeta meta) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
+    // ?tagging in-place meta rewrite (roadmap §2.5): xattr + sidecar under the per-key commit lock
+    Task<void> set_object_tagging(std::string_view bucket, std::string_view key,
+                                  std::string tagging) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
     // multipart: parts land in <staging>/mpu/<upload_id>/part.NNNNN, complete concatenates

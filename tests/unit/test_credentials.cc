@@ -693,3 +693,95 @@ TEST(policy_prefix_batch_delete_and_listing) {
     CHECK_EQ(env.call("GET", "/shared/other/secret", root).status, 200);  // not deleted beyond authority
     CHECK_EQ(env.call("GET", "/shared/logs/mine", root).status, 404);
 }
+
+// ---- roadmap §2.5: in-place credential policy/comment update + multi-instance propagation ----
+
+TEST(admin_api_update_credential) {
+    SvcEnv env;
+    Credential root{kRootAk, kRootSk};
+
+    // Create a dynamic credential restricted to bucket "boxa"
+    auto created = env.call("POST", "/-/admin/credentials", root, {}, R"({
+        "comment": "before",
+        "policy": {"buckets": ["boxa"]}
+    })");
+    CHECK_EQ(created.status, 201);
+    auto cj = body_json(created);
+    Credential dyn{cj["access_key"], cj["secret_key"]};
+    CHECK_EQ(cj["rev"].get<uint64_t>(), uint64_t{1});
+
+    CHECK_EQ(env.call("PUT", "/boxa", root).status, 200);
+    CHECK_EQ(env.call("PUT", "/boxb", root).status, 200);
+    CHECK_EQ(env.call("PUT", "/boxa/k", dyn, {}, "v").status, 200);
+    CHECK_EQ(env.call("PUT", "/boxb/k", dyn, {}, "v").status, 403);
+
+    // Replace the policy: allowed buckets flip from boxa to boxb
+    auto upd = env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {},
+                        R"({"policy": {"buckets": ["boxb"]}})");
+    CHECK_EQ(upd.status, 200);
+    CHECK_EQ(body_json(upd)["rev"].get<uint64_t>(), uint64_t{2});
+    CHECK_EQ(env.call("PUT", "/boxb/k", dyn, {}, "v").status, 200);
+    CHECK_EQ(env.call("PUT", "/boxa/k2", dyn, {}, "v").status, 403);
+
+    // "policy": null clears the restriction; comment-only update keeps it cleared
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {},
+                      R"({"policy": null})")
+                 .status,
+             200);
+    CHECK_EQ(env.call("PUT", "/boxa/k3", dyn, {}, "v").status, 200);
+    auto commented = env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {},
+                              R"({"comment": "after"})");
+    CHECK_EQ(commented.status, 200);
+    CHECK_EQ(body_json(commented)["comment"], "after");
+    CHECK_EQ(body_json(commented)["rev"].get<uint64_t>(), uint64_t{4});
+
+    // Rejections: static credential, unknown AK, empty body, unknown fields
+    CHECK_EQ(env.call("PUT", std::string("/-/admin/credentials/") + kRootAk, root, {},
+                      R"({"comment": "x"})")
+                 .status,
+             405);
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/L3AKNOPE", root, {},
+                      R"({"comment": "x"})")
+                 .status,
+             403);
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {}, "").status,
+             400);
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {},
+                      R"({"nope": 1})")
+                 .status,
+             400);
+
+    // Update survives a reload (write-through persisted the new rev)
+    auto store2 = load_store(env.backend, root_cfg());
+    auto info = store2->find(dyn.access_key);
+    CHECK(info && info->comment == "after" && !info->policy);
+    CHECK_EQ(info->rev, uint64_t{4});
+}
+
+TEST(credstore_update_propagates_via_sync) {
+    auto be = std::make_shared<storage::MemoryBackend>();
+    auto a = load_store(be, root_cfg());
+    auto b = load_store(be, root_cfg());
+    auto c = sync_wait(a->generate("shared"));
+
+    // Instance B learns about the new credential
+    sync_wait(b->sync_now());
+    CHECK(b->find(c.access_key).has_value());
+    CHECK(!b->find(c.access_key)->policy);
+
+    // A edits the policy; B picks the edit up on its next sync (ETag+rev comparison)
+    CredentialStore::Update upd;
+    upd.set_policy = true;
+    CredentialPolicy p;
+    p.buckets = {"only-this"};
+    upd.policy = std::move(p);
+    sync_wait(a->update(c.access_key, std::move(upd)));
+    sync_wait(b->sync_now());
+    auto got = b->find(c.access_key);
+    CHECK(got && got->policy && got->policy->buckets == std::vector<std::string>{"only-this"});
+    CHECK_EQ(got->rev, uint64_t{2});
+
+    // An unchanged round does not regress anything
+    sync_wait(b->sync_now());
+    CHECK_EQ(b->find(c.access_key)->rev, uint64_t{2});
+}

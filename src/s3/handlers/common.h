@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "core/task.h"
 #include "core/util/time.h"
@@ -36,8 +37,47 @@ inline void reject_control_chars(std::string_view name, const std::string& v) {
                       "Header '" + std::string(name) + "' must not contain line breaks.");
 }
 
+// Object tagging (roadmap §2.5): "k=v&k2=v2", both sides percent-encoded. AWS limits:
+// at most 10 tags, unique keys, key 1..128 chars, value 0..256 chars (decoded)
+inline std::vector<std::pair<std::string, std::string>> parse_tagging(const std::string& s) {
+    std::vector<std::pair<std::string, std::string>> out;
+    auto bad = [](const std::string& why) {
+        throw S3Error(S3ErrorCode::InvalidArgument, "Invalid tag set: " + why);
+    };
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t amp = s.find('&', pos);
+        if (amp == std::string::npos) amp = s.size();
+        std::string item = s.substr(pos, amp - pos);
+        if (item.empty()) bad("empty tag entry");
+        auto eq = item.find('=');
+        std::string k = util::percent_decode(eq == std::string::npos ? item : item.substr(0, eq));
+        std::string v = eq == std::string::npos ? "" : util::percent_decode(item.substr(eq + 1));
+        if (k.empty() || k.size() > 128) bad("tag keys must be 1-128 characters");
+        if (v.size() > 256) bad("tag values must be at most 256 characters");
+        for (auto& [ek, ev] : out)
+            if (ek == k) bad("duplicate tag key '" + k + "'");
+        out.emplace_back(std::move(k), std::move(v));
+        if (out.size() > 10) bad("an object may carry at most 10 tags");
+        pos = amp + 1;
+    }
+    return out;
+}
+
+// Canonical stored form: strict aws_uri_encode on both sides — the safe character set
+// keeps every text serializer (TSV/kv) intact regardless of what the client encoded
+inline std::string encode_tagging(const std::vector<std::pair<std::string, std::string>>& tags) {
+    std::string out;
+    for (auto& [k, v] : tags) {
+        if (!out.empty()) out += '&';
+        out += util::aws_uri_encode(k, /*encode_slash=*/true) + "=" +
+               util::aws_uri_encode(v, /*encode_slash=*/true);
+    }
+    return out;
+}
+
 // Shared by PutObject / CreateMultipartUpload: extracts Content-Type, x-amz-meta-*, and
-// the six first-class S3 metadata fields (docs/archive/gaps.md §5.2)
+// the first-class S3 metadata fields (docs/archive/gaps.md §5.2), incl. x-amz-tagging
 inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     storage::ObjectMeta meta;
     if (auto ct = req.headers.get("Content-Type")) meta.content_type = *ct;
@@ -64,6 +104,8 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "x-amz-website-redirect-location must start with '/', 'http://' or "
                       "'https://'.");
+    // x-amz-tagging validated and re-encoded canonically (roadmap §2.5)
+    if (!meta.tagging.empty()) meta.tagging = encode_tagging(parse_tagging(meta.tagging));
     return meta;
 }
 

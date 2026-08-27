@@ -490,6 +490,12 @@ Task<std::string> TieredBackend::create_multipart(std::string_view bucket, std::
                                                   ObjectMeta meta) {
     co_return co_await local_->create_multipart(bucket, key, std::move(meta));
 }
+Task<void> TieredBackend::set_object_tagging(std::string_view bucket, std::string_view key,
+                                             std::string tagging) {
+    // Meta lives in the local xattr/sidecar even for demoted stubs — pure delegation
+    co_return co_await local_->set_object_tagging(bucket, key, std::move(tagging));
+}
+
 Task<PutResult> TieredBackend::upload_part(std::string_view bucket, std::string_view key,
                                            std::string_view upload_id, int part_no,
                                            http::BodyReader& body,

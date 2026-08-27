@@ -115,7 +115,7 @@ private:
 // Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
     "acl",         "policy",       "versioning",     "versions",
-    "lifecycle",   "tagging",      "encryption",     "object-lock",
+    "lifecycle",   "encryption",   "object-lock",
     "legal-hold",  "retention",    "torrent",        "replication",    "logging",
     "notification", "requestPayment", "accelerate",  "analytics",      "inventory",
     "intelligent-tiering", "metrics", "ownershipControls", "publicAccessBlock",
@@ -140,11 +140,8 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         "x-amz-object-lock-",                        // mode / retain-until-date / legal-hold
         "x-amz-grant-",                              // the five ACL grant headers, same class as x-amz-acl
     };
-    // x-amz-website-redirect-location left this list with docs/static-website.md phase ③:
-    // it is now a first-class metadata field (kStdMetaFields)
-    constexpr std::string_view kExact[] = {
-        "x-amz-tagging",
-    };
+    // x-amz-website-redirect-location left this list with docs/static-website.md phase ③,
+    // x-amz-tagging with roadmap §2.5: both are first-class metadata fields now
     for (auto& [k, v] : req.headers.items()) {
         std::string lk;
         lk.reserve(k.size());
@@ -167,8 +164,6 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         }
         for (auto p : kPrefixes)
             if (lk.rfind(p, 0) == 0) refuse();
-        for (auto e : kExact)
-            if (lk == e) refuse();
     }
 }
 
@@ -856,6 +851,26 @@ std::span<const S3Service::Route> S3Service::route_table() {
          return s.delete_objects(req, std::move(b), auth);
      }},
 
+    // ?tagging subresource (roadmap §2.5)
+    {"GET", Scope::Object, "tagging", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
+        const RequestAuth&) {
+         return s.get_object_tagging(std::move(b), std::move(k));
+     }},
+    {"PUT", Scope::Object, "tagging", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
+        const RequestAuth&) {
+         return s.put_object_tagging(req, std::move(b), std::move(k));
+     }},
+    {"DELETE", Scope::Object, "tagging", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
+        const RequestAuth&) {
+         return s.delete_object_tagging(std::move(b), std::move(k));
+     }},
+
     // Object level: multipart
     {"POST", Scope::Object, "uploads", "",
      Action::Write,
@@ -898,9 +913,12 @@ std::span<const S3Service::Route> S3Service::route_table() {
          return s.put_object(req, std::move(b), std::move(k));
      }},
     // response-* override parameters (docs/archive/gaps.md §5.3): the family most used in presigned download links
+    // partNumber (roadmap §2.5): reads one part of a completed multipart object; ranges
+    // resolve from the part_sizes layout recorded at complete
     {"GET", Scope::Object, "",
      "response-content-type response-content-language response-expires "
-     "response-cache-control response-content-disposition response-content-encoding",
+     "response-cache-control response-content-disposition response-content-encoding "
+     "partNumber",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
@@ -908,7 +926,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
      }},
     {"HEAD", Scope::Object, "",
      "response-content-type response-content-language response-expires "
-     "response-cache-control response-content-disposition response-content-encoding",
+     "response-cache-control response-content-disposition response-content-encoding "
+     "partNumber",
      Action::Read,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {

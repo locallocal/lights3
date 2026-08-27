@@ -864,6 +864,104 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
+Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolve_object_part(
+    std::string_view bucket, std::string_view key, int part_no) {
+    validate_object_key(key);
+    auto rb = remote_bucket(bucket);
+    auto t = ctx_->target(rb);
+    auto path = t.object_path(key_path(key));
+    std::string query = "partNumber=" + std::to_string(part_no);
+    std::string full = path + "?" + query;
+    auto res = co_await control_io([&] {
+        return ctx_->with_retry("head_part", [&](httplib::Client& c) {
+            return c.Head(full, ctx_->signed_headers("HEAD", path, query, {}, "", t.host));
+        });
+    });
+    if (!res) ctx_->throw_transport_error(res.error());
+    if (res->status == 416)
+        throw S3Error(S3ErrorCode::InvalidPartNumber,
+                      "The requested partnumber is not satisfiable", std::string(key));
+    if (res->status != 200 && res->status != 206)
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key,
+                                 resource_of(bucket, key));
+    int count = 1;
+    if (res->has_header("x-amz-mp-parts-count")) {
+        try {
+            count = std::stoi(res->get_header_value("x-amz-mp-parts-count"));
+        } catch (...) {
+        }
+    }
+    ObjectPartExtent pe;
+    pe.parts_count = count;
+    if (res->status == 206) {
+        std::string cr = res->get_header_value("Content-Range");
+        unsigned long long a = 0, b = 0, total = 0;
+        if (sscanf(cr.c_str(), "bytes %llu-%llu/%llu", &a, &b, &total) != 3)
+            throw S3Error(S3ErrorCode::InternalError,
+                          "cloudproxy: remote part HEAD has unparsable Content-Range: " + cr);
+        pe.offset = a;
+        pe.size = b - a + 1;
+    } else {
+        pe.offset = 0;
+        pe.size = require_content_length(*res);
+    }
+    co_return pe;
+}
+
+Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
+                                                 std::string_view key, std::string tagging) {
+    validate_object_key(key);
+    auto rb = remote_bucket(bucket);
+    auto t = ctx_->target(rb);
+    auto path = t.object_path(key_path(key));
+    std::string query = "tagging";
+    std::string full = path + "?" + query;
+    if (tagging.empty()) {  // DeleteObjectTagging upstream
+        auto res = co_await control_io([&] {
+            return ctx_->with_retry("delete_tagging", [&](httplib::Client& c) {
+                return c.Delete(full,
+                                ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
+            });
+        });
+        if (!res) ctx_->throw_transport_error(res.error());
+        if (res->status / 100 == 2) co_return;
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key,
+                                 resource_of(bucket, key));
+    }
+    // Rebuild the Tagging XML from the canonical encoded form
+    s3::XmlWriter w;
+    w.open("Tagging");
+    w.open("TagSet");
+    size_t pos = 0;
+    while (pos < tagging.size()) {
+        size_t amp = tagging.find('&', pos);
+        if (amp == std::string::npos) amp = tagging.size();
+        std::string item = tagging.substr(pos, amp - pos);
+        auto eq = item.find('=');
+        w.open("Tag");
+        w.element("Key", util::percent_decode(eq == std::string::npos ? item
+                                                                      : item.substr(0, eq)));
+        w.element("Value",
+                  eq == std::string::npos ? "" : util::percent_decode(item.substr(eq + 1)));
+        w.close();
+        pos = amp + 1;
+    }
+    w.close();
+    w.close();
+    const std::string body = w.str();
+    const std::string body_hash = util::sha256_hex(body);
+    auto res = co_await control_io([&] {
+        return ctx_->with_retry("put_tagging", [&](httplib::Client& c) {
+            return c.Put(full,
+                         ctx_->signed_headers("PUT", path, query, {}, body_hash, t.host),
+                         body, "application/xml");
+        });
+    });
+    if (!res) ctx_->throw_transport_error(res.error());
+    if (res->status / 100 == 2) co_return;
+    ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
+}
+
 Task<void> CloudProxyBackend::delete_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);

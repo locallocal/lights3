@@ -1054,8 +1054,9 @@ TEST(service_unsupported_headers_rejected) {
         req.headers.add(std::move(header), std::move(value));
         return sync_wait(svc.dispatch(std::move(req)));
     };
+    // x-amz-tagging left this list with roadmap §2.5 (now a first-class metadata field)
     for (const char* h : {"x-amz-server-side-encryption",
-                          "x-amz-server-side-encryption-customer-algorithm", "x-amz-tagging",
+                          "x-amz-server-side-encryption-customer-algorithm",
                           "x-amz-object-lock-mode", "x-amz-grant-read"}) {
         auto resp = try_put(h, "whatever");
         CHECK_EQ(resp.status, 501);
@@ -1095,9 +1096,9 @@ TEST(service_query_whitelist) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "0123456789")));
 
     // Exact gaps from the blacklist era: each silently degraded to "read the whole object".
-    // response-* was implemented in §5.3 and is no longer listed here -- unimplemented
+    // response-* was implemented in §5.3, partNumber in roadmap §2.5 -- unimplemented
     // subresources must still 501
-    for (auto q : {std::pair{"attributes", ""}, std::pair{"partNumber", "1"}}) {
+    for (auto q : {std::pair{"attributes", ""}, std::pair{"restore", ""}}) {
         auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{q.first, q.second}})));
         CHECK_EQ(resp.status, 501);
         CHECK(contains(resp.small_body, "<Code>NotImplemented</Code>"));
@@ -2229,4 +2230,124 @@ TEST(service_checksum_multipart_composite) {
     CHECK_EQ(gr.headers.get("x-amz-checksum-crc32").value_or(""), "wpn7tg==-2");
     CHECK_EQ(gr.headers.get("x-amz-checksum-type").value_or(""), "COMPOSITE");
     CHECK_EQ(body_of(gr), "helloworld");
+}
+
+// ---- roadmap §2.5: GET/HEAD ?partNumber ----
+TEST(service_get_object_part_number) {
+    auto svc = make_service_noauth();
+    svc.set_min_part_size(0);
+    sync_wait(svc.dispatch(make_req("PUT", "/pnb")));
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/pnb/mp", "", {{"uploads", ""}})));
+    std::string uid = xelem(body_of(init), "UploadId");
+    std::string etags[2];
+    const char* datas[2] = {"hello", "world"};
+    for (int i = 0; i < 2; ++i) {
+        auto r = sync_wait(svc.dispatch(make_req(
+            "PUT", "/pnb/mp", datas[i], {{"partNumber", std::to_string(i + 1)}, {"uploadId", uid}})));
+        etags[i] = r.headers.get("ETag").value_or("");
+    }
+    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
+                      etags[0] + "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" +
+                      etags[1] + "</ETag></Part></CompleteMultipartUpload>";
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("POST", "/pnb/mp", xml, {{"uploadId", uid}})))
+                 .status,
+             200);
+
+    // Part 2 = bytes 5-9 of the 10-byte object
+    auto g2 = sync_wait(svc.dispatch(make_req("GET", "/pnb/mp", "", {{"partNumber", "2"}})));
+    CHECK_EQ(g2.status, 206);
+    CHECK_EQ(body_of(g2), "world");
+    CHECK_EQ(g2.headers.get("Content-Range").value_or(""), "bytes 5-9/10");
+    CHECK_EQ(g2.headers.get("x-amz-mp-parts-count").value_or(""), "2");
+
+    auto h1 = sync_wait(svc.dispatch(make_req("HEAD", "/pnb/mp", "", {{"partNumber", "1"}})));
+    CHECK_EQ(h1.status, 206);
+    CHECK_EQ(h1.content_length.value_or(0), uint64_t{5});
+    CHECK_EQ(h1.headers.get("x-amz-mp-parts-count").value_or(""), "2");
+
+    // Out-of-range part → 416 InvalidPartNumber; Range + partNumber → 400
+    auto g3 = sync_wait(svc.dispatch(make_req("GET", "/pnb/mp", "", {{"partNumber", "3"}})));
+    CHECK_EQ(g3.status, 416);
+    CHECK(contains(body_of(g3), "InvalidPartNumber"));
+    auto both = make_req("GET", "/pnb/mp", "", {{"partNumber", "1"}});
+    both.headers.add("Range", "bytes=0-1");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(both))).status, 400);
+
+    // Single-part object behaves as one part
+    sync_wait(svc.dispatch(make_req("PUT", "/pnb/simple", "abc")));
+    auto s1 = sync_wait(svc.dispatch(make_req("GET", "/pnb/simple", "", {{"partNumber", "1"}})));
+    CHECK_EQ(s1.status, 206);
+    CHECK_EQ(body_of(s1), "abc");
+    CHECK_EQ(s1.headers.get("x-amz-mp-parts-count").value_or(""), "1");
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/pnb/simple", "", {{"partNumber", "2"}})))
+                 .status,
+             416);
+}
+
+// ---- roadmap §2.5: object tagging ----
+TEST(service_object_tagging) {
+    auto svc = make_service_noauth();
+    sync_wait(svc.dispatch(make_req("PUT", "/tagb")));
+
+    // Tags at write time via x-amz-tagging (percent-encoded pairs)
+    auto put = make_req("PUT", "/tagb/o.txt", "data");
+    put.headers.add("x-amz-tagging", "env=prod&team=data%20eng");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
+
+    // GET answers the count, never the values as a header
+    auto get = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt")));
+    CHECK_EQ(get.headers.get("x-amz-tagging-count").value_or(""), "2");
+    CHECK(!get.headers.has("x-amz-tagging"));
+
+    // GET ?tagging returns the decoded XML tag set
+    auto gt = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
+    CHECK_EQ(gt.status, 200);
+    std::string b = body_of(gt);
+    CHECK(contains(b, "<Key>env</Key>"));
+    CHECK(contains(b, "<Value>prod</Value>"));
+    CHECK(contains(b, "<Value>data eng</Value>"));
+
+    // PUT ?tagging replaces the set in place
+    const std::string one =
+        "<Tagging><TagSet><Tag><Key>only</Key><Value>v1</Value></Tag></TagSet></Tagging>";
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", one, {{"tagging", ""}})))
+                 .status,
+             200);
+    auto gt2 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
+    std::string b2 = body_of(gt2);
+    CHECK(contains(b2, "<Key>only</Key>"));
+    CHECK(!contains(b2, "<Key>env</Key>"));
+    auto get2 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt")));
+    CHECK_EQ(get2.headers.get("x-amz-tagging-count").value_or(""), "1");
+
+    // DELETE ?tagging clears; count header disappears
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("DELETE", "/tagb/o.txt", "", {{"tagging", ""}})))
+                 .status,
+             204);
+    auto gt3 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
+    CHECK(contains(body_of(gt3), "<TagSet></TagSet>"));
+    CHECK(!sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt"))).headers
+               .has("x-amz-tagging-count"));
+
+    // Validation: 11 tags and duplicate keys are refused on both planes
+    std::string many;
+    for (int i = 0; i < 11; ++i) many += (i ? "&k" : "k") + std::to_string(i) + "=v";
+    auto bad = make_req("PUT", "/tagb/bad", "x");
+    bad.headers.add("x-amz-tagging", many);
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 400);
+    auto dup = make_req("PUT", "/tagb/bad", "x");
+    dup.headers.add("x-amz-tagging", "a=1&a=2");
+    CHECK_EQ(sync_wait(svc.dispatch(std::move(dup))).status, 400);
+    const std::string dupxml =
+        "<Tagging><TagSet><Tag><Key>a</Key><Value>1</Value></Tag>"
+        "<Tag><Key>a</Key><Value>2</Value></Tag></TagSet></Tagging>";
+    CHECK_EQ(
+        sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", dupxml, {{"tagging", ""}})))
+            .status,
+        400);
+
+    // Missing object → 404
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/tagb/none", "", {{"tagging", ""}})))
+                 .status,
+             404);
 }

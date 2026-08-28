@@ -1775,6 +1775,132 @@ TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
     sync_wait(b->close());
 }
 
+// ---------- scrub suite (roadmap §3.1) ----------
+
+namespace {
+
+std::vector<fs::path> chunk_paths_on_disk(const fs::path& root) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    fs::recursive_directory_iterator it(root / "chunks", ec), end;
+    for (; !ec && it != end; it.increment(ec))
+        if (it->is_regular_file() && it->path().extension() == ".chk") out.push_back(it->path());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+void flip_byte_at(const fs::path& p, std::streamoff off) {
+    std::fstream f(p, std::ios::binary | std::ios::in | std::ios::out);
+    CHECK(bool(f));
+    f.seekg(off);
+    char c = 0;
+    f.get(c);
+    f.seekp(off);
+    f.put(char(c ^ 0x1));
+}
+
+}  // namespace
+
+// Clean state: every extent reads back with a matching crc, refs reconcile in
+// both directions; in-flight multipart parts are covered and hold their refs
+TEST(duostore_scrub_clean_state) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "scrub-clean");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
+    put(*b, "bkt", "empty", "");            // zero extents
+    auto id = sync_wait(b->create_multipart("bkt", "mp", {}));
+    {
+        http::StringBodyReader part(patterned(6000));  // 2 chunks, in-flight
+        sync_wait(b->upload_part("bkt", "mp", id, 1, part));
+    }
+
+    auto st = sync_wait(b->run_scrub_once());
+    CHECK_EQ(st.objects_scanned, uint64_t(2));
+    CHECK_EQ(st.parts_scanned, uint64_t(1));
+    CHECK_EQ(st.extents_checked, uint64_t(5));
+    CHECK_EQ(st.bytes_read, uint64_t(16000));
+    CHECK_EQ(st.corrupt_extents, uint64_t(0));
+    CHECK_EQ(st.unreadable_extents, uint64_t(0));
+    CHECK_EQ(st.objects_bad, uint64_t(0));
+    CHECK_EQ(st.refs_missing, uint64_t(0));
+    CHECK_EQ(st.refs_stale, uint64_t(0));
+    CHECK_EQ(st.meta_errors, uint64_t(0));
+    CHECK(!st.aborted);
+    sync_wait(b->close());
+}
+
+// Silent bit rot in a chunk: verify_chunk_crc is off by default so GET would
+// serve it, but the scrub recomputes the crc independently; a missing chunk
+// file is a distinct unreadable finding
+TEST(duostore_scrub_detects_chunk_bitrot_and_loss) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "scrub-rot");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
+    auto chunks = chunk_paths_on_disk(cfg.root);
+    CHECK_EQ(chunks.size(), size_t(3));
+
+    flip_byte_at(chunks[0], 1);
+    auto st1 = sync_wait(b->run_scrub_once());
+    CHECK_EQ(st1.corrupt_extents, uint64_t(1));
+    CHECK_EQ(st1.unreadable_extents, uint64_t(0));
+    CHECK_EQ(st1.objects_bad, uint64_t(1));
+
+    fs::remove(chunks[1]);
+    auto st2 = sync_wait(b->run_scrub_once());
+    CHECK_EQ(st2.corrupt_extents, uint64_t(1));
+    CHECK_EQ(st2.unreadable_extents, uint64_t(1));
+    CHECK_EQ(st2.objects_bad, uint64_t(1));
+    sync_wait(b->close());
+}
+
+// Pack payload corruption: the pack read path always verifies crc and refuses
+// to deliver bytes, so the finding lands in unreadable_extents
+TEST(duostore_scrub_detects_pack_corruption) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "scrub-pack");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "small", patterned(600));  // <= threshold: pack record
+
+    auto st0 = sync_wait(b->run_scrub_once());
+    CHECK_EQ(st0.extents_checked, uint64_t(1));
+    CHECK_EQ(st0.unreadable_extents, uint64_t(0));
+
+    fs::path pak = sole_pack_file(cfg.root);
+    CHECK(!pak.empty());
+    flip_byte_at(pak, std::streamoff(fs::file_size(pak)) - 1);  // last payload byte
+    auto st1 = sync_wait(b->run_scrub_once());
+    CHECK_EQ(st1.unreadable_extents, uint64_t(1));
+    CHECK_EQ(st1.objects_bad, uint64_t(1));
+    sync_wait(b->close());
+}
+
+// Throttled scrub still verifies everything (the rate limiter must not starve
+// or truncate the walk); wall-clock is bounded by the test sizes
+TEST(duostore_scrub_rate_limited) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "scrub-rate");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(8192));  // 2 chunks
+
+    DuoScrubOptions opt;
+    opt.max_bytes_per_sec = 1 << 20;  // 8KiB at 1MiB/s: fast but exercises pacing
+    auto st = sync_wait(b->run_scrub_once(opt));
+    CHECK_EQ(st.bytes_read, uint64_t(8192));
+    CHECK_EQ(st.corrupt_extents, uint64_t(0));
+    CHECK_EQ(st.unreadable_extents, uint64_t(0));
+    sync_wait(b->close());
+}
+
 // ---------- P4 crash injection (§15 P4 acceptance: kill -9, restart, converge) ----------
 // A child process (execv of self into duostore-crash-child mode) _exits at a
 // chosen point / gets SIGKILLed — equivalent for process state (no destructors,

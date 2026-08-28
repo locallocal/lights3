@@ -364,6 +364,44 @@ tikv primary 提交超时——事务**可能已生效**。本地引擎"抛异�
 `gc_tick`/`orphan_tick` **完成后重臂**（轮次永不重叠堆积）；`gc_enabled=false`
 （多网关非指定实例）不排程但保留手动钩子。
 
+### 8.4 scrub（`run_scrub_once`，roadmap §3.1）
+
+`duostore_backend.cc:DuoStoreBackend::run_scrub_once` 是深度完整性巡检——
+孤儿扫描只查**存在性**，scrub 读**内容**。**纯只读**：一切发现只落
+LOG + `DuoScrubStats` 计数，绝不修复、绝不删除。CLI 入口
+`lights3 fsck <backend>`（[../cli.md](../cli.md) §2.3）。
+
+以 **meta 为驱动**而非盘面驱动，这是布局决定的：chunk 文件无头无尾，
+crc32c 只存在 manifest 的 extent 数组里（§4.2），`scan_chunks` 枚举只给
+`(id, mtime, size)`——盘面驱动无从校验。遍历 = `list_buckets` →
+`list_objects` 分页 → `get_object` 取全量 manifest（与 dump 同构），加
+`list_uploads × list_parts` 覆盖进行中 multipart 分片（分片持有 refs 与
+活数据，跳过会把它们误报成 stale）。对每个 extent：
+
+- **读回 + 重算 crc**：单 extent 构造 DataRef 走 `open_reader` 排空，边读边
+  `crc32c_update` 与 manifest 对照——**独立于 `verify_chunk_crc` 开关**（该
+  开关只管 GET 热路径）。读失败/短读 → `unreadable_extents`（pack 侧 crc
+  失配由 reader 自身拒绝交付，也落在这一类）；读通但 crc 不符 →
+  `corrupt_extents`。逐 extent 打点使报告能精确到 file_id。
+- **refs 正向对账**（chunk/rados；pack 走 packstat 不进 refs）：巡检开始时
+  先做 refs 快照（排序向量 + 命中位图，同孤儿扫描的内存取舍），manifest
+  引用的 id 不在快照 → 时点性 `chunk_referenced` 复查 → 再重取 manifest 确
+  认未被并发覆盖/删除，三关都过才报 `refs_missing`——这是"孤儿扫描可能删
+  掉活数据"的危险信号，LOG_ERROR。
+- **refs 反向对账**：快照中从未被任何 manifest 命中的 id，复查仍在 →
+  `refs_stale`（泄漏嫌疑：孤儿扫描永远不会回收它的文件）。只 LOG_WARN——
+  巡检中途 complete 的 MPU 会把分片 refs 转给一个已走过的列表位置，造成
+  暂态误报，复跑确认。
+
+并发边界：全程持 `gc_sem_`（自身 GC/孤儿扫描停摆 ⇒ 巡检期间没有任何
+unlink，业务删除只入 gcq 不动数据，读回无需 pin）；GC 租约 best-effort 续
+（失败只 WARN 不跳过——scrub 不删东西，对端 GC 并发至多造成 unreadable
+误报）。限速经 `storage/scrub_throttle.h:ScrubThrottle`：按字节预算在
+TimerQueue 上分片睡眠（≤500ms/片，片间探测 `bg_.closing()`），close 不被
+长限速拖住；`DuoScrubOptions::max_bytes_per_sec` 每次调用传入而非配置项
+（scrub 是运维触发的遍历，不是常驻 worker）。`bg_.closing()` 在对象与
+extent 粒度探测，中断置 `aborted`（统计为部分结果）。
+
 ## 9. Multipart
 
 - `create_multipart`：纯 meta 写（upload_id 由引擎生成）。

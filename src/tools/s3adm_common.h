@@ -66,7 +66,12 @@ public:
     // GET that streams the body into the void, adding its size to *bytes —
     // benchmark downloads must not buffer whole objects in memory
     httplib::Result get_discard(const std::string& path, uint64_t* bytes);
-    httplib::Result head(const std::string& path);
+    // GET that streams the body through an MD5 (fsck verification): *md5_hex
+    // receives the digest of whatever body arrived — only meaningful when the
+    // status is the expected success code
+    httplib::Result get_hashed(const std::string& path, const std::string& query,
+                               std::string* md5_hex, uint64_t* bytes);
+    httplib::Result head(const std::string& path, const std::string& query = "");
     // Signs the literal UNSIGNED-PAYLOAD instead of hashing the body (the
     // server uses the header value verbatim in the canonical request), so
     // benchmark uploads do not pay a client-side SHA-256 per request

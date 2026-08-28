@@ -326,3 +326,30 @@ RAII，`ok` 默认 false，任何未走到成功标记的退出路径（S3Error�
 `localfs_backend.cc:close` / 析构共用 `shutdown_background`：`BackgroundTaskGroup`
 关门 → 锁外 cancel 定时器（`TimerQueue::cancel` 会等在途回调，而回调要拿组
 锁，顺序不能反）→ 等在途扫描收尾。xlocalfs 的 override 须回链本实现。
+
+## 11. scrub（`run_scrub_once`，roadmap §3.1）
+
+读路径零校验（ETag 写时算、读时从不复核）意味着静默位翻转不可发现；
+`localfs_backend.cc:LocalFsBackend::run_scrub_once` 补上这一课：把 ETag 当
+校验和做全量 verify。**纯只读**，发现只落 LOG + `FsScrubStats` 计数。CLI
+入口 `lights3 fsck <backend>`（[../cli.md](../cli.md) §2.3）；xlocalfs 同
+布局直接继承，tiered 不在覆盖面内（`skipped_stubs` 防御性兜住误配）。
+
+遍历照 tiered `scan_once` 的先例：root 下含 bucket marker 的目录 →
+`recursive_directory_iterator`，跳过 marker 与 sidecar，`.lights3-dir` 标记
+文件还原为尾斜杠 key；顺带报告孤儿 sidecar（listing 会自愈但只覆盖被访问
+的目录，scrub 只报不删）。每对象：
+
+- open + fstat 后 `load_object_meta_stat` 读元数据；`tier=remote` 的 stub
+  跳过（数据在云端）；无 ETag / 元数据不可读 → `unverifiable`；
+- 单段 ETag：256KiB pread 循环流式重算 MD5（每块 hop 一次池线程，
+  同 `FdStreamReader` 的节奏），与存储值对照；
+- multipart 复合 ETag（`-N` 后缀）：按 `part_sizes` 的前缀和切段、逐段
+  MD5 后过 `combined_etag` 重算——布局缺失/与 `-N` 或 st_size 不符的存量
+  对象诚实计 `unverifiable`，绝不误报 mismatch；
+- 失配先复查竞态：元数据按路径读而哈希用的是 fd，两者之间被并发覆盖属
+  torn snapshot——重 stat 比对 inode/size/mtime，变了计 `skipped_races`，
+  没变才是 `etag_mismatches`（LOG_ERROR，静默损坏实锤）。
+
+限速与中断同 duostore scrub（`storage/scrub_throttle.h:ScrubThrottle` +
+`bg_.closing()` 探测），见 [duostore-core.md §8.4](duostore-core.md)。

@@ -14,7 +14,7 @@
 | [memory.md](memory.md) | `memory/` | 全内存结构与快照隔离、容量双闸门、测试角色 |
 | [tiered.md](tiered.md) | `tiered/` | stub/缓存双态提交、atime 快照、下沉与透明回读流程、GC 对账 |
 | [cloudproxy.md](cloudproxy.md) | `cloudproxy/` | SigV4 自签、连接池、双向流式泵与背压、重试与错误映射单点 |
-| [duostore-core.md](duostore-core.md) | `duostore/` 核心 | meta/data 分离编排、codec 字节布局、SPI 契约、读写路径与崩溃窗口矩阵、GC 四步、dump/load |
+| [duostore-core.md](duostore-core.md) | `duostore/` 核心 | meta/data 分离编排、codec 字节布局、SPI 契约、读写路径与崩溃窗口矩阵、GC 四步、scrub、dump/load |
 | [duostore-data-fs.md](duostore-data-fs.md) | `duostore/fs_data_store` | chunk/pack 磁盘格式（LP3R record）、active pack 槽位与封存、损坏分诊 |
 | [duostore-data-rados.md](duostore-data-rados.md) | `duostore/rados_data_store` | chunk→RADOS 对象映射、AIO 状态机、双缓冲流水线、flush/close 语义 |
 | [duostore-meta-rocksdb.md](duostore-meta-rocksdb.md) | `duostore/rocks_meta_store` | 8 CF 键空间、CounterMerge 计数、WriteBatch guarded-commit、快照列举 |

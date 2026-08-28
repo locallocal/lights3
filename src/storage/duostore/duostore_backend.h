@@ -113,6 +113,32 @@ struct DuoOrphanStats {
     uint64_t pack_bytes = 0;            // total bytes of on-disk pack files (usage metric)
 };
 
+// run_scrub_once knobs (roadmap §3.1). Rate limiting is per-call rather than
+// config: a scrub is an operator-invoked traversal (CLI), not a resident worker
+struct DuoScrubOptions {
+    uint64_t max_bytes_per_sec = 0;  // 0 = unthrottled
+};
+
+// Integrity report of run_scrub_once() (roadmap §3.1). Read-only: the scrub
+// mutates nothing, every finding is a log line plus a counter here.
+// corrupt/unreadable/refs_missing are the "data is in danger" signals;
+// refs_stale is a space-leak suspect that can also be a transient artifact of
+// an MPU completing mid-scrub (re-run to confirm)
+struct DuoScrubStats {
+    uint64_t objects_scanned = 0;     // committed objects fully walked
+    uint64_t parts_scanned = 0;       // in-flight multipart parts walked
+    uint64_t extents_checked = 0;
+    uint64_t bytes_read = 0;
+    uint64_t corrupt_extents = 0;     // read back fine but crc32c != manifest
+    uint64_t unreadable_extents = 0;  // open/read failed or short (includes pack-side crc aborts)
+    uint64_t objects_bad = 0;         // objects/parts with >= 1 corrupt or unreadable extent
+    uint64_t refs_missing = 0;        // manifest references a chunk id absent from the refs
+                                      // ledger — the orphan scan could unlink live data
+    uint64_t refs_stale = 0;          // refs entry no object/part manifest references (leak suspect)
+    uint64_t meta_errors = 0;         // bucket enumerations that failed and were skipped
+    bool aborted = false;             // backend close interrupted the scrub (stats are partial)
+};
+
 // Standard implementation of PackMigrateFn (§9.2 steps 2-3; shared by the cfg
 // constructor and test-injection assembly): owner reverse-lookup of liveness
 // (objects "b\0k" looked up directly; mpu "mpu\0b\0k\0id\0no" uses b/k as a hint
@@ -275,6 +301,19 @@ public:
     // depends on the gcq's unlink→settle window not running concurrently
     Task<duostore::DuoOrphanStats> run_orphan_scan_once();
 
+    // Deep integrity scrub (roadmap §3.1): meta-driven — every committed object
+    // and in-flight multipart part has its full manifest read back from the data
+    // plane with crc32c recomputed per extent (independently of verify_chunk_crc,
+    // which only guards the GET hot path), plus a two-way reconciliation of the
+    // chunk/rados refs ledger against what the manifests actually reference.
+    // Strictly read-only; findings are logged and counted, never repaired.
+    // Holds the same semaphore as GC (our own GC cannot unlink mid-read; business
+    // deletes only enqueue to the gcq while it is held) and renews the GC lease
+    // best-effort so a peer gateway's GC defers. Designed for the offline
+    // `lights3 fsck` entry; safe to run against a live instance at the cost of
+    // GC standing still for the duration
+    Task<duostore::DuoScrubStats> run_scrub_once(duostore::DuoScrubOptions opt = {});
+
     // meta backup/restore and cross-engine migration (docs/archive/gaps.md §6.1; stream
     // format and ops contract in meta_dump.h). Both hold the same semaphore as
     // GC/orphan scan; write quiescence is guaranteed by ops (main's
@@ -306,6 +345,16 @@ private:
     Task<void> gc_tick();
     void schedule_orphan_scan();  // independent low-frequency timer (orphan_scan_interval; 0 = off)
     Task<void> orphan_tick();
+    // One manifest's worth of scrub work (run_scrub_once): refs-ledger presence
+    // per chunk/rados extent + full read-back with crc recomputation. refetch
+    // re-reads the current manifest to separate a genuine refs hole from a
+    // concurrent overwrite/delete; returns whether any extent failed
+    Task<bool> scrub_manifest(const duostore::DataRef& ref, const std::string& what,
+                              const std::vector<uint64_t>& refs_snapshot,
+                              std::vector<bool>& ref_seen,
+                              const std::function<std::optional<duostore::DataRef>()>& refetch,
+                              class ScrubThrottle& throttle, std::vector<std::byte>& buf,
+                              duostore::DuoScrubStats& st);
     void shutdown_background();
     // GC counter metric registration (shared by both constructors)
     void init_metrics(const MetricsScope& metrics);

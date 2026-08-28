@@ -30,6 +30,28 @@ struct LocalFsOptions {
     int mpu_scan_interval_sec = 6 * 3600; // 0 = scan only at startup
 };
 
+// run_scrub_once knobs (roadmap §3.1); per-call rather than config — a scrub is
+// an operator-invoked traversal (CLI), not a resident worker
+struct FsScrubOptions {
+    uint64_t max_bytes_per_sec = 0;  // 0 = unthrottled
+};
+
+// Integrity report of run_scrub_once() (roadmap §3.1). Read-only; every finding
+// is a log line plus a counter here. etag_mismatches/read_errors are the "data
+// is in danger" signals; the skipped_* and unverifiable buckets exist so a
+// clean report can honestly say what it did not cover
+struct FsScrubStats {
+    uint64_t objects_scanned = 0;
+    uint64_t bytes_read = 0;
+    uint64_t etag_mismatches = 0;  // content MD5 no longer matches the stored ETag
+    uint64_t read_errors = 0;      // open/read failures (EIO, truncation under scrub)
+    uint64_t unverifiable = 0;     // no ETag recorded, or legacy multipart without part_sizes
+    uint64_t skipped_stubs = 0;    // tiered stubs (data lives remote)
+    uint64_t skipped_races = 0;    // object overwritten/deleted mid-verify
+    uint64_t orphan_sidecars = 0;  // sidecar whose data file is gone (listing normally self-heals)
+    bool aborted = false;          // backend close interrupted the scrub (stats are partial)
+};
+
 class LocalFsBackend : public IStorageBackend {
 public:
     LocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
@@ -83,6 +105,16 @@ public:
                                      const ListPartsOptions& opt) override;
     Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
                                                    const ListUploadsOptions& opt) override;
+
+    // Full-verify scrub (roadmap §3.1): walks every bucket directory, re-reads
+    // each object's content and compares the recomputed MD5 against the stored
+    // ETag (multipart composites are recomputed from part_sizes; legacy objects
+    // without a recorded layout count as unverifiable). Strictly read-only.
+    // xlocalfs shares the on-disk format and inherits this unchanged; entry
+    // point is the offline `lights3 fsck` command, but it is safe against a
+    // live instance — objects mutated mid-verify are re-checked and counted as
+    // skipped_races instead of mismatches
+    Task<FsScrubStats> run_scrub_once(FsScrubOptions opt = {});
 
     static constexpr const char* kSidecarSuffix = fsutil::kSidecarSuffix;
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
@@ -140,6 +172,17 @@ protected:
     std::shared_ptr<ThreadPool> pool_;
 
 private:
+    // run_scrub_once helpers (pool thread): one bucket's ordered walk, then one
+    // object's hash-and-compare; md5_range streams [off, off+len) of an open fd
+    Task<void> scrub_bucket(const std::string& bucket, const std::filesystem::path& dir,
+                            class ScrubThrottle& throttle, std::vector<uint8_t>& buf,
+                            FsScrubStats& st);
+    Task<void> scrub_object(const std::string& bucket, const std::string& key,
+                            const std::filesystem::path& path, class ScrubThrottle& throttle,
+                            std::vector<uint8_t>& buf, FsScrubStats& st);
+    Task<std::string> md5_range(int fd, uint64_t off, uint64_t len, class ScrubThrottle& throttle,
+                                std::vector<uint8_t>& buf, FsScrubStats& st);
+
     void init_metrics(const MetricsScope& metrics);  // one-time acquisition at construction (same pattern as duostore)
     void cleanup_stale_uploads();  // remove mpu directories past mpu_ttl (startup + periodic)
     void schedule_mpu_scan();      // re-arm after completion (same shape as duostore's GC worker)

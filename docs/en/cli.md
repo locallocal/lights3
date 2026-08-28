@@ -37,14 +37,16 @@ static websites in [static-website.md](static-website.md).
 lights3 [--config=<path>]                                  start the server
 lights3 duostore dump <backend> <file> [--config=<path>]   export duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   import duostore meta
-lights3 help [duostore [dump|load]]
+lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  offline integrity scrub
+lights3 help [duostore [dump|load] | fsck]
 ```
 
 | Option | Applies to | Default | Meaning |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | all | `config/lights3.yaml` | YAML config file (format: [architecture.md §5](architecture.md#5-example-configuration-file)) |
-| `--backend=<name>` | `duostore *` | — | backend name, same as the first positional |
+| `--backend=<name>` | `duostore *`, `fsck` | — | backend name, same as the first positional |
 | `--file=<path>` | `duostore *` | — | dump file path, same as the second positional |
+| `--max-mbps=<n>` | `fsck` | `0` | read throttle in MB/s, `0` = unthrottled |
 
 ### 2.1 Starting the server
 
@@ -84,12 +86,43 @@ data back first, then `load`.
 ./build/lights3 duostore load --backend=duo --file=/backup/duo-meta.dump -c /etc/lights3/lights3.yaml
 ```
 
+### 2.3 `fsck`
+
+Offline data-integrity scrub (roadmap §3.1; implementation details in
+[storage/duostore-core.md §8.4](../storage/duostore-core.md) and
+[storage/localfs.md §11](../storage/localfs.md)). Same pattern as dump/load:
+builds every backend without listening, runs, and exits; **strictly
+read-only** — every finding is a log line plus a counter, nothing is repaired.
+Dispatches on the actual type of `<backend>`:
+
+- **duostore**: meta-driven — reads back every extent of every object and every
+  in-flight multipart part, recomputes crc32c per extent against the manifest
+  (independent of the `verify_chunk_crc` switch), and reconciles the
+  chunk/rados refs ledger against the manifests in both directions;
+- **localfs / xlocalfs**: re-reads every object and compares the recomputed MD5
+  with the stored ETag (multipart composites recomputed over the recorded part
+  layout; legacy objects without one count as unverifiable);
+- other types (memory/cloudproxy/tiered) error out.
+
+Exit codes: `0` clean; `1` when integrity findings exist (duostore's
+corrupt/unreadable/refs_missing/meta_errors, localfs's mismatches/read_errors).
+Warning-grade counters (refs_stale, unverifiable, orphan sidecars) are logged
+without affecting the exit code — refs_stale can be a transient artifact of an
+MPU completing mid-scrub; re-run to confirm. Safe against a live instance too
+(on duostore at the cost of GC standing still for the duration).
+
+```bash
+./build/lights3 fsck duodata --max-mbps=100 --config=/etc/lights3/lights3.yaml
+./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
+```
+
 ## 3. `s3adm` — ops CLI
 
-`src/tools/s3adm*.cc`, built next to `lights3`. Three command groups: `cred`
-(credential admin plane), `website` (bucket static-website configuration),
-`bench` (load testing). Every subcommand signs its own SigV4 requests against
-the lights3 HTTP endpoint; no aws cli needed.
+`src/tools/s3adm*.cc`, built next to `lights3`. Three command groups plus one
+leaf command: `cred` (credential admin plane), `website` (bucket static-website
+configuration), `bench` (load testing), `fsck` (online object verification).
+Every subcommand signs its own SigV4 requests against the lights3 HTTP
+endpoint; no aws cli needed.
 
 ### 3.1 Connection and credential options (shared by every leaf)
 
@@ -195,6 +228,37 @@ s3adm bench get -b test -s 4M -j 8 -d 30 --keep
 s3adm bench stat -b test -j 16
 s3adm bench list -b test -n 10000 --max-keys=1000
 s3adm bench list-buckets -j 16
+```
+
+### 3.5 `fsck` — online object verification
+
+The online complement of `lights3 fsck` (§2.3): end-to-end verification through
+the S3 API — ListObjectsV2 page by page, then a streaming GET per object with
+the MD5 recomputed client-side and compared against the ETag, which also
+exercises the gateway read path itself. Multipart composite ETags are
+recomputed part by part via `GET ?partNumber=i` (objects the server has no
+recorded layout for return 501 and count as UNVERIFIABLE, never MISMATCH).
+Read-only; any credential that can read the bucket works. The cost is pulling
+every byte over HTTP — the deep check (duostore crc/refs reconciliation) still
+needs server-side `lights3 fsck`.
+
+```text
+s3adm fsck <bucket> [-p|--prefix=<p>] [--max-mbps=<n>]
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `-p, --prefix=<p>` | — | only verify keys under this prefix |
+| `--max-mbps=<n>` | `0` | download throttle in MB/s, `0` = unthrottled |
+
+Prints one `MISMATCH <key>` line per finding (stdout) / transport errors
+(stderr), then a summary line (objects/bytes/mismatches/errors/unverifiable/
+skipped; skipped = objects deleted between list and GET). Exit codes: `0`
+clean; `1` mismatches or errors.
+
+```bash
+s3adm fsck my-bucket --endpoint=https://s3.example.com
+s3adm fsck my-bucket --prefix=photos/ --max-mbps=50
 ```
 
 ## 4. Conventions for adding subcommands

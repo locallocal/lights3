@@ -6,6 +6,8 @@
 //   lights3 [--config=<path>]                     start the server
 //   lights3 duostore dump <backend> <file> [...]  duostore meta admin
 //   lights3 duostore load <backend> <file> [...]  (docs/storage/duostore-core.md §11)
+//   lights3 duostore gc|scan <backend> [...]      run one GC / orphan-scan round (roadmap §3.2)
+//   lights3 tier scan|gc|reconcile <backend> [..] tiered background tasks on demand (roadmap §3.2)
 //   lights3 fsck <backend> [--max-mbps=<n>] [...] offline integrity scrub (roadmap §3.1)
 //
 // ccmd's root options do not propagate down, so --config is registered on
@@ -23,6 +25,7 @@
 #include "app/app.h"
 #include "core/log.h"
 #include "storage/localfs/localfs_backend.h"
+#include "storage/tiered/tiered_backend.h"
 #ifdef LIGHTS3_DUOSTORE
 #include <fstream>
 
@@ -79,6 +82,33 @@ void run_server(const Cmd& c) {
     app.open_storage();
     app.start_server();
     g_exit = app.run();
+}
+
+// Shared by every single-backend admin leaf (duostore gc/scan, tier *, fsck):
+// `<backend>` positional or --backend=, positional wins
+std::string one_backend_arg(const Cmd& c) {
+    std::string backend = c->var<std::string>("backend");
+    const auto& pos = c->args();
+    if (pos.size() > 1) {
+        g_exit = 2;
+        throw std::runtime_error(c->name() + ": too many arguments");
+    }
+    if (pos.size() == 1) backend = pos[0];
+    if (backend.empty()) {
+        c->print_help();
+        g_exit = 2;
+        throw std::runtime_error(c->name() + ": <backend> is required");
+    }
+    return backend;
+}
+
+// Leaf factory for commands taking only `<backend>` (+ --config)
+Cmd make_backend_leaf(const char* name, const char* example, const char* usage,
+                      const char* help_long, const char* help_short, void (*run)(const Cmd&)) {
+    auto cmd = std::make_shared<ccmd::c_command>(name, example, usage, help_long, help_short, run);
+    add_config_flag(cmd);
+    cmd->var<std::string>("backend", "", "backend name (alternative to the positional)");
+    return cmd;
 }
 
 #ifdef LIGHTS3_DUOSTORE
@@ -148,6 +178,44 @@ void run_load(const Cmd& c) {
     app.shutdown();
 }
 
+// Background tasks on demand (roadmap §3.2): the run_*_once hooks were only
+// reachable through timers (GC every 5min, orphan scan daily by default) —
+// an operator wanting space back *now* had nothing to call. Offline like
+// dump/load: with a local meta engine (rocksdb/sqlite) the file lock demands
+// the server be stopped; with a shared engine (redis/tikv) this can run next
+// to live gateways — the GC lease coordinates. Stats are logged; exit code
+// stays 0 (running the task succeeded — refs_missing etc. are already
+// LOG_ERROR'd, and integrity verdicts belong to `lights3 fsck`)
+void run_duo_gc(const Cmd& c) {
+    using namespace lights3;
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* duo = find_duostore(app, one_backend_arg(c));
+    auto st = sync_wait(duo->run_gc_once());
+    LOG_INFO("duostore admin: gc round: reclaims {} (grace-skipped {}, pinned {}), files "
+             "removed {}, packs removed {}, uploads expired {}, packs sealed-aged {}, "
+             "compacted {} (deferred {}), records migrated {}, corrupt {}",
+             st.reclaims_acked, st.skipped_grace, st.skipped_pinned, st.files_removed,
+             st.packs_removed, st.uploads_expired, st.packs_sealed_aged, st.packs_compacted,
+             st.packs_compact_deferred, st.records_migrated, st.records_corrupt);
+    app.shutdown();
+}
+
+void run_duo_scan(const Cmd& c) {
+    using namespace lights3;
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* duo = find_duostore(app, one_backend_arg(c));
+    auto st = sync_wait(duo->run_orphan_scan_once());
+    LOG_INFO("duostore admin: orphan scan: {} chunks ({} bytes) / {} packs ({} bytes) "
+             "scanned; orphans removed {} (grace-skipped {}, pinned {}), orphan packs "
+             "removed {} (skipped active {}); refs missing {}, packstats missing {}",
+             st.chunks_scanned, st.chunk_bytes, st.packs_scanned, st.pack_bytes,
+             st.orphans_removed, st.skipped_grace, st.skipped_pinned, st.orphan_packs_removed,
+             st.packs_skipped_active, st.refs_missing, st.pack_stats_missing);
+    app.shutdown();
+}
+
 Cmd make_admin_leaf(const char* name, const char* example, const char* usage, const char* help_long,
                     const char* help_short, void (*run)(const Cmd&)) {
     auto cmd = std::make_shared<ccmd::c_command>(name, example, usage, help_long, help_short, run);
@@ -160,12 +228,12 @@ Cmd make_admin_leaf(const char* name, const char* example, const char* usage, co
 Cmd make_duostore() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "duostore", "lights3 duostore dump local meta.dump --config=config/lights3.yaml",
-        "lights3 duostore <dump|load> <backend> <file> [--config=<path>]",
-        "DuoStore meta dump/load (docs/storage/duostore-core.md §11). Runs with the "
-        "backends built but no server listening (no traffic), then exits; load ends "
-        "with a forced orphan scan. Backup order: copy the data dir first, then dump "
-        "meta; restore data first, then load.",
-        "duostore meta admin (dump/load)",
+        "lights3 duostore <dump|load|gc|scan> <backend> [<file>] [--config=<path>]",
+        "DuoStore admin: meta dump/load (docs/storage/duostore-core.md §11) and "
+        "on-demand GC / orphan-scan rounds (§8). All run with the backends built but "
+        "no server listening, then exit; load ends with a forced orphan scan. Backup "
+        "order: copy the data dir first, then dump meta; restore data first, then load.",
+        "duostore admin (dump/load/gc/scan)",
         [](const Cmd& c) {
             c->print_help();
             g_exit = 2;
@@ -180,9 +248,105 @@ Cmd make_duostore() {
         "lights3 duostore load <backend> <file> [--config=<path>]",
         "Replay a meta dump from <file> into the backend, then run an orphan scan.",
         "load duostore meta from a file", run_load));
+    cmd->add_subcommand(make_backend_leaf(
+        "gc", "lights3 duostore gc local",
+        "lights3 duostore gc <backend> [--config=<path>]",
+        "Run one GC round now (docs/storage/duostore-core.md §8.1): mpu_ttl expiry "
+        "cleanup, gcq consumption, aged-pack sealing + compaction, whole-empty-pack "
+        "deletion. Same round the background worker runs on its timer.",
+        "run one duostore GC round", run_duo_gc));
+    cmd->add_subcommand(make_backend_leaf(
+        "scan", "lights3 duostore scan local",
+        "lights3 duostore scan <backend> [--config=<path>]",
+        "Run one orphan-scan round now (docs/storage/duostore-core.md §8.3): two-way "
+        "reconciliation of on-disk chunks/packs against refs/packstat; unreferenced "
+        "residue beyond gc_grace is unlinked, loss signals are warned and counted.",
+        "run one duostore orphan-scan round", run_duo_scan));
     return cmd;
 }
 #endif  // LIGHTS3_DUOSTORE
+
+// Tiered background tasks on demand (roadmap §3.2; same offline pattern —
+// tiered sits over localfs + a cloud backend, no exclusive lock issue, but the
+// coldness verdict is atime-based and an offline run sees its own process's
+// access table, so `tier scan` demotes by mtime/atime as recorded on disk)
+lights3::storage::TieredBackend* find_tiered(lights3::Application& app, const std::string& name) {
+    const auto& backends = app.backends();
+    auto it = backends.find(name);
+    if (it == backends.end()) throw std::runtime_error("tier: no backend named '" + name + "'");
+    auto* t = dynamic_cast<lights3::storage::TieredBackend*>(it->second.get());
+    if (!t) throw std::runtime_error("tier: backend '" + name + "' is not tiered");
+    return t;
+}
+
+void run_tier_scan(const Cmd& c) {
+    using namespace lights3;
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* t = find_tiered(app, one_backend_arg(c));
+    sync_wait(t->scan_once());  // demotions/reclaim are logged by the scan itself
+    LOG_INFO("tier admin: scan round complete");
+    app.shutdown();
+}
+
+void run_tier_gc(const Cmd& c) {
+    using namespace lights3;
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* t = find_tiered(app, one_backend_arg(c));
+    auto st = sync_wait(t->run_gc_once());
+    LOG_INFO("tier admin: gc round: resolved {} (cloud replicas removed {}), deferred {}, "
+             "failed {}",
+             st.resolved, st.removed_cloud, st.deferred, st.failed);
+    app.shutdown();
+}
+
+void run_tier_reconcile(const Cmd& c) {
+    using namespace lights3;
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* t = find_tiered(app, one_backend_arg(c));
+    auto st = sync_wait(t->run_reconcile_once());
+    LOG_INFO("tier admin: reconcile round: {} cloud objects walked; stubs rebuilt {}, "
+             "orphans deleted {}, orphans skipped {}, refs missing {}",
+             st.cloud_objects, st.stubs_rebuilt, st.orphans_deleted, st.orphans_skipped,
+             st.refs_missing);
+    app.shutdown();
+}
+
+Cmd make_tier() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "tier", "lights3 tier scan tierdata --config=config/lights3.yaml",
+        "lights3 tier <scan|gc|reconcile> <backend> [--config=<path>]",
+        "Tiered-storage background tasks on demand (docs/tiered-storage.md §9): the "
+        "same rounds the timers run, for operators who cannot wait for the next tick. "
+        "Runs with the backends built but no server listening, then exits.",
+        "tiered background tasks (scan/gc/reconcile)",
+        [](const Cmd& c) {
+            c->print_help();
+            g_exit = 2;
+        });
+    cmd->add_subcommand(make_backend_leaf(
+        "scan", "lights3 tier scan tierdata",
+        "lights3 tier scan <backend> [--config=<path>]",
+        "Run one scan round now: coldness detection + space-watermark reclamation + "
+        "crash recovery + atime snapshot.",
+        "run one tiered scan round", run_tier_scan));
+    cmd->add_subcommand(make_backend_leaf(
+        "gc", "lights3 tier gc tierdata",
+        "lights3 tier gc <backend> [--config=<path>]",
+        "Consume one round of the tiered GC queue now: delete orphan cloud replicas "
+        "(etag-verified); failures reschedule with their persisted backoff.",
+        "run one tiered GC round", run_tier_gc));
+    cmd->add_subcommand(make_backend_leaf(
+        "reconcile", "lights3 tier reconcile tierdata",
+        "lights3 tier reconcile <backend> [--config=<path>]",
+        "Run one bidirectional local/cloud reconciliation now: rebuild missing stubs "
+        "from redundant headers (or delete orphans when configured); local-remote with "
+        "cloud missing warns and never deletes the stub.",
+        "run one tiered reconcile round", run_tier_reconcile));
+    return cmd;
+}
 
 // Offline integrity scrub (roadmap §3.1): backends built, no server listening —
 // same shape as duostore dump/load. Dispatches on the backend's concrete type:
@@ -192,18 +356,7 @@ Cmd make_duostore() {
 // and can be transient or expected on legacy data
 void run_fsck(const Cmd& c) {
     using namespace lights3;
-    std::string backend = c->var<std::string>("backend");
-    const auto& pos = c->args();
-    if (pos.size() > 1) {
-        g_exit = 2;
-        throw std::runtime_error("fsck: too many arguments");
-    }
-    if (pos.size() == 1) backend = pos[0];
-    if (backend.empty()) {
-        c->print_help();
-        g_exit = 2;
-        throw std::runtime_error("fsck: <backend> is required");
-    }
+    std::string backend = one_backend_arg(c);
     int mbps = c->var<int>("max-mbps");
     if (mbps < 0) {
         g_exit = 2;
@@ -254,7 +407,7 @@ void run_fsck(const Cmd& c) {
 }
 
 Cmd make_fsck() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+    auto cmd = make_backend_leaf(
         "fsck", "lights3 fsck local --max-mbps=100 --config=config/lights3.yaml",
         "lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]",
         "Offline data-integrity scrub (read-only). duostore: read back every extent of "
@@ -264,8 +417,6 @@ Cmd make_fsck() {
         "composites via the recorded part layout). Runs with the backends built but no "
         "server listening; exit code 1 when integrity findings exist.",
         "offline data-integrity scrub", run_fsck);
-    add_config_flag(cmd);
-    cmd->var<std::string>("backend", "", "backend name (alternative to the positional)");
     cmd->var<int>("max-mbps", 0, "read throttle in MB/s (0 = unthrottled)");
     return cmd;
 }
@@ -282,6 +433,7 @@ int main(int argc, char** argv) {
 #ifdef LIGHTS3_DUOSTORE
     root->add_subcommand(make_duostore());
 #endif
+    root->add_subcommand(make_tier());
     root->add_subcommand(make_fsck());
 
     try {

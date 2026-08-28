@@ -32,7 +32,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [duostore-sqlite-meta.md](duostore-sqlite-meta.md) | DuoStore 的 SQLite IMetaStore：amalgamation 内嵌，WAL + 读池/单写连接 |
 | [duostore-rados-data.md](duostore-rados-data.md) | DuoStore 的 RADOS IDataStore：librados 直连，chunk → rados 对象 |
 | [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore 的 TiKV IMetaStore：client-c + 2PC 侧车，meta 水平扩展 |
-| [cli.md](cli.md) | 命令行工具：`lights3` 启动与 `duostore dump/load`、`fsck` 离线巡检、`s3adm` 的 cred/website/bench/fsck 命令、ccmd 选项语义与退出码 |
+| [cli.md](cli.md) | 命令行工具：`lights3` 启动、`duostore dump/load/gc/scan`、`tier scan/gc/reconcile`、`fsck` 离线巡检、`s3adm` 的 cred/website/bench/fsck 命令、ccmd 选项语义与退出码 |
 | [roadmap.md](roadmap.md) | 优化与功能规划（2026-08-25 全量走读）：bug 级待修项、各层功能缺口与可优化点、明确不做清单、优先级梯队 |
 | [archive/](archive/gaps.md) | 已清零的历史评审底账（gaps.md / issues.md），只读归档——源码注释中 `docs/archive/<name>.md §N` 引用的论证出处 |
 

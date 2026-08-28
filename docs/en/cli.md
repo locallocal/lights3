@@ -37,15 +37,18 @@ static websites in [static-website.md](static-website.md).
 lights3 [--config=<path>]                                  start the server
 lights3 duostore dump <backend> <file> [--config=<path>]   export duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   import duostore meta
+lights3 duostore gc <backend> [--config=<path>]            run one duostore GC round now
+lights3 duostore scan <backend> [--config=<path>]          run one orphan-scan round now
+lights3 tier scan|gc|reconcile <backend> [--config=<path>] tiered background tasks on demand
 lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  offline integrity scrub
-lights3 help [duostore [dump|load] | fsck]
+lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 ```
 
 | Option | Applies to | Default | Meaning |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | all | `config/lights3.yaml` | YAML config file (format: [architecture.md §5](architecture.md#5-example-configuration-file)) |
-| `--backend=<name>` | `duostore *`, `fsck` | — | backend name, same as the first positional |
-| `--file=<path>` | `duostore *` | — | dump file path, same as the second positional |
+| `--backend=<name>` | `duostore *`, `tier *`, `fsck` | — | backend name, same as the first positional |
+| `--file=<path>` | `duostore dump|load` | — | dump file path, same as the second positional |
 | `--max-mbps=<n>` | `fsck` | `0` | read throttle in MB/s, `0` = unthrottled |
 
 ### 2.1 Starting the server
@@ -114,6 +117,40 @@ MPU completing mid-scrub; re-run to confirm. Safe against a live instance too
 ```bash
 ./build/lights3 fsck duodata --max-mbps=100 --config=/etc/lights3/lights3.yaml
 ./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
+```
+
+### 2.4 Background tasks on demand: `duostore gc|scan`, `tier scan|gc|reconcile`
+
+CLI exits for the background hooks (roadmap §3.2): `run_gc_once` /
+`run_orphan_scan_once` / `scan_once` / tiered `run_gc_once` /
+`run_reconcile_once` used to be reachable only through timers and unit tests —
+an operator wanting space back *now* had to wait for the next tick (GC every
+5min, orphan scan and reconciliation daily by default). Same pattern as
+dump/load: build the backends, listen on nothing, run one round, exit; stats go
+to the log. **Exit code is plain 0/1 (success/exception)** — loss signals like
+refs_missing are LOG_ERROR'd as always but do not change the exit code; the
+integrity-verdict surface is `lights3 fsck`.
+
+- `duostore gc <backend>`: one full GC round (mpu_ttl cleanup → gcq
+  consumption → aged sealing + compaction → whole-empty-pack deletion,
+  [storage/duostore-core.md §8.1](../storage/duostore-core.md)). Local meta
+  engines (rocksdb/sqlite) hold a file lock, so stop the server first; shared
+  engines (redis/tikv) can run next to live gateways — the GC lease
+  coordinates. A `gc_enabled=false` (secondary gateway) config does not gate
+  the manual hooks.
+- `duostore scan <backend>`: one orphan-scan round (two-way reconciliation of
+  the disk against refs/packstat, §8.3); also prints chunk/pack on-disk usage.
+- `tier scan <backend>`: one round of coldness detection + watermark
+  reclamation + crash recovery + atime snapshot;
+- `tier gc <backend>`: consume one round of the tiered GC queue (orphan cloud
+  replica deletion; exponential backoff persists with each entry);
+- `tier reconcile <backend>`: one bidirectional local/cloud reconciliation
+  (cloud-has-it-local-doesn't → rebuild the stub; local-remote-cloud-missing →
+  warn, never delete the stub).
+
+```bash
+./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # reclaim space now
+./build/lights3 tier reconcile tierdata -c /etc/lights3/lights3.yaml
 ```
 
 ## 3. `s3adm` — ops CLI

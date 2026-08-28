@@ -117,15 +117,13 @@ token 验证（不符 InvalidToken / 过期 ExpiredToken），
 [storage/duostore-core.md](storage/duostore-core.md) §8.4、
 [storage/localfs.md](storage/localfs.md) §11。
 
-### 3.2 后台任务 CLI 化（钩子现成，接线即可）
+### 3.2 ~~后台任务 CLI 化（钩子现成，接线即可）~~ **已完成（2026-08-28）**
 
-`run_gc_once` / `run_orphan_scan_once` / `run_reconcile_once`（tiered 对账）/
-`scan_once`（tiered 判冷）目前只被定时器和单测调用，运维想立即回收空间只能
-等定时器（GC 默认 5min、孤儿扫描 1 天）。照 `lights3 duostore dump|load` 的
-模式加 `lights3 duostore gc|scan <backend>`、`lights3 tier scan|reconcile
-<backend>`。
-**价值：高；难度：低。** 入口：`src/main.cc`、
-`src/storage/duostore/duostore_backend.h`、`src/storage/tiered/tiered_backend.h`。
+`lights3 duostore gc|scan <backend>` 与 `lights3 tier scan|gc|reconcile
+<backend>`（tiered 的 run_gc_once 一并接上），照 dump/load 离线模式跑一轮即
+退，统计进日志、退出码 0/1（完整性裁决归 `lights3 fsck`）。本地 meta 引擎
+持文件锁须停服；redis/tikv 可与在线网关并行（GC 租约协调）。见
+[cli.md](cli.md) §2.4。
 
 ### 3.3 cloudproxy 网络面
 
@@ -359,7 +357,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 | 条目 | 说明 | 价值 | 难度 |
 | --- | --- | --- | --- |
 | ~~`s3adm fsck/scrub`~~ **已完成（2026-08-28）** | 见 §3.1（`s3adm fsck` + `lights3 fsck`） | — | — |
-| `lights3 duostore gc/scan`、`tier scan/reconcile` | 见 §3.2 | 高 | 低 |
+| ~~`lights3 duostore gc/scan`、`tier scan/reconcile`~~ **已完成（2026-08-28）** | 见 §3.2（含 `tier gc`） | — | — |
 | `s3adm object inspect` | 打印对象内部布局（pack/chunk/offset/CRC/tier 归属）；现排障只能读日志或 hexdump | 中-高 | 低-中 |
 | `s3adm mpu list/abort` | 清理僵尸 MPU；服务端 API 已有，纯 CLI 包装 | 中 | 低 |
 | `lights3 --check-config` | 校验逻辑已完整（test_config.cc 345 行），只差不 open backend 的 dry-run 出口 | 中 | 极低 |
@@ -407,7 +405,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 3. API×后端分维指标 + 后端耗时（§5.1）；异步日志 + 慢日志（§5.2）
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
 5. cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3）
-6. 后台任务 CLI 化（§3.2）；DuoGcStats 接指标（§3.7）；xattr 降级 gauge（§3.5）
+6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；DuoGcStats 接指标（§3.7）；xattr 降级 gauge（§3.5）
 7. fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）
 8. Dockerfile + compose（§6.3）
 9. 性能基线入库（§4.3；前置 bench --json）

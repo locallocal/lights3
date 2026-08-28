@@ -29,15 +29,18 @@
 lights3 [--config=<path>]                                  启动服务
 lights3 duostore dump <backend> <file> [--config=<path>]   导出 duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   导入 duostore meta
+lights3 duostore gc <backend> [--config=<path>]            立即跑一轮 duostore GC
+lights3 duostore scan <backend> [--config=<path>]          立即跑一轮孤儿扫描
+lights3 tier scan|gc|reconcile <backend> [--config=<path>] tiered 后台任务手动触发
 lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  离线数据完整性巡检
-lights3 help [duostore [dump|load] | fsck]
+lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 ```
 
 | 选项 | 适用 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | 全部 | `config/lights3.yaml` | YAML 配置文件（格式见 [architecture.md §5](architecture.md#5-配置文件示例)） |
-| `--backend=<name>` | `duostore *`、`fsck` | — | 后端名，等价于第一个位置参数 |
-| `--file=<path>` | `duostore *` | — | dump 文件路径，等价于第二个位置参数 |
+| `--backend=<name>` | `duostore *`、`tier *`、`fsck` | — | 后端名，等价于第一个位置参数 |
+| `--file=<path>` | `duostore dump|load` | — | dump 文件路径，等价于第二个位置参数 |
 | `--max-mbps=<n>` | `fsck` | `0` | 读限速（MB/s），`0` 不限速 |
 
 ### 2.1 启动服务
@@ -99,6 +102,33 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 ```bash
 ./build/lights3 fsck duodata --max-mbps=100 --config=/etc/lights3/lights3.yaml
 ./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
+```
+
+### 2.4 后台任务手动触发：`duostore gc|scan`、`tier scan|gc|reconcile`
+
+后台钩子的 CLI 出口（roadmap §3.2）：`run_gc_once` / `run_orphan_scan_once` /
+`scan_once` / `run_gc_once`(tiered) / `run_reconcile_once` 此前只被定时器与单
+测调用，想立即回收空间只能等下一个 tick（GC 默认 5min、孤儿扫描与对账默认
+1 天）。与 dump/load 同模式：构建后端、不监听端口、跑一轮即退出，统计打进
+日志。**退出码恒 0/1（成功/异常）**——refs_missing 等丢失信号照常 LOG_ERROR
+但不改变退出码，完整性裁决面归 `lights3 fsck`。
+
+- `duostore gc <backend>`：一轮完整 GC（mpu_ttl 清理 → gcq 消费 → 按龄封存 +
+  压实 → 整空 pack 删除，[storage/duostore-core.md §8.1](storage/duostore-core.md)）。
+  本地 meta 引擎（rocksdb/sqlite）持文件锁，须停服执行；共享引擎
+  （redis/tikv）可与在线网关并行——GC 租约自会协调。`gc_enabled=false` 的
+  从网关配置不影响手动钩子。
+- `duostore scan <backend>`：一轮孤儿扫描（盘面与 refs/packstat 双向对账，
+  §8.3），顺带打出 chunk/pack 盘面用量。
+- `tier scan <backend>`：一轮判冷 + 水位回收 + 崩溃恢复 + atime 快照；
+- `tier gc <backend>`：消费一轮 tiered GC 队列（孤儿云副本删除，指数退避
+  账随条目持久化）；
+- `tier reconcile <backend>`：一轮本地/云双向对账（云有本地无 → 重建
+  stub；本地 remote 云缺 → 告警绝不删 stub）。
+
+```bash
+./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # 立即回收空间
+./build/lights3 tier reconcile tierdata -c /etc/lights3/lights3.yaml
 ```
 
 ## 3. `s3adm` —— 运维 CLI

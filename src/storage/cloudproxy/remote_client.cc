@@ -8,6 +8,7 @@
 
 #include "core/config.h"
 #include "core/log.h"
+#include "core/util/time.h"
 #include "core/util/uri.h"
 #include "s3/xml.h"
 
@@ -66,6 +67,12 @@ CloudProxyConfig CloudProxyConfig::from_params(
     c.retry_max = int_param(params, "retry_max", 3, name);
     c.retry_base_ms = int_param(params, "retry_base_ms", 100, name);
     c.max_connections = int_param(params, "max_connections", 16, name);
+    c.pool_idle_timeout_ms = int_param(params, "pool_idle_timeout_ms", 60'000, name);
+    c.pool_max_lifetime_ms = int_param(params, "pool_max_lifetime_ms", 0, name);
+    c.breaker_threshold = int_param(params, "breaker_threshold", 10, name);
+    c.breaker_cooldown_ms = int_param(params, "breaker_cooldown_ms", 10'000, name);
+    c.op_deadline_ms = int_param(params, "op_deadline_ms", 0, name);
+    if (auto* v = find(params, "imds_endpoint")) c.imds_endpoint = *v;
     if (auto* v = find(params, "queue_cap")) {
         try {
             c.queue_cap_bytes = parse_size(*v);
@@ -96,7 +103,16 @@ CloudProxyConfig CloudProxyConfig::from_params(
     require_range("retry_max", c.retry_max, 0, 16);
     require_range("retry_base_ms", c.retry_base_ms, 1, 60'000);
     require_range("max_connections", c.max_connections, 1, 4096);
+    require_range("pool_idle_timeout_ms", c.pool_idle_timeout_ms, 0, 3'600'000);
+    require_range("pool_max_lifetime_ms", c.pool_max_lifetime_ms, 0, 86'400'000);
+    require_range("breaker_threshold", c.breaker_threshold, 0, 10'000);
+    require_range("breaker_cooldown_ms", c.breaker_cooldown_ms, 1, 3'600'000);
+    require_range("op_deadline_ms", c.op_deadline_ms, 0, 3'600'000);
     require_range("queue_cap", static_cast<int64_t>(c.queue_cap_bytes), 4096, 1 << 30);
+    if (!c.imds_endpoint.empty() && c.imds_endpoint.rfind("http://", 0) != 0 &&
+        c.imds_endpoint.rfind("https://", 0) != 0)
+        throw std::runtime_error("cloudproxy backend '" + name +
+                                 "': imds_endpoint must be an http(s) URL");
     // virtual-hosted style (force_path_style=false): connection and SNI always point at the
     // endpoint; only Host/signature and path vary per bucket (docs/cloudproxy-backend.md §7);
     // bucket names containing '.' will mismatch under TLS wildcard certificates -- a
@@ -212,7 +228,20 @@ void RemoteMetrics::count_error(const std::string& code) const {
 
 ClientPool::ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep,
                        std::shared_ptr<MetricHistogram> wait_hist)
-    : cfg_(cfg), ep_(ep), wait_hist_(std::move(wait_hist)) {}
+    : cfg_(cfg), ep_(ep), wait_hist_(std::move(wait_hist)) {
+    schedule_reaper();
+}
+
+ClientPool::~ClientPool() {
+    TimerQueue::Id id;
+    {
+        std::lock_guard lk(m_);
+        stopping_ = true;
+        id = reaper_;
+    }
+    // cancel blocks on an in-flight tick; the tick takes m_, so cancel outside the lock
+    TimerQueue::instance().cancel(id);
+}
 
 std::unique_ptr<httplib::Client> ClientPool::make_client() const {
     auto c = std::make_unique<httplib::Client>(ep_.base_url);
@@ -228,6 +257,67 @@ std::unique_ptr<httplib::Client> ClientPool::make_client() const {
     return c;
 }
 
+// Idle entries age at the front (back = most recently used); anything idle beyond
+// pool_idle_timeout is dropped — the remote/NAT likely closed it already, and reusing
+// it would surface as a first-request transport error and retry spike (roadmap §3.3).
+// Invariant: waiters exist only while idle_ is empty (release hands off before pushing
+// idle), so reaping never needs to wake anyone — it only shrinks total_
+void ClientPool::reap_stale_locked() {
+    if (cfg_.pool_idle_timeout_ms <= 0) return;
+    auto now = std::chrono::steady_clock::now();
+    auto ttl = std::chrono::milliseconds(cfg_.pool_idle_timeout_ms);
+    while (!idle_.empty() && now - idle_.front().since > ttl) {
+        idle_.pop_front();
+        --total_;
+    }
+}
+
+void ClientPool::schedule_reaper() {
+    if (cfg_.pool_idle_timeout_ms <= 0) return;
+    auto interval = std::chrono::milliseconds(
+        std::max(cfg_.pool_idle_timeout_ms / 2, 1000));
+    std::lock_guard lk(m_);
+    if (stopping_) return;
+    reaper_ = TimerQueue::instance().add(interval, [this] {
+        {
+            std::lock_guard g(m_);
+            if (stopping_) return;
+            reap_stale_locked();
+        }
+        schedule_reaper();  // re-arm after completion (never overlaps)
+    });
+}
+
+// Capacity slot freed (lifetime retirement / creation rollback): prefer handing the
+// slot to an async waiter — who re-takes it and creates a fresh client after resuming —
+// else wake a cv waiter. Waiters resume outside the pool lock: an inline resume under
+// m_ could re-enter the pool (creation-failure rollback) and self-deadlock
+void ClientPool::retire_slot() {
+    std::unique_lock lk(m_);
+    --total_;
+    for (;;) {
+        if (waiters_.empty()) {
+            cv_.notify_one();
+            return;
+        }
+        auto w = std::move(waiters_.front());
+        waiters_.pop_front();
+        {
+            std::lock_guard g(w->m);
+            if (w->done) continue;  // timed out; zombie entry
+            w->done = true;
+            w->create_new = true;
+        }
+        ++total_;  // the slot transfers to the waiter's upcoming client
+        lk.unlock();
+        if (w->ex)
+            w->ex->post(w->h);
+        else
+            w->h.resume();
+        return;
+    }
+}
+
 ClientPool::Lease ClientPool::acquire() {
     auto start = std::chrono::steady_clock::now();
     auto deadline = start + std::chrono::milliseconds(cfg_.request_timeout_ms);
@@ -241,24 +331,23 @@ ClientPool::Lease ClientPool::acquire() {
     };
     std::unique_lock lk(m_);
     for (;;) {
+        reap_stale_locked();
         if (!idle_.empty()) {
-            auto c = std::move(idle_.back());
+            auto pc = std::move(idle_.back().pc);
             idle_.pop_back();
             observe();
-            return Lease(this, std::move(c));
+            return Lease(this, std::move(pc));
         }
         if (total_ < cfg_.max_connections) {
             ++total_;
             lk.unlock();
             observe();
             try {
-                return Lease(this, make_client());
+                return Lease(this, {make_client(), std::chrono::steady_clock::now()});
             } catch (...) {
                 // Roll back the slot and wake waiters; an exception (e.g. bad_alloc) must
                 // not shrink the pool permanently
-                std::lock_guard g(m_);
-                --total_;
-                cv_.notify_one();
+                retire_slot();
                 throw;
             }
         }
@@ -271,10 +360,129 @@ ClientPool::Lease ClientPool::acquire() {
     }
 }
 
-void ClientPool::release(std::unique_ptr<httplib::Client> c) {
-    std::lock_guard lk(m_);
-    idle_.push_back(std::move(c));
+Task<ClientPool::Lease> ClientPool::acquire_async() {
+    auto start = std::chrono::steady_clock::now();
+    auto observe = [&] {
+        if (wait_hist_)
+            wait_hist_->observe(std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - start)
+                                    .count());
+    };
+
+    struct Acquire {
+        ClientPool* pool;
+        PooledClient granted;
+        bool create_new = false;
+        std::shared_ptr<Waiter> w;
+
+        bool await_ready() const noexcept { return false; }
+        bool await_suspend(std::coroutine_handle<> h) {
+            std::lock_guard lk(pool->m_);
+            pool->reap_stale_locked();
+            if (!pool->idle_.empty()) {
+                granted = std::move(pool->idle_.back().pc);
+                pool->idle_.pop_back();
+                return false;  // fast path: resume synchronously
+            }
+            if (pool->total_ < pool->cfg_.max_connections) {
+                ++pool->total_;
+                create_new = true;
+                return false;
+            }
+            w = std::make_shared<Waiter>();
+            w->h = h;
+            w->ex = pool->resume_ex_;
+            pool->waiters_.push_back(w);
+            // Timeout keeps the sync contract (SlowDown after request_timeout). The
+            // callback touches only the shared Waiter — no cancel bookkeeping needed;
+            // release() skips entries already marked done
+            auto wp = w;
+            TimerQueue::instance().add(
+                std::chrono::milliseconds(pool->cfg_.request_timeout_ms), [wp] {
+                    std::coroutine_handle<> hh{};
+                    {
+                        std::lock_guard g(wp->m);
+                        if (!wp->done) {
+                            wp->done = true;
+                            wp->timed_out = true;
+                            hh = wp->h;
+                        }
+                    }
+                    if (!hh) return;
+                    if (wp->ex)
+                        wp->ex->post(hh);
+                    else
+                        hh.resume();
+                });
+            return true;
+        }
+        void await_resume() {
+            if (!w) return;
+            std::lock_guard g(w->m);
+            if (w->timed_out)
+                throw S3Error(S3ErrorCode::SlowDown,
+                              "cloudproxy: all remote connections busy, try again later");
+            granted = std::move(w->granted);
+            create_new = w->create_new;
+        }
+    };
+
+    Acquire aw{this};
+    try {
+        co_await aw;
+    } catch (...) {
+        observe();
+        throw;
+    }
+    if (aw.create_new) {
+        try {
+            aw.granted = {make_client(), std::chrono::steady_clock::now()};
+        } catch (...) {
+            retire_slot();
+            throw;
+        }
+    }
+    observe();
+    co_return Lease(this, std::move(aw.granted));
+}
+
+void ClientPool::release(PooledClient pc) {
+    auto now = std::chrono::steady_clock::now();
+    // Age retirement (roadmap §3.3): drop instead of pooling; the connection closes
+    // when pc goes out of scope below, outside any handoff
+    if (cfg_.pool_max_lifetime_ms > 0 &&
+        now - pc.created > std::chrono::milliseconds(cfg_.pool_max_lifetime_ms)) {
+        pc.c.reset();  // close the socket before any waiter bookkeeping
+        retire_slot();
+        return;
+    }
+    std::unique_lock lk(m_);
+    // Direct handoff to the oldest live async waiter (skipping timed-out zombies)
+    while (!waiters_.empty()) {
+        auto w = std::move(waiters_.front());
+        waiters_.pop_front();
+        std::coroutine_handle<> h{};
+        {
+            std::lock_guard g(w->m);
+            if (w->done) continue;
+            w->done = true;
+            w->granted = std::move(pc);
+            h = w->h;
+        }
+        lk.unlock();  // resume outside the pool lock
+        if (w->ex)
+            w->ex->post(h);
+        else
+            h.resume();
+        return;
+    }
+    idle_.push_back({std::move(pc), now});
     cv_.notify_one();
+}
+
+ClientPool::Stats ClientPool::stats() {
+    std::lock_guard lk(m_);
+    return {total_, idle_.size()};
 }
 
 // ---------- Addressing and signing pipeline ----------
@@ -299,7 +507,17 @@ httplib::Headers RemoteContext::signed_headers(
     req.raw_query = raw_query;
     req.headers.set("Host", host.empty() ? ep.signed_host : host);
     for (auto& [k, v] : extra) req.headers.set(k, v);
-    auth.sign(req, cred, payload_hash);
+    if (cred_chain) {
+        // Chain credentials (roadmap §3.3): may block briefly on a refresh — always on a
+        // pool/pump thread here. The session token is set before signing so it enters
+        // SignedHeaders (x-amz-* are swept in automatically)
+        auto c = cred_chain->get();
+        if (!c.session_token.empty()) req.headers.set("x-amz-security-token", c.session_token);
+        Credential dyn{c.access_key, util::SecretString(std::move(c.secret_key))};
+        auth.sign(req, dyn, payload_hash);
+    } else {
+        auth.sign(req, cred, payload_hash);
+    }
     httplib::Headers out;
     for (auto& [k, v] : req.headers.items()) out.emplace(k, v);
     return out;
@@ -403,14 +621,97 @@ void RemoteContext::throw_transport_error(httplib::Error err) const {
                       " failed: " + httplib::to_string(err));
 }
 
-void RemoteContext::backoff(int attempt) const {
+std::optional<int64_t> RemoteContext::retry_after_hint(const httplib::Result& r) {
+    if (!r || (r->status != 429 && r->status != 503)) return std::nullopt;
+    if (!r->has_header("Retry-After")) return std::nullopt;
+    const std::string v = r->get_header_value("Retry-After");
+    if (v.empty()) return std::nullopt;
+    // Integer-seconds form; the alternative is an HTTP-date (RFC 9110 §10.2.3)
+    if (v.find_first_not_of("0123456789") == std::string::npos) {
+        try {
+            return std::clamp<int64_t>(std::stoll(v), 0, 60) * 1000;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+    if (auto t = util::parse_http_date(v)) {
+        auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
+                         *t - std::chrono::system_clock::now())
+                         .count();
+        return std::clamp<int64_t>(delta, 0, 60'000);
+    }
+    return std::nullopt;
+}
+
+int64_t RemoteContext::backoff_delay_ms(int attempt,
+                                        std::optional<int64_t> retry_after_ms) const {
+    // The server's own hint wins over the formula (roadmap §3.3): it knows its
+    // overload horizon; the clamp in retry_after_hint bounds a hostile value
+    if (retry_after_ms) return *retry_after_ms;
     thread_local std::mt19937 rng{std::random_device{}()};
     // 64-bit arithmetic + upper clamp: extreme config values must not overflow negative and
     // feed uniform_int_distribution (UB)
     int64_t base = static_cast<int64_t>(cfg.retry_base_ms) << std::min(attempt, 10);
     base = std::clamp<int64_t>(base, 0, 60'000);
     std::uniform_int_distribution<int64_t> jitter(0, base);
-    std::this_thread::sleep_for(std::chrono::milliseconds(base + jitter(rng)));
+    return base + jitter(rng);
+}
+
+void RemoteContext::backoff(int attempt, std::optional<int64_t> retry_after_ms) const {
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(backoff_delay_ms(attempt, retry_after_ms)));
+}
+
+// ---------- Circuit breaker (roadmap §3.3) ----------
+
+bool RemoteContext::breaker_allow() {
+    if (cfg.breaker_threshold <= 0) return true;
+    std::lock_guard lk(breaker_m_);
+    if (consec_failures_ < cfg.breaker_threshold) return true;
+    auto now = std::chrono::steady_clock::now();
+    if (now < breaker_open_until_) return false;
+    if (probe_inflight_) return false;  // half-open: exactly one probe decides
+    probe_inflight_ = true;
+    return true;
+}
+
+void RemoteContext::breaker_report(bool ok) {
+    if (cfg.breaker_threshold <= 0) return;
+    std::lock_guard lk(breaker_m_);
+    probe_inflight_ = false;
+    if (ok) {
+        if (consec_failures_ >= cfg.breaker_threshold)
+            LOG_INFO("cloudproxy: remote {} recovered, circuit breaker closed", cfg.endpoint);
+        consec_failures_ = 0;
+        return;
+    }
+    ++consec_failures_;
+    if (consec_failures_ >= cfg.breaker_threshold) {
+        breaker_open_until_ = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(cfg.breaker_cooldown_ms);
+        if (consec_failures_ == cfg.breaker_threshold)
+            LOG_WARN("cloudproxy: {} consecutive remote failures, circuit breaker open for "
+                     "{}ms (endpoint {})",
+                     consec_failures_, cfg.breaker_cooldown_ms, cfg.endpoint);
+    }
+}
+
+void RemoteContext::breaker_observe(const httplib::Result& r) {
+    if (!r) {
+        breaker_report(false);
+    } else if (r->status >= 500) {
+        breaker_report(false);
+    } else if (r->status != 429) {  // 429 = throttling, neither up nor down
+        breaker_report(true);
+    }
+}
+
+void RemoteContext::breaker_gate() {
+    if (breaker_allow()) return;
+    metrics.count_error("breaker_open");  // §8.2: shed load is visible per remote
+    throw S3Error(S3ErrorCode::SlowDown,
+                  "cloudproxy: circuit breaker open (remote " + cfg.endpoint +
+                      " failing), request shed");
 }
 
 // ---------- Pagination helpers ----------

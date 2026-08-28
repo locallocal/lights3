@@ -374,6 +374,7 @@ endif()
 if(LIGHTS3_CLOUDPROXY)
   target_sources(lights3_core PRIVATE
     src/storage/cloudproxy/remote_client.cc
+    src/storage/cloudproxy/aws_credentials.cc
     src/storage/cloudproxy/cloudproxy_backend.cc
   )
   # OPENSSL_SUPPORT must be uniform target-wide: having it on in httplib_server.cc but
@@ -517,6 +518,10 @@ if(LIGHTS3_BUILD_TESTS)
   endif()
   target_link_libraries(unit_tests PRIVATE lights3_core nlohmann_json::nlohmann_json)
   target_include_directories(unit_tests PRIVATE tests)
+  if(LIGHTS3_CLOUDPROXY)
+    # test_cloudproxy drives ClientPool/RemoteContext directly (remote_client.h includes httplib)
+    target_include_directories(unit_tests SYSTEM PRIVATE third_party)
+  endif()
   add_test(NAME unit_tests COMMAND unit_tests)
 
   # e2e parameterized by driver: the same set of real S3 flow cases runs against every compiled driver

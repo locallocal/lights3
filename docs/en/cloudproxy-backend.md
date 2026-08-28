@@ -28,9 +28,10 @@ Goals:
 
 Non-goals (first phase):
 
-- No automatic acquisition of IAM Role / IMDS / STS temporary credentials—this
-  is the main cost of dropping the cloud SDK; credentials are static AK/SK
-  (config supports `${ENV}` expansion);
+- ~~No automatic acquisition of IAM Role / IMDS / STS temporary credentials~~
+  **implemented (roadmap §3.3, 2026-08-28)**: with no static AK/SK configured
+  the credential chain runs (environment → container endpoint → EC2 IMDSv2,
+  §7); static AK/SK (`${ENV}` expansion) remains the explicit-config shape;
 - No multi-endpoint load balancing/failover; one backend instance maps to one
   remote endpoint;
 - No caching of remote data—caching is the responsibility of TieredBackend
@@ -361,7 +362,23 @@ Remote response → local `s3::S3Error` (single-point implementation in
 - Retryable conditions: network-layer errors, 5xx, SlowDown. Exponential
   backoff `base × 2^n + jitter` (defaults: base 100ms, 3 attempts;
   `retry_max` / `retry_base_ms` configurable with range validation at load
-  time; a single backoff is clamped to 60s);
+  time; a single backoff is clamped to 60s); **a `Retry-After` header on
+  429/503 (integer seconds or HTTP-date) overrides the formula, clamped to
+  [0, 60s] (roadmap §3.3)**;
+- **Backoff never sleeps on a pool thread** (roadmap §3.3 rework): the
+  control-plane retry loop is driven at coroutine level (`retry_io`) with
+  awaitable TimerQueue sleeps between attempts, and connection leases are
+  asynchronous too (`ClientPool::acquire_async` — at capacity a waiter
+  suspends for a handoff instead of parking in a cv). Data-plane pumps are
+  private per-transfer threads, where a blocking backoff is harmless;
+- **Circuit breaker**: `breaker_threshold` consecutive transport/5xx failures
+  (429 is neutral; default 10) open it for `breaker_cooldown_ms` (default
+  10s) — requests fail fast with SlowDown, then a single half-open probe
+  decides. A decidedly-down remote no longer costs every request the full
+  `(retry_max+1)` rounds;
+- **Per-op deadline** (`op_deadline_ms`, default 0 = off): a total budget for
+  one operation's whole retry loop; it only trims retries and never cuts an
+  in-flight transfer;
 - Applies in full to idempotent operations: GET / HEAD / LIST / DELETE / abort
   / bucket operations / create_multipart / complete_multipart. Note:
   create_multipart is strictly speaking non-idempotent—retrying after a lost
@@ -413,9 +430,17 @@ backends:
     request_timeout_ms: 60000        # httplib read/write timeout (per recv/send call)
     retry_max: 3
     retry_base_ms: 100
+    op_deadline_ms: 0                # total budget for one op's retry loop; 0 = no cap (§5.2)
+    breaker_threshold: 10            # circuit-breaker threshold (consecutive failures); 0 = off (§5.2)
+    breaker_cooldown_ms: 10000
     max_connections: 16              # ClientPool cap = pump concurrency cap
+    pool_idle_timeout_ms: 60000      # idle-connection expiry/reaping (NAT protection, §8.1); 0 = keep forever
+    pool_max_lifetime_ms: 0          # retire connections by age; 0 = unlimited
     queue_cap: 1MiB                  # data-plane BlockQueue capacity (backpressure watermark, §3.1)
     verify_etag: true                # §6; turn off when the remote uses SSE-KMS
+    # Leave BOTH access_key/secret_key empty to use the AWS credential chain (roadmap §3.3):
+    # environment → container endpoint (ECS/EKS) → EC2 IMDSv2, with session credentials
+    # refreshed ahead of expiry; imds_endpoint: http://169.254.169.254 is overridable for tests
 ```
 
 All keys are collected automatically via `BackendConfig::params` (scalar keys
@@ -446,11 +471,19 @@ matching—a deployment-side responsibility, not intercepted by the gateway.
 ### 8.1 ClientPool
 
 `httplib::Client` is not thread-safe (a single socket reused sequentially) →
-a mutex-protected **idle-stack connection pool**: acquire pops an idle instance
-(creating one if none, total capped at `max_connections`; at the cap, block and
-wait with a timeout), returned via RAII guard. Per-thread clients rejected:
-pumps run on private threads and the control plane on arbitrary pool threads,
-so thread_local would make the connection count uncontrollable.
+a mutex-protected **idle-queue connection pool**: acquire pops an idle instance
+(creating one if none, total capped at `max_connections`; at the cap, wait with
+a timeout — pump threads block on a cv, the coroutine control plane suspends in
+`acquire_async` for a direct handoff instead of parking a pool thread), returned
+via RAII guard. Per-thread clients rejected: pumps run on private threads and
+the control plane on arbitrary pool threads, so thread_local would make the
+connection count uncontrollable.
+
+Connection hygiene (roadmap §3.3): idle entries carry timestamps — anything
+idle beyond `pool_idle_timeout` is never reused and a light reaper closes it (a
+remote/NAT silently dropping idle sockets no longer shows up as periodic
+first-request retry spikes); `pool_max_lifetime` retires connections by age at
+release; `total_` shrinks accordingly.
 
 Each Client is uniformly configured at creation: `set_connection_timeout` /
 `set_read_timeout` / `set_write_timeout`, `set_keep_alive(true)`, TLS

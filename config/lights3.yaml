@@ -164,8 +164,9 @@ backends:
   #   type: cloudproxy
   #   endpoint: https://s3.example.com   # required; scheme://host[:port]
   #   region: us-east-1
-  #   access_key: ${REMOTE_AK}
-  #   secret_key: ${REMOTE_SK}
+  #   access_key: ${REMOTE_AK}           # leave BOTH empty to use the AWS credential chain:
+  #   secret_key: ${REMOTE_SK}           # env → container endpoint (ECS/EKS) → EC2 IMDSv2 (roadmap §3.3)
+  #   imds_endpoint: http://169.254.169.254  # metadata base URL (override for tests/proxies)
   #   bucket_prefix: ""                  # remote bucket = prefix + local name
   #   force_path_style: true             # false = virtual-hosted style (supported, §7 deployment constraints)
   #   tls_verify: true
@@ -173,8 +174,15 @@ backends:
   #   connect_timeout_ms: 5000
   #   request_timeout_ms: 60000
   #   retry_max: 3                       # [0,16]
-  #   retry_base_ms: 100                 # exponential backoff base
+  #   retry_base_ms: 100                 # exponential backoff base; a remote Retry-After (429/503) wins
+  #   op_deadline_ms: 0                  # total budget for one op's retry loop; 0 = no cap
+  #   breaker_threshold: 10              # consecutive transport/5xx failures that open the
+  #                                      # circuit breaker (fail fast with 503); 0 = disabled
+  #   breaker_cooldown_ms: 10000         # open duration before a single half-open probe
   #   max_connections: 16
+  #   pool_idle_timeout_ms: 60000        # idle connections older than this are never reused
+  #                                      # and get reaped (NAT-drop protection); 0 = keep forever
+  #   pool_max_lifetime_ms: 0            # retire connections by age at release; 0 = unlimited
   #   verify_etag: true                  # compare single-part PUT MD5 against the remote ETag (§6)
   #   queue_cap: 1MiB                    # data-plane queue capacity (backpressure watermark) [4KiB,1GiB]
   #   control_in_pump: false             # true = small control-plane requests also go through the pump thread (§8.2)

@@ -125,18 +125,22 @@ token 验证（不符 InvalidToken / 过期 ExpiredToken），
 持文件锁须停服；redis/tikv 可与在线网关并行（GC 租约协调）。见
 [cli.md](cli.md) §2.4。
 
-### 3.3 cloudproxy 网络面
+### 3.3 ~~cloudproxy 网络面~~ **已完成（2026-08-28，六项全部）**
 
-| 条目 | 现状 | 价值 | 难度 |
-| --- | --- | --- | --- |
-| **退避改协程定时器** | `backoff()` 用 `std::this_thread::sleep_for` 阻塞池线程，最坏 700ms/请求；远端抖动时并发退避成片吃掉池容量。换 `co_await` TimerQueue 即可 | 高 | 低 |
-| 连接池空闲回收 | `release()` 只 push 不带时间戳，无 reaper、无 max-lifetime；远端/NAT 关掉空闲连接后表现为周期性偶发重试尖峰；`total_` 只增不减 | 中 | 低 |
-| 解析 `Retry-After` | 现为固定公式 + jitter | 中 | 低 |
-| 熔断器 / per-op 总 deadline | 远端整体挂掉时每请求走满 `retry_max+1` 轮；GET 重试环最坏 `(retry_max+1)×60s` | 中 | 中 |
-| `ClientPool::acquire` 异步化 | 现用 `cv_.wait_until` 同步等（有 histogram 观测，属自觉取舍）；可换 `AsyncSemaphore` | 中 | 中 |
-| IMDS/STS 凭证链 | 只支持静态 AK/SK；EC2/EKS 上部署几乎必需 | 中-高 | 中 |
-
-入口：`src/storage/cloudproxy/remote_client.{h,cc}`、`cloudproxy_backend.cc`。
+① 退避协程化：控制面重试环重构为 `retry_io` 协程模板（每 attempt 经
+control_io 阻塞发送，轮间 `core/timer.h:async_sleep` + 回池，退避不再睡池
+线程；pump 私有线程保留阻塞退避）；② 连接池卫生：空闲项带时间戳
+（`pool_idle_timeout` 逾期绝不复用 + TimerQueue reaper 静默期回收）+
+`pool_max_lifetime` 按龄退休，`total_` 随之收缩；③ `Retry-After`（整秒/
+HTTP-date 两形态，钳 [0,60s]）覆盖公式退避；④ 熔断器（连续 N 次传输/5xx
+失败开闸快败 SlowDown + 半开单探针，`breaker_threshold/cooldown`）+
+`op_deadline_ms`（只裁剪重试环，不掐在飞传输）；⑤ `acquire_async`（池满
+waiter 挂起等 release 交接，TimerQueue 兑现超时契约，不停池线程）；
+⑥ AWS 凭证链（AK/SK 未配置时：环境变量 → ECS/EKS 容器端点 → EC2 IMDSv2，
+会话 token 进签名、到期前 5min 续期、负缓存 60s，`imds_endpoint` 可指测试
+桩）。COPY 顺带纳入重试（幂等 PUT）。见
+[storage/cloudproxy.md](storage/cloudproxy.md) §2.3.1/§2.4/§7.2、
+[cloudproxy-backend.md](cloudproxy-backend.md) §5.2/§7/§8.1。
 
 ### 3.4 xlocalfs：io_uring 的未兑现收益
 
@@ -404,7 +408,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 2. mint 挂 ctest + website e2e/单测 + s3adm 进 e2e（§6.1）
 3. API×后端分维指标 + 后端耗时（§5.1）；异步日志 + 慢日志（§5.2）
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
-5. cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3）
+5. ~~cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3，含熔断/deadline/异步 acquire/凭证链）~~ **已完成（2026-08-28）**
 6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；DuoGcStats 接指标（§3.7）；xattr 降级 gauge（§3.5）
 7. fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）
 8. Dockerfile + compose（§6.3）

@@ -6,6 +6,7 @@
 //   lights3 [--config=<path>]                     start the server
 //   lights3 duostore dump <backend> <file> [...]  duostore meta admin
 //   lights3 duostore load <backend> <file> [...]  (docs/storage/duostore-core.md §11)
+//   lights3 fsck <backend> [--max-mbps=<n>] [...] offline integrity scrub (roadmap §3.1)
 //
 // ccmd's root options do not propagate down, so --config is registered on
 // every leaf. cflag accepts long-option values only as --name=value; the
@@ -21,6 +22,7 @@
 
 #include "app/app.h"
 #include "core/log.h"
+#include "storage/localfs/localfs_backend.h"
 #ifdef LIGHTS3_DUOSTORE
 #include <fstream>
 
@@ -45,7 +47,7 @@ void add_config_flag(const Cmd& cmd) {
 // for non-bool long options). Applies to the value-taking long options
 // registered in this file; everything after `--` is left untouched.
 std::vector<std::string> normalize_argv(int argc, char** argv) {
-    static const char* const kValueFlags[] = {"--config", "--backend", "--file"};
+    static const char* const kValueFlags[] = {"--config", "--backend", "--file", "--max-mbps"};
     std::vector<std::string> out;
     out.reserve(static_cast<size_t>(argc));
     for (int i = 0; i < argc; ++i) {
@@ -182,6 +184,92 @@ Cmd make_duostore() {
 }
 #endif  // LIGHTS3_DUOSTORE
 
+// Offline integrity scrub (roadmap §3.1): backends built, no server listening —
+// same shape as duostore dump/load. Dispatches on the backend's concrete type:
+// duostore gets the deep manifest/crc/refs scrub, localfs/xlocalfs the ETag
+// full-verify. Findings set exit code 1 (fsck convention); warning-grade
+// counters (refs_stale, unverifiable, orphan sidecars) do not — they are logged
+// and can be transient or expected on legacy data
+void run_fsck(const Cmd& c) {
+    using namespace lights3;
+    std::string backend = c->var<std::string>("backend");
+    const auto& pos = c->args();
+    if (pos.size() > 1) {
+        g_exit = 2;
+        throw std::runtime_error("fsck: too many arguments");
+    }
+    if (pos.size() == 1) backend = pos[0];
+    if (backend.empty()) {
+        c->print_help();
+        g_exit = 2;
+        throw std::runtime_error("fsck: <backend> is required");
+    }
+    int mbps = c->var<int>("max-mbps");
+    if (mbps < 0) {
+        g_exit = 2;
+        throw std::runtime_error("fsck: --max-mbps must be >= 0");
+    }
+    const uint64_t bps = uint64_t(mbps) * 1000 * 1000;
+
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    const auto& backends = app.backends();
+    auto it = backends.find(backend);
+    if (it == backends.end()) throw std::runtime_error("fsck: no backend named '" + backend + "'");
+    uint64_t findings = 0;
+    bool aborted = false;
+#ifdef LIGHTS3_DUOSTORE
+    if (auto* duo = dynamic_cast<storage::DuoStoreBackend*>(it->second.get())) {
+        storage::duostore::DuoScrubOptions opt;
+        opt.max_bytes_per_sec = bps;
+        auto st = sync_wait(duo->run_scrub_once(opt));
+        LOG_INFO("fsck '{}': {} objects / {} parts / {} extents / {} bytes read; corrupt {}, "
+                 "unreadable {}, refs missing {}, refs stale {}, meta errors {}",
+                 backend, st.objects_scanned, st.parts_scanned, st.extents_checked,
+                 st.bytes_read, st.corrupt_extents, st.unreadable_extents, st.refs_missing,
+                 st.refs_stale, st.meta_errors);
+        findings =
+            st.corrupt_extents + st.unreadable_extents + st.refs_missing + st.meta_errors;
+        aborted = st.aborted;
+    } else
+#endif
+        if (auto* lfs = dynamic_cast<storage::LocalFsBackend*>(it->second.get())) {
+        storage::FsScrubOptions opt;
+        opt.max_bytes_per_sec = bps;
+        auto st = sync_wait(lfs->run_scrub_once(opt));
+        LOG_INFO("fsck '{}': {} objects / {} bytes read; mismatches {}, read errors {}, "
+                 "unverifiable {}, stubs skipped {}, races skipped {}, orphan sidecars {}",
+                 backend, st.objects_scanned, st.bytes_read, st.etag_mismatches,
+                 st.read_errors, st.unverifiable, st.skipped_stubs, st.skipped_races,
+                 st.orphan_sidecars);
+        findings = st.etag_mismatches + st.read_errors;
+        aborted = st.aborted;
+    } else {
+        throw std::runtime_error("fsck: backend '" + backend +
+                                 "' does not support offline fsck (duostore/localfs/xlocalfs)");
+    }
+    app.shutdown();
+    if (aborted) throw std::runtime_error("fsck: scrub aborted before completion");
+    if (findings > 0) g_exit = 1;
+}
+
+Cmd make_fsck() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "fsck", "lights3 fsck local --max-mbps=100 --config=config/lights3.yaml",
+        "lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]",
+        "Offline data-integrity scrub (read-only). duostore: read back every extent of "
+        "every object and in-flight multipart part, recompute crc32c against the "
+        "manifest, and reconcile the refs ledger both ways. localfs/xlocalfs: re-read "
+        "every object and compare the recomputed MD5 with the stored ETag (multipart "
+        "composites via the recorded part layout). Runs with the backends built but no "
+        "server listening; exit code 1 when integrity findings exist.",
+        "offline data-integrity scrub", run_fsck);
+    add_config_flag(cmd);
+    cmd->var<std::string>("backend", "", "backend name (alternative to the positional)");
+    cmd->var<int>("max-mbps", 0, "read throttle in MB/s (0 = unthrottled)");
+    return cmd;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -194,6 +282,7 @@ int main(int argc, char** argv) {
 #ifdef LIGHTS3_DUOSTORE
     root->add_subcommand(make_duostore());
 #endif
+    root->add_subcommand(make_fsck());
 
     try {
         root->execute(normalize_argv(argc, argv));

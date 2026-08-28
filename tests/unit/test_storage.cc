@@ -1,6 +1,7 @@
 // Backend consistency suite: the same set of cases runs parameterized over memory / localfs / xlocalfs (docs/storage-backend.md §6);
 // the suite body lives in unit/backend_suite.h (also used by the cloudproxy tests, docs/cloudproxy-backend.md §10)
 #include <fcntl.h>
+#include <sys/xattr.h>
 
 #include <atomic>
 #include <filesystem>
@@ -457,6 +458,113 @@ TEST(localfs_orphan_sidecar_reaped_by_list) {
     CHECK_EQ(res.objects[0].key, std::string("stay.bin"));
     CHECK(!fs::exists(orphan));
     CHECK(fs::exists(tmp.path / "data/bkt/stay.bin.lights3-meta"));
+}
+
+// ---------- scrub (roadmap §3.1) ----------
+
+// Full verify over the real layout: single-part, directory marker, and a
+// multipart composite recomputed from part_sizes all pass clean; a silently
+// flipped byte surfaces as an ETag mismatch; an orphan sidecar is reported but
+// (unlike listing) never healed — the scrub is read-only
+TEST(localfs_scrub_verifies_and_detects) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+    put(b, "bkt", "ok.bin", "hello world");
+    put(b, "bkt", "dir/", "");
+    put(b, "bkt", "bad.bin", "corrupt me please");
+    auto id = sync_wait(b.create_multipart("bkt", "mp.bin", {}));
+    std::vector<PartInfo> parts;
+    {
+        http::StringBodyReader r(std::string(1000, 'a'));
+        parts.push_back({1, sync_wait(b.upload_part("bkt", "mp.bin", id, 1, r)).etag});
+    }
+    {
+        http::StringBodyReader r(std::string(500, 'b'));
+        parts.push_back({2, sync_wait(b.upload_part("bkt", "mp.bin", id, 2, r)).etag});
+    }
+    sync_wait(b.complete_multipart("bkt", "mp.bin", id, parts));
+
+    auto st0 = sync_wait(b.run_scrub_once());
+    CHECK_EQ(st0.objects_scanned, uint64_t(4));
+    CHECK_EQ(st0.etag_mismatches, uint64_t(0));
+    CHECK_EQ(st0.unverifiable, uint64_t(0));
+    CHECK_EQ(st0.read_errors, uint64_t(0));
+    CHECK_EQ(st0.orphan_sidecars, uint64_t(0));
+
+    {
+        std::fstream f(tmp.path / "data/bkt/bad.bin",
+                       std::ios::binary | std::ios::in | std::ios::out);
+        f.seekp(0);
+        f.put('X');
+    }
+    auto st1 = sync_wait(b.run_scrub_once());
+    CHECK_EQ(st1.etag_mismatches, uint64_t(1));
+
+    fs::remove(tmp.path / "data/bkt/ok.bin");
+    auto st2 = sync_wait(b.run_scrub_once());
+    CHECK_EQ(st2.objects_scanned, uint64_t(3));
+    CHECK_EQ(st2.orphan_sidecars, uint64_t(1));
+    CHECK(fs::exists(tmp.path / "data/bkt/ok.bin.lights3-meta"));  // reported, not healed
+}
+
+// A multipart object whose metadata predates part_sizes has unrecoverable part
+// boundaries: the honest verdict is unverifiable, never a mismatch
+TEST(localfs_scrub_legacy_multipart_unverifiable) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+    auto id = sync_wait(b.create_multipart("bkt", "mp.bin", {}));
+    std::vector<PartInfo> parts;
+    {
+        http::StringBodyReader r(std::string(800, 'x'));
+        parts.push_back({1, sync_wait(b.upload_part("bkt", "mp.bin", id, 1, r)).etag});
+    }
+    sync_wait(b.complete_multipart("bkt", "mp.bin", id, parts));
+
+    // Strip part_sizes from both metadata carriers to simulate a legacy object
+    fs::path data = tmp.path / "data/bkt/mp.bin";
+    fs::path side = tmp.path / "data/bkt/mp.bin.lights3-meta";
+    std::string filtered;
+    {
+        std::ifstream in(side);
+        std::string line;
+        while (std::getline(in, line))
+            if (line.rfind("part_sizes\t", 0) != 0) filtered += line + "\n";
+    }
+    {
+        std::ofstream out(side, std::ios::trunc);
+        out << filtered;
+    }
+    (void)::setxattr(data.c_str(), "user.lights3.meta", filtered.data(), filtered.size(), 0);
+
+    auto st = sync_wait(b.run_scrub_once());
+    CHECK_EQ(st.objects_scanned, uint64_t(1));
+    CHECK_EQ(st.unverifiable, uint64_t(1));
+    CHECK_EQ(st.etag_mismatches, uint64_t(0));
+}
+
+// xlocalfs shares the on-disk format and inherits the scrub unchanged
+TEST(xlocalfs_scrub_inherited) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+    put(b, "bkt", "k.bin", "xlocalfs payload");
+    auto st0 = sync_wait(b.run_scrub_once());
+    CHECK_EQ(st0.objects_scanned, uint64_t(1));
+    CHECK_EQ(st0.etag_mismatches, uint64_t(0));
+    {
+        std::fstream f(tmp.path / "data/bkt/k.bin",
+                       std::ios::binary | std::ios::in | std::ios::out);
+        f.seekp(0);
+        f.put('Y');
+    }
+    auto st1 = sync_wait(b.run_scrub_once());
+    CHECK_EQ(st1.etag_mismatches, uint64_t(1));
+    sync_wait(b.close());
 }
 
 // ---------- P0 §1.3 / §1.4 regressions ----------

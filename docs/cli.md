@@ -29,14 +29,16 @@
 lights3 [--config=<path>]                                  启动服务
 lights3 duostore dump <backend> <file> [--config=<path>]   导出 duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   导入 duostore meta
-lights3 help [duostore [dump|load]]
+lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  离线数据完整性巡检
+lights3 help [duostore [dump|load] | fsck]
 ```
 
 | 选项 | 适用 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | 全部 | `config/lights3.yaml` | YAML 配置文件（格式见 [architecture.md §5](architecture.md#5-配置文件示例)） |
-| `--backend=<name>` | `duostore *` | — | 后端名，等价于第一个位置参数 |
+| `--backend=<name>` | `duostore *`、`fsck` | — | 后端名，等价于第一个位置参数 |
 | `--file=<path>` | `duostore *` | — | dump 文件路径，等价于第二个位置参数 |
+| `--max-mbps=<n>` | `fsck` | `0` | 读限速（MB/s），`0` 不限速 |
 
 ### 2.1 启动服务
 
@@ -72,11 +74,39 @@ DuoStore 的逻辑 meta 备份与恢复（流格式与不变量见
 ./build/lights3 duostore load --backend=duo --file=/backup/duo-meta.dump -c /etc/lights3/lights3.yaml
 ```
 
+### 2.3 `fsck`
+
+离线数据完整性巡检（roadmap §3.1，实现细节见
+[storage/duostore-core.md §8.4](storage/duostore-core.md) 与
+[storage/localfs.md §11](storage/localfs.md)）。与
+dump/load 同模式：构建全部后端、不监听端口，跑完即退出；**纯只读**，任何
+发现只记日志与计数，绝不修复。按 `<backend>` 的实际类型分派：
+
+- **duostore**：以 meta 为驱动读回每个对象与进行中 multipart 分片的全部
+  extent，逐段重算 crc32c 与 manifest 对照（与 `verify_chunk_crc` 开关无关），
+  并把 chunk/rados refs 台账与 manifest 双向对账；
+- **localfs / xlocalfs**：重读每个对象内容、重算 MD5 与存储的 ETag 对照
+  （multipart 复合 ETag 按记录的 part 布局重算；无布局的存量对象计为
+  unverifiable）；
+- 其余类型（memory/cloudproxy/tiered）报错退出。
+
+退出码：`0` 干净；`1` 存在完整性发现（duostore 的 corrupt/unreadable/
+refs_missing/meta_errors，localfs 的 mismatches/read_errors）。警告级计数
+（refs_stale、unverifiable、孤儿 sidecar）只记日志不影响退出码——
+refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。对运行中的
+实例也可安全执行（duostore 侧代价是巡检期间 GC 停摆）。
+
+```bash
+./build/lights3 fsck duodata --max-mbps=100 --config=/etc/lights3/lights3.yaml
+./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
+```
+
 ## 3. `s3adm` —— 运维 CLI
 
-`src/tools/s3adm*.cc`，构建产物与 `lights3` 同目录。三个命令组：`cred`
-（凭证管理面）、`website`（桶静态网站配置）、`bench`（压测）。全部子命令
-以 SigV4 自签名直连 lights3 的 HTTP 端点，无需 aws cli。
+`src/tools/s3adm*.cc`，构建产物与 `lights3` 同目录。三个命令组加一个叶子
+命令：`cred`（凭证管理面）、`website`（桶静态网站配置）、`bench`（压测）、
+`fsck`（在线对象校验）。全部子命令以 SigV4 自签名直连 lights3 的 HTTP
+端点，无需 aws cli。
 
 ### 3.1 连接与凭证选项（所有叶子子命令共有）
 
@@ -176,6 +206,33 @@ s3adm bench get -b test -s 4M -j 8 -d 30 --keep
 s3adm bench stat -b test -j 16
 s3adm bench list -b test -n 10000 --max-keys=1000
 s3adm bench list-buckets -j 16
+```
+
+### 3.5 `fsck` —— 在线对象校验
+
+`lights3 fsck`（§2.3）的在线补集：走 S3 API 端到端校验——ListObjectsV2 逐页
+列举，逐对象流式 GET 并在客户端重算 MD5 与 ETag 对照，顺带覆盖了网关读
+路径本身。multipart 复合 ETag 经 `GET ?partNumber=i` 逐分片下载重算
+（服务端无布局的存量对象回 501，计为 UNVERIFIABLE 而非 MISMATCH）。
+纯只读；任何能读目标桶的凭证即可。代价是全部字节走一遍 HTTP——深检
+（duostore crc/refs 对账）仍需服务器侧的 `lights3 fsck`。
+
+```text
+s3adm fsck <bucket> [-p|--prefix=<p>] [--max-mbps=<n>]
+```
+
+| 选项 | 默认 | 说明 |
+| --- | --- | --- |
+| `-p, --prefix=<p>` | — | 只校验该前缀下的 key |
+| `--max-mbps=<n>` | `0` | 下载限速（MB/s），`0` 不限速 |
+
+逐条打印 `MISMATCH <key>`（stdout）/ 传输错误（stderr），结尾一行汇总
+（objects/bytes/mismatches/errors/unverifiable/skipped，skipped = 列举与
+GET 之间被删除的对象）。退出码：`0` 干净；`1` 有 mismatch 或错误。
+
+```bash
+s3adm fsck my-bucket --endpoint=https://s3.example.com
+s3adm fsck my-bucket --prefix=photos/ --max-mbps=50
 ```
 
 ## 4. 新增子命令的约定

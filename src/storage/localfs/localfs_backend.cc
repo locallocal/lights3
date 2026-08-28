@@ -14,6 +14,7 @@
 #include "core/util/crypto.h"
 #include "storage/listing.h"
 #include "storage/multipart.h"
+#include "storage/scrub_throttle.h"
 
 namespace fs = std::filesystem;
 
@@ -1024,6 +1025,200 @@ void LocalFsBackend::cleanup_stale_uploads() {
             LOG_INFO("localfs: removed stale multipart upload {}",
                      e.path().filename().string());
     }
+}
+
+// ---------- scrub (roadmap §3.1) ----------
+
+Task<FsScrubStats> LocalFsBackend::run_scrub_once(FsScrubOptions opt) {
+    co_await pool_->schedule();
+    BackgroundTaskGroup::Scope scope(bg_);
+    FsScrubStats st;
+    if (!scope.ok()) {
+        st.aborted = true;
+        co_return st;
+    }
+    ScrubThrottle throttle(opt.max_bytes_per_sec, pool_, [this] { return bg_.closing(); });
+    std::vector<uint8_t> buf(256 << 10);
+    std::error_code ec;
+    for (auto it = fs::directory_iterator(root_, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (st.aborted || bg_.closing()) {
+            st.aborted = true;
+            break;
+        }
+        std::error_code sec;
+        if (!it->is_directory(sec) || !fs::exists(it->path() / fsutil::kBucketMarker, sec))
+            continue;
+        co_await scrub_bucket(it->path().filename().string(), it->path(), throttle, buf, st);
+    }
+    if (ec) {
+        ++st.read_errors;
+        LOG_ERROR("localfs: scrub: root enumeration failed: {}", ec.message());
+    }
+    LOG_INFO("localfs: scrub{}: {} objects, {} bytes read; mismatches {}, read errors {}, "
+             "unverifiable {}, stubs skipped {}, races skipped {}, orphan sidecars {}",
+             st.aborted ? " (aborted)" : "", st.objects_scanned, st.bytes_read,
+             st.etag_mismatches, st.read_errors, st.unverifiable, st.skipped_stubs,
+             st.skipped_races, st.orphan_sidecars);
+    co_return st;
+}
+
+Task<void> LocalFsBackend::scrub_bucket(const std::string& bucket, const fs::path& dir,
+                                        ScrubThrottle& throttle, std::vector<uint8_t>& buf,
+                                        FsScrubStats& st) {
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(dir, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (bg_.closing()) {
+            st.aborted = true;
+            co_return;
+        }
+        std::error_code sec;
+        if (!it->is_regular_file(sec)) continue;
+        const fs::path& p = it->path();
+        std::string name = p.filename().string();
+        if (name == fsutil::kBucketMarker) continue;
+        if (name.ends_with(fsutil::kSidecarSuffix)) {
+            // Delete crashes leave "sidecar without data"; listing self-heals
+            // only directories it visits, so the scrub reports the leftovers
+            fs::path data = p.parent_path() /
+                            name.substr(0, name.size() - strlen(fsutil::kSidecarSuffix));
+            if (!fs::exists(data, sec)) {
+                ++st.orphan_sidecars;
+                LOG_WARN("localfs: scrub {}: orphan sidecar {}", bucket, p.string());
+            }
+            continue;
+        }
+        std::string rel = fs::relative(p, dir, sec).generic_string();
+        if (sec) continue;
+        // Directory-marker file maps back to the trailing-slash key it stands for
+        std::string key = name == fsutil::kDirMarker
+                              ? rel.substr(0, rel.size() - strlen(fsutil::kDirMarker))
+                              : rel;
+        co_await scrub_object(bucket, key, p, throttle, buf, st);
+    }
+    if (ec) {
+        ++st.read_errors;
+        LOG_ERROR("localfs: scrub {}: directory walk failed: {}", bucket, ec.message());
+    }
+}
+
+Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::string& key,
+                                        const fs::path& path, ScrubThrottle& throttle,
+                                        std::vector<uint8_t>& buf, FsScrubStats& st) {
+    int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno != ENOENT) {  // ENOENT = deleted mid-walk, not a finding
+            ++st.read_errors;
+            LOG_ERROR("localfs: scrub {}/{}: open failed: {}", bucket, key, strerror(errno));
+        }
+        co_return;
+    }
+    struct FdGuard {
+        int fd;
+        ~FdGuard() { ::close(fd); }
+    } guard{fd};
+    struct stat sb{};
+    if (::fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) co_return;
+    fsutil::TierInfo tier;
+    ObjectMeta meta;
+    try {
+        meta = fsutil::load_object_meta_stat(path, key, sb, &tier);
+    } catch (const S3Error&) {
+        // Data file readable but its metadata is not (torn xattr/sidecar): the
+        // ETag cannot be known, which is itself worth surfacing
+        ++st.objects_scanned;
+        ++st.unverifiable;
+        LOG_WARN("localfs: scrub {}/{}: metadata unreadable, cannot verify", bucket, key);
+        co_return;
+    }
+    ++st.objects_scanned;
+    if (tier.tier == fsutil::Tier::kRemote) {
+        ++st.skipped_stubs;  // data lives on the cloud side; nothing local to hash
+        co_return;
+    }
+    if (meta.etag.empty()) {
+        ++st.unverifiable;
+        LOG_WARN("localfs: scrub {}/{}: no ETag recorded, cannot verify", bucket, key);
+        co_return;
+    }
+    std::string computed;
+    try {
+        auto dash = meta.etag.find('-');
+        if (dash == std::string::npos) {
+            computed = co_await md5_range(fd, 0, uint64_t(sb.st_size), throttle, buf, st);
+        } else {
+            // Multipart composite: recompute per-part MD5s over the recorded
+            // part boundaries. Objects completed before part_sizes existed have
+            // no recoverable boundaries — unverifiable, not a mismatch
+            uint64_t declared_parts = strtoull(meta.etag.c_str() + dash + 1, nullptr, 10);
+            uint64_t sum = 0;
+            for (uint64_t s : meta.part_sizes) sum += s;
+            if (meta.part_sizes.empty() || meta.part_sizes.size() != declared_parts ||
+                sum != uint64_t(sb.st_size)) {
+                ++st.unverifiable;
+                LOG_WARN("localfs: scrub {}/{}: multipart ETag without a usable part layout "
+                         "(legacy object), cannot verify",
+                         bucket, key);
+                co_return;
+            }
+            std::vector<std::string> md5s;
+            md5s.reserve(meta.part_sizes.size());
+            uint64_t off = 0;
+            for (uint64_t s : meta.part_sizes) {
+                md5s.push_back(co_await md5_range(fd, off, s, throttle, buf, st));
+                off += s;
+            }
+            computed = combined_etag(md5s);
+        }
+    } catch (const std::exception& ex) {
+        ++st.read_errors;
+        LOG_ERROR("localfs: scrub {}/{}: read failed: {}", bucket, key, ex.what());
+        co_return;
+    }
+    if (st.aborted) co_return;  // partial hash after an interrupted pace is meaningless
+    if (computed == meta.etag) co_return;
+    // The metadata is read by path while the content hash used the fd: a
+    // concurrent overwrite between the two is a torn snapshot, not corruption
+    struct stat sb2{};
+    if (::stat(path.c_str(), &sb2) != 0 || sb2.st_ino != sb.st_ino ||
+        sb2.st_size != sb.st_size || sb2.st_mtim.tv_sec != sb.st_mtim.tv_sec ||
+        sb2.st_mtim.tv_nsec != sb.st_mtim.tv_nsec) {
+        ++st.skipped_races;
+        co_return;
+    }
+    ++st.etag_mismatches;
+    LOG_ERROR("localfs: scrub {}/{}: ETag mismatch (stored {}, computed {}) — silent data "
+              "corruption",
+              bucket, key, meta.etag, computed);
+}
+
+Task<std::string> LocalFsBackend::md5_range(int fd, uint64_t off, uint64_t len,
+                                            ScrubThrottle& throttle, std::vector<uint8_t>& buf,
+                                            FsScrubStats& st) {
+    util::HashStream md5(util::HashStream::Algo::Md5);
+    while (len > 0 && !st.aborted) {  // an aborted multipart verify skips its remaining parts
+        // Hop per buffer like FdStreamReader: a full-store scrub must not sit
+        // on one pool thread for its whole duration
+        co_await pool_->schedule();
+        size_t want = size_t(std::min<uint64_t>(buf.size(), len));
+        ssize_t n = ::pread(fd, buf.data(), want, off);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            throw std::system_error(errno, std::generic_category(), "pread");
+        }
+        if (n == 0) throw std::runtime_error("file shorter than expected (truncated under scrub)");
+        md5.update(std::span(buf.data(), size_t(n)));
+        off += uint64_t(n);
+        len -= uint64_t(n);
+        st.bytes_read += uint64_t(n);
+        co_await throttle.pace(uint64_t(n));
+        if (st.aborted || bg_.closing()) {
+            st.aborted = true;
+            break;  // caller sees st.aborted and discards the partial hash
+        }
+    }
+    co_return md5.final_hex();
 }
 
 }  // namespace lights3::storage

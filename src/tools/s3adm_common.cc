@@ -119,8 +119,22 @@ httplib::Result SignedClient::get_discard(const std::string& path, uint64_t* byt
                     });
 }
 
-httplib::Result SignedClient::head(const std::string& path) {
-    return cli_.Head(path, sign("HEAD", path, "", ""));
+httplib::Result SignedClient::get_hashed(const std::string& path, const std::string& query,
+                                         std::string* md5_hex, uint64_t* bytes) {
+    util::HashStream md5(util::HashStream::Algo::Md5);
+    auto r = cli_.Get(path + (query.empty() ? "" : "?" + query), sign("GET", path, query, ""),
+                      [&](const char* data, size_t n) {
+                          md5.update(std::span(reinterpret_cast<const uint8_t*>(data), n));
+                          *bytes += n;
+                          return true;
+                      });
+    *md5_hex = md5.final_hex();
+    return r;
+}
+
+httplib::Result SignedClient::head(const std::string& path, const std::string& query) {
+    return cli_.Head(path + (query.empty() ? "" : "?" + query),
+                     sign("HEAD", path, query, ""));
 }
 
 httplib::Result SignedClient::put_unsigned(const std::string& path, const std::string& body,

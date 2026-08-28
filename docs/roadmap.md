@@ -103,19 +103,19 @@ token 验证（不符 InvalidToken / 过期 ExpiredToken），
 存储层是全项目完成度最高的部分（duostore GC/压实/孤儿扫描/租约矩阵齐全），
 以下是残留设计边界与新增可优化面。
 
-### 3.1 数据完整性：scrub / fsck（最大的单项运维缺口）
+### 3.1 ~~数据完整性：scrub / fsck（最大的单项运维缺口）~~ **已完成（2026-08-28）**
 
-现状拼图：duostore pack extent 读取恒校验 crc32c，但 chunk 的
-`verify_chunk_crc` **默认关**且 Range 命中中段时无法校验；localfs/xlocalfs
-**读路径零校验**（ETag 写时算、读时从不复核，静默位翻转不可发现）；孤儿扫
-描只查存在性、不读内容；`s3adm`/`lights3` 均无 fsck/scrub/verify 子命令。
-**当前网关无法自证数据完好。**
-
-分步走：① duostore 侧成本最低——`scan_chunks` 枚举原语已存在，加"读 + 验
-crc + 对账 refs"的遍历与限速；② localfs 侧把 ETag 当校验和用做全量 verify；
-③ 挂到 CLI 与（可选的）admin 端点。
-**价值：高；难度：中。** 入口：`src/storage/duostore/data_store.h`、
-`fs_data_store.cc`、新增 `src/tools/s3adm_fsck.cc`。
+① duostore `run_scrub_once`：meta 驱动（chunk 无头无尾、crc 只在 manifest，
+盘面驱动无从校验）读回全部对象与进行中 mpu 分片的 extent、独立于
+`verify_chunk_crc` 重算 crc32c，refs 台账双向对账（三关复查防并发误报）；
+② localfs/xlocalfs `run_scrub_once`：ETag 当校验和全量 verify（multipart
+按 part_sizes 重算复合 ETag，无布局存量对象诚实 unverifiable）；③ CLI 两
+面：离线 `lights3 fsck <backend>`（照 dump/load 模式，发现 → 退出码 1）+
+在线 `s3adm fsck <bucket>`（S3 API 端到端，GET ?partNumber 逐分片）。均纯
+只读，`--max-mbps` 限速（`scrub_throttle.h`，TimerQueue 分片睡眠）。admin
+端点未做（CLI 已覆盖，触发面留观）。见 [cli.md](cli.md) §2.3/§3.5、
+[storage/duostore-core.md](storage/duostore-core.md) §8.4、
+[storage/localfs.md](storage/localfs.md) §11。
 
 ### 3.2 后台任务 CLI 化（钩子现成，接线即可）
 
@@ -358,7 +358,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 | 条目 | 说明 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| `s3adm fsck/scrub` | 见 §3.1 | 高 | 中 |
+| ~~`s3adm fsck/scrub`~~ **已完成（2026-08-28）** | 见 §3.1（`s3adm fsck` + `lights3 fsck`） | — | — |
 | `lights3 duostore gc/scan`、`tier scan/reconcile` | 见 §3.2 | 高 | 低 |
 | `s3adm object inspect` | 打印对象内部布局（pack/chunk/offset/CRC/tier 归属）；现排障只能读日志或 hexdump | 中-高 | 低-中 |
 | `s3adm mpu list/abort` | 清理僵尸 MPU；服务端 API 已有，纯 CLI 包装 | 中 | 低 |
@@ -414,7 +414,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 ### P2 — 中期（需设计，一个方向一个迭代）
 
-1. scrub/fsck（§3.1）→ 顺带产出用量统计（§3.9①）
+1. ~~scrub/fsck（§3.1）~~ **已完成（2026-08-28）**；顺带的用量统计（§3.9①）未做——scrub 的 bytes_read 只覆盖引用数据，孤儿扫描的 chunk_bytes/pack_bytes 仍是现成的盘面口径
 2. 超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）
 3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
 4. builtin/seastar TLS + 证书热重载（§4.1）

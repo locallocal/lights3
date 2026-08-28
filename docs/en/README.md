@@ -41,7 +41,7 @@ the inside. The design emphasizes three points:
 | [duostore-sqlite-meta.md](duostore-sqlite-meta.md) | DuoStore's SQLite IMetaStore: embedded amalgamation, WAL + read pool / single write connection |
 | [duostore-rados-data.md](duostore-rados-data.md) | DuoStore's RADOS IDataStore: librados, chunk → rados objects |
 | [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore's TiKV IMetaStore: client-c + 2PC sidecar, horizontally scalable meta |
-| [cli.md](cli.md) | Command-line tools: `lights3` startup and `duostore dump/load`, `s3adm` cred/website/bench groups, ccmd option semantics and exit codes |
+| [cli.md](cli.md) | Command-line tools: `lights3` startup, `duostore dump/load` and the offline `fsck` scrub, `s3adm` cred/website/bench/fsck commands, ccmd option semantics and exit codes |
 
 *The project introduction (build/run/current scope) lives in the repository
 root [README.md](../../README.md) (English) and

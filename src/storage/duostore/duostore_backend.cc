@@ -14,6 +14,7 @@
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/listing.h"
 #include "storage/multipart.h"
+#include "storage/scrub_throttle.h"
 
 #ifdef LIGHTS3_DUOSTORE_REDIS_META
 #include "storage/duostore/redis_meta_store.h"
@@ -1700,6 +1701,206 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // cadence (default once per day)
     m_bytes_chunks_->set(int64_t(st.chunk_bytes));
     m_bytes_packs_->set(int64_t(st.pack_bytes));
+    co_return st;
+}
+
+Task<bool> DuoStoreBackend::scrub_manifest(
+    const duostore::DataRef& ref, const std::string& what,
+    const std::vector<uint64_t>& refs_snapshot, std::vector<bool>& ref_seen,
+    const std::function<std::optional<duostore::DataRef>()>& refetch, ScrubThrottle& throttle,
+    std::vector<std::byte>& buf, duostore::DuoScrubStats& st) {
+    bool bad = false;
+    for (const auto& e : ref.extents) {
+        if (bg_.closing()) {
+            st.aborted = true;
+            co_return bad;
+        }
+        ++st.extents_checked;
+        if (e.kind != Extent::Kind::kPack) {
+            // Refs-ledger presence (pack extents are tracked by packstat, not
+            // refs). A miss against the snapshot is rechecked point-in-time,
+            // then against a refreshed manifest: a concurrent overwrite/delete
+            // legitimately removed the ref, only an unchanged manifest with the
+            // ref still gone is a genuine hole
+            auto it = std::lower_bound(refs_snapshot.begin(), refs_snapshot.end(), e.file_id);
+            if (it != refs_snapshot.end() && *it == e.file_id) {
+                ref_seen[size_t(it - refs_snapshot.begin())] = true;
+            } else if (!meta_->chunk_referenced(e.file_id)) {
+                auto cur = refetch();
+                if (cur && cur->extents == ref.extents) {
+                    ++st.refs_missing;
+                    bad = true;
+                    LOG_ERROR("duostore '{}': scrub {}: chunk {:016x} referenced by the "
+                              "manifest but absent from the refs ledger — the orphan scan "
+                              "could unlink live data",
+                              cfg_.name, what, e.file_id);
+                }
+            }
+        }
+        if (e.length == 0) continue;
+        uint32_t crc = 0;
+        uint64_t got = 0;
+        bool read_ok = true;
+        try {
+            DataRef one;
+            one.extents.push_back(e);
+            auto reader = co_await data_->open_reader(one, 0, e.length - 1);
+            for (;;) {
+                size_t n = co_await reader->read(std::span(buf));
+                if (n == 0) break;
+                crc = codec::crc32c_update(crc, std::span(buf.data(), n));
+                got += n;
+                st.bytes_read += n;
+                co_await throttle.pace(n);
+            }
+        } catch (const std::exception& ex) {
+            read_ok = false;
+            ++st.unreadable_extents;
+            bad = true;
+            LOG_ERROR("duostore '{}': scrub {}: extent kind={} {:016x}+{} len={} unreadable: {}",
+                      cfg_.name, what, int(e.kind), e.file_id, e.offset, e.length, ex.what());
+        }
+        if (read_ok) {
+            if (got != e.length) {
+                ++st.unreadable_extents;
+                bad = true;
+                LOG_ERROR("duostore '{}': scrub {}: extent {:016x} short read ({} of {} bytes)",
+                          cfg_.name, what, e.file_id, got, e.length);
+            } else if (crc != e.crc32c) {
+                ++st.corrupt_extents;
+                bad = true;
+                LOG_ERROR("duostore '{}': scrub {}: extent kind={} {:016x}+{} len={} crc32c "
+                          "mismatch (manifest {:08x}, read {:08x})",
+                          cfg_.name, what, int(e.kind), e.file_id, e.offset, e.length, e.crc32c,
+                          crc);
+            }
+        }
+    }
+    co_return bad;
+}
+
+Task<duostore::DuoScrubStats> DuoStoreBackend::run_scrub_once(duostore::DuoScrubOptions opt) {
+    co_await pool_->schedule();
+    BackgroundTaskGroup::Scope scope(bg_);
+    DuoScrubStats st;
+    if (!scope.ok()) {
+        st.aborted = true;
+        co_return st;
+    }
+    auto permit = co_await gc_sem_.acquire();  // our GC/orphan scan stands still: nothing
+                                               // gets unlinked while manifests are read back
+    // Renew the lease best-effort so a peer gateway's GC defers too. Unlike the
+    // orphan scan the round is not skipped on failure — the scrub deletes
+    // nothing; a racing peer GC can at worst surface overwritten-and-reclaimed
+    // extents as spurious unreadable reports
+    const int64_t lease_ttl_ms = std::max<int64_t>(2 * int64_t(cfg_.gc_interval_sec), 600) * 1000;
+    if (!meta_->try_gc_lease(gc_owner_, lease_ttl_ms))
+        LOG_WARN("duostore '{}': scrub: GC lease held by another instance; scrubbing anyway "
+                 "(a racing peer GC may cause spurious unreadable reports)",
+                 cfg_.name);
+
+    // Refs snapshot before the walk (same shape as the orphan scan): ids
+    // committed later are simply never judged, and every unseen leftover is
+    // point-in-time rechecked before being reported
+    std::vector<uint64_t> refs;
+    meta_->scan_refs([&](uint64_t id) { refs.push_back(id); });
+    std::sort(refs.begin(), refs.end());
+    refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
+    std::vector<bool> ref_seen(refs.size(), false);
+
+    ScrubThrottle throttle(opt.max_bytes_per_sec, pool_, [this] { return bg_.closing(); });
+    std::vector<std::byte> buf(256 << 10);
+
+    std::vector<BucketInfo> buckets = meta_->list_buckets();
+    for (const auto& b : buckets) {
+        if (st.aborted || bg_.closing()) {
+            st.aborted = true;
+            break;
+        }
+        try {
+            ListOptions lo;
+            lo.max_keys = 1000;
+            for (;;) {
+                auto page = meta_->list_objects(b.name, lo);
+                for (const auto& om : page.objects) {
+                    if (bg_.closing()) {
+                        st.aborted = true;
+                        break;
+                    }
+                    auto rec = meta_->get_object(b.name, om.key);
+                    if (!rec) continue;  // deleted mid-walk
+                    auto refetch = [&]() -> std::optional<DataRef> {
+                        auto cur = meta_->get_object(b.name, om.key);
+                        if (!cur) return std::nullopt;
+                        return std::move(cur->data);
+                    };
+                    bool bad = co_await scrub_manifest(rec->data, b.name + "/" + om.key, refs,
+                                                       ref_seen, refetch, throttle, buf, st);
+                    ++st.objects_scanned;
+                    if (bad) ++st.objects_bad;
+                }
+                if (st.aborted || !page.is_truncated) break;
+                lo.start_after = page.next_token;
+            }
+            // In-flight multipart parts hold refs and live data too; a scrub
+            // that skipped them would misreport their refs as stale
+            for (const auto& up : meta_->list_uploads(b.name)) {
+                if (st.aborted || bg_.closing()) {
+                    st.aborted = true;
+                    break;
+                }
+                std::vector<PartRec> parts;
+                try {
+                    parts = meta_->list_parts(b.name, up.key, up.upload_id);
+                } catch (const S3Error&) {
+                    continue;  // completed/aborted mid-walk
+                }
+                for (const auto& p : parts) {
+                    auto refetch = [&]() -> std::optional<DataRef> {
+                        try {
+                            for (auto& q : meta_->list_parts(b.name, up.key, up.upload_id))
+                                if (q.part_no == p.part_no) return std::move(q.data);
+                        } catch (const S3Error&) {
+                        }
+                        return std::nullopt;
+                    };
+                    std::string what = b.name + "/" + up.key + " upload " + up.upload_id +
+                                       " part " + std::to_string(p.part_no);
+                    bool bad = co_await scrub_manifest(p.data, what, refs, ref_seen, refetch,
+                                                       throttle, buf, st);
+                    ++st.parts_scanned;
+                    if (bad) ++st.objects_bad;
+                }
+            }
+        } catch (const std::exception& ex) {
+            ++st.meta_errors;
+            LOG_ERROR("duostore '{}': scrub: bucket '{}' enumeration failed: {}", cfg_.name,
+                      b.name, ex.what());
+        }
+    }
+
+    // Reverse reconciliation: a refs entry no manifest referenced is a leak
+    // suspect — its chunk is protected from the orphan scan forever. Recheck
+    // point-in-time first (deleted mid-walk is normal); what remains can still
+    // be an MPU that completed after its bucket page was walked, hence the
+    // re-run advice rather than an ERROR
+    if (!st.aborted) {
+        for (size_t i = 0; i < refs.size(); ++i) {
+            if (ref_seen[i]) continue;
+            if (!meta_->chunk_referenced(refs[i])) continue;
+            ++st.refs_stale;
+            LOG_WARN("duostore '{}': scrub: refs entry {:016x} not referenced by any object or "
+                     "part manifest (space-leak suspect; transient if an MPU completed "
+                     "mid-scrub — re-run to confirm)",
+                     cfg_.name, refs[i]);
+        }
+    }
+
+    LOG_INFO("duostore '{}': scrub{}: {} objects, {} parts, {} extents, {} bytes read; "
+             "corrupt {}, unreadable {}, refs missing {}, refs stale {}, meta errors {}",
+             cfg_.name, st.aborted ? " (aborted)" : "", st.objects_scanned, st.parts_scanned,
+             st.extents_checked, st.bytes_read, st.corrupt_extents, st.unreadable_extents,
+             st.refs_missing, st.refs_stale, st.meta_errors);
     co_return st;
 }
 

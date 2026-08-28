@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <coroutine>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -104,5 +105,22 @@ private:
     std::thread thread_;
     std::thread fire_thread_;
 };
+
+// One-shot awaitable sleep over the process TimerQueue. The coroutine resumes
+// on the timer **callback thread** (which runs callbacks serially and must not
+// block) — the continuation must immediately hop to a real execution
+// environment (`co_await pool->schedule()`). A TimerQueue already shut down
+// returns id 0 from add(); then the awaiter resumes synchronously instead of
+// suspending forever. Users: cloudproxy retry backoff, scrub throttling.
+struct AsyncSleep {
+    TimerQueue::Clock::duration d;
+    bool await_ready() const noexcept { return d <= TimerQueue::Clock::duration::zero(); }
+    bool await_suspend(std::coroutine_handle<> h) const {
+        return TimerQueue::instance().add(d, [h] { h.resume(); }) != 0;
+    }
+    void await_resume() const noexcept {}
+};
+
+inline AsyncSleep async_sleep(TimerQueue::Clock::duration d) { return AsyncSleep{d}; }
 
 }  // namespace lights3

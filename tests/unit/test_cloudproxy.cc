@@ -10,7 +10,9 @@
 #include "core/thread_pool.h"
 #include "http/server.h"
 #include "s3/service.h"
+#include "core/util/time.h"
 #include "storage/cloudproxy/cloudproxy_backend.h"
+#include "storage/cloudproxy/remote_client.h"
 #include "storage/memory/memory_backend.h"
 #include "unit/backend_suite.h"
 #include "unit/mini_test.h"
@@ -569,6 +571,230 @@ TEST(cloudproxy_server_side_copy) {
     // Source missing -> NoSuchKey mapped as-is
     CHECK_THROWS_S3(sync_wait(b.copy_object_fast("bkt", "absent", "bkt", "d2", {})),
                     s3::S3ErrorCode::NoSuchKey);
+}
+
+// ---------- roadmap §3.3: backoff/Retry-After, breaker, deadline, pool hygiene, creds ----------
+
+// A large Retry-After combined with a small op deadline: the retry whose backoff would
+// land past the deadline is not taken — exactly one remote hit, and the 503 maps out.
+// This also proves the hint is honored (the formula would have retried after ~10ms)
+TEST(cloudproxy_retry_after_respected_and_deadline_caps) {
+    std::atomic<int> hits{0};
+    HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
+        ++hits;
+        auto r = xml_error(503, "SlowDown");
+        r.headers.set("Retry-After", "5");
+        co_return r;
+    });
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto cfg = cfg_for(remote.port, /*retry_max=*/3);
+    cfg.op_deadline_ms = 300;
+    CloudProxyBackend b(cfg, pool);
+    auto t0 = std::chrono::steady_clock::now();
+    CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), s3::S3ErrorCode::SlowDown);
+    CHECK_EQ(hits.load(), 1);  // no retry: 5s hint > 300ms deadline
+    CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));
+}
+
+// A small Retry-After is actually waited out (async backoff path): one 503 with
+// Retry-After: 1, then success — two hits and >= ~1s elapsed
+TEST(cloudproxy_retry_after_waits_hint) {
+    std::atomic<int> hits{0};
+    HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
+        if (hits.fetch_add(1) == 0) {
+            auto r = xml_error(503, "SlowDown");
+            r.headers.set("Retry-After", "1");
+            co_return r;
+        }
+        http::HttpResponse ok;
+        ok.headers.set("Content-Length", "0");
+        co_return ok;
+    });
+    auto pool = std::make_shared<ThreadPool>(2);
+    CloudProxyBackend b(cfg_for(remote.port, /*retry_max=*/1), pool);
+    auto t0 = std::chrono::steady_clock::now();
+    CHECK(sync_wait(b.bucket_exists("bkt")));
+    CHECK_EQ(hits.load(), 2);
+    CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(900));
+}
+
+// Circuit breaker: consecutive 5xx opens it (fail fast without touching the remote),
+// the cooldown ends with a half-open probe, and success closes it again
+TEST(cloudproxy_breaker_opens_and_recovers) {
+    std::atomic<int> hits{0};
+    std::atomic<bool> healthy{false};
+    HandlerServer remote([&](http::HttpRequest) -> Task<http::HttpResponse> {
+        ++hits;
+        if (!healthy) co_return xml_error(500, "InternalError");
+        http::HttpResponse ok;
+        ok.headers.set("Content-Length", "0");
+        co_return ok;
+    });
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto cfg = cfg_for(remote.port, /*retry_max=*/0);
+    cfg.breaker_threshold = 3;
+    cfg.breaker_cooldown_ms = 300;
+    CloudProxyBackend b(cfg, pool);
+
+    for (int i = 0; i < 3; ++i)
+        CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), s3::S3ErrorCode::InternalError);
+    CHECK_EQ(hits.load(), 3);
+    // Open: shed without a remote round trip, even though the remote is healthy again
+    healthy = true;
+    CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), s3::S3ErrorCode::SlowDown);
+    CHECK_EQ(hits.load(), 3);
+    // Cooldown over: the half-open probe goes through and closes the breaker
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    CHECK(sync_wait(b.bucket_exists("bkt")));
+    CHECK_EQ(hits.load(), 4);
+    CHECK(sync_wait(b.bucket_exists("bkt")));  // closed: normal traffic
+    CHECK_EQ(hits.load(), 5);
+}
+
+// Pool hygiene (drives ClientPool directly): idle entries beyond pool_idle_timeout are
+// reaped (total_ shrinks — a NAT-dropped socket is never reused), and pool_max_lifetime
+// retires aged connections at release
+TEST(cloudproxy_pool_idle_reap_and_max_lifetime) {
+    cloudproxy::Endpoint ep = cloudproxy::Endpoint::parse("http://127.0.0.1:1");
+    {
+        CloudProxyConfig cfg = cfg_for(1);
+        cfg.pool_idle_timeout_ms = 100;  // reaper interval clamps to 1s
+        cloudproxy::ClientPool pool(cfg, ep);
+        { auto lease = pool.acquire(); }
+        auto st = pool.stats();
+        CHECK_EQ(st.total, 1);
+        CHECK_EQ(st.idle, size_t(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+        st = pool.stats();  // background reaper dropped the stale idle
+        CHECK_EQ(st.total, 0);
+        CHECK_EQ(st.idle, size_t(0));
+        { auto lease = pool.acquire(); }  // pool still serves fresh connections
+        CHECK_EQ(pool.stats().total, 1);
+    }
+    {
+        CloudProxyConfig cfg = cfg_for(1);
+        cfg.pool_max_lifetime_ms = 50;
+        cloudproxy::ClientPool pool(cfg, ep);
+        { auto lease = pool.acquire(); }          // age ~0: pooled
+        CHECK_EQ(pool.stats().idle, size_t(1));
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        { auto lease = pool.acquire(); }          // reused, now past its lifetime
+        auto st = pool.stats();                   // -> retired at release
+        CHECK_EQ(st.total, 0);
+        CHECK_EQ(st.idle, size_t(0));
+    }
+}
+
+// Async acquire (drives ClientPool directly): at capacity the waiter queues without
+// parking a thread in the pool's cv; a release hands the connection over, and the
+// request_timeout produces the same SlowDown as the sync path
+TEST(cloudproxy_pool_async_acquire_handoff_and_timeout) {
+    cloudproxy::Endpoint ep = cloudproxy::Endpoint::parse("http://127.0.0.1:1");
+    CloudProxyConfig cfg = cfg_for(1);
+    cfg.max_connections = 1;
+    cfg.request_timeout_ms = 150;
+    cloudproxy::ClientPool pool(cfg, ep);
+
+    {
+        auto held = pool.acquire();
+        std::thread waiter([&] {
+            CHECK_THROWS_S3(sync_wait(pool.acquire_async()), s3::S3ErrorCode::SlowDown);
+        });
+        waiter.join();  // timed out while the lease was held
+    }
+    {
+        auto held = std::make_optional(pool.acquire());
+        std::atomic<bool> got{false};
+        std::thread waiter([&] {
+            auto lease = sync_wait(pool.acquire_async());
+            got = true;
+        });
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        CHECK(!got.load());
+        held.reset();  // release: direct handoff to the waiter
+        waiter.join();
+        CHECK(got.load());
+    }
+    CHECK_EQ(pool.stats().total, 1);
+}
+
+// Credential chain via a fake IMDS (roadmap §3.3): empty static keys resolve through
+// IMDSv2 (token PUT → role → credential doc); an expiry inside the refresh margin
+// re-fetches on the next signing. The remote is the full SigV4-verifying stack, so a
+// wrong chain would fail the signature, not just the assertion
+TEST(cloudproxy_credential_chain_imds) {
+    std::atomic<int> token_hits{0};
+    HandlerServer imds([&](http::HttpRequest req) -> Task<http::HttpResponse> {
+        http::HttpResponse r;
+        if (req.method == "PUT" && req.path == "/latest/api/token") {
+            ++token_hits;
+            r.small_body = "imds-tok";
+        } else if (req.path == "/latest/meta-data/iam/security-credentials/") {
+            if (req.headers.get("X-aws-ec2-metadata-token").value_or("") != "imds-tok") {
+                r.status = 401;
+                co_return r;
+            }
+            r.small_body = "test-role\n";
+        } else if (req.path == "/latest/meta-data/iam/security-credentials/test-role") {
+            // Expiration 4min out: inside the 5min refresh margin, so every signing
+            // refreshes — observable as growing token_hits
+            auto exp = std::chrono::system_clock::now() + std::chrono::minutes(4);
+            r.small_body = std::string("{\"AccessKeyId\":\"") + kAk +
+                           "\",\"SecretAccessKey\":\"" + kSk +
+                           "\",\"Token\":\"\",\"Expiration\":\"" +
+                           util::iso8601(exp) + "\"}";
+        } else {
+            r.status = 404;
+        }
+        co_return r;
+    });
+
+    RemoteStack remote;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto cfg = remote.proxy_cfg();
+    cfg.access_key.clear();
+    cfg.secret_key.clear();
+    cfg.imds_endpoint = "http://127.0.0.1:" + std::to_string(imds.port);
+    CloudProxyBackend b(cfg, pool);
+
+    sync_wait(b.create_bucket("chain"));
+    CHECK(sync_wait(b.bucket_exists("chain")));
+    CHECK(token_hits.load() >= 2);  // near-expiry doc forced a refresh per signing
+    sync_wait(b.delete_bucket("chain"));
+}
+
+// The session token is set before signing and travels as x-amz-security-token
+TEST(cloudproxy_credential_chain_session_token_header) {
+    HandlerServer imds([&](http::HttpRequest req) -> Task<http::HttpResponse> {
+        http::HttpResponse r;
+        if (req.method == "PUT" && req.path == "/latest/api/token") {
+            r.small_body = "t";
+        } else if (req.path == "/latest/meta-data/iam/security-credentials/") {
+            r.small_body = "role";
+        } else if (req.path == "/latest/meta-data/iam/security-credentials/role") {
+            r.small_body = std::string("{\"AccessKeyId\":\"") + kAk +
+                           "\",\"SecretAccessKey\":\"" + kSk +
+                           "\",\"Token\":\"sess-token\"}";  // no Expiration: cached forever
+        } else {
+            r.status = 404;
+        }
+        co_return r;
+    });
+    std::atomic<int> with_token{0};
+    HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
+        if (req.headers.get("x-amz-security-token").value_or("") == "sess-token") ++with_token;
+        http::HttpResponse ok;
+        ok.headers.set("Content-Length", "0");
+        co_return ok;
+    });
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto cfg = cfg_for(remote.port);
+    cfg.access_key.clear();
+    cfg.secret_key.clear();
+    cfg.imds_endpoint = "http://127.0.0.1:" + std::to_string(imds.port);
+    CloudProxyBackend b(cfg, pool);
+    CHECK(sync_wait(b.bucket_exists("bkt")));
+    CHECK_EQ(with_token.load(), 1);
 }
 
 #endif  // LIGHTS3_CLOUDPROXY

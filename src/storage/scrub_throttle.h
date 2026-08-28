@@ -43,26 +43,13 @@ public:
             if (abort_ && abort_()) break;
             auto delay = next_ - Clock::now();
             if (delay <= Clock::duration::zero()) break;
-            co_await SleepAwaiter{std::min<Clock::duration>(delay, kSlice)};
+            co_await async_sleep(std::min<Clock::duration>(delay, kSlice));
             co_await pool_->schedule();  // off the timer callback thread
         }
     }
 
 private:
     static constexpr TimerQueue::Clock::duration kSlice = std::chrono::milliseconds(500);
-
-    // One-shot awaitable timer. Resumes on TimerQueue's callback thread — the
-    // continuation must immediately hop back to a pool (pace does). A TimerQueue
-    // already shut down returns id 0; then resume synchronously instead of
-    // suspending forever.
-    struct SleepAwaiter {
-        TimerQueue::Clock::duration d;
-        bool await_ready() const noexcept { return d <= TimerQueue::Clock::duration::zero(); }
-        bool await_suspend(std::coroutine_handle<> h) const {
-            return TimerQueue::instance().add(d, [h] { h.resume(); }) != 0;
-        }
-        void await_resume() const noexcept {}
-    };
 
     uint64_t bps_;
     std::shared_ptr<ThreadPool> pool_;

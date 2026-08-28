@@ -22,8 +22,9 @@
 
 非目标（首期）：
 
-- 不做 IAM Role / IMDS / STS 临时凭证自动获取——这是放弃云 SDK 的主要代价，
-  凭证为静态 AK/SK（配置支持 `${ENV}` 展开）；
+- ~~不做 IAM Role / IMDS / STS 临时凭证自动获取~~ **已实现（roadmap §3.3，
+  2026-08-28）**：AK/SK 未配置时走凭证链（环境变量 → 容器端点 → EC2
+  IMDSv2，见 §7），静态 AK/SK（`${ENV}` 展开）仍是显式配置时的形态；
 - 不做多 endpoint 负载均衡/故障转移，一个 backend 实例对应一个远端端点；
 - 不缓存远端数据——缓存是 TieredBackend 的职责（docs/tiered-storage.md §6），职责分离；
 - 不代理远端的 ACL / policy / versioning / lifecycle 等扩展 API，仅覆盖
@@ -285,7 +286,17 @@ continuation-token 可能的服务端优化）。
 
 - 可重试条件：网络层错误、5xx、SlowDown。指数退避 `base × 2^n + 抖动`
   （默认 base 100ms、3 次，`retry_max` / `retry_base_ms` 可配，加载期做
-  范围校验；单次退避钳制在 60s 内）；
+  范围校验；单次退避钳制在 60s 内）；**429/503 带 `Retry-After` 头（整秒或
+  HTTP-date）时以远端提示为准（钳制 [0,60s]，roadmap §3.3）**；
+- **退避不占池线程**（roadmap §3.3 重构）：控制面重试环在协程层驱动
+  （`retry_io`），轮间经 TimerQueue 可等待睡眠；连接租约也改异步
+  （`ClientPool::acquire_async`，池满时 waiter 挂起等交接而非阻塞 cv）。
+  数据面 pump 是每传输私有线程，阻塞退避无害；
+- **熔断器**：连续 `breaker_threshold`（默认 10）次传输错误/5xx（429 中性）
+  → 开闸 `breaker_cooldown_ms`（默认 10s）快败 SlowDown，冷却后单探针半开
+  ——远端整体挂掉时不再每请求走满 `(retry_max+1)` 轮；
+- **per-op deadline**（`op_deadline_ms`，默认 0=关）：整个重试环的总预算，
+  只裁剪重试、绝不中断在飞传输；
 - 幂等操作全量适用：GET / HEAD / LIST / DELETE / abort / bucket 操作 /
   create_multipart / complete_multipart。注：create_multipart 严格说非幂等
   ——响应丢失后的重试会在远端留下一个空的孤儿 upload（业界通行做法，AWS SDK
@@ -327,9 +338,17 @@ backends:
     request_timeout_ms: 60000        # httplib read/write timeout（按次 recv/send 计）
     retry_max: 3
     retry_base_ms: 100
+    op_deadline_ms: 0                # 单操作重试环总预算，0 = 不设（§5.2）
+    breaker_threshold: 10            # 熔断阈值（连续失败数），0 = 关（§5.2）
+    breaker_cooldown_ms: 10000
     max_connections: 16              # ClientPool 上限 = pump 并发上限
+    pool_idle_timeout_ms: 60000      # 空闲连接过期回收（NAT 防护，§8.1）；0 = 不过期
+    pool_max_lifetime_ms: 0          # 连接按龄退休；0 = 不限
     queue_cap: 1MiB                  # 数据面 BlockQueue 容量（背压水位，§3.1）
     verify_etag: true                # §6；远端 SSE-KMS 时关
+    # access_key/secret_key 均留空 = 走 AWS 凭证链（roadmap §3.3）：
+    # 环境变量 → 容器端点（ECS/EKS）→ EC2 IMDSv2，会话凭证到期前自动续期；
+    # imds_endpoint: http://169.254.169.254   # 测试/代理可覆盖
 ```
 
 全部键经 `BackendConfig::params` 自动收集（yaml 后端条目下非 name/type 的
@@ -351,10 +370,16 @@ S3 兼容网关的常见形态；lights3 作远端配 `http.base_domain` 即可�
 
 ### 8.1 ClientPool
 
-`httplib::Client` 非线程安全（单 socket 顺序复用）→ 互斥保护的**空闲栈式
+`httplib::Client` 非线程安全（单 socket 顺序复用）→ 互斥保护的**空闲队列
 连接池**：acquire 时弹出空闲实例（无则新建，总数上限 `max_connections`，
-到上限则阻塞等待 + 超时），RAII guard 归还。否决 per-thread client：pump 在
-私有线程、控制面在任意池线程，thread_local 会让连接数不可控。
+到上限则等待 + 超时——pump 私有线程走阻塞 cv，协程控制面走
+`acquire_async` waiter 交接，不停池线程）。RAII guard 归还。否决 per-thread
+client：pump 在私有线程、控制面在任意池线程，thread_local 会让连接数
+不可控。
+
+连接卫生（roadmap §3.3）：空闲项带时间戳，逾 `pool_idle_timeout` 绝不复用
+并由轻量 reaper 回收（远端/NAT 静默断连不再表现为周期性首请求重试尖峰）；
+`pool_max_lifetime` 归还时按龄退休；`total_` 随回收收缩。
 
 每个 Client 创建时统一设置：`set_connection_timeout` / `set_read_timeout` /
 `set_write_timeout`、`set_keep_alive(true)`、TLS 校验开关

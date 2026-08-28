@@ -81,15 +81,47 @@ payload hash 的三档用法：控制面带体请求用精确 `util::sha256_hex(
 无体请求传空串；流式上传用 `remote_client.h:kUnsignedPayload`
 （`UNSIGNED-PAYLOAD`，取舍见设计文档 §3.2，完整性由 TLS + §7 ETag 比对补偿）。
 
-### 2.4 ClientPool：互斥保护的空闲栈连接池
+### 2.3.1 凭证链（roadmap §3.3）
+
+`access_key`/`secret_key` **均未配置**时，RemoteContext 构造
+`aws_credentials.h:CredentialProvider`，签名时按链解析：环境变量
+（AWS_ACCESS_KEY_ID/SECRET_ACCESS_KEY[/SESSION_TOKEN]）→ 容器端点
+（AWS_CONTAINER_CREDENTIALS_RELATIVE_URI/_FULL_URI，ECS/EKS pod identity）→
+EC2 IMDSv2（token PUT → 实例角色 → 凭证 JSON）——EC2/EKS 部署的标配形态。
+要点：
+
+- **惰性解析 + 负缓存**：首次签名才探测；全链落空缓存 60s 再试（非 EC2
+  主机不为每个请求付一次 169.254.169.254 的连接超时），并保留旧凭证到其
+  自身过期；
+- **提前续期**：带 Expiration 的会话凭证在到期前 5 分钟边际内刷新，互斥
+  串行、阻塞在池/pump 线程上（IMDS 1s/2s 短超时封顶）；
+- **会话 token**：`signed_headers` 在签名前置入 `x-amz-security-token`，
+  自动进 SignedHeaders；
+- `imds_endpoint` 配置项可指向测试桩/代理（单测
+  `cloudproxy_credential_chain_imds` 即由此驱动全链）。
+
+### 2.4 ClientPool：互斥保护的空闲队列连接池
 
 `httplib::Client` 非线程安全，故租约独占（`remote_client.h:ClientPool`）：
 
-- `ClientPool::acquire`：优先弹出空闲实例；无空闲且总数未达
-  `max_connections` 则新建（新建抛异常时回滚计数并唤醒等待者，池容量不会
-  被永久蚕食）；达上限则在条件变量上等待，**超时（`request_timeout_ms`）抛
-  `SlowDown`**。等待时长无论成败都记入 `pool_wait` 直方图；
-- `ClientPool::Lease`：RAII 归还，析构时 push 回空闲栈并 `notify_one`；
+- **同步 `acquire`**（pump 私有线程用）：先剪掉队头过期空闲项，再弹出最新
+  空闲实例；无空闲且总数未达 `max_connections` 则新建（新建抛异常时回滚
+  计数并让出槽位，池容量不会被永久蚕食）；达上限则在条件变量上等待，
+  **超时（`request_timeout_ms`）抛 `SlowDown`**。等待时长无论成败都记入
+  `pool_wait` 直方图；
+- **异步 `acquire_async`**（协程控制面用，roadmap §3.3）：达上限时不再把
+  池线程停在 cv 上——waiter 入队挂起，`release()` 直接把连接交接给队头
+  waiter（跳过已超时的僵尸项）并经 backend 注入的 executor 在池线程恢复；
+  TimerQueue 单发定时器兑现同一份 `request_timeout` → `SlowDown` 契约。
+  超时回调只触碰 waiter 自身的共享状态（自带锁），与池的销毁无竞态；
+- **空闲回收与寿命**（roadmap §3.3）：空闲项带时间戳（队头最旧），逾
+  `pool_idle_timeout_ms`（默认 60s，0=不过期）者**绝不复用**——远端/NAT
+  静默断掉的连接复用出去就是首请求重试尖峰；acquire 路径惰性剪 +
+  TimerQueue 轻量 reaper（间隔 = max(ttl/2, 1s)，完成后重臂）在静默期关闭
+  socket，`total_` 随之收缩。`pool_max_lifetime_ms`（默认 0=不限）在归还
+  时按龄退休，creation 时间随 `PooledClient` 穿越租约周期；
+- `ClientPool::Lease`：RAII 归还，归还优先交接 waiter，否则入空闲队列并
+  `notify_one`；
 - `remote_client.cc:ClientPool::make_client` 统一设置：连接/读/写超时、
   `set_keep_alive(true)`、`set_tcp_nodelay(true)`；https 端点上按
   `tls_verify` 开关证书校验（`enable_server_certificate_verification`），
@@ -97,7 +129,8 @@ payload hash 的三档用法：控制面带体请求用精确 `util::sha256_hex(
   `tls_verify: false` 或配 ca_cert。
 
 被 `stop()` 打断的连接归还池后，由 httplib 在下次请求时自动重连
-（损失一次 keep-alive，见 §8 取消）。
+（损失一次 keep-alive，见 §8 取消）。析构先摘 reaper（`TimerQueue::cancel`
+等在途回调），空闲连接随队列析构关闭。
 
 ## 3. 线程模型：control_io 与 pump
 
@@ -321,27 +354,49 @@ CopyObjectResult 的 ETag 去引号返回。
 文字。resource 一律用**客户端视角**的 `/bucket/key`
 （`cloudproxy_backend.cc:resource_of`），不泄漏带前缀的远端路径。
 
-### 7.2 重试策略：with_retry 与三条独立路径
+### 7.2 重试策略：retry_io 与三条独立路径（roadmap §3.3 重构）
 
 - 判定集合：`remote_client.h:RemoteContext::retryable_status`
   （429/500/502/503/504）与 `retryable_transport`
   （Connection/ConnectionTimeout/SSLConnection/Read/Write）；
-- 退避：`remote_client.cc:RemoteContext::backoff` = `retry_base_ms × 2^n +
-  等值抖动`，64 位算术、指数钳制 `min(n,10)`、单次上限 60s（防溢出喂
-  uniform_int_distribution 的 UB）；
-- **幂等控制面**走 `remote_client.h:RemoteContext::with_retry` 模板：每轮
-  租连接发一次请求（每次往返各记一次 op 时延），可重试且未超 `retry_max`
-  则计 retry、退避、续轮，耗尽返回最后一个 Result 交调用点映射。适用：
-  head/delete/list/bucket CRUD/create_multipart/abort/list_parts/list_uploads；
+- 退避：`remote_client.cc:RemoteContext::backoff_delay_ms` = `retry_base_ms ×
+  2^n + 等值抖动`，64 位算术、指数钳制 `min(n,10)`、单次上限 60s（防溢出喂
+  uniform_int_distribution 的 UB）；**429/503 带 `Retry-After` 时以远端提示
+  为准**（`retry_after_hint`：整秒或 HTTP-date 两形态，钳制 [0,60s]）；
+- **幂等控制面**走 `cloudproxy_backend.cc:CloudProxyBackend::retry_io` 协程
+  模板（取代旧的阻塞 with_retry——其退避睡在池线程上，最坏 700ms/请求，
+  远端抖动时并发退避成片吃掉池容量）：每轮 = 熔断闸（`breaker_gate`）→
+  `acquire_async` 异步租约 → control_io 内一次阻塞发送（每往返各记一次 op
+  时延）→ 结果喂熔断器；轮间经 `async_backoff`（`core/timer.h:async_sleep`
+  + 回池）退避，**从不睡在池线程上**，租约在退避前随作用域归还。适用：
+  head/delete/list/bucket CRUD/tagging/create_multipart/abort/list_parts/
+  list_uploads/**copy**（服务端 COPY 是幂等 PUT，现同样重试；200-错误体
+  之坑在环后照旧消解）；
 - **GET** 在 pump 内自带重试环（§4 步骤 3），仅限 headers 尚未交付阶段——
-  body 已开始流出后失败只能 `close(false)` 让读方见异常；
-- **流式上传**仅连接建立阶段重试（§5 步骤 2）；copy_object_fast 单发不重试。
+  body 已开始流出后失败只能 `close(false)` 让读方见异常；pump 是每传输
+  私有线程，阻塞退避不占池容量，同样吃 Retry-After 提示与熔断闸；
+- **流式上传**仅连接建立阶段重试（§5 步骤 2），同样过熔断闸；熔断观测
+  排除主动 abort 与"provider 已被调但无响应"（可能是我方生产者断流，
+  不能算远端健康失格）。
+
+### 7.2.1 熔断器与 per-op deadline（roadmap §3.3）
+
+- **熔断器**（`remote_client.cc:RemoteContext::breaker_*`）：连续
+  `breaker_threshold`（默认 10，0=关）次决定性失败（传输错误或 5xx；429
+  节流中性不计）→ 开闸 `breaker_cooldown_ms`（默认 10s），期间请求直接
+  `SlowDown` 快败（`remote_errors_total{code="breaker_open"}` 计数），
+  冷却结束放**单个半开探针**，成功归零、失败续开。远端整体挂掉时每请求
+  不再走满 `(retry_max+1)` 轮超时；
+- **per-op deadline**（`op_deadline_ms`，默认 0=关）：一次操作整个重试环的
+  总预算——某次退避会落到 deadline 之外就不再重试，直接以最后结果收场。
+  **只裁剪重试环，绝不中断在飞传输**（半路掐 body = 给客户端残缺响应）；
+  GET 的 headers 等待预算取 `min((retry_max+1)×request_timeout, op_deadline)`。
 
 ### 7.3 complete_multipart：200-错误体与 NoSuchUpload 歧义
 
 `cloudproxy_backend.cc:CloudProxyBackend::complete_multipart` 是重试逻辑最厚
-的一处。整个重试环提取为阻塞函数经 `control_io` 执行（含退避；歧义消解需
-`co_await head_object`，留在协程侧）：
+的一处。重试环在协程层驱动（每次 POST 是 control_io 内的一次阻塞 attempt，
+退避走 TimerQueue，同样过熔断闸与 deadline；歧义消解本就在协程侧）：
 
 1. body 用 `s3::XmlWriter` 生成（ETag 补回引号），精确 sha256 签名；
 2. 每轮 POST 后先按常规 `retryable_transport` / `retryable_status` 判定；
@@ -391,9 +446,9 @@ scope——测试直连构造时计数落在孤儿实例上，调用无害）单
 
 | 指标 | 类型/标签 | 观测点 |
 | --- | --- | --- |
-| `lights3_cloudproxy_remote_request_seconds` | histogram, op | `with_retry` 每次往返各一次；数据面（get/put/upload_part/complete_multipart/copy）由各自路径观测，get/put 的一整段传输记为一次观测 |
-| `lights3_cloudproxy_retries_total` | counter, op | 实际退避重试处：`with_retry`、GET pump、上传连接阶段、complete 环 |
-| `lights3_cloudproxy_remote_errors_total` | counter, code | `throw_remote_error`（wire code 或 `http_<status>`）与 `throw_transport_error`（`transport`）；GET headers 等待超时另计 `transport` |
+| `lights3_cloudproxy_remote_request_seconds` | histogram, op | `retry_io` 每次往返各一次；数据面（get/put/upload_part/complete_multipart/copy）由各自路径观测，get/put 的一整段传输记为一次观测 |
+| `lights3_cloudproxy_retries_total` | counter, op | 实际退避重试处：`retry_io`、GET pump、上传连接阶段、complete 环 |
+| `lights3_cloudproxy_remote_errors_total` | counter, code | `throw_remote_error`（wire code 或 `http_<status>`）与 `throw_transport_error`（`transport`）；GET headers 等待超时另计 `transport`；熔断快败计 `breaker_open` |
 | `lights3_cloudproxy_etag_mismatch_total` | counter | §5 步骤 5 的在途损坏信号；构造期注册 0 值可见 |
 | `lights3_cloudproxy_pool_wait_seconds` | histogram | `ClientPool::acquire` 等待时长（拿到租约与 SlowDown 超时两条路径都记）；右移 = `max_connections` 调优信号 |
 

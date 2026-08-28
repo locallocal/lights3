@@ -13,6 +13,13 @@
 #include "core/thread_pool.h"
 #include "storage/backend.h"
 
+// Forward declaration only — this header stays free of httplib includes; the
+// retry_io member template is declared with the incomplete type and defined in
+// the .cc (its only users live there)
+namespace httplib {
+class Result;
+}
+
 namespace lights3::storage {
 
 struct CloudProxyConfig {
@@ -37,6 +44,25 @@ struct CloudProxyConfig {
     int retry_max = 3;
     int retry_base_ms = 100;
     int max_connections = 16;
+    // Connection-pool hygiene (roadmap §3.3): an idle connection older than
+    // pool_idle_timeout is never reused (a NAT/remote that silently dropped it would
+    // surface as periodic first-request retry spikes) and is closed by a light reaper;
+    // pool_max_lifetime additionally retires connections by age at release (0 = off)
+    int pool_idle_timeout_ms = 60'000;  // 0 = never expire idles
+    int pool_max_lifetime_ms = 0;
+    // Circuit breaker (roadmap §3.3): after `breaker_threshold` consecutive definitive
+    // failures (transport error or 5xx; 429 is neutral) requests fail fast with SlowDown
+    // for breaker_cooldown, then a single half-open probe decides. 0 = disabled
+    int breaker_threshold = 10;
+    int breaker_cooldown_ms = 10'000;
+    // Total per-operation budget across the whole retry loop (roadmap §3.3): a retry is
+    // skipped when its backoff would land past the deadline. Caps the retry loop only —
+    // an in-flight transfer is never cut mid-stream. 0 = no cap (legacy worst case
+    // (retry_max+1) x request_timeout)
+    int op_deadline_ms = 0;
+    // EC2 metadata service base URL for the credential chain (overridable for tests /
+    // IMDS proxies); used only when access_key/secret_key are not configured
+    std::string imds_endpoint = "http://169.254.169.254";
     bool verify_etag = true;             // docs/cloudproxy-backend.md §6: single-part PUT compares MD5 against the remote ETag
     size_t queue_cap_bytes = 1 << 20;    // data-plane BlockQueue capacity (backpressure watermark)
     // Spool for length-less uploads (docs/archive/gaps.md §6.2): 0 = disabled (back to
@@ -118,6 +144,16 @@ private:
     // Defined in the .cc (used only in that TU)
     template <class Fn>
     Task<std::invoke_result_t<Fn>> control_io(Fn fn);
+    // Coroutine-level retry driver for idempotent control-plane requests (roadmap §3.3):
+    // per attempt — breaker gate, async pool lease, one blocking send via control_io —
+    // then backoff via the TimerQueue (never sleeping on a pool thread), honoring the
+    // remote's Retry-After and the per-op deadline. Returns the last Result after policy
+    // exhaustion. Defined in the .cc
+    template <class Fn>
+    Task<httplib::Result> retry_io(const char* op, Fn fn);
+    // TimerQueue sleep + hop back to a pool thread (the timer callback thread must not
+    // run business logic)
+    Task<void> async_backoff(int64_t delay_ms);
     // Streaming upload shared by PUT / upload_part (docs/cloudproxy-backend.md §3.2).
     // resource is the client-view "/bucket/key" (goes into the error XML; does not leak the
     // prefixed remote path); multipart_ctx decides the semantic fallback for a body-less 404

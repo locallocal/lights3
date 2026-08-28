@@ -259,10 +259,15 @@ CloudProxyBackend::CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<Threa
     : pool_(std::move(pool)) {
     auto ep = Endpoint::parse(cfg.endpoint);
     ctx_ = std::make_shared<RemoteContext>(std::move(cfg), ep, metrics);
-    LOG_INFO("cloudproxy backend: endpoint={} region={} prefix='{}' style={} control={}",
+    // Async pool waiters resume business logic on pool threads, never on the
+    // releasing/timer thread (roadmap §3.3)
+    ctx_->pool.set_resume_executor(&exec_);
+    LOG_INFO("cloudproxy backend: endpoint={} region={} prefix='{}' style={} control={} "
+             "credentials={}",
              ctx_->cfg.endpoint, ctx_->cfg.region, ctx_->cfg.bucket_prefix,
              ctx_->cfg.force_path_style ? "path" : "vhost",
-             ctx_->cfg.control_in_pump ? "pump" : "pool");
+             ctx_->cfg.control_in_pump ? "pump" : "pool",
+             ctx_->cred_chain ? "chain(env/container/imds)" : "static");
 }
 
 CloudProxyBackend::~CloudProxyBackend() = default;
@@ -313,6 +318,41 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
     co_return co_await Awaiter{&fn, &exec_};
 }
 
+Task<void> CloudProxyBackend::async_backoff(int64_t delay_ms) {
+    co_await async_sleep(std::chrono::milliseconds(delay_ms));
+    co_await pool_->schedule();  // off the timer callback thread before any business logic
+}
+
+// Coroutine retry driver for idempotent control-plane requests (roadmap §3.3): replaces
+// the old blocking with_retry, whose backoff slept on a pool thread — worst case 700ms
+// per request, and a jittery remote would eat the pool wholesale with concurrent
+// backoffs. Per attempt: breaker gate (fail fast when the remote is decidedly down) →
+// async lease (a pool thread never parks in the pool's cv) → one blocking send inside
+// control_io → outcome into the breaker. Between attempts: Retry-After-aware backoff on
+// the TimerQueue, bounded by the per-op deadline. The lease is scoped to the attempt so
+// no pooled connection is held through a backoff.
+template <class Fn>
+Task<httplib::Result> CloudProxyBackend::retry_io(const char* op, Fn fn) {
+    auto hist = ctx_->metrics.op_seconds(op);
+    const auto deadline = ctx_->op_deadline();
+    for (int attempt = 0;; ++attempt) {
+        ctx_->breaker_gate();
+        httplib::Result r = co_await [&]() -> Task<httplib::Result> {
+            auto lease = co_await ctx_->pool.acquire_async();
+            co_return co_await control_io(
+                [&] { return ctx_->attempt(hist, lease.client(), fn); });
+        }();
+        ctx_->breaker_observe(r);
+        bool retry = !r ? RemoteContext::retryable_transport(r.error())
+                        : ctx_->retryable_status(r->status);
+        if (!retry || attempt >= ctx_->cfg.retry_max) co_return r;
+        auto delay = ctx_->backoff_delay_ms(attempt, RemoteContext::retry_after_hint(r));
+        if (!RemoteContext::deadline_allows(deadline, delay)) co_return r;
+        ctx_->metrics.count_retry(op);
+        co_await async_backoff(delay);
+    }
+}
+
 // Remote transliterated name for the reserved bucket .sys: a leading '.' is illegal under
 // S3 naming rules, and prefix concatenation would also produce adjacent "-." ("e2e-" +
 // ".sys"), which both real AWS and a lights3 remote reject -- with naive concatenation, the
@@ -356,13 +396,11 @@ Task<void> CloudProxyBackend::create_bucket(std::string_view bucket) {
         w.close();
         body = w.str();
     }
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("create_bucket", [&](httplib::Client& c) {
-            auto headers = ctx_->signed_headers("PUT", path, "", {},
-                                                body.empty() ? "" : util::sha256_hex(body),
-                                                t.host);
-            return c.Put(path, headers, body, body.empty() ? "" : "application/xml");
-        });
+    auto res = co_await retry_io("create_bucket", [&](httplib::Client& c) {
+        auto headers = ctx_->signed_headers("PUT", path, "", {},
+                                            body.empty() ? "" : util::sha256_hex(body),
+                                            t.host);
+        return c.Put(path, headers, body, body.empty() ? "" : "application/xml");
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
@@ -373,10 +411,8 @@ Task<void> CloudProxyBackend::delete_bucket(std::string_view bucket) {
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.bucket_path();
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("delete_bucket", [&](httplib::Client& c) {
-            return c.Delete(path, ctx_->signed_headers("DELETE", path, "", {}, "", t.host));
-        });
+    auto res = co_await retry_io("delete_bucket", [&](httplib::Client& c) {
+        return c.Delete(path, ctx_->signed_headers("DELETE", path, "", {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
@@ -387,10 +423,8 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.bucket_path();
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("head_bucket", [&](httplib::Client& c) {
-            return c.Head(path, ctx_->signed_headers("HEAD", path, "", {}, "", t.host));
-        });
+    auto res = co_await retry_io("head_bucket", [&](httplib::Client& c) {
+        return c.Head(path, ctx_->signed_headers("HEAD", path, "", {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return true;
@@ -406,10 +440,8 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
 
 Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
     // Service-level operations always go to the endpoint itself, regardless of addressing style
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("list_buckets", [&](httplib::Client& c) {
-            return c.Get("/", ctx_->signed_headers("GET", "/", "", {}, ""));
-        });
+    auto res = co_await retry_io("list_buckets", [&](httplib::Client& c) {
+        return c.Get("/", ctx_->signed_headers("GET", "/", "", {}, ""));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -464,10 +496,13 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
     std::thread pump([ctx, queue, abortst, prom, path, extra, resource, keycopy,
                       host = t.host] {
         auto op_hist = ctx->metrics.op_seconds("get");  // §8.2: the whole transfer is one observation
+        const auto deadline = ctx->op_deadline();  // §3.3: caps the retry loop, not a transfer
         bool delivered = false;
         try {
             for (int attempt = 0;; ++attempt) {
+                ctx->breaker_gate();  // fail fast while the remote is decidedly down (§3.3)
                 std::string err_body;
+                int64_t delay_ms = 0;
                 {
                     auto lease = ctx->pool.acquire();
                     abortst->arm(lease.client());
@@ -500,14 +535,25 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                     op_hist->observe(std::chrono::duration<double>(
                                          std::chrono::steady_clock::now() - t0)
                                          .count());
+                    // A deliberately aborted transfer (client gone) says nothing about
+                    // the remote's health
+                    if (!abortst->is_aborted()) ctx->breaker_observe(res);
                     if (delivered) {
                         queue->close(static_cast<bool>(res));  // empty res = transfer failed midway
                         return;
                     }
-                    // Headers not delivered: retry or deliver the mapped exception
+                    // Headers not delivered: retry or deliver the mapped exception.
+                    // The remote's Retry-After (429/503) overrides the formula; a retry
+                    // whose backoff would land past the per-op deadline is not taken
                     bool retry = (!res ? RemoteContext::retryable_transport(res.error())
                                        : ctx->retryable_status(res->status)) &&
                                  attempt < ctx->cfg.retry_max;
+                    if (retry) {
+                        delay_ms = ctx->backoff_delay_ms(
+                            attempt, RemoteContext::retry_after_hint(res));
+                        if (!RemoteContext::deadline_allows(deadline, delay_ms))
+                            retry = false;
+                    }
                     if (!retry) {
                         try {
                             if (!res) ctx->throw_transport_error(res.error());
@@ -520,7 +566,8 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                     }
                     ctx->metrics.count_retry("get");
                 }  // return the connection before backing off
-                ctx->backoff(attempt);
+                // Private per-transfer thread: a blocking sleep costs no pool capacity
+                std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
             }
         } catch (...) {
             // Surprises such as acquire timeout: choose the propagation path by delivery stage
@@ -542,6 +589,8 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
         // backstopped by httplib's own timeouts
         auto budget = std::chrono::milliseconds(ctx_->cfg.request_timeout_ms) *
                       (ctx_->cfg.retry_max + 1);
+        if (ctx_->cfg.op_deadline_ms > 0)  // §3.3: the per-op deadline caps the whole loop
+            budget = std::min(budget, std::chrono::milliseconds(ctx_->cfg.op_deadline_ms));
         if (fut.wait_for(budget) != std::future_status::ready) {
             abortst->abort();   // interrupt in-flight socket IO; do not sit out httplib's timeout
             queue->cancel();
@@ -605,8 +654,10 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     std::thread pump([ctx, queue, abortst, out, raw_path, raw_query, host, full, content_type,
                       extra, len, op] {
         auto op_hist = ctx->metrics.op_seconds(op);  // §8.2: the whole transfer is one observation
+        const auto deadline = ctx->op_deadline();  // §3.3: caps the retry loop, not a transfer
         try {
             for (int attempt = 0;; ++attempt) {
+                ctx->breaker_gate();  // fail fast while the remote is decidedly down (§3.3)
                 // Single-threaded reads/writes within the pump suffice, no atomics needed:
                 // only used for the connection-stage retry decision
                 bool provider_called = false;
@@ -635,15 +686,26 @@ Task<PutResult> CloudProxyBackend::stream_upload(
                 op_hist->observe(std::chrono::duration<double>(
                                      std::chrono::steady_clock::now() - t0)
                                      .count());
+                // A deliberately aborted transfer says nothing about the remote's
+                // health; nor does a mid-transfer failure with no response — it may be
+                // our own producer breaking off (provider false ⇒ canceled), so only a
+                // response or a pre-provider (connection-stage) failure is observed
+                if (!abortst->is_aborted() && (res || !provider_called))
+                    ctx->breaker_observe(res);
                 // Retry only when the failure is in the connection-establishment stage and
                 // the Provider was never called (queue unconsumed) (§5.2); a deliberately
-                // aborted transfer is not retried
+                // aborted transfer is not retried, and a backoff past the per-op deadline
+                // is not taken
                 if (!res && !provider_called && !abortst->is_aborted() &&
                     RemoteContext::connection_stage_error(res.error()) &&
                     attempt < ctx->cfg.retry_max) {
-                    ctx->metrics.count_retry(op);
-                    ctx->backoff(attempt);
-                    continue;
+                    auto delay = ctx->backoff_delay_ms(attempt);
+                    if (RemoteContext::deadline_allows(deadline, delay)) {
+                        ctx->metrics.count_retry(op);
+                        // Private per-transfer thread: blocking sleep costs no pool capacity
+                        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+                        continue;
+                    }
                 }
                 if (res) {
                     out->has_response = true;
@@ -794,18 +856,14 @@ Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
                            std::string(key_path(src_key)));
     extra.emplace_back("x-amz-metadata-directive", "REPLACE");
 
-    auto res = co_await control_io([&] {
-        auto op_hist = ctx_->metrics.op_seconds("copy");
-        auto lease = ctx_->pool.acquire();
-        auto t0 = std::chrono::steady_clock::now();
+    // Server-side COPY is an idempotent PUT: transport/5xx retries are safe, and the
+    // 200-with-error-body trap is resolved after the loop like complete's (§4.4)
+    auto res = co_await retry_io("copy", [&](httplib::Client& c) {
         auto headers = ctx_->signed_headers("PUT", path, "", extra,
                                             util::sha256_hex(""), tgt.host);
-        auto r = lease.client().Put(path, headers, "", meta.content_type.empty()
-                                                          ? "application/octet-stream"
-                                                          : meta.content_type.c_str());
-        op_hist->observe(
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
-        return r;
+        return c.Put(path, headers, "", meta.content_type.empty()
+                                            ? "application/octet-stream"
+                                            : meta.content_type.c_str());
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -849,13 +907,11 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.object_path(key_path(key));
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("head", [&](httplib::Client& c) {
-            return c.Head(path, ctx_->signed_headers(
-                                    "HEAD", path, "",
-                                    {{"x-amz-checksum-mode", "ENABLED"}},  // §2.2
-                                    "", t.host));
-        });
+    auto res = co_await retry_io("head", [&](httplib::Client& c) {
+        return c.Head(path, ctx_->signed_headers(
+                                "HEAD", path, "",
+                                {{"x-amz-checksum-mode", "ENABLED"}},  // §2.2
+                                "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 200) co_return meta_from_response(key, *res);
@@ -872,10 +928,8 @@ Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolv
     auto path = t.object_path(key_path(key));
     std::string query = "partNumber=" + std::to_string(part_no);
     std::string full = path + "?" + query;
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("head_part", [&](httplib::Client& c) {
-            return c.Head(full, ctx_->signed_headers("HEAD", path, query, {}, "", t.host));
-        });
+    auto res = co_await retry_io("head_part", [&](httplib::Client& c) {
+        return c.Head(full, ctx_->signed_headers("HEAD", path, query, {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 416)
@@ -917,11 +971,9 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
     std::string query = "tagging";
     std::string full = path + "?" + query;
     if (tagging.empty()) {  // DeleteObjectTagging upstream
-        auto res = co_await control_io([&] {
-            return ctx_->with_retry("delete_tagging", [&](httplib::Client& c) {
-                return c.Delete(full,
-                                ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
-            });
+        auto res = co_await retry_io("delete_tagging", [&](httplib::Client& c) {
+            return c.Delete(full,
+                            ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
         });
         if (!res) ctx_->throw_transport_error(res.error());
         if (res->status / 100 == 2) co_return;
@@ -950,12 +1002,10 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
     w.close();
     const std::string body = w.str();
     const std::string body_hash = util::sha256_hex(body);
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("put_tagging", [&](httplib::Client& c) {
-            return c.Put(full,
-                         ctx_->signed_headers("PUT", path, query, {}, body_hash, t.host),
-                         body, "application/xml");
-        });
+    auto res = co_await retry_io("put_tagging", [&](httplib::Client& c) {
+        return c.Put(full,
+                     ctx_->signed_headers("PUT", path, query, {}, body_hash, t.host),
+                     body, "application/xml");
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
@@ -967,10 +1017,8 @@ Task<void> CloudProxyBackend::delete_object(std::string_view bucket, std::string
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.object_path(key_path(key));
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("delete", [&](httplib::Client& c) {
-            return c.Delete(path, ctx_->signed_headers("DELETE", path, "", {}, "", t.host));
-        });
+    auto res = co_await retry_io("delete", [&](httplib::Client& c) {
+        return c.Delete(path, ctx_->signed_headers("DELETE", path, "", {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     // Both 204 and 404 count as success (S3 idempotent delete semantics)
@@ -991,10 +1039,8 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
     if (!opt.start_after.empty()) query += "&start-after=" + qv(opt.start_after);
     std::string full = path + "?" + query;
 
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("list", [&](httplib::Client& c) {
-            return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
-        });
+    auto res = co_await retry_io("list", [&](httplib::Client& c) {
+        return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -1045,11 +1091,9 @@ Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
     // Note: create retries may leave empty orphan uploads on the remote (a known §5.2
     // trade-off, standard industry practice) -- recommend configuring an
     // AbortIncompleteMultipartUpload lifecycle rule on the remote account
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("create_multipart", [&](httplib::Client& c) {
-            return c.Post(full, ctx_->signed_headers("POST", path, query, extra, "", t.host),
-                          "", meta.content_type);
-        });
+    auto res = co_await retry_io("create_multipart", [&](httplib::Client& c) {
+        return c.Post(full, ctx_->signed_headers("POST", path, query, extra, "", t.host),
+                      "", meta.content_type);
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -1118,101 +1162,101 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
     const std::string body = w.str();
     const std::string body_hash = util::sha256_hex(body);
 
-    // The whole retry loop is extracted into a blocking function: with control_in_pump=true
-    // it runs, backoff included, on a private thread (§2.3); ambiguity resolution needs
-    // co_await head_object and stays on the coroutine side
+    // The retry loop lives at coroutine level (roadmap §3.3): each POST is one blocking
+    // attempt inside control_io, backoff goes through the TimerQueue instead of sleeping
+    // on a pool/private thread, gated by the breaker and the per-op deadline. Ambiguity
+    // resolution (co_await head_object) already lived on the coroutine side
     struct CompleteOutcome {
         std::string etag;
         std::string checksum_algorithm, checksum_value, checksum_type;
         std::exception_ptr ambiguous;
     };
-    auto outcome = co_await control_io([&]() -> CompleteOutcome {
-        auto op_hist = ctx_->metrics.op_seconds("complete_multipart");
-        std::string etag_out;
-        std::string checksum_algo, checksum_val, checksum_type;
-        std::exception_ptr ambiguous_nosuch;
-        for (int attempt = 0;; ++attempt) {
-            auto res = [&] {
-                auto lease = ctx_->pool.acquire();
-                auto t0 = std::chrono::steady_clock::now();
-                auto r = lease.client().Post(
-                    full, ctx_->signed_headers("POST", path, query, {}, body_hash, tgt.host),
-                    body, "application/xml");
-                op_hist->observe(std::chrono::duration<double>(
-                                     std::chrono::steady_clock::now() - t0)
-                                     .count());
-                return r;
-            }();
-            bool retry = !res ? RemoteContext::retryable_transport(res.error())
-                              : ctx_->retryable_status(res->status);
-            // S3 quirk: a long-running complete returns 200 first with the error in the
-            // body (§4.4). InternalError/SlowDown in the body are the same thing as their
-            // namesake HTTP statuses and equally worth retrying -- not retrying turns
-            // straight into a 500 for the client, whose retry then goes through the
-            // NoSuchUpload ambiguity resolution, wasting a round trip. A post-retry
-            // NoSuchUpload is resolved by the retried branch below
-            if (!retry && res && res->status == 200 &&
-                res->body.find("<Error") != std::string::npos) {
-                try {
-                    auto root = s3::xml_parse(res->body);
-                    if (root.name == "Error") {
-                        auto code = map_remote_code(root.get("Code"));
-                        retry = code == S3ErrorCode::InternalError ||
-                                code == S3ErrorCode::SlowDown;
-                    }
-                } catch (...) {  // unparsable: leave it to the unified handling below
-                }
-            }
-            if (retry && attempt < ctx_->cfg.retry_max) {
-                ctx_->metrics.count_retry("complete_multipart");
-                ctx_->backoff(attempt);
-                continue;
-            }
-            const bool retried = attempt > 0;
-            if (!res) ctx_->throw_transport_error(res.error());
+    auto op_hist = ctx_->metrics.op_seconds("complete_multipart");
+    const auto deadline = ctx_->op_deadline();
+    CompleteOutcome outcome;
+    for (int attempt = 0;; ++attempt) {
+        ctx_->breaker_gate();
+        httplib::Result res = co_await [&]() -> Task<httplib::Result> {
+            auto lease = co_await ctx_->pool.acquire_async();
+            co_return co_await control_io([&] {
+                return ctx_->attempt(op_hist, lease.client(), [&](httplib::Client& c) {
+                    return c.Post(full,
+                                  ctx_->signed_headers("POST", path, query, {}, body_hash,
+                                                       tgt.host),
+                                  body, "application/xml");
+                });
+            });
+        }();
+        ctx_->breaker_observe(res);
+        bool retry = !res ? RemoteContext::retryable_transport(res.error())
+                          : ctx_->retryable_status(res->status);
+        // S3 quirk: a long-running complete returns 200 first with the error in the
+        // body (§4.4). InternalError/SlowDown in the body are the same thing as their
+        // namesake HTTP statuses and equally worth retrying -- not retrying turns
+        // straight into a 500 for the client, whose retry then goes through the
+        // NoSuchUpload ambiguity resolution, wasting a round trip. A post-retry
+        // NoSuchUpload is resolved by the retried branch below
+        if (!retry && res && res->status == 200 &&
+            res->body.find("<Error") != std::string::npos) {
             try {
-                if (res->status != 200)
-                    ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
-                // S3 quirk: a long-running complete returns 200 first with the error in the
-                // body (docs/cloudproxy-backend.md §4.4)
-                s3::XmlNode root;
-                try {
-                    root = s3::xml_parse(res->body);
-                } catch (...) {
-                    throw S3Error(S3ErrorCode::InternalError,
-                                  "cloudproxy: remote returned unparsable "
-                                  "CompleteMultipartUpload body");
-                }
+                auto root = s3::xml_parse(res->body);
                 if (root.name == "Error") {
                     auto code = map_remote_code(root.get("Code"));
-                    throw S3Error(code.value_or(S3ErrorCode::InternalError),
-                                  root.get("Message"), resource);
+                    retry = code == S3ErrorCode::InternalError ||
+                            code == S3ErrorCode::SlowDown;
                 }
-                etag_out = std::string(strip_etag_quotes(root.get("ETag")));
-                for (std::string_view a :
-                     {"CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"}) {
-                    std::string v = root.get("Checksum" + std::string(a));
-                    if (!v.empty()) {
-                        checksum_algo = std::string(a);
-                        checksum_val = std::move(v);
-                        checksum_type = root.get("ChecksumType");
-                        break;
-                    }
-                }
-            } catch (const S3Error& e) {
-                // NoSuchUpload after a retry: the previous attempt may have actually
-                // succeeded -> verify with HEAD (docs/cloudproxy-backend.md §5.2)
-                if (e.code == S3ErrorCode::NoSuchUpload && retried) {
-                    ambiguous_nosuch = std::current_exception();
+            } catch (...) {  // unparsable: leave it to the unified handling below
+            }
+        }
+        if (retry && attempt < ctx_->cfg.retry_max) {
+            auto delay = ctx_->backoff_delay_ms(attempt, RemoteContext::retry_after_hint(res));
+            if (RemoteContext::deadline_allows(deadline, delay)) {
+                ctx_->metrics.count_retry("complete_multipart");
+                co_await async_backoff(delay);
+                continue;
+            }
+        }
+        const bool retried = attempt > 0;
+        if (!res) ctx_->throw_transport_error(res.error());
+        try {
+            if (res->status != 200)
+                ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
+            // S3 quirk: a long-running complete returns 200 first with the error in the
+            // body (docs/cloudproxy-backend.md §4.4)
+            s3::XmlNode root;
+            try {
+                root = s3::xml_parse(res->body);
+            } catch (...) {
+                throw S3Error(S3ErrorCode::InternalError,
+                              "cloudproxy: remote returned unparsable "
+                              "CompleteMultipartUpload body");
+            }
+            if (root.name == "Error") {
+                auto code = map_remote_code(root.get("Code"));
+                throw S3Error(code.value_or(S3ErrorCode::InternalError),
+                              root.get("Message"), resource);
+            }
+            outcome.etag = std::string(strip_etag_quotes(root.get("ETag")));
+            for (std::string_view a : {"CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"}) {
+                std::string v = root.get("Checksum" + std::string(a));
+                if (!v.empty()) {
+                    outcome.checksum_algorithm = std::string(a);
+                    outcome.checksum_value = std::move(v);
+                    outcome.checksum_type = root.get("ChecksumType");
                     break;
                 }
-                throw;
             }
-            break;
+        } catch (const S3Error& e) {
+            // NoSuchUpload after a retry: the previous attempt may have actually
+            // succeeded -> verify with HEAD (docs/cloudproxy-backend.md §5.2)
+            if (e.code == S3ErrorCode::NoSuchUpload && retried) {
+                outcome.ambiguous = std::current_exception();
+                break;
+            }
+            throw;
         }
-        return {std::move(etag_out), std::move(checksum_algo), std::move(checksum_val),
-                std::move(checksum_type), ambiguous_nosuch};
-    });
+        break;
+    }
     std::string etag_out = std::move(outcome.etag);
     if (outcome.ambiguous) {
         std::string expect = expected_total_etag(parts);
@@ -1240,10 +1284,8 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
     auto path = t.object_path(key_path(key));
     std::string query = "uploadId=" + qv(upload_id);
     std::string full = path + "?" + query;
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("abort_multipart", [&](httplib::Client& c) {
-            return c.Delete(full, ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
-        });
+    auto res = co_await retry_io("abort_multipart", [&](httplib::Client& c) {
+        return c.Delete(full, ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
@@ -1273,10 +1315,8 @@ Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
     if (opt.part_number_marker > 0)
         query += "&part-number-marker=" + std::to_string(opt.part_number_marker);
     std::string full = path + "?" + query;
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("list_parts", [&](httplib::Client& c) {
-            return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
-        });
+    auto res = co_await retry_io("list_parts", [&](httplib::Client& c) {
+        return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -1319,10 +1359,8 @@ Task<ListUploadsResult> CloudProxyBackend::list_multipart_uploads(
         query += "&key-marker=" + qv(opt.key_marker) +
                  "&upload-id-marker=" + qv(opt.upload_id_marker);
     std::string full = path + "?" + query;
-    auto res = co_await control_io([&] {
-        return ctx_->with_retry("list_uploads", [&](httplib::Client& c) {
-            return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
-        });
+    auto res = co_await retry_io("list_uploads", [&](httplib::Client& c) {
+        return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)

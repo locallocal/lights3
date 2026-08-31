@@ -327,6 +327,7 @@ add_library(lights3_core STATIC
   src/storage/memory/memory_backend.cc
   src/storage/tiered/tiered_backend.cc
   src/storage/xlocalfs/uring.cc
+  src/storage/xlocalfs/uring_stream.cc
   src/storage/xlocalfs/xlocalfs_backend.cc
 )
 target_include_directories(lights3_core PUBLIC src)
@@ -558,6 +559,11 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_duostore
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin duostore)
+    # duostore with the io_uring fs data plane (roadmap §3.4 ⑤); the backend falls back
+    # to synchronous IO where io_uring is unavailable, so the case stays green everywhere
+    add_test(NAME e2e_duostore_uring
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin duostore-uring)
     # tiered combination (docs/duostore-backend.md §13.1/§15 P5): duostore as tiered's
     # cloud side (cloud goes only through the IStorageBackend abstraction, re-validating the component relationship)
     add_test(NAME e2e_tiered_duostore

@@ -154,10 +154,13 @@ Key conventions:
 ### 2.4 Variants
 
 - **XLocalFs** (`xlocalfs_backend.cc:put_object`): same staging/commit path,
-  only the data-plane `write` is replaced with io_uring (`drain_to_tmp()`:
-  `body.read` → `uring_->write`); completion continuations are resumed via the
-  thread pool, and no thread is occupied while flushing to disk; the commit
-  still runs synchronously back on a pool thread.
+  with the data plane going through the io_uring write pipeline
+  (`drain_to_tmp()`: `body.read` fills pipeline blocks directly →
+  `UringWriteStream::commit`, up to write_depth writes in flight; the final
+  block and the fdatasync go out as one linked chain); completion continuations
+  are resumed via the thread pool, and no thread is occupied while flushing to
+  disk. The commit-phase rename/directory fsync also ride the ring where the
+  kernel supports it (storage/xlocalfs.md §6).
 - **Memory** (`memory_backend.cc:put_object`): first, without holding the lock,
   streams the whole body into a `std::string` while computing the MD5, then
   locks and inserts into the map (the object resides wholly in memory — mainly
@@ -225,8 +228,9 @@ on destruction.
 
 ### 3.3 Variants
 
-- **XLocalFs**: `UringBodyReader` replaces `pread` with io_uring offset reads
-  (Range comes naturally); no thread is occupied while waiting for completion.
+- **XLocalFs**: `UringStreamBodyReader` replaces `pread` with an io_uring
+  read-ahead stream (read_depth block reads pre-submitted; Range comes
+  naturally); no thread is occupied while waiting for completion.
 - **Memory**: under the lock, `substr`-copies the hit interval out and returns
   it wrapped in a `StringBodyReader`.
 

@@ -16,6 +16,10 @@
 #include "core/thread_pool.h"
 #include "storage/duostore/data_store.h"
 
+namespace lights3::storage {
+class UringEngine;  // storage/xlocalfs/uring.h; held only by shared_ptr here
+}
+
 namespace lights3::storage::duostore {
 
 struct FsDataOptions {
@@ -46,6 +50,13 @@ struct FsDataOptions {
     // lifetime — the callback must not reference the store/backend (the assembly
     // side captures only a counter)
     std::function<void()> on_corruption;
+    // io_uring data plane (roadmap §3.4 ⑤): when set, chunk writes/reads and pack
+    // record reads go through the shared engine's pipelined streams and the
+    // durability fdatasyncs become FSYNC SQEs; null = the original synchronous
+    // path. Layout is identical either way. Readers copy these options and escape
+    // the store's lifetime, so they co-own the engine via this shared_ptr.
+    // Deliberately last: existing positional FsDataOptions initializers stay valid
+    std::shared_ptr<UringEngine> uring;
 };
 
 class ChunkWriter;
@@ -123,13 +134,17 @@ private:
     int pack_dirfd(unsigned shard) { return subdir_fd(pack_dirfds_, "packs", shard); }
     int subdir_fd(std::array<int, 256>& fds, const char* sub, unsigned shard);
 
-    // Append one pack record (blocking IO, must be called on a pool thread);
+    // Append one pack record (blocking pwrite on the calling pool thread; with the
+    // uring engine the end-of-batch fdatasync suspends instead of blocking);
     // returns an extent pointing at the payload
-    Extent append_pack_record(std::string_view owner, std::span<const std::byte> payload);
+    Task<Extent> append_pack_record(std::string_view owner, std::span<const std::byte> payload);
     // Batch append (write_batch's pack path): per-item pwrite inside a single slot
     // lock, one fdatasync at the end (§2.13 batching — a mid-batch rotation seal
-    // first flushes the unsynced writes to disk)
-    std::vector<Extent> append_pack_records(std::span<const PackAppendItem> items);
+    // first flushes the unsynced writes to disk). The slot std::mutex cannot be
+    // held across a suspension point, so the pwrites and any rotation fdatasync
+    // stay blocking inside the lock; only the final batch fdatasync moves off-lock
+    // (on a dup of the pack fd) onto the ring (roadmap §3.4 ⑤)
+    Task<std::vector<Extent>> append_pack_records(std::span<const PackAppendItem> items);
 
     // Sealing split in two steps (docs/archive/gaps.md §3.9): inside the lock only close
     // the fd / clear slot state and push (id,size) onto seal_retry_; seal_'s meta

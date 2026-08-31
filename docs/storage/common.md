@@ -177,7 +177,7 @@ map），参数解释权在各后端。注册表本体是 `registry.cc` 匿名�
 | type | 构建要点（`storage/registry.cc: ensure_registered`） |
 |---|---|
 | `localfs` | `fs_backend_paths` 解析 `root`（必填，缺失抛 runtime_error）与 `staging`（默认 `<root>/.lights3-staging`）；`fs_backend_opts` 解析 `mpu_ttl` / `mpu_scan_interval` |
-| `xlocalfs` | 同上，另解析 `queue_depth` / `sqpoll` / `sqpoll_idle` 组成 `UringOptions`。构造抛异常（老内核、seccomp 拦 `io_uring_setup`、memlock 配额不足）时**降级为 LocalFsBackend**——两者磁盘布局与元数据语义完全一致，降级无损、只失去异步 IO；同时 `LOG_WARN` 并置常驻 gauge `lights3_xlocalfs_uring_fallback=1`，让"以为在跑异步 IO 实则回退"在监控面可见 |
+| `xlocalfs` | 同上，另解析 `queue_depth` / `sqpoll` / `sqpoll_idle` / `rings` / `fixed_buffers` / `fixed_files` / `block_size` / `read_depth` / `write_depth` / `meta_ops` 组成 `UringOptions`（详表见 [xlocalfs.md](xlocalfs.md) §8）。构造抛异常（老内核、seccomp 拦 `io_uring_setup`、memlock 配额不足）时**降级为 LocalFsBackend**——两者磁盘布局与元数据语义完全一致，降级无损、只失去异步 IO；同时 `LOG_WARN` 并置常驻 gauge `lights3_xlocalfs_uring_fallback=1`，让"以为在跑异步 IO 实则回退"在监控面可见 |
 | `memory` | `max_bytes`（`parse_size`）、`mpu_ttl`；注册回调 gauge `lights3_memory_backend_used_bytes`（经 `weak_ptr` 读 `used_bytes()`，后端析构后返回 0） |
 | `cloudproxy` | 编译开关 `LIGHTS3_CLOUDPROXY`；`CloudProxyConfig::from_params` 解析 |
 | `duostore` | 编译开关 `LIGHTS3_DUOSTORE`；`DuoStoreConfig::from_params` 解析 |

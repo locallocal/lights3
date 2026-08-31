@@ -198,6 +198,14 @@ struct DuoStoreConfig {
     int rados_connect_timeout_sec = 5;
     int rados_op_timeout_sec = 0;                    // 0 = no op timeout
     uint64_t chunk_size = 8ull << 20;
+    // io_uring fs data plane (roadmap §3.4 ⑤, data=fs only): chunk/pack byte transfers
+    // and durability syncs go through the shared UringEngine; opt-in, and on engine
+    // setup failure (old kernel, seccomp, memlock quota) the backend falls back to the
+    // synchronous path with a warning plus a resident gauge
+    bool fs_uring = false;
+    unsigned fs_uring_queue_depth = 256;
+    bool fs_uring_sqpoll = false;
+    unsigned fs_uring_rings = 1;  // 0 = auto (hardware threads / 8, clamped to [1,8])
     uint64_t pack_threshold = 128 << 10;   // ≤ this goes into packs; 0 = disabled (everything via chunks)
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;

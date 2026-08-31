@@ -142,28 +142,27 @@ waiter 挂起等 release 交接，TimerQueue 兑现超时契约，不停池线�
 [storage/cloudproxy.md](storage/cloudproxy.md) §2.3.1/§2.4/§7.2、
 [cloudproxy-backend.md](cloudproxy-backend.md) §5.2/§7/§8.1。
 
-### 3.4 xlocalfs：io_uring 的未兑现收益
+### 3.4 ~~xlocalfs：io_uring 的未兑现收益~~ **已完成（2026-09-01，五项全部）**
 
-当前只用了数据面最基本形态。按收益排序：
-
-1. **单流多在途 op 流水线**（价值高/难度中-高）：现纪律是"每协程帧至多一个
-   在途 op"，单个大对象 GET/PUT 严格 64KiB 串行、每块等一次 CQE——
-   `queue_depth=256` 只在多请求并发时被填满。预提交 N 个后续读（read-ahead
-   环形缓冲）是 io_uring 相对 pread 最大的收益点，但需重新论证多在途 op 的
-   取消/析构安全性（当前简单性正是靠该纪律换来的，见
-   [storage/xlocalfs.md](storage/xlocalfs.md)）。
-2. **fixed buffers / fixed files**（中-高/高）：现无 `IORING_REGISTER_BUFFERS/FILES`，
-   且缓冲住在协程帧栈上、不适合注册——依赖先引入缓冲池（与 §4.3 缓冲池化
-   同一件事）。
-3. **linked SQE + 元数据面 opcode**（中/中）：write+fdatasync 链一次提交；
-   open/statx/rename/unlink 均有 uring opcode（文档中"无目录原语"仅对
-   getdents 成立），现全走线程池同步调用。
-4. **多 ring 分片**（中/中）：单 ring + `submit_mu_` 一把锁在高核数下是单点。
-5. duostore 的 **io_uring 版 FsDataStore**（中/中）：文档明确"未实现"，
-   `uring.h` 引擎可复用、布局不变。
-
-入口：`src/storage/xlocalfs/uring.{h,cc}`、`xlocalfs_backend.cc`、
-`src/storage/duostore/fs_data_store.cc`。
+① 单流多在途流水线：新增 `storage/xlocalfs/uring_stream.h` ——
+`UringReadStream`（read-ahead 环形缓冲，`read_depth` 默认 4）与
+`UringWriteStream`（hold-back 写流水线，`write_depth` 默认 4）；多在途下的
+析构安全用"引用计数共享块（缓冲 + fd + fixed 槽），每个在途 op 持一票"重建：
+中途弃流不做取消，弃置的 op 自然完成后由末票释放资源。② fixed
+buffers/files：建环时 `IORING_REGISTER_BUFFERS`（每 ring
+`fixed_buffers`×`block_size`，流块直接取注册缓冲走 READ/WRITE_FIXED，池尽或
+注册被拒静默退堆块）与稀疏 `IORING_REGISTER_FILES` + FILES_UPDATE
+（≥512KiB 的流临时注册 fd）。③ linked SQE + 元数据 opcode：写流 finish 时
+末块 WRITE→FSYNC 链一次提交（短写自动回退独立 fsync）；GET 的 open、提交期
+rename + 目录 fsync、part rename、DELETE 的 unlink、complete 分片存在性
+statx 全部上 ring（`meta_ops: false` 一键回退同步）。④ 多 ring 分片：
+`rings`（0=auto=核数/8）个独立 SQ/CQ/收割线程，fixed 资源按 ring 作用域，
+流固定单 ring、散 op 轮询。⑤ duostore io_uring 版 FsDataStore：
+`fs_uring: true`（chunk 读写走流水线 + 封存链式 fdatasync；pack 批尾
+fdatasync 经 dup fd 出锁上 ring；引擎建失败回退同步路径 + 常驻 gauge
+`lights3_duostore_uring_fallback`），布局不变。见
+[storage/xlocalfs.md](storage/xlocalfs.md)、
+[storage/duostore-data-fs.md](storage/duostore-data-fs.md) §9。
 
 ### 3.5 localfs / listing
 

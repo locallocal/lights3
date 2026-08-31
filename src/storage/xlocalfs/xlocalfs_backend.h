@@ -1,13 +1,16 @@
 // L3: xlocalfs -- io_uring data-plane variant of localfs (see docs/storage-backend.md §3.3).
 // Disk layout and metadata logic are fully reused from LocalFsBackend; the byte transfers in
 // GET streaming reads, PUT/part streaming writes, and complete-time concatenation go through
-// io_uring asynchronously instead, no longer tying up pool threads waiting on disk.
-// Directory traversal and metadata operations still use the thread pool (io_uring has no
-// directory primitives such as getdents).
+// io_uring with multiple ops in flight per stream (uring_stream.h read-ahead / pipelined
+// writes, roadmap §3.4 ①), the commit-phase fdatasync rides as a linked SQE behind the
+// final write (③), and -- kernel permitting -- open/statx/rename/unlink on the data paths
+// go through the ring's metadata opcodes instead of blocking a pool thread (③).
+// Directory traversal (listing) still uses the thread pool: io_uring has no getdents.
 #pragma once
 
 #include "storage/localfs/localfs_backend.h"
 #include "storage/xlocalfs/uring.h"
+#include "storage/xlocalfs/uring_stream.h"
 
 namespace lights3::storage {
 
@@ -29,23 +32,30 @@ public:
     Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
                                        std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;
-    Task<void> close() override;  // stop the uring reaper thread
+    // UNLINKAT via the ring when the kernel has it (roadmap §3.4 ③): unlinking a large
+    // file is real disk work on ext4/xfs; falls through to the base implementation otherwise
+    Task<void> delete_object(std::string_view bucket, std::string_view key) override;
+    Task<void> close() override;  // stop the uring reaper threads
 
 private:
-    // Stream in the body and write it to the staging temp file via io_uring, yielding
-    // (byte count, MD5 hex).
-    // Out-params instead of a return value: see the note in the .cc (when a co_await result
-    // carries a std::string, a throw from body makes the compiler destroy a never-constructed
-    // binding target)
-    Task<void> drain_to_tmp(http::BodyReader& body, int fd, uint64_t& total_out,
+    // Stream the body into the write pipeline, yielding (byte count, MD5 hex) via
+    // out-params. The pipeline is deliberately left unfinished: the caller writes the
+    // meta xattr first (original commit order) and then finish()es, so the final block
+    // and the fdatasync go out as one linked chain.
+    // Out-params instead of a return value: when a co_await result carries a std::string,
+    // a throw from body makes the compiler destroy a never-constructed binding target
+    // (double free / SEGV, docs/archive/gaps.md §5.6)
+    Task<void> drain_to_tmp(http::BodyReader& body, UringWriteStream& ws, uint64_t& total_out,
                             std::string& etag_out);
-    // The kernel may short-write; loop until everything is written; throw InternalError on failure
-    Task<void> write_all(int fd, std::span<const std::byte> data, uint64_t off);
-    // Data persistence (docs/archive/gaps.md §6.3): use io_uring's FSYNC SQE so the submit phase no
-    // longer blocks a pool thread in fdatasync -- exactly the kind of wait xlocalfs is meant
-    // to eliminate. Falls back to the existing synchronous path when the kernel lacks the
-    // FSYNC opcode (per probe) or LIGHTS3_FSYNC=0
-    Task<void> sync_fd(int fd);
+    // The rename + directory-fsync + sidecar tail of fsutil::commit_object_file, with the
+    // rename going through RENAMEAT and the directory fsync through an FSYNC SQE when
+    // available (same on-disk result; the caller already persisted xattr + data).
+    // By-value paths: coroutine parameters must not bind temporaries
+    Task<void> commit_prepared(std::filesystem::path dest, fsutil::TmpFile& tmp,
+                               const ObjectMeta& meta, std::string_view key);
+    // fsync the directory entry via an FSYNC SQE (silent-failure semantics of
+    // fsutil::fsync_dir); no-op under LIGHTS3_FSYNC=0
+    Task<void> sync_dir(std::filesystem::path dir);
 
     std::shared_ptr<UringEngine> uring_;
 };

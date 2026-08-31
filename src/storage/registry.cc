@@ -104,6 +104,21 @@ void ensure_registered() {
                 if (cfg.params.count("sqpoll")) uo.sqpoll = parse_bool(cfg.params.at("sqpoll"));
                 if (cfg.params.count("sqpoll_idle"))
                     uo.sqpoll_idle_ms = parse_duration_sec(cfg.params.at("sqpoll_idle")) * 1000;
+                // roadmap §3.4: ring sharding, registered buffers/files, stream depths
+                if (cfg.params.count("rings"))
+                    uo.rings = unsigned(std::stoul(cfg.params.at("rings")));  // 0 = auto
+                if (cfg.params.count("fixed_buffers"))
+                    uo.fixed_buffers = unsigned(std::stoul(cfg.params.at("fixed_buffers")));
+                if (cfg.params.count("fixed_files"))
+                    uo.fixed_files = unsigned(std::stoul(cfg.params.at("fixed_files")));
+                if (cfg.params.count("block_size"))
+                    uo.block_size = unsigned(parse_size(cfg.params.at("block_size")));
+                if (cfg.params.count("read_depth"))
+                    uo.read_depth = unsigned(std::stoul(cfg.params.at("read_depth")));
+                if (cfg.params.count("write_depth"))
+                    uo.write_depth = unsigned(std::stoul(cfg.params.at("write_depth")));
+                if (cfg.params.count("meta_ops"))
+                    uo.meta_ops = parse_bool(cfg.params.at("meta_ops"));
                 try {
                     return std::make_shared<XLocalFsBackend>(root, staging, pool, uo,
                                                              fs_backend_opts(cfg), m);

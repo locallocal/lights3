@@ -70,6 +70,15 @@ void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const O
                         const std::filesystem::path& staging_put, std::string_view key,
                         bool prepared = false);
 
+// The two synchronous halves of commit_object_file, exposed separately so xlocalfs can run
+// the data rename and the directory fsync in between through io_uring (RENAMEAT + FSYNC
+// SQE, roadmap §3.4 ③) with byte-identical on-disk semantics:
+// prepare_object_dest = create parent dirs + directory-conflict checks;
+// write_object_sidecar = the trailing sidecar write
+void prepare_object_dest(const std::filesystem::path& dest, std::string_view key);
+void write_object_sidecar(const std::filesystem::path& dest, const ObjectMeta& meta,
+                          const std::filesystem::path& staging_put);
+
 // Commit-point check for conditional PUT (PutCondition contract, storage/backend.h): the
 // caller must hold the commit lock for the same key so the check and the following rename
 // commit are atomic. Metadata is read via xattr/sidecar and is equally authoritative for

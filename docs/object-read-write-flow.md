@@ -127,9 +127,11 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 
 ### 2.4 变体
 
-- **XLocalFs**（`xlocalfs_backend.cc:put_object`）：同一 staging/提交路径，仅把数据面
-  `write` 换成 io_uring（`drain_to_tmp()`：`body.read` → `uring_->write`），
-  完成续体经线程池恢复，落盘期间不占线程；提交仍回池线程同步执行。
+- **XLocalFs**（`xlocalfs_backend.cc:put_object`）：同一 staging/提交路径，数据面换
+  io_uring 写流水线（`drain_to_tmp()`：`body.read` 直读流水线块 →
+  `UringWriteStream::commit`，至多 write_depth 个写在途；末块与 fdatasync
+  链式一次提交），完成续体经线程池恢复，落盘期间不占线程；提交期的
+  rename/目录 fsync 内核支持时也走 ring（storage/xlocalfs.md §6）。
 - **Memory**（`memory_backend.cc:put_object`）：先不持锁流式读完 body 到 `std::string`
   并算 MD5，再加锁插入 map（对象整体驻留内存，主要用于测试）。
 - **CopyObject**（`objects.cc:copy_object`）：服务端拼管道——源后端
@@ -182,8 +184,8 @@ resolve_range(range, size)：解析 a-b/a-/-n 为闭区间，不可满足 → In
 
 ### 3.3 变体
 
-- **XLocalFs**：`UringBodyReader` 把 `pread` 换成 io_uring 带偏移读
-  （天然支持 Range），等待完成时不占线程。
+- **XLocalFs**：`UringStreamBodyReader` 把 `pread` 换成 io_uring read-ahead
+  流（预提交 read_depth 个块读，天然支持 Range），等待完成时不占线程。
 - **Memory**：加锁把命中区间 `substr` 拷出来，包成 `StringBodyReader` 返回。
 
 ## 4. 响应回写（驱动层）

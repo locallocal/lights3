@@ -201,8 +201,7 @@ std::optional<std::string> get_meta_xattr(const fs::path& path) {
     return out;
 }
 
-void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                        const fs::path& staging_put, std::string_view key, bool prepared) {
+void prepare_object_dest(const fs::path& dest, std::string_view key) {
     std::error_code ec;
     fs::create_directories(dest.parent_path(), ec);
     if (ec) {
@@ -218,6 +217,17 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     if (fs::is_directory(dest))
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "Object key conflicts with an existing key prefix", std::string(key));
+}
+
+void write_object_sidecar(const fs::path& dest, const ObjectMeta& meta,
+                          const fs::path& staging_put) {
+    write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
+}
+
+void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
+                        const fs::path& staging_put, std::string_view key, bool prepared) {
+    prepare_object_dest(dest, key);
+    std::error_code ec;
 
     // Order: data first, then sidecar (consistent with commit_cached). The reverse order
     // (old implementation) had a crash window of "sidecar with new etag/size + old data"
@@ -239,7 +249,7 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
     tmp.committed = true;
     fsync_dir(dest.parent_path());
-    write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
+    write_object_sidecar(dest, meta, staging_put);
 }
 
 void rewrite_object_meta(const fs::path& data_path, const ObjectMeta& meta,

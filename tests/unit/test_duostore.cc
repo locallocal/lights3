@@ -27,6 +27,7 @@
 #include "storage/duostore/fs_data_store.h"
 #include "storage/duostore/meta_util.h"
 #include "storage/duostore/rocks_meta_store.h"
+#include "storage/xlocalfs/uring.h"
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
 #include "unit/mini_test.h"
@@ -2183,6 +2184,75 @@ TEST(duostore_chunk_ids_batched_in_runs) {
     for (size_t i = 4; i <= 6; ++i)                                // contiguous within run(4)
         CHECK_EQ(ref.extents[i].file_id, ref.extents[3].file_id + (i - 3));
     CHECK(ref.extents[1].file_id != ref.extents[0].file_id + 1);  // interleaving really happened
+    sync_wait(d.close());
+}
+
+// roadmap §3.4 ⑤: io_uring FsDataStore — identical layout, chunk path via the pipelined
+// streams (multi-block write, crc-verified read-ahead, Range across chunk boundaries) and
+// the pack path via the ring-side fdatasync. Direct-store test; the full-suite coverage
+// lives in test_storage.cc (duostore_backend_suite_uring)
+TEST(duostore_fs_data_store_uring_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    std::shared_ptr<UringEngine> eng;
+    try {
+        eng = std::make_shared<UringEngine>(pool, UringOptions{});
+    } catch (const std::exception&) {
+        return;  // io_uring unavailable here: the sync suites already cover the layout
+    }
+    uint64_t next_id = 1;
+    FsDataOptions opt{tmp.path / "duo", 64 * 1024, /*verify_chunk_crc=*/true,
+                      /*pack_threshold=*/1024, 64 << 10, 1, 0, {}, eng};
+    FsDataStore d(std::move(opt), pool, [&](Extent::Kind, uint32_t n) {
+        uint64_t f = next_id;
+        next_id += n;
+        return f;
+    });
+    auto read_span = [&](http::BodyReader& r) {
+        std::string out;
+        std::byte buf[8192];
+        for (;;) {
+            size_t n = sync_wait(r.read(std::span(buf)));
+            if (n == 0) break;
+            out.append(reinterpret_cast<const char*>(buf), n);
+        }
+        return out;
+    };
+
+    // chunk path: 3 full blocks + a tail, written in odd-sized pieces
+    std::string body(64 * 1024 * 3 + 500, '\0');
+    uint32_t x = 42;
+    for (auto& c : body) {
+        x = x * 1664525 + 1013904223;
+        c = char(x >> 24);
+    }
+    auto w = sync_wait(d.open_writer({uint64_t(body.size()), "t/big"}));
+    size_t off = 0, step = 3000;
+    while (off < body.size()) {
+        size_t n = std::min(step, body.size() - off);
+        sync_wait(w->write(
+            std::span(reinterpret_cast<const std::byte*>(body.data()) + off, n)));
+        off += n;
+        step += 1777;
+    }
+    auto ref = sync_wait(w->finish());
+    CHECK_EQ(ref.total(), uint64_t(body.size()));
+    DataRef ref_copy = ref;
+    CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(ref), 0, body.size() - 1))), body);
+    // Range crossing the first chunk boundary (also disables crc, the partial-read branch)
+    CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(ref_copy), 65530, 67529))),
+             body.substr(65530, 2000));
+
+    // pack path: small object, ring-side fdatasync off the slot lock
+    std::string small(600, 's');
+    auto wp = sync_wait(d.open_writer({uint64_t(small.size()), "t/small"}));
+    sync_wait(wp->write(
+        std::span(reinterpret_cast<const std::byte*>(small.data()), small.size())));
+    auto pref = sync_wait(wp->finish());
+    CHECK_EQ(pref.extents.size(), size_t(1));
+    CHECK(pref.extents[0].kind == Extent::Kind::kPack);
+    CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(pref), 0, small.size() - 1))),
+             small);
     sync_wait(d.close());
 }
 

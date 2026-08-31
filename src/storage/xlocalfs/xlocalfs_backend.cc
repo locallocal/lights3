@@ -18,7 +18,6 @@ using s3::S3Error;
 using s3::S3ErrorCode;
 
 using fsutil::TmpFile;
-using fsutil::commit_object_file;
 using fsutil::load_manifest;
 using fsutil::next_tmp_name;
 using fsutil::part_file_name;
@@ -42,34 +41,54 @@ struct FdGuard {
     }
 };
 
-// io_uring pread streaming reads (with an offset, so Range comes naturally);
-// completion continuations resume via the thread pool, occupying no thread while reading disk
-class UringBodyReader final : public http::BodyReader {
-public:
-    UringBodyReader(int fd, uint64_t offset, uint64_t remaining,
-                    std::shared_ptr<UringEngine> eng)
-        : fd_(fd), offset_(offset), remaining_(remaining), eng_(std::move(eng)) {}
-    ~UringBodyReader() override { ::close(fd_); }
+// ---- metadata ops through the ring (roadmap §3.4 ③), with blocking fallbacks ----
+// All of these take const char*: the caller keeps the owning fs::path/string alive across
+// the co_await (under SQPOLL the kernel copies the path only when the poll thread picks
+// the SQE up). All return the syscall convention (fd / 0 on success, -errno on failure)
 
-    Task<size_t> read(std::span<std::byte> buf) override {
-        if (remaining_ == 0) co_return 0;
-        size_t want = std::min<uint64_t>(buf.size(), remaining_);
-        int n = co_await eng_->read(fd_, buf.first(want), offset_);
-        if (n < 0) throw_uring("io_uring read", n);
-        if (n == 0) remaining_ = 0;  // file truncated externally, early EOF
-        offset_ += static_cast<uint64_t>(n);
-        remaining_ -= static_cast<uint64_t>(n);
-        co_return static_cast<size_t>(n);
+Task<int> uring_open(UringEngine& eng, const char* path, int flags, mode_t mode) {
+    if (eng.features().op_openat && eng.options().meta_ops)
+        co_return co_await eng.openat(AT_FDCWD, path, flags, mode);
+    int fd = ::open(path, flags, mode);
+    co_return fd < 0 ? -errno : fd;
+}
+
+Task<int> uring_rename(UringEngine& eng, const char* oldp, const char* newp) {
+    if (eng.features().op_renameat && eng.options().meta_ops)
+        co_return co_await eng.renameat(AT_FDCWD, oldp, AT_FDCWD, newp);
+    co_return ::rename(oldp, newp) == 0 ? 0 : -errno;
+}
+
+Task<int> uring_unlink(UringEngine& eng, const char* path) {
+    if (eng.features().op_unlinkat && eng.options().meta_ops)
+        co_return co_await eng.unlinkat(AT_FDCWD, path, 0);
+    co_return ::unlink(path) == 0 ? 0 : -errno;
+}
+
+Task<bool> uring_exists(UringEngine& eng, const char* path) {
+    if (eng.features().op_statx && eng.options().meta_ops) {
+        struct ::statx stx {};
+        int r = co_await eng.statx(AT_FDCWD, path, 0, STATX_TYPE, &stx);
+        co_return r == 0;
     }
+    struct stat st{};
+    co_return ::stat(path, &st) == 0;
+}
+
+// GET body: thin BodyReader over the read-ahead stream (roadmap §3.4 ①). Range comes
+// naturally from the stream's [off, off+len) window; fd ownership transfers to the stream,
+// which also keeps buffers/fd alive past an early destruction with reads still in flight
+class UringStreamBodyReader final : public http::BodyReader {
+public:
+    UringStreamBodyReader(std::shared_ptr<UringEngine> eng, int fd, uint64_t off, uint64_t len)
+        : stream_(std::move(eng), fd, off, len, /*own_fd=*/true), total_(len) {}
+
+    Task<size_t> read(std::span<std::byte> buf) override { return stream_.read(buf); }
     std::optional<uint64_t> length() const override { return total_; }
-    void set_total(uint64_t t) { total_ = t; }
 
 private:
-    int fd_;
-    uint64_t offset_;
-    uint64_t remaining_;
-    uint64_t total_ = 0;
-    std::shared_ptr<UringEngine> eng_;
+    UringReadStream stream_;
+    uint64_t total_;
 };
 
 }  // namespace
@@ -83,50 +102,48 @@ XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging,
     : LocalFsBackend(std::move(root), std::move(staging), pool, fs_opt, std::move(metrics)),
       uring_(std::make_shared<UringEngine>(std::move(pool), uring_opt)) {}
 
-// Data persistence in the commit phase (docs/archive/gaps.md §6.3): this used to be a synchronous
-// fdatasync -- pinning a pool thread waiting on disk, exactly what xlocalfs exists to
-// eliminate. The FSYNC SQE takes the same completion path, and the thread returns to the
-// pool while waiting
-Task<void> XLocalFsBackend::sync_fd(int fd) {
-    if (!fsutil::fsync_enabled()) co_return;
-    if (!uring_->features().op_fsync) {
-        co_await pool_->schedule();
-        fsutil::fsync_file(fd);
-        co_return;
-    }
-    int r = co_await uring_->fdatasync(fd);
-    if (r < 0 && r != -EINVAL) throw_uring("io_uring fdatasync", r);  // EINVAL: fs unsupported
-}
-
-Task<void> XLocalFsBackend::write_all(int fd, std::span<const std::byte> data, uint64_t off) {
-    while (!data.empty()) {
-        int w = co_await uring_->write(fd, data, off);
-        if (w < 0) throw_uring("io_uring write", w);
-        if (w == 0) throw S3Error(S3ErrorCode::InternalError, "io_uring write returned 0");
-        data = data.subspan(static_cast<size_t>(w));
-        off += static_cast<uint64_t>(w);
-    }
-}
-
-// Results come back through out-params rather than co_await-ing a pair carrying a
-// std::string: when body.read throws (Content-MD5 mismatch, client disconnect), GCC still
-// runs the destructor on the never-constructed binding target, presenting as a double free /
-// SEGV on the put path. Out-params are fully constructed before the co_await, so unwinding
-// destroys real objects (the test case in docs/archive/gaps.md §5.6 is exactly this shape)
-Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, int fd, uint64_t& total_out,
-                                         std::string& etag_out) {
+Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStream& ws,
+                                         uint64_t& total_out, std::string& etag_out) {
     util::HashStream md5(util::HashStream::Algo::Md5);
     uint64_t total = 0;
-    std::byte buf[64 * 1024];
     for (;;) {
-        size_t n = co_await body.read(std::span(buf));
-        if (n == 0) break;
-        md5.update(std::span(reinterpret_cast<const uint8_t*>(buf), n));
-        co_await write_all(fd, std::span<const std::byte>(buf, n), total);
+        // The body is read straight into the pipeline's block (a registered fixed buffer
+        // when available) -- no bounce copy; MD5 runs on the pool thread as before
+        std::span<std::byte> buf = co_await ws.acquire();
+        size_t n = co_await body.read(buf);
+        if (n == 0) {
+            ws.commit(0);
+            break;
+        }
+        md5.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
+        ws.commit(n);
         total += n;
     }
     total_out = total;
     etag_out = md5.final_hex();
+}
+
+Task<void> XLocalFsBackend::sync_dir(fs::path dir) {
+    if (!fsutil::fsync_enabled()) co_return;
+    if (!uring_->features().op_fsync) {
+        fsutil::fsync_dir(dir);
+        co_return;
+    }
+    FdGuard d{::open(dir.c_str(), O_RDONLY | O_DIRECTORY)};
+    if (d.fd < 0) co_return;  // same as fsync_dir: an unreadable directory must not take down the write path
+    (void)co_await uring_->fsync(d.fd);  // failure silent, matching fsync_dir
+}
+
+Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const ObjectMeta& meta,
+                                            std::string_view key) {
+    fsutil::prepare_object_dest(dest, key);
+    // Same ordering as fsutil::commit_object_file with prepared=true: data rename ->
+    // directory fsync -> sidecar; only the first two go through the ring
+    int r = co_await uring_rename(*uring_, tmp.path.c_str(), dest.c_str());
+    if (r < 0) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
+    tmp.committed = true;
+    co_await sync_dir(dest.parent_path());
+    fsutil::write_object_sidecar(dest, meta, staging_ / "put");
 }
 
 Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
@@ -142,37 +159,40 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     co_await pool_->schedule();
     require_bucket(bucket);
 
-    // 1. Stream into the staging temp file via io_uring, computing MD5 as we write
+    // 1. Stream into the staging temp file through the write pipeline, computing MD5 as we
+    // go (roadmap §3.4 ①: up to write_depth blocks in flight while the next body block is
+    // being received)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
-    tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (tmp.fd < 0) throw_errno("open staging tmp");
+    tmp.fd = co_await uring_open(*uring_, tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (tmp.fd < 0) throw_uring("open staging tmp", tmp.fd);
 
+    UringWriteStream ws(uring_, tmp.fd, 0, body.length());
     uint64_t total = 0;
     std::string etag;
-    co_await drain_to_tmp(body, tmp.fd, total, etag);
+    co_await drain_to_tmp(body, ws, total, etag);
 
     meta.key = std::string(key);
     meta.size = total;
     meta.etag = etag;
     meta.last_modified = std::chrono::system_clock::now();
 
-    // The first two steps of commit_object_file (write xattr -> persist data) are done here
-    // ourselves, in the same order, only swapping that blocking fdatasync for an FSYNC SQE;
-    // then commit with prepared=true
+    // Original commit order preserved: write xattr -> persist data. The pipeline held the
+    // final block back, so finish() can send it and the fdatasync as one linked chain
+    // (roadmap §3.4 ③) -- for a small object that is the whole persistence in a single
+    // submission
     fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
-    co_await sync_fd(tmp.fd);
+    co_await ws.finish(fsutil::fsync_enabled());
     ::close(tmp.fd);
     tmp.fd = -1;
 
-    // 2. Conflict check + data rename + sidecar commit (synchronous calls, back on a pool
-    // thread). Per-key lock as in localfs: the commit phase's two renames must not interleave
-    // with concurrent writes to the same key; the conditional-PUT check is inside the same
-    // lock (PutCondition contract)
+    // 2. Conflict check + data rename + sidecar commit. Per-key lock as in localfs: the
+    // commit phase's two renames must not interleave with concurrent writes to the same
+    // key; the conditional-PUT check is inside the same lock (PutCondition contract)
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
-    fsutil::check_put_condition(object_path(bucket, key), cond, key);
-    commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key,
-                       /*prepared=*/true);
+    fs::path dest = object_path(bucket, key);
+    fsutil::check_put_condition(dest, cond, key);
+    co_await commit_prepared(dest, tmp, meta, key);
     g.ok = true;
     co_return PutResult{meta.etag};
 }
@@ -190,7 +210,10 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     require_bucket(bucket);  // same as localfs: bucket existence is an unconditional precondition, not something to check only on failure paths
 
     fs::path path = object_path(bucket, key);
-    int fd = ::open(path.c_str(), O_RDONLY);
+    // OPENAT via the ring (roadmap §3.4 ③): a cold dentry/inode lookup is disk work the
+    // pool thread no longer waits on; fstat afterwards is in-memory (the open just
+    // populated the inode) and stays a plain syscall
+    int fd = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
     if (fd < 0)
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
@@ -221,9 +244,8 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
         } else if (out.meta.size == 0) {
             len = 0;
         }
-        auto reader = std::make_unique<UringBodyReader>(fd, f, len, uring_);
-        reader->set_total(len);
-        out.body = std::move(reader);  // fd ownership transfers to the reader
+        // fd ownership transfers to the reader's stream (read-ahead over [f, f+len))
+        out.body = std::make_unique<UringStreamBodyReader>(uring_, fd, f, len);
     } catch (...) {
         ::close(fd);
         throw;
@@ -242,17 +264,19 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     auto up = require_upload(staging_, bucket, key, upload_id,
                              load_manifest(staging_, upload_id));
 
-    // Stream into the staging temp file via io_uring, computing the part MD5 as we write (same as PUT)
+    // Stream into the staging temp file through the write pipeline (same as PUT)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
-    tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (tmp.fd < 0) throw_errno("open part tmp");
+    tmp.fd = co_await uring_open(*uring_, tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (tmp.fd < 0) throw_uring("open part tmp", tmp.fd);
 
+    UringWriteStream ws(uring_, tmp.fd, 0, body.length());
     uint64_t total = 0;
     std::string etag;
-    co_await drain_to_tmp(body, tmp.fd, total, etag);
+    co_await drain_to_tmp(body, ws, total, etag);
     (void)total;
-    co_await sync_fd(tmp.fd);  // same as localfs: part data persists first; only then is .md5 the readiness proof
-    co_await pool_->schedule();
+    // Same as localfs: part data persists first (final write + fdatasync linked); only
+    // then is .md5 the readiness proof
+    co_await ws.finish(fsutil::fsync_enabled());
     ::close(tmp.fd);
     tmp.fd = -1;
 
@@ -260,9 +284,9 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     // last-write-wins, rename overwrites); rationale as in localfs -- the reverse order
     // could leave a valid .md5 paired with zero data blocks after a power loss
     std::string name = part_file_name(part_no);
-    std::error_code ec;
-    fs::rename(tmp.path, up.dir / name, ec);
-    if (ec) {
+    fs::path dest = up.dir / name;
+    int r = co_await uring_rename(*uring_, tmp.path.c_str(), dest.c_str());
+    if (r < 0) {
         // The upload may have been aborted (directory removed) while we were reading the body
         if (!fs::exists(up.dir))
             throw S3Error(S3ErrorCode::NoSuchUpload,
@@ -271,7 +295,7 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
         throw S3Error(S3ErrorCode::InternalError, "rename part failed");
     }
     tmp.committed = true;
-    fsutil::fsync_dir(up.dir);
+    co_await sync_dir(up.dir);
     // Verified part checksum rides in the .md5 kv sidecar (roadmap §2.2, same as localfs)
     std::vector<std::pair<std::string, std::string>> pkv{{"md5", etag}};
     if (checksum && !checksum->resolved().empty()) {
@@ -294,7 +318,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
                              load_manifest(staging_, upload_id));
     require_bucket(bucket);
 
-    // 1. Validate each declared part: it exists and the ETag matches
+    // 1. Validate each declared part: it exists (STATX via the ring) and the ETag matches
     std::vector<std::string> md5s;
     std::vector<fs::path> paths;
     std::vector<PartDigest> digests;
@@ -308,7 +332,8 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
             else if (k == "checksum_algorithm") digest.algorithm = v;
             else if (k == "checksum_value") digest.value = v;
         }
-        if (stored.empty() || !fs::exists(up.dir / name) ||
+        fs::path part_path = up.dir / name;
+        if (stored.empty() || !co_await uring_exists(*uring_, part_path.c_str()) ||
             stored != strip_etag_quotes(p.etag))
             throw S3Error(S3ErrorCode::InvalidPart,
                           "One or more of the specified parts could not be found or the "
@@ -316,29 +341,40 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
                           std::string(key));
         md5s.push_back(stored);
         digests.push_back(std::move(digest));
-        paths.push_back(up.dir / name);
+        paths.push_back(std::move(part_path));
     }
 
-    // 2. Concatenate into the final temp file in declared order, reading and writing via io_uring
+    // 2. Concatenate into the final temp file in declared order: per-part read-ahead
+    // stream feeding the shared write pipeline -- part reads run ahead while previous
+    // blocks are still being written (roadmap §3.4 ①)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
-    tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (tmp.fd < 0) throw_errno("open complete tmp");
+    tmp.fd = co_await uring_open(*uring_, tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+    if (tmp.fd < 0) throw_uring("open complete tmp", tmp.fd);
+    UringWriteStream ws(uring_, tmp.fd, 0, std::nullopt);
     uint64_t total = 0;
     std::vector<uint64_t> sizes;  // per-part layout for GET ?partNumber (roadmap §2.5)
-    std::byte buf[256 * 1024];
     for (auto& path : paths) {
-        FdGuard in{::open(path.c_str(), O_RDONLY)};
-        if (in.fd < 0) throw_errno("open part");
-        uint64_t off = 0;
-        for (;;) {
-            int n = co_await uring_->read(in.fd, std::span(buf), off);
-            if (n < 0) throw_uring("io_uring read part", n);
-            if (n == 0) break;
-            co_await write_all(tmp.fd, std::span<const std::byte>(buf, n), total);
-            off += static_cast<uint64_t>(n);
-            total += static_cast<uint64_t>(n);
+        int in = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
+        if (in < 0) throw_uring("open part", in);
+        struct stat pst{};
+        if (::fstat(in, &pst) != 0) {
+            ::close(in);
+            throw_errno("fstat part");
         }
-        sizes.push_back(off);
+        UringReadStream rs(uring_, in, 0, uint64_t(pst.st_size));  // fd owned by the stream
+        uint64_t part_bytes = 0;
+        for (;;) {
+            std::span<std::byte> wb = co_await ws.acquire();
+            size_t n = co_await rs.read(wb);
+            if (n == 0) {
+                ws.commit(0);
+                break;
+            }
+            ws.commit(n);
+            part_bytes += n;
+            total += n;
+        }
+        sizes.push_back(part_bytes);
     }
     // 3. Commit (same atomic path as PUT), then clean up the mpu directory
     ObjectMeta meta = std::move(up.meta);
@@ -350,20 +386,63 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     PutResult result{meta.etag};
     apply_composite_checksum(digests, meta, result);  // roadmap §2.2
     fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
-    co_await sync_fd(tmp.fd);
+    co_await ws.finish(fsutil::fsync_enabled());  // final write + fdatasync linked
     ::close(tmp.fd);
     tmp.fd = -1;
     {
         auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT
         co_await pool_->schedule();
-        commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key,
-                           /*prepared=*/true);
+        co_await commit_prepared(object_path(bucket, key), tmp, meta, key);
     }
 
     std::error_code ec;
     fs::remove_all(up.dir, ec);
     g.ok = true;
     co_return result;
+}
+
+Task<void> XLocalFsBackend::delete_object(std::string_view bucket, std::string_view key) {
+    if (!uring_->features().op_unlinkat || !uring_->options().meta_ops)
+        co_return co_await LocalFsBackend::delete_object(bucket, key);
+    OpGuard g{this, Op::kDelete};
+    validate_bucket_name(bucket, kAllowReserved);
+    validate_object_key(key);
+    validate_fs_object_key(key);
+    reject_reserved_key(key);
+    co_await pool_->schedule();
+    require_bucket(bucket);
+
+    fs::path path = object_path(bucket, key);
+    std::string sidecar = path.string() + fsutil::kSidecarSuffix;
+    // Idempotent like the base: absence is not an error, but real EACCES/EIO must
+    // propagate -- a silent 204 would convince the client the delete happened
+    int r = co_await uring_unlink(*uring_, path.c_str());
+    if (r == -EISDIR) {
+        // The key maps onto an existing prefix directory: match the base's fs::remove
+        // semantics (an empty directory is removed, a non-empty one errors)
+        std::error_code ec;
+        fs::remove(path, ec);
+        if (ec) throw S3Error(S3ErrorCode::InternalError, "delete object: " + ec.message());
+        r = 0;
+    }
+    if (r < 0 && r != -ENOENT)
+        throw S3Error(S3ErrorCode::InternalError,
+                      std::string("delete object: ") + std::strerror(-r));
+    r = co_await uring_unlink(*uring_, sidecar.c_str());
+    if (r < 0 && r != -ENOENT)
+        throw S3Error(S3ErrorCode::InternalError,
+                      std::string("delete object sidecar: ") + std::strerror(-r));
+    // Clean up empty parent directories up to the bucket root (same as the base)
+    std::error_code ec;
+    fs::path dir = path.parent_path(), root = bucket_dir(bucket);
+    while (dir != root && dir.string().size() > root.string().size()) {
+        if (!fs::is_empty(dir, ec) || ec) break;
+        fs::remove(dir, ec);
+        if (ec) break;
+        dir = dir.parent_path();
+    }
+    g.ok = true;
+    co_return;
 }
 
 Task<void> XLocalFsBackend::close() {

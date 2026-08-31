@@ -252,5 +252,29 @@ HTTP 响应逃逸出 backend 生命周期（驱动器在 handler 返回后继续
 | ExtentChainReader | 无锁 | 自持 options 副本，与 store 生命周期解耦 |
 
 `close()`：逐槽加锁封存 active pack → `flush_seals(true)`（失败上抛，关闭路径
-必须可见）。backend 的 close 顺序保证 data 先于 meta 关闭，seal 回调此时仍可用。
+必须可见）→ 若挂了 uring 引擎则 `shutdown()` 其收割线程（§9）。backend 的
+close 顺序保证 data 先于 meta 关闭，seal 回调此时仍可用。
+
+## 9. io_uring 变体（roadmap §3.4 ⑤）
+
+`fs_uring: true`（键表见 [../duostore-backend.md](../duostore-backend.md) §11）
+时，DuoStoreBackend 构造一个与 xlocalfs 同源的
+`storage/xlocalfs/uring.h:UringEngine` 注入 `FsDataOptions::uring`；引擎建失败
+（老内核 / seccomp / memlock 配额）LOG_WARN 后回退同步路径，并置常驻 gauge
+`lights3_duostore_uring_fallback=1`。**磁盘布局与两种模式完全一致**，可随时
+开关切换。替换面：
+
+| 路径 | 同步模式 | uring 模式 |
+| --- | --- | --- |
+| chunk 写（`ChunkWriter`） | 池线程 `write` 循环 + 封存时阻塞 fdatasync | 每 chunk 一条 `uring_stream.h:UringWriteStream` 写流水线（拷入流块，至多 `write_depth` 在途）；封存 = 末块 WRITE→FSYNC 链一次提交 |
+| chunk 读（`ExtentChainReader`） | 池线程 pread 逐块 | 每 extent 一条 `UringReadStream`（read-ahead），crc 校验条件不变 |
+| pack 记录读 | pread 循环整读 payload | `UringReadStream` 整读，crc 恒校验不变 |
+| pack 追加（`append_pack_records`） | 槽锁内 pwrite + 批尾 fdatasync | pwrite 仍在槽锁内同步（临界区小；`std::mutex` 不能跨挂起点），**批尾 fdatasync 经 `dup(fd)` 出锁后以 FSYNC SQE 挂起等待**——追加路径最长的阻塞点离开池线程。正确性：封存/轮转仍在锁内先做阻塞 sync 再 close，seal 上报的 file_size 恒对应已持久化字节；本批自身的持久化在返回 extents 前完成 |
+| 轮转中途 sync / dirfd fsync | 阻塞 | 不变（锁内 / 低频路径） |
+
+读者（`ExtentChainReader`）持 options 副本逃逸 store 生命周期的老约束照旧成立：
+`FsDataOptions::uring` 是 shared_ptr，读者共同持有引擎对象；`close()` 停掉
+收割线程后，逃逸读者的下一次提交以 InternalError 收场（与 xlocalfs 的关闭
+时序假设一致）。多在途 op 的析构安全性由 uring_stream 的引用计数共享块承担
+（见 [./xlocalfs.md](./xlocalfs.md) §5）。
 

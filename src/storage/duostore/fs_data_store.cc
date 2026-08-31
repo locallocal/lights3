@@ -16,6 +16,7 @@
 #include "core/log.h"
 #include "storage/duostore/codec.h"
 #include "storage/localfs/fs_util.h"
+#include "storage/xlocalfs/uring_stream.h"
 
 namespace lights3::storage::duostore {
 
@@ -109,17 +110,28 @@ public:
         while (!buf.empty()) {
             if (fd_ < 0) open_next_chunk();
             size_t n = std::min<uint64_t>(store_->opt_.chunk_size - cur_len_, buf.size());
-            write_full(fd_, buf.data(), n);
+            if (ws_) {
+                // Pipelined chunk write (roadmap §3.4 ⑤): copy into the stream's block (a
+                // registered fixed buffer when available); up to write_depth writes stay
+                // in flight while the next body block is being received. The copy is
+                // required by the DataWriter contract -- buf is only valid for this call
+                std::span<std::byte> wb = co_await ws_->acquire();
+                n = std::min(n, wb.size());
+                std::memcpy(wb.data(), buf.data(), n);
+                ws_->commit(n);
+            } else {
+                write_full(fd_, buf.data(), n);
+            }
             cur_crc_ = codec::crc32c_update(cur_crc_, buf.first(n));
             cur_len_ += n;
             buf = buf.subspan(n);
-            if (cur_len_ == store_->opt_.chunk_size) seal_chunk();
+            if (cur_len_ == store_->opt_.chunk_size) co_await seal_chunk();
         }
         co_return;
     }
 
     Task<DataRef> finish() override {
-        if (fd_ >= 0) seal_chunk();
+        if (fd_ >= 0) co_await seal_chunk();
         // fsync the shard directories touched by this session at its end (§5.1)
         for (unsigned s = 0; s < 256; ++s)
             if (touched_[s] && ::fsync(store_->shard_dirfd(s)) != 0)
@@ -152,22 +164,34 @@ private:
         auto path = store_->chunk_path(cur_id_);
         fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
         if (fd_ < 0) throw_errno("open chunk");
+        if (store_->opt_.uring)
+            ws_ = std::make_unique<UringWriteStream>(store_->opt_.uring, fd_, 0,
+                                                     store_->opt_.chunk_size);
         touched_[shard] = true;
         cur_len_ = 0;
         cur_crc_ = 0;
     }
 
-    void seal_chunk() {
-        if (::fdatasync(fd_) != 0) throw_errno("fdatasync chunk");
+    Task<void> seal_chunk() {
+        if (ws_) {
+            // Final write + fdatasync as one linked chain (roadmap §3.4 ③); -EINVAL
+            // (filesystem unsupported) is tolerated by the stream, matching fsync_file
+            auto ws = std::move(ws_);
+            co_await ws->finish(/*fdatasync=*/true);
+        } else if (::fdatasync(fd_) != 0) {
+            throw_errno("fdatasync chunk");
+        }
         ::close(fd_);
         fd_ = -1;
         extents_.push_back({Extent::Kind::kChunk, cur_id_, 0, cur_len_, cur_crc_});
+        co_return;
     }
 
     FsDataStore* store_;
     std::vector<Extent> extents_;
     std::vector<uint64_t> pinned_;  // ids write-side pinned by this session (ownership transfers to the caller after finish)
     std::bitset<256> touched_;
+    std::unique_ptr<UringWriteStream> ws_;  // current chunk's write pipeline (uring mode)
     int fd_ = -1;
     uint64_t cur_id_ = 0;
     uint64_t cur_len_ = 0;
@@ -208,7 +232,7 @@ public:
     Task<DataRef> finish() override {
         if (spill_) co_return co_await spill_->finish();
         if (buf_.empty()) co_return DataRef{};  // 0-byte object: empty DataRef
-        Extent e = store_->append_pack_record(
+        Extent e = co_await store_->append_pack_record(
             owner_, std::span<const std::byte>(buf_.data(), buf_.size()));
         co_return DataRef{{e}};
     }
@@ -258,16 +282,28 @@ public:
         if (remaining_ == 0 || buf.empty()) co_return 0;
         co_await pool_->schedule();
         const Extent& e = extents_[idx_];
-        if (e.kind == Extent::Kind::kPack) co_return read_pack(e, buf);
-        if (fd_ < 0) {
-            fd_ = open_extent(e);
+        if (e.kind == Extent::Kind::kPack) co_return co_await read_pack(e, buf);
+        if (fd_ < 0 && !stream_) {
+            int fd = open_extent(e);
             // crc verification is only feasible when reading the full extent from start to end (a Range hitting the middle cannot be verified, §7)
             crc_active_ = opt_.verify_chunk_crc && cur_off_ == 0 && remaining_ >= e.length;
             crc_acc_ = 0;
+            if (opt_.uring)
+                // Read-ahead chunk stream (roadmap §3.4 ⑤①); fd ownership moves to it
+                stream_ = std::make_unique<UringReadStream>(
+                    opt_.uring, fd, e.offset + cur_off_,
+                    std::min<uint64_t>(e.length - cur_off_, remaining_));
+            else
+                fd_ = fd;
         }
         size_t want = size_t(std::min<uint64_t>({buf.size(), e.length - cur_off_, remaining_}));
-        ssize_t n = ::pread(fd_, buf.data(), want, off_t(e.offset + cur_off_));
-        if (n < 0) throw_errno("pread extent");
+        ssize_t n;
+        if (stream_) {
+            n = ssize_t(co_await stream_->read(buf.first(want)));
+        } else {
+            n = ::pread(fd_, buf.data(), want, off_t(e.offset + cur_off_));
+            if (n < 0) throw_errno("pread extent");
+        }
         if (n == 0)
             throw S3Error(S3ErrorCode::InternalError,
                           "duostore: extent shorter than manifest");
@@ -303,28 +339,41 @@ private:
 
     // pack extent: on first touch, read the whole payload in and always verify
     // crc (bounded by payload ≤ pack_threshold); subsequent reads slice from memory
-    size_t read_pack(const Extent& e, std::span<std::byte> buf) {
+    Task<size_t> read_pack(const Extent& e, std::span<std::byte> buf) {
         if (!pack_loaded_) {
             int fd = open_extent(e);
             pack_buf_.resize(size_t(e.length));
-            size_t got = 0;
-            while (got < pack_buf_.size()) {
-                ssize_t n = ::pread(fd, pack_buf_.data() + got, pack_buf_.size() - got,
-                                    off_t(e.offset + got));
-                if (n < 0) {
-                    int err = errno;
-                    ::close(fd);
-                    errno = err;
-                    throw_errno("pread pack record");
+            if (opt_.uring) {
+                UringReadStream rs(opt_.uring, fd, e.offset, e.length);  // owns fd
+                size_t got = 0;
+                while (got < pack_buf_.size()) {
+                    size_t n = co_await rs.read(
+                        std::span(pack_buf_.data() + got, pack_buf_.size() - got));
+                    if (n == 0)
+                        throw S3Error(S3ErrorCode::InternalError,
+                                      "duostore: pack record shorter than manifest");
+                    got += n;
                 }
-                if (n == 0) {
-                    ::close(fd);
-                    throw S3Error(S3ErrorCode::InternalError,
-                                  "duostore: pack record shorter than manifest");
+            } else {
+                size_t got = 0;
+                while (got < pack_buf_.size()) {
+                    ssize_t n = ::pread(fd, pack_buf_.data() + got, pack_buf_.size() - got,
+                                        off_t(e.offset + got));
+                    if (n < 0) {
+                        int err = errno;
+                        ::close(fd);
+                        errno = err;
+                        throw_errno("pread pack record");
+                    }
+                    if (n == 0) {
+                        ::close(fd);
+                        throw S3Error(S3ErrorCode::InternalError,
+                                      "duostore: pack record shorter than manifest");
+                    }
+                    got += size_t(n);
                 }
-                got += size_t(n);
+                ::close(fd);
             }
-            ::close(fd);
             uint32_t crc = codec::crc32c_of(
                 std::span<const std::byte>(pack_buf_.data(), pack_buf_.size()));
             if (crc != e.crc32c) {
@@ -340,7 +389,7 @@ private:
         cur_off_ += n;
         remaining_ -= n;
         if (cur_off_ == e.length) advance_extent();
-        return n;
+        co_return n;
     }
 
     void advance_extent() {
@@ -348,6 +397,7 @@ private:
             ::close(fd_);
             fd_ = -1;
         }
+        stream_.reset();
         pack_loaded_ = false;
         pack_buf_.clear();
         ++idx_;
@@ -361,6 +411,7 @@ private:
     uint64_t remaining_;
     uint64_t total_;
     int fd_ = -1;
+    std::unique_ptr<UringReadStream> stream_;  // current chunk extent's read-ahead stream (uring mode)
     bool crc_active_ = false;
     uint32_t crc_acc_ = 0;
     bool pack_loaded_ = false;
@@ -436,46 +487,56 @@ Task<std::unique_ptr<DataWriter>> FsDataStore::open_writer(WriteHint hint) {
     co_return std::make_unique<FsPackedWriter>(this, std::move(hint.owner));
 }
 
-Extent FsDataStore::append_pack_record(std::string_view owner,
-                                       std::span<const std::byte> payload) {
-    PackAppendItem item{owner, payload};
-    return append_pack_records({&item, 1}).at(0);
+Task<Extent> FsDataStore::append_pack_record(std::string_view owner,
+                                             std::span<const std::byte> payload) {
+    PackAppendItem item{owner, payload};  // lives in this frame, valid across the co_await
+    auto v = co_await append_pack_records({&item, 1});
+    co_return v.at(0);
 }
 
-std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendItem> items) {
+Task<std::vector<Extent>> FsDataStore::append_pack_records(
+    std::span<const PackAppendItem> items) {
     std::vector<Extent> out;
-    if (items.empty()) return out;
+    if (items.empty()) co_return out;
     out.reserve(items.size());
 
-    // Round-robin lock acquisition (§5.2): first sweep with try_lock to spread queuing; if all busy, block on the starting slot
-    const unsigned start = pack_rr_.fetch_add(1, std::memory_order_relaxed) % packs_.size();
-    ActivePack* slot = nullptr;
-    std::unique_lock<std::mutex> lk;
-    for (size_t i = 0; i < packs_.size() && !slot; ++i) {
-        auto& s = *packs_[(start + i) % packs_.size()];
-        std::unique_lock<std::mutex> l(s.m, std::try_to_lock);
-        if (l.owns_lock()) {
-            slot = &s;
-            lk = std::move(l);
+    // With the uring engine, the end-of-batch fdatasync runs off-lock on a dup of the
+    // pack fd (roadmap §3.4 ⑤): the slot std::mutex cannot be held across a suspension
+    // point. Correctness: a whole-file fdatasync needs no lock, and rotation/sealing
+    // always run their own blocking sync inside the lock before closing the fd, so a
+    // seal's reported file_size still corresponds to persisted bytes; this batch's own
+    // durability is settled before the extents are returned
+    int async_sync_fd = -1;
+    {
+        // Round-robin lock acquisition (§5.2): first sweep with try_lock to spread queuing; if all busy, block on the starting slot
+        const unsigned start = pack_rr_.fetch_add(1, std::memory_order_relaxed) % packs_.size();
+        ActivePack* slot = nullptr;
+        std::unique_lock<std::mutex> lk;
+        for (size_t i = 0; i < packs_.size() && !slot; ++i) {
+            auto& s = *packs_[(start + i) % packs_.size()];
+            std::unique_lock<std::mutex> l(s.m, std::try_to_lock);
+            if (l.owns_lock()) {
+                slot = &s;
+                lk = std::move(l);
+            }
         }
-    }
-    if (!slot) {
-        slot = packs_[start].get();
-        lk = std::unique_lock(slot->m);
-    }
+        if (!slot) {
+            slot = packs_[start].get();
+            lk = std::unique_lock(slot->m);
+        }
 
-    // Batching (docs/archive/gaps.md §2.13): per-item pwrite within the batch, fdatasync
-    // converges to one at the batch end. A crash can only lose records "not yet
-    // returned to the caller" — swap/meta commits all happen after this function
-    // returns, equivalent to a torn tail (§5.2's expected discard-on-restart form)
-    bool dirty = false;
-    auto sync_slot = [&] {
-        if (!dirty) return;
-        if (::fdatasync(slot->fd) != 0) throw_errno("fdatasync pack");
-        dirty = false;
-    };
+        // Batching (docs/archive/gaps.md §2.13): per-item pwrite within the batch, fdatasync
+        // converges to one at the batch end. A crash can only lose records "not yet
+        // returned to the caller" — swap/meta commits all happen after this function
+        // returns, equivalent to a torn tail (§5.2's expected discard-on-restart form)
+        bool dirty = false;
+        auto sync_slot = [&] {
+            if (!dirty) return;
+            if (::fdatasync(slot->fd) != 0) throw_errno("fdatasync pack");
+            dirty = false;
+        };
 
-    for (const auto& item : items) {
+        for (const auto& item : items) {
         uint32_t crc = codec::crc32c_of(item.payload);
         std::string header = build_pack_header(item.owner, item.payload.size(), crc);
         const uint64_t rec_size = header.size() + item.payload.size();
@@ -526,18 +587,36 @@ std::vector<Extent> FsDataStore::append_pack_records(std::span<const PackAppendI
         }
         dirty = true;
 
-        out.push_back({Extent::Kind::kPack, slot->id,
-                       slot->size + (rec.size() - item.payload.size()), item.payload.size(),
-                       crc});
-        slot->size += rec_size;
+            out.push_back({Extent::Kind::kPack, slot->id,
+                           slot->size + (rec.size() - item.payload.size()),
+                           item.payload.size(), crc});
+            slot->size += rec_size;
+        }
+        if (dirty && opt_.uring) {
+            async_sync_fd = ::dup(slot->fd);
+            if (async_sync_fd < 0) sync_slot();  // dup failed: fall back to the blocking sync
+        } else {
+            sync_slot();
+        }
+    }  // slot lock released
+    if (async_sync_fd >= 0) {
+        int r;
+        try {
+            r = co_await opt_.uring->fdatasync(async_sync_fd);
+        } catch (...) {
+            ::close(async_sync_fd);
+            throw;
+        }
+        ::close(async_sync_fd);
+        if (r < 0 && r != -EINVAL)  // EINVAL: fs unsupported, matching fsync_file semantics
+            throw S3Error(S3ErrorCode::InternalError,
+                          std::string("fdatasync pack: ") + std::strerror(-r));
     }
-    sync_slot();
     // The seal's meta commit is submitted outside the slot lock (docs/archive/gaps.md
     // §3.9); failure only warns, and (id,size) stays in the queue for later
     // writes/close to retry — this batch's own writes are already safely on disk
-    lk.unlock();
     flush_seals(/*rethrow=*/false);
-    return out;
+    co_return out;
 }
 
 Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendItem> items) {
@@ -556,7 +635,7 @@ Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendIt
             pk.push_back(items[i]);
         }
     if (!pk.empty()) {
-        auto exts = append_pack_records(pk);
+        auto exts = co_await append_pack_records(pk);
         for (size_t j = 0; j < exts.size(); ++j) out[pack_idx[j]].extents = {exts[j]};
     }
     std::vector<bool> via_pack(items.size(), false);
@@ -866,6 +945,10 @@ Task<void> FsDataStore::close() {
         if (slot->fd >= 0) close_slot_locked(*slot);
     }
     flush_seals(/*rethrow=*/true);  // sealing failures on the shutdown path must be visible to the caller
+    // Stop the engine's reaper threads; escaped readers keep the engine object alive via
+    // their options copies, but their next submission fails with InternalError (same
+    // close-ordering assumption as xlocalfs)
+    if (opt_.uring) opt_.uring->shutdown();
     co_return;
 }
 

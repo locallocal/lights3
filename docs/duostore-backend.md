@@ -492,6 +492,10 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | root | 必填 | 数据根目录 |
 | meta_path | `<root>/meta` | RocksDB 目录 |
 | chunk_size | 8MiB | 大对象切片粒度 |
+| fs_uring | false | data=fs 的 io_uring 数据面（roadmap §3.4 ⑤，[storage/duostore-data-fs.md](storage/duostore-data-fs.md) §9）；引擎建失败回退同步路径并置常驻 gauge `lights3_duostore_uring_fallback=1` |
+| fs_uring_queue_depth | 256 | 每 ring SQ 深度（[8,65536]） |
+| fs_uring_sqpoll | false | 内核 SQ 轮询线程 |
+| fs_uring_rings | 1 | ring 分片数（[0,64]，0 = auto） |
 | pack_threshold | 128KiB | ≤ 此值进 pack；亦是 chunked PUT 的缓冲上限（§5.3） |
 | pack_max_size | 128MiB | active pack 封存阈值（= 压实重写单元） |
 | pack_writers | 4 | 并存 active pack 数 |
@@ -516,7 +520,7 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | meta | redis / TiKV（多网关共 meta，均已实现） | 实现 IMetaStore：同步客户端在池线程调用即可（§2.2）；事务不变量用各自原语（redis MULTI/Lua、TiKV 事务）表达——语义级接口不假设有序 KV，这正是 §2.1 选 A 的原因。Redis 版详细设计见 [duostore-redis-meta.md](duostore-redis-meta.md)，TiKV 版详细调研见 [duostore-tikv-meta.md](duostore-tikv-meta.md) |
 | meta | SQLite（单文件部署，已实现） | 同上，SQL 事务。详细设计见 [duostore-sqlite-meta.md](duostore-sqlite-meta.md) |
 | data | Ceph / RADOS（已实现） | 实现 IDataStore：新增 `Extent::Kind::kRados`（file_id 映射 rados 对象名），meta 层零改动；librados 异步 API 与协程接口天然契合。详细调研见 [duostore-rados-data.md](duostore-rados-data.md) |
-| data | io_uring 版 FsDataStore（未实现） | 对照 xlocalfs 的做法，数据面换 IO 引擎、布局不变 |
+| data | io_uring 版 FsDataStore（已实现，`fs_uring: true`） | 复用 xlocalfs 的 `UringEngine`/`uring_stream` 流水线，数据面换 IO 引擎、布局不变（[storage/duostore-data-fs.md](storage/duostore-data-fs.md) §9） |
 
 组合矩阵：RocksDB+本地盘（首期）、TiKV+Ceph（全分布式网关）、
 RocksDB+Ceph（本地索引 + 远端数据）均为合法组合。注意：跨网关共享 meta

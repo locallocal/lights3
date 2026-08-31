@@ -175,6 +175,22 @@ elif [[ "$BACKEND" == "cloudproxy" ]]; then cat <<CLOUD
     secret_key: $CLOUD_SK
     bucket_prefix: e2e-
 CLOUD
+elif [[ "$BACKEND" == "xlocalfs" ]]; then cat <<XLFS
+  - name: tierdata
+    type: xlocalfs
+    root: $WORK/data
+    staging: $WORK/staging
+    rings: 2
+    read_depth: 3
+    write_depth: 3
+    fixed_buffers: 8
+XLFS
+elif [[ "$BACKEND" == "duostore-uring" ]]; then cat <<DUOURING
+  - name: tierdata
+    type: duostore
+    root: $WORK/data
+    fs_uring: true
+DUOURING
 elif [[ "$BACKEND" == "duostore-redis" ]]; then cat <<DUOREDIS
   - name: tierdata
     type: duostore

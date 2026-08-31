@@ -11,6 +11,7 @@
 #include "core/util/crypto.h"
 #include "storage/duostore/codec.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/xlocalfs/uring.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/listing.h"
 #include "storage/multipart.h"
@@ -278,6 +279,25 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("meta_path"); v && !v->empty()) c.meta_path = *v;
     else c.meta_path = c.root / "meta";
     if (auto* v = get("chunk_size")) c.chunk_size = parse_size(*v);
+    // io_uring fs data plane (roadmap §3.4 ⑤); range checks inline because the fields are
+    // unsigned (a negative would wrap before the validation section below)
+    if (auto* v = get("fs_uring")) c.fs_uring = parse_bool_param(name, "fs_uring", *v);
+    if (auto* v = get("fs_uring_queue_depth")) {
+        int qd = parse_int_param(name, "fs_uring_queue_depth", *v);
+        if (qd < 8 || qd > 65536)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': fs_uring_queue_depth must be in [8,65536]");
+        c.fs_uring_queue_depth = unsigned(qd);
+    }
+    if (auto* v = get("fs_uring_sqpoll"))
+        c.fs_uring_sqpoll = parse_bool_param(name, "fs_uring_sqpoll", *v);
+    if (auto* v = get("fs_uring_rings")) {
+        int r = parse_int_param(name, "fs_uring_rings", *v);
+        if (r < 0 || r > 64)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': fs_uring_rings must be in [0,64] (0 = auto)");
+        c.fs_uring_rings = unsigned(r);
+    }
     if (auto* v = get("pack_threshold")) c.pack_threshold = parse_size(*v);
     if (auto* v = get("pack_max_size")) c.pack_max_size = parse_size(*v);
     if (auto* v = get("pack_writers")) c.pack_writers = parse_int_param(name, "pack_writers", *v);
@@ -471,6 +491,10 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             DuoDataKind kind;
         } kDataOwnedKeys[] = {
             {"chunk_size", DuoDataKind::kFs},
+            {"fs_uring", DuoDataKind::kFs},
+            {"fs_uring_queue_depth", DuoDataKind::kFs},
+            {"fs_uring_sqpoll", DuoDataKind::kFs},
+            {"fs_uring_rings", DuoDataKind::kFs},
             {"pack_threshold", DuoDataKind::kFs},
             {"pack_max_size", DuoDataKind::kFs},
             {"pack_writers", DuoDataKind::kFs},
@@ -656,11 +680,32 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         // Callbacks do not capture this (meta/pins lifetimes are guaranteed by
         // this class's ownership and shared_ptr); test-injection assembly is identical
         auto pins = pins_;
+        FsDataOptions fopt{cfg_.root,          cfg_.chunk_size,   cfg_.verify_chunk_crc,
+                           cfg_.pack_threshold, cfg_.pack_max_size, cfg_.pack_writers,
+                           cfg_.pack_max_age_sec, on_corruption};
+        // io_uring fs data plane (roadmap §3.4 ⑤): opt-in; unavailability (old kernel,
+        // seccomp, memlock quota) degrades to the synchronous path -- same layout, only
+        // async IO is lost. Warn plus resident gauge, mirroring the xlocalfs fallback
+        if (cfg_.fs_uring) {
+            try {
+                UringOptions uo;
+                uo.entries = cfg_.fs_uring_queue_depth;
+                uo.sqpoll = cfg_.fs_uring_sqpoll;
+                uo.rings = cfg_.fs_uring_rings;
+                fopt.uring = std::make_shared<UringEngine>(pool_, uo);
+            } catch (const std::exception& e) {
+                LOG_WARN("duostore backend '{}': io_uring unavailable ({}); fs data plane "
+                         "falls back to synchronous IO (same layout)",
+                         cfg_.name, e.what());
+                metrics
+                    .gauge("lights3_duostore_uring_fallback",
+                           "io_uring unavailable, duostore fs data plane fell back to "
+                           "synchronous IO")
+                    ->set(1);
+            }
+        }
         data_ = std::make_unique<FsDataStore>(
-            FsDataOptions{cfg_.root, cfg_.chunk_size, cfg_.verify_chunk_crc,
-                          cfg_.pack_threshold, cfg_.pack_max_size, cfg_.pack_writers,
-                          cfg_.pack_max_age_sec, on_corruption},
-            pool_, alloc,
+            std::move(fopt), pool_, alloc,
             [meta](uint64_t pack_id, uint64_t size) { meta->seal_pack(pack_id, size); },
             [meta, pins](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
                 return migrate_pack_records(*meta, ds, pins.get(), std::move(batch));

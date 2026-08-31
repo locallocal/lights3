@@ -160,16 +160,21 @@ resolve(bucket) → IStorageBackend&
 `fs_util` 落盘原语），仅把数据面的字节搬运换成 io_uring：
 
 - **封装**：`storage/xlocalfs/uring.h` 用原生 syscall（io_uring_setup/enter +
-  mmap SQ/CQ）实现最小封装，不引入 liburing 依赖。单 ring：提交侧互斥锁
-  串行化 SQE 填充并逐个 enter（SQ 不积压）；独立收割线程等待 CQE，完成后把
-  协程续体投递回线程池——磁盘等待期间不占任何线程，后续的同步落盘调用
-  （rename/sidecar）天然回到池线程。
-- **覆盖范围**：GET 流式读（`UringBodyReader`，带偏移天然支持 Range）、
-  PUT/UploadPart 流式写、complete 分片拼接。目录遍历与元数据操作仍走线程池
-  （io_uring 无 getdents 等目录原语）。
+  mmap SQ/CQ）实现最小封装，不引入 liburing 依赖。1..N 个独立 ring
+  （`rings`，roadmap §3.4 ④）：每 ring 一把提交互斥锁 + 批量 enter（值班
+  flusher）+ 专职收割线程，CQE 完成后把协程续体投递回线程池——磁盘等待期间
+  不占任何线程，后续的同步落盘调用（sidecar 等）天然回到池线程。建环时注册
+  fixed buffers / 稀疏 fixed files 表（失败只丢优化不丢功能）。
+- **覆盖范围**：GET 流式读（`UringStreamBodyReader`，read-ahead 环形缓冲，
+  带偏移天然支持 Range）、PUT/UploadPart 流水线写（末块与 fdatasync 链式
+  一次提交）、complete 分片拼接（分片读 read-ahead + 拼接写流水线）；内核
+  支持时 open/statx/rename/unlink 与提交期目录 fsync 也走 ring。目录遍历
+  （listing）仍走线程池（io_uring 无 getdents）。
 - **配置**：`type: xlocalfs`，参数同 localfs（root/staging），另有可选
-  `queue_depth`（SQ 深度，默认 256）。
-- **生命周期**：`close()` 停止收割线程；须在在途请求完成后调用（与
+  `queue_depth`（SQ 深度，默认 256）、`rings`、`fixed_buffers` /
+  `fixed_files`、`block_size`、`read_depth` / `write_depth`、`meta_ops`
+  （详表见 [storage/xlocalfs.md](storage/xlocalfs.md) §8）。
+- **生命周期**：`close()` 停止全部收割线程；须在在途请求完成后调用（与
   ThreadPool::join 同一假设）。
 
 ## 4. CloudProxyBackend（映射公有云）

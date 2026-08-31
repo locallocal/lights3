@@ -151,6 +151,40 @@ TEST(duostore_backend_suite_all_pack) {
     run_backend_suite(*b);
     sync_wait(b->close());
 }
+
+// io_uring fs data plane (roadmap §3.4 ⑤): the same suite over the uring-backed
+// FsDataStore -- default parameters (mixed pack/chunk) and small-chunk (multi-chunk
+// manifests exercising the read-ahead stream across extents). Where io_uring is
+// unavailable the config constructor falls back to the sync path, so the suite stays
+// meaningful either way
+TEST(duostore_backend_suite_uring) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    DuoStoreConfig cfg;
+    cfg.name = "suite-uring";
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    cfg.fs_uring = true;
+    auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
+    run_backend_suite(*b);
+    sync_wait(b->close());
+}
+
+TEST(duostore_backend_suite_uring_small_chunk) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    DuoStoreConfig cfg;
+    cfg.name = "suite-uring-4k";
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    cfg.chunk_size = 4096;
+    cfg.pack_threshold = 0;
+    cfg.meta_sync = false;
+    cfg.fs_uring = true;
+    auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
+    run_backend_suite(*b);
+    sync_wait(b->close());
+}
 #endif
 
 // Read/write paths spanning multiple 64KiB data blocks: io_uring streaming writes and offset reads
@@ -217,18 +251,20 @@ TEST(xlocalfs_uring_readv_writev_fallback_roundtrip) {
 
     std::string payload = "readv/writev fallback payload";
     auto io = [&]() -> Task<std::string> {
-        UringEngine::Awaitable w{*eng,   IORING_OP_WRITEV,
-                                 fd,    payload.data(),
-                                 unsigned(payload.size()), 0,
-                                 {},    {}};
-        int n = co_await w;
+        UringEngine::Sqe w;
+        w.opcode = IORING_OP_WRITEV;
+        w.fd = fd;
+        w.addr = reinterpret_cast<uint64_t>(payload.data());
+        w.len = unsigned(payload.size());
+        int n = co_await eng->raw(0, w);
         CHECK_EQ(n, int(payload.size()));
         std::string out(payload.size(), '\0');
-        UringEngine::Awaitable r{*eng,  IORING_OP_READV,
-                                 fd,    out.data(),
-                                 unsigned(out.size()), 0,
-                                 {},    {}};
-        int m = co_await r;
+        UringEngine::Sqe r;
+        r.opcode = IORING_OP_READV;
+        r.fd = fd;
+        r.addr = reinterpret_cast<uint64_t>(out.data());
+        r.len = unsigned(out.size());
+        int m = co_await eng->raw(0, r);
         CHECK_EQ(m, int(out.size()));
         co_return out;
     };
@@ -679,4 +715,344 @@ TEST(localfs_list_pruning_matches_reference) {
     mid.delimiter = "/";
     mid.start_after = "a/b/c.txt";
     check_same(mid);
+}
+
+// ---------- roadmap §3.4: multi-in-flight streams, fixed resources, meta opcodes ----------
+
+namespace {
+
+std::string patterned_bytes(size_t n, uint32_t seed) {
+    std::string s(n, '\0');
+    uint32_t x = seed;
+    for (auto& c : s) {
+        x = x * 1664525 + 1013904223;
+        c = char(x >> 24);
+    }
+    return s;
+}
+
+void write_file(const fs::path& p, const std::string& data) {
+    std::ofstream f(p, std::ios::binary);
+    f.write(data.data(), std::streamsize(data.size()));
+}
+
+}  // namespace
+
+// Read-ahead stream (roadmap §3.4 ①): multi-block file consumed through caller buffers
+// that are deliberately not divisors of the block size (partial slot consumption), plus a
+// Range window crossing a block boundary
+TEST(uring_read_stream_readahead_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    UringOptions uo;
+    uo.read_depth = 3;
+    uo.fixed_buffers = 4;
+    auto eng = std::make_shared<UringEngine>(pool, uo);
+    auto path = tmp.path / "ra.bin";
+    std::string data = patterned_bytes((1 << 20) + 12345, 0x5eed);
+    write_file(path, data);
+
+    int fd = ::open(path.c_str(), O_RDONLY);
+    CHECK(fd >= 0);
+    auto io = [&]() -> Task<std::string> {
+        UringReadStream rs(eng, fd, 0, data.size());  // fd ownership moves to the stream
+        std::string got;
+        std::vector<std::byte> buf(40000);
+        for (;;) {
+            size_t n = co_await rs.read(std::span(buf.data(), buf.size()));
+            if (n == 0) break;
+            got.append(reinterpret_cast<const char*>(buf.data()), n);
+        }
+        co_return got;
+    };
+    CHECK(sync_wait(io()) == data);
+
+    int fd2 = ::open(path.c_str(), O_RDONLY);
+    CHECK(fd2 >= 0);
+    auto ranged = [&]() -> Task<std::string> {
+        UringReadStream rs(eng, fd2, 65530, 16);  // crosses the 64KiB block boundary
+        std::string got(16, '\0');
+        size_t off = 0;
+        while (off < got.size()) {
+            size_t n = co_await rs.read(
+                std::span(reinterpret_cast<std::byte*>(got.data()) + off, got.size() - off));
+            if (n == 0) break;
+            off += n;
+        }
+        got.resize(off);
+        co_return got;
+    };
+    CHECK(sync_wait(ranged()) == data.substr(65530, 16));
+    eng->shutdown();
+}
+
+// Destroying a stream with read-ahead still in flight must not free buffers under the
+// kernel: the refcounted state holds buffers/fd until the last CQE lands, and engine
+// shutdown's drain then completes cleanly (ASan/TSan would flag a violation)
+TEST(uring_read_stream_abandon_inflight_safe) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    UringOptions uo;
+    uo.read_depth = 4;
+    auto eng = std::make_shared<UringEngine>(pool, uo);
+    auto path = tmp.path / "ab.bin";
+    write_file(path, std::string(2 << 20, 'q'));
+    for (int i = 0; i < 8; ++i) {
+        int fd = ::open(path.c_str(), O_RDONLY);
+        CHECK(fd >= 0);
+        auto io = [&]() -> Task<void> {
+            UringReadStream rs(eng, fd, 0, uint64_t(2 << 20));
+            std::byte buf[1000];
+            size_t n = co_await rs.read(std::span(buf));  // fills the read-ahead window
+            CHECK(n > 0);
+            co_return;  // rs destroyed with up to 3 reads still in flight
+        };
+        sync_wait(io());
+    }
+    eng->shutdown();
+}
+
+// Write pipeline (roadmap §3.4 ①③): odd-sized commits exercise block reuse and the
+// hold-back; finish(true) sends the final write + FSYNC as one linked chain. Also the
+// empty-stream edge (finish with nothing written)
+TEST(uring_write_stream_linked_fsync_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    UringOptions uo;
+    uo.write_depth = 2;
+    uo.fixed_buffers = 2;
+    auto eng = std::make_shared<UringEngine>(pool, uo);
+    auto path = tmp.path / "ws.bin";
+    std::string data = patterned_bytes(300 * 1024 + 777, 0x17e5);
+    int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    CHECK(fd >= 0);
+    auto io = [&]() -> Task<void> {
+        UringWriteStream ws(eng, fd, 0, uint64_t(data.size()));
+        size_t off = 0, step = 1;
+        while (off < data.size()) {
+            std::span<std::byte> buf = co_await ws.acquire();
+            size_t n = std::min({buf.size(), data.size() - off, step});
+            std::memcpy(buf.data(), data.data() + off, n);
+            ws.commit(n);
+            off += n;
+            step = step * 3 + 1;
+        }
+        co_await ws.finish(true);
+        CHECK_EQ(ws.written(), uint64_t(data.size()));
+    };
+    sync_wait(io());
+    ::close(fd);
+    std::ifstream in(path, std::ios::binary);
+    std::string got{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    CHECK(got == data);
+
+    auto path2 = tmp.path / "ws-empty.bin";
+    int fd2 = ::open(path2.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+    CHECK(fd2 >= 0);
+    auto empty = [&]() -> Task<void> {
+        UringWriteStream ws(eng, fd2, 0, uint64_t(0));
+        co_await ws.finish(true);
+    };
+    sync_wait(empty());
+    ::close(fd2);
+    CHECK_EQ(uint64_t(fs::file_size(path2)), uint64_t(0));
+    eng->shutdown();
+}
+
+// Fixed buffer pool exhaustion (roadmap §3.4 ②): more concurrent streams than registered
+// blocks -- the overflow silently falls back to heap blocks with identical results, and
+// every registered block returns to the pool once the streams are gone
+TEST(uring_fixed_buffers_exhaust_and_return) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    UringOptions uo;
+    uo.fixed_buffers = 2;
+    uo.read_depth = 2;
+    auto eng = std::make_shared<UringEngine>(pool, uo);
+    if (!eng->features().fixed_buffers) {  // registration refused (old kernel/quota): nothing to assert
+        eng->shutdown();
+        return;
+    }
+    CHECK_EQ(eng->fixed_free(0), 2u);
+    auto path = tmp.path / "fx.bin";
+    std::string data = patterned_bytes(512 * 1024 + 99, 0xf1);
+    write_file(path, data);
+    auto io = [&]() -> Task<void> {
+        std::vector<std::unique_ptr<UringReadStream>> streams;
+        for (int i = 0; i < 3; ++i) {  // 3 streams x depth 2 > 2 registered blocks
+            int fd = ::open(path.c_str(), O_RDONLY);
+            CHECK(fd >= 0);
+            streams.push_back(
+                std::make_unique<UringReadStream>(eng, fd, 0, uint64_t(data.size())));
+        }
+        std::vector<std::byte> buf(64 * 1024);
+        for (auto& s : streams) {
+            std::string got;
+            for (;;) {
+                size_t n = co_await s->read(std::span(buf.data(), buf.size()));
+                if (n == 0) break;
+                got.append(reinterpret_cast<const char*>(buf.data()), n);
+            }
+            CHECK(got == data);
+        }
+        co_return;
+    };
+    sync_wait(io());
+    CHECK_EQ(eng->fixed_free(0), 2u);  // all registered blocks returned
+    eng->shutdown();
+}
+
+// Fixed file table (roadmap §3.4 ②): register -> IO through the slot with
+// IOSQE_FIXED_FILE -> unregister returns the slot to the pool
+TEST(uring_fixed_files_register_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto eng = std::make_shared<UringEngine>(pool, UringOptions{});
+    if (!eng->features().fixed_files || !eng->features().op_read_write) {
+        eng->shutdown();
+        return;
+    }
+    auto path = tmp.path / "ff.bin";
+    std::string data = "fixed-file payload";
+    write_file(path, data);
+    int fd = ::open(path.c_str(), O_RDONLY);
+    CHECK(fd >= 0);
+    int slot = eng->register_file(0, fd);
+    CHECK(slot >= 0);
+    auto io = [&]() -> Task<std::string> {
+        std::string out(data.size(), '\0');
+        UringEngine::Sqe q;
+        q.opcode = IORING_OP_READ;
+        q.flags = IOSQE_FIXED_FILE;
+        q.fd = slot;
+        q.addr = reinterpret_cast<uint64_t>(out.data());
+        q.len = unsigned(out.size());
+        int n = co_await eng->raw(0, q);
+        CHECK_EQ(n, int(out.size()));
+        co_return out;
+    };
+    CHECK_EQ(sync_wait(io()), data);
+    eng->unregister_file(0, slot);
+    int slot2 = eng->register_file(0, fd);  // the slot came back to the free pool
+    CHECK(slot2 >= 0);
+    eng->unregister_file(0, slot2);
+    ::close(fd);
+    eng->shutdown();
+}
+
+// Metadata opcodes (roadmap §3.4 ③): openat -> statx -> renameat -> unlinkat through the
+// ring, each gated on its probe bit (older kernels skip the missing ones)
+TEST(uring_meta_opcodes_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto eng = std::make_shared<UringEngine>(pool, UringOptions{});
+    const auto& f = eng->features();
+    auto io = [&]() -> Task<void> {
+        fs::path p = tmp.path / "meta-a.txt";
+        fs::path q = tmp.path / "meta-b.txt";
+        if (f.op_openat) {
+            int fd = co_await eng->openat(AT_FDCWD, p.c_str(), O_WRONLY | O_CREAT | O_EXCL,
+                                          0644);
+            CHECK(fd >= 0);
+            const char payload[2] = {'h', 'i'};
+            int w = co_await eng->write(
+                fd, std::span(reinterpret_cast<const std::byte*>(payload), 2), 0);
+            CHECK_EQ(w, 2);
+            ::close(fd);
+        } else {
+            write_file(p, "hi");
+        }
+        if (f.op_statx) {
+            struct ::statx stx {};
+            CHECK_EQ(co_await eng->statx(AT_FDCWD, p.c_str(), 0, STATX_SIZE, &stx), 0);
+            CHECK_EQ(uint64_t(stx.stx_size), uint64_t(2));
+        }
+        if (f.op_renameat) {
+            CHECK_EQ(co_await eng->renameat(AT_FDCWD, p.c_str(), AT_FDCWD, q.c_str()), 0);
+        } else {
+            fs::rename(p, q);
+        }
+        CHECK(!fs::exists(p));
+        CHECK(fs::exists(q));
+        if (f.op_unlinkat) {
+            CHECK_EQ(co_await eng->unlinkat(AT_FDCWD, q.c_str(), 0), 0);
+            CHECK_EQ(co_await eng->unlinkat(AT_FDCWD, q.c_str(), 0), -ENOENT);  // idempotence signal
+            CHECK(!fs::exists(q));
+        }
+        co_return;
+    };
+    sync_wait(io());
+    eng->shutdown();
+}
+
+// Ring sharding (roadmap §3.4 ④): the batched-submission correctness criterion (every
+// co_await gets its own result) holds across two independent rings with tiny SQs
+TEST(uring_multi_ring_concurrent_roundtrip) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(8);
+    UringOptions uo;
+    uo.entries = 8;
+    uo.rings = 2;
+    auto eng = std::make_shared<UringEngine>(pool, uo);
+    CHECK_EQ(eng->features().rings, 2u);
+    constexpr int kN = 16;
+    std::vector<int> fds(kN, -1);
+    for (int i = 0; i < kN; ++i) {
+        auto p = tmp.path / ("m" + std::to_string(i) + ".bin");
+        fds[i] = ::open(p.c_str(), O_RDWR | O_CREAT | O_TRUNC, 0644);
+        CHECK(fds[i] >= 0);
+    }
+    auto one = [&](int i) -> Task<bool> {
+        std::string want(4096, char('a' + (i % 26)));
+        want.replace(0, 8, std::to_string(1000000 + i));
+        int n = co_await eng->write(
+            fds[i], std::span<const std::byte>(
+                        reinterpret_cast<const std::byte*>(want.data()), want.size()),
+            0);
+        if (n != int(want.size())) co_return false;
+        std::string got(want.size(), '\0');
+        int m = co_await eng->read(
+            fds[i], std::span<std::byte>(reinterpret_cast<std::byte*>(got.data()), got.size()),
+            0);
+        co_return m == int(want.size()) && got == want;
+    };
+    std::vector<std::thread> ts;
+    std::atomic<int> ok{0};
+    for (int i = 0; i < kN; ++i)
+        ts.emplace_back([&, i] {
+            if (sync_wait(one(i))) ok.fetch_add(1);
+        });
+    for (auto& t : ts) t.join();
+    CHECK_EQ(ok.load(), kN);
+    for (int fd : fds) ::close(fd);
+    eng->shutdown();
+}
+
+// The full backend consistency suite under stress-shaped stream options: tiny SQs over
+// two rings, a 2-block fixed pool, shallow pipelines -- covers SQ-full waits, linked
+// chains, fixed-buffer fallback and multi-ring interleaving on the real data paths
+TEST(xlocalfs_backend_suite_stream_options) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    UringOptions uo;
+    uo.entries = 8;
+    uo.rings = 2;
+    uo.fixed_buffers = 2;
+    uo.read_depth = 2;
+    uo.write_depth = 2;
+    XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, uo);
+    run_backend_suite(b);
+    sync_wait(b.close());
+}
+
+// meta_ops=false forces the blocking open/statx/rename/unlink fallbacks while keeping the
+// pipelined data plane -- the suite must be indistinguishable
+TEST(xlocalfs_backend_suite_no_meta_ops) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    UringOptions uo;
+    uo.meta_ops = false;
+    XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, uo);
+    run_backend_suite(b);
+    sync_wait(b.close());
 }

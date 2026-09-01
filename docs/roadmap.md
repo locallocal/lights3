@@ -188,17 +188,29 @@ commit_lock 下复查后进行（listing 自愈同路径），杜绝误删刚落
 [storage/localfs.md](storage/localfs.md) §2/§3/§6/§12、
 [storage/duostore-meta-redis.md](storage/duostore-meta-redis.md) §5.2。
 
-### 3.6 tiered
+### 3.6 ~~tiered~~ **已完成（2026-09-02，七项全部）**
 
-| 条目 | 现状 | 价值 | 难度 |
-| --- | --- | --- | --- |
-| **后台扫描全量遍历增量化** | `scan_once` 每周期完整 readdir+stat 整个 local root（超水位再来第二遍）。正路是持久化候选索引/时间轮，或直接用 atime 表产出候选 | 高 | 中-高 |
-| prefix 级分层策略 | 现策略最细到 bucket（文档明示的取舍）；在 `scan_once` 判冷分支加 prefix 策略表即可，不动磁盘布局 | 中 | 中 |
-| 冷热判定多维化 | 现仅"最后访问时间"单维；加大小加权/访问频次到 `Evict` 排序键即可 | 中 | 低 |
-| 对账 quarantine | `orphans_skipped`/`refs_missing` 两类条目每轮重复告警，无隔离区、无人工处置入口 | 中 | 低 |
-| atime 表全量常驻内存 + 全量 TSV 快照 | 千万级热对象下内存与快照成本可观 | 中 | 中 |
-| local 侧支持 duostore | 现 `dynamic_cast<LocalFsBackend>` 硬绑；"duostore 热层 + 云冷层"需为 tiered 抽象 local 侧接口（stub 表示/tier 字段/原子提交原语） | 中 | 高 |
-| Range GET 部分缓存 | 现读 1MB 可能触发整对象回迁；需块级索引+稀疏文件，文档已论证复杂度 | 中 | 高 |
+⑥ 先行：local 侧抽象为 `storage/tiered/tier_local.h:ITierLocal`（读状态 /
+访问记录 / 上传快照 / stub 与缓存回填两条提交原语 / 空间探针 / 全量枚举 /
+可选块缓存），`LocalFsTierLocal`（localfs/xlocalfs）与 `DuoStoreTierLocal`
+（tier 状态进对象记录 v3，stub = 无 extent 记录，提交 = `PutCondition`
+CAS 元数据事务，旧 extent 同事务入 gcq）两个适配器，`from_config` 按类型选
+择；`DuoStoreBackend::get_object` 对 stub 抛 `StubRace`。① 访问记录改随对象
+持久化（localfs xattr `user.lights3.access`，无 xattr / duostore 退常驻表），
+后端只留写后缓冲；`<state>/wheel/<hour>` 时间轮按 `atime+cold_after` 登记，
+常态扫描只消费到期槽（成本正比活动量），`full_scan_interval`（默认 1d）全量
+兜底（未登记对象/崩溃恢复/配额校准/块缓存清理）。② `rules[]`（`bucket/key`
+glob → `cold_after`，`never` 钉住，config.cc 把后端下的 map 列表拍平成
+`rules.N.*`）。③ 淘汰候选来自时间轮（≈LRU，读到 4×缺口即止），排序键
+`(rank, score)`，`score = age × (1 + size_w·log2(1+MiB)) / (1 + freq_w·hits)`。
+④ 对账隔离区 `<state>/quarantine/`（refs_missing / foreign 首次告警、之后只累
+计、完整轮后自动销账），`lights3 tier quarantine list|forget|purge`，gauge
+`lights3_tiered_quarantine_entries{kind}`。⑤ 即 ① 的访问记录改造（常驻表仅作
+无 xattr 与 duostore 的兜底）。⑦ `range_cache`：`<state>/rcache/` 稀疏文件 +
+位图，Range 命中块对齐超集回填、全命中本地服务、尾块同 read 吸完，
+PUT/回填/换代失效，水位淘汰当 rank 0 残留。见
+[tiered-storage.md](tiered-storage.md) §4.3/§5.1/§6.3/§9、
+[storage/tiered.md](storage/tiered.md) §3/§4.1/§5.4/§11。
 
 ### 3.7 duostore 残留
 
@@ -435,7 +447,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 5. 配置热重载安全子集（§4.4）
 6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**
 7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）
-8. tiered 扫描增量化 + prefix 策略（§3.6）
+8. ~~tiered 扫描增量化 + prefix 策略（§3.6）~~ **已完成（2026-09-02，含全部七项）**
 9. 故障注入体系 + soak（§6.1）；traceparent 透传（§5.4）
 10. install target + CPack（§6.3）；审计日志（§3.9④）
 

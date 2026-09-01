@@ -32,6 +32,7 @@ lights3 duostore load <backend> <file> [--config=<path>]   导入 duostore meta
 lights3 duostore gc <backend> [--config=<path>]            立即跑一轮 duostore GC
 lights3 duostore scan <backend> [--config=<path>]          立即跑一轮孤儿扫描
 lights3 tier scan|gc|reconcile <backend> [--config=<path>] tiered 后台任务手动触发
+lights3 tier quarantine list|forget|purge <backend> [<bucket> <key>] tiered 对账隔离区
 lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  离线数据完整性巡检
 lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 ```
@@ -104,7 +105,7 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 ./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
 ```
 
-### 2.4 后台任务手动触发：`duostore gc|scan`、`tier scan|gc|reconcile`
+### 2.4 后台任务手动触发：`duostore gc|scan`、`tier scan|gc|reconcile|quarantine`
 
 后台钩子的 CLI 出口（roadmap §3.2）：`run_gc_once` / `run_orphan_scan_once` /
 `scan_once` / `run_gc_once`(tiered) / `run_reconcile_once` 此前只被定时器与单
@@ -120,15 +121,26 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
   从网关配置不影响手动钩子。
 - `duostore scan <backend>`：一轮孤儿扫描（盘面与 refs/packstat 双向对账，
   §8.3），顺带打出 chunk/pack 盘面用量。
-- `tier scan <backend>`：一轮判冷 + 水位回收 + 崩溃恢复 + atime 快照；
+- `tier scan <backend>`：一轮扫描（启动后首轮/每 `full_scan_interval` 为全量枚举，
+  其余为时间轮增量轮）：判冷 + 水位回收 + 崩溃恢复 + 访问记录刷写，日志打出
+  本轮 `TierScanStats`；
 - `tier gc <backend>`：消费一轮 tiered GC 队列（孤儿云副本删除，指数退避
   账随条目持久化）；
 - `tier reconcile <backend>`：一轮本地/云双向对账（云有本地无 → 重建
-  stub；本地 remote 云缺 → 告警绝不删 stub）。
+  stub；本地 remote 云缺 → 告警绝不删 stub），重复出现的发现进隔离区账本
+  只报一次；
+- `tier quarantine list <backend>`：打印隔离区账本（kind / bucket / key / etag /
+  首末次发现 / 次数）；`tier quarantine forget <backend> <bucket> <key>` 只删条目
+  （下轮仍复现会再记）；`tier quarantine purge <backend> <bucket> <key>` 针对
+  `refs_missing`：HEAD 复核云副本仍不存在后删除这个已死的本地 stub（承认数据
+  丢失，对象从列表消失；副本回来了则保留 stub、销账并返回退出码 1）。
+  见 [tiered-storage.md §9](tiered-storage.md)。
 
 ```bash
 ./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # 立即回收空间
 ./build/lights3 tier reconcile tierdata -c /etc/lights3/lights3.yaml
+./build/lights3 tier quarantine list tierdata -c /etc/lights3/lights3.yaml
+./build/lights3 tier quarantine purge tierdata archive photos/2024/a.jpg -c /etc/lights3/lights3.yaml
 ```
 
 ## 3. `s3adm` —— 运维 CLI

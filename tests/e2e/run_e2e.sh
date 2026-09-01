@@ -6,6 +6,7 @@ BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
 # localfs | xlocalfs | tiered (localfs+memory, docs/tiered-storage.md)
 # | cloudproxy | tiered-cloudproxy (two instances: instance B acts as the "cloud", docs/cloudproxy-backend.md §10)
+# | tiered-duostore (duostore as the cloud) | tiered-duolocal (duostore as the local/hot side, roadmap §3.6 ⑥)
 BACKEND="${3:-localfs}"
 AK=E2EACCESSKEY
 SK=e2e-secret-key
@@ -236,6 +237,18 @@ elif [[ "$BACKEND" == "tiered-duostore" ]]; then cat <<TIERDUO
     cloud: cloudduo
     scan_interval: 0s
 TIERDUO
+elif [[ "$BACKEND" == "tiered-duolocal" ]]; then cat <<TIERDUOLOCAL
+  - name: duolocal
+    type: duostore
+    root: $WORK/duo-local
+  - name: cloudmem
+    type: memory
+  - name: tierdata
+    type: tiered
+    local: duolocal
+    cloud: cloudmem
+    scan_interval: 0s
+TIERDUOLOCAL
 elif [[ "$BACKEND" == "tiered-cloudproxy" ]]; then cat <<TIERCLOUD
   - name: localdata
     type: localfs

@@ -223,6 +223,12 @@ u8 ver | u64 size | u64 mtime_ms | u64 version | str etag | str content_type
 | u16 n_meta | (str k, str v)* | u32 n_runs | run*        (str = u16 len + bytes)
 ```
 
+v2 appends the first-class metadata section `u16 n_std | (str k, str v)*` after
+n_meta; v3 (roadmap §3.6 ⑥) appends `u8 tier | str remote_etag | str remote_at`
+— the object's state when duostore serves as a tiered hot tier (a stub is
+tier=remote with no runs), see [storage/tiered.md §11](../storage/tiered.md).
+Readers accept v1–v3, writers always emit v3.
+
 ### 4.3 extent run encoding
 
 chunk file_ids allocated within one write session are contiguous (§4.5

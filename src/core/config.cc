@@ -356,6 +356,19 @@ Config Config::from_string(const std::string& text) {
                 if (k == "name") bc.name = v.scalar;
                 else if (k == "type") bc.type = v.scalar;
                 else if (v.type == YamlNode::Type::Scalar) bc.params[k] = v.scalar;
+                else if (v.type == YamlNode::Type::List) {
+                    // A list of maps under a backend entry (tiered `rules`, roadmap §3.6 ②)
+                    // is flattened into scalar params "k.<index>.<field>" so BackendConfig
+                    // stays a flat map and every backend factory reads it the same way
+                    size_t i = 0;
+                    for (auto& item : v.list) {
+                        if (item.type == YamlNode::Type::Map)
+                            for (auto& [ik, iv] : item.map)
+                                if (iv.type == YamlNode::Type::Scalar)
+                                    bc.params[k + "." + std::to_string(i) + "." + ik] = iv.scalar;
+                        ++i;
+                    }
+                }
             }
             if (bc.name.empty() || bc.type.empty())
                 throw std::runtime_error("config: backend needs name + type");

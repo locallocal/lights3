@@ -25,10 +25,22 @@
 
 namespace lights3::storage::duostore {
 
+// Tiering state of an object when duostore is the local side of a TieredBackend
+// (roadmap §3.6 ⑥, docs/tiered-storage.md §3): remote = the data lives in the cloud and
+// `data` is empty (a stub), cached = local extents are a cache of the cloud replica.
+// Codec object record v3; absent on older records = local
+struct TierState {
+    enum : uint8_t { kLocal = 0, kRemote = 1, kCached = 2 };
+    uint8_t tier = kLocal;
+    std::string remote_etag;  // cloud replica ETag (unquoted), never exposed
+    std::string remote_at;    // iso8601 upload time
+};
+
 struct ObjectRec {
     ObjectMeta meta;       // key/size/etag/content_type/last_modified/user_meta
     DataRef data;
     uint64_t version = 0;  // +1 on every write (maintained by the implementation); optimistic check for GC compaction ref swap (§9.2)
+    TierState tier;        // tiered local-side state (v3); meta.size stays the logical size even when data is empty
 };
 
 struct UploadRec {

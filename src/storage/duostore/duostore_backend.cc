@@ -11,6 +11,7 @@
 #include "core/util/crypto.h"
 #include "storage/duostore/codec.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/localfs/fs_util.h"  // StubRace: shared tiered vocabulary
 #include "storage/xlocalfs/uring.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/listing.h"
@@ -1052,11 +1053,65 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     co_return PutResult{pumped.md5};
 }
 
+// ---------- tiered local-side hooks (roadmap §3.6 ⑥) ----------
+
+std::optional<ObjectRec> DuoStoreBackend::tier_read(std::string_view bucket,
+                                                    std::string_view key) {
+    try {
+        return meta_->get_object(bucket, key);
+    } catch (const S3Error& e) {
+        if (e.code == S3ErrorCode::NoSuchBucket || e.code == S3ErrorCode::NoSuchKey)
+            return std::nullopt;
+        throw;
+    }
+}
+
+Task<void> DuoStoreBackend::tier_commit_stub(std::string_view bucket, std::string_view key,
+                                             const ObjectMeta& meta, const TierState& ts) {
+    co_await pool_->schedule();
+    ObjectRec rec;
+    rec.meta = meta;
+    rec.meta.key = std::string(key);
+    rec.tier = ts;  // data stays empty: the meta transaction sends the old extents to the gcq
+    PutCondition cond;
+    cond.if_match_etag = meta.etag;
+    meta_->put_object(bucket, key, std::move(rec), cond);
+}
+
+Task<void> DuoStoreBackend::tier_commit_cached(std::string_view bucket, std::string_view key,
+                                               http::BodyReader& body, const ObjectMeta& meta,
+                                               const TierState& ts) {
+    co_await pool_->schedule();
+    auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
+    WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
+    if (pumped.ref.total() != meta.size) {  // the fill was verified upstream; defend anyway
+        try {
+            co_await data_->remove(pumped.ref.extents);
+        } catch (...) {
+        }
+        throw S3Error(S3ErrorCode::InternalError, "tier cache fill size mismatch",
+                      std::string(key));
+    }
+    ObjectRec rec;
+    rec.meta = meta;
+    rec.meta.key = std::string(key);
+    rec.data = pumped.ref;
+    rec.tier = ts;
+    PutCondition cond;
+    cond.if_match_etag = meta.etag;
+    co_await commit_or_discard(*data_, pumped.ref,
+                               [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
+}
+
 Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::string_view key,
                                                std::optional<ByteRange> range) {
     validate_object_key(key);
     co_await pool_->schedule();
     auto rec = require_object(bucket, key);
+    // A tiered stub (roadmap §3.6 ⑥): the data lives in the cloud and TieredBackend
+    // routes there before asking us; reachable only by direct routing to the local
+    // backend or a demotion race — same signal localfs raises for its 0-length stub
+    if (rec.tier.tier == TierState::kRemote) throw fsutil::StubRace(std::string(key));
 
     ObjectStream out;
     out.meta = rec.meta;

@@ -5,7 +5,10 @@
 > 抽象接入，CI 用 MemoryBackend 充当云端全覆盖（单测 `test_tiered.cc` +
 > `e2e_tiered`）；P5 的真实 CloudProxyBackend 见
 > [cloudproxy-backend.md](cloudproxy-backend.md)，组合场景由
-> `e2e_tiered_cloudproxy` 验收。
+> `e2e_tiered_cloudproxy` 验收。P6（2026-09-02，roadmap §3.6）：local 侧抽象为
+> `ITierLocal`（localfs/xlocalfs 与 duostore 两个适配器）、访问记录落对象
+> xattr + 时间轮增量扫描、prefix 策略、多维淘汰评分、对账隔离区、Range
+> 块缓存。
 
 ## 1. 目标与非目标
 
@@ -20,8 +23,10 @@
 
 - 不做 object 级多副本/纠删，云端始终恰好一份；
 - 不做透明压缩/加密（依赖云侧 SSE 即可）；
-- 进行中的 multipart 分片不参与下沉（完成后成为普通对象再进入生命周期）；
-- 不做 prefix 粒度策略（策略最细到 bucket，见 §8 配置）。
+- 进行中的 multipart 分片不参与下沉（完成后成为普通对象再进入生命周期）。
+
+首期的"不做 prefix 粒度策略"已在 P6 撤销：`rules[]` 按 `bucket/key` glob 给
+出 per-prefix `cold_after`（`never` = 钉住），见 §5.1/§8。
 
 ## 2. 架构定位：组合后端 TieredBackend
 
@@ -41,10 +46,10 @@ docs/storage-backend.md §2 有意把路由停在 bucket 粒度，并预留"obje
                      └──┬──────────┬───┘
               local（热层）│          │ cloud（冷层）
         ┌───────────────▼──┐    ┌──▼──────────────────┐
-        │ LocalFsBackend /  │    │ 任意 IStorageBackend │
-        │ XLocalFsBackend   │    │ （首期 CloudProxy；  │
-        │ （须为具体类型，   │    │  单测用 Memory）     │
-        │  复用磁盘布局）    │    └─────────────────────┘
+        │ ITierLocal        │    │ 任意 IStorageBackend │
+        │  ├ LocalFsTierLocal│    │ （首期 CloudProxy；  │
+        │  │ (localfs/xlocalfs)│  │  单测用 Memory）     │
+        │  └ DuoStoreTierLocal│   └─────────────────────┘
         └───────────────────┘
 ```
 
@@ -53,9 +58,14 @@ docs/storage-backend.md §2 有意把路由停在 bucket 粒度，并预留"obje
 - **cloud 侧只经 `IStorageBackend` 抽象**——上传/下载/删除全是标准
   put/get/delete，因此云端可以是 CloudProxy、也可以是另一个 localfs
   （测试）或未来任何后端；
-- **local 侧要求具体为 localfs/xlocalfs**——stub 表示、sidecar 扩展字段、
-  fd 快照语义都依赖其磁盘布局（docs/storage-backend.md §3.1），TieredBackend 与它共享
-  `fs_util` 落盘原语，如同 xlocalfs 之于 localfs 的关系。
+- **local 侧经 `tier::ITierLocal`（`src/storage/tiered/tier_local.h`，P6）**——
+  tiered 对热层的全部依赖收敛为一个窄接口：读 tier 状态、读写访问记录、
+  取上传快照、两条原子提交原语（stub 化 / 缓存回填）、空间探针、全量枚举、
+  可选的块缓存。两个实现：`LocalFsTierLocal`（localfs/xlocalfs，共享
+  `fs_util` 磁盘布局，本文 §4 描述的就是它）与 `DuoStoreTierLocal`（tier
+  状态进对象记录、stub = 无 extent 的记录、提交 = CAS 元数据事务，见
+  [storage/tiered.md §11](storage/tiered.md)）。配置里 `local` 指向
+  localfs/xlocalfs 或 duostore 均可，其余类型仍为配置错误。
 
 配置以 name 引用两个既有后端实例；`StorageRegistry::build` 改为两阶段
 （先构造全部叶子后端，再构造组合后端），循环引用视为配置错误。
@@ -115,27 +125,55 @@ remote.at       <iso8601 上传时间>
 云端对象同时携带 `x-amz-meta-lights3-*` 冗余一份原始 meta（etag/
 content_type/user_meta），本地 stub 意外丢失时可对账重建（§9）。
 
-### 4.3 TierIndex：访问时间与空间账
+### 4.3 TierIndex：访问记录、时间轮与空间账
 
-- **atime 表**：内存 `key → last_access` 哈希（GET/HEAD 命中时无锁更新），
-  周期（默认 5 min）快照到 `<staging>/tier/atime.tsv`（tmp+rename）。
-  启动时加载快照，缺失项以数据文件 mtime 兜底。崩溃最多丢一个周期的
-  访问记录，只影响判冷精度，可接受；不把 atime 写 sidecar（每次 GET 一次
-  fsync 不可接受），也不依赖文件系统 atime（relatime 不可靠）。
+- **访问记录**（P6，roadmap §3.6 ⑤）：每个对象一条
+  `AccessRec{atime, hits, enrolled}`，**随对象持久化**而非常驻内存——
+  localfs 侧写进数据文件的第二个 xattr `user.lights3.access`
+  （不 fsync，随 inode 走；PUT 覆盖/stub 化换 inode 后自然消失，回落
+  mtime），duostore 侧与无 xattr 的文件系统退回常驻表 +
+  `<state>/atime.tsv` 快照（内存随对象数增长，是有意保留的兜底）。
+  TieredBackend 只持有一个**写后缓冲**（`ikey → 最新 atime + 命中增量`）：
+  GET/HEAD/PUT 命中时更新缓冲，每 5 分钟或缓冲达 `access_buffer_max`
+  （默认 10 万键）即刷写（读旧记录 → 合并 → 写回 + 时间轮登记）。判冷读
+  记录时缓冲优先、其次持久记录、最后 mtime 兜底，因此刷写窗口内的访问不会
+  被误判。崩溃最多丢一个刷写周期，只影响判冷精度；不依赖文件系统 atime
+  （relatime 不可靠）。
+- **时间轮**（roadmap §3.6 ①）：`<state>/wheel/<slot>` 按小时分槽的追加文件，
+  行 = `bucket\tkey`；一个键在其 `atime + cold_after` 落入的槽登记一次
+  （`enrolled` 记住已登记槽，再次访问只在槽变化时追加）。到期槽被扫描消费
+  后删除，仍热的键改登记到新槽。它是判冷候选与淘汰候选的唯一来源，全量
+  遍历只在 `full_scan_interval`（默认 1 天）做一次兜底（未登记对象、崩溃恢
+  复、配额校准），见 §5.1。
 - **空间账**：`statvfs` 实时读取为准（本地盘可能被其他进程共用），
-  可选 `quota_bytes` 叠加逻辑配额（遍历累计、增量维护）。
+  可选 `quota_bytes` 叠加逻辑配额（全量扫描校准、PUT/DELETE 增量维护）。
 
 ## 5. 下沉流程（demote）
 
 ### 5.1 触发
 
 后台 **TierScanner**：`TimerQueue` 周期触发（默认 1h）→ 投递到线程池跑扫描协程。
-两类触发条件，产生同一个按 atime 升序的候选队列：
+一轮先刷写访问缓冲，再按模式产出候选（P6，roadmap §3.6 ①）：
 
-1. **判冷**：`now - atime > cold_after` 的 `local`/`cached` 对象；
+- **增量轮（常态）**：只读时间轮里已到期的槽（`slot ≤ now/1h`），逐键复核当前
+  访问记录——仍热的重新登记到新槽，已删的丢弃，冷的下沉。成本正比于**活动
+  量**而非对象总数；
+- **全量轮**：启动后第一轮，以及此后每 `full_scan_interval`（默认 1 天，
+  `0` = 每轮全量即旧行为）——`ITierLocal::walk` 枚举全部对象：未登记的对象
+  登记进轮、`remote 但本地仍有数据` 的崩溃残留补完 stub、校准配额账本、清理
+  失效的 Range 块缓存。
+
+两类触发条件：
+
+1. **判冷**：`now - atime ≥ cold_after(bucket, key)` 的 `local`/`cached` 对象。
+   阈值先查 `rules[]`（`bucket/key` glob，首个命中生效，`never` 钉住：既不判冷
+   也不参与水位淘汰），无命中用全局 `cold_after`；
 2. **空间水位**：`statvfs` 使用率 > `space_high_watermark`（默认 85%）时进入
-   回收模式，从最冷开始处理，直到降至 `space_low_watermark`（默认 70%）。
-   回收顺序：先 `cached`（stub 化零成本）、再 `local`（需上传）。
+   回收模式，直到降至 `space_low_watermark`（默认 70%）。候选按时间轮槽升序
+   （≈ LRU 顺序）取，只读到"累计候选字节 ≥ 4×缺口"即止；排序键为
+   `(rank, score)`——`cached` 与 remote 对象残留的块缓存 rank 0（零上传），
+   `local` rank 1；`score = age × (1 + size_weight × log2(1 + size/1MiB)) /
+   (1 + frequency_weight × hits)`，两个权重默认 0 即纯 LRU（roadmap §3.6 ③）。
 
 并发由 `core/semaphore.h` 限流（`max_concurrent_transfers`，默认 4），
 避免打满上行带宽与线程池。
@@ -196,11 +234,20 @@ Tee 方案下缓存回填**零额外云端流量**（相对"透传一遍、后�
 
 ### 6.3 Range GET
 
-Range 请求把 range 直接透传给云端（`IStorageBackend::get_object` 本就带
-range），响应按 docs/object-read-write-flow.md §3.1 正常走 206——**不做部分缓存**（稀疏文件/分块
-缓存的复杂度首期不值得）。可配置 `cache_fill_on_range`（默认开）：命中时
-向后台提交一个 single-flight 的整对象回迁任务（独立云端 GET → staging →
-提交为 cached），空间不足同样直接放弃。
+Range 请求默认把 range 直接透传给云端（`IStorageBackend::get_object` 本就带
+range），响应按 docs/object-read-write-flow.md §3.1 正常走 206。可配置
+`cache_fill_on_range`（默认开）：命中时向后台提交一个 single-flight 的整对象
+回迁任务（独立云端 GET → 缓存回填 → 提交为 cached），空间不足同样直接放弃。
+
+**块级部分缓存**（P6，roadmap §3.6 ⑦，`range_cache: true`，仅 localfs 侧支持）：
+remote 对象的 Range 命中先查 `<state>/rcache/` 下的块缓存——数据文件是对象
+等长的稀疏文件、位图文件记录已有块（按 `remote.etag` 绑定副本）。全部命中
+块本地直接服务；否则向云端请求**块对齐的超集** `[af, al]`，`RangeTeeReader`
+边收边 `pwrite` 进稀疏文件、只把客户端窗口透传出去，客户端窗口耗尽后在同一次
+`read()` 内把尾部（至多一块）吸完，EOF 时合并写位图。写盘失败静默降级透传；
+同 key 的并发填充 single-flight。PUT/DELETE/complete 覆盖、整对象回填提交、
+全量扫描发现对象已非 remote/副本换代时丢弃缓存；水位回收把块缓存残留当
+rank 0 牺牲品（直接删文件）。`range_cache_block` 默认 1MiB。
 
 ### 6.4 single-flight
 
@@ -273,6 +320,18 @@ backends:
     gc_retry_cap: 1h                  # 退避上限
     reconcile_interval: 1d            # 双向对账周期（§9）；0 = 关（scan_interval=0 时全停）
     reconcile_orphans: rebuild        # 云端孤儿处置：rebuild（默认，重建 stub）| delete
+    # ---- P6（roadmap §3.6）----
+    full_scan_interval: 1d            # 全量枚举兜底周期；0 = 每轮全量（旧行为）
+    evict_size_weight: 0              # 淘汰评分的大小加权；0 = 忽略大小
+    evict_frequency_weight: 0         # 淘汰评分的访问频次加权；0 = 纯 LRU
+    access_buffer_max: 100000         # 访问记录写后缓冲上限（键数），达到即提前刷写
+    range_cache: false                # Range GET 块级部分缓存（localfs 侧）
+    range_cache_block: 1MiB           # 块大小 [64KiB, 1GiB]
+    rules:                            # prefix 策略：bucket/key glob，首个命中生效
+      - match: "archive-*/raw/*"
+        cold_after: 7d
+      - match: "archive-*/keep/*"
+        cold_after: never             # 钉住：不判冷、不淘汰
 
 buckets:
   default_backend: localdata
@@ -281,8 +340,8 @@ buckets:
       backend: tiered
 ```
 
-分层的开关粒度 = bucket 路由粒度，不引入新的策略机制；不同 `cold_after`
-需求可声明多个 tiered 实例。
+分层的开关粒度 = bucket 路由粒度；bucket 之下的差异用 `rules[]` 表达
+（`local` 为 duostore 时同样生效），跨实例的差异仍可声明多个 tiered 实例。
 
 ## 9. 故障矩阵与对账
 
@@ -311,6 +370,16 @@ buckets:
   stub**——对象保留在列表中供人工介入；cached 引用失效只降级告警（数据仍
   在本地，下轮判冷重新上传）。
 
+**隔离区**（P6，roadmap §3.6 ④）：`refs_missing`（stub 引用的云副本已丢）与
+`foreign`（无 lights3 冗余头的云端孤儿）两类发现进入
+`<state>/quarantine/` 账本（每条一个 TSV：kind/bucket/key/etag/首末次发现/
+次数）。**首次发现才 ERROR/WARN**，之后每轮只累加次数（DEBUG），不再刷屏；
+一轮对账**完整跑完**后，本轮没再复现的条目自动销账（INFO）。人工处置入口
+`lights3 tier quarantine list|forget|purge <backend> …`（[cli.md §2.4](cli.md)）：
+`forget` 只删账本条目，`purge` 针对 refs_missing——先 HEAD 复核云副本仍不存在，
+再删除这个已死的本地 stub（承认数据丢失；副本回来了则保留 stub、销账）。
+gauge `lights3_tiered_quarantine_entries{kind}` 常驻显示账本规模。
+
 ## 10. 实施拆分
 
 | 阶段 | 内容 | 可独立验收 | 状态 |
@@ -320,6 +389,7 @@ buckets:
 | P3 | Tee 缓存回填 + 空间兜底降级 + single-flight | 断连/ENOSPC 注入测试 | ✅ |
 | P4 | GC 队列 + 对账工具 | 崩溃注入后对账收敛 | ✅ 全部落地（对账工具 + GC 指数退避 2026-07-31 收尾；stub 丢失重建/删除模式/防复活/反向告警/退避恢复专项全绿） |
 | P5 | 接入真实 CloudProxyBackend（其自身为独立特性，见 docs/cloudproxy-backend.md） | 对公有云端到端 | ✅（`e2e_tiered_cloudproxy` 双实例组合） |
+| P6 | roadmap §3.6：`ITierLocal` 抽象 + duostore 热层、xattr 访问记录 + 时间轮增量扫描、prefix 策略、多维淘汰评分、对账隔离区、Range 块缓存 | 增量轮/规则/评分/块缓存/隔离区/duostore 热层专项单测 | ✅（2026-09-02） |
 
 P1–P4 完全不依赖云 SDK，`tiered` + `memory` 组合即可在 CI 全覆盖，
 这是把 local 侧耦合具体类型、cloud 侧走抽象接口这一决策换来的直接红利。

@@ -828,7 +828,8 @@ std::vector<PartRec> TikvMetaStore::list_parts(std::string_view b, std::string_v
 
 std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
                                                    std::string_view key_marker,
-                                                   std::string_view id_marker, int limit) {
+                                                   std::string_view id_marker, int limit,
+                                                   std::string_view prefix) {
     return guarded("list_uploads", [&] {
         uint64_t ts = client().get_ts();
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
@@ -837,19 +838,26 @@ std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
         size_t plen = lo.size();  // prefix + 'U' + b + '\0'
         // Cursor pushdown (docs/archive/gaps.md §5.1): key order is (key, upload_id) order, so
         // raising the lower bound of [lo,hi) skips the whole segment. The trailing
-        // '\0' places the lower bound just past that pair
-        if (!key_marker.empty() || !id_marker.empty()) {
-            std::string from = lo;
+        // '\0' places the lower bound just past that pair; key-marker-only means
+        // "key > key_marker" (keys contain no NUL, so key_marker+'\x01' is the smallest
+        // greater key). The prefix raises the bound further (roadmap §3.5)
+        std::string from = lo;
+        if (!id_marker.empty()) {
             from += std::string(key_marker);
             from += '\0';
             from += std::string(id_marker);
             from += '\0';
-            if (from > lo) lo = std::move(from);
+        } else if (!key_marker.empty()) {
+            from += std::string(key_marker);
+            from += '\x01';
         }
+        if (std::string pf = lo + std::string(prefix); pf > from) from = std::move(pf);
+        if (from > lo) lo = std::move(from);
         scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
             if (limit > 0 && out.size() >= size_t(limit)) return false;
             // rest = <key>\0<upload_id>; the prefix scan is naturally sorted by (key, upload_id)
             std::string_view rest = std::string_view(key).substr(plen);
+            if (rest.substr(0, prefix.size()) != prefix) return false;  // past the prefix range
             auto sep = rest.rfind('\0');
             if (sep == std::string_view::npos) return true;
             auto rec = codec::decode_upload(std::string(rest.substr(0, sep)),

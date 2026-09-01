@@ -66,7 +66,7 @@
 | `default` | `schema` | STRING | 打开时 `SET NX` 写 `"r1"`，已存在则读出校验；谱系与 RocksDB 的 schema 区分。不设 `instance`——meta 本就为多网关共享，不绑实例 |
 | `buckets` | `buckets` | HASH：field=`<bucket>`，value=`encode_bucket` | `create_bucket` = `HSETNX` 单命令即原子，返回 0 → BucketAlreadyOwnedByYou，无需脚本；`list_buckets` = `HGETALL` + 客户端按名排序（桶数小） |
 | `objects` | `o:<b>` + `oz:<b>` | HASH + ZSET（§2.1 原则 3） | 点查 `HGET o:<b> <key>`；迭代走 `oz:<b>` |
-| `uploads` | `up:<b>` | HASH：field=`<key>\0<id>`，value=`encode_upload` | `list_uploads` = `HSCAN` 分批（COUNT 512，R4——超大 uploads 表不再单命令整体物化；游标弱一致对 ListMultipartUploads 可接受，client 侧 map 兼做去重）+ 按 field 字节序排序，即得 (key, upload_id) 序（与 RocksDB 前缀扫同序） |
+| `uploads` | `up:<b>` + `uz:<b>` | HASH：field=`<key>\0<id>`，value=`encode_upload`；ZSET（score 0）member 同 field（§2.1 原则 3，roadmap §3.5） | `list_uploads` = `ZRANGEBYLEX uz:<b>` 从游标/prefix 起分页 + `HMGET up:<b>` 取值，游标与 prefix 下推（与 RocksDB 前缀扫同序、同成本形态）；`ZCARD≠HLEN`（建索引前的存量表 / 老版本网关写入）时回退 `HSCAN COUNT 512` 全表分批并重建索引，见 [storage/duostore-meta-redis.md](storage/duostore-meta-redis.md) §5.2 |
 | `parts` | `pt:<b>\0<key>\0<id>` | HASH：field=十进制 `part_no`，value=`encode_part` | 每 upload 一个 HASH；`complete/abort` 整键 `DEL`（对应 RocksDB 的范围删）；≤1 万 field，`HGETALL` + 客户端数值排序 |
 | `refs` | `refs` | HASH：field=十进制 `file_id`，value=owner 简述 | `chunk_referenced` = `HEXISTS`，O(1) |
 | `gcq` | `gcq` | ZSET：score=`seq`，member=`be64(seq) ‖ encode_reclaim(...)` | be64 前缀保证 member 唯一且自含 seq；`peek_reclaims` = `ZRANGEBYSCORE gcq -inf +inf LIMIT 0 max`（seq 从 member 前 8 字节精确解析）；`ack_reclaim` = `ZREMRANGEBYSCORE gcq seq seq`。约束：score 为 double，要求 seq < 2^53——每秒 1 万次删除可用 2.8 万年，声明即可 |

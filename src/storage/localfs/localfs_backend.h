@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "core/metrics.h"
@@ -17,6 +18,7 @@
 #include "core/timer.h"
 #include "storage/backend.h"
 #include "storage/localfs/fs_util.h"
+#include "storage/localfs/list_cache.h"
 
 namespace lights3::storage {
 
@@ -28,6 +30,24 @@ struct LocalFsOptions {
     // restart would accumulate never-completed/aborted upload directories without bound
     int mpu_ttl_sec = 7 * 86400;          // 0 = no cleanup
     int mpu_scan_interval_sec = 6 * 3600; // 0 = scan only at startup
+
+    // ---- roadmap §3.5 (docs/storage/localfs.md §2/§3/§6/§12) ----
+    // Fail at construction (and on every write) when the root filesystem cannot store the
+    // metadata xattr, instead of degrading to the two-rename sidecar consistency model
+    bool require_xattr = false;
+    // Sidecar write policy: sync (default, 4 fsync + 2 rename per PUT) | async (sidecar
+    // written off the request path) | lazy (no sidecar while the xattr succeeds)
+    fsutil::SidecarMode sidecar = fsutil::SidecarMode::kSync;
+    // Pool workers sharing one listing page's stat+getxattr fan-out (<=1 = serial, capped
+    // by the pool size; pages below ~32 keys per worker use fewer)
+    int list_meta_concurrency = 8;
+    // Per-directory sorted-entry cache budget in entries (0 = off) and the directory size
+    // below which readdir is cheap enough not to bother caching
+    size_t list_cache_entries = size_t(1) << 20;
+    size_t list_cache_min_dir_entries = 256;
+    // Orphan-sidecar sweep period (a delete crash leaves "<key>.lights3-meta" without its
+    // data file; listing self-heals only the directories it visits). 0 = off
+    int sidecar_scan_interval_sec = 24 * 3600;
 };
 
 // run_scrub_once knobs (roadmap §3.1); per-call rather than config — a scrub is
@@ -116,6 +136,17 @@ public:
     // skipped_races instead of mismatches
     Task<FsScrubStats> run_scrub_once(FsScrubOptions opt = {});
 
+    // Orphan-sidecar sweep (roadmap §3.5): walks every bucket and removes sidecars whose
+    // data file is gone, each under the per-key commit lock so an in-flight PUT of the same
+    // key can never lose its freshly written sidecar. Returns the number removed. Runs
+    // periodically (sidecar_scan_interval) and is exposed for tests/tools
+    Task<uint64_t> run_sidecar_sweep_once();
+
+    // Observability hooks for tests (docs/storage/localfs.md §10)
+    const fsutil::MetaXattrPolicy& xattr_policy() const { return xattr_; }
+    fsutil::DirListCache::Stats list_cache_stats() const { return dir_cache_->stats(); }
+    const LocalFsOptions& options() const { return opt_; }
+
     static constexpr const char* kSidecarSuffix = fsutil::kSidecarSuffix;
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
 
@@ -167,9 +198,22 @@ protected:
     static constexpr size_t kLockStripes = 64;
     AsyncSemaphore& commit_lock(std::string_view bucket, std::string_view key);
 
+    // Commit-time policy shared with xlocalfs (xattr accounting / fail-fast + sidecar mode)
+    fsutil::CommitOptions commit_options() const {
+        fsutil::CommitOptions co;
+        co.sidecar = opt_.sidecar;
+        co.xattr = &xattr_;
+        return co;
+    }
+    // SidecarMode::kAsync: write the sidecar from a background task (bg_-tracked, so close
+    // waits for it); falls back to an inline write when the backend is already closing
+    void defer_sidecar(std::filesystem::path dest, ObjectMeta meta);
+
     std::filesystem::path root_;
     std::filesystem::path staging_;
     std::shared_ptr<ThreadPool> pool_;
+    LocalFsOptions opt_;
+    mutable fsutil::MetaXattrPolicy xattr_;
 
 private:
     // run_scrub_once helpers (pool thread): one bucket's ordered walk, then one
@@ -183,20 +227,42 @@ private:
     Task<std::string> md5_range(int fd, uint64_t off, uint64_t len, class ScrubThrottle& throttle,
                                 std::vector<uint8_t>& buf, FsScrubStats& st);
 
+    // list_objects helpers (roadmap §3.5 ①): the page's metadata is loaded by `stride`
+    // strided workers over the pool (each key = stat + getxattr; a key deleted between
+    // readdir and stat is dropped, not an error), then orphan sidecars spotted during the
+    // walk are reaped under the per-key lock
+    Task<void> load_page_meta(const std::filesystem::path& base,
+                              const std::vector<std::string>& keys,
+                              std::vector<ObjectMeta>& out);
+    Task<void> load_meta_slice(const std::filesystem::path& base,
+                               const std::vector<std::string>& keys, size_t first, size_t stride,
+                               std::vector<std::optional<ObjectMeta>>& metas);
+    Task<bool> reap_orphan_sidecar(std::string bucket, std::filesystem::path sidecar);
+    Task<void> reap_orphan_sidecars(std::string bucket, std::vector<std::filesystem::path> list);
+
     void init_metrics(const MetricsScope& metrics);  // one-time acquisition at construction (same pattern as duostore)
     void cleanup_stale_uploads();  // remove mpu directories past mpu_ttl (startup + periodic)
-    void schedule_mpu_scan();      // re-arm after completion (same shape as duostore's GC worker)
-    void shutdown_background();    // shared by close/dtor: cancel timer + wait in-flight scans
+    Task<void> mpu_scan_task();    // pool hop + cleanup_stale_uploads
+    Task<void> sidecar_sweep_task();
+    // Re-arm a periodic maintenance task after it completes (same shape as duostore's GC
+    // worker): runs never overlap, a slow run just pushes back the next trigger
+    void schedule_periodic(TimerQueue::Id& id, int interval_sec,
+                           Task<void> (LocalFsBackend::*fn)());
+    Task<void> run_periodic(TimerQueue::Id* slot, int interval_sec,
+                            Task<void> (LocalFsBackend::*fn)());  // one run, then re-arm
+    void shutdown_background();    // shared by close/dtor: cancel timers + wait in-flight scans
 
-    LocalFsOptions opt_;
     // Instances fully pre-registered across the op dimension (acquired at construction,
     // hot path only inc/observe); the latency histogram is non-null only at the
     // put/get/list indices, record_op skips null ones
     std::array<std::shared_ptr<MetricCounter>, kOpCount> m_ops_, m_op_errors_;
     std::array<std::shared_ptr<MetricHistogram>, kOpCount> m_op_seconds_;
+    std::shared_ptr<MetricCounter> m_orphans_removed_;
     std::vector<std::unique_ptr<AsyncSemaphore>> commit_locks_;
+    std::unique_ptr<fsutil::DirListCache> dir_cache_;
     BackgroundTaskGroup bg_{"localfs"};
-    TimerQueue::Id mpu_timer_ = 0;  // written only inside bg_.if_open; 0 = not armed
+    TimerQueue::Id mpu_timer_ = 0;      // written only inside bg_.if_open; 0 = not armed
+    TimerQueue::Id sidecar_timer_ = 0;  // same discipline
     std::atomic<bool> closed_{false};
 };
 

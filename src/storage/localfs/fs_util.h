@@ -5,6 +5,7 @@
 
 #include <sys/stat.h>
 
+#include <atomic>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -12,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/metrics.h"
 #include "core/thread_pool.h"
 #include "storage/backend.h"
 
@@ -60,15 +62,62 @@ void write_tsv(const std::filesystem::path& dest, const std::filesystem::path& t
                const std::vector<std::pair<std::string, std::string>>& kv);
 std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem::path& path);
 
-// Create parent dirs + directory-conflict check + sidecar-then-data rename
-// (docs/storage-backend.md §3.1 write atomicity); shared by PUT and complete_multipart
-// prepared=true means the caller already performed "write xattr → persist data" in
-// commit_object_file's original order itself (xlocalfs replaces that blocking fdatasync
-// with io_uring's FSYNC SQE), so those two steps are skipped here. The rename, directory
-// fsync, and sidecar write are unchanged
-void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
+// Metadata-xattr accounting and policy (roadmap §3.5): setxattr failure used to be a
+// single startup-time WARN line -- silently falling back to the two-rename sidecar
+// consistency model. The backend owns one of these, wires the gauge/counter into its
+// MetricsScope, and hands a pointer down every write path. required=true turns a failed
+// xattr write into an InternalError **before** the data rename (fail-fast: the object is
+// never committed without its atomic metadata), for deployments that must not run on a
+// filesystem without xattr support. All fields are optional; a null policy = the legacy
+// "warn once, degrade" behavior
+struct MetaXattrPolicy {
+    bool required = false;
+    std::shared_ptr<MetricGauge> fallback;    // 1 once any xattr write has failed (resident)
+    std::shared_ptr<MetricCounter> failures;  // every failed setxattr
+    std::atomic<uint64_t> failure_count{0};
+    void note_failure() {
+        failure_count.fetch_add(1, std::memory_order_relaxed);
+        if (failures) failures->inc();
+        if (fallback) fallback->set(1);
+    }
+};
+
+// One-shot capability probe: creates a scratch file under dir, writes and reads back
+// kMetaXattr, unlinks it. Returns the failing errno (0 = supported). Used at backend
+// construction so the fallback gauge is live before the first PUT, and to fail fast under
+// require_xattr
+int probe_meta_xattr(const std::filesystem::path& dir);
+
+// Sidecar write policy (roadmap §3.5): the xattr is the authoritative read source, the
+// sidecar exists for external tools / legacy objects / filesystems without xattr. In the
+// default kSync mode a small-object PUT costs 4 fsyncs + 2 renames, half of it the
+// sidecar. kAsync takes the sidecar off the latency path (written by a background task
+// after the response); kLazy does not write it at all while the xattr succeeded (and
+// unlinks a stale one left by an earlier sync-mode write). Both fall back to a
+// synchronous sidecar write whenever the xattr write failed -- then the sidecar is the
+// only metadata source and must be committed before the caller answers
+enum class SidecarMode { kSync, kAsync, kLazy };
+SidecarMode parse_sidecar_mode(std::string_view s);  // sync|async|lazy, else runtime_error
+const char* sidecar_mode_name(SidecarMode m);
+
+struct CommitOptions {
+    // The caller already performed "write xattr → persist data" in commit_object_file's
+    // original order itself (xlocalfs replaces that blocking fdatasync with io_uring's
+    // FSYNC SQE), so those two steps are skipped; xattr_ok then reports that step's outcome
+    bool prepared = false;
+    bool xattr_ok = true;
+    SidecarMode sidecar = SidecarMode::kSync;
+    MetaXattrPolicy* xattr = nullptr;
+};
+
+// Create parent dirs + directory-conflict check + data rename + sidecar
+// (docs/storage-backend.md §3.1 write atomicity); shared by PUT and complete_multipart.
+// Returns true when the sidecar write was **deferred to the caller** (SidecarMode::kAsync
+// with a successful xattr): the caller must schedule write_object_sidecar off the request
+// path. Every other mode returns false with the on-disk state complete
+bool commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
                         const std::filesystem::path& staging_put, std::string_view key,
-                        bool prepared = false);
+                        const CommitOptions& opt = {});
 
 // The two synchronous halves of commit_object_file, exposed separately so xlocalfs can run
 // the data rename and the directory fsync in between through io_uring (RENAMEAT + FSYNC
@@ -78,6 +127,13 @@ void commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const O
 void prepare_object_dest(const std::filesystem::path& dest, std::string_view key);
 void write_object_sidecar(const std::filesystem::path& dest, const ObjectMeta& meta,
                           const std::filesystem::path& staging_put);
+// The mode-aware trailing sidecar step of commit_object_file (also used by xlocalfs's
+// ring-based commit): sync → write now; lazy+xattr_ok → unlink a stale sidecar, write
+// nothing; async+xattr_ok → write nothing and return true (caller defers); any mode with
+// xattr_ok=false → write now (the sidecar is the only source). Returns "deferred"
+bool finish_object_sidecar(const std::filesystem::path& dest, const ObjectMeta& meta,
+                           const std::filesystem::path& staging_put, SidecarMode mode,
+                           bool xattr_ok);
 
 // Commit-point check for conditional PUT (PutCondition contract, storage/backend.h): the
 // caller must hold the commit lock for the same key so the check and the following rename
@@ -98,9 +154,11 @@ struct TierInfo {
 
 // Write metadata into the data file's xattr (used inside commit_object_file; xlocalfs
 // needs to write the xattr itself first in the same order, so it can swap the subsequent
-// fdatasync for io_uring's FSYNC SQE)
-void set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta,
-                    const TierInfo& tier);
+// fdatasync for io_uring's FSYNC SQE). Returns false when the write failed and the object
+// will rely on its sidecar (accounted on policy when given; throws InternalError instead
+// under policy->required)
+bool set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta,
+                    const TierInfo& tier, MetaXattrPolicy* policy = nullptr);
 
 // stat the data file + read metadata (xattr first, fall back to sidecar); when
 // tier != local the size comes from the metadata (a stub data file has zero length,
@@ -130,9 +188,13 @@ struct StubRace : s3::S3Error {
 // the per-key lock.
 // In-place metadata rewrite for an existing object (roadmap §2.5 ?tagging): xattr
 // first (authoritative), sidecar after — same consistency model as commit paths.
+// Under SidecarMode::kLazy the sidecar is rewritten only if one exists or the xattr
+// failed (a rare operator path: async deferral is not worth its complexity here).
 // Caller holds the per-key commit lock
 void rewrite_object_meta(const std::filesystem::path& data_path, const ObjectMeta& meta,
-                         const TierInfo& tier, const std::filesystem::path& staging_put);
+                         const TierInfo& tier, const std::filesystem::path& staging_put,
+                         SidecarMode mode = SidecarMode::kSync,
+                         MetaXattrPolicy* policy = nullptr);
 
 void commit_stub(const std::filesystem::path& dest, const ObjectMeta& meta, const TierInfo& tier,
                  const std::filesystem::path& staging_put);

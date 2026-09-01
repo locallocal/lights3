@@ -628,6 +628,9 @@ std::string RedisMetaStore::zindex_key(std::string_view b) const {
 std::string RedisMetaStore::uploads_key(std::string_view b) const {
     return key(std::string("up:") + std::string(b));
 }
+std::string RedisMetaStore::uploads_zkey(std::string_view b) const {
+    return key(std::string("uz:") + std::string(b));
+}
 std::string RedisMetaStore::parts_key(std::string_view b, std::string_view k,
                                       std::string_view id) const {
     // pt:<b>\0<key>\0<id>; segment validity is guaranteed by the shared validation layer + codec key builders (§2.1)
@@ -773,6 +776,7 @@ void RedisMetaStore::delete_bucket(std::string_view b) {
         bt.expect_hlen0(uploads_key(b));
         bt.hdel(buckets_key(), b);
         bt.del(zindex_key(b));
+        bt.del(uploads_zkey(b));  // empty by the hlen0 guard, but a stale member must not outlive the bucket
         if (bt.commit()) return;
     }
     throw_internal("delete_bucket", "too many CAS retries");
@@ -908,6 +912,7 @@ std::string RedisMetaStore::create_upload(std::string_view b, std::string_view k
         RedisBatch bt(*this);
         bt.expect_exists(buckets_key(), b);
         bt.hset(uploads_key(b), field, codec::encode_upload(rec));
+        bt.zadd(uploads_zkey(b), "0", field);  // lex index (§2.1 principle 3, same as oz:<b>)
         if (bt.commit()) return rec.upload_id;
     }
     throw_internal("create_upload", "too many CAS retries");
@@ -995,23 +1000,94 @@ std::vector<PartRec> RedisMetaStore::list_parts(std::string_view b, std::string_
 
 std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b,
                                                     std::string_view key_marker,
-                                                    std::string_view id_marker, int limit) {
-    // Cursor hints can only be ignored here (docs/archive/gaps.md §5.1): uploads are stored as a hash,
-    // HSCAN's cursor is bucket-ordered not lexicographic, and there is no way to express
-    // "start after some field". After the full HSCAN, the caller's apply_uploads_page trims —
-    // pagination saves response body size, not this scan
-    (void)key_marker;
-    (void)id_marker;
-    (void)limit;
+                                                    std::string_view id_marker, int limit,
+                                                    std::string_view prefix) {
     require_bucket(b);
-    // HSCAN in batches (R4, §2.2): huge uploads tables are no longer materialized by a single
+    // roadmap §3.5: uz:<b> is a score-0 ZSET over the very same fields as up:<b>
+    // (<key>\0<id>), so ZRANGEBYLEX walks (key, upload_id) order from any cursor and the
+    // page is HMGET'd from the hash -- the old path HSCAN'd the whole table for every
+    // page. Index health is a cardinality comparison: tables written before the index
+    // existed (or by an older gateway sharing this redis) fall back to the full scan,
+    // which also rebuilds the index so the next listing is indexed
+    const std::string zkey = uploads_zkey(b), hkey = uploads_key(b);
+    {
+        auto zc = exec({"ZCARD", zkey}, /*read_retry=*/true);
+        auto hl = exec({"HLEN", hkey}, /*read_retry=*/true);
+        if (require_int("list_uploads", zc.get()) != require_int("list_uploads", hl.get()))
+            return list_uploads_rebuild(b);
+    }
+    // Lower bound: the greater of "after the marker" and "at the prefix". Key-marker-only
+    // means "key > key_marker"; keys contain no NUL, so key_marker+'\x01' is the smallest
+    // member payload strictly above every "<key_marker>\0<id>"
+    std::string min = "[" + std::string(prefix);
+    if (!id_marker.empty() || !key_marker.empty()) {
+        std::string m = std::string(key_marker);
+        bool exclusive = !id_marker.empty();
+        if (exclusive) {
+            m += '\0';
+            m += std::string(id_marker);
+        } else {
+            m += '\x01';
+        }
+        if (m >= prefix) min = (exclusive ? "(" : "[") + m;
+    }
+    std::vector<UploadInfo> out;
+    constexpr int kPage = 512;
+    for (;;) {
+        int want = limit > 0 ? std::min(kPage, limit - int(out.size())) : kPage;
+        if (want <= 0) break;
+        auto r = exec({"ZRANGEBYLEX", zkey, min, "+", "LIMIT", "0", std::to_string(want)},
+                      /*read_retry=*/true);
+        check_reply_error("list_uploads", r.get());
+        if (r->type != REDIS_REPLY_ARRAY) throw_internal("list_uploads", "unexpected reply");
+        if (r->elements == 0) break;
+        std::vector<std::string> args{"HMGET", hkey};
+        bool past_prefix = false;
+        for (size_t i = 0; i < r->elements; ++i) {
+            std::string_view m = reply_str(r->element[i]);
+            if (m.substr(0, prefix.size()) != prefix) {  // sorted: nothing after this matches
+                past_prefix = true;
+                break;
+            }
+            args.emplace_back(m);
+        }
+        if (args.size() > 2) {
+            auto vals = exec(args, /*read_retry=*/true);
+            check_reply_error("list_uploads", vals.get());
+            if (vals->type != REDIS_REPLY_ARRAY || vals->elements != args.size() - 2)
+                throw_internal("list_uploads", "unexpected HMGET reply");
+            for (size_t i = 0; i < vals->elements; ++i) {
+                const std::string& field = args[i + 2];
+                if (vals->element[i]->type != REDIS_REPLY_STRING) {
+                    // Index member without a hash field: a write raced the rebuild path.
+                    // Self-heal (best effort, outside any transaction) and skip
+                    (void)exec({"ZREM", zkey, field}, /*read_retry=*/false);
+                    continue;
+                }
+                auto sep = field.rfind('\0');
+                if (sep == std::string::npos) continue;
+                auto rec = codec::decode_upload(field.substr(0, sep), field.substr(sep + 1),
+                                                reply_str(vals->element[i]));
+                out.push_back(
+                    {rec.meta.key, rec.upload_id, codec::from_unix_ms(rec.initiated_ms)});
+            }
+            min = "(" + args.back();
+        }
+        if (past_prefix || int(r->elements) < want) break;
+    }
+    return out;
+}
+
+std::vector<UploadInfo> RedisMetaStore::list_uploads_rebuild(std::string_view b) {
+    // HSCAN in batches (R4, §2.2): huge uploads tables are not materialized by a single
     // command. The cursor's weak consistency (concurrent add/remove during iteration may
     // miss/duplicate) is acceptable for ListMultipartUploads; the map doubles as dedup (HSCAN
     // may return the same field twice) and byte-order sorting of fields = (key, upload_id) order
+    const std::string zkey = uploads_zkey(b), hkey = uploads_key(b);
     std::map<std::string, std::string> rows;
     std::string cursor = "0";
     do {
-        auto r = exec({"HSCAN", uploads_key(b), cursor, "COUNT", "512"}, /*read_retry=*/true);
+        auto r = exec({"HSCAN", hkey, cursor, "COUNT", "512"}, /*read_retry=*/true);
         check_reply_error("list_uploads", r.get());
         if (r->type != REDIS_REPLY_ARRAY || r->elements != 2)
             throw_internal("list_uploads", "unexpected HSCAN reply");
@@ -1021,6 +1097,44 @@ std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b,
             rows.insert_or_assign(std::string(reply_str(kv->element[i])),
                                   std::string(reply_str(kv->element[i + 1])));
     } while (cursor != "0");
+
+    // Reconcile the index with what the hash holds right now: members the hash lacks go,
+    // fields the index lacks come in (plain commands, batched -- a concurrent
+    // create/abort keeps both sides in step by itself, and a member this re-adds after a
+    // concurrent abort is caught by the nil check on the indexed path)
+    {
+        auto r = exec({"ZRANGEBYLEX", zkey, "-", "+"}, /*read_retry=*/true);
+        check_reply_error("list_uploads", r.get());
+        std::vector<std::string> stale;
+        std::set<std::string> indexed;
+        if (r->type == REDIS_REPLY_ARRAY)
+            for (size_t i = 0; i < r->elements; ++i) {
+                std::string m(reply_str(r->element[i]));
+                if (!rows.count(m)) stale.push_back(m);
+                indexed.insert(std::move(m));
+            }
+        for (size_t i = 0; i < stale.size(); i += 512) {
+            std::vector<std::string> args{"ZREM", zkey};
+            for (size_t j = i; j < std::min(stale.size(), i + 512); ++j) args.push_back(stale[j]);
+            (void)exec(args, /*read_retry=*/false);
+        }
+        std::vector<std::string> args{"ZADD", zkey};
+        for (auto& [field, val] : rows) {
+            if (indexed.count(field)) continue;
+            args.push_back("0");
+            args.push_back(field);
+            if (args.size() >= 2 + 2 * 512) {
+                (void)exec(args, /*read_retry=*/false);
+                args.resize(2);
+            }
+        }
+        if (args.size() > 2) (void)exec(args, /*read_retry=*/false);
+        if (!stale.empty() || indexed.size() != rows.size())
+            LOG_INFO("duostore redis meta: rebuilt uploads index {} ({} entries, {} stale members "
+                     "dropped)",
+                     zkey, rows.size(), stale.size());
+    }
+
     std::vector<UploadInfo> out;
     for (auto& [field, val] : rows) {
         auto sep = field.rfind('\0');
@@ -1070,6 +1184,7 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
         bt.hset(objects_key(b), k, codec::encode_object(rec));
         bt.zadd(zindex_key(b), "0", k);
         bt.hdel(uploads_key(b), ufield);
+        bt.zrem(uploads_zkey(b), ufield);
         bt.del(parts_key(b, k, id));
         for (const auto& [no, p] : stored) {
             if (selected.count(no)) {
@@ -1115,6 +1230,7 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k,
         bt.expect_exists(uploads_key(b), ufield);
         bt.expect_sha1(parts_key(b, k, id), fingerprint);
         bt.hdel(uploads_key(b), ufield);
+        bt.zrem(uploads_zkey(b), ufield);
         bt.del(parts_key(b, k, id));
         for (const auto& [raw, p] : scanned) {
             enqueue_reclaim(bt, p.data, ReclaimReason::kAbort);

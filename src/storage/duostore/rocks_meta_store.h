@@ -69,8 +69,9 @@ public:
                   PartRec p) override;
     std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
                                     std::string_view id) override;
-    std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker,
-                                         std::string_view id_marker, int limit) override;
+    std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
+                                         std::string_view id_marker = {}, int limit = 0,
+                                         std::string_view prefix = {}) override;
     std::string complete_upload(std::string_view b, std::string_view k, std::string_view id,
                                 std::span<const PartInfo> parts) override;
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;

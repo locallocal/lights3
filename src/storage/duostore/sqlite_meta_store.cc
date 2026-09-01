@@ -98,9 +98,11 @@ constexpr const char* kUpAny = "SELECT 1 FROM uploads WHERE bucket=?1 LIMIT 1";
 // Composite-cursor pushdown (docs/archive/gaps.md §5.1): (key,id) > (?2,?3) uses row-value
 // comparison, which follows primary-key order exactly; ?4<=0 means unlimited rows
 // (a negative LIMIT in SQLite means no limit)
+// ?5=1 selects key-marker-only semantics ("key > key_marker"); ?6 is the prefix lower
+// bound (the upper bound is enforced by the reader breaking once past the prefix)
 constexpr const char* kUpList =
     "SELECT key,id,val FROM uploads WHERE bucket=?1 AND (key,id) > (?2,?3) "
-    "ORDER BY key,id LIMIT ?4";
+    "AND (?5 = 0 OR key > ?2) AND key >= ?6 ORDER BY key,id LIMIT ?4";
 constexpr const char* kPartGet =
     "SELECT val FROM parts WHERE bucket=?1 AND key=?2 AND id=?3 AND part_no=?4";
 constexpr const char* kPartPut =
@@ -1006,7 +1008,8 @@ std::vector<PartRec> SqliteMetaStore::list_parts(std::string_view b, std::string
 
 std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b,
                                                      std::string_view key_marker,
-                                                     std::string_view id_marker, int limit) {
+                                                     std::string_view id_marker, int limit,
+                                                     std::string_view prefix) {
     auto lease = read_conn();
     require_bucket(*lease, b);
     std::vector<UploadInfo> out;
@@ -1015,9 +1018,13 @@ std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b,
     st.blob(2, key_marker);
     st.blob(3, id_marker);
     st.i64(4, limit > 0 ? limit : -1);
+    st.i64(5, (!key_marker.empty() && id_marker.empty()) ? 1 : 0);
+    st.blob(6, prefix);
     while (st.step()) {
-        auto rec = codec::decode_upload(std::string(st.col_blob(0)),
-                                        std::string(st.col_blob(1)), st.col_blob(2));
+        std::string_view k = st.col_blob(0);
+        if (k.substr(0, prefix.size()) != prefix) break;  // ordered: past the prefix range (roadmap §3.5)
+        auto rec = codec::decode_upload(std::string(k), std::string(st.col_blob(1)),
+                                        st.col_blob(2));
         out.push_back({rec.meta.key, rec.upload_id, codec::from_unix_ms(rec.initiated_ms)});
     }
     return out;  // primary-key order = (key, upload_id) order

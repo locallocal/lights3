@@ -135,7 +135,7 @@ Task<void> XLocalFsBackend::sync_dir(fs::path dir) {
 }
 
 Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const ObjectMeta& meta,
-                                            std::string_view key) {
+                                            std::string_view key, bool xattr_ok) {
     fsutil::prepare_object_dest(dest, key);
     // Same ordering as fsutil::commit_object_file with prepared=true: data rename ->
     // directory fsync -> sidecar; only the first two go through the ring
@@ -143,7 +143,9 @@ Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const O
     if (r < 0) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
     tmp.committed = true;
     co_await sync_dir(dest.parent_path());
-    fsutil::write_object_sidecar(dest, meta, staging_ / "put");
+    // Sidecar policy shared with localfs (roadmap §3.5): sync / deferred / lazy
+    if (fsutil::finish_object_sidecar(dest, meta, staging_ / "put", opt_.sidecar, xattr_ok))
+        defer_sidecar(std::move(dest), meta);
 }
 
 Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
@@ -180,7 +182,7 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     // final block back, so finish() can send it and the fdatasync as one linked chain
     // (roadmap §3.4 ③) -- for a small object that is the whole persistence in a single
     // submission
-    fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
+    bool xattr_ok = fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{}, &xattr_);
     co_await ws.finish(fsutil::fsync_enabled());
     ::close(tmp.fd);
     tmp.fd = -1;
@@ -192,7 +194,7 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     co_await pool_->schedule();
     fs::path dest = object_path(bucket, key);
     fsutil::check_put_condition(dest, cond, key);
-    co_await commit_prepared(dest, tmp, meta, key);
+    co_await commit_prepared(dest, tmp, meta, key, xattr_ok);
     g.ok = true;
     co_return PutResult{meta.etag};
 }
@@ -385,14 +387,14 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     meta.part_sizes = std::move(sizes);
     PutResult result{meta.etag};
     apply_composite_checksum(digests, meta, result);  // roadmap §2.2
-    fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{});
+    bool xattr_ok = fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{}, &xattr_);
     co_await ws.finish(fsutil::fsync_enabled());  // final write + fdatasync linked
     ::close(tmp.fd);
     tmp.fd = -1;
     {
         auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT
         co_await pool_->schedule();
-        co_await commit_prepared(object_path(bucket, key), tmp, meta, key);
+        co_await commit_prepared(object_path(bucket, key), tmp, meta, key, xattr_ok);
     }
 
     std::error_code ec;

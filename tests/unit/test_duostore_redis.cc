@@ -453,4 +453,80 @@ TEST(duostore_redis_gc_lease) {
     c.close();
 }
 
+// roadmap §3.5: uz:<b> lex index. Pages walked with the composite cursor must concatenate to
+// the full listing (which itself must match what was registered); a legacy table without an
+// index (simulated by deleting uz:<b>) still lists completely and gets its index rebuilt;
+// a stale index member (hash field gone) is skipped and healed
+TEST(duostore_redis_list_uploads_lex_index) {
+    REDIS_OR_SKIP();
+    std::string prefix = unique_prefix();
+    RedisMetaStore m(redis_opts(prefix));
+    m.create_bucket("idx");
+    constexpr int kUploads = 700;  // > one ZRANGEBYLEX page (512)
+    std::set<std::pair<std::string, std::string>> expect;
+    for (int i = 0; i < kUploads; ++i) {
+        std::string k = "p" + std::to_string(i % 7) + "/k" + std::to_string(i % 50);
+        expect.emplace(k, m.create_upload("idx", k, {}));
+    }
+    auto full = m.list_uploads("idx");
+    CHECK_EQ(full.size(), size_t(kUploads));
+    for (size_t i = 1; i < full.size(); ++i)
+        CHECK(std::pair(full[i - 1].key, full[i - 1].upload_id) <
+              std::pair(full[i].key, full[i].upload_id));
+    for (const auto& u : full) CHECK(expect.count({u.key, u.upload_id}) == 1);
+
+    // Cursor pushdown: walk in pages of 97 and compare with the full list
+    std::vector<UploadInfo> walked;
+    std::string km, im;
+    for (int guard = 0; guard < 100; ++guard) {
+        auto page = m.list_uploads("idx", km, im, 97);
+        if (page.empty()) break;
+        CHECK(page.size() <= size_t(97));
+        for (auto& u : page) walked.push_back(u);
+        km = page.back().key;
+        im = page.back().upload_id;
+    }
+    CHECK_EQ(walked.size(), full.size());
+    for (size_t i = 0; i < walked.size() && i < full.size(); ++i) {
+        CHECK_EQ(walked[i].key, full[i].key);
+        CHECK_EQ(walked[i].upload_id, full[i].upload_id);
+    }
+    // Prefix pushdown: only p3/ entries, in order, and the limit is honored
+    auto p3 = m.list_uploads("idx", {}, {}, 10, "p3/");
+    CHECK_EQ(p3.size(), size_t(10));
+    for (auto& u : p3) CHECK(u.key.compare(0, 3, "p3/") == 0);
+    CHECK_EQ(p3[0].key, full[std::lower_bound(full.begin(), full.end(), std::string("p3/"),
+                                              [](const UploadInfo& u, const std::string& k) {
+                                                  return u.key < k;
+                                              }) -
+                             full.begin()]
+                            .key);
+
+    // Legacy table: drop the index; the listing must still be complete and rebuild it
+    CHECK(RedisTestServer::instance().raw_command(("DEL " + prefix + "uz:idx").c_str()));
+    auto legacy = m.list_uploads("idx");
+    CHECK_EQ(legacy.size(), size_t(kUploads));
+    auto again = m.list_uploads("idx", {}, {}, 5);  // indexed again: limited page comes back
+    CHECK_EQ(again.size(), size_t(5));
+    CHECK_EQ(again[0].upload_id, full[0].upload_id);
+
+    // Stale index member without a hash field (a write racing the rebuild): never
+    // surfaced. The cardinality check routes this listing through the rebuild, which
+    // drops the member; the next one is indexed again and honors the limit
+    m.abort_upload("idx", full[0].key, full[0].upload_id);
+    CHECK(RedisTestServer::instance().raw_command(
+        ("ZADD " + prefix + "uz:idx 0 zz-stale-member").c_str()));
+    auto rest = m.list_uploads("idx");
+    CHECK_EQ(rest.size(), size_t(kUploads - 1));
+    for (const auto& u : rest) CHECK(u.key.compare(0, 2, "zz") != 0);
+    auto tail = m.list_uploads("idx", "zz", {}, 5);  // indexed: nothing at or after "zz"
+    CHECK(tail.empty());
+    auto lim = m.list_uploads("idx", {}, {}, 3);
+    CHECK_EQ(lim.size(), size_t(3));
+    CHECK_EQ(lim[0].upload_id, full[1].upload_id);
+    for (const auto& u : rest) m.abort_upload("idx", u.key, u.upload_id);
+    m.delete_bucket("idx");
+    m.close();
+}
+
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META

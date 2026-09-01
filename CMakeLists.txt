@@ -323,6 +323,7 @@ add_library(lights3_core STATIC
   src/storage/registry.cc
   src/storage/bucket_router.cc
   src/storage/localfs/fs_util.cc
+  src/storage/localfs/list_cache.cc
   src/storage/localfs/localfs_backend.cc
   src/storage/memory/memory_backend.cc
   src/storage/tiered/tiered_backend.cc

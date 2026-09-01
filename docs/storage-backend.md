@@ -126,7 +126,13 @@ resolve(bucket) → IStorageBackend&
     同款 TSV），因此**一次 rename 同时提交数据与元数据**——xattr 随 inode 走，
     读到的 etag 不可能描述另一个 inode 的 body。sidecar 文件继续写（外部工具
     可读、存量对象兼容），读取侧 xattr 优先、缺失时回落 sidecar；不支持 xattr
-    的文件系统上退化为纯 sidecar 语义（提交顺序为先数据后 sidecar）。
+    的文件系统上退化为纯 sidecar 语义（提交顺序为先数据后 sidecar）——该降级
+    以常驻 gauge `lights3_localfs_xattr_fallback` 暴露（构造期即探测），
+    `require_xattr: true` 则改为启动/写入即失败（roadmap §3.5）。
+  - **sidecar 写策略**（`sidecar: sync|async|lazy`，默认 sync）：sync 每次
+    PUT 4 次 fsync + 2 次 rename；async 把 sidecar 挪到后台任务（响应后落
+    盘）；lazy 在 xattr 写成功时根本不写 sidecar（并顺手 unlink 旧的）。
+    xattr 写失败时两种模式都退回同步写 sidecar——此时它是唯一元数据源。
   - **提交段 per-key 锁**：数据与 sidecar 毕竟是两次 rename，提交段取 striped
     异步互斥（64 条带，PUT 与 complete_multipart 共用），使 sidecar 也恒描述
     最终落地的那次写入。锁只覆盖提交段，body 读写全并发。
@@ -148,7 +154,10 @@ resolve(bucket) → IStorageBackend&
 - **LIST**：递归目录遍历 + prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；
   delimiter=`/` 时目录即 common prefix，无需展开其内部，天然高效。
   分页 token = 最后返回的 key（目录序即字典序，需保证遍历为排序遍历）。
-  首期不建索引；对超大 bucket 的优化（如 per-directory 缓存）留作后续。
+  不建索引，但（roadmap §3.5）：一页的 stat+getxattr 由多个池线程条带并行
+  （`list_meta_concurrency`）；每个目录的排序条目表按目录 inode+mtime/ctime
+  缓存（`list_cache_entries`，一次 stat 校验），翻页时二分定位 marker，深页
+  成本不再随页码增长。见 [storage/localfs.md](storage/localfs.md) §6。
 - **Multipart**：分片落 `staging/mpu/<id>/part.N`；complete 时按 part 顺序
   拼接写入最终临时文件再 rename（顺带算总 ETag：`md5(各分片md5拼接)-N`，
   与 S3 规则一致）；abort 删目录。启动时扫描 mpu 目录清理超期（默认 7 天）

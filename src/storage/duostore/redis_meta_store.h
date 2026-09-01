@@ -61,8 +61,9 @@ public:
                   PartRec p) override;
     std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
                                     std::string_view id) override;
-    std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker,
-                                         std::string_view id_marker, int limit) override;
+    std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
+                                         std::string_view id_marker = {}, int limit = 0,
+                                         std::string_view prefix = {}) override;
     std::string complete_upload(std::string_view b, std::string_view k, std::string_view id,
                                 std::span<const PartInfo> parts) override;
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override;
@@ -122,6 +123,10 @@ private:
     std::string objects_key(std::string_view b) const;   // o:<b>   HASH
     std::string zindex_key(std::string_view b) const;    // oz:<b>  ZSET
     std::string uploads_key(std::string_view b) const;   // up:<b>  HASH
+    std::string uploads_zkey(std::string_view b) const;  // uz:<b>  ZSET (lex index over up:<b> fields, roadmap §3.5)
+    // Full HSCAN of up:<b> plus reconciliation of uz:<b> against it (legacy tables written
+    // before the index existed, or by an older gateway sharing the meta). Returns everything
+    std::vector<UploadInfo> list_uploads_rebuild(std::string_view b);
     std::string parts_key(std::string_view b, std::string_view k, std::string_view id) const;
     std::string refs_key() const;
     std::string gcq_key() const;

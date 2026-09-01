@@ -170,16 +170,60 @@ static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
 // -- but must leave a trace: degradation means falling back to the "two-rename"
 // consistency model, and if it happens silently operators have no way to know
 // (docs/archive/gaps.md §3.9). Warn only once per errno kind to avoid flooding the write path
-void set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier) {
+bool set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier,
+                    MetaXattrPolicy* policy) {
     std::string blob = kv_to_tsv(meta_kv(meta, tier));
-    if (::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0) != 0) {
-        static std::atomic<int> last_errno{0};
-        int e = errno;
-        if (last_errno.exchange(e) != e)
-            LOG_WARN("setxattr({}) failed: {} — object metadata falls back to sidecar-only "
-                     "(two-rename consistency model)",
-                     path.string(), strerror(e));
+    if (::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0) == 0) return true;
+    static std::atomic<int> last_errno{0};
+    int e = errno;
+    if (last_errno.exchange(e) != e)
+        LOG_WARN("setxattr({}) failed: {} — object metadata falls back to sidecar-only "
+                 "(two-rename consistency model)",
+                 path.string(), strerror(e));
+    if (policy) {
+        policy->note_failure();
+        // Fail-fast (roadmap §3.5): the caller has not renamed yet, so refusing here leaves
+        // no half-committed object -- the tmp is discarded by TmpFile RAII
+        if (policy->required)
+            throw S3Error(S3ErrorCode::InternalError,
+                          std::string("object metadata xattr write failed (require_xattr): ") +
+                              strerror(e));
     }
+    return false;
+}
+
+int probe_meta_xattr(const fs::path& dir) {
+    fs::path p = dir / ("xattr-probe-" + next_tmp_name());
+    int fd = ::open(p.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return errno;
+    int err = 0;
+    static constexpr char kBlob[] = "probe\t1\n";
+    if (::fsetxattr(fd, kMetaXattr, kBlob, sizeof(kBlob) - 1, 0) != 0) {
+        err = errno;
+    } else {
+        char buf[32];
+        if (::fgetxattr(fd, kMetaXattr, buf, sizeof(buf)) < 0) err = errno;
+    }
+    ::close(fd);
+    ::unlink(p.c_str());
+    return err;
+}
+
+SidecarMode parse_sidecar_mode(std::string_view s) {
+    if (s == "sync") return SidecarMode::kSync;
+    if (s == "async") return SidecarMode::kAsync;
+    if (s == "lazy") return SidecarMode::kLazy;
+    throw std::runtime_error("sidecar must be one of sync|async|lazy, got '" + std::string(s) +
+                             "'");
+}
+
+const char* sidecar_mode_name(SidecarMode m) {
+    switch (m) {
+        case SidecarMode::kSync: return "sync";
+        case SidecarMode::kAsync: return "async";
+        case SidecarMode::kLazy: return "lazy";
+    }
+    return "?";
 }
 
 // Returns nullopt = no xattr (legacy object / unsupported filesystem) → caller falls back
@@ -224,10 +268,29 @@ void write_object_sidecar(const fs::path& dest, const ObjectMeta& meta,
     write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
 }
 
-void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                        const fs::path& staging_put, std::string_view key, bool prepared) {
+bool finish_object_sidecar(const fs::path& dest, const ObjectMeta& meta,
+                           const fs::path& staging_put, SidecarMode mode, bool xattr_ok) {
+    // A failed xattr makes the sidecar the only metadata source: it must be on disk
+    // before the caller answers, whatever the configured mode
+    if (!xattr_ok || mode == SidecarMode::kSync) {
+        write_object_sidecar(dest, meta, staging_put);
+        return false;
+    }
+    if (mode == SidecarMode::kAsync) return true;
+    // kLazy: a sidecar left behind by an earlier sync-mode write would now describe an
+    // older version of the object; it is never consulted while the xattr exists, but
+    // external tools and the scrub's orphan report would read it -- unlink (no fsync: a
+    // resurrected stale sidecar after a crash is exactly the pre-lazy state, harmless)
+    ::unlink((dest.string() + kSidecarSuffix).c_str());
+    return false;
+}
+
+bool commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
+                        const fs::path& staging_put, std::string_view key,
+                        const CommitOptions& opt) {
     prepare_object_dest(dest, key);
     std::error_code ec;
+    bool xattr_ok = opt.xattr_ok;
 
     // Order: data first, then sidecar (consistent with commit_cached). The reverse order
     // (old implementation) had a crash window of "sidecar with new etag/size + old data"
@@ -241,21 +304,27 @@ void commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     // and metadata together, so a crash can never leave an inconsistent "new etag with old
     // data" object (the sidecar is written afterwards, only for external tools and as the
     // fallback on filesystems without xattr support)
-    if (!prepared) {
-        set_meta_xattr(tmp.path, meta, TierInfo{});
+    if (!opt.prepared) {
+        xattr_ok = set_meta_xattr(tmp.path, meta, TierInfo{}, opt.xattr);
         fsync_path(tmp.path);  // persist the data content first, then splice it into the tree
     }
     fs::rename(tmp.path, dest, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
     tmp.committed = true;
     fsync_dir(dest.parent_path());
-    write_object_sidecar(dest, meta, staging_put);
+    return finish_object_sidecar(dest, meta, staging_put, opt.sidecar, xattr_ok);
 }
 
 void rewrite_object_meta(const fs::path& data_path, const ObjectMeta& meta,
-                         const TierInfo& tier, const fs::path& staging_put) {
-    set_meta_xattr(data_path, meta, tier);
-    write_sidecar(fs::path(data_path.string() + kSidecarSuffix), meta, staging_put, tier);
+                         const TierInfo& tier, const fs::path& staging_put, SidecarMode mode,
+                         MetaXattrPolicy* policy) {
+    bool xattr_ok = set_meta_xattr(data_path, meta, tier, policy);
+    fs::path sidecar(data_path.string() + kSidecarSuffix);
+    if (mode == SidecarMode::kLazy && xattr_ok) {
+        std::error_code ec;
+        if (!fs::exists(sidecar, ec)) return;  // lazy: nothing to keep consistent
+    }
+    write_sidecar(sidecar, meta, staging_put, tier);
 }
 
 void check_put_condition(const fs::path& data_path, const PutCondition& cond,

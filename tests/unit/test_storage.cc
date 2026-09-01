@@ -10,6 +10,7 @@
 #include <mutex>
 #include <thread>
 
+#include "core/metrics.h"
 #include "core/thread_pool.h"
 #include "storage/localfs/localfs_backend.h"
 #include "storage/memory/memory_backend.h"
@@ -715,6 +716,299 @@ TEST(localfs_list_pruning_matches_reference) {
     mid.delimiter = "/";
     mid.start_after = "a/b/c.txt";
     check_same(mid);
+}
+
+// ---------- roadmap §3.5: listing fan-out + directory snapshot cache ----------
+
+namespace {
+
+// Directory mtimes older than the cache's racy window (2s), so freshly written fixtures are cacheable
+void backdate_dirs(const fs::path& root) {
+    auto old = fs::file_time_type::clock::now() - std::chrono::seconds(30);
+    std::error_code ec;
+    for (auto& e : fs::recursive_directory_iterator(root, ec))
+        if (e.is_directory(ec)) fs::last_write_time(e.path(), old, ec);
+    fs::last_write_time(root, old, ec);
+}
+
+std::vector<std::string> listed_keys(const ListResult& r) {
+    std::vector<std::string> out;
+    for (auto& o : r.objects) out.push_back(o.key);
+    return out;
+}
+
+// The two backends must agree on the one-shot listing and on the concatenation of paged walks
+std::vector<std::string> walk_pages(IStorageBackend& b, ListOptions page) {
+    std::vector<std::string> out;
+    for (int guard = 0; guard < 200; ++guard) {
+        auto r = sync_wait(b.list_objects("bkt", page));
+        for (auto& o : r.objects) out.push_back(o.key);
+        for (auto& g : r.common_prefixes) out.push_back(g);
+        if (!r.is_truncated) break;
+        page.start_after = r.next_token;
+    }
+    return out;
+}
+
+void check_listing_matches(IStorageBackend& a, IStorageBackend& b, ListOptions opt) {
+    auto ra = sync_wait(a.list_objects("bkt", opt));
+    auto rb = sync_wait(b.list_objects("bkt", opt));
+    CHECK(listed_keys(ra) == listed_keys(rb));
+    CHECK(ra.common_prefixes == rb.common_prefixes);
+    CHECK_EQ(ra.is_truncated, rb.is_truncated);
+    for (size_t i = 0; i < ra.objects.size() && i < rb.objects.size(); ++i)
+        CHECK_EQ(ra.objects[i].etag, rb.objects[i].etag);
+    for (int mk : {7, 100}) {
+        ListOptions page = opt;
+        page.max_keys = mk;
+        auto wa = walk_pages(a, page), wb = walk_pages(b, page);
+        CHECK(wa == wb);
+        CHECK_EQ(wa.size(), ra.objects.size() + ra.common_prefixes.size());
+    }
+}
+
+}  // namespace
+
+// Metadata of a page is loaded by strided pool workers and directory snapshots come from
+// the cache on later pages: results must stay byte-identical to the full-scan reference
+// (memory backend), and the second pass must actually hit the cache
+TEST(localfs_list_parallel_meta_and_dir_cache_match_reference) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    LocalFsOptions o;
+    o.list_meta_concurrency = 4;
+    o.list_cache_min_dir_entries = 1;
+    o.sidecar_scan_interval_sec = 0;
+    LocalFsBackend lf(tmp.path / "data", tmp.path / "staging", pool, o);
+    MemoryBackend mem;
+    sync_wait(lf.create_bucket("bkt"));
+    sync_wait(mem.create_bucket("bkt"));
+    for (int i = 0; i < 300; ++i) {
+        char num[8];
+        snprintf(num, sizeof(num), "%03d", i);
+        std::string k = (i % 3 == 0 ? "flat-" : i % 3 == 1 ? "d1/" : "d2/sub/") + std::string(num);
+        put(lf, "bkt", k, "v" + std::string(num));
+        put(mem, "bkt", k, "v" + std::string(num));
+    }
+    put(lf, "bkt", "d1/", "");  // directory-marker object sorts first inside d1/
+    put(mem, "bkt", "d1/", "");
+    backdate_dirs(tmp.path / "data" / "bkt");
+
+    for (const std::string& prefix : {std::string(""), std::string("d1/"), std::string("d2/su"),
+                                      std::string("flat-1")}) {
+        for (const std::string& delim : {std::string(""), std::string("/"), std::string("-")}) {
+            ListOptions opt;
+            opt.prefix = prefix;
+            opt.delimiter = delim;
+            check_listing_matches(lf, mem, opt);
+        }
+    }
+    // start_after deep inside a large directory (binary-searched page start)
+    ListOptions mid;
+    mid.start_after = "d2/sub/250";
+    check_listing_matches(lf, mem, mid);
+    auto st = lf.list_cache_stats();
+    CHECK(st.misses > 0);
+    CHECK(st.hits > st.misses);  // the paged walks re-read the same directories from the snapshot
+    CHECK(st.entries > 0);
+}
+
+// A directory write (create/delete) changes the directory's mtime, which invalidates its
+// snapshot; a directory modified within the racy window is never cached in the first place
+TEST(localfs_list_dir_cache_invalidates_on_change) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsOptions o;
+    o.list_cache_min_dir_entries = 1;
+    o.sidecar_scan_interval_sec = 0;
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);
+    sync_wait(b.create_bucket("bkt"));
+    for (const char* k : {"a", "b", "c"}) put(b, "bkt", k, "x");
+    // Freshly modified: two listings, no cache hit
+    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));
+    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));
+    CHECK_EQ(b.list_cache_stats().hits, uint64_t(0));
+    backdate_dirs(tmp.path / "data" / "bkt");
+    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));  // fills
+    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));  // hits
+    CHECK_EQ(b.list_cache_stats().hits, uint64_t(1));
+    put(b, "bkt", "d", "x");  // mtime bumps → stale snapshot dropped
+    auto r = sync_wait(b.list_objects("bkt", {}));
+    CHECK_EQ(r.objects.size(), size_t(4));
+    CHECK_EQ(r.objects[3].key, std::string("d"));
+    sync_wait(b.delete_object("bkt", "a"));
+    r = sync_wait(b.list_objects("bkt", {}));
+    CHECK_EQ(r.objects.size(), size_t(3));
+    CHECK_EQ(r.objects[0].key, std::string("b"));
+    CHECK_EQ(b.list_cache_stats().hits, uint64_t(1));  // nothing served stale
+}
+
+// A key deleted between the directory read and its stat drops out of the page instead of
+// failing the whole LIST (the old inline load_meta turned it into NoSuchKey)
+TEST(localfs_list_tolerates_vanished_key) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
+    sync_wait(b.create_bucket("bkt"));
+    put(b, "bkt", "a", "x");
+    put(b, "bkt", "b", "x");
+    // Data gone, sidecar gone, but the directory still lists nothing else -- simulate the
+    // window by racing a listing against a delete many times; at minimum it must never throw
+    for (int i = 0; i < 20; ++i) {
+        put(b, "bkt", "r", "x");
+        std::thread t([&] { sync_wait(b.delete_object("bkt", "r")); });
+        auto r = sync_wait(b.list_objects("bkt", {}));
+        t.join();
+        CHECK(r.objects.size() == 2 || r.objects.size() == 3);
+    }
+}
+
+// ---------- roadmap §3.5: sidecar modes ----------
+
+TEST(localfs_sidecar_modes) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    if (fsutil::probe_meta_xattr(tmp.path) != 0) {
+        printf("       [SKIP] temp filesystem has no xattr support\n");
+        return;
+    }
+    // lazy: no sidecar while the xattr succeeds; reads and listings are xattr-backed
+    {
+        LocalFsOptions o;
+        o.sidecar = fsutil::SidecarMode::kLazy;
+        o.sidecar_scan_interval_sec = 0;
+        LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);
+        sync_wait(b.create_bucket("bkt"));
+        auto pr = put(b, "bkt", "k.bin", "lazy body");
+        CHECK(!fs::exists(tmp.path / "data/bkt/k.bin.lights3-meta"));
+        CHECK_EQ(sync_wait(b.head_object("bkt", "k.bin")).etag, pr.etag);
+        CHECK_EQ(read_all(*sync_wait(b.get_object("bkt", "k.bin", std::nullopt)).body),
+                 std::string("lazy body"));
+        auto l = sync_wait(b.list_objects("bkt", {}));
+        CHECK_EQ(l.objects.size(), size_t(1));
+        CHECK_EQ(l.objects[0].etag, pr.etag);
+        // A stale sidecar from an earlier sync-mode write is unlinked by the overwrite
+        std::ofstream(tmp.path / "data/bkt/k.bin.lights3-meta") << "etag\tstale\n";
+        put(b, "bkt", "k.bin", "lazy body v2");
+        CHECK(!fs::exists(tmp.path / "data/bkt/k.bin.lights3-meta"));
+        // Tagging rewrite stays sidecar-less too
+        sync_wait(b.set_object_tagging("bkt", "k.bin", "a=b"));
+        CHECK(!fs::exists(tmp.path / "data/bkt/k.bin.lights3-meta"));
+        CHECK_EQ(sync_wait(b.head_object("bkt", "k.bin")).tagging, std::string("a=b"));
+        // Multipart complete takes the same path
+        auto uid = sync_wait(b.create_multipart("bkt", "mp.bin", {}));
+        http::StringBodyReader p1("part-1");
+        auto e1 = sync_wait(b.upload_part("bkt", "mp.bin", uid, 1, p1));
+        sync_wait(b.complete_multipart("bkt", "mp.bin", uid, std::vector<PartInfo>{{1, e1.etag}}));
+        CHECK(!fs::exists(tmp.path / "data/bkt/mp.bin.lights3-meta"));
+        CHECK_EQ(sync_wait(b.head_object("bkt", "mp.bin")).size, uint64_t(6));
+        sync_wait(b.close());
+    }
+    // async: the sidecar lands after the response, before close() returns
+    {
+        LocalFsOptions o;
+        o.sidecar = fsutil::SidecarMode::kAsync;
+        o.sidecar_scan_interval_sec = 0;
+        LocalFsBackend b(tmp.path / "data2", tmp.path / "staging2", pool, o);
+        sync_wait(b.create_bucket("bkt"));
+        auto pr = put(b, "bkt", "k.bin", "async body");
+        CHECK_EQ(sync_wait(b.head_object("bkt", "k.bin")).etag, pr.etag);
+        sync_wait(b.close());
+        fs::path sc = tmp.path / "data2/bkt/k.bin.lights3-meta";
+        CHECK(fs::exists(sc));
+        bool has_etag = false;
+        for (auto& [k, v] : fsutil::read_tsv(sc))
+            if (k == "etag" && v == pr.etag) has_etag = true;
+        CHECK(has_etag);
+    }
+    // Both modes keep the sidecar synchronous when the xattr write fails (the sidecar is
+    // then the only source): a value above XATTR_SIZE_MAX (64KiB) fails on every filesystem
+    for (auto mode : {fsutil::SidecarMode::kLazy, fsutil::SidecarMode::kAsync}) {
+        LocalFsOptions o;
+        o.sidecar = mode;
+        o.sidecar_scan_interval_sec = 0;
+        fs::path root = tmp.path / ("data3-" + std::string(fsutil::sidecar_mode_name(mode)));
+        LocalFsBackend b(root, root / ".staging", pool, o);
+        sync_wait(b.create_bucket("bkt"));
+        ObjectMeta m;
+        m.user_meta["big"] = std::string(70000, 'x');
+        put(b, "bkt", "big.bin", "payload", m);
+        CHECK(fs::exists(root / "bkt/big.bin.lights3-meta"));  // written inline, before the response
+        CHECK_EQ(sync_wait(b.head_object("bkt", "big.bin")).user_meta["big"].size(), size_t(70000));
+        CHECK_EQ(b.xattr_policy().failure_count.load(), uint64_t(1));
+        sync_wait(b.close());
+    }
+}
+
+// ---------- roadmap §3.5: xattr degradation visibility + fail-fast ----------
+
+TEST(localfs_xattr_fallback_gauge_and_require_xattr) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    if (fsutil::probe_meta_xattr(tmp.path) != 0) {
+        printf("       [SKIP] temp filesystem has no xattr support\n");
+        return;
+    }
+    auto reg = std::make_shared<MetricsRegistry>();
+    {
+        LocalFsOptions o;
+        o.sidecar_scan_interval_sec = 0;
+        LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o,
+                         MetricsScope(reg, {{"backend", "lf"}}));
+        sync_wait(b.create_bucket("bkt"));
+        CHECK_EQ(b.xattr_policy().failure_count.load(), uint64_t(0));
+        std::string out = reg->render();
+        CHECK(out.find("lights3_localfs_xattr_fallback{backend=\"lf\"} 0") != std::string::npos);
+        ObjectMeta m;
+        m.user_meta["big"] = std::string(70000, 'x');  // > XATTR_SIZE_MAX → E2BIG, degrades to sidecar
+        put(b, "bkt", "big.bin", "payload", m);
+        CHECK_EQ(b.xattr_policy().failure_count.load(), uint64_t(1));
+        out = reg->render();
+        CHECK(out.find("lights3_localfs_xattr_fallback{backend=\"lf\"} 1") != std::string::npos);
+        CHECK(out.find("lights3_localfs_xattr_write_failures_total{backend=\"lf\"} 1") !=
+              std::string::npos);
+        CHECK_EQ(sync_wait(b.head_object("bkt", "big.bin")).user_meta["big"].size(), size_t(70000));
+        sync_wait(b.close());
+    }
+    {
+        LocalFsOptions o;
+        o.require_xattr = true;
+        o.sidecar_scan_interval_sec = 0;
+        LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);  // probe passes here
+        ObjectMeta m;
+        m.user_meta["big"] = std::string(70000, 'x');
+        CHECK_THROWS_S3(put(b, "bkt", "strict.bin", "payload", m), S3ErrorCode::InternalError);
+        CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "strict.bin")), S3ErrorCode::NoSuchKey);
+        CHECK(fs::is_empty(tmp.path / "staging/put"));  // tmp discarded, nothing half-committed
+        put(b, "bkt", "ok.bin", "payload");             // normal writes unaffected
+        CHECK_EQ(sync_wait(b.head_object("bkt", "ok.bin")).size, uint64_t(7));
+        sync_wait(b.close());
+    }
+}
+
+// ---------- roadmap §3.5: orphan sidecar sweep ----------
+
+TEST(localfs_orphan_sidecar_sweep) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsOptions o;
+    o.sidecar_scan_interval_sec = 0;  // drive it by hand
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);
+    sync_wait(b.create_bucket("bkt"));
+    put(b, "bkt", "a/b.bin", "x");
+    put(b, "bkt", "keep.bin", "y");
+    put(b, "bkt", "dir/", "");  // marker object: sidecar is dir/.lights3-dir.lights3-meta
+    fs::remove(tmp.path / "data/bkt/a/b.bin");
+    fs::remove(tmp.path / "data/bkt/dir/.lights3-dir");
+    CHECK(fs::exists(tmp.path / "data/bkt/a/b.bin.lights3-meta"));
+    CHECK(fs::exists(tmp.path / "data/bkt/dir/.lights3-dir.lights3-meta"));
+    CHECK_EQ(sync_wait(b.run_sidecar_sweep_once()), uint64_t(2));
+    CHECK(!fs::exists(tmp.path / "data/bkt/a/b.bin.lights3-meta"));
+    CHECK(!fs::exists(tmp.path / "data/bkt/dir/.lights3-dir.lights3-meta"));
+    CHECK(fs::exists(tmp.path / "data/bkt/keep.bin.lights3-meta"));
+    CHECK_EQ(sync_wait(b.run_sidecar_sweep_once()), uint64_t(0));
+    CHECK_EQ(sync_wait(b.head_object("bkt", "keep.bin")).size, uint64_t(1));
+    sync_wait(b.close());
 }
 
 // ---------- roadmap §3.4: multi-in-flight streams, fixed resources, meta opcodes ----------

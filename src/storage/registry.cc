@@ -41,6 +41,27 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     if (cfg.params.count("mpu_ttl")) o.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
     if (cfg.params.count("mpu_scan_interval"))
         o.mpu_scan_interval_sec = parse_duration_sec(cfg.params.at("mpu_scan_interval"));
+    // roadmap §3.5 knobs (docs/storage/localfs.md)
+    if (cfg.params.count("require_xattr")) o.require_xattr = parse_bool(cfg.params.at("require_xattr"));
+    if (cfg.params.count("sidecar")) o.sidecar = fsutil::parse_sidecar_mode(cfg.params.at("sidecar"));
+    auto small_int = [&](const char* k, int lo, int hi) {
+        const std::string& v = cfg.params.at(k);
+        int n = 0;
+        auto r = std::from_chars(v.data(), v.data() + v.size(), n);
+        if (r.ec != std::errc() || r.ptr != v.data() + v.size() || n < lo || n > hi)
+            throw std::runtime_error(cfg.type + " backend '" + cfg.name + "': " + k +
+                                     " must be an integer in [" + std::to_string(lo) + "," +
+                                     std::to_string(hi) + "]");
+        return n;
+    };
+    if (cfg.params.count("list_meta_concurrency"))
+        o.list_meta_concurrency = small_int("list_meta_concurrency", 1, 256);
+    if (cfg.params.count("list_cache_entries"))
+        o.list_cache_entries = parse_size(cfg.params.at("list_cache_entries"));  // plain count; K/M suffixes allowed
+    if (cfg.params.count("list_cache_min_dir_entries"))
+        o.list_cache_min_dir_entries = size_t(small_int("list_cache_min_dir_entries", 1, 1 << 30));
+    if (cfg.params.count("sidecar_scan_interval"))
+        o.sidecar_scan_interval_sec = parse_duration_sec(cfg.params.at("sidecar_scan_interval"));
     return o;
 }
 

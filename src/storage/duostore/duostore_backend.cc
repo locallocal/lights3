@@ -1226,7 +1226,8 @@ Task<ListUploadsResult> DuoStoreBackend::list_multipart_uploads(std::string_view
     // as end-of-list
     int limit = opt.delimiter.empty() && opt.max_uploads > 0 ? opt.max_uploads + 1 : 0;
     co_return apply_uploads_page(
-        meta_->list_uploads(bucket, opt.key_marker, opt.upload_id_marker, limit), opt);
+        meta_->list_uploads(bucket, opt.key_marker, opt.upload_id_marker, limit, opt.prefix),
+        opt);
 }
 
 // ---------- GC phase one (§9/§9.1) ----------

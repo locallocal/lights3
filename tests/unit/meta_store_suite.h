@@ -5,6 +5,7 @@
 // scenarios within the suite are isolated by distinct bucket names, and instances open/close serially (RocksDB single-process lock).
 #pragma once
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -483,11 +484,57 @@ inline void case_swap_extents_batch(const MetaFactory& make) {
     m->close();
 }
 
+// list_uploads pushdown hints (roadmap §3.5): engines that honor `limit` must also honor the
+// prefix and the key-marker-only cursor, otherwise the caller's own filtering can empty a page
+// and misreport end-of-list. Every engine must at least return a superset in (key, id) order
+inline void case_list_uploads_hints(const MetaFactory& make) {
+    auto m = make();
+    m->create_bucket("ms-uplist");
+    lights3::storage::ObjectMeta meta;
+    std::vector<std::string> a_ids, b_ids;
+    for (int i = 0; i < 5; ++i) a_ids.push_back(m->create_upload("ms-uplist", "a/k", meta));
+    for (int i = 0; i < 3; ++i) b_ids.push_back(m->create_upload("ms-uplist", "b/k", meta));
+    std::sort(a_ids.begin(), a_ids.end());
+    std::sort(b_ids.begin(), b_ids.end());
+    auto ordered = [](const std::vector<UploadInfo>& v) {
+        for (size_t i = 1; i < v.size(); ++i)
+            if (!(std::pair(v[i - 1].key, v[i - 1].upload_id) < std::pair(v[i].key, v[i].upload_id)))
+                return false;
+        return true;
+    };
+    // prefix + limit: the page must come from inside the prefix range
+    auto pb = m->list_uploads("ms-uplist", {}, {}, 2, "b/");
+    CHECK(ordered(pb));
+    CHECK(!pb.empty());
+    for (auto& u : pb) CHECK(u.key.compare(0, 2, "b/") == 0);
+    CHECK_EQ(pb[0].upload_id, b_ids[0]);
+    // key-marker only: everything of that key is already paged past
+    auto pk = m->list_uploads("ms-uplist", "a/k", {}, 2);
+    CHECK(ordered(pk));
+    CHECK(!pk.empty());
+    for (auto& u : pk) CHECK(u.key != "a/k");
+    CHECK_EQ(pk[0].upload_id, b_ids[0]);
+    // composite marker: strictly after (key, id)
+    auto pc = m->list_uploads("ms-uplist", "a/k", a_ids[2], 0);
+    CHECK(ordered(pc));
+    CHECK(pc.size() >= size_t(2 + 3));
+    CHECK_EQ(pc[0].key, "a/k");
+    CHECK_EQ(pc[0].upload_id, a_ids[3]);
+    // no prefix match → empty, not "the first entries of the table"
+    auto pn = m->list_uploads("ms-uplist", {}, {}, 2, "zz/");
+    CHECK(pn.empty());
+    for (auto& id : a_ids) m->abort_upload("ms-uplist", "a/k", id);
+    for (auto& id : b_ids) m->abort_upload("ms-uplist", "b/k", id);
+    m->delete_bucket("ms-uplist");
+    m->close();
+}
+
 inline void run_meta_store_suite(const MetaFactory& make) {
     case_gc_accounting(make);
     case_reclaim_reasons(make);
     case_alloc_monotonic_across_reopen(make);
     case_delete_bucket_blocks_on_mpu(make);
+    case_list_uploads_hints(make);
     case_list_max_keys_zero(make);
     case_list_delimiter_paging(make);
     case_pack_stats_accounting(make);

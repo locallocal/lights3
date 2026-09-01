@@ -50,9 +50,10 @@ private:
     // The rename + directory-fsync + sidecar tail of fsutil::commit_object_file, with the
     // rename going through RENAMEAT and the directory fsync through an FSYNC SQE when
     // available (same on-disk result; the caller already persisted xattr + data).
-    // By-value paths: coroutine parameters must not bind temporaries
+    // By-value paths: coroutine parameters must not bind temporaries. xattr_ok is the
+    // outcome of the caller's set_meta_xattr (drives the sidecar policy, roadmap §3.5)
     Task<void> commit_prepared(std::filesystem::path dest, fsutil::TmpFile& tmp,
-                               const ObjectMeta& meta, std::string_view key);
+                               const ObjectMeta& meta, std::string_view key, bool xattr_ok);
     // fsync the directory entry via an FSYNC SQE (silent-failure semantics of
     // fsutil::fsync_dir); no-op under LIGHTS3_FSYNC=0
     Task<void> sync_dir(std::filesystem::path dir);

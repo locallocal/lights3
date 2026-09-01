@@ -35,6 +35,7 @@ DuoStoreBackend 主体见 [./duostore-core.md](./duostore-core.md)；姊妹实�
 | `o:<b>` | HASH | `objects_key` | field=对象 key，value=`codec::encode_object`；点查 `HGET` |
 | `oz:<b>` | ZSET | `zindex_key` | 全员 score=0 的字典序索引，member=对象 key；list 走 `ZRANGEBYLEX`（§5） |
 | `up:<b>` | HASH | `uploads_key` | field=`<key>\0<id>`，value=`codec::encode_upload` |
+| `uz:<b>` | ZSET（score 恒 0） | `uploads_zkey` | member=`<key>\0<id>`，`up:<b>` 的词序索引（roadmap §3.5），与 `oz:<b>` 同构；create/complete/abort 与 HASH 同脚本同批维护，delete_bucket 一并 DEL |
 | `pt:<b>\0<key>\0<id>` | HASH | `parts_key`（内部拼 `codec::upload_key`） | field=十进制 part_no，value=`codec::encode_part`；complete/abort 整键 `DEL` |
 | `refs` | HASH | `refs_key` | field=十进制 file_id，value=owner 简述；`chunk_referenced` = `HEXISTS` |
 | `gcq` | ZSET | `gcq_key` | score=seq，member=`be64(seq) ‖ encode_reclaim`（be64 前缀保 member 唯一且自含 seq） |
@@ -162,10 +163,15 @@ C++ 侧 `list_objects` 解包四元组返回值，value 经 `codec::decode_objec
 ### 5.2 其余列举
 
 - `list_buckets`：`HGETALL buckets` + 客户端按名排序（桶数小）；
-- `list_uploads`：`HSCAN up:<b> COUNT 512` 分批（超大表不再单命令整体物化）；游标
-  弱一致可接受，`std::map` 兼做去重（HSCAN 可能重复返回 field）与 (key, upload_id)
-  字节序排序。**分页 hint 全忽略**：HSCAN 游标是桶序非字典序，无法表达
-  "从某 field 之后开始"，调用方 `apply_uploads_page` 会再裁剪（SPI 允许）；
+- `list_uploads`（roadmap §3.5）：先 `ZCARD uz:<b>` 与 `HLEN up:<b>` 对账。相等
+  → 索引路径：`ZRANGEBYLEX uz:<b> <min> + LIMIT 0 <page>` 从游标起按 (key,
+  upload_id) 序分页取 member，再 `HMGET up:<b>` 取值；`<min>` 取"marker 之后"
+  与"prefix 起点"二者较大者（复合 marker 用 `(key\0id`；仅 key-marker 用
+  `[key\x01`——key 不含 NUL，故这是严格大于该 key 的最小串），member 越过
+  prefix 即停，`limit` 下推。HMGET 为 nil 的 member（写入与重建竞态）跳过并
+  顺手 `ZREM`。不等 → 兼容路径：`HSCAN up:<b> COUNT 512` 全表分批（老版本网
+  关或建索引前写入的表），`std::map` 去重排序返回全部，并**重建索引**
+  （ZREM 多余 member、ZADD 缺失 field，普通命令分批），下一次列举即走索引；
 - `scan_parts` / `list_parts`：`HGETALL pt:...` + 客户端按 part_no 数值排序，同时保留
   原始 value（供 complete/abort 的 sha1 指纹）；
 - `pack_stats`：`SCAN MATCH <prefix>pack:* COUNT 512` 游标迭代（不阻塞 server）+

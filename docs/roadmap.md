@@ -164,16 +164,29 @@ fdatasync 经 dup fd 出锁上 ring；引擎建失败回退同步路径 + 常驻
 [storage/xlocalfs.md](storage/xlocalfs.md)、
 [storage/duostore-data-fs.md](storage/duostore-data-fs.md) §9。
 
-### 3.5 localfs / listing
+### 3.5 ~~localfs / listing~~ **已完成（2026-09-01，六项全部）**
 
-| 条目 | 现状 | 价值 | 难度 |
-| --- | --- | --- | --- |
-| **listing 每 key 一次 stat+getxattr** | `max_keys=1000` 一页 2000+ 次系统调用、串行在单个池线程。可并行化 `load_meta` 或加 per-directory 缓存（文档已把后者写作"留作后续"） | 高 | 中 |
-| 分页无索引 | 翻页需沿路径重走 readdir+排序，深目录百万对象下成本随页码上升 | 中 | 中 |
-| xattr 降级不可见 | 不支持 xattr 的 fs（NFS/部分 overlayfs）上退化为两步提交、留下"新数据+旧 sidecar"崩溃窗口，但只有一行启动 WARN。照 `xlocalfs_uring_fallback` 先例提升为常驻 gauge，或提供 fail-fast 开关 | 中 | 低 |
-| 写路径 4 次 fsync + 2 次 rename | 小对象负载下元数据开销大于数据；xattr 已是权威读源，可考虑 sidecar 惰性/异步化选项 | 中 | 中 |
-| 孤儿 sidecar 仅 listing 顺带清理 | 从不被 list 的目录永久残留；可挂进现有 MPU 孤儿清理定时器 | 低 | 低 |
-| redis 侧 list_multipart_uploads 全表 HSCAN | 可加词序 ZSET 索引下推游标 | 中 | 低 |
+① listing 元数据并行：遍历只收集本页 key，随后按 `list_meta_concurrency`
+（默认 8）条带分给池线程 `when_all` 并行 stat+getxattr；readdir 与 stat 之
+间被删的 key 从本页消失而非让整个 LIST 报 NoSuchKey。② 分页：新增
+`storage/localfs/list_cache.h:DirListCache`——每个目录的排序条目表按目录
+inode+mtime/ctime 缓存（一次 stat 校验、2s racy 窗口不入缓存、LRU 预算
+`list_cache_entries`），翻页起点 `partition_point` 二分，深页成本不再随页码
+上升；孤儿 sidecar 判定改用同一次 readdir 的名字集合（省掉每 sidecar 一次
+stat）。③ xattr 降级可见：构造期 `probe_meta_xattr`，常驻 gauge
+`lights3_localfs_xattr_fallback` + 计数器 `…_xattr_write_failures_total`，
+`require_xattr: true` 探测失败即拒绝启动、写失败在 rename 前抛错。④ 写路径：
+`sidecar: sync|async|lazy`——async 把 sidecar 挪到后台补写、lazy 在 xattr 成
+功时不写（关键路径 2 fsync + 1 rename），xattr 失败时两者退回同步写；
+xlocalfs 的 ring 提交同享。⑤ 孤儿 sidecar 定期扫描：
+`run_sidecar_sweep_once` 挂 `schedule_periodic`（默认 1d），删除在该 key 的
+commit_lock 下复查后进行（listing 自愈同路径），杜绝误删刚落地对象的 sidecar。
+⑥ redis：`uz:<b>` 词序 ZSET 索引，`ZRANGEBYLEX` 下推游标与 prefix、`HMGET`
+取值，`ZCARD≠HLEN` 时回退全表 HSCAN 并重建索引；顺带修正四个 meta 引擎
+`list_uploads` 的下推契约（SPI 增 `prefix` 提示 + 仅 key-marker 的"整 key 已翻
+过"语义），此前 rocks/sqlite/tikv 在 prefix 列举下可能误报列举结束。见
+[storage/localfs.md](storage/localfs.md) §2/§3/§6/§12、
+[storage/duostore-meta-redis.md](storage/duostore-meta-redis.md) §5.2。
 
 ### 3.6 tiered
 
@@ -408,7 +421,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 3. API×后端分维指标 + 后端耗时（§5.1）；异步日志 + 慢日志（§5.2）
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
 5. ~~cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3，含熔断/deadline/异步 acquire/凭证链）~~ **已完成（2026-08-28）**
-6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；DuoGcStats 接指标（§3.7）；xattr 降级 gauge（§3.5）
+6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；DuoGcStats 接指标（§3.7）；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**
 7. fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）
 8. Dockerfile + compose（§6.3）
 9. 性能基线入库（§4.3；前置 bench --json）
@@ -421,7 +434,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 4. builtin/seastar TLS + 证书热重载（§4.1）
 5. 配置热重载安全子集（§4.4）
 6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**
-7. localfs listing 优化 + 元数据缓存层（§3.5/§3.8）
+7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）
 8. tiered 扫描增量化 + prefix 策略（§3.6）
 9. 故障注入体系 + soak（§6.1）；traceparent 透传（§5.4）
 10. install target + CPack（§6.3）；审计日志（§3.9④）

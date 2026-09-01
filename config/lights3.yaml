@@ -85,6 +85,13 @@ backends:
     staging: ./data/staging            # must be on the same filesystem as root (rename atomicity);
                                        # default <root>/.lights3-staging
     # queue_depth: 256                 # xlocalfs only: io_uring SQ depth
+    # -- roadmap §3.5 (docs/storage/localfs.md §2/§3/§6/§12; values are defaults) --
+    # require_xattr: false             # true = refuse to start (and to write) on a filesystem without user xattrs
+    # sidecar: sync                    # sync | async (sidecar written after the response) | lazy (none while the xattr succeeds)
+    # list_meta_concurrency: 8         # pool workers sharing one listing page's stat+getxattr
+    # list_cache_entries: 1M           # per-directory sorted-entry cache budget (entries; 0 = off)
+    # list_cache_min_dir_entries: 256  # directories smaller than this are never cached
+    # sidecar_scan_interval: 1d        # orphan-sidecar sweep period; 0s = off
 
   # ---------- duostore: metadata KV + chunk/pack data engine (docs/duostore-backend.md) ----------
   # meta engine, pick one of four: rocksdb (default) | redis | sqlite | tikv;

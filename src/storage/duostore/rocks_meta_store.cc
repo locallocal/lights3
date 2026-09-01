@@ -592,19 +592,26 @@ std::vector<PartRec> RocksMetaStore::list_parts(std::string_view b, std::string_
 
 std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b,
                                                     std::string_view key_marker,
-                                                    std::string_view id_marker, int limit) {
+                                                    std::string_view id_marker, int limit,
+                                                    std::string_view key_prefix) {
     require_bucket_locked(b);  // pure read; the lock-free get is idempotent and safe
     std::string prefix = std::string(b) + '\0';
     // Cursor pushdown (docs/archive/gaps.md §5.1): the key encoding is already in
     // (key, upload_id) order, so seeking past the marker suffices — not a single
-    // skipped entry is read
+    // skipped entry is read. Key-marker-only means "key > key_marker": keys contain no
+    // NUL, so key_marker+'\x01' is the smallest possible greater key. The prefix raises
+    // the seek point further (roadmap §3.5) and bounds the scan below
     std::string seek = prefix;
-    if (!key_marker.empty() || !id_marker.empty()) {
+    if (!id_marker.empty()) {
         seek += std::string(key_marker);
         seek += '\0';
         seek += std::string(id_marker);
         seek += '\0';  // trailing '\0' makes the seek land just after that (key,id)
+    } else if (!key_marker.empty()) {
+        seek += std::string(key_marker);
+        seek += '\x01';
     }
+    if (std::string from = prefix + std::string(key_prefix); from > seek) seek = std::move(from);
     std::vector<UploadInfo> out;
     auto it = std::unique_ptr<rocksdb::Iterator>(
         db()->NewIterator(rocksdb::ReadOptions(), cfs_[kUploads]));
@@ -612,6 +619,7 @@ std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b,
         if (limit > 0 && out.size() >= size_t(limit)) break;
         // key = <bucket>\0<key>\0<upload_id>; the prefix scan is naturally sorted by (key, upload_id)
         std::string_view rest = strip_prefix(it->key(), prefix.size());
+        if (rest.substr(0, key_prefix.size()) != key_prefix) break;  // sorted: past the prefix range
         auto sep = rest.rfind('\0');
         if (sep == std::string_view::npos) continue;
         auto rec = codec::decode_upload(std::string(rest.substr(0, sep)),

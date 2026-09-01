@@ -11,6 +11,7 @@
 #include <tuple>
 
 #include "core/log.h"
+#include "core/task.h"
 #include "core/util/crypto.h"
 #include "storage/listing.h"
 #include "storage/multipart.h"
@@ -38,15 +39,35 @@ using fsutil::write_tsv;
 LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool,
                                LocalFsOptions opt, MetricsScope metrics)
     : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)), opt_(opt) {
-    init_metrics(metrics);
     fs::create_directories(root_);
     fs::create_directories(staging_ / "put");
     fs::create_directories(staging_ / "mpu");
+    init_metrics(metrics);
     commit_locks_.reserve(kLockStripes);
     for (size_t i = 0; i < kLockStripes; ++i)
         commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
+    // xattr capability probe (roadmap §3.5): staging shares root's filesystem (rename
+    // atomicity), so a probe there answers for the whole layout. A negative result is
+    // either fatal (require_xattr) or made visible on the metrics plane right away --
+    // previously the only trace was a WARN at the first failing PUT
+    xattr_.required = opt_.require_xattr;
+    if (int err = fsutil::probe_meta_xattr(staging_ / "put"); err != 0) {
+        if (opt_.require_xattr)
+            throw std::runtime_error(
+                std::string("localfs: filesystem under ") + root_.string() +
+                " cannot store the metadata xattr (" + strerror(err) +
+                ") and require_xattr is set");
+        LOG_WARN("localfs: filesystem under {} has no usable xattr support ({}); object "
+                 "metadata runs sidecar-only (two-rename consistency model), see "
+                 "lights3_localfs_xattr_fallback",
+                 root_.string(), strerror(err));
+        xattr_.note_failure();
+    }
     cleanup_stale_uploads();
-    schedule_mpu_scan();
+    schedule_periodic(mpu_timer_, opt_.mpu_ttl_sec > 0 ? opt_.mpu_scan_interval_sec : 0,
+                      &LocalFsBackend::mpu_scan_task);
+    schedule_periodic(sidecar_timer_, opt_.sidecar_scan_interval_sec,
+                      &LocalFsBackend::sidecar_sweep_task);
 }
 
 void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
@@ -74,6 +95,24 @@ void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
         m_op_seconds_[size_t(op)] = metrics.histogram(
             "lights3_localfs_op_seconds", "Wall time of a data-path operation",
             {0.001, 0.005, 0.02, 0.1, 0.5, 2, 10}, {{"op", kOpNames[size_t(op)]}});
+    // roadmap §3.5: xattr degradation as a resident gauge (same rationale as
+    // lights3_xlocalfs_uring_fallback -- a startup WARN vanishes with log rotation, a gauge
+    // stays on the dashboard), plus the sweep and directory-cache counters
+    xattr_.fallback = metrics.gauge(
+        "lights3_localfs_xattr_fallback",
+        "1 = metadata xattr unavailable, objects rely on the sidecar (two-rename model)");
+    xattr_.failures = metrics.counter("lights3_localfs_xattr_write_failures_total",
+                                      "Object metadata xattr writes that failed");
+    m_orphans_removed_ = metrics.counter("lights3_localfs_orphan_sidecars_removed_total",
+                                         "Orphan sidecar files removed (listing + sweep)");
+    dir_cache_ = std::make_unique<fsutil::DirListCache>(
+        fsutil::DirListCache::Options{opt_.list_cache_entries, opt_.list_cache_min_dir_entries},
+        metrics.counter("lights3_localfs_list_dir_cache_total",
+                        "Listing directory-snapshot cache lookups", {{"result", "hit"}}),
+        metrics.counter("lights3_localfs_list_dir_cache_total",
+                        "Listing directory-snapshot cache lookups", {{"result", "miss"}}),
+        metrics.gauge("lights3_localfs_list_dir_cache_entries",
+                      "Directory entries resident in the listing cache"));
 }
 
 void LocalFsBackend::record_op(Op op, double secs, bool ok) {
@@ -93,30 +132,57 @@ Task<void> LocalFsBackend::close() {
     co_return;
 }
 
-// Periodic cleanup (docs/archive/gaps.md §6.3): previously ran only once at startup, so a gateway
-// running for months without a restart would accumulate never-completed/aborted upload
-// directories without bound. Re-arms after completion (same as the duostore worker): scans
-// never overlap/pile up, a slow scan just pushes back the next trigger
-void LocalFsBackend::schedule_mpu_scan() {
-    if (opt_.mpu_ttl_sec <= 0 || opt_.mpu_scan_interval_sec <= 0) return;
+// Periodic maintenance (docs/archive/gaps.md §6.3 for the mpu scan, roadmap §3.5 for the
+// sidecar sweep): the mpu cleanup previously ran only once at startup, so a gateway running
+// for months without a restart would accumulate never-completed/aborted upload directories
+// without bound. Each task re-arms itself after completion (same as the duostore worker):
+// runs never overlap/pile up, a slow run just pushes back the next trigger
+void LocalFsBackend::schedule_periodic(TimerQueue::Id& id, int interval_sec,
+                                       Task<void> (LocalFsBackend::*fn)()) {
+    if (interval_sec <= 0) return;
     bg_.if_open([&] {
-        mpu_timer_ = TimerQueue::instance().add(
-            std::chrono::seconds(opt_.mpu_scan_interval_sec), [this] {
-                bg_.spawn([](LocalFsBackend* self) -> Task<void> {
-                    co_await self->pool_->schedule();  // directory walk is blocking IO, go to the pool
-                    self->cleanup_stale_uploads();
-                    self->schedule_mpu_scan();
-                }(this));
-            });
+        id = TimerQueue::instance().add(std::chrono::seconds(interval_sec),
+                                        [this, slot = &id, interval_sec, fn] {
+                                            bg_.spawn(run_periodic(slot, interval_sec, fn));
+                                        });
     });
 }
+
+Task<void> LocalFsBackend::run_periodic(TimerQueue::Id* slot, int interval_sec,
+                                        Task<void> (LocalFsBackend::*fn)()) {
+    // Two statements on purpose: GCC 15 ICEs (gimplify.cc gimple_add_tmp_var) on
+    // co_await'ing a pointer-to-member call expression directly
+    Task<void> run = (this->*fn)();
+    co_await std::move(run);
+    schedule_periodic(*slot, interval_sec, fn);
+}
+
+Task<void> LocalFsBackend::mpu_scan_task() {
+    co_await pool_->schedule();  // directory walk is blocking IO, go to the pool
+    cleanup_stale_uploads();
+}
+
+Task<void> LocalFsBackend::sidecar_sweep_task() { (void)co_await run_sidecar_sweep_once(); }
 
 void LocalFsBackend::shutdown_background() {
     bg_.begin_close();
     // cancel must happen outside the group lock: TimerQueue::cancel blocks on in-flight
     // callbacks, and the callback takes the group lock
     TimerQueue::instance().cancel(mpu_timer_);
+    TimerQueue::instance().cancel(sidecar_timer_);
     bg_.wait_idle();
+}
+
+void LocalFsBackend::defer_sidecar(fs::path dest, ObjectMeta meta) {
+    // The sidecar is an auxiliary copy here (the xattr succeeded, or we would not be
+    // deferring): ordering between two deferred writes of the same key is not enforced --
+    // on an xattr filesystem the sidecar is never read back, and the next sync-mode or
+    // tagging write realigns it. Closing backends write inline instead of dropping it
+    bool spawned = bg_.spawn([](LocalFsBackend* self, fs::path d, ObjectMeta m) -> Task<void> {
+        co_await self->pool_->schedule();
+        fsutil::write_object_sidecar(d, m, self->staging_ / "put");
+    }(this, dest, meta));
+    if (!spawned) fsutil::write_object_sidecar(dest, meta, staging_ / "put");
 }
 
 AsyncSemaphore& LocalFsBackend::commit_lock(std::string_view bucket, std::string_view key) {
@@ -296,8 +362,10 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     // and commit are atomic with respect to concurrent writers
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();  // the lock wakeup may resume on another thread; do blocking IO back on a pool thread
-    fsutil::check_put_condition(object_path(bucket, key), cond, key);
-    commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+    fs::path dest = object_path(bucket, key);
+    fsutil::check_put_condition(dest, cond, key);
+    if (commit_object_file(dest, tmp, meta, staging_ / "put", key, commit_options()))
+        defer_sidecar(std::move(dest), meta);
     g.ok = true;
     co_return PutResult{meta.etag};
 }
@@ -446,7 +514,9 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     meta.last_modified = std::chrono::system_clock::now();
     auto lk = co_await commit_lock(dst_bucket, dst_key).acquire();
     co_await pool_->schedule();
-    commit_object_file(object_path(dst_bucket, dst_key), tmp, meta, staging_ / "put", dst_key);
+    fs::path dest = object_path(dst_bucket, dst_key);
+    if (commit_object_file(dest, tmp, meta, staging_ / "put", dst_key, commit_options()))
+        defer_sidecar(std::move(dest), meta);
     g.ok = true;
     co_return PutResult{meta.etag};
 }
@@ -497,6 +567,83 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
 
 namespace {
 
+using fsutil::DirEntries;
+using fsutil::DirEntry;
+
+// One directory read for the listing walker: sorted entries (files by name, subdirectories
+// by name+"/", the directory-marker object by ""), bucket marker and sidecars filtered out.
+// Sidecars whose data file is absent from the **same readdir** are reported as orphan
+// candidates (no extra stat per object: previously every sidecar cost one exists() call,
+// a third of the walk's syscalls) and reaped afterwards under the per-key commit lock
+DirEntries read_dir_sorted(const fs::path& dir, std::vector<fs::path>* orphans) {
+    auto es = std::make_shared<std::vector<DirEntry>>();
+    std::vector<std::string> sidecars;
+    std::error_code ec;
+    for (auto& e : fs::directory_iterator(dir, ec)) {
+        std::string name = e.path().filename().string();
+        std::error_code tec;
+        if (e.is_directory(tec)) {
+            es->push_back({name + "/", true});
+            continue;
+        }
+        if (name == fsutil::kBucketMarker) continue;
+        // Directory-marker object (docs/archive/gaps.md §6.3): restored to the key "<rel>"
+        // (already ends with '/'). Its sort key is the empty string -- it sorts right
+        // before the other entries in the same directory, matching the
+        // "collect everything + full sort" order where "a/b/" < "a/b/x"
+        if (name == fsutil::kDirMarker) {
+            if (e.is_regular_file(tec)) es->push_back({std::string(), false});
+            continue;
+        }
+        if (name.ends_with(fsutil::kSidecarSuffix)) {
+            if (orphans) sidecars.push_back(std::move(name));
+            continue;
+        }
+        if (e.is_regular_file(tec)) es->push_back({std::move(name), false});
+    }
+    std::sort(es->begin(), es->end(),
+              [](const DirEntry& a, const DirEntry& b) { return a.sort_key < b.sort_key; });
+    if (!sidecars.empty()) {
+        // Orphan sidecar detection: delete_object is a two-step "data first, then sidecar",
+        // and a crash in between leaves an orphan that occupies space forever. Membership
+        // test against the sorted names of this very directory (the marker object's data
+        // file is the marker itself)
+        auto has = [&](const std::string& data_name) {
+            const std::string& sk = data_name == fsutil::kDirMarker ? std::string() : data_name;
+            auto it = std::lower_bound(
+                es->begin(), es->end(), sk,
+                [](const DirEntry& e, const std::string& k) { return e.sort_key < k; });
+            return it != es->end() && !it->is_dir && it->sort_key == sk;
+        };
+        for (auto& sc : sidecars) {
+            std::string data = sc.substr(0, sc.size() - std::strlen(fsutil::kSidecarSuffix));
+            if (!has(data)) orphans->push_back(dir / sc);
+        }
+    }
+    return es;
+}
+
+// Per-list_objects directory reader: consults the backend's snapshot cache (roadmap
+// §3.5 ②) and collects orphan candidates across the walk
+struct DirReader {
+    fsutil::DirListCache* cache;
+    std::vector<fs::path> orphans;
+
+    DirEntries read(const fs::path& dir) {
+        if (!cache || !cache->enabled()) return read_dir_sorted(dir, &orphans);
+        fsutil::DirListCache::Stamp st;
+        // Stamp **before** the readdir: a modification racing with the read then always
+        // shows as a stamp mismatch on the next page
+        if (!fsutil::DirListCache::stamp_of(dir, st)) return read_dir_sorted(dir, &orphans);
+        std::string key = dir.string();
+        if (auto hit = cache->lookup(key, st)) return hit;
+        auto started = std::chrono::system_clock::now();
+        auto es = read_dir_sorted(dir, &orphans);
+        cache->insert(key, st, es, started);
+        return es;
+    }
+};
+
 // Ordered directory walk for list_objects (docs/archive/gaps.md §2.7 pruning).
 // Sort key of a directory entry: files use name, directories use name+"/" -- every key
 // underneath has that string as a prefix, so the interleaved output order matches
@@ -504,6 +651,7 @@ namespace {
 struct ListWalker {
     const std::string& prefix;
     const std::string& start_after;  // only entries strictly greater than this key are visible
+    DirReader& reader;
     // Returning false terminates the whole walk (truncation); the callback may set
     // skip_prefix to skip a delimiter group
     std::function<bool(std::string&&)> on_key;
@@ -519,46 +667,32 @@ struct ListWalker {
         return true;
     }
 
+    // Page start (roadmap §3.5 ②): index of the first entry of this (sorted) directory
+    // that can still produce output after start_after -- a binary search instead of the
+    // old linear "q <= start_after → continue" over every entry, which made page N cost
+    // O(directory) even when the marker sat near the end
+    size_t first_visible(const std::vector<DirEntry>& es, const std::string& rel) const {
+        if (start_after.empty()) return 0;
+        if (start_after.compare(0, rel.size(), rel) != 0)
+            // Not under rel: every key here is either entirely above start_after (rel >
+            // start_after, keep all) or entirely below it (skip all)
+            return rel > start_after ? 0 : es.size();
+        std::string_view tail(start_after);
+        tail.remove_prefix(rel.size());
+        size_t i = std::partition_point(es.begin(), es.end(),
+                                        [&](const DirEntry& e) { return e.sort_key <= tail; }) -
+                   es.begin();
+        // The directory right before the boundary may be an ancestor of start_after (its
+        // "name/" is a prefix of the tail): the marker lies inside it, keep descending
+        if (i > 0 && es[i - 1].is_dir && tail.starts_with(es[i - 1].sort_key)) --i;
+        return i;
+    }
+
     // rel: the key prefix this directory corresponds to ("" or "a/b/")
     void walk(const fs::path& dir, const std::string& rel) {
-        struct Entry {
-            std::string sort_key;  // file: name; directory: name+"/"
-            bool is_dir;
-        };
-        std::vector<Entry> es;
-        std::error_code ec;
-        for (auto& e : fs::directory_iterator(dir, ec)) {
-            std::string name = e.path().filename().string();
-            std::error_code tec;
-            if (e.is_directory(tec)) {
-                es.push_back({name + "/", true});
-                continue;
-            }
-            if (name == fsutil::kBucketMarker) continue;
-            // Directory-marker object (docs/archive/gaps.md §6.3): restored to the key "<rel>"
-            // (already ends with '/'). Its sort key is the empty string -- it sorts right
-            // before the other entries in the same directory, matching the
-            // "collect everything + full sort" order where "a/b/" < "a/b/x"
-            if (name == fsutil::kDirMarker) {
-                if (e.is_regular_file(tec)) es.push_back({std::string(), false});
-                continue;
-            }
-            if (name.ends_with(fsutil::kSidecarSuffix)) {
-                // Orphan sidecar self-healing: delete_object is a two-step
-                // "data first, then sidecar", and a crash in between leaves an orphan that
-                // occupies space forever. With pruning this only covers visited
-                // directories (best-effort; unvisited parts wait for a later list)
-                std::string data = e.path().string();
-                data.resize(data.size() - std::strlen(fsutil::kSidecarSuffix));
-                if (!fs::exists(data, tec)) fs::remove(e.path(), tec);
-                continue;
-            }
-            if (e.is_regular_file(tec)) es.push_back({std::move(name), false});
-        }
-        std::sort(es.begin(), es.end(),
-                  [](const Entry& a, const Entry& b) { return a.sort_key < b.sort_key; });
-
-        for (auto& e : es) {
+        DirEntries es = reader.read(dir);
+        for (size_t i = first_visible(*es, rel); i < es->size(); ++i) {
+            const DirEntry& e = (*es)[i];
             if (stopped) return;
             std::string q = rel + e.sort_key;  // file: full key; directory: subtree prefix
             // Delimiter group skipping: an item fully inside the group is skipped
@@ -592,26 +726,11 @@ struct ListWalker {
 // string if none. When the truncation boundary lands on a common prefix, this finds the
 // group tail, keeping the next_token semantics ("last key inside the group") consistent
 // with the full implementation
-std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
+std::string max_key_with_prefix(DirReader& reader, const fs::path& dir, const std::string& rel,
                                 const std::string& want) {
-    struct Entry {
-        std::string sort_key;
-        bool is_dir;
-    };
-    std::vector<Entry> es;
-    std::error_code ec;
-    for (auto& e : fs::directory_iterator(dir, ec)) {
-        std::string name = e.path().filename().string();
-        std::error_code tec;
-        if (e.is_directory(tec)) es.push_back({name + "/", true});
-        else if (name == fsutil::kDirMarker) es.push_back({std::string(), false});
-        else if (name != fsutil::kBucketMarker && !name.ends_with(fsutil::kSidecarSuffix) &&
-                 e.is_regular_file(tec))
-            es.push_back({std::move(name), false});
-    }
-    std::sort(es.begin(), es.end(),
-              [](const Entry& a, const Entry& b) { return a.sort_key > b.sort_key; });
-    for (auto& e : es) {
+    DirEntries es = reader.read(dir);
+    for (auto it = es->rbegin(); it != es->rend(); ++it) {
+        const DirEntry& e = *it;
         std::string q = rel + e.sort_key;
         if (e.is_dir) {
             // The whole subtree is inside the group (q starts with want), or the group
@@ -619,7 +738,7 @@ std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
             if (q.compare(0, want.size(), want) != 0 && want.compare(0, q.size(), q) != 0)
                 continue;
             fs::path sub = dir / e.sort_key.substr(0, e.sort_key.size() - 1);
-            auto r = max_key_with_prefix(sub, q, want);
+            auto r = max_key_with_prefix(reader, sub, q, want);
             if (!r.empty()) return r;
         } else if (q.compare(0, want.size(), want) == 0) {
             return q;
@@ -627,6 +746,15 @@ std::string max_key_with_prefix(const fs::path& dir, const std::string& rel,
     }
     return {};
 }
+
+// A directory-marker object's data file is the reserved marker inside the directory
+// (same mapping as object_path)
+fs::path key_data_path(const fs::path& base, const std::string& key) {
+    return key.ends_with('/') ? base / fs::path(key + fsutil::kDirMarker) : base / fs::path(key);
+}
+
+// Keys per strided meta-load worker below which fanning out is not worth the pool hops
+constexpr size_t kMinKeysPerMetaWorker = 32;
 
 }  // namespace
 
@@ -660,14 +788,16 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     int count = 0;
     std::string last_emitted;   // last emitted entry (key or group name)
     bool last_is_group = false;
+    std::vector<std::string> page_keys;  // metadata is loaded after the walk, in parallel
 
-    ListWalker walker{opt.prefix, opt.start_after, nullptr, {}, false};
+    DirReader reader{dir_cache_.get(), {}};
+    ListWalker walker{opt.prefix, opt.start_after, reader, nullptr, {}, false};
     auto truncate = [&] {
         out.is_truncated = true;
         // The group tail is the token (consistent with the full implementation); if a
         // concurrent delete made the group vanish, fall back to the group name itself
         if (last_is_group) {
-            std::string tail = max_key_with_prefix(start_dir, dir_rel, last_emitted);
+            std::string tail = max_key_with_prefix(reader, start_dir, dir_rel, last_emitted);
             out.next_token = tail.empty() ? last_emitted : tail;
         } else {
             out.next_token = last_emitted;
@@ -694,19 +824,135 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
             truncate();
             return false;
         }
-        // A directory-marker object's data file is the reserved marker inside the
-        // directory (same mapping as object_path)
-        fs::path data = key.ends_with('/') ? base / fs::path(key + fsutil::kDirMarker)
-                                           : base / fs::path(key);
-        out.objects.push_back(load_meta(data, key));
-        last_emitted = std::move(key);
+        last_emitted = key;
+        page_keys.push_back(std::move(key));
         last_is_group = false;
         ++count;
         return true;
     };
     walker.walk(start_dir, dir_rel);
+    co_await load_page_meta(base, page_keys, out.objects);
+    if (!reader.orphans.empty())
+        co_await reap_orphan_sidecars(std::string(bucket), std::move(reader.orphans));
     g.ok = true;
     co_return out;
+}
+
+// roadmap §3.5 ①: one page = up to max_keys × (stat + getxattr), previously serial on a
+// single pool thread (2000+ syscalls behind one request). Strided fan-out over the pool;
+// results keep the walk order by index
+Task<void> LocalFsBackend::load_page_meta(const fs::path& base,
+                                          const std::vector<std::string>& keys,
+                                          std::vector<ObjectMeta>& out) {
+    const size_t n = keys.size();
+    if (n == 0) co_return;
+    std::vector<std::optional<ObjectMeta>> metas(n);
+    size_t stride = size_t(std::max(1, opt_.list_meta_concurrency));
+    stride = std::min({stride, pool_->size(),
+                       (n + kMinKeysPerMetaWorker - 1) / kMinKeysPerMetaWorker});
+    if (stride <= 1) {
+        co_await load_meta_slice(base, keys, 0, 1, metas);  // already on a pool thread
+    } else {
+        std::vector<Task<void>> workers;
+        workers.reserve(stride);
+        for (size_t w = 0; w < stride; ++w)
+            workers.push_back(load_meta_slice(base, keys, w, stride, metas));
+        co_await when_all(std::move(workers));
+        co_await pool_->schedule();  // when_all resumes on the last worker's thread; stay on the pool
+    }
+    out.reserve(out.size() + n);
+    for (auto& m : metas)
+        if (m) out.push_back(std::move(*m));
+}
+
+Task<void> LocalFsBackend::load_meta_slice(const fs::path& base,
+                                           const std::vector<std::string>& keys, size_t first,
+                                           size_t stride,
+                                           std::vector<std::optional<ObjectMeta>>& metas) {
+    if (stride > 1) co_await pool_->schedule();
+    for (size_t i = first; i < keys.size(); i += stride) {
+        try {
+            metas[i] = load_meta(key_data_path(base, keys[i]), keys[i]);
+        } catch (const S3Error& e) {
+            // Deleted between readdir and stat: the key simply drops out of this page
+            // (the old inline path turned it into a NoSuchKey for the whole LIST)
+            if (e.code != S3ErrorCode::NoSuchKey) throw;
+        }
+    }
+}
+
+// ---------- orphan sidecars (roadmap §3.5) ----------
+
+// Remove one "<key>.lights3-meta" whose data file is gone. Under the key's commit lock:
+// PUT's commit section (data rename → sidecar write) holds the same lock, so the re-check
+// and the unlink cannot straddle a fresh commit and delete the new object's sidecar --
+// which on a filesystem without xattr would be its only metadata
+Task<bool> LocalFsBackend::reap_orphan_sidecar(std::string bucket, fs::path sidecar) {
+    std::string rel = sidecar.lexically_relative(bucket_dir(bucket)).generic_string();
+    if (rel.empty() || rel.starts_with("..") || !rel.ends_with(kSidecarSuffix)) co_return false;
+    std::string key = rel.substr(0, rel.size() - std::strlen(kSidecarSuffix));
+    fs::path data = bucket_dir(bucket) / fs::path(key);
+    if (key.ends_with(fsutil::kDirMarker))  // marker object: lock the "<dir>/" key PUT uses
+        key.resize(key.size() - std::strlen(fsutil::kDirMarker));
+    auto lk = co_await commit_lock(bucket, key).acquire();
+    co_await pool_->schedule();
+    std::error_code ec;
+    if (fs::exists(data, ec)) co_return false;  // a PUT landed meanwhile: not an orphan any more
+    bool removed = fs::remove(sidecar, ec) && !ec;
+    if (removed) m_orphans_removed_->inc();
+    co_return removed;
+}
+
+Task<void> LocalFsBackend::reap_orphan_sidecars(std::string bucket, std::vector<fs::path> list) {
+    for (auto& p : list) {
+        try {
+            co_await reap_orphan_sidecar(bucket, p);
+        } catch (const std::exception& e) {  // best effort: never fail the listing over it
+            LOG_WARN("localfs: orphan sidecar {} not removed: {}", p.string(), e.what());
+        }
+    }
+}
+
+Task<uint64_t> LocalFsBackend::run_sidecar_sweep_once() {
+    co_await pool_->schedule();
+    BackgroundTaskGroup::Scope scope(bg_);
+    if (!scope.ok()) co_return 0;
+    uint64_t removed = 0, seen = 0, candidates = 0;
+    std::error_code ec;
+    for (auto bit = fs::directory_iterator(root_, ec); !ec && bit != fs::directory_iterator();
+         bit.increment(ec)) {
+        std::error_code sec;
+        if (bg_.closing()) break;
+        if (!bit->is_directory(sec) || !fs::exists(bit->path() / kBucketMarker, sec)) continue;
+        std::string bucket = bit->path().filename().string();
+        std::error_code wec;
+        for (auto it = fs::recursive_directory_iterator(bit->path(), wec);
+             !wec && it != fs::recursive_directory_iterator(); it.increment(wec)) {
+            if (bg_.closing()) break;
+            // Yield periodically: a full-store walk must not pin one pool thread
+            if (++seen % 256 == 0) co_await pool_->schedule();
+            std::error_code tec;
+            if (!it->is_regular_file(tec)) continue;
+            std::string name = it->path().filename().string();
+            if (!name.ends_with(kSidecarSuffix)) continue;
+            fs::path data = it->path().parent_path() /
+                            name.substr(0, name.size() - std::strlen(kSidecarSuffix));
+            if (fs::exists(data, tec)) continue;
+            ++candidates;
+            try {
+                if (co_await reap_orphan_sidecar(bucket, it->path())) ++removed;
+            } catch (const std::exception& e) {
+                LOG_WARN("localfs: sweep: orphan sidecar {} not removed: {}", it->path().string(),
+                         e.what());
+            }
+        }
+        if (wec) LOG_WARN("localfs: sweep {}: directory walk failed: {}", bucket, wec.message());
+    }
+    if (ec) LOG_WARN("localfs: sweep: root enumeration failed: {}", ec.message());
+    if (candidates || removed)
+        LOG_INFO("localfs: orphan sidecar sweep{}: {} entries seen, {} orphans, {} removed",
+                 bg_.closing() ? " (interrupted)" : "", seen, candidates, removed);
+    co_return removed;
 }
 
 Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::string_view key,
@@ -725,7 +971,7 @@ Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::stri
     fsutil::TierInfo tier;
     ObjectMeta meta = load_object_meta(p, std::string(key), &tier);  // missing -> NoSuchKey
     meta.tagging = std::move(tagging);
-    fsutil::rewrite_object_meta(p, meta, tier, staging_ / "put");
+    fsutil::rewrite_object_meta(p, meta, tier, staging_ / "put", opt_.sidecar, &xattr_);
 }
 
 // ---------- multipart (docs/storage-backend.md §3.2) ----------
@@ -916,7 +1162,9 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     {
         auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT: serialize the commit section
         co_await pool_->schedule();
-        commit_object_file(object_path(bucket, key), tmp, meta, staging_ / "put", key);
+        fs::path dest = object_path(bucket, key);
+        if (commit_object_file(dest, tmp, meta, staging_ / "put", key, commit_options()))
+            defer_sidecar(std::move(dest), meta);
     }
 
     std::error_code ec;

@@ -143,7 +143,17 @@ Key decisions:
     inode's body. The sidecar file is still written (readable by external tools,
     compatible with existing objects); the read side prefers the xattr and falls
     back to the sidecar when absent. On filesystems without xattr support this
-    degrades to pure-sidecar semantics (commit order: data first, then sidecar).
+    degrades to pure-sidecar semantics (commit order: data first, then sidecar) —
+    the degradation is exposed as the resident gauge
+    `lights3_localfs_xattr_fallback` (probed at construction), and
+    `require_xattr: true` turns it into a startup/write failure instead
+    (roadmap §3.5).
+  - **Sidecar write policy** (`sidecar: sync|async|lazy`, default sync): sync
+    costs 4 fsyncs + 2 renames per PUT; async moves the sidecar to a background
+    task (written after the response); lazy skips the sidecar entirely while the
+    xattr write succeeds (and unlinks a stale one). When the xattr write fails
+    both modes fall back to a synchronous sidecar write — it is then the only
+    metadata source.
   - **Per-key lock over the commit section**: data and sidecar are still two
     renames, so the commit section takes a striped async mutex (64 stripes,
     shared by PUT and complete_multipart) to ensure the sidecar always describes
@@ -169,13 +179,17 @@ Key decisions:
   cancellation/disconnect.
 - **PUT**: loop `body.read(64KiB)` → in-pool write + incremental MD5 → rename.
   ETag = MD5 hex, matching S3 single-part upload.
-- **LIST**: recursive directory walk + prefix pruning (when the prefix contains
-  `/`, jump straight to the starting directory); with delimiter=`/`, a directory
-  is a common prefix and its contents need not be expanded — naturally efficient.
-  Pagination token = last key returned (directory order is lexicographic order;
-  the traversal must be a sorted traversal).
-  No index in phase 1; optimizations for very large buckets (e.g. per-directory
-  caching) are left for later.
+- **LIST**: recursive directory walk + prefix pruning (a prefix containing `/`
+  locates the start directory directly); with delimiter=`/` a directory *is* the
+  common prefix and never needs expanding, which is naturally efficient. The
+  page token is the last returned key (directory order is lexicographic order,
+  so the walk must be a sorted walk). No index, but (roadmap §3.5): a page's
+  stat+getxattr calls are striped across pool workers
+  (`list_meta_concurrency`); each directory's sorted entry table is cached
+  keyed by the directory's inode + mtime/ctime (`list_cache_entries`, validated
+  with one stat), and the page start is found by binary search, so deep pages
+  no longer cost more than early ones. See [storage/localfs.md](../storage/localfs.md)
+  §6.
 - **Multipart**: parts land in `staging/mpu/<id>/part.N`; complete concatenates
   the parts in order into a final temp file and then renames (computing the total
   ETag along the way: `md5(concatenated part MD5s)-N`, per S3 rules); abort

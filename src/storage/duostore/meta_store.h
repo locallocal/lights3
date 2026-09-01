@@ -149,16 +149,24 @@ struct IMetaStore {
                                             std::string_view id) = 0;
     // Pagination hint (docs/archive/gaps.md §5.1): return entries with (key, upload_id)
     // strictly greater than (key_marker, id_marker), in ascending order; with
-    // limit>0 return at most limit entries. The hint may be ignored — an engine
-    // that cannot push it down can just return everything, since the caller
-    // (DuoStoreBackend) always runs apply_uploads_page again; semantics do not
-    // depend on whether the engine pushes down.
+    // limit>0 return at most limit entries. An empty id_marker with a non-empty
+    // key_marker means "key > key_marker" (the whole key was paged past, S3
+    // key-marker-only semantics) -- not "(key_marker, "") < (key, id)".
+    // prefix (roadmap §3.5): only entries whose key starts with prefix. An engine
+    // that honors limit MUST honor prefix as well (seek to it and stop past it):
+    // returning `limit` entries from before the prefix range would let the
+    // caller's own prefix filter empty the page and misreport end-of-list.
+    // The hints may be ignored together — an engine that cannot push down can
+    // just return everything, since the caller (DuoStoreBackend) always runs
+    // apply_uploads_page again; semantics do not depend on whether the engine
+    // pushes down.
     // Note the caller passes limit=0 when delimiter is non-empty: grouping needs
     // the full picture to determine truncation
     virtual std::vector<UploadInfo> list_uploads(std::string_view b,
                                                  std::string_view key_marker = {},
                                                  std::string_view id_marker = {},
-                                                 int limit = 0) = 0;
+                                                 int limit = 0,
+                                                 std::string_view prefix = {}) = 0;
     virtual std::string complete_upload(std::string_view b, std::string_view k,
                                         std::string_view id,
                                         std::span<const PartInfo> parts) = 0;  // returns the aggregate ETag (§8)

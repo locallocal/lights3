@@ -1,9 +1,12 @@
 // Tiered storage backend unit tests (docs/tiered-storage.md §10 P1-P4 acceptance):
 // consistency suite, tier state machine, overwrite/delete entering GC, scanner cold detection and crash recovery, space fallback.
 // The cloud side is played by MemoryBackend (wrapped with counters to assert the number of cloud calls).
+#include <sys/xattr.h>
+
 #include <atomic>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #include "core/thread_pool.h"
 #include "storage/localfs/fs_util.h"
@@ -11,6 +14,10 @@
 #include "storage/bucket_router.h"
 #include "storage/registry.h"
 #include "storage/tiered/tiered_backend.h"
+#ifdef LIGHTS3_DUOSTORE
+#include "storage/duostore/duostore_backend.h"
+#include "storage/tiered/tier_local_duo.h"
+#endif
 #include "unit/backend_suite.h"
 #include "unit/mini_test.h"
 
@@ -755,6 +762,398 @@ TEST(tiered_quota_incremental_kicks_early_scan) {
     }
     CHECK(converged);
 }
+
+// ---------- roadmap §3.6 ----------
+
+namespace {
+
+std::string getx(const fs::path& p, const char* name) {
+    char buf[128];
+    ssize_t n = ::getxattr(p.c_str(), name, buf, sizeof(buf));
+    return n > 0 ? std::string(buf, size_t(n)) : std::string();
+}
+
+fsutil::TierInfo tier_of_path(const fs::path& p) {
+    fsutil::TierInfo t;
+    fsutil::load_object_meta(p, p.filename().string(), &t);
+    return t;
+}
+
+size_t wheel_files(const Fixture& f) {
+    size_t n = 0;
+    std::error_code ec;
+    for (auto& e : fs::directory_iterator(f.tmp.path / "staging/tier/wheel", ec))
+        if (e.is_regular_file()) ++n;
+    return n;
+}
+
+}  // namespace
+
+// ⑤ Access records leave the process: after a flush the record sits in the data file's
+// xattr (atime + hits + wheel slot), and a restarted backend reads it back — the
+// coldness verdict no longer depends on a resident table
+TEST(tiered_access_record_in_xattr_survives_restart) {
+    if (fsutil::probe_meta_xattr(fs::temp_directory_path()) != 0) {
+        printf("       [SKIP] temp filesystem has no xattr support\n");
+        return;
+    }
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cloud = std::make_shared<CountingCloud>();
+    TieredConfig cfg;
+    cfg.scan_interval_sec = 0;
+    cfg.cold_after_sec = 3600;
+    int64_t atime = 0;
+    {
+        auto local = std::make_shared<LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
+        auto t = std::make_shared<TieredBackend>(local, cloud, pool, cfg);
+        sync_wait(t->create_bucket("bkt"));
+        put(*t, "bkt", "k.bin", make_data(4 * 1024));
+        for (int i = 0; i < 3; ++i) read_all(*sync_wait(t->get_object("bkt", "k.bin", std::nullopt)).body);
+        sync_wait(t->flush_access());
+        std::string rec = getx(tmp.path / "data/bkt/k.bin", "user.lights3.access");
+        CHECK(!rec.empty());
+        long long a = 0, hits = 0, slot = 0;
+        CHECK_EQ(sscanf(rec.c_str(), "%lld %lld %lld", &a, &hits, &slot), 3);
+        atime = a;
+        CHECK(a >= ::time(nullptr) - 5);
+        CHECK_EQ(hits, 4LL);  // PUT + 3 GETs
+        CHECK_EQ(slot, (a + 3600) / 3600);  // enrolled at its deadline slot
+        sync_wait(t->close());
+    }
+    // No atime.tsv is written in xattr mode
+    CHECK(!fs::exists(tmp.path / "staging/tier/atime.tsv"));
+    {
+        auto local = std::make_shared<LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
+        auto t = std::make_shared<TieredBackend>(local, cloud, pool, cfg);
+        // Backdate the file's mtime far into the past: only the xattr record keeps it hot
+        fs::last_write_time(tmp.path / "data/bkt/k.bin",
+                            fs::file_time_type::clock::now() - std::chrono::hours(24 * 30));
+        auto st = sync_wait(t->scan_once());
+        CHECK(st.full);
+        CHECK_EQ(st.cold_picked, uint64_t(0));
+        CHECK(tier_of_path(tmp.path / "data/bkt/k.bin").tier == fsutil::Tier::kLocal);
+        sync_wait(t->close());
+    }
+    (void)atime;
+}
+
+// ① Incremental rounds: after the bootstrap full scan, later rounds consume only the
+// due time-wheel slots. A key touched after enrollment is re-enrolled further out
+// instead of demoted; deleted keys are dropped as stale
+TEST(tiered_incremental_scan_consumes_wheel) {
+    TieredConfig cfg;
+    cfg.cold_after_sec = 1;
+    Fixture f(cfg);
+    sync_wait(f.tiered->create_bucket("bkt"));
+    put(*f.tiered, "bkt", "a.bin", make_data(8 * 1024));
+    put(*f.tiered, "bkt", "gone.bin", make_data(8 * 1024));
+    auto st1 = sync_wait(f.tiered->scan_once());  // bootstrap: full, nothing cold yet (just written)
+    CHECK(st1.full);
+    CHECK_EQ(st1.cold_picked, uint64_t(0));
+    CHECK(wheel_files(f) >= 1);  // enrolled by the pre-scan access flush (PUT touches)
+    sync_wait(f.tiered->delete_object("bkt", "gone.bin"));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    auto st2 = sync_wait(f.tiered->scan_once());  // wheel round: a.bin is due and cold
+    CHECK(!st2.full);
+    CHECK_EQ(st2.cold_picked, uint64_t(1));
+    CHECK_EQ(st2.stale, uint64_t(1));  // gone.bin's enrollment
+    CHECK(f.tier_of("bkt", "a.bin").tier == fsutil::Tier::kRemote);
+    CHECK_EQ(wheel_files(f), size_t(0));  // consumed slots are removed
+
+    // A hot key is pushed out, not demoted: PUT b, touch it after enrollment, then a due round
+    put(*f.tiered, "bkt", "b.bin", make_data(8 * 1024));
+    sync_wait(f.tiered->flush_access());
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    read_all(*sync_wait(f.tiered->get_object("bkt", "b.bin", std::nullopt)).body);  // fresh touch (pending)
+    auto st3 = sync_wait(f.tiered->scan_once());
+    CHECK(!st3.full);
+    CHECK_EQ(st3.cold_picked, uint64_t(0));
+    CHECK(f.tier_of("bkt", "b.bin").tier == fsutil::Tier::kLocal);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    auto st4 = sync_wait(f.tiered->scan_once());  // now genuinely cold
+    CHECK_EQ(st4.cold_picked, uint64_t(1));
+    CHECK(f.tier_of("bkt", "b.bin").tier == fsutil::Tier::kRemote);
+}
+
+// ② Prefix rules: per-prefix cold_after, "never" pins (neither cold demotion nor
+// watermark eviction touches pinned objects); first match wins
+TEST(tiered_prefix_rules_and_pinning) {
+    TieredConfig cfg;
+    cfg.cold_after_sec = 1 << 30;
+    cfg.rules = {{"bkt/pin/*", -1}, {"bkt/fast/*", 0}, {"other/*", 0}};
+    cfg.quota_bytes = 100 * 1024;  // 85K high / 70K low
+    Fixture f(cfg);
+    sync_wait(f.tiered->create_bucket("bkt"));
+    put(*f.tiered, "bkt", "pin/a.bin", make_data(60 * 1024));
+    put(*f.tiered, "bkt", "fast/b.bin", make_data(10 * 1024));
+    put(*f.tiered, "bkt", "slow/c.bin", make_data(30 * 1024));
+    CHECK_EQ(f.tiered->cold_after_for("bkt", "pin/x"), int64_t(-1));
+    CHECK_EQ(f.tiered->cold_after_for("bkt", "fast/x"), int64_t(0));
+    CHECK_EQ(f.tiered->cold_after_for("bkt", "slow/x"), int64_t(1 << 30));
+
+    auto st = sync_wait(f.tiered->scan_once());
+    CHECK(f.tier_of("bkt", "fast/b.bin").tier == fsutil::Tier::kRemote);  // per-prefix threshold
+    CHECK(f.tier_of("bkt", "pin/a.bin").tier == fsutil::Tier::kLocal);    // pinned
+    // Quota: 100K local > 85K; after fast/b (10K) 90K remain > 70K → the only evictable
+    // candidate is slow/c (30K); pin/a must stay even though it is the biggest and coldest
+    CHECK(f.tier_of("bkt", "slow/c.bin").tier == fsutil::Tier::kRemote);
+    CHECK(f.tier_of("bkt", "pin/a.bin").tier == fsutil::Tier::kLocal);
+    CHECK(st.evicted >= 1);
+}
+
+// ③ Eviction score: with frequency weighting a frequently read object survives a
+// colder-by-age but rarely read one; size weighting prefers big victims
+TEST(tiered_evict_score_weights) {
+    auto run = [&](double size_w, double freq_w, int hot_gets, const char* expect_evicted) {
+        TieredConfig cfg;
+        cfg.cold_after_sec = 1 << 30;
+        cfg.quota_bytes = 100 * 1024;  // need 20K once 90K are local
+        cfg.evict_size_weight = size_w;
+        cfg.evict_frequency_weight = freq_w;
+        Fixture f(cfg);
+        sync_wait(f.tiered->create_bucket("bkt"));
+        put(*f.tiered, "bkt", "a-big.bin", make_data(60 * 1024));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // a-big is older
+        put(*f.tiered, "bkt", "b-small.bin", make_data(30 * 1024));
+        for (int i = 0; i < hot_gets; ++i)
+            read_all(*sync_wait(f.tiered->get_object("bkt", "a-big.bin", std::nullopt)).body);
+        sync_wait(f.tiered->scan_once());
+        bool big_remote = f.tier_of("bkt", "a-big.bin").tier == fsutil::Tier::kRemote;
+        bool small_remote = f.tier_of("bkt", "b-small.bin").tier == fsutil::Tier::kRemote;
+        CHECK(big_remote != small_remote);  // exactly one victim covers the 20K deficit
+        CHECK_EQ(big_remote ? "a-big" : "b-small", std::string(expect_evicted));
+    };
+    run(0.0, 0.0, 0, "a-big");     // pure LRU: the older object goes
+    run(0.0, 1.0, 20, "b-small");  // a-big read 20×: frequency keeps it, the younger small one goes
+    run(1.0, 0.0, 0, "a-big");     // size weight only reinforces the LRU pick here
+}
+
+// ⑦ Range cache: a Range GET on a remote object fills block-aligned blocks into the
+// sparse cache; later ranges inside those blocks are served locally, ranges outside
+// fetch again; a PUT drops the cache
+TEST(tiered_range_cache_blocks) {
+    TieredConfig cfg;
+    cfg.cache_fill_on_range = false;
+    cfg.range_cache = true;
+    cfg.range_cache_block = 64 * 1024;
+    Fixture f(cfg);
+    std::string data = make_data(300 * 1024);
+    sync_wait(f.tiered->create_bucket("bkt"));
+    put(*f.tiered, "bkt", "r.bin", data);
+    sync_wait(f.tiered->demote_object("bkt", "r.bin"));
+
+    auto get_range = [&](uint64_t a, uint64_t b) {
+        auto os = sync_wait(f.tiered->get_object("bkt", "r.bin", ByteRange{a, b}));
+        CHECK(os.range.has_value());
+        CHECK_EQ(os.meta.size, uint64_t(data.size()));
+        return read_all(*os.body);
+    };
+    int gets0 = f.cloud->gets.load();
+    CHECK(get_range(70000, 149999) == data.substr(70000, 80000));  // blocks 1..2 fetched
+    CHECK_EQ(f.cloud->gets.load(), gets0 + 1);
+    fs::path rc = f.tmp.path / "staging/tier/rcache/data/bkt/r.bin";
+    CHECK(fs::exists(rc));
+    CHECK_EQ(fs::file_size(rc), uint64_t(data.size()));  // sparse container of the object's size
+    CHECK(fs::exists(f.tmp.path / "staging/tier/rcache/map/bkt/r.bin"));
+    CHECK(get_range(70000, 149999) == data.substr(70000, 80000));  // hit
+    CHECK(get_range(100000, 120000) == data.substr(100000, 20001));  // inside cached blocks: hit
+    CHECK(get_range(65536, 196607) == data.substr(65536, 131072));   // exactly the two blocks: hit
+    CHECK_EQ(f.cloud->gets.load(), gets0 + 1);
+    CHECK(get_range(0, 9) == data.substr(0, 10));  // block 0: fill
+    CHECK_EQ(f.cloud->gets.load(), gets0 + 2);
+    CHECK(get_range(0, 9) == data.substr(0, 10));
+    CHECK(get_range(299000, 307199) == data.substr(299000, 8200));  // tail block (short last block)
+    CHECK_EQ(f.cloud->gets.load(), gets0 + 3);
+    CHECK(get_range(299000, 307199) == data.substr(299000, 8200));
+    CHECK_EQ(f.cloud->gets.load(), gets0 + 3);
+    CHECK(f.tier_of("bkt", "r.bin").tier == fsutil::Tier::kRemote);  // still a stub
+    CHECK_EQ(f.disk_size("bkt", "r.bin"), uint64_t(0));
+
+    // Whole-object promotion replaces the partial cache
+    sync_wait(f.tiered->promote_object("bkt", "r.bin"));
+    CHECK(f.tier_of("bkt", "r.bin").tier == fsutil::Tier::kCached);
+    CHECK(!fs::exists(rc));
+    // Demote again, fill, then a PUT overwrite drops the (now stale) cache
+    sync_wait(f.tiered->demote_object("bkt", "r.bin"));
+    CHECK(get_range(0, 9) == data.substr(0, 10));
+    CHECK(fs::exists(rc));
+    put(*f.tiered, "bkt", "r.bin", make_data(1024));
+    CHECK(!fs::exists(rc));
+}
+
+// ④ Quarantine ledger: a refs_missing finding alerts once, later rounds only bump the
+// count; it resolves by itself when the copy comes back, `forget` drops it, `purge`
+// deletes the dead stub after re-verification; foreign cloud objects are quarantined too
+TEST(tiered_quarantine_ledger) {
+    Fixture f;
+    sync_wait(f.tiered->create_bucket("bkt"));
+    std::string data = make_data(4 * 1024);
+    put(*f.tiered, "bkt", "r.bin", data);
+    sync_wait(f.tiered->demote_object("bkt", "r.bin"));
+    sync_wait(f.cloud->inner->delete_object("bkt", "r.bin"));  // copy lost behind GC's back
+
+    auto st1 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st1.refs_missing, uint64_t(1));
+    CHECK_EQ(st1.quarantined_new, uint64_t(1));
+    auto q1 = f.tiered->quarantine_list();
+    CHECK_EQ(q1.size(), size_t(1));
+    CHECK_EQ(q1[0].kind, std::string("refs_missing"));
+    CHECK_EQ(q1[0].key, std::string("r.bin"));
+    CHECK_EQ(q1[0].count, uint64_t(1));
+    auto st2 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st2.refs_missing, uint64_t(1));
+    CHECK_EQ(st2.quarantined_new, uint64_t(0));  // already known: no re-alert
+    CHECK_EQ(f.tiered->quarantine_list()[0].count, uint64_t(2));
+
+    // The copy comes back (same bytes → same etag): the finding resolves on the next round
+    {
+        http::StringBodyReader b(data);
+        sync_wait(f.cloud->inner->put_object("bkt", "r.bin", {}, b));
+    }
+    auto st3 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st3.refs_missing, uint64_t(0));
+    CHECK_EQ(st3.quarantined_resolved, uint64_t(1));
+    CHECK(f.tiered->quarantine_list().empty());
+
+    // Lost again → purge deletes the dead stub; a present copy makes purge refuse
+    sync_wait(f.cloud->inner->delete_object("bkt", "r.bin"));
+    sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(f.tiered->quarantine_list().size(), size_t(1));
+    CHECK(!sync_wait(f.tiered->quarantine_purge("bkt", "nope.bin")));  // not quarantined
+    CHECK(sync_wait(f.tiered->quarantine_purge("bkt", "r.bin")));
+    CHECK_THROWS_S3(sync_wait(f.tiered->head_object("bkt", "r.bin")), s3::S3ErrorCode::NoSuchKey);
+    CHECK(f.tiered->quarantine_list().empty());
+
+    // Foreign object: quarantined as `foreign`, forget drops it, next round re-adds it
+    {
+        http::StringBodyReader b("foreign");
+        sync_wait(f.cloud->inner->put_object("bkt", "foreign.bin", {}, b));
+    }
+    auto st4 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st4.orphans_skipped, uint64_t(1));
+    CHECK_EQ(st4.quarantined_new, uint64_t(1));
+    CHECK_EQ(f.tiered->quarantine_list()[0].kind, std::string("foreign"));
+    CHECK(f.tiered->quarantine_forget("bkt", "foreign.bin"));
+    CHECK(f.tiered->quarantine_list().empty());
+    CHECK(!f.tiered->quarantine_forget("bkt", "foreign.bin"));
+    auto st5 = sync_wait(f.tiered->run_reconcile_once());
+    CHECK_EQ(st5.quarantined_new, uint64_t(1));
+}
+
+// rules parsing through the registry (config.cc flattens `rules:` into rules.N.*)
+TEST(tiered_rules_config_parsing) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    std::vector<BackendConfig> cfgs = {
+        {"l", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}},
+        {"m", "memory", {}},
+        {"t", "tiered",
+         {{"local", "l"}, {"cloud", "m"}, {"scan_interval", "0s"},
+          {"rules.0.match", "arch-*/raw/*"}, {"rules.0.cold_after", "7d"},
+          {"rules.1.match", "arch-*/keep/*"}, {"rules.1.cold_after", "never"},
+          {"full_scan_interval", "12h"}, {"evict_frequency_weight", "0.5"},
+          {"range_cache", "true"}, {"range_cache_block", "256KiB"}}}};
+    auto out = StorageRegistry::build(cfgs, pool);
+    auto t = std::dynamic_pointer_cast<TieredBackend>(out.at("t"));
+    CHECK_EQ(t->config().rules.size(), size_t(2));
+    CHECK_EQ(t->cold_after_for("arch-1", "raw/x"), int64_t(7 * 86400));
+    CHECK_EQ(t->cold_after_for("arch-1", "keep/x"), int64_t(-1));
+    CHECK_EQ(t->cold_after_for("arch-1", "other/x"), t->config().cold_after_sec);
+    CHECK_EQ(t->config().full_scan_interval_sec, int64_t(12 * 3600));
+    CHECK(t->config().range_cache);
+    CHECK_EQ(t->config().range_cache_block, uint64_t(256 * 1024));
+    sync_wait(t->close());
+    for (const auto& bad : std::vector<std::map<std::string, std::string>>{
+             {{"rules.0.match", "x/*"}},                     // missing cold_after
+             {{"evict_size_weight", "-1"}},
+             {{"range_cache_block", "1KiB"}}}) {
+        std::vector<BackendConfig> c2 = cfgs;
+        c2[2].params = {{"local", "l"}, {"cloud", "m"}, {"scan_interval", "0s"}};
+        for (auto& [k, v] : bad) c2[2].params[k] = v;
+        bool threw = false;
+        try {
+            StorageRegistry::build(c2, pool);
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+}
+
+#ifdef LIGHTS3_DUOSTORE
+// ⑥ duostore as the local side: tier state lives in the object record, a stub is a
+// record without extents (the old extents go to duostore's gcq), read-back caches into
+// new extents; scan/GC/reconcile run unchanged over the ITierLocal interface
+TEST(tiered_duostore_local_side) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    DuoStoreConfig dc;
+    dc.name = "duo-local";
+    dc.root = tmp.path / "duo";
+    dc.meta_path = dc.root / "meta";
+    dc.gc_interval_sec = 0;
+    dc.orphan_scan_interval_sec = 0;
+    fs::create_directories(dc.meta_path);
+    auto duo = std::make_shared<DuoStoreBackend>(dc, pool);
+    auto cloud = std::make_shared<CountingCloud>();
+    TieredConfig cfg;
+    cfg.scan_interval_sec = 0;
+    cfg.cold_after_sec = 1 << 30;
+    auto t = std::make_shared<TieredBackend>(std::make_shared<tier::DuoStoreTierLocal>(duo),
+                                             cloud, pool, cfg);
+    CHECK_EQ(std::string(t->local().kind()), std::string("duostore"));
+    sync_wait(t->create_bucket("bkt"));
+    std::string data = make_data(200 * 1024);
+    auto pr = put(*t, "bkt", "dir/cold.bin", data);
+
+    sync_wait(t->demote_object("bkt", "dir/cold.bin"));
+    auto rec = duo->tier_read("bkt", "dir/cold.bin");
+    CHECK(rec.has_value());
+    CHECK_EQ(int(rec->tier.tier), int(duostore::TierState::kRemote));
+    CHECK(rec->data.extents.empty());          // local data released to the gcq
+    CHECK_EQ(rec->meta.size, uint64_t(data.size()));  // logical size kept
+    CHECK_EQ(cloud->puts.load(), 1);
+    // HEAD/list local, GET goes to the cloud and caches back into fresh extents
+    CHECK_EQ(sync_wait(t->head_object("bkt", "dir/cold.bin")).etag, pr.etag);
+    CHECK_EQ(sync_wait(t->list_objects("bkt", {})).objects[0].size, uint64_t(data.size()));
+    // Direct GET on the stub through duostore itself is refused loudly, not served empty
+    CHECK_THROWS_S3(sync_wait(duo->get_object("bkt", "dir/cold.bin", std::nullopt)),
+                    s3::S3ErrorCode::InternalError);
+    auto got = sync_wait(t->get_object("bkt", "dir/cold.bin", std::nullopt));
+    CHECK_EQ(got.meta.etag, pr.etag);
+    CHECK(read_all(*got.body) == data);
+    CHECK_EQ(cloud->gets.load(), 1);
+    rec = duo->tier_read("bkt", "dir/cold.bin");
+    CHECK_EQ(int(rec->tier.tier), int(duostore::TierState::kCached));
+    CHECK(!rec->data.extents.empty());
+    CHECK(read_all(*sync_wait(t->get_object("bkt", "dir/cold.bin", std::nullopt)).body) == data);
+    CHECK_EQ(cloud->gets.load(), 1);  // served from the cached extents
+    // cached → remote again with zero upload
+    sync_wait(t->demote_object("bkt", "dir/cold.bin"));
+    CHECK_EQ(cloud->puts.load(), 1);
+    CHECK_EQ(int(duo->tier_read("bkt", "dir/cold.bin")->tier.tier), int(duostore::TierState::kRemote));
+
+    // Scan (full bootstrap) over the meta-driven walker + coldness with a 0 threshold
+    put(*t, "bkt", "hot.bin", make_data(8 * 1024));
+    auto st = sync_wait(t->scan_once());
+    CHECK(st.full);
+    CHECK_EQ(st.walked, uint64_t(2));
+    CHECK_EQ(st.cold_picked, uint64_t(0));
+    // Overwrite + delete route the old cloud copies through GC
+    put(*t, "bkt", "dir/cold.bin", make_data(1024));
+    CHECK_EQ(int(duo->tier_read("bkt", "dir/cold.bin")->tier.tier), int(duostore::TierState::kLocal));
+    auto gs = sync_wait(t->run_gc_once());
+    CHECK_EQ(gs.removed_cloud, uint64_t(1));
+    // Reconcile is a no-op on a consistent pair
+    auto rs = sync_wait(t->run_reconcile_once());
+    CHECK_EQ(rs.stubs_rebuilt + rs.orphans_deleted + rs.refs_missing, uint64_t(0));
+    // duostore's own GC reclaims the released extents without complaint
+    sync_wait(duo->run_gc_once());
+    sync_wait(t->close());
+}
+#endif
 
 // bucket_router build-time validation (docs/archive/gaps.md §6.3): bad globs / unreachable rules error at startup,
 // negation rules take effect

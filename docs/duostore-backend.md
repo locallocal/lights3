@@ -203,6 +203,11 @@ u8 ver | u64 size | u64 mtime_ms | u64 version | str etag | str content_type
 | u16 n_meta | (str k, str v)* | u32 n_runs | run*        （str = u16 len + bytes）
 ```
 
+v2 在 n_meta 段后追加一等元数据段 `u16 n_std | (str k, str v)*`；v3（roadmap
+§3.6 ⑥）再追加 `u8 tier | str remote_etag | str remote_at`——duostore 作 tiered
+热层时的对象状态（stub = tier=remote 且无 run），见
+[storage/tiered.md §11](storage/tiered.md)。读端兼容 v1–v3，写端恒 v3。
+
 ### 4.3 extent run 编码
 
 一次写入会话分配的 chunk file_id 连续（§4.5 号段），故：

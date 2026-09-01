@@ -335,6 +335,23 @@ public:
     // probing (docs/archive/gaps.md §1.4)
     duostore::IDataStore& data_for_test() { return *data_; }
 
+    // ---- Tiered local-side hooks (roadmap §3.6 ⑥; used by tier::DuoStoreTierLocal) ----
+    // Full record incl. tier state; nullopt when bucket or object is absent (sync, pool thread)
+    std::optional<duostore::ObjectRec> tier_read(std::string_view bucket, std::string_view key);
+    // Stub commit: rewrite the record with no extents and tier=remote, CAS on meta.etag
+    // (the old extents enter the gcq in the same meta transaction — that *is* the local
+    // space reclamation). Throws PreconditionFailed when beaten by a concurrent write
+    Task<void> tier_commit_stub(std::string_view bucket, std::string_view key,
+                                const ObjectMeta& meta, const duostore::TierState& ts);
+    // Cache-fill commit: pump body into the data plane, then rewrite the record with the
+    // new extents and tier=cached, CAS on meta.etag; the produced extents are discarded
+    // when the commit fails (same shape as PUT)
+    Task<void> tier_commit_cached(std::string_view bucket, std::string_view key,
+                                  http::BodyReader& body, const ObjectMeta& meta,
+                                  const duostore::TierState& ts);
+    const std::filesystem::path& root() const { return cfg_.root; }
+    const std::shared_ptr<ThreadPool>& pool() const { return pool_; }
+
 private:
     void require_bucket(std::string_view bucket);  // called on a pool thread
     // Fetch the object record; on absence distinguish NoSuchBucket / NoSuchKey

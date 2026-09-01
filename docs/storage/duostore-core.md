@@ -92,7 +92,7 @@ run = { u8 kind, u64 first_file_id, u32 count,
 | 记录 | 版本 | 布局（str = u16 len + bytes） |
 | --- | --- | --- |
 | bucket（`encode_bucket`） | v1 | `u8 ver \| u64 created_ms` |
-| object（`encode_object`） | 写 v2 读 v1/v2 | `u8 ver \| u64 size \| u64 mtime_ms \| u64 version \| str etag \| str content_type \| u16 n_meta (str k, str v)* \| [v2] u16 n_std (str k, str v)* \| runs` |
+| object（`encode_object`） | 写 v3 读 v1–v3 | `u8 ver \| u64 size \| u64 mtime_ms \| u64 version \| str etag \| str content_type \| u16 n_meta (str k, str v)* \| [v2] u16 n_std (str k, str v)* \| [v3] u8 tier \| str remote_etag \| str remote_at \| runs`（v3 tier 段 = duostore 作 tiered 热层时的状态，[tiered.md §11](tiered.md)；老于 v3 的二进制读不了 v3 记录） |
 | upload（`encode_upload`） | 写 v2 读 v1/v2 | `u8 ver \| u64 initiated_ms \| str content_type \| u16 n_meta kv* \| [v2] u16 n_std kv*` |
 | part（`encode_part`） | v1 | `u8 ver \| u64 size \| str md5 \| u64 modified_ms \| runs` |
 | gcq（`encode_reclaim`） | v1 | `u8 ver \| u8 reason \| u64 enqueue_ms \| runs` |

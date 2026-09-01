@@ -40,6 +40,7 @@ lights3 duostore load <backend> <file> [--config=<path>]   import duostore meta
 lights3 duostore gc <backend> [--config=<path>]            run one duostore GC round now
 lights3 duostore scan <backend> [--config=<path>]          run one orphan-scan round now
 lights3 tier scan|gc|reconcile <backend> [--config=<path>] tiered background tasks on demand
+lights3 tier quarantine list|forget|purge <backend> [<bucket> <key>] tiered reconcile quarantine ledger
 lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  offline integrity scrub
 lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 ```
@@ -119,7 +120,7 @@ MPU completing mid-scrub; re-run to confirm. Safe against a live instance too
 ./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
 ```
 
-### 2.4 Background tasks on demand: `duostore gc|scan`, `tier scan|gc|reconcile`
+### 2.4 Background tasks on demand: `duostore gc|scan`, `tier scan|gc|reconcile|quarantine`
 
 CLI exits for the background hooks (roadmap §3.2): `run_gc_once` /
 `run_orphan_scan_once` / `scan_once` / tiered `run_gc_once` /
@@ -140,17 +141,31 @@ integrity-verdict surface is `lights3 fsck`.
   the manual hooks.
 - `duostore scan <backend>`: one orphan-scan round (two-way reconciliation of
   the disk against refs/packstat, §8.3); also prints chunk/pack on-disk usage.
-- `tier scan <backend>`: one round of coldness detection + watermark
-  reclamation + crash recovery + atime snapshot;
+- `tier scan <backend>`: one scan round (the first after startup and every
+  `full_scan_interval` is a full enumeration, the rest are time-wheel
+  incremental rounds): coldness detection + watermark reclamation + crash
+  recovery + access-record flush; the round's `TierScanStats` go to the log;
 - `tier gc <backend>`: consume one round of the tiered GC queue (orphan cloud
   replica deletion; exponential backoff persists with each entry);
 - `tier reconcile <backend>`: one bidirectional local/cloud reconciliation
   (cloud-has-it-local-doesn't → rebuild the stub; local-remote-cloud-missing →
-  warn, never delete the stub).
+  warn, never delete the stub); findings that repeat go to the quarantine
+  ledger and alert once;
+- `tier quarantine list <backend>`: print the quarantine ledger (kind / bucket /
+  key / etag / first and last sighting / count);
+  `tier quarantine forget <backend> <bucket> <key>` drops the entry only (it
+  returns next round if the finding still reproduces);
+  `tier quarantine purge <backend> <bucket> <key>` resolves a `refs_missing`
+  finding: after a HEAD confirms the cloud copy is still gone it deletes the
+  dead local stub (acknowledged data loss, the object leaves listings; if the
+  copy is back the stub stays, the entry is dropped and the exit code is 1).
+  See [tiered-storage.md §9](tiered-storage.md).
 
 ```bash
 ./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # reclaim space now
 ./build/lights3 tier reconcile tierdata -c /etc/lights3/lights3.yaml
+./build/lights3 tier quarantine list tierdata -c /etc/lights3/lights3.yaml
+./build/lights3 tier quarantine purge tierdata archive photos/2024/a.jpg -c /etc/lights3/lights3.yaml
 ```
 
 ## 3. `s3adm` — ops CLI

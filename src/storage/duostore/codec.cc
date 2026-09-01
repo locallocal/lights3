@@ -372,11 +372,14 @@ int64_t decode_bucket(std::string_view v) {
 
 // ---- object: u8 ver | u64 size | u64 mtime_ms | u64 version | str etag
 //              | str content_type | u16 n_meta (str k, str v)*
-//              | [v2] u16 n_std (str k, str v)* | runs (§4.2) ----
-// v1 = no first-class metadata section; the read side accepts both versions, the
-// write side always emits v2 (existing records stay readable in place, no rewrite)
+//              | [v2] u16 n_std (str k, str v)*
+//              | [v3] u8 tier | str remote_etag | str remote_at | runs (§4.2) ----
+// v1 = no first-class metadata section, v2 = no tier section (roadmap §3.6 ⑥); the read
+// side accepts every version, the write side always emits the newest (existing records
+// stay readable in place, no rewrite). A binary older than v3 cannot read v3 records —
+// upgrade every gateway sharing a meta engine together
 
-constexpr uint8_t kObjectVer = 2;
+constexpr uint8_t kObjectVer = 3;
 constexpr uint8_t kUploadVer = 2;
 
 std::string encode_object(const ObjectRec& rec) {
@@ -389,6 +392,9 @@ std::string encode_object(const ObjectRec& rec) {
     put_str(s, rec.meta.content_type);
     put_user_meta(s, rec.meta.user_meta);
     put_std_meta(s, rec.meta);
+    put_u8(s, rec.tier.tier);
+    put_str(s, rec.tier.remote_etag);
+    put_str(s, rec.tier.remote_at);
     append_extent_runs(s, rec.data.extents);
     return s;
 }
@@ -405,6 +411,11 @@ ObjectMeta decode_object_meta(std::string key, std::string_view v) {
     m.content_type = std::string(c.str());
     m.user_meta = read_user_meta(c);
     if (ver >= 2) read_std_meta(c, m);
+    if (ver >= 3) {  // tier section: not part of ObjectMeta
+        c.u8();
+        c.str();
+        c.str();
+    }
     skip_extent_runs(c);  // list needs no location info; avoids materializing a large object's Extent array (§4.4)
     c.done();
     return m;
@@ -422,6 +433,11 @@ ObjectRec decode_object(std::string key, std::string_view v) {
     rec.meta.content_type = std::string(c.str());
     rec.meta.user_meta = read_user_meta(c);
     if (ver >= 2) read_std_meta(c, rec.meta);
+    if (ver >= 3) {
+        rec.tier.tier = c.u8();
+        rec.tier.remote_etag = std::string(c.str());
+        rec.tier.remote_at = std::string(c.str());
+    }
     rec.data.extents = read_extent_runs(c);
     c.done();
     return rec;

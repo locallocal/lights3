@@ -326,6 +326,7 @@ add_library(lights3_core STATIC
   src/storage/localfs/list_cache.cc
   src/storage/localfs/localfs_backend.cc
   src/storage/memory/memory_backend.cc
+  src/storage/tiered/tier_local_fs.cc
   src/storage/tiered/tiered_backend.cc
   src/storage/xlocalfs/uring.cc
   src/storage/xlocalfs/uring_stream.cc
@@ -394,6 +395,7 @@ if(LIGHTS3_DUOSTORE)
     src/storage/duostore/rocks_meta_store.cc
     src/storage/duostore/fs_data_store.cc
     src/storage/duostore/duostore_backend.cc
+    src/storage/tiered/tier_local_duo.cc
   )
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_DUOSTORE)
   target_link_libraries(lights3_core PRIVATE rocksdb)
@@ -570,6 +572,11 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_tiered_duostore
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
                      $<TARGET_FILE:lights3> builtin tiered-duostore)
+    # duostore as the tiered *local* side (roadmap §3.6 ⑥): tier state in the object
+    # record, stubs without extents; the full protocol suite over that composition
+    add_test(NAME e2e_tiered_duolocal
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh
+                     $<TARGET_FILE:lights3> builtin tiered-duolocal)
     # duostore + Redis meta (docs/duostore-redis-meta.md §9): the script probes for
     # redis-server, explicit SKIP if missing
     if(LIGHTS3_DUOSTORE_REDIS_META)

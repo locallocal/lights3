@@ -197,7 +197,7 @@ backends:
   #                                      # default shares runtime.io_threads' pool)
 
   # ---------- tiered: local cache + cloud sink (docs/tiered-storage.md) ----------
-  # local/cloud reference other backends in this list by name; local must be localfs/xlocalfs.
+  # local/cloud reference other backends in this list by name; local must be localfs/xlocalfs or duostore.
   # - name: tierdata
   #   type: tiered
   #   local: localdata                   # required
@@ -214,6 +214,18 @@ backends:
   #   gc_retry_cap: 1h                   # backoff cap
   #   reconcile_interval: 0s             # index/cloud reconciliation period; 0s = off (§9)
   #   reconcile_orphans: rebuild         # rebuild = recreate index entries | delete = remove cloud orphans
+  #   # -- roadmap §3.6 (docs/tiered-storage.md §4.3/§5.1/§6.3/§9) --
+  #   full_scan_interval: 1d             # full enumeration safety net; rounds in between consume the time wheel; 0s = every round full
+  #   evict_size_weight: 0               # eviction score size weighting (log2 of MiB); 0 = ignore size
+  #   evict_frequency_weight: 0          # eviction score access-count weighting; 0 = pure LRU
+  #   access_buffer_max: 100000          # write-behind access-record buffer (keys) before an early flush
+  #   range_cache: false                 # block-level partial cache for Range GETs of remote objects (localfs local only)
+  #   range_cache_block: 1MiB            # [64KiB, 1GiB]
+  #   rules:                             # per-prefix policy: "bucket/key" glob, first match wins
+  #     - match: "archive-*/raw/*"
+  #       cold_after: 7d
+  #     - match: "archive-*/keep/*"
+  #       cold_after: never              # pinned: never demoted, never evicted
 
 buckets:
   default_backend: localdata

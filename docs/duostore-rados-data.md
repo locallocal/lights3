@@ -334,11 +334,12 @@ RedisMetaStore + RadosDataStore = 主文档 §12 组合矩阵里"全分布式网
 | --- | --- |
 | file_id 全局唯一 | 已满足：共享 meta 的号段分配（INCRBY，redis-meta §4）天然跨网关单调 |
 | meta 事务全局原子 | 已满足：Lua 脚本服务端原子（redis-meta §3.4） |
-| 读侧 pin vs 他网关 GC | **缺口**：pin 表进程内，网关 A 长读期间网关 B 的 GC 可 remove 对象 → 读 -ENOENT。首期约束 + 缓解见下 |
+| 读侧 pin vs 他网关 GC | **已补**（roadmap §3.7）：pin 表虽为进程内，但各网关经 `read_lease`（默认 5s）向共享 meta 发布"最老在途读开始时间"，GC 网关只回收所有对端在途读都晚于其入队的 gcq 项/见空早于下限的空 pack（[storage/duostore-core.md §8.5](storage/duostore-core.md)）；`read_lease: 0` 关闭时回落旧约束 `gc_grace` ≥ 最长预期 GET 时长 |
 | GC/孤儿扫描的执行者 | **需单实例执行**（配置指定哪个网关跑 GC），否则并发压实/扫描互踩 |
 
-部署约束（C4 起有配置承载）：**多网关时 GC 仅由指定的单一实例执行，
-且 `gc_grace` ≥ 最长预期 GET 时长**（把概率正确拉到工程可接受）。
+部署约束（C4 起有配置承载）：**多网关时 GC 仅由指定的单一实例执行**；
+read-lease 关闭时另需 `gc_grace` ≥ 最长预期 GET 时长（把概率正确拉到
+工程可接受）。
 非指定网关配 **`gc_enabled: false`**（duostore 通用键，主文档 §11）：
 只停后台 GC worker 与孤儿扫描的排程，手动钩子（测试/运维通道）保留；
 启动期打 INFO 留痕防"忘了哪台在跑 GC"。

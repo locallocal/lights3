@@ -107,7 +107,7 @@ struct CrcReader {
 
 }  // namespace
 
-MetaDumpStats dump_meta(IMetaStore& src, std::ostream& out) {
+MetaDumpStats dump_meta(IMetaReadView& src, std::ostream& out) {
     MetaDumpStats st;
     CrcWriter w{out};
     w.raw(kMagic, kMagicLen);
@@ -121,7 +121,7 @@ MetaDumpStats dump_meta(IMetaStore& src, std::ostream& out) {
             auto res = src.list_objects(b.name, opt);
             for (const auto& om : res.objects) {
                 auto rec = src.get_object(b.name, om.key);
-                if (!rec) continue;  // writes-stopped is the operational contract; a concurrent delete is skipped only defensively
+                if (!rec) continue;  // invisible under a snapshot view; on a live store (redis) a concurrent delete is skipped defensively
                 auto val = codec::encode_object(*rec);
                 w.u8('O');
                 w.str32(b.name);

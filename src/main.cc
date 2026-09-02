@@ -7,6 +7,7 @@
 //   lights3 duostore dump <backend> <file> [...]  duostore meta admin
 //   lights3 duostore load <backend> <file> [...]  (docs/storage/duostore-core.md §11)
 //   lights3 duostore gc|scan <backend> [...]      run one GC / orphan-scan round (roadmap §3.2)
+//   lights3 duostore quarantine list|release|purge ...  corrupt-pack quarantine (roadmap §3.7)
 //   lights3 tier scan|gc|reconcile <backend> [..] tiered background tasks on demand (roadmap §3.2)
 //   lights3 tier quarantine list|forget|purge ...  tiered reconcile quarantine ledger (roadmap §3.6)
 //   lights3 fsck <backend> [--max-mbps=<n>] [...] offline integrity scrub (roadmap §3.1)
@@ -17,6 +18,7 @@
 // that shape by normalize_argv below, so both keep working.
 #include <ccmd.h>
 
+#include <charconv>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
@@ -195,12 +197,14 @@ void run_duo_gc(const Cmd& c) {
     app.open_storage();
     auto* duo = find_duostore(app, one_backend_arg(c));
     auto st = sync_wait(duo->run_gc_once());
-    LOG_INFO("duostore admin: gc round: reclaims {} (grace-skipped {}, pinned {}), files "
-             "removed {}, packs removed {}, uploads expired {}, packs sealed-aged {}, "
-             "compacted {} (deferred {}), records migrated {}, corrupt {}",
-             st.reclaims_acked, st.skipped_grace, st.skipped_pinned, st.files_removed,
-             st.packs_removed, st.uploads_expired, st.packs_sealed_aged, st.packs_compacted,
-             st.packs_compact_deferred, st.records_migrated, st.records_corrupt);
+    LOG_INFO("duostore admin: gc round: reclaims {} (grace-skipped {}, pinned {}, "
+             "leased {}), files removed {}, packs removed {}, uploads expired {}, packs "
+             "sealed-aged {}, compacted {} (deferred {}), records migrated {}, corrupt {}, "
+             "packs quarantined {}",
+             st.reclaims_acked, st.skipped_grace, st.skipped_pinned, st.skipped_leased,
+             st.files_removed, st.packs_removed, st.uploads_expired, st.packs_sealed_aged,
+             st.packs_compacted, st.packs_compact_deferred, st.records_migrated,
+             st.records_corrupt, st.packs_quarantined);
     app.shutdown();
 }
 
@@ -211,12 +215,140 @@ void run_duo_scan(const Cmd& c) {
     auto* duo = find_duostore(app, one_backend_arg(c));
     auto st = sync_wait(duo->run_orphan_scan_once());
     LOG_INFO("duostore admin: orphan scan: {} chunks ({} bytes) / {} packs ({} bytes) "
-             "scanned; orphans removed {} (grace-skipped {}, pinned {}), orphan packs "
-             "removed {} (skipped active {}); refs missing {}, packstats missing {}",
+             "scanned; orphans removed {} (grace-skipped {}, pinned {}, gcq-pending {}), "
+             "orphan packs removed {} (skipped active {}); refs missing {}, packstats "
+             "missing {}",
              st.chunks_scanned, st.chunk_bytes, st.packs_scanned, st.pack_bytes,
-             st.orphans_removed, st.skipped_grace, st.skipped_pinned, st.orphan_packs_removed,
-             st.packs_skipped_active, st.refs_missing, st.pack_stats_missing);
+             st.orphans_removed, st.skipped_grace, st.skipped_pinned, st.skipped_gcq,
+             st.orphan_packs_removed, st.packs_skipped_active, st.refs_missing,
+             st.pack_stats_missing);
     app.shutdown();
+}
+
+// Corrupt-pack quarantine (roadmap §3.7): packs whose compaction cannot converge
+// because of corrupt records are parked by GC; these are the operator exits.
+// Pack ids accept the 16-digit hex the logs print, 0x-prefixed hex, or decimal
+uint64_t parse_pack_id(const std::string& s) {
+    uint64_t id = 0;
+    int base = 10;
+    size_t off = 0;
+    if (s.size() > 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16;
+        off = 2;
+    } else if (s.size() == 16) {
+        base = 16;  // the {:016x} form GC logs and `quarantine list` print
+    }
+    auto res = std::from_chars(s.data() + off, s.data() + s.size(), id, base);
+    if (res.ec != std::errc{} || res.ptr != s.data() + s.size())
+        throw std::runtime_error("invalid pack id '" + s +
+                                 "' (16-digit hex as logged, 0x-prefixed hex, or decimal)");
+    return id;
+}
+
+std::pair<std::string, uint64_t> backend_pack_args(const Cmd& c) {
+    std::string backend = c->var<std::string>("backend");
+    std::vector<std::string> pos = c->args();
+    if (!backend.empty() && pos.size() == 1) pos.insert(pos.begin(), backend);
+    if (pos.size() != 2) {
+        c->print_help();
+        g_exit = 2;
+        throw std::runtime_error(c->name() + ": expected <backend> <pack_id>");
+    }
+    return {pos[0], parse_pack_id(pos[1])};
+}
+
+void run_duo_quarantine_list(const Cmd& c) {
+    using namespace lights3;
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* duo = find_duostore(app, one_backend_arg(c));
+    auto entries = duo->quarantine_list();
+    if (entries.empty()) {
+        std::printf("no quarantined packs\n");
+    } else {
+        std::printf("%-18s %-10s %-8s %-20s %s\n", "PACK", "LIVE_RECS", "CORRUPT",
+                    "QUARANTINED", "PURGED");
+        for (const auto& e : entries)
+            std::printf("%016llx   %-10lld %-8llu %-20s %s\n",
+                        static_cast<unsigned long long>(e.pack_id),
+                        static_cast<long long>(e.live_recs),
+                        static_cast<unsigned long long>(e.corrupt_records),
+                        util::iso8601(std::chrono::system_clock::from_time_t(
+                                          e.quarantined_ms / 1000))
+                            .c_str(),
+                        e.purged ? "yes" : "no");
+    }
+    app.shutdown();
+}
+
+void run_duo_quarantine_release(const Cmd& c) {
+    using namespace lights3;
+    auto [backend, pack_id] = backend_pack_args(c);
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* duo = find_duostore(app, backend);
+    if (duo->quarantine_release(pack_id)) {
+        LOG_INFO("duostore admin: pack {:016x} released from quarantine (compaction retries "
+                 "next GC round)", pack_id);
+    } else {
+        LOG_WARN("duostore admin: pack {:016x} is not quarantined", pack_id);
+        g_exit = 1;
+    }
+    app.shutdown();
+}
+
+void run_duo_quarantine_purge(const Cmd& c) {
+    using namespace lights3;
+    auto [backend, pack_id] = backend_pack_args(c);
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* duo = find_duostore(app, backend);
+    if (sync_wait(duo->quarantine_purge(pack_id))) {
+        LOG_WARN("duostore admin: quarantined pack {:016x} purged (data loss acknowledged); "
+                 "delete the owning objects to drain its accounting", pack_id);
+    } else {
+        LOG_WARN("duostore admin: pack {:016x} not purged (not quarantined, or already purged)",
+                 pack_id);
+        g_exit = 1;
+    }
+    app.shutdown();
+}
+
+Cmd make_duo_quarantine() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "quarantine", "lights3 duostore quarantine list local",
+        "lights3 duostore quarantine <list|release|purge> <backend> [<pack_id>] [--config=<path>]",
+        "Corrupt-pack quarantine (docs/storage/duostore-core.md §8.6): packs whose "
+        "compaction found corrupt records and made no progress for consecutive scans are "
+        "parked here instead of retrying forever. list shows them; release drops an entry "
+        "so compaction retries (use after restoring the pack file from backup); purge "
+        "deletes the pack file, accepting the loss of its remaining records — the "
+        "accounting drains as the owning objects are deleted.",
+        "duostore corrupt-pack quarantine (list/release/purge)",
+        [](const Cmd& c) {
+            c->print_help();
+            g_exit = 2;
+        });
+    cmd->add_subcommand(make_backend_leaf(
+        "list", "lights3 duostore quarantine list local",
+        "lights3 duostore quarantine list <backend> [--config=<path>]",
+        "Print every quarantined pack with its live/corrupt record counts and entry time.",
+        "list quarantined packs", run_duo_quarantine_list));
+    cmd->add_subcommand(make_backend_leaf(
+        "release", "lights3 duostore quarantine release local 000000000000a001",
+        "lights3 duostore quarantine release <backend> <pack_id> [--config=<path>]",
+        "Drop the quarantine entry so the next GC round rescans the pack (it returns "
+        "after three fruitless scans if the corruption persists).",
+        "release a pack back to compaction", run_duo_quarantine_release));
+    cmd->add_subcommand(make_backend_leaf(
+        "purge", "lights3 duostore quarantine purge local 000000000000a001",
+        "lights3 duostore quarantine purge <backend> <pack_id> [--config=<path>]",
+        "Delete the quarantined pack's file, accepting the loss of its remaining "
+        "records (their reads become missing-extent errors). Refused while an in-flight "
+        "reader pins the pack. The liveness accounting is kept until the owning objects "
+        "are deleted; GC then retires it.",
+        "purge a quarantined pack from disk (data loss)", run_duo_quarantine_purge));
+    return cmd;
 }
 
 Cmd make_admin_leaf(const char* name, const char* example, const char* usage, const char* help_long,
@@ -231,12 +363,15 @@ Cmd make_admin_leaf(const char* name, const char* example, const char* usage, co
 Cmd make_duostore() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "duostore", "lights3 duostore dump local meta.dump --config=config/lights3.yaml",
-        "lights3 duostore <dump|load|gc|scan> <backend> [<file>] [--config=<path>]",
-        "DuoStore admin: meta dump/load (docs/storage/duostore-core.md §11) and "
-        "on-demand GC / orphan-scan rounds (§8). All run with the backends built but "
-        "no server listening, then exit; load ends with a forced orphan scan. Backup "
-        "order: copy the data dir first, then dump meta; restore data first, then load.",
-        "duostore admin (dump/load/gc/scan)",
+        "lights3 duostore <dump|load|gc|scan|quarantine> <backend> [<file>|<pack_id>] "
+        "[--config=<path>]",
+        "DuoStore admin: meta dump/load (docs/storage/duostore-core.md §11), on-demand "
+        "GC / orphan-scan rounds (§8), and the corrupt-pack quarantine (§8.1). All run "
+        "with the backends built but no server listening, then exit; load ends with a "
+        "forced orphan scan. Backup order: copy the data dir first, then dump meta "
+        "(online-consistent on rocksdb/sqlite/tikv; stop writes on redis); restore data "
+        "first, then load.",
+        "duostore admin (dump/load/gc/scan/quarantine)",
         [](const Cmd& c) {
             c->print_help();
             g_exit = 2;
@@ -265,6 +400,7 @@ Cmd make_duostore() {
         "reconciliation of on-disk chunks/packs against refs/packstat; unreferenced "
         "residue beyond gc_grace is unlinked, loss signals are warned and counted.",
         "run one duostore orphan-scan round", run_duo_scan));
+    cmd->add_subcommand(make_duo_quarantine());
     return cmd;
 }
 #endif  // LIGHTS3_DUOSTORE

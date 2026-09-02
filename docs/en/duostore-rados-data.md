@@ -421,13 +421,13 @@ gaps item by item:
 | --- | --- |
 | file_id globally unique | Satisfied: segment allocation on the shared meta (INCRBY, redis-meta §4) is naturally monotonic across gateways |
 | meta transactions globally atomic | Satisfied: Lua scripts are server-side atomic (redis-meta §3.4) |
-| read-side pin vs another gateway's GC | **Gap**: the pin table is per-process; during a long read on gateway A, gateway B's GC may remove the object → read -ENOENT. First-phase constraint + mitigation below |
+| read-side pin vs another gateway's GC | **Closed** (roadmap §3.7): the pin table stays per-process, but every gateway publishes its oldest in-flight read start time to the shared meta every `read_lease` (default 5s); the GC gateway only reclaims gcq entries every peer's in-flight read provably cannot reference, and empty packs first seen empty before the lease floor (storage/duostore-core.md §8.5). With `read_lease: 0` the old constraint `gc_grace` ≥ the longest expected GET duration applies again |
 | who runs GC / the orphan scan | **Must be a single instance** (configuration designates which gateway runs GC), otherwise concurrent compaction/scans trample each other |
 
 Deployment constraint (carried by configuration since C4): **with multiple
-gateways, GC runs only on the single designated instance, and `gc_grace` ≥
-the longest expected GET duration** (pulling probabilistic correctness up to
-engineering acceptability). Non-designated gateways set
+gateways, GC runs only on the single designated instance**; with the read
+lease off, additionally `gc_grace` ≥ the longest expected GET duration
+(pulling probabilistic correctness up to engineering acceptability). Non-designated gateways set
 **`gc_enabled: false`** (a duostore-wide key, main document §11): it only
 stops the scheduling of the background GC worker and orphan scan; the manual
 hooks (test/ops channel) remain; an INFO log at startup leaves a trace

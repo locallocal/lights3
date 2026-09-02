@@ -576,6 +576,7 @@ parses centrally with range validation (modeled on cloudproxy); `parse_size` /
 | pack_gc_ratio | 0.5 | compaction triggers when the liveness ratio falls below this |
 | gc_enabled | true | master switch for the background GC worker + orphan-scan scheduling; set false on non-designated instances in multi-gateway deployments (single-instance execution constraint, duostore-rados-data.md §8.3); manual hooks are not gated |
 | gc_interval / gc_grace | 5m / 5m | reclaim period / delayed-deletion grace |
+| read_lease | 5s | multi-gateway read-lease publish period (roadmap §3.7, storage/duostore-core.md §8.5): every gateway publishes its oldest in-flight read start time to the shared meta (redis/tikv); GC only reclaims entries every peer's in-flight read provably cannot reference; 0 = off; local engines (rocksdb/sqlite) stand the publisher down automatically at no cost |
 | orphan_scan_interval | 1d | chunk orphan reconciliation period |
 | mpu_ttl | 7d | expiry cleanup of incomplete multiparts; 0 = off (matching gc_interval's 0 semantics) |
 | meta_sync | true | whether RocksDB commits are WAL-fsynced (§6.3) |

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstring>
 #include <map>
 #include <set>
@@ -1309,6 +1310,59 @@ return 1
     auto r = eval(kSha, kBody, {key("gc_lease")},
                   {std::string(owner), std::to_string(ttl_ms)}, /*read_retry=*/false);
     return require_int("try_gc_lease", r.get()) == 1;
+}
+
+// Multi-gateway read lease (roadmap §3.7): plain SET with PX — each gateway only
+// writes its own key, no arbitration needed; a crashed publisher's key expires
+bool RedisMetaStore::publish_read_lease(std::string_view owner, int64_t oldest_ms,
+                                        int64_t ttl_ms) {
+    auto r = exec({"SET", key("readlease:") + std::string(owner), std::to_string(oldest_ms),
+                   "PX", std::to_string(ttl_ms)},
+                  /*read_retry=*/false);
+    check_reply_error("publish_read_lease", r.get());
+    return true;
+}
+
+std::optional<int64_t> RedisMetaStore::min_read_lease() {
+    // SCAN MATCH <prefix>readlease:* (cursor iteration; same glob escaping as
+    // pack_stats — the prefix may contain arbitrary bytes) + one MGET per SCAN
+    // page. Gateway counts are tiny; the cost is a handful of round trips
+    std::string pattern;
+    for (char ch : key("readlease:")) {
+        if (ch == '*' || ch == '?' || ch == '[' || ch == ']' || ch == '\\')
+            pattern.push_back('\\');
+        pattern.push_back(ch);
+    }
+    pattern.push_back('*');
+
+    std::optional<int64_t> min;
+    std::string cursor = "0";
+    do {
+        auto r = exec({"SCAN", cursor, "MATCH", pattern, "COUNT", "64"}, /*read_retry=*/true);
+        check_reply_error("min_read_lease scan", r.get());
+        if (r->type != REDIS_REPLY_ARRAY || r->elements != 2)
+            throw_internal("min_read_lease", "unexpected SCAN reply");
+        cursor = std::string(reply_str(r->element[0]));
+        const redisReply* keys = r->element[1];
+        if (keys->elements == 0) continue;
+        std::vector<std::string> cmd{"MGET"};
+        for (size_t i = 0; i < keys->elements; ++i)
+            cmd.emplace_back(reply_str(keys->element[i]));
+        auto vals = exec(cmd, /*read_retry=*/true);
+        check_reply_error("min_read_lease mget", vals.get());
+        if (vals->type != REDIS_REPLY_ARRAY)
+            throw_internal("min_read_lease", "unexpected MGET reply");
+        for (size_t i = 0; i < vals->elements; ++i) {
+            const redisReply* v = vals->element[i];
+            if (v->type != REDIS_REPLY_STRING) continue;  // expired between SCAN and MGET
+            int64_t oldest = 0;
+            auto sv = reply_str(v);
+            if (std::from_chars(sv.data(), sv.data() + sv.size(), oldest).ec != std::errc{})
+                continue;
+            if (!min || oldest < *min) min = oldest;
+        }
+    } while (cursor != "0");
+    return min;
 }
 
 std::vector<PackStat> RedisMetaStore::pack_stats() {

@@ -31,6 +31,7 @@ lights3 duostore dump <backend> <file> [--config=<path>]   导出 duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   导入 duostore meta
 lights3 duostore gc <backend> [--config=<path>]            立即跑一轮 duostore GC
 lights3 duostore scan <backend> [--config=<path>]          立即跑一轮孤儿扫描
+lights3 duostore quarantine list|release|purge <backend> [<pack_id>] 损坏 pack 隔离区
 lights3 tier scan|gc|reconcile <backend> [--config=<path>] tiered 后台任务手动触发
 lights3 tier quarantine list|forget|purge <backend> [<bucket> <key>] tiered 对账隔离区
 lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  离线数据完整性巡检
@@ -63,8 +64,11 @@ export LIGHTS3_SECRET_1=my-secret
 DuoStore 的逻辑 meta 备份与恢复（流格式与不变量见
 [storage/duostore-core.md §11](storage/duostore-core.md#11-meta-dumpload)）。
 仅在 `LIGHTS3_DUOSTORE` 构建中注册；两者都在**不监听端口**的前提下构建全部
-后端，执行完即退出，写静默由此天然成立。`<backend>` 必须是配置中
-`type: duostore` 的后端名，否则报错退出。
+后端，执行完即退出。`<backend>` 必须是配置中 `type: duostore` 的后端名，
+否则报错退出。共享 meta 引擎旁路在线网关执行时：`dump` 在 rocksdb/sqlite/
+tikv 上走引擎快照、在线一致（roadmap §3.7）；redis 无 MVCC，其他网关持续
+写入时 dump 不保证一致（入口 WARN 提示，须停写）。`load` 恒要求目标端写
+静默。
 
 - `dump`：写出该后端全部 bucket/object 记录与已封存 pack 账本到 `<file>`
   （覆盖写）。
@@ -105,7 +109,7 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 ./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
 ```
 
-### 2.4 后台任务手动触发：`duostore gc|scan`、`tier scan|gc|reconcile|quarantine`
+### 2.4 后台任务手动触发：`duostore gc|scan|quarantine`、`tier scan|gc|reconcile|quarantine`
 
 后台钩子的 CLI 出口（roadmap §3.2）：`run_gc_once` / `run_orphan_scan_once` /
 `scan_once` / `run_gc_once`(tiered) / `run_reconcile_once` 此前只被定时器与单
@@ -121,6 +125,14 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
   从网关配置不影响手动钩子。
 - `duostore scan <backend>`：一轮孤儿扫描（盘面与 refs/packstat 双向对账，
   §8.3），顺带打出 chunk/pack 盘面用量。
+- `duostore quarantine list <backend>`：打印损坏 pack 隔离区账本（pack id /
+  live/corrupt 记录数 / 入区时间 / 是否已 purge，
+  [storage/duostore-core.md §8.6](storage/duostore-core.md)）；
+  `duostore quarantine release <backend> <pack_id>` 删条目让压实重试（修好
+  盘面/从备份放回文件后用）；`duostore quarantine purge <backend> <pack_id>`
+  物理删 pack 文件、保留记账（承认剩余损坏记录丢失；有在途读 pin 时拒绝），
+  之后删除引用它的对象即可由常规 GC 收尾。pack id 接受日志里的 16 位十六进
+  制、`0x` 前缀十六进制或十进制。
 - `tier scan <backend>`：一轮扫描（启动后首轮/每 `full_scan_interval` 为全量枚举，
   其余为时间轮增量轮）：判冷 + 水位回收 + 崩溃恢复 + 访问记录刷写，日志打出
   本轮 `TierScanStats`；

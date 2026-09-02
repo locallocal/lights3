@@ -453,6 +453,30 @@ TEST(duostore_redis_gc_lease) {
     c.close();
 }
 
+// Multi-gateway read lease (roadmap §3.7): the min across published leases wins;
+// expiry (PX) retires a crashed publisher; no publishers = nullopt; no snapshot
+// support on this engine (the online dump falls back to the writes-stopped path)
+TEST(duostore_redis_read_lease) {
+    REDIS_OR_SKIP();
+    std::string prefix = unique_prefix();
+    RedisMetaStore a(redis_opts(prefix)), b(redis_opts(prefix));
+    CHECK(!a.min_read_lease().has_value());
+    CHECK(a.publish_read_lease("gw-a", 1'000, 60'000));
+    CHECK(b.publish_read_lease("gw-b", 500, 60'000));
+    auto min = a.min_read_lease();
+    CHECK(min.has_value());
+    CHECK_EQ(*min, int64_t(500));
+    CHECK(b.publish_read_lease("gw-b", 2'000, 60'000));  // b's oldest read finished
+    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
+    // A short-TTL lease expires and stops holding the floor down
+    CHECK(a.publish_read_lease("gw-c", 1, 100));
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
+    CHECK(a.snapshot() == nullptr);  // documented engine limitation
+    a.close();
+    b.close();
+}
+
 // roadmap §3.5: uz:<b> lex index. Pages walked with the composite cursor must concatenate to
 // the full listing (which itself must match what was registered); a legacy table without an
 // index (simulated by deleting uz:<b>) still lists completely and gets its index rebuilt;

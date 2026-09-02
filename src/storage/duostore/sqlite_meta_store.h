@@ -75,6 +75,10 @@ public:
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
+    // Online-dump snapshot (roadmap §3.7): leases a pool connection and holds an
+    // open WAL read transaction on it — every view read observes the snapshot the
+    // transaction materialized. Borrows this store — destroy before close()
+    std::unique_ptr<IMetaReadView> snapshot() override;
     void close() override;
 
     // Test-only (§9 S4 consistent-view case): each list_objects call invokes this hook
@@ -129,8 +133,16 @@ private:
     void release(std::unique_ptr<Conn> c);
     Conn& wconn();                         // write connection; mu_ must be held; throws InternalError after close
 
+    class SnapshotView;
+
     void require_bucket(Conn& c, std::string_view b);
     std::optional<std::string> object_raw(Conn& c, std::string_view b, std::string_view k);
+    // Connection-parameterized read bodies shared by the live methods (fresh pool
+    // lease per call) and SnapshotView (roadmap §3.7: all calls on the one leased
+    // connection inside its open read transaction)
+    std::vector<BucketInfo> list_buckets_in(Conn& c);
+    ListResult list_objects_in(Conn& c, std::string_view b, const ListOptions& opt);
+    std::vector<PackStat> pack_stats_in(Conn& c);
     UploadRec require_upload_in(Conn& c, std::string_view b, std::string_view k,
                                 std::string_view id);
     // Maintain refs (chunk reference table) in the same batch: add=write owner, else delete

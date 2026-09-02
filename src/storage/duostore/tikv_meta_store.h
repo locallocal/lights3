@@ -86,6 +86,16 @@ public:
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
     bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
+    // Multi-gateway read lease (roadmap §3.7): 'L' table rows "r<owner>" with the
+    // value "<oldest_ms>\0<expiry_ms>" (same wall-clock TTL arithmetic as the GC
+    // lease); min_read_lease scans them, lazily deleting expired rows
+    bool publish_read_lease(std::string_view owner, int64_t oldest_ms,
+                            int64_t ttl_ms) override;
+    std::optional<int64_t> min_read_lease() override;
+    // Online-dump snapshot (roadmap §3.7): a fixed TSO version — MVCC makes every
+    // read at it a consistent view. The cluster GC safepoint must not pass the
+    // version while the view lives: keep gc_retention above the dump duration
+    std::unique_ptr<IMetaReadView> snapshot() override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // batch write-off in one transaction
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
@@ -105,7 +115,18 @@ public:
     uint64_t update_gc_safepoint_once();
 
 private:
+    class SnapshotView;
+
     void migrate_schema(int64_t ver);  // migration chain for version < current (called by open schema)
+
+    // Version-parameterized read bodies shared by the live methods (fresh TSO per
+    // call) and SnapshotView (one fixed version for the whole dump). fold=false
+    // keeps pack_stats_at purely read-only (the view must not write)
+    std::vector<BucketInfo> list_buckets_at(uint64_t ver);
+    std::optional<ObjectRec> get_object_at(uint64_t ver, std::string_view b,
+                                           std::string_view k);
+    ListResult list_objects_at(uint64_t ver, std::string_view b, const ListOptions& opt);
+    std::vector<PackStat> pack_stats_at(uint64_t ver, bool fold);
 
     // Id-segment reservation (§5, isomorphic to the RocksDB/Redis versions): a small
     // RMW transaction on the counter key adds +kIdSegment at a time, then dispatches

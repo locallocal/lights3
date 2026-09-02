@@ -233,10 +233,13 @@ rocksdb::DB* RocksMetaStore::db() const {
     return d;
 }
 
-std::optional<std::string> RocksMetaStore::get_raw(int cf, std::string_view key) {
+std::optional<std::string> RocksMetaStore::get_raw(int cf, std::string_view key,
+                                                   const rocksdb::Snapshot* snap) {
     auto* d = db();  // fetch the handle before touching cfs_ (close nulls db_ before clearing cfs_)
     std::string v;
-    auto s = d->Get(rocksdb::ReadOptions(), cfs_[cf], slice(key), &v);
+    rocksdb::ReadOptions ro;
+    ro.snapshot = snap;
+    auto s = d->Get(ro, cfs_[cf], slice(key), &v);
     if (s.IsNotFound()) return std::nullopt;
     if (!s.ok()) throw_status("get", s);
     return v;
@@ -383,10 +386,13 @@ void RocksMetaStore::delete_bucket(std::string_view b) {
 
 bool RocksMetaStore::bucket_exists(std::string_view b) { return get_raw(kBuckets, b).has_value(); }
 
-std::vector<BucketInfo> RocksMetaStore::list_buckets() {
+std::vector<BucketInfo> RocksMetaStore::list_buckets() { return list_buckets_snap(nullptr); }
+
+std::vector<BucketInfo> RocksMetaStore::list_buckets_snap(const rocksdb::Snapshot* snap) {
     std::vector<BucketInfo> out;
-    auto it = std::unique_ptr<rocksdb::Iterator>(
-        db()->NewIterator(rocksdb::ReadOptions(), cfs_[kBuckets]));
+    rocksdb::ReadOptions ro;
+    ro.snapshot = snap;
+    auto it = std::unique_ptr<rocksdb::Iterator>(db()->NewIterator(ro, cfs_[kBuckets]));
     for (it->SeekToFirst(); it->Valid(); it->Next()) {
         int64_t created = codec::decode_bucket({it->value().data(), it->value().size()});
         out.push_back({it->key().ToString(), codec::from_unix_ms(created)});
@@ -452,7 +458,16 @@ bool RocksMetaStore::delete_object(std::string_view b, std::string_view k) {
 // §4.4: the objects CF iterates in natural sorted order; delimiter groups are
 // skipped wholesale with Seek
 ListResult RocksMetaStore::list_objects(std::string_view b, const ListOptions& opt) {
-    require_bucket_locked(b);  // pure read; the lock-free get is idempotent and safe
+    return list_objects_snap(b, opt, nullptr);
+}
+
+ListResult RocksMetaStore::list_objects_snap(std::string_view b, const ListOptions& opt,
+                                             const rocksdb::Snapshot* ext_snap) {
+    // Bucket existence must be judged in the same view as the scan: the dump view
+    // passes its pinned snapshot, the live path takes a per-call one below
+    if (!get_raw(kBuckets, b, ext_snap))
+        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist",
+                      std::string(b));
     ListResult out;
     // S3: max-keys=0 returns empty with IsTruncated=false (consistent with apply_listing)
     if (opt.max_keys <= 0) return out;
@@ -461,8 +476,10 @@ ListResult RocksMetaStore::list_objects(std::string_view b, const ListOptions& o
 
     rocksdb::ReadOptions ro;
     auto* d = db();
-    SnapshotGuard snap{d, d->GetSnapshot()};
-    ro.snapshot = snap.snap;
+    // External snapshot (online dump view) is owned by the view; otherwise pin one
+    // for this call only
+    SnapshotGuard snap{d, ext_snap ? nullptr : d->GetSnapshot()};
+    ro.snapshot = ext_snap ? ext_snap : snap.snap;
     rocksdb::Slice upper_slice(upper);
     ro.iterate_upper_bound = &upper_slice;
     auto it = std::unique_ptr<rocksdb::Iterator>(d->NewIterator(ro, cfs_[kObjects]));
@@ -744,14 +761,17 @@ void RocksMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
     commit(batch);
 }
 
-std::vector<PackStat> RocksMetaStore::pack_stats() {
+std::vector<PackStat> RocksMetaStore::pack_stats() { return pack_stats_snap(nullptr); }
+
+std::vector<PackStat> RocksMetaStore::pack_stats_snap(const rocksdb::Snapshot* snap) {
     // Prefix scan 'p' over the stats CF: a pack's b/r/s sub-keys are adjacent, so we
     // aggregate while scanning. The result includes live=0 and unsealed entries
     // (whole-pack deletion of empty packs and re-sealing on restart depend on seeing
     // them)
     std::vector<PackStat> out;
-    auto it = std::unique_ptr<rocksdb::Iterator>(
-        db()->NewIterator(rocksdb::ReadOptions(), cfs_[kStats]));
+    rocksdb::ReadOptions ro;
+    ro.snapshot = snap;
+    auto it = std::unique_ptr<rocksdb::Iterator>(db()->NewIterator(ro, cfs_[kStats]));
     for (it->Seek("p"); it->Valid() && it->key().starts_with("p"); it->Next()) {
         std::string_view k(it->key().data(), it->key().size());
         if (k.size() != 10) continue;  // 'p' + be64 + field
@@ -858,6 +878,35 @@ void RocksMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
     for (it->SeekToFirst(); it->Valid(); it->Next())
         cb(codec::parse_be64({it->key().data(), it->key().size()}));
     if (!it->status().ok()) throw_status("scan_refs", it->status());
+}
+
+// Online-dump snapshot view (roadmap §3.7): pins one RocksDB snapshot for its
+// lifetime; every read is routed through the store's snapshot-parameterized
+// bodies. Borrows the store — the caller (run_meta_dump) destroys it before close
+class RocksMetaStore::SnapshotView final : public IMetaReadView {
+public:
+    SnapshotView(RocksMetaStore& store, rocksdb::DB* d)
+        : store_(store), guard_{d, d->GetSnapshot()} {}
+    std::vector<BucketInfo> list_buckets() override {
+        return store_.list_buckets_snap(guard_.snap);
+    }
+    std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override {
+        auto v = store_.get_raw(kObjects, codec::object_key(b, k), guard_.snap);
+        if (!v) return std::nullopt;
+        return codec::decode_object(std::string(k), *v);
+    }
+    ListResult list_objects(std::string_view b, const ListOptions& opt) override {
+        return store_.list_objects_snap(b, opt, guard_.snap);
+    }
+    std::vector<PackStat> pack_stats() override { return store_.pack_stats_snap(guard_.snap); }
+
+private:
+    RocksMetaStore& store_;
+    SnapshotGuard guard_;
+};
+
+std::unique_ptr<IMetaReadView> RocksMetaStore::snapshot() {
+    return std::make_unique<SnapshotView>(*this, db());
 }
 
 }  // namespace lights3::storage::duostore

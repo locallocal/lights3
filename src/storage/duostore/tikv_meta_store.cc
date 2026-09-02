@@ -585,9 +585,12 @@ bool TikvMetaStore::bucket_exists(std::string_view b) {
 }
 
 std::vector<BucketInfo> TikvMetaStore::list_buckets() {
+    return list_buckets_at(guarded("list_buckets", [&] { return client().get_ts(); }));
+}
+
+std::vector<BucketInfo> TikvMetaStore::list_buckets_at(uint64_t ts) {
     return guarded("list_buckets", [&] {
         std::vector<BucketInfo> out;
-        auto ts = client().get_ts();
         auto [lo, hi] = range_of('B', {});
         size_t plen = lo.size();  // prefix + 'B'
         scan_range(ts, lo, hi, [&](const std::string& k, const std::string& v) {
@@ -601,8 +604,13 @@ std::vector<BucketInfo> TikvMetaStore::list_buckets() {
 // ---------- object ----------
 
 std::optional<ObjectRec> TikvMetaStore::get_object(std::string_view b, std::string_view k) {
+    return get_object_at(guarded("get_object", [&] { return client().get_ts(); }), b, k);
+}
+
+std::optional<ObjectRec> TikvMetaStore::get_object_at(uint64_t ts, std::string_view b,
+                                                      std::string_view k) {
     return guarded("get_object", [&]() -> std::optional<ObjectRec> {
-        auto v = snap_get(client().get_ts(), object_key(b, k));
+        auto v = snap_get(ts, object_key(b, k));
         if (!v) return std::nullopt;
         return codec::decode_object(std::string(k), *v);
     });
@@ -670,9 +678,14 @@ bool TikvMetaStore::delete_object(std::string_view b, std::string_view k) {
 // forward scan done on that group to fetch its tail key (at most once per list; groups
 // are usually far smaller than the bucket)
 ListResult TikvMetaStore::list_objects(std::string_view b, const ListOptions& opt) {
+    // Consistent view for the whole list (across pages/group skips)
+    return list_objects_at(guarded("list_objects", [&] { return client().get_ts(); }), b, opt);
+}
+
+ListResult TikvMetaStore::list_objects_at(uint64_t ts, std::string_view b,
+                                          const ListOptions& opt) {
     return guarded("list_objects", [&] {
         ListResult out;
-        uint64_t ts = client().get_ts();  // consistent view for the whole list (across pages/group skips)
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
         if (opt.max_keys <= 0) return out;  // S3: max-keys=0 returns empty and not truncated
 
@@ -998,6 +1011,55 @@ bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
     });
 }
 
+// Multi-gateway read lease (roadmap §3.7): 'L' table row "r<owner>", value
+// "<oldest_ms>\0<expiry_ms>". A blind single-key put — each gateway only ever
+// writes its own row, so there is no contention to arbitrate; TTL expiry is
+// judged by wall clock exactly like try_gc_lease
+bool TikvMetaStore::publish_read_lease(std::string_view owner, int64_t oldest_ms,
+                                       int64_t ttl_ms) {
+    txn_retry("publish_read_lease", [&](uint64_t, std::vector<TikvMutation>& muts) {
+        std::string val = std::to_string(oldest_ms);
+        val += '\0';
+        val += std::to_string(now_ms() + ttl_ms);
+        muts.push_back({TikvOp::kPut, tkey('L', "r" + std::string(owner)), std::move(val)});
+    });
+    return true;
+}
+
+std::optional<int64_t> TikvMetaStore::min_read_lease() {
+    std::optional<int64_t> min;
+    std::vector<std::string> expired;
+    const int64_t now = now_ms();
+    guarded("min_read_lease", [&] {
+        uint64_t ts = client().get_ts();
+        auto [lo, hi] = range_of('L', "r");
+        scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
+            auto nul = v.find('\0');
+            if (nul == std::string::npos) return true;  // not our format, skip
+            int64_t oldest = 0, expiry = 0;
+            std::from_chars(v.data(), v.data() + nul, oldest);
+            std::from_chars(v.data() + nul + 1, v.data() + v.size(), expiry);
+            if (expiry <= now) {
+                expired.push_back(key);  // crashed publisher: lazily removed below
+                return true;
+            }
+            if (!min || oldest < *min) min = oldest;
+            return true;
+        });
+    });
+    if (!expired.empty()) {
+        try {
+            txn_retry("expire read leases", [&](uint64_t, std::vector<TikvMutation>& muts) {
+                for (auto& k : expired) muts.push_back({TikvOp::kDel, k, {}});
+            });
+        } catch (const std::exception& e) {
+            // Best effort: leftovers are re-judged expired by the next scan
+            LOG_WARN("duostore tikv meta: expired read-lease cleanup failed: {}", e.what());
+        }
+    }
+    return min;
+}
+
 void TikvMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
     if (seqs.empty()) return;
     txn_retry("ack_reclaims", [&](uint64_t, std::vector<TikvMutation>& muts) {
@@ -1006,18 +1068,24 @@ void TikvMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
 }
 
 std::vector<PackStat> TikvMetaStore::pack_stats() {
+    return pack_stats_at(guarded("pack_stats", [&] { return client().get_ts(); }),
+                         /*fold=*/true);
+}
+
+std::vector<PackStat> TikvMetaStore::pack_stats_at(uint64_t ver, bool fold) {
     // 'S' table prefix scan (a pack's delta/seal rows are adjacent: 'd' < 's'),
     // aggregating as it scans. Folds in passing (the other half of the §3.2 delta-row
     // scheme): once a single pack's delta rows exceed the threshold they are merged
     // into one row — the low-frequency GC path bears the merge, keeping the business
-    // write path pure-write and conflict-free
+    // write path pure-write and conflict-free. fold=false (the online-dump snapshot
+    // view) keeps the call purely read-only
     struct Acc {
         PackStat ps;
         std::vector<std::string> delta_keys;  // fold candidates
     };
     std::vector<Acc> accs;
     guarded("pack_stats", [&] {
-        uint64_t ts = client().get_ts();
+        uint64_t ts = ver;
         auto [lo, hi] = range_of('S', {});
         size_t plen = opt_.prefix.size() + 1;  // prefix + 'S'
         scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
@@ -1042,7 +1110,7 @@ std::vector<PackStat> TikvMetaStore::pack_stats() {
         });
     });
     for (Acc& a : accs) {
-        if (a.delta_keys.size() <= kPackFoldThreshold) continue;
+        if (!fold || a.delta_keys.size() <= kPackFoldThreshold) continue;
         // Fold into one row: delete the delta rows already read + write a merged row
         // (new delta_id). Concurrent business transactions only add rows with other
         // keys, no conflict; concurrent folds (multiple gateways) are arbitrated by
@@ -1148,6 +1216,35 @@ void TikvMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
         });
         return 0;
     });
+}
+
+// Online-dump snapshot view (roadmap §3.7): one TSO version fixed at
+// construction — MVCC makes every read at it a consistent view across the whole
+// dump, with no server-side state to hold. The cluster GC safepoint must stay
+// behind the version for the view's lifetime (gc_retention covers the dump
+// duration; the safepoint worker only advances to now − retention)
+class TikvMetaStore::SnapshotView final : public IMetaReadView {
+public:
+    SnapshotView(TikvMetaStore& store, uint64_t ver) : store_(store), ver_(ver) {}
+    std::vector<BucketInfo> list_buckets() override { return store_.list_buckets_at(ver_); }
+    std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override {
+        return store_.get_object_at(ver_, b, k);
+    }
+    ListResult list_objects(std::string_view b, const ListOptions& opt) override {
+        return store_.list_objects_at(ver_, b, opt);
+    }
+    std::vector<PackStat> pack_stats() override {
+        return store_.pack_stats_at(ver_, /*fold=*/false);
+    }
+
+private:
+    TikvMetaStore& store_;
+    uint64_t ver_;
+};
+
+std::unique_ptr<IMetaReadView> TikvMetaStore::snapshot() {
+    uint64_t ver = guarded("snapshot", [&] { return client().get_ts(); });
+    return std::make_unique<SnapshotView>(*this, ver);
 }
 
 }  // namespace lights3::storage::duostore

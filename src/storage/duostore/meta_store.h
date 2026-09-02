@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -126,16 +127,25 @@ struct UndeterminedCommit : s3::S3Error {
         : S3Error(s3::S3ErrorCode::InternalError, std::move(msg)) {}
 };
 
-struct IMetaStore {
+// Read-only slice of the meta shared by IMetaStore and its point-in-time
+// snapshots (roadmap §3.7 online meta dump): exactly the reads dump_meta needs.
+// A snapshot implementation must make every method observe one consistent state
+struct IMetaReadView {
+    virtual std::vector<BucketInfo> list_buckets() = 0;
+    virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
+    virtual ListResult list_objects(std::string_view b, const ListOptions& opt) = 0;
+    virtual std::vector<PackStat> pack_stats() = 0;
+    virtual ~IMetaReadView() = default;
+};
+
+struct IMetaStore : IMetaReadView {
     // ---- bucket ----
     virtual void create_bucket(std::string_view b) = 0;  // already exists -> BucketAlreadyOwnedByYou
     // Missing -> NoSuchBucket; has objects or in-progress multipart -> BucketNotEmpty (aligned with AWS)
     virtual void delete_bucket(std::string_view b) = 0;
     virtual bool bucket_exists(std::string_view b) = 0;
-    virtual std::vector<BucketInfo> list_buckets() = 0;
 
     // ---- object ----
-    virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
     // Meta only, no manifest (docs/archive/gaps.md §3.9): HEAD/precondition reads go here.
     // decode_object materializes the entire extent vector (650k extents ≈ 26MB)
     // only to discard it immediately; decode_object_meta decodes just the
@@ -148,7 +158,6 @@ struct IMetaStore {
     virtual void put_object(std::string_view b, std::string_view k, ObjectRec rec,
                             PutCondition cond = {}) = 0;
     virtual bool delete_object(std::string_view b, std::string_view k) = 0;  // returns false if missing (idempotent)
-    virtual ListResult list_objects(std::string_view b, const ListOptions& opt) = 0;
 
     // ---- multipart ----
     virtual std::string create_upload(std::string_view b, std::string_view k,
@@ -218,10 +227,10 @@ struct IMetaStore {
     }
     // Pack liveness ledger (§9.1/§9.2): live_bytes/live_recs are incremented and
     // decremented in the same batch as commit-type transactions (pack extents do
-    // not enter refs, they go through this ledger); pack_stats() returns every pack
-    // with an entry (including live=0 and unsealed ones — whole-file deletion of
-    // empty packs and abandonment on restart both depend on seeing them)
-    virtual std::vector<PackStat> pack_stats() = 0;
+    // not enter refs, they go through this ledger); pack_stats() (declared on
+    // IMetaReadView) returns every pack with an entry (including live=0 and
+    // unsealed ones — whole-file deletion of empty packs and abandonment on
+    // restart both depend on seeing them)
     // Seal (called back on data-plane rotation/close; idempotent): file_size=0
     // means unknown and must not overwrite a recorded non-zero value — crash
     // leftover packs are back-sealed with 0 by DuoStoreBackend at startup
@@ -257,9 +266,33 @@ struct IMetaStore {
     // always true. owner is the instance identifier (randomly generated in
     // process). A crashed holder yields naturally via TTL expiry — the lease does
     // not solve the unshared pin table problem (in-process pins are invisible to
-    // other gateways), so the deployment constraint gc_grace >= longest expected
-    // GET duration still holds
+    // other gateways); that is what the read lease below covers on shared
+    // engines, with gc_grace as the fallback when it is off
     virtual bool try_gc_lease(std::string_view /*owner*/, int64_t /*ttl_ms*/) { return true; }
+    // Multi-gateway read lease (roadmap §3.7): each gateway periodically publishes
+    // "the oldest in-flight read on this gateway started at oldest_ms" under its
+    // owner id with a TTL (crashed publishers yield via expiry). The GC gateway
+    // reads the min across live leases and only reclaims gcq entries enqueued
+    // strictly before it — a reader holding a ref to reclaimed extents must have
+    // fetched the manifest before the deref enqueued them, so "every in-flight
+    // read started after the enqueue" proves no reader can hold the ref. Shared
+    // engines (redis/tikv) implement both; local engines keep the no-op defaults
+    // (in-process pins are already exact, publish returns false = unsupported and
+    // the backend stops republishing). Clock skew between gateways must stay far
+    // below gc_grace (NTP assumption, same as try_gc_lease's TTL arithmetic)
+    virtual bool publish_read_lease(std::string_view /*owner*/, int64_t /*oldest_ms*/,
+                                    int64_t /*ttl_ms*/) {
+        return false;
+    }
+    // Min oldest_ms across unexpired leases; nullopt = none published / engine
+    // does not support leases (the caller then falls back to gc_grace alone)
+    virtual std::optional<int64_t> min_read_lease() { return std::nullopt; }
+    // Point-in-time read snapshot for the online meta dump (roadmap §3.7):
+    // every read through the returned view observes one consistent state while
+    // writes continue. nullptr = engine cannot snapshot (redis) — the caller
+    // must then guarantee write quiescence for a consistent dump. The view
+    // borrows this store: it must be destroyed before close()
+    virtual std::unique_ptr<IMetaReadView> snapshot() { return nullptr; }
     virtual bool chunk_referenced(uint64_t file_id) = 0;  // orphan scan
     // Orphan reverse reconciliation (§9.3): iterate every file_id in the refs table
     // (chunk/rados share the ledger; order not guaranteed). Snapshot semantics are

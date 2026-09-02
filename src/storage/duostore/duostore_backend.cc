@@ -1,7 +1,9 @@
 #include "storage/duostore/duostore_backend.h"
 
 #include <algorithm>
+#include <charconv>
 #include <chrono>
+#include <fstream>
 #include <random>
 #include <stdexcept>
 #include <unordered_set>
@@ -92,6 +94,26 @@ bool PinTable::pinned_key(bool is_pack, uint64_t id) {
     auto& s = shard_of(id);
     std::lock_guard lk(s.m);
     return (is_pack ? s.pack_refs : s.chunk_refs).count(id) != 0;
+}
+
+// ---------- in-flight read registry (read lease, roadmap §3.7) ----------
+
+uint64_t ReadClock::begin() {
+    const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
+    std::lock_guard lk(m_);
+    uint64_t id = next_++;
+    active_.emplace(id, now);
+    return id;
+}
+
+void ReadClock::end(uint64_t ticket) {
+    std::lock_guard lk(m_);
+    active_.erase(ticket);
+}
+
+int64_t ReadClock::oldest_or(int64_t fallback) {
+    std::lock_guard lk(m_);
+    return active_.empty() ? fallback : active_.begin()->second;
 }
 
 // ---------- compaction migration (P4 §9.2 steps 2-3) ----------
@@ -311,6 +333,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("gc_enabled")) c.gc_enabled = parse_bool_param(name, "gc_enabled", *v);
     if (auto* v = get("gc_interval")) c.gc_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("gc_grace")) c.gc_grace_sec = parse_duration_sec(*v);
+    if (auto* v = get("read_lease")) c.read_lease_sec = parse_duration_sec(*v);
     if (auto* v = get("orphan_scan_interval"))
         c.orphan_scan_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("mpu_ttl")) c.mpu_ttl_sec = parse_duration_sec(*v);
@@ -716,9 +739,11 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         write_pins_ = true;
     }
     gc_owner_ = random_owner();
+    load_quarantine();
     abandon_stale_packs();
     schedule_gc();
     schedule_orphan_scan();
+    schedule_read_lease();
 }
 
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
@@ -728,9 +753,11 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
       data_(std::move(data)) {
     init_metrics(metrics);
     gc_owner_ = random_owner();
+    load_quarantine();
     abandon_stale_packs();
     schedule_gc();
     schedule_orphan_scan();
+    schedule_read_lease();
 }
 
 void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
@@ -805,6 +832,13 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
                                         "Reclaim entries skipped for gc_grace in the last round");
     m_gc_skipped_pinned_ = metrics.gauge("lights3_duostore_gc_skipped_pinned",
                                          "Reclaim entries skipped for pins in the last round");
+    m_gc_skipped_leased_ = metrics.gauge(
+        "lights3_duostore_gc_skipped_leased",
+        "Reclaim entries deferred by a peer gateway's read lease in the last round");
+    m_packs_quarantined_ = metrics.gauge(
+        "lights3_duostore_packs_quarantined",
+        "Packs parked in the corruption quarantine (needs operator attention: "
+        "`lights3 duostore quarantine list`)");
     m_gc_duration_ = metrics.histogram(
         "lights3_duostore_gc_round_seconds", "Wall time of a completed GC round",
         {0.01, 0.1, 0.5, 1, 5, 15, 60, 300, 1800});
@@ -865,6 +899,110 @@ void DuoStoreBackend::abandon_stale_packs() {
         // A sealing failure does not block startup (retry chances remain at the next startup/GC), but must leave a loud trace
         LOG_WARN("duostore '{}': sealing stale packs failed: {}", cfg_.name, e.what());
     }
+}
+
+// ---------- corrupt-pack quarantine (roadmap §3.7) ----------
+
+std::filesystem::path DuoStoreBackend::quarantine_dir() const {
+    return cfg_.root / "quarantine";
+}
+
+// One tiny file per pack: <root>/quarantine/<pack_id hex> with a single
+// "v1 <live> <corrupt> <since_ms> <purged>" line — restarts and the admin CLI
+// (a separate process) read the same ledger the GC round writes
+void DuoStoreBackend::load_quarantine() {
+    std::error_code ec;
+    std::filesystem::create_directories(quarantine_dir(), ec);
+    for (const auto& de : std::filesystem::directory_iterator(quarantine_dir(), ec)) {
+        uint64_t id = 0;
+        auto name = de.path().filename().string();
+        auto res = std::from_chars(name.data(), name.data() + name.size(), id, 16);
+        if (res.ec != std::errc{} || res.ptr != name.data() + name.size()) continue;
+        std::ifstream f(de.path());
+        std::string tag;
+        DuoQuarantineEntry e;
+        e.pack_id = id;
+        int purged = 0;
+        if (!(f >> tag >> e.live_recs >> e.corrupt_records >> e.quarantined_ms >> purged) ||
+            tag != "v1") {
+            LOG_WARN("duostore '{}': unreadable quarantine entry {}, ignoring", cfg_.name,
+                     de.path().string());
+            continue;
+        }
+        e.purged = purged != 0;
+        quarantined_.emplace(id, e);
+    }
+    if (!quarantined_.empty())
+        LOG_WARN("duostore '{}': {} pack(s) in the corruption quarantine "
+                 "(`lights3 duostore quarantine list`)", cfg_.name, quarantined_.size());
+    m_packs_quarantined_->set(int64_t(quarantined_.size()));
+}
+
+void DuoStoreBackend::quarantine_save(const DuoQuarantineEntry& e) {
+    char name[32];
+    std::snprintf(name, sizeof name, "%016llx", (unsigned long long)e.pack_id);
+    std::ofstream f(quarantine_dir() / name, std::ios::trunc);
+    f << "v1 " << e.live_recs << ' ' << e.corrupt_records << ' ' << e.quarantined_ms << ' '
+      << (e.purged ? 1 : 0) << '\n';
+    f.flush();
+    if (!f)
+        LOG_ERROR("duostore '{}': cannot persist quarantine entry for pack {:016x} "
+                  "(in-memory state stays authoritative until restart)", cfg_.name, e.pack_id);
+}
+
+// Caller holds q_mu_
+void DuoStoreBackend::quarantine_drop(uint64_t pack_id) {
+    quarantined_.erase(pack_id);
+    char name[32];
+    std::snprintf(name, sizeof name, "%016llx", (unsigned long long)pack_id);
+    std::error_code ec;
+    std::filesystem::remove(quarantine_dir() / name, ec);
+    m_packs_quarantined_->set(int64_t(quarantined_.size()));
+}
+
+std::vector<DuoQuarantineEntry> DuoStoreBackend::quarantine_list() {
+    std::lock_guard lk(q_mu_);
+    std::vector<DuoQuarantineEntry> out;
+    out.reserve(quarantined_.size());
+    for (const auto& [id, e] : quarantined_) out.push_back(e);
+    return out;
+}
+
+bool DuoStoreBackend::quarantine_release(uint64_t pack_id) {
+    std::lock_guard lk(q_mu_);
+    if (!quarantined_.count(pack_id)) return false;
+    quarantine_drop(pack_id);
+    LOG_INFO("duostore '{}': pack {:016x} released from quarantine; compaction retries "
+             "next GC round", cfg_.name, pack_id);
+    return true;
+}
+
+Task<bool> DuoStoreBackend::quarantine_purge(uint64_t pack_id) {
+    co_await pool_->schedule();
+    BackgroundTaskGroup::Scope scope(bg_);
+    if (!scope.ok()) co_return false;  // shutting down
+    auto permit = co_await gc_sem_.acquire();  // no GC round while the file goes away
+    {
+        std::lock_guard lk(q_mu_);
+        auto it = quarantined_.find(pack_id);
+        if (it == quarantined_.end() || it->second.purged) co_return false;
+    }
+    if (pins_->pinned_pack(pack_id) || data_->pack_write_locked(pack_id))
+        throw S3Error(S3ErrorCode::InternalError,
+                      "pack is held by an in-flight reader/writer; retry later");
+    co_await data_->remove_pack(pack_id);
+    {
+        std::lock_guard lk(q_mu_);
+        auto it = quarantined_.find(pack_id);
+        if (it != quarantined_.end()) {
+            it->second.purged = true;
+            quarantine_save(it->second);
+        }
+    }
+    LOG_WARN("duostore '{}': quarantined pack {:016x} purged from disk; its remaining "
+             "records are lost — delete the owning objects to drain the accounting",
+             cfg_.name, pack_id);
+    co_return true;
 }
 
 DuoStoreBackend::~DuoStoreBackend() {
@@ -959,9 +1097,14 @@ Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string own
 class PinnedReader final : public http::BodyReader {
 public:
     PinnedReader(std::unique_ptr<http::BodyReader> inner, std::shared_ptr<PinTable> pins,
-                 std::vector<PinTable::Handle> ids)
-        : inner_(std::move(inner)), pins_(std::move(pins)), ids_(std::move(ids)) {}
-    ~PinnedReader() override { pins_->unpin(ids_); }
+                 std::vector<PinTable::Handle> ids, std::shared_ptr<ReadClock> clock,
+                 uint64_t ticket)
+        : inner_(std::move(inner)), pins_(std::move(pins)), ids_(std::move(ids)),
+          clock_(std::move(clock)), ticket_(ticket) {}
+    ~PinnedReader() override {
+        pins_->unpin(ids_);
+        clock_->end(ticket_);  // the read-lease registration ends with the read (roadmap §3.7)
+    }
 
     Task<size_t> read(std::span<std::byte> buf) override { return inner_->read(buf); }
     std::optional<uint64_t> length() const override { return inner_->length(); }
@@ -970,6 +1113,8 @@ private:
     std::unique_ptr<http::BodyReader> inner_;
     std::shared_ptr<PinTable> pins_;
     std::vector<PinTable::Handle> ids_;
+    std::shared_ptr<ReadClock> clock_;
+    uint64_t ticket_;
 };
 
 // Symmetric release of write-side pins (§9.3): ChunkWriter pins on allocation
@@ -1103,10 +1248,25 @@ Task<void> DuoStoreBackend::tier_commit_cached(std::string_view bucket, std::str
                                [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
 }
 
+namespace {
+// Ends a read-clock ticket unless ownership was handed to the PinnedReader
+struct TicketGuard {
+    std::shared_ptr<ReadClock> clock;
+    uint64_t ticket;
+    ~TicketGuard() {
+        if (clock) clock->end(ticket);
+    }
+};
+}  // namespace
+
 Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::string_view key,
                                                std::optional<ByteRange> range) {
     validate_object_key(key);
     co_await pool_->schedule();
+    // Register with the read clock BEFORE fetching the manifest (roadmap §3.7):
+    // the published "oldest in-flight read" must cover the meta read itself, or
+    // a peer's GC could reclaim between our meta fetch and the registration
+    TicketGuard ticket{read_clock_, read_clock_->begin()};
     auto rec = require_object(bucket, key);
     // A tiered stub (roadmap §3.6 ⑥): the data lives in the cloud and TieredBackend
     // routes there before asking us; reachable only by direct routing to the local
@@ -1151,7 +1311,9 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
             pins_->unpin(ids);
             std::rethrow_exception(err);
         }
-        out.body = std::make_unique<PinnedReader>(std::move(inner), pins_, std::move(ids));
+        out.body = std::make_unique<PinnedReader>(std::move(inner), pins_, std::move(ids),
+                                                  read_clock_, ticket.ticket);
+        ticket.clock.reset();  // ownership handed to the reader
     }
     co_return out;
 }
@@ -1317,6 +1479,21 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         LOG_INFO("duostore '{}': GC lease held by another instance, skipping round", cfg_.name);
         co_return st;
     }
+    // Multi-gateway read-lease floor (roadmap §3.7): only reclaim what no peer's
+    // in-flight read can reference — a reader holding a ref to reclaimed extents
+    // must have fetched the manifest before the deref enqueued them, so an entry
+    // enqueued before every in-flight read started is provably unreachable.
+    // Errors fall back to the grace-only behavior (the documented gc_grace
+    // premise), never to stalling reclamation
+    std::optional<int64_t> lease_floor;
+    if (cfg_.read_lease_sec > 0) {
+        try {
+            lease_floor = meta_->min_read_lease();
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore '{}': min_read_lease failed ({}); this round is gated by "
+                     "gc_grace only", cfg_.name, e.what());
+        }
+    }
     const auto round_start = std::chrono::steady_clock::now();
 
     // 1) mpu_ttl-expired multipart cleanup (end of §8): internal abort, parts
@@ -1399,6 +1576,13 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             if (batch_now - rc.enqueue_ms < grace_ms) {
                 ++st.skipped_grace;
                 note_skip(seq, rc.enqueue_ms + grace_ms);  // deterministic lower bound
+                continue;
+            }
+            // A peer gateway's in-flight read started before this entry was
+            // enqueued could still hold the old ref (roadmap §3.7)
+            if (lease_floor && rc.enqueue_ms >= *lease_floor) {
+                ++st.skipped_leased;
+                note_skip(seq, batch_now);  // when the peer read finishes is unknowable
                 continue;
             }
             if (pins_->any_pinned(rc.extents)) {
@@ -1503,6 +1687,24 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                 double(ps.live_bytes) > cfg_.pack_gc_ratio * double(ps.file_size))
                 continue;
         }
+        // Quarantined packs are parked (roadmap §3.7): no cooldown rescans until
+        // the operator releases them or the live account moves (real progress —
+        // deletes/mpu resolution killed records; purged entries stay parked, the
+        // file is gone). live==0 needs no exception here: step 4's whole
+        // deletion runs regardless and drops the ledger entry with the packstat
+        {
+            std::lock_guard ql(q_mu_);
+            if (auto qit = quarantined_.find(ps.pack_id); qit != quarantined_.end()) {
+                if (!qit->second.purged && ps.live_recs != qit->second.live_recs) {
+                    LOG_INFO("duostore '{}': pack {:016x} auto-released from quarantine "
+                             "(live account moved {} -> {})", cfg_.name, ps.pack_id,
+                             qit->second.live_recs, ps.live_recs);
+                    quarantine_drop(ps.pack_id);
+                } else {
+                    continue;
+                }
+            }
+        }
         if (auto it = compact_blocked_.find(ps.pack_id);
             it != compact_blocked_.end() && it->second.live_recs == ps.live_recs &&
             compact_now < it->second.retry_at_ms)
@@ -1519,6 +1721,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     });
 
     std::vector<uint64_t> rewritten;
+    // Per-pack scan outcome for the quarantine strike accounting below (roadmap §3.7)
+    std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> rw_by_pack;  // migrated, corrupt
     uint64_t scanned_bytes = 0;
     for (size_t ci = 0; ci < cands.size(); ++ci) {
         const auto& cd = cands[ci];
@@ -1540,6 +1744,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             st.records_migrated += rw.migrated;
             st.records_corrupt += rw.corrupt;
             rewritten.push_back(cd.pack_id);
+            rw_by_pack[cd.pack_id] = {rw.migrated, rw.corrupt};
             // Engines without stat_pack support (returning 0): backfill from the file_size the sequential scan reports (§9.2)
             if (cd.file_size == 0 && rw.file_size > 0)
                 meta_->seal_pack(cd.pack_id, rw.file_size);
@@ -1570,12 +1775,24 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             }
             auto [it, first_seen] = pack_empty_since_.try_emplace(ps.pack_id, pack_now);
             (void)first_seen;
-            if (pack_now - it->second < grace_ms || pins_->pinned_pack(ps.pack_id)) continue;
+            // Lease gate (roadmap §3.7): a peer's read that started before the
+            // pack was first seen empty may hold a pre-swap manifest still
+            // pointing into it; one that started after cannot (it read the
+            // post-swap manifests)
+            if (pack_now - it->second < grace_ms ||
+                (lease_floor && it->second >= *lease_floor) || pins_->pinned_pack(ps.pack_id))
+                continue;
             try {
                 co_await data_->remove_pack(ps.pack_id);
                 meta_->drop_pack_stat(ps.pack_id);
                 pack_empty_since_.erase(ps.pack_id);
                 ++st.packs_removed;
+                // A quarantined pack whose live account drained to zero is fully
+                // settled — retire the ledger entry with the packstat
+                {
+                    std::lock_guard ql(q_mu_);
+                    if (quarantined_.count(ps.pack_id)) quarantine_drop(ps.pack_id);
+                }
             } catch (const std::exception& e) {
                 LOG_WARN("duostore '{}': gc remove pack {} failed: {}", cfg_.name, ps.pack_id,
                          e.what());
@@ -1591,8 +1808,41 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                     live = ps.live_recs;
                     break;
                 }
-            if (live > 0) compact_blocked_[pid] = {live, pack_now + grace_ms};
-            else compact_blocked_.erase(pid);
+            if (live > 0) {
+                // Quarantine strikes (roadmap §3.7): corrupt records with zero
+                // migration progress and an unmoved account, kQuarantineStrikes
+                // scans in a row, prove the cooldown loop cannot converge —
+                // park the pack instead of rescanning it forever
+                auto [migrated, corrupt] = rw_by_pack[pid];
+                int strikes = 0;
+                if (corrupt > 0 && migrated == 0) {
+                    auto prev = compact_blocked_.find(pid);
+                    strikes = (prev != compact_blocked_.end() && prev->second.live_recs == live)
+                                  ? prev->second.strikes + 1
+                                  : 1;
+                }
+                if (strikes >= kQuarantineStrikes) {
+                    DuoQuarantineEntry qe{pid, live, corrupt, pack_now, /*purged=*/false};
+                    {
+                        std::lock_guard ql(q_mu_);
+                        quarantined_[pid] = qe;
+                        quarantine_save(qe);
+                        m_packs_quarantined_->set(int64_t(quarantined_.size()));
+                    }
+                    compact_blocked_.erase(pid);
+                    ++st.packs_quarantined;
+                    LOG_ERROR("duostore '{}': pack {:016x} quarantined — {} scan(s) found {} "
+                              "corrupt record(s) and migrated nothing ({} live record(s) "
+                              "unreclaimable). Inspect with `lights3 duostore quarantine "
+                              "list`; `release` after restoring the file from backup, or "
+                              "`purge` to reclaim the disk space and accept the loss",
+                              cfg_.name, pid, kQuarantineStrikes, corrupt, live);
+                } else {
+                    compact_blocked_[pid] = {live, pack_now + grace_ms, strikes};
+                }
+            } else {
+                compact_blocked_.erase(pid);
+            }
         }
         // Prune packs whose accounting entries are gone so the two bookkeeping
         // maps don't grow without bound over history
@@ -1620,6 +1870,7 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     // operators actually want to see
     m_gc_skipped_grace_->set(int64_t(st.skipped_grace));
     m_gc_skipped_pinned_->set(int64_t(st.skipped_pinned));
+    m_gc_skipped_leased_->set(int64_t(st.skipped_leased));
     m_gc_duration_->observe(
         std::chrono::duration<double>(std::chrono::steady_clock::now() - round_start).count());
     m_gc_runs_->inc();
@@ -1674,6 +1925,24 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
     std::vector<bool> ref_seen(refs.size(), false);  // reverse reconciliation: on-disk hit marks
 
+    // Chunks with a pending gcq entry are left to the gcq consumer (roadmap
+    // §3.7): every once-referenced chunk enters the gcq atomically with its
+    // deref, and the gcq path is the one gated by the peer read lease —
+    // unlinking such a chunk here would bypass that gate for a remote in-flight
+    // reader. What stays eligible below was never referenced (crash leftovers),
+    // which no reader can hold. Stable under gc_sem_ (no concurrent local
+    // consumption; new business enqueues only add entries for chunks whose refs
+    // still existed at the snapshot above)
+    std::unordered_set<uint64_t> gcq_pending;
+    for (uint64_t seq = 0;;) {
+        auto batch = meta_->peek_reclaims(kGcBatch, seq, kGcBatchExtents);
+        if (batch.empty()) break;
+        seq = batch.back().first + 1;
+        for (const auto& [s, rc] : batch)
+            for (const auto& e : rc.extents)
+                if (e.kind != Extent::Kind::kPack) gcq_pending.insert(e.file_id);
+    }
+
     // Forward pass (§9.3) classification inlined into the enumeration callback:
     // no reference, mtime older than gc_grace, and no pin (the write-side pin
     // covers very long streaming PUTs, for which the mtime grace alone is
@@ -1691,6 +1960,10 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
         auto it = std::lower_bound(refs.begin(), refs.end(), id);
         if (it != refs.end() && *it == id) {
             ref_seen[size_t(it - refs.begin())] = true;
+            return;
+        }
+        if (gcq_pending.count(id)) {
+            ++st.skipped_gcq;  // deref'd, pending reclaim: the gcq path owns it (lease-gated)
             return;
         }
         if (now - mtime_ms < grace_ms) {
@@ -2010,9 +2283,16 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_dump(std::ostream& out) 
     BackgroundTaskGroup::Scope scope(bg_);
     if (!scope.ok())
         throw S3Error(S3ErrorCode::InternalError, "duostore meta dump: backend closing");
-    auto permit = co_await gc_sem_.acquire();  // mutual exclusion with GC/orphan scan
-                                               // (prerequisite for a consistent snapshot)
-    co_return duostore::dump_meta(*meta_, out);
+    auto permit = co_await gc_sem_.acquire();  // no GC unlinks while the dump references extents
+    // Online dump (roadmap §3.7): engines with MVCC/read transactions hand out a
+    // consistent point-in-time view and business writes may continue; redis
+    // cannot and keeps the historical writes-stopped contract
+    auto view = meta_->snapshot();
+    if (!view)
+        LOG_WARN("duostore '{}': meta engine cannot snapshot — the dump is only "
+                 "consistent if writes are stopped for its duration", cfg_.name);
+    co_return duostore::dump_meta(
+        view ? *view : static_cast<duostore::IMetaReadView&>(*meta_), out);
 }
 
 Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_load(std::istream& in) {
@@ -2086,6 +2366,33 @@ void DuoStoreBackend::schedule_orphan_scan() {
     });
 }
 
+Task<void> DuoStoreBackend::lease_tick() {
+    co_await pool_->schedule();
+    bool supported = true;
+    try {
+        const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
+        // TTL = 3 publish periods: a gateway that misses two renewals in a row
+        // (crash, partition) stops holding peers' reclamation back
+        const int64_t ttl_ms = int64_t(cfg_.read_lease_sec) * 3000;
+        supported = meta_->publish_read_lease(gc_owner_, read_clock_->oldest_or(now), ttl_ms);
+    } catch (const std::exception& e) {
+        // Transient (network): keep the timer armed; while the lease is stale
+        // peers merely defer more, never reclaim more
+        LOG_WARN("duostore '{}': read-lease publish failed: {}", cfg_.name, e.what());
+    }
+    // Local engines report unsupported — in-process pins are already exact
+    // there, so the publisher stands down for the process lifetime
+    if (supported) schedule_read_lease();
+}
+
+void DuoStoreBackend::schedule_read_lease() {
+    if (cfg_.read_lease_sec <= 0) return;  // 0 = off (single-gateway deployments)
+    bg_.if_open([&] {
+        lease_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.read_lease_sec),
+                                                  [this] { bg_.spawn(lease_tick()); });
+    });
+}
+
 void DuoStoreBackend::shutdown_background() {
     bg_.begin_close();
     // cancel must be called outside the group lock: TimerQueue::cancel blocks
@@ -2094,6 +2401,7 @@ void DuoStoreBackend::shutdown_background() {
     // reading them needs no lock
     TimerQueue::instance().cancel(gc_timer_);
     TimerQueue::instance().cancel(orphan_timer_);
+    TimerQueue::instance().cancel(lease_timer_);
     // The blocking wait happens on the caller's thread; in-flight GC finishes
     // up on pool threads, so neither holds up the other (same as tiered close)
     bg_.wait_idle();

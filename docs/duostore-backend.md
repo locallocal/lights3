@@ -507,6 +507,7 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | pack_gc_ratio | 0.5 | 存活率低于此值触发压实 |
 | gc_enabled | true | 后台 GC worker + 孤儿扫描排程总开关；多网关部署非指定实例置 false（单实例执行约束，duostore-rados-data.md §8.3），手动钩子不受门控 |
 | gc_interval / gc_grace | 5m / 5m | 回收周期 / 延迟删除宽限 |
+| read_lease | 5s | 多网关 read-lease 发布周期（roadmap §3.7，[storage/duostore-core.md](storage/duostore-core.md) §8.5）：每网关向共享 meta（redis/tikv）发布最老在途读开始时间，GC 只回收所有对端在途读都晚于其入队的项；0 = 关；本地引擎（rocksdb/sqlite）自动停摆无开销 |
 | orphan_scan_interval | 1d | chunk 孤儿对账周期 |
 | mpu_ttl | 7d | 未完成 multipart 过期清理；0 = 关闭（对齐 gc_interval 的 0 语义） |
 | meta_sync | true | RocksDB 提交是否 WAL fsync（§6.3） |

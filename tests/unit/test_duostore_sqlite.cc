@@ -20,6 +20,7 @@
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_dump.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/duostore/sqlite_meta_store.h"
 #include "unit/backend_suite.h"
@@ -591,6 +592,39 @@ TEST(duostore_sqlite_schema_version_policy) {
         CHECK(m.bucket_exists("x"));
         m.close();
     }
+}
+
+// Online meta dump (roadmap §3.7): the snapshot view is a held-open WAL read
+// transaction — writes committed after snapshot() stay invisible to every read
+// through the view, while the write connection keeps committing
+TEST(duostore_sqlite_snapshot_dump_is_consistent) {
+    TmpDir tmp;
+    SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
+    m.create_bucket("b");
+    m.put_object("b", "k1", make_rec("k1", {chunk_extent(1, 10)}));
+    m.put_object("b", "k2", make_rec("k2", {chunk_extent(2, 10)}));
+
+    auto view = m.snapshot();
+    CHECK(view != nullptr);
+    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));  // after the snapshot
+    m.delete_object("b", "k1");
+    m.create_bucket("b2");
+
+    CHECK_EQ(view->list_buckets().size(), size_t(1));
+    CHECK(view->get_object("b", "k1").has_value());
+    CHECK(!view->get_object("b", "k3").has_value());
+    std::ostringstream out;
+    auto st = dump_meta(*view, out);
+    CHECK_EQ(st.buckets, uint64_t(1));
+    CHECK_EQ(st.objects, uint64_t(2));
+    view.reset();
+
+    // The live store sees everything, and the writes committed during the
+    // snapshot's lifetime landed
+    CHECK(m.get_object("b", "k3").has_value());
+    CHECK(!m.get_object("b", "k1").has_value());
+    CHECK_EQ(m.list_buckets().size(), size_t(2));
+    m.close();
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_SQLITE_META

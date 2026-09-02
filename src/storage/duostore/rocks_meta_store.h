@@ -17,6 +17,7 @@
 namespace rocksdb {
 class DB;
 class ColumnFamilyHandle;
+class Snapshot;
 class WriteBatch;
 }  // namespace rocksdb
 
@@ -90,9 +91,13 @@ public:
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
+    // Online-dump snapshot (roadmap §3.7): pins a RocksDB snapshot; all four view
+    // reads run against it. Borrows this store — destroy before close()
+    std::unique_ptr<IMetaReadView> snapshot() override;
     void close() override;
 
 private:
+    class SnapshotView;
     // CF indices (table in §4.1)
     enum Cf { kDefault = 0, kBuckets, kObjects, kUploads, kParts, kRefs, kGcq, kStats, kNumCf };
 
@@ -107,7 +112,15 @@ private:
     // misuse into a 500 instead of a segfault; the contract is still that close
     // must be called after in-flight requests finish (§9 lifecycle)
     rocksdb::DB* db() const;
-    std::optional<std::string> get_raw(int cf, std::string_view key);
+    // snap = pinned snapshot for the online-dump view (nullptr = latest state)
+    std::optional<std::string> get_raw(int cf, std::string_view key,
+                                       const rocksdb::Snapshot* snap = nullptr);
+    // Snapshot-parameterized read bodies shared by the live methods (nullptr =
+    // per-call snapshot / latest) and SnapshotView (roadmap §3.7 online dump)
+    std::vector<BucketInfo> list_buckets_snap(const rocksdb::Snapshot* snap);
+    ListResult list_objects_snap(std::string_view b, const ListOptions& opt,
+                                 const rocksdb::Snapshot* snap);
+    std::vector<PackStat> pack_stats_snap(const rocksdb::Snapshot* snap);
     void commit(rocksdb::WriteBatch& batch);
     void require_bucket_locked(std::string_view b);
     std::vector<PartRec> scan_parts(std::string_view b, std::string_view k,

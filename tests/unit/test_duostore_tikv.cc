@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_dump.h"
 #include "storage/duostore/tikv_meta_store.h"
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
@@ -542,6 +544,55 @@ TEST(duostore_tikv_gc_lease) {
     a.close();
     b.close();
     c.close();
+}
+
+// Multi-gateway read lease (roadmap §3.7): min across published leases; expired
+// rows are ignored (and lazily deleted); no publishers = nullopt
+TEST(duostore_tikv_read_lease) {
+    TIKV_OR_SKIP();
+    std::string prefix = unique_prefix();
+    TikvMetaStore a(tikv_opts(prefix)), b(tikv_opts(prefix));
+    CHECK(!a.min_read_lease().has_value());
+    CHECK(a.publish_read_lease("gw-a", 1'000, 60'000));
+    CHECK(b.publish_read_lease("gw-b", 500, 60'000));
+    auto min = a.min_read_lease();
+    CHECK(min.has_value());
+    CHECK_EQ(*min, int64_t(500));
+    CHECK(b.publish_read_lease("gw-b", 2'000, 60'000));  // b's oldest read finished
+    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
+    CHECK(a.publish_read_lease("gw-c", 1, 100));  // expires almost immediately
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
+    a.close();
+    b.close();
+}
+
+// Online meta dump (roadmap §3.7): the snapshot view reads at one fixed TSO —
+// writes committed after snapshot() stay invisible through the whole dump
+TEST(duostore_tikv_snapshot_dump_is_consistent) {
+    TIKV_OR_SKIP();
+    TikvMetaStore m(tikv_opts(unique_prefix()));
+    m.create_bucket("b");
+    m.put_object("b", "k1", make_rec("k1", {chunk_extent(1, 10)}));
+    m.put_object("b", "k2", make_rec("k2", {chunk_extent(2, 10)}));
+
+    auto view = m.snapshot();
+    CHECK(view != nullptr);
+    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));  // after the snapshot
+    m.delete_object("b", "k1");
+    m.create_bucket("b2");
+
+    CHECK_EQ(view->list_buckets().size(), size_t(1));
+    CHECK(view->get_object("b", "k1").has_value());
+    CHECK(!view->get_object("b", "k3").has_value());
+    std::ostringstream out;
+    auto st = dump_meta(*view, out);
+    CHECK_EQ(st.buckets, uint64_t(1));
+    CHECK_EQ(st.objects, uint64_t(2));
+    view.reset();
+    CHECK(m.get_object("b", "k3").has_value());  // the live store sees everything
+    m.delete_bucket("b2");
+    m.close();
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_TIKV_META

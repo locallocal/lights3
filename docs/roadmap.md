@@ -212,15 +212,15 @@ PUT/回填/换代失效，水位淘汰当 rank 0 残留。见
 [tiered-storage.md](tiered-storage.md) §4.3/§5.1/§6.3/§9、
 [storage/tiered.md](storage/tiered.md) §3/§4.1/§5.4/§11。
 
-### 3.7 duostore 残留
+### 3.7 duostore 残留 **已完成（2026-09-03，全部五项）**
 
-| 条目 | 现状 | 价值 | 难度 |
-| --- | --- | --- | --- |
-| `DuoGcStats` 接入 metrics | 头注释自认 "for later metric wiring"；压实/孤儿统计现只能看日志 | 中 | 低 |
-| 损坏 pack 隔离区 | 损坏记录使 pack 进 `compact_blocked_` 反复冷却重试、永久无法回收，无运维出口 | 中 | 中 |
-| TiKV 事务层生产化 | `tikv_client.h` 自认 "commit layer is test-grade"（Put-only、错误路径含上游 TODO、写冲突靠字符串分类）。要么向上游 client-c 贡献结构化错误码，要么自建 2PC 层 | 高（若 TiKV 组合要投产） | 高 |
-| 多网关 read-lease | 跨网关 GC 已有 `try_gc_lease`（redis/tikv），但"A 网关在读的 extent，B 网关 GC 看不到 A 的 pin"仍只靠 `gc_grace` 兜底；文档列为设计前提 | 中 | 高 |
-| meta 在线备份 | dump/load 需停写；无增量/PITR | 中 | 高 |
+| 条目 | 落地 |
+| --- | --- |
+| ~~`DuoGcStats` 接入 metrics~~ | 早在 gaps §6.1 已全量接线（`lights3_duostore_gc_*` 计数器/gauge 族，完整轮末折算），本表此前未更新；本次仅清掉陈旧头注释 |
+| ~~损坏 pack 隔离区~~ | 连续 3 次"corrupt>0 且零迁移且账目不动"入持久化隔离账本（`<root>/quarantine/`），停冷却重扫；账目一动自动释放；CLI `lights3 duostore quarantine list\|release\|purge` + `packs_quarantined` gauge（duostore-core.md §8.6） |
+| ~~TiKV 事务层生产化~~ | "自建 2PC 层"选项早已由 tikv_client sidecar 落地（乐观 2PC、Put/Del/Lock/Insert 四 op、kvrpcpb 结构化冲突分类＋字符串匹配仅作纵深、Undetermined 禁盲重试），头注释里 "test-grade" 指上游 client-c 而非本仓实现，本表此前误读；向上游贡献结构化错误码仍是可选项（duostore-tikv-meta.md：上游 PR 列为 T5 遗留） |
+| ~~多网关 read-lease~~ | 各网关周期发布"最老在途读开始时间"（redis SET PX / tikv 'L' 表，TTL 崩溃自愈；本地引擎 unsupported 即停摆），GC 只回收 `enqueue_ms < 全体最小租约` 的 gcq 项与见空早于下限的空 pack；孤儿扫描改为跳过 gcq 在途 chunk 以关闭同一竞态（duostore-core.md §8.5） |
+| ~~meta 在线备份~~ | dump 走 `IMetaStore::snapshot()` 一致性视图（rocksdb Snapshot / sqlite WAL 读事务 / tikv 固定 TSO），写不停机；redis 无 MVCC 保持停写契约并 WARN；load 契约不变（duostore-core.md §11）。增量/PITR 仍为未做的后续方向 |
 
 ### 3.8 横切：元数据缓存层
 
@@ -433,7 +433,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 3. API×后端分维指标 + 后端耗时（§5.1）；异步日志 + 慢日志（§5.2）
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
 5. ~~cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3，含熔断/deadline/异步 acquire/凭证链）~~ **已完成（2026-08-28）**
-6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；DuoGcStats 接指标（§3.7）；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**
+6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；~~DuoGcStats 接指标（§3.7）~~ **已完成（早于 2026-09，gaps §6.1 时接线）**；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**
 7. fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）
 8. Dockerfile + compose（§6.3）
 9. 性能基线入库（§4.3；前置 bench --json）
@@ -456,7 +456,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 1. xlocalfs 单流多在途流水线 + fixed buffers（§3.4）
 2. 配额 → 租户实体化（§3.9②③）
 3. ~~STS 会话凭证（§2.6）~~ **已完成（2026-08-28）**
-4. TiKV 事务层生产化 / 多网关 read-lease / meta 在线备份（§3.7）
+4. ~~TiKV 事务层生产化 / 多网关 read-lease / meta 在线备份（§3.7）~~ **已完成（2026-09-03，§3.7 全部五项）**；meta 增量备份/PITR 留作后续
 5. versioning（duostore 侧切入）、SSE-C/SSE-S3（§2.2/§7）
 6. tiered local 侧抽象化容纳 duostore、Range 部分缓存（§3.6）
 7. OpenTelemetry 全量埋点（§5.4）、HTTP/2（§4.5）

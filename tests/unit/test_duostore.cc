@@ -17,6 +17,7 @@
 #include <iterator>
 #include <memory>
 #include <semaphore>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -25,6 +26,7 @@
 #include "storage/duostore/codec.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_dump.h"
 #include "storage/duostore/meta_util.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/xlocalfs/uring.h"
@@ -409,6 +411,230 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     CHECK_EQ(st3.reclaims_acked, uint64_t(0));
     CHECK_EQ(st3.files_removed, uint64_t(0));
     sync_wait(b->close());
+}
+
+namespace {
+
+// Forwarding IMetaStore wrapper that simulates a peer gateway's published read
+// lease (roadmap §3.7): min_read_lease reports whatever the test sets, everything
+// else delegates to a real RocksMetaStore
+struct LeaseSimMeta final : IMetaStore {
+    std::unique_ptr<RocksMetaStore> inner;
+    std::optional<int64_t> floor;  // what min_read_lease reports
+
+    explicit LeaseSimMeta(std::unique_ptr<RocksMetaStore> m) : inner(std::move(m)) {}
+    std::optional<int64_t> min_read_lease() override { return floor; }
+
+    void create_bucket(std::string_view b) override { inner->create_bucket(b); }
+    void delete_bucket(std::string_view b) override { inner->delete_bucket(b); }
+    bool bucket_exists(std::string_view b) override { return inner->bucket_exists(b); }
+    std::vector<BucketInfo> list_buckets() override { return inner->list_buckets(); }
+    std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override {
+        return inner->get_object(b, k);
+    }
+    std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override {
+        return inner->head_object(b, k);
+    }
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
+                    PutCondition cond = {}) override {
+        inner->put_object(b, k, std::move(rec), std::move(cond));
+    }
+    bool delete_object(std::string_view b, std::string_view k) override {
+        return inner->delete_object(b, k);
+    }
+    ListResult list_objects(std::string_view b, const ListOptions& opt) override {
+        return inner->list_objects(b, opt);
+    }
+    std::string create_upload(std::string_view b, std::string_view k, ObjectMeta meta) override {
+        return inner->create_upload(b, k, std::move(meta));
+    }
+    UploadRec require_upload(std::string_view b, std::string_view k,
+                             std::string_view id) override {
+        return inner->require_upload(b, k, id);
+    }
+    void put_part(std::string_view b, std::string_view k, std::string_view id,
+                  PartRec p) override {
+        inner->put_part(b, k, id, std::move(p));
+    }
+    std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
+                                    std::string_view id) override {
+        return inner->list_parts(b, k, id);
+    }
+    std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
+                                         std::string_view id_marker = {}, int limit = 0,
+                                         std::string_view prefix = {}) override {
+        return inner->list_uploads(b, key_marker, id_marker, limit, prefix);
+    }
+    std::string complete_upload(std::string_view b, std::string_view k, std::string_view id,
+                                std::span<const PartInfo> parts) override {
+        return inner->complete_upload(b, k, id, parts);
+    }
+    void abort_upload(std::string_view b, std::string_view k, std::string_view id) override {
+        inner->abort_upload(b, k, id);
+    }
+    uint64_t alloc_file_run(Extent::Kind kind, uint32_t n) override {
+        return inner->alloc_file_run(kind, n);
+    }
+    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(
+        size_t max, uint64_t min_seq = 0, size_t max_extents = SIZE_MAX) override {
+        return inner->peek_reclaims(max, min_seq, max_extents);
+    }
+    void ack_reclaim(uint64_t seq) override { inner->ack_reclaim(seq); }
+    void ack_reclaims(std::span<const uint64_t> seqs) override { inner->ack_reclaims(seqs); }
+    std::vector<PackStat> pack_stats() override { return inner->pack_stats(); }
+    void seal_pack(uint64_t pack_id, uint64_t file_size) override {
+        inner->seal_pack(pack_id, file_size);
+    }
+    void drop_pack_stat(uint64_t pack_id) override { inner->drop_pack_stat(pack_id); }
+    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
+                      const DataRef& from, const DataRef& to) override {
+        return inner->swap_extents(b, k, expect_version, from, to);
+    }
+    bool chunk_referenced(uint64_t file_id) override { return inner->chunk_referenced(file_id); }
+    void scan_refs(const std::function<void(uint64_t)>& cb) override { inner->scan_refs(cb); }
+    void close() override { inner->close(); }
+};
+
+// Chunk-only backend over LeaseSimMeta (gc_cfg shape: pack disabled, grace 0)
+struct LeaseHarness {
+    std::shared_ptr<DuoStoreBackend> b;
+    LeaseSimMeta* meta = nullptr;  // lifetime follows b
+};
+
+LeaseHarness make_lease_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+    fs::create_directories(cfg.root);
+    auto meta = std::make_unique<LeaseSimMeta>(std::make_unique<RocksMetaStore>(
+        RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20}));
+    auto* mp = meta.get();
+    auto data = std::make_unique<FsDataStore>(
+        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                      cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
+        pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
+        [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
+        [mp](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
+            return migrate_pack_records(*mp, ds, nullptr, std::move(batch));
+        });
+    LeaseHarness h;
+    h.meta = mp;
+    h.b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
+    return h;
+}
+
+}  // namespace
+
+// Multi-gateway read lease (roadmap §3.7): a gcq entry enqueued after the oldest
+// in-flight peer read started is deferred (that read may hold the old ref); once
+// the lease floor moves past the enqueue — or no lease is published at all — the
+// entry reclaims as usual
+TEST(duostore_gc_defers_to_peer_read_lease) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "lease");
+    auto h = make_lease_backend(cfg, pool);
+    sync_wait(h.b->create_bucket("bkt"));
+
+    put(*h.b, "bkt", "k", patterned(100));  // 1 chunk
+    sync_wait(h.b->delete_object("bkt", "k"));
+    const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
+
+    // A peer read started a minute ago is still in flight: the entry (enqueued
+    // just now) must wait
+    h.meta->floor = now - 60'000;
+    auto st1 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st1.reclaims_acked, uint64_t(0));
+    CHECK_EQ(st1.skipped_leased, uint64_t(1));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(1));
+
+    // The peer read finished; every in-flight read now started after the enqueue
+    h.meta->floor = now + 60'000;
+    auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st2.reclaims_acked, uint64_t(1));
+    CHECK_EQ(st2.files_removed, uint64_t(1));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
+
+    // No lease published anywhere: grace-only behavior (the historical premise)
+    h.meta->floor = std::nullopt;
+    put(*h.b, "bkt", "k2", patterned(100));
+    sync_wait(h.b->delete_object("bkt", "k2"));
+    auto st3 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st3.reclaims_acked, uint64_t(1));
+    CHECK_EQ(st3.skipped_leased, uint64_t(0));
+    sync_wait(h.b->close());
+}
+
+// Orphan scan vs gcq pending (roadmap §3.7): a chunk deref'd but not yet
+// reclaimed stays with the (lease-gated) gcq path — the scan counts and skips it
+TEST(duostore_orphan_scan_leaves_gcq_pending_chunks) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "orphan-gcq");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    sync_wait(b->create_bucket("bkt"));
+    put(*b, "bkt", "k", patterned(100));  // 1 chunk
+    sync_wait(b->delete_object("bkt", "k"));
+
+    auto st = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(st.orphans_removed, uint64_t(0));
+    CHECK_EQ(st.skipped_gcq, uint64_t(1));
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(1));  // still owned by the gcq path
+
+    auto gc = sync_wait(b->run_gc_once());
+    CHECK_EQ(gc.files_removed, uint64_t(1));
+    auto st2 = sync_wait(b->run_orphan_scan_once());
+    CHECK_EQ(st2.skipped_gcq, uint64_t(0));
+    sync_wait(b->close());
+}
+
+// Online meta dump (roadmap §3.7): the snapshot view observes the state at
+// snapshot() — writes committed afterwards are invisible, and the archive loads
+// back to exactly the snapshot state
+TEST(duostore_meta_snapshot_dump_is_consistent) {
+    TmpDir tmp;
+    RocksMetaStore m(meta_opts(tmp));
+    m.create_bucket("b");
+    m.put_object("b", "k1", make_rec("k1", {chunk_extent(1, 10)}));
+    m.put_object("b", "k2", make_rec("k2", {chunk_extent(2, 10)}));
+
+    auto view = m.snapshot();
+    CHECK(view != nullptr);
+    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));  // after the snapshot
+    m.delete_object("b", "k1");
+    m.create_bucket("b2");
+
+    std::ostringstream out;
+    auto st = dump_meta(*view, out);
+    CHECK_EQ(st.buckets, uint64_t(1));
+    CHECK_EQ(st.objects, uint64_t(2));
+    view.reset();
+    m.close();
+
+    TmpDir tmp2;
+    RocksMetaStore m2(meta_opts(tmp2));
+    std::istringstream in(out.str());
+    auto lst = load_meta(m2, in);
+    CHECK_EQ(lst.objects, uint64_t(2));
+    CHECK(m2.get_object("b", "k1").has_value());  // deleted only after the snapshot
+    CHECK(m2.get_object("b", "k2").has_value());
+    CHECK(!m2.get_object("b", "k3").has_value());
+    CHECK(!m2.bucket_exists("b2"));
+    m2.close();
+}
+
+// ReadClock (roadmap §3.7): empty registry reports the fallback; the oldest
+// in-flight start wins until it ends
+TEST(duostore_read_clock_oldest) {
+    ReadClock c;
+    CHECK_EQ(c.oldest_or(42), int64_t(42));
+    uint64_t t1 = c.begin();
+    int64_t o1 = c.oldest_or(0);
+    CHECK(o1 > 0);
+    uint64_t t2 = c.begin();
+    CHECK_EQ(c.oldest_or(0), o1);  // the older read still anchors the clock
+    c.end(t1);
+    CHECK(c.oldest_or(0) >= o1);   // now anchored by the second read
+    c.end(t2);
+    CHECK_EQ(c.oldest_or(7), int64_t(7));
+    c.end(t2);  // idempotent
 }
 
 // Backend-level metrics: GC counts land in the registry via MetricsScope,
@@ -1314,6 +1540,88 @@ TEST(duostore_compact_corrupt_live_record_keeps_pack) {
     // No accounting progress + within the cooldown window: the next round skips the re-scan
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.packs_compacted, uint64_t(0));
+    sync_wait(h.b->close());
+}
+
+// Corrupt-pack quarantine (roadmap §3.7): three fruitless scans (corrupt records,
+// zero migration, unmoved account) park the pack — no more rescans; the ledger
+// survives restart; release re-enables scanning; purge removes the file keeping
+// the accounting; draining the account retires everything
+TEST(duostore_corrupt_pack_quarantine_lifecycle) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = pack_cfg(tmp, "quarantine");
+    cfg.pack_max_size = 1400;  // grace stays 0: every round rescans, strikes accumulate fast
+    uint64_t pid = 0;
+    {
+        auto h = make_pack_backend(cfg, pool);
+        sync_wait(h.b->create_bucket("bkt"));
+        put(*h.b, "bkt", "k1", patterned(600));
+        put(*h.b, "bkt", "k2", patterned(600));
+        put(*h.b, "bkt", "filler", patterned(600));  // P1 sealed
+        sync_wait(h.b->delete_object("bkt", "k1"));  // liveness 1/2 -> candidate
+
+        auto live2 = h.meta->get_object("bkt", "k2")->data.extents[0];
+        pid = live2.file_id;
+        corrupt_file_at(pack_file_path(cfg.root, pid), live2.offset + 10);
+
+        // Strikes 1 and 2: scanned, nothing migrates, not yet quarantined
+        for (int i = 0; i < 2; ++i) {
+            auto st = sync_wait(h.b->run_gc_once());
+            CHECK_EQ(st.packs_compacted, uint64_t(1));
+            CHECK_EQ(st.records_corrupt, uint64_t(1));
+            CHECK_EQ(st.packs_quarantined, uint64_t(0));
+        }
+        // Strike 3: quarantined in the same round
+        auto st3 = sync_wait(h.b->run_gc_once());
+        CHECK_EQ(st3.packs_compacted, uint64_t(1));
+        CHECK_EQ(st3.packs_quarantined, uint64_t(1));
+
+        // Parked: no rescans, no repeated corruption warnings
+        auto st4 = sync_wait(h.b->run_gc_once());
+        CHECK_EQ(st4.packs_compacted, uint64_t(0));
+        CHECK_EQ(st4.records_corrupt, uint64_t(0));
+
+        auto entries = h.b->quarantine_list();
+        CHECK_EQ(entries.size(), size_t(1));
+        CHECK_EQ(entries[0].pack_id, pid);
+        CHECK_EQ(entries[0].live_recs, int64_t(1));
+        CHECK_EQ(entries[0].corrupt_records, uint64_t(1));
+        CHECK(!entries[0].purged);
+        sync_wait(h.b->close());
+    }
+    // The ledger is persisted: a fresh process still sees (and skips) the pack
+    auto h = make_pack_backend(cfg, pool);
+    {
+        auto entries = h.b->quarantine_list();
+        CHECK_EQ(entries.size(), size_t(1));
+        CHECK_EQ(entries[0].pack_id, pid);
+        auto st = sync_wait(h.b->run_gc_once());
+        CHECK_EQ(st.packs_compacted, uint64_t(0));
+    }
+    // release -> compaction retries (and the corruption is found again)
+    CHECK(h.b->quarantine_release(pid));
+    CHECK(!h.b->quarantine_release(pid));  // second release: nothing to drop
+    auto st5 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st5.packs_compacted, uint64_t(1));
+    CHECK_EQ(st5.records_corrupt, uint64_t(1));
+    sync_wait(h.b->run_gc_once());
+    auto st7 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st7.packs_quarantined, uint64_t(1));  // three fruitless scans re-park it
+
+    // purge: file gone, accounting and (purged) ledger entry kept
+    CHECK(sync_wait(h.b->quarantine_purge(pid)));
+    CHECK(!fs::exists(pack_file_path(cfg.root, pid)));
+    CHECK(find_pack_stat(*h.meta, pid).has_value());
+    CHECK(h.b->quarantine_list().at(0).purged);
+    CHECK(!sync_wait(h.b->quarantine_purge(pid)));  // already purged
+
+    // Deleting the owner drains the account; GC retires packstat + ledger entry
+    sync_wait(h.b->delete_object("bkt", "k2"));
+    auto st8 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(st8.packs_removed, uint64_t(1));
+    CHECK(!find_pack_stat(*h.meta, pid).has_value());
+    CHECK(h.b->quarantine_list().empty());
     sync_wait(h.b->close());
 }
 

@@ -82,12 +82,38 @@ private:
     bool pinned_key(bool is_pack, uint64_t id);
 };
 
-// Reclamation statistics for run_gc_once() (§9.1; for test assertions and later metric wiring)
+// In-flight read registry for the multi-gateway read lease (roadmap §3.7):
+// get_object registers a ticket *before* fetching the manifest and the reader's
+// destructor ends it, so "oldest in-flight read start" published to the shared
+// meta soundly covers every reader that may hold a pre-deref manifest (the
+// registration-to-meta-read window needs no grace argument — registration comes
+// first). Shared with escaping readers via shared_ptr, same lifetime shape as
+// PinTable
+class ReadClock {
+public:
+    uint64_t begin();          // returns a ticket id (monotonic)
+    void end(uint64_t ticket); // idempotent for unknown ids
+    // Start time of the oldest in-flight read, or fallback when none (the
+    // publisher passes "now": an idle gateway holds nothing back)
+    int64_t oldest_or(int64_t fallback);
+
+private:
+    std::mutex m_;
+    uint64_t next_ = 1;
+    // Ordered by ticket id; ids and start times are both monotonic, so begin()
+    // of the first entry is the oldest start
+    std::map<uint64_t, int64_t> active_;
+};
+
+// Reclamation statistics for run_gc_once() (§9.1; test assertions, and folded
+// into the lights3_duostore_gc_* counters/gauges at the end of every completed
+// round — see init_metrics)
 struct DuoGcStats {
     uint64_t reclaims_acked = 0;    // gcq entries settled
     uint64_t files_removed = 0;     // chunk/rados extents physically deleted (pack records excluded)
     uint64_t skipped_grace = 0;     // gcq entries skipped for not yet exceeding gc_grace
     uint64_t skipped_pinned = 0;    // gcq entries skipped because an involved file was pinned
+    uint64_t skipped_leased = 0;    // gcq entries deferred by a peer gateway's read lease (roadmap §3.7)
     uint64_t packs_removed = 0;     // empty packs deleted whole (sealed with live_recs==0)
     uint64_t uploads_expired = 0;   // multiparts internally aborted after mpu_ttl expiry
     uint64_t packs_sealed_aged = 0; // active packs sealed by aging (§6.1)
@@ -95,6 +121,22 @@ struct DuoGcStats {
     uint64_t packs_compact_deferred = 0;  // packs eligible but squeezed out by this round's budget (§6.1)
     uint64_t records_migrated = 0;  // records whose refs were successfully swapped by compaction migration
     uint64_t records_corrupt = 0;   // corrupt records detected by the compaction scan (skipped + warned, not deleted)
+    uint64_t packs_quarantined = 0; // packs moved to the corruption quarantine this round (roadmap §3.7)
+};
+
+// Corrupt-pack quarantine entry (roadmap §3.7): a pack whose compaction made no
+// progress for kQuarantineStrikes consecutive scans while corrupt records were
+// the only remaining explanation is parked here — no more cooldown rescans until
+// an operator releases it (`lights3 duostore quarantine release`) or its live
+// account moves (objects deleted → auto-release / whole deletion). Persisted as
+// one small file per pack under <root>/quarantine so restarts and the admin CLI
+// (a separate process) see the same ledger
+struct DuoQuarantineEntry {
+    uint64_t pack_id = 0;
+    int64_t live_recs = 0;        // live account at quarantine time (auto-release trigger baseline)
+    uint64_t corrupt_records = 0; // corrupt records the last scan counted
+    int64_t quarantined_ms = 0;   // unix ms of quarantine entry
+    bool purged = false;          // pack file removed by `quarantine purge` (accounting kept until live drains)
 };
 
 // Reconciliation statistics for run_orphan_scan_once() (§9.3)
@@ -111,6 +153,8 @@ struct DuoOrphanStats {
     uint64_t pack_stats_missing = 0;    // reverse: packstat present but file missing (sign of data loss)
     uint64_t chunk_bytes = 0;           // total bytes of on-disk chunk entities (usage metric)
     uint64_t pack_bytes = 0;            // total bytes of on-disk pack files (usage metric)
+    uint64_t skipped_gcq = 0;           // unreferenced chunks left to the gcq path (pending entry exists;
+                                        // closes the cross-gateway reader race, roadmap §3.7)
 };
 
 // run_scrub_once knobs (roadmap §3.1). Rate limiting is per-call rather than
@@ -225,12 +269,20 @@ struct DuoStoreConfig {
     // must run on a single instance; set false on non-designated gateways (no
     // background worker scheduled; the manual hooks remain for tests/ops).
     // Concurrent GC over shared meta/data would step on itself (duplicate
-    // compaction/scans), and another gateway's GC cannot see this gateway's
-    // in-process pin table — single instance + gc_grace ≥ the longest expected
-    // GET duration is the initial deployment constraint
+    // compaction/scans). Peer gateways' in-flight reads are covered by the read
+    // lease below (roadmap §3.7) on shared meta engines; gc_grace remains the
+    // fallback when the lease is off or the engine is local
     bool gc_enabled = true;
     int gc_interval_sec = 300;
     int gc_grace_sec = 300;
+    // Multi-gateway read lease publish period (roadmap §3.7): every gateway
+    // (gc_enabled or not) publishes "oldest in-flight read started at" to shared
+    // meta engines (redis/tikv); the GC gateway defers reclaiming anything a
+    // peer's in-flight read could still reference. 0 = off; local engines
+    // (rocksdb/sqlite) report unsupported and the publisher stands down, so the
+    // default costs nothing there. Keep well below gc_grace (staleness of the
+    // published value adds to reclaim latency, never to risk)
+    int read_lease_sec = 5;
     int orphan_scan_interval_sec = 86400;  // effective with P4
     int mpu_ttl_sec = 7 * 86400;
     bool meta_sync = true;
@@ -331,6 +383,20 @@ public:
     Task<duostore::MetaDumpStats> run_meta_dump(std::ostream& out);
     Task<duostore::MetaDumpStats> run_meta_load(std::istream& in);
 
+    // ---- Corrupt-pack quarantine (roadmap §3.7; CLI `lights3 duostore quarantine`) ----
+    std::vector<duostore::DuoQuarantineEntry> quarantine_list();
+    // Drop the ledger entry: compaction retries from scratch next round (use after
+    // restoring the pack file from a backup, or to force one more scan)
+    bool quarantine_release(uint64_t pack_id);
+    // Physically remove the quarantined pack file, accepting the loss of its
+    // remaining (corrupt) records — reads of objects still referencing them turn
+    // from crc aborts into missing-extent errors. The liveness accounting is kept:
+    // once the owning objects are deleted and live drains to zero, the regular GC
+    // round drops the packstat and the ledger entry (remove_pack is idempotent).
+    // Refuses while the pack is pinned by an in-flight reader. Returns false when
+    // the pack is not quarantined or already purged
+    Task<bool> quarantine_purge(uint64_t pack_id);
+
     // Direct data-plane access (tests only): verifies the active pack's write-lock
     // probing (docs/archive/gaps.md §1.4)
     duostore::IDataStore& data_for_test() { return *data_; }
@@ -370,6 +436,11 @@ private:
     Task<void> gc_tick();
     void schedule_orphan_scan();  // independent low-frequency timer (orphan_scan_interval; 0 = off)
     Task<void> orphan_tick();
+    // Read-lease publisher (roadmap §3.7): periodic timer on every gateway; the
+    // tick stands down permanently when the engine reports leases unsupported
+    // (local engines — in-process pins are already exact there)
+    void schedule_read_lease();
+    Task<void> lease_tick();
     // One manifest's worth of scrub work (run_scrub_once): refs-ledger presence
     // per chunk/rados extent + full read-back with crc recomputation. refetch
     // re-reads the current manifest to separate a genuine refs hole from a
@@ -405,9 +476,9 @@ private:
     // Reclamation source buckets (§6.1): index = ReclaimReason
     std::array<std::shared_ptr<MetricCounter>, 6> m_gc_reclaims_by_reason_;
     std::shared_ptr<MetricGauge> m_gc_compact_deferred_, m_gcq_depth_, m_gcq_oldest_age_,
-        m_gc_skipped_grace_, m_gc_skipped_pinned_, m_bytes_chunks_, m_bytes_packs_,
-        m_pack_accounted_bytes_, m_pack_live_bytes_, m_packs_total_,
-        m_orphan_packstats_missing_;
+        m_gc_skipped_grace_, m_gc_skipped_pinned_, m_gc_skipped_leased_, m_bytes_chunks_,
+        m_bytes_packs_, m_pack_accounted_bytes_, m_pack_live_bytes_, m_packs_total_,
+        m_packs_quarantined_, m_orphan_packstats_missing_;
     std::shared_ptr<MetricHistogram> m_gc_duration_;
     // GET read-path crc mismatch counter (P5 corruption metric): data-plane
     // readers increment via the on_corruption callback — the callback captures
@@ -431,9 +502,25 @@ private:
     struct CompactBlocked {
         int64_t live_recs = 0;
         int64_t retry_at_ms = 0;
+        // Consecutive scans with corrupt records and zero migration progress
+        // (roadmap §3.7): at kQuarantineStrikes the pack is quarantined instead
+        // of cooling down again. Any account movement resets the count
+        int strikes = 0;
     };
+    static constexpr int kQuarantineStrikes = 3;
     std::unordered_map<uint64_t, int64_t> pack_empty_since_;
     std::unordered_map<uint64_t, CompactBlocked> compact_blocked_;
+
+    // ---- Corrupt-pack quarantine ledger (roadmap §3.7) ----
+    // In-memory mirror of <root>/quarantine/<pack_id> files (loaded at
+    // construction). q_mu_ orders GC-round mutation against the admin CLI's
+    // list/release (purge additionally holds gc_sem_ for the physical removal)
+    std::filesystem::path quarantine_dir() const;
+    void load_quarantine();
+    void quarantine_save(const duostore::DuoQuarantineEntry& e);  // write-through (logs on failure)
+    void quarantine_drop(uint64_t pack_id);                       // erase entry + file
+    std::mutex q_mu_;
+    std::map<uint64_t, duostore::DuoQuarantineEntry> quarantined_;
     // gcq scan watermark (gaps §2.13: rescanning all unreclaimable entries from
     // seq 0 every round costs CPU that grows linearly with backlog and never
     // shrinks): records the earliest seq among skipped entries and the earliest
@@ -458,11 +545,16 @@ private:
     // expiry. Lease TTL is max(2×gc_interval, 10min), far above a single round's
     // duration
     std::string gc_owner_;
+    // In-flight read registry for the read lease (roadmap §3.7); shared with
+    // escaping readers like pins_
+    std::shared_ptr<duostore::ReadClock> read_clock_ =
+        std::make_shared<duostore::ReadClock>();
     BackgroundTaskGroup bg_{"duostore"};
     // Written only inside bg_.if_open, unchanged after begin_close (readers are
     // lock-free); 0 = not armed (cancel(0) is safe)
     TimerQueue::Id gc_timer_ = 0;
     TimerQueue::Id orphan_timer_ = 0;
+    TimerQueue::Id lease_timer_ = 0;
     // Manual hooks, the background worker, and the orphan scan are mutually
     // exclusive (std::mutex cannot be held across co_await, so a coroutine semaphore)
     AsyncSemaphore gc_sem_{1};

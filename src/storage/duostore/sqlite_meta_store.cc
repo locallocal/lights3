@@ -788,8 +788,12 @@ bool SqliteMetaStore::bucket_exists(std::string_view b) {
 
 std::vector<BucketInfo> SqliteMetaStore::list_buckets() {
     auto lease = read_conn();
+    return list_buckets_in(*lease);
+}
+
+std::vector<BucketInfo> SqliteMetaStore::list_buckets_in(Conn& c) {
     std::vector<BucketInfo> out;
-    Stmt st(*lease, kBucketList);
+    Stmt st(c, kBucketList);
     while (st.step())
         out.push_back({std::string(st.col_blob(0)),
                        codec::from_unix_ms(codec::decode_bucket(st.col_blob(1)))});
@@ -868,13 +872,20 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
     auto lease = read_conn();
     Conn& c = *lease;
     Txn t(c, /*immediate=*/false);
+    ListResult out = list_objects_in(c, b, opt);
+    t.commit();
+    return out;
+}
+
+// Transaction managed by the caller: the live path wraps one read transaction per
+// call, the snapshot view (roadmap §3.7) runs every call inside its one long-held
+// read transaction — an inner BEGIN here would nest and fail
+ListResult SqliteMetaStore::list_objects_in(Conn& c, std::string_view b,
+                                            const ListOptions& opt) {
     require_bucket(c, b);
     ListResult out;
     // S3: max-keys=0 returns empty with IsTruncated=false
-    if (opt.max_keys <= 0) {
-        t.commit();
-        return out;
-    }
+    if (opt.max_keys <= 0) return out;
     const std::string& prefix = opt.prefix;
     const std::string& delim = opt.delimiter;
     // Seek start = max(prefix, successor of start_after): when the start is exactly
@@ -938,8 +949,7 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
         ++count;
         pause_hook();
     }
-    it.reset();  // finish the statement before finishing the transaction
-    t.commit();
+    it.reset();  // finish the statement before the caller finishes the transaction
     return out;
 }
 
@@ -1165,11 +1175,15 @@ void SqliteMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
 }
 
 std::vector<PackStat> SqliteMetaStore::pack_stats() {
+    auto lease = read_conn();
+    return pack_stats_in(*lease);
+}
+
+std::vector<PackStat> SqliteMetaStore::pack_stats_in(Conn& c) {
     // Returns every pack with an account (including live=0 and unsealed entries —
     // whole-pack deletion of empty packs and restart re-sealing depend on them)
-    auto lease = read_conn();
     std::vector<PackStat> out;
-    Stmt st(*lease, kPackList);
+    Stmt st(c, kPackList);
     while (st.step())
         out.push_back({uint64_t(st.col_i64(0)), uint64_t(st.col_i64(1)), st.col_i64(2),
                        st.col_i64(3), st.col_i64(4) != 0});
@@ -1270,6 +1284,42 @@ void SqliteMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
     auto lease = read_conn();
     Stmt st(*lease, kRefScan);
     while (st.step()) cb(uint64_t(st.col_i64(0)));
+}
+
+// Online-dump snapshot view (roadmap §3.7): one leased pool connection with an
+// open WAL read transaction for the view's lifetime — every read observes the
+// state the transaction first materialized, while the write connection keeps
+// committing. Member order matters: txn_ is declared after lease_, so it is
+// destroyed (rolled back) before the connection returns to the pool
+class SqliteMetaStore::SnapshotView final : public IMetaReadView {
+public:
+    explicit SnapshotView(SqliteMetaStore& store)
+        : store_(store), lease_(store.read_conn()) {
+        txn_.emplace(*lease_, /*immediate=*/false);
+        // A deferred BEGIN only takes its WAL snapshot at the first read; force it
+        // now so writes committed after snapshot() never leak into the view
+        Stmt st(*lease_, "SELECT 1 FROM buckets LIMIT 1");
+        st.step();
+    }
+    std::vector<BucketInfo> list_buckets() override { return store_.list_buckets_in(*lease_); }
+    std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override {
+        auto v = store_.object_raw(*lease_, b, k);
+        if (!v) return std::nullopt;
+        return codec::decode_object(std::string(k), *v);
+    }
+    ListResult list_objects(std::string_view b, const ListOptions& opt) override {
+        return store_.list_objects_in(*lease_, b, opt);
+    }
+    std::vector<PackStat> pack_stats() override { return store_.pack_stats_in(*lease_); }
+
+private:
+    SqliteMetaStore& store_;
+    Lease lease_;
+    std::optional<Txn> txn_;
+};
+
+std::unique_ptr<IMetaReadView> SqliteMetaStore::snapshot() {
+    return std::make_unique<SnapshotView>(*this);
 }
 
 }  // namespace lights3::storage::duostore

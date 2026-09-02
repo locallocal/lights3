@@ -39,6 +39,7 @@ lights3 duostore dump <backend> <file> [--config=<path>]   export duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   import duostore meta
 lights3 duostore gc <backend> [--config=<path>]            run one duostore GC round now
 lights3 duostore scan <backend> [--config=<path>]          run one orphan-scan round now
+lights3 duostore quarantine list|release|purge <backend> [<pack_id>] corrupt-pack quarantine
 lights3 tier scan|gc|reconcile <backend> [--config=<path>] tiered background tasks on demand
 lights3 tier quarantine list|forget|purge <backend> [<bucket> <key>] tiered reconcile quarantine ledger
 lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]  offline integrity scrub
@@ -73,8 +74,12 @@ export LIGHTS3_SECRET_1=my-secret
 Logical meta backup/restore for DuoStore (stream format and invariants:
 [storage/duostore-core.md §11](../storage/duostore-core.md)). Registered only
 in `LIGHTS3_DUOSTORE` builds; both build every backend **without listening**,
-run, and exit, so write quiescence holds trivially. `<backend>` must name a
-`type: duostore` backend in the config, otherwise the command errors out.
+run, and exit. `<backend>` must name a `type: duostore` backend in the config,
+otherwise the command errors out. When run next to live gateways on a shared
+meta engine: `dump` is online-consistent on rocksdb/sqlite/tikv via an engine
+snapshot (roadmap §3.7); redis has no MVCC, so a dump is only consistent with
+writes stopped (the entry point warns). `load` always requires target-side
+write quiescence.
 
 - `dump`: writes all bucket/object records and the sealed-pack ledger of that
   backend to `<file>` (truncating).
@@ -120,7 +125,7 @@ MPU completing mid-scrub; re-run to confirm. Safe against a live instance too
 ./build/lights3 fsck localdata -c /etc/lights3/lights3.yaml && echo clean
 ```
 
-### 2.4 Background tasks on demand: `duostore gc|scan`, `tier scan|gc|reconcile|quarantine`
+### 2.4 Background tasks on demand: `duostore gc|scan|quarantine`, `tier scan|gc|reconcile|quarantine`
 
 CLI exits for the background hooks (roadmap §3.2): `run_gc_once` /
 `run_orphan_scan_once` / `scan_once` / tiered `run_gc_once` /
@@ -141,6 +146,16 @@ integrity-verdict surface is `lights3 fsck`.
   the manual hooks.
 - `duostore scan <backend>`: one orphan-scan round (two-way reconciliation of
   the disk against refs/packstat, §8.3); also prints chunk/pack on-disk usage.
+- `duostore quarantine list <backend>`: print the corrupt-pack quarantine
+  ledger (pack id / live and corrupt record counts / entry time / purged,
+  [storage/duostore-core.md §8.6](../storage/duostore-core.md));
+  `duostore quarantine release <backend> <pack_id>` drops the entry so
+  compaction retries (use after restoring the pack file from backup);
+  `duostore quarantine purge <backend> <pack_id>` deletes the pack file while
+  keeping the accounting (accepting the loss of its remaining corrupt records;
+  refused while an in-flight reader pins the pack) — delete the owning objects
+  afterwards and regular GC retires the rest. Pack ids accept the 16-digit hex
+  the logs print, 0x-prefixed hex, or decimal.
 - `tier scan <backend>`: one scan round (the first after startup and every
   `full_scan_interval` is a full enumeration, the rest are time-wheel
   incremental rounds): coldness detection + watermark reclamation + crash

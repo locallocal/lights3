@@ -74,6 +74,13 @@ public:
     void ack_reclaim(uint64_t seq) override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;
     bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
+    // Multi-gateway read lease (roadmap §3.7): per-owner key with PX expiry
+    // (crashed publishers yield automatically); min via SCAN + MGET. Note redis
+    // does NOT implement IMetaStore::snapshot() — no MVCC to pin, so the online
+    // meta dump falls back to the writes-stopped contract on this engine
+    bool publish_read_lease(std::string_view owner, int64_t oldest_ms,
+                            int64_t ttl_ms) override;
+    std::optional<int64_t> min_read_lease() override;
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;

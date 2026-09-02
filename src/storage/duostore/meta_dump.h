@@ -6,12 +6,16 @@
 // between the four engines (rocksdb/sqlite/redis/tikv), with value-layout
 // differences absorbed by the interface.
 //
-// Fixed backup/restore order (operational contract; both ends require **writes
-// stopped**):
+// Fixed backup/restore order (operational contract; the **load** side requires
+// writes stopped; the dump side is online when the engine can snapshot —
+// rocksdb/sqlite/tikv implement IMetaStore::snapshot(), redis cannot and keeps
+// the writes-stopped requirement, roadmap §3.7):
 //   Backup: data first (copy the chunks/packs directory or a rados pool snapshot)
 //           -> then dump meta. The order guarantees "data referenced by meta is
 //           necessarily in the backup" (§6 data-first mirror argument): extra
 //           files on the data side are merely orphans; the reverse does not hold.
+//           An online dump keeps the same argument: the snapshot is taken after
+//           the data copy, so anything it references was already on disk.
 //   Restore: put data back first -> load meta -> **forced orphan scan**
 //           (built into DuoStoreBackend::run_meta_load) — reclaims files the data
 //           side accumulated during the backup window.
@@ -47,11 +51,13 @@ struct MetaDumpStats {
     uint64_t sealed_packs = 0;
 };
 
-// Full export to out (the caller guarantees no concurrent writes meanwhile; the
-// backend-layer entry point additionally holds the GC mutex). The stream carries
-// its own magic, per-record length prefixes, and trailing counts + crc32c — the
-// load side validates all of it
-MetaDumpStats dump_meta(IMetaStore& src, std::ostream& out);
+// Full export to out. src should be a point-in-time snapshot view
+// (IMetaStore::snapshot()) for an online dump; when passed a live store the
+// caller must guarantee no concurrent writes (the backend-layer entry point
+// additionally holds the GC mutex either way). The stream carries its own
+// magic, per-record length prefixes, and trailing counts + crc32c — the load
+// side validates all of it
+MetaDumpStats dump_meta(IMetaReadView& src, std::ostream& out);
 
 // Replay from in into dst (should be a freshly created empty store; buckets that
 // already exist are skipped idempotently, supporting a rerun after interruption).

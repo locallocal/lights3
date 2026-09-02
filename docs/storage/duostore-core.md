@@ -176,8 +176,14 @@ run = { u8 kind, u64 first_file_id, u32 count,
   网络引擎保持逐项（合并成单事务会让一个 CAS 失败拖垮全批）。
 - `try_gc_lease(owner, ttl_ms)`：多网关 GC 租约。共享引擎（redis/tikv）实现为
   带 TTL 的原子 CAS（同 owner 续租刷新 TTL）；本地引擎默认恒 true（单进程文件
-  锁已保证独占）。租约不解决进程内 pin 表不共享的问题——部署约束
-  `gc_grace ≥ 最长预期 GET 时长`仍然成立。
+  锁已保证独占）。租约不解决进程内 pin 表不共享的问题——那由
+  `publish_read_lease` / `min_read_lease`（read-lease，§8.5）在共享引擎上覆盖，
+  关闭时回落 `gc_grace ≥ 最长预期 GET 时长` 的旧约束。
+- `publish_read_lease(owner, oldest_ms, ttl)` / `min_read_lease()`：多网关
+  read-lease（roadmap §3.7，语义与安全论证见 §8.5）。共享引擎实现；本地引擎
+  默认 publish 返回 false（unsupported，发布器停摆）、min 返回 nullopt。
+- `snapshot()`：在线 dump 的一致性只读视图（`IMetaReadView`，§11）；
+  rocksdb/sqlite/tikv 实现，redis 返回 nullptr（回落停写契约）。
 - `chunk_referenced(file_id)` / `scan_refs(cb)`：孤儿扫描的正/反向查询。
   `scan_refs` 快照语义宽松（迭代期间的并发增删可见与否不保证）——调用方用
   时点性 `chunk_referenced` 复查后才删，反向只告警不删 meta。
@@ -305,7 +311,9 @@ tikv primary 提交超时——事务**可能已生效**。本地引擎"抛异�
    内部 `abort_upload`（分片入 gcq，本轮第 2 步即变现）。ttl ≤ 0 = 关闭。
    单桶 list 失败只跳过该桶，绝不让异常吞掉后续三步。
 2. **gcq 消费**：`peek_reclaims` 批取（kGcBatch=256 条 / kGcBatchExtents=32768
-   段封批）；逾 `gc_grace` 且 `pins_->any_pinned` 为假的项：
+   段封批）；逾 `gc_grace`、**enqueue 早于 read-lease 下限**（§8.5，仅共享
+   引擎且 `read_lease` 开启时生效；跳过计入 `skipped_leased`）且
+   `pins_->any_pinned` 为假的项：
    `data_->remove(extents)` **物理删先行** → `ack_reclaims` 批量销账。
    顺序铁律：反序在删与销之间崩溃产生永久账外孤儿；正序只留 gcq 残留，重试
    幂等。跨轮水位线 `gcq_hi_`/`gcq_skips_`：无跳过条目到期的轮次从上轮高水位
@@ -319,10 +327,15 @@ tikv primary 提交超时——事务**可能已生效**。本地引擎"抛异�
    否则超预算的单个大 pack 永远无法推进），余者计入 `packs_compact_deferred`
    下轮继续。`rewrite_pack` 顺扫触发迁移回调（§8.2）。`compact_blocked_`：
    上轮没迁干净的 pack（在途 mpu 分片/遗留 owner/存活损坏记录），live_recs
-   无变化且冷却窗（gc_grace）未过则跳过重扫。
+   无变化且冷却窗（gc_grace）未过则跳过重扫。**损坏隔离区**（roadmap §3.7，
+   §8.6）：连续 `kQuarantineStrikes`(=3) 次扫描"corrupt>0 且 migrated==0 且
+   账目不动"的 pack 进隔离账本——不再冷却重扫，候选收集时直接跳过；账目一动
+   （删对象/mpu 落定）自动释放重试（purged 条目除外，文件已删）。
 4. **整空 pack 删除**：sealed 且 live_recs==0、**首次见空起逾 gc_grace**
    （`pack_empty_since_` 记账；服务压实/删除瞬间已读到旧 ref 但尚未 pin 的
-   读者）且无 pin → `remove_pack` → `drop_pack_stat`（同一顺序铁律）。
+   读者）、见空时间早于 read-lease 下限（§8.5：晚于见空才开始的对端读只能
+   读到 swap 后的 manifest，不会引用此 pack）且无 pin → `remove_pack` →
+   `drop_pack_stat`（同一顺序铁律）；隔离账本里的条目随 packstat 一并销。
    两张簿记表按现存账目剪枝防无界增长。
 
 ### 8.2 压实迁移（`duostore_backend.cc:migrate_pack_records`）
@@ -348,7 +361,11 @@ tikv primary 提交超时——事务**可能已生效**。本地引擎"抛异�
 - **refs 快照先行**：先 `scan_refs` 收集 R（排序去重的 u64 向量 + 命中位图，
   峰值内存较三张哈希表方案低一个量级），再枚举盘面——"文件先于 refs 落盘"
   的不变量保证 R 中 id 的文件在枚举开始前必已在盘，miss 即真丢失。
-- **正向**：`scan_chunks` 枚举中内联分类——无 refs、mtime 逾 gc_grace、无
+- **正向**：`scan_chunks` 枚举中内联分类——无 refs、**不在 gcq 在途集合**
+  （roadmap §3.7：曾被引用的 chunk 解引用时原子入 gcq，回收交给带
+  read-lease 门的 gcq 路径，此处 unlink 会绕过该门伤及对端在途读；扫描前
+  peek 全量 gcq 收集在途 file_id，跳过计入 `skipped_gcq`。剩下够格的候选
+  必是从未被引用的崩溃遗留，读者不可能持有）、mtime 逾 gc_grace、无
   pin → 候选；删除前再做时点性 `chunk_referenced` 复查（扫描间隙新提交的
   引用）。unlink 的 extent kind 跟随 `data_kind`（rados 引擎只认 kRados，
   硬编码 kChunk 会让 rados 孤儿删除静默空转）。
@@ -402,6 +419,47 @@ TimerQueue 上分片睡眠（≤500ms/片，片间探测 `bg_.closing()`），cl
 （scrub 是运维触发的遍历，不是常驻 worker）。`bg_.closing()` 在对象与
 extent 粒度探测，中断置 `aborted`（统计为部分结果）。
 
+### 8.5 多网关 read-lease（roadmap §3.7）
+
+补齐"A 网关在读的 extent，B 网关 GC 看不到 A 的 pin"这块文档明列的设计
+前提（此前只靠 `gc_grace` 兜底）。粗粒度租约而非逐 extent 上报：
+
+- **发布侧**（每个网关，无论 gc_enabled）：`get_object` 在**读 meta 之前**
+  向 `ReadClock` 注册 ticket（`PinnedReader` 析构时注销；注册先于 meta 读，
+  故发布值必然覆盖所有可能持有旧 manifest 的读者，无需微窗口宽限论证）。
+  `lease_timer_` 每 `read_lease`（默认 5s，0=关）秒经
+  `IMetaStore::publish_read_lease(owner, oldest_ms, ttl)` 发布"本网关最老
+  在途读的开始时间"（无在途读发 now），TTL = 3 个发布周期——崩溃网关连丢
+  两次续约即自动让路。本地引擎（rocksdb/sqlite）返回 unsupported，发布器
+  当场停摆（进程内 pin 本就精确）；redis 实现为 SET PX 键，tikv 为 'L' 表
+  "r<owner>" 行（值 `<oldest_ms>\0<expiry_ms>`，扫描时惰性删过期行）。
+- **消费侧**（GC 网关）：每轮开头 `min_read_lease()` 取全体存活租约的最小
+  oldest_ms 作 **lease_floor**。gcq 项仅当 `enqueue_ms < floor` 才可回收：
+  持有旧 ref 的读者必在解引用入队**之前**读到 manifest，故"所有在途读都晚
+  于入队开始"证明无人持有；发布延迟只让 floor 偏旧 ⇒ 多推迟、绝不多删。
+  整空 pack 删除同理用"首次见空时间 < floor"。取失败（网络抖动）WARN 后
+  回落 grace-only（历史行为），绝不停摆回收。
+- 时钟前提与 GC 租约相同：网关间 NTP 偏差 ≪ gc_grace。
+
+### 8.6 损坏 pack 隔离区（roadmap §3.7；CLI `lights3 duostore quarantine`）
+
+存活损坏记录（读回 crc 不符、无法迁移）以前只会让 pack 在 `compact_blocked_`
+里按 gc_grace 冷却无限重扫——永远回收不掉，也没有运维出口。现在：
+
+- **入区**：连续 3 次扫描 corrupt>0、migrated==0 且 live_recs 不动 →
+  `LOG_ERROR` + 写 `<root>/quarantine/<pack_id 十六进制>` 账本文件
+  （`v1 <live> <corrupt> <since_ms> <purged>` 单行；重启与 admin CLI 进程
+  读同一账本），本轮起候选收集直接跳过。指标
+  `lights3_duostore_packs_quarantined`（gauge，当前在区数）。
+- **自动出区**：live_recs 一动（删对象/mpu 落定 = 有真进展可能）自动释放
+  重试；账目清零走 §8.1 第 4 步整删，packstat 与账本条目一并销。
+- **运维出口**：`quarantine list` 列出（pack、live/corrupt 计数、入区时间、
+  是否已 purge）；`release <pack_id>` 删条目强制重扫（修复盘面/从备份放回
+  文件后用）；`purge <pack_id>` 物理删 pack 文件、**保留记账**（剩余记录
+  读取从 crc 中止变缺文件错误，数据本就已损；有 pin/写锁时拒绝）——之后
+  删掉引用它的对象，账目归零由常规 GC 收尾（`remove_pack` 幂等容忍文件
+  已缺）。purged 条目不自动出区。
+
 ## 9. Multipart
 
 - `create_multipart`：纯 meta 写（upload_id 由引擎生成）。
@@ -437,11 +495,21 @@ inode = 静默丢数据。封存失败仅 WARN 不阻启动。随后生成随机
 
 ## 11. meta dump/load（`meta_dump.h` / `meta_dump.cc`）
 
-经 IMetaStore 中介的逻辑 dump/load：dump 写全部 bucket/object 记录（含
-extent manifest）与已封存 pack 账；load 逐条经 `put_object` 重放——记录级
-重放天然兼作四引擎间的 meta 迁移工具，value 布局差异被接口吸收。backend 层
-入口 `run_meta_dump` / `run_meta_load` 持 `gc_sem_`（写静默由运维保证：
-`lights3 duostore dump|load <backend> <file> [--config=<path>]` 入口在服务启动前运行）。
+经 IMetaReadView / IMetaStore 中介的逻辑 dump/load：dump 写全部 bucket/object
+记录（含 extent manifest）与已封存 pack 账；load 逐条经 `put_object` 重放——
+记录级重放天然兼作四引擎间的 meta 迁移工具，value 布局差异被接口吸收。
+backend 层入口 `run_meta_dump` / `run_meta_load` 持 `gc_sem_`。
+
+**在线 dump**（roadmap §3.7）：`run_meta_dump` 先要 `IMetaStore::snapshot()`
+——一个 `IMetaReadView`（list_buckets / get_object / list_objects /
+pack_stats 四个读，恰好是 dump 所需），全部读观测同一时点状态，业务写可以
+继续。三个引擎的实现：rocksdb 钉一个 `GetSnapshot()`（四条读路径按
+snapshot 参数化，SnapshotView 复用同一函数体）；sqlite 租一条池连接持一个
+打开的 WAL 读事务（构造时先跑一条读物化快照——deferred BEGIN 只在首读取
+快照）；tikv 固定一个 TSO 版本（MVCC 天然一致，注意 `gc_retention` 须覆盖
+dump 时长，safepoint 越过版本会破坏快照）。redis 无 MVCC 返回 nullptr ⇒
+回落到写静默契约（入口 WARN 提示）。**load 仍要求目标端写静默**（服务启动
+前运行的运维契约不变）。
 
 **流格式**（`meta_dump.cc:dump_meta`）：magic `"L3DUOMETA1\n"` 后按 tag：
 
@@ -485,7 +553,8 @@ get_object 逐条导出（并发删除仅防御性跳过）。
 | counter | `gc_reclaims_by_reason_total{reason}` | 按 gcq reason 字节分桶（六个值全预注册，缺桶在 Prometheus 里读作"无数据"而非 0） |
 | counter | `orphan_scans_total` / `orphan_chunks_removed_total` / `orphan_packs_removed_total` | 孤儿扫描 |
 | counter | `read_corruption_total` | GET 链路 crc 不符；数据面经 on_corruption 回调递增，回调只捕获 shared_ptr（reader 逃逸 backend 生命周期仍安全） |
-| gauge | `gc_skipped_grace` / `gc_skipped_pinned` / `gc_compact_deferred` | 每轮观测值而非累计（grace/pin 跳过每轮重计，单调计数器会虚增） |
+| gauge | `gc_skipped_grace` / `gc_skipped_pinned` / `gc_skipped_leased` / `gc_compact_deferred` | 每轮观测值而非累计（grace/pin/lease 跳过每轮重计，单调计数器会虚增） |
+| gauge | `packs_quarantined` | 损坏隔离区当前在区 pack 数（§8.6；>0 需运维介入） |
 | gauge | `gcq_depth` / `gcq_oldest_age_seconds` | 仅**全量轮**刷新（增量轮从高水位续扫看不到队头积压，刷新会周期性误报 0） |
 | gauge | `chunk_bytes` / `pack_bytes` | 盘面用量，随孤儿扫描节奏刷新 |
 | gauge | `pack_accounted_bytes` / `pack_live_bytes` / `packs` | accounted/live 之比 = 空间放大系数（留给查询侧计算，保精度） |

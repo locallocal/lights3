@@ -285,8 +285,9 @@ tikv primary 提交超时——事务**可能已生效**。本地引擎"抛异�
 
 `duostore_backend.cc:DuoStoreBackend::get_object`：
 
-1. 池线程上 `require_object`（缺失时再查 bucket 以区分 NoSuchBucket/NoSuchKey，
-   与 HEAD 的错误语义一致）；
+1. 池线程上先查元数据缓存（§7.1）：含 manifest 的整记录命中即跳过 meta 引擎；
+   否则 `require_object`（缺失时再查 bucket 以区分 NoSuchBucket/NoSuchKey，
+   与 HEAD 的错误语义一致）并回填；
 2. `resolve_range` 解出闭区间 `[first,last]`；len==0 走空 body 短路；
 3. **只 pin 命中区间的 extent**——按 manifest 顺序累加偏移，落在
    `[first,last]` 内的段进 hit 列表（Range GET 不为整对象 manifest 付 pin
@@ -296,8 +297,39 @@ tikv primary 提交超时——事务**可能已生效**。本地引擎"抛异�
 5. 内层 reader 包进 `duostore_backend.cc:PinnedReader`：析构时 unpin，经
    shared_ptr 持有 pin 表，reader 随 HTTP 响应逃逸后仍安全。
 
-`head_object` 走 `meta_->head_object`（`decode_object_meta`，零 manifest
-物化）。`delete_object` 是纯 meta 事务（幂等），物理回收全部异步由 GC 变现。
+`head_object` 先查缓存（两种记录都能应答 HEAD），未命中走
+`meta_->head_object`（`decode_object_meta`，零 manifest 物化）并回填 meta-only
+记录。`delete_object` 是纯 meta 事务（幂等），物理回收全部异步由 GC 变现。
+
+### 7.1 对象元数据缓存（roadmap §3.8）
+
+`meta_cache.h:MetaCache<CachedObject>`（`duostore_backend.h:ObjectRecCache`）
+按 (bucket, key) 缓存 `ObjectRec` 整条记录：`manifest=false` 是 HEAD 回填的
+meta-only 记录，GET 视其为未命中并升级为含 DataRef 的整记录（超过
+`kMetaCacheMaxExtents`=256 个 extent 的记录不缓存——大对象的 meta RTT 摊在
+传输里，预算留给小对象热集）。命中的 GET/HEAD 不碰 meta 引擎。
+
+失效面（全部在提交点之后经 `invalidate_on_exit` RAII 守卫，异常与
+`UndeterminedCommit` 同样触发）：`put_object`、`delete_object`、
+`complete_multipart`、`tier_commit_stub` / `tier_commit_cached`。整表清空：
+GC 轮压实迁移了记录（`records_migrated > 0`，缓存中的旧 manifest 仍指向被
+迁移的 pack 区域——在空 pack 逾 gc_grace 被整删前仍可读，但不能活过它）、
+`run_meta_load`。回填令牌（miss 时取分片失效代，insert 时代已变则丢弃）
+关闭"读旧记录→写者提交并失效→回填旧记录"的竞态；`quarantine_purge`
+不失效（其语义本就是"引用该 pack 的读变成缺 extent 错误"）。
+
+**引擎类型决定一致性契约**（`DuoStoreConfig::from_params` 与
+`init_metrics` 双重校验）：
+
+| 引擎 | 默认 | 契约 |
+| --- | --- | --- |
+| rocksdb / sqlite（本进程独占） | `meta_cache_entries=64K`，无 TTL | 精确：所有写都经本进程失效 |
+| redis / tikv（多网关共享） | 关 | 开启须 `0 < meta_cache_ttl < gc_grace`：对端网关的写在 TTL 内不可见；陈旧 manifest 必须先于其 extent 可被对端 GC 回收而过期。`lease_tick` 发布的"最老在途读"再回拨一个 TTL（§8.5）——本网关缓存里任何 manifest 的取得时刻都不早于 `oldest − TTL`，对端 GC 于是不会回收它们仍可能命名的 extent |
+
+跨网关失效消息（redis pub/sub；tikv 无等价物）留作后续分期，共享引擎以
+TTL 有界陈旧为契约。指标 `lights3_meta_cache_lookups_total{result=hit|miss}`（duostore 不用校验谓词，无 stale）/
+`lights3_meta_cache_invalidations_total` / `lights3_meta_cache_entries`；
+测试观测口 `meta_cache_stats()` / `meta_cache_enabled()`。
 
 ## 8. GC 与孤儿扫描
 
@@ -560,3 +592,6 @@ get_object 逐条导出（并发删除仅防御性跳过）。
 | gauge | `pack_accounted_bytes` / `pack_live_bytes` / `packs` | accounted/live 之比 = 空间放大系数（留给查询侧计算，保精度） |
 | gauge | `orphan_refs_missing` / `orphan_packstats_missing` | 数据丢失信号 |
 | histogram | `gc_round_seconds` | 单轮 GC 墙钟时间 |
+
+元数据缓存（§7.1）使用跨后端共用的族名 `lights3_meta_cache_lookups_total{result=hit|miss}` /
+`lights3_meta_cache_invalidations_total` / `lights3_meta_cache_entries`（backend 标签区分实例）。

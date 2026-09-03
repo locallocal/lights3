@@ -1350,3 +1350,223 @@ TEST(xlocalfs_backend_suite_no_meta_ops) {
     run_backend_suite(b);
     sync_wait(b.close());
 }
+
+// ---------- object metadata cache (roadmap §3.8) ----------
+
+// MetaCache core: LRU budget, invalidation, the fill token, TTL, clear
+TEST(meta_cache_lru_token_ttl) {
+    MetaCache<int> c(MetaCacheOptions{4, std::chrono::milliseconds(0), /*shards=*/1});
+    CHECK(c.enabled());
+    MetaCache<int>::Token tok;
+    CHECK(c.lookup("b", "k1", &tok) == nullptr);
+    c.insert(tok, "b", "k1", std::make_shared<int>(1));
+    CHECK_EQ(*c.lookup("b", "k1"), 1);
+    CHECK_EQ(c.stats().hits, uint64_t(1));
+    CHECK_EQ(c.stats().misses, uint64_t(1));
+
+    // A fill whose token predates an invalidation of the shard is refused
+    MetaCache<int>::Token stale;
+    CHECK(c.lookup("b", "k2", &stale) == nullptr);
+    c.invalidate("b", "k1");
+    c.insert(stale, "b", "k2", std::make_shared<int>(2));
+    CHECK(c.lookup("b", "k2") == nullptr);
+    CHECK_EQ(c.stats().fills_dropped, uint64_t(1));
+    CHECK(c.lookup("b", "k1") == nullptr);  // invalidated
+    CHECK_EQ(c.stats().invalidations, uint64_t(1));
+
+    // LRU eviction under the budget: k3..k6 fill it, touching k3 keeps it, k4 goes
+    for (int i = 3; i <= 6; ++i) {
+        MetaCache<int>::Token t;
+        c.lookup("b", "k" + std::to_string(i), &t);
+        c.insert(t, "b", "k" + std::to_string(i), std::make_shared<int>(i));
+    }
+    CHECK_EQ(c.stats().entries, size_t(4));
+    CHECK_EQ(*c.lookup("b", "k3"), 3);
+    {
+        MetaCache<int>::Token t;
+        c.lookup("b", "k7", &t);
+        c.insert(t, "b", "k7", std::make_shared<int>(7));
+    }
+    CHECK_EQ(c.stats().entries, size_t(4));
+    CHECK(c.lookup("b", "k4") == nullptr);
+    CHECK_EQ(*c.lookup("b", "k3"), 3);
+
+    // Same key in another bucket is a different entry
+    CHECK(c.lookup("other", "k3") == nullptr);
+
+    // Validation predicate: a rejected record counts as stale, is dropped, and refuses a
+    // fill whose token predates the rejection
+    {
+        MetaCache<int>::Token before;
+        c.lookup("b", "k-none", &before);  // token from an unrelated miss on the same shard
+        MetaCache<int>::Token t;
+        CHECK(c.lookup("b", "k3", &t, [](const int& v) { return v != 3; }) == nullptr);
+        CHECK_EQ(c.stats().stale, uint64_t(1));
+        CHECK(c.lookup("b", "k3") == nullptr);
+        c.insert(before, "b", "k3", std::make_shared<int>(33));  // stale token: dropped
+        CHECK(c.lookup("b", "k3") == nullptr);
+        c.insert(t, "b", "k3", std::make_shared<int>(3));
+        CHECK_EQ(*c.lookup("b", "k3", nullptr, [](const int& v) { return v == 3; }), 3);
+    }
+
+    c.clear();
+    CHECK_EQ(c.stats().entries, size_t(0));
+    CHECK(c.lookup("b", "k3") == nullptr);
+
+    // TTL: an entry expires and counts as a miss afterwards
+    MetaCache<int> t(MetaCacheOptions{8, std::chrono::milliseconds(30)});
+    MetaCache<int>::Token tt;
+    t.lookup("b", "k", &tt);
+    t.insert(tt, "b", "k", std::make_shared<int>(9));
+    CHECK_EQ(*t.lookup("b", "k"), 9);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    CHECK(t.lookup("b", "k") == nullptr);
+    CHECK_EQ(t.stats().entries, size_t(0));
+
+    // Disabled cache: every call is a no-op
+    MetaCache<int> off(MetaCacheOptions{0});
+    CHECK(!off.enabled());
+    off.insert({}, "b", "k", std::make_shared<int>(1));
+    CHECK(off.lookup("b", "k") == nullptr);
+    CHECK_EQ(off.stats().misses, uint64_t(0));
+}
+
+// localfs: HEAD/GET fill and hit, every write path invalidates, tagging rewrite included
+TEST(localfs_meta_cache_hits_and_write_invalidation) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsOptions o;
+    o.sidecar_scan_interval_sec = 0;
+    LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);
+    sync_wait(b.create_bucket("bkt"));
+    auto p1 = put(b, "bkt", "k", "v1");
+    CHECK_EQ(b.meta_cache_stats().entries, size_t(0));  // PUT does not populate
+
+    auto h1 = sync_wait(b.head_object("bkt", "k"));  // miss + fill
+    CHECK_EQ(h1.etag, p1.etag);
+    CHECK_EQ(b.meta_cache_stats().misses, uint64_t(1));
+    CHECK_EQ(b.meta_cache_stats().entries, size_t(1));
+    auto h2 = sync_wait(b.head_object("bkt", "k"));  // validated hit
+    CHECK_EQ(h2.etag, p1.etag);
+    CHECK_EQ(b.meta_cache_stats().hits, uint64_t(1));
+    {
+        auto s = sync_wait(b.get_object("bkt", "k", std::nullopt));  // hit via the fstat stamp
+        CHECK_EQ(s.meta.etag, p1.etag);
+        CHECK_EQ(read_all(*s.body), std::string("v1"));
+    }
+    CHECK_EQ(b.meta_cache_stats().hits, uint64_t(2));
+
+    // Overwrite: the record is dropped after the commit, the next HEAD refetches
+    auto p2 = put(b, "bkt", "k", "value-two");
+    CHECK_EQ(b.meta_cache_stats().entries, size_t(0));
+    auto h3 = sync_wait(b.head_object("bkt", "k"));
+    CHECK_EQ(h3.etag, p2.etag);
+    CHECK_EQ(h3.size, uint64_t(9));
+    CHECK_EQ(b.meta_cache_stats().misses, uint64_t(2));
+
+    // In-place tag rewrite changes the record without a new inode
+    sync_wait(b.set_object_tagging("bkt", "k", "a=1"));
+    CHECK_EQ(sync_wait(b.head_object("bkt", "k")).tagging, std::string("a=1"));
+
+    // Copy fast path invalidates the destination
+    put(b, "bkt", "dst", "old");
+    CHECK_EQ(sync_wait(b.head_object("bkt", "dst")).size, uint64_t(3));
+    ObjectMeta cm;
+    auto cr = sync_wait(b.copy_object_fast("bkt", "k", "bkt", "dst", cm));
+    if (cr) CHECK_EQ(sync_wait(b.head_object("bkt", "dst")).etag, p2.etag);
+
+    // Multipart complete invalidates
+    auto up = sync_wait(b.create_multipart("bkt", "k", {}));
+    {
+        http::StringBodyReader part("part-one");
+        sync_wait(b.upload_part("bkt", "k", up, 1, part));
+    }
+    std::vector<PartInfo> parts{{1, sync_wait(b.list_parts("bkt", "k", up, {})).parts[0].etag}};
+    auto cpl = sync_wait(b.complete_multipart("bkt", "k", up, parts));
+    CHECK_EQ(sync_wait(b.head_object("bkt", "k")).etag, cpl.etag);
+
+    // Delete drops the record; HEAD after delete is a real miss
+    sync_wait(b.delete_object("bkt", "k"));
+    CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::NoSuchKey);
+    // Nothing above was ever served stale: every hit carried the etag of the time
+    CHECK_EQ(b.meta_cache_stats().fills_dropped, uint64_t(0));
+}
+
+// localfs: a write made by another process on the same root (a second backend instance
+// with its own cache) is caught by the stat stamp when validation is on; with validation
+// off the first instance serves the old record until invalidated (the documented trade)
+TEST(localfs_meta_cache_stamp_catches_external_write) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsOptions o;
+    o.sidecar_scan_interval_sec = 0;
+    LocalFsBackend a(tmp.path / "data", tmp.path / "staging", pool, o);
+    LocalFsBackend w(tmp.path / "data", tmp.path / "staging2", pool, o);  // "another process"
+    sync_wait(a.create_bucket("bkt"));
+    auto p1 = put(a, "bkt", "k", "v1");
+    CHECK_EQ(sync_wait(a.head_object("bkt", "k")).etag, p1.etag);  // fill
+    auto p2 = put(w, "bkt", "k", "v2-longer");
+    auto h = sync_wait(a.head_object("bkt", "k"));  // stamp mismatch → stale, refetch
+    CHECK_EQ(h.etag, p2.etag);
+    CHECK_EQ(h.size, uint64_t(9));
+    CHECK_EQ(a.meta_cache_stats().hits, uint64_t(0));
+    CHECK_EQ(a.meta_cache_stats().stale, uint64_t(1));
+    {
+        auto s = sync_wait(a.get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(s.meta.etag, p2.etag);
+        CHECK_EQ(read_all(*s.body), std::string("v2-longer"));
+    }
+    CHECK_EQ(a.meta_cache_stats().hits, uint64_t(1));
+    // Deleted behind our back: a validated HEAD refetches and reports NoSuchKey
+    sync_wait(w.delete_object("bkt", "k"));
+    CHECK_THROWS_S3(sync_wait(a.head_object("bkt", "k")), S3ErrorCode::NoSuchKey);
+
+    LocalFsOptions nv = o;
+    nv.meta_cache_validate = false;
+    LocalFsBackend t(tmp.path / "data", tmp.path / "staging3", pool, nv);
+    auto p3 = put(t, "bkt", "k", "v3");
+    CHECK_EQ(sync_wait(t.head_object("bkt", "k")).etag, p3.etag);
+    auto p4 = put(w, "bkt", "k", "v4");
+    CHECK_EQ(sync_wait(t.head_object("bkt", "k")).etag, p3.etag);  // unvalidated hit: stale by design
+    CHECK_EQ(t.meta_cache_stats().hits, uint64_t(1));
+    // GET always validates against the fd it holds, so it refetches and repairs the record
+    {
+        auto s = sync_wait(t.get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(s.meta.etag, p4.etag);
+    }
+    CHECK_EQ(sync_wait(t.head_object("bkt", "k")).etag, p4.etag);
+    // A cache-off backend behaves exactly as before
+    LocalFsOptions off = o;
+    off.meta_cache_entries = 0;
+    LocalFsBackend z(tmp.path / "data", tmp.path / "staging4", pool, off);
+    CHECK_EQ(sync_wait(z.head_object("bkt", "k")).etag, p4.etag);
+    CHECK_EQ(z.meta_cache_stats().misses, uint64_t(0));
+    CHECK_EQ(z.meta_cache_stats().entries, size_t(0));
+}
+
+// xlocalfs shares the cache through the inherited plumbing: its own put/complete/delete
+// overrides invalidate and its ring-based GET validates against the fd's fstat
+TEST(xlocalfs_meta_cache_paths) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    LocalFsOptions o;
+    o.sidecar_scan_interval_sec = 0;
+    XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, {}, o);
+    sync_wait(b.create_bucket("bkt"));
+    auto p1 = put(b, "bkt", "k", "one");
+    {
+        auto s = sync_wait(b.get_object("bkt", "k", std::nullopt));  // miss + fill
+        CHECK_EQ(read_all(*s.body), std::string("one"));
+    }
+    CHECK_EQ(sync_wait(b.head_object("bkt", "k")).etag, p1.etag);  // hit
+    CHECK_EQ(b.meta_cache_stats().hits, uint64_t(1));
+    auto p2 = put(b, "bkt", "k", "two-2");
+    {
+        auto s = sync_wait(b.get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(s.meta.etag, p2.etag);
+        CHECK_EQ(read_all(*s.body), std::string("two-2"));
+    }
+    sync_wait(b.delete_object("bkt", "k"));
+    CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::NoSuchKey);
+    sync_wait(b.close());
+}

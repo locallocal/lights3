@@ -334,6 +334,11 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("gc_interval")) c.gc_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("gc_grace")) c.gc_grace_sec = parse_duration_sec(*v);
     if (auto* v = get("read_lease")) c.read_lease_sec = parse_duration_sec(*v);
+    // Object metadata cache (roadmap §3.8); the budget default depends on the engine
+    // kind resolved below, so remember whether it was configured
+    std::optional<size_t> meta_cache_entries;
+    if (auto* v = get("meta_cache_entries")) meta_cache_entries = parse_size(*v);
+    if (auto* v = get("meta_cache_ttl")) c.meta_cache_ttl_sec = parse_duration_sec(*v);
     if (auto* v = get("orphan_scan_interval"))
         c.orphan_scan_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("mpu_ttl")) c.mpu_ttl_sec = parse_duration_sec(*v);
@@ -611,6 +616,27 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (c.rocksdb_max_background_jobs < 1)
         throw std::runtime_error("duostore backend '" + name +
                                  "': rocksdb_max_background_jobs must be >= 1");
+    // Object metadata cache (roadmap §3.8): a shared meta engine has writers this
+    // process never sees, so the cache is off there unless configured, and then only
+    // with a TTL bounding the staleness window (kept below gc_grace: a stale manifest
+    // must expire before the extents it names can be reclaimed by a peer's GC)
+    const bool shared_meta = c.meta_kind == DuoMetaKind::kRedis || c.meta_kind == DuoMetaKind::kTikv;
+    if (meta_cache_entries) c.meta_cache_entries = *meta_cache_entries;
+    else if (shared_meta) c.meta_cache_entries = 0;
+    if (c.meta_cache_ttl_sec < 0)
+        throw std::runtime_error("duostore backend '" + name +
+                                 "': meta_cache_ttl must be >= 0 (0 = no expiry)");
+    if (shared_meta && c.meta_cache_entries > 0) {
+        if (c.meta_cache_ttl_sec <= 0)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': meta_cache_entries > 0 on a shared meta engine "
+                                     "(redis/tikv) requires meta_cache_ttl > 0 -- peer "
+                                     "gateways' writes are only visible after expiry");
+        if (c.meta_cache_ttl_sec >= c.gc_grace_sec)
+            throw std::runtime_error("duostore backend '" + name +
+                                     "': meta_cache_ttl must be below gc_grace on a "
+                                     "shared meta engine");
+    }
     return c;
 }
 
@@ -857,6 +883,20 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
     m_read_corruption_ = metrics.counter(
         "lights3_duostore_read_corruption_total",
         "Chunk/pack crc mismatches detected on the GET read path (P5 corruption metric)");
+    // Object metadata cache (roadmap §3.8). The from_params contract is re-checked here
+    // for directly constructed configs (tests, embedding): a TTL-less cache over a
+    // shared engine would serve peers' overwrites indefinitely, so it is refused
+    const bool shared_meta =
+        cfg_.meta_kind == DuoMetaKind::kRedis || cfg_.meta_kind == DuoMetaKind::kTikv;
+    if (shared_meta && cfg_.meta_cache_entries > 0 &&
+        (cfg_.meta_cache_ttl_sec <= 0 || cfg_.meta_cache_ttl_sec >= cfg_.gc_grace_sec))
+        throw std::runtime_error("duostore backend '" + cfg_.name +
+                                 "': meta cache on a shared meta engine needs "
+                                 "0 < meta_cache_ttl < gc_grace");
+    meta_cache_ = std::make_shared<ObjectRecCache>(
+        MetaCacheOptions{cfg_.meta_cache_entries,
+                         std::chrono::seconds(std::max(0, cfg_.meta_cache_ttl_sec))},
+        metrics);
 }
 
 // Discard active packs on restart (§5.2): the data plane never reuses old active
@@ -1192,7 +1232,10 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     rec.data = pumped.ref;
     // Commit point; the old DataRef enters gcq in the same batch. The condition
     // check completes inside the meta transaction's atomic region; a throw on
-    // failure takes the discard path to reclaim already-landed data extents
+    // failure takes the discard path to reclaim already-landed data extents.
+    // The cached record is dropped on the way out whatever the outcome (an
+    // UndeterminedCommit may have taken effect, roadmap §3.8)
+    auto inv = meta_cache_->invalidate_on_exit(bucket, key);
     co_await commit_or_discard(*data_, pumped.ref,
                                [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
     co_return PutResult{pumped.md5};
@@ -1220,6 +1263,7 @@ Task<void> DuoStoreBackend::tier_commit_stub(std::string_view bucket, std::strin
     rec.tier = ts;  // data stays empty: the meta transaction sends the old extents to the gcq
     PutCondition cond;
     cond.if_match_etag = meta.etag;
+    auto inv = meta_cache_->invalidate_on_exit(bucket, key);
     meta_->put_object(bucket, key, std::move(rec), cond);
 }
 
@@ -1244,6 +1288,7 @@ Task<void> DuoStoreBackend::tier_commit_cached(std::string_view bucket, std::str
     rec.tier = ts;
     PutCondition cond;
     cond.if_match_etag = meta.etag;
+    auto inv = meta_cache_->invalidate_on_exit(bucket, key);
     co_await commit_or_discard(*data_, pumped.ref,
                                [&] { meta_->put_object(bucket, key, std::move(rec), cond); });
 }
@@ -1267,7 +1312,22 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
     // the published "oldest in-flight read" must cover the meta read itself, or
     // a peer's GC could reclaim between our meta fetch and the registration
     TicketGuard ticket{read_clock_, read_clock_->begin()};
-    auto rec = require_object(bucket, key);
+    // Cache first (roadmap §3.8): a full entry skips the meta engine; a meta-only
+    // entry (left by a HEAD) or a miss goes to the engine and fills/upgrades it. The
+    // token predates the meta read so a racing write cannot leave a stale record
+    ObjectRec rec;
+    if (auto c = meta_cache_->lookup(bucket, key); c && c->manifest) {
+        rec = c->rec;
+    } else {
+        auto tok = meta_cache_->token_for(bucket, key);
+        rec = require_object(bucket, key);
+        if (rec.data.extents.size() <= kMetaCacheMaxExtents) {
+            auto e = std::make_shared<CachedObject>();
+            e->rec = rec;
+            e->manifest = true;
+            meta_cache_->insert(tok, bucket, key, std::move(e));
+        }
+    }
     // A tiered stub (roadmap §3.6 ⑥): the data lives in the cloud and TieredBackend
     // routes there before asking us; reachable only by direct routing to the local
     // backend or a demotion race — same signal localfs raises for its 0-length stub
@@ -1321,6 +1381,9 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
 Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
+    // Cache first (roadmap §3.8): either entry kind answers a HEAD
+    ObjectRecCache::Token tok;
+    if (auto c = meta_cache_->lookup(bucket, key, &tok)) co_return c->rec.meta;
     // meta-only read (docs/archive/gaps.md §3.9): HEAD does not pay for the whole manifest
     auto meta = meta_->head_object(bucket, key);
     if (!meta) {
@@ -1328,12 +1391,16 @@ Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::stri
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
     }
+    auto e = std::make_shared<CachedObject>();
+    e->rec.meta = *meta;
+    meta_cache_->insert(tok, bucket, key, std::move(e));
     co_return std::move(*meta);
 }
 
 Task<void> DuoStoreBackend::delete_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
+    auto inv = meta_cache_->invalidate_on_exit(bucket, key);
     meta_->delete_object(bucket, key);  // idempotent (returns false if absent); physical reclamation realized asynchronously by GC (§6.2)
 }
 
@@ -1402,6 +1469,7 @@ Task<PutResult> DuoStoreBackend::complete_multipart(std::string_view bucket,
     validate_object_key(key);
     co_await pool_->schedule();
     // Pure metadata transaction, zero data movement: O(#parts) vs localfs concatenation's O(total bytes) (§8)
+    auto inv = meta_cache_->invalidate_on_exit(bucket, key);
     PutResult r{meta_->complete_upload(bucket, key, upload_id, parts)};
     // Composite checksum echo (roadmap §2.2): assemble persisted it with the object;
     // one meta read fetches it back for the response
@@ -1757,6 +1825,12 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         LOG_INFO("duostore '{}': gc compaction budget reached ({} packs / {} bytes scanned), "
                  "{} eligible pack(s) deferred to the next round", cfg_.name,
                  st.packs_compacted, scanned_bytes, st.packs_compact_deferred);
+    // Migrated records now carry new refs; cached manifests naming the old pack regions
+    // stay readable until the emptied pack is unlinked in a later round (beyond
+    // gc_grace), but must not outlive it. Compaction is rare and batched, so dropping
+    // the whole cache is cheaper than plumbing per-object callbacks through the
+    // migration hook (roadmap §3.8)
+    if (st.records_migrated > 0) meta_cache_->clear();
 
     // 4) Whole empty-pack deletion (§9.1/§9.2 step 4): sealed with live_recs==0,
     // empty for longer than gc_grace (delayed unlink: serving readers who read
@@ -2304,6 +2378,7 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_load(std::istream& in) {
             throw S3Error(S3ErrorCode::InternalError, "duostore meta load: backend closing");
         auto permit = co_await gc_sem_.acquire();
         st = duostore::load_meta(*meta_, in);
+        meta_cache_->clear();  // the restored records replace whatever was cached (roadmap §3.8)
     }  // semaphore released at block exit — the orphan scan below must re-acquire the same one
     // Tail end of the restore-and-solidify flow (operational contract in
     // meta_dump.h): a forced orphan scan reclaims the extra data-side files
@@ -2374,7 +2449,14 @@ Task<void> DuoStoreBackend::lease_tick() {
         // TTL = 3 publish periods: a gateway that misses two renewals in a row
         // (crash, partition) stops holding peers' reclamation back
         const int64_t ttl_ms = int64_t(cfg_.read_lease_sec) * 3000;
-        supported = meta_->publish_read_lease(gc_owner_, read_clock_->oldest_or(now), ttl_ms);
+        // A cached manifest may be up to meta_cache_ttl old when a read starts, so
+        // the lease is backdated by that much: a peer's GC then only reclaims extents
+        // whose deref predates every manifest this gateway can still be holding
+        // (roadmap §3.8; the TTL is bounded below gc_grace by config validation)
+        int64_t oldest = read_clock_->oldest_or(now);
+        if (meta_cache_->enabled() && cfg_.meta_cache_ttl_sec > 0)
+            oldest -= int64_t(cfg_.meta_cache_ttl_sec) * 1000;
+        supported = meta_->publish_read_lease(gc_owner_, oldest, ttl_ms);
     } catch (const std::exception& e) {
         // Transient (network): keep the timer armed; while the lease is stale
         // peers merely defer more, never reclaim more

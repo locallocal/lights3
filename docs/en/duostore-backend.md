@@ -577,6 +577,8 @@ parses centrally with range validation (modeled on cloudproxy); `parse_size` /
 | gc_enabled | true | master switch for the background GC worker + orphan-scan scheduling; set false on non-designated instances in multi-gateway deployments (single-instance execution constraint, duostore-rados-data.md §8.3); manual hooks are not gated |
 | gc_interval / gc_grace | 5m / 5m | reclaim period / delayed-deletion grace |
 | read_lease | 5s | multi-gateway read-lease publish period (roadmap §3.7, storage/duostore-core.md §8.5): every gateway publishes its oldest in-flight read start time to the shared meta (redis/tikv); GC only reclaims entries every peer's in-flight read provably cannot reference; 0 = off; local engines (rocksdb/sqlite) stand the publisher down automatically at no cost |
+| meta_cache_entries | 64K (rocksdb/sqlite) / 0 (redis/tikv) | object metadata cache budget (roadmap §3.8, storage/duostore-core.md §7.1): a GET/HEAD hit costs no meta round trip; 0 = off. Exact invalidation on local engines; shared engines need `meta_cache_ttl` to enable it |
+| meta_cache_ttl | 0 (never) | cache entry expiry; on shared engines (redis/tikv) it must satisfy `0 < ttl < gc_grace` (a peer gateway's write stays invisible for up to one TTL; the published read lease is backdated by the TTL) |
 | orphan_scan_interval | 1d | chunk orphan reconciliation period |
 | mpu_ttl | 7d | expiry cleanup of incomplete multiparts; 0 = off (matching gc_interval's 0 semantics) |
 | meta_sync | true | whether RocksDB commits are WAL-fsynced (§6.3) |

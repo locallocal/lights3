@@ -154,11 +154,13 @@ sidecar=B）由 per-key 锁消除，只剩单写者崩溃窗口。
 
 1. 同 PUT 的入口校验 + `pool_->schedule()` + `require_bucket`
    （bucket 存在性是无条件前置——历史实现只在 open 失败分支查 bucket，
-   成功路径完全绕过校验）；
+   成功路径完全绕过校验；元数据缓存命中时跳过——记录只在 inode 戳仍匹配时
+   使用，而它证明对象上次被读到时 bucket 存在，见 §5.1）；
 2. `open(O_RDONLY)`，失败抛 `NoSuchKey`；`fstat` 确认普通文件；
 3. `fs_util.cc:load_object_meta_stat` 用**已打开 fd 的 fstat 结果**读元数据，
    绝不对路径二次 stat：并发覆盖后路径指向新 inode，二次 stat 的 size/mtime
-   会与 fd 持有的旧 body 错位（短包或截断，静默损坏）；
+   会与 fd 持有的旧 body 错位（短包或截断，静默损坏）。缓存记录的戳与这次
+   fstat 一致则直接采用（省掉 xattr/sidecar 读），否则失效并重读回填；
 4. tiered 竞态检查：若元数据声明 `tier != local` 且 `st_size != 声明 size`，
    说明对象在 open 与读 sidecar 之间被 stub 化（fd 指着 0 长新 inode），抛
    `fs_util.h:StubRace`——`TieredBackend` 捕获后改走云端重试，独立 localfs
@@ -178,8 +180,9 @@ GET 的延迟指标只统计到流句柄就绪（open + 元数据），不含 bo
 
 ## 5. head / delete / copy
 
-- **head_object**（`localfs_backend.cc:head_object`）：校验 + `require_bucket` +
-  `load_meta`（即 `fs_util.cc:load_object_meta`），一次 stat + 一次 xattr/sidecar 读。
+- **head_object**（`localfs_backend.cc:head_object`）：先查元数据缓存（§5.1）：
+  命中且戳校验通过（或关闭校验）直接返回；否则校验 + `require_bucket` +
+  `load_meta_fill`（stat + xattr/sidecar 读 + 回填）。
 - **delete_object**（`localfs_backend.cc:delete_object`）：幂等——`fs::remove`
   对不存在的路径返回 false 且 ec 为空，不报错；但真实失败（EACCES/EIO）必须
   上抛 500，静默 204 会让客户端误信删除已发生。顺序为先数据后 sidecar
@@ -194,6 +197,32 @@ GET 的延迟指标只统计到流句柄就绪（open + 元数据），不含 bo
   回落流式取一致快照。字节未变故 etag/size 恒等于源；REPLACE 的新
   user_meta/content_type 已由 handler 装配进 meta。提交与 PUT 完全同路
   （目标 key 的 commit_lock + `commit_object_file`）。
+
+### 5.1 对象元数据缓存（roadmap §3.8）
+
+`meta_cache.h:MetaCache<FsCachedMeta>`（`localfs_backend.h:FsMetaCache`）按
+(bucket, key) 缓存 `ObjectMeta + TierInfo + FsMetaStamp`，戳 =
+fstat/stat 观测到的 `dev/ino/size/mtime/ctime`。每条提交路径都用新 inode
+rename 覆盖对象（PUT / complete / copy / tiered 的 stub 与回填），就地改标签
+只动 xattr 但会推 ctime，所以**戳不符 ⇒ 记录可能陈旧**是充分条件，且对
+同一 root 上另一个进程的写同样成立。
+
+| 路径 | 行为 |
+| --- | --- |
+| HEAD 命中 | `meta_cache_validate=true`（默认）：先 `stat` 一次，再以"戳相等"为谓词 `lookup`——一致即返回（省掉 getxattr / sidecar 读 + TSV 解码），不一致计 `stale`、丢弃并走回填；`false`：零 syscall 直接返回 |
+| GET 命中 | 恒以已打开 fd 的 `fstat` 戳为谓词（本来就要做，免费），一致直接采用，否则计 `stale` + `require_bucket` + 重读回填 |
+| 未命中 | `meta_from_stat` 复用同一个 stat 结果做权威读（xattr→sidecar），读完 `insert`；回填令牌由未命中的 `lookup` 发出、**先于元数据读**，其分片在此期间发生过失效/陈旧判定则丢弃回填（关闭"读旧→写者提交并失效→回填旧记录"的竞态） |
+| 写路径 | `invalidate_on_exit` RAII 守卫置于提交区起点：put / copy_object_fast / complete_multipart / delete_object / set_object_tagging，以及 xlocalfs 覆写的 put / complete / delete；协程帧局部在调用方恢复前析构，故失效先于"写已完成"被观察到，异常路径同样触发 |
+| tiered 提交 | `tier_local_fs.cc` 的 `commit_stub` / `FsCacheFill::commit` 走 fs_util 原语绕过后端写路径，提交后调 `LocalFsBackend::invalidate_object_meta`（戳本就能兜住，这是让 validate=false 对进程内写者也精确） |
+| 列举 | 不回填（rclone/s3fs 式全量列举会把热集冲出 LRU），只按需填充 |
+
+配置（`registry.cc:fs_backend_opts`）：`meta_cache_entries`（默认 64K，
+0 = 关）、`meta_cache_ttl`（默认 0 = 不过期）、`meta_cache_validate`
+（默认 true）。`validate=false` 只适合本进程独占 root 的部署：外部进程的
+覆盖在失效或 TTL 前不可见（GET 因为持 fd 校验仍会自我修复并顺带修复记录）。
+指标 `lights3_meta_cache_lookups_total{result=hit|miss|stale}`（stale 是被谓词拒绝的命中，同时计入 miss）/
+`lights3_meta_cache_invalidations_total` / `lights3_meta_cache_entries`
+（跨后端共用族名，backend 标签区分）。测试观测口 `meta_cache_stats()`。
 
 ## 6. list_objects：排序目录遍历
 
@@ -352,6 +381,7 @@ GET 的 body 传输阶段每块各自 hop 一次池（`FdStreamReader::read`）�
 | `fs_util.cc:finish_object_sidecar` | 按 `SidecarMode` 收尾的 sidecar 步骤（§3），xlocalfs 的 ring 提交同样调用 |
 | `fs_util.h:MetaXattrPolicy` / `fs_util.cc:probe_meta_xattr` | xattr 失败计数 + fail-fast 策略 / 构造期能力探测（§2） |
 | `list_cache.h:DirListCache` | 目录排序条目快照缓存（§6） |
+| `meta_cache.h:MetaCache` / `localfs_backend.h:FsMetaStamp` | 对象元数据缓存 + inode 戳校验（§5.1） |
 | `fs_util.cc:check_put_condition` | 条件 PUT 判定（§3 第 7 步），须持同 key 提交锁 |
 | `fs_util.cc:set_meta_xattr` / `get_meta_xattr` | 元数据 xattr 写（返回是否成功；失败降级+限流告警+策略计数，`required` 下抛错）/ 读（ERANGE 重取，缺失回落 sidecar） |
 | `fs_util.cc:load_object_meta`(`_stat`) | stat/复用 stat + xattr→sidecar 元数据读；缺失 → `NoSuchKey` |
@@ -376,7 +406,9 @@ roadmap §3.5 追加的序列：`lights3_localfs_xattr_fallback`（gauge，§2�
 `lights3_localfs_xattr_write_failures_total`、
 `lights3_localfs_orphan_sidecars_removed_total`（listing 自愈 + §12 扫描合计）、
 `lights3_localfs_list_dir_cache_total{result=hit|miss}` 与
-`lights3_localfs_list_dir_cache_entries`（§6 目录快照缓存）。
+`lights3_localfs_list_dir_cache_entries`（§6 目录快照缓存）；roadmap §3.8 的
+`lights3_meta_cache_lookups_total{result}` / `lights3_meta_cache_invalidations_total` /
+`lights3_meta_cache_entries`（§5.1 元数据缓存，族名跨后端共用）。
 
 `localfs_backend.cc:close` / 析构共用 `shutdown_background`：`BackgroundTaskGroup`
 关门 → 锁外 cancel 两个维护定时器（mpu 清理、§12 扫描；`TimerQueue::cancel`

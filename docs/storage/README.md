@@ -8,7 +8,7 @@
 
 | 文档 | 覆盖源码 | 内容 |
 | --- | --- | --- |
-| [common.md](common.md) | `backend.h`、`registry`、`bucket_router`、`validate/listing/multipart` | `IStorageBackend` 逐方法契约、注册构建流程、bucket 路由、公共列举/分片算法 |
+| [common.md](common.md) | `backend.h`、`registry`、`bucket_router`、`validate/listing/multipart`、`meta_cache.h` | `IStorageBackend` 逐方法契约、注册构建流程、bucket 路由、公共列举/分片算法、后端级元数据缓存组件 |
 | [localfs.md](localfs.md) | `localfs/` | 磁盘布局与 xattr/sidecar 元数据、staging+rename 原子提交、fd 快照读、有序目录游走列举、multipart 落盘 |
 | [xlocalfs.md](xlocalfs.md) | `xlocalfs/` | 原生 syscall 的 io_uring 引擎（SQ/CQ mmap、能力探测、SQPOLL）、与 localfs 的复用边界、关闭时序 |
 | [memory.md](memory.md) | `memory/` | 全内存结构与快照隔离、容量双闸门、测试角色 |

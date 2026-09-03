@@ -18,6 +18,7 @@
 | `src/storage/validate.cc` | bucket/key 命名校验实现（声明在 `backend.h`，无独立头文件） |
 | `src/storage/listing.h/.cc` | ListObjects / ListParts / ListMultipartUploads 的共享分页与 delimiter 算法；`resolve_range` 的实现也在此 |
 | `src/storage/multipart.h/.cc` | upload_id 生成、合并 ETag、parts 预校验等后端无关的分片辅助 |
+| `src/storage/meta_cache.h` | `MetaCache<V>`：后端级对象元数据缓存（分片 LRU + TTL + 回填令牌 + 失效守卫），localfs/xlocalfs 与 duostore 各自实例化（roadmap §3.8；[localfs.md](localfs.md) §5.1、[duostore-core.md](duostore-core.md) §7.1） |
 
 ## 2. IStorageBackend 接口逐方法语义
 

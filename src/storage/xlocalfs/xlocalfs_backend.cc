@@ -192,6 +192,7 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     // key; the conditional-PUT check is inside the same lock (PutCondition contract)
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
+    auto inv = invalidate_on_exit(bucket, key);  // roadmap §3.8
     fs::path dest = object_path(bucket, key);
     fsutil::check_put_condition(dest, cond, key);
     co_await commit_prepared(dest, tmp, meta, key, xattr_ok);
@@ -209,19 +210,23 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
-    require_bucket(bucket);  // same as localfs: bucket existence is an unconditional precondition, not something to check only on failure paths
-
+    // Same as localfs: bucket existence is an unconditional precondition on every path
+    // that reads metadata from disk, skipped only behind a cached record whose inode
+    // stamp matches the fd's fstat (roadmap §3.8)
     fs::path path = object_path(bucket, key);
     // OPENAT via the ring (roadmap §3.4 ③): a cold dentry/inode lookup is disk work the
     // pool thread no longer waits on; fstat afterwards is in-memory (the open just
     // populated the inode) and stays a plain syscall
     int fd = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
-    if (fd < 0)
+    if (fd < 0) {
+        require_bucket(bucket);  // NoSuchBucket takes precedence over NoSuchKey
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
+    }
     struct stat st{};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);
+        require_bucket(bucket);
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
     }
@@ -230,8 +235,18 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     try {
         fsutil::TierInfo tier;
         // Same as localfs: use the fd's fstat, so a concurrent overwrite cannot leave meta
-        // and body coming from different inodes
-        out.meta = fsutil::load_object_meta_stat(path, std::string(key), st, &tier);
+        // and body coming from different inodes; the cached record must match that fstat
+        FsMetaCache::Token tok;
+        const FsMetaStamp stamp = FsMetaStamp::of(st);
+        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) {
+                return v.stamp == stamp;
+            })) {
+            out.meta = c->meta;
+            tier = c->tier;
+        } else {
+            require_bucket(bucket);
+            out.meta = meta_from_stat(bucket, key, path, st, tok, &tier);
+        }
         // Same as localfs: stubbed between open and sidecar read -> report to tiered so it
         // goes to the cloud instead
         if (tier.tier != fsutil::Tier::kLocal && out.meta.size > 0 &&
@@ -394,6 +409,7 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
     {
         auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT
         co_await pool_->schedule();
+        auto inv = invalidate_on_exit(bucket, key);
         co_await commit_prepared(object_path(bucket, key), tmp, meta, key, xattr_ok);
     }
 
@@ -414,6 +430,7 @@ Task<void> XLocalFsBackend::delete_object(std::string_view bucket, std::string_v
     co_await pool_->schedule();
     require_bucket(bucket);
 
+    auto inv = invalidate_on_exit(bucket, key);
     fs::path path = object_path(bucket, key);
     std::string sidecar = path.string() + fsutil::kSidecarSuffix;
     // Idempotent like the base: absence is not an error, but real EACCES/EIO must

@@ -149,6 +149,12 @@ resolve(bucket) → IStorageBackend&
   路径指向新 inode，二次 stat 会让 meta 与 fd 持有的 body 错位（短包/截断）。
   `FdBodyReader` 每次 `read()` 都经池执行 `pread`（带偏移，天然支持 Range）；
   fd 由 RAII 持有，取消/断连自动关闭。
+- **元数据缓存**（roadmap §3.8）：HEAD/GET 先查按 (bucket,key) 分片的 LRU
+  （`meta_cache.h`），记录携带 inode 戳（dev/ino/size/mtime/ctime）：HEAD 命中
+  默认一次 stat 对戳（`meta_cache_validate=false` 则零 syscall），GET 用已持
+  fd 的 fstat 对戳，戳不符即重读——外部进程改写同一 root 也不会喂出陈旧
+  记录；本后端的每条写路径在提交点后失效。`meta_cache_entries`（默认 64K）、
+  `meta_cache_ttl`。见 [storage/localfs.md](storage/localfs.md) §5.1。
 - **PUT**：循环 `body.read(64KiB)` → 池内 write + 增量 MD5 → rename。
   ETag = MD5 hex，与 S3 单段上传一致。
 - **LIST**：递归目录遍历 + prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；
@@ -236,6 +242,12 @@ meta / data 两侧均已有可选替换实现（各有专文，编译开关默�
   SQLite（[duostore-sqlite-meta.md](duostore-sqlite-meta.md)）、
   TiKV（[duostore-tikv-meta.md](duostore-tikv-meta.md)）；
 - data：Ceph/RADOS（[duostore-rados-data.md](duostore-rados-data.md)）。
+
+对象元数据缓存（roadmap §3.8）：GET/HEAD 命中时整条 `ObjectRec`（含
+manifest）来自进程内 LRU，零 meta 引擎 RTT。rocksdb/sqlite 默认开且精确
+失效；redis/tikv 默认关，开启须 `0 < meta_cache_ttl < gc_grace`（对端网关的
+写在 TTL 内不可见，read-lease 相应回拨）。见
+[storage/duostore-core.md](storage/duostore-core.md) §7.1。
 
 注意：duostore 不能作 tiered 的 local 侧（tiered 绑定 localfs 磁盘布局），
 可作其 cloud 侧或独立使用。

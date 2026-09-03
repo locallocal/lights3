@@ -222,12 +222,37 @@ PUT/回填/换代失效，水位淘汰当 rank 0 残留。见
 | ~~多网关 read-lease~~ | 各网关周期发布"最老在途读开始时间"（redis SET PX / tikv 'L' 表，TTL 崩溃自愈；本地引擎 unsupported 即停摆），GC 只回收 `enqueue_ms < 全体最小租约` 的 gcq 项与见空早于下限的空 pack；孤儿扫描改为跳过 gcq 在途 chunk 以关闭同一竞态（duostore-core.md §8.5） |
 | ~~meta 在线备份~~ | dump 走 `IMetaStore::snapshot()` 一致性视图（rocksdb Snapshot / sqlite WAL 读事务 / tikv 固定 TSO），写不停机；redis 无 MVCC 保持停写契约并 WARN；load 契约不变（duostore-core.md §11）。增量/PITR 仍为未做的后续方向 |
 
-### 3.8 横切：元数据缓存层
+### 3.8 横切：元数据缓存层 **已完成（2026-09-04，单实例层 + 共享 meta 的有界陈旧模式）**
 
-全仓无任何对象/元数据缓存：每次 HEAD/GET 都是一次 stat+getxattr（localfs）
+~~全仓无任何对象/元数据缓存：每次 HEAD/GET 都是一次 stat+getxattr（localfs）
 或一次 meta 引擎 RTT（duostore+redis/tikv）。单实例可做 per-backend 分片
-LRU + 写路径 invalidate；多网关共享 meta 时需失效协议，可分期。
-**价值：高（小对象高 QPS）；难度：中。**
+LRU + 写路径 invalidate；多网关共享 meta 时需失效协议，可分期。~~
+
+落地：`storage/meta_cache.h:MetaCache<V>`——按 (bucket,key) 分片（默认 64
+条带）的 LRU，可选 TTL，**回填令牌**（miss 时取分片失效代，insert 时代已
+变则丢弃）关闭"读旧记录→被覆盖写抢先提交并失效→回填旧记录"的经典竞态；
+指标 `lights3_meta_cache_lookups_total{result}` / `_invalidations_total` /
+`_entries`（backend 标签区分实例）。两个后端各自接入：
+
+- **localfs/xlocalfs**：缓存 `ObjectMeta + tier + stat 戳`（dev/ino/size/
+  mtime/ctime）。HEAD 命中默认仍做一次 stat 校验戳（省掉 getxattr / sidecar
+  读 + TSV 解码；`meta_cache_validate=false` 则零 syscall），GET 用已持有
+  fd 的 fstat 校验（免费），戳不符即失效重读——因此**外部进程改写同一
+  root 也不会被喂陈旧记录**。put/copy/complete/delete/tagging 与 xlocalfs
+  的 ring 提交在提交点后经 RAII 守卫失效；tiered 的 stub/回填提交调
+  `invalidate_object_meta`。默认 64K 条。
+- **duostore**：缓存整条 `ObjectRec`（HEAD 只填 meta 段，GET 升级为含
+  manifest 的整记录；>256 extent 的记录不缓存），命中的 GET/HEAD **零 meta
+  RTT**。本地引擎（rocksdb/sqlite）默认开、精确失效（put/delete/complete/
+  tier 提交守卫；压实 swap 后整表清空；dump load 后清空）。共享引擎
+  （redis/tikv）默认关：开启必须 `0 < meta_cache_ttl < gc_grace`（对端网关的
+  写在 TTL 内不可见，且陈旧 manifest 必须早于其 extent 可被对端 GC 回收前
+  过期），read-lease 发布值再回拨一个 TTL，使对端 GC 不回收本网关缓存
+  manifest 仍可能引用的 extent。
+
+**分期保留**：跨网关失效协议（redis pub/sub / tikv 无等价物）未做，共享
+meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/localfs.md)
+§5.1、[storage/duostore-core.md](storage/duostore-core.md) §7.1。
 
 ### 3.9 链条：用量统计 → 配额 → 多租户
 

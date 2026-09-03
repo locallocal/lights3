@@ -19,8 +19,37 @@
 #include "storage/backend.h"
 #include "storage/localfs/fs_util.h"
 #include "storage/localfs/list_cache.h"
+#include "storage/meta_cache.h"
 
 namespace lights3::storage {
+
+// ---- Object metadata cache value (roadmap §3.8) ----
+// Identity of the data inode as stat(2)/fstat(2) observed it when the metadata was read.
+// Every commit path renames a fresh inode over the object (PUT / complete / copy / tier
+// stub / cache fill) and the in-place tag rewrite touches ctime, so a stamp mismatch is a
+// sufficient signal that the cached record may be stale -- including writes made by
+// another process on the same root
+struct FsMetaStamp {
+    dev_t dev = 0;
+    ino_t ino = 0;
+    off_t size = 0;
+    struct timespec mtime{};
+    struct timespec ctime{};
+    static FsMetaStamp of(const struct stat& st) {
+        return {st.st_dev, st.st_ino, st.st_size, st.st_mtim, st.st_ctim};
+    }
+    bool operator==(const FsMetaStamp& o) const {
+        return dev == o.dev && ino == o.ino && size == o.size &&
+               mtime.tv_sec == o.mtime.tv_sec && mtime.tv_nsec == o.mtime.tv_nsec &&
+               ctime.tv_sec == o.ctime.tv_sec && ctime.tv_nsec == o.ctime.tv_nsec;
+    }
+};
+struct FsCachedMeta {
+    ObjectMeta meta;
+    fsutil::TierInfo tier;
+    FsMetaStamp stamp;
+};
+using FsMetaCache = MetaCache<FsCachedMeta>;
 
 // Inheritable by xlocalfs: the data plane (GET/PUT/parts/concatenation) is virtual, layout
 // and metadata logic are reused
@@ -48,6 +77,17 @@ struct LocalFsOptions {
     // Orphan-sidecar sweep period (a delete crash leaves "<key>.lights3-meta" without its
     // data file; listing self-heals only the directories it visits). 0 = off
     int sidecar_scan_interval_sec = 24 * 3600;
+
+    // ---- Object metadata cache (roadmap §3.8; docs/storage/localfs.md §5.1) ----
+    // Budget in objects (0 = off). A hit spares the getxattr / sidecar read + TSV decode;
+    // with meta_cache_validate a HEAD still costs one stat(2) (GET already holds an fstat)
+    // and a stamp mismatch refetches, so the cache stays correct under writes made by
+    // other processes on the same root. validate=false trusts the entry until the
+    // backend's own write paths invalidate it or meta_cache_ttl expires -- only for roots
+    // this process owns exclusively
+    size_t meta_cache_entries = size_t(1) << 16;
+    int meta_cache_ttl_sec = 0;  // 0 = no expiry
+    bool meta_cache_validate = true;
 };
 
 // run_scrub_once knobs (roadmap §3.1); per-call rather than config — a scrub is
@@ -145,7 +185,15 @@ public:
     // Observability hooks for tests (docs/storage/localfs.md §10)
     const fsutil::MetaXattrPolicy& xattr_policy() const { return xattr_; }
     fsutil::DirListCache::Stats list_cache_stats() const { return dir_cache_->stats(); }
+    MetaCacheStats meta_cache_stats() const { return meta_cache_->stats(); }
     const LocalFsOptions& options() const { return opt_; }
+    // Drop the cached record of one object. Composite backends that commit through
+    // fs_util primitives directly (tiered stub / cache-fill commits) must call this after
+    // their commit point; the stat stamp would catch it anyway under
+    // meta_cache_validate, this keeps validate=false exact for in-process writers
+    void invalidate_object_meta(std::string_view bucket, std::string_view key) {
+        meta_cache_->invalidate(bucket, key);
+    }
 
     static constexpr const char* kSidecarSuffix = fsutil::kSidecarSuffix;
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
@@ -163,6 +211,22 @@ protected:
     std::filesystem::path object_path(std::string_view bucket, std::string_view key) const;
     void require_bucket(std::string_view bucket) const;      // throws NoSuchBucket if missing
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
+
+    // ---- metadata cache plumbing (roadmap §3.8) ----
+    // Authoritative read (xattr/sidecar) over a stat result the caller holds, filling the
+    // cache with the record + that stat's stamp. tok must predate the metadata read (the
+    // lookup that missed hands it out), so a write racing the read cannot leave a stale
+    // record behind
+    ObjectMeta meta_from_stat(std::string_view bucket, std::string_view key,
+                              const std::filesystem::path& path, const struct stat& st,
+                              const FsMetaCache::Token& tok,
+                              fsutil::TierInfo* tier_out = nullptr) const;
+    // Invalidation on frame exit, declared right before a commit section (xlocalfs's
+    // ring-based commits share it); see MetaCache::InvalidateGuard
+    [[nodiscard]] FsMetaCache::InvalidateGuard invalidate_on_exit(std::string_view bucket,
+                                                                  std::string_view key) {
+        return meta_cache_->invalidate_on_exit(bucket, key);
+    }
 
     // ---- Data-plane accounting (docs/archive/gaps.md §7) ----
     // Enum values are the metric array indices; the data-plane methods xlocalfs overrides
@@ -214,6 +278,7 @@ protected:
     std::shared_ptr<ThreadPool> pool_;
     LocalFsOptions opt_;
     mutable fsutil::MetaXattrPolicy xattr_;
+    std::unique_ptr<FsMetaCache> meta_cache_;  // roadmap §3.8; xlocalfs's data plane consults it too
 
 private:
     // run_scrub_once helpers (pool thread): one bucket's ordered walk, then one

@@ -92,6 +92,10 @@ backends:
     # list_cache_entries: 1M           # per-directory sorted-entry cache budget (entries; 0 = off)
     # list_cache_min_dir_entries: 256  # directories smaller than this are never cached
     # sidecar_scan_interval: 1d        # orphan-sidecar sweep period; 0s = off
+    # -- roadmap §3.8 object metadata cache (docs/storage/localfs.md §5.1) --
+    # meta_cache_entries: 64K          # cached object records (0 = off); a hit spares the xattr/sidecar read
+    # meta_cache_ttl: 0s               # entry expiry; 0s = never (write paths invalidate exactly)
+    # meta_cache_validate: true        # HEAD re-checks the inode stamp with one stat; false = trust until invalidated/expired
 
   # ---------- duostore: metadata KV + chunk/pack data engine (docs/duostore-backend.md) ----------
   # meta engine, pick one of four: rocksdb (default) | redis | sqlite | tikv;
@@ -108,6 +112,9 @@ backends:
   #   gc_enabled: true                 # false = non-designated instance in a multi-gateway setup (§8.3 single instance runs GC)
   #   gc_grace: 300s                   # delayed-deletion grace (defense in depth against concurrent reads)
   #   orphan_scan_interval: 1d
+  #   # -- roadmap §3.8 object metadata cache (docs/storage/duostore-core.md §7.1) --
+  #   meta_cache_entries: 64K          # cached ObjectRec budget; default 64K on rocksdb/sqlite, 0 on redis/tikv
+  #   meta_cache_ttl: 0s               # required (0 < ttl < gc_grace) when enabling the cache on redis/tikv
   #   mpu_ttl: 7d                      # cleanup deadline for incomplete multipart uploads; 0 = off
   #
   #   # -- meta = rocksdb (default, docs/duostore-backend.md) --

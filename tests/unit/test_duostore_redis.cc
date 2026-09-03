@@ -180,6 +180,8 @@ RedisMetaOptions redis_opts(const std::string& prefix) {
         return;                                                               \
     }
 
+using backend_suite::put;
+using backend_suite::read_all;
 using backend_suite::TmpDir;
 using meta_store_suite::chunk_extent;
 using meta_store_suite::make_rec;
@@ -475,6 +477,100 @@ TEST(duostore_redis_read_lease) {
     CHECK(a.snapshot() == nullptr);  // documented engine limitation
     a.close();
     b.close();
+}
+
+// Object metadata cache over a shared engine (roadmap §3.8): a peer gateway's overwrite is
+// invisible to a cached reader for at most meta_cache_ttl (the documented bounded-staleness
+// contract), the published read lease is backdated by that TTL, and from_params enforces
+// "off unless configured, and then only with 0 < ttl < gc_grace"
+TEST(duostore_redis_meta_cache_bounded_staleness) {
+    REDIS_OR_SKIP();
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    std::string prefix = unique_prefix();
+    auto make = [&](const char* name) {
+        auto meta = std::make_unique<RedisMetaStore>(redis_opts(prefix));
+        IMetaStore* mp = meta.get();
+        DuoStoreConfig cfg;
+        cfg.name = name;
+        // Shared data plane, as in a real multi-gateway deployment (rados or a shared
+        // filesystem): chunk ids come from the shared meta, so two writers never collide
+        cfg.root = tmp.path / "duo";
+        cfg.meta_kind = DuoMetaKind::kRedis;
+        cfg.pack_threshold = 0;
+        cfg.gc_interval_sec = 0;
+        cfg.read_lease_sec = 1;
+        cfg.meta_cache_ttl_sec = 1;  // default budget stays (direct construction); ttl < gc_grace (300)
+        fs::create_directories(cfg.root);
+        auto data = std::make_unique<FsDataStore>(
+            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                          cfg.pack_max_size, cfg.pack_writers, {}},
+            pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
+            [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
+        return std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
+    };
+    auto a = make("gw-a");
+    auto b = make("gw-b");
+    CHECK(a->meta_cache_enabled());
+    sync_wait(a->create_bucket("bkt"));
+    auto p1 = put(*a, "bkt", "k", "v1");
+    {
+        auto g = sync_wait(a->get_object("bkt", "k", std::nullopt));  // a caches the full record
+        CHECK_EQ(read_all(*g.body), std::string("v1"));
+    }
+    auto p2 = put(*b, "bkt", "k", "v2-two");  // peer overwrite: a's record is now stale
+    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p2.etag);
+    // Within the TTL a still answers from its cache (bounded staleness by contract); the
+    // old chunks are still on a's disk (no GC ran), so even the body is the old one
+    CHECK_EQ(sync_wait(a->head_object("bkt", "k")).etag, p1.etag);
+    CHECK_EQ(a->meta_cache_stats().hits, uint64_t(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    // Expired: the next reads go to the shared meta and see the peer's write
+    CHECK_EQ(sync_wait(a->head_object("bkt", "k")).etag, p2.etag);
+    {
+        auto g = sync_wait(a->get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(read_all(*g.body), std::string("v2-two"));
+    }
+    // Read lease backdating: with the cache on, every gateway publishes
+    // "oldest in-flight read − ttl", so the floor a peer's GC sees is at least one TTL
+    // in the past even while no read is in flight
+    RedisMetaStore probe(redis_opts(prefix));
+    auto floor = probe.min_read_lease();
+    CHECK(floor.has_value());
+    const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+    CHECK(*floor + 1000 <= now_ms);
+    probe.close();
+    sync_wait(a->close());
+    sync_wait(b->close());
+
+    // from_params: redis defaults the cache off; enabling it needs a TTL below gc_grace
+    std::map<std::string, std::string> base{{"root", (tmp.path / "p").string()},
+                                            {"meta", "redis"},
+                                            {"redis_uri", RedisTestServer::instance().uri}};
+    CHECK_EQ(DuoStoreConfig::from_params("p", base).meta_cache_entries, size_t(0));
+    auto on = base;
+    on["meta_cache_entries"] = "1K";
+    bool thrown = false;
+    try {
+        DuoStoreConfig::from_params("p", on);  // no ttl
+    } catch (const std::runtime_error&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+    on["meta_cache_ttl"] = "300s";  // == gc_grace default
+    thrown = false;
+    try {
+        DuoStoreConfig::from_params("p", on);
+    } catch (const std::runtime_error&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+    on["meta_cache_ttl"] = "2s";
+    auto c = DuoStoreConfig::from_params("p", on);
+    CHECK_EQ(c.meta_cache_entries, size_t(1024));
+    CHECK_EQ(c.meta_cache_ttl_sec, 2);
 }
 
 // roadmap §3.5: uz:<b> lex index. Pages walked with the composite cursor must concatenate to

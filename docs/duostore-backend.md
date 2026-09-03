@@ -508,6 +508,8 @@ cloudproxy），`parse_size` / `parse_duration_sec` 可直接用。
 | gc_enabled | true | 后台 GC worker + 孤儿扫描排程总开关；多网关部署非指定实例置 false（单实例执行约束，duostore-rados-data.md §8.3），手动钩子不受门控 |
 | gc_interval / gc_grace | 5m / 5m | 回收周期 / 延迟删除宽限 |
 | read_lease | 5s | 多网关 read-lease 发布周期（roadmap §3.7，[storage/duostore-core.md](storage/duostore-core.md) §8.5）：每网关向共享 meta（redis/tikv）发布最老在途读开始时间，GC 只回收所有对端在途读都晚于其入队的项；0 = 关；本地引擎（rocksdb/sqlite）自动停摆无开销 |
+| meta_cache_entries | 64K（rocksdb/sqlite）/ 0（redis/tikv） | 对象元数据缓存预算（roadmap §3.8，[storage/duostore-core.md](storage/duostore-core.md) §7.1）：命中的 GET/HEAD 零 meta RTT；0 = 关。本地引擎精确失效；共享引擎开启须配 `meta_cache_ttl` |
+| meta_cache_ttl | 0（不过期） | 缓存记录过期时间；共享引擎（redis/tikv）必须 `0 < ttl < gc_grace`（对端网关的写在 TTL 内不可见；read-lease 发布值回拨一个 TTL） |
 | orphan_scan_interval | 1d | chunk 孤儿对账周期 |
 | mpu_ttl | 7d | 未完成 multipart 过期清理；0 = 关闭（对齐 gc_interval 的 0 语义） |
 | meta_sync | true | RocksDB 提交是否 WAL fsync（§6.3） |

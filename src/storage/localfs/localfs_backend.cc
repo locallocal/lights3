@@ -113,6 +113,12 @@ void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
                         "Listing directory-snapshot cache lookups", {{"result", "miss"}}),
         metrics.gauge("lights3_localfs_list_dir_cache_entries",
                       "Directory entries resident in the listing cache"));
+    // Object metadata cache (roadmap §3.8); metric family shared across backends
+    // (lights3_meta_cache_*, distinguished by the backend label)
+    meta_cache_ = std::make_unique<FsMetaCache>(
+        MetaCacheOptions{opt_.meta_cache_entries,
+                         std::chrono::seconds(std::max(0, opt_.meta_cache_ttl_sec))},
+        metrics);
 }
 
 void LocalFsBackend::record_op(Op op, double secs, bool ok) {
@@ -227,6 +233,21 @@ ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key)
     // Tier awareness (a stub's size comes from the sidecar) is handled in the shared
     // implementation (docs/tiered-storage.md §4.1)
     return fsutil::load_object_meta(data_path, std::move(key));
+}
+
+// ---------- object metadata cache (roadmap §3.8) ----------
+
+ObjectMeta LocalFsBackend::meta_from_stat(std::string_view bucket, std::string_view key,
+                                          const fs::path& path, const struct stat& st,
+                                          const FsMetaCache::Token& tok,
+                                          fsutil::TierInfo* tier_out) const {
+    auto rec = std::make_shared<FsCachedMeta>();
+    rec->meta = fsutil::load_object_meta_stat(path, std::string(key), st, &rec->tier);
+    rec->stamp = FsMetaStamp::of(st);
+    if (tier_out) *tier_out = rec->tier;
+    ObjectMeta out = rec->meta;
+    meta_cache_->insert(tok, bucket, key, std::move(rec));
+    return out;
 }
 
 // ---------- bucket ----------
@@ -362,6 +383,7 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     // and commit are atomic with respect to concurrent writers
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();  // the lock wakeup may resume on another thread; do blocking IO back on a pool thread
+    auto inv = invalidate_on_exit(bucket, key);  // cached record dropped after the commit (roadmap §3.8)
     fs::path dest = object_path(bucket, key);
     fsutil::check_put_condition(dest, cond, key);
     if (commit_object_file(dest, tmp, meta, staging_ / "put", key, commit_options()))
@@ -381,19 +403,24 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
-    // Bucket existence is an unconditional precondition: previously it was only checked on
-    // the open-failure branch, so the success path never checked the bucket at all, and
-    // any bucket that could construct a path outside root_ could read files directly
-    require_bucket(bucket);
-
+    // Bucket existence is an unconditional precondition on every path that reads
+    // metadata from disk (previously it was only checked on the open-failure branch, so
+    // the success path never checked the bucket at all, and any bucket that could
+    // construct a path outside root_ could read files directly). The one exception is a
+    // metadata-cache hit (roadmap §3.8): the record is only used when the inode stamp
+    // still matches the fd's fstat, and it proves the bucket existed when the object was
+    // last read from disk
     fs::path path = object_path(bucket, key);
     int fd = ::open(path.c_str(), O_RDONLY);
-    if (fd < 0)
+    if (fd < 0) {
+        require_bucket(bucket);  // NoSuchBucket takes precedence over NoSuchKey
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
+    }
     struct stat st{};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);
+        require_bucket(bucket);
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
                       std::string(key));
     }
@@ -404,8 +431,19 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         // Use fstat on the already-open fd (not a second stat on the path): after a
         // concurrent overwrite the path points at a new inode, and size/mtime would be
         // misaligned with the old body the fd holds (short read or truncation, silent
-        // corruption)
-        out.meta = fsutil::load_object_meta_stat(path, std::string(key), st, &tier);
+        // corruption). The cached record is trusted only when its stamp matches that
+        // same fstat; otherwise the authoritative read refills it
+        FsMetaCache::Token tok;
+        const FsMetaStamp stamp = FsMetaStamp::of(st);
+        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) {
+                return v.stamp == stamp;
+            })) {
+            out.meta = c->meta;
+            tier = c->tier;
+        } else {
+            require_bucket(bucket);
+            out.meta = meta_from_stat(bucket, key, path, st, tok, &tier);
+        }
         // Stubbed between open and reading the sidecar: the fd points at a 0-length new
         // inode and cannot deliver the size the sidecar claims -- report it so tiered
         // retries via the cloud (docs/tiered-storage.md §7.3 conflict matrix)
@@ -514,6 +552,7 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     meta.last_modified = std::chrono::system_clock::now();
     auto lk = co_await commit_lock(dst_bucket, dst_key).acquire();
     co_await pool_->schedule();
+    auto inv = invalidate_on_exit(dst_bucket, dst_key);
     fs::path dest = object_path(dst_bucket, dst_key);
     if (commit_object_file(dest, tmp, meta, staging_ / "put", dst_key, commit_options()))
         defer_sidecar(std::move(dest), meta);
@@ -528,8 +567,42 @@ Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::strin
     validate_fs_object_key(key);
     reject_reserved_key(key);
     co_await pool_->schedule();
+    fs::path path = object_path(bucket, key);
+    if (!meta_cache_->enabled()) {
+        require_bucket(bucket);
+        auto m = load_meta(path, std::string(key));
+        g.ok = true;
+        co_return m;
+    }
+    // Cache first (roadmap §3.8). Validated (default): one stat(2) taken before the
+    // lookup, whose stamp must match the record -- one syscall instead of stat +
+    // getxattr (+ sidecar read) + decode, and an external overwrite/removal is caught.
+    // Unvalidated: a hit is no syscall at all. A miss goes on to the authoritative
+    // read over the same stat (no second syscall) and fills
+    FsMetaCache::Token tok;
+    struct stat st{};
+    bool present = false;
+    if (!opt_.meta_cache_validate) {
+        if (auto c = meta_cache_->lookup(bucket, key, &tok)) {
+            g.ok = true;
+            co_return c->meta;
+        }
+        present = ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+    } else {
+        present = ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+        const FsMetaStamp stamp = FsMetaStamp::of(st);
+        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) {
+                return present && v.stamp == stamp;
+            })) {
+            g.ok = true;
+            co_return c->meta;
+        }
+    }
     require_bucket(bucket);
-    auto m = load_meta(object_path(bucket, key), std::string(key));
+    if (!present)
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(key));
+    auto m = meta_from_stat(bucket, key, path, st, tok);
     g.ok = true;
     co_return m;
 }
@@ -543,6 +616,7 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
     co_await pool_->schedule();
     require_bucket(bucket);
 
+    auto inv = invalidate_on_exit(bucket, key);
     fs::path path = object_path(bucket, key);
     std::error_code ec;
     // Idempotent: absence is not an error (remove returns false with an empty ec); but
@@ -967,6 +1041,7 @@ Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::stri
     // interleave with the xattr/sidecar rewrite pair
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
+    auto inv = invalidate_on_exit(bucket, key);
     fs::path p = object_path(bucket, key);
     fsutil::TierInfo tier;
     ObjectMeta meta = load_object_meta(p, std::string(key), &tier);  // missing -> NoSuchKey
@@ -1162,6 +1237,7 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     {
         auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT: serialize the commit section
         co_await pool_->schedule();
+        auto inv = invalidate_on_exit(bucket, key);
         fs::path dest = object_path(bucket, key);
         if (commit_object_file(dest, tmp, meta, staging_ / "put", key, commit_options()))
             defer_sidecar(std::move(dest), meta);

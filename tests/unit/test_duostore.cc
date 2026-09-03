@@ -1355,9 +1355,17 @@ TEST(duostore_compact_low_liveness_pack) {
     CHECK_EQ(st1.packs_compacted, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
+    // A GET before the round caches k2's manifest, which still names P1 (roadmap §3.8)
+    {
+        auto g = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
+        CHECK_EQ(read_all(*g.body), patterned(600));
+    }
+    CHECK_EQ(h.b->meta_cache_stats().entries, size_t(1));
+
     // Liveness 1/3 (0.32 < 0.5) -> compaction: k2 migrates, P1 empties, whole-deleted in the same round
     sync_wait(h.b->delete_object("bkt", "k1"));
     auto st2 = sync_wait(h.b->run_gc_once());
+    CHECK_EQ(h.b->meta_cache_stats().entries, size_t(0));  // ref swaps drop the cache
     CHECK_EQ(st2.packs_compacted, uint64_t(1));
     CHECK_EQ(st2.records_migrated, uint64_t(1));
     CHECK_EQ(st2.records_corrupt, uint64_t(0));
@@ -2562,6 +2570,140 @@ TEST(duostore_fs_data_store_uring_roundtrip) {
     CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(pref), 0, small.size() - 1))),
              small);
     sync_wait(d.close());
+}
+
+// ---------- object metadata cache (roadmap §3.8) ----------
+
+// HEAD fills a meta-only entry, GET upgrades it to a full record and then skips the meta
+// engine; put/complete/delete invalidate after their commit point
+TEST(duostore_meta_cache_hits_and_invalidation) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    auto cfg = gc_cfg(tmp, "mcache");
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
+    CHECK(b->meta_cache_enabled());
+    sync_wait(b->create_bucket("bkt"));
+    auto p1 = put(*b, "bkt", "k", patterned(10000));  // 3 chunks
+    CHECK_EQ(b->meta_cache_stats().entries, size_t(0));
+
+    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p1.etag);  // miss: meta-only fill
+    CHECK_EQ(b->meta_cache_stats().misses, uint64_t(1));
+    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p1.etag);  // hit
+    CHECK_EQ(b->meta_cache_stats().hits, uint64_t(1));
+    {
+        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));  // meta-only entry: upgrade
+        CHECK_EQ(read_all(*g.body), patterned(10000));
+    }
+    CHECK_EQ(b->meta_cache_stats().entries, size_t(1));
+    {
+        auto g = sync_wait(b->get_object("bkt", "k", ByteRange{100, 199}));  // full hit, ranged
+        CHECK_EQ(read_all(*g.body), patterned(10000).substr(100, 100));
+    }
+    CHECK_EQ(b->meta_cache_stats().hits, uint64_t(3));
+
+    // Overwrite: the next reads see the new record (and a GC round may reclaim the old chunks
+    // without disturbing the cached-then-refetched manifest)
+    auto p2 = put(*b, "bkt", "k", patterned(5000));
+    CHECK_EQ(b->meta_cache_stats().entries, size_t(0));
+    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p2.etag);
+    {
+        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(read_all(*g.body), patterned(5000));
+    }
+    auto st = sync_wait(b->run_gc_once());
+    CHECK_EQ(st.files_removed, uint64_t(3));
+    {
+        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));  // cached manifest is the live one
+        CHECK_EQ(read_all(*g.body), patterned(5000));
+    }
+
+    // Multipart complete replaces the record
+    auto up = sync_wait(b->create_multipart("bkt", "k", {}));
+    {
+        http::StringBodyReader part(patterned(3000));
+        sync_wait(b->upload_part("bkt", "k", up, 1, part));
+    }
+    std::vector<PartInfo> parts{{1, sync_wait(b->list_parts("bkt", "k", up, {})).parts[0].etag}};
+    auto cpl = sync_wait(b->complete_multipart("bkt", "k", up, parts));
+    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, cpl.etag);
+    {
+        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(read_all(*g.body), patterned(3000));
+    }
+
+    // Delete: HEAD/GET miss for real; a cache-off config never fills
+    sync_wait(b->delete_object("bkt", "k"));
+    CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "k")), s3::S3ErrorCode::NoSuchKey);
+    CHECK_THROWS_S3(sync_wait(b->get_object("bkt", "k", std::nullopt)), s3::S3ErrorCode::NoSuchKey);
+    CHECK_EQ(b->meta_cache_stats().fills_dropped, uint64_t(0));
+    sync_wait(b->close());
+
+    TmpDir tmp2;
+    auto off = gc_cfg(tmp2, "mcache-off");
+    off.meta_cache_entries = 0;
+    auto z = std::make_shared<DuoStoreBackend>(off, pool);
+    CHECK(!z->meta_cache_enabled());
+    sync_wait(z->create_bucket("bkt"));
+    put(*z, "bkt", "k", "x");
+    sync_wait(z->head_object("bkt", "k"));
+    sync_wait(z->head_object("bkt", "k"));
+    CHECK_EQ(z->meta_cache_stats().hits, uint64_t(0));
+    CHECK_EQ(z->meta_cache_stats().misses, uint64_t(0));
+    sync_wait(z->close());
+}
+
+// A shared meta engine (redis/tikv) can only carry the cache with a TTL below gc_grace:
+// the constructor refuses a directly built config that says otherwise, and from_params
+// applies the same rule (plus the engine-dependent default budget)
+TEST(duostore_meta_cache_shared_engine_needs_ttl) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto cfg = gc_cfg(tmp, "shared");
+    cfg.meta_kind = DuoMetaKind::kRedis;  // engine kind only; the injected stores are local
+    cfg.gc_grace_sec = 300;
+    auto build = [&] {
+        fs::create_directories(cfg.root);
+        auto meta = std::make_unique<RocksMetaStore>(
+            RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
+        auto* mp = meta.get();
+        auto data = std::make_unique<FsDataStore>(
+            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                          cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
+            pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
+        return std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
+    };
+    bool thrown = false;
+    try {
+        build();  // entries > 0, ttl = 0
+    } catch (const std::runtime_error&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+    cfg.meta_cache_ttl_sec = 300;  // == gc_grace: refused too
+    thrown = false;
+    try {
+        build();
+    } catch (const std::runtime_error&) {
+        thrown = true;
+    }
+    CHECK(thrown);
+    cfg.meta_cache_ttl_sec = 5;
+    auto b = build();
+    CHECK(b->meta_cache_enabled());
+    sync_wait(b->close());
+
+    // from_params: rocksdb defaults the budget on; a bare shared engine would default it
+    // off (the redis branch needs the engine compiled in, so only the local side is
+    // exercised here), negative TTLs are rejected
+    std::map<std::string, std::string> params{{"root", (tmp.path / "p").string()},
+                                              {"meta_cache_entries", "1K"},
+                                              {"meta_cache_ttl", "10s"}};
+    auto c = DuoStoreConfig::from_params("p", params);
+    CHECK_EQ(c.meta_cache_entries, size_t(1024));
+    CHECK_EQ(c.meta_cache_ttl_sec, 10);
+    CHECK_EQ(DuoStoreConfig::from_params("p", {{"root", (tmp.path / "p").string()}})
+                 .meta_cache_entries,
+             size_t(1) << 16);
 }
 
 #endif  // LIGHTS3_DUOSTORE

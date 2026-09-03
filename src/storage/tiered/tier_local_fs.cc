@@ -234,6 +234,7 @@ Task<void> LocalFsTierLocal::commit_stub(std::string_view bucket, std::string_vi
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);  // reconcile rebuilds into a possibly missing tree
     fsutil::commit_stub(path, meta, tier, tmp_dir());
+    local_->invalidate_object_meta(bucket, key);  // roadmap §3.8: the record changed under the backend
     co_return;
 }
 
@@ -263,6 +264,7 @@ public:
         ::close(tmp_.fd);
         tmp_.fd = -1;
         fsutil::commit_cached(owner_.data_path(bucket_, key_), tmp_, meta, tier, owner_.tmp_dir());
+        owner_.localfs()->invalidate_object_meta(bucket_, key_);  // roadmap §3.8
         owner_.drop_range_cache(bucket_, key_);  // the whole object is local now
         co_return;
     }

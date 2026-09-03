@@ -62,6 +62,13 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
         o.list_cache_min_dir_entries = size_t(small_int("list_cache_min_dir_entries", 1, 1 << 30));
     if (cfg.params.count("sidecar_scan_interval"))
         o.sidecar_scan_interval_sec = parse_duration_sec(cfg.params.at("sidecar_scan_interval"));
+    // Object metadata cache (roadmap §3.8; docs/storage/localfs.md §5.1)
+    if (cfg.params.count("meta_cache_entries"))
+        o.meta_cache_entries = parse_size(cfg.params.at("meta_cache_entries"));
+    if (cfg.params.count("meta_cache_ttl"))
+        o.meta_cache_ttl_sec = parse_duration_sec(cfg.params.at("meta_cache_ttl"));
+    if (cfg.params.count("meta_cache_validate"))
+        o.meta_cache_validate = parse_bool(cfg.params.at("meta_cache_validate"));
     return o;
 }
 

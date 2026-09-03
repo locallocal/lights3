@@ -177,6 +177,15 @@ Key decisions:
   `pread` through the pool on every `read()` (with offset, naturally supporting
   Range); the fd is held by RAII and closed automatically on
   cancellation/disconnect.
+- **Metadata cache** (roadmap §3.8): HEAD/GET consult a (bucket, key)-sharded
+  LRU first (`meta_cache.h`); each record carries an inode stamp
+  (dev/ino/size/mtime/ctime). A HEAD hit re-checks the stamp with one stat by
+  default (`meta_cache_validate=false` makes it syscall-free), a GET hit checks
+  it against the fstat of the fd it already holds, and a mismatch refetches —
+  so another process writing the same root never gets a stale record served.
+  Every write path of this backend invalidates after its commit point.
+  `meta_cache_entries` (default 64K), `meta_cache_ttl`. See
+  [storage/localfs.md](../storage/localfs.md) §5.1.
 - **PUT**: loop `body.read(64KiB)` → in-pool write + incremental MD5 → rename.
   ETag = MD5 hex, matching S3 single-part upload.
 - **LIST**: recursive directory walk + prefix pruning (a prefix containing `/`
@@ -280,6 +289,14 @@ Both the meta and data sides already have optional replacement implementations
   SQLite ([duostore-sqlite-meta.md](duostore-sqlite-meta.md)),
   TiKV ([duostore-tikv-meta.md](duostore-tikv-meta.md));
 - data: Ceph/RADOS ([duostore-rados-data.md](duostore-rados-data.md)).
+
+Object metadata cache (roadmap §3.8): a GET/HEAD hit serves the whole
+`ObjectRec` (manifest included) from an in-process LRU, with no meta-engine round
+trip. On by default with exact invalidation for rocksdb/sqlite; off by default
+for redis/tikv, where enabling it requires `0 < meta_cache_ttl < gc_grace` (a
+peer gateway's write stays invisible for up to one TTL and the published read
+lease is backdated accordingly). See
+[storage/duostore-core.md](../storage/duostore-core.md) §7.1.
 
 Note: duostore cannot serve as tiered's local side (tiered is bound to the
 localfs disk layout); it can serve as its cloud side or stand alone.

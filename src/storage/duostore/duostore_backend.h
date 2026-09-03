@@ -28,10 +28,25 @@
 #include "storage/duostore/data_store.h"
 #include "storage/duostore/meta_dump.h"
 #include "storage/duostore/meta_store.h"
+#include "storage/meta_cache.h"
 
 namespace lights3::storage {
 
 namespace duostore {
+
+// Object metadata cache entry (roadmap §3.8): the full record when a GET filled it
+// (manifest included, so a hit skips the meta engine entirely), or meta only when a
+// HEAD did (head_object decodes just the header -- materializing a 650k-extent
+// manifest for a HEAD would be the regression docs/archive/gaps.md §3.9 removed). A GET
+// treats a meta-only entry as a miss and upgrades it
+struct CachedObject {
+    ObjectRec rec;
+    bool manifest = false;
+};
+using ObjectRecCache = MetaCache<CachedObject>;
+// Records above this many extents are served but never cached (a large object's meta
+// RTT is amortized over its transfer; the budget is for the small-object hot set)
+inline constexpr size_t kMetaCacheMaxExtents = 256;
 
 // In-process pin counting (main doc §7): open_reader registers every file_id the
 // ref involves, reader destruction removes them; GC skips files with pin>0 this
@@ -283,6 +298,17 @@ struct DuoStoreConfig {
     // default costs nothing there. Keep well below gc_grace (staleness of the
     // published value adds to reclaim latency, never to risk)
     int read_lease_sec = 5;
+    // Object metadata cache (roadmap §3.8; docs/storage/duostore-core.md §7.1): budget
+    // in objects, 0 = off. Exact on local engines (rocksdb/sqlite: every write to the
+    // meta goes through this process and invalidates). On shared engines (redis/tikv)
+    // a peer gateway's write is invisible until the entry expires, so a TTL is
+    // mandatory there and must stay below gc_grace; the read-lease publisher also
+    // backdates its "oldest in-flight read" by the TTL so a peer's GC cannot reclaim
+    // extents a cached manifest may still name. from_params defaults the budget to 0
+    // on shared engines unless configured; the constructor refuses a TTL-less cache
+    // on a shared engine
+    size_t meta_cache_entries = size_t(1) << 16;
+    int meta_cache_ttl_sec = 0;  // 0 = no expiry
     int orphan_scan_interval_sec = 86400;  // effective with P4
     int mpu_ttl_sec = 7 * 86400;
     bool meta_sync = true;
@@ -400,6 +426,9 @@ public:
     // Direct data-plane access (tests only): verifies the active pack's write-lock
     // probing (docs/archive/gaps.md §1.4)
     duostore::IDataStore& data_for_test() { return *data_; }
+    // Object metadata cache observability (roadmap §3.8; tests + docs)
+    MetaCacheStats meta_cache_stats() const { return meta_cache_->stats(); }
+    bool meta_cache_enabled() const { return meta_cache_->enabled(); }
 
     // ---- Tiered local-side hooks (roadmap §3.6 ⑥; used by tier::DuoStoreTierLocal) ----
     // Full record incl. tier state; nullopt when bucket or object is absent (sync, pool thread)
@@ -460,6 +489,10 @@ private:
     std::unique_ptr<duostore::IMetaStore> meta_;
     std::unique_ptr<duostore::IDataStore> data_;
     std::shared_ptr<duostore::PinTable> pins_ = std::make_shared<duostore::PinTable>();
+    // Object metadata cache (roadmap §3.8): filled by GET/HEAD, dropped by every
+    // record-changing path of this process (put/delete/complete/tier commits), cleared
+    // whole after a compaction round that swapped refs and after a meta restore
+    std::shared_ptr<duostore::ObjectRecCache> meta_cache_;
     // Write-side pins assembled (set when the cfg constructor injects
     // ChunkPinHooks into FsDataStore): the put path must symmetrically unpin
     // after commit/discard. The injection constructor has no hooks by default —

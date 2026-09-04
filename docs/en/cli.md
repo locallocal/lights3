@@ -58,7 +58,13 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 No subcommand means start: `Application(config)` → `open_storage()` →
 `start_server()` → `run()`, blocking until SIGINT/SIGTERM, then a graceful
 shutdown in the order of [architecture.md §4](architecture.md#4-process-structure-and-startup-flow);
-`run()`'s return value is the exit code. Any startup exception (config parse
+`run()`'s return value is the exit code: `0` = clean exit; `3` = unclean
+shutdown (roadmap §4.5) — requests still in flight past `http.shutdown_grace`,
+or a backend `close()` / thread-pool join that failed (each LOG_ERRORs; the
+process used to exit 0 regardless, invisible to a process manager). The drain
+deadline is `http.shutdown_grace` itself: one quantity bounds both the driver's
+connection drain and the return of admission permits, no separate hard-coded
+10s any more. Any startup exception (config parse
 failure, backend open failure, port in use, …) prints `fatal: …` to stderr and
 exits `1`; backends already built are closed through `~Application` (duostore
 seals its active pack, rados flushes).

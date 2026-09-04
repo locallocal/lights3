@@ -53,8 +53,15 @@ public:
     int run();
 
     // Full teardown in reverse dependency order. Idempotent, and safe after
-    // a partial startup: only what exists is closed
+    // a partial startup: only what exists is closed. Failures (a backend
+    // close, the pool join) are logged and remembered: shutdown_clean() is
+    // false afterwards and run() exits with kExitUncleanShutdown (roadmap §4.5)
     void shutdown() noexcept;
+    bool shutdown_clean() const { return shutdown_errors_.load() == 0; }
+
+    // Process exit codes of run(): 0 = clean; requests still in flight past the
+    // drain deadline or a failed backend close/pool join = unclean shutdown
+    static constexpr int kExitUncleanShutdown = 3;
 
     const Config& config() const { return cfg_; }
 
@@ -74,6 +81,7 @@ private:
 
     // Declaration order = construction order; shutdown() releases in reverse
     std::string config_path_;
+    std::atomic<int> shutdown_errors_{0};
     std::mutex reload_mu_;  // one reload at a time (SIGHUP and the admin API may race)
     std::shared_ptr<std::atomic<long>> stall_sec_;  // transfer_stall_timeout, read per request
     Config cfg_;

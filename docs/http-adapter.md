@@ -114,7 +114,9 @@ struct HttpServerFactory {
 - **可配置边界**（曾是四驱动各写一份的硬编码，默认值即旧常量）：
   `drain_limit`（4MiB，回错前排空请求体上限）、`trailer_max_size`（16KiB）、
   `io_chunk_size`（64KiB 流式块）、`body_queue_cap`（256KiB，仅 httplib 的
-  推转拉背压水位）、`shutdown_grace`（10s）、`shutdown_force_wait`（5s）。
+  推转拉背压水位）、`shutdown_grace`（10s；也是关停时等待许可归还的排空死线，
+  roadmap §4.5）、`shutdown_force_wait`（5s）。关停失败（后端 close / 池 join）
+  以退出码 `3` 上报，见 [cli.md §2.1](cli.md)。
 - `http.io_threads` 的语义随驱动漂移，见 §2.2 的矩阵。
 
 ### 2.2 超时体系与连接治理（roadmap §4.2）

@@ -5,6 +5,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cassert>
 #include <concepts>
 #include <coroutine>
@@ -234,6 +235,14 @@ public:
         }
     }
 
+    // Shutdown drain (roadmap §4.5): block until every permit is back (available ==
+    // capacity) or the deadline passes; true = fully drained. Replaces the old
+    // 20ms polling loop; release_one signals when the last permit returns
+    bool wait_drained(std::chrono::milliseconds timeout) {
+        std::unique_lock lk(m_);
+        return drained_cv_.wait_for(lk, timeout, [&] { return permits_ >= capacity_; });
+    }
+
     long available() const {
         std::lock_guard lk(m_);
         return permits_;
@@ -261,6 +270,7 @@ private:
             }
             if (!next) {
                 ++permits_;
+                if (permits_ >= capacity_) drained_cv_.notify_all();
                 return;
             }
         }
@@ -296,6 +306,7 @@ private:
     mutable std::mutex m_;
     long permits_;
     long capacity_ = 0;
+    std::condition_variable drained_cv_;
     IExecutor* exec_;
     bool closed_ = false;
     std::deque<std::shared_ptr<Waiter>> waiters_;

@@ -130,7 +130,10 @@ struct HttpServerFactory {
   defaults are the old values): `drain_limit` (4MiB, request-body drain cap
   before erroring), `trailer_max_size` (16KiB), `io_chunk_size` (64KiB streaming
   chunk), `body_queue_cap` (256KiB, httplib-only push-to-pull backpressure
-  watermark), `shutdown_grace` (10s), `shutdown_force_wait` (5s).
+  watermark), `shutdown_grace` (10s; also the drain deadline for admission
+  permits at shutdown, roadmap §4.5), `shutdown_force_wait` (5s). Shutdown
+  failures (backend close / pool join) surface as exit code `3`, see
+  [cli.md §2.1](cli.md).
 - `http.io_threads` semantics drift per driver; see the matrix in §2.2.
 
 ### 2.2 Timeout Family and Connection Governance (roadmap §4.2)

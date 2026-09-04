@@ -49,7 +49,11 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 
 无子命令即为启动：`Application(config)` → `open_storage()` → `start_server()`
 → `run()`，阻塞到 SIGINT/SIGTERM，按 [architecture.md §4](architecture.md#4-进程结构与启动流程)
-的顺序优雅关闭，`run()` 的返回值即退出码。启动期任何异常（配置解析失败、
+的顺序优雅关闭，`run()` 的返回值即退出码：`0` 干净退出；`3` 关停不干净
+（roadmap §4.5）——在途请求在 `http.shutdown_grace` 内没有排空，或某个后端
+`close()` / 线程池 join 失败（各自 LOG_ERROR，此前进程仍以 0 退出，进程管理器
+无从察觉）。排空死线就是 `http.shutdown_grace`，同一个量同时约束驱动的连接排空
+与许可归还，不再有独立硬编码的 10s。启动期任何异常（配置解析失败、
 后端打开失败、端口占用等）在 stderr 打 `fatal: …` 并以 `1` 退出；已构建
 的后端经 `~Application` 关闭（duostore 封存 active pack、rados flush）。
 

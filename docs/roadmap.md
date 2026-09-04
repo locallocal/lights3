@@ -355,13 +355,13 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 `requires_restart` 并 WARN。driver/后端/`default_backend`/`auth.*` 明确不可重载；
 后端实例增删仍"另议"。
 
-### 4.5 其他
+### 4.5 其他 **前两项已完成（2026-09-05）；HTTP/2 维持长期**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| 排空死线硬编码 | 关停排空是 20ms 轮询 + `constexpr 10s` 死线，不可配且与 `http.shutdown_grace` 是两个量 | 中 | 低 |
-| 关停失败退出码 | backend close 失败只 LOG_ERROR、进程仍 0 退出 | 中 | 低 |
-| HTTP/2 | 全仓零命中；S3 SDK 主流仍 HTTP/1.1，CDN/L7 前置场景才需要 | 中 | 高（长期） |
+| ~~排空死线硬编码~~ | 已完成：许可排空死线即 `http.shutdown_grace`（与驱动连接排空同一个量），`AsyncSemaphore::wait_drained` 条件变量等待替代 20ms 轮询 | — | — |
+| ~~关停失败退出码~~ | 已完成：后端 `close()` / 线程池 join 失败或在途请求超过排空死线 → `run()` 返回 `3`（[cli.md §2.1](cli.md)），进程管理器可察觉 | — | — |
+| HTTP/2 | 全仓零命中；S3 SDK 主流仍 HTTP/1.1，CDN/L7 前置场景才需要——**维持长期**，前置代理终结 h2 见 [tls.md §6](tls.md) | 中 | 高（长期） |
 
 ## 5. 可观测性
 

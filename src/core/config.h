@@ -173,6 +173,25 @@ struct BucketsConfig {
     std::vector<BucketRule> rules;
 };
 
+// Bucket usage accounting (roadmap §3.9 ①): per-bucket object/byte counters kept at
+// L2, updated at every write commit, persisted to .sys/usage/<bucket> and reconciled
+// by a periodic full listing (docs/multi-tenancy.md §2)
+struct UsageConfig {
+    bool enabled = true;              // false = no counters, no quota enforcement (skips the pre-write HEAD)
+    int flush_interval_sec = 60;      // persist dirty counters; 0 = only at shutdown / after a scan
+    int reconcile_interval_sec = 86400;  // full re-count of every bucket; 0 = never (manual rescan only)
+    bool reconcile = true;            // false = non-designated instance in a multi-gateway setup
+};
+
+// Audit log (roadmap §3.9 ④): JSON lines to a rotating file; empty path = off
+// (control-plane events still go to the regular log at INFO)
+struct AuditConfig {
+    std::string path;
+    bool data_plane = false;          // also record one line per data-plane request
+    uint64_t max_size = 64 * 1024 * 1024;  // rotate above this many bytes
+    int max_files = 10;               // rotated files kept
+};
+
 struct Config {
     HttpConfig http;
     RuntimeConfig runtime;
@@ -181,6 +200,8 @@ struct Config {
     BucketsConfig buckets;
     WebsiteConfig website;
     LifecycleConfig lifecycle;
+    UsageConfig usage;
+    AuditConfig audit;
     std::string log_level = "info";
 
     static Config load(const std::string& path);

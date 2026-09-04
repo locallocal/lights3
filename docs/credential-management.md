@@ -358,6 +358,15 @@ bucket / key 前缀 / 动作三个维度（docs/archive/gaps.md §5.10）：
   桶名混淆问题更是如此），受限凭证不该看到白名单外的桶存在；
 - 已知取舍：吊销/policy 均不影响已通过验签的在途请求（§7 语义）。
 
+### 10.4a 租户字段（roadmap §3.9）
+
+凭证对象与 credentials_file 条目可带 `"tenant": "<id>"` 与 `"role":
+"user"|"admin"`：租户凭证只能访问其租户所有的桶（在 policy 之上再加一层
+归属判定），`role=admin` 可在 `/-/admin/credentials` 内管理**本租户**的凭证
+（POST 的 tenant 固定为本租户、他租户 AK 一律 `InvalidAccessKeyId`）。
+不带 tenant 的凭证行为与以前完全一致。完整模型见
+[multi-tenancy.md §4](multi-tenancy.md)。
+
 ### 10.5 静态凭证的 SK 不经 admin API 回传
 
 `?show-secret=true` 只对动态与文件凭证生效，静态（root）凭证恒返回掩码

@@ -117,12 +117,20 @@ std::shared_ptr<ccmd::c_command> make_create() {
                 auto policy = c->var<std::string>("policy");
                 if (!comment.empty()) body["comment"] = comment;
                 if (!policy.empty()) body["policy"] = json::parse(load_policy_arg(policy));
+                // Tenancy (docs/multi-tenancy.md §4): a tenant admin may omit --tenant
+                // (the server pins its own tenant); root names the tenant explicitly
+                auto tenant = c->var<std::string>("tenant");
+                auto role = c->var<std::string>("role");
+                if (!tenant.empty()) body["tenant"] = tenant;
+                if (!role.empty()) body["role"] = role;
                 // Send the body even when the object is empty: POST semantics stay uniform, and the server treats {} the same as no body
                 return finish(cli.post_json(kBase, body.dump()), 201);
             });
         });
     cmd->varp<std::string>("comment", "c", "", "credential comment.");
     cmd->varp<std::string>("policy", "p", "", "policy JSON, or @file to read from a file.");
+    cmd->varp<std::string>("tenant", "t", "", "owning tenant id (docs/multi-tenancy.md).");
+    cmd->varp<std::string>("role", "r", "", "user (default) | admin: tenant admin role.");
     s3adm::add_conn_flags(cmd);
     return cmd;
 }

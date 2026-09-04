@@ -157,8 +157,14 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
     j["comment"] = c.comment;
     j["rev"] = c.rev;  // monotonic edit counter (roadmap §2.5), independent of "version"
     if (c.policy) j["policy"] = policy_to_json_obj(*c.policy);
+    if (!c.tenant.empty()) {
+        j["tenant"] = c.tenant;
+        j["role"] = c.tenant_admin ? "admin" : "user";
+    }
     return j.dump(2) + "\n";
 }
+
+bool parse_role(const std::string& role) { return parse_credential_role(role); }
 
 // Corrupt JSON returns nullopt (skipped without blocking startup); version=2 with no key / failed decryption
 // throws runtime_error -- that is a configuration error, and silently dropping credentials would lock users out;
@@ -198,6 +204,8 @@ std::optional<CredentialInfo> deserialize(std::string_view ak, const std::string
         c.comment = j.value("comment", "");
         c.rev = j.value("rev", uint64_t{1});
         if (j.contains("policy")) c.policy = policy_from_json_obj(j.at("policy"));
+        c.tenant = j.value("tenant", "");
+        c.tenant_admin = !c.tenant.empty() && parse_role(j.value("role", "user"));
         return c;
     } catch (const json::exception&) {
         return std::nullopt;
@@ -237,6 +245,8 @@ std::vector<CredentialInfo> parse_credentials_file_text(const std::string& text,
             c.source = CredSource::kFile;
             c.comment = e.value("comment", "");
             if (e.contains("policy")) c.policy = policy_from_json_obj(e.at("policy"));
+            c.tenant = e.value("tenant", "");
+            c.tenant_admin = !c.tenant.empty() && parse_role(e.value("role", "user"));
             out.push_back(std::move(c));
         }
     } catch (const json::exception& ex) {
@@ -436,15 +446,21 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
 std::optional<CredentialLookup> CredentialStore::lookup(std::string_view ak) const {
     std::shared_lock lk(mu_);
     auto it = creds_.find(ak);
-    if (it != creds_.end())
-        return CredentialLookup{it->second.secret_key, it->second.policy};
+    if (it != creds_.end()) {
+        CredentialLookup l{it->second.secret_key, it->second.policy};
+        l.tenant = it->second.tenant;
+        l.tenant_admin = it->second.tenant_admin;
+        return l;
+    }
     // STS sessions (roadmap §2.6): expired entries are still returned — verify turns
     // them into ExpiredToken, which tells the SDK to re-assume; a plain
     // InvalidAccessKeyId would read as a configuration error
     auto sit = sessions_.find(ak);
     if (sit == sessions_.end()) return std::nullopt;
-    return CredentialLookup{sit->second.secret_key, sit->second.policy, sit->second.token,
-                            sit->second.expires};
+    CredentialLookup l{sit->second.secret_key, sit->second.policy, sit->second.token,
+                       sit->second.expires};
+    l.tenant = sit->second.tenant;
+    return l;
 }
 
 bool CredentialStore::has_credentials() const {
@@ -485,13 +501,32 @@ std::vector<CredentialInfo> CredentialStore::list() const {
     return out;  // the map is already ordered by AK
 }
 
+std::vector<CredentialInfo> CredentialStore::list_tenant(std::string_view tenant) const {
+    std::shared_lock lk(mu_);
+    std::vector<CredentialInfo> out;
+    for (auto& [_, c] : creds_)
+        if (c.tenant == tenant) out.push_back(c);
+    return out;
+}
+
+// "user" (default) / "admin"; anything else is InvalidRequest so a typo cannot silently
+// grant or withhold the admin role
+bool parse_credential_role(const std::string& role) {
+    if (role == "admin") return true;
+    if (role == "user" || role.empty()) return false;
+    throw S3Error(S3ErrorCode::InvalidRequest, "role must be \"user\" or \"admin\".");
+}
+
 // ---------- Admin plane ----------
 
 Task<CredentialInfo> CredentialStore::generate(std::string comment,
-                                               std::optional<CredentialPolicy> policy) {
+                                               std::optional<CredentialPolicy> policy,
+                                               std::string tenant, bool tenant_admin) {
     CredentialInfo c;
     c.comment = std::move(comment);
     c.policy = std::move(policy);
+    c.tenant = std::move(tenant);
+    c.tenant_admin = !c.tenant.empty() && tenant_admin;
     c.created = std::chrono::system_clock::now();
     for (int attempt = 0;; ++attempt) {
         c.access_key = random_access_key();
@@ -525,8 +560,9 @@ Task<CredentialInfo> CredentialStore::generate(std::string comment,
         std::unique_lock lk(mu_);
         creds_[c.access_key] = c;
     }
-    LOG_INFO("generated credential {} ({})", c.access_key,
-             c.comment.empty() ? "no comment" : c.comment);
+    LOG_INFO("generated credential {} ({}{})", c.access_key,
+             c.comment.empty() ? "no comment" : c.comment,
+             c.tenant.empty() ? "" : ", tenant " + c.tenant + (c.tenant_admin ? " admin" : ""));
     co_return c;
 }
 
@@ -583,6 +619,9 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
     }
     if (upd.comment) c.comment = std::move(*upd.comment);
     if (upd.set_policy) c.policy = std::move(upd.policy);
+    if (upd.tenant) c.tenant = std::move(*upd.tenant);
+    if (upd.tenant_admin) c.tenant_admin = *upd.tenant_admin;
+    if (c.tenant.empty()) c.tenant_admin = false;  // the role only exists inside a tenant
     ++c.rev;
 
     // Write-through, same ordering as generate: storage first, then memory
@@ -642,8 +681,8 @@ CredentialStore::SessionCredential CredentialStore::mint_session(std::string_vie
     if (pit == creds_.end())
         throw S3Error(S3ErrorCode::AccessDenied,
                       "Session credentials cannot call AssumeRole.");
-    sessions_[out.access_key] =
-        SessionEntry{out.secret_key, out.token, out.expires, pit->second.policy};
+    sessions_[out.access_key] = SessionEntry{out.secret_key, out.token, out.expires,
+                                             pit->second.policy, pit->second.tenant};
     return out;
 }
 

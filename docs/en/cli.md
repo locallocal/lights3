@@ -185,11 +185,13 @@ integrity-verdict surface is `lights3 fsck`.
 
 ## 3. `s3adm` — ops CLI
 
-`src/tools/s3adm*.cc`, built next to `lights3`. Three command groups plus one
-leaf command: `cred` (credential admin plane), `website` (bucket static-website
-configuration), `bench` (load testing), `fsck` (online object verification).
-Every subcommand signs its own SigV4 requests against the lights3 HTTP
-endpoint; no aws cli needed.
+`src/tools/s3adm*.cc`, built next to `lights3`. Command groups: `cred`
+(credential admin plane), `website` (bucket static-website configuration),
+`bench` (load testing), `fsck` (online object verification), `quota` (bucket
+quotas), `tenant` (tenants and bucket ownership), `usage` (usage counters;
+roadmap §3.9, see [multi-tenancy.md](multi-tenancy.md)). Every subcommand
+signs its own SigV4 requests against the lights3 HTTP endpoint; no aws cli
+needed.
 
 ### 3.1 Connection and credential options (shared by every leaf)
 
@@ -201,10 +203,12 @@ endpoint; no aws cli needed.
 | `--insecure` | false | skip certificate verification for https (self-signed deployments) |
 | `--timeout-sec=<n>` | 10 | connect/read/write timeout |
 
-`cred` and `website` require the **root static credential** (an entry in the
-config's `auth.credentials`, see [credential-management.md §3](credential-management.md));
-tenant credentials get 403. `bench` works with any credential allowed on the
-target bucket.
+`website`, `quota set/clear` and the mutating `tenant` commands require the
+**root static credential** (an entry in the config's `auth.credentials`, see
+[credential-management.md §3](credential-management.md)); `cred`,
+`tenant list/get` and `usage` also accept a **tenant admin** (scoped to its
+own tenant, [multi-tenancy.md §4.4](multi-tenancy.md)); other credentials get
+403. `bench` works with any credential allowed on the target bucket.
 
 ```bash
 export LIGHTS3_ADMIN_AK=AKIDEXAMPLE
@@ -220,8 +224,10 @@ printed verbatim to stdout.
 s3adm cred list                          list all credentials (SK masked; static/file/dynamic sources)
 s3adm cred get <ak> [-s|--show-secret]   show one credential; --show-secret returns the plaintext SK
                                          (dynamic/file credentials only; the server writes an audit line)
-s3adm cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>]
-                                         create an AK/SK pair (the only time the full SK is returned)
+s3adm cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>] [-t|--tenant=<id>] [-r|--role=user|admin]
+                                         create an AK/SK pair (the only time the full SK is returned); --tenant sets the
+                                         owning tenant (pinned server-side when a tenant admin calls, so it may be omitted),
+                                         --role=admin grants that tenant's admin plane
 s3adm cred delete <ak>                   revoke a dynamic credential (static ones belong to the config; refused)
 ```
 
@@ -235,6 +241,7 @@ s3adm cred create -c ci-runner -p @policies/ci.json
 s3adm cred get L3AK7Q2MXX5EIY4BJZW3 --show-secret
 s3adm cred list --endpoint=https://s3.example.com --insecure
 s3adm cred delete L3AK7Q2MXX5EIY4BJZW3
+s3adm cred create --tenant=acme --role=admin --comment='acme operator'
 ```
 
 ### 3.3 `website` — bucket static-website configuration
@@ -326,6 +333,67 @@ clean; `1` mismatches or errors.
 ```bash
 s3adm fsck my-bucket --endpoint=https://s3.example.com
 s3adm fsck my-bucket --prefix=photos/ --max-mbps=50
+```
+
+### 3.6 `quota` — bucket quotas
+
+Drives the `?quota` subresource ([multi-tenancy.md §3](multi-tenancy.md)).
+`set` replaces the limit as a whole and needs at least one axis > 0; `get`
+works for any credential allowed on the bucket, `set`/`clear` are root only.
+Writes over the limit get `QuotaExceeded` (403).
+
+```text
+s3adm quota get <bucket>                                    print the quota XML (none set: 404 -> exit 1)
+s3adm quota set <bucket> [-b|--max-bytes=<sz>] [-o|--max-objects=<n>]
+                                                            set/replace; sz accepts KiB/MiB/GiB suffixes, 0 = that axis unlimited
+s3adm quota clear <bucket>                                  remove the quota (idempotent)
+```
+
+```bash
+s3adm quota set logs --max-bytes=50GiB --max-objects=1000000
+s3adm quota get logs
+s3adm quota clear logs
+```
+
+### 3.7 `tenant` — tenants and bucket ownership
+
+Drives `/-/admin/tenants` ([multi-tenancy.md §6](multi-tenancy.md)).
+Mutations are root only; `list`/`get` also work for a tenant admin on its own
+tenant. The JSON response is printed verbatim.
+
+```text
+s3adm tenant list                                            list tenants (quota, owned buckets, aggregate usage, credential count)
+s3adm tenant get <id>                                        one tenant
+s3adm tenant create <id> [--display-name=<s>] [--max-bytes=<sz>] [--max-objects=<n>] [--max-buckets=<n>]
+                                                             create; id matches [a-z0-9][a-z0-9._-]{0,63}
+s3adm tenant update <id> [--display-name=<s>] [quota flags | --clear-quota]
+                                                             the quota is replaced as a whole: axes not given become unlimited
+s3adm tenant delete <id>                                     refused (409) while it still owns buckets or has credentials
+s3adm tenant assign <id> <bucket> [--force]                  make an existing bucket the tenant's; --force to take it from another tenant
+s3adm tenant unassign <id> <bucket>                          detach (the bucket becomes unowned)
+```
+
+```bash
+s3adm tenant create acme --display-name='ACME Corp' --max-bytes=1TiB --max-buckets=20
+s3adm tenant assign acme legacy-logs
+s3adm tenant get acme
+```
+
+### 3.8 `usage` — usage counters
+
+Reads `/-/admin/usage` ([multi-tenancy.md §2](multi-tenancy.md)). Root sees
+every bucket, a tenant admin its own tenant's; `--rescan` runs a synchronous
+full count of one bucket and prints the result (refused when
+`usage.enabled=false`).
+
+```text
+s3adm usage [bucket] [-r|--rescan] [-t|--tenant=<id>]
+```
+
+```bash
+s3adm usage                       # every bucket: objects / bytes / mpu_bytes / scanned_at
+s3adm usage --tenant=acme         # only buckets owned by acme (root)
+s3adm usage logs --rescan         # recount the logs bucket now
 ```
 
 ## 4. Conventions for adding subcommands

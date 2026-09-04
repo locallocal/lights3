@@ -178,6 +178,10 @@ sudo /usr/local/sbin/lights3ctl status
   （`x-amz-checksum-*` 随对象存储、GET/HEAD `x-amz-checksum-mode: ENABLED`、
   multipart 复合 `-N` 校验和）；`GET ?partNumber` + `x-amz-mp-parts-count`；
   STS AssumeRole 会话凭证（SigV4 `sts` scope，数据面带 token 验证与 TTL）
+- **用量 / 配额 / 多租户 / 审计**（[multi-tenancy.md](multi-tenancy.md)）：
+  桶级用量计数器（增量 + 周期全量校准，`/-/admin/usage`）；`?quota` 桶配额与
+  租户聚合配额（`QuotaExceeded` 403，MPU 分片计入）；租户实体与桶归属
+  （凭证 `tenant`/`role`，租户只见自己的桶，分级管理面）；JSON 行审计日志
 
 设计上明确不支持（返回 NotImplemented，见 [s3-protocol.md](s3-protocol.md) §1）：
 versioning、ACL 细粒度（只认 private）、bucket policy、lifecycle
@@ -196,6 +200,7 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | [storage-backend](storage-backend.md) | `IStorageBackend`、LocalFs/XLocalFs、bucket 路由、新增后端指南 |
 | [s3-protocol](s3-protocol.md) | API 范围、SigV4（含 presigned 与时钟偏移）、XML 编解码、错误、mint 门禁 |
 | [credential-management](credential-management.md) | AK/SK 管理 API、三来源模型、`.sys` 持久化、at-rest 加密、policy |
+| [multi-tenancy](multi-tenancy.md) | 用量统计、桶/租户配额、租户与桶归属、分级管理面、审计日志 |
 | [object-read-write-flow](object-read-write-flow.md) | 端到端读写路径、BodyReader 链、staging 提交、fd 快照读 |
 | [tiered-storage](tiered-storage.md) | 冷数据下沉云端、stub 元数据、透明回读 |
 | [cloudproxy-backend](cloudproxy-backend.md) | 自签 SigV4 转发远端 S3、流式泵、重试 |
@@ -204,4 +209,4 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | [duostore-sqlite-meta](duostore-sqlite-meta.md) | SQLite IMetaStore：内嵌 amalgamation、WAL、读连接池 |
 | [duostore-rados-data](duostore-rados-data.md) | RADOS IDataStore：librados，chunk → rados 对象 |
 | [duostore-tikv-meta](duostore-tikv-meta.md) | TiKV IMetaStore：client-c + 2PC 侧车 |
-| [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load、cred/website/bench |
+| [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load、cred/website/bench/quota/tenant/usage |

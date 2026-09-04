@@ -605,6 +605,75 @@ check "static credential SK not returned via admin" "0" \
     "$(s3curl "$BASE/-/admin/credentials/$AK?show-secret=true" | grep -q '"secret_key"' && echo 1 || echo 0)"
 s3curl -o /dev/null -X DELETE "$BASE/credbkt/keep/a"
 
+# ---------- roadmap §3.9: usage accounting / quotas / tenants (docs/multi-tenancy.md) ----------
+json_num() {  # json_num <key> -- extract a numeric field from the indented JSON on stdin
+    sed -n "s/.*\"$1\": \([0-9]*\).*/\1/p" | head -1
+}
+S3ADM="$(dirname "$BIN")/s3adm"
+s3curl -o /dev/null -X PUT "$BASE/qbkt"
+s3curl -o /dev/null -X PUT --data-binary '0123456789' "$BASE/qbkt/ten"
+USAGE_OUT=$(s3curl "$BASE/-/admin/usage/qbkt")
+check "usage bytes after PUT" "10" "$(echo "$USAGE_OUT" | json_num bytes)"
+check "usage objects after PUT" "1" "$(echo "$USAGE_OUT" | json_num objects)"
+check "usage rescan agrees with counters" "10" \
+    "$(s3curl -X POST "$BASE/-/admin/usage/qbkt/rescan" | json_num bytes)"
+check "usage API denied for non-root" "403" \
+    "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" -o /dev/null -w '%{http_code}' "$BASE/-/admin/usage")"
+QUOTA_XML='<QuotaConfiguration><MaxBytes>15</MaxBytes><MaxObjects>0</MaxObjects></QuotaConfiguration>'
+check "GET ?quota before set is 404" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/qbkt?quota")"
+check "PUT ?quota" "200" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary "$QUOTA_XML" "$BASE/qbkt?quota")"
+check "GET ?quota round-trips" "0" "$(s3curl "$BASE/qbkt?quota" | grep -q '<MaxBytes>15</MaxBytes>'; echo $?)"
+check "PUT over quota rejected" "403" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary '0123456789' "$BASE/qbkt/second")"
+check "QuotaExceeded error code" "0" \
+    "$(s3curl -X PUT --data-binary '0123456789' "$BASE/qbkt/second" | grep -q 'QuotaExceeded'; echo $?)"
+check "PUT within quota" "200" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary '01234' "$BASE/qbkt/second")"
+check "DELETE ?quota" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/qbkt?quota")"
+check "quota gone after delete" "404" "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/qbkt?quota")"
+
+TENANT_OUT=$(s3curl -X POST -H 'Content-Type: application/json' \
+    --data-binary '{"id":"acme","display_name":"ACME","quota":{"max_buckets":1}}' "$BASE/-/admin/tenants")
+check "create tenant" "acme" "$(echo "$TENANT_OUT" | json_field id)"
+TCRED_OUT=$(s3curl -X POST -H 'Content-Type: application/json' --data-binary '{"tenant":"acme"}' \
+    "$BASE/-/admin/credentials")
+T_AK=$(echo "$TCRED_OUT" | json_field access_key)
+T_SK=$(echo "$TCRED_OUT" | json_field secret_key)
+check "tenant credential carries tenant" "acme" "$(echo "$TCRED_OUT" | json_field tenant)"
+tcurl() {  # sign with the tenant credential
+    curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$T_AK:$T_SK" "$@"
+}
+check "tenant creates its own bucket" "200" "$(tcurl -o /dev/null -w '%{http_code}' -X PUT "$BASE/acme-data")"
+check "tenant bucket limit enforced" "403" "$(tcurl -o /dev/null -w '%{http_code}' -X PUT "$BASE/acme-two")"
+check "tenant cannot read a foreign bucket" "403" "$(tcurl -o /dev/null -w '%{http_code}' "$BASE/qbkt/ten")"
+check "tenant PutObject in own bucket" "200" \
+    "$(tcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'tenant-data' "$BASE/acme-data/k")"
+TLIST=$(tcurl "$BASE/")
+check "tenant ListBuckets hides foreign buckets" "1" "$(echo "$TLIST" | grep -qF '<Name>qbkt</Name>'; echo $?)"
+check "tenant ListBuckets shows own bucket + Owner" "0" \
+    "$(echo "$TLIST" | grep -qF '<Name>acme-data</Name>' && echo "$TLIST" | grep -qF '<ID>acme</ID>'; echo $?)"
+check "tenant user cannot use admin plane" "403" "$(tcurl -o /dev/null -w '%{http_code}' "$BASE/-/admin/tenants")"
+check "tenant record lists bucket + usage" "11" "$(s3curl "$BASE/-/admin/tenants/acme" | json_num bytes)"
+check "tenant delete refused while it owns buckets" "409" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/-/admin/tenants/acme")"
+if [[ -x "$S3ADM" ]]; then
+    adm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" "$@" --endpoint="$BASE" --region="$REGION"; }
+    check "s3adm usage shows bucket" "0" "$(adm usage qbkt | grep -q '"bucket": "qbkt"'; echo $?)"
+    check "s3adm quota set" "0" "$(adm quota set qbkt --max-objects=100 >/dev/null; echo $?)"
+    check "s3adm quota get" "0" "$(adm quota get qbkt | grep -q '<MaxObjects>100</MaxObjects>'; echo $?)"
+    check "s3adm quota clear" "0" "$(adm quota clear qbkt >/dev/null; echo $?)"
+    check "s3adm tenant get" "0" "$(adm tenant get acme | grep -q '"acme-data"'; echo $?)"
+    check "s3adm tenant list" "0" "$(adm tenant list | grep -q '"id": "acme"'; echo $?)"
+fi
+tcurl -o /dev/null -X DELETE "$BASE/acme-data/k"
+check "tenant deletes its bucket" "204" "$(tcurl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/acme-data")"
+s3curl -o /dev/null -X DELETE "$BASE/-/admin/credentials/$T_AK"
+check "delete tenant once empty" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/-/admin/tenants/acme")"
+s3curl -o /dev/null -X DELETE "$BASE/qbkt/ten"
+s3curl -o /dev/null -X DELETE "$BASE/qbkt/second"
+s3curl -o /dev/null -X DELETE "$BASE/qbkt"
+
 # Graceful shutdown
 kill -TERM "$SRV_PID"
 EXITED=1

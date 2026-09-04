@@ -450,6 +450,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // evaluation in the error path below (addr itself lives inside the try block)
     std::string anon_orig_key;
     bool vhost = false;
+    std::string tenant_for_log;  // actor's tenant for the audit record (empty = none)
     try {
         // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path is
         // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
@@ -480,6 +481,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                 req.path.rfind("/-/admin/credentials/", 0) == 0)) {
             // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
             resp = co_await admin_credentials(req, access_key);
+        } else if (internal && (req.path == "/-/admin/tenants" || req.path == "/-/admin/usage" ||
+                                req.path.rfind("/-/admin/tenants/", 0) == 0 ||
+                                req.path.rfind("/-/admin/usage/", 0) == 0)) {
+            // Tenancy + usage admin plane (docs/multi-tenancy.md §6), same JSON conventions
+            resp = co_await admin_tenancy(req, access_key, ctx);
         } else if (!addr.vhost && req.path == "/" && req.method == "POST") {
             // STS AssumeRole (roadmap §2.6): SDKs pointed at this gateway as their STS
             // endpoint POST a form body to the service root. Path-style only — under
@@ -585,7 +591,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
             // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
             // The decision input is the snapshot verify returned, never a store lookup (§3.7)
-            RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr};
+            RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr, ident.tenant,
+                             ident.tenant_admin, ctx.request_id};
+            tenant_for_log = ident.tenant;
             if (ident.policy) {
                 auto deny = [] {
                     throw S3Error(S3ErrorCode::AccessDenied,
@@ -604,6 +612,22 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     if (auto src = req.headers.get("x-amz-copy-source")) {
                         auto [sb, sk] = handlers::parse_copy_source(*src);
                         if (!ident.policy->allows(sb, sk, Action::Read)) deny();
+                    }
+                }
+            }
+            // Tenant ownership (docs/multi-tenancy.md §4.3): a tenant credential is
+            // confined to the buckets its tenant owns, on top of its policy. Service
+            // scope (ListBuckets) filters in the handler instead. Decided on the
+            // verify-time snapshot like the policy; the owner table is a snapshot too
+            if (!ident.tenant.empty() && tenants_ && !bucket.empty()) {
+                Scope scope = key.empty() ? Scope::Bucket : Scope::Object;
+                const Route* r = match_route(req, scope);
+                if (r) {
+                    bool creating = scope == Scope::Bucket && req.method == "PUT" && r->flag.empty();
+                    co_await require_tenant_bucket(bucket, ident.tenant, creating);
+                    if (auto src = req.headers.get("x-amz-copy-source")) {
+                        auto [sb, sk] = handlers::parse_copy_source(*src);
+                        co_await require_tenant_bucket(sb, ident.tenant, false);
                     }
                 }
             }
@@ -717,6 +741,21 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     LOG_INFO("access {} {} {} {} {} {} {}ms", ctx.request_id,
              access_key.empty() ? "-" : access_key, req.method, req.path, resp.status, bytes,
              static_cast<uint64_t>(secs * 1000));
+    // Data-plane audit record (roadmap §3.9 ④): structured twin of the access line
+    if (audit_ && audit_->data_plane()) {
+        AuditEvent e;
+        e.event = "access";
+        e.actor = access_key;
+        e.tenant = tenant_for_log;
+        e.request_id = ctx.request_id;
+        e.bucket = bucket;
+        e.key = key;
+        e.method = req.method;
+        e.path = req.path;
+        e.status = resp.status;
+        e.bytes = static_cast<int64_t>(bytes);
+        audit_->access(e);
+    }
     co_return resp;
 }
 
@@ -820,6 +859,26 @@ std::span<const S3Service::Route> S3Service::route_table() {
         const RequestAuth& auth) {
          return s.delete_bucket_cors(std::move(b), auth);
      }},
+    // ?quota subresource (roadmap §3.9 ②, docs/multi-tenancy.md §3): GET for anyone
+    // admitted to the bucket, PUT/DELETE root only
+    {"GET", Scope::Bucket, "quota", "",
+     Action::Read,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.get_bucket_quota(std::move(b), auth);
+     }},
+    {"PUT", Scope::Bucket, "quota", "",
+     Action::Write,
+     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.put_bucket_quota(req, std::move(b), auth);
+     }},
+    {"DELETE", Scope::Bucket, "quota", "",
+     Action::Delete,
+     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
+        const RequestAuth& auth) {
+         return s.delete_bucket_quota(std::move(b), auth);
+     }},
     // All five parameters now take effect (docs/archive/gaps.md §5.1): previously pagination parameters were "allowed
     // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
     {"GET", Scope::Bucket, "uploads",
@@ -842,8 +901,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
     {"PUT", Scope::Bucket, "", "",
      Action::Write,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth&) {
-         return s.create_bucket(req, std::move(b));
+        const RequestAuth& auth) {
+         return s.create_bucket(req, std::move(b), auth);
      }},
     {"HEAD", Scope::Bucket, "", "",
      Action::Read,
@@ -854,8 +913,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
     {"DELETE", Scope::Bucket, "", "",
      Action::Delete,
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth&) {
-         return s.delete_bucket(std::move(b));
+        const RequestAuth& auth) {
+         return s.delete_bucket(std::move(b), auth);
      }},
     {"POST", Scope::Bucket, "delete", "",
      Action::Delete,
@@ -888,20 +947,20 @@ std::span<const S3Service::Route> S3Service::route_table() {
     {"POST", Scope::Object, "uploads", "",
      Action::Write,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.create_multipart(req, std::move(b), std::move(k));
+        const RequestAuth& auth) {
+         return s.create_multipart(req, std::move(b), std::move(k), auth);
      }},
     {"POST", Scope::Object, "uploadId", "",
      Action::Write,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.complete_multipart(req, std::move(b), std::move(k));
+        const RequestAuth& auth) {
+         return s.complete_multipart(req, std::move(b), std::move(k), auth);
      }},
     {"PUT", Scope::Object, "partNumber", "uploadId",
      Action::Write,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.upload_part(req, std::move(b), std::move(k));
+        const RequestAuth& auth) {
+         return s.upload_part(req, std::move(b), std::move(k), auth);
      }},
     {"GET", Scope::Object, "uploadId", "max-parts part-number-marker encoding-type",
      Action::Read,
@@ -920,10 +979,10 @@ std::span<const S3Service::Route> S3Service::route_table() {
     {"PUT", Scope::Object, "", "",  // PutObject / CopyObject (steered by x-amz-copy-source)
      Action::Write,
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
+        const RequestAuth& auth) {
          if (req.headers.has("x-amz-copy-source"))
-             return s.copy_object(req, std::move(b), std::move(k));
-         return s.put_object(req, std::move(b), std::move(k));
+             return s.copy_object(req, std::move(b), std::move(k), auth);
+         return s.put_object(req, std::move(b), std::move(k), auth);
      }},
     // response-* override parameters (docs/archive/gaps.md §5.3): the family most used in presigned download links
     // partNumber (roadmap §2.5): reads one part of a completed multipart object; ranges

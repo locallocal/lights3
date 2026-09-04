@@ -31,6 +31,11 @@ struct CredentialLookup {
     // §3.7 snapshot invariant holds for sessions too
     std::optional<std::string> session_token;
     std::optional<std::chrono::system_clock::time_point> session_expires;
+    // Multi-tenancy (roadmap §3.9 ③): the tenant the credential belongs to (empty =
+    // legacy/root credential, sees every bucket) and whether it administers that
+    // tenant. Snapshotted with the policy for the same §3.7 reason
+    std::string tenant;
+    bool tenant_admin = false;
 };
 
 struct ICredentialProvider {
@@ -53,6 +58,8 @@ struct ICredentialProvider {
 struct VerifiedIdentity {
     std::string access_key;                  // empty when auth is disabled (for access logs)
     std::optional<CredentialPolicy> policy;  // nullopt = unrestricted
+    std::string tenant;                      // empty = not a tenant credential
+    bool tenant_admin = false;
 };
 
 class SigV4Authenticator {

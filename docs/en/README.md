@@ -33,6 +33,7 @@ the inside. The design emphasizes three points:
 | [storage-backend.md](storage-backend.md) | Storage backend abstraction, LocalFs/XLocalFs, DuoStore overview and new-backend guide, bucket routing |
 | [s3-protocol.md](s3-protocol.md) | S3 protocol: API scope, SigV4 (incl. presigned & clock skew), Multipart Upload, error mapping, mint compatibility gate |
 | [credential-management.md](credential-management.md) | Credential management: AK/SK generate/query/revoke API, three credential sources (static root / file / dynamic), `.sys` persistence; phase 2: at-rest SK encryption, hot-reloaded credentials file, multi-instance sync, per-credential policy |
+| [multi-tenancy.md](multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenant entities and bucket ownership, tiered admin plane, audit log (the whole roadmap §3.9 chain) |
 | [object-read-write-flow.md](object-read-write-flow.md) | Object read/write flow: the three-layer code path, BodyReader chains, atomic staging commit, fd-snapshot reads |
 | [tiered-storage.md](tiered-storage.md) | Tiered storage: cold data sinking to public cloud, stub metadata, transparent read-back and cache refill |
 | [cloudproxy-backend.md](cloudproxy-backend.md) | CloudProxy backend: self-signed SigV4 + httplib to a remote S3, bidirectional streaming pumps, error mapping and retries |
@@ -41,7 +42,7 @@ the inside. The design emphasizes three points:
 | [duostore-sqlite-meta.md](duostore-sqlite-meta.md) | DuoStore's SQLite IMetaStore: embedded amalgamation, WAL + read pool / single write connection |
 | [duostore-rados-data.md](duostore-rados-data.md) | DuoStore's RADOS IDataStore: librados, chunk → rados objects |
 | [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore's TiKV IMetaStore: client-c + 2PC sidecar, horizontally scalable meta |
-| [cli.md](cli.md) | Command-line tools: `lights3` startup, `duostore dump/load/gc/scan`, `tier scan/gc/reconcile`, the offline `fsck` scrub, `s3adm` cred/website/bench/fsck commands, ccmd option semantics and exit codes |
+| [cli.md](cli.md) | Command-line tools: `lights3` startup, `duostore dump/load/gc/scan`, `tier scan/gc/reconcile`, the offline `fsck` scrub, `s3adm` cred/website/bench/fsck/quota/tenant/usage commands, ccmd option semantics and exit codes |
 
 *The project introduction (build/run/current scope) lives in the repository
 root [README.md](../../README.md) (English) and

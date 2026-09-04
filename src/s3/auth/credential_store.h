@@ -43,6 +43,11 @@ struct CredentialInfo {
     // AK only when the listed ETag differs, so policy edits propagate cheaply
     uint64_t rev = 1;
     std::string storage_etag;
+    // Multi-tenancy (roadmap §3.9 ③, docs/multi-tenancy.md §4): tenant the credential
+    // belongs to (empty = legacy credential: no ownership filter, as before) and its
+    // role inside that tenant. Static credentials never carry a tenant (they are root)
+    std::string tenant;
+    bool tenant_admin = false;  // may manage credentials/quotas of its own tenant
 
     bool is_static() const { return source == CredSource::kStatic; }
 };
@@ -50,6 +55,9 @@ struct CredentialInfo {
 // Reserved system bucket and object key prefix (docs/credential-management.md §4.1)
 inline constexpr std::string_view kSysBucket = ".sys";
 inline constexpr std::string_view kCredPrefix = "credentials/";
+
+// Credential role names in JSON ("user" default / "admin"); unknown -> InvalidRequest
+bool parse_credential_role(const std::string& role);
 
 // Environment variable for the SK at-rest encryption master key (§10.1): 64 hex characters (32 bytes).
 // Once set, newly written credential objects are version=2 (AES-256-GCM); v1 objects auto-upgrade at load
@@ -85,8 +93,11 @@ public:
     // Write storage first, then memory (write-through): on crash, storage is authoritative and memory can at
     // worst have "less", never "more". Note: no co_await while holding a lock (a coroutine may resume on another
     // thread, and unlocking std::mutex across threads is UB); uniqueness of concurrent generate is guaranteed by the AK random space
+    // tenant/tenant_admin: tenancy attributes (docs/multi-tenancy.md §4); the tenant id
+    // is validated by the caller against the tenant registry
     Task<CredentialInfo> generate(std::string comment,
-                                  std::optional<CredentialPolicy> policy = std::nullopt);
+                                  std::optional<CredentialPolicy> policy = std::nullopt,
+                                  std::string tenant = "", bool tenant_admin = false);
     // Nonexistent -> InvalidAccessKeyId; static/file credentials -> MethodNotAllowed (managed by config/file)
     Task<void> remove(std::string_view ak);
 
@@ -98,6 +109,8 @@ public:
         std::optional<std::string> comment;
         bool set_policy = false;
         std::optional<CredentialPolicy> policy;  // meaningful only when set_policy
+        std::optional<std::string> tenant;       // "" = detach from its tenant
+        std::optional<bool> tenant_admin;
     };
     Task<CredentialInfo> update(std::string_view ak, Update upd);
 
@@ -118,6 +131,8 @@ public:
 
     std::optional<CredentialInfo> find(std::string_view ak) const;
     std::vector<CredentialInfo> list() const;  // sorted by AK
+    // Non-session credentials of one tenant (admin plane scoping / tenant deletion guard)
+    std::vector<CredentialInfo> list_tenant(std::string_view tenant) const;
 
     // ---- Background tasks (§10.2 file hot-reload polling / §10.3 periodic multi-instance incremental sync) ----
     // Called once after main assembly; shutdown_background must be called before the thread pool joins (idempotent)
@@ -156,6 +171,7 @@ private:
         std::string token;
         std::chrono::system_clock::time_point expires;
         std::optional<CredentialPolicy> policy;
+        std::string tenant;  // inherited; sessions are never tenant admins (data plane only)
     };
     std::map<std::string, SessionEntry, std::less<>> sessions_;
     // AKs this instance just revoked -> revocation time (guarded by mu_). sync_now's add branch skips recent

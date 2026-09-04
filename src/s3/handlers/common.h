@@ -115,6 +115,25 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
 // otherwise hang an arbitrary Content-Disposition off the bucket's domain.
 bool has_response_override(const http::HttpRequest& req);
 
+// Counts the bytes a backend actually pulls through a body (usage accounting,
+// roadmap §3.9 ①): the post-commit delta must be what was written, not what the
+// client declared, and put_object/upload_part read to EOF by contract
+class ByteCountingReader final : public http::BodyReader {
+public:
+    ByteCountingReader(std::unique_ptr<http::BodyReader> inner, uint64_t* counter)
+        : inner_(std::move(inner)), counter_(counter) {}
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t n = co_await inner_->read(buf);
+        *counter_ += n;
+        co_return n;
+    }
+    std::optional<uint64_t> length() const override { return inner_->length(); }
+
+private:
+    std::unique_ptr<http::BodyReader> inner_;
+    uint64_t* counter_;
+};
+
 // HTTP time headers compare at second granularity (Last-Modified serializes at second precision)
 inline int64_t to_epoch_sec(util::SysTime t) {
     return std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();

@@ -45,15 +45,20 @@ namespace lights3::s3 {
     X(NoSuchCORSConfiguration, 404)      \
     X(NoSuchKey, 404)                    \
     X(NoSuchLifecycleConfiguration, 404) \
+    X(NoSuchQuotaConfiguration, 404)     \
+    X(NoSuchTenant, 404)                 \
     X(NoSuchWebsiteConfiguration, 404)   \
     X(NoSuchUpload, 404)                 \
     X(NotImplemented, 501)               \
     X(PermanentRedirect, 301)            \
     X(PreconditionFailed, 412)           \
+    X(QuotaExceeded, 403)                \
     X(RequestTimeout, 400)               \
     X(RequestTimeTooSkewed, 403)         \
     X(SignatureDoesNotMatch, 403)        \
     X(SlowDown, 503)                     \
+    X(TenantAlreadyExists, 409)          \
+    X(TenantNotEmpty, 409)               \
     X(TooManyBuckets, 400)               \
     X(XAmzContentSHA256Mismatch, 400)
 

@@ -105,6 +105,16 @@ TEST(ratelimit_table_is_bounded) {
     (void)rl2.admit("w", t0);
     CHECK(rl2.admit("x").has_value());  // still tracked, still has its slot accounting
     CHECK(rl2.tracked() <= size_t(4));
+    // Every tracked key in flight + a table already full: the newcomer must still be
+    // admitted safely (it is never evicted out from under its own admission)
+    RateLimiter rl3({.max_inflight = 2}, 1);
+    auto p = rl3.admit("p");
+    auto q = rl3.admit("q");
+    CHECK(p && q);
+    auto r = rl3.admit("r");
+    CHECK(r.has_value());
+    r->reset();
+    CHECK(rl3.admit("r").has_value());
 }
 
 TEST(ratelimit_dispatch_per_ip_and_per_ak) {

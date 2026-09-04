@@ -16,13 +16,16 @@ std::optional<RateLimiter::Token> RateLimiter::admit(std::string_view key,
     std::lock_guard lk(mu_);
     auto it = table_.find(k);
     if (it == table_.end()) {
+        // Make room BEFORE inserting: eviction only drops keys with nothing in
+        // flight, and the key being admitted is exactly such a key until the slot
+        // below is taken — evicting after the insert could free `it` under us
+        if (table_.size() >= max_tracked_) evict_locked();
         lru_.push_front(k);
         Entry e;
         e.tokens = limits_.burst;  // a new key starts with a full bucket
         e.last = now;
         e.lru = lru_.begin();
         it = table_.emplace(k, e).first;
-        evict_locked();
     } else {
         lru_.splice(lru_.begin(), lru_, it->second.lru);
     }
@@ -56,7 +59,7 @@ size_t RateLimiter::tracked() const {
 // key that comes back later simply starts with a full bucket again — the bound
 // protects memory, exactness for evicted stragglers is not the goal
 void RateLimiter::evict_locked() {
-    while (table_.size() > max_tracked_ && !lru_.empty()) {
+    while (table_.size() >= max_tracked_ && !lru_.empty()) {
         auto victim = std::prev(lru_.end());
         bool removed = false;
         for (auto it = victim;; --it) {

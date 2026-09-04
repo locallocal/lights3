@@ -9,6 +9,7 @@
 // two backends would break their atomicity and consistency semantics
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <string>
@@ -19,6 +20,11 @@
 
 namespace lights3::storage {
 
+// Copies of a router share one rule table (config hot reload, roadmap §4.4):
+// update() swaps the table atomically for every holder — S3Service, the lifecycle
+// runner, the usage tracker — while a request in flight keeps the table it
+// resolved against. The backend set and the default backend are fixed for the
+// process (they carry state and host .sys); update() refuses to change them
 class BucketRouter {
 public:
     static BucketRouter build(const BucketsConfig& cfg,
@@ -26,11 +32,17 @@ public:
 
     IStorageBackend& resolve(std::string_view bucket) const;
     const std::map<std::string, std::shared_ptr<IStorageBackend>>& backends() const {
-        return backends_;
+        return shared_->backends;
     }
     // Internal data (e.g. credential persistence, docs/credential-management.md §4.1)
     // always lands on the default backend
-    std::shared_ptr<IStorageBackend> default_backend() const { return default_; }
+    std::shared_ptr<IStorageBackend> default_backend() const { return shared_->default_backend; }
+
+    // Replace the rule table (same validation as build); throws std::runtime_error
+    // and leaves the current table in force on any problem, including a changed
+    // default_backend or a rule naming a backend not present at startup
+    void update(const BucketsConfig& cfg);
+    size_t rule_count() const { return table()->rules.size(); }
 
 private:
     struct Rule {
@@ -38,9 +50,19 @@ private:
         bool negate = false;  // "!pattern": buckets NOT matching pattern hit this rule
         std::shared_ptr<IStorageBackend> backend;
     };
-    std::vector<Rule> rules_;
-    std::shared_ptr<IStorageBackend> default_;
-    std::map<std::string, std::shared_ptr<IStorageBackend>> backends_;
+    struct Table {
+        std::vector<Rule> rules;
+    };
+    struct Shared {
+        std::map<std::string, std::shared_ptr<IStorageBackend>> backends;
+        std::shared_ptr<IStorageBackend> default_backend;
+        std::string default_name;
+        std::atomic<std::shared_ptr<const Table>> table;
+    };
+    static std::shared_ptr<const Table> compile(const BucketsConfig& cfg, const Shared& sh);
+    std::shared_ptr<const Table> table() const { return shared_->table.load(std::memory_order_acquire); }
+
+    std::shared_ptr<Shared> shared_;
 };
 
 }  // namespace lights3::storage

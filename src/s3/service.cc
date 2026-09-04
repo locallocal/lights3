@@ -456,6 +456,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     bool vhost = false;
     std::string tenant_for_log;  // actor's tenant for the audit record (empty = none)
     // Rate-limit slots (roadmap §4.2) held for the whole dispatch; released on return
+    // The limiter instances are pinned here so a hot-reload swap cannot destroy
+    // one while this request still holds a slot in it (declared before the slots:
+    // the slots release first at scope exit)
+    std::shared_ptr<RateLimiter> ip_lim = ip_limiter_.load(), ak_lim = ak_limiter_.load();
     std::optional<RateLimiter::Token> ip_slot, ak_slot;
     auto throttle = [&](bool by_ak) {
         metrics_.ratelimit_rejected(by_ak);
@@ -476,8 +480,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         // access); the internal read endpoints (health/metrics probes) stay exempt
         bool probe = internal && (req.path == "/-/healthz" || req.path == "/-/readyz" ||
                                   req.path == "/-/metrics");
-        if (ip_limiter_ && !probe) {
-            ip_slot = ip_limiter_->admit(req.remote_addr);
+        if (ip_lim && !probe) {
+            ip_slot = ip_lim->admit(req.remote_addr);
             if (!ip_slot) throttle(false);
         }
         // Read endpoints accept only GET/HEAD (probes commonly use HEAD); previously PUT /-/metrics also returned 200
@@ -503,6 +507,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                 req.path.rfind("/-/admin/credentials/", 0) == 0)) {
             // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
             resp = co_await admin_credentials(req, access_key);
+        } else if (internal && req.path == "/-/admin/config/reload") {
+            // Config hot reload (roadmap §4.4, docs/config-reload.md)
+            resp = co_await admin_config_reload(req, access_key, ctx);
         } else if (internal && (req.path == "/-/admin/tenants" || req.path == "/-/admin/usage" ||
                                 req.path.rfind("/-/admin/tenants/", 0) == 0 ||
                                 req.path.rfind("/-/admin/usage/", 0) == 0)) {
@@ -541,8 +548,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             access_key = ident.access_key;
             // Per-access-key limit (after verification: the key is authenticated, so a
             // forged header cannot burn another tenant's budget)
-            if (ak_limiter_ && !access_key.empty()) {
-                ak_slot = ak_limiter_->admit(access_key);
+            if (ak_lim && !access_key.empty()) {
+                ak_slot = ak_lim->admit(access_key);
                 if (!ak_slot) throttle(true);
             }
             // Content-MD5 / x-amz-checksum-* (docs/archive/gaps.md §5.6): installed after verify, hence wrapping outside
@@ -670,8 +677,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 link = ctx.cancel.on_cancel([&req_src] { req_src.request_cancel(); });
                 if (ctx.cancel.cancelled()) req_src.request_cancel();
             }
-            if (request_timeout_.count() > 0)
-                resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout_, req_src);
+            std::chrono::milliseconds request_timeout(
+                request_timeout_ms_.load(std::memory_order_relaxed));
+            if (request_timeout.count() > 0)
+                resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout, req_src);
             else
                 resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
             // Object-level website redirect (docs/static-website.md phase ③): on the

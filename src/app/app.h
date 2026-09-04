@@ -3,7 +3,9 @@
 // startup/shutdown sequence that used to live in main()
 #pragma once
 
+#include <atomic>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <string>
 
@@ -55,6 +57,12 @@ public:
     void shutdown() noexcept;
 
     const Config& config() const { return cfg_; }
+
+    // Config hot reload (roadmap §4.4, docs/config-reload.md): re-read the file,
+    // validate it as at startup, apply the runtime-changeable subset, report the
+    // rest. Driven by SIGHUP and POST /-/admin/config/reload. Never partial: a
+    // file that fails validation changes nothing
+    ConfigReloadReport reload_config();
     const std::map<std::string, std::shared_ptr<storage::IStorageBackend>>& backends() const {
         return backends_;
     }
@@ -65,6 +73,9 @@ private:
     void close_backends() noexcept;
 
     // Declaration order = construction order; shutdown() releases in reverse
+    std::string config_path_;
+    std::mutex reload_mu_;  // one reload at a time (SIGHUP and the admin API may race)
+    std::shared_ptr<std::atomic<long>> stall_sec_;  // transfer_stall_timeout, read per request
     Config cfg_;
     std::shared_ptr<ThreadPool> pool_;
     std::shared_ptr<MetricsRegistry> metrics_;

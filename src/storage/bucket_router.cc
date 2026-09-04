@@ -53,13 +53,12 @@ bool glob_match(const std::string& glob, std::string_view bucket) {
 
 }  // namespace
 
-BucketRouter BucketRouter::build(
-    const BucketsConfig& cfg, std::map<std::string, std::shared_ptr<IStorageBackend>> backends) {
-    BucketRouter r;
-    r.backends_ = std::move(backends);
+std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(const BucketsConfig& cfg,
+                                                                 const Shared& sh) {
+    auto t = std::make_shared<Table>();
     auto find = [&](const std::string& name) {
-        auto it = r.backends_.find(name);
-        if (it == r.backends_.end())
+        auto it = sh.backends.find(name);
+        if (it == sh.backends.end())
             throw std::runtime_error("bucket rule references unknown backend: " + name);
         return it->second;
     };
@@ -75,7 +74,7 @@ BucketRouter BucketRouter::build(
         if (saw_catch_all)
             throw std::runtime_error("bucket rule '" + rule.match +
                                      "' is unreachable: it follows a catch-all rule");
-        for (auto& prev : r.rules_)
+        for (auto& prev : t->rules)
             if (prev.glob == glob && prev.negate == negate)
                 throw std::runtime_error("bucket rule '" + rule.match +
                                          "' is unreachable: duplicate of an earlier rule");
@@ -85,16 +84,39 @@ BucketRouter BucketRouter::build(
             // "!fixed-string" matches every bucket except one name -- it is itself a catch-all
             saw_catch_all = true;
         }
-        r.rules_.push_back({std::move(glob), negate, find(rule.backend)});
+        t->rules.push_back({std::move(glob), negate, find(rule.backend)});
     }
-    r.default_ = find(cfg.default_backend);
+    return t;
+}
+
+BucketRouter BucketRouter::build(
+    const BucketsConfig& cfg, std::map<std::string, std::shared_ptr<IStorageBackend>> backends) {
+    BucketRouter r;
+    r.shared_ = std::make_shared<Shared>();
+    r.shared_->backends = std::move(backends);
+    auto it = r.shared_->backends.find(cfg.default_backend);
+    if (it == r.shared_->backends.end())
+        throw std::runtime_error("bucket rule references unknown backend: " + cfg.default_backend);
+    r.shared_->default_backend = it->second;
+    r.shared_->default_name = cfg.default_backend;
+    r.shared_->table.store(compile(cfg, *r.shared_), std::memory_order_release);
     return r;
 }
 
+void BucketRouter::update(const BucketsConfig& cfg) {
+    if (cfg.default_backend != shared_->default_name)
+        throw std::runtime_error("buckets.default_backend cannot change at runtime (" +
+                                 shared_->default_name + " -> " + cfg.default_backend +
+                                 "): it hosts .sys and the stores loaded from it");
+    auto fresh = compile(cfg, *shared_);  // validates before anything is swapped
+    shared_->table.store(std::move(fresh), std::memory_order_release);
+}
+
 IStorageBackend& BucketRouter::resolve(std::string_view bucket) const {
-    for (auto& rule : rules_)
+    auto t = table();
+    for (auto& rule : t->rules)
         if (glob_match(rule.glob, bucket) != rule.negate) return *rule.backend;
-    return *default_;
+    return *shared_->default_backend;
 }
 
 }  // namespace lights3::storage

@@ -183,13 +183,26 @@ integrity-verdict surface is `lights3 fsck`.
 ./build/lights3 tier quarantine purge tierdata archive photos/2024/a.jpg -c /etc/lights3/lights3.yaml
 ```
 
+### 2.5 Configuration hot reload: `SIGHUP`
+
+`kill -HUP <pid>` makes the server re-read the file given by `--config`
+(roadmap §4.4, [config-reload.md](config-reload.md)): after validating it as a
+whole, only the hot-reloadable subset is applied (log level,
+`request_timeout`/`transfer_stall_timeout`, `max_inflight_requests`,
+`min_part_size`, rate limits, bucket routing rules, TLS certificate contents);
+every other change is WARNed as "needs a restart", and a file that fails
+validation changes nothing. A systemd unit can use
+`ExecReload=/bin/kill -HUP $MAINPID`. The same action is available through
+`s3adm reload` (§3.9), which also returns the report.
+
 ## 3. `s3adm` — ops CLI
 
 `src/tools/s3adm*.cc`, built next to `lights3`. Command groups: `cred`
 (credential admin plane), `website` (bucket static-website configuration),
 `bench` (load testing), `fsck` (online object verification), `quota` (bucket
 quotas), `tenant` (tenants and bucket ownership), `usage` (usage counters;
-roadmap §3.9, see [multi-tenancy.md](multi-tenancy.md)). Every subcommand
+roadmap §3.9, see [multi-tenancy.md](multi-tenancy.md)), `reload`
+(configuration hot reload, [config-reload.md](config-reload.md)). Every subcommand
 signs its own SigV4 requests against the lights3 HTTP endpoint; no aws cli
 needed.
 
@@ -394,6 +407,21 @@ s3adm usage [bucket] [-r|--rescan] [-t|--tenant=<id>]
 s3adm usage                       # every bucket: objects / bytes / mpu_bytes / scanned_at
 s3adm usage --tenant=acme         # only buckets owned by acme (root)
 s3adm usage logs --rescan         # recount the logs bucket now
+```
+
+### 3.9 `reload` — configuration hot reload
+
+CLI wrapper of `POST /-/admin/config/reload` (root only): the same path as
+`SIGHUP`, but the outcome comes back to the caller — `applied` (in effect now)
+and `requires_restart` (changed on disk, needs a restart). A file that fails
+validation answers 400 and the command exits 1.
+
+```text
+s3adm reload
+```
+
+```bash
+s3adm reload --endpoint=https://s3.example.com
 ```
 
 ## 4. Conventions for adding subcommands

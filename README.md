@@ -230,6 +230,7 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | Document ([en](docs/en/README.md) · [中文](docs/README.md)) | Contents |
 | --- | --- |
 | [architecture](docs/en/architecture.md) | Overall architecture, layering, request lifecycle, code layout |
+| [config-reload](docs/en/config-reload.md) | Configuration hot reload: SIGHUP / admin API / `s3adm reload` |
 | [tls](docs/en/tls.md) | HTTPS on all drivers, certificate hot reload, mTLS / ciphers / SNI, reverse-proxy termination |
 | [http-adapter](docs/en/http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, driver notes |
 | [concurrency](docs/en/concurrency.md) | Task coroutines, Executor abstraction, thread pool, sync/async driver bridging |

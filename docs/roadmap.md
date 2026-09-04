@@ -342,16 +342,18 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 结果入库 `docs/`，后续优化才有对照（`bench` 需先支持 `--output=json`，见
 §6.3）。
 
-### 4.4 配置热重载
+### 4.4 配置热重载 **已完成（2026-09-05，安全子集 + bucket 路由规则）**
 
-现状：全项目唯一的热更新是凭证文件与 website 条目；`SIGHUP` 零命中，改日
-志级别/超时/限流/路由规则都要重启。`Config` 是纯值类型、`load()` 无状态，
-地基良好；`CredentialStore::schedule_file_reload` 是现成范式。分期：先做
-安全子集（`log.level`、`request_timeout`、`transfer_stall_timeout`、
-`max_inflight_requests`、TLS 证书），bucket 路由规则次之（`BucketRouter`
-可 `shared_ptr` 原子换代，后端实例增删涉及生命周期另议），driver/后端不可
-重载。
-**价值：高；难度：中。** 入口：`src/app/app.cc`、`src/core/config.cc`。
+~~现状：全项目唯一的热更新是凭证文件与 website 条目；`SIGHUP` 零命中，改日
+志级别/超时/限流/路由规则都要重启。~~ 落地（[config-reload.md](config-reload.md)）：
+`SIGHUP` / `POST /-/admin/config/reload` / `s3adm reload` 三入口共用
+`Application::reload_config`——重新 `Config::load` 做与启动相同的全量校验，失败
+整体拒绝；通过后应用可热更新子集（`log.level`、`request_timeout`、
+`transfer_stall_timeout`、`max_inflight_requests`（`AsyncSemaphore::set_capacity`）、
+`min_part_size`、`ratelimit.*`、TLS 证书素材）与 `buckets.rules`
+（`BucketRouter::update` 原子换代，各持有者共享一张表）；其余改动逐项列入
+`requires_restart` 并 WARN。driver/后端/`default_backend`/`auth.*` 明确不可重载；
+后端实例增删仍"另议"。
 
 ### 4.5 其他
 
@@ -489,7 +491,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 2. ~~超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）~~ **§4.2 已完成（2026-09-05）；§5.3 的 L1 连接/超时指标随之落地，其余指标补口仍待做**
 3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
 4. ~~builtin/seastar TLS + 证书热重载（§4.1）~~ **已完成（2026-09-05，含 mTLS/SNI/cipher 旋钮与反代样例）**
-5. 配置热重载安全子集（§4.4）
+5. ~~配置热重载安全子集（§4.4）~~ **已完成（2026-09-05，含 bucket 路由规则）**
 6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**
 7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）
 8. ~~tiered 扫描增量化 + prefix 策略（§3.6）~~ **已完成（2026-09-02，含全部七项）**

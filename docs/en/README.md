@@ -27,6 +27,7 @@ the inside. The design emphasizes three points:
 | Document | Contents |
 | --- | --- |
 | [architecture.md](architecture.md) | Overall architecture, layering, request lifecycle, code layout |
+| [config-reload.md](config-reload.md) | Configuration hot reload: SIGHUP / admin API / `s3adm reload`, whole-file validation, the hot-reloadable subset and the "requires restart" report (roadmap §4.4) |
 | [tls.md](tls.md) | TLS: HTTPS on all four drivers, certificate hot reload, mTLS / ciphers / minimum version / SNI multi-certificate, reverse-proxy termination examples (roadmap §4.1) |
 | [http-adapter.md](http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, adapter notes |
 | [concurrency.md](concurrency.md) | Concurrency model: Task coroutines, Executor abstraction, thread pool, unifying sync/async HTTP libraries |

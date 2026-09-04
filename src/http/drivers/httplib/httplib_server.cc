@@ -208,6 +208,7 @@ public:
     }
 
     uint16_t bound_port() const override { return port_; }
+    bool reload_tls() override { return tls_holder_ && tls_holder_->reload_now(); }
 
     void run() override {
         // Compensates for shutdown arriving before run (same as the other

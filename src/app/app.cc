@@ -5,6 +5,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <sstream>
 #include <thread>
 
 #include "core/log.h"
@@ -39,7 +40,8 @@ LogLevel parse_level(const std::string& s) {
 
 }  // namespace
 
-Application::Application(const std::string& config_path) : cfg_(Config::load(config_path)) {
+Application::Application(const std::string& config_path)
+    : config_path_(config_path), cfg_(Config::load(config_path)) {
     Logger::init(parse_level(cfg_.log_level));
 }
 
@@ -134,9 +136,10 @@ void Application::start_server() {
     // "stuck in the pool" and "how long the timer was blocked by a slow
     // callback" can all be read straight from /-/metrics
     service_->set_admission_stats(
-        [inflight = inflight_, cap = cfg_.runtime.max_inflight_requests]() -> s3::AdmissionStats {
-            return {cap, inflight->available(), inflight->waiting()};
+        [inflight = inflight_]() -> s3::AdmissionStats {
+            return {inflight->capacity(), inflight->available(), inflight->waiting()};
         });
+    service_->set_reload_hook([this] { return reload_config(); });
     service_->set_timer_stats([] { return TimerQueue::instance().stats(); });
     // L1 connection counters + per-client rate limits (roadmap §4.2)
     service_->set_conn_stats([this]() -> http::ConnStats {
@@ -164,7 +167,7 @@ void Application::start_server() {
     // requests converge from their nearest cancellable suspension point
     // instead of waiting out their individual request_timeouts
     shutdown_src_ = std::make_shared<CancelSource>();
-    auto stall = std::chrono::seconds(cfg_.http.transfer_stall_timeout_sec);
+    stall_sec_ = std::make_shared<std::atomic<long>>(cfg_.http.transfer_stall_timeout_sec);
     // Assembly of queueing / Permit lifetime / cancellation convergence lives in http/admission.h (shared with the unit tests)
     // The stall guard's progress threshold must not exceed the streaming chunk size:
     // with io_chunk_size configured below 64KiB, a single read could never count as
@@ -172,7 +175,7 @@ void Application::start_server() {
     auto stall_progress = std::min<uint64_t>(http::StallGuardReader::kMinProgressBytes,
                                              cfg_.http.io_chunk_size);
     server_->set_handler(http::make_admission_handler(
-        inflight_, stall, shutdown_src_,
+        inflight_, stall_sec_, shutdown_src_,
         [service = service_](http::HttpRequest req) { return service->dispatch(std::move(req)); },
         stall_progress));
     server_->listen(cfg_.http.bind, cfg_.http.port);
@@ -185,6 +188,13 @@ int Application::run() {
     std::thread sig_thread([this] {
         unsigned char b = 0;
         while (::read(g_sig_pipe[0], &b, 1) == 1) {
+            if (b == SIGHUP) {
+                // Config hot reload (roadmap §4.4) on the watchdog thread: file IO and
+                // the apply steps are all off the signal handler and off the request path
+                LOG_INFO("SIGHUP received, reloading {}", config_path_);
+                reload_config();
+                continue;
+            }
             LOG_INFO("signal {} received, shutting down", int(b));
             server_->shutdown();
         }
@@ -195,6 +205,7 @@ int Application::run() {
     sa.sa_flags = SA_RESTART;  // With the self-pipe scheme, no need to interrupt syscalls via EINTR
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGHUP, &sa, nullptr);  // reload, not terminate
     signal(SIGPIPE, SIG_IGN);
 
     LOG_INFO("lights3 started: driver={} backends={} pool={}", cfg_.http.driver,
@@ -222,7 +233,7 @@ int Application::run() {
         // permits returning. Write the literal in one place only: copying
         // "10s" into the log message would drift out of sync eventually
         constexpr auto kDrainDeadline = std::chrono::seconds(10);
-        const int max_inflight = cfg_.runtime.max_inflight_requests;
+        const long max_inflight = inflight_->capacity();  // may have been reloaded
         auto deadline = std::chrono::steady_clock::now() + kDrainDeadline;
         while (inflight_->available() < max_inflight &&
                std::chrono::steady_clock::now() < deadline)
@@ -235,6 +246,214 @@ int Application::run() {
     shutdown();
     LOG_INFO("lights3 exited cleanly");
     return 0;
+}
+
+// ---------- Config hot reload (roadmap §4.4, docs/config-reload.md) ----------
+
+namespace {
+
+template <class T>
+std::string change(const char* key, const T& from, const T& to) {
+    std::ostringstream os;
+    os << key << ": " << from << " -> " << to;
+    return os.str();
+}
+
+// Every key outside the reloadable subset: a change is reported as
+// requires_restart and left alone. Kept as an explicit list so a new config key
+// is either wired here or shows up in the report — never silently ignored
+std::vector<std::string> restart_only_changes(const Config& a, const Config& b) {
+    std::vector<std::string> out;
+    auto cmp = [&](bool differs, const char* key) {
+        if (differs) out.push_back(key);
+    };
+    auto& x = a.http;
+    auto& y = b.http;
+    cmp(x.driver != y.driver, "http.driver");
+    cmp(x.bind != y.bind, "http.bind");
+    cmp(x.port != y.port, "http.port");
+    cmp(x.io_threads != y.io_threads, "http.io_threads");
+    cmp(x.max_header_size != y.max_header_size, "http.max_header_size");
+    cmp(x.idle_timeout_sec != y.idle_timeout_sec, "http.idle_timeout");
+    cmp(x.header_timeout_sec != y.header_timeout_sec, "http.header_timeout");
+    cmp(x.body_timeout_sec != y.body_timeout_sec, "http.body_timeout");
+    cmp(x.write_timeout_sec != y.write_timeout_sec, "http.write_timeout");
+    cmp(x.max_requests_per_connection != y.max_requests_per_connection,
+        "http.max_requests_per_connection");
+    cmp(x.max_connections != y.max_connections, "http.max_connections");
+    cmp(x.base_domain != y.base_domain, "http.base_domain");
+    cmp(x.tls_cert != y.tls_cert || x.tls_key != y.tls_key, "http.tls_cert/tls_key (paths)");
+    cmp(x.tls_client_ca != y.tls_client_ca || x.tls_client_auth != y.tls_client_auth,
+        "http.tls_client_ca/tls_client_auth");
+    cmp(x.tls_min_version != y.tls_min_version || x.tls_ciphers != y.tls_ciphers ||
+            x.tls_ciphersuites != y.tls_ciphersuites,
+        "http.tls_min_version/tls_ciphers/tls_ciphersuites");
+    cmp(x.tls_reload_interval_sec != y.tls_reload_interval_sec, "http.tls_reload_interval");
+    cmp(x.tls_sni.size() != y.tls_sni.size(), "http.tls_sni");
+    for (size_t i = 0; i < x.tls_sni.size() && i < y.tls_sni.size(); ++i)
+        if (x.tls_sni[i].hosts != y.tls_sni[i].hosts || x.tls_sni[i].cert != y.tls_sni[i].cert ||
+            x.tls_sni[i].key != y.tls_sni[i].key) {
+            out.push_back("http.tls_sni");
+            break;
+        }
+    cmp(x.drain_limit != y.drain_limit || x.trailer_max_size != y.trailer_max_size ||
+            x.io_chunk_size != y.io_chunk_size || x.body_queue_cap != y.body_queue_cap,
+        "http.drain_limit/trailer_max_size/io_chunk_size/body_queue_cap");
+    cmp(x.shutdown_grace_sec != y.shutdown_grace_sec ||
+            x.shutdown_force_wait_sec != y.shutdown_force_wait_sec,
+        "http.shutdown_grace/shutdown_force_wait");
+    cmp(a.runtime.io_threads != b.runtime.io_threads, "runtime.io_threads");
+    auto& p = a.auth;
+    auto& q = b.auth;
+    bool creds_differ = p.credentials.size() != q.credentials.size();
+    for (size_t i = 0; !creds_differ && i < p.credentials.size(); ++i)
+        creds_differ = p.credentials[i].access_key != q.credentials[i].access_key ||
+                       static_cast<const std::string&>(p.credentials[i].secret_key) !=
+                           static_cast<const std::string&>(q.credentials[i].secret_key);
+    cmp(creds_differ, "auth.credentials");
+    cmp(p.region != q.region || p.service != q.service, "auth.region/service");
+    cmp(p.credentials_file != q.credentials_file ||
+            p.credentials_file_reload_sec != q.credentials_file_reload_sec,
+        "auth.credentials_file/credentials_file_reload");
+    cmp(p.sync_interval_sec != q.sync_interval_sec, "auth.sync_interval");
+    bool backends_differ = a.backends.size() != b.backends.size();
+    for (size_t i = 0; !backends_differ && i < a.backends.size(); ++i)
+        backends_differ = a.backends[i].name != b.backends[i].name ||
+                          a.backends[i].type != b.backends[i].type ||
+                          a.backends[i].params != b.backends[i].params;
+    cmp(backends_differ, "backends");
+    cmp(a.buckets.default_backend != b.buckets.default_backend, "buckets.default_backend");
+    cmp(a.website.buckets != b.website.buckets, "website");
+    cmp(a.lifecycle.scan_interval_sec != b.lifecycle.scan_interval_sec, "lifecycle.scan_interval");
+    cmp(a.usage.enabled != b.usage.enabled || a.usage.flush_interval_sec != b.usage.flush_interval_sec ||
+            a.usage.reconcile_interval_sec != b.usage.reconcile_interval_sec ||
+            a.usage.reconcile != b.usage.reconcile,
+        "usage");
+    cmp(a.audit.path != b.audit.path || a.audit.data_plane != b.audit.data_plane ||
+            a.audit.max_size != b.audit.max_size || a.audit.max_files != b.audit.max_files,
+        "audit");
+    cmp(a.ratelimit.max_tracked != b.ratelimit.max_tracked, "ratelimit.max_tracked");
+    return out;
+}
+
+bool rules_differ(const BucketsConfig& a, const BucketsConfig& b) {
+    if (a.rules.size() != b.rules.size()) return true;
+    for (size_t i = 0; i < a.rules.size(); ++i)
+        if (a.rules[i].match != b.rules[i].match || a.rules[i].backend != b.rules[i].backend)
+            return true;
+    return false;
+}
+
+}  // namespace
+
+ConfigReloadReport Application::reload_config() {
+    std::lock_guard lk(reload_mu_);
+    ConfigReloadReport report;
+    Config fresh;
+    try {
+        fresh = Config::load(config_path_);  // same parser + validation as startup
+    } catch (const std::exception& e) {
+        report.error = e.what();
+        LOG_WARN("config reload refused, keeping the running configuration: {}", e.what());
+        return report;
+    }
+    if (!service_) {
+        report.error = "server not started";
+        return report;
+    }
+
+    // Bucket routing rules first: the one step that can still fail (unknown backend,
+    // unreachable rule) — refused as a whole before anything else is touched
+    if (rules_differ(cfg_.buckets, fresh.buckets)) {
+        try {
+            service_->router().update(fresh.buckets);
+            report.applied.push_back(change("buckets.rules", cfg_.buckets.rules.size(),
+                                            fresh.buckets.rules.size()) + " rule(s)");
+            cfg_.buckets.rules = fresh.buckets.rules;
+        } catch (const std::exception& e) {
+            report.error = std::string("buckets.rules: ") + e.what();
+            LOG_WARN("config reload refused, keeping the running configuration: {}", report.error);
+            return report;
+        }
+    }
+    if (cfg_.log_level != fresh.log_level) {
+        Logger::set_level(parse_level(fresh.log_level));
+        report.applied.push_back(change("log.level", cfg_.log_level, fresh.log_level));
+        cfg_.log_level = fresh.log_level;
+    }
+    if (cfg_.http.request_timeout_sec != fresh.http.request_timeout_sec) {
+        service_->set_request_timeout(std::chrono::seconds(fresh.http.request_timeout_sec));
+        report.applied.push_back(change("http.request_timeout", cfg_.http.request_timeout_sec,
+                                        fresh.http.request_timeout_sec));
+        cfg_.http.request_timeout_sec = fresh.http.request_timeout_sec;
+    }
+    if (cfg_.http.transfer_stall_timeout_sec != fresh.http.transfer_stall_timeout_sec) {
+        stall_sec_->store(fresh.http.transfer_stall_timeout_sec, std::memory_order_relaxed);
+        report.applied.push_back(change("http.transfer_stall_timeout",
+                                        cfg_.http.transfer_stall_timeout_sec,
+                                        fresh.http.transfer_stall_timeout_sec));
+        cfg_.http.transfer_stall_timeout_sec = fresh.http.transfer_stall_timeout_sec;
+    }
+    if (cfg_.http.min_part_size != fresh.http.min_part_size) {
+        service_->set_min_part_size(fresh.http.min_part_size);
+        report.applied.push_back(
+            change("http.min_part_size", cfg_.http.min_part_size, fresh.http.min_part_size));
+        cfg_.http.min_part_size = fresh.http.min_part_size;
+    }
+    if (cfg_.runtime.max_inflight_requests != fresh.runtime.max_inflight_requests) {
+        inflight_->set_capacity(fresh.runtime.max_inflight_requests);
+        report.applied.push_back(change("runtime.max_inflight_requests",
+                                        cfg_.runtime.max_inflight_requests,
+                                        fresh.runtime.max_inflight_requests));
+        cfg_.runtime.max_inflight_requests = fresh.runtime.max_inflight_requests;
+    }
+    {
+        auto& o = cfg_.ratelimit;
+        auto& n = fresh.ratelimit;
+        bool differs = o.per_ip_rps != n.per_ip_rps || o.per_ip_burst != n.per_ip_burst ||
+                       o.per_ip_max_inflight != n.per_ip_max_inflight ||
+                       o.per_ak_rps != n.per_ak_rps || o.per_ak_burst != n.per_ak_burst ||
+                       o.per_ak_max_inflight != n.per_ak_max_inflight;
+        if (differs) {
+            std::shared_ptr<s3::RateLimiter> ip, ak;
+            if (n.per_ip_rps > 0 || n.per_ip_max_inflight > 0)
+                ip = std::make_shared<s3::RateLimiter>(
+                    s3::RateLimiter::Limits{n.per_ip_rps, n.per_ip_burst, n.per_ip_max_inflight},
+                    static_cast<size_t>(o.max_tracked));
+            if (n.per_ak_rps > 0 || n.per_ak_max_inflight > 0)
+                ak = std::make_shared<s3::RateLimiter>(
+                    s3::RateLimiter::Limits{n.per_ak_rps, n.per_ak_burst, n.per_ak_max_inflight},
+                    static_cast<size_t>(o.max_tracked));
+            service_->set_rate_limiters(std::move(ip), std::move(ak));
+            report.applied.push_back("ratelimit: per-ip rps=" + std::to_string(n.per_ip_rps) +
+                                     " burst=" + std::to_string(n.per_ip_burst) +
+                                     " inflight=" + std::to_string(n.per_ip_max_inflight) +
+                                     ", per-ak rps=" + std::to_string(n.per_ak_rps) +
+                                     " burst=" + std::to_string(n.per_ak_burst) +
+                                     " inflight=" + std::to_string(n.per_ak_max_inflight));
+            o.per_ip_rps = n.per_ip_rps;
+            o.per_ip_burst = n.per_ip_burst;
+            o.per_ip_max_inflight = n.per_ip_max_inflight;
+            o.per_ak_rps = n.per_ak_rps;
+            o.per_ak_burst = n.per_ak_burst;
+            o.per_ak_max_inflight = n.per_ak_max_inflight;
+        }
+    }
+    // TLS certificate material: always re-read on an explicit reload (the periodic
+    // poll may be off); the paths/knobs themselves are startup-only
+    if (server_ && !cfg_.http.tls_cert.empty()) {
+        if (server_->reload_tls()) report.applied.push_back("http.tls: certificate material re-read");
+        else if (cfg_.http.driver == "seastar")
+            report.applied.push_back("http.tls: seastar reloads certificates on file change");
+    }
+    report.requires_restart = restart_only_changes(cfg_, fresh);
+    report.ok = true;
+    if (report.applied.empty() && report.requires_restart.empty())
+        LOG_INFO("config reload: no changes");
+    for (auto& a : report.applied) LOG_INFO("config reload: applied {}", a);
+    for (auto& r : report.requires_restart)
+        LOG_WARN("config reload: {} changed on disk but needs a restart to take effect", r);
+    return report;
 }
 
 void Application::close_backends() noexcept {

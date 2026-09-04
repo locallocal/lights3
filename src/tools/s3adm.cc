@@ -13,6 +13,7 @@
 #include "tools/s3adm_cred.h"
 #include "tools/s3adm_fsck.h"
 #include "tools/s3adm_quota.h"
+#include "tools/s3adm_reload.h"
 #include "tools/s3adm_tenant.h"
 #include "tools/s3adm_usage.h"
 #include "tools/s3adm_website.h"
@@ -32,7 +33,8 @@ int main(int argc, char* argv[]) {
         "lives under the `cred` command group, benchmarking under `bench`, bucket "
         "website configuration under `website`, online object verification under "
         "`fsck`, bucket quotas under `quota`, tenants under `tenant`, usage "
-        "counters under `usage`; run `s3adm help <command>` for details.",
+        "counters under `usage`, configuration hot reload under `reload`; run "
+        "`s3adm help <command>` for details.",
         "lights3 ops CLI.",
         // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a usage error
         [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -46,6 +48,7 @@ int main(int argc, char* argv[]) {
     root->add_subcommand(s3adm::make_quota());
     root->add_subcommand(s3adm::make_tenant());
     root->add_subcommand(s3adm::make_usage());
+    root->add_subcommand(s3adm::make_reload());
     root->execute(argc, argv);
     return s3adm::g_exit;
 }

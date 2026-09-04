@@ -317,7 +317,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     // knows sizes, hence the upfront listing; declared part checksums cross-check in the same pass
     bool accounting = usage_ && usage_->enabled();
     auto totals = co_await check_parts_before_complete(backend, bucket, key, upload_id, parts,
-                                                       min_part_size_, accounting);
+                                                       min_part_size(), accounting);
     // Accounting at complete (roadmap §3.9 ①②): the named parts become the object's
     // bytes, every stored part leaves the in-flight pool, and a replaced object is
     // netted out. The gate therefore only refuses when the finished object would

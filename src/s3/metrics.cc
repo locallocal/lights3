@@ -51,6 +51,28 @@ void Metrics::record_bucket_request(std::string_view bucket) {
     bucket_slot_locked(bucket).requests += 1;
 }
 
+void Metrics::record_api(std::string_view api, std::string_view backend, int status,
+                         double seconds) {
+    if (api.empty()) return;
+    std::string key(api);
+    key.push_back('\0');
+    key.append(backend);
+    std::lock_guard lk(api_m_);
+    auto it = by_api_.find(key);
+    if (it == by_api_.end()) {
+        if (by_api_.size() >= kMaxApiSeries) return;  // label-cardinality guard
+        it = by_api_.emplace(key, ApiStats{}).first;
+    }
+    auto& st = it->second;
+    size_t b = 0;
+    while (b < kLatencyBuckets.size() && seconds > kLatencyBuckets[b]) ++b;
+    ++st.hist[b];
+    st.sum += seconds;
+    ++st.count;
+    int cls = status / 100;
+    if (cls >= 1 && cls <= 5) ++st.by_class[cls];
+}
+
 std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats,
                             const std::function<AdmissionStats()>& admission,
                             const std::function<TimerQueue::Stats()>& timer_stats,
@@ -97,6 +119,39 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     uint64_t created = mpu_created_.load(std::memory_order_relaxed);
     uint64_t finished = mpu_finished_.load(std::memory_order_relaxed);
     os << "lights3_multipart_active " << (created > finished ? created - finished : 0) << "\n";
+
+    // API x backend dimension (roadmap §5.1)
+    {
+        std::lock_guard lk(api_m_);
+        if (!by_api_.empty()) {
+            auto labels = [](const std::string& key) {
+                auto nul = key.find('\0');
+                return "api=\"" + key.substr(0, nul) + "\",backend=\"" + key.substr(nul + 1) + "\"";
+            };
+            os << "# TYPE lights3_api_requests_total counter\n";
+            for (auto& [key, st] : by_api_)
+                for (int cls = 2; cls <= 5; ++cls)
+                    if (st.by_class[cls])
+                        os << "lights3_api_requests_total{" << labels(key) << ",class=\"" << cls
+                           << "xx\"} " << st.by_class[cls] << "\n";
+            os << "# TYPE lights3_api_request_duration_seconds histogram\n";
+            for (auto& [key, st] : by_api_) {
+                std::string l = labels(key);
+                uint64_t c = 0;
+                for (size_t i = 0; i < kLatencyBuckets.size(); ++i) {
+                    c += st.hist[i];
+                    os << "lights3_api_request_duration_seconds_bucket{" << l << ",le=\""
+                       << kLatencyBuckets[i] << "\"} " << c << "\n";
+                }
+                c += st.hist[kLatencyBuckets.size()];
+                os << "lights3_api_request_duration_seconds_bucket{" << l << ",le=\"+Inf\"} " << c
+                   << "\n";
+                os << "lights3_api_request_duration_seconds_sum{" << l << "} " << st.sum << "\n";
+                os << "lights3_api_request_duration_seconds_count{" << l << "} " << st.count
+                   << "\n";
+            }
+        }
+    }
 
     // Per-client rate limiting (roadmap §4.2)
     os << "# TYPE lights3_ratelimit_rejections_total counter\n";

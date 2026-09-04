@@ -365,15 +365,19 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 
 ## 5. 可观测性
 
-### 5.1 API × 后端维度指标（文档挂账两处"待接入"）
+### 5.1 API × 后端维度指标 **已完成（2026-09-05，两处挂账兑现）**
 
-现延迟直方图全局单条（PutObject 的 P99 被 HeadBucket 稀释），访问日志只有
+~~现延迟直方图全局单条（PutObject 的 P99 被 HeadBucket 稀释），访问日志只有
 总耗时无后端耗时——无法回答"是哪个 API / 哪个后端在劣化、是网关排队慢还
-是后端慢"。分派表的 `Route` 结构天然是 API 名的单一来源：加 `name` 字段 →
-按 `(api, backend)` 分维直方图 + 访问日志加后端耗时槽，一次改动兑现两处挂
-账。标签基数 = API 数 × 后端数，可控。
-**价值：高；难度：中。** 入口：`src/s3/metrics.{h,cc}`、`service.cc`
-（Route 表）、`src/storage/bucket_router.cc`。
+是后端慢"。~~ 落地：`Route` 加 `name`（32 条路由各有 S3 API 名，
+CopyObject/UploadPartCopy 按 `x-amz-copy-source` 细分）→
+`lights3_api_requests_total{api,backend,class}` +
+`lights3_api_request_duration_seconds{api,backend}`（backend 取自
+`BucketRouter::backend_name`）；路由后端外包一层 `storage::MeteredBackend`
+计时装饰器 → `lights3_backend_op_seconds{backend,op}` 直方图 +
+`lights3_backend_errors_total{backend,op}`（后端错误率），并经请求取消令牌
+上的 `RequestBackendStats` 把后端耗时回填到访问日志尾部
+`api=… backend=<name>:<ms>`（[s3-protocol.md §7](s3-protocol.md)）。
 
 ### 5.2 日志体系
 
@@ -477,7 +481,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 1. Grafana dashboard + Prometheus 告警规则（§5.5，零 C++）
 2. mint 挂 ctest + website e2e/单测 + s3adm 进 e2e（§6.1）
-3. API×后端分维指标 + 后端耗时（§5.1）；异步日志 + 慢日志（§5.2）
+3. ~~API×后端分维指标 + 后端耗时（§5.1）~~ **已完成（2026-09-05）**；异步日志 + 慢日志（§5.2）
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
 5. ~~cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3，含熔断/deadline/异步 acquire/凭证链）~~ **已完成（2026-08-28）**
 6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；~~DuoGcStats 接指标（§3.7）~~ **已完成（早于 2026-09，gaps §6.1 时接线）**；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**

@@ -175,6 +175,11 @@ public:
         // from the HTTP method -- DeleteObjects is a POST yet clearly a delete, CreateMultipartUpload is also a
         // POST yet a write; the method dimension simply cannot separate the two
         Action action;
+        // S3 API name (roadmap §5.1): the single source for the api label of the
+        // (api, backend) metrics and the access log. The two routes shared by two
+        // APIs (PutObject/CopyObject, UploadPart/UploadPartCopy) are refined by
+        // dispatch on x-amz-copy-source
+        std::string_view name;
         Handler fn;
     };
 

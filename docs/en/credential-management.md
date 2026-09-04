@@ -448,6 +448,16 @@ syntax — but with three dimensions: bucket, key prefix and action
 - Known trade-off: neither revocation nor policy affects in-flight requests that
   already passed verification (the §7 semantics).
 
+### 10.4a Tenant Fields (roadmap §3.9)
+
+Credential objects and credentials_file entries may carry `"tenant": "<id>"`
+and `"role": "user"|"admin"`: a tenant credential can only reach the buckets
+its tenant owns (an ownership decision layered on top of the policy), and
+`role=admin` may manage **its own tenant's** credentials through
+`/-/admin/credentials` (POST's tenant is pinned to its own; foreign AKs read
+as `InvalidAccessKeyId`). Credentials without a tenant behave exactly as
+before. The full model is in [multi-tenancy.md §4](multi-tenancy.md).
+
 ### 10.5 Static Credential Secrets Are Never Returned by the Admin API
 
 `?show-secret=true` applies only to dynamic and file credentials; static (root)

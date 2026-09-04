@@ -12,6 +12,7 @@
 | Tagging | GetObjectTagging / PutObjectTagging / DeleteObjectTagging | `x-amz-tagging` 写入时带标签（各后端均持久化）；`x-amz-tagging-count` 回显；就地改标签（PUT/DELETE ?tagging）在 memory/localfs/xlocalfs/tiered/cloudproxy 可用，duostore 诚实 501（无 meta 原地更新原语） |
 | CORS | GetBucketCors / PutBucketCors / DeleteBucketCors + OPTIONS 预检 | root 专属（与 ?website 同两级模型）；规则持久化 `.sys/cors/<bucket>`；预检在验签**之前**分派（浏览器不给 OPTIONS 签名）；实际请求（成功与错误响应）注入 Allow-Origin/Expose-Headers/Vary |
 | Lifecycle | GetBucketLifecycle / PutBucketLifecycle / DeleteBucketLifecycle | root 专属；最小子集：Expiration.Days + AbortIncompleteMultipartUpload.DaysAfterInitiation（prefix 过滤）；`lifecycle.scan_interval`（默认 1h，0=关）周期执行；Transition/按 tag 过滤/Date 形态 → 501 |
+| Quota / 租户 | GetBucketQuota / PutBucketQuota / DeleteBucketQuota（`?quota`，本实现自定义 XML） | 桶级 `MaxBytes`/`MaxObjects`（PUT/DELETE root 专属）；用量计数器由网关维护并周期全量校准；超限写回 `QuotaExceeded`(403)，MPU 分片计入用量、Complete 仅在完成后仍放不下时拒绝且上传保留；租户凭证（`tenant`/`role` 字段）只见本租户所有的桶，ListBuckets `Owner` 为租户；管理面 `/-/admin/tenants`、`/-/admin/usage`；审计日志 JSON 行。详见 [multi-tenancy.md](multi-tenancy.md) |
 | STS | AssumeRole | `POST /`（path-style 部署）form 表单、SigV4 service scope `sts`；会话凭证（L3SA 前缀 AK/SK/token + TTL 900–43200s）继承**调用者**的 policy（无角色目录，永不越权）；内存态单实例、session 不能再 AssumeRole |
 | List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner；V1 只认 marker，V2 只认 continuation-token 与 start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated；两者均支持 encoding-type，uploads 的 delimiter 任意）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder`；分片校验和随 part 记录持久化，complete 由**已验证**的分片值算复合（`-N`）校验和（COMPOSITE；CRC64NVME/显式 FULL_OBJECT → 501），complete XML 的 Checksum* 声明与存量对照（不符 BadDigest） |
@@ -150,6 +151,10 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
 响应头，作为端到端排查的关联键。
 
 未知异常 → `InternalError`(500)，日志记完整堆栈，响应不泄漏内部信息。
+
+本实现自定义（AWS 无对应）的错误码：`QuotaExceeded`(403，配额)、
+`NoSuchQuotaConfiguration`(404)、`NoSuchTenant`(404)、`TenantAlreadyExists`(409)、
+`TenantNotEmpty`(409)，语义见 [multi-tenancy.md](multi-tenancy.md)。
 
 ## 6. 一致性与语义说明（对客户端的承诺）
 

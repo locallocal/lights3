@@ -151,9 +151,20 @@ bool has_response_override(const http::HttpRequest& req) {
 }  // namespace handlers
 
 Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket,
-                                               std::string key) {
+                                               std::string key, const RequestAuth& auth) {
     require_content_length(req);  // 411 (roadmap §2.5); CopyObject is body-less and exempt
     auto& backend = router_.resolve(bucket);
+
+    // Usage accounting + quota gate (roadmap §3.9 ①②): what this PUT replaces is read
+    // before the write so the counters can net it out; the gate judges the declared
+    // length (aws-chunked bodies expose their decoded length) before any byte streams
+    std::optional<uint64_t> replaced = co_await existing_size(backend, bucket, key);
+    uint64_t declared = req.body && req.body->length() ? *req.body->length() : 0;
+    check_quota(bucket, static_cast<int64_t>(declared) - static_cast<int64_t>(replaced.value_or(0)),
+                replaced ? 0 : 1, auth);
+    uint64_t written = 0;
+    if (usage_ && usage_->enabled() && req.body)
+        req.body = std::make_unique<ByteCountingReader>(std::move(req.body), &written);
 
     // PUT conditional requests (docs/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is optimistic concurrency.
     // "Check + commit" is done by the backend at its atomic commit point (PutCondition contract, backend.h) -- here
@@ -195,6 +206,8 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
     auto result = co_await backend.put_object(bucket, key, std::move(meta), body, cond);
+    note_usage(bucket, replaced ? 0 : 1,
+               static_cast<int64_t>(written) - static_cast<int64_t>(replaced.value_or(0)));
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));
@@ -211,7 +224,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
 }
 
 Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::string bucket,
-                                                std::string key) {
+                                                std::string key, const RequestAuth& auth) {
     auto [src_bucket, src_key] = parse_copy_source(*req.headers.get("x-amz-copy-source"));
     auto& src_backend = router_.resolve(src_bucket);
 
@@ -249,6 +262,12 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
     // cloudproxy uses remote server-side COPY -- both skip "read into the gateway then write back". nullopt = the
     // backend has no fast path or it is unavailable this time (tier stub, cross-device); falls back to the streaming path, semantically equivalent
     auto& dst_backend = router_.resolve(bucket);
+    // Accounting (roadmap §3.9): the copy's size is the source's; the destination's
+    // previous size (if any) is netted out
+    std::optional<uint64_t> replaced = co_await existing_size(dst_backend, bucket, key);
+    check_quota(bucket,
+                static_cast<int64_t>(src_meta.size) - static_cast<int64_t>(replaced.value_or(0)),
+                replaced ? 0 : 1, auth);
     storage::PutResult result;
     std::optional<storage::PutResult> fast;
     if (&src_backend == &dst_backend)
@@ -259,6 +278,8 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
         auto stream = co_await src_backend.get_object(src_bucket, src_key, std::nullopt);
         result = co_await dst_backend.put_object(bucket, key, std::move(meta), *stream.body);
     }
+    note_usage(bucket, replaced ? 0 : 1,
+               static_cast<int64_t>(src_meta.size) - static_cast<int64_t>(replaced.value_or(0)));
 
     XmlWriter w;
     w.open("CopyObjectResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
@@ -389,7 +410,10 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
 }
 
 Task<http::HttpResponse> S3Service::delete_object(std::string bucket, std::string key) {
-    co_await router_.resolve(bucket).delete_object(bucket, key);
+    auto& backend = router_.resolve(bucket);
+    std::optional<uint64_t> removed = co_await existing_size(backend, bucket, key);
+    co_await backend.delete_object(bucket, key);
+    if (removed) note_usage(bucket, -1, -static_cast<int64_t>(*removed));
     http::HttpResponse resp;
     resp.status = 204;
     co_return resp;
@@ -461,9 +485,20 @@ namespace {
 // the batch -- already-deleted keys must appear in the response, or clients cannot tell which deletions succeeded.
 // A standalone function rather than a capturing lambda: the lambda temporary is destroyed while the coroutine is suspended, so captures would dangle
 Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
-                                        const std::string& bucket, const std::string& key) {
+                                        const std::string& bucket, const std::string& key,
+                                        UsageTracker* usage) {
     try {
+        // Usage accounting (roadmap §3.9 ①): same HEAD-before-delete as the single delete
+        std::optional<uint64_t> removed;
+        if (usage && usage->enabled()) {
+            try {
+                removed = (co_await backend.head_object(bucket, key)).size;
+            } catch (const S3Error& e) {
+                if (e.code != S3ErrorCode::NoSuchKey) throw;
+            }
+        }
         co_await backend.delete_object(bucket, key);
+        if (removed) usage->apply(bucket, -1, -static_cast<int64_t>(*removed));
         co_return std::nullopt;
     } catch (const S3Error& e) {
         co_return e;
@@ -541,7 +576,7 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
         std::vector<Task<std::optional<S3Error>>> batch;
         batch.reserve(n);
         for (size_t i = 0; i < n; ++i)
-            batch.push_back(delete_one(backend, bucket, keys[pending[base + i]]));
+            batch.push_back(delete_one(backend, bucket, keys[pending[base + i]], usage_.get()));
         auto res = co_await when_all(std::move(batch));
         for (size_t i = 0; i < n; ++i) outcome[pending[base + i]] = std::move(res[i]);
     }

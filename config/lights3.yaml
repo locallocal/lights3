@@ -77,6 +77,26 @@ auth:
 # lifecycle:
 #   scan_interval: 1h            # 0s = enforcement off (the API still stores rules)
 
+# ---------- Usage accounting / quotas (roadmap §3.9, docs/multi-tenancy.md §2/§7) ----------
+# Per-bucket object/byte counters kept by the gateway (updated on every write,
+# persisted to .sys/usage/, recounted by a periodic full listing). Bucket quotas
+# (?quota / s3adm quota) and tenant quotas (s3adm tenant) are enforced on them.
+# usage:
+#   enabled: true               # false = no counters and no quota enforcement (skips the pre-write HEAD)
+#   flush_interval: 60s         # persist dirty counters; 0s = only at shutdown / after a scan
+#   reconcile_interval: 1d      # full recount of every bucket; 0s = on demand only (s3adm usage --rescan)
+#   reconcile: true             # multi-gateway: true on ONE instance only (bootstrap + periodic recounts)
+
+# ---------- Audit log (roadmap §3.9 ④, docs/multi-tenancy.md §5) ----------
+# JSON lines in a dedicated rotating file: credential/tenant/quota lifecycle,
+# STS sessions, bucket create/delete, quota rejections; data_plane adds one
+# record per S3 request. Empty path = off.
+# audit:
+#   path: /var/log/lights3/audit.log
+#   data_plane: false           # requires path
+#   max_size: 64MiB             # rotation threshold
+#   max_files: 10               # rotated files kept
+
 backends:
   # ---------- localfs / xlocalfs: local filesystem (docs/storage-backend.md) ----------
   - name: localdata

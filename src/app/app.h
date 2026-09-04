@@ -13,8 +13,12 @@
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
 #include "http/server.h"
+#include "s3/audit.h"
 #include "s3/auth/credential_store.h"
+#include "s3/quota.h"
 #include "s3/service.h"
+#include "s3/tenant.h"
+#include "s3/usage.h"
 #include "s3/website_store.h"
 #include "storage/backend.h"
 
@@ -70,6 +74,13 @@ private:
     std::shared_ptr<s3::CorsStore> cors_store_;
     std::shared_ptr<s3::LifecycleStore> lifecycle_store_;
     std::unique_ptr<s3::LifecycleRunner> lifecycle_runner_;
+    // roadmap §3.9: usage accounting, quotas, tenancy, audit (docs/multi-tenancy.md)
+    std::shared_ptr<s3::AuditLog> audit_;
+    std::shared_ptr<s3::UsageTracker> usage_;
+    std::shared_ptr<s3::QuotaStore> quota_store_;
+    std::shared_ptr<s3::TenantStore> tenant_store_;
+    std::shared_ptr<s3::OwnerStore> owner_store_;
+    std::shared_ptr<s3::TenantRegistry> tenants_;
     std::shared_ptr<s3::S3Service> service_;
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;
     std::shared_ptr<AsyncSemaphore> inflight_;

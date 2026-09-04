@@ -98,6 +98,18 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
         auto sc = cred_store_->mint_session(access_key, duration);
         LOG_INFO("sts: session {} minted for {} ({}s, role '{}')", sc.access_key, access_key,
                  duration, role_arn);
+        {
+            AuditEvent e;
+            e.event = "sts.assume_role";
+            e.actor = access_key;
+            e.tenant = ident.tenant;
+            e.request_id = ctx.request_id;
+            e.target = sc.access_key;
+            std::string detail = "duration=" + std::to_string(duration) + " role=" + role_arn +
+                                 " session=" + session_name;
+            e.detail = detail;
+            audit(e);
+        }
 
         XmlWriter x;
         x.open("AssumeRoleResponse", R"(xmlns="https://sts.amazonaws.com/doc/2011-06-15/")");

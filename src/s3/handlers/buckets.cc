@@ -1,4 +1,5 @@
 // Bucket-level and service-level handlers
+#include "core/log.h"
 #include "core/util/time.h"
 #include "s3/handlers/common.h"
 #include "s3/service.h"
@@ -18,6 +19,9 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
             // ("only bucket names leak"), but bucket names are exactly step one of an attack chain -- restricted
             // credentials should not see that buckets outside their allowlist exist
             if (auth.policy && !auth.policy->allows_bucket(b.name)) continue;
+            // Tenant credentials see only their tenant's buckets (docs/multi-tenancy.md §4.3)
+            if (!auth.tenant.empty() && tenants_ && tenants_->owner_of(b.name) != auth.tenant)
+                continue;
             bool dup = false;
             for (auto& e : all)
                 if (e.name == b.name) dup = true;
@@ -29,9 +33,16 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
 
     XmlWriter w;
     w.open("ListAllMyBucketsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
+    // Owner: the tenant for tenant credentials, the single legacy identity otherwise
+    std::string owner_id(handlers::kOwnerId), owner_name(handlers::kOwnerId);
+    if (!auth.tenant.empty() && tenants_) {
+        owner_id = std::string(auth.tenant);
+        auto t = tenants_->find(owner_id);
+        owner_name = t ? t->display_name : owner_id;
+    }
     w.open("Owner");
-    w.element("ID", std::string(handlers::kOwnerId));
-    w.element("DisplayName", std::string(handlers::kOwnerId));
+    w.element("ID", owner_id);
+    w.element("DisplayName", owner_name);
     w.close();
     w.open("Buckets");
     for (auto& b : all) {
@@ -53,7 +64,8 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
 // Previously the request body was never read, so cross-region bucket creation silently succeeded while a later
 // GetBucketLocation echoed the local region -- leading clients to conclude the data lived elsewhere. Empty body
 // and empty LocationConstraint are both treated as us-east-1 (S3 convention: that region writes no constraint)
-Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::string bucket) {
+Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::string bucket,
+                                                  const RequestAuth& auth) {
     std::string body = co_await handlers::read_body(req);
     if (!body.empty()) {
         XmlNode root = xml_parse(body);
@@ -70,7 +82,68 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
                               "' is not valid for this endpoint (region '" + region + "').",
                           bucket);
     }
-    co_await router_.resolve(bucket).create_bucket(bucket);
+    auto& backend = router_.resolve(bucket);
+    // Tenant credential (docs/multi-tenancy.md §4.3): the bucket becomes the tenant's.
+    // An existing unowned name must not be claimable — dispatch admitted the request
+    // because no owner record exists, so the existence check happens here
+    if (!auth.tenant.empty() && tenants_) {
+        auto t = tenants_->find(std::string(auth.tenant));
+        if (!t)
+            throw S3Error(S3ErrorCode::AccessDenied,
+                          "The credential's tenant no longer exists.", bucket);
+        if (t->quota.max_buckets &&
+            tenants_->buckets_of(t->id).size() >= t->quota.max_buckets) {
+            if (usage_) usage_->quota_rejected(true);
+            AuditEvent e;
+            e.event = "quota.reject";
+            e.actor = auth.access_key;
+            e.tenant = auth.tenant;
+            e.request_id = auth.request_id;
+            e.bucket = bucket;
+            e.detail = "buckets " + std::to_string(t->quota.max_buckets) + " reached";
+            audit(e);
+            throw S3Error(S3ErrorCode::QuotaExceeded,
+                          "The tenant has reached its bucket limit (" +
+                              std::to_string(t->quota.max_buckets) + ").",
+                          bucket);
+        }
+        if (co_await backend.bucket_exists(bucket))
+            throw S3Error(S3ErrorCode::BucketAlreadyExists,
+                          "The requested bucket name is not available.", bucket);
+    }
+    co_await backend.create_bucket(bucket);
+    if (!auth.tenant.empty() && tenants_) {
+        std::exception_ptr err;
+        try {
+            co_await tenants_->assign(bucket, std::string(auth.tenant),
+                                      std::string(auth.access_key), /*force=*/true);
+        } catch (...) {
+            err = std::current_exception();
+        }
+        if (err) {
+            // The bucket exists but its ownership could not be recorded: undo, or the
+            // tenant would have created a bucket it can never touch again (co_await is
+            // not allowed inside a catch handler, hence the exception_ptr detour)
+            LOG_ERROR("bucket {}: ownership record failed, rolling back creation", bucket);
+            try {
+                co_await backend.delete_bucket(bucket);
+            } catch (...) {
+            }
+            std::rethrow_exception(err);
+        }
+    }
+    // A fresh bucket starts with a known-empty counter (listed by the usage API right
+    // away; the bootstrap scan still counts it later as it carries no scan stamp)
+    note_usage(bucket, 0, 0);
+    {
+        AuditEvent e;
+        e.event = "bucket.create";
+        e.actor = auth.access_key;
+        e.tenant = auth.tenant;
+        e.request_id = auth.request_id;
+        e.bucket = bucket;
+        audit(e);
+    }
     http::HttpResponse resp;
     resp.headers.set("Location", "/" + bucket);
     resp.headers.set("x-amz-bucket-region", auth_.region());
@@ -87,8 +160,31 @@ Task<http::HttpResponse> S3Service::head_bucket(std::string bucket) {
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket) {
+Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket,
+                                                  const RequestAuth& auth) {
     co_await router_.resolve(bucket).delete_bucket(bucket);
+    // Per-bucket records this feature set owns die with the bucket. Failures here
+    // only leave a stale record (harmless: an owner entry for a missing bucket is
+    // ignored, and a re-created bucket by root gets a fresh assignment if needed)
+    auto forget = [&](Task<void> t, const char* what) -> Task<void> {
+        try {
+            co_await std::move(t);
+        } catch (const std::exception& e) {
+            LOG_WARN("bucket {}: could not drop {} record: {}", bucket, what, e.what());
+        }
+    };
+    if (tenants_) co_await forget(tenants_->unassign(bucket), "ownership");
+    if (quota_store_) co_await forget(quota_store_->remove(bucket), "quota");
+    if (usage_) co_await forget(usage_->remove(bucket), "usage");
+    {
+        AuditEvent e;
+        e.event = "bucket.delete";
+        e.actor = auth.access_key;
+        e.tenant = auth.tenant;
+        e.request_id = auth.request_id;
+        e.bucket = bucket;
+        audit(e);
+    }
     http::HttpResponse resp;
     resp.status = 204;
     co_return resp;

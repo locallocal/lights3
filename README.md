@@ -208,6 +208,13 @@ must be adjusted before the first launch.
   multipart checksums); `GET ?partNumber` with `x-amz-mp-parts-count`; STS
   AssumeRole session credentials (SigV4 `sts` scope, token-verified data-plane
   requests with TTL)
+- **Usage / quotas / multi-tenancy / audit**
+  ([docs/en/multi-tenancy.md](docs/en/multi-tenancy.md)): per-bucket usage
+  counters (incremental + periodic full recount, `/-/admin/usage`); `?quota`
+  bucket quotas and aggregate tenant quotas (`QuotaExceeded` 403, multipart
+  parts counted); tenant entities with bucket ownership (credential
+  `tenant`/`role`, tenants see only their own buckets, tiered admin plane);
+  JSON-lines audit log
 
 Not supported by design (returns NotImplemented; see
 [docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1): versioning, fine-grained
@@ -228,6 +235,7 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [storage-backend](docs/en/storage-backend.md) | `IStorageBackend`, LocalFs/XLocalFs, bucket routing, new-backend guide |
 | [s3-protocol](docs/en/s3-protocol.md) | API scope, SigV4 (incl. presigned & clock skew), XML codec, errors, mint gate |
 | [credential-management](docs/en/credential-management.md) | AK/SK admin API, three credential sources, `.sys` persistence, at-rest encryption, policy |
+| [multi-tenancy](docs/en/multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenants and bucket ownership, tiered admin plane, audit log |
 | [object-read-write-flow](docs/en/object-read-write-flow.md) | End-to-end read/write paths, BodyReader chains, staging commit, fd-snapshot reads |
 | [tiered-storage](docs/en/tiered-storage.md) | Cold-data tiering to cloud, stub metadata, transparent read-back |
 | [cloudproxy-backend](docs/en/cloudproxy-backend.md) | Self-signed SigV4 proxy to remote S3, streaming pumps, retries |
@@ -236,4 +244,4 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [duostore-sqlite-meta](docs/en/duostore-sqlite-meta.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
 | [duostore-rados-data](docs/en/duostore-rados-data.md) | RADOS IDataStore: librados, chunk → rados objects |
 | [duostore-tikv-meta](docs/en/duostore-tikv-meta.md) | TiKV IMetaStore: client-c + 2PC sidecar |
-| [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load, cred/website/bench |
+| [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load, cred/website/bench/quota/tenant/usage |

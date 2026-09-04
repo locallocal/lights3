@@ -725,7 +725,8 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
         // actual body is empty, empty digest + non-empty body would slip the body out of signature protection
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);
     }
-    return {std::move(f.access_key), std::move(cred->policy)};
+    return {std::move(f.access_key), std::move(cred->policy), std::move(cred->tenant),
+            cred->tenant_admin};
 }
 
 void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred,

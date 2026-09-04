@@ -78,6 +78,10 @@ public:
     httplib::Result put_unsigned(const std::string& path, const std::string& body,
                                  const std::string& query = "");
     httplib::Result post_json(const std::string& path, const std::string& body);
+    // JSON PUT (admin plane) and empty-body POST (admin actions such as a usage rescan)
+    httplib::Result put_json(const std::string& path, const std::string& body,
+                             const std::string& query = "");
+    httplib::Result post_empty(const std::string& path, const std::string& query = "");
     httplib::Result del(const std::string& path, const std::string& query = "");
 
 private:

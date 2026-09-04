@@ -18,6 +18,7 @@
 #include "core/thread_pool.h"
 #include "core/timer.h"
 #include "s3/sys_config_store.h"
+#include "s3/usage.h"
 #include "storage/bucket_router.h"
 
 namespace lights3::s3 {
@@ -67,6 +68,9 @@ public:
     void set_now_for_tests(std::function<std::chrono::system_clock::time_point()> fn) {
         now_ = std::move(fn);
     }
+    // Usage accounting (roadmap §3.9 ①): expirations and aborts adjust the counters
+    // like their request-path twins
+    void set_usage_tracker(std::shared_ptr<UsageTracker> u) { usage_ = std::move(u); }
 
 private:
     std::chrono::system_clock::time_point now() const {
@@ -77,6 +81,7 @@ private:
 
     storage::BucketRouter router_;
     std::shared_ptr<LifecycleStore> store_;
+    std::shared_ptr<UsageTracker> usage_;
     std::function<std::chrono::system_clock::time_point()> now_;
 
     std::shared_ptr<ThreadPool> pool_;

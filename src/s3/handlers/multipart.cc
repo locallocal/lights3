@@ -70,26 +70,39 @@ std::string request_base_url(const http::HttpRequest& req) {
 // last part exempt) plus declared-checksum cross-check (roadmap §2.2 — the complete XML's
 // Checksum values are client claims and must match the stored, upload-time-verified
 // ones; a mismatch is BadDigest, a claim against a checksum-less part is InvalidPart).
-// Missing parts are not reported here but left to the backend's InvalidPart
-Task<void> check_parts_before_complete(storage::IStorageBackend& backend,
-                                       const std::string& bucket, const std::string& key,
-                                       const std::string& upload_id,
-                                       const std::vector<storage::PartInfo>& parts,
-                                       uint64_t min_size) {
+// Missing parts are not reported here but left to the backend's InvalidPart.
+// want_sizes (usage accounting, roadmap §3.9 ①) forces the listing and reports the
+// bytes of the parts named in the request plus the bytes of every stored part
+struct PartTotals {
+    bool listed = false;
+    uint64_t requested = 0;  // sum over parts named in the complete XML
+    uint64_t stored = 0;     // sum over every part currently under the upload
+};
+Task<PartTotals> check_parts_before_complete(storage::IStorageBackend& backend,
+                                             const std::string& bucket, const std::string& key,
+                                             const std::string& upload_id,
+                                             const std::vector<storage::PartInfo>& parts,
+                                             uint64_t min_size, bool want_sizes) {
+    PartTotals totals;
     bool need_sizes = min_size > 0 && parts.size() > 1;
     bool need_checksums = false;
     for (auto& p : parts)
         if (!p.checksum_value.empty()) need_checksums = true;
-    if (!need_sizes && !need_checksums) co_return;
+    if (!need_sizes && !need_checksums && !want_sizes) co_return totals;
     // Fetch everything: the protocol caps part count at 10000, and this needs lookup by part number, not paging
     storage::ListPartsOptions all_opt;
     all_opt.max_parts = storage::kMaxParts;
     auto have = co_await backend.list_parts(bucket, key, upload_id, all_opt);
+    totals.listed = true;
     std::map<int, const storage::PartMeta*> by_no;
-    for (auto& p : have.parts) by_no[p.part_no] = &p;
+    for (auto& p : have.parts) {
+        by_no[p.part_no] = &p;
+        totals.stored += p.size;
+    }
     for (size_t i = 0; i < parts.size(); ++i) {
         auto it = by_no.find(parts[i].part_no);
         if (it == by_no.end()) continue;
+        totals.requested += it->second->size;
         if (need_sizes && i + 1 < parts.size() && it->second->size < min_size)  // last part exempt
             throw S3Error(S3ErrorCode::EntityTooSmall,
                           "Your proposed upload is smaller than the minimum allowed size. "
@@ -110,6 +123,7 @@ Task<void> check_parts_before_complete(storage::IStorageBackend& backend,
                                   " did not match what we received.");
         }
     }
+    co_return totals;
 }
 
 // "bytes=first-last": both ends required, closed interval (AWS UploadPartCopy semantics, stricter than GET Range's
@@ -145,7 +159,10 @@ storage::ByteRange parse_copy_source_range(const std::string& v, uint64_t src_si
 }  // namespace
 
 Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std::string bucket,
-                                                     std::string key) {
+                                                     std::string key, const RequestAuth& auth) {
+    // Quota gate (roadmap §3.9 ②): a bucket already over its limit refuses to start an
+    // upload at all; the per-part gate in upload_part then judges each part's bytes
+    check_quota(bucket, 0, 0, auth);
     auto meta = meta_from_headers(req);
     // Declared checksum algorithm survives create→complete (roadmap §2.2). Only the
     // COMPOSITE form is implemented: CRC64NVME (full-object only per AWS) and an
@@ -189,7 +206,7 @@ Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std
 }
 
 Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::string bucket,
-                                                std::string key) {
+                                                std::string key, const RequestAuth& auth) {
     int part_no = parse_part_number(req);
     std::string upload_id = require_upload_id(req);
 
@@ -204,10 +221,14 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
         std::optional<storage::ByteRange> range;
         if (auto r = req.headers.get("x-amz-copy-source-range"))
             range = parse_copy_source_range(*r, src_meta.size);
+        // Part bytes count toward the bucket (in-flight multipart bytes, roadmap §3.9 ②)
+        uint64_t part_bytes = range ? (*range->last - *range->first + 1) : src_meta.size;
+        check_quota(bucket, static_cast<int64_t>(part_bytes), 0, auth);
 
         auto stream = co_await src_backend.get_object(src_bucket, src_key, range);
         auto result = co_await router_.resolve(bucket).upload_part(bucket, key, upload_id,
                                                                    part_no, *stream.body);
+        note_usage(bucket, 0, 0, static_cast<int64_t>(part_bytes));
 
         XmlWriter w;
         w.open("CopyPartResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
@@ -221,12 +242,21 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
     }
 
     require_content_length(req);  // 411 (roadmap §2.5); UploadPartCopy above is body-less and exempt
+    // Quota gate on the declared part length, then count what actually streamed
+    // (roadmap §3.9 ②; a re-uploaded part number over-counts until complete/abort
+    // settle the upload against the stored parts)
+    uint64_t declared = req.body && req.body->length() ? *req.body->length() : 0;
+    check_quota(bucket, static_cast<int64_t>(declared), 0, auth);
+    uint64_t written = 0;
+    if (usage_ && usage_->enabled() && req.body)
+        req.body = std::make_unique<ByteCountingReader>(std::move(req.body), &written);
     // Declared part checksum persists with the part record (roadmap §2.2)
     auto part_checksum = extract_part_checksum(req);
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
     auto result = co_await router_.resolve(bucket).upload_part(bucket, key, upload_id, part_no,
                                                                body, part_checksum);
+    note_usage(bucket, 0, 0, static_cast<int64_t>(written));
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));
@@ -242,7 +272,8 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
 }
 
 Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
-                                                       std::string bucket, std::string key) {
+                                                       std::string bucket, std::string key,
+                                                       const RequestAuth& auth) {
     std::string upload_id = require_upload_id(req);
     std::string body = co_await read_body(req);
     XmlNode root = xml_parse(body);
@@ -284,11 +315,30 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     // Minimum part size 5MiB (last part exempt): without the check, 10000 one-byte parts could be committed, and
     // complete's per-part open/read/write concatenation is a cheap amplification surface. Only the storage layer
     // knows sizes, hence the upfront listing; declared part checksums cross-check in the same pass
-    co_await check_parts_before_complete(backend, bucket, key, upload_id, parts,
-                                         min_part_size_);
+    bool accounting = usage_ && usage_->enabled();
+    auto totals = co_await check_parts_before_complete(backend, bucket, key, upload_id, parts,
+                                                       min_part_size_, accounting);
+    // Accounting at complete (roadmap §3.9 ①②): the named parts become the object's
+    // bytes, every stored part leaves the in-flight pool, and a replaced object is
+    // netted out. The gate therefore only refuses when the finished object would
+    // still not fit (quota lowered after the parts were admitted): the upload stays
+    // in place for the client to abort — the documented mid-flight semantics
+    std::optional<uint64_t> replaced;
+    if (accounting) {
+        replaced = co_await existing_size(backend, bucket, key);
+        check_quota(bucket,
+                    static_cast<int64_t>(totals.requested) - static_cast<int64_t>(totals.stored) -
+                        static_cast<int64_t>(replaced.value_or(0)),
+                    replaced ? 0 : 1, auth);
+    }
 
     auto result = co_await backend.complete_multipart(bucket, key, upload_id, parts);
     metrics_.mpu_finished();
+    if (accounting)
+        note_usage(bucket, replaced ? 0 : 1,
+                   static_cast<int64_t>(totals.requested) -
+                       static_cast<int64_t>(replaced.value_or(0)),
+                   -static_cast<int64_t>(totals.stored));
 
     XmlWriter w;
     w.open("CompleteMultipartUploadResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
@@ -313,7 +363,13 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
 
 Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std::string bucket,
                                                     std::string key) {
-    co_await router_.resolve(bucket).abort_multipart(bucket, key, require_upload_id(req));
+    std::string upload_id = require_upload_id(req);
+    auto& backend = router_.resolve(bucket);
+    // In-flight bytes leave the pool with the upload (roadmap §3.9 ①); a missing upload
+    // surfaces the same NoSuchUpload the abort itself would
+    uint64_t stored = co_await upload_parts_bytes(backend, bucket, key, upload_id);
+    co_await backend.abort_multipart(bucket, key, upload_id);
+    note_usage(bucket, 0, 0, -static_cast<int64_t>(stored));
     metrics_.mpu_finished();
     http::HttpResponse resp;
     resp.status = 204;

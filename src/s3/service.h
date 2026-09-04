@@ -17,10 +17,14 @@
 #include "core/thread_pool.h"
 #include "http/model.h"
 #include "s3/auth/policy.h"
+#include "s3/audit.h"
 #include "s3/auth/sigv4.h"
 #include "s3/cors_store.h"
 #include "s3/lifecycle.h"
 #include "s3/metrics.h"
+#include "s3/quota.h"
+#include "s3/tenant.h"
+#include "s3/usage.h"
 #include "s3/website_store.h"
 #include "storage/bucket_router.h"
 #include "storage/multipart.h"
@@ -111,11 +115,23 @@ public:
         lifecycle_store_ = std::move(store);
     }
 
+    // Usage accounting + quotas + tenancy + audit (roadmap §3.9, docs/multi-tenancy.md).
+    // Each is optional: not injected = feature off (no counters / no ?quota / no
+    // ownership filter / no audit records)
+    void set_usage_tracker(std::shared_ptr<UsageTracker> u) { usage_ = std::move(u); }
+    void set_quota_store(std::shared_ptr<QuotaStore> q) { quota_store_ = std::move(q); }
+    void set_tenant_registry(std::shared_ptr<TenantRegistry> t) { tenants_ = std::move(t); }
+    void set_audit_log(std::shared_ptr<AuditLog> a) { audit_ = std::move(a); }
+    const std::shared_ptr<UsageTracker>& usage_tracker() const { return usage_; }
+
     // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
         std::string_view access_key;             // empty when auth is disabled
         const CredentialPolicy* policy = nullptr;  // nullptr = unrestricted
+        std::string_view tenant;                 // empty = not a tenant credential (docs/multi-tenancy.md §4)
+        bool tenant_admin = false;
+        std::string_view request_id;             // for audit records
     };
 
     // Explicit dispatch table (docs/s3-protocol.md §2): (method, scope, query-flag) -> handler, matched in declaration order
@@ -148,7 +164,8 @@ private:
 
     // handlers/buckets.cc
     Task<http::HttpResponse> list_buckets(const RequestAuth& auth);
-    Task<http::HttpResponse> create_bucket(http::HttpRequest& req, std::string bucket);
+    Task<http::HttpResponse> create_bucket(http::HttpRequest& req, std::string bucket,
+                                           const RequestAuth& auth);
     Task<http::HttpResponse> head_bucket(std::string bucket);
     // ?website subresource (docs/static-website.md phase ③, root credential only)
     Task<http::HttpResponse> get_bucket_website(std::string bucket, const RequestAuth& auth);
@@ -174,13 +191,19 @@ private:
     // success and error responses
     void apply_cors_headers(const http::HttpRequest& req, const std::string& bucket,
                             http::HttpResponse& resp);
-    Task<http::HttpResponse> delete_bucket(std::string bucket);
+    Task<http::HttpResponse> delete_bucket(std::string bucket, const RequestAuth& auth);
     Task<http::HttpResponse> get_bucket_location(std::string bucket);
+    // handlers/bucket_quota.cc (roadmap §3.9 ②): ?quota subresource. GET for any
+    // credential admitted to the bucket, PUT/DELETE root only
+    Task<http::HttpResponse> get_bucket_quota(std::string bucket, const RequestAuth& auth);
+    Task<http::HttpResponse> put_bucket_quota(http::HttpRequest& req, std::string bucket,
+                                              const RequestAuth& auth);
+    Task<http::HttpResponse> delete_bucket_quota(std::string bucket, const RequestAuth& auth);
     // handlers/objects.cc
     Task<http::HttpResponse> put_object(http::HttpRequest& req, std::string bucket,
-                                        std::string key);
+                                        std::string key, const RequestAuth& auth);
     Task<http::HttpResponse> copy_object(http::HttpRequest& req, std::string bucket,
-                                         std::string key);
+                                         std::string key, const RequestAuth& auth);
     Task<http::HttpResponse> get_object(http::HttpRequest& req, std::string bucket,
                                         std::string key, bool head_only);
     Task<http::HttpResponse> delete_object(std::string bucket, std::string key);
@@ -196,11 +219,11 @@ private:
                                           const RequestAuth& auth);
     // handlers/multipart.cc
     Task<http::HttpResponse> create_multipart(http::HttpRequest& req, std::string bucket,
-                                              std::string key);
+                                              std::string key, const RequestAuth& auth);
     Task<http::HttpResponse> upload_part(http::HttpRequest& req, std::string bucket,
-                                         std::string key);
+                                         std::string key, const RequestAuth& auth);
     Task<http::HttpResponse> complete_multipart(http::HttpRequest& req, std::string bucket,
-                                                std::string key);
+                                                std::string key, const RequestAuth& auth);
     Task<http::HttpResponse> abort_multipart(http::HttpRequest& req, std::string bucket,
                                              std::string key);
     Task<http::HttpResponse> list_parts(http::HttpRequest& req, std::string bucket,
@@ -219,6 +242,40 @@ private:
     // internally, renders errors as JSON bodies; access_key out-param feeds the access log
     Task<http::HttpResponse> admin_credentials(http::HttpRequest& req,
                                                std::string& access_key);
+    // handlers/admin_tenants.cc (docs/multi-tenancy.md §6): /-/admin/tenants,
+    // /-/admin/usage — root, or a tenant admin scoped to its own tenant
+    Task<http::HttpResponse> admin_tenancy(http::HttpRequest& req, std::string& access_key,
+                                           const RequestContext& ctx);
+
+    // ---- usage / quota / tenancy helpers (handlers/quota_gate.cc) ----
+    // Size of the object currently under (bucket,key) when usage accounting is on;
+    // nullopt = no such key (or accounting off). Write handlers call it before the
+    // commit so the replaced/deleted size can be subtracted from the counters
+    Task<std::optional<uint64_t>> existing_size(storage::IStorageBackend& backend,
+                                                const std::string& bucket,
+                                                const std::string& key);
+    // Quota gate: refuses (QuotaExceeded) when the bucket's or its owner tenant's
+    // limits would be exceeded by add_bytes/add_objects more. Reads the in-memory
+    // counters only — no I/O, decided before the body is streamed
+    void check_quota(const std::string& bucket, int64_t add_bytes, int64_t add_objects,
+                     const RequestAuth& auth);
+    // Counter deltas after a successful commit (no-op when accounting is off)
+    void note_usage(const std::string& bucket, int64_t d_objects, int64_t d_bytes,
+                    int64_t d_mpu_bytes = 0);
+    // Sum of every part currently stored under an upload (mpu_bytes bookkeeping at
+    // complete/abort); 0 when accounting is off
+    Task<uint64_t> upload_parts_bytes(storage::IStorageBackend& backend,
+                                      const std::string& bucket, const std::string& key,
+                                      const std::string& upload_id);
+    // Tenant ownership gate (docs/multi-tenancy.md §4.3): a tenant credential may only
+    // touch buckets its tenant owns. creating = the CreateBucket route (an unowned
+    // name is admitted, the handler records ownership after the backend accepts it)
+    Task<void> require_tenant_bucket(const std::string& bucket, std::string_view tenant,
+                                     bool creating);
+    bool is_root(std::string_view access_key) const;
+    void audit(const AuditEvent& e) {
+        if (audit_) audit_->record(e);
+    }
 
     // virtual-host style: when Host matches *.base_domain, the bucket is prepended for path parsing.
     // The vhost flag steers internal-endpoint routing (docs/archive/gaps.md §3.8): under vhost, req.path is the key,
@@ -261,6 +318,10 @@ private:
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off
     std::shared_ptr<CorsStore> cors_store_;        // null = CORS off (OPTIONS -> 403)
     std::shared_ptr<LifecycleStore> lifecycle_store_;  // null = ?lifecycle unavailable
+    std::shared_ptr<UsageTracker> usage_;              // null = no usage accounting / quotas
+    std::shared_ptr<QuotaStore> quota_store_;          // null = ?quota unavailable
+    std::shared_ptr<TenantRegistry> tenants_;          // null = tenancy off (legacy model)
+    std::shared_ptr<AuditLog> audit_;                  // null = no audit file
 
     // Anonymous website rate limiting (roadmap §2.3): one token bucket per website
     // bucket; entries are bounded by the number of configured website buckets

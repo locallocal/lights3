@@ -254,23 +254,41 @@ LRU + 写路径 invalidate；多网关共享 meta 时需失效协议，可分期
 meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/localfs.md)
 §5.1、[storage/duostore-core.md](storage/duostore-core.md) §7.1。
 
-### 3.9 链条：用量统计 → 配额 → 多租户
+### 3.9 链条：用量统计 → 配额 → 多租户 **已完成（2026-09-04，四项全部）**
 
-三者是同一条依赖链，越往后越重，建议按序分期：
+~~三者是同一条依赖链，越往后越重，建议按序分期：~~ 落地文档
+[multi-tenancy.md](multi-tenancy.md)，全部实现在 L2，存储层与 meta schema
+零改动：
 
-1. **用量统计**（价值高/难度中）：`IStorageBackend` 无任何 usage 接口，
+1. ~~**用量统计**（价值高/难度中）：`IStorageBackend` 无任何 usage 接口，
    想知道桶的对象数/字节数只能全量 List 累加；指标只到后端粒度。方案二选
    一：meta 侧增量计数器（四个 IMetaStore 实现都要动、正确性成本高）或离
-   线聚合扫描（可与 §3.1 scrub 同一次遍历产出）。
-2. **桶级/租户级配额**（中-高/高）：现唯一的 "quota" 是 tiered 本地盘水位，
-   语义完全不同。依赖 ①，还需定超限错误码与 MPU 半途语义。
-3. **租户实体化**（中-高/高）：现模型是"一个 root + 多个受限 AK"（policy
+   线聚合扫描（可与 §3.1 scrub 同一次遍历产出）。~~ 选了"离线聚合"路线的
+   改良版：`UsageTracker`（`src/s3/usage.{h,cc}`）在每条写路径提交后做增量
+   （覆盖/删除前 HEAD 取旧尺寸，body 实际字节计数），周期 flush 到
+   `.sys/usage/<bucket>`，`usage.reconcile_interval` 全量列举校准 + 启动
+   bootstrap + `s3adm usage --rescan`；多网关只采纳更新的扫描。精度契约
+   "两次扫描之间近似"（multi-tenancy.md §2.4）。指标
+   `lights3_bucket_usage_{bytes,objects}{bucket}`。
+2. ~~**桶级/租户级配额**（中-高/高）：现唯一的 "quota" 是 tiered 本地盘水位，
+   语义完全不同。依赖 ①，还需定超限错误码与 MPU 半途语义。~~ `?quota`
+   子资源（`.sys/quota/<bucket>`，root 管理）+ 租户记录里的聚合配额
+   （bytes/objects/buckets）；错误码 **`QuotaExceeded`(403)**；MPU 语义：
+   分片计入 `mpu_bytes` 受限，Complete 仅在完成后仍放不下时拒绝且上传保留
+   （multi-tenancy.md §3.4）。
+3. ~~**租户实体化**（中-高/高）：现模型是"一个 root + 多个受限 AK"（policy
    glob 隔离已含列举过滤），无桶归属、无 Owner、无分级 admin。适合内部部
    署，不适合真多租户 SaaS；牵动 meta schema 与全部 IMetaStore，动之前先
-   想清目标场景。
-4. **审计日志**（高/中）：现全仓审计面只有"请求明文 SK 时一条 WARN"。凭证
+   想清目标场景。~~ 目标场景定为"叠加而非替换"：`.sys/tenants/<id>` +
+   `.sys/owners/<bucket>`，凭证加 `tenant`/`role`，租户凭证只见本租户所有
+   桶（dispatch 归属判定 + ListBuckets 过滤 + 真实 `Owner`），无归属记录的
+   桶对 root/legacy 凭证行为不变；分级 admin（租户 admin 管本租户凭证/用量）；
+   `/-/admin/tenants`、`s3adm tenant`。meta schema 未动。
+4. ~~**审计日志**（高/中）：现全仓审计面只有"请求明文 SK 时一条 WARN"。凭证
    生命周期事件 + 数据面结构化访问日志（见 §5.2）是合规前置，也是 ① 的数
-   据源之一。
+   据源之一。~~ `audit.path` 独立 rotating JSON 行文件：凭证/租户/配额/归属
+   生命周期、STS、建删桶、配额拒绝、rescan；`audit.data_plane` 每请求一条
+   `access`（§5.2 的运行日志异步化与慢日志仍独立待做）。
 
 ## 4. 运行时与 HTTP 层
 
@@ -359,7 +377,7 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 | --- | --- | --- | --- |
 | **异步 sink + 轮转** | `Logger::init` 硬编码同步 `stderr_color_sink_mt`——高 QPS 下每条访问日志一次锁 + write syscall；spdlog 的 `async_logger` + `rotating_file_sink` 现成，配置项化即可 | 高 | 低 |
 | 慢请求日志 | 无阈值通道：生产开 info 被淹没，开 warn 就没有访问日志。加 `log.slow_request_threshold`，超限升 WARN 并附阶段耗时 | 高 | 低 |
-| 结构化访问日志 | 固定七字段空格分隔，`path` 未转义（含空格的 key 破坏切分），缺 remote_addr / UA / bucket / 后端名 / TTFB；无 JSON 选项，不利接 Loki/ELK；同时是审计（§3.9）与用量统计的数据源 | 中-高 | 低-中 |
+| 结构化访问日志 | 固定七字段空格分隔，`path` 未转义（含空格的 key 破坏切分），缺 remote_addr / UA / bucket / 后端名 / TTFB；无 JSON 选项，不利接 Loki/ELK。审计侧已由 §3.9④ 的 `audit.data_plane` JSON 行 `access` 记录覆盖（bucket/key/tenant/status/bytes），运行日志本身的结构化仍待做 | 中 | 低-中 |
 
 ### 5.3 指标补口
 
@@ -415,7 +433,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 | `s3adm mpu list/abort` | 清理僵尸 MPU；服务端 API 已有，纯 CLI 包装 | 中 | 低 |
 | `lights3 --check-config` | 校验逻辑已完整（test_config.cc 345 行），只差不 open backend 的 dry-run 出口 | 中 | 极低 |
 | `s3adm bench --output=json` | 现只有人读表格，无法做基线比对（§4.3 性能基线的前置） | 中 | 低 |
-| `s3adm usage` | 依赖 §3.9 ① | 高 | 中 |
+| ~~`s3adm usage`~~ **已完成（2026-09-04）** | 见 §3.9①（`s3adm usage [bucket] [--rescan]`，另有 `quota`/`tenant` 命令组） | — | — |
 
 ### 6.3 构建与分发
 
@@ -465,7 +483,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 ### P2 — 中期（需设计，一个方向一个迭代）
 
-1. ~~scrub/fsck（§3.1）~~ **已完成（2026-08-28）**；顺带的用量统计（§3.9①）未做——scrub 的 bytes_read 只覆盖引用数据，孤儿扫描的 chunk_bytes/pack_bytes 仍是现成的盘面口径
+1. ~~scrub/fsck（§3.1）~~ **已完成（2026-08-28）**；~~顺带的用量统计（§3.9①）未做~~ **已完成（2026-09-04，L2 增量 + 全量列举校准，未复用 scrub 遍历）**
 2. 超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）
 3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
 4. builtin/seastar TLS + 证书热重载（§4.1）
@@ -474,12 +492,12 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）
 8. ~~tiered 扫描增量化 + prefix 策略（§3.6）~~ **已完成（2026-09-02，含全部七项）**
 9. 故障注入体系 + soak（§6.1）；traceparent 透传（§5.4）
-10. install target + CPack（§6.3）；审计日志（§3.9④）
+10. install target + CPack（§6.3）；~~审计日志（§3.9④）~~ **已完成（2026-09-04）**
 
 ### P3 — 长期 / 架构级（先想清目标场景再动）
 
 1. xlocalfs 单流多在途流水线 + fixed buffers（§3.4）
-2. 配额 → 租户实体化（§3.9②③）
+2. ~~配额 → 租户实体化（§3.9②③）~~ **已完成（2026-09-04，§3.9 四项全部）**
 3. ~~STS 会话凭证（§2.6）~~ **已完成（2026-08-28）**
 4. ~~TiKV 事务层生产化 / 多网关 read-lease / meta 在线备份（§3.7）~~ **已完成（2026-09-03，§3.7 全部五项）**；meta 增量备份/PITR 留作后续
 5. versioning（duostore 侧切入）、SSE-C/SSE-S3（§2.2/§7）

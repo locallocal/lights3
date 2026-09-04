@@ -157,10 +157,11 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 
 ## 3. `s3adm` —— 运维 CLI
 
-`src/tools/s3adm*.cc`，构建产物与 `lights3` 同目录。三个命令组加一个叶子
-命令：`cred`（凭证管理面）、`website`（桶静态网站配置）、`bench`（压测）、
-`fsck`（在线对象校验）。全部子命令以 SigV4 自签名直连 lights3 的 HTTP
-端点，无需 aws cli。
+`src/tools/s3adm*.cc`，构建产物与 `lights3` 同目录。命令组：`cred`（凭证
+管理面）、`website`（桶静态网站配置）、`bench`（压测）、`fsck`（在线对象
+校验）、`quota`（桶配额）、`tenant`（租户与桶归属）、`usage`（用量计数器，
+roadmap §3.9，见 [multi-tenancy.md](multi-tenancy.md)）。全部子命令以 SigV4
+自签名直连 lights3 的 HTTP 端点，无需 aws cli。
 
 ### 3.1 连接与凭证选项（所有叶子子命令共有）
 
@@ -172,9 +173,12 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 | `--insecure` | false | https 跳过证书校验（自签名部署） |
 | `--timeout-sec=<n>` | 10 | 连接/读/写超时 |
 
-`cred` 与 `website` 要求 **root 静态凭证**（配置文件 `auth.credentials` 中的
-条目，见 [credential-management.md §3](credential-management.md)），租户
-凭证调用会得到 403。`bench` 用任意有权访问目标桶的凭证即可。
+`website`、`quota set/clear`、`tenant` 的变更操作要求 **root 静态凭证**
+（配置文件 `auth.credentials` 中的条目，见
+[credential-management.md §3](credential-management.md)）；`cred`、
+`tenant list/get`、`usage` 也接受**租户 admin**（作用域限于本租户，
+[multi-tenancy.md §4.4](multi-tenancy.md)）；其它凭证调用会得到 403。
+`bench` 用任意有权访问目标桶的凭证即可。
 
 ```bash
 export LIGHTS3_ADMIN_AK=AKIDEXAMPLE
@@ -188,8 +192,9 @@ export LIGHTS3_ADMIN_SK=my-secret
 ```text
 s3adm cred list                          列出全部凭证（SK 掩码；含静态/文件/动态三来源）
 s3adm cred get <ak> [-s|--show-secret]   查询单个凭证；--show-secret 返回明文 SK（仅动态/文件凭证，服务端记审计日志）
-s3adm cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>]
-                                         生成一对 AK/SK（唯一一次返回完整 SK）
+s3adm cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>] [-t|--tenant=<id>] [-r|--role=user|admin]
+                                         生成一对 AK/SK（唯一一次返回完整 SK）；--tenant 归属租户（租户 admin 调用时
+                                         服务端固定为本租户，可省略），--role=admin 授予本租户管理面
 s3adm cred delete <ak>                   吊销动态凭证（静态凭证归配置文件管，服务端拒绝）
 ```
 
@@ -203,6 +208,7 @@ s3adm cred create -c ci-runner -p @policies/ci.json
 s3adm cred get L3AK7Q2MXX5EIY4BJZW3 --show-secret
 s3adm cred list --endpoint=https://s3.example.com --insecure
 s3adm cred delete L3AK7Q2MXX5EIY4BJZW3
+s3adm cred create --tenant=acme --role=admin --comment='acme operator'
 ```
 
 ### 3.3 `website` —— 桶静态网站配置
@@ -287,6 +293,64 @@ GET 之间被删除的对象）。退出码：`0` 干净；`1` 有 mismatch 或�
 ```bash
 s3adm fsck my-bucket --endpoint=https://s3.example.com
 s3adm fsck my-bucket --prefix=photos/ --max-mbps=50
+```
+
+### 3.6 `quota` —— 桶配额
+
+操作 `?quota` 子资源（[multi-tenancy.md §3](multi-tenancy.md)）。`set` 整体
+替换限额，至少一轴 > 0；`get` 任何能访问该桶的凭证可用，`set`/`clear` root
+专属。超限的写请求得 `QuotaExceeded`(403)。
+
+```text
+s3adm quota get <bucket>                                    打印配额 XML（未配置 404 → 退出码 1）
+s3adm quota set <bucket> [-b|--max-bytes=<sz>] [-o|--max-objects=<n>]
+                                                            设置/替换配额；sz 接受 KiB/MiB/GiB 后缀，0 = 该轴不限
+s3adm quota clear <bucket>                                  删除配额（幂等）
+```
+
+```bash
+s3adm quota set logs --max-bytes=50GiB --max-objects=1000000
+s3adm quota get logs
+s3adm quota clear logs
+```
+
+### 3.7 `tenant` —— 租户与桶归属
+
+操作 `/-/admin/tenants`（[multi-tenancy.md §6](multi-tenancy.md)）。变更
+root 专属；`list`/`get` 租户 admin 可查本租户。响应 JSON 原样输出。
+
+```text
+s3adm tenant list                                            列出租户（含配额、所有桶、聚合用量、凭证数）
+s3adm tenant get <id>                                        单个租户
+s3adm tenant create <id> [--display-name=<s>] [--max-bytes=<sz>] [--max-objects=<n>] [--max-buckets=<n>]
+                                                             创建；id 形如 [a-z0-9][a-z0-9._-]{0,63}
+s3adm tenant update <id> [--display-name=<s>] [配额三项 | --clear-quota]
+                                                             配额整体替换：未给出的轴变为不限
+s3adm tenant delete <id>                                     仍拥有桶或凭证时被拒（409）
+s3adm tenant assign <id> <bucket> [--force]                  把已有桶归给租户；已属他租户须 --force
+s3adm tenant unassign <id> <bucket>                          解除归属（桶变为未归属）
+```
+
+```bash
+s3adm tenant create acme --display-name='ACME Corp' --max-bytes=1TiB --max-buckets=20
+s3adm tenant assign acme legacy-logs
+s3adm tenant get acme
+```
+
+### 3.8 `usage` —— 用量计数器
+
+读取 `/-/admin/usage`（[multi-tenancy.md §2](multi-tenancy.md)）。root 看
+全部桶，租户 admin 看本租户的桶；`--rescan` 对单个桶同步做一次全量计数并
+打印结果（`usage.enabled=false` 时拒绝）。
+
+```text
+s3adm usage [bucket] [-r|--rescan] [-t|--tenant=<id>]
+```
+
+```bash
+s3adm usage                       # 全部桶：objects / bytes / mpu_bytes / scanned_at
+s3adm usage --tenant=acme         # 只看 acme 所有的桶（root）
+s3adm usage logs --rescan         # 立即重算 logs 桶
 ```
 
 ## 4. 新增子命令的约定

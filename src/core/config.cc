@@ -442,6 +442,31 @@ Config Config::from_string(const std::string& text) {
         // Upper bound one week: beyond that the operator almost certainly wanted "off" (0)
         check_range("lifecycle.scan_interval", cfg.lifecycle.scan_interval_sec, 0, 604800);
     }
+    if (auto* us = root.find("usage")) {
+        if (std::string v = us->get("enabled"); !v.empty()) cfg.usage.enabled = parse_bool(v);
+        if (std::string v = us->get("flush_interval"); !v.empty())
+            cfg.usage.flush_interval_sec = parse_duration_sec(v);
+        if (std::string v = us->get("reconcile_interval"); !v.empty())
+            cfg.usage.reconcile_interval_sec = parse_duration_sec(v);
+        if (std::string v = us->get("reconcile"); !v.empty()) cfg.usage.reconcile = parse_bool(v);
+        check_range("usage.flush_interval", cfg.usage.flush_interval_sec, 0, 86400);
+        // Same one-week ceiling as lifecycle.scan_interval: beyond it the operator meant "off"
+        check_range("usage.reconcile_interval", cfg.usage.reconcile_interval_sec, 0, 604800);
+    }
+    if (auto* au = root.find("audit")) {
+        cfg.audit.path = au->get("path", cfg.audit.path);
+        if (std::string v = au->get("data_plane"); !v.empty())
+            cfg.audit.data_plane = parse_bool(v);
+        if (std::string v = au->get("max_size"); !v.empty()) cfg.audit.max_size = parse_size(v);
+        cfg.audit.max_files = to_int("audit.max_files", au->get("max_files"), cfg.audit.max_files);
+        // Lower bound keeps a rotation from thrashing on every line; upper bound guards a slipped unit
+        check_range("audit.max_size", static_cast<long long>(cfg.audit.max_size), 65536LL,
+                    64LL * 1'073'741'824LL);
+        check_range("audit.max_files", cfg.audit.max_files, 1, 1000);
+        // data_plane without a file is a knob that looks configured but records nothing
+        if (cfg.audit.path.empty() && cfg.audit.data_plane)
+            throw std::runtime_error("config: audit.data_plane requires audit.path");
+    }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
     // parse_level in app.cc maps anything unknown to Info, so a misspelled level
     // ("warning", "trace") would silently downgrade — the operator believes debug

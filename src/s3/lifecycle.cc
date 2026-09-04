@@ -4,6 +4,7 @@
 
 #include "core/log.h"
 #include "s3/errors.h"
+#include "storage/multipart.h"
 
 namespace lights3::s3 {
 
@@ -73,7 +74,17 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
                             if (now() - u.initiated < rule.abort_incomplete_days * kDay)
                                 continue;
                             try {
+                                // Usage accounting (roadmap §3.9 ①): in-flight bytes leave with the upload
+                                int64_t stored = 0;
+                                if (usage_ && usage_->enabled()) {
+                                    storage::ListPartsOptions popt;
+                                    popt.max_parts = storage::kMaxParts;
+                                    auto parts = co_await backend.list_parts(bucket, u.key,
+                                                                             u.upload_id, popt);
+                                    for (auto& p : parts.parts) stored += int64_t(p.size);
+                                }
                                 co_await backend.abort_multipart(bucket, u.key, u.upload_id);
+                                if (usage_) usage_->apply(bucket, 0, 0, -stored);
                                 ++stats.uploads_aborted;
                             } catch (const std::exception& e) {
                                 // Raced with a concurrent complete/abort: skip, next
@@ -97,6 +108,7 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
                                 continue;
                             try {
                                 co_await backend.delete_object(bucket, o.key);
+                                if (usage_) usage_->apply(bucket, -1, -int64_t(o.size));
                                 ++stats.objects_expired;
                             } catch (const std::exception& e) {
                                 LOG_WARN("lifecycle: expire {}/{} failed: {}", bucket, o.key,

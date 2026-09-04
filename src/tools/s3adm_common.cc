@@ -150,6 +150,17 @@ httplib::Result SignedClient::post_json(const std::string& path, const std::stri
                      "application/json");
 }
 
+httplib::Result SignedClient::put_json(const std::string& path, const std::string& body,
+                                       const std::string& query) {
+    return cli_.Put(path + (query.empty() ? "" : "?" + query),
+                    sign("PUT", path, query, util::sha256_hex(body)), body, "application/json");
+}
+
+httplib::Result SignedClient::post_empty(const std::string& path, const std::string& query) {
+    return cli_.Post(path + (query.empty() ? "" : "?" + query),
+                     sign("POST", path, query, util::sha256_hex("")), "", "application/json");
+}
+
 httplib::Result SignedClient::del(const std::string& path, const std::string& query) {
     return cli_.Delete(path + (query.empty() ? "" : "?" + query),
                        sign("DELETE", path, query, ""));

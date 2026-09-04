@@ -14,6 +14,7 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | Tagging | GetObjectTagging / PutObjectTagging / DeleteObjectTagging | `x-amz-tagging` at write time persists on every backend; `x-amz-tagging-count` echoed; in-place tag mutation works on memory/localfs/xlocalfs/tiered/cloudproxy, duostore answers an honest 501 (no meta-only update primitive) |
 | CORS | GetBucketCors / PutBucketCors / DeleteBucketCors + OPTIONS preflight | Root only (same two-tier model as ?website); rules persist to `.sys/cors/<bucket>`; preflight is dispatched **before** signature verification (browsers never sign OPTIONS); actual requests (success and error responses alike) get Allow-Origin/Expose-Headers/Vary injected |
 | Lifecycle | GetBucketLifecycle / PutBucketLifecycle / DeleteBucketLifecycle | Root only; minimal subset: Expiration.Days + AbortIncompleteMultipartUpload.DaysAfterInitiation (prefix filters); enforced periodically (`lifecycle.scan_interval`, default 1h, 0 = off); Transitions/tag filters/Date forms → 501 |
+| Quota / tenancy | GetBucketQuota / PutBucketQuota / DeleteBucketQuota (`?quota`, this implementation's own XML) | Bucket-level `MaxBytes`/`MaxObjects` (PUT/DELETE root only); usage counters are gateway-maintained and periodically recounted; writes over the limit get `QuotaExceeded` (403), multipart parts count toward usage and Complete is refused only when the finished object still would not fit (the upload is kept); tenant credentials (`tenant`/`role` fields) see only their tenant's buckets and ListBuckets reports the tenant as `Owner`; admin plane `/-/admin/tenants`, `/-/admin/usage`; JSON-lines audit log. See [multi-tenancy.md](multi-tenancy.md) |
 | STS | AssumeRole | `POST /` (path-style deployments) with a form body, SigV4 service scope `sts`; session credentials (L3SA-prefixed AK/SK/token, TTL 900–43200s) inherit the **caller's** policy (no role catalog — a session can never exceed the identity that minted it); in-memory single-instance, sessions cannot assume again |
 | List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner; V1 honours only marker, V2 only continuation-token and start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated; both accept encoding-type, and uploads accepts arbitrary delimiters); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder`; per-part checksums persist with the part records, complete computes the composite (`-N`) checksum from **verified** stored values (COMPOSITE; CRC64NVME/explicit FULL_OBJECT → 501) and cross-checks any Checksum* claims in the XML (mismatch → BadDigest) |
@@ -155,6 +156,11 @@ access log and the `x-amz-request-id` response header, serving as the correlatio
 key for end-to-end troubleshooting.
 
 Unknown exceptions → `InternalError` (500); the log records the full stack trace,
+
+Error codes specific to this implementation (no AWS counterpart): `QuotaExceeded`
+(403, quotas), `NoSuchQuotaConfiguration` (404), `NoSuchTenant` (404),
+`TenantAlreadyExists` (409), `TenantNotEmpty` (409); semantics in
+[multi-tenancy.md](multi-tenancy.md).
 and the response leaks no internal information.
 
 ## 6. Consistency and Semantics (Promises to Clients)

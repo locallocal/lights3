@@ -308,7 +308,14 @@ add_library(lights3_core STATIC
   src/s3/website_store.cc
   src/s3/cors_store.cc
   src/s3/lifecycle.cc
+  src/s3/audit.cc
+  src/s3/quota.cc
+  src/s3/tenant.cc
+  src/s3/usage.cc
   src/s3/handlers/admin_credentials.cc
+  src/s3/handlers/admin_tenants.cc
+  src/s3/handlers/bucket_quota.cc
+  src/s3/handlers/quota_gate.cc
   src/s3/handlers/bucket_website.cc
   src/s3/handlers/bucket_cors.cc
   src/s3/handlers/bucket_lifecycle.cc
@@ -469,7 +476,9 @@ target_link_libraries(lights3 PRIVATE lights3_core ccmd::ccmd)
 # httplib/cloudproxy it automatically degrades to http-only
 add_executable(s3adm src/tools/s3adm.cc src/tools/s3adm_common.cc
                      src/tools/s3adm_cred.cc src/tools/s3adm_bench.cc
-                     src/tools/s3adm_website.cc src/tools/s3adm_fsck.cc)
+                     src/tools/s3adm_website.cc src/tools/s3adm_fsck.cc
+                     src/tools/s3adm_tenant.cc src/tools/s3adm_quota.cc
+                     src/tools/s3adm_usage.cc)
 target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(s3adm SYSTEM PRIVATE third_party)
@@ -491,6 +500,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_tiered.cc
     tests/unit/test_cloudproxy.cc
     tests/unit/test_service.cc
+    tests/unit/test_tenancy.cc
     tests/unit/test_http_drivers.cc
     tests/unit/test_admission.cc
   )

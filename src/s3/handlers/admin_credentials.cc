@@ -58,6 +58,10 @@ json to_json(const CredentialInfo& c, bool with_secret) {
     if (!c.is_static()) {
         if (!c.comment.empty()) j["comment"] = c.comment;
         if (c.policy) j["policy"] = json::parse(policy_to_json(*c.policy));
+        if (!c.tenant.empty()) {  // docs/multi-tenancy.md §4
+            j["tenant"] = c.tenant;
+            j["role"] = c.tenant_admin ? "admin" : "user";
+        }
     }
     return j;
 }
@@ -67,6 +71,8 @@ json to_json(const CredentialInfo& c, bool with_secret) {
 struct CreateRequest {
     std::string comment;
     std::optional<CredentialPolicy> policy;
+    std::string tenant;        // docs/multi-tenancy.md §4: owning tenant (optional)
+    bool tenant_admin = false;  // "role": "admin"
 };
 
 Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
@@ -98,10 +104,20 @@ Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
             out.comment = v.get<std::string>();  // body takes precedence over ?comment=
         } else if (k == "policy") {
             out.policy = parse_policy_json(v.dump());
+        } else if (k == "tenant") {
+            if (!v.is_string())
+                throw S3Error(S3ErrorCode::InvalidRequest, "tenant must be a string.");
+            out.tenant = v.get<std::string>();
+        } else if (k == "role") {
+            if (!v.is_string())
+                throw S3Error(S3ErrorCode::InvalidRequest, "role must be a string.");
+            out.tenant_admin = parse_credential_role(v.get<std::string>());
         } else {
             throw S3Error(S3ErrorCode::InvalidRequest, "unknown field '" + k + "'.");
         }
     }
+    if (out.tenant_admin && out.tenant.empty())
+        throw S3Error(S3ErrorCode::InvalidRequest, "role requires a tenant.");
     co_return out;
 }
 
@@ -111,12 +127,44 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                                                       std::string& access_key) {
     constexpr std::string_view kBase = "/-/admin/credentials";
     try {
-        access_key = auth_.verify(req).access_key;
-        // Two-tier model (docs/credential-management.md §3): only root (static credentials) may use this; with auth
-        // disabled, verify returns an empty ak, which also falls to AccessDenied -- no root, no admin plane
-        if (!cred_store_ || !cred_store_->is_root(access_key))
+        auto ident = auth_.verify(req);
+        access_key = ident.access_key;
+        // Tiered model (docs/credential-management.md §3, docs/multi-tenancy.md §4.4): root
+        // (static credentials) manages everything; a tenant admin manages the credentials
+        // of its own tenant only. With auth disabled, verify returns an empty ak, which
+        // falls to AccessDenied -- no root, no admin plane
+        bool root = cred_store_ && cred_store_->is_root(access_key);
+        bool tenant_admin = cred_store_ && !root && ident.tenant_admin && !ident.tenant.empty();
+        if (!root && !tenant_admin)
             throw S3Error(S3ErrorCode::AccessDenied,
-                          "Admin API requires a root (statically configured) credential.");
+                          "Admin API requires a root (statically configured) credential "
+                          "or a tenant admin.");
+        const std::string& own = ident.tenant;  // empty for root
+        auto visible = [&](const CredentialInfo& c) { return root || c.tenant == own; };
+        // A foreign credential reads as nonexistent: the admin plane must not let a
+        // tenant enumerate other tenants' access keys
+        auto require_visible = [&](const std::string& ak) {
+            auto c = cred_store_->find(ak);
+            if (!c || !visible(*c))
+                throw S3Error(S3ErrorCode::InvalidAccessKeyId,
+                              "The specified access key does not exist.");
+            return *c;
+        };
+        auto require_tenant_exists = [&](const std::string& id) {
+            if (!tenants_ || !tenants_->find(id))
+                throw S3Error(S3ErrorCode::NoSuchTenant,
+                              "Tenant '" + id + "' does not exist.");
+        };
+        auto audit_event = [&](std::string_view event, std::string_view target,
+                               std::string detail) {
+            AuditEvent e;
+            e.event = event;
+            e.actor = access_key;
+            e.tenant = own;
+            e.target = target;
+            e.detail = detail;
+            audit(e);
+        };
 
         // Subpath: /-/admin/credentials[/{ak}]
         std::string rest = req.path.substr(kBase.size());
@@ -126,27 +174,43 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
 
         if (req.method == "POST" && rest.empty()) {
             auto body = co_await parse_create_body(req);
+            if (!root) {
+                // A tenant admin mints credentials inside its own tenant only
+                if (!body.tenant.empty() && body.tenant != own)
+                    throw S3Error(S3ErrorCode::AccessDenied,
+                                  "Tenant admins may only create credentials for their own "
+                                  "tenant.");
+                body.tenant = own;
+            } else if (!body.tenant.empty()) {
+                require_tenant_exists(body.tenant);
+            }
             auto c = co_await cred_store_->generate(std::move(body.comment),
-                                                    std::move(body.policy));
+                                                    std::move(body.policy), body.tenant,
+                                                    body.tenant_admin);
+            audit_event("cred.create", c.access_key,
+                        c.tenant.empty() ? "" : "tenant=" + c.tenant +
+                                                   (c.tenant_admin ? " role=admin" : ""));
             co_return json_response(201, to_json(c, /*with_secret=*/true));
         }
         if (req.method == "GET" && rest.empty()) {
             json j;
             j["credentials"] = json::array();
-            for (auto& c : cred_store_->list()) j["credentials"].push_back(to_json(c, false));
+            for (auto& c : cred_store_->list())
+                if (visible(c)) j["credentials"].push_back(to_json(c, false));
             co_return json_response(200, j);
         }
         if (req.method == "GET") {
-            auto c = cred_store_->find(rest);
-            if (!c)
-                throw S3Error(S3ErrorCode::InvalidAccessKeyId,
-                              "The specified access key does not exist.");
+            auto c = require_visible(rest);
             bool show = req.query_get("show-secret").value_or("") == "true";
             // Retrieving the plaintext SK is highly sensitive: leave an audit trail whether or not it is granted
-            if (show)
-                LOG_WARN("admin: plaintext secret requested for {} by root {}{}", c->access_key,
-                         access_key, c->is_static() ? " (static credential — refused)" : "");
-            co_return json_response(200, to_json(*c, show));
+            if (show) {
+                LOG_WARN("admin: plaintext secret requested for {} by {} {}{}", c.access_key,
+                         root ? "root" : "tenant admin", access_key,
+                         c.is_static() ? " (static credential — refused)" : "");
+                audit_event("cred.show_secret", c.access_key,
+                            c.is_static() ? "refused (static)" : "granted");
+            }
+            co_return json_response(200, to_json(c, show));
         }
         if (req.method == "PUT" && !rest.empty()) {
             // Update a dynamic credential in place (roadmap §2.5): fields present in the
@@ -175,6 +239,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
             if (!j.is_object())
                 throw S3Error(S3ErrorCode::InvalidRequest,
                               "Request body must be a JSON object.");
+            require_visible(rest);
             CredentialStore::Update upd;
             for (auto& [k, v] : j.items()) {
                 if (k == "comment") {
@@ -184,19 +249,40 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                 } else if (k == "policy") {
                     upd.set_policy = true;
                     if (!v.is_null()) upd.policy = parse_policy_json(v.dump());
+                } else if (k == "tenant") {
+                    // Moving a credential between tenants is an operator action
+                    if (!root)
+                        throw S3Error(S3ErrorCode::AccessDenied,
+                                      "Only root may change a credential's tenant.");
+                    if (v.is_null()) {
+                        upd.tenant = "";
+                    } else {
+                        if (!v.is_string())
+                            throw S3Error(S3ErrorCode::InvalidRequest,
+                                          "tenant must be a string or null.");
+                        upd.tenant = v.get<std::string>();
+                        if (!upd.tenant->empty()) require_tenant_exists(*upd.tenant);
+                    }
+                } else if (k == "role") {
+                    if (!v.is_string())
+                        throw S3Error(S3ErrorCode::InvalidRequest, "role must be a string.");
+                    upd.tenant_admin = parse_credential_role(v.get<std::string>());
                 } else {
                     throw S3Error(S3ErrorCode::InvalidRequest, "unknown field '" + k + "'.");
                 }
             }
-            if (!upd.comment && !upd.set_policy)
+            if (!upd.comment && !upd.set_policy && !upd.tenant && !upd.tenant_admin)
                 throw S3Error(S3ErrorCode::InvalidRequest,
-                              "Update requires at least one of comment or policy.");
+                              "Update requires at least one of comment, policy, tenant or role.");
             auto c = co_await cred_store_->update(rest, std::move(upd));
-            LOG_INFO("admin: credential {} updated by root {}", rest, access_key);
+            LOG_INFO("admin: credential {} updated by {}", rest, access_key);
+            audit_event("cred.update", rest, text);
             co_return json_response(200, to_json(c, /*with_secret=*/false));
         }
         if (req.method == "DELETE" && !rest.empty()) {
+            require_visible(rest);
             co_await cred_store_->remove(rest);
+            audit_event("cred.delete", rest, "");
             http::HttpResponse resp;
             resp.status = 204;
             co_return resp;

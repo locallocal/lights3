@@ -120,6 +120,15 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     if (result.is_truncated)
         w.element(v2 ? "NextContinuationToken" : "NextMarker",
                   v2 ? token_encode(result.next_token) : enc(result.next_token));
+    // Owner (fetch-owner): the bucket's tenant when it has one, else the legacy identity
+    std::string owner_id(kOwnerId), owner_name(kOwnerId);
+    if (tenants_) {
+        if (std::string t = tenants_->owner_of(bucket); !t.empty()) {
+            owner_id = t;
+            auto rec = tenants_->find(t);
+            owner_name = rec ? rec->display_name : t;
+        }
+    }
     for (auto& o : result.objects) {
         w.open("Contents");
         w.element("Key", enc(o.key));
@@ -129,8 +138,8 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
         w.element("StorageClass", "STANDARD");
         if (fetch_owner) {
             w.open("Owner");
-            w.element("ID", std::string(kOwnerId));
-            w.element("DisplayName", std::string(kOwnerId));
+            w.element("ID", owner_id);
+            w.element("DisplayName", owner_name);
             w.close();
         }
         w.close();

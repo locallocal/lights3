@@ -76,6 +76,18 @@ void Application::start_server() {
     lifecycle_store_ = sync_wait(s3::LifecycleStore::load(router.default_backend()));
     lifecycle_runner_ = std::make_unique<s3::LifecycleRunner>(
         storage::BucketRouter::build(cfg_.buckets, backends_), lifecycle_store_);
+    // roadmap §3.9 (docs/multi-tenancy.md): audit file, usage counters, quotas,
+    // tenants + bucket ownership. All persisted next to the other .sys records
+    audit_ = s3::AuditLog::open(cfg_.audit);
+    usage_ = sync_wait(s3::UsageTracker::load(storage::BucketRouter::build(cfg_.buckets, backends_),
+                                              cfg_.usage, metrics_));
+    quota_store_ = sync_wait(s3::QuotaStore::load(router.default_backend()));
+    tenant_store_ = sync_wait(s3::TenantStore::load(router.default_backend()));
+    owner_store_ = sync_wait(s3::OwnerStore::load(router.default_backend()));
+    tenants_ = std::make_shared<s3::TenantRegistry>(tenant_store_, owner_store_);
+    lifecycle_runner_->set_usage_tracker(usage_);
+    if (!cfg_.usage.enabled)
+        LOG_WARN("usage accounting is disabled: bucket/tenant quotas are not enforced");
     service_ = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
                                                cfg_.http.base_domain);
     service_->set_pool_stats([pool = pool_] { return pool->stats(); });
@@ -86,6 +98,10 @@ void Application::start_server() {
     service_->set_website_store(website_store_);
     service_->set_cors_store(cors_store_);
     service_->set_lifecycle_store(lifecycle_store_);
+    service_->set_usage_tracker(usage_);
+    service_->set_quota_store(quota_store_);
+    service_->set_tenant_registry(tenants_);
+    service_->set_audit_log(audit_);
     if (!cfg_.website.buckets.empty() && !auth_enabled)
         LOG_WARN("website: buckets configured but authentication is disabled; "
                  "all buckets are already anonymously accessible");
@@ -97,6 +113,11 @@ void Application::start_server() {
     website_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     cors_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     lifecycle_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    quota_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    tenant_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    owner_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    // Counter flush / reconcile / multi-instance adoption (usage.*, auth.sync_interval)
+    usage_->start_background(pool_, cfg_.auth.sync_interval_sec);
     // Enforcement scan (lifecycle.scan_interval, 0 = disabled)
     lifecycle_runner_->start_background(pool_, cfg_.lifecycle.scan_interval_sec);
 
@@ -219,6 +240,10 @@ void Application::shutdown() noexcept {
         if (cors_store_) cors_store_->shutdown_background();
         if (lifecycle_runner_) lifecycle_runner_->shutdown_background();
         if (lifecycle_store_) lifecycle_store_->shutdown_background();
+        if (usage_) usage_->shutdown_background();  // final counter flush happens here
+        if (quota_store_) quota_store_->shutdown_background();
+        if (tenant_store_) tenant_store_->shutdown_background();
+        if (owner_store_) owner_store_->shutdown_background();
     } catch (const std::exception& e) {
         LOG_ERROR("store background shutdown failed: {}", e.what());
     }
@@ -238,6 +263,12 @@ void Application::shutdown() noexcept {
     cors_store_.reset();
     lifecycle_runner_.reset();
     lifecycle_store_.reset();
+    tenants_.reset();
+    owner_store_.reset();
+    tenant_store_.reset();
+    quota_store_.reset();
+    usage_.reset();
+    audit_.reset();
     backends_.clear();
     if (pool_) {
         try {

@@ -155,12 +155,22 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 ./build/lights3 tier quarantine purge tierdata archive photos/2024/a.jpg -c /etc/lights3/lights3.yaml
 ```
 
+### 2.5 配置热重载：`SIGHUP`
+
+`kill -HUP <pid>` 让服务进程重新读取 `--config` 指定的文件（roadmap §4.4，
+[config-reload.md](config-reload.md)）：整体校验后只应用可热更新子集（日志级别、
+`request_timeout`/`transfer_stall_timeout`、`max_inflight_requests`、`min_part_size`、
+限流、bucket 路由规则、TLS 证书内容），其余改动逐项 WARN "需重启"；文件校验失败
+则一字不改。systemd 单元可配 `ExecReload=/bin/kill -HUP $MAINPID`。同一动作也可经
+`s3adm reload`（§3.9）触发并拿到报告。
+
 ## 3. `s3adm` —— 运维 CLI
 
 `src/tools/s3adm*.cc`，构建产物与 `lights3` 同目录。命令组：`cred`（凭证
 管理面）、`website`（桶静态网站配置）、`bench`（压测）、`fsck`（在线对象
 校验）、`quota`（桶配额）、`tenant`（租户与桶归属）、`usage`（用量计数器，
-roadmap §3.9，见 [multi-tenancy.md](multi-tenancy.md)）。全部子命令以 SigV4
+roadmap §3.9，见 [multi-tenancy.md](multi-tenancy.md)）、`reload`（配置热重载，
+[config-reload.md](config-reload.md)）。全部子命令以 SigV4
 自签名直连 lights3 的 HTTP 端点，无需 aws cli。
 
 ### 3.1 连接与凭证选项（所有叶子子命令共有）
@@ -351,6 +361,20 @@ s3adm usage [bucket] [-r|--rescan] [-t|--tenant=<id>]
 s3adm usage                       # 全部桶：objects / bytes / mpu_bytes / scanned_at
 s3adm usage --tenant=acme         # 只看 acme 所有的桶（root）
 s3adm usage logs --rescan         # 立即重算 logs 桶
+```
+
+### 3.9 `reload` —— 配置热重载
+
+`POST /-/admin/config/reload`（root 专属）的 CLI 包装，与 `SIGHUP` 同一条路径，
+但把结果返回给调用者：`applied`（已生效项）与 `requires_restart`（改了但需重启
+的键）。配置校验失败时服务端回 400、命令退出码 1。
+
+```text
+s3adm reload
+```
+
+```bash
+s3adm reload --endpoint=https://s3.example.com
 ```
 
 ## 4. 新增子命令的约定

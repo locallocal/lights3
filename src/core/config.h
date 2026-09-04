@@ -247,6 +247,16 @@ struct Config {
     static Config from_string(const std::string& yaml_text);
 };
 
+// Outcome of a configuration hot reload (roadmap §4.4, docs/config-reload.md):
+// what was applied at runtime, what changed but needs a restart, or why the new
+// file was refused (the old configuration then stays in force, untouched)
+struct ConfigReloadReport {
+    bool ok = false;
+    std::string error;                         // parse/validation failure (nothing applied)
+    std::vector<std::string> applied;          // "log.level: info -> debug"
+    std::vector<std::string> requires_restart; // "http.port" ...
+};
+
 // Parsing helpers for values like "16KiB" / "1MB" / "60s" / "true"
 size_t parse_size(const std::string& s);
 int parse_duration_sec(const std::string& s);

@@ -624,6 +624,7 @@ public:
 
     uint16_t bound_port() const override { return port_; }
     ConnStats stats() const override { return shared_->counters.snapshot(); }
+    bool reload_tls() override { return shared_->tls && shared_->tls->reload_now(); }
 
     void run() override {
         auto& sh = *shared_;

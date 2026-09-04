@@ -272,6 +272,7 @@ public:
 
     uint16_t bound_port() const override { return port_; }
     ConnStats stats() const override { return counters_.snapshot(); }
+    bool reload_tls() override { return tls_holder_ && tls_holder_->reload_now(); }
 
     void run() override {
         int n = std::max(1, cfg_.io_threads);

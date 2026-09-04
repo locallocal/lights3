@@ -482,7 +482,7 @@ add_executable(s3adm src/tools/s3adm.cc src/tools/s3adm_common.cc
                      src/tools/s3adm_cred.cc src/tools/s3adm_bench.cc
                      src/tools/s3adm_website.cc src/tools/s3adm_fsck.cc
                      src/tools/s3adm_tenant.cc src/tools/s3adm_quota.cc
-                     src/tools/s3adm_usage.cc)
+                     src/tools/s3adm_usage.cc src/tools/s3adm_reload.cc)
 target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(s3adm SYSTEM PRIVATE third_party)
@@ -507,6 +507,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_tenancy.cc
     tests/unit/test_tls.cc
     tests/unit/test_ratelimit.cc
+    tests/unit/test_reload.cc
     tests/unit/test_http_drivers.cc
     tests/unit/test_admission.cc
   )

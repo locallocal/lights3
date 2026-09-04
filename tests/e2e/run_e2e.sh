@@ -674,6 +674,33 @@ s3curl -o /dev/null -X DELETE "$BASE/qbkt/ten"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt/second"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt"
 
+# ---------- roadmap §4.4: config hot reload (SIGHUP + s3adm reload, docs/config-reload.md) ----------
+sed -i 's/^  level: info$/  level: debug/' "$WORK/config.yaml"
+kill -HUP "$SRV_PID"
+for _ in $(seq 1 50); do
+    grep -q "config reload: applied log.level: info -> debug" "$WORK/server.log" && break
+    sleep 0.1
+done
+check "SIGHUP applies log.level" "0" \
+    "$(grep -q 'config reload: applied log.level: info -> debug' "$WORK/server.log"; echo $?)"
+sed -i 's/^  level: debug$/  level: info/' "$WORK/config.yaml"
+# 600s keeps request_timeout >= transfer_stall_timeout (300s default): the reload
+# runs the full startup validation and refuses inconsistent pairs
+sed -i 's/^  port: 0$/  port: 0\n  request_timeout: 600s/' "$WORK/config.yaml"
+RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
+check "admin reload reports applied request_timeout" "0" \
+    "$(echo "$RELOAD_OUT" | grep -q 'http.request_timeout: 300 -> 600'; echo $?)"
+check "admin reload denied for non-root" "403" \
+    "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/config/reload")"
+if [[ -x "$S3ADM" ]]; then
+    check "s3adm reload" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" reload --endpoint="$BASE" --region="$REGION" | grep -q '"ok": true'; echo $?)"
+fi
+sed -i 's/^  port: 0$/  port: 0\n  idle_timeout: 0s/' "$WORK/config.yaml"
+check "invalid config refused on reload" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/config/reload")"
+sed -i '/^  idle_timeout: 0s$/d' "$WORK/config.yaml"
+sed -i '/^  request_timeout: 600s$/d' "$WORK/config.yaml"  # restore for the restart phase
+
 # ---------- roadmap §4.2: L1 connection counters + rate-limit series on /-/metrics ----------
 METRICS_OUT=$(curl -s "$BASE/-/metrics")
 check "metrics: connection counters present" "0" \

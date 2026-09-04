@@ -17,6 +17,8 @@ public:
         spdlog::set_pattern("%Y-%m-%dT%H:%M:%S.%eZ %-5!l %v", spdlog::pattern_time_type::utc);
         spdlog::set_level(to_spdlog(lv));
     }
+    // Runtime change (config hot reload, roadmap §4.4)
+    static void set_level(LogLevel lv) { spdlog::set_level(to_spdlog(lv)); }
 
 private:
     static spdlog::level::level_enum to_spdlog(LogLevel lv) {

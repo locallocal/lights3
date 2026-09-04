@@ -10,6 +10,7 @@
 // main.cc and the unit tests assemble the same code.
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <utility>
@@ -64,16 +65,19 @@ private:
 // - The transfer stall guard (docs/archive/gaps.md §3.3) wraps both directions,
 //   installed at the L1/L2 boundary so it covers all four drivers at once;
 //   disabled when stall <= 0
+// stall_sec is read per request so a config hot reload (roadmap §4.4) can change
+// the transfer stall bound without rebuilding the handler chain
 inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
-                                      std::chrono::seconds stall,
+                                      std::shared_ptr<std::atomic<long>> stall_sec,
                                       std::shared_ptr<CancelSource> shutdown_src,
                                       Handler dispatch,
                                       uint64_t stall_min_progress =
                                           StallGuardReader::kMinProgressBytes) {
-    return [inflight, stall, shutdown_src, stall_min_progress,
+    return [inflight, stall_sec, shutdown_src, stall_min_progress,
             dispatch = std::move(dispatch)](HttpRequest req) -> Task<HttpResponse> {
         if (!req.cancel.valid()) req.cancel = shutdown_src->token();
         CancelToken tok = req.cancel;
+        std::chrono::seconds stall(stall_sec->load(std::memory_order_relaxed));
         try {
             auto permit = co_await inflight->acquire(tok);
             req.body = guard_stalls(std::move(req.body), stall, stall_min_progress);
@@ -95,6 +99,19 @@ inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
             co_return r;
         }
     };
+}
+
+// Fixed-stall convenience (tests / static assemblies)
+inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
+                                      std::chrono::seconds stall,
+                                      std::shared_ptr<CancelSource> shutdown_src,
+                                      Handler dispatch,
+                                      uint64_t stall_min_progress =
+                                          StallGuardReader::kMinProgressBytes) {
+    return make_admission_handler(std::move(inflight),
+                                  std::make_shared<std::atomic<long>>(stall.count()),
+                                  std::move(shutdown_src), std::move(dispatch),
+                                  stall_min_progress);
 }
 
 }  // namespace lights3::http

@@ -27,7 +27,7 @@ public:
     // the synchronous drivers this builds deep recursion of "finish one request ->
     // inline-run the next request", so production paths should pass the pool executor
     explicit AsyncSemaphore(long permits, IExecutor* resume_executor = nullptr)
-        : permits_(permits), exec_(resume_executor) {}
+        : permits_(permits), capacity_(permits), exec_(resume_executor) {}
     AsyncSemaphore(const AsyncSemaphore&) = delete;
 
     // Contract: no waiters may remain at destruction — resuming them would hand out
@@ -196,6 +196,44 @@ public:
         return Permit{this};
     }
 
+    // Configured capacity (runtime.max_inflight_requests); set_capacity resizes it
+    // live (config hot reload, roadmap §4.4): growing wakes queued waiters, shrinking
+    // lets the extra permits drain as in-flight requests finish (available() may go
+    // negative meanwhile — nothing new is admitted until it recovers)
+    long capacity() const {
+        std::lock_guard lk(m_);
+        return capacity_;
+    }
+    void set_capacity(long n) {
+        std::vector<std::shared_ptr<Waiter>> wake;
+        {
+            std::lock_guard lk(m_);
+            long delta = n - capacity_;
+            capacity_ = n;
+            if (delta <= 0) {
+                permits_ += delta;
+                return;
+            }
+            for (long i = 0; i < delta; ++i) {
+                std::shared_ptr<Waiter> next;
+                while (!waiters_.empty()) {
+                    auto w = std::move(waiters_.front());
+                    waiters_.pop_front();
+                    if (!w->claimed.exchange(true, std::memory_order_acq_rel)) {
+                        next = std::move(w);
+                        break;
+                    }
+                }
+                if (next) wake.push_back(std::move(next));
+                else ++permits_;
+            }
+        }
+        for (auto& w : wake) {
+            if (exec_) exec_->post(w->h);
+            else w->h.resume();
+        }
+    }
+
     long available() const {
         std::lock_guard lk(m_);
         return permits_;
@@ -257,6 +295,7 @@ private:
 
     mutable std::mutex m_;
     long permits_;
+    long capacity_ = 0;
     IExecutor* exec_;
     bool closed_ = false;
     std::deque<std::shared_ptr<Waiter>> waiters_;

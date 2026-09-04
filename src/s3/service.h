@@ -1,6 +1,7 @@
 // L2 entry point: S3Service::dispatch (auth -> routing -> handler -> error mapping)
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <span>
 #include <functional>
@@ -79,10 +80,19 @@ public:
     // Per-client rate limits (roadmap §4.2, docs/http-adapter.md §2.3): the IP
     // limiter is consulted before signature verification on every non-internal
     // request, the access-key limiter after it on the S3 plane. null = off
+    // Swappable at runtime (config hot reload): dispatch pins the limiter it admitted
+    // through for the request's lifetime, so a replaced instance outlives its tokens
     void set_rate_limiters(std::shared_ptr<RateLimiter> per_ip, std::shared_ptr<RateLimiter> per_ak) {
-        ip_limiter_ = std::move(per_ip);
-        ak_limiter_ = std::move(per_ak);
+        ip_limiter_.store(std::move(per_ip));
+        ak_limiter_.store(std::move(per_ak));
     }
+
+    // Config hot reload (roadmap §4.4): POST /-/admin/config/reload (root) runs the
+    // hook the app installs and renders its report as JSON
+    void set_reload_hook(std::function<ConfigReloadReport()> fn) { reload_hook_ = std::move(fn); }
+    // The router's rule table is shared with the app's copies; exposed so the
+    // reload path can swap it (storage::BucketRouter::update)
+    storage::BucketRouter& router() { return router_; }
 
     // Backend-level metrics registry (optional): rendered appended after the L2 request metrics
     void set_backend_metrics(std::shared_ptr<MetricsRegistry> m) {
@@ -96,14 +106,16 @@ public:
 
     // Per-request timeout (docs/archive/gaps.md §3.3): 0 = disabled. On expiry, cooperative cancellation interrupts the
     // whole handler chain; suspension points throw OperationCancelled -> 503
-    void set_request_timeout(std::chrono::milliseconds t) { request_timeout_ = t; }
+    void set_request_timeout(std::chrono::milliseconds t) {
+        request_timeout_ms_.store(t.count(), std::memory_order_relaxed);
+    }
 
     // Minimum multipart part size (docs/archive/gaps.md §5.7): defaults to AWS's 5MiB, 0 = unlimited.
     // A knob rather than hardcoded because toolchains in front of the gateway may not honor the rule
     // (bouncing small-part uploads costs more than making ops fix the tool), and so that a
     // "proxy to another lights3" deployment is not judged once per layer
-    void set_min_part_size(uint64_t n) { min_part_size_ = n; }
-    uint64_t min_part_size() const { return min_part_size_; }
+    void set_min_part_size(uint64_t n) { min_part_size_.store(n, std::memory_order_relaxed); }
+    uint64_t min_part_size() const { return min_part_size_.load(std::memory_order_relaxed); }
 
     // Static website hosting (docs/static-website.md): buckets accepting anonymous
     // GET/HEAD object reads, with index/error document semantics. Names are validated
@@ -258,6 +270,9 @@ private:
     // /-/admin/usage — root, or a tenant admin scoped to its own tenant
     Task<http::HttpResponse> admin_tenancy(http::HttpRequest& req, std::string& access_key,
                                            const RequestContext& ctx);
+    // handlers/admin_tenants.cc: POST /-/admin/config/reload (root only)
+    Task<http::HttpResponse> admin_config_reload(http::HttpRequest& req, std::string& access_key,
+                                                 const RequestContext& ctx);
 
     // ---- usage / quota / tenancy helpers (handlers/quota_gate.cc) ----
     // Size of the object currently under (bucket,key) when usage accounting is on;
@@ -324,9 +339,10 @@ private:
     std::function<AdmissionStats()> admission_stats_;
     std::function<TimerQueue::Stats()> timer_stats_;
     std::function<http::ConnStats()> conn_stats_;
-    std::shared_ptr<RateLimiter> ip_limiter_, ak_limiter_;
-    std::chrono::milliseconds request_timeout_{0};
-    uint64_t min_part_size_ = storage::kMinPartSize;
+    std::function<ConfigReloadReport()> reload_hook_;
+    std::atomic<std::shared_ptr<RateLimiter>> ip_limiter_, ak_limiter_;
+    std::atomic<int64_t> request_timeout_ms_{0};
+    std::atomic<uint64_t> min_part_size_{storage::kMinPartSize};
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off

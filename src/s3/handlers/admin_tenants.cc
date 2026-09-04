@@ -324,4 +324,50 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
     }
 }
 
+// POST /-/admin/config/reload (roadmap §4.4): root only; the app's hook re-reads
+// the file, applies the reloadable subset and reports the rest. The same path a
+// SIGHUP takes, exposed so `s3adm reload` can drive it and read the outcome
+Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req,
+                                                        std::string& access_key,
+                                                        const RequestContext& ctx) {
+    try {
+        auto ident = auth_.verify(req);
+        access_key = ident.access_key;
+        if (!is_root(access_key))
+            throw S3Error(S3ErrorCode::AccessDenied,
+                          "Reloading the configuration requires a root (statically "
+                          "configured) credential.");
+        if (req.method != "POST")
+            throw S3Error(S3ErrorCode::MethodNotAllowed,
+                          "The specified method is not allowed against this resource.");
+        if (!reload_hook_)
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          "Configuration reload is not available on this deployment.");
+        ConfigReloadReport r = reload_hook_();
+        json j;
+        j["ok"] = r.ok;
+        if (!r.error.empty()) j["error"] = r.error;
+        j["applied"] = r.applied;
+        j["requires_restart"] = r.requires_restart;
+        AuditEvent e;
+        e.event = "config.reload";
+        e.actor = access_key;
+        e.request_id = ctx.request_id;
+        std::string detail = r.ok ? "applied " + std::to_string(r.applied.size()) +
+                                        ", requires_restart " +
+                                        std::to_string(r.requires_restart.size())
+                                  : "refused: " + r.error;
+        e.detail = detail;
+        audit(e);
+        co_return json_response(r.ok ? 200 : 400, j);
+    } catch (const S3Error& e) {
+        metrics_.s3_error(e.code);
+        co_return admin_error(e, req);
+    } catch (const std::exception& e) {
+        LOG_ERROR("admin api {} {} internal error: {}", req.method, req.path, e.what());
+        metrics_.s3_error(S3ErrorCode::InternalError);
+        co_return admin_error(S3Error(S3ErrorCode::InternalError, e.what()), req);
+    }
+}
+
 }  // namespace lights3::s3

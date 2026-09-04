@@ -4,6 +4,9 @@
 # the defaults, except those marked "required") — uncomment to switch.
 # Note: the built-in YAML parser is simplified (no tab indentation/flow style/anchors, src/core/config.cc).
 # Size units: B/KiB/MiB/GiB (KB/MB/GB/K/M/G are synonyms); duration units: s/m/h/d.
+# Hot reload (docs/config-reload.md): `kill -HUP <pid>` or `s3adm reload` re-reads this file;
+# log.level, request/stall timeouts, max_inflight_requests, min_part_size, ratelimit.*,
+# buckets.rules and TLS certificate contents take effect live, everything else needs a restart.
 http:
   driver: builtin          # builtin | beast | httplib (must be compiled in via the matching CMake option)
   bind: 0.0.0.0

@@ -195,6 +195,7 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | 文档（[中文](README.md) · [en](en/README.md)） | 内容 |
 | --- | --- |
 | [architecture](architecture.md) | 总体架构、分层、请求生命周期、代码布局 |
+| [tls](tls.md) | 四驱动 HTTPS、证书热重载、mTLS / cipher / SNI、反代终结样例 |
 | [http-adapter](http-adapter.md) | HTTP 插拔层：中立请求/响应模型、流式 body、各驱动要点 |
 | [concurrency](concurrency.md) | Task 协程、Executor 抽象、线程池、同步/异步驱动桥接 |
 | [storage-backend](storage-backend.md) | `IStorageBackend`、LocalFs/XLocalFs、bucket 路由、新增后端指南 |

@@ -118,13 +118,14 @@ struct HttpServerFactory {
 
 ### 2.1 TLS and Shutdown/Backpressure Knobs (docs/archive/gaps.md §7)
 
-- **TLS**: `http.tls_cert` + `http.tls_key` (PEM; both required to enable). Only
-  httplib (`SSLServer`) and beast (`asio::ssl::stream` layered over `tcp_stream`;
-  the session loop is templated so plaintext/TLS share one implementation)
-  support it; builtin/seastar throw at construction when TLS is configured —
-  SigV4 `UNSIGNED-PAYLOAD` integrity relies on transport encryption, so
-  "configured but silently plaintext" is unacceptable. Certificate load failures
-  also throw at startup.
+- **TLS**: `http.tls_cert` + `http.tls_key` (PEM; both required to enable).
+  **All four drivers** support it (roadmap §4.1, [tls.md](tls.md)):
+  builtin/beast/httplib share the OpenSSL certificate-callback layer in
+  `src/http/tls.h` (SNI multi-certificate, mTLS, minimum version, ciphers and
+  certificate hot reload all live there), seastar goes through `seastar::tls`
+  (no SNI). Certificate loading failures throw at startup — SigV4
+  `UNSIGNED-PAYLOAD` integrity relies on transport-layer encryption, and
+  "configured but silently plaintext" is unacceptable.
 - **Configurable boundaries** (formerly per-driver hard-coded constants; the
   defaults are the old values): `drain_limit` (4MiB, request-body drain cap
   before erroring), `trailer_max_size` (16KiB), `io_chunk_size` (64KiB streaming
@@ -151,8 +152,9 @@ struct HttpServerFactory {
   meaningless for it (a startup WARN fires when explicitly configured, §2.1).
 - IPv4/IPv6 dual stack (`::` defaults to v6only=0); the same config is
   interchangeable with the other three drivers.
-- Limits: no TLS (configuring it throws at construction, §2.1); use beast for
-  the performance path.
+- TLS: OpenSSL blocking I/O wrapped around the socket on the connection thread
+  (an `Io` abstraction routes recv/send); certificates/SNI/hot reload come from
+  the shared `tls::Holder` ([tls.md](tls.md) §3); use beast for the performance path.
 
 ### 3.1 Boost.Beast (async driver, preferred performance path)
 
@@ -229,6 +231,11 @@ struct HttpServerFactory {
   ragel, xfs headers); not compiled by default. Enable with
   `-DLIGHTS3_DRIVER_SEASTAR=ON`; on machines without root the dependencies can be
   unpacked into `~/.local/opt/seastar-deps` (apt-get download + dpkg -x).
+- TLS: every shard builds credentials with `seastar::tls::credentials_builder`
+  and wraps its listener with `tls::listen`; `tls_reload_interval > 0` uses
+  reloadable credentials (seastar watches the files itself); `tls_sni` is
+  unsupported (throws at construction) and cipher strings only reach the
+  OpenSSL backend ([tls.md](tls.md) §4).
 
 ### 3.4 CivetWeb / Others (extension examples only; not implemented, not planned)
 

@@ -954,11 +954,11 @@ struct TlsClient {
 };
 
 TEST(http_driver_tls_round_trip) {
-    // Only httplib/beast support TLS (builtin/seastar reject explicitly, see the next case)
+    // Every OpenSSL-backed driver serves TLS (roadmap §4.1); seastar goes through
+    // seastar::tls and is covered by its own build. The knobs/SNI/reload cases live in test_tls.cc
     TlsCertFiles certs;
     auto drivers = HttpServerFactory::drivers();
     for (auto& d : drivers) {
-        if (d != "httplib" && d != "beast") continue;
         try {
             TestServer ts(d, certs.cert_path, certs.key_path);
             {
@@ -988,7 +988,6 @@ TEST(http_driver_tls_plaintext_client_rejected) {
     // A plaintext client hitting the TLS port: handshake fails and the connection closes, it must never answer as plaintext HTTP
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
-        if (d != "httplib" && d != "beast") continue;
         TestServer ts(d, certs.cert_path, certs.key_path);
         {
             Client c(ts.port);
@@ -999,16 +998,17 @@ TEST(http_driver_tls_plaintext_client_rejected) {
     }
 }
 
-TEST(http_driver_tls_unsupported_drivers_throw) {
-    // builtin/seastar do not support TLS: if configured they must throw on the spot -- silently running plaintext would void
-    // the transport-layer integrity argument for UNSIGNED-PAYLOAD (docs/archive/gaps.md §7)
+TEST(http_driver_tls_seastar_rejects_sni) {
+    // seastar's credentials carry one certificate per listener (docs/tls.md §4): a
+    // tls_sni list must fail at construction rather than serve the wrong certificate
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
-        if (d != "builtin" && d != "seastar") continue;
+        if (d != "seastar") continue;
         HttpConfig cfg;
         cfg.driver = d;
         cfg.tls_cert = certs.cert_path;
         cfg.tls_key = certs.key_path;
+        cfg.tls_sni.push_back({"a.example", certs.cert_path, certs.key_path});
         bool threw = false;
         try {
             HttpServerFactory::create(d, cfg);
@@ -1022,7 +1022,6 @@ TEST(http_driver_tls_unsupported_drivers_throw) {
 TEST(http_driver_tls_bad_cert_throws) {
     // A bad certificate path must throw at construction/startup, not be discovered at the first connection
     for (auto& d : HttpServerFactory::drivers()) {
-        if (d != "httplib" && d != "beast") continue;
         HttpConfig cfg;
         cfg.driver = d;
         cfg.tls_cert = "/nonexistent/cert.pem";

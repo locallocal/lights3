@@ -105,11 +105,12 @@ struct HttpServerFactory {
 
 ### 2.1 TLS 与停机/背压参数（docs/archive/gaps.md §7）
 
-- **TLS**：`http.tls_cert` + `http.tls_key`（PEM，两个都给才启用）。仅
-  httplib（`SSLServer`）与 beast（`asio::ssl::stream` 包一层 `tcp_stream`，
-  会话循环模板化对明文/TLS 同一份逻辑）支持；builtin/seastar 配置了 TLS 会在
-  构造期直接抛错——SigV4 `UNSIGNED-PAYLOAD` 的完整性依赖传输层加密，
-  "配了但静默跑明文"不可接受。证书加载失败同样在启动期抛出。
+- **TLS**：`http.tls_cert` + `http.tls_key`（PEM，两个都给才启用）。**四个驱动
+  都支持**（roadmap §4.1，[tls.md](tls.md)）：builtin/beast/httplib 共用
+  `src/http/tls.h` 的 OpenSSL 证书回调层（SNI 多证书、mTLS、最低版本、cipher、
+  证书热重载都在那一处），seastar 走 `seastar::tls`（无 SNI）。证书加载失败在
+  启动期抛出——SigV4 `UNSIGNED-PAYLOAD` 的完整性依赖传输层加密，"配了但静默
+  跑明文"不可接受。
 - **可配置边界**（曾是四驱动各写一份的硬编码，默认值即旧常量）：
   `drain_limit`（4MiB，回错前排空请求体上限）、`trailer_max_size`（16KiB）、
   `io_chunk_size`（64KiB 流式块）、`body_queue_cap`（256KiB，仅 httplib 的
@@ -130,7 +131,8 @@ struct HttpServerFactory {
   并发上限即 `http.max_connections`，`http.io_threads` 对它无意义（显式配置时
   启动 WARN，见 §2.1）。
 - IPv4/IPv6 双栈（`::` 默认 v6only=0），同一份配置与另三驱动互换。
-- 限制：不支持 TLS（配置了在构造期报错，§2.1）；性能路径请用 beast。
+- TLS：连接线程上以 OpenSSL 阻塞 I/O 包裹 socket（`Io` 抽象统一 recv/send），
+  证书/SNI/热重载来自共享的 `tls::Holder`（[tls.md](tls.md) §3）；性能路径请用 beast。
 
 ### 3.1 Boost.Beast（异步驱动，性能路径首选）
 
@@ -184,6 +186,10 @@ struct HttpServerFactory {
 - 依赖较重（编译版 Boost、fmt、c-ares、lz4、yaml-cpp、protobuf、ragel、
   xfs 头），默认不编译；`-DLIGHTS3_DRIVER_SEASTAR=ON` 启用，无 root 机器
   可把依赖解包到 `~/.local/opt/seastar-deps`（apt-get download + dpkg -x）。
+- TLS：每 shard 用 `seastar::tls::credentials_builder` 建凭证并 `tls::listen`
+  包裹 listener；`tls_reload_interval > 0` 时用可重载凭证（seastar 自己监视
+  文件）；不支持 `tls_sni`（配置即构造期抛错），cipher 串只对 OpenSSL 后端生效
+  （[tls.md](tls.md) §4）。
 
 ### 3.4 CivetWeb / 其他（仅为扩展示例，未实现，不在计划内）
 

@@ -30,6 +30,7 @@
 #include "core/task.h"
 #include "core/util/time.h"
 #include "http/drivers/common.h"
+#include "http/tls.h"
 #include "http/server.h"
 
 namespace lights3::http {
@@ -207,16 +208,16 @@ public:
         // bad path / bad PEM throws right here — must not be discovered only
         // at the first connection's handshake
         if (!cfg.tls_cert.empty()) {
-            tls_ctx_.emplace(asio::ssl::context::tls_server);
-            tls_ctx_->set_options(asio::ssl::context::default_workarounds |
-                                  asio::ssl::context::no_sslv2 | asio::ssl::context::no_sslv3 |
-                                  asio::ssl::context::no_tlsv1 | asio::ssl::context::no_tlsv1_1);
+            // Certificates/SNI/client CA come from the shared holder's snapshot at
+            // handshake time (roadmap §4.1, http/tls.h); the asio context only carries
+            // the static knobs the holder configures onto its SSL_CTX
             try {
-                tls_ctx_->use_certificate_chain_file(cfg.tls_cert);
-                tls_ctx_->use_private_key_file(cfg.tls_key, asio::ssl::context::pem);
+                tls_holder_ = std::make_shared<tls::Holder>(cfg);
+                tls_ctx_.emplace(asio::ssl::context::tls_server);
+                tls_holder_->configure(tls_ctx_->native_handle());
             } catch (const std::exception& e) {
-                throw std::runtime_error("beast driver: failed to load TLS cert/key (" +
-                                         cfg.tls_cert + ", " + cfg.tls_key + "): " + e.what());
+                throw std::runtime_error(std::string("beast driver: failed to set up TLS: ") +
+                                         e.what());
             }
         }
     }
@@ -261,7 +262,9 @@ public:
             uint64_t one = 1;
             [[maybe_unused]] ssize_t r = ::write(event_fd_, &one, sizeof(one));
         }
-        LOG_INFO("beast http{} server listening on {}:{}", tls_ctx_ ? "s" : "", addr, port_);
+        if (tls_holder_) tls_holder_->start_watch(cfg_.tls_reload_interval_sec);
+        LOG_INFO("beast http{} server listening on {}:{}{}", tls_ctx_ ? "s" : "", addr, port_,
+                 tls_holder_ ? std::string(" (tls: ") + tls_holder_->summary() + ")" : "");
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -663,7 +666,8 @@ private:
 
     HttpConfig cfg_;
     Handler handler_;
-    std::optional<asio::ssl::context> tls_ctx_;  // Present means HTTPS (certificates loaded at construction)
+    std::shared_ptr<tls::Holder> tls_holder_;    // Declared before tls_ctx_: the context's cert callback points here
+    std::optional<asio::ssl::context> tls_ctx_;  // Present means HTTPS (knobs applied at construction)
     asio::io_context ioc_;
     // Control-plane strand: all operations on acceptor / stop_event /
     // grace_timer / force_timer serialize here (the data plane still has one

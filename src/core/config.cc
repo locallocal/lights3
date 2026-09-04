@@ -311,6 +311,44 @@ Config Config::from_string(const std::string& text) {
         if (cfg.http.tls_cert.empty() != cfg.http.tls_key.empty())
             throw std::runtime_error(
                 "config: http.tls_cert and http.tls_key must be set together");
+        // TLS knobs (roadmap §4.1): every one of them presupposes a TLS listener, so
+        // any of them without tls_cert is a configuration that looks secured but is not
+        cfg.http.tls_client_ca = http->get("tls_client_ca", cfg.http.tls_client_ca);
+        cfg.http.tls_client_auth = http->get("tls_client_auth", cfg.http.tls_client_auth);
+        cfg.http.tls_min_version = http->get("tls_min_version", cfg.http.tls_min_version);
+        cfg.http.tls_ciphers = http->get("tls_ciphers", cfg.http.tls_ciphers);
+        cfg.http.tls_ciphersuites = http->get("tls_ciphersuites", cfg.http.tls_ciphersuites);
+        if (auto v = http->get("tls_reload_interval"); !v.empty())
+            cfg.http.tls_reload_interval_sec = parse_duration_sec(v);
+        check_range("http.tls_reload_interval", cfg.http.tls_reload_interval_sec, 0, 86400);
+        if (auto* sni = http->find("tls_sni"); sni && sni->type == YamlNode::Type::List) {
+            for (auto& e : sni->list) {
+                TlsSniEntry s{e.get("hosts"), e.get("cert"), e.get("key")};
+                if (s.hosts.empty() || s.cert.empty() || s.key.empty())
+                    throw std::runtime_error(
+                        "config: each http.tls_sni entry needs hosts + cert + key");
+                cfg.http.tls_sni.push_back(std::move(s));
+            }
+        }
+        if (cfg.http.tls_client_auth != "off" && cfg.http.tls_client_auth != "optional" &&
+            cfg.http.tls_client_auth != "require")
+            throw std::runtime_error(
+                "config: http.tls_client_auth must be off|optional|require, got '" +
+                cfg.http.tls_client_auth + "'");
+        if (cfg.http.tls_client_auth != "off" && cfg.http.tls_client_ca.empty())
+            throw std::runtime_error(
+                "config: http.tls_client_auth=" + cfg.http.tls_client_auth +
+                " requires http.tls_client_ca");
+        if (cfg.http.tls_min_version != "1.2" && cfg.http.tls_min_version != "1.3")
+            throw std::runtime_error("config: http.tls_min_version must be 1.2 or 1.3, got '" +
+                                     cfg.http.tls_min_version + "'");
+        bool knobs = !cfg.http.tls_client_ca.empty() || !cfg.http.tls_ciphers.empty() ||
+                     !cfg.http.tls_ciphersuites.empty() || !cfg.http.tls_sni.empty() ||
+                     !http->get("tls_min_version").empty();
+        if (knobs && cfg.http.tls_cert.empty())
+            throw std::runtime_error(
+                "config: http.tls_* options require http.tls_cert and http.tls_key (no TLS "
+                "listener is configured)");
         // Shutdown/backpressure knobs (docs/archive/gaps.md §7)
         if (auto v = http->get("drain_limit"); !v.empty())
             cfg.http.drain_limit = parse_size(v);

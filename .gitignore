@@ -1,4 +1,5 @@
 build
+build-*
 build-tsan
 build-asan
 build-redis
@@ -7,3 +8,4 @@ build-tikv
 build-sqlite
 Testing
 .claude/
+build-seastar

@@ -674,6 +674,15 @@ s3curl -o /dev/null -X DELETE "$BASE/qbkt/ten"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt/second"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt"
 
+# ---------- roadmap §4.2: L1 connection counters + rate-limit series on /-/metrics ----------
+METRICS_OUT=$(curl -s "$BASE/-/metrics")
+check "metrics: connection counters present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_http_connections_total{result="accepted"}'; echo $?)"
+check "metrics: timeout phases present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_http_timeouts_total{phase="header"}'; echo $?)"
+check "metrics: rate-limit series present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_ratelimit_rejections_total{scope="ip"}'; echo $?)"
+
 # Graceful shutdown
 kill -TERM "$SRV_PID"
 EXITED=1

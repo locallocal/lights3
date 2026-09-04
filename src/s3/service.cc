@@ -63,7 +63,11 @@ S3Error public_error(const S3Error& e, const std::string& request_id,
     }
     if (e.code == S3ErrorCode::SlowDown) {
         LOG_WARN("req {} {} {} slow down: {}", request_id, req.method, req.path, e.message);
-        return S3Error(e.code, "Please reduce your request rate.");
+        // Fixed wording, but the throttling headers (Retry-After from the rate
+        // limiter, roadmap §4.2) must survive the scrub
+        S3Error scrubbed(e.code, "Please reduce your request rate.");
+        scrubbed.headers = e.headers;
+        return scrubbed;
     }
     return e;
 }
@@ -451,6 +455,15 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::string anon_orig_key;
     bool vhost = false;
     std::string tenant_for_log;  // actor's tenant for the audit record (empty = none)
+    // Rate-limit slots (roadmap §4.2) held for the whole dispatch; released on return
+    std::optional<RateLimiter::Token> ip_slot, ak_slot;
+    auto throttle = [&](bool by_ak) {
+        metrics_.ratelimit_rejected(by_ak);
+        throw S3Error(S3ErrorCode::SlowDown,
+                      by_ak ? "Request rate limit exceeded for this access key."
+                            : "Request rate limit exceeded for this client address.")
+            .with_header("Retry-After", "1");
+    };
     try {
         // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path is
         // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
@@ -459,6 +472,14 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         auto addr = resolve_address(req);
         vhost = addr.vhost;
         bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
+        // Per-IP limit before anything costly (signature verification, backend
+        // access); the internal read endpoints (health/metrics probes) stay exempt
+        bool probe = internal && (req.path == "/-/healthz" || req.path == "/-/readyz" ||
+                                  req.path == "/-/metrics");
+        if (ip_limiter_ && !probe) {
+            ip_slot = ip_limiter_->admit(req.remote_addr);
+            if (!ip_slot) throttle(false);
+        }
         // Read endpoints accept only GET/HEAD (probes commonly use HEAD); previously PUT /-/metrics also returned 200
         auto internal_get = [&](std::string_view ep) {
             if (req.path != ep) return false;
@@ -471,7 +492,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.small_body = "ok\n";
             resp.headers.set("Content-Type", "text/plain");
         } else if (internal && internal_get("/-/metrics")) {
-            resp.small_body = metrics_.render(pool_stats_, admission_stats_, timer_stats_);
+            resp.small_body =
+                metrics_.render(pool_stats_, admission_stats_, timer_stats_, conn_stats_);
             // The backend-level registry is appended after the L2 request metrics
             if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
@@ -517,6 +539,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // in-flight requests complete strictly with verify-time semantics
             auto ident = anon ? VerifiedIdentity{} : auth_.verify(req);
             access_key = ident.access_key;
+            // Per-access-key limit (after verification: the key is authenticated, so a
+            // forged header cannot burn another tenant's budget)
+            if (ak_limiter_ && !access_key.empty()) {
+                ak_slot = ak_limiter_->admit(access_key);
+                if (!ak_slot) throttle(true);
+            }
             // Content-MD5 / x-amz-checksum-* (docs/archive/gaps.md §5.6): installed after verify, hence wrapping outside
             // the sha256/aws-chunked decorators -- digests are computed over the de-framed plaintext, the same
             // bytes the client computed over. Independent of the signature; also effective with auth disabled

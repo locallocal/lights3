@@ -131,10 +131,83 @@ struct HttpServerFactory {
   before erroring), `trailer_max_size` (16KiB), `io_chunk_size` (64KiB streaming
   chunk), `body_queue_cap` (256KiB, httplib-only push-to-pull backpressure
   watermark), `shutdown_grace` (10s), `shutdown_force_wait` (5s).
-- `http.io_threads` semantics drift per driver (beast = IO threads / httplib =
-  thread-pool floor of 8 / seastar = shard count) and **builtin ignores it
-  entirely** (thread-per-connection) — builtin now WARNs at startup when it is
-  explicitly configured instead of silently swallowing it.
+- `http.io_threads` semantics drift per driver; see the matrix in §2.2.
+
+### 2.2 Timeout Family and Connection Governance (roadmap §4.2)
+
+One `idle_timeout` used to carry four meanings, so "reclaim idle connections
+after 5s" and "allow a slow uploader 300s" could not be configured apart. It is
+now four knobs, wired into every driver:
+
+| Key | Default | Meaning | Metric |
+| --- | --- | --- | --- |
+| `header_timeout` | 30s | a new connection's request line + header block must arrive within (slowloris bound; the TLS handshake is inside it) | `timeouts{phase="header"}` |
+| `idle_timeout` | 60s | keep-alive wait for the next request | `phase="idle"` |
+| `body_timeout` | 60s | inactivity bound on one request-body read (slow uploader) | `phase="body"` |
+| `write_timeout` | 60s | inactivity bound on one response write (slow downloader) | `phase="write"` |
+| `request_timeout` / `transfer_stall_timeout` | 300s / 300s | unchanged: whole-request bound / whole-transfer stall bound | — |
+
+Per driver: builtin re-arms `SO_RCVTIMEO`/`SO_SNDTIMEO` at phase boundaries;
+beast calls `expires_after` with the phase's bound before each async op;
+seastar's `ArmGuard` arms the timer with the current phase; httplib's upstream
+has one read timeout, so **its header phase is bounded by `body_timeout`**
+(write and keep-alive map one to one). One `async_read_header` covers request
+line and headers, so beast cannot separate "before the first byte" from "mid
+headers" — a fresh connection gets `header_timeout`, a reused one `idle_timeout`.
+
+**Keep-alive request budget** `max_requests_per_connection` (default 1024, 0 =
+unlimited): the Nth response carries `Connection: close` and the connection is
+closed afterwards, giving load balancers a chance to re-balance long-lived
+connections. Only httplib had it before (hard-coded 1024).
+
+**Connection counters** via `IHttpServer::stats()` → `/-/metrics`:
+`lights3_http_connections_total{result=accepted|rejected_limit}`,
+`lights3_http_connections_active`, `lights3_http_keepalive_closes_total`,
+`lights3_http_timeouts_total{phase}`. httplib runs upstream's accept loop and
+reports zeros for all four (documented limitation).
+
+**`http.io_threads` semantics matrix** (one key kept; each driver logs what it
+means at startup):
+
+| Driver | Meaning | Startup log |
+| --- | --- | --- |
+| builtin | ignored (thread-per-connection; concurrency = `max_connections`) | WARN when set explicitly |
+| beast | number of `io_context` threads | `io_threads=N -> N io_context thread(s)` |
+| httplib | request thread-pool size, floor 8 | `io_threads=N -> request thread pool of max(N,8)` |
+| seastar | shard count (the in-process engine starts once, immutable afterwards) | `io_threads=N -> smp=N shard(s)` |
+
+### 2.3 Per-IP / Per-Access-Key Rate Limiting (roadmap §4.2)
+
+Per-client gates beside the global `runtime.max_inflight_requests`
+(`src/s3/ratelimit.h`):
+
+```yaml
+ratelimit:
+  per_ip_rps: 0            # sustained rate per client IP; 0 = off
+  per_ip_burst: 0          # token bucket capacity; 0 = rps
+  per_ip_max_inflight: 0   # concurrent requests per IP; 0 = off
+  per_ak_rps: 0            # per access key (after signature verification)
+  per_ak_burst: 0
+  per_ak_max_inflight: 0
+  max_tracked: 10000       # keys kept per table (LRU eviction of keys with nothing in flight)
+```
+
+- per-IP is decided after `resolve_address` and before verification (a flood
+  never reaches the HMAC); the `/-/healthz|readyz|metrics` probes are exempt.
+  per-AK is decided after verification on the authenticated key (a forged
+  header cannot burn someone else's budget) and covers the S3 plane only
+  (admin/STS branches are not counted);
+- over the limit answers `503 SlowDown` + `Retry-After: 1` (SDKs already back
+  off and retry on SlowDown); metric
+  `lights3_ratelimit_rejections_total{scope=ip|ak}`;
+- the in-flight slot is released when dispatch returns (later writes of a
+  streaming body are not counted);
+- behind a reverse proxy either rate-limit at the proxy or leave per-IP off —
+  the gateway sees the proxy's address (`X-Forwarded-For` is not trusted).
+
+**A dedicated client-disconnect cancel source** remains a deliberate trade-off
+(last row of roadmap §4.2): long handlers rely on `request_timeout`, drivers
+notice the disconnect at their next socket operation.
 
 ## 3. Implementation Notes per Driver
 

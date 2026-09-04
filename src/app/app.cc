@@ -138,6 +138,27 @@ void Application::start_server() {
             return {cap, inflight->available(), inflight->waiting()};
         });
     service_->set_timer_stats([] { return TimerQueue::instance().stats(); });
+    // L1 connection counters + per-client rate limits (roadmap §4.2)
+    service_->set_conn_stats([this]() -> http::ConnStats {
+        return server_ ? server_->stats() : http::ConnStats{};
+    });
+    {
+        auto& rl = cfg_.ratelimit;
+        std::shared_ptr<s3::RateLimiter> ip, ak;
+        if (rl.per_ip_rps > 0 || rl.per_ip_max_inflight > 0)
+            ip = std::make_shared<s3::RateLimiter>(
+                s3::RateLimiter::Limits{rl.per_ip_rps, rl.per_ip_burst, rl.per_ip_max_inflight},
+                static_cast<size_t>(rl.max_tracked));
+        if (rl.per_ak_rps > 0 || rl.per_ak_max_inflight > 0)
+            ak = std::make_shared<s3::RateLimiter>(
+                s3::RateLimiter::Limits{rl.per_ak_rps, rl.per_ak_burst, rl.per_ak_max_inflight},
+                static_cast<size_t>(rl.max_tracked));
+        if (ip || ak)
+            LOG_INFO("rate limits: per-ip rps={} burst={} inflight={}; per-ak rps={} burst={} inflight={}",
+                     rl.per_ip_rps, rl.per_ip_burst, rl.per_ip_max_inflight, rl.per_ak_rps,
+                     rl.per_ak_burst, rl.per_ak_max_inflight);
+        service_->set_rate_limiters(std::move(ip), std::move(ak));
+    }
     // Process shutdown broadcast (the third cancel source of
     // docs/concurrency.md §5): fired after run() returns, so in-flight
     // requests converge from their nearest cancellable suspension point

@@ -45,10 +45,18 @@ struct HttpConfig {
     // Validated to [1KiB, 1MiB]: beast passes it into parser.header_limit(uint32_t),
     // where an unbounded value like 4GiB would truncate to 0 and reject every request
     size_t max_header_size = 16 * 1024;
-    // Validated to [1s, 86400s]. 0 is rejected: drivers disagree on its meaning
-    // (builtin's SO_RCVTIMEO 0 = never time out, beast's expires_after(0s) = expire
-    // immediately), so "no idle timeout" is not a supported configuration
-    int idle_timeout_sec = 60;
+    // Timeout family (roadmap §4.2, docs/http-adapter.md §2.1). All validated to
+    // [1s, 86400s]; 0 is rejected: drivers disagree on its meaning (builtin's
+    // SO_RCVTIMEO 0 = never time out, beast's expires_after(0s) = expire
+    // immediately), so "no timeout" is not a supported configuration
+    int idle_timeout_sec = 60;    // keep-alive: waiting for the next request on an idle connection
+    int header_timeout_sec = 30;  // a new connection's request line + header block (slowloris bound)
+    int body_timeout_sec = 60;    // inactivity bound on one request-body read (slow uploader)
+    int write_timeout_sec = 60;   // inactivity bound on one response write (slow downloader)
+    // Requests served over one keep-alive connection before the server answers
+    // Connection: close (lets load balancers re-balance long-lived connections);
+    // 0 = unlimited. httplib had a hard-coded 1024 before, the other three had none
+    int max_requests_per_connection = 1024;
     // Per-request timeout (docs/archive/gaps.md §3.3): the clock starts when the handler
     // begins executing; on expiry the request is interrupted via cooperative
     // cancellation (suspension points throw OperationCancelled -> 503 SlowDown,
@@ -104,6 +112,19 @@ struct HttpConfig {
 struct RuntimeConfig {
     int io_threads = 16;
     int max_inflight_requests = 1024;
+};
+
+// Per-client rate limits (roadmap §4.2, docs/http-adapter.md §2.3): token bucket +
+// concurrency cap per source IP (decided before signature verification) and per
+// access key (after it). 0 = that limit off. Over the limit answers 503 SlowDown
+struct RateLimitConfig {
+    int per_ip_rps = 0;           // sustained requests/second per client IP
+    int per_ip_burst = 0;         // bucket size; 0 = same as rps
+    int per_ip_max_inflight = 0;  // concurrent requests per client IP
+    int per_ak_rps = 0;           // sustained requests/second per access key
+    int per_ak_burst = 0;
+    int per_ak_max_inflight = 0;
+    int max_tracked = 10000;      // distinct keys kept per table (LRU beyond that)
 };
 
 struct Credential {
@@ -219,6 +240,7 @@ struct Config {
     LifecycleConfig lifecycle;
     UsageConfig usage;
     AuditConfig audit;
+    RateLimitConfig ratelimit;
     std::string log_level = "info";
 
     static Config load(const std::string& path);

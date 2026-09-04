@@ -100,10 +100,17 @@ public:
             return new httplib::ThreadPool(static_cast<size_t>(n));
         };
         svr_->set_tcp_nodelay(true);
-        svr_->set_read_timeout(cfg.idle_timeout_sec);
-        svr_->set_write_timeout(cfg.idle_timeout_sec);
+        // Timeout family (roadmap §4.2): upstream has one read timeout for headers
+        // and body alike, so the header phase is bounded by body_timeout here (the
+        // keep-alive wait has its own knob); write and keep-alive map one to one
+        svr_->set_read_timeout(cfg.body_timeout_sec);
+        svr_->set_write_timeout(cfg.write_timeout_sec);
         svr_->set_keep_alive_timeout(cfg.idle_timeout_sec);
-        svr_->set_keep_alive_max_count(1024);
+        svr_->set_keep_alive_max_count(cfg.max_requests_per_connection > 0
+                                           ? static_cast<size_t>(cfg.max_requests_per_connection)
+                                           : static_cast<size_t>(1) << 40);
+        LOG_INFO("httplib driver: io_threads={} -> request thread pool of {} (floor 8)",
+                 cfg.io_threads, std::max(cfg.io_threads, 8));
         svr_->set_exception_handler(
             [](const httplib::Request&, httplib::Response& rs, std::exception_ptr ep) {
                 std::string what;

@@ -194,6 +194,11 @@ and the response leaks no internal information.
 
 ## 7. Observability
 
+L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_total{result}`,
+`lights3_http_connections_active`, `lights3_http_keepalive_closes_total`,
+`lights3_http_timeouts_total{phase=idle|header|body|write}`,
+`lights3_ratelimit_rejections_total{scope=ip|ak}`; see [http-adapter.md §2.2–§2.3](http-adapter.md).
+
 - **Access log**: one structured log line per request (request_id, AK, method, path,
   status, byte counts, total elapsed ms; backend elapsed time pending), formatted
   to match S3 server access logs so existing analysis tools can be reused.

@@ -115,9 +115,72 @@ struct HttpServerFactory {
   `drain_limit`（4MiB，回错前排空请求体上限）、`trailer_max_size`（16KiB）、
   `io_chunk_size`（64KiB 流式块）、`body_queue_cap`（256KiB，仅 httplib 的
   推转拉背压水位）、`shutdown_grace`（10s）、`shutdown_force_wait`（5s）。
-- `http.io_threads` 的语义随驱动漂移（beast=IO 线程数 / httplib=线程池下限 8 /
-  seastar=shard 数），**builtin 完全忽略**（thread-per-connection）——显式配置
-  时 builtin 启动 WARN 而非静默吞掉。
+- `http.io_threads` 的语义随驱动漂移，见 §2.2 的矩阵。
+
+### 2.2 超时体系与连接治理（roadmap §4.2）
+
+原先一个 `idle_timeout` 撑起四类语义，"空闲连接 5s 回收"与"慢客户端 body 允许
+300s"无法分开。现拆为四项，四驱动各接一遍：
+
+| 键 | 默认 | 语义 | 计入指标 |
+| --- | --- | --- | --- |
+| `header_timeout` | 30s | 新连接的请求行 + 头部块必须在此内到齐（slowloris 上界；TLS 握手也在其内） | `timeouts{phase="header"}` |
+| `idle_timeout` | 60s | keep-alive 连接等待下一个请求的空闲上界 | `phase="idle"` |
+| `body_timeout` | 60s | 单次请求体读的无进展上界（慢上传） | `phase="body"` |
+| `write_timeout` | 60s | 单次响应写的无进展上界（慢下载） | `phase="write"` |
+| `request_timeout` / `transfer_stall_timeout` | 300s / 300s | 不变：整请求处理上界 / 整次传输总停滞上界 | — |
+
+各驱动映射：builtin 在阶段边界重设 `SO_RCVTIMEO`/`SO_SNDTIMEO`；beast 每个异步
+操作前 `expires_after` 对应阶段；seastar 的 `ArmGuard` 按当前阶段武装定时器；
+httplib 上游只有一个读超时，**头部阶段由 `body_timeout` 约束**（写与 keep-alive
+一一对应）。同一 `async_read_header` 覆盖请求行与头部，因此 beast 无法把"第一个
+字节前"与"头部中途"分开——新连接按 `header_timeout`、复用连接按 `idle_timeout`。
+
+**keep-alive 请求数上限** `max_requests_per_connection`（默认 1024，0=不限）：
+第 N 个响应带 `Connection: close`，之后关闭——让负载均衡器有机会重新分片长连接。
+原先只有 httplib 有（硬编码 1024）。
+
+**连接计数器** `IHttpServer::stats()` → `/-/metrics`：
+`lights3_http_connections_total{result=accepted|rejected_limit}`、
+`lights3_http_connections_active`、`lights3_http_keepalive_closes_total`、
+`lights3_http_timeouts_total{phase}`。httplib 跑上游的 accept 循环，四组都为 0
+（文档化限制）。
+
+**`http.io_threads` 语义矩阵**（保留单键，启动日志各自打印实际含义）：
+
+| 驱动 | 含义 | 启动日志 |
+| --- | --- | --- |
+| builtin | 忽略（thread-per-connection，并发 = `max_connections`） | 显式配置时 WARN |
+| beast | `io_context` 线程数 | `io_threads=N -> N io_context thread(s)` |
+| httplib | 请求线程池大小，下限 8 | `io_threads=N -> request thread pool of max(N,8)` |
+| seastar | shard 数（进程内引擎只启一次，之后不可变） | `io_threads=N -> smp=N shard(s)` |
+
+### 2.3 per-IP / per-AK 限流（roadmap §4.2）
+
+全局 `runtime.max_inflight_requests` 之外的按客户端闸门（`src/s3/ratelimit.h`）：
+
+```yaml
+ratelimit:
+  per_ip_rps: 0            # 每客户端 IP 的持续速率；0 = 关
+  per_ip_burst: 0          # 令牌桶容量；0 = 等于 rps
+  per_ip_max_inflight: 0   # 每 IP 并发上限；0 = 关
+  per_ak_rps: 0            # 每 access key（验签后）
+  per_ak_burst: 0
+  per_ak_max_inflight: 0
+  max_tracked: 10000       # 每张表保留的键数（超出按 LRU 淘汰无在途请求的键）
+```
+
+- per-IP 在 `resolve_address` 之后、验签之前判定（洪水到不了 HMAC），
+  `/-/healthz|readyz|metrics` 探针豁免；per-AK 在验签之后按已认证的 AK 判定
+  （伪造头不能烧别人的额度），只覆盖 S3 数据面（admin/STS 分支不计）；
+- 超限回 `503 SlowDown` + `Retry-After: 1`（SDK 本就对 SlowDown 退避重试）；
+  指标 `lights3_ratelimit_rejections_total{scope=ip|ak}`；
+- 在途槽位在 dispatch 返回时释放（流式响应体的后续写不再计入）；
+- 反向代理后的部署要么把限流放在代理，要么让 per-IP 关掉——网关看到的是
+  代理地址（`X-Forwarded-For` 不被信任）。
+
+**客户端断连独立取消源**仍是刻意取舍（roadmap §4.2 末项）：长 handler 靠
+`request_timeout` 兜底，驱动只在下一次 socket 操作时发现断连。
 
 ## 3. 各驱动实现要点
 

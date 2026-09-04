@@ -1,6 +1,7 @@
 // L1: adapter helpers shared by the HTTP drivers (not part of the L1/L2 boundary; driver-internal reuse only)
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <random>
@@ -11,6 +12,7 @@
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "http/model.h"
+#include "http/server.h"
 #include "s3/errors.h"
 
 namespace lights3::http::driver {
@@ -21,6 +23,36 @@ namespace lights3::http::driver {
 // defaults consolidated in config.h; only purely internal values remain here
 inline constexpr size_t kIoChunkBytes = 64 * 1024;  // Streaming read/write chunk size (default of http.io_chunk_size)
 inline constexpr size_t kScratchBytes = 16 * 1024;  // Scratch buffer for draining, line parsing, etc.
+
+// Lock-free counters behind IHttpServer::stats() (roadmap §4.2); shared by the
+// drivers that own their accept loop
+struct ConnCounters {
+    std::atomic<uint64_t> accepted{0}, rejected_limit{0}, active{0}, keepalive_closes{0};
+    std::atomic<uint64_t> timeouts_idle{0}, timeouts_header{0}, timeouts_body{0}, timeouts_write{0};
+    ConnStats snapshot() const {
+        auto ld = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
+        return {ld(accepted), ld(rejected_limit), ld(active), ld(keepalive_closes),
+                ld(timeouts_idle), ld(timeouts_header), ld(timeouts_body), ld(timeouts_write)};
+    }
+};
+
+// Which socket phase a timeout hit, for attribution
+enum class Phase { Idle, Header, Body, Write };
+inline void count_timeout(ConnCounters& c, Phase p) {
+    switch (p) {
+        case Phase::Idle: c.timeouts_idle.fetch_add(1, std::memory_order_relaxed); break;
+        case Phase::Header: c.timeouts_header.fetch_add(1, std::memory_order_relaxed); break;
+        case Phase::Body: c.timeouts_body.fetch_add(1, std::memory_order_relaxed); break;
+        case Phase::Write: c.timeouts_write.fetch_add(1, std::memory_order_relaxed); break;
+    }
+}
+
+// Keep-alive request budget (http.max_requests_per_connection): true when the
+// connection has served its quota and the current response must carry
+// Connection: close
+inline bool keepalive_budget_exhausted(int served, int max_requests) {
+    return max_requests > 0 && served >= max_requests;
+}
 
 // Splits the request-line target ("/a%2Fb?x=1&y") into the neutral model's
 // four fields: raw_path / raw_query keep the original text (needed for SigV4),

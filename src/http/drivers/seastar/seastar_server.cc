@@ -248,12 +248,16 @@ struct SeaConn {
     // read). The expiry callback shuts down both directions, pending
     // operations wake to EOF/exception, and the session winds down naturally
     ss::timer<>* idle = nullptr;
-    std::chrono::seconds idle_timeout{0};
+    // Phase timeouts (roadmap §4.2): the session sets phase + phase_timeout before
+    // each socket phase; ArmGuard arms the timer with the current bound and the
+    // expiry callback attributes the timeout to the phase
+    std::chrono::seconds phase_timeout{0};
+    driver::Phase phase = driver::Phase::Header;
 
     struct ArmGuard {
         ss::timer<>* t;
         explicit ArmGuard(SeaConn& c) : t(c.idle) {
-            if (t) t->arm(c.idle_timeout);
+            if (t) t->arm(c.phase_timeout);
         }
         ~ArmGuard() {
             if (t) t->cancel();
@@ -448,6 +452,7 @@ struct ShardState {
 struct ServerCore {
     HttpConfig cfg;
     Handler handler;
+    driver::ConnCounters counters;  // IHttpServer::stats(); shards increment concurrently (atomics)
     std::vector<std::shared_ptr<ShardState>> shards;
     std::atomic<bool> stopping{false};
 
@@ -548,23 +553,32 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     // The timer is armed by SeaConn during every pending socket operation
     // (ArmGuard), covering the request line, header block, body reads, and
     // response writes end to end (slowloris defense)
-    ss::timer<> idle_timer([sess] {
+    ss::timer<> idle_timer([sess, core] {
+        driver::count_timeout(core->counters, sess->conn.phase);
         try {
             sess->conn.cs.shutdown_input();
             sess->conn.cs.shutdown_output();
         } catch (...) {}
     });
     conn.idle = &idle_timer;
-    conn.idle_timeout = std::chrono::seconds(core->cfg.idle_timeout_sec);
+    auto set_phase = [&](driver::Phase p, int sec) {
+        conn.phase = p;
+        conn.phase_timeout = std::chrono::seconds(sec);
+    };
     bool keep = true;
+    int served = 0;  // keep-alive budget (http.max_requests_per_connection)
 
     // Socket errors such as a peer RST surface from seastar futures as exceptions: catch them and take the unified stream-close wrap-up
     try {
     while (keep && !core->stopping.load(std::memory_order_relaxed)) {
         const size_t max_line = core->cfg.max_header_size;
         std::string line;
+        // Request line: idle wait on a reused connection, header bound on a fresh one
+        if (served == 0) set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
+        else set_phase(driver::Phase::Idle, core->cfg.idle_timeout_sec);
         bool got = co_await conn.read_line(line, max_line);
         if (!got || line.empty()) break;
+        set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
 
         HttpRequest req;
         req.remote_addr = peer;
@@ -626,6 +640,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                                     core->cfg.io_chunk_size, shard);
             break;
         }
+        set_phase(driver::Phase::Body, core->cfg.body_timeout_sec);
         BodyState bstate;
         bstate.conn = &conn;
         bstate.shard = shard;
@@ -667,10 +682,17 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
             else if (keep) keep = co_await bstate.drain(core->cfg.drain_limit);
         }
 
+        if (keep && driver::keepalive_budget_exhausted(served + 1,
+                                                       core->cfg.max_requests_per_connection)) {
+            keep = false;
+            core->counters.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
+        }
+        set_phase(driver::Phase::Write, core->cfg.write_timeout_sec);
         bool ok = co_await write_response(conn, resp, head_request, keep,
                                           core->cfg.io_chunk_size, shard);
         sess->in_flight = false;
         if (!ok) break;
+        ++served;
     }
     } catch (const std::exception& e) {
         LOG_DEBUG("seastar session ended with error: {}", e.what());
@@ -716,14 +738,19 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
             1, static_cast<size_t>(core->cfg.max_connections) / ss::smp::count);
         if (st->sessions.size() >= shard_cap) {
             LOG_WARN("connection limit ({}/shard) reached, rejecting", shard_cap);
+            core->counters.rejected_limit.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
         std::ostringstream oss;
         oss << ar->remote_address.addr();
         auto sess = std::make_shared<Session>(std::move(ar->connection));
         st->sessions.insert(sess);
-        spawn_detached(session_run(core, sess, oss.str(), shard),
-                       [st, sess] { st->sessions.erase(sess); });
+        core->counters.accepted.fetch_add(1, std::memory_order_relaxed);
+        core->counters.active.fetch_add(1, std::memory_order_relaxed);
+        spawn_detached(session_run(core, sess, oss.str(), shard), [st, sess, core] {
+            st->sessions.erase(sess);
+            core->counters.active.fetch_sub(1, std::memory_order_relaxed);
+        });
     }
     st->listener.reset();
     // Released here, on the owning shard: reloadable credentials tear down their
@@ -960,11 +987,12 @@ public:
             uint64_t one = 1;
             [[maybe_unused]] ssize_t r = ::write(stop_fd_, &one, sizeof(one));
         }
-        LOG_INFO("seastar http{} server listening on {}:{} (smp={})",
-                 cfg_.tls_cert.empty() ? "" : "s", addr, port_, eng.shards());
+        LOG_INFO("seastar http{} server listening on {}:{} (io_threads={} -> smp={} shard(s))",
+                 cfg_.tls_cert.empty() ? "" : "s", addr, port_, cfg_.io_threads, eng.shards());
     }
 
     uint16_t bound_port() const override { return port_; }
+    ConnStats stats() const override { return core_ ? core_->counters.snapshot() : ConnStats{}; }
 
     void run() override {
         core_->wait_stopped();

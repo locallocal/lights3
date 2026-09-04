@@ -23,6 +23,7 @@
 #include "s3/lifecycle.h"
 #include "s3/metrics.h"
 #include "s3/quota.h"
+#include "s3/ratelimit.h"
 #include "s3/tenant.h"
 #include "s3/usage.h"
 #include "s3/website_store.h"
@@ -70,6 +71,17 @@ public:
     // Timer thread health (docs/archive/gaps.md §7, optional)
     void set_timer_stats(std::function<TimerQueue::Stats()> fn) {
         timer_stats_ = std::move(fn);
+    }
+
+    // L1 connection counters for /-/metrics (roadmap §4.2, optional)
+    void set_conn_stats(std::function<http::ConnStats()> fn) { conn_stats_ = std::move(fn); }
+
+    // Per-client rate limits (roadmap §4.2, docs/http-adapter.md §2.3): the IP
+    // limiter is consulted before signature verification on every non-internal
+    // request, the access-key limiter after it on the S3 plane. null = off
+    void set_rate_limiters(std::shared_ptr<RateLimiter> per_ip, std::shared_ptr<RateLimiter> per_ak) {
+        ip_limiter_ = std::move(per_ip);
+        ak_limiter_ = std::move(per_ak);
     }
 
     // Backend-level metrics registry (optional): rendered appended after the L2 request metrics
@@ -311,6 +323,8 @@ private:
     std::function<ThreadPool::Stats()> pool_stats_;
     std::function<AdmissionStats()> admission_stats_;
     std::function<TimerQueue::Stats()> timer_stats_;
+    std::function<http::ConnStats()> conn_stats_;
+    std::shared_ptr<RateLimiter> ip_limiter_, ak_limiter_;
     std::chrono::milliseconds request_timeout_{0};
     uint64_t min_part_size_ = storage::kMinPartSize;
     std::shared_ptr<MetricsRegistry> backend_metrics_;

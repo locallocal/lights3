@@ -12,6 +12,7 @@
 
 #include "core/thread_pool.h"
 #include "core/timer.h"
+#include "http/server.h"
 #include "s3/errors.h"
 
 namespace lights3::s3 {
@@ -41,6 +42,11 @@ public:
         errors_[size_t(code)].fetch_add(1, std::memory_order_relaxed);
     }
 
+    // Per-client rate limiting (roadmap §4.2): rejections by key space
+    void ratelimit_rejected(bool by_access_key) {
+        (by_access_key ? rl_ak_ : rl_ip_).fetch_add(1, std::memory_order_relaxed);
+    }
+
     void mpu_created() { mpu_created_.fetch_add(1, std::memory_order_relaxed); }
     void mpu_finished() { mpu_finished_.fetch_add(1, std::memory_order_relaxed); }
 
@@ -51,9 +57,11 @@ public:
     void record_bucket_request(std::string_view bucket);
 
     // pool_stats / admission / timer_stats may each be empty (corresponding metrics omitted when not wired up)
+    // conn = L1 connection counters (roadmap §4.2), omitted when not wired
     std::string render(const std::function<ThreadPool::Stats()>& pool_stats,
                        const std::function<AdmissionStats()>& admission = {},
-                       const std::function<TimerQueue::Stats()>& timer_stats = {}) const;
+                       const std::function<TimerQueue::Stats()>& timer_stats = {},
+                       const std::function<http::ConnStats()>& conn = {}) const;
 
 private:
     static size_t method_index(std::string_view m);
@@ -78,6 +86,7 @@ private:
     std::atomic<uint64_t> latency_count_{0};
     std::atomic<uint64_t> mpu_created_{0};
     std::atomic<uint64_t> mpu_finished_{0};  // complete + abort
+    std::atomic<uint64_t> rl_ip_{0}, rl_ak_{0};  // rate-limit rejections (roadmap §4.2)
     std::atomic<uint64_t> bytes_in_{0};
     std::atomic<uint64_t> bytes_out_{0};
 

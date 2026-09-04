@@ -146,7 +146,8 @@ struct BodyCtx {
     bhttp::request_parser<bhttp::buffer_body>* parser;
     Stream* stream;
     beast::flat_buffer* buffer;
-    int idle_timeout_sec;
+    int idle_timeout_sec;  // body_timeout: inactivity bound on one body read (roadmap §4.2)
+    driver::ConnCounters* counters = nullptr;
     bool need_100 = false;  // Expect: 100-continue not yet answered; reply only on the first body read
     bool errored = false;
 };
@@ -181,6 +182,8 @@ public:
         });
         (void)n;
         beast::get_lowest_layer(*ctx_->stream).expires_never();
+        if (ec == beast::error::timeout && ctx_->counters)
+            driver::count_timeout(*ctx_->counters, driver::Phase::Body);
         if (ec == bhttp::error::need_buffer) ec = {};
         if (ec) fail(ec, "client disconnected mid-body");
         size_t got = buf.size() - body.size;
@@ -268,9 +271,11 @@ public:
     }
 
     uint16_t bound_port() const override { return port_; }
+    ConnStats stats() const override { return counters_.snapshot(); }
 
     void run() override {
         int n = std::max(1, cfg_.io_threads);
+        LOG_INFO("beast driver: io_threads={} -> {} io_context thread(s)", cfg_.io_threads, n);
         std::vector<std::thread> threads;
         threads.reserve(n - 1);
         for (int i = 1; i < n; ++i) threads.emplace_back([this] { ioc_.run(); });
@@ -313,9 +318,12 @@ private:
                 // Concurrent-connection cap (uniform across the four drivers): without one, per-connection coroutine frames/buffers can exhaust memory
                 if (sessions_.size() >= static_cast<size_t>(cfg_.max_connections)) {
                     LOG_WARN("connection limit ({}) reached, rejecting", cfg_.max_connections);
+                    counters_.rejected_limit.fetch_add(1, std::memory_order_relaxed);
                     continue;  // sess closes the socket as it leaves scope
                 }
                 sessions_.insert(sess);
+                counters_.accepted.fetch_add(1, std::memory_order_relaxed);
+                counters_.active.store(sessions_.size(), std::memory_order_relaxed);
             }
             spawn_detached(session_run(sess), [this, sess] { on_session_done(sess); });
         }
@@ -327,7 +335,7 @@ private:
     // — destroyed only after session_loop completes, so nothing dangles
     Task<void> session_run(std::shared_ptr<Session> sess) {
         sess->stream.socket().set_option(tcp::no_delay(true));
-        auto idle = std::chrono::seconds(cfg_.idle_timeout_sec);
+        auto idle = std::chrono::seconds(cfg_.header_timeout_sec);  // handshake: header bound
         if (tls_ctx_) {
             TlsStream tls(sess->stream, *tls_ctx_);
             sess->stream.expires_after(idle);
@@ -363,6 +371,7 @@ private:
     Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream) {
         beast::flat_buffer buffer;  // Kept across keep-alive requests (the parser may over-read)
         bool keep = true;
+        int served = 0;  // keep-alive budget (http.max_requests_per_connection)
 
         while (keep && !stopping_.load()) {
             bhttp::request_parser<bhttp::buffer_body> parser;
@@ -373,14 +382,21 @@ private:
             // in memory; no object-size cap is set (consistent with the other
             // drivers — an S3-semantics decision)
             parser.body_limit(boost::none);
-            beast::get_lowest_layer(stream).expires_after(
-                std::chrono::seconds(cfg_.idle_timeout_sec));
+            // Phase timeouts (roadmap §4.2): a fresh connection's request line + headers
+            // are bounded by header_timeout, a reused one's wait by idle_timeout (one
+            // read op covers both, so the two cannot be told apart finer than this)
+            bool fresh = served == 0;
+            beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(
+                fresh ? cfg_.header_timeout_sec : cfg_.idle_timeout_sec));
             {
                 auto [ec, n] = co_await io_op([&](auto cb) {
                     bhttp::async_read_header(stream, buffer, parser, std::move(cb));
                 });
                 (void)n;
                 beast::get_lowest_layer(stream).expires_never();
+                if (ec == beast::error::timeout)
+                    driver::count_timeout(counters_,
+                                          fresh ? driver::Phase::Header : driver::Phase::Idle);
                 if (ec) break;  // eof / timeout / closed by shutdown
             }
             sess->in_flight.store(true);
@@ -409,7 +425,7 @@ private:
                 break;
             }
 
-            BodyCtx<Stream> bctx{&parser, &stream, &buffer, cfg_.idle_timeout_sec};
+            BodyCtx<Stream> bctx{&parser, &stream, &buffer, cfg_.body_timeout_sec, &counters_};
             if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
                 bctx.need_100 = true;
             std::optional<uint64_t> content_length;
@@ -438,9 +454,15 @@ private:
                 else if (keep) keep = co_await drain_body(bctx);
             }
 
+            if (keep && driver::keepalive_budget_exhausted(served + 1,
+                                                           cfg_.max_requests_per_connection)) {
+                keep = false;
+                counters_.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
+            }
             bool ok = co_await write_response(stream, resp, head_request, keep);
             sess->in_flight.store(false);
             if (!ok) co_return;
+            ++served;
         }
     }
 
@@ -471,7 +493,11 @@ private:
     Task<bool> write_response(Stream& stream, HttpResponse& resp, bool head_request,
                               bool keep) {
         bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
-        auto idle = std::chrono::seconds(cfg_.idle_timeout_sec);
+        auto idle = std::chrono::seconds(cfg_.write_timeout_sec);  // write_timeout per write op
+        auto note_write = [&](const beast::error_code& ec) {
+            if (ec == beast::error::timeout)
+                driver::count_timeout(counters_, driver::Phase::Write);
+        };
 
         // Small response / HEAD / bodyless status code: write the whole message at once
         if (!resp.stream_body || head_request || no_body_status) {
@@ -512,6 +538,7 @@ private:
             });
             (void)n;
             beast::get_lowest_layer(stream).expires_never();
+            note_write(ec);
             co_return !ec;
         }
 
@@ -540,6 +567,7 @@ private:
             });
             (void)n;
             beast::get_lowest_layer(stream).expires_never();
+            note_write(ec);
             if (ec) co_return false;
         }
 
@@ -584,6 +612,7 @@ private:
             (void)wrote;
             beast::get_lowest_layer(stream).expires_never();
             if (ec == bhttp::error::need_buffer) ec = {};
+            note_write(ec);
             if (ec) co_return false;
             if (n == 0) break;
         }
@@ -640,6 +669,7 @@ private:
         {
             std::lock_guard lk(m_);
             sessions_.erase(sess);
+            counters_.active.store(sessions_.size(), std::memory_order_relaxed);
             // No finish() before stop_handled_: when shutdown() has just set
             // stopping_ but the eventfd event is not yet processed, the last
             // session ending must not jump the gun (otherwise finish would
@@ -685,6 +715,7 @@ private:
     std::mutex m_;
     bool stop_handled_ = false;  // on_stop_signal has run (guarded by m_)
     std::set<std::shared_ptr<Session>> sessions_;
+    driver::ConnCounters counters_;  // IHttpServer::stats() (roadmap §4.2)
     std::once_flag finish_once_;
 };
 

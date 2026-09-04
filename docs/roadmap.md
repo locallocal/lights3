@@ -303,16 +303,16 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 
 **分期保留**：mTLS 客户端证书 → 凭证/租户身份映射；SIGHUP 触发重载（轮询已够）。
 
-### 4.2 超时与连接治理
+### 4.2 超时与连接治理 **已完成（2026-09-05，五项落地，末项按原计划维持）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| **超时体系拆分** | 单个 `idle_timeout` 撑起 header 读/body 读/写/keep-alive 空闲四类语义，"空闲连接 5s 回收"与"慢客户端 body 允许 300s"无法分开配置 | 高 | 中（拆三项、四驱动各接一遍） |
-| keep-alive 每连接请求数上限 | 仅 httplib 有（1024）；其余三驱动 `while(keep_alive)` 无上限，妨碍 LB 重分片 | 中 | 低 |
-| 连接上限观测 | `max_connections` 四驱动已统一，但拒绝时只有 WARN 无计数器 | 中 | 低 |
-| per-IP / per-AK 限流 | 只有全局闸门，单客户端可占满全部配额 | 中 | 中 |
-| `io_threads` 语义漂移 | 同一配置键在四驱动四种语义（beast=IO 线程 / httplib=池下限 / seastar=shard 数 / builtin=忽略） | 中 | 低（文档化矩阵或拆键） |
-| 客户端断连独立取消源 | 文档明示的刻意取舍（长 handler 靠 `request_timeout` 兜底），暂维持 | 中 | 高 |
+| ~~**超时体系拆分**~~ | 已完成：`header_timeout` / `idle_timeout` / `body_timeout` / `write_timeout` 四类，四驱动各接一遍（builtin 阶段边界重设 socket 超时、beast 逐操作 `expires_after`、seastar 按阶段武装定时器、httplib 头部阶段由 body_timeout 约束），超时按阶段计入 `lights3_http_timeouts_total{phase}`（[http-adapter.md §2.2](http-adapter.md)） | — | — |
+| ~~keep-alive 每连接请求数上限~~ | 已完成：`http.max_requests_per_connection`（默认 1024，0=不限），第 N 个响应带 `Connection: close`；指标 `lights3_http_keepalive_closes_total` | — | — |
+| ~~连接上限观测~~ | 已完成：`IHttpServer::stats()` → `lights3_http_connections_total{result=accepted\|rejected_limit}`、`lights3_http_connections_active`（httplib 跑上游 accept 循环，报零） | — | — |
+| ~~per-IP / per-AK 限流~~ | 已完成：`ratelimit.*`（令牌桶 + 并发上限，LRU 有界表），per-IP 在验签前、per-AK 在验签后，超限 `503 SlowDown` + `Retry-After: 1`，指标 `lights3_ratelimit_rejections_total{scope}`（[http-adapter.md §2.3](http-adapter.md)） | — | — |
+| ~~`io_threads` 语义漂移~~ | 已完成（文档化矩阵路线）：[http-adapter.md §2.2](http-adapter.md) 的四驱动矩阵 + 各驱动启动日志打印实际含义 | — | — |
+| 客户端断连独立取消源 | 文档明示的刻意取舍（长 handler 靠 `request_timeout` 兜底），**维持** | 中 | 高 |
 
 ### 4.3 数据面性能（按投入产出排序）
 
@@ -486,7 +486,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 ### P2 — 中期（需设计，一个方向一个迭代）
 
 1. ~~scrub/fsck（§3.1）~~ **已完成（2026-08-28）**；~~顺带的用量统计（§3.9①）未做~~ **已完成（2026-09-04，L2 增量 + 全量列举校准，未复用 scrub 遍历）**
-2. 超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）
+2. ~~超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）~~ **§4.2 已完成（2026-09-05）；§5.3 的 L1 连接/超时指标随之落地，其余指标补口仍待做**
 3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
 4. ~~builtin/seastar TLS + 证书热重载（§4.1）~~ **已完成（2026-09-05，含 mTLS/SNI/cipher 旋钮与反代样例）**
 5. 配置热重载安全子集（§4.4）

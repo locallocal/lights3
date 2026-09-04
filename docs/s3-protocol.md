@@ -180,6 +180,11 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
 
 ## 7. 可观测性
 
+L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{result}`、
+`lights3_http_connections_active`、`lights3_http_keepalive_closes_total`、
+`lights3_http_timeouts_total{phase=idle|header|body|write}`、
+`lights3_ratelimit_rejections_total{scope=ip|ak}`，见 [http-adapter.md §2.2–§2.3](http-adapter.md)。
+
 - **访问日志**：每请求一行结构化日志（request_id、AK、method、path、
   status、字节数、总耗时 ms；后端耗时待接入），格式对齐 S3 server
   access log 便于复用现有分析工具。

@@ -294,6 +294,18 @@ Config Config::from_string(const std::string& text) {
             cfg.http.max_header_size = parse_size(v);
         if (auto v = http->get("idle_timeout"); !v.empty())
             cfg.http.idle_timeout_sec = parse_duration_sec(v);
+        // Timeout family (roadmap §4.2): header / body / write phases
+        if (auto v = http->get("header_timeout"); !v.empty())
+            cfg.http.header_timeout_sec = parse_duration_sec(v);
+        if (auto v = http->get("body_timeout"); !v.empty())
+            cfg.http.body_timeout_sec = parse_duration_sec(v);
+        if (auto v = http->get("write_timeout"); !v.empty())
+            cfg.http.write_timeout_sec = parse_duration_sec(v);
+        cfg.http.max_requests_per_connection =
+            to_int("http.max_requests_per_connection", http->get("max_requests_per_connection"),
+                   cfg.http.max_requests_per_connection);
+        check_range("http.max_requests_per_connection", cfg.http.max_requests_per_connection, 0,
+                    1'000'000);
         // Per-request timeout and transfer stall limit (docs/archive/gaps.md §3.3): 0 = disabled
         if (auto v = http->get("request_timeout"); !v.empty())
             cfg.http.request_timeout_sec = parse_duration_sec(v);
@@ -505,6 +517,29 @@ Config Config::from_string(const std::string& text) {
         if (cfg.audit.path.empty() && cfg.audit.data_plane)
             throw std::runtime_error("config: audit.data_plane requires audit.path");
     }
+    if (auto* rl = root.find("ratelimit")) {
+        auto& r = cfg.ratelimit;
+        r.per_ip_rps = to_int("ratelimit.per_ip_rps", rl->get("per_ip_rps"), r.per_ip_rps);
+        r.per_ip_burst = to_int("ratelimit.per_ip_burst", rl->get("per_ip_burst"), r.per_ip_burst);
+        r.per_ip_max_inflight = to_int("ratelimit.per_ip_max_inflight",
+                                       rl->get("per_ip_max_inflight"), r.per_ip_max_inflight);
+        r.per_ak_rps = to_int("ratelimit.per_ak_rps", rl->get("per_ak_rps"), r.per_ak_rps);
+        r.per_ak_burst = to_int("ratelimit.per_ak_burst", rl->get("per_ak_burst"), r.per_ak_burst);
+        r.per_ak_max_inflight = to_int("ratelimit.per_ak_max_inflight",
+                                       rl->get("per_ak_max_inflight"), r.per_ak_max_inflight);
+        r.max_tracked = to_int("ratelimit.max_tracked", rl->get("max_tracked"), r.max_tracked);
+        for (auto [name, v] : {std::pair{"ratelimit.per_ip_rps", r.per_ip_rps},
+                               std::pair{"ratelimit.per_ip_burst", r.per_ip_burst},
+                               std::pair{"ratelimit.per_ip_max_inflight", r.per_ip_max_inflight},
+                               std::pair{"ratelimit.per_ak_rps", r.per_ak_rps},
+                               std::pair{"ratelimit.per_ak_burst", r.per_ak_burst},
+                               std::pair{"ratelimit.per_ak_max_inflight", r.per_ak_max_inflight}})
+            check_range(name, v, 0, 10'000'000);
+        check_range("ratelimit.max_tracked", r.max_tracked, 1, 10'000'000);
+        // A burst without a rate has nothing to refill it: reject rather than let it read as a limit
+        if ((r.per_ip_burst && !r.per_ip_rps) || (r.per_ak_burst && !r.per_ak_rps))
+            throw std::runtime_error("config: ratelimit.*_burst requires the matching *_rps");
+    }
     if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
     // parse_level in app.cc maps anything unknown to Info, so a misspelled level
     // ("warning", "trace") would silently downgrade — the operator believes debug
@@ -532,6 +567,9 @@ Config Config::from_string(const std::string& text) {
     // but "already expired" to beast (expires_after(0s)) — rather than silently
     // picking one meaning per driver, reject it: an idle timeout must be positive
     check_range("http.idle_timeout", cfg.http.idle_timeout_sec, 1, 86400);
+    check_range("http.header_timeout", cfg.http.header_timeout_sec, 1, 86400);
+    check_range("http.body_timeout", cfg.http.body_timeout_sec, 1, 86400);
+    check_range("http.write_timeout", cfg.http.write_timeout_sec, 1, 86400);
     check_range("http.request_timeout", cfg.http.request_timeout_sec, 0, 86400);
     check_range("http.transfer_stall_timeout", cfg.http.transfer_stall_timeout_sec, 0, 86400);
     // Cross-item consistency: the per-request timeout always fires first, so a stall

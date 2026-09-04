@@ -11,7 +11,12 @@ http:
   io_threads: 4            # beast=IO thread count / httplib=thread pool / seastar=shard count;
                            # builtin (thread-per-connection) ignores it and WARNs when set explicitly
   max_header_size: 16KiB
-  idle_timeout: 60s
+  # ---------- Timeout family (roadmap §4.2, docs/http-adapter.md §2.2) ----------
+  idle_timeout: 60s          # keep-alive: waiting for the next request on an idle connection
+  # header_timeout: 30s      # a new connection's request line + headers (slowloris bound)
+  # body_timeout: 60s        # inactivity bound on one request-body read (slow uploads)
+  # write_timeout: 60s       # inactivity bound on one response write (slow downloads)
+  # max_requests_per_connection: 1024   # then Connection: close (LB re-balancing); 0 = unlimited
   # Minimum size for non-final multipart parts (AWS fixes it at 5MiB). 0 = no limit —
   # relax it when fronted by toolchains that don't honor this rule, or when this
   # instance is merely a proxy for another lights3
@@ -44,6 +49,18 @@ http:
 runtime:
   io_threads: 16           # blocking IO thread pool size
   max_inflight_requests: 1024
+
+# ---------- Per-client rate limits (roadmap §4.2, docs/http-adapter.md §2.3) ----------
+# Token bucket + concurrency cap per source IP (before signature verification) and per
+# access key (after it). 0 = off. Over the limit: 503 SlowDown + Retry-After: 1
+# ratelimit:
+#   per_ip_rps: 0
+#   per_ip_burst: 0          # 0 = same as rps
+#   per_ip_max_inflight: 0
+#   per_ak_rps: 0
+#   per_ak_burst: 0
+#   per_ak_max_inflight: 0
+#   max_tracked: 10000       # keys kept per table (LRU beyond that)
 
 auth:
   credentials:

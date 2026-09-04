@@ -1059,6 +1059,138 @@ TEST(http_driver_idle_timeout_closes_idle_connection) {
     }
 }
 
+// ---------- Timeout family / keep-alive budget / connection counters (roadmap §4.2, http-adapter.md §2.1) ----------
+
+// The drivers close the socket before their completion handler bumps the counter,
+// so the client can observe the close first: wait briefly for the counter to land
+template <class Pred>
+bool eventually(Pred&& pred, int max_ms = 3000) {
+    for (int i = 0; i < max_ms / 20; ++i) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
+TEST(http_driver_header_timeout_bounds_slow_headers) {
+    // A fresh connection that never completes its request line/headers is cut by
+    // header_timeout, independently of the (much longer) idle/body timeouts.
+    // httplib bounds headers with body_timeout instead (upstream has one read
+    // timeout), so it gets that knob set low
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d, [&](HttpConfig& c) {
+                c.header_timeout_sec = 1;
+                c.body_timeout_sec = d == "httplib" ? 1 : 30;
+                c.idle_timeout_sec = 30;
+                c.write_timeout_sec = 30;
+            });
+            Client c(ts.port);
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nX-Slow: ");  // headers never finish
+            auto t0 = std::chrono::steady_clock::now();
+            auto r = c.read_response();  // a plain close, or httplib's 408 — never a success
+            CHECK(!r.ok || r.status >= 400);
+            CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8));
+            if (d != "httplib") {
+                CHECK(eventually([&] { return ts.srv->stats().timeouts_header == 1; }));
+                CHECK_EQ(ts.srv->stats().timeouts_idle, uint64_t(0));
+            }
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_body_timeout_bounds_stalled_upload) {
+    // Headers arrive, the declared body never does: body_timeout ends it while
+    // header/idle timeouts stay long
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d, [](HttpConfig& c) {
+                c.body_timeout_sec = 1;
+                c.header_timeout_sec = 30;
+                c.idle_timeout_sec = 30;
+                c.write_timeout_sec = 30;
+                c.transfer_stall_timeout_sec = 0;
+            });
+            Client c(ts.port);
+            c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\nabc");
+            auto t0 = std::chrono::steady_clock::now();
+            auto r = c.read_response();  // either an error response or a plain close
+            CHECK(!r.ok || r.status >= 400);
+            CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8));
+            if (d != "httplib") {
+                CHECK(eventually([&] { return ts.srv->stats().timeouts_body == 1; }));
+                CHECK_EQ(ts.srv->stats().timeouts_header, uint64_t(0));
+            }
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_keepalive_request_budget) {
+    // max_requests_per_connection=2: the second response announces Connection: close
+    // and the connection is closed afterwards; a fresh connection starts a new budget
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d, [](HttpConfig& c) { c.max_requests_per_connection = 2; });
+            Client c(ts.port);
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            auto r1 = c.read_response();
+            CHECK(r1.ok);
+            CHECK(!r1.header("Connection") || !HeaderMap::ieq(*r1.header("Connection"), "close"));
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            auto r2 = c.read_response();
+            CHECK(r2.ok);
+            CHECK(r2.header("Connection") && HeaderMap::ieq(*r2.header("Connection"), "close"));
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(!c.read_response().ok);  // budget spent: closed
+            Client c2(ts.port);
+            c2.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(c2.read_response().ok);
+            if (d != "httplib") CHECK(eventually([&] { return ts.srv->stats().keepalive_closes == 1; }));
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_connection_counters) {
+    // accepted / active / rejected_limit / idle timeouts through IHttpServer::stats()
+    // (httplib runs upstream's accept loop and exposes none of these)
+    for (auto& d : HttpServerFactory::drivers()) {
+        if (d == "httplib") continue;
+        try {
+            // max_connections=2 like the limit test above: seastar's resident engine keeps
+            // the smp it was first started with, and the cap is apportioned per shard
+            TestServer ts(d, [](HttpConfig& c) {
+                c.max_connections = 2;
+                c.io_threads = 1;
+                c.idle_timeout_sec = 1;
+            });
+            Client a(ts.port), b(ts.port);
+            a.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(a.read_response().ok);
+            b.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(b.read_response().ok);
+            CHECK_EQ(ts.srv->stats().accepted, uint64_t(2));
+            CHECK_EQ(ts.srv->stats().active, uint64_t(2));
+            Client c3(ts.port);
+            c3.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+            CHECK(!c3.read_response().ok);
+            CHECK(eventually([&] { return ts.srv->stats().rejected_limit == 1; }));
+            // The idle keep-alive connections time out and the active gauge drops
+            char ch;
+            CHECK_EQ(::recv(a.fd, &ch, 1, 0), ssize_t{0});
+            CHECK(eventually([&] { return ts.srv->stats().active == 0; }));
+            CHECK(eventually([&] { return ts.srv->stats().timeouts_idle == 2; }));
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
 TEST(http_driver_max_connections_rejects_excess) {
     // Over the limit, new connections are refused (builtin/beast close, seastar discards), established ones are unaffected.
     // httplib's limit is implicitly constrained by its thread pool (as the config.h comment states), different semantics, skipped

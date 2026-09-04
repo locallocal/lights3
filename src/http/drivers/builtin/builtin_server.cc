@@ -38,6 +38,19 @@ struct Io {
     int fd = -1;
     SSL* ssl = nullptr;
 
+    // Phase timeouts (roadmap §4.2): the blocking model expresses them as socket
+    // timeouts re-armed at each phase boundary; a read/write that times out fails
+    // with EAGAIN, which the callers attribute to the phase they were in
+    void set_recv_timeout(int sec) {
+        timeval tv{sec, 0};
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    void set_send_timeout(int sec) {
+        timeval tv{sec, 0};
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    }
+    static bool timed_out() { return errno == EAGAIN || errno == EWOULDBLOCK; }
+
     ssize_t recv(void* buf, size_t len) {
         if (ssl) {
             int n = SSL_read(ssl, buf, static_cast<int>(std::min<size_t>(len, INT32_MAX)));
@@ -108,6 +121,7 @@ struct ConnReader {
 struct BodyState {
     ConnReader* conn = nullptr;
     Io* io = nullptr;
+    driver::ConnCounters* counters = nullptr;
     bool need_continue = false;   // Expect: 100-continue not yet answered; reply only on first read
     bool chunked = false;
     uint64_t remaining = 0;       // Fixed-length mode: bytes remaining
@@ -135,7 +149,10 @@ struct BodyState {
         if (!chunked) {
             if (remaining == 0) return 0;
             size_t n = conn->read_some(dst, std::min<uint64_t>(want, remaining));
-            if (n == 0) fail("client disconnected mid-body");
+            if (n == 0) {
+                if (Io::timed_out() && counters) driver::count_timeout(*counters, driver::Phase::Body);
+                fail("client disconnected mid-body");
+            }
             remaining -= n;
             return n;
         }
@@ -173,7 +190,10 @@ struct BodyState {
             chunk_left = sz;
         }
         size_t n = conn->read_some(dst, std::min<uint64_t>(want, chunk_left));
-        if (n == 0) fail("client disconnected mid-body");
+        if (n == 0) {
+            if (Io::timed_out() && counters) driver::count_timeout(*counters, driver::Phase::Body);
+            fail("client disconnected mid-body");
+        }
         chunk_left -= n;
         if (chunk_left == 0) after_chunk_data = true;
         return n;
@@ -231,6 +251,7 @@ private:
 struct ConnShared {
     HttpConfig cfg;
     Handler handler;
+    driver::ConnCounters counters;  // IHttpServer::stats() (roadmap §4.2)
     // TLS (roadmap §4.1): the holder supplies certificates/SNI/client CA per
     // handshake and hot-reloads them; the SSL_CTX carries the static knobs. Both
     // live here because connection threads outlive the server object
@@ -285,14 +306,21 @@ bool spawn_conn_thread(std::function<void()> fn) {
 }
 
 bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_alive,
-                    size_t io_chunk = driver::kIoChunkBytes) {
+                    size_t io_chunk = driver::kIoChunkBytes,
+                    driver::ConnCounters* counters = nullptr) {
+    // A send that fails with EAGAIN hit write_timeout (roadmap §4.2)
+    auto send = [&](const char* p, size_t n) {
+        if (io.send_all(p, n)) return true;
+        if (Io::timed_out() && counters) driver::count_timeout(*counters, driver::Phase::Write);
+        return false;
+    };
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
     auto head = driver::render_response_head(resp, keep_alive, head_request);
     bool chunked = head.chunked;
-    if (!io.send_all(head.text.data(), head.text.size())) return false;
+    if (!send(head.text.data(), head.text.size())) return false;
     if (head_request || no_body_status) return true;
 
-    if (!resp.stream_body) return io.send_all(resp.small_body.data(), resp.small_body.size());
+    if (!resp.stream_body) return send(resp.small_body.data(), resp.small_body.size());
 
     // Streaming response: pulled in http.io_chunk_size chunks
     // (docs/architecture.md request lifecycle). The chunk size is a runtime
@@ -317,13 +345,13 @@ bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_ali
         if (chunked) {
             char sz[32];
             int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
-            if (!io.send_all(sz, static_cast<size_t>(m))) return false;
+            if (!send(sz, static_cast<size_t>(m))) return false;
         }
-        if (!io.send_all(reinterpret_cast<const char*>(buf.data()), n)) return false;
-        if (chunked && !io.send_all("\r\n", 2)) return false;
+        if (!send(reinterpret_cast<const char*>(buf.data()), n)) return false;
+        if (chunked && !send("\r\n", 2)) return false;
         written += n;
     }
-    if (chunked) return io.send_all("0\r\n\r\n", 5);
+    if (chunked) return send("0\r\n\r\n", 5);
     // A fixed-length response that wrote too little must not stay keep-alive: the client would read the next response head as the rest of this body
     if (resp.content_length && written != *resp.content_length) {
         LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
@@ -335,9 +363,13 @@ bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_ali
 
 // Handles one request; false means the connection should be closed
 bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& peer,
-               bool& keep_alive) {
+               bool& keep_alive, int served) {
     const size_t max_line = sh.cfg.max_header_size;
     const int fd = io.fd;
+    // Phase timeouts (roadmap §4.2): waiting for the request line is the keep-alive
+    // idle wait on a reused connection, the header bound on a fresh one; headers
+    // and body then get their own bounds, the response write its own
+    io.set_recv_timeout(served == 0 ? sh.cfg.header_timeout_sec : sh.cfg.idle_timeout_sec);
 
     // Until the request line is read, this connection is "idle keep-alive":
     // register it in idle so the shutdown sweep cuts it directly; on the
@@ -353,7 +385,14 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
         std::lock_guard lk(sh.m);
         sh.idle.erase(fd);
     }
-    if (!got || line.empty()) return false;
+    if (!got) {
+        if (Io::timed_out())
+            driver::count_timeout(sh.counters,
+                                  served == 0 ? driver::Phase::Header : driver::Phase::Idle);
+        return false;
+    }
+    if (line.empty()) return false;
+    io.set_recv_timeout(sh.cfg.header_timeout_sec);
 
     HttpRequest req;
     req.remote_addr = peer;
@@ -371,7 +410,10 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     // Headers
     size_t header_bytes = 0;
     for (;;) {
-        if (!reader.read_line(line, max_line)) return false;
+        if (!reader.read_line(line, max_line)) {
+            if (Io::timed_out()) driver::count_timeout(sh.counters, driver::Phase::Header);
+            return false;
+        }
         if (line.empty()) break;
         header_bytes += line.size();
         if (header_bytes > sh.cfg.max_header_size) return false;
@@ -402,9 +444,11 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
         write_response(io, bad, req.method == "HEAD", /*keep_alive=*/false);
         return false;
     }
+    io.set_recv_timeout(sh.cfg.body_timeout_sec);
     BodyState body_state;
     body_state.conn = &reader;
     body_state.io = &io;
+    body_state.counters = &sh.counters;
     body_state.trailer_max = sh.cfg.trailer_max_size;
     std::optional<uint64_t> content_length = framing.content_length;
     bool has_body = false;
@@ -443,19 +487,26 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
         else if (keep_alive) keep_alive = body_state.drain(sh.cfg.drain_limit);
     }
 
-    if (!write_response(io, resp, head_request, keep_alive, sh.cfg.io_chunk_size)) return false;
+    // Keep-alive budget (http.max_requests_per_connection): the last allowed
+    // response already announces Connection: close
+    if (keep_alive && driver::keepalive_budget_exhausted(served + 1,
+                                                         sh.cfg.max_requests_per_connection)) {
+        keep_alive = false;
+        sh.counters.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!write_response(io, resp, head_request, keep_alive, sh.cfg.io_chunk_size, &sh.counters))
+        return false;
     return keep_alive;
 }
 
 void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
-    timeval tv{sh.cfg.idle_timeout_sec, 0};
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
     Io io;
     io.fd = fd;
+    io.set_recv_timeout(sh.cfg.header_timeout_sec);  // covers the TLS handshake too
+    io.set_send_timeout(sh.cfg.write_timeout_sec);
     if (sh.tls_ctx) {
         // TLS handshake on the connection thread (blocking, bounded by the socket
         // timeouts). The certificate callback installed by the holder picks the
@@ -476,8 +527,10 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     ConnReader reader;
     reader.io = &io;  // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset 16KiB)
     bool keep_alive = true;
+    int served = 0;
     while (keep_alive && !sh.stopping.load()) {
-        if (!serve_one(sh, io, reader, peer, keep_alive)) break;
+        if (!serve_one(sh, io, reader, peer, keep_alive, served)) break;
+        ++served;
     }
     if (io.ssl) {
         SSL_shutdown(io.ssl);  // best-effort close_notify; TCP is closed right after anyway
@@ -570,6 +623,7 @@ public:
     }
 
     uint16_t bound_port() const override { return port_; }
+    ConnStats stats() const override { return shared_->counters.snapshot(); }
 
     void run() override {
         auto& sh = *shared_;
@@ -612,10 +666,13 @@ public:
                 if (sh.active >= sh.cfg.max_connections) {
                     LOG_WARN("connection limit ({}) reached, rejecting {}",
                              sh.cfg.max_connections, ip);
+                    sh.counters.rejected_limit.fetch_add(1, std::memory_order_relaxed);
                     ::close(fd);
                     continue;
                 }
                 ++sh.active;
+                sh.counters.accepted.fetch_add(1, std::memory_order_relaxed);
+                sh.counters.active.store(static_cast<uint64_t>(sh.active), std::memory_order_relaxed);
                 sh.conns.insert(fd);
             }
             bool spawned = spawn_conn_thread([sp = shared_, fd, peer_ip = std::string(ip)] {
@@ -625,6 +682,7 @@ public:
                 sp->idle.erase(fd);
                 ::close(fd);
                 if (--sp->active == 0) sp->cv.notify_all();
+                sp->counters.active.store(static_cast<uint64_t>(sp->active), std::memory_order_relaxed);
             });
             if (!spawned) {
                 // Thread creation failed (resource exhaustion): roll back the
@@ -635,6 +693,7 @@ public:
                 sh.conns.erase(fd);
                 ::close(fd);
                 if (--sh.active == 0) sh.cv.notify_all();
+                sh.counters.active.store(static_cast<uint64_t>(sh.active), std::memory_order_relaxed);
             }
         }
         // Graceful exit: idle keep-alive connections are cut immediately

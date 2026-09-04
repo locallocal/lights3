@@ -53,7 +53,8 @@ void Metrics::record_bucket_request(std::string_view bucket) {
 
 std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats,
                             const std::function<AdmissionStats()>& admission,
-                            const std::function<TimerQueue::Stats()>& timer_stats) const {
+                            const std::function<TimerQueue::Stats()>& timer_stats,
+                            const std::function<http::ConnStats()>& conn) const {
     std::ostringstream os;
 
     os << "# TYPE lights3_requests_total counter\n";
@@ -96,6 +97,13 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     uint64_t created = mpu_created_.load(std::memory_order_relaxed);
     uint64_t finished = mpu_finished_.load(std::memory_order_relaxed);
     os << "lights3_multipart_active " << (created > finished ? created - finished : 0) << "\n";
+
+    // Per-client rate limiting (roadmap §4.2)
+    os << "# TYPE lights3_ratelimit_rejections_total counter\n";
+    os << "lights3_ratelimit_rejections_total{scope=\"ip\"} "
+       << rl_ip_.load(std::memory_order_relaxed) << "\n";
+    os << "lights3_ratelimit_rejections_total{scope=\"ak\"} "
+       << rl_ak_.load(std::memory_order_relaxed) << "\n";
 
     // Byte counts and per-bucket dimension (docs/archive/gaps.md §7)
     os << "# TYPE lights3_bytes_total counter\n";
@@ -141,6 +149,25 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_pool_wait_seconds_bucket{le=\"+Inf\"} " << wcum << "\n";
         os << "lights3_pool_wait_seconds_sum " << st.wait_sum_us / 1e6 << "\n";
         os << "lights3_pool_wait_seconds_count " << wcum << "\n";
+    }
+
+    // L1 connection counters (roadmap §4.2): accept/reject, keep-alive budget closes,
+    // and timeouts attributed to the phase (idle wait / headers / body / write)
+    if (conn) {
+        auto st = conn();
+        os << "# TYPE lights3_http_connections_total counter\n";
+        os << "lights3_http_connections_total{result=\"accepted\"} " << st.accepted << "\n";
+        os << "lights3_http_connections_total{result=\"rejected_limit\"} " << st.rejected_limit
+           << "\n";
+        os << "# TYPE lights3_http_connections_active gauge\n";
+        os << "lights3_http_connections_active " << st.active << "\n";
+        os << "# TYPE lights3_http_keepalive_closes_total counter\n";
+        os << "lights3_http_keepalive_closes_total " << st.keepalive_closes << "\n";
+        os << "# TYPE lights3_http_timeouts_total counter\n";
+        os << "lights3_http_timeouts_total{phase=\"idle\"} " << st.timeouts_idle << "\n";
+        os << "lights3_http_timeouts_total{phase=\"header\"} " << st.timeouts_header << "\n";
+        os << "lights3_http_timeouts_total{phase=\"body\"} " << st.timeouts_body << "\n";
+        os << "lights3_http_timeouts_total{phase=\"write\"} " << st.timeouts_write << "\n";
     }
 
     // Ingress throttling queue depth (docs/archive/gaps.md §7): the inflight semaphore is the process-wide sole admission gate

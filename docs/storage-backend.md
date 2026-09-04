@@ -252,6 +252,16 @@ manifest）来自进程内 LRU，零 meta 引擎 RTT。rocksdb/sqlite 默认开�
 注意：duostore 不能作 tiered 的 local 侧（tiered 绑定 localfs 磁盘布局），
 可作其 cloud 侧或独立使用。
 
+### 5.x 计时装配（roadmap §5.1）
+
+`Application` 把路由用的后端集合包一层 `storage::MeteredBackend`
+（`src/storage/metered_backend.h`）：每个 `IStorageBackend` 虚函数被计时并记入
+`lights3_backend_op_seconds{backend,op}` / `lights3_backend_errors_total{backend,op}`，
+同时把耗时累加到请求取消令牌携带的 `RequestBackendStats`（访问日志的后端耗时槽）。
+新增后端**不需要**做任何事即可获得这组指标；后端内部更细的指标仍按 §6 的
+`MetricsScope` 方式自行注册。原始实例仍由 `Application` 持有并负责 `close()`，
+装饰器的 `close()` 是空操作。
+
 ## 6. 新增后端的步骤（扩展指南)
 
 1. 实现 `IStorageBackend`（放 `src/storage/<name>/`）。

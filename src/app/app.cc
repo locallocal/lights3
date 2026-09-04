@@ -56,7 +56,11 @@ void Application::open_storage() {
 }
 
 void Application::start_server() {
-    auto router = storage::BucketRouter::build(cfg_.buckets, backends_);
+    // The data plane routes to metered decorators (roadmap §5.1: per-backend op
+    // histograms + the per-request backend-time accumulator); the raw instances
+    // stay in backends_ for close() and the offline admin tasks
+    metered_ = storage::meter_backends(backends_, metrics_);
+    auto router = storage::BucketRouter::build(cfg_.buckets, metered_);
     auto auth = s3::SigV4Authenticator::build(cfg_.auth);
     // Dynamic credentials (docs/credential-management.md): loaded from the default backend, replacing the static lookup table
     cred_store_ = sync_wait(s3::CredentialStore::load(router.default_backend(), cfg_.auth));
@@ -77,11 +81,11 @@ void Application::start_server() {
     // own router copy (S3Service owns the primary by value)
     lifecycle_store_ = sync_wait(s3::LifecycleStore::load(router.default_backend()));
     lifecycle_runner_ = std::make_unique<s3::LifecycleRunner>(
-        storage::BucketRouter::build(cfg_.buckets, backends_), lifecycle_store_);
+        storage::BucketRouter::build(cfg_.buckets, metered_), lifecycle_store_);
     // roadmap §3.9 (docs/multi-tenancy.md): audit file, usage counters, quotas,
     // tenants + bucket ownership. All persisted next to the other .sys records
     audit_ = s3::AuditLog::open(cfg_.audit);
-    usage_ = sync_wait(s3::UsageTracker::load(storage::BucketRouter::build(cfg_.buckets, backends_),
+    usage_ = sync_wait(s3::UsageTracker::load(storage::BucketRouter::build(cfg_.buckets, metered_),
                                               cfg_.usage, metrics_));
     quota_store_ = sync_wait(s3::QuotaStore::load(router.default_backend()));
     tenant_store_ = sync_wait(s3::TenantStore::load(router.default_backend()));
@@ -512,6 +516,7 @@ void Application::shutdown() noexcept {
     quota_store_.reset();
     usage_.reset();
     audit_.reset();
+    metered_.clear();
     backends_.clear();
     if (pool_) {
         try {

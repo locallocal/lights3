@@ -199,17 +199,26 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
 `lights3_http_timeouts_total{phase=idle|header|body|write}`,
 `lights3_ratelimit_rejections_total{scope=ip|ak}`; see [http-adapter.md §2.2–§2.3](http-adapter.md).
 
-- **Access log**: one structured log line per request (request_id, AK, method, path,
-  status, byte counts, total elapsed ms; backend elapsed time pending), formatted
-  to match S3 server access logs so existing analysis tools can be reused.
-- **Metrics** (Prometheus text format, `GET /-/metrics`, anonymous endpoint on the
-  same listener as the data plane; access must be restricted at the deployment level):
-  request counts / latency histograms (dimensioned by API and backend), in-flight
-  request count, thread pool queue depth, active multipart count, backend error
-  rate. Backend-level metrics are registered via the `core/metrics.h` registry
-  (`backend=<name>` label) and appended after the L2 request metrics
-  in the output; "per API x backend request histograms and backend error rate"
-  are still pending.
+- **Access log**: one structured line per request (request_id, AK, method, path,
+  status, byte counts, total elapsed ms), formatted like the S3 server access
+  log so existing tooling applies; since roadmap §5.1 two trailing slots
+  `api=<Route name> backend=<backend name>:<ms spent in the backend>` — the
+  backend time comes from the metering decorator wrapped around the routed
+  backends (`storage/metered_backend.h`), fed back through the request's
+  cancellation token, so "gateway queueing or backend" is answered by one line.
+- **Metrics** (Prometheus text format, `GET /-/metrics`, an anonymous
+  endpoint on the data-plane listener — restrict it at the deployment layer):
+  request counts / latency histograms (global and per `(api, backend)`:
+  `lights3_api_requests_total{api,backend,class}`,
+  `lights3_api_request_duration_seconds{api,backend}`; api is the dispatch
+  table's `Route::name`, CopyObject/UploadPartCopy refined on
+  `x-amz-copy-source`), in-flight requests, thread-pool queue depth, active
+  multipart uploads. Backend-level metrics registered through the
+  `core/metrics.h` registry (`backend=<name>` label) follow the L2 request
+  metrics; among them `lights3_backend_op_seconds{backend,op}` histograms and
+  `lights3_backend_errors_total{backend,op}` (5xx / transport exceptions count,
+  4xx do not) are produced uniformly for all six backends by the metering
+  decorator (roadmap §5.1).
 - **Health checks**: `GET /-/healthz` (process liveness) and `GET /-/readyz`
   (per-backend probing: `co_await list_buckets()` uniformly against all backends;
   any failure returns 503 with the failing backend names reported in the body).

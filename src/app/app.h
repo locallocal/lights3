@@ -23,6 +23,7 @@
 #include "s3/usage.h"
 #include "s3/website_store.h"
 #include "storage/backend.h"
+#include "storage/metered_backend.h"
 
 namespace lights3 {
 
@@ -88,6 +89,7 @@ private:
     std::shared_ptr<ThreadPool> pool_;
     std::shared_ptr<MetricsRegistry> metrics_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> metered_;  // roadmap §5.1 decorators
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::CorsStore> cors_store_;

@@ -60,6 +60,20 @@ public:
 
     bool cancelled() const { return cancelled_.load(std::memory_order_acquire); }
 
+    // Request-scoped payload riding on the token (roadmap §5.1): the request entry
+    // attaches e.g. its backend-time accumulator, and anything down the inherited
+    // co_await chain (the metered backend decorator) reaches it without threading a
+    // parameter through every call. Shared ownership: a frame outliving the request
+    // (abandoned after a timeout) keeps the payload alive instead of dangling
+    void set_data(std::shared_ptr<void> d) {
+        std::lock_guard lk(m_);
+        data_ = std::move(d);
+    }
+    std::shared_ptr<void> data() const {
+        std::lock_guard lk(m_);
+        return data_;
+    }
+
     // If already cancelled, does not register and returns 0; after registering, the
     // caller must check cancelled() itself to cover the race window
     uint64_t add_callback(std::function<void()> fn) {
@@ -107,7 +121,8 @@ public:
 
 private:
     std::atomic<bool> cancelled_{false};
-    std::mutex m_;
+    std::shared_ptr<void> data_;  // request-scoped payload (guarded by m_)
+    mutable std::mutex m_;
     std::condition_variable fired_cv_;
     uint64_t next_id_ = 0;
     bool firing_ = false;              // callback batch is executing outside the lock
@@ -163,6 +178,11 @@ public:
     // "never cancelled" token). Used when the coroutine chain inherits tokens along
     // Tasks to decide "does this level already have a token" (core/task.h)
     bool valid() const { return state_ != nullptr; }
+    // Request-scoped payload attached by the source (see CancelState::set_data)
+    template <class T>
+    std::shared_ptr<T> data() const {
+        return state_ ? std::static_pointer_cast<T>(state_->data()) : nullptr;
+    }
 
     // Note: if already cancelled at registration time, the callback will not be
     // invoked (an empty handle is returned) — the caller then checks cancelled() itself
@@ -197,6 +217,7 @@ public:
     CancelToken token() const { return CancelToken(state_); }
     void request_cancel() { state_->request_cancel(); }
     bool cancelled() const { return state_->cancelled(); }
+    void set_data(std::shared_ptr<void> d) { state_->set_data(std::move(d)); }
 
 private:
     std::shared_ptr<detail::CancelState> state_;

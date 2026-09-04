@@ -314,6 +314,7 @@ add_library(lights3_core STATIC
   src/s3/tenant.cc
   src/s3/usage.cc
   src/s3/ratelimit.cc
+  src/storage/metered_backend.cc
   src/s3/handlers/admin_credentials.cc
   src/s3/handlers/admin_tenants.cc
   src/s3/handlers/bucket_quota.cc
@@ -508,6 +509,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_tls.cc
     tests/unit/test_ratelimit.cc
     tests/unit/test_reload.cc
+    tests/unit/test_api_metrics.cc
     tests/unit/test_http_drivers.cc
     tests/unit/test_admission.cc
   )

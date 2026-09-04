@@ -84,7 +84,7 @@ std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(const BucketsCo
             // "!fixed-string" matches every bucket except one name -- it is itself a catch-all
             saw_catch_all = true;
         }
-        t->rules.push_back({std::move(glob), negate, find(rule.backend)});
+        t->rules.push_back({std::move(glob), negate, find(rule.backend), rule.backend});
     }
     return t;
 }
@@ -110,6 +110,13 @@ void BucketRouter::update(const BucketsConfig& cfg) {
                                  "): it hosts .sys and the stores loaded from it");
     auto fresh = compile(cfg, *shared_);  // validates before anything is swapped
     shared_->table.store(std::move(fresh), std::memory_order_release);
+}
+
+std::string BucketRouter::backend_name(std::string_view bucket) const {
+    auto t = table();
+    for (auto& rule : t->rules)
+        if (glob_match(rule.glob, bucket) != rule.negate) return rule.backend_name;
+    return shared_->default_name;
 }
 
 IStorageBackend& BucketRouter::resolve(std::string_view bucket) const {

@@ -1,4 +1,5 @@
 #include "s3/service.h"
+#include "storage/metered_backend.h"
 
 #include <algorithm>
 #include <cctype>
@@ -455,6 +456,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::string anon_orig_key;
     bool vhost = false;
     std::string tenant_for_log;  // actor's tenant for the audit record (empty = none)
+    // API x backend dimension (roadmap §5.1): the route name becomes the api label,
+    // the routed backend the backend label; the accumulator travels on the
+    // request's cancellation token and collects the backend share of the latency
+    std::string_view api_name;
+    std::string backend_name;
+    auto backend_stats = std::make_shared<storage::RequestBackendStats>();
     // Rate-limit slots (roadmap §4.2) held for the whole dispatch; released on return
     // The limiter instances are pinned here so a hot-reload swap cannot destroy
     // one while this request still holds a slot in it (declared before the slots:
@@ -493,27 +500,33 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             return true;
         };
         if (internal && internal_get("/-/healthz")) {
+            api_name = "healthz";
             resp.small_body = "ok\n";
             resp.headers.set("Content-Type", "text/plain");
         } else if (internal && internal_get("/-/metrics")) {
+            api_name = "metrics";
             resp.small_body =
                 metrics_.render(pool_stats_, admission_stats_, timer_stats_, conn_stats_);
             // The backend-level registry is appended after the L2 request metrics
             if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
         } else if (internal && internal_get("/-/readyz")) {
+            api_name = "readyz";
             resp = co_await readyz();
         } else if (internal && (req.path == "/-/admin/credentials" ||
                                 req.path.rfind("/-/admin/credentials/", 0) == 0)) {
             // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
+            api_name = "AdminCredentials";
             resp = co_await admin_credentials(req, access_key);
         } else if (internal && req.path == "/-/admin/config/reload") {
             // Config hot reload (roadmap §4.4, docs/config-reload.md)
+            api_name = "AdminConfigReload";
             resp = co_await admin_config_reload(req, access_key, ctx);
         } else if (internal && (req.path == "/-/admin/tenants" || req.path == "/-/admin/usage" ||
                                 req.path.rfind("/-/admin/tenants/", 0) == 0 ||
                                 req.path.rfind("/-/admin/usage/", 0) == 0)) {
             // Tenancy + usage admin plane (docs/multi-tenancy.md §6), same JSON conventions
+            api_name = "AdminTenancy";
             resp = co_await admin_tenancy(req, access_key, ctx);
         } else if (!addr.vhost && req.path == "/" && req.method == "POST") {
             // STS AssumeRole (roadmap §2.6): SDKs pointed at this gateway as their STS
@@ -521,6 +534,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // vhost addressing "/" is a bucket root and stays on the S3 plane. The
             // handler does its own verification (service scope "sts") and renders
             // errors in the STS XML shape
+            api_name = "AssumeRole";
             resp = co_await sts_endpoint(req, ctx, access_key);
         } else if (req.method == "OPTIONS") {
             // CORS preflight (roadmap §2.1): decided before signature verification —
@@ -530,6 +544,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // beyond "this origin/method pair is allowed"
             bucket = addr.bucket;
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
+            api_name = "Preflight";
             resp = co_await cors_preflight(req, bucket);
         } else {
             // Static website hosting phase 1 (docs/static-website.md): requests with no
@@ -571,6 +586,18 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // rules close both entrances at once, and reserved names (.sys) are only available to callers with
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
+            {
+                Scope scope = bucket.empty() ? Scope::Service
+                              : key.empty()  ? Scope::Bucket
+                                             : Scope::Object;
+                if (const Route* r = match_route(req, scope)) {
+                    api_name = r->name;
+                    bool copy = req.headers.has("x-amz-copy-source");
+                    if (copy && r->name == "PutObject") api_name = "CopyObject";
+                    if (copy && r->name == "UploadPart") api_name = "UploadPartCopy";
+                }
+                backend_name = bucket.empty() ? std::string() : router_.backend_name(bucket);
+            }
             // Set when the anonymous plane answered with a redirect before any object
             // access (RedirectAllRequestsTo / prefix RoutingRules, roadmap §2.3):
             // routing and policy are skipped entirely
@@ -672,6 +699,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // nearest cancellable suspension point (pool.schedule / semaphore.acquire). The token propagates down
             // the Task promise automatically, no per-handler/backend signature changes needed
             CancelSource req_src;
+            req_src.set_data(backend_stats);  // reachable from the metered backends (roadmap §5.1)
             CancelRegistration link;
             if (ctx.cancel.valid()) {
                 link = ctx.cancel.on_cancel([&req_src] { req_src.request_cancel(); });
@@ -775,9 +803,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // Access log (docs/s3-protocol.md §7): one structured line, field order aligned with a slimmed-down S3 access log
     double secs = mguard.finish(resp.status);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
-    LOG_INFO("access {} {} {} {} {} {} {}ms", ctx.request_id,
+    metrics_.record_api(api_name, backend_name.empty() ? "-" : backend_name, resp.status, secs);
+    // Two trailing slots since roadmap §5.1: api=<Route name> backend=<name>:<ms in backend>
+    LOG_INFO("access {} {} {} {} {} {} {}ms api={} backend={}:{:.1f}ms", ctx.request_id,
              access_key.empty() ? "-" : access_key, req.method, req.path, resp.status, bytes,
-             static_cast<uint64_t>(secs * 1000));
+             static_cast<uint64_t>(secs * 1000), api_name.empty() ? "-" : api_name,
+             backend_name.empty() ? "-" : backend_name, backend_stats->millis());
     // Data-plane audit record (roadmap §3.9 ④): structured twin of the access line
     if (audit_ && audit_->data_plane()) {
         AuditEvent e;
@@ -791,6 +822,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         e.path = req.path;
         e.status = resp.status;
         e.bytes = static_cast<int64_t>(bytes);
+        e.action = api_name;
         audit_->access(e);
     }
     co_return resp;
@@ -825,7 +857,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
     static constexpr Route kRoutes[] = {
     // Service level
     {"GET", Scope::Service, "", "",
-     Action::Read,
+     Action::Read, "ListBuckets",
      [](S3Service& s, http::HttpRequest&, std::string, std::string,
         const RequestAuth& auth) {
          return s.list_buckets(auth);
@@ -833,7 +865,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
 
     // Bucket level
     {"GET", Scope::Bucket, "location", "",
-     Action::Read,
+     Action::Read, "GetBucketLocation",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth&) {
          return s.get_bucket_location(std::move(b));
@@ -841,57 +873,57 @@ std::span<const S3Service::Route> S3Service::route_table() {
     // ?website subresource (docs/static-website.md phase ③): flagged routes must precede
     // the flagless fallbacks of the same method, or PUT /bucket?website would create a bucket
     {"GET", Scope::Bucket, "website", "",
-     Action::Read,
+     Action::Read, "GetBucketWebsite",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.get_bucket_website(std::move(b), auth);
      }},
     {"PUT", Scope::Bucket, "website", "",
-     Action::Write,
+     Action::Write, "PutBucketWebsite",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.put_bucket_website(req, std::move(b), auth);
      }},
     {"DELETE", Scope::Bucket, "website", "",
-     Action::Delete,
+     Action::Delete, "DeleteBucketWebsite",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_bucket_website(std::move(b), auth);
      }},
     // ?lifecycle subresource (roadmap §2.4, root credential only, same model as ?website)
     {"GET", Scope::Bucket, "lifecycle", "",
-     Action::Read,
+     Action::Read, "GetBucketLifecycle",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.get_bucket_lifecycle(std::move(b), auth);
      }},
     {"PUT", Scope::Bucket, "lifecycle", "",
-     Action::Write,
+     Action::Write, "PutBucketLifecycle",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.put_bucket_lifecycle(req, std::move(b), auth);
      }},
     {"DELETE", Scope::Bucket, "lifecycle", "",
-     Action::Delete,
+     Action::Delete, "DeleteBucketLifecycle",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_bucket_lifecycle(std::move(b), auth);
      }},
     // ?cors subresource (roadmap §2.1, root credential only, same model as ?website)
     {"GET", Scope::Bucket, "cors", "",
-     Action::Read,
+     Action::Read, "GetBucketCors",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.get_bucket_cors(std::move(b), auth);
      }},
     {"PUT", Scope::Bucket, "cors", "",
-     Action::Write,
+     Action::Write, "PutBucketCors",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.put_bucket_cors(req, std::move(b), auth);
      }},
     {"DELETE", Scope::Bucket, "cors", "",
-     Action::Delete,
+     Action::Delete, "DeleteBucketCors",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_bucket_cors(std::move(b), auth);
@@ -899,19 +931,19 @@ std::span<const S3Service::Route> S3Service::route_table() {
     // ?quota subresource (roadmap §3.9 ②, docs/multi-tenancy.md §3): GET for anyone
     // admitted to the bucket, PUT/DELETE root only
     {"GET", Scope::Bucket, "quota", "",
-     Action::Read,
+     Action::Read, "GetBucketQuota",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.get_bucket_quota(std::move(b), auth);
      }},
     {"PUT", Scope::Bucket, "quota", "",
-     Action::Write,
+     Action::Write, "PutBucketQuota",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.put_bucket_quota(req, std::move(b), auth);
      }},
     {"DELETE", Scope::Bucket, "quota", "",
-     Action::Delete,
+     Action::Delete, "DeleteBucketQuota",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_bucket_quota(std::move(b), auth);
@@ -920,7 +952,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
     // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
     {"GET", Scope::Bucket, "uploads",
      "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
-     Action::Read,
+     Action::Read, "ListMultipartUploads",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.list_multipart_uploads(req, std::move(b), auth);
@@ -930,31 +962,31 @@ std::span<const S3Service::Route> S3Service::route_table() {
     {"GET", Scope::Bucket, "",
      "list-type prefix delimiter marker continuation-token start-after max-keys "
      "encoding-type fetch-owner",
-     Action::Read,
+     Action::Read, "ListObjects",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.list_objects(req, std::move(b), auth);
      }},
     {"PUT", Scope::Bucket, "", "",
-     Action::Write,
+     Action::Write, "CreateBucket",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.create_bucket(req, std::move(b), auth);
      }},
     {"HEAD", Scope::Bucket, "", "",
-     Action::Read,
+     Action::Read, "HeadBucket",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth&) {
          return s.head_bucket(std::move(b));
      }},
     {"DELETE", Scope::Bucket, "", "",
-     Action::Delete,
+     Action::Delete, "DeleteBucket",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_bucket(std::move(b), auth);
      }},
     {"POST", Scope::Bucket, "delete", "",
-     Action::Delete,
+     Action::Delete, "DeleteObjects",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
         const RequestAuth& auth) {
          return s.delete_objects(req, std::move(b), auth);
@@ -962,19 +994,19 @@ std::span<const S3Service::Route> S3Service::route_table() {
 
     // ?tagging subresource (roadmap §2.5)
     {"GET", Scope::Object, "tagging", "",
-     Action::Read,
+     Action::Read, "GetObjectTagging",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
         const RequestAuth&) {
          return s.get_object_tagging(std::move(b), std::move(k));
      }},
     {"PUT", Scope::Object, "tagging", "",
-     Action::Write,
+     Action::Write, "PutObjectTagging",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
          return s.put_object_tagging(req, std::move(b), std::move(k));
      }},
     {"DELETE", Scope::Object, "tagging", "",
-     Action::Delete,
+     Action::Delete, "DeleteObjectTagging",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
         const RequestAuth&) {
          return s.delete_object_tagging(std::move(b), std::move(k));
@@ -982,31 +1014,31 @@ std::span<const S3Service::Route> S3Service::route_table() {
 
     // Object level: multipart
     {"POST", Scope::Object, "uploads", "",
-     Action::Write,
+     Action::Write, "CreateMultipartUpload",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth& auth) {
          return s.create_multipart(req, std::move(b), std::move(k), auth);
      }},
     {"POST", Scope::Object, "uploadId", "",
-     Action::Write,
+     Action::Write, "CompleteMultipartUpload",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth& auth) {
          return s.complete_multipart(req, std::move(b), std::move(k), auth);
      }},
     {"PUT", Scope::Object, "partNumber", "uploadId",
-     Action::Write,
+     Action::Write, "UploadPart",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth& auth) {
          return s.upload_part(req, std::move(b), std::move(k), auth);
      }},
     {"GET", Scope::Object, "uploadId", "max-parts part-number-marker encoding-type",
-     Action::Read,
+     Action::Read, "ListParts",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
          return s.list_parts(req, std::move(b), std::move(k));
      }},
     {"DELETE", Scope::Object, "uploadId", "",
-     Action::Delete,
+     Action::Delete, "AbortMultipartUpload",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
          return s.abort_multipart(req, std::move(b), std::move(k));
@@ -1014,7 +1046,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
 
     // Object level: data plane
     {"PUT", Scope::Object, "", "",  // PutObject / CopyObject (steered by x-amz-copy-source)
-     Action::Write,
+     Action::Write, "PutObject",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth& auth) {
          if (req.headers.has("x-amz-copy-source"))
@@ -1028,7 +1060,7 @@ std::span<const S3Service::Route> S3Service::route_table() {
      "response-content-type response-content-language response-expires "
      "response-cache-control response-content-disposition response-content-encoding "
      "partNumber",
-     Action::Read,
+     Action::Read, "GetObject",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
          return s.get_object(req, std::move(b), std::move(k), false);
@@ -1037,13 +1069,13 @@ std::span<const S3Service::Route> S3Service::route_table() {
      "response-content-type response-content-language response-expires "
      "response-cache-control response-content-disposition response-content-encoding "
      "partNumber",
-     Action::Read,
+     Action::Read, "HeadObject",
      [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
         const RequestAuth&) {
          return s.get_object(req, std::move(b), std::move(k), true);
      }},
     {"DELETE", Scope::Object, "", "",
-     Action::Delete,
+     Action::Delete, "DeleteObject",
      [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
         const RequestAuth&) {
          return s.delete_object(std::move(b), std::move(k));

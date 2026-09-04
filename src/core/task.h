@@ -96,7 +96,26 @@ std::coroutine_handle<> task_await_suspend(std::coroutine_handle<Promise> task,
     return task;  // symmetric transfer starts the awaited task
 }
 
+// co_await current_cancel(): the token the current coroutine carries (inherited or
+// attached). Never suspends; used by the metered backend decorator to reach the
+// request-scoped payload (roadmap §5.1)
+struct CurrentCancel {
+    CancelToken tok;
+    bool await_ready() const noexcept { return false; }
+    template <class P>
+    bool await_suspend(std::coroutine_handle<P> h) noexcept {
+        if constexpr (requires {
+                          { h.promise().cancel } -> std::convertible_to<CancelToken>;
+                      })
+            tok = h.promise().cancel;
+        return false;  // resume immediately
+    }
+    CancelToken await_resume() noexcept { return std::move(tok); }
+};
+
 }  // namespace detail
+
+inline detail::CurrentCancel current_cancel() { return {}; }
 
 template <class T>
 class [[nodiscard]] Task {

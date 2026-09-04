@@ -38,6 +38,10 @@ public:
     // always lands on the default backend
     std::shared_ptr<IStorageBackend> default_backend() const { return shared_->default_backend; }
 
+    // Configured name of the backend a bucket routes to (metrics label, roadmap §5.1)
+    std::string backend_name(std::string_view bucket) const;
+    const std::string& default_backend_name() const { return shared_->default_name; }
+
     // Replace the rule table (same validation as build); throws std::runtime_error
     // and leaves the current table in force on any problem, including a changed
     // default_backend or a rule naming a backend not present at startup
@@ -49,6 +53,7 @@ private:
         std::string glob;
         bool negate = false;  // "!pattern": buckets NOT matching pattern hit this rule
         std::shared_ptr<IStorageBackend> backend;
+        std::string backend_name;
     };
     struct Table {
         std::vector<Rule> rules;

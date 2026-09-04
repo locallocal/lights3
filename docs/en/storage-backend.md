@@ -301,6 +301,18 @@ lease is backdated accordingly). See
 Note: duostore cannot serve as tiered's local side (tiered is bound to the
 localfs disk layout); it can serve as its cloud side or stand alone.
 
+### 5.x Metering Decorator (roadmap §5.1)
+
+`Application` wraps the backends the router uses in `storage::MeteredBackend`
+(`src/storage/metered_backend.h`): every `IStorageBackend` virtual is timed
+into `lights3_backend_op_seconds{backend,op}` /
+`lights3_backend_errors_total{backend,op}`, and the duration is also added to
+the `RequestBackendStats` riding on the request's cancellation token (the
+access log's backend-time slot). A new backend gets this family for free;
+finer backend-internal metrics are still registered through the `MetricsScope`
+of §6. The raw instances stay with `Application`, which owns `close()`; the
+decorator's `close()` is a no-op.
+
 ## 6. Steps to Add a Backend (Extension Guide)
 
 1. Implement `IStorageBackend` (place it in `src/storage/<name>/`).

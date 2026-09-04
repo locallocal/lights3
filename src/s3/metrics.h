@@ -34,6 +34,11 @@ public:
     static constexpr std::array<double, 9> kLatencyBuckets{0.005, 0.02, 0.1,  0.5, 2.0,
                                                            10.0,  30.0, 60.0, 300.0};
 
+    // API x backend dimension (roadmap §5.1): per (api, backend) latency histogram
+    // and per-status-class counter, keyed by the Route name and the routed backend.
+    // Cardinality = APIs x backends, bounded further by kMaxApiSeries
+    void record_api(std::string_view api, std::string_view backend, int status, double seconds);
+
     void request_start() { inflight_.fetch_add(1, std::memory_order_relaxed); }
     void request_end(std::string_view method, int status, double seconds);
     // Lock-free (docs/archive/gaps.md §4: previously every error response contended on one global mutex): the code set
@@ -69,6 +74,16 @@ private:
     static constexpr const char* kMethods[] = {"GET", "PUT", "POST", "DELETE", "HEAD", "other"};
     static constexpr size_t kMethodCount = 6;
     static constexpr size_t kMaxTrackedBuckets = 512;
+    static constexpr size_t kMaxApiSeries = 4096;
+
+    struct ApiStats {
+        uint64_t hist[kLatencyBuckets.size() + 1] = {};
+        double sum = 0;
+        uint64_t count = 0;
+        uint64_t by_class[6] = {};
+    };
+    mutable std::mutex api_m_;
+    std::map<std::string, ApiStats> by_api_;  // key = api + '\0' + backend
 
     struct BucketStats {
         uint64_t requests = 0;

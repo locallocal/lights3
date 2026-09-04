@@ -709,6 +709,13 @@ check "metrics: timeout phases present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_http_timeouts_total{phase="header"}'; echo $?)"
 check "metrics: rate-limit series present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_ratelimit_rejections_total{scope="ip"}'; echo $?)"
+# roadmap §5.1: API x backend series, per-backend op histograms, backend time in the access log
+check "metrics: api x backend series present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_api_requests_total{api="PutObject",backend="tierdata",class="2xx"}'; echo $?)"
+check "metrics: backend op histogram present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_backend_op_seconds_count{backend="tierdata",op="put_object"}'; echo $?)"
+check "access log carries api and backend time" "0" \
+    "$(grep -q 'access .* PUT /mybucket/dir/big.bin 200 .* api=PutObject backend=tierdata:' "$WORK/server.log"; echo $?)"
 
 # Graceful shutdown
 kill -TERM "$SRV_PID"

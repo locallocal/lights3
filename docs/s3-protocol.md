@@ -186,14 +186,21 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
 `lights3_ratelimit_rejections_total{scope=ip|ak}`，见 [http-adapter.md §2.2–§2.3](http-adapter.md)。
 
 - **访问日志**：每请求一行结构化日志（request_id、AK、method、path、
-  status、字节数、总耗时 ms；后端耗时待接入），格式对齐 S3 server
-  access log 便于复用现有分析工具。
+  status、字节数、总耗时 ms），格式对齐 S3 server access log 便于复用现有
+  分析工具；roadmap §5.1 起尾部追加两槽 `api=<路由名> backend=<后端名>:<后端
+  耗时 ms>`——后端耗时由包在路由后端外的计时装饰器（`storage/metered_backend.h`）
+  经请求的取消令牌回填，"网关排队慢还是后端慢"一行可判。
 - **Metrics**（Prometheus 文本格式，`GET /-/metrics`，匿名端点、与数据面
   同一监听，访问面需靠部署侧限制）：
-  请求数/延迟直方图（按 API 与后端分维度）、在途请求数、线程池队列深度、
-  multipart 活跃数、后端错误率。后端级指标经 `core/metrics.h` 注册表
-  （backend=<name> 标签）追加在 L2 请求指标之后输出；
-  「按 API×后端分维度的请求直方图、后端错误率」仍待接入。
+  请求数/延迟直方图（全局 + 按 `(api, backend)` 分维：
+  `lights3_api_requests_total{api,backend,class}`、
+  `lights3_api_request_duration_seconds{api,backend}`，api 取自分派表 `Route::name`，
+  CopyObject/UploadPartCopy 按 `x-amz-copy-source` 细分）、在途请求数、线程池
+  队列深度、multipart 活跃数。后端级指标经 `core/metrics.h` 注册表
+  （backend=<name> 标签）追加在 L2 请求指标之后输出，其中
+  `lights3_backend_op_seconds{backend,op}` 直方图与
+  `lights3_backend_errors_total{backend,op}`（5xx/传输异常计错误，4xx 不计）
+  由计时装饰器对六个后端统一产出（roadmap §5.1）。
 - **健康检查**：`GET /-/healthz`（进程存活）与 `GET /-/readyz`
   （各后端探活：对所有后端一律 `co_await list_buckets()`，任一失败
   返回 503 并在响应体中报告失败的后端名）。三个读端点只认 GET/HEAD，

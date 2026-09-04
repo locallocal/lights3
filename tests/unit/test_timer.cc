@@ -221,13 +221,18 @@ TEST(timer_stats_track_fired_and_pending) {
 }
 
 TEST(timer_slow_callback_counted) {
-    TimerQueue q;
+    // done outlives q: the callback stores into it from the fire thread, which q's
+    // destructor joins — declared the other way round a failed CHECK unwinds past
+    // a callback still running against a destroyed flag. The wait allows for a
+    // heavily loaded machine (the 1.1s sleep has been seen to overrun 3s under a
+    // parallel build)
     std::atomic<bool> done{false};
+    TimerQueue q;
     q.add(std::chrono::milliseconds(1), [&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(1100));
         done.store(true);
     });
-    for (int i = 0; i < 600 && !done.load(); ++i)
+    for (int i = 0; i < 2000 && !done.load(); ++i)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     CHECK(done.load());
     TimerQueue::Stats st;

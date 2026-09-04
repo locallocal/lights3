@@ -227,25 +227,26 @@ int Application::run() {
     // touch the same backend concurrently with still-running requests
     shutdown_src_->request_cancel();
     inflight_->close();
+    int rc = 0;
     {
-        // The driver-side connection grace is a separate quantity
-        // (drivers/common.h kShutdownGrace); what we wait for here is
-        // permits returning. Write the literal in one place only: copying
-        // "10s" into the log message would drift out of sync eventually
-        constexpr auto kDrainDeadline = std::chrono::seconds(10);
-        const long max_inflight = inflight_->capacity();  // may have been reloaded
-        auto deadline = std::chrono::steady_clock::now() + kDrainDeadline;
-        while (inflight_->available() < max_inflight &&
-               std::chrono::steady_clock::now() < deadline)
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
-        if (inflight_->available() < max_inflight)
-            LOG_ERROR("{} request(s) still in flight after {}s; proceeding with shutdown",
-                      max_inflight - inflight_->available(), kDrainDeadline.count());
+        // Permit drain (roadmap §4.5): the same http.shutdown_grace that bounds the
+        // driver's connection drain bounds how long we wait for permits to return
+        // (streaming responses hold theirs past the driver's return). One knob,
+        // one meaning; the wait is a condition variable, not a polling loop
+        auto grace = std::chrono::seconds(cfg_.http.shutdown_grace_sec);
+        if (!inflight_->wait_drained(grace)) {
+            LOG_ERROR("{} request(s) still in flight after http.shutdown_grace={}s; "
+                      "proceeding with shutdown",
+                      inflight_->capacity() - inflight_->available(), grace.count());
+            rc = kExitUncleanShutdown;
+        }
     }
 
     shutdown();
-    LOG_INFO("lights3 exited cleanly");
-    return 0;
+    if (!shutdown_clean()) rc = kExitUncleanShutdown;
+    if (rc == 0) LOG_INFO("lights3 exited cleanly");
+    else LOG_ERROR("lights3 exited with shutdown errors (exit code {})", rc);
+    return rc;
 }
 
 // ---------- Config hot reload (roadmap §4.4, docs/config-reload.md) ----------
@@ -468,6 +469,7 @@ void Application::close_backends() noexcept {
             sync_wait(backend->close());
         } catch (const std::exception& e) {
             LOG_ERROR("backend {} close failed: {}", name, e.what());
+            ++shutdown_errors_;  // surfaces as a non-zero exit code (roadmap §4.5)
         }
     }
 }
@@ -486,6 +488,7 @@ void Application::shutdown() noexcept {
         if (owner_store_) owner_store_->shutdown_background();
     } catch (const std::exception& e) {
         LOG_ERROR("store background shutdown failed: {}", e.what());
+        ++shutdown_errors_;
     }
     close_backends();
     // The backends' shared_ptrs are still held by service (via router)
@@ -515,6 +518,7 @@ void Application::shutdown() noexcept {
             pool_->join();
         } catch (const std::exception& e) {
             LOG_ERROR("thread pool join failed: {}", e.what());
+            ++shutdown_errors_;
         }
         pool_.reset();
     }

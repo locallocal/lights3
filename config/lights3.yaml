@@ -46,7 +46,8 @@ http:
   # trailer_max_size: 16KiB    # chunked trailer section cap (builtin/seastar hand-written parsers)
   # io_chunk_size: 64KiB       # streaming read/write block size
   # body_queue_cap: 256KiB     # push-to-pull queue capacity, i.e. backpressure watermark (httplib only)
-  # shutdown_grace: 10s        # grace period waiting for in-flight requests on shutdown
+  # shutdown_grace: 10s        # grace period waiting for in-flight requests on shutdown (driver
+  #                            # connection drain AND admission-permit drain; unclean -> exit code 3)
   # shutdown_force_wait: 5s    # second wait after forced disconnect
 
 runtime:

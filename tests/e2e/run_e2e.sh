@@ -719,6 +719,7 @@ for _ in $(seq 1 50); do
 done
 check "SIGTERM graceful shutdown" "0" "$EXITED"
 wait "$SRV_PID" 2>/dev/null
+check "clean shutdown exit code" "0" "$?"  # roadmap §4.5: unclean teardown would exit 3
 SRV_PID=""
 
 # ---------- Restart: dynamic credential persistence check (docs/credential-management.md §8) ----------

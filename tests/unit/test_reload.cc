@@ -77,6 +77,23 @@ TEST(reload_semaphore_capacity_grows_and_shrinks) {
     CHECK(sem.try_acquire().has_value());
 }
 
+TEST(shutdown_drain_waits_on_the_semaphore) {
+    // roadmap §4.5: the drain deadline waits on a condition variable that fires when
+    // the last permit returns, instead of polling
+    AsyncSemaphore sem(2);
+    CHECK(sem.wait_drained(std::chrono::milliseconds(10)));  // nothing out: immediately
+    auto p = sync_wait(acquire_task(sem));
+    auto t0 = std::chrono::steady_clock::now();
+    CHECK(!sem.wait_drained(std::chrono::milliseconds(100)));
+    CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(90));
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        p.release();
+    });
+    CHECK(sem.wait_drained(std::chrono::seconds(5)));
+    releaser.join();
+}
+
 TEST(reload_bucket_router_table_swap) {
     auto a = std::make_shared<storage::MemoryBackend>();
     auto b = std::make_shared<storage::MemoryBackend>();
@@ -169,6 +186,7 @@ TEST(reload_application_applies_subset_and_reports_rest) {
                                  "' applied=" + std::to_string(r3.applied.size()));
     CHECK_EQ(app.config().http.request_timeout_sec, 120);
     app.shutdown();
+    CHECK(app.shutdown_clean());  // roadmap §4.5: a clean teardown reports clean
     std::filesystem::remove(path);
 }
 

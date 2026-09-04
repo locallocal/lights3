@@ -298,6 +298,7 @@ add_library(lights3_core STATIC
   src/core/util/uri.cc
   src/core/util/time.cc
   src/http/server.cc
+  src/http/tls.cc
   src/s3/errors.cc
   src/s3/xml.cc
   src/s3/router.cc
@@ -340,7 +341,9 @@ add_library(lights3_core STATIC
   src/storage/xlocalfs/xlocalfs_backend.cc
 )
 target_include_directories(lights3_core PUBLIC src)
-target_link_libraries(lights3_core PUBLIC OpenSSL::Crypto Threads::Threads spdlog::spdlog)
+# libssl is unconditional since roadmap §4.1: the shared TLS material/holder
+# (src/http/tls.cc) serves every OpenSSL-backed driver, builtin included
+target_link_libraries(lights3_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads spdlog::spdlog)
 # JSON is used only in the admin handler / CredentialStore .cc files, never in public headers (docs/credential-management.md §5.4)
 target_link_libraries(lights3_core PRIVATE nlohmann_json::nlohmann_json)
 
@@ -501,6 +504,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_cloudproxy.cc
     tests/unit/test_service.cc
     tests/unit/test_tenancy.cc
+    tests/unit/test_tls.cc
     tests/unit/test_http_drivers.cc
     tests/unit/test_admission.cc
   )

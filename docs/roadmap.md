@@ -292,14 +292,16 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 
 ## 4. 运行时与 HTTP 层
 
-### 4.1 TLS（部署硬伤级）
+### 4.1 TLS（部署硬伤级）**已完成（2026-09-05，四项全部）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| **builtin / seastar 无 TLS** | 配置 TLS 构造期直接抛错（刻意防静默明文），但**默认驱动 builtin 恰好是不支持的那个**，性能路径 seastar 同样没有 | 高 | 中（builtin 接 OpenSSL BIO；seastar 用 `seastar::tls`） |
-| 证书热重载 | 证书轮换必须重启进程 | 高 | 中 |
-| TLS 旋钮 | 仅 `tls_cert`+`tls_key` 两项：无 mTLS、无 cipher 选择、无 SNI 多证书、无 min_version | 中 | 中 |
-| 短期替代 | 文档补 nginx/caddy 反代终结样例，成本极低 | 中 | 低 |
+| ~~**builtin / seastar 无 TLS**~~ | 已完成：builtin 在连接线程用 OpenSSL 阻塞 I/O 包裹 socket；seastar 经 `seastar::tls` 包裹每 shard 的 listener（[tls.md](tls.md) §3/§4） | — | — |
+| ~~证书热重载~~ | 已完成：`tls_reload_interval` 轮询证书文件，变更即整套重载、新握手生效、失败保留旧素材；seastar 用可重载凭证（自带文件监视） | — | — |
+| ~~TLS 旋钮~~ | 已完成：`tls_client_ca` + `tls_client_auth`（mTLS，暂不映射身份）、`tls_min_version`、`tls_ciphers` / `tls_ciphersuites`、`tls_sni` 多证书（seastar 不支持 SNI，构造期抛错）——三个 OpenSSL 驱动共用一个证书回调层 `src/http/tls.h` | — | — |
+| ~~短期替代~~ | 已完成：[tls.md](tls.md) §6 nginx / caddy 反代终结样例（透传 Host、`X-Forwarded-Proto`、关请求体缓冲） | — | — |
+
+**分期保留**：mTLS 客户端证书 → 凭证/租户身份映射；SIGHUP 触发重载（轮询已够）。
 
 ### 4.2 超时与连接治理
 
@@ -486,7 +488,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 1. ~~scrub/fsck（§3.1）~~ **已完成（2026-08-28）**；~~顺带的用量统计（§3.9①）未做~~ **已完成（2026-09-04，L2 增量 + 全量列举校准，未复用 scrub 遍历）**
 2. 超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）
 3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
-4. builtin/seastar TLS + 证书热重载（§4.1）
+4. ~~builtin/seastar TLS + 证书热重载（§4.1）~~ **已完成（2026-09-05，含 mTLS/SNI/cipher 旋钮与反代样例）**
 5. 配置热重载安全子集（§4.4）
 6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**
 7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）

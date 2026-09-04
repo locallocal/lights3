@@ -16,6 +16,7 @@
 #include "core/task.h"
 #include "core/util/time.h"
 #include "http/drivers/common.h"
+#include "http/tls.h"
 #include "http/pushpull.h"
 #include "http/server.h"
 
@@ -50,11 +51,29 @@ public:
         // (when is_valid() is false, listen just fails silently)
         if (!cfg.tls_cert.empty()) {
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
-            auto ssl = std::make_unique<httplib::SSLServer>(cfg.tls_cert.c_str(),
-                                                            cfg.tls_key.c_str());
+            // Certificates, SNI extras, client CA and the knobs all live in the shared
+            // holder (roadmap §4.1, http/tls.h); SSLServer only owns the SSL_CTX, which
+            // the setup callback hands to the holder for configuration
+            try {
+                tls_holder_ = std::make_shared<tls::Holder>(cfg);
+            } catch (const std::exception& e) {
+                throw std::runtime_error(std::string("httplib driver: failed to load TLS material: ") +
+                                         e.what());
+            }
+            std::string setup_error;
+            auto ssl = std::make_unique<httplib::SSLServer>([&](SSL_CTX& ctx) {
+                try {
+                    tls_holder_->configure(&ctx);
+                    return true;
+                } catch (const std::exception& e) {
+                    setup_error = e.what();  // no exception through httplib's constructor
+                    return false;
+                }
+            });
             if (!ssl->is_valid())
-                throw std::runtime_error("httplib driver: failed to load TLS cert/key (" +
-                                         cfg.tls_cert + ", " + cfg.tls_key + ")");
+                throw std::runtime_error("httplib driver: TLS setup failed: " +
+                                         (setup_error.empty() ? std::string("no SSL context")
+                                                              : setup_error));
             svr_ = std::move(ssl);
             tls_ = true;
 #else
@@ -176,7 +195,9 @@ public:
                                          std::to_string(port));
             port_ = port;
         }
-        LOG_INFO("httplib http{} server listening on {}:{}", tls_ ? "s" : "", addr, port_);
+        if (tls_holder_) tls_holder_->start_watch(cfg_.tls_reload_interval_sec);
+        LOG_INFO("httplib http{} server listening on {}:{}{}", tls_ ? "s" : "", addr, port_,
+                 tls_holder_ ? std::string(" (tls: ") + tls_holder_->summary() + ")" : "");
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -398,6 +419,9 @@ private:
 
     HttpConfig cfg_;
     Handler handler_;
+    // Declared before svr_: the SSL_CTX's certificate callback points at the
+    // holder, so the holder must outlive the server (members destroy in reverse)
+    std::shared_ptr<tls::Holder> tls_holder_;
     std::unique_ptr<httplib::Server> svr_;  // Actually an SSLServer under TLS (decided in the constructor)
     bool tls_ = false;
     uint16_t port_ = 0;

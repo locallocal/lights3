@@ -3,7 +3,10 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -22,26 +25,48 @@
 #include "core/util/uri.h"
 #include "http/drivers/common.h"
 #include "http/server.h"
+#include "http/tls.h"
 
 namespace lights3::http {
 
 namespace {
 
-bool send_all(int fd, const char* data, size_t len) {
-    while (len > 0) {
-        ssize_t n = ::send(fd, data, len, MSG_NOSIGNAL);
-        if (n <= 0) return false;
-        data += n;
-        len -= static_cast<size_t>(n);
+// Connection I/O: plaintext socket or an OpenSSL session on top of it (roadmap
+// §4.1). Blocking either way — the socket's SO_RCVTIMEO/SO_SNDTIMEO stay the
+// timeout mechanism, and OpenSSL reports a timed-out read/write as an error
+struct Io {
+    int fd = -1;
+    SSL* ssl = nullptr;
+
+    ssize_t recv(void* buf, size_t len) {
+        if (ssl) {
+            int n = SSL_read(ssl, buf, static_cast<int>(std::min<size_t>(len, INT32_MAX)));
+            return n > 0 ? n : -1;
+        }
+        return ::recv(fd, buf, len, 0);
     }
-    return true;
-}
+    bool send_all(const char* data, size_t len) {
+        while (len > 0) {
+            ssize_t n;
+            if (ssl) {
+                int m = SSL_write(ssl, data, static_cast<int>(std::min<size_t>(len, INT32_MAX)));
+                n = m > 0 ? m : -1;
+            } else {
+                n = ::send(fd, data, len, MSG_NOSIGNAL);
+            }
+            if (n <= 0) return false;
+            data += n;
+            len -= static_cast<size_t>(n);
+        }
+        return true;
+    }
+};
 
 // Buffered connection reader; shared by request-header parsing and body reads.
 // buf is not zero-initialized (docs/archive/gaps.md §4): pos/end delimit the valid
 // region, and memset-ing 16KiB per connection is pure waste
 struct ConnReader {
-    int fd = -1;
+    Io* io = nullptr;
     char buf[driver::kScratchBytes];
     size_t pos = 0, end = 0;
 
@@ -58,7 +83,7 @@ struct ConnReader {
                 if (line.size() >= max_len) return false;
                 line.push_back(c);
             }
-            ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            ssize_t n = io->recv(buf, sizeof(buf));
             if (n <= 0) return false;
             pos = 0;
             end = static_cast<size_t>(n);
@@ -72,7 +97,7 @@ struct ConnReader {
             pos += n;
             return n;
         }
-        ssize_t n = ::recv(fd, dst, want, 0);
+        ssize_t n = io->recv(dst, want);
         return n > 0 ? static_cast<size_t>(n) : 0;
     }
 };
@@ -82,7 +107,7 @@ struct ConnReader {
 // Contract (docs/http-adapter.md §4): normal EOF returns 0; client disconnect / bad chunked propagate as exceptions.
 struct BodyState {
     ConnReader* conn = nullptr;
-    int fd = -1;
+    Io* io = nullptr;
     bool need_continue = false;   // Expect: 100-continue not yet answered; reply only on first read
     bool chunked = false;
     uint64_t remaining = 0;       // Fixed-length mode: bytes remaining
@@ -104,7 +129,7 @@ struct BodyState {
         // cases like auth failure can reject outright without receiving the body
         if (need_continue) {
             need_continue = false;
-            if (!send_all(fd, "HTTP/1.1 100 Continue\r\n\r\n", 25))
+            if (!io->send_all("HTTP/1.1 100 Continue\r\n\r\n", 25))
                 fail("failed to send 100 Continue");
         }
         if (!chunked) {
@@ -206,6 +231,14 @@ private:
 struct ConnShared {
     HttpConfig cfg;
     Handler handler;
+    // TLS (roadmap §4.1): the holder supplies certificates/SNI/client CA per
+    // handshake and hot-reloads them; the SSL_CTX carries the static knobs. Both
+    // live here because connection threads outlive the server object
+    std::shared_ptr<tls::Holder> tls;
+    SSL_CTX* tls_ctx = nullptr;
+    ~ConnShared() {
+        if (tls_ctx) SSL_CTX_free(tls_ctx);
+    }
     std::atomic<bool> stopping{false};
     std::mutex m;
     std::condition_variable cv;
@@ -251,15 +284,15 @@ bool spawn_conn_thread(std::function<void()> fn) {
     return true;
 }
 
-bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_alive,
+bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_alive,
                     size_t io_chunk = driver::kIoChunkBytes) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
     auto head = driver::render_response_head(resp, keep_alive, head_request);
     bool chunked = head.chunked;
-    if (!send_all(fd, head.text.data(), head.text.size())) return false;
+    if (!io.send_all(head.text.data(), head.text.size())) return false;
     if (head_request || no_body_status) return true;
 
-    if (!resp.stream_body) return send_all(fd, resp.small_body.data(), resp.small_body.size());
+    if (!resp.stream_body) return io.send_all(resp.small_body.data(), resp.small_body.size());
 
     // Streaming response: pulled in http.io_chunk_size chunks
     // (docs/architecture.md request lifecycle). The chunk size is a runtime
@@ -284,13 +317,13 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
         if (chunked) {
             char sz[32];
             int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
-            if (!send_all(fd, sz, static_cast<size_t>(m))) return false;
+            if (!io.send_all(sz, static_cast<size_t>(m))) return false;
         }
-        if (!send_all(fd, reinterpret_cast<const char*>(buf.data()), n)) return false;
-        if (chunked && !send_all(fd, "\r\n", 2)) return false;
+        if (!io.send_all(reinterpret_cast<const char*>(buf.data()), n)) return false;
+        if (chunked && !io.send_all("\r\n", 2)) return false;
         written += n;
     }
-    if (chunked) return send_all(fd, "0\r\n\r\n", 5);
+    if (chunked) return io.send_all("0\r\n\r\n", 5);
     // A fixed-length response that wrote too little must not stay keep-alive: the client would read the next response head as the rest of this body
     if (resp.content_length && written != *resp.content_length) {
         LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
@@ -301,9 +334,10 @@ bool write_response(int fd, HttpResponse& resp, bool head_request, bool keep_ali
 }
 
 // Handles one request; false means the connection should be closed
-bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& peer,
+bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& peer,
                bool& keep_alive) {
     const size_t max_line = sh.cfg.max_header_size;
+    const int fd = io.fd;
 
     // Until the request line is read, this connection is "idle keep-alive":
     // register it in idle so the shutdown sweep cuts it directly; on the
@@ -365,12 +399,12 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
     auto framing = driver::parse_body_framing(req.headers);
     if (!framing.valid) {
         auto bad = driver::bad_request_response("Invalid message framing.");
-        write_response(fd, bad, req.method == "HEAD", /*keep_alive=*/false);
+        write_response(io, bad, req.method == "HEAD", /*keep_alive=*/false);
         return false;
     }
     BodyState body_state;
     body_state.conn = &reader;
-    body_state.fd = fd;
+    body_state.io = &io;
     body_state.trailer_max = sh.cfg.trailer_max_size;
     std::optional<uint64_t> content_length = framing.content_length;
     bool has_body = false;
@@ -409,7 +443,7 @@ bool serve_one(ConnShared& sh, int fd, ConnReader& reader, const std::string& pe
         else if (keep_alive) keep_alive = body_state.drain(sh.cfg.drain_limit);
     }
 
-    if (!write_response(fd, resp, head_request, keep_alive, sh.cfg.io_chunk_size)) return false;
+    if (!write_response(io, resp, head_request, keep_alive, sh.cfg.io_chunk_size)) return false;
     return keep_alive;
 }
 
@@ -420,24 +454,60 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
+    Io io;
+    io.fd = fd;
+    if (sh.tls_ctx) {
+        // TLS handshake on the connection thread (blocking, bounded by the socket
+        // timeouts). The certificate callback installed by the holder picks the
+        // SNI-matching bundle from the current snapshot
+        io.ssl = SSL_new(sh.tls_ctx);
+        if (!io.ssl || SSL_set_fd(io.ssl, fd) != 1 || SSL_accept(io.ssl) != 1) {
+            // Plaintext client / probe / rejected client certificate: one line, no request loop
+            unsigned long e = ERR_peek_last_error();
+            char buf[128] = "handshake failed";
+            if (e) ERR_error_string_n(e, buf, sizeof(buf));
+            ERR_clear_error();
+            LOG_WARN("TLS handshake failed from {}: {}", peer, buf);
+            if (io.ssl) SSL_free(io.ssl);
+            return;
+        }
+    }
+
     ConnReader reader;
-    reader.fd = fd;  // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset 16KiB)
+    reader.io = &io;  // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset 16KiB)
     bool keep_alive = true;
     while (keep_alive && !sh.stopping.load()) {
-        if (!serve_one(sh, fd, reader, peer, keep_alive)) break;
+        if (!serve_one(sh, io, reader, peer, keep_alive)) break;
+    }
+    if (io.ssl) {
+        SSL_shutdown(io.ssl);  // best-effort close_notify; TCP is closed right after anyway
+        SSL_free(io.ssl);
+        ERR_clear_error();
     }
 }
 
 class BuiltinServer final : public IHttpServer {
 public:
     explicit BuiltinServer(const HttpConfig& cfg) : shared_(std::make_shared<ConnShared>()) {
-        // TLS unsupported (docs/archive/gaps.md §7): configuring it must fail on the
-        // spot — silently running plaintext would void the entire integrity
-        // argument for UNSIGNED-PAYLOAD requests (which relies on
-        // transport-layer encryption)
-        if (!cfg.tls_cert.empty())
-            throw std::runtime_error(
-                "http driver 'builtin' does not support TLS; use 'httplib' or 'beast'");
+        // TLS (roadmap §4.1): OpenSSL on the connection's blocking socket; the
+        // shared holder supplies certificates (SNI + hot reload) and the knobs.
+        // Loading failures throw right here — never "configured but silently
+        // plaintext", which would void the UNSIGNED-PAYLOAD integrity argument
+        if (!cfg.tls_cert.empty()) {
+            try {
+                shared_->tls = std::make_shared<tls::Holder>(cfg);
+                shared_->tls_ctx = SSL_CTX_new(TLS_server_method());
+                if (!shared_->tls_ctx) throw std::runtime_error("SSL_CTX_new failed");
+                shared_->tls->configure(shared_->tls_ctx);
+            } catch (const std::exception& e) {
+                throw std::runtime_error(std::string("builtin driver: failed to set up TLS: ") +
+                                         e.what());
+            }
+            // SSL_write goes through write(2) (no MSG_NOSIGNAL): a client that
+            // vanished mid-response must not SIGPIPE the process. The app installs
+            // this too; the drivers built on asio/httplib avoid the syscall shape
+            signal(SIGPIPE, SIG_IGN);
+        }
         // The thread-per-connection model has no notion of an IO thread
         // count; configuring it explicitly means the user expects an effect
         // that will not happen (docs/archive/gaps.md §7)
@@ -494,7 +564,9 @@ public:
         port_ = ntohs(bound.ss_family == AF_INET6
                           ? reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port
                           : reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
-        LOG_INFO("builtin http server listening on {}:{}", addr, port_);
+        if (shared_->tls) shared_->tls->start_watch(shared_->cfg.tls_reload_interval_sec);
+        LOG_INFO("builtin http{} server listening on {}:{}{}", shared_->tls ? "s" : "", addr,
+                 port_, shared_->tls ? std::string(" (tls: ") + shared_->tls->summary() + ")" : "");
     }
 
     uint16_t bound_port() const override { return port_; }

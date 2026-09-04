@@ -17,6 +17,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | 文档 | 内容 |
 | --- | --- |
 | [architecture.md](architecture.md) | 总体架构、分层设计、请求生命周期、代码目录规划 |
+| [tls.md](tls.md) | TLS：四驱动 HTTPS、证书热重载、mTLS / cipher / 最低版本 / SNI 多证书、反向代理终结样例（roadmap §4.1） |
 | [http-adapter.md](http-adapter.md) | HTTP 协议库插拔层：中立请求/响应模型、流式 Body、适配器实现要点 |
 | [concurrency.md](concurrency.md) | 并发模型：Task 协程、Executor 抽象、线程池、同步/异步 HTTP 库的统一 |
 | [coroutine-internals.md](coroutine-internals.md) | 协程实现内幕：Task promise 布局与对称转移、顶层驱动方式、when_all/with_timeout、取消的竞态协议与生命期守则 |

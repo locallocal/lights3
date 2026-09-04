@@ -16,13 +16,23 @@ http:
   # relax it when fronted by toolchains that don't honor this rule, or when this
   # instance is merely a proxy for another lights3
   min_part_size: 5MiB
-  # ---------- TLS (docs/archive/gaps.md §7) ----------
-  # HTTPS is enabled only when both are given; only the httplib/beast drivers support
-  # it, builtin/seastar error out at startup if configured (never silently run
-  # plaintext). SigV4 UNSIGNED-PAYLOAD integrity relies on transport-layer encryption;
-  # strongly recommended for public deployments (or terminate TLS at a fronting LB)
-  # tls_cert: /etc/lights3/server.crt   # PEM certificate chain
+  # ---------- TLS (roadmap §4.1, docs/tls.md) ----------
+  # HTTPS is enabled only when both are given; every driver supports it (seastar
+  # through seastar::tls, see docs/tls.md §4). SigV4 UNSIGNED-PAYLOAD integrity
+  # relies on transport-layer encryption; strongly recommended for public
+  # deployments (or terminate TLS at a fronting proxy, docs/tls.md §6)
+  # tls_cert: /etc/lights3/server.crt   # PEM certificate chain (leaf first)
   # tls_key: /etc/lights3/server.key    # PEM private key
+  # tls_min_version: "1.2"              # 1.2 | 1.3
+  # tls_client_ca: /etc/lights3/clients-ca.pem   # client-certificate CA bundle (mTLS)
+  # tls_client_auth: off                # off | optional | require (needs tls_client_ca)
+  # tls_ciphers: ""                     # OpenSSL cipher list for TLS <= 1.2; empty = library default
+  # tls_ciphersuites: ""                # TLS 1.3 suites; empty = library default
+  # tls_reload_interval: 60s            # poll the certificate files and hot-reload on change; 0s = off
+  # tls_sni:                            # extra certificates selected by SNI (not on seastar)
+  #   - hosts: "s3.example.com, *.s3.example.com"
+  #     cert: /etc/lights3/s3.example.com.crt
+  #     key: /etc/lights3/s3.example.com.key
   # ---------- Shutdown/backpressure boundaries (docs/archive/gaps.md §7, values are defaults) ----------
   # drain_limit: 4MiB          # max request body drained before erroring (beyond it, close the connection)
   # trailer_max_size: 16KiB    # chunked trailer section cap (builtin/seastar hand-written parsers)

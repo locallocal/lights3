@@ -30,6 +30,7 @@
 #include <seastar/net/api.hh>
 #include <seastar/net/inet_address.hh>
 #include <seastar/net/socket_defs.hh>
+#include <seastar/net/tls.hh>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -44,6 +45,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <unordered_set>
 #include <sstream>
 #include <thread>
 #include <vector>
@@ -434,6 +436,10 @@ struct Session {
 // One per shard; touched only on its owning shard except during construction
 struct ShardState {
     std::optional<ss::server_socket> listener;
+    // TLS (roadmap §4.1): per-shard credentials (seastar's shared_ptr is not
+    // thread-safe, so every shard builds its own); reloadable variants watch the
+    // certificate files themselves
+    ss::shared_ptr<ss::tls::server_credentials> tls_creds;
     std::set<std::shared_ptr<Session>> sessions;
     bool stopping = false;
 };
@@ -720,6 +726,10 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
                        [st, sess] { st->sessions.erase(sess); });
     }
     st->listener.reset();
+    // Released here, on the owning shard: reloadable credentials tear down their
+    // fsnotify watcher through the reactor, which must not happen from the thread
+    // that later drops the last ServerCore reference (docs/tls.md §4)
+    st->tls_creds = {};
 }
 
 ss::future<size_t> count_sessions(std::shared_ptr<ServerCore> core) {
@@ -779,21 +789,67 @@ ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd
 // the caller's lambda object staying alive (a coroutine lambda's captures
 // dangle once the lambda object is destroyed, and the alien/smp posting
 // closures do not outlive the first suspension)
-ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr, uint16_t p) {
-    for (unsigned s = 0; s < ss::smp::count; ++s) {
-        co_await ss::smp::submit_to(s, [core, &addr, p, s] {
-            auto st = std::make_shared<ShardState>();
-            ss::listen_options lo;
-            lo.reuse_address = true;
-            // inet_address accepts both v4/v6 literals: with ipv4_addr
-            // hard-coded, bind: "::" in the config threw outright while
-            // beast/httplib started fine (docs/archive/gaps.md §3.9)
-            st->listener =
-                ss::engine().listen(ss::socket_address(ss::inet_address(addr), p), lo);
-            core->shards[s] = st;
-            (void)accept_loop(core, st, s).handle_exception([](std::exception_ptr) {});
-        });
+// TLS credentials for one shard (roadmap §4.1, docs/tls.md §4): the shared
+// config surface mapped onto seastar::tls. Versions/client auth map onto both
+// backends (a GnuTLS priority string plus the OpenSSL-only setters, each a no-op
+// on the other backend); cipher strings only reach the OpenSSL backend. With a
+// reload interval > 0 the credentials watch their files and reload on their own
+ss::future<ss::shared_ptr<ss::tls::server_credentials>> build_tls_credentials(const HttpConfig& cfg) {
+    ss::tls::credentials_builder b;
+    co_await b.set_x509_key_file(cfg.tls_cert, cfg.tls_key, ss::tls::x509_crt_format::PEM);
+    if (!cfg.tls_client_ca.empty()) {
+        co_await b.set_x509_trust_file(cfg.tls_client_ca, ss::tls::x509_crt_format::PEM);
+        b.set_client_auth(cfg.tls_client_auth == "require"    ? ss::tls::client_auth::REQUIRE
+                          : cfg.tls_client_auth == "optional" ? ss::tls::client_auth::REQUEST
+                                                              : ss::tls::client_auth::NONE);
     }
+    bool v13 = cfg.tls_min_version == "1.3";
+    b.set_priority_string(v13 ? "SECURE128:+SECURE192:-VERS-ALL:+VERS-TLS1.3"
+                              : "SECURE128:+SECURE192:-VERS-ALL:+VERS-TLS1.2:+VERS-TLS1.3");
+    b.set_minimum_tls_version(v13 ? ss::tls::tls_version::tlsv1_3 : ss::tls::tls_version::tlsv1_2);
+    if (!cfg.tls_ciphers.empty()) b.set_cipher_string(cfg.tls_ciphers);
+    if (!cfg.tls_ciphersuites.empty()) b.set_ciphersuites(cfg.tls_ciphersuites);
+    b.enable_server_precedence();
+    if (cfg.tls_reload_interval_sec <= 0) co_return b.build_server_credentials();
+    co_return co_await b.build_reloadable_server_credentials(
+        [](const std::unordered_set<ss::sstring>& files, std::exception_ptr ep) {
+            std::string names;
+            for (auto& f : files) names += (names.empty() ? "" : ", ") + std::string(f);
+            if (ep) {
+                try {
+                    std::rethrow_exception(ep);
+                } catch (const std::exception& e) {
+                    LOG_WARN("seastar tls: certificate reload failed ({}): {}", names, e.what());
+                }
+            } else {
+                LOG_INFO("seastar tls: certificate material reloaded ({})", names);
+            }
+        });
+}
+
+// One shard's listener (+ TLS wrap) and accept loop; runs on that shard
+ss::future<> setup_shard(std::shared_ptr<ServerCore> core, std::string addr, uint16_t p,
+                         unsigned s) {
+    auto st = std::make_shared<ShardState>();
+    ss::listen_options lo;
+    lo.reuse_address = true;
+    // inet_address accepts both v4/v6 literals: with ipv4_addr
+    // hard-coded, bind: "::" in the config threw outright while
+    // beast/httplib started fine (docs/archive/gaps.md §3.9)
+    auto sock = ss::engine().listen(ss::socket_address(ss::net::inet_address(addr), p), lo);
+    if (!core->cfg.tls_cert.empty()) {
+        st->tls_creds = co_await build_tls_credentials(core->cfg);
+        st->listener = ss::tls::listen(st->tls_creds, std::move(sock));
+    } else {
+        st->listener = std::move(sock);
+    }
+    core->shards[s] = st;
+    (void)accept_loop(core, st, s).handle_exception([](std::exception_ptr) {});
+}
+
+ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr, uint16_t p) {
+    for (unsigned s = 0; s < ss::smp::count; ++s)
+        co_await ss::smp::submit_to(s, [core, addr, p, s] { return setup_shard(core, addr, p, s); });
     ss::readable_eventfd evfd;
     int wfd = evfd.get_write_fd();
     (void)stop_watcher(core, std::move(evfd)).handle_exception([core](std::exception_ptr) {
@@ -845,10 +901,24 @@ uint16_t probe_free_port(const std::string& addr) {
 class SeastarServer final : public IHttpServer {
 public:
     explicit SeastarServer(const HttpConfig& cfg) : cfg_(cfg) {
-        // TLS unsupported (docs/archive/gaps.md §7): configuring it must fail on the spot; never silently run plaintext
-        if (!cfg.tls_cert.empty())
-            throw std::runtime_error(
-                "http driver 'seastar' does not support TLS; use 'httplib' or 'beast'");
+        // TLS (roadmap §4.1) goes through seastar::tls (docs/tls.md §4). The
+        // credentials are built inside the reactor at listen(); what can be
+        // checked without it is checked here so misconfiguration fails at startup
+        if (!cfg.tls_cert.empty()) {
+            if (!cfg.tls_sni.empty())
+                throw std::runtime_error(
+                    "http driver 'seastar' does not support tls_sni (one certificate per "
+                    "listener); use the builtin, beast or httplib driver for SNI");
+            for (const std::string* path : {&cfg.tls_cert, &cfg.tls_key, &cfg.tls_client_ca}) {
+                if (path->empty()) continue;
+                if (::access(path->c_str(), R_OK) != 0)
+                    throw std::runtime_error("seastar driver: cannot read TLS file " + *path);
+            }
+            if (!cfg.tls_ciphers.empty() || !cfg.tls_ciphersuites.empty())
+                LOG_WARN("seastar driver: tls_ciphers/tls_ciphersuites only apply to a "
+                         "seastar built with the OpenSSL backend (GnuTLS uses its own priority "
+                         "string, docs/tls.md §4)");
+        }
     }
 
     ~SeastarServer() override {
@@ -890,7 +960,8 @@ public:
             uint64_t one = 1;
             [[maybe_unused]] ssize_t r = ::write(stop_fd_, &one, sizeof(one));
         }
-        LOG_INFO("seastar http server listening on {}:{} (smp={})", addr, port_, eng.shards());
+        LOG_INFO("seastar http{} server listening on {}:{} (smp={})",
+                 cfg_.tls_cert.empty() ? "" : "s", addr, port_, eng.shards());
     }
 
     uint16_t bound_port() const override { return port_; }

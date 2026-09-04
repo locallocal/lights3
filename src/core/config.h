@@ -29,6 +29,14 @@ struct YamlNode {
 YamlNode yaml_parse(const std::string& text);  // throws std::runtime_error on syntax errors
 
 // ---------- Typed configuration ----------
+// Extra certificate served by SNI (roadmap §4.1, docs/tls.md §2.3): hosts is a
+// comma-separated list of exact names or "*.example.com" wildcards
+struct TlsSniEntry {
+    std::string hosts;
+    std::string cert;
+    std::string key;
+};
+
 struct HttpConfig {
     std::string driver = "builtin";
     std::string bind = "0.0.0.0";
@@ -71,6 +79,15 @@ struct HttpConfig {
     // "configured but silently running plaintext"
     std::string tls_cert;  // path to PEM certificate chain
     std::string tls_key;   // path to PEM private key
+    // TLS knobs (roadmap §4.1, docs/tls.md): all four drivers honor them (seastar
+    // maps versions/client auth onto GnuTLS, see docs/tls.md §4)
+    std::string tls_client_ca;             // PEM CA bundle for client certificates (mTLS); empty = none
+    std::string tls_client_auth = "off";   // off | optional | require (the latter two need tls_client_ca)
+    std::string tls_min_version = "1.2";   // 1.2 | 1.3
+    std::string tls_ciphers;               // OpenSSL cipher list for TLS <= 1.2; empty = library default
+    std::string tls_ciphersuites;          // OpenSSL TLS 1.3 suites; empty = library default
+    int tls_reload_interval_sec = 60;      // certificate file polling period (hot reload); 0 = off
+    std::vector<TlsSniEntry> tls_sni;      // extra certificates selected by SNI
     // The builtin driver is thread-per-connection, so io_threads is meaningless for
     // it; when explicitly configured, WARN at startup instead of silently ignoring
     // (docs/archive/gaps.md §7). Set by the parser

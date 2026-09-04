@@ -718,6 +718,47 @@ kill -TERM "$SRV_PID"
 wait "$SRV_PID" 2>/dev/null
 SRV_PID=""
 
+# ---------- roadmap §4.1: TLS smoke on the same driver (docs/tls.md) ----------
+# A second instance with an openssl-CLI self-signed certificate: SigV4 over HTTPS
+# end to end through curl, plus a plaintext probe refused on the TLS port
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+    -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
+    -keyout "$WORK/tls.key" -out "$WORK/tls.crt" > /dev/null 2>&1
+# Fresh storage roots and a private redis key prefix: the instance must not see the
+# earlier run's metadata. The master key is the restart phase's — a cloudproxy remote
+# already re-encrypted its .sys credential objects with it
+sed -e "s#^  port: 0#  port: 0\n  tls_cert: $WORK/tls.crt\n  tls_key: $WORK/tls.key\n  tls_min_version: \"1.2\"\n  tls_reload_interval: 0s#" \
+    -e "s#$WORK/data#$WORK/tls-data#g" -e "s#$WORK/staging#$WORK/tls-staging#g" \
+    -e "s#$WORK/cloud-duo#$WORK/tls-cloud-duo#g" -e "s#$WORK/duo-local#$WORK/tls-duo-local#g" \
+    -e "s#^    meta: redis#    meta: redis\n    redis_prefix: \"tlse2e:\"#" \
+    -e "s#^    tikv_prefix: \"\(.*\)\"#    tikv_prefix: \"\1tls-\"#" \
+    -e "s#^    rados_namespace: \(.*\)#    rados_namespace: \1-tls#" \
+    "$WORK/config.yaml" > "$WORK/config-tls.yaml"
+LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config-tls.yaml" > "$WORK/server-tls.log" 2>&1 &
+TLS_PID=$!
+TPORT=""
+for _ in $(seq 1 50); do
+    TPORT=$(sed -n 's/.*listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-tls.log" | head -1)
+    [[ -n "$TPORT" ]] && break
+    kill -0 "$TLS_PID" 2>/dev/null || break
+    sleep 0.1
+done
+check "TLS instance started (https listener)" "0" "$([[ -n "$TPORT" ]] && grep -q "https server listening" "$WORK/server-tls.log"; echo $?)"
+[[ -z "$TPORT" ]] && { echo "--- server-tls.log ---"; cat "$WORK/server-tls.log"; }
+if [[ -n "$TPORT" ]]; then
+    TBASE="https://127.0.0.1:$TPORT"
+    tlscurl() { curl -sS --cacert "$WORK/tls.crt" --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" "$@"; }
+    check "TLS CreateBucket" "200" "$(tlscurl -o /dev/null -w '%{http_code}' -X PUT "$TBASE/tlsbkt")"
+    check "TLS PutObject" "200" "$(tlscurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'over-tls' "$TBASE/tlsbkt/k")"
+    check "TLS GetObject" "over-tls" "$(tlscurl "$TBASE/tlsbkt/k")"
+    check "TLS 1.1 refused" "1" "$(curl -s --tls-max 1.1 --cacert "$WORK/tls.crt" -o /dev/null "$TBASE/-/healthz" 2>/dev/null && echo 0 || echo 1)"
+    check "plaintext on the TLS port refused" "1" "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$TPORT/-/healthz" | grep -q 200; echo $?)"
+    tlscurl -o /dev/null -X DELETE "$TBASE/tlsbkt/k"
+    tlscurl -o /dev/null -X DELETE "$TBASE/tlsbkt"
+fi
+kill -TERM "$TLS_PID" 2>/dev/null
+wait "$TLS_PID" 2>/dev/null
+
 echo
 echo "e2e: $PASS passed, $FAIL failed"
 if [[ $FAIL -ne 0 ]]; then

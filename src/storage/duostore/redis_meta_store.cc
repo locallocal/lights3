@@ -4,13 +4,16 @@
 
 #include <hiredis.h>
 #include <openssl/evp.h>
+#include <poll.h>
 #include <sys/time.h>
 
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdio>
 #include <cstring>
 #include <map>
+#include <random>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -118,6 +121,7 @@ for _ = 1, no do
   elseif k == 'zrem' then redis.call('ZREM', key, a)
   elseif k == 'del' then redis.call('DEL', key)
   elseif k == 'set' then redis.call('SET', key, a)
+  elseif k == 'pub' then redis.call('PUBLISH', key, a)
   end
 end
 return 1
@@ -305,6 +309,11 @@ public:
         add_op("zrem", key, member, {});
     }
     void del(const std::string& key) { add_op("del", key, {}, {}); }
+    // Cross-gateway invalidation (backlog-sequence ⑤): PUBLISH runs inside the same
+    // script execution, so a message exists iff the commit landed
+    void publish(const std::string& channel, std::string_view payload) {
+        add_op("pub", channel, payload, {});
+    }
 
     // Single EVALSHA commit: returns true when all checks pass and the writes land; any check
     // failure (concurrent modification) returns false and the caller re-reads, rebuilds, retries (§3.2 CAS loop)
@@ -367,6 +376,9 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
     m_reconnects_ = opt_.metrics.counter(
         "lights3_duostore_redis_reconnects_total",
         "Connections re-established after a pooled redis connection went bad");
+    m_sub_reconnects_ = opt_.metrics.counter(
+        "lights3_duostore_redis_invalidation_subscribes_total",
+        "Invalidation feed (re)subscriptions (backlog-sequence ⑤); each one clears the local meta cache");
 
     // URI parsing (§8): redis://[user][:pass]@host[:port][/db] or unix://<path>
     const std::string& uri = opt_.uri;
@@ -414,6 +426,13 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         bad_uri();
     }
     if (opt_.pool_size < 1) opt_.pool_size = 1;
+    {
+        std::random_device rd;
+        uint64_t v = (uint64_t(rd()) << 32) ^ rd();
+        char buf[17];
+        std::snprintf(buf, sizeof buf, "%016llx", (unsigned long long)v);
+        origin_ = buf;
+    }
 
     auto c = make_conn();  // an unreachable server fails loudly here
     std::string err;
@@ -488,9 +507,120 @@ RedisMetaStore::~RedisMetaStore() {
 }
 
 void RedisMetaStore::close() {
+    {
+        std::lock_guard lk(pool_mu_);
+        closed_ = true;
+        idle_.clear();  // redisFree all idle connections; calls after close fail cleanly in acquire() (500)
+    }
+    // Stop the invalidation feed outside the pool lock: the thread polls with a short
+    // timeout and checks the flag, so the join is bounded
+    sub_stop_.store(true, std::memory_order_relaxed);
+    if (sub_thread_.joinable() && sub_thread_.get_id() != std::this_thread::get_id())
+        sub_thread_.join();
+}
+
+// ---------- Invalidation feed (backlog-sequence ⑤) ----------
+
+std::string RedisMetaStore::invalidation_channel() const { return key("inv"); }
+
+std::string RedisMetaStore::invalidation_payload(std::string_view b, std::string_view k) const {
+    std::string p = origin_;
+    p.push_back('\0');
+    p.append(b);
+    p.push_back('\0');
+    p.append(k);
+    return p;
+}
+
+bool RedisMetaStore::subscribe_invalidations(InvalidationSink on_key,
+                                             std::function<void()> on_reset) {
+    if (!on_key) return false;
     std::lock_guard lk(pool_mu_);
-    closed_ = true;
-    idle_.clear();  // redisFree all idle connections; calls after close fail cleanly in acquire() (500)
+    if (closed_ || sub_thread_.joinable()) return false;
+    sub_on_key_ = std::move(on_key);
+    sub_on_reset_ = std::move(on_reset);
+    sub_stop_.store(false, std::memory_order_relaxed);
+    sub_thread_ = std::thread([this] { subscriber_loop(); });
+    return true;
+}
+
+// One blocking SUBSCRIBE connection, read through poll() so the stop flag is
+// honored without a socket timeout marking the context as failed. Any error drops
+// the connection; the next connect calls on_reset first (the cache is cleared
+// before any message is delivered) -- conservative, since pub/sub is fire-and-
+// forget and nothing published while we were away can be recovered
+void RedisMetaStore::subscriber_loop() {
+    const std::string channel = invalidation_channel();
+    int backoff_ms = 200;
+    while (!sub_stop_.load(std::memory_order_relaxed)) {
+        std::unique_ptr<Conn> c;
+        try {
+            c = make_conn();
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore redis meta: invalidation feed connect failed: {}", e.what());
+            c.reset();
+        }
+        bool subscribed = false;
+        if (c) {
+            std::string err;
+            auto r = run_on(c->ctx, {"SUBSCRIBE", channel}, &err);
+            subscribed = r && r->type == REDIS_REPLY_ARRAY;
+            if (!subscribed)
+                LOG_WARN("duostore redis meta: SUBSCRIBE {} failed: {}", channel,
+                         r ? "unexpected reply" : err);
+        }
+        if (!subscribed) {
+            for (int waited = 0; waited < backoff_ms && !sub_stop_.load(); waited += 50)
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            backoff_ms = std::min(backoff_ms * 2, 5000);
+            continue;
+        }
+        backoff_ms = 200;
+        m_sub_reconnects_->inc();
+        LOG_INFO("duostore redis meta: invalidation feed subscribed to {}", channel);
+        if (sub_on_reset_) sub_on_reset_();
+        // The connection's socket timeout would flag the context on every idle period;
+        // subscriber reads are driven by poll() instead
+        timeval never{0, 0};
+        redisSetTimeout(c->ctx, never);
+        bool failed = false;
+        while (!sub_stop_.load(std::memory_order_relaxed) && !failed) {
+            pollfd pfd{c->ctx->fd, POLLIN, 0};
+            int rc = ::poll(&pfd, 1, 250);
+            if (rc < 0) {
+                if (errno == EINTR) continue;
+                failed = true;
+                break;
+            }
+            if (rc == 0) continue;
+            if (redisBufferRead(c->ctx) != REDIS_OK) {
+                failed = true;
+                break;
+            }
+            for (;;) {
+                void* raw = nullptr;
+                if (redisGetReplyFromReader(c->ctx, &raw) != REDIS_OK) {
+                    failed = true;
+                    break;
+                }
+                if (!raw) break;
+                RedisReplyPtr reply(static_cast<redisReply*>(raw));
+                if (reply->type == REDIS_REPLY_ARRAY && reply->elements == 3 &&
+                    reply->element[0]->type == REDIS_REPLY_STRING &&
+                    reply_str(reply->element[0]) == "message" &&
+                    reply->element[2]->type == REDIS_REPLY_STRING) {
+                    std::string_view payload = reply_str(reply->element[2]);
+                    auto s1 = payload.find('\0');
+                    auto s2 = s1 == std::string_view::npos ? s1 : payload.find('\0', s1 + 1);
+                    if (s2 != std::string_view::npos && payload.substr(0, s1) != origin_)
+                        sub_on_key_(payload.substr(s1 + 1, s2 - s1 - 1), payload.substr(s2 + 1));
+                }
+            }
+        }
+        if (failed && !sub_stop_.load())
+            LOG_WARN("duostore redis meta: invalidation feed lost ({}); reconnecting",
+                     c->ctx->err ? c->ctx->errstr : "read error");
+    }
 }
 
 // ---------- Connection pool (§5.2) ----------
@@ -853,6 +983,7 @@ void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, ov);
         }
+        bt.publish(invalidation_channel(), invalidation_payload(b, k));
         if (bt.commit()) return;
     }
     throw_internal("put_object", "too many CAS retries");
@@ -873,6 +1004,7 @@ bool RedisMetaStore::delete_object(std::string_view b, std::string_view k) {
         enqueue_reclaim(bt, old.data, ReclaimReason::kDelete);
         batch_refs(bt, old.data, /*add=*/false, {});
         batch_pack_delta(bt, old.data, -1, codec::pack_rec_overhead(b, k));
+        bt.publish(invalidation_channel(), invalidation_payload(b, k));
         if (bt.commit()) return true;
     }
     throw_internal("delete_object", "too many CAS retries");
@@ -1215,6 +1347,7 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, codec::pack_rec_overhead(b, k));
         }
+        bt.publish(invalidation_channel(), invalidation_payload(b, k));
         if (bt.commit()) return rec.meta.etag;
         // Guard failed: re-read to classify — upload gone → NoSuchUpload (thrown by
         // require_upload), everything else (concurrent put_part / object overwrite) → retry
@@ -1475,6 +1608,7 @@ bool RedisMetaStore::swap_extents(std::string_view b, std::string_view k,
     const int64_t ov = codec::pack_rec_overhead(b, k);
     batch_pack_delta(bt, to, +1, ov);
     batch_pack_delta(bt, from, -1, ov);
+    bt.publish(invalidation_channel(), invalidation_payload(b, k));
     return bt.commit();
 }
 

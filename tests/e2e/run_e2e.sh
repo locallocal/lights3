@@ -212,6 +212,8 @@ elif [[ "$BACKEND" == "duostore-redis" ]]; then cat <<DUOREDIS
     meta: redis
     redis_uri: $REDIS_URI
     redis_prefix: "$REDIS_PREFIX"
+    meta_cache_entries: 1K
+    meta_cache_ttl: 100s
 DUOREDIS
 elif [[ "$BACKEND" == "duostore-sqlite" ]]; then cat <<DUOSQLITE
   - name: tierdata
@@ -1079,6 +1081,54 @@ if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
     fi
     kill -TERM "$STA_PID" "$STB_PID" 2>/dev/null
     wait "$STA_PID" 2>/dev/null; wait "$STB_PID" 2>/dev/null
+fi
+
+# ---------- backlog-sequence ⑤: cross-gateway meta cache invalidation over redis pub/sub ----------
+# A second gateway on the same redis meta + same data root, both with the object cache
+# on (100 s TTL): a peer's overwrite/delete must be visible at once, not after the TTL
+if [[ "$BACKEND" == "duostore-redis" ]]; then
+    LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server-a.log" 2>&1 &
+    INV_A=$!
+    LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server-b.log" 2>&1 &
+    INV_B=$!
+    APORT=""; BPORT=""
+    for _ in $(seq 1 50); do
+        APORT=$(sed -n 's/.*http server listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-a.log" | head -1)
+        BPORT=$(sed -n 's/.*http server listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-b.log" | head -1)
+        [[ -n "$APORT" && -n "$BPORT" ]] && break
+        sleep 0.1
+    done
+    check "two gateways on one redis meta started" "0" "$([[ -n "$APORT" && -n "$BPORT" ]]; echo $?)"
+    if [[ -n "$APORT" && -n "$BPORT" ]]; then
+        AB="http://127.0.0.1:$APORT"; BB="http://127.0.0.1:$BPORT"
+        check "gateway A subscribed to the invalidation feed" "0" "$(grep -q "subscribed to the engine's invalidation feed" "$WORK/server-a.log"; echo $?)"
+        s3curl -o /dev/null -X PUT "$AB/invbkt"
+        s3curl -o /dev/null -X PUT --data-binary 'v1' "$AB/invbkt/k"
+        E1=$(s3curl -sI "$AB/invbkt/k" | grep -i '^etag' | tr -d '\r' | awk '{print $2}')
+        check "A cached the record (HEAD via A)" "0" "$([[ -n "$E1" ]]; echo $?)"
+        s3curl -o /dev/null -X PUT --data-binary 'v2-from-b' "$BB/invbkt/k"
+        E2=$(s3curl -sI "$BB/invbkt/k" | grep -i '^etag' | tr -d '\r' | awk '{print $2}')
+        check "B's overwrite has a new ETag" "1" "$([[ "$E1" != "$E2" ]] && echo 1 || echo 0)"
+        SEEN=""
+        for _ in $(seq 1 50); do
+            EA=$(s3curl -sI "$AB/invbkt/k" | grep -i '^etag' | tr -d '\r' | awk '{print $2}')
+            [[ "$EA" == "$E2" ]] && { SEEN=yes; break; }
+            sleep 0.1
+        done
+        check "A sees B's overwrite within a second (feed, not TTL)" "yes" "$SEEN"
+        check "A serves B's body" "v2-from-b" "$(s3curl "$AB/invbkt/k")"
+        s3curl -o /dev/null -X DELETE "$BB/invbkt/k"
+        GONE=""
+        for _ in $(seq 1 50); do
+            [[ "$(s3curl -o /dev/null -w '%{http_code}' "$AB/invbkt/k")" == "404" ]] && { GONE=yes; break; }
+            sleep 0.1
+        done
+        check "A sees B's delete within a second" "yes" "$GONE"
+        check "feed invalidations counted on A" "0" "$(curl -s "$AB/-/metrics" | grep -q 'lights3_duostore_meta_cache_feed_invalidations_total{backend="tierdata"} [1-9]'; echo $?)"
+        s3curl -o /dev/null -X DELETE "$AB/invbkt"
+    fi
+    kill -TERM "$INV_A" "$INV_B" 2>/dev/null
+    wait "$INV_A" 2>/dev/null; wait "$INV_B" 2>/dev/null
 fi
 
 # ---------- backlog-sequence ②: separate admin listener (docs/http-adapter.md §2.1) ----------

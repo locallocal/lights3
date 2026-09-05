@@ -6,9 +6,11 @@
 // Value encoding is 100% reused from codec.cc (§2.1); Redis Cluster is unsupported (§1 non-goal).
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <optional>
 #include <string>
 #include <vector>
@@ -88,6 +90,19 @@ public:
                       const DataRef& from, const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
+    // Invalidation feed (backlog-sequence ⑤, docs/duostore-redis-meta.md §3.6): every
+    // commit that changes an object record PUBLISHes "<bucket>\0<key>" on <prefix>inv
+    // from inside the commit script (atomic with the write, no extra round trip);
+    // this starts a dedicated subscriber connection + thread that feeds on_key, calls
+    // on_reset on every (re)connect, and reconnects with backoff. One subscription
+    // per store; a second call replaces nothing and returns false
+    bool subscribe_invalidations(InvalidationSink on_key,
+                                 std::function<void()> on_reset) override;
+    std::string invalidation_channel() const;
+    // Payload of one invalidation message: "<origin>\0<bucket>\0<key>"; origin is this
+    // store's random id, so a subscriber skips its own commits (the write path already
+    // invalidated exactly; a late self-message would only evict a fresh fill)
+    std::string invalidation_payload(std::string_view b, std::string_view k) const;
     void close() override;
 
 private:
@@ -179,9 +194,17 @@ private:
     IdRange file_ids_[2];  // indexed by Extent::Kind
     IdRange seqs_;         // gcq seq
 
+    // Invalidation subscriber (backlog-sequence ⑤)
+    void subscriber_loop();
+    std::string origin_;  // random per-store id stamped into published invalidations
+    std::thread sub_thread_;
+    std::atomic<bool> sub_stop_{false};
+    InvalidationSink sub_on_key_;
+    std::function<void()> sub_on_reset_;
     // R4 metrics (registered at construction; zero values visible)
     std::shared_ptr<MetricCounter> m_cas_retries_;
     std::shared_ptr<MetricCounter> m_reconnects_;
+    std::shared_ptr<MetricCounter> m_sub_reconnects_;
 };
 
 }  // namespace lights3::storage::duostore

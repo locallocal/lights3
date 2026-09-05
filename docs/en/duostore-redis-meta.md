@@ -243,6 +243,38 @@ data-plane precondition see §1 non-goals).
   connection was already dead when taken from the pool) (§5.4). A CAS return of
   0 is not in this category—0 is a definite outcome, safe.
 
+
+### 3.6 Cross-Gateway Cache Invalidation Broadcast (backlog-sequence ⑤)
+
+The object metadata cache ([storage/duostore-core.md §7.1](../storage/duostore-core.md))
+on a shared meta engine cannot see a peer gateway's writes by itself. Redis has
+pub/sub, so:
+
+- **Publish inside the commit script**: the guarded-commit op table gains a `pub`
+  kind (`PUBLISH KEYS[kx] a`); `put_object` / `delete_object` / `complete_upload` /
+  `swap_extents` append `PUBLISH <prefix>inv "<bucket>\0<key>"` as the batch's last
+  op -- one atomic execution with the write, **no extra round trip**, and "a message
+  exists ⇔ the commit landed" (a round that fails its CAS guard publishes nothing);
+- **Subscriber**: `subscribe_invalidations(on_key, on_reset)` starts a dedicated
+  connection plus thread on `SUBSCRIBE <prefix>inv`, reads through `poll()` (no
+  socket timeout, which would flag the context during idle periods), and feeds
+  every message to `MetaCache::invalidate`; a lost connection reconnects with a
+  200 ms→5 s backoff, and **every (re)subscription calls `on_reset` first to clear
+  the whole table** -- pub/sub is fire-and-forget, nothing published meanwhile can
+  be recovered, so the conservative move is to start empty;
+- `meta_cache_ttl` remains the bound for lost messages (redis itself guarantees no
+  delivery); the configuration rule is unchanged (`0 < ttl < gc_grace`), but with
+  the broadcast in place the TTL can safely sit close to `gc_grace`;
+- metrics: `lights3_duostore_redis_invalidation_subscribes_total` (+1 per
+  (re)subscription), backend-side
+  `lights3_duostore_meta_cache_feed_invalidations_total` / `_feed_resets_total`;
+- the payload is `"<origin>\0<bucket>\0<key>"`: `origin` is a random per-store id
+  and the subscriber skips its own messages (the write path already invalidated
+  exactly; a late self-message would only evict a fresh fill);
+- `meta_cache_feed: false` turns the subscription off (an ops switch) and falls
+  back to TTL-only bounded staleness; tikv has no equivalent and keeps the TTL
+  contract (`IMetaStore::subscribe_invalidations` returns false by default).
+
 ## 4. alloc_file_id: INCRBY Segments
 
 Isomorphic to the RocksDB version (main doc §4.5): `INCRBY ctr:chunk 4096`

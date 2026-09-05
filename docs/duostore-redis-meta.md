@@ -193,6 +193,29 @@ RedisMetaStore **不持业务互斥**（仅保留号段派发的内存小锁，�
   发送前就失败（连接从池中取出即坏）的请求（§5.4）。CAS 返回 0 的重试
   不在此列——0 是明确结果，安全。
 
+### 3.6 跨网关缓存失效广播（backlog-sequence ⑤）
+
+对象元数据缓存（[storage/duostore-core.md §7.1](storage/duostore-core.md)）在共享
+meta 上的困境是"对端网关的写本进程看不见"。redis 有发布订阅，于是：
+
+- **发布点在提交脚本内**：守卫式提交的 op 表多一种 `pub`（`PUBLISH KEYS[kx] a`），
+  `put_object` / `delete_object` / `complete_upload` / `swap_extents` 把
+  `PUBLISH <prefix>inv "<bucket>\0<key>"` 作为最后一个 op 装进批——与写同一次原子执行，
+  **零额外 RTT**，且"有消息 ⇔ 提交落地"（CAS 失败的轮次不会发）；
+- **订阅端**：`subscribe_invalidations(on_key, on_reset)` 起一条专用连接 + 线程
+  `SUBSCRIBE <prefix>inv`，`poll()` 驱动读（不用 socket 超时，避免空闲期把上下文标坏），
+  每条消息喂 `MetaCache::invalidate`；断线退避 200ms→5s 重连，**每次（重）订阅先
+  `on_reset` 清空整表**——pub/sub 是 fire-and-forget，缺席期间的消息不可追回，保守清表；
+- `meta_cache_ttl` 仍是丢消息的兜底上界（redis 自身不保证投递），配置约束不变
+  （`0 < ttl < gc_grace`），但有了广播可以放心把 TTL 设到接近 `gc_grace`；
+- 指标：`lights3_duostore_redis_invalidation_subscribes_total`（每次（重）订阅 +1）、
+  backend 侧 `lights3_duostore_meta_cache_feed_invalidations_total` /
+  `_feed_resets_total`；
+- 消息载荷 `"<origin>\0<bucket>\0<key>"`：`origin` 是每个 store 的随机 id，订阅端
+  忽略自己发出的消息（写路径已精确失效；迟到的自身消息只会把刚填充的记录踢掉）；
+- `meta_cache_feed: false` 关掉订阅（运维开关），退回纯 TTL 有界陈旧；tikv 无等价
+  机制，维持 TTL 契约（`IMetaStore::subscribe_invalidations` 默认返回 false）。
+
 ## 4. alloc_file_id：INCRBY 号段
 
 与 RocksDB 版同构（主文档 §4.5）：`INCRBY ctr:chunk 4096` 返回新上界

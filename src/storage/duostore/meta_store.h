@@ -301,6 +301,19 @@ struct IMetaStore : IMetaReadView {
     // point-in-time chunk_referenced, and only warns without deleting on "refs
     // present, file missing"; both directions tolerate a weakly consistent snapshot
     virtual void scan_refs(const std::function<void(uint64_t file_id)>& cb) = 0;
+    // Cross-gateway cache invalidation (backlog-sequence ⑤): an engine that can push
+    // peers' commits calls on_key(bucket, key) for every object-record change it
+    // observes (including this instance's own) and on_reset() whenever the feed
+    // (re)connects -- messages during a gap are lost, so the subscriber drops
+    // everything it holds. Returns false when the engine has no such channel (local
+    // engines, tikv): the caller keeps the TTL contract. Callbacks run on the
+    // engine's feed thread, must be cheap and must not call back into the store;
+    // close() stops the feed and joins the thread before returning
+    using InvalidationSink = std::function<void(std::string_view bucket, std::string_view key)>;
+    virtual bool subscribe_invalidations(InvalidationSink /*on_key*/,
+                                         std::function<void()> /*on_reset*/) {
+        return false;
+    }
     virtual void close() = 0;
     virtual ~IMetaStore() = default;
 };

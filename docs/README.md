@@ -40,8 +40,8 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [duostore-rados-data.md](duostore-rados-data.md) | DuoStore 的 RADOS IDataStore：librados 直连，chunk → rados 对象 |
 | [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore 的 TiKV IMetaStore：client-c + 2PC 侧车，meta 水平扩展 |
 | [cli.md](cli.md) | 命令行工具：`lights3` 启动、`duostore dump/load/gc/scan`、`tier scan/gc/reconcile`、`fsck` 离线巡检、`s3adm` 的 cred/website/bench/fsck/quota/tenant/usage 命令、ccmd 选项语义与退出码 |
-| [roadmap.md](roadmap.md) | 优化与功能规划（2026-08-25 全量走读）：bug 级待修项、各层功能缺口与可优化点、明确不做清单、优先级梯队 |
-| [archive/](archive/gaps.md) | 已清零的历史评审底账（gaps.md / issues.md），只读归档——源码注释中 `docs/archive/<name>.md §N` 引用的论证出处 |
+| [backlog.md](backlog.md) | 待办与后续规划：分期保留的设计、代码已落地但本机无法验证的项、基线跑出的新问题、长期项、明确不做清单；做完即删 |
+| [archive/](archive/gaps.md) | 已收口的历史底账（gaps.md / issues.md / roadmap.md），只读归档——源码注释中 `docs/archive/<name>.md §N` 与 `roadmap §N` 引用的论证出处 |
 
 *另有中文项目介绍 [README.zh-CN.md](README.zh-CN.md)（构建/运行/当前实现范围）；
 全部设计文档的英文翻译在 [en/](en/README.md)，章节编号与中文版一一对应，

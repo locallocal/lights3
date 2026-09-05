@@ -1,4 +1,4 @@
-// L3: byte-rate pacing for scrub/fsck traversals (docs/roadmap.md §3.1).
+// L3: byte-rate pacing for scrub/fsck traversals (docs/archive/roadmap.md §3.1).
 // A scrub reads every byte a backend holds; unthrottled it competes with live
 // traffic for disk bandwidth, so the read loops call pace(n) after each buffer
 // and sleep whenever they run ahead of max_bytes_per_sec. Sleeping goes through

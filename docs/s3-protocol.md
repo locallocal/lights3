@@ -205,6 +205,18 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
   handler=<ms> backend_calls=<n>`；JSON：`"slow":true` + 上述字段），生产
   `log.level: warn` 时仍能看到值得看的请求。auth = 从进入 dispatch 到身份验证
   完成，handler = 路由处理器整段（后端耗时是其子集）。
+- **分布式 trace（轻量层，roadmap §5.4，`core/trace.h`）**：接受 W3C
+  `traceparent`（严格校验：版本 00、小写 hex、非零 id；畸形即视为无）与
+  `tracestate`（原样透传）；缺失时网关自起一条 trace。每个请求持有自己的 span，
+  来访的 span 记为 parent。落点：访问行文本槽 `trace=<trace_id>/<span_id>
+  [parent=<span>]`、JSON 字段 `trace_id / span_id / parent_span_id`、dispatch
+  的取消/内部错误 WARN/ERROR 行 `trace=`、审计数据面记录 `trace_id`；响应头
+  `traceresponse: 00-<trace_id>-<span_id>-<flags>`（W3C 草案）让无 tracer 的
+  客户端也能引用。出站：cloudproxy 每个远端请求带网关自身 span 的 `traceparent`
+  （远端以之为 parent，链接落在双方日志里）+ `tracestate`（[cloudproxy-backend.md §2.2](cloudproxy-backend.md)），
+  多跳（网关→cloudproxy 远端 lights3 / tiered 冷层）按同一 trace id 关联；
+  后台任务（tiered 降冷、GC）无请求上下文，不带 trace 头。不导出 span：
+  otel-cpp 全量埋点仍是长期项。
 - **sink 与异步**：`log.file` 为空写 stderr，否则写按大小轮转的文件
   （`max_size` / `max_files`，每秒定时 flush，WARN 及以上立即 flush）；
   `log.async: true` 时请求线程只入队（容量 `async_queue`），单独的写线程落盘，

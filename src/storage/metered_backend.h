@@ -20,15 +20,9 @@
 
 #include "core/metrics.h"
 #include "storage/backend.h"
+#include "storage/request_stats.h"
 
 namespace lights3::storage {
-
-struct RequestBackendStats {
-    std::atomic<int64_t> nanos{0};
-    std::atomic<uint32_t> calls{0};
-    std::atomic<uint32_t> errors{0};
-    double millis() const { return static_cast<double>(nanos.load(std::memory_order_relaxed)) / 1e6; }
-};
 
 class MeteredBackend final : public IStorageBackend {
 public:

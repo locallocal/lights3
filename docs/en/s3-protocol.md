@@ -227,6 +227,23 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
   running at `log.level: warn` still sees the requests worth looking at. auth =
   dispatch entry to verified identity, handler = the whole route handler
   (backend time is a subset).
+- **Distributed trace (lightweight tier, roadmap §5.4, `core/trace.h`)**:
+  accepts W3C `traceparent` (strict: version 00, lowercase hex, non-zero ids; a
+  malformed header counts as absent) and `tracestate` (passed through verbatim);
+  without one the gateway starts a trace. Every request owns its span, the
+  caller's span is recorded as parent. Where it lands: the access line's text
+  slot `trace=<trace_id>/<span_id> [parent=<span>]`, the JSON fields `trace_id /
+  span_id / parent_span_id`, dispatch's cancellation / internal-error WARN/ERROR
+  lines (`trace=`), the audit data-plane record (`trace_id`); the response
+  header `traceresponse: 00-<trace_id>-<span_id>-<flags>` (W3C draft) lets a
+  client without a tracer quote it. Outbound: every cloudproxy request carries
+  the gateway's own span in `traceparent` (the remote logs it as parent, so the
+  link lands in both logs) plus `tracestate`
+  ([cloudproxy-backend.md §2.2](cloudproxy-backend.md)), so multi-hop setups
+  (gateway → remote lights3 behind cloudproxy / tiered cold layer) correlate on
+  one trace id; background work (tiered demotion, GC) has no request context
+  and sends no trace headers. Nothing is exported: otel-cpp instrumentation
+  stays a long-term item.
 - **Sink and async**: an empty `log.file` writes to stderr, otherwise to a
   size-rotated file (`max_size` / `max_files`, flushed every second and
   immediately at WARN and above); with `log.async: true` request threads only

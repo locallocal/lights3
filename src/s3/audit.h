@@ -29,6 +29,7 @@ struct AuditEvent {
     std::string_view actor;       // access key (empty = anonymous / auth disabled)
     std::string_view tenant;      // actor's tenant (empty = none / root)
     std::string_view request_id;
+    std::string_view trace_id;    // W3C trace id of the request (roadmap §5.4), data plane
     std::string_view bucket;
     std::string_view key;
     std::string_view target;      // object of the action: another AK, a tenant id, ...

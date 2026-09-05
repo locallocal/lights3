@@ -105,6 +105,7 @@ struct AccessRecord {
     std::chrono::steady_clock::time_point start;
     std::string request_id, remote, access_key, method, path, query, bucket, key, user_agent,
         api, backend;
+    std::string trace_id, span_id, parent_span_id;  // roadmap §5.4
     int status = 0;
     double auth_ms = 0, handler_ms = 0, backend_ms = 0, ttfb_ms = 0;
     uint32_t backend_calls = 0;
@@ -174,16 +175,21 @@ void emit_access(const AccessRecord& r, uint64_t bytes, bool truncated) {
         j["api"] = dash(r.api);
         j["backend"] = dash(r.backend);
         if (!r.user_agent.empty()) j["ua"] = r.user_agent;
+        j["trace_id"] = r.trace_id;
+        j["span_id"] = r.span_id;
+        if (!r.parent_span_id.empty()) j["parent_span_id"] = r.parent_span_id;
         if (slow) j["slow"] = true;
         if (truncated) j["truncated"] = true;
         log.log(level, "{}", j.dump());
         return;
     }
     std::string line = spdlog::fmt_lib::format(
-        "access {} {} {} {} {} {} {}ms api={} backend={}:{:.1f}ms remote={} bucket={} ttfb={:.1f}ms ua={}",
+        "access {} {} {} {} {} {} {}ms api={} backend={}:{:.1f}ms remote={} bucket={} ttfb={:.1f}ms ua={} trace={}/{}",
         r.request_id, dash(r.access_key), r.method, quote_field(r.path), r.status, bytes,
         static_cast<uint64_t>(total_ms), dash(r.api), dash(r.backend), r.backend_ms,
-        dash(r.remote), dash(r.bucket), r.ttfb_ms, quote_field(r.user_agent));
+        dash(r.remote), dash(r.bucket), r.ttfb_ms, quote_field(r.user_agent), r.trace_id,
+        r.span_id);
+    if (!r.parent_span_id.empty()) line += " parent=" + r.parent_span_id;
     if (truncated) line += " truncated=1";
     if (slow)
         line += spdlog::fmt_lib::format(" slow=1 auth={:.1f}ms handler={:.1f}ms backend_calls={}", r.auth_ms,
@@ -556,7 +562,9 @@ bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Addre
 // ---------- Top-level entry ----------
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
-    RequestContext ctx{make_request_id(), make_host_id(), req.cancel};
+    RequestContext ctx{make_request_id(), make_host_id(), req.cancel,
+                       TraceContext::from_headers(req.headers.get("traceparent"),
+                                                  req.headers.get("tracestate"))};
     bool head = req.method == "HEAD";
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
@@ -589,6 +597,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::string_view api_name;
     std::string backend_name;
     auto backend_stats = std::make_shared<storage::RequestBackendStats>();
+    backend_stats->trace = ctx.trace;  // outbound hops forward it as traceparent (roadmap §5.4)
     // Rate-limit slots (roadmap §4.2) held for the whole dispatch; released on return
     // The limiter instances are pinned here so a hot-reload swap cannot destroy
     // one while this request still holds a slot in it (declared before the slots:
@@ -875,8 +884,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     } catch (const OperationCancelled&) {
         // Timeout/disconnect/shutdown: 503 lets SDKs retry. Blocking syscalls already running on pool threads are
         // not preempted; this response only means "the gateway stops waiting for it" (the cooperative semantics of docs/concurrency.md §5)
-        LOG_WARN("req {} {} {} cancelled (timeout or shutdown)", ctx.request_id, req.method,
-                 req.path);
+        LOG_WARN("req {} {} {} cancelled (timeout or shutdown) trace={}", ctx.request_id,
+                 req.method, req.path, ctx.trace.trace_id);
         metrics_.s3_error(S3ErrorCode::SlowDown);
         resp = error_response(
             S3Error(S3ErrorCode::SlowDown, "Request cancelled: timed out or server shutting down."),
@@ -888,8 +897,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         else
             resp = error_response(public_error(e, ctx.request_id, req), ctx, head);
     } catch (const std::exception& e) {
-        LOG_ERROR("req {} {} {} internal error: {}", ctx.request_id, req.method, req.path,
-                  e.what());
+        LOG_ERROR("req {} {} {} internal error: {} trace={}", ctx.request_id, req.method,
+                  req.path, e.what(), ctx.trace.trace_id);
         metrics_.s3_error(S3ErrorCode::InternalError);
         S3Error internal(S3ErrorCode::InternalError, "We encountered an internal error.");
         if (anon_site)
@@ -942,6 +951,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     resp.headers.set("x-amz-request-id", ctx.request_id);
     resp.headers.set("x-amz-id-2", ctx.host_id);
     resp.headers.set("Server", "lights3");
+    // Trace Context response header (W3C draft `traceresponse`): the trace id the
+    // gateway used, so a client without its own tracer can still quote it
+    resp.headers.set("traceresponse", ctx.trace.traceparent());
 
     // Metrics close here: the histograms measure time-to-headers-ready, the same
     // quantity the access line reports as ttfb (docs/s3-protocol.md §7)
@@ -963,6 +975,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     if (auto ua = req.headers.get("User-Agent")) access->user_agent = *ua;
     access->api = std::string(api_name);
     access->backend = backend_name;
+    access->trace_id = ctx.trace.trace_id;
+    access->span_id = ctx.trace.span_id;
+    access->parent_span_id = ctx.trace.parent_span_id;
     access->status = resp.status;
     access->auth_ms = ms_since(start, auth_done);
     if (route_start) access->handler_ms = ms_since(*route_start, route_end.value_or(std::chrono::steady_clock::now()));
@@ -990,6 +1005,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         e.actor = access_key;
         e.tenant = tenant_for_log;
         e.request_id = ctx.request_id;
+        e.trace_id = ctx.trace.trace_id;
         e.bucket = bucket;
         e.key = key;
         e.method = req.method;

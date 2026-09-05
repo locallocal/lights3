@@ -8,6 +8,8 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "core/metrics.h"
 #include "core/thread_pool.h"
@@ -154,6 +156,12 @@ private:
     // TimerQueue sleep + hop back to a pool thread (the timer callback thread must not
     // run business logic)
     Task<void> async_backoff(int64_t delay_ms);
+    // Outbound hop of the request's trace (roadmap §5.4): when the awaiting chain
+    // carries the request payload (storage/request_stats.h), appends `traceparent`
+    // (the gateway's own span, so the remote logs it as parent) and `tracestate`.
+    // Background work (tiered demotion, GC) carries no request: nothing is added
+    using Extra = std::vector<std::pair<std::string, std::string>>;
+    Task<Extra> trace_extra(Extra extra = {});
     // Streaming upload shared by PUT / upload_part (docs/cloudproxy-backend.md §3.2).
     // resource is the client-view "/bucket/key" (goes into the error XML; does not leak the
     // prefixed remote path); multipart_ctx decides the semantic fallback for a body-less 404

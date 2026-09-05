@@ -397,13 +397,17 @@ CopyObject/UploadPartCopy 按 `x-amz-copy-source` 细分）→
 | ~~website/匿名面指标~~ | `lights3_website_events_total{event=anon_read\|index_rewrite\|error_document\|redirect\|throttled}`；[static-website.md §6](static-website.md) | 中 | 极低 |
 | ~~`/-/metrics` 匿名可达~~ | `http.metrics_access: anonymous\|root`（可热更新）：root 时 GET 须 root 凭证签名，healthz/readyz 不受影响；独立 admin 端口未做（root gate 已足够，端口层隔离仍可由部署侧完成） | 中 | 低 |
 
-### 5.4 分布式 trace
+### 5.4 分布式 trace **轻量层已完成（2026-09-05）；otel-cpp 全量埋点维持长期**
 
-全仓无 traceparent/otel 痕迹，只有自生成 `x-amz-request-id`。多跳架构
-（网关→cloudproxy 远端 / tiered / duostore meta+data）下排障刚需。轻量方
-案先行：接受并透传 W3C `traceparent` + 注入日志关联字段；otel-cpp 全量埋
-点作为长期项。
-**价值：高；难度：低（透传）/ 高（otel）。**
+~~全仓无 traceparent/otel 痕迹，只有自生成 `x-amz-request-id`。~~ 轻量方案
+已落地（`core/trace.h`，[s3-protocol.md §7](s3-protocol.md)）：接受并严格校验
+W3C `traceparent` + 透传 `tracestate`，缺失自起；每请求一个 span、来访 span 为
+parent；访问日志（文本 `trace=`/JSON `trace_id/span_id/parent_span_id`）、
+WARN/ERROR 行、审计数据面记录注入关联字段；响应头 `traceresponse`；cloudproxy
+每个远端请求带网关 span（`trace_extra`，经取消令牌上的请求载荷；远端记为 parent），多跳同一
+trace id（e2e 对网关→远端 lights3 两跳验证）。duostore meta+data 为进程内后端，
+无网络跳，不涉及。otel-cpp 全量埋点（导出 span）作为长期项保留。
+**价值：高；难度：低（透传，已完成）/ 高（otel，长期）。**
 
 ### 5.5 监控消费侧（零 C++ 改动）
 
@@ -499,7 +503,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**
 7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）
 8. ~~tiered 扫描增量化 + prefix 策略（§3.6）~~ **已完成（2026-09-02，含全部七项）**
-9. 故障注入体系 + soak（§6.1）；traceparent 透传（§5.4）
+9. 故障注入体系 + soak（§6.1）；~~traceparent 透传（§5.4）~~ **已完成（2026-09-05）**
 10. install target + CPack（§6.3）；~~审计日志（§3.9④）~~ **已完成（2026-09-04）**
 
 ### P3 — 长期 / 架构级（先想清目标场景再动）

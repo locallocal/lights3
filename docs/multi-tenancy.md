@@ -264,7 +264,7 @@ JSON 对象，字段缺省时**省略而非空串**：
 | `quota.reject` | 任何配额拒绝 | `bucket`，`detail`=超限的轴 |
 | `bucket.create` / `bucket.delete` | 数据面建删桶 | `bucket` |
 | `usage.rescan` | 按需扫描 | `bucket`，`detail`=结果 |
-| `access` | **仅 `audit.data_plane=true`**：每个请求一条 | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant` |
+| `access` | **仅 `audit.data_plane=true`**：每个请求一条 | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant`/`trace_id`（roadmap §5.4） |
 
 控制面事件逐条 flush（少而关键），`access` 记录不逐条 flush（高 QPS 下由
 sink 缓冲）。`access` 是 roadmap §5.2 "结构化访问日志"的审计侧版本；§5.2 的

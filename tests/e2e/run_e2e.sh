@@ -308,6 +308,30 @@ check "CreateBucket" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BAS
 check "HeadBucket" "200" "$(s3curl -o /dev/null -w '%{http_code}' -I "$BASE/mybucket")"
 check "duplicate create 409" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/mybucket")"
 
+# roadmap §5.4: W3C trace context — the client's trace id is kept on the access
+# line (with the caller's span as parent) and echoed in traceresponse; the
+# cloudproxy hop forwards a child span so the remote instance logs the same id
+E2E_TRACE=4bf92f3577b34da6a3ce929d0e0e4736
+TRACE_HDRS=$(s3curl -D - -o /dev/null -X PUT --data-binary "trace me" \
+    -H "traceparent: 00-$E2E_TRACE-00f067aa0ba902b7-01" "$BASE/mybucket/trace.txt")
+check "traceresponse echoes the client's trace id" "0" \
+    "$(echo "$TRACE_HDRS" | grep -qi "^traceresponse: 00-$E2E_TRACE-[0-9a-f]\{16\}-01"; echo $?)"
+sleep 0.2
+check "access log carries trace id and parent span" "0" \
+    "$(grep -q "access .* PUT \"/mybucket/trace.txt\" 200 .* trace=$E2E_TRACE/[0-9a-f]* parent=00f067aa0ba902b7" "$WORK/server.log"; echo $?)"
+# Only the pure cloudproxy backend forwards the PUT synchronously; under tiered the
+# object lands in the hot tier and reaches the remote via background demotion,
+# which carries no request context (by design: no trace headers)
+if [[ "$BACKEND" == "cloudproxy" ]]; then
+    GW_SPAN=$(grep "access .* PUT \"/mybucket/trace.txt\" 200 " "$WORK/server.log" | sed -n "s/.* trace=$E2E_TRACE\/\([0-9a-f]*\).*/\1/p" | head -1)
+    check "remote instance logs the same trace id under the gateway's span" "0" \
+        "$(grep -q "access .* PUT .* trace=$E2E_TRACE/[0-9a-f]* parent=$GW_SPAN" "$WORK/remote.log"; echo $?)"
+fi
+NOTRACE_HDRS=$(s3curl -D - -o /dev/null -I "$BASE/mybucket/trace.txt")
+check "traceresponse present without a client trace" "0" \
+    "$(echo "$NOTRACE_HDRS" | grep -qi "^traceresponse: 00-[0-9a-f]\{32\}-[0-9a-f]\{16\}-01"; echo $?)"
+s3curl -o /dev/null -X DELETE "$BASE/mybucket/trace.txt"  # keep the later listing / DeleteBucket cases unchanged
+
 # 5MB random file PUT/GET round trip
 dd if=/dev/urandom of="$WORK/big.bin" bs=1M count=5 2>/dev/null
 MD5=$(md5sum "$WORK/big.bin" | cut -d' ' -f1)

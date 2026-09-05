@@ -1,0 +1,324 @@
+# Prometheus recording + alerting rules for lights3 (roadmap §5.5, docs/monitoring.md §3).
+# Every metric name below is emitted by GET /-/metrics (docs/s3-protocol.md §7);
+# tests/monitoring/check_assets.py cross-checks them against the source catalog.
+# Thresholds are starting points for a single gateway — tune `for` and the
+# ratios to the deployment's traffic shape.
+groups:
+  - name: lights3.recording
+    interval: 15s
+    rules:
+      - record: lights3:requests:rate5m
+        expr: sum by (instance) (rate(lights3_requests_total[5m]))
+      - record: lights3:responses_5xx_ratio:rate5m
+        expr: |
+          sum by (instance) (rate(lights3_responses_total{class="5xx"}[5m]))
+            / clamp_min(sum by (instance) (rate(lights3_requests_total[5m])), 1e-9)
+      - record: lights3:request_duration_seconds:p99_5m
+        expr: histogram_quantile(0.99, sum by (instance, le) (rate(lights3_request_duration_seconds_bucket[5m])))
+      - record: lights3:api_request_duration_seconds:p99_5m
+        expr: histogram_quantile(0.99, sum by (instance, api, backend, le) (rate(lights3_api_request_duration_seconds_bucket[5m])))
+      - record: lights3:backend_error_ratio:rate5m
+        expr: |
+          sum by (instance, backend) (rate(lights3_backend_errors_total[5m]))
+            / clamp_min(sum by (instance, backend) (rate(lights3_backend_op_seconds_count[5m])), 1e-9)
+      - record: lights3:cloudproxy_retry_ratio:rate5m
+        expr: |
+          sum by (instance, backend) (rate(lights3_cloudproxy_retries_total[5m]))
+            / clamp_min(sum by (instance, backend) (rate(lights3_cloudproxy_remote_request_seconds_count[5m])), 1e-9)
+      - record: lights3:keepalive_reuse:rate5m
+        expr: |
+          sum by (instance) (rate(lights3_http_requests_total[5m]))
+            / clamp_min(sum by (instance) (rate(lights3_http_connections_total{result="accepted"}[5m])), 1e-9)
+
+  - name: lights3.availability
+    rules:
+      - alert: Lights3Down
+        expr: up{job="lights3"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "lights3 {{ $labels.instance }} is not scrapeable"
+          description: "Prometheus could not scrape /-/metrics for 1m (process down, listener unreachable, or http.metrics_access: root without a signing proxy)."
+      - alert: Lights3High5xxRate
+        expr: lights3:responses_5xx_ratio:rate5m > 0.02 and lights3:requests:rate5m > 1
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "5xx ratio {{ $value | humanizePercentage }} on {{ $labels.instance }}"
+          description: "More than 2% of responses are 5xx over 5m. Check lights3_s3_errors_total{code} and lights3_backend_errors_total{backend,op} for the failing side."
+      - alert: Lights3HighP99Latency
+        expr: lights3:request_duration_seconds:p99_5m > 2
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "request P99 {{ $value | humanizeDuration }} on {{ $labels.instance }}"
+          description: "Time-to-headers P99 above 2s for 10m. Compare lights3:api_request_duration_seconds:p99_5m per API and lights3_backend_op_seconds per backend to place the latency."
+      - alert: Lights3ApiP99Latency
+        expr: lights3:api_request_duration_seconds:p99_5m{api!~"GetObject|PutObject|UploadPart|CopyObject|UploadPartCopy|CompleteMultipartUpload"} > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.api }} P99 {{ $value | humanizeDuration }} via {{ $labels.backend }}"
+          description: "A metadata-class API (no body transfer) is slow — usually the backend's metadata path (listing, head) or the thread pool queue."
+
+  - name: lights3.capacity
+    rules:
+      - alert: Lights3AdmissionSaturated
+        expr: lights3_admission_available <= 0 and lights3_admission_waiting > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "runtime.max_inflight_requests exhausted on {{ $labels.instance }}"
+          description: "Every permit is in use and requests are queueing at admission for 5m. Raise runtime.max_inflight_requests (hot-reloadable) or find the slow backend holding permits (streaming bodies keep theirs until drained)."
+      - alert: Lights3AdmissionQueueWait
+        expr: histogram_quantile(0.99, sum by (instance, le) (rate(lights3_admission_wait_seconds_bucket[5m]))) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "admission wait P99 {{ $value | humanizeDuration }} on {{ $labels.instance }}"
+          description: "Requests wait more than 1s for a permit at P99. Distinguish 'stuck at admission' (this) from 'stuck in the pool' (lights3_pool_wait_seconds)."
+      - alert: Lights3AdmissionCancellations
+        expr: increase(lights3_admission_cancelled_total[10m]) > 10
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} requests cancelled while queued on {{ $labels.instance }}"
+          description: "Queued requests are being cancelled (request_timeout expiring in the queue, or client disconnects). They answered 503 SlowDown."
+      - alert: Lights3PoolBacklogged
+        expr: lights3_pool_backlogged > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "shared thread pool backlogged on {{ $labels.instance }}"
+          description: "The shared pool has been over its queue threshold for 5m; the pool wait histogram shifting right is the criterion for dedicated per-backend pools (docs/concurrency.md §3.1)."
+      - alert: Lights3TimerLag
+        expr: lights3_timer_lag_seconds > 5
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "timer queue lagging {{ $value | humanizeDuration }} on {{ $labels.instance }}"
+          description: "Head-of-queue lag on the timer thread: a slow callback (lights3_timer_slow_callbacks_total) delays tiered scans, duostore GC and credential sync."
+      - alert: Lights3TransferStalls
+        expr: increase(lights3_transfer_stalls_total[10m]) > 20
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $value }} transfers cut by the stall guard ({{ $labels.direction }}) on {{ $labels.instance }}"
+          description: "Bodies moving less than 64KiB per http.transfer_stall_timeout window are being cut. Sustained counts point at a slow network path or an io_chunk_size below the progress threshold."
+
+  - name: lights3.http
+    rules:
+      - alert: Lights3ConnectionLimit
+        expr: increase(lights3_http_connections_total{result="rejected_limit"}[5m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "connections refused by http.max_connections on {{ $labels.instance }}"
+          description: "The accept loop turned connections away. Raise http.max_connections (restart) or put a load balancer in front."
+      - alert: Lights3ParseErrorSpike
+        expr: rate(lights3_http_parse_errors_total[5m]) > 5
+        for: 5m
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $value | humanize }} malformed requests/s on {{ $labels.instance }}"
+          description: "Request line / header / framing rejects at L1 — a scanner, a broken client, or a proxy mis-framing bodies."
+      - alert: Lights3TlsHandshakeFailures
+        expr: rate(lights3_http_tls_handshakes_total{result="failed"}[5m]) > 1
+        for: 5m
+        labels: {severity: info}
+        annotations:
+          summary: "TLS handshakes failing on {{ $labels.instance }}"
+          description: "Plaintext clients on the TLS port, an unsupported TLS version/cipher, or clients failing mTLS (docs/tls.md)."
+      - alert: Lights3RateLimitRejections
+        expr: rate(lights3_ratelimit_rejections_total[5m]) > 10
+        for: 10m
+        labels: {severity: info}
+        annotations:
+          summary: "rate limiting active ({{ $labels.scope }}) on {{ $labels.instance }}"
+          description: "More than 10 rejections/s for 10m. Expected under attack; otherwise the per-IP/per-AK limits are below the legitimate load."
+
+  - name: lights3.backends
+    rules:
+      - alert: Lights3BackendErrors
+        expr: lights3:backend_error_ratio:rate5m > 0.01 and sum by (instance, backend) (rate(lights3_backend_op_seconds_count[5m])) > 0.5
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "backend {{ $labels.backend }} error ratio {{ $value | humanizePercentage }}"
+          description: "5xx / transport failures from the storage backend (4xx are not counted). Break down by lights3_backend_errors_total{op}."
+      - alert: Lights3XlocalfsUringFallback
+        expr: lights3_xlocalfs_uring_fallback == 1
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "xlocalfs backend {{ $labels.backend }} fell back to synchronous IO"
+          description: "io_uring was unavailable at startup (kernel / seccomp / RLIMIT_MEMLOCK); the backend runs the localfs path. The startup WARN line rotates away, this gauge does not."
+      - alert: Lights3LocalfsXattrFallback
+        expr: lights3_localfs_xattr_fallback == 1
+        for: 1m
+        labels: {severity: info}
+        annotations:
+          summary: "localfs backend {{ $labels.backend }} stores metadata sidecar-only"
+          description: "setxattr failed on the data directory (filesystem without user xattrs); metadata lives in sidecar files only (two-rename consistency model)."
+      - alert: Lights3MetaCacheStale
+        expr: |
+          sum by (instance, backend) (rate(lights3_meta_cache_lookups_total{result="stale"}[10m]))
+            / clamp_min(sum by (instance, backend) (rate(lights3_meta_cache_lookups_total[10m])), 1e-9) > 0.05
+        for: 10m
+        labels: {severity: info}
+        annotations:
+          summary: "metadata cache serving >5% stale lookups on {{ $labels.backend }}"
+          description: "Bounded-staleness mode on a shared meta store is serving old records more often than expected; shorten meta_cache_ttl or check invalidation traffic."
+
+  - name: lights3.duostore
+    rules:
+      - alert: Lights3DuostoreGcNotConverging
+        expr: lights3_duostore_gcq_oldest_age_seconds > 3600 and increase(lights3_duostore_gc_runs_total[30m]) > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "duostore {{ $labels.backend }} GC queue head older than 1h"
+          description: "GC rounds run but the oldest queued reclaim is not being processed: grace/lease/pin skips (lights3_duostore_gc_skipped_*) or rounds too short for the backlog (lights3_duostore_gcq_depth)."
+      - alert: Lights3DuostoreGcStalled
+        expr: lights3_duostore_gcq_depth > 0 and increase(lights3_duostore_gc_runs_total[1h]) == 0
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "duostore {{ $labels.backend }} has a GC backlog but no GC round in 1h"
+          description: "gc_interval may be 0 (manual `lights3 duostore gc` only) while reclaims accumulate, or the timer thread is wedged (see Lights3TimerLag)."
+      - alert: Lights3DuostoreGcRoundSlow
+        expr: histogram_quantile(0.99, sum by (instance, backend, le) (rate(lights3_duostore_gc_round_seconds_bucket[1h]))) > 600
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "duostore {{ $labels.backend }} GC rounds take >10min at P99"
+          description: "Long rounds hold the GC thread; consider a smaller gc_batch or more frequent rounds."
+      - alert: Lights3DuostoreCorruption
+        expr: increase(lights3_duostore_read_corruption_total[10m]) > 0 or increase(lights3_duostore_pack_corrupt_records_total[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "duostore {{ $labels.backend }} detected corrupt data"
+          description: "A CRC mismatch on read or a corrupt pack record during GC/compaction. Run `lights3 fsck` / `lights3 duostore scan` (docs/cli.md) and inspect the disk."
+      - alert: Lights3DuostorePacksQuarantined
+        expr: lights3_duostore_packs_quarantined > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} quarantined packs on duostore {{ $labels.backend }}"
+          description: "Packs set aside by the scrubber; live data in them is unreadable until resolved (docs/duostore-backend.md)."
+      - alert: Lights3DuostoreCompactionDeferred
+        expr: lights3_duostore_gc_compact_deferred > 0
+        for: 6h
+        labels: {severity: info}
+        annotations:
+          summary: "duostore {{ $labels.backend }} compaction deferred for 6h"
+          description: "Compaction keeps being deferred (space headroom / lease pressure); pack live ratio (lights3_duostore_pack_live_bytes / lights3_duostore_pack_bytes) will keep degrading."
+      - alert: Lights3DuostoreSqliteBusy
+        expr: rate(lights3_duostore_sqlite_busy_total[5m]) > 1
+        for: 10m
+        labels: {severity: info}
+        annotations:
+          summary: "SQLite meta store busy retries on {{ $labels.backend }}"
+          description: "Writers are contending on the single-writer connection; consider the RocksDB engine for write-heavy workloads."
+      - alert: Lights3DuostoreRedisReconnects
+        expr: increase(lights3_duostore_redis_reconnects_total[10m]) > 3
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis meta store reconnecting on {{ $labels.backend }}"
+          description: "Repeated reconnects to the shared Redis meta store within 10m."
+      - alert: Lights3DuostoreTikvSafepoint
+        expr: increase(lights3_duostore_tikv_safepoint_update_failures_total[30m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "TiKV GC safepoint updates failing on {{ $labels.backend }}"
+          description: "PD safepoint updates fail; TiKV GC may reclaim versions the meta store still needs (docs/duostore-tikv-meta.md)."
+      - alert: Lights3DuostoreRadosErrors
+        expr: rate(lights3_duostore_rados_op_errors_total[5m]) > 0.1
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "RADOS data store errors on {{ $labels.backend }}"
+          description: "librados operations failing for 5m — cluster health or pool permissions."
+
+  - name: lights3.tiered
+    rules:
+      - alert: Lights3TieredGcFailures
+        expr: increase(lights3_tiered_gc_failed_total[30m]) > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "tiered {{ $labels.backend }} cannot delete cloud copies"
+          description: "Cloud deletions keep failing (retried with backoff); lights3_tiered_gc_deferred shows the pending count. Check the cloudproxy backend's remote errors."
+      - alert: Lights3TieredGcBacklog
+        expr: lights3_tiered_gc_deferred > 100
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} deferred cloud deletions on tiered {{ $labels.backend }}"
+          description: "Deleted objects whose cloud copy is still not removed — cost keeps accruing on the remote."
+      - alert: Lights3TieredQuarantine
+        expr: lights3_tiered_quarantine_entries > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "tiered {{ $labels.backend }} quarantine has {{ $labels.kind }} entries"
+          description: "refs_missing = a stub references a cloud copy that is gone (data-loss signal); foreign = unexpected cloud objects. Resolve with `lights3 tier quarantine` (docs/cli.md)."
+      - alert: Lights3TieredEvictionPressure
+        expr: rate(lights3_tiered_evicted_bytes_total[15m]) > 0 and increase(lights3_tiered_scan_rounds_total[15m]) > 0
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "tiered {{ $labels.backend }} evicting continuously (space watermark)"
+          description: "The local tier sits above space_high_watermark for an hour: every scan evicts. Grow the local disk, lower cold_after, or raise the watermark (docs/tiered-storage.md). A local-usage gauge is not exported — the eviction rate is the watermark signal."
+      - alert: Lights3TieredCloudReadHeavy
+        expr: |
+          sum by (instance, backend) (rate(lights3_tiered_get_source_total{source="cloud"}[15m]))
+            / clamp_min(sum by (instance, backend) (rate(lights3_tiered_get_source_total[15m])), 1e-9) > 0.5
+        for: 30m
+        labels: {severity: info}
+        annotations:
+          summary: "more than half of tiered reads on {{ $labels.backend }} recall from the cloud"
+          description: "The working set is colder than cold_after assumes, or the range cache is off for a Range-heavy workload."
+
+  - name: lights3.cloudproxy
+    rules:
+      - alert: Lights3CloudproxyRetryRatio
+        expr: lights3:cloudproxy_retry_ratio:rate5m > 0.1 and sum by (instance, backend) (rate(lights3_cloudproxy_remote_request_seconds_count[5m])) > 0.2
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "cloudproxy {{ $labels.backend }} retrying {{ $value | humanizePercentage }} of remote requests"
+          description: "Retries are backoff-driven waits on 5xx / transport errors / 429. Sustained ratios mean the remote is throttling or flapping; the circuit breaker opens on consecutive failures."
+      - alert: Lights3CloudproxyRemoteErrors
+        expr: rate(lights3_cloudproxy_remote_errors_total{code=~"5..|transport"}[5m]) > 0.5
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "cloudproxy {{ $labels.backend }} remote {{ $labels.code }} errors"
+          description: "The remote S3 endpoint answers 5xx or the transport fails. Endpoint, credentials chain (IMDS/env), or the remote's own health."
+      - alert: Lights3CloudproxyEtagMismatch
+        expr: increase(lights3_cloudproxy_etag_mismatch_total[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "cloudproxy {{ $labels.backend }} ETag mismatch on upload"
+          description: "The remote's ETag differed from the locally computed digest: data corrupted in transit or a remote that rewrites bodies (docs/cloudproxy-backend.md §6)."
+      - alert: Lights3CloudproxyPoolWait
+        expr: histogram_quantile(0.99, sum by (instance, backend, le) (rate(lights3_cloudproxy_pool_wait_seconds_bucket[5m]))) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "cloudproxy {{ $labels.backend }} connection pool wait P99 {{ $value | humanizeDuration }}"
+          description: "Requests wait for a pooled connection; raise max_connections on the backend or check remote latency."
+
+  - name: lights3.tenancy
+    rules:
+      - alert: Lights3QuotaRejections
+        expr: increase(lights3_quota_rejections_total[1h]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "{{ $labels.scope }} quota rejections on {{ $labels.instance }}"
+          description: "Writes refused with QuotaExceeded; the audit log's quota.reject records name the bucket/tenant."
+      - alert: Lights3UsageScanStale
+        expr: (time() - lights3_usage_last_scan_timestamp_seconds) > 2 * 86400 and lights3_usage_last_scan_timestamp_seconds > 0
+        for: 1h
+        labels: {severity: info}
+        annotations:
+          summary: "usage reconciliation has not run for 2 days on {{ $labels.instance }}"
+          description: "usage.reconcile_interval elapsed twice without a full recount; counters may drift from the incremental path (docs/multi-tenancy.md §2)."

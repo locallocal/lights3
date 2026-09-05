@@ -568,6 +568,14 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME e2e_seastar
              COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_e2e.sh $<TARGET_FILE:lights3> seastar)
   endif()
+  # Monitoring assets (roadmap §5.5, docs/monitoring.md §5): rules / scrape config /
+  # dashboard validated against the source metric catalog and a live scrape
+  find_program(LIGHTS3_PYTHON3 python3)
+  if(LIGHTS3_DRIVER_BUILTIN AND LIGHTS3_PYTHON3)
+    add_test(NAME monitoring_assets
+             COMMAND ${LIGHTS3_PYTHON3} ${CMAKE_SOURCE_DIR}/tests/monitoring/check_assets.py
+                     --repo ${CMAKE_SOURCE_DIR} --binary $<TARGET_FILE:lights3>)
+  endif()
   # The xlocalfs backend reuses the same e2e cases (io_uring data plane)
   if(LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_xlocalfs

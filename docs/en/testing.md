@@ -125,6 +125,14 @@ only as client-c's nested submodule and is not a repository-wide dependency.
 
 ## 5. Performance gate and soak
 
+- `scripts/bench_matrix.sh <lights3> <s3adm> [--drivers a,b] [--tls on|off|both]
+  [--duration N] [--concurrency N] [--size SZ] [--modes put,get] [--json FILE]
+  [--label TEXT]`: the performance baseline matrix (roadmap §4.3) -- one
+  localfs gateway per (driver × TLS) cell running `s3adm bench put/get`, output
+  as a Markdown table plus one JSON line per cell; the driver list defaults to
+  the `drivers:` line of `lights3 --version`. Results are kept in
+  [performance-baseline.md](performance-baseline.md).
+
 - `scripts/bench_gate.sh <lights3> <s3adm> [--duration N] [--min-put-ops N]
   [--min-get-ops N] [--max-p99-ms N]`: a memory-backend gateway + `s3adm bench
   put/get --output=json`; the JSON summary is parsed and a throughput floor (default 300

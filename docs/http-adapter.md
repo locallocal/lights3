@@ -58,8 +58,8 @@ struct HttpResponse {
   （对异步库体现为不再投递 async_read；对同步库体现为线程阻塞在 recv）。
   响应方向同理，L1 作为消费者拉取 `stream_body`。
 - **不做零拷贝抽象过度设计**：统一以 `span<byte>` 块传递，块大小由调用方决定
-  （默认 64KiB）。后续如某 driver 支持 `sendfile`，可给 `BodyReader` 增加
-  `try_as_file()` 可选接口做特化，不影响现有实现。
+  （默认 64KiB）。零拷贝只留一个可选出口：`BodyReader::try_as_file()` /
+  `file_bytes_sent()`（默认无快路径，§2.4 ④），不影响其他实现。
 - **HTTP/1.1 chunked trailer 不进中立模型**：`HttpRequest` 无承接字段，L1 在
   剥壳时有界读掉并丢弃（`http.trailer_max_size` 上限防灌注，超限断连）。这是
   刻意取舍：S3 的流式校验和走 body 内 aws-chunked 编码（`STREAMING-*-TRAILER`
@@ -115,7 +115,8 @@ struct HttpServerFactory {
   `drain_limit`（4MiB，回错前排空请求体上限）、`trailer_max_size`（16KiB）、
   `io_chunk_size`（64KiB 流式块）、`body_queue_cap`（256KiB，仅 httplib 的
   推转拉背压水位）、`shutdown_grace`（10s；也是关停时等待许可归还的排空死线，
-  roadmap §4.5）、`shutdown_force_wait`（5s）。关停失败（后端 close / 池 join）
+  roadmap §4.5）、`shutdown_force_wait`（5s）、`sendfile`（true，builtin 的文件
+  body 零拷贝出口，§2.4 ④）。关停失败（后端 close / 池 join）
   以退出码 `3` 上报，见 [cli.md §2.1](cli.md)。
 - `http.io_threads` 的语义随驱动漂移，见 §2.2 的矩阵。
 
@@ -188,6 +189,24 @@ ratelimit:
 **客户端断连独立取消源**仍是刻意取舍（roadmap §4.2 末项）：长 handler 靠
 `request_timeout` 兜底，驱动只在下一次 socket 操作时发现断连。
 
+### 2.4 数据面性能（roadmap §4.3）
+
+流式响应路径的四项改动，全部在 L1 内、不改 `BodyReader` 的串行单消费者契约；
+基线数据见 [performance-baseline.md](performance-baseline.md)。
+
+| # | 项 | 实现 |
+| --- | --- | --- |
+| ① | **双缓冲预取** | `drivers/common.h` `StreamPrefetch`：持两块 chunk 缓冲，向 socket 写当前块的同时后端读下一块已在飞行（`Started<size_t>`，[concurrency.md §2.3](concurrency.md)）。下一次 `read()` 只在上一次完成后才发起，契约不破。四驱动共用：beast/seastar/builtin 走 `co_await next()`，httplib 的同步 content provider 走 `next_sync()`。中途出错在下一块浮出，驱动照旧断连（`http_driver_backend_error_mid_stream_closes_connection`）。提前放弃响应时析构会等在飞的那次读完成（缓冲是自己的），代价是一次读延迟，不会 use-after-free |
+| ② | **缓冲池** | `IoBuffer`：thread_local 空闲表（每线程最多 16 块），`new std::byte[n]` 默认初始化——不再每个响应构造一个**清零**的 64KiB `std::vector`。跨线程归还无妨（只是缓存） |
+| ④ | **sendfile** | `BodyReader::try_as_file()` 返回 `FileSpan{fd, offset, length}`（剩余字节恰是一段连续文件区间时），驱动内核态搬运后经 `file_bytes_sent(n)` 回报，reader 位置与计数装饰器保持一致。实现方：localfs `FdStreamReader`（含 Range）；L2 `CountingBodyReader` 转发两者（字节仍进指标与访问日志）；校验和/tee 类装饰器保持默认（无快路径）。**只有 builtin 驱动接**：定长 + 明文 + `http.sendfile: true`（默认）；TLS、chunked、非文件 body 一律走 `read()`；首次调用被 `EINVAL/ENOSYS` 拒绝也回退。beast 不接——strand 线程上的 sendfile 会因文件冷读阻塞 I/O 线程；httplib 无 socket 句柄；seastar 原生栈无 sendfile |
+| ⑤ | **builtin 流式写进 pumping** | 整个 body 循环是一个协程，由 `sync_wait_pumping` 驱动（此前每 64KiB 一次裸 `sync_wait`：condvar + 两次线程跳转，1GiB = 16384 次）；每块前 `co_await resume_on(exec)` 把续体拉回连接线程发送（慢客户端不占共享池），`PumpExecutor::running_in_this_thread()` 已在本线程时内联继续 |
+| ⑥ | **beast `ResumeOn` 快路径** | 连接 executor 都是 `make_strand` 出的 `strand<io_context::executor_type>`；`any_io_executor::target<Strand>()` 探到后 `running_in_this_thread()` 为真即 `await_ready`，省一次 `asio::post`。seastar 的 `ResumeOnShard` 本就有同样判断 |
+| ⑦ | **per-bucket 指标去锁** | `CountingBodyReader` 每块只加全局原子计数（`add_bytes_*_total`），桶维度累计到流末或每 16MiB 才 `add_bucket_bytes` 进一次互斥锁（此前每 64KiB 一次全局锁） |
+| ⑧ | HeaderMap / BlockQueue | 维持：线性扫描与双拷贝的绝对量小，未动 |
+| ⑨ | **beast 请求体读粒度**（基线跑出的发现） | 会话的 `flat_buffer` 不预留容量时，beast 的 `read_size = max(512, capacity − size)` 让每次 socket 读只取 512 字节：4 MiB 请求体 = 8192 次 `recvmsg` + 同样多次 `timerfd_settime`（每次 `expires_after`）+ 7.7 万次 futex，单次 PUT 40 ms 对 builtin 6 ms。修复：`buffer.reserve(io_chunk_size)`，PUT 4 MiB 91 → 914 ops/s |
+
+③ 异步日志已随 §5.2 完成。
+
 ## 3. 各驱动实现要点
 
 ### 3.0 builtin（默认驱动，零依赖 POSIX socket）
@@ -201,7 +220,9 @@ ratelimit:
   启动 WARN，见 §2.1）。
 - IPv4/IPv6 双栈（`::` 默认 v6only=0），同一份配置与另三驱动互换。
 - TLS：连接线程上以 OpenSSL 阻塞 I/O 包裹 socket（`Io` 抽象统一 recv/send），
-  证书/SNI/热重载来自共享的 `tls::Holder`（[tls.md](tls.md) §3）；性能路径请用 beast。
+  证书/SNI/热重载来自共享的 `tls::Holder`（[tls.md](tls.md) §3）。
+- 流式响应（§2.4）：定长明文的文件 body 走 `sendfile(2)`（`http.sendfile`），
+  其余走单协程的 pumping 循环 + 双缓冲预取；发送始终在连接线程。
 
 ### 3.1 Boost.Beast（异步驱动，性能路径首选）
 
@@ -216,6 +237,8 @@ ratelimit:
 - 支持 `Expect: 100-continue`：Beast 解析到该头后，由 driver 在 handler 首次
   调用 `body->read()` 时先回 `100 Continue` 再收 body——这样认证失败可以在
   不接收 body 的情况下直接拒绝，符合 S3 行为。
+- 响应循环：`StreamPrefetch` 双缓冲 + `ResumeOn` 同 strand 快路径（§2.4 ①⑥）；
+  不接 sendfile（strand 线程不能被冷文件读阻塞）。
 
 ### 3.2 cpp-httplib（同步驱动，thread-per-request）
 

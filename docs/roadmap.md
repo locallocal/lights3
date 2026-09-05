@@ -314,30 +314,30 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 | ~~`io_threads` 语义漂移~~ | 已完成（文档化矩阵路线）：[http-adapter.md §2.2](http-adapter.md) 的四驱动矩阵 + 各驱动启动日志打印实际含义 | — | — |
 | 客户端断连独立取消源 | 文档明示的刻意取舍（长 handler 靠 `request_timeout` 兜底），**维持** | 中 | 高 |
 
-### 4.3 数据面性能（按投入产出排序）
+### 4.3 数据面性能（按投入产出排序）**已完成（2026-09-05，①②④⑤⑥⑦ + 基线入库；⑧ 维持不动；[http-adapter.md §2.4](http-adapter.md)、[performance-baseline.md](performance-baseline.md)）**
 
-1. **流式响应双缓冲/预取**（高/中）：现读后端与写 socket 严格交替，吞吐
+1. ~~**流式响应双缓冲/预取**~~（高/中）**已完成**：`drivers/common.h` `StreamPrefetch` + `Started<T>`，四驱动共用，契约不变。原文：现读后端与写 socket 严格交替，吞吐
    ≈ 1/(读延迟+写延迟)；rados 数据面已有双缓冲流水范式可抄。注意
    `BodyReader` 契约要求串行单消费者，需在驱动内做而非改契约。
-2. **缓冲区池化**（高/中）：每个流式响应现场 `std::vector` 分配并**零初始
+2. ~~**缓冲区池化**~~（高/中）**已完成**：`IoBuffer` thread_local 空闲表，不清零。原文：每个流式响应现场 `std::vector` 分配并**零初始
    化** 64KiB，四驱动各一份；thread_local 池即可（builtin 是
    thread-per-connection，天然适配），同时是 §3.4 fixed buffers 的前置。
 3. ~~**异步日志 sink**~~（高/低）**已完成（2026-09-05）**：见 §5.2——访问日志现是热路径上每请求一次同
    步 stderr write。
-4. **sendfile 零拷贝**（高/中-高）：`http-adapter.md` §1 已预留
+4. ~~**sendfile 零拷贝**~~（高/中-高）**已完成**：`try_as_file()` / `file_bytes_sent()`，localfs 实现、计数装饰器转发、builtin 接入（TLS/chunked 回退，`http.sendfile` 开关）；beast/httplib/seastar 有意不接（理由见 http-adapter §2.4）。原文：`http-adapter.md` §1 已预留
    `try_as_file()` 设计出口，接口未加实现未做；localfs 大对象 GET 收益显
    著，TLS 路径需保留回退。
-5. **builtin 流式写纳入 pumping**（中/中）：`write_response` 现每 64KiB 一
+5. ~~**builtin 流式写纳入 pumping**~~（中/中）**已完成**：单协程 + `resume_on` 内联快路径。原文：`write_response` 现每 64KiB 一
    次裸 `sync_wait`（condvar + 双向线程跳转），1GiB 对象 = 16384 次；请求
    body 侧已用 `sync_wait_pumping`，补齐对称面。
-6. **beast `ResumeOn` 快速路径**（中/低）：已在同一 strand 时跳过
+6. ~~**beast `ResumeOn` 快速路径**~~（中/低）**已完成**：`target<strand>()->running_in_this_thread()`。原文：已在同一 strand 时跳过
    `asio::post`。
-7. **per-bucket 指标去锁**（中/中）：`add_bytes_in/out` 每 64KiB 进一次全
+7. ~~**per-bucket 指标去锁**~~（中/中）**已完成**：per-request 聚合，流末 / 每 16MiB 提交一次。原文：`add_bytes_in/out` 每 64KiB 进一次全
    局 mutex（注释自认"a tier below lock-free"）；sharded map 或
    per-request 聚合后一次提交。
 8. `HeaderMap` 线性扫描、`BlockQueue` 双拷贝：绝对量小，低优先。
 
-另：**性能基线缺失**（高/低）——仓内无任何存档的 benchmark 数据，"beast
+另：~~**性能基线缺失**~~（高/低）**已完成**：`scripts/bench_matrix.sh` + [performance-baseline.md](performance-baseline.md)；基线顺带揪出 beast 请求体 512 B/次 socket 读（PUT 4 MiB 慢 7×，已修，http-adapter §2.4 ⑨）；beast TLS GET 明显落后其他驱动，留作后续排查。原文：仓内无任何存档的 benchmark 数据，"beast
 是性能路径"是断言而非实测。跑一轮 `s3adm bench` × 4 驱动 × TLS 开关矩阵，
 结果入库 `docs/`，后续优化才有对照（`bench` 需先支持 `--output=json`，见
 §6.3）。
@@ -497,13 +497,13 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；~~DuoGcStats 接指标（§3.7）~~ **已完成（早于 2026-09，gaps §6.1 时接线）**；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**
 7. ~~fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）~~ **已完成（2026-09-05，六个 harness）**
 8. ~~Dockerfile + compose（§6.3）~~ **已完成（2026-09-05）**
-9. 性能基线入库（§4.3；前置 bench --json）
+9. ~~性能基线入库（§4.3；前置 bench --json）~~ **已完成（2026-09-05）**
 
 ### P2 — 中期（需设计，一个方向一个迭代）
 
 1. ~~scrub/fsck（§3.1）~~ **已完成（2026-08-28）**；~~顺带的用量统计（§3.9①）未做~~ **已完成（2026-09-04，L2 增量 + 全量列举校准，未复用 scrub 遍历）**
 2. ~~超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）~~ **§4.2 已完成（2026-09-05）；§5.3 全部指标补口已完成（2026-09-05）**
-3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
+3. ~~缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）~~ **已完成（2026-09-05）**
 4. ~~builtin/seastar TLS + 证书热重载（§4.1）~~ **已完成（2026-09-05，含 mTLS/SNI/cipher 旋钮与反代样例）**
 5. ~~配置热重载安全子集（§4.4）~~ **已完成（2026-09-05，含 bucket 路由规则）**
 6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**

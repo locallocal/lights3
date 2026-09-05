@@ -249,6 +249,24 @@ TEST(s3_metrics_bytes_and_per_bucket) {
           std::string::npos);
 }
 
+TEST(s3_metrics_split_totals_and_bucket_batches) {
+    // The streaming decorator feeds the lock-free totals per chunk and the
+    // per-bucket slot in batches (roadmap §4.3 ⑦); both halves must render
+    s3::Metrics m;
+    m.add_bytes_out_total(64 * 1024);
+    m.add_bytes_out_total(64 * 1024);
+    m.add_bytes_in_total(10);
+    m.add_bucket_bytes("photos", 10, 128 * 1024);
+    m.add_bucket_bytes("", 5, 5);  // no bucket: nothing to attribute
+    auto out = m.render({});
+    CHECK(out.find("lights3_bytes_total{direction=\"out\"} 131072") != std::string::npos);
+    CHECK(out.find("lights3_bytes_total{direction=\"in\"} 10") != std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"out\"} 131072") !=
+          std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"in\"} 10") !=
+          std::string::npos);
+}
+
 TEST(s3_metrics_bucket_cardinality_capped) {
     // A malicious/runaway client scanning bucket names must not inflate /-/metrics into GiB-scale label cardinality
     s3::Metrics m;

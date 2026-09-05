@@ -45,7 +45,9 @@ http:
   # ---------- Shutdown/backpressure boundaries (docs/archive/gaps.md §7, values are defaults) ----------
   # drain_limit: 4MiB          # max request body drained before erroring (beyond it, close the connection)
   # trailer_max_size: 16KiB    # chunked trailer section cap (builtin/seastar hand-written parsers)
-  # io_chunk_size: 64KiB       # streaming read/write block size
+  # io_chunk_size: 64KiB       # streaming read/write block size (one chunk is read ahead of the socket)
+  # sendfile: true             # builtin driver: file-backed fixed-length plaintext responses go kernel-side
+  #                            # (sendfile(2)); TLS / chunked / non-file bodies always use the read path (roadmap §4.3)
   # body_queue_cap: 256KiB     # push-to-pull queue capacity, i.e. backpressure watermark (httplib only)
   # shutdown_grace: 10s        # grace period waiting for in-flight requests on shutdown (driver
   #                            # connection drain AND admission-permit drain; unclean -> exit code 3)

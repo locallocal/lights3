@@ -29,6 +29,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [multi-tenancy.md](multi-tenancy.md) | 用量统计、桶/租户配额、租户实体与桶归属、分级管理面、审计日志（roadmap §3.9 全链） |
 | [testing.md](testing.md) | 测试体系：ctest 矩阵与标签、website/s3adm/故障注入 e2e、fuzz harness、故障注入门面、性能门禁与 soak、mint、ubsan/coverage、一键矩阵脚本（roadmap §6.1） |
 | [deployment.md](deployment.md) | 构建与分发：`--version` / git commit 嵌入、`cmake --install` 安装树、CPack deb/rpm、Dockerfile + compose（含 redis/tikv/rados e2e profile）、`install.sh` 升级的回滚与卸载（roadmap §6.3） |
+| [performance-baseline.md](performance-baseline.md) | 性能基线：`scripts/bench_matrix.sh` 的 4 驱动 × TLS 开关 × put/get 矩阵，§4.3 数据面优化前后对照，复现方法（roadmap §4.3） |
 | [monitoring.md](monitoring.md) | 监控消费侧：`deploy/` 下的 Prometheus 抓取配置与告警/recording 规则、Grafana dashboard 及其生成器、资产对账测试（roadmap §5.5，零 C++） |
 | [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
 | [tiered-storage.md](tiered-storage.md) | 分层存储：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |

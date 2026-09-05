@@ -214,6 +214,7 @@ public:
           access_(std::move(access)) {}
 
     ~CountingBodyReader() override {
+        flush_bucket();
         if (!access_) return;
         auto len = inner_->length();
         bool truncated = len ? total_ < *len : !eof_;
@@ -223,25 +224,56 @@ public:
 
     Task<size_t> read(std::span<std::byte> buf) override {
         size_t n = co_await inner_->read(buf);
-        if (inbound_) m_->add_bytes_in(bucket_, n);
-        else m_->add_bytes_out(bucket_, n);
-        total_ += n;
+        account(n);
         if (n == 0) eof_ = true;
-        if (access_ && (eof_ || (inner_->length() && total_ >= *inner_->length()))) {
-            emit_access(*access_, total_, /*truncated=*/false);
-            access_.reset();
-        }
+        finish_if_complete();
         co_return n;
     }
     std::optional<uint64_t> length() const override { return inner_->length(); }
+    // sendfile pass-through (roadmap §4.3 ④): the bytes still flow through the
+    // accounting, reported by the driver instead of observed in read()
+    std::optional<http::FileSpan> try_as_file() override { return inner_->try_as_file(); }
+    void file_bytes_sent(uint64_t n) override {
+        inner_->file_bytes_sent(n);
+        account(n);
+        finish_if_complete();
+    }
 
 private:
+    // Global totals per chunk (atomics); the per-bucket slot in batches
+    // (roadmap §4.3 ⑦: one mutex round per stream or per 16MiB, not per 64KiB)
+    void account(uint64_t n) {
+        if (n == 0) return;
+        if (inbound_) m_->add_bytes_in_total(n);
+        else m_->add_bytes_out_total(n);
+        total_ += n;
+        pending_bucket_ += n;
+        if (pending_bucket_ >= kBucketFlushBytes) flush_bucket();
+    }
+    void flush_bucket() {
+        if (pending_bucket_ == 0) return;
+        if (inbound_) m_->add_bucket_bytes(bucket_, pending_bucket_, 0);
+        else m_->add_bucket_bytes(bucket_, 0, pending_bucket_);
+        pending_bucket_ = 0;
+    }
+    void finish_if_complete() {
+        bool complete = eof_ || (inner_->length() && total_ >= *inner_->length());
+        if (!complete) return;
+        flush_bucket();
+        if (access_) {
+            emit_access(*access_, total_, /*truncated=*/false);
+            access_.reset();
+        }
+    }
+    static constexpr uint64_t kBucketFlushBytes = 16 * 1024 * 1024;
+
     std::unique_ptr<http::BodyReader> inner_;
     Metrics* m_;
     std::string bucket_;
     bool inbound_;
     std::unique_ptr<AccessRecord> access_;
     uint64_t total_ = 0;
+    uint64_t pending_bucket_ = 0;
     bool eof_ = false;
 };
 

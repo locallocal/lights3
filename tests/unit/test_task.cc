@@ -126,6 +126,87 @@ TEST(pump_executor_value_and_exception) {
     CHECK(caught);
 }
 
+// ---------- Started<T> (roadmap §4.3 ①, docs/concurrency.md §2.3) ----------
+
+TEST(started_collect_by_wait) {
+    ThreadPool pool(2);
+    auto child = [](ThreadPool& p) -> Task<int> {
+        co_await p.schedule();
+        co_return 41 + 1;
+    };
+    Started<int> st(child(pool));
+    CHECK(st.pending());
+    CHECK_EQ(st.wait(), 42);
+    CHECK(!st.pending());
+    // Restart on the same object
+    st.start(child(pool));
+    CHECK_EQ(st.wait(), 42);
+}
+
+TEST(started_collect_by_co_await_and_exception) {
+    ThreadPool pool(2);
+    auto child = [](ThreadPool& p, bool fail) -> Task<int> {
+        co_await p.schedule();
+        if (fail) throw std::runtime_error("child failed");
+        co_return 7;
+    };
+    auto outer = [&](bool fail) -> Task<int> {
+        Started<int> st(child(pool, fail));
+        co_return co_await st;
+    };
+    CHECK_EQ(sync_wait(outer(false)), 7);
+    bool caught = false;
+    try {
+        sync_wait(outer(true));
+    } catch (const std::runtime_error& e) {
+        caught = std::string(e.what()) == "child failed";
+    }
+    CHECK(caught);
+    // Already-finished child: co_await must not hang and must return the value
+    auto late = [&]() -> Task<int> {
+        Started<int> st(child(pool, false));
+        st.wait();  // collected synchronously; a second collect is the caller's error, so restart
+        st.start(child(pool, false));
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        co_return co_await st;
+    };
+    CHECK_EQ(sync_wait(late()), 7);
+}
+
+TEST(started_destructor_waits_for_uncollected_child) {
+    // The child writes into memory owned by the scope that owns the Started;
+    // destroying the Started early must block until the child is done
+    ThreadPool pool(1);
+    std::atomic<bool> wrote{false};
+    {
+        int slot = 0;
+        Started<void> st([](ThreadPool& p, int& out, std::atomic<bool>& flag) -> Task<void> {
+            co_await p.schedule();
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+            out = 1;
+            flag.store(true);
+        }(pool, slot, wrote));
+        CHECK(st.pending());
+    }  // ~Started blocks here
+    CHECK(wrote.load());
+}
+
+TEST(pump_executor_resume_on_inline_when_running) {
+    PumpExecutor ex;
+    // The constructing thread is the pumping thread; any other thread is not
+    CHECK(ex.running_in_this_thread());
+    bool elsewhere = true;
+    std::thread([&] { elsewhere = ex.running_in_this_thread(); }).join();
+    CHECK(!elsewhere);
+    auto t = [](PumpExecutor& e) -> Task<bool> {
+        bool inside = e.running_in_this_thread();
+        auto before = std::this_thread::get_id();
+        co_await resume_on(e);  // fast path: already on the pumping thread
+        co_return inside && std::this_thread::get_id() == before;
+    };
+    CHECK(sync_wait_pumping(ex, t(ex)));
+}
+
 TEST(task_moved_from_throws_not_segv) {
     // Calling on a moved-from Task used to be a null-pointer dereference (docs/archive/gaps.md §4): all four entry
     // points now throw logic_error; take_result is covered too (it has direct callers besides sync_wait)

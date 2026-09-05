@@ -221,6 +221,15 @@ public:
 
     Task<size_t> read(std::span<std::byte> buf) override;
     std::optional<uint64_t> length() const override { return total_; }
+    // sendfile exit (roadmap §4.3 ④): the remaining range, as-is
+    std::optional<http::FileSpan> try_as_file() override {
+        return http::FileSpan{fd_, offset_, remaining_};
+    }
+    void file_bytes_sent(uint64_t n) override {
+        n = std::min(n, remaining_);
+        offset_ += n;
+        remaining_ -= n;
+    }
 
 private:
     int fd_;

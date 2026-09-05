@@ -103,10 +103,27 @@ private:
     std::vector<std::pair<std::string, std::string>> items_;
 };
 
+// Zero-copy exit for file-backed bodies (roadmap §4.3 ④, docs/http-adapter.md §1):
+// the reader's *remaining* bytes are exactly this contiguous range of fd
+struct FileSpan {
+    int fd;
+    uint64_t offset;
+    uint64_t length;
+};
+
 // Streaming request/response body: pull model. Returns bytes read; 0 means EOF.
 struct BodyReader {
     virtual Task<size_t> read(std::span<std::byte> buf) = 0;
     virtual std::optional<uint64_t> length() const = 0;  // nullopt when chunked
+    // Optional sendfile(2) fast path. A reader whose remaining bytes are one
+    // contiguous file range may expose it; a driver that takes the offer moves
+    // the bytes kernel-side and reports them through file_bytes_sent() so the
+    // reader's position and any accounting decorator stay consistent (a driver
+    // may also stop taking the offer midway and go back to read()). Default:
+    // no fast path. Decorators that only observe bytes forward both; decorators
+    // that transform or inspect bytes (checksums, tees) keep the default
+    virtual std::optional<FileSpan> try_as_file() { return std::nullopt; }
+    virtual void file_bytes_sent(uint64_t /*n*/) {}
     virtual ~BodyReader() = default;
 };
 

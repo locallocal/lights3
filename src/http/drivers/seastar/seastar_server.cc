@@ -497,18 +497,20 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
         co_return false;  // Write failure such as peer disconnect: close the connection
     }
 
-    // Streaming response: pulled in http.io_chunk_size chunks (docs/architecture.md request lifecycle)
-    std::vector<std::byte> buf(io_chunk);
+    // Streaming response: pulled in http.io_chunk_size chunks (docs/architecture.md
+    // request lifecycle), one read ahead of the socket (roadmap §4.3 ①/②)
+    driver::StreamPrefetch pf(*resp.stream_body, io_chunk);
     uint64_t written = 0;
     for (;;) {
-        size_t n = 0;
+        std::span<const std::byte> chunk;
         try {
-            n = co_await resp.stream_body->read(std::span(buf));
+            chunk = co_await pf.next();
         } catch (const std::exception& e) {
             LOG_ERROR("stream body read failed mid-response: {}", e.what());
             co_return false;  // Response head already sent; can only disconnect (contract 3: discard the result)
         }
         co_await ResumeOnShard{shard};
+        size_t n = chunk.size();
         try {
             if (n == 0) {
                 if (head.chunked) {
@@ -535,7 +537,7 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
                 int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
                 co_await conn.write(sz, static_cast<size_t>(m));
             }
-            co_await conn.write(reinterpret_cast<const char*>(buf.data()), n);
+            co_await conn.write(reinterpret_cast<const char*>(chunk.data()), n);
             if (head.chunked) co_await conn.write("\r\n", 2);
             written += n;
         } catch (...) {

@@ -72,7 +72,17 @@ IoAwaiter<std::decay_t<Init>> io_op(Init&& init) {
 // strand before starting the next socket operation
 struct ResumeOn {
     asio::any_io_executor ex;
-    bool await_ready() const noexcept { return false; }
+    // Fast path (roadmap §4.3 ⑥): a coroutine that is already running on this
+    // connection's strand (the previous await completed inline, or the
+    // handler resumed on the strand) continues without an asio::post round
+    // trip. The connection executors are all strands over the io_context
+    // executor (make_strand at accept), so the type probe matches; anything
+    // else takes the safe post
+    bool await_ready() const noexcept {
+        using Strand = asio::strand<asio::io_context::executor_type>;
+        if (auto* st = ex.target<Strand>()) return st->running_in_this_thread();
+        return false;
+    }
     void await_suspend(std::coroutine_handle<> h) {
         asio::post(ex, [h] { h.resume(); });
     }
@@ -372,6 +382,12 @@ private:
     template <class Stream>
     Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream) {
         beast::flat_buffer buffer;  // Kept across keep-alive requests (the parser may over-read)
+        // Socket reads are sized by beast::read_size = max(512, capacity - size):
+        // an unreserved flat_buffer grows to 512 bytes on the first read and then
+        // stays there, so a 4MiB request body was pulled in ~8000 recv calls
+        // (measured 40ms vs 6ms on builtin, roadmap §4.3 baseline). Reserving one
+        // io chunk makes every body read a full-size recv
+        buffer.reserve(cfg_.io_chunk_size);
         bool keep = true;
         int served = 0;  // keep-alive budget (http.max_requests_per_connection)
 
@@ -581,17 +597,20 @@ private:
             if (ec) co_return false;
         }
 
-        std::vector<std::byte> buf(cfg_.io_chunk_size);
+        // One backend read in flight while the previous chunk is on the wire
+        // (roadmap §4.3 ①/②: pooled buffers, no per-response zeroed vector)
+        driver::StreamPrefetch pf(*resp.stream_body, cfg_.io_chunk_size);
         uint64_t written = 0;
         for (;;) {
-            size_t n = 0;
+            std::span<const std::byte> chunk;
             try {
-                n = co_await resp.stream_body->read(std::span(buf));
+                chunk = co_await pf.next();
             } catch (const std::exception& e) {
                 LOG_ERROR("stream body read failed mid-response: {}", e.what());
                 co_return false;  // Response head already sent; can only disconnect (contract 3: discard the result)
             }
             co_await ResumeOn{stream.get_executor()};
+            size_t n = chunk.size();
             // Byte accounting for fixed-length responses (consistent with the
             // other three drivers): writing too much breaks message framing;
             // writing too little must not stay keep-alive — the client would
@@ -611,7 +630,7 @@ private:
                 res.body().data = nullptr;
                 res.body().more = false;
             } else {
-                res.body().data = buf.data();
+                res.body().data = const_cast<std::byte*>(chunk.data());  // buffer_body wants void*; beast only reads
                 res.body().size = n;
                 res.body().more = true;
             }

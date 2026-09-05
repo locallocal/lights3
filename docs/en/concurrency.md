@@ -112,7 +112,38 @@ comments before touching the code):
 Production consumer: the tiered backend's TierScanner sinking a batch of cold
 objects concurrently.
 
-### 2.3 with_timeout
+### 2.3 Started
+
+```cpp
+template <class T> class Started {
+    explicit Started(Task<T> t);   // starts immediately
+    void start(Task<T> t);         // reuse the object (the previous child must be collected)
+    bool pending() const;          // a child is in flight or finished-but-uncollected
+    T wait();                      // thread-blocking collect (httplib's sync content provider)
+    auto operator co_await();      // coroutine collect (beast / seastar / builtin's pumping loop)
+    ~Started();                    // blocks until the child completes if uncollected
+};
+```
+
+The "start now, collect later" single-child primitive behind the drivers'
+double-buffered response pipeline ([http-adapter.md §2.4](http-adapter.md) ①):
+issue the backend read of the next chunk, go write the current chunk to the
+socket, then collect. Same self-destroying runner coroutine as `when_all` plus
+a two-vote latch (one vote for the child, one for `co_await`; `wait()` does not
+vote, it just waits on the condition variable). The child completes on whatever
+thread its own suspension points chose; `co_await` resumes the collector on
+that **completing thread** (inline when already finished), after which the
+driver switches back to its connection context (strand / shard / pump) as usual.
+
+- **The completing side's last touch is under the lock**: `complete()` sets the
+  flag, casts its vote and copies the continuation out while holding the mutex,
+  then unlocks and resumes -- the collector may destroy the object the moment it
+  wakes (`wait()` returns or it is resumed);
+- **The destructor waits**: the child writes into the owner's buffers
+  (`StreamPrefetch`'s two chunks); a driver abandoning a response pays one read
+  latency instead of freeing memory under a running read.
+
+### 2.4 with_timeout
 
 ```cpp
 Task<T> with_timeout(Task<T> task, std::chrono::milliseconds timeout, CancelSource src);

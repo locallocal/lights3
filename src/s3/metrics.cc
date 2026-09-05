@@ -46,6 +46,14 @@ void Metrics::add_bytes_out(std::string_view bucket, uint64_t n) {
     bucket_slot_locked(bucket).bytes_out += n;
 }
 
+void Metrics::add_bucket_bytes(std::string_view bucket, uint64_t in, uint64_t out) {
+    if (bucket.empty() || (in == 0 && out == 0)) return;
+    std::lock_guard lk(bucket_m_);
+    auto& slot = bucket_slot_locked(bucket);
+    slot.bytes_in += in;
+    slot.bytes_out += out;
+}
+
 void Metrics::record_bucket_request(std::string_view bucket) {
     if (bucket.empty()) return;
     std::lock_guard lk(bucket_m_);

@@ -69,6 +69,8 @@ public:
                                      const ListPartsOptions& opt) override;
     Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
                                                    const ListUploadsOptions& opt) override;
+    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket,
+                                                     std::string_view key) override;
     // Not forwarded: the application closes the raw backends it built (the router
     // holds the decorators, main.cc's admin tasks the raw instances)
     Task<void> close() override { co_return; }

@@ -15,6 +15,8 @@
 #include "tools/s3adm_quota.h"
 #include "tools/s3adm_reload.h"
 #include "tools/s3adm_tenant.h"
+#include "tools/s3adm_mpu.h"
+#include "tools/s3adm_object.h"
 #include "tools/s3adm_usage.h"
 #include "tools/s3adm_website.h"
 
@@ -33,7 +35,8 @@ int main(int argc, char* argv[]) {
         "lives under the `cred` command group, benchmarking under `bench`, bucket "
         "website configuration under `website`, online object verification under "
         "`fsck`, bucket quotas under `quota`, tenants under `tenant`, usage "
-        "counters under `usage`, configuration hot reload under `reload`; run "
+        "counters under `usage`, configuration hot reload under `reload`, object layout "
+        "introspection under `object`, multipart cleanup under `mpu`; run "
         "`s3adm help <command>` for details.",
         "lights3 ops CLI.",
         // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a usage error
@@ -49,6 +52,8 @@ int main(int argc, char* argv[]) {
     root->add_subcommand(s3adm::make_tenant());
     root->add_subcommand(s3adm::make_usage());
     root->add_subcommand(s3adm::make_reload());
+    root->add_subcommand(s3adm::make_object());
+    root->add_subcommand(s3adm::make_mpu());
     root->execute(argc, argv);
     return s3adm::g_exit;
 }

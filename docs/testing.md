@@ -103,7 +103,7 @@ LIGHTS3_FAULTS="localfs.write:1:EIO,duostore.pack.fdatasync:0:ENOSPC" lights3 --
 
 - `scripts/bench_gate.sh <lights3> <s3adm> [--duration N] [--min-put-ops N]
   [--min-get-ops N] [--max-p99-ms N]`：memory 后端网关 + `s3adm bench put/get`，
-  解析汇总行断言吞吐下限（默认 300 ops/s）与 p99 上限（默认 500 ms）；环境变量
+  解析 `--output=json` 的汇总对象断言吞吐下限（默认 300 ops/s）与 p99 上限（默认 500 ms）；环境变量
   `LIGHTS3_BENCH_*` 同名覆盖。ctest `bench_gate` 用 3 秒。
 - `scripts/soak.sh <lights3> <s3adm> [--seconds N] [--backend localfs|duostore|memory]
   [--max-rss-growth PCT] [--max-fd-growth N]`：轮转 put/get/stat/list/删池 五种

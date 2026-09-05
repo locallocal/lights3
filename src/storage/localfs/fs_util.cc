@@ -397,6 +397,10 @@ static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier,
     }
 }
 
+bool has_meta_xattr(const fs::path& data_path) {
+    return ::getxattr(data_path.c_str(), kMetaXattr, nullptr, 0) >= 0;
+}
+
 ObjectMeta load_object_meta(const fs::path& data_path, std::string key, TierInfo* tier_out) {
     struct stat st{};
     if (::stat(data_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))

@@ -30,6 +30,8 @@
 #include <thread>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "core/util/uri.h"
 #include "s3/errors.h"
 #include "tools/s3adm_common.h"
@@ -54,6 +56,7 @@ struct BenchOpts {
     int objects = 64;
     int max_keys = 100;
     bool keep = false;
+    bool json = false;  // --output=json: no per-second table, one JSON summary on stdout
 };
 
 // "4096" / "8K" / "1M" / "2G" (binary units); capped so the shared upload buffer stays sane
@@ -300,7 +303,8 @@ void cleanup_pool(const BenchOpts& o) {
             auto r = cli.del(obj_path(o, i));
             if (r && r->status == 204) ++deleted;
         }
-        printf("cleanup: deleted %d/%d objects under %s/%s (skip with --keep)\n", deleted,
+        fprintf(o.json ? stderr : stdout,
+                "cleanup: deleted %d/%d objects under %s/%s (skip with --keep)\n", deleted,
                o.objects, o.bucket.c_str(), o.prefix.c_str());
     } catch (const std::exception& e) {
         fprintf(stderr, "s3adm: bench: cleanup failed: %s\n", e.what());
@@ -337,14 +341,15 @@ int run_bench(Mode mode, const BenchOpts& o) {
         SignedClient setup(o.conn);
         if (!ensure_bucket(setup, o)) return 1;
         if (needs_prepare) {
-            printf("preparing %d objects of %s under %s/%s ...\n", o.objects,
+            fprintf(o.json ? stderr : stdout, "preparing %d objects of %s under %s/%s ...\n", o.objects,
                    human_size(o.size).c_str(), o.bucket.c_str(), o.prefix.c_str());
             fflush(stdout);
             if (!prepare_pool(o, body)) return 1;
         }
     }
 
-    printf("bench %s: %d workers, %d s%s\n", mode_name(mode), o.concurrency, o.duration_sec,
+    fprintf(o.json ? stderr : stdout, "bench %s: %d workers, %d s%s\n", mode_name(mode),
+            o.concurrency, o.duration_sec,
            mode == Mode::Put || mode == Mode::Get
                ? (", " + human_size(o.size) + " objects, " + std::to_string(o.objects) + " keys")
                      .c_str()
@@ -358,16 +363,46 @@ int run_bench(Mode mode, const BenchOpts& o) {
     for (int i = 0; i < o.concurrency; ++i)
         workers.emplace_back(worker, mode, std::cref(o), i, std::cref(body), std::ref(stop),
                              std::ref(st));
-    std::thread rep(reporter, std::ref(st), std::ref(done));
+    std::thread rep;
+    if (!o.json) rep = std::thread(reporter, std::ref(st), std::ref(done));
 
     std::this_thread::sleep_for(std::chrono::seconds(o.duration_sec));
     stop.store(true);
     for (auto& t : workers) t.join();
     done.store(true);
-    rep.join();
+    if (rep.joinable()) rep.join();
     double wall = std::chrono::duration<double>(Clock::now() - t_start).count();
 
     uint64_t ops = st.ops.load(), errs = st.errs.load(), bytes = st.bytes.load();
+    if (o.json) {
+        // Machine-readable summary (roadmap §6.2): the baseline-comparison input of
+        // scripts/bench_gate.sh; the same numbers the text summary prints
+        nlohmann::json j;
+        j["mode"] = mode_name(mode);
+        j["wall_s"] = wall;
+        j["workers"] = o.concurrency;
+        if (has_pool) {
+            j["keys"] = o.objects;
+            j["size"] = o.size;
+        }
+        j["ops"] = ops;
+        j["errors"] = errs;
+        j["ops_per_s"] = ops / wall;
+        j["mib_per_s"] = bytes / (1024.0 * 1024.0) / wall;
+        if (ops) {
+            nlohmann::json lat;
+            lat["avg"] = double(st.lat_sum_us.load()) / double(ops) / 1000.0;
+            lat["p50"] = hist_pct(st.hist, ops, 0.50) / 1000.0;
+            lat["p90"] = hist_pct(st.hist, ops, 0.90) / 1000.0;
+            lat["p99"] = hist_pct(st.hist, ops, 0.99) / 1000.0;
+            lat["max"] = st.total_max_us.load() / 1000.0;
+            j["latency_ms"] = lat;
+        }
+        printf("%s\n", j.dump(2).c_str());
+        fflush(stdout);
+        if (has_pool && !o.keep) cleanup_pool(o);
+        return errs ? 1 : 0;
+    }
     printf("---- bench %s summary ----\n", mode_name(mode));
     printf("wall %.2f s   workers %d%s\n", wall, o.concurrency,
            has_pool ? ("   keys " + std::to_string(o.objects)).c_str() : "");
@@ -398,6 +433,9 @@ void add_bench_flags(const std::shared_ptr<ccmd::c_command>& cmd, const char* de
     }
     cmd->varp<int>("concurrency", "j", 4, "worker threads (one connection each).");
     cmd->varp<int>("duration-sec", "d", 10, "measured run time in seconds.");
+    cmd->varp<std::string>("output", "o", "text",
+                           "text (per-second table + summary) | json (one summary object, "
+                           "for baseline comparison).");
     s3adm::add_conn_flags(cmd);
 }
 
@@ -411,6 +449,15 @@ bool read_bench_opts(const std::shared_ptr<ccmd::c_command>& c, bool with_pool, 
     if (!s3adm::read_conn_opts(c, o.conn)) return false;
     o.concurrency = c->var<int>("concurrency");
     o.duration_sec = c->var<int>("duration-sec");
+    {
+        auto output = c->var<std::string>("output");
+        if (output != "text" && output != "json") {
+            fprintf(stderr, "s3adm: --output must be text|json\n");
+            g_exit = 2;
+            return false;
+        }
+        o.json = output == "json";
+    }
     if (o.concurrency < 1 || o.concurrency > 256) {
         fprintf(stderr, "s3adm: --concurrency must be in [1,256]\n");
         g_exit = 2;

@@ -20,6 +20,9 @@ using BackendFactory = std::function<std::shared_ptr<IStorageBackend>(
 class StorageRegistry {
 public:
     static void register_backend(const std::string& type, BackendFactory factory);
+    // Registered type names, sorted (`lights3 --check-config` validates backends[].type
+    // against it without opening anything, roadmap §6.2)
+    static std::vector<std::string> registered_types();
 
     // Construct all backends per config; returns name → instance. metrics may be null
     // (unit-test assembly path skips the registry)

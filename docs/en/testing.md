@@ -119,7 +119,7 @@ only as client-c's nested submodule and is not a repository-wide dependency.
 
 - `scripts/bench_gate.sh <lights3> <s3adm> [--duration N] [--min-put-ops N]
   [--min-get-ops N] [--max-p99-ms N]`: a memory-backend gateway + `s3adm bench
-  put/get`; the summary line is parsed and a throughput floor (default 300
+  put/get --output=json`; the JSON summary is parsed and a throughput floor (default 300
   ops/s) and a p99 ceiling (default 500 ms) asserted; `LIGHTS3_BENCH_*`
   variables override. ctest `bench_gate` uses 3 seconds.
 - `scripts/soak.sh <lights3> <s3adm> [--seconds N] [--backend

@@ -18,6 +18,8 @@
 // that shape by normalize_argv below, so both keep working.
 #include <ccmd.h>
 
+#include <algorithm>
+
 #include <charconv>
 #include <cstdio>
 #include <memory>
@@ -27,6 +29,8 @@
 #include <vector>
 
 #include "app/app.h"
+#include "http/server.h"
+#include "storage/registry.h"
 #include "core/log.h"
 #include "storage/localfs/localfs_backend.h"
 #include "core/util/time.h"
@@ -82,7 +86,62 @@ std::vector<std::string> normalize_argv(int argc, char** argv) {
 // through ~Application, which closes every backend already built: duostore's
 // active pack gets sealed and rados flushed even on the error path (see
 // Application::shutdown)
+// `lights3 --check-config` (roadmap §6.2): parse + validate the configuration and
+// print what it resolves to, without opening a backend or binding a port. Exit 0 =
+// the server would start with this file (modulo runtime failures such as an
+// unreachable data directory), 1 = the file is rejected, with the same message the
+// server would print as `fatal:`
+int check_config(const std::string& path) {
+    using namespace lights3;
+    Config cfg;
+    try {
+        cfg = Config::load(path);
+    } catch (const std::exception& e) {
+        fprintf(stderr, "config error: %s\n", e.what());
+        return 1;
+    }
+    int problems = 0;
+    auto drivers = http::HttpServerFactory::drivers();
+    if (std::find(drivers.begin(), drivers.end(), cfg.http.driver) == drivers.end()) {
+        fprintf(stderr, "config error: http.driver '%s' is not compiled into this binary\n",
+                cfg.http.driver.c_str());
+        ++problems;
+    }
+    auto types = storage::StorageRegistry::registered_types();
+    for (auto& b : cfg.backends)
+        if (std::find(types.begin(), types.end(), b.type) == types.end()) {
+            fprintf(stderr, "config error: backends[%s].type '%s' is not compiled into this binary\n",
+                    b.name.c_str(), b.type.c_str());
+            ++problems;
+        }
+    printf("config %s: %s\n", path.c_str(), problems ? "REJECTED" : "ok");
+    printf("  http      driver=%s bind=%s:%u tls=%s metrics_access=%s\n", cfg.http.driver.c_str(),
+           cfg.http.bind.c_str(), unsigned(cfg.http.port), cfg.http.tls_cert.empty() ? "off" : "on",
+           cfg.http.metrics_access.c_str());
+    printf("  runtime   io_threads=%d max_inflight_requests=%d\n", cfg.runtime.io_threads,
+           cfg.runtime.max_inflight_requests);
+    printf("  auth      static_credentials=%zu credentials_file=%s region=%s\n",
+           cfg.auth.credentials.size(),
+           cfg.auth.credentials_file.empty() ? "-" : cfg.auth.credentials_file.c_str(),
+           cfg.auth.region.c_str());
+    printf("  backends  %zu\n", cfg.backends.size());
+    for (auto& b : cfg.backends) printf("    - %s: type=%s\n", b.name.c_str(), b.type.c_str());
+    printf("  buckets   default_backend=%s rules=%zu\n", cfg.buckets.default_backend.c_str(),
+           cfg.buckets.rules.size());
+    printf("  website   static_entries=%zu\n", cfg.website.buckets.size());
+    printf("  log       level=%s format=%s sink=%s async=%s slow_request_threshold=%dms\n",
+           cfg.log.level.c_str(), cfg.log.format.c_str(),
+           cfg.log.file.empty() ? "stderr" : cfg.log.file.c_str(), cfg.log.async ? "on" : "off",
+           cfg.log.slow_request_threshold_ms);
+    printf("  audit     %s\n", cfg.audit.path.empty() ? "off" : cfg.audit.path.c_str());
+    return problems ? 1 : 0;
+}
+
 void run_server(const Cmd& c) {
+    if (c->var<bool>("check-config")) {
+        g_exit = check_config(c->var<std::string>("config"));
+        return;
+    }
     lights3::Application app(c->var<std::string>("config"));
     app.open_storage();
     app.start_server();
@@ -677,6 +736,9 @@ int main(int argc, char** argv) {
         "runs until SIGINT/SIGTERM; run `lights3 help <command>` for the admin commands.",
         "S3-compatible object storage server", run_server);
     add_config_flag(root);
+    root->var<bool>("check-config", false,
+                    "Parse and validate the config, print what it resolves to, exit 0/1 "
+                    "without opening backends or binding a port (roadmap §6.2)");
 #ifdef LIGHTS3_DUOSTORE
     root->add_subcommand(make_duostore());
 #endif

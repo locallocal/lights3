@@ -1,5 +1,7 @@
 #include "storage/registry.h"
 
+#include <algorithm>
+
 #include <charconv>
 #include <set>
 #include <stdexcept>
@@ -216,6 +218,15 @@ void ensure_registered() {
 
 void StorageRegistry::register_backend(const std::string& type, BackendFactory factory) {
     registry()[type] = std::move(factory);
+}
+
+std::vector<std::string> StorageRegistry::registered_types() {
+    ensure_registered();
+    std::vector<std::string> out;
+    for (auto& [type, _] : registry()) out.push_back(type);
+    out.push_back("tiered");  // composite, assembled by build() itself rather than a factory
+    std::sort(out.begin(), out.end());
+    return out;
 }
 
 std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(

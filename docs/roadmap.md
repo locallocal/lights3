@@ -441,16 +441,16 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 | ~~coverage / ubsan~~ | `build.sh --ubsan` / `--coverage`；`scripts/coverage.sh`（gcovr/lcov/原始 gcov 三级回退） | 中 | 极低 |
 | ~~一键矩阵脚本~~ | `scripts/check-all.sh`：存在的构建目录逐个增量构建 + `ctest -LE`，sanitizer 目录带 halt_on_error，汇总表 | 中 | 低 |
 
-### 6.2 s3adm / 运维命令扩展
+### 6.2 s3adm / 运维命令扩展 **已完成（2026-09-05，余下四项）**
 
 | 条目 | 说明 | 价值 | 难度 |
 | --- | --- | --- | --- |
 | ~~`s3adm fsck/scrub`~~ **已完成（2026-08-28）** | 见 §3.1（`s3adm fsck` + `lights3 fsck`） | — | — |
 | ~~`lights3 duostore gc/scan`、`tier scan/reconcile`~~ **已完成（2026-08-28）** | 见 §3.2（含 `tier gc`） | — | — |
-| `s3adm object inspect` | 打印对象内部布局（pack/chunk/offset/CRC/tier 归属）；现排障只能读日志或 hexdump | 中-高 | 低-中 |
-| `s3adm mpu list/abort` | 清理僵尸 MPU；服务端 API 已有，纯 CLI 包装 | 中 | 低 |
-| `lights3 --check-config` | 校验逻辑已完整（test_config.cc 345 行），只差不 open backend 的 dry-run 出口 | 中 | 极低 |
-| `s3adm bench --output=json` | 现只有人读表格，无法做基线比对（§4.3 性能基线的前置） | 中 | 低 |
+| ~~`s3adm object inspect`~~ **已完成（2026-09-05）** | `IStorageBackend::inspect_object` + `GET /-/admin/objects/<bucket>/<key>`（root）：localfs/xlocalfs 路径/inode/元数据来源/tier，duostore 元数据版本与 chunk/pack/rados extents（id/offset/length/crc32c），tiered 分层视图 + 本地引擎布局，memory/cloudproxy 报 null；[cli.md §3.10](cli.md) | 中-高 | 低-中 |
+| ~~`s3adm mpu list/abort`~~ **已完成（2026-09-05）** | 标准 API 包装，翻页、`--older-than`/`--prefix` 选集、`abort --all`；[cli.md §3.11](cli.md) | 中 | 低 |
+| ~~`lights3 --check-config`~~ **已完成（2026-09-05）** | dry-run：`Config::load` 校验 + 驱动/后端类型是否编入 + 解析摘要，不开后端不绑端口；[cli.md §2.1](cli.md) | 中 | 极低 |
+| ~~`s3adm bench --output=json`~~ **已完成（2026-09-05）** | 单个 JSON 汇总对象，`scripts/bench_gate.sh` 已改用它做阈值比对 | 中 | 低 |
 | ~~`s3adm usage`~~ **已完成（2026-09-04）** | 见 §3.9①（`s3adm usage [bucket] [--rescan]`，另有 `quota`/`tenant` 命令组） | — | — |
 
 ### 6.3 构建与分发

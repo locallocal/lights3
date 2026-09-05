@@ -673,6 +673,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // Tenancy + usage admin plane (docs/multi-tenancy.md §6), same JSON conventions
             api_name = "AdminTenancy";
             resp = co_await admin_tenancy(req, access_key, ctx);
+        } else if (internal && req.path.rfind("/-/admin/objects/", 0) == 0) {
+            // Object layout introspection (roadmap §6.2, `s3adm object inspect`)
+            api_name = "AdminObjectInspect";
+            resp = co_await admin_object_inspect(req, access_key, ctx);
         } else if (!addr.vhost && req.path == "/" && req.method == "POST") {
             // STS AssumeRole (roadmap §2.6): SDKs pointed at this gateway as their STS
             // endpoint POST a form body to the service root. Path-style only — under

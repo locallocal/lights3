@@ -64,6 +64,12 @@ struct VerifiedIdentity {
 
 class SigV4Authenticator {
 public:
+    // The access key a request claims (Authorization header or presigned query),
+    // without verifying anything; nullopt when neither carries a parsable Credential.
+    // Lets dispatch load a session minted on another instance before verify's
+    // synchronous lookup (backlog-sequence ④)
+    static std::optional<std::string> peek_access_key(const http::HttpRequest& req);
+
     static SigV4Authenticator build(const AuthConfig& cfg);
 
     // require_auth_ is atomic (not implicitly copyable/movable): moving by value during assembly needs explicit definitions
@@ -82,6 +88,7 @@ public:
           service_(o.service_) {}
 
     void set_provider(std::shared_ptr<const ICredentialProvider> p) {
+
         provider_ = std::move(p);
         if (provider_ && provider_->has_credentials()) require_auth_.store(true);
     }

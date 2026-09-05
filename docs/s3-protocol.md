@@ -13,7 +13,7 @@
 | CORS | GetBucketCors / PutBucketCors / DeleteBucketCors + OPTIONS 预检 | root 专属（与 ?website 同两级模型）；规则持久化 `.sys/cors/<bucket>`；预检在验签**之前**分派（浏览器不给 OPTIONS 签名）；实际请求（成功与错误响应）注入 Allow-Origin/Expose-Headers/Vary |
 | Lifecycle | GetBucketLifecycle / PutBucketLifecycle / DeleteBucketLifecycle | root 专属；最小子集：Expiration.Days + AbortIncompleteMultipartUpload.DaysAfterInitiation（prefix 过滤）；`lifecycle.scan_interval`（默认 1h，0=关）周期执行；Transition/按 tag 过滤/Date 形态 → 501 |
 | Quota / 租户 | GetBucketQuota / PutBucketQuota / DeleteBucketQuota（`?quota`，本实现自定义 XML） | 桶级 `MaxBytes`/`MaxObjects`（PUT/DELETE root 专属）；用量计数器由网关维护并周期全量校准；超限写回 `QuotaExceeded`(403)，MPU 分片计入用量、Complete 仅在完成后仍放不下时拒绝且上传保留；租户凭证（`tenant`/`role` 字段）只见本租户所有的桶，ListBuckets `Owner` 为租户；管理面 `/-/admin/tenants`、`/-/admin/usage`；审计日志 JSON 行。详见 [multi-tenancy.md](multi-tenancy.md) |
-| STS | AssumeRole | `POST /`（path-style 部署）form 表单、SigV4 service scope `sts`；会话凭证（L3SA 前缀 AK/SK/token + TTL 900–43200s）继承**调用者**的 policy（无角色目录，永不越权）；内存态单实例、session 不能再 AssumeRole |
+| STS | AssumeRole | `POST /`（path-style 部署）form 表单、SigV4 service scope `sts`；会话凭证（L3SA 前缀 AK/SK/token + TTL 900–43200s）继承**调用者**的 policy（无角色目录，永不越权）；写穿 `.sys/sts/` 跨实例共享（§3.5）、session 不能再 AssumeRole |
 | List | ListObjectsV2（含 V1 兼容） | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner；V1 只认 marker，V2 只认 continuation-token 与 start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy 支持 x-amz-copy-source-if-* 与 x-amz-copy-source-range（bytes=first-last，两端必填），源/目标可在不同后端；ListParts/ListMultipartUploads **真分页**（marker + max-*，据实回 IsTruncated；两者均支持 encoding-type，uploads 的 delimiter 任意）；非末片最小 5MiB（`http.min_part_size`，0=关），乱序回 `InvalidPartOrder`；分片校验和随 part 记录持久化，complete 由**已验证**的分片值算复合（`-N`）校验和（COMPOSITE；CRC64NVME/显式 FULL_OBJECT → 501），complete XML 的 Checksum* 声明与存量对照（不符 BadDigest） |
 
@@ -109,8 +109,22 @@ STS 会话凭证（roadmap §2.6）：`AssumeRole` 铸造 `L3SA` 前缀的会话
 AK/SK/token（TTL 900–43200s），policy 继承调用者快照；数据面请求需带
 `x-amz-security-token`（header 或 presigned query）——token 不符
 `InvalidToken`、过期 `ExpiredToken`（重试信号）、永久 AK 携带 token 同样
-拒绝。会话表为内存态（单实例语义，会话本就短命），session 不入 `.sys`、
-不能是 root、不能再 AssumeRole。
+拒绝。session 不能是 root、不能再 AssumeRole。
+
+**多实例共享**（backlog-sequence ④）：会话记录写穿到默认后端的
+`.sys/sts/<session-ak>`（SK 与 token 与凭证 SK 同规则——有主密钥则 AES-256-GCM
+封存 `version: 2`，否则明文 `version: 1`；另含 `expires_unix`、`created_unix`、
+`parent`、继承的 `policy`/`tenant`），本实例内存表只是缓存：
+
+- 数据面请求带 `L3SA` 前缀 AK 而本实例不认识时，分派在验签前
+  `ensure_session_loaded`——读一次 `.sys/sts/<ak>` 入表（`SigV4Authenticator::peek_access_key`
+  只取 Credential 里的 AK，不做任何校验）；读不到的 AK 进 60s 负缓存（有界 4096 条），
+  枚举随机 AK 打不穿后端；
+- 启动加载与 `auth.sync_interval` 的周期 sync 顺带拉取别处铸造的会话，并把已过期的
+  对象删掉（谁先看到谁删，幂等）；内存里过期条目由 AssumeRole 与 sync 机会性清扫；
+- 写穿先于生效：对端在 put 落地前看到该 AK 会答 `InvalidAccessKeyId`，SDK 重试即可；
+- 没有主密钥的实例读不了 `version: 2` 的会话对象（记 WARN，视为未知）——多实例部署
+  的 `LIGHTS3_MASTER_KEY` 必须一致，与凭证对象一样。
 
 
 

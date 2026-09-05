@@ -12,6 +12,8 @@
 #include "s3/auth/credential_store.h"
 #include "s3/service.h"
 #include "storage/memory/memory_backend.h"
+#include <thread>
+
 #include "unit/mini_test.h"
 
 using namespace lights3;
@@ -41,8 +43,10 @@ struct SvcEnv {
     std::unique_ptr<S3Service> svc;
     SigV4Authenticator signer;  // test-side signer (same region/service as the server)
 
-    explicit SvcEnv(AuthConfig cfg = root_cfg())
-        : backend(std::make_shared<storage::MemoryBackend>()),
+    explicit SvcEnv(AuthConfig cfg = root_cfg()) : SvcEnv(std::make_shared<storage::MemoryBackend>(), cfg) {}
+    // A second "instance" over the same backend (multi-instance sharing of .sys)
+    SvcEnv(std::shared_ptr<storage::MemoryBackend> shared, AuthConfig cfg = root_cfg())
+        : backend(std::move(shared)),
           store(load_store(backend, cfg)),
           signer(SigV4Authenticator::build(cfg)) {
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends;
@@ -864,6 +868,74 @@ TEST(sts_assume_role_flow) {
     CHECK(other.small_body.find("<Code>NotImplemented</Code>") != std::string::npos);
     // Out-of-range duration
     CHECK_EQ(sts_call(env, root, "Action=AssumeRole&DurationSeconds=60").status, 400);
+}
+
+// Sessions are shared across instances through .sys/sts/<ak> (backlog-sequence ④):
+// instance B verifies a session minted on A the first time it sees the AK (read-through
+// before verify), the periodic sync pulls sessions ahead of time, and expiry is reaped
+// by whichever instance notices, after which both reject
+TEST(sts_session_shared_across_instances) {
+    SvcEnv a;
+    SvcEnv b(a.backend);
+    Credential root{kRootAk, kRootSk};
+    CHECK_EQ(a.call("PUT", "/shared", root).status, 200);
+
+    auto resp = sts_call(a, root, "Action=AssumeRole&DurationSeconds=900");
+    CHECK_EQ(resp.status, 200);
+    Credential sess{xtext(resp.small_body, "AccessKeyId"), xtext(resp.small_body, "SecretAccessKey")};
+    std::string token = xtext(resp.small_body, "SessionToken");
+    std::vector<std::pair<std::string, std::string>> tok{{"x-amz-security-token", token}};
+    CHECK_EQ(a.store->session_count(), size_t{1});
+    CHECK_EQ(b.store->session_count(), size_t{0});
+    // The record is on the shared backend
+    CHECK(sync_wait(a.backend->head_object(".sys", "sts/" + sess.access_key)).size > 0);
+
+    // B: unknown session AK -> read-through -> verify passes; a second request hits memory
+    CHECK_EQ(b.call("PUT", "/shared/from-b", sess, {}, "v", tok).status, 200);
+    CHECK_EQ(b.store->session_count(), size_t{1});
+    CHECK_EQ(b.call("GET", "/shared/from-b", sess, {}, "", tok).status, 200);
+    // Wrong token on B is InvalidToken, not "unknown key": the session is really there
+    std::vector<std::pair<std::string, std::string>> bad{{"x-amz-security-token", "nope"}};
+    auto wrong = b.call("GET", "/shared/from-b", sess, {}, "", bad);
+    CHECK_EQ(wrong.status, 400);
+    CHECK(wrong.small_body.find("InvalidToken") != std::string::npos);
+    // A random L3SA key: one backend miss, then the negative cache answers
+    Credential ghost{"L3SAGHOSTGHOSTGHOST1", "x"};
+    CHECK_EQ(b.call("GET", "/shared/from-b", ghost, {}, "", tok).status, 403);
+    CHECK_EQ(b.store->session_count(), size_t{1});
+
+    // Sync pulls a session minted elsewhere before any request carries it
+    auto resp2 = sts_call(a, root, "Action=AssumeRole&DurationSeconds=900");
+    std::string ak2 = xtext(resp2.small_body, "AccessKeyId");
+    SvcEnv c(a.backend);
+    CHECK_EQ(c.store->session_count(), size_t{2});  // startup load sees both
+    SvcEnv d(a.backend);
+    sync_wait(a.store->mint_session(kRootAk, 900));   // a third one after d loaded
+    CHECK_EQ(d.store->session_count(), size_t{2});
+    sync_wait(d.store->sync_now());
+    CHECK_EQ(d.store->session_count(), size_t{3});
+    (void)ak2;
+
+    // Expiry: a 1-second session minted on A is reaped by B's sync, then both reject
+    auto shortlived = sync_wait(a.store->mint_session(kRootAk, 1));
+    Credential se{shortlived.access_key, shortlived.secret_key};
+    std::vector<std::pair<std::string, std::string>> stok{{"x-amz-security-token", shortlived.token}};
+    CHECK_EQ(b.call("GET", "/shared/from-b", se, {}, "", stok).status, 200);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1300));
+    sync_wait(b.store->sync_now());
+    bool gone = false;
+    try {
+        sync_wait(a.backend->head_object(".sys", "sts/" + shortlived.access_key));
+    } catch (const S3Error& e) {
+        gone = e.code == S3ErrorCode::NoSuchKey;
+    }
+    CHECK(gone);
+    // B dropped it (reaped); A still holds the expired entry until its own sweep --
+    // either way the request is refused (ExpiredToken on A, unknown key on B)
+    CHECK(b.call("GET", "/shared/from-b", se, {}, "", stok).status != 200);
+    CHECK(a.call("GET", "/shared/from-b", se, {}, "", stok).status != 200);
+    sync_wait(a.store->sync_now());
+    CHECK(a.call("GET", "/shared/from-b", se, {}, "", stok).status != 200);
 }
 
 TEST(sts_session_policy_and_expiry) {

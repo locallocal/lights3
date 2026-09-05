@@ -15,7 +15,7 @@ The first phase covers the subset needed for day-to-day operations of mainstream
 | CORS | GetBucketCors / PutBucketCors / DeleteBucketCors + OPTIONS preflight | Root only (same two-tier model as ?website); rules persist to `.sys/cors/<bucket>`; preflight is dispatched **before** signature verification (browsers never sign OPTIONS); actual requests (success and error responses alike) get Allow-Origin/Expose-Headers/Vary injected |
 | Lifecycle | GetBucketLifecycle / PutBucketLifecycle / DeleteBucketLifecycle | Root only; minimal subset: Expiration.Days + AbortIncompleteMultipartUpload.DaysAfterInitiation (prefix filters); enforced periodically (`lifecycle.scan_interval`, default 1h, 0 = off); Transitions/tag filters/Date forms → 501 |
 | Quota / tenancy | GetBucketQuota / PutBucketQuota / DeleteBucketQuota (`?quota`, this implementation's own XML) | Bucket-level `MaxBytes`/`MaxObjects` (PUT/DELETE root only); usage counters are gateway-maintained and periodically recounted; writes over the limit get `QuotaExceeded` (403), multipart parts count toward usage and Complete is refused only when the finished object still would not fit (the upload is kept); tenant credentials (`tenant`/`role` fields) see only their tenant's buckets and ListBuckets reports the tenant as `Owner`; admin plane `/-/admin/tenants`, `/-/admin/usage`; JSON-lines audit log. See [multi-tenancy.md](multi-tenancy.md) |
-| STS | AssumeRole | `POST /` (path-style deployments) with a form body, SigV4 service scope `sts`; session credentials (L3SA-prefixed AK/SK/token, TTL 900–43200s) inherit the **caller's** policy (no role catalog — a session can never exceed the identity that minted it); in-memory single-instance, sessions cannot assume again |
+| STS | AssumeRole | `POST /` (path-style deployments) with a form body, SigV4 service scope `sts`; session credentials (L3SA-prefixed AK/SK/token, TTL 900–43200s) inherit the **caller's** policy (no role catalog — a session can never exceed the identity that minted it); written through to `.sys/sts/` and shared across instances (§3.5), sessions cannot assume again |
 | List | ListObjectsV2 (with V1 compatibility) | prefix / delimiter / max-keys / continuation-token / start-after / fetch-owner; V1 honours only marker, V2 only continuation-token and start-after |
 | Multipart | CreateMultipartUpload / UploadPart / UploadPartCopy / CompleteMultipartUpload / AbortMultipartUpload / ListParts / ListMultipartUploads | UploadPartCopy supports x-amz-copy-source-if-* and x-amz-copy-source-range (bytes=first-last, both ends required); source/destination may be on different backends; ListParts/ListMultipartUploads are **truly paginated** (marker + max-*, honest IsTruncated; both accept encoding-type, and uploads accepts arbitrary delimiters); non-final parts must be at least 5MiB (`http.min_part_size`, 0 disables), out-of-order parts return `InvalidPartOrder`; per-part checksums persist with the part records, complete computes the composite (`-N`) checksum from **verified** stored values (COMPOSITE; CRC64NVME/explicit FULL_OBJECT → 501) and cross-checks any Checksum* claims in the XML (mismatch → BadDigest) |
 
@@ -113,7 +113,36 @@ constrains the past side; an `X-Amz-Date` more than 15min ahead of the server is
 likewise rejected (AccessDenied "Request is not valid yet"), preventing future
 timestamps from extending the validity window indefinitely.
 
-### 3.5 Credential Management
+### 3.5 Credential Management and STS Sessions
+
+STS session credentials (roadmap §2.6): `AssumeRole` mints an `L3SA`-prefixed
+session AK/SK/token (TTL 900–43200 s) inheriting the caller's policy snapshot;
+data-plane requests must carry `x-amz-security-token` (header or presigned
+query) -- a mismatch is `InvalidToken`, expiry `ExpiredToken` (retry signal), a
+token on a permanent AK is refused too. A session is never root and cannot
+assume again.
+
+**Shared across instances** (backlog-sequence ④): the record is written through
+to `.sys/sts/<session-ak>` on the default backend (SK and token follow the
+credential-SK rule -- AES-256-GCM sealed `version: 2` with a master key,
+plaintext `version: 1` without; plus `expires_unix`, `created_unix`, `parent`,
+the inherited `policy`/`tenant`); the in-memory table is only a cache:
+
+- a data-plane request carrying an `L3SA` AK this instance does not know makes
+  dispatch call `ensure_session_loaded` before verify -- one read of
+  `.sys/sts/<ak>` into the table (`SigV4Authenticator::peek_access_key` only
+  extracts the AK from Credential, verifying nothing); an AK that is not there
+  enters a 60 s negative cache (bounded, 4096 entries), so scanning random AKs
+  cannot hammer the backend;
+- startup load and the `auth.sync_interval` sync also pull sessions minted
+  elsewhere and delete expired objects (whichever instance sees one first,
+  idempotently); expired in-memory entries are swept opportunistically by
+  AssumeRole and by the sync;
+- write-through precedes visibility: a peer that meets the AK before the put
+  lands answers `InvalidAccessKeyId`, and the SDK retries;
+- an instance without the master key cannot read `version: 2` session objects
+  (WARN, treated as unknown) -- `LIGHTS3_MASTER_KEY` must match across a
+  multi-instance deployment, as for credential objects.
 
 A static AK/SK table in the config file (secrets may reference environment variables)
 is the phase-1 form; phase 2 has landed the three-source model

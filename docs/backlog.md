@@ -13,7 +13,6 @@
 
 | 条目 | 出处 | 现状与入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
-| STS 会话表多实例共享 | roadmap §2.6 | `AssumeRole` 会话为单实例内存态（`src/s3/auth/credential_store.*`，会话短命）；多网关共享需落到 `.sys` 或 meta 引擎，可复用凭证 `sync_interval` 的同步机制 | 中 | 中 |
 | duostore meta 增量备份 / PITR | roadmap §3.7 | `dump` 已是一致性全量快照（`IMetaStore::snapshot()`）；增量需 WAL 级导出，四个引擎各不相同 | 中 | 高 |
 | client-c 结构化错误码上游贡献 | roadmap §3.7（tikv T5） | sidecar 以 kvrpcpb 结构化冲突分类为主、字符串匹配作纵深，功能不受影响；上游 PR 可选 | 低 | 中 |
 | 跨网关元数据缓存失效协议 | roadmap §3.8 | 共享 meta（redis/tikv）以 `meta_cache_ttl` 有界陈旧为契约（[storage/duostore-core.md §7.1](storage/duostore-core.md)）；redis 可走 pub/sub，tikv 无等价物 | 中 | 高 |

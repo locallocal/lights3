@@ -550,7 +550,7 @@ TEST(tenant_sessions_inherit_tenant_but_never_admin) {
     env.admin(env.root, "POST", "/-/admin/tenants", {{"id", "t2"}}, {}, 201);
     auto a1 = env.mint(env.root, {{"tenant", "t1"}, {"role", "admin"}});
     CHECK_EQ(env.call("PUT", "/mine", a1).status, 200);
-    auto sc = env.cred_store->mint_session(a1.access_key, 900);
+    auto sc = sync_wait(env.cred_store->mint_session(a1.access_key, 900));
     Credential session{sc.access_key, sc.secret_key};
     std::vector<std::pair<std::string, std::string>> tok{{"x-amz-security-token", sc.token}};
     CHECK_EQ(env.call("PUT", "/mine/k", session, {}, "v", tok).status, 200);

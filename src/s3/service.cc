@@ -758,6 +758,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // after verification, the policy would vanish entirely in the race window where sync/remove deletes
             // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
             // in-flight requests complete strictly with verify-time semantics
+            // STS sessions minted on another instance (backlog-sequence ④): verify's
+            // lookup is synchronous, so a session AK unknown to this instance is read
+            // back from .sys before it (no-op for permanent AKs and known sessions)
+            if (!anon && cred_store_)
+                if (auto ak = SigV4Authenticator::peek_access_key(req))
+                    co_await cred_store_->ensure_session_loaded(*ak);
             auto ident = anon ? VerifiedIdentity{} : auth_.verify(req);
             access_key = ident.access_key;
             auth_done = std::chrono::steady_clock::now();

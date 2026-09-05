@@ -321,7 +321,10 @@ root 凭证 POST 生成 → 解析响应 JSON 取出新 AK/SK（sed/grep 提取�
 - 已存在的 AK 不重拉：SK 与 policy 在凭证生命周期内不可变（无 update API），
   增量只有增删两种；
 - 定时器模式与 duostore GC 相同（`BackgroundTaskGroup` + `TimerQueue`，
-  完成后重臂不重叠），tick 先 `pool_->schedule()` 挪到池线程再做 IO。
+  完成后重臂不重叠），tick 先 `pool_->schedule()` 挪到池线程再做 IO；
+- 同一轮也同步 STS 会话（`.sys/sts/`，backlog-sequence ④）：拉取别处铸造的会话、
+  删除已过期的对象；会话另有验签前的按需回源，不依赖本周期
+  （[s3-protocol.md §3.5](s3-protocol.md)）。
 
 ### 10.4 per-credential policy
 

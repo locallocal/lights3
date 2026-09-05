@@ -1043,6 +1043,44 @@ fi
 kill -TERM "$TLS_PID" 2>/dev/null
 wait "$TLS_PID" 2>/dev/null
 
+# ---------- backlog-sequence ④: STS sessions shared across gateways (docs/s3-protocol.md §3.5) ----------
+# A second gateway on the SAME localfs root (.sys included): a session minted by the
+# first is honored by the second at first sight (read-through), with the token checked
+if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
+    LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server-a.log" 2>&1 &
+    STA_PID=$!
+    LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server-b.log" 2>&1 &
+    STB_PID=$!
+    APORT=""; BPORT=""
+    for _ in $(seq 1 50); do
+        APORT=$(sed -n 's/.*http server listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-a.log" | head -1)
+        BPORT=$(sed -n 's/.*http server listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-b.log" | head -1)
+        [[ -n "$APORT" && -n "$BPORT" ]] && break
+        sleep 0.1
+    done
+    check "two gateways on one localfs root started" "0" "$([[ -n "$APORT" && -n "$BPORT" ]]; echo $?)"
+    if [[ -n "$APORT" && -n "$BPORT" ]]; then
+        AB="http://127.0.0.1:$APORT"; BB="http://127.0.0.1:$BPORT"
+        STS_XML=$(curl -sS --aws-sigv4 "aws:amz:$REGION:sts" --user "$AK:$SK" -X POST \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data "Action=AssumeRole&Version=2011-06-15&RoleArn=arn:aws:iam::0:role/e2e&RoleSessionName=e2e&DurationSeconds=900" "$AB/")
+        SAK=$(echo "$STS_XML" | sed -n 's/.*<AccessKeyId>\([^<]*\)<.*/\1/p'); SSK=$(echo "$STS_XML" | sed -n 's/.*<SecretAccessKey>\([^<]*\)<.*/\1/p'); STOK=$(echo "$STS_XML" | sed -n 's/.*<SessionToken>\([^<]*\)<.*/\1/p')
+        check "AssumeRole on gateway A minted an L3SA session" "L3SA" "${SAK:0:4}"
+        sesscurl() { curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$SAK:$SSK" -H "x-amz-security-token: $STOK" "$@"; }
+        curl -sS -o /dev/null --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" -X PUT "$AB/stsshared"
+        check "session works on gateway A" "200" "$(sesscurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'via-a' "$AB/stsshared/a")"
+        check "session honored on gateway B at first sight (read-through)" "200" "$(sesscurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'via-b' "$BB/stsshared/b")"
+        check "session read on B of an object written via A" "via-a" "$(sesscurl "$BB/stsshared/a")"
+        check "wrong token on B is InvalidToken (session known there)" "0" "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$SAK:$SSK" -H "x-amz-security-token: bogus" "$BB/stsshared/a" | grep -q InvalidToken; echo $?)"
+        check "session object persisted under .sys/sts" "0" "$(ls "$WORK/data/.sys/sts/$SAK" >/dev/null 2>&1; echo $?)"
+        check "gateway B loaded the session from .sys" "0" "$(grep -q "session $SAK loaded from .sys" "$WORK/server-b.log"; echo $?)"
+        sesscurl -o /dev/null -X DELETE "$BB/stsshared/a"; sesscurl -o /dev/null -X DELETE "$AB/stsshared/b"
+        curl -sS -o /dev/null --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" -X DELETE "$AB/stsshared"
+    fi
+    kill -TERM "$STA_PID" "$STB_PID" 2>/dev/null
+    wait "$STA_PID" 2>/dev/null; wait "$STB_PID" 2>/dev/null
+fi
+
 # ---------- backlog-sequence ②: separate admin listener (docs/http-adapter.md §2.1) ----------
 # A third instance with http.admin_port: the /-/ face moves to the admin port, the
 # data-plane port answers 404 for it, probes stay on both, s3adm points at the admin port

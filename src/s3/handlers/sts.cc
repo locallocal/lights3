@@ -95,7 +95,7 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
         if (!cred_store_)
             throw S3Error(S3ErrorCode::InvalidRequest,
                           "STS is not available on this deployment.");
-        auto sc = cred_store_->mint_session(access_key, duration);
+        auto sc = co_await cred_store_->mint_session(access_key, duration);
         LOG_INFO("sts: session {} minted for {} ({}s, role '{}')", sc.access_key, access_key,
                  duration, role_arn);
         {

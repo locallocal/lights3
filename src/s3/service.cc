@@ -651,6 +651,20 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         auto addr = resolve_address(req);
         vhost = addr.vhost;
         bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
+        // Listener split (http.admin_port, backlog-sequence ②): the liveness/readiness
+        // probes are the only /-/ paths both listeners serve; everything else under
+        // /-/ belongs to the admin listener and the data plane belongs to the other.
+        // A plain 404 (no hint beyond the message) on the wrong listener: the split
+        // exists so a data-plane exposure cannot reach the admin face at all
+        if (admin_split_.load(std::memory_order_relaxed)) {
+            bool both = internal && (req.path == "/-/healthz" || req.path == "/-/readyz");
+            if (req.admin_face ? !internal : (internal && !both))
+                throw S3Error(S3ErrorCode::NoSuchKey,
+                              req.admin_face
+                                  ? "The admin listener serves only the /-/ endpoints."
+                                  : "This endpoint is served on the admin listener "
+                                    "(http.admin_port), not on the data-plane port.");
+        }
         // Per-IP limit before anything costly (signature verification, backend
         // access); the internal read endpoints (health/metrics probes) stay exempt
         bool probe = internal && (req.path == "/-/healthz" || req.path == "/-/readyz" ||

@@ -160,6 +160,11 @@ struct HttpRequest {
     // timeout into one source, and the whole coroutine chain unwinds from it.
     // Defaults to "never cancelled"
     CancelToken cancel;
+    // Which listener accepted the request when a separate admin port is configured
+    // (http.admin_port, backlog-sequence ②): the application's admin-listener
+    // handler sets it, the service gates the /-/ face on it. Meaningless (false)
+    // without the split
+    bool admin_face = false;
 
     std::optional<std::string> query_get(std::string_view key) const {
         for (auto& [k, v] : query)

@@ -26,7 +26,9 @@ Grafana：Dashboards → Import → 上传 `lights3.json`，选 Prometheus 数�
 `backend` 变量过滤（取自 `lights3_backend_op_seconds_count` 的 backend 标签）。
 
 **`/-/metrics` 的访问面**：Prometheus 不会做 SigV4 签名，因此抓取要求
-`http.metrics_access: anonymous`（默认）。开了 `root` 门禁的部署，要么用
+`http.metrics_access: anonymous`（默认）。配置了 `http.admin_port` 时 `/-/metrics`
+只在 admin 端口上（数据面端口答 404），抓取目标写 `host:admin_port`
+（[http-adapter.md §2.1](http-adapter.md)）。开了 `root` 门禁的部署，要么用
 会签名的旁路代理抓取，要么把监听放在私网并保持匿名。TLS 部署改
 `scheme: https` 并配置 `tls_config`。
 

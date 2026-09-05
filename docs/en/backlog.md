@@ -24,7 +24,6 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 | Cross-gateway meta cache invalidation | roadmap §3.8 | Shared meta (redis/tikv) runs under the bounded-staleness contract of `meta_cache_ttl` ([storage/duostore-core.md §7.1](../storage/duostore-core.md)); redis could use pub/sub, tikv has no equivalent | medium | high |
 | mTLS client certificate → credential / tenant identity | roadmap §4.1 | `tls_client_auth` verifies the chain but maps no identity ([tls.md](tls.md)); needs a rule binding certificate fields to credentials | medium | medium |
 | Hot add / remove of backend instances | roadmap §4.4 | `reload_config` applies the safe subset plus `buckets.rules`; driver / backends / `default_backend` / `auth.*` explicitly need a restart ([config-reload.md](config-reload.md)) | medium | high |
-| Separate admin port | roadmap §5.3 | Guarded today by `http.metrics_access: root` and root-only admin routes; port-level isolation is left to a fronting proxy ([tls.md §6](tls.md)) | low | low |
 | `HeaderMap` linear scan / `BlockQueue` double copy | roadmap §4.3 ⑧ | Small in absolute terms; touch only with profile evidence | low | low |
 
 ## 2. Pending verification (implemented, not verifiable on the development box)
@@ -33,6 +32,7 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 | --- | --- | --- |
 | Docker image build and the compose profiles (default / redis / tikv / rados / e2e) | roadmap §6.3, [deployment.md §4](deployment.md) | A machine with a docker daemon: `docker compose build`, then `docker compose --profile e2e run --rm e2e` (runs the redis / tikv / rados e2e paths that SKIP locally) |
 | CPack RPM | roadmap §6.3, [deployment.md §3.2](deployment.md) | A machine with `rpmbuild`: `cpack -G RPM`, check the scriptlets with `rpm -qp --scripts`, walk through install / upgrade / remove |
+| `unit_tests` intermittently dies with `terminate called without an active exception` | 2 of 5 full runs on 2026-09-05 on this box, always right after `timer_stats_track_fired_and_pending` passed, during the 1.1 s slow callback of `timer_slow_callback_counted` (the "callback took 1.100s" line prints first); not reproducible under gdb; unrelated to feature work | Investigate in a gap: suspect the destruction order of a joinable `std::thread` in TimerQueue or the test fixture under load; capture a stack with `ulimit -c` / `catch throw` first |
 | mint compatibility baseline | roadmap §6.1, [testing.md §6](testing.md) | A machine with docker: `ctest -R mint -V`, record the per-suite PASS/FAIL/NA counts in testing.md §6 |
 
 ## 3. Found by the performance baseline ([performance-baseline.md](performance-baseline.md))

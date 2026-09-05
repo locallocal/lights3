@@ -66,6 +66,10 @@ public:
     static constexpr int kExitUncleanShutdown = 3;
 
     const Config& config() const { return cfg_; }
+    // Bound ports after start_server() (0 when the listener does not exist): the
+    // data-plane listener and the optional admin listener (http.admin_port)
+    uint16_t bound_port() const;
+    uint16_t admin_bound_port() const;
 
     // Config hot reload (roadmap §4.4, docs/config-reload.md): re-read the file,
     // validate it as at startup, apply the runtime-changeable subset, report the
@@ -109,6 +113,10 @@ private:
     std::shared_ptr<AsyncSemaphore> inflight_;
     std::shared_ptr<CancelSource> shutdown_src_;
     std::unique_ptr<http::IHttpServer> server_;
+    // Separate admin listener (backlog-sequence ②): same driver (builtin when the
+    // data plane runs seastar, whose engine is a process singleton), same admission
+    // gate and shutdown grace; runs on its own thread inside run()
+    std::unique_ptr<http::IHttpServer> admin_server_;
 };
 
 }  // namespace lights3

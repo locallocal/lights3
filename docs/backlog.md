@@ -20,7 +20,6 @@
 | 跨网关元数据缓存失效协议 | roadmap §3.8 | 共享 meta（redis/tikv）以 `meta_cache_ttl` 有界陈旧为契约（[storage/duostore-core.md §7.1](storage/duostore-core.md)）；redis 可走 pub/sub，tikv 无等价物 | 中 | 高 |
 | mTLS 客户端证书 → 凭证 / 租户身份映射 | roadmap §4.1 | `tls_client_auth` 已验证证书链但不映射身份（[tls.md](tls.md)）；映射需定证书字段与凭证的绑定规则 | 中 | 中 |
 | 后端实例增删热重载 | roadmap §4.4 | `reload_config` 只应用安全子集 + `buckets.rules`；driver / 后端 / `default_backend` / `auth.*` 明确需重启（[config-reload.md](config-reload.md)） | 中 | 高 |
-| 独立 admin 端口 | roadmap §5.3 | 现由 `http.metrics_access: root` 与 root 专属 admin 路由把关；端口层隔离交部署侧反代（[tls.md §6](tls.md)） | 低 | 低 |
 | `HeaderMap` 线性扫描 / `BlockQueue` 双拷贝 | roadmap §4.3 ⑧ | 绝对量小；有 profile 证据再动 | 低 | 低 |
 
 ## 2. 待验证（代码已落地，本机环境验证不了）
@@ -29,6 +28,7 @@
 | --- | --- | --- |
 | Docker 镜像构建与 compose 四个 profile（默认 / redis / tikv / rados / e2e） | roadmap §6.3，[deployment.md §4](deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
 | CPack RPM | roadmap §6.3，[deployment.md §3.2](deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
+| `unit_tests` 偶发 `terminate called without an active exception` | 2026-09-05 本机 5 次全量运行中 2 次，均发生在 `timer_stats_track_fired_and_pending` 通过之后、`timer_slow_callback_counted` 的 1.1s 慢回调期间（日志先打 "callback took 1.100s"），gdb 下未复现；与业务改动无关 | 有空档时排查：怀疑 TimerQueue 或测试夹具里某个 joinable `std::thread` 在负载下的析构次序；先用 `catch throw`/`ulimit -c` 抓栈 |
 | mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 
 ## 3. 性能基线跑出的新问题（[performance-baseline.md](performance-baseline.md)）

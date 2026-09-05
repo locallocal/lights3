@@ -53,7 +53,7 @@
 
 ## 4. 明确不可热更新（列入 requires_restart）
 
-- `http.driver / bind / port / io_threads / max_header_size`，四类连接超时与
+- `http.driver / bind / port / admin_bind / admin_port / io_threads / max_header_size`，四类连接超时与
   `max_requests_per_connection`、`max_connections`（驱动构造期固化）；
 - TLS 的**路径与旋钮**（`tls_cert/tls_key` 路径、`tls_client_*`、`tls_min_version`、
   cipher、`tls_sni`、`tls_reload_interval`）——证书**内容**热更新，参数不；

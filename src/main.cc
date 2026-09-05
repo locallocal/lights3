@@ -119,6 +119,10 @@ int check_config(const std::string& path) {
     printf("  http      driver=%s bind=%s:%u tls=%s metrics_access=%s\n", cfg.http.driver.c_str(),
            cfg.http.bind.c_str(), unsigned(cfg.http.port), cfg.http.tls_cert.empty() ? "off" : "on",
            cfg.http.metrics_access.c_str());
+    if (cfg.http.admin_port >= 0)
+        printf("  admin     bind=%s:%d (/-/ face served here; data-plane port answers 404)\n",
+               (cfg.http.admin_bind.empty() ? cfg.http.bind : cfg.http.admin_bind).c_str(),
+               cfg.http.admin_port);
     printf("  runtime   io_threads=%d max_inflight_requests=%d\n", cfg.runtime.io_threads,
            cfg.runtime.max_inflight_requests);
     printf("  auth      static_credentials=%zu credentials_file=%s region=%s\n",

@@ -125,6 +125,11 @@ public:
     // business information); false = anonymous, the classic scrape setup.
     // Moot when authentication is disabled altogether. Hot-reloadable
     void set_metrics_root_only(bool root) { metrics_root_.store(root, std::memory_order_relaxed); }
+    // Separate admin listener (http.admin_port): the /-/ face (metrics, admin API)
+    // is served only to requests flagged admin_face, the data-plane listener answers
+    // 404 for it, and the admin listener answers 404 for everything else; the two
+    // probes stay on both. Off = every face on every listener (single-port layout)
+    void set_admin_split(bool on) { admin_split_.store(on, std::memory_order_relaxed); }
 
     // Slow-request channel (roadmap §5.2): an access line whose total time reaches
     // the threshold is logged at WARN with per-stage timings; 0 = off. Read once per
@@ -370,6 +375,7 @@ private:
     std::atomic<uint64_t> min_part_size_{storage::kMinPartSize};
     std::atomic<int64_t> slow_request_ms_{0};
     std::atomic<bool> metrics_root_{false};
+    std::atomic<bool> admin_split_{false};
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off

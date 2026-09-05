@@ -197,6 +197,40 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     std::filesystem::remove(path);
 }
 
+// Separate admin listener (http.admin_port, backlog-sequence ②): the application
+// binds a second listener, and moving it is a restart-only change
+TEST(application_admin_listener_bound_and_restart_only) {
+    std::string path = temp_path("admin.yaml");
+    write_file(path, base_config("  admin_port: 0\n"));
+    Application app(path);
+    app.open_storage();
+    app.start_server();
+    CHECK(app.bound_port() != 0);
+    CHECK(app.admin_bound_port() != 0);
+    CHECK(app.bound_port() != app.admin_bound_port());
+    auto r0 = app.reload_config();
+    CHECK(r0.ok && r0.requires_restart.empty());
+    write_file(path, base_config("  admin_port: 0\n  admin_bind: 127.0.0.2\n"));
+    auto r1 = app.reload_config();
+    CHECK(r1.ok);
+    CHECK(has(r1.requires_restart, "http.admin_bind/admin_port"));
+    CHECK_EQ(r1.requires_restart.size(), size_t(1));
+    write_file(path, base_config(""));  // dropping the listener is restart-only too
+    auto r2 = app.reload_config();
+    CHECK(has(r2.requires_restart, "http.admin_bind/admin_port"));
+    CHECK(app.admin_bound_port() != 0);  // still bound: nothing was applied
+    app.shutdown();
+    CHECK(app.shutdown_clean());
+
+    // Without admin_port there is no second listener
+    write_file(path, base_config(""));
+    Application single(path);
+    single.open_storage();
+    single.start_server();
+    CHECK_EQ(single.admin_bound_port(), uint16_t(0));
+    single.shutdown();
+}
+
 TEST(reload_admin_endpoint_root_only) {
     AuthConfig acfg;
     acfg.credentials = {{"RLDROOT", "root-sk"}};

@@ -4,7 +4,9 @@
 #
 #   prometheus --config.file=deploy/prometheus/scrape.yml
 #
-# /-/metrics is served on the data-plane listener in Prometheus text format.
+# /-/metrics is served on the data-plane listener in Prometheus text format --
+# or only on the admin listener when http.admin_port is configured
+# (docs/http-adapter.md §2.1): then the target below is host:admin_port.
 # It must stay reachable anonymously for Prometheus (http.metrics_access:
 # anonymous, the default) — Prometheus cannot sign SigV4. With
 # http.metrics_access: root, scrape through a sidecar/proxy that signs, or keep

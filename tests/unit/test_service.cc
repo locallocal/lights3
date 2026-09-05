@@ -123,6 +123,48 @@ TEST(service_put_get_roundtrip) {
     CHECK(!head.stream_body);
 }
 
+// Listener split (http.admin_port, backlog-sequence ②): with the split on, the
+// /-/ face answers only to admin-face requests, the data plane only to the other
+// listener, and the two probes to both; with it off every face is on every request
+TEST(service_admin_split_gates_faces) {
+    auto svc = make_service_noauth();
+    auto admin = [&](std::string method, std::string path) {
+        auto req = make_req(std::move(method), std::move(path));
+        req.admin_face = true;
+        return sync_wait(svc.dispatch(std::move(req)));
+    };
+    auto data = [&](std::string method, std::string path) {
+        return sync_wait(svc.dispatch(make_req(std::move(method), std::move(path))));
+    };
+    // Off (single-port layout): everything everywhere
+    CHECK_EQ(data("GET", "/-/metrics").status, 200);
+    CHECK_EQ(data("PUT", "/bkt").status, 200);
+    CHECK_EQ(admin("GET", "/-/metrics").status, 200);
+
+    svc.set_admin_split(true);
+    CHECK_EQ(data("GET", "/-/healthz").status, 200);
+    CHECK_EQ(data("GET", "/-/readyz").status, 200);
+    CHECK_EQ(admin("GET", "/-/healthz").status, 200);
+    CHECK_EQ(admin("GET", "/-/readyz").status, 200);
+    auto blocked = data("GET", "/-/metrics");
+    CHECK_EQ(blocked.status, 404);
+    CHECK(body_of(blocked).find("admin listener") != std::string::npos);
+    CHECK_EQ(data("GET", "/-/admin/credentials").status, 404);
+    CHECK_EQ(admin("GET", "/-/metrics").status, 200);
+    // Reaches the endpoint (root gate answers, not the listener gate): 403 here
+    // because this fixture has no root credential
+    CHECK_EQ(admin("GET", "/-/admin/credentials").status, 403);
+    // The admin listener serves no data plane at all
+    CHECK_EQ(admin("PUT", "/bkt2").status, 404);
+    CHECK_EQ(admin("GET", "/bkt").status, 404);
+    CHECK_EQ(admin("POST", "/").status, 404);
+    CHECK_EQ(data("GET", "/bkt").status, 200);
+    CHECK_EQ(data("PUT", "/bkt/k").status, 200);
+
+    svc.set_admin_split(false);
+    CHECK_EQ(data("GET", "/-/metrics").status, 200);
+}
+
 TEST(service_range_request) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));

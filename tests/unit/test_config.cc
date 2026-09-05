@@ -247,6 +247,38 @@ TEST(config_port_rejects_trailing_garbage) {
     CHECK(msg.find("nine") != std::string::npos);
 }
 
+// Separate admin listener (backlog-sequence ②): off by default (-1), 0 = kernel-picked
+// like http.port, and it cannot share the data-plane address:port
+TEST(config_admin_port_parsed_and_distinct) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    auto off = Config::from_string(std::string("http:\n  port: 9000\n") + backends);
+    CHECK_EQ(off.http.admin_port, -1);
+    CHECK(off.http.admin_bind.empty());
+    auto on = Config::from_string(
+        std::string("http:\n  port: 9000\n  admin_port: 0\n  admin_bind: 127.0.0.1\n") + backends);
+    CHECK_EQ(on.http.admin_port, 0);
+    CHECK_EQ(on.http.admin_bind, "127.0.0.1");
+    CHECK_EQ(Config::from_string(std::string("http:\n  port: 9000\n  admin_port: 9001\n") + backends)
+                 .http.admin_port,
+             9001);
+    // Same port on the same address: two listeners cannot both bind
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  port: 9000\n  admin_port: 9000\n") + backends);
+    }));
+    // Same port on a different address is legal
+    CHECK_EQ(Config::from_string(std::string("http:\n  bind: 0.0.0.0\n  port: 9000\n"
+                                             "  admin_port: 9000\n  admin_bind: 127.0.0.1\n") +
+                                 backends)
+                 .http.admin_port,
+             9000);
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  admin_port: 70000\n") + backends);
+    }));
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  admin_port: nine\n") + backends);
+    }));
+}
+
 TEST(config_max_header_size_bounded) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // 4GiB truncates to 0 in beast's parser.header_limit(uint32_t) and rejects everything

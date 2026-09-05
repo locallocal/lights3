@@ -28,7 +28,10 @@ source to the `DS` variable. Several gateways are selected/aggregated through
 label of `lights3_backend_op_seconds_count`).
 
 **Exposure of `/-/metrics`**: Prometheus cannot sign SigV4, so scraping needs
-`http.metrics_access: anonymous` (the default). Deployments with the `root`
+`http.metrics_access: anonymous` (the default). With `http.admin_port`
+configured, `/-/metrics` lives only on the admin listener (the data-plane port
+answers 404), so the scrape target is `host:admin_port`
+([http-adapter.md §2.1](http-adapter.md)). Deployments with the `root`
 gate either scrape through a signing sidecar/proxy or keep the listener on a
 private network with the gate off. TLS deployments switch `scheme: https` and
 fill in `tls_config`.

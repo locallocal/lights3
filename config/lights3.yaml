@@ -11,6 +11,12 @@ http:
   driver: builtin          # builtin | beast | httplib (must be compiled in via the matching CMake option)
   bind: 0.0.0.0
   port: 9000
+  # Separate admin listener (docs/http-adapter.md §2.1): when set, /-/metrics and
+  # /-/admin/* are served ONLY here (the data-plane port answers 404 for them;
+  # /-/healthz and /-/readyz stay on both). Point s3adm --endpoint and the
+  # Prometheus scrape at it. Not hot-reloadable. Omit = every face on `port`.
+  # admin_bind: 127.0.0.1    # empty = same as bind
+  # admin_port: 9100         # 0 = kernel-picked; must differ from port on the same address
   io_threads: 4            # beast=IO thread count / httplib=thread pool / seastar=shard count;
                            # builtin (thread-per-connection) ignores it and WARNs when set explicitly
   max_header_size: 16KiB

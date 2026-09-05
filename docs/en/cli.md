@@ -233,7 +233,7 @@ needed.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `-e, --endpoint=<url>` | `http://127.0.0.1:9000` | `scheme://host[:port]`; https needs a build with OpenSSL |
+| `-e, --endpoint=<url>` | `http://127.0.0.1:9000` | `scheme://host[:port]`; https needs a build with OpenSSL. When the server has `http.admin_port`, the command groups that use `/-/admin/*` (`cred` / `website` / `quota` / `tenant` / `usage` / `reload` / `object` / `mpu`) must point at the **admin port** (the data-plane port answers 404 for them); `bench` / `fsck` use the data-plane port ([http-adapter.md §2.1](http-adapter.md)) |
 | `--ak=<key>` / `--sk=<key>` | env | fall back to `LIGHTS3_ADMIN_AK` / `LIGHTS3_ADMIN_SK`; prefer env for the SK (argv is visible to local `ps`) |
 | `--region=<r>` | `us-east-1` | SigV4 region; must match the server's `auth.region` |
 | `--insecure` | false | skip certificate verification for https (self-signed deployments) |

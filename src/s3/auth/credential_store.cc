@@ -166,6 +166,36 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
 
 bool parse_role(const std::string& role) { return parse_credential_role(role); }
 
+// ---- STS session objects (backlog-sequence ④): .sys/sts/<ak> ----
+// Same secrecy rule as credential SKs: with a master key both the SK and the
+// token are AES-256-GCM sealed (version 2), without one they are plaintext
+// (version 1). An instance without the key cannot verify sessions minted by an
+// instance with it (deserialize throws -> logged, session stays unknown there)
+std::string session_object_key(std::string_view ak) {
+    return std::string(kStsPrefix) + std::string(ak);
+}
+
+std::string seal_or_plain(const std::string& v, const std::optional<util::Aes256Key>& key) {
+    if (!key) return v;
+    std::string sealed = util::aes256gcm_seal(*key, v);
+    return util::to_hex(std::span(reinterpret_cast<const uint8_t*>(sealed.data()), sealed.size()));
+}
+
+std::optional<std::string> open_or_plain(const std::string& v, const std::optional<util::Aes256Key>& key,
+                                         int version, std::string_view ak, const char* field) {
+    if (version == 1) return v;
+    if (!key)
+        throw std::runtime_error("session object " + std::string(ak) + " is encrypted (version 2) but " +
+                                 kMasterKeyEnv + " is not set");
+    auto blob = util::from_hex(v);
+    auto out = util::aes256gcm_open(
+        *key, std::string_view(reinterpret_cast<const char*>(blob.data()), blob.size()));
+    if (!out)
+        throw std::runtime_error("session object " + std::string(ak) + ": " + field +
+                                 " decryption failed (wrong " + kMasterKeyEnv + " or corrupted object)");
+    return out;
+}
+
 // Corrupt JSON returns nullopt (skipped without blocking startup); version=2 with no key / failed decryption
 // throws runtime_error -- that is a configuration error, and silently dropping credentials would lock users out;
 // better to block startup.
@@ -394,6 +424,8 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
         }
     }
     size_t dynamic_count = store->creds_.size();
+    // STS sessions minted before this instance started (or by others): usable at once
+    co_await store->sync_sessions(/*startup=*/true);
 
     // v1 -> v2 upgrade: once a master key is set, existing plaintext objects are rewritten in place in encrypted form
     for (auto& ak : plaintext_aks) {
@@ -653,37 +685,191 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
 
 // ---------- STS sessions (roadmap §2.6) ----------
 
-CredentialStore::SessionCredential CredentialStore::mint_session(std::string_view parent_ak,
-                                                                 int duration_sec) {
-    // Bound the table: sessions are memory-only, and an unauthenticated caller cannot
-    // reach here, but a runaway client must not grow the map without limit
+namespace {
+int64_t unix_secs(std::chrono::system_clock::time_point t) {
+    return std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
+}
+std::chrono::system_clock::time_point from_unix(int64_t s) {
+    return std::chrono::system_clock::time_point(std::chrono::seconds(s));
+}
+}  // namespace
+
+Task<std::string> CredentialStore::persist_session(const std::string& ak, const SessionEntry& e) {
+    json j;
+    j["version"] = master_key_ ? 2 : 1;
+    j["sk"] = seal_or_plain(static_cast<const std::string&>(e.secret_key), master_key_);
+    j["token"] = seal_or_plain(e.token, master_key_);
+    j["expires_unix"] = unix_secs(e.expires);
+    j["expires"] = util::iso8601(e.expires);
+    j["created_unix"] = unix_secs(e.created);
+    j["parent"] = e.parent;
+    if (e.policy) j["policy"] = policy_to_json_obj(*e.policy);
+    if (!e.tenant.empty()) j["tenant"] = e.tenant;
+    if (!sys_bucket_ready_) {
+        try {
+            co_await backend_->create_bucket(kSysBucket);
+        } catch (const S3Error& err) {
+            if (err.code != S3ErrorCode::BucketAlreadyOwnedByYou) throw;
+        }
+        sys_bucket_ready_ = true;
+    }
+    storage::ObjectMeta meta;
+    meta.content_type = "application/json";
+    http::StringBodyReader body(j.dump(2) + "\n");
+    auto pr = co_await backend_->put_object(kSysBucket, session_object_key(ak), std::move(meta), body);
+    co_return pr.etag;
+}
+
+Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::string_view parent_ak,
+                                                                       int duration_sec) {
+    // Bound the table: an unauthenticated caller cannot reach here, but a runaway
+    // client must not grow the map without limit
     constexpr size_t kMaxSessions = 100000;
 
     SessionCredential out;
-    out.access_key = "L3SA" + random_access_key().substr(4);  // session-prefixed AK shape
+    out.access_key = std::string(kSessionAkPrefix) + random_access_key().substr(4);  // session-prefixed AK shape
     out.secret_key = random_secret_key();
     {
         uint8_t raw[48];
         fill_random(raw, sizeof(raw));
         out.token = util::base64_encode(std::span(raw, sizeof(raw)));
     }
-    out.expires = std::chrono::system_clock::now() + std::chrono::seconds(duration_sec);
-
-    std::unique_lock lk(mu_);
-    // Opportunistic sweep of expired sessions (they are also harmless in place:
-    // verify answers ExpiredToken for them)
     auto now = std::chrono::system_clock::now();
-    std::erase_if(sessions_, [&](auto& kv) { return kv.second.expires < now; });
-    if (sessions_.size() >= kMaxSessions)
-        throw S3Error(S3ErrorCode::SlowDown, "Too many active sessions; retry later.");
-    auto pit = creds_.find(parent_ak);
-    // A session AK lives in sessions_, not creds_: a session can never assume again
-    if (pit == creds_.end())
-        throw S3Error(S3ErrorCode::AccessDenied,
-                      "Session credentials cannot call AssumeRole.");
-    sessions_[out.access_key] = SessionEntry{out.secret_key, out.token, out.expires,
-                                             pit->second.policy, pit->second.tenant};
-    return out;
+    out.expires = now + std::chrono::seconds(duration_sec);
+
+    SessionEntry entry;
+    {
+        std::unique_lock lk(mu_);
+        // Opportunistic sweep of expired sessions (they are also harmless in place:
+        // verify answers ExpiredToken for them)
+        std::erase_if(sessions_, [&](auto& kv) { return kv.second.expires < now; });
+        if (sessions_.size() >= kMaxSessions)
+            throw S3Error(S3ErrorCode::SlowDown, "Too many active sessions; retry later.");
+        auto pit = creds_.find(parent_ak);
+        // A session AK lives in sessions_, not creds_: a session can never assume again
+        if (pit == creds_.end())
+            throw S3Error(S3ErrorCode::AccessDenied,
+                          "Session credentials cannot call AssumeRole.");
+        entry = SessionEntry{out.secret_key, out.token, out.expires, pit->second.policy,
+                             pit->second.tenant, std::string(parent_ak), now};
+    }
+    // Persist first, then take effect (write-through, same rule as generate): another
+    // instance that sees the session AK before this put lands answers
+    // InvalidAccessKeyId and the SDK retries
+    co_await persist_session(out.access_key, entry);
+    {
+        std::unique_lock lk(mu_);
+        sessions_[out.access_key] = std::move(entry);
+    }
+    co_return out;
+}
+
+Task<void> CredentialStore::ensure_session_loaded(std::string_view ak_view) {
+    if (ak_view.rfind(kSessionAkPrefix, 0) != 0) co_return;
+    std::string ak(ak_view);
+    {
+        std::shared_lock lk(mu_);
+        if (sessions_.contains(ak)) co_return;
+        auto mit = session_misses_.find(ak);
+        if (mit != session_misses_.end() &&
+            std::chrono::steady_clock::now() - mit->second < kSessionMissTtl)
+            co_return;
+    }
+    std::optional<SessionEntry> entry;
+    bool missing = false;
+    try {
+        auto stream = co_await backend_->get_object(kSysBucket, session_object_key(ak), std::nullopt);
+        auto body = co_await read_all(*stream.body);
+        json j = json::parse(body);
+        int ver = j.at("version").get<int>();
+        SessionEntry e;
+        e.secret_key = *open_or_plain(j.at("sk").get<std::string>(), master_key_, ver, ak, "sk");
+        e.token = *open_or_plain(j.at("token").get<std::string>(), master_key_, ver, ak, "token");
+        e.expires = from_unix(j.at("expires_unix").get<int64_t>());
+        e.created = from_unix(j.value("created_unix", int64_t{0}));
+        e.parent = j.value("parent", "");
+        e.tenant = j.value("tenant", "");
+        if (j.contains("policy")) e.policy = policy_from_json_obj(j.at("policy"));
+        entry = std::move(e);
+    } catch (const S3Error& e) {
+        if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket) missing = true;
+        else LOG_WARN("sts: reading session {} failed: {}", ak, e.message);
+    } catch (const std::exception& e) {
+        LOG_WARN("sts: session object {} unusable: {}", ak, e.what());
+        missing = true;  // malformed / undecryptable: do not retry on every request
+    }
+    std::unique_lock lk(mu_);
+    if (entry) {
+        session_misses_.erase(ak);
+        sessions_.emplace(ak, std::move(*entry));
+        LOG_INFO("sts: session {} loaded from {} (minted elsewhere)", ak, kSysBucket);
+    } else if (missing) {
+        auto now = std::chrono::steady_clock::now();
+        if (session_misses_.size() >= kMaxSessionMisses)
+            std::erase_if(session_misses_, [&](auto& kv) { return now - kv.second >= kSessionMissTtl; });
+        if (session_misses_.size() < kMaxSessionMisses) session_misses_[ak] = now;
+    }
+}
+
+Task<void> CredentialStore::sync_sessions(bool startup) {
+    if (!co_await backend_->bucket_exists(kSysBucket)) co_return;
+    std::vector<std::string> on_storage;
+    storage::ListOptions opt;
+    opt.prefix = std::string(kStsPrefix);
+    for (;;) {
+        auto page = co_await backend_->list_objects(kSysBucket, opt);
+        for (auto& obj : page.objects) on_storage.push_back(obj.key.substr(kStsPrefix.size()));
+        if (!page.is_truncated) break;
+        opt.start_after = page.next_token;
+    }
+    const auto now = std::chrono::system_clock::now();
+    size_t added = 0, expired = 0;
+    for (auto& ak : on_storage) {
+        bool known;
+        {
+            std::shared_lock lk(mu_);
+            known = sessions_.contains(ak);
+        }
+        if (!known) {
+            std::unique_lock lk(mu_);
+            session_misses_.erase(ak);  // a listing beats a stale miss
+        }
+        if (!known) {
+            co_await ensure_session_loaded(ak);
+            std::shared_lock lk(mu_);
+            if (sessions_.contains(ak)) ++added;
+        }
+        bool is_expired = false;
+        {
+            std::shared_lock lk(mu_);
+            auto it = sessions_.find(ak);
+            is_expired = it != sessions_.end() && it->second.expires < now;
+        }
+        if (is_expired) {
+            // Any instance may reap an expired object; a concurrent reap is a harmless NoSuchKey
+            try {
+                co_await backend_->delete_object(kSysBucket, session_object_key(ak));
+            } catch (const S3Error& e) {
+                if (e.code != S3ErrorCode::NoSuchKey) LOG_WARN("sts: reaping session {} failed: {}", ak, e.message);
+            } catch (const std::exception& e) {
+                LOG_WARN("sts: reaping session {} failed: {}", ak, e.what());
+            }
+            std::unique_lock lk(mu_);
+            sessions_.erase(ak);
+            ++expired;
+        }
+    }
+    // Sessions in memory whose object vanished (reaped elsewhere): drop them too
+    {
+        std::set<std::string, std::less<>> listed(on_storage.begin(), on_storage.end());
+        std::unique_lock lk(mu_);
+        std::erase_if(sessions_, [&](auto& kv) {
+            return !listed.contains(kv.first) && kv.second.expires < now;
+        });
+    }
+    if (added || expired)
+        LOG_INFO("sts: session sync{}: {} loaded, {} expired reaped", startup ? " (startup)" : "",
+                 added, expired);
 }
 
 size_t CredentialStore::session_count() const {
@@ -855,6 +1041,8 @@ Task<void> CredentialStore::sync_now() {
     }
     if (added || removed)
         LOG_INFO("credential sync: {} added, {} revoked", added, removed);
+    // STS sessions (backlog-sequence ④): new ones minted elsewhere, expired ones reaped
+    co_await sync_sessions(/*startup=*/false);
 }
 
 // ---------- Background task assembly (§10.2/§10.3; same pattern as duostore GC: re-arm after completion, no overlap) ----------

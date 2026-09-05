@@ -542,6 +542,19 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
     return util::to_hex(util::hmac_sha256(k, sts));
 }
 
+std::optional<std::string> SigV4Authenticator::peek_access_key(const http::HttpRequest& req) {
+    try {
+        AuthFields f;
+        if (auto auth = req.headers.get("Authorization")) f = parse_auth_header(*auth);
+        else if (auto cred = req.query_get("X-Amz-Credential")) parse_credential(*cred, f);
+        else return std::nullopt;
+        if (f.access_key.empty()) return std::nullopt;
+        return f.access_key;
+    } catch (const S3Error&) {
+        return std::nullopt;  // verify reports the malformed header itself
+    }
+}
+
 VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
                                                  std::string_view service,
                                                  const std::string* explicit_payload_hash) const {

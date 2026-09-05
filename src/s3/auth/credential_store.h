@@ -55,6 +55,11 @@ struct CredentialInfo {
 // Reserved system bucket and object key prefix (docs/credential-management.md §4.1)
 inline constexpr std::string_view kSysBucket = ".sys";
 inline constexpr std::string_view kCredPrefix = "credentials/";
+// STS session objects (backlog-sequence ④): .sys/sts/<session-ak>, shared by every
+// instance on the same backend
+inline constexpr std::string_view kStsPrefix = "sts/";
+// Session access keys carry this prefix (never root, never a parent for AssumeRole)
+inline constexpr std::string_view kSessionAkPrefix = "L3SA";
 
 // Credential role names in JSON ("user" default / "admin"); unknown -> InvalidRequest
 bool parse_credential_role(const std::string& role);
@@ -114,20 +119,31 @@ public:
     };
     Task<CredentialInfo> update(std::string_view ak, Update upd);
 
-    // ---- STS session credentials (roadmap §2.6) ----
-    // In-memory only (single-instance; sessions are short-lived by design): AssumeRole
-    // mints a session AK/SK/token with a TTL, inheriting the CALLER's policy — this
-    // implementation has no role catalog, so a session can never exceed the identity
-    // that minted it. Session AKs are L3SA-prefixed and are never root; a session
-    // cannot mint further sessions. Expired entries are swept opportunistically
+    // ---- STS session credentials (roadmap §2.6, multi-instance since backlog-sequence ④) ----
+    // AssumeRole mints a session AK/SK/token with a TTL, inheriting the CALLER's policy
+    // — this implementation has no role catalog, so a session can never exceed the
+    // identity that minted it. Session AKs are L3SA-prefixed and are never root; a
+    // session cannot mint further sessions. The record is written through to
+    // .sys/sts/<ak> (SK and token sealed like credential SKs) so any instance on the
+    // same backend can verify it: an unknown session AK is read back on demand
+    // (ensure_session_loaded, called by dispatch before verify), the periodic sync
+    // pulls new sessions and deletes expired objects, and expired entries are swept
+    // from memory opportunistically
     struct SessionCredential {
         std::string access_key;         // L3SA + 16 base32 chars
         util::SecretString secret_key;
         std::string token;              // opaque base64
         std::chrono::system_clock::time_point expires;
     };
-    SessionCredential mint_session(std::string_view parent_ak, int duration_sec);
+    Task<SessionCredential> mint_session(std::string_view parent_ak, int duration_sec);
+    // Read-through for a session AK this instance has not seen (minted elsewhere):
+    // no-op for non-session AKs, for AKs already in memory, and for AKs that missed
+    // within the last kSessionMissTtl (a bounded negative cache keeps a scan of
+    // random L3SA keys from turning into backend reads). Never throws: a backend
+    // error leaves the AK unknown and verify answers InvalidAccessKeyId
+    Task<void> ensure_session_loaded(std::string_view ak);
     size_t session_count() const;
+    static constexpr std::chrono::seconds kSessionMissTtl{60};
 
     std::optional<CredentialInfo> find(std::string_view ak) const;
     std::vector<CredentialInfo> list() const;  // sorted by AK
@@ -172,8 +188,18 @@ private:
         std::chrono::system_clock::time_point expires;
         std::optional<CredentialPolicy> policy;
         std::string tenant;  // inherited; sessions are never tenant admins (data plane only)
+        std::string parent;  // the AK that assumed (audit trail; not re-checked at verify)
+        std::chrono::system_clock::time_point created;
     };
     std::map<std::string, SessionEntry, std::less<>> sessions_;
+    // Negative cache of ensure_session_loaded (guarded by mu_): ak -> miss time
+    std::map<std::string, std::chrono::steady_clock::time_point, std::less<>> session_misses_;
+    static constexpr size_t kMaxSessionMisses = 4096;
+    // Pull every unexpired .sys/sts/* not yet in memory; delete expired objects
+    // (best effort, any instance may do it). Shared by load() and sync_now()
+    Task<void> sync_sessions(bool startup);
+    // Persist a session record (write-through); returns the object ETag
+    Task<std::string> persist_session(const std::string& ak, const SessionEntry& e);
     // AKs this instance just revoked -> revocation time (guarded by mu_). sync_now's add branch skips recent
     // tombstones: when remove's delete_object interleaves with sync's list, the list may still see the revoked
     // object, and without a tombstone it would be pulled back into memory, resurrected for one sync cycle

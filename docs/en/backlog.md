@@ -17,7 +17,6 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 
 | Item | Source | State and entry point | Value | Difficulty |
 | --- | --- | --- | --- | --- |
-| Multi-instance STS session table | roadmap §2.6 | `AssumeRole` sessions are single-instance in-memory state (`src/s3/auth/credential_store.*`, sessions are short-lived); sharing across gateways means persisting to `.sys` or the meta engine, reusing the credential `sync_interval` mechanism | medium | medium |
 | duostore meta incremental backup / PITR | roadmap §3.7 | `dump` is already a consistent full snapshot (`IMetaStore::snapshot()`); incremental needs WAL-level export, different for each of the four engines | medium | high |
 | Structured error codes upstream in client-c | roadmap §3.7 (tikv T5) | The sidecar classifies conflicts from kvrpcpb structures first and string-matches only as defense in depth; an upstream PR is optional | low | medium |
 | Cross-gateway meta cache invalidation | roadmap §3.8 | Shared meta (redis/tikv) runs under the bounded-staleness contract of `meta_cache_ttl` ([storage/duostore-core.md §7.1](../storage/duostore-core.md)); redis could use pub/sub, tikv has no equivalent | medium | high |

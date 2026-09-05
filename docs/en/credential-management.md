@@ -396,7 +396,11 @@ a minute-scale operational action anyway).
   and removals;
 - The timer pattern is the same as duostore GC (`BackgroundTaskGroup` +
   `TimerQueue`, re-armed after completion, no overlap); a tick first
-  `pool_->schedule()`s onto a pool thread before doing IO.
+  `pool_->schedule()`s onto a pool thread before doing IO;
+- The same round also syncs STS sessions (`.sys/sts/`, backlog-sequence ④):
+  it pulls sessions minted elsewhere and deletes expired objects; sessions are
+  additionally read through on demand before verify, independent of this
+  period ([s3-protocol.md §3.5](s3-protocol.md)).
 
 ### 10.4 Per-Credential Policy
 

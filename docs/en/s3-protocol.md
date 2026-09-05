@@ -199,13 +199,42 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
 `lights3_http_timeouts_total{phase=idle|header|body|write}`,
 `lights3_ratelimit_rejections_total{scope=ip|ak}`; see [http-adapter.md §2.2–§2.3](http-adapter.md).
 
-- **Access log**: one structured line per request (request_id, AK, method, path,
-  status, byte counts, total elapsed ms), formatted like the S3 server access
-  log so existing tooling applies; since roadmap §5.1 two trailing slots
-  `api=<Route name> backend=<backend name>:<ms spent in the backend>` — the
-  backend time comes from the metering decorator wrapped around the routed
-  backends (`storage/metered_backend.h`), fed back through the request's
-  cancellation token, so "gateway queueing or backend" is answered by one line.
+- **Access log** (roadmap §5.2): one line per request through a dedicated
+  `lights3.access` logger sharing the operational log's sink. Text format
+  (`log.format: text`): `access <request_id> <AK|-> <method> "<path>" <status>
+  <bytes> <total>ms api=<Route name> backend=<backend>:<backend ms>ms
+  remote=<client address> bucket=<bucket|-> ttfb=<ms>ms ua="<User-Agent>"` — the
+  first seven fields follow the S3 server access log, `path` and the UA are
+  quoted and escaped (`"`, `\`, control characters) so a key with a space no
+  longer breaks field splitting; the backend time comes from the metering
+  decorator wrapped around the routed backends (`storage/metered_backend.h`),
+  fed back through the request's cancellation token, so "gateway queueing or
+  backend" is answered by one line. **Streaming responses** (GetObject and the
+  like) write their line at end of body: `bytes` is what actually went out, the
+  total includes the transfer, `ttfb` is the headers-ready moment (the quantity
+  the metric histograms record); a client leaving mid-transfer gets the line
+  from the decorator's destructor, flagged `truncated=1`. In JSON format
+  (`log.format: json`) the whole operational log is one object per line
+  `{"ts","level","thread","msg"}` and access records carry flat fields in the
+  same object: `request_id / remote / ak / method / path / query / bucket / key /
+  status / bytes / ms / ttfb_ms / auth_ms / handler_ms / backend_ms /
+  backend_calls / api / backend / ua`; absent values are omitted rather than
+  rendered empty (`ak` disappears for anonymous requests), ready for Loki/ELK.
+- **Slow-request channel**: `log.slow_request_threshold` (e.g. `500ms`, 0 = off,
+  hot-reloadable) — an access line whose total reaches the threshold is logged
+  at WARN with the per-stage timings (text: `slow=1 auth=<ms> handler=<ms>
+  backend_calls=<n>`; JSON: `"slow":true` plus those fields), so a deployment
+  running at `log.level: warn` still sees the requests worth looking at. auth =
+  dispatch entry to verified identity, handler = the whole route handler
+  (backend time is a subset).
+- **Sink and async**: an empty `log.file` writes to stderr, otherwise to a
+  size-rotated file (`max_size` / `max_files`, flushed every second and
+  immediately at WARN and above); with `log.async: true` request threads only
+  enqueue (capacity `async_queue`) and a dedicated writer thread drains, a full
+  queue blocking or overwriting the oldest record per `async_overflow`;
+  `Logger::shutdown` drains the queue before the process exits. The audit log
+  ([multi-tenancy.md §5](multi-tenancy.md)) stays a separate file, untouched by
+  these knobs.
 - **Metrics** (Prometheus text format, `GET /-/metrics`, an anonymous
   endpoint on the data-plane listener — restrict it at the deployment layer):
   request counts / latency histograms (global and per `(api, backend)`:

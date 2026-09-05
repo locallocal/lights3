@@ -225,6 +225,22 @@ int parse_duration_sec(const std::string& s) {
     return static_cast<int>(num * mult);
 }
 
+int parse_duration_ms(const std::string& s) {
+    size_t pos = 0;
+    long long num = std::stoll(s, &pos);
+    std::string unit = trim(s.substr(pos));
+    long long mult = 0;
+    if (unit == "ms") mult = 1;
+    else if (unit.empty() || unit == "s") mult = 1000;
+    else if (unit == "m") mult = 60'000;
+    else if (unit == "h") mult = 3'600'000;
+    else if (unit == "d") mult = 86'400'000;
+    else throw std::runtime_error("bad duration unit: " + s);
+    if (num < 0 || num > INT_MAX / mult)
+        throw std::runtime_error("duration out of range: " + s);
+    return static_cast<int>(num * mult);
+}
+
 bool parse_bool(const std::string& s) {
     if (s == "true" || s == "1" || s == "yes" || s == "on") return true;
     if (s == "false" || s == "0" || s == "no" || s == "off") return false;
@@ -540,14 +556,38 @@ Config Config::from_string(const std::string& text) {
         if ((r.per_ip_burst && !r.per_ip_rps) || (r.per_ak_burst && !r.per_ak_rps))
             throw std::runtime_error("config: ratelimit.*_burst requires the matching *_rps");
     }
-    if (auto* log = root.find("log")) cfg.log_level = log->get("level", cfg.log_level);
-    // parse_level in app.cc maps anything unknown to Info, so a misspelled level
+    if (auto* log = root.find("log")) {
+        auto& l = cfg.log;
+        l.level = log->get("level", l.level);
+        l.format = log->get("format", l.format);
+        l.file = log->get("file", l.file);
+        if (std::string v = log->get("max_size"); !v.empty()) l.max_size = parse_size(v);
+        l.max_files = to_int("log.max_files", log->get("max_files"), l.max_files);
+        if (std::string v = log->get("async"); !v.empty()) l.async = parse_bool(v);
+        l.async_queue = to_int("log.async_queue", log->get("async_queue"), l.async_queue);
+        l.async_overflow = log->get("async_overflow", l.async_overflow);
+        if (std::string v = log->get("slow_request_threshold"); !v.empty())
+            l.slow_request_threshold_ms = parse_duration_ms(v);
+    }
+    // Logger::parse_level maps anything unknown to Info, so a misspelled level
     // ("warning", "trace") would silently downgrade — the operator believes debug
     // logging is on while it is not. Reject it here instead
-    if (cfg.log_level != "debug" && cfg.log_level != "info" && cfg.log_level != "warn" &&
-        cfg.log_level != "error")
+    if (cfg.log.level != "debug" && cfg.log.level != "info" && cfg.log.level != "warn" &&
+        cfg.log.level != "error")
         throw std::runtime_error("config: log.level must be one of debug|info|warn|error, got '" +
-                                 cfg.log_level + "'");
+                                 cfg.log.level + "'");
+    if (cfg.log.format != "text" && cfg.log.format != "json")
+        throw std::runtime_error("config: log.format must be text|json, got '" + cfg.log.format +
+                                 "'");
+    if (cfg.log.async_overflow != "block" && cfg.log.async_overflow != "drop")
+        throw std::runtime_error("config: log.async_overflow must be block|drop, got '" +
+                                 cfg.log.async_overflow + "'");
+    // Same bounds as the audit file: a rotation must not thrash per line, a slipped unit must not pass
+    check_range("log.max_size", static_cast<long long>(cfg.log.max_size), 65536LL,
+                64LL * 1'073'741'824LL);
+    check_range("log.max_files", cfg.log.max_files, 1, 1000);
+    // spdlog's queue is preallocated as a whole: a fat-fingered 1e9 would OOM at startup
+    check_range("log.async_queue", cfg.log.async_queue, 64, 1'048'576);
 
     // Consistency checks. Thread-count upper bounds align with the per-backend
     // parameters of the same name ([1,1024]): without an upper bound, a fat-fingered

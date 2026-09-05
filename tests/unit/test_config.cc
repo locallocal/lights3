@@ -284,8 +284,44 @@ TEST(config_log_level_rejects_typos) {
     }));
     for (const char* ok : {"debug", "info", "warn", "error"})
         CHECK_EQ(Config::from_string(std::string("log:\n  level: ") + ok + "\n" + backends)
-                     .log_level,
+                     .log.level,
                  ok);
+}
+
+TEST(config_log_section) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    auto d = Config::from_string(backends).log;
+    CHECK_EQ(d.level, "info");
+    CHECK_EQ(d.format, "text");
+    CHECK(d.file.empty() && !d.async);
+    CHECK_EQ(d.slow_request_threshold_ms, 0);
+    auto cfg = Config::from_string(std::string("log:\n  level: warn\n  format: json\n"
+                                               "  file: /var/log/lights3.log\n  max_size: 1MiB\n"
+                                               "  max_files: 3\n  async: true\n"
+                                               "  async_queue: 1024\n  async_overflow: drop\n"
+                                               "  slow_request_threshold: 500ms\n") +
+                                   backends)
+                   .log;
+    CHECK_EQ(cfg.level, "warn");
+    CHECK_EQ(cfg.format, "json");
+    CHECK_EQ(cfg.file, "/var/log/lights3.log");
+    CHECK_EQ(cfg.max_size, uint64_t(1048576));
+    CHECK_EQ(cfg.max_files, 3);
+    CHECK(cfg.async);
+    CHECK_EQ(cfg.async_queue, 1024);
+    CHECK_EQ(cfg.async_overflow, "drop");
+    CHECK_EQ(cfg.slow_request_threshold_ms, 500);
+    CHECK_EQ(Config::from_string(std::string("log:\n  slow_request_threshold: 2s\n") + backends)
+                 .log.slow_request_threshold_ms,
+             2000);
+    for (const char* bad : {"  format: xml\n", "  async_overflow: panic\n", "  async_queue: 8\n",
+                            "  max_files: 0\n", "  max_size: 1KiB\n",
+                            "  slow_request_threshold: -1s\n", "  slow_request_threshold: 1x\n"})
+        CHECK(throws([&] { Config::from_string(std::string("log:\n") + bad + backends); }));
+    CHECK_EQ(parse_duration_ms("250ms"), 250);
+    CHECK_EQ(parse_duration_ms("3"), 3000);
+    CHECK_EQ(parse_duration_ms("2m"), 120000);
+    CHECK(throws([] { parse_duration_ms("99999999h"); }));
 }
 
 TEST(config_bucket_rule_rejects_empty_fields) {
@@ -354,7 +390,7 @@ TEST(config_undefined_env_is_an_error_unless_defaulted) {
     // Genuinely optional values are written ${VAR:-default}
     auto cfg = Config::from_string(
         std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET:-debug}\n") + backends);
-    CHECK_EQ(cfg.log_level, "debug");
+    CHECK_EQ(cfg.log.level, "debug");
 }
 
 TEST(config_tls_requires_both_cert_and_key) {

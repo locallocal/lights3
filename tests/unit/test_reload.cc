@@ -152,12 +152,15 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     {
         std::ifstream in(path);
         std::string text((std::istreambuf_iterator<char>(in)), {});
-        text.replace(text.find("level: info"), 11, "level: debug");
+        text.replace(text.find("level: info"), 11,
+                     "level: debug\n  slow_request_threshold: 250ms\n  format: json");
         write_file(path, text);
     }
     auto r1 = app.reload_config();
     CHECK(r1.ok);
     CHECK(has(r1.applied, "log.level: info -> debug"));
+    CHECK(has(r1.applied, "log.slow_request_threshold(ms): 0 -> 250"));
+    CHECK(has(r1.requires_restart, "log.format/file/max_size/max_files/async*"));
     CHECK(has(r1.applied, "http.request_timeout: 300 -> 120"));
     CHECK(has(r1.applied, "http.transfer_stall_timeout: 300 -> 60"));
     CHECK(has(r1.applied, "http.min_part_size"));
@@ -165,7 +168,9 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     CHECK(has(r1.applied, "ratelimit: per-ip rps=50"));
     CHECK(has(r1.applied, "buckets.rules: 0 -> 1"));
     CHECK(has(r1.requires_restart, "http.max_connections"));
-    CHECK_EQ(r1.requires_restart.size(), size_t(1));
+    CHECK_EQ(r1.requires_restart.size(), size_t(2));
+    CHECK_EQ(app.config().log.slow_request_threshold_ms, 250);
+    CHECK_EQ(app.config().log.format, "text");  // the running value stays
     CHECK_EQ(app.config().http.request_timeout_sec, 120);
     CHECK_EQ(app.config().runtime.max_inflight_requests, 200);
     CHECK_EQ(app.config().buckets.rules.size(), size_t(1));

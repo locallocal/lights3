@@ -230,6 +230,22 @@ struct AuditConfig {
     int max_files = 10;               // rotated files kept
 };
 
+// Operational log (roadmap §5.2). Every knob but level / slow_request_threshold is
+// fixed at startup (the sink and the formatter are built once; docs/config-reload.md §4)
+struct LogConfig {
+    std::string level = "info";        // debug | info | warn | error (hot-reloadable)
+    std::string format = "text";       // text = one human-readable line; json = one JSON object per line
+    std::string file;                  // empty = stderr; otherwise a size-rotated file
+    uint64_t max_size = 64 * 1024 * 1024;  // rotate the file above this many bytes
+    int max_files = 10;                // rotated files kept
+    bool async = false;                // true = a dedicated writer thread; request threads only enqueue
+    int async_queue = 8192;            // queue capacity (records)
+    std::string async_overflow = "block";  // block = the caller waits on a full queue; drop = overwrite the oldest
+    // Requests taking at least this long are logged at WARN with per-stage timings
+    // (auth / handler / backend / TTFB / total); 0 = off (hot-reloadable)
+    int slow_request_threshold_ms = 0;
+};
+
 struct Config {
     HttpConfig http;
     RuntimeConfig runtime;
@@ -241,7 +257,7 @@ struct Config {
     UsageConfig usage;
     AuditConfig audit;
     RateLimitConfig ratelimit;
-    std::string log_level = "info";
+    LogConfig log;
 
     static Config load(const std::string& path);
     static Config from_string(const std::string& yaml_text);
@@ -260,6 +276,7 @@ struct ConfigReloadReport {
 // Parsing helpers for values like "16KiB" / "1MB" / "60s" / "true"
 size_t parse_size(const std::string& s);
 int parse_duration_sec(const std::string& s);
+int parse_duration_ms(const std::string& s);   // same units plus "ms"; a bare number is seconds
 bool parse_bool(const std::string& s);  // true/1/yes/on | false/0/no/off; anything else throws runtime_error
 
 }  // namespace lights3

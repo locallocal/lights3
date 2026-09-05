@@ -41,6 +41,7 @@
 | 键 | 生效方式 |
 | --- | --- |
 | `log.level` | spdlog 全局级别即时切换 |
+| `log.slow_request_threshold` | 下一请求起生效（dispatch 结束时读原子值；流式响应在响应体读尽时判定） |
 | `http.request_timeout` | 下一请求起生效（dispatch 每次读原子值） |
 | `http.transfer_stall_timeout` | 下一请求起生效（准入处理器每请求读原子值） |
 | `http.min_part_size` | 下一次 CompleteMultipartUpload 起生效 |
@@ -60,7 +61,9 @@
 - `auth.*`（静态 root 凭证、凭证文件路径、同步周期）——动态凭证与凭证文件
   本就有各自的热加载通道；
 - `website` 静态条目（动态条目走 `?website` API）、`lifecycle.scan_interval`、
-  `usage.*`、`audit.*`、`ratelimit.max_tracked`、停机/背压边界。
+  `usage.*`、`audit.*`、`ratelimit.max_tracked`、停机/背压边界；
+- `log.format / file / max_size / max_files / async*`——sink 与格式器在
+  `Logger::init` 一次性构建（roadmap §5.2）。
 
 ## 5. 分期保留
 

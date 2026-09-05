@@ -46,6 +46,7 @@ Report shape (admin API / `s3adm reload` output):
 | Key | How it takes effect |
 | --- | --- |
 | `log.level` | spdlog's global level switches immediately |
+| `log.slow_request_threshold` | from the next request (dispatch reads an atomic at its end; streaming responses judge at end of body) |
 | `http.request_timeout` | from the next request (dispatch reads an atomic per request) |
 | `http.transfer_stall_timeout` | from the next request (the admission handler reads an atomic per request) |
 | `http.min_part_size` | from the next CompleteMultipartUpload |
@@ -70,7 +71,9 @@ Report shape (admin API / `s3adm reload` output):
   channels;
 - static `website` entries (dynamic ones go through `?website`),
   `lifecycle.scan_interval`, `usage.*`, `audit.*`, `ratelimit.max_tracked`,
-  shutdown/backpressure boundaries.
+  shutdown/backpressure boundaries;
+- `log.format / file / max_size / max_files / async*` — sink and formatter are
+  built once in `Logger::init` (roadmap §5.2).
 
 ## 5. Deferred
 

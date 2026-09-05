@@ -40,11 +40,13 @@ struct AdmissionEnv {
     std::shared_ptr<ThreadPoolExecutor> exec = std::make_shared<ThreadPoolExecutor>(*pool);
     std::shared_ptr<AsyncSemaphore> inflight;
     std::shared_ptr<CancelSource> shutdown_src = std::make_shared<CancelSource>();
+    std::shared_ptr<AdmissionCounters> counters = std::make_shared<AdmissionCounters>();
     Handler handler;
 
     AdmissionEnv(long cap, Handler dispatch, std::chrono::seconds stall = 0s)
         : inflight(std::make_shared<AsyncSemaphore>(cap, exec.get())),
-          handler(make_admission_handler(inflight, stall, shutdown_src, std::move(dispatch))) {}
+          handler(make_admission_handler(inflight, stall, shutdown_src, std::move(dispatch),
+                                         StallGuardReader::kMinProgressBytes, counters)) {}
 
     HttpResponse call(HttpRequest req = {}) { return sync_wait(handler(std::move(req))); }
 };
@@ -260,4 +262,90 @@ TEST(stall_guard_eof_and_disabled_passthrough) {
     CHECK(dynamic_cast<StallGuardReader*>(raw.get()) == nullptr);
     // A null reader passes through as-is (the no-body response path)
     CHECK(guard_stalls(nullptr, 1s) == nullptr);
+}
+
+// ---------- roadmap §5.3: admission-gate counters ----------
+
+// Immediate permits land in the first wait bucket without counting as queued; a
+// request that had to wait is counted once with its wait time; a cancellation
+// while queued is counted separately
+TEST(admission_counters_wait_queue_and_cancel) {
+    AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
+        HttpResponse r;
+        r.stream_body = std::make_unique<ZeroReader>(64);
+        co_return r;
+    });
+    auto ld = [](const std::atomic<uint64_t>& a) { return a.load(); };
+    auto first = env.call();  // immediate
+    CHECK_EQ(ld(env.counters->wait_count), uint64_t{1});
+    CHECK_EQ(ld(env.counters->wait_hist[0]), uint64_t{1});
+    CHECK_EQ(ld(env.counters->queued), uint64_t{0});
+
+    std::thread second([&] {
+        auto resp = env.call();
+        CHECK_EQ(resp.status, 200);
+        resp.stream_body.reset();
+    });
+    CHECK(eventually([&] { return env.inflight->waiting() == 1; }));
+    std::this_thread::sleep_for(30ms);  // measurable wait
+    first.stream_body.reset();
+    second.join();
+    CHECK_EQ(ld(env.counters->wait_count), uint64_t{2});
+    CHECK_EQ(ld(env.counters->queued), uint64_t{1});
+    CHECK(ld(env.counters->wait_sum_us) >= 20'000);
+    CHECK_EQ(ld(env.counters->wait_hist[0]), uint64_t{1});  // the queued one is in a later bucket
+    CHECK_EQ(ld(env.counters->cancelled), uint64_t{0});
+
+    // Cancelled while queued: 503 and the cancellation counter, no wait sample
+    auto holder = env.call();
+    CancelSource src;
+    std::thread third([&] {
+        HttpRequest req;
+        req.cancel = src.token();
+        auto resp = env.call(std::move(req));
+        CHECK_EQ(resp.status, 503);
+    });
+    CHECK(eventually([&] { return env.inflight->waiting() == 1; }));
+    src.request_cancel();
+    third.join();
+    CHECK_EQ(ld(env.counters->cancelled), uint64_t{1});
+    CHECK_EQ(ld(env.counters->wait_count), uint64_t{3});
+    holder.stream_body.reset();
+}
+
+// Stall cuts are attributed to the direction that stalled
+TEST(admission_counters_stall_cuts_per_direction) {
+    // Response side: the handler answers with a dripping stream
+    AdmissionEnv out_env(
+        4,
+        [](HttpRequest) -> Task<HttpResponse> {
+            HttpResponse r;
+            r.stream_body = std::make_unique<DripReader>();
+            co_return r;
+        },
+        1s);
+    auto resp = out_env.call();
+    std::byte b[1];
+    CHECK_EQ(sync_wait(resp.stream_body->read(std::span(b))), size_t{1});
+    std::this_thread::sleep_for(1100ms);
+    CHECK_THROWS_S3(sync_wait(resp.stream_body->read(std::span(b))), s3::S3ErrorCode::RequestTimeout);
+    CHECK_EQ(out_env.counters->stalls_out.load(), uint64_t{1});
+    CHECK_EQ(out_env.counters->stalls_in.load(), uint64_t{0});
+
+    // Request side: the handler reads a dripping body
+    AdmissionEnv in_env(
+        4,
+        [](HttpRequest req) -> Task<HttpResponse> {
+            std::byte buf[1];
+            co_await req.body->read(std::span(buf));
+            std::this_thread::sleep_for(1100ms);
+            co_await req.body->read(std::span(buf));  // throws RequestTimeout
+            co_return HttpResponse{};
+        },
+        1s);
+    HttpRequest req;
+    req.body = std::make_unique<DripReader>();
+    CHECK_THROWS_S3(in_env.call(std::move(req)), s3::S3ErrorCode::RequestTimeout);
+    CHECK_EQ(in_env.counters->stalls_in.load(), uint64_t{1});
+    CHECK_EQ(in_env.counters->stalls_out.load(), uint64_t{0});
 }

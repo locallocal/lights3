@@ -23,6 +23,27 @@ struct AdmissionStats {
     long capacity = 0;   // total permits
     long available = 0;  // remaining permits (capacity - available = in flight)
     size_t waiting = 0;  // requests queued on the semaphore
+    // Cumulative counters (roadmap §5.3, http/admission.h AdmissionCounters);
+    // rendered only when `counters` is set (test/static assemblies may not wire them)
+    bool counters = false;
+    std::array<uint64_t, 6> wait_hist{};  // bounds = AdmissionCounters::kWaitBounds + Inf
+    uint64_t wait_sum_us = 0;
+    uint64_t wait_count = 0;
+    uint64_t queued = 0;         // had to wait for a permit
+    uint64_t cancelled = 0;      // cancelled while queued (503 SlowDown)
+    uint64_t stalls_in = 0;      // transfer stall cuts, request bodies
+    uint64_t stalls_out = 0;     // transfer stall cuts, response bodies
+};
+
+// Static-website plane events (roadmap §5.3, docs/static-website.md)
+enum class WebsiteEvent {
+    AnonRead = 0,       // request admitted on the anonymous plane
+    IndexRewrite,       // key rewritten to the index document
+    ErrorDocument,      // error answered with the site's error document / built-in page
+    Redirect,           // 301/302 answered by the website layer (RedirectAllRequestsTo,
+                        // RoutingRules, slash redirect, x-amz-website-redirect-location)
+    Throttled,          // per-bucket anonymous rate limit (503)
+    Count_
 };
 
 class Metrics {
@@ -50,6 +71,10 @@ public:
     // Per-client rate limiting (roadmap §4.2): rejections by key space
     void ratelimit_rejected(bool by_access_key) {
         (by_access_key ? rl_ak_ : rl_ip_).fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void website(WebsiteEvent e) {
+        website_[size_t(e)].fetch_add(1, std::memory_order_relaxed);
     }
 
     void mpu_created() { mpu_created_.fetch_add(1, std::memory_order_relaxed); }
@@ -96,6 +121,8 @@ private:
     std::atomic<uint64_t> inflight_{0};
     std::atomic<uint64_t> by_method_[kMethodCount]{};
     std::atomic<uint64_t> by_status_class_[6]{};  // 1xx..5xx (index = hundreds digit)
+    std::atomic<uint64_t> by_status_[600]{};      // exact code (roadmap §5.3); only nonzero rendered
+    std::atomic<uint64_t> website_[size_t(WebsiteEvent::Count_)]{};
     std::atomic<uint64_t> latency_hist_[kLatencyBuckets.size() + 1]{};
     std::atomic<uint64_t> latency_sum_us_{0};
     std::atomic<uint64_t> latency_count_{0};

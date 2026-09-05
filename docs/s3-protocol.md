@@ -211,8 +211,10 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
   队列满时按 `async_overflow` 阻塞或覆盖最旧记录；进程退出前 `Logger::shutdown`
   排空队列。审计日志（[multi-tenancy.md §5](multi-tenancy.md)）仍是独立文件，
   不受这些开关影响。
-- **Metrics**（Prometheus 文本格式，`GET /-/metrics`，匿名端点、与数据面
-  同一监听，访问面需靠部署侧限制）：
+- **Metrics**（Prometheus 文本格式，`GET /-/metrics`，与数据面同一监听；
+  `http.metrics_access: anonymous`（默认，经典抓取）或 `root`——后者要求
+  GET 由 root 凭证签名，因输出含 bucket 名与后端拓扑等业务信息；可热更新，
+  认证整体关闭时无意义；`/-/healthz|readyz` 始终匿名）：
   请求数/延迟直方图（全局 + 按 `(api, backend)` 分维：
   `lights3_api_requests_total{api,backend,class}`、
   `lights3_api_request_duration_seconds{api,backend}`，api 取自分派表 `Route::name`，
@@ -222,6 +224,18 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
   `lights3_backend_op_seconds{backend,op}` 直方图与
   `lights3_backend_errors_total{backend,op}`（5xx/传输异常计错误，4xx 不计）
   由计时装饰器对六个后端统一产出（roadmap §5.1）。
+  roadmap §5.3 补口：**精确状态码** `lights3_responses_by_status_total{status}`
+  （稀疏输出，出现过的码才有一行；206/304 比例是网站/CDN 场景的关键量）；
+  **准入闸门** `lights3_admission_wait_seconds` 直方图（每个请求一样本，直接
+  拿到许可的落在首桶）、`lights3_admission_queued_total`（排过队的请求数）、
+  `lights3_admission_cancelled_total`（排队中被取消 → 503）、
+  `lights3_transfer_stalls_total{direction=in|out}`（停滞守卫掐断次数）；
+  **L1** `lights3_http_requests_total`（L1 解析成功的请求数，÷ accepted 即
+  keep-alive 复用率）、`lights3_http_tls_handshakes_total{result=ok|failed}`、
+  `lights3_http_parse_errors_total`（请求行/头部/framing 畸形；详见
+  [http-adapter.md §2.2](http-adapter.md)）；**网站面**
+  `lights3_website_events_total{event=anon_read|index_rewrite|error_document|redirect|throttled}`
+  （[static-website.md §6](static-website.md)）。
 - **健康检查**：`GET /-/healthz`（进程存活）与 `GET /-/readyz`
   （各后端探活：对所有后端一律 `co_await list_buckets()`，任一失败
   返回 503 并在响应体中报告失败的后端名）。三个读端点只认 GET/HEAD，

@@ -134,10 +134,27 @@ void Application::start_server() {
     // (docs/archive/gaps.md §7): under load testing, "stuck at admission" vs
     // "stuck in the pool" and "how long the timer was blocked by a slow
     // callback" can all be read straight from /-/metrics
+    admission_counters_ = std::make_shared<http::AdmissionCounters>();
     service_->set_admission_stats(
-        [inflight = inflight_]() -> s3::AdmissionStats {
-            return {inflight->capacity(), inflight->available(), inflight->waiting()};
+        [inflight = inflight_, ctr = admission_counters_]() -> s3::AdmissionStats {
+            s3::AdmissionStats st;
+            st.capacity = inflight->capacity();
+            st.available = inflight->available();
+            st.waiting = inflight->waiting();
+            st.counters = true;
+            auto ld = [](const std::atomic<uint64_t>& a) {
+                return a.load(std::memory_order_relaxed);
+            };
+            for (size_t i = 0; i < st.wait_hist.size(); ++i) st.wait_hist[i] = ld(ctr->wait_hist[i]);
+            st.wait_sum_us = ld(ctr->wait_sum_us);
+            st.wait_count = ld(ctr->wait_count);
+            st.queued = ld(ctr->queued);
+            st.cancelled = ld(ctr->cancelled);
+            st.stalls_in = ld(ctr->stalls_in);
+            st.stalls_out = ld(ctr->stalls_out);
+            return st;
         });
+    service_->set_metrics_root_only(cfg_.http.metrics_access == "root");
     service_->set_reload_hook([this] { return reload_config(); });
     service_->set_timer_stats([] { return TimerQueue::instance().stats(); });
     // L1 connection counters + per-client rate limits (roadmap §4.2)
@@ -176,7 +193,7 @@ void Application::start_server() {
     server_->set_handler(http::make_admission_handler(
         inflight_, stall_sec_, shutdown_src_,
         [service = service_](http::HttpRequest req) { return service->dispatch(std::move(req)); },
-        stall_progress));
+        stall_progress, admission_counters_));
     server_->listen(cfg_.http.bind, cfg_.http.port);
 }
 
@@ -407,6 +424,12 @@ ConfigReloadReport Application::reload_config() {
                                         cfg_.http.transfer_stall_timeout_sec,
                                         fresh.http.transfer_stall_timeout_sec));
         cfg_.http.transfer_stall_timeout_sec = fresh.http.transfer_stall_timeout_sec;
+    }
+    if (cfg_.http.metrics_access != fresh.http.metrics_access) {
+        service_->set_metrics_root_only(fresh.http.metrics_access == "root");
+        report.applied.push_back(
+            change("http.metrics_access", cfg_.http.metrics_access, fresh.http.metrics_access));
+        cfg_.http.metrics_access = fresh.http.metrics_access;
     }
     if (cfg_.http.min_part_size != fresh.http.min_part_size) {
         service_->set_min_part_size(fresh.http.min_part_size);

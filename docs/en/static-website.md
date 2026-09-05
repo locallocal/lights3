@@ -130,6 +130,14 @@ read-only policy (that bucket only, Read only). Everything else is unchanged:
 - The `website` subresource and the redirect header both left the 501
   blocklists.
 
+- **Metrics** (roadmap §5.3): `lights3_website_events_total{event}` —
+  `anon_read` (requests entering the anonymous plane), `index_rewrite` (key
+  rewritten to the index document), `error_document` (error answered with the
+  error document / built-in page), `redirect` (3xx from RedirectAllRequestsTo /
+  RoutingRules / the slash 302 / `x-amz-website-redirect-location`),
+  `throttled` (`max_rps` rejections); together with
+  `lights3_responses_by_status_total{status}` the 206/304 share is readable.
+
 ## 5. Remaining options (notes)
 
 - `GET /prefix` (no trailing slash) 302-redirecting to `/prefix/` when

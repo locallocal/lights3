@@ -15,6 +15,7 @@ void Metrics::request_end(std::string_view method, int status, double seconds) {
     by_method_[method_index(method)].fetch_add(1, std::memory_order_relaxed);
     int cls = status / 100;
     if (cls >= 1 && cls <= 5) by_status_class_[cls].fetch_add(1, std::memory_order_relaxed);
+    if (status >= 100 && status < 600) by_status_[status].fetch_add(1, std::memory_order_relaxed);
 
     size_t b = 0;
     while (b < kLatencyBuckets.size() && seconds > kLatencyBuckets[b]) ++b;
@@ -89,6 +90,13 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_responses_total{class=\"" << cls << "xx\"} "
            << by_status_class_[cls].load(std::memory_order_relaxed) << "\n";
 
+    // Exact status codes (roadmap §5.3): 200/204/206/304 tell a website/CDN story the
+    // class counter cannot; rendered sparsely, a code appears once it occurred
+    os << "# TYPE lights3_responses_by_status_total counter\n";
+    for (int st = 100; st < 600; ++st)
+        if (uint64_t n = by_status_[st].load(std::memory_order_relaxed))
+            os << "lights3_responses_by_status_total{status=\"" << st << "\"} " << n << "\n";
+
     os << "# TYPE lights3_inflight_requests gauge\n";
     os << "lights3_inflight_requests " << inflight_.load(std::memory_order_relaxed) << "\n";
 
@@ -151,6 +159,19 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
                    << "\n";
             }
         }
+    }
+
+    // Static-website plane (roadmap §5.3)
+    {
+        static constexpr const char* kWebsiteEvents[] = {"anon_read", "index_rewrite",
+                                                         "error_document", "redirect",
+                                                         "throttled"};
+        static_assert(sizeof(kWebsiteEvents) / sizeof(kWebsiteEvents[0]) ==
+                      size_t(WebsiteEvent::Count_));
+        os << "# TYPE lights3_website_events_total counter\n";
+        for (size_t i = 0; i < size_t(WebsiteEvent::Count_); ++i)
+            os << "lights3_website_events_total{event=\"" << kWebsiteEvents[i] << "\"} "
+               << website_[i].load(std::memory_order_relaxed) << "\n";
     }
 
     // Per-client rate limiting (roadmap §4.2)
@@ -223,6 +244,16 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_http_timeouts_total{phase=\"header\"} " << st.timeouts_header << "\n";
         os << "lights3_http_timeouts_total{phase=\"body\"} " << st.timeouts_body << "\n";
         os << "lights3_http_timeouts_total{phase=\"write\"} " << st.timeouts_write << "\n";
+        // roadmap §5.3: requests parsed at L1 (÷ accepted = keep-alive reuse factor),
+        // TLS handshake outcomes, malformed requests
+        os << "# TYPE lights3_http_requests_total counter\n";
+        os << "lights3_http_requests_total " << st.requests << "\n";
+        os << "# TYPE lights3_http_tls_handshakes_total counter\n";
+        os << "lights3_http_tls_handshakes_total{result=\"ok\"} " << st.tls_handshakes_ok << "\n";
+        os << "lights3_http_tls_handshakes_total{result=\"failed\"} " << st.tls_handshakes_failed
+           << "\n";
+        os << "# TYPE lights3_http_parse_errors_total counter\n";
+        os << "lights3_http_parse_errors_total " << st.parse_errors << "\n";
     }
 
     // Ingress throttling queue depth (docs/archive/gaps.md §7): the inflight semaphore is the process-wide sole admission gate
@@ -234,6 +265,29 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_admission_available " << st.available << "\n";
         os << "# TYPE lights3_admission_waiting gauge\n";
         os << "lights3_admission_waiting " << st.waiting << "\n";
+        // roadmap §5.3: how long requests wait for a permit, how many had to, how
+        // many gave up in the queue, and stall-guard cuts per direction
+        if (st.counters) {
+            static constexpr double kWaitBounds[] = {0.001, 0.01, 0.1, 1.0, 10.0};
+            os << "# TYPE lights3_admission_wait_seconds histogram\n";
+            uint64_t acum = 0;
+            for (size_t i = 0; i < 5; ++i) {
+                acum += st.wait_hist[i];
+                os << "lights3_admission_wait_seconds_bucket{le=\"" << kWaitBounds[i] << "\"} "
+                   << acum << "\n";
+            }
+            acum += st.wait_hist[5];
+            os << "lights3_admission_wait_seconds_bucket{le=\"+Inf\"} " << acum << "\n";
+            os << "lights3_admission_wait_seconds_sum " << st.wait_sum_us / 1e6 << "\n";
+            os << "lights3_admission_wait_seconds_count " << st.wait_count << "\n";
+            os << "# TYPE lights3_admission_queued_total counter\n";
+            os << "lights3_admission_queued_total " << st.queued << "\n";
+            os << "# TYPE lights3_admission_cancelled_total counter\n";
+            os << "lights3_admission_cancelled_total " << st.cancelled << "\n";
+            os << "# TYPE lights3_transfer_stalls_total counter\n";
+            os << "lights3_transfer_stalls_total{direction=\"in\"} " << st.stalls_in << "\n";
+            os << "lights3_transfer_stalls_total{direction=\"out\"} " << st.stalls_out << "\n";
+        }
     }
 
     // Timer thread health (docs/archive/gaps.md §7): slow callbacks cascade into delaying tiered scans /

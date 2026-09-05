@@ -79,6 +79,9 @@ struct HttpConfig {
     // above the limit; without one, per-connection threads/coroutine frames/buffers
     // can exhaust memory
     int max_connections = 4096;
+    // /-/metrics exposure (roadmap §5.3): anonymous (default, classic scrape) or
+    // root (a statically configured credential must sign the GET). Hot-reloadable
+    std::string metrics_access = "anonymous";
     std::string base_domain;  // non-empty enables virtual-host style (docs/s3-protocol.md §2)
     // TLS (docs/archive/gaps.md §7): HTTPS is enabled when both cert and key are given.
     // SigV4's UNSIGNED-PAYLOAD integrity relies on transport-layer encryption, and

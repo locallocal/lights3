@@ -13,6 +13,7 @@
 // driver's idle_timeout.
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <memory>
 #include <optional>
@@ -33,12 +34,15 @@ public:
     // default, and every window would misjudge a healthy slow connection as stalled
     static constexpr uint64_t kMinProgressBytes = 64 * 1024;
 
+    // stalls: optional counter bumped on every cut (roadmap §5.3)
     StallGuardReader(std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
-                     uint64_t min_progress = kMinProgressBytes)
+                     uint64_t min_progress = kMinProgressBytes,
+                     std::atomic<uint64_t>* stalls = nullptr)
         : inner_(std::move(inner)),
           window_(window),
           min_progress_(min_progress ? min_progress : 1),
-          mark_(Clock::now()) {}
+          mark_(Clock::now()),
+          stalls_(stalls) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {
         size_t n = co_await inner_->read(buf);
@@ -49,6 +53,7 @@ public:
             moved_ = 0;
             mark_ = now;
         } else if (now - mark_ > window_) {
+            if (stalls_) stalls_->fetch_add(1, std::memory_order_relaxed);
             throw s3::S3Error(s3::S3ErrorCode::RequestTimeout,
                               "Transfer stalled: less than " + std::to_string(min_progress_) +
                                   " bytes moved within the transfer stall timeout.");
@@ -65,14 +70,16 @@ private:
     uint64_t min_progress_;
     Clock::time_point mark_;
     uint64_t moved_ = 0;
+    std::atomic<uint64_t>* stalls_;
 };
 
 // Returns the reader unchanged when window <= 0 (guard disabled)
 inline std::unique_ptr<BodyReader> guard_stalls(
     std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
-    uint64_t min_progress = StallGuardReader::kMinProgressBytes) {
+    uint64_t min_progress = StallGuardReader::kMinProgressBytes,
+    std::atomic<uint64_t>* stalls = nullptr) {
     if (!inner || window.count() <= 0) return inner;
-    return std::make_unique<StallGuardReader>(std::move(inner), window, min_progress);
+    return std::make_unique<StallGuardReader>(std::move(inner), window, min_progress, stalls);
 }
 
 }  // namespace lights3::http

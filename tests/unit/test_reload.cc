@@ -145,7 +145,8 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     CHECK(r0.ok && r0.applied.empty() && r0.requires_restart.empty());
     // Reloadable subset + a startup-only key + new routing rules
     write_file(path, base_config("  request_timeout: 120s\n  transfer_stall_timeout: 60s\n"
-                                 "  min_part_size: 0\n  max_connections: 99\nruntime:\n"
+                                 "  min_part_size: 0\n  max_connections: 99\n"
+                                 "  metrics_access: root\nruntime:\n"
                                  "  max_inflight_requests: 200\nratelimit:\n  per_ip_rps: 50\n",
                                  "  rules:\n    - match: \"logs-*\"\n      backend: b\n"));
     // log level lives at the end of base_config; rewrite it to debug
@@ -160,6 +161,7 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     CHECK(r1.ok);
     CHECK(has(r1.applied, "log.level: info -> debug"));
     CHECK(has(r1.applied, "log.slow_request_threshold(ms): 0 -> 250"));
+    CHECK(has(r1.applied, "http.metrics_access: anonymous -> root"));
     CHECK(has(r1.requires_restart, "log.format/file/max_size/max_files/async*"));
     CHECK(has(r1.applied, "http.request_timeout: 300 -> 120"));
     CHECK(has(r1.applied, "http.transfer_stall_timeout: 300 -> 60"));

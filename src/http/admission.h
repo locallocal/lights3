@@ -10,6 +10,7 @@
 // main.cc and the unit tests assemble the same code.
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -50,6 +51,28 @@ private:
     AsyncSemaphore::Permit permit_;
 };
 
+// Admission-gate counters (roadmap §5.3), rendered by /-/metrics next to the
+// three capacity gauges: the queue-wait histogram over every request (a request
+// that got its permit without queueing lands in the first bucket), how many had
+// to queue, how many were cancelled while queued (503), and transfer stall cuts
+// per direction. Lock-free; shared between the handler and the metrics snapshot
+struct AdmissionCounters {
+    static constexpr std::array<double, 5> kWaitBounds{0.001, 0.01, 0.1, 1.0, 10.0};
+    std::atomic<uint64_t> wait_hist[kWaitBounds.size() + 1]{};
+    std::atomic<uint64_t> wait_sum_us{0}, wait_count{0};
+    std::atomic<uint64_t> queued{0}, cancelled{0};
+    std::atomic<uint64_t> stalls_in{0}, stalls_out{0};
+
+    void record_wait(double seconds, bool had_to_queue) {
+        size_t b = 0;
+        while (b < kWaitBounds.size() && seconds > kWaitBounds[b]) ++b;
+        wait_hist[b].fetch_add(1, std::memory_order_relaxed);
+        wait_sum_us.fetch_add(static_cast<uint64_t>(seconds * 1e6), std::memory_order_relaxed);
+        wait_count.fetch_add(1, std::memory_order_relaxed);
+        if (had_to_queue) queued.fetch_add(1, std::memory_order_relaxed);
+    }
+};
+
 // Assembles the driver handler with admission control + transfer stall guard:
 // - Requests over the limit queue on inflight (FIFO) instead of being
 //   rejected; cancellation while queued (shutdown broadcast / request timeout
@@ -66,28 +89,48 @@ private:
 //   installed at the L1/L2 boundary so it covers all four drivers at once;
 //   disabled when stall <= 0
 // stall_sec is read per request so a config hot reload (roadmap §4.4) can change
-// the transfer stall bound without rebuilding the handler chain
+// the transfer stall bound without rebuilding the handler chain.
+// counters (optional) receives the queue-wait / cancellation / stall statistics
 inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
                                       std::shared_ptr<std::atomic<long>> stall_sec,
                                       std::shared_ptr<CancelSource> shutdown_src,
                                       Handler dispatch,
                                       uint64_t stall_min_progress =
-                                          StallGuardReader::kMinProgressBytes) {
-    return [inflight, stall_sec, shutdown_src, stall_min_progress,
+                                          StallGuardReader::kMinProgressBytes,
+                                      std::shared_ptr<AdmissionCounters> counters = nullptr) {
+    return [inflight, stall_sec, shutdown_src, stall_min_progress, counters,
             dispatch = std::move(dispatch)](HttpRequest req) -> Task<HttpResponse> {
         if (!req.cancel.valid()) req.cancel = shutdown_src->token();
         CancelToken tok = req.cancel;
         std::chrono::seconds stall(stall_sec->load(std::memory_order_relaxed));
+        auto* stalls_in = counters ? &counters->stalls_in : nullptr;
+        auto* stalls_out = counters ? &counters->stalls_out : nullptr;
         try {
-            auto permit = co_await inflight->acquire(tok);
-            req.body = guard_stalls(std::move(req.body), stall, stall_min_progress);
+            // Fast path first so the wait histogram tells "got a permit at once" from
+            // "queued": try_acquire never joins the queue, acquire does
+            AsyncSemaphore::Permit permit;
+            if (auto p = inflight->try_acquire()) {
+                permit = std::move(*p);
+                if (counters) counters->record_wait(0.0, false);
+            } else {
+                auto t0 = std::chrono::steady_clock::now();
+                permit = co_await inflight->acquire(tok);
+                if (counters)
+                    counters->record_wait(
+                        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+                            .count(),
+                        true);
+            }
+            req.body = guard_stalls(std::move(req.body), stall, stall_min_progress, stalls_in);
             auto resp = co_await dispatch(std::move(req));
-            resp.stream_body = guard_stalls(std::move(resp.stream_body), stall, stall_min_progress);
+            resp.stream_body =
+                guard_stalls(std::move(resp.stream_body), stall, stall_min_progress, stalls_out);
             if (resp.stream_body)
                 resp.stream_body = std::make_unique<PermitBodyReader>(
                     std::move(resp.stream_body), std::move(permit));
             co_return resp;
         } catch (const OperationCancelled&) {
+            if (counters) counters->cancelled.fetch_add(1, std::memory_order_relaxed);
             HttpResponse r;
             r.status = 503;
             r.headers.set("Content-Type", "application/xml");
@@ -107,11 +150,12 @@ inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
                                       std::shared_ptr<CancelSource> shutdown_src,
                                       Handler dispatch,
                                       uint64_t stall_min_progress =
-                                          StallGuardReader::kMinProgressBytes) {
+                                          StallGuardReader::kMinProgressBytes,
+                                      std::shared_ptr<AdmissionCounters> counters = nullptr) {
     return make_admission_handler(std::move(inflight),
                                   std::make_shared<std::atomic<long>>(stall.count()),
                                   std::move(shutdown_src), std::move(dispatch),
-                                  stall_min_progress);
+                                  stall_min_progress, std::move(counters));
 }
 
 }  // namespace lights3::http

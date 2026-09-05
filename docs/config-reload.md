@@ -45,6 +45,7 @@
 | `http.request_timeout` | 下一请求起生效（dispatch 每次读原子值） |
 | `http.transfer_stall_timeout` | 下一请求起生效（准入处理器每请求读原子值） |
 | `http.min_part_size` | 下一次 CompleteMultipartUpload 起生效 |
+| `http.metrics_access` | 下一次 `GET /-/metrics` 起生效（dispatch 读原子值） |
 | `runtime.max_inflight_requests` | `AsyncSemaphore::set_capacity`：调大立即唤醒排队请求；调小则等在途请求归还许可（`available` 可短暂为负，期间不再放行新请求） |
 | `ratelimit.per_ip_* / per_ak_*` | 重建限流器并原子替换；在途请求持有旧实例直到结束，不会悬空（`max_tracked` 除外：仅重启） |
 | `buckets.rules` | `BucketRouter::update` 原子换代规则表；`S3Service`、lifecycle runner、usage tracker 的路由副本共享同一张表；在途请求继续用它解析时的表 |

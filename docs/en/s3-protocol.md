@@ -235,8 +235,12 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
   `Logger::shutdown` drains the queue before the process exits. The audit log
   ([multi-tenancy.md §5](multi-tenancy.md)) stays a separate file, untouched by
   these knobs.
-- **Metrics** (Prometheus text format, `GET /-/metrics`, an anonymous
-  endpoint on the data-plane listener — restrict it at the deployment layer):
+- **Metrics** (Prometheus text format, `GET /-/metrics`, on the data-plane
+  listener; `http.metrics_access: anonymous` (default, the classic scrape) or
+  `root` — the latter requires the GET to be signed by a root credential, since
+  the output carries business information such as bucket names and backend
+  topology; hot-reloadable, moot when authentication is disabled altogether;
+  `/-/healthz|readyz` stay anonymous):
   request counts / latency histograms (global and per `(api, backend)`:
   `lights3_api_requests_total{api,backend,class}`,
   `lights3_api_request_duration_seconds{api,backend}`; api is the dispatch
@@ -248,6 +252,20 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
   `lights3_backend_errors_total{backend,op}` (5xx / transport exceptions count,
   4xx do not) are produced uniformly for all six backends by the metering
   decorator (roadmap §5.1).
+  roadmap §5.3 additions: **exact status codes**
+  `lights3_responses_by_status_total{status}` (sparse — a code gets a line once
+  it occurred; the 206/304 share is the key website/CDN quantity); the
+  **admission gate** `lights3_admission_wait_seconds` histogram (one sample per
+  request, an immediate permit lands in the first bucket),
+  `lights3_admission_queued_total` (requests that had to wait),
+  `lights3_admission_cancelled_total` (cancelled while queued → 503),
+  `lights3_transfer_stalls_total{direction=in|out}` (stall-guard cuts); **L1**
+  `lights3_http_requests_total` (requests parsed at L1; ÷ accepted = keep-alive
+  reuse factor), `lights3_http_tls_handshakes_total{result=ok|failed}`,
+  `lights3_http_parse_errors_total` (malformed request line / headers /
+  framing; see [http-adapter.md §2.2](http-adapter.md)); the **website plane**
+  `lights3_website_events_total{event=anon_read|index_rewrite|error_document|redirect|throttled}`
+  ([static-website.md §6](static-website.md)).
 - **Health checks**: `GET /-/healthz` (process liveness) and `GET /-/readyz`
   (per-backend probing: `co_await list_buckets()` uniformly against all backends;
   any failure returns 503 with the failing backend names reported in the body).

@@ -20,6 +20,7 @@ http:
   # body_timeout: 60s        # inactivity bound on one request-body read (slow uploads)
   # write_timeout: 60s       # inactivity bound on one response write (slow downloads)
   # max_requests_per_connection: 1024   # then Connection: close (LB re-balancing); 0 = unlimited
+  # metrics_access: anonymous  # root = GET /-/metrics must be signed by a root credential (roadmap §5.3, hot-reloadable)
   # Minimum size for non-final multipart parts (AWS fixes it at 5MiB). 0 = no limit —
   # relax it when fronted by toolchains that don't honor this rule, or when this
   # instance is merely a proxy for another lights3

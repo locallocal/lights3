@@ -324,6 +324,17 @@ TEST(config_log_section) {
     CHECK(throws([] { parse_duration_ms("99999999h"); }));
 }
 
+TEST(config_metrics_access) {
+    const char* backends = "backends:\n  - name: m\n    type: memory\n";
+    CHECK_EQ(Config::from_string(backends).http.metrics_access, "anonymous");
+    CHECK_EQ(Config::from_string(std::string("http:\n  metrics_access: root\n") + backends)
+                 .http.metrics_access,
+             "root");
+    CHECK(throws([&] {
+        Config::from_string(std::string("http:\n  metrics_access: public\n") + backends);
+    }));
+}
+
 TEST(config_bucket_rule_rejects_empty_fields) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // An empty glob can never match a bucket name; an empty backend surfaced as unknown backend ""

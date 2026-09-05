@@ -2456,3 +2456,78 @@ TEST(lifecycle_runner_pass) {
     auto s2 = sync_wait(runner.run_once());
     CHECK_EQ(s2.objects_expired, uint64_t{0});
 }
+
+// ---------- roadmap §5.3: website-plane events on /-/metrics, /-/metrics root gate ----------
+
+TEST(service_website_metrics_events) {
+    AuthConfig acfg;
+    acfg.credentials = {{"TESTAK", "test-sk"}};
+    auto auth = SigV4Authenticator::build(acfg);
+    S3Service svc(make_router(), auth);
+    WebsiteBucket site{"site", "index.html", "error.html"};
+    site.max_rps = 2;
+    svc.set_website_buckets({site});
+    auto signed_put = [&](const std::string& path, const std::string& body) {
+        auto req = make_req("PUT", path, body);
+        auth.sign(req, acfg.credentials[0], util::sha256_hex(body));
+        CHECK_EQ(sync_wait(svc.dispatch(std::move(req))).status, 200);
+    };
+    {
+        auto req = make_req("PUT", "/site");
+        auth.sign(req, acfg.credentials[0]);
+        CHECK_EQ(sync_wait(svc.dispatch(std::move(req))).status, 200);
+    }
+    signed_put("/site/index.html", "<h1>root</h1>");
+    signed_put("/site/error.html", "<h1>err</h1>");
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/"))).status, 200);        // index rewrite
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/nope"))).status, 404);    // error document
+    // Third anonymous read within the same second trips the per-bucket limit (max_rps = 2)
+    int throttled = 0;
+    for (int i = 0; i < 3; ++i)
+        if (sync_wait(svc.dispatch(make_req("GET", "/site/index.html"))).status == 503) ++throttled;
+    CHECK(throttled >= 1);
+    auto metrics = sync_wait(svc.dispatch(make_req("GET", "/-/metrics")));
+    CHECK_EQ(metrics.status, 200);
+    auto count = [&](const std::string& event) {
+        std::string needle = "lights3_website_events_total{event=\"" + event + "\"} ";
+        auto pos = metrics.small_body.find(needle);
+        if (pos == std::string::npos) return -1;
+        return std::atoi(metrics.small_body.c_str() + pos + needle.size());
+    };
+    CHECK_EQ(count("index_rewrite"), 1);
+    CHECK_EQ(count("error_document"), 1);
+    CHECK_EQ(count("throttled"), throttled);
+    CHECK_EQ(count("anon_read"), 5 - throttled);
+    CHECK_EQ(count("redirect"), 0);
+    CHECK(contains(metrics.small_body, "lights3_responses_by_status_total{status=\"404\"} 1\n"));
+}
+
+TEST(service_metrics_root_gate) {
+    AuthConfig acfg;
+    acfg.credentials = {{"ROOTAK", "root-sk"}};
+    auto auth = SigV4Authenticator::build(acfg);
+    S3Service svc(make_router(), auth);
+    auto store = sync_wait(CredentialStore::load(std::make_shared<storage::MemoryBackend>(), acfg));
+    svc.set_credential_store(store);
+    // Default (anonymous): the classic scrape works unsigned
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/-/metrics"))).status, 200);
+    svc.set_metrics_root_only(true);
+    auto denied = sync_wait(svc.dispatch(make_req("GET", "/-/metrics")));
+    CHECK_EQ(denied.status, 403);
+    CHECK(contains(denied.small_body, "<Code>AccessDenied</Code>"));
+    auto head = sync_wait(svc.dispatch(make_req("HEAD", "/-/metrics")));
+    CHECK_EQ(head.status, 403);
+    // Root signature admits; the probes next door stay anonymous
+    auto signed_req = make_req("GET", "/-/metrics");
+    auth.sign(signed_req, acfg.credentials[0]);
+    auto ok = sync_wait(svc.dispatch(std::move(signed_req)));
+    CHECK_EQ(ok.status, 200);
+    CHECK(contains(ok.small_body, "lights3_requests_total"));
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/-/healthz"))).status, 200);
+    svc.set_metrics_root_only(false);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/-/metrics"))).status, 200);
+    // With authentication disabled altogether the gate is moot
+    auto open = make_service_noauth();
+    open.set_metrics_root_only(true);
+    CHECK_EQ(sync_wait(open.dispatch(make_req("GET", "/-/metrics"))).status, 200);
+}

@@ -333,6 +333,10 @@ Config Config::from_string(const std::string& text) {
         cfg.http.max_connections =
             to_int("http.max_connections", http->get("max_connections"), cfg.http.max_connections);
         check_range("http.max_connections", cfg.http.max_connections, 1, 1'000'000);
+        cfg.http.metrics_access = http->get("metrics_access", cfg.http.metrics_access);
+        if (cfg.http.metrics_access != "anonymous" && cfg.http.metrics_access != "root")
+            throw std::runtime_error("config: http.metrics_access must be anonymous|root, got '" +
+                                     cfg.http.metrics_access + "'");
         // TLS (docs/archive/gaps.md §7): enabled only when both are given; giving just one is surely a misconfiguration
         cfg.http.tls_cert = http->get("tls_cert", cfg.http.tls_cert);
         cfg.http.tls_key = http->get("tls_key", cfg.http.tls_key);

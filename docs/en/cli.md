@@ -120,6 +120,11 @@ data back first, then `load`.
 
 ### 2.3 `fsck`
 
+> The same scrub can be triggered and polled on a running gateway through the
+> admin plane: `POST/GET /-/admin/fsck/<backend>` and `s3adm fsck --offline
+> <backend>` (§3.5). The offline CLI and the admin endpoint share the type
+> dispatch and the findings definition in `app/fsck_jobs.h`.
+
 Offline data-integrity scrub (roadmap §3.1; implementation details in
 [storage/duostore-core.md §8.4](../storage/duostore-core.md) and
 [storage/localfs.md §11](../storage/localfs.md)). Same pattern as dump/load:
@@ -341,7 +346,37 @@ s3adm bench list -b test -n 10000 --max-keys=1000
 s3adm bench list-buckets -j 16
 ```
 
-### 3.5 `fsck` — online object verification
+### 3.5 `fsck` — online object verification / server-side scrub
+
+**`--offline <backend>`** (backlog-sequence ③): instead of the S3 API, ask the
+**running gateway** to scrub one backend (duostore manifest/crc/refs
+reconciliation, localfs/xlocalfs ETag full-verify -- the same implementation as
+`lights3 fsck`) through the admin plane:
+
+```text
+POST /-/admin/fsck/<backend>[?max_mbps=N]   root; 202 {"backend","job_id","running":true}
+                                            409 ScrubInProgress = a round is already running there
+                                            404 unknown backend; 400 the type has no offline scrub (memory/cloudproxy/tiered)
+GET  /-/admin/fsck/<backend>                200 {"running","job_id","started_at_ms","max_mbps",
+                                                 after completion also "finished_at_ms","duration_ms","kind","findings","aborted","stats"{…}}
+```
+
+`s3adm fsck --offline <backend> [--max-mbps=N] [--no-wait]` starts a round,
+polls every 0.5 s until it ends and prints the outcome document; exit code 1
+when `findings > 0` (duostore: corrupt + unreadable + refs_missing +
+meta_errors; localfs: etag_mismatches + read_errors) or `aborted`;
+`--no-wait` prints the job id and returns; `s3adm fsck --status <backend>`
+only queries. One job per backend at a time; a gateway shutdown interrupts a
+running scrub (`aborted: true`). Throttling is the offline CLI's
+`scrub_throttle.h`. Audit event `fsck.start`.
+
+```bash
+s3adm fsck --offline duodata --max-mbps=200     # wait, print the JSON outcome
+s3adm fsck --offline localdata --no-wait        # just the job id
+s3adm fsck --status localdata                   # progress / last outcome
+```
+
+The online mode below keeps its semantics:
 
 The online complement of `lights3 fsck` (§2.3): end-to-end verification through
 the S3 API — ListObjectsV2 page by page, then a streaming GET per object with

@@ -159,7 +159,7 @@ Unknown exceptions → `InternalError` (500); the log records the full stack tra
 
 Error codes specific to this implementation (no AWS counterpart): `QuotaExceeded`
 (403, quotas), `NoSuchQuotaConfiguration` (404), `NoSuchTenant` (404),
-`TenantAlreadyExists` (409), `TenantNotEmpty` (409); semantics in
+`TenantAlreadyExists` (409), `TenantNotEmpty` (409), `ScrubInProgress` (409, concurrent admin fsck); semantics in
 [multi-tenancy.md](multi-tenancy.md).
 and the response leaks no internal information.
 

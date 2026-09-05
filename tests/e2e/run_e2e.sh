@@ -732,6 +732,45 @@ if [[ -x "$S3ADM" ]]; then
     s3curl -o /dev/null -X DELETE "$BASE/admsite"
     BENCH_OUT=$(adm bench put --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K --keep 2>&1)
     check "s3adm bench put runs error-free" "0" "$(echo "$BENCH_OUT" | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
+    # backlog-sequence ③: the offline scrub through the admin plane (root only; the
+    # localfs-family and duostore backends have one, memory/cloudproxy/tiered do not)
+    FSCK_KIND=""
+    case "$BACKEND" in
+        localfs|xlocalfs|duostore|duostore-uring|duostore-redis|duostore-sqlite|duostore-rados|duostore-tikv) FSCK_KIND=yes ;;
+    esac
+    if [[ -n "$FSCK_KIND" ]]; then
+        check "admin fsck: unsigned refused" "403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/fsck/tierdata")"
+        check "admin fsck: unknown backend 404" "404" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/fsck/nope")"
+        check "admin fsck: status before any job" "0" "$(s3curl "$BASE/-/admin/fsck/tierdata" | grep -q '"running": false'; echo $?)"
+        OFF_OUT=$(adm fsck --offline tierdata 2>&1); OFF_RC=$?
+        check "s3adm fsck --offline completes clean" "0" "$OFF_RC"
+        check "s3adm fsck --offline prints the outcome document" "0" "$(echo "$OFF_OUT" | grep -q '"findings": 0'; echo $?)"
+        check "admin fsck: status shows the finished job" "0" "$(s3curl "$BASE/-/admin/fsck/tierdata" | grep -q '"job_id": 1'; echo $?)"
+        check "s3adm fsck --status" "0" "$(adm fsck --status tierdata 2>&1 | grep -q '"running": false'; echo $?)"
+        # A throttled round keeps the backend busy: a second start is refused with 409
+        check "admin fsck: throttled start accepted" "202" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/fsck/tierdata?max_mbps=1")"
+        check "admin fsck: concurrent start refused (409 ScrubInProgress)" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/fsck/tierdata")"
+        for _ in $(seq 1 600); do s3curl "$BASE/-/admin/fsck/tierdata" | grep -q '"running": false' && break; sleep 0.1; done
+        check "admin fsck: throttled round finished" "0" "$(s3curl "$BASE/-/admin/fsck/tierdata" | grep -q '"job_id": 2'; echo $?)"
+        if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
+            # Flip a byte inside a stored object's data file: the next round must report
+            # exactly one ETag mismatch and s3adm must exit 1
+            head -c 200000 /dev/urandom > "$WORK/fsck-victim.bin"
+            s3curl -o /dev/null -X PUT "$BASE/fsckbkt"
+            s3curl -o /dev/null -X PUT --data-binary "@$WORK/fsck-victim.bin" "$BASE/fsckbkt/victim"
+            corrupt=$(find "$WORK/data/fsckbkt" -type f -size +100k ! -name '.*' | head -1)
+            check "admin fsck: victim object stored on disk" "0" "$([[ -n "$corrupt" ]]; echo $?)"
+            if [[ -n "$corrupt" ]]; then
+                printf 'Z' | dd of="$corrupt" bs=1 seek=64 conv=notrunc 2>/dev/null
+                CORR_OUT=$(adm fsck --offline tierdata 2>&1); CORR_RC=$?
+                check "s3adm fsck --offline exits 1 on a corrupted object" "1" "$CORR_RC"
+                check "admin fsck: the corruption is one etag mismatch" "0" "$(echo "$CORR_OUT" | grep -q '"etag_mismatches": 1'; echo $?)"
+                check "admin fsck: findings counted" "0" "$(echo "$CORR_OUT" | grep -q '"findings": 1'; echo $?)"
+            fi
+            s3curl -o /dev/null -X DELETE "$BASE/fsckbkt/victim"
+            s3curl -o /dev/null -X DELETE "$BASE/fsckbkt"
+        fi
+    fi
     FSCK_OUT=$(adm fsck admbench 2>&1); FSCK_RC=$?
     check "s3adm fsck verifies the bench objects" "0" "$FSCK_RC"
     [[ $FSCK_RC -ne 0 ]] && echo "$FSCK_OUT"

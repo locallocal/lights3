@@ -102,6 +102,10 @@ tikv 上走引擎快照、在线一致（roadmap §3.7）；redis 无 MVCC，其
 
 ### 2.3 `fsck`
 
+> 在线网关上同一套 scrub 也能经 admin 面触发与轮询：`POST/GET /-/admin/fsck/<backend>`
+> 与 `s3adm fsck --offline <backend>`（§3.5）。离线 CLI 与 admin 端点共用
+> `app/fsck_jobs.h` 的类型分派与结论定义。
+
 离线数据完整性巡检（roadmap §3.1，实现细节见
 [storage/duostore-core.md §8.4](storage/duostore-core.md) 与
 [storage/localfs.md §11](storage/localfs.md)）。与
@@ -297,7 +301,34 @@ s3adm bench list -b test -n 10000 --max-keys=1000
 s3adm bench list-buckets -j 16
 ```
 
-### 3.5 `fsck` —— 在线对象校验
+### 3.5 `fsck` —— 在线对象校验 / 服务端 scrub
+
+**`--offline <backend>`**（backlog-sequence ③）：不走 S3 API，而是让**运行中的网关**
+对指定后端跑一轮离线 scrub（duostore 的 manifest/crc/refs 对账，localfs/xlocalfs 的
+ETag 全量 verify——与 `lights3 fsck` 同一实现），经 admin 面：
+
+```text
+POST /-/admin/fsck/<backend>[?max_mbps=N]   root；202 {"backend","job_id","running":true}
+                                            409 ScrubInProgress = 该后端已有一轮在跑
+                                            404 未知后端；400 该后端类型无离线 scrub（memory/cloudproxy/tiered）
+GET  /-/admin/fsck/<backend>                200 {"running","job_id","started_at_ms","max_mbps",
+                                                 完成后再加 "finished_at_ms","duration_ms","kind","findings","aborted","stats"{…}}
+```
+
+`s3adm fsck --offline <backend> [--max-mbps=N] [--no-wait]` 发起后每 0.5s 轮询到
+结束并打印结论文档，`findings > 0`（duostore：corrupt + unreadable + refs_missing +
+meta_errors；localfs：etag_mismatches + read_errors）或 `aborted` 时退出码 1；
+`--no-wait` 只打印 job id 立即返回；`s3adm fsck --status <backend>` 只查询。
+同一后端同一时刻一个 job；网关关停会中断在跑的 scrub（`aborted: true`）。
+限速与离线 CLI 同一 `scrub_throttle.h`。审计事件 `fsck.start`。
+
+```bash
+s3adm fsck --offline duodata --max-mbps=200     # 等到结束，打印 JSON 结论
+s3adm fsck --offline localdata --no-wait        # 只拿 job id
+s3adm fsck --status localdata                   # 进度 / 上次结论
+```
+
+原有在线模式（下）语义不变：
 
 `lights3 fsck`（§2.3）的在线补集：走 S3 API 端到端校验——ListObjectsV2 逐页
 列举，逐对象流式 GET 并在客户端重算 MD5 与 ETag 对照，顺带覆盖了网关读

@@ -168,6 +168,36 @@ void Application::start_server() {
         });
     service_->set_metrics_root_only(cfg_.http.metrics_access == "root");
     service_->set_reload_hook([this] { return reload_config(); });
+    // Offline scrub jobs on the live gateway (backlog-sequence ③): the raw backends
+    // (not the metered decorators -- the scrub is a maintenance traversal, not a
+    // request), one job per backend at a time, outcome kept for polling
+    fsck_jobs_ = std::make_unique<FsckJobs>(backends_);
+    auto fsck_failure = [](const FsckJobs::Failure& f) -> s3::S3Error {
+        switch (f.code) {
+            case FsckJobs::Error::NoSuchBackend: return s3::S3Error(s3::S3ErrorCode::NoSuchKey, f.message);
+            case FsckJobs::Error::Unsupported: return s3::S3Error(s3::S3ErrorCode::InvalidRequest, f.message);
+            case FsckJobs::Error::Busy: return s3::S3Error(s3::S3ErrorCode::ScrubInProgress, f.message);
+        }
+        return s3::S3Error(s3::S3ErrorCode::InternalError, f.message);
+    };
+    service_->set_fsck_hooks(
+        [this, fsck_failure](const std::string& backend, uint64_t bps) {
+            try {
+                nlohmann::json j = fsck_jobs_->status(backend);
+                j["job_id"] = fsck_jobs_->start(backend, bps);
+                j["running"] = true;
+                return j;
+            } catch (const FsckJobs::Failure& f) {
+                throw fsck_failure(f);
+            }
+        },
+        [this, fsck_failure](const std::string& backend) {
+            try {
+                return fsck_jobs_->status(backend);
+            } catch (const FsckJobs::Failure& f) {
+                throw fsck_failure(f);
+            }
+        });
     service_->set_timer_stats([] { return TimerQueue::instance().stats(); });
     // L1 connection counters + per-client rate limits (roadmap §4.2)
     // Both listeners' counters add up (accepted/active/timeouts are per-listener
@@ -604,6 +634,10 @@ void Application::shutdown() noexcept {
         ++shutdown_errors_;
     }
     close_backends();
+    // A scrub in flight aborts once its backend is closed; join its thread before
+    // the backends themselves go away
+    if (fsck_jobs_) fsck_jobs_->shutdown();
+    fsck_jobs_.reset();
     // The backends' shared_ptrs are still held by service (via router)
     // and handler (via server), so clearing backends_ alone triggers
     // no destruction. Release in reverse ownership order so backend

@@ -16,6 +16,7 @@
 #include "core/thread_pool.h"
 #include "http/admission.h"
 #include "http/server.h"
+#include "app/fsck_jobs.h"
 #include "s3/audit.h"
 #include "s3/auth/credential_store.h"
 #include "s3/quota.h"
@@ -112,6 +113,7 @@ private:
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;
     std::shared_ptr<AsyncSemaphore> inflight_;
     std::shared_ptr<CancelSource> shutdown_src_;
+    std::unique_ptr<FsckJobs> fsck_jobs_;  // backlog-sequence ③: /-/admin/fsck/<backend>
     std::unique_ptr<http::IHttpServer> server_;
     // Separate admin listener (backlog-sequence ②): same driver (builtin when the
     // data plane runs seastar, whose engine is a process singleton), same admission

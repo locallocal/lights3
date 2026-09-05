@@ -153,7 +153,7 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
 未知异常 → `InternalError`(500)，日志记完整堆栈，响应不泄漏内部信息。
 
 本实现自定义（AWS 无对应）的错误码：`QuotaExceeded`(403，配额)、
-`NoSuchQuotaConfiguration`(404)、`NoSuchTenant`(404)、`TenantAlreadyExists`(409)、
+`NoSuchQuotaConfiguration`(404)、`NoSuchTenant`(404)、`ScrubInProgress`(409，admin fsck 并发触发)、`TenantAlreadyExists`(409)、
 `TenantNotEmpty`(409)，语义见 [multi-tenancy.md](multi-tenancy.md)。
 
 ## 6. 一致性与语义说明（对客户端的承诺）

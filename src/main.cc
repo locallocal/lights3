@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "app/app.h"
+#include "app/fsck_jobs.h"
 #include "http/server.h"
 #include "storage/registry.h"
 #include "core/log.h"
@@ -684,41 +685,18 @@ void run_fsck(const Cmd& c) {
     const auto& backends = app.backends();
     auto it = backends.find(backend);
     if (it == backends.end()) throw std::runtime_error("fsck: no backend named '" + backend + "'");
-    uint64_t findings = 0;
-    bool aborted = false;
-#ifdef LIGHTS3_DUOSTORE
-    if (auto* duo = dynamic_cast<storage::DuoStoreBackend*>(it->second.get())) {
-        storage::duostore::DuoScrubOptions opt;
-        opt.max_bytes_per_sec = bps;
-        auto st = sync_wait(duo->run_scrub_once(opt));
-        LOG_INFO("fsck '{}': {} objects / {} parts / {} extents / {} bytes read; corrupt {}, "
-                 "unreadable {}, refs missing {}, refs stale {}, meta errors {}",
-                 backend, st.objects_scanned, st.parts_scanned, st.extents_checked,
-                 st.bytes_read, st.corrupt_extents, st.unreadable_extents, st.refs_missing,
-                 st.refs_stale, st.meta_errors);
-        findings =
-            st.corrupt_extents + st.unreadable_extents + st.refs_missing + st.meta_errors;
-        aborted = st.aborted;
-    } else
-#endif
-        if (auto* lfs = dynamic_cast<storage::LocalFsBackend*>(it->second.get())) {
-        storage::FsScrubOptions opt;
-        opt.max_bytes_per_sec = bps;
-        auto st = sync_wait(lfs->run_scrub_once(opt));
-        LOG_INFO("fsck '{}': {} objects / {} bytes read; mismatches {}, read errors {}, "
-                 "unverifiable {}, stubs skipped {}, races skipped {}, orphan sidecars {}",
-                 backend, st.objects_scanned, st.bytes_read, st.etag_mismatches,
-                 st.read_errors, st.unverifiable, st.skipped_stubs, st.skipped_races,
-                 st.orphan_sidecars);
-        findings = st.etag_mismatches + st.read_errors;
-        aborted = st.aborted;
-    } else {
-        throw std::runtime_error("fsck: backend '" + backend +
-                                 "' does not support offline fsck (duostore/localfs/xlocalfs)");
+    // Same dispatch as the admin endpoint (app/fsck_jobs.h); the report goes to the log
+    FsckOutcome out;
+    try {
+        out = run_scrub(*it->second, bps);
+    } catch (const std::invalid_argument& e) {
+        throw std::runtime_error("fsck: backend '" + backend + "': " + e.what());
     }
+    LOG_INFO("fsck '{}' ({}): findings {} aborted {} stats {}", backend, out.kind, out.findings,
+             out.aborted, out.stats.dump());
     app.shutdown();
-    if (aborted) throw std::runtime_error("fsck: scrub aborted before completion");
-    if (findings > 0) g_exit = 1;
+    if (out.aborted) throw std::runtime_error("fsck: scrub aborted before completion");
+    if (out.findings > 0) g_exit = 1;
 }
 
 Cmd make_fsck() {

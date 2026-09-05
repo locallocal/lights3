@@ -124,7 +124,13 @@ points:
   S3 accepts);
 - Authenticator instance: one per backend,
   `SigV4Authenticator::build(AuthConfig{cloud credentials, remote region, "s3"})`,
-  with region independent from the region used by local L2 verification.
+  with region independent from the region used by local L2 verification;
+- **Trace propagation** (roadmap §5.4): every op entry does
+  `co_await trace_extra(extra)` — it reads the request payload off the awaiting
+  chain's cancellation token (`RequestBackendStats::trace` in
+  `storage/request_stats.h`) and appends `traceparent` (the gateway's own span,
+  logged as parent by the remote) and `tracestate`; neither is signed (not x-amz-*). Without a
+  request context (background work) nothing is added.
 
 ### 2.3 Threading Model: Private Pump Threads, No Shared-Pool Occupation
 

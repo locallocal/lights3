@@ -15,6 +15,7 @@
 #include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/task.h"
+#include "core/trace.h"
 #include "core/thread_pool.h"
 #include "http/model.h"
 #include "s3/auth/policy.h"
@@ -43,6 +44,9 @@ struct RequestContext {
     // Cancellation signal: client disconnect (detected by the driver), request timeout, process shutdown (docs/concurrency.md §5);
     // defaults to "never cancelled". Long loops (between chunks of streaming reads/writes) and pool.schedule() observe it
     CancelToken cancel;
+    // W3C trace context (roadmap §5.4, core/trace.h): inherited from the client's
+    // traceparent or started here; stamped on log lines and propagated outbound
+    TraceContext trace;
 };
 
 class S3Service {

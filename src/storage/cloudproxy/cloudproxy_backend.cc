@@ -5,6 +5,7 @@
 // short control-plane requests call synchronously on shared pool threads
 // (docs/cloudproxy-backend.md §2.3).
 #include "storage/cloudproxy/cloudproxy_backend.h"
+#include "storage/request_stats.h"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -318,6 +319,15 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
     co_return co_await Awaiter{&fn, &exec_};
 }
 
+Task<CloudProxyBackend::Extra> CloudProxyBackend::trace_extra(Extra extra) {
+    CancelToken tok = co_await current_cancel();
+    if (auto st = tok.data<RequestBackendStats>(); st && st->trace.valid()) {
+        extra.emplace_back("traceparent", st->trace.traceparent());
+        if (!st->trace.tracestate.empty()) extra.emplace_back("tracestate", st->trace.tracestate);
+    }
+    co_return extra;
+}
+
 Task<void> CloudProxyBackend::async_backoff(int64_t delay_ms) {
     co_await async_sleep(std::chrono::milliseconds(delay_ms));
     co_await pool_->schedule();  // off the timer callback thread before any business logic
@@ -396,8 +406,9 @@ Task<void> CloudProxyBackend::create_bucket(std::string_view bucket) {
         w.close();
         body = w.str();
     }
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("create_bucket", [&](httplib::Client& c) {
-        auto headers = ctx_->signed_headers("PUT", path, "", {},
+        auto headers = ctx_->signed_headers("PUT", path, "", tp,
                                             body.empty() ? "" : util::sha256_hex(body),
                                             t.host);
         return c.Put(path, headers, body, body.empty() ? "" : "application/xml");
@@ -411,8 +422,9 @@ Task<void> CloudProxyBackend::delete_bucket(std::string_view bucket) {
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.bucket_path();
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("delete_bucket", [&](httplib::Client& c) {
-        return c.Delete(path, ctx_->signed_headers("DELETE", path, "", {}, "", t.host));
+        return c.Delete(path, ctx_->signed_headers("DELETE", path, "", tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
@@ -423,8 +435,9 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.bucket_path();
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("head_bucket", [&](httplib::Client& c) {
-        return c.Head(path, ctx_->signed_headers("HEAD", path, "", {}, "", t.host));
+        return c.Head(path, ctx_->signed_headers("HEAD", path, "", tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return true;
@@ -440,8 +453,9 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
 
 Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
     // Service-level operations always go to the endpoint itself, regardless of addressing style
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("list_buckets", [&](httplib::Client& c) {
-        return c.Get("/", ctx_->signed_headers("GET", "/", "", {}, ""));
+        return c.Get("/", ctx_->signed_headers("GET", "/", "", tp, ""));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -482,6 +496,7 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
     std::vector<std::pair<std::string, std::string>> extra;
     if (range) extra.emplace_back("Range", format_range(*range));
     extra.emplace_back("x-amz-checksum-mode", "ENABLED");  // capture the remote checksum (§2.2)
+    extra = co_await trace_extra(std::move(extra));
 
     co_await pool_->schedule();
     auto ctx = ctx_;
@@ -616,6 +631,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     std::string raw_path, std::string raw_query, std::string host, std::string content_type,
     std::vector<std::pair<std::string, std::string>> extra, http::BodyReader& body,
     std::string resource, bool multipart_ctx) {
+    extra = co_await trace_extra(std::move(extra));
     auto len_opt = body.length();
     // AWS rejects bare chunked uploads (§3.2). Without a length (chunked and no
     // x-amz-decoded-content-length), spool to a local temp file first to obtain the length,
@@ -855,6 +871,7 @@ Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
                        "/" + util::aws_uri_encode(src_rb, /*encode_slash=*/false) +
                            std::string(key_path(src_key)));
     extra.emplace_back("x-amz-metadata-directive", "REPLACE");
+    extra = co_await trace_extra(std::move(extra));
 
     // Server-side COPY is an idempotent PUT: transport/5xx retries are safe, and the
     // 200-with-error-body trap is resolved after the loop like complete's (§4.4)
@@ -907,11 +924,9 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.object_path(key_path(key));
+    auto tp = co_await trace_extra({{"x-amz-checksum-mode", "ENABLED"}});  // §2.2
     auto res = co_await retry_io("head", [&](httplib::Client& c) {
-        return c.Head(path, ctx_->signed_headers(
-                                "HEAD", path, "",
-                                {{"x-amz-checksum-mode", "ENABLED"}},  // §2.2
-                                "", t.host));
+        return c.Head(path, ctx_->signed_headers("HEAD", path, "", tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 200) co_return meta_from_response(key, *res);
@@ -928,8 +943,9 @@ Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolv
     auto path = t.object_path(key_path(key));
     std::string query = "partNumber=" + std::to_string(part_no);
     std::string full = path + "?" + query;
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("head_part", [&](httplib::Client& c) {
-        return c.Head(full, ctx_->signed_headers("HEAD", path, query, {}, "", t.host));
+        return c.Head(full, ctx_->signed_headers("HEAD", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 416)
@@ -971,9 +987,10 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
     std::string query = "tagging";
     std::string full = path + "?" + query;
     if (tagging.empty()) {  // DeleteObjectTagging upstream
+        auto tp = co_await trace_extra();
         auto res = co_await retry_io("delete_tagging", [&](httplib::Client& c) {
             return c.Delete(full,
-                            ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
+                            ctx_->signed_headers("DELETE", path, query, tp, "", t.host));
         });
         if (!res) ctx_->throw_transport_error(res.error());
         if (res->status / 100 == 2) co_return;
@@ -1002,9 +1019,10 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
     w.close();
     const std::string body = w.str();
     const std::string body_hash = util::sha256_hex(body);
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("put_tagging", [&](httplib::Client& c) {
         return c.Put(full,
-                     ctx_->signed_headers("PUT", path, query, {}, body_hash, t.host),
+                     ctx_->signed_headers("PUT", path, query, tp, body_hash, t.host),
                      body, "application/xml");
     });
     if (!res) ctx_->throw_transport_error(res.error());
@@ -1017,8 +1035,9 @@ Task<void> CloudProxyBackend::delete_object(std::string_view bucket, std::string
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.object_path(key_path(key));
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("delete", [&](httplib::Client& c) {
-        return c.Delete(path, ctx_->signed_headers("DELETE", path, "", {}, "", t.host));
+        return c.Delete(path, ctx_->signed_headers("DELETE", path, "", tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     // Both 204 and 404 count as success (S3 idempotent delete semantics)
@@ -1039,8 +1058,9 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
     if (!opt.start_after.empty()) query += "&start-after=" + qv(opt.start_after);
     std::string full = path + "?" + query;
 
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("list", [&](httplib::Client& c) {
-        return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
+        return c.Get(full, ctx_->signed_headers("GET", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -1091,6 +1111,7 @@ Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
     // Note: create retries may leave empty orphan uploads on the remote (a known §5.2
     // trade-off, standard industry practice) -- recommend configuring an
     // AbortIncompleteMultipartUpload lifecycle rule on the remote account
+    extra = co_await trace_extra(std::move(extra));
     auto res = co_await retry_io("create_multipart", [&](httplib::Client& c) {
         return c.Post(full, ctx_->signed_headers("POST", path, query, extra, "", t.host),
                       "", meta.content_type);
@@ -1174,6 +1195,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
     auto op_hist = ctx_->metrics.op_seconds("complete_multipart");
     const auto deadline = ctx_->op_deadline();
     CompleteOutcome outcome;
+    auto tp = co_await trace_extra();
     for (int attempt = 0;; ++attempt) {
         ctx_->breaker_gate();
         httplib::Result res = co_await [&]() -> Task<httplib::Result> {
@@ -1181,7 +1203,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             co_return co_await control_io([&] {
                 return ctx_->attempt(op_hist, lease.client(), [&](httplib::Client& c) {
                     return c.Post(full,
-                                  ctx_->signed_headers("POST", path, query, {}, body_hash,
+                                  ctx_->signed_headers("POST", path, query, tp, body_hash,
                                                        tgt.host),
                                   body, "application/xml");
                 });
@@ -1284,8 +1306,9 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
     auto path = t.object_path(key_path(key));
     std::string query = "uploadId=" + qv(upload_id);
     std::string full = path + "?" + query;
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("abort_multipart", [&](httplib::Client& c) {
-        return c.Delete(full, ctx_->signed_headers("DELETE", path, query, {}, "", t.host));
+        return c.Delete(full, ctx_->signed_headers("DELETE", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
@@ -1315,8 +1338,9 @@ Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
     if (opt.part_number_marker > 0)
         query += "&part-number-marker=" + std::to_string(opt.part_number_marker);
     std::string full = path + "?" + query;
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("list_parts", [&](httplib::Client& c) {
-        return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
+        return c.Get(full, ctx_->signed_headers("GET", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)
@@ -1359,8 +1383,9 @@ Task<ListUploadsResult> CloudProxyBackend::list_multipart_uploads(
         query += "&key-marker=" + qv(opt.key_marker) +
                  "&upload-id-marker=" + qv(opt.upload_id_marker);
     std::string full = path + "?" + query;
+    auto tp = co_await trace_extra();
     auto res = co_await retry_io("list_uploads", [&](httplib::Client& c) {
-        return c.Get(full, ctx_->signed_headers("GET", path, query, {}, "", t.host));
+        return c.Get(full, ctx_->signed_headers("GET", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status != 200)

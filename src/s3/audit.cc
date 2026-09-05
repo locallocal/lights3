@@ -54,6 +54,7 @@ void AuditLog::write(const AuditEvent& e, bool flush_now) {
     put("actor", e.actor);
     put("tenant", e.tenant);
     put("request_id", e.request_id);
+    put("trace_id", e.trace_id);
     put("bucket", e.bucket);
     put("key", e.key);
     put("target", e.target);

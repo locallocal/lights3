@@ -301,7 +301,7 @@ fields are **omitted, never empty strings**:
 | `quota.reject` | any quota refusal | `bucket`, `detail`=the exceeded axis |
 | `bucket.create` / `bucket.delete` | data-plane bucket create/delete | `bucket` |
 | `usage.rescan` | on-demand scan | `bucket`, `detail`=result |
-| `access` | **only with `audit.data_plane=true`**: one per request | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant` |
+| `access` | **only with `audit.data_plane=true`**: one per request | `method`/`path`/`status`/`bytes`/`bucket`/`key`/`tenant`/`trace_id` (roadmap §5.4) |
 
 Control-plane events are flushed one by one (rare and critical); `access`
 records are not (buffered by the sink under high QPS). `access` is the audit

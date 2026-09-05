@@ -94,7 +94,11 @@ HttpRequest 只为签名，再搬运 headers"——另一种做法（直接对 h
   （SignedHeaders 只含 host + x-amz-*，S3 接受）；
 - Authenticator 实例：每 backend 一个，
   `SigV4Authenticator::build(AuthConfig{云凭证, 远端 region, "s3"})`，
-  region 独立于本地 L2 验签用的 region。
+  region 独立于本地 L2 验签用的 region；
+- **trace 透传**（roadmap §5.4）：每个 op 入口 `co_await trace_extra(extra)`——
+  从等待链的取消令牌取请求载荷（`storage/request_stats.h` 的
+  `RequestBackendStats::trace`），追加 `traceparent`（网关自身 span，远端记为 parent）与
+  `tracestate`；不参与签名（非 x-amz-*）。无请求上下文（后台任务）时不加。
 
 ### 2.3 线程模型：私有 pump 线程，不占共享池
 

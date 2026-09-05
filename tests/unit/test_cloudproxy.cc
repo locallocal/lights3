@@ -5,6 +5,7 @@
 #ifdef LIGHTS3_CLOUDPROXY
 
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 #include "core/thread_pool.h"
@@ -14,6 +15,7 @@
 #include "storage/cloudproxy/cloudproxy_backend.h"
 #include "storage/cloudproxy/remote_client.h"
 #include "storage/memory/memory_backend.h"
+#include "storage/request_stats.h"
 #include "unit/backend_suite.h"
 #include "unit/mini_test.h"
 
@@ -798,3 +800,38 @@ TEST(cloudproxy_credential_chain_session_token_header) {
 }
 
 #endif  // LIGHTS3_CLOUDPROXY
+
+// roadmap §5.4: every outbound request carries the request's trace with the
+// gateway's span (payload on the awaiting chain's cancellation token), so the
+// remote logs it as parent; background work without a request context sends none
+TEST(cloudproxy_propagates_traceparent) {
+    std::mutex m;
+    std::vector<std::pair<std::string, std::string>> seen;  // (traceparent, tracestate)
+    HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
+        std::lock_guard lk(m);
+        seen.emplace_back(req.headers.get("traceparent").value_or(""),
+                          req.headers.get("tracestate").value_or(""));
+        co_return xml_error(403, "AccessDenied");  // head_bucket: 403 = exists
+    });
+    auto pool = std::make_shared<ThreadPool>(2);
+    CloudProxyBackend b(cfg_for(remote.port), pool);
+
+    auto stats = std::make_shared<RequestBackendStats>();
+    stats->trace = *TraceContext::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+                                        "vendor=abc");
+    CancelSource src;
+    src.set_data(stats);
+    auto t = b.bucket_exists("bkt");
+    t.with_cancel(src.token());
+    CHECK(sync_wait(std::move(t)));
+    CHECK(sync_wait(b.bucket_exists("bkt")));  // no request context
+    std::lock_guard lk(m);
+    CHECK_EQ(seen.size(), size_t(2));
+    auto hop = TraceContext::parse(seen[0].first);
+    CHECK(hop.has_value());
+    CHECK_EQ(hop->trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
+    CHECK_EQ(hop->parent_span_id, stats->trace.span_id);  // the gateway's span is the parent
+    CHECK(hop->parent_span_id != "00f067aa0ba902b7");     // not the client's span
+    CHECK_EQ(seen[0].second, "vendor=abc");
+    CHECK(seen[1].first.empty() && seen[1].second.empty());
+}

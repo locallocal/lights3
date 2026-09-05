@@ -295,3 +295,51 @@ TEST(logger_async_rotating_file) {
     CHECK(contains(all, "after shutdown"));
     std::filesystem::remove_all(dir);
 }
+
+// roadmap §5.4: trace correlation — an inherited traceparent keeps the client's
+// trace id and records the caller's span as parent; without one the gateway starts
+// a trace; the response carries traceresponse either way
+TEST(access_log_trace_fields) {
+    Capture cap("json");
+    auto svc = make_service();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto req = make_req("PUT", "/bkt/k", "v");
+    req.headers.add("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+    req.headers.add("tracestate", "vendor=abc");
+    auto resp = sync_wait(svc.dispatch(std::move(req)));
+    CHECK_EQ(resp.status, 200);
+    auto tr = resp.headers.get("traceresponse").value_or("");
+    CHECK(tr.rfind("00-4bf92f3577b34da6a3ce929d0e0e4736-", 0) == 0 && tr.ends_with("-01"));
+    auto j = nlohmann::json::parse(cap.last_access());
+    CHECK_EQ(j["trace_id"].get<std::string>(), "4bf92f3577b34da6a3ce929d0e0e4736");
+    CHECK_EQ(j["parent_span_id"].get<std::string>(), "00f067aa0ba902b7");
+    std::string span = j["span_id"].get<std::string>();
+    CHECK_EQ(span.size(), size_t(16));
+    CHECK_EQ(tr, "00-4bf92f3577b34da6a3ce929d0e0e4736-" + span + "-01");
+    // No / malformed header: a fresh trace, no parent
+    auto bad = make_req("GET", "/bkt/k");
+    bad.headers.add("traceparent", "not-a-traceparent");
+    resp = sync_wait(svc.dispatch(std::move(bad)));
+    CHECK_EQ(sync_wait(drain(*resp.stream_body)), uint64_t(1));
+    j = nlohmann::json::parse(cap.last_access());
+    CHECK_EQ(j["trace_id"].get<std::string>().size(), size_t(32));
+    CHECK(j["trace_id"].get<std::string>() != "4bf92f3577b34da6a3ce929d0e0e4736");
+    CHECK(!j.contains("parent_span_id"));
+    CHECK_EQ(resp.headers.get("traceresponse").value_or(""),
+             "00-" + j["trace_id"].get<std::string>() + "-" + j["span_id"].get<std::string>() + "-01");
+}
+
+TEST(access_log_trace_text_slot) {
+    Capture cap("text");
+    auto svc = make_service();
+    sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
+    auto req = make_req("PUT", "/bkt/k", "v");
+    req.headers.add("traceparent", "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01");
+    sync_wait(svc.dispatch(std::move(req)));
+    std::string line = cap.last_access();
+    CHECK(contains(line, " trace=0af7651916cd43dd8448eb211c80319c/"));
+    CHECK(contains(line, " parent=b7ad6b7169203331"));
+    sync_wait(svc.dispatch(make_req("HEAD", "/bkt/k")));
+    line = cap.last_access();
+    CHECK(contains(line, " trace=") && !contains(line, " parent="));
+}

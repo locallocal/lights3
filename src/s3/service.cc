@@ -719,6 +719,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // Tenancy + usage admin plane (docs/multi-tenancy.md §6), same JSON conventions
             api_name = "AdminTenancy";
             resp = co_await admin_tenancy(req, access_key, ctx);
+        } else if (internal && req.path.rfind("/-/admin/fsck/", 0) == 0) {
+            // Offline scrub on a live gateway (backlog-sequence ③, `s3adm fsck --offline`)
+            api_name = "AdminFsck";
+            resp = co_await admin_fsck(req, access_key, ctx);
         } else if (internal && req.path.rfind("/-/admin/objects/", 0) == 0) {
             // Object layout introspection (roadmap §6.2, `s3adm object inspect`)
             api_name = "AdminObjectInspect";

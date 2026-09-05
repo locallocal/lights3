@@ -418,6 +418,9 @@ roadmap §3.5 追加的序列：`lights3_localfs_xattr_fallback`（gauge，§2�
 
 ## 11. scrub（`run_scrub_once`，roadmap §3.1）
 
+> 触发面：离线 `lights3 fsck <backend>`、在线网关的 `POST /-/admin/fsck/<backend>`
+> （`s3adm fsck --offline`，[cli.md §3.5](../cli.md)）；两者共用 `app/fsck_jobs.h` 的分派。
+
 读路径零校验（ETag 写时算、读时从不复核）意味着静默位翻转不可发现；
 `localfs_backend.cc:LocalFsBackend::run_scrub_once` 补上这一课：把 ETag 当
 校验和做全量 verify。**纯只读**，发现只落 LOG + `FsScrubStats` 计数。CLI

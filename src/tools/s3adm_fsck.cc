@@ -20,6 +20,7 @@
 #include "core/util/uri.h"
 #include "s3/xml.h"
 #include "storage/multipart.h"
+#include <nlohmann/json.hpp>
 #include "tools/s3adm_common.h"
 
 namespace {
@@ -196,24 +197,72 @@ int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& pr
 
 namespace s3adm {
 
+// --offline: the server-side scrub (backlog-sequence ③) through the admin plane.
+// POST starts one round (409 while one runs), GET polls; the final document is
+// printed as JSON and findings > 0 make the exit code 1 like `lights3 fsck`
+int run_fsck_offline(SignedClient& cli, const std::string& backend, uint64_t mbps, bool wait,
+                     bool status_only) {
+    const std::string path = "/-/admin/fsck/" + backend;
+    auto print_doc = [](const httplib::Result& r) -> int {
+        auto doc = nlohmann::json::parse(r->body, nullptr, false);
+        fputs(r->body.c_str(), stdout);
+        if (!r->body.empty() && r->body.back() != '\n') fputc('\n', stdout);
+        if (doc.is_discarded()) return 1;
+        if (doc.contains("error")) return 1;
+        if (doc.value("aborted", false)) return 1;
+        return doc.value("findings", uint64_t(0)) > 0 ? 1 : 0;
+    };
+    if (status_only) {
+        auto r = cli.get(path, "");
+        if (!r || r->status != 200) return finish(r, 200);
+        return print_doc(r);
+    }
+    auto r = cli.post_empty(path, mbps ? "max_mbps=" + std::to_string(mbps) : "");
+    if (!r || r->status != 202) return finish(r, 202);
+    if (!wait) {
+        fputs(r->body.c_str(), stdout);
+        return 0;
+    }
+    uint64_t job = nlohmann::json::parse(r->body).value("job_id", uint64_t(0));
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto st = cli.get(path, "");
+        if (!st || st->status != 200) return finish(st, 200);
+        auto doc = nlohmann::json::parse(st->body, nullptr, false);
+        if (doc.is_discarded()) {
+            fprintf(stderr, "s3adm: fsck: unparsable status document\n");
+            return 1;
+        }
+        if (doc.value("running", false)) continue;
+        if (doc.value("job_id", uint64_t(0)) != job) continue;  // a newer job replaced ours
+        return print_doc(st);
+    }
+}
+
 std::shared_ptr<ccmd::c_command> make_fsck() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "fsck", "s3adm fsck my-bucket --prefix=photos/ --max-mbps=50",
-        "s3adm fsck <bucket> [options]",
+        "s3adm fsck <bucket> [options] | s3adm fsck --offline <backend> [--max-mbps=N] [--no-wait] | s3adm fsck --status <backend>",
         "Verify a bucket's objects end to end through the S3 API: every listed object "
         "is downloaded and its MD5 recomputed against the ETag (multipart composites "
         "via GET ?partNumber per part). Read-only; prints MISMATCH/UNVERIFIABLE lines "
         "plus a summary, exit code 1 when mismatches or errors were found. Works with "
-        "any credential that can read the bucket. For a deeper offline check "
-        "(duostore crc/refs, localfs ETag) use `lights3 fsck` on the server host.",
+        "any credential that can read the bucket.\n"
+        "--offline <backend>: run the server-side scrub instead (duostore crc/refs, "
+        "localfs/xlocalfs ETag; POST /-/admin/fsck/<backend>, root credential), wait for "
+        "it and print the outcome document (exit 1 on findings; --no-wait returns the "
+        "job id at once). --status <backend>: print the running/last outcome. One job "
+        "per backend at a time (409 ScrubInProgress).",
         "verify a bucket's objects against their ETags.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
-            if (c->args().size() != 1) {
+            bool offline = c->var<bool>("offline");
+            bool status = c->var<bool>("status");
+            if (c->args().size() != 1 || (offline && status)) {
                 fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
-            std::string bucket = c->args().front();
+            std::string target = c->args().front();
             auto prefix = c->var<std::string>("prefix");
             int mbps = c->var<int>("max-mbps");
             if (mbps < 0) {
@@ -221,12 +270,22 @@ std::shared_ptr<ccmd::c_command> make_fsck() {
                 g_exit = 2;
                 return;
             }
+            if (offline || status) {
+                bool wait = !c->var<bool>("no-wait");
+                run_admin(c, [&](SignedClient& cli) {
+                    return run_fsck_offline(cli, target, uint64_t(mbps), wait, status);
+                });
+                return;
+            }
             run_admin(c, [&](SignedClient& cli) {
-                return run_fsck(cli, bucket, prefix, uint64_t(mbps) * 1000 * 1000);
+                return run_fsck(cli, target, prefix, uint64_t(mbps) * 1000 * 1000);
             });
         });
     cmd->varp<std::string>("prefix", "p", "", "only verify keys under this prefix.");
-    cmd->var<int>("max-mbps", 0, "download throttle in MB/s (0 = unthrottled).");
+    cmd->var<int>("max-mbps", 0, "read throttle in MB/s (0 = unthrottled); online: download, --offline: server-side scrub.");
+    cmd->var<bool>("offline", false, "<backend> is a backend name: run the server-side scrub via /-/admin/fsck (root).");
+    cmd->var<bool>("status", false, "<backend> is a backend name: print the running/last scrub outcome.");
+    cmd->var<bool>("no-wait", false, "with --offline: return right after starting the job.");
     s3adm::add_conn_flags(cmd);
     return cmd;
 }

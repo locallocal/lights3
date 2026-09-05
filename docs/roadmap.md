@@ -409,12 +409,18 @@ trace id（e2e 对网关→远端 lights3 两跳验证）。duostore meta+data �
 无网络跳，不涉及。otel-cpp 全量埋点（导出 span）作为长期项保留。
 **价值：高；难度：低（透传，已完成）/ 高（otel，长期）。**
 
-### 5.5 监控消费侧（零 C++ 改动）
+### 5.5 监控消费侧（零 C++ 改动）**已完成（2026-09-05）**
 
-`/-/metrics` 已是规范 Prometheus 文本格式、`lights3_*` 命名统一，但一张
-dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
-`deploy/prometheus/{scrape.yml,lights3.rules.yml}`（5xx 率、P99、GC 未收
-敛、tiered 水位、cloudproxy 重试率、`xlocalfs_uring_fallback=1` 等）。
+~~`/-/metrics` 已是规范 Prometheus 文本格式、`lights3_*` 命名统一，但一张
+dashboard、一条告警规则都没有。~~ 已补齐（[monitoring.md](monitoring.md)）：
+`deploy/prometheus/scrape.yml` + `lights3.rules.yml`（7 条 recording + 39 条
+告警：5xx 率、P99、准入饱和、GC 未收敛/停滞、tiered 逐出压力（水位信号）
+与隔离、cloudproxy 重试率/远端错误/ETag 不符、`xlocalfs_uring_fallback=1`、
+xattr 降级、各 meta 引擎信号、配额/用量校准）+ `deploy/grafana/lights3.json`
+（62 面板 / 9 行，由 `gen_dashboard.py` 生成）。测试 `monitoring_assets`：
+资产引用的每个指标与 `src/` 指标目录对账、dashboard 与生成器逐字节一致、
+起 memory 后端网关抓 `/-/metrics` 校验 exposition 格式与核心指标族在场。
+tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速率表达。
 **价值：高；难度：低——投入产出比最高的单项。**
 
 ## 6. 测试 / 工具链 / 分发
@@ -483,7 +489,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 ### P1 — 近期（高价值 / 低-中难度）
 
-1. Grafana dashboard + Prometheus 告警规则（§5.5，零 C++）
+1. ~~Grafana dashboard + Prometheus 告警规则（§5.5，零 C++）~~ **已完成（2026-09-05）**
 2. mint 挂 ctest + website e2e/单测 + s3adm 进 e2e（§6.1）
 3. ~~API×后端分维指标 + 后端耗时（§5.1）~~ **已完成（2026-09-05）**；~~异步日志 + 慢日志（§5.2）~~ **已完成（2026-09-05）**
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**

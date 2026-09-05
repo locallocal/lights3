@@ -1,0 +1,33 @@
+# Prometheus scrape configuration for lights3 (roadmap §5.5, docs/monitoring.md).
+# Drop the `scrape_configs` entry into an existing prometheus.yml, or run this
+# file as-is for a single-gateway lab setup:
+#
+#   prometheus --config.file=deploy/prometheus/scrape.yml
+#
+# /-/metrics is served on the data-plane listener in Prometheus text format.
+# It must stay reachable anonymously for Prometheus (http.metrics_access:
+# anonymous, the default) — Prometheus cannot sign SigV4. With
+# http.metrics_access: root, scrape through a sidecar/proxy that signs, or keep
+# the listener on a private network and leave the gate off.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - lights3.rules.yml
+
+scrape_configs:
+  - job_name: lights3
+    metrics_path: /-/metrics
+    scheme: http            # https when http.tls_cert/tls_key are set (see tls_config below)
+    static_configs:
+      - targets:
+          - 127.0.0.1:9000  # http.bind:http.port of each gateway
+        labels:
+          cluster: lab
+    # Backend-level series carry backend=<name> and are appended after the L2
+    # request series; nothing to configure here. A large bucket count inflates
+    # lights3_bucket_* (capped at 512 tracked buckets + "_other" in the gateway).
+    # tls_config:
+    #   ca_file: /etc/lights3/ca.pem
+    #   insecure_skip_verify: false

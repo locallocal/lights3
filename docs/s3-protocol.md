@@ -185,11 +185,32 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
 `lights3_http_timeouts_total{phase=idle|header|body|write}`、
 `lights3_ratelimit_rejections_total{scope=ip|ak}`，见 [http-adapter.md §2.2–§2.3](http-adapter.md)。
 
-- **访问日志**：每请求一行结构化日志（request_id、AK、method、path、
-  status、字节数、总耗时 ms），格式对齐 S3 server access log 便于复用现有
-  分析工具；roadmap §5.1 起尾部追加两槽 `api=<路由名> backend=<后端名>:<后端
-  耗时 ms>`——后端耗时由包在路由后端外的计时装饰器（`storage/metered_backend.h`）
-  经请求的取消令牌回填，"网关排队慢还是后端慢"一行可判。
+- **访问日志**（roadmap §5.2）：每请求一行，经独立的 `lights3.access` logger
+  与运行日志共用 sink。文本格式（`log.format: text`）：
+  `access <request_id> <AK|-> <method> "<path>" <status> <bytes> <总耗时>ms
+  api=<路由名> backend=<后端名>:<后端耗时>ms remote=<客户端地址> bucket=<bucket|->
+  ttfb=<ms>ms ua="<User-Agent>"`——前七字段对齐 S3 server access log，`path` 与
+  UA 加引号并转义（`"`、`\`、控制字符），含空格的 key 不再破坏切分；后端耗时
+  由包在路由后端外的计时装饰器（`storage/metered_backend.h`）经请求的取消令牌
+  回填，"网关排队慢还是后端慢"一行可判。**流式响应**（GetObject 等）的行在
+  响应体读尽时写出：`bytes` 是实际发出的字节数、总耗时含传输、`ttfb` 是响应头
+  就绪时刻（即指标直方图记录的量）；客户端中途断开则由装饰器析构补写并标
+  `truncated=1`。JSON 格式（`log.format: json`）下整条运行日志都是每行一个对象
+  `{"ts","level","thread","msg"}`，访问记录以平铺字段落在同一对象里：
+  `request_id / remote / ak / method / path / query / bucket / key / status /
+  bytes / ms / ttfb_ms / auth_ms / handler_ms / backend_ms / backend_calls / api /
+  backend / ua`，缺省值省略而非空串（`ak` 匿名时不出现），可直接接 Loki/ELK。
+- **慢请求通道**：`log.slow_request_threshold`（如 `500ms`，0 = 关，可热更新）——
+  总耗时达到阈值的访问行升为 WARN 并附阶段耗时（文本：`slow=1 auth=<ms>
+  handler=<ms> backend_calls=<n>`；JSON：`"slow":true` + 上述字段），生产
+  `log.level: warn` 时仍能看到值得看的请求。auth = 从进入 dispatch 到身份验证
+  完成，handler = 路由处理器整段（后端耗时是其子集）。
+- **sink 与异步**：`log.file` 为空写 stderr，否则写按大小轮转的文件
+  （`max_size` / `max_files`，每秒定时 flush，WARN 及以上立即 flush）；
+  `log.async: true` 时请求线程只入队（容量 `async_queue`），单独的写线程落盘，
+  队列满时按 `async_overflow` 阻塞或覆盖最旧记录；进程退出前 `Logger::shutdown`
+  排空队列。审计日志（[multi-tenancy.md §5](multi-tenancy.md)）仍是独立文件，
+  不受这些开关影响。
 - **Metrics**（Prometheus 文本格式，`GET /-/metrics`，匿名端点、与数据面
   同一监听，访问面需靠部署侧限制）：
   请求数/延迟直方图（全局 + 按 `(api, backend)` 分维：

@@ -115,6 +115,13 @@ public:
     // (bouncing small-part uploads costs more than making ops fix the tool), and so that a
     // "proxy to another lights3" deployment is not judged once per layer
     void set_min_part_size(uint64_t n) { min_part_size_.store(n, std::memory_order_relaxed); }
+
+    // Slow-request channel (roadmap §5.2): an access line whose total time reaches
+    // the threshold is logged at WARN with per-stage timings; 0 = off. Read once per
+    // request at dispatch end (streaming responses judge at end of body)
+    void set_slow_request_threshold(std::chrono::milliseconds t) {
+        slow_request_ms_.store(t.count(), std::memory_order_relaxed);
+    }
     uint64_t min_part_size() const { return min_part_size_.load(std::memory_order_relaxed); }
 
     // Static website hosting (docs/static-website.md): buckets accepting anonymous
@@ -348,6 +355,7 @@ private:
     std::atomic<std::shared_ptr<RateLimiter>> ip_limiter_, ak_limiter_;
     std::atomic<int64_t> request_timeout_ms_{0};
     std::atomic<uint64_t> min_part_size_{storage::kMinPartSize};
+    std::atomic<int64_t> slow_request_ms_{0};
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off

@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <random>
+
+#include <nlohmann/json.hpp>
 
 #include "core/log.h"
 #include "core/util/hex.h"
@@ -93,19 +96,135 @@ struct MetricsEndGuard {
     }
 };
 
+// Access log record (roadmap §5.2, docs/s3-protocol.md §7). Filled at dispatch end;
+// emitted right away for buffered responses, and at end of body for streaming ones
+// (the driver pulls the body after dispatch returns, so total time and the bytes
+// actually sent are only known then). Self-contained: emission may run on a driver
+// thread after the service is gone
+struct AccessRecord {
+    std::chrono::steady_clock::time_point start;
+    std::string request_id, remote, access_key, method, path, query, bucket, key, user_agent,
+        api, backend;
+    int status = 0;
+    double auth_ms = 0, handler_ms = 0, backend_ms = 0, ttfb_ms = 0;
+    uint32_t backend_calls = 0;
+    int64_t slow_threshold_ms = 0;
+};
+
+// Text-mode quoting: the path/UA may contain spaces (the historical unquoted path
+// broke whitespace splitting), quotes and control characters
+std::string quote_field(std::string_view v) {
+    std::string out;
+    out.reserve(v.size() + 2);
+    out.push_back('"');
+    for (unsigned char c : v) {
+        if (c == '"' || c == '\\') {
+            out.push_back('\\');
+            out.push_back(static_cast<char>(c));
+        } else if (c < 0x20 || c == 0x7f) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\x%02x", c);
+            out += buf;
+        } else {
+            out.push_back(static_cast<char>(c));
+        }
+    }
+    out.push_back('"');
+    return out;
+}
+
+double ms_since(std::chrono::steady_clock::time_point t0, std::chrono::steady_clock::time_point t1) {
+    return std::chrono::duration<double, std::milli>(t1 - t0).count();
+}
+
+// One line per request. INFO normally; WARN with the per-stage breakdown once the
+// total reaches log.slow_request_threshold, so a production deployment running at
+// warn still sees the requests worth looking at. Text: fixed leading fields (aligned
+// with the pre-§5.2 line, path now quoted) plus key=value slots. JSON: a flat object
+// spliced into the JSON envelope by the formatter (core/log.cc)
+void emit_access(const AccessRecord& r, uint64_t bytes, bool truncated) {
+    double total_ms = ms_since(r.start, std::chrono::steady_clock::now());
+    bool slow = r.slow_threshold_ms > 0 && total_ms >= static_cast<double>(r.slow_threshold_ms);
+    auto level = slow ? spdlog::level::warn : spdlog::level::info;
+    auto& log = Logger::access();
+    if (!log.should_log(level)) return;
+    auto dash = [](const std::string& v) -> const std::string& {
+        static const std::string kDash = "-";
+        return v.empty() ? kDash : v;
+    };
+    if (Logger::json()) {
+        auto ms3 = [](double v) { return std::round(v * 1000.0) / 1000.0; };  // 3 decimals: no float noise
+        nlohmann::json j;
+        j["request_id"] = r.request_id;
+        if (!r.remote.empty()) j["remote"] = r.remote;
+        if (!r.access_key.empty()) j["ak"] = r.access_key;
+        j["method"] = r.method;
+        j["path"] = r.path;
+        if (!r.query.empty()) j["query"] = r.query;
+        if (!r.bucket.empty()) j["bucket"] = r.bucket;
+        if (!r.key.empty()) j["key"] = r.key;
+        j["status"] = r.status;
+        j["bytes"] = bytes;
+        j["ms"] = ms3(total_ms);
+        j["ttfb_ms"] = ms3(r.ttfb_ms);
+        j["auth_ms"] = ms3(r.auth_ms);
+        j["handler_ms"] = ms3(r.handler_ms);
+        j["backend_ms"] = ms3(r.backend_ms);
+        j["backend_calls"] = r.backend_calls;
+        j["api"] = dash(r.api);
+        j["backend"] = dash(r.backend);
+        if (!r.user_agent.empty()) j["ua"] = r.user_agent;
+        if (slow) j["slow"] = true;
+        if (truncated) j["truncated"] = true;
+        log.log(level, "{}", j.dump());
+        return;
+    }
+    std::string line = spdlog::fmt_lib::format(
+        "access {} {} {} {} {} {} {}ms api={} backend={}:{:.1f}ms remote={} bucket={} ttfb={:.1f}ms ua={}",
+        r.request_id, dash(r.access_key), r.method, quote_field(r.path), r.status, bytes,
+        static_cast<uint64_t>(total_ms), dash(r.api), dash(r.backend), r.backend_ms,
+        dash(r.remote), dash(r.bucket), r.ttfb_ms, quote_field(r.user_agent));
+    if (truncated) line += " truncated=1";
+    if (slow)
+        line += spdlog::fmt_lib::format(" slow=1 auth={:.1f}ms handler={:.1f}ms backend_calls={}", r.auth_ms,
+                            r.handler_ms, r.backend_calls);
+    log.log(level, "{}", line);
+}
+
 // Byte-counting decorators (docs/archive/gaps.md §7): inbound wraps outside the checksum/de-framing decorators
 // (counting the payload bytes the handler actually consumes); outbound wraps outside stream_body (counting the
-// bytes the driver actually pulls -- streaming responses are written after dispatch returns, and only a decorator can see them)
+// bytes the driver actually pulls -- streaming responses are written after dispatch returns, and only a decorator can see them).
+// The outbound side also carries the access record (roadmap §5.2): emitted at EOF, or from the destructor
+// when the driver stopped pulling early (client gone, backend read failure, HEAD) -- then flagged truncated
+// whenever fewer bytes than announced went out
 class CountingBodyReader final : public http::BodyReader {
 public:
     CountingBodyReader(std::unique_ptr<http::BodyReader> inner, Metrics* m, std::string bucket,
-                       bool inbound)
-        : inner_(std::move(inner)), m_(m), bucket_(std::move(bucket)), inbound_(inbound) {}
+                       bool inbound, std::unique_ptr<AccessRecord> access = nullptr)
+        : inner_(std::move(inner)),
+          m_(m),
+          bucket_(std::move(bucket)),
+          inbound_(inbound),
+          access_(std::move(access)) {}
+
+    ~CountingBodyReader() override {
+        if (!access_) return;
+        auto len = inner_->length();
+        bool truncated = len ? total_ < *len : !eof_;
+        if (access_->method == "HEAD") truncated = false;
+        emit_access(*access_, total_, truncated);
+    }
 
     Task<size_t> read(std::span<std::byte> buf) override {
         size_t n = co_await inner_->read(buf);
         if (inbound_) m_->add_bytes_in(bucket_, n);
         else m_->add_bytes_out(bucket_, n);
+        total_ += n;
+        if (n == 0) eof_ = true;
+        if (access_ && (eof_ || (inner_->length() && total_ >= *inner_->length()))) {
+            emit_access(*access_, total_, /*truncated=*/false);
+            access_.reset();
+        }
         co_return n;
     }
     std::optional<uint64_t> length() const override { return inner_->length(); }
@@ -115,6 +234,9 @@ private:
     Metrics* m_;
     std::string bucket_;
     bool inbound_;
+    std::unique_ptr<AccessRecord> access_;
+    uint64_t total_ = 0;
+    bool eof_ = false;
 };
 
 // Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
@@ -439,6 +561,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
     MetricsEndGuard mguard{metrics_, req.method, start};
+    // Stage marks for the access/slow-request line (roadmap §5.2): auth = up to the
+    // verified identity, handler = the route() call (backend time is a subset of it,
+    // accumulated separately). Requests short-circuited before either stage keep 0
+    std::chrono::steady_clock::time_point auth_done = start;
+    std::optional<std::chrono::steady_clock::time_point> route_start, route_end;
 
     std::string access_key;
     std::string bucket, key;
@@ -561,6 +688,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // in-flight requests complete strictly with verify-time semantics
             auto ident = anon ? VerifiedIdentity{} : auth_.verify(req);
             access_key = ident.access_key;
+            auth_done = std::chrono::steady_clock::now();
             // Per-access-key limit (after verification: the key is authenticated, so a
             // forged header cannot burn another tenant's budget)
             if (ak_lim && !access_key.empty()) {
@@ -707,10 +835,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             }
             std::chrono::milliseconds request_timeout(
                 request_timeout_ms_.load(std::memory_order_relaxed));
+            route_start = std::chrono::steady_clock::now();
             if (request_timeout.count() > 0)
                 resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout, req_src);
             else
                 resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
+            route_end = std::chrono::steady_clock::now();
             // Object-level website redirect (docs/static-website.md phase ③): on the
             // anonymous plane, x-amz-website-redirect-location turns the response into a
             // 301 — the header value was prefix-validated at PUT, so it is Location-safe.
@@ -787,28 +917,50 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // the browser needs Allow-Origin to surface either response to the page. Preflight
     // (OPTIONS) builds its own full header set in the handler
     if (req.method != "OPTIONS") apply_cors_headers(req, bucket, resp);
-    // per-bucket request distribution and outbound bytes (docs/archive/gaps.md §7). Streaming response bytes are pulled
-    // by the driver after dispatch returns and counted via the decorator; small responses have a known length by now
-    metrics_.record_bucket_request(bucket);
-    if (resp.stream_body)
-        resp.stream_body = std::make_unique<CountingBodyReader>(std::move(resp.stream_body),
-                                                                &metrics_, bucket,
-                                                                /*inbound=*/false);
-    else
-        metrics_.add_bytes_out(bucket, resp.small_body.size());
     resp.headers.set("x-amz-request-id", ctx.request_id);
     resp.headers.set("x-amz-id-2", ctx.host_id);
     resp.headers.set("Server", "lights3");
 
-    // Access log (docs/s3-protocol.md §7): one structured line, field order aligned with a slimmed-down S3 access log
+    // Metrics close here: the histograms measure time-to-headers-ready, the same
+    // quantity the access line reports as ttfb (docs/s3-protocol.md §7)
     double secs = mguard.finish(resp.status);
     uint64_t bytes = resp.content_length.value_or(resp.small_body.size());
     metrics_.record_api(api_name, backend_name.empty() ? "-" : backend_name, resp.status, secs);
-    // Two trailing slots since roadmap §5.1: api=<Route name> backend=<name>:<ms in backend>
-    LOG_INFO("access {} {} {} {} {} {} {}ms api={} backend={}:{:.1f}ms", ctx.request_id,
-             access_key.empty() ? "-" : access_key, req.method, req.path, resp.status, bytes,
-             static_cast<uint64_t>(secs * 1000), api_name.empty() ? "-" : api_name,
-             backend_name.empty() ? "-" : backend_name, backend_stats->millis());
+    // Access log (roadmap §5.2, docs/s3-protocol.md §7): one line per request; a
+    // route that never ran (short-circuited before/at auth) reports handler=0
+    auto access = std::make_unique<AccessRecord>();
+    access->start = start;
+    access->request_id = ctx.request_id;
+    access->remote = req.remote_addr;
+    access->access_key = access_key;
+    access->method = req.method;
+    access->path = req.path;
+    access->query = req.raw_query;
+    access->bucket = bucket;
+    access->key = key;
+    if (auto ua = req.headers.get("User-Agent")) access->user_agent = *ua;
+    access->api = std::string(api_name);
+    access->backend = backend_name;
+    access->status = resp.status;
+    access->auth_ms = ms_since(start, auth_done);
+    if (route_start) access->handler_ms = ms_since(*route_start, route_end.value_or(std::chrono::steady_clock::now()));
+    access->backend_ms = backend_stats->millis();
+    access->backend_calls = backend_stats->calls.load(std::memory_order_relaxed);
+    access->ttfb_ms = secs * 1000.0;
+    access->slow_threshold_ms = slow_request_ms_.load(std::memory_order_relaxed);
+    // per-bucket request distribution and outbound bytes (docs/archive/gaps.md §7). Streaming response bytes are pulled
+    // by the driver after dispatch returns and counted via the decorator (which then also emits the access line with
+    // the bytes actually sent and the full wall time); small responses have a known length by now
+    metrics_.record_bucket_request(bucket);
+    if (resp.stream_body) {
+        resp.stream_body = std::make_unique<CountingBodyReader>(std::move(resp.stream_body),
+                                                                &metrics_, bucket,
+                                                                /*inbound=*/false,
+                                                                std::move(access));
+    } else {
+        metrics_.add_bytes_out(bucket, resp.small_body.size());
+        emit_access(*access, bytes, /*truncated=*/false);
+    }
     // Data-plane audit record (roadmap §3.9 ④): structured twin of the access line
     if (audit_ && audit_->data_plane()) {
         AuditEvent e;

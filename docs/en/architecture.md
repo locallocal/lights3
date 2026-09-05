@@ -203,6 +203,10 @@ buckets:
 
 log:
   level: info
+  # format: json                        # one JSON object per line (default text)
+  # file: /var/log/lights3/lights3.log  # empty = stderr; otherwise size-rotated
+  # async: true                         # dedicated writer thread
+  # slow_request_threshold: 500ms       # slow requests logged at WARN with stage timings
 ```
 
 A runnable minimal example lives at `config/lights3.yaml` in the repository root.

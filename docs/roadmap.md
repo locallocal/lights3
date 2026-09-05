@@ -288,7 +288,7 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
    生命周期事件 + 数据面结构化访问日志（见 §5.2）是合规前置，也是 ① 的数
    据源之一。~~ `audit.path` 独立 rotating JSON 行文件：凭证/租户/配额/归属
    生命周期、STS、建删桶、配额拒绝、rescan；`audit.data_plane` 每请求一条
-   `access`（§5.2 的运行日志异步化与慢日志仍独立待做）。
+   `access`（§5.2 的运行日志异步化与慢日志已于 2026-09-05 完成）。
 
 ## 4. 运行时与 HTTP 层
 
@@ -322,7 +322,7 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 2. **缓冲区池化**（高/中）：每个流式响应现场 `std::vector` 分配并**零初始
    化** 64KiB，四驱动各一份；thread_local 池即可（builtin 是
    thread-per-connection，天然适配），同时是 §3.4 fixed buffers 的前置。
-3. **异步日志 sink**（高/低）：见 §5.2——访问日志现是热路径上每请求一次同
+3. ~~**异步日志 sink**~~（高/低）**已完成（2026-09-05）**：见 §5.2——访问日志现是热路径上每请求一次同
    步 stderr write。
 4. **sendfile 零拷贝**（高/中-高）：`http-adapter.md` §1 已预留
    `try_as_file()` 设计出口，接口未加实现未做；localfs 大对象 GET 收益显
@@ -379,13 +379,13 @@ CopyObject/UploadPartCopy 按 `x-amz-copy-source` 细分）→
 上的 `RequestBackendStats` 把后端耗时回填到访问日志尾部
 `api=… backend=<name>:<ms>`（[s3-protocol.md §7](s3-protocol.md)）。
 
-### 5.2 日志体系
+### 5.2 日志体系 **已完成（2026-09-05，三项全部）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| **异步 sink + 轮转** | `Logger::init` 硬编码同步 `stderr_color_sink_mt`——高 QPS 下每条访问日志一次锁 + write syscall；spdlog 的 `async_logger` + `rotating_file_sink` 现成，配置项化即可 | 高 | 低 |
-| 慢请求日志 | 无阈值通道：生产开 info 被淹没，开 warn 就没有访问日志。加 `log.slow_request_threshold`，超限升 WARN 并附阶段耗时 | 高 | 低 |
-| 结构化访问日志 | 固定七字段空格分隔，`path` 未转义（含空格的 key 破坏切分），缺 remote_addr / UA / bucket / 后端名 / TTFB；无 JSON 选项，不利接 Loki/ELK。审计侧已由 §3.9④ 的 `audit.data_plane` JSON 行 `access` 记录覆盖（bucket/key/tenant/status/bytes），运行日志本身的结构化仍待做 | 中 | 低-中 |
+| ~~**异步 sink + 轮转**~~ | 已完成：`log.file`（空 = stderr，否则 `rotating_file_sink` 按 `max_size`/`max_files` 轮转，每秒定时 flush）、`log.async` + `async_queue` + `async_overflow`（block/drop）走 `async_logger`，`Logger::shutdown` 在应用停机末尾排空队列；`core/log.cc` | 高 | 低 |
+| ~~慢请求日志~~ | 已完成：`log.slow_request_threshold`（可热更新）——总耗时达阈值的访问行升 WARN 并附 `auth/handler/backend/ttfb/total` 阶段耗时；`log.level: warn` 下仍可见 | 高 | 低 |
+| ~~结构化访问日志~~ | 已完成：文本行 `path`/UA 加引号转义，新增 `remote/bucket/ttfb/ua` 槽；`log.format: json` 时整条运行日志每行一个对象，访问记录平铺 `request_id/remote/ak/method/path/query/bucket/key/status/bytes/ms/ttfb_ms/auth_ms/handler_ms/backend_ms/backend_calls/api/backend/ua`；流式响应在响应体读尽时写行（实际字节数 + 含传输的总耗时，中断标 `truncated`）；[s3-protocol.md §7](s3-protocol.md) | 中 | 低-中 |
 
 ### 5.3 指标补口
 
@@ -481,7 +481,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 
 1. Grafana dashboard + Prometheus 告警规则（§5.5，零 C++）
 2. mint 挂 ctest + website e2e/单测 + s3adm 进 e2e（§6.1）
-3. ~~API×后端分维指标 + 后端耗时（§5.1）~~ **已完成（2026-09-05）**；异步日志 + 慢日志（§5.2）
+3. ~~API×后端分维指标 + 后端耗时（§5.1）~~ **已完成（2026-09-05）**；~~异步日志 + 慢日志（§5.2）~~ **已完成（2026-09-05）**
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
 5. ~~cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3，含熔断/deadline/异步 acquire/凭证链）~~ **已完成（2026-08-28）**
 6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；~~DuoGcStats 接指标（§3.7）~~ **已完成（早于 2026-09，gaps §6.1 时接线）**；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**

@@ -182,6 +182,10 @@ buckets:
 
 log:
   level: info
+  # format: json                        # 每行一个 JSON 对象（默认 text）
+  # file: /var/log/lights3/lights3.log  # 空 = stderr；否则按大小轮转
+  # async: true                         # 独立写线程
+  # slow_request_threshold: 500ms       # 慢请求升 WARN 并附阶段耗时
 ```
 
 可运行的最小示例见仓库根的 `config/lights3.yaml`。

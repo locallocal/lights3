@@ -31,18 +31,11 @@ void on_signal(int sig) {
     (void)n;  // A full pipe means a signal is already pending; dropping is fine
 }
 
-LogLevel parse_level(const std::string& s) {
-    if (s == "debug") return LogLevel::Debug;
-    if (s == "warn") return LogLevel::Warn;
-    if (s == "error") return LogLevel::Error;
-    return LogLevel::Info;
-}
-
 }  // namespace
 
 Application::Application(const std::string& config_path)
     : config_path_(config_path), cfg_(Config::load(config_path)) {
-    Logger::init(parse_level(cfg_.log_level));
+    Logger::init(cfg_.log);
 }
 
 Application::~Application() { shutdown(); }
@@ -99,6 +92,8 @@ void Application::start_server() {
     service_->set_pool_stats([pool = pool_] { return pool->stats(); });
     service_->set_request_timeout(std::chrono::seconds(cfg_.http.request_timeout_sec));
     service_->set_min_part_size(cfg_.http.min_part_size);
+    service_->set_slow_request_threshold(
+        std::chrono::milliseconds(cfg_.log.slow_request_threshold_ms));
     service_->set_backend_metrics(metrics_);
     service_->set_credential_store(cred_store_);
     service_->set_website_store(website_store_);
@@ -338,6 +333,12 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
             a.audit.max_size != b.audit.max_size || a.audit.max_files != b.audit.max_files,
         "audit");
     cmp(a.ratelimit.max_tracked != b.ratelimit.max_tracked, "ratelimit.max_tracked");
+    // Sink and formatter are built once at Logger::init (roadmap §5.2)
+    cmp(a.log.format != b.log.format || a.log.file != b.log.file ||
+            a.log.max_size != b.log.max_size || a.log.max_files != b.log.max_files ||
+            a.log.async != b.log.async || a.log.async_queue != b.log.async_queue ||
+            a.log.async_overflow != b.log.async_overflow,
+        "log.format/file/max_size/max_files/async*");
     return out;
 }
 
@@ -381,10 +382,18 @@ ConfigReloadReport Application::reload_config() {
             return report;
         }
     }
-    if (cfg_.log_level != fresh.log_level) {
-        Logger::set_level(parse_level(fresh.log_level));
-        report.applied.push_back(change("log.level", cfg_.log_level, fresh.log_level));
-        cfg_.log_level = fresh.log_level;
+    if (cfg_.log.level != fresh.log.level) {
+        Logger::set_level(Logger::parse_level(fresh.log.level));
+        report.applied.push_back(change("log.level", cfg_.log.level, fresh.log.level));
+        cfg_.log.level = fresh.log.level;
+    }
+    if (cfg_.log.slow_request_threshold_ms != fresh.log.slow_request_threshold_ms) {
+        service_->set_slow_request_threshold(
+            std::chrono::milliseconds(fresh.log.slow_request_threshold_ms));
+        report.applied.push_back(change("log.slow_request_threshold(ms)",
+                                        cfg_.log.slow_request_threshold_ms,
+                                        fresh.log.slow_request_threshold_ms));
+        cfg_.log.slow_request_threshold_ms = fresh.log.slow_request_threshold_ms;
     }
     if (cfg_.http.request_timeout_sec != fresh.http.request_timeout_sec) {
         service_->set_request_timeout(std::chrono::seconds(fresh.http.request_timeout_sec));
@@ -528,6 +537,10 @@ void Application::shutdown() noexcept {
         pool_.reset();
     }
     metrics_.reset();
+    // Last: everything above may still log. Drains the async queue (log.async) so
+    // the final lines reach the sink before the process exits; logging afterwards
+    // continues synchronously on the same sink
+    Logger::shutdown();
 }
 
 }  // namespace lights3

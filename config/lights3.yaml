@@ -293,4 +293,13 @@ buckets:
   #     backend: tierdata
 
 log:
-  level: info
+  level: info                          # debug | info | warn | error (hot-reloadable)
+  # -- roadmap §5.2 (docs/s3-protocol.md §7) --
+  # format: text                       # text = one readable line | json = one JSON object per line (Loki/ELK)
+  # file: /var/log/lights3/lights3.log # empty = stderr; otherwise a size-rotated file
+  # max_size: 64MiB                    # rotate above this size
+  # max_files: 10                      # rotated files kept
+  # async: false                       # true = dedicated writer thread, request threads only enqueue
+  # async_queue: 8192                  # queue capacity (records), [64, 1048576]
+  # async_overflow: block              # block = wait on a full queue | drop = overwrite the oldest record
+  # slow_request_threshold: 0s         # >= this total time => WARN access line with per-stage timings; 0 = off (hot-reloadable)

@@ -715,7 +715,13 @@ check "metrics: api x backend series present" "0" \
 check "metrics: backend op histogram present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_backend_op_seconds_count{backend="tierdata",op="put_object"}'; echo $?)"
 check "access log carries api and backend time" "0" \
-    "$(grep -q 'access .* PUT /mybucket/dir/big.bin 200 .* api=PutObject backend=tierdata:' "$WORK/server.log"; echo $?)"
+    "$(grep -q 'access .* PUT "/mybucket/dir/big.bin" 200 .* api=PutObject backend=tierdata:' "$WORK/server.log"; echo $?)"
+# roadmap §5.2: quoted path, remote address, bucket and TTFB slots; the streaming GET
+# line is written at end of body with the bytes actually sent
+check "access log carries remote/bucket/ttfb slots" "0" \
+    "$(grep -q 'access .* PUT "/mybucket/dir/big.bin" 200 .* remote=127.0.0.1 bucket=mybucket ttfb=[0-9.]*ms ua="' "$WORK/server.log"; echo $?)"
+check "access log: streaming GET reports the bytes sent" "0" \
+    "$(grep -q 'access .* GET "/mybucket/dir/big.bin" 200 [1-9][0-9]* .* api=GetObject ' "$WORK/server.log"; echo $?)"
 
 # Graceful shutdown
 kill -TERM "$SRV_PID"

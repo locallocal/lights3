@@ -21,6 +21,7 @@
 
 #include "core/metrics.h"
 
+#include "core/fault.h"
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
@@ -650,3 +651,22 @@ TEST(duostore_redis_list_uploads_lex_index) {
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META
+
+// roadmap §6.1: the redis.command fault point simulates a connection-level
+// failure — a read retries once on a fresh connection (reconnect counted), a write
+// surfaces InternalError; the store keeps working once the point clears
+TEST(duostore_redis_fault_point) {
+    REDIS_OR_SKIP();
+    RedisMetaStore a(redis_opts(unique_prefix()));
+    a.create_bucket("flt");
+    fault::arm("redis.command:1:ECONNRESET");
+    CHECK(a.bucket_exists("flt"));  // read: retried on a fresh connection
+    fault::arm("redis.command:1:ECONNRESET");
+    CHECK_THROWS_S3(a.create_bucket("flt2"), s3::S3ErrorCode::InternalError);
+    fault::reset();
+    a.create_bucket("flt2");
+    CHECK(a.bucket_exists("flt2"));
+    a.delete_bucket("flt");
+    a.delete_bucket("flt2");
+    a.close();
+}

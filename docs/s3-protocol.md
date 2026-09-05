@@ -268,6 +268,7 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
    脚本（含 100MB 级 multipart、Range 下载、presigned URL）；
    另跑 MinIO 的 `mint` 兼容性测试集作为回归门槛——已落地
    `tests/e2e/run_mint.sh`（起 lights3 + `minio/mint` 容器对打，docker 不可用
-   时显式 SKIP）。mint 依赖 docker daemon 权限，本地开发机通常跑不了，定位为
-   CI/有权限环境的手动门槛；全集含 versioning/tagging 等明确不支持的 API，
-   建议以 `s3cmd`、`awscli` 子集起步（`run_mint.sh <bin> s3cmd awscli`）。
+   时显式 SKIP）。mint 依赖 docker daemon 权限，本地开发机通常跑不了；全集含
+   versioning/tagging 等明确不支持的 API，以 `s3cmd`、`awscli` 子集起步——
+   自 roadmap §6.1 起挂为 ctest `mint`（无 docker 显示 Not Run），跑完打印
+   每套件 PASS/FAIL 基线（[testing.md §6](testing.md)）。

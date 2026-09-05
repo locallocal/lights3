@@ -21,6 +21,17 @@ struct YamlNode {
     std::vector<std::pair<std::string, YamlNode>> map;  // order-preserving
     std::vector<YamlNode> list;
 
+    // Special members out of line: the recursive pair<string, YamlNode> member
+    // makes clang instantiate them while the type is still incomplete when they
+    // are defaulted in-class (GCC accepts it); defined in config.cc
+    YamlNode();
+    explicit YamlNode(Type t) : type(t) {}
+    ~YamlNode();
+    YamlNode(const YamlNode&);
+    YamlNode(YamlNode&&) noexcept;
+    YamlNode& operator=(const YamlNode&);
+    YamlNode& operator=(YamlNode&&) noexcept;
+
     const YamlNode* find(const std::string& key) const;
     // Get a child scalar; returns def if absent
     std::string get(const std::string& key, const std::string& def = "") const;

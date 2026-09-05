@@ -1,0 +1,3 @@
+Host: localhost
+
+X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=FUZZAK1234567890%2F20260905%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20260905T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=00

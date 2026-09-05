@@ -1,5 +1,7 @@
 #include "storage/xlocalfs/xlocalfs_backend.h"
 
+#include "core/fault.h"
+
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -114,6 +116,11 @@ Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStrea
         if (n == 0) {
             ws.commit(0);
             break;
+        }
+        if (int fe = fault::check("xlocalfs.write")) {  // roadmap §6.1: the io_uring write path
+            ws.commit(0);
+            throw s3::S3Error(s3::S3ErrorCode::InternalError,
+                              std::string("write staging tmp (uring): ") + std::strerror(fe));
         }
         md5.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
         ws.commit(n);

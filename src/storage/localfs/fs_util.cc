@@ -1,5 +1,7 @@
 #include "storage/localfs/fs_util.h"
 
+#include "core/fault.h"
+
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/xattr.h>
@@ -64,6 +66,10 @@ bool fsync_enabled() {
 
 void fsync_file(int fd) {
     if (!fsync_enabled()) return;
+    if (int fe = fault::check("localfs.fsync")) {  // roadmap §6.1
+        errno = fe;
+        throw_errno("fdatasync");
+    }
     if (::fdatasync(fd) != 0 && errno != EINVAL)  // EINVAL: target fs unsupported, ignore
         throw_errno("fdatasync");
 }
@@ -82,8 +88,17 @@ void fsync_path(const fs::path& path) {
     if (!fsync_enabled()) return;
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) return;
-    ::fdatasync(fd);
+    // Same contract as fsync_file: the 200 promises durability, so a failed
+    // fdatasync of the staged content is a write failure (roadmap §6.1 fault point
+    // localfs.fsync sits here as well — the object commit path syncs by path)
+    int fe = fault::check("localfs.fsync");
+    int rc = fe ? -1 : ::fdatasync(fd);
+    int saved = fe ? fe : errno;
     ::close(fd);
+    if (rc != 0 && saved != EINVAL) {
+        errno = saved;
+        throw_errno("fdatasync staged file");
+    }
 }
 
 void write_tsv(const fs::path& dest, const fs::path& tmp_dir,
@@ -308,8 +323,9 @@ bool commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
         xattr_ok = set_meta_xattr(tmp.path, meta, TierInfo{}, opt.xattr);
         fsync_path(tmp.path);  // persist the data content first, then splice it into the tree
     }
-    fs::rename(tmp.path, dest, ec);
-    if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed");
+    if (int fe = fault::check("localfs.rename")) ec = std::error_code(fe, std::generic_category());
+    else fs::rename(tmp.path, dest, ec);
+    if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed: " + ec.message());
     tmp.committed = true;
     fsync_dir(dest.parent_path());
     return finish_object_sidecar(dest, meta, staging_put, opt.sidecar, xattr_ok);
@@ -444,8 +460,9 @@ void commit_cached(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
     // commit_object_file's ordering
     fsync_path(tmp.path);
     std::error_code ec;
-    fs::rename(tmp.path, dest, ec);
-    if (ec) throw s3::S3Error(s3::S3ErrorCode::InternalError, "rename cached data failed");
+    if (int fe = fault::check("localfs.rename")) ec = std::error_code(fe, std::generic_category());
+    else fs::rename(tmp.path, dest, ec);
+    if (ec) throw s3::S3Error(s3::S3ErrorCode::InternalError, "rename cached data failed: " + ec.message());
     tmp.committed = true;
     fsync_dir(dest.parent_path());
     write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put, tier);

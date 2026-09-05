@@ -1,0 +1,3 @@
+Authorization: AWS4-HMAC-SHA256 Credential=FUZZAK1234567890/20990101/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=zz
+x-amz-date: 2099
+

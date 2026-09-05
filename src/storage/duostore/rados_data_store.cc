@@ -1,5 +1,7 @@
 #include "storage/duostore/rados_data_store.h"
 
+#include "core/fault.h"
+
 #include <rados/librados.h>
 
 #include <algorithm>
@@ -349,7 +351,9 @@ private:
         p->data = std::move(buf_);
         p->permit = std::move(permit_);
         int r;
-        if (!owner_.empty()) {
+        if (int fe = fault::check("rados.submit")) {  // roadmap §6.1
+            r = -fe;
+        } else if (!owner_.empty()) {
             // Ownership persisted with the object (§6.1): a single-object write_op
             // is atomic — data and the owner xattr are either both present or both
             // absent, never the intermediate "object without ownership" state
@@ -462,8 +466,10 @@ public:
         // destroying the coroutine frame along with the caller's buffer would let
         // the remote completion still write through freed memory
         p->data.resize(want);
-        int r = rados_aio_read(ctx, RadosDataStore::object_name(e.file_id).c_str(), p->comp,
-                               reinterpret_cast<char*>(p->data.data()), want, cur_off_);
+        int r = fault::check("rados.submit");
+        if (r) r = -r;
+        else r = rados_aio_read(ctx, RadosDataStore::object_name(e.file_id).c_str(), p->comp,
+                                reinterpret_cast<char*>(p->data.data()), want, cur_off_);
         if (r < 0) {
             p->unref();
             p->unref();
@@ -566,7 +572,9 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
             const auto& e = extents[i];
             if (e.kind != Extent::Kind::kRados) continue;  // foreign-kind extents (leftovers from a data engine switch) do not belong to this store
             AioPending* p = make_pending(exec_, m_lat_remove_);
-            int r = rados_aio_remove(ctx, object_name(e.file_id).c_str(), p->comp);
+            int r = fault::check("rados.submit");
+            if (r) r = -r;
+            else r = rados_aio_remove(ctx, object_name(e.file_id).c_str(), p->comp);
             if (r < 0) {
                 p->unref();
                 p->unref();

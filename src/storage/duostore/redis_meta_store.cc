@@ -1,5 +1,7 @@
 #include "storage/duostore/redis_meta_store.h"
 
+#include "core/fault.h"
+
 #include <hiredis.h>
 #include <openssl/evp.h>
 #include <sys/time.h>
@@ -230,6 +232,10 @@ RedisReplyPtr run_on(redisContext* ctx, const std::vector<std::string>& args,
     for (size_t i = 0; i < args.size(); ++i) {
         argv[i] = args[i].data();
         lens[i] = args[i].size();
+    }
+    if (int fe = fault::check("redis.command")) {  // roadmap §6.1: connection-level failure
+        *err = std::string("injected: ") + std::strerror(fe);
+        return nullptr;
     }
     auto* r = static_cast<redisReply*>(
         redisCommandArgv(ctx, int(args.size()), argv.data(), lens.data()));

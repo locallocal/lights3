@@ -29,6 +29,13 @@ Usage: ./build.sh [options]
                 build-asan, isolated from regular builds (override with -B)
   --tsan        ThreadSanitizer build; the build directory defaults to
                 build-tsan. Mutually exclusive with --asan
+  --ubsan       UndefinedBehaviorSanitizer build; defaults to build-ubsan.
+                Mutually exclusive with --asan/--tsan (docs/testing.md §7)
+  --coverage    gcov instrumentation (-O0 --coverage); defaults to build-cov;
+                scripts/coverage.sh builds, runs and reports (docs/testing.md §7)
+  --fuzz        libFuzzer harnesses (requires clang; CC/CXX are switched to
+                clang unless already set); defaults to build-fuzz
+                (docs/testing.md §3)
   --clean       Remove the build directory first, then do a full build
   --test        Run ctest after the build (unit + per-driver e2e)
   -j N          Build parallelism (default nproc)
@@ -40,7 +47,9 @@ EOF
 
 BUILD_DIR=""
 BUILD_TYPE=""
-SAN=""      # "" | address | thread
+SAN=""      # "" | address | thread | undefined
+COVERAGE=0
+FUZZ=0
 SEASTAR=0
 TIKV=0
 REDIS=0
@@ -63,6 +72,10 @@ while [[ $# -gt 0 ]]; do
                    SAN=address ;;
         --tsan)    [[ $SAN == address ]] && { echo "--asan and --tsan are mutually exclusive" >&2; exit 2; }
                    SAN=thread ;;
+        --ubsan)   [[ -n $SAN && $SAN != undefined ]] && { echo "sanitizer flags are mutually exclusive" >&2; exit 2; }
+                   SAN=undefined ;;
+        --coverage) COVERAGE=1 ;;
+        --fuzz)    FUZZ=1 ;;
         --clean)   CLEAN=1 ;;
         --test)    RUN_TEST=1 ;;
         -j)        JOBS="${2:?-j requires an argument}"; shift ;;
@@ -79,10 +92,13 @@ done
 # sanitizer and regular builds do not pollute each other's caches
 if [[ -z $BUILD_DIR ]]; then
     case "$SAN" in
-        address) BUILD_DIR=build-asan ;;
-        thread)  BUILD_DIR=build-tsan ;;
-        *)       BUILD_DIR=build ;;
+        address)   BUILD_DIR=build-asan ;;
+        thread)    BUILD_DIR=build-tsan ;;
+        undefined) BUILD_DIR=build-ubsan ;;
+        *)         BUILD_DIR=build ;;
     esac
+    [[ $COVERAGE -eq 1 ]] && BUILD_DIR=build-cov
+    [[ $FUZZ -eq 1 ]] && BUILD_DIR=build-fuzz
 fi
 
 # Submodules: always init the regular ones (rocksdb is a shallow clone; with all
@@ -120,6 +136,21 @@ command -v ninja >/dev/null && CMAKE_ARGS+=(-G Ninja)
 # CMake raises FATAL_ERROR suggesting to install librados-dev or set
 # LIGHTS3_RADOS_ROOT (CMakeLists.txt)
 [[ $RADOS -eq 1 ]] && CMAKE_ARGS+=(-DLIGHTS3_DUOSTORE_RADOS_DATA=ON)
+# Coverage: -O0 keeps line attribution honest; gcov data lands next to the objects
+if [[ $COVERAGE -eq 1 ]]; then
+    CMAKE_ARGS+=(-DCMAKE_BUILD_TYPE=Debug
+                 -DCMAKE_CXX_FLAGS="-O0 --coverage -fno-inline"
+                 -DCMAKE_EXE_LINKER_FLAGS="--coverage")
+fi
+# libFuzzer needs clang: switch the compiler for this build dir unless the caller pinned one
+if [[ $FUZZ -eq 1 ]]; then
+    if [[ -z ${CXX:-} ]]; then
+        command -v clang++ >/dev/null || { echo "--fuzz needs clang++ (or set CXX)" >&2; exit 2; }
+        export CC=clang CXX=clang++
+    fi
+    CMAKE_ARGS+=(-DLIGHTS3_FUZZ_LIBFUZZER=ON)
+    [[ -z $SAN ]] && SAN=address  # fuzzers run under ASan by default
+fi
 if [[ -n $SAN ]]; then
     CMAKE_ARGS+=(-DCMAKE_CXX_FLAGS="-fsanitize=$SAN -fno-omit-frame-pointer"
                  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=$SAN")

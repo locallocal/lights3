@@ -157,6 +157,11 @@ public:
         svr_->set_error_handler([this](const httplib::Request&, httplib::Response& rs) {
             using HR = httplib::Server::HandlerResponse;
             if (!rs.body.empty()) return HR::Unhandled;
+            // A response L2 rendered always carries its ids (x-amz-request-id /
+            // Server) even when the body is empty or streamed: a HEAD 404 or a
+            // website error document must not be rewritten into 405 (found by the
+            // website / fault e2e cases, roadmap §6.1)
+            if (rs.has_header("x-amz-request-id") || rs.has_header("Server")) return HR::Unhandled;
             if (rs.status == 400 || rs.status == 431) counters_.parse_error();  // upstream parser verdicts
             s3::S3ErrorCode code = s3::S3ErrorCode::InternalError;
             switch (rs.status) {

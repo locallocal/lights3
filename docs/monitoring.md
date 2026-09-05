@@ -9,8 +9,8 @@
 | 文件 | 内容 |
 | --- | --- |
 | `deploy/prometheus/scrape.yml` | 抓取配置：`job_name: lights3`、`metrics_path: /-/metrics`、加载规则文件；可单独运行也可并入既有 prometheus.yml |
-| `deploy/prometheus/lights3.rules.yml` | 9 组 46 条：7 条 recording（5xx 率、P99、后端错误率、cloudproxy 重试率、keep-alive 复用率）+ 39 条告警 |
-| `deploy/grafana/lights3.json` | dashboard（uid `lights3-overview`，62 面板 / 9 行），变量 `DS` / `instance` / `backend` |
+| `deploy/prometheus/lights3.rules.yml` | 9 组 48 条：7 条 recording（5xx 率、P99、后端错误率、cloudproxy 重试率、keep-alive 复用率）+ 41 条告警 |
+| `deploy/grafana/lights3.json` | dashboard（uid `lights3-overview`，63 面板 / 9 行），变量 `DS` / `instance` / `backend` |
 | `deploy/grafana/gen_dashboard.py` | dashboard 的生成脚本——面板定义的唯一来源，改完重跑生成 JSON |
 | `tests/monitoring/check_assets.py` | 资产校验（§5），ctest 名 `monitoring_assets` |
 
@@ -90,13 +90,16 @@ Recording 规则（供 dashboard 与告警共用）：`lights3:requests:rate5m`�
 | Storage backends | 后端 op P99 / 错误 / 速率、元数据缓存、**降级旗标**（uring / xattr fallback）、localfs op 错误 |
 | Buckets / usage / website | top bucket、用量字节、配额拒绝、网站面事件、活跃 multipart |
 | DuoStore | GC 队列深度与队头年龄（收敛判据）、轮次/回收/耗时、跳过原因、pack live vs total、隔离、损坏与孤儿、四种 meta 引擎信号 |
-| Tiered | 读来源、降冷/回热/逐出、云端 GC、扫描与隔离、range cache、op 错误 |
+| Tiered | 读来源、降冷/回热/逐出、本地层容量（文件系统已用 vs 高水位、账面本地字节 vs 配额）、云端 GC、扫描与隔离、range cache、op 错误 |
 | CloudProxy | 远端请求 P99、重试比、错误码、连接池等待与 ETag 不符 |
 
-**tiered 水位**：网关未导出本地层已用字节的 gauge（要加得改 C++，本项
-零改动），因此"水位"以逐出速率 + 扫描轮次表达：连续一小时每轮都在逐出
-即在 `space_high_watermark` 之上。需要精确值时看 `lights3_bucket_usage_bytes`
-（桶维度，非分层本地层）或磁盘侧的 node exporter。
+**tiered 水位**：`lights3_tiered_local_used_bytes` / `_total_bytes` /
+`_high_watermark_bytes`（statvfs，正是水位逻辑看到的量）与
+`lights3_tiered_local_cached_bytes` / `_quota_bytes`（账面本地字节与逻辑配额）
+五个 gauge 直接给出位置；告警 `Lights3TieredLocalAboveHighWatermark`（30 分钟
+仍在高水位之上 = 逐出追不上）与 `Lights3TieredQuotaNearlyFull`（账面超过配额
+90%）。逐出速率 + 扫描轮次的 `Lights3TieredEvictionPressure` 保留为"每轮都在逐出"
+的补充信号。
 
 ## 5. 测试
 

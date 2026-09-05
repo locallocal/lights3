@@ -150,17 +150,12 @@ std::unique_ptr<ICacheFill> DuoStoreTierLocal::begin_cache_fill(std::string_view
 }
 
 bool DuoStoreTierLocal::cache_space_ok(uint64_t size, uint64_t min_free_bytes) const {
-    struct statvfs sv{};
-    if (::statvfs(duo_->root().c_str(), &sv) != 0) return false;
-    uint64_t avail = uint64_t(sv.f_bavail) * sv.f_frsize;
-    return avail > size + min_free_bytes;
+    auto s = probe_space(duo_->root());
+    return s && s->avail_bytes > size + min_free_bytes;
 }
 
-std::optional<std::pair<double, uint64_t>> DuoStoreTierLocal::disk_usage() const {
-    struct statvfs sv{};
-    if (::statvfs(duo_->root().c_str(), &sv) != 0 || sv.f_blocks == 0) return std::nullopt;
-    double used = 1.0 - double(sv.f_bavail) / double(sv.f_blocks);
-    return std::pair(used, uint64_t(sv.f_blocks) * uint64_t(sv.f_frsize));
+std::optional<SpaceUsage> DuoStoreTierLocal::space_usage() const {
+    return probe_space(duo_->root());
 }
 
 // Meta-driven enumeration: buckets → paged key listing → one record read per key for

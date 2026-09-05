@@ -21,7 +21,6 @@
 | mTLS 客户端证书 → 凭证 / 租户身份映射 | roadmap §4.1 | `tls_client_auth` 已验证证书链但不映射身份（[tls.md](tls.md)）；映射需定证书字段与凭证的绑定规则 | 中 | 中 |
 | 后端实例增删热重载 | roadmap §4.4 | `reload_config` 只应用安全子集 + `buckets.rules`；driver / 后端 / `default_backend` / `auth.*` 明确需重启（[config-reload.md](config-reload.md)） | 中 | 高 |
 | 独立 admin 端口 | roadmap §5.3 | 现由 `http.metrics_access: root` 与 root 专属 admin 路由把关；端口层隔离交部署侧反代（[tls.md §6](tls.md)） | 低 | 低 |
-| tiered 本地层已用字节 gauge | roadmap §5.5 | dashboard 以逐出速率表达水位；`ITierLocal` 已有空间探针，导出为 gauge 是小改 C++ + 面板生成器 | 中 | 低 |
 | `HeaderMap` 线性扫描 / `BlockQueue` 双拷贝 | roadmap §4.3 ⑧ | 绝对量小；有 profile 证据再动 | 低 | 低 |
 
 ## 2. 待验证（代码已落地，本机环境验证不了）

@@ -4,6 +4,8 @@
 #include <sys/xattr.h>
 
 #include <atomic>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <thread>
@@ -602,6 +604,58 @@ TEST(tiered_quota_watermark_eviction) {
     CHECK(f.tier_of("bkt", "warm.bin").tier == fsutil::Tier::kRemote);
     CHECK(f.tier_of("bkt", "hot.bin").tier == fsutil::Tier::kLocal);  // local needs no upload
     CHECK_EQ(f.cloud->puts.load(), puts_before);  // zero upload traffic
+}
+
+// Local-tier capacity gauges (backlog-sequence ①): what the space watermark sees,
+// exported per backend and readable after the backend is gone
+TEST(tiered_local_capacity_gauges) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    auto metrics = std::make_shared<MetricsRegistry>();
+    std::vector<BackendConfig> cfgs;
+    cfgs.push_back({"localdata", "localfs",
+                    {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
+    cfgs.push_back({"mem", "memory", {}});
+    cfgs.push_back({"tier", "tiered",
+                    {{"local", "localdata"}, {"cloud", "mem"}, {"scan_interval", "0s"},
+                     {"cold_after", "30d"}, {"space_high_watermark", "85%"},
+                     {"quota_bytes", "64MiB"}}});
+    auto out = StorageRegistry::build(cfgs, pool, metrics);
+    auto tiered = std::dynamic_pointer_cast<TieredBackend>(out.at("tier"));
+    CHECK(tiered != nullptr);
+
+    auto gauge = [&](const char* name) -> double {
+        auto text = metrics->render();
+        std::string key = std::string(name) + "{backend=\"tier\"} ";
+        auto at = text.find(key);
+        CHECK(at != std::string::npos);
+        return at == std::string::npos ? -1.0 : std::strtod(text.c_str() + at + key.size(), nullptr);
+    };
+    double used = gauge("lights3_tiered_local_used_bytes");
+    double total = gauge("lights3_tiered_local_total_bytes");
+    double high = gauge("lights3_tiered_local_high_watermark_bytes");
+    CHECK(total > 0);
+    CHECK(used > 0 && used <= total);
+    CHECK(std::fabs(high - 0.85 * total) <= 1e-6 * total);
+    CHECK_EQ(gauge("lights3_tiered_local_quota_bytes"), double(64) * 1024 * 1024);
+    // The books estimate starts uncalibrated (rendered as 0); a scan calibrates it to
+    // the resident object bytes
+    CHECK_EQ(gauge("lights3_tiered_local_cached_bytes"), 0.0);
+    sync_wait(tiered->create_bucket("bkt"));
+    backend_suite::put(*tiered, "bkt", "k", std::string(1 << 20, 'x'));
+    sync_wait(tiered->scan_once());
+    CHECK(gauge("lights3_tiered_local_cached_bytes") >= double(1 << 20));
+    // The used-bytes probe agrees with the adapter's own view of the same filesystem
+    auto s = tiered->local().space_usage();
+    CHECK(s.has_value());
+    CHECK_EQ(s->used_bytes + s->avail_bytes, s->total_bytes);
+
+    sync_wait(tiered->close());
+    tiered.reset();
+    out.clear();
+    // The registry outlives the backend: the callbacks hold the adapter and the shared
+    // estimate, not the backend, so rendering stays valid
+    CHECK(gauge("lights3_tiered_local_total_bytes") > 0);
 }
 
 // Two-phase registry construction: tiered references leaf backends; cycles/unknown references and an invalid local error out

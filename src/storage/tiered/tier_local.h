@@ -7,6 +7,8 @@
 // over the localfs/xlocalfs disk layout, tier_local_duo.{h,cc} over duostore's meta.
 #pragma once
 
+#include <sys/statvfs.h>
+
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -20,6 +22,28 @@
 #include "storage/localfs/fs_util.h"  // Tier / TierInfo are the shared vocabulary
 
 namespace lights3::storage::tier {
+
+// Filesystem space as the watermark logic sees it: "used" is everything an
+// unprivileged writer cannot use (f_blocks - f_bavail), so used + avail == total
+struct SpaceUsage {
+    uint64_t used_bytes = 0;
+    uint64_t total_bytes = 0;
+    uint64_t avail_bytes = 0;
+    double used_fraction() const {
+        return total_bytes ? double(used_bytes) / double(total_bytes) : 0.0;
+    }
+};
+
+// statvfs on the local root; nullopt when the call fails or reports no blocks
+inline std::optional<SpaceUsage> probe_space(const std::filesystem::path& root) {
+    struct statvfs sv{};
+    if (::statvfs(root.c_str(), &sv) != 0 || sv.f_blocks == 0) return std::nullopt;
+    SpaceUsage u;
+    u.total_bytes = uint64_t(sv.f_blocks) * uint64_t(sv.f_frsize);
+    u.avail_bytes = uint64_t(sv.f_bavail) * uint64_t(sv.f_frsize);
+    u.used_bytes = u.total_bytes - std::min(u.total_bytes, u.avail_bytes);
+    return u;
+}
 
 using fsutil::Tier;
 using fsutil::TierInfo;
@@ -128,9 +152,16 @@ public:
 
     // ---- space ----
     virtual bool cache_space_ok(uint64_t size, uint64_t min_free_bytes) const = 0;
-    // Used fraction and total bytes of the filesystem holding the local data (statvfs);
-    // nullopt when unavailable
-    virtual std::optional<std::pair<double, uint64_t>> disk_usage() const = 0;
+    // Capacity of the filesystem holding the local data (statvfs), nullopt when
+    // unavailable. Exported as the lights3_tiered_local_*_bytes gauges
+    // (backlog-sequence ①) and consumed by the space watermark
+    virtual std::optional<SpaceUsage> space_usage() const = 0;
+    // Used fraction and total bytes, the watermark's view of space_usage()
+    std::optional<std::pair<double, uint64_t>> disk_usage() const {
+        auto s = space_usage();
+        if (!s || s->total_bytes == 0) return std::nullopt;
+        return std::pair(s->used_fraction(), s->total_bytes);
+    }
 
     // ---- enumeration ----
     virtual std::unique_ptr<IWalker> walk() = 0;

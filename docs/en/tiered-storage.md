@@ -461,7 +461,10 @@ automatically (INFO). Operator entry point:
 refs_missing — it HEADs the cloud once more and, if the copy is still gone,
 deletes the dead local stub (acknowledged data loss; if the copy is back the
 stub stays and the entry is dropped). The gauge
-`lights3_tiered_quarantine_entries{kind}` shows the ledger size at all times.
+`lights3_tiered_quarantine_entries{kind}` shows the ledger size at all times. Local-tier
+capacity has its own five callback gauges,
+`lights3_tiered_local_{used,total,high_watermark,cached,quota}_bytes`
+([monitoring.md](monitoring.md) "Tiered watermark", [storage/tiered.md](../storage/tiered.md) metric table).
 
 ## 10. Implementation Phases
 

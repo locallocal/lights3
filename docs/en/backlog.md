@@ -25,7 +25,6 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 | mTLS client certificate → credential / tenant identity | roadmap §4.1 | `tls_client_auth` verifies the chain but maps no identity ([tls.md](tls.md)); needs a rule binding certificate fields to credentials | medium | medium |
 | Hot add / remove of backend instances | roadmap §4.4 | `reload_config` applies the safe subset plus `buckets.rules`; driver / backends / `default_backend` / `auth.*` explicitly need a restart ([config-reload.md](config-reload.md)) | medium | high |
 | Separate admin port | roadmap §5.3 | Guarded today by `http.metrics_access: root` and root-only admin routes; port-level isolation is left to a fronting proxy ([tls.md §6](tls.md)) | low | low |
-| tiered local-tier used-bytes gauge | roadmap §5.5 | The dashboard expresses the watermark through eviction rate; `ITierLocal` already has the space probe, exporting it is a small C++ change plus the dashboard generator | medium | low |
 | `HeaderMap` linear scan / `BlockQueue` double copy | roadmap §4.3 ⑧ | Small in absolute terms; touch only with profile evidence | low | low |
 
 ## 2. Pending verification (implemented, not verifiable on the development box)

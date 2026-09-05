@@ -47,7 +47,7 @@ public:
                                                  std::string_view key) override;
 
     bool cache_space_ok(uint64_t size, uint64_t min_free_bytes) const override;
-    std::optional<std::pair<double, uint64_t>> disk_usage() const override;
+    std::optional<SpaceUsage> space_usage() const override;
 
     std::unique_ptr<IWalker> walk() override;
 

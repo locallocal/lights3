@@ -10,8 +10,8 @@ test that reconciles them against the source's metric catalog.
 | File | Content |
 | --- | --- |
 | `deploy/prometheus/scrape.yml` | scrape config: `job_name: lights3`, `metrics_path: /-/metrics`, loads the rules; runnable standalone or merged into an existing prometheus.yml |
-| `deploy/prometheus/lights3.rules.yml` | 9 groups, 46 rules: 7 recording rules (5xx ratio, P99s, backend error ratio, cloudproxy retry ratio, keep-alive reuse) + 39 alerts |
-| `deploy/grafana/lights3.json` | the dashboard (uid `lights3-overview`, 62 panels / 9 rows), variables `DS` / `instance` / `backend` |
+| `deploy/prometheus/lights3.rules.yml` | 9 groups, 48 rules: 7 recording rules (5xx ratio, P99s, backend error ratio, cloudproxy retry ratio, keep-alive reuse) + 41 alerts |
+| `deploy/grafana/lights3.json` | the dashboard (uid `lights3-overview`, 63 panels / 9 rows), variables `DS` / `instance` / `backend` |
 | `deploy/grafana/gen_dashboard.py` | dashboard generator — the single source of truth for panels; rerun after editing |
 | `tests/monitoring/check_assets.py` | asset validation (§5), ctest name `monitoring_assets` |
 
@@ -97,12 +97,15 @@ Recording rules (shared by dashboard and alerts): `lights3:requests:rate5m`,
 | Tiered | read source, demotion / promotion / eviction, cloud GC, scans and quarantine, range cache, op errors |
 | CloudProxy | remote request P99, retry ratio, error codes, pool wait and ETag mismatches |
 
-**Tiered watermark**: the gateway exports no gauge for the local tier's used
-bytes (adding one means C++, and this item is zero-change), so the "watermark"
-is expressed as eviction rate + scan rounds: evicting on every scan for an
-hour means the tier sits above `space_high_watermark`. For exact numbers use
-`lights3_bucket_usage_bytes` (per bucket, not the local tier) or the disk-side
-node exporter.
+**Tiered watermark**: five gauges give the position directly --
+`lights3_tiered_local_used_bytes` / `_total_bytes` / `_high_watermark_bytes`
+(statvfs, exactly what the watermark logic sees) and
+`lights3_tiered_local_cached_bytes` / `_quota_bytes` (booked local bytes and
+the logical quota). Alerts: `Lights3TieredLocalAboveHighWatermark` (still above
+the high watermark after 30 minutes = eviction cannot keep up) and
+`Lights3TieredQuotaNearlyFull` (booked bytes above 90% of the quota).
+`Lights3TieredEvictionPressure` (eviction rate + scan rounds) stays as the
+"every round evicts" complement.
 
 ## 5. Tests
 

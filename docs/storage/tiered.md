@@ -397,6 +397,8 @@ Prometheus 里读作"无数据"而非 0）。只在 tiered 自身有分层逻辑
 | `lights3_tiered_access_records_flushed_total` | counter | 写后缓冲刷写的记录数 |
 | `lights3_tiered_range_cache_total{result=hit\|fill\|passthrough}` | counter | remote 对象 Range GET 的块缓存结局 |
 | `lights3_tiered_quarantine_entries{kind=refs_missing\|foreign}` | gauge | 隔离区账本当前条目数 |
+| `lights3_tiered_local_used_bytes` / `_total_bytes` / `_high_watermark_bytes` | gauge（回调） | 本地层所在文件系统的已用 / 总量（`ITierLocal::space_usage()`，statvfs，"已用"= 非特权写入者不可用的部分，即水位逻辑看到的量）与 `space_high_watermark × 总量`；渲染时现读 |
+| `lights3_tiered_local_cached_bytes` / `_quota_bytes` | gauge（回调） | 账面本地对象字节（写路径估算，每次全量扫描校准；校准前为 0）与 `quota_bytes`（0 = 无配额）。回调只捕获适配器与共享估算值，后端销毁后仍可安全渲染 |
 
 GET 来源计数在**成功之后**才 +1：StubRace 重试改走云端时不会留下半截 local
 计数。

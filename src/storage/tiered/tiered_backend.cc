@@ -347,6 +347,46 @@ void TieredBackend::init_metrics(const MetricsScope& metrics) {
     m_q_refs_missing_ = metrics.gauge("lights3_tiered_quarantine_entries", q_help,
                                       {{"kind", "refs_missing"}});
     m_q_foreign_ = metrics.gauge("lights3_tiered_quarantine_entries", q_help, {{"kind", "foreign"}});
+    // Local-tier capacity (backlog-sequence ①): the numbers the space watermark is
+    // measured against, read at render time. Callbacks capture the tier-local adapter
+    // and the shared books estimate rather than this backend, so a registry that
+    // outlives the backend renders zeros instead of touching freed memory
+    {
+        std::shared_ptr<tier::ITierLocal> local = local_;
+        const double high = cfg_.space_high_watermark;
+        const double quota = double(cfg_.quota_bytes);
+        std::shared_ptr<std::atomic<int64_t>> est = local_bytes_est_;
+        metrics.gauge_callback(
+            "lights3_tiered_local_used_bytes",
+            "Bytes used on the filesystem holding the local tier (statvfs, everything an "
+            "unprivileged writer cannot use); what space_high_watermark is measured against",
+            [local] {
+                auto s = local->space_usage();
+                return s ? double(s->used_bytes) : 0.0;
+            });
+        metrics.gauge_callback("lights3_tiered_local_total_bytes",
+                               "Size of the filesystem holding the local tier (statvfs)",
+                               [local] {
+                                   auto s = local->space_usage();
+                                   return s ? double(s->total_bytes) : 0.0;
+                               });
+        metrics.gauge_callback(
+            "lights3_tiered_local_high_watermark_bytes",
+            "space_high_watermark expressed in bytes of the local filesystem; used above "
+            "this = every scan evicts",
+            [local, high] {
+                auto s = local->space_usage();
+                return s ? high * double(s->total_bytes) : 0.0;
+            });
+        metrics.gauge_callback(
+            "lights3_tiered_local_cached_bytes",
+            "Object bytes the tier books as resident locally (write-path estimate, "
+            "calibrated by every full scan; 0 until the first calibration)",
+            [est] { return double(std::max<int64_t>(0, est->load(std::memory_order_relaxed))); });
+        metrics.gauge_callback("lights3_tiered_local_quota_bytes",
+                               "Logical quota_bytes of the local tier (0 = no quota)",
+                               [quota] { return quota; });
+    }
 }
 
 void TieredBackend::record_op(Op op, bool ok) {
@@ -1126,7 +1166,7 @@ Task<void> TieredBackend::scan_full(ScanCtx& cx) {
         for (auto& e : entries) co_await consider(cx, e.bucket, e.key, /*from_slot=*/-1);
     }
     cx.local_bytes += local_->sweep_range_cache();
-    local_bytes_est_.store(int64_t(cx.local_bytes), std::memory_order_relaxed);  // incremental-books calibration
+    local_bytes_est_->store(int64_t(cx.local_bytes), std::memory_order_relaxed);  // incremental-books calibration
     last_full_scan_ = cx.now;
 }
 
@@ -1283,7 +1323,7 @@ Task<TierScanStats> TieredBackend::scan_once() {
             need = uint64_t((du->first - cfg_.space_low_watermark) * double(du->second));
     }
     uint64_t books = cx.st.full ? cx.local_bytes
-                                : uint64_t(std::max<int64_t>(0, local_bytes_est_.load()));
+                                : uint64_t(std::max<int64_t>(0, local_bytes_est_->load()));
     uint64_t lb = books - std::min(books, cx.cold_freed);
     if (cfg_.quota_bytes > 0 && double(lb) > cfg_.space_high_watermark * double(cfg_.quota_bytes)) {
         uint64_t target = uint64_t(cfg_.space_low_watermark * double(cfg_.quota_bytes));
@@ -1871,14 +1911,14 @@ bool TieredBackend::inflight_contains(const std::string& ikey) {
 }
 
 void TieredBackend::note_local_delta(int64_t delta) {
-    int64_t est = local_bytes_est_.load(std::memory_order_relaxed);
+    int64_t est = local_bytes_est_->load(std::memory_order_relaxed);
     if (est < 0) return;  // no bookkeeping before the first scan calibrates (avoids negative books)
-    local_bytes_est_.fetch_add(delta, std::memory_order_relaxed);
+    local_bytes_est_->fetch_add(delta, std::memory_order_relaxed);
 }
 
 void TieredBackend::maybe_kick_quota_scan() {
     if (cfg_.quota_bytes == 0) return;
-    int64_t est = local_bytes_est_.load(std::memory_order_relaxed);
+    int64_t est = local_bytes_est_->load(std::memory_order_relaxed);
     if (est < 0 || double(est) <= cfg_.space_high_watermark * double(cfg_.quota_bytes)) return;
     if (quota_kick_inflight_.exchange(true)) return;  // an early round is already in flight
     bool spawned = bg_.spawn([](TieredBackend* self) -> Task<void> {

@@ -12,7 +12,7 @@ it from backlog.md §1, strike its row here and record the date.
 
 | # | Phase | Item | Value / difficulty | Estimate | Why here |
 | --- | --- | --- | --- | --- | --- |
-| 1 | A quick wins | tiered local-tier used-bytes gauge | medium / low | 0.5 d | zero-risk small change; the dashboard stops inferring the watermark from eviction rate |
+| 1 | A quick wins | ~~tiered local-tier used-bytes gauge~~ **done (2026-09-05)** | medium / low | 0.5 d | zero-risk small change; the dashboard stops inferring the watermark from eviction rate |
 | 2 | A quick wins | separate admin port | low / low | 1 d | every later admin endpoint lands on this port -- lay the foundation first |
 | 3 | A quick wins | admin endpoint for scrub / fsck | low / low | 0.5 d | right after ②: the first new endpoint on the admin port, exercising the isolation |
 | 4 | B multi-instance consistency | multi-instance STS session table | medium / medium | 2–3 d | the only feature that "breaks when the next request hits another instance"; reuses the credential sync mechanism, warm-up for ⑤ |
@@ -210,7 +210,7 @@ start ⑦ of phase D only after B has landed.
 
 | # | Item | Status | Date / branch |
 | --- | --- | --- | --- |
-| ① | tiered local-tier used-bytes gauge | not started | |
+| ① | tiered local-tier used-bytes gauge | done | 2026-09-05 / `feat/tiered-local-usage-gauge` |
 | ② | separate admin port | not started | |
 | ③ | admin endpoint for scrub / fsck | not started | |
 | ④ | multi-instance STS session table | not started | |

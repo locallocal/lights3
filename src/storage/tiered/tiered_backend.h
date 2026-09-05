@@ -375,7 +375,10 @@ private:
     mutable std::mutex quarantine_m_;
 
     std::atomic<uint64_t> gc_seq_{0};
-    std::atomic<int64_t> local_bytes_est_{-1};      // -1 = not yet calibrated by scan
+    // Shared with the lights3_tiered_local_cached_bytes callback gauge, which may be
+    // rendered after this backend is gone (the registry outlives backends)
+    std::shared_ptr<std::atomic<int64_t>> local_bytes_est_ =
+        std::make_shared<std::atomic<int64_t>>(-1);  // -1 = not yet calibrated by scan
     std::atomic<bool> quota_kick_inflight_{false};  // only one early-kicked scan at a time
 
     BackgroundTaskGroup bg_{"tiered"};

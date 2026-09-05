@@ -378,7 +378,9 @@ buckets:
 `lights3 tier quarantine list|forget|purge <backend> …`（[cli.md §2.4](cli.md)）：
 `forget` 只删账本条目，`purge` 针对 refs_missing——先 HEAD 复核云副本仍不存在，
 再删除这个已死的本地 stub（承认数据丢失；副本回来了则保留 stub、销账）。
-gauge `lights3_tiered_quarantine_entries{kind}` 常驻显示账本规模。
+gauge `lights3_tiered_quarantine_entries{kind}` 常驻显示账本规模。本地层容量另有
+`lights3_tiered_local_{used,total,high_watermark,cached,quota}_bytes` 五个回调 gauge
+（[monitoring.md](monitoring.md) "tiered 水位"、[storage/tiered.md](storage/tiered.md) 指标表）。
 
 ## 10. 实施拆分
 

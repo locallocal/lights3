@@ -233,6 +233,11 @@ timeseries("Demotion / promotion / eviction", [(f'sum by (backend) (rate(lights3
                                                 (f'sum by (backend) (rate(lights3_tiered_promoted_objects_total{{{INST},{BK}}}[$__rate_interval]))', "promoted/s {{backend}}"),
                                                 (f'sum by (backend) (rate(lights3_tiered_evicted_bytes_total{{{INST},{BK}}}[$__rate_interval]))', "evicted B/s {{backend}}")],
            description="Sustained eviction = the local tier sits above space_high_watermark (no local-usage gauge is exported)")
+timeseries("Local tier capacity", [(f'lights3_tiered_local_used_bytes{{{INST},{BK}}}', "fs used {{backend}}"),
+                                   (f'lights3_tiered_local_high_watermark_bytes{{{INST},{BK}}}', "high watermark {{backend}}"),
+                                   (f'lights3_tiered_local_cached_bytes{{{INST},{BK}}}', "booked local data {{backend}}"),
+                                   (f'lights3_tiered_local_quota_bytes{{{INST},{BK}}} > 0', "quota {{backend}}")], unit="bytes",
+           description="Filesystem usage vs space_high_watermark (both statvfs-derived); booked data vs quota_bytes when a quota is set")
 timeseries("Cloud GC", [(f'lights3_tiered_gc_deferred{{{INST},{BK}}}', "deferred {{backend}}"),
                         (f'sum by (backend) (rate(lights3_tiered_gc_failed_total{{{INST},{BK}}}[$__rate_interval]))', "failed/s {{backend}}"),
                         (f'sum by (backend) (rate(lights3_tiered_gc_removed_cloud_total{{{INST},{BK}}}[$__rate_interval]))', "removed/s {{backend}}")])

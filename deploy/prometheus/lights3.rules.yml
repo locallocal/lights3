@@ -266,7 +266,21 @@ groups:
         labels: {severity: info}
         annotations:
           summary: "tiered {{ $labels.backend }} evicting continuously (space watermark)"
-          description: "The local tier sits above space_high_watermark for an hour: every scan evicts. Grow the local disk, lower cold_after, or raise the watermark (docs/tiered-storage.md). A local-usage gauge is not exported — the eviction rate is the watermark signal."
+          description: "The local tier sits above space_high_watermark for an hour: every scan evicts. Grow the local disk, lower cold_after, or raise the watermark (docs/tiered-storage.md). lights3_tiered_local_used_bytes vs _high_watermark_bytes shows how far above."
+      - alert: Lights3TieredLocalAboveHighWatermark
+        expr: lights3_tiered_local_used_bytes >= lights3_tiered_local_high_watermark_bytes
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "tiered {{ $labels.backend }} local filesystem above space_high_watermark for 30m"
+          description: "Eviction is not bringing the local filesystem back under the watermark ({{ $value | humanize1024 }}B used). Other data on the same filesystem, a stalled scan, or too little cold data to evict — check lights3_tiered_evicted_bytes_total and the scan rounds (docs/tiered-storage.md)."
+      - alert: Lights3TieredQuotaNearlyFull
+        expr: lights3_tiered_local_quota_bytes > 0 and lights3_tiered_local_cached_bytes > 0.9 * lights3_tiered_local_quota_bytes
+        for: 15m
+        labels: {severity: info}
+        annotations:
+          summary: "tiered {{ $labels.backend }} booked local data above 90% of quota_bytes"
+          description: "The logical quota is close to full; the quota scan evicts above space_high_watermark × quota_bytes. Raise quota_bytes or lower cold_after (docs/tiered-storage.md)."
       - alert: Lights3TieredCloudReadHeavy
         expr: |
           sum by (instance, backend) (rate(lights3_tiered_get_source_total{source="cloud"}[15m]))

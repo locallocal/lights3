@@ -1,0 +1,35 @@
+# Container config for the lights3 image (deploy/docker, docs/deployment.md §4):
+# builtin driver on 0.0.0.0:9000, localfs under the /var/lib/lights3 volume.
+# The root secret comes from the LIGHTS3_SECRET_1 environment variable
+# (docker run -e / compose environment:). Every other key is documented with its
+# default in config/lights3.yaml.
+http:
+  driver: builtin
+  bind: 0.0.0.0
+  port: 9000
+  idle_timeout: 60s
+  min_part_size: 5MiB
+
+runtime:
+  io_threads: 16
+  max_inflight_requests: 1024
+
+auth:
+  credentials:
+    - access_key: ${LIGHTS3_ACCESS_KEY:-AKIDEXAMPLE}
+      secret_key: ${LIGHTS3_SECRET_1}
+  region: ${LIGHTS3_REGION:-us-east-1}
+
+backends:
+  - name: localdata
+    type: localfs
+    root: /var/lib/lights3/objects
+    staging: /var/lib/lights3/staging
+
+buckets:
+  default_backend: localdata
+  rules: []
+
+log:
+  level: ${LIGHTS3_LOG_LEVEL:-info}
+  format: ${LIGHTS3_LOG_FORMAT:-text}

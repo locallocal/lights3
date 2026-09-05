@@ -116,21 +116,38 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
 
 或使用 aws cli：`aws --endpoint-url http://127.0.0.1:9000 s3 ls`。
 
-## 作为 systemd 服务安装
+`lights3 --version`（以及 `s3adm --version`）打印版本号、构建时嵌入的 git
+commit、构建类型与编译进来的驱动 / 后端；同一身份也写在启动日志首行，并以
+`lights3_build_info` 指标导出。
 
-先构建二进制，再以 root 权限运行安装脚本：
+## 安装、打包、容器化
+
+三条渠道，细节见 [deployment.md](deployment.md)：
 
 ```bash
+# 1. /usr/local 下的 systemd 服务（先构建）
 ./build.sh -DLIGHTS3_BUILD_TESTS=OFF
-sudo ./scripts/install.sh
+sudo ./scripts/install.sh                    # 可升级：保留配置/密钥，旧二进制留作 *.prev
 sudo /usr/local/sbin/lights3ctl status
+sudo ./scripts/rollback.sh                   # 换回上一版二进制
+sudo ./scripts/uninstall.sh [--purge]
+
+# 2. 安装树 / 包
+sudo cmake --install build                   # 或 --prefix / DESTDIR
+cmake --build build --target package         # build/packages/lights3_<ver>_<arch>.deb（有 rpmbuild 则出 rpm）
+sudo apt install ./build/packages/lights3_0.1.0_amd64.deb
+
+# 3. Docker / compose
+docker compose up -d                         # localfs demo，:9000（AKIDEXAMPLE / lights3-demo-secret）
+docker compose --profile redis up -d         # duostore + redis meta，:9001（另有 tikv / rados profile）
+docker compose --profile e2e run --rm e2e    # 开发机上 SKIP 的 redis / tikv / rados e2e 路径
 ```
 
-安装脚本会创建专用的 `lights3` 系统用户，把服务安装到 `/usr/local/bin`，
-并以 `/var/lib/lights3` 为工作目录读取 `/etc/lights3/lights3.yaml`。首次安装
-还会在 `/etc/lights3/lights3.env` 中生成随机凭证；升级安装不会覆盖已有的
-配置和凭证。可通过 `lights3ctl help` 查看启停、重启、状态及日志命令；若需
-先调整配置再启动，请向安装脚本传入 `--no-start`。
+各渠道都会创建 `lights3` 系统用户，把配置放在 `/etc/lights3/lights3.yaml`
+（deb conffile / rpm `%config(noreplace)`；重复安装不覆盖），首次安装在
+`/etc/lights3/lights3.env` 生成随机凭证，并在重启服务前先用
+`lights3 --check-config` 校验现有配置。`lights3ctl help` 列出启停、重启、
+状态与日志命令。
 
 ## 当前实现范围
 
@@ -211,4 +228,5 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | [duostore-sqlite-meta](duostore-sqlite-meta.md) | SQLite IMetaStore：内嵌 amalgamation、WAL、读连接池 |
 | [duostore-rados-data](duostore-rados-data.md) | RADOS IDataStore：librados，chunk → rados 对象 |
 | [duostore-tikv-meta](duostore-tikv-meta.md) | TiKV IMetaStore：client-c + 2PC 侧车 |
+| [deployment](deployment.md) | 版本标识、`cmake --install`、deb/rpm 包、Dockerfile + compose、回滚 / 卸载 |
 | [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load、cred/website/bench/quota/tenant/usage |

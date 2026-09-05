@@ -34,12 +34,24 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------- duostore-redis scenario: spawn a private redis (docs/duostore-redis-meta.md §9) ----------
+# LIGHTS3_TEST_REDIS_URI=redis://host:port points at an external instance instead
+# (docker compose --profile e2e, docs/deployment.md §4): the run isolates itself with
+# a unique key prefix and leaves the instance running
 REDIS_PID=""
+REDIS_URI=""
+REDIS_PREFIX=""
 if [[ "$BACKEND" == "duostore-redis" ]]; then
-    if ! command -v redis-server >/dev/null; then
-        echo "[SKIP] duostore-redis: redis-server not available"
+    REDIS_PREFIX="duo:"  # the backend default; unique per run on a shared external instance
+    if [[ -n "${LIGHTS3_TEST_REDIS_URI:-}" ]]; then
+        REDIS_URI="$LIGHTS3_TEST_REDIS_URI"
+        REDIS_PREFIX="e2e-$$-$RANDOM:"
+        echo "redis: external $REDIS_URI prefix=$REDIS_PREFIX"
+    elif ! command -v redis-server >/dev/null; then
+        echo "[SKIP] duostore-redis: redis-server not available (set LIGHTS3_TEST_REDIS_URI for an external one)"
         exit 0
     fi
+fi
+if [[ "$BACKEND" == "duostore-redis" && -z "$REDIS_URI" ]]; then
     redis-server --port 0 --unixsocket "$WORK/redis.sock" --save '' --appendonly no \
         --dir "$WORK" > "$WORK/redis.log" 2>&1 &
     REDIS_PID=$!
@@ -50,6 +62,7 @@ if [[ "$BACKEND" == "duostore-redis" ]]; then
     done
     [[ -S "$WORK/redis.sock" ]] || { echo "redis-server did not come up"; cat "$WORK/redis.log"; exit 1; }
     echo "redis up: $WORK/redis.sock (pid $REDIS_PID)"
+    REDIS_URI="unix://$WORK/redis.sock"
 fi
 
 # ---------- duostore-rados scenario: probe for a real cluster (docs/duostore-rados-data.md §11) ----------
@@ -197,7 +210,8 @@ elif [[ "$BACKEND" == "duostore-redis" ]]; then cat <<DUOREDIS
     type: duostore
     root: $WORK/data
     meta: redis
-    redis_uri: unix://$WORK/redis.sock
+    redis_uri: $REDIS_URI
+    redis_prefix: "$REDIS_PREFIX"
 DUOREDIS
 elif [[ "$BACKEND" == "duostore-sqlite" ]]; then cat <<DUOSQLITE
   - name: tierdata
@@ -961,7 +975,7 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
 sed -e "s#^  port: 0#  port: 0\n  tls_cert: $WORK/tls.crt\n  tls_key: $WORK/tls.key\n  tls_min_version: \"1.2\"\n  tls_reload_interval: 0s#" \
     -e "s#$WORK/data#$WORK/tls-data#g" -e "s#$WORK/staging#$WORK/tls-staging#g" \
     -e "s#$WORK/cloud-duo#$WORK/tls-cloud-duo#g" -e "s#$WORK/duo-local#$WORK/tls-duo-local#g" \
-    -e "s#^    meta: redis#    meta: redis\n    redis_prefix: \"tlse2e:\"#" \
+    -e "s#^    redis_prefix: \"\(.*\)\"#    redis_prefix: \"\1tls-\"#" \
     -e "s#^    tikv_prefix: \"\(.*\)\"#    tikv_prefix: \"\1tls-\"#" \
     -e "s#^    rados_namespace: \(.*\)#    rados_namespace: \1-tls#" \
     "$WORK/config.yaml" > "$WORK/config-tls.yaml"

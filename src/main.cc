@@ -32,6 +32,7 @@
 #include "http/server.h"
 #include "storage/registry.h"
 #include "core/log.h"
+#include "core/version.h"
 #include "storage/localfs/localfs_backend.h"
 #include "core/util/time.h"
 #include "storage/tiered/tiered_backend.h"
@@ -138,6 +139,10 @@ int check_config(const std::string& path) {
 }
 
 void run_server(const Cmd& c) {
+    if (c->var<bool>("version")) {
+        fputs(lights3::version_report("lights3").c_str(), stdout);
+        return;
+    }
     if (c->var<bool>("check-config")) {
         g_exit = check_config(c->var<std::string>("config"));
         return;
@@ -739,6 +744,9 @@ int main(int argc, char** argv) {
     root->var<bool>("check-config", false,
                     "Parse and validate the config, print what it resolves to, exit 0/1 "
                     "without opening backends or binding a port (roadmap §6.2)");
+    root->var<bool>("version", false,
+                    "Print version, git commit, build type and the compiled-in drivers / "
+                    "backends, then exit (roadmap §6.3)");
 #ifdef LIGHTS3_DUOSTORE
     root->add_subcommand(make_duostore());
 #endif

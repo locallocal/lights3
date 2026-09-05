@@ -1,3 +1,5 @@
+# Template: @LIGHTS3_BINDIR@ / @LIGHTS3_CONFIG_DIR@ are filled in by CMake
+# (cmake --install, packages) or by scripts/install.sh (/usr/local/bin, /etc/lights3).
 [Unit]
 Description=LightS3 S3-compatible object storage server
 Documentation=https://github.com/locallocal/lights3
@@ -9,8 +11,9 @@ Type=simple
 User=lights3
 Group=lights3
 WorkingDirectory=/var/lib/lights3
-EnvironmentFile=/etc/lights3/lights3.env
-ExecStart=/usr/local/bin/lights3 --config=/etc/lights3/lights3.yaml
+EnvironmentFile=@LIGHTS3_CONFIG_DIR@/lights3.env
+ExecStart=@LIGHTS3_BINDIR@/lights3 --config=@LIGHTS3_CONFIG_DIR@/lights3.yaml
+ExecReload=/bin/kill -HUP $MAINPID
 
 # LightS3 handles SIGTERM and drains in-flight requests before exiting.
 KillSignal=SIGTERM

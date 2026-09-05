@@ -1,0 +1,32 @@
+# compose profile `rados`: duostore with RocksDB metadata under the volume and
+# chunk data in the ceph demo cluster (docs/duostore-rados-data.md); needs the
+# image built with LIGHTS3_RADOS=ON and the shared /etc/ceph volume
+http:
+  driver: builtin
+  bind: 0.0.0.0
+  port: 9000
+
+runtime:
+  io_threads: 16
+
+auth:
+  credentials:
+    - access_key: ${LIGHTS3_ACCESS_KEY:-AKIDEXAMPLE}
+      secret_key: ${LIGHTS3_SECRET_1}
+  region: ${LIGHTS3_REGION:-us-east-1}
+
+backends:
+  - name: duodata
+    type: duostore
+    root: /var/lib/lights3/duostore
+    data: rados
+    rados_conf: /etc/ceph/ceph.conf
+    rados_client: client.admin
+    rados_pool: ${LIGHTS3_RADOS_POOL:-lights3}
+
+buckets:
+  default_backend: duodata
+  rules: []
+
+log:
+  level: ${LIGHTS3_LOG_LEVEL:-info}

@@ -1,0 +1,10 @@
+#!/bin/sh
+# lights3 prerm: stop and disable the service on remove (upgrades keep it running;
+# postinst restarts it with the new binary after --check-config passes)
+set -e
+case "$1" in
+    remove)
+        /usr/share/lights3/lights3-setup.sh remove
+        ;;
+esac
+exit 0

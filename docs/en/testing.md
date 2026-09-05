@@ -17,9 +17,17 @@ ctest, ubsan/coverage builds, and the one-shot matrix script.
 | `bench_gate` | 3-second throughput / latency gate (§5) | `perf` |
 | `soak_smoke` | 30-second soak: RSS / fd / leak assertions (§5) | `perf` `soak` |
 | `mint` | MinIO mint's s3cmd + awscli subset; explicit SKIP without docker (§6) | `mint` |
+| `install_tree` | `cmake --install` into a scratch prefix: layout, unit relocation, config preservation, `--version` format, `sh -n` on the maintainer scripts ([deployment.md §2](deployment.md)) | — |
 
 Load-sensitive or externally dependent items are excluded by label:
 `ctest -LE "perf|mint"`.
+
+`e2e_duostore_redis` / `_tikv` / `_rados` each probe an external dependency and
+SKIP explicitly without it: redis looks for `redis-server` and spawns a private
+instance, or `LIGHTS3_TEST_REDIS_URI=redis://host:port` points at an external
+one (unique `redis_prefix` per run); tikv reads `LIGHTS3_TEST_PD_ADDR`; rados
+reads `LIGHTS3_TEST_RADOS_CONF` + `_POOL`. `docker compose --profile e2e run --rm e2e`
+brings all three up and runs them in one go ([deployment.md §4.3](deployment.md)).
 
 ## 2. New e2e sections (`tests/e2e/run_e2e.sh`)
 

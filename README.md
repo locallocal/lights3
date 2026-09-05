@@ -110,6 +110,10 @@ ctest --test-dir build -LE "perf|mint"      # the quick set
 ctest --test-dir build -R mint -V           # mint, on a machine with docker
 ```
 
+`lights3 --version` (and `s3adm --version`) prints the version, the git commit
+stamped at build time, the build type and the compiled-in drivers / backends;
+the same identity is logged at startup and exported as `lights3_build_info`.
+
 ## Run
 
 ```bash
@@ -135,23 +139,35 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range downlo
 
 Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
 
-## Install as a systemd service
+## Install, package, containerize
 
-Build the binaries, then run the installer as root:
+Three channels, all documented in [docs/en/deployment.md](docs/en/deployment.md):
 
 ```bash
+# 1. systemd service under /usr/local (build first)
 ./build.sh -DLIGHTS3_BUILD_TESTS=OFF
-sudo ./scripts/install.sh
+sudo ./scripts/install.sh                    # upgrade-safe: keeps config/secrets, old binary -> *.prev
 sudo /usr/local/sbin/lights3ctl status
+sudo ./scripts/rollback.sh                   # swap back to the previous binary
+sudo ./scripts/uninstall.sh [--purge]
+
+# 2. install tree / packages
+sudo cmake --install build                   # or --prefix / DESTDIR
+cmake --build build --target package         # build/packages/lights3_<ver>_<arch>.deb (rpm with rpmbuild)
+sudo apt install ./build/packages/lights3_0.1.0_amd64.deb
+
+# 3. Docker / compose
+docker compose up -d                         # localfs demo on :9000 (AKIDEXAMPLE / lights3-demo-secret)
+docker compose --profile redis up -d         # duostore + redis meta on :9001 (tikv / rados profiles too)
+docker compose --profile e2e run --rm e2e    # the redis / tikv / rados e2e paths that SKIP on a dev box
 ```
 
-The installer creates a dedicated `lights3` system user, installs the server
-under `/usr/local/bin`, and runs it with `/etc/lights3/lights3.yaml` from the
-`/var/lib/lights3` working directory. On the first install it also writes random
-credentials to `/etc/lights3/lights3.env`; both that file and an existing YAML
-configuration are preserved on upgrades. Use `lights3ctl help` for start, stop,
-restart, status, and journal commands. Pass `--no-start` if the configuration
-must be adjusted before the first launch.
+Every channel creates the `lights3` system user, keeps the configuration in
+`/etc/lights3/lights3.yaml` (a deb conffile / rpm `%config(noreplace)`; never
+overwritten by a re-install), generates random credentials into
+`/etc/lights3/lights3.env` on the first install, and validates the live config
+with `lights3 --check-config` before restarting the service. `lights3ctl help`
+lists the start / stop / restart / status / journal commands.
 
 ## Current scope
 
@@ -252,4 +268,5 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [duostore-sqlite-meta](docs/en/duostore-sqlite-meta.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
 | [duostore-rados-data](docs/en/duostore-rados-data.md) | RADOS IDataStore: librados, chunk → rados objects |
 | [duostore-tikv-meta](docs/en/duostore-tikv-meta.md) | TiKV IMetaStore: client-c + 2PC sidecar |
+| [deployment](docs/en/deployment.md) | Version stamp, `cmake --install`, deb/rpm packages, Dockerfile + compose, rollback / uninstall |
 | [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load, cred/website/bench/quota/tenant/usage |

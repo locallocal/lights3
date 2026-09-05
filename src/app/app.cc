@@ -10,6 +10,7 @@
 
 #include "core/fault.h"
 #include "core/log.h"
+#include "core/version.h"
 #include "http/admission.h"
 #include "s3/errors.h"
 #include "storage/bucket_router.h"
@@ -49,6 +50,12 @@ void Application::open_storage() {
     // Backend-level metrics registry: build hands each backend a scope
     // labeled backend=<name>, rendered appended to /-/metrics
     metrics_ = std::make_shared<MetricsRegistry>();
+    // Build identity as a constant-1 gauge (the Prometheus *_build_info idiom,
+    // roadmap §6.3): `lights3_build_info{version=,commit=,build_type=}` lets a
+    // fleet dashboard tell which build every instance is running
+    metrics_->gauge("lights3_build_info", "Build identity of this lights3 process (always 1)",
+                    {{"version", version()}, {"commit", git_commit()}, {"build_type", build_type()}})
+        ->set(1);
     backends_ = storage::StorageRegistry::build(cfg_.backends, pool_, metrics_);
 }
 
@@ -228,8 +235,9 @@ int Application::run() {
     sigaction(SIGHUP, &sa, nullptr);  // reload, not terminate
     signal(SIGPIPE, SIG_IGN);
 
-    LOG_INFO("lights3 started: driver={} backends={} pool={}", cfg_.http.driver,
-             cfg_.backends.size(), cfg_.runtime.io_threads);
+    LOG_INFO("lights3 {} (git {}, {}) started: driver={} backends={} pool={}", version(),
+             git_commit(), build_type(), cfg_.http.driver, cfg_.backends.size(),
+             cfg_.runtime.io_threads);
     server_->run();  // Blocks until SIGINT/SIGTERM
 
     // Reap the shutdown watchdog thread first: only then is destroying server safe

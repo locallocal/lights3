@@ -174,7 +174,10 @@ backends:
   #   orphan_scan_interval: 1d
   #   # -- roadmap §3.8 object metadata cache (docs/storage/duostore-core.md §7.1) --
   #   meta_cache_entries: 64K          # cached ObjectRec budget; default 64K on rocksdb/sqlite, 0 on redis/tikv
-  #   meta_cache_ttl: 0s               # required (0 < ttl < gc_grace) when enabling the cache on redis/tikv
+  #   meta_cache_ttl: 0s               # required (0 < ttl < gc_grace) when enabling the cache on redis/tikv;
+  #                                    # redis pushes peers' commits over pub/sub (docs/duostore-redis-meta.md §3.6),
+  #                                    # so the TTL only bounds lost messages there; tikv relies on the TTL alone
+  #   meta_cache_feed: true            # subscribe the cache to that feed (redis); false = TTL-only staleness
   #   mpu_ttl: 7d                      # cleanup deadline for incomplete multipart uploads; 0 = off
   #
   #   # -- meta = rocksdb (default, docs/duostore-backend.md) --

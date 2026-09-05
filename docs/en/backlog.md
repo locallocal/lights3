@@ -19,7 +19,6 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 | --- | --- | --- | --- | --- |
 | duostore meta incremental backup / PITR | roadmap §3.7 | `dump` is already a consistent full snapshot (`IMetaStore::snapshot()`); incremental needs WAL-level export, different for each of the four engines | medium | high |
 | Structured error codes upstream in client-c | roadmap §3.7 (tikv T5) | The sidecar classifies conflicts from kvrpcpb structures first and string-matches only as defense in depth; an upstream PR is optional | low | medium |
-| Cross-gateway meta cache invalidation | roadmap §3.8 | Shared meta (redis/tikv) runs under the bounded-staleness contract of `meta_cache_ttl` ([storage/duostore-core.md §7.1](../storage/duostore-core.md)); redis could use pub/sub, tikv has no equivalent | medium | high |
 | mTLS client certificate → credential / tenant identity | roadmap §4.1 | `tls_client_auth` verifies the chain but maps no identity ([tls.md](tls.md)); needs a rule binding certificate fields to credentials | medium | medium |
 | Hot add / remove of backend instances | roadmap §4.4 | `reload_config` applies the safe subset plus `buckets.rules`; driver / backends / `default_backend` / `auth.*` explicitly need a restart ([config-reload.md](config-reload.md)) | medium | high |
 | `HeaderMap` linear scan / `BlockQueue` double copy | roadmap §4.3 ⑧ | Small in absolute terms; touch only with profile evidence | low | low |

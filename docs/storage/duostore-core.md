@@ -331,6 +331,13 @@ TTL 有界陈旧为契约。指标 `lights3_meta_cache_lookups_total{result=hit|
 `lights3_meta_cache_invalidations_total` / `lights3_meta_cache_entries`；
 测试观测口 `meta_cache_stats()` / `meta_cache_enabled()`。
 
+**跨网关失效广播（backlog-sequence ⑤）**：redis 引擎把每次对象记录变更从提交脚本内
+`PUBLISH <prefix>inv`，各网关一条订阅连接把消息喂给本地 `MetaCache::invalidate`，
+（重）订阅时整表清空；`meta_cache_ttl` 退为丢消息的兜底上界。tikv 无发布订阅，
+维持 TTL 有界陈旧契约。接线在 `DuoStoreBackend::wire_cache_invalidation`
+（`IMetaStore::subscribe_invalidations`，默认 false），细节见
+[duostore-redis-meta.md §3.6](../duostore-redis-meta.md)。
+
 ## 8. GC 与孤儿扫描
 
 ### 8.1 run_gc_once（`duostore_backend.cc:DuoStoreBackend::run_gc_once`）

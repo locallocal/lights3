@@ -309,6 +309,10 @@ struct DuoStoreConfig {
     // on a shared engine
     size_t meta_cache_entries = size_t(1) << 16;
     int meta_cache_ttl_sec = 0;  // 0 = no expiry
+    // Subscribe the cache to the engine's invalidation feed when it has one (redis
+    // pub/sub, backlog-sequence ⑤); false = TTL-only bounded staleness, the
+    // pre-feed behaviour (an ops kill switch, and what the staleness tests exercise)
+    bool meta_cache_feed = true;
     int orphan_scan_interval_sec = 86400;  // effective with P4
     int mpu_ttl_sec = 7 * 86400;
     bool meta_sync = true;
@@ -521,6 +525,10 @@ private:
     // readers increment via the on_corruption callback — the callback captures
     // only this shared_ptr, so readers escaping the backend's lifetime stay safe
     std::shared_ptr<MetricCounter> m_read_corruption_;
+    // Cross-gateway cache invalidation feed (backlog-sequence ⑤)
+    std::shared_ptr<MetricCounter> m_cache_peer_invalidations_;
+    std::shared_ptr<MetricCounter> m_cache_feed_resets_;
+    void wire_cache_invalidation();
     std::shared_ptr<MetricGauge> m_orphan_refs_missing_;  // files missing in the latest reverse reconciliation round
 
     // GC per-round bookkeeping (read/written only while holding gc_sem_, so

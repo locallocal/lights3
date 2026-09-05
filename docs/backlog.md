@@ -15,7 +15,6 @@
 | --- | --- | --- | --- | --- |
 | duostore meta 增量备份 / PITR | roadmap §3.7 | `dump` 已是一致性全量快照（`IMetaStore::snapshot()`）；增量需 WAL 级导出，四个引擎各不相同 | 中 | 高 |
 | client-c 结构化错误码上游贡献 | roadmap §3.7（tikv T5） | sidecar 以 kvrpcpb 结构化冲突分类为主、字符串匹配作纵深，功能不受影响；上游 PR 可选 | 低 | 中 |
-| 跨网关元数据缓存失效协议 | roadmap §3.8 | 共享 meta（redis/tikv）以 `meta_cache_ttl` 有界陈旧为契约（[storage/duostore-core.md §7.1](storage/duostore-core.md)）；redis 可走 pub/sub，tikv 无等价物 | 中 | 高 |
 | mTLS 客户端证书 → 凭证 / 租户身份映射 | roadmap §4.1 | `tls_client_auth` 已验证证书链但不映射身份（[tls.md](tls.md)）；映射需定证书字段与凭证的绑定规则 | 中 | 中 |
 | 后端实例增删热重载 | roadmap §4.4 | `reload_config` 只应用安全子集 + `buckets.rules`；driver / 后端 / `default_backend` / `auth.*` 明确需重启（[config-reload.md](config-reload.md)） | 中 | 高 |
 | `HeaderMap` 线性扫描 / `BlockQueue` 双拷贝 | roadmap §4.3 ⑧ | 绝对量小；有 profile 证据再动 | 低 | 低 |

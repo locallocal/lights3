@@ -341,6 +341,8 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     std::optional<size_t> meta_cache_entries;
     if (auto* v = get("meta_cache_entries")) meta_cache_entries = parse_size(*v);
     if (auto* v = get("meta_cache_ttl")) c.meta_cache_ttl_sec = parse_duration_sec(*v);
+    if (auto* v = get("meta_cache_feed"))
+        c.meta_cache_feed = parse_bool_param(name, "meta_cache_feed", *v);
     if (auto* v = get("orphan_scan_interval"))
         c.orphan_scan_interval_sec = parse_duration_sec(*v);
     if (auto* v = get("mpu_ttl")) c.mpu_ttl_sec = parse_duration_sec(*v);
@@ -766,6 +768,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
                           [pins](uint64_t id) { pins->unpin_id(id); }});
         write_pins_ = true;
     }
+    wire_cache_invalidation();
     gc_owner_ = random_owner();
     load_quarantine();
     abandon_stale_packs();
@@ -780,6 +783,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     : cfg_(std::move(cfg)), pool_(std::move(pool)), meta_(std::move(meta)),
       data_(std::move(data)) {
     init_metrics(metrics);
+    wire_cache_invalidation();
     gc_owner_ = random_owner();
     load_quarantine();
     abandon_stale_packs();
@@ -885,6 +889,13 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
     m_read_corruption_ = metrics.counter(
         "lights3_duostore_read_corruption_total",
         "Chunk/pack crc mismatches detected on the GET read path (P5 corruption metric)");
+    m_cache_peer_invalidations_ = metrics.counter(
+        "lights3_duostore_meta_cache_feed_invalidations_total",
+        "Object records dropped from the meta cache on a peer gateway's commit message "
+        "(shared meta engine with an invalidation feed, backlog-sequence ⑤)");
+    m_cache_feed_resets_ = metrics.counter(
+        "lights3_duostore_meta_cache_feed_resets_total",
+        "Meta cache cleared because the invalidation feed (re)connected");
     // Object metadata cache (roadmap §3.8). The from_params contract is re-checked here
     // for directly constructed configs (tests, embedding): a TTL-less cache over a
     // shared engine would serve peers' overwrites indefinitely, so it is refused
@@ -899,6 +910,36 @@ void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
         MetaCacheOptions{cfg_.meta_cache_entries,
                          std::chrono::seconds(std::max(0, cfg_.meta_cache_ttl_sec))},
         metrics);
+}
+
+// Shared meta engines (backlog-sequence ⑤): when the engine can push peers' commits,
+// subscribe the cache to it -- a peer's overwrite/delete then drops the local record
+// within a message's latency instead of at meta_cache_ttl. The TTL stays as the
+// bound for lost messages (pub/sub is fire-and-forget); a feed (re)connect clears the
+// whole cache. The callbacks hold the cache by shared_ptr, never this backend
+void DuoStoreBackend::wire_cache_invalidation() {
+    if (!meta_cache_->enabled() || !cfg_.meta_cache_feed) return;
+    const bool shared_meta =
+        cfg_.meta_kind == DuoMetaKind::kRedis || cfg_.meta_kind == DuoMetaKind::kTikv;
+    if (!shared_meta) return;
+    auto cache = meta_cache_;
+    bool ok = meta_->subscribe_invalidations(
+        [cache, m = m_cache_peer_invalidations_](std::string_view b, std::string_view k) {
+            cache->invalidate(b, k);
+            m->inc();
+        },
+        [cache, m = m_cache_feed_resets_] {
+            cache->clear();
+            m->inc();
+        });
+    if (ok)
+        LOG_INFO("duostore '{}': meta cache subscribed to the engine's invalidation feed "
+                 "(peer commits invalidate; meta_cache_ttl={}s bounds lost messages)",
+                 cfg_.name, cfg_.meta_cache_ttl_sec);
+    else
+        LOG_INFO("duostore '{}': meta engine has no invalidation feed; the cache relies on "
+                 "meta_cache_ttl={}s (bounded staleness)",
+                 cfg_.name, cfg_.meta_cache_ttl_sec);
 }
 
 // Discard active packs on restart (§5.2): the data plane never reuses old active

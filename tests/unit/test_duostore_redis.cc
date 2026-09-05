@@ -502,6 +502,9 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
         cfg.gc_interval_sec = 0;
         cfg.read_lease_sec = 1;
         cfg.meta_cache_ttl_sec = 1;  // default budget stays (direct construction); ttl < gc_grace (300)
+        // The TTL contract on its own: with the invalidation feed on (the default), a
+        // peer's write would be visible at once -- that path has its own test below
+        cfg.meta_cache_feed = false;
         fs::create_directories(cfg.root);
         auto data = std::make_unique<FsDataStore>(
             FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
@@ -572,6 +575,102 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     auto c = DuoStoreConfig::from_params("p", on);
     CHECK_EQ(c.meta_cache_entries, size_t(1024));
     CHECK_EQ(c.meta_cache_ttl_sec, 2);
+    CHECK(c.meta_cache_feed);  // the feed is on by default
+    on["meta_cache_feed"] = "false";
+    CHECK(!DuoStoreConfig::from_params("p", on).meta_cache_feed);
+}
+
+// backlog-sequence ⑤ (docs/duostore-redis-meta.md §3.6): with the cache on, a peer's
+// commit publishes on <prefix>inv and the local record drops within a message's
+// latency instead of at the TTL; a lost feed clears the cache on reconnect
+TEST(duostore_redis_cache_invalidation_feed) {
+    REDIS_OR_SKIP();
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(4);
+    std::string prefix = unique_prefix();
+    auto metrics = std::make_shared<MetricsRegistry>();
+    auto make = [&](const char* name) {
+        auto ro = redis_opts(prefix);
+        ro.metrics = MetricsScope(metrics, {{"backend", name}});
+        auto meta = std::make_unique<RedisMetaStore>(std::move(ro));
+        IMetaStore* mp = meta.get();
+        DuoStoreConfig cfg;
+        cfg.name = name;
+        cfg.root = tmp.path / "duo";
+        cfg.meta_kind = DuoMetaKind::kRedis;
+        cfg.pack_threshold = 0;
+        cfg.gc_interval_sec = 0;
+        cfg.read_lease_sec = 1;
+        cfg.meta_cache_ttl_sec = 100;  // long TTL: only the feed can make a peer's write visible in time
+        fs::create_directories(cfg.root);
+        auto data = std::make_unique<FsDataStore>(
+            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
+                          cfg.pack_max_size, cfg.pack_writers, {}},
+            pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
+            [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
+        return std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data),
+                                                 MetricsScope(metrics, {{"backend", name}}));
+    };
+    auto a = make("gw-a");
+    auto b = make("gw-b");
+    CHECK(a->meta_cache_enabled());
+    // Both feeds subscribed (each subscription clears the -- still empty -- cache once)
+    auto wait_for = [&](auto pred, int ms) {
+        for (int i = 0; i < ms / 20; ++i) {
+            if (pred()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+        return pred();
+    };
+    CHECK(wait_for([&] {
+        return metrics->render().find("lights3_duostore_redis_invalidation_subscribes_total{backend=\"gw-a\"} 1") != std::string::npos;
+    }, 3000));
+
+    sync_wait(a->create_bucket("bkt"));
+    auto p1 = put(*a, "bkt", "k", "v1");
+    CHECK_EQ(sync_wait(a->head_object("bkt", "k")).etag, p1.etag);  // a caches the record
+    CHECK(a->meta_cache_stats().entries >= 1);
+    // Peer overwrite: the feed drops a's record and the next read sees v2 -- well
+    // inside the 100 s TTL
+    auto p2 = put(*b, "bkt", "k", "v2-two");
+    CHECK(wait_for([&] { return sync_wait(a->head_object("bkt", "k")).etag == p2.etag; }, 3000));
+    {
+        auto g = sync_wait(a->get_object("bkt", "k", std::nullopt));
+        CHECK_EQ(read_all(*g.body), std::string("v2-two"));
+    }
+    CHECK(a->meta_cache_stats().invalidations >= 1);
+    // Peer delete
+    sync_wait(a->head_object("bkt", "k"));  // re-cache
+    sync_wait(b->delete_object("bkt", "k"));
+    CHECK(wait_for([&] {
+        try {
+            sync_wait(a->head_object("bkt", "k"));
+            return false;
+        } catch (const s3::S3Error& e) {
+            return e.code == s3::S3ErrorCode::NoSuchKey;
+        }
+    }, 3000));
+    // The feed counter on a saw both messages (its own put is published too and
+    // dropped harmlessly after the write path's own invalidation)
+    CHECK(metrics->render().find("lights3_duostore_meta_cache_feed_invalidations_total{backend=\"gw-a\"}") != std::string::npos);
+
+    // Feed loss: killing the pub/sub clients makes each store reconnect and reset
+    // (clear) its cache -- only on a private server (CLIENT KILL is server-global)
+    if (RedisTestServer::instance().owned) {
+        put(*a, "bkt", "k2", "warm");
+        sync_wait(a->head_object("bkt", "k2"));
+        CHECK(a->meta_cache_stats().entries >= 1);
+        CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE pubsub"));
+        CHECK(wait_for([&] {
+            return metrics->render().find("lights3_duostore_meta_cache_feed_resets_total{backend=\"gw-a\"} 2") != std::string::npos;
+        }, 6000));
+        CHECK_EQ(a->meta_cache_stats().entries, size_t(0));
+        // ...and keeps working afterwards
+        auto p3 = put(*b, "bkt", "k2", "after-reconnect");
+        CHECK(wait_for([&] { return sync_wait(a->head_object("bkt", "k2")).etag == p3.etag; }, 3000));
+    }
+    sync_wait(a->close());
+    sync_wait(b->close());
 }
 
 // roadmap §3.5: uz:<b> lex index. Pages walked with the composite cursor must concatenate to

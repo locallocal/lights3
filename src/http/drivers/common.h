@@ -29,11 +29,16 @@ inline constexpr size_t kScratchBytes = 16 * 1024;  // Scratch buffer for draini
 struct ConnCounters {
     std::atomic<uint64_t> accepted{0}, rejected_limit{0}, active{0}, keepalive_closes{0};
     std::atomic<uint64_t> timeouts_idle{0}, timeouts_header{0}, timeouts_body{0}, timeouts_write{0};
+    std::atomic<uint64_t> requests{0}, tls_ok{0}, tls_failed{0}, parse_errors{0};  // roadmap §5.3
     ConnStats snapshot() const {
         auto ld = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
-        return {ld(accepted), ld(rejected_limit), ld(active), ld(keepalive_closes),
-                ld(timeouts_idle), ld(timeouts_header), ld(timeouts_body), ld(timeouts_write)};
+        return {ld(accepted),      ld(rejected_limit), ld(active),        ld(keepalive_closes),
+                ld(timeouts_idle), ld(timeouts_header), ld(timeouts_body), ld(timeouts_write),
+                ld(requests),      ld(tls_ok),         ld(tls_failed),    ld(parse_errors)};
     }
+    void request_parsed() { requests.fetch_add(1, std::memory_order_relaxed); }
+    void parse_error() { parse_errors.fetch_add(1, std::memory_order_relaxed); }
+    void tls_handshake(bool ok) { (ok ? tls_ok : tls_failed).fetch_add(1, std::memory_order_relaxed); }
 };
 
 // Which socket phase a timeout hit, for attribution

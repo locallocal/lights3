@@ -348,6 +348,7 @@ private:
             });
             (void)hn;
             sess->stream.expires_never();
+            counters_.tls_handshake(!hec);
             if (hec) {
                 // Plaintext client hitting the TLS port / probe traffic: one warning line suffices; skip the request loop
                 LOG_WARN("TLS handshake failed from client: {}", hec.message());
@@ -398,6 +399,12 @@ private:
                 if (ec == beast::error::timeout)
                     driver::count_timeout(counters_,
                                           fresh ? driver::Phase::Header : driver::Phase::Idle);
+                // A parser verdict (bad request line / header, header_limit) is a
+                // malformed request (roadmap §5.3); a peer that closed mid-message
+                // (end_of_stream / partial_message) or a transport error is not
+                else if (ec && ec.category() == bhttp::make_error_code(bhttp::error::bad_method).category() &&
+                         ec != bhttp::error::end_of_stream && ec != bhttp::error::partial_message)
+                    counters_.parse_error();
                 if (ec) break;  // eof / timeout / closed by shutdown
             }
             sess->in_flight.store(true);
@@ -421,10 +428,12 @@ private:
             // chunked — reject all of it at L1, so all four drivers
             // accept/reject the same request set
             if (!driver::parse_body_framing(req.headers).valid) {
+                counters_.parse_error();
                 auto bad = driver::bad_request_response("Invalid message framing.");
                 co_await write_response(stream, bad, /*head_request=*/false, /*keep=*/false);
                 break;
             }
+            counters_.request_parsed();
 
             BodyCtx<Stream> bctx{&parser, &stream, &buffer, cfg_.body_timeout_sec, &counters_};
             if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))

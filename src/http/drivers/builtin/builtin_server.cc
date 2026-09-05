@@ -396,10 +396,16 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
 
     HttpRequest req;
     req.remote_addr = peer;
+    // Malformed request line / header block / framing (roadmap §5.3): counted once,
+    // whether the connection is closed silently or answered 400
+    auto malformed = [&] {
+        sh.counters.parse_error();
+        return false;
+    };
     {
         auto sp1 = line.find(' ');
         auto sp2 = line.rfind(' ');
-        if (sp1 == std::string::npos || sp2 == sp1) return false;
+        if (sp1 == std::string::npos || sp2 == sp1) return malformed();
         req.method = line.substr(0, sp1);
         std::string target = line.substr(sp1 + 1, sp2 - sp1 - 1);
         std::string version = line.substr(sp2 + 1);
@@ -416,11 +422,11 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
         }
         if (line.empty()) break;
         header_bytes += line.size();
-        if (header_bytes > sh.cfg.max_header_size) return false;
+        if (header_bytes > sh.cfg.max_header_size) return malformed();
         // A bare CR must not remain in the header name/value (read_line only strips the single trailing \r)
-        if (line.find('\r') != std::string::npos) return false;
+        if (line.find('\r') != std::string::npos) return malformed();
         auto colon = line.find(':');
-        if (colon == std::string::npos || colon == 0) return false;
+        if (colon == std::string::npos || colon == 0) return malformed();
         std::string k = line.substr(0, colon);
         std::string v = line.substr(colon + 1);
         v.erase(0, v.find_first_not_of(" \t"));
@@ -442,8 +448,9 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     if (!framing.valid) {
         auto bad = driver::bad_request_response("Invalid message framing.");
         write_response(io, bad, req.method == "HEAD", /*keep_alive=*/false);
-        return false;
+        return malformed();
     }
+    sh.counters.request_parsed();
     io.set_recv_timeout(sh.cfg.body_timeout_sec);
     BodyState body_state;
     body_state.conn = &reader;
@@ -519,9 +526,11 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
             if (e) ERR_error_string_n(e, buf, sizeof(buf));
             ERR_clear_error();
             LOG_WARN("TLS handshake failed from {}: {}", peer, buf);
+            sh.counters.tls_handshake(false);
             if (io.ssl) SSL_free(io.ssl);
             return;
         }
+        sh.counters.tls_handshake(true);
     }
 
     ConnReader reader;

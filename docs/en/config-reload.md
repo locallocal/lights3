@@ -50,6 +50,7 @@ Report shape (admin API / `s3adm reload` output):
 | `http.request_timeout` | from the next request (dispatch reads an atomic per request) |
 | `http.transfer_stall_timeout` | from the next request (the admission handler reads an atomic per request) |
 | `http.min_part_size` | from the next CompleteMultipartUpload |
+| `http.metrics_access` | from the next `GET /-/metrics` (dispatch reads an atomic) |
 | `runtime.max_inflight_requests` | `AsyncSemaphore::set_capacity`: growing wakes queued requests at once; shrinking waits for in-flight permits to return (`available` may go negative briefly, nothing new is admitted meanwhile) |
 | `ratelimit.per_ip_* / per_ak_*` | limiters are rebuilt and swapped atomically; in-flight requests hold the old instance until they finish, so nothing dangles (`max_tracked` excepted: restart only) |
 | `buckets.rules` | `BucketRouter::update` swaps the rule table atomically; the router copies held by `S3Service`, the lifecycle runner and the usage tracker share one table; a request in flight keeps the table it resolved against |

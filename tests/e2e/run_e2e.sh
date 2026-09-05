@@ -714,6 +714,35 @@ check "metrics: api x backend series present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_api_requests_total{api="PutObject",backend="tierdata",class="2xx"}'; echo $?)"
 check "metrics: backend op histogram present" "0" \
     "$(echo "$METRICS_OUT" | grep -q 'lights3_backend_op_seconds_count{backend="tierdata",op="put_object"}'; echo $?)"
+# roadmap §5.3: L1 request/parse series, admission wait histogram, exact status
+# codes, website-plane events
+check "metrics: L1 request counter present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q '^lights3_http_requests_total [1-9]'; echo $?)"
+check "metrics: L1 parse-error / TLS series present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q '^lights3_http_parse_errors_total ' && echo "$METRICS_OUT" | grep -q 'lights3_http_tls_handshakes_total{result="ok"}'; echo $?)"
+check "metrics: admission wait histogram present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q '^lights3_admission_wait_seconds_count [1-9]'; echo $?)"
+check "metrics: transfer stall series present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_transfer_stalls_total{direction="out"} 0'; echo $?)"
+check "metrics: exact status code series present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_responses_by_status_total{status="200"} [1-9]'; echo $?)"
+check "metrics: website event series present" "0" \
+    "$(echo "$METRICS_OUT" | grep -q 'lights3_website_events_total{event="anon_read"} '; echo $?)"
+# /-/metrics root gate, switched on and off through the hot reload
+sed -i 's/^  port: 0$/  port: 0\n  metrics_access: root/' "$WORK/config.yaml"
+RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
+check "reload applies http.metrics_access" "0" \
+    "$(echo "$RELOAD_OUT" | grep -q 'http.metrics_access: anonymous -> root'; echo $?)"
+check "metrics: anonymous scrape denied under root gate" "403" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/metrics")"
+check "metrics: root-signed scrape admitted under root gate" "200" \
+    "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/-/metrics")"
+check "metrics: healthz stays anonymous under root gate" "200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/healthz")"
+sed -i '/^  metrics_access: root$/d' "$WORK/config.yaml"
+s3curl -o /dev/null -X POST "$BASE/-/admin/config/reload"
+check "metrics: anonymous scrape back after reload" "200" \
+    "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/metrics")"
 check "access log carries api and backend time" "0" \
     "$(grep -q 'access .* PUT "/mybucket/dir/big.bin" 200 .* api=PutObject backend=tierdata:' "$WORK/server.log"; echo $?)"
 # roadmap §5.2: quoted path, remote address, bucket and TTFB slots; the streaming GET

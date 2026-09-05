@@ -167,7 +167,14 @@ connections. Only httplib had it before (hard-coded 1024).
 `lights3_http_connections_total{result=accepted|rejected_limit}`,
 `lights3_http_connections_active`, `lights3_http_keepalive_closes_total`,
 `lights3_http_timeouts_total{phase}`. httplib runs upstream's accept loop and
-reports zeros for all four (documented limitation).
+reports zeros for all four (documented limitation). roadmap §5.3 adds
+`lights3_http_requests_total` (requests parsed at L1; ÷ accepted = keep-alive
+reuse factor), `lights3_http_tls_handshakes_total{result=ok|failed}` (builtin
+and beast own their handshake and count it; httplib/seastar handshake inside
+upstream and report 0), `lights3_http_parse_errors_total` (malformed request
+line / header block / framing, counted by all four drivers whether the
+connection is closed silently or answered 400; a peer that leaves or times out
+mid-headers is not a parse error).
 
 **`http.io_threads` semantics matrix** (one key kept; each driver logs what it
 means at startup):

@@ -953,6 +953,17 @@ struct TlsClient {
     }
 };
 
+// The drivers close the socket before their completion handler bumps the counter,
+// so the client can observe the close first: wait briefly for the counter to land
+template <class Pred>
+bool eventually(Pred&& pred, int max_ms = 3000) {
+    for (int i = 0; i < max_ms / 20; ++i) {
+        if (pred()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return pred();
+}
+
 TEST(http_driver_tls_round_trip) {
     // Every OpenSSL-backed driver serves TLS (roadmap §4.1); seastar goes through
     // seastar::tls and is covered by its own build. The knobs/SNI/reload cases live in test_tls.cc
@@ -994,6 +1005,57 @@ TEST(http_driver_tls_plaintext_client_rejected) {
             c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             auto r = c.read_response();
             CHECK(!r.ok);  // only a disconnect (or TLS alert noise) is possible, never an HTTP 200
+        }
+        // roadmap §5.3: the failed handshake is counted (OpenSSL-backed drivers with
+        // their own accept loop; httplib and seastar handshake inside upstream)
+        if (d == "builtin" || d == "beast") {
+            try {
+                CHECK(eventually([&] { return ts.srv->stats().tls_handshakes_failed == 1; }));
+                CHECK_EQ(ts.srv->stats().tls_handshakes_ok, uint64_t(0));
+                TlsClient ok(ts.port);
+                ok.send_str("GET /small HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+                CHECK(ok.read_all().find("200") != std::string::npos);
+                CHECK(eventually([&] { return ts.srv->stats().tls_handshakes_ok == 1; }));
+            } catch (const mini_test::Failure& f) {
+                throw mini_test::Failure("[driver=" + d + "] " + f.what());
+            }
+        }
+    }
+}
+
+// roadmap §5.3: requests parsed at L1 (÷ accepted = keep-alive reuse) and malformed
+// requests — request line, header block, message framing — across the drivers
+TEST(http_driver_request_and_parse_error_counters) {
+    for (auto& d : HttpServerFactory::drivers()) {
+        try {
+            TestServer ts(d);
+            {
+                Client c(ts.port);  // two requests over one keep-alive connection
+                c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+                CHECK(c.read_response().ok);
+                c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+                CHECK(c.read_response().ok);
+            }
+            CHECK(eventually([&] { return ts.srv->stats().requests == 2; }));
+            if (d != "httplib") CHECK_EQ(ts.srv->stats().accepted, uint64_t(1));
+            CHECK_EQ(ts.srv->stats().parse_errors, uint64_t(0));
+            {
+                Client c(ts.port);  // no request line structure at all
+                c.send_str("GARBAGE\r\n\r\n");
+                auto r = c.read_response();
+                CHECK(!r.ok || r.status >= 400);
+            }
+            CHECK(eventually([&] { return ts.srv->stats().parse_errors >= 1; }));
+            {
+                Client c(ts.port);  // framing rejected by the shared validator: 400 + close
+                c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: abc\r\n\r\n");
+                auto r = c.read_response();
+                CHECK(!r.ok || r.status == 400);
+            }
+            CHECK(eventually([&] { return ts.srv->stats().parse_errors >= 2; }));
+            CHECK_EQ(ts.srv->stats().requests, uint64_t(2));  // malformed ones are not requests
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
         }
     }
 }
@@ -1060,17 +1122,6 @@ TEST(http_driver_idle_timeout_closes_idle_connection) {
 }
 
 // ---------- Timeout family / keep-alive budget / connection counters (roadmap §4.2, http-adapter.md §2.1) ----------
-
-// The drivers close the socket before their completion handler bumps the counter,
-// so the client can observe the close first: wait briefly for the counter to land
-template <class Pred>
-bool eventually(Pred&& pred, int max_ms = 3000) {
-    for (int i = 0; i < max_ms / 20; ++i) {
-        if (pred()) return true;
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    return pred();
-}
 
 TEST(http_driver_header_timeout_bounds_slow_headers) {
     // A fresh connection that never completes its request line/headers is cut by

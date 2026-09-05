@@ -146,7 +146,11 @@ httplib 上游只有一个读超时，**头部阶段由 `body_timeout` 约束**�
 `lights3_http_connections_total{result=accepted|rejected_limit}`、
 `lights3_http_connections_active`、`lights3_http_keepalive_closes_total`、
 `lights3_http_timeouts_total{phase}`。httplib 跑上游的 accept 循环，四组都为 0
-（文档化限制）。
+（文档化限制）。roadmap §5.3 追加 `lights3_http_requests_total`（L1 解析成功的
+请求数，÷ accepted = keep-alive 复用率）、`lights3_http_tls_handshakes_total{result=ok|failed}`
+（builtin/beast 自持握手可计；httplib/seastar 的握手在上游内部，恒 0）、
+`lights3_http_parse_errors_total`（请求行/头部块/framing 畸形，无论静默关闭还是
+回 400，四驱动都计；对端在头部中途断开或超时不算）。
 
 **`http.io_threads` 语义矩阵**（保留单键，启动日志各自打印实际含义）：
 

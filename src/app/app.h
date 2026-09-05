@@ -14,6 +14,7 @@
 #include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
+#include "http/admission.h"
 #include "http/server.h"
 #include "s3/audit.h"
 #include "s3/auth/credential_store.h"
@@ -84,7 +85,8 @@ private:
     std::string config_path_;
     std::atomic<int> shutdown_errors_{0};
     std::mutex reload_mu_;  // one reload at a time (SIGHUP and the admin API may race)
-    std::shared_ptr<std::atomic<long>> stall_sec_;  // transfer_stall_timeout, read per request
+    std::shared_ptr<std::atomic<long>> stall_sec_;
+    std::shared_ptr<http::AdmissionCounters> admission_counters_;  // roadmap §5.3  // transfer_stall_timeout, read per request
     Config cfg_;
     std::shared_ptr<ThreadPool> pool_;
     std::shared_ptr<MetricsRegistry> metrics_;

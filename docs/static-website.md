@@ -116,3 +116,9 @@ policy（仅该桶、仅 Read）进入正常授权链。除此之外一切不变
   缺省时生成本网关相对路径（path-style 下带 `/bucket` 前缀）。
 - **按桶匿名限速**：`website[].max_rps`（YAML/JSON；AWS XML 无此字段，
   不经 `?website` API 暴露），见 §2。
+- **指标**（roadmap §5.3）：`lights3_website_events_total{event}`——
+  `anon_read`（进入匿名面的请求）、`index_rewrite`（key 改写为 index 文档）、
+  `error_document`（错误以 error 文档/内置页面应答）、`redirect`
+  （RedirectAllRequestsTo / RoutingRules / 302 补斜杠 /
+  `x-amz-website-redirect-location` 的 3xx）、`throttled`（`max_rps` 拒绝）；
+  配合 `lights3_responses_by_status_total{status}` 可读出 206/304 比例。

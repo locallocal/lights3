@@ -585,7 +585,10 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         {
             auto sp1 = line.find(' ');
             auto sp2 = line.rfind(' ');
-            if (sp1 == std::string::npos || sp2 == sp1) break;
+            if (sp1 == std::string::npos || sp2 == sp1) {
+                core->counters.parse_error();
+                break;
+            }
             req.method = line.substr(0, sp1);
             std::string target = line.substr(sp1 + 1, sp2 - sp1 - 1);
             std::string version = line.substr(sp2 + 1);
@@ -594,11 +597,12 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         }
 
         // Headers
-        bool bad = false;
+        bool bad = false;     // malformed header block (counted as a parse error)
+        bool closed = false;  // peer gone / timed out mid-headers (not a parse error)
         size_t header_bytes = 0;
         for (;;) {
             if (!co_await conn.read_line(line, max_line)) {
-                bad = true;
+                closed = true;
                 break;
             }
             if (line.empty()) break;
@@ -621,7 +625,11 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
             if (tail != std::string::npos) v.erase(tail + 1);
             req.headers.add(std::move(k), std::move(v));
         }
-        if (bad) break;
+        if (closed) break;
+        if (bad) {
+            core->counters.parse_error();
+            break;
+        }
         sess->in_flight = true;
 
         if (req.headers.has("Connection")) {
@@ -635,11 +643,13 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         // preconditions, see drivers/common.h parse_body_framing)
         auto framing = driver::parse_body_framing(req.headers);
         if (!framing.valid) {
+            core->counters.parse_error();
             auto bad = driver::bad_request_response("Invalid message framing.");
             co_await write_response(conn, bad, req.method == "HEAD", /*keep=*/false,
                                     core->cfg.io_chunk_size, shard);
             break;
         }
+        core->counters.request_parsed();
         set_phase(driver::Phase::Body, core->cfg.body_timeout_sec);
         BodyState bstate;
         bstate.conn = &conn;

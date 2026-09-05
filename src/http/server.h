@@ -24,6 +24,13 @@ struct ConnStats {
     uint64_t timeouts_header = 0;   // request line / headers (header_timeout)
     uint64_t timeouts_body = 0;     // body read (body_timeout)
     uint64_t timeouts_write = 0;    // response write (write_timeout)
+    // roadmap §5.3: requests parsed at L1 (requests / accepted = keep-alive reuse
+    // factor), TLS handshake outcomes, and request-line / header / framing
+    // parse failures (answered 400 or closed without a response)
+    uint64_t requests = 0;
+    uint64_t tls_handshakes_ok = 0;
+    uint64_t tls_handshakes_failed = 0;
+    uint64_t parse_errors = 0;
 };
 
 struct IHttpServer {

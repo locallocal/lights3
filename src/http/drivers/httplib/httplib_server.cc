@@ -154,9 +154,10 @@ public:
         // it alone. A routing 404 can only mean "method not registered"
         // (".*" is registered below for all business methods), so translate
         // it to 405 MethodNotAllowed like the other three drivers
-        svr_->set_error_handler([](const httplib::Request&, httplib::Response& rs) {
+        svr_->set_error_handler([this](const httplib::Request&, httplib::Response& rs) {
             using HR = httplib::Server::HandlerResponse;
             if (!rs.body.empty()) return HR::Unhandled;
+            if (rs.status == 400 || rs.status == 431) counters_.parse_error();  // upstream parser verdicts
             s3::S3ErrorCode code = s3::S3ErrorCode::InternalError;
             switch (rs.status) {
                 case 404: rs.status = 405; code = s3::S3ErrorCode::MethodNotAllowed; break;
@@ -190,6 +191,10 @@ public:
     }
 
     void set_handler(Handler h) override { handler_ = std::move(h); }
+    // Upstream owns the accept loop and the TLS handshake, so accept/active/TLS
+    // stay 0 here (documented in docs/http-adapter.md §2.2); requests and the
+    // parse failures this layer sees are counted (roadmap §5.3)
+    ConnStats stats() const override { return counters_.snapshot(); }
 
     void listen(const std::string& addr, uint16_t port) override {
         if (port == 0) {
@@ -251,6 +256,7 @@ private:
         // Content-Length, etc.; reject all of them at L1 and close the
         // connection, so all four drivers accept/reject the same request set
         auto reject = [&](const char* why) {
+            counters_.parse_error();
             apply_fallback(rs, driver::bad_request_response(why));
             rs.set_header("Connection", "close");  // Framing is suspect; do not reuse the connection
         };
@@ -268,12 +274,14 @@ private:
         for (auto& [k, v] : rq.headers)
             if (!is_pseudo_header(k)) header_bytes += k.size() + v.size() + 4;  // ": " + CRLF
         if (header_bytes > cfg_.max_header_size) {
+            counters_.parse_error();
             apply_fallback(rs, driver::upstream_error_response(s3::S3ErrorCode::InvalidRequest,
                                                               "Request header fields too large."));
             rs.status = 431;  // InvalidRequest maps to 400; reply 431 here per upstream semantics
             rs.set_header("Connection", "close");
             return;
         }
+        counters_.request_parsed();
         std::optional<uint64_t> content_length = framing.content_length;
         bool chunked = framing.chunked;
         // Connection is a token list: upstream only compares for full
@@ -427,6 +435,7 @@ private:
 
     HttpConfig cfg_;
     Handler handler_;
+    driver::ConnCounters counters_;
     // Declared before svr_: the SSL_CTX's certificate callback points at the
     // holder, so the holder must outlive the server (members destroy in reverse)
     std::shared_ptr<tls::Holder> tls_holder_;

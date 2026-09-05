@@ -632,6 +632,15 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp.headers.set("Content-Type", "text/plain");
         } else if (internal && internal_get("/-/metrics")) {
             api_name = "metrics";
+            // Root gate (roadmap §5.3): the same credential class as the admin plane
+            if (metrics_root_.load(std::memory_order_relaxed) && auth_.enabled()) {
+                auto ident = auth_.verify(req);
+                access_key = ident.access_key;
+                if (!is_root(access_key))
+                    throw S3Error(S3ErrorCode::AccessDenied,
+                                  "Reading metrics requires a root (statically configured) "
+                                  "credential on this deployment (http.metrics_access: root).");
+            }
             resp.small_body =
                 metrics_.render(pool_stats_, admission_stats_, timer_stats_, conn_stats_);
             // The backend-level registry is appended after the L2 request metrics
@@ -736,13 +745,17 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 // anon_site is set, so the rejection stays a cheap XML 503 — serving
                 // the error document would spend the very backend read the limiter
                 // exists to protect
-                if (site->max_rps && !website_rate_admit(bucket, site->max_rps))
+                if (site->max_rps && !website_rate_admit(bucket, site->max_rps)) {
+                    metrics_.website(WebsiteEvent::Throttled);
                     throw S3Error(S3ErrorCode::SlowDown, "Please reduce your request rate.");
+                }
+                metrics_.website(WebsiteEvent::AnonRead);
                 anon_site = site;
                 anon_orig_key = key;
                 // RedirectAllRequestsTo + prefix-only RoutingRules: evaluated on the
                 // original key, before the index rewrite and before any object access
                 if (auto redirect = website_redirect_response(req, *site, key, bucket, vhost)) {
+                    metrics_.website(WebsiteEvent::Redirect);
                     early = std::move(*redirect);
                 } else {
                 // Index document (docs/static-website.md phase ②): an empty key (bucket
@@ -750,7 +763,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 // ("docs/") maps to the index object. Rewriting before the route gate
                 // also turns what would be a bucket-scope listing into a plain object
                 // read -- anonymous listing stays impossible by construction
-                if (key.empty() || key.back() == '/') key += anon_site->index_suffix;
+                if (key.empty() || key.back() == '/') {
+                    key += anon_site->index_suffix;
+                    metrics_.website(WebsiteEvent::IndexRewrite);
+                }
                 // Anonymous scope is pinned by route, not just policy: only the bare
                 // GET/HEAD object routes (flag == "", Action::Read) qualify -- a query
                 // flag steers to a different operation (?uploadId is ListParts), and
@@ -851,6 +867,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     redirect.status = 301;
                     redirect.headers.set("Location", *loc);
                     resp = std::move(redirect);
+                    metrics_.website(WebsiteEvent::Redirect);
                 }
             }
             }  // !early
@@ -890,6 +907,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                                http_status(website_err->code))) {
             resp = routing_redirect(req, *r, anon_orig_key, bucket, vhost);
             website_err.reset();
+            metrics_.website(WebsiteEvent::Redirect);
         } else if (website_err->code == S3ErrorCode::NoSuchKey && !anon_orig_key.empty() &&
                    anon_orig_key.back() != '/') {
             // AWS website-endpoint behavior (roadmap §2.3): GET /prefix without the
@@ -909,9 +927,13 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                   "/";
                 resp = redirect_response(302, std::move(loc));
                 website_err.reset();
+                metrics_.website(WebsiteEvent::Redirect);
             }
         }
-        if (website_err) resp = co_await website_error_page(*website_err, *anon_site, head);
+        if (website_err) {
+            metrics_.website(WebsiteEvent::ErrorDocument);
+            resp = co_await website_error_page(*website_err, *anon_site, head);
+        }
     }
     // CORS actual-request headers (roadmap §2.1): injected on success and error alike —
     // the browser needs Allow-Origin to surface either response to the page. Preflight

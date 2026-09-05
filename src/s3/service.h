@@ -116,6 +116,12 @@ public:
     // "proxy to another lights3" deployment is not judged once per layer
     void set_min_part_size(uint64_t n) { min_part_size_.store(n, std::memory_order_relaxed); }
 
+    // /-/metrics exposure (roadmap §5.3, http.metrics_access): true = a root
+    // credential's signature is required (bucket names and backend topology are
+    // business information); false = anonymous, the classic scrape setup.
+    // Moot when authentication is disabled altogether. Hot-reloadable
+    void set_metrics_root_only(bool root) { metrics_root_.store(root, std::memory_order_relaxed); }
+
     // Slow-request channel (roadmap §5.2): an access line whose total time reaches
     // the threshold is logged at WARN with per-stage timings; 0 = off. Read once per
     // request at dispatch end (streaming responses judge at end of body)
@@ -356,6 +362,7 @@ private:
     std::atomic<int64_t> request_timeout_ms_{0};
     std::atomic<uint64_t> min_part_size_{storage::kMinPartSize};
     std::atomic<int64_t> slow_request_ms_{0};
+    std::atomic<bool> metrics_root_{false};
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off

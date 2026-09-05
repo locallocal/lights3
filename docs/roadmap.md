@@ -387,15 +387,15 @@ CopyObject/UploadPartCopy 按 `x-amz-copy-source` 细分）→
 | ~~慢请求日志~~ | 已完成：`log.slow_request_threshold`（可热更新）——总耗时达阈值的访问行升 WARN 并附 `auth/handler/backend/ttfb/total` 阶段耗时；`log.level: warn` 下仍可见 | 高 | 低 |
 | ~~结构化访问日志~~ | 已完成：文本行 `path`/UA 加引号转义，新增 `remote/bucket/ttfb/ua` 槽；`log.format: json` 时整条运行日志每行一个对象，访问记录平铺 `request_id/remote/ak/method/path/query/bucket/key/status/bytes/ms/ttfb_ms/auth_ms/handler_ms/backend_ms/backend_calls/api/backend/ua`；流式响应在响应体读尽时写行（实际字节数 + 含传输的总耗时，中断标 `truncated`）；[s3-protocol.md §7](s3-protocol.md) | 中 | 低-中 |
 
-### 5.3 指标补口
+### 5.3 指标补口 **已完成（2026-09-05，五项全部）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| L1 层零指标 | 连接数、accept/拒绝、keep-alive 复用率、TLS 握手、解析失败全缺；`MetricsScope` 现成 | 高 | 低 |
-| admission/stall 指标 | 排队时长 histogram、停滞掐断计数均无（现仅三个瞬时 gauge） | 中 | 低 |
-| 精确状态码 | 现仅 2xx-5xx 大类，200/204/206/304 不可分（206/304 比例是网站/CDN 场景关键指标） | 中 | 极低 |
-| website/匿名面指标 | 匿名读、index 改写、error 回退、301 全无计数 | 中 | 极低 |
-| `/-/metrics` 匿名可达 | 含 bucket 名等业务信息；加 root gate 或独立 admin 端口 | 中 | 低 |
+| ~~L1 层零指标~~ | 连接数/accept/拒绝/超时随 §4.2 落地；本轮补 `lights3_http_requests_total`（÷ accepted = keep-alive 复用率）、`lights3_http_tls_handshakes_total{result}`（builtin/beast）、`lights3_http_parse_errors_total`（四驱动）；[http-adapter.md §2.2](http-adapter.md) | 高 | 低 |
+| ~~admission/stall 指标~~ | `http/admission.h` 的 `AdmissionCounters`：`lights3_admission_wait_seconds` 直方图 + `queued_total` + `cancelled_total`，停滞守卫带计数器 → `lights3_transfer_stalls_total{direction}` | 中 | 低 |
+| ~~精确状态码~~ | `lights3_responses_by_status_total{status}`（稀疏输出） | 中 | 极低 |
+| ~~website/匿名面指标~~ | `lights3_website_events_total{event=anon_read\|index_rewrite\|error_document\|redirect\|throttled}`；[static-website.md §6](static-website.md) | 中 | 极低 |
+| ~~`/-/metrics` 匿名可达~~ | `http.metrics_access: anonymous\|root`（可热更新）：root 时 GET 须 root 凭证签名，healthz/readyz 不受影响；独立 admin 端口未做（root gate 已足够，端口层隔离仍可由部署侧完成） | 中 | 低 |
 
 ### 5.4 分布式 trace
 
@@ -492,7 +492,7 @@ dashboard、一条告警规则都没有。补 `deploy/grafana/lights3.json` +
 ### P2 — 中期（需设计，一个方向一个迭代）
 
 1. ~~scrub/fsck（§3.1）~~ **已完成（2026-08-28）**；~~顺带的用量统计（§3.9①）未做~~ **已完成（2026-09-04，L2 增量 + 全量列举校准，未复用 scrub 遍历）**
-2. ~~超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）~~ **§4.2 已完成（2026-09-05）；§5.3 的 L1 连接/超时指标随之落地，其余指标补口仍待做**
+2. ~~超时体系拆分 + L1 指标 + 连接治理（§4.2/§5.3）~~ **§4.2 已完成（2026-09-05）；§5.3 全部指标补口已完成（2026-09-05）**
 3. 缓冲池化 + 流式双缓冲 + sendfile（§4.3；与 §3.4 fixed buffers 联动）
 4. ~~builtin/seastar TLS + 证书热重载（§4.1）~~ **已完成（2026-09-05，含 mTLS/SNI/cipher 旋钮与反代样例）**
 5. ~~配置热重载安全子集（§4.4）~~ **已完成（2026-09-05，含 bucket 路由规则）**

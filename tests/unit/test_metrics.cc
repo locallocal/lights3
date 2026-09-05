@@ -256,3 +256,74 @@ TEST(s3_metrics_bucket_cardinality_capped) {
     auto out = m.render({});
     CHECK(out.find("lights3_bucket_requests_total{bucket=\"_other\"}") != std::string::npos);
 }
+
+// roadmap §5.3: exact status codes and website-plane events
+TEST(s3_metrics_status_codes_and_website_events) {
+    s3::Metrics m;
+    for (int st : {200, 206, 304, 304, 404}) {
+        m.request_start();
+        m.request_end("GET", st, 0.001);
+    }
+    m.website(s3::WebsiteEvent::IndexRewrite);
+    m.website(s3::WebsiteEvent::IndexRewrite);
+    m.website(s3::WebsiteEvent::Redirect);
+    auto out = m.render({});
+    CHECK(out.find("lights3_responses_by_status_total{status=\"200\"} 1\n") != std::string::npos);
+    CHECK(out.find("lights3_responses_by_status_total{status=\"206\"} 1\n") != std::string::npos);
+    CHECK(out.find("lights3_responses_by_status_total{status=\"304\"} 2\n") != std::string::npos);
+    CHECK(out.find("lights3_responses_by_status_total{status=\"404\"} 1\n") != std::string::npos);
+    CHECK(out.find("status=\"500\"") == std::string::npos);  // sparse: never occurred
+    CHECK(out.find("lights3_responses_total{class=\"3xx\"} 2") != std::string::npos);
+    CHECK(out.find("lights3_website_events_total{event=\"index_rewrite\"} 2\n") != std::string::npos);
+    CHECK(out.find("lights3_website_events_total{event=\"redirect\"} 1\n") != std::string::npos);
+    CHECK(out.find("lights3_website_events_total{event=\"anon_read\"} 0\n") != std::string::npos);
+    CHECK(out.find("lights3_website_events_total{event=\"error_document\"} 0\n") != std::string::npos);
+    CHECK(out.find("lights3_website_events_total{event=\"throttled\"} 0\n") != std::string::npos);
+}
+
+// roadmap §5.3: admission wait histogram / queue / cancellation / stall cuts and the
+// added L1 series (requests, TLS handshakes, parse errors)
+TEST(s3_metrics_renders_admission_counters_and_l1_extras) {
+    s3::Metrics m;
+    auto out = m.render(
+        {},
+        [] {
+            s3::AdmissionStats st{64, 60, 1};
+            st.counters = true;
+            st.wait_hist = {5, 1, 0, 0, 0, 1};
+            st.wait_sum_us = 2'500'000;
+            st.wait_count = 7;
+            st.queued = 2;
+            st.cancelled = 1;
+            st.stalls_in = 3;
+            st.stalls_out = 4;
+            return st;
+        },
+        {},
+        [] {
+            http::ConnStats c;
+            c.accepted = 3;
+            c.requests = 12;
+            c.tls_handshakes_ok = 2;
+            c.tls_handshakes_failed = 1;
+            c.parse_errors = 5;
+            return c;
+        });
+    CHECK(out.find("lights3_admission_wait_seconds_bucket{le=\"0.001\"} 5\n") != std::string::npos);
+    CHECK(out.find("lights3_admission_wait_seconds_bucket{le=\"0.01\"} 6\n") != std::string::npos);
+    CHECK(out.find("lights3_admission_wait_seconds_bucket{le=\"+Inf\"} 7\n") != std::string::npos);
+    CHECK(out.find("lights3_admission_wait_seconds_sum 2.5\n") != std::string::npos);
+    CHECK(out.find("lights3_admission_wait_seconds_count 7\n") != std::string::npos);
+    CHECK(out.find("lights3_admission_queued_total 2\n") != std::string::npos);
+    CHECK(out.find("lights3_admission_cancelled_total 1\n") != std::string::npos);
+    CHECK(out.find("lights3_transfer_stalls_total{direction=\"in\"} 3\n") != std::string::npos);
+    CHECK(out.find("lights3_transfer_stalls_total{direction=\"out\"} 4\n") != std::string::npos);
+    CHECK(out.find("lights3_http_requests_total 12\n") != std::string::npos);
+    CHECK(out.find("lights3_http_tls_handshakes_total{result=\"ok\"} 2\n") != std::string::npos);
+    CHECK(out.find("lights3_http_tls_handshakes_total{result=\"failed\"} 1\n") != std::string::npos);
+    CHECK(out.find("lights3_http_parse_errors_total 5\n") != std::string::npos);
+    // Without the cumulative counters wired (counters=false) only the three gauges appear
+    auto bare = m.render({}, [] { return s3::AdmissionStats{1, 1, 0}; });
+    CHECK(bare.find("lights3_admission_capacity 1") != std::string::npos);
+    CHECK(bare.find("lights3_admission_wait_seconds") == std::string::npos);
+}

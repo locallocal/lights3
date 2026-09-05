@@ -1,0 +1,23 @@
+#!/bin/sh
+# lights3 postrm: purge removes secrets, data, logs and the service user; a plain
+# remove keeps them (conffile lights3.yaml is handled by dpkg itself)
+set -e
+case "$1" in
+    purge)
+        LIGHTS3_CONFIG_DIR=/etc/lights3 LIGHTS3_STATE_DIR=/var/lib/lights3 \
+            sh /usr/share/lights3/lights3-setup.sh purge 2>/dev/null || {
+            # The helper is already gone on purge-after-remove: inline the essentials
+            rm -f /etc/lights3/lights3.env /etc/lights3/lights3.yaml
+            rm -rf /var/lib/lights3 /var/log/lights3
+            rmdir /etc/lights3 2>/dev/null || true
+            getent passwd lights3 >/dev/null && userdel lights3 2>/dev/null || true
+            getent group lights3 >/dev/null && groupdel lights3 2>/dev/null || true
+        }
+        ;;
+    remove)
+        if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            systemctl daemon-reload
+        fi
+        ;;
+esac
+exit 0

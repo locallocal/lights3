@@ -180,6 +180,8 @@ struct S3Error : std::exception {   // L2/L3 统一抛这个
 
 ## 7. 可观测性
 
+构建身份 `lights3_build_info{version,commit,build_type}`（恒 1，roadmap §6.3，
+[deployment.md §1](deployment.md)）。
 L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{result}`、
 `lights3_http_connections_active`、`lights3_http_keepalive_closes_total`、
 `lights3_http_timeouts_total{phase=idle|header|body|write}`、

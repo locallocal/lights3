@@ -1,0 +1,9 @@
+#!/bin/sh
+# lights3 postinst: user / directories / secrets / systemd (via the shared helper)
+set -e
+case "$1" in
+    configure)
+        /usr/share/lights3/lights3-setup.sh configure
+        ;;
+esac
+exit 0

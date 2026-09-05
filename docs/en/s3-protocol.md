@@ -194,6 +194,8 @@ and the response leaks no internal information.
 
 ## 7. Observability
 
+Build identity `lights3_build_info{version,commit,build_type}` (constant 1,
+roadmap §6.3, [deployment.md §1](deployment.md)).
 L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_total{result}`,
 `lights3_http_connections_active`, `lights3_http_keepalive_closes_total`,
 `lights3_http_timeouts_total{phase=idle|header|body|write}`,

@@ -16,8 +16,15 @@ harness、故障注入门面、性能门禁与 soak、mint 挂 ctest、ubsan/cov
 | `bench_gate` | 3 秒吞吐/延迟门禁（§5） | `perf` |
 | `soak_smoke` | 30 秒 soak：RSS / fd / 泄漏断言（§5） | `perf` `soak` |
 | `mint` | MinIO mint 的 s3cmd + awscli 子集；无 docker 显式 SKIP（§6） | `mint` |
+| `install_tree` | `cmake --install` 进临时 prefix：布局、unit 搬迁、保留已有配置、`--version` 格式、维护脚本 `sh -n`（[deployment.md §2](deployment.md)） | — |
 
 负载敏感或需要外部依赖的项按标签排除：`ctest -LE "perf|mint"`。
+
+`e2e_duostore_redis` / `_tikv` / `_rados` 各自探测外部依赖，缺则显式 SKIP：
+redis 找 `redis-server` 自起私有实例，或 `LIGHTS3_TEST_REDIS_URI=redis://host:port`
+指向外部实例（每次运行唯一 `redis_prefix`）；tikv 看 `LIGHTS3_TEST_PD_ADDR`；
+rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e run --rm e2e`
+把三套依赖拉起来一次跑完（[deployment.md §4.3](deployment.md)）。
 
 ## 2. e2e 新增段（`tests/e2e/run_e2e.sh`）
 

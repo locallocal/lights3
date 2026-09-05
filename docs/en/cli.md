@@ -35,6 +35,8 @@ static websites in [static-website.md](static-website.md).
 
 ```text
 lights3 [--config=<path>]                                  start the server
+lights3 --version                                          version / git commit / compiled-in drivers and backends
+lights3 --check-config [--config=<path>]                   validate the config only (§2.1)
 lights3 duostore dump <backend> <file> [--config=<path>]   export duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   import duostore meta
 lights3 duostore gc <backend> [--config=<path>]            run one duostore GC round now
@@ -49,6 +51,7 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 | Option | Applies to | Default | Meaning |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | all | `config/lights3.yaml` | YAML config file (format: [architecture.md §5](architecture.md#5-example-configuration-file)) |
+| `--version` | root command (`s3adm` too) | — | print `lights3 <ver> (git <commit>, <build type>, <date>)` plus the `drivers:` / `features:` lines, exit 0; wins over `--check-config` (roadmap §6.3, [deployment.md §1](deployment.md)) |
 | `--backend=<name>` | `duostore *`, `tier *`, `fsck` | — | backend name, same as the first positional |
 | `--file=<path>` | `duostore dump|load` | — | dump file path, same as the second positional |
 | `--max-mbps=<n>` | `fsck` | `0` | read throttle in MB/s, `0` = unthrottled |

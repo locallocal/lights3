@@ -1,0 +1,31 @@
+# compose profile `tikv`: duostore with its metadata in the pd0/tikv0 services
+# (docs/duostore-tikv-meta.md); needs the image built with LIGHTS3_TIKV=ON
+http:
+  driver: builtin
+  bind: 0.0.0.0
+  port: 9000
+
+runtime:
+  io_threads: 16
+
+auth:
+  credentials:
+    - access_key: ${LIGHTS3_ACCESS_KEY:-AKIDEXAMPLE}
+      secret_key: ${LIGHTS3_SECRET_1}
+  region: ${LIGHTS3_REGION:-us-east-1}
+
+backends:
+  - name: duodata
+    type: duostore
+    root: /var/lib/lights3/duostore
+    meta: tikv
+    pd_endpoints: "${LIGHTS3_PD_ENDPOINTS:-pd0:2379}"
+    tikv_prefix: "duo:"
+    tikv_gc_interval: 60s
+
+buckets:
+  default_backend: duodata
+  rules: []
+
+log:
+  level: ${LIGHTS3_LOG_LEVEL:-info}

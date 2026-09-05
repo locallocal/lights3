@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(lights3 CXX)
+project(lights3 VERSION 0.1.0 LANGUAGES CXX)
+include(GNUInstallDirs)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -475,6 +476,27 @@ if(LIGHTS3_DRIVER_SEASTAR)
   target_link_libraries(lights3_core PRIVATE seastar)
 endif()
 
+# ---- Build identity (roadmap §6.3, src/core/version.h) ----
+# The git commit is stamped at *build* time by a script-mode CMake run so that it
+# follows the checkout rather than the last configure; the file is rewritten only
+# when its content changes. LIGHTS3_GIT_COMMIT overrides the probe for builds
+# without a .git directory (source tarballs, Docker build contexts)
+set(LIGHTS3_GIT_COMMIT "" CACHE STRING "Git commit to embed when the source tree has no .git (tarball / container builds)")
+set(LIGHTS3_VERSION_CC ${CMAKE_BINARY_DIR}/generated/version_info.cc)
+add_custom_target(lights3_version_gen
+  COMMAND ${CMAKE_COMMAND}
+          -DLIGHTS3_VERSION=${PROJECT_VERSION}
+          -DSOURCE_DIR=${CMAKE_SOURCE_DIR}
+          -DOUTPUT=${LIGHTS3_VERSION_CC}
+          -DBUILD_TYPE=${CMAKE_BUILD_TYPE}
+          -DGIT_COMMIT_OVERRIDE=${LIGHTS3_GIT_COMMIT}
+          -P ${CMAKE_SOURCE_DIR}/cmake/GenerateVersion.cmake
+  BYPRODUCTS ${LIGHTS3_VERSION_CC}
+  COMMENT "Refreshing build version stamp"
+  VERBATIM)
+target_sources(lights3_core PRIVATE src/core/version.cc ${LIGHTS3_VERSION_CC})
+add_dependencies(lights3_core lights3_version_gen)
+
 # ---- Main executable ----
 add_executable(lights3 src/main.cc)
 target_link_libraries(lights3 PRIVATE lights3_core ccmd::ccmd)
@@ -601,6 +623,11 @@ if(LIGHTS3_BUILD_TESTS)
     set_tests_properties(soak_smoke PROPERTIES LABELS "perf;soak" TIMEOUT 900)
   endif()
 
+  # Install tree + --version (roadmap §6.3, docs/deployment.md): cmake --install into a
+  # scratch prefix, layout / unit relocation / config preservation / version output
+  add_test(NAME install_tree
+           COMMAND ${CMAKE_SOURCE_DIR}/tests/packaging/check_install.sh ${CMAKE_BINARY_DIR})
+
   # e2e parameterized by driver: the same set of real S3 flow cases runs against every compiled driver
   if(LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME e2e_builtin
@@ -695,3 +722,6 @@ if(LIGHTS3_BUILD_TESTS)
                      $<TARGET_FILE:lights3> builtin tiered-cloudproxy)
   endif()
 endif()
+
+# ---- Install tree + packages (roadmap §6.3) ----
+include(cmake/Packaging.cmake)

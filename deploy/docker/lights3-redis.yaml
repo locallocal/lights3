@@ -1,0 +1,30 @@
+# compose profile `redis`: duostore with its metadata in the redis service
+# (docs/duostore-redis-meta.md), chunk/pack data under the volume
+http:
+  driver: builtin
+  bind: 0.0.0.0
+  port: 9000
+
+runtime:
+  io_threads: 16
+
+auth:
+  credentials:
+    - access_key: ${LIGHTS3_ACCESS_KEY:-AKIDEXAMPLE}
+      secret_key: ${LIGHTS3_SECRET_1}
+  region: ${LIGHTS3_REGION:-us-east-1}
+
+backends:
+  - name: duodata
+    type: duostore
+    root: /var/lib/lights3/duostore
+    meta: redis
+    redis_uri: ${LIGHTS3_REDIS_URI:-redis://redis:6379}
+    redis_prefix: "duo:"
+
+buckets:
+  default_backend: duodata
+  rules: []
+
+log:
+  level: ${LIGHTS3_LOG_LEVEL:-info}

@@ -1,0 +1,210 @@
+# LightS3 compose (roadmap §6.3, docs/deployment.md §4).
+#
+#   docker compose up -d                       # demo: localfs on :9000, root key AKIDEXAMPLE
+#   docker compose --profile redis up -d       # + duostore with redis metadata on :9001
+#   docker compose --profile tikv up -d        # + duostore with TiKV metadata on :9002 (image lights3:full)
+#   docker compose --profile rados up -d       # + duostore with RADOS data on :9003 (image lights3:full, ceph demo)
+#   docker compose --profile e2e run --rm e2e  # the redis / tikv / rados e2e paths that SKIP on a dev box
+#
+# Environment: LIGHTS3_SECRET_1 (root secret, demo default below),
+# LIGHTS3_GIT_COMMIT (stamped into --version: LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build),
+# TIKV_VERSION, CEPH_IMAGE. Submodules must be checked out before building (.dockerignore).
+name: lights3
+
+x-lights3-env: &lights3-env
+  LIGHTS3_SECRET_1: ${LIGHTS3_SECRET_1:-lights3-demo-secret}
+  LIGHTS3_LOG_LEVEL: ${LIGHTS3_LOG_LEVEL:-info}
+
+x-full-build: &full-build
+  context: .
+  args:
+    LIGHTS3_GIT_COMMIT: ${LIGHTS3_GIT_COMMIT:-unknown}
+    LIGHTS3_RADOS: "ON"
+    LIGHTS3_TIKV: "ON"
+
+services:
+  # ---- default: localfs demo -------------------------------------------------
+  lights3:
+    build:
+      context: .
+      args:
+        LIGHTS3_GIT_COMMIT: ${LIGHTS3_GIT_COMMIT:-unknown}
+    image: lights3:local
+    environment: *lights3-env
+    ports:
+      - "${LIGHTS3_PORT:-9000}:9000"
+    volumes:
+      - lights3-data:/var/lib/lights3
+    restart: unless-stopped
+
+  # ---- profile redis: duostore + redis metadata --------------------------------
+  redis:
+    image: redis:7-alpine
+    profiles: [redis, e2e]
+    # AOF on: the redis meta store warns (and may lose commits on crash) without it
+    command: ["redis-server", "--appendonly", "yes", "--save", ""]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  lights3-redis:
+    image: lights3:local
+    profiles: [redis]
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment: *lights3-env
+    ports:
+      - "${LIGHTS3_REDIS_PORT:-9001}:9000"
+    volumes:
+      - lights3-redis-data:/var/lib/lights3
+      - ./deploy/docker/lights3-redis.yaml:/etc/lights3/lights3.yaml:ro
+    restart: unless-stopped
+
+  # ---- profile tikv: duostore + TiKV metadata (single PD + single TiKV) --------
+  pd0:
+    image: pingcap/pd:${TIKV_VERSION:-v8.5.2}
+    profiles: [tikv, e2e]
+    command:
+      - --name=pd0
+      - --client-urls=http://0.0.0.0:2379
+      - --peer-urls=http://0.0.0.0:2380
+      - --advertise-client-urls=http://pd0:2379
+      - --advertise-peer-urls=http://pd0:2380
+      - --initial-cluster=pd0=http://pd0:2380
+      - --data-dir=/data/pd0
+    volumes:
+      - pd-data:/data
+
+  tikv0:
+    image: pingcap/tikv:${TIKV_VERSION:-v8.5.2}
+    profiles: [tikv, e2e]
+    depends_on: [pd0]
+    command:
+      - --addr=0.0.0.0:20160
+      - --advertise-addr=tikv0:20160
+      - --status-addr=0.0.0.0:20180
+      - --pd=pd0:2379
+      - --data-dir=/data/tikv0
+    volumes:
+      - tikv-data:/data
+
+  lights3-tikv:
+    build: *full-build
+    image: lights3:full
+    profiles: [tikv]
+    depends_on: [pd0, tikv0]
+    environment: *lights3-env
+    ports:
+      - "${LIGHTS3_TIKV_PORT:-9002}:9000"
+    volumes:
+      - lights3-tikv-data:/var/lib/lights3
+      - ./deploy/docker/lights3-tikv.yaml:/etc/lights3/lights3.yaml:ro
+    restart: unless-stopped
+
+  # ---- profile rados: duostore + RADOS data (ceph single-node demo) -----------
+  # ceph/demo brings up mon + mgr + osd on one container and writes ceph.conf plus
+  # the admin keyring into /etc/ceph, shared read-only with the consumers; the
+  # keyring is root-only, so the consumers run as root here
+  ceph:
+    image: ${CEPH_IMAGE:-quay.io/ceph/demo:latest}
+    profiles: [rados, e2e]
+    environment:
+      MON_IP: 172.28.0.10
+      CEPH_PUBLIC_NETWORK: 172.28.0.0/16
+      CEPH_DEMO_UID: demo
+      CEPH_DEMO_ACCESS_KEY: demo
+      CEPH_DEMO_SECRET_KEY: demo
+      CEPH_DEMO_BUCKET: demo
+    networks:
+      default:
+        ipv4_address: 172.28.0.10
+    volumes:
+      - ceph-etc:/etc/ceph
+      - ceph-data:/var/lib/ceph
+    healthcheck:
+      test: ["CMD-SHELL", "ceph -s >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+      start_period: 60s
+
+  rados-init:
+    image: ${CEPH_IMAGE:-quay.io/ceph/demo:latest}
+    profiles: [rados]
+    depends_on:
+      ceph:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        pool=${LIGHTS3_RADOS_POOL:-lights3};
+        ceph osd pool ls | grep -qx "$$pool" ||
+        { ceph osd pool create "$$pool" 8 && ceph osd pool application enable "$$pool" rados; }
+    volumes:
+      - ceph-etc:/etc/ceph:ro
+
+  lights3-rados:
+    build: *full-build
+    image: lights3:full
+    profiles: [rados]
+    depends_on:
+      rados-init:
+        condition: service_completed_successfully
+    user: "0:0"
+    environment:
+      <<: *lights3-env
+      LIGHTS3_RADOS_POOL: ${LIGHTS3_RADOS_POOL:-lights3}
+    ports:
+      - "${LIGHTS3_RADOS_PORT:-9003}:9000"
+    volumes:
+      - lights3-rados-data:/var/lib/lights3
+      - ceph-etc:/etc/ceph:ro
+      - ./deploy/docker/lights3-rados.yaml:/etc/lights3/lights3.yaml:ro
+    restart: unless-stopped
+
+  # ---- profile e2e: run the externally-backed e2e paths against the services --
+  # docker compose --profile e2e run --rm e2e            # all three
+  # docker compose --profile e2e run --rm -e E2E_TESTS=e2e_duostore_redis e2e
+  e2e:
+    build:
+      <<: *full-build
+      target: e2e
+    image: lights3:e2e
+    profiles: [e2e]
+    depends_on:
+      redis:
+        condition: service_healthy
+      tikv0:
+        condition: service_started
+      ceph:
+        condition: service_healthy
+    environment:
+      LIGHTS3_TEST_REDIS_URI: redis://redis:6379
+      LIGHTS3_TEST_PD_ADDR: pd0:2379
+      LIGHTS3_TEST_RADOS_CONF: /etc/ceph/ceph.conf
+      LIGHTS3_TEST_RADOS_POOL: lights3-e2e
+      E2E_TESTS: ${E2E_TESTS:-e2e_duostore_(redis|tikv|rados)}
+    volumes:
+      - ceph-etc:/etc/ceph:ro
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  lights3-data:
+  lights3-redis-data:
+  lights3-tikv-data:
+  lights3-rados-data:
+  redis-data:
+  pd-data:
+  tikv-data:
+  ceph-etc:
+  ceph-data:

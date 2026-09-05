@@ -6,7 +6,10 @@
 // subcommand, and long options only accept values in --name=value form.
 #include <ccmd.h>
 
+#include <cstdio>
 #include <memory>
+
+#include "core/version.h"
 
 #include "tools/s3adm_bench.h"
 #include "tools/s3adm_common.h"
@@ -39,11 +42,19 @@ int main(int argc, char* argv[]) {
         "introspection under `object`, multipart cleanup under `mpu`; run "
         "`s3adm help <command>` for details.",
         "lights3 ops CLI.",
-        // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a usage error
+        // Bare s3adm / s3adm -x: nothing actionable to run; print help and exit as a
+        // usage error. `s3adm --version` is the one root-level flag (roadmap §6.3)
         [](const std::shared_ptr<ccmd::c_command>& c) {
+            if (c->var<bool>("version")) {
+                fputs(lights3::version_report("s3adm").c_str(), stdout);
+                return;
+            }
             c->print_help();
             s3adm::g_exit = 2;
         });
+    root->var<bool>("version", false,
+                    "Print version, git commit, build type and the compiled-in drivers / "
+                    "backends, then exit");
     root->add_subcommand(s3adm::make_cred());
     root->add_subcommand(s3adm::make_bench());
     root->add_subcommand(s3adm::make_website());

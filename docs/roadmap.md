@@ -453,15 +453,15 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 | ~~`s3adm bench --output=json`~~ **已完成（2026-09-05）** | 单个 JSON 汇总对象，`scripts/bench_gate.sh` 已改用它做阈值比对 | 中 | 低 |
 | ~~`s3adm usage`~~ **已完成（2026-09-04）** | 见 §3.9①（`s3adm usage [bucket] [--rescan]`，另有 `quota`/`tenant` 命令组） | — | — |
 
-### 6.3 构建与分发
+### 6.3 构建与分发 **已完成（2026-09-05，五项全部；[deployment.md](deployment.md)）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| **`--version` / 版本号** | `project()` 无 VERSION、二进制无版本输出、无 git commit 嵌入——现场无法确认在跑哪个构建 | 中 | 极低 |
-| CMake install target | `install()` 零命中，`cmake --install` 不可用；是打包的前置 | 中-高 | 低 |
-| CPack deb/rpm | 现分发 = clone + 全套构建依赖；install.sh 已手工实现的 user/unit/conffile 逻辑可迁给 deb 钩子 | 中-高 | 中 |
-| Dockerfile + compose | 零容器化（而 run_mint.sh 自己都依赖 docker）。compose 一箭双雕：上手 demo + 让 redis/tikv/rados 三条**长期被 SKIP 的 e2e 路径**真正跑起来 | 高 | 低-中 |
-| uninstall/回滚脚本 | install.sh 原子替换但不保留上一版 | 低-中 | 极低 |
+| ~~**`--version` / 版本号**~~ | **已完成**：`project(VERSION 0.1.0)`；git commit 构建时由 `cmake/GenerateVersion.cmake` 嵌入（`-dirty` 标记，无 `.git` 可 `-DLIGHTS3_GIT_COMMIT=`）；`lights3 --version` / `s3adm --version` 打印版本 + commit + 构建类型 + 编译进来的驱动/后端；启动日志首行与 `lights3_build_info` 指标同源 | 中 | 极低 |
+| ~~CMake install target~~ | **已完成**：`cmake/Packaging.cmake`——二进制、`lights3ctl`、安装时按 prefix 渲染的 unit（含 `ExecReload`）、样例配置（已存在则保留）、setup helper、监控资产、文档；ctest `install_tree` 每次校验 | 中-高 | 低 |
+| ~~CPack deb/rpm~~ | **已完成**：DEB（shlibdeps、conffile、postinst/prerm/postrm）+ RPM 规则（`%config(noreplace)`、scriptlets；本机无 rpmbuild 未验证）；user/unit/conffile 逻辑收敛到 `packaging/lights3-setup.sh`，install.sh 与 deb/rpm 共用 | 中-高 | 中 |
+| ~~Dockerfile + compose~~ | **已完成**：三阶段 Dockerfile（builder / runtime 非 root / e2e）；compose 默认 localfs demo + `redis` / `tikv` / `rados` profile + `e2e` profile 一次跑完三条 SKIP 路径；`run_e2e.sh` 新增 `LIGHTS3_TEST_REDIS_URI` 外部实例口（本机验证）；本机 docker daemon 不可达，镜像构建未验证 | 高 | 低-中 |
+| ~~uninstall/回滚脚本~~ | **已完成**：install.sh 升级前用新二进制 `--check-config`，旧二进制留 `*.prev`；`scripts/rollback.sh` 三步 rename 换回并重启；`scripts/uninstall.sh [--purge]` | 低-中 | 极低 |
 
 ## 7. 明确不建议近期做的事
 
@@ -485,7 +485,7 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 2. ~~配置校验缺口簇（§1.2）+ stall guard 误杀（§1.4）+ 延迟桶上界（§1.5）~~ **已完成（2026-08-27）**
 3. ~~`X-Amz-Security-Token` 显式 501（§1.3）~~ **已完成（2026-08-27）**
 4. ~~文档漂移三件套：README website、gaps.md 断链归档恢复、cli.md 笔误（§1.6）~~ **已完成（2026-08-27）**
-5. `--version`、`--check-config` 极低成本小项（ListParts encoding-type 已随 §2.5 完成，2026-08-28）
+5. ~~`--version`、`--check-config` 极低成本小项~~ **已完成（`--check-config` 2026-09-05 随 §6.2，`--version` 2026-09-05 随 §6.3；ListParts encoding-type 已随 §2.5 完成，2026-08-28）**
 
 ### P1 — 近期（高价值 / 低-中难度）
 
@@ -496,7 +496,7 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 5. ~~cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3，含熔断/deadline/异步 acquire/凭证链）~~ **已完成（2026-08-28）**
 6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；~~DuoGcStats 接指标（§3.7）~~ **已完成（早于 2026-09，gaps §6.1 时接线）**；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**
 7. ~~fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）~~ **已完成（2026-09-05，六个 harness）**
-8. Dockerfile + compose（§6.3）
+8. ~~Dockerfile + compose（§6.3）~~ **已完成（2026-09-05）**
 9. 性能基线入库（§4.3；前置 bench --json）
 
 ### P2 — 中期（需设计，一个方向一个迭代）
@@ -510,7 +510,7 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）
 8. ~~tiered 扫描增量化 + prefix 策略（§3.6）~~ **已完成（2026-09-02，含全部七项）**
 9. ~~故障注入体系 + soak（§6.1）~~ **已完成（2026-09-05）**；~~traceparent 透传（§5.4）~~ **已完成（2026-09-05）**
-10. install target + CPack（§6.3）；~~审计日志（§3.9④）~~ **已完成（2026-09-04）**
+10. ~~install target + CPack（§6.3）~~ **已完成（2026-09-05）**；~~审计日志（§3.9④）~~ **已完成（2026-09-04）**
 
 ### P3 — 长期 / 架构级（先想清目标场景再动）
 

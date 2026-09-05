@@ -27,6 +27,8 @@
 
 ```text
 lights3 [--config=<path>]                                  启动服务
+lights3 --version                                          版本 / git commit / 编译进来的驱动与后端
+lights3 --check-config [--config=<path>]                   只校验配置（§2.1）
 lights3 duostore dump <backend> <file> [--config=<path>]   导出 duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   导入 duostore meta
 lights3 duostore gc <backend> [--config=<path>]            立即跑一轮 duostore GC
@@ -41,6 +43,7 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 | 选项 | 适用 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | 全部 | `config/lights3.yaml` | YAML 配置文件（格式见 [architecture.md §5](architecture.md#5-配置文件示例)） |
+| `--version` | 根命令（`s3adm` 同） | — | 打印 `lights3 <ver> (git <commit>, <build type>, <date>)` + `drivers:` / `features:` 两行后退出 0；优先于 `--check-config`（roadmap §6.3，[deployment.md §1](deployment.md)） |
 | `--backend=<name>` | `duostore *`、`tier *`、`fsck` | — | 后端名，等价于第一个位置参数 |
 | `--file=<path>` | `duostore dump|load` | — | dump 文件路径，等价于第二个位置参数 |
 | `--max-mbps=<n>` | `fsck` | `0` | 读限速（MB/s），`0` 不限速 |

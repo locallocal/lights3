@@ -63,6 +63,17 @@ export LIGHTS3_SECRET_1=my-secret
 ./build/lights3 -c /etc/lights3/lights3.yaml
 ```
 
+**`--check-config`**（roadmap §6.2）：只做配置解析与校验的 dry-run——不打开后端、
+不绑端口。走与启动完全相同的 `Config::load` 校验，再核对 `http.driver` 与每个
+`backends[].type` 是否编进了本二进制，然后打印配置解析出的摘要（驱动/监听/TLS、
+线程数、凭证数、后端列表、路由规则数、网站条目数、日志与审计设置）。退出码
+`0` = 此文件能启动（运行期失败如数据目录不可写除外），`1` = 被拒，错误信息与
+启动时的 `fatal:` 同源。部署脚本在 reload/重启前先跑它：
+
+```bash
+./build/lights3 --check-config --config=/etc/lights3/lights3.yaml && systemctl reload lights3
+```
+
 ### 2.2 `duostore dump` / `duostore load`
 
 DuoStore 的逻辑 meta 备份与恢复（流格式与不变量见
@@ -270,6 +281,7 @@ s3adm bench list-buckets  ListBuckets（不需要 --bucket）
 | `--prefix=<p>` | `s3adm-bench/` | 键前缀 |
 | `--max-keys=<n>` | 100 | 仅 `list` |
 | `--keep` | false | 结束后保留对象（默认删除整池） |
+| `-o, --output=text\|json` | `text` | `json`：stdout 只输出一个 JSON 对象（mode、wall_s、workers、keys、size、ops、errors、ops_per_s、mib_per_s、latency_ms{avg,p50,p90,p99,max}），每秒表格与准备/清理提示改到 stderr——`scripts/bench_gate.sh` 的基线比对输入（roadmap §6.2） |
 
 首个错误打印到 stderr（`s3adm: bench: first error: …`），其余只计入 err
 计数；准备阶段（建桶/预上传）失败直接以 `1` 退出。
@@ -379,6 +391,47 @@ s3adm reload
 
 ```bash
 s3adm reload --endpoint=https://s3.example.com
+```
+
+### 3.10 `object` —— 对象内部布局（roadmap §6.2）
+
+`GET /-/admin/objects/<bucket>/<key>`（root 专属）的 CLI 包装：打印对象在路由到的
+后端里的物理布局，排障不再靠读日志或 hexdump。
+
+```text
+s3adm object inspect <bucket> <key> [-o|--output=json|text]
+```
+
+各引擎报告的内容：
+
+| 引擎 | attrs | extents |
+| --- | --- | --- |
+| localfs / xlocalfs | `data_path`、`inode`、`on_disk_bytes` vs `logical_size`、`etag`、`content_type`、`last_modified`、`meta_xattr`（present/absent）、`sidecar`、`tier`（stub 时附 `remote_etag`/`remote_at`） | 一个 `file`（id = inode） |
+| duostore | `meta_version`、`tier`、`extents` 数、`stored_bytes` 等 | 每个 extent 的 `kind`（chunk/pack/rados）、`id`（文件/对象号）、`offset`、`length`、`crc32c` |
+| tiered | 分层视图 `tier`/`local_bytes`/`local_mtime`（+ `remote_*`）与 `local_engine`，再以 `local.` 前缀附本地引擎的全部 attrs | 本地引擎的 extents |
+| memory / cloudproxy | `layout: null` + `note` | — |
+
+```bash
+s3adm object inspect photos 2026/01/a.jpg              # 服务端 JSON 原样
+s3adm object inspect photos 2026/01/a.jpg -o text      # 表格
+```
+
+### 3.11 `mpu` —— 僵尸 multipart 清理（roadmap §6.2）
+
+走标准 S3 API（ListMultipartUploads / AbortMultipartUpload），任何对桶有权限的
+凭证都能用，不涉及 admin 面。`list` 翻完所有分页，每个上传一行（发起时间、
+年龄、uploadId、key）；`--older-than`/`--prefix` 决定选集，`abort --all` 对同一
+选集动手。
+
+```text
+s3adm mpu list <bucket> [--prefix=<p>] [--older-than=<dur>] [-o text|json]
+s3adm mpu abort <bucket> <key> <upload-id>
+s3adm mpu abort <bucket> --all [--prefix=<p>] [--older-than=<dur>]
+```
+
+```bash
+s3adm mpu list photos --older-than=1d
+s3adm mpu abort photos --all --older-than=7d          # 已消失的（404）按完成计
 ```
 
 ## 4. 新增子命令的约定

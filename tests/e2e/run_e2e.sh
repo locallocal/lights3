@@ -302,6 +302,15 @@ s3curl() {  # s3curl <curl args...> -- with SigV4 signing
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" "$@"
 }
 
+# ---------- roadmap §6.2: lights3 --check-config (dry run, no backend opened) ----------
+check "lights3 --check-config accepts the running config" "0" \
+    "$("$BIN" --check-config --config="$WORK/config.yaml" > "$WORK/check-config.out" 2>&1; echo $?)"
+check "check-config prints the resolved summary" "0" "$(grep -q '^config .*: ok$' "$WORK/check-config.out" && grep -q '^  backends ' "$WORK/check-config.out"; echo $?)"
+sed 's/^  default_backend: tierdata$/  default_backend: ghost/' "$WORK/config.yaml" > "$WORK/config-bad.yaml"
+check "lights3 --check-config rejects a broken config with exit 1" "1" \
+    "$("$BIN" --check-config --config="$WORK/config-bad.yaml" >/dev/null 2>&1; echo $?)"
+check "check-config leaves no data directories behind" "0" "$([[ ! -e "$WORK/check-config-data" ]]; echo $?)"
+
 # ---------- Test cases ----------
 check "healthz (no auth)" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/healthz")"
 check "unsigned request rejected" "403" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/mybucket")"
@@ -714,6 +723,37 @@ if [[ -x "$S3ADM" ]]; then
     [[ $FSCK_RC -ne 0 ]] && echo "$FSCK_OUT"
     check "s3adm fsck reports zero mismatches" "0" "$(echo "$FSCK_OUT" | grep -q ' 0 mismatches, 0 errors'; echo $?)"
     check "s3adm bench get runs error-free" "0" "$(adm bench get --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K 2>&1 | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
+    # roadmap §6.2: machine-readable bench summary (stdout is exactly one JSON object)
+    BENCH_JSON=$(adm bench put --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K --output=json 2>/dev/null)
+    check "s3adm bench --output=json is a JSON object with the summary fields" "0" \
+        "$(echo "$BENCH_JSON" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j["mode"]=="put" and j["errors"]==0 and j["ops"]>0 and j["ops_per_s"]>0 and "p99" in j["latency_ms"]' 2>/dev/null; echo $?)"
+    # roadmap §6.2: object layout introspection through the admin endpoint
+    s3curl -o /dev/null -X PUT --data-binary 'layout me' "$BASE/admbench/dir/layout.txt"
+    INSPECT=$(adm object inspect admbench dir/layout.txt 2>&1)
+    if [[ "$BACKEND" == "cloudproxy" ]]; then
+        # cloudproxy exposes no internal layout by design: the routing is still reported
+        check "s3adm object inspect reports the routed backend and no layout (cloudproxy)" "0" \
+            "$(echo "$INSPECT" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j["bucket"]=="admbench" and j["key"]=="dir/layout.txt" and j["backend"]=="tierdata" and j["layout"] is None and j["note"]' 2>/dev/null; echo $?)"
+        check "s3adm object inspect --output=text says (none)" "0" "$(adm object inspect admbench dir/layout.txt --output=text | grep -q '^layout   (none)'; echo $?)"
+    else
+        check "s3adm object inspect returns the routed backend and a layout" "0" \
+            "$(echo "$INSPECT" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j["bucket"]=="admbench" and j["key"]=="dir/layout.txt" and j["backend"]=="tierdata" and j["layout"] is not None and j["layout"]["engine"] and isinstance(j["layout"]["extents"], list)' 2>/dev/null; echo $?)"
+        check "s3adm object inspect --output=text prints the engine" "0" "$(adm object inspect admbench dir/layout.txt --output=text | grep -q '^engine   '; echo $?)"
+    fi
+    check "s3adm object inspect on a missing key fails" "1" "$(adm object inspect admbench nope >/dev/null 2>&1; echo $?)"
+    check "object inspect denied for non-root" "403" \
+        "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" -o /dev/null -w '%{http_code}' "$BASE/-/admin/objects/admbench/dir/layout.txt")"
+    s3curl -o /dev/null -X DELETE "$BASE/admbench/dir/layout.txt"
+    # roadmap §6.2: zombie multipart uploads listed and aborted through s3adm
+    s3curl -o /dev/null -X POST "$BASE/admbench/zombie-1?uploads"
+    s3curl -o /dev/null -X POST "$BASE/admbench/zombie-2?uploads"
+    check "s3adm mpu list shows both uploads" "2" "$(adm mpu list admbench | grep -c 'zombie-')"
+    check "s3adm mpu list --output=json" "2" "$(adm mpu list admbench --output=json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["uploads"]))')"
+    check "s3adm mpu list --older-than filters out fresh uploads" "0" "$(adm mpu list admbench --older-than=1h | grep -c 'zombie-')"
+    Z1=$(adm mpu list admbench --output=json | python3 -c 'import json,sys; u=[x for x in json.load(sys.stdin)["uploads"] if x["key"]=="zombie-1"][0]; print(u["upload_id"])')
+    check "s3adm mpu abort one upload" "0" "$(adm mpu abort admbench zombie-1 "$Z1" >/dev/null 2>&1; echo $?)"
+    check "s3adm mpu abort --all clears the rest" "1 of 1 upload(s) aborted" "$(adm mpu abort admbench --all | tail -1)"
+    check "s3adm mpu list empty after abort" "0 upload(s)" "$(adm mpu list admbench | tail -1)"
     s3curl -o /dev/null -X DELETE "$BASE/admbench"
 fi
 

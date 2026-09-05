@@ -1,6 +1,7 @@
 #include "storage/localfs/localfs_backend.h"
 
 #include "core/fault.h"
+#include "core/util/time.h"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -564,6 +565,43 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
         defer_sidecar(std::move(dest), meta);
     g.ok = true;
     co_return PutResult{meta.etag};
+}
+
+Task<std::optional<ObjectLayout>> LocalFsBackend::inspect_object(std::string_view bucket,
+                                                                 std::string_view key) {
+    require_bucket(bucket);
+    co_await pool_->schedule();
+    fs::path path = object_path(bucket, key);
+    struct stat st {};
+    if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist.",
+                      std::string(key));
+    fsutil::TierInfo tier;
+    ObjectMeta meta = fsutil::load_object_meta(path, std::string(key), &tier);
+    ObjectLayout L;
+    L.engine = engine_name();
+    auto& a = L.attrs;
+    a.emplace_back("data_path", path.string());
+    a.emplace_back("inode", std::to_string(st.st_ino));
+    a.emplace_back("on_disk_bytes", std::to_string(st.st_size));
+    a.emplace_back("logical_size", std::to_string(meta.size));
+    a.emplace_back("etag", meta.etag);
+    a.emplace_back("content_type", meta.content_type);
+    a.emplace_back("last_modified", util::iso8601(meta.last_modified));
+    a.emplace_back("meta_xattr", fsutil::has_meta_xattr(path) ? "present" : "absent");
+    a.emplace_back("sidecar", fs::exists(fs::path(path.string() + fsutil::kSidecarSuffix))
+                                  ? "present"
+                                  : "absent");
+    a.emplace_back("tier", tier.tier == fsutil::Tier::kLocal    ? "local"
+                           : tier.tier == fsutil::Tier::kRemote ? "remote"
+                                                                : "cached");
+    if (tier.tier != fsutil::Tier::kLocal) {
+        a.emplace_back("remote_etag", tier.remote_etag);
+        a.emplace_back("remote_at", tier.remote_at);
+    }
+    L.extents.push_back({"file", static_cast<uint64_t>(st.st_ino), 0,
+                         static_cast<uint64_t>(st.st_size), 0});
+    co_return L;
 }
 
 Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::string_view key) {

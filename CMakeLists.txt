@@ -321,6 +321,7 @@ add_library(lights3_core STATIC
   src/storage/metered_backend.cc
   src/s3/handlers/admin_credentials.cc
   src/s3/handlers/admin_tenants.cc
+  src/s3/handlers/admin_objects.cc
   src/s3/handlers/bucket_quota.cc
   src/s3/handlers/quota_gate.cc
   src/s3/handlers/bucket_website.cc
@@ -487,7 +488,8 @@ add_executable(s3adm src/tools/s3adm.cc src/tools/s3adm_common.cc
                      src/tools/s3adm_cred.cc src/tools/s3adm_bench.cc
                      src/tools/s3adm_website.cc src/tools/s3adm_fsck.cc
                      src/tools/s3adm_tenant.cc src/tools/s3adm_quota.cc
-                     src/tools/s3adm_usage.cc src/tools/s3adm_reload.cc)
+                     src/tools/s3adm_usage.cc src/tools/s3adm_reload.cc
+                     src/tools/s3adm_object.cc src/tools/s3adm_mpu.cc)
 target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(s3adm SYSTEM PRIVATE third_party)
@@ -517,6 +519,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_access_log.cc
     tests/unit/test_trace.cc
     tests/unit/test_fault.cc
+    tests/unit/test_admin_inspect.cc
     tests/unit/test_http_drivers.cc
     tests/unit/test_admission.cc
   )

@@ -133,6 +133,10 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
+    // Data path, on-disk vs. logical size, metadata source (xattr / sidecar), tier
+    // sidecar fields; one "file" extent (roadmap §6.2)
+    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket,
+                                                     std::string_view key) override;
     // Same-backend copy fast path (docs/archive/gaps.md §6.3): copy_file_range moves data in the
     // kernel (an O(1) clone on reflink-capable filesystems), bypassing user-space buffers.
     // Tier stubs (data not local) return nullopt to fall back to the streaming path
@@ -207,6 +211,7 @@ public:
     }
 
 protected:
+    virtual const char* engine_name() const { return "localfs"; }
     std::filesystem::path bucket_dir(std::string_view bucket) const;
     std::filesystem::path object_path(std::string_view bucket, std::string_view key) const;
     void require_bucket(std::string_view bucket) const;      // throws NoSuchBucket if missing

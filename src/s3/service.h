@@ -290,6 +290,9 @@ private:
                                                std::string& access_key);
     // handlers/admin_tenants.cc (docs/multi-tenancy.md §6): /-/admin/tenants,
     // /-/admin/usage — root, or a tenant admin scoped to its own tenant
+    // GET /-/admin/objects/<bucket>/<key>: object layout for operators (roadmap §6.2)
+    Task<http::HttpResponse> admin_object_inspect(http::HttpRequest& req, std::string& access_key,
+                                                  const RequestContext& ctx);
     Task<http::HttpResponse> admin_tenancy(http::HttpRequest& req, std::string& access_key,
                                            const RequestContext& ctx);
     // handlers/admin_tenants.cc: POST /-/admin/config/reload (root only)

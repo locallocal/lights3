@@ -107,6 +107,10 @@ Task<PutResult> MeteredBackend::put_object(std::string_view bucket, std::string_
 Task<ObjectMeta> MeteredBackend::head_object(std::string_view bucket, std::string_view key) {
     co_return co_await timed("head_object", inner_->head_object(bucket, key));
 }
+Task<std::optional<ObjectLayout>> MeteredBackend::inspect_object(std::string_view bucket,
+                                                                 std::string_view key) {
+    co_return co_await timed("inspect_object", inner_->inspect_object(bucket, key));
+}
 Task<std::optional<PutResult>> MeteredBackend::copy_object_fast(std::string_view src_bucket,
                                                                 std::string_view src_key,
                                                                 std::string_view dst_bucket,

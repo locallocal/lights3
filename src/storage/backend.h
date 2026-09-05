@@ -124,6 +124,24 @@ struct ObjectStream {
     std::optional<ByteRange> range;          // the effective range (suffix resolved / clamped)
 };
 
+// Object layout for operators (roadmap §6.2, `s3adm object inspect` via
+// GET /-/admin/objects/<bucket>/<key>): where the bytes live inside the engine.
+// attrs are engine-specific key/values in display order; extents are the physical
+// pieces (a file, pack/chunk records, rados objects). Engines without an internal
+// layout worth showing (memory, cloudproxy) answer nullopt
+struct ObjectLayout {
+    std::string engine;  // "localfs" "xlocalfs" "duostore" "tiered"
+    std::vector<std::pair<std::string, std::string>> attrs;
+    struct Extent {
+        std::string kind;  // "file" | "chunk" | "pack" | "rados"
+        uint64_t id = 0;   // inode / chunk or pack file id / rados object id
+        uint64_t offset = 0;
+        uint64_t length = 0;
+        uint32_t crc32c = 0;  // 0 = engine keeps no per-extent checksum
+    };
+    std::vector<Extent> extents;
+};
+
 struct PutResult {
     std::string etag;
     // Filled by complete_multipart when a composite checksum was computed from the
@@ -347,6 +365,12 @@ struct IStorageBackend {
     virtual Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
                                                            const ListUploadsOptions& opt) = 0;
 
+    // Operator introspection (roadmap §6.2): nullopt = this engine exposes no layout.
+    // Missing bucket/key throw NoSuchBucket/NoSuchKey like head_object
+    virtual Task<std::optional<ObjectLayout>> inspect_object(std::string_view /*bucket*/,
+                                                             std::string_view /*key*/) {
+        co_return std::nullopt;
+    }
     virtual Task<void> close() { co_return; }
     virtual ~IStorageBackend() = default;
 };

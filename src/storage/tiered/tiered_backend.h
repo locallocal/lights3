@@ -146,6 +146,10 @@ public:
                                http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
+    // Tier state + local bytes from the local side, followed by the local engine's own
+    // layout (roadmap §6.2 `s3adm object inspect`)
+    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket,
+                                                     std::string_view key) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<void> set_object_tagging(std::string_view bucket, std::string_view key,
                                   std::string tagging) override;

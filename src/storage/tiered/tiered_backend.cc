@@ -630,6 +630,36 @@ Task<PutResult> TieredBackend::put_object(std::string_view bucket, std::string_v
     co_return r;
 }
 
+Task<std::optional<ObjectLayout>> TieredBackend::inspect_object(std::string_view bucket,
+                                                                std::string_view key) {
+    validate_bucket_name(bucket, kAllowReserved);
+    // The local engine raises NoSuchBucket/NoSuchKey and hops to the pool; its layout
+    // is appended under local.* after the tiering view
+    auto inner = co_await local_->backend().inspect_object(bucket, key);
+    auto lo = local_->read(bucket, key);
+    ObjectLayout L;
+    L.engine = "tiered";
+    auto& a = L.attrs;
+    if (lo) {
+        a.emplace_back("tier", lo->tier.tier == Tier::kLocal    ? "local"
+                               : lo->tier.tier == Tier::kRemote ? "remote"
+                                                                : "cached");
+        a.emplace_back("logical_size", std::to_string(lo->meta.size));
+        a.emplace_back("local_bytes", std::to_string(lo->local_bytes));
+        a.emplace_back("local_mtime", std::to_string(lo->mtime));
+        if (lo->tier.tier != Tier::kLocal) {
+            a.emplace_back("remote_etag", lo->tier.remote_etag);
+            a.emplace_back("remote_at", lo->tier.remote_at);
+        }
+    }
+    if (inner) {
+        a.emplace_back("local_engine", inner->engine);
+        for (auto& [k, v] : inner->attrs) a.emplace_back("local." + k, v);
+        L.extents = std::move(inner->extents);
+    }
+    co_return L;
+}
+
 Task<ObjectMeta> TieredBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_bucket_name(bucket, kAllowReserved);
     // The stub's metadata is complete, so HEAD finishes entirely locally (§6.1)

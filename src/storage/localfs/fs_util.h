@@ -166,6 +166,8 @@ bool set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta,
 // Missing / not a regular file throws NoSuchKey.
 ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key,
                             TierInfo* tier_out = nullptr);
+// Whether the data file carries the metadata xattr (operator introspection, roadmap §6.2)
+bool has_meta_xattr(const std::filesystem::path& data_path);
 
 // Same as above, but reuses a stat result the caller already holds. GET must use **fstat
 // on the already-open fd**: a second stat on the path after a concurrent overwrite would

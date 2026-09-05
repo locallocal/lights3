@@ -1,5 +1,7 @@
 #include "storage/duostore/duostore_backend.h"
 
+#include "core/util/time.h"
+
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -1376,6 +1378,42 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
         ticket.clock.reset();  // ownership handed to the reader
     }
     co_return out;
+}
+
+Task<std::optional<ObjectLayout>> DuoStoreBackend::inspect_object(std::string_view bucket,
+                                                                  std::string_view key) {
+    validate_object_key(key);
+    co_await pool_->schedule();
+    auto rec = meta_->get_object(bucket, key);  // authoritative: bypasses the cache on purpose
+    if (!rec) {
+        require_bucket(bucket);
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
+                      std::string(key));
+    }
+    ObjectLayout L;
+    L.engine = "duostore";
+    auto& a = L.attrs;
+    a.emplace_back("logical_size", std::to_string(rec->meta.size));
+    a.emplace_back("etag", rec->meta.etag);
+    a.emplace_back("content_type", rec->meta.content_type);
+    a.emplace_back("last_modified", util::iso8601(rec->meta.last_modified));
+    a.emplace_back("meta_version", std::to_string(rec->version));
+    a.emplace_back("tier", rec->tier.tier == TierState::kLocal    ? "local"
+                           : rec->tier.tier == TierState::kRemote ? "remote"
+                                                                  : "cached");
+    if (rec->tier.tier != TierState::kLocal) {
+        a.emplace_back("remote_etag", rec->tier.remote_etag);
+        a.emplace_back("remote_at", rec->tier.remote_at);
+    }
+    a.emplace_back("extents", std::to_string(rec->data.extents.size()));
+    a.emplace_back("stored_bytes", std::to_string(rec->data.total()));
+    for (auto& e : rec->data.extents) {
+        const char* kind = e.kind == Extent::Kind::kChunk  ? "chunk"
+                           : e.kind == Extent::Kind::kPack ? "pack"
+                                                           : "rados";
+        L.extents.push_back({kind, e.file_id, e.offset, e.length, e.crc32c});
+    }
+    co_return L;
 }
 
 Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::string_view key) {

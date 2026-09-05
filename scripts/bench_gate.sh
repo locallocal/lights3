@@ -75,17 +75,17 @@ done
 [[ -z "$PORT" ]] && { echo "gateway did not report its port"; cat "$WORK/server.log"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
 
-# summary line: "ops N ok, M err   X ops/s   Y MiB/s" / "latency ms: avg A   p50 ~B   p90 ~C   p99 ~D   max E"
+# `s3adm bench --output=json` (roadmap §6.2) is the parsing contract: one JSON object on stdout
 run_mode() {  # run_mode <put|get> <min-ops>
-    local mode=$1 min=$2 out ok err ops p99
+    local mode=$1 min=$2 out parsed ok err ops p99
     out=$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" bench "$mode" --bucket=benchgate \
-            --concurrency="$CONC" --duration-sec="$DURATION" --size="$SIZE" --objects=64 \
-            --endpoint="$BASE" --region="$REGION" 2>&1) || { echo "s3adm bench $mode failed:"; echo "$out"; return 1; }
-    ok=$(echo "$out" | sed -n 's/^ops \([0-9]*\) ok, \([0-9]*\) err.*/\1/p' | tail -1)
-    err=$(echo "$out" | sed -n 's/^ops \([0-9]*\) ok, \([0-9]*\) err.*/\2/p' | tail -1)
-    ops=$(echo "$out" | sed -n 's/^ops .* err *\([0-9.]*\) ops\/s.*/\1/p' | tail -1)
-    p99=$(echo "$out" | sed -n 's/.*p99 ~\([0-9.]*\).*/\1/p' | tail -1)
-    [[ -z "$ok" || -z "$ops" ]] && { echo "could not parse bench summary:"; echo "$out"; return 1; }
+            --concurrency="$CONC" --duration-sec="$DURATION" --size="$SIZE" --objects=64 --output=json \
+            --endpoint="$BASE" --region="$REGION" 2>"$WORK/bench-$mode.err") || { echo "s3adm bench $mode failed:"; cat "$WORK/bench-$mode.err"; echo "$out"; return 1; }
+    parsed=$(echo "$out" | python3 -c '
+import json, sys
+j = json.load(sys.stdin)
+print(j["ops"], j["errors"], j["ops_per_s"], j.get("latency_ms", {}).get("p99", ""))' 2>/dev/null) || { echo "could not parse bench JSON:"; echo "$out"; return 1; }
+    read -r ok err ops p99 <<< "$parsed"
     printf "bench %-3s: %s ok, %s err, %s ops/s, p99 %s ms (floor %s ops/s, ceiling %s ms)\n" \
         "$mode" "$ok" "$err" "$ops" "${p99:-?}" "$min" "$MAX_P99"
     local rc=0

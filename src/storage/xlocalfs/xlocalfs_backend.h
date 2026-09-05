@@ -15,6 +15,8 @@
 namespace lights3::storage {
 
 class XLocalFsBackend final : public LocalFsBackend {
+    const char* engine_name() const override { return "xlocalfs"; }
+
 public:
     XLocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
                     std::shared_ptr<ThreadPool> pool, UringOptions uring_opt = {},

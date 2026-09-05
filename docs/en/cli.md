@@ -75,6 +75,20 @@ export LIGHTS3_SECRET_1=my-secret
 ./build/lights3 -c /etc/lights3/lights3.yaml
 ```
 
+**`--check-config`** (roadmap §6.2): a dry run that only parses and validates the
+configuration — no backend is opened, no port bound. It runs the exact
+`Config::load` validation the server runs, then checks that `http.driver` and
+every `backends[].type` are compiled into this binary, and prints the resolved
+summary (driver/listener/TLS, threads, credential count, backends, routing
+rules, website entries, log and audit settings). Exit `0` = the file would
+start (runtime failures such as an unwritable data directory excepted), `1` =
+rejected, with the same message the server prints as `fatal:`. Run it from
+deployment scripts before a reload/restart:
+
+```bash
+./build/lights3 --check-config --config=/etc/lights3/lights3.yaml && systemctl reload lights3
+```
+
 ### 2.2 `duostore dump` / `duostore load`
 
 Logical meta backup/restore for DuoStore (stream format and invariants:
@@ -310,6 +324,7 @@ s3adm bench list-buckets  ListBuckets (no --bucket needed)
 | `--prefix=<p>` | `s3adm-bench/` | key prefix |
 | `--max-keys=<n>` | 100 | `list` only |
 | `--keep` | false | keep the objects instead of deleting the pool at the end |
+| `-o, --output=text\|json` | `text` | `json`: stdout carries exactly one JSON object (mode, wall_s, workers, keys, size, ops, errors, ops_per_s, mib_per_s, latency_ms{avg,p50,p90,p99,max}); the per-second table and the prepare/cleanup notes move to stderr — the baseline-comparison input of `scripts/bench_gate.sh` (roadmap §6.2) |
 
 The first error is printed to stderr (`s3adm: bench: first error: …`); later
 ones only increment the err counter. A failure in the prepare phase (bucket
@@ -428,6 +443,49 @@ s3adm reload
 
 ```bash
 s3adm reload --endpoint=https://s3.example.com
+```
+
+### 3.10 `object` — object internal layout (roadmap §6.2)
+
+CLI wrapper of `GET /-/admin/objects/<bucket>/<key>` (root only): prints where the
+object's bytes live inside the backend it routes to, so troubleshooting no longer
+means reading logs or hexdumps.
+
+```text
+s3adm object inspect <bucket> <key> [-o|--output=json|text]
+```
+
+What each engine reports:
+
+| Engine | attrs | extents |
+| --- | --- | --- |
+| localfs / xlocalfs | `data_path`, `inode`, `on_disk_bytes` vs `logical_size`, `etag`, `content_type`, `last_modified`, `meta_xattr` (present/absent), `sidecar`, `tier` (plus `remote_etag`/`remote_at` for a stub) | one `file` (id = inode) |
+| duostore | `meta_version`, `tier`, extent count, `stored_bytes`, … | per extent: `kind` (chunk/pack/rados), `id` (file/object number), `offset`, `length`, `crc32c` |
+| tiered | the tiering view `tier`/`local_bytes`/`local_mtime` (+ `remote_*`) and `local_engine`, then every attr of the local engine under the `local.` prefix | the local engine's extents |
+| memory / cloudproxy | `layout: null` + `note` | — |
+
+```bash
+s3adm object inspect photos 2026/01/a.jpg              # the server's JSON verbatim
+s3adm object inspect photos 2026/01/a.jpg -o text      # table
+```
+
+### 3.11 `mpu` — zombie multipart cleanup (roadmap §6.2)
+
+Over the standard S3 API (ListMultipartUploads / AbortMultipartUpload): any
+credential allowed on the bucket works, no admin plane involved. `list` walks
+every page and prints one line per upload (initiated, age, uploadId, key);
+`--older-than` / `--prefix` define the selection and `abort --all` acts on the
+same selection.
+
+```text
+s3adm mpu list <bucket> [--prefix=<p>] [--older-than=<dur>] [-o text|json]
+s3adm mpu abort <bucket> <key> <upload-id>
+s3adm mpu abort <bucket> --all [--prefix=<p>] [--older-than=<dur>]
+```
+
+```bash
+s3adm mpu list photos --older-than=1d
+s3adm mpu abort photos --all --older-than=7d          # an already-gone upload (404) counts as done
 ```
 
 ## 4. Conventions for adding subcommands

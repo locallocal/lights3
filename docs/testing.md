@@ -61,10 +61,13 @@ clang，`-DLIGHTS3_FUZZ_LIBFUZZER=ON`，默认叠 ASan）链接 libFuzzer 真正
 
 ```bash
 ./build.sh --fuzz -B build-fuzz
-build-fuzz/fuzz_xml tests/fuzz/corpus/xml -max_total_time=600
+mkdir -p build-fuzz/corpus-xml
+build-fuzz/fuzz_xml build-fuzz/corpus-xml tests/fuzz/corpus/xml -max_total_time=600
 ```
 
-发现的崩溃输入放回 `corpus/<target>/` 即成为永久回归。libFuzzer 模式要求整棵树能
+libFuzzer 把新发现的有趣输入写进**第一个**语料目录：把工作目录放在 build-fuzz
+下，`tests/fuzz/corpus/<target>/` 只放手写种子；发现的崩溃输入挑出来放回种子目录
+即成为永久回归。libFuzzer 模式要求整棵树能
 用 clang 编译——为此把 `YamlNode` 的特殊成员移到类外（递归的 `pair<string,
 YamlNode>` 成员在类内 default 时 clang 会以不完整类型实例化）并修了一处窄化；
 clang 21 + ASan 下核心库、六个 harness、unit_tests 全部编过，unit_tests 484 项通过。

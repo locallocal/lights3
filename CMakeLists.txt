@@ -558,7 +558,8 @@ if(LIGHTS3_BUILD_TESTS)
   # per parser reachable without authentication. Default = standalone binaries
   # replaying tests/fuzz/corpus/<name>/ (a crash-regression gate under any
   # compiler / sanitizer); LIGHTS3_FUZZ_LIBFUZZER=ON (clang) links libFuzzer and
-  # the same sources become real fuzzers: build-fuzz/fuzz_xml tests/fuzz/corpus/xml
+  # the same sources become real fuzzers (first directory = libFuzzer's working
+  # corpus, keep it out of the tree): build-fuzz/fuzz_xml build-fuzz/corpus-xml tests/fuzz/corpus/xml
   set(LIGHTS3_FUZZ_TARGETS xml uri http_parse sigv4 aws_chunked)
   if(LIGHTS3_DUOSTORE)
     list(APPEND LIGHTS3_FUZZ_TARGETS duostore_codec)

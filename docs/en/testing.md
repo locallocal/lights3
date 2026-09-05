@@ -71,11 +71,14 @@ really mutates:
 
 ```bash
 ./build.sh --fuzz -B build-fuzz
-build-fuzz/fuzz_xml tests/fuzz/corpus/xml -max_total_time=600
+mkdir -p build-fuzz/corpus-xml
+build-fuzz/fuzz_xml build-fuzz/corpus-xml tests/fuzz/corpus/xml -max_total_time=600
 ```
 
-A crashing input dropped back into `corpus/<target>/` becomes a permanent
-regression. libFuzzer mode needs the whole tree to compile with clang — for
+libFuzzer writes newly interesting inputs into the **first** corpus directory:
+keep that working directory under build-fuzz and leave
+`tests/fuzz/corpus/<target>/` to hand-written seeds; a crashing input picked
+out and dropped into the seed directory becomes a permanent regression. libFuzzer mode needs the whole tree to compile with clang — for
 that `YamlNode`'s special members moved out of line (clang instantiates them
 with the recursive `pair<string, YamlNode>` member still incomplete when they
 are defaulted in-class) and one narrowing was fixed; under clang 21 + ASan the

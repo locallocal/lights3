@@ -27,6 +27,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [s3-protocol.md](s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证（含 presigned 与时钟偏移）、Multipart Upload、错误码映射、mint 兼容集 |
 | [credential-management.md](credential-management.md) | 凭证管理：AK/SK 生成/查询/吊销 API、三来源模型（静态 root / 文件 / 动态）、`.sys` 持久化；二期：SK at-rest 加密、凭证文件热加载、多实例同步、per-credential policy |
 | [multi-tenancy.md](multi-tenancy.md) | 用量统计、桶/租户配额、租户实体与桶归属、分级管理面、审计日志（roadmap §3.9 全链） |
+| [testing.md](testing.md) | 测试体系：ctest 矩阵与标签、website/s3adm/故障注入 e2e、fuzz harness、故障注入门面、性能门禁与 soak、mint、ubsan/coverage、一键矩阵脚本（roadmap §6.1） |
 | [monitoring.md](monitoring.md) | 监控消费侧：`deploy/` 下的 Prometheus 抓取配置与告警/recording 规则、Grafana dashboard 及其生成器、资产对账测试（roadmap §5.5，零 C++） |
 | [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
 | [tiered-storage.md](tiered-storage.md) | 分层存储：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |

@@ -1,5 +1,7 @@
 #include "storage/duostore/fs_data_store.h"
 
+#include "core/fault.h"
+
 #include <fcntl.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -532,6 +534,10 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(
         bool dirty = false;
         auto sync_slot = [&] {
             if (!dirty) return;
+            if (int fe = fault::check("duostore.pack.fdatasync")) {  // roadmap §6.1
+                errno = fe;
+                throw_errno("fdatasync pack");
+            }
             if (::fdatasync(slot->fd) != 0) throw_errno("fdatasync pack");
             dirty = false;
         };
@@ -580,6 +586,10 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(
         rec.append(reinterpret_cast<const char*>(item.payload.data()), item.payload.size());
         size_t off = 0;
         while (off < rec.size()) {
+            if (int fe = fault::check("duostore.pack.pwrite")) {  // roadmap §6.1
+                errno = fe;
+                throw_errno("pwrite pack record");
+            }
             ssize_t w = ::pwrite(slot->fd, rec.data() + off, rec.size() - off,
                                  off_t(slot->size + off));
             if (w < 0) throw_errno("pwrite pack record");

@@ -27,6 +27,7 @@ option(LIGHTS3_DUOSTORE_SQLITE_META "Build the SQLite-backed IMetaStore for duos
 option(LIGHTS3_DUOSTORE_RADOS_DATA "Build the Ceph/RADOS-backed IDataStore for duostore (system librados, docs/duostore-rados-data.md)" OFF)
 option(LIGHTS3_DUOSTORE_TIKV_META "Build the TiKV-backed IMetaStore for duostore (client-c submodule, docs/duostore-tikv-meta.md)" OFF)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
+option(LIGHTS3_FUZZ_LIBFUZZER "Link the fuzz harnesses against libFuzzer (clang, -fsanitize=fuzzer); off = standalone corpus replay (docs/testing.md §3)" OFF)
 
 if(LIGHTS3_DUOSTORE)
   # RocksDB trimming presets (docs/duostore-backend.md §13.3, modeled on the gflags/seastar template)
@@ -294,6 +295,7 @@ add_library(lights3_core STATIC
   src/core/config.cc
   src/core/log.cc
   src/core/trace.cc
+  src/core/fault.cc
   src/core/metrics.cc
   src/core/util/crypto.cc
   src/core/util/checksum.cc
@@ -514,6 +516,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_api_metrics.cc
     tests/unit/test_access_log.cc
     tests/unit/test_trace.cc
+    tests/unit/test_fault.cc
     tests/unit/test_http_drivers.cc
     tests/unit/test_admission.cc
   )
@@ -550,6 +553,50 @@ if(LIGHTS3_BUILD_TESTS)
     target_include_directories(unit_tests SYSTEM PRIVATE third_party)
   endif()
   add_test(NAME unit_tests COMMAND unit_tests)
+
+  # Fuzz harnesses (roadmap §6.1, docs/testing.md §3): one LLVMFuzzerTestOneInput
+  # per parser reachable without authentication. Default = standalone binaries
+  # replaying tests/fuzz/corpus/<name>/ (a crash-regression gate under any
+  # compiler / sanitizer); LIGHTS3_FUZZ_LIBFUZZER=ON (clang) links libFuzzer and
+  # the same sources become real fuzzers (first directory = libFuzzer's working
+  # corpus, keep it out of the tree): build-fuzz/fuzz_xml build-fuzz/corpus-xml tests/fuzz/corpus/xml
+  set(LIGHTS3_FUZZ_TARGETS xml uri http_parse sigv4 aws_chunked)
+  if(LIGHTS3_DUOSTORE)
+    list(APPEND LIGHTS3_FUZZ_TARGETS duostore_codec)
+  endif()
+  foreach(fz IN LISTS LIGHTS3_FUZZ_TARGETS)
+    add_executable(fuzz_${fz} tests/fuzz/fuzz_${fz}.cc)
+    target_link_libraries(fuzz_${fz} PRIVATE lights3_core)
+    target_include_directories(fuzz_${fz} PRIVATE tests)
+    if(LIGHTS3_FUZZ_LIBFUZZER)
+      target_compile_options(fuzz_${fz} PRIVATE -fsanitize=fuzzer)
+      target_link_options(fuzz_${fz} PRIVATE -fsanitize=fuzzer)
+    else()
+      target_sources(fuzz_${fz} PRIVATE tests/fuzz/fuzz_driver.cc)
+      add_test(NAME fuzz_regression_${fz}
+               COMMAND fuzz_${fz} ${CMAKE_SOURCE_DIR}/tests/fuzz/corpus/${fz})
+      set_tests_properties(fuzz_regression_${fz} PROPERTIES LABELS fuzz)
+    endif()
+  endforeach()
+
+  # MinIO mint compatibility suite (roadmap §6.1): needs docker; SKIP (77) without
+  # it. The s3cmd + awscli subset is the regression gate (docs/testing.md §6)
+  add_test(NAME mint
+           COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_mint.sh $<TARGET_FILE:lights3> s3cmd awscli)
+  set_tests_properties(mint PROPERTIES SKIP_RETURN_CODE 77 LABELS mint TIMEOUT 3600)
+
+  # Performance gate + short soak (roadmap §6.1, docs/testing.md §5): s3adm bench
+  # against a memory-backend gateway with throughput / latency floors, and a
+  # 30-second soak asserting RSS / fd stability. Both labeled so `ctest -LE perf`
+  # skips them on a loaded box
+  if(LIGHTS3_DRIVER_BUILTIN)
+    add_test(NAME bench_gate
+             COMMAND ${CMAKE_SOURCE_DIR}/scripts/bench_gate.sh $<TARGET_FILE:lights3> $<TARGET_FILE:s3adm> --duration 3)
+    set_tests_properties(bench_gate PROPERTIES LABELS perf TIMEOUT 300)
+    add_test(NAME soak_smoke
+             COMMAND ${CMAKE_SOURCE_DIR}/scripts/soak.sh $<TARGET_FILE:lights3> $<TARGET_FILE:s3adm> --seconds 30)
+    set_tests_properties(soak_smoke PROPERTIES LABELS "perf;soak" TIMEOUT 900)
+  endif()
 
   # e2e parameterized by driver: the same set of real S3 flow cases runs against every compiled driver
   if(LIGHTS3_DRIVER_BUILTIN)

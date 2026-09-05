@@ -105,7 +105,7 @@ TEST(duostore_extent_run_roundtrip) {
     // single run; adjacent extents of different kinds do not merge
     std::vector<Extent> rados;
     for (uint64_t i = 0; i < 4; ++i)
-        rados.push_back({Extent::Kind::kRados, 500 + i, 0, i == 3 ? 100 : 8192, uint32_t(i)});
+        rados.push_back({Extent::Kind::kRados, 500 + i, 0, uint64_t(i == 3 ? 100 : 8192), uint32_t(i)});
     CHECK_EQ(codec::encode_extents(rados).size(), size_t(4 + 37 + 4 * 4));
     CHECK(codec::decode_extents(codec::encode_extents(rados)) == rados);
     std::vector<Extent> cross = {chunk_extent(600, 8192, 1),

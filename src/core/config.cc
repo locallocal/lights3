@@ -109,7 +109,7 @@ public:
     explicit Parser(std::vector<Line> lines) : lines_(std::move(lines)) {}
 
     YamlNode parse() {
-        if (lines_.empty()) return YamlNode{YamlNode::Type::Map, {}, {}, {}};
+        if (lines_.empty()) return YamlNode(YamlNode::Type::Map);
         YamlNode root = parse_block(lines_[0].indent, 0);
         // A line with mismatched indentation makes every block loop exit instead of
         // consuming it; without this check it is silently dropped (a lost optional
@@ -164,7 +164,7 @@ private:
                                           parse_block(lines_[i_].indent, depth + 1));
                 } else {
                     node.map.emplace_back(std::move(key),
-                                          YamlNode{YamlNode::Type::Map, {}, {}, {}});
+                                          YamlNode(YamlNode::Type::Map));
                 }
             }
         }
@@ -187,6 +187,13 @@ std::string YamlNode::get(const std::string& key, const std::string& def) const 
     auto* n = find(key);
     return (n && n->type == Type::Scalar) ? n->scalar : def;
 }
+
+YamlNode::YamlNode() = default;
+YamlNode::~YamlNode() = default;
+YamlNode::YamlNode(const YamlNode&) = default;
+YamlNode::YamlNode(YamlNode&&) noexcept = default;
+YamlNode& YamlNode::operator=(const YamlNode&) = default;
+YamlNode& YamlNode::operator=(YamlNode&&) noexcept = default;
 
 YamlNode yaml_parse(const std::string& text) { return Parser(to_lines(text)).parse(); }
 

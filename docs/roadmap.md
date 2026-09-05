@@ -428,18 +428,18 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 注：本项目已明确不使用 GitHub Actions CI，回归全靠脚本手工触发；下面的
 "自动化"均指本地脚本/ctest 层面。
 
-### 6.1 测试缺口
+### 6.1 测试缺口 **已完成（2026-09-05，八项全部；[testing.md](testing.md)）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| **mint 挂进 ctest** | `run_mint.sh` 已写好（无 docker 自动 SKIP），但 CMake 无对应 `add_test`——"写完了没挂上门禁"。以 `s3cmd awscli` 子集起步并记录基线通过率 | 高 | 低 |
-| **website e2e 零覆盖** | `run_e2e.sh` 中 website 零命中；匿名可读开关这种安全敏感面完全无回归保护（同 §2.3 单测项） | 高 | 低 |
-| `s3adm` 零测试 | e2e 全用 curl 手工签名，s3adm 的自签客户端与服务端是两份实现、无交叉验证；替换部分 e2e 步骤为 s3adm 调用即可一石二鸟 | 中-高 | 低 |
-| fuzz | 零 fuzz 目标；高价值面全是无认证可触达的解析器：SigV4/aws-chunked、XML、URI、builtin HTTP 解析、duostore codec。asan 基建已有，libFuzzer harness 每个 20 行 | 高 | 低-中 |
-| 故障注入体系化 | 真崩溃注入只在 duostore 单测内；磁盘满/EIO/redis 断连/rados 超时/TiKV region error 无系统性注入（依赖树里已有 libfiu 可用） | 高 | 中 |
-| 压力/长稳 | 无带阈值断言的性能回归、无数小时 soak（内存增长/fd 泄漏/pack 空间放大/GC 收敛都是长时间才暴露的） | 高 | 中 |
-| coverage / ubsan | build.sh 有 asan/tsan，无 `--coverage`、无 ubsan（几乎零成本） | 中 | 极低 |
-| 一键矩阵脚本 | 6 个构建目录 × 14 个 e2e 变体靠人记得轮转；加 `scripts/check-all.sh` 串起增量构建 + ctest 矩阵 | 中 | 低 |
+| ~~**mint 挂进 ctest**~~ | ctest `mint`（`s3cmd awscli`，`SKIP_RETURN_CODE 77`），跑完打印每套件 PASS/FAIL 基线；本机 docker 不可达，基线待有权限机器记录一次 | 高 | 低 |
+| ~~**website e2e 零覆盖**~~ | `run_e2e.sh` 新增 26 条 website 断言（静态 + `?website` 动态、匿名面各种拒绝、error/index/301/302、指标）；顺带抓到并修掉 httplib 驱动把空 body 的 ≥400（HEAD 404 / 流式错误页）改写成 405 的 bug | 高 | 低 |
+| ~~`s3adm` 零测试~~ | e2e 交叉验证：s3adm 铸凭证 curl 能签、吊销后 403；website set/get/delete 两端互读；bench/fsck 零错误 | 中-高 | 低 |
+| ~~fuzz~~ | 6 个 harness（xml/uri/http_parse/sigv4/aws_chunked/duostore_codec）+ 语料；默认构建回放语料作 ctest 回归门槛，`build.sh --fuzz` 走 clang libFuzzer | 高 | 低-中 |
+| ~~故障注入体系化~~ | `core/fault.h` 门面（`LIGHTS3_FAULTS` / 程序化）+ 8 个注入点（localfs write/rename/fsync、xlocalfs write、duostore pack pwrite/fdatasync、redis command、rados submit）；单测 + e2e 全栈验证；libfiu 只在 client-c 子模块里，未作全仓依赖 | 高 | 中 |
+| ~~压力/长稳~~ | `scripts/bench_gate.sh`（吞吐下限/p99 上限）+ `scripts/soak.sh`（RSS/fd/multipart/GC 收敛断言）；ctest `bench_gate`（3s）/`soak_smoke`（30s）。门禁首日抓到 s3adm 客户端缺 TCP_NODELAY 的 40ms Nagle 停顿，已修 | 高 | 中 |
+| ~~coverage / ubsan~~ | `build.sh --ubsan` / `--coverage`；`scripts/coverage.sh`（gcovr/lcov/原始 gcov 三级回退） | 中 | 极低 |
+| ~~一键矩阵脚本~~ | `scripts/check-all.sh`：存在的构建目录逐个增量构建 + `ctest -LE`，sanitizer 目录带 halt_on_error，汇总表 | 中 | 低 |
 
 ### 6.2 s3adm / 运维命令扩展
 
@@ -490,12 +490,12 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 ### P1 — 近期（高价值 / 低-中难度）
 
 1. ~~Grafana dashboard + Prometheus 告警规则（§5.5，零 C++）~~ **已完成（2026-09-05）**
-2. mint 挂 ctest + website e2e/单测 + s3adm 进 e2e（§6.1）
+2. ~~mint 挂 ctest + website e2e/单测 + s3adm 进 e2e（§6.1）~~ **已完成（2026-09-05）**
 3. ~~API×后端分维指标 + 后端耗时（§5.1）~~ **已完成（2026-09-05）**；~~异步日志 + 慢日志（§5.2）~~ **已完成（2026-09-05）**
 4. ~~CORS + OPTIONS 预检（§2.1）；网站 302 补斜杠（§2.3）~~ **已完成（2026-08-28，§2.3 全项一并）**
 5. ~~cloudproxy 协程化退避 + 连接池回收 + Retry-After（§3.3，含熔断/deadline/异步 acquire/凭证链）~~ **已完成（2026-08-28）**
 6. ~~后台任务 CLI 化（§3.2）~~ **已完成（2026-08-28）**；~~DuoGcStats 接指标（§3.7）~~ **已完成（早于 2026-09，gaps §6.1 时接线）**；~~xattr 降级 gauge（§3.5）~~ **已完成（2026-09-01）**
-7. fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）
+7. ~~fuzz 起步（XML/SigV4/URI 三个 harness）+ ubsan/coverage（§6.1）~~ **已完成（2026-09-05，六个 harness）**
 8. Dockerfile + compose（§6.3）
 9. 性能基线入库（§4.3；前置 bench --json）
 
@@ -509,7 +509,7 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 6. ~~Lifecycle 最小子集（MPU 自动清理）+ Object Tagging（§2.4/§2.5）~~ **已完成（2026-08-28）**
 7. ~~localfs listing 优化（§3.5）~~ **已完成（2026-09-01）**；元数据缓存层（§3.8）
 8. ~~tiered 扫描增量化 + prefix 策略（§3.6）~~ **已完成（2026-09-02，含全部七项）**
-9. 故障注入体系 + soak（§6.1）；~~traceparent 透传（§5.4）~~ **已完成（2026-09-05）**
+9. ~~故障注入体系 + soak（§6.1）~~ **已完成（2026-09-05）**；~~traceparent 透传（§5.4）~~ **已完成（2026-09-05）**
 10. install target + CPack（§6.3）；~~审计日志（§3.9④）~~ **已完成（2026-09-04）**
 
 ### P3 — 长期 / 架构级（先想清目标场景再动）

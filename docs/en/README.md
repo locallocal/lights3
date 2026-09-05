@@ -36,6 +36,7 @@ the inside. The design emphasizes three points:
 | [s3-protocol.md](s3-protocol.md) | S3 protocol: API scope, SigV4 (incl. presigned & clock skew), Multipart Upload, error mapping, mint compatibility gate |
 | [credential-management.md](credential-management.md) | Credential management: AK/SK generate/query/revoke API, three credential sources (static root / file / dynamic), `.sys` persistence; phase 2: at-rest SK encryption, hot-reloaded credentials file, multi-instance sync, per-credential policy |
 | [multi-tenancy.md](multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenant entities and bucket ownership, tiered admin plane, audit log (the whole roadmap §3.9 chain) |
+| [testing.md](testing.md) | Testing: the ctest matrix and labels, website/s3adm/fault-injection e2e, fuzz harnesses, the fault-injection facade, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script (roadmap §6.1) |
 | [monitoring.md](monitoring.md) | Monitoring consumers: the Prometheus scrape config and alert/recording rules under `deploy/`, the Grafana dashboard and its generator, the asset-reconciliation test (roadmap §5.5, zero C++) |
 | [object-read-write-flow.md](object-read-write-flow.md) | Object read/write flow: the three-layer code path, BodyReader chains, atomic staging commit, fd-snapshot reads |
 | [tiered-storage.md](tiered-storage.md) | Tiered storage: cold data sinking to public cloud, stub metadata, transparent read-back and cache refill |

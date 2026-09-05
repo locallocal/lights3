@@ -93,15 +93,21 @@ The seastar driver is off by default (heavy dependencies); enable with
 (DuoStore meta engines), `--tikv` (needs system gRPC/Poco, lazily pulls the
 client-c submodule), `--rados` (needs librados, or `-DLIGHTS3_RADOS_ROOT`).
 These CMake options are sticky in the build cache — combine with `--clean`
-or a separate `-B build-x` directory to switch them off. Sanitizer builds:
-`./build.sh --asan` / `--tsan`.
+or a separate `-B build-x` directory to switch them off. Sanitizer / analysis
+builds: `./build.sh --asan` / `--tsan` / `--ubsan` / `--coverage` / `--fuzz`
+(libFuzzer, clang). `scripts/check-all.sh` runs the incremental build + ctest
+matrix over every build directory present; `scripts/coverage.sh` reports line
+coverage; `scripts/bench_gate.sh` and `scripts/soak.sh` are the performance
+gate and the long-stability run — see [docs/en/testing.md](docs/en/testing.md).
 
-The MinIO mint compatibility suite is a manual gate (not wired into ctest;
-needs docker and skips cleanly without it — see
-[docs/en/s3-protocol.md](docs/en/s3-protocol.md) §8):
+ctest also carries the fuzz corpus replays (`fuzz_regression_*`), the
+monitoring-asset check, a 3-second bench gate and a 30-second soak (labels
+`perf`/`soak`), and the MinIO mint compatibility suite (`s3cmd awscli` subset;
+needs docker and reports SKIP without it):
 
 ```bash
-tests/e2e/run_mint.sh build/lights3 s3cmd awscli
+ctest --test-dir build -LE "perf|mint"      # the quick set
+ctest --test-dir build -R mint -V           # mint, on a machine with docker
 ```
 
 ## Run

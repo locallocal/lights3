@@ -1,5 +1,7 @@
 #include "storage/localfs/localfs_backend.h"
 
+#include "core/fault.h"
+
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -361,6 +363,10 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
         const char* p = reinterpret_cast<const char*>(buf);
         size_t left = n;
         while (left > 0) {
+            if (int fe = fault::check("localfs.write")) {  // roadmap §6.1
+                errno = fe;
+                throw_errno("write staging tmp");
+            }
             ssize_t w = ::write(tmp.fd, p, left);
             if (w < 0) throw_errno("write staging tmp");
             p += w;
@@ -1109,6 +1115,10 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
         const char* p = reinterpret_cast<const char*>(buf);
         size_t left = n;
         while (left > 0) {
+            if (int fe = fault::check("localfs.write")) {  // roadmap §6.1
+                errno = fe;
+                throw_errno("write part tmp");
+            }
             ssize_t w = ::write(tmp.fd, p, left);
             if (w < 0) throw_errno("write part tmp");
             p += w;
@@ -1207,8 +1217,10 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
             const char* p = buf.data();
             size_t left = static_cast<size_t>(n);
             while (left > 0) {
-                ssize_t w = ::write(tmp.fd, p, left);
+                int fe = fault::check("localfs.write");  // roadmap §6.1
+                ssize_t w = fe ? -1 : ::write(tmp.fd, p, left);
                 if (w < 0) {
+                    if (fe) errno = fe;
                     ::close(in);
                     throw_errno("write complete tmp");
                 }

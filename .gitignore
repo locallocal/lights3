@@ -9,3 +9,5 @@ build-sqlite
 Testing
 .claude/
 build-seastar
+__pycache__/
+*.pyc

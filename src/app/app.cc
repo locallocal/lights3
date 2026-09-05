@@ -8,6 +8,7 @@
 #include <sstream>
 #include <thread>
 
+#include "core/fault.h"
 #include "core/log.h"
 #include "http/admission.h"
 #include "s3/errors.h"
@@ -36,6 +37,9 @@ void on_signal(int sig) {
 Application::Application(const std::string& config_path)
     : config_path_(config_path), cfg_(Config::load(config_path)) {
     Logger::init(cfg_.log);
+    // Fault injection (roadmap §6.1): LIGHTS3_FAULTS arms named IO failure points
+    fault::arm_from_env();
+    if (auto d = fault::describe(); !d.empty()) LOG_WARN("fault injection armed: {}", d);
 }
 
 Application::~Application() { shutdown(); }

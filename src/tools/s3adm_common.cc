@@ -101,6 +101,10 @@ SignedClient::SignedClient(const ConnOpts& conn)
     cli_.set_read_timeout(t);
     cli_.set_write_timeout(t);
     cli_.set_keep_alive(true);
+    // Small PUTs stalled ~40ms each without this (Nagle on the client's header +
+    // body writes vs. the server's delayed ACK); the bench gate (roadmap §6.1,
+    // scripts/bench_gate.sh) is what caught it. cloudproxy's pool does the same
+    cli_.set_tcp_nodelay(true);
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
     if (ep_.https) cli_.enable_server_certificate_verification(!conn.insecure);
 #endif

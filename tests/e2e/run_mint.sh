@@ -15,9 +15,10 @@ set -u
 BIN="${1:?usage: run_mint.sh <path-to-lights3-binary> [mint tests...]}"
 shift || true
 
+# 77 = ctest SKIP_RETURN_CODE (CMakeLists.txt): the test shows as "Not Run" rather than passed
 if ! docker info >/dev/null 2>&1; then
     echo "[SKIP] mint: docker not available (daemon unreachable or no permission)"
-    exit 0
+    exit 77
 fi
 
 AK=MINTACCESSKEY
@@ -77,5 +78,23 @@ docker run --rm --network host \
     -v "$WORK/mint-log:/mint/log" \
     minio/mint "$@"
 RC=$?
+# Baseline bookkeeping (docs/testing.md §6): mint's log.json lists one line per
+# test with a status; summarize pass/fail per suite so a run leaves a number behind
+if [[ -f "$WORK/mint-log/log.json" ]]; then
+    echo "--- mint baseline ($(date -u +%Y-%m-%dT%H:%M:%SZ)) ---"
+    python3 - "$WORK/mint-log/log.json" <<'PY' 2>/dev/null || true
+import json, sys, collections
+c = collections.defaultdict(lambda: collections.Counter())
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line: continue
+    try: j = json.loads(line)
+    except ValueError: continue
+    c[j.get("name", "?")][j.get("status", "?")] += 1
+for name, st in sorted(c.items()):
+    total = sum(st.values())
+    print(f"{name:12s} PASS {st.get('PASS', 0):4d} / {total:4d}   FAIL {st.get('FAIL', 0)}   NA {st.get('NA', 0)}")
+PY
+fi
 [[ $RC -ne 0 ]] && { echo "--- mint log ---"; cat "$WORK/mint-log"/*.log 2>/dev/null; }
 exit $RC

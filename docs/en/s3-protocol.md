@@ -308,7 +308,9 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
    regression gate — `tests/e2e/run_mint.sh` has landed (starts lights3 + a
    `minio/mint` container against each other; explicit SKIP when docker is
    unavailable). mint requires docker daemon privileges and usually cannot run on
-   local dev machines; it is positioned as a manual gate for CI/privileged
+   local dev machines; since roadmap §6.1 it is registered as ctest `mint`
+   (Not Run without docker) and prints a per-suite PASS/FAIL baseline
+   ([testing.md §6](testing.md)); it is positioned as a gate for CI/privileged
    environments. The full suite includes explicitly unsupported APIs such as
    versioning/tagging, so starting with the `s3cmd` and `awscli` subsets is
    recommended (`run_mint.sh <bin> s3cmd awscli`).

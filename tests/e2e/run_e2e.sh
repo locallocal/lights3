@@ -274,6 +274,10 @@ else cat <<PLAIN
     staging: $WORK/staging
 PLAIN
 fi)
+website:
+  - bucket: e2esite
+    index_suffix: index.html
+    error_key: error.html
 buckets:
   default_backend: tierdata
 log:
@@ -629,6 +633,90 @@ check "static credential SK not returned via admin" "0" \
     "$(s3curl "$BASE/-/admin/credentials/$AK?show-secret=true" | grep -q '"secret_key"' && echo 1 || echo 0)"
 s3curl -o /dev/null -X DELETE "$BASE/credbkt/keep/a"
 
+# ---------- roadmap §6.1: static website hosting e2e (docs/static-website.md) ----------
+# The static entry e2esite comes from config.yaml; the anonymous plane is the
+# security-sensitive face: reads of listed buckets only, never listing / writes /
+# other buckets; the index/error documents and the object-level 301 all through
+# real HTTP with no signature material
+check "website: owner creates bucket" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/e2esite")"
+s3curl -o /dev/null -X PUT --data-binary '<h1>home</h1>' -H 'Content-Type: text/html' "$BASE/e2esite/index.html"
+s3curl -o /dev/null -X PUT --data-binary '<h1>docs</h1>' -H 'Content-Type: text/html' "$BASE/e2esite/docs/index.html"
+s3curl -o /dev/null -X PUT --data-binary '<h1>custom 404</h1>' -H 'Content-Type: text/html' "$BASE/e2esite/error.html"
+s3curl -o /dev/null -X PUT --data-binary 'moved' -H 'x-amz-website-redirect-location: /index.html' "$BASE/e2esite/old"
+check "website: anonymous object read" "<h1>home</h1>" "$(curl -s "$BASE/e2esite/index.html")"
+check "website: anonymous read keeps Content-Type" "text/html" "$(curl -s -o /dev/null -w '%{content_type}' "$BASE/e2esite/index.html")"
+check "website: bucket root serves the index document" "<h1>home</h1>" "$(curl -s "$BASE/e2esite/")"
+check "website: directory key serves its index" "<h1>docs</h1>" "$(curl -s "$BASE/e2esite/docs/")"
+check "website: GET /prefix without slash 302s to /prefix/" "302" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/e2esite/docs")"
+check "website: missing key answers the error document with 404" "404" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/e2esite/nope")"
+check "website: error document body served" "<h1>custom 404</h1>" "$(curl -s "$BASE/e2esite/nope")"
+check "website: x-amz-website-redirect-location -> 301" "301" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/e2esite/old")"
+check "website: 301 Location" "/index.html" "$(curl -s -o /dev/null -w '%{redirect_url}' "$BASE/e2esite/old" | sed "s#^$BASE##")"
+check "website: anonymous listing refused (no ListBucketResult)" "1" \
+    "$(curl -s "$BASE/e2esite?list-type=2" | grep -q '<ListBucketResult'; echo $?)"
+# A query flag on the anonymous plane is refused by the object route's query
+# allowlist (501) before any policy decision -- refused either way, never served
+check "website: anonymous listing refused (non-2xx)" "1" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/e2esite?list-type=2" | grep -q '^2'; echo $?)"
+check "website: anonymous write refused" "403" "$(curl -s -o /dev/null -w '%{http_code}' -X PUT --data-binary x "$BASE/e2esite/evil")"
+check "website: anonymous delete refused" "403" "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/e2esite/index.html")"
+check "website: anonymous read of a non-website bucket refused" "403" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/mybucket/dir/big.bin")"
+check "website: ListMultipartUploads on the anonymous plane refused (non-2xx)" "1" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/e2esite?uploads" | grep -q '^2'; echo $?)"
+check "website: HEAD anonymous" "200" "$(curl -s -o /dev/null -w '%{http_code}' -I "$BASE/e2esite/index.html")"
+check "website: static entry is immutable via the API (405)" "405" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/e2esite?website")"
+# Dynamic ?website entry (root only) through the API, torn down again: the anonymous
+# plane must close the moment the configuration is gone
+s3curl -o /dev/null -X PUT "$BASE/dynsite"
+s3curl -o /dev/null -X PUT --data-binary 'dyn' "$BASE/dynsite/index.html"
+check "website: anonymous read closed before ?website" "403" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/dynsite/index.html")"
+check "website: PutBucketWebsite (root)" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary '<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument></WebsiteConfiguration>' "$BASE/dynsite?website")"
+check "website: PutBucketWebsite denied for non-root" "403" \
+    "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" -o /dev/null -w '%{http_code}' -X PUT --data-binary '<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument></WebsiteConfiguration>' "$BASE/dynsite?website")"
+check "website: anonymous read open after ?website" "dyn" "$(curl -s "$BASE/dynsite/")"
+check "website: GetBucketWebsite" "0" "$(s3curl "$BASE/dynsite?website" | grep -q '<Suffix>index.html</Suffix>'; echo $?)"
+check "website: DeleteBucketWebsite" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/dynsite?website")"
+check "website: anonymous read closed again" "403" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/dynsite/index.html")"
+check "website: metrics count the anonymous plane" "0" \
+    "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_website_events_total{event="anon_read"} [1-9]'; echo $?)"
+for k in index.html docs/index.html error.html old; do s3curl -o /dev/null -X DELETE "$BASE/e2esite/$k"; done
+s3curl -o /dev/null -X DELETE "$BASE/e2esite"
+s3curl -o /dev/null -X DELETE "$BASE/dynsite/index.html"
+s3curl -o /dev/null -X DELETE "$BASE/dynsite"
+
+# ---------- roadmap §6.1: s3adm cross-validation (self-signed client vs. the server's verifier) ----------
+# curl signs with libcurl's SigV4, s3adm with its own implementation: the same
+# flows through both catch a drift in either signer
+S3ADM="$(dirname "$BIN")/s3adm"
+if [[ -x "$S3ADM" ]]; then
+    adm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" "$@" --endpoint="$BASE" --region="$REGION"; }
+    ADM_CRED=$(adm cred create --comment=s3adm-e2e 2>&1)
+    ADM_AK=$(echo "$ADM_CRED" | json_field access_key)
+    check "s3adm cred create returns an AK" "1" "$([[ ${#ADM_AK} -ge 16 ]] && echo 1 || echo 0)"
+    check "s3adm cred list shows it" "0" "$(adm cred list | grep -q "$ADM_AK"; echo $?)"
+    ADM_SK=$(adm cred get "$ADM_AK" --show-secret | json_field secret_key)
+    check "s3adm cred get --show-secret returns the secret" "1" "$([[ -n "$ADM_SK" ]] && echo 1 || echo 0)"
+    check "curl signs with the credential s3adm minted (ListBuckets)" "200" \
+        "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$ADM_AK:$ADM_SK" -o /dev/null -w '%{http_code}' "$BASE/")"
+    check "s3adm cred delete" "0" "$(adm cred delete "$ADM_AK" >/dev/null 2>&1; echo $?)"
+    check "curl rejected with the credential s3adm revoked" "403" \
+        "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$ADM_AK:$ADM_SK" -o /dev/null -w '%{http_code}' "$BASE/")"
+    s3curl -o /dev/null -X PUT "$BASE/admsite"
+    check "s3adm website set" "0" "$(adm website set admsite --index-suffix=index.html --error-key=404.html >/dev/null 2>&1; echo $?)"
+    check "curl reads the configuration s3adm wrote" "0" "$(s3curl "$BASE/admsite?website" | grep -q '<Key>404.html</Key>'; echo $?)"
+    check "s3adm website get" "0" "$(adm website get admsite | grep -q '<Suffix>index.html</Suffix>'; echo $?)"
+    check "s3adm website delete" "0" "$(adm website delete admsite >/dev/null 2>&1; echo $?)"
+    check "s3adm website get after delete exits 1" "1" "$(adm website get admsite >/dev/null 2>&1; echo $?)"
+    s3curl -o /dev/null -X DELETE "$BASE/admsite"
+    BENCH_OUT=$(adm bench put --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K --keep 2>&1)
+    check "s3adm bench put runs error-free" "0" "$(echo "$BENCH_OUT" | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
+    FSCK_OUT=$(adm fsck admbench 2>&1); FSCK_RC=$?
+    check "s3adm fsck verifies the bench objects" "0" "$FSCK_RC"
+    [[ $FSCK_RC -ne 0 ]] && echo "$FSCK_OUT"
+    check "s3adm fsck reports zero mismatches" "0" "$(echo "$FSCK_OUT" | grep -q ' 0 mismatches, 0 errors'; echo $?)"
+    check "s3adm bench get runs error-free" "0" "$(adm bench get --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K 2>&1 | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
+    s3curl -o /dev/null -X DELETE "$BASE/admbench"
+fi
+
 # ---------- roadmap §3.9: usage accounting / quotas / tenants (docs/multi-tenancy.md) ----------
 json_num() {  # json_num <key> -- extract a numeric field from the indented JSON on stdin
     sed -n "s/.*\"$1\": \([0-9]*\).*/\1/p" | head -1
@@ -861,6 +949,47 @@ if [[ -n "$TPORT" ]]; then
 fi
 kill -TERM "$TLS_PID" 2>/dev/null
 wait "$TLS_PID" 2>/dev/null
+
+# ---------- roadmap §6.1: fault injection through the whole stack (docs/testing.md §4) ----------
+# A second instance armed via LIGHTS3_FAULTS: the first staging write fails with
+# EIO -> the PUT answers 500 InternalError, the object does not exist, the retry
+# succeeds, and the backend error shows up on /-/metrics. Only backends with a
+# localfs data path reach the point (memory/cloudproxy do not); duostore's own
+# points are covered by the unit tests
+if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" || "$BACKEND" == "tiered" ]]; then
+    sed -e "s#$WORK/data#$WORK/fault-data#g" -e "s#$WORK/staging#$WORK/fault-staging#g" \
+        -e "s#$WORK/cloud-duo#$WORK/fault-cloud-duo#g" -e "s#$WORK/duo-local#$WORK/fault-duo-local#g" \
+        "$WORK/config.yaml" > "$WORK/config-fault.yaml"
+    LIGHTS3_FAULTS="localfs.write:1:EIO,xlocalfs.write:1:EIO" LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config-fault.yaml" > "$WORK/server-fault.log" 2>&1 &
+    FAULT_PID=$!
+    FPORT=""
+    for _ in $(seq 1 50); do
+        FPORT=$(sed -n 's/.*listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-fault.log" | head -1)
+        [[ -n "$FPORT" ]] && break
+        kill -0 "$FAULT_PID" 2>/dev/null || break
+        sleep 0.1
+    done
+    check "fault instance started with the point armed" "0" "$([[ -n "$FPORT" ]] && grep -q "fault injection armed: localfs.write:1:5, xlocalfs.write:1:5" "$WORK/server-fault.log"; echo $?)"
+    if [[ -n "$FPORT" ]]; then
+        FBASE="http://127.0.0.1:$FPORT"
+        fcurl() { curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" "$@"; }
+        fcurl -o /dev/null -X PUT "$FBASE/fbkt"
+        check "fault: first PUT fails with 500" "500" "$(fcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'first write' "$FBASE/fbkt/k")"
+        check "fault: object does not exist after the failed PUT" "404" "$(fcurl -o /dev/null -w '%{http_code}' -I "$FBASE/fbkt/k")"
+        check "fault: one-shot point clears, retry succeeds" "200" "$(fcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'second write' "$FBASE/fbkt/k")"
+        check "fault: retried object readable" "second write" "$(fcurl "$FBASE/fbkt/k")"
+        check "fault: backend error counted on /-/metrics" "0" \
+            "$(curl -s "$FBASE/-/metrics" | grep -q 'lights3_backend_errors_total{backend="[a-z]*",op="put_object"} 1'; echo $?)"
+        check "fault: exact status series shows the 500" "0" \
+            "$(curl -s "$FBASE/-/metrics" | grep -q 'lights3_responses_by_status_total{status="500"} 1'; echo $?)"
+        fcurl -o /dev/null -X DELETE "$FBASE/fbkt/k"
+        fcurl -o /dev/null -X DELETE "$FBASE/fbkt"
+    else
+        echo "--- server-fault.log ---"; cat "$WORK/server-fault.log"
+    fi
+    kill -TERM "$FAULT_PID" 2>/dev/null
+    wait "$FAULT_PID" 2>/dev/null
+fi
 
 echo
 echo "e2e: $PASS passed, $FAIL failed"

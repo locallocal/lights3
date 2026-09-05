@@ -9,6 +9,8 @@
 
 ## 1. 分期保留（设计入口已定，随需求触发）
 
+实施先后顺序、各项范围与验收见 [backlog-sequence.md](backlog-sequence.md)。
+
 | 条目 | 出处 | 现状与入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
 | STS 会话表多实例共享 | roadmap §2.6 | `AssumeRole` 会话为单实例内存态（`src/s3/auth/credential_store.*`，会话短命）；多网关共享需落到 `.sys` 或 meta 引擎，可复用凭证 `sync_interval` 的同步机制 | 中 | 中 |

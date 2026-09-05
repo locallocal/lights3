@@ -40,6 +40,7 @@ the inside. The design emphasizes three points:
 | [deployment.md](deployment.md) | Build and distribution: `--version` / embedded git commit, the `cmake --install` tree, CPack deb/rpm, Dockerfile + compose (with the redis/tikv/rados e2e profile), rollback and uninstall for `install.sh` upgrades (roadmap §6.3) |
 | [performance-baseline.md](performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the §4.3 data-plane work, how to reproduce (roadmap §4.3) |
 | [backlog.md](backlog.md) | Open items and future plans: designs kept for later, implemented-but-unverified items, findings from the performance baseline, long-term items, the not-planned list; entries are deleted when done |
+| [backlog-sequence.md](backlog-sequence.md) | Implementation order for the ten deferred items of backlog §1: five phases, dependencies, scope / entry points / acceptance / estimate per item, ledger |
 | [monitoring.md](monitoring.md) | Monitoring consumers: the Prometheus scrape config and alert/recording rules under `deploy/`, the Grafana dashboard and its generator, the asset-reconciliation test (roadmap §5.5, zero C++) |
 | [object-read-write-flow.md](object-read-write-flow.md) | Object read/write flow: the three-layer code path, BodyReader chains, atomic staging commit, fd-snapshot reads |
 | [tiered-storage.md](tiered-storage.md) | Tiered storage: cold data sinking to public cloud, stub metadata, transparent read-back and cache refill |

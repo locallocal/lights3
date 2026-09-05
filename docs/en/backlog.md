@@ -13,6 +13,8 @@ here, unlike the roadmap. Each entry carries **value** (high/medium/low) and
 
 ## 1. Kept for a later phase (design entry points settled, triggered by demand)
 
+Implementation order, scope and acceptance per item: [backlog-sequence.md](backlog-sequence.md).
+
 | Item | Source | State and entry point | Value | Difficulty |
 | --- | --- | --- | --- | --- |
 | Multi-instance STS session table | roadmap §2.6 | `AssumeRole` sessions are single-instance in-memory state (`src/s3/auth/credential_store.*`, sessions are short-lived); sharing across gateways means persisting to `.sys` or the meta engine, reusing the credential `sync_interval` mechanism | medium | medium |

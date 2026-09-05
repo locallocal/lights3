@@ -19,6 +19,7 @@
 
 #include "core/config.h"
 #include "core/task.h"
+#include "http/drivers/common.h"
 #include "http/pushpull.h"
 #include "http/server.h"
 #include "unit/mini_test.h"
@@ -54,6 +55,90 @@ public:
 private:
     uint64_t size_;
     uint64_t pos_ = 0;
+};
+
+// File-backed body for the sendfile contract (roadmap §4.3 ④): pread on the
+// calling thread (tests only), remaining range exposed through try_as_file
+std::atomic<uint64_t> g_file_bytes_sent{0};  // bytes moved by a driver's sendfile path
+std::atomic<uint64_t> g_file_bytes_read{0};  // bytes pulled through read()
+
+class FileRangeReader final : public BodyReader {
+public:
+    FileRangeReader(int fd, uint64_t off, uint64_t len) : fd_(fd), off_(off), left_(len), total_(len) {}
+    ~FileRangeReader() override { ::close(fd_); }
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t want = static_cast<size_t>(std::min<uint64_t>(buf.size(), left_));
+        if (want == 0) co_return 0;
+        ssize_t n = ::pread(fd_, buf.data(), want, static_cast<off_t>(off_));
+        if (n <= 0) co_return 0;
+        off_ += static_cast<uint64_t>(n);
+        left_ -= static_cast<uint64_t>(n);
+        co_return static_cast<size_t>(n);
+    }
+    std::optional<uint64_t> length() const override { return total_; }
+    std::optional<FileSpan> try_as_file() override { return FileSpan{fd_, off_, left_}; }
+    void file_bytes_sent(uint64_t n) override {
+        off_ += n;
+        left_ -= n;
+    }
+
+private:
+    int fd_;
+    uint64_t off_, left_, total_;
+};
+
+// Accounting decorator in the shape of L2's CountingBodyReader: forwards the
+// fast path and still sees every byte
+class ForwardingCounter final : public BodyReader {
+public:
+    explicit ForwardingCounter(std::unique_ptr<BodyReader> inner) : inner_(std::move(inner)) {}
+    Task<size_t> read(std::span<std::byte> buf) override {
+        size_t n = co_await inner_->read(buf);
+        g_file_bytes_read += n;
+        co_return n;
+    }
+    std::optional<uint64_t> length() const override { return inner_->length(); }
+    std::optional<FileSpan> try_as_file() override { return inner_->try_as_file(); }
+    void file_bytes_sent(uint64_t n) override {
+        inner_->file_bytes_sent(n);
+        g_file_bytes_sent += n;
+    }
+
+private:
+    std::unique_ptr<BodyReader> inner_;
+};
+
+// A temp file holding make_pattern(bytes); returns an fd (unlinked)
+int pattern_file(uint64_t bytes) {
+    char name[] = "/tmp/lights3-sendfile.XXXXXX";
+    int fd = ::mkstemp(name);
+    CHECK(fd >= 0);
+    ::unlink(name);
+    std::string data(bytes, '\0');
+    for (uint64_t i = 0; i < bytes; ++i) data[i] = static_cast<char>(pattern_byte(i));
+    size_t done = 0;
+    while (done < data.size()) {
+        ssize_t n = ::write(fd, data.data() + done, data.size() - done);
+        CHECK(n > 0);
+        done += static_cast<size_t>(n);
+    }
+    return fd;
+}
+
+// Throws on the k-th read: the prefetch must surface it at the right chunk
+class FailingReader final : public BodyReader {
+public:
+    FailingReader(uint64_t size, int fail_at) : inner_(size), fail_at_(fail_at) {}
+    Task<size_t> read(std::span<std::byte> buf) override {
+        if (++calls_ == fail_at_) throw std::runtime_error("backend read failed");
+        co_return co_await inner_.read(buf);
+    }
+    std::optional<uint64_t> length() const override { return inner_.length(); }
+
+private:
+    PatternReader inner_;
+    int fail_at_;
+    int calls_ = 0;
 };
 
 Task<HttpResponse> consume_and_sum(HttpRequest req, HttpResponse resp) {
@@ -97,6 +182,23 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         uint64_t size = std::stoull(req.query_get("size").value_or("0"));
         resp.stream_body = std::make_unique<PatternReader>(size);
         if (req.path == "/stream") resp.content_length = size;
+        co_return resp;
+    }
+    if (req.path == "/file") {  // file-backed body: sendfile on builtin/plaintext, read() elsewhere
+        uint64_t size = std::stoull(req.query_get("size").value_or("0"));
+        uint64_t off = std::stoull(req.query_get("off").value_or("0"));
+        bool short_file = req.query_has("short");  // file ends halfway through the declared range
+        int fd = pattern_file(off + (short_file ? size / 2 : size));
+        resp.stream_body = std::make_unique<ForwardingCounter>(
+            std::make_unique<FileRangeReader>(fd, off, size));
+        resp.content_length = size;
+        co_return resp;
+    }
+    if (req.path == "/failing") {  // backend error mid-stream, after `at` successful chunks
+        uint64_t size = std::stoull(req.query_get("size").value_or("0"));
+        int at = std::stoi(req.query_get("at").value_or("3"));
+        resp.stream_body = std::make_unique<FailingReader>(size, at);
+        resp.content_length = size;
         co_return resp;
     }
     if (req.path == "/short") {  // backend truncation: declares size but delivers only half
@@ -409,6 +511,153 @@ TEST(http_driver_large_get) {
         CHECK_EQ(r.body.size(), size);
         CHECK(r.body == make_pattern(size));
     });
+}
+
+TEST(http_driver_file_body_sendfile_or_read) {
+    // Every driver serves a file-backed body correctly; builtin/plaintext takes
+    // the sendfile exit (bytes reported through file_bytes_sent), the others
+    // (and TLS / sendfile: false) pull through read() -- the decorator sees the
+    // full byte count either way (roadmap §4.3 ④)
+    const uint64_t size = 3 * 1024 * 1024 + 12345, off = 777;
+    std::string expect = make_pattern(off + size).substr(off);
+    for_each_driver([&](const std::string& d) {
+        TestServer ts(d);
+        g_file_bytes_sent = 0;
+        g_file_bytes_read = 0;
+        Client c(ts.port);
+        c.send_str("GET /file?size=" + std::to_string(size) + "&off=" + std::to_string(off) +
+                   " HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(r.ok);
+        CHECK_EQ(r.status, 200);
+        CHECK_EQ(r.header("Content-Length").value_or(""), std::to_string(size));
+        CHECK(r.body == expect);
+        if (d == "builtin") {
+            CHECK_EQ(g_file_bytes_sent.load(), size);
+            CHECK_EQ(g_file_bytes_read.load(), uint64_t{0});
+        } else {
+            CHECK_EQ(g_file_bytes_sent.load(), uint64_t{0});
+            CHECK_EQ(g_file_bytes_read.load(), size);
+        }
+        // keep-alive survives the fast path: framing was exact
+        c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r2 = c.read_response();
+        CHECK(r2.ok);
+        CHECK_EQ(r2.body, "nobody");
+    });
+    {
+        TestServer ts("builtin", [](HttpConfig& c) { c.sendfile = false; });
+        g_file_bytes_sent = 0;
+        g_file_bytes_read = 0;
+        Client c(ts.port);
+        c.send_str("GET /file?size=100000 HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(r.ok);
+        CHECK(r.body == make_pattern(100000));
+        CHECK_EQ(g_file_bytes_sent.load(), uint64_t{0});
+        CHECK_EQ(g_file_bytes_read.load(), uint64_t{100000});
+    }
+}
+
+TEST(http_driver_file_body_short_file_closes_connection) {
+    // The file ends before the declared length: sendfile reports the shortfall,
+    // the driver disconnects (same contract as a short stream_body)
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        c.send_str("GET /file?size=200000&short=1 HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(!r.ok);
+        c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
+        CHECK(!c.read_response().ok);
+    });
+}
+
+TEST(http_driver_backend_error_mid_stream_closes_connection) {
+    // With one read in flight ahead of the socket (roadmap §4.3 ①) an error on
+    // the k-th chunk must still end in a disconnect, never a silently short
+    // body that looks complete
+    for_each_driver([](const std::string& d) {
+        TestServer ts(d);
+        Client c(ts.port);
+        c.send_str("GET /failing?size=1000000&at=4 HTTP/1.1\r\nHost: t\r\n\r\n");
+        auto r = c.read_response();
+        CHECK(!r.ok);
+    });
+}
+
+TEST(io_buffer_pool_reuses_per_thread) {
+    using lights3::http::driver::IoBuffer;
+    size_t base = IoBuffer::cached_count();
+    std::byte* first;
+    {
+        IoBuffer a(64 * 1024);
+        first = a.data();
+        CHECK_EQ(a.size(), size_t{64 * 1024});
+    }
+    CHECK_EQ(IoBuffer::cached_count(), base + 1);
+    {
+        IoBuffer b(32 * 1024);  // a cached buffer with enough capacity is handed out
+        CHECK(b.data() == first);
+        CHECK_EQ(b.size(), size_t{32 * 1024});  // ...but presents only the requested size
+        CHECK_EQ(b.capacity(), size_t{64 * 1024});
+        CHECK_EQ(b.span().size(), size_t{32 * 1024});
+        CHECK_EQ(IoBuffer::cached_count(), base);
+        IoBuffer c(128 * 1024);  // none large enough: fresh allocation
+        CHECK(c.data() != first);
+    }
+    CHECK_EQ(IoBuffer::cached_count(), base + 2);
+    // Bounded: releasing more than the cap drops the surplus
+    {
+        std::vector<IoBuffer> many;
+        for (size_t i = 0; i < IoBuffer::kPerThreadCap + 4; ++i) many.emplace_back(4096);
+    }
+    CHECK(IoBuffer::cached_count() <= IoBuffer::kPerThreadCap);
+}
+
+TEST(stream_prefetch_delivers_in_order_and_surfaces_errors) {
+    using lights3::http::driver::StreamPrefetch;
+    const uint64_t size = 200000;
+    {
+        PatternReader r(size);
+        StreamPrefetch pf(r, 64 * 1024);
+        std::string got;
+        for (;;) {
+            auto chunk = pf.next_sync();
+            if (chunk.empty()) break;
+            got.append(reinterpret_cast<const char*>(chunk.data()), chunk.size());
+        }
+        CHECK(got == make_pattern(size));
+        CHECK(pf.at_eof());
+        CHECK(pf.next_sync().empty());  // EOF is sticky
+    }
+    {
+        FailingReader r(size, 2);
+        StreamPrefetch pf(r, 64 * 1024);
+        CHECK_EQ(pf.next_sync().size(), size_t{64 * 1024});  // chunk 1 fine, chunk 2 is prefetched and fails
+        bool threw = false;
+        try {
+            pf.next_sync();
+        } catch (const std::runtime_error&) {
+            threw = true;
+        }
+        CHECK(threw);
+    }
+    {
+        // Coroutine collect path
+        PatternReader r(size);
+        auto run = [&]() -> Task<std::string> {
+            StreamPrefetch pf(r, 50000);
+            std::string got;
+            for (;;) {
+                auto chunk = co_await pf.next();
+                if (chunk.empty()) break;
+                got.append(reinterpret_cast<const char*>(chunk.data()), chunk.size());
+            }
+            co_return got;
+        };
+        CHECK(sync_wait(run()) == make_pattern(size));
+    }
 }
 
 TEST(http_driver_chunked_response) {
@@ -989,6 +1238,28 @@ TEST(http_driver_tls_round_trip) {
                 std::string r = c.read_all();
                 CHECK(r.find(expected_sum(1024)) != std::string::npos);
             }
+        } catch (const mini_test::Failure& f) {
+            throw mini_test::Failure("[driver=" + d + "] " + f.what());
+        }
+    }
+}
+
+TEST(http_driver_tls_file_body_falls_back_to_read) {
+    TlsCertFiles certs;
+    for (auto& d : HttpServerFactory::drivers()) {
+        if (d == "seastar") continue;  // seastar::tls is covered by its own build
+        try {
+            TestServer ts(d, certs.cert_path, certs.key_path);
+            g_file_bytes_sent = 0;
+            g_file_bytes_read = 0;
+            TlsClient c(ts.port);
+            c.send_str("GET /file?size=300000 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+            std::string r = c.read_all();
+            auto body_at = r.find("\r\n\r\n");
+            CHECK(body_at != std::string::npos);
+            CHECK(r.substr(body_at + 4) == make_pattern(300000));
+            CHECK_EQ(g_file_bytes_sent.load(), uint64_t{0});
+            CHECK_EQ(g_file_bytes_read.load(), uint64_t{300000});
         } catch (const mini_test::Failure& f) {
             throw mini_test::Failure("[driver=" + d + "] " + f.what());
         }

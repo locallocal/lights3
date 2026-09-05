@@ -7,6 +7,7 @@
 #include <openssl/ssl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -305,9 +306,92 @@ bool spawn_conn_thread(std::function<void()> fn) {
     return true;
 }
 
+// sendfile(2) fast path (roadmap §4.3 ④): a fixed-length plaintext response
+// whose body is exactly one file range goes kernel-side, no user-space copy
+// and no per-chunk pool hop. Returns nullopt when the path does not apply or
+// the very first call is refused (EINVAL/ENOSYS: unsupported fd or filesystem)
+// so the caller falls back to read(); once bytes have moved there is no way
+// back, and a failure closes the connection like any other write error
+std::optional<bool> sendfile_body(Io& io, HttpResponse& resp, bool chunked, bool enabled,
+                                  driver::ConnCounters* counters) {
+    if (!enabled || io.ssl || chunked || !resp.content_length) return std::nullopt;
+    auto fs = resp.stream_body->try_as_file();
+    if (!fs || fs->length != *resp.content_length) return std::nullopt;
+    uint64_t left = fs->length;
+    off_t off = static_cast<off_t>(fs->offset);
+    while (left > 0) {
+        size_t want = static_cast<size_t>(std::min<uint64_t>(left, uint64_t{1} << 30));
+        ssize_t n = ::sendfile(io.fd, fs->fd, &off, want);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (left == fs->length && (errno == EINVAL || errno == ENOSYS)) return std::nullopt;
+            if (Io::timed_out() && counters) driver::count_timeout(*counters, driver::Phase::Write);
+            return false;
+        }
+        if (n == 0) {
+            LOG_ERROR("sendfile: file shorter than declared Content-Length ({} bytes missing)", left);
+            return false;
+        }
+        left -= static_cast<uint64_t>(n);
+        resp.stream_body->file_bytes_sent(static_cast<uint64_t>(n));
+    }
+    return true;
+}
+
+// Streaming body as one coroutine driven by sync_wait_pumping (roadmap §4.3 ⑤):
+// the previous shape did a bare sync_wait per chunk (condvar + two thread
+// hops each; a 1GiB object = 16384 of them). Now the backend read of the next
+// chunk is in flight while the current one is sent (StreamPrefetch), and the
+// continuation comes back to the connection thread through the pump queue --
+// inline when already there. Sends stay on the connection thread: a slow
+// client must never pin a shared pool thread
+Task<bool> stream_body(Io& io, HttpResponse& resp, bool chunked, size_t io_chunk,
+                       PumpExecutor& exec, driver::ConnCounters* counters) {
+    auto send = [&](const char* p, size_t n) {
+        if (io.send_all(p, n)) return true;
+        if (Io::timed_out() && counters) driver::count_timeout(*counters, driver::Phase::Write);
+        return false;
+    };
+    driver::StreamPrefetch pf(*resp.stream_body, io_chunk);
+    uint64_t written = 0;
+    for (;;) {
+        std::span<const std::byte> chunk;
+        try {
+            chunk = co_await pf.next();
+        } catch (const std::exception& e) {
+            LOG_ERROR("stream body read failed mid-response: {}", e.what());
+            co_return false;  // Response head already sent; can only disconnect
+        }
+        co_await resume_on(exec);
+        size_t n = chunk.size();
+        if (n == 0) break;
+        if (!chunked && resp.content_length && written + n > *resp.content_length) {
+            LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})", written, n,
+                      *resp.content_length);
+            co_return false;
+        }
+        if (chunked) {
+            char sz[32];
+            int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
+            if (!send(sz, static_cast<size_t>(m))) co_return false;
+        }
+        if (!send(reinterpret_cast<const char*>(chunk.data()), n)) co_return false;
+        if (chunked && !send("\r\n", 2)) co_return false;
+        written += n;
+    }
+    if (chunked) co_return send("0\r\n\r\n", 5);
+    // A fixed-length response that wrote too little must not stay keep-alive: the client would read the next response head as the rest of this body
+    if (resp.content_length && written != *resp.content_length) {
+        LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
+                  *resp.content_length);
+        co_return false;
+    }
+    co_return true;
+}
+
 bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_alive,
                     size_t io_chunk = driver::kIoChunkBytes,
-                    driver::ConnCounters* counters = nullptr) {
+                    driver::ConnCounters* counters = nullptr, bool sendfile_enabled = true) {
     // A send that fails with EAGAIN hit write_timeout (roadmap §4.2)
     auto send = [&](const char* p, size_t n) {
         if (io.send_all(p, n)) return true;
@@ -322,43 +406,12 @@ bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_ali
 
     if (!resp.stream_body) return send(resp.small_body.data(), resp.small_body.size());
 
+    if (auto r = sendfile_body(io, resp, chunked, sendfile_enabled, counters)) return *r;
+
     // Streaming response: pulled in http.io_chunk_size chunks
-    // (docs/architecture.md request lifecycle). The chunk size is a runtime
-    // setting, so the buffer moved to the heap (a stack array needs a
-    // compile-time size)
-    std::vector<std::byte> buf(io_chunk);
-    uint64_t written = 0;
-    for (;;) {
-        size_t n = 0;
-        try {
-            n = sync_wait(resp.stream_body->read(std::span(buf)));
-        } catch (const std::exception& e) {
-            LOG_ERROR("stream body read failed mid-response: {}", e.what());
-            return false;  // Response head already sent; can only disconnect
-        }
-        if (n == 0) break;
-        if (!chunked && resp.content_length && written + n > *resp.content_length) {
-            LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})", written, n,
-                      *resp.content_length);
-            return false;
-        }
-        if (chunked) {
-            char sz[32];
-            int m = snprintf(sz, sizeof(sz), "%zx\r\n", n);
-            if (!send(sz, static_cast<size_t>(m))) return false;
-        }
-        if (!send(reinterpret_cast<const char*>(buf.data()), n)) return false;
-        if (chunked && !send("\r\n", 2)) return false;
-        written += n;
-    }
-    if (chunked) return send("0\r\n\r\n", 5);
-    // A fixed-length response that wrote too little must not stay keep-alive: the client would read the next response head as the rest of this body
-    if (resp.content_length && written != *resp.content_length) {
-        LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
-                  *resp.content_length);
-        return false;
-    }
-    return true;
+    // (docs/architecture.md request lifecycle), one read ahead of the socket
+    PumpExecutor exec;
+    return sync_wait_pumping(exec, stream_body(io, resp, chunked, io_chunk, exec, counters));
 }
 
 // Handles one request; false means the connection should be closed
@@ -501,7 +554,8 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
         keep_alive = false;
         sh.counters.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!write_response(io, resp, head_request, keep_alive, sh.cfg.io_chunk_size, &sh.counters))
+    if (!write_response(io, resp, head_request, keep_alive, sh.cfg.io_chunk_size, &sh.counters,
+                        sh.cfg.sendfile))
         return false;
     return keep_alive;
 }

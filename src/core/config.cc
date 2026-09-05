@@ -395,6 +395,7 @@ Config Config::from_string(const std::string& text) {
             cfg.http.trailer_max_size = parse_size(v);
         if (auto v = http->get("io_chunk_size"); !v.empty())
             cfg.http.io_chunk_size = parse_size(v);
+        if (auto v = http->get("sendfile"); !v.empty()) cfg.http.sendfile = parse_bool(v);
         if (auto v = http->get("body_queue_cap"); !v.empty())
             cfg.http.body_queue_cap = parse_size(v);
         if (auto v = http->get("shutdown_grace"); !v.empty())

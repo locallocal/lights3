@@ -398,42 +398,51 @@ private:
         }
 
         // Streaming response: httplib's content provider is itself a pull
-        // model, so sync_wait per chunk suffices. Ownership of the reader and
-        // the reused buffer goes to the closure (the response is written out
-        // after this callback returns); the buffer lives with the closure
-        // (docs/archive/gaps.md §4: previously a vector was constructed per 64KiB chunk)
-        std::shared_ptr<BodyReader> body(std::move(resp.stream_body));
-        auto buf = std::make_shared<std::vector<std::byte>>(cfg_.io_chunk_size);
+        // model; the closure owns the reader and a double-buffered prefetch
+        // over it (roadmap §4.3 ①/②: the read of the next chunk is in flight
+        // while httplib writes the current one; pooled buffers). pf is declared
+        // after body so it is destroyed first -- it may still hold a read in
+        // flight when httplib drops the provider on a client disconnect
+        struct Stream {
+            std::unique_ptr<BodyReader> body;
+            driver::StreamPrefetch pf;
+            Stream(std::unique_ptr<BodyReader> b, size_t chunk) : body(std::move(b)), pf(*body, chunk) {}
+        };
+        auto st = std::make_shared<Stream>(std::move(resp.stream_body), cfg_.io_chunk_size);
         if (resp.content_length) {
             rs.set_content_provider(
                 static_cast<size_t>(*resp.content_length), content_type,
-                [body, buf](size_t /*offset*/, size_t length, httplib::DataSink& sink) {
-                    size_t want = std::min<size_t>(length, buf->size());
-                    size_t n = 0;
+                [st](size_t /*offset*/, size_t length, httplib::DataSink& sink) {
+                    std::span<const std::byte> chunk;
                     try {
-                        n = sync_wait(body->read(std::span(buf->data(), want)));
+                        chunk = st->pf.next_sync();
                     } catch (const std::exception& e) {
                         LOG_ERROR("stream body read failed mid-response: {}", e.what());
                         return false;  // Response head already sent; can only disconnect (contract 3)
                     }
-                    if (n == 0) return false;  // EOF before the length is reached counts as an error
-                    return sink.write(reinterpret_cast<const char*>(buf->data()), n);
+                    if (chunk.empty()) return false;  // EOF before the length is reached counts as an error
+                    if (chunk.size() > length) {
+                        LOG_ERROR("stream body overruns declared Content-Length ({} > {} left)",
+                                  chunk.size(), length);
+                        return false;
+                    }
+                    return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
                 });
         } else {
             rs.set_chunked_content_provider(
-                content_type, [body, buf](size_t /*offset*/, httplib::DataSink& sink) {
-                    size_t n = 0;
+                content_type, [st](size_t /*offset*/, httplib::DataSink& sink) {
+                    std::span<const std::byte> chunk;
                     try {
-                        n = sync_wait(body->read(std::span(*buf)));
+                        chunk = st->pf.next_sync();
                     } catch (const std::exception& e) {
                         LOG_ERROR("stream body read failed mid-response: {}", e.what());
                         return false;
                     }
-                    if (n == 0) {
+                    if (chunk.empty()) {
                         sink.done();
                         return true;
                     }
-                    return sink.write(reinterpret_cast<const char*>(buf->data()), n);
+                    return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
                 });
         }
     }

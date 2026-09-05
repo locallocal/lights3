@@ -84,6 +84,13 @@ public:
     // requests count only globally); tracked bucket count is capped, overflow folds into "_other" to prevent label cardinality explosion
     void add_bytes_in(std::string_view bucket, uint64_t n);
     void add_bytes_out(std::string_view bucket, uint64_t n);
+    // Split form for streaming decorators (roadmap §4.3 ⑦): the global totals are
+    // lock-free atomics and can take every chunk; the per-bucket slot sits behind
+    // a mutex and takes one batched delta per stream (or per 16MiB), instead of a
+    // global lock per 64KiB
+    void add_bytes_in_total(uint64_t n) { bytes_in_.fetch_add(n, std::memory_order_relaxed); }
+    void add_bytes_out_total(uint64_t n) { bytes_out_.fetch_add(n, std::memory_order_relaxed); }
+    void add_bucket_bytes(std::string_view bucket, uint64_t in, uint64_t out);
     void record_bucket_request(std::string_view bucket);
 
     // pool_stats / admission / timer_stats may each be empty (corresponding metrics omitted when not wired up)

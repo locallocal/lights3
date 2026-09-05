@@ -5,6 +5,7 @@
 #include <coroutine>
 #include <deque>
 #include <mutex>
+#include <thread>
 
 namespace lights3 {
 
@@ -30,6 +31,11 @@ struct InlineExecutor final : IExecutor {
 // request
 class PumpExecutor final : public IExecutor {
 public:
+    // The constructing thread is the pumping thread: the top-level task starts
+    // eagerly on it before run() is entered (sync_wait_pumping), and a
+    // resume_on() hit during that ramp may continue inline just the same
+    PumpExecutor() : runner_(std::this_thread::get_id()) {}
+
     // Notify while holding the lock (same as SyncWaitEvent): this object may be
     // destroyed as soon as run() returns, so notify must complete before unlocking
     // or it would touch a destroyed cv
@@ -49,6 +55,7 @@ public:
     // Request thread: loops executing posted continuations until finish() has been
     // called and the queue is drained
     void run() {
+        runner_ = std::this_thread::get_id();
         for (;;) {
             std::coroutine_handle<> h;
             {
@@ -62,11 +69,17 @@ public:
         }
     }
 
+    // True while called from inside run() on the pumping thread: resume_on() can
+    // then continue inline instead of a queue round trip (roadmap §4.3 ⑤, the
+    // same fast path the beast strand / seastar shard awaiters have)
+    bool running_in_this_thread() const { return runner_ == std::this_thread::get_id(); }
+
 private:
     std::mutex m_;
     std::condition_variable cv_;
     std::deque<std::coroutine_handle<>> q_;
     bool done_ = false;
+    std::thread::id runner_;
 };
 
 // co_await resume_on(ex): switches the current coroutine's subsequent execution to the given executor
@@ -77,5 +90,14 @@ struct ResumeOnAwaiter {
     void await_resume() const noexcept {}
 };
 inline ResumeOnAwaiter resume_on(IExecutor& ex) { return {ex}; }
+
+// PumpExecutor overload: no-op when already running on the pumping thread
+struct ResumeOnPumpAwaiter {
+    PumpExecutor& ex;
+    bool await_ready() const noexcept { return ex.running_in_this_thread(); }
+    void await_suspend(std::coroutine_handle<> h) { ex.post(h); }
+    void await_resume() const noexcept {}
+};
+inline ResumeOnPumpAwaiter resume_on(PumpExecutor& ex) { return {ex}; }
 
 }  // namespace lights3

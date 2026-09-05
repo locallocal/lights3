@@ -38,6 +38,7 @@ the inside. The design emphasizes three points:
 | [multi-tenancy.md](multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenant entities and bucket ownership, tiered admin plane, audit log (the whole roadmap §3.9 chain) |
 | [testing.md](testing.md) | Testing: the ctest matrix and labels, website/s3adm/fault-injection e2e, fuzz harnesses, the fault-injection facade, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script (roadmap §6.1) |
 | [deployment.md](deployment.md) | Build and distribution: `--version` / embedded git commit, the `cmake --install` tree, CPack deb/rpm, Dockerfile + compose (with the redis/tikv/rados e2e profile), rollback and uninstall for `install.sh` upgrades (roadmap §6.3) |
+| [performance-baseline.md](performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the §4.3 data-plane work, how to reproduce (roadmap §4.3) |
 | [monitoring.md](monitoring.md) | Monitoring consumers: the Prometheus scrape config and alert/recording rules under `deploy/`, the Grafana dashboard and its generator, the asset-reconciliation test (roadmap §5.5, zero C++) |
 | [object-read-write-flow.md](object-read-write-flow.md) | Object read/write flow: the three-layer code path, BodyReader chains, atomic staging commit, fd-snapshot reads |
 | [tiered-storage.md](tiered-storage.md) | Tiered storage: cold data sinking to public cloud, stub metadata, transparent read-back and cache refill |

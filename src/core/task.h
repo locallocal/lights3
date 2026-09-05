@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <type_traits>
@@ -500,6 +501,146 @@ inline Task<void> when_all(std::vector<Task<void>> tasks) {
     for (auto& e : errors)
         if (e) std::rethrow_exception(e);
 }
+
+// ---------- Started<T>: an eagerly started task collected later (docs/concurrency.md §2.3) ----------
+// The building block of the drivers' double-buffered response pipeline (roadmap
+// §4.3 ①): start the backend read of the *next* chunk, write the current one to
+// the socket, then collect. One in-flight child per Started; the collector is
+// either a coroutine (co_await, async drivers and the pumped builtin loop) or a
+// plain thread (wait(), httplib's synchronous content provider). The child runs
+// on whatever thread its own suspension points resume it on; co_await resumes
+// the collector on the child's completing thread (or inline when the child
+// already finished), so a driver switches back to its connection context
+// afterwards exactly as after any co_await.
+//
+// Lifetime: the child references this object until it completes. Destroying a
+// Started with an uncollected child blocks until the child finishes (the
+// buffers it writes into are typically the owner's), so callers that bail out
+// early pay the read latency once instead of freeing memory under a running read
+
+namespace detail {
+
+struct StartedState {
+    std::atomic<int> votes{2};  // child + collecting coroutine; wait() never votes
+    std::coroutine_handle<> continuation;
+    std::mutex m;
+    std::condition_variable cv;
+    bool done = false;
+
+    // Child side. Everything this object is touched for happens under the
+    // lock, and the continuation handle is copied out before unlocking: the
+    // owner may destroy the state the moment it observes done (wait()) or is
+    // resumed (co_await)
+    void complete() {
+        std::coroutine_handle<> resume;
+        {
+            std::lock_guard lk(m);
+            done = true;
+            if (votes.fetch_sub(1, std::memory_order_acq_rel) == 1) resume = continuation;
+            cv.notify_all();
+        }
+        if (resume) resume.resume();
+    }
+    void wait() {
+        std::unique_lock lk(m);
+        cv.wait(lk, [&] { return done; });
+    }
+    bool finished() {
+        std::lock_guard lk(m);
+        return done;
+    }
+};
+
+struct StartedAwaiter {
+    StartedState& st;
+    bool await_ready() const noexcept { return false; }
+    std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
+        st.continuation = h;
+        if (st.votes.fetch_sub(1, std::memory_order_acq_rel) == 1) return h;  // already done
+        return std::noop_coroutine();
+    }
+    void await_resume() const noexcept {}
+};
+
+template <class T>
+WhenAllRunner started_run(Task<T> t, StartedState& st, std::optional<T>& out,
+                          std::exception_ptr& err) {
+    try {
+        out.emplace(co_await std::move(t));
+    } catch (...) {
+        err = std::current_exception();
+    }
+    st.complete();
+}
+
+inline WhenAllRunner started_run(Task<void> t, StartedState& st, std::exception_ptr& err) {
+    try {
+        co_await std::move(t);
+    } catch (...) {
+        err = std::current_exception();
+    }
+    st.complete();
+}
+
+}  // namespace detail
+
+template <class T>
+class Started {
+public:
+    Started() = default;
+    explicit Started(Task<T> t) { start(std::move(t)); }
+    Started(const Started&) = delete;
+    Started& operator=(const Started&) = delete;
+    ~Started() {
+        if (st_ && !collected_) st_->wait();
+    }
+
+    // Starts t; the previous child (if any) must have been collected
+    void start(Task<T> t) {
+        if (st_ && !collected_) st_->wait();
+        st_ = std::make_unique<detail::StartedState>();
+        collected_ = false;
+        if constexpr (!std::is_void_v<T>) out_.reset();
+        err_ = nullptr;
+        if constexpr (std::is_void_v<T>) detail::started_run(std::move(t), *st_, err_).start();
+        else detail::started_run(std::move(t), *st_, out_, err_).start();
+    }
+    // A child is running or finished but not yet collected
+    bool pending() const { return st_ && !collected_; }
+    bool finished() const { return pending() && st_->finished(); }
+
+    // Synchronous collect (thread-blocking); rethrows the child's exception
+    T wait() {
+        st_->wait();
+        return take();
+    }
+
+    // Coroutine collect
+    auto operator co_await() {
+        struct Awaiter {
+            Started& s;
+            detail::StartedAwaiter inner;
+            bool await_ready() const noexcept { return false; }
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
+                return inner.await_suspend(h);
+            }
+            T await_resume() { return s.take(); }
+        };
+        return Awaiter{*this, detail::StartedAwaiter{*st_}};
+    }
+
+private:
+    T take() {
+        collected_ = true;
+        if (err_) std::rethrow_exception(err_);
+        if constexpr (!std::is_void_v<T>) return std::move(*out_);
+    }
+
+    std::unique_ptr<detail::StartedState> st_;
+    std::conditional_t<std::is_void_v<T>, std::monostate, std::optional<T>> out_;
+    std::exception_ptr err_;
+    bool collected_ = true;
+};
 
 // ---------- with_timeout: cooperative timeout (docs/concurrency.md §2/§5) ----------
 // On expiry it only triggers src.request_cancel(); this function attaches

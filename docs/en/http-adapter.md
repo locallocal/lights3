@@ -63,10 +63,10 @@ Design notes:
   async_read being posted; for sync libraries as the thread blocking in recv).
   Same for the response direction: L1, as the consumer, pulls `stream_body`.
 - **No over-engineered zero-copy abstraction**: data is uniformly passed as
-  `span<byte>` blocks, block size chosen by the caller (default 64KiB). If some
-  driver later supports `sendfile`, an optional `try_as_file()` interface can be
-  added to `BodyReader` as a specialization without affecting existing
-  implementations.
+  `span<byte>` blocks, block size chosen by the caller (default 64KiB). Zero
+  copy keeps exactly one optional exit: `BodyReader::try_as_file()` /
+  `file_bytes_sent()` (no fast path by default, §2.4 ④), leaving every other
+  implementation untouched.
 - **HTTP/1.1 chunked trailers do not enter the neutral model**: `HttpRequest`
   has no field for them; L1 reads them off with a bound and discards them during
   de-framing (`http.trailer_max_size` caps injection; over the cap the
@@ -131,7 +131,8 @@ struct HttpServerFactory {
   before erroring), `trailer_max_size` (16KiB), `io_chunk_size` (64KiB streaming
   chunk), `body_queue_cap` (256KiB, httplib-only push-to-pull backpressure
   watermark), `shutdown_grace` (10s; also the drain deadline for admission
-  permits at shutdown, roadmap §4.5), `shutdown_force_wait` (5s). Shutdown
+  permits at shutdown, roadmap §4.5), `shutdown_force_wait` (5s), `sendfile`
+  (true; builtin's zero-copy exit for file bodies, §2.4 ④). Shutdown
   failures (backend close / pool join) surface as exit code `3`, see
   [cli.md §2.1](cli.md).
 - `http.io_threads` semantics drift per driver; see the matrix in §2.2.
@@ -219,6 +220,25 @@ ratelimit:
 (last row of roadmap §4.2): long handlers rely on `request_timeout`, drivers
 notice the disconnect at their next socket operation.
 
+### 2.4 Data-plane performance (roadmap §4.3)
+
+Four changes on the streaming response path, all inside L1 and all keeping
+`BodyReader`'s serial single-consumer contract; numbers in
+[performance-baseline.md](performance-baseline.md).
+
+| # | Item | Implementation |
+| --- | --- | --- |
+| ① | **Double-buffered prefetch** | `drivers/common.h` `StreamPrefetch`: two chunk buffers; while the current chunk is written to the socket, the backend read of the next one is already in flight (`Started<size_t>`, [concurrency.md §2.3](concurrency.md)). The next `read()` is issued only after the previous one completed, so the contract holds. Shared by all four drivers: beast/seastar/builtin `co_await next()`, httplib's synchronous content provider calls `next_sync()`. A mid-stream error surfaces on the following chunk and the driver disconnects as before (`http_driver_backend_error_mid_stream_closes_connection`). Abandoning a response early waits for the in-flight read in the destructor (the buffers are its own): one read latency, never a use-after-free |
+| ② | **Buffer pool** | `IoBuffer`: a thread_local free list (at most 16 per thread), `new std::byte[n]` default-initialized -- no more zero-filled 64KiB `std::vector` per response. Returning on another thread is fine (it is only a cache) |
+| ④ | **sendfile** | `BodyReader::try_as_file()` returns `FileSpan{fd, offset, length}` when the remaining bytes are one contiguous file range; the driver moves them kernel-side and reports through `file_bytes_sent(n)` so the reader position and accounting decorators stay consistent. Implemented by localfs `FdStreamReader` (Range included); L2's `CountingBodyReader` forwards both (the bytes still reach metrics and the access log); checksum / tee decorators keep the default (no fast path). **Only the builtin driver takes it**: fixed length + plaintext + `http.sendfile: true` (default); TLS, chunked and non-file bodies always use `read()`, and an `EINVAL/ENOSYS` on the first call falls back too. beast does not: a sendfile on a strand thread would block an I/O thread on cold file reads; httplib exposes no socket handle; seastar's native stack has no sendfile |
+| ⑤ | **builtin streaming write under pumping** | The whole body loop is one coroutine driven by `sync_wait_pumping` (previously a bare `sync_wait` per 64KiB: condvar + two thread hops each, 16384 of them for 1GiB); `co_await resume_on(exec)` before every send brings the continuation back to the connection thread (a slow client never pins a shared pool thread), and `PumpExecutor::running_in_this_thread()` continues inline when already there |
+| ⑥ | **beast `ResumeOn` fast path** | Connection executors are all `strand<io_context::executor_type>` from `make_strand`; `any_io_executor::target<Strand>()` finds it and `running_in_this_thread()` makes `await_ready` true, skipping the `asio::post`. seastar's `ResumeOnShard` already had the same check |
+| ⑦ | **per-bucket metrics without the lock** | `CountingBodyReader` adds only the global atomics per chunk (`add_bytes_*_total`); the bucket dimension accumulates and enters the mutex once per stream or per 16MiB via `add_bucket_bytes` (previously one global lock per 64KiB) |
+| ⑧ | HeaderMap / BlockQueue | unchanged: the absolute cost of the linear scan and the double copy is small |
+| ⑨ | **beast request-body read granularity** (found by the baseline) | Without a reserved capacity on the session's `flat_buffer`, beast's `read_size = max(512, capacity − size)` requests 512 bytes per socket read: a 4 MiB body was 8192 `recvmsg` + as many `timerfd_settime` (one `expires_after` each) + 77k futex calls, 40 ms per PUT against 6 ms on builtin. Fix: `buffer.reserve(io_chunk_size)`; PUT 4 MiB 91 → 914 ops/s |
+
+③ async logging was completed with §5.2.
+
 ## 3. Implementation Notes per Driver
 
 ### 3.0 builtin (default driver, zero-dependency POSIX sockets)
@@ -237,7 +257,11 @@ notice the disconnect at their next socket operation.
   interchangeable with the other three drivers.
 - TLS: OpenSSL blocking I/O wrapped around the socket on the connection thread
   (an `Io` abstraction routes recv/send); certificates/SNI/hot reload come from
-  the shared `tls::Holder` ([tls.md](tls.md) §3); use beast for the performance path.
+  the shared `tls::Holder` ([tls.md](tls.md) §3).
+- Streaming responses (§2.4): fixed-length plaintext file bodies go through
+  `sendfile(2)` (`http.sendfile`), everything else through the single-coroutine
+  pumping loop with double-buffered prefetch; sends always stay on the
+  connection thread.
 
 ### 3.1 Boost.Beast (async driver, preferred performance path)
 
@@ -256,6 +280,9 @@ notice the disconnect at their next socket operation.
   `100 Continue` only when the handler first calls `body->read()`, then receives
   the body — so authentication failures can reject outright without receiving the
   body, matching S3 behavior.
+- Response loop: `StreamPrefetch` double buffering plus the same-strand
+  `ResumeOn` fast path (§2.4 ①⑥); no sendfile (a strand thread must not block
+  on a cold file read).
 
 ### 3.2 cpp-httplib (sync driver, thread-per-request)
 

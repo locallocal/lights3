@@ -90,7 +90,32 @@ Task<void>           when_all(std::vector<Task<void>> tasks);
 
 生产消费方：tiered 后端的 TierScanner 并发下沉一批冷对象。
 
-### 2.3 with_timeout
+### 2.3 Started
+
+```cpp
+template <class T> class Started {
+    explicit Started(Task<T> t);   // 立即启动
+    void start(Task<T> t);         // 复用对象再启动（上一个子任务须已收取）
+    bool pending() const;          // 有子任务在飞或已完成未收取
+    T wait();                      // 线程阻塞收取（httplib 同步 content provider）
+    auto operator co_await();      // 协程收取（beast / seastar / builtin 的 pumping 循环）
+    ~Started();                    // 未收取则阻塞到子任务完成
+};
+```
+
+"先启动、稍后收取"的单子任务原语，是驱动流式响应双缓冲流水线的基石
+（[http-adapter.md §2.4](http-adapter.md) ①）：发起下一块的后端读，回头把当前块
+写进 socket，再收取。与 `when_all` 同源的自销毁 runner 协程 + 两票 latch
+（子任务一票、`co_await` 一票；`wait()` 不投票，只等条件变量）。子任务在自己的
+挂起点决定的线程上完成；`co_await` 使收取方在**完成线程**上恢复（已完成则内联），
+之后驱动照常切回连接上下文（strand / shard / pump）。
+
+- **完成侧的最后一次触碰在锁内**：`complete()` 在互斥锁内置位、投票、拷出续体后
+  才解锁再 resume——收取方一醒来（`wait()` 返回或被 resume）就可能析构对象；
+- **析构等待**：子任务写的是持有者的缓冲（`StreamPrefetch` 的两块 chunk），提前放弃
+  响应的驱动付一次读延迟，不能在读还在飞时释放内存。
+
+### 2.4 with_timeout
 
 ```cpp
 Task<T> with_timeout(Task<T> task, std::chrono::milliseconds timeout, CancelSource src);

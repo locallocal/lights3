@@ -108,6 +108,13 @@ LIGHTS3_FAULTS="localfs.write:1:EIO,duostore.pack.fdatasync:0:ENOSPC" lights3 --
 
 ## 5. 性能门禁与 soak
 
+- `scripts/bench_matrix.sh <lights3> <s3adm> [--drivers a,b] [--tls on|off|both]
+  [--duration N] [--concurrency N] [--size SZ] [--modes put,get] [--json FILE]
+  [--label TEXT]`：性能基线矩阵（roadmap §4.3）——每个（驱动 × TLS）格起一个
+  localfs 网关跑 `s3adm bench put/get`，输出 Markdown 表 + 每格一行 JSON；
+  驱动清单默认取 `lights3 --version` 的 `drivers:` 行。结果入库
+  [performance-baseline.md](performance-baseline.md)。
+
 - `scripts/bench_gate.sh <lights3> <s3adm> [--duration N] [--min-put-ops N]
   [--min-get-ops N] [--max-p99-ms N]`：memory 后端网关 + `s3adm bench put/get`，
   解析 `--output=json` 的汇总对象断言吞吐下限（默认 300 ops/s）与 p99 上限（默认 500 ms）；环境变量

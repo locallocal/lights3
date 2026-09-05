@@ -3,12 +3,17 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdio>
+#include <memory>
+#include <span>
+#include <vector>
 #include <random>
 #include <string>
 #include <string_view>
 
 #include "core/log.h"
+#include "core/task.h"
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "http/model.h"
@@ -23,6 +28,139 @@ namespace lights3::http::driver {
 // defaults consolidated in config.h; only purely internal values remain here
 inline constexpr size_t kIoChunkBytes = 64 * 1024;  // Streaming read/write chunk size (default of http.io_chunk_size)
 inline constexpr size_t kScratchBytes = 16 * 1024;  // Scratch buffer for draining, line parsing, etc.
+
+// ---------- Pooled I/O buffers (roadmap §4.3 ②) ----------
+// Streaming responses used to construct a zero-initialized std::vector per
+// response (a 64KiB memset plus a heap round trip each time, in every driver).
+// Buffers now come from a per-thread free list and are never cleared: the
+// reader tells how many bytes it wrote and only that prefix is ever read.
+// Acquire/release may happen on different threads (a beast session hops
+// between pool and strand threads) -- the lists are just caches, buffers
+// migrate freely. Bounded per thread so a burst does not pin memory forever
+class IoBuffer {
+public:
+    IoBuffer() = default;
+    explicit IoBuffer(size_t n) { acquire(n); }
+    IoBuffer(IoBuffer&& o) noexcept : p_(std::move(o.p_)), size_(o.size_), cap_(o.cap_) {
+        o.size_ = o.cap_ = 0;
+    }
+    IoBuffer& operator=(IoBuffer&& o) noexcept {
+        if (this != &o) {
+            release();
+            p_ = std::move(o.p_);
+            size_ = o.size_;
+            cap_ = o.cap_;
+            o.size_ = o.cap_ = 0;
+        }
+        return *this;
+    }
+    ~IoBuffer() { release(); }
+
+    // The requested size, not the underlying capacity: a recycled buffer may be
+    // larger than asked for, and handing out its full capacity would let a
+    // reader fill more than http.io_chunk_size per chunk
+    std::byte* data() { return p_.get(); }
+    size_t size() const { return size_; }
+    size_t capacity() const { return cap_; }
+    std::span<std::byte> span() { return {p_.get(), size_}; }
+
+    static constexpr size_t kPerThreadCap = 16;  // cached buffers per thread
+    static size_t cached_count() { return cache().size(); }
+
+private:
+    struct Slot {
+        std::unique_ptr<std::byte[]> p;
+        size_t cap;
+    };
+    static std::vector<Slot>& cache() {
+        thread_local std::vector<Slot> c;
+        return c;
+    }
+    void acquire(size_t n) {
+        size_ = n;
+        auto& c = cache();
+        for (size_t i = c.size(); i-- > 0;) {
+            if (c[i].cap >= n) {
+                p_ = std::move(c[i].p);
+                cap_ = c[i].cap;
+                c.erase(c.begin() + static_cast<std::ptrdiff_t>(i));
+                return;
+            }
+        }
+        p_ = std::unique_ptr<std::byte[]>(new std::byte[n]);  // default-init: no memset
+        cap_ = n;
+    }
+    void release() {
+        if (!p_) return;
+        auto& c = cache();
+        if (c.size() < kPerThreadCap) c.push_back({std::move(p_), cap_});
+        p_.reset();
+        size_ = cap_ = 0;
+    }
+
+    std::unique_ptr<std::byte[]> p_;
+    size_t size_ = 0;
+    size_t cap_ = 0;
+};
+
+// ---------- Double-buffered body pull (roadmap §4.3 ①) ----------
+// The drivers used to alternate strictly: read a chunk from the backend, write
+// it to the socket, read the next one -- throughput ~ 1 / (read latency +
+// write latency). StreamPrefetch keeps one read in flight while the caller
+// writes the previous chunk, so the two latencies overlap. BodyReader's
+// serial single-consumer contract holds: the next read is started only after
+// the previous one completed. Owns two buffers of chunk bytes.
+//
+//   next()      coroutine collect (beast / seastar / the pumped builtin loop)
+//   next_sync() thread-blocking collect (httplib's content provider)
+//
+// The returned span is valid until the following next()/next_sync() (it is
+// the buffer the *following* read after that reuses). An empty span means
+// EOF; the reader's exceptions propagate from next(). Destroying the object
+// with a read still in flight blocks until it completes (Started's rule) --
+// drivers that abort a response mid-way pay one read latency, never a
+// use-after-free of the buffer
+class StreamPrefetch {
+public:
+    StreamPrefetch(BodyReader& reader, size_t chunk) : reader_(reader), bufs_{IoBuffer(chunk), IoBuffer(chunk)} {}
+
+    Task<std::span<const std::byte>> next() {
+        if (eof_) co_return std::span<const std::byte>{};
+        if (!pending_.pending()) start_read();
+        size_t n = co_await pending_;
+        co_return finish(n);
+    }
+    std::span<const std::byte> next_sync() {
+        if (eof_) return {};
+        if (!pending_.pending()) start_read();
+        size_t n = pending_.wait();
+        return finish(n);
+    }
+    // Remaining bytes still buffered ahead of the socket when the caller
+    // stops early; informational (access-log truncation is by the decorator)
+    bool at_eof() const { return eof_; }
+
+private:
+    void start_read() {
+        pending_.start(reader_.read(bufs_[reading_].span()));
+    }
+    std::span<const std::byte> finish(size_t n) {
+        if (n == 0) {
+            eof_ = true;
+            return {};
+        }
+        size_t cur = reading_;
+        reading_ ^= 1;
+        start_read();  // overlap the next read with the caller's write of `cur`
+        return std::span<const std::byte>(bufs_[cur].data(), n);
+    }
+
+    BodyReader& reader_;
+    IoBuffer bufs_[2];
+    size_t reading_ = 0;  // index of the buffer the in-flight read fills
+    Started<size_t> pending_;
+    bool eof_ = false;
+};
 
 // Lock-free counters behind IHttpServer::stats() (roadmap §4.2); shared by the
 // drivers that own their accept loop

@@ -118,6 +118,9 @@ struct HttpConfig {
     uint64_t drain_limit = 4 * 1024 * 1024;   // max request body drained before returning an error
     size_t trailer_max_size = 16 * 1024;      // chunked trailer section limit (builtin/seastar)
     size_t io_chunk_size = 64 * 1024;         // streaming read/write chunk size
+    // sendfile(2) for file-backed fixed-length plaintext responses (roadmap §4.3 ④;
+    // builtin driver; TLS / chunked / non-file bodies always take the read() path)
+    bool sendfile = true;
     size_t body_queue_cap = 256 * 1024;       // push-to-pull body queue capacity (httplib only, i.e. the backpressure watermark)
     int shutdown_grace_sec = 10;              // grace period waiting for in-flight requests on shutdown
     int shutdown_force_wait_sec = 5;          // second wait after forced disconnect

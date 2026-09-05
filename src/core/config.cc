@@ -308,6 +308,18 @@ Config Config::from_string(const std::string& text) {
             check_range("http.port", p, 0, 65535);
             cfg.http.port = static_cast<uint16_t>(p);
         }
+        cfg.http.admin_bind = http->get("admin_bind", cfg.http.admin_bind);
+        if (auto v = http->get("admin_port"); !v.empty()) {
+            int p = to_int("http.admin_port", v, 0);
+            check_range("http.admin_port", p, 0, 65535);
+            cfg.http.admin_port = p;
+        }
+        // Two listeners on one port cannot both bind; 0 on either side means "kernel
+        // picks", which can never collide
+        if (cfg.http.admin_port > 0 && cfg.http.admin_port == int(cfg.http.port) &&
+            (cfg.http.admin_bind.empty() || cfg.http.admin_bind == cfg.http.bind))
+            throw std::runtime_error("config: http.admin_port must differ from http.port "
+                                     "(or bind the admin listener to another address)");
         if (auto v = http->get("io_threads"); !v.empty()) {
             cfg.http.io_threads = to_int("http.io_threads", v, cfg.http.io_threads);
             cfg.http.io_threads_set = true;  // the builtin driver WARNs based on this (docs/archive/gaps.md §7)

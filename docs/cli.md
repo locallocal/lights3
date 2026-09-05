@@ -195,7 +195,7 @@ roadmap §3.9，见 [multi-tenancy.md](multi-tenancy.md)）、`reload`（配置�
 
 | 选项 | 默认 | 说明 |
 | --- | --- | --- |
-| `-e, --endpoint=<url>` | `http://127.0.0.1:9000` | `scheme://host[:port]`；https 需要带 OpenSSL 的构建 |
+| `-e, --endpoint=<url>` | `http://127.0.0.1:9000` | `scheme://host[:port]`；https 需要带 OpenSSL 的构建。服务端配置了 `http.admin_port` 时，`cred` / `website` / `quota` / `tenant` / `usage` / `reload` / `object` / `mpu` 这些走 `/-/admin/*` 的命令组必须指向 **admin 端口**（数据面端口对它们答 404），`bench` / `fsck` 走数据面端口（[http-adapter.md §2.1](http-adapter.md)） |
 | `--ak=<key>` / `--sk=<key>` | 环境变量 | 缺省回退 `LIGHTS3_ADMIN_AK` / `LIGHTS3_ADMIN_SK`；SK 建议走环境变量（argv 对本机 `ps` 可见） |
 | `--region=<r>` | `us-east-1` | SigV4 region，须与服务端 `auth.region` 一致 |
 | `--insecure` | false | https 跳过证书校验（自签名部署） |

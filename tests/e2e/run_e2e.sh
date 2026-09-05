@@ -1004,6 +1004,51 @@ fi
 kill -TERM "$TLS_PID" 2>/dev/null
 wait "$TLS_PID" 2>/dev/null
 
+# ---------- backlog-sequence ②: separate admin listener (docs/http-adapter.md §2.1) ----------
+# A third instance with http.admin_port: the /-/ face moves to the admin port, the
+# data-plane port answers 404 for it, probes stay on both, s3adm points at the admin port
+sed -e "s#^  port: 0#  port: 0\n  admin_port: 0#" \
+    -e "s#$WORK/data#$WORK/adm-data#g" -e "s#$WORK/staging#$WORK/adm-staging#g" \
+    -e "s#$WORK/cloud-duo#$WORK/adm-cloud-duo#g" -e "s#$WORK/duo-local#$WORK/adm-duo-local#g" \
+    -e "s#^    redis_prefix: \"\(.*\)\"#    redis_prefix: \"\1adm-\"#" \
+    -e "s#^    tikv_prefix: \"\(.*\)\"#    tikv_prefix: \"\1adm-\"#" \
+    -e "s#^    rados_namespace: \(.*\)#    rados_namespace: \1-adm#" \
+    "$WORK/config.yaml" > "$WORK/config-admin.yaml"
+LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config-admin.yaml" > "$WORK/server-admin.log" 2>&1 &
+ADM_PID=$!
+DPORT=""; APORT=""
+for _ in $(seq 1 50); do
+    DPORT=$(sed -n 's/.*http server listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-admin.log" | head -1)
+    APORT=$(sed -n 's/.*admin listener.*127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-admin.log" | head -1)
+    [[ -n "$DPORT" && -n "$APORT" ]] && break
+    kill -0 "$ADM_PID" 2>/dev/null || break
+    sleep 0.1
+done
+check "admin-port instance started (two listeners)" "0" "$([[ -n "$DPORT" && -n "$APORT" && "$DPORT" != "$APORT" ]]; echo $?)"
+[[ -z "$APORT" ]] && { echo "--- server-admin.log ---"; cat "$WORK/server-admin.log"; }
+if [[ -n "$DPORT" && -n "$APORT" ]]; then
+    DB="http://127.0.0.1:$DPORT"; AB="http://127.0.0.1:$APORT"
+    acurl() { curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK:$SK" "$@"; }
+    check "probes on the data-plane port" "200 200" "$(curl -s -o /dev/null -w '%{http_code}' "$DB/-/healthz") $(curl -s -o /dev/null -w '%{http_code}' "$DB/-/readyz")"
+    check "probes on the admin port" "200 200" "$(curl -s -o /dev/null -w '%{http_code}' "$AB/-/healthz") $(curl -s -o /dev/null -w '%{http_code}' "$AB/-/readyz")"
+    check "metrics 404 on the data-plane port" "404" "$(curl -s -o /dev/null -w '%{http_code}' "$DB/-/metrics")"
+    check "metrics 200 on the admin port" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$AB/-/metrics")"
+    check "admin API 404 on the data-plane port" "404" "$(acurl -o /dev/null -w '%{http_code}' "$DB/-/admin/credentials")"
+    check "admin API 200 on the admin port" "200" "$(acurl -o /dev/null -w '%{http_code}' "$AB/-/admin/credentials")"
+    check "data plane works on the data-plane port" "200" "$(acurl -o /dev/null -w '%{http_code}' -X PUT "$DB/admbkt")"
+    check "data plane 404 on the admin port" "404" "$(acurl -o /dev/null -w '%{http_code}' -X PUT "$AB/admbkt2")"
+    check "s3adm cred list against the admin port" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" cred list --endpoint="$AB" --region="$REGION" > /dev/null 2>&1; echo $?)"
+    check "s3adm reload against the admin port" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" reload --endpoint="$AB" --region="$REGION" > /dev/null 2>&1; echo $?)"
+    # httplib runs the upstream accept loop and reports no connection counters, so the
+    # request counter (kept by every driver) is the "both listeners feed one view" probe
+    check "request counter covers both listeners" "0" "$(curl -s "$AB/-/metrics" | grep -q '^lights3_http_requests_total [1-9]'; echo $?)"
+    acurl -o /dev/null -X DELETE "$DB/admbkt"
+fi
+kill -TERM "$ADM_PID" 2>/dev/null
+wait "$ADM_PID" 2>/dev/null
+for _ in $(seq 1 20); do grep -q "lights3 exited cleanly" "$WORK/server-admin.log" && break; sleep 0.1; done
+check "admin-port instance exited cleanly" "0" "$(grep -q "lights3 exited cleanly" "$WORK/server-admin.log"; echo $?)"
+
 # ---------- roadmap §6.1: fault injection through the whole stack (docs/testing.md §4) ----------
 # A second instance armed via LIGHTS3_FAULTS: the first staging write fails with
 # EIO -> the PUT answers 500 InternalError, the object does not exist, the retry

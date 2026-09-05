@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
 #include <sstream>
 #include <thread>
@@ -169,8 +170,25 @@ void Application::start_server() {
     service_->set_reload_hook([this] { return reload_config(); });
     service_->set_timer_stats([] { return TimerQueue::instance().stats(); });
     // L1 connection counters + per-client rate limits (roadmap §4.2)
+    // Both listeners' counters add up (accepted/active/timeouts are per-listener
+    // events; the sum is the process-wide view a dashboard wants)
     service_->set_conn_stats([this]() -> http::ConnStats {
-        return server_ ? server_->stats() : http::ConnStats{};
+        http::ConnStats s = server_ ? server_->stats() : http::ConnStats{};
+        if (!admin_server_) return s;
+        http::ConnStats a = admin_server_->stats();
+        s.accepted += a.accepted;
+        s.rejected_limit += a.rejected_limit;
+        s.active += a.active;
+        s.keepalive_closes += a.keepalive_closes;
+        s.timeouts_idle += a.timeouts_idle;
+        s.timeouts_header += a.timeouts_header;
+        s.timeouts_body += a.timeouts_body;
+        s.timeouts_write += a.timeouts_write;
+        s.requests += a.requests;
+        s.tls_handshakes_ok += a.tls_handshakes_ok;
+        s.tls_handshakes_failed += a.tls_handshakes_failed;
+        s.parse_errors += a.parse_errors;
+        return s;
     });
     {
         auto& rl = cfg_.ratelimit;
@@ -206,6 +224,41 @@ void Application::start_server() {
         [service = service_](http::HttpRequest req) { return service->dispatch(std::move(req)); },
         stall_progress, admission_counters_));
     server_->listen(cfg_.http.bind, cfg_.http.port);
+
+    // Separate admin listener (http.admin_port, backlog-sequence ②): the same
+    // admission gate and cancellation source (its requests count toward
+    // max_inflight_requests and drain under the same shutdown_grace), its own
+    // driver instance; the handler flags every request as admin-face and the
+    // service gates the /-/ endpoints on that flag
+    if (cfg_.http.admin_port >= 0) {
+        std::string admin_driver = cfg_.http.driver;
+        if (admin_driver == "seastar") {
+            auto drivers = http::HttpServerFactory::drivers();
+            if (std::find(drivers.begin(), drivers.end(), "builtin") == drivers.end())
+                throw std::runtime_error("http.admin_port with the seastar driver needs the "
+                                         "builtin driver compiled in for the admin listener");
+            admin_driver = "builtin";
+        }
+        admin_server_ = http::HttpServerFactory::create(admin_driver, cfg_.http);
+        admin_server_->set_handler(http::make_admission_handler(
+            inflight_, stall_sec_, shutdown_src_,
+            [service = service_](http::HttpRequest req) {
+                req.admin_face = true;
+                return service->dispatch(std::move(req));
+            },
+            stall_progress, admission_counters_));
+        service_->set_admin_split(true);
+        const std::string& abind = cfg_.http.admin_bind.empty() ? cfg_.http.bind : cfg_.http.admin_bind;
+        admin_server_->listen(abind, static_cast<uint16_t>(cfg_.http.admin_port));
+        LOG_INFO("admin listener ({}): {}:{} serves /-/ (metrics, admin API); the data-plane "
+                 "port answers 404 for it",
+                 admin_driver, abind, admin_server_->bound_port());
+    }
+}
+
+uint16_t Application::bound_port() const { return server_ ? server_->bound_port() : 0; }
+uint16_t Application::admin_bound_port() const {
+    return admin_server_ ? admin_server_->bound_port() : 0;
 }
 
 int Application::run() {
@@ -224,6 +277,7 @@ int Application::run() {
             }
             LOG_INFO("signal {} received, shutting down", int(b));
             server_->shutdown();
+            if (admin_server_) admin_server_->shutdown();
         }
     });
     struct sigaction sa{};
@@ -238,7 +292,16 @@ int Application::run() {
     LOG_INFO("lights3 {} (git {}, {}) started: driver={} backends={} pool={}", version(),
              git_commit(), build_type(), cfg_.http.driver, cfg_.backends.size(),
              cfg_.runtime.io_threads);
+    // The admin listener runs on its own thread for the lifetime of the data-plane
+    // run(); both are stopped by the watchdog thread on a signal. Joined before the
+    // watchdog so the order of teardown stays: listeners, watchdog, in-flight drain
+    std::thread admin_thread;
+    if (admin_server_) admin_thread = std::thread([this] { admin_server_->run(); });
     server_->run();  // Blocks until SIGINT/SIGTERM
+    if (admin_thread.joinable()) {
+        admin_server_->shutdown();  // no-op when the watchdog already did it
+        admin_thread.join();
+    }
 
     // Reap the shutdown watchdog thread first: only then is destroying server safe
     ::close(g_sig_pipe[1]);
@@ -301,6 +364,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
     cmp(x.driver != y.driver, "http.driver");
     cmp(x.bind != y.bind, "http.bind");
     cmp(x.port != y.port, "http.port");
+    cmp(x.admin_bind != y.admin_bind || x.admin_port != y.admin_port, "http.admin_bind/admin_port");
     cmp(x.io_threads != y.io_threads, "http.io_threads");
     cmp(x.max_header_size != y.max_header_size, "http.max_header_size");
     cmp(x.idle_timeout_sec != y.idle_timeout_sec, "http.idle_timeout");
@@ -491,6 +555,7 @@ ConfigReloadReport Application::reload_config() {
     // TLS certificate material: always re-read on an explicit reload (the periodic
     // poll may be off); the paths/knobs themselves are startup-only
     if (server_ && !cfg_.http.tls_cert.empty()) {
+        if (admin_server_) admin_server_->reload_tls();  // same files, its own holder
         if (server_->reload_tls()) report.applied.push_back("http.tls: certificate material re-read");
         else if (cfg_.http.driver == "seastar")
             report.applied.push_back("http.tls: seastar reloads certificates on file change");
@@ -544,6 +609,7 @@ void Application::shutdown() noexcept {
     // no destruction. Release in reverse ownership order so backend
     // destruction happens **before** pool->join() — destructors still use
     // the pool (docs/archive/gaps.md §3.9)
+    admin_server_.reset();
     server_.reset();
     service_.reset();
     inflight_.reset();  // holds a raw pointer into pool_exec_; must go first

@@ -118,6 +118,20 @@ struct HttpServerFactory {
   roadmap §4.5）、`shutdown_force_wait`（5s）、`sendfile`（true，builtin 的文件
   body 零拷贝出口，§2.4 ④）。关停失败（后端 close / 池 join）
   以退出码 `3` 上报，见 [cli.md §2.1](cli.md)。
+- **独立 admin 端口**（backlog-sequence ②）：`http.admin_port`（缺省 = 不起；`0` =
+  内核选端口，同 `port`）+ `http.admin_bind`（空 = 同 `bind`）。配置后再起一个
+  **同驱动**的 `IHttpServer`（数据面是 seastar 时 admin 面用 builtin——seastar 引擎是
+  进程单例），只服务 `/-/` 面：`/-/metrics` 与全部 `/-/admin/*` 搬到 admin 端口，
+  数据面端口对它们答 `404`；反过来 admin 端口对任何数据面路径（含 `POST /` STS、
+  OPTIONS 预检）也答 `404`；`/-/healthz` / `/-/readyz` 两边都留（探针不需要知道
+  布局）。两个监听共用同一准入信号量（admin 请求计入 `max_inflight_requests`）、
+  同一 `shutdown_grace`、同一 TLS 素材（各自一个 `tls::Holder` 读同一组文件，
+  `reload` 两边一起重读）；`lights3_http_connections_*` 等 L1 计数器为两监听之和。
+  `metrics_access: root` 语义不变（换端口不等于免签）。分派侧的实现是
+  `HttpRequest.admin_face`（admin 监听的 handler 置位）+ `S3Service::set_admin_split`
+  的门控：先于限流与验签判定，错误面是不带提示的 404 XML。热重载不覆盖
+  （`requires_restart`）。`s3adm` 的 `--endpoint` 须指向 admin 端口
+  （[cli.md §3.1](cli.md)），Prometheus 抓 admin 端口（[monitoring.md](monitoring.md)）。
 - `http.io_threads` 的语义随驱动漂移，见 §2.2 的矩阵。
 
 ### 2.2 超时体系与连接治理（roadmap §4.2）

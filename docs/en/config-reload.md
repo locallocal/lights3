@@ -58,7 +58,7 @@ Report shape (admin API / `s3adm reload` output):
 
 ## 4. Explicitly Not Hot-Reloadable (reported as requires_restart)
 
-- `http.driver / bind / port / io_threads / max_header_size`, the four
+- `http.driver / bind / port / admin_bind / admin_port / io_threads / max_header_size`, the four
   connection timeouts, `max_requests_per_connection`, `max_connections` (fixed
   at driver construction);
 - the TLS **paths and knobs** (`tls_cert/tls_key` paths, `tls_client_*`,

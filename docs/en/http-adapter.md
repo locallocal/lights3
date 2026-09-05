@@ -135,6 +135,26 @@ struct HttpServerFactory {
   (true; builtin's zero-copy exit for file bodies, §2.4 ④). Shutdown
   failures (backend close / pool join) surface as exit code `3`, see
   [cli.md §2.1](cli.md).
+- **Separate admin port** (backlog-sequence ②): `http.admin_port` (absent = no
+  admin listener; `0` = kernel-picked, like `port`) plus `http.admin_bind` (empty
+  = same as `bind`). When set, a second `IHttpServer` of the **same driver**
+  (builtin when the data plane runs seastar, whose engine is a process
+  singleton) serves only the `/-/` face: `/-/metrics` and every `/-/admin/*`
+  move to the admin port and the data-plane port answers `404` for them;
+  conversely the admin port answers `404` to every data-plane path (including
+  `POST /` STS and OPTIONS preflight); `/-/healthz` / `/-/readyz` stay on both
+  (probes need not know the layout). The two listeners share the admission
+  semaphore (admin requests count toward `max_inflight_requests`), the
+  `shutdown_grace`, and the TLS material (one `tls::Holder` each over the same
+  files, `reload` re-reads both); the L1 counters
+  (`lights3_http_connections_*`, ...) are the sum over both listeners.
+  `metrics_access: root` keeps its meaning (a different port is not a
+  signature waiver). Dispatch-side the mechanism is `HttpRequest.admin_face`
+  (set by the admin listener's handler) plus the `S3Service::set_admin_split`
+  gate, evaluated before rate limiting and signature verification; the wrong
+  face gets a plain 404 XML. Not hot-reloadable (`requires_restart`). `s3adm`'s
+  `--endpoint` must point at the admin port ([cli.md §3.1](cli.md)), Prometheus
+  scrapes the admin port ([monitoring.md](monitoring.md)).
 - `http.io_threads` semantics drift per driver; see the matrix in §2.2.
 
 ### 2.2 Timeout Family and Connection Governance (roadmap §4.2)

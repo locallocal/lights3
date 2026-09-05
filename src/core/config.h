@@ -52,6 +52,13 @@ struct HttpConfig {
     std::string driver = "builtin";
     std::string bind = "0.0.0.0";
     uint16_t port = 9000;
+    // Separate admin listener (backlog-sequence ②): when admin_port is set (>= 0;
+    // 0 = kernel-picked, like port) a second server of the same driver serves the
+    // /-/ face (metrics, admin API) and the data-plane port answers 404 for it;
+    // probes (/-/healthz, /-/readyz) stay on both. -1 = no admin listener (every
+    // face on the data-plane port). admin_bind empty = same address as bind
+    std::string admin_bind;
+    int admin_port = -1;
     int io_threads = 4;
     // Validated to [1KiB, 1MiB]: beast passes it into parser.header_limit(uint32_t),
     // where an unbounded value like 4GiB would truncate to 0 and reject every request

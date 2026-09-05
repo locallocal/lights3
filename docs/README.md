@@ -41,6 +41,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore 的 TiKV IMetaStore：client-c + 2PC 侧车，meta 水平扩展 |
 | [cli.md](cli.md) | 命令行工具：`lights3` 启动、`duostore dump/load/gc/scan`、`tier scan/gc/reconcile`、`fsck` 离线巡检、`s3adm` 的 cred/website/bench/fsck/quota/tenant/usage 命令、ccmd 选项语义与退出码 |
 | [backlog.md](backlog.md) | 待办与后续规划：分期保留的设计、代码已落地但本机无法验证的项、基线跑出的新问题、长期项、明确不做清单；做完即删 |
+| [backlog-sequence.md](backlog-sequence.md) | backlog §1 十个分期保留项的实施顺序：五个阶段、依赖关系、各项范围 / 入口 / 验收 / 预估与记账表 |
 | [archive/](archive/gaps.md) | 已收口的历史底账（gaps.md / issues.md / roadmap.md），只读归档——源码注释中 `docs/archive/<name>.md §N` 与 `roadmap §N` 引用的论证出处 |
 
 *另有中文项目介绍 [README.zh-CN.md](README.zh-CN.md)（构建/运行/当前实现范围）；

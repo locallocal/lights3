@@ -229,7 +229,7 @@ TEST(config_int_errors_name_the_key_and_value) {
     }));
 }
 
-// ---------- Validation gaps, second round (docs/roadmap.md §1.2) ----------
+// ---------- Validation gaps, second round (docs/archive/roadmap.md §1.2) ----------
 
 TEST(config_port_rejects_trailing_garbage) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";

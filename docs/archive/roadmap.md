@@ -1,10 +1,16 @@
-# 优化与功能规划（Roadmap）
+# 优化与功能规划（Roadmap，已归档）
 
+> **归档说明（2026-09-05）**：本规划底账的全部条目已于 2026-09-05 收口
+> （完成、维持不动、或转为分期保留/长期项），文件从 `docs/` 移至此处，
+> 内容不再更新。全仓源码/文档注释里的 `roadmap §N` 均指本文件的 §N，
+> 章节编号保持不变。尚未做的事、待验证项与长期规划见
+> [../backlog.md](../backlog.md)。
+>
 > 基于 2026-08-25 的全仓走读（源码 + 设计文档 + git 历史）。此前的评审底账
-> `gaps.md` / `issues.md` 已全部清零并归档至 [archive/](archive/gaps.md)，
+> `gaps.md` / `issues.md` 已全部清零并归档至 [archive/](gaps.md)，
 > 本文是接续它们的新规划底账：
 > 只收录"尚未做"与"值得做"的事，不重复已落地能力（能力边界见根
-> README「Current scope」与 [s3-protocol.md](s3-protocol.md) §1）。
+> README「Current scope」与 [s3-protocol.md](../s3-protocol.md) §1）。
 >
 > 每项标注 **价值**（高/中/低）与 **难度**（低/中/高）。条目按主题分节，
 > 末节给出跨主题的优先级梯队。文中行号为写作时快照，仅作定位提示。
@@ -30,7 +36,7 @@
 
 | # | 条目 | 现状 | 价值 | 难度 | 入口 |
 | --- | --- | --- | --- | --- | --- |
-| 1.1 | ~~aws-chunked trailer 校验和完全不验~~ **已完成（2026-08-26）** | -TRAILER 两变体的 trailer 段现按行严格解析并与 `x-amz-trailer` 声明双向对照，声明的校验和对解码后 payload 校验，signed 变体验 `x-amz-trailer-signature`（见 [s3-protocol.md](s3-protocol.md) §3.2/§3.3） | — | — | `src/s3/auth/sigv4.cc`、`src/s3/checksum_guard.h` |
+| 1.1 | ~~aws-chunked trailer 校验和完全不验~~ **已完成（2026-08-26）** | -TRAILER 两变体的 trailer 段现按行严格解析并与 `x-amz-trailer` 声明双向对照，声明的校验和对解码后 payload 校验，signed 变体验 `x-amz-trailer-signature`（见 [s3-protocol.md](../s3-protocol.md) §3.2/§3.3） | — | — | `src/s3/auth/sigv4.cc`、`src/s3/checksum_guard.h` |
 | 1.2 | ~~配置校验缺口簇~~ **已完成（2026-08-27）** | ① `max_header_size` 限 `[1KiB,1MiB]`（远低于 beast `header_limit(uint32_t)` 截断阈值）；② `idle_timeout` 限 `[1s,86400s]`，`0` 因驱动语义相反直接拒绝；③ `http.port` 改走 `to_int`（尾随垃圾报错）；④ `log.level` 白名单 debug\|info\|warn\|error，拼错启动即报错；⑤ `buckets.rules[].match/backend` 空值拒绝；⑥ 跨项检查：`transfer_stall_timeout > request_timeout`（且后者启用）启动报错 | — | — | `src/core/config.cc`、`tests/unit/test_config.cc` |
 | 1.3 | ~~`X-Amz-Security-Token` 静默忽略~~ **已完成（2026-08-27）** | query/header 两侧现均在 verify 之前被 `reject_sts_token` 显式拒绝（501 NotImplemented，报文点名 STS 不支持），token 已从 `kCommonQueryKeys` 白名单移除；真做 STS 见 §2.8 | — | — | `src/s3/service.cc`（`reject_sts_token`） |
 | 1.4 | ~~stall guard 与 `io_chunk_size` 下界耦合可误杀~~ **已完成（2026-08-27）** | 进度阈值参数化为 `min(kMinProgressBytes, io_chunk_size)`（app.cc 装配处收敛），`io_chunk_size` 配到 4KiB 时不再每 window 误判停滞 | — | — | `src/http/stall_guard.h`、`src/http/admission.h`、`src/app/app.cc` |
@@ -60,12 +66,12 @@ tombstone 同步，lifecycle 复用同一模板）。root 专属，同 ?website 
 | ~~`crc64nvme` 算法~~ **已完成（2026-08-26）** | 头部与 trailer 两种形态均支持（`util::crc64nvme_update` + `checksum_spec` 表项） | — | — |
 | ~~校验和持久化 + 回显~~ **已完成（2026-08-28）** | `ObjectMeta` 增 checksum_algorithm/value/type + part_sizes（trailer 形态经 pending 槽在 body 读尽后落值）；六后端序列化齐备（duostore 走自描述 kv 零迁移、part 记录 v2）；GET/HEAD 认 `x-amz-checksum-mode: ENABLED`；multipart 复合 `-N` 由已验证分片值计算（CRC64NVME/FULL_OBJECT → 501） | — | — |
 
-### 2.3 网站托管收尾（[static-website.md](static-website.md) §"未尽事项"）
+### 2.3 网站托管收尾（[static-website.md](../static-website.md) §"未尽事项"）
 
 | 条目 | 价值 | 难度 |
 | --- | --- | --- |
 | ~~`GET /prefix` 无尾斜杠时 302 补斜杠~~ **已完成（2026-08-28）**（`prefix/<index>` 存在时 302，否则保留原错误） | — | — |
-| ~~`RedirectAllRequestsTo` / `RoutingRules`~~ **已完成（2026-08-28）**（XML/JSON 全量；prefix 规则取对象前评估、错误码规则先于 error 文档；见 [static-website.md](static-website.md) §6） | — | — |
+| ~~`RedirectAllRequestsTo` / `RoutingRules`~~ **已完成（2026-08-28）**（XML/JSON 全量；prefix 规则取对象前评估、错误码规则先于 error 文档；见 [static-website.md](../static-website.md) §6） | — | — |
 | ~~per-bucket 限速~~ **已完成（2026-08-28）**（`website[].max_rps` 令牌桶，超限轻量 XML 503，签名请求不受限） | — | — |
 | ~~website 匿名面的专项单测~~ **已完成（2026-08-28）**（签名材料检测、路由限定、`response-*` 拒绝、302/重定向规则/限速全覆盖，`test_service.cc`） | — | — |
 
@@ -113,9 +119,9 @@ token 验证（不符 InvalidToken / 过期 ExpiredToken），
 面：离线 `lights3 fsck <backend>`（照 dump/load 模式，发现 → 退出码 1）+
 在线 `s3adm fsck <bucket>`（S3 API 端到端，GET ?partNumber 逐分片）。均纯
 只读，`--max-mbps` 限速（`scrub_throttle.h`，TimerQueue 分片睡眠）。admin
-端点未做（CLI 已覆盖，触发面留观）。见 [cli.md](cli.md) §2.3/§3.5、
-[storage/duostore-core.md](storage/duostore-core.md) §8.4、
-[storage/localfs.md](storage/localfs.md) §11。
+端点未做（CLI 已覆盖，触发面留观）。见 [cli.md](../cli.md) §2.3/§3.5、
+[storage/duostore-core.md](../storage/duostore-core.md) §8.4、
+[storage/localfs.md](../storage/localfs.md) §11。
 
 ### 3.2 ~~后台任务 CLI 化（钩子现成，接线即可）~~ **已完成（2026-08-28）**
 
@@ -123,7 +129,7 @@ token 验证（不符 InvalidToken / 过期 ExpiredToken），
 <backend>`（tiered 的 run_gc_once 一并接上），照 dump/load 离线模式跑一轮即
 退，统计进日志、退出码 0/1（完整性裁决归 `lights3 fsck`）。本地 meta 引擎
 持文件锁须停服；redis/tikv 可与在线网关并行（GC 租约协调）。见
-[cli.md](cli.md) §2.4。
+[cli.md](../cli.md) §2.4。
 
 ### 3.3 ~~cloudproxy 网络面~~ **已完成（2026-08-28，六项全部）**
 
@@ -139,8 +145,8 @@ waiter 挂起等 release 交接，TimerQueue 兑现超时契约，不停池线�
 ⑥ AWS 凭证链（AK/SK 未配置时：环境变量 → ECS/EKS 容器端点 → EC2 IMDSv2，
 会话 token 进签名、到期前 5min 续期、负缓存 60s，`imds_endpoint` 可指测试
 桩）。COPY 顺带纳入重试（幂等 PUT）。见
-[storage/cloudproxy.md](storage/cloudproxy.md) §2.3.1/§2.4/§7.2、
-[cloudproxy-backend.md](cloudproxy-backend.md) §5.2/§7/§8.1。
+[storage/cloudproxy.md](../storage/cloudproxy.md) §2.3.1/§2.4/§7.2、
+[cloudproxy-backend.md](../cloudproxy-backend.md) §5.2/§7/§8.1。
 
 ### 3.4 ~~xlocalfs：io_uring 的未兑现收益~~ **已完成（2026-09-01，五项全部）**
 
@@ -161,8 +167,8 @@ statx 全部上 ring（`meta_ops: false` 一键回退同步）。④ 多 ring �
 `fs_uring: true`（chunk 读写走流水线 + 封存链式 fdatasync；pack 批尾
 fdatasync 经 dup fd 出锁上 ring；引擎建失败回退同步路径 + 常驻 gauge
 `lights3_duostore_uring_fallback`），布局不变。见
-[storage/xlocalfs.md](storage/xlocalfs.md)、
-[storage/duostore-data-fs.md](storage/duostore-data-fs.md) §9。
+[storage/xlocalfs.md](../storage/xlocalfs.md)、
+[storage/duostore-data-fs.md](../storage/duostore-data-fs.md) §9。
 
 ### 3.5 ~~localfs / listing~~ **已完成（2026-09-01，六项全部）**
 
@@ -185,8 +191,8 @@ commit_lock 下复查后进行（listing 自愈同路径），杜绝误删刚落
 取值，`ZCARD≠HLEN` 时回退全表 HSCAN 并重建索引；顺带修正四个 meta 引擎
 `list_uploads` 的下推契约（SPI 增 `prefix` 提示 + 仅 key-marker 的"整 key 已翻
 过"语义），此前 rocks/sqlite/tikv 在 prefix 列举下可能误报列举结束。见
-[storage/localfs.md](storage/localfs.md) §2/§3/§6/§12、
-[storage/duostore-meta-redis.md](storage/duostore-meta-redis.md) §5.2。
+[storage/localfs.md](../storage/localfs.md) §2/§3/§6/§12、
+[storage/duostore-meta-redis.md](../storage/duostore-meta-redis.md) §5.2。
 
 ### 3.6 ~~tiered~~ **已完成（2026-09-02，七项全部）**
 
@@ -209,8 +215,8 @@ glob → `cold_after`，`never` 钉住，config.cc 把后端下的 map 列表拍
 无 xattr 与 duostore 的兜底）。⑦ `range_cache`：`<state>/rcache/` 稀疏文件 +
 位图，Range 命中块对齐超集回填、全命中本地服务、尾块同 read 吸完，
 PUT/回填/换代失效，水位淘汰当 rank 0 残留。见
-[tiered-storage.md](tiered-storage.md) §4.3/§5.1/§6.3/§9、
-[storage/tiered.md](storage/tiered.md) §3/§4.1/§5.4/§11。
+[tiered-storage.md](../tiered-storage.md) §4.3/§5.1/§6.3/§9、
+[storage/tiered.md](../storage/tiered.md) §3/§4.1/§5.4/§11。
 
 ### 3.7 duostore 残留 **已完成（2026-09-03，全部五项）**
 
@@ -251,13 +257,13 @@ LRU + 写路径 invalidate；多网关共享 meta 时需失效协议，可分期
   manifest 仍可能引用的 extent。
 
 **分期保留**：跨网关失效协议（redis pub/sub / tikv 无等价物）未做，共享
-meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/localfs.md)
-§5.1、[storage/duostore-core.md](storage/duostore-core.md) §7.1。
+meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](../storage/localfs.md)
+§5.1、[storage/duostore-core.md](../storage/duostore-core.md) §7.1。
 
 ### 3.9 链条：用量统计 → 配额 → 多租户 **已完成（2026-09-04，四项全部）**
 
 ~~三者是同一条依赖链，越往后越重，建议按序分期：~~ 落地文档
-[multi-tenancy.md](multi-tenancy.md)，全部实现在 L2，存储层与 meta schema
+[multi-tenancy.md](../multi-tenancy.md)，全部实现在 L2，存储层与 meta schema
 零改动：
 
 1. ~~**用量统计**（价值高/难度中）：`IStorageBackend` 无任何 usage 接口，
@@ -296,10 +302,10 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| ~~**builtin / seastar 无 TLS**~~ | 已完成：builtin 在连接线程用 OpenSSL 阻塞 I/O 包裹 socket；seastar 经 `seastar::tls` 包裹每 shard 的 listener（[tls.md](tls.md) §3/§4） | — | — |
+| ~~**builtin / seastar 无 TLS**~~ | 已完成：builtin 在连接线程用 OpenSSL 阻塞 I/O 包裹 socket；seastar 经 `seastar::tls` 包裹每 shard 的 listener（[tls.md](../tls.md) §3/§4） | — | — |
 | ~~证书热重载~~ | 已完成：`tls_reload_interval` 轮询证书文件，变更即整套重载、新握手生效、失败保留旧素材；seastar 用可重载凭证（自带文件监视） | — | — |
 | ~~TLS 旋钮~~ | 已完成：`tls_client_ca` + `tls_client_auth`（mTLS，暂不映射身份）、`tls_min_version`、`tls_ciphers` / `tls_ciphersuites`、`tls_sni` 多证书（seastar 不支持 SNI，构造期抛错）——三个 OpenSSL 驱动共用一个证书回调层 `src/http/tls.h` | — | — |
-| ~~短期替代~~ | 已完成：[tls.md](tls.md) §6 nginx / caddy 反代终结样例（透传 Host、`X-Forwarded-Proto`、关请求体缓冲） | — | — |
+| ~~短期替代~~ | 已完成：[tls.md](../tls.md) §6 nginx / caddy 反代终结样例（透传 Host、`X-Forwarded-Proto`、关请求体缓冲） | — | — |
 
 **分期保留**：mTLS 客户端证书 → 凭证/租户身份映射；SIGHUP 触发重载（轮询已够）。
 
@@ -307,14 +313,14 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| ~~**超时体系拆分**~~ | 已完成：`header_timeout` / `idle_timeout` / `body_timeout` / `write_timeout` 四类，四驱动各接一遍（builtin 阶段边界重设 socket 超时、beast 逐操作 `expires_after`、seastar 按阶段武装定时器、httplib 头部阶段由 body_timeout 约束），超时按阶段计入 `lights3_http_timeouts_total{phase}`（[http-adapter.md §2.2](http-adapter.md)） | — | — |
+| ~~**超时体系拆分**~~ | 已完成：`header_timeout` / `idle_timeout` / `body_timeout` / `write_timeout` 四类，四驱动各接一遍（builtin 阶段边界重设 socket 超时、beast 逐操作 `expires_after`、seastar 按阶段武装定时器、httplib 头部阶段由 body_timeout 约束），超时按阶段计入 `lights3_http_timeouts_total{phase}`（[http-adapter.md §2.2](../http-adapter.md)） | — | — |
 | ~~keep-alive 每连接请求数上限~~ | 已完成：`http.max_requests_per_connection`（默认 1024，0=不限），第 N 个响应带 `Connection: close`；指标 `lights3_http_keepalive_closes_total` | — | — |
 | ~~连接上限观测~~ | 已完成：`IHttpServer::stats()` → `lights3_http_connections_total{result=accepted\|rejected_limit}`、`lights3_http_connections_active`（httplib 跑上游 accept 循环，报零） | — | — |
-| ~~per-IP / per-AK 限流~~ | 已完成：`ratelimit.*`（令牌桶 + 并发上限，LRU 有界表），per-IP 在验签前、per-AK 在验签后，超限 `503 SlowDown` + `Retry-After: 1`，指标 `lights3_ratelimit_rejections_total{scope}`（[http-adapter.md §2.3](http-adapter.md)） | — | — |
-| ~~`io_threads` 语义漂移~~ | 已完成（文档化矩阵路线）：[http-adapter.md §2.2](http-adapter.md) 的四驱动矩阵 + 各驱动启动日志打印实际含义 | — | — |
+| ~~per-IP / per-AK 限流~~ | 已完成：`ratelimit.*`（令牌桶 + 并发上限，LRU 有界表），per-IP 在验签前、per-AK 在验签后，超限 `503 SlowDown` + `Retry-After: 1`，指标 `lights3_ratelimit_rejections_total{scope}`（[http-adapter.md §2.3](../http-adapter.md)） | — | — |
+| ~~`io_threads` 语义漂移~~ | 已完成（文档化矩阵路线）：[http-adapter.md §2.2](../http-adapter.md) 的四驱动矩阵 + 各驱动启动日志打印实际含义 | — | — |
 | 客户端断连独立取消源 | 文档明示的刻意取舍（长 handler 靠 `request_timeout` 兜底），**维持** | 中 | 高 |
 
-### 4.3 数据面性能（按投入产出排序）**已完成（2026-09-05，①②④⑤⑥⑦ + 基线入库；⑧ 维持不动；[http-adapter.md §2.4](http-adapter.md)、[performance-baseline.md](performance-baseline.md)）**
+### 4.3 数据面性能（按投入产出排序）**已完成（2026-09-05，①②④⑤⑥⑦ + 基线入库；⑧ 维持不动；[http-adapter.md §2.4](../http-adapter.md)、[performance-baseline.md](../performance-baseline.md)）**
 
 1. ~~**流式响应双缓冲/预取**~~（高/中）**已完成**：`drivers/common.h` `StreamPrefetch` + `Started<T>`，四驱动共用，契约不变。原文：现读后端与写 socket 严格交替，吞吐
    ≈ 1/(读延迟+写延迟)；rados 数据面已有双缓冲流水范式可抄。注意
@@ -337,7 +343,7 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
    per-request 聚合后一次提交。
 8. `HeaderMap` 线性扫描、`BlockQueue` 双拷贝：绝对量小，低优先。
 
-另：~~**性能基线缺失**~~（高/低）**已完成**：`scripts/bench_matrix.sh` + [performance-baseline.md](performance-baseline.md)；基线顺带揪出 beast 请求体 512 B/次 socket 读（PUT 4 MiB 慢 7×，已修，http-adapter §2.4 ⑨）；beast TLS GET 明显落后其他驱动，留作后续排查。原文：仓内无任何存档的 benchmark 数据，"beast
+另：~~**性能基线缺失**~~（高/低）**已完成**：`scripts/bench_matrix.sh` + [performance-baseline.md](../performance-baseline.md)；基线顺带揪出 beast 请求体 512 B/次 socket 读（PUT 4 MiB 慢 7×，已修，http-adapter §2.4 ⑨）；beast TLS GET 明显落后其他驱动，留作后续排查。原文：仓内无任何存档的 benchmark 数据，"beast
 是性能路径"是断言而非实测。跑一轮 `s3adm bench` × 4 驱动 × TLS 开关矩阵，
 结果入库 `docs/`，后续优化才有对照（`bench` 需先支持 `--output=json`，见
 §6.3）。
@@ -345,7 +351,7 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 ### 4.4 配置热重载 **已完成（2026-09-05，安全子集 + bucket 路由规则）**
 
 ~~现状：全项目唯一的热更新是凭证文件与 website 条目；`SIGHUP` 零命中，改日
-志级别/超时/限流/路由规则都要重启。~~ 落地（[config-reload.md](config-reload.md)）：
+志级别/超时/限流/路由规则都要重启。~~ 落地（[config-reload.md](../config-reload.md)）：
 `SIGHUP` / `POST /-/admin/config/reload` / `s3adm reload` 三入口共用
 `Application::reload_config`——重新 `Config::load` 做与启动相同的全量校验，失败
 整体拒绝；通过后应用可热更新子集（`log.level`、`request_timeout`、
@@ -360,8 +366,8 @@ meta 场景以 TTL 有界陈旧为契约。见 [storage/localfs.md](storage/loca
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
 | ~~排空死线硬编码~~ | 已完成：许可排空死线即 `http.shutdown_grace`（与驱动连接排空同一个量），`AsyncSemaphore::wait_drained` 条件变量等待替代 20ms 轮询 | — | — |
-| ~~关停失败退出码~~ | 已完成：后端 `close()` / 线程池 join 失败或在途请求超过排空死线 → `run()` 返回 `3`（[cli.md §2.1](cli.md)），进程管理器可察觉 | — | — |
-| HTTP/2 | 全仓零命中；S3 SDK 主流仍 HTTP/1.1，CDN/L7 前置场景才需要——**维持长期**，前置代理终结 h2 见 [tls.md §6](tls.md) | 中 | 高（长期） |
+| ~~关停失败退出码~~ | 已完成：后端 `close()` / 线程池 join 失败或在途请求超过排空死线 → `run()` 返回 `3`（[cli.md §2.1](../cli.md)），进程管理器可察觉 | — | — |
+| HTTP/2 | 全仓零命中；S3 SDK 主流仍 HTTP/1.1，CDN/L7 前置场景才需要——**维持长期**，前置代理终结 h2 见 [tls.md §6](../tls.md) | 中 | 高（长期） |
 
 ## 5. 可观测性
 
@@ -377,7 +383,7 @@ CopyObject/UploadPartCopy 按 `x-amz-copy-source` 细分）→
 计时装饰器 → `lights3_backend_op_seconds{backend,op}` 直方图 +
 `lights3_backend_errors_total{backend,op}`（后端错误率），并经请求取消令牌
 上的 `RequestBackendStats` 把后端耗时回填到访问日志尾部
-`api=… backend=<name>:<ms>`（[s3-protocol.md §7](s3-protocol.md)）。
+`api=… backend=<name>:<ms>`（[s3-protocol.md §7](../s3-protocol.md)）。
 
 ### 5.2 日志体系 **已完成（2026-09-05，三项全部）**
 
@@ -385,22 +391,22 @@ CopyObject/UploadPartCopy 按 `x-amz-copy-source` 细分）→
 | --- | --- | --- | --- |
 | ~~**异步 sink + 轮转**~~ | 已完成：`log.file`（空 = stderr，否则 `rotating_file_sink` 按 `max_size`/`max_files` 轮转，每秒定时 flush）、`log.async` + `async_queue` + `async_overflow`（block/drop）走 `async_logger`，`Logger::shutdown` 在应用停机末尾排空队列；`core/log.cc` | 高 | 低 |
 | ~~慢请求日志~~ | 已完成：`log.slow_request_threshold`（可热更新）——总耗时达阈值的访问行升 WARN 并附 `auth/handler/backend/ttfb/total` 阶段耗时；`log.level: warn` 下仍可见 | 高 | 低 |
-| ~~结构化访问日志~~ | 已完成：文本行 `path`/UA 加引号转义，新增 `remote/bucket/ttfb/ua` 槽；`log.format: json` 时整条运行日志每行一个对象，访问记录平铺 `request_id/remote/ak/method/path/query/bucket/key/status/bytes/ms/ttfb_ms/auth_ms/handler_ms/backend_ms/backend_calls/api/backend/ua`；流式响应在响应体读尽时写行（实际字节数 + 含传输的总耗时，中断标 `truncated`）；[s3-protocol.md §7](s3-protocol.md) | 中 | 低-中 |
+| ~~结构化访问日志~~ | 已完成：文本行 `path`/UA 加引号转义，新增 `remote/bucket/ttfb/ua` 槽；`log.format: json` 时整条运行日志每行一个对象，访问记录平铺 `request_id/remote/ak/method/path/query/bucket/key/status/bytes/ms/ttfb_ms/auth_ms/handler_ms/backend_ms/backend_calls/api/backend/ua`；流式响应在响应体读尽时写行（实际字节数 + 含传输的总耗时，中断标 `truncated`）；[s3-protocol.md §7](../s3-protocol.md) | 中 | 低-中 |
 
 ### 5.3 指标补口 **已完成（2026-09-05，五项全部）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
-| ~~L1 层零指标~~ | 连接数/accept/拒绝/超时随 §4.2 落地；本轮补 `lights3_http_requests_total`（÷ accepted = keep-alive 复用率）、`lights3_http_tls_handshakes_total{result}`（builtin/beast）、`lights3_http_parse_errors_total`（四驱动）；[http-adapter.md §2.2](http-adapter.md) | 高 | 低 |
+| ~~L1 层零指标~~ | 连接数/accept/拒绝/超时随 §4.2 落地；本轮补 `lights3_http_requests_total`（÷ accepted = keep-alive 复用率）、`lights3_http_tls_handshakes_total{result}`（builtin/beast）、`lights3_http_parse_errors_total`（四驱动）；[http-adapter.md §2.2](../http-adapter.md) | 高 | 低 |
 | ~~admission/stall 指标~~ | `http/admission.h` 的 `AdmissionCounters`：`lights3_admission_wait_seconds` 直方图 + `queued_total` + `cancelled_total`，停滞守卫带计数器 → `lights3_transfer_stalls_total{direction}` | 中 | 低 |
 | ~~精确状态码~~ | `lights3_responses_by_status_total{status}`（稀疏输出） | 中 | 极低 |
-| ~~website/匿名面指标~~ | `lights3_website_events_total{event=anon_read\|index_rewrite\|error_document\|redirect\|throttled}`；[static-website.md §6](static-website.md) | 中 | 极低 |
+| ~~website/匿名面指标~~ | `lights3_website_events_total{event=anon_read\|index_rewrite\|error_document\|redirect\|throttled}`；[static-website.md §6](../static-website.md) | 中 | 极低 |
 | ~~`/-/metrics` 匿名可达~~ | `http.metrics_access: anonymous\|root`（可热更新）：root 时 GET 须 root 凭证签名，healthz/readyz 不受影响；独立 admin 端口未做（root gate 已足够，端口层隔离仍可由部署侧完成） | 中 | 低 |
 
 ### 5.4 分布式 trace **轻量层已完成（2026-09-05）；otel-cpp 全量埋点维持长期**
 
 ~~全仓无 traceparent/otel 痕迹，只有自生成 `x-amz-request-id`。~~ 轻量方案
-已落地（`core/trace.h`，[s3-protocol.md §7](s3-protocol.md)）：接受并严格校验
+已落地（`core/trace.h`，[s3-protocol.md §7](../s3-protocol.md)）：接受并严格校验
 W3C `traceparent` + 透传 `tracestate`，缺失自起；每请求一个 span、来访 span 为
 parent；访问日志（文本 `trace=`/JSON `trace_id/span_id/parent_span_id`）、
 WARN/ERROR 行、审计数据面记录注入关联字段；响应头 `traceresponse`；cloudproxy
@@ -412,7 +418,7 @@ trace id（e2e 对网关→远端 lights3 两跳验证）。duostore meta+data �
 ### 5.5 监控消费侧（零 C++ 改动）**已完成（2026-09-05）**
 
 ~~`/-/metrics` 已是规范 Prometheus 文本格式、`lights3_*` 命名统一，但一张
-dashboard、一条告警规则都没有。~~ 已补齐（[monitoring.md](monitoring.md)）：
+dashboard、一条告警规则都没有。~~ 已补齐（[monitoring.md](../monitoring.md)）：
 `deploy/prometheus/scrape.yml` + `lights3.rules.yml`（7 条 recording + 39 条
 告警：5xx 率、P99、准入饱和、GC 未收敛/停滞、tiered 逐出压力（水位信号）
 与隔离、cloudproxy 重试率/远端错误/ETag 不符、`xlocalfs_uring_fallback=1`、
@@ -428,7 +434,7 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 注：本项目已明确不使用 GitHub Actions CI，回归全靠脚本手工触发；下面的
 "自动化"均指本地脚本/ctest 层面。
 
-### 6.1 测试缺口 **已完成（2026-09-05，八项全部；[testing.md](testing.md)）**
+### 6.1 测试缺口 **已完成（2026-09-05，八项全部；[testing.md](../testing.md)）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |
@@ -447,13 +453,13 @@ tiered 本地层已用字节 gauge 未导出（需 C++），水位以逐出速�
 | --- | --- | --- | --- |
 | ~~`s3adm fsck/scrub`~~ **已完成（2026-08-28）** | 见 §3.1（`s3adm fsck` + `lights3 fsck`） | — | — |
 | ~~`lights3 duostore gc/scan`、`tier scan/reconcile`~~ **已完成（2026-08-28）** | 见 §3.2（含 `tier gc`） | — | — |
-| ~~`s3adm object inspect`~~ **已完成（2026-09-05）** | `IStorageBackend::inspect_object` + `GET /-/admin/objects/<bucket>/<key>`（root）：localfs/xlocalfs 路径/inode/元数据来源/tier，duostore 元数据版本与 chunk/pack/rados extents（id/offset/length/crc32c），tiered 分层视图 + 本地引擎布局，memory/cloudproxy 报 null；[cli.md §3.10](cli.md) | 中-高 | 低-中 |
-| ~~`s3adm mpu list/abort`~~ **已完成（2026-09-05）** | 标准 API 包装，翻页、`--older-than`/`--prefix` 选集、`abort --all`；[cli.md §3.11](cli.md) | 中 | 低 |
-| ~~`lights3 --check-config`~~ **已完成（2026-09-05）** | dry-run：`Config::load` 校验 + 驱动/后端类型是否编入 + 解析摘要，不开后端不绑端口；[cli.md §2.1](cli.md) | 中 | 极低 |
+| ~~`s3adm object inspect`~~ **已完成（2026-09-05）** | `IStorageBackend::inspect_object` + `GET /-/admin/objects/<bucket>/<key>`（root）：localfs/xlocalfs 路径/inode/元数据来源/tier，duostore 元数据版本与 chunk/pack/rados extents（id/offset/length/crc32c），tiered 分层视图 + 本地引擎布局，memory/cloudproxy 报 null；[cli.md §3.10](../cli.md) | 中-高 | 低-中 |
+| ~~`s3adm mpu list/abort`~~ **已完成（2026-09-05）** | 标准 API 包装，翻页、`--older-than`/`--prefix` 选集、`abort --all`；[cli.md §3.11](../cli.md) | 中 | 低 |
+| ~~`lights3 --check-config`~~ **已完成（2026-09-05）** | dry-run：`Config::load` 校验 + 驱动/后端类型是否编入 + 解析摘要，不开后端不绑端口；[cli.md §2.1](../cli.md) | 中 | 极低 |
 | ~~`s3adm bench --output=json`~~ **已完成（2026-09-05）** | 单个 JSON 汇总对象，`scripts/bench_gate.sh` 已改用它做阈值比对 | 中 | 低 |
 | ~~`s3adm usage`~~ **已完成（2026-09-04）** | 见 §3.9①（`s3adm usage [bucket] [--rescan]`，另有 `quota`/`tenant` 命令组） | — | — |
 
-### 6.3 构建与分发 **已完成（2026-09-05，五项全部；[deployment.md](deployment.md)）**
+### 6.3 构建与分发 **已完成（2026-09-05，五项全部；[deployment.md](../deployment.md)）**
 
 | 条目 | 现状 | 价值 | 难度 |
 | --- | --- | --- | --- |

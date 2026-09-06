@@ -994,6 +994,127 @@ TEST(block_queue_cancel_wakes_blocked_consumer) {
     CHECK(threw.load());  // cancel is not a normal EOF, it propagates as an exception
 }
 
+// backlog-sequence ⑩: pieces pushed from a borrowed buffer coalesce into one tail
+// block, so the consumer pops them in one go; a block moved in stays its own
+// block; byte order and the byte-capped backpressure are unchanged
+TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
+    auto q = std::make_shared<BlockQueue>(1 << 20);
+    std::string expect;
+    for (int i = 0; i < 16; ++i) {  // 16 x 16 KiB slices, the httplib receiver's shape (CPPHTTPLIB_RECV_BUFSIZ)
+        std::string piece(16384, char('a' + i));
+        expect += piece;
+        CHECK(q->push(piece.data(), piece.size()));
+    }
+    std::string owned(100, 'Z');
+    expect += owned;
+    CHECK(q->push(std::move(owned)));
+    CHECK(q->push("tail", 4));
+    expect += "tail";
+    CHECK(q->push("", 0));  // empty pieces are dropped, never a zero-size block (= EOF to pop)
+    CHECK(q->push(std::string()));
+    q->close(true);
+    std::vector<std::byte> buf(1 << 20);
+    std::string got;
+    size_t pops = 0;
+    for (;;) {
+        size_t n = q->pop(std::span(buf));
+        if (n == 0) break;
+        got.append(reinterpret_cast<const char*>(buf.data()), n);
+        ++pops;
+    }
+    CHECK_EQ(got, expect);
+    CHECK_EQ(pops, size_t(3));  // one coalesced block, the owned block, a new tail after it
+
+    // A piece larger than the target becomes its own block; the consumer can drain
+    // the block the producer is still appending to (both under the lock)
+    auto q2 = std::make_shared<BlockQueue>(4 * BlockQueue::kBlockTarget);
+    std::string big(BlockQueue::kBlockTarget + 1, 'B');
+    CHECK(q2->push(big.data(), big.size()));
+    CHECK(q2->push("ab", 2));
+    std::byte small[3];
+    CHECK_EQ(q2->pop(std::span(small)), size_t(3));
+    CHECK(q2->push("cd", 2));  // appends to the open tail while it is partly consumed
+    q2->close(true);
+    std::string rest;
+    for (;;) {
+        size_t n = q2->pop(std::span(buf));
+        if (n == 0) break;
+        rest.append(reinterpret_cast<const char*>(buf.data()), n);
+    }
+    CHECK_EQ(rest.size(), big.size() - 3 + 4);
+    CHECK_EQ(rest.substr(rest.size() - 4), std::string("abcd"));
+
+    // Backpressure: the byte cap still blocks the producer once the coalesced
+    // bytes reach it, and a pop releases it
+    auto q3 = std::make_shared<BlockQueue>(8192);
+    CHECK(q3->push(std::string(8192, 'x')));
+    std::atomic<bool> pushed{false};
+    std::thread producer([&] {
+        q3->push("y", 1);
+        pushed.store(true);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(!pushed.load());
+    std::byte one[1];
+    CHECK_EQ(q3->pop(std::span(one)), size_t(1));
+    producer.join();
+    CHECK(pushed.load());
+}
+
+// backlog-sequence ⑩: the 8-bit name tag is a prefilter only -- every operation
+// stays case-insensitive and exact, including after removals shift the table
+TEST(header_map_tag_prefilter_keeps_semantics) {
+    CHECK_EQ(HeaderMap::tag("Content-Type"), HeaderMap::tag("content-type"));
+    CHECK_EQ(HeaderMap::tag("X-Amz-Date"), HeaderMap::tag("x-AMZ-date"));
+    HeaderMap h;
+    h.add("Content-Type", "text/plain");
+    h.add("x-amz-meta-a", "1");
+    h.add("Set-Cookie", "a=1");
+    h.add("set-cookie", "b=2");
+    h.add("X-Amz-Meta-A", "2");
+    CHECK_EQ(h.get("CONTENT-TYPE").value_or(""), "text/plain");
+    CHECK_EQ(h.count("Set-Cookie"), size_t(2));
+    CHECK_EQ(h.get_all("X-AMZ-META-A").size(), size_t(2));
+    CHECK_EQ(*h.get_all("X-AMZ-META-A")[1], "2");
+    CHECK(!h.has("content-typo"));
+    h.set("content-type", "text/html");  // replaces in place, keeps position
+    CHECK_EQ(h.items()[0].second, "text/html");
+    CHECK_EQ(h.items().size(), size_t(5));
+    CHECK_EQ(h.remove("SET-COOKIE"), size_t(2));
+    CHECK_EQ(h.items().size(), size_t(3));
+    CHECK_EQ(h.count("set-cookie"), size_t(0));
+    // The tags moved with their items: lookups after the compaction still hit
+    CHECK_EQ(h.get_all("x-amz-meta-a").size(), size_t(2));
+    CHECK_EQ(h.items()[1].first, "x-amz-meta-a");
+    CHECK_EQ(h.items()[2].first, "X-Amz-Meta-A");
+    h.set("New-Header", "v");
+    CHECK_EQ(h.items().size(), size_t(4));
+    CHECK_EQ(h.get("new-header").value_or(""), "v");
+    h.add("Connection", "keep-alive, Upgrade");
+    CHECK(h.has_token("CONNECTION", "upgrade"));
+    CHECK(!h.has_token("CONNECTION", "close"));
+    // Names that collide on the tag are still told apart by the compare: find one
+    // by brute force to prove the collision path
+    std::string other;
+    for (size_t len = 1; len <= 24 && other.empty(); ++len)
+        for (char f = 'a'; f <= 'z' && other.empty(); ++f)
+            for (char l = 'a'; l <= 'z' && other.empty(); ++l) {
+                std::string cand(len, 'q');
+                cand.front() = f;
+                cand.back() = l;
+                if (!HeaderMap::ieq(cand, "New-Header") &&
+                    HeaderMap::tag(cand) == HeaderMap::tag("New-Header"))
+                    other = cand;
+            }
+    CHECK(!other.empty());
+    CHECK(!h.has(other));
+    h.add(other, "w");
+    CHECK_EQ(h.get("NEW-HEADER").value_or(""), "v");
+    CHECK_EQ(h.get(other).value_or(""), "w");
+    CHECK_EQ(h.remove("new-header"), size_t(1));
+    CHECK_EQ(h.get(other).value_or(""), "w");
+}
+
 TEST(block_queue_normal_eof_still_returns_zero) {
     auto q = std::make_shared<BlockQueue>(64 * 1024);
     CHECK(q->push("hello", 5));

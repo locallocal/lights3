@@ -745,20 +745,24 @@ Task<PutResult> CloudProxyBackend::stream_upload(
     uint64_t sent = 0;
     bool remote_gone = false;
     std::exception_ptr read_err;
-    std::vector<std::byte> buf(64 * 1024);
+    constexpr size_t kChunk = 64 * 1024;
     try {
         // Read until EOF (n==0) rather than stopping at sent==len: the storage-backend
         // contract requires draining the body -- the verification decorators (sha256/chunked
         // checks) hook at full-read/EOF, and stopping at full-read would skip them
         for (;;) {
-            size_t n = co_await body.read(std::span(buf));
+            // A fresh block per read, moved into the queue whole (backlog-sequence ⑩):
+            // the copy under the queue lock goes away for the price of one allocation
+            std::string chunk(kChunk, '\0');
+            size_t n = co_await body.read(std::as_writable_bytes(std::span(chunk)));
             // body.read may resume the coroutine on an L1 driver thread (beast returns to
             // the strand via symmetric transfer); push can block on backpressure, so it must
             // be done back on a pool thread, never holding the event loop (§2.3)
             co_await pool_->schedule();
             if (n == 0) break;
-            md5.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
-            if (!queue->push(reinterpret_cast<const char*>(buf.data()), n)) {
+            chunk.resize(n);
+            md5.update(std::span(reinterpret_cast<const uint8_t*>(chunk.data()), n));
+            if (!queue->push(std::move(chunk))) {
                 remote_gone = true;
                 break;
             }

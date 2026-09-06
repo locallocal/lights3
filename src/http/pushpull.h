@@ -5,8 +5,15 @@
 // consumer has cancelled; consumer pop returning 0 means EOF, and pop after
 // close(ok=false) propagates as an exception (matching the "peer failed
 // mid-transfer" contract).
+// Block shaping (backlog-sequence ⑩): a producer that hands over pieces it does
+// not own (httplib's content receiver: 16 KiB slices of its own buffer) has them
+// appended to one growing tail block of up to kBlockTarget bytes, so the consumer
+// pops large blocks and the two threads hand off per block, not per slice; a
+// producer that owns its buffer moves it in as a block of its own (push(string&&),
+// no copy under the lock).
 #pragma once
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -23,6 +30,12 @@ namespace lights3::http {
 
 class BlockQueue {
 public:
+    // Tail block size at which a new one starts: large enough that a 4 MiB body
+    // crosses the threads 16 times, small enough to stay well under the queue
+    // capacities in use (256 KiB httplib driver, 1 MiB cloudproxy). A fresh tail
+    // block reserves min(kBlockTarget, cap) up front so appends never reallocate
+    static constexpr size_t kBlockTarget = 256 * 1024;
+
     explicit BlockQueue(size_t cap_bytes) : cap_(cap_bytes) {}
 
     // Producer; false means the consumer has cancelled (the pusher aborts the transfer on false)
@@ -30,8 +43,34 @@ public:
         std::unique_lock lk(m_);
         cv_push_.wait(lk, [&] { return bytes_ < cap_ || cancelled_; });
         if (cancelled_) return false;
-        blocks_.emplace_back(data, n);
+        if (n == 0) return true;  // an empty block would read as EOF on the pop side
+        // Append to the tail while it is a coalescing block with room; the consumer
+        // may be draining the same block (front_pos_ < size), which is safe: both
+        // sides hold m_ for the whole copy
+        if (!blocks_.empty() && tail_open_ && blocks_.back().size() + n <= kBlockTarget) {
+            blocks_.back().append(data, n);
+        } else if (n >= kBlockTarget) {
+            blocks_.emplace_back(data, n);
+            tail_open_ = false;
+        } else {
+            blocks_.emplace_back();
+            blocks_.back().reserve(std::min(kBlockTarget, std::max(cap_, n)));
+            blocks_.back().append(data, n);
+            tail_open_ = true;
+        }
         bytes_ += n;
+        cv_pop_.notify_one();
+        return true;
+    }
+    // Producer owning its buffer: the block is taken over as is (no copy)
+    bool push(std::string&& block) {
+        std::unique_lock lk(m_);
+        cv_push_.wait(lk, [&] { return bytes_ < cap_ || cancelled_; });
+        if (cancelled_) return false;
+        if (block.empty()) return true;
+        bytes_ += block.size();
+        blocks_.push_back(std::move(block));
+        tail_open_ = false;
         cv_pop_.notify_one();
         return true;
     }
@@ -82,6 +121,7 @@ private:
     std::mutex m_;
     std::condition_variable cv_push_, cv_pop_;
     std::deque<std::string> blocks_;
+    bool tail_open_ = false;  // blocks_.back() is a coalescing block push(const char*) may still append to
     size_t front_pos_ = 0;
     size_t bytes_ = 0;
     size_t cap_;

@@ -19,7 +19,7 @@ backlog.md §1 删掉，本文对应行划掉并记日期。
 | 7 | D 运维纵深 | ~~后端实例增删热重载~~ **已完成（2026-09-06）** | 中 / 高 | 4–5 天 | 动 Application 生命周期与路由表换代，风险最高，放在多实例与身份两条线稳定之后 |
 | 8 | D 运维纵深 | duostore meta 增量备份 / PITR | 中 / 高 | 5+ 天（按引擎分期） | 四个引擎各不相同，天然可拆成四个小迭代；不阻塞任何其他项 |
 | 9 | E 机会项 | client-c 结构化错误码上游贡献 | 低 / 中 | 1–2 天 + 上游周期 | 外部依赖节奏，任何空档都能做；功能不受影响 |
-| 10 | E 机会项 | `HeaderMap` 线性扫描 / `BlockQueue` 双拷贝 | 低 / 低 | 视 profile | 有 profile 证据才动；没有证据就一直排在最后 |
+| 10 | E 机会项 | ~~`HeaderMap` 线性扫描 / `BlockQueue` 双拷贝~~ **已完成（2026-09-06）** | 低 / 低 | 视 profile | 有 profile 证据才动；没有证据就一直排在最后 |
 
 依赖只有两条实线：② → ③（端点落到新端口上）、④ → ⑤（共用多实例 e2e 脚手架
 与 `.sys` 共享状态的写法）。其余各项相互独立，A/B/C 三个阶段可以并行推进；
@@ -155,6 +155,19 @@ D 阶段建议等 B 落地后再动 ⑦。
   超过请求 CPU 的 2%。没有这个证据就不动。
 - **若做**：`HeaderMap` 保持 vector 但加小写键的 8 位哈希预筛；`BlockQueue::push`
   接受 `std::string&&` 让 httplib 的 content receiver 直接移交。
+- **实际做法（2026-09-06，按要求提前做，无 perf 火焰图，以微基准 + 驱动压测为证据）**：
+  - `HeaderMap`：每项旁存 8 位 tag + 256 位"在场 tag"集合，未命中不扫描。tag 取
+    名字长度 + 小写首尾字符（O(1)），**不是**整名哈希——实测 FNV-1a tag 的哈希
+    代价与省下的扫描相当，命中反而从 8.3 慢到 13.3 ns。微基准（25 个头、-O2）：
+    未命中 15→1.8 ns，命中 8.3→8.0 ns，混合 12.6→6.7 ns。
+  - `BlockQueue`：httplib 的 content receiver 给的是它自己缓冲的 `const char*` 片，
+    **移交不成立**，改为把连续的借用片拼进同一个 ≤256 KiB 尾块（消费方按块 pop，
+    256 MiB 从 16384 次降到约 4.6K 次），`push(std::string&&)` 留给真正持有缓冲的
+    生产者（cloudproxy 出方向上传：每轮读进新分配的 64 KiB string 后整块移入）。
+    空 push 一律丢弃（零长块会被 pop 当作 EOF）。
+  - 驱动压测（`bench_matrix.sh`，httplib 明文，localfs）：4 MiB PUT 1077→1114 ops/s，
+    GET 与 16 KiB 小对象持平——与 backlog 当初"绝对量小"的判断一致。
+  - 细节见 [http-adapter.md §2.4 ⑧](http-adapter.md)、[cloudproxy-backend.md §3](cloudproxy-backend.md)。
 
 ## 6. 记账
 
@@ -169,4 +182,4 @@ D 阶段建议等 B 落地后再动 ⑦。
 | ⑦ | 后端实例增删热重载 | 已完成 | 2026-09-06 / `feat/backend-hot-reload` |
 | ⑧ | duostore meta 增量备份 / PITR | 已完成 | 2026-09-06 / `feat/duostore-meta-pitr` |
 | ⑨ | client-c 上游贡献 | 本仓侧完成，待上游合入 | 2026-09-06 / `feat/client-c-write-conflict-code`；补丁在 `third_party/patches/client-c`，合入后升指针、删消息串分支 |
-| ⑩ | HeaderMap / BlockQueue | 等 profile 证据 | |
+| ⑩ | HeaderMap / BlockQueue | 已完成（按要求提前做，微基准 + 驱动压测为证据） | 2026-09-06 / `feat/headermap-tag-blockqueue-move` |

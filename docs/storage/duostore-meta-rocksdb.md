@@ -1,11 +1,11 @@
 # RocksMetaStore：DuoStore 元数据的 RocksDB 实现
 
 本文是 `RocksMetaStore` 的实现级文档，展开
-[../duostore-backend.md](../duostore-backend.md)（下称"主文档"）§4 的设计在代码中的
-具体落法。DuoStoreBackend 主体与双接口拆分见 [./duostore-core.md](./duostore-core.md)；
-姊妹实现见 [./duostore-meta-sqlite.md](./duostore-meta-sqlite.md) 与
-[../duostore-redis-meta.md](../duostore-redis-meta.md) /
-[../duostore-tikv-meta.md](../duostore-tikv-meta.md)。涉及文件：
+[duostore-design.md](duostore-design.md)（下称"主文档"）§4 的设计在代码中的
+具体落法。DuoStoreBackend 主体与双接口拆分见 [./duostore-core.md](duostore-core.md)；
+姊妹实现见 [./duostore-meta-sqlite.md](duostore-meta-sqlite.md) 与
+[duostore-meta-redis-design.md](duostore-meta-redis-design.md) /
+[duostore-meta-tikv-design.md](duostore-meta-tikv-design.md)。涉及文件：
 
 | 文件 | 内容 |
 | --- | --- |

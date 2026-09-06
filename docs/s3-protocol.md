@@ -229,7 +229,7 @@ L1 连接与限流指标（roadmap §4.2）：`lights3_http_connections_total{re
   的取消/内部错误 WARN/ERROR 行 `trace=`、审计数据面记录 `trace_id`；响应头
   `traceresponse: 00-<trace_id>-<span_id>-<flags>`（W3C 草案）让无 tracer 的
   客户端也能引用。出站：cloudproxy 每个远端请求带网关自身 span 的 `traceparent`
-  （远端以之为 parent，链接落在双方日志里）+ `tracestate`（[cloudproxy-backend.md §2.2](cloudproxy-backend.md)），
+  （远端以之为 parent，链接落在双方日志里）+ `tracestate`（[cloudproxy-design.md §2.2](storage/cloudproxy-design.md)），
   多跳（网关→cloudproxy 远端 lights3 / tiered 冷层）按同一 trace id 关联；
   后台任务（tiered 降冷、GC）无请求上下文，不带 trace 头。不导出 span：
   otel-cpp 全量埋点仍是长期项。

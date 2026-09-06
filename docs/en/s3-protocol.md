@@ -270,7 +270,7 @@ L1 connection and rate-limit metrics (roadmap §4.2): `lights3_http_connections_
   client without a tracer quote it. Outbound: every cloudproxy request carries
   the gateway's own span in `traceparent` (the remote logs it as parent, so the
   link lands in both logs) plus `tracestate`
-  ([cloudproxy-backend.md §2.2](cloudproxy-backend.md)), so multi-hop setups
+  ([cloudproxy-design.md §2.2](storage/cloudproxy-design.md)), so multi-hop setups
   (gateway → remote lights3 behind cloudproxy / tiered cold layer) correlate on
   one trace id; background work (tiered demotion, GC) has no request context
   and sends no trace headers. Nothing is exported: otel-cpp instrumentation

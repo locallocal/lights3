@@ -1,4 +1,4 @@
-// L3: resident access-record table with a TSV snapshot (docs/tiered-storage.md §4.3).
+// L3: resident access-record table with a TSV snapshot (docs/storage/tiered-design.md §4.3).
 // The fallback store for local sides that cannot attach a record to the object itself
 // (duostore's meta has no in-place update primitive; a filesystem without xattrs):
 // memory grows with the tracked object count, which the xattr store avoids

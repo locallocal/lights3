@@ -195,7 +195,7 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
   （下轮仍复现会再记）；`tier quarantine purge <backend> <bucket> <key>` 针对
   `refs_missing`：HEAD 复核云副本仍不存在后删除这个已死的本地 stub（承认数据
   丢失，对象从列表消失；副本回来了则保留 stub、销账并返回退出码 1）。
-  见 [tiered-storage.md §9](tiered-storage.md)。
+  见 [tiered-design.md §9](storage/tiered-design.md)。
 
 ```bash
 ./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # 立即回收空间

@@ -8,12 +8,12 @@
 > OFF）。submodule `third_party/client-c` 锁定 `78a557e`
 > （2026-07-21，上游无 release tag 只能按 commit 锁定）。实施偏差：上游扩展
 > 未走 fork，改为 in-tree 侧车（§6.3）。兑现
-> [duostore-backend.md](duostore-backend.md)
+> [duostore-design.md](duostore-design.md)
 > §12 "TiKV（多网关共 meta）"的演进承诺：实现 `IMetaStore`
 > （`src/storage/duostore/meta_store.h`），meta 侧获得**水平扩展 + 多副本
 > 高可用**，补齐 Redis 版（单点/主从）之上的最后一级。客户端库
 > [tikv/client-c](https://github.com/tikv/client-c)。本文中"主文档"指
-> duostore-backend.md，`§N` 不带前缀时指本文档章节。
+> duostore-design.md，`§N` 不带前缀时指本文档章节。
 >
 > **先读结论**：client-c 的传输基建（PD/TSO、region cache、重试退避、
 > lock 解析）经 TiFlash 生产验证，但其**事务提交层是 test-grade**——
@@ -115,7 +115,7 @@ RocksDB 版（主文档 §4.4）的迭代结构原样成立，迭代原语换成
 
 - 打开一个 `Snapshot`（TSO 定版本）作为整次 list 的一致视图——**跨
   Scanner 重建全程有效**，这是 MVCC 的直接红利：Redis 版要靠"整个循环
-  塞进一个 Lua 脚本"才买到的单次调用一致性（duostore-redis-meta.md
+  塞进一个 Lua 脚本"才买到的单次调用一致性（duostore-meta-redis-design.md
   §2.3），这里免费；
 - seek 起点 = `max(prefix, start_after 的后继)`；delimiter 命中归组后
   **组末字节 +1 构造后继 seek 点**，在同一 Snapshot 上新建 Scanner 跳过
@@ -142,7 +142,7 @@ prewrite 对写集内每个 key 检查"是否存在 commit_ts > start_ts 的写�
 免费保证**（WriteConflict / KeyIsLocked → 重试）。对比：
 
 - Redis 版要把"读到的原始字节"作为前置条件传给 Lua 脚本逐一比对
-  （duostore-redis-meta.md §3.2）；TiKV 版对**写集内**的 key 天然 CAS，
+  （duostore-meta-redis-design.md §3.2）；TiKV 版对**写集内**的 key 天然 CAS，
   前置条件绝大部分消失；
 - 例外是"只读不写"的前置条件（bucket 存在性、delete_bucket 空检查、
   put_part 的 upload 存在性）——乐观 2PC 不校验只读键，构成写偏斜

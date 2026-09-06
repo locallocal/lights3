@@ -16,7 +16,7 @@ design document -- no struck-through history here. Each entry carries
 
 | Item | Source | State and remaining steps | Value | Difficulty |
 | --- | --- | --- | --- | --- |
-| Structured error codes merged upstream in client-c | backlog-sequence ⑨, [duostore-tikv-meta.md](duostore-tikv-meta.md) | Done on our side (2026-09-06): patch in `third_party/patches/client-c` (README has the PR text and the post-merge steps); the sidecar picks by-code / by-message at compile time from the linked library. Remaining: open the upstream PR → after the merge bump the submodule pointer, delete the message branch and the patch directory | low | low |
+| Structured error codes merged upstream in client-c | backlog-sequence ⑨, [duostore-meta-tikv-design.md](storage/duostore-meta-tikv-design.md) | Done on our side (2026-09-06): patch in `third_party/patches/client-c` (README has the PR text and the post-merge steps); the sidecar picks by-code / by-message at compile time from the linked library. Remaining: open the upstream PR → after the merge bump the submodule pointer, delete the message branch and the patch directory | low | low |
 
 ## 2. Pending verification (implemented, not verifiable on the development box)
 
@@ -52,7 +52,7 @@ design document -- no struck-through history here. Each entry carries
 | Bucket Policy (IAM language) | Per-credential policy already covers tenant isolation, anonymous public buckets are handled by the website face; an IAM evaluator is a subsystem of its own, out of proportion |
 | SigV2 | Retired by AWS, clients have all but disappeared |
 | presigned POST | Needs half a streaming multipart/form-data parser first; CORS + presigned PUT is the more modern path |
-| cloudproxy outbound streaming-signed uploads | High complexity for integrity over plaintext HTTP only ([cloudproxy-backend.md](cloudproxy-backend.md)) |
+| cloudproxy outbound streaming-signed uploads | High complexity for integrity over plaintext HTTP only ([cloudproxy-design.md](storage/cloudproxy-design.md)) |
 | A pack layer on the rados data plane | Argued as a design boundary in the code (small-object amplification is left to BlueStore `min_alloc_size`) |
 | CivetWeb or other new HTTP drivers | The four drivers cover the design space ([http-adapter.md §3.4](http-adapter.md)) |
 | GitHub Actions CI | Deliberately removed; automation investment goes into the local script matrix (`scripts/check-all.sh`, [testing.md §8](testing.md)) |

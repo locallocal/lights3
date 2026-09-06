@@ -56,7 +56,7 @@ struct LocalObject {
     int64_t mtime = 0;         // epoch seconds of the local record (access-time fallback)
 };
 
-// Per-object access record (docs/tiered-storage.md §4.3): last access, a saturating
+// Per-object access record (docs/storage/tiered-design.md §4.3): last access, a saturating
 // access count (frequency-aware eviction, roadmap §3.6 ③) and the time-wheel slot the
 // key was last enrolled in (incremental scanning, ①). Persisted by the local side
 // (xattr on the data file for localfs; a resident table for duostore); the backend
@@ -143,7 +143,7 @@ public:
     virtual Task<std::unique_ptr<http::BodyReader>> open_snapshot(std::string_view bucket,
                                                                   std::string_view key,
                                                                   uint64_t size) = 0;
-    // Stub commit (docs/tiered-storage.md §5.2 ④): caller holds the per-key lock and has
+    // Stub commit (docs/storage/tiered-design.md §5.2 ④): caller holds the per-key lock and has
     // verified the state; also finishes a half-done stub (remote with data still present)
     virtual Task<void> commit_stub(std::string_view bucket, std::string_view key,
                                    const ObjectMeta& meta, const TierInfo& tier) = 0;

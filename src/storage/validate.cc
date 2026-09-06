@@ -131,7 +131,7 @@ void validate_fs_object_key(std::string_view k) {
             throw S3Error(S3ErrorCode::InvalidArgument,
                           "Object key contains an empty path segment.");
         // A single segment beyond the file-name limit (255B) cannot land on disk
-        // (docs/storage-backend.md §3.1)
+        // (docs/storage/storage-backend.md §3.1)
         if (seg.size() > 255)
             throw S3Error(S3ErrorCode::KeyTooLongError,
                           "A single path segment of the key exceeds 255 bytes.");

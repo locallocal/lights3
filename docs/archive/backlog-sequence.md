@@ -45,7 +45,7 @@ D 阶段建议等 B 落地后再动 ⑦。
   加一条"接近高水位"告警。
 - **验收**：`test_tiered.cc` 断言 gauge 在场且写入后单调；ctest `monitoring_assets`
   通过（dashboard 必须由生成器重新生成，逐字节一致）；[monitoring.md](../monitoring.md)、
-  [tiered-storage.md](../tiered-storage.md) 各补一行。
+  [tiered-design.md](../storage/tiered-design.md) 各补一行。
 
 ### ② 独立 admin 端口
 
@@ -99,7 +99,7 @@ D 阶段建议等 B 落地后再动 ⑦。
 - **验收**：`test_duostore_redis.cc`（有实例才跑）——两个 backend 实例共享一个 redis，
   A 写 B 读命中新值；订阅连接被 kill 后 B 清缓存并恢复；e2e `duostore-redis`
   段增两实例用例；[storage/duostore-core.md §7.1](../storage/duostore-core.md)、
-  [duostore-redis-meta.md](../duostore-redis-meta.md)。
+  [duostore-meta-redis-design.md](../storage/duostore-meta-redis-design.md)。
 
 ## 3. 阶段 C：身份（约 2–3 天）
 
@@ -171,7 +171,7 @@ D 阶段建议等 B 落地后再动 ⑦。
     空 push 一律丢弃（零长块会被 pop 当作 EOF）。
   - 驱动压测（`bench_matrix.sh`，httplib 明文，localfs）：4 MiB PUT 1077→1114 ops/s，
     GET 与 16 KiB 小对象持平——与 backlog 当初"绝对量小"的判断一致。
-  - 细节见 [http-adapter.md §2.4 ⑧](../http-adapter.md)、[cloudproxy-backend.md §3](../cloudproxy-backend.md)。
+  - 细节见 [http-adapter.md §2.4 ⑧](../http-adapter.md)、[cloudproxy-design.md §3](../storage/cloudproxy-design.md)。
 
 ## 6. 记账
 

@@ -1,4 +1,4 @@
-// L3: ITierLocal over the localfs/xlocalfs disk layout (docs/tiered-storage.md §4,
+// L3: ITierLocal over the localfs/xlocalfs disk layout (docs/storage/tiered-design.md §4,
 // docs/storage/tiered.md §2). Tier state rides in the object's xattr/sidecar
 // (fs_util TierInfo), the stub is a 0-length data file, commits are the fs_util
 // rename primitives; access records live in a second xattr on the data file

@@ -2,7 +2,7 @@
 
 > 本文是 `src/storage/tiered/tiered_backend.h/.cc` 的实现级文档：数据结构、
 > 后台流程逐步拆解、竞态处理与指标。设计动机、状态机与方案取舍见
-> [../tiered-storage.md](../tiered-storage.md)（下文以 §N 引用其章节），
+> [tiered-design.md](tiered-design.md)（下文以 §N 引用其章节），
 > 本文不重复其内容，只讲"代码怎么落地的"。
 
 ## 1. 组合方式与构造

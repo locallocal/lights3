@@ -1,5 +1,5 @@
 # compose profile `redis`: duostore with its metadata in the redis service
-# (docs/duostore-redis-meta.md), chunk/pack data under the volume
+# (docs/storage/duostore-meta-redis-design.md), chunk/pack data under the volume
 http:
   driver: builtin
   bind: 0.0.0.0

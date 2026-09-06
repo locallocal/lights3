@@ -2,7 +2,7 @@
 
 本文档覆盖 `src/storage/` 顶层的公共代码：后端接口、注册与构建、bucket 路由、
 以及所有后端共享的校验/列举/分片辅助件。设计动机与各后端的具体实现见
-[storage-backend.md](../storage-backend.md)；本文只讲实现层的契约与算法。
+[storage-backend.md](storage-backend.md)；本文只讲实现层的契约与算法。
 
 ## 1. 定位与文件清单
 
@@ -185,7 +185,7 @@ map），参数解释权在各后端。注册表本体是 `registry.cc` 匿名�
 | `tiered` | 不走注册表，`build` 内特判延迟构建（见下） |
 
 第三方扩展路径：调用 `StorageRegistry::register_backend(type, factory)`
-（[storage-backend.md](../storage-backend.md) §6）。
+（[storage-backend.md](storage-backend.md) §6）。
 
 ### 4.2 build 的两阶段与回滚
 
@@ -375,4 +375,4 @@ CommonPrefix 与对象条目共享同一个 `max_keys` 名额池（与 S3 一致
 - 公共层自身登记的指标：`lights3_backend_pool_*` 四项（§4.3）、
   `lights3_xlocalfs_uring_fallback`、`lights3_memory_backend_used_bytes`
   （§4.1）；后端内部指标接入示例见
-  [duostore-backend.md](../duostore-backend.md)。
+  [duostore-design.md](duostore-design.md)。

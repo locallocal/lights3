@@ -12,7 +12,7 @@
 
 | 条目 | 出处 | 现状与剩余步骤 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
-| client-c 结构化错误码上游合入 | backlog-sequence ⑨，[duostore-tikv-meta.md](duostore-tikv-meta.md) | 本仓侧已完成（2026-09-06）：补丁在 `third_party/patches/client-c`（README 含 PR 描述与合入后步骤），sidecar 编译期按链接到的库选择按码 / 按消息串。剩余：开上游 PR → 合入后升子模块指针、删消息串分支与补丁目录 | 低 | 低 |
+| client-c 结构化错误码上游合入 | backlog-sequence ⑨，[duostore-meta-tikv-design.md](storage/duostore-meta-tikv-design.md) | 本仓侧已完成（2026-09-06）：补丁在 `third_party/patches/client-c`（README 含 PR 描述与合入后步骤），sidecar 编译期按链接到的库选择按码 / 按消息串。剩余：开上游 PR → 合入后升子模块指针、删消息串分支与补丁目录 | 低 | 低 |
 
 ## 2. 待验证（代码已落地，本机环境验证不了）
 
@@ -48,7 +48,7 @@
 | Bucket Policy（IAM 语言） | per-credential policy 已覆盖多租户隔离，匿名公开桶由 website 面解决；IAM 求值器是独立子系统，投入不成比例 |
 | SigV2 | AWS 已停用，客户端基本绝迹 |
 | presigned POST | 需先写半个 multipart/form-data 流式解析器；CORS + presigned PUT 是更现代的替代路径 |
-| cloudproxy 出方向 streaming 签名上传 | 复杂度高、收益仅是明文 HTTP 下的完整性（[cloudproxy-backend.md](cloudproxy-backend.md)） |
+| cloudproxy 出方向 streaming 签名上传 | 复杂度高、收益仅是明文 HTTP 下的完整性（[cloudproxy-design.md](storage/cloudproxy-design.md)） |
 | rados 数据面 pack 层 | 代码内长注释已论证为设计边界（小对象放大交给 BlueStore `min_alloc_size`） |
 | CivetWeb 等新 HTTP 驱动 | 四驱动已覆盖设计空间（[http-adapter.md §3.4](http-adapter.md)） |
 | GitHub Actions CI | 项目已明确移除、不使用；自动化投入放在本地脚本矩阵（`scripts/check-all.sh`，[testing.md §8](testing.md)） |

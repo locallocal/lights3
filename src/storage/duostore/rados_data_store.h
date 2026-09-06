@@ -1,4 +1,4 @@
-// L3: Ceph/RADOS implementation of IDataStore (docs/duostore-rados-data.md).
+// L3: Ceph/RADOS implementation of IDataStore (docs/storage/duostore-data-rados-design.md).
 // Single path: slice buffering → one write_full per rados object (no packs, no
 // compaction, no torn tail, §3.3). Since C3 all IO goes through rados_aio_*:
 // completion callbacks only post the continuation back to this process's pool

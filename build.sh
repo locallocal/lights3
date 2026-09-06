@@ -11,16 +11,16 @@ Usage: ./build.sh [options]
                 written into the CMake cache; use --clean to turn it off
   --tikv        Enable the TiKV meta backend for duostore (client-c submodule
                 plus system-level gRPC/Poco dependencies, off by default; see
-                docs/duostore-tikv-meta.md §8). Same sticky semantics as
+                docs/storage/duostore-meta-tikv-design.md §8). Same sticky semantics as
                 --seastar; recommend -B build-tikv to isolate from regular builds
   --redis       Enable the Redis meta backend for duostore (hiredis submodule,
-                off by default; see docs/duostore-redis-meta.md). Same sticky
+                off by default; see docs/storage/duostore-meta-redis-design.md). Same sticky
                 semantics as --seastar
   --sqlite      Enable the SQLite meta backend for duostore (sqlite submodule,
-                off by default; see docs/duostore-sqlite-meta.md). Same sticky
+                off by default; see docs/storage/duostore-meta-sqlite-design.md). Same sticky
                 semantics as --seastar
   --rados       Enable the RADOS data backend for duostore (off by default; see
-                docs/duostore-rados-data.md §9). Requires system librados
+                docs/storage/duostore-data-rados-design.md §9). Requires system librados
                 (apt install librados-dev, or unpack to a custom path and point
                 -DLIGHTS3_RADOS_ROOT=... at it). Same sticky semantics as
                 --seastar; recommend -B build-rados to isolate from regular builds
@@ -103,7 +103,7 @@ fi
 
 # Submodules: always init the regular ones (rocksdb is a shallow clone; with all
 # compression disabled it has zero system-level deps, so no lazy fetch,
-# docs/duostore-backend.md §13.2); the seastar clone is huge, fetch only when needed
+# docs/storage/duostore-design.md §13.2); the seastar clone is huge, fetch only when needed
 # (its bundled dpdk submodule is unused at build time, so no recursive init)
 LIGHT_MODULES=(third_party/spdlog third_party/httplib third_party/json
                third_party/rocksdb third_party/hiredis third_party/sqlite)
@@ -114,7 +114,7 @@ if [[ $SEASTAR -eq 1 ]]; then
     git submodule update --init third_party/seastar
 fi
 # client-c needs a system-level gRPC/Poco toolchain, so fetch it lazily
-# (docs/duostore-tikv-meta.md §8.1); of its nested submodules only kvproto/libfiu
+# (docs/storage/duostore-meta-tikv-design.md §8.1); of its nested submodules only kvproto/libfiu
 # are taken (abseil uniformly uses the system copy, googletest is not built)
 if [[ $TIKV -eq 1 ]]; then
     git submodule update --init third_party/client-c

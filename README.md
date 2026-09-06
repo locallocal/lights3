@@ -208,10 +208,10 @@ lists the start / stop / restart / status / journal commands.
 - **Storage**: LocalFs (sidecar metadata, atomic writes via staging+rename),
   XLocalFs (io_uring data plane using raw syscalls, no liburing required),
   Memory (for tests), CloudProxy (self-signed SigV4 proxy to a remote S3,
-  [docs/cloudproxy-backend.md](docs/cloudproxy-backend.md)), Tiered (cold-data
-  tiering combinator, [docs/tiered-storage.md](docs/tiered-storage.md)),
+  [docs/storage/cloudproxy-design.md](docs/storage/cloudproxy-design.md)), Tiered (cold-data
+  tiering combinator, [docs/storage/tiered-design.md](docs/storage/tiered-design.md)),
   DuoStore (split metadata/data engine — meta: RocksDB/Redis/SQLite/TiKV,
-  data: local fs/RADOS, [docs/duostore-backend.md](docs/duostore-backend.md));
+  data: local fs/RADOS, [docs/storage/duostore-design.md](docs/storage/duostore-design.md));
   bucket-level glob routing
 - **S3 API**: ListBuckets, Create/Head/DeleteBucket, Put/Get/Head/DeleteObject
   (including Range and conditional requests), CopyObject, batch DeleteObjects,
@@ -256,18 +256,18 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [tls](docs/en/tls.md) | HTTPS on all drivers, certificate hot reload, mTLS / ciphers / SNI, reverse-proxy termination |
 | [http-adapter](docs/en/http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, driver notes |
 | [concurrency](docs/en/concurrency.md) | Task coroutines, Executor abstraction, thread pool, sync/async driver bridging |
-| [storage-backend](docs/en/storage-backend.md) | `IStorageBackend`, LocalFs/XLocalFs, bucket routing, new-backend guide |
+| [storage/storage-backend](docs/en/storage/storage-backend.md) | `IStorageBackend`, LocalFs/XLocalFs, bucket routing, new-backend guide |
 | [s3-protocol](docs/en/s3-protocol.md) | API scope, SigV4 (incl. presigned & clock skew), XML codec, errors, mint gate |
 | [credential-management](docs/en/credential-management.md) | AK/SK admin API, three credential sources, `.sys` persistence, at-rest encryption, policy |
 | [multi-tenancy](docs/en/multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenants and bucket ownership, tiered admin plane, audit log |
 | [object-read-write-flow](docs/en/object-read-write-flow.md) | End-to-end read/write paths, BodyReader chains, staging commit, fd-snapshot reads |
-| [tiered-storage](docs/en/tiered-storage.md) | Cold-data tiering to cloud, stub metadata, transparent read-back |
-| [cloudproxy-backend](docs/en/cloudproxy-backend.md) | Self-signed SigV4 proxy to remote S3, streaming pumps, retries |
-| [duostore-backend](docs/en/duostore-backend.md) | Split meta/data engine: RocksDB meta, chunk/pack, GC |
-| [duostore-redis-meta](docs/en/duostore-redis-meta.md) | Redis IMetaStore: hiredis + Lua guarded-commit |
-| [duostore-sqlite-meta](docs/en/duostore-sqlite-meta.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
-| [duostore-rados-data](docs/en/duostore-rados-data.md) | RADOS IDataStore: librados, chunk → rados objects |
-| [duostore-tikv-meta](docs/en/duostore-tikv-meta.md) | TiKV IMetaStore: client-c + 2PC sidecar |
+| [storage/tiered-design](docs/en/storage/tiered-design.md) | Cold-data tiering to cloud, stub metadata, transparent read-back |
+| [storage/cloudproxy-design](docs/en/storage/cloudproxy-design.md) | Self-signed SigV4 proxy to remote S3, streaming pumps, retries |
+| [storage/duostore-design](docs/en/storage/duostore-design.md) | Split meta/data engine: RocksDB meta, chunk/pack, GC |
+| [storage/duostore-meta-redis-design](docs/en/storage/duostore-meta-redis-design.md) | Redis IMetaStore: hiredis + Lua guarded-commit |
+| [storage/duostore-meta-sqlite-design](docs/en/storage/duostore-meta-sqlite-design.md) | SQLite IMetaStore: embedded amalgamation, WAL, read pool |
+| [storage/duostore-data-rados-design](docs/en/storage/duostore-data-rados-design.md) | RADOS IDataStore: librados, chunk → rados objects |
+| [storage/duostore-meta-tikv-design](docs/en/storage/duostore-meta-tikv-design.md) | TiKV IMetaStore: client-c + 2PC sidecar |
 | [performance-baseline](docs/en/performance-baseline.md) | Driver × TLS bench matrix, before/after the data-plane optimizations |
 | [deployment](docs/en/deployment.md) | Version stamp, `cmake --install`, deb/rpm packages, Dockerfile + compose, rollback / uninstall |
 | [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load/backup/restore, cred/website/bench/quota/tenant/usage |

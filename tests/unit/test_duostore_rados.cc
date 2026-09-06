@@ -1,4 +1,4 @@
-// Dedicated RadosDataStore unit tests (docs/duostore-rados-data.md §11): the injected combination runs the backend
+// Dedicated RadosDataStore unit tests (docs/storage/duostore-data-rados-design.md §11): the injected combination runs the backend
 // suite, multi-chunk roundtrip and cross-extent Range, unknown-length streaming, idempotent remove, namespace
 // isolation, semaphore backpressure, the alarm path for refs-present-but-object-missing, bitrot detection, close
 // guard; C3 double-buffered pipeline (including serial degradation), C4 orphan scan (forward/reverse/grace/foreign

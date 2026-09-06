@@ -176,10 +176,10 @@ docker compose --profile e2e run --rm e2e    # 开发机上 SKIP 的 redis / tik
   per-credential policy（bucket glob 白名单 + readonly）
 - **存储**：LocalFs（sidecar 元数据、staging+rename 原子写）、
   XLocalFs（io_uring 数据面，原生 syscall 实现，无需 liburing）、Memory（测试用）、
-  CloudProxy（自签 SigV4 直连远端 S3，[cloudproxy-backend.md](cloudproxy-backend.md)）、
-  Tiered（冷数据下沉云端的组合后端，[tiered-storage.md](tiered-storage.md)）、
+  CloudProxy（自签 SigV4 直连远端 S3，[cloudproxy-design.md](storage/cloudproxy-design.md)）、
+  Tiered（冷数据下沉云端的组合后端，[tiered-design.md](storage/tiered-design.md)）、
   DuoStore（元数据/数据分离引擎，meta 可选 RocksDB/Redis/SQLite/TiKV、
-  data 可选本地 fs/RADOS，[duostore-backend.md](duostore-backend.md)）；
+  data 可选本地 fs/RADOS，[duostore-design.md](storage/duostore-design.md)）；
   bucket 级 glob 路由
 - **S3 API**：ListBuckets、Create/Head/DeleteBucket、Put/Get/Head/DeleteObject
   （含 Range 与条件请求）、CopyObject、DeleteObjects 批量、
@@ -216,18 +216,18 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | [tls](tls.md) | 四驱动 HTTPS、证书热重载、mTLS / cipher / SNI、反代终结样例 |
 | [http-adapter](http-adapter.md) | HTTP 插拔层：中立请求/响应模型、流式 body、各驱动要点 |
 | [concurrency](concurrency.md) | Task 协程、Executor 抽象、线程池、同步/异步驱动桥接 |
-| [storage-backend](storage-backend.md) | `IStorageBackend`、LocalFs/XLocalFs、bucket 路由、新增后端指南 |
+| [storage-backend](storage/storage-backend.md) | `IStorageBackend`、LocalFs/XLocalFs、bucket 路由、新增后端指南 |
 | [s3-protocol](s3-protocol.md) | API 范围、SigV4（含 presigned 与时钟偏移）、XML 编解码、错误、mint 门禁 |
 | [credential-management](credential-management.md) | AK/SK 管理 API、三来源模型、`.sys` 持久化、at-rest 加密、policy |
 | [multi-tenancy](multi-tenancy.md) | 用量统计、桶/租户配额、租户与桶归属、分级管理面、审计日志 |
 | [object-read-write-flow](object-read-write-flow.md) | 端到端读写路径、BodyReader 链、staging 提交、fd 快照读 |
-| [tiered-storage](tiered-storage.md) | 冷数据下沉云端、stub 元数据、透明回读 |
-| [cloudproxy-backend](cloudproxy-backend.md) | 自签 SigV4 转发远端 S3、流式泵、重试 |
-| [duostore-backend](duostore-backend.md) | 元数据/数据分离引擎：RocksDB meta、chunk/pack、GC |
-| [duostore-redis-meta](duostore-redis-meta.md) | Redis IMetaStore：hiredis + Lua 守卫提交 |
-| [duostore-sqlite-meta](duostore-sqlite-meta.md) | SQLite IMetaStore：内嵌 amalgamation、WAL、读连接池 |
-| [duostore-rados-data](duostore-rados-data.md) | RADOS IDataStore：librados，chunk → rados 对象 |
-| [duostore-tikv-meta](duostore-tikv-meta.md) | TiKV IMetaStore：client-c + 2PC 侧车 |
+| [tiered-storage](storage/tiered-design.md) | 冷数据下沉云端、stub 元数据、透明回读 |
+| [cloudproxy-backend](storage/cloudproxy-design.md) | 自签 SigV4 转发远端 S3、流式泵、重试 |
+| [duostore-backend](storage/duostore-design.md) | 元数据/数据分离引擎：RocksDB meta、chunk/pack、GC |
+| [duostore-redis-meta](storage/duostore-meta-redis-design.md) | Redis IMetaStore：hiredis + Lua 守卫提交 |
+| [duostore-sqlite-meta](storage/duostore-meta-sqlite-design.md) | SQLite IMetaStore：内嵌 amalgamation、WAL、读连接池 |
+| [duostore-rados-data](storage/duostore-data-rados-design.md) | RADOS IDataStore：librados，chunk → rados 对象 |
+| [duostore-tikv-meta](storage/duostore-meta-tikv-design.md) | TiKV IMetaStore：client-c + 2PC 侧车 |
 | [performance-baseline](performance-baseline.md) | 驱动 × TLS 压测矩阵，数据面优化前后对照 |
 | [deployment](deployment.md) | 版本标识、`cmake --install`、deb/rpm 包、Dockerfile + compose、回滚 / 卸载 |
 | [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load/backup/restore、cred/website/bench/quota/tenant/usage |

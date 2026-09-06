@@ -1,4 +1,4 @@
-// L3: TiKV client sidecar (docs/duostore-tikv-meta.md §6.3). client-c's transaction
+// L3: TiKV client sidecar (docs/storage/duostore-meta-tikv-design.md §6.3). client-c's transaction
 // commit layer is test-grade (mutations are Put-only, commit error paths contain TODOs),
 // so this file builds on its public transport infrastructure
 // (Cluster/RegionCache/RegionClient/Backoffer/LockResolver) to implement an optimistic
@@ -23,7 +23,7 @@ namespace lights3::storage::duostore {
 
 struct TikvOptions {
     std::vector<std::string> pd_endpoints;  // list of "host:port"
-    // mTLS triple (optional; enabled only when all three are given, docs/duostore-tikv-meta.md §9)
+    // mTLS triple (optional; enabled only when all three are given, docs/storage/duostore-meta-tikv-design.md §9)
     std::string ca_path;
     std::string cert_path;
     std::string key_path;

@@ -1,15 +1,15 @@
 # DuoStore 引擎核心实现
 
-> 本文是 [../duostore-backend.md](../duostore-backend.md)（设计文档）的实现级对照，
+> 本文是 [duostore-design.md](duostore-design.md)（设计文档）的实现级对照，
 > 覆盖 DuoStore 的**引擎核心**：编排层 `DuoStoreBackend`、元数据编解码 `codec`、
 > 运维 dump/load 路径 `meta_dump`，以及两个 SPI 接口 `IMetaStore` / `IDataStore`
 > 的方法级契约。各插件实现的细节见同目录文档：
-> [./duostore-meta-rocksdb.md](./duostore-meta-rocksdb.md)、
-> [./duostore-meta-redis.md](./duostore-meta-redis.md)、
-> [./duostore-meta-sqlite.md](./duostore-meta-sqlite.md)、
-> [./duostore-meta-tikv.md](./duostore-meta-tikv.md)、
-> [./duostore-data-fs.md](./duostore-data-fs.md)、
-> [./duostore-data-rados.md](./duostore-data-rados.md)。代码位置
+> [./duostore-meta-rocksdb.md](duostore-meta-rocksdb.md)、
+> [./duostore-meta-redis.md](duostore-meta-redis.md)、
+> [./duostore-meta-sqlite.md](duostore-meta-sqlite.md)、
+> [./duostore-meta-tikv.md](duostore-meta-tikv.md)、
+> [./duostore-data-fs.md](duostore-data-fs.md)、
+> [./duostore-data-rados.md](duostore-data-rados.md)。代码位置
 > `src/storage/duostore/`，符号引用格式为 `文件:符号`。
 
 ## 1. 架构：元数据/数据分离的落地形态
@@ -262,7 +262,7 @@ tikv primary 提交超时——事务**可能已生效**。本地引擎"抛异�
 - `duostore_backend.cc:pump_body`：PUT 与 upload_part 共用的泵送循环，64KiB
   栈缓冲，边写边算 MD5（哈希是 S3 语义，不进数据面接口）。chunk/pack 路由、
   active pack 轮转与封存都在数据面内部完成（见
-  [./duostore-data-fs.md](./duostore-data-fs.md)）。
+  [./duostore-data-fs.md](duostore-data-fs.md)）。
 - `duostore_backend.cc:commit_or_discard`：提交抛异常时兜底
   `data.remove(ref.extents)`（co_await 不能进 catch，经 exception_ptr 移出）；
   兜底失败也无害——落入孤儿扫描/死区。**例外**：`UndeterminedCommit` 不删
@@ -336,7 +336,7 @@ TTL 有界陈旧为契约。指标 `lights3_meta_cache_lookups_total{result=hit|
 （重）订阅时整表清空；`meta_cache_ttl` 退为丢消息的兜底上界。tikv 无发布订阅，
 维持 TTL 有界陈旧契约。接线在 `DuoStoreBackend::wire_cache_invalidation`
 （`IMetaStore::subscribe_invalidations`，默认 false），细节见
-[duostore-redis-meta.md §3.6](../duostore-redis-meta.md)。
+[duostore-meta-redis-design.md §3.6](duostore-meta-redis-design.md)。
 
 ## 8. GC 与孤儿扫描
 

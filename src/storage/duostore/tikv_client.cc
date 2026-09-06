@@ -1,4 +1,4 @@
-// L3: TiKV client sidecar implementation (docs/duostore-tikv-meta.md §6.3).
+// L3: TiKV client sidecar implementation (docs/storage/duostore-meta-tikv-design.md §6.3).
 // The committer skeleton is adapted from client-c's kv/2pc.cc (Apache-2.0, tikv/client-c@78a557e):
 // region grouping/batching, prewrite lock resolution, and region-error retry stay isomorphic;
 // differences —

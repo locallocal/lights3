@@ -143,7 +143,7 @@ resolve(bucket) → IStorageBackend&
 ### 3.2 各操作实现要点
 
 - 所有 posix 调用都在 `co_await pool.schedule()` 之后执行
-  （见 [concurrency.md](concurrency.md) §3）。
+  （见 [concurrency.md](../concurrency.md) §3）。
 - **GET**：open + fstat + 读元数据（该 fd 的 xattr，缺失回落 sidecar）。
   size/mtime 一律取**已打开 fd 的 fstat**、绝不对路径二次 stat——并发覆盖写后
   路径指向新 inode，二次 stat 会让 meta 与 fd 持有的 body 错位（短包/截断）。
@@ -154,7 +154,7 @@ resolve(bucket) → IStorageBackend&
   默认一次 stat 对戳（`meta_cache_validate=false` 则零 syscall），GET 用已持
   fd 的 fstat 对戳，戳不符即重读——外部进程改写同一 root 也不会喂出陈旧
   记录；本后端的每条写路径在提交点后失效。`meta_cache_entries`（默认 64K）、
-  `meta_cache_ttl`。见 [storage/localfs.md](storage/localfs.md) §5.1。
+  `meta_cache_ttl`。见 [storage/localfs.md](localfs.md) §5.1。
 - **PUT**：循环 `body.read(64KiB)` → 池内 write + 增量 MD5 → rename。
   ETag = MD5 hex，与 S3 单段上传一致。
 - **LIST**：递归目录遍历 + prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；
@@ -163,7 +163,7 @@ resolve(bucket) → IStorageBackend&
   不建索引，但（roadmap §3.5）：一页的 stat+getxattr 由多个池线程条带并行
   （`list_meta_concurrency`）；每个目录的排序条目表按目录 inode+mtime/ctime
   缓存（`list_cache_entries`，一次 stat 校验），翻页时二分定位 marker，深页
-  成本不再随页码增长。见 [storage/localfs.md](storage/localfs.md) §6。
+  成本不再随页码增长。见 [storage/localfs.md](localfs.md) §6。
 - **Multipart**：分片落 `staging/mpu/<id>/part.N`；complete 时按 part 顺序
   拼接写入最终临时文件再 rename（顺带算总 ETag：`md5(各分片md5拼接)-N`，
   与 S3 规则一致）；abort 删目录。启动时扫描 mpu 目录清理超期（默认 7 天）
@@ -188,7 +188,7 @@ resolve(bucket) → IStorageBackend&
 - **配置**：`type: xlocalfs`，参数同 localfs（root/staging），另有可选
   `queue_depth`（SQ 深度，默认 256）、`rings`、`fixed_buffers` /
   `fixed_files`、`block_size`、`read_depth` / `write_depth`、`meta_ops`
-  （详表见 [storage/xlocalfs.md](storage/xlocalfs.md) §8）。
+  （详表见 [storage/xlocalfs.md](xlocalfs.md) §8）。
 - **生命周期**：`close()` 停止全部收割线程；须在在途请求完成后调用（与
   ThreadPool::join 同一假设）。
 
@@ -196,7 +196,7 @@ resolve(bucket) → IStorageBackend&
 
 把本地 bucket 映射到公有云对象存储（AWS S3 / 兼容 S3 协议的 OSS、COS、MinIO
 等），网关充当带本地认证的代理。完整设计见
-[cloudproxy-backend.md](cloudproxy-backend.md)，本节保留概述与路线决策。
+[cloudproxy-design.md](cloudproxy-design.md)，本节保留概述与路线决策。
 
 ### 4.1 两种实现路线
 
@@ -205,26 +205,26 @@ resolve(bucket) → IStorageBackend&
 | A. SDK 封装 | 用 aws-sdk-cpp（或轻量的 aws-c-s3）调用远端 | 正确性省心：重试、region、TLS、分片都是现成的；SDK 同步 API 在线程池里调用即可接入协程模型 |
 | B. 直接转发（已定） | 自己构造 HTTP 请求 + 对远端做 SigV4 签名，经 HTTP client 转发 | 零 SDK 依赖、可真流式转发；但要自己处理重试与各云差异 |
 
-设计初期倾向路线 A，**详细设计阶段反转为路线 B**（理由见 docs/cloudproxy-backend.md §2.1）：
+设计初期倾向路线 A，**详细设计阶段反转为路线 B**（理由见 docs/storage/cloudproxy-design.md §2.1）：
 出方向签名 `SigV4Authenticator::sign()` 早已随验签一并实现并预留给
 cloudproxy；vendored 的 httplib 具备流式 client 能力；而 aws-sdk-cpp 的
 依赖体量与本项目"全 vendored 子模块"的构建约束冲突。
 
-要点（详细展开见 docs/cloudproxy-backend.md 对应小节）：
+要点（详细展开见 docs/storage/cloudproxy-design.md 对应小节）：
 
 - **凭证隔离**：客户端用网关本地的 AK/SK 认证；网关用自己的云凭证访问远端。
   客户端凭证绝不透传，云凭证只存在于网关配置。
 - **流式**：GET 方向 pump 线程 + 有界队列把 httplib 推模型翻成 `BodyReader`
-  拉模型；PUT 方向对称反转。避免整对象缓冲（docs/cloudproxy-backend.md §3）。
+  拉模型；PUT 方向对称反转。避免整对象缓冲（docs/storage/cloudproxy-design.md §3）。
 - **Multipart 透传**：upload_id、part 直接映射远端同名概念，网关不落地分片。
 - **超时与重试**：连接/请求超时、指数退避 3 次；远端 5xx 映射为网关 500/503
-  对应的 S3 错误码，透传远端 4xx 语义（NoSuchKey 等）（docs/cloudproxy-backend.md §5）。
+  对应的 S3 错误码，透传远端 4xx 语义（NoSuchKey 等）（docs/storage/cloudproxy-design.md §5）。
 - **名称映射**：`bucket_prefix` 解决本地 bucket 名与远端全局命名空间冲突；
   key 不变换。
 - 线程占用：同步 HTTP client 会占住线程整个请求时长——数据面 pump 使用
-  cloudproxy 私有 pump 线程而非共享池（docs/cloudproxy-backend.md §2.3）。
+  cloudproxy 私有 pump 线程而非共享池（docs/storage/cloudproxy-design.md §2.3）。
   与之独立的另一机制是通用的 per-backend `io_threads` 池，已作为任意后端
-  可配的通用键落地（见 [concurrency.md](concurrency.md) §3.1）。
+  可配的通用键落地（见 [concurrency.md](../concurrency.md) §3.1）。
 
 ## 5. DuoStoreBackend（元数据/数据分离引擎）
 
@@ -234,20 +234,20 @@ DataRef 为唯一耦合点的存储引擎：默认元数据用 RocksDB（submodu
 删除/覆盖经 GC 回收（延迟 unlink + pack 压实 + 孤儿对账；P1-P5 已全部
 实现）。multipart 的 complete 是纯
 元数据拼接（O(#parts)，零数据搬运）。完整设计见
-[duostore-backend.md](duostore-backend.md)。
+[duostore-design.md](duostore-design.md)。
 
 meta / data 两侧均已有可选替换实现（各有专文，编译开关默认 OFF）：
 
-- meta：Redis（[duostore-redis-meta.md](duostore-redis-meta.md)）、
-  SQLite（[duostore-sqlite-meta.md](duostore-sqlite-meta.md)）、
-  TiKV（[duostore-tikv-meta.md](duostore-tikv-meta.md)）；
-- data：Ceph/RADOS（[duostore-rados-data.md](duostore-rados-data.md)）。
+- meta：Redis（[duostore-meta-redis-design.md](duostore-meta-redis-design.md)）、
+  SQLite（[duostore-meta-sqlite-design.md](duostore-meta-sqlite-design.md)）、
+  TiKV（[duostore-meta-tikv-design.md](duostore-meta-tikv-design.md)）；
+- data：Ceph/RADOS（[duostore-data-rados-design.md](duostore-data-rados-design.md)）。
 
 对象元数据缓存（roadmap §3.8）：GET/HEAD 命中时整条 `ObjectRec`（含
 manifest）来自进程内 LRU，零 meta 引擎 RTT。rocksdb/sqlite 默认开且精确
 失效；redis/tikv 默认关，开启须 `0 < meta_cache_ttl < gc_grace`（对端网关的
 写在 TTL 内不可见，read-lease 相应回拨）。见
-[storage/duostore-core.md](storage/duostore-core.md) §7.1。
+[storage/duostore-core.md](duostore-core.md) §7.1。
 
 注意：duostore 不能作 tiered 的 local 侧（tiered 绑定 localfs 磁盘布局），
 可作其 cloud 侧或独立使用。
@@ -280,4 +280,4 @@ manifest）来自进程内 LRU，零 meta 引擎 RTT。rocksdb/sqlite 默认开�
 5. 通用键 `io_threads`（可选）：任意后端配置即获得专属
    IO 线程池而非共享全局池（Registry 在调用工厂前按参数注入，工厂/后端
    无感知）——慢后端（云端）占满共享池饿死快后端（本地盘）时的隔离
-   手段，见 [concurrency.md](concurrency.md) §3.1。
+   手段，见 [concurrency.md](../concurrency.md) §3.1。

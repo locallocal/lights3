@@ -1,6 +1,6 @@
 # TikvMetaStore: TiKV-Based DuoStore Metadata Store
 
-> English translation of [../duostore-tikv-meta.md](../duostore-tikv-meta.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/duostore-meta-tikv-design.md](../../storage/duostore-meta-tikv-design.md). The Chinese original is authoritative; section numbering matches.
 
 > Status: T0-T5 all complete (2026-07-30; full `TikvMetaStore` interface + 2PC
 > sidecar committer with ops + guard shards + test suite/e2e wiring + T5 polish —
@@ -12,13 +12,13 @@
 > (2026-07-21; upstream has no release tag, so pinning by commit is the only
 > option). Implementation deviation: the upstream extension did not go through a
 > fork; it became an in-tree sidecar instead (§6.3). Delivers the evolution
-> promise of [duostore-backend.md](duostore-backend.md)
+> promise of [duostore-design.md](duostore-design.md)
 > §12 "TiKV (multi-gateway shared meta)": implement `IMetaStore`
 > (`src/storage/duostore/meta_store.h`); the meta side gains **horizontal scaling
 > + multi-replica high availability**, completing the final tier above the Redis
 > version (single node / primary-replica). Client library:
 > [tikv/client-c](https://github.com/tikv/client-c). In this document "main doc"
-> refers to duostore-backend.md, and a bare `§N` refers to sections of this
+> refers to duostore-design.md, and a bare `§N` refers to sections of this
 > document.
 >
 > **Read this first**: client-c's transport infrastructure (PD/TSO, region cache,
@@ -136,7 +136,7 @@ the iteration primitive becomes `Snapshot::Scan`:
 - Open one `Snapshot` (TSO-pinned version) as the consistent view for the entire
   list — **valid across Scanner rebuilds**, a direct dividend of MVCC: the
   single-invocation consistency that the Redis version had to buy by "stuffing the
-  whole loop into one Lua script" (duostore-redis-meta.md §2.3) is free here;
+  whole loop into one Lua script" (duostore-meta-redis-design.md §2.3) is free here;
 - Seek start = `max(prefix, successor of start_after)`; after a delimiter hit
   groups, **construct the successor seek point by +1 on the group's last byte**
   and open a new Scanner on the same Snapshot to skip the whole group — one gRPC
@@ -171,7 +171,7 @@ concurrently modified" is guaranteed for free by the protocol**
 (WriteConflict / KeyIsLocked → retry). Comparison:
 
 - The Redis version has to pass "the raw bytes read" to the Lua script as
-  preconditions for one-by-one comparison (duostore-redis-meta.md §3.2); the TiKV
+  preconditions for one-by-one comparison (duostore-meta-redis-design.md §3.2); the TiKV
   version gets natural CAS for keys **in the write set**, and most preconditions
   vanish;
 - The exception is read-only preconditions (bucket existence, delete_bucket's

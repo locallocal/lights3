@@ -1,6 +1,6 @@
 # Storage Backend
 
-> English translation of [../storage-backend.md](../storage-backend.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/storage-backend.md](../../storage/storage-backend.md). The Chinese original is authoritative; section numbering matches.
 
 ## 1. The IStorageBackend Interface
 
@@ -168,7 +168,7 @@ Key decisions:
 ### 3.2 Implementation Notes per Operation
 
 - All posix calls execute after `co_await pool.schedule()`
-  (see [concurrency.md](concurrency.md) §3).
+  (see [concurrency.md](../concurrency.md) §3).
 - **GET**: open + fstat + read metadata (the fd's xattr, falling back to the
   sidecar when absent). size/mtime always come from **fstat of the already-open
   fd** — never a second stat by path: after a concurrent overwrite the path
@@ -185,7 +185,7 @@ Key decisions:
   so another process writing the same root never gets a stale record served.
   Every write path of this backend invalidates after its commit point.
   `meta_cache_entries` (default 64K), `meta_cache_ttl`. See
-  [storage/localfs.md](../storage/localfs.md) §5.1.
+  [storage/localfs.md](../../storage/localfs.md) §5.1.
 - **PUT**: loop `body.read(64KiB)` → in-pool write + incremental MD5 → rename.
   ETag = MD5 hex, matching S3 single-part upload.
 - **LIST**: recursive directory walk + prefix pruning (a prefix containing `/`
@@ -197,7 +197,7 @@ Key decisions:
   (`list_meta_concurrency`); each directory's sorted entry table is cached
   keyed by the directory's inode + mtime/ctime (`list_cache_entries`, validated
   with one stat), and the page start is found by binary search, so deep pages
-  no longer cost more than early ones. See [storage/localfs.md](../storage/localfs.md)
+  no longer cost more than early ones. See [storage/localfs.md](../../storage/localfs.md)
   §6.
 - **Multipart**: parts land in `staging/mpu/<id>/part.N`; complete concatenates
   the parts in order into a final temp file and then renames (computing the total
@@ -231,7 +231,7 @@ data-plane byte shoveling is swapped for io_uring:
 
 Maps local buckets to public-cloud object storage (AWS S3 / S3-compatible OSS,
 COS, MinIO, etc.); the gateway acts as a proxy with local authentication. Full
-design in [cloudproxy-backend.md](cloudproxy-backend.md); this section retains
+design in [cloudproxy-design.md](cloudproxy-design.md); this section retains
 the overview and route decision.
 
 ### 4.1 Two Implementation Routes
@@ -242,13 +242,13 @@ the overview and route decision.
 | B. Direct forwarding (decided) | Construct HTTP requests ourselves + SigV4-sign against the remote, forward via an HTTP client | Zero SDK dependency, truly streaming forwarding; but retries and per-cloud differences must be handled ourselves |
 
 Early design leaned toward route A; **the detailed design phase reversed to route B**
-(rationale in docs/cloudproxy-backend.md §2.1): outbound signing
+(rationale in docs/storage/cloudproxy-design.md §2.1): outbound signing
 `SigV4Authenticator::sign()` was implemented long ago alongside verification and
 reserved for cloudproxy; the vendored httplib has streaming client capability;
 and aws-sdk-cpp's dependency footprint conflicts with this project's
 "fully vendored submodules" build constraint.
 
-Key points (expanded in the corresponding sections of docs/cloudproxy-backend.md):
+Key points (expanded in the corresponding sections of docs/storage/cloudproxy-design.md):
 
 - **Credential isolation**: clients authenticate with the gateway's local AK/SK;
   the gateway accesses the remote with its own cloud credentials. Client
@@ -256,20 +256,20 @@ Key points (expanded in the corresponding sections of docs/cloudproxy-backend.md
   gateway configuration.
 - **Streaming**: in the GET direction, a pump thread + bounded queue turns
   httplib's push model into the `BodyReader` pull model; the PUT direction is the
-  symmetric inverse. Avoids whole-object buffering (docs/cloudproxy-backend.md §3).
+  symmetric inverse. Avoids whole-object buffering (docs/storage/cloudproxy-design.md §3).
 - **Multipart pass-through**: upload_id and parts map directly to the remote's
   same-named concepts; the gateway never lands parts on disk.
 - **Timeouts and retries**: connect/request timeouts, exponential backoff 3 times;
   remote 5xx maps to the S3 error codes corresponding to gateway 500/503, remote
-  4xx semantics pass through (NoSuchKey etc.) (docs/cloudproxy-backend.md §5).
+  4xx semantics pass through (NoSuchKey etc.) (docs/storage/cloudproxy-design.md §5).
 - **Name mapping**: `bucket_prefix` resolves conflicts between local bucket names
   and the remote's global namespace; keys are not transformed.
 - Thread occupancy: a synchronous HTTP client holds a thread for the entire
   request duration — the data-plane pump uses cloudproxy-private pump threads
-  rather than the shared pool (docs/cloudproxy-backend.md §2.3).
+  rather than the shared pool (docs/storage/cloudproxy-design.md §2.3).
   An independent mechanism is the generic per-backend `io_threads` pool, landed
   as a generic key configurable on any backend
-  (see [concurrency.md](concurrency.md) §3.1).
+  (see [concurrency.md](../concurrency.md) §3.1).
 
 ## 5. DuoStoreBackend (Metadata/Data-Split Engine)
 
@@ -280,15 +280,15 @@ large objects are sliced into fixed-length chunks, small objects are aggregated
 into append-only packs, and deletes/overwrites are reclaimed by GC (deferred
 unlink + pack compaction + orphan reconciliation; P1-P5 all implemented).
 Multipart complete is pure metadata concatenation (O(#parts), zero data
-movement). Full design in [duostore-backend.md](duostore-backend.md).
+movement). Full design in [duostore-design.md](duostore-design.md).
 
 Both the meta and data sides already have optional replacement implementations
 (each with its own document; compile switches default to OFF):
 
-- meta: Redis ([duostore-redis-meta.md](duostore-redis-meta.md)),
-  SQLite ([duostore-sqlite-meta.md](duostore-sqlite-meta.md)),
-  TiKV ([duostore-tikv-meta.md](duostore-tikv-meta.md));
-- data: Ceph/RADOS ([duostore-rados-data.md](duostore-rados-data.md)).
+- meta: Redis ([duostore-meta-redis-design.md](duostore-meta-redis-design.md)),
+  SQLite ([duostore-meta-sqlite-design.md](duostore-meta-sqlite-design.md)),
+  TiKV ([duostore-meta-tikv-design.md](duostore-meta-tikv-design.md));
+- data: Ceph/RADOS ([duostore-data-rados-design.md](duostore-data-rados-design.md)).
 
 Object metadata cache (roadmap §3.8): a GET/HEAD hit serves the whole
 `ObjectRec` (manifest included) from an in-process LRU, with no meta-engine round
@@ -296,7 +296,7 @@ trip. On by default with exact invalidation for rocksdb/sqlite; off by default
 for redis/tikv, where enabling it requires `0 < meta_cache_ttl < gc_grace` (a
 peer gateway's write stays invisible for up to one TTL and the published read
 lease is backdated accordingly). See
-[storage/duostore-core.md](../storage/duostore-core.md) §7.1.
+[storage/duostore-core.md](../../storage/duostore-core.md) §7.1.
 
 Note: duostore cannot serve as tiered's local side (tiered is bound to the
 localfs disk layout); it can serve as its cloud side or stand alone.
@@ -337,4 +337,4 @@ decorator's `close()` is a no-op.
    (the Registry injects it per the parameter before calling the factory; factory
    and backend are unaware) — an isolation lever for when a slow backend (cloud)
    saturates the shared pool and starves fast backends (local disk); see
-   [concurrency.md](concurrency.md) §3.1.
+   [concurrency.md](../concurrency.md) §3.1.

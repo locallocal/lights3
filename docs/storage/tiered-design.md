@@ -4,7 +4,7 @@
 > §9 对账工具 + GC 失败条目指数退避），cloud 侧经 `IStorageBackend`
 > 抽象接入，CI 用 MemoryBackend 充当云端全覆盖（单测 `test_tiered.cc` +
 > `e2e_tiered`）；P5 的真实 CloudProxyBackend 见
-> [cloudproxy-backend.md](cloudproxy-backend.md)，组合场景由
+> [cloudproxy-design.md](cloudproxy-design.md)，组合场景由
 > `e2e_tiered_cloudproxy` 验收。P6（2026-09-02，roadmap §3.6）：local 侧抽象为
 > `ITierLocal`（localfs/xlocalfs 与 duostore 两个适配器）、访问记录落对象
 > xattr + 时间轮增量扫描、prefix 策略、多维淘汰评分、对账隔离区、Range
@@ -30,7 +30,7 @@
 
 ## 2. 架构定位：组合后端 TieredBackend
 
-docs/storage-backend.md §2 有意把路由停在 bucket 粒度，并预留"object 级分层用叠加实现、
+docs/storage/storage-backend.md §2 有意把路由停在 bucket 粒度，并预留"object 级分层用叠加实现、
 不改 `IStorageBackend` 接口"。本设计兑现该预留：新增组合后端
 `type: tiered`（`src/storage/tiered/`），对 L2 仍是一个普通 `IStorageBackend`，
 内部组合两个既有后端：
@@ -64,7 +64,7 @@ docs/storage-backend.md §2 有意把路由停在 bucket 粒度，并预留"obje
   可选的块缓存。两个实现：`LocalFsTierLocal`（localfs/xlocalfs，共享
   `fs_util` 磁盘布局，本文 §4 描述的就是它）与 `DuoStoreTierLocal`（tier
   状态进对象记录、stub = 无 extent 的记录、提交 = CAS 元数据事务，见
-  [storage/tiered.md §11](storage/tiered.md)）。配置里 `local` 指向
+  [storage/tiered.md §11](tiered.md)）。配置里 `local` 指向
   localfs/xlocalfs 或 duostore 均可，其余类型仍为配置错误。
 
 配置以 name 引用两个既有后端实例；`StorageRegistry::build` 改为两阶段
@@ -300,7 +300,7 @@ backends:
     root: ./data/objects
     staging: ./data/staging
   - name: aws
-    type: cloudproxy                  # docs/cloudproxy-backend.md
+    type: cloudproxy                  # docs/storage/cloudproxy-design.md
     endpoint: https://s3.us-east-1.amazonaws.com
     bucket_prefix: lights3-tier-
     # 云端凭证……
@@ -375,12 +375,12 @@ buckets:
 `<state>/quarantine/` 账本（每条一个 TSV：kind/bucket/key/etag/首末次发现/
 次数）。**首次发现才 ERROR/WARN**，之后每轮只累加次数（DEBUG），不再刷屏；
 一轮对账**完整跑完**后，本轮没再复现的条目自动销账（INFO）。人工处置入口
-`lights3 tier quarantine list|forget|purge <backend> …`（[cli.md §2.4](cli.md)）：
+`lights3 tier quarantine list|forget|purge <backend> …`（[cli.md §2.4](../cli.md)）：
 `forget` 只删账本条目，`purge` 针对 refs_missing——先 HEAD 复核云副本仍不存在，
 再删除这个已死的本地 stub（承认数据丢失；副本回来了则保留 stub、销账）。
 gauge `lights3_tiered_quarantine_entries{kind}` 常驻显示账本规模。本地层容量另有
 `lights3_tiered_local_{used,total,high_watermark,cached,quota}_bytes` 五个回调 gauge
-（[monitoring.md](monitoring.md) "tiered 水位"、[storage/tiered.md](storage/tiered.md) 指标表）。
+（[monitoring.md](../monitoring.md) "tiered 水位"、[storage/tiered.md](tiered.md) 指标表）。
 
 ## 10. 实施拆分
 
@@ -390,7 +390,7 @@ gauge `lights3_tiered_quarantine_entries{kind}` 常驻显示账本规模。本�
 | P2 | TierScanner（判冷 + 水位）、TierIndex 持久化、per-key 锁与冲突矩阵测试 | 并发 PUT/GET/下沉压测无脏数据 | ✅ |
 | P3 | Tee 缓存回填 + 空间兜底降级 + single-flight | 断连/ENOSPC 注入测试 | ✅ |
 | P4 | GC 队列 + 对账工具 | 崩溃注入后对账收敛 | ✅ 全部落地（对账工具 + GC 指数退避 2026-07-31 收尾；stub 丢失重建/删除模式/防复活/反向告警/退避恢复专项全绿） |
-| P5 | 接入真实 CloudProxyBackend（其自身为独立特性，见 docs/cloudproxy-backend.md） | 对公有云端到端 | ✅（`e2e_tiered_cloudproxy` 双实例组合） |
+| P5 | 接入真实 CloudProxyBackend（其自身为独立特性，见 docs/storage/cloudproxy-design.md） | 对公有云端到端 | ✅（`e2e_tiered_cloudproxy` 双实例组合） |
 | P6 | roadmap §3.6：`ITierLocal` 抽象 + duostore 热层、xattr 访问记录 + 时间轮增量扫描、prefix 策略、多维淘汰评分、对账隔离区、Range 块缓存 | 增量轮/规则/评分/块缓存/隔离区/duostore 热层专项单测 | ✅（2026-09-02） |
 
 P1–P4 完全不依赖云 SDK，`tiered` + `memory` 组合即可在 CI 全覆盖，

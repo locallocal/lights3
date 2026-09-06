@@ -1,6 +1,6 @@
 # RedisMetaStore: Redis-Based DuoStore Metadata Store
 
-> English translation of [../duostore-redis-meta.md](../duostore-redis-meta.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/duostore-meta-redis-design.md](../../storage/duostore-meta-redis-design.md). The Chinese original is authoritative; section numbering matches.
 
 > Status: R1-R4 all complete (full `RedisMetaStore` interface + guarded-commit
 > script + test-suite interfacing + e2e + R4 polish: AOF probe warning /
@@ -8,11 +8,11 @@
 > HSCAN batching / TLS evaluated and kept disabled; code in
 > `src/storage/duostore/redis_meta_store.{h,cc}`, compile switch
 > `LIGHTS3_DUOSTORE_REDIS_META` default OFF). This delivers the evolution
-> promise of [duostore-backend.md](duostore-backend.md) §12: swap the meta side
+> promise of [duostore-design.md](duostore-design.md) §12: swap the meta side
 > to Redis, implementing `IMetaStore` (`src/storage/duostore/meta_store.h`) so
 > multiple gateways can share the same metadata. Client library: hiredis
 > (`third_party/hiredis` submodule, §7). In this document, "main doc" refers to
-> duostore-backend.md, and unprefixed `§N` refers to sections of this document.
+> duostore-design.md, and unprefixed `§N` refers to sections of this document.
 
 ## 1. Goals and Non-Goals
 
@@ -246,7 +246,7 @@ data-plane precondition see §1 non-goals).
 
 ### 3.6 Cross-Gateway Cache Invalidation Broadcast (backlog-sequence ⑤)
 
-The object metadata cache ([storage/duostore-core.md §7.1](../storage/duostore-core.md))
+The object metadata cache ([storage/duostore-core.md §7.1](../../storage/duostore-core.md))
 on a shared meta engine cannot see a peer gateway's writes by itself. Redis has
 pub/sub, so:
 

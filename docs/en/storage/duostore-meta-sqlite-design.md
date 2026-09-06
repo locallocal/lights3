@@ -1,19 +1,19 @@
 # SqliteMetaStore: SQLite-Based DuoStore Metadata Store
 
-> English translation of [../duostore-sqlite-meta.md](../duostore-sqlite-meta.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/duostore-meta-sqlite-design.md](../../storage/duostore-meta-sqlite-design.md). The Chinese original is authoritative; section numbering matches.
 
 > Status: S1-S4 all complete (2026-07-30; full `SqliteMetaStore` interface + meta/backend
 > suites + e2e + S4 polish — crash-replay/consistent-view specials, BUSY/corruption
 > metrics, checkpoint tuning and online-backup evaluation; code in
 > `src/storage/duostore/sqlite_meta_store.{h,cc}`, build option
 > `LIGHTS3_DUOSTORE_SQLITE_META` default OFF). Delivers the evolution promise of
-> [duostore-backend.md](duostore-backend.md)
+> [duostore-design.md](duostore-design.md)
 > §12 "SQLite (single-file deployment)": switch the meta side to SQLite, implement
 > `IMetaStore` (`src/storage/duostore/meta_store.h`), and converge metadata into a
 > **single database file** — backup/migration = copying one file. Engine source is the
 > `third_party/sqlite` submodule (https://github.com/sqlite/sqlite.git,
-> §7). In this document "main doc" refers to duostore-backend.md, "the Redis doc"
-> refers to [duostore-redis-meta.md](duostore-redis-meta.md), and a bare `§N` refers
+> §7). In this document "main doc" refers to duostore-design.md, "the Redis doc"
+> refers to [duostore-meta-redis-design.md](duostore-meta-redis-design.md), and a bare `§N` refers
 > to sections of this document.
 
 ## 1. Goals and Non-Goals

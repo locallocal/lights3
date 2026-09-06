@@ -1,6 +1,6 @@
 # CloudProxyBackend: A Proxy Backend Mapping Public Cloud Storage
 
-> English translation of [../cloudproxy-backend.md](../cloudproxy-backend.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/cloudproxy-design.md](../../storage/cloudproxy-design.md). The Chinese original is authoritative; section numbering matches.
 
 > Status: P1–P5 fully implemented (`src/storage/cloudproxy/`; remaining P4 items
 > wrapped up on 2026-07-31: §8.2 metrics, §2.3 `control_in_pump`, §7
@@ -8,11 +8,11 @@
 > and run the consistency suite (`test_cloudproxy.cc`, including the
 > vhost/control_in_pump suites and metrics assertions); the e2e dual-instance
 > scenarios `e2e_cloudproxy` / `e2e_tiered_cloudproxy` are all green. This
-> carries forward the overview in docs/storage-backend.md §4 and the reservation
-> in docs/tiered-storage.md §10 P5 (hooking tiered's cloud side up to a real
+> carries forward the overview in docs/storage/storage-backend.md §4 and the reservation
+> in docs/storage/tiered-design.md §10 P5 (hooking tiered's cloud side up to a real
 > cloud). This document settles the implementation route as **in-house SigV4
 > signing + direct connection via vendored httplib** (route B of
-> docs/storage-backend.md §4.1).
+> docs/storage/storage-backend.md §4.1).
 
 ## 1. Goals and Non-Goals
 
@@ -21,10 +21,10 @@ Goals:
 | Goal | Notes |
 | --- | --- |
 | 1:1 mapping of a remote S3-compatible store | Local bucket ↔ remote bucket (`bucket_prefix` prefix mapping); the remote may be AWS S3, MinIO, an S3-compatible endpoint of OSS/COS, or even another lights3 instance |
-| Implement the full `IStorageBackend` interface | Including bucket CRUD, the object data plane, list, and the complete multipart set (docs/storage-backend.md §1, with `src/storage/backend.h` as the source of truth) |
-| End-to-end streaming | GET/PUT never buffer a whole object in memory; backpressure propagates down to the TCP layer (continuing the principle of docs/storage-backend.md §4) |
+| Implement the full `IStorageBackend` interface | Including bucket CRUD, the object data plane, list, and the complete multipart set (docs/storage/storage-backend.md §1, with `src/storage/backend.h` as the source of truth) |
+| End-to-end streaming | GET/PUT never buffer a whole object in memory; backpressure propagates down to the TCP layer (continuing the principle of docs/storage/storage-backend.md §4) |
 | Credential isolation | Clients authenticate with the gateway's local AK/SK; the gateway accesses the remote with its own cloud credentials; the two are never mixed or passed through |
-| Support tiered P5 | Serves as the cloud-side backend of docs/tiered-storage.md's TieredBackend (the primary consumer); acceptance checklist in §9 |
+| Support tiered P5 | Serves as the cloud-side backend of docs/storage/tiered-design.md's TieredBackend (the primary consumer); acceptance checklist in §9 |
 
 Non-goals (first phase):
 
@@ -35,7 +35,7 @@ Non-goals (first phase):
 - No multi-endpoint load balancing/failover; one backend instance maps to one
   remote endpoint;
 - No caching of remote data—caching is the responsibility of TieredBackend
-  (docs/tiered-storage.md §6); separation of concerns;
+  (docs/storage/tiered-design.md §6); separation of concerns;
 - No proxying of remote extension APIs such as ACL / policy / versioning /
   lifecycle; coverage is limited to the object semantics expressed by
   `IStorageBackend`.
@@ -44,7 +44,7 @@ Non-goals (first phase):
 
 ### 2.1 Route Reversal: A (SDK) → B (In-House Signing, Direct Connection)
 
-docs/storage-backend.md §4.1 originally preferred route A (wrapping
+docs/storage/storage-backend.md §4.1 originally preferred route A (wrapping
 aws-sdk-cpp). This design **reverses that to route B**, for these reasons:
 
 1. **Outbound signing is already in place**: `SigV4Authenticator::sign()`
@@ -65,7 +65,7 @@ aws-sdk-cpp). This design **reverses that to route B**, for these reasons:
 4. **A controllable threading model**: a self-built implementation can be fused
    precisely with the project's coroutine/ThreadPool model; the SDK's sync/async
    APIs would require a second adaptation layer instead
-   (docs/storage-backend.md §4 already pointed out the thread-hogging bottleneck
+   (docs/storage/storage-backend.md §4 already pointed out the thread-hogging bottleneck
    of a synchronous SDK).
 
 Costs (already listed as §1 non-goals): no automatic credential chain; S3
@@ -365,7 +365,7 @@ Remote response → local `s3::S3Error` (single-point implementation in
 | Remote 403 (proxy credential/permission fault) | **`InternalError`, do not pass AccessDenied through**—the client has already passed local authentication; the 403 is a gateway configuration fault, and passing it through would mislead the client into debugging its own credentials; log warn with the remote's original code (exception: the HEAD 403 of `bucket_exists`, see §4.3) |
 | 404 with unparsable body | Fill in NoSuchKey / NoSuchBucket from the operation context |
 | 429 / 503 / SlowDown | `SlowDown` (local 503; the client may back off and retry) |
-| 500 / 502 / 504, 5xx with unparsable body | `InternalError` (local 500). **No 502 introduced**: the S3 error vocabulary has no BadGateway; standard S3 clients treat 500/503 as retryable; stay protocol-faithful (the original "502/503" wording in docs/storage-backend.md §4 is revised along with this document) |
+| 500 / 502 / 504, 5xx with unparsable body | `InternalError` (local 500). **No 502 introduced**: the S3 error vocabulary has no BadGateway; standard S3 clients treat 500/503 as retryable; stay protocol-faithful (the original "502/503" wording in docs/storage/storage-backend.md §4 is revised along with this document) |
 | Connection refused / DNS failure / timeout (after retries exhausted) | `InternalError`, message containing the endpoint and the underlying cause (httplib `Result.error()` enum rendered as text) |
 
 ### 5.2 Retry Policy
@@ -414,7 +414,7 @@ Remote response → local `s3::S3Error` (single-point implementation in
   the response arrives, compare against the remote ETag and throw
   `InternalError` ("upload corrupted in transit") on mismatch—this both
   compensates for the integrity of UNSIGNED-PAYLOAD and directly satisfies
-  docs/tiered-storage.md §5.2's dependency of "verify the cloud-returned etag
+  docs/storage/tiered-design.md §5.2's dependency of "verify the cloud-returned etag
   against local content";
 - The multipart overall ETag `hex-N` rule matches the local implementation
   (`md5(concatenation of part md5s)-N`), so tiered's comparison of the cloud
@@ -531,24 +531,24 @@ fallback) remain unchanged.
 - New option `LIGHTS3_CLOUDPROXY` (default ON); `registry.cc` already registers
   the cloudproxy factory (reading the §7 keys from `BackendConfig::params`).
 
-## 9. Acceptance for Integration with TieredBackend (docs/tiered-storage.md P5)
+## 9. Acceptance for Integration with TieredBackend (docs/storage/tiered-design.md P5)
 
 As tiered's cloud-side backend, the acceptance checklist:
 
 1. After `put_object` uploads with `user_meta` (the `x-amz-meta-lights3-*`
-   redundancy headers, docs/tiered-storage.md §4.2), `head_object` /
+   redundancy headers, docs/storage/tiered-design.md §4.2), `head_object` /
    `get_object` retrieve it verbatim;
 2. The etags returned by put / upload_part / complete are non-empty;
    single-part = content MD5 (the verification dependency of
-   docs/tiered-storage.md §5.2 step ③);
+   docs/storage/tiered-design.md §5.2 step ③);
 3. All three Range GET forms are correct (the pass-through dependency of
-   docs/tiered-storage.md §6.3);
+   docs/storage/tiered-design.md §6.3);
 4. head returns size / etag / last_modified in full (the conditional-request
-   dependency of docs/tiered-storage.md §6.1);
-5. `list_objects` is usable for the docs/tiered-storage.md §9 reconciliation
+   dependency of docs/storage/tiered-design.md §6.1);
+5. `list_objects` is usable for the docs/storage/tiered-design.md §9 reconciliation
    traversal;
 6. When the remote is unreachable, throw `InternalError` / `SlowDown` rather
-   than hanging (docs/tiered-storage.md §9's fault matrix relies on
+   than hanging (docs/storage/tiered-design.md §9's fault matrix relies on
    predictable exceptions).
 
 ## 10. Testing Strategy
@@ -583,4 +583,4 @@ external dependencies like MinIO/docker throughout.
 | P2 | GET data plane (pump + ResponseHandler + BlockQueue, Range, cancellation); list_objects / list_buckets XML parsing | run_backend_suite read/list paths pass; cancellation targeted test passes | ✅ |
 | P3 | PUT / upload_part streaming (pull-to-pull + UNSIGNED-PAYLOAD + MD5 verification); full multipart set (including 200-with-error-body handling) | `run_backend_suite(CloudProxyBackend)` all green | ✅ |
 | P4 | Retry/backoff, timeout refinement, metrics, logging; decision on the length-less body path (NotImplemented or TRAILER framing); `control_in_pump` default set by load test | Fault-injection targeted tests pass | ✅ All landed (2026-07-31): metrics in §8.2; `control_in_pump` load test set default false (§2.3); `force_path_style: false` vhost implemented along the way (§7) |
-| P5 | e2e dual-instance script; tiered integration (§9 checklist); docs/tiered-storage.md P5 status update | e2e passes; tiered + cloudproxy smoke test passes | ✅ (`e2e_cloudproxy` + `e2e_tiered_cloudproxy`) |
+| P5 | e2e dual-instance script; tiered integration (§9 checklist); docs/storage/tiered-design.md P5 status update | e2e passes; tiered + cloudproxy smoke test passes | ✅ (`e2e_cloudproxy` + `e2e_tiered_cloudproxy`) |

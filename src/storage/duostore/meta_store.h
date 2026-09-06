@@ -1,4 +1,4 @@
-// L3: DuoStore metadata-side interface (docs/duostore-backend.md §3.2).
+// L3: DuoStore metadata-side interface (docs/storage/duostore-design.md §3.2).
 // Contract: synchronous interface, must be called on a pool thread (DuoStoreBackend
 // switches to the pool uniformly at the entry point, §2.2); errors throw
 // s3::S3Error; commit-type methods internally complete
@@ -28,7 +28,7 @@
 namespace lights3::storage::duostore {
 
 // Tiering state of an object when duostore is the local side of a TieredBackend
-// (roadmap §3.6 ⑥, docs/tiered-storage.md §3): remote = the data lives in the cloud and
+// (roadmap §3.6 ⑥, docs/storage/tiered-design.md §3): remote = the data lives in the cloud and
 // `data` is empty (a stub), cached = local extents are a cache of the cloud replica.
 // Codec object record v3; absent on older records = local
 struct TierState {

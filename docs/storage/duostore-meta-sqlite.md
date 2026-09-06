@@ -1,11 +1,11 @@
 # SqliteMetaStore：DuoStore 元数据的 SQLite 实现
 
 本文是 `SqliteMetaStore` 的实现级文档，展开
-[../duostore-sqlite-meta.md](../duostore-sqlite-meta.md)（下称"设计文档"）在代码中的
+[duostore-meta-sqlite-design.md](duostore-meta-sqlite-design.md)（下称"设计文档"）在代码中的
 具体落法；主设计脉络（CF 布局、崩溃模型、GC）见
-[../duostore-backend.md](../duostore-backend.md)（下称"主文档"）。DuoStoreBackend
-主体见 [./duostore-core.md](./duostore-core.md)，RocksDB 版对照见
-[./duostore-meta-rocksdb.md](./duostore-meta-rocksdb.md)。涉及文件：
+[duostore-design.md](duostore-design.md)（下称"主文档"）。DuoStoreBackend
+主体见 [./duostore-core.md](duostore-core.md)，RocksDB 版对照见
+[./duostore-meta-rocksdb.md](duostore-meta-rocksdb.md)。涉及文件：
 
 | 文件 | 内容 |
 | --- | --- |

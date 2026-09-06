@@ -1,5 +1,5 @@
 // Cross-cutting infrastructure: backend-level metrics registration (wiring in
-// docs/storage-backend.md §6). L2 request-dimension metrics remain the job of
+// docs/storage/storage-backend.md §6). L2 request-dimension metrics remain the job of
 // s3::Metrics; this file lets any component (storage backends and their meta/data
 // subcomponents) register counters / gauges / histograms, appended to the
 // GET /-/metrics output in Prometheus text format. Wiring path: main creates the

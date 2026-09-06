@@ -1,6 +1,6 @@
 // L3: on-disk primitives shared by the localfs family of backends (tmp files, TSV
 // sidecar/manifest, atomic commit).
-// localfs and xlocalfs share the same disk layout (docs/storage-backend.md §3.1/§3.2); they differ only in data-plane IO style.
+// localfs and xlocalfs share the same disk layout (docs/storage/storage-backend.md §3.1/§3.2); they differ only in data-plane IO style.
 #pragma once
 
 #include <sys/stat.h>
@@ -29,7 +29,7 @@ inline constexpr const char* kBucketMarker = ".lights3-bucket";
 inline constexpr const char* kDirMarker = ".lights3-dir";
 // Metadata extended attribute on the data file (content = same TSV as the sidecar):
 // travels with the inode and is committed by the same rename as the data, so it can never
-// be misaligned with the data it describes (docs/storage-backend.md §3.1)
+// be misaligned with the data it describes (docs/storage/storage-backend.md §3.1)
 inline constexpr const char* kMetaXattr = "user.lights3.meta";
 
 std::string next_tmp_name();
@@ -47,7 +47,7 @@ void reject_reserved_key(std::string_view key);
 
 [[noreturn]] void throw_errno(const std::string& what);
 
-// Durability primitives (all no-ops when LIGHTS3_FSYNC=0, docs/storage-backend.md §3.1):
+// Durability primitives (all no-ops when LIGHTS3_FSYNC=0, docs/storage/storage-backend.md §3.1):
 // fsync_file runs fdatasync on an open fd (throws on failure); fsync_dir persists the
 // directory entry (rename only guarantees atomicity, not that the parent directory has
 // been persisted; failure is silent -- it should not take down the write path)
@@ -111,7 +111,7 @@ struct CommitOptions {
 };
 
 // Create parent dirs + directory-conflict check + data rename + sidecar
-// (docs/storage-backend.md §3.1 write atomicity); shared by PUT and complete_multipart.
+// (docs/storage/storage-backend.md §3.1 write atomicity); shared by PUT and complete_multipart.
 // Returns true when the sidecar write was **deferred to the caller** (SidecarMode::kAsync
 // with a successful xattr): the caller must schedule write_object_sidecar off the request
 // path. Every other mode returns false with the on-disk state complete
@@ -142,7 +142,7 @@ bool finish_object_sidecar(const std::filesystem::path& dest, const ObjectMeta& 
 void check_put_condition(const std::filesystem::path& data_path, const PutCondition& cond,
                          std::string_view key);
 
-// ---- Sidecar extensions for tiered storage (docs/tiered-storage.md §4) ----
+// ---- Sidecar extensions for tiered storage (docs/storage/tiered-design.md §4) ----
 
 enum class Tier { kLocal, kRemote, kCached };
 
@@ -162,7 +162,7 @@ bool set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta,
 
 // stat the data file + read metadata (xattr first, fall back to sidecar); when
 // tier != local the size comes from the metadata (a stub data file has zero length,
-// docs/tiered-storage.md §4.1).
+// docs/storage/tiered-design.md §4.1).
 // Missing / not a regular file throws NoSuchKey.
 ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key,
                             TierInfo* tier_out = nullptr);
@@ -185,7 +185,7 @@ struct StubRace : s3::S3Error {
         : S3Error(s3::S3ErrorCode::InternalError, "object is a tier stub", std::move(key)) {}
 };
 
-// Stubbing commit (docs/tiered-storage.md §5.2 steps b/c): first write the tier=remote
+// Stubbing commit (docs/storage/tiered-design.md §5.2 steps b/c): first write the tier=remote
 // sidecar, then rename a 0-length tmp over the data file. Idempotent; the caller must hold
 // the per-key lock.
 // In-place metadata rewrite for an existing object (roadmap §2.5 ?tagging): xattr
@@ -201,7 +201,7 @@ void rewrite_object_meta(const std::filesystem::path& data_path, const ObjectMet
 void commit_stub(const std::filesystem::path& dest, const ObjectMeta& meta, const TierInfo& tier,
                  const std::filesystem::path& staging_put);
 
-// Cache backfill commit (docs/tiered-storage.md §6.2): rename the data tmp first, then
+// Cache backfill commit (docs/storage/tiered-design.md §6.2): rename the data tmp first, then
 // write the tier=cached sidecar
 // (on a crash in between, the sidecar still says remote and reads keep going to the cloud unaffected).
 // dest must previously be a stub (parent directory already exists), so no directory-conflict check.
@@ -239,7 +239,7 @@ private:
     std::shared_ptr<ThreadPool> pool_;
 };
 
-// ---- multipart layout (docs/storage-backend.md §3.2): <staging>/mpu/<id>/{manifest, part.NNNNN, .md5} ----
+// ---- multipart layout (docs/storage/storage-backend.md §3.2): <staging>/mpu/<id>/{manifest, part.NNNNN, .md5} ----
 
 std::string part_file_name(int part_no);
 

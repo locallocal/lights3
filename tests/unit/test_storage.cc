@@ -1,5 +1,5 @@
-// Backend consistency suite: the same set of cases runs parameterized over memory / localfs / xlocalfs (docs/storage-backend.md §6);
-// the suite body lives in unit/backend_suite.h (also used by the cloudproxy tests, docs/cloudproxy-backend.md §10)
+// Backend consistency suite: the same set of cases runs parameterized over memory / localfs / xlocalfs (docs/storage/storage-backend.md §6);
+// the suite body lives in unit/backend_suite.h (also used by the cloudproxy tests, docs/storage/cloudproxy-design.md §10)
 #include <fcntl.h>
 #include <sys/xattr.h>
 
@@ -94,7 +94,7 @@ TEST(xlocalfs_backend_suite) {
     sync_wait(b.close());
 }
 
-// tiered is still an ordinary backend toward L2 (docs/tiered-storage.md §2): run the same consistency cases in the all-local state
+// tiered is still an ordinary backend toward L2 (docs/storage/tiered-design.md §2): run the same consistency cases in the all-local state
 TEST(tiered_backend_suite) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -107,7 +107,7 @@ TEST(tiered_backend_suite) {
 }
 
 #ifdef LIGHTS3_DUOSTORE
-// duostore (RocksDB meta + chunk/pack data plane, docs/duostore-backend.md §14):
+// duostore (RocksDB meta + chunk/pack data plane, docs/storage/duostore-design.md §14):
 // three layout variants all green on the same suite -- default parameters (mixed: small objects go to pack), small chunk (forcing
 // multi-chunk manifests), forced all-pack (larger threshold + small pack_max_size for high-frequency rotation and sealing)
 TEST(duostore_backend_suite) {
@@ -349,7 +349,7 @@ TEST(localfs_atomic_layout) {
     sync_wait(b.create_bucket("bkt"));
     put(b, "bkt", "x/y.bin", "payload");
 
-    // On-disk layout matches docs/storage-backend.md §3.1: data file + sidecar, no staging residue
+    // On-disk layout matches docs/storage/storage-backend.md §3.1: data file + sidecar, no staging residue
     CHECK(fs::exists(tmp.path / "data/bkt/x/y.bin"));
     CHECK(fs::exists(tmp.path / "data/bkt/x/y.bin.lights3-meta"));
     size_t staging_leftover = 0;
@@ -368,7 +368,7 @@ TEST(localfs_multipart_layout_and_cleanup) {
     LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
     sync_wait(b.create_bucket("bkt"));
 
-    // Parts land in <staging>/mpu/<id>/; after complete the directory is cleaned and the object lands atomically (docs/storage-backend.md §3.2)
+    // Parts land in <staging>/mpu/<id>/; after complete the directory is cleaned and the object lands atomically (docs/storage/storage-backend.md §3.2)
     auto uid = sync_wait(b.create_multipart("bkt", "big.bin", {}));
     http::StringBodyReader part("data");
     auto pr = sync_wait(b.upload_part("bkt", "big.bin", uid, 1, part));

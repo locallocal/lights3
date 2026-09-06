@@ -26,7 +26,7 @@ namespace {
 
 // The push-to-pull BlockQueue / QueueBodyReader have been extracted into a
 // shared component (http/pushpull.h, also used by the cloudproxy backend,
-// docs/cloudproxy-backend.md §3.1)
+// docs/storage/cloudproxy-design.md §3.1)
 
 // Connection-info pseudo-headers httplib injects into headers in process_request; not part of the HTTP message
 bool is_pseudo_header(const std::string& k) {

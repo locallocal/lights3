@@ -146,7 +146,7 @@ docker run --rm lights3 s3adm --help
 | --- | --- | --- |
 | `LIGHTS3_REDIS` / `LIGHTS3_SQLITE` | `ON` | duostore's zero-external-dependency meta engines |
 | `LIGHTS3_RADOS` | `OFF` | `librados-dev` at build time, `librados2` at runtime |
-| `LIGHTS3_TIKV` | `OFF` | `libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev libpoco-dev libabsl-dev` ([duostore-tikv-meta.md §8](duostore-tikv-meta.md)) |
+| `LIGHTS3_TIKV` | `OFF` | `libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev libpoco-dev libabsl-dev` ([duostore-meta-tikv-design.md §8](storage/duostore-meta-tikv-design.md)) |
 | `LIGHTS3_GIT_COMMIT` | `unknown` | the build context has no `.git` (`.dockerignore`); the commit comes in here |
 | `CMAKE_BUILD_TYPE` | `Release` | |
 | `BASE` | `ubuntu:24.04` | a Debian base works too (`libssl3` name fallback) |

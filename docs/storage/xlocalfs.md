@@ -10,10 +10,10 @@ fdatasync——换成 io_uring 异步提交：磁盘等待期间**不占用任�
 与元数据 opcode（§5.2/§6）、多 ring 分片（§3）。
 
 本文只讲 xlocalfs 特有的部分；共享的布局 / 提交 / 元数据语义见
-[./localfs.md](./localfs.md)，总体定位见
-[../storage-backend.md](../storage-backend.md) §3.3，协程与线程池模型见
+[./localfs.md](localfs.md)，总体定位见
+[storage-backend.md](storage-backend.md) §3.3，协程与线程池模型见
 [../concurrency.md](../concurrency.md)。duostore 的 fs 数据面复用同一引擎与
-流（`fs_uring: true`），见 [./duostore-data-fs.md](./duostore-data-fs.md) §9。
+流（`fs_uring: true`），见 [./duostore-data-fs.md](duostore-data-fs.md) §9。
 
 ## 1. 复用与替换边界
 
@@ -250,7 +250,7 @@ open（冷 dentry/inode 查找是真实盘上工作）走 OPENAT SQE；fstat 紧
 之后是纯内存操作，保持普通 syscall。`UringStreamBodyReader` 把 fd 所有权交给
 `UringReadStream`（§5.1）按 `[off, off+len)` 窗口 read-ahead，Range 天然成立。
 meta 取**已打开 fd 的 fstat** 防并发覆盖错位；tier stub 竞态抛 `StubRace`
-交给 tiered 走云端（见 [../tiered-storage.md](../tiered-storage.md) §7.3）；
+交给 tiered 走云端（见 [tiered-design.md](tiered-design.md) §7.3）；
 延迟指标止于流句柄就绪。
 
 ### 6.2 PUT / UploadPart
@@ -360,8 +360,8 @@ localfs（root/staging/mpu_ttl/mpu_scan_interval）之上增加（映射
 ring 数、READ/WRITE 还是 READV/WRITEV 回退、FSYNC 有无、fixed buffers/files
 是否注册成功、link 可用性、各元数据 opcode、SQPOLL 是否真实启用、
 SINGLE_MMAP/NODROP 特性位。数据面指标沿用 `lights3_localfs_*` 命名空间
-（见 [./localfs.md](./localfs.md)），以 backend label 区分实例。
+（见 [./localfs.md](localfs.md)），以 backend label 区分实例。
 
 duostore 复用同一引擎的 `fs_uring*` 配置与回退 gauge
 `lights3_duostore_uring_fallback` 见
-[./duostore-data-fs.md](./duostore-data-fs.md) §9。
+[./duostore-data-fs.md](duostore-data-fs.md) §9。

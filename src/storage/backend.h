@@ -1,4 +1,4 @@
-// L2/L3 boundary: storage backend interface (see docs/storage-backend.md)
+// L2/L3 boundary: storage backend interface (see docs/storage/storage-backend.md)
 // Error convention: backends throw s3::S3Error and are unaware of HTTP.
 #pragma once
 
@@ -325,7 +325,7 @@ struct IStorageBackend {
     virtual Task<void> delete_object(std::string_view bucket, std::string_view key) = 0;
     virtual Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) = 0;
 
-    // ---- multipart (docs/storage-backend.md §1/§3.2) ----
+    // ---- multipart (docs/storage/storage-backend.md §1/§3.2) ----
     // Returns upload_id; meta carries the desired content_type/user_meta, applied at complete
     virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                                ObjectMeta meta) = 0;

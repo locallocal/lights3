@@ -80,7 +80,7 @@ LocalFsTierLocal::LocalFsTierLocal(std::shared_ptr<LocalFsBackend> local)
     if (resident_)
         LOG_WARN("tiered: filesystem under {} has no xattr support; access records stay in a "
                  "resident table + atime.tsv snapshot (memory grows with the object count, "
-                 "docs/tiered-storage.md §4.3)",
+                 "docs/storage/tiered-design.md §4.3)",
                  local_->root().string());
     load_access_table();
 }

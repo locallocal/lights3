@@ -1,4 +1,4 @@
-// Meta store conformance suite (docs/duostore-redis-meta.md §9): the same set of cases runs parameterized
+// Meta store conformance suite (docs/storage/duostore-meta-redis-design.md §9): the same set of cases runs parameterized
 // over all IMetaStore implementations (RocksMetaStore always, RedisMetaStore conditionally); both
 // implementations share the same semantic baseline. Extracted from the meta cases of test_duostore.cc.
 // Factory convention: each call opens a new instance on the same underlying storage ("restart" semantics);
@@ -164,7 +164,7 @@ inline void case_reclaim_reasons(const MetaFactory& make) {
 }
 
 // file_id segments: no rollback after restart (only uniqueness and monotonicity are required, not contiguity --
-// the absolute value is an implementation detail: RocksDB starts at 0, Redis burns the first segment and starts at kIdSegment, docs/duostore-redis-meta.md §4)
+// the absolute value is an implementation detail: RocksDB starts at 0, Redis burns the first segment and starts at kIdSegment, docs/storage/duostore-meta-redis-design.md §4)
 inline void case_alloc_monotonic_across_reopen(const MetaFactory& make) {
     uint64_t last = 0;
     {

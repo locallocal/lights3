@@ -142,7 +142,7 @@ auth:
 #   max_files: 10               # rotated files kept
 
 backends:
-  # ---------- localfs / xlocalfs: local filesystem (docs/storage-backend.md) ----------
+  # ---------- localfs / xlocalfs: local filesystem (docs/storage/storage-backend.md) ----------
   - name: localdata
     type: localfs                      # localfs | xlocalfs (io_uring data plane) | memory
     root: ./data/objects
@@ -161,7 +161,7 @@ backends:
     # meta_cache_ttl: 0s               # entry expiry; 0s = never (write paths invalidate exactly)
     # meta_cache_validate: true        # HEAD re-checks the inode stamp with one stat; false = trust until invalidated/expired
 
-  # ---------- duostore: metadata KV + chunk/pack data engine (docs/duostore-backend.md) ----------
+  # ---------- duostore: metadata KV + chunk/pack data engine (docs/storage/duostore-design.md) ----------
   # meta engine, pick one of four: rocksdb (default) | redis | sqlite | tikv;
   # data engine, pick one of two: fs (default) | rados.
   # redis/sqlite/tikv/rados must be compiled in via the matching CMake options
@@ -171,7 +171,7 @@ backends:
   #   type: duostore
   #   root: ./data/duostore            # required; meta/ chunks/ packs/ all live under it
   #   verify_chunk_crc: false          # read-path chunk CRC verification (shared by both data engines)
-  #   # -- Background GC and orphan scan (all effective; docs/duostore-backend.md §9) --
+  #   # -- Background GC and orphan scan (all effective; docs/storage/duostore-design.md §9) --
   #   gc_interval: 300s                # reclaim period; 0s = disable background GC
   #   gc_enabled: true                 # false = non-designated instance in a multi-gateway setup (§8.3 single instance runs GC)
   #   gc_grace: 300s                   # delayed-deletion grace (defense in depth against concurrent reads)
@@ -179,12 +179,12 @@ backends:
   #   # -- roadmap §3.8 object metadata cache (docs/storage/duostore-core.md §7.1) --
   #   meta_cache_entries: 64K          # cached ObjectRec budget; default 64K on rocksdb/sqlite, 0 on redis/tikv
   #   meta_cache_ttl: 0s               # required (0 < ttl < gc_grace) when enabling the cache on redis/tikv;
-  #                                    # redis pushes peers' commits over pub/sub (docs/duostore-redis-meta.md §3.6),
+  #                                    # redis pushes peers' commits over pub/sub (docs/storage/duostore-meta-redis-design.md §3.6),
   #                                    # so the TTL only bounds lost messages there; tikv relies on the TTL alone
   #   meta_cache_feed: true            # subscribe the cache to that feed (redis); false = TTL-only staleness
   #   mpu_ttl: 7d                      # cleanup deadline for incomplete multipart uploads; 0 = off
   #
-  #   # -- meta = rocksdb (default, docs/duostore-backend.md) --
+  #   # -- meta = rocksdb (default, docs/storage/duostore-design.md) --
   #   meta: rocksdb
   #   meta_path: ./data/duostore/meta  # default <root>/meta (can point to an SSD separately)
   #   rocksdb_block_cache: 64MiB
@@ -193,7 +193,7 @@ backends:
   #   rocksdb_max_background_jobs: 2   # total flush/compaction background threads (>=1)
   #   meta_sync: true                  # fsync WAL on every commit (shared by rocksdb/sqlite)
   #
-  #   # -- meta = redis (docs/duostore-redis-meta.md §8) --
+  #   # -- meta = redis (docs/storage/duostore-meta-redis-design.md §8) --
   #   # meta: redis
   #   # redis_uri: redis://127.0.0.1:6379  # required; unix:///path/redis.sock also supported
   #   # redis_prefix: "duo:"               # key prefix (multi-instance/test isolation)
@@ -202,7 +202,7 @@ backends:
   #   # redis_wait_replicas: 0             # replicas to WAIT for after commit [0,256] (0=no wait;
   #                                        # with Sentinel primaries/replicas this narrows the failover lost-write window, insufficient replicas only WARN)
   #
-  #   # -- meta = sqlite (docs/duostore-sqlite-meta.md §8) --
+  #   # -- meta = sqlite (docs/storage/duostore-meta-sqlite-design.md §8) --
   #   # meta: sqlite
   #   # sqlite_path: ./data/duostore/meta.sqlite3   # default <root>/meta.sqlite3
   #   # sqlite_cache: 64MiB                # process-level page cache total budget (>= 1MiB)
@@ -210,7 +210,7 @@ backends:
   #                                        # (WAL segments archived there; empty = full backups only, docs/cli.md §2.2.1)
   #   # meta_sync: true                    # maps to PRAGMA synchronous FULL/NORMAL
   #
-  #   # -- meta = tikv (docs/duostore-tikv-meta.md §9) --
+  #   # -- meta = tikv (docs/storage/duostore-meta-tikv-design.md §9) --
   #   # meta: tikv
   #   # pd_endpoints: "127.0.0.1:2379"     # required; comma-separated multiple PDs
   #   # tikv_prefix: "duo:"                # key prefix (multi-instance/test isolation)
@@ -222,7 +222,7 @@ backends:
   #   # tikv_gc_retention: 10m             # safepoint retention window (now − retention, must be positive)
   #   # tikv_backoff_ms: 0                 # sidecar-path backoff budget (0 = client-c library default)
   #
-  #   # -- data = fs (default): chunk/pack local engine (docs/duostore-backend.md) --
+  #   # -- data = fs (default): chunk/pack local engine (docs/storage/duostore-design.md) --
   #   data: fs
   #   chunk_size: 8MiB
   #   pack_threshold: 128KiB           # objects <= this go into packs; 0 = off (everything via chunks)
@@ -230,7 +230,7 @@ backends:
   #   pack_writers: 4                  # concurrent active packs (1-64)
   #   pack_gc_ratio: 0.5               # live ratio below this triggers compaction (effective in P4)
   #
-  #   # -- data = rados (docs/duostore-rados-data.md §10) --
+  #   # -- data = rados (docs/storage/duostore-data-rados-design.md §10) --
   #   # data: rados
   #   # rados_pool: lights3                # required
   #   # rados_conf: /etc/ceph/ceph.conf
@@ -241,7 +241,7 @@ backends:
   #   # rados_connect_timeout: 5s
   #   # rados_op_timeout: 0s               # 0 = no op timeout
 
-  # ---------- cloudproxy: forward to a remote S3 (docs/cloudproxy-backend.md) ----------
+  # ---------- cloudproxy: forward to a remote S3 (docs/storage/cloudproxy-design.md) ----------
   # Requires LIGHTS3_CLOUDPROXY=ON (default on).
   # - name: cloudpx
   #   type: cloudproxy
@@ -272,7 +272,7 @@ backends:
   #   io_threads: 8                      # backend-dedicated thread pool (generic key, available to all backends;
   #                                      # default shares runtime.io_threads' pool)
 
-  # ---------- tiered: local cache + cloud sink (docs/tiered-storage.md) ----------
+  # ---------- tiered: local cache + cloud sink (docs/storage/tiered-design.md) ----------
   # local/cloud reference other backends in this list by name; local must be localfs/xlocalfs or duostore.
   # - name: tierdata
   #   type: tiered
@@ -290,7 +290,7 @@ backends:
   #   gc_retry_cap: 1h                   # backoff cap
   #   reconcile_interval: 0s             # index/cloud reconciliation period; 0s = off (§9)
   #   reconcile_orphans: rebuild         # rebuild = recreate index entries | delete = remove cloud orphans
-  #   # -- roadmap §3.6 (docs/tiered-storage.md §4.3/§5.1/§6.3/§9) --
+  #   # -- roadmap §3.6 (docs/storage/tiered-design.md §4.3/§5.1/§6.3/§9) --
   #   full_scan_interval: 1d             # full enumeration safety net; rounds in between consume the time wheel; 0s = every round full
   #   evict_size_weight: 0               # eviction score size weighting (log2 of MiB); 0 = ignore size
   #   evict_frequency_weight: 0          # eviction score access-count weighting; 0 = pure LRU
@@ -305,7 +305,7 @@ backends:
 
 buckets:
   default_backend: localdata
-  rules: []                # glob-matched in declaration order (docs/storage-backend.md §2)
+  rules: []                # glob-matched in declaration order (docs/storage/storage-backend.md §2)
   # rules:
   #   - match: "archive-*"               # fnmatch glob
   #     backend: tierdata

@@ -114,11 +114,11 @@ CloudProxyConfig CloudProxyConfig::from_params(
         throw std::runtime_error("cloudproxy backend '" + name +
                                  "': imds_endpoint must be an http(s) URL");
     // virtual-hosted style (force_path_style=false): connection and SNI always point at the
-    // endpoint; only Host/signature and path vary per bucket (docs/cloudproxy-backend.md §7);
+    // endpoint; only Host/signature and path vary per bucket (docs/storage/cloudproxy-design.md §7);
     // bucket names containing '.' will mismatch under TLS wildcard certificates -- a
     // deployment-side constraint, not blocked here
     // The concatenated name is validated as a whole against S3 rules
-    // (docs/cloudproxy-backend.md §4.3): "aaa" stands for the shortest legal local name,
+    // (docs/storage/cloudproxy-design.md §4.3): "aaa" stands for the shortest legal local name,
     // covering charset/leading-char/".."/length issues the prefix introduces; a prefix that
     // is doomed to be invalid errors out at load time
     if (!c.bucket_prefix.empty()) {
@@ -175,7 +175,7 @@ Endpoint Endpoint::parse(const std::string& url) {
     if (ep.host.empty())
         throw std::runtime_error("cloudproxy endpoint has empty host: " + url);
     // httplib's Host header: default port sends host only, otherwise host:port (the
-    // consistency trap of docs/cloudproxy-backend.md §2.2)
+    // consistency trap of docs/storage/cloudproxy-design.md §2.2)
     bool default_port = ep.port == (ep.https ? 443 : 80);
     ep.signed_host = default_port ? ep.host : ep.host + ":" + std::to_string(ep.port);
     ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" +
@@ -183,7 +183,7 @@ Endpoint Endpoint::parse(const std::string& url) {
     return ep;
 }
 
-// ---------- Metrics (docs/cloudproxy-backend.md §8.2) ----------
+// ---------- Metrics (docs/storage/cloudproxy-design.md §8.2) ----------
 
 RemoteMetrics::RemoteMetrics(const MetricsScope& scope) : scope_(scope) {
     etag_mismatch = scope.counter(
@@ -523,7 +523,7 @@ httplib::Headers RemoteContext::signed_headers(
     return out;
 }
 
-// ---------- Error mapping (docs/cloudproxy-backend.md §5.1) ----------
+// ---------- Error mapping (docs/storage/cloudproxy-design.md §5.1) ----------
 
 std::optional<S3ErrorCode> map_remote_code(std::string_view wire) {
     if (auto c = s3::code_from_wire(wire)) return c;

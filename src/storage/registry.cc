@@ -234,7 +234,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     std::shared_ptr<MetricsRegistry> metrics,
     const std::map<std::string, std::shared_ptr<IStorageBackend>>* existing) {
     ensure_registered();
-    // Two-phase build (docs/tiered-storage.md §2): construct all leaf backends first, then
+    // Two-phase build (docs/storage/tiered-design.md §2): construct all leaf backends first, then
     // construct composite backends iteratively by dependency
     std::map<std::string, std::shared_ptr<IStorageBackend>> out;
     std::vector<const BackendConfig*> deferred;

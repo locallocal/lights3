@@ -7,7 +7,7 @@ disk (write), then from disk back to the socket (read)", threading together the
 actual code paths of the HTTP Adapter layer (L1), the S3 Protocol layer (L2),
 and the Storage layer (L3). Layer responsibilities are in
 [architecture.md](architecture.md); per-layer internals are in
-[http-adapter.md](http-adapter.md)/[storage-backend.md](storage-backend.md)/[s3-protocol.md](s3-protocol.md).
+[http-adapter.md](http-adapter.md)/[storage/storage-backend.md](storage/storage-backend.md)/[s3-protocol.md](s3-protocol.md).
 
 There is exactly one core abstraction running through this document: the
 **`http::BodyReader` streaming pull interface** (`src/http/model.h`). Both
@@ -136,7 +136,7 @@ Key conventions:
 - **ETag = MD5 of the whole content** (hex, stored without quotes; quotes are
   added uniformly at the exits).
 - **Data first, then sidecar** (the metadata already committed with the data via
-  the xattr in the same rename, see [storage-backend.md](storage-backend.md)
+  the xattr in the same rename, see [storage/storage-backend.md](storage/storage-backend.md)
   §3.1): the reverse order's crash window is "sidecar with the new etag + data
   still old" — GET returns a body that does not match its ETag, i.e. silent
   corruption. This order leaves only a "new data + old sidecar" window, and
@@ -169,7 +169,7 @@ Key conventions:
   backend's `get_object()` stream is used directly as the body of the target
   backend's `put_object()`; cross-backend copies are likewise free of
   whole-object buffering; `x-amz-copy-source-if-*` is validated before copying.
-- **Multipart** (details in docs/storage-backend.md §3.2 and
+- **Multipart** (details in docs/storage/storage-backend.md §3.2 and
   docs/s3-protocol.md §1): `upload_part` is fully isomorphic to PUT
   (staged streaming write + per-part MD5, write `part.NNNNN.md5` first then
   rename the data file; re-uploading the same part number is last-write-wins);

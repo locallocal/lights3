@@ -22,8 +22,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [http-adapter.md](http-adapter.md) | HTTP 协议库插拔层：中立请求/响应模型、流式 Body、适配器实现要点 |
 | [concurrency.md](concurrency.md) | 并发模型：Task 协程、Executor 抽象、线程池、同步/异步 HTTP 库的统一 |
 | [coroutine-internals.md](coroutine-internals.md) | 协程实现内幕：Task promise 布局与对称转移、顶层驱动方式、when_all/with_timeout、取消的竞态协议与生命期守则 |
-| [storage-backend.md](storage-backend.md) | 存储后端抽象、LocalFs/XLocalFs、DuoStore 概览与新增后端指南、bucket 路由 |
-| [storage/](storage/README.md) | 各存储实现的实现级详解（13 篇）：数据结构、磁盘/键空间布局、读写流程、并发与崩溃一致性 |
+| [storage/](storage/README.md) | 存储层全部文档（目录见该 README）：设计层——`storage-backend.md`（接口抽象、bucket 路由、LocalFs/XLocalFs、新增后端指南）与 tiered / cloudproxy / duostore（含 redis / sqlite / tikv meta、rados data 引擎）各自的 `*-design.md`；实现层——13 篇实现级详解：数据结构、磁盘/键空间布局、读写流程、并发与崩溃一致性 |
 | [s3-protocol.md](s3-protocol.md) | S3 协议实现：API 范围、SigV4 认证（含 presigned 与时钟偏移）、Multipart Upload、错误码映射、mint 兼容集 |
 | [credential-management.md](credential-management.md) | 凭证管理：AK/SK 生成/查询/吊销 API、三来源模型（静态 root / 文件 / 动态）、`.sys` 持久化；二期：SK at-rest 加密、凭证文件热加载、多实例同步、per-credential policy |
 | [multi-tenancy.md](multi-tenancy.md) | 用量统计、桶/租户配额、租户实体与桶归属、分级管理面、审计日志（roadmap §3.9 全链） |
@@ -32,13 +31,6 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [performance-baseline.md](performance-baseline.md) | 性能基线：`scripts/bench_matrix.sh` 的 4 驱动 × TLS 开关 × put/get 矩阵，§4.3 数据面优化前后对照，复现方法（roadmap §4.3） |
 | [monitoring.md](monitoring.md) | 监控消费侧：`deploy/` 下的 Prometheus 抓取配置与告警/recording 规则、Grafana dashboard 及其生成器、资产对账测试（roadmap §5.5，零 C++） |
 | [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
-| [tiered-storage.md](tiered-storage.md) | 分层存储：冷数据下沉公有云、stub 元数据、透明回读与缓存回填 |
-| [cloudproxy-backend.md](cloudproxy-backend.md) | CloudProxy 后端：自签 SigV4 + httplib 直连远端 S3、双向流式泵、错误映射与重试 |
-| [duostore-backend.md](duostore-backend.md) | DuoStore 后端：元数据/数据分离引擎，RocksDB 元数据 + chunk 切片/pack 聚合/GC |
-| [duostore-redis-meta.md](duostore-redis-meta.md) | DuoStore 的 Redis IMetaStore：hiredis + Lua guarded-commit，多网关共享 meta |
-| [duostore-sqlite-meta.md](duostore-sqlite-meta.md) | DuoStore 的 SQLite IMetaStore：amalgamation 内嵌，WAL + 读池/单写连接 |
-| [duostore-rados-data.md](duostore-rados-data.md) | DuoStore 的 RADOS IDataStore：librados 直连，chunk → rados 对象 |
-| [duostore-tikv-meta.md](duostore-tikv-meta.md) | DuoStore 的 TiKV IMetaStore：client-c + 2PC 侧车，meta 水平扩展 |
 | [cli.md](cli.md) | 命令行工具：`lights3` 启动、`duostore dump/load/backup/restore/gc/scan`、`tier scan/gc/reconcile`、`fsck` 离线巡检、`s3adm` 的 cred/website/bench/fsck/quota/tenant/usage 命令、ccmd 选项语义与退出码 |
 | [todo.md](todo.md) | 待办与规划：待验证项、基线跑出的新问题、长期项、明确不做清单；做完即删 |
 | [archive/](archive/gaps.md) | 已收口的历史底账（gaps.md / issues.md / roadmap.md / backlog.md / backlog-sequence.md），只读归档——源码注释中 `docs/archive/<name>.md §N`、`roadmap §N`、`backlog §N`、`backlog-sequence ①…⑩` 引用的论证出处 |
@@ -79,8 +71,8 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
   `BodyReader`/`BodyWriter` 拉/推接口传递，支撑大对象上传下载与 SigV4
   chunked 签名校验。
 - **bucket 级路由而非 object 级**：路由规则简单、可静态配置，避免元数据服务；
-  object 级分层已按此思路以组合后端形式叠加实现（见 [tiered-storage.md](tiered-storage.md)）。
+  object 级分层已按此思路以组合后端形式叠加实现（见 [tiered-design.md](storage/tiered-design.md)）。
 - **元数据 sidecar 而非嵌入数据文件**：LocalFs 后端用 `.lights3-meta` sidecar
   （TSV，`fs_util.h:kSidecarSuffix`）存储 Content-Type、ETag、自定义元数据，
   保持数据文件与普通文件系统工具兼容（xattr 同批提交为主，sidecar 兼作外部
-  工具可读与回落，见 [storage-backend.md](storage-backend.md) §3.1）。
+  工具可读与回落，见 [storage/storage-backend.md](storage/storage-backend.md) §3.1）。

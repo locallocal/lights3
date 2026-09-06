@@ -1,4 +1,4 @@
-// SqliteMetaStore dedicated unit tests (docs/duostore-sqlite-meta.md §9): meta consistency suite,
+// SqliteMetaStore dedicated unit tests (docs/storage/duostore-meta-sqlite-design.md §9): meta consistency suite,
 // backend suite over the injected combination, BLOB key ordering (non-UTF-8 bytes), reopen durability, single-file cold backup,
 // swap_extents CAS, file lineage validation. Zero external dependencies -- no probe/SKIP path like the Redis version.
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_SQLITE_META)

@@ -1,4 +1,4 @@
-// RedisMetaStore dedicated unit tests (docs/duostore-redis-meta.md §9): meta consistency suite,
+// RedisMetaStore dedicated unit tests (docs/storage/duostore-meta-redis-design.md §9): meta consistency suite,
 // backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS, multiple gateways sharing meta,
 // concurrent CAS convergence. Obtaining a real redis: probe for redis-server in PATH and start a private instance
 // on a unix socket (--save '' --appendonly no); if none is found, SKIP explicitly (not a failure).
@@ -189,7 +189,7 @@ using meta_store_suite::make_rec;
 
 }  // namespace
 
-// Same meta semantics baseline (suite shared with RocksMetaStore, docs/duostore-redis-meta.md §9.1)
+// Same meta semantics baseline (suite shared with RocksMetaStore, docs/storage/duostore-meta-redis-design.md §9.1)
 TEST(duostore_redis_meta_store_suite) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -580,7 +580,7 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     CHECK(!DuoStoreConfig::from_params("p", on).meta_cache_feed);
 }
 
-// backlog-sequence ⑤ (docs/duostore-redis-meta.md §3.6): with the cache on, a peer's
+// backlog-sequence ⑤ (docs/storage/duostore-meta-redis-design.md §3.6): with the cache on, a peer's
 // commit publishes on <prefix>inv and the local record drops within a message's
 // latency instead of at the TTL; a lost feed clears the cache on reconnect
 TEST(duostore_redis_cache_invalidation_feed) {

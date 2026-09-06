@@ -225,7 +225,7 @@ int parse_duration_sec(const std::string& s) {
     if (unit.empty() || unit == "s") mult = 1;
     else if (unit == "m") mult = 60;
     else if (unit == "h") mult = 3600;
-    else if (unit == "d") mult = 86400;  // tiered storage's cold_after (docs/tiered-storage.md §8)
+    else if (unit == "d") mult = 86400;  // tiered storage's cold_after (docs/storage/tiered-design.md §8)
     else throw std::runtime_error("bad duration unit: " + s);
     if (num < 0 || num > INT_MAX / mult)
         throw std::runtime_error("duration out of range: " + s);

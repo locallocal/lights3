@@ -2,11 +2,11 @@
 
 > 状态：C1-C4 已实现（`src/storage/duostore/rados_data_store.{h,cc}`，
 > CMake option `LIGHTS3_DUOSTORE_RADOS_DATA`，2026-07-30 全部完成，§12）。兑现
-> [duostore-backend.md](duostore-backend.md) §12 的演进承诺：data 侧换
+> [duostore-design.md](duostore-design.md) §12 的演进承诺：data 侧换
 > Ceph，实现 `IDataStore`（`src/storage/duostore/data_store.h`），数据面从
 > 单机文件系统换成 RADOS 分布式对象池，副本/EC、扩容再平衡、自修复由
 > Ceph 承担。客户端库 librados **C API**（系统包发现，不作 submodule，
-> §9）。本文中"主文档"指 duostore-backend.md，`§N` 不带前缀时指本文档章节。
+> §9）。本文中"主文档"指 duostore-design.md，`§N` 不带前缀时指本文档章节。
 
 ## 1. 目标与非目标
 
@@ -69,7 +69,7 @@ run 同构，**O(#parts) 零数据搬运的红利原样保留**。
   stat，EC 不需开 overwrite 特性，§4.1）；
 - **namespace**（`rados_namespace`，默认空）：pool 内的廉价逻辑隔离，
   多 backend 实例 / 多套测试共用一个 pool 而互不可见——角色对应
-  redis-meta 的 `redis_prefix`（[duostore-redis-meta.md](duostore-redis-meta.md)
+  redis-meta 的 `redis_prefix`（[duostore-meta-redis-design.md](duostore-meta-redis-design.md)
   §2.1），测试隔离靠它（§11）。
 
 ### 3.3 单一路径：pack 聚合取消
@@ -334,7 +334,7 @@ RedisMetaStore + RadosDataStore = 主文档 §12 组合矩阵里"全分布式网
 | --- | --- |
 | file_id 全局唯一 | 已满足：共享 meta 的号段分配（INCRBY，redis-meta §4）天然跨网关单调 |
 | meta 事务全局原子 | 已满足：Lua 脚本服务端原子（redis-meta §3.4） |
-| 读侧 pin vs 他网关 GC | **已补**（roadmap §3.7）：pin 表虽为进程内，但各网关经 `read_lease`（默认 5s）向共享 meta 发布"最老在途读开始时间"，GC 网关只回收所有对端在途读都晚于其入队的 gcq 项/见空早于下限的空 pack（[storage/duostore-core.md §8.5](storage/duostore-core.md)）；`read_lease: 0` 关闭时回落旧约束 `gc_grace` ≥ 最长预期 GET 时长 |
+| 读侧 pin vs 他网关 GC | **已补**（roadmap §3.7）：pin 表虽为进程内，但各网关经 `read_lease`（默认 5s）向共享 meta 发布"最老在途读开始时间"，GC 网关只回收所有对端在途读都晚于其入队的 gcq 项/见空早于下限的空 pack（[storage/duostore-core.md §8.5](duostore-core.md)）；`read_lease: 0` 关闭时回落旧约束 `gc_grace` ≥ 最长预期 GET 时长 |
 | GC/孤儿扫描的执行者 | **需单实例执行**（配置指定哪个网关跑 GC），否则并发压实/扫描互踩 |
 
 部署约束（C4 起有配置承载）：**多网关时 GC 仅由指定的单一实例执行**；

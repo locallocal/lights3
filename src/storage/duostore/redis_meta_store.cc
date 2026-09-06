@@ -490,7 +490,7 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         if (probe->type == REDIS_REPLY_ARRAY && probe->elements == 2 &&
             reply_str(probe->element[1]) != "yes")
             LOG_WARN("duostore redis meta: appendonly=no -- a crash may roll back data; "
-                     "deployment requires AOF (docs/duostore-redis-meta.md §6)");
+                     "deployment requires AOF (docs/storage/duostore-meta-redis-design.md §6)");
     } else {
         LOG_INFO("duostore redis meta: CONFIG GET unavailable, skipping AOF probe");
     }

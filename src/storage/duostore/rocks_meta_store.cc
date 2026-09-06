@@ -10,6 +10,7 @@
 #include <rocksdb/options.h>
 #include <rocksdb/slice.h>
 #include <rocksdb/table.h>
+#include <rocksdb/utilities/backup_engine.h>
 #include <rocksdb/write_batch.h>
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 
 #include "core/log.h"
 #include "storage/duostore/codec.h"
+#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/meta_util.h"
 #include "storage/multipart.h"
 
@@ -907,6 +909,62 @@ private:
 
 std::unique_ptr<IMetaReadView> RocksMetaStore::snapshot() {
     return std::make_unique<SnapshotView>(*this, db());
+}
+
+
+// ---------- Backup chain (backlog-sequence ⑧) ----------
+
+namespace {
+rocksdb::BackupEngineOptions backup_options(const std::filesystem::path& dir) {
+    rocksdb::BackupEngineOptions bo((dir / "rocksdb").string());
+    bo.share_table_files = true;  // incremental by construction: unchanged SSTs are linked, not copied
+    bo.sync = true;
+    return bo;
+}
+}  // namespace
+
+MetaBackupEntry RocksMetaStore::backup_physical(const std::filesystem::path& dir, uint64_t id,
+                                                bool full) {
+    std::filesystem::create_directories(dir);
+    rocksdb::BackupEngine* raw = nullptr;
+    auto s = rocksdb::BackupEngine::Open(backup_options(dir), rocksdb::Env::Default(), &raw);
+    if (!s.ok()) throw_status("backup engine open", s);
+    std::unique_ptr<rocksdb::BackupEngine> be(raw);
+    rocksdb::CreateBackupOptions co;
+    co.flush_before_backup = true;  // the memtable goes into the backup, not just the WAL
+    s = be->CreateNewBackupWithMetadata(co, db(), "lights3 entry " + std::to_string(id));
+    if (!s.ok()) throw_status("backup", s);
+    std::vector<rocksdb::BackupInfo> infos;
+    be->GetBackupInfo(&infos);
+    if (infos.empty()) throw_status("backup", rocksdb::Status::Corruption("no backup recorded"));
+    const auto& last = infos.back();
+    MetaBackupEntry e;
+    e.id = id;
+    e.full = full;
+    e.ts_ms = backup_now_ms();
+    e.file = "rocksdb";
+    e.marker = std::to_string(last.backup_id);
+    e.bytes = last.size;
+    return e;
+}
+
+void RocksMetaStore::restore_physical(const std::filesystem::path& dir, const std::string& marker,
+                                      const std::filesystem::path& db_path) {
+    uint32_t backup_id = 0;
+    auto r = std::from_chars(marker.data(), marker.data() + marker.size(), backup_id);
+    if (r.ec != std::errc() || r.ptr != marker.data() + marker.size())
+        throw S3Error(S3ErrorCode::InternalError,
+                      "duostore meta(rocksdb) restore: bad backup marker '" + marker + "'");
+    rocksdb::BackupEngineReadOnly* raw = nullptr;
+    auto s = rocksdb::BackupEngineReadOnly::Open(backup_options(dir), rocksdb::Env::Default(), &raw);
+    if (!s.ok()) throw_status("backup engine open", s);
+    std::unique_ptr<rocksdb::BackupEngineReadOnly> be(raw);
+    std::error_code ec;
+    std::filesystem::remove_all(db_path, ec);
+    std::filesystem::create_directories(db_path, ec);
+    s = be->RestoreDBFromBackup(rocksdb::RestoreOptions(), backup_id, db_path.string(),
+                                db_path.string());
+    if (!s.ok()) throw_status("restore", s);
 }
 
 }  // namespace lights3::storage::duostore

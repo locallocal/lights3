@@ -7,12 +7,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <filesystem>
 #include <map>
 #include <set>
 
 #include "core/log.h"
 #include "storage/duostore/codec.h"
+#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/meta_util.h"
 #include "storage/multipart.h"
 
@@ -467,6 +469,20 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
         apply_pragmas(*wc_, opt_.sync);
         init_schema(*wc_);
         ac_ = open_conn(/*full_sync=*/true);  // id-segment connection is always FULL (§4)
+        // Backup chain (backlog-sequence ⑧): an existing chain in wal_archive means
+        // the WAL must keep every commit until the next segment is archived
+        if (!opt_.wal_archive.empty()) {
+            auto m = BackupManifest::load(opt_.wal_archive);
+            if (!m.entries.empty() && m.engine != "sqlite")
+                throw S3Error(S3ErrorCode::InternalError,
+                              "duostore meta(sqlite): " + opt_.wal_archive +
+                                  " holds a " + m.engine + " backup chain");
+            if (!m.entries.empty()) {
+                set_archiving_locked(true);
+                LOG_INFO("duostore meta(sqlite): WAL archiving on ({} entries in {})",
+                         m.entries.size(), opt_.wal_archive);
+            }
+        }
     } catch (...) {
         shutdown(/*graceful=*/false);
         throw;
@@ -489,6 +505,30 @@ void SqliteMetaStore::shutdown(bool graceful) {
     idle_.clear();
     ac_.reset();
     if (wc_ && !graceful) wc_.reset();  // constructor-failure cleanup: db never opened cleanly, skip graceful wrap-up
+    if (wc_ && archive_active_) {
+        // Clean close under an active chain: the checkpoint below would fold the
+        // frames since the last segment into the database file, where no later
+        // incremental could pick them up -- archive them first as one more entry
+        try {
+            auto m = BackupManifest::load(opt_.wal_archive);
+            MetaBackupEntry e;
+            e.id = m.next_id();
+            e.ts_ms = backup_now_ms();
+            e.bytes = archive_wal_segment_locked(opt_.wal_archive, e.id, e.file);
+            e.full = false;
+            e.marker = "close";
+            if (e.bytes > 0) {
+                m.entries.push_back(e);
+                m.save(opt_.wal_archive);
+                LOG_INFO("duostore meta(sqlite): archived the closing WAL segment as entry {} "
+                         "({} bytes)", e.id, e.bytes);
+            }
+        } catch (const std::exception& e) {
+            LOG_ERROR("duostore meta(sqlite): closing WAL segment not archived: {} -- the "
+                      "backup chain in {} misses the commits since its last entry",
+                      e.what(), opt_.wal_archive);
+        }
+    }
     if (wc_) {
         // Clean shutdown (§5.3): merge the WAL back into the main file and truncate,
         // leaving a single DB file in the directory — cold backup = copy that one
@@ -1320,6 +1360,221 @@ private:
 
 std::unique_ptr<IMetaReadView> SqliteMetaStore::snapshot() {
     return std::make_unique<SnapshotView>(*this);
+}
+
+
+// ---------- Backup chain (backlog-sequence ⑧) ----------
+
+namespace {
+
+std::string wal_path_of(const std::string& db) { return db + "-wal"; }
+
+void remove_quiet(const std::filesystem::path& p) {
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+}
+
+// Whole-file copy through the SQLite online backup API: consistent even if a
+// reader holds a transaction, and it writes a proper database file (page size,
+// WAL-mode header) rather than trusting a raw byte copy
+void backup_db_file(sqlite3* src, const std::filesystem::path& dest) {
+    remove_quiet(dest);
+    remove_quiet(dest.string() + "-wal");
+    remove_quiet(dest.string() + "-shm");
+    sqlite3* out = nullptr;
+    if (sqlite3_open_v2(dest.c_str(), &out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) !=
+        SQLITE_OK) {
+        std::string msg = out ? sqlite3_errmsg(out) : "out of memory";
+        sqlite3_close(out);
+        throw S3Error(S3ErrorCode::InternalError,
+                      "duostore meta(sqlite) backup: cannot create " + dest.string() + ": " + msg);
+    }
+    sqlite3_backup* bk = sqlite3_backup_init(out, "main", src, "main");
+    int rc = bk ? sqlite3_backup_step(bk, -1) : SQLITE_ERROR;
+    if (bk) sqlite3_backup_finish(bk);
+    std::string err = rc == SQLITE_DONE ? "" : sqlite3_errmsg(out);
+    // The copy comes out in rollback-journal mode; the WAL segments of the chain
+    // only replay into a WAL-mode file (the header flag decides whether an open
+    // looks at -wal at all)
+    if (rc == SQLITE_DONE && sqlite3_exec(out, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr) != SQLITE_OK) {
+        rc = SQLITE_ERROR;
+        err = sqlite3_errmsg(out);
+    }
+    sqlite3_close(out);
+    if (rc != SQLITE_DONE)
+        throw S3Error(S3ErrorCode::InternalError,
+                      "duostore meta(sqlite) backup: copy to " + dest.string() + " failed: " + err);
+}
+
+// Open db_path, run sql, close; throws with `what` on failure
+void exec_on_file(const std::filesystem::path& db_path, const char* sql, const char* what) {
+    sqlite3* db = nullptr;
+    if (sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+        std::string msg = db ? sqlite3_errmsg(db) : "out of memory";
+        sqlite3_close(db);
+        throw S3Error(S3ErrorCode::InternalError,
+                      std::string("duostore meta(sqlite) ") + what + ": open " + db_path.string() + ": " + msg);
+    }
+    char* err = nullptr;
+    int rc = sqlite3_exec(db, sql, nullptr, nullptr, &err);
+    std::string msg = err ? err : "";
+    sqlite3_free(err);
+    sqlite3_close(db);
+    if (rc != SQLITE_OK)
+        throw S3Error(S3ErrorCode::InternalError,
+                      std::string("duostore meta(sqlite) ") + what + ": " + sql + ": " + msg);
+}
+
+}  // namespace
+
+void SqliteMetaStore::checkpoint_truncate_locked(const char* what) {
+    int n_log = 0, n_ckpt = 0;
+    int rc = sqlite3_wal_checkpoint_v2(wc_->db, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &n_log, &n_ckpt);
+    if (rc != SQLITE_OK || n_log != 0)
+        throw S3Error(S3ErrorCode::InternalError,
+                      std::string("duostore meta(sqlite) ") + what +
+                          ": checkpoint incomplete (rc=" + std::to_string(rc) + ", " +
+                          std::to_string(n_log) + " WAL frame(s) left -- a snapshot reader is "
+                          "open? retry)");
+}
+
+uint64_t SqliteMetaStore::archive_wal_segment_locked(const std::filesystem::path& dir, uint64_t id,
+                                                     std::string& file) {
+    std::error_code ec;
+    auto wal = std::filesystem::path(wal_path_of(opt_.path));
+    uint64_t size = std::filesystem::exists(wal, ec) ? std::filesystem::file_size(wal, ec) : 0;
+    // 32-byte header only = no frames since the last point
+    if (ec || size <= 32) {
+        file.clear();
+        return 0;
+    }
+    char name[64];
+    snprintf(name, sizeof name, "%06llu-wal", static_cast<unsigned long long>(id));
+    std::filesystem::create_directories(dir);
+    auto dest = dir / name;
+    remove_quiet(dest);
+    std::filesystem::copy_file(wal, dest, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec)
+        throw S3Error(S3ErrorCode::InternalError,
+                      "duostore meta(sqlite) backup: cannot copy WAL to " + dest.string() + ": " +
+                          ec.message());
+    file = name;
+    return std::filesystem::file_size(dest, ec);
+}
+
+void SqliteMetaStore::set_archiving_locked(bool on) {
+    archive_active_ = on;
+    // Auto-checkpoints restart the WAL behind the archive's back; commits happen on
+    // the write connection, so its setting is the one that matters
+    wc_->exec(on ? "PRAGMA wal_autocheckpoint=0" : "PRAGMA wal_autocheckpoint=1000",
+              "wal_autocheckpoint");
+}
+
+MetaBackupEntry SqliteMetaStore::backup_physical(const std::filesystem::path& dir, uint64_t id,
+                                                 bool full) {
+    std::error_code ec;
+    bool same_dir = !opt_.wal_archive.empty() &&
+                    std::filesystem::weakly_canonical(dir, ec) ==
+                        std::filesystem::weakly_canonical(opt_.wal_archive, ec);
+    if (!full && opt_.wal_archive.empty())
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "duostore meta(sqlite): incremental backup needs sqlite_wal_archive "
+                      "pointing at the backup directory");
+    if (!opt_.wal_archive.empty() && !same_dir)
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "duostore meta(sqlite): the backup chain lives in sqlite_wal_archive (" +
+                          opt_.wal_archive + "), not in " + dir.string());
+    std::lock_guard lk(mu_);
+    Conn& c = wconn();
+    (void)c;
+    MetaBackupEntry e;
+    e.id = id;
+    e.ts_ms = backup_now_ms();
+    e.full = full;
+    std::filesystem::create_directories(dir);
+    if (full) {
+        // Chain start: fold the WAL into the file (complete, so the copy is the
+        // whole state), copy it, and from now on keep the WAL for the segments
+        checkpoint_truncate_locked("backup");
+        char name[64];
+        snprintf(name, sizeof name, "%06llu-full.sqlite3", static_cast<unsigned long long>(id));
+        backup_db_file(wc_->db, dir / name);
+        e.file = name;
+        e.bytes = std::filesystem::file_size(dir / name, ec);
+        e.marker = "checkpoint";
+        if (same_dir && !archive_active_) set_archiving_locked(true);
+        return e;
+    }
+    if (!archive_active_)
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "duostore meta(sqlite): no full backup has started a chain in " +
+                          dir.string() + " yet");
+    e.bytes = archive_wal_segment_locked(dir, id, e.file);
+    e.marker = "wal";
+    // The segment is on disk: reset the WAL so the next segment starts clean. An
+    // incomplete checkpoint leaves the frames in place -- the next incremental
+    // re-archives them (frame replay is idempotent), so nothing is lost either way
+    checkpoint_truncate_locked("backup --incremental");
+    return e;
+}
+
+void SqliteMetaStore::restore_physical(const std::filesystem::path& dir,
+                                       const std::vector<MetaBackupEntry>& chain,
+                                       const std::filesystem::path& db_path) {
+    if (chain.empty() || !chain.front().full)
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "duostore meta(sqlite) restore: the chain must start with a full backup");
+    std::error_code ec;
+    if (!db_path.parent_path().empty()) std::filesystem::create_directories(db_path.parent_path(), ec);
+    remove_quiet(db_path);
+    remove_quiet(db_path.string() + "-wal");
+    remove_quiet(db_path.string() + "-shm");
+    std::filesystem::copy_file(dir / chain.front().file, db_path,
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec)
+        throw S3Error(S3ErrorCode::InternalError,
+                      "duostore meta(sqlite) restore: cannot copy " + chain.front().file + ": " +
+                          ec.message());
+    // Belt and braces for a full copy made by an older build: WAL mode before any segment
+    exec_on_file(db_path, "PRAGMA journal_mode=WAL", "restore");
+    remove_quiet(db_path.string() + "-wal");
+    remove_quiet(db_path.string() + "-shm");
+    for (size_t i = 1; i < chain.size(); ++i) {
+        const auto& e = chain[i];
+        if (e.full)
+            throw S3Error(S3ErrorCode::InternalError,
+                          "duostore meta(sqlite) restore: unexpected full entry inside the chain");
+        if (e.bytes == 0 || e.file.empty()) continue;  // nothing was committed in that window
+        std::filesystem::copy_file(dir / e.file, db_path.string() + "-wal",
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (ec)
+            throw S3Error(S3ErrorCode::InternalError,
+                          "duostore meta(sqlite) restore: cannot copy " + e.file + ": " + ec.message());
+        // Opening runs WAL recovery over the segment (its frames are self-validating:
+        // salts + checksum chain); the TRUNCATE checkpoint folds them into the file
+        // so the next segment can take its place
+        sqlite3* db = nullptr;
+        if (sqlite3_open_v2(db_path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+            std::string msg = db ? sqlite3_errmsg(db) : "out of memory";
+            sqlite3_close(db);
+            throw S3Error(S3ErrorCode::InternalError,
+                          "duostore meta(sqlite) restore: open " + db_path.string() + ": " + msg);
+        }
+        // A fresh connection opens the WAL lazily on its first read; a checkpoint
+        // before that reports "not in WAL mode" (-1 frames) and applies nothing
+        sqlite3_exec(db, "SELECT count(*) FROM sqlite_master", nullptr, nullptr, nullptr);
+        int n_log = 0, n_ckpt = 0;
+        int rc = sqlite3_wal_checkpoint_v2(db, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &n_log, &n_ckpt);
+        std::string msg = rc == SQLITE_OK ? "" : sqlite3_errmsg(db);
+        sqlite3_close(db);
+        if (rc != SQLITE_OK || n_log != 0)
+            throw S3Error(S3ErrorCode::InternalError,
+                          "duostore meta(sqlite) restore: segment " + e.file + " did not apply (rc=" +
+                              std::to_string(rc) + " " + msg + ", frames left " +
+                              std::to_string(n_log) + ")");
+    }
+    remove_quiet(db_path.string() + "-wal");
+    remove_quiet(db_path.string() + "-shm");
 }
 
 }  // namespace lights3::storage::duostore

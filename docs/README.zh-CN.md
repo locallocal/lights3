@@ -230,4 +230,4 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | [duostore-tikv-meta](duostore-tikv-meta.md) | TiKV IMetaStore：client-c + 2PC 侧车 |
 | [performance-baseline](performance-baseline.md) | 驱动 × TLS 压测矩阵，数据面优化前后对照 |
 | [deployment](deployment.md) | 版本标识、`cmake --install`、deb/rpm 包、Dockerfile + compose、回滚 / 卸载 |
-| [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load、cred/website/bench/quota/tenant/usage |
+| [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load/backup/restore、cred/website/bench/quota/tenant/usage |

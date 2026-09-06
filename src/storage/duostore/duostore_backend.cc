@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstdio>
 #include <chrono>
 #include <fstream>
 #include <random>
@@ -13,6 +14,7 @@
 #include "core/config.h"
 #include "core/log.h"
 #include "core/util/crypto.h"
+#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/codec.h"
 #include "storage/duostore/fs_data_store.h"
 #include "storage/localfs/fs_util.h"  // StubRace: shared tiered vocabulary
@@ -417,6 +419,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
     if (auto* v = get("sqlite_path"); v && !v->empty()) c.sqlite_path = *v;
     else c.sqlite_path = c.root / "meta.sqlite3";
     if (auto* v = get("sqlite_cache")) c.sqlite_cache = parse_size(*v);
+    if (auto* v = get("sqlite_wal_archive"); v && !v->empty()) c.sqlite_wal_archive = *v;
     if (c.meta_kind == DuoMetaKind::kSqlite) {
         // Process-wide total budget; must remain meaningful after splitting across connections (docs/duostore-sqlite-meta.md §8)
         if (c.sqlite_cache < (1ull << 20))
@@ -574,6 +577,7 @@ DuoStoreConfig DuoStoreConfig::from_params(const std::string& name,
             {"redis_wait_replicas", DuoMetaKind::kRedis},
             {"sqlite_path", DuoMetaKind::kSqlite},
             {"sqlite_cache", DuoMetaKind::kSqlite},
+            {"sqlite_wal_archive", DuoMetaKind::kSqlite},
             {"pd_endpoints", DuoMetaKind::kTikv},
             {"tikv_prefix", DuoMetaKind::kTikv},
             {"tikv_ca", DuoMetaKind::kTikv},
@@ -673,6 +677,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         so.path = cfg_.sqlite_path.string();
         so.sync = cfg_.meta_sync;
         so.cache_bytes = cfg_.sqlite_cache;
+        so.wal_archive = cfg_.sqlite_wal_archive.string();
         so.metrics = metrics;
         meta_ = std::make_unique<SqliteMetaStore>(std::move(so));
     }
@@ -2446,6 +2451,78 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_dump(std::ostream& out) 
                  "consistent if writes are stopped for its duration", cfg_.name);
     co_return duostore::dump_meta(
         view ? *view : static_cast<duostore::IMetaReadView&>(*meta_), out);
+}
+
+const char* DuoStoreConfig::meta_kind_name() const {
+    switch (meta_kind) {
+        case DuoMetaKind::kRocksDb: return "rocksdb";
+        case DuoMetaKind::kRedis: return "redis";
+        case DuoMetaKind::kSqlite: return "sqlite";
+        case DuoMetaKind::kTikv: return "tikv";
+    }
+    return "rocksdb";
+}
+
+Task<duostore::MetaBackupEntry> DuoStoreBackend::run_meta_backup(const std::filesystem::path& dir,
+                                                                 bool incremental) {
+    co_await pool_->schedule();
+    BackgroundTaskGroup::Scope scope(bg_);
+    if (!scope.ok())
+        throw S3Error(S3ErrorCode::InternalError, "duostore meta backup: backend closing");
+    auto permit = co_await gc_sem_.acquire();  // no GC unlinks while the backup references extents
+    auto manifest = duostore::BackupManifest::load(dir);
+    const char* engine = cfg_.meta_kind_name();
+    if (!manifest.entries.empty() && manifest.engine != engine)
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "duostore meta backup: " + dir.string() + " holds a " + manifest.engine +
+                          " chain, this backend's meta engine is " + engine);
+    if (incremental && manifest.entries.empty())
+        throw S3Error(S3ErrorCode::InvalidRequest,
+                      "duostore meta backup: no full backup in " + dir.string() +
+                          " yet -- run without --incremental first");
+    manifest.engine = engine;
+    manifest.backend = cfg_.name;
+    uint64_t id = manifest.next_id();
+    duostore::MetaBackupEntry e;
+    if (meta_->supports_physical_backup()) {
+        e = meta_->backup_physical(dir, id, !incremental);
+    } else {
+        if (incremental)
+            throw S3Error(S3ErrorCode::InvalidRequest,
+                          std::string("duostore meta backup: the ") + engine +
+                              " engine has no gateway-side incremental backup -- its "
+                              "incremental copies live cluster-side (redis AOF archive, tikv "
+                              "BR/CDC); take a full backup and keep the recorded marker");
+        // Logical full dump of a snapshot (redis: writes-stopped contract, run_meta_dump)
+        char name[64];
+        snprintf(name, sizeof name, "%06llu-full.dump", static_cast<unsigned long long>(id));
+        std::filesystem::create_directories(dir);
+        std::ofstream f(dir / name, std::ios::binary | std::ios::trunc);
+        if (!f) throw S3Error(S3ErrorCode::InternalError,
+                              "duostore meta backup: cannot write " + (dir / name).string());
+        // The marker first: everything the dump holds was committed at or before it
+        e.marker = meta_->restore_marker();
+        auto view = meta_->snapshot();
+        if (!view)
+            LOG_WARN("duostore '{}': meta engine cannot snapshot -- the backup is only "
+                     "consistent if writes are stopped for its duration", cfg_.name);
+        duostore::dump_meta(view ? *view : static_cast<duostore::IMetaReadView&>(*meta_), f);
+        f.flush();
+        if (!f) throw S3Error(S3ErrorCode::InternalError,
+                              "duostore meta backup: write failed: " + (dir / name).string());
+        e.id = id;
+        e.full = true;
+        e.ts_ms = duostore::backup_now_ms();
+        e.file = name;
+        std::error_code ec;
+        e.bytes = std::filesystem::file_size(dir / name, ec);
+    }
+    manifest.entries.push_back(e);
+    manifest.save(dir);
+    LOG_INFO("duostore '{}': meta backup entry {} ({}, {} bytes{}) written to {}", cfg_.name, e.id,
+             e.full ? "full" : "incremental", e.bytes,
+             e.marker.empty() ? std::string() : ", marker " + e.marker, dir.string());
+    co_return e;
 }
 
 Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_load(std::istream& in) {

@@ -78,6 +78,10 @@ public:
     bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
     // Multi-gateway read lease (roadmap §3.7): per-owner key with PX expiry
     // (crashed publishers yield automatically); min via SCAN + MGET. Note redis
+    // Restore marker (backlog-sequence ⑧): the primary's replication offset
+    // (INFO replication master_repl_offset) at backup time -- the point to which
+    // an AOF archive must be replayed before loading the logical dump
+    std::string restore_marker() override;
     // does NOT implement IMetaStore::snapshot() — no MVCC to pin, so the online
     // meta dump falls back to the writes-stopped contract on this engine
     bool publish_read_lease(std::string_view owner, int64_t oldest_ms,

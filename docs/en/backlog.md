@@ -17,7 +17,6 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 
 | Item | Source | State and entry point | Value | Difficulty |
 | --- | --- | --- | --- | --- |
-| duostore meta incremental backup / PITR | roadmap §3.7 | `dump` is already a consistent full snapshot (`IMetaStore::snapshot()`); incremental needs WAL-level export, different for each of the four engines | medium | high |
 | Structured error codes upstream in client-c | roadmap §3.7 (tikv T5) | The sidecar classifies conflicts from kvrpcpb structures first and string-matches only as defense in depth; an upstream PR is optional | low | medium |
 | `HeaderMap` linear scan / `BlockQueue` double copy | roadmap §4.3 ⑧ | Small in absolute terms; touch only with profile evidence | low | low |
 

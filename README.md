@@ -270,4 +270,4 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [duostore-tikv-meta](docs/en/duostore-tikv-meta.md) | TiKV IMetaStore: client-c + 2PC sidecar |
 | [performance-baseline](docs/en/performance-baseline.md) | Driver × TLS bench matrix, before/after the data-plane optimizations |
 | [deployment](docs/en/deployment.md) | Version stamp, `cmake --install`, deb/rpm packages, Dockerfile + compose, rollback / uninstall |
-| [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load, cred/website/bench/quota/tenant/usage |
+| [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load/backup/restore, cred/website/bench/quota/tenant/usage |

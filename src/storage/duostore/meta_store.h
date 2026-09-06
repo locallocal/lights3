@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -136,6 +137,18 @@ struct IMetaReadView {
     virtual ListResult list_objects(std::string_view b, const ListOptions& opt) = 0;
     virtual std::vector<PackStat> pack_stats() = 0;
     virtual ~IMetaReadView() = default;
+};
+
+// One entry of a meta backup chain (backlog-sequence ⑧, docs/storage/duostore-core.md
+// §11.1): what an engine wrote into the backup directory and how to address it
+// at restore time. full=false is a delta over the previous entry of the chain
+struct MetaBackupEntry {
+    uint64_t id = 0;
+    bool full = true;
+    int64_t ts_ms = 0;       // wall clock at the backup point
+    std::string file;        // relative to the backup directory (empty: engine-managed, e.g. rocksdb's BackupEngine tree)
+    std::string marker;      // engine-specific restore point: rocksdb backup id, sqlite WAL segment no., redis repl offset, tikv TSO
+    uint64_t bytes = 0;      // payload written by this entry
 };
 
 struct IMetaStore : IMetaReadView {
@@ -293,6 +306,22 @@ struct IMetaStore : IMetaReadView {
     // must then guarantee write quiescence for a consistent dump. The view
     // borrows this store: it must be destroyed before close()
     virtual std::unique_ptr<IMetaReadView> snapshot() { return nullptr; }
+    // ---- Incremental backup / PITR (backlog-sequence ⑧) ----
+    // Engines with a gateway-side physical mechanism (sqlite: WAL segment archive;
+    // rocksdb: BackupEngine) implement backup_physical: write entry `id` into dir --
+    // full=true a complete copy that starts a chain, full=false the delta since the
+    // chain's previous entry -- and return what to record in the manifest. Writes are
+    // paused for the duration (the engine's own write mutex). Engines whose
+    // incremental copies live cluster-side (redis AOF, tikv BR/CDC) return false from
+    // supports_physical_backup: the caller falls back to the logical dump and records
+    // restore_marker() -- the replication offset / TSO to hand to the cluster tooling
+    virtual bool supports_physical_backup() const { return false; }
+    virtual MetaBackupEntry backup_physical(const std::filesystem::path& /*dir*/, uint64_t /*id*/,
+                                            bool /*full*/) {
+        throw s3::S3Error(s3::S3ErrorCode::InvalidRequest,
+                          "this meta engine has no gateway-side physical backup");
+    }
+    virtual std::string restore_marker() { return ""; }
     virtual bool chunk_referenced(uint64_t file_id) = 0;  // orphan scan
     // Orphan reverse reconciliation (§9.3): iterate every file_id in the refs table
     // (chunk/rados share the ledger; order not guaranteed). Snapshot semantics are

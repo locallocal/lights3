@@ -26,6 +26,7 @@
 #include "storage/duostore/codec.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/meta_dump.h"
 #include "storage/duostore/meta_util.h"
 #include "storage/duostore/rocks_meta_store.h"
@@ -2704,6 +2705,177 @@ TEST(duostore_meta_cache_shared_engine_needs_ttl) {
     CHECK_EQ(DuoStoreConfig::from_params("p", {{"root", (tmp.path / "p").string()}})
                  .meta_cache_entries,
              size_t(1) << 16);
+}
+
+
+// ---------- backlog-sequence ⑧: backup chains / PITR ----------
+
+TEST(duostore_backup_manifest_plan) {
+    TmpDir tmp;
+    BackupManifest m;
+    m.engine = "rocksdb";
+    for (uint64_t i = 1; i <= 5; ++i)
+        m.entries.push_back({i, i == 1 || i == 4, int64_t(1000 * i), "f" + std::to_string(i), "", 1});
+    m.save(tmp.path);
+    auto l = BackupManifest::load(tmp.path);
+    CHECK_EQ(l.engine, std::string("rocksdb"));
+    CHECK_EQ(l.entries.size(), size_t(5));
+    CHECK_EQ(l.next_id(), uint64_t(6));
+    auto ids = [](const std::vector<MetaBackupEntry>& v) {
+        std::string s;
+        for (auto& e : v) s += std::to_string(e.id);
+        return s;
+    };
+    CHECK_EQ(ids(l.plan(std::nullopt, std::nullopt)), std::string("45"));  // from the last full entry
+    CHECK_EQ(ids(l.plan(uint64_t{3}, std::nullopt)), std::string("123"));
+    CHECK_EQ(ids(l.plan(std::nullopt, int64_t{3500})), std::string("123"));
+    CHECK_EQ(ids(l.plan(std::nullopt, int64_t{4000})), std::string("4"));
+    for (auto bad : {std::pair<std::optional<uint64_t>, std::optional<int64_t>>{uint64_t{9}, std::nullopt},
+                     {std::nullopt, int64_t{5}}, {uint64_t{2}, int64_t{2000}}}) {
+        bool threw = false;
+        try {
+            l.plan(bad.first, bad.second);
+        } catch (const s3::S3Error& e) {
+            threw = e.code == s3::S3ErrorCode::InvalidRequest;
+        }
+        CHECK(threw);
+    }
+    // Gaps and a non-full first entry are rejected on load
+    BackupManifest gap;
+    gap.engine = "sqlite";
+    gap.entries.push_back({1, true, 1, "a", "", 1});
+    gap.entries.push_back({3, false, 2, "b", "", 1});
+    TmpDir tmp2;
+    gap.save(tmp2.path);
+    bool threw = false;
+    try {
+        BackupManifest::load(tmp2.path);
+    } catch (const s3::S3Error&) {
+        threw = true;
+    }
+    CHECK(threw);
+    CHECK(BackupManifest::load(tmp.path / "nowhere").entries.empty());
+    CHECK_EQ(*parse_restore_ts("1700000000123"), int64_t(1700000000123));
+    CHECK(parse_restore_ts("2026-09-06T00:00:00Z").has_value());
+    CHECK(!parse_restore_ts("yesterday").has_value());
+}
+
+// rocksdb: every BackupEngine entry restores on its own; the chain still records
+// full/incremental for the operator, and restore takes the plan's last entry
+TEST(duostore_rocks_backup_chain_pitr) {
+    TmpDir tmp;
+    fs::path bk = tmp.path / "backup";
+    BackupManifest man;
+    man.engine = "rocksdb";
+    auto record = [&](MetaBackupEntry e) {
+        man.entries.push_back(e);
+        man.save(bk);
+        return e;
+    };
+    int64_t ts_after_b = 0;
+    {
+        RocksMetaStore m(meta_opts(tmp));
+        m.create_bucket("b");
+        m.put_object("b", "a", make_rec("a", {chunk_extent(1, 5)}));
+        auto e1 = record(m.backup_physical(bk, man.next_id(), /*full=*/true));
+        CHECK_EQ(e1.marker, std::string("1"));
+        m.put_object("b", "bb", make_rec("bb", {chunk_extent(2, 5)}));
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        auto e2 = record(m.backup_physical(bk, man.next_id(), /*full=*/false));
+        CHECK_EQ(e2.marker, std::string("2"));
+        ts_after_b = e2.ts_ms;
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        m.put_object("b", "c", make_rec("c", {chunk_extent(3, 5)}));
+        m.delete_object("b", "a");
+        record(m.backup_physical(bk, man.next_id(), /*full=*/false));
+        m.close();
+    }
+    auto loaded = BackupManifest::load(bk);
+    CHECK_EQ(loaded.entries.size(), size_t(3));
+    auto objects_at = [&](std::vector<MetaBackupEntry> chain) {
+        fs::path target = tmp.path / ("restored-" + chain.back().marker);
+        RocksMetaStore::restore_physical(bk, chain.back().marker, target);
+        RocksMetaStore r(RocksMetaOptions{target.string(), false, 8ull << 20});
+        std::string seen;
+        for (auto k : {"a", "bb", "c"})
+            if (r.get_object("b", k)) seen += k;
+        r.close();
+        return seen;
+    };
+    CHECK_EQ(objects_at(loaded.plan(uint64_t{1}, std::nullopt)), std::string("a"));
+    CHECK_EQ(objects_at(loaded.plan(std::nullopt, ts_after_b)), std::string("abb"));
+    CHECK_EQ(objects_at(loaded.plan(std::nullopt, std::nullopt)), std::string("bbc"));
+}
+
+std::string get_body(IStorageBackend& b, const std::string& bkt, const std::string& key) {
+    auto stream = sync_wait(b.get_object(bkt, key, std::nullopt));
+    return read_all(*stream.body);
+}
+
+// Backend level: run_meta_backup keeps the manifest, the restored meta reopens
+// and the forced orphan scan reconciles the data side (the object written after
+// the restore point leaves an unreferenced chunk behind)
+TEST(duostore_backend_backup_and_restore_pitr) {
+    TmpDir tmp;
+    fs::path bk = tmp.path / "backup";
+    auto pool = std::make_shared<ThreadPool>(2);
+    DuoStoreConfig cfg;
+    cfg.name = "pitr";
+    cfg.root = tmp.path / "duo";
+    cfg.meta_path = cfg.root / "meta";
+    cfg.pack_threshold = 0;  // chunks only
+    cfg.gc_grace_sec = 0;
+    fs::create_directories(cfg.root);
+    {
+        DuoStoreBackend b(cfg, pool);
+        sync_wait(b.create_bucket("bkt"));
+        put(b, "bkt", "first", "one");
+        auto e1 = sync_wait(b.run_meta_backup(bk, /*incremental=*/false));
+        CHECK(e1.full && e1.id == 1);
+        put(b, "bkt", "second", "two");
+        auto e2 = sync_wait(b.run_meta_backup(bk, /*incremental=*/true));
+        CHECK(!e2.full && e2.id == 2);
+        sync_wait(b.close());
+    }
+    auto man = BackupManifest::load(bk);
+    CHECK_EQ(man.engine, std::string("rocksdb"));
+    CHECK_EQ(man.backend, std::string("pitr"));
+    CHECK_EQ(man.entries.size(), size_t(2));
+    // Back to entry 1: "second" is gone from the meta, its chunk becomes an orphan
+    RocksMetaStore::restore_physical(bk, man.plan(uint64_t{1}, std::nullopt).back().marker,
+                                     cfg.meta_path);
+    {
+        DuoStoreBackend b(cfg, pool);
+        CHECK_EQ(get_body(b, "bkt", "first"), std::string("one"));
+        bool missing = false;
+        try {
+            sync_wait(b.head_object("bkt", "second"));
+        } catch (const s3::S3Error& e) {
+            missing = e.code == s3::S3ErrorCode::NoSuchKey;
+        }
+        CHECK(missing);
+        auto st = sync_wait(b.run_orphan_scan_once());
+        CHECK_EQ(st.orphans_removed, uint64_t(1));
+        // The chain is still valid for further backups on the restored meta
+        auto e3 = sync_wait(b.run_meta_backup(bk, /*incremental=*/true));
+        CHECK_EQ(e3.id, uint64_t(3));
+        sync_wait(b.close());
+    }
+    // And forward again to entry 2
+    RocksMetaStore::restore_physical(bk, "2", cfg.meta_path);
+    {
+        DuoStoreBackend b(cfg, pool);
+        CHECK_EQ(get_body(b, "bkt", "first"), std::string("one"));
+        bool present = true;
+        try {
+            sync_wait(b.head_object("bkt", "second"));
+        } catch (const s3::S3Error&) {
+            present = false;
+        }
+        CHECK(present);  // the record is back (its chunk was reclaimed above: a real PITR keeps the data copy)
+        sync_wait(b.close());
+    }
+    pool->join();
 }
 
 #endif  // LIGHTS3_DUOSTORE

@@ -31,6 +31,8 @@ lights3 --version                                          版本 / git commit /
 lights3 --check-config [--config=<path>]                   只校验配置（§2.1）
 lights3 duostore dump <backend> <file> [--config=<path>]   导出 duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   导入 duostore meta
+lights3 duostore backup <backend> --to=<dir> [--incremental] [--config=<path>]  追加一条 meta 备份链条目
+lights3 duostore restore <backend> --from=<dir> [--to-id=<n>|--to-ts=<t>] [--config=<path>]  按链恢复 meta 到某点
 lights3 duostore gc <backend> [--config=<path>]            立即跑一轮 duostore GC
 lights3 duostore scan <backend> [--config=<path>]          立即跑一轮孤儿扫描
 lights3 duostore quarantine list|release|purge <backend> [<pack_id>] 损坏 pack 隔离区
@@ -46,6 +48,9 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 | `--version` | 根命令（`s3adm` 同） | — | 打印 `lights3 <ver> (git <commit>, <build type>, <date>)` + `drivers:` / `features:` 两行后退出 0；优先于 `--check-config`（roadmap §6.3，[deployment.md §1](deployment.md)） |
 | `--backend=<name>` | `duostore *`、`tier *`、`fsck` | — | 后端名，等价于第一个位置参数 |
 | `--file=<path>` | `duostore dump|load` | — | dump 文件路径，等价于第二个位置参数 |
+| `--to=<dir>` / `--from=<dir>` | `duostore backup` / `restore` | — | 备份链目录（必填） |
+| `--incremental` | `duostore backup` | `false` | 追加自上一条以来的增量而非全量副本 |
+| `--to-id=<n>` / `--to-ts=<t>` | `duostore restore` | 最新 | 恢复到 manifest 条目 n / 到时间 t（ISO 8601 或 unix ms）之前的最后一条；二者互斥 |
 | `--max-mbps=<n>` | `fsck` | `0` | 读限速（MB/s），`0` 不限速 |
 
 ### 2.1 启动服务
@@ -98,6 +103,28 @@ tikv 上走引擎快照、在线一致（roadmap §3.7）；redis 无 MVCC，其
 ```bash
 ./build/lights3 duostore dump duo /backup/duo-meta.dump --config=/etc/lights3/lights3.yaml
 ./build/lights3 duostore load --backend=duo --file=/backup/duo-meta.dump -c /etc/lights3/lights3.yaml
+```
+
+### 2.2.1 `duostore backup` / `duostore restore`
+
+备份链与恢复到中间点（PITR；目录布局、manifest、各引擎载荷见
+[storage/duostore-core.md §11.1](storage/duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)）。
+`backup` 向 `--to=<dir>` 追加一条：默认全量，`--incremental` 为自上一条以来的
+增量（目录里还没有全量时拒绝）。引擎差异：sqlite 增量 = WAL 段，需要后端配置
+`sqlite_wal_archive` 指向同一目录；rocksdb 走 BackupEngine，每条都能独立恢复；
+redis / tikv 没有网关侧增量——`backup` 落成逻辑 dump 并记下恢复点标记（复制
+offset / TSO），`--incremental` 拒绝。本地引擎（sqlite / rocksdb）持文件锁，服务
+须已停。
+
+`restore` 按 `--to-id` / `--to-ts`（默认最新）在链上取前缀：sqlite / rocksdb 先在
+**不构建后端**的前提下做文件级恢复，再构建后端跑一次强制孤儿扫描；redis / tikv
+要求集群已回到该条目的标记，然后 load 该 dump。恢复顺序同 §2.2：先放回数据
+目录再 `restore`。
+
+```bash
+./build/lights3 duostore backup duo --to=/backup/duo-meta -c /etc/lights3/lights3.yaml
+./build/lights3 duostore backup duo --to=/backup/duo-meta --incremental -c /etc/lights3/lights3.yaml
+./build/lights3 duostore restore duo --from=/backup/duo-meta --to-ts=2026-09-06T12:00:00Z -c /etc/lights3/lights3.yaml
 ```
 
 ### 2.3 `fsck`

@@ -206,6 +206,8 @@ backends:
   #   # meta: sqlite
   #   # sqlite_path: ./data/duostore/meta.sqlite3   # default <root>/meta.sqlite3
   #   # sqlite_cache: 64MiB                # process-level page cache total budget (>= 1MiB)
+  #   # sqlite_wal_archive: /backup/duo-meta  # meta backup chain dir for `duostore backup --incremental`
+  #                                        # (WAL segments archived there; empty = full backups only, docs/cli.md §2.2.1)
   #   # meta_sync: true                    # maps to PRAGMA synchronous FULL/NORMAL
   #
   #   # -- meta = tikv (docs/duostore-tikv-meta.md §9) --

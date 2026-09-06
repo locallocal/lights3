@@ -749,7 +749,6 @@ TEST(duostore_redis_list_uploads_lex_index) {
     m.close();
 }
 
-#endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META
 
 // roadmap §6.1: the redis.command fault point simulates a connection-level
 // failure — a read retries once on a fresh connection (reconnect counted), a write
@@ -769,3 +768,30 @@ TEST(duostore_redis_fault_point) {
     a.delete_bucket("flt2");
     a.close();
 }
+
+// backlog-sequence ⑧: redis has no gateway-side incremental mechanism -- a
+// backup is the logical dump plus the replication offset as the AOF restore marker
+TEST(duostore_redis_backup_marker_and_logical_chain) {
+    REDIS_OR_SKIP();
+    RedisMetaStore m(redis_opts(unique_prefix()));
+    CHECK(!m.supports_physical_backup());
+    auto marker = m.restore_marker();
+    CHECK(!marker.empty());
+    for (char c : marker) CHECK(c >= '0' && c <= '9');
+    m.create_bucket("b");
+    m.put_object("b", "k", make_rec("k", {chunk_extent(1, 5)}));
+    auto after = m.restore_marker();
+    // The offset only moves once a replication backlog exists (a replica has
+    // connected); on a standalone test server it stays 0 -- it never goes back
+    CHECK(std::stoll(after) >= std::stoll(marker));
+    bool threw = false;
+    try {
+        m.backup_physical("/nonexistent", 1, true);
+    } catch (const s3::S3Error& e) {
+        threw = e.code == s3::S3ErrorCode::InvalidRequest;
+    }
+    CHECK(threw);
+    m.close();
+}
+
+#endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META

@@ -167,6 +167,6 @@ D 阶段建议等 B 落地后再动 ⑦。
 | ⑤ | 跨网关元数据缓存失效协议 | 已完成 | 2026-09-05 / `feat/redis-cache-invalidation` |
 | ⑥ | mTLS 身份映射 | 已完成 | 2026-09-06 / `feat/tls-identity` |
 | ⑦ | 后端实例增删热重载 | 已完成 | 2026-09-06 / `feat/backend-hot-reload` |
-| ⑧ | duostore meta 增量备份 / PITR | 未开始 | |
+| ⑧ | duostore meta 增量备份 / PITR | 已完成 | 2026-09-06 / `feat/duostore-meta-pitr` |
 | ⑨ | client-c 上游贡献 | 未开始 | |
 | ⑩ | HeaderMap / BlockQueue | 等 profile 证据 | |

@@ -477,6 +477,7 @@ backends:
 | meta | `rocksdb` | 增合法值 `sqlite`；未编译 option 时选 sqlite → 配置错误 |
 | sqlite_path | `<root>/meta.sqlite3` | DB 文件路径（对应 RocksDB 的 meta_path 可指 SSD 的用法）；父目录由 store 自建 |
 | sqlite_cache | 64MiB | 页缓存**进程级总预算**（校验 ≥1MiB）：SQLite 的 cache_size 按连接生效，实现将预算摊到全部连接（1 写 + 1 alloc + pool_size 读，§5.2）——语义对齐 rocksdb_block_cache 的单一预算角色，不随连接数放大 |
+| sqlite_wal_archive | 空 | 备份链目录（backlog-sequence ⑧）：`duostore backup --incremental` 的 WAL 段归档到这里，链一旦开始即关自动 checkpoint、关闭时补归档最后一段；空 = 只能全量（[storage/duostore-meta-sqlite.md §10](storage/duostore-meta-sqlite.md#10-备份链与-pitr)） |
 | meta_sync | true | **沿用而非忽略**（对比 meta=redis 时被忽略）：SQLite 与 RocksDB 同为本地引擎，持久化档位仍归本进程管（§6） |
 
 meta 引擎专属键（meta_path / rocksdb_* / redis_* / sqlite_*）出现但不属

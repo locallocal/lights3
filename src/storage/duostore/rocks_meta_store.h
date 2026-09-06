@@ -6,6 +6,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -94,6 +95,19 @@ public:
     // Online-dump snapshot (roadmap §3.7): pins a RocksDB snapshot; all four view
     // reads run against it. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
+    // Backup chain (backlog-sequence ⑧): rocksdb::BackupEngine on dir/rocksdb --
+    // every backup is self-sufficient (SST files shared between backups, so a
+    // "full" and an "incremental" entry cost the same); the manifest marker is
+    // the engine's backup id and a restore needs only the last entry of the plan.
+    // Online: the engine flushes the memtable and copies the live files, no write
+    // pause
+    bool supports_physical_backup() const override { return true; }
+    MetaBackupEntry backup_physical(const std::filesystem::path& dir, uint64_t id,
+                                    bool full) override;
+    // Restore backup `marker` (the id recorded by backup_physical) into db_path
+    // with the store closed; db_path is wiped first
+    static void restore_physical(const std::filesystem::path& dir, const std::string& marker,
+                                 const std::filesystem::path& db_path);
     void close() override;
 
 private:

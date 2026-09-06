@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -26,6 +27,12 @@ struct SqliteMetaOptions {
     size_t cache_bytes = 64ull << 20;  // page cache capacity (PRAGMA cache_size, §8)
     int pool_size = 8;                 // read connection pool cap (§3.1)
     int busy_timeout_ms = 5000;        // busy handler wait (§5.2; not in YAML, tests may shorten)
+    // Backup chain directory (backlog-sequence ⑧, docs/storage/duostore-meta-sqlite.md
+    // §10): when set and a full backup has started a chain there, auto-checkpoints
+    // are off and the WAL is archived as one segment per `backup --incremental`
+    // (and once more at close), so every commit reaches the chain. Empty = off
+    // (full backups still work; incremental ones are refused)
+    std::string wal_archive;
     MetricsScope metrics;              // BUSY / corruption counters (S4; empty scope = isolated instance)
 };
 
@@ -79,6 +86,22 @@ public:
     // open WAL read transaction on it — every view read observes the snapshot the
     // transaction materialized. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
+    // Backup chain (backlog-sequence ⑧): full = TRUNCATE checkpoint + online copy of
+    // the database file (sqlite3_backup) into dir/<id>-full.sqlite3; incremental =
+    // the -wal file since the previous chain point copied to dir/<id>-wal, then a
+    // TRUNCATE checkpoint so the next segment starts clean. Writers are paused for
+    // the duration (mu_). Incremental needs wal_archive to name dir
+    bool supports_physical_backup() const override { return true; }
+    MetaBackupEntry backup_physical(const std::filesystem::path& dir, uint64_t id,
+                                    bool full) override;
+    // Restore a chain prefix (BackupManifest::plan) into db_path with the store
+    // closed: the full copy is put in place, then every non-empty WAL segment is
+    // dropped next to it as <db>-wal and checkpointed in order
+    static void restore_physical(const std::filesystem::path& dir,
+                                 const std::vector<MetaBackupEntry>& chain,
+                                 const std::filesystem::path& db_path);
+    // Whether the WAL is being archived (a chain exists in wal_archive)
+    bool archiving() const { return archive_active_; }
     void close() override;
 
     // Test-only (§9 S4 consistent-view case): each list_objects call invokes this hook
@@ -127,6 +150,14 @@ private:
     // conversion) — app_id/ver both 0 but sqlite_master non-empty = someone else's
     // database; refuse without leaving a trace
     void check_lineage(Conn& c);
+    // Backup chain helpers (mu_ held): a complete TRUNCATE checkpoint (throws when a
+    // reader keeps frames alive past busy_timeout -- retry), the -wal file copied
+    // into dir as segment `id` (bytes copied; 0 = nothing committed since the last
+    // point, no file written), and the auto-checkpoint switch
+    void checkpoint_truncate_locked(const char* what);
+    uint64_t archive_wal_segment_locked(const std::filesystem::path& dir, uint64_t id,
+                                        std::string& file);
+    void set_archiving_locked(bool on);
     void migrate_schema(Conn& c, int64_t ver);  // migration chain for version < current (called by check_lineage)
     void init_schema(Conn& c);
     Lease read_conn();                     // take from pool; throws InternalError after close
@@ -189,6 +220,7 @@ private:
     std::mutex pool_mu_;
     std::vector<std::unique_ptr<Conn>> idle_;
     bool closed_ = false;
+    bool archive_active_ = false;  // a chain exists in opt_.wal_archive: auto-checkpoint off, WAL archived
 
     // S4 metrics (registered at construction, visible at value 0); connections hold
     // shared_ptr copies and increment them on error paths

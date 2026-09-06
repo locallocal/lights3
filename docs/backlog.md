@@ -13,7 +13,6 @@
 
 | 条目 | 出处 | 现状与入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
-| duostore meta 增量备份 / PITR | roadmap §3.7 | `dump` 已是一致性全量快照（`IMetaStore::snapshot()`）；增量需 WAL 级导出，四个引擎各不相同 | 中 | 高 |
 | client-c 结构化错误码上游贡献 | roadmap §3.7（tikv T5） | sidecar 以 kvrpcpb 结构化冲突分类为主、字符串匹配作纵深，功能不受影响；上游 PR 可选 | 低 | 中 |
 | `HeaderMap` 线性扫描 / `BlockQueue` 双拷贝 | roadmap §4.3 ⑧ | 绝对量小；有 profile 证据再动 | 低 | 低 |
 

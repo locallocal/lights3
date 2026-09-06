@@ -239,6 +239,7 @@ struct DuoStoreConfig {
     int redis_wait_replicas = 0;          // replicas to WAIT for after commit (0 = no wait)
     std::filesystem::path sqlite_path;    // meta=sqlite: DB file, default <root>/meta.sqlite3
     size_t sqlite_cache = 64ull << 20;    // page cache (PRAGMA cache_size)
+    std::filesystem::path sqlite_wal_archive;  // meta=sqlite: backup chain dir for incremental backups (backlog-sequence ⑧); empty = full backups only
     std::vector<std::string> pd_endpoints;  // required when meta=tikv (docs/duostore-tikv-meta.md §9)
     std::string tikv_prefix = "duo:";       // key prefix (multi-instance/test isolation)
     std::string tikv_ca;                    // mTLS triple (enabled only when all three are given)
@@ -327,6 +328,8 @@ struct DuoStoreConfig {
     // configuration errors throw std::runtime_error
     static DuoStoreConfig from_params(const std::string& name,
                                       const std::map<std::string, std::string>& params);
+    // "rocksdb" | "sqlite" | "redis" | "tikv" (manifest engine tag, log labels)
+    const char* meta_kind_name() const;
 };
 
 class DuoStoreBackend final : public IStorageBackend {
@@ -416,6 +419,20 @@ public:
     // reclaiming files the data side accumulated during the backup window
     Task<duostore::MetaDumpStats> run_meta_dump(std::ostream& out);
     Task<duostore::MetaDumpStats> run_meta_load(std::istream& in);
+
+    // Backup chain in dir (backlog-sequence ⑧, docs/storage/duostore-core.md §11.1):
+    // appends one manifest entry. Engines with a gateway-side physical mechanism
+    // (sqlite WAL segments, rocksdb BackupEngine) write their payload through
+    // IMetaStore::backup_physical; the others (redis, tikv) get a logical dump of
+    // a snapshot as a full entry plus the engine's restore marker (replication
+    // offset / TSO) for the cluster-side tooling -- incremental=true is refused
+    // there. Holds the GC semaphore like dump
+    Task<duostore::MetaBackupEntry> run_meta_backup(const std::filesystem::path& dir,
+                                                    bool incremental);
+    const DuoStoreConfig& config() const { return cfg_; }
+    // The engine's current restore marker ("" for local engines)
+    std::string meta_restore_marker() { return meta_->restore_marker(); }
+    bool meta_physical_backup() const { return meta_->supports_physical_backup(); }
 
     // ---- Corrupt-pack quarantine (roadmap §3.7; CLI `lights3 duostore quarantine`) ----
     std::vector<duostore::DuoQuarantineEntry> quarantine_list();

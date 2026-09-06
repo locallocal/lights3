@@ -48,9 +48,15 @@ Task<ObjectStream> LocalFsBackend::get_object(...) {
 - **惰性启动**（`initial_suspend = suspend_always`）：`Task` 只是描述，
   `co_await` / `sync_wait` 才执行，便于组合（`when_all`、`with_timeout`
   都要求"先拿到 Task 再决定怎么跑"）；
-- **对称转移**：`co_await task` 时记录当前协程为 continuation，直接
-  `return task_handle` 转移执行权；`final_suspend` 再对称转移回来，
-  全程不增长调用栈；
+- **对称转移经蹦床**：`co_await task` 时记录当前协程为 continuation，把子任务
+  handle 交给本线程的恢复循环（`detail::transfer`）；`final_suspend` 同样把
+  continuation 交回循环。标准的"`await_suspend` 返回 handle"只在编译器发出尾调用
+  时不增长栈——GCC 仅在优化下如此，-O0（Debug / sanitizer 构建）每次转移压一层 C
+  栈帧，同步完成的读链（builtin 的阻塞 socket 读喂 `put_object`、`StreamPrefetch`
+  读内存 body）几 MiB 就溢出。蹦床让任何构建都是平栈：线程上第一次转移就地起循环
+  （在那个 `await_suspend` 里，协程已挂起，合法），循环运行期间的转移只入队、当前
+  `resume` 返回后再取；`sync_wait` 用私有队列驱动到底（`detail::drive`），否则在循环
+  内阻塞会把自己等的工作留在队列里；
 - **move-only**，`operator co_await` 仅限右值（`std::move(t)` 或临时值）：
   一个 Task 只能被消费一次，析构时销毁未完成的协程帧。
 
@@ -145,7 +151,7 @@ struct IExecutor {
    业务代码需要明确落点时使用。
 
 **切回策略**：`Task::promise` 带一个 `cont_executor`（home executor）指针。
-设置后 `final_suspend` 不做对称转移，改为 `executor->post(continuation)`；
+设置后 `final_suspend` 不走蹦床转移，改为 `executor->post(continuation)`；
 子任务在 `co_await` 时**继承**调用方的 home executor，因此在链路起点
 `task.via(ex)` 一次即可作用于整条协程链。
 

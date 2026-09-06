@@ -24,14 +24,12 @@
 | Docker 镜像构建与 compose 四个 profile（默认 / redis / tikv / rados / e2e） | roadmap §6.3，[deployment.md §4](deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
 | CPack RPM | roadmap §6.3，[deployment.md §3.2](deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
 | `unit_tests` 偶发 `terminate called without an active exception` | 2026-09-05 本机 5 次全量运行中 2 次，均发生在 `timer_stats_track_fired_and_pending` 通过之后、`timer_slow_callback_counted` 的 1.1s 慢回调期间（日志先打 "callback took 1.100s"），gdb 下未复现；与业务改动无关 | 有空档时排查：怀疑 TimerQueue 或测试夹具里某个 joinable `std::thread` 在负载下的析构次序；先用 `catch throw`/`ulimit -c` 抓栈 |
-| ASan 下 `unit_tests` 栈溢出 | 2026-09-06 `build-asan` 全量运行：`test_http_drivers` 的 builtin `stream_body` 经 `StreamPrefetch::finish → start_read → Started::start → read`（`PatternReader` 同步完成）无限同步递归，ASan 帧变大后 T2040 线程栈溢出（`drivers/common.h:127–154`）；非 ASan 构建与 seastar 变体均通过，上次 ASan 记录（08-14，324 用例）早于 prefetch 代码 | 排查 `StreamPrefetch` 对同步完成 reader 的递归：用循环/trampoline 替代在 `finish` 内直接 `start_read`，或在同步完成时延后到下一次 `next()` |
 | mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 
 ## 3. 性能基线跑出的新问题（[performance-baseline.md](performance-baseline.md)）
 
 | 条目 | 现象 | 入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
-| builtin 驱动下大对象 PUT 栈溢出（**崩溃**） | 2026-09-06 e2e 扩展时发现，main 复现：builtin 驱动 PUT 32MiB（memory 与 localfs 后端都一样；4MiB 正常，8MiB 已崩，Debug 构建）进程 SIGSEGV。gdb 回溯是 `put_object → ByteCountingReader::read → CountingBodyReader → Sha256VerifyingReader → StallGuardReader → SocketBodyReader::read → …` 反复嵌套：builtin 的 `SocketBodyReader::read` 同步完成，后端 `put_object` 的下一次 `co_await body.read()` 在上一次读的 `final_suspend` 恢复链**里面**发起，每 64KiB 一层栈帧，直到溢出。beast/httplib 不受影响（读完成走执行器）。与 §2 的 ASan `StreamPrefetch` 条目同根：`Task` 在同步完成时用 `resume()` 恢复续体而非对称转移 | `core/task.h`：await 路径对"内层已完成"的情况改为对称转移（`await_suspend` 返回续体句柄）或在 builtin 的 `SocketBodyReader` 处加 trampoline；修好后把 e2e 的热加后端流对象放大到 32MiB 恢复严格的"close 晚于流结束"断言 | 高 | 中 |
 | beast 的 TLS GET 明显落后 | 4 MiB GET 明文 4.6k ops/s、TLS 仅 1.5k，其他三驱动 TLS 在 3.0k 左右 | `src/http/drivers/beast/beast_server.cc` 的 `TlsStream` 写路径：asio ssl 的 record 切分与每块一次 strand 跳转；先用 `strace -c` 对比明文/TLS 的 syscall 计数 | 中 | 中 |
 | 请求体路径未做对称优化 | PUT 各驱动持平，只有 beast 因读粒度 bug 修复而大幅提升 | 请求体是 pull 模型且要保留背压，预取需谨慎；候选：builtin `SocketBodyReader` 大块 recv、beast `expires_after` 每块重设定时器的开销 | 中 | 中 |
 

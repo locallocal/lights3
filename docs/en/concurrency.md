@@ -58,9 +58,20 @@ assumption. Places that need to return to a specific execution environment
   description; only `co_await` / `sync_wait` executes it. This makes
   composition easy (`when_all` and `with_timeout` both require "get the Task
   first, decide how to run it later");
-- **symmetric transfer**: `co_await task` records the current coroutine as the
-  continuation and directly `return task_handle` to transfer execution;
-  `final_suspend` symmetrically transfers back — the call stack never grows;
+- **symmetric transfer through a trampoline**: `co_await task` records the
+  current coroutine as the continuation and hands the child's handle to this
+  thread's resume loop (`detail::transfer`); `final_suspend` hands the
+  continuation back the same way. The standard "`await_suspend` returns a
+  handle" only keeps the stack flat when the compiler emits a tail call — GCC
+  does under optimization, not at -O0, where every transfer nested one C frame
+  and a synchronously completing read chain (builtin's blocking socket reader
+  feeding `put_object`, `StreamPrefetch` over an in-memory body) overflowed
+  the stack at a few MiB in Debug / sanitizer builds. The trampoline keeps every
+  build flat: the first transfer on a thread runs the loop right there (inside
+  that `await_suspend`; the coroutine is already suspended, so this is legal),
+  transfers made while the loop runs are queued and picked up when the current
+  resume returns; `sync_wait` drives with a private queue (`detail::drive`),
+  since blocking inside a loop would leave the work it waits for queued;
 - **move-only**, `operator co_await` is rvalue-only (`std::move(t)` or a
   temporary): a Task can be consumed only once, and its destructor destroys an
   unfinished coroutine frame.
@@ -177,7 +188,7 @@ Two implementations + one switching primitive:
    the given executor; used when business code needs an explicit landing spot.
 
 **Resume policy**: `Task::promise` carries a `cont_executor` (home executor)
-pointer. When set, `final_suspend` does not do symmetric transfer but
+pointer. When set, `final_suspend` does not go through the trampoline but
 `executor->post(continuation)` instead; a child task **inherits** the caller's
 home executor at `co_await`, so a single `task.via(ex)` at the head of the
 chain covers the entire coroutine chain.

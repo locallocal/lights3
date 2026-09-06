@@ -55,16 +55,20 @@ struct PromiseBase {
 - record the caller's handle as the child's `continuation`;
 - if the child has **no** `cont_executor`/`cancel` of its own, inherit from the
   parent promise (an explicitly bound one via `via`/`with_cancel` wins);
-- return the child's handle → **symmetric transfer** starts the awaited task
-  without growing the stack.
+- hand the child's handle to `detail::transfer` → this thread's resume loop
+  starts it (no handle is returned: the compiler turns a returned handle into a
+  tail call only under optimization, at -O0 every transfer nests a frame; the
+  trampoline keeps the stack flat in every build,
+  [concurrency.md §2](concurrency.md)).
 
 The completion path is `PromiseBase::FinalAwaiter::await_suspend`:
 
 - continuation present and `cont_executor` set → `post` the continuation to the
   executor (returning to the home execution context, e.g. beast's connection
   strand) and return `noop_coroutine`;
-- continuation present, no executor → symmetric transfer straight back to the
-  caller;
+- continuation present, no executor → `detail::transfer(continuation)` hands it
+  back to the resume loop (nothing of this promise is touched afterwards: the
+  caller may destroy this frame inside the loop);
 - neither (top level) → `event->set()` wakes `sync_wait`.
 
 `operator co_await` is rvalue-only (`&&`): a `Task` can be awaited exactly

@@ -49,13 +49,16 @@ struct PromiseBase {
 - 把调用者 handle 记进子任务的 `continuation`；
 - 子任务**没有**自己的 `cont_executor`/`cancel` 时，从父 promise 继承（有则保留，
   `via`/`with_cancel` 显式绑定的优先）；
-- 返回子任务 handle → **对称转移**启动子任务，不增长栈。
+- 子任务 handle 交给 `detail::transfer` → 本线程的恢复循环启动它（不返回 handle：
+  编译器只在优化下把"返回 handle"编成尾调用，-O0 会逐层压栈；蹦床在任何构建下
+  都不增长栈，[concurrency.md §2](concurrency.md)）。
 
 完成路径在 `PromiseBase::FinalAwaiter::await_suspend`：
 
 - 有 `continuation` 且有 `cont_executor` → `post` 到 executor（回到 home 执行环境，
   例如 beast 的连接 strand），返回 `noop_coroutine`；
-- 有 `continuation` 无 executor → 对称转移直接恢复调用者；
+- 有 `continuation` 无 executor → `detail::transfer(continuation)` 交回恢复循环
+  （之后不再触碰本 promise：调用者可能在循环里销毁本帧）；
 - 都没有（顶层）→ `event->set()` 唤醒 `sync_wait`。
 
 `operator co_await` 只对右值开放（`&&`）：一个 `Task` 只能被 await 一次，结果被

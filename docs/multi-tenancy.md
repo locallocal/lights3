@@ -200,6 +200,9 @@ tenant 为空的动态/文件凭证              = legacy：数据面全部桶�
 tenant=<id> 的动态/文件凭证             = 租户凭证：仅本租户所有桶（再受 policy 约束）
     role=admin                          + 本租户的管理面（§4.4）
 STS 会话                                 继承父凭证的 tenant，永不是 admin
+mTLS 客户端证书（auth.tls_identity 开启）  按 .sys/tls-identities 绑定视同某个凭证：未签名请求继承
+                                         其 policy / tenant / role；已签名请求须与签名凭证同租户
+                                         （root 豁免），详见 tls.md §2.1
 ```
 
 `tenant`/`role` 随 policy 一起在验签时刻快照（`VerifiedIdentity`，
@@ -289,6 +292,10 @@ HTTP 状态取自 S3 错误表）。
 | `POST /-/admin/usage/{bucket}/rescan` | root / 归属租户 admin | 同步全量计数并返回结果；并发扫描 `SlowDown`(503) |
 | `POST /-/admin/credentials` | root / 租户 admin | body 新增 `"tenant"`（须存在，`NoSuchTenant`）与 `"role"` |
 | `PUT /-/admin/credentials/{ak}` | root / 租户 admin | 新增 `"tenant"`（root 专属，`null` 解除）与 `"role"` |
+| `GET /-/admin/tls-identities` | root | `{"mode","identities":[{subject,access_key,comment?,created_at,created_by}]}`（[tls.md §2.1](tls.md)） |
+| `GET /-/admin/tls-identities/{subject}` | root | 单条；未绑定 `NoSuchKey`(404)。subject 走路径（百分号编码，可含 `/`）或 `?subject=` |
+| `PUT /-/admin/tls-identities/{subject}` | root | `{"access_key","comment"?}` → 201 新建 / 200 覆盖；AK 须存在（`InvalidAccessKeyId`）且不能是 STS 会话；subject 1–256 字节可打印文本 |
+| `DELETE /-/admin/tls-identities/{subject}` | root | 解绑，幂等 204 |
 
 ## 7. 配置
 
@@ -305,14 +312,16 @@ audit:
   max_files: 10              # 保留的轮转文件数 [1, 1000]
 ```
 
-多实例的记录同步复用 `auth.sync_interval`（quota/tenants/owners 三个存储
-与 usage 的采纳都挂在它上面）。
+多实例的记录同步复用 `auth.sync_interval`（quota/tenants/owners 三个存储、
+证书绑定表 tls-identities 与 usage 的采纳都挂在它上面）。证书身份映射的开关
+`auth.tls_identity: off|subject-cn|san-uri` 见 [tls.md §2.1](tls.md)。
 
 ## 8. CLI
 
 `s3adm quota get|set|clear <bucket>`、`s3adm tenant list|get|create|update|
 delete|assign|unassign`、`s3adm usage [bucket] [--rescan] [--tenant=]`、
-`s3adm cred create --tenant= --role=`，详见 [cli.md §3.6–§3.8](cli.md)。
+`s3adm cred create --tenant= --role=`，详见 [cli.md §3.6–§3.8](cli.md)；证书绑定
+`s3adm cred bind-cert|unbind-cert|list-certs`（[cli.md §3.2](cli.md)）。
 
 ## 9. 测试
 

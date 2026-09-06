@@ -1045,6 +1045,74 @@ fi
 kill -TERM "$TLS_PID" 2>/dev/null
 wait "$TLS_PID" 2>/dev/null
 
+# ---------- backlog-sequence ⑥: mTLS client certificate -> credential identity (docs/tls.md §2.1) ----------
+# A private client CA signs two client certificates; the instance requires client
+# auth and maps the subject CN (auth.tls_identity: subject-cn). Root binds one CN
+# to a readonly dynamic credential through s3adm; unsigned requests over that
+# certificate then run as the credential, the other certificate is refused, a
+# signed tenant request must agree with the certificate, and root is exempt
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
+    -subj "/CN=e2e-client-ca" -addext "basicConstraints=critical,CA:TRUE" \
+    -keyout "$WORK/cca.key" -out "$WORK/cca.crt" > /dev/null 2>&1
+for who in alice stranger; do
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=e2e-$who" \
+        -keyout "$WORK/$who.key" -out "$WORK/$who.csr" > /dev/null 2>&1
+    openssl x509 -req -in "$WORK/$who.csr" -CA "$WORK/cca.crt" -CAkey "$WORK/cca.key" \
+        -CAcreateserial -days 2 -out "$WORK/$who.crt" > /dev/null 2>&1
+done
+sed -e "s#^  port: 0#  port: 0\n  tls_cert: $WORK/tls.crt\n  tls_key: $WORK/tls.key\n  tls_client_ca: $WORK/cca.crt\n  tls_client_auth: require\n  tls_reload_interval: 0s#" \
+    -e "s#^  region: $REGION#  region: $REGION\n  tls_identity: subject-cn#" \
+    -e "s#$WORK/data#$WORK/mtls-data#g" -e "s#$WORK/staging#$WORK/mtls-staging#g" \
+    -e "s#$WORK/cloud-duo#$WORK/mtls-cloud-duo#g" -e "s#$WORK/duo-local#$WORK/mtls-duo-local#g" \
+    -e "s#^    redis_prefix: \"\(.*\)\"#    redis_prefix: \"\1mtls-\"#" \
+    -e "s#^    tikv_prefix: \"\(.*\)\"#    tikv_prefix: \"\1mtls-\"#" \
+    -e "s#^    rados_namespace: \(.*\)#    rados_namespace: \1-mtls#" \
+    "$WORK/config.yaml" > "$WORK/config-mtls.yaml"
+LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config-mtls.yaml" > "$WORK/server-mtls.log" 2>&1 &
+MTLS_PID=$!
+MPORT=""
+for _ in $(seq 1 50); do
+    MPORT=$(sed -n 's/.*listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-mtls.log" | head -1)
+    [[ -n "$MPORT" ]] && break
+    kill -0 "$MTLS_PID" 2>/dev/null || break
+    sleep 0.1
+done
+check "mTLS instance started (identity mapping on)" "0" "$([[ -n "$MPORT" ]] && grep -q "mTLS identity mapping on (subject-cn)" "$WORK/server-mtls.log"; echo $?)"
+[[ -z "$MPORT" ]] && { echo "--- server-mtls.log ---"; cat "$WORK/server-mtls.log"; }
+if [[ -n "$MPORT" ]]; then
+    MBASE="https://127.0.0.1:$MPORT"
+    S3ADM="$(dirname "$BIN")/s3adm"
+    # curl helpers: <cert> = alice | stranger; signed variants take ak:sk
+    mcurl() { local who=$1; shift; curl -sS --cacert "$WORK/tls.crt" --cert "$WORK/$who.crt" --key "$WORK/$who.key" "$@"; }
+    msigned() { local who=$1 user=$2; shift 2; mcurl "$who" --aws-sigv4 "aws:amz:$REGION:s3" --user "$user" "$@"; }
+    madm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" "$@" --endpoint="$MBASE" --region="$REGION" --insecure --cert="$WORK/alice.crt" --key="$WORK/alice.key"; }
+    # Root over mTLS (any certificate, root is exempt): data + a readonly credential + the binding
+    check "mTLS: root CreateBucket" "200" "$(msigned alice "$AK:$SK" -o /dev/null -w '%{http_code}' -X PUT "$MBASE/mtls")"
+    check "mTLS: root PutObject" "200" "$(msigned stranger "$AK:$SK" -o /dev/null -w '%{http_code}' -X PUT --data-binary 'cert-bound' "$MBASE/mtls/k")"
+    RO_JSON=$(madm cred create --comment=mtls-reader --policy='{"buckets":["mtls"],"readonly":true}' 2>&1)
+    RO_AK=$(echo "$RO_JSON" | json_field access_key)
+    RO_SK=$(echo "$RO_JSON" | json_field secret_key)
+    check "mTLS: s3adm cred create over mTLS" "0" "$([[ -n "$RO_AK" && -n "$RO_SK" ]]; echo $?)"
+    check "mTLS: s3adm cred bind-cert" "0" "$(madm cred bind-cert "$RO_AK" --subject=e2e-alice --comment=e2e > /dev/null 2>&1; echo $?)"
+    check "mTLS: s3adm cred list-certs shows the binding" "0" "$(madm cred list-certs 2>/dev/null | grep -q '"subject": "e2e-alice"'; echo $?)"
+    # Unsigned requests: the bound certificate runs as the readonly credential
+    check "mTLS: unsigned GET with bound cert" "cert-bound" "$(mcurl alice "$MBASE/mtls/k")"
+    check "mTLS: unsigned PUT with bound cert refused by its policy" "403" "$(mcurl alice -o /dev/null -w '%{http_code}' -X PUT --data-binary 'x' "$MBASE/mtls/k2")"
+    check "mTLS: unsigned GET with unbound cert" "403" "$(mcurl stranger -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
+    check "mTLS: no client certificate fails the handshake" "0" "$(curl -s --cacert "$WORK/tls.crt" -o /dev/null "$MBASE/mtls/k" > /dev/null 2>&1; [[ $? -ne 0 ]]; echo $?)"
+    # Signed requests: certificate and signing credential must agree (root exempt)
+    check "mTLS: signed by the bound credential + own cert" "200" "$(msigned alice "$RO_AK:$RO_SK" -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
+    check "mTLS: signed by the bound credential + unbound cert" "403" "$(msigned stranger "$RO_AK:$RO_SK" -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
+    check "mTLS: root signed + unbound cert" "200" "$(msigned stranger "$AK:$SK" -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
+    # Unbind: the certificate is a stranger again
+    check "mTLS: s3adm cred unbind-cert" "0" "$(madm cred unbind-cert --subject=e2e-alice > /dev/null 2>&1; echo $?)"
+    check "mTLS: unsigned GET after unbind" "403" "$(mcurl alice -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
+    msigned alice "$AK:$SK" -o /dev/null -X DELETE "$MBASE/mtls/k"
+    msigned alice "$AK:$SK" -o /dev/null -X DELETE "$MBASE/mtls"
+fi
+kill -TERM "$MTLS_PID" 2>/dev/null
+wait "$MTLS_PID" 2>/dev/null
+
 # ---------- backlog-sequence ④: STS sessions shared across gateways (docs/s3-protocol.md §3.5) ----------
 # A second gateway on the SAME localfs root (.sys included): a session minted by the
 # first is honored by the second at first sight (read-through), with the token checked

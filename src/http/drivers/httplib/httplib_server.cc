@@ -255,6 +255,11 @@ private:
         for (auto& [k, v] : rq.headers)
             if (!is_pseudo_header(k)) req.headers.add(k, v);
         req.remote_addr = rq.remote_addr;
+#ifdef CPPHTTPLIB_OPENSSL_SUPPORT
+        // Verified client certificate (backlog-sequence ⑥): httplib exposes the
+        // session per request, so the read happens per request (a cheap peek)
+        if (rq.ssl) req.tls_identity = tls::peer_identity(rq.ssl);
+#endif
 
         // Message framing validation (drivers/common.h parse_body_framing):
         // httplib itself is more lenient about CL/TE conflicts, non-numeric

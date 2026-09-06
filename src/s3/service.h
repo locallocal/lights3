@@ -29,6 +29,7 @@
 #include "s3/quota.h"
 #include "s3/ratelimit.h"
 #include "s3/tenant.h"
+#include "s3/tls_identity_store.h"
 #include "s3/usage.h"
 #include "s3/website_store.h"
 #include "storage/bucket_router.h"
@@ -117,6 +118,17 @@ public:
     void set_credential_store(std::shared_ptr<CredentialStore> s) {
         cred_store_ = std::move(s);
     }
+
+    // mTLS identity mapping (backlog-sequence ⑥, docs/tls.md §2.1): the binding
+    // table (.sys/tls-identities/) and which certificate field names the subject
+    // (auth.tls_identity: off | subject-cn | san-uri). Mode off = certificates
+    // stay transport admission only, the table is still manageable. Restart-only
+    // (auth.* is not hot-reloadable), so plain members set at assembly
+    enum class TlsIdentityMode { Off, SubjectCn, SanUri };
+    static TlsIdentityMode parse_tls_identity_mode(const std::string& s);  // throws on unknown
+    void set_tls_identity_store(std::shared_ptr<TlsIdentityStore> s) { tls_store_ = std::move(s); }
+    void set_tls_identity_mode(TlsIdentityMode m) { tls_mode_ = m; }
+    TlsIdentityMode tls_identity_mode() const { return tls_mode_; }
 
     // Per-request timeout (docs/archive/gaps.md §3.3): 0 = disabled. On expiry, cooperative cancellation interrupts the
     // whole handler chain; suspension points throw OperationCancelled -> 503
@@ -313,6 +325,25 @@ private:
     // handlers/admin_tenants.cc: POST /-/admin/config/reload (root only)
     Task<http::HttpResponse> admin_config_reload(http::HttpRequest& req, std::string& access_key,
                                                  const RequestContext& ctx);
+    // handlers/admin_tls_identities.cc (backlog-sequence ⑥): /-/admin/tls-identities
+    // (root only) -- certificate subject -> credential bindings
+    Task<http::HttpResponse> admin_tls_identities(http::HttpRequest& req,
+                                                  std::string& access_key,
+                                                  const RequestContext& ctx);
+    // Signature verification with the mTLS identity folded in (docs/tls.md §2.1):
+    // an unsigned request from a bound certificate is treated as signed by the
+    // bound credential; a signed request must agree with the certificate's tenant
+    // (root is exempt). Without a usable certificate / mode off this is
+    // auth_.verify(req). Every plane (S3, STS, metrics gate, admin) goes through it
+    VerifiedIdentity verify_identity(http::HttpRequest& req) const;
+    // The tenant-consistency half alone, for callers that verify differently (STS)
+    void enforce_tls_tenant(const http::HttpRequest& req, const VerifiedIdentity& ident) const;
+    // The certificate subject auth.tls_identity selects, when the request carries a
+    // verified certificate with that field; nullopt otherwise (mode off included)
+    std::optional<std::string> tls_subject_of(const http::HttpRequest& req) const;
+    // Whether the request's certificate subject is bound (anonymous website reads
+    // yield to a bound certificate: the more specific identity wins)
+    bool tls_identity_bound(const http::HttpRequest& req) const;
     // handlers/admin_fsck.cc: POST/GET /-/admin/fsck/<backend> (root only, backlog-sequence ③)
     Task<http::HttpResponse> admin_fsck(http::HttpRequest& req, std::string& access_key,
                                         const RequestContext& ctx);
@@ -393,6 +424,8 @@ private:
     std::atomic<bool> admin_split_{false};
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
+    std::shared_ptr<TlsIdentityStore> tls_store_;  // null = no binding table (tests / static assemblies)
+    TlsIdentityMode tls_mode_ = TlsIdentityMode::Off;
     std::shared_ptr<WebsiteStore> website_store_;  // null = website hosting off
     std::shared_ptr<CorsStore> cors_store_;        // null = CORS off (OPTIONS -> 403)
     std::shared_ptr<LifecycleStore> lifecycle_store_;  // null = ?lifecycle unavailable

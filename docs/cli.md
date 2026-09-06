@@ -204,6 +204,7 @@ roadmap §3.9，见 [multi-tenancy.md](multi-tenancy.md)）、`reload`（配置�
 | `--region=<r>` | `us-east-1` | SigV4 region，须与服务端 `auth.region` 一致 |
 | `--insecure` | false | https 跳过证书校验（自签名部署） |
 | `--timeout-sec=<n>` | 10 | 连接/读/写超时 |
+| `--cert=<pem>` / `--key=<pem>` | 无 | 客户端证书与私钥，服务端 `tls_client_auth: optional\|require` 时使用（[tls.md §2.1](tls.md)）；须成对给出 |
 
 `website`、`quota set/clear`、`tenant` 的变更操作要求 **root 静态凭证**
 （配置文件 `auth.credentials` 中的条目，见
@@ -219,7 +220,8 @@ export LIGHTS3_ADMIN_SK=my-secret
 
 ### 3.2 `cred` —— 凭证管理
 
-与 `/-/admin/credentials` 的四个接口一一对应；响应 JSON 原样输出到 stdout。
+与 `/-/admin/credentials` 的四个接口一一对应，外加 `/-/admin/tls-identities` 的
+证书绑定三命令；响应 JSON 原样输出到 stdout。
 
 ```text
 s3adm cred list                          列出全部凭证（SK 掩码；含静态/文件/动态三来源）
@@ -228,6 +230,13 @@ s3adm cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>] [-t|--tenan
                                          生成一对 AK/SK（唯一一次返回完整 SK）；--tenant 归属租户（租户 admin 调用时
                                          服务端固定为本租户，可省略），--role=admin 授予本租户管理面
 s3adm cred delete <ak>                   吊销动态凭证（静态凭证归配置文件管，服务端拒绝）
+s3adm cred bind-cert <ak> -S|--subject=<subject> [-c|--comment=<text>]
+                                         把客户端证书主体（CN，或 auth.tls_identity: san-uri 下的 URI SAN）绑到凭证：
+                                         该证书上的未签名请求视同此凭证签名，已签名请求须同租户（tls.md §2.1）；
+                                         root 专属，重复绑定即覆盖（201 新建 / 200 覆盖）
+s3adm cred unbind-cert -S|--subject=<subject>
+                                         解除绑定（幂等）；root 专属
+s3adm cred list-certs                    列出全部绑定与服务端的 auth.tls_identity 模式；root 专属
 ```
 
 `--policy` 取内联 JSON 或 `@file`，结构
@@ -241,6 +250,9 @@ s3adm cred get L3AK7Q2MXX5EIY4BJZW3 --show-secret
 s3adm cred list --endpoint=https://s3.example.com --insecure
 s3adm cred delete L3AK7Q2MXX5EIY4BJZW3
 s3adm cred create --tenant=acme --role=admin --comment='acme operator'
+s3adm cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=alice --endpoint=https://s3.example.com --cert=ops.crt --key=ops.key
+s3adm cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=spiffe://example.org/ns/prod/sa/api   # san-uri 模式
+s3adm cred unbind-cert --subject=alice
 ```
 
 ### 3.3 `website` —— 桶静态网站配置

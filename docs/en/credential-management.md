@@ -129,7 +129,10 @@ Dynamic credentials (API-generated, storage-persisted) = normal: data plane only
 ### 4.1 Location: the reserved system bucket `.sys`
 
 - Credentials are written to a bucket named `.sys` on the `default_backend`,
-  object key `credentials/{ak}` — one object per credential;
+  object key `credentials/{ak}` — one object per credential; the same bucket
+  holds the STS sessions `sts/{ak}`, the per-bucket configuration stores and the
+  mTLS certificate bindings `tls-identities/{subject}` (the subject
+  percent-encoded into one path segment, [tls.md §2.1](tls.md));
 - `validate_bucket_name()` is also called inside each backend, so it **admits**
   the reserved name `.sys` (src/storage/validate.cc); interception of user
   requests is lifted to L2: dispatch rejects any bucket starting with `.`

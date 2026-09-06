@@ -152,6 +152,87 @@ std::shared_ptr<ccmd::c_command> make_delete() {
     return cmd;
 }
 
+// ---- mTLS bindings (backlog-sequence ⑥, docs/tls.md §2.1): /-/admin/tls-identities ----
+
+constexpr const char* kTlsBase = "/-/admin/tls-identities";
+
+std::string subject_path(const std::string& subject) {
+    return std::string(kTlsBase) + "/" + util::aws_uri_encode(subject, /*encode_slash=*/true);
+}
+
+bool subject_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& subject) {
+    subject = cmd->var<std::string>("subject");
+    if (subject.empty()) {
+        fprintf(stderr, "s3adm: --subject is required\n");
+        g_exit = 2;
+        return false;
+    }
+    return true;
+}
+
+std::shared_ptr<ccmd::c_command> make_bind_cert() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "bind-cert", "s3adm cred bind-cert L3AKXXXX --subject=alice",
+        "s3adm cred bind-cert <ak> --subject=<subject> [options]",
+        "Bind a client-certificate subject (the CN, or the URI SAN with "
+        "auth.tls_identity: san-uri) to a credential: unsigned requests over a "
+        "connection presenting that certificate run as the credential, signed "
+        "requests must come from the same tenant. Root only; rebinding replaces.",
+        "bind a client-certificate subject to a credential.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            std::string ak, subject;
+            if (!one_ak_arg(c, ak) || !subject_arg(c, subject)) return;
+            run_admin(c, [&](SignedClient& cli) {
+                json body = json::object();
+                body["access_key"] = ak;
+                auto comment = c->var<std::string>("comment");
+                if (!comment.empty()) body["comment"] = comment;
+                auto r = cli.put_json(subject_path(subject), body.dump());
+                // 201 = new binding, 200 = replaced
+                return finish(r, r && r->status == 200 ? 200 : 201);
+            });
+        });
+    cmd->varp<std::string>("subject", "S", "", "certificate subject (CN or URI SAN).");
+    cmd->varp<std::string>("comment", "c", "", "binding comment.");
+    s3adm::add_conn_flags(cmd);
+    return cmd;
+}
+
+std::shared_ptr<ccmd::c_command> make_unbind_cert() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "unbind-cert", "s3adm cred unbind-cert --subject=alice",
+        "s3adm cred unbind-cert --subject=<subject> [options]",
+        "Remove a client-certificate binding (idempotent). Root only.",
+        "remove a client-certificate binding.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            if (!c->args().empty()) {
+                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+                g_exit = 2;
+                return;
+            }
+            std::string subject;
+            if (!subject_arg(c, subject)) return;
+            run_admin(c, [&](SignedClient& cli) {
+                return finish(cli.del(subject_path(subject)), 204, "unbound " + subject);
+            });
+        });
+    cmd->varp<std::string>("subject", "S", "", "certificate subject (CN or URI SAN).");
+    s3adm::add_conn_flags(cmd);
+    return cmd;
+}
+
+std::shared_ptr<ccmd::c_command> make_list_certs() {
+    auto cmd = std::make_shared<ccmd::c_command>(
+        "list-certs", "s3adm cred list-certs", "s3adm cred list-certs [options]",
+        "List client-certificate bindings and the server's auth.tls_identity mode. Root only.",
+        "list client-certificate bindings.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
+            run_admin(c, [](SignedClient& cli) { return finish(cli.get(kTlsBase, ""), 200); });
+        });
+    s3adm::add_conn_flags(cmd);
+    return cmd;
+}
+
 }  // namespace
 
 namespace s3adm {
@@ -177,6 +258,9 @@ std::shared_ptr<ccmd::c_command> make_cred() {
     cmd->add_subcommand(make_get());
     cmd->add_subcommand(make_create());
     cmd->add_subcommand(make_delete());
+    cmd->add_subcommand(make_bind_cert());
+    cmd->add_subcommand(make_unbind_cert());
+    cmd->add_subcommand(make_list_certs());
     return cmd;
 }
 

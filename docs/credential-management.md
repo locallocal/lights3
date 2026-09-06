@@ -104,7 +104,9 @@ SigV4 是 HMAC 方案，服务端必须保存可逆的 SK（不能只存哈希�
 ### 4.1 位置：保留系统 bucket `.sys`
 
 - 凭证写入 `default_backend` 上名为 `.sys` 的 bucket，对象键
-  `credentials/{ak}`，一凭证一对象；
+  `credentials/{ak}`，一凭证一对象；同一 bucket 下还住着 STS 会话
+  `sts/{ak}`、各 per-bucket 配置存储与 mTLS 证书绑定 `tls-identities/{主体}`
+  （主体百分号编码为单一路径段，[tls.md §2.1](tls.md)）；
 - `validate_bucket_name()` 在各后端内部也会调用，因此对保留名 `.sys`
   **放行**（src/storage/validate.cc）；用户请求的拦截上移到 L2：dispatch
   在路由前拒绝一切 `.` 开头的 bucket（InvalidBucketName），`.sys` 仅

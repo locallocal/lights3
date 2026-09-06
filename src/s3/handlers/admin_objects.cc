@@ -17,7 +17,7 @@ Task<http::HttpResponse> S3Service::admin_object_inspect(http::HttpRequest& req,
                                                          const RequestContext& ctx) {
     (void)ctx;
     try {
-        auto ident = auth_.verify(req);
+        auto ident = verify_identity(req);
         access_key = ident.access_key;
         if (!is_root(access_key))
             throw S3Error(S3ErrorCode::AccessDenied,

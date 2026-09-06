@@ -23,6 +23,7 @@
 
 #include "core/config.h"
 #include "core/timer.h"
+#include "http/model.h"
 
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_st SSL;
@@ -128,5 +129,17 @@ private:
 
 // Static knobs shared by the drivers (also used by tests to build client contexts)
 long min_version_of(const std::string& s);  // "1.2" -> TLS1_2_VERSION, "1.3" -> TLS1_3_VERSION
+
+// Identity of the peer certificate after the handshake (backlog-sequence ⑥):
+// nullopt when the peer presented none or verification did not succeed (the
+// latter cannot happen on a completed handshake with SSL_VERIFY_PEER, kept as a
+// belt-and-braces check). Reads the subject CN and the first URI SAN; the
+// OpenSSL-backed drivers call it once per connection (httplib per request)
+std::optional<TlsIdentity> peer_identity(const SSL* ssl);
+
+// Subject CN out of an RFC 4514 distinguished-name string such as
+// "CN=alice,O=Example" (the shape GnuTLS / seastar report); empty when absent.
+// Backslash escapes and quoted values are unwrapped
+std::string cn_of_dn(std::string_view dn);
 
 }  // namespace lights3::http::tls

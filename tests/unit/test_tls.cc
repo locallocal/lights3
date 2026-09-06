@@ -71,13 +71,14 @@ struct Server {
     std::unique_ptr<IHttpServer> srv;
     std::thread th;
     uint16_t port = 0;
-    Server(const std::string& driver, const HttpConfig& cfg_in) {
+    Server(const std::string& driver, const HttpConfig& cfg_in, Handler handler = nullptr) {
         HttpConfig cfg = cfg_in;
         cfg.driver = driver;
         cfg.io_threads = 2;
         cfg.idle_timeout_sec = 5;
         srv = HttpServerFactory::create(driver, cfg);
-        srv->set_handler([](HttpRequest req) { return echo_handler(std::move(req)); });
+        if (!handler) handler = [](HttpRequest req) { return echo_handler(std::move(req)); };
+        srv->set_handler(std::move(handler));
         srv->listen("127.0.0.1", 0);
         port = srv->bound_port();
         th = std::thread([this] { srv->run(); });
@@ -284,6 +285,66 @@ TEST(tls_client_auth_require_and_optional) {
     }
 }
 
+// backlog-sequence ⑥: the verified client certificate's subject CN and URI SAN
+// reach L2 on HttpRequest::tls_identity, on every driver; absent without a
+// certificate (optional mode) and on plaintext
+TEST(tls_client_identity_reaches_the_request) {
+    Files files;
+    auto ca = tls_test::make_cert("Identity CA", nullptr, /*ca=*/true);
+    auto server = tls_test::make_cert("id.test", &ca);
+    auto alice = tls_test::make_cert("alice", &ca, false, 0, "spiffe://example.org/ns/alice");
+    HttpConfig cfg;
+    cfg.tls_cert = files.put("cert.pem", server.cert_pem);
+    cfg.tls_key = files.put("key.pem", server.key_pem);
+    cfg.tls_client_ca = files.put("ca.pem", ca.cert_pem);
+    cfg.tls_client_auth = "optional";
+    cfg.tls_reload_interval_sec = 0;
+    auto identity_handler = [](HttpRequest req) -> Task<HttpResponse> {
+        HttpResponse resp;
+        resp.headers.set("Content-Type", "text/plain");
+        resp.small_body = req.tls_identity ? "cn=" + req.tls_identity->subject_cn +
+                                                 " uri=" + req.tls_identity->san_uri
+                                           : "none";
+        co_return resp;
+    };
+    for (auto& d : tls_drivers(/*with_seastar=*/true)) {
+        try {
+            Server s(d, cfg, identity_handler);
+            Client with(s.port, {.client_cert = &alice});
+            CHECK(with.handshake_ok);
+            CHECK(contains(with.request("GET", "/id"),
+                           "cn=alice uri=spiffe://example.org/ns/alice"));
+            Client none(s.port);
+            CHECK(contains(none.request("GET", "/anon"), "none"));
+        } catch (const mini_test::Failure& f) {
+            Driver(d).fail(f);
+        }
+    }
+    // Plaintext listener: never set
+    {
+        HttpConfig plain;
+        plain.tls_reload_interval_sec = 0;
+        Server s("builtin", plain, identity_handler);
+        int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in sa{};
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(s.port);
+        inet_pton(AF_INET, "127.0.0.1", &sa.sin_addr);
+        CHECK(::connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == 0);
+        std::string req = "GET /p HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n";
+        CHECK(::send(fd, req.data(), req.size(), 0) == static_cast<ssize_t>(req.size()));
+        std::string out;
+        char buf[1024];
+        for (;;) {
+            ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+            if (n <= 0) break;
+            out.append(buf, static_cast<size_t>(n));
+        }
+        ::close(fd);
+        CHECK(contains(out, "none"));
+    }
+}
+
 TEST(tls_sni_selects_certificate) {
     Files files;
     auto def = tls_test::make_cert("default.test");
@@ -408,6 +469,11 @@ TEST(tls_config_validation) {
     CHECK(rejects(base + "  tls_min_version: \"1.1\"\n"));                        // below the floor
     CHECK(rejects(base + "  tls_sni:\n    - hosts: x\n      cert: /x.pem\n"));   // missing key
     CHECK(rejects("backends:\n  - name: m\n    type: memory\nhttp:\n  tls_client_ca: /ca.pem\n"));  // knob without listener
+    // auth.tls_identity (backlog-sequence ⑥) presupposes client auth
+    CHECK(rejects(base + "  tls_client_ca: /ca.pem\n  tls_client_auth: require\nauth:\n  tls_identity: cn\n"));
+    CHECK(rejects(base + "auth:\n  tls_identity: subject-cn\n"));
+    auto with_id = Config::from_string(base + "  tls_client_ca: /ca.pem\n  tls_client_auth: optional\nauth:\n  tls_identity: san-uri\n");
+    CHECK_EQ(with_id.auth.tls_identity, std::string("san-uri"));
     CHECK(rejects(base + "  tls_reload_interval: 2d\n"));
     CHECK(!rejects(base + "  tls_reload_interval: 0s\n"));
 }

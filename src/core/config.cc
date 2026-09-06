@@ -430,6 +430,17 @@ Config Config::from_string(const std::string& text) {
             cfg.auth.credentials_file_reload_sec = parse_duration_sec(v);
         if (auto v = auth->get("sync_interval"); !v.empty())
             cfg.auth.sync_interval_sec = parse_duration_sec(v);
+        cfg.auth.tls_identity = auth->get("tls_identity", cfg.auth.tls_identity);
+        if (cfg.auth.tls_identity != "off" && cfg.auth.tls_identity != "subject-cn" &&
+            cfg.auth.tls_identity != "san-uri")
+            throw std::runtime_error(
+                "config: auth.tls_identity must be off|subject-cn|san-uri, got '" +
+                cfg.auth.tls_identity + "'");
+        // The mapping only ever sees certificates the listener verified: without
+        // client auth it would be a knob that looks like security and does nothing
+        if (cfg.auth.tls_identity != "off" && cfg.http.tls_client_auth == "off")
+            throw std::runtime_error("config: auth.tls_identity=" + cfg.auth.tls_identity +
+                                     " requires http.tls_client_auth optional|require");
         if (auto* creds = auth->find("credentials"); creds && creds->type == YamlNode::Type::List) {
             for (auto& c : creds->list) {
                 Credential cr{c.get("access_key"), c.get("secret_key")};

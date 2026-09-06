@@ -127,7 +127,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                                                       std::string& access_key) {
     constexpr std::string_view kBase = "/-/admin/credentials";
     try {
-        auto ident = auth_.verify(req);
+        auto ident = verify_identity(req);
         access_key = ident.access_key;
         // Tiered model (docs/credential-management.md §3, docs/multi-tenancy.md §4.4): root
         // (static credentials) manages everything; a tenant admin manages the credentials

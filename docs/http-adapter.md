@@ -34,6 +34,8 @@ struct HttpRequest {
     HeaderMap   headers;
     std::string remote_addr;
     std::unique_ptr<BodyReader> body;   // 可能为 nullptr（无 body）
+    bool admin_face = false;            // 由 admin 监听接入（http.admin_port，§2.1）
+    std::optional<TlsIdentity> tls_identity;  // 验证通过的客户端证书 {subject_cn, san_uri}（tls.md §2.1）
 };
 
 struct HttpResponse {

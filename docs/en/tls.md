@@ -49,11 +49,58 @@ string matching no suite throws before listening.
 With `tls_client_ca` set: `optional` requests a client certificate, admits
 connections without one, and refuses one that fails verification; `require`
 demands one that verifies. The verdict is decided inside the handshake (under
-TLS 1.3 the client sees the alert on its first read). A verified client
-certificate is currently **not mapped to an identity** — SigV4 remains the only
-identity source; mTLS is transport admission ("without a certificate from the
-company CA you cannot even complete the handshake"). Mapping the client
-certificate CN to a credential/tenant is a later item.
+TLS 1.3 the client sees the alert on its first read). By default
+(`auth.tls_identity: off`) a verified client certificate is **not mapped to an
+identity** — SigV4 remains the only identity source; mTLS is transport admission
+("without a certificate from the company CA you cannot even complete the
+handshake").
+
+**Certificate → credential / tenant identity mapping** (backlog-sequence ⑥).
+With `auth.tls_identity: subject-cn | san-uri` one field of the verified client
+certificate becomes its **subject** (the subject CN, or the first URI-type
+subjectAltName — SPIFFE-style deployments use the latter) and takes part in
+authentication through the root-managed binding table
+`.sys/tls-identities/<subject>` → credential AK:
+
+| Request | Subject bound | Subject not bound |
+| --- | --- | --- |
+| **Unsigned** (no `Authorization`, no presigned parameters) | Treated as signed by the bound credential: policy / tenant / role all inherited (a readonly credential stays readonly, a tenant credential still sees only its tenant's buckets, a binding to root opens the admin plane) | `AccessDenied` ("not bound") — turning the mode on means every certificate is accounted for |
+| **Signed** | The bound credential and the signing credential must be of the **same tenant** (equal tenant field; tenant-less legacy credentials count as one tenant), else `AccessDenied`; the same credential passes trivially | `AccessDenied` — exception below |
+| **Signed by root** | Admitted (root has no tenant to compare; an operator's certificate may front any credential) | Admitted |
+
+Edge cases: a certificate without the selected field (no CN / no URI SAN) is no
+identity at all and gets the plain signature semantics; once the bound credential
+is revoked the binding dangles and unsigned requests get `AccessDenied` ("no
+longer exists"); an anonymous static-website read yields to a bound certificate
+(the more specific identity wins — a bound credential that may not read the
+bucket gets 403, an unbound certificate still reads anonymously); STS
+`AssumeRole`, the root gate of `/-/metrics` and every `/-/admin/*` endpoint
+follow the same rules. Bindings never accept STS session AKs (the binding would
+outlive the session). Each of the four drivers reads the peer certificate once
+after the handshake (httplib once per request, a cheap peek) into
+`HttpRequest::tls_identity` (both candidates, CN and URI SAN); L2 picks one by
+mode. seastar goes through GnuTLS's DN string and parses the CN out of it.
+
+Bindings are managed by root through `/-/admin/tls-identities`
+([multi-tenancy.md §6](multi-tenancy.md)) or `s3adm cred
+bind-cert|unbind-cert|list-certs` ([cli.md §3.2](cli.md)) and synced across
+gateways by `auth.sync_interval`; the table stays manageable with
+`tls_identity: off`, so bindings can be prepared before the switch.
+`auth.tls_identity` needs a restart like every `auth.*` key and requires
+`tls_client_auth` to be `optional|require` (startup error otherwise).
+
+```yaml
+http:
+  tls_client_ca: /etc/lights3/clients-ca.pem
+  tls_client_auth: require
+auth:
+  tls_identity: subject-cn        # off | subject-cn | san-uri
+```
+
+```bash
+s3adm cred bind-cert L3AK... --subject=alice --cert=ops.crt --key=ops.key --endpoint=https://...
+curl --cert alice.crt --key alice.key https://s3.example.com/bucket/key   # unsigned, judged as the bound credential
+```
 
 ### 2.2 Versions and Suites
 
@@ -184,7 +231,9 @@ challenge plugin); lights3 then stays plaintext and `X-Forwarded-Proto` keeps
   version/mTLS cases when that build exists) — HTTPS round trip with a streamed
   body and a refused 1.1 client; `1.3` floor + ciphersuite restriction; mTLS
   require/optional (no certificate and a foreign-CA certificate refused, a valid
-  one admitted); SNI exact/wildcard/case/no-SNI fallback; hot reload (new CN on
+  one admitted); the client certificate's CN and URI SAN reaching
+  `HttpRequest::tls_identity` on every driver (empty without a certificate / on
+  plaintext); `auth.tls_identity` config validation; SNI exact/wildcard/case/no-SNI fallback; hot reload (new CN on
   the next handshake, a broken file never replaces working material); `Holder`
   reload semantics (a half rotation keeps the old material, old snapshots stay
   valid for their holders, bad paths throw naming the file); config validation.
@@ -192,6 +241,20 @@ challenge plugin); lights3 then stays plaintext and `X-Forwarded-Proto` keeps
   P-256), no fixture files.
 - `test_http_drivers.cc`: TLS round trip / plaintext rejection / bad-certificate
   throw across all drivers; seastar with `tls_sni` throws.
+- `tests/unit/test_tls_identity.cc` (the §2.1 mapping rules, full dispatch):
+  unsigned + bound certificate runs under the bound credential's policy;
+  unbound / no certificate / mode off refused; a revoked credential leaves a
+  dangling binding; tenant consistency on signed requests (same tenant admitted,
+  cross-tenant 403, root exempt, legacy credentials accept each other);
+  `san-uri` mode; admin API permissions and validation, persistence, `sync_now`
+  cross-instance propagation, a second gateway enforcing the first one's
+  bindings; a certificate bound to root passing the `/-/metrics` root gate and
+  the admin plane; the anonymous website read yielding to a binding.
 - e2e: the end of `run_e2e.sh` starts an HTTPS instance with an openssl-CLI
   self-signed certificate and does a SigV4 PUT/GET round trip with
-  `curl --cacert` (builtin, the default driver).
+  `curl --cacert` (builtin, the default driver); then a `tls_client_auth:
+  require` + `tls_identity: subject-cn` instance with two client certificates
+  from a private CA: `s3adm cred bind-cert` binds one to a readonly credential,
+  and the script checks unsigned GET admitted / PUT refused by the policy /
+  unbound certificate 403 / no certificate fails the handshake / signature and
+  certificate of different tenants 403 / root exempt / 403 again after unbind.

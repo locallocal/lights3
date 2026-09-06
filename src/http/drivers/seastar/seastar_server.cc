@@ -54,6 +54,7 @@
 #include "core/task.h"
 #include "http/drivers/common.h"
 #include "http/server.h"
+#include "http/tls.h"
 
 namespace lights3::http {
 
@@ -569,9 +570,32 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     };
     bool keep = true;
     int served = 0;  // keep-alive budget (http.max_requests_per_connection)
+    // Verified client certificate (backlog-sequence ⑥): seastar::tls answers DN /
+    // SAN queries per socket (forcing the handshake first), read once per
+    // connection. Only asked for when client auth is on -- the query on a
+    // connection without a certificate is a cheap nullopt, on a plaintext socket
+    // it throws, hence the gate on the config
+    std::optional<TlsIdentity> tls_identity;
 
     // Socket errors such as a peer RST surface from seastar futures as exceptions: catch them and take the unified stream-close wrap-up
     try {
+    if (!core->cfg.tls_cert.empty() && core->cfg.tls_client_auth != "off") {
+        set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
+        SeaConn::ArmGuard arm(conn);
+        auto dn = co_await fut_await(ss::tls::get_dn_information(conn.cs));
+        if (dn) {
+            TlsIdentity id;
+            id.subject_cn = tls::cn_of_dn(std::string_view(dn->subject.data(), dn->subject.size()));
+            auto sans = co_await fut_await(ss::tls::get_alt_name_information(
+                conn.cs, {ss::tls::subject_alt_name_type::uri}));
+            for (auto& san : sans)
+                if (auto* v = std::get_if<ss::sstring>(&san.value)) {
+                    id.san_uri.assign(v->data(), v->size());
+                    break;
+                }
+            tls_identity = std::move(id);
+        }
+    }
     while (keep && !core->stopping.load(std::memory_order_relaxed)) {
         const size_t max_line = core->cfg.max_header_size;
         std::string line;
@@ -584,6 +608,7 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
 
         HttpRequest req;
         req.remote_addr = peer;
+        req.tls_identity = tls_identity;
         {
             auto sp1 = line.find(' ');
             auto sp2 = line.rfind(' ');

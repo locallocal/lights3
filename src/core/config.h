@@ -164,6 +164,11 @@ struct AuthConfig {
     std::string credentials_file;          // external credentials file (JSON, hot-reloaded); empty = disabled
     int credentials_file_reload_sec = 30;  // file mtime polling period; 0 = load at startup only
     int sync_interval_sec = 0;             // multi-instance: periodic incremental reload of .sys; 0 = disabled
+    // mTLS identity mapping (backlog-sequence ⑥, docs/tls.md §2.1): which field of a
+    // verified client certificate names the identity looked up in
+    // .sys/tls-identities/. off = certificates stay transport admission only.
+    // Needs http.tls_client_auth optional|require
+    std::string tls_identity = "off";      // off | subject-cn | san-uri
 };
 
 struct BackendConfig {

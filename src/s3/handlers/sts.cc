@@ -66,6 +66,7 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
         // payload hash only inside the canonical request, so verify needs it up front
         std::string body = co_await handlers::read_body(req, 64 * 1024);
         auto ident = auth_.verify_sts(req, util::sha256_hex(body));
+        enforce_tls_tenant(req, ident);  // a bound certificate must agree with the caller (backlog-sequence ⑥)
         access_key = ident.access_key;
         if (!auth_.enabled())
             throw S3Error(S3ErrorCode::AccessDenied,

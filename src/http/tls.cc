@@ -5,8 +5,10 @@
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <stdexcept>
 
@@ -188,6 +190,96 @@ long min_version_of(const std::string& s) {
     if (s == "1.2" || s.empty()) return TLS1_2_VERSION;
     if (s == "1.3") return TLS1_3_VERSION;
     throw std::runtime_error("tls_min_version must be 1.2 or 1.3, got '" + s + "'");
+}
+
+// ---------- peer identity ----------
+
+std::optional<TlsIdentity> peer_identity(const SSL* ssl) {
+    if (!ssl) return std::nullopt;
+    X509* x = SSL_get1_peer_certificate(ssl);
+    if (!x) return std::nullopt;
+    struct Free {
+        X509* x;
+        ~Free() { X509_free(x); }
+    } guard{x};
+    if (SSL_get_verify_result(ssl) != X509_V_OK) return std::nullopt;
+    TlsIdentity id;
+    // CN as UTF-8 regardless of the string type used in the certificate
+    // (X509_NAME_get_text_by_NID would truncate / mis-decode BMPString)
+    X509_NAME* name = X509_get_subject_name(x);
+    int idx = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
+    if (idx >= 0) {
+        ASN1_STRING* v = X509_NAME_ENTRY_get_data(X509_NAME_get_entry(name, idx));
+        unsigned char* utf8 = nullptr;
+        int n = ASN1_STRING_to_UTF8(&utf8, v);
+        if (n > 0) id.subject_cn.assign(reinterpret_cast<char*>(utf8), static_cast<size_t>(n));
+        if (utf8) OPENSSL_free(utf8);
+    }
+    auto* sans = static_cast<GENERAL_NAMES*>(X509_get_ext_d2i(x, NID_subject_alt_name, nullptr, nullptr));
+    if (sans) {
+        for (int i = 0; i < sk_GENERAL_NAME_num(sans) && id.san_uri.empty(); ++i) {
+            GENERAL_NAME* gn = sk_GENERAL_NAME_value(sans, i);
+            if (gn->type != GEN_URI) continue;
+            const unsigned char* d = ASN1_STRING_get0_data(gn->d.uniformResourceIdentifier);
+            int n = ASN1_STRING_length(gn->d.uniformResourceIdentifier);
+            if (n > 0) id.san_uri.assign(reinterpret_cast<const char*>(d), static_cast<size_t>(n));
+        }
+        GENERAL_NAMES_free(sans);
+    }
+    // Embedded NULs would let two subjects print alike; treat such a certificate as identity-less
+    if (id.subject_cn.find('\0') != std::string::npos || id.san_uri.find('\0') != std::string::npos)
+        return std::nullopt;
+    return id;
+}
+
+std::string cn_of_dn(std::string_view dn) {
+    // Split on unescaped commas, then look for the CN attribute
+    size_t start = 0;
+    while (start <= dn.size()) {
+        size_t end = start;
+        bool quoted = false;
+        for (; end < dn.size(); ++end) {
+            char c = dn[end];
+            if (c == '\\' && end + 1 < dn.size()) {
+                ++end;
+                continue;
+            }
+            if (c == '"') quoted = !quoted;
+            else if (c == ',' && !quoted) break;
+        }
+        std::string_view rdn = dn.substr(start, end - start);
+        while (!rdn.empty() && rdn.front() == ' ') rdn.remove_prefix(1);
+        auto eq = rdn.find('=');
+        if (eq != std::string_view::npos) {
+            std::string_view type = rdn.substr(0, eq);
+            while (!type.empty() && type.back() == ' ') type.remove_suffix(1);
+            if (type.size() == 2 && (type[0] == 'C' || type[0] == 'c') &&
+                (type[1] == 'N' || type[1] == 'n')) {
+                std::string_view raw = rdn.substr(eq + 1);
+                while (!raw.empty() && raw.front() == ' ') raw.remove_prefix(1);
+                while (!raw.empty() && raw.back() == ' ') raw.remove_suffix(1);
+                if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"')
+                    raw = raw.substr(1, raw.size() - 2);
+                std::string out;
+                for (size_t i = 0; i < raw.size(); ++i) {
+                    if (raw[i] == '\\' && i + 1 < raw.size()) {
+                        ++i;
+                        // \XX hex escapes (RFC 4514 §3): decode a single byte
+                        if (i + 1 < raw.size() && std::isxdigit(static_cast<unsigned char>(raw[i])) &&
+                            std::isxdigit(static_cast<unsigned char>(raw[i + 1]))) {
+                            out.push_back(static_cast<char>(std::stoi(std::string(raw.substr(i, 2)), nullptr, 16)));
+                            ++i;
+                            continue;
+                        }
+                    }
+                    out.push_back(raw[i]);
+                }
+                return out;
+            }
+        }
+        start = end + 1;
+    }
+    return "";
 }
 
 // ---------- Holder ----------

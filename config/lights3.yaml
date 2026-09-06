@@ -90,6 +90,10 @@ auth:
   # credentials_file_reload: 30s               # file mtime polling period; 0s = load at startup only
   # sync_interval: 0s                          # with a shared multi-instance backend, periodic incremental
   #                                            # reload of .sys (pick up additions/revocations); 0s = off (single-instance default)
+  # tls_identity: off                          # off | subject-cn | san-uri (docs/tls.md §2.1): map a verified client
+  #                                            # certificate (needs http.tls_client_auth optional|require) to the credential
+  #                                            # bound in .sys/tls-identities (s3adm cred bind-cert); unsigned requests then
+  #                                            # run as that credential, signed ones must agree with its tenant
 
 # ---------- Static website hosting (docs/static-website.md) ----------
 # Buckets listed here accept anonymous GET/HEAD object reads (no listing, no

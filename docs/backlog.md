@@ -15,7 +15,6 @@
 | --- | --- | --- | --- | --- |
 | duostore meta 增量备份 / PITR | roadmap §3.7 | `dump` 已是一致性全量快照（`IMetaStore::snapshot()`）；增量需 WAL 级导出，四个引擎各不相同 | 中 | 高 |
 | client-c 结构化错误码上游贡献 | roadmap §3.7（tikv T5） | sidecar 以 kvrpcpb 结构化冲突分类为主、字符串匹配作纵深，功能不受影响；上游 PR 可选 | 低 | 中 |
-| mTLS 客户端证书 → 凭证 / 租户身份映射 | roadmap §4.1 | `tls_client_auth` 已验证证书链但不映射身份（[tls.md](tls.md)）；映射需定证书字段与凭证的绑定规则 | 中 | 中 |
 | 后端实例增删热重载 | roadmap §4.4 | `reload_config` 只应用安全子集 + `buckets.rules`；driver / 后端 / `default_backend` / `auth.*` 明确需重启（[config-reload.md](config-reload.md)） | 中 | 高 |
 | `HeaderMap` 线性扫描 / `BlockQueue` 双拷贝 | roadmap §4.3 ⑧ | 绝对量小；有 profile 证据再动 | 低 | 低 |
 
@@ -26,6 +25,7 @@
 | Docker 镜像构建与 compose 四个 profile（默认 / redis / tikv / rados / e2e） | roadmap §6.3，[deployment.md §4](deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
 | CPack RPM | roadmap §6.3，[deployment.md §3.2](deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
 | `unit_tests` 偶发 `terminate called without an active exception` | 2026-09-05 本机 5 次全量运行中 2 次，均发生在 `timer_stats_track_fired_and_pending` 通过之后、`timer_slow_callback_counted` 的 1.1s 慢回调期间（日志先打 "callback took 1.100s"），gdb 下未复现；与业务改动无关 | 有空档时排查：怀疑 TimerQueue 或测试夹具里某个 joinable `std::thread` 在负载下的析构次序；先用 `catch throw`/`ulimit -c` 抓栈 |
+| ASan 下 `unit_tests` 栈溢出 | 2026-09-06 `build-asan` 全量运行：`test_http_drivers` 的 builtin `stream_body` 经 `StreamPrefetch::finish → start_read → Started::start → read`（`PatternReader` 同步完成）无限同步递归，ASan 帧变大后 T2040 线程栈溢出（`drivers/common.h:127–154`）；非 ASan 构建与 seastar 变体均通过，上次 ASan 记录（08-14，324 用例）早于 prefetch 代码 | 排查 `StreamPrefetch` 对同步完成 reader 的递归：用循环/trampoline 替代在 `finish` 内直接 `start_read`，或在同步完成时延后到下一次 `next()` |
 | mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 
 ## 3. 性能基线跑出的新问题（[performance-baseline.md](performance-baseline.md)）

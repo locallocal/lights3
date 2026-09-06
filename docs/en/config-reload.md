@@ -67,9 +67,9 @@ Report shape (admin API / `s3adm reload` output):
 - `backends` (adding/removing instances or changing their parameters touches
   lifetimes and data) and `buckets.default_backend` (hosts `.sys` and every
   store loaded from it);
-- `auth.*` (static root credentials, credentials-file path, sync period) —
-  dynamic credentials and the credentials file already have their own reload
-  channels;
+- `auth.*` (static root credentials, credentials-file path, sync period, the
+  `tls_identity` mode) — dynamic credentials, the credentials file and the
+  certificate binding table already have their own reload / sync channels;
 - static `website` entries (dynamic ones go through `?website`),
   `lifecycle.scan_interval`, `usage.*`, `audit.*`, `ratelimit.max_tracked`,
   shutdown/backpressure boundaries;

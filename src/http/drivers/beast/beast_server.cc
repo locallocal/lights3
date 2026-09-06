@@ -363,7 +363,8 @@ private:
                 // Plaintext client hitting the TLS port / probe traffic: one warning line suffices; skip the request loop
                 LOG_WARN("TLS handshake failed from client: {}", hec.message());
             } else {
-                co_await session_loop(sess, tls);
+                // Verified client certificate (backlog-sequence ⑥): once per connection
+                co_await session_loop(sess, tls, tls::peer_identity(tls.native_handle()));
                 // Best-effort close_notify (with a timeout backstop); failure is fine, TCP gets closed right after anyway
                 sess->stream.expires_after(idle);
                 co_await io_op([&](auto cb) {
@@ -373,14 +374,15 @@ private:
                 sess->stream.expires_never();
             }
         } else {
-            co_await session_loop(sess, sess->stream);
+            co_await session_loop(sess, sess->stream, std::nullopt);
         }
         beast::error_code ig;
         sess->stream.socket().shutdown(tcp::socket::shutdown_both, ig);
     }
 
     template <class Stream>
-    Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream) {
+    Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream,
+                            std::optional<TlsIdentity> tls_identity) {
         beast::flat_buffer buffer;  // Kept across keep-alive requests (the parser may over-read)
         // Socket reads are sized by beast::read_size = max(512, capacity - size):
         // an unreserved flat_buffer grows to 512 bytes on the first read and then
@@ -437,6 +439,7 @@ private:
                 auto ep = beast::get_lowest_layer(stream).socket().remote_endpoint(epc);
                 if (!epc) req.remote_addr = ep.address().to_string();
             }
+            req.tls_identity = tls_identity;
 
             // Message framing validation (drivers/common.h parse_body_framing):
             // beast's own parsing is more lenient about CL/TE conflicts etc.,

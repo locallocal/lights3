@@ -314,6 +314,7 @@ add_library(lights3_core STATIC
   src/s3/auth/credential_store.cc
   src/s3/website_store.cc
   src/s3/cors_store.cc
+  src/s3/tls_identity_store.cc
   src/s3/lifecycle.cc
   src/s3/audit.cc
   src/s3/quota.cc
@@ -325,6 +326,7 @@ add_library(lights3_core STATIC
   src/s3/handlers/admin_tenants.cc
   src/s3/handlers/admin_objects.cc
   src/s3/handlers/admin_fsck.cc
+  src/s3/handlers/admin_tls_identities.cc
   src/s3/handlers/bucket_quota.cc
   src/s3/handlers/quota_gate.cc
   src/s3/handlers/bucket_website.cc
@@ -537,6 +539,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_service.cc
     tests/unit/test_tenancy.cc
     tests/unit/test_tls.cc
+    tests/unit/test_tls_identity.cc
     tests/unit/test_ratelimit.cc
     tests/unit/test_reload.cc
     tests/unit/test_fsck_jobs.cc

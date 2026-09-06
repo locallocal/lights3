@@ -100,6 +100,7 @@ private:
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::CorsStore> cors_store_;
+    std::shared_ptr<s3::TlsIdentityStore> tls_identity_store_;  // backlog-sequence ⑥
     std::shared_ptr<s3::LifecycleStore> lifecycle_store_;
     std::unique_ptr<s3::LifecycleRunner> lifecycle_runner_;
     // roadmap §3.9: usage accounting, quotas, tenancy, audit (docs/multi-tenancy.md)

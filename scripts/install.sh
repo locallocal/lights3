@@ -144,10 +144,10 @@ if [[ -x "$BIN_DIR/lights3" ]]; then
 fi
 
 install_atomic "$BUILD_DIR/lights3" "$BIN_DIR/lights3" 0755
-if [[ -x "$BUILD_DIR/s3adm" ]]; then
-    install_atomic "$BUILD_DIR/s3adm" "$BIN_DIR/s3adm" 0755
+if [[ -x "$BUILD_DIR/lights3-ctl" ]]; then
+    install_atomic "$BUILD_DIR/lights3-ctl" "$BIN_DIR/lights3-ctl" 0755
 else
-    echo "warning: $BUILD_DIR/s3adm is missing; the optional admin CLI was not installed" >&2
+    echo "warning: $BUILD_DIR/lights3-ctl is missing; the optional admin CLI was not installed" >&2
 fi
 install_atomic "$SCRIPT_DIR/systemctl.sh" "$SBIN_DIR/lights3ctl" 0755
 install -m 0755 -o root -g root "$SETUP_HELPER" "$SHARE_DIR/lights3-setup.sh"

@@ -708,32 +708,32 @@ s3curl -o /dev/null -X DELETE "$BASE/e2esite"
 s3curl -o /dev/null -X DELETE "$BASE/dynsite/index.html"
 s3curl -o /dev/null -X DELETE "$BASE/dynsite"
 
-# ---------- roadmap §6.1: s3adm cross-validation (self-signed client vs. the server's verifier) ----------
-# curl signs with libcurl's SigV4, s3adm with its own implementation: the same
+# ---------- roadmap §6.1: lights3-ctl cross-validation (self-signed client vs. the server's verifier) ----------
+# curl signs with libcurl's SigV4, lights3-ctl with its own implementation: the same
 # flows through both catch a drift in either signer
-S3ADM="$(dirname "$BIN")/s3adm"
-if [[ -x "$S3ADM" ]]; then
-    adm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" "$@" --endpoint="$BASE" --region="$REGION"; }
-    ADM_CRED=$(adm cred create --comment=s3adm-e2e 2>&1)
+LIGHTS3_CTL="$(dirname "$BIN")/lights3-ctl"
+if [[ -x "$LIGHTS3_CTL" ]]; then
+    adm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" "$@" --endpoint="$BASE" --region="$REGION"; }
+    ADM_CRED=$(adm cred create --comment=lights3-ctl-e2e 2>&1)
     ADM_AK=$(echo "$ADM_CRED" | json_field access_key)
-    check "s3adm cred create returns an AK" "1" "$([[ ${#ADM_AK} -ge 16 ]] && echo 1 || echo 0)"
-    check "s3adm cred list shows it" "0" "$(adm cred list | grep -q "$ADM_AK"; echo $?)"
+    check "lights3-ctl cred create returns an AK" "1" "$([[ ${#ADM_AK} -ge 16 ]] && echo 1 || echo 0)"
+    check "lights3-ctl cred list shows it" "0" "$(adm cred list | grep -q "$ADM_AK"; echo $?)"
     ADM_SK=$(adm cred get "$ADM_AK" --show-secret | json_field secret_key)
-    check "s3adm cred get --show-secret returns the secret" "1" "$([[ -n "$ADM_SK" ]] && echo 1 || echo 0)"
-    check "curl signs with the credential s3adm minted (ListBuckets)" "200" \
+    check "lights3-ctl cred get --show-secret returns the secret" "1" "$([[ -n "$ADM_SK" ]] && echo 1 || echo 0)"
+    check "curl signs with the credential lights3-ctl minted (ListBuckets)" "200" \
         "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$ADM_AK:$ADM_SK" -o /dev/null -w '%{http_code}' "$BASE/")"
-    check "s3adm cred delete" "0" "$(adm cred delete "$ADM_AK" >/dev/null 2>&1; echo $?)"
-    check "curl rejected with the credential s3adm revoked" "403" \
+    check "lights3-ctl cred delete" "0" "$(adm cred delete "$ADM_AK" >/dev/null 2>&1; echo $?)"
+    check "curl rejected with the credential lights3-ctl revoked" "403" \
         "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$ADM_AK:$ADM_SK" -o /dev/null -w '%{http_code}' "$BASE/")"
     s3curl -o /dev/null -X PUT "$BASE/admsite"
-    check "s3adm website set" "0" "$(adm website set admsite --index-suffix=index.html --error-key=404.html >/dev/null 2>&1; echo $?)"
-    check "curl reads the configuration s3adm wrote" "0" "$(s3curl "$BASE/admsite?website" | grep -q '<Key>404.html</Key>'; echo $?)"
-    check "s3adm website get" "0" "$(adm website get admsite | grep -q '<Suffix>index.html</Suffix>'; echo $?)"
-    check "s3adm website delete" "0" "$(adm website delete admsite >/dev/null 2>&1; echo $?)"
-    check "s3adm website get after delete exits 1" "1" "$(adm website get admsite >/dev/null 2>&1; echo $?)"
+    check "lights3-ctl website set" "0" "$(adm website set admsite --index-suffix=index.html --error-key=404.html >/dev/null 2>&1; echo $?)"
+    check "curl reads the configuration lights3-ctl wrote" "0" "$(s3curl "$BASE/admsite?website" | grep -q '<Key>404.html</Key>'; echo $?)"
+    check "lights3-ctl website get" "0" "$(adm website get admsite | grep -q '<Suffix>index.html</Suffix>'; echo $?)"
+    check "lights3-ctl website delete" "0" "$(adm website delete admsite >/dev/null 2>&1; echo $?)"
+    check "lights3-ctl website get after delete exits 1" "1" "$(adm website get admsite >/dev/null 2>&1; echo $?)"
     s3curl -o /dev/null -X DELETE "$BASE/admsite"
     BENCH_OUT=$(adm bench put --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K --keep 2>&1)
-    check "s3adm bench put runs error-free" "0" "$(echo "$BENCH_OUT" | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
+    check "lights3-ctl bench put runs error-free" "0" "$(echo "$BENCH_OUT" | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
     # backlog-sequence ③: the offline scrub through the admin plane (root only; the
     # localfs-family and duostore backends have one, memory/cloudproxy/tiered do not)
     FSCK_KIND=""
@@ -745,10 +745,10 @@ if [[ -x "$S3ADM" ]]; then
         check "admin fsck: unknown backend 404" "404" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/fsck/nope")"
         check "admin fsck: status before any job" "0" "$(s3curl "$BASE/-/admin/fsck/tierdata" | grep -q '"running": false'; echo $?)"
         OFF_OUT=$(adm fsck --offline tierdata 2>&1); OFF_RC=$?
-        check "s3adm fsck --offline completes clean" "0" "$OFF_RC"
-        check "s3adm fsck --offline prints the outcome document" "0" "$(echo "$OFF_OUT" | grep -q '"findings": 0'; echo $?)"
+        check "lights3-ctl fsck --offline completes clean" "0" "$OFF_RC"
+        check "lights3-ctl fsck --offline prints the outcome document" "0" "$(echo "$OFF_OUT" | grep -q '"findings": 0'; echo $?)"
         check "admin fsck: status shows the finished job" "0" "$(s3curl "$BASE/-/admin/fsck/tierdata" | grep -q '"job_id": 1'; echo $?)"
-        check "s3adm fsck --status" "0" "$(adm fsck --status tierdata 2>&1 | grep -q '"running": false'; echo $?)"
+        check "lights3-ctl fsck --status" "0" "$(adm fsck --status tierdata 2>&1 | grep -q '"running": false'; echo $?)"
         # A throttled round keeps the backend busy: a second start is refused with 409
         check "admin fsck: throttled start accepted" "202" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/fsck/tierdata?max_mbps=1")"
         check "admin fsck: concurrent start refused (409 ScrubInProgress)" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/fsck/tierdata")"
@@ -756,7 +756,7 @@ if [[ -x "$S3ADM" ]]; then
         check "admin fsck: throttled round finished" "0" "$(s3curl "$BASE/-/admin/fsck/tierdata" | grep -q '"job_id": 2'; echo $?)"
         if [[ "$BACKEND" == "localfs" || "$BACKEND" == "xlocalfs" ]]; then
             # Flip a byte inside a stored object's data file: the next round must report
-            # exactly one ETag mismatch and s3adm must exit 1
+            # exactly one ETag mismatch and lights3-ctl must exit 1
             head -c 200000 /dev/urandom > "$WORK/fsck-victim.bin"
             s3curl -o /dev/null -X PUT "$BASE/fsckbkt"
             s3curl -o /dev/null -X PUT --data-binary "@$WORK/fsck-victim.bin" "$BASE/fsckbkt/victim"
@@ -765,7 +765,7 @@ if [[ -x "$S3ADM" ]]; then
             if [[ -n "$corrupt" ]]; then
                 printf 'Z' | dd of="$corrupt" bs=1 seek=64 conv=notrunc 2>/dev/null
                 CORR_OUT=$(adm fsck --offline tierdata 2>&1); CORR_RC=$?
-                check "s3adm fsck --offline exits 1 on a corrupted object" "1" "$CORR_RC"
+                check "lights3-ctl fsck --offline exits 1 on a corrupted object" "1" "$CORR_RC"
                 check "admin fsck: the corruption is one etag mismatch" "0" "$(echo "$CORR_OUT" | grep -q '"etag_mismatches": 1'; echo $?)"
                 check "admin fsck: findings counted" "0" "$(echo "$CORR_OUT" | grep -q '"findings": 1'; echo $?)"
             fi
@@ -774,41 +774,41 @@ if [[ -x "$S3ADM" ]]; then
         fi
     fi
     FSCK_OUT=$(adm fsck admbench 2>&1); FSCK_RC=$?
-    check "s3adm fsck verifies the bench objects" "0" "$FSCK_RC"
+    check "lights3-ctl fsck verifies the bench objects" "0" "$FSCK_RC"
     [[ $FSCK_RC -ne 0 ]] && echo "$FSCK_OUT"
-    check "s3adm fsck reports zero mismatches" "0" "$(echo "$FSCK_OUT" | grep -q ' 0 mismatches, 0 errors'; echo $?)"
-    check "s3adm bench get runs error-free" "0" "$(adm bench get --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K 2>&1 | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
+    check "lights3-ctl fsck reports zero mismatches" "0" "$(echo "$FSCK_OUT" | grep -q ' 0 mismatches, 0 errors'; echo $?)"
+    check "lights3-ctl bench get runs error-free" "0" "$(adm bench get --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K 2>&1 | grep -q '^ops [0-9]* ok, 0 err'; echo $?)"
     # roadmap §6.2: machine-readable bench summary (stdout is exactly one JSON object)
     BENCH_JSON=$(adm bench put --bucket=admbench --concurrency=2 --duration-sec=1 --objects=8 --size=4K --output=json 2>/dev/null)
-    check "s3adm bench --output=json is a JSON object with the summary fields" "0" \
+    check "lights3-ctl bench --output=json is a JSON object with the summary fields" "0" \
         "$(echo "$BENCH_JSON" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j["mode"]=="put" and j["errors"]==0 and j["ops"]>0 and j["ops_per_s"]>0 and "p99" in j["latency_ms"]' 2>/dev/null; echo $?)"
     # roadmap §6.2: object layout introspection through the admin endpoint
     s3curl -o /dev/null -X PUT --data-binary 'layout me' "$BASE/admbench/dir/layout.txt"
     INSPECT=$(adm object inspect admbench dir/layout.txt 2>&1)
     if [[ "$BACKEND" == "cloudproxy" ]]; then
         # cloudproxy exposes no internal layout by design: the routing is still reported
-        check "s3adm object inspect reports the routed backend and no layout (cloudproxy)" "0" \
+        check "lights3-ctl object inspect reports the routed backend and no layout (cloudproxy)" "0" \
             "$(echo "$INSPECT" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j["bucket"]=="admbench" and j["key"]=="dir/layout.txt" and j["backend"]=="tierdata" and j["layout"] is None and j["note"]' 2>/dev/null; echo $?)"
-        check "s3adm object inspect --output=text says (none)" "0" "$(adm object inspect admbench dir/layout.txt --output=text | grep -q '^layout   (none)'; echo $?)"
+        check "lights3-ctl object inspect --output=text says (none)" "0" "$(adm object inspect admbench dir/layout.txt --output=text | grep -q '^layout   (none)'; echo $?)"
     else
-        check "s3adm object inspect returns the routed backend and a layout" "0" \
+        check "lights3-ctl object inspect returns the routed backend and a layout" "0" \
             "$(echo "$INSPECT" | python3 -c 'import json,sys; j=json.load(sys.stdin); assert j["bucket"]=="admbench" and j["key"]=="dir/layout.txt" and j["backend"]=="tierdata" and j["layout"] is not None and j["layout"]["engine"] and isinstance(j["layout"]["extents"], list)' 2>/dev/null; echo $?)"
-        check "s3adm object inspect --output=text prints the engine" "0" "$(adm object inspect admbench dir/layout.txt --output=text | grep -q '^engine   '; echo $?)"
+        check "lights3-ctl object inspect --output=text prints the engine" "0" "$(adm object inspect admbench dir/layout.txt --output=text | grep -q '^engine   '; echo $?)"
     fi
-    check "s3adm object inspect on a missing key fails" "1" "$(adm object inspect admbench nope >/dev/null 2>&1; echo $?)"
+    check "lights3-ctl object inspect on a missing key fails" "1" "$(adm object inspect admbench nope >/dev/null 2>&1; echo $?)"
     check "object inspect denied for non-root" "403" \
         "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" -o /dev/null -w '%{http_code}' "$BASE/-/admin/objects/admbench/dir/layout.txt")"
     s3curl -o /dev/null -X DELETE "$BASE/admbench/dir/layout.txt"
-    # roadmap §6.2: zombie multipart uploads listed and aborted through s3adm
+    # roadmap §6.2: zombie multipart uploads listed and aborted through lights3-ctl
     s3curl -o /dev/null -X POST "$BASE/admbench/zombie-1?uploads"
     s3curl -o /dev/null -X POST "$BASE/admbench/zombie-2?uploads"
-    check "s3adm mpu list shows both uploads" "2" "$(adm mpu list admbench | grep -c 'zombie-')"
-    check "s3adm mpu list --output=json" "2" "$(adm mpu list admbench --output=json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["uploads"]))')"
-    check "s3adm mpu list --older-than filters out fresh uploads" "0" "$(adm mpu list admbench --older-than=1h | grep -c 'zombie-')"
+    check "lights3-ctl mpu list shows both uploads" "2" "$(adm mpu list admbench | grep -c 'zombie-')"
+    check "lights3-ctl mpu list --output=json" "2" "$(adm mpu list admbench --output=json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["uploads"]))')"
+    check "lights3-ctl mpu list --older-than filters out fresh uploads" "0" "$(adm mpu list admbench --older-than=1h | grep -c 'zombie-')"
     Z1=$(adm mpu list admbench --output=json | python3 -c 'import json,sys; u=[x for x in json.load(sys.stdin)["uploads"] if x["key"]=="zombie-1"][0]; print(u["upload_id"])')
-    check "s3adm mpu abort one upload" "0" "$(adm mpu abort admbench zombie-1 "$Z1" >/dev/null 2>&1; echo $?)"
-    check "s3adm mpu abort --all clears the rest" "1 of 1 upload(s) aborted" "$(adm mpu abort admbench --all | tail -1)"
-    check "s3adm mpu list empty after abort" "0 upload(s)" "$(adm mpu list admbench | tail -1)"
+    check "lights3-ctl mpu abort one upload" "0" "$(adm mpu abort admbench zombie-1 "$Z1" >/dev/null 2>&1; echo $?)"
+    check "lights3-ctl mpu abort --all clears the rest" "1 of 1 upload(s) aborted" "$(adm mpu abort admbench --all | tail -1)"
+    check "lights3-ctl mpu list empty after abort" "0 upload(s)" "$(adm mpu list admbench | tail -1)"
     s3curl -o /dev/null -X DELETE "$BASE/admbench"
 fi
 
@@ -816,7 +816,7 @@ fi
 json_num() {  # json_num <key> -- extract a numeric field from the indented JSON on stdin
     sed -n "s/.*\"$1\": \([0-9]*\).*/\1/p" | head -1
 }
-S3ADM="$(dirname "$BIN")/s3adm"
+LIGHTS3_CTL="$(dirname "$BIN")/lights3-ctl"
 s3curl -o /dev/null -X PUT "$BASE/qbkt"
 s3curl -o /dev/null -X PUT --data-binary '0123456789' "$BASE/qbkt/ten"
 USAGE_OUT=$(s3curl "$BASE/-/admin/usage/qbkt")
@@ -864,14 +864,14 @@ check "tenant user cannot use admin plane" "403" "$(tcurl -o /dev/null -w '%{htt
 check "tenant record lists bucket + usage" "11" "$(s3curl "$BASE/-/admin/tenants/acme" | json_num bytes)"
 check "tenant delete refused while it owns buckets" "409" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/-/admin/tenants/acme")"
-if [[ -x "$S3ADM" ]]; then
-    adm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" "$@" --endpoint="$BASE" --region="$REGION"; }
-    check "s3adm usage shows bucket" "0" "$(adm usage qbkt | grep -q '"bucket": "qbkt"'; echo $?)"
-    check "s3adm quota set" "0" "$(adm quota set qbkt --max-objects=100 >/dev/null; echo $?)"
-    check "s3adm quota get" "0" "$(adm quota get qbkt | grep -q '<MaxObjects>100</MaxObjects>'; echo $?)"
-    check "s3adm quota clear" "0" "$(adm quota clear qbkt >/dev/null; echo $?)"
-    check "s3adm tenant get" "0" "$(adm tenant get acme | grep -q '"acme-data"'; echo $?)"
-    check "s3adm tenant list" "0" "$(adm tenant list | grep -q '"id": "acme"'; echo $?)"
+if [[ -x "$LIGHTS3_CTL" ]]; then
+    adm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" "$@" --endpoint="$BASE" --region="$REGION"; }
+    check "lights3-ctl usage shows bucket" "0" "$(adm usage qbkt | grep -q '"bucket": "qbkt"'; echo $?)"
+    check "lights3-ctl quota set" "0" "$(adm quota set qbkt --max-objects=100 >/dev/null; echo $?)"
+    check "lights3-ctl quota get" "0" "$(adm quota get qbkt | grep -q '<MaxObjects>100</MaxObjects>'; echo $?)"
+    check "lights3-ctl quota clear" "0" "$(adm quota clear qbkt >/dev/null; echo $?)"
+    check "lights3-ctl tenant get" "0" "$(adm tenant get acme | grep -q '"acme-data"'; echo $?)"
+    check "lights3-ctl tenant list" "0" "$(adm tenant list | grep -q '"id": "acme"'; echo $?)"
 fi
 tcurl -o /dev/null -X DELETE "$BASE/acme-data/k"
 check "tenant deletes its bucket" "204" "$(tcurl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/acme-data")"
@@ -881,7 +881,7 @@ s3curl -o /dev/null -X DELETE "$BASE/qbkt/ten"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt/second"
 s3curl -o /dev/null -X DELETE "$BASE/qbkt"
 
-# ---------- roadmap §4.4: config hot reload (SIGHUP + s3adm reload, docs/config-reload.md) ----------
+# ---------- roadmap §4.4: config hot reload (SIGHUP + lights3-ctl reload, docs/config-reload.md) ----------
 sed -i 's/^  level: info$/  level: debug/' "$WORK/config.yaml"
 kill -HUP "$SRV_PID"
 for _ in $(seq 1 50); do
@@ -899,8 +899,8 @@ check "admin reload reports applied request_timeout" "0" \
     "$(echo "$RELOAD_OUT" | grep -q 'http.request_timeout: 300 -> 600'; echo $?)"
 check "admin reload denied for non-root" "403" \
     "$(curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$AK2:$SK2" -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/config/reload")"
-if [[ -x "$S3ADM" ]]; then
-    check "s3adm reload" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" reload --endpoint="$BASE" --region="$REGION" | grep -q '"ok": true'; echo $?)"
+if [[ -x "$LIGHTS3_CTL" ]]; then
+    check "lights3-ctl reload" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" reload --endpoint="$BASE" --region="$REGION" | grep -q '"ok": true'; echo $?)"
 fi
 sed -i 's/^  port: 0$/  port: 0\n  idle_timeout: 0s/' "$WORK/config.yaml"
 check "invalid config refused on reload" "400" \
@@ -921,7 +921,7 @@ check "bucket on the added backend" "200" "$(s3curl -o /dev/null -w '%{http_code
 head -c 33554432 /dev/urandom > "$WORK/hot.bin"  # 32 MiB: more than the socket buffers absorb, so the stream is still open below
 check "object on the added backend" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary "@$WORK/hot.bin" "$BASE/hot-bkt/big")"
 check "metrics carry the added backend's op series" "0" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_backend_op_seconds_count{backend="hot"'; echo $?)"
-check "s3adm object inspect sees the added backend" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" object inspect hot-bkt big --endpoint="$BASE" --region="$REGION" 2>/dev/null | grep -q '"backend": "hot"'; echo $?)"
+check "lights3-ctl object inspect sees the added backend" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" object inspect hot-bkt big --endpoint="$BASE" --region="$REGION" 2>/dev/null | grep -q '"backend": "hot"'; echo $?)"
 s3curl --limit-rate 8M -o "$WORK/hot.out" "$BASE/hot-bkt/big" &
 HOT_GET_PID=$!
 sleep 0.5
@@ -1101,7 +1101,7 @@ wait "$TLS_PID" 2>/dev/null
 # ---------- backlog-sequence ⑥: mTLS client certificate -> credential identity (docs/tls.md §2.1) ----------
 # A private client CA signs two client certificates; the instance requires client
 # auth and maps the subject CN (auth.tls_identity: subject-cn). Root binds one CN
-# to a readonly dynamic credential through s3adm; unsigned requests over that
+# to a readonly dynamic credential through lights3-ctl; unsigned requests over that
 # certificate then run as the credential, the other certificate is refused, a
 # signed tenant request must agree with the certificate, and root is exempt
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 2 \
@@ -1134,20 +1134,20 @@ check "mTLS instance started (identity mapping on)" "0" "$([[ -n "$MPORT" ]] && 
 [[ -z "$MPORT" ]] && { echo "--- server-mtls.log ---"; cat "$WORK/server-mtls.log"; }
 if [[ -n "$MPORT" ]]; then
     MBASE="https://127.0.0.1:$MPORT"
-    S3ADM="$(dirname "$BIN")/s3adm"
+    LIGHTS3_CTL="$(dirname "$BIN")/lights3-ctl"
     # curl helpers: <cert> = alice | stranger; signed variants take ak:sk
     mcurl() { local who=$1; shift; curl -sS --cacert "$WORK/tls.crt" --cert "$WORK/$who.crt" --key "$WORK/$who.key" "$@"; }
     msigned() { local who=$1 user=$2; shift 2; mcurl "$who" --aws-sigv4 "aws:amz:$REGION:s3" --user "$user" "$@"; }
-    madm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" "$@" --endpoint="$MBASE" --region="$REGION" --insecure --cert="$WORK/alice.crt" --key="$WORK/alice.key"; }
+    madm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" "$@" --endpoint="$MBASE" --region="$REGION" --insecure --cert="$WORK/alice.crt" --key="$WORK/alice.key"; }
     # Root over mTLS (any certificate, root is exempt): data + a readonly credential + the binding
     check "mTLS: root CreateBucket" "200" "$(msigned alice "$AK:$SK" -o /dev/null -w '%{http_code}' -X PUT "$MBASE/mtls")"
     check "mTLS: root PutObject" "200" "$(msigned stranger "$AK:$SK" -o /dev/null -w '%{http_code}' -X PUT --data-binary 'cert-bound' "$MBASE/mtls/k")"
     RO_JSON=$(madm cred create --comment=mtls-reader --policy='{"buckets":["mtls"],"readonly":true}' 2>&1)
     RO_AK=$(echo "$RO_JSON" | json_field access_key)
     RO_SK=$(echo "$RO_JSON" | json_field secret_key)
-    check "mTLS: s3adm cred create over mTLS" "0" "$([[ -n "$RO_AK" && -n "$RO_SK" ]]; echo $?)"
-    check "mTLS: s3adm cred bind-cert" "0" "$(madm cred bind-cert "$RO_AK" --subject=e2e-alice --comment=e2e > /dev/null 2>&1; echo $?)"
-    check "mTLS: s3adm cred list-certs shows the binding" "0" "$(madm cred list-certs 2>/dev/null | grep -q '"subject": "e2e-alice"'; echo $?)"
+    check "mTLS: lights3-ctl cred create over mTLS" "0" "$([[ -n "$RO_AK" && -n "$RO_SK" ]]; echo $?)"
+    check "mTLS: lights3-ctl cred bind-cert" "0" "$(madm cred bind-cert "$RO_AK" --subject=e2e-alice --comment=e2e > /dev/null 2>&1; echo $?)"
+    check "mTLS: lights3-ctl cred list-certs shows the binding" "0" "$(madm cred list-certs 2>/dev/null | grep -q '"subject": "e2e-alice"'; echo $?)"
     # Unsigned requests: the bound certificate runs as the readonly credential
     check "mTLS: unsigned GET with bound cert" "cert-bound" "$(mcurl alice "$MBASE/mtls/k")"
     check "mTLS: unsigned PUT with bound cert refused by its policy" "403" "$(mcurl alice -o /dev/null -w '%{http_code}' -X PUT --data-binary 'x' "$MBASE/mtls/k2")"
@@ -1158,7 +1158,7 @@ if [[ -n "$MPORT" ]]; then
     check "mTLS: signed by the bound credential + unbound cert" "403" "$(msigned stranger "$RO_AK:$RO_SK" -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
     check "mTLS: root signed + unbound cert" "200" "$(msigned stranger "$AK:$SK" -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
     # Unbind: the certificate is a stranger again
-    check "mTLS: s3adm cred unbind-cert" "0" "$(madm cred unbind-cert --subject=e2e-alice > /dev/null 2>&1; echo $?)"
+    check "mTLS: lights3-ctl cred unbind-cert" "0" "$(madm cred unbind-cert --subject=e2e-alice > /dev/null 2>&1; echo $?)"
     check "mTLS: unsigned GET after unbind" "403" "$(mcurl alice -o /dev/null -w '%{http_code}' "$MBASE/mtls/k")"
     msigned alice "$AK:$SK" -o /dev/null -X DELETE "$MBASE/mtls/k"
     msigned alice "$AK:$SK" -o /dev/null -X DELETE "$MBASE/mtls"
@@ -1254,7 +1254,7 @@ fi
 
 # ---------- backlog-sequence ②: separate admin listener (docs/http-adapter.md §2.1) ----------
 # A third instance with http.admin_port: the /-/ face moves to the admin port, the
-# data-plane port answers 404 for it, probes stay on both, s3adm points at the admin port
+# data-plane port answers 404 for it, probes stay on both, lights3-ctl points at the admin port
 sed -e "s#^  port: 0#  port: 0\n  admin_port: 0#" \
     -e "s#$WORK/data#$WORK/adm-data#g" -e "s#$WORK/staging#$WORK/adm-staging#g" \
     -e "s#$WORK/cloud-duo#$WORK/adm-cloud-duo#g" -e "s#$WORK/duo-local#$WORK/adm-duo-local#g" \
@@ -1285,8 +1285,8 @@ if [[ -n "$DPORT" && -n "$APORT" ]]; then
     check "admin API 200 on the admin port" "200" "$(acurl -o /dev/null -w '%{http_code}' "$AB/-/admin/credentials")"
     check "data plane works on the data-plane port" "200" "$(acurl -o /dev/null -w '%{http_code}' -X PUT "$DB/admbkt")"
     check "data plane 404 on the admin port" "404" "$(acurl -o /dev/null -w '%{http_code}' -X PUT "$AB/admbkt2")"
-    check "s3adm cred list against the admin port" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" cred list --endpoint="$AB" --region="$REGION" > /dev/null 2>&1; echo $?)"
-    check "s3adm reload against the admin port" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" reload --endpoint="$AB" --region="$REGION" > /dev/null 2>&1; echo $?)"
+    check "lights3-ctl cred list against the admin port" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" cred list --endpoint="$AB" --region="$REGION" > /dev/null 2>&1; echo $?)"
+    check "lights3-ctl reload against the admin port" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" reload --endpoint="$AB" --region="$REGION" > /dev/null 2>&1; echo $?)"
     # httplib runs the upstream accept loop and reports no connection counters, so the
     # request counter (kept by every driver) is the "both listeners feed one view" probe
     check "request counter covers both listeners" "0" "$(curl -s "$AB/-/metrics" | grep -q '^lights3_http_requests_total [1-9]'; echo $?)"

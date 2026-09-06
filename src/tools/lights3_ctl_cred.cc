@@ -1,12 +1,12 @@
-// s3adm `cred` command group — credential operations against
+// lights3-ctl `cred` command group — credential operations against
 // /-/admin/credentials (docs/credential-management.md §2/§3).
 // Each subcommand (cred list / get / create / delete) has its own option set —
 // ccmd's root options do not propagate down, connection options must follow
-// the leaf subcommand (s3adm cred list --endpoint=...), and long options only
+// the leaf subcommand (lights3-ctl cred list --endpoint=...), and long options only
 // accept values in --name=value form.
-// Requests go through the shared SigV4 self-signing client (s3adm_common.h);
+// Requests go through the shared SigV4 self-signing client (lights3_ctl_common.h);
 // responses print the server's JSON verbatim.
-#include "tools/s3adm_cred.h"
+#include "tools/lights3_ctl_cred.h"
 
 #include <cstdio>
 #include <fstream>
@@ -19,20 +19,20 @@
 #include "core/util/uri.h"
 #include "s3/auth/policy.h"
 #include "s3/errors.h"
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
 namespace {
 
 using nlohmann::json;
-using s3adm::g_exit;
-using s3adm::SignedClient;
+using lights3_ctl::g_exit;
+using lights3_ctl::SignedClient;
 namespace s3 = lights3::s3;
 namespace util = lights3::util;
 
 constexpr const char* kBase = "/-/admin/credentials";
 
-using s3adm::finish;
-using s3adm::run_admin;
+using lights3_ctl::finish;
+using lights3_ctl::run_admin;
 
 std::string ak_path(const std::string& ak) {
     return std::string(kBase) + "/" + util::aws_uri_encode(ak, /*encode_slash=*/true);
@@ -55,7 +55,7 @@ std::string load_policy_arg(const std::string& arg) {
 // Positional arguments must be exactly one AK; otherwise print the subcommand usage and set the usage-error exit code
 bool one_ak_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& ak) {
     if (cmd->args().size() != 1) {
-        fprintf(stderr, "s3adm: usage: %s\n", cmd->usage().c_str());
+        fprintf(stderr, "lights3-ctl: usage: %s\n", cmd->usage().c_str());
         g_exit = 2;
         return false;
     }
@@ -65,20 +65,20 @@ bool one_ak_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& ak) {
 
 std::shared_ptr<ccmd::c_command> make_list() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "list", "s3adm cred list --endpoint=http://127.0.0.1:9000",
-        "s3adm cred list [options]",
+        "list", "lights3-ctl cred list --endpoint=http://127.0.0.1:9000",
+        "lights3-ctl cred list [options]",
         "List all credentials (secret keys masked; includes static and file-based ones).",
         "list all credentials (secret keys masked).",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             run_admin(c, [](SignedClient& cli) { return finish(cli.get(kBase, ""), 200); });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "get", "s3adm cred get L3AKXXXX --show-secret", "s3adm cred get <ak> [options]",
+        "get", "lights3-ctl cred get L3AKXXXX --show-secret", "lights3-ctl cred get <ak> [options]",
         "Show one credential's metadata; --show-secret returns the plaintext secret key "
         "(dynamic/file credentials only; sensitive - the server logs an audit line).",
         "show one credential.",
@@ -91,15 +91,15 @@ std::shared_ptr<ccmd::c_command> make_get() {
             });
         });
     cmd->varp<bool>("show-secret", "s", false, "return the plaintext secret key (dynamic/file credentials only).");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_create() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "create",
-        R"(s3adm cred create --comment=tenant-a --policy='{"buckets":["tenant-a-*"]}')",
-        "s3adm cred create [options]",
+        R"(lights3-ctl cred create --comment=tenant-a --policy='{"buckets":["tenant-a-*"]}')",
+        "lights3-ctl cred create [options]",
         "Create a tenant access/secret key pair (the response is the only time the "
         "full secret key is returned). --policy takes policy JSON "
         "({\"buckets\":[...],\"prefixes\":[...],\"readonly\":bool,\"actions\":[...]}) "
@@ -107,7 +107,7 @@ std::shared_ptr<ccmd::c_command> make_create() {
         "create a tenant access/secret key pair.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!c->args().empty()) {
-                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+                fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
@@ -131,13 +131,13 @@ std::shared_ptr<ccmd::c_command> make_create() {
     cmd->varp<std::string>("policy", "p", "", "policy JSON, or @file to read from a file.");
     cmd->varp<std::string>("tenant", "t", "", "owning tenant id (docs/multi-tenancy.md).");
     cmd->varp<std::string>("role", "r", "", "user (default) | admin: tenant admin role.");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_delete() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "delete", "s3adm cred delete L3AKXXXX", "s3adm cred delete <ak> [options]",
+        "delete", "lights3-ctl cred delete L3AKXXXX", "lights3-ctl cred delete <ak> [options]",
         "Revoke a dynamic credential (static ones belong to the config file; the "
         "server refuses them).",
         "revoke a dynamic credential.",
@@ -148,7 +148,7 @@ std::shared_ptr<ccmd::c_command> make_delete() {
                 return finish(cli.del(ak_path(ak)), 204, "revoked " + ak);
             });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
@@ -163,7 +163,7 @@ std::string subject_path(const std::string& subject) {
 bool subject_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& subject) {
     subject = cmd->var<std::string>("subject");
     if (subject.empty()) {
-        fprintf(stderr, "s3adm: --subject is required\n");
+        fprintf(stderr, "lights3-ctl: --subject is required\n");
         g_exit = 2;
         return false;
     }
@@ -172,8 +172,8 @@ bool subject_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& subje
 
 std::shared_ptr<ccmd::c_command> make_bind_cert() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "bind-cert", "s3adm cred bind-cert L3AKXXXX --subject=alice",
-        "s3adm cred bind-cert <ak> --subject=<subject> [options]",
+        "bind-cert", "lights3-ctl cred bind-cert L3AKXXXX --subject=alice",
+        "lights3-ctl cred bind-cert <ak> --subject=<subject> [options]",
         "Bind a client-certificate subject (the CN, or the URI SAN with "
         "auth.tls_identity: san-uri) to a credential: unsigned requests over a "
         "connection presenting that certificate run as the credential, signed "
@@ -194,19 +194,19 @@ std::shared_ptr<ccmd::c_command> make_bind_cert() {
         });
     cmd->varp<std::string>("subject", "S", "", "certificate subject (CN or URI SAN).");
     cmd->varp<std::string>("comment", "c", "", "binding comment.");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_unbind_cert() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "unbind-cert", "s3adm cred unbind-cert --subject=alice",
-        "s3adm cred unbind-cert --subject=<subject> [options]",
+        "unbind-cert", "lights3-ctl cred unbind-cert --subject=alice",
+        "lights3-ctl cred unbind-cert --subject=<subject> [options]",
         "Remove a client-certificate binding (idempotent). Root only.",
         "remove a client-certificate binding.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!c->args().empty()) {
-                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+                fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
@@ -217,33 +217,33 @@ std::shared_ptr<ccmd::c_command> make_unbind_cert() {
             });
         });
     cmd->varp<std::string>("subject", "S", "", "certificate subject (CN or URI SAN).");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_list_certs() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "list-certs", "s3adm cred list-certs", "s3adm cred list-certs [options]",
+        "list-certs", "lights3-ctl cred list-certs", "lights3-ctl cred list-certs [options]",
         "List client-certificate bindings and the server's auth.tls_identity mode. Root only.",
         "list client-certificate bindings.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             run_admin(c, [](SignedClient& cli) { return finish(cli.get(kTlsBase, ""), 200); });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 }  // namespace
 
-namespace s3adm {
+namespace lights3_ctl {
 
 // `cred` command group: pure dispatcher, holds no options of its own.
-// Bare `s3adm cred` / `s3adm cred -x` has nothing actionable to run, so it
+// Bare `lights3-ctl cred` / `lights3-ctl cred -x` has nothing actionable to run, so it
 // prints its own help and exits as a usage error (same convention as root).
 std::shared_ptr<ccmd::c_command> make_cred() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "cred", "s3adm cred list --endpoint=http://127.0.0.1:9000",
-        "s3adm cred <command> [options]",
+        "cred", "lights3-ctl cred list --endpoint=http://127.0.0.1:9000",
+        "lights3-ctl cred <command> [options]",
         "Manage tenant credentials via /-/admin/credentials with the root (static) "
         "access/secret key (docs/credential-management.md). Credentials come from each "
         "subcommand's --ak=/--sk= or from env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK. "
@@ -264,4 +264,4 @@ std::shared_ptr<ccmd::c_command> make_cred() {
     return cmd;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

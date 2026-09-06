@@ -4,7 +4,7 @@
 #   cpack --config build/CPackConfig.cmake -G DEB  # or RPM; `cmake --build build --target package`
 #
 # Layout (prefix /usr for packages, /usr/local for a plain install):
-#   <bindir>/lights3, <bindir>/s3adm
+#   <bindir>/lights3, <bindir>/lights3-ctl
 #   <sbindir>/lights3ctl                      (scripts/systemctl.sh)
 #   <prefix>/lib/systemd/system/lights3.service
 #   <confdir>/lights3.yaml                    preserved when it already exists
@@ -26,7 +26,7 @@ set(LIGHTS3_CONFIG_DIR "" CACHE STRING
 set(CMAKE_INSTALL_DEFAULT_DIRECTORY_PERMISSIONS
     OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
 
-install(TARGETS lights3 s3adm RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS lights3 lights3-ctl RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS scripts/systemctl.sh DESTINATION ${CMAKE_INSTALL_SBINDIR} RENAME lights3ctl)
 install(PROGRAMS packaging/lights3-setup.sh DESTINATION ${CMAKE_INSTALL_DATADIR}/lights3)
 install(DIRECTORY deploy/prometheus deploy/grafana
@@ -71,7 +71,7 @@ set(CPACK_PACKAGE_CONTACT "lights3 maintainers <https://github.com/locallocal/li
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/locallocal/lights3")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "S3-compatible object storage gateway")
 set(CPACK_PACKAGE_DESCRIPTION
-    "LightS3 is a single-binary S3-compatible object storage server with pluggable HTTP drivers and storage backends (local filesystem, DuoStore, tiered cloud, cloud proxy). Ships the lights3 server, the s3adm ops CLI, a systemd unit and monitoring assets.")
+    "LightS3 is a single-binary S3-compatible object storage server with pluggable HTTP drivers and storage backends (local filesystem, DuoStore, tiered cloud, cloud proxy). Ships the lights3 server, the lights3-ctl ops CLI, a systemd unit and monitoring assets.")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_PACKAGING_INSTALL_PREFIX /usr)
 set(CPACK_STRIP_FILES ON)

@@ -326,7 +326,7 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
 
 // POST /-/admin/config/reload (roadmap §4.4): root only; the app's hook re-reads
 // the file, applies the reloadable subset and reports the rest. The same path a
-// SIGHUP takes, exposed so `s3adm reload` can drive it and read the outcome
+// SIGHUP takes, exposed so `lights3-ctl reload` can drive it and read the outcome
 Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req,
                                                         std::string& access_key,
                                                         const RequestContext& ctx) {

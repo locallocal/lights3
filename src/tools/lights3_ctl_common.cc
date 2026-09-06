@@ -1,4 +1,4 @@
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
 #include <chrono>
 #include <cstdio>
@@ -9,7 +9,7 @@
 #include "core/util/crypto.h"
 #include "http/model.h"
 
-namespace s3adm {
+namespace lights3_ctl {
 
 namespace util = lights3::util;
 namespace s3 = lights3::s3;
@@ -74,7 +74,7 @@ bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out) 
         if (const char* e = std::getenv("LIGHTS3_ADMIN_SK")) out.sk = e;
     if (out.ak.empty() || out.sk.empty()) {
         fprintf(stderr,
-                "s3adm: missing credentials; pass --ak=/--sk= or set env "
+                "lights3-ctl: missing credentials; pass --ak=/--sk= or set env "
                 "LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK\n");
         g_exit = 2;
         return false;
@@ -82,7 +82,7 @@ bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out) 
     out.ep = Endpoint::parse(cmd->var<std::string>("endpoint"));
 #ifndef CPPHTTPLIB_OPENSSL_SUPPORT
     if (out.ep.https) {
-        fprintf(stderr, "s3adm: this build lacks OpenSSL support; https endpoints are unavailable\n");
+        fprintf(stderr, "lights3-ctl: this build lacks OpenSSL support; https endpoints are unavailable\n");
         g_exit = 2;
         return false;
     }
@@ -93,7 +93,7 @@ bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out) 
     out.client_cert = cmd->var<std::string>("cert");
     out.client_key = cmd->var<std::string>("key");
     if (out.client_cert.empty() != out.client_key.empty()) {
-        fprintf(stderr, "s3adm: --cert and --key must be given together\n");
+        fprintf(stderr, "lights3-ctl: --cert and --key must be given together\n");
         g_exit = 2;
         return false;
     }
@@ -182,11 +182,11 @@ httplib::Result SignedClient::del(const std::string& path, const std::string& qu
 
 int finish(const httplib::Result& r, int expect, const std::string& ok_note) {
     if (!r) {
-        fprintf(stderr, "s3adm: transport error: %s\n", httplib::to_string(r.error()).c_str());
+        fprintf(stderr, "lights3-ctl: transport error: %s\n", httplib::to_string(r.error()).c_str());
         return 1;
     }
     if (r->status != expect) {
-        fprintf(stderr, "s3adm: HTTP %d\n%s", r->status, r->body.c_str());
+        fprintf(stderr, "lights3-ctl: HTTP %d\n%s", r->status, r->body.c_str());
         if (!r->body.empty() && r->body.back() != '\n') fputc('\n', stderr);
         return 1;
     }
@@ -211,4 +211,4 @@ httplib::Headers SignedClient::sign(const std::string& method, const std::string
     return out;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

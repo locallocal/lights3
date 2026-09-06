@@ -358,7 +358,7 @@ public:
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     // Meta record version, tier state, and the extent list (chunk / pack / rados
-    // with file id, offset, length, crc32c) — roadmap §6.2 `s3adm object inspect`
+    // with file id, offset, length, crc32c) — roadmap §6.2 `lights3-ctl object inspect`
     Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket,
                                                      std::string_view key) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;

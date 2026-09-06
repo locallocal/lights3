@@ -21,7 +21,7 @@ changes to tracked files append `-dirty`.
 Visible in three places:
 
 ```text
-$ lights3 --version                 # s3adm --version has the same shape
+$ lights3 --version                 # lights3-ctl --version has the same shape
 lights3 0.1.0 (git d6f38292dab0, RelWithDebInfo, 2026-09-05)
 drivers:  builtin beast httplib
 features: memory localfs xlocalfs tiered cloudproxy duostore duostore-redis-meta duostore-sqlite-meta
@@ -48,7 +48,7 @@ DESTDIR=/tmp/stage cmake --install build --prefix /usr   # staging for packaging
 
 | Path | Content |
 | --- | --- |
-| `<bindir>/lights3`, `<bindir>/s3adm` | the binaries |
+| `<bindir>/lights3`, `<bindir>/lights3-ctl` | the binaries |
 | `<sbindir>/lights3ctl` | `scripts/systemctl.sh` (start/stop/restart/status/logs …) |
 | `<prefix>/lib/systemd/system/lights3.service` | rendered from `scripts/lights3.service.in` **at install time** with the prefix's `ExecStart` / `EnvironmentFile`; carries `ExecReload=kill -HUP` (hot reload, [config-reload.md](config-reload.md)) |
 | `<confdir>/lights3.yaml` | the `config/lights3.yaml` sample; **an existing file is preserved** |
@@ -139,7 +139,7 @@ git submodule update --init --recursive third_party/ccmd     # or run ./build.sh
 docker build -t lights3 --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .
 docker run -d -p 9000:9000 -e LIGHTS3_SECRET_1=my-secret -v lights3-data:/var/lib/lights3 lights3
 docker run --rm lights3 --version
-docker run --rm lights3 s3adm --help
+docker run --rm lights3 lights3-ctl --help
 ```
 
 | build-arg | Default | Meaning |
@@ -157,7 +157,7 @@ localfs under the `/var/lib/lights3` volume; `LIGHTS3_SECRET_1` is mandatory
 rejects every request); `LIGHTS3_ACCESS_KEY` / `LIGHTS3_REGION` /
 `LIGHTS3_LOG_LEVEL` / `LIGHTS3_LOG_FORMAT` are optional. Entrypoint rule: no
 arguments, or a first argument starting with `-` / `duostore` / `tier` /
-`fsck` / `help` → `lights3 --config=… "$@"`; anything else (`s3adm …`, `sh`) is
+`fsck` / `help` → `lights3 --config=… "$@"`; anything else (`lights3-ctl …`, `sh`) is
 exec'd as given.
 
 The seastar driver is out of scope for the image (`.dockerignore` drops its
@@ -237,7 +237,7 @@ sudo ./scripts/uninstall.sh --purge  # also delete config, secrets, data, logs a
   start-stop are delegated to `lights3-setup.sh` (§3.3).
 - **rollback.sh**: runs `--check-config` with `lights3.prev` first (an older
   binary rejects config keys it does not know — revert the config by hand in
-  that case), then swaps `lights3` / `s3adm` with their `.prev` in three
+  that case), then swaps `lights3` / `lights3-ctl` with their `.prev` in three
   renames and restarts the service if it is running. Config and data are left
   alone.
 - **uninstall.sh**: `remove` → delete files → `daemon-reload`; `--purge` adds

@@ -108,7 +108,7 @@ fi
 LIGHT_MODULES=(third_party/spdlog third_party/httplib third_party/json
                third_party/rocksdb third_party/hiredis third_party/sqlite)
 git submodule update --init "${LIGHT_MODULES[@]}"
-# ccmd (command-line framework for lights3 + s3adm) nests its cflag dependency
+# ccmd (command-line framework for lights3 + lights3-ctl) nests its cflag dependency
 git submodule update --init --recursive third_party/ccmd
 if [[ $SEASTAR -eq 1 ]]; then
     git submodule update --init third_party/seastar

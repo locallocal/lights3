@@ -18,7 +18,7 @@ if ! cmake --install "$BUILD_DIR" --prefix "$PREFIX" >"$WORK/install.log" 2>&1; 
     cat "$WORK/install.log"; echo "cmake --install failed"; exit 1
 fi
 
-for f in bin/lights3 bin/s3adm sbin/lights3ctl lib/systemd/system/lights3.service \
+for f in bin/lights3 bin/lights3-ctl sbin/lights3ctl lib/systemd/system/lights3.service \
          etc/lights3/lights3.yaml share/lights3/lights3-setup.sh \
          share/lights3/deploy/prometheus/lights3.rules.yml share/lights3/deploy/grafana/lights3.json \
          share/doc/lights3/README.md share/doc/lights3/docs/deployment.md; do
@@ -48,9 +48,9 @@ check "lights3 --version exit 0" "[[ $rc -eq 0 ]]"
 check "lights3 --version first line format" "echo \"\$V\" | head -n1 | grep -Eq '^lights3 [0-9]+\.[0-9]+\.[0-9]+ \(git [0-9a-f]{12}(-dirty)?|git unknown, [A-Za-z]+, [0-9]{4}-[0-9]{2}-[0-9]{2}\)\$'"
 check "lights3 --version lists drivers" "echo \"\$V\" | grep -Eq '^drivers:  (builtin|beast|httplib|seastar)( (builtin|beast|httplib|seastar))*\$'"
 check "lights3 --version lists features" "echo \"\$V\" | grep -q '^features: memory localfs xlocalfs tiered'"
-S=$("$PREFIX/bin/s3adm" --version); rc=$?
-check "s3adm --version exit 0" "[[ $rc -eq 0 ]]"
-check "s3adm reports the same build" "[[ \"\${S#s3adm }\" == \"\${V#lights3 }\" ]]"
+S=$("$PREFIX/bin/lights3-ctl" --version); rc=$?
+check "lights3-ctl --version exit 0" "[[ $rc -eq 0 ]]"
+check "lights3-ctl reports the same build" "[[ \"\${S#lights3-ctl }\" == \"\${V#lights3 }\" ]]"
 check "--version wins over --check-config" "'$PREFIX/bin/lights3' --version --check-config --config=/nonexistent | grep -q '^lights3 '"
 
 # Packaging inputs: maintainer scripts are POSIX sh and executable where dpkg requires it

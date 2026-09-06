@@ -16,7 +16,7 @@ usage() {
     cat <<'EOF2'
 Usage: sudo ./scripts/rollback.sh [--no-restart]
 
-Swap /usr/local/bin/lights3 (and s3adm) with the *.prev copy kept by the last
+Swap /usr/local/bin/lights3 (and lights3-ctl) with the *.prev copy kept by the last
 scripts/install.sh run, then restart lights3.service if it is running.
 EOF2
 }
@@ -64,7 +64,7 @@ swap() {
     echo "swapped:  $target <-> ${target}.prev"
 }
 swap "$BIN_DIR/lights3"
-swap "$BIN_DIR/s3adm"
+swap "$BIN_DIR/lights3-ctl"
 
 if [[ $RESTART -eq 1 ]] && command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet "$SERVICE"; then
     systemctl restart "$SERVICE"

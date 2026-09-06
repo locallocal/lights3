@@ -110,7 +110,7 @@ ctest --test-dir build -LE "perf|mint"      # the quick set
 ctest --test-dir build -R mint -V           # mint, on a machine with docker
 ```
 
-`lights3 --version` (and `s3adm --version`) prints the version, the git commit
+`lights3 --version` (and `lights3-ctl --version`) prints the version, the git commit
 stamped at build time, the build type and the compiled-in drivers / backends;
 the same identity is logged at startup and exported as `lights3_build_info`.
 
@@ -124,7 +124,7 @@ export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
 ./build/lights3 --config=config/lights3.yaml
 ```
 
-The ops CLI `s3adm` (credentials, bucket websites, benchmarks) and the full
+The ops CLI `lights3-ctl` (credentials, bucket websites, benchmarks) and the full
 `lights3` command tree are documented in [docs/en/cli.md](docs/en/cli.md).
 
 Access it with any S3 client (the examples below use curl's SigV4 support):
@@ -252,7 +252,7 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | Document ([en](docs/en/README.md) · [中文](docs/README.md)) | Contents |
 | --- | --- |
 | [architecture](docs/en/architecture.md) | Overall architecture, layering, request lifecycle, code layout |
-| [config-reload](docs/en/config-reload.md) | Configuration hot reload: SIGHUP / admin API / `s3adm reload` |
+| [config-reload](docs/en/config-reload.md) | Configuration hot reload: SIGHUP / admin API / `lights3-ctl reload` |
 | [tls](docs/en/tls.md) | HTTPS on all drivers, certificate hot reload, mTLS / ciphers / SNI, reverse-proxy termination |
 | [http-adapter](docs/en/http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, driver notes |
 | [concurrency](docs/en/concurrency.md) | Task coroutines, Executor abstraction, thread pool, sync/async driver bridging |
@@ -270,4 +270,4 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [storage/duostore-meta-tikv-design](docs/en/storage/duostore-meta-tikv-design.md) | TiKV IMetaStore: client-c + 2PC sidecar |
 | [performance-baseline](docs/en/performance-baseline.md) | Driver × TLS bench matrix, before/after the data-plane optimizations |
 | [deployment](docs/en/deployment.md) | Version stamp, `cmake --install`, deb/rpm packages, Dockerfile + compose, rollback / uninstall |
-| [cli](docs/en/cli.md) | `lights3` / `s3adm` command reference: startup, duostore dump/load/backup/restore, cred/website/bench/quota/tenant/usage |
+| [cli](docs/en/cli.md) | `lights3` / `lights3-ctl` command reference: startup, duostore dump/load/backup/restore, cred/website/bench/quota/tenant/usage |

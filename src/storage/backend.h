@@ -124,7 +124,7 @@ struct ObjectStream {
     std::optional<ByteRange> range;          // the effective range (suffix resolved / clamped)
 };
 
-// Object layout for operators (roadmap §6.2, `s3adm object inspect` via
+// Object layout for operators (roadmap §6.2, `lights3-ctl object inspect` via
 // GET /-/admin/objects/<bucket>/<key>): where the bytes live inside the engine.
 // attrs are engine-specific key/values in display order; extents are the physical
 // pieces (a file, pack/chunk records, rados objects). Engines without an internal

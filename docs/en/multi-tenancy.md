@@ -3,7 +3,7 @@
 > Status: all four items landed (2026-09-04). Code: `src/s3/usage.{h,cc}`,
 > `src/s3/quota.{h,cc}`, `src/s3/tenant.{h,cc}`, `src/s3/audit.{h,cc}`,
 > `src/s3/handlers/{quota_gate,bucket_quota,admin_tenants}.cc`; CLI
-> `src/tools/s3adm_{usage,quota,tenant}.cc`. Unit tests in
+> `src/tools/lights3_ctl_{usage,quota,tenant}.cc`. Unit tests in
 > `tests/unit/test_tenancy.cc`, e2e in the "roadmap §3.9" section of
 > `tests/e2e/run_e2e.sh`.
 
@@ -86,7 +86,7 @@ triggers:
 | --- | --- |
 | startup bootstrap | every existing bucket without a scan record, once (instances with `usage.reconcile=true`) |
 | periodic | `usage.reconcile_interval` (default 1d, 0 = off) recounts every bucket; in a multi-gateway setup enable `usage.reconcile` on one instance only (the designated-instance semantics of duostore's `gc_enabled`) |
-| on demand | `POST /-/admin/usage/<bucket>/rescan`, `s3adm usage <bucket> --rescan` |
+| on demand | `POST /-/admin/usage/<bucket>/rescan`, `lights3-ctl usage <bucket> --rescan` |
 
 **Accuracy contract**: exact at the moment a scan completes; between scans the
 only error sources are (a) concurrent overwrites of the same key each
@@ -357,10 +357,10 @@ described in [tls.md §2.1](tls.md).
 
 ## 8. CLI
 
-`s3adm quota get|set|clear <bucket>`, `s3adm tenant list|get|create|update|
-delete|assign|unassign`, `s3adm usage [bucket] [--rescan] [--tenant=]`,
-`s3adm cred create --tenant= --role=`; see [cli.md §3.6–§3.8](cli.md); certificate
-bindings via `s3adm cred bind-cert|unbind-cert|list-certs` ([cli.md §3.2](cli.md)).
+`lights3-ctl quota get|set|clear <bucket>`, `lights3-ctl tenant list|get|create|update|
+delete|assign|unassign`, `lights3-ctl usage [bucket] [--rescan] [--tenant=]`,
+`lights3-ctl cred create --tenant= --role=`; see [cli.md §3.6–§3.8](cli.md); certificate
+bindings via `lights3-ctl cred bind-cert|unbind-cert|list-certs` ([cli.md §3.2](cli.md)).
 
 ## 9. Tests
 
@@ -377,4 +377,4 @@ bindings via `s3adm cred bind-cert|unbind-cert|list-certs` ([cli.md §3.2](cli.m
   data-plane records, config parsing and validation.
 - e2e: `run_e2e.sh` runs the same §3.9 section against every backend variant
   (usage API, ?quota round trip and 403, tenant bucket creation / bucket cap /
-  isolation / ListBuckets, tenant deletion guard, `s3adm usage/quota/tenant`).
+  isolation / ListBuckets, tenant deletion guard, `lights3-ctl usage/quota/tenant`).

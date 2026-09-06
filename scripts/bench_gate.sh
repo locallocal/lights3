@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Performance regression gate (roadmap §6.1, docs/testing.md §5): starts a
-# memory-backend gateway, runs `s3adm bench put` and `get`, and fails when the
+# memory-backend gateway, runs `lights3-ctl bench put` and `get`, and fails when the
 # throughput floor or the p99 ceiling is missed. Thresholds are deliberately
 # loose defaults for a shared/loaded developer box — tighten per environment
 # through the flags or the LIGHTS3_BENCH_* variables.
 #
-# Usage: bench_gate.sh <lights3> <s3adm> [--duration N] [--concurrency N] [--size SZ]
+# Usage: bench_gate.sh <lights3> <lights3-ctl> [--duration N] [--concurrency N] [--size SZ]
 #                      [--min-put-ops N] [--min-get-ops N] [--max-p99-ms N] [--keep-log]
 set -u
-BIN="${1:?usage: bench_gate.sh <lights3> <s3adm> [options]}"
-S3ADM="${2:?usage: bench_gate.sh <lights3> <s3adm> [options]}"
+BIN="${1:?usage: bench_gate.sh <lights3> <lights3-ctl> [options]}"
+LIGHTS3_CTL="${2:?usage: bench_gate.sh <lights3> <lights3-ctl> [options]}"
 shift 2
 DURATION="${LIGHTS3_BENCH_DURATION:-5}"
 CONC="${LIGHTS3_BENCH_CONCURRENCY:-4}"
@@ -75,12 +75,12 @@ done
 [[ -z "$PORT" ]] && { echo "gateway did not report its port"; cat "$WORK/server.log"; exit 1; }
 BASE="http://127.0.0.1:$PORT"
 
-# `s3adm bench --output=json` (roadmap §6.2) is the parsing contract: one JSON object on stdout
+# `lights3-ctl bench --output=json` (roadmap §6.2) is the parsing contract: one JSON object on stdout
 run_mode() {  # run_mode <put|get> <min-ops>
     local mode=$1 min=$2 out parsed ok err ops p99
-    out=$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" bench "$mode" --bucket=benchgate \
+    out=$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" bench "$mode" --bucket=benchgate \
             --concurrency="$CONC" --duration-sec="$DURATION" --size="$SIZE" --objects=64 --output=json \
-            --endpoint="$BASE" --region="$REGION" 2>"$WORK/bench-$mode.err") || { echo "s3adm bench $mode failed:"; cat "$WORK/bench-$mode.err"; echo "$out"; return 1; }
+            --endpoint="$BASE" --region="$REGION" 2>"$WORK/bench-$mode.err") || { echo "lights3-ctl bench $mode failed:"; cat "$WORK/bench-$mode.err"; echo "$out"; return 1; }
     parsed=$(echo "$out" | python3 -c '
 import json, sys
 j = json.load(sys.stdin)

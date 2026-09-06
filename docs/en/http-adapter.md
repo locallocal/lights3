@@ -154,7 +154,7 @@ struct HttpServerFactory {
   signature waiver). Dispatch-side the mechanism is `HttpRequest.admin_face`
   (set by the admin listener's handler) plus the `S3Service::set_admin_split`
   gate, evaluated before rate limiting and signature verification; the wrong
-  face gets a plain 404 XML. Not hot-reloadable (`requires_restart`). `s3adm`'s
+  face gets a plain 404 XML. Not hot-reloadable (`requires_restart`). `lights3-ctl`'s
   `--endpoint` must point at the admin port ([cli.md §3.1](cli.md)), Prometheus
   scrapes the admin port ([monitoring.md](monitoring.md)).
 - `http.io_threads` semantics drift per driver; see the matrix in §2.2.

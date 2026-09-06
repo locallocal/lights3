@@ -102,7 +102,7 @@ export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
 ./build/lights3 --config=config/lights3.yaml
 ```
 
-运维 CLI `s3adm`（凭证、桶网站配置、压测）与 `lights3` 完整命令树见 [cli.md](cli.md)。
+运维 CLI `lights3-ctl`（凭证、桶网站配置、压测）与 `lights3` 完整命令树见 [cli.md](cli.md)。
 
 用任意 S3 客户端访问（示例用 curl 的 SigV4 支持）：
 
@@ -116,7 +116,7 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range 下载
 
 或使用 aws cli：`aws --endpoint-url http://127.0.0.1:9000 s3 ls`。
 
-`lights3 --version`（以及 `s3adm --version`）打印版本号、构建时嵌入的 git
+`lights3 --version`（以及 `lights3-ctl --version`）打印版本号、构建时嵌入的 git
 commit、构建类型与编译进来的驱动 / 后端；同一身份也写在启动日志首行，并以
 `lights3_build_info` 指标导出。
 
@@ -212,7 +212,7 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | 文档（[中文](README.md) · [en](en/README.md)） | 内容 |
 | --- | --- |
 | [architecture](architecture.md) | 总体架构、分层、请求生命周期、代码布局 |
-| [config-reload](config-reload.md) | 配置热重载：SIGHUP / admin API / `s3adm reload` |
+| [config-reload](config-reload.md) | 配置热重载：SIGHUP / admin API / `lights3-ctl reload` |
 | [tls](tls.md) | 四驱动 HTTPS、证书热重载、mTLS / cipher / SNI、反代终结样例 |
 | [http-adapter](http-adapter.md) | HTTP 插拔层：中立请求/响应模型、流式 body、各驱动要点 |
 | [concurrency](concurrency.md) | Task 协程、Executor 抽象、线程池、同步/异步驱动桥接 |
@@ -230,4 +230,4 @@ Transition/按 tag 过滤、SSE-C/KMS、Object Lock、presigned POST。
 | [duostore-tikv-meta](storage/duostore-meta-tikv-design.md) | TiKV IMetaStore：client-c + 2PC 侧车 |
 | [performance-baseline](performance-baseline.md) | 驱动 × TLS 压测矩阵，数据面优化前后对照 |
 | [deployment](deployment.md) | 版本标识、`cmake --install`、deb/rpm 包、Dockerfile + compose、回滚 / 卸载 |
-| [cli](cli.md) | `lights3` / `s3adm` 命令参考：启动、duostore dump/load/backup/restore、cred/website/bench/quota/tenant/usage |
+| [cli](cli.md) | `lights3` / `lights3-ctl` 命令参考：启动、duostore dump/load/backup/restore、cred/website/bench/quota/tenant/usage |

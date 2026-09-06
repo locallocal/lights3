@@ -132,7 +132,7 @@ struct HttpServerFactory {
   `metrics_access: root` 语义不变（换端口不等于免签）。分派侧的实现是
   `HttpRequest.admin_face`（admin 监听的 handler 置位）+ `S3Service::set_admin_split`
   的门控：先于限流与验签判定，错误面是不带提示的 404 XML。热重载不覆盖
-  （`requires_restart`）。`s3adm` 的 `--endpoint` 须指向 admin 端口
+  （`requires_restart`）。`lights3-ctl` 的 `--endpoint` 须指向 admin 端口
   （[cli.md §3.1](cli.md)），Prometheus 抓 admin 端口（[monitoring.md](monitoring.md)）。
 - `http.io_threads` 的语义随驱动漂移，见 §2.2 的矩阵。
 

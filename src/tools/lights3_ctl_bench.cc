@@ -1,5 +1,5 @@
-// s3adm `bench` command group — closed-loop load generator over the shared
-// SigV4 self-signing client (s3adm_common.h).
+// lights3-ctl `bench` command group — closed-loop load generator over the shared
+// SigV4 self-signing client (lights3_ctl_common.h).
 // IO modes: put / get (object upload/download, throughput in MiB/s); non-IO
 // modes: stat (HeadObject) / list (ListObjectsV2) / list-buckets. Each worker
 // thread owns one keep-alive connection and issues requests back to back;
@@ -13,7 +13,7 @@
 // end unless --keep. Uploads sign UNSIGNED-PAYLOAD, downloads stream the body
 // into a byte counter — neither side pays a per-request SHA-256 or buffers
 // whole objects.
-#include "tools/s3adm_bench.h"
+#include "tools/lights3_ctl_bench.h"
 
 #include <algorithm>
 #include <array>
@@ -34,13 +34,13 @@
 
 #include "core/util/uri.h"
 #include "s3/errors.h"
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
 namespace {
 
-using s3adm::ConnOpts;
-using s3adm::g_exit;
-using s3adm::SignedClient;
+using lights3_ctl::ConnOpts;
+using lights3_ctl::g_exit;
+using lights3_ctl::SignedClient;
 namespace util = lights3::util;
 using Clock = std::chrono::steady_clock;
 
@@ -137,7 +137,7 @@ struct Stats {
         std::lock_guard<std::mutex> lk(err_mu);
         if (!err_printed) {
             err_printed = true;
-            fprintf(stderr, "s3adm: bench: first error: %s\n", msg.c_str());
+            fprintf(stderr, "lights3-ctl: bench: first error: %s\n", msg.c_str());
         }
     }
 };
@@ -263,7 +263,7 @@ void reporter(Stats& st, std::atomic<bool>& done) {
 bool ensure_bucket(SignedClient& cli, const BenchOpts& o) {
     auto r = cli.put_unsigned("/" + o.bucket, "");
     if (r && (r->status == 200 || r->status == 409)) return true;
-    fprintf(stderr, "s3adm: bench: create bucket %s failed: %s\n", o.bucket.c_str(),
+    fprintf(stderr, "lights3-ctl: bench: create bucket %s failed: %s\n", o.bucket.c_str(),
             result_err(r).c_str());
     return false;
 }
@@ -282,13 +282,13 @@ bool prepare_pool(const BenchOpts& o, const std::string& body) {
                     auto r = cli.put_unsigned(obj_path(o, i), body);
                     if (!r || r->status != 200) {
                         if (!failed.exchange(true))
-                            fprintf(stderr, "s3adm: bench: prepare %s failed: %s\n",
+                            fprintf(stderr, "lights3-ctl: bench: prepare %s failed: %s\n",
                                     obj_key(o, i).c_str(), result_err(r).c_str());
                     }
                 }
             } catch (const std::exception& e) {
                 if (!failed.exchange(true))
-                    fprintf(stderr, "s3adm: bench: prepare failed: %s\n", e.what());
+                    fprintf(stderr, "lights3-ctl: bench: prepare failed: %s\n", e.what());
             }
         });
     for (auto& t : ts) t.join();
@@ -307,7 +307,7 @@ void cleanup_pool(const BenchOpts& o) {
                 "cleanup: deleted %d/%d objects under %s/%s (skip with --keep)\n", deleted,
                o.objects, o.bucket.c_str(), o.prefix.c_str());
     } catch (const std::exception& e) {
-        fprintf(stderr, "s3adm: bench: cleanup failed: %s\n", e.what());
+        fprintf(stderr, "lights3-ctl: bench: cleanup failed: %s\n", e.what());
     }
 }
 
@@ -425,7 +425,7 @@ void add_bench_flags(const std::shared_ptr<ccmd::c_command>& cmd, const char* de
                      bool with_pool) {
     if (with_pool) {
         cmd->varp<std::string>("bucket", "b", "", "target bucket (created if missing).");
-        cmd->var<std::string>("prefix", "s3adm-bench/", "key prefix for benchmark objects.");
+        cmd->var<std::string>("prefix", "lights3-ctl-bench/", "key prefix for benchmark objects.");
         cmd->varp<std::string>("size", "s", def_size,
                                "object size (bytes, or K/M/G suffix, max 1G).");
         cmd->varp<int>("objects", "n", 64, "key pool size (put overwrites round-robin).");
@@ -436,35 +436,35 @@ void add_bench_flags(const std::shared_ptr<ccmd::c_command>& cmd, const char* de
     cmd->varp<std::string>("output", "o", "text",
                            "text (per-second table + summary) | json (one summary object, "
                            "for baseline comparison).");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
 }
 
 // Flag validation + BenchOpts assembly; false = usage error already reported
 bool read_bench_opts(const std::shared_ptr<ccmd::c_command>& c, bool with_pool, BenchOpts& o) {
     if (!c->args().empty()) {
-        fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+        fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
         g_exit = 2;
         return false;
     }
-    if (!s3adm::read_conn_opts(c, o.conn)) return false;
+    if (!lights3_ctl::read_conn_opts(c, o.conn)) return false;
     o.concurrency = c->var<int>("concurrency");
     o.duration_sec = c->var<int>("duration-sec");
     {
         auto output = c->var<std::string>("output");
         if (output != "text" && output != "json") {
-            fprintf(stderr, "s3adm: --output must be text|json\n");
+            fprintf(stderr, "lights3-ctl: --output must be text|json\n");
             g_exit = 2;
             return false;
         }
         o.json = output == "json";
     }
     if (o.concurrency < 1 || o.concurrency > 256) {
-        fprintf(stderr, "s3adm: --concurrency must be in [1,256]\n");
+        fprintf(stderr, "lights3-ctl: --concurrency must be in [1,256]\n");
         g_exit = 2;
         return false;
     }
     if (o.duration_sec < 1 || o.duration_sec > 86400) {
-        fprintf(stderr, "s3adm: --duration-sec must be in [1,86400]\n");
+        fprintf(stderr, "lights3-ctl: --duration-sec must be in [1,86400]\n");
         g_exit = 2;
         return false;
     }
@@ -475,12 +475,12 @@ bool read_bench_opts(const std::shared_ptr<ccmd::c_command>& c, bool with_pool, 
     o.keep = c->var<bool>("keep");
     o.size = parse_size(c->var<std::string>("size"));
     if (o.bucket.empty()) {
-        fprintf(stderr, "s3adm: --bucket is required\n");
+        fprintf(stderr, "lights3-ctl: --bucket is required\n");
         g_exit = 2;
         return false;
     }
     if (o.objects < 1 || o.objects > 1000000) {
-        fprintf(stderr, "s3adm: --objects must be in [1,1000000]\n");
+        fprintf(stderr, "lights3-ctl: --objects must be in [1,1000000]\n");
         g_exit = 2;
         return false;
     }
@@ -494,10 +494,10 @@ void run_mode(const std::shared_ptr<ccmd::c_command>& c, Mode mode) {
         if (mode == Mode::List) o.max_keys = c->var<int>("max-keys");
         g_exit = run_bench(mode, o);
     } catch (const lights3::s3::S3Error& e) {
-        fprintf(stderr, "s3adm: %s\n", e.message.c_str());
+        fprintf(stderr, "lights3-ctl: %s\n", e.message.c_str());
         g_exit = 1;
     } catch (const std::exception& e) {
-        fprintf(stderr, "s3adm: %s\n", e.what());
+        fprintf(stderr, "lights3-ctl: %s\n", e.what());
         g_exit = 1;
     }
 }
@@ -516,14 +516,14 @@ std::shared_ptr<ccmd::c_command> make_mode(Mode mode, const char* name, const ch
 
 }  // namespace
 
-namespace s3adm {
+namespace lights3_ctl {
 
 // `bench` command group: pure dispatcher, holds no options of its own (same
 // convention as `cred`)
 std::shared_ptr<ccmd::c_command> make_bench() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "bench", "s3adm bench put --bucket=test --size=1M --concurrency=8 --duration-sec=30",
-        "s3adm bench <command> [options]",
+        "bench", "lights3-ctl bench put --bucket=test --size=1M --concurrency=8 --duration-sec=30",
+        "lights3-ctl bench <command> [options]",
         "Benchmark the S3 data plane (put/get) and non-IO APIs (stat/list/list-buckets) "
         "with per-second stats. Workers run closed-loop over a pool of --objects keys "
         "under --prefix; get/stat/list upload the pool first, and it is deleted at the "
@@ -536,36 +536,36 @@ std::shared_ptr<ccmd::c_command> make_bench() {
             g_exit = 2;
         });
     cmd->add_subcommand(make_mode(
-        Mode::Put, "put", "s3adm bench put --bucket=test --size=4M --concurrency=8",
-        "s3adm bench put [options]",
+        Mode::Put, "put", "lights3-ctl bench put --bucket=test --size=4M --concurrency=8",
+        "lights3-ctl bench put [options]",
         "Upload benchmark: PUT objects of --size round-robin over the key pool "
         "(UNSIGNED-PAYLOAD, so no client-side SHA-256).",
         "object upload benchmark.", "1M"));
     cmd->add_subcommand(make_mode(
-        Mode::Get, "get", "s3adm bench get --bucket=test --size=4M --concurrency=8",
-        "s3adm bench get [options]",
+        Mode::Get, "get", "lights3-ctl bench get --bucket=test --size=4M --concurrency=8",
+        "lights3-ctl bench get [options]",
         "Download benchmark: pre-uploads the key pool, then GETs it round-robin "
         "(bodies are streamed and discarded).",
         "object download benchmark.", "1M"));
     cmd->add_subcommand(make_mode(
-        Mode::Stat, "stat", "s3adm bench stat --bucket=test --concurrency=16",
-        "s3adm bench stat [options]",
+        Mode::Stat, "stat", "lights3-ctl bench stat --bucket=test --concurrency=16",
+        "lights3-ctl bench stat [options]",
         "HeadObject benchmark (non-IO): pre-uploads the key pool, then HEADs it "
         "round-robin.",
         "HeadObject (metadata) benchmark.", "4K"));
     cmd->add_subcommand(make_mode(
-        Mode::List, "list", "s3adm bench list --bucket=test --max-keys=100",
-        "s3adm bench list [options]",
+        Mode::List, "list", "lights3-ctl bench list --bucket=test --max-keys=100",
+        "lights3-ctl bench list [options]",
         "ListObjectsV2 benchmark (non-IO): pre-uploads the key pool, then lists "
         "under --prefix with --max-keys per request.",
         "ListObjectsV2 benchmark.", "4K"));
     cmd->add_subcommand(make_mode(
-        Mode::ListBuckets, "list-buckets", "s3adm bench list-buckets --concurrency=16",
-        "s3adm bench list-buckets [options]",
+        Mode::ListBuckets, "list-buckets", "lights3-ctl bench list-buckets --concurrency=16",
+        "lights3-ctl bench list-buckets [options]",
         "ListBuckets benchmark (non-IO): GET / in a loop; needs no bucket and "
         "creates no objects.",
         "ListBuckets benchmark.", "4K"));
     return cmd;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

@@ -1,4 +1,4 @@
-// L2: GET /-/admin/objects/<bucket>/<key> (roadmap §6.2, `s3adm object inspect`):
+// L2: GET /-/admin/objects/<bucket>/<key> (roadmap §6.2, `lights3-ctl object inspect`):
 // the object's internal layout as the routed backend reports it — data path or
 // pack/chunk/rados extents with offsets and checksums, metadata source, tier state.
 // Root only (the layout names paths and backend topology); JSON conventions of the

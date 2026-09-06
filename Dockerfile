@@ -44,7 +44,7 @@ RUN cmake -S . -B build -G Ninja \
         -DLIGHTS3_DUOSTORE_SQLITE_META="$LIGHTS3_SQLITE" \
         -DLIGHTS3_DUOSTORE_RADOS_DATA="$LIGHTS3_RADOS" \
         -DLIGHTS3_DUOSTORE_TIKV_META="$LIGHTS3_TIKV" \
-    && cmake --build build -j"$(nproc)" --target lights3 s3adm \
+    && cmake --build build -j"$(nproc)" --target lights3 lights3-ctl \
     && DESTDIR=/stage cmake --install build --prefix /usr \
     && /stage/usr/bin/lights3 --version
 
@@ -71,7 +71,7 @@ RUN apt-get update \
         --shell /usr/sbin/nologin --comment "LightS3 service" lights3 \
     && install -d -m 0750 -o root -g lights3 /etc/lights3 \
     && install -d -m 0750 -o lights3 -g lights3 /var/lib/lights3 /var/log/lights3
-COPY --from=builder /stage/usr/bin/lights3 /stage/usr/bin/s3adm /usr/bin/
+COPY --from=builder /stage/usr/bin/lights3 /stage/usr/bin/lights3-ctl /usr/bin/
 COPY --from=builder /stage/usr/share/lights3 /usr/share/lights3
 COPY --chown=root:lights3 --chmod=0640 deploy/docker/lights3.yaml /etc/lights3/lights3.yaml
 COPY --chmod=0755 deploy/docker/entrypoint.sh /usr/local/bin/lights3-entrypoint
@@ -82,7 +82,7 @@ WORKDIR /var/lib/lights3
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:9000/-/healthz || exit 1
 ENTRYPOINT ["lights3-entrypoint"]
-# Any `lights3 ...` flag or admin subcommand; `s3adm ...` / `sh` run as-is
+# Any `lights3 ...` flag or admin subcommand; `lights3-ctl ...` / `sh` run as-is
 CMD []
 
 # -------------------------------------------------------------------- e2e ----

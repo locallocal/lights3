@@ -284,7 +284,7 @@ add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
 # ccmd: command/subcommand framework (git submodule, header-only + static cflag; needs
 # --recursive init for its cflag submodule). Used by the lights3 entry point
-# (src/main.cc: --config + `duostore dump|load`) and the s3adm ops CLI
+# (src/main.cc: --config + `duostore dump|load`) and the lights3-ctl ops CLI
 add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
 
 # ---- Core library: L2/L3/L4 + HTTP boundary ----
@@ -507,19 +507,19 @@ add_executable(lights3 src/main.cc)
 target_link_libraries(lights3 PRIVATE lights3_core ccmd::ccmd)
 
 # ---- Ops tooling ----
-# s3adm: CLI client for /-/admin/credentials (docs/credential-management.md §2).
+# lights3-ctl: CLI client for /-/admin/credentials (docs/credential-management.md §2).
 # CPPHTTPLIB_OPENSSL_SUPPORT propagates via lights3_core's PUBLIC definition, staying
 # target-level consistent with the core library (ODR); in trimmed builds without
 # httplib/cloudproxy it automatically degrades to http-only
-add_executable(s3adm src/tools/s3adm.cc src/tools/s3adm_common.cc
-                     src/tools/s3adm_cred.cc src/tools/s3adm_bench.cc
-                     src/tools/s3adm_website.cc src/tools/s3adm_fsck.cc
-                     src/tools/s3adm_tenant.cc src/tools/s3adm_quota.cc
-                     src/tools/s3adm_usage.cc src/tools/s3adm_reload.cc
-                     src/tools/s3adm_object.cc src/tools/s3adm_mpu.cc)
-target_link_libraries(s3adm PRIVATE lights3_core ccmd::ccmd
+add_executable(lights3-ctl src/tools/lights3_ctl.cc src/tools/lights3_ctl_common.cc
+                     src/tools/lights3_ctl_cred.cc src/tools/lights3_ctl_bench.cc
+                     src/tools/lights3_ctl_website.cc src/tools/lights3_ctl_fsck.cc
+                     src/tools/lights3_ctl_tenant.cc src/tools/lights3_ctl_quota.cc
+                     src/tools/lights3_ctl_usage.cc src/tools/lights3_ctl_reload.cc
+                     src/tools/lights3_ctl_object.cc src/tools/lights3_ctl_mpu.cc)
+target_link_libraries(lights3-ctl PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
-target_include_directories(s3adm SYSTEM PRIVATE third_party)
+target_include_directories(lights3-ctl SYSTEM PRIVATE third_party)
 
 # ---- Tests ----
 if(LIGHTS3_BUILD_TESTS)
@@ -617,16 +617,16 @@ if(LIGHTS3_BUILD_TESTS)
            COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_mint.sh $<TARGET_FILE:lights3> s3cmd awscli)
   set_tests_properties(mint PROPERTIES SKIP_RETURN_CODE 77 LABELS mint TIMEOUT 3600)
 
-  # Performance gate + short soak (roadmap §6.1, docs/testing.md §5): s3adm bench
+  # Performance gate + short soak (roadmap §6.1, docs/testing.md §5): lights3-ctl bench
   # against a memory-backend gateway with throughput / latency floors, and a
   # 30-second soak asserting RSS / fd stability. Both labeled so `ctest -LE perf`
   # skips them on a loaded box
   if(LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME bench_gate
-             COMMAND ${CMAKE_SOURCE_DIR}/scripts/bench_gate.sh $<TARGET_FILE:lights3> $<TARGET_FILE:s3adm> --duration 3)
+             COMMAND ${CMAKE_SOURCE_DIR}/scripts/bench_gate.sh $<TARGET_FILE:lights3> $<TARGET_FILE:lights3-ctl> --duration 3)
     set_tests_properties(bench_gate PROPERTIES LABELS perf TIMEOUT 300)
     add_test(NAME soak_smoke
-             COMMAND ${CMAKE_SOURCE_DIR}/scripts/soak.sh $<TARGET_FILE:lights3> $<TARGET_FILE:s3adm> --seconds 30)
+             COMMAND ${CMAKE_SOURCE_DIR}/scripts/soak.sh $<TARGET_FILE:lights3> $<TARGET_FILE:lights3-ctl> --seconds 30)
     set_tests_properties(soak_smoke PROPERTIES LABELS "perf;soak" TIMEOUT 900)
   endif()
 

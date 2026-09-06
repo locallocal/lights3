@@ -1,26 +1,26 @@
-// s3adm `website` command group — Get/Put/DeleteBucketWebsite against the
+// lights3-ctl `website` command group — Get/Put/DeleteBucketWebsite against the
 // ?website subresource (docs/static-website.md phase ③). Requires the root
 // (static) credential, same as `cred`; responses print the server's XML verbatim.
-#include "tools/s3adm_website.h"
+#include "tools/lights3_ctl_website.h"
 
 #include <cstdio>
 #include <memory>
 #include <string>
 
 #include "s3/xml.h"
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
 namespace {
 
-using s3adm::finish;
-using s3adm::g_exit;
-using s3adm::run_admin;
-using s3adm::SignedClient;
+using lights3_ctl::finish;
+using lights3_ctl::g_exit;
+using lights3_ctl::run_admin;
+using lights3_ctl::SignedClient;
 
 // Positional arguments must be exactly one bucket; same convention as cred's one_ak_arg
 bool one_bucket_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& bucket) {
     if (cmd->args().size() != 1) {
-        fprintf(stderr, "s3adm: usage: %s\n", cmd->usage().c_str());
+        fprintf(stderr, "lights3-ctl: usage: %s\n", cmd->usage().c_str());
         g_exit = 2;
         return false;
     }
@@ -30,7 +30,7 @@ bool one_bucket_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& bu
 
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "get", "s3adm website get my-site", "s3adm website get <bucket> [options]",
+        "get", "lights3-ctl website get my-site", "lights3-ctl website get <bucket> [options]",
         "Print a bucket's website configuration XML (404 when none is set).",
         "show a bucket's website configuration.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -44,14 +44,14 @@ std::shared_ptr<ccmd::c_command> make_get() {
                 return rc;
             });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_set() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "set", "s3adm website set my-site --index-suffix=index.html --error-key=error.html",
-        "s3adm website set <bucket> [options]",
+        "set", "lights3-ctl website set my-site --index-suffix=index.html --error-key=error.html",
+        "lights3-ctl website set <bucket> [options]",
         "Enable/replace a bucket's website configuration: the bucket becomes anonymously "
         "readable (GET/HEAD objects only) with index/error document semantics "
         "(docs/static-website.md). Buckets configured statically in the server config "
@@ -85,13 +85,13 @@ std::shared_ptr<ccmd::c_command> make_set() {
     cmd->varp<std::string>("error-key", "k", "",
                            "error document key (served on anonymous 4xx/5xx); empty = "
                            "built-in error page.");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_delete() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "delete", "s3adm website delete my-site", "s3adm website delete <bucket> [options]",
+        "delete", "lights3-ctl website delete my-site", "lights3-ctl website delete <bucket> [options]",
         "Remove a bucket's website configuration (idempotent); the bucket stops being "
         "anonymously readable.",
         "remove a bucket's website configuration.",
@@ -103,20 +103,20 @@ std::shared_ptr<ccmd::c_command> make_delete() {
                               "website configuration deleted for " + bucket);
             });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 }  // namespace
 
-namespace s3adm {
+namespace lights3_ctl {
 
 // `website` command group: pure dispatcher, holds no options of its own (same
 // convention as `cred`)
 std::shared_ptr<ccmd::c_command> make_website() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "website", "s3adm website set my-site --error-key=error.html",
-        "s3adm website <command> [options]",
+        "website", "lights3-ctl website set my-site --error-key=error.html",
+        "lights3-ctl website <command> [options]",
         "Manage per-bucket static website configuration via the ?website subresource "
         "(docs/static-website.md; requires the root static credential, like `cred`). "
         "Credentials come from each subcommand's --ak=/--sk= or from env "
@@ -133,4 +133,4 @@ std::shared_ptr<ccmd::c_command> make_website() {
     return cmd;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

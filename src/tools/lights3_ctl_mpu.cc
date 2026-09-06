@@ -1,10 +1,10 @@
-// s3adm `mpu list|abort` — zombie multipart upload cleanup over the standard S3
+// lights3-ctl `mpu list|abort` — zombie multipart upload cleanup over the standard S3
 // API (ListMultipartUploads / AbortMultipartUpload), no admin endpoint involved,
 // so any credential allowed on the bucket works (roadmap §6.2, docs/cli.md §3.11).
 // `list` walks every page (key-marker / upload-id-marker cursor) and prints one
 // line per upload with its age; `--older-than` filters by initiation time and
 // `abort --all` removes everything the same filter selects.
-#include "tools/s3adm_mpu.h"
+#include "tools/lights3_ctl_mpu.h"
 
 #include <chrono>
 #include <cstdio>
@@ -18,14 +18,14 @@
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "s3/xml.h"
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
 namespace {
 
-using s3adm::finish;
-using s3adm::g_exit;
-using s3adm::run_admin;
-using s3adm::SignedClient;
+using lights3_ctl::finish;
+using lights3_ctl::g_exit;
+using lights3_ctl::run_admin;
+using lights3_ctl::SignedClient;
 namespace util = lights3::util;
 
 struct Upload {
@@ -89,7 +89,7 @@ bool read_common(const std::shared_ptr<ccmd::c_command>& c, std::string& bucket,
     prefix = c->var<std::string>("prefix");
     output = c->var<std::string>("output");
     if (output != "text" && output != "json") {
-        fprintf(stderr, "s3adm: --output must be text|json\n");
+        fprintf(stderr, "lights3-ctl: --output must be text|json\n");
         g_exit = 2;
         return false;
     }
@@ -99,13 +99,13 @@ bool read_common(const std::shared_ptr<ccmd::c_command>& c, std::string& bucket,
         try {
             older_sec = lights3::parse_duration_sec(older);
         } catch (const std::exception& e) {
-            fprintf(stderr, "s3adm: --older-than: %s\n", e.what());
+            fprintf(stderr, "lights3-ctl: --older-than: %s\n", e.what());
             g_exit = 2;
             return false;
         }
     }
     if (c->args().empty()) {
-        fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+        fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
         g_exit = 2;
         return false;
     }
@@ -118,7 +118,7 @@ void add_common_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
     cmd->var<std::string>("older-than", "",
                           "only uploads initiated at least this long ago (e.g. 1h, 2d); default all.");
     cmd->varp<std::string>("output", "o", "text", "text (one line per upload) | json.");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
 }
 
 void print_uploads(const std::vector<Upload>& ups, const std::string& output, const std::string& bucket) {
@@ -145,7 +145,7 @@ void print_uploads(const std::vector<Upload>& ups, const std::string& output, co
 
 std::shared_ptr<ccmd::c_command> make_list() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "list", "s3adm mpu list photos --older-than=1d", "s3adm mpu list <bucket> [options]",
+        "list", "lights3-ctl mpu list photos --older-than=1d", "lights3-ctl mpu list <bucket> [options]",
         "List in-progress multipart uploads of a bucket (every page), one line per upload: "
         "initiated, age, upload id, key. --older-than / --prefix narrow the set — the same "
         "selection `abort --all` acts on.",
@@ -155,7 +155,7 @@ std::shared_ptr<ccmd::c_command> make_list() {
             int64_t older = 0;
             if (!read_common(c, bucket, prefix, older, output)) return;
             if (c->args().size() != 1) {
-                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+                fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
@@ -170,8 +170,8 @@ std::shared_ptr<ccmd::c_command> make_list() {
 
 std::shared_ptr<ccmd::c_command> make_abort() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "abort", "s3adm mpu abort photos --all --older-than=7d",
-        "s3adm mpu abort <bucket> (<key> <upload-id> | --all) [options]",
+        "abort", "lights3-ctl mpu abort photos --all --older-than=7d",
+        "lights3-ctl mpu abort <bucket> (<key> <upload-id> | --all) [options]",
         "Abort multipart uploads: one upload given as <key> <upload-id>, or --all for every "
         "upload the --prefix / --older-than selection matches (zombie cleanup). Prints one "
         "line per aborted upload; a 404 (already gone) counts as done.",
@@ -182,7 +182,7 @@ std::shared_ptr<ccmd::c_command> make_abort() {
             if (!read_common(c, bucket, prefix, older, output)) return;
             bool all = c->var<bool>("all");
             if ((all && c->args().size() != 1) || (!all && c->args().size() != 3)) {
-                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+                fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
@@ -201,7 +201,7 @@ std::shared_ptr<ccmd::c_command> make_abort() {
                         if (output == "text") printf("aborted %s %s\n", u.upload_id.c_str(), u.key.c_str());
                     } else {
                         rc = 1;
-                        fprintf(stderr, "s3adm: abort %s %s: %s\n", u.upload_id.c_str(), u.key.c_str(),
+                        fprintf(stderr, "lights3-ctl: abort %s %s: %s\n", u.upload_id.c_str(), u.key.c_str(),
                                 r ? ("HTTP " + std::to_string(r->status)).c_str()
                                   : httplib::to_string(r.error()).c_str());
                     }
@@ -225,11 +225,11 @@ std::shared_ptr<ccmd::c_command> make_abort() {
 
 }  // namespace
 
-namespace s3adm {
+namespace lights3_ctl {
 
 std::shared_ptr<ccmd::c_command> make_mpu() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "mpu", "s3adm mpu list photos --older-than=1d", "s3adm mpu <command> [options]",
+        "mpu", "lights3-ctl mpu list photos --older-than=1d", "lights3-ctl mpu <command> [options]",
         "Multipart upload housekeeping over the standard S3 API (ListMultipartUploads / "
         "AbortMultipartUpload): list in-progress uploads with their age, abort one or every "
         "stale one (roadmap §6.2). Works with any credential allowed on the bucket. Options "
@@ -244,4 +244,4 @@ std::shared_ptr<ccmd::c_command> make_mpu() {
     return cmd;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

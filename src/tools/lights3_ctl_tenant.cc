@@ -1,8 +1,8 @@
-// s3adm `tenant` command group — tenant lifecycle and bucket ownership against
+// lights3-ctl `tenant` command group — tenant lifecycle and bucket ownership against
 // /-/admin/tenants (docs/multi-tenancy.md §6). Root credential for mutations;
 // a tenant admin may `get`/`list` its own tenant. Responses print the server's
 // JSON verbatim.
-#include "tools/s3adm_tenant.h"
+#include "tools/lights3_ctl_tenant.h"
 
 #include <cstdio>
 #include <memory>
@@ -11,15 +11,15 @@
 #include <nlohmann/json.hpp>
 
 #include "core/util/uri.h"
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
 namespace {
 
 using nlohmann::json;
-using s3adm::finish;
-using s3adm::g_exit;
-using s3adm::run_admin;
-using s3adm::SignedClient;
+using lights3_ctl::finish;
+using lights3_ctl::g_exit;
+using lights3_ctl::run_admin;
+using lights3_ctl::SignedClient;
 namespace util = lights3::util;
 
 constexpr const char* kBase = "/-/admin/tenants";
@@ -30,7 +30,7 @@ std::string tenant_path(const std::string& id) {
 
 bool n_args(const std::shared_ptr<ccmd::c_command>& cmd, size_t n) {
     if (cmd->args().size() != n) {
-        fprintf(stderr, "s3adm: usage: %s\n", cmd->usage().c_str());
+        fprintf(stderr, "lights3-ctl: usage: %s\n", cmd->usage().c_str());
         g_exit = 2;
         return false;
     }
@@ -60,34 +60,34 @@ void add_quota_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
 
 std::shared_ptr<ccmd::c_command> make_list() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "list", "s3adm tenant list", "s3adm tenant list [options]",
+        "list", "lights3-ctl tenant list", "lights3-ctl tenant list [options]",
         "List tenants with their quota, buckets and aggregate usage (a tenant admin sees "
         "only its own tenant).",
         "list tenants.", [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!n_args(c, 0)) return;
             run_admin(c, [](SignedClient& cli) { return finish(cli.get(kBase, ""), 200); });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "get", "s3adm tenant get acme", "s3adm tenant get <id> [options]",
+        "get", "lights3-ctl tenant get acme", "lights3-ctl tenant get <id> [options]",
         "Show one tenant: quota, owned buckets, aggregate usage, credential count.",
         "show one tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!n_args(c, 1)) return;
             std::string id = c->args().front();
             run_admin(c, [&](SignedClient& cli) { return finish(cli.get(tenant_path(id), ""), 200); });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_create() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "create", "s3adm tenant create acme --display-name='ACME Corp' --max-bytes=1TiB",
-        "s3adm tenant create <id> [options]",
+        "create", "lights3-ctl tenant create acme --display-name='ACME Corp' --max-bytes=1TiB",
+        "lights3-ctl tenant create <id> [options]",
         "Create a tenant (id: [a-z0-9][a-z0-9._-]{0,63}). Quota flags are optional; "
         "sizes accept KiB/MiB/GiB units.",
         "create a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -104,14 +104,14 @@ std::shared_ptr<ccmd::c_command> make_create() {
         });
     cmd->var<std::string>("display-name", "", "human-readable name (Owner/DisplayName); defaults to the id.");
     add_quota_flags(cmd);
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_update() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "update", "s3adm tenant update acme --max-bytes=2TiB --max-buckets=50",
-        "s3adm tenant update <id> [options]",
+        "update", "lights3-ctl tenant update acme --max-bytes=2TiB --max-buckets=50",
+        "lights3-ctl tenant update <id> [options]",
         "Replace a tenant's quota and/or display name. The quota is replaced as a whole: "
         "axes not given become unlimited.",
         "update a tenant's quota / display name.",
@@ -127,7 +127,7 @@ std::shared_ptr<ccmd::c_command> make_update() {
                     !c->var<std::string>("max-buckets").empty() || c->var<bool>("clear-quota"))
                     body["quota"] = quota_from_flags(c, /*all=*/true);
                 if (body.empty()) {
-                    fprintf(stderr, "s3adm: nothing to update (give --display-name and/or quota flags)\n");
+                    fprintf(stderr, "lights3-ctl: nothing to update (give --display-name and/or quota flags)\n");
                     return 2;
                 }
                 return finish(cli.put_json(tenant_path(id), body.dump()), 200);
@@ -136,13 +136,13 @@ std::shared_ptr<ccmd::c_command> make_update() {
     cmd->var<std::string>("display-name", "", "new display name.");
     add_quota_flags(cmd);
     cmd->var<bool>("clear-quota", false, "remove every limit (quota = unlimited).");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_delete() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "delete", "s3adm tenant delete acme", "s3adm tenant delete <id> [options]",
+        "delete", "lights3-ctl tenant delete acme", "lights3-ctl tenant delete <id> [options]",
         "Delete a tenant. Refused while it still owns buckets or has credentials.",
         "delete a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!n_args(c, 1)) return;
@@ -151,13 +151,13 @@ std::shared_ptr<ccmd::c_command> make_delete() {
                 return finish(cli.del(tenant_path(id)), 204, "deleted tenant " + id);
             });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_assign() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "assign", "s3adm tenant assign acme logs-bucket", "s3adm tenant assign <id> <bucket> [options]",
+        "assign", "lights3-ctl tenant assign acme logs-bucket", "lights3-ctl tenant assign <id> <bucket> [options]",
         "Make an existing bucket owned by the tenant. A bucket owned by another tenant is "
         "refused unless --force.",
         "assign a bucket to a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -171,14 +171,14 @@ std::shared_ptr<ccmd::c_command> make_assign() {
             });
         });
     cmd->var<bool>("force", false, "take the bucket over from its current owner tenant.");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 std::shared_ptr<ccmd::c_command> make_unassign() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "unassign", "s3adm tenant unassign acme logs-bucket",
-        "s3adm tenant unassign <id> <bucket> [options]",
+        "unassign", "lights3-ctl tenant unassign acme logs-bucket",
+        "lights3-ctl tenant unassign <id> <bucket> [options]",
         "Detach a bucket from the tenant (it becomes unowned: visible to root and legacy "
         "credentials only).",
         "detach a bucket from a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
@@ -190,18 +190,18 @@ std::shared_ptr<ccmd::c_command> make_unassign() {
                 return finish(cli.del(path), 204, "detached " + bucket + " from " + id);
             });
         });
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
 }  // namespace
 
-namespace s3adm {
+namespace lights3_ctl {
 
 std::shared_ptr<ccmd::c_command> make_tenant() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "tenant", "s3adm tenant list --endpoint=http://127.0.0.1:9000",
-        "s3adm tenant <command> [options]",
+        "tenant", "lights3-ctl tenant list --endpoint=http://127.0.0.1:9000",
+        "lights3-ctl tenant <command> [options]",
         "Manage tenants and bucket ownership via /-/admin/tenants (docs/multi-tenancy.md). "
         "Mutations need the root credential; `list`/`get` also work for a tenant admin "
         "on its own tenant. Options must follow the leaf subcommand; long options take "
@@ -221,4 +221,4 @@ std::shared_ptr<ccmd::c_command> make_tenant() {
     return cmd;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

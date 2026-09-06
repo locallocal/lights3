@@ -11,7 +11,7 @@ roadmap §4.3 末项"性能基线缺失"的兑现：仓内首份存档的 benchm
 | --- | --- |
 | 机器 | Intel i9-14900KF（32 线程）、30 GiB、Linux 7.0.0-31、g++ 15.2 |
 | 数据目录 | `/tmp`（tmpfs）——localfs 后端的对象在内存文件系统上，测的是 HTTP 层 + 拷贝路径，**不含磁盘 IO** |
-| 客户端 | `s3adm bench`（httplib 同步客户端，每 worker 一条 keep-alive 连接），与网关同机 loopback |
+| 客户端 | `lights3-ctl bench`（httplib 同步客户端，每 worker 一条 keep-alive 连接），与网关同机 loopback |
 | 网关 | localfs 后端；`http.io_threads: 8`（beast/httplib/seastar），`runtime.io_threads: 16`；TLS 为 openssl 自签 P-256 证书，客户端 `--insecure` |
 | 大对象档 | 4 MiB × 8 workers × 8 s × 32 键 |
 | 小对象档 | 16 KiB × 16 workers × 8 s × 256 键 |
@@ -19,7 +19,7 @@ roadmap §4.3 末项"性能基线缺失"的兑现：仓内首份存档的 benchm
 | "后" | 分支 `feat/dataplane-perf`，同一套选项；seastar 同一 `build-seastar` 增量重建 |
 | 脚本 | `scripts/bench_matrix.sh`（[testing.md §5](testing.md)），每格起一个新网关，顺序执行，机器空闲 |
 
-延迟列来自 `s3adm bench` 的直方图分位数（桶边界离散，p50 出现 6.15、12.29 这类
+延迟列来自 `lights3-ctl bench` 的直方图分位数（桶边界离散，p50 出现 6.15、12.29 这类
 "整数"是桶宽所致）。单次 8 s 的抖动约 ±5%：**±5% 以内的差异视为噪声**。
 
 ## 2. 结果
@@ -93,14 +93,14 @@ roadmap §4.3 末项"性能基线缺失"的兑现：仓内首份存档的 benchm
 
 ```bash
 ./build.sh -B build-rel -DCMAKE_BUILD_TYPE=Release -DLIGHTS3_DUOSTORE=OFF -DLIGHTS3_CLOUDPROXY=OFF -DLIGHTS3_BUILD_TESTS=OFF
-scripts/bench_matrix.sh build-rel/lights3 build-rel/s3adm --duration 8 --size 4M --json 4m.jsonl --label "$(git rev-parse --short HEAD)"
-scripts/bench_matrix.sh build-rel/lights3 build-rel/s3adm --duration 8 --size 16K --concurrency 16 --objects 256 --json 16k.jsonl
-scripts/bench_matrix.sh build-seastar/lights3 build-rel/s3adm --drivers seastar --duration 8 --size 4M   # seastar 变体单跑
+scripts/bench_matrix.sh build-rel/lights3 build-rel/lights3-ctl --duration 8 --size 4M --json 4m.jsonl --label "$(git rev-parse --short HEAD)"
+scripts/bench_matrix.sh build-rel/lights3 build-rel/lights3-ctl --duration 8 --size 16K --concurrency 16 --objects 256 --json 16k.jsonl
+scripts/bench_matrix.sh build-seastar/lights3 build-rel/lights3-ctl --drivers seastar --duration 8 --size 4M   # seastar 变体单跑
 ```
 
 脚本每格打印一行进度到 stderr，stdout 是 Markdown 表；`--json` 每格一行
 `{label, version, driver, tls, mode, size, concurrency, duration_s, result}`，
-`result` 就是 `s3adm bench --output=json` 的对象。跑之前确认机器空闲、
+`result` 就是 `lights3-ctl bench --output=json` 的对象。跑之前确认机器空闲、
 没有残留的 `lights3` 进程（`pgrep -x lights3`）。
 
 ## 4. 历史

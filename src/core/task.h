@@ -44,6 +44,69 @@ private:
 
 namespace detail {
 
+// ---------- Resume trampoline ----------
+// co_await of a Task and its completion are "symmetric transfers": await_suspend
+// returns the coroutine to run next. The standard promises no stack growth for
+// that only when the compiler emits a tail call, which GCC does under
+// optimization and not at -O0: a Debug / sanitizer build nested one C frame per
+// transfer, and a body-read loop whose reads complete synchronously (the builtin
+// driver's blocking socket reader feeding put_object, StreamPrefetch over an
+// in-memory body) overflowed the stack at a few MiB (docs/concurrency.md §2.4).
+// Transfers therefore go through a per-thread loop instead: the first transfer
+// on a thread runs the loop right there (inside that await_suspend, which is
+// legal -- the coroutine is already suspended), every transfer made while the
+// loop runs is queued and picked up when the current resume returns. The stack
+// stays flat in every build; the cost is a thread_local access and a queue
+// push per transfer. Direct h.resume() calls elsewhere (executors, latches) are
+// fine: the transfers they trigger enter the loop the same way
+struct Trampoline {
+    bool running = false;
+    std::vector<std::coroutine_handle<>> queue;
+};
+inline Trampoline& trampoline() {
+    thread_local Trampoline t;
+    return t;
+}
+
+// Hand h to the running loop of this thread, or run one for it now. The caller
+// must not touch its own coroutine frame afterwards (it may have completed and
+// been destroyed inside the loop)
+inline void transfer(std::coroutine_handle<> h) noexcept {
+    auto& t = trampoline();
+    if (t.running) {
+        t.queue.push_back(h);
+        return;
+    }
+    t.running = true;
+    h.resume();
+    while (!t.queue.empty()) {
+        auto n = t.queue.back();
+        t.queue.pop_back();
+        n.resume();
+    }
+    t.running = false;
+}
+
+// Run h and everything it hands over until it all suspends, even inside a
+// running loop (a private queue keeps the outer loop's pending work aside):
+// for resumers whose caller then blocks on the outcome (sync_wait), which a
+// deferred transfer would deadlock
+inline void drive(std::coroutine_handle<> h) {
+    auto& t = trampoline();
+    std::vector<std::coroutine_handle<>> saved;
+    saved.swap(t.queue);
+    bool was = t.running;
+    t.running = true;
+    h.resume();
+    while (!t.queue.empty()) {
+        auto n = t.queue.back();
+        t.queue.pop_back();
+        n.resume();
+    }
+    t.running = was;
+    t.queue.swap(saved);
+}
+
 struct PromiseBase {
     std::coroutine_handle<> continuation;
     SyncWaitEvent* event = nullptr;
@@ -69,7 +132,10 @@ struct PromiseBase {
                     p.cont_executor->post(p.continuation);
                     return std::noop_coroutine();
                 }
-                return p.continuation;  // symmetric transfer back to the caller
+                // Back to the caller through the trampoline (the caller may destroy
+                // this frame inside it: nothing of p is touched afterwards)
+                transfer(p.continuation);
+                return std::noop_coroutine();
             }
             if (p.event) p.event->set();  // top-level sync_wait
             return std::noop_coroutine();
@@ -94,7 +160,8 @@ std::coroutine_handle<> task_await_suspend(std::coroutine_handle<Promise> task,
     // Do not override a token the child task already carries (explicitly attached
     // via with_cancel); otherwise inherit the caller's
     if (!p.cancel.valid()) p.cancel = parent_cancel;
-    return task;  // symmetric transfer starts the awaited task
+    transfer(task);  // starts the awaited task (flat, see Trampoline)
+    return std::noop_coroutine();
 }
 
 // co_await current_cancel(): the token the current coroutine carries (inherited or
@@ -188,11 +255,12 @@ public:
         return *this;
     }
 
-    // For sync_wait only: bind the event and start
+    // For sync_wait only: bind the event and start. drive: the caller blocks on
+    // the event next, so nothing may stay queued behind it on this thread
     void start(SyncWaitEvent* ev) {
         check_valid("start");
         h_.promise().event = ev;
-        h_.resume();
+        detail::drive(h_);
     }
     T take_result() {
         check_valid("take_result");
@@ -275,7 +343,7 @@ public:
     void start(SyncWaitEvent* ev) {
         check_valid("start");
         h_.promise().event = ev;
-        h_.resume();
+        detail::drive(h_);
     }
     void take_result() {
         check_valid("take_result");
@@ -321,14 +389,21 @@ namespace detail {
 // Self-destroying wrapper coroutine: drives the top-level task, moves the result
 // onto the caller's stack, and finally wakes the pump loop. out/err are written
 // before finish(); after finish() no caller state is touched anymore
+// Lazy start + drive(): the caller pumps ex right after, so the task and every
+// transfer it makes must have run to their first real suspension before that
+// (a transfer left in an enclosing trampoline loop would deadlock the pump)
 struct PumpRunner {
     struct promise_type {
-        PumpRunner get_return_object() { return {}; }
-        std::suspend_never initial_suspend() noexcept { return {}; }
-        std::suspend_never final_suspend() noexcept { return {}; }
+        PumpRunner get_return_object() {
+            return {std::coroutine_handle<promise_type>::from_promise(*this)};
+        }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_never final_suspend() noexcept { return {}; }  // self-destructs on completion
         void return_void() {}
         void unhandled_exception() { std::terminate(); }  // coroutine body catches everything
     };
+    std::coroutine_handle<> h;
+    void start() { drive(h); }
 };
 
 template <class T>
@@ -357,7 +432,7 @@ template <class T>
 T sync_wait_pumping(PumpExecutor& ex, Task<T> t) {
     std::optional<T> out;
     std::exception_ptr err;
-    detail::pump_run(std::move(t), ex, out, err);
+    detail::pump_run(std::move(t), ex, out, err).start();
     ex.run();
     if (err) std::rethrow_exception(err);
     return std::move(*out);
@@ -365,7 +440,7 @@ T sync_wait_pumping(PumpExecutor& ex, Task<T> t) {
 
 inline void sync_wait_pumping(PumpExecutor& ex, Task<void> t) {
     std::exception_ptr err;
-    detail::pump_run(std::move(t), ex, err);
+    detail::pump_run(std::move(t), ex, err).start();
     ex.run();
     if (err) std::rethrow_exception(err);
 }
@@ -381,9 +456,9 @@ struct WhenAllLatch {
     std::coroutine_handle<> continuation;
     explicit WhenAllLatch(size_t n) : pending(n + 1) {}
     void arrive() {
-        // Do not touch the latch after resume: the when_all frame may already have
-        // been destroyed inside resume
-        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) continuation.resume();
+        // Do not touch the latch after the transfer: the when_all frame may already
+        // have been destroyed inside it
+        if (pending.fetch_sub(1, std::memory_order_acq_rel) == 1) transfer(continuation);
     }
 };
 
@@ -393,8 +468,10 @@ struct WhenAllAwaiter {
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
         latch.continuation = h;
         // Write the continuation before casting the last vote, so the runner side
-        // sees a ready continuation when the count reaches 0
-        if (latch.pending.fetch_sub(1, std::memory_order_acq_rel) == 1) return h;
+        // sees a ready continuation when the count reaches 0. Everything already
+        // done: resume through the trampoline (a returned handle would nest a frame
+        // per synchronous round at -O0, see Trampoline)
+        if (latch.pending.fetch_sub(1, std::memory_order_acq_rel) == 1) transfer(h);
         return std::noop_coroutine();
     }
     void await_resume() const noexcept {}
@@ -404,7 +481,9 @@ struct WhenAllAwaiter {
 // Lazy start + explicit resume: guarantees the ramp has fully returned and the
 // coroutine frame handoff is clean before it runs; otherwise, when the coroutine
 // migrates to a pool thread and self-destructs, the ramp may still be touching the
-// frame (a real data race)
+// frame (a real data race). start() drives with a private trampoline queue: the
+// child has reached its first real suspension (or completed) when start()
+// returns, which a Started::wait() right after relies on
 struct WhenAllRunner {
     struct promise_type {
         WhenAllRunner get_return_object() {
@@ -416,7 +495,7 @@ struct WhenAllRunner {
         void unhandled_exception() { std::terminate(); }  // coroutine body catches everything
     };
     std::coroutine_handle<> h;
-    void start() { h.resume(); }
+    void start() { drive(h); }
 };
 
 template <class T>
@@ -539,7 +618,7 @@ struct StartedState {
             if (votes.fetch_sub(1, std::memory_order_acq_rel) == 1) resume = continuation;
             cv.notify_all();
         }
-        if (resume) resume.resume();
+        if (resume) transfer(resume);
     }
     void wait() {
         std::unique_lock lk(m);
@@ -556,7 +635,9 @@ struct StartedAwaiter {
     bool await_ready() const noexcept { return false; }
     std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
         st.continuation = h;
-        if (st.votes.fetch_sub(1, std::memory_order_acq_rel) == 1) return h;  // already done
+        // Already done: through the trampoline, never a returned handle (a
+        // synchronous collect-restart-collect loop must not nest, see Trampoline)
+        if (st.votes.fetch_sub(1, std::memory_order_acq_rel) == 1) transfer(h);
         return std::noop_coroutine();
     }
     void await_resume() const noexcept {}

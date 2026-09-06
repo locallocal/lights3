@@ -77,7 +77,7 @@ libFuzzer 把新发现的有趣输入写进**第一个**语料目录：把工作
 即成为永久回归。libFuzzer 模式要求整棵树能
 用 clang 编译——为此把 `YamlNode` 的特殊成员移到类外（递归的 `pair<string,
 YamlNode>` 成员在类内 default 时 clang 会以不完整类型实例化）并修了一处窄化；
-clang 21 + ASan 下核心库、六个 harness、unit_tests 全部编过，unit_tests 484 项通过。
+clang 21 + ASan 下核心库、六个 harness、unit_tests 全部编过；GCC 15 + ASan 的 `build-asan` 全量 unit_tests 521 项通过（2026-09-06，`Task` 恢复蹦床落地之后——此前 -O0 下同步完成的读链会在 `test_http_drivers` 栈溢出中止整次运行，[concurrency.md §2](concurrency.md)）。
 本机各 harness 空跑 5–10 秒：xml 15 万次、uri 340 万次、http_parse 247 万次、
 sigv4 42 万次、aws_chunked 1.4 万次、duostore_codec 19 万次，均无崩溃。
 

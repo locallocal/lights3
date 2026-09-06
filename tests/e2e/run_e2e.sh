@@ -918,22 +918,21 @@ RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
 check "reload adds backend hot" "0" "$(echo "$RELOAD_OUT" | grep -q 'backends: added hot (memory)'; echo $?)"
 check "reload routes hot-* to it" "0" "$(echo "$RELOAD_OUT" | grep -q 'buckets.rules: 0 -> 1'; echo $?)"
 check "bucket on the added backend" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/hot-bkt")"
-head -c 4194304 /dev/urandom > "$WORK/hot.bin"
+head -c 33554432 /dev/urandom > "$WORK/hot.bin"  # 32 MiB: more than the socket buffers absorb, so the stream is still open below
 check "object on the added backend" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary "@$WORK/hot.bin" "$BASE/hot-bkt/big")"
 check "metrics carry the added backend's op series" "0" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_backend_op_seconds_count{backend="hot"'; echo $?)"
 check "s3adm object inspect sees the added backend" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" object inspect hot-bkt big --endpoint="$BASE" --region="$REGION" 2>/dev/null | grep -q '"backend": "hot"'; echo $?)"
-s3curl --limit-rate 1M -o "$WORK/hot.out" "$BASE/hot-bkt/big" &
+s3curl --limit-rate 8M -o "$WORK/hot.out" "$BASE/hot-bkt/big" &
 HOT_GET_PID=$!
 sleep 0.5
 sed -i '/^  - name: hot$/,/^    type: memory$/d' "$WORK/config.yaml"
 sed -i '/^  rules:$/,/^      backend: hot$/d' "$WORK/config.yaml"
 RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
 check "reload removes backend hot" "0" "$(echo "$RELOAD_OUT" | grep -q 'backends: removed hot (closing after in-flight requests drain)'; echo $?)"
-# The reload returned while the GET still streams: the removal never waits for
-# in-flight requests (the strict "closed only after the stream is released" order
-# is asserted by test_reload.cc; here the kernel's socket buffers may let the
-# server finish sending before the rate-limited client has read everything)
+# The reload returned while the GET still streams (the removal never waits for
+# in-flight requests), and the instance is not closed while the stream is open
 check "reload returned while the GET still streams" "0" "$(kill -0 "$HOT_GET_PID" 2>/dev/null; echo $?)"
+check "backend stays open while the GET streams" "1" "$(grep -q 'backend hot removed: closed' "$WORK/server.log"; echo $?)"
 check "hot-* routes to the default backend right away" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$BASE/hot-bkt")"
 wait "$HOT_GET_PID"
 check "streaming GET completed after the removal" "0" "$(cmp -s "$WORK/hot.bin" "$WORK/hot.out"; echo $?)"

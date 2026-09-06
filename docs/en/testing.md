@@ -90,8 +90,11 @@ out and dropped into the seed directory becomes a permanent regression. libFuzze
 that `YamlNode`'s special members moved out of line (clang instantiates them
 with the recursive `pair<string, YamlNode>` member still incomplete when they
 are defaulted in-class) and one narrowing was fixed; under clang 21 + ASan the
-core library, the six harnesses and unit_tests all build, unit_tests passing
-484 cases. Idle 5–10 second runs on this machine: xml 150k executions, uri
+core library, the six harnesses and unit_tests all build; the GCC 15 + ASan
+`build-asan` runs the full unit_tests, 521 cases passing (2026-09-06, once the
+`Task` resume trampoline landed — before it, a synchronously completing read
+chain overflowed the stack in `test_http_drivers` at -O0 and aborted the whole
+run, [concurrency.md §2](concurrency.md)). Idle 5–10 second runs on this machine: xml 150k executions, uri
 3.4M, http_parse 2.47M, sigv4 420k, aws_chunked 14k, duostore_codec 190k, no
 crashes.
 

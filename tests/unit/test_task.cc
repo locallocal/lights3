@@ -235,3 +235,60 @@ TEST(task_moved_from_throws_not_segv) {
     CHECK_EQ(sync_wait(std::move(moved_a)), 1);
     sync_wait(std::move(moved_v));
 }
+
+// ---------- Resume trampoline (task.h detail::transfer / drive) ----------
+
+namespace {
+
+Task<size_t> sync_child(size_t i) { co_return i; }
+
+// A read loop whose children complete synchronously: without the trampoline every
+// iteration nested two C frames (GCC emits the symmetric-transfer tail call only
+// under optimization), and a few MiB of 64 KiB reads overflowed the stack
+Task<size_t> deep_sync_chain(size_t n) {
+    size_t sum = 0;
+    for (size_t i = 0; i < n; ++i) sum += co_await sync_child(i);
+    co_return sum;
+}
+
+// A Started chain that restarts itself from the completion path (the
+// StreamPrefetch shape): collect, start the next, collect, ...
+Task<size_t> started_chain(size_t n) {
+    size_t sum = 0;
+    Started<size_t> st(sync_child(0));
+    for (size_t i = 1; i <= n; ++i) {
+        sum += co_await st;
+        st.start(sync_child(i));
+    }
+    sum += co_await st;
+    co_return sum;
+}
+
+// sync_wait from inside a coroutine that itself runs under the trampoline loop:
+// drive() must run the nested chain to completion instead of queueing it behind
+// the blocked caller
+Task<size_t> nested_sync_wait(size_t n) {
+    co_await sync_child(0);  // enters the loop
+    co_return sync_wait(deep_sync_chain(n));
+}
+
+}  // namespace
+
+TEST(task_deep_synchronous_chain_keeps_the_stack_flat) {
+    const size_t n = 200000;
+    CHECK_EQ(sync_wait(deep_sync_chain(n)), n * (n - 1) / 2);
+    CHECK_EQ(sync_wait(started_chain(n)), n * (n + 1) / 2);
+}
+
+TEST(task_sync_wait_inside_a_trampolined_coroutine) {
+    const size_t n = 50000;
+    CHECK_EQ(sync_wait(nested_sync_wait(n)), n * (n - 1) / 2);
+    // The same through a pool thread's executor entry
+    ThreadPool pool(2);
+    auto via_pool = [&]() -> Task<size_t> {
+        co_await pool.schedule();
+        co_return co_await nested_sync_wait(n);
+    };
+    CHECK_EQ(sync_wait(via_pool()), n * (n - 1) / 2);
+    pool.join();
+}

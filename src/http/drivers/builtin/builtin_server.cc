@@ -416,7 +416,7 @@ bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_ali
 
 // Handles one request; false means the connection should be closed
 bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& peer,
-               bool& keep_alive, int served) {
+               const std::optional<TlsIdentity>& tls_identity, bool& keep_alive, int served) {
     const size_t max_line = sh.cfg.max_header_size;
     const int fd = io.fd;
     // Phase timeouts (roadmap §4.2): waiting for the request line is the keep-alive
@@ -449,6 +449,7 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
 
     HttpRequest req;
     req.remote_addr = peer;
+    req.tls_identity = tls_identity;
     // Malformed request line / header block / framing (roadmap §5.3): counted once,
     // whether the connection is closed silently or answered 400
     auto malformed = [&] {
@@ -566,6 +567,7 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
 
     Io io;
     io.fd = fd;
+    std::optional<TlsIdentity> tls_identity;
     io.set_recv_timeout(sh.cfg.header_timeout_sec);  // covers the TLS handshake too
     io.set_send_timeout(sh.cfg.write_timeout_sec);
     if (sh.tls_ctx) {
@@ -585,6 +587,9 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
             return;
         }
         sh.counters.tls_handshake(true);
+        // Verified client certificate (backlog-sequence ⑥): read once per
+        // connection, stamped on every request it carries
+        tls_identity = tls::peer_identity(io.ssl);
     }
 
     ConnReader reader;
@@ -592,7 +597,7 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     bool keep_alive = true;
     int served = 0;
     while (keep_alive && !sh.stopping.load()) {
-        if (!serve_one(sh, io, reader, peer, keep_alive, served)) break;
+        if (!serve_one(sh, io, reader, peer, tls_identity, keep_alive, served)) break;
         ++served;
     }
     if (io.ssl) {

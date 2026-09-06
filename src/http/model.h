@@ -146,6 +146,12 @@ private:
     size_t pos_ = 0;
 };
 
+// The identity-bearing fields of a verified client certificate (mTLS)
+struct TlsIdentity {
+    std::string subject_cn;  // subject commonName (empty when the subject has none)
+    std::string san_uri;     // first URI subjectAltName (empty when there is none)
+};
+
 struct HttpRequest {
     std::string method;    // "GET" "PUT" ...
     std::string raw_path;  // Undecoded (needed for the SigV4 canonical URI)
@@ -165,6 +171,12 @@ struct HttpRequest {
     // handler sets it, the service gates the /-/ face on it. Meaningless (false)
     // without the split
     bool admin_face = false;
+    // Verified client certificate of the connection (mTLS, backlog-sequence ⑥,
+    // docs/tls.md §2.1): set by the driver after a handshake in which the peer
+    // presented a certificate that verified against http.tls_client_ca; absent on
+    // plaintext, without a client certificate, or when client auth is off. L1
+    // reports both candidate subjects, L2 picks one by auth.tls_identity
+    std::optional<TlsIdentity> tls_identity;
 
     std::optional<std::string> query_get(std::string_view key) const {
         for (auto& [k, v] : query)

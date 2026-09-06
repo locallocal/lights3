@@ -60,6 +60,9 @@ void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
     cmd->var<std::string>("region", "us-east-1", "SigV4 region; must match the server auth.region.");
     cmd->var<bool>("insecure", false, "skip server certificate verification for https (self-signed deployments).");
     cmd->var<int>("timeout-sec", 10, "connect/read/write timeout in seconds.");
+    cmd->var<std::string>("cert", "",
+                          "client certificate (PEM) for mTLS listeners; needs --key.");
+    cmd->var<std::string>("key", "", "private key (PEM) of --cert.");
 }
 
 bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out) {
@@ -87,12 +90,19 @@ bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out) 
     out.region = cmd->var<std::string>("region");
     out.timeout_sec = cmd->var<int>("timeout-sec");
     out.insecure = cmd->var<bool>("insecure");
+    out.client_cert = cmd->var<std::string>("cert");
+    out.client_key = cmd->var<std::string>("key");
+    if (out.client_cert.empty() != out.client_key.empty()) {
+        fprintf(stderr, "s3adm: --cert and --key must be given together\n");
+        g_exit = 2;
+        return false;
+    }
     return true;
 }
 
 SignedClient::SignedClient(const ConnOpts& conn)
     : ep_(conn.ep),
-      cli_(conn.ep.base_url),
+      cli_(conn.ep.base_url, conn.client_cert, conn.client_key),
       auth_(s3::SigV4Authenticator::build(lights3::AuthConfig{
           .credentials = {}, .region = conn.region, .service = "s3"})),
       cred_(lights3::Credential{conn.ak, util::SecretString(std::string(conn.sk))}) {

@@ -74,7 +74,7 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
                                                   std::string& access_key,
                                                   const RequestContext& ctx) {
     try {
-        auto ident = auth_.verify(req);
+        auto ident = verify_identity(req);
         access_key = ident.access_key;
         bool root = is_root(access_key);
         // Tenant admins reach this plane for their own tenant only; sessions never do
@@ -331,7 +331,7 @@ Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req,
                                                         std::string& access_key,
                                                         const RequestContext& ctx) {
     try {
-        auto ident = auth_.verify(req);
+        auto ident = verify_identity(req);
         access_key = ident.access_key;
         if (!is_root(access_key))
             throw S3Error(S3ErrorCode::AccessDenied,

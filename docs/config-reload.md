@@ -59,8 +59,8 @@
   cipher、`tls_sni`、`tls_reload_interval`）——证书**内容**热更新，参数不；
 - `backends`（后端实例增删/参数变更牵动生命周期与数据）与
   `buckets.default_backend`（承载 `.sys` 与从它加载的各 store）；
-- `auth.*`（静态 root 凭证、凭证文件路径、同步周期）——动态凭证与凭证文件
-  本就有各自的热加载通道；
+- `auth.*`（静态 root 凭证、凭证文件路径、同步周期、`tls_identity` 模式）——动态
+  凭证、凭证文件与证书绑定表本就有各自的热加载 / 同步通道；
 - `website` 静态条目（动态条目走 `?website` API）、`lifecycle.scan_interval`、
   `usage.*`、`audit.*`、`ratelimit.max_tracked`、停机/背压边界；
 - `log.format / file / max_size / max_files / async*`——sink 与格式器在

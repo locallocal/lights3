@@ -16,7 +16,7 @@ using nlohmann::json;
 Task<http::HttpResponse> S3Service::admin_fsck(http::HttpRequest& req, std::string& access_key,
                                                const RequestContext& ctx) {
     try {
-        auto ident = auth_.verify(req);
+        auto ident = verify_identity(req);
         access_key = ident.access_key;
         if (!is_root(access_key))
             throw S3Error(S3ErrorCode::AccessDenied,

@@ -45,9 +45,48 @@ CA 文件在构造期加载，坏路径、坏 PEM、私钥与证书不匹配、c
 
 `tls_client_ca` 给出信任的 CA bundle 后：`optional` = 请求客户端证书，不给也放行，
 给了必须能验证；`require` = 必须给且验证通过。验证结果在握手内决定（TLS 1.3 下
-客户端会在首个读上看到 alert）。通过验证的客户端证书目前**不映射为身份**——
-SigV4 仍是唯一的身份来源，mTLS 是传输层准入（"没有公司 CA 签发的证书连
-握手都过不了"）。把客户端证书 CN 映射到凭证/租户是后续项。
+客户端会在首个读上看到 alert）。默认（`auth.tls_identity: off`）通过验证的客户端
+证书**不映射为身份**——SigV4 仍是唯一的身份来源，mTLS 只是传输层准入（"没有
+公司 CA 签发的证书连握手都过不了"）。
+
+**证书 → 凭证 / 租户身份映射**（backlog-sequence ⑥）。`auth.tls_identity:
+subject-cn | san-uri` 打开后，验证通过的客户端证书取一个字段作为**主体**
+（subject 的 CN，或首个 URI 类型的 subjectAltName——SPIFFE 风格部署用后者），
+按 root 维护的绑定表 `.sys/tls-identities/<主体>` → 凭证 AK 参与鉴权：
+
+| 请求 | 主体已绑定 | 主体未绑定 |
+| --- | --- | --- |
+| **未签名**（无 `Authorization`、无 presigned 参数） | 视同被绑定凭证签名：policy / tenant / role 全部继承（只读凭证仍只读，租户凭证仍只见本租户桶，绑到 root 则可进管理面） | `AccessDenied`（"not bound"）——开了映射就意味着每张证书都该有归属 |
+| **已签名** | 绑定凭证与签名凭证须**同租户**（tenant 字段相等；无 tenant 的 legacy 凭证彼此算同一租户），否则 `AccessDenied`；同一凭证天然通过 | `AccessDenied`——例外见下 |
+| **root 签名** | 放行（root 没有租户可比，运维证书可代任何凭证操作） | 放行 |
+
+几条边界：证书没有所选字段（CN 缺失 / 无 URI SAN）等于没有身份，走原有
+签名语义；绑定的凭证被吊销后绑定悬空，未签名请求得到 `AccessDenied`
+（"no longer exists"）；静态网站桶的匿名读让位于已绑定证书（更具体的身份
+优先——绑定凭证无权读该桶就是 403，未绑定证书仍走匿名）；STS `AssumeRole`
+与 `/-/metrics` 的 root 门、全部 `/-/admin/*` 都走同一套规则。绑定不接受 STS
+会话 AK（会话过期后绑定就失效）。四个驱动握手后各取一次对端证书（httplib
+每请求一次，都是廉价读），放进 `HttpRequest::tls_identity`（CN + URI SAN 两个
+候选），选哪个由 L2 按模式决定；seastar 走 GnuTLS 的 DN 字符串再解析 CN。
+
+绑定由 root 经 `/-/admin/tls-identities`（[multi-tenancy.md §6](multi-tenancy.md)）
+或 `s3adm cred bind-cert|unbind-cert|list-certs`（[cli.md §3.2](cli.md)）维护，
+多网关经 `auth.sync_interval` 同步；表在 `tls_identity: off` 时照常可维护，
+方便先铺绑定再切模式。`auth.tls_identity` 与其它 `auth.*` 一样需重启生效，
+且要求 `tls_client_auth` 为 `optional|require`（否则启动报错）。
+
+```yaml
+http:
+  tls_client_ca: /etc/lights3/clients-ca.pem
+  tls_client_auth: require
+auth:
+  tls_identity: subject-cn        # off | subject-cn | san-uri
+```
+
+```bash
+s3adm cred bind-cert L3AK... --subject=alice --cert=ops.crt --key=ops.key --endpoint=https://...
+curl --cert alice.crt --key alice.key https://s3.example.com/bucket/key   # 未签名，按绑定凭证鉴权
+```
 
 ### 2.2 版本与套件
 
@@ -167,10 +206,22 @@ lights3 端保持明文即可，`X-Forwarded-Proto` 让 Location 正确。
 - `tests/unit/test_tls.cc`：三个 OpenSSL 驱动（有 seastar 构建时版本/mTLS 用例
   也覆盖 seastar）逐一验证——HTTPS 往返（含 body 流）与 1.1 拒绝；`1.3` 下限 +
   ciphersuite 限制；mTLS require/optional（无证书、他 CA 证书拒绝，合法证书放行）；
+  客户端证书的 CN 与 URI SAN 到达 `HttpRequest::tls_identity`（四驱动，无证书 /
+  明文为空）；`auth.tls_identity` 的配置校验；
   SNI 精确/通配/大小写/无 SNI 回落；热重载（换证书后新握手看到新 CN，坏文件不替换）；
   `Holder` 的重载语义（cert/key 半轮换保留旧素材、旧快照对持有者仍有效、坏路径抛错带文件名）；
   配置校验。证书由 `tests/unit/tls_testcerts.h` 运行时生成（EC P-256），无固定文件。
 - `test_http_drivers.cc`：TLS 往返/明文拒绝/坏证书抛错覆盖全部驱动；seastar 配
   `tls_sni` 抛错。
+- `tests/unit/test_tls_identity.cc`（§2.1 的映射规则，全 dispatch）：未签名 + 已绑定
+  证书按绑定凭证的 policy 执行、未绑定 / 无证书 / 模式关闭拒绝、凭证吊销后绑定
+  悬空；已签名请求的租户一致性（同租户放行、跨租户 403、root 豁免、legacy 互认）；
+  `san-uri` 模式；admin API 的权限与校验、持久化、`sync_now` 跨实例同步、第二个
+  网关执行第一个的绑定；绑到 root 的证书过 `/-/metrics` root 门与管理面；网站桶
+  匿名读让位于绑定。
 - e2e：`run_e2e.sh` 末尾用 openssl CLI 自签证书起一个 HTTPS 实例，`curl --cacert`
-  做 SigV4 PUT/GET 往返（builtin 驱动即默认驱动）。
+  做 SigV4 PUT/GET 往返（builtin 驱动即默认驱动）；再起一个 `tls_client_auth:
+  require` + `tls_identity: subject-cn` 的实例，私有 CA 签两张客户端证书，
+  `s3adm cred bind-cert` 绑定其一到只读凭证，验证未签名 GET 放行 / PUT 被 policy
+  拒 / 未绑定证书 403 / 无证书握手失败 / 签名与证书跨租户 403 / root 豁免 /
+  解绑后回到 403。

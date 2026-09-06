@@ -689,7 +689,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             api_name = "metrics";
             // Root gate (roadmap §5.3): the same credential class as the admin plane
             if (metrics_root_.load(std::memory_order_relaxed) && auth_.enabled()) {
-                auto ident = auth_.verify(req);
+                auto ident = verify_identity(req);
                 access_key = ident.access_key;
                 if (!is_root(access_key))
                     throw S3Error(S3ErrorCode::AccessDenied,
@@ -719,6 +719,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // Tenancy + usage admin plane (docs/multi-tenancy.md §6), same JSON conventions
             api_name = "AdminTenancy";
             resp = co_await admin_tenancy(req, access_key, ctx);
+        } else if (internal && (req.path == "/-/admin/tls-identities" ||
+                                req.path.rfind("/-/admin/tls-identities/", 0) == 0)) {
+            // mTLS certificate -> credential bindings (backlog-sequence ⑥, root only)
+            api_name = "AdminTlsIdentities";
+            resp = co_await admin_tls_identities(req, access_key, ctx);
         } else if (internal && req.path.rfind("/-/admin/fsck/", 0) == 0) {
             // Offline scrub on a live gateway (backlog-sequence ③, `s3adm fsck --offline`)
             api_name = "AdminFsck";
@@ -753,7 +758,10 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // everything anyway and the anonymous branch changes nothing (the synthesized
             // read-only policy would only be stricter than "unrestricted")
             if (website_store_) web_snap = website_store_->snapshot();
-            bool anon = auth_.enabled() && anonymous_website_read(req, addr, web_snap);
+            // A bound client certificate (backlog-sequence ⑥) is an identity, not an
+            // anonymous reader: it takes the verified path below
+            bool anon = auth_.enabled() && !tls_identity_bound(req) &&
+                        anonymous_website_read(req, addr, web_snap);
             // Authorization uses the verify-time policy snapshot (docs/archive/gaps.md §3.7): with a second store lookup
             // after verification, the policy would vanish entirely in the race window where sync/remove deletes
             // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
@@ -764,7 +772,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             if (!anon && cred_store_)
                 if (auto ak = SigV4Authenticator::peek_access_key(req))
                     co_await cred_store_->ensure_session_loaded(*ak);
-            auto ident = anon ? VerifiedIdentity{} : auth_.verify(req);
+            auto ident = anon ? VerifiedIdentity{} : verify_identity(req);
             access_key = ident.access_key;
             auth_done = std::chrono::steady_clock::now();
             // Per-access-key limit (after verification: the key is authenticated, so a

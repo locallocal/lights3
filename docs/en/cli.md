@@ -243,6 +243,7 @@ needed.
 | `--region=<r>` | `us-east-1` | SigV4 region; must match the server's `auth.region` |
 | `--insecure` | false | skip certificate verification for https (self-signed deployments) |
 | `--timeout-sec=<n>` | 10 | connect/read/write timeout |
+| `--cert=<pem>` / `--key=<pem>` | none | client certificate and private key for listeners with `tls_client_auth: optional\|require` ([tls.md §2.1](tls.md)); must be given together |
 
 `website`, `quota set/clear` and the mutating `tenant` commands require the
 **root static credential** (an entry in the config's `auth.credentials`, see
@@ -258,8 +259,9 @@ export LIGHTS3_ADMIN_SK=my-secret
 
 ### 3.2 `cred` — credential management
 
-One subcommand per `/-/admin/credentials` endpoint; the JSON response is
-printed verbatim to stdout.
+One subcommand per `/-/admin/credentials` endpoint plus three for the
+`/-/admin/tls-identities` certificate bindings; the JSON response is printed
+verbatim to stdout.
 
 ```text
 s3adm cred list                          list all credentials (SK masked; static/file/dynamic sources)
@@ -270,6 +272,14 @@ s3adm cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>] [-t|--tenan
                                          owning tenant (pinned server-side when a tenant admin calls, so it may be omitted),
                                          --role=admin grants that tenant's admin plane
 s3adm cred delete <ak>                   revoke a dynamic credential (static ones belong to the config; refused)
+s3adm cred bind-cert <ak> -S|--subject=<subject> [-c|--comment=<text>]
+                                         bind a client-certificate subject (the CN, or the URI SAN under
+                                         auth.tls_identity: san-uri) to a credential: unsigned requests over that
+                                         certificate run as the credential, signed ones must be of the same tenant
+                                         (tls.md §2.1); root only, rebinding replaces (201 created / 200 replaced)
+s3adm cred unbind-cert -S|--subject=<subject>
+                                         remove a binding (idempotent); root only
+s3adm cred list-certs                    list every binding and the server's auth.tls_identity mode; root only
 ```
 
 `--policy` takes inline JSON or `@file`, shaped
@@ -283,6 +293,9 @@ s3adm cred get L3AK7Q2MXX5EIY4BJZW3 --show-secret
 s3adm cred list --endpoint=https://s3.example.com --insecure
 s3adm cred delete L3AK7Q2MXX5EIY4BJZW3
 s3adm cred create --tenant=acme --role=admin --comment='acme operator'
+s3adm cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=alice --endpoint=https://s3.example.com --cert=ops.crt --key=ops.key
+s3adm cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=spiffe://example.org/ns/prod/sa/api   # san-uri mode
+s3adm cred unbind-cert --subject=alice
 ```
 
 ### 3.3 `website` — bucket static-website configuration

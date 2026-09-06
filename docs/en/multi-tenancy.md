@@ -230,6 +230,9 @@ dynamic/file credential without tenant      = legacy: every bucket on the data p
 dynamic/file credential with tenant=<id>    = tenant credential: only its tenant's buckets (then policy)
     role=admin                              + its tenant's admin plane (§4.4)
 STS session                                 inherits the parent's tenant, never admin
+mTLS client certificate (auth.tls_identity) acts as the credential bound in .sys/tls-identities: an
+                                            unsigned request inherits its policy / tenant / role, a signed
+                                            one must be of the same tenant (root exempt) — tls.md §2.1
 ```
 
 `tenant`/`role` are snapshotted at verify time together with the policy
@@ -327,6 +330,10 @@ Same JSON conventions as `/-/admin/credentials` (error body
 | `POST /-/admin/usage/{bucket}/rescan` | root / owner tenant's admin | synchronous full count, returns the result; concurrent scan `SlowDown` (503) |
 | `POST /-/admin/credentials` | root / tenant admin | body gains `"tenant"` (must exist, else `NoSuchTenant`) and `"role"` |
 | `PUT /-/admin/credentials/{ak}` | root / tenant admin | gains `"tenant"` (root only, `null` detaches) and `"role"` |
+| `GET /-/admin/tls-identities` | root | `{"mode","identities":[{subject,access_key,comment?,created_at,created_by}]}` ([tls.md §2.1](tls.md)) |
+| `GET /-/admin/tls-identities/{subject}` | root | one binding; unbound `NoSuchKey` (404). The subject travels in the path (percent-encoded, may contain `/`) or as `?subject=` |
+| `PUT /-/admin/tls-identities/{subject}` | root | `{"access_key","comment"?}` → 201 created / 200 replaced; the AK must exist (`InvalidAccessKeyId`) and must not be an STS session; subject = 1–256 bytes of printable text |
+| `DELETE /-/admin/tls-identities/{subject}` | root | unbind, idempotent 204 |
 
 ## 7. Configuration
 
@@ -344,13 +351,16 @@ audit:
 ```
 
 Multi-instance record sync reuses `auth.sync_interval` (the quota/tenant/owner
-stores and usage adoption all hang off it).
+stores, the tls-identities binding table and usage adoption all hang off it).
+The certificate identity switch `auth.tls_identity: off|subject-cn|san-uri` is
+described in [tls.md §2.1](tls.md).
 
 ## 8. CLI
 
 `s3adm quota get|set|clear <bucket>`, `s3adm tenant list|get|create|update|
 delete|assign|unassign`, `s3adm usage [bucket] [--rescan] [--tenant=]`,
-`s3adm cred create --tenant= --role=`; see [cli.md §3.6–§3.8](cli.md).
+`s3adm cred create --tenant= --role=`; see [cli.md §3.6–§3.8](cli.md); certificate
+bindings via `s3adm cred bind-cert|unbind-cert|list-certs` ([cli.md §3.2](cli.md)).
 
 ## 9. Tests
 

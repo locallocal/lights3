@@ -36,6 +36,8 @@ struct HttpRequest {
     HeaderMap   headers;
     std::string remote_addr;
     std::unique_ptr<BodyReader> body;   // may be nullptr (no body)
+    bool admin_face = false;            // accepted by the admin listener (http.admin_port, §2.1)
+    std::optional<TlsIdentity> tls_identity;  // verified client certificate {subject_cn, san_uri} (tls.md §2.1)
 };
 
 struct HttpResponse {

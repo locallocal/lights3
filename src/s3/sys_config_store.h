@@ -14,6 +14,11 @@
 //     static std::optional<Entry> deserialize(const std::string& bucket,
 //                                             const std::string& body);  // nullopt = malformed (skip + WARN)
 //     static bool differs(const Entry&, const Entry&);    // sync change detection
+//     // Optional pair: map key <-> object-key suffix. Default: identity. A store
+//     // whose keys are not bucket names (TLS certificate subjects carry '/', '=',
+//     // spaces, ...) encodes them so the object key stays a plain path segment
+//     static std::string encode_key(const std::string& key);
+//     static std::string decode_key(const std::string& suffix);
 //   };
 #pragma once
 
@@ -61,7 +66,7 @@ public:
             for (;;) {
                 auto page = co_await store->backend_->list_objects(kSysConfigBucket, opt);
                 for (auto& obj : page.objects) {
-                    std::string bucket = obj.key.substr(Traits::kPrefix.size());
+                    std::string bucket = decode_key(obj.key.substr(Traits::kPrefix.size()));
                     auto stream = co_await store->backend_->get_object(kSysConfigBucket,
                                                                        obj.key, std::nullopt);
                     auto body = co_await read_all(*stream.body);
@@ -161,7 +166,7 @@ public:
         for (;;) {
             auto page = co_await backend_->list_objects(kSysConfigBucket, opt);
             for (auto& obj : page.objects) {
-                std::string bucket = obj.key.substr(Traits::kPrefix.size());
+                std::string bucket = decode_key(obj.key.substr(Traits::kPrefix.size()));
                 try {
                     auto stream = co_await backend_->get_object(kSysConfigBucket, obj.key,
                                                                 std::nullopt);
@@ -224,7 +229,14 @@ private:
     static constexpr auto kTombstoneTtl = std::chrono::minutes(5);
 
     static std::string object_key(const std::string& bucket) {
-        return std::string(Traits::kPrefix) + bucket;
+        if constexpr (requires { Traits::encode_key(bucket); })
+            return std::string(Traits::kPrefix) + Traits::encode_key(bucket);
+        else
+            return std::string(Traits::kPrefix) + bucket;
+    }
+    static std::string decode_key(const std::string& suffix) {
+        if constexpr (requires { Traits::decode_key(suffix); }) return Traits::decode_key(suffix);
+        else return suffix;
     }
 
     void require_backend() const {

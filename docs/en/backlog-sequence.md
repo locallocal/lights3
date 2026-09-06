@@ -17,7 +17,7 @@ it from backlog.md §1, strike its row here and record the date.
 | 3 | A quick wins | ~~admin endpoint for scrub / fsck~~ **done (2026-09-05)** | low / low | 0.5 d | right after ②: the first new endpoint on the admin port, exercising the isolation |
 | 4 | B multi-instance consistency | ~~multi-instance STS session table~~ **done (2026-09-05)** | medium / medium | 2–3 d | the only feature that "breaks when the next request hits another instance"; reuses the credential sync mechanism, warm-up for ⑤ |
 | 5 | B multi-instance consistency | ~~cross-gateway meta cache invalidation~~ **done (2026-09-05)** | medium / high | 4–5 d | same theme as ④ (shared state across gateways), shares the two-instance e2e scaffolding; lifts the "cache off by default" restriction on shared redis meta |
-| 6 | C identity | mTLS client certificate → credential / tenant identity | medium / medium | 2–3 d | independent of B; the tenant model and `tls_client_auth` exist, only the binding rule is missing |
+| 6 | C identity | ~~mTLS client certificate → credential / tenant identity~~ **done (2026-09-06)** | medium / medium | 2–3 d | independent of B; the tenant model and `tls_client_auth` exist, only the binding rule is missing |
 | 7 | D operational depth | hot add / remove of backend instances | medium / high | 4–5 d | touches the Application lifecycle and routing-table replacement -- the riskiest item, after the multi-instance and identity lines settle |
 | 8 | D operational depth | duostore meta incremental backup / PITR | medium / high | 5+ d (per engine) | four engines, four natural small iterations; blocks nothing else |
 | 9 | E opportunistic | structured error codes upstream in client-c | low / medium | 1–2 d + upstream cycle | paced by an external project, fits any gap; no functional impact |
@@ -215,7 +215,7 @@ start ⑦ of phase D only after B has landed.
 | ③ | admin endpoint for scrub / fsck | done | 2026-09-05 / `feat/fsck-admin-endpoint` |
 | ④ | multi-instance STS session table | done | 2026-09-05 / `feat/sts-shared-sessions` |
 | ⑤ | cross-gateway meta cache invalidation | done | 2026-09-05 / `feat/redis-cache-invalidation` |
-| ⑥ | mTLS identity mapping | not started | |
+| ⑥ | mTLS identity mapping | done | 2026-09-06 / `feat/tls-identity` |
 | ⑦ | hot add / remove of backend instances | not started | |
 | ⑧ | duostore meta incremental backup / PITR | not started | |
 | ⑨ | client-c upstream contribution | not started | |

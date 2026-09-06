@@ -82,6 +82,9 @@ void Application::start_server() {
     // CORS rules (roadmap §2.1): dynamic-only (?cors API), persisted next to the
     // website entries in .sys
     cors_store_ = sync_wait(s3::CorsStore::load(router.default_backend()));
+    // mTLS identity bindings (backlog-sequence ⑥, docs/tls.md §2.1): the table is
+    // always loaded (root may prepare bindings before switching the mode on)
+    tls_identity_store_ = sync_wait(s3::TlsIdentityStore::load(router.default_backend()));
     // Lifecycle rules (roadmap §2.4): stored next to cors/website; the runner gets its
     // own router copy (S3Service owns the primary by value)
     lifecycle_store_ = sync_wait(s3::LifecycleStore::load(router.default_backend()));
@@ -110,6 +113,16 @@ void Application::start_server() {
     service_->set_credential_store(cred_store_);
     service_->set_website_store(website_store_);
     service_->set_cors_store(cors_store_);
+    service_->set_tls_identity_store(tls_identity_store_);
+    service_->set_tls_identity_mode(s3::S3Service::parse_tls_identity_mode(cfg_.auth.tls_identity));
+    if (cfg_.auth.tls_identity != "off") {
+        if (!auth_enabled)
+            LOG_WARN("auth.tls_identity={} but authentication is disabled: certificate "
+                     "bindings have nothing to map to", cfg_.auth.tls_identity);
+        else
+            LOG_INFO("mTLS identity mapping on ({}): {} binding(s) in .sys/tls-identities",
+                     cfg_.auth.tls_identity, tls_identity_store_->snapshot()->size());
+    }
     service_->set_lifecycle_store(lifecycle_store_);
     service_->set_usage_tracker(usage_);
     service_->set_quota_store(quota_store_);
@@ -125,6 +138,7 @@ void Application::start_server() {
     // Website/CORS entries share the same multi-instance sync knob (docs/static-website.md §4)
     website_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     cors_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+    tls_identity_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     lifecycle_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     quota_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     tenant_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
@@ -439,6 +453,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
             p.credentials_file_reload_sec != q.credentials_file_reload_sec,
         "auth.credentials_file/credentials_file_reload");
     cmp(p.sync_interval_sec != q.sync_interval_sec, "auth.sync_interval");
+    cmp(p.tls_identity != q.tls_identity, "auth.tls_identity");
     bool backends_differ = a.backends.size() != b.backends.size();
     for (size_t i = 0; !backends_differ && i < a.backends.size(); ++i)
         backends_differ = a.backends[i].name != b.backends[i].name ||

@@ -1,4 +1,4 @@
-// L3: TiKV implementation of IMetaStore (docs/duostore-tikv-meta.md).
+// L3: TiKV implementation of IMetaStore (docs/storage/duostore-meta-tikv-design.md).
 // Committing operations = snapshot read (start_ts) + mutation batch assembled in C++ +
 // optimistic 2PC commit (tikv_client sidecar); WriteConflict → take a new ts, re-read
 // and retry (§4.1). Write skew on read-only preconditions (bucket existence, emptiness

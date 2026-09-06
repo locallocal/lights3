@@ -223,7 +223,7 @@ local（stub sidecar 为权威）、cloudproxy 把 `If-None-Match`/`If-Match` �
 
 ### 2.7 [✅已修复] localfs LIST 无 prefix/delimiter 剪枝（文档声称有）
 
-**位置**：`src/storage/localfs/localfs_backend.cc:250-277`——不论 prefix/delimiter 是什么，一律 `recursive_directory_iterator` 全桶遍历 + 全部 key 收进 vector + 全排序。而 `docs/storage-backend.md:148-150` 明确声称"prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；delimiter=`/` 时目录即 common prefix，无需展开其内部"。
+**位置**：`src/storage/localfs/localfs_backend.cc:250-277`——不论 prefix/delimiter 是什么，一律 `recursive_directory_iterator` 全桶遍历 + 全部 key 收进 vector + 全排序。而 `docs/storage/storage-backend.md:148-150` 明确声称"prefix 剪枝（prefix 含 `/` 时直接定位起始目录）；delimiter=`/` 时目录即 common prefix，无需展开其内部"。
 
 **后果**：`?max-keys=1&prefix=a/b/c` 在 1000 万对象的桶上要 stat 1000 万次、构造 ~1GB 字符串、做一次 O(n log n) 排序，只为返回 1 个 key。并发 LIST 直接打爆 IO 池与内存。
 
@@ -990,7 +990,7 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 | `http-adapter.md §3.1` | Expect: 100-continue 延迟应答，认证失败可不收 body | httplib 驱动是立即应答（2.13），且该分歧被"测进"了契约 | 改实现，或在文档显式声明为该驱动的已知降级 |
 | `http-adapter.md §4` | 四驱动接受/拒绝的请求集合一致 | httplib 忽略 `max_header_size`（硬编码 8KiB）、只注册 6 个方法；连接上限只有 builtin 有；IPv6 只有 beast/httplib 支持（3.9） | 改实现 |
 | `http-adapter.md §3` | 驱动清单 3.1 Beast / 3.2 httplib / 3.3 Seastar / 3.4 CivetWeb | **默认驱动 builtin 未被文档收录**；`builtin_server.cc:2` 与 `seastar_server.cc:1` 的章节号引用还错位 | 改文档：补 §3.0 描述 builtin 的定位与限制，修正两处注释 |
-| `tiered-storage.md:126` | quota "遍历累计、增量维护" | 只有遍历累计（6.2） | 改实现或改文档 |
+| `tiered-design.md:126` | quota "遍历累计、增量维护" | 只有遍历累计（6.2） | 改实现或改文档 |
 | `credential-management.md §2` | 查询返回 SK 是"能力上无法避免" | 该论证对动态凭证成立，对**静态 root 凭证**不成立（5.10） | 改实现 |
 | `credential-management.md §7` | 吊销不影响已通过验签的在途请求 | 实际是 policy **完全消失**而非按原 policy 继续（3.7） | 改实现 |
 | `http-adapter.md §1` | （未提及 trailer 限制） | HTTP/1.1 chunked trailer 在 L1 被静默丢弃，模型无承接字段 | 改文档：写明 trailer 不进中立模型（S3 校验和走 body 内 aws-chunked） |
@@ -1064,15 +1064,15 @@ docs/credential-management.md §10.4 重写并新增 §10.5，中英同步；顺
 
 | 位置 | 问题 | 严重度 |
 | --- | --- | --- |
-| `docs/en/storage-backend.md:134-135` | 写着 `meta first, then data`——**正是被判定会造成静默损坏的旧实现**（中文版已改为"先数据后 sidecar"，`fs_util.cc:172-174` 的注释直接点名这一反序是静默损坏的成因）。照英文文档移植或新写后端会重新引入该缺陷 | **高** |
-| `docs/en/storage-backend.md` §3.1 | 整段缺失中文版新增的三条要点：元数据随数据 xattr 同批提交、提交段 per-key 锁、fsync 持久性。其中 **`LIGHTS3_FSYNC` 开关在英文文档里 0 处提及**（中文 1 处 + 代码 2 处）——这是唯一一处"一方有配置开关另一方完全没有"的漂移，且因为它是环境变量而非 yaml 键，机械比对抓不到 | **高** |
-| `docs/en/storage-backend.md:144-146` | GET 段仍写 `open + fstat + read sidecar`，缺 xattr 优先与"绝不对路径二次 stat"的铁律（对应 2.2 的修复） | 中 |
+| `docs/en/storage/storage-backend.md:134-135` | 写着 `meta first, then data`——**正是被判定会造成静默损坏的旧实现**（中文版已改为"先数据后 sidecar"，`fs_util.cc:172-174` 的注释直接点名这一反序是静默损坏的成因）。照英文文档移植或新写后端会重新引入该缺陷 | **高** |
+| `docs/en/storage/storage-backend.md` §3.1 | 整段缺失中文版新增的三条要点：元数据随数据 xattr 同批提交、提交段 per-key 锁、fsync 持久性。其中 **`LIGHTS3_FSYNC` 开关在英文文档里 0 处提及**（中文 1 处 + 代码 2 处）——这是唯一一处"一方有配置开关另一方完全没有"的漂移，且因为它是环境变量而非 yaml 键，机械比对抓不到 | **高** |
+| `docs/en/storage/storage-backend.md:144-146` | GET 段仍写 `open + fstat + read sidecar`，缺 xattr 优先与"绝不对路径二次 stat"的铁律（对应 2.2 的修复） | 中 |
 | `docs/object-read-write-flow.md:109-117` 与 `docs/en/*:130-143` | **中英双方**都还写着"sidecar 先于数据文件落位"，与同仓 `storage-backend.md:129` 直接矛盾 | 中 |
 | `docs/README.md:71-72` | 称 sidecar 用「`.meta` **JSON**」，实际是 `.lights3-meta` **TSV**（`fs_util.h:19`，`storage-backend.md:118` 自己就写对了）。英文 README 因措辞含糊反而没错 | 中 |
 | 全仓 16 处 | `docs/todo.md` 与 `docs/en/todo.md` 已删除，但正文引用残留 ZH 8 处 + EN 8 处（concurrency / architecture / cloudproxy-backend×2 / storage-backend×2 / s3-protocol / duostore-tikv-meta，中英各一份） | 低 |
 | `docs/README.zh-CN.md` | 缺仓库根 `README.md:184-205` 那段文档索引表；其余技术事实逐项一致 | 低 |
 
-**建议**：以 `docs/storage-backend.md` §3.1 为唯一参照，一次性同步 `docs/en/storage-backend.md` 与中英两份 `object-read-write-flow.md`；`todo.md` 的残留引用统一改为自述式描述。
+**建议**：以 `docs/storage/storage-backend.md` §3.1 为唯一参照，一次性同步 `docs/en/storage/storage-backend.md` 与中英两份 `object-read-write-flow.md`；`todo.md` 的残留引用统一改为自述式描述。
 
 **✅已修复**（2026-08-12，逐行）：
 

@@ -8,7 +8,7 @@
 | HTTP 库可插拔 | 更换 HTTP 库不触碰协议层与存储层代码 |
 | 高吞吐大对象 | 全链路流式传输，内存占用与对象大小无关 |
 | 后端可扩展 | 新增存储后端只需实现一个接口并注册工厂 |
-| 部署简单 | 单二进制 + 一个 YAML 配置文件；默认形态无外部服务依赖（duostore 后端可选接入外部 meta/data 服务：Redis/TiKV/Ceph，见 [storage-backend.md](storage-backend.md) §5） |
+| 部署简单 | 单二进制 + 一个 YAML 配置文件；默认形态无外部服务依赖（duostore 后端可选接入外部 meta/data 服务：Redis/TiKV/Ceph，见 [storage/storage-backend.md](storage/storage-backend.md) §5） |
 
 非目标（首期不做）：网关多节点集群（凭证面已有 `auth.sync_interval` 定期
 同步，见 [credential-management.md](credential-management.md) §10.3；
@@ -47,7 +47,7 @@ bucket versioning、Object Lock、事件通知。元数据/数据侧的多副本
 
 - `IHttpServer` / `HttpRequest` / `HttpResponse`：L1 与 L2 之间的边界
   （见 [http-adapter.md](http-adapter.md)）。
-- `IStorageBackend`：L2 与 L3 之间的边界（见 [storage-backend.md](storage-backend.md)）。
+- `IStorageBackend`：L2 与 L3 之间的边界（见 [storage/storage-backend.md](storage/storage-backend.md)）。
 
 L2 是纯逻辑层：不含任何 socket、epoll、具体 HTTP 库或存储 SDK 的头文件，
 可以在单元测试中用 mock 的 Http 模型和内存后端完整覆盖。
@@ -167,7 +167,7 @@ backends:
     root: /var/lib/lights3/data
     staging: /var/lib/lights3/staging     # multipart 暂存，需与 root 同文件系统
   - name: aws-archive
-    type: cloudproxy                      # 见 cloudproxy-backend.md
+    type: cloudproxy                      # 见 cloudproxy-design.md
     endpoint: https://s3.us-west-2.amazonaws.com
     region: us-west-2
     access_key: AKIA...
@@ -238,9 +238,9 @@ lights3/
 │       ├── memory/           #   内存后端（测试用）
 │       ├── localfs/          #   本地文件系统后端
 │       ├── xlocalfs/         #   localfs 的 io_uring 数据面变体
-│       ├── tiered/           #   分层存储组合后端（见 tiered-storage.md）
-│       ├── cloudproxy/       #   公有云代理后端（见 cloudproxy-backend.md）
-│       └── duostore/         #   元数据/数据分离引擎（见 duostore-backend.md）
+│       ├── tiered/           #   分层存储组合后端（见 tiered-design.md）
+│       ├── cloudproxy/       #   公有云代理后端（见 cloudproxy-design.md）
+│       └── duostore/         #   元数据/数据分离引擎（见 duostore-design.md）
 ├── tests/
 │   ├── unit/                 # L2/L3 纯逻辑测试（mock http + 内存后端）
 │   └── e2e/                  # 起真实进程，用 aws cli 打请求

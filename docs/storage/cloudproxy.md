@@ -1,6 +1,6 @@
 # CloudProxy 后端实现详解
 
-> 本文是 [../cloudproxy-backend.md](../cloudproxy-backend.md)（设计文档，含路线决策、
+> 本文是 [cloudproxy-design.md](cloudproxy-design.md)（设计文档，含路线决策、
 > 目标/非目标、测试策略）的实现级配套文档：以代码为准逐一说明
 > `src/storage/cloudproxy/cloudproxy_backend.h/.cc` 与
 > `src/storage/cloudproxy/remote_client.h/.cc` 的内部结构、请求流、错误映射、

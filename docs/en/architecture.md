@@ -10,7 +10,7 @@
 | Pluggable HTTP library | Swapping the HTTP library touches neither the protocol-layer nor the storage-layer code |
 | High-throughput large objects | Streaming across the whole pipeline; memory footprint is independent of object size |
 | Extensible backends | Adding a storage backend only requires implementing one interface and registering a factory |
-| Simple deployment | Single binary + one YAML config file; the default form has no external service dependencies (the duostore backend can optionally attach external meta/data services: Redis/TiKV/Ceph, see [storage-backend.md](storage-backend.md) §5) |
+| Simple deployment | Single binary + one YAML config file; the default form has no external service dependencies (the duostore backend can optionally attach external meta/data services: Redis/TiKV/Ceph, see [storage/storage-backend.md](storage/storage-backend.md) §5) |
 
 Non-goals (not in the first phase): multi-node gateway cluster (the credential
 plane already has periodic sync via `auth.sync_interval`, see
@@ -57,7 +57,7 @@ There are two interfaces at the core decoupling points:
 
 - `IHttpServer` / `HttpRequest` / `HttpResponse`: the boundary between L1 and L2
   (see [http-adapter.md](http-adapter.md)).
-- `IStorageBackend`: the boundary between L2 and L3 (see [storage-backend.md](storage-backend.md)).
+- `IStorageBackend`: the boundary between L2 and L3 (see [storage/storage-backend.md](storage/storage-backend.md)).
 
 L2 is a pure-logic layer: it contains no socket, epoll, concrete HTTP library,
 or storage SDK headers, and can be fully covered in unit tests with mocked
@@ -188,7 +188,7 @@ backends:
     root: /var/lib/lights3/data
     staging: /var/lib/lights3/staging     # multipart staging, must be on the same filesystem as root
   - name: aws-archive
-    type: cloudproxy                      # see cloudproxy-backend.md
+    type: cloudproxy                      # see cloudproxy-design.md
     endpoint: https://s3.us-west-2.amazonaws.com
     region: us-west-2
     access_key: AKIA...
@@ -259,9 +259,9 @@ lights3/
 │       ├── memory/           #   in-memory backend (for tests)
 │       ├── localfs/          #   local filesystem backend
 │       ├── xlocalfs/         #   io_uring data-plane variant of localfs
-│       ├── tiered/           #   tiered-storage composite backend (see tiered-storage.md)
-│       ├── cloudproxy/       #   public-cloud proxy backend (see cloudproxy-backend.md)
-│       └── duostore/         #   metadata/data split engine (see duostore-backend.md)
+│       ├── tiered/           #   tiered-storage composite backend (see tiered-design.md)
+│       ├── cloudproxy/       #   public-cloud proxy backend (see cloudproxy-design.md)
+│       └── duostore/         #   metadata/data split engine (see duostore-design.md)
 ├── tests/
 │   ├── unit/                 # L2/L3 pure-logic tests (mock http + in-memory backend)
 │   └── e2e/                  # start a real process, drive requests with the aws cli

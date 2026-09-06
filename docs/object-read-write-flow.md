@@ -3,7 +3,7 @@
 本文按"一个字节从 socket 到磁盘（写），再从磁盘回到 socket（读）"的视角，串联
 HTTP Adapter 层（L1）、S3 Protocol 层（L2）、Storage 层（L3）三层的实际代码路径。
 分层职责见 [architecture.md](architecture.md)，各层内部细节见
-[http-adapter.md](http-adapter.md)/[storage-backend.md](storage-backend.md)/[s3-protocol.md](s3-protocol.md)。
+[http-adapter.md](http-adapter.md)/[storage/storage-backend.md](storage/storage-backend.md)/[s3-protocol.md](s3-protocol.md)。
 
 贯穿全文的核心抽象只有一个：**`http::BodyReader` 流式拉接口**
 （`src/http/model.h`）。请求体和响应体在三层之间都以它传递，
@@ -115,7 +115,7 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 
 - **ETag = 整体内容 MD5**（hex，不带引号存储，出口统一加引号）。
 - **先数据后 sidecar**（元数据已随 xattr 同 rename 提交，见
-  [storage-backend.md](storage-backend.md) §3.1）：反序的崩溃窗口是
+  [storage/storage-backend.md](storage/storage-backend.md) §3.1）：反序的崩溃窗口是
   "sidecar 新 etag + 数据仍旧"——GET 返回的 body 与 ETag 不符，静默损坏；
   本序仅余"数据新 + sidecar 旧"的窗口，而读侧 xattr 优先、sidecar 只是回落，
   该窗口对支持 xattr 的文件系统不可见。提交段有 per-key 锁，两次 rename
@@ -137,7 +137,7 @@ require_bucket()                    ← 无 marker 则 NoSuchBucket
 - **CopyObject**（`objects.cc:copy_object`）：服务端拼管道——源后端
   `get_object()` 得到流，直接作为目标后端 `put_object()` 的 body，
   跨后端复制同样零整体缓冲；`x-amz-copy-source-if-*` 先于复制校验。
-- **Multipart**（详见 docs/storage-backend.md §3.2、docs/s3-protocol.md §1）：`upload_part` 与 PUT 完全同构
+- **Multipart**（详见 docs/storage/storage-backend.md §3.2、docs/s3-protocol.md §1）：`upload_part` 与 PUT 完全同构
   （staging 流式写 + 分片 MD5，先写 `part.NNNNN.md5` 再 rename 数据文件，
   同号重传 last-write-wins）；`complete_multipart` 校验各分片 ETag 后按声明顺序
   拼接到新 tmp，总 ETag = `md5(各分片 md5 二进制拼接)-N`，最后走同一个

@@ -1,5 +1,5 @@
-// Backend conformance suite (docs/storage-backend.md §6): the same set of cases runs parameterized over all IStorageBackend implementations.
-// Extracted from test_storage.cc, reused by test_cloudproxy.cc (docs/cloudproxy-backend.md §10).
+// Backend conformance suite (docs/storage/storage-backend.md §6): the same set of cases runs parameterized over all IStorageBackend implementations.
+// Extracted from test_storage.cc, reused by test_cloudproxy.cc (docs/storage/cloudproxy-design.md §10).
 #pragma once
 
 #include <unistd.h>
@@ -293,7 +293,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK(!p3.is_truncated);
     CHECK(p1.objects[1].key < p2.objects[0].key);
 
-    // multipart: part upload - assembly - overall ETag rule (docs/storage-backend.md §1/§3.2)
+    // multipart: part upload - assembly - overall ETag rule (docs/storage/storage-backend.md §1/§3.2)
     ObjectMeta mmeta;
     mmeta.content_type = "application/x-mpu";
     mmeta.user_meta["origin"] = "suite";

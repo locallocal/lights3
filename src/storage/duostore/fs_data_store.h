@@ -1,4 +1,4 @@
-// L3: local-filesystem implementation of IDataStore (docs/duostore-backend.md §5).
+// L3: local-filesystem implementation of IDataStore (docs/storage/duostore-design.md §5).
 // Chunk path (fixed-size slicing + shard directories, P1) + pack aggregation
 // (append-only records, P2).
 #pragma once

@@ -1,12 +1,12 @@
 # TikvMetaStore：DuoStore 元数据的 TiKV 实现
 
 本文是 `TikvMetaStore` 与其 2PC 侧车 `TikvClient` 的实现级文档，展开
-[../duostore-tikv-meta.md](../duostore-tikv-meta.md)（下称"设计文档"）的方案在代码中的
+[duostore-meta-tikv-design.md](duostore-meta-tikv-design.md)（下称"设计文档"）的方案在代码中的
 具体落法——client-c 选型调研、构建/依赖矩阵、配置与测试策略见设计文档，本文只讲
-代码层。DuoStoreBackend 主体见 [./duostore-core.md](./duostore-core.md)；姊妹实现见
-[./duostore-meta-rocksdb.md](./duostore-meta-rocksdb.md)、
-[./duostore-meta-sqlite.md](./duostore-meta-sqlite.md) 与
-[./duostore-meta-redis.md](./duostore-meta-redis.md)。涉及文件：
+代码层。DuoStoreBackend 主体见 [./duostore-core.md](duostore-core.md)；姊妹实现见
+[./duostore-meta-rocksdb.md](duostore-meta-rocksdb.md)、
+[./duostore-meta-sqlite.md](duostore-meta-sqlite.md) 与
+[./duostore-meta-redis.md](duostore-meta-redis.md)。涉及文件：
 
 | 文件 | 内容 |
 | --- | --- |

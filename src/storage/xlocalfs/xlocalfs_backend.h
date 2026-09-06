@@ -1,4 +1,4 @@
-// L3: xlocalfs -- io_uring data-plane variant of localfs (see docs/storage-backend.md §3.3).
+// L3: xlocalfs -- io_uring data-plane variant of localfs (see docs/storage/storage-backend.md §3.3).
 // Disk layout and metadata logic are fully reused from LocalFsBackend; the byte transfers in
 // GET streaming reads, PUT/part streaming writes, and complete-time concatenation go through
 // io_uring with multiple ops in flight per stream (uring_stream.h read-ahead / pipelined

@@ -188,7 +188,7 @@ localfs / xlocalfs / tiered / cloudproxy / duostore 默认共享此池。
 部署的正确选择，隔离是"确认了饿死征兆（等待时长直方图右移）再开"的
 定向手段——判据直接读 `/-/metrics` 的 `lights3_pool_wait_seconds`
 （右移即饿死征兆）；cloudproxy 另有私有 pump 线程的局部规避，见
-[cloudproxy-backend.md](cloudproxy-backend.md) §2.3。专属池随后端
+[cloudproxy-design.md](storage/cloudproxy-design.md) §2.3。专属池随后端
 shared_ptr 存亡（析构即 join）；观测指标
 `lights3_backend_pool_{threads,queue_depth,backlogged,completed}` 挂
 backend 标签经后端注册表暴露，与全局池的无标签 `lights3_pool_*` 名字
@@ -273,7 +273,7 @@ body 读抛异常、响应写失败即丢弃结果，L2/L3 靠 RAII 回卷；不
 - `pool.schedule(token)`：排队中被取消 → 立即以异常 resume（§3.2）；
 - 流式读写的每块之间：`token.throw_if_cancelled()`；
 - cloudproxy 的远端流：reader 析构即中止远端传输
-  （见 [cloudproxy-backend.md](cloudproxy-backend.md) §3.1）。
+  （见 [cloudproxy-design.md](storage/cloudproxy-design.md) §3.1）。
 
 ### 5.3 TimerQueue（core/timer.h）
 
@@ -294,7 +294,7 @@ auto maybe = sem.try_acquire();         // 非阻塞：无许可立即 nullopt�
 ```
 
 `try_acquire` 供"已持一份、还想再拿一份"的调用方（rados 双缓冲流水，
-duostore-rados-data.md §4.2）：嵌套的阻塞 acquire 会在全员各持一份时
+duostore-data-rados-design.md §4.2）：嵌套的阻塞 acquire 会在全员各持一份时
 互等死锁，try 语义把第二份降级为"拿得到就流水，拿不到就串行"。
 
 实现要点：
@@ -310,9 +310,9 @@ duostore-rados-data.md §4.2）：嵌套的阻塞 acquire 会在全员各持一�
 | 位置 | 用途 |
 | --- | --- |
 | `main.cc` dispatch 入口 | `runtime.max_inflight_requests` 全局限流，超限请求排队而非拒绝；等待者经池 executor 唤醒。流式响应的 Permit 系在 `stream_body` 上（最外层包装），驱动读完/断连丢弃时才归还——限流覆盖响应传输全程，而非只覆盖 handler 协程帧；关停排空按 `available()` 判在途，因此也数得到流式传输中的请求 |
-| tiered `transfers_` | `max_concurrent_transfers`：下沉/回迁的并发传输上限（见 [tiered-storage.md](tiered-storage.md) §5.1） |
-| tiered `key_locks_` | permits=1 当异步互斥用：striped per-key 锁，只保护状态提交段（见 [tiered-storage.md](tiered-storage.md) §7.3） |
-| rados `buffer_sem_` | `rados_buffer_total` 写缓冲总额度：首份阻塞 acquire（背压），双缓冲第二份 try_acquire（见 [duostore-rados-data.md](duostore-rados-data.md) §4.2） |
+| tiered `transfers_` | `max_concurrent_transfers`：下沉/回迁的并发传输上限（见 [tiered-design.md](storage/tiered-design.md) §5.1） |
+| tiered `key_locks_` | permits=1 当异步互斥用：striped per-key 锁，只保护状态提交段（见 [tiered-design.md](storage/tiered-design.md) §7.3） |
+| rados `buffer_sem_` | `rados_buffer_total` 写缓冲总额度：首份阻塞 acquire（背压），双缓冲第二份 try_acquire（见 [duostore-data-rados-design.md](storage/duostore-data-rados-design.md) §4.2） |
 
 此外：每连接串行处理（HTTP/1.1 pipelining 不并行执行）由 driver 保证；
 线程池的有界队列 + backlog（§3.1）是最底层的第二道闸门。

@@ -1,4 +1,4 @@
-// L3: RocksDB implementation of IMetaStore (docs/duostore-backend.md §4).
+// L3: RocksDB implementation of IMetaStore (docs/storage/duostore-design.md §4).
 // Commit-type operations = a single WriteBatch (§4.5); compound cross-key
 // invariants are serialized with one std::mutex, while pure reads (get/list, via
 // snapshot) take no lock.
@@ -28,7 +28,7 @@ struct RocksMetaOptions {
     std::string path;
     bool sync = true;                        // whether commits WAL-fsync (§6.3 meta_sync)
     size_t block_cache_bytes = 64ull << 20;
-    // Tuning knobs exposed (P5, docs/duostore-backend.md §11); defaults = RocksDB's
+    // Tuning knobs exposed (P5, docs/storage/duostore-design.md §11); defaults = RocksDB's
     // own defaults, so existing deployments keep their behavior. Compression is
     // always off (§13.3) and not exposed
     size_t write_buffer_bytes = 64ull << 20;  // memtable capacity per CF

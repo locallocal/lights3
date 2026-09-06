@@ -55,7 +55,7 @@
 | Bucket Policy（IAM 语言） | per-credential policy 已覆盖多租户隔离，匿名公开桶由 website 面解决；IAM 求值器是独立子系统，投入不成比例 |
 | SigV2 | AWS 已停用，客户端基本绝迹 |
 | presigned POST | 需先写半个 multipart/form-data 流式解析器；CORS + presigned PUT 是更现代的替代路径 |
-| cloudproxy 出方向 streaming 签名上传 | 复杂度高、收益仅是明文 HTTP 下的完整性（[cloudproxy-backend.md](../cloudproxy-backend.md)） |
+| cloudproxy 出方向 streaming 签名上传 | 复杂度高、收益仅是明文 HTTP 下的完整性（[cloudproxy-design.md](../storage/cloudproxy-design.md)） |
 | rados 数据面 pack 层 | 代码内长注释已论证为设计边界（小对象放大交给 BlueStore `min_alloc_size`） |
 | CivetWeb 等新 HTTP 驱动 | 四驱动已覆盖设计空间（[http-adapter.md §3.4](../http-adapter.md)） |
 | GitHub Actions CI | 项目已明确移除、不使用；自动化投入放在本地脚本矩阵（`scripts/check-all.sh`，[testing.md §8](../testing.md)） |

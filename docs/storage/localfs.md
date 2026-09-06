@@ -1,7 +1,7 @@
 # LocalFs 后端实现
 
 本文是 `LocalFsBackend` 的实现级文档，展开
-[../storage-backend.md](../storage-backend.md) §3 的设计决策在代码中的具体落法。
+[storage-backend.md](storage-backend.md) §3 的设计决策在代码中的具体落法。
 读写主链路（三层视角）见
 [../object-read-write-flow.md](../object-read-write-flow.md) §2.3/§3.2，本文只讲
 L3 内部。涉及文件：
@@ -14,11 +14,11 @@ L3 内部。涉及文件：
 
 xlocalfs 继承本类、只覆盖数据面字节搬运（io_uring）；tiered 通过
 `localfs_backend.h:LocalFsBackend::root()/staging()/object_data_path()` 直接复用同一磁盘布局
-（见 [../tiered-storage.md](../tiered-storage.md)）。
+（见 [tiered-design.md](tiered-design.md)）。
 
 ## 1. 磁盘布局与 key → 路径映射
 
-布局总览见 [../storage-backend.md](../storage-backend.md) §3.1。保留名常量集中在
+布局总览见 [storage-backend.md](storage-backend.md) §3.1。保留名常量集中在
 `fs_util.h`：
 
 | 常量 | 值 | 作用 |
@@ -386,7 +386,7 @@ GET 的 body 传输阶段每块各自 hop 一次池（`FdStreamReader::read`）�
 | `fs_util.cc:set_meta_xattr` / `get_meta_xattr` | 元数据 xattr 写（返回是否成功；失败降级+限流告警+策略计数，`required` 下抛错）/ 读（ERANGE 重取，缺失回落 sidecar） |
 | `fs_util.cc:load_object_meta`(`_stat`) | stat/复用 stat + xattr→sidecar 元数据读；缺失 → `NoSuchKey` |
 | `fs_util.h:StubRace` | GET 期间对象被 stub 化的竞态信号（tiered 捕获重试） |
-| `fs_util.cc:commit_stub` / `commit_cached` | tiered 的 stub 化/缓存回填提交（顺序互为镜像，见 [../tiered-storage.md](../tiered-storage.md) §5/§6） |
+| `fs_util.cc:commit_stub` / `commit_cached` | tiered 的 stub 化/缓存回填提交（顺序互为镜像，见 [tiered-design.md](tiered-design.md) §5/§6） |
 | `fs_util.cc:FdStreamReader` | pread 流式读（§4） |
 | `fs_util.cc:part_file_name` | `part.%05d` |
 | `fs_util.cc:load_manifest` / `require_upload` | mpu 校验链（§7），任何不符 → `NoSuchUpload` |

@@ -1,5 +1,5 @@
 # compose profile `tikv`: duostore with its metadata in the pd0/tikv0 services
-# (docs/duostore-tikv-meta.md); needs the image built with LIGHTS3_TIKV=ON
+# (docs/storage/duostore-meta-tikv-design.md); needs the image built with LIGHTS3_TIKV=ON
 http:
   driver: builtin
   bind: 0.0.0.0

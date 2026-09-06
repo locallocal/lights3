@@ -146,7 +146,7 @@ waiter 挂起等 release 交接，TimerQueue 兑现超时契约，不停池线�
 会话 token 进签名、到期前 5min 续期、负缓存 60s，`imds_endpoint` 可指测试
 桩）。COPY 顺带纳入重试（幂等 PUT）。见
 [storage/cloudproxy.md](../storage/cloudproxy.md) §2.3.1/§2.4/§7.2、
-[cloudproxy-backend.md](../cloudproxy-backend.md) §5.2/§7/§8.1。
+[cloudproxy-design.md](../storage/cloudproxy-design.md) §5.2/§7/§8.1。
 
 ### 3.4 ~~xlocalfs：io_uring 的未兑现收益~~ **已完成（2026-09-01，五项全部）**
 
@@ -215,7 +215,7 @@ glob → `cold_after`，`never` 钉住，config.cc 把后端下的 map 列表拍
 无 xattr 与 duostore 的兜底）。⑦ `range_cache`：`<state>/rcache/` 稀疏文件 +
 位图，Range 命中块对齐超集回填、全命中本地服务、尾块同 read 吸完，
 PUT/回填/换代失效，水位淘汰当 rank 0 残留。见
-[tiered-storage.md](../tiered-storage.md) §4.3/§5.1/§6.3/§9、
+[tiered-design.md](../storage/tiered-design.md) §4.3/§5.1/§6.3/§9、
 [storage/tiered.md](../storage/tiered.md) §3/§4.1/§5.4/§11。
 
 ### 3.7 duostore 残留 **已完成（2026-09-03，全部五项）**
@@ -224,7 +224,7 @@ PUT/回填/换代失效，水位淘汰当 rank 0 残留。见
 | --- | --- |
 | ~~`DuoGcStats` 接入 metrics~~ | 早在 gaps §6.1 已全量接线（`lights3_duostore_gc_*` 计数器/gauge 族，完整轮末折算），本表此前未更新；本次仅清掉陈旧头注释 |
 | ~~损坏 pack 隔离区~~ | 连续 3 次"corrupt>0 且零迁移且账目不动"入持久化隔离账本（`<root>/quarantine/`），停冷却重扫；账目一动自动释放；CLI `lights3 duostore quarantine list\|release\|purge` + `packs_quarantined` gauge（duostore-core.md §8.6） |
-| ~~TiKV 事务层生产化~~ | "自建 2PC 层"选项早已由 tikv_client sidecar 落地（乐观 2PC、Put/Del/Lock/Insert 四 op、kvrpcpb 结构化冲突分类＋字符串匹配仅作纵深、Undetermined 禁盲重试），头注释里 "test-grade" 指上游 client-c 而非本仓实现，本表此前误读；向上游贡献结构化错误码仍是可选项（duostore-tikv-meta.md：上游 PR 列为 T5 遗留） |
+| ~~TiKV 事务层生产化~~ | "自建 2PC 层"选项早已由 tikv_client sidecar 落地（乐观 2PC、Put/Del/Lock/Insert 四 op、kvrpcpb 结构化冲突分类＋字符串匹配仅作纵深、Undetermined 禁盲重试），头注释里 "test-grade" 指上游 client-c 而非本仓实现，本表此前误读；向上游贡献结构化错误码仍是可选项（duostore-meta-tikv-design.md：上游 PR 列为 T5 遗留） |
 | ~~多网关 read-lease~~ | 各网关周期发布"最老在途读开始时间"（redis SET PX / tikv 'L' 表，TTL 崩溃自愈；本地引擎 unsupported 即停摆），GC 只回收 `enqueue_ms < 全体最小租约` 的 gcq 项与见空早于下限的空 pack；孤儿扫描改为跳过 gcq 在途 chunk 以关闭同一竞态（duostore-core.md §8.5） |
 | ~~meta 在线备份~~ | dump 走 `IMetaStore::snapshot()` 一致性视图（rocksdb Snapshot / sqlite WAL 读事务 / tikv 固定 TSO），写不停机；redis 无 MVCC 保持停写契约并 WARN；load 契约不变（duostore-core.md §11）。增量/PITR 仍为未做的后续方向 |
 

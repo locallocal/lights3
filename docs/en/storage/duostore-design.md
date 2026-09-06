@@ -1,6 +1,6 @@
 # DuoStore: A Storage Engine Backend with Metadata/Data Separation
 
-> English translation of [../duostore-backend.md](../duostore-backend.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/duostore-design.md](../../storage/duostore-design.md). The Chinese original is authoritative; section numbering matches.
 
 > Status: P1-P5 all complete (dual interfaces + full RocksMetaStore + chunk/pack
 > data path + GC phases one and two (compaction/orphan scan/crash injection) +
@@ -73,7 +73,7 @@ duplicated across implementations, minimized with shared helpers
   after that), so compound meta operations complete in a single hop. Network
   meta making synchronous calls on pool threads is the same pattern as
   cloudproxy running synchronous httplib on pool threads
-  ([concurrency.md](concurrency.md) §1).
+  ([concurrency.md](../concurrency.md) §1).
 - **IDataStore is coroutine-based** (Task<T>): the data plane must interleave
   streaming writes with the coroutine read loop of `http::BodyReader`; and the
   foreseeable alternative implementations (an io_uring version mirroring
@@ -226,7 +226,7 @@ u8 ver | u64 size | u64 mtime_ms | u64 version | str etag | str content_type
 v2 appends the first-class metadata section `u16 n_std | (str k, str v)*` after
 n_meta; v3 (roadmap §3.6 ⑥) appends `u8 tier | str remote_etag | str remote_at`
 — the object's state when duostore serves as a tiered hot tier (a stub is
-tier=remote with no runs), see [storage/tiered.md §11](../storage/tiered.md).
+tier=remote with no runs), see [storage/tiered.md §11](../../storage/tiered.md).
 Readers accept v1–v3, writers always emit v3.
 
 ### 4.3 extent run encoding
@@ -574,7 +574,7 @@ parses centrally with range validation (modeled on cloudproxy); `parse_size` /
 | pack_max_size | 128MiB | active-pack sealing threshold (= compaction rewrite unit) |
 | pack_writers | 4 | number of concurrent active packs |
 | pack_gc_ratio | 0.5 | compaction triggers when the liveness ratio falls below this |
-| gc_enabled | true | master switch for the background GC worker + orphan-scan scheduling; set false on non-designated instances in multi-gateway deployments (single-instance execution constraint, duostore-rados-data.md §8.3); manual hooks are not gated |
+| gc_enabled | true | master switch for the background GC worker + orphan-scan scheduling; set false on non-designated instances in multi-gateway deployments (single-instance execution constraint, duostore-data-rados-design.md §8.3); manual hooks are not gated |
 | gc_interval / gc_grace | 5m / 5m | reclaim period / delayed-deletion grace |
 | read_lease | 5s | multi-gateway read-lease publish period (roadmap §3.7, storage/duostore-core.md §8.5): every gateway publishes its oldest in-flight read start time to the shared meta (redis/tikv); GC only reclaims entries every peer's in-flight read provably cannot reference; 0 = off; local engines (rocksdb/sqlite) stand the publisher down automatically at no cost |
 | meta_cache_entries | 64K (rocksdb/sqlite) / 0 (redis/tikv) | object metadata cache budget (roadmap §3.8, storage/duostore-core.md §7.1): a GET/HEAD hit costs no meta round trip; 0 = off. Exact invalidation on local engines; shared engines need `meta_cache_ttl` to enable it |
@@ -595,9 +595,9 @@ let the two sides be replaced independently:
 
 | Side | Implementation | Integration |
 | --- | --- | --- |
-| meta | redis / TiKV (meta shared across gateways; both implemented) | implement IMetaStore: the synchronous client is simply called on pool threads (§2.2); transaction invariants are expressed with each system's primitives (redis MULTI/Lua, TiKV transactions) — the semantic-level interface assumes no ordered KV, which is exactly why §2.1 chose A. Detailed Redis design in [duostore-redis-meta.md](duostore-redis-meta.md), detailed TiKV investigation in [duostore-tikv-meta.md](duostore-tikv-meta.md) |
-| meta | SQLite (single-file deployment, implemented) | same as above, with SQL transactions. Detailed design in [duostore-sqlite-meta.md](duostore-sqlite-meta.md) |
-| data | Ceph / RADOS (implemented) | implement IDataStore: add `Extent::Kind::kRados` (file_id maps to a rados object name), zero meta-layer changes; the librados async API fits the coroutine interface naturally. Detailed investigation in [duostore-rados-data.md](duostore-rados-data.md) |
+| meta | redis / TiKV (meta shared across gateways; both implemented) | implement IMetaStore: the synchronous client is simply called on pool threads (§2.2); transaction invariants are expressed with each system's primitives (redis MULTI/Lua, TiKV transactions) — the semantic-level interface assumes no ordered KV, which is exactly why §2.1 chose A. Detailed Redis design in [duostore-meta-redis-design.md](duostore-meta-redis-design.md), detailed TiKV investigation in [duostore-meta-tikv-design.md](duostore-meta-tikv-design.md) |
+| meta | SQLite (single-file deployment, implemented) | same as above, with SQL transactions. Detailed design in [duostore-meta-sqlite-design.md](duostore-meta-sqlite-design.md) |
+| data | Ceph / RADOS (implemented) | implement IDataStore: add `Extent::Kind::kRados` (file_id maps to a rados object name), zero meta-layer changes; the librados async API fits the coroutine interface naturally. Detailed investigation in [duostore-data-rados-design.md](duostore-data-rados-design.md) |
 | data | io_uring FsDataStore (not implemented) | following xlocalfs's approach: swap the data plane's IO engine, layout unchanged |
 
 Combination matrix: RocksDB+local disk (first phase), TiKV+Ceph (fully

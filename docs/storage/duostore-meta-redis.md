@@ -1,12 +1,12 @@
 # RedisMetaStore：DuoStore 元数据的 Redis 实现
 
 本文是 `RedisMetaStore` 的实现级文档，展开
-[../duostore-redis-meta.md](../duostore-redis-meta.md)（下称"设计文档"）的方案在代码中的
+[duostore-meta-redis-design.md](duostore-meta-redis-design.md)（下称"设计文档"）的方案在代码中的
 具体落法——选型论证、构建接入、配置与测试策略见设计文档，本文只讲代码层的契约与算法。
-DuoStoreBackend 主体见 [./duostore-core.md](./duostore-core.md)；姊妹实现见
-[./duostore-meta-rocksdb.md](./duostore-meta-rocksdb.md)、
-[./duostore-meta-sqlite.md](./duostore-meta-sqlite.md) 与
-[./duostore-meta-tikv.md](./duostore-meta-tikv.md)。涉及文件：
+DuoStoreBackend 主体见 [./duostore-core.md](duostore-core.md)；姊妹实现见
+[./duostore-meta-rocksdb.md](duostore-meta-rocksdb.md)、
+[./duostore-meta-sqlite.md](duostore-meta-sqlite.md) 与
+[./duostore-meta-tikv.md](duostore-meta-tikv.md)。涉及文件：
 
 | 文件 | 内容 |
 | --- | --- |

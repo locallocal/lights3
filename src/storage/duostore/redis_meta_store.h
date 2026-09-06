@@ -1,4 +1,4 @@
-// L3: Redis implementation of IMetaStore (docs/duostore-redis-meta.md).
+// L3: Redis implementation of IMetaStore (docs/storage/duostore-meta-redis-design.md).
 // Commit-class operations = one generic guarded-commit Lua script (check-and-commit) + client-
 // side optimistic CAS retry (§3.2); the script executes atomically on the single-threaded Redis
 // server — script atomicity is global atomicity, so multiple gateways sharing one redis share
@@ -94,7 +94,7 @@ public:
                       const DataRef& from, const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
-    // Invalidation feed (backlog-sequence ⑤, docs/duostore-redis-meta.md §3.6): every
+    // Invalidation feed (backlog-sequence ⑤, docs/storage/duostore-meta-redis-design.md §3.6): every
     // commit that changes an object record PUBLISHes "<bucket>\0<key>" on <prefix>inv
     // from inside the commit script (atomic with the write, no extra round trip);
     // this starts a dedicated subscriber connection + thread that feeds on_key, calls

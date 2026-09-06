@@ -1,17 +1,17 @@
 # RadosDataStore: DuoStore Data Storage on Ceph/RADOS
 
-> English translation of [../duostore-rados-data.md](../duostore-rados-data.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/duostore-data-rados-design.md](../../storage/duostore-data-rados-design.md). The Chinese original is authoritative; section numbering matches.
 
 > Status: C1-C4 implemented (`src/storage/duostore/rados_data_store.{h,cc}`,
 > CMake option `LIGHTS3_DUOSTORE_RADOS_DATA`, all completed 2026-07-30, §12).
 > Delivers the evolution promise of
-> [duostore-backend.md](duostore-backend.md) §12: swap the data side to Ceph by
+> [duostore-design.md](duostore-design.md) §12: swap the data side to Ceph by
 > implementing `IDataStore` (`src/storage/duostore/data_store.h`); the data
 > plane moves from a single-node filesystem to a RADOS distributed object
 > pool, with replication/EC, rebalancing on expansion, and self-healing all
 > handled by Ceph. Client library: the librados **C API** (discovered as a
 > system package, not a submodule, §9). In this document "the main document"
-> means duostore-backend.md, and an unprefixed `§N` refers to sections of this
+> means duostore-design.md, and an unprefixed `§N` refers to sections of this
 > document.
 
 ## 1. Goals and Non-Goals
@@ -83,7 +83,7 @@ movement payoff is preserved intact**.
 - **namespace** (`rados_namespace`, default empty): cheap logical isolation
   inside a pool — multiple backend instances / multiple test runs share one
   pool without seeing each other; its role corresponds to redis-meta's
-  `redis_prefix` ([duostore-redis-meta.md](duostore-redis-meta.md) §2.1), and
+  `redis_prefix` ([duostore-meta-redis-design.md](duostore-meta-redis-design.md) §2.1), and
   test isolation relies on it (§11).
 
 ### 3.3 A single path: pack aggregation dropped

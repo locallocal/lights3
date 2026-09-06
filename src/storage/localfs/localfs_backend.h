@@ -1,4 +1,4 @@
-// L3: local filesystem backend (see docs/storage-backend.md §3)
+// L3: local filesystem backend (see docs/storage/storage-backend.md §3)
 // Layout: <root>/<bucket>/<key path>, sidecar metadata <data>.lights3-meta,
 // PUT writes via <staging>/put/<uuid> then lands atomically with rename.
 #pragma once
@@ -152,7 +152,7 @@ public:
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
     // multipart: parts land in <staging>/mpu/<upload_id>/part.NNNNN, complete concatenates
-    // and then takes the same atomic rename commit as PUT (docs/storage-backend.md §3.2)
+    // and then takes the same atomic rename commit as PUT (docs/storage/storage-backend.md §3.2)
     Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
                                        ObjectMeta meta) override;
     using IStorageBackend::upload_part;
@@ -202,7 +202,7 @@ public:
     static constexpr const char* kSidecarSuffix = fsutil::kSidecarSuffix;
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
 
-    // ---- Layout access needed by composite backends (tiered, docs/tiered-storage.md §2) ----
+    // ---- Layout access needed by composite backends (tiered, docs/storage/tiered-design.md §2) ----
     const std::filesystem::path& root() const { return root_; }
     const std::filesystem::path& staging() const { return staging_; }
     const std::shared_ptr<ThreadPool>& pool() const { return pool_; }

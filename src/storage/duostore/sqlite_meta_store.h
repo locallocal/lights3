@@ -1,4 +1,4 @@
-// L3: SQLite implementation of IMetaStore (docs/duostore-sqlite-meta.md).
+// L3: SQLite implementation of IMetaStore (docs/storage/duostore-meta-sqlite-design.md).
 // Commit-class operations = a single SQL transaction (BEGIN IMMEDIATE + RAII guard,
 // §3.2); compound invariants are read-checked-written inside the transaction's
 // isolation domain, with zero window. One in-process std::mutex serializes writers

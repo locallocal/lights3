@@ -4,9 +4,9 @@
 > §8.2 指标、§2.3 `control_in_pump`、§7 `force_path_style: false` vhost），
 > 单测双栈自举跑一致性套件（`test_cloudproxy.cc`，含 vhost/control_in_pump
 > 套件与指标断言），e2e 双实例场景 `e2e_cloudproxy` / `e2e_tiered_cloudproxy`
-> 全绿。承接 docs/storage-backend.md §4 的概述与 docs/tiered-storage.md §10 P5 的预留
+> 全绿。承接 docs/storage/storage-backend.md §4 的概述与 docs/storage/tiered-design.md §10 P5 的预留
 > （tiered 的 cloud 侧接入真实云端）。本文档确定实现路线为**自签 SigV4 +
-> vendored httplib 直连**（docs/storage-backend.md §4.1 的路线 B）。
+> vendored httplib 直连**（docs/storage/storage-backend.md §4.1 的路线 B）。
 
 ## 1. 目标与非目标
 
@@ -15,10 +15,10 @@
 | 目标 | 说明 |
 | --- | --- |
 | 1:1 映射远端 S3 兼容存储 | 本地 bucket ↔ 远端 bucket（`bucket_prefix` 前缀映射），远端可以是 AWS S3、MinIO、OSS/COS 的 S3 兼容端点，甚至另一个 lights3 实例 |
-| 实现 `IStorageBackend` 全接口 | 含 bucket CRUD、对象数据面、list、multipart 全套（docs/storage-backend.md §1，以 `src/storage/backend.h` 为准） |
-| 全链路流式 | GET/PUT 不在内存缓冲整对象，背压传导到 TCP 层（延续 docs/storage-backend.md §4 原则） |
+| 实现 `IStorageBackend` 全接口 | 含 bucket CRUD、对象数据面、list、multipart 全套（docs/storage/storage-backend.md §1，以 `src/storage/backend.h` 为准） |
+| 全链路流式 | GET/PUT 不在内存缓冲整对象，背压传导到 TCP 层（延续 docs/storage/storage-backend.md §4 原则） |
 | 凭证隔离 | 客户端用网关本地 AK/SK 认证；网关用自己的云凭证访问远端；两者绝不混淆透传 |
-| 支撑 tiered P5 | 作为 docs/tiered-storage.md TieredBackend 的 cloud 侧后端（首要消费方），验收清单见 §9 |
+| 支撑 tiered P5 | 作为 docs/storage/tiered-design.md TieredBackend 的 cloud 侧后端（首要消费方），验收清单见 §9 |
 
 非目标（首期）：
 
@@ -26,7 +26,7 @@
   2026-08-28）**：AK/SK 未配置时走凭证链（环境变量 → 容器端点 → EC2
   IMDSv2，见 §7），静态 AK/SK（`${ENV}` 展开）仍是显式配置时的形态；
 - 不做多 endpoint 负载均衡/故障转移，一个 backend 实例对应一个远端端点；
-- 不缓存远端数据——缓存是 TieredBackend 的职责（docs/tiered-storage.md §6），职责分离；
+- 不缓存远端数据——缓存是 TieredBackend 的职责（docs/storage/tiered-design.md §6），职责分离；
 - 不代理远端的 ACL / policy / versioning / lifecycle 等扩展 API，仅覆盖
   `IStorageBackend` 表达的对象语义。
 
@@ -34,7 +34,7 @@
 
 ### 2.1 路线反转：A（SDK）→ B（自签直连）
 
-docs/storage-backend.md §4.1 原首选路线 A（aws-sdk-cpp 封装）。本设计**反转为路线 B**，理由：
+docs/storage/storage-backend.md §4.1 原首选路线 A（aws-sdk-cpp 封装）。本设计**反转为路线 B**，理由：
 
 1. **出方向签名已就绪**：`SigV4Authenticator::sign()`（`src/s3/auth/sigv4.h`）
    在实现验签时同步实现，头注释即写明"签名端供单测与后续 cloudproxy 转发复用"；
@@ -46,7 +46,7 @@ docs/storage-backend.md §4.1 原首选路线 A（aws-sdk-cpp 封装）。本设
 3. **SDK 引入代价不可接受**：aws-sdk-cpp 依赖树庞大（libcurl 等），与本项目
    "依赖全靠 vendored 子模块、零系统包依赖"的构建约束冲突。
 4. **线程模型可控**：自实现可与项目协程/ThreadPool 模型精确融合；SDK 的
-   同步/异步 API 反而要做第二次适配（docs/storage-backend.md §4 已指出同步 SDK 占线程的瓶颈）。
+   同步/异步 API 反而要做第二次适配（docs/storage/storage-backend.md §4 已指出同步 SDK 占线程的瓶颈）。
 
 代价（已列入 §1 非目标）：无自动凭证链；S3 协议边角（如 §4.4 complete 的
 200-带错误体）需自行处理——好在覆盖面只有 `IStorageBackend` 这一层接口，
@@ -286,7 +286,7 @@ continuation-token 可能的服务端优化）。
 | 远端 403（代理凭证/权限故障） | **`InternalError`，不透传 AccessDenied**——客户端已通过本地认证，403 是网关配置故障，透传会误导客户端排查自己的凭证；日志记 warn 含远端原始码（`bucket_exists` 的 HEAD 403 例外，见 §4.3） |
 | 404 且体不可解析 | 按操作上下文补 NoSuchKey / NoSuchBucket |
 | 429 / 503 / SlowDown | `SlowDown`（本地 503，客户端可退避重试） |
-| 500 / 502 / 504、体不可解析的 5xx | `InternalError`（本地 500）。**不引入 502**：S3 错误词表本无 BadGateway，标准 S3 客户端把 500/503 视为可重试，保持协议忠实（docs/storage-backend.md §4 原"502/503"表述随本文档修订） |
+| 500 / 502 / 504、体不可解析的 5xx | `InternalError`（本地 500）。**不引入 502**：S3 错误词表本无 BadGateway，标准 S3 客户端把 500/503 视为可重试，保持协议忠实（docs/storage/storage-backend.md §4 原"502/503"表述随本文档修订） |
 | 连接拒绝 / DNS 失败 / 超时（重试耗尽后） | `InternalError`，message 含 endpoint 与底层原因（httplib `Result.error()` 枚举转文字） |
 
 ### 5.2 重试策略
@@ -321,7 +321,7 @@ continuation-token 可能的服务端优化）。
 - 单段 PUT / upload_part：远端 ETag = 内容 MD5。§3.2 推流时已用
   `util::HashStream(Md5)` 增量计算，响应到达后与远端 ETag 比对，不一致抛
   `InternalError`（"upload corrupted in transit"）——既是 UNSIGNED-PAYLOAD
-  的完整性补偿，也直接满足 docs/tiered-storage.md §5.2 "云端返回 etag 与本地内容校验"的依赖；
+  的完整性补偿，也直接满足 docs/storage/tiered-design.md §5.2 "云端返回 etag 与本地内容校验"的依赖；
 - multipart 总 ETag `hex-N` 规则与本地实现一致（`md5(各分片 md5 拼接)-N`），
   tiered 拿云端 etag 与本地 sidecar 比对语义自洽；
 - 例外：远端开 SSE-KMS / SSE-C 时 ETag 非内容 MD5——提供 `verify_etag: false`
@@ -419,18 +419,18 @@ op/code 维度实例经互斥缓存按需注册（get-or-create 幂等）。warn
 - 新增 option `LIGHTS3_CLOUDPROXY`（默认 ON）；`registry.cc` 已注册 cloudproxy
   工厂（从 `BackendConfig::params` 读 §7 各键）。
 
-## 9. 与 TieredBackend 的对接验收（docs/tiered-storage.md P5）
+## 9. 与 TieredBackend 的对接验收（docs/storage/tiered-design.md P5）
 
 作为 tiered 的 cloud 侧后端，验收清单：
 
-1. `put_object` 携带 `user_meta`（`x-amz-meta-lights3-*` 冗余头，docs/tiered-storage.md §4.2）
+1. `put_object` 携带 `user_meta`（`x-amz-meta-lights3-*` 冗余头，docs/storage/tiered-design.md §4.2）
    上传后，`head_object` / `get_object` 能原样取回；
 2. put / upload_part / complete 返回的 etag 非空，单段 = 内容 MD5
-   （docs/tiered-storage.md §5.2 步骤 ③ 的校验依赖）；
-3. Range GET 三种形态正确（docs/tiered-storage.md §6.3 透传依赖）;
-4. head 返回 size / etag / last_modified 齐全（docs/tiered-storage.md §6.1 条件请求依赖）；
-5. `list_objects` 可用于 docs/tiered-storage.md §9 对账遍历；
-6. 远端不可达时抛 `InternalError` / `SlowDown` 而非挂死（docs/tiered-storage.md §9 故障矩阵
+   （docs/storage/tiered-design.md §5.2 步骤 ③ 的校验依赖）；
+3. Range GET 三种形态正确（docs/storage/tiered-design.md §6.3 透传依赖）;
+4. head 返回 size / etag / last_modified 齐全（docs/storage/tiered-design.md §6.1 条件请求依赖）；
+5. `list_objects` 可用于 docs/storage/tiered-design.md §9 对账遍历；
+6. 远端不可达时抛 `InternalError` / `SlowDown` 而非挂死（docs/storage/tiered-design.md §9 故障矩阵
    依赖可预期的异常）。
 
 ## 10. 测试策略
@@ -459,4 +459,4 @@ ETag 校验失败路径、重试计数（可注入失败的假端点）、comple
 | P2 | GET 数据面（pump + ResponseHandler + BlockQueue、Range、取消）；list_objects / list_buckets XML 解析 | run_backend_suite 读/列路径过；取消专项测试过 | ✅ |
 | P3 | PUT / upload_part 流式（拉转拉 + UNSIGNED-PAYLOAD + MD5 校验）；multipart 全套（含 200-错误体处理） | `run_backend_suite(CloudProxyBackend)` 全绿 | ✅ |
 | P4 | 重试/退避、超时细化、指标、日志；无长度 body 路径决断（NotImplemented 或 TRAILER 组帧）；`control_in_pump` 压测定默认值 | 故障注入专项测试过 | ✅ 全部落地（2026-07-31）：指标见 §8.2；`control_in_pump` 压测定默认 false（§2.3）；顺带实现 `force_path_style: false` vhost（§7） |
-| P5 | e2e 双实例脚本；tiered 对接（§9 清单）；docs/tiered-storage.md P5 状态更新 | e2e 过；tiered + cloudproxy 冒烟过 | ✅（`e2e_cloudproxy` + `e2e_tiered_cloudproxy`） |
+| P5 | e2e 双实例脚本；tiered 对接（§9 清单）；docs/storage/tiered-design.md P5 状态更新 | e2e 过；tiered + cloudproxy 冒烟过 | ✅（`e2e_cloudproxy` + `e2e_tiered_cloudproxy`） |

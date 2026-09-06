@@ -4,8 +4,8 @@ set -u
 
 BIN="${1:?usage: run_e2e.sh <path-to-lights3-binary> [driver] [backend-type]}"
 DRIVER="${2:-builtin}"
-# localfs | xlocalfs | tiered (localfs+memory, docs/tiered-storage.md)
-# | cloudproxy | tiered-cloudproxy (two instances: instance B acts as the "cloud", docs/cloudproxy-backend.md §10)
+# localfs | xlocalfs | tiered (localfs+memory, docs/storage/tiered-design.md)
+# | cloudproxy | tiered-cloudproxy (two instances: instance B acts as the "cloud", docs/storage/cloudproxy-design.md §10)
 # | tiered-duostore (duostore as the cloud) | tiered-duolocal (duostore as the local/hot side, roadmap §3.6 ⑥)
 BACKEND="${3:-localfs}"
 AK=E2EACCESSKEY
@@ -33,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------- duostore-redis scenario: spawn a private redis (docs/duostore-redis-meta.md §9) ----------
+# ---------- duostore-redis scenario: spawn a private redis (docs/storage/duostore-meta-redis-design.md §9) ----------
 # LIGHTS3_TEST_REDIS_URI=redis://host:port points at an external instance instead
 # (docker compose --profile e2e, docs/deployment.md §4): the run isolates itself with
 # a unique key prefix and leaves the instance running
@@ -65,7 +65,7 @@ if [[ "$BACKEND" == "duostore-redis" && -z "$REDIS_URI" ]]; then
     REDIS_URI="unix://$WORK/redis.sock"
 fi
 
-# ---------- duostore-rados scenario: probe for a real cluster (docs/duostore-rados-data.md §11) ----------
+# ---------- duostore-rados scenario: probe for a real cluster (docs/storage/duostore-data-rados-design.md §11) ----------
 # A cluster cannot be spun up casually like redis (full mon+osd+cephx dependency set);
 # runs only when both env vars LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL are set, otherwise explicit SKIP
 RADOS_NS=""
@@ -78,14 +78,14 @@ if [[ "$BACKEND" == "duostore-rados" ]]; then
     echo "rados: conf=$LIGHTS3_TEST_RADOS_CONF pool=$LIGHTS3_TEST_RADOS_POOL ns=$RADOS_NS"
 fi
 
-# ---------- duostore-tikv scenario: probe for a real cluster (docs/duostore-tikv-meta.md §10) ----------
+# ---------- duostore-tikv scenario: probe for a real cluster (docs/storage/duostore-meta-tikv-design.md §10) ----------
 # PD+TiKV cannot be spun up casually (tiup/multi-process dependencies); runs only when
 # LIGHTS3_TEST_PD_ADDR is set, otherwise explicit SKIP.
 # Cluster-side residue: TxnKV has no client-reachable delete-by-prefix (tikv-ctl is not
 # assumed present); the keys left per run are bounded and prefix-unique -- the cases
 # delete their own buckets/objects, so the residue is only schema, counters, and version
 # garbage of already-settled gcq entries, reclaimed as the cluster GC safepoint advances
-# (docs/duostore-tikv-meta.md §7.3)
+# (docs/storage/duostore-meta-tikv-design.md §7.3)
 TIKV_PREFIX=""
 if [[ "$BACKEND" == "duostore-tikv" ]]; then
     if [[ -z "${LIGHTS3_TEST_PD_ADDR:-}" ]]; then

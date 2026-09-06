@@ -1,5 +1,5 @@
 // L3: pure-computation helpers shared by the meta store implementations
-// (docs/duostore-backend.md §2.1: "S3 semantics duplicated across implementations
+// (docs/storage/duostore-design.md §2.1: "S3 semantics duplicated across implementations
 // are minimized via shared helpers"). Depends only on the record types from
 // meta_store.h and the multipart utilities; no storage-engine coupling.
 #pragma once

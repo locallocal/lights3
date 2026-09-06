@@ -232,7 +232,7 @@ integrity-verdict surface is `lights3 fsck`.
   finding: after a HEAD confirms the cloud copy is still gone it deletes the
   dead local stub (acknowledged data loss, the object leaves listings; if the
   copy is back the stub stays, the entry is dropped and the exit code is 1).
-  See [tiered-storage.md §9](tiered-storage.md).
+  See [tiered-design.md §9](storage/tiered-design.md).
 
 ```bash
 ./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # reclaim space now

@@ -1,4 +1,4 @@
-// TikvMetaStore dedicated unit tests (docs/duostore-tikv-meta.md §10): meta consistency suite,
+// TikvMetaStore dedicated unit tests (docs/storage/duostore-meta-tikv-design.md §10): meta consistency suite,
 // backend suite over the injected combination, prefix isolation, multiple gateways sharing meta, write-skew guard materialization (Op::Lock semantics
 // smoke test), swap_extents CAS, concurrent conflict convergence, close guard.
 // Obtaining a real cluster: runs only if the env var LIGHTS3_TEST_PD_ADDR is set (comma-separated PD addresses pointing at a tiup
@@ -90,7 +90,7 @@ using meta_store_suite::make_rec;
 
 }  // namespace
 
-// Same meta semantics baseline (suite shared with RocksMetaStore, docs/duostore-tikv-meta.md §10)
+// Same meta semantics baseline (suite shared with RocksMetaStore, docs/storage/duostore-meta-tikv-design.md §10)
 TEST(duostore_tikv_meta_store_suite) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();

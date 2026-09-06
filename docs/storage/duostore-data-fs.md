@@ -1,9 +1,9 @@
 # FsDataStore：DuoStore 本地文件系统数据面
 
-本文是 `FsDataStore` 的实现级文档，展开 [../duostore-backend.md](../duostore-backend.md)
+本文是 `FsDataStore` 的实现级文档，展开 [duostore-design.md](duostore-design.md)
 §5–§9 的数据面设计在代码中的具体落法。装配与驱动侧（GC worker、pin 表、泵送循环）见
-[./duostore-core.md](./duostore-core.md)；RADOS 数据面的对照实现见
-[./duostore-data-rados.md](./duostore-data-rados.md)。涉及文件：
+[./duostore-core.md](duostore-core.md)；RADOS 数据面的对照实现见
+[./duostore-data-rados.md](duostore-data-rados.md)。涉及文件：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -257,7 +257,7 @@ close 顺序保证 data 先于 meta 关闭，seal 回调此时仍可用。
 
 ## 9. io_uring 变体（roadmap §3.4 ⑤）
 
-`fs_uring: true`（键表见 [../duostore-backend.md](../duostore-backend.md) §11）
+`fs_uring: true`（键表见 [duostore-design.md](duostore-design.md) §11）
 时，DuoStoreBackend 构造一个与 xlocalfs 同源的
 `storage/xlocalfs/uring.h:UringEngine` 注入 `FsDataOptions::uring`；引擎建失败
 （老内核 / seccomp / memlock 配额）LOG_WARN 后回退同步路径，并置常驻 gauge
@@ -276,5 +276,5 @@ close 顺序保证 data 先于 meta 关闭，seal 回调此时仍可用。
 `FsDataOptions::uring` 是 shared_ptr，读者共同持有引擎对象；`close()` 停掉
 收割线程后，逃逸读者的下一次提交以 InternalError 收场（与 xlocalfs 的关闭
 时序假设一致）。多在途 op 的析构安全性由 uring_stream 的引用计数共享块承担
-（见 [./xlocalfs.md](./xlocalfs.md) §5）。
+（见 [./xlocalfs.md](xlocalfs.md) §5）。
 

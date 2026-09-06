@@ -136,7 +136,7 @@ docker run --rm lights3 s3adm --help
 | --- | --- | --- |
 | `LIGHTS3_REDIS` / `LIGHTS3_SQLITE` | `ON` | duostore 的零外部依赖 meta 引擎 |
 | `LIGHTS3_RADOS` | `OFF` | `librados-dev` / 运行时 `librados2` |
-| `LIGHTS3_TIKV` | `OFF` | `libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev libpoco-dev libabsl-dev`（[duostore-tikv-meta.md §8](duostore-tikv-meta.md)） |
+| `LIGHTS3_TIKV` | `OFF` | `libgrpc++-dev protobuf-compiler-grpc libprotobuf-dev libpoco-dev libabsl-dev`（[duostore-meta-tikv-design.md §8](storage/duostore-meta-tikv-design.md)） |
 | `LIGHTS3_GIT_COMMIT` | `unknown` | 构建上下文不含 `.git`（`.dockerignore`），commit 由此传入 |
 | `CMAKE_BUILD_TYPE` | `Release` | |
 | `BASE` | `ubuntu:24.04` | Debian 基底也可（`libssl3` 名字已兜底） |

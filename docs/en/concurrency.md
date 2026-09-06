@@ -237,7 +237,7 @@ histogram shifting right)" — read the criterion straight off
 `lights3_pool_wait_seconds` in `/-/metrics` (a rightward shift is the
 starvation symptom); cloudproxy
 additionally has a local workaround with its private pump threads, see
-[cloudproxy-backend.md](cloudproxy-backend.md) §2.3. A dedicated pool lives and
+[cloudproxy-design.md](storage/cloudproxy-design.md) §2.3. A dedicated pool lives and
 dies with the backend's shared_ptr (destruction joins it); the observability
 metrics `lights3_backend_pool_{threads,queue_depth,backlogged,completed}` carry
 a backend label and are exposed via the backend registry, in a namespace
@@ -348,7 +348,7 @@ self-consistent with the thread-pool model.
   exception (§3.2);
 - between chunks of streaming reads/writes: `token.throw_if_cancelled()`;
 - cloudproxy's remote stream: destroying the reader aborts the remote transfer
-  (see [cloudproxy-backend.md](cloudproxy-backend.md) §3.1).
+  (see [cloudproxy-design.md](storage/cloudproxy-design.md) §3.1).
 
 ### 5.3 TimerQueue (core/timer.h)
 
@@ -370,7 +370,7 @@ auto maybe = sem.try_acquire();         // non-blocking: nullopt immediately if 
 ```
 
 `try_acquire` serves callers that "already hold one and want one more" (the
-rados double-buffered pipeline, duostore-rados-data.md §4.2): a nested blocking
+rados double-buffered pipeline, duostore-data-rados-design.md §4.2): a nested blocking
 acquire would deadlock when everyone holds one each and waits for a second; the
 try semantics degrade the second permit to "pipeline if available, serialize if
 not".
@@ -391,9 +391,9 @@ Production consumers:
 | Site | Purpose |
 | --- | --- |
 | `main.cc` dispatch entry | `runtime.max_inflight_requests` global throttling; over-limit requests queue rather than being rejected; waiters woken via the pool executor. For streaming responses the Permit is tied to `stream_body` (outermost wrapper) and released only when the driver finishes or discards the body — throttling covers the whole response transfer, not just the handler coroutine frame; shutdown draining judges in-flight via `available()`, so it counts mid-stream requests too |
-| tiered `transfers_` | `max_concurrent_transfers`: concurrency cap on sink/recall transfers (see [tiered-storage.md](tiered-storage.md) §5.1) |
-| tiered `key_locks_` | permits=1 used as an async mutex: striped per-key locks, protecting only the state-commit section (see [tiered-storage.md](tiered-storage.md) §7.3) |
-| rados `buffer_sem_` | `rados_buffer_total` overall write-buffer budget: first share via blocking acquire (backpressure), second share of the double buffer via try_acquire (see [duostore-rados-data.md](duostore-rados-data.md) §4.2) |
+| tiered `transfers_` | `max_concurrent_transfers`: concurrency cap on sink/recall transfers (see [tiered-design.md](storage/tiered-design.md) §5.1) |
+| tiered `key_locks_` | permits=1 used as an async mutex: striped per-key locks, protecting only the state-commit section (see [tiered-design.md](storage/tiered-design.md) §7.3) |
+| rados `buffer_sem_` | `rados_buffer_total` overall write-buffer budget: first share via blocking acquire (backpressure), second share of the double buffer via try_acquire (see [duostore-data-rados-design.md](storage/duostore-data-rados-design.md) §4.2) |
 
 In addition: per-connection serial processing (HTTP/1.1 pipelining is not
 executed in parallel) is guaranteed by the driver; the thread pool's bounded

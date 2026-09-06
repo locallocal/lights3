@@ -757,7 +757,7 @@ Cmd make_tier_quarantine() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "quarantine", "lights3 tier quarantine list tierdata",
         "lights3 tier quarantine <list|forget|purge> <backend> [<bucket> <key>] [--config=<path>]",
-        "Reconciliation quarantine ledger (docs/tiered-storage.md §9): findings that "
+        "Reconciliation quarantine ledger (docs/storage/tiered-design.md §9): findings that "
         "repeat every round (stub whose cloud copy is gone; foreign cloud object without "
         "lights3 headers) are recorded once and stop re-alerting. list shows them; forget "
         "drops an entry without touching data; purge deletes the dead local stub of a "
@@ -792,7 +792,7 @@ Cmd make_tier() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "tier", "lights3 tier scan tierdata --config=config/lights3.yaml",
         "lights3 tier <scan|gc|reconcile|quarantine> <backend> [--config=<path>]",
-        "Tiered-storage background tasks on demand (docs/tiered-storage.md §9): the "
+        "Tiered-storage background tasks on demand (docs/storage/tiered-design.md §9): the "
         "same rounds the timers run, for operators who cannot wait for the next tick. "
         "Runs with the backends built but no server listening, then exits.",
         "tiered background tasks (scan/gc/reconcile) + quarantine ledger",

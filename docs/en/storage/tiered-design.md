@@ -1,4 +1,4 @@
-> English translation of [../tiered-storage.md](../tiered-storage.md). The Chinese original is authoritative; section numbering matches.
+> English translation of [../../storage/tiered-design.md](../../storage/tiered-design.md). The Chinese original is authoritative; section numbering matches.
 
 # Tiered Storage: Demoting Cold Data to Public Cloud
 
@@ -7,7 +7,7 @@
 > entries). The cloud side is integrated via the `IStorageBackend` abstraction,
 > and CI uses MemoryBackend as the cloud for full coverage (unit tests
 > `test_tiered.cc` + `e2e_tiered`); the real CloudProxyBackend of P5 is described
-> in [cloudproxy-backend.md](cloudproxy-backend.md), with the combined scenario
+> in [cloudproxy-design.md](cloudproxy-design.md), with the combined scenario
 > accepted by `e2e_tiered_cloudproxy`.
 
 ## 1. Goals and Non-Goals
@@ -35,7 +35,7 @@ see §5.1/§8.
 
 ## 2. Architectural Position: the Composite TieredBackend
 
-docs/storage-backend.md §2 deliberately stops routing at bucket granularity and
+docs/storage/storage-backend.md §2 deliberately stops routing at bucket granularity and
 reserves "object-level tiering is implemented as an overlay, without changing the
 `IStorageBackend` interface". This design fulfills that reservation: a new
 composite backend `type: tiered` (`src/storage/tiered/`) that is still an
@@ -72,7 +72,7 @@ The coupling on the two sides is deliberately asymmetric:
   `LocalFsTierLocal` (localfs/xlocalfs, sharing the `fs_util` disk layout — what
   §4 describes) and `DuoStoreTierLocal` (tier state inside the object record, a
   stub = record without extents, commits = CAS meta transactions; see
-  [storage/tiered.md §11](../storage/tiered.md)). `local` may name a
+  [storage/tiered.md §11](../../storage/tiered.md)). `local` may name a
   localfs/xlocalfs or a duostore backend; any other type is still a config error.
 
 The configuration references the two existing backend instances by name;
@@ -368,7 +368,7 @@ backends:
     root: ./data/objects
     staging: ./data/staging
   - name: aws
-    type: cloudproxy                  # docs/cloudproxy-backend.md
+    type: cloudproxy                  # docs/storage/cloudproxy-design.md
     endpoint: https://s3.us-east-1.amazonaws.com
     bucket_prefix: lights3-tier-
     # cloud credentials...
@@ -457,14 +457,14 @@ just bump the count (DEBUG) instead of re-alerting. After a reconcile round
 **runs to completion**, entries that did not reproduce this round are resolved
 automatically (INFO). Operator entry point:
 `lights3 tier quarantine list|forget|purge <backend> …`
-([cli.md §2.4](cli.md)): `forget` drops the ledger entry only; `purge` targets
+([cli.md §2.4](../cli.md)): `forget` drops the ledger entry only; `purge` targets
 refs_missing — it HEADs the cloud once more and, if the copy is still gone,
 deletes the dead local stub (acknowledged data loss; if the copy is back the
 stub stays and the entry is dropped). The gauge
 `lights3_tiered_quarantine_entries{kind}` shows the ledger size at all times. Local-tier
 capacity has its own five callback gauges,
 `lights3_tiered_local_{used,total,high_watermark,cached,quota}_bytes`
-([monitoring.md](monitoring.md) "Tiered watermark", [storage/tiered.md](../storage/tiered.md) metric table).
+([monitoring.md](../monitoring.md) "Tiered watermark", [storage/tiered.md](../../storage/tiered.md) metric table).
 
 ## 10. Implementation Phases
 
@@ -474,7 +474,7 @@ capacity has its own five callback gauges,
 | P2 | TierScanner (cold detection + watermarks), TierIndex persistence, per-key locks and conflict-matrix tests | Concurrent PUT/GET/demotion stress with no dirty data | ✅ |
 | P3 | Tee cache backfill + space-fallback degradation + single-flight | Disconnect/ENOSPC injection tests | ✅ |
 | P4 | GC queue + reconciliation tool | Reconciliation converges after crash injection | ✅ Fully landed (reconciliation tool + GC exponential backoff wrapped up 2026-07-31; stub-loss rebuild / delete mode / anti-resurrection / reverse alert / backoff-recovery specials all green) |
-| P5 | Integrate the real CloudProxyBackend (itself an independent feature, see docs/cloudproxy-backend.md) | End-to-end against public cloud | ✅ (`e2e_tiered_cloudproxy` two-instance composition) |
+| P5 | Integrate the real CloudProxyBackend (itself an independent feature, see docs/storage/cloudproxy-design.md) | End-to-end against public cloud | ✅ (`e2e_tiered_cloudproxy` two-instance composition) |
 | P6 | roadmap §3.6: `ITierLocal` abstraction + duostore hot tier, xattr access records + time-wheel incremental scanning, prefix rules, multi-dimensional eviction score, reconcile quarantine, Range block cache | Dedicated unit tests for incremental rounds / rules / score / block cache / quarantine / duostore hot tier | ✅ (2026-09-02) |
 
 P1–P4 depend on no cloud SDK at all; the `tiered` + `memory` combination gives

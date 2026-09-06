@@ -1,5 +1,5 @@
 // L3: the single coupling point between DuoStore's metadata and data sides
-// (docs/duostore-backend.md §3.1). meta stores/loads DataRef as opaque location
+// (docs/storage/duostore-design.md §3.1). meta stores/loads DataRef as opaque location
 // info; data just reads/writes according to it.
 #pragma once
 
@@ -9,7 +9,7 @@
 namespace lights3::storage::duostore {
 
 struct Extent {
-    // kRados: file_id maps to the rados object name (docs/duostore-rados-data.md §3.1)
+    // kRados: file_id maps to the rados object name (docs/storage/duostore-data-rados-design.md §3.1)
     enum class Kind : uint8_t { kChunk = 0, kPack = 1, kRados = 2 };
     Kind kind = Kind::kChunk;
     uint64_t file_id = 0;  // chunk / pack file number (globally monotonic allocation, §4.5)

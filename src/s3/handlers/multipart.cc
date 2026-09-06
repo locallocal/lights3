@@ -1,5 +1,5 @@
 // multipart handler: Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
-// (docs/s3-protocol.md §1; storage-layer semantics in docs/storage-backend.md §3.2)
+// (docs/s3-protocol.md §1; storage-layer semantics in docs/storage/storage-backend.md §3.2)
 #include <charconv>
 #include <algorithm>
 #include <map>

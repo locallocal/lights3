@@ -1,4 +1,4 @@
-// L3: backend type registry: type string → factory (docs/storage-backend.md §6 extension guide)
+// L3: backend type registry: type string → factory (docs/storage/storage-backend.md §6 extension guide)
 #pragma once
 
 #include <functional>

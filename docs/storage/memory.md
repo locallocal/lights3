@@ -2,7 +2,7 @@
 
 > 全内存的 `IStorageBackend` 实现，代码在 `src/storage/memory/memory_backend.{h,cc}`。
 > 定位是**单测夹具与演示后端**：无持久化、无后台线程、无线程池，语义与 localfs
-> 对齐并通过同一套后端一致性套件（[storage-backend.md](../storage-backend.md) §6）。
+> 对齐并通过同一套后端一致性套件（[storage-backend.md](storage-backend.md) §6）。
 > 同时它也在 `storage/registry.cc` 注册为一等后端，可被配置进网关，因此带有
 > 容量闸门与 MPU 过期清理，防止误配置时无上界地吃堆内存。
 
@@ -174,5 +174,5 @@ key 静默插入空对象）。整个列举持锁完成，bucket 很大时是这
   + 未记账的在途上传缓冲。
 - `complete_multipart` 峰值时新对象与分片并存，最坏瞬时约 2 倍对象大小。
 
-相关文档：接口契约与扩展指南见 [storage-backend.md](../storage-backend.md)；
+相关文档：接口契约与扩展指南见 [storage-backend.md](storage-backend.md)；
 读写全链路见 [object-read-write-flow.md](../object-read-write-flow.md)。

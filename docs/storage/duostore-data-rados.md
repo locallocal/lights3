@@ -1,10 +1,10 @@
 # RadosDataStore：DuoStore RADOS 数据面
 
 本文是 `RadosDataStore` 的实现级文档，展开
-[../duostore-rados-data.md](../duostore-rados-data.md)（设计与选型调研，本文引其
+[duostore-data-rados-design.md](duostore-data-rados-design.md)（设计与选型调研，本文引其
 章节记作"设计文档 §N"）在代码中的具体落法。装配与驱动侧见
-[./duostore-core.md](./duostore-core.md)；本地 fs 数据面对照见
-[./duostore-data-fs.md](./duostore-data-fs.md)。涉及文件：
+[./duostore-core.md](duostore-core.md)；本地 fs 数据面对照见
+[./duostore-data-fs.md](duostore-data-fs.md)。涉及文件：
 
 | 文件 | 内容 |
 | --- | --- |
@@ -204,5 +204,5 @@ extent kind 随 `data_kind` 取 kRados（硬编码 kChunk 会被本店 `remove` 
 崩溃窗口（对照 fs 版大幅收窄）：write_full 单对象原子 ⇒ 无半截对象；网关
 崩溃只留无主对象（refs 无记录）→ 孤儿扫描回收；无 pack ⇒ 无 torn tail、无
 补封存逻辑、无 packs/ 泄漏面。数据先落、meta 后提交的总不变量
-（[../duostore-backend.md](../duostore-backend.md) §6）逐条成立。
+（[duostore-design.md](duostore-design.md) §6）逐条成立。
 

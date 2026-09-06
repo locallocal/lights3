@@ -5,13 +5,13 @@
 > checkpoint 调优与在线备份评估，代码在
 > `src/storage/duostore/sqlite_meta_store.{h,cc}`，编译开关
 > `LIGHTS3_DUOSTORE_SQLITE_META` 默认 OFF）。兑现
-> [duostore-backend.md](duostore-backend.md)
+> [duostore-design.md](duostore-design.md)
 > §12 "SQLite（单文件部署）"的演进承诺：meta 侧换 SQLite，实现
 > `IMetaStore`（`src/storage/duostore/meta_store.h`），元数据收敛为**单个
 > 数据库文件**，备份/迁移 = 拷一个文件。引擎源码为
 > `third_party/sqlite` submodule（https://github.com/sqlite/sqlite.git，
-> §7）。本文中"主文档"指 duostore-backend.md，"Redis 版文档"指
-> [duostore-redis-meta.md](duostore-redis-meta.md)，`§N` 不带前缀时指本
+> §7）。本文中"主文档"指 duostore-design.md，"Redis 版文档"指
+> [duostore-meta-redis-design.md](duostore-meta-redis-design.md)，`§N` 不带前缀时指本
 > 文档章节。
 
 ## 1. 目标与非目标
@@ -477,7 +477,7 @@ backends:
 | meta | `rocksdb` | 增合法值 `sqlite`；未编译 option 时选 sqlite → 配置错误 |
 | sqlite_path | `<root>/meta.sqlite3` | DB 文件路径（对应 RocksDB 的 meta_path 可指 SSD 的用法）；父目录由 store 自建 |
 | sqlite_cache | 64MiB | 页缓存**进程级总预算**（校验 ≥1MiB）：SQLite 的 cache_size 按连接生效，实现将预算摊到全部连接（1 写 + 1 alloc + pool_size 读，§5.2）——语义对齐 rocksdb_block_cache 的单一预算角色，不随连接数放大 |
-| sqlite_wal_archive | 空 | 备份链目录（backlog-sequence ⑧）：`duostore backup --incremental` 的 WAL 段归档到这里，链一旦开始即关自动 checkpoint、关闭时补归档最后一段；空 = 只能全量（[storage/duostore-meta-sqlite.md §10](storage/duostore-meta-sqlite.md#10-备份链与-pitr)） |
+| sqlite_wal_archive | 空 | 备份链目录（backlog-sequence ⑧）：`duostore backup --incremental` 的 WAL 段归档到这里，链一旦开始即关自动 checkpoint、关闭时补归档最后一段；空 = 只能全量（[storage/duostore-meta-sqlite.md §10](duostore-meta-sqlite.md#10-备份链与-pitr)） |
 | meta_sync | true | **沿用而非忽略**（对比 meta=redis 时被忽略）：SQLite 与 RocksDB 同为本地引擎，持久化档位仍归本进程管（§6） |
 
 meta 引擎专属键（meta_path / rocksdb_* / redis_* / sqlite_*）出现但不属

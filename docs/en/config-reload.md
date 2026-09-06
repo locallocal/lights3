@@ -54,6 +54,9 @@ Report shape (admin API / `s3adm reload` output):
 | `runtime.max_inflight_requests` | `AsyncSemaphore::set_capacity`: growing wakes queued requests at once; shrinking waits for in-flight permits to return (`available` may go negative briefly, nothing new is admitted meanwhile) |
 | `ratelimit.per_ip_* / per_ak_*` | limiters are rebuilt and swapped atomically; in-flight requests hold the old instance until they finish, so nothing dangles (`max_tracked` excepted: restart only) |
 | `buckets.rules` | `BucketRouter::update` swaps the rule table atomically; the router copies held by `S3Service`, the lifecycle runner and the usage tracker share one table; a request in flight keeps the table it resolved against |
+| `backends[]` **new entries** | backlog-sequence ⑦: built per config by `StorageRegistry::build` (a new tiered entry may name running backends), wrapped by `meter_backends`, swapped into the router in the **same snapshot** as the rules (rules may point at the new backend at once); the fsck job table and the `backend=` metric label follow. A construction failure (e.g. localfs without root) refuses the reload as a whole and the instances built so far are closed again |
+| `backends[]` **removed entries** | Conditions: not the `default_backend`, no tiered entry in the file still references it, no fsck job running on it (the last two refuse the whole reload, the first defers into requires_restart). The backend leaves the routing table first (new requests follow the remaining rules immediately); a **retiring thread** then waits for its in-flight leases to reach zero (`MeteredBackend::wait_idle` — every call and every open get_object stream holds one) before `close()`, and finally drops its metric series; log line `backend <name> removed: closed after in-flight requests drained`. The wait is unbounded (a line every 10 s while waiting); process shutdown cuts it short and closes |
+| `backends[]` parameter change of an existing entry | **Not applied**: instances carry state, rebuilding equals a restart; reported per entry in requires_restart (`backends (<name>: type/parameters changed …)`), the running instance keeps its startup configuration. Reordering entries is not a change (matched by name) |
 | TLS certificate material | every reload forces `Holder::reload_now()` (no waiting for the `tls_reload_interval` poll); seastar's reloadable credentials watch the files themselves |
 
 ## 4. Explicitly Not Hot-Reloadable (reported as requires_restart)
@@ -64,9 +67,9 @@ Report shape (admin API / `s3adm reload` output):
 - the TLS **paths and knobs** (`tls_cert/tls_key` paths, `tls_client_*`,
   `tls_min_version`, ciphers, `tls_sni`, `tls_reload_interval`) — certificate
   **contents** reload, parameters do not;
-- `backends` (adding/removing instances or changing their parameters touches
-  lifetimes and data) and `buckets.default_backend` (hosts `.sys` and every
-  store loaded from it);
+- parameter changes of existing `backends[]` entries (see §3: add / remove
+  yes, modify no) and `buckets.default_backend` (hosts `.sys` and every store
+  loaded from it; removing the default backend is deferred for the same reason);
 - `auth.*` (static root credentials, credentials-file path, sync period, the
   `tls_identity` mode) — dynamic credentials, the credentials file and the
   certificate binding table already have their own reload / sync channels;
@@ -78,9 +81,10 @@ Report shape (admin API / `s3adm reload` output):
 
 ## 5. Deferred
 
-- Hot add/remove of backend instances: touches `StorageRegistry` lifetimes and
-  `.sys` placement; decide the target scenario first (the roadmap's "separate
-  discussion").
+- Hot add / remove of backend instances landed (§3, 2026-09-06); **changing
+  parameters** of a running instance still needs a restart — rebuilding a
+  stateful instance (duostore meta handles, tiered demotion tables, the
+  cloudproxy connection pool) is a restart in all but name.
 - Automatic mtime polling of the config file: SIGHUP / the admin API are enough
   and more deliberate, and avoid applying a half-written file.
 
@@ -93,7 +97,21 @@ Report shape (admin API / `s3adm reload` output):
   applied and a startup-only key reported; a broken file refused as a whole with
   running values unchanged; a rule naming an unknown backend refused before
   anything is applied); the admin endpoint (unsigned / non-root 403, GET 405,
-  the JSON report, failure 400).
+  the JSON report, failure 400). Backend hot add / remove (⑦): rules and
+  backend set swapped as one snapshot, old snapshots untouched, the default
+  backend cannot be dropped; `MeteredBackend` leases (an open get_object stream
+  counts as in flight, `wait_idle` wakes when the last lease returns);
+  the dynamic `FsckJobs` set; `Application`-level — a memory backend added and
+  routed to (real HTTP requests land on it), removal refused while a rule still
+  names it, a parameter change only reported, removal with a stream open applies
+  at once while the instance closes only after the stream, removing the default
+  backend deferred, a tiered entry naming a removed backend / a backend that does
+  not construct refused as a whole.
 - e2e: `SIGHUP` after changing `log.level` and the log line; `request_timeout`
   applied through the admin API and `s3adm reload`; non-root 403; an invalid
-  file answers 400.
+  file answers 400; a memory backend `hot` added with a `hot-*` rule (PUT lands
+  on it, `backend="hot"` appears on `/-/metrics`, `s3adm object inspect` sees
+  it), removed while a rate-limited GET streams from it — the reload reports the
+  removal at once, `hot-*` routes to the default backend immediately, the close
+  log line appears only after the stream ends, the metric label disappears;
+  removing the default backend is only deferred.

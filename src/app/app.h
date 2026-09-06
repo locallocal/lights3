@@ -8,6 +8,8 @@
 #include <mutex>
 #include <memory>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "core/cancel.h"
 #include "core/config.h"
@@ -80,11 +82,22 @@ public:
     const std::map<std::string, std::shared_ptr<storage::IStorageBackend>>& backends() const {
         return backends_;
     }
+    // The assembled L2 service (null before start_server): tests drive dispatch
+    // directly instead of running the listener
+    const std::shared_ptr<s3::S3Service>& service() const { return service_; }
+    // Backend hot removal (backlog-sequence ⑦) closes the instance on a retiring
+    // thread once its in-flight requests drain; waits for every such thread
+    // (shutdown does; tests call it to observe the close)
+    void join_retiring();
 
 private:
     // Each backend needs an individual close() on shutdown: the router only
     // routes by bucket and cannot produce the full set
     void close_backends() noexcept;
+    // Removed backend: wait for its leases (MeteredBackend::wait_idle) on a
+    // retiring thread, then close() and drop its metric series
+    void retire_backend(std::string name, std::shared_ptr<storage::IStorageBackend> raw,
+                        std::shared_ptr<storage::MeteredBackend> metered);
 
     // Declaration order = construction order; shutdown() releases in reverse
     std::string config_path_;
@@ -97,6 +110,9 @@ private:
     std::shared_ptr<MetricsRegistry> metrics_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> metered_;  // roadmap §5.1 decorators
+    std::mutex retire_mu_;
+    std::vector<std::thread> retiring_;   // backlog-sequence ⑦: removed backends draining
+    std::atomic<bool> retire_stop_{false};  // shutdown: stop waiting, close what is left
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::CorsStore> cors_store_;

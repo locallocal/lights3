@@ -231,7 +231,12 @@ public:
     }
 
     void shutdown() override {
-        stopping_.store(true);
+        // Idempotent: the watchdog thread and the end of Application::run both
+        // call it (admin listener, backlog-sequence ②). A second stop() while the
+        // accept loop is still winding down hits upstream's
+        // assert(svr_sock_ != INVALID_SOCKET) -- the socket is already gone but
+        // is_running_ is not yet cleared
+        if (stopping_.exchange(true)) return;
         // Order-sensitive: stop() resets is_decommissioned, so it must come
         // before decommission. Already running -> stop() closes the listening
         // socket so the loop exits; not yet running -> decommission() makes

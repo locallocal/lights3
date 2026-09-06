@@ -1407,7 +1407,8 @@ Task<http::HttpResponse> S3Service::readyz() {
 
     std::string report;
     bool ok = true;
-    for (auto& [name, backend] : router_.backends()) {
+    auto backends = router_.backends();
+    for (auto& [name, backend] : *backends) {
         try {
             co_await backend->list_buckets();
             report += name + " ok\n";

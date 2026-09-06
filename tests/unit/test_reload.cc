@@ -8,12 +8,14 @@
 #include <nlohmann/json.hpp>
 
 #include "app/app.h"
+#include "app/fsck_jobs.h"
 #include "core/semaphore.h"
 #include "core/util/crypto.h"
 #include "s3/auth/credential_store.h"
 #include "s3/service.h"
 #include "storage/bucket_router.h"
 #include "storage/memory/memory_backend.h"
+#include "storage/metered_backend.h"
 #include "unit/mini_test.h"
 
 using namespace lights3;
@@ -48,6 +50,29 @@ std::string base_config(const std::string& extra, const std::string& rules = "  
     return "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n" + extra +
            "backends:\n  - name: a\n    type: memory\n  - name: b\n    type: memory\n"
            "buckets:\n  default_backend: a\n" + rules + "log:\n  level: info\n";
+}
+
+// Request through the assembled service (auth is off in these configs, so no
+// signature); returns the HTTP status
+int call(Application& app, std::string method, std::string path, std::string body = "") {
+    http::HttpRequest req;
+    req.method = std::move(method);
+    req.raw_path = path;
+    req.path = std::move(path);
+    req.headers.add("Host", "localhost");
+    req.headers.add("Content-Length", std::to_string(body.size()));
+    if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
+    return sync_wait(app.service()->dispatch(std::move(req))).status;
+}
+// Free coroutine (a lambda's frame would not outlive the sync_wait)
+Task<storage::ObjectStream> open_object(storage::IStorageBackend& b, std::string bucket,
+                                        std::string key) {
+    co_return co_await b.get_object(bucket, key, std::nullopt);
+}
+Task<void> put_small(storage::IStorageBackend& b, std::string bucket, std::string key,
+                     std::string data) {
+    http::StringBodyReader body(std::move(data));
+    co_await b.put_object(bucket, key, {}, body, {});
 }
 
 }  // namespace
@@ -282,4 +307,209 @@ TEST(reload_admin_endpoint_root_only) {
     CHECK_EQ(bad.status, 400);
     CHECK_EQ(json::parse(bad.small_body)["error"].get<std::string>(), std::string("config: bad"));
     CHECK_EQ(calls, 2);
+}
+
+// ---------- backlog-sequence ⑦: backend instances added / removed at runtime ----------
+
+// The router swaps rules and backend set in one snapshot; iteration snapshots stay
+// stable; the default backend must survive (same instance)
+TEST(reload_bucket_router_backend_set_swap) {
+    auto a = std::make_shared<storage::MemoryBackend>();
+    auto b = std::make_shared<storage::MemoryBackend>();
+    auto c = std::make_shared<storage::MemoryBackend>();
+    BucketsConfig cfg;
+    cfg.default_backend = "a";
+    auto router = storage::BucketRouter::build(cfg, {{"a", a}, {"b", b}});
+    storage::BucketRouter copy = router;
+    auto before = router.backends();  // snapshot taken before the swap
+    BucketsConfig fresh = cfg;
+    fresh.rules.push_back({"c-*", "c"});
+    // A rule naming c without c in the set is refused
+    bool threw = false;
+    try {
+        router.update(fresh);
+    } catch (const std::runtime_error& e) {
+        threw = contains(e.what(), "unknown backend");
+    }
+    CHECK(threw);
+    router.update(fresh, {{"a", a}, {"c", c}});  // b dropped, c added, rule routes to it
+    CHECK_EQ(&copy.resolve("c-1"), static_cast<storage::IStorageBackend*>(c.get()));
+    CHECK_EQ(&copy.resolve("other"), static_cast<storage::IStorageBackend*>(a.get()));
+    CHECK_EQ(router.backends()->size(), size_t(2));
+    CHECK(router.backends()->count("c") == 1 && router.backends()->count("b") == 0);
+    CHECK_EQ(before->size(), size_t(2));  // the old snapshot is untouched
+    CHECK(before->count("b") == 1);
+    // Dropping the default backend, or swapping it for another instance, is refused
+    for (auto bad : {storage::BucketRouter::BackendMap{{"c", c}},
+                     storage::BucketRouter::BackendMap{{"a", c}, {"c", c}}}) {
+        threw = false;
+        try {
+            router.update(cfg, bad);
+        } catch (const std::runtime_error& e) {
+            threw = contains(e.what(), "default backend");
+        }
+        CHECK(threw);
+    }
+    CHECK_EQ(router.backends()->size(), size_t(2));  // still the previous set
+}
+
+// The metered decorator counts calls in progress and open get_object streams;
+// wait_idle wakes when the last lease returns
+TEST(metered_backend_inflight_leases) {
+    auto inner = std::make_shared<storage::MemoryBackend>();
+    auto m = std::make_shared<storage::MeteredBackend>("m", inner, nullptr);
+    sync_wait(m->create_bucket("bkt"));
+    sync_wait(put_small(*m, "bkt", "k", "hello"));
+    CHECK_EQ(m->inflight(), 0L);  // every call released its lease
+    CHECK(m->wait_idle(std::chrono::milliseconds(1)));
+    {
+        auto stream = sync_wait(open_object(*m, "bkt", "k"));
+        CHECK_EQ(m->inflight(), 1L);  // the open stream holds the lease
+        auto t0 = std::chrono::steady_clock::now();
+        CHECK(!m->wait_idle(std::chrono::milliseconds(60)));
+        CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(50));
+        // The stream still reads through the lease wrapper
+        std::byte buf[16];
+        CHECK_EQ(sync_wait(stream.body->read(std::span(buf))), size_t(5));
+        std::thread releaser([&] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            stream.body.reset();
+        });
+        CHECK(m->wait_idle(std::chrono::seconds(5)));
+        releaser.join();
+    }
+    CHECK_EQ(m->inflight(), 0L);
+}
+
+TEST(fsck_jobs_dynamic_backend_set) {
+    auto a = std::make_shared<storage::MemoryBackend>();
+    FsckJobs jobs({{"a", a}});
+    CHECK(!jobs.busy("a"));
+    bool threw = false;
+    try {
+        jobs.status("c");
+    } catch (const FsckJobs::Failure& f) {
+        threw = f.code == FsckJobs::Error::NoSuchBackend;
+    }
+    CHECK(threw);
+    jobs.add_backend("c", std::make_shared<storage::MemoryBackend>());
+    CHECK(!jobs.status("c")["running"].get<bool>());
+    CHECK(jobs.remove_backend("c"));
+    CHECK(jobs.remove_backend("c"));  // idempotent
+    threw = false;
+    try {
+        jobs.status("c");
+    } catch (const FsckJobs::Failure&) {
+        threw = true;
+    }
+    CHECK(threw);
+}
+
+// Application-level: add a backend and route to it, refuse removals the file still
+// references, remove it once unreferenced (closed after draining), report the rest
+TEST(reload_application_adds_and_removes_backends) {
+    std::string path = temp_path("backends.yaml");
+    write_file(path, base_config(""));
+    Application app(path);
+    app.open_storage();
+    app.start_server();
+    CHECK_EQ(app.backends().size(), size_t(2));
+
+    // Add c and route c-* to it
+    std::string with_c =
+        "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
+        "backends:\n  - name: a\n    type: memory\n  - name: b\n    type: memory\n"
+        "  - name: c\n    type: memory\n    max_bytes: 1MiB\n"
+        "buckets:\n  default_backend: a\n  rules:\n    - match: \"c-*\"\n      backend: c\n"
+        "log:\n  level: info\n";
+    write_file(path, with_c);
+    auto r1 = app.reload_config();
+    CHECK(r1.ok);
+    CHECK(has(r1.applied, "backends: added c (memory)"));
+    CHECK(has(r1.applied, "buckets.rules: 0 -> 1"));
+    CHECK(r1.requires_restart.empty());
+    CHECK_EQ(app.backends().size(), size_t(3));
+    CHECK_EQ(app.config().backends.size(), size_t(3));
+    CHECK_EQ(call(app, "PUT", "/c-data"), 200);
+    CHECK_EQ(call(app, "PUT", "/c-data/k", "on-c"), 200);
+    // The bucket lives on c, nowhere else
+    auto* c = app.backends().at("c").get();
+    CHECK(sync_wait(c->bucket_exists("c-data")));
+    CHECK(!sync_wait(app.backends().at("a")->bucket_exists("c-data")));
+
+    // Removing c while the rule still names it: the file fails validation as a whole
+    write_file(path, base_config("", "  rules:\n    - match: \"c-*\"\n      backend: c\n"));
+    auto r2 = app.reload_config();
+    CHECK(!r2.ok);
+    CHECK(contains(r2.error, "unknown backend c"));
+    CHECK_EQ(app.backends().size(), size_t(3));
+
+    // Changing c's parameters: reported, the running instance keeps its startup config
+    write_file(path, [&] {
+        std::string t = with_c;
+        t.replace(t.find("max_bytes: 1MiB"), 15, "max_bytes: 2MiB");
+        return t;
+    }());
+    auto r3 = app.reload_config();
+    CHECK(r3.ok);
+    CHECK(has(r3.requires_restart, "backends (c: type/parameters changed"));
+    CHECK_EQ(r3.requires_restart.size(), size_t(1));
+
+    // Remove c (and its rule) while a stream from it is open: the removal applies at
+    // once, the close waits for the stream
+    auto stream = sync_wait(open_object(*app.backends().at("c"), "c-data", "k"));
+    write_file(path, base_config(""));
+    auto r4 = app.reload_config();
+    CHECK(r4.ok);
+    CHECK(has(r4.applied, "backends: removed c (closing after in-flight requests drain)"));
+    CHECK(has(r4.applied, "buckets.rules: 1 -> 0"));
+    CHECK_EQ(app.backends().size(), size_t(2));
+    CHECK_EQ(app.config().backends.size(), size_t(2));
+    // c-* now lands on the default backend, and the old bucket is gone with c
+    CHECK_EQ(call(app, "HEAD", "/c-data"), 404);
+    CHECK_EQ(call(app, "PUT", "/c-new"), 200);
+    CHECK(sync_wait(app.backends().at("a")->bucket_exists("c-new")));
+    // The stream taken from c keeps reading (the instance closes only after it is dropped)
+    std::byte buf[16];
+    CHECK_EQ(sync_wait(stream.body->read(std::span(buf))), size_t(4));
+    stream.body.reset();
+    app.join_retiring();
+    // No change now: clean report
+    auto r5 = app.reload_config();
+    CHECK(r5.ok && r5.applied.empty() && r5.requires_restart.empty());
+
+    // Removing the default backend is deferred (with the changed default reported),
+    // everything else in the same file still applies
+    write_file(path, "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
+                     "backends:\n  - name: b\n    type: memory\n"
+                     "buckets:\n  default_backend: b\nlog:\n  level: warn\n");
+    auto r6 = app.reload_config();
+    CHECK(r6.ok);
+    CHECK(has(r6.applied, "log.level: info -> warn"));
+    CHECK(has(r6.requires_restart, "buckets.default_backend"));
+    CHECK(has(r6.requires_restart, "backends (a: the default backend cannot be removed"));
+    CHECK_EQ(app.backends().size(), size_t(2));
+    Logger::set_level(LogLevel::Info);
+
+    // A tiered entry referencing a removed backend, and a backend that fails to
+    // construct, are refused as a whole
+    write_file(path, "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
+                     "backends:\n  - name: a\n    type: memory\n"
+                     "  - name: t\n    type: tiered\n    local: b\n    cloud: a\n"
+                     "buckets:\n  default_backend: a\nlog:\n  level: info\n");
+    auto r7 = app.reload_config();
+    CHECK(!r7.ok);
+    CHECK(contains(r7.error, "cannot remove 'b'") && contains(r7.error, "tiered backend 't'"));
+    // A backend that does not construct (localfs without root)
+    write_file(path, "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
+                     "backends:\n  - name: a\n    type: memory\n  - name: b\n    type: memory\n"
+                     "  - name: bad\n    type: localfs\n"
+                     "buckets:\n  default_backend: a\nlog:\n  level: info\n");
+    auto r8 = app.reload_config();
+    CHECK(!r8.ok);
+    CHECK(contains(r8.error, "backends:") && contains(r8.error, "bad"));
+    CHECK_EQ(app.backends().size(), size_t(2));
+    app.shutdown();
+    CHECK(app.shutdown_clean());
+    std::filesystem::remove(path);
 }

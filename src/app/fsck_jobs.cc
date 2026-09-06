@@ -72,10 +72,14 @@ int64_t now_ms() {
 }  // namespace
 
 uint64_t FsckJobs::start(const std::string& backend, uint64_t max_bytes_per_sec) {
-    auto it = backends_.find(backend);
-    if (it == backends_.end())
-        throw Failure{Error::NoSuchBackend, "no backend named '" + backend + "'"};
-    std::shared_ptr<storage::IStorageBackend> b = it->second;
+    std::shared_ptr<storage::IStorageBackend> b;
+    {
+        std::lock_guard lk(m_);  // the set changes under backend hot add / remove
+        auto it = backends_.find(backend);
+        if (it == backends_.end())
+            throw Failure{Error::NoSuchBackend, "no backend named '" + backend + "'"};
+        b = it->second;
+    }
     // Type check before taking the slot: an unsupported backend never becomes "busy"
     if (!dynamic_cast<storage::LocalFsBackend*>(b.get())
 #ifdef LIGHTS3_DUOSTORE
@@ -131,11 +135,11 @@ void FsckJobs::finish_job(Job& j, FsckOutcome out, std::string error) {
 }
 
 json FsckJobs::status(const std::string& backend) const {
+    std::lock_guard lk(m_);
     if (!backends_.count(backend))
         throw Failure{Error::NoSuchBackend, "no backend named '" + backend + "'"};
     json s;
     s["backend"] = backend;
-    std::lock_guard lk(m_);
     auto it = jobs_.find(backend);
     if (it == jobs_.end()) {
         s["running"] = false;
@@ -172,6 +176,31 @@ void FsckJobs::shutdown() {
             if (j.thread.joinable()) threads.push_back(std::move(j.thread));
     }
     for (auto& t : threads) t.join();
+}
+
+// ---------- backend hot add / remove (backlog-sequence ⑦) ----------
+
+void FsckJobs::add_backend(const std::string& name, std::shared_ptr<storage::IStorageBackend> b) {
+    std::lock_guard lk(m_);
+    backends_[name] = std::move(b);
+}
+
+bool FsckJobs::busy(const std::string& name) const {
+    std::lock_guard lk(m_);
+    auto it = jobs_.find(name);
+    return it != jobs_.end() && it->second.running;
+}
+
+bool FsckJobs::remove_backend(const std::string& name) {
+    std::lock_guard lk(m_);
+    auto it = jobs_.find(name);
+    if (it != jobs_.end()) {
+        if (it->second.running) return false;
+        if (it->second.thread.joinable()) it->second.thread.join();
+        jobs_.erase(it);
+    }
+    backends_.erase(name);
+    return true;
 }
 
 }  // namespace lights3

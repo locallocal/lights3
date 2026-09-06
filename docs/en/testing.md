@@ -10,7 +10,7 @@ ctest, ubsan/coverage builds, and the one-shot matrix script.
 
 | Test | Content | Labels |
 | --- | --- | --- |
-| `unit_tests` | every unit case (including `test_fault.cc`) | — |
+| `unit_tests` | every unit case (including `test_fault.cc`); `LIGHTS3_TEST_FILTER=sub1,sub2` runs only the cases whose name contains one of the substrings (a sanitizer build that dies in one file can still cover another) | — |
 | `e2e_<driver>` / `e2e_<backend>` | one `run_e2e.sh` parameterized by driver × backend (13 variants) | — |
 | `fuzz_regression_<target>` | the 6 harnesses replaying their corpora (§3) | `fuzz` |
 | `monitoring_assets` | monitoring-asset reconciliation ([monitoring.md §5](monitoring.md)) | — |

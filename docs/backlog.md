@@ -15,7 +15,6 @@
 | --- | --- | --- | --- | --- |
 | duostore meta 增量备份 / PITR | roadmap §3.7 | `dump` 已是一致性全量快照（`IMetaStore::snapshot()`）；增量需 WAL 级导出，四个引擎各不相同 | 中 | 高 |
 | client-c 结构化错误码上游贡献 | roadmap §3.7（tikv T5） | sidecar 以 kvrpcpb 结构化冲突分类为主、字符串匹配作纵深，功能不受影响；上游 PR 可选 | 低 | 中 |
-| 后端实例增删热重载 | roadmap §4.4 | `reload_config` 只应用安全子集 + `buckets.rules`；driver / 后端 / `default_backend` / `auth.*` 明确需重启（[config-reload.md](config-reload.md)） | 中 | 高 |
 | `HeaderMap` 线性扫描 / `BlockQueue` 双拷贝 | roadmap §4.3 ⑧ | 绝对量小；有 profile 证据再动 | 低 | 低 |
 
 ## 2. 待验证（代码已落地，本机环境验证不了）
@@ -32,6 +31,7 @@
 
 | 条目 | 现象 | 入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
+| builtin 驱动下大对象 PUT 栈溢出（**崩溃**） | 2026-09-06 e2e 扩展时发现，main 复现：builtin 驱动 PUT 32MiB（memory 与 localfs 后端都一样；4MiB 正常，8MiB 已崩，Debug 构建）进程 SIGSEGV。gdb 回溯是 `put_object → ByteCountingReader::read → CountingBodyReader → Sha256VerifyingReader → StallGuardReader → SocketBodyReader::read → …` 反复嵌套：builtin 的 `SocketBodyReader::read` 同步完成，后端 `put_object` 的下一次 `co_await body.read()` 在上一次读的 `final_suspend` 恢复链**里面**发起，每 64KiB 一层栈帧，直到溢出。beast/httplib 不受影响（读完成走执行器）。与 §2 的 ASan `StreamPrefetch` 条目同根：`Task` 在同步完成时用 `resume()` 恢复续体而非对称转移 | `core/task.h`：await 路径对"内层已完成"的情况改为对称转移（`await_suspend` 返回续体句柄）或在 builtin 的 `SocketBodyReader` 处加 trampoline；修好后把 e2e 的热加后端流对象放大到 32MiB 恢复严格的"close 晚于流结束"断言 | 高 | 中 |
 | beast 的 TLS GET 明显落后 | 4 MiB GET 明文 4.6k ops/s、TLS 仅 1.5k，其他三驱动 TLS 在 3.0k 左右 | `src/http/drivers/beast/beast_server.cc` 的 `TlsStream` 写路径：asio ssl 的 record 切分与每块一次 strand 跳转；先用 `strace -c` 对比明文/TLS 的 syscall 计数 | 中 | 中 |
 | 请求体路径未做对称优化 | PUT 各驱动持平，只有 beast 因读粒度 bug 修复而大幅提升 | 请求体是 pull 模型且要保留背压，预取需谨慎；候选：builtin `SocketBodyReader` 大块 recv、beast `expires_after` 每块重设定时器的开销 | 中 | 中 |
 

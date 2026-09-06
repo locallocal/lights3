@@ -19,7 +19,49 @@ bool is_backend_error(std::exception_ptr ep) {
         return true;
     }
 }
+
+// Body of a get_object stream carrying the backend lease (backlog-sequence ⑦):
+// released when the request drops the stream, however it ends
+class LeasedBodyReader final : public http::BodyReader {
+public:
+    LeasedBodyReader(std::unique_ptr<http::BodyReader> inner, MeteredBackend::Lease lease)
+        : inner_(std::move(inner)), lease_(std::move(lease)) {}
+    Task<size_t> read(std::span<std::byte> buf) override { return inner_->read(buf); }
+    std::optional<uint64_t> length() const override { return inner_->length(); }
+    std::optional<http::FileSpan> try_as_file() override { return inner_->try_as_file(); }
+    void file_bytes_sent(uint64_t n) override { inner_->file_bytes_sent(n); }
+
+private:
+    std::unique_ptr<http::BodyReader> inner_;
+    MeteredBackend::Lease lease_;
+};
 }  // namespace
+
+// ---------- in-flight leases ----------
+
+MeteredBackend::Lease::Lease(std::shared_ptr<Inflight> in) : in_(std::move(in)) {
+    std::lock_guard lk(in_->m);
+    ++in_->n;
+}
+
+void MeteredBackend::Lease::release() {
+    if (!in_) return;
+    {
+        std::lock_guard lk(in_->m);
+        if (--in_->n == 0) in_->cv.notify_all();
+    }
+    in_.reset();
+}
+
+long MeteredBackend::inflight() const {
+    std::lock_guard lk(inflight_->m);
+    return inflight_->n;
+}
+
+bool MeteredBackend::wait_idle(std::chrono::milliseconds timeout) {
+    std::unique_lock lk(inflight_->m);
+    return inflight_->cv.wait_for(lk, timeout, [&] { return inflight_->n == 0; });
+}
 
 MeteredBackend::MeteredBackend(std::string name, std::shared_ptr<IStorageBackend> inner,
                                std::shared_ptr<MetricsRegistry> registry)
@@ -58,6 +100,7 @@ Task<T> MeteredBackend::timed(const char* name, Task<T> inner) {
     // The token is inherited from the awaiting handler chain: it carries the
     // request's RequestBackendStats when dispatch attached one
     CancelToken tok = co_await current_cancel();
+    Lease lease(inflight_);  // held for the call's duration (backlog-sequence ⑦)
     OpMetrics& m = op(name);
     auto t0 = std::chrono::steady_clock::now();
     std::exception_ptr ep;
@@ -97,7 +140,12 @@ Task<std::vector<BucketInfo>> MeteredBackend::list_buckets() {
 }
 Task<ObjectStream> MeteredBackend::get_object(std::string_view bucket, std::string_view key,
                                               std::optional<ByteRange> range) {
-    co_return co_await timed("get_object", inner_->get_object(bucket, key, range));
+    auto stream = co_await timed("get_object", inner_->get_object(bucket, key, range));
+    // The open is timed; the bytes stream afterwards -- keep the backend "in flight"
+    // until the request lets go of the body
+    if (stream.body)
+        stream.body = std::make_unique<LeasedBodyReader>(std::move(stream.body), Lease(inflight_));
+    co_return stream;
 }
 Task<PutResult> MeteredBackend::put_object(std::string_view bucket, std::string_view key,
                                            ObjectMeta meta, http::BodyReader& body,

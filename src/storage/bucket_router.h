@@ -23,17 +23,21 @@ namespace lights3::storage {
 // Copies of a router share one rule table (config hot reload, roadmap §4.4):
 // update() swaps the table atomically for every holder — S3Service, the lifecycle
 // runner, the usage tracker — while a request in flight keeps the table it
-// resolved against. The backend set and the default backend are fixed for the
-// process (they carry state and host .sys); update() refuses to change them
+// resolved against. The backend set can be replaced the same way (backend
+// instances added / removed at runtime, backlog-sequence ⑦): rules and backend
+// set travel in one snapshot, so a table never names a backend outside its set.
+// The default backend is fixed for the process (it hosts .sys and the stores
+// loaded from it); update() refuses to change it
 class BucketRouter {
 public:
-    static BucketRouter build(const BucketsConfig& cfg,
-                              std::map<std::string, std::shared_ptr<IStorageBackend>> backends);
+    using BackendMap = std::map<std::string, std::shared_ptr<IStorageBackend>>;
+
+    static BucketRouter build(const BucketsConfig& cfg, BackendMap backends);
 
     IStorageBackend& resolve(std::string_view bucket) const;
-    const std::map<std::string, std::shared_ptr<IStorageBackend>>& backends() const {
-        return shared_->backends;
-    }
+    // Snapshot of the backend set (name -> instance): stable for the caller's
+    // iteration even while a reload swaps the set underneath
+    std::shared_ptr<const BackendMap> backends() const { return table()->backends; }
     // Internal data (e.g. credential persistence, docs/credential-management.md §4.1)
     // always lands on the default backend
     std::shared_ptr<IStorageBackend> default_backend() const { return shared_->default_backend; }
@@ -44,8 +48,12 @@ public:
 
     // Replace the rule table (same validation as build); throws std::runtime_error
     // and leaves the current table in force on any problem, including a changed
-    // default_backend or a rule naming a backend not present at startup
+    // default_backend or a rule naming a backend outside the current set
     void update(const BucketsConfig& cfg);
+    // Replace rules and backend set together (backend hot add / remove): the new
+    // set must still contain the default backend (same instance); rules are
+    // validated against the new set before anything is swapped
+    void update(const BucketsConfig& cfg, BackendMap backends);
     size_t rule_count() const { return table()->rules.size(); }
 
 private:
@@ -57,14 +65,15 @@ private:
     };
     struct Table {
         std::vector<Rule> rules;
+        std::shared_ptr<const BackendMap> backends;
     };
     struct Shared {
-        std::map<std::string, std::shared_ptr<IStorageBackend>> backends;
         std::shared_ptr<IStorageBackend> default_backend;
         std::string default_name;
         std::atomic<std::shared_ptr<const Table>> table;
     };
-    static std::shared_ptr<const Table> compile(const BucketsConfig& cfg, const Shared& sh);
+    static std::shared_ptr<const Table> compile(const BucketsConfig& cfg,
+                                                std::shared_ptr<const BackendMap> backends);
     std::shared_ptr<const Table> table() const { return shared_->table.load(std::memory_order_acquire); }
 
     std::shared_ptr<Shared> shared_;

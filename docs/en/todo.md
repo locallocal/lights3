@@ -1,23 +1,22 @@
-# Backlog: open items and future plans
+# TODO: open items and plans
 
-Successor of [archive/roadmap.md](../archive/roadmap.md) (the planning ledger
-from the 2026-08-25 walkthrough, archived on 2026-09-05 once every entry was
-closed out; `roadmap §N` in source comments refers to that archived file's
-sections). This document lists **only what is not done**: designs kept for a
-later phase, code that is in place but could not be verified on the development
-box, new issues found by the performance baseline, long-term items, and the
-explicit not-planned list. Delete an item when it is done and write the
-implementation into the relevant design document -- no struck-through history
-here, unlike the roadmap. Each entry carries **value** (high/medium/low) and
-**difficulty** (low/medium/high).
+Successor of `docs/archive/backlog.md` (the open-items ledger since 2026-09-05;
+its ten deferred items of §1 were all completed by 2026-09-06 in the order of
+`docs/archive/backlog-sequence.md`, and both files were archived -- Chinese only,
+like the other archived ledgers; `backlog §N` / `backlog-sequence ①…⑩` in source
+comments refer to their sections). This document lists **only what is not
+done**: follow-ups that wait on an external party, code that is in place but
+could not be verified on the development box, new issues found by the
+performance baseline, long-term items, and the explicit not-planned list.
+Delete an item when it is done and write the implementation into the relevant
+design document -- no struck-through history here. Each entry carries
+**value** (high/medium/low) and **difficulty** (low/medium/high).
 
-## 1. Kept for a later phase (design entry points settled, triggered by demand)
+## 1. Follow-ups waiting on an external party
 
-Implementation order, scope and acceptance per item: [backlog-sequence.md](backlog-sequence.md).
-
-| Item | Source | State and entry point | Value | Difficulty |
+| Item | Source | State and remaining steps | Value | Difficulty |
 | --- | --- | --- | --- | --- |
-| Structured error codes upstream in client-c | roadmap §3.7 (tikv T5) | Done on our side (2026-09-06): patch in `third_party/patches/client-c` (README has the PR text and the post-merge steps); the sidecar picks by-code / by-message at compile time from the linked library. Remaining: open the upstream PR → after the merge bump the submodule pointer, delete the message branch and the patch | low | medium |
+| Structured error codes merged upstream in client-c | backlog-sequence ⑨, [duostore-tikv-meta.md](duostore-tikv-meta.md) | Done on our side (2026-09-06): patch in `third_party/patches/client-c` (README has the PR text and the post-merge steps); the sidecar picks by-code / by-message at compile time from the linked library. Remaining: open the upstream PR → after the merge bump the submodule pointer, delete the message branch and the patch directory | low | low |
 
 ## 2. Pending verification (implemented, not verifiable on the development box)
 
@@ -33,7 +32,7 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 | Item | Symptom | Entry point | Value | Difficulty |
 | --- | --- | --- | --- | --- |
 | beast's TLS GET clearly lags | 4 MiB GET at 4.6k ops/s plaintext but 1.5k under TLS, while the other three drivers sit around 3.0k under TLS | The `TlsStream` write path in `src/http/drivers/beast/beast_server.cc`: asio ssl record splitting and one strand hop per chunk; start with an `strace -c` comparison of plaintext vs TLS syscall counts | medium | medium |
-| Request-body path not optimized symmetrically | PUT is flat across drivers; only beast improved, through the read-granularity bug fix | The request body is a pull model that must keep backpressure, so prefetch needs care; candidates: larger recv calls in builtin's `SocketBodyReader`, beast's per-chunk `expires_after` timer re-arm | medium | medium |
+| Request-body path not optimized symmetrically | PUT is flat across drivers; only beast improved, through the read-granularity bug fix; the queue block shaping of backlog-sequence ⑩ gained httplib's 4 MiB PUT only about 3% | The request body is a pull model that must keep backpressure, so prefetch needs care; candidates: larger recv calls in builtin's `SocketBodyReader`, beast's per-chunk `expires_after` timer re-arm | medium | medium |
 
 ## 4. Long-term / architectural (settle the target scenario first)
 
@@ -62,7 +61,7 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 
 - A new entry states its **source / entry point / value / difficulty**; delete
   it when done and write the implementation into the design document.
-- Source comments keep citing the archived reasoning as `roadmap §N`; entries
-  here are cited as `backlog §N`.
-- Historical ledgers, read-only: [archive/gaps.md](../archive/gaps.md),
-  [archive/issues.md](../archive/issues.md), [archive/roadmap.md](../archive/roadmap.md).
+- Source comments keep citing the archived reasoning as `roadmap §N`,
+  `backlog §N` and `backlog-sequence ①…⑩`; entries here are cited as `todo §N`.
+- Historical ledgers, read-only (Chinese): `docs/archive/gaps.md`, `issues.md`,
+  `roadmap.md`, `backlog.md`, `backlog-sequence.md`.

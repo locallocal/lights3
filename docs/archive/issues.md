@@ -4,7 +4,7 @@
 > `docs/` 删除；因源码/文档注释以 `docs/archive/issues.md TN` 形式引用其中的
 > 论证，现从 git 历史恢复归档于此。内容不再更新；接续的规划底账
 > [roadmap.md](roadmap.md) 也已于 2026-09-05 收口归档于此，当前待办见
-> [../backlog.md](../backlog.md)。
+> [../todo.md](../todo.md)。
 >
 > 生成日期：2026-08-13
 > 方法：并行通读 `src/core`、`src/storage`、`src/s3`、`src/http`、`src/main.cc`、`tests/` 全部源码；

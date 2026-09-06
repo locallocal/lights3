@@ -27,11 +27,11 @@ Task<http::HttpResponse> S3Service::admin_fsck(http::HttpRequest& req, std::stri
             backend.find('/', 1) != std::string::npos)
             throw S3Error(S3ErrorCode::InvalidRequest, "Usage: /-/admin/fsck/<backend>.");
         backend.erase(0, 1);
-        if (!fsck_start_ || !fsck_status_)
+        if (!job_start_ || !job_status_)
             throw S3Error(S3ErrorCode::InvalidRequest,
                           "fsck is not available on this deployment.");
         if (req.method == "GET") {
-            co_return json_response(200, fsck_status_(backend));
+            co_return json_response(200, job_status_(backend, "fsck", "fsck"));
         }
         if (req.method != "POST")
             throw S3Error(S3ErrorCode::MethodNotAllowed,
@@ -42,7 +42,7 @@ Task<http::HttpResponse> S3Service::admin_fsck(http::HttpRequest& req, std::stri
                 throw S3Error(S3ErrorCode::InvalidArgument, "max_mbps must be a non-negative integer.");
             mbps = std::stoull(*v);
         }
-        json j = fsck_start_(backend, mbps * 1000 * 1000);
+        json j = job_start_(backend, "fsck", "fsck", mbps * 1000 * 1000);
         AuditEvent e;
         e.event = "fsck.start";
         e.actor = access_key;

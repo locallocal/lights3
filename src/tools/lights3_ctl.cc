@@ -15,6 +15,7 @@
 #include "tools/lights3_ctl_common.h"
 #include "tools/lights3_ctl_cred.h"
 #include "tools/lights3_ctl_fsck.h"
+#include "tools/lights3_ctl_jobs.h"
 #include "tools/lights3_ctl_quota.h"
 #include "tools/lights3_ctl_reload.h"
 #include "tools/lights3_ctl_tenant.h"
@@ -39,7 +40,8 @@ int main(int argc, char* argv[]) {
         "website configuration under `website`, online object verification under "
         "`fsck`, bucket quotas under `quota`, tenants under `tenant`, usage "
         "counters under `usage`, configuration hot reload under `reload`, object layout "
-        "introspection under `object`, multipart cleanup under `mpu`; run "
+        "introspection under `object`, multipart cleanup under `mpu`, duostore / tiered "
+        "maintenance rounds on the live gateway under `duostore` and `tier`; run "
         "`lights3-ctl help <command>` for details.",
         "lights3 ops CLI.",
         // Bare lights3-ctl / lights3-ctl -x: nothing actionable to run; print help and exit as a
@@ -65,6 +67,8 @@ int main(int argc, char* argv[]) {
     root->add_subcommand(lights3_ctl::make_reload());
     root->add_subcommand(lights3_ctl::make_object());
     root->add_subcommand(lights3_ctl::make_mpu());
+    root->add_subcommand(lights3_ctl::make_duostore());
+    root->add_subcommand(lights3_ctl::make_tier());
     root->execute(argc, argv);
     return lights3_ctl::g_exit;
 }

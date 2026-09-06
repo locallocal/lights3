@@ -22,6 +22,7 @@
 #include "storage/multipart.h"
 #include <nlohmann/json.hpp>
 #include "tools/lights3_ctl_common.h"
+#include "tools/lights3_ctl_jobs.h"
 
 namespace {
 
@@ -197,46 +198,13 @@ int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& pr
 
 namespace lights3_ctl {
 
-// --offline: the server-side scrub (backlog-sequence ③) through the admin plane.
-// POST starts one round (409 while one runs), GET polls; the final document is
-// printed as JSON and findings > 0 make the exit code 1 like `lights3 fsck`
+// --offline: the server-side scrub (backlog-sequence ③) through the admin plane,
+// on the shared job driver (lights3_ctl_jobs.h): POST starts one round (409
+// while one runs), GET polls; the final document is printed as JSON and
+// findings > 0 make the exit code 1 like `lights3 fsck`
 int run_fsck_offline(SignedClient& cli, const std::string& backend, uint64_t mbps, bool wait,
                      bool status_only) {
-    const std::string path = "/-/admin/fsck/" + backend;
-    auto print_doc = [](const httplib::Result& r) -> int {
-        auto doc = nlohmann::json::parse(r->body, nullptr, false);
-        fputs(r->body.c_str(), stdout);
-        if (!r->body.empty() && r->body.back() != '\n') fputc('\n', stdout);
-        if (doc.is_discarded()) return 1;
-        if (doc.contains("error")) return 1;
-        if (doc.value("aborted", false)) return 1;
-        return doc.value("findings", uint64_t(0)) > 0 ? 1 : 0;
-    };
-    if (status_only) {
-        auto r = cli.get(path, "");
-        if (!r || r->status != 200) return finish(r, 200);
-        return print_doc(r);
-    }
-    auto r = cli.post_empty(path, mbps ? "max_mbps=" + std::to_string(mbps) : "");
-    if (!r || r->status != 202) return finish(r, 202);
-    if (!wait) {
-        fputs(r->body.c_str(), stdout);
-        return 0;
-    }
-    uint64_t job = nlohmann::json::parse(r->body).value("job_id", uint64_t(0));
-    for (;;) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        auto st = cli.get(path, "");
-        if (!st || st->status != 200) return finish(st, 200);
-        auto doc = nlohmann::json::parse(st->body, nullptr, false);
-        if (doc.is_discarded()) {
-            fprintf(stderr, "lights3-ctl: fsck: unparsable status document\n");
-            return 1;
-        }
-        if (doc.value("running", false)) continue;
-        if (doc.value("job_id", uint64_t(0)) != job) continue;  // a newer job replaced ours
-        return print_doc(st);
-    }
+    return run_job(cli, "/-/admin/fsck/" + backend, "fsck", mbps, wait, status_only);
 }
 
 std::shared_ptr<ccmd::c_command> make_fsck() {

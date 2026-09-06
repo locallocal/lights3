@@ -728,6 +728,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // Offline scrub on a live gateway (backlog-sequence ③, `lights3-ctl fsck --offline`)
             api_name = "AdminFsck";
             resp = co_await admin_fsck(req, access_key, ctx);
+        } else if (internal && (req.path.rfind("/-/admin/duostore/", 0) == 0 ||
+                                req.path.rfind("/-/admin/tier/", 0) == 0)) {
+            // Background rounds on demand + quarantine ledgers (docs/cli.md §3.12,
+            // `lights3-ctl duostore|tier ...`), same job model as fsck
+            api_name = req.path.rfind("/-/admin/tier/", 0) == 0 ? "AdminTier" : "AdminDuostore";
+            resp = co_await admin_jobs(req, access_key, ctx);
         } else if (internal && req.path.rfind("/-/admin/objects/", 0) == 0) {
             // Object layout introspection (roadmap §6.2, `lights3-ctl object inspect`)
             api_name = "AdminObjectInspect";

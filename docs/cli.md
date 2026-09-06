@@ -131,7 +131,7 @@ offset / TSO），`--incremental` 拒绝。本地引擎（sqlite / rocksdb）持
 
 > 在线网关上同一套 scrub 也能经 admin 面触发与轮询：`POST/GET /-/admin/fsck/<backend>`
 > 与 `lights3-ctl fsck --offline <backend>`（§3.5）。离线 CLI 与 admin 端点共用
-> `app/fsck_jobs.h` 的类型分派与结论定义。
+> `app/admin_jobs.h` 的类型分派与结论定义。
 
 离线数据完整性巡检（roadmap §3.1，实现细节见
 [storage/duostore-core.md §8.4](storage/duostore-core.md) 与
@@ -196,6 +196,9 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
   `refs_missing`：HEAD 复核云副本仍不存在后删除这个已死的本地 stub（承认数据
   丢失，对象从列表消失；副本回来了则保留 stub、销账并返回退出码 1）。
   见 [tiered-design.md §9](storage/tiered-design.md)。
+
+同一批轮次也能在**运行中的网关**里立即触发（`lights3-ctl duostore|tier`，§3.12），
+不必停服；离线入口保留给未启动网关、以及账本的 `release` / `purge` / `forget`。
 
 ```bash
 ./build/lights3 duostore gc duodata --config=/etc/lights3/lights3.yaml   # 立即回收空间
@@ -509,11 +512,60 @@ lights3-ctl mpu list photos --older-than=1d
 lights3-ctl mpu abort photos --all --older-than=7d          # 已消失的（404）按完成计
 ```
 
+### 3.12 `duostore` / `tier` —— 在线网关上的后台任务与隔离区账本
+
+§2.4 那几轮后台任务（duostore GC / 孤儿扫描，tiered 扫描 / GC / 对账）在**运行中的
+网关**内立即跑一轮，不必另起进程——本地 meta 引擎（rocksdb/sqlite）持文件锁，离线
+`lights3 duostore gc` 必须停服，这里则直接借网关自己的后端实例。与 `fsck --offline`
+同一 job 模型（`app/admin_jobs.h`）：POST 发起、202 带 job id、GET 轮询，**同一后端
+同一时刻只跑一个 job，不分操作**（各轮共用后端的维护状态；fsck 在跑时 gc 也被拒），
+409 码为 `JobInProgress`（fsck 保留 `ScrubInProgress`）。隔离区账本只读：动账的
+`release` / `purge` / `forget` 仍是离线 CLI 的事。
+
+```text
+POST /-/admin/duostore/<backend>/gc|scan            root；202 {"backend","op","job_id","running":true,"busy":true}
+POST /-/admin/tier/<backend>/scan|gc|reconcile      409 JobInProgress = 该后端已有 job 在跑（任何操作）
+                                                    404 未知后端；400 组里没有这个操作 / 后端类型不符
+GET  /-/admin/duostore/<backend>/gc|scan            200 {"backend","op","running","busy","job_id","started_at_ms",
+GET  /-/admin/tier/<backend>/scan|gc|reconcile           完成后再加 "finished_at_ms","duration_ms","kind","findings","aborted","stats"{…}}
+GET  /-/admin/duostore/<backend>/quarantine         200 {"backend","kind":"duostore","entries":[{"pack_id","live_recs","corrupt_records","quarantined_at_ms","purged"}]}
+GET  /-/admin/tier/<backend>/quarantine             200 {"backend","kind":"tiered","entries":[{"kind","bucket","key","etag","first_seen_ms","last_seen_ms","count"}]}
+```
+
+每个操作各留一份最近一次的文档（`running` 只指这个操作，`busy` 指该后端任一操作），
+`stats` 逐字段镜像对应的 `*Stats` 结构（`DuoGcStats` / `DuoOrphanStats` /
+`TierScanStats` / `TierGcStats` / `TierReconcileStats`），`findings` 是其中的丢失信号
+之和：duostore gc = `records_corrupt + packs_quarantined`，duostore scan =
+`refs_missing + pack_stats_missing`，tier reconcile = `refs_missing`，tier scan / gc
+恒 0。网关关停会中断在跑的一轮（`aborted: true`）。审计事件 `<group>.<op>.start`。
+
+```text
+lights3-ctl duostore gc|scan <backend> [--no-wait | --status]
+lights3-ctl duostore quarantine list <backend>
+lights3-ctl tier scan|gc|reconcile <backend> [--no-wait | --status]
+lights3-ctl tier quarantine list <backend>
+```
+
+与 `fsck --offline` 同一套驱动（`lights3_ctl_jobs.cc`）：发起后每 0.5s 轮询到结束并
+打印结论文档，退出码 **1 = job 抛异常 / `aborted` / `findings > 0`**（注意这与离线
+`lights3 duostore|tier` 的"恒 0/1"不同——在线入口沿用 fsck 的裁决约定，便于脚本判
+断）；`--no-wait` 只打印 202 文档立即返回；`--status` 不发起、只查询。`quarantine list`
+原样打印账本 JSON。
+
+```bash
+lights3-ctl duostore gc duodata                   # 立即回收空间，等到结束打印 DuoGcStats
+lights3-ctl duostore scan duodata --no-wait       # 只拿 job id
+lights3-ctl tier reconcile tierdata               # refs_missing > 0 时退出码 1
+lights3-ctl tier scan tierdata --status           # 进度 / 上次结论
+lights3-ctl tier quarantine list tierdata
+```
+
 ## 4. 新增子命令的约定
 
 - 每个命令组一个源文件（`lights3_ctl_<group>.cc/.h`，`make_<group>()` 返回根节点），
   在 `lights3_ctl.cc` 中 `add_subcommand`；连接选项经 `lights3_ctl_common.h` 的
-  `add_conn_flags` / `read_conn_opts` 复用。
+  `add_conn_flags` / `read_conn_opts` 复用。同一机制的几个组可共用一个文件（`duostore` / `tier`
+  与 `fsck --offline` 的 job 驱动同在 `lights3_ctl_jobs.cc`）。
 - 回调无返回值，退出码通过 `lights3_ctl::g_exit` 传出，遵守 §1 的 0/1/2 约定；
   位置参数经 `c->args()` 读取并自行校验数量。
 - 服务进程侧的运维入口放在 `src/main.cc` 的命令树下（如 `duostore`），

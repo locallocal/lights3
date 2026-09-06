@@ -183,34 +183,56 @@ void Application::start_server() {
         });
     service_->set_metrics_root_only(cfg_.http.metrics_access == "root");
     service_->set_reload_hook([this] { return reload_config(); });
-    // Offline scrub jobs on the live gateway (backlog-sequence ③): the raw backends
-    // (not the metered decorators -- the scrub is a maintenance traversal, not a
-    // request), one job per backend at a time, outcome kept for polling
-    fsck_jobs_ = std::make_unique<FsckJobs>(backends_);
-    auto fsck_failure = [](const FsckJobs::Failure& f) -> s3::S3Error {
+    // Maintenance jobs on the live gateway (backlog-sequence ③ fsck; duostore
+    // gc / scan and tier scan / gc / reconcile rounds; the quarantine ledgers):
+    // the raw backends (not the metered decorators -- a round is a maintenance
+    // traversal, not a request), one job per backend at a time, outcome kept for
+    // polling. The service speaks (group, op) strings; the mapping to ops and the
+    // 409 code (ScrubInProgress for fsck, JobInProgress for the rounds) live here
+    admin_jobs_ = std::make_unique<AdminJobs>(backends_);
+    auto job_failure = [](const AdminJobs::Failure& f, bool fsck) -> s3::S3Error {
         switch (f.code) {
-            case FsckJobs::Error::NoSuchBackend: return s3::S3Error(s3::S3ErrorCode::NoSuchKey, f.message);
-            case FsckJobs::Error::Unsupported: return s3::S3Error(s3::S3ErrorCode::InvalidRequest, f.message);
-            case FsckJobs::Error::Busy: return s3::S3Error(s3::S3ErrorCode::ScrubInProgress, f.message);
+            case AdminJobs::Error::NoSuchBackend: return s3::S3Error(s3::S3ErrorCode::NoSuchKey, f.message);
+            case AdminJobs::Error::Unsupported: return s3::S3Error(s3::S3ErrorCode::InvalidRequest, f.message);
+            case AdminJobs::Error::Busy:
+                return s3::S3Error(fsck ? s3::S3ErrorCode::ScrubInProgress : s3::S3ErrorCode::JobInProgress,
+                                   f.message);
         }
         return s3::S3Error(s3::S3ErrorCode::InternalError, f.message);
     };
-    service_->set_fsck_hooks(
-        [this, fsck_failure](const std::string& backend, uint64_t bps) {
+    auto op_of = [](const std::string& group, const std::string& op) {
+        auto o = parse_job_op(group, op);
+        if (!o) throw s3::S3Error(s3::S3ErrorCode::InvalidRequest, "no operation '" + op + "' in '" + group + "'.");
+        return *o;
+    };
+    service_->set_job_hooks(
+        [this, job_failure, op_of](const std::string& backend, const std::string& group,
+                                   const std::string& op, uint64_t bps) {
+            JobOp o = op_of(group, op);
             try {
-                nlohmann::json j = fsck_jobs_->status(backend);
-                j["job_id"] = fsck_jobs_->start(backend, bps);
+                nlohmann::json j = admin_jobs_->status(backend, o);
+                j["job_id"] = admin_jobs_->start(backend, o, bps);
                 j["running"] = true;
+                j["busy"] = true;
                 return j;
-            } catch (const FsckJobs::Failure& f) {
-                throw fsck_failure(f);
+            } catch (const AdminJobs::Failure& f) {
+                throw job_failure(f, o == JobOp::Fsck);
             }
         },
-        [this, fsck_failure](const std::string& backend) {
+        [this, job_failure, op_of](const std::string& backend, const std::string& group,
+                                   const std::string& op) {
+            JobOp o = op_of(group, op);
             try {
-                return fsck_jobs_->status(backend);
-            } catch (const FsckJobs::Failure& f) {
-                throw fsck_failure(f);
+                return admin_jobs_->status(backend, o);
+            } catch (const AdminJobs::Failure& f) {
+                throw job_failure(f, o == JobOp::Fsck);
+            }
+        },
+        [this, job_failure](const std::string& backend, const std::string& group) {
+            try {
+                return admin_jobs_->quarantine(backend, group);
+            } catch (const AdminJobs::Failure& f) {
+                throw job_failure(f, false);
             }
         });
     service_->set_timer_stats([] { return TimerQueue::instance().stats(); });
@@ -491,9 +513,10 @@ bool rules_differ(const BucketsConfig& a, const BucketsConfig& b) {
 // keeps running as configured before and is reported (a parameter change would
 // mean rebuilding an instance that carries state). Removal is refused outright
 // (whole reload) when the file still references the backend -- a remaining tiered
-// entry naming it as local / cloud, or an fsck job running on it -- because the
-// file describes a topology this process cannot run; removing the default backend
-// is only deferred (it hosts .sys; the rest of the reload still applies)
+// entry naming it as local / cloud, or a maintenance job (fsck, duostore or tier
+// round) running on it -- because the file describes a topology this process
+// cannot run; removing the default backend is only deferred (it hosts .sys; the
+// rest of the reload still applies)
 struct BackendPlan {
     std::vector<BackendConfig> added;
     std::vector<std::string> removed;
@@ -502,7 +525,7 @@ struct BackendPlan {
 };
 
 BackendPlan plan_backends(const std::vector<BackendConfig>& running, const Config& fresh,
-                          const std::string& default_name, const FsckJobs* fsck) {
+                          const std::string& default_name, const AdminJobs* jobs) {
     BackendPlan plan;
     auto find = [](const std::vector<BackendConfig>& v, const std::string& name) {
         for (auto& b : v)
@@ -538,9 +561,9 @@ BackendPlan plan_backends(const std::vector<BackendConfig>& running, const Confi
                 return plan;
             }
         }
-        if (fsck && fsck->busy(old.name)) {
+        if (jobs && jobs->busy(old.name)) {
             plan.error = "backends: cannot remove '" + old.name +
-                         "' while an fsck job runs on it (retry when it finishes)";
+                         "' while a maintenance job (fsck / duostore / tier round) runs on it (retry when it finishes)";
             return plan;
         }
         plan.removed.push_back(old.name);
@@ -573,7 +596,7 @@ ConfigReloadReport Application::reload_config() {
     // the rules (one snapshot, backlog-sequence ⑦); removed ones leave the router
     // here and are closed on a retiring thread once their in-flight requests drain
     BackendPlan plan = plan_backends(cfg_.backends, fresh, cfg_.buckets.default_backend,
-                                     fsck_jobs_.get());
+                                     admin_jobs_.get());
     if (!plan.error.empty()) {
         report.error = plan.error;
         LOG_WARN("config reload refused, keeping the running configuration: {}", report.error);
@@ -622,7 +645,7 @@ ConfigReloadReport Application::reload_config() {
         for (auto& bc : plan.added) {
             backends_[bc.name] = built[bc.name];
             metered_[bc.name] = built_metered[bc.name];
-            fsck_jobs_->add_backend(bc.name, built[bc.name]);
+            admin_jobs_->add_backend(bc.name, built[bc.name]);
             cfg_.backends.push_back(bc);
             report.applied.push_back("backends: added " + bc.name + " (" + bc.type + ")");
         }
@@ -631,8 +654,8 @@ ConfigReloadReport Application::reload_config() {
             auto metered = std::dynamic_pointer_cast<storage::MeteredBackend>(metered_[name]);
             backends_.erase(name);
             metered_.erase(name);
-            if (!fsck_jobs_->remove_backend(name))  // a job slipped in since the plan: it aborts on close
-                LOG_WARN("backend {} removed while an fsck job runs on it; the job will abort", name);
+            if (!admin_jobs_->remove_backend(name))  // a job slipped in since the plan: it aborts on close
+                LOG_WARN("backend {} removed while a maintenance job runs on it; the job will abort", name);
             std::erase_if(cfg_.backends, [&](const BackendConfig& b) { return b.name == name; });
             retire_backend(name, std::move(raw), std::move(metered));
             report.applied.push_back("backends: removed " + name +
@@ -825,8 +848,8 @@ void Application::shutdown() noexcept {
     close_backends();
     // A scrub in flight aborts once its backend is closed; join its thread before
     // the backends themselves go away
-    if (fsck_jobs_) fsck_jobs_->shutdown();
-    fsck_jobs_.reset();
+    if (admin_jobs_) admin_jobs_->shutdown();
+    admin_jobs_.reset();
     // The backends' shared_ptrs are still held by service (via router)
     // and handler (via server), so clearing backends_ alone triggers
     // no destruction. Release in reverse ownership order so backend

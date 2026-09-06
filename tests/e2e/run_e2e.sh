@@ -773,6 +773,39 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
             s3curl -o /dev/null -X DELETE "$BASE/fsckbkt"
         fi
     fi
+    # docs/cli.md §3.12: the background rounds on demand and the quarantine
+    # ledgers through the admin plane (same job model as fsck; the group must
+    # match the backend type: 400 otherwise, 404 for an unknown backend)
+    check "admin jobs: unsigned refused" "403" "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/tier/tierdata/scan")"
+    check "admin jobs: unknown backend 404" "404" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/duostore/nope/gc")"
+    check "admin jobs: unknown op 400" "400" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/tier/tierdata/frobnicate")"
+    check "admin jobs: quarantine is read-only (405)" "405" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/tier/tierdata/quarantine")"
+    JOB_GROUP=""
+    case "$BACKEND" in
+        tiered|tiered-*) JOB_GROUP=tier ;;
+        duostore|duostore-*) JOB_GROUP=duostore ;;
+    esac
+    if [[ "$JOB_GROUP" == "tier" ]]; then
+        check "admin jobs: duostore op on a tiered backend 400" "400" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/duostore/tierdata/gc")"
+        for op in scan gc reconcile; do
+            J_OUT=$(adm tier $op tierdata 2>&1); J_RC=$?
+            check "lights3-ctl tier $op completes clean" "0" "$J_RC"
+            [[ $J_RC -ne 0 ]] && echo "$J_OUT"
+            check "lights3-ctl tier $op prints the outcome document" "0" "$(echo "$J_OUT" | grep -q '"kind": "tiered"'; echo $?)"
+        done
+        check "lights3-ctl tier scan --status" "0" "$(adm tier scan tierdata --status 2>&1 | grep -q '"running": false'; echo $?)"
+        check "lights3-ctl tier quarantine list" "0" "$(adm tier quarantine list tierdata 2>&1 | grep -q '"entries": \[\]'; echo $?)"
+    elif [[ "$JOB_GROUP" == "duostore" ]]; then
+        check "admin jobs: tier op on a duostore backend 400" "400" "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/tier/tierdata/scan")"
+        for op in gc scan; do
+            J_OUT=$(adm duostore $op tierdata 2>&1); J_RC=$?
+            check "lights3-ctl duostore $op completes clean" "0" "$J_RC"
+            [[ $J_RC -ne 0 ]] && echo "$J_OUT"
+            check "lights3-ctl duostore $op prints the outcome document" "0" "$(echo "$J_OUT" | grep -q '"kind": "duostore"'; echo $?)"
+        done
+        check "lights3-ctl duostore gc --status" "0" "$(adm duostore gc tierdata --status 2>&1 | grep -q '"running": false'; echo $?)"
+        check "lights3-ctl duostore quarantine list" "0" "$(adm duostore quarantine list tierdata 2>&1 | grep -q '"entries": \[\]'; echo $?)"
+    fi
     FSCK_OUT=$(adm fsck admbench 2>&1); FSCK_RC=$?
     check "lights3-ctl fsck verifies the bench objects" "0" "$FSCK_RC"
     [[ $FSCK_RC -ne 0 ]] && echo "$FSCK_OUT"

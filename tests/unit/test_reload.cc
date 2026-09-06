@@ -8,7 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "app/app.h"
-#include "app/fsck_jobs.h"
+#include "app/admin_jobs.h"
 #include "core/semaphore.h"
 #include "core/util/crypto.h"
 #include "s3/auth/credential_store.h"
@@ -381,25 +381,25 @@ TEST(metered_backend_inflight_leases) {
     CHECK_EQ(m->inflight(), 0L);
 }
 
-TEST(fsck_jobs_dynamic_backend_set) {
+TEST(admin_jobs_dynamic_backend_set) {
     auto a = std::make_shared<storage::MemoryBackend>();
-    FsckJobs jobs({{"a", a}});
+    AdminJobs jobs({{"a", a}});
     CHECK(!jobs.busy("a"));
     bool threw = false;
     try {
-        jobs.status("c");
-    } catch (const FsckJobs::Failure& f) {
-        threw = f.code == FsckJobs::Error::NoSuchBackend;
+        jobs.status("c", JobOp::Fsck);
+    } catch (const AdminJobs::Failure& f) {
+        threw = f.code == AdminJobs::Error::NoSuchBackend;
     }
     CHECK(threw);
     jobs.add_backend("c", std::make_shared<storage::MemoryBackend>());
-    CHECK(!jobs.status("c")["running"].get<bool>());
+    CHECK(!jobs.status("c", JobOp::Fsck)["running"].get<bool>());
     CHECK(jobs.remove_backend("c"));
     CHECK(jobs.remove_backend("c"));  // idempotent
     threw = false;
     try {
-        jobs.status("c");
-    } catch (const FsckJobs::Failure&) {
+        jobs.status("c", JobOp::Fsck);
+    } catch (const AdminJobs::Failure&) {
         threw = true;
     }
     CHECK(threw);

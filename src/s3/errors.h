@@ -60,6 +60,7 @@ namespace lights3::s3 {
     X(TenantAlreadyExists, 409)          \
     X(TenantNotEmpty, 409)               \
     X(ScrubInProgress, 409)              \
+    X(JobInProgress, 409)                \
     X(TooManyBuckets, 400)               \
     X(XAmzContentSHA256Mismatch, 400)
 

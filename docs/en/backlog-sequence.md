@@ -21,7 +21,7 @@ it from backlog.md §1, strike its row here and record the date.
 | 7 | D operational depth | ~~hot add / remove of backend instances~~ **done (2026-09-06)** | medium / high | 4–5 d | touches the Application lifecycle and routing-table replacement -- the riskiest item, after the multi-instance and identity lines settle |
 | 8 | D operational depth | duostore meta incremental backup / PITR | medium / high | 5+ d (per engine) | four engines, four natural small iterations; blocks nothing else |
 | 9 | E opportunistic | structured error codes upstream in client-c | low / medium | 1–2 d + upstream cycle | paced by an external project, fits any gap; no functional impact |
-| 10 | E opportunistic | `HeaderMap` linear scan / `BlockQueue` double copy | low / low | per profile | only with profile evidence; without it, it stays last |
+| 10 | E opportunistic | ~~`HeaderMap` linear scan / `BlockQueue` double copy~~ **done (2026-09-06)** | low / low | per profile | only with profile evidence; without it, it stays last |
 
 Only two hard dependencies: ② → ③ (the endpoint lands on the new port) and
 ④ → ⑤ (shared multi-instance e2e scaffolding and the `.sys` shared-state
@@ -205,6 +205,26 @@ start ⑦ of phase D only after B has landed.
 - **If done**: keep `HeaderMap` a vector but add an 8-bit hash of the
   lower-cased key as a pre-filter; let `BlockQueue::push` accept
   `std::string&&` so httplib's content receiver hands the buffer over.
+- **What was done (2026-09-06, pulled forward on request; no `perf` flame
+  graph, evidence is a microbenchmark plus the driver benchmark)**:
+  - `HeaderMap`: an 8-bit tag next to each item plus a 256-bit set of the
+    tags present, so a miss never scans. The tag is name length + lowercased
+    first / last characters (O(1)), **not** a hash of the whole name: an
+    FNV-1a tag measured as expensive as the scan it saves and made hits slower
+    (8.3 → 13.3 ns). Microbenchmark (25 headers, -O2): miss 15 → 1.8 ns,
+    hit 8.3 → 8.0 ns, mixed 12.6 → 6.7 ns.
+  - `BlockQueue`: httplib's content receiver hands over `const char*` slices
+    of its own buffer, so **a hand-over is not possible there**; instead
+    consecutive borrowed slices are appended to one tail block of ≤ 256 KiB
+    (the consumer pops per block: 16384 → about 4.6K pops per 256 MiB), and
+    `push(std::string&&)` serves producers that do own their buffer
+    (cloudproxy's outbound upload reads each round into a fresh 64 KiB string
+    and moves it in whole). Empty pushes are dropped (a zero-length block
+    would read as EOF on pop).
+  - Driver benchmark (`bench_matrix.sh`, httplib plaintext, localfs): 4 MiB
+    PUT 1077 → 1114 ops/s, GET and 16 KiB objects flat -- consistent with the
+    backlog's "small in absolute terms" call.
+  - Details: [http-adapter.md §2.4 ⑧](http-adapter.md), [cloudproxy-backend.md §3](cloudproxy-backend.md).
 
 ## 6. Ledger
 
@@ -219,4 +239,4 @@ start ⑦ of phase D only after B has landed.
 | ⑦ | hot add / remove of backend instances | done | 2026-09-06 / `feat/backend-hot-reload` |
 | ⑧ | duostore meta incremental backup / PITR | done | 2026-09-06 / `feat/duostore-meta-pitr` |
 | ⑨ | client-c upstream contribution | done on our side, awaiting the upstream merge | 2026-09-06 / `feat/client-c-write-conflict-code`; patch in `third_party/patches/client-c`, bump the pointer and delete the message branch after the merge |
-| ⑩ | HeaderMap / BlockQueue | waiting for profile evidence | |
+| ⑩ | HeaderMap / BlockQueue | done (pulled forward on request; microbenchmark + driver benchmark as evidence) | 2026-09-06 / `feat/headermap-tag-blockqueue-move` |

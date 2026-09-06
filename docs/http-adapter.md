@@ -218,7 +218,7 @@ ratelimit:
 | ⑤ | **builtin 流式写进 pumping** | 整个 body 循环是一个协程，由 `sync_wait_pumping` 驱动（此前每 64KiB 一次裸 `sync_wait`：condvar + 两次线程跳转，1GiB = 16384 次）；每块前 `co_await resume_on(exec)` 把续体拉回连接线程发送（慢客户端不占共享池），`PumpExecutor::running_in_this_thread()` 已在本线程时内联继续 |
 | ⑥ | **beast `ResumeOn` 快路径** | 连接 executor 都是 `make_strand` 出的 `strand<io_context::executor_type>`；`any_io_executor::target<Strand>()` 探到后 `running_in_this_thread()` 为真即 `await_ready`，省一次 `asio::post`。seastar 的 `ResumeOnShard` 本就有同样判断 |
 | ⑦ | **per-bucket 指标去锁** | `CountingBodyReader` 每块只加全局原子计数（`add_bytes_*_total`），桶维度累计到流末或每 16MiB 才 `add_bucket_bytes` 进一次互斥锁（此前每 64KiB 一次全局锁） |
-| ⑧ | HeaderMap / BlockQueue | 维持：线性扫描与双拷贝的绝对量小，未动 |
+| ⑧ | **HeaderMap 预筛 / BlockQueue 块整形**（backlog-sequence ⑩，2026-09-06 补做） | `HeaderMap` 仍是保序 vector，每项旁存一个 8 位 tag（名字长度 + 小写首尾字符折叠，O(1)——整名 FNV 哈希的代价与它省下的扫描相当，实测反让命中变慢）+ 256 位"在场 tag"集合：未命中（L2 探测的可选头多数不在请求里）不扫描直接返回，命中先比 tag 再做大小写折叠比较。微基准（25 个头、-O2）：未命中 15→1.8 ns，命中 8.3→8.0 ns。`BlockQueue`：借用缓冲的 push（httplib 的 16 KiB 片）拼进同一尾块（≤256 KiB），消费方按块而不是按片 pop（16384→约 4.6K 次/256 MiB）；`push(std::string&&)` 整块移交（cloudproxy 出方向上传每轮读进新分配的 64 KiB string 后移入，锁内不再拷贝）。空 push 被丢弃（零长块会被 pop 当作 EOF）。绝对量仍小，与 backlog 当初的判断一致 |
 | ⑨ | **beast 请求体读粒度**（基线跑出的发现） | 会话的 `flat_buffer` 不预留容量时，beast 的 `read_size = max(512, capacity − size)` 让每次 socket 读只取 512 字节：4 MiB 请求体 = 8192 次 `recvmsg` + 同样多次 `timerfd_settime`（每次 `expires_after`）+ 7.7 万次 futex，单次 PUT 40 ms 对 builtin 6 ms。修复：`buffer.reserve(io_chunk_size)`，PUT 4 MiB 91 → 914 ops/s |
 
 ③ 异步日志已随 §5.2 完成。

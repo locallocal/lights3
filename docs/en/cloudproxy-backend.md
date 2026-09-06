@@ -193,7 +193,10 @@ get_object(bucket, key, range):
                + parse Content-Range, hand back to ① via the promise;
          error status → keep receiving the error body, do the §5 mapping,
                hand the exception back via the promise
-     - ContentReceiver: loop queue->push(data, n); if push returns false,
+     - ContentReceiver: loop queue->push(data, n) (httplib hands over one
+       16 KiB slice of its own buffer per callback; the queue appends
+       consecutive slices to one tail block of up to 256 KiB, backlog-sequence ⑩,
+       so the consumer pops a block, not a slice); if push returns false,
        return false to abort the transfer
      - Finish: queue->close(ok)
 ③ Once ① has the meta: co_return ObjectStream{meta,
@@ -227,7 +230,9 @@ put_object(bucket, key, meta, body):
      popping EOF
 ② The calling coroutine (staying in the shared pool) loops:
      co_await body.read(64KiB buffer) → HashStream(Md5) incremental update
-       → queue->push(); after EOF, queue->close(ok=true)
+       → queue->push(std::move(chunk)) (a fresh 64 KiB string per read, moved
+         in whole: no copy under the lock, backlog-sequence ⑩); after EOF,
+         queue->close(ok=true)
      body.read() throws (client disconnected) → queue->close(ok=false) →
        Provider returns false to abort the upload
 ③ join the pump, take the remote response: 2xx → verify ETag (§6)

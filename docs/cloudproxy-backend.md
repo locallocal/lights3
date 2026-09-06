@@ -147,7 +147,9 @@ get_object(bucket, key, range)：
                经 promise 交还 ①；
          错误状态 → 继续收完错误体做 §5 映射，经 promise 交还异常
      - ContentReceiver：循环 queue->push(data, n)；push 返回 false 则
-       返回 false 中止传输
+       返回 false 中止传输。httplib 每次回调只给自己缓冲的一片（16 KiB），
+       队列把连续的片拼进同一个尾块（上限 256 KiB，backlog-sequence ⑩），
+       消费方一次 pop 拿到整块而不是一片
      - 结束：queue->close(ok)
 ③ ① 拿到 meta 后 co_return ObjectStream{meta,
        make_unique<CancelOnDropReader>(QueueBodyReader(queue, len)), range}
@@ -173,8 +175,9 @@ put_object(bucket, key, meta, body)：
 ① 启动 pump 线程：client.Put(path, headers, length, ContentProvider, ct)
      Provider 从 queue pop 写入 DataSink；pop 到 EOF 后结束
 ② 调用方协程（留在共享池）循环：
-     co_await body.read(64KiB 缓冲) → HashStream(Md5) 增量更新
-       → queue->push()；EOF 后 queue->close(ok=true)
+     co_await body.read(每轮新分配的 64KiB string) → HashStream(Md5) 增量更新
+       → queue->push(std::move(chunk))（整块移交，锁内不再拷贝，
+         backlog-sequence ⑩）；EOF 后 queue->close(ok=true)
      body.read() 抛异常（客户端断连）→ queue->close(ok=false) →
        Provider 返回 false 中止上传
 ③ join pump，取远端响应：2xx → 校验 ETag（§6）→ co_return PutResult

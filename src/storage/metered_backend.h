@@ -11,11 +11,18 @@
 // The time measured is the call's wall time: for put_object/upload_part that
 // includes streaming the body in (which is what the backend spends its time on),
 // for get_object it is the open only — bytes stream afterwards through the driver.
+// The decorator also keeps the per-backend in-flight count that backend hot
+// removal drains on (backlog-sequence ⑦): every call holds a lease for its
+// duration, and a get_object lease travels with the returned body until the
+// stream is released, so "in flight" covers streaming reads as well.
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "core/metrics.h"
@@ -31,6 +38,13 @@ public:
 
     const std::string& name() const { return name_; }
     const std::shared_ptr<IStorageBackend>& inner() const { return inner_; }
+
+    // In-flight operations (calls in progress + open get_object streams)
+    long inflight() const;
+    // Block until nothing is in flight or the deadline passes; true = drained.
+    // The lease release signals the condition, no polling (the
+    // AsyncSemaphore::wait_drained shape, roadmap §4.5)
+    bool wait_idle(std::chrono::milliseconds timeout);
 
     Task<void> create_bucket(std::string_view bucket) override;
     Task<void> delete_bucket(std::string_view bucket) override;
@@ -88,11 +102,41 @@ private:
     template <class T>
     Task<T> timed(const char* name, Task<T> inner);
 
+public:
+    // Shared by the decorator and the leases handed to open streams: a stream may
+    // outlive the decorator (a request holds the body after a reload dropped the
+    // backend), so the counter lives in its own block
+    struct Inflight {
+        std::mutex m;
+        std::condition_variable cv;
+        long n = 0;
+    };
+    class Lease {
+    public:
+        Lease() = default;
+        explicit Lease(std::shared_ptr<Inflight> in);
+        Lease(Lease&& o) noexcept : in_(std::move(o.in_)) {}
+        Lease& operator=(Lease&& o) noexcept {
+            release();
+            in_ = std::move(o.in_);
+            return *this;
+        }
+        Lease(const Lease&) = delete;
+        Lease& operator=(const Lease&) = delete;
+        ~Lease() { release(); }
+        void release();
+
+    private:
+        std::shared_ptr<Inflight> in_;
+    };
+
+private:
     std::string name_;
     std::shared_ptr<IStorageBackend> inner_;
     MetricsScope scope_;
     std::mutex mu_;
     std::map<std::string, OpMetrics> ops_;
+    std::shared_ptr<Inflight> inflight_ = std::make_shared<Inflight>();
 };
 
 // Wrap every backend of the map (used for the bucket router; the raw map stays

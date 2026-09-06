@@ -17,7 +17,7 @@ std::shared_ptr<ccmd::c_command> make_reload() {
         "Reload the server configuration file (POST /-/admin/config/reload, root "
         "credential). Applies the runtime-changeable subset (log level, request/stall "
         "timeouts, max_inflight_requests, min_part_size, rate limits, bucket routing "
-        "rules, TLS certificate material) and lists keys that changed but need a "
+        "rules, added/removed backend instances, TLS certificate material) and lists keys that changed but need a "
         "restart; a file that fails validation changes nothing (exit 1).",
         "reload the server configuration.", [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!c->args().empty()) {

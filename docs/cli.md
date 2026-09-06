@@ -182,7 +182,7 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 `kill -HUP <pid>` 让服务进程重新读取 `--config` 指定的文件（roadmap §4.4，
 [config-reload.md](config-reload.md)）：整体校验后只应用可热更新子集（日志级别、
 `request_timeout`/`transfer_stall_timeout`、`max_inflight_requests`、`min_part_size`、
-限流、bucket 路由规则、TLS 证书内容），其余改动逐项 WARN "需重启"；文件校验失败
+限流、bucket 路由规则、后端实例的增删、TLS 证书内容），其余改动逐项 WARN "需重启"；文件校验失败
 则一字不改。systemd 单元可配 `ExecReload=/bin/kill -HUP $MAINPID`。同一动作也可经
 `s3adm reload`（§3.9）触发并拿到报告。
 
@@ -428,8 +428,10 @@ s3adm usage logs --rescan         # 立即重算 logs 桶
 ### 3.9 `reload` —— 配置热重载
 
 `POST /-/admin/config/reload`（root 专属）的 CLI 包装，与 `SIGHUP` 同一条路径，
-但把结果返回给调用者：`applied`（已生效项）与 `requires_restart`（改了但需重启
-的键）。配置校验失败时服务端回 400、命令退出码 1。
+但把结果返回给调用者：`applied`（已生效项，含 `backends: added <name> (<type>)` /
+`backends: removed <name> (closing after in-flight requests drain)`）与
+`requires_restart`（改了但需重启的键）。配置校验失败、新后端构建失败、删除仍被
+tiered 条目或运行中的 fsck job 引用的后端时服务端回 400、命令退出码 1。
 
 ```text
 s3adm reload

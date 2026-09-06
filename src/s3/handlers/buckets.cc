@@ -10,7 +10,8 @@ namespace lights3::s3 {
 Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
     // Aggregate across backends; deduplicate by name (first backend wins)
     std::vector<storage::BucketInfo> all;
-    for (auto& [_, backend] : router_.backends()) {
+    auto backends = router_.backends();  // snapshot across the co_awaits
+    for (auto& [_, backend] : *backends) {
         auto part = co_await backend->list_buckets();
         for (auto& b : part) {
             // Internal reserved names never appear in the user-visible list (docs/credential-management.md §4.1)

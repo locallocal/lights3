@@ -217,7 +217,8 @@ integrity-verdict surface is `lights3 fsck`.
 (roadmap §4.4, [config-reload.md](config-reload.md)): after validating it as a
 whole, only the hot-reloadable subset is applied (log level,
 `request_timeout`/`transfer_stall_timeout`, `max_inflight_requests`,
-`min_part_size`, rate limits, bucket routing rules, TLS certificate contents);
+`min_part_size`, rate limits, bucket routing rules, adding / removing backend
+instances, TLS certificate contents);
 every other change is WARNed as "needs a restart", and a file that fails
 validation changes nothing. A systemd unit can use
 `ExecReload=/bin/kill -HUP $MAINPID`. The same action is available through
@@ -484,9 +485,12 @@ s3adm usage logs --rescan         # recount the logs bucket now
 ### 3.9 `reload` — configuration hot reload
 
 CLI wrapper of `POST /-/admin/config/reload` (root only): the same path as
-`SIGHUP`, but the outcome comes back to the caller — `applied` (in effect now)
-and `requires_restart` (changed on disk, needs a restart). A file that fails
-validation answers 400 and the command exits 1.
+`SIGHUP`, but the outcome comes back to the caller — `applied` (in effect now,
+including `backends: added <name> (<type>)` / `backends: removed <name> (closing
+after in-flight requests drain)`) and `requires_restart` (changed on disk, needs
+a restart). A file that fails validation, a new backend that does not construct,
+or removing a backend still referenced by a tiered entry or a running fsck job
+answers 400 and the command exits 1.
 
 ```text
 s3adm reload

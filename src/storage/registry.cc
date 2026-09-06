@@ -231,7 +231,8 @@ std::vector<std::string> StorageRegistry::registered_types() {
 
 std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool,
-    std::shared_ptr<MetricsRegistry> metrics) {
+    std::shared_ptr<MetricsRegistry> metrics,
+    const std::map<std::string, std::shared_ptr<IStorageBackend>>* existing) {
     ensure_registered();
     // Two-phase build (docs/tiered-storage.md §2): construct all leaf backends first, then
     // construct composite backends iteratively by dependency
@@ -240,9 +241,16 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     {
         std::set<std::string> names;
         for (auto& cfg : configs)
-            if (!names.insert(cfg.name).second)
+            if (!names.insert(cfg.name).second || (existing && existing->count(cfg.name)))
                 throw std::runtime_error("duplicate backend name: " + cfg.name);
     }
+    // Lookup for tiered references: the instances built here plus the running ones
+    auto lookup = [&](const std::string& name) -> std::shared_ptr<IStorageBackend> {
+        if (auto it = out.find(name); it != out.end()) return it->second;
+        if (existing)
+            if (auto it = existing->find(name); it != existing->end()) return it->second;
+        return nullptr;
+    };
     // A mid-build failure must roll back: already-built backends each hold a dedicated
     // ThreadPool (threads already started) and a set of metric gauge callbacks (closures
     // holding the pool's shared_ptr). Letting the exception escape directly would leave
@@ -288,7 +296,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
             auto cloud = cfg.params.count("cloud") ? cfg.params.at("cloud") : "";
             if (local.empty() || cloud.empty())
                 throw std::runtime_error("tiered backend '" + cfg.name + "' needs local + cloud");
-            if (out.count(local) && out.count(cloud)) {
+            if (lookup(local) && lookup(cloud)) {
                 // Composite backends support a dedicated pool too (tiered's own
                 // demotion/promotion transfers run on it).
                 // Register the scope before constructing: if the tiered build throws, its
@@ -300,8 +308,11 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
                 // registry's get-or-create is idempotent; re-constructing with the same
                 // label is harmless)
                 MetricsScope scope(metrics, {{"backend", cfg.name}});
+                std::map<std::string, std::shared_ptr<IStorageBackend>> built = out;
+                built[local] = lookup(local);
+                built[cloud] = lookup(cloud);
                 out[cfg.name] = TieredBackend::from_config(
-                    cfg, out, backend_pool(cfg, pool, scope), scope);
+                    cfg, built, backend_pool(cfg, pool, scope), scope);
                 it = deferred.erase(it);
                 progress = true;
             } else {

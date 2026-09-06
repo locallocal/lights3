@@ -53,12 +53,13 @@ bool glob_match(const std::string& glob, std::string_view bucket) {
 
 }  // namespace
 
-std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(const BucketsConfig& cfg,
-                                                                 const Shared& sh) {
+std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(
+    const BucketsConfig& cfg, std::shared_ptr<const BackendMap> backends) {
     auto t = std::make_shared<Table>();
+    t->backends = std::move(backends);
     auto find = [&](const std::string& name) {
-        auto it = sh.backends.find(name);
-        if (it == sh.backends.end())
+        auto it = t->backends->find(name);
+        if (it == t->backends->end())
             throw std::runtime_error("bucket rule references unknown backend: " + name);
         return it->second;
     };
@@ -89,17 +90,16 @@ std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(const BucketsCo
     return t;
 }
 
-BucketRouter BucketRouter::build(
-    const BucketsConfig& cfg, std::map<std::string, std::shared_ptr<IStorageBackend>> backends) {
+BucketRouter BucketRouter::build(const BucketsConfig& cfg, BackendMap backends) {
     BucketRouter r;
     r.shared_ = std::make_shared<Shared>();
-    r.shared_->backends = std::move(backends);
-    auto it = r.shared_->backends.find(cfg.default_backend);
-    if (it == r.shared_->backends.end())
+    auto set = std::make_shared<const BackendMap>(std::move(backends));
+    auto it = set->find(cfg.default_backend);
+    if (it == set->end())
         throw std::runtime_error("bucket rule references unknown backend: " + cfg.default_backend);
     r.shared_->default_backend = it->second;
     r.shared_->default_name = cfg.default_backend;
-    r.shared_->table.store(compile(cfg, *r.shared_), std::memory_order_release);
+    r.shared_->table.store(compile(cfg, std::move(set)), std::memory_order_release);
     return r;
 }
 
@@ -108,7 +108,20 @@ void BucketRouter::update(const BucketsConfig& cfg) {
         throw std::runtime_error("buckets.default_backend cannot change at runtime (" +
                                  shared_->default_name + " -> " + cfg.default_backend +
                                  "): it hosts .sys and the stores loaded from it");
-    auto fresh = compile(cfg, *shared_);  // validates before anything is swapped
+    auto fresh = compile(cfg, table()->backends);  // validates before anything is swapped
+    shared_->table.store(std::move(fresh), std::memory_order_release);
+}
+
+void BucketRouter::update(const BucketsConfig& cfg, BackendMap backends) {
+    if (cfg.default_backend != shared_->default_name)
+        throw std::runtime_error("buckets.default_backend cannot change at runtime (" +
+                                 shared_->default_name + " -> " + cfg.default_backend +
+                                 "): it hosts .sys and the stores loaded from it");
+    auto it = backends.find(cfg.default_backend);
+    if (it == backends.end() || it->second != shared_->default_backend)
+        throw std::runtime_error("backend set must keep the default backend '" +
+                                 shared_->default_name + "' (same instance)");
+    auto fresh = compile(cfg, std::make_shared<const BackendMap>(std::move(backends)));
     shared_->table.store(std::move(fresh), std::memory_order_release);
 }
 

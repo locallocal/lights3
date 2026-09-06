@@ -57,6 +57,12 @@ public:
     // Wait for every running job (backends are closed by the caller first, which
     // makes a scrub abort promptly)
     void shutdown();
+    // Backend hot add / remove (backlog-sequence ⑦). remove returns false while a
+    // job runs on that backend (the caller refuses the removal); the last outcome
+    // is dropped with the backend
+    void add_backend(const std::string& name, std::shared_ptr<storage::IStorageBackend> b);
+    bool remove_backend(const std::string& name);
+    bool busy(const std::string& name) const;  // a job is running on that backend
 
 private:
     struct Job {

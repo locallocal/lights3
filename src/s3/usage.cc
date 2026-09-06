@@ -301,7 +301,8 @@ Task<BucketUsage> UsageTracker::rescan(std::string bucket) {
 Task<size_t> UsageTracker::reconcile_all() {
     size_t n = 0;
     std::set<std::string> seen;
-    for (auto& [name, backend] : router_.backends()) {
+    auto backends = router_.backends();  // snapshot: a reload may swap the set meanwhile
+    for (auto& [name, backend] : *backends) {
         std::vector<storage::BucketInfo> buckets;
         try {
             buckets = co_await backend->list_buckets();
@@ -345,7 +346,8 @@ Task<void> UsageTracker::bootstrap_scan() {
     // feature was off) start from zero: count them once so quotas mean something
     std::vector<std::string> todo;
     std::set<std::string> seen;
-    for (auto& [name, backend] : router_.backends()) {
+    auto backends = router_.backends();
+    for (auto& [name, backend] : *backends) {
         try {
             for (auto& b : co_await backend->list_buckets()) {
                 if (b.name == storage::kSysBucketName || !seen.insert(b.name).second) continue;

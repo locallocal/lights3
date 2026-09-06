@@ -88,13 +88,14 @@ void Application::start_server() {
     // Lifecycle rules (roadmap §2.4): stored next to cors/website; the runner gets its
     // own router copy (S3Service owns the primary by value)
     lifecycle_store_ = sync_wait(s3::LifecycleStore::load(router.default_backend()));
-    lifecycle_runner_ = std::make_unique<s3::LifecycleRunner>(
-        storage::BucketRouter::build(cfg_.buckets, metered_), lifecycle_store_);
+    // Copies of the one router share its table: rule swaps and backend hot add /
+    // remove (roadmap §4.4, backlog-sequence ⑦) reach the runner and the usage
+    // tracker through the same snapshot the service resolves against
+    lifecycle_runner_ = std::make_unique<s3::LifecycleRunner>(router, lifecycle_store_);
     // roadmap §3.9 (docs/multi-tenancy.md): audit file, usage counters, quotas,
     // tenants + bucket ownership. All persisted next to the other .sys records
     audit_ = s3::AuditLog::open(cfg_.audit);
-    usage_ = sync_wait(s3::UsageTracker::load(storage::BucketRouter::build(cfg_.buckets, metered_),
-                                              cfg_.usage, metrics_));
+    usage_ = sync_wait(s3::UsageTracker::load(router, cfg_.usage, metrics_));
     quota_store_ = sync_wait(s3::QuotaStore::load(router.default_backend()));
     tenant_store_ = sync_wait(s3::TenantStore::load(router.default_backend()));
     owner_store_ = sync_wait(s3::OwnerStore::load(router.default_backend()));
@@ -454,12 +455,8 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
         "auth.credentials_file/credentials_file_reload");
     cmp(p.sync_interval_sec != q.sync_interval_sec, "auth.sync_interval");
     cmp(p.tls_identity != q.tls_identity, "auth.tls_identity");
-    bool backends_differ = a.backends.size() != b.backends.size();
-    for (size_t i = 0; !backends_differ && i < a.backends.size(); ++i)
-        backends_differ = a.backends[i].name != b.backends[i].name ||
-                          a.backends[i].type != b.backends[i].type ||
-                          a.backends[i].params != b.backends[i].params;
-    cmp(backends_differ, "backends");
+    // backends[] is judged entry by entry by plan_backends (add / remove apply,
+    // the rest is reported there)
     cmp(a.buckets.default_backend != b.buckets.default_backend, "buckets.default_backend");
     cmp(a.website.buckets != b.website.buckets, "website");
     cmp(a.lifecycle.scan_interval_sec != b.lifecycle.scan_interval_sec, "lifecycle.scan_interval");
@@ -488,6 +485,69 @@ bool rules_differ(const BucketsConfig& a, const BucketsConfig& b) {
     return false;
 }
 
+// Backend instance add / remove on reload (backlog-sequence ⑦): entries are
+// matched by name. New names are built and routed; names gone from the file are
+// removed once nothing references them; an entry whose type / parameters changed
+// keeps running as configured before and is reported (a parameter change would
+// mean rebuilding an instance that carries state). Removal is refused outright
+// (whole reload) when the file still references the backend -- a remaining tiered
+// entry naming it as local / cloud, or an fsck job running on it -- because the
+// file describes a topology this process cannot run; removing the default backend
+// is only deferred (it hosts .sys; the rest of the reload still applies)
+struct BackendPlan {
+    std::vector<BackendConfig> added;
+    std::vector<std::string> removed;
+    std::vector<std::string> requires_restart;
+    std::string error;
+};
+
+BackendPlan plan_backends(const std::vector<BackendConfig>& running, const Config& fresh,
+                          const std::string& default_name, const FsckJobs* fsck) {
+    BackendPlan plan;
+    auto find = [](const std::vector<BackendConfig>& v, const std::string& name) {
+        for (auto& b : v)
+            if (b.name == name) return &b;
+        return static_cast<const BackendConfig*>(nullptr);
+    };
+    for (auto& b : fresh.backends) {
+        auto* old = find(running, b.name);
+        if (!old) {
+            plan.added.push_back(b);
+        } else if (old->type != b.type || old->params != b.params) {
+            plan.requires_restart.push_back("backends (" + b.name +
+                                            ": type/parameters changed; the running instance keeps "
+                                            "its startup configuration)");
+        }
+    }
+    for (auto& old : running) {
+        if (find(fresh.backends, old.name)) continue;
+        if (old.name == default_name) {
+            plan.requires_restart.push_back("backends (" + old.name +
+                                            ": the default backend cannot be removed at runtime)");
+            continue;
+        }
+        for (auto& b : fresh.backends) {
+            if (b.type != "tiered") continue;
+            auto ref = [&](const char* k) {
+                auto it = b.params.find(k);
+                return it != b.params.end() && it->second == old.name;
+            };
+            if (ref("local") || ref("cloud")) {
+                plan.error = "backends: cannot remove '" + old.name + "': tiered backend '" +
+                             b.name + "' references it as " + (ref("local") ? "local" : "cloud");
+                return plan;
+            }
+        }
+        if (fsck && fsck->busy(old.name)) {
+            plan.error = "backends: cannot remove '" + old.name +
+                         "' while an fsck job runs on it (retry when it finishes)";
+            return plan;
+        }
+        plan.removed.push_back(old.name);
+    }
+    return plan;
+}
+
 }  // namespace
 
 ConfigReloadReport Application::reload_config() {
@@ -506,18 +566,77 @@ ConfigReloadReport Application::reload_config() {
         return report;
     }
 
-    // Bucket routing rules first: the one step that can still fail (unknown backend,
-    // unreachable rule) — refused as a whole before anything else is touched
-    if (rules_differ(cfg_.buckets, fresh.buckets)) {
+    // Backends and bucket routing rules first: the steps that can still fail
+    // (a backend that does not construct, a rule naming an unknown backend, an
+    // unreachable rule) -- refused as a whole before anything else is touched.
+    // New instances are built, metered and swapped into the router together with
+    // the rules (one snapshot, backlog-sequence ⑦); removed ones leave the router
+    // here and are closed on a retiring thread once their in-flight requests drain
+    BackendPlan plan = plan_backends(cfg_.backends, fresh, cfg_.buckets.default_backend,
+                                     fsck_jobs_.get());
+    if (!plan.error.empty()) {
+        report.error = plan.error;
+        LOG_WARN("config reload refused, keeping the running configuration: {}", report.error);
+        return report;
+    }
+    bool rules_changed = rules_differ(cfg_.buckets, fresh.buckets);
+    if (rules_changed || !plan.added.empty() || !plan.removed.empty()) {
+        std::map<std::string, std::shared_ptr<storage::IStorageBackend>> built;
         try {
-            service_->router().update(fresh.buckets);
-            report.applied.push_back(change("buckets.rules", cfg_.buckets.rules.size(),
-                                            fresh.buckets.rules.size()) + " rule(s)");
-            cfg_.buckets.rules = fresh.buckets.rules;
+            if (!plan.added.empty())
+                built = storage::StorageRegistry::build(plan.added, pool_, metrics_, &backends_);
         } catch (const std::exception& e) {
+            report.error = std::string("backends: ") + e.what();
+            LOG_WARN("config reload refused, keeping the running configuration: {}", report.error);
+            return report;
+        }
+        auto built_metered = storage::meter_backends(built, metrics_);
+        auto candidate = metered_;
+        for (auto& name : plan.removed) candidate.erase(name);
+        for (auto& [name, b] : built_metered) candidate[name] = b;
+        // A changed default_backend is reported by restart_only_changes; the router
+        // keeps the running one (it hosts .sys), so the rules are validated against it
+        BucketsConfig target = fresh.buckets;
+        target.default_backend = cfg_.buckets.default_backend;
+        try {
+            service_->router().update(target, std::move(candidate));
+        } catch (const std::exception& e) {
+            // Nothing was swapped: tear the freshly built instances down again
+            for (auto& [name, b] : built) {
+                try {
+                    sync_wait(b->close());
+                } catch (const std::exception& ce) {
+                    LOG_WARN("backend {} (rolled back): close failed: {}", name, ce.what());
+                }
+                metrics_->remove_labeled("backend", name);
+            }
             report.error = std::string("buckets.rules: ") + e.what();
             LOG_WARN("config reload refused, keeping the running configuration: {}", report.error);
             return report;
+        }
+        if (rules_changed) {
+            report.applied.push_back(change("buckets.rules", cfg_.buckets.rules.size(),
+                                            fresh.buckets.rules.size()) + " rule(s)");
+            cfg_.buckets.rules = fresh.buckets.rules;
+        }
+        for (auto& bc : plan.added) {
+            backends_[bc.name] = built[bc.name];
+            metered_[bc.name] = built_metered[bc.name];
+            fsck_jobs_->add_backend(bc.name, built[bc.name]);
+            cfg_.backends.push_back(bc);
+            report.applied.push_back("backends: added " + bc.name + " (" + bc.type + ")");
+        }
+        for (auto& name : plan.removed) {
+            auto raw = backends_[name];
+            auto metered = std::dynamic_pointer_cast<storage::MeteredBackend>(metered_[name]);
+            backends_.erase(name);
+            metered_.erase(name);
+            if (!fsck_jobs_->remove_backend(name))  // a job slipped in since the plan: it aborts on close
+                LOG_WARN("backend {} removed while an fsck job runs on it; the job will abort", name);
+            std::erase_if(cfg_.backends, [&](const BackendConfig& b) { return b.name == name; });
+            retire_backend(name, std::move(raw), std::move(metered));
+            report.applied.push_back("backends: removed " + name +
+                                     " (closing after in-flight requests drain)");
         }
     }
     if (cfg_.log.level != fresh.log.level) {
@@ -606,6 +725,7 @@ ConfigReloadReport Application::reload_config() {
             report.applied.push_back("http.tls: seastar reloads certificates on file change");
     }
     report.requires_restart = restart_only_changes(cfg_, fresh);
+    for (auto& r : plan.requires_restart) report.requires_restart.push_back(r);
     report.ok = true;
     if (report.applied.empty() && report.requires_restart.empty())
         LOG_INFO("config reload: no changes");
@@ -613,6 +733,51 @@ ConfigReloadReport Application::reload_config() {
     for (auto& r : report.requires_restart)
         LOG_WARN("config reload: {} changed on disk but needs a restart to take effect", r);
     return report;
+}
+
+void Application::retire_backend(std::string name, std::shared_ptr<storage::IStorageBackend> raw,
+                                 std::shared_ptr<storage::MeteredBackend> metered) {
+    std::lock_guard lk(retire_mu_);
+    retiring_.emplace_back([this, name, raw, metered] {
+        // Requests that resolved the old table still hold the decorator (and a
+        // get_object stream its lease): wait for them in bounded slices so a
+        // shutdown can cut the wait short; log while it takes long
+        if (metered) {
+            int waited = 0;
+            while (!retire_stop_.load(std::memory_order_relaxed) &&
+                   !metered->wait_idle(std::chrono::seconds(1))) {
+                if (++waited % 10 == 0)
+                    LOG_INFO("backend {} removed: still waiting for {} in-flight request(s)", name,
+                             metered->inflight());
+            }
+            if (long left = metered->inflight(); left > 0)
+                LOG_WARN("backend {} removed: closing with {} request(s) still in flight (shutdown)",
+                         name, left);
+        }
+        std::string failure;
+        try {
+            sync_wait(raw->close());
+        } catch (const std::exception& e) {
+            failure = e.what();
+        }
+        // Series first, log line last: the line is what operators (and the e2e)
+        // wait on, so everything observable must be done by then
+        if (metrics_) metrics_->remove_labeled("backend", name);
+        if (failure.empty())
+            LOG_INFO("backend {} removed: closed after in-flight requests drained", name);
+        else
+            LOG_ERROR("backend {} removed: close failed: {}", name, failure);
+    });
+}
+
+void Application::join_retiring() {
+    std::vector<std::thread> threads;
+    {
+        std::lock_guard lk(retire_mu_);
+        threads.swap(retiring_);
+    }
+    for (auto& t : threads)
+        if (t.joinable()) t.join();
 }
 
 void Application::close_backends() noexcept {
@@ -633,6 +798,15 @@ void Application::close_backends() noexcept {
 }
 
 void Application::shutdown() noexcept {
+    // Retiring backends first: their threads close instances through the pool,
+    // which must still be alive; a lingering stream no longer holds them up
+    retire_stop_.store(true, std::memory_order_relaxed);
+    try {
+        join_retiring();
+    } catch (const std::exception& e) {
+        LOG_ERROR("retiring backend join failed: {}", e.what());
+        ++shutdown_errors_;
+    }
     try {
         // Timers / in-flight sync must wind down before the thread pool
         if (cred_store_) cred_store_->shutdown_background();

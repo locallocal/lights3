@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <sstream>
 #include <stdexcept>
@@ -41,9 +42,29 @@ void check_eq(const A& a, const B& b, const char* ea, const char* eb, const char
     }
 }
 
+// LIGHTS3_TEST_FILTER=sub1,sub2: run only the cases whose name contains one of
+// the substrings (a sanitizer run that dies in one file can still cover another)
+inline bool selected(const char* name) {
+    const char* f = std::getenv("LIGHTS3_TEST_FILTER");
+    if (!f || !*f) return true;
+    std::string filters(f), n(name);
+    size_t start = 0;
+    while (start <= filters.size()) {
+        size_t comma = filters.find(',', start);
+        if (comma == std::string::npos) comma = filters.size();
+        std::string sub = filters.substr(start, comma - start);
+        if (!sub.empty() && n.find(sub) != std::string::npos) return true;
+        start = comma + 1;
+    }
+    return false;
+}
+
 inline int run_all() {
     int failed = 0;
+    size_t ran = 0;
     for (auto& t : registry()) {
+        if (!selected(t.name)) continue;
+        ++ran;
         try {
             t.fn();
             printf("[ OK ] %s\n", t.name);
@@ -52,7 +73,7 @@ inline int run_all() {
             ++failed;
         }
     }
-    printf("%zu tests, %d failed\n", registry().size(), failed);
+    printf("%zu tests, %d failed\n", ran, failed);
     return failed == 0 ? 0 : 1;
 }
 

@@ -908,6 +908,60 @@ check "invalid config refused on reload" "400" \
 sed -i '/^  idle_timeout: 0s$/d' "$WORK/config.yaml"
 sed -i '/^  request_timeout: 600s$/d' "$WORK/config.yaml"  # restore for the restart phase
 
+# ---------- backlog-sequence ⑦: backend instances added / removed on reload (docs/config-reload.md §3) ----------
+# A memory backend "hot" joins the running instance with a hot-* rule; then it is
+# removed while a rate-limited GET still streams from it: the removal applies at
+# once (routing, metrics, admin view) and the instance closes only after the stream
+sed -i 's/^backends:$/backends:\n  - name: hot\n    type: memory/' "$WORK/config.yaml"
+sed -i 's/^  default_backend: tierdata$/  default_backend: tierdata\n  rules:\n    - match: "hot-*"\n      backend: hot/' "$WORK/config.yaml"
+RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
+check "reload adds backend hot" "0" "$(echo "$RELOAD_OUT" | grep -q 'backends: added hot (memory)'; echo $?)"
+check "reload routes hot-* to it" "0" "$(echo "$RELOAD_OUT" | grep -q 'buckets.rules: 0 -> 1'; echo $?)"
+check "bucket on the added backend" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/hot-bkt")"
+head -c 4194304 /dev/urandom > "$WORK/hot.bin"
+check "object on the added backend" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary "@$WORK/hot.bin" "$BASE/hot-bkt/big")"
+check "metrics carry the added backend's op series" "0" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_backend_op_seconds_count{backend="hot"'; echo $?)"
+check "s3adm object inspect sees the added backend" "0" "$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" object inspect hot-bkt big --endpoint="$BASE" --region="$REGION" 2>/dev/null | grep -q '"backend": "hot"'; echo $?)"
+s3curl --limit-rate 1M -o "$WORK/hot.out" "$BASE/hot-bkt/big" &
+HOT_GET_PID=$!
+sleep 0.5
+sed -i '/^  - name: hot$/,/^    type: memory$/d' "$WORK/config.yaml"
+sed -i '/^  rules:$/,/^      backend: hot$/d' "$WORK/config.yaml"
+RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
+check "reload removes backend hot" "0" "$(echo "$RELOAD_OUT" | grep -q 'backends: removed hot (closing after in-flight requests drain)'; echo $?)"
+# The reload returned while the GET still streams: the removal never waits for
+# in-flight requests (the strict "closed only after the stream is released" order
+# is asserted by test_reload.cc; here the kernel's socket buffers may let the
+# server finish sending before the rate-limited client has read everything)
+check "reload returned while the GET still streams" "0" "$(kill -0 "$HOT_GET_PID" 2>/dev/null; echo $?)"
+check "hot-* routes to the default backend right away" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$BASE/hot-bkt")"
+wait "$HOT_GET_PID"
+check "streaming GET completed after the removal" "0" "$(cmp -s "$WORK/hot.bin" "$WORK/hot.out"; echo $?)"
+for _ in $(seq 1 50); do grep -q 'backend hot removed: closed' "$WORK/server.log" && break; sleep 0.1; done
+check "backend closed after the stream drained" "0" "$(grep -q 'backend hot removed: closed after in-flight requests drained' "$WORK/server.log"; echo $?)"
+# The backend-level series go with the instance; the L2 api x backend request
+# history (lights3_api_*) stays, as for any label value seen in the past
+check "metrics dropped the removed backend's op series" "1" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_backend_op_seconds_count{backend="hot"'; echo $?)"
+# Swapping the default backend for a new one: the new instance is added, the old
+# default stays (deferred, reported) -- then the file is restored and the extra
+# instance retires again
+cp "$WORK/config.yaml" "$WORK/config-keep.yaml"
+sed -i 's/^backends:$/backends:\n  - name: alt\n    type: memory/' "$WORK/config.yaml"
+sed -i 's/^  default_backend: tierdata$/  default_backend: alt/' "$WORK/config.yaml"
+# drop the tierdata entry whatever its shape (localfs / duostore / tiered lines)
+awk 'BEGIN{skip=0} /^  - name: tierdata$/{skip=1; next} skip && (/^  - name: / || /^[a-z]/){skip=0} !skip' "$WORK/config.yaml" > "$WORK/config-swap.yaml" && mv "$WORK/config-swap.yaml" "$WORK/config.yaml"
+s3curl -o /dev/null -X PUT "$BASE/defbkt"
+RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
+check "new default backend instance is added" "0" "$(echo "$RELOAD_OUT" | grep -q 'backends: added alt (memory)'; echo $?)"
+check "removing the default backend is deferred" "0" "$(echo "$RELOAD_OUT" | grep -q 'the default backend cannot be removed' && echo "$RELOAD_OUT" | grep -q 'buckets.default_backend'; echo $?)"
+check "the running default still serves" "200" "$(s3curl -o /dev/null -w '%{http_code}' -I "$BASE/defbkt")"
+s3curl -o /dev/null -X DELETE "$BASE/defbkt"
+cp "$WORK/config-keep.yaml" "$WORK/config.yaml"
+RELOAD_OUT=$(s3curl -X POST "$BASE/-/admin/config/reload")
+check "restoring the file retires the extra instance" "0" "$(echo "$RELOAD_OUT" | grep -q 'backends: removed alt'; echo $?)"
+for _ in $(seq 1 50); do grep -q 'backend alt removed: closed' "$WORK/server.log" && break; sleep 0.1; done
+check "extra instance closed" "0" "$(grep -q 'backend alt removed: closed' "$WORK/server.log"; echo $?)"
+
 # ---------- roadmap §4.2: L1 connection counters + rate-limit series on /-/metrics ----------
 METRICS_OUT=$(curl -s "$BASE/-/metrics")
 check "metrics: connection counters present" "0" \
@@ -1241,7 +1295,7 @@ if [[ -n "$DPORT" && -n "$APORT" ]]; then
 fi
 kill -TERM "$ADM_PID" 2>/dev/null
 wait "$ADM_PID" 2>/dev/null
-for _ in $(seq 1 20); do grep -q "lights3 exited cleanly" "$WORK/server-admin.log" && break; sleep 0.1; done
+for _ in $(seq 1 50); do grep -q "lights3 exited cleanly" "$WORK/server-admin.log" && break; sleep 0.1; done
 check "admin-port instance exited cleanly" "0" "$(grep -q "lights3 exited cleanly" "$WORK/server-admin.log"; echo $?)"
 
 # ---------- roadmap §6.1: fault injection through the whole stack (docs/testing.md §4) ----------

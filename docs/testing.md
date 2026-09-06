@@ -9,7 +9,7 @@ harness、故障注入门面、性能门禁与 soak、mint 挂 ctest、ubsan/cov
 
 | 测试 | 内容 | 标签 |
 | --- | --- | --- |
-| `unit_tests` | 全部单元用例（含 `test_fault.cc`） | — |
+| `unit_tests` | 全部单元用例（含 `test_fault.cc`）；`LIGHTS3_TEST_FILTER=子串1,子串2` 只跑名字含任一子串的用例（sanitizer 构建在某个文件上中止时仍能覆盖其它文件） | — |
 | `e2e_<driver>` / `e2e_<backend>` | 同一套 `run_e2e.sh` 按驱动 × 后端参数化（13 变体） | — |
 | `fuzz_regression_<target>` | 6 个 harness 各自回放语料（§3） | `fuzz` |
 | `monitoring_assets` | 监控资产对账（[monitoring.md §5](monitoring.md)） | — |

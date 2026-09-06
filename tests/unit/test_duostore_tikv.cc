@@ -22,6 +22,7 @@
 #include "core/metrics.h"
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
+#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/fs_data_store.h"
 #include "storage/duostore/meta_dump.h"
 #include "storage/duostore/tikv_meta_store.h"
@@ -592,6 +593,19 @@ TEST(duostore_tikv_snapshot_dump_is_consistent) {
     view.reset();
     CHECK(m.get_object("b", "k3").has_value());  // the live store sees everything
     m.delete_bucket("b2");
+    m.close();
+}
+
+// backlog-sequence ⑧: tikv keeps its incremental copies cluster-side (BR/CDC);
+// the gateway exports a fresh TSO as the restore point of a logical backup
+TEST(duostore_tikv_backup_marker) {
+    TIKV_OR_SKIP();
+    TikvMetaStore m(tikv_opts(unique_prefix()));
+    CHECK(!m.supports_physical_backup());
+    auto a = m.restore_marker();
+    CHECK(!a.empty());
+    auto b = m.restore_marker();
+    CHECK(std::stoull(b) > std::stoull(a));  // TSOs are monotonic
     m.close();
 }
 

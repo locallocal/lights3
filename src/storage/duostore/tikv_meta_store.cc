@@ -1247,4 +1247,8 @@ std::unique_ptr<IMetaReadView> TikvMetaStore::snapshot() {
     return std::make_unique<SnapshotView>(*this, ver);
 }
 
+std::string TikvMetaStore::restore_marker() {
+    return std::to_string(guarded("restore_marker", [&] { return client().get_ts(); }));
+}
+
 }  // namespace lights3::storage::duostore

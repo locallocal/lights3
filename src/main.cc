@@ -6,6 +6,7 @@
 //   lights3 [--config=<path>]                     start the server
 //   lights3 duostore dump <backend> <file> [...]  duostore meta admin
 //   lights3 duostore load <backend> <file> [...]  (docs/storage/duostore-core.md §11)
+//   lights3 duostore backup|restore <backend> ...  meta backup chains / PITR (§11.1)
 //   lights3 duostore gc|scan <backend> [...]      run one GC / orphan-scan round (roadmap §3.2)
 //   lights3 duostore quarantine list|release|purge ...  corrupt-pack quarantine (roadmap §3.7)
 //   lights3 tier scan|gc|reconcile <backend> [..] tiered background tasks on demand (roadmap §3.2)
@@ -41,6 +42,11 @@
 #include <fstream>
 
 #include "storage/duostore/duostore_backend.h"
+#include "storage/duostore/meta_backup.h"
+#ifdef LIGHTS3_DUOSTORE_SQLITE_META
+#include "storage/duostore/sqlite_meta_store.h"
+#endif
+#include "storage/duostore/rocks_meta_store.h"
 #endif
 
 namespace {
@@ -252,6 +258,123 @@ void run_load(const Cmd& c) {
     app.shutdown();
 }
 
+// ---- Backup chains / PITR (backlog-sequence ⑧, docs/storage/duostore-core.md §11.1) ----
+
+// `<backend>` positional or --backend=; the directory comes from --to= / --from=
+std::string backend_dir_args(const Cmd& c, const char* dir_flag, std::string& dir) {
+    std::string backend = c->var<std::string>("backend");
+    dir = c->var<std::string>(dir_flag);
+    const auto& pos = c->args();
+    if (pos.size() > 1) {
+        g_exit = 2;
+        throw std::runtime_error("duostore " + c->name() + ": too many arguments");
+    }
+    if (pos.size() == 1) backend = pos[0];
+    if (backend.empty() || dir.empty()) {
+        c->print_help();
+        g_exit = 2;
+        throw std::runtime_error("duostore " + c->name() + ": <backend> and --" + dir_flag +
+                                 "=<dir> are required");
+    }
+    return backend;
+}
+
+void run_backup(const Cmd& c) {
+    using namespace lights3;
+    std::string dir;
+    std::string backend = backend_dir_args(c, "to", dir);
+    bool incremental = c->var<bool>("incremental");
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* duo = find_duostore(app, backend);
+    auto e = sync_wait(duo->run_meta_backup(dir, incremental));
+    LOG_INFO("duostore admin: backup entry {} ({}) of '{}' written to {}: {} bytes{}", e.id,
+             e.full ? "full" : "incremental", backend, dir, e.bytes,
+             e.marker.empty() ? std::string() : ", restore marker " + e.marker);
+    if (!duo->meta_physical_backup())
+        LOG_INFO("duostore admin: {} meta keeps its incremental copies cluster-side -- to "
+                 "restore to a point in time, bring the {} back to marker {} first, then "
+                 "`duostore restore` this entry",
+                 duo->config().meta_kind_name(),
+                 duo->config().meta_kind_name() == std::string("redis") ? "AOF archive"
+                                                                          : "cluster (BR --backupts)",
+                 e.marker);
+    app.shutdown();
+}
+
+void run_restore(const Cmd& c) {
+    using namespace lights3;
+    using namespace lights3::storage::duostore;
+    std::string dir;
+    std::string backend = backend_dir_args(c, "from", dir);
+    std::optional<uint64_t> to_id;
+    std::optional<int64_t> to_ts;
+    if (auto v = c->var<std::string>("to-id"); !v.empty()) to_id = std::stoull(v);
+    if (auto v = c->var<std::string>("to-ts"); !v.empty()) {
+        to_ts = parse_restore_ts(v);
+        if (!to_ts) {
+            g_exit = 2;
+            throw std::runtime_error("duostore restore: --to-ts must be ISO 8601 or unix ms, got '" + v + "'");
+        }
+    }
+    auto manifest = BackupManifest::load(dir);
+    auto chain = manifest.plan(to_id, to_ts);
+    const auto& last = chain.back();
+    LOG_INFO("duostore admin: restoring '{}' from {} ({} engine) to entry {} ({}) -- {} entries "
+             "to replay",
+             backend, dir, manifest.engine, last.id,
+             util::iso8601(std::chrono::system_clock::time_point(std::chrono::milliseconds(last.ts_ms))),
+             chain.size());
+
+    // The backend's meta paths come from the config alone: a local engine is
+    // restored at file level with nothing open, so the backends are built only
+    // afterwards (and the forced orphan scan then runs on the restored meta)
+    auto cfg = Config::load(c->var<std::string>("config"));
+    const BackendConfig* bc = nullptr;
+    for (auto& b : cfg.backends)
+        if (b.name == backend) bc = &b;
+    if (!bc) throw std::runtime_error("duostore: no backend named '" + backend + "'");
+    if (bc->type != "duostore") throw std::runtime_error("duostore: backend '" + backend + "' is not duostore");
+    auto duo_cfg = storage::DuoStoreConfig::from_params(bc->name, bc->params);
+    if (manifest.engine != duo_cfg.meta_kind_name())
+        throw std::runtime_error("duostore restore: " + dir + " holds a " + manifest.engine +
+                                 " chain, backend '" + backend + "' uses " + duo_cfg.meta_kind_name());
+    bool physical = false;
+    if (manifest.engine == "sqlite") {
+#ifdef LIGHTS3_DUOSTORE_SQLITE_META
+        SqliteMetaStore::restore_physical(dir, chain, duo_cfg.sqlite_path);
+        physical = true;
+#else
+        throw std::runtime_error("duostore restore: sqlite meta is not compiled in");
+#endif
+    } else if (manifest.engine == "rocksdb") {
+        RocksMetaStore::restore_physical(dir, last.marker, duo_cfg.meta_path);
+        physical = true;
+    }
+    if (physical)
+        LOG_INFO("duostore admin: meta files of '{}' restored to entry {}; opening the backend for "
+                 "the forced orphan scan", backend, last.id);
+    else
+        LOG_INFO("duostore admin: {} meta: the cluster must already be at marker {} (entry {}); "
+                 "loading the logical dump {}", manifest.engine, last.marker, last.id, last.file);
+
+    Application app(c->var<std::string>("config"));
+    app.open_storage();
+    auto* duo = find_duostore(app, backend);
+    if (physical) {
+        auto st = sync_wait(duo->run_orphan_scan_once());
+        LOG_INFO("duostore admin: restore done; orphan scan: {} chunks / {} packs reclaimed, "
+                 "{} refs missing", st.orphans_removed, st.orphan_packs_removed, st.refs_missing);
+    } else {
+        std::ifstream f(dir + "/" + last.file, std::ios::binary);
+        if (!f) throw std::runtime_error("duostore restore: cannot open " + dir + "/" + last.file);
+        auto st = sync_wait(duo->run_meta_load(f));
+        LOG_INFO("duostore admin: restore done: loaded {} buckets / {} objects / {} sealed packs",
+                 st.buckets, st.objects, st.sealed_packs);
+    }
+    app.shutdown();
+}
+
 // Background tasks on demand (roadmap §3.2): the run_*_once hooks were only
 // reachable through timers (GC every 5min, orphan scan daily by default) —
 // an operator wanting space back *now* had nothing to call. Offline like
@@ -432,9 +555,10 @@ Cmd make_admin_leaf(const char* name, const char* example, const char* usage, co
 Cmd make_duostore() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "duostore", "lights3 duostore dump local meta.dump --config=config/lights3.yaml",
-        "lights3 duostore <dump|load|gc|scan|quarantine> <backend> [<file>|<pack_id>] "
+        "lights3 duostore <dump|load|backup|restore|gc|scan|quarantine> <backend> [<file>|<pack_id>] "
         "[--config=<path>]",
-        "DuoStore admin: meta dump/load (docs/storage/duostore-core.md §11), on-demand "
+        "DuoStore admin: meta dump/load (docs/storage/duostore-core.md §11), backup chains "
+        "with point-in-time restore (§11.1), on-demand "
         "GC / orphan-scan rounds (§8), and the corrupt-pack quarantine (§8.1). All run "
         "with the backends built but no server listening, then exit; load ends with a "
         "forced orphan scan. Backup order: copy the data dir first, then dump meta "
@@ -455,6 +579,41 @@ Cmd make_duostore() {
         "lights3 duostore load <backend> <file> [--config=<path>]",
         "Replay a meta dump from <file> into the backend, then run an orphan scan.",
         "load duostore meta from a file", run_load));
+    {
+        auto bk = std::make_shared<ccmd::c_command>(
+            "backup", "lights3 duostore backup local --to=/backup/local-meta --incremental",
+            "lights3 duostore backup <backend> --to=<dir> [--incremental] [--config=<path>]",
+            "Append one entry to the meta backup chain in <dir> (docs/storage/duostore-core.md "
+            "§11.1). sqlite: a full copy, or with --incremental the WAL segment since the "
+            "previous entry (needs sqlite_wal_archive pointing at <dir>); rocksdb: a "
+            "BackupEngine backup (incremental by construction, every entry restores on its "
+            "own); redis / tikv: a logical dump plus the restore marker (replication offset / "
+            "TSO) for the cluster-side archive, --incremental is refused. Local engines need "
+            "the server stopped (file lock).",
+            "append an entry to the meta backup chain", run_backup);
+        add_config_flag(bk);
+        bk->var<std::string>("backend", "", "duostore backend name (alternative to the positional)");
+        bk->var<std::string>("to", "", "backup chain directory");
+        bk->var<bool>("incremental", false, "delta since the previous entry instead of a full copy");
+        cmd->add_subcommand(bk);
+        auto rs = std::make_shared<ccmd::c_command>(
+            "restore", "lights3 duostore restore local --from=/backup/local-meta --to-ts=2026-09-06T12:00:00Z",
+            "lights3 duostore restore <backend> --from=<dir> [--to-id=<n> | --to-ts=<iso8601>] "
+            "[--config=<path>]",
+            "Restore the backend's meta from the chain in <dir>: every entry up to --to-id / "
+            "--to-ts (default: the latest). sqlite / rocksdb: file-level restore of the "
+            "closed meta, then the backend opens and a forced orphan scan reconciles the "
+            "data side; redis / tikv: the cluster must already be at the entry's marker, "
+            "then the logical dump is loaded (writes stopped). Put the data directory "
+            "back first (§11 order).",
+            "restore meta from a backup chain (point in time)", run_restore);
+        add_config_flag(rs);
+        rs->var<std::string>("backend", "", "duostore backend name (alternative to the positional)");
+        rs->var<std::string>("from", "", "backup chain directory");
+        rs->var<std::string>("to-id", "", "restore through this manifest entry id");
+        rs->var<std::string>("to-ts", "", "restore through the last entry at or before this time (ISO 8601 or unix ms)");
+        cmd->add_subcommand(rs);
+    }
     cmd->add_subcommand(make_backend_leaf(
         "gc", "lights3 duostore gc local",
         "lights3 duostore gc <backend> [--config=<path>]",

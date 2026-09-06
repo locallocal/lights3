@@ -584,6 +584,46 @@ get_object 逐条导出（并发删除仅防御性跳过）。
 （`run_meta_load` 内建：释放信号量后调 `run_orphan_scan_once`，回收备份窗口
 内数据侧多出的文件）。
 
+### 11.1 备份链与 PITR（`meta_backup.h` / `meta_backup.cc`，backlog-sequence ⑧）
+
+§11 的 dump 是一份逻辑全量；备份链在它旁边补**增量 + 恢复到中间点**：一个备份
+目录持一条链，`manifest.json` 按序记条目（第一条必为全量，其后为增量或新的全量），
+引擎专属的载荷放在同目录。CLI：
+
+```text
+lights3 duostore backup  <backend> --to=<dir> [--incremental]           追加一条
+lights3 duostore restore <backend> --from=<dir> [--to-id=<n> | --to-ts=<iso8601|unix ms>]
+```
+
+manifest 条目（`IMetaStore` 的 `MetaBackupEntry`）：`id`（自 1 连续）、`full`、
+`ts_ms`/`ts`（备份点墙钟）、`file`（相对目录；空 = 引擎自管，如 rocksdb 的
+BackupEngine 树）、`marker`（引擎恢复点）、`bytes`。载荷与恢复方式按引擎分两类
+——网关侧有物理机制的走 `IMetaStore::backup_physical`，增量副本在集群侧的走逻辑
+dump + `restore_marker()`：
+
+| 引擎 | 全量 | 增量 | marker | 恢复 |
+| --- | --- | --- | --- | --- |
+| sqlite | TRUNCATE checkpoint + `sqlite3_backup` 在线整库拷贝 `NNNNNN-full.sqlite3`；链一旦开始就关自动 checkpoint | 自上一条以来的 `-wal` 文件整段拷为 `NNNNNN-wal`，随后 TRUNCATE checkpoint 清零（需 `sqlite_wal_archive` 指向 `<dir>`）；干净关闭再归档一段 `marker=close` | `checkpoint` / `wal` / `close` | 文件级：放全量副本 → 逐段放成 `-wal` 打开并 checkpoint（[meta-sqlite §10](duostore-meta-sqlite.md#10-备份链与-pitr)） |
+| rocksdb | `BackupEngine::CreateNewBackup`（`share_table_files`，flush 后拷贝 live 文件；在线，不停写） | 同上——SST 在备份间共享，每条自足，"全量/增量"只是给运维看的标记 | BackupEngine backup id | `RestoreDBFromBackup(marker)`，只用计划的**最后一条**（[meta-rocksdb §9](duostore-meta-rocksdb.md#9-备份链与-pitr)） |
+| redis | 逻辑 dump（无 MVCC，写静默契约）`NNNNNN-full.dump` | **拒绝**（增量在 AOF 归档，集群侧） | `INFO replication` 的 `master_repl_offset` | 先把 AOF 回放到 marker，再 `restore` = `run_meta_load`（[meta-redis §10](duostore-meta-redis.md#10-备份与-pitr-恢复点)） |
+| tikv | 逻辑 dump（TSO 快照，在线一致） | **拒绝**（BR/CDC 集群侧） | 备份点 PD TSO | 先 BR `--backupts`/PITR 到 marker，再 `run_meta_load`（[meta-tikv §10](duostore-meta-tikv.md#10-备份与-pitr-恢复点)） |
+
+**恢复计划**（`BackupManifest::plan`）：`--to-id N` 取 `id ≤ N` 的前缀，`--to-ts T`
+取 `ts_ms ≤ T` 的前缀，默认全部；前缀再截到其中**最后一条全量**起（新全量重启链，
+旧段不再需要）。校验：N 不存在 / T 早于首条全量 / 两者同给 / 空目录都抛
+InvalidRequest；manifest 装载时 id 不连续或首条非全量抛 InternalError（链有洞不可
+恢复，宁可拒绝）。同一目录的引擎标签与后端引擎不符时 backup 与 restore 都拒绝。
+
+**入口与顺序契约**：`DuoStoreBackend::run_meta_backup` 与 dump 一样持 `gc_sem_`
+（备份引用的 extent 不被 GC 删）；`--incremental` 在没有全量的目录、或在 redis/
+tikv 上直接拒绝。`restore` 对本地引擎在**不构建后端**的前提下做文件级恢复（引擎
+自身的 flock 保证服务已停），随后构建后端跑一次**强制孤儿扫描**（恢复点之后写入
+的数据侧文件此时无引用，被回收）；对 redis/tikv 则只做 load。数据侧仍沿用 §11 的
+顺序：备份先拷数据目录再 `backup`，恢复先放回数据再 `restore`——恢复点之后才写的
+对象记录不存在，其数据是孤儿；恢复点之前的对象若数据副本更旧则 GET 失败（须用与
+链同期或更晚的数据副本）。回滚到较早条目后继续追加增量是允许的：链在恢复出的谱
+系上延续（被跳过的条目仍在 manifest 里，`--to-id` 仍可回到它们）。
+
 ## 12. 指标
 
 `duostore_backend.cc:DuoStoreBackend::init_metrics` 注册（两个构造函数共用；

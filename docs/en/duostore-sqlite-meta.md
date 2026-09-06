@@ -545,6 +545,7 @@ backends:
 | --- | --- | --- |
 | meta | `rocksdb` | Adds legal value `sqlite`; selecting sqlite when the option is not compiled in → configuration error |
 | sqlite_path | `<root>/meta.sqlite3` | DB file path (corresponds to the RocksDB meta_path usage of pointing at an SSD); the parent directory is created by the store |
+| sqlite_wal_archive | empty | Backup chain directory (backlog-sequence ⑧): `duostore backup --incremental` archives WAL segments there; once a chain has started auto-checkpoints are off and close archives the last segment; empty = full backups only (storage/duostore-meta-sqlite.md §10) |
 | sqlite_cache | 64MiB | Page-cache **process-wide total budget** (validated ≥1MiB): SQLite's cache_size is per-connection; the implementation spreads the budget across all connections (1 write + 1 alloc + pool_size reads, §5.2) — semantics aligned with rocksdb_block_cache's single-budget role, not amplified by connection count |
 | meta_sync | true | **Carried over, not ignored** (contrast: ignored when meta=redis): SQLite, like RocksDB, is a local engine; the durability level is still owned by this process (§6) |
 

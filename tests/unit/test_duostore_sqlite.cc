@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -20,6 +21,7 @@
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/meta_dump.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/duostore/sqlite_meta_store.h"
@@ -625,6 +627,163 @@ TEST(duostore_sqlite_snapshot_dump_is_consistent) {
     CHECK(!m.get_object("b", "k1").has_value());
     CHECK_EQ(m.list_buckets().size(), size_t(2));
     m.close();
+}
+
+
+// backlog-sequence ⑧: backup chain = full copy + WAL segments, restored to any
+// entry (id or time). The close-time segment completes the chain; a store that
+// reopens on an existing chain keeps archiving
+TEST(duostore_sqlite_backup_chain_pitr) {
+    TmpDir tmp;
+    fs::path db = tmp.path / "meta.sqlite3";
+    fs::path bk = tmp.path / "backup";
+    auto opts = sqlite_opts(db);
+    opts.wal_archive = bk.string();
+    BackupManifest man;
+    man.engine = "sqlite";
+    auto record = [&](MetaBackupEntry e) {
+        man.entries.push_back(e);
+        man.save(bk);
+        return e;
+    };
+    int64_t ts_after_c = 0;
+    {
+        SqliteMetaStore m(opts);
+        CHECK(!m.archiving());
+        // Incremental before any full: refused
+        bool threw = false;
+        try {
+            m.backup_physical(bk, 1, /*full=*/false);
+        } catch (const s3::S3Error& e) {
+            threw = e.code == s3::S3ErrorCode::InvalidRequest;
+        }
+        CHECK(threw);
+        m.create_bucket("b");
+        m.put_object("b", "a", make_rec("a", {chunk_extent(1, 5)}));
+        auto e1 = record(m.backup_physical(bk, man.next_id(), /*full=*/true));
+        CHECK(e1.full && e1.bytes > 0);
+        CHECK(m.archiving());  // the chain started: WAL kept for the segments
+        m.put_object("b", "bb", make_rec("bb", {chunk_extent(2, 5)}));
+        auto e2 = record(m.backup_physical(bk, man.next_id(), /*full=*/false));
+        CHECK(!e2.full && e2.bytes > 32);
+        m.put_object("b", "c", make_rec("c", {chunk_extent(3, 5)}));
+        m.delete_object("b", "a");
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        auto e3 = record(m.backup_physical(bk, man.next_id(), /*full=*/false));
+        ts_after_c = e3.ts_ms;
+        // Nothing committed: an empty segment still keeps ids consecutive
+        auto e4 = record(m.backup_physical(bk, man.next_id(), /*full=*/false));
+        CHECK_EQ(e4.bytes, uint64_t(0));
+        CHECK(e4.file.empty());
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        m.put_object("b", "d", make_rec("d", {chunk_extent(4, 5)}));
+        m.close();  // archives the closing segment as entry 5 on its own
+    }
+    auto loaded = BackupManifest::load(bk);
+    CHECK_EQ(loaded.entries.size(), size_t(5));
+    CHECK(!loaded.entries.back().full);
+    CHECK_EQ(loaded.entries.back().marker, std::string("close"));
+
+    auto objects_at = [&](std::vector<MetaBackupEntry> chain) {
+        fs::path target = tmp.path / ("restored-" + std::to_string(chain.back().id) + ".sqlite3");
+        SqliteMetaStore::restore_physical(bk, chain, target);
+        auto o = sqlite_opts(target);
+        SqliteMetaStore r(o);
+        std::string seen;
+        for (auto k : {"a", "bb", "c", "d", "e"})
+            if (r.get_object("b", k)) seen += k;
+        r.close();
+        return seen;
+    };
+    CHECK_EQ(objects_at(loaded.plan(uint64_t{1}, std::nullopt)), std::string("a"));
+    CHECK_EQ(objects_at(loaded.plan(uint64_t{2}, std::nullopt)), std::string("abb"));
+    CHECK_EQ(objects_at(loaded.plan(std::nullopt, ts_after_c)), std::string("bbc"));
+    CHECK_EQ(objects_at(loaded.plan(std::nullopt, std::nullopt)), std::string("bbcd"));
+
+    // Reopening on the chain keeps archiving; a second full entry restarts it
+    {
+        SqliteMetaStore m(opts);
+        CHECK(m.archiving());
+        m.put_object("b", "e", make_rec("e", {chunk_extent(5, 5)}));
+        man = BackupManifest::load(bk);
+        record(m.backup_physical(bk, man.next_id(), /*full=*/true));
+        m.close();
+    }
+    loaded = BackupManifest::load(bk);
+    auto tail = loaded.plan(std::nullopt, std::nullopt);
+    CHECK_EQ(tail.size(), size_t(1));  // the plan starts at the last full entry
+    CHECK(tail.front().full);
+    CHECK_EQ(objects_at(tail), std::string("bbcde"));
+}
+
+// Backend level over the config path: sqlite_wal_archive names the chain
+// directory, run_meta_backup appends full + incremental entries, a file-level
+// restore to the middle entry reopens and the forced orphan scan reclaims the
+// chunk of the object written after that point
+TEST(duostore_sqlite_backend_backup_and_restore_pitr) {
+    TmpDir tmp;
+    fs::path bk = tmp.path / "backup";
+    auto pool = std::make_shared<ThreadPool>(2);
+    std::map<std::string, std::string> params{
+        {"root", (tmp.path / "duo").string()},
+        {"meta", "sqlite"},
+        {"sqlite_wal_archive", bk.string()},
+        {"pack_threshold", "0"},
+        {"gc_grace", "0s"},
+    };
+    auto cfg = DuoStoreConfig::from_params("pitr-sqlite", params);
+    CHECK_EQ(cfg.sqlite_wal_archive, bk);
+    CHECK_EQ(std::string(cfg.meta_kind_name()), std::string("sqlite"));
+    fs::create_directories(cfg.root);
+    {
+        DuoStoreBackend b(cfg, pool);
+        CHECK(b.meta_physical_backup());
+        sync_wait(b.create_bucket("bkt"));
+        backend_suite::put(b, "bkt", "first", "one");
+        auto e1 = sync_wait(b.run_meta_backup(bk, /*incremental=*/false));
+        CHECK(e1.full && e1.id == 1);
+        backend_suite::put(b, "bkt", "second", "two");
+        auto e2 = sync_wait(b.run_meta_backup(bk, /*incremental=*/true));
+        CHECK(!e2.full && e2.id == 2 && e2.bytes > 32);
+        backend_suite::put(b, "bkt", "third", "three");
+        auto e3 = sync_wait(b.run_meta_backup(bk, /*incremental=*/true));
+        CHECK(!e3.full && e3.id == 3);
+        // The chain lives in sqlite_wal_archive: another directory is refused
+        CHECK_THROWS_S3(sync_wait(b.run_meta_backup(tmp.path / "elsewhere", /*incremental=*/true)),
+                        s3::S3ErrorCode::InvalidRequest);
+        sync_wait(b.close());  // nothing committed since entry 3: no closing segment
+    }
+    auto man = BackupManifest::load(bk);
+    CHECK_EQ(man.engine, std::string("sqlite"));
+    CHECK_EQ(man.backend, std::string("pitr-sqlite"));
+    CHECK_EQ(man.entries.size(), size_t(3));
+    // Middle point: "first" and "second" exist, "third" is gone and its chunk is an orphan
+    SqliteMetaStore::restore_physical(bk, man.plan(uint64_t{2}, std::nullopt), cfg.sqlite_path);
+    {
+        DuoStoreBackend b(cfg, pool);
+        auto g = sync_wait(b.get_object("bkt", "second", std::nullopt));
+        CHECK_EQ(backend_suite::read_all(*g.body), std::string("two"));
+        CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "third")), s3::S3ErrorCode::NoSuchKey);
+        auto st = sync_wait(b.run_orphan_scan_once());
+        CHECK_EQ(st.orphans_removed, uint64_t(1));
+        // The restored file is a WAL-mode database on an existing chain: archiving resumes
+        backend_suite::put(b, "bkt", "fourth", "four");
+        auto e4 = sync_wait(b.run_meta_backup(bk, /*incremental=*/true));
+        CHECK_EQ(e4.id, uint64_t(4));
+        CHECK(e4.bytes > 32);
+        sync_wait(b.close());
+    }
+    // Latest = entries 1..4 over the restored lineage
+    man = BackupManifest::load(bk);
+    SqliteMetaStore::restore_physical(bk, man.plan(std::nullopt, std::nullopt), cfg.sqlite_path);
+    {
+        DuoStoreBackend b(cfg, pool);
+        auto g = sync_wait(b.get_object("bkt", "fourth", std::nullopt));
+        CHECK_EQ(backend_suite::read_all(*g.body), std::string("four"));
+        CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "third")), s3::S3ErrorCode::NoSuchKey);
+        sync_wait(b.close());
+    }
+    pool->join();
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_SQLITE_META

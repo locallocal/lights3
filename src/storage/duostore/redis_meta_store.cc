@@ -1639,4 +1639,16 @@ void RedisMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
     } while (cursor != "0");
 }
 
+
+std::string RedisMetaStore::restore_marker() {
+    auto r = exec({"INFO", "replication"}, /*read_retry=*/true);
+    if (!r || (r->type != REDIS_REPLY_STRING && r->type != REDIS_REPLY_VERB)) return "";
+    std::string info(reply_str(r.get()));
+    const std::string key = "master_repl_offset:";
+    auto at = info.find(key);
+    if (at == std::string::npos) return "";
+    auto end = info.find_first_of("\r\n", at);
+    return info.substr(at + key.size(), end == std::string::npos ? std::string::npos : end - at - key.size());
+}
+
 }  // namespace lights3::storage::duostore

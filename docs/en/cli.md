@@ -39,6 +39,8 @@ lights3 --version                                          version / git commit 
 lights3 --check-config [--config=<path>]                   validate the config only (§2.1)
 lights3 duostore dump <backend> <file> [--config=<path>]   export duostore meta
 lights3 duostore load <backend> <file> [--config=<path>]   import duostore meta
+lights3 duostore backup <backend> --to=<dir> [--incremental] [--config=<path>]  append one entry to the meta backup chain
+lights3 duostore restore <backend> --from=<dir> [--to-id=<n>|--to-ts=<t>] [--config=<path>]  restore meta from the chain to a point
 lights3 duostore gc <backend> [--config=<path>]            run one duostore GC round now
 lights3 duostore scan <backend> [--config=<path>]          run one orphan-scan round now
 lights3 duostore quarantine list|release|purge <backend> [<pack_id>] corrupt-pack quarantine
@@ -54,6 +56,9 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 | `--version` | root command (`s3adm` too) | — | print `lights3 <ver> (git <commit>, <build type>, <date>)` plus the `drivers:` / `features:` lines, exit 0; wins over `--check-config` (roadmap §6.3, [deployment.md §1](deployment.md)) |
 | `--backend=<name>` | `duostore *`, `tier *`, `fsck` | — | backend name, same as the first positional |
 | `--file=<path>` | `duostore dump|load` | — | dump file path, same as the second positional |
+| `--to=<dir>` / `--from=<dir>` | `duostore backup` / `restore` | — | backup chain directory (required) |
+| `--incremental` | `duostore backup` | `false` | append the delta since the previous entry instead of a full copy |
+| `--to-id=<n>` / `--to-ts=<t>` | `duostore restore` | latest | restore through manifest entry n / the last entry at or before time t (ISO 8601 or unix ms); mutually exclusive |
 | `--max-mbps=<n>` | `fsck` | `0` | read throttle in MB/s, `0` = unthrottled |
 
 ### 2.1 Starting the server
@@ -116,6 +121,31 @@ data back first, then `load`.
 ```bash
 ./build/lights3 duostore dump duo /backup/duo-meta.dump --config=/etc/lights3/lights3.yaml
 ./build/lights3 duostore load --backend=duo --file=/backup/duo-meta.dump -c /etc/lights3/lights3.yaml
+```
+
+### 2.2.1 `duostore backup` / `duostore restore`
+
+Backup chains with point-in-time restore (directory layout, manifest and the
+per-engine payloads: [storage/duostore-core.md §11.1](../storage/duostore-core.md)).
+`backup` appends one entry to `--to=<dir>`: a full copy by default, with
+`--incremental` the delta since the previous entry (refused while the directory
+holds no full entry yet). Per engine: sqlite's increment is a WAL segment and
+needs the backend's `sqlite_wal_archive` to name the same directory; rocksdb goes
+through BackupEngine, where every entry restores on its own; redis / tikv have no
+gateway-side increment -- `backup` writes a logical dump plus the restore marker
+(replication offset / TSO) and refuses `--incremental`. The local engines
+(sqlite / rocksdb) hold a file lock, so the server must be stopped.
+
+`restore` takes the chain prefix selected by `--to-id` / `--to-ts` (default:
+latest): sqlite / rocksdb are restored at file level **without building the
+backends**, then the backend is built for one forced orphan scan; redis / tikv
+require the cluster to be back at the entry's marker, then load that dump. Same
+order as §2.2: put the data directory back before `restore`.
+
+```bash
+./build/lights3 duostore backup duo --to=/backup/duo-meta -c /etc/lights3/lights3.yaml
+./build/lights3 duostore backup duo --to=/backup/duo-meta --incremental -c /etc/lights3/lights3.yaml
+./build/lights3 duostore restore duo --from=/backup/duo-meta --to-ts=2026-09-06T12:00:00Z -c /etc/lights3/lights3.yaml
 ```
 
 ### 2.3 `fsck`

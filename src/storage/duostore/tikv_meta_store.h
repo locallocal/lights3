@@ -96,6 +96,9 @@ public:
     // read at it a consistent view. The cluster GC safepoint must not pass the
     // version while the view lives: keep gc_retention above the dump duration
     std::unique_ptr<IMetaReadView> snapshot() override;
+    // Restore marker (backlog-sequence ⑧): a fresh PD TSO -- the --backupts / point
+    // in time for the cluster-side BR restore that precedes a logical load
+    std::string restore_marker() override;
     void ack_reclaims(std::span<const uint64_t> seqs) override;  // batch write-off in one transaction
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;

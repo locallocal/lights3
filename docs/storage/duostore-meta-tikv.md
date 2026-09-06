@@ -269,3 +269,18 @@ Cluster（顺序颠倒会让 worker 正常退出路径变成 500 抛出）。
 指标（构造期注册，0 值可见）：`lights3_duostore_tikv_txn_conflict_retries_total`、
 `lights3_duostore_tikv_safepoint_update_failures_total`、
 `lights3_duostore_tikv_gc_safepoint_ms`（gauge，最近推进值物理 ms）。
+
+## 10. 备份与 PITR 恢复点
+
+总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)。
+tikv 的增量与 PITR 属集群侧（BR 全量 / 日志备份、CDC）；网关侧：
+
+- `supports_physical_backup()=false`：`backup` 落成逻辑 dump（TSO 快照，在线一致，
+  §9 的 `gc_retention` 须覆盖 dump 时长）；`--incremental` 拒绝。
+- `restore_marker()`：dump 前向 PD 取一个新 TSO 记为 `marker`——dump 观测到的每个
+  提交版本都 ≤ 它。恢复到中间点 = 集群侧 `br restore point --restored-ts=<marker>`
+  （或全量 `--backupts` 不晚于它的那份）→ `duostore restore --to-id=N` 在写静默下
+  `run_meta_load`（末尾强制孤儿扫描）。TSO 单调，同一网关连续两次 marker 严格递增。
+
+用例：`test_duostore_tikv.cc` 的 `duostore_tikv_backup_marker`（需
+`LIGHTS3_TEST_PD_ADDR`，否则 SKIP）。

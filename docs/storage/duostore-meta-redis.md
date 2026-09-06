@@ -234,3 +234,21 @@ redis_uri 即共享 meta，无需任何进程间协调；进程内仅剩 `alloc_
 
 指标（构造期注册，0 值可见；空 `MetricsScope` 返回游离实例便于测试直构）：
 `lights3_duostore_redis_cas_retries_total`、`lights3_duostore_redis_reconnects_total`。
+
+## 10. 备份与 PITR 恢复点
+
+总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)。
+redis 没有网关侧的增量机制——增量副本是 **AOF 归档**，归集群运维；网关只做两件事：
+
+- `supports_physical_backup()=false`：`backup` 落成逻辑 dump（`NNNNNN-full.dump`，
+  与 `duostore dump` 同格式）；无 MVCC，与 §11 的在线 dump 一样要求**写静默**
+  （入口 WARN）。`--incremental` 直接拒绝（InvalidRequest 附说明）。
+- `restore_marker()`：dump 之前读 `INFO replication` 的 `master_repl_offset`，记进
+  manifest 的 `marker`。dump 里的一切都在该 offset 之前提交，所以**恢复到中间点**
+  的流程是：AOF 归档回放到不晚于 marker 的位置（或直接用那份 AOF 快照）→
+  `duostore restore --from=<dir> --to-id=N` = 写静默下 `run_meta_load` 该 dump
+  （末尾强制孤儿扫描）。offset 只在存在复制积压（有副本连过）时前进，单机测试
+  实例恒为 0——用例只断言其为非负整数且单调不减。
+
+用例：`test_duostore_redis.cc` 的 `duostore_redis_backup_marker_and_logical_chain`
+（需本机 redis，否则 SKIP）。

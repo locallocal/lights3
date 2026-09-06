@@ -212,3 +212,26 @@ chunk，全量先加后删在 last-wins 下净效果是删，会抹掉存活数�
 - 错误映射（主文档 §10）：非 ok `Status` 统一经 `rocks_meta_store.cc:throw_status`
   转 `InternalError` + error 日志；`IsNotFound` 不是错误，由语义层转
   `NoSuchKey/NoSuchBucket/NoSuchUpload`；损坏 value 由 codec 抛 InternalError。
+
+## 9. 备份链与 PITR
+
+总体约定见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)。
+rocksdb 的载荷是 `rocksdb::BackupEngine`，根在 `<dir>/rocksdb`：
+
+- **每条都是 `CreateNewBackupWithMetadata`**（`flush_before_backup=true`，memtable
+  先刷成 SST 进备份，不依赖 WAL 拷贝；`share_table_files=true`，未变化的 SST 在
+  备份间共享——"增量"由此天然成立，一条全量与一条增量成本相同）。manifest 里的
+  `full` 只是运维标记，`marker` = BackupEngine 的 backup id，`bytes` = 该备份的
+  总大小（含共享文件）。
+- **在线**：BackupEngine 自己拿一致的文件集，不持 `mu_`，业务写不停。
+- **恢复**（`RocksMetaStore::restore_physical`，静态，库已关）：清空 `meta_path` 后
+  `BackupEngineReadOnly::RestoreDBFromBackup(marker)`。因为每条自足，恢复只用计划
+  的**最后一条**——前面的条目对 rocksdb 不需要回放（CLI 日志里的"n entries to
+  replay"是计划长度，不是回放次数）。
+- **保留策略**：链只增不减；要瘦身用 BackupEngine 的 `PurgeOldBackups` 或删目录重
+  开一条新链（manifest 不提供删条目，id 连续性是恢复计划的前提）。
+
+用例：`test_duostore.cc` 的 `duostore_rocks_backup_chain_pitr`（store 级，全量 +
+两次增量，按 id / 时间恢复到三个点）与 `duostore_backend_backup_and_restore_pitr`
+（backend 级：`run_meta_backup` 记 manifest，回滚到条目 1 后孤儿扫描回收越点
+chunk，续链，再前滚到条目 2）。

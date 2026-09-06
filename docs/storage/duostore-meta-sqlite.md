@@ -220,3 +220,43 @@ run ≤ `data_ref.h:kMaxIdRun`=64；kRados 与 kChunk 共用计数器防跨 kind
 §6.3）。`graceful=false` 供构造失败清理——库未曾干净打开，跳过收尾（必然失败且会
 重复计 corruption）。close 后一切调用经 `wconn()`/`read_conn()` 的守卫干净抛
 InternalError（500 而非崩溃）；析构兜底调 close 并吞异常。
+
+## 10. 备份链与 PITR
+
+总体约定（目录、manifest、恢复计划、CLI）见[主文档 §11.1](duostore-core.md#111-备份链与-pitrmeta_backuph--meta_backupccbacklog-sequence-)；
+本节只讲 sqlite 的载荷：**全量 = 整库在线拷贝，增量 = WAL 段归档**。
+
+- **配置**：`sqlite_wal_archive: <dir>` 指向备份链目录（`SqliteMetaOptions::wal_archive`）。
+  未设时只能做全量（`--incremental` 抛 InvalidRequest 提示配置）；设了则 `--to`
+  必须就是这个目录（链只能有一处，避免两处各自截 WAL 互相丢段）。
+- **全量**（`backup_physical(full=true)`，持 `mu_` 停写）：先
+  `sqlite3_wal_checkpoint_v2(TRUNCATE)` 把 WAL 全部合并进主文件（未合干净——有
+  快照读者钉着帧——抛 InternalError 让运维重试，不产出一份少帧的"全量"），再经
+  `sqlite3_backup` 在线拷贝到 `<dir>/NNNNNN-full.sqlite3`，并把副本切回
+  `journal_mode=WAL`（backup API 产出的是 rollback 模式文件，而 WAL 段只会被
+  WAL 模式的文件在打开时回放）。随后 `archive_active_=true`：写连接
+  `PRAGMA wal_autocheckpoint=0`——自动 checkpoint 会在归档之前把帧折进主文件，
+  增量再也拿不到它们。
+- **增量**（`full=false`）：`-wal` 文件整段 `copy_file` 到 `<dir>/NNNNNN-wal`（只有
+  32 字节头 = 上一点以来无提交，不写文件、`bytes=0`，id 照样占位保持连续），然后
+  TRUNCATE checkpoint 清零 WAL，下一段从头开始。checkpoint 未干净时帧留在 WAL 里，
+  下一次增量会把它们**再归档一次**——帧回放幂等（salt + 校验链只认自己那一代
+  文件），不丢也不重。
+- **关闭**（§9 的 `shutdown`）：链活跃时先把剩余 WAL 归档为一条 `marker=close` 的
+  增量（manifest 由 store 自己追加），再做 §9 的 TRUNCATE checkpoint——否则"干净
+  关闭 = 合并 WAL"会把最后一段折进主文件，链就缺了这段。重新打开时若
+  `wal_archive` 里已有链，构造期直接恢复 `archive_active_`（日志一行 "WAL
+  archiving on"）。
+- **恢复**（`SqliteMetaStore::restore_physical`，静态，库已关）：把全量副本拷到
+  `sqlite_path`（先删旧的 db/-wal/-shm），跑一次 `PRAGMA journal_mode=WAL` 兜底；
+  然后按序把每个非空段拷成 `<db>-wal`，打开连接、先跑一条读（新连接惰性打开
+  WAL，此前 checkpoint 会报"非 WAL 模式"什么也不做），再 TRUNCATE checkpoint 折
+  进主文件——帧数残留非 0 即抛错。最后删掉 -wal/-shm，目录又只剩单个 DB 文件。
+- **不变量**：备份点上的写被 `mu_` 挡住，段边界严格落在事务边界；读者只可能让
+  checkpoint 不完整（抛错重试），不会读到半段。链目录与 DB 文件无需同盘。
+
+用例：`test_duostore_sqlite.cc` 的 `duostore_sqlite_backup_chain_pitr`（store 级：
+全量 + 三次增量（含一次空段）+ 关闭段，按 id / 时间恢复到每个点，重开续链，第二
+条全量重启链）与 `duostore_sqlite_backend_backup_and_restore_pitr`（backend 级：
+`sqlite_wal_archive` 配置键、`run_meta_backup`、恢复到中间点后强制孤儿扫描回收
+越点对象的 chunk、恢复后续链）。

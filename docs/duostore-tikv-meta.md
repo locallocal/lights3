@@ -299,9 +299,12 @@ pristine 上游锁定，升级 = 换指针 + 回归。上游 PR 仍列为 T5 事
 2. **结构化错误**：`already_exist` → `TikvAlreadyExist`（create_bucket
    转 `BucketAlreadyOwnedByYou`）、`write_conflict`/`retryable` →
    `TikvConflict`（重试循环消费）——上游笼统 LogicalError/Unknown。
-   含一处对上游裸异常的补分类：`resolveLocksForWrite` 遇"更新事务的
-   活锁"抛 `Exception("write conflict")`（上游 TODO 未给错误码），
-   prewrite 阶段明确未提交，按消息归入 `TikvConflict`（守卫分片专项
+   含一处对上游异常的补分类：`resolveLocksForWrite` 遇"更新事务的
+   活锁"抛的异常在 `@78a557e` 只有 UnknownError 码（上游 TODO），
+   prewrite 阶段明确未提交，归入 `TikvConflict`——分类由
+   `is_upstream_write_conflict` 在编译期按链接到的 client-c 二选一：
+   子模块带 `ErrorCodes::WriteConflict`（本仓向上游提的补丁，
+   `third_party/patches/client-c`）时按码，否则按消息串（守卫分片专项
    `duostore_tikv_write_skew_guard` 在真实集群上暴露此路径）；
 3. **commit 异常路径显式化**（§4.6 两分支）：primary 明确拒绝 = 已回滚
    （TiKV 对已提交事务的 commit 幂等返回 ok）→ 安全重试；RPC 层异常 =
@@ -576,8 +579,12 @@ backends:
 
 **§11 末注——上游回馈项（唯一未销的 T5 子项，依赖上游流程）**：向
 tikv/client-c 回馈 2PC mutation op 扩展、`Snapshot::Get` not_found 重载，
-合入后升级 submodule 指针、侧车相应退役。在此之前侧车对
-`@78a557e` 的两处消息串耦合持续有效（`tikv_client.cc` 对
-resolveLocksForWrite 裸 `Exception("write conflict")` 的兜底匹配，另有
-先行结构化判定压低依赖，文件头差异 7）——**升级指针时必须复查该消息串**。
+合入后升级 submodule 指针、侧车相应退役。消息串耦合部分（backlog-sequence
+⑨，2026-09-06）：上游补丁已备好在 `third_party/patches/client-c`（加
+`ErrorCodes::WriteConflict`，LockResolver 抛带码异常，RegionClient 两处裸
+异常补 LogicalError；PR 描述见该目录 README），侧车 `is_upstream_write_conflict`
+按链接到的库在编译期选择"按码 / 按消息串"，单测
+`duostore_tikv_write_conflict_classification` 两个分支各自断言。合入后：升
+指针 → 跑真实集群冲突用例 → 删消息串分支与补丁（README 列了步骤）。在此之前
+`@78a557e` 的消息串匹配仍是生效分支——**升级指针时必须复查该消息串**。
 该上游回馈事项以本节为跟踪记录。

@@ -609,4 +609,24 @@ TEST(duostore_tikv_backup_marker) {
     m.close();
 }
 
+// backlog-sequence ⑨: the write-conflict fallback classification follows the linked
+// client-c -- structured code when the submodule carries ErrorCodes::WriteConflict
+// (third_party/patches/client-c), message string at @78a557e. No cluster needed
+TEST(duostore_tikv_write_conflict_classification) {
+    constexpr int kUnknownError = 21;  // pingcap::ErrorCodes::UnknownError at @78a557e
+    int code = client_c_write_conflict_code();
+    if (code >= 0) {
+        CHECK(code != kUnknownError);
+        CHECK(is_upstream_write_conflict(code, "write conflict: key ... held by newer optimistic txn 7"));
+        CHECK(is_upstream_write_conflict(code, "any message"));
+        // The message alone no longer classifies: a coded library never relies on it
+        CHECK(!is_upstream_write_conflict(kUnknownError, "write conflict"));
+    } else {
+        CHECK(is_upstream_write_conflict(kUnknownError, "write conflict"));
+        CHECK(is_upstream_write_conflict(0, "Exception: write conflict"));
+        CHECK(!is_upstream_write_conflict(kUnknownError, "resolve txn failed"));
+    }
+    CHECK(!is_upstream_write_conflict(0, ""));
+}
+
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_TIKV_META

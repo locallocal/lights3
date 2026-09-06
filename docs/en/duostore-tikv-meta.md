@@ -368,12 +368,16 @@ differences from upstream 2pc.cc (itemized in the file header):
 2. **Structured errors**: `already_exist` → `TikvAlreadyExist` (create_bucket
    converts to `BucketAlreadyOwnedByYou`), `write_conflict`/`retryable` →
    `TikvConflict` (consumed by the retry loop) — upstream is a vague
-   LogicalError/Unknown. Includes one reclassification of an upstream bare
+   LogicalError/Unknown. Includes one reclassification of an upstream
    exception: `resolveLocksForWrite`, when hitting "a live lock of a newer
-   transaction", throws `Exception("write conflict")` (upstream TODO, no error
-   code); the prewrite phase is definitively uncommitted, so it is classified as
-   `TikvConflict` by message (the guard-shard special
-   `duostore_tikv_write_skew_guard` exposes this path on a real cluster);
+   transaction", throws an exception that at `@78a557e` carries only the
+   UnknownError code (upstream TODO); the prewrite phase is definitively
+   uncommitted, so it is classified as `TikvConflict` -- by
+   `is_upstream_write_conflict`, which picks at compile time between the
+   `ErrorCodes::WriteConflict` code when the submodule carries it (our upstream
+   patch, `third_party/patches/client-c`) and the message string otherwise (the
+   guard-shard special `duostore_tikv_write_skew_guard` exposes this path on a
+   real cluster);
 3. **Commit exception paths made explicit** (the two §4.6 branches): a definite
    primary rejection = already rolled back (TiKV's commit is idempotent-ok for an
    already-committed transaction) → safe to retry; an RPC-layer exception =
@@ -692,10 +696,15 @@ with a WARN (§7.1).
 **§11 endnote — upstream contribution item (the only unclosed T5 sub-item,
 dependent on the upstream process)**: contribute to tikv/client-c the 2PC
 mutation op extension and the `Snapshot::Get` not_found overload; once merged,
-upgrade the submodule pointer and retire the sidecar accordingly. Until then the
-sidecar's two message-string couplings to `@78a557e` stay in force
-(`tikv_client.cc`'s fallback match on resolveLocksForWrite's bare
-`Exception("write conflict")`, with a preceding structured classification that
-lowers the dependency, file-header difference 7) — **that message string must be
-re-checked whenever the pointer is upgraded**. This section is the tracking
-record for that upstream contribution.
+upgrade the submodule pointer and retire the sidecar accordingly. The
+message-string coupling (backlog-sequence ⑨, 2026-09-06): the upstream patch is
+prepared in `third_party/patches/client-c` (adds `ErrorCodes::WriteConflict`,
+LockResolver throws it, RegionClient's two bare throws get LogicalError; PR text
+in that directory's README); the sidecar's `is_upstream_write_conflict` chooses
+"by code / by message" at compile time from the linked library, and
+`duostore_tikv_write_conflict_classification` asserts both branches. After the
+merge: bump the pointer, run the conflict cases on a real cluster, delete the
+message branch and the patch (steps in the README). Until then the `@78a557e`
+message match is the live branch — **that message string must be re-checked
+whenever the pointer is upgraded**. This section is the tracking record for
+that upstream contribution.

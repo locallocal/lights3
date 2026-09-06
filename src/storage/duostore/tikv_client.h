@@ -11,6 +11,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -62,6 +63,18 @@ struct TikvAlreadyExist {
 struct TikvUndetermined {
     std::string what;
 };
+
+// ---- Upstream write-conflict classification (backlog-sequence ⑨) ----
+// client-c's resolveLocksForWrite aborts a writer whose key is held by a live optimistic
+// transaction newer than its start_ts. At tikv/client-c@78a557e that exception carries
+// UnknownError and only the message says "write conflict"; the proposed upstream change
+// (third_party/patches/client-c/0001-*.patch) gives it ErrorCodes::WriteConflict. These
+// two resolve at compile time against whatever the submodule pointer provides:
+//   client_c_write_conflict_code()  the enumerator's value, -1 when the library lacks it
+//   is_upstream_write_conflict()    by code when the library has one, by message otherwise
+// (the message branch is the defense-in-depth string match that retires with the pointer bump)
+int client_c_write_conflict_code();
+bool is_upstream_write_conflict(int code, std::string_view text);
 
 class TikvClient {
 public:

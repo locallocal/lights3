@@ -103,8 +103,10 @@ delta 行（id 出 `d` 号段），纯写无冲突——共享行的读改写会
 - 错误分类（`tikv_client.h` 三个结构化异常，替代上游笼统 LogicalError）：
   `already_exist` → `TikvAlreadyExist`；`conflict` / `retryable` → `TikvConflict`
   （明确未提交，安全重试）；其余提取锁——**新乐观事务持有的活锁提前归类为
-  TikvConflict**（不赌上游 `resolveLocksForWrite` 的裸 `Exception("write conflict")`
-  消息串，但消息匹配保留为纵深防御；若对端实际已死，本轮多退避一次后，重试的新
+  TikvConflict**（不赌上游 `resolveLocksForWrite` 抛出的异常；对该异常的兜底分类
+  `is_upstream_write_conflict` 在编译期按链接到的 client-c 二选一：子模块带
+  `ErrorCodes::WriteConflict`（`third_party/patches/client-c` 的上游补丁）按码，
+  `@78a557e` 按 "write conflict" 消息串；若对端实际已死，本轮多退避一次后，重试的新
   start_ts 必大于其 txn_id，走 resolver 清锁路径收敛）；活锁未过期则
   `boTxnLock` 退避后重试本批；
 - **prewrite 阶段任何异常 = 明确未提交**：`execute` 捕获后 best-effort

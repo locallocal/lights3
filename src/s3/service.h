@@ -97,13 +97,22 @@ public:
     // Config hot reload (roadmap §4.4): POST /-/admin/config/reload (root) runs the
     // hook the app installs and renders its report as JSON
     void set_reload_hook(std::function<ConfigReloadReport()> fn) { reload_hook_ = std::move(fn); }
-    // Offline scrub jobs (backlog-sequence ③): start(backend, max_bytes_per_sec)
-    // returns {"job_id",...} or throws S3Error (NoSuchKey / InvalidRequest /
-    // ScrubInProgress); status(backend) returns the job document or throws
-    void set_fsck_hooks(std::function<nlohmann::json(const std::string&, uint64_t)> start,
-                        std::function<nlohmann::json(const std::string&)> status) {
-        fsck_start_ = std::move(start);
-        fsck_status_ = std::move(status);
+    // Maintenance jobs on the live gateway (backlog-sequence ③ fsck, plus the
+    // duostore / tier groups, docs/cli.md §3.12): the application supplies them
+    // through hooks so the service never sees backend types. start(backend, group,
+    // op, max_bytes_per_sec) returns the job document with "job_id" or throws
+    // S3Error (NoSuchKey / InvalidRequest / ScrubInProgress / JobInProgress);
+    // status(backend, group, op) returns the job document; ledger(backend, group)
+    // the quarantine ledger document. group = "fsck" | "duostore" | "tier"
+    using JobStartHook = std::function<nlohmann::json(const std::string&, const std::string&,
+                                                      const std::string&, uint64_t)>;
+    using JobStatusHook =
+        std::function<nlohmann::json(const std::string&, const std::string&, const std::string&)>;
+    using JobLedgerHook = std::function<nlohmann::json(const std::string&, const std::string&)>;
+    void set_job_hooks(JobStartHook start, JobStatusHook status, JobLedgerHook ledger) {
+        job_start_ = std::move(start);
+        job_status_ = std::move(status);
+        job_ledger_ = std::move(ledger);
     }
     // The router's rule table is shared with the app's copies; exposed so the
     // reload path can swap it (storage::BucketRouter::update)
@@ -347,6 +356,10 @@ private:
     // handlers/admin_fsck.cc: POST/GET /-/admin/fsck/<backend> (root only, backlog-sequence ③)
     Task<http::HttpResponse> admin_fsck(http::HttpRequest& req, std::string& access_key,
                                         const RequestContext& ctx);
+    // handlers/admin_jobs.cc: POST/GET /-/admin/duostore/<backend>/gc|scan and
+    // /-/admin/tier/<backend>/scan|gc|reconcile, GET .../quarantine (root only)
+    Task<http::HttpResponse> admin_jobs(http::HttpRequest& req, std::string& access_key,
+                                        const RequestContext& ctx);
 
     // ---- usage / quota / tenancy helpers (handlers/quota_gate.cc) ----
     // Size of the object currently under (bucket,key) when usage accounting is on;
@@ -414,8 +427,9 @@ private:
     std::function<TimerQueue::Stats()> timer_stats_;
     std::function<http::ConnStats()> conn_stats_;
     std::function<ConfigReloadReport()> reload_hook_;
-    std::function<nlohmann::json(const std::string&, uint64_t)> fsck_start_;
-    std::function<nlohmann::json(const std::string&)> fsck_status_;
+    JobStartHook job_start_;
+    JobStatusHook job_status_;
+    JobLedgerHook job_ledger_;
     std::atomic<std::shared_ptr<RateLimiter>> ip_limiter_, ak_limiter_;
     std::atomic<int64_t> request_timeout_ms_{0};
     std::atomic<uint64_t> min_part_size_{storage::kMinPartSize};

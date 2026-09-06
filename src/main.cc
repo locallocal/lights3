@@ -30,7 +30,7 @@
 #include <vector>
 
 #include "app/app.h"
-#include "app/fsck_jobs.h"
+#include "app/admin_jobs.h"
 #include "http/server.h"
 #include "storage/registry.h"
 #include "core/log.h"
@@ -844,7 +844,7 @@ void run_fsck(const Cmd& c) {
     const auto& backends = app.backends();
     auto it = backends.find(backend);
     if (it == backends.end()) throw std::runtime_error("fsck: no backend named '" + backend + "'");
-    // Same dispatch as the admin endpoint (app/fsck_jobs.h); the report goes to the log
+    // Same dispatch as the admin endpoint (app/admin_jobs.h); the report goes to the log
     FsckOutcome out;
     try {
         out = run_scrub(*it->second, bps);

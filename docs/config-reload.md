@@ -49,8 +49,8 @@
 | `runtime.max_inflight_requests` | `AsyncSemaphore::set_capacity`：调大立即唤醒排队请求；调小则等在途请求归还许可（`available` 可短暂为负，期间不再放行新请求） |
 | `ratelimit.per_ip_* / per_ak_*` | 重建限流器并原子替换；在途请求持有旧实例直到结束，不会悬空（`max_tracked` 除外：仅重启） |
 | `buckets.rules` | `BucketRouter::update` 原子换代规则表；`S3Service`、lifecycle runner、usage tracker 的路由副本共享同一张表；在途请求继续用它解析时的表 |
-| `backends[]` **新增条目** | backlog-sequence ⑦：按配置 `StorageRegistry::build`（新的 tiered 条目可引用已在运行的后端）→ `meter_backends` 包装 → 与规则表**同一快照**换入路由器（规则可以立刻指向新后端）；fsck job 表、`/-/metrics` 的 `backend=` 标签随之出现。构建失败（如 localfs 缺 root）整体拒绝，已建好的实例回滚关闭 |
-| `backends[]` **删除条目** | 条件：不是 `default_backend`、文件里没有 tiered 条目再引用它、没有 fsck job 在跑（后两者违反 = 整体拒绝，前者 = 延后进 requires_restart）。删除先从路由表摘除（新请求立刻按剩余规则走），随后在一条**退役线程**上等该后端的在途租约归零（`MeteredBackend::wait_idle`，每次调用与每个打开的 GET 流各持一租约）再 `close()`，最后删掉它的指标序列；日志 `backend <name> removed: closed after in-flight requests drained`。等待不设上限（每 10s 记一行仍在等），进程关停时中止等待直接关闭 |
+| `backends[]` **新增条目** | backlog-sequence ⑦：按配置 `StorageRegistry::build`（新的 tiered 条目可引用已在运行的后端）→ `meter_backends` 包装 → 与规则表**同一快照**换入路由器（规则可以立刻指向新后端）；维护 job 表（fsck 与 duostore / tier 轮次，[cli.md §3.12](cli.md)）、`/-/metrics` 的 `backend=` 标签随之出现。构建失败（如 localfs 缺 root）整体拒绝，已建好的实例回滚关闭 |
+| `backends[]` **删除条目** | 条件：不是 `default_backend`、文件里没有 tiered 条目再引用它、没有维护 job（fsck / duostore / tier 轮次）在跑（后两者违反 = 整体拒绝，前者 = 延后进 requires_restart）。删除先从路由表摘除（新请求立刻按剩余规则走），随后在一条**退役线程**上等该后端的在途租约归零（`MeteredBackend::wait_idle`，每次调用与每个打开的 GET 流各持一租约）再 `close()`，最后删掉它的指标序列；日志 `backend <name> removed: closed after in-flight requests drained`。等待不设上限（每 10s 记一行仍在等），进程关停时中止等待直接关闭 |
 | `backends[]` 已有条目改参数 | **不应用**：实例带状态，重建等于重启；逐条列入 requires_restart（`backends (<name>: type/parameters changed …)`），运行实例保持启动时的配置。条目顺序变化不算变化（按名字匹配） |
 | TLS 证书素材 | 每次重载强制 `Holder::reload_now()`（不等 `tls_reload_interval` 轮询）；seastar 由其可重载凭证自行监视文件 |
 
@@ -86,7 +86,7 @@
   端点（未签名/非 root 403、GET 405、报告 JSON、失败 400）。后端热增删（⑦）：
   路由器规则 + 后端集合一次换代、旧快照不受影响、默认后端不可丢；
   `MeteredBackend` 租约（打开的 GET 流计入在途，`wait_idle` 在最后一个租约归还
-  时醒来）；`FsckJobs` 动态集合；`Application` 级——加 memory 后端并路由过去
+  时醒来）；`AdminJobs` 动态集合；`Application` 级——加 memory 后端并路由过去
   （HTTP 真请求落在新后端）、规则仍引用时删除被整体拒绝、改参数只报告、流打开
   时删除立刻生效而实例等流结束才关、删默认后端延后、tiered 引用被删后端 /
   构建失败整体拒绝。

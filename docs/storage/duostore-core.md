@@ -423,7 +423,7 @@ TTL 有界陈旧为契约。指标 `lights3_meta_cache_lookups_total{result=hit|
 ### 8.4 scrub（`run_scrub_once`，roadmap §3.1）
 
 > 触发面：离线 `lights3 fsck <backend>`、在线网关的 `POST /-/admin/fsck/<backend>`
-> （`lights3-ctl fsck --offline`，[cli.md §3.5](../cli.md)）；两者共用 `app/fsck_jobs.h` 的分派。
+> （`lights3-ctl fsck --offline`，[cli.md §3.5](../cli.md)）；两者共用 `app/admin_jobs.h` 的分派。
 
 `duostore_backend.cc:DuoStoreBackend::run_scrub_once` 是深度完整性巡检——
 孤儿扫描只查**存在性**，scrub 读**内容**。**纯只读**：一切发现只落

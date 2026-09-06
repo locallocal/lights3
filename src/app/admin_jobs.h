@@ -1,0 +1,125 @@
+// Application-level maintenance jobs on a live gateway: the offline integrity
+// scrub (`run_scrub_once`, roadmap §3.1, backlog-sequence ③) plus the on-demand
+// background rounds the offline CLI already exposes (`lights3 duostore gc|scan`,
+// `lights3 tier scan|gc|reconcile`, docs/cli.md §2.4) -- each run against the
+// application's backends, one job per backend at a time, on a dedicated thread,
+// with the outcome kept for polling. Drives `lights3 fsck` (run_scrub,
+// synchronous) and the admin endpoints (AdminJobs, asynchronous):
+//   POST/GET /-/admin/fsck/<backend>
+//   POST/GET /-/admin/duostore/<backend>/gc|scan    GET /-/admin/duostore/<backend>/quarantine
+//   POST/GET /-/admin/tier/<backend>/scan|gc|reconcile  GET /-/admin/tier/<backend>/quarantine
+#pragma once
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+#include <nlohmann/json.hpp>
+
+#include "storage/backend.h"
+
+namespace lights3 {
+
+// One completed job. `kind` is the backend type the round ran on ("duostore" |
+// "localfs" | "tiered"); `stats` is the backend's report as JSON (field names =
+// the *Stats members); `findings` is the sum of the "data is in danger"
+// counters (exit code 1 for the CLIs)
+struct JobOutcome {
+    std::string kind;
+    nlohmann::json stats;
+    uint64_t findings = 0;
+    bool aborted = false;  // backend close interrupted the round (stats are partial)
+};
+using FsckOutcome = JobOutcome;
+
+// The maintenance operations. Fsck runs on duostore / localfs / xlocalfs, the
+// Duo* ops on duostore, the Tier* ops on tiered; anything else is Unsupported
+enum class JobOp { Fsck, DuoGc, DuoScan, TierScan, TierGc, TierReconcile };
+// "fsck" | "gc" | "scan" | "reconcile": the op's name on the admin plane and in
+// the status document ("op"); the group ("fsck" | "duostore" | "tier") is the
+// endpoint prefix
+const char* job_op_name(JobOp op);
+const char* job_group_name(JobOp op);
+// The (group, op) pair of an endpoint, or nullopt when the group has no such op
+std::optional<JobOp> parse_job_op(std::string_view group, std::string_view op);
+
+// Dispatch on the backend type and run one scrub round synchronously (the caller
+// is a thread that may block). Throws std::invalid_argument for a backend type
+// without an offline scrub (memory, cloudproxy, tiered)
+FsckOutcome run_scrub(storage::IStorageBackend& backend, uint64_t max_bytes_per_sec);
+// Same for every op (Fsck delegates to run_scrub; max_bytes_per_sec only
+// applies to Fsck). Findings: duostore gc = records_corrupt + packs_quarantined,
+// duostore scan = refs_missing + pack_stats_missing, tier reconcile =
+// refs_missing, tier scan / gc = 0 (nothing they count is a loss signal)
+JobOutcome run_job(JobOp op, storage::IStorageBackend& backend, uint64_t max_bytes_per_sec);
+// The corrupt-pack (duostore) / reconciliation (tiered) quarantine ledger as
+// {"backend"?, "kind", "entries": [...]} -- synchronous and read-only. Throws
+// std::invalid_argument when `group` ("duostore" | "tier") does not match the
+// backend type
+nlohmann::json quarantine_ledger(std::string_view group, storage::IStorageBackend& backend);
+
+class AdminJobs {
+public:
+    enum class Error { NoSuchBackend, Unsupported, Busy };
+    struct Failure {
+        Error code;
+        std::string message;
+    };
+
+    explicit AdminJobs(std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends)
+        : backends_(std::move(backends)) {}
+    ~AdminJobs() { shutdown(); }
+
+    // Start a job; returns its id. Throws Failure{Busy} while any job runs on the
+    // backend (the rounds share the backend's maintenance state, so they are
+    // serialized whatever their op), {NoSuchBackend} / {Unsupported} before
+    // anything starts
+    uint64_t start(const std::string& backend, JobOp op, uint64_t max_bytes_per_sec = 0);
+    // {"backend","op","running","job_id","started_at_ms","finished_at_ms",
+    //  "duration_ms","max_mbps"(fsck),"kind","findings","aborted","stats"}: the
+    // most recent job of that op on that backend (job_id null before the first);
+    // "running" is true only while that op's job runs -- "busy" says whether any
+    // op does. Throws Failure{NoSuchBackend}
+    nlohmann::json status(const std::string& backend, JobOp op) const;
+    // The quarantine ledger of the backend (see quarantine_ledger). Throws
+    // Failure{NoSuchBackend} / {Unsupported}
+    nlohmann::json quarantine(const std::string& backend, std::string_view group) const;
+    // Wait for every running job (backends are closed by the caller first, which
+    // makes a round abort promptly)
+    void shutdown();
+    // Backend hot add / remove (backlog-sequence ⑦). remove returns false while a
+    // job runs on that backend (the caller refuses the removal); the outcomes are
+    // dropped with the backend
+    void add_backend(const std::string& name, std::shared_ptr<storage::IStorageBackend> b);
+    bool remove_backend(const std::string& name);
+    bool busy(const std::string& name) const;  // a job of any op is running on that backend
+
+private:
+    struct Job {
+        uint64_t id = 0;
+        bool running = false;
+        uint64_t max_mbps = 0;
+        int64_t started_ms = 0;   // unix ms
+        int64_t finished_ms = 0;  // 0 while running
+        JobOutcome outcome;       // of the last completed job
+        bool has_outcome = false;
+        std::string error;  // exception text if the last job threw
+        std::thread thread;
+    };
+    using Slots = std::map<JobOp, Job>;  // one slot per op, at most one running per backend
+    void finish_job(Job& j, JobOp op, JobOutcome out, std::string error);
+    static const Job* running_of(const Slots& s);
+
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
+    mutable std::mutex m_;
+    std::map<std::string, Slots> jobs_;
+    uint64_t next_id_ = 1;
+};
+
+}  // namespace lights3

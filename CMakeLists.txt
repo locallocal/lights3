@@ -290,7 +290,7 @@ add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
 # ---- Core library: L2/L3/L4 + HTTP boundary ----
 add_library(lights3_core STATIC
   src/app/app.cc
-  src/app/fsck_jobs.cc
+  src/app/admin_jobs.cc
   src/core/background.cc
   src/core/thread_pool.cc
   src/core/timer.cc
@@ -326,6 +326,7 @@ add_library(lights3_core STATIC
   src/s3/handlers/admin_tenants.cc
   src/s3/handlers/admin_objects.cc
   src/s3/handlers/admin_fsck.cc
+  src/s3/handlers/admin_jobs.cc
   src/s3/handlers/admin_tls_identities.cc
   src/s3/handlers/bucket_quota.cc
   src/s3/handlers/quota_gate.cc
@@ -357,7 +358,7 @@ target_include_directories(lights3_core PUBLIC src)
 # (src/http/tls.cc) serves every OpenSSL-backed driver, builtin included
 target_link_libraries(lights3_core PUBLIC OpenSSL::SSL OpenSSL::Crypto Threads::Threads spdlog::spdlog)
 # JSON is used only in the admin handler / CredentialStore .cc files, never in public headers (docs/credential-management.md §5.4)
-target_link_libraries(lights3_core PUBLIC nlohmann_json::nlohmann_json)  # json in public headers (service.h, app/fsck_jobs.h)
+target_link_libraries(lights3_core PUBLIC nlohmann_json::nlohmann_json)  # json in public headers (service.h, app/admin_jobs.h)
 
 if(LIGHTS3_DRIVER_BUILTIN)
   target_sources(lights3_core PRIVATE src/http/drivers/builtin/builtin_server.cc)
@@ -516,7 +517,8 @@ add_executable(lights3-ctl src/tools/lights3_ctl.cc src/tools/lights3_ctl_common
                      src/tools/lights3_ctl_website.cc src/tools/lights3_ctl_fsck.cc
                      src/tools/lights3_ctl_tenant.cc src/tools/lights3_ctl_quota.cc
                      src/tools/lights3_ctl_usage.cc src/tools/lights3_ctl_reload.cc
-                     src/tools/lights3_ctl_object.cc src/tools/lights3_ctl_mpu.cc)
+                     src/tools/lights3_ctl_object.cc src/tools/lights3_ctl_mpu.cc
+                     src/tools/lights3_ctl_jobs.cc)
 target_link_libraries(lights3-ctl PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(lights3-ctl SYSTEM PRIVATE third_party)
@@ -543,7 +545,7 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_tls_identity.cc
     tests/unit/test_ratelimit.cc
     tests/unit/test_reload.cc
-    tests/unit/test_fsck_jobs.cc
+    tests/unit/test_admin_jobs.cc
     tests/unit/test_api_metrics.cc
     tests/unit/test_access_log.cc
     tests/unit/test_trace.cc

@@ -153,7 +153,7 @@ order as §2.2: put the data directory back before `restore`.
 > The same scrub can be triggered and polled on a running gateway through the
 > admin plane: `POST/GET /-/admin/fsck/<backend>` and `lights3-ctl fsck --offline
 > <backend>` (§3.5). The offline CLI and the admin endpoint share the type
-> dispatch and the findings definition in `app/fsck_jobs.h`.
+> dispatch and the findings definition in `app/admin_jobs.h`.
 
 Offline data-integrity scrub (roadmap §3.1; implementation details in
 [storage/duostore-core.md §8.4](../storage/duostore-core.md) and
@@ -573,12 +573,69 @@ lights3-ctl mpu list photos --older-than=1d
 lights3-ctl mpu abort photos --all --older-than=7d          # an already-gone upload (404) counts as done
 ```
 
+### 3.12 `duostore` / `tier` — background rounds and quarantine ledgers on a live gateway
+
+The background rounds of §2.4 (duostore GC / orphan scan, tiered scan / GC /
+reconciliation) run once, right now, **inside the running gateway** -- no second
+process: a local meta engine (rocksdb/sqlite) holds a file lock, so the offline
+`lights3 duostore gc` needs downtime, whereas this borrows the gateway's own
+backend instances. Same job model as `fsck --offline` (`app/admin_jobs.h`):
+POST starts, 202 carries the job id, GET polls; **one job per backend at a
+time, whatever the operation** (the rounds share the backend's maintenance
+state, so a running fsck refuses a gc too), 409 code `JobInProgress` (fsck keeps
+`ScrubInProgress`). The quarantine ledgers are read-only here: `release` /
+`purge` / `forget` stay with the offline CLI.
+
+```text
+POST /-/admin/duostore/<backend>/gc|scan            root; 202 {"backend","op","job_id","running":true,"busy":true}
+POST /-/admin/tier/<backend>/scan|gc|reconcile      409 JobInProgress = a job (of any op) already runs on that backend
+                                                    404 unknown backend; 400 no such op in the group / backend of another type
+GET  /-/admin/duostore/<backend>/gc|scan            200 {"backend","op","running","busy","job_id","started_at_ms",
+GET  /-/admin/tier/<backend>/scan|gc|reconcile           after completion also "finished_at_ms","duration_ms","kind","findings","aborted","stats"{…}}
+GET  /-/admin/duostore/<backend>/quarantine         200 {"backend","kind":"duostore","entries":[{"pack_id","live_recs","corrupt_records","quarantined_at_ms","purged"}]}
+GET  /-/admin/tier/<backend>/quarantine             200 {"backend","kind":"tiered","entries":[{"kind","bucket","key","etag","first_seen_ms","last_seen_ms","count"}]}
+```
+
+Every operation keeps its own most recent document (`running` refers to that
+operation, `busy` to any operation on the backend); `stats` mirrors the
+matching `*Stats` struct field by field (`DuoGcStats` / `DuoOrphanStats` /
+`TierScanStats` / `TierGcStats` / `TierReconcileStats`) and `findings` sums its
+loss signals: duostore gc = `records_corrupt + packs_quarantined`, duostore
+scan = `refs_missing + pack_stats_missing`, tier reconcile = `refs_missing`,
+tier scan / gc always 0. A gateway shutdown interrupts a running round
+(`aborted: true`). Audit event `<group>.<op>.start`.
+
+```text
+lights3-ctl duostore gc|scan <backend> [--no-wait | --status]
+lights3-ctl duostore quarantine list <backend>
+lights3-ctl tier scan|gc|reconcile <backend> [--no-wait | --status]
+lights3-ctl tier quarantine list <backend>
+```
+
+The same driver as `fsck --offline` (`lights3_ctl_jobs.cc`): start, poll every
+0.5 s until the job ends, print the outcome document; exit code **1 = the job
+threw / `aborted` / `findings > 0`** (note this differs from the offline
+`lights3 duostore|tier` commands' fixed 0/1 -- the online entry follows the
+fsck verdict convention so scripts can branch on it); `--no-wait` prints the
+202 document and returns; `--status` only queries. `quarantine list` prints
+the ledger JSON verbatim.
+
+```bash
+lights3-ctl duostore gc duodata                   # reclaim space now, print DuoGcStats when done
+lights3-ctl duostore scan duodata --no-wait       # just the job id
+lights3-ctl tier reconcile tierdata               # exit 1 when refs_missing > 0
+lights3-ctl tier scan tierdata --status           # progress / last outcome
+lights3-ctl tier quarantine list tierdata
+```
+
 ## 4. Conventions for adding subcommands
 
 - One source file per command group (`lights3_ctl_<group>.cc/.h`, `make_<group>()`
   returns the group root), added in `lights3_ctl.cc` via `add_subcommand`;
   connection options are reused through `add_conn_flags` / `read_conn_opts`
-  in `lights3_ctl_common.h`.
+  in `lights3_ctl_common.h`. Groups built on one mechanism may share a file
+  (`duostore` / `tier` live with the `fsck --offline` job driver in
+  `lights3_ctl_jobs.cc`).
 - Callbacks return nothing; the exit code travels through `lights3_ctl::g_exit`
   following the 0/1/2 convention in §1; positionals are read from `c->args()`
   and count-checked by the command itself.

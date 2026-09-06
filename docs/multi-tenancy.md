@@ -3,7 +3,7 @@
 > 状态：四项全部落地（2026-09-04）。代码：`src/s3/usage.{h,cc}`、
 > `src/s3/quota.{h,cc}`、`src/s3/tenant.{h,cc}`、`src/s3/audit.{h,cc}`、
 > `src/s3/handlers/{quota_gate,bucket_quota,admin_tenants}.cc`；CLI
-> `src/tools/s3adm_{usage,quota,tenant}.cc`。单测 `tests/unit/test_tenancy.cc`，
+> `src/tools/lights3_ctl_{usage,quota,tenant}.cc`。单测 `tests/unit/test_tenancy.cc`，
 > e2e `tests/e2e/run_e2e.sh` 的 "roadmap §3.9" 一节。
 
 ## 1. 目标与边界
@@ -76,7 +76,7 @@ PutObject/UploadPart 的实际写入字节由 `ByteCountingReader` 在 body 上�
 | --- | --- |
 | 启动 bootstrap | 存在但没有扫描记录的桶各扫一次（`usage.reconcile=true` 的实例） |
 | 周期 | `usage.reconcile_interval`（默认 1d，0=关）全桶重扫；多网关只在一个实例开 `usage.reconcile`（同 duostore `gc_enabled` 的指定实例语义） |
-| 按需 | `POST /-/admin/usage/<bucket>/rescan`、`s3adm usage <bucket> --rescan` |
+| 按需 | `POST /-/admin/usage/<bucket>/rescan`、`lights3-ctl usage <bucket> --rescan` |
 
 **精度契约**：扫描完成的瞬间精确；两次扫描之间的误差来源只有 (a) 同键并发
 覆盖写各自减去同一个旧尺寸，(b) 同 upload 重传同一分片号的过计（complete/abort
@@ -318,10 +318,10 @@ audit:
 
 ## 8. CLI
 
-`s3adm quota get|set|clear <bucket>`、`s3adm tenant list|get|create|update|
-delete|assign|unassign`、`s3adm usage [bucket] [--rescan] [--tenant=]`、
-`s3adm cred create --tenant= --role=`，详见 [cli.md §3.6–§3.8](cli.md)；证书绑定
-`s3adm cred bind-cert|unbind-cert|list-certs`（[cli.md §3.2](cli.md)）。
+`lights3-ctl quota get|set|clear <bucket>`、`lights3-ctl tenant list|get|create|update|
+delete|assign|unassign`、`lights3-ctl usage [bucket] [--rescan] [--tenant=]`、
+`lights3-ctl cred create --tenant= --role=`，详见 [cli.md §3.6–§3.8](cli.md)；证书绑定
+`lights3-ctl cred bind-cert|unbind-cert|list-certs`（[cli.md §3.2](cli.md)）。
 
 ## 9. 测试
 
@@ -334,5 +334,5 @@ delete|assign|unassign`、`s3adm usage [bucket] [--rescan] [--tenant=]`、
   非 admin、凭证文件的 tenant/role、lifecycle 过期扣减、审计文件的事件与
   数据面记录、配置解析与校验。
 - e2e：`run_e2e.sh` 对全部后端变体跑同一段 §3.9 用例（usage API、?quota
-  往返与 403、租户建桶/桶数上限/隔离/ListBuckets、租户删除守卫、`s3adm
+  往返与 403、租户建桶/桶数上限/隔离/ListBuckets、租户删除守卫、`lights3-ctl
   usage/quota/tenant`）。

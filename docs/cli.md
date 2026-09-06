@@ -1,4 +1,4 @@
-# 命令行工具：`lights3` 与 `s3adm`
+# 命令行工具：`lights3` 与 `lights3-ctl`
 
 本文是两个可执行文件的命令参考。二者都基于 `third_party/ccmd`
 （header-only 子命令框架，内嵌 `cflag` 做选项解析），共享同一套命令行语义，
@@ -11,13 +11,13 @@
 - **命令树**：`<程序> [<命令组> [<子命令>]] [位置参数] [选项]`。
   `<程序> help [<命令组> [<子命令>]]` 或任一层级的 `-h/--help` 打印该层帮助。
 - **选项不向下继承**：每个叶子子命令拥有独立的选项集，选项必须写在叶子
-  子命令之后（`s3adm cred list --endpoint=…`，而不是 `s3adm --endpoint=… cred list`）。
+  子命令之后（`lights3-ctl cred list --endpoint=…`，而不是 `lights3-ctl --endpoint=… cred list`）。
 - **长选项取值只接受 `--name=value`**；`--name value` 会被 cflag 当作缺值报错。
   短选项两种都可以：`-e http://…` 或 `-ehttp://…`。bool 选项裸写即为 true
   （`--insecure`、`--keep`）。
   例外：`lights3` 主程序在进入 ccmd 前把 `--config <path>`（以及
   `--backend`/`--file`）折叠成 `=` 形式，因此空格写法对 `lights3` 也可用
-  （e2e 脚本与旧文档沿用这一写法）；`s3adm` 没有这层兼容。
+  （e2e 脚本与旧文档沿用这一写法）；`lights3-ctl` 没有这层兼容。
 - **`--` 终止选项解析**，其后全部视为位置参数。
 - **退出码**：`0` 成功；`1` 运行期失败（请求被拒、IO 错误、服务启动异常）；
   `2` 用法错误（缺位置参数、缺凭证、数值越界、裸命令组）。ccmd 自身对
@@ -45,7 +45,7 @@ lights3 help [duostore [<sub>] | tier [<sub>] | fsck]
 | 选项 | 适用 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `-c, --config=<path>` | 全部 | `config/lights3.yaml` | YAML 配置文件（格式见 [architecture.md §5](architecture.md#5-配置文件示例)） |
-| `--version` | 根命令（`s3adm` 同） | — | 打印 `lights3 <ver> (git <commit>, <build type>, <date>)` + `drivers:` / `features:` 两行后退出 0；优先于 `--check-config`（roadmap §6.3，[deployment.md §1](deployment.md)） |
+| `--version` | 根命令（`lights3-ctl` 同） | — | 打印 `lights3 <ver> (git <commit>, <build type>, <date>)` + `drivers:` / `features:` 两行后退出 0；优先于 `--check-config`（roadmap §6.3，[deployment.md §1](deployment.md)） |
 | `--backend=<name>` | `duostore *`、`tier *`、`fsck` | — | 后端名，等价于第一个位置参数 |
 | `--file=<path>` | `duostore dump|load` | — | dump 文件路径，等价于第二个位置参数 |
 | `--to=<dir>` / `--from=<dir>` | `duostore backup` / `restore` | — | 备份链目录（必填） |
@@ -130,7 +130,7 @@ offset / TSO），`--incremental` 拒绝。本地引擎（sqlite / rocksdb）持
 ### 2.3 `fsck`
 
 > 在线网关上同一套 scrub 也能经 admin 面触发与轮询：`POST/GET /-/admin/fsck/<backend>`
-> 与 `s3adm fsck --offline <backend>`（§3.5）。离线 CLI 与 admin 端点共用
+> 与 `lights3-ctl fsck --offline <backend>`（§3.5）。离线 CLI 与 admin 端点共用
 > `app/fsck_jobs.h` 的类型分派与结论定义。
 
 离线数据完整性巡检（roadmap §3.1，实现细节见
@@ -211,11 +211,11 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 `request_timeout`/`transfer_stall_timeout`、`max_inflight_requests`、`min_part_size`、
 限流、bucket 路由规则、后端实例的增删、TLS 证书内容），其余改动逐项 WARN "需重启"；文件校验失败
 则一字不改。systemd 单元可配 `ExecReload=/bin/kill -HUP $MAINPID`。同一动作也可经
-`s3adm reload`（§3.9）触发并拿到报告。
+`lights3-ctl reload`（§3.9）触发并拿到报告。
 
-## 3. `s3adm` —— 运维 CLI
+## 3. `lights3-ctl` —— 运维 CLI
 
-`src/tools/s3adm*.cc`，构建产物与 `lights3` 同目录。命令组：`cred`（凭证
+`src/tools/lights3-ctl*.cc`，构建产物与 `lights3` 同目录。命令组：`cred`（凭证
 管理面）、`website`（桶静态网站配置）、`bench`（压测）、`fsck`（在线对象
 校验）、`quota`（桶配额）、`tenant`（租户与桶归属）、`usage`（用量计数器，
 roadmap §3.9，见 [multi-tenancy.md](multi-tenancy.md)）、`reload`（配置热重载，
@@ -251,19 +251,19 @@ export LIGHTS3_ADMIN_SK=my-secret
 证书绑定三命令；响应 JSON 原样输出到 stdout。
 
 ```text
-s3adm cred list                          列出全部凭证（SK 掩码；含静态/文件/动态三来源）
-s3adm cred get <ak> [-s|--show-secret]   查询单个凭证；--show-secret 返回明文 SK（仅动态/文件凭证，服务端记审计日志）
-s3adm cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>] [-t|--tenant=<id>] [-r|--role=user|admin]
+lights3-ctl cred list                          列出全部凭证（SK 掩码；含静态/文件/动态三来源）
+lights3-ctl cred get <ak> [-s|--show-secret]   查询单个凭证；--show-secret 返回明文 SK（仅动态/文件凭证，服务端记审计日志）
+lights3-ctl cred create [-c|--comment=<text>] [-p|--policy=<json>|@<file>] [-t|--tenant=<id>] [-r|--role=user|admin]
                                          生成一对 AK/SK（唯一一次返回完整 SK）；--tenant 归属租户（租户 admin 调用时
                                          服务端固定为本租户，可省略），--role=admin 授予本租户管理面
-s3adm cred delete <ak>                   吊销动态凭证（静态凭证归配置文件管，服务端拒绝）
-s3adm cred bind-cert <ak> -S|--subject=<subject> [-c|--comment=<text>]
+lights3-ctl cred delete <ak>                   吊销动态凭证（静态凭证归配置文件管，服务端拒绝）
+lights3-ctl cred bind-cert <ak> -S|--subject=<subject> [-c|--comment=<text>]
                                          把客户端证书主体（CN，或 auth.tls_identity: san-uri 下的 URI SAN）绑到凭证：
                                          该证书上的未签名请求视同此凭证签名，已签名请求须同租户（tls.md §2.1）；
                                          root 专属，重复绑定即覆盖（201 新建 / 200 覆盖）
-s3adm cred unbind-cert -S|--subject=<subject>
+lights3-ctl cred unbind-cert -S|--subject=<subject>
                                          解除绑定（幂等）；root 专属
-s3adm cred list-certs                    列出全部绑定与服务端的 auth.tls_identity 模式；root 专属
+lights3-ctl cred list-certs                    列出全部绑定与服务端的 auth.tls_identity 模式；root 专属
 ```
 
 `--policy` 取内联 JSON 或 `@file`，结构
@@ -271,15 +271,15 @@ s3adm cred list-certs                    列出全部绑定与服务端的 auth.
 [credential-management.md §11](credential-management.md)。
 
 ```bash
-s3adm cred create --comment=tenant-a --policy='{"buckets":["tenant-a-*"],"readonly":false}'
-s3adm cred create -c ci-runner -p @policies/ci.json
-s3adm cred get L3AK7Q2MXX5EIY4BJZW3 --show-secret
-s3adm cred list --endpoint=https://s3.example.com --insecure
-s3adm cred delete L3AK7Q2MXX5EIY4BJZW3
-s3adm cred create --tenant=acme --role=admin --comment='acme operator'
-s3adm cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=alice --endpoint=https://s3.example.com --cert=ops.crt --key=ops.key
-s3adm cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=spiffe://example.org/ns/prod/sa/api   # san-uri 模式
-s3adm cred unbind-cert --subject=alice
+lights3-ctl cred create --comment=tenant-a --policy='{"buckets":["tenant-a-*"],"readonly":false}'
+lights3-ctl cred create -c ci-runner -p @policies/ci.json
+lights3-ctl cred get L3AK7Q2MXX5EIY4BJZW3 --show-secret
+lights3-ctl cred list --endpoint=https://s3.example.com --insecure
+lights3-ctl cred delete L3AK7Q2MXX5EIY4BJZW3
+lights3-ctl cred create --tenant=acme --role=admin --comment='acme operator'
+lights3-ctl cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=alice --endpoint=https://s3.example.com --cert=ops.crt --key=ops.key
+lights3-ctl cred bind-cert L3AK7Q2MXX5EIY4BJZW3 --subject=spiffe://example.org/ns/prod/sa/api   # san-uri 模式
+lights3-ctl cred unbind-cert --subject=alice
 ```
 
 ### 3.3 `website` —— 桶静态网站配置
@@ -289,17 +289,17 @@ s3adm cred unbind-cert --subject=alice
 静态配置的桶服务端拒绝动态修改（405）。
 
 ```text
-s3adm website get <bucket>                            打印配置 XML（未配置为 404 → 退出码 1）
-s3adm website set <bucket> [-i|--index-suffix=<s>] [-k|--error-key=<key>]
+lights3-ctl website get <bucket>                            打印配置 XML（未配置为 404 → 退出码 1）
+lights3-ctl website set <bucket> [-i|--index-suffix=<s>] [-k|--error-key=<key>]
                                                       启用/替换配置；index-suffix 默认 index.html，不得含 '/'；
                                                       error-key 为空用内置错误页
-s3adm website delete <bucket>                         删除配置（幂等），桶不再匿名可读
+lights3-ctl website delete <bucket>                         删除配置（幂等），桶不再匿名可读
 ```
 
 ```bash
-s3adm website set my-site --index-suffix=index.html --error-key=404.html
-s3adm website get my-site
-s3adm website delete my-site
+lights3-ctl website set my-site --index-suffix=index.html --error-key=404.html
+lights3-ctl website get my-site
+lights3-ctl website delete my-site
 ```
 
 ### 3.4 `bench` —— 压测
@@ -310,11 +310,11 @@ s3adm website delete my-site
 （ops、ops/s、MiB/s、avg/p50/p90/p99/max 延迟）。
 
 ```text
-s3adm bench put           上传（池内键轮转覆盖写）
-s3adm bench get           下载（先上传整池）
-s3adm bench stat          HeadObject（先上传整池）
-s3adm bench list          ListObjectsV2（先上传整池，--max-keys 控制每页）
-s3adm bench list-buckets  ListBuckets（不需要 --bucket）
+lights3-ctl bench put           上传（池内键轮转覆盖写）
+lights3-ctl bench get           下载（先上传整池）
+lights3-ctl bench stat          HeadObject（先上传整池）
+lights3-ctl bench list          ListObjectsV2（先上传整池，--max-keys 控制每页）
+lights3-ctl bench list-buckets  ListBuckets（不需要 --bucket）
 ```
 
 | 选项 | 默认 | 范围/说明 |
@@ -324,20 +324,20 @@ s3adm bench list-buckets  ListBuckets（不需要 --bucket）
 | `-d, --duration-sec=<n>` | 10 | 1–86400 |
 | `-n, --objects=<n>` | 64 | 1–1000000，键池大小 |
 | `-s, --size=<sz>` | put/get `1M`，stat/list `4K` | 字节或 K/M/G 后缀，上限 1G |
-| `--prefix=<p>` | `s3adm-bench/` | 键前缀 |
+| `--prefix=<p>` | `lights3-ctl-bench/` | 键前缀 |
 | `--max-keys=<n>` | 100 | 仅 `list` |
 | `--keep` | false | 结束后保留对象（默认删除整池） |
 | `-o, --output=text\|json` | `text` | `json`：stdout 只输出一个 JSON 对象（mode、wall_s、workers、keys、size、ops、errors、ops_per_s、mib_per_s、latency_ms{avg,p50,p90,p99,max}），每秒表格与准备/清理提示改到 stderr——`scripts/bench_gate.sh` 的基线比对输入（roadmap §6.2） |
 
-首个错误打印到 stderr（`s3adm: bench: first error: …`），其余只计入 err
+首个错误打印到 stderr（`lights3-ctl: bench: first error: …`），其余只计入 err
 计数；准备阶段（建桶/预上传）失败直接以 `1` 退出。
 
 ```bash
-s3adm bench put --bucket=test --size=4M --concurrency=8 --duration-sec=30
-s3adm bench get -b test -s 4M -j 8 -d 30 --keep
-s3adm bench stat -b test -j 16
-s3adm bench list -b test -n 10000 --max-keys=1000
-s3adm bench list-buckets -j 16
+lights3-ctl bench put --bucket=test --size=4M --concurrency=8 --duration-sec=30
+lights3-ctl bench get -b test -s 4M -j 8 -d 30 --keep
+lights3-ctl bench stat -b test -j 16
+lights3-ctl bench list -b test -n 10000 --max-keys=1000
+lights3-ctl bench list-buckets -j 16
 ```
 
 ### 3.5 `fsck` —— 在线对象校验 / 服务端 scrub
@@ -354,17 +354,17 @@ GET  /-/admin/fsck/<backend>                200 {"running","job_id","started_at_
                                                  完成后再加 "finished_at_ms","duration_ms","kind","findings","aborted","stats"{…}}
 ```
 
-`s3adm fsck --offline <backend> [--max-mbps=N] [--no-wait]` 发起后每 0.5s 轮询到
+`lights3-ctl fsck --offline <backend> [--max-mbps=N] [--no-wait]` 发起后每 0.5s 轮询到
 结束并打印结论文档，`findings > 0`（duostore：corrupt + unreadable + refs_missing +
 meta_errors；localfs：etag_mismatches + read_errors）或 `aborted` 时退出码 1；
-`--no-wait` 只打印 job id 立即返回；`s3adm fsck --status <backend>` 只查询。
+`--no-wait` 只打印 job id 立即返回；`lights3-ctl fsck --status <backend>` 只查询。
 同一后端同一时刻一个 job；网关关停会中断在跑的 scrub（`aborted: true`）。
 限速与离线 CLI 同一 `scrub_throttle.h`。审计事件 `fsck.start`。
 
 ```bash
-s3adm fsck --offline duodata --max-mbps=200     # 等到结束，打印 JSON 结论
-s3adm fsck --offline localdata --no-wait        # 只拿 job id
-s3adm fsck --status localdata                   # 进度 / 上次结论
+lights3-ctl fsck --offline duodata --max-mbps=200     # 等到结束，打印 JSON 结论
+lights3-ctl fsck --offline localdata --no-wait        # 只拿 job id
+lights3-ctl fsck --status localdata                   # 进度 / 上次结论
 ```
 
 原有在线模式（下）语义不变：
@@ -377,7 +377,7 @@ s3adm fsck --status localdata                   # 进度 / 上次结论
 （duostore crc/refs 对账）仍需服务器侧的 `lights3 fsck`。
 
 ```text
-s3adm fsck <bucket> [-p|--prefix=<p>] [--max-mbps=<n>]
+lights3-ctl fsck <bucket> [-p|--prefix=<p>] [--max-mbps=<n>]
 ```
 
 | 选项 | 默认 | 说明 |
@@ -390,8 +390,8 @@ s3adm fsck <bucket> [-p|--prefix=<p>] [--max-mbps=<n>]
 GET 之间被删除的对象）。退出码：`0` 干净；`1` 有 mismatch 或错误。
 
 ```bash
-s3adm fsck my-bucket --endpoint=https://s3.example.com
-s3adm fsck my-bucket --prefix=photos/ --max-mbps=50
+lights3-ctl fsck my-bucket --endpoint=https://s3.example.com
+lights3-ctl fsck my-bucket --prefix=photos/ --max-mbps=50
 ```
 
 ### 3.6 `quota` —— 桶配额
@@ -401,16 +401,16 @@ s3adm fsck my-bucket --prefix=photos/ --max-mbps=50
 专属。超限的写请求得 `QuotaExceeded`(403)。
 
 ```text
-s3adm quota get <bucket>                                    打印配额 XML（未配置 404 → 退出码 1）
-s3adm quota set <bucket> [-b|--max-bytes=<sz>] [-o|--max-objects=<n>]
+lights3-ctl quota get <bucket>                                    打印配额 XML（未配置 404 → 退出码 1）
+lights3-ctl quota set <bucket> [-b|--max-bytes=<sz>] [-o|--max-objects=<n>]
                                                             设置/替换配额；sz 接受 KiB/MiB/GiB 后缀，0 = 该轴不限
-s3adm quota clear <bucket>                                  删除配额（幂等）
+lights3-ctl quota clear <bucket>                                  删除配额（幂等）
 ```
 
 ```bash
-s3adm quota set logs --max-bytes=50GiB --max-objects=1000000
-s3adm quota get logs
-s3adm quota clear logs
+lights3-ctl quota set logs --max-bytes=50GiB --max-objects=1000000
+lights3-ctl quota get logs
+lights3-ctl quota clear logs
 ```
 
 ### 3.7 `tenant` —— 租户与桶归属
@@ -419,21 +419,21 @@ s3adm quota clear logs
 root 专属；`list`/`get` 租户 admin 可查本租户。响应 JSON 原样输出。
 
 ```text
-s3adm tenant list                                            列出租户（含配额、所有桶、聚合用量、凭证数）
-s3adm tenant get <id>                                        单个租户
-s3adm tenant create <id> [--display-name=<s>] [--max-bytes=<sz>] [--max-objects=<n>] [--max-buckets=<n>]
+lights3-ctl tenant list                                            列出租户（含配额、所有桶、聚合用量、凭证数）
+lights3-ctl tenant get <id>                                        单个租户
+lights3-ctl tenant create <id> [--display-name=<s>] [--max-bytes=<sz>] [--max-objects=<n>] [--max-buckets=<n>]
                                                              创建；id 形如 [a-z0-9][a-z0-9._-]{0,63}
-s3adm tenant update <id> [--display-name=<s>] [配额三项 | --clear-quota]
+lights3-ctl tenant update <id> [--display-name=<s>] [配额三项 | --clear-quota]
                                                              配额整体替换：未给出的轴变为不限
-s3adm tenant delete <id>                                     仍拥有桶或凭证时被拒（409）
-s3adm tenant assign <id> <bucket> [--force]                  把已有桶归给租户；已属他租户须 --force
-s3adm tenant unassign <id> <bucket>                          解除归属（桶变为未归属）
+lights3-ctl tenant delete <id>                                     仍拥有桶或凭证时被拒（409）
+lights3-ctl tenant assign <id> <bucket> [--force]                  把已有桶归给租户；已属他租户须 --force
+lights3-ctl tenant unassign <id> <bucket>                          解除归属（桶变为未归属）
 ```
 
 ```bash
-s3adm tenant create acme --display-name='ACME Corp' --max-bytes=1TiB --max-buckets=20
-s3adm tenant assign acme legacy-logs
-s3adm tenant get acme
+lights3-ctl tenant create acme --display-name='ACME Corp' --max-bytes=1TiB --max-buckets=20
+lights3-ctl tenant assign acme legacy-logs
+lights3-ctl tenant get acme
 ```
 
 ### 3.8 `usage` —— 用量计数器
@@ -443,13 +443,13 @@ s3adm tenant get acme
 打印结果（`usage.enabled=false` 时拒绝）。
 
 ```text
-s3adm usage [bucket] [-r|--rescan] [-t|--tenant=<id>]
+lights3-ctl usage [bucket] [-r|--rescan] [-t|--tenant=<id>]
 ```
 
 ```bash
-s3adm usage                       # 全部桶：objects / bytes / mpu_bytes / scanned_at
-s3adm usage --tenant=acme         # 只看 acme 所有的桶（root）
-s3adm usage logs --rescan         # 立即重算 logs 桶
+lights3-ctl usage                       # 全部桶：objects / bytes / mpu_bytes / scanned_at
+lights3-ctl usage --tenant=acme         # 只看 acme 所有的桶（root）
+lights3-ctl usage logs --rescan         # 立即重算 logs 桶
 ```
 
 ### 3.9 `reload` —— 配置热重载
@@ -461,11 +461,11 @@ s3adm usage logs --rescan         # 立即重算 logs 桶
 tiered 条目或运行中的 fsck job 引用的后端时服务端回 400、命令退出码 1。
 
 ```text
-s3adm reload
+lights3-ctl reload
 ```
 
 ```bash
-s3adm reload --endpoint=https://s3.example.com
+lights3-ctl reload --endpoint=https://s3.example.com
 ```
 
 ### 3.10 `object` —— 对象内部布局（roadmap §6.2）
@@ -474,7 +474,7 @@ s3adm reload --endpoint=https://s3.example.com
 后端里的物理布局，排障不再靠读日志或 hexdump。
 
 ```text
-s3adm object inspect <bucket> <key> [-o|--output=json|text]
+lights3-ctl object inspect <bucket> <key> [-o|--output=json|text]
 ```
 
 各引擎报告的内容：
@@ -487,8 +487,8 @@ s3adm object inspect <bucket> <key> [-o|--output=json|text]
 | memory / cloudproxy | `layout: null` + `note` | — |
 
 ```bash
-s3adm object inspect photos 2026/01/a.jpg              # 服务端 JSON 原样
-s3adm object inspect photos 2026/01/a.jpg -o text      # 表格
+lights3-ctl object inspect photos 2026/01/a.jpg              # 服务端 JSON 原样
+lights3-ctl object inspect photos 2026/01/a.jpg -o text      # 表格
 ```
 
 ### 3.11 `mpu` —— 僵尸 multipart 清理（roadmap §6.2）
@@ -499,22 +499,22 @@ s3adm object inspect photos 2026/01/a.jpg -o text      # 表格
 选集动手。
 
 ```text
-s3adm mpu list <bucket> [--prefix=<p>] [--older-than=<dur>] [-o text|json]
-s3adm mpu abort <bucket> <key> <upload-id>
-s3adm mpu abort <bucket> --all [--prefix=<p>] [--older-than=<dur>]
+lights3-ctl mpu list <bucket> [--prefix=<p>] [--older-than=<dur>] [-o text|json]
+lights3-ctl mpu abort <bucket> <key> <upload-id>
+lights3-ctl mpu abort <bucket> --all [--prefix=<p>] [--older-than=<dur>]
 ```
 
 ```bash
-s3adm mpu list photos --older-than=1d
-s3adm mpu abort photos --all --older-than=7d          # 已消失的（404）按完成计
+lights3-ctl mpu list photos --older-than=1d
+lights3-ctl mpu abort photos --all --older-than=7d          # 已消失的（404）按完成计
 ```
 
 ## 4. 新增子命令的约定
 
-- 每个命令组一个源文件（`s3adm_<group>.cc/.h`，`make_<group>()` 返回根节点），
-  在 `s3adm.cc` 中 `add_subcommand`；连接选项经 `s3adm_common.h` 的
+- 每个命令组一个源文件（`lights3_ctl_<group>.cc/.h`，`make_<group>()` 返回根节点），
+  在 `lights3_ctl.cc` 中 `add_subcommand`；连接选项经 `lights3_ctl_common.h` 的
   `add_conn_flags` / `read_conn_opts` 复用。
-- 回调无返回值，退出码通过 `s3adm::g_exit` 传出，遵守 §1 的 0/1/2 约定；
+- 回调无返回值，退出码通过 `lights3_ctl::g_exit` 传出，遵守 §1 的 0/1/2 约定；
   位置参数经 `c->args()` 读取并自行校验数量。
 - 服务进程侧的运维入口放在 `src/main.cc` 的命令树下（如 `duostore`），
   仅在对应编译开关内注册，保证裁剪构建不出现不可用命令。

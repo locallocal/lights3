@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Performance baseline matrix (roadmap §4.3, docs/performance-baseline.md):
-# `s3adm bench put|get` against one gateway per (driver × TLS) cell, localfs
+# `lights3-ctl bench put|get` against one gateway per (driver × TLS) cell, localfs
 # backend on a scratch directory, results as a Markdown table plus one JSON
 # line per cell. Drivers not compiled into the binary are skipped.
 #
-# Usage: bench_matrix.sh <lights3> <s3adm> [--drivers builtin,beast,httplib,seastar]
+# Usage: bench_matrix.sh <lights3> <lights3-ctl> [--drivers builtin,beast,httplib,seastar]
 #          [--tls on|off|both] [--duration N] [--concurrency N] [--size SZ] [--objects N]
 #          [--modes put,get] [--io-threads N] [--json FILE] [--label TEXT] [--keep-log]
 set -u
-BIN="${1:?usage: bench_matrix.sh <lights3> <s3adm> [options]}"
-S3ADM="${2:?usage: bench_matrix.sh <lights3> <s3adm> [options]}"
+BIN="${1:?usage: bench_matrix.sh <lights3> <lights3-ctl> [options]}"
+LIGHTS3_CTL="${2:?usage: bench_matrix.sh <lights3> <lights3-ctl> [options]}"
 shift 2
 DRIVERS=""
 TLS="both"
@@ -130,10 +130,10 @@ JSON_LINES=()
 run_cell() {  # run_cell <driver> <tls> <mode>
     local driver=$1 tls=$2 mode=$3 out parsed extra=()
     [[ $tls == on ]] && extra+=(--insecure)
-    out=$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" bench "$mode" --bucket=benchmatrix \
+    out=$(LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" bench "$mode" --bucket=benchmatrix \
             --concurrency="$CONC" --duration-sec="$DURATION" --size="$SIZE" --objects="$OBJECTS" \
             --output=json --endpoint="$BASE" --region="$REGION" "${extra[@]}" 2>"$WORK/bench-$driver-$tls-$mode.err") \
-        || { echo "s3adm bench $mode ($driver, tls=$tls) failed:" >&2; cat "$WORK/bench-$driver-$tls-$mode.err" >&2; return 1; }
+        || { echo "lights3-ctl bench $mode ($driver, tls=$tls) failed:" >&2; cat "$WORK/bench-$driver-$tls-$mode.err" >&2; return 1; }
     parsed=$(echo "$out" | python3 -c '
 import json, sys
 j = json.load(sys.stdin); l = j.get("latency_ms", {})

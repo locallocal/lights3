@@ -1,15 +1,15 @@
-// s3adm `website` command group: manages per-bucket static website configuration
+// lights3-ctl `website` command group: manages per-bucket static website configuration
 // via the ?website subresource (docs/static-website.md phase ③, root credential
-// only). Implementation in s3adm_website.cc.
+// only). Implementation in lights3_ctl_website.cc.
 #pragma once
 
 #include <ccmd.h>
 
 #include <memory>
 
-namespace s3adm {
+namespace lights3_ctl {
 
 // Builds the `website` command group (website get / set / delete).
 std::shared_ptr<ccmd::c_command> make_website();
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

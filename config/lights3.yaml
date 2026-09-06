@@ -4,7 +4,7 @@
 # the defaults, except those marked "required") — uncomment to switch.
 # Note: the built-in YAML parser is simplified (no tab indentation/flow style/anchors, src/core/config.cc).
 # Size units: B/KiB/MiB/GiB (KB/MB/GB/K/M/G are synonyms); duration units: s/m/h/d.
-# Hot reload (docs/config-reload.md): `kill -HUP <pid>` or `s3adm reload` re-reads this file;
+# Hot reload (docs/config-reload.md): `kill -HUP <pid>` or `lights3-ctl reload` re-reads this file;
 # log.level, request/stall timeouts, max_inflight_requests, min_part_size, ratelimit.*,
 # buckets.rules and TLS certificate contents take effect live, everything else needs a restart.
 http:
@@ -13,7 +13,7 @@ http:
   port: 9000
   # Separate admin listener (docs/http-adapter.md §2.1): when set, /-/metrics and
   # /-/admin/* are served ONLY here (the data-plane port answers 404 for them;
-  # /-/healthz and /-/readyz stay on both). Point s3adm --endpoint and the
+  # /-/healthz and /-/readyz stay on both). Point lights3-ctl --endpoint and the
   # Prometheus scrape at it. Not hot-reloadable. Omit = every face on `port`.
   # admin_bind: 127.0.0.1    # empty = same as bind
   # admin_port: 9100         # 0 = kernel-picked; must differ from port on the same address
@@ -92,7 +92,7 @@ auth:
   #                                            # reload of .sys (pick up additions/revocations); 0s = off (single-instance default)
   # tls_identity: off                          # off | subject-cn | san-uri (docs/tls.md §2.1): map a verified client
   #                                            # certificate (needs http.tls_client_auth optional|require) to the credential
-  #                                            # bound in .sys/tls-identities (s3adm cred bind-cert); unsigned requests then
+  #                                            # bound in .sys/tls-identities (lights3-ctl cred bind-cert); unsigned requests then
   #                                            # run as that credential, signed ones must agree with its tenant
 
 # ---------- Static website hosting (docs/static-website.md) ----------
@@ -100,7 +100,7 @@ auth:
 # subresources, response-* overrides refused). Exact names only, no globs.
 # Entries here are static: immutable via the API and they win over same-name
 # dynamic ones. Buckets can also be enabled at runtime via the root-only
-# ?website API (`s3adm website set <bucket>`), persisted to .sys/website/ and
+# ?website API (`lights3-ctl website set <bucket>`), persisted to .sys/website/ and
 # hot-synced across instances via auth.sync_interval.
 # website:
 #   - bucket: my-site
@@ -124,11 +124,11 @@ auth:
 # ---------- Usage accounting / quotas (roadmap §3.9, docs/multi-tenancy.md §2/§7) ----------
 # Per-bucket object/byte counters kept by the gateway (updated on every write,
 # persisted to .sys/usage/, recounted by a periodic full listing). Bucket quotas
-# (?quota / s3adm quota) and tenant quotas (s3adm tenant) are enforced on them.
+# (?quota / lights3-ctl quota) and tenant quotas (lights3-ctl tenant) are enforced on them.
 # usage:
 #   enabled: true               # false = no counters and no quota enforcement (skips the pre-write HEAD)
 #   flush_interval: 60s         # persist dirty counters; 0s = only at shutdown / after a scan
-#   reconcile_interval: 1d      # full recount of every bucket; 0s = on demand only (s3adm usage --rescan)
+#   reconcile_interval: 1d      # full recount of every bucket; 0s = on demand only (lights3-ctl usage --rescan)
 #   reconcile: true             # multi-gateway: true on ONE instance only (bootstrap + periodic recounts)
 
 # ---------- Audit log (roadmap §3.9 ④, docs/multi-tenancy.md §5) ----------

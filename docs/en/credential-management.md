@@ -45,7 +45,7 @@ and the caller must be a root credential** (defined in §3).
 | `PUT /-/admin/credentials/{ak}` | Edit a dynamic credential's policy/comment in place (roadmap §2.5): fields present in the body are replaced, `"policy": null` clears; the persisted `rev` counter bumps and other instances pick the edit up via the sync ETag/rev comparison | `200` + JSON (SK masked) |
 | `DELETE /-/admin/credentials/{ak}` | Revoke (dynamic credentials only; static credentials belong to the config file) | `204` |
 
-Companion ops CLI: `s3adm` (`src/tools/s3adm.cc`, built next to `lights3`,
+Companion ops CLI: `lights3-ctl` (`src/tools/lights3_ctl.cc`, built next to `lights3`,
 subcommand framework `third_party/ccmd`). Credential operations live in the
 `cred` command group; its four subcommands `cred list` / `cred get <ak>` /
 `cred create` / `cred delete <ak>` map one-to-one onto the table above and
@@ -55,7 +55,7 @@ visible to local `ps`); options must follow the leaf subcommand and long
 options take values as `--name=value` (ccmd semantics); `cred get` supports
 `--show-secret`, `cred create` supports `--comment` and `--policy` (inline
 JSON or `@file`). Full reference: [cli.md §3.2](cli.md), or
-`s3adm help cred [command]`.
+`lights3-ctl help cred [command]`.
 
 Responses use JSON; serialization/parsing brings in
 [nlohmann/json](https://github.com/nlohmann/json) (header-only, git submodule

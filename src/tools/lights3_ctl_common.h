@@ -1,6 +1,6 @@
-// s3adm shared support: process exit code, endpoint parsing, connection
+// lights3-ctl shared support: process exit code, endpoint parsing, connection
 // options and the SigV4 self-signing httplib client used by every command
-// group (cred: s3adm_cred.cc, bench: s3adm_bench.cc).
+// group (cred: lights3_ctl_cred.cc, bench: lights3_ctl_bench.cc).
 #pragma once
 
 #include <ccmd.h>
@@ -14,10 +14,10 @@
 #include "core/config.h"
 #include "s3/auth/sigv4.h"
 
-namespace s3adm {
+namespace lights3_ctl {
 
 // ccmd callbacks return nothing; the process exit code is carried out through
-// this (0 success / 1 request failure / 2 usage error). Defined in s3adm.cc.
+// this (0 success / 1 request failure / 2 usage error). Defined in lights3_ctl.cc.
 extern int g_exit;
 
 // Endpoint parsing. signed_host matches the Host header httplib actually
@@ -112,12 +112,12 @@ void run_admin(const std::shared_ptr<ccmd::c_command>& cmd, Fn&& fn) {
         SignedClient cli(conn);
         g_exit = fn(cli);
     } catch (const lights3::s3::S3Error& e) {
-        fprintf(stderr, "s3adm: %s\n", e.message.c_str());
+        fprintf(stderr, "lights3-ctl: %s\n", e.message.c_str());
         g_exit = 1;
     } catch (const std::exception& e) {
-        fprintf(stderr, "s3adm: %s\n", e.what());
+        fprintf(stderr, "lights3-ctl: %s\n", e.what());
         g_exit = 1;
     }
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

@@ -70,7 +70,7 @@ subject-cn | san-uri` 打开后，验证通过的客户端证书取一个字段�
 候选），选哪个由 L2 按模式决定；seastar 走 GnuTLS 的 DN 字符串再解析 CN。
 
 绑定由 root 经 `/-/admin/tls-identities`（[multi-tenancy.md §6](multi-tenancy.md)）
-或 `s3adm cred bind-cert|unbind-cert|list-certs`（[cli.md §3.2](cli.md)）维护，
+或 `lights3-ctl cred bind-cert|unbind-cert|list-certs`（[cli.md §3.2](cli.md)）维护，
 多网关经 `auth.sync_interval` 同步；表在 `tls_identity: off` 时照常可维护，
 方便先铺绑定再切模式。`auth.tls_identity` 与其它 `auth.*` 一样需重启生效，
 且要求 `tls_client_auth` 为 `optional|require`（否则启动报错）。
@@ -84,7 +84,7 @@ auth:
 ```
 
 ```bash
-s3adm cred bind-cert L3AK... --subject=alice --cert=ops.crt --key=ops.key --endpoint=https://...
+lights3-ctl cred bind-cert L3AK... --subject=alice --cert=ops.crt --key=ops.key --endpoint=https://...
 curl --cert alice.crt --key alice.key https://s3.example.com/bucket/key   # 未签名，按绑定凭证鉴权
 ```
 
@@ -222,6 +222,6 @@ lights3 端保持明文即可，`X-Forwarded-Proto` 让 Location 正确。
 - e2e：`run_e2e.sh` 末尾用 openssl CLI 自签证书起一个 HTTPS 实例，`curl --cacert`
   做 SigV4 PUT/GET 往返（builtin 驱动即默认驱动）；再起一个 `tls_client_auth:
   require` + `tls_identity: subject-cn` 的实例，私有 CA 签两张客户端证书，
-  `s3adm cred bind-cert` 绑定其一到只读凭证，验证未签名 GET 放行 / PUT 被 policy
+  `lights3-ctl cred bind-cert` 绑定其一到只读凭证，验证未签名 GET 放行 / PUT 被 policy
   拒 / 未绑定证书 403 / 无证书握手失败 / 签名与证书跨租户 403 / root 豁免 /
   解绑后回到 403。

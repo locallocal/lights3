@@ -1,36 +1,36 @@
-// s3adm `usage` command — bucket usage counters via /-/admin/usage
+// lights3-ctl `usage` command — bucket usage counters via /-/admin/usage
 // (docs/multi-tenancy.md §2/§6). Root sees every bucket; a tenant admin sees its
 // own tenant's buckets. --rescan triggers a synchronous full count of one bucket.
-#include "tools/s3adm_usage.h"
+#include "tools/lights3_ctl_usage.h"
 
 #include <cstdio>
 #include <memory>
 #include <string>
 
 #include "core/util/uri.h"
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
-namespace s3adm {
+namespace lights3_ctl {
 
 namespace util = lights3::util;
 
 std::shared_ptr<ccmd::c_command> make_usage() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "usage", "s3adm usage logs --rescan", "s3adm usage [bucket] [options]",
+        "usage", "lights3-ctl usage logs --rescan", "lights3-ctl usage [bucket] [options]",
         "Show bucket usage counters (objects, committed bytes, in-flight multipart bytes, "
         "last full count). Without a bucket every visible bucket is listed (--tenant "
         "filters by owner, root only). --rescan runs a full count of the given bucket "
         "now and prints the result (roadmap §3.9 ①).",
         "show bucket usage counters.", [](const std::shared_ptr<ccmd::c_command>& c) {
             if (c->args().size() > 1) {
-                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+                fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
             bool rescan = c->var<bool>("rescan");
             auto tenant = c->var<std::string>("tenant");
             if (rescan && c->args().empty()) {
-                fprintf(stderr, "s3adm: --rescan needs a bucket\n");
+                fprintf(stderr, "lights3-ctl: --rescan needs a bucket\n");
                 g_exit = 2;
                 return;
             }
@@ -53,4 +53,4 @@ std::shared_ptr<ccmd::c_command> make_usage() {
     return cmd;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

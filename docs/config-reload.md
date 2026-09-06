@@ -2,7 +2,7 @@
 
 > 状态：已落地（2026-09-05）。代码：`Application::reload_config`（`src/app/app.cc`）、
 > `storage::BucketRouter::update`、`AsyncSemaphore::set_capacity`、
-> `POST /-/admin/config/reload`（`src/s3/handlers/admin_tenants.cc`）、`s3adm reload`。
+> `POST /-/admin/config/reload`（`src/s3/handlers/admin_tenants.cc`）、`lights3-ctl reload`。
 > 单测 `tests/unit/test_reload.cc`，e2e `run_e2e.sh` 的 "roadmap §4.4" 一节。
 
 ## 1. 触发方式
@@ -11,7 +11,7 @@
 | --- | --- |
 | `kill -HUP <pid>` | 信号经自管道交给看门狗线程执行（信号处理函数只写一个字节），与 SIGINT/SIGTERM 同一套机制；systemd 单元可配 `ExecReload=/bin/kill -HUP $MAINPID` |
 | `POST /-/admin/config/reload` | root 静态凭证；返回 JSON 报告（下文）；写一条 `config.reload` 审计记录 |
-| `s3adm reload` | 上一条的 CLI 包装，退出码 0/1 对应 `ok` |
+| `lights3-ctl reload` | 上一条的 CLI 包装，退出码 0/1 对应 `ok` |
 
 两条路径共用同一把锁，串行执行；重载不阻塞请求路径（读文件与应用都在看门狗
 线程或 admin 请求的协程里）。
@@ -25,7 +25,7 @@
 3. 子集之外、但磁盘上已改变的键列入 `requires_restart` 并逐项 WARN——运维能立刻
    看到"改了但没生效"的项，而不是发现不了。
 
-报告形状（admin API / `s3adm reload` 输出）：
+报告形状（admin API / `lights3-ctl reload` 输出）：
 
 ```json
 {
@@ -91,7 +91,7 @@
   时删除立刻生效而实例等流结束才关、删默认后端延后、tiered 引用被删后端 /
   构建失败整体拒绝。
 - e2e：改 `log.level` 后 `SIGHUP` 看日志；`?request_timeout` 经 admin API 与
-  `s3adm reload` 应用；非 root 403；非法配置 400；热加 memory 后端 `hot` 并路由
-  `hot-*`（PUT 落在新后端、指标出现 `backend="hot"`、`s3adm object inspect` 看到
+  `lights3-ctl reload` 应用；非 root 403；非法配置 400；热加 memory 后端 `hot` 并路由
+  `hot-*`（PUT 落在新后端、指标出现 `backend="hot"`、`lights3-ctl object inspect` 看到
   它），限速 GET 流进行中删除——reload 立刻返回 removed、`hot-*` 立刻改走默认
   后端、close 日志在流结束后才出现、指标标签消失；删默认后端只延后报告。

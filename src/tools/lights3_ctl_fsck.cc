@@ -1,4 +1,4 @@
-// s3adm `fsck` — online integrity verification through the data plane
+// lights3-ctl `fsck` — online integrity verification through the data plane
 // (roadmap §3.1): ListObjectsV2 pages, then for every key a streaming GET with
 // the MD5 recomputed client-side and compared against the ETag. Multipart
 // composites ("-N" ETags) are verified per part via GET ?partNumber=i and
@@ -6,7 +6,7 @@
 // slice (pre-layout legacy, 501) count as unverifiable, never as mismatches.
 // This is the end-to-end complement of the offline `lights3 fsck`: it also
 // covers the gateway read path, at the cost of pulling every byte over HTTP.
-#include "tools/s3adm_fsck.h"
+#include "tools/lights3_ctl_fsck.h"
 
 #include <chrono>
 #include <cstdint>
@@ -21,13 +21,13 @@
 #include "s3/xml.h"
 #include "storage/multipart.h"
 #include <nlohmann/json.hpp>
-#include "tools/s3adm_common.h"
+#include "tools/lights3_ctl_common.h"
 
 namespace {
 
-using s3adm::g_exit;
-using s3adm::run_admin;
-using s3adm::SignedClient;
+using lights3_ctl::g_exit;
+using lights3_ctl::run_admin;
+using lights3_ctl::SignedClient;
 namespace util = lights3::util;
 
 struct FsckStats {
@@ -79,7 +79,7 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         rl.pace(st.bytes - before);
         if (!r) {
             ++st.errors;
-            fprintf(stderr, "s3adm: fsck: GET %s: %s\n", key.c_str(),
+            fprintf(stderr, "lights3-ctl: fsck: GET %s: %s\n", key.c_str(),
                     httplib::to_string(r.error()).c_str());
             return;
         }
@@ -89,7 +89,7 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         }
         if (r->status != 200) {
             ++st.errors;
-            fprintf(stderr, "s3adm: fsck: GET %s: HTTP %d\n", key.c_str(), r->status);
+            fprintf(stderr, "lights3-ctl: fsck: GET %s: HTTP %d\n", key.c_str(), r->status);
             return;
         }
     } else {
@@ -99,7 +99,7 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         auto h = cli.head(path, "partNumber=1");
         if (!h) {
             ++st.errors;
-            fprintf(stderr, "s3adm: fsck: HEAD %s: %s\n", key.c_str(),
+            fprintf(stderr, "lights3-ctl: fsck: HEAD %s: %s\n", key.c_str(),
                     httplib::to_string(h.error()).c_str());
             return;
         }
@@ -115,7 +115,7 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         }
         if (h->status != 206) {
             ++st.errors;
-            fprintf(stderr, "s3adm: fsck: HEAD %s?partNumber=1: HTTP %d\n", key.c_str(),
+            fprintf(stderr, "lights3-ctl: fsck: HEAD %s?partNumber=1: HTTP %d\n", key.c_str(),
                     h->status);
             return;
         }
@@ -137,7 +137,7 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
             rl.pace(st.bytes - before);
             if (!r || r->status != 206) {
                 ++st.errors;
-                fprintf(stderr, "s3adm: fsck: GET %s?partNumber=%d: %s\n", key.c_str(), i,
+                fprintf(stderr, "lights3-ctl: fsck: GET %s?partNumber=%d: %s\n", key.c_str(), i,
                         r ? ("HTTP " + std::to_string(r->status)).c_str()
                           : httplib::to_string(r.error()).c_str());
                 return;
@@ -165,11 +165,11 @@ int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& pr
             q += "&continuation-token=" + util::aws_uri_encode(token, /*encode_slash=*/true);
         auto r = cli.get("/" + bucket, q);
         if (!r) {
-            fprintf(stderr, "s3adm: fsck: list: %s\n", httplib::to_string(r.error()).c_str());
+            fprintf(stderr, "lights3-ctl: fsck: list: %s\n", httplib::to_string(r.error()).c_str());
             return 1;
         }
         if (r->status != 200) {
-            fprintf(stderr, "s3adm: fsck: list: HTTP %d\n%s\n", r->status, r->body.c_str());
+            fprintf(stderr, "lights3-ctl: fsck: list: HTTP %d\n%s\n", r->status, r->body.c_str());
             return 1;
         }
         auto root = lights3::s3::xml_parse(r->body, 16 << 20);
@@ -195,7 +195,7 @@ int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& pr
 
 }  // namespace
 
-namespace s3adm {
+namespace lights3_ctl {
 
 // --offline: the server-side scrub (backlog-sequence ③) through the admin plane.
 // POST starts one round (409 while one runs), GET polls; the final document is
@@ -230,7 +230,7 @@ int run_fsck_offline(SignedClient& cli, const std::string& backend, uint64_t mbp
         if (!st || st->status != 200) return finish(st, 200);
         auto doc = nlohmann::json::parse(st->body, nullptr, false);
         if (doc.is_discarded()) {
-            fprintf(stderr, "s3adm: fsck: unparsable status document\n");
+            fprintf(stderr, "lights3-ctl: fsck: unparsable status document\n");
             return 1;
         }
         if (doc.value("running", false)) continue;
@@ -241,8 +241,8 @@ int run_fsck_offline(SignedClient& cli, const std::string& backend, uint64_t mbp
 
 std::shared_ptr<ccmd::c_command> make_fsck() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "fsck", "s3adm fsck my-bucket --prefix=photos/ --max-mbps=50",
-        "s3adm fsck <bucket> [options] | s3adm fsck --offline <backend> [--max-mbps=N] [--no-wait] | s3adm fsck --status <backend>",
+        "fsck", "lights3-ctl fsck my-bucket --prefix=photos/ --max-mbps=50",
+        "lights3-ctl fsck <bucket> [options] | lights3-ctl fsck --offline <backend> [--max-mbps=N] [--no-wait] | lights3-ctl fsck --status <backend>",
         "Verify a bucket's objects end to end through the S3 API: every listed object "
         "is downloaded and its MD5 recomputed against the ETag (multipart composites "
         "via GET ?partNumber per part). Read-only; prints MISMATCH/UNVERIFIABLE lines "
@@ -258,7 +258,7 @@ std::shared_ptr<ccmd::c_command> make_fsck() {
             bool offline = c->var<bool>("offline");
             bool status = c->var<bool>("status");
             if (c->args().size() != 1 || (offline && status)) {
-                fprintf(stderr, "s3adm: usage: %s\n", c->usage().c_str());
+                fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
                 return;
             }
@@ -266,7 +266,7 @@ std::shared_ptr<ccmd::c_command> make_fsck() {
             auto prefix = c->var<std::string>("prefix");
             int mbps = c->var<int>("max-mbps");
             if (mbps < 0) {
-                fprintf(stderr, "s3adm: fsck: --max-mbps must be >= 0\n");
+                fprintf(stderr, "lights3-ctl: fsck: --max-mbps must be >= 0\n");
                 g_exit = 2;
                 return;
             }
@@ -286,8 +286,8 @@ std::shared_ptr<ccmd::c_command> make_fsck() {
     cmd->var<bool>("offline", false, "<backend> is a backend name: run the server-side scrub via /-/admin/fsck (root).");
     cmd->var<bool>("status", false, "<backend> is a backend name: print the running/last scrub outcome.");
     cmd->var<bool>("no-wait", false, "with --offline: return right after starting the job.");
-    s3adm::add_conn_flags(cmd);
+    lights3_ctl::add_conn_flags(cmd);
     return cmd;
 }
 
-}  // namespace s3adm
+}  // namespace lights3_ctl

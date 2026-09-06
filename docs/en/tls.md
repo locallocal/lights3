@@ -82,7 +82,7 @@ after the handshake (httplib once per request, a cheap peek) into
 mode. seastar goes through GnuTLS's DN string and parses the CN out of it.
 
 Bindings are managed by root through `/-/admin/tls-identities`
-([multi-tenancy.md §6](multi-tenancy.md)) or `s3adm cred
+([multi-tenancy.md §6](multi-tenancy.md)) or `lights3-ctl cred
 bind-cert|unbind-cert|list-certs` ([cli.md §3.2](cli.md)) and synced across
 gateways by `auth.sync_interval`; the table stays manageable with
 `tls_identity: off`, so bindings can be prepared before the switch.
@@ -98,7 +98,7 @@ auth:
 ```
 
 ```bash
-s3adm cred bind-cert L3AK... --subject=alice --cert=ops.crt --key=ops.key --endpoint=https://...
+lights3-ctl cred bind-cert L3AK... --subject=alice --cert=ops.crt --key=ops.key --endpoint=https://...
 curl --cert alice.crt --key alice.key https://s3.example.com/bucket/key   # unsigned, judged as the bound credential
 ```
 
@@ -254,7 +254,7 @@ challenge plugin); lights3 then stays plaintext and `X-Forwarded-Proto` keeps
   self-signed certificate and does a SigV4 PUT/GET round trip with
   `curl --cacert` (builtin, the default driver); then a `tls_client_auth:
   require` + `tls_identity: subject-cn` instance with two client certificates
-  from a private CA: `s3adm cred bind-cert` binds one to a readonly credential,
+  from a private CA: `lights3-ctl cred bind-cert` binds one to a readonly credential,
   and the script checks unsigned GET admitted / PUT refused by the policy /
   unbound certificate 403 / no certificate fails the handshake / signature and
   certificate of different tenants 403 / root exempt / 403 again after unbind.

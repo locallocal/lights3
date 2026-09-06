@@ -1,4 +1,4 @@
-// roadmap §6.2: GET /-/admin/objects/<bucket>/<key> (s3adm object inspect) — root
+// roadmap §6.2: GET /-/admin/objects/<bucket>/<key> (lights3-ctl object inspect) — root
 // gate, JSON shape, and each engine's layout: localfs (data path, inode extent,
 // metadata source), duostore (pack/chunk extents with crc), tiered (tier view +
 // the local engine's layout), memory (no layout), plus the error mapping

@@ -3,7 +3,7 @@
 > Status: landed (2026-09-05). Code: `Application::reload_config`
 > (`src/app/app.cc`), `storage::BucketRouter::update`,
 > `AsyncSemaphore::set_capacity`, `POST /-/admin/config/reload`
-> (`src/s3/handlers/admin_tenants.cc`), `s3adm reload`. Unit tests in
+> (`src/s3/handlers/admin_tenants.cc`), `lights3-ctl reload`. Unit tests in
 > `tests/unit/test_reload.cc`, e2e in the "roadmap §4.4" section of `run_e2e.sh`.
 
 ## 1. Triggers
@@ -12,7 +12,7 @@
 | --- | --- |
 | `kill -HUP <pid>` | delivered through the self-pipe to the watchdog thread (the signal handler writes one byte), the same mechanism as SIGINT/SIGTERM; a systemd unit can use `ExecReload=/bin/kill -HUP $MAINPID` |
 | `POST /-/admin/config/reload` | root static credential; returns the JSON report below; writes a `config.reload` audit record |
-| `s3adm reload` | CLI wrapper of the above; exit code 0/1 mirrors `ok` |
+| `lights3-ctl reload` | CLI wrapper of the above; exit code 0/1 mirrors `ok` |
 
 Both paths share one lock and run serially; a reload never blocks the request
 path (file IO and the apply steps run on the watchdog thread or inside the admin
@@ -30,7 +30,7 @@ request's coroutine).
    `requires_restart` and WARNed one by one — the operator sees "changed but not
    in effect" immediately instead of never.
 
-Report shape (admin API / `s3adm reload` output):
+Report shape (admin API / `lights3-ctl reload` output):
 
 ```json
 {
@@ -108,9 +108,9 @@ Report shape (admin API / `s3adm reload` output):
   backend deferred, a tiered entry naming a removed backend / a backend that does
   not construct refused as a whole.
 - e2e: `SIGHUP` after changing `log.level` and the log line; `request_timeout`
-  applied through the admin API and `s3adm reload`; non-root 403; an invalid
+  applied through the admin API and `lights3-ctl reload`; non-root 403; an invalid
   file answers 400; a memory backend `hot` added with a `hot-*` rule (PUT lands
-  on it, `backend="hot"` appears on `/-/metrics`, `s3adm object inspect` sees
+  on it, `backend="hot"` appears on `/-/metrics`, `lights3-ctl object inspect` sees
   it), removed while a rate-limited GET streams from it — the reload reports the
   removal at once, `hot-*` routes to the default backend immediately, the close
   log line appears only after the stream ends, the metric label disappears;

@@ -1,7 +1,7 @@
 # 测试体系：矩阵、e2e 覆盖、fuzz、故障注入、压测/长稳、覆盖率（roadmap §6.1）
 
 单元测试与 e2e 的基础形态见 [s3-protocol.md §8](s3-protocol.md)；本篇是 roadmap
-§6.1 补齐的八项：ctest 清单与标签、website / s3adm / 故障注入的 e2e 段、fuzz
+§6.1 补齐的八项：ctest 清单与标签、website / lights3-ctl / 故障注入的 e2e 段、fuzz
 harness、故障注入门面、性能门禁与 soak、mint 挂 ctest、ubsan/coverage 构建、
 一键矩阵脚本。
 
@@ -34,9 +34,9 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   `x-amz-website-redirect-location` 301、匿名 listing / `?uploads` / 写 / 删 /
   非网站桶一律拒绝、静态条目 API 不可改（405）、非 root 不能 Put 配置、删除配置后
   匿名面立即关闭、`lights3_website_events_total` 计数。
-- **s3adm 交叉验证**：curl 用 libcurl 的 SigV4，s3adm 用自实现签名，两套客户端
-  打同一服务端。`cred create/list/get --show-secret/delete`（s3adm 铸的凭证 curl
-  能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 s3adm 写的配置）、
+- **lights3-ctl 交叉验证**：curl 用 libcurl 的 SigV4，lights3-ctl 用自实现签名，两套客户端
+  打同一服务端。`cred create/list/get --show-secret/delete`（lights3-ctl 铸的凭证 curl
+  能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 lights3-ctl 写的配置）、
   `bench put/get` 零错误、`fsck` 对 bench 对象零 mismatch；原有 `usage/quota/
   tenant/reload` 保留。
 - **故障注入**（localfs / xlocalfs / tiered 变体）：以
@@ -108,27 +108,27 @@ LIGHTS3_FAULTS="localfs.write:1:EIO,duostore.pack.fdatasync:0:ENOSPC" lights3 --
 
 ## 5. 性能门禁与 soak
 
-- `scripts/bench_matrix.sh <lights3> <s3adm> [--drivers a,b] [--tls on|off|both]
+- `scripts/bench_matrix.sh <lights3> <lights3-ctl> [--drivers a,b] [--tls on|off|both]
   [--duration N] [--concurrency N] [--size SZ] [--modes put,get] [--json FILE]
   [--label TEXT]`：性能基线矩阵（roadmap §4.3）——每个（驱动 × TLS）格起一个
-  localfs 网关跑 `s3adm bench put/get`，输出 Markdown 表 + 每格一行 JSON；
+  localfs 网关跑 `lights3-ctl bench put/get`，输出 Markdown 表 + 每格一行 JSON；
   驱动清单默认取 `lights3 --version` 的 `drivers:` 行。结果入库
   [performance-baseline.md](performance-baseline.md)。
 
-- `scripts/bench_gate.sh <lights3> <s3adm> [--duration N] [--min-put-ops N]
-  [--min-get-ops N] [--max-p99-ms N]`：memory 后端网关 + `s3adm bench put/get`，
+- `scripts/bench_gate.sh <lights3> <lights3-ctl> [--duration N] [--min-put-ops N]
+  [--min-get-ops N] [--max-p99-ms N]`：memory 后端网关 + `lights3-ctl bench put/get`，
   解析 `--output=json` 的汇总对象断言吞吐下限（默认 300 ops/s）与 p99 上限（默认 500 ms）；环境变量
   `LIGHTS3_BENCH_*` 同名覆盖。ctest `bench_gate` 用 3 秒。
-- `scripts/soak.sh <lights3> <s3adm> [--seconds N] [--backend localfs|duostore|memory]
+- `scripts/soak.sh <lights3> <lights3-ctl> [--seconds N] [--backend localfs|duostore|memory]
   [--max-rss-growth PCT] [--max-fd-growth N]`：轮转 put/get/stat/list/删池 五种
   轮次，每轮采样 RSS、fd 数、`lights3_duostore_gcq_depth`、`lights3_multipart_active`；
   结束断言 RSS 相对暖机后增长 < 25%、fd ≤ 暖机 + 16、multipart 无残留、duostore
   GC 队列归零、日志无 ERROR。ctest `soak_smoke` 30 秒；数小时 soak：
-  `scripts/soak.sh build/lights3 build/s3adm --seconds 7200 --backend duostore`。
+  `scripts/soak.sh build/lights3 build/lights3-ctl --seconds 7200 --backend duostore`。
 
-门禁上线即抓到一个真实问题：s3adm 客户端未开 TCP_NODELAY，小 PUT 因 Nagle +
+门禁上线即抓到一个真实问题：lights3-ctl 客户端未开 TCP_NODELAY，小 PUT 因 Nagle +
 延迟 ACK 每次卡约 40 ms（三个驱动一致、256K 以上正常），已修
-（`s3adm_common.cc`），16K PUT 从 98 ops/s 到约 2 万 ops/s。
+（`lights3_ctl_common.cc`），16K PUT 从 98 ops/s 到约 2 万 ops/s。
 
 ## 6. mint
 

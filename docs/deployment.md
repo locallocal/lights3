@@ -18,7 +18,7 @@ roadmap §6.3 的落地说明。覆盖五件事：二进制里的**版本与构�
 三处可见：
 
 ```text
-$ lights3 --version                 # s3adm --version 同样格式
+$ lights3 --version                 # lights3-ctl --version 同样格式
 lights3 0.1.0 (git d6f38292dab0, RelWithDebInfo, 2026-09-05)
 drivers:  builtin beast httplib
 features: memory localfs xlocalfs tiered cloudproxy duostore duostore-redis-meta duostore-sqlite-meta
@@ -43,7 +43,7 @@ DESTDIR=/tmp/stage cmake --install build --prefix /usr   # 打包用 staging
 
 | 路径 | 内容 |
 | --- | --- |
-| `<bindir>/lights3`、`<bindir>/s3adm` | 二进制 |
+| `<bindir>/lights3`、`<bindir>/lights3-ctl` | 二进制 |
 | `<sbindir>/lights3ctl` | `scripts/systemctl.sh`（start/stop/restart/status/logs …） |
 | `<prefix>/lib/systemd/system/lights3.service` | 由 `scripts/lights3.service.in` 在**安装时**按 prefix 填好 `ExecStart` / `EnvironmentFile`，含 `ExecReload=kill -HUP`（热重载，[config-reload.md](config-reload.md)） |
 | `<confdir>/lights3.yaml` | `config/lights3.yaml` 样例；**目标已存在则保留不覆盖** |
@@ -129,7 +129,7 @@ git submodule update --init --recursive third_party/ccmd     # 或直接 ./build
 docker build -t lights3 --build-arg LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) .
 docker run -d -p 9000:9000 -e LIGHTS3_SECRET_1=my-secret -v lights3-data:/var/lib/lights3 lights3
 docker run --rm lights3 --version
-docker run --rm lights3 s3adm --help
+docker run --rm lights3 lights3-ctl --help
 ```
 
 | build-arg | 默认 | 说明 |
@@ -146,7 +146,7 @@ docker run --rm lights3 s3adm --help
 2，而不是起一个拒绝所有请求的实例）；`LIGHTS3_ACCESS_KEY` / `LIGHTS3_REGION` /
 `LIGHTS3_LOG_LEVEL` / `LIGHTS3_LOG_FORMAT` 可选。entrypoint 规则：无参数或
 以 `-` / `duostore` / `tier` / `fsck` / `help` 开头 → `lights3 --config=… "$@"`，
-其他（`s3adm …`、`sh`）原样 exec。
+其他（`lights3-ctl …`、`sh`）原样 exec。
 
 seastar 驱动不进镜像（`.dockerignore` 排除其子模块）。**本仓库的开发机 docker
 daemon 不可达，镜像构建与 compose 拉起未在本机验证**；`docker compose config`
@@ -216,7 +216,7 @@ sudo ./scripts/uninstall.sh --purge  # 连配置、密钥、数据、日志、�
   `/etc/lights3`。用户/目录/密钥/启停全部交给 `lights3-setup.sh`（§3.3）。
 - **rollback.sh**：先用 `lights3.prev` 跑 `--check-config`（旧二进制不认识新
   配置键时会被拒，此时先手动回退配置），再三步 rename 交换 `lights3` /
-  `s3adm` 与其 `.prev`，服务在运行则 restart。配置与数据不动。
+  `lights3-ctl` 与其 `.prev`，服务在运行则 restart。配置与数据不动。
 - **uninstall.sh**：`remove` → 删文件 → `daemon-reload`；`--purge` 追加 helper 的
   `purge`。包安装的实例用包管理器卸载（§3.1）。
 

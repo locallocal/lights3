@@ -6,7 +6,7 @@
 // URI SAN); a bound certificate stands in for a SigV4 signature on unsigned
 // requests and must agree with the signing credential's tenant on signed ones
 // (S3Service::verify_identity). Managed by root through /-/admin/tls-identities
-// and `s3adm cred bind-cert`.
+// and `lights3-ctl cred bind-cert`.
 #pragma once
 
 #include <chrono>

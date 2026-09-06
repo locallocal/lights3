@@ -27,7 +27,7 @@ the inside. The design emphasizes three points:
 | Document | Contents |
 | --- | --- |
 | [architecture.md](architecture.md) | Overall architecture, layering, request lifecycle, code layout |
-| [config-reload.md](config-reload.md) | Configuration hot reload: SIGHUP / admin API / `s3adm reload`, whole-file validation, the hot-reloadable subset and the "requires restart" report (roadmap §4.4) |
+| [config-reload.md](config-reload.md) | Configuration hot reload: SIGHUP / admin API / `lights3-ctl reload`, whole-file validation, the hot-reloadable subset and the "requires restart" report (roadmap §4.4) |
 | [tls.md](tls.md) | TLS: HTTPS on all four drivers, certificate hot reload, mTLS / ciphers / minimum version / SNI multi-certificate, reverse-proxy termination examples (roadmap §4.1) |
 | [http-adapter.md](http-adapter.md) | Pluggable HTTP layer: neutral request/response model, streaming bodies, adapter notes |
 | [concurrency.md](concurrency.md) | Concurrency model: Task coroutines, Executor abstraction, thread pool, unifying sync/async HTTP libraries |
@@ -36,13 +36,13 @@ the inside. The design emphasizes three points:
 | [s3-protocol.md](s3-protocol.md) | S3 protocol: API scope, SigV4 (incl. presigned & clock skew), Multipart Upload, error mapping, mint compatibility gate |
 | [credential-management.md](credential-management.md) | Credential management: AK/SK generate/query/revoke API, three credential sources (static root / file / dynamic), `.sys` persistence; phase 2: at-rest SK encryption, hot-reloaded credentials file, multi-instance sync, per-credential policy |
 | [multi-tenancy.md](multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenant entities and bucket ownership, tiered admin plane, audit log (the whole roadmap §3.9 chain) |
-| [testing.md](testing.md) | Testing: the ctest matrix and labels, website/s3adm/fault-injection e2e, fuzz harnesses, the fault-injection facade, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script (roadmap §6.1) |
+| [testing.md](testing.md) | Testing: the ctest matrix and labels, website/lights3-ctl/fault-injection e2e, fuzz harnesses, the fault-injection facade, the performance gate and soak, mint, ubsan/coverage, the one-shot matrix script (roadmap §6.1) |
 | [deployment.md](deployment.md) | Build and distribution: `--version` / embedded git commit, the `cmake --install` tree, CPack deb/rpm, Dockerfile + compose (with the redis/tikv/rados e2e profile), rollback and uninstall for `install.sh` upgrades (roadmap §6.3) |
 | [performance-baseline.md](performance-baseline.md) | Performance baseline: the `scripts/bench_matrix.sh` matrix of 4 drivers × TLS × put/get, before/after the §4.3 data-plane work, how to reproduce (roadmap §4.3) |
 | [todo.md](todo.md) | Open items and plans: pending verification, findings from the performance baseline, long-term items, the not-planned list; entries are deleted when done (the closed ledgers backlog.md / backlog-sequence.md are archived, Chinese only, under `docs/archive/`) |
 | [monitoring.md](monitoring.md) | Monitoring consumers: the Prometheus scrape config and alert/recording rules under `deploy/`, the Grafana dashboard and its generator, the asset-reconciliation test (roadmap §5.5, zero C++) |
 | [object-read-write-flow.md](object-read-write-flow.md) | Object read/write flow: the three-layer code path, BodyReader chains, atomic staging commit, fd-snapshot reads |
-| [cli.md](cli.md) | Command-line tools: `lights3` startup, `duostore dump/load/gc/scan`, `tier scan/gc/reconcile`, the offline `fsck` scrub, `s3adm` cred/website/bench/fsck/quota/tenant/usage commands, ccmd option semantics and exit codes |
+| [cli.md](cli.md) | Command-line tools: `lights3` startup, `duostore dump/load/gc/scan`, `tier scan/gc/reconcile`, the offline `fsck` scrub, `lights3-ctl` cred/website/bench/fsck/quota/tenant/usage commands, ccmd option semantics and exit codes |
 
 *The project introduction (build/run/current scope) lives in the repository
 root [README.md](../../README.md) (English) and

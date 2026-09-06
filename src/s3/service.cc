@@ -725,11 +725,11 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             api_name = "AdminTlsIdentities";
             resp = co_await admin_tls_identities(req, access_key, ctx);
         } else if (internal && req.path.rfind("/-/admin/fsck/", 0) == 0) {
-            // Offline scrub on a live gateway (backlog-sequence ③, `s3adm fsck --offline`)
+            // Offline scrub on a live gateway (backlog-sequence ③, `lights3-ctl fsck --offline`)
             api_name = "AdminFsck";
             resp = co_await admin_fsck(req, access_key, ctx);
         } else if (internal && req.path.rfind("/-/admin/objects/", 0) == 0) {
-            // Object layout introspection (roadmap §6.2, `s3adm object inspect`)
+            // Object layout introspection (roadmap §6.2, `lights3-ctl object inspect`)
             api_name = "AdminObjectInspect";
             resp = co_await admin_object_inspect(req, access_key, ctx);
         } else if (!addr.vhost && req.path == "/" && req.method == "POST") {

@@ -2,7 +2,7 @@
 
 The basic shape of unit tests and e2e is in [s3-protocol.md §8](s3-protocol.md);
 this document covers the eight items roadmap §6.1 filled in: the ctest inventory
-and labels, the website / s3adm / fault-injection e2e sections, the fuzz
+and labels, the website / lights3-ctl / fault-injection e2e sections, the fuzz
 harnesses, the fault-injection facade, the performance gate and soak, mint in
 ctest, ubsan/coverage builds, and the one-shot matrix script.
 
@@ -40,10 +40,10 @@ brings all three up and runs them in one go ([deployment.md §4.3](deployment.md
   static entries immutable through the API (405), non-root cannot Put the
   configuration, the anonymous plane closes as soon as the configuration is
   deleted, `lights3_website_events_total` counts.
-- **s3adm cross-validation**: curl signs with libcurl's SigV4, s3adm with its
+- **lights3-ctl cross-validation**: curl signs with libcurl's SigV4, lights3-ctl with its
   own implementation, both against one server. `cred create/list/get
-  --show-secret/delete` (curl signs with the credential s3adm minted, 403 after
-  revocation), `website set/get/delete` (curl reads back what s3adm wrote),
+  --show-secret/delete` (curl signs with the credential lights3-ctl minted, 403 after
+  revocation), `website set/get/delete` (curl reads back what lights3-ctl wrote),
   `bench put/get` error-free, `fsck` with zero mismatches over the bench objects;
   the existing `usage/quota/tenant/reload` cases stay.
 - **Fault injection** (localfs / xlocalfs / tiered variants): a second instance
@@ -128,31 +128,31 @@ only as client-c's nested submodule and is not a repository-wide dependency.
 
 ## 5. Performance gate and soak
 
-- `scripts/bench_matrix.sh <lights3> <s3adm> [--drivers a,b] [--tls on|off|both]
+- `scripts/bench_matrix.sh <lights3> <lights3-ctl> [--drivers a,b] [--tls on|off|both]
   [--duration N] [--concurrency N] [--size SZ] [--modes put,get] [--json FILE]
   [--label TEXT]`: the performance baseline matrix (roadmap §4.3) -- one
-  localfs gateway per (driver × TLS) cell running `s3adm bench put/get`, output
+  localfs gateway per (driver × TLS) cell running `lights3-ctl bench put/get`, output
   as a Markdown table plus one JSON line per cell; the driver list defaults to
   the `drivers:` line of `lights3 --version`. Results are kept in
   [performance-baseline.md](performance-baseline.md).
 
-- `scripts/bench_gate.sh <lights3> <s3adm> [--duration N] [--min-put-ops N]
-  [--min-get-ops N] [--max-p99-ms N]`: a memory-backend gateway + `s3adm bench
+- `scripts/bench_gate.sh <lights3> <lights3-ctl> [--duration N] [--min-put-ops N]
+  [--min-get-ops N] [--max-p99-ms N]`: a memory-backend gateway + `lights3-ctl bench
   put/get --output=json`; the JSON summary is parsed and a throughput floor (default 300
   ops/s) and a p99 ceiling (default 500 ms) asserted; `LIGHTS3_BENCH_*`
   variables override. ctest `bench_gate` uses 3 seconds.
-- `scripts/soak.sh <lights3> <s3adm> [--seconds N] [--backend
+- `scripts/soak.sh <lights3> <lights3-ctl> [--seconds N] [--backend
   localfs|duostore|memory] [--max-rss-growth PCT] [--max-fd-growth N]`: rotates
   put/get/stat/list/delete-pool rounds, sampling RSS, fd count,
   `lights3_duostore_gcq_depth` and `lights3_multipart_active` per round; at the
   end asserts RSS growth since warm-up < 25%, fds ≤ warm-up + 16, no multipart
   leftovers, duostore GC queue back at 0, no ERROR lines. ctest `soak_smoke`
-  runs 30 seconds; for hours: `scripts/soak.sh build/lights3 build/s3adm
+  runs 30 seconds; for hours: `scripts/soak.sh build/lights3 build/lights3-ctl
   --seconds 7200 --backend duostore`.
 
-The gate caught a real issue the day it went in: the s3adm client had no
+The gate caught a real issue the day it went in: the lights3-ctl client had no
 TCP_NODELAY, so every small PUT stalled ~40 ms on Nagle + delayed ACK (identical
-across all three drivers, fine from 256K up) — fixed in `s3adm_common.cc`, 16K
+across all three drivers, fine from 256K up) — fixed in `lights3_ctl_common.cc`, 16K
 PUTs went from 98 ops/s to ~20k ops/s.
 
 ## 6. mint

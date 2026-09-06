@@ -47,7 +47,7 @@ helper="$SHARE_DIR/lights3-setup.sh"
 
 LIGHTS3_CONFIG_DIR="$CONFIG_DIR" LIGHTS3_STATE_DIR="$STATE_DIR" sh "$helper" remove
 
-rm -f "$BIN_DIR/lights3" "$BIN_DIR/lights3.prev" "$BIN_DIR/s3adm" "$BIN_DIR/s3adm.prev" \
+rm -f "$BIN_DIR/lights3" "$BIN_DIR/lights3.prev" "$BIN_DIR/lights3-ctl" "$BIN_DIR/lights3-ctl.prev" \
       "$SBIN_DIR/lights3ctl" "$SBIN_DIR/lights3ctl.prev" "$UNIT_FILE"
 if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
     systemctl daemon-reload

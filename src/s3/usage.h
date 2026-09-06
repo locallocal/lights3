@@ -9,7 +9,7 @@
 //     usage.flush_interval and at shutdown, so a restart resumes where it left off;
 //   - reconciled: a full listing (objects + in-flight multipart parts) replaces the
 //     counters every usage.reconcile_interval, at startup for buckets without a
-//     record, and on demand (admin API / s3adm usage --rescan). The listing walks
+//     record, and on demand (admin API / lights3-ctl usage --rescan). The listing walks
 //     the normal IStorageBackend API, so every backend is covered uniformly.
 // Accuracy contract: exact right after a scan; between scans the counters drift by
 // at most the effect of concurrent same-key writes and, in multi-gateway setups,

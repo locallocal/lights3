@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Soak / long-stability run (roadmap §6.1, docs/testing.md §5): loops s3adm bench
+# Soak / long-stability run (roadmap §6.1, docs/testing.md §5): loops lights3-ctl bench
 # rounds (put / get / stat / list / multipart-heavy put) against a gateway while
 # sampling the process's RSS, open fds and a few convergence gauges from
 # /-/metrics. At the end it asserts:
@@ -10,11 +10,11 @@
 # Default backend is localfs (disk-backed, exercises staging/rename/fsync);
 # --backend duostore runs the pack/GC engine so GC convergence is covered too.
 #
-# Usage: soak.sh <lights3> <s3adm> [--seconds N] [--backend localfs|duostore|memory]
+# Usage: soak.sh <lights3> <lights3-ctl> [--seconds N] [--backend localfs|duostore|memory]
 #                [--concurrency N] [--max-rss-growth PCT] [--max-fd-growth N] [--keep-log]
 set -u
-BIN="${1:?usage: soak.sh <lights3> <s3adm> [options]}"
-S3ADM="${2:?usage: soak.sh <lights3> <s3adm> [options]}"
+BIN="${1:?usage: soak.sh <lights3> <lights3-ctl> [options]}"
+LIGHTS3_CTL="${2:?usage: soak.sh <lights3> <lights3-ctl> [options]}"
 shift 2
 SECONDS_TOTAL="${LIGHTS3_SOAK_SECONDS:-600}"
 BACKEND="${LIGHTS3_SOAK_BACKEND:-localfs}"
@@ -96,7 +96,7 @@ fd_count() { ls "/proc/$SRV_PID/fd" 2>/dev/null | wc -l; }
 metric() { curl -s "$BASE/-/metrics" | awk -v n="$1" '$1 == n {print $2; exit}'; }
 bench() {  # bench <mode> <seconds> [extra...]
     local mode=$1 secs=$2; shift 2
-    LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$S3ADM" bench "$mode" --bucket=soak \
+    LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" bench "$mode" --bucket=soak \
         --concurrency="$CONC" --duration-sec="$secs" --objects=128 "$@" \
         --endpoint="$BASE" --region="$REGION" 2>&1 | sed -n 's/^ops \(.*\)/  '"$mode"': ops \1/p'
 }

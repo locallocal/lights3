@@ -1,4 +1,4 @@
-// L2: POST/GET /-/admin/fsck/<backend> (backlog-sequence ③, `s3adm fsck --offline`):
+// L2: POST/GET /-/admin/fsck/<backend> (backlog-sequence ③, `lights3-ctl fsck --offline`):
 // the offline integrity scrub (roadmap §3.1) triggered on a live gateway and
 // polled for its outcome. Root only; the application supplies the job manager
 // through hooks (the service never sees backend types). POST starts one round

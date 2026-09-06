@@ -1,6 +1,6 @@
 #!/bin/sh
 # Container entrypoint: no arguments or a leading flag / admin subcommand runs the
-# server with the image config; anything else (s3adm, sh) is exec'd as given.
+# server with the image config; anything else (lights3-ctl, sh) is exec'd as given.
 set -eu
 CONFIG="${LIGHTS3_CONFIG:-/etc/lights3/lights3.yaml}"
 

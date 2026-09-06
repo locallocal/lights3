@@ -13,7 +13,7 @@ box and replace the tables.
 | --- | --- |
 | Machine | Intel i9-14900KF (32 threads), 30 GiB, Linux 7.0.0-31, g++ 15.2 |
 | Data directory | `/tmp` (tmpfs) -- the localfs objects live on a memory filesystem, so this measures the HTTP layer plus the copy path, **no disk IO** |
-| Client | `s3adm bench` (httplib synchronous client, one keep-alive connection per worker), loopback on the same machine |
+| Client | `lights3-ctl bench` (httplib synchronous client, one keep-alive connection per worker), loopback on the same machine |
 | Gateway | localfs backend; `http.io_threads: 8` (beast/httplib/seastar), `runtime.io_threads: 16`; TLS with an openssl self-signed P-256 certificate, client `--insecure` |
 | Large objects | 4 MiB × 8 workers × 8 s × 32 keys |
 | Small objects | 16 KiB × 16 workers × 8 s × 256 keys |
@@ -21,7 +21,7 @@ box and replace the tables.
 | "after" | branch `feat/dataplane-perf`, same options; seastar the same `build-seastar` rebuilt incrementally |
 | Script | `scripts/bench_matrix.sh` ([testing.md §5](testing.md)), a fresh gateway per cell, run sequentially on an idle machine |
 
-Latency columns are histogram percentiles from `s3adm bench` (discrete bucket
+Latency columns are histogram percentiles from `lights3-ctl bench` (discrete bucket
 edges: "round" p50 values such as 6.15 or 12.29 are bucket widths). A single
 8 s run jitters by about ±5%: **differences within ±5% are noise**.
 
@@ -103,15 +103,15 @@ edges: "round" p50 values such as 6.15 or 12.29 are bucket widths). A single
 
 ```bash
 ./build.sh -B build-rel -DCMAKE_BUILD_TYPE=Release -DLIGHTS3_DUOSTORE=OFF -DLIGHTS3_CLOUDPROXY=OFF -DLIGHTS3_BUILD_TESTS=OFF
-scripts/bench_matrix.sh build-rel/lights3 build-rel/s3adm --duration 8 --size 4M --json 4m.jsonl --label "$(git rev-parse --short HEAD)"
-scripts/bench_matrix.sh build-rel/lights3 build-rel/s3adm --duration 8 --size 16K --concurrency 16 --objects 256 --json 16k.jsonl
-scripts/bench_matrix.sh build-seastar/lights3 build-rel/s3adm --drivers seastar --duration 8 --size 4M   # the seastar variant on its own
+scripts/bench_matrix.sh build-rel/lights3 build-rel/lights3-ctl --duration 8 --size 4M --json 4m.jsonl --label "$(git rev-parse --short HEAD)"
+scripts/bench_matrix.sh build-rel/lights3 build-rel/lights3-ctl --duration 8 --size 16K --concurrency 16 --objects 256 --json 16k.jsonl
+scripts/bench_matrix.sh build-seastar/lights3 build-rel/lights3-ctl --drivers seastar --duration 8 --size 4M   # the seastar variant on its own
 ```
 
 The script prints one progress line per cell to stderr and the Markdown table
 to stdout; `--json` writes one line per cell, `{label, version, driver, tls,
 mode, size, concurrency, duration_s, result}`, where `result` is the
-`s3adm bench --output=json` object. Make sure the machine is idle and no stray
+`lights3-ctl bench --output=json` object. Make sure the machine is idle and no stray
 `lights3` process is around (`pgrep -x lights3`) before running.
 
 ## 4. History

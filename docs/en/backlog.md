@@ -17,7 +17,7 @@ Implementation order, scope and acceptance per item: [backlog-sequence.md](backl
 
 | Item | Source | State and entry point | Value | Difficulty |
 | --- | --- | --- | --- | --- |
-| Structured error codes upstream in client-c | roadmap §3.7 (tikv T5) | The sidecar classifies conflicts from kvrpcpb structures first and string-matches only as defense in depth; an upstream PR is optional | low | medium |
+| Structured error codes upstream in client-c | roadmap §3.7 (tikv T5) | Done on our side (2026-09-06): patch in `third_party/patches/client-c` (README has the PR text and the post-merge steps); the sidecar picks by-code / by-message at compile time from the linked library. Remaining: open the upstream PR → after the merge bump the submodule pointer, delete the message branch and the patch | low | medium |
 | `HeaderMap` linear scan / `BlockQueue` double copy | roadmap §4.3 ⑧ | Small in absolute terms; touch only with profile evidence | low | low |
 
 ## 2. Pending verification (implemented, not verifiable on the development box)

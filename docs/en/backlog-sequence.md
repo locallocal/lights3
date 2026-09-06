@@ -218,5 +218,5 @@ start ⑦ of phase D only after B has landed.
 | ⑥ | mTLS identity mapping | done | 2026-09-06 / `feat/tls-identity` |
 | ⑦ | hot add / remove of backend instances | done | 2026-09-06 / `feat/backend-hot-reload` |
 | ⑧ | duostore meta incremental backup / PITR | done | 2026-09-06 / `feat/duostore-meta-pitr` |
-| ⑨ | client-c upstream contribution | not started | |
+| ⑨ | client-c upstream contribution | done on our side, awaiting the upstream merge | 2026-09-06 / `feat/client-c-write-conflict-code`; patch in `third_party/patches/client-c`, bump the pointer and delete the message branch after the merge |
 | ⑩ | HeaderMap / BlockQueue | waiting for profile evidence | |

@@ -168,5 +168,5 @@ D 阶段建议等 B 落地后再动 ⑦。
 | ⑥ | mTLS 身份映射 | 已完成 | 2026-09-06 / `feat/tls-identity` |
 | ⑦ | 后端实例增删热重载 | 已完成 | 2026-09-06 / `feat/backend-hot-reload` |
 | ⑧ | duostore meta 增量备份 / PITR | 已完成 | 2026-09-06 / `feat/duostore-meta-pitr` |
-| ⑨ | client-c 上游贡献 | 未开始 | |
+| ⑨ | client-c 上游贡献 | 本仓侧完成，待上游合入 | 2026-09-06 / `feat/client-c-write-conflict-code`；补丁在 `third_party/patches/client-c`，合入后升指针、删消息串分支 |
 | ⑩ | HeaderMap / BlockQueue | 等 profile 证据 | |

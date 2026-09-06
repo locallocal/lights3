@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: EarthWind <earth_github@163.com>
+Date: Sun, 6 Sep 2026 15:22:17 +0800
+Subject: [PATCH] LockResolver: throw a structured WriteConflict error code
+
+resolveLocksForWrite aborts the caller when a key is held by a live
+optimistic transaction newer than the caller's start_ts, but the
+exception it threw carried ErrorCodes::UnknownError (the TODO next to
+it) -- a caller who wants to retry with a fresh start_ts in that case,
+and only in that case, had to match the "write conflict" message
+string. Add ErrorCodes::WriteConflict (appended, existing values are
+unchanged), throw it from that site with the lock and the two
+timestamps in the message, and give the two bare Exception throws in
+RegionClient (TiFlash label_filter misuse) the LogicalError code so
+every exception the client raises carries a code.
+
+Signed-off-by: EarthWind <earth_github@163.com>
+---
+ include/pingcap/Exception.h       | 5 ++++-
+ include/pingcap/kv/RegionClient.h | 4 ++--
+ src/kv/LockResolver.cc            | 6 ++++--
+ 3 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/include/pingcap/Exception.h b/include/pingcap/Exception.h
+index 0fa278e..77b4032 100644
+--- a/include/pingcap/Exception.h
++++ b/include/pingcap/Exception.h
+@@ -29,7 +29,10 @@ enum ErrorCodes : int
+     KeyspaceNotEnabled = 18,
+     InternalError = 19,
+     GRPCNotImplemented = 20,
+-    UnknownError = 21
++    UnknownError = 21,
++    // resolveLocksForWrite: the key is locked by a live optimistic transaction newer than
++    // the caller; the caller's prewrite has not happened, so it may retry with a new start_ts
++    WriteConflict = 22
+ };
+ 
+ class Exception : public Poco::Exception
+diff --git a/include/pingcap/kv/RegionClient.h b/include/pingcap/kv/RegionClient.h
+index 4ba701d..ddd3733 100644
+--- a/include/pingcap/kv/RegionClient.h
++++ b/include/pingcap/kv/RegionClient.h
+@@ -51,7 +51,7 @@ struct RegionClient
+     {
+         if (store_type == kv::StoreType::TiFlash && tiflash_label_filter == kv::labelFilterInvalid)
+         {
+-            throw Exception("should setup proper label_filter for tiflash");
++            throw Exception("should setup proper label_filter for tiflash", ErrorCodes::LogicalError);
+         }
+         for (;;)
+         {
+@@ -151,7 +151,7 @@ struct RegionClient
+     {
+         if (store_type == kv::StoreType::TiFlash && tiflash_label_filter == kv::labelFilterInvalid)
+         {
+-            throw Exception("should setup proper label_filter for tiflash");
++            throw Exception("should setup proper label_filter for tiflash", ErrorCodes::LogicalError);
+         }
+         for (;;)
+         {
+diff --git a/src/kv/LockResolver.cc b/src/kv/LockResolver.cc
+index 90ef4f4..c4bee39 100644
+--- a/src/kv/LockResolver.cc
++++ b/src/kv/LockResolver.cc
+@@ -138,8 +138,10 @@ int64_t LockResolver::resolveLocks(
+                     {
+                         log->warning("write conflict detected");
+                         pushed.clear();
+-                        // TODO: throw write conflict exception
+-                        throw Exception("write conflict", ErrorCodes::UnknownError);
++                        throw Exception(
++                            "write conflict: " + lock->toDebugString() + " held by newer optimistic txn " + std::to_string(lock->txn_id)
++                                + ", caller start_ts " + std::to_string(caller_start_ts),
++                            ErrorCodes::WriteConflict);
+                     }
+                 }
+                 else
+-- 
+2.53.0
+

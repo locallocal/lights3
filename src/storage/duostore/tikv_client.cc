@@ -19,8 +19,10 @@
 //   6. multiple mutations on the same key merge at construction (last one wins, matching
 //      WriteBatch's in-order overwrite semantics);
 //   7. "live lock held by a newer optimistic txn" is classified as a conflict early at the
-//      prewrite error site, without relying on upstream resolveLocksForWrite's bare
-//      Exception("write conflict") message string (string matching kept as defense in depth);
+//      prewrite error site; the fallback classification of upstream resolveLocksForWrite's
+//      exception goes by ErrorCodes::WriteConflict once the submodule carries it
+//      (third_party/patches/client-c, backlog-sequence ⑨) and by the "write conflict"
+//      message string at @78a557e (is_upstream_write_conflict picks at compile time);
 //   8. adds two read primitives, batch_get (KvBatchGet) and last_key (key-only reverse scan),
 //      which upstream Snapshot/Scanner do not cover.
 #include "storage/duostore/tikv_client.h"
@@ -46,11 +48,47 @@
 #include <cmath>
 #include <mutex>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
 
 #include "core/log.h"
 
 namespace lights3::storage::duostore {
+
+namespace {
+
+// ErrorCodes::WriteConflict exists only with the proposed upstream change applied
+// (third_party/patches/client-c); detected on the enum type so the same source builds
+// against @78a557e and against a bumped pointer, choosing the classification per build
+template <class E, class = void>
+struct has_write_conflict_code : std::false_type {};
+template <class E>
+struct has_write_conflict_code<E, std::void_t<decltype(E::WriteConflict)>> : std::true_type {};
+
+// The lookup must stay dependent (E::WriteConflict inside a template): if constexpr
+// discards the untaken branch only there, a non-dependent name is a hard error on @78a557e
+template <class E>
+constexpr int write_conflict_code_of_impl() {
+    if constexpr (has_write_conflict_code<E>::value)
+        return static_cast<int>(E::WriteConflict);
+    else
+        return -1;
+}
+constexpr int write_conflict_code_of() { return write_conflict_code_of_impl<pingcap::ErrorCodes>(); }
+
+}  // namespace
+
+int client_c_write_conflict_code() { return write_conflict_code_of(); }
+
+bool is_upstream_write_conflict(int code, std::string_view text) {
+    if constexpr (write_conflict_code_of() >= 0) {
+        (void)text;
+        return code == write_conflict_code_of();
+    } else {
+        // @78a557e: UnknownError code, the message is the only signal (stable there)
+        return text.find("write conflict") != std::string_view::npos;
+    }
+}
 
 namespace {
 
@@ -304,11 +342,11 @@ private:
             try {
                 before_expired = cluster_->lock_resolver->resolveLocksForWrite(bo, start_ts_, locks);
             } catch (Exception& e) {
-                // Upstream throws a bare Exception("write conflict") for "live lock held by a
-                // newer txn" (LockResolver.cc carries its own TODO; no structured error code;
-                // the message is stable at @78a557e) — the prewrite phase is definitively
-                // uncommitted, so classify as conflict and retry
-                if (e.displayText().find("write conflict") != std::string::npos)
+                // Upstream aborts the writer on "live lock held by a newer txn": with the
+                // WriteConflict error code where the linked client-c has it, by message at
+                // @78a557e (see is_upstream_write_conflict) — the prewrite phase is
+                // definitively uncommitted, so classify as conflict and retry
+                if (is_upstream_write_conflict(e.code(), e.displayText()))
                     throw TikvConflict{e.displayText()};
                 throw;
             }

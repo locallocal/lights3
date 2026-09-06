@@ -1,6 +1,12 @@
-# 待办与后续规划（Backlog）
+# 待办与后续规划（Backlog，已归档）
 
-接替 [archive/roadmap.md](archive/roadmap.md)（2026-08-25 走读的规划底账，
+> **归档说明（2026-09-06）**：§1 十个分期保留项已按 [backlog-sequence.md](backlog-sequence.md)
+> 全部完成（⑨ 本仓侧完成，待上游合入），文件从 `docs/` 移至此处，内容不再更新。
+> 源码/文档注释里的 `backlog §N` 指本文件的 §N，章节编号保持不变。§2–§5 中
+> 尚未做的事（待验证、基线新问题、长期项、不做清单）已整体搬到 [../todo.md](../todo.md)，
+> 以后只在那里维护。
+
+接替 [roadmap.md](roadmap.md)（2026-08-25 走读的规划底账，
 2026-09-05 全部条目收口后归档；源码注释里的 `roadmap §N` 指该归档文件的
 章节）。本文**只列尚未做的事**：分期保留的设计、代码已落地但本机无法验证的
 项、基线跑出的新问题、长期项与明确不做清单。做完一项就从本文删除，实现细节
@@ -9,7 +15,7 @@
 
 ## 1. 分期保留（设计入口已定，随需求触发）
 
-实施先后顺序、各项范围与验收见 [backlog-sequence.md](backlog-sequence.md)。
+实施先后顺序、各项范围与验收见 [backlog-sequence.md](backlog-sequence.md)（同在本目录）。
 
 | 条目 | 出处 | 现状与入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
@@ -19,12 +25,12 @@
 
 | 条目 | 出处 | 需要 |
 | --- | --- | --- |
-| Docker 镜像构建与 compose 四个 profile（默认 / redis / tikv / rados / e2e） | roadmap §6.3，[deployment.md §4](deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
-| CPack RPM | roadmap §6.3，[deployment.md §3.2](deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
+| Docker 镜像构建与 compose 四个 profile（默认 / redis / tikv / rados / e2e） | roadmap §6.3，[deployment.md §4](../deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
+| CPack RPM | roadmap §6.3，[deployment.md §3.2](../deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
 | `unit_tests` 偶发 `terminate called without an active exception` | 2026-09-05 本机 5 次全量运行中 2 次，均发生在 `timer_stats_track_fired_and_pending` 通过之后、`timer_slow_callback_counted` 的 1.1s 慢回调期间（日志先打 "callback took 1.100s"），gdb 下未复现；与业务改动无关 | 有空档时排查：怀疑 TimerQueue 或测试夹具里某个 joinable `std::thread` 在负载下的析构次序；先用 `catch throw`/`ulimit -c` 抓栈 |
-| mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
+| mint 兼容基线 | roadmap §6.1，[testing.md §6](../testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 
-## 3. 性能基线跑出的新问题（[performance-baseline.md](performance-baseline.md)）
+## 3. 性能基线跑出的新问题（[performance-baseline.md](../performance-baseline.md)）
 
 | 条目 | 现象 | 入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
@@ -37,9 +43,9 @@
 | --- | --- |
 | Versioning | 架构级（六后端 key 布局 / List 语义 / delete marker / GC 全动）；若做，**从 duostore 侧切入成本最低**（meta 是 KV，加 version 维度即可），localfs 的 key→路径映射容纳不下多版本 |
 | SSE-C / SSE-S3 | 服务端加密；需先定密钥来源与 ETag/校验和语义 |
-| OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](s3-protocol.md)）；otel-cpp 导出 span 是长期项 |
-| HTTP/2 | S3 SDK 主流仍 HTTP/1.1，CDN / L7 前置场景才需要；前置代理终结 h2 见 [tls.md §6](tls.md) |
-| 客户端断连独立取消源 | 刻意取舍：长 handler 靠 `request_timeout` 兜底，驱动在下一次 socket 操作时发现断连（[http-adapter.md §2.3](http-adapter.md)） |
+| OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](../s3-protocol.md)）；otel-cpp 导出 span 是长期项 |
+| HTTP/2 | S3 SDK 主流仍 HTTP/1.1，CDN / L7 前置场景才需要；前置代理终结 h2 见 [tls.md §6](../tls.md) |
+| 客户端断连独立取消源 | 刻意取舍：长 handler 靠 `request_timeout` 兜底，驱动在下一次 socket 操作时发现断连（[http-adapter.md §2.3](../http-adapter.md)） |
 
 ## 5. 明确不做
 
@@ -49,14 +55,13 @@
 | Bucket Policy（IAM 语言） | per-credential policy 已覆盖多租户隔离，匿名公开桶由 website 面解决；IAM 求值器是独立子系统，投入不成比例 |
 | SigV2 | AWS 已停用，客户端基本绝迹 |
 | presigned POST | 需先写半个 multipart/form-data 流式解析器；CORS + presigned PUT 是更现代的替代路径 |
-| cloudproxy 出方向 streaming 签名上传 | 复杂度高、收益仅是明文 HTTP 下的完整性（[cloudproxy-backend.md](cloudproxy-backend.md)） |
+| cloudproxy 出方向 streaming 签名上传 | 复杂度高、收益仅是明文 HTTP 下的完整性（[cloudproxy-backend.md](../cloudproxy-backend.md)） |
 | rados 数据面 pack 层 | 代码内长注释已论证为设计边界（小对象放大交给 BlueStore `min_alloc_size`） |
-| CivetWeb 等新 HTTP 驱动 | 四驱动已覆盖设计空间（[http-adapter.md §3.4](http-adapter.md)） |
-| GitHub Actions CI | 项目已明确移除、不使用；自动化投入放在本地脚本矩阵（`scripts/check-all.sh`，[testing.md §8](testing.md)） |
+| CivetWeb 等新 HTTP 驱动 | 四驱动已覆盖设计空间（[http-adapter.md §3.4](../http-adapter.md)） |
+| GitHub Actions CI | 项目已明确移除、不使用；自动化投入放在本地脚本矩阵（`scripts/check-all.sh`，[testing.md §8](../testing.md)） |
 
 ## 6. 维护约定
 
 - 新条目须给出**出处 / 入口 / 价值 / 难度**；做完即删，实现写进对应设计文档。
 - 源码注释继续用 `roadmap §N` 引用归档文件的论证；本文的条目以 `backlog §N` 引用。
-- 历史底账：[archive/gaps.md](archive/gaps.md)、[archive/issues.md](archive/issues.md)、
-  [archive/roadmap.md](archive/roadmap.md)，只读。
+- 历史底账：[gaps.md](gaps.md)、[issues.md](issues.md)、[roadmap.md](roadmap.md)，只读。

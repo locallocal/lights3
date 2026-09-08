@@ -639,6 +639,10 @@ lights3-ctl tier quarantine list tierdata
 - Callbacks return nothing; the exit code travels through `lights3_ctl::g_exit`
   following the 0/1/2 convention in §1; positionals are read from `c->args()`
   and count-checked by the command itself.
-- Server-side ops entry points live in the command tree of `src/main.cc`
-  (e.g. `duostore`), registered only inside their compile-time switch so that
-  trimmed builds never expose an unusable command.
+- Server-side ops entry points live in the command tree of the `lights3` binary
+  (e.g. `duostore`), split the same way: `src/main.cc` keeps only the root
+  command and `main`, each command group is one `src/cli/cli_<group>.cc/.h`
+  (`make_<group>()`), and the shared helpers (`--config`, `<backend>` parsing,
+  `g_exit`) sit in `src/cli/cli_common.h`. Groups are registered only inside
+  their compile-time switch (`cli_duostore.cc` is compiled only under
+  `LIGHTS3_DUOSTORE`) so that trimmed builds never expose an unusable command.

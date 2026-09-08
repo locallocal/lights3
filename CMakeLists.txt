@@ -284,7 +284,7 @@ add_subdirectory(third_party/json EXCLUDE_FROM_ALL)
 
 # ccmd: command/subcommand framework (git submodule, header-only + static cflag; needs
 # --recursive init for its cflag submodule). Used by the lights3 entry point
-# (src/main.cc: --config + `duostore dump|load`) and the lights3-ctl ops CLI
+# (src/main.cc + src/cli/: --config, `duostore ...`, `tier ...`, `fsck`) and the lights3-ctl ops CLI
 add_subdirectory(third_party/ccmd EXCLUDE_FROM_ALL)
 
 # ---- Core library: L2/L3/L4 + HTTP boundary ----
@@ -504,7 +504,13 @@ target_sources(lights3_core PRIVATE src/core/version.cc ${LIGHTS3_VERSION_CC})
 add_dependencies(lights3_core lights3_version_gen)
 
 # ---- Main executable ----
-add_executable(lights3 src/main.cc)
+# src/main.cc holds the root command + main; each command group is one
+# src/cli/cli_<group>.cc (make_<group>()), shared helpers in cli_common
+add_executable(lights3 src/main.cc src/cli/cli_common.cc src/cli/cli_server.cc
+                       src/cli/cli_tier.cc src/cli/cli_fsck.cc)
+if(LIGHTS3_DUOSTORE)
+  target_sources(lights3 PRIVATE src/cli/cli_duostore.cc)
+endif()
 target_link_libraries(lights3 PRIVATE lights3_core ccmd::ccmd)
 
 # ---- Ops tooling ----

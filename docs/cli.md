@@ -568,5 +568,8 @@ lights3-ctl tier quarantine list tierdata
   与 `fsck --offline` 的 job 驱动同在 `lights3_ctl_jobs.cc`）。
 - 回调无返回值，退出码通过 `lights3_ctl::g_exit` 传出，遵守 §1 的 0/1/2 约定；
   位置参数经 `c->args()` 读取并自行校验数量。
-- 服务进程侧的运维入口放在 `src/main.cc` 的命令树下（如 `duostore`），
-  仅在对应编译开关内注册，保证裁剪构建不出现不可用命令。
+- 服务进程侧的运维入口放在 `lights3` 二进制的命令树下（如 `duostore`），按同样的方式
+  拆分：`src/main.cc` 只保留根命令与 `main`，每个命令组一个 `src/cli/cli_<group>.cc/.h`
+  （`make_<group>()`），公共助手（`--config`、`<backend>` 解析、`g_exit`）在
+  `src/cli/cli_common.h`；仅在对应编译开关内注册（`cli_duostore.cc` 只在
+  `LIGHTS3_DUOSTORE` 下参与编译），保证裁剪构建不出现不可用命令。

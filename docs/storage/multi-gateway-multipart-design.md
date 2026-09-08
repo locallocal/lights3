@@ -1,11 +1,12 @@
 # 多网关共享存储下的 Multipart：现状核对与补齐步骤
 
-> 状态：**设计 / 待实施**（2026-09-08 核对代码得出）。本文回答一个问题：
+> 状态：**§4 ① 写侧租约已实现（2026-09-08），②③④ 待做**。本文回答一个问题：
 > 多个 lights3 网关指向同一份共享存储时，一个 multipart 上传的
 > create / upload_part / complete / abort 能否落在**不同网关**上。结论先行：
 > 只有 **duostore（redis / tikv meta + rados data）** 与 **cloudproxy** 在设计上
-> 支持；duostore 的这条组合还有一个会损坏数据的缺口（§3.2 写侧在途保护）与
-> 零端到端测试，补齐步骤见 §4。其余后端不是多网关设计，§2 逐一说明。
+> 支持；duostore 的这条组合曾有一个会损坏数据的缺口（§3.2 写侧在途保护，
+> 已由 §4 ① 的写侧租约关闭）与零端到端测试，补齐步骤见 §4。其余后端不是
+> 多网关设计，§2 逐一说明。
 >
 > 相关：[duostore-core.md](duostore-core.md) §3 / §8 / §9、
 > [duostore-data-rados-design.md](duostore-data-rados-design.md) §8.3、
@@ -53,17 +54,17 @@
 | 读侧 | read-lease（[duostore-core.md](duostore-core.md) §8.5）已把"A 在读、B 在回收"的 pin 表跨进程问题覆盖 |
 | 元数据缓存 | 分片记录不进缓存；complete 在本网关 `invalidate_on_exit`，redis 经 pub/sub 广播、tikv 靠 `meta_cache_ttl` 有界陈旧（§7.1），对 multipart 无额外问题 |
 
-### 3.2 缺口 G1：写侧在途保护是进程内的（会损坏数据）
+### 3.2 缺口 G1（已关闭）：写侧在途保护曾是进程内的
 
-`run_orphan_scan_once`（`duostore_backend.cc:2047` 起）的正向判定：**无 refs +
+`run_orphan_scan_once`（`duostore_backend.cc`）的正向判定原为：**无 refs +
 mtime 早于 `gc_grace` + 本进程 pin 表无 pin** → unlink。代码注释明说
 "write-side pin covers very long streaming PUTs, for which the mtime grace alone
 is insufficient"——即单网关下超过 `gc_grace` 的长上传靠**写侧 pin** 保护。
-写侧 pin（`ChunkPinHooks` / `write_pins_`）与读侧一样是进程内表，但读侧有
-read-lease 把它搬到共享介质，**写侧没有对应物**（`ReadClock` 只在
-`PinnedReader` 注册，`pump_body` 不注册）。
+写侧 pin（`ChunkPinHooks` / `write_pins_`）与读侧一样是进程内表，读侧有
+read-lease 把它搬到共享介质，写侧当时**没有对应物**。
 
-多网关下的失效序列：
+多网关下的失效序列（单测 `duostore_orphan_scan_defers_to_peer_write_lease`
+第一阶段以 `read_lease: 0` 复现）：
 
 1. 网关 A 接收一个大分片（或大 PUT），`RadosChunkWriter` 按 `rados_chunk_size`
    （默认 8 MiB）逐块 `write_full`，第一块的 mtime 是上传开始时刻；
@@ -75,12 +76,12 @@ read-lease 把它搬到共享介质，**写侧没有对应物**（`ReadClock` �
    GET 该区间 500（缺 extent），`lights3 fsck` 才会发现。
 
 触发条件是"孤儿扫描轮 ∩ 逾 grace 的在途写"。默认 `orphan_scan_interval: 1d`
-使概率不高，但 `lights3 duostore scan <backend>` 手动轮随时可触发，且
-rados 数据面把每一块都写成独立对象，块越多越容易被扫到。gcq 路径不受影响
-（只有曾被引用的 extent 才入 gcq，且已被 read-lease 门控）。
+使概率不高，但 `lights3 duostore scan <backend>` 手动轮随时可触发。gcq 路径
+不受影响（只有曾被引用的 extent 才入 gcq，且已被 read-lease 门控）。
 
-**现有唯一规避**：把 `gc_grace` 调到 ≥ 最长预期分片/对象上传时长（同时会拖慢
-所有正常回收），或非指定网关之外关闭孤儿扫描。两者都是运维口头约定，代码不校验。
+**现状**：§4 ① 的写侧租约已落地——租约同时携带最老在途写开始时间，孤儿扫描
+只删 mtime 早于该下限的无 refs chunk。`read_lease: 0` 关闭租约时仍回落到
+"`gc_grace` ≥ 最长预期分片/对象上传时长"的运维约定（代码不校验）。
 
 ### 3.3 缺口 G2：零端到端验证
 
@@ -101,30 +102,41 @@ rados 数据面把每一块都写成独立对象，块越多越容易被扫到�
 
 按依赖顺序；① 是正确性前提，②③ 让它可验证、可运维，④ 是误配防线。
 
-### ① 写侧租约（write-lease）：把写侧在途保护搬到共享介质
+### ① 写侧租约（write-lease）：把写侧在途保护搬到共享介质 —— 已实现
 
-与 read-lease 同构，复用其发布/消费骨架，不引入新表：
+与 read-lease 同构，复用其发布/消费骨架，不引入新表（实现细节与安全论证
+汇总在 [duostore-core.md §8.5](duostore-core.md)）：
 
-1. **登记**：`pump_body`（PUT 与 upload_part 共用）开始前向 `WriteClock`
-   （`ReadClock` 同一实现，独立实例）取 ticket，`WritePinRelease` 析构时注销。
-   登记先于第一块落盘，故发布值必然早于任何在途块的 mtime。
-2. **发布**：`lease_tick` 同时发布 `oldest_read_ms` 与 `oldest_write_ms`
-   （无在途写发 now）。接口从
-   `publish_read_lease(owner, oldest_ms, ttl)` / `min_read_lease()` 扩为
+1. **登记**：`put_object` / `upload_part` / `tier_commit_cached` 在 `pump_body`
+   之前构造 `WriteTicket`（向 `write_clock_`——与读侧同一实现 `InFlightClock`
+   的独立实例——取 ticket），协程帧退出（提交或兜底删除之后）注销。登记先于
+   第一块落盘，故发布值必然早于任何在途块的 mtime。
+2. **发布**：`lease_tick` 同时发布读、写两个下限。接口由
+   `publish_read_lease(owner, oldest_ms, ttl)` / `min_read_lease()` 改为
    `publish_lease(owner, LeaseInfo{oldest_read_ms, oldest_write_ms}, ttl)` /
-   `min_lease() -> optional<LeaseInfo>`；redis 值 `<read>\0<write>`、tikv `'L'`
-   表 `r<owner>` 行值追加一段。**兼容**：解析到旧格式（缺 write 字段）视该
-   网关 write 下限未知 → 消费侧对该轮回落 grace-only（等价现状，不更糟）。
-3. **消费**：孤儿扫描的 chunk 候选条件加一项：`mtime_ms < write_floor − skew`，
-   `write_floor = min` 全体存活租约的 `oldest_write_ms`。含义：任何在途写开始
-   之后才出现的块都可能属于它，跳过；发布延迟只让 floor 偏旧 ⇒ 只会少删。
-   `skew` 取 `gc_grace` 的一个固定分数（如 min(gc_grace, 60 s)）吸收 OSD 与
-   网关的时钟差（rados 对象 mtime 由 OSD 打，不是网关时钟）。取租约失败 →
-   WARN + grace-only（与 gcq 路径一致，绝不停摆）。指标：`skipped_leased`
-   在孤儿扫描统计里新增一项，日志一并打印。
-4. **本地引擎**：`publish_lease` 返回 unsupported → 发布器停摆（现行为），
+   `min_lease() -> optional<LeaseInfo>`（`meta_store.h`）；redis 值
+   `<read> <write>`、tikv 'L' 表 `r<owner>` 行值 `<read>\0<expiry>\0<write>`。
+   **兼容**：解析到旧格式（缺 write 字段）视该网关写侧下限未知 →
+   `min_lease().oldest_write_ms` 为 nullopt，消费侧对该轮回落 grace-only
+   （等价现状，不更糟）。`publish_lease_once()` 为手动发布钩子。
+3. **消费**：孤儿扫描枚举前取 `min_lease()`，
+   `write_floor = oldest_write_ms − clamp(gc_grace, 1 s, 60 s)`；无 refs 的
+   chunk 仅当 `mtime < write_floor` 才成为候选，否则计入新增统计
+   `skipped_leased`（admin JSON / `lights3 duostore scan` 日志同步输出）。
+   余量吸收 OSD 与网关的时钟差（rados 对象 mtime 由 OSD 打）与粗粒度文件时间
+   戳，1 s 下限让 `gc_grace: 0` 的测试配置也能容忍一个 jiffy。取租约失败 →
+   WARN + grace-only（与 gcq 路径一致，绝不停摆）。
+4. **本地引擎**：`publish_lease` 返回 unsupported → 发布器停摆（原行为），
    写侧 pin 仍精确。
 5. **pack 路径不改**：rados 无 pack；fs 数据面不在多网关矩阵内（§2）。
+
+测试（已随实现落地）：
+
+| 用例 | 覆盖 |
+| --- | --- |
+| `duostore_orphan_scan_defers_to_peer_write_lease`（test_duostore.cc） | 两个 `DuoStoreBackend` 共享一个 RocksMetaStore + 租约板 + 同一 chunk 目录。阶段 1 `read_lease: 0`：对端扫描删掉在途 PUT 的块、提交后 `refs_missing`（复现缺口）；阶段 2 租约开启：`skipped_leased ≥ 1`、块保留、对象从对端可读；早于下限的真孤儿仍被删 |
+| `duostore_redis_read_lease` / `duostore_tikv_read_lease` | 双字段逐字段取最小、TTL 过期、旧格式值 → 写侧下限未知 |
+| `duostore_redis_meta_cache_bounded_staleness` | 读侧回拨 TTL、写侧不回拨 |
 
 替代方案评估：在 `alloc_file_run` 时把号段登记进共享"在途 id"表并 TTL 续租，
 孤儿扫描跳过表内 id——精确但每次分配多一次共享写、需要续租线程，且
@@ -145,7 +157,7 @@ self-assembled meta/data"）建两个 `DuoStoreBackend`，共享**同一个**
 | A create → B upload_part ×2 → A complete → B get | ETag = `combined_etag`，内容逐字节相等 |
 | A upload_part 泵送中 → B abort | A 的 put_part 抛 NoSuchUpload，A 落盘的 chunk 被 `commit_or_discard` 删除，孤儿扫描无残留 |
 | 同号分片 A/B 并发 | 胜者内容可读，败者 extent 入 gcq 并被 GC 回收 |
-| **长写 vs 对端孤儿扫描**（G1 回归） | A 用慢 BodyReader 持有在途写，`gc_grace=0`，B 跑 `run_orphan_scan_once`：无 write-lease 时 A 的块被删（先写出失败用例证明缺口），接线后 `skipped_leased>0` 且块保留 |
+| **长写 vs 对端孤儿扫描**（G1 回归） | 已随 ① 落地（`duostore_orphan_scan_defers_to_peer_write_lease`） |
 | mpu_ttl 清理 | 只有持租约的实例 abort 过期 upload；另一实例 `uploads_expired=0` |
 | list_parts / list_uploads 跨网关 | 任一网关列出的集合一致 |
 

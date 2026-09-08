@@ -1451,18 +1451,23 @@ return 1
     return require_int("try_gc_lease", r.get()) == 1;
 }
 
-// Multi-gateway read lease (roadmap §3.7): plain SET with PX — each gateway only
-// writes its own key, no arbitration needed; a crashed publisher's key expires
-bool RedisMetaStore::publish_read_lease(std::string_view owner, int64_t oldest_ms,
-                                        int64_t ttl_ms) {
-    auto r = exec({"SET", key("readlease:") + std::string(owner), std::to_string(oldest_ms),
-                   "PX", std::to_string(ttl_ms)},
+// Multi-gateway read / write leases (roadmap §3.7; write side:
+// docs/storage/multi-gateway-multipart-design.md §4 ①): plain SET with PX —
+// each gateway only writes its own key, no arbitration needed; a crashed
+// publisher's key expires. Value "<oldest_read_ms> <oldest_write_ms>"; the
+// write field is absent in leases written by builds before the write lease
+bool RedisMetaStore::publish_lease(std::string_view owner, const LeaseInfo& info,
+                                   int64_t ttl_ms) {
+    std::string val = std::to_string(info.oldest_read_ms);
+    if (info.oldest_write_ms) val += " " + std::to_string(*info.oldest_write_ms);
+    auto r = exec({"SET", key("readlease:") + std::string(owner), val, "PX",
+                   std::to_string(ttl_ms)},
                   /*read_retry=*/false);
-    check_reply_error("publish_read_lease", r.get());
+    check_reply_error("publish_lease", r.get());
     return true;
 }
 
-std::optional<int64_t> RedisMetaStore::min_read_lease() {
+std::optional<LeaseInfo> RedisMetaStore::min_lease() {
     // SCAN MATCH <prefix>readlease:* (cursor iteration; same glob escaping as
     // pack_stats — the prefix may contain arbitrary bytes) + one MGET per SCAN
     // page. Gateway counts are tiny; the cost is a handful of round trips
@@ -1474,13 +1479,14 @@ std::optional<int64_t> RedisMetaStore::min_read_lease() {
     }
     pattern.push_back('*');
 
-    std::optional<int64_t> min;
+    std::optional<LeaseInfo> min;
+    bool write_unknown = false;  // some live lease carries no write field (older build)
     std::string cursor = "0";
     do {
         auto r = exec({"SCAN", cursor, "MATCH", pattern, "COUNT", "64"}, /*read_retry=*/true);
-        check_reply_error("min_read_lease scan", r.get());
+        check_reply_error("min_lease scan", r.get());
         if (r->type != REDIS_REPLY_ARRAY || r->elements != 2)
-            throw_internal("min_read_lease", "unexpected SCAN reply");
+            throw_internal("min_lease", "unexpected SCAN reply");
         cursor = std::string(reply_str(r->element[0]));
         const redisReply* keys = r->element[1];
         if (keys->elements == 0) continue;
@@ -1488,19 +1494,33 @@ std::optional<int64_t> RedisMetaStore::min_read_lease() {
         for (size_t i = 0; i < keys->elements; ++i)
             cmd.emplace_back(reply_str(keys->element[i]));
         auto vals = exec(cmd, /*read_retry=*/true);
-        check_reply_error("min_read_lease mget", vals.get());
+        check_reply_error("min_lease mget", vals.get());
         if (vals->type != REDIS_REPLY_ARRAY)
-            throw_internal("min_read_lease", "unexpected MGET reply");
+            throw_internal("min_lease", "unexpected MGET reply");
         for (size_t i = 0; i < vals->elements; ++i) {
             const redisReply* v = vals->element[i];
             if (v->type != REDIS_REPLY_STRING) continue;  // expired between SCAN and MGET
-            int64_t oldest = 0;
             auto sv = reply_str(v);
-            if (std::from_chars(sv.data(), sv.data() + sv.size(), oldest).ec != std::errc{})
+            int64_t read = 0;
+            auto res = std::from_chars(sv.data(), sv.data() + sv.size(), read);
+            if (res.ec != std::errc{}) continue;
+            std::optional<int64_t> write;
+            if (res.ptr < sv.data() + sv.size() && *res.ptr == ' ') {
+                int64_t w = 0;
+                if (std::from_chars(res.ptr + 1, sv.data() + sv.size(), w).ec == std::errc{})
+                    write = w;
+            }
+            if (!write) write_unknown = true;
+            if (!min) {
+                min = LeaseInfo{read, write};
                 continue;
-            if (!min || oldest < *min) min = oldest;
+            }
+            min->oldest_read_ms = std::min(min->oldest_read_ms, read);
+            if (write && min->oldest_write_ms)
+                min->oldest_write_ms = std::min(*min->oldest_write_ms, *write);
         }
     } while (cursor != "0");
+    if (min && write_unknown) min->oldest_write_ms.reset();
     return min;
 }
 

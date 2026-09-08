@@ -422,11 +422,12 @@ gaps item by item:
 | file_id globally unique | Satisfied: segment allocation on the shared meta (INCRBY, redis-meta §4) is naturally monotonic across gateways |
 | meta transactions globally atomic | Satisfied: Lua scripts are server-side atomic (redis-meta §3.4) |
 | read-side pin vs another gateway's GC | **Closed** (roadmap §3.7): the pin table stays per-process, but every gateway publishes its oldest in-flight read start time to the shared meta every `read_lease` (default 5s); the GC gateway only reclaims gcq entries every peer's in-flight read provably cannot reference, and empty packs first seen empty before the lease floor (storage/duostore-core.md §8.5). With `read_lease: 0` the old constraint `gc_grace` ≥ the longest expected GET duration applies again |
+| write-side pin vs another gateway's orphan scan | **Closed** ([multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) §4 ①): chunks an in-flight PUT / part has landed but not yet referenced were guarded only by the per-process write pin, so an upload longer than `gc_grace` looked like crash residue to a peer's orphan scan; the same lease now carries the "oldest in-flight write start", and the orphan scan only unlinks unreferenced chunks whose mtime is older than that floor minus a skew margin (storage/duostore-core.md §8.5) |
 | who runs GC / the orphan scan | **Must be a single instance** (configuration designates which gateway runs GC), otherwise concurrent compaction/scans trample each other |
 
 Deployment constraint (carried by configuration since C4): **with multiple
 gateways, GC runs only on the single designated instance**; with the read
-lease off, additionally `gc_grace` ≥ the longest expected GET duration
+lease off, additionally `gc_grace` ≥ the longest expected GET **and upload** duration
 (pulling probabilistic correctness up to engineering acceptability). Non-designated gateways set
 **`gc_enabled: false`** (a duostore-wide key, main document §11): it only
 stops the scheduling of the background GC worker and orphan scan; the manual

@@ -35,7 +35,7 @@
 
 | 条目 | 说明 |
 | --- | --- |
-| 多网关 multipart：duostore 写侧租约 | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §3.2 / §4 ①②③④：redis/tikv + rados 组合下，超过 `gc_grace` 的在途分片/PUT 会被对端网关的孤儿扫描删除（写侧 pin 是进程内的，read-lease 无写侧对应物）；按文档顺序做 write-lease → 双实例共享 meta/data 单测 → 文档/配置 → fs data 误配告警。价值 高 / 难度 中 |
+| 多网关 multipart：收尾 ②③④ | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §4：① 写侧租约与双实例共享 meta/data 的 G1 回归用例已落地（2026-09-08）；剩余 ② 其余跨网关 multipart 用例（A create / B part / A complete / B get、abort 竞态、同号分片竞态、mpu_ttl 单执行者、list 一致）与 compose `multi` e2e、③ 文档/配置（config 样例 `read_lease`、deployment 多网关小节）、④ redis/tikv + fs data 误配启动告警。价值 中 / 难度 低 |
 | Versioning | 架构级（六后端 key 布局 / List 语义 / delete marker / GC 全动）；若做，**从 duostore 侧切入成本最低**（meta 是 KV，加 version 维度即可），localfs 的 key→路径映射容纳不下多版本 |
 | SSE-C / SSE-S3 | 服务端加密；需先定密钥来源与 ETag/校验和语义 |
 | OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](s3-protocol.md)）；otel-cpp 导出 span 是长期项 |

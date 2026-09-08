@@ -180,6 +180,7 @@ JobOutcome run_duo_job(JobOp op, storage::DuoStoreBackend& duo) {
                          {"skipped_grace", st.skipped_grace},
                          {"skipped_pinned", st.skipped_pinned},
                          {"skipped_gcq", st.skipped_gcq},
+                         {"skipped_leased", st.skipped_leased},
                          {"orphan_packs_removed", st.orphan_packs_removed},
                          {"packs_skipped_active", st.packs_skipped_active},
                          {"refs_missing", st.refs_missing},

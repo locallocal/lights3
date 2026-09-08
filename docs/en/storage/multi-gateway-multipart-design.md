@@ -1,13 +1,13 @@
 # Multipart Across Gateways on Shared Storage: Audit and Gap-Closing Steps
 
-> Status: **design / pending implementation** (audited against the code on
-> 2026-09-08). Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
+> Status: **§4 ① write lease implemented (2026-09-08); ②③④ pending**. Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
 > The question: when several lights3 gateways point at the same shared storage,
 > can the create / upload_part / complete / abort steps of one multipart upload
 > land on **different gateways**? Short answer: only **duostore (redis / tikv
 > meta + rados data)** and **cloudproxy** support it by design; the duostore
-> combination still has one data-corrupting gap (§3.2, write-side in-flight
-> protection) and zero end-to-end tests. The steps to close them are in §4.
+> combination had one data-corrupting gap (§3.2, write-side in-flight
+> protection — closed by the write lease of §4 ①) and still has zero
+> end-to-end tests. The steps to close them are in §4.
 > The other backends are not multi-gateway designs; §2 goes through them.
 >
 > Related: [duostore-core.md](../../storage/duostore-core.md) §3 / §8 / §9,
@@ -58,20 +58,20 @@ gateway. For this to hold, all of the following are required:
 | read side | the read lease ([duostore-core.md](../../storage/duostore-core.md) §8.5) already covers the cross-process pin-table problem for "A reads while B reclaims" |
 | meta cache | part records are never cached; complete runs `invalidate_on_exit` locally, redis broadcasts over pub/sub, tikv relies on `meta_cache_ttl` bounded staleness (§7.1); nothing multipart-specific |
 
-### 3.2 Gap G1: write-side in-flight protection is process-local (corrupts data)
+### 3.2 Gap G1 (closed): write-side in-flight protection was process-local
 
-The forward pass of `run_orphan_scan_once` (`duostore_backend.cc:2047` ff.)
-unlinks a chunk when: **no refs + mtime older than `gc_grace` + no pin in this
+The forward pass of `run_orphan_scan_once` (`duostore_backend.cc`) used to
+unlink a chunk when: **no refs + mtime older than `gc_grace` + no pin in this
 process's pin table**. The code comment says it outright: "write-side pin
 covers very long streaming PUTs, for which the mtime grace alone is
 insufficient" — on a single gateway, uploads longer than `gc_grace` are
 protected by the **write-side pin**. That pin (`ChunkPinHooks` / `write_pins_`)
 is an in-process table just like the read-side one, but where the read side
-has the read lease to move it onto the shared medium, **the write side has no
-counterpart** (`ReadClock` is registered only by `PinnedReader`; `pump_body`
-registers nothing).
+had the read lease to move it onto the shared medium, the write side had
+**no counterpart**.
 
-Failure sequence across gateways:
+Failure sequence across gateways (reproduced by phase 1 of the unit test
+`duostore_orphan_scan_defers_to_peer_write_lease` with `read_lease: 0`):
 
 1. Gateway A receives a large part (or a large PUT); `RadosChunkWriter` issues
    one `write_full` per `rados_chunk_size` (default 8 MiB), so the first
@@ -88,15 +88,15 @@ Failure sequence across gateways:
 
 The trigger is "an orphan-scan round ∩ an in-flight write older than the
 grace". The default `orphan_scan_interval: 1d` keeps the probability low, but
-`lights3 duostore scan <backend>` can fire a round at any time, and the rados
-data plane writes every chunk as its own object, so the more chunks the more
-likely one is caught. The gcq path is unaffected (only once-referenced extents
-enter the gcq, and that path is already gated by the read lease).
+`lights3 duostore scan <backend>` can fire a round at any time. The gcq path
+is unaffected (only once-referenced extents enter the gcq, and that path is
+already gated by the read lease).
 
-**Only mitigation today**: raise `gc_grace` to ≥ the longest expected
-part/object upload time (which also delays every normal reclaim), or disable
-the orphan scan beyond the non-designated gateways. Both are operational
-folklore; the code checks neither.
+**Now**: the write lease of §4 ① is in place — the lease also carries the
+oldest in-flight write start, and the orphan scan only unlinks unreferenced
+chunks older than that floor. With `read_lease: 0` the operational rule
+"`gc_grace` ≥ the longest expected part/object upload" still applies (the code
+does not check it).
 
 ### 3.3 Gap G2: zero end-to-end verification
 
@@ -122,39 +122,49 @@ multipart steps have never been executed across instances; e2e
 In dependency order; ① is the correctness prerequisite, ② and ③ make it
 verifiable and operable, ④ is the misconfiguration guard.
 
-### ① Write lease: move write-side in-flight protection onto the shared medium
+### ① Write lease: move write-side in-flight protection onto the shared medium — implemented
 
 Isomorphic to the read lease, reusing its publish/consume skeleton with no new
-table:
+table (implementation details and the safety argument are collected in
+[duostore-core.md §8.5](../../storage/duostore-core.md)):
 
-1. **Register**: before `pump_body` (shared by PUT and upload_part) starts, take
-   a ticket from a `WriteClock` (same implementation as `ReadClock`, separate
-   instance); `WritePinRelease` unregisters on destruction. Registration
-   precedes the first chunk landing, so the published value is necessarily
-   older than the mtime of any in-flight chunk.
-2. **Publish**: `lease_tick` publishes both `oldest_read_ms` and
-   `oldest_write_ms` (now when no write is in flight). The interface grows from
+1. **Register**: `put_object` / `upload_part` / `tier_commit_cached` construct a
+   `WriteTicket` before `pump_body` (a ticket from `write_clock_`, a separate
+   instance of the same `InFlightClock` the read side uses); it is released
+   when the coroutine frame exits, after the commit or the discard.
+   Registration precedes the first chunk landing, so the published value is
+   necessarily older than the mtime of any in-flight chunk.
+2. **Publish**: `lease_tick` publishes both floors. The interface changed from
    `publish_read_lease(owner, oldest_ms, ttl)` / `min_read_lease()` to
    `publish_lease(owner, LeaseInfo{oldest_read_ms, oldest_write_ms}, ttl)` /
-   `min_lease() -> optional<LeaseInfo>`; the redis value becomes
-   `<read>\0<write>`, the tikv `'L'` table row `r<owner>` gains a segment.
-   **Compatibility**: an old-format value (write field missing) means that
-   gateway's write floor is unknown → the consumer falls back to grace-only for
-   that round (equal to today's behaviour, never worse).
-3. **Consume**: the orphan scan's chunk candidate condition gains
-   `mtime_ms < write_floor − skew`, where `write_floor = min` of
-   `oldest_write_ms` over all live leases. Meaning: any chunk that appeared
-   after some in-flight write began may belong to it, skip it; publish delay
-   only makes the floor older ⇒ fewer deletions, never more. `skew` is a fixed
-   fraction of `gc_grace` (e.g. min(gc_grace, 60 s)) absorbing the clock
-   difference between OSDs and gateways (rados object mtimes are stamped by
-   the OSD, not the gateway). A failed lease fetch → WARN + grace-only (as on
-   the gcq path, never stall). Metrics: a new `skipped_leased` counter in the
-   orphan-scan stats, printed in the log line.
+   `min_lease() -> optional<LeaseInfo>` (`meta_store.h`); the redis value is
+   `<read> <write>`, the tikv `'L'` table row `r<owner>` holds
+   `<read>\0<expiry>\0<write>`. **Compatibility**: an old-format value (write
+   field missing) marks that gateway's write floor unknown →
+   `min_lease().oldest_write_ms` is nullopt and the consumer falls back to
+   grace-only for that round (equal to the old behaviour, never worse).
+   `publish_lease_once()` is the manual publish hook.
+3. **Consume**: before enumerating, the orphan scan fetches `min_lease()` and
+   sets `write_floor = oldest_write_ms − clamp(gc_grace, 1 s, 60 s)`; an
+   unreferenced chunk becomes a candidate only when `mtime < write_floor`,
+   otherwise it is counted in the new `skipped_leased` statistic (also in the
+   admin JSON and the `lights3 duostore scan` log line). The margin absorbs
+   OSD-vs-gateway clock offsets (rados object mtimes are stamped by the OSD)
+   and coarse filesystem timestamps; the 1 s floor lets `gc_grace: 0` test
+   setups tolerate a jiffy. A failed lease fetch → WARN + grace-only (as on the
+   gcq path, never stall).
 4. **Local engines**: `publish_lease` returns unsupported → the publisher
-   stands down (current behaviour); the write-side pin stays exact.
+   stands down (previous behaviour); the write-side pin stays exact.
 5. **Pack path untouched**: rados has no packs; the fs data plane is outside
    the multi-gateway matrix (§2).
+
+Tests (landed with the implementation):
+
+| Case | Coverage |
+| --- | --- |
+| `duostore_orphan_scan_defers_to_peer_write_lease` (test_duostore.cc) | two `DuoStoreBackend`s sharing one RocksMetaStore + a lease board + one chunk directory. Phase 1 with `read_lease: 0`: the peer scan deletes the in-flight PUT's chunk and the commit leaves `refs_missing` (reproduces the gap); phase 2 with the lease on: `skipped_leased ≥ 1`, the chunk survives, the object is readable from the peer; a genuine orphan older than the floor is still reclaimed |
+| `duostore_redis_read_lease` / `duostore_tikv_read_lease` | field-wise min over both fields, TTL expiry, legacy value → write floor unknown |
+| `duostore_redis_meta_cache_bounded_staleness` | the read floor is backdated by the cache TTL, the write floor is not |
 
 Alternative evaluated: register each `alloc_file_run` segment in a shared
 "in-flight ids" table with TTL renewal and have the orphan scan skip listed
@@ -177,7 +187,7 @@ misconfiguration and is enough to verify the backend orchestration layer):
 | A create → B upload_part ×2 → A complete → B get | ETag = `combined_etag`, content byte-identical |
 | B aborts while A is pumping a part | A's put_part throws NoSuchUpload, the chunks A landed are removed by `commit_or_discard`, the orphan scan finds no residue |
 | same part number concurrently from A / B | the winner's content is readable, the loser's extents enter the gcq and are reclaimed by GC |
-| **long write vs peer orphan scan** (G1 regression) | A holds an in-flight write with a slow BodyReader, `gc_grace=0`, B runs `run_orphan_scan_once`: without the write lease A's chunks are deleted (write the failing case first to prove the gap), after wiring `skipped_leased>0` and the chunks survive |
+| **long write vs peer orphan scan** (G1 regression) | landed with ① (`duostore_orphan_scan_defers_to_peer_write_lease`) |
 | mpu_ttl cleanup | only the lease holder aborts the expired upload; the other instance reports `uploads_expired=0` |
 | list_parts / list_uploads across gateways | both gateways list the same set |
 

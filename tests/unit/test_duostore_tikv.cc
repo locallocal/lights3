@@ -547,23 +547,36 @@ TEST(duostore_tikv_gc_lease) {
     c.close();
 }
 
-// Multi-gateway read lease (roadmap §3.7): min across published leases; expired
-// rows are ignored (and lazily deleted); no publishers = nullopt
+// Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart §4 ①):
+// min across published leases field-wise; expired rows are ignored (and lazily
+// deleted); no publishers = nullopt; a row without the write field (older build)
+// makes the write floor unknown while the read floor still folds
 TEST(duostore_tikv_read_lease) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
     TikvMetaStore a(tikv_opts(prefix)), b(tikv_opts(prefix));
-    CHECK(!a.min_read_lease().has_value());
-    CHECK(a.publish_read_lease("gw-a", 1'000, 60'000));
-    CHECK(b.publish_read_lease("gw-b", 500, 60'000));
-    auto min = a.min_read_lease();
+    CHECK(!a.min_lease().has_value());
+    CHECK(a.publish_lease("gw-a", LeaseInfo{1'000, 3'000}, 60'000));
+    CHECK(b.publish_lease("gw-b", LeaseInfo{500, 4'000}, 60'000));
+    auto min = a.min_lease();
     CHECK(min.has_value());
-    CHECK_EQ(*min, int64_t(500));
-    CHECK(b.publish_read_lease("gw-b", 2'000, 60'000));  // b's oldest read finished
-    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
-    CHECK(a.publish_read_lease("gw-c", 1, 100));  // expires almost immediately
+    CHECK_EQ(min->oldest_read_ms, int64_t(500));
+    CHECK(min->oldest_write_ms.has_value());
+    CHECK_EQ(*min->oldest_write_ms, int64_t(3'000));
+    CHECK(b.publish_lease("gw-b", LeaseInfo{2'000, 2'500}, 60'000));  // b's oldest read finished, a write began
+    min = a.min_lease();
+    CHECK_EQ(min->oldest_read_ms, int64_t(1'000));
+    CHECK_EQ(*min->oldest_write_ms, int64_t(2'500));
+    CHECK(a.publish_lease("gw-c", LeaseInfo{1, 1}, 100));  // expires almost immediately
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
+    min = a.min_lease();
+    CHECK_EQ(min->oldest_read_ms, int64_t(1'000));
+    CHECK_EQ(*min->oldest_write_ms, int64_t(2'500));
+    // Legacy row (pre write-lease build, no write field): write floor unknown
+    CHECK(a.publish_lease("gw-old", LeaseInfo{700, std::nullopt}, 60'000));
+    min = a.min_lease();
+    CHECK_EQ(min->oldest_read_ms, int64_t(700));
+    CHECK(!min->oldest_write_ms.has_value());
     a.close();
     b.close();
 }

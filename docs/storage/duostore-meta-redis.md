@@ -42,6 +42,7 @@ DuoStoreBackend 主体见 [./duostore-core.md](duostore-core.md)；姊妹实现�
 | `ctr:chunk` / `ctr:pack` / `ctr:seq` | STRING 整数 | `kCounterChunk/Pack/Seq` 常量 | `INCRBY` 号段计数器（§6） |
 | `pack:<id>` | HASH | `pack_key` | live_bytes / live_recs / file_size / sealed 四 field，`HINCRBY` 增量记账 |
 | `gc_lease` | STRING | `try_gc_lease` 内 `key("gc_lease")` | 多网关 GC 租约，PX 过期（§7） |
+| `readlease:<owner>` | STRING | `publish_lease` | 该网关的读写租约 `<oldest_read_ms> <oldest_write_ms>`，PX 过期；`min_lease` SCAN 后逐字段取最小，缺 write 字段（旧版本）则写侧下限未知（core §8.5） |
 
 约束声明：gcq 的 score 为 double，要求 seq < 2^53（`ack_reclaim` 注释），号段
 速率下可用万年量级；`pack_stats()` 对 `pack:` 做 `SCAN MATCH` 时会转义 glob

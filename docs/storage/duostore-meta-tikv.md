@@ -41,6 +41,7 @@ key = 前缀（`TikvMetaOptions::prefix`，默认 `duo:`）+ **单字符表标�
 | `C` | `counter_key` | `C<kind>`，kind ∈ {`0` chunk, `1` pack, `q` seq, `d` pack-delta} | 8B 小端 i64（codec 计数器格式） |
 | `S` | `pack_delta_key` / `pack_seal_key` | `S<be64 id>d<be64 delta_id>` / `S<be64 id>s` | delta = le64 bytes‖le64 recs（`encode_pack_delta`）；seal = le64 file_size |
 | `L` | `try_gc_lease` 内 `tkey('L', "gc")` | GC 租约 | `<owner>\0<expiry_ms>` |
+| `L` | `publish_lease` 内 `tkey('L', "r<owner>")` | 该网关的读写租约 | `<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>`；`min_lease` 扫描逐字段取最小、惰性删过期行；旧版本行无第三段 = 写侧下限未知（core §8.5） |
 
 前缀范围由 `range_of` 生成：`[lo, hi)`，hi = lo 经 `codec::bump_last_byte`（末非
 0xff 字节 +1）。pack 账采用**唯一 delta 行**而非共享账行：每次业务事务写一条新

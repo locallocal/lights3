@@ -128,6 +128,16 @@ struct UndeterminedCommit : s3::S3Error {
         : S3Error(s3::S3ErrorCode::InternalError, std::move(msg)) {}
 };
 
+// What a gateway publishes as its lease (IMetaStore::publish_lease): start times
+// (unix ms) of its oldest in-flight read and oldest in-flight write, "now" when
+// idle (an idle gateway holds nothing back). oldest_write_ms is optional only on
+// the consumer side (min_lease): a lease written by an older build carries no
+// write field
+struct LeaseInfo {
+    int64_t oldest_read_ms = 0;
+    std::optional<int64_t> oldest_write_ms;
+};
+
 // Read-only slice of the meta shared by IMetaStore and its point-in-time
 // snapshots (roadmap §3.7 online meta dump): exactly the reads dump_meta needs.
 // A snapshot implementation must make every method observe one consistent state
@@ -282,24 +292,34 @@ struct IMetaStore : IMetaReadView {
     // other gateways); that is what the read lease below covers on shared
     // engines, with gc_grace as the fallback when it is off
     virtual bool try_gc_lease(std::string_view /*owner*/, int64_t /*ttl_ms*/) { return true; }
-    // Multi-gateway read lease (roadmap §3.7): each gateway periodically publishes
-    // "the oldest in-flight read on this gateway started at oldest_ms" under its
-    // owner id with a TTL (crashed publishers yield via expiry). The GC gateway
-    // reads the min across live leases and only reclaims gcq entries enqueued
-    // strictly before it — a reader holding a ref to reclaimed extents must have
-    // fetched the manifest before the deref enqueued them, so "every in-flight
-    // read started after the enqueue" proves no reader can hold the ref. Shared
-    // engines (redis/tikv) implement both; local engines keep the no-op defaults
-    // (in-process pins are already exact, publish returns false = unsupported and
-    // the backend stops republishing). Clock skew between gateways must stay far
-    // below gc_grace (NTP assumption, same as try_gc_lease's TTL arithmetic)
-    virtual bool publish_read_lease(std::string_view /*owner*/, int64_t /*oldest_ms*/,
-                                    int64_t /*ttl_ms*/) {
+    // Multi-gateway read / write leases (roadmap §3.7; write side:
+    // docs/storage/multi-gateway-multipart-design.md §4 ①): each gateway
+    // periodically publishes, under its owner id with a TTL (crashed publishers
+    // yield via expiry), the start time of its oldest in-flight read and of its
+    // oldest in-flight write. The GC gateway reads the min across live leases:
+    //  - read floor: only gcq entries enqueued strictly before it are reclaimed —
+    //    a reader holding a ref to reclaimed extents must have fetched the
+    //    manifest before the deref enqueued them, so "every in-flight read
+    //    started after the enqueue" proves no reader can hold the ref;
+    //  - write floor: the orphan scan only unlinks unreferenced chunks whose
+    //    mtime is older than it — a chunk that appeared after some in-flight
+    //    write began may belong to that write (its refs commit only at the end;
+    //    the in-process write pin is invisible to peers).
+    // Shared engines (redis/tikv) implement both; local engines keep the no-op
+    // defaults (in-process pins are already exact, publish returns false =
+    // unsupported and the backend stops republishing). Clock skew between
+    // gateways must stay far below gc_grace (NTP assumption, same as
+    // try_gc_lease's TTL arithmetic)
+    virtual bool publish_lease(std::string_view /*owner*/, const LeaseInfo& /*info*/,
+                               int64_t /*ttl_ms*/) {
         return false;
     }
-    // Min oldest_ms across unexpired leases; nullopt = none published / engine
-    // does not support leases (the caller then falls back to gc_grace alone)
-    virtual std::optional<int64_t> min_read_lease() { return std::nullopt; }
+    // Min across unexpired leases (field-wise); nullopt = none published / engine
+    // does not support leases (the caller then falls back to gc_grace alone).
+    // oldest_write_ms is nullopt when any live lease was published without it
+    // (a gateway running an older build): the write floor is then unknown and
+    // the consumer falls back to grace-only for that round
+    virtual std::optional<LeaseInfo> min_lease() { return std::nullopt; }
     // Point-in-time read snapshot for the online meta dump (roadmap §3.7):
     // every read through the returned view observes one consistent state while
     // writes continue. nullptr = engine cannot snapshot (redis) — the caller

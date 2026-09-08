@@ -84,9 +84,12 @@ public:
     std::string restore_marker() override;
     // does NOT implement IMetaStore::snapshot() — no MVCC to pin, so the online
     // meta dump falls back to the writes-stopped contract on this engine
-    bool publish_read_lease(std::string_view owner, int64_t oldest_ms,
-                            int64_t ttl_ms) override;
-    std::optional<int64_t> min_read_lease() override;
+    // Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart
+    // §4 ①): STRING "<prefix>readlease:<owner>" = "<oldest_read_ms> <oldest_write_ms>"
+    // with PX expiry; a value without the second field was written by an older
+    // build (write floor unknown). min_lease SCANs the keys and folds field-wise
+    bool publish_lease(std::string_view owner, const LeaseInfo& info, int64_t ttl_ms) override;
+    std::optional<LeaseInfo> min_lease() override;
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;

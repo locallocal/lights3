@@ -233,12 +233,12 @@ void run_duo_scan(const Cmd& c) {
     auto* duo = find_duostore(app, one_backend_arg(c));
     auto st = sync_wait(duo->run_orphan_scan_once());
     LOG_INFO("duostore admin: orphan scan: {} chunks ({} bytes) / {} packs ({} bytes) "
-             "scanned; orphans removed {} (grace-skipped {}, pinned {}, gcq-pending {}), "
-             "orphan packs removed {} (skipped active {}); refs missing {}, packstats "
-             "missing {}",
+             "scanned; orphans removed {} (grace-skipped {}, pinned {}, gcq-pending {}, "
+             "write-leased {}), orphan packs removed {} (skipped active {}); refs missing "
+             "{}, packstats missing {}",
              st.chunks_scanned, st.chunk_bytes, st.packs_scanned, st.pack_bytes,
              st.orphans_removed, st.skipped_grace, st.skipped_pinned, st.skipped_gcq,
-             st.orphan_packs_removed, st.packs_skipped_active, st.refs_missing,
+             st.skipped_leased, st.orphan_packs_removed, st.packs_skipped_active, st.refs_missing,
              st.pack_stats_missing);
     app.shutdown();
 }

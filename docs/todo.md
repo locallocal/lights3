@@ -21,6 +21,7 @@
 | Docker 镜像构建与 compose 四个 profile（默认 / redis / tikv / rados / e2e） | roadmap §6.3，[deployment.md §4](deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
 | CPack RPM | roadmap §6.3，[deployment.md §3.2](deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
 | `unit_tests` 偶发 `terminate called without an active exception` | 2026-09-05 本机 5 次全量运行中 2 次，均发生在 `timer_stats_track_fired_and_pending` 通过之后、`timer_slow_callback_counted` 的 1.1s 慢回调期间（日志先打 "callback took 1.100s"），gdb 下未复现；与业务改动无关 | 有空档时排查：怀疑 TimerQueue 或测试夹具里某个 joinable `std::thread` 在负载下的析构次序；先用 `catch throw`/`ulimit -c` 抓栈 |
+| 多网关 multipart e2e | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §4 ② | 有 docker 的机器：compose 增 `multi` profile（两 lights3 + redis + rados + nginx 轮询），aws cli 跑 5 分片 multipart 校验 ETag；依赖 §4 ① 先落地 |
 | mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 
 ## 3. 性能基线跑出的新问题（[performance-baseline.md](performance-baseline.md)）
@@ -34,6 +35,7 @@
 
 | 条目 | 说明 |
 | --- | --- |
+| 多网关 multipart：duostore 写侧租约 | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §3.2 / §4 ①②③④：redis/tikv + rados 组合下，超过 `gc_grace` 的在途分片/PUT 会被对端网关的孤儿扫描删除（写侧 pin 是进程内的，read-lease 无写侧对应物）；按文档顺序做 write-lease → 双实例共享 meta/data 单测 → 文档/配置 → fs data 误配告警。价值 高 / 难度 中 |
 | Versioning | 架构级（六后端 key 布局 / List 语义 / delete marker / GC 全动）；若做，**从 duostore 侧切入成本最低**（meta 是 KV，加 version 维度即可），localfs 的 key→路径映射容纳不下多版本 |
 | SSE-C / SSE-S3 | 服务端加密；需先定密钥来源与 ETag/校验和语义 |
 | OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](s3-protocol.md)）；otel-cpp 导出 span 是长期项 |

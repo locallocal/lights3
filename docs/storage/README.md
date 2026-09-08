@@ -19,6 +19,7 @@
 | [duostore-meta-sqlite-design.md](duostore-meta-sqlite-design.md) | [duostore-meta-sqlite.md](duostore-meta-sqlite.md) | SQLite IMetaStore：schema、事务与并发、单文件部署与备份 |
 | [duostore-meta-tikv-design.md](duostore-meta-tikv-design.md) | [duostore-meta-tikv.md](duostore-meta-tikv.md) | TiKV IMetaStore：接入路线调研、2PC 侧车前置工程、数据模型与事务不变量 |
 | [duostore-data-rados-design.md](duostore-data-rados-design.md) | [duostore-data-rados.md](duostore-data-rados.md) | RADOS IDataStore：接入路线、对象映射、写读路径、一致性与多网关 GC |
+| [multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) | —（设计 / 待实施） | 多网关共享存储下的 multipart：各后端支持矩阵、duostore（redis/tikv + rados）逐前提核对、写侧在途保护缺口（write-lease）、补齐步骤与测试清单 |
 
 ## 实现文档
 

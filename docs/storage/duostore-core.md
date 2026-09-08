@@ -177,11 +177,14 @@ run = { u8 kind, u64 first_file_id, u32 count,
 - `try_gc_lease(owner, ttl_ms)`：多网关 GC 租约。共享引擎（redis/tikv）实现为
   带 TTL 的原子 CAS（同 owner 续租刷新 TTL）；本地引擎默认恒 true（单进程文件
   锁已保证独占）。租约不解决进程内 pin 表不共享的问题——那由
-  `publish_read_lease` / `min_read_lease`（read-lease，§8.5）在共享引擎上覆盖，
-  关闭时回落 `gc_grace ≥ 最长预期 GET 时长` 的旧约束。
-- `publish_read_lease(owner, oldest_ms, ttl)` / `min_read_lease()`：多网关
-  read-lease（roadmap §3.7，语义与安全论证见 §8.5）。共享引擎实现；本地引擎
-  默认 publish 返回 false（unsupported，发布器停摆）、min 返回 nullopt。
+  `publish_lease` / `min_lease`（读写租约，§8.5）在共享引擎上覆盖，
+  关闭时回落 `gc_grace ≥ 最长预期 GET / 上传时长` 的旧约束。
+- `publish_lease(owner, LeaseInfo{oldest_read_ms, oldest_write_ms}, ttl)` /
+  `min_lease() -> optional<LeaseInfo>`：多网关读写租约（roadmap §3.7；写侧
+  [multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) §4 ①，
+  语义与安全论证见 §8.5）。共享引擎实现，min 逐字段取最小；任一存活租约缺
+  write 字段（旧版本网关写的）则 `oldest_write_ms` 为 nullopt = 写侧下限未知。
+  本地引擎默认 publish 返回 false（unsupported，发布器停摆）、min 返回 nullopt。
 - `snapshot()`：在线 dump 的一致性只读视图（`IMetaReadView`，§11）；
   rocksdb/sqlite/tikv 实现，redis 返回 nullptr（回落停写契约）。
 - `chunk_referenced(file_id)` / `scan_refs(cb)`：孤儿扫描的正/反向查询。
@@ -404,9 +407,11 @@ TTL 有界陈旧为契约。指标 `lights3_meta_cache_lookups_total{result=hit|
   （roadmap §3.7：曾被引用的 chunk 解引用时原子入 gcq，回收交给带
   read-lease 门的 gcq 路径，此处 unlink 会绕过该门伤及对端在途读；扫描前
   peek 全量 gcq 收集在途 file_id，跳过计入 `skipped_gcq`。剩下够格的候选
-  必是从未被引用的崩溃遗留，读者不可能持有）、mtime 逾 gc_grace、无
-  pin → 候选；删除前再做时点性 `chunk_referenced` 复查（扫描间隙新提交的
-  引用）。unlink 的 extent kind 跟随 `data_kind`（rados 引擎只认 kRados，
+  必是从未被引用的崩溃遗留，读者不可能持有）、mtime 逾 gc_grace、**mtime
+  早于对端写侧下限**（§8.5 write floor：不早于任一网关最老在途写开始时间的
+  chunk 可能属于该写，跳过计入 `skipped_leased`；仅共享引擎且 `read_lease`
+  开启时生效）、无 pin → 候选；删除前再做时点性 `chunk_referenced` 复查
+  （扫描间隙新提交的引用）。unlink 的 extent kind 跟随 `data_kind`（rados 引擎只认 kRados，
   硬编码 kChunk 会让 rados 孤儿删除静默空转）。
 - **反向**：refs 有而文件缺 → **告警 + 计数（refs_missing），绝不删 meta**
   （数据丢失征兆，留人工介入）。
@@ -461,26 +466,42 @@ TimerQueue 上分片睡眠（≤500ms/片，片间探测 `bg_.closing()`），cl
 （scrub 是运维触发的遍历，不是常驻 worker）。`bg_.closing()` 在对象与
 extent 粒度探测，中断置 `aborted`（统计为部分结果）。
 
-### 8.5 多网关 read-lease（roadmap §3.7）
+### 8.5 多网关读写租约（roadmap §3.7；写侧 multi-gateway-multipart §4 ①）
 
-补齐"A 网关在读的 extent，B 网关 GC 看不到 A 的 pin"这块文档明列的设计
-前提（此前只靠 `gc_grace` 兜底）。粗粒度租约而非逐 extent 上报：
+补齐"A 网关在读/在写的 extent，B 网关 GC 看不到 A 的 pin"这块文档明列的
+设计前提（此前只靠 `gc_grace` 兜底）。粗粒度租约而非逐 extent 上报，一条
+租约同时携带读、写两个下限：
 
 - **发布侧**（每个网关，无论 gc_enabled）：`get_object` 在**读 meta 之前**
-  向 `ReadClock` 注册 ticket（`PinnedReader` 析构时注销；注册先于 meta 读，
-  故发布值必然覆盖所有可能持有旧 manifest 的读者，无需微窗口宽限论证）。
-  `lease_timer_` 每 `read_lease`（默认 5s，0=关）秒经
-  `IMetaStore::publish_read_lease(owner, oldest_ms, ttl)` 发布"本网关最老
-  在途读的开始时间"（无在途读发 now），TTL = 3 个发布周期——崩溃网关连丢
-  两次续约即自动让路。本地引擎（rocksdb/sqlite）返回 unsupported，发布器
-  当场停摆（进程内 pin 本就精确）；redis 实现为 SET PX 键，tikv 为 'L' 表
-  "r<owner>" 行（值 `<oldest_ms>\0<expiry_ms>`，扫描时惰性删过期行）。
-- **消费侧**（GC 网关）：每轮开头 `min_read_lease()` 取全体存活租约的最小
-  oldest_ms 作 **lease_floor**。gcq 项仅当 `enqueue_ms < floor` 才可回收：
+  向 `read_clock_`（`InFlightClock`）注册 ticket（`PinnedReader` 析构时注销；
+  注册先于 meta 读，故发布值必然覆盖所有可能持有旧 manifest 的读者，无需
+  微窗口宽限论证）；`put_object` / `upload_part` / `tier_commit_cached` 在
+  `pump_body` **之前**向 `write_clock_` 注册（`WriteTicket` 守卫，协程帧退出
+  即提交或兜底删除之后注销；注册先于第一块落盘，故发布值必然早于该写所有
+  已落盘未入 refs 的 chunk 的 mtime）。`lease_timer_` 每 `read_lease`（默认
+  5s，0=关）秒经 `IMetaStore::publish_lease(owner, {oldest_read_ms,
+  oldest_write_ms}, ttl)` 发布本网关最老在途读、最老在途写的开始时间（无在途
+  发 now；读侧另回拨 `meta_cache_ttl`，写侧不回拨），TTL = 3 个发布周期——
+  崩溃网关连丢两次续约即自动让路。`publish_lease_once()` 是同一发布的手动
+  钩子（测试/运维）。本地引擎（rocksdb/sqlite）返回 unsupported，发布器当场
+  停摆（进程内 pin 本就精确）；redis 实现为 SET PX 键，值 `<read> <write>`；
+  tikv 为 'L' 表 "r<owner>" 行，值 `<read>\0<expiry_ms>\0<write>`（扫描时惰性
+  删过期行）。两种格式都兼容旧版本写的无 write 字段的值：读侧照常折叠，
+  写侧下限对该轮记为未知。
+- **消费侧（读，GC 网关）**：每轮开头 `min_lease()` 取全体存活租约的最小
+  oldest_read_ms 作 **lease_floor**。gcq 项仅当 `enqueue_ms < floor` 才可回收：
   持有旧 ref 的读者必在解引用入队**之前**读到 manifest，故"所有在途读都晚
   于入队开始"证明无人持有；发布延迟只让 floor 偏旧 ⇒ 多推迟、绝不多删。
-  整空 pack 删除同理用"首次见空时间 < floor"。取失败（网络抖动）WARN 后
-  回落 grace-only（历史行为），绝不停摆回收。
+  整空 pack 删除同理用"首次见空时间 < floor"。
+- **消费侧（写，孤儿扫描）**：枚举前 `min_lease()` 取最小 oldest_write_ms，
+  减去偏差余量 `clamp(gc_grace, 1s, 60s)`（吸收 OSD 与网关的时钟差——rados
+  对象 mtime 由集群侧打——及粗粒度文件时间戳）作 **write_floor**；无 refs
+  的 chunk 仅当 `mtime < write_floor` 才成为候选，否则计入 `skipped_leased`。
+  论证：在途写的每个 chunk 都在其 ticket 登记之后落盘，mtime ≥ 该写开始
+  时间 ≥ floor；枚举前取值保证之后才开始的写其 chunk 必然更新。写侧下限
+  未知（有旧版本网关、无人发布或引擎不支持）即回落 grace-only。
+- 两侧取失败（网络抖动）都 WARN 后回落 grace-only（历史行为），绝不停摆
+  回收；`read_lease: 0` 关闭时回落旧约束 `gc_grace ≥ 最长预期 GET / 上传时长`。
 - 时钟前提与 GC 租约相同：网关间 NTP 偏差 ≪ gc_grace。
 
 ### 8.6 损坏 pack 隔离区（roadmap §3.7；CLI `lights3 duostore quarantine`）

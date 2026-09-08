@@ -14,6 +14,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <mutex>
 #include <iterator>
 #include <memory>
 #include <semaphore>
@@ -416,15 +418,55 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
 
 namespace {
 
-// Forwarding IMetaStore wrapper that simulates a peer gateway's published read
-// lease (roadmap §3.7): min_read_lease reports whatever the test sets, everything
-// else delegates to a real RocksMetaStore
-struct LeaseSimMeta final : IMetaStore {
-    std::unique_ptr<RocksMetaStore> inner;
-    std::optional<int64_t> floor;  // what min_read_lease reports
+// Shared lease board (multi-gateway-multipart §4 ①): what a shared meta engine
+// would hold — one LeaseInfo per publishing gateway. Two LeaseSimMeta wrappers
+// over the same RocksMetaStore + board model two gateways on one meta
+struct LeaseBoard {
+    std::mutex m;
+    std::map<std::string, LeaseInfo> leases;
+    std::optional<LeaseInfo> min() {
+        std::lock_guard lk(m);
+        std::optional<LeaseInfo> out;
+        for (auto& [owner, l] : leases) {
+            if (!out) {
+                out = l;
+                continue;
+            }
+            out->oldest_read_ms = std::min(out->oldest_read_ms, l.oldest_read_ms);
+            if (out->oldest_write_ms && l.oldest_write_ms)
+                out->oldest_write_ms = std::min(*out->oldest_write_ms, *l.oldest_write_ms);
+            else
+                out->oldest_write_ms.reset();
+        }
+        return out;
+    }
+};
 
-    explicit LeaseSimMeta(std::unique_ptr<RocksMetaStore> m) : inner(std::move(m)) {}
-    std::optional<int64_t> min_read_lease() override { return floor; }
+// Forwarding IMetaStore wrapper that simulates a peer gateway's published lease
+// (roadmap §3.7): min_lease reports the test-set read floor (`floor`, the
+// historical single-knob form) or, with use_board, the field-wise min of the
+// leases published to the shared board; everything else delegates to a real
+// RocksMetaStore (possibly shared between two wrappers; only the owner closes it)
+struct LeaseSimMeta final : IMetaStore {
+    std::shared_ptr<RocksMetaStore> inner;
+    std::optional<int64_t> floor;  // read floor reported when !use_board
+    std::shared_ptr<LeaseBoard> board;
+    bool use_board = false;
+    bool owns_close = true;
+
+    explicit LeaseSimMeta(std::shared_ptr<RocksMetaStore> m, std::shared_ptr<LeaseBoard> bd = nullptr)
+        : inner(std::move(m)), board(std::move(bd)) {}
+    bool publish_lease(std::string_view owner, const LeaseInfo& info, int64_t) override {
+        if (!board) return false;
+        std::lock_guard lk(board->m);
+        board->leases[std::string(owner)] = info;
+        return true;
+    }
+    std::optional<LeaseInfo> min_lease() override {
+        if (use_board) return board ? board->min() : std::nullopt;
+        if (!floor) return std::nullopt;
+        return LeaseInfo{*floor, std::nullopt};
+    }
 
     void create_bucket(std::string_view b) override { inner->create_bucket(b); }
     void delete_bucket(std::string_view b) override { inner->delete_bucket(b); }
@@ -493,19 +535,31 @@ struct LeaseSimMeta final : IMetaStore {
     }
     bool chunk_referenced(uint64_t file_id) override { return inner->chunk_referenced(file_id); }
     void scan_refs(const std::function<void(uint64_t)>& cb) override { inner->scan_refs(cb); }
-    void close() override { inner->close(); }
+    void close() override {
+        if (owns_close) inner->close();
+    }
 };
 
-// Chunk-only backend over LeaseSimMeta (gc_cfg shape: pack disabled, grace 0)
+// Chunk-only backend over LeaseSimMeta (gc_cfg shape: pack disabled, grace 0).
+// Passing another harness's `rocks` + `board` builds a second gateway over the
+// same meta (and, with the same cfg.root, the same chunk directory — the
+// object-level sharing a rados data plane gives every gateway)
 struct LeaseHarness {
     std::shared_ptr<DuoStoreBackend> b;
     LeaseSimMeta* meta = nullptr;  // lifetime follows b
+    std::shared_ptr<RocksMetaStore> rocks;
 };
 
-LeaseHarness make_lease_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadPool> pool) {
+LeaseHarness make_lease_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadPool> pool,
+                                std::shared_ptr<RocksMetaStore> rocks = nullptr,
+                                std::shared_ptr<LeaseBoard> board = nullptr) {
     fs::create_directories(cfg.root);
-    auto meta = std::make_unique<LeaseSimMeta>(std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20}));
+    const bool owner = !rocks;
+    if (!rocks)
+        rocks = std::make_shared<RocksMetaStore>(
+            RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
+    auto meta = std::make_unique<LeaseSimMeta>(rocks, std::move(board));
+    meta->owns_close = owner;
     auto* mp = meta.get();
     auto data = std::make_unique<FsDataStore>(
         FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
@@ -517,6 +571,7 @@ LeaseHarness make_lease_backend(const DuoStoreConfig& cfg, std::shared_ptr<Threa
         });
     LeaseHarness h;
     h.meta = mp;
+    h.rocks = rocks;
     h.b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     return h;
 }
@@ -621,10 +676,10 @@ TEST(duostore_meta_snapshot_dump_is_consistent) {
     m2.close();
 }
 
-// ReadClock (roadmap §3.7): empty registry reports the fallback; the oldest
+// InFlightClock (roadmap §3.7): empty registry reports the fallback; the oldest
 // in-flight start wins until it ends
 TEST(duostore_read_clock_oldest) {
-    ReadClock c;
+    InFlightClock c;
     CHECK_EQ(c.oldest_or(42), int64_t(42));
     uint64_t t1 = c.begin();
     int64_t o1 = c.oldest_or(0);
@@ -2091,6 +2146,97 @@ TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
     auto g = sync_wait(b->get_object("bkt", "slow", std::nullopt));
     CHECK_EQ(read_all(*g.body), body_data);
     sync_wait(b->close());
+}
+
+// Write lease (multi-gateway-multipart §4 ①): two gateways over one meta and one
+// chunk directory. Gateway A streams a slow PUT; gateway B (the GC instance) runs
+// the orphan scan with grace=0. B's pin table cannot see A's write-side pin, so
+// without the lease (read_lease=0, the documented grace-only fallback) B deletes
+// A's landed-but-uncommitted chunk and A's commit then references deleted data.
+// With the lease, A's published "oldest in-flight write" makes B skip the chunk
+// (skipped_leased), the object completes intact and is readable from B; a
+// genuine orphan older than the floor is still reclaimed
+TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
+    TmpDir tmp;
+    auto pool = std::make_shared<ThreadPool>(6);
+    auto board = std::make_shared<LeaseBoard>();
+    auto cfg_a = gc_cfg(tmp, "wl-a");
+    cfg_a.read_lease_sec = 0;  // A publishes through the manual hook (deterministic ordering)
+    auto a = make_lease_backend(cfg_a, pool, nullptr, board);
+    a.meta->use_board = true;
+    sync_wait(a.b->create_bucket("bkt"));
+
+    auto start_slow_put = [&](const char* key, std::string& data, std::unique_ptr<GatedReader>& body,
+                              std::thread& writer) {
+        data = patterned(9000);
+        body = std::make_unique<GatedReader>(data.substr(0, 5000), data.substr(5000));
+        writer = std::thread([&, key] { sync_wait(a.b->put_object("bkt", key, {}, *body)); });
+        for (int i = 0; i < 200 && chunk_files_on_disk(cfg_a.root) < 1; ++i) usleep(20 * 1000);
+        CHECK(chunk_files_on_disk(cfg_a.root) >= 1);
+    };
+
+    // Phase 1 — lease off on the scanning gateway: the gap the lease closes
+    {
+        auto cfg_b = gc_cfg(tmp, "wl-b0");
+        cfg_b.read_lease_sec = 0;
+        auto b = make_lease_backend(cfg_b, pool, a.rocks, board);
+        b.meta->use_board = true;
+        std::string data;
+        std::unique_ptr<GatedReader> body;
+        std::thread writer;
+        start_slow_put("slow0", data, body, writer);
+        CHECK(sync_wait(a.b->publish_lease_once()));  // published, but b does not consult it
+        auto st = sync_wait(b.b->run_orphan_scan_once());
+        CHECK(st.orphans_removed >= 1);  // A's in-flight chunk mistaken for crash residue
+        CHECK_EQ(st.skipped_leased, uint64_t(0));
+        body->release();
+        writer.join();  // A commits refs to a deleted chunk: the object is now corrupt
+        auto st2 = sync_wait(b.b->run_orphan_scan_once());
+        CHECK(st2.refs_missing >= 1);
+        sync_wait(b.b->close());
+    }
+
+    // Phase 2 — lease on: the peer's in-flight write is respected
+    {
+        auto cfg_b = gc_cfg(tmp, "wl-b1");
+        cfg_b.read_lease_sec = 1;  // consumer gate; B's own timer lease says "idle" (now)
+        auto b = make_lease_backend(cfg_b, pool, a.rocks, board);
+        b.meta->use_board = true;
+        const size_t before = chunk_files_on_disk(cfg_a.root);
+        std::string data;
+        std::unique_ptr<GatedReader> body;
+        std::thread writer;
+        start_slow_put("slow1", data, body, writer);
+        CHECK(sync_wait(a.b->publish_lease_once()));  // oldest_write = the slow PUT's start
+        auto st = sync_wait(b.b->run_orphan_scan_once());
+        CHECK_EQ(st.orphans_removed, uint64_t(0));
+        CHECK(st.skipped_leased >= 1);
+        CHECK_EQ(st.skipped_pinned, uint64_t(0));  // B holds no pin for A's write
+        CHECK(chunk_files_on_disk(cfg_a.root) > before);
+
+        body->release();
+        writer.join();
+        CHECK(sync_wait(a.b->publish_lease_once()));  // A idle again: floor moves to now
+        auto st2 = sync_wait(b.b->run_orphan_scan_once());
+        CHECK_EQ(st2.orphans_removed, uint64_t(0));
+        CHECK_EQ(st2.skipped_leased, uint64_t(0));
+        auto g = sync_wait(b.b->get_object("bkt", "slow1", std::nullopt));  // readable from the peer
+        CHECK_EQ(read_all(*g.body), data);
+        g.body.reset();
+
+        // A genuine orphan older than the floor (minus the 1 s skew margin) is
+        // still reclaimed while the lease is in force
+        fs::create_directories(cfg_a.root / "chunks" / "ab");
+        auto old = cfg_a.root / "chunks" / "ab" / "000000000000abcd.chk";
+        std::ofstream(old) << patterned(100);
+        fs::last_write_time(old, fs::file_time_type::clock::now() - std::chrono::seconds(30));
+        CHECK(sync_wait(a.b->publish_lease_once()));
+        auto st3 = sync_wait(b.b->run_orphan_scan_once());
+        CHECK_EQ(st3.orphans_removed, uint64_t(1));
+        CHECK(!fs::exists(old));
+        sync_wait(b.b->close());
+    }
+    sync_wait(a.b->close());
 }
 
 // ---------- scrub suite (roadmap §3.1) ----------

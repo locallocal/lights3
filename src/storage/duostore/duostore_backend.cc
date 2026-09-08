@@ -100,9 +100,9 @@ bool PinTable::pinned_key(bool is_pack, uint64_t id) {
     return (is_pack ? s.pack_refs : s.chunk_refs).count(id) != 0;
 }
 
-// ---------- in-flight read registry (read lease, roadmap §3.7) ----------
+// ---------- in-flight operation registry (read / write leases, roadmap §3.7) ----------
 
-uint64_t ReadClock::begin() {
+uint64_t InFlightClock::begin() {
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
     std::lock_guard lk(m_);
     uint64_t id = next_++;
@@ -110,12 +110,12 @@ uint64_t ReadClock::begin() {
     return id;
 }
 
-void ReadClock::end(uint64_t ticket) {
+void InFlightClock::end(uint64_t ticket) {
     std::lock_guard lk(m_);
     active_.erase(ticket);
 }
 
-int64_t ReadClock::oldest_or(int64_t fallback) {
+int64_t InFlightClock::oldest_or(int64_t fallback) {
     std::lock_guard lk(m_);
     return active_.empty() ? fallback : active_.begin()->second;
 }
@@ -1185,7 +1185,7 @@ Task<Pumped> pump_body(IDataStore& data, http::BodyReader& body, std::string own
 class PinnedReader final : public http::BodyReader {
 public:
     PinnedReader(std::unique_ptr<http::BodyReader> inner, std::shared_ptr<PinTable> pins,
-                 std::vector<PinTable::Handle> ids, std::shared_ptr<ReadClock> clock,
+                 std::vector<PinTable::Handle> ids, std::shared_ptr<InFlightClock> clock,
                  uint64_t ticket)
         : inner_(std::move(inner)), pins_(std::move(pins)), ids_(std::move(ids)),
           clock_(std::move(clock)), ticket_(ticket) {}
@@ -1201,8 +1201,23 @@ private:
     std::unique_ptr<http::BodyReader> inner_;
     std::shared_ptr<PinTable> pins_;
     std::vector<PinTable::Handle> ids_;
-    std::shared_ptr<ReadClock> clock_;
+    std::shared_ptr<InFlightClock> clock_;
     uint64_t ticket_;
+};
+
+// Write-lease registration (multi-gateway-multipart §4 ①): held across the
+// whole "pump → commit / discard" span of a PUT / upload_part / tier cache fill,
+// so the published "oldest in-flight write" precedes the mtime of every chunk
+// this write has landed but not yet referenced. Peers' orphan scans skip chunks
+// newer than that floor — the cross-gateway counterpart of the write-side pin
+struct WriteTicket {
+    std::shared_ptr<InFlightClock> clock;
+    uint64_t ticket;
+    explicit WriteTicket(std::shared_ptr<InFlightClock> c)
+        : clock(std::move(c)), ticket(clock->begin()) {}
+    ~WriteTicket() { clock->end(ticket); }
+    WriteTicket(const WriteTicket&) = delete;
+    WriteTicket& operator=(const WriteTicket&) = delete;
 };
 
 // Symmetric release of write-side pins (§9.3): ChunkWriter pins on allocation
@@ -1269,6 +1284,7 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     co_await pool_->schedule();
     require_bucket(bucket);  // precheck; the authoritative check is redone inside the commit transaction (§6.1 ②)
 
+    WriteTicket wt(write_clock_);  // write lease: registered before the first chunk lands
     auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     ObjectRec rec;
@@ -1319,6 +1335,7 @@ Task<void> DuoStoreBackend::tier_commit_cached(std::string_view bucket, std::str
                                                http::BodyReader& body, const ObjectMeta& meta,
                                                const TierState& ts) {
     co_await pool_->schedule();
+    WriteTicket wt(write_clock_);  // write lease: registered before the first chunk lands
     auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     if (pumped.ref.total() != meta.size) {  // the fill was verified upstream; defend anyway
@@ -1344,7 +1361,7 @@ Task<void> DuoStoreBackend::tier_commit_cached(std::string_view bucket, std::str
 namespace {
 // Ends a read-clock ticket unless ownership was handed to the PinnedReader
 struct TicketGuard {
-    std::shared_ptr<ReadClock> clock;
+    std::shared_ptr<InFlightClock> clock;
     uint64_t ticket;
     ~TicketGuard() {
         if (clock) clock->end(ticket);
@@ -1526,6 +1543,7 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     owner += upload_id;
     owner += '\0';
     owner += std::to_string(part_no);
+    WriteTicket wt(write_clock_);  // write lease: registered before the first chunk lands
     auto pumped = co_await pump_body(*data_, body, std::move(owner));
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     PartRec p;
@@ -1640,9 +1658,9 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     std::optional<int64_t> lease_floor;
     if (cfg_.read_lease_sec > 0) {
         try {
-            lease_floor = meta_->min_read_lease();
+            if (auto l = meta_->min_lease()) lease_floor = l->oldest_read_ms;
         } catch (const std::exception& e) {
-            LOG_WARN("duostore '{}': min_read_lease failed ({}); this round is gated by "
+            LOG_WARN("duostore '{}': min_lease failed ({}); this round is gated by "
                      "gc_grace only", cfg_.name, e.what());
         }
     }
@@ -2111,6 +2129,27 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     // snapshot is necessarily stale)
     const int64_t grace_ms = int64_t(cfg_.gc_grace_sec) * 1000;
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
+    // Peer write lease (multi-gateway-multipart §4 ①): the in-process write pin
+    // above is invisible to other gateways, so on a shared data plane a peer's
+    // in-flight PUT / part older than gc_grace would look like crash residue.
+    // Every gateway publishes its oldest in-flight write start; a chunk whose
+    // mtime is not older than the min of those (minus a skew margin) may belong
+    // to such a write and is skipped. Fetched before the enumeration: a write
+    // that starts later has chunks newer than the floor by construction.
+    // The margin absorbs OSD-vs-gateway clock offsets (a rados object's mtime is
+    // stamped cluster-side) and coarse filesystem timestamps; it is bounded by
+    // gc_grace, with a 1 s floor so grace=0 setups still tolerate a jiffy.
+    // Fetch failures fall back to grace-only (never stall), like the gcq path
+    std::optional<int64_t> write_floor;
+    if (cfg_.read_lease_sec > 0) {
+        try {
+            if (auto l = meta_->min_lease(); l && l->oldest_write_ms)
+                write_floor = *l->oldest_write_ms - std::clamp<int64_t>(grace_ms, 1000, 60'000);
+        } catch (const std::exception& e) {
+            LOG_WARN("duostore '{}': min_lease failed ({}); this orphan scan is gated by "
+                     "gc_grace only", cfg_.name, e.what());
+        }
+    }
     std::vector<uint64_t> orphans;
     co_await data_->scan_chunks([&](uint64_t id, int64_t mtime_ms, uint64_t size) {
         ++st.chunks_scanned;
@@ -2126,6 +2165,10 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
         }
         if (now - mtime_ms < grace_ms) {
             ++st.skipped_grace;
+            return;
+        }
+        if (write_floor && mtime_ms >= *write_floor) {
+            ++st.skipped_leased;  // may belong to a peer's in-flight write
             return;
         }
         if (pins_->pinned_chunk(id)) {
@@ -2597,26 +2640,35 @@ void DuoStoreBackend::schedule_orphan_scan() {
     });
 }
 
-Task<void> DuoStoreBackend::lease_tick() {
+Task<bool> DuoStoreBackend::publish_lease_once() {
     co_await pool_->schedule();
+    const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
+    // TTL = 3 publish periods: a gateway that misses two renewals in a row
+    // (crash, partition) stops holding peers' reclamation back. The manual hook
+    // may run with the timer off (read_lease 0): keep a positive TTL then
+    const int64_t ttl_ms = int64_t(std::max(cfg_.read_lease_sec, 1)) * 3000;
+    LeaseInfo info;
+    // A cached manifest may be up to meta_cache_ttl old when a read starts, so
+    // the read floor is backdated by that much: a peer's GC then only reclaims
+    // extents whose deref predates every manifest this gateway can still be
+    // holding (roadmap §3.8; the TTL is bounded below gc_grace by config validation)
+    info.oldest_read_ms = read_clock_->oldest_or(now);
+    if (meta_cache_->enabled() && cfg_.meta_cache_ttl_sec > 0)
+        info.oldest_read_ms -= int64_t(cfg_.meta_cache_ttl_sec) * 1000;
+    // Write floor: no backdating — the ticket is taken before the first chunk
+    // can land (multi-gateway-multipart §4 ①)
+    info.oldest_write_ms = write_clock_->oldest_or(now);
+    co_return meta_->publish_lease(gc_owner_, info, ttl_ms);
+}
+
+Task<void> DuoStoreBackend::lease_tick() {
     bool supported = true;
     try {
-        const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
-        // TTL = 3 publish periods: a gateway that misses two renewals in a row
-        // (crash, partition) stops holding peers' reclamation back
-        const int64_t ttl_ms = int64_t(cfg_.read_lease_sec) * 3000;
-        // A cached manifest may be up to meta_cache_ttl old when a read starts, so
-        // the lease is backdated by that much: a peer's GC then only reclaims extents
-        // whose deref predates every manifest this gateway can still be holding
-        // (roadmap §3.8; the TTL is bounded below gc_grace by config validation)
-        int64_t oldest = read_clock_->oldest_or(now);
-        if (meta_cache_->enabled() && cfg_.meta_cache_ttl_sec > 0)
-            oldest -= int64_t(cfg_.meta_cache_ttl_sec) * 1000;
-        supported = meta_->publish_read_lease(gc_owner_, oldest, ttl_ms);
+        supported = co_await publish_lease_once();
     } catch (const std::exception& e) {
         // Transient (network): keep the timer armed; while the lease is stale
         // peers merely defer more, never reclaim more
-        LOG_WARN("duostore '{}': read-lease publish failed: {}", cfg_.name, e.what());
+        LOG_WARN("duostore '{}': lease publish failed: {}", cfg_.name, e.what());
     }
     // Local engines report unsupported — in-process pins are already exact
     // there, so the publisher stands down for the process lifetime

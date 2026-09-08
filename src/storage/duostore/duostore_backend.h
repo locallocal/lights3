@@ -97,18 +97,22 @@ private:
     bool pinned_key(bool is_pack, uint64_t id);
 };
 
-// In-flight read registry for the multi-gateway read lease (roadmap §3.7):
-// get_object registers a ticket *before* fetching the manifest and the reader's
-// destructor ends it, so "oldest in-flight read start" published to the shared
-// meta soundly covers every reader that may hold a pre-deref manifest (the
-// registration-to-meta-read window needs no grace argument — registration comes
-// first). Shared with escaping readers via shared_ptr, same lifetime shape as
-// PinTable
-class ReadClock {
+// In-flight operation registry for the multi-gateway read / write leases
+// (roadmap §3.7; write side: docs/storage/multi-gateway-multipart-design.md §4 ①).
+// Read side: get_object registers a ticket *before* fetching the manifest and
+// the reader's destructor ends it, so "oldest in-flight read start" published to
+// the shared meta soundly covers every reader that may hold a pre-deref manifest
+// (the registration-to-meta-read window needs no grace argument — registration
+// comes first). Write side: put_object / upload_part / tier cache fills register
+// before the first chunk can land and end after the meta commit (or the discard),
+// so "oldest in-flight write start" precedes the mtime of every chunk the write
+// has on disk but not yet in refs. Shared with escaping readers via shared_ptr,
+// same lifetime shape as PinTable
+class InFlightClock {
 public:
     uint64_t begin();          // returns a ticket id (monotonic)
     void end(uint64_t ticket); // idempotent for unknown ids
-    // Start time of the oldest in-flight read, or fallback when none (the
+    // Start time of the oldest in-flight operation, or fallback when none (the
     // publisher passes "now": an idle gateway holds nothing back)
     int64_t oldest_or(int64_t fallback);
 
@@ -170,6 +174,8 @@ struct DuoOrphanStats {
     uint64_t pack_bytes = 0;            // total bytes of on-disk pack files (usage metric)
     uint64_t skipped_gcq = 0;           // unreferenced chunks left to the gcq path (pending entry exists;
                                         // closes the cross-gateway reader race, roadmap §3.7)
+    uint64_t skipped_leased = 0;        // unreferenced chunks newer than a peer gateway's oldest
+                                        // in-flight write (write lease, multi-gateway-multipart §4 ①)
 };
 
 // run_scrub_once knobs (roadmap §3.1). Rate limiting is per-call rather than
@@ -397,6 +403,10 @@ public:
     // — the reverse reconciliation's "file must exist before its ref" argument
     // depends on the gcq's unlink→settle window not running concurrently
     Task<duostore::DuoOrphanStats> run_orphan_scan_once();
+    // Manual lease hook (tests / ops): publish this gateway's read / write lease
+    // once, exactly as the lease_tick timer does; returns whether the engine
+    // supports leases (false on local engines). Does not touch the timer
+    Task<bool> publish_lease_once();
 
     // Deep integrity scrub (roadmap §3.1): meta-driven — every committed object
     // and in-flight multipart part has its full manifest read back from the data
@@ -490,9 +500,9 @@ private:
     Task<void> gc_tick();
     void schedule_orphan_scan();  // independent low-frequency timer (orphan_scan_interval; 0 = off)
     Task<void> orphan_tick();
-    // Read-lease publisher (roadmap §3.7): periodic timer on every gateway; the
-    // tick stands down permanently when the engine reports leases unsupported
-    // (local engines — in-process pins are already exact there)
+    // Lease publisher (roadmap §3.7, read + write floors): periodic timer on
+    // every gateway; the tick stands down permanently when the engine reports
+    // leases unsupported (local engines — in-process pins are already exact there)
     void schedule_read_lease();
     Task<void> lease_tick();
     // One manifest's worth of scrub work (run_scrub_once): refs-ledger presence
@@ -607,10 +617,12 @@ private:
     // expiry. Lease TTL is max(2×gc_interval, 10min), far above a single round's
     // duration
     std::string gc_owner_;
-    // In-flight read registry for the read lease (roadmap §3.7); shared with
-    // escaping readers like pins_
-    std::shared_ptr<duostore::ReadClock> read_clock_ =
-        std::make_shared<duostore::ReadClock>();
+    // In-flight read / write registries for the leases (roadmap §3.7,
+    // multi-gateway-multipart §4 ①); shared with escaping readers like pins_
+    std::shared_ptr<duostore::InFlightClock> read_clock_ =
+        std::make_shared<duostore::InFlightClock>();
+    std::shared_ptr<duostore::InFlightClock> write_clock_ =
+        std::make_shared<duostore::InFlightClock>();
     BackgroundTaskGroup bg_{"duostore"};
     // Written only inside bg_.if_open, unchanged after begin_close (readers are
     // lock-free); 0 = not armed (cancel(0) is safe)

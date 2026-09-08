@@ -86,12 +86,13 @@ public:
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
     bool try_gc_lease(std::string_view owner, int64_t ttl_ms) override;
-    // Multi-gateway read lease (roadmap §3.7): 'L' table rows "r<owner>" with the
-    // value "<oldest_ms>\0<expiry_ms>" (same wall-clock TTL arithmetic as the GC
-    // lease); min_read_lease scans them, lazily deleting expired rows
-    bool publish_read_lease(std::string_view owner, int64_t oldest_ms,
-                            int64_t ttl_ms) override;
-    std::optional<int64_t> min_read_lease() override;
+    // Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart
+    // §4 ①): 'L' table rows "r<owner>" with the value
+    // "<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>" (same wall-clock TTL
+    // arithmetic as the GC lease; rows from older builds stop after expiry_ms =
+    // write floor unknown); min_lease scans them, lazily deleting expired rows
+    bool publish_lease(std::string_view owner, const LeaseInfo& info, int64_t ttl_ms) override;
+    std::optional<LeaseInfo> min_lease() override;
     // Online-dump snapshot (roadmap §3.7): a fixed TSO version — MVCC makes every
     // read at it a consistent view. The cluster GC safepoint must not pass the
     // version while the view lives: keep gc_retention above the dump duration

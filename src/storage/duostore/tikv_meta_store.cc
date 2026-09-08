@@ -1011,52 +1011,77 @@ bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
     });
 }
 
-// Multi-gateway read lease (roadmap §3.7): 'L' table row "r<owner>", value
-// "<oldest_ms>\0<expiry_ms>". A blind single-key put — each gateway only ever
-// writes its own row, so there is no contention to arbitrate; TTL expiry is
-// judged by wall clock exactly like try_gc_lease
-bool TikvMetaStore::publish_read_lease(std::string_view owner, int64_t oldest_ms,
-                                       int64_t ttl_ms) {
-    txn_retry("publish_read_lease", [&](uint64_t, std::vector<TikvMutation>& muts) {
-        std::string val = std::to_string(oldest_ms);
+// Multi-gateway read / write leases (roadmap §3.7; write side:
+// docs/storage/multi-gateway-multipart-design.md §4 ①): 'L' table row
+// "r<owner>", value "<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>". A blind
+// single-key put — each gateway only ever writes its own row, so there is no
+// contention to arbitrate; TTL expiry is judged by wall clock exactly like
+// try_gc_lease. Rows written by builds before the write lease end after
+// expiry_ms; min_lease treats them as "write floor unknown"
+bool TikvMetaStore::publish_lease(std::string_view owner, const LeaseInfo& info,
+                                  int64_t ttl_ms) {
+    txn_retry("publish_lease", [&](uint64_t, std::vector<TikvMutation>& muts) {
+        std::string val = std::to_string(info.oldest_read_ms);
         val += '\0';
         val += std::to_string(now_ms() + ttl_ms);
+        if (info.oldest_write_ms) {
+            val += '\0';
+            val += std::to_string(*info.oldest_write_ms);
+        }
         muts.push_back({TikvOp::kPut, tkey('L', "r" + std::string(owner)), std::move(val)});
     });
     return true;
 }
 
-std::optional<int64_t> TikvMetaStore::min_read_lease() {
-    std::optional<int64_t> min;
+std::optional<LeaseInfo> TikvMetaStore::min_lease() {
+    std::optional<LeaseInfo> min;
+    bool write_unknown = false;
     std::vector<std::string> expired;
     const int64_t now = now_ms();
-    guarded("min_read_lease", [&] {
+    guarded("min_lease", [&] {
         uint64_t ts = client().get_ts();
         auto [lo, hi] = range_of('L', "r");
         scan_range(ts, lo, hi, [&](const std::string& key, const std::string& v) {
             auto nul = v.find('\0');
             if (nul == std::string::npos) return true;  // not our format, skip
-            int64_t oldest = 0, expiry = 0;
-            std::from_chars(v.data(), v.data() + nul, oldest);
-            std::from_chars(v.data() + nul + 1, v.data() + v.size(), expiry);
+            int64_t read = 0, expiry = 0;
+            std::from_chars(v.data(), v.data() + nul, read);
+            auto nul2 = v.find('\0', nul + 1);
+            const char* exp_end = nul2 == std::string::npos ? v.data() + v.size() : v.data() + nul2;
+            std::from_chars(v.data() + nul + 1, exp_end, expiry);
             if (expiry <= now) {
                 expired.push_back(key);  // crashed publisher: lazily removed below
                 return true;
             }
-            if (!min || oldest < *min) min = oldest;
+            std::optional<int64_t> write;
+            if (nul2 != std::string::npos) {
+                int64_t w = 0;
+                if (std::from_chars(v.data() + nul2 + 1, v.data() + v.size(), w).ec ==
+                    std::errc{})
+                    write = w;
+            }
+            if (!write) write_unknown = true;
+            if (!min) {
+                min = LeaseInfo{read, write};
+                return true;
+            }
+            min->oldest_read_ms = std::min(min->oldest_read_ms, read);
+            if (write && min->oldest_write_ms)
+                min->oldest_write_ms = std::min(*min->oldest_write_ms, *write);
             return true;
         });
     });
     if (!expired.empty()) {
         try {
-            txn_retry("expire read leases", [&](uint64_t, std::vector<TikvMutation>& muts) {
+            txn_retry("expire leases", [&](uint64_t, std::vector<TikvMutation>& muts) {
                 for (auto& k : expired) muts.push_back({TikvOp::kDel, k, {}});
             });
         } catch (const std::exception& e) {
             // Best effort: leftovers are re-judged expired by the next scan
-            LOG_WARN("duostore tikv meta: expired read-lease cleanup failed: {}", e.what());
+            LOG_WARN("duostore tikv meta: expired lease cleanup failed: {}", e.what());
         }
     }
+    if (min && write_unknown) min->oldest_write_ms.reset();
     return min;
 }
 

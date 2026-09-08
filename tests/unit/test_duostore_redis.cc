@@ -456,25 +456,40 @@ TEST(duostore_redis_gc_lease) {
     c.close();
 }
 
-// Multi-gateway read lease (roadmap §3.7): the min across published leases wins;
-// expiry (PX) retires a crashed publisher; no publishers = nullopt; no snapshot
-// support on this engine (the online dump falls back to the writes-stopped path)
+// Multi-gateway read / write leases (roadmap §3.7, multi-gateway-multipart §4 ①):
+// the min across published leases wins field-wise; expiry (PX) retires a crashed
+// publisher; no publishers = nullopt; a lease written by an older build (no write
+// field) makes the write floor unknown while the read floor still folds; no
+// snapshot support on this engine (the online dump falls back to the
+// writes-stopped path)
 TEST(duostore_redis_read_lease) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
     RedisMetaStore a(redis_opts(prefix)), b(redis_opts(prefix));
-    CHECK(!a.min_read_lease().has_value());
-    CHECK(a.publish_read_lease("gw-a", 1'000, 60'000));
-    CHECK(b.publish_read_lease("gw-b", 500, 60'000));
-    auto min = a.min_read_lease();
+    CHECK(!a.min_lease().has_value());
+    CHECK(a.publish_lease("gw-a", LeaseInfo{1'000, 3'000}, 60'000));
+    CHECK(b.publish_lease("gw-b", LeaseInfo{500, 4'000}, 60'000));
+    auto min = a.min_lease();
     CHECK(min.has_value());
-    CHECK_EQ(*min, int64_t(500));
-    CHECK(b.publish_read_lease("gw-b", 2'000, 60'000));  // b's oldest read finished
-    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
-    // A short-TTL lease expires and stops holding the floor down
-    CHECK(a.publish_read_lease("gw-c", 1, 100));
+    CHECK_EQ(min->oldest_read_ms, int64_t(500));
+    CHECK(min->oldest_write_ms.has_value());
+    CHECK_EQ(*min->oldest_write_ms, int64_t(3'000));
+    CHECK(b.publish_lease("gw-b", LeaseInfo{2'000, 2'500}, 60'000));  // b's oldest read finished, a write began
+    min = a.min_lease();
+    CHECK_EQ(min->oldest_read_ms, int64_t(1'000));
+    CHECK_EQ(*min->oldest_write_ms, int64_t(2'500));
+    // A short-TTL lease expires and stops holding the floors down
+    CHECK(a.publish_lease("gw-c", LeaseInfo{1, 1}, 100));
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    CHECK_EQ(*a.min_read_lease(), int64_t(1'000));
+    min = a.min_lease();
+    CHECK_EQ(min->oldest_read_ms, int64_t(1'000));
+    CHECK_EQ(*min->oldest_write_ms, int64_t(2'500));
+    // Legacy value (pre write-lease build): read folds, write floor becomes unknown
+    std::string legacy = "SET " + prefix + "readlease:gw-old 700 PX 60000";
+    CHECK(RedisTestServer::instance().raw_command(legacy.c_str()));
+    min = a.min_lease();
+    CHECK_EQ(min->oldest_read_ms, int64_t(700));
+    CHECK(!min->oldest_write_ms.has_value());
     CHECK(a.snapshot() == nullptr);  // documented engine limitation
     a.close();
     b.close();
@@ -539,12 +554,15 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     // "oldest in-flight read − ttl", so the floor a peer's GC sees is at least one TTL
     // in the past even while no read is in flight
     RedisMetaStore probe(redis_opts(prefix));
-    auto floor = probe.min_read_lease();
+    auto floor = probe.min_lease();
     CHECK(floor.has_value());
     const int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                std::chrono::system_clock::now().time_since_epoch())
                                .count();
-    CHECK(*floor + 1000 <= now_ms);
+    CHECK(floor->oldest_read_ms + 1000 <= now_ms);
+    // The write floor is never backdated (registration precedes the first chunk)
+    CHECK(floor->oldest_write_ms.has_value());
+    CHECK(*floor->oldest_write_ms > floor->oldest_read_ms);
     probe.close();
     sync_wait(a->close());
     sync_wait(b->close());

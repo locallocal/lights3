@@ -65,7 +65,7 @@ prefix 校验：布局、unit 搬迁、保留已有配置、`--version` 输出�
 ## 3. deb / rpm（CPack）
 
 ```bash
-cmake --build build --target package        # 或：cd build && cpack
+cmake --build build --target package        # 或：cd build && cpack；`make package` = Release 构建 + 同一步，产物在 build-rel/packages/
 cpack --config build/CPackConfig.cmake -G DEB   # 显式选生成器：DEB | RPM | TGZ
 ls build/packages/                          # lights3_0.1.0_amd64.deb / lights3-0.1.0-1.x86_64.rpm
 ```

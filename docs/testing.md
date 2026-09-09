@@ -165,7 +165,16 @@ sqlite / redis / rados / tikv / seastar / fuzz）逐个增量构建 + `ctest -LE
 "mint|perf|soak"`（按旗标放开），sanitizer 目录带 `*SAN_OPTIONS` 使发现即失败，
 末尾打印汇总表；`--configure` 用 `build.sh` 创建缺失目录。
 
-## 9. 代码格式
+## 9. Makefile：构建与代码格式
+
+根目录 `Makefile` 是 `build.sh` 与 CPack 的薄封装：`make release`（Release，`build-rel/`）、
+`make debug`（Debug，`build/`）、`make package`（先 release，再 CPack，产物在
+`build-rel/packages/`，生成器按机器上有的 dpkg-deb / rpmbuild 选，否则 TGZ）、
+`make clean`（只删这两个目录，其余 `build-*` 变体不动）。`JOBS=` 定并发（默认核数
+的一半），`BUILD_ARGS="--redis --sqlite"` 透传 build.sh 旗标，`RELEASE_DIR=` /
+`DEBUG_DIR=` 改目录。`make help` 列出全部目标。
+
+### 9.1 代码格式
 
 `make format` 先跑 `scripts/check_comments.py --fix` 把行尾 `//` 注释挪到所在语句
 的上一行（以 `{` 结尾的行挪进块内第一行；列表元素、标签、预处理行放在自身上一行；

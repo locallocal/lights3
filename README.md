@@ -73,6 +73,7 @@ and sqlite serve its optional meta engines).
 
 ```bash
 ./build.sh --test        # submodules + cmake + ninja + ctest in one go
+make release             # Release build in build-rel (make debug -> Debug in build; make package -> deb/rpm/tgz)
 ```
 
 or manually:
@@ -154,6 +155,7 @@ sudo ./scripts/uninstall.sh [--purge]
 # 2. install tree / packages
 sudo cmake --install build                   # or --prefix / DESTDIR
 cmake --build build --target package         # build/packages/lights3_<ver>_<arch>.deb (rpm with rpmbuild)
+make package                                 # same from a Release tree: build-rel/packages/
 sudo apt install ./build/packages/lights3_0.1.0_amd64.deb
 
 # 3. Docker / compose

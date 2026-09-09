@@ -1,0 +1,20 @@
+# lights3 C++ formatting (`make format` / `make format-check`): the Google C++ style
+# with the house deviations — 4-space indent and
+# 120 columns.  Everything not listed here is the Google preset of the pinned
+# clang-format (see Makefile).
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 120
+# Google places access modifiers one column left of the members; with a 4-space
+# indent that is flush with `class`, which is what the code does.
+AccessModifierOffset: -4
+# `Type* name` everywhere (Google's own preference), not a file's local majority.
+DerivePointerAlignment: false
+PointerAlignment: Left
+# Include groups (system / third-party / project, separated by blank lines) stay as
+# written and are only sorted within each group.
+IncludeBlocks: Preserve
+# Trailing comments longer than the limit reflow onto continuation comment lines
+# rather than splitting the declaration in front of them (`x =\n 0;  // ...`).
+PenaltyBreakAssignment: 1000
+PenaltyBreakComment: 60

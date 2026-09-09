@@ -538,6 +538,29 @@ extent 粒度探测，中断置 `aborted`（统计为部分结果）。
   再统一 `apply_uploads_page`。
 - 过期兜底：GC 第 1 步的 mpu_ttl 清理（§8.1）。
 
+### 9.1 多网关
+
+四步可落在不同网关（[multi-gateway-multipart-design.md](multi-gateway-multipart-design.md)），
+前提是共享 meta（redis / tikv）+ 共享数据面（rados）；部署清单见
+[../deployment.md §5](../deployment.md)：
+
+- **全局唯一**：upload_id 由 `multipart.cc:new_upload_id` 取 128 bit 随机，与
+  进程无关；分片 extent 的 file_id 来自共享 meta 的号段分配，跨网关不重叠。
+- **竞态收敛在引擎的单事务里**：同号分片两网关并发 = last-write-wins，败者同批
+  入 gcq；A 泵送分片时 B abort / complete → A 的 `put_part` 提交失败抛
+  NoSuchUpload，`commit_or_discard` 删已落数据；`UndeterminedCommit` 不删、留给
+  孤儿扫描。
+- **在途保护**：分片落盘到进 refs 之间的 chunk 由写侧租约（§8.5）挡住对端的
+  孤儿扫描；提交后由 refs 保护，与单网关相同。
+- **后台任务单执行者**：mpu_ttl 清理是 GC 轮第 1 步，随 `try_gc_lease` 只在
+  一个网关执行；轮内 abort 入 gcq 的分片必然晚于轮前取到的对端读下限，本轮
+  计入 `skipped_leased`，下一轮回收（对端可能有早于 abort 的在途读）。
+- **用例**：`tests/unit/multi_gateway_suite.h`（`duostore_{redis,tikv}_multi_gateway_*`，
+  两个 backend 共享同前缀 meta 与同一个数据面对象）、`run_e2e.sh` duostore-redis
+  双网关段、compose `multi` profile。
+- `redis/tikv meta + fs data` **不在矩阵内**：数据在各网关本地盘，对端读不到
+  （[duostore-data-fs.md §5](duostore-data-fs.md)）。
+
 ## 10. 启动恢复与关闭
 
 **启动**（两个构造函数尾部）：`abandon_stale_packs` 对上一代遗留的未封存

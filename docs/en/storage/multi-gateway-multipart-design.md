@@ -1,6 +1,6 @@
 # Multipart Across Gateways on Shared Storage: Audit and Gap-Closing Steps
 
-> Status: **§4 ① write lease (2026-09-08) and ② two-instance tests (2026-09-09) implemented; ③④ pending**. Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
+> Status: **§4 ① write lease (2026-09-08), ② two-instance tests and ③ docs / config (2026-09-09) implemented; ④ pending**. Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
 > The question: when several lights3 gateways point at the same shared storage,
 > can the create / upload_part / complete / abort steps of one multipart upload
 > land on **different gateways**? Short answer: only **duostore (redis / tikv
@@ -98,7 +98,7 @@ chunks older than that floor. With `read_lease: 0` the operational rule
 "`gc_grace` ≥ the longest expected part/object upload" still applies (the code
 does not check it).
 
-### 3.3 Gap G2: zero end-to-end verification
+### 3.3 Gap G2 (closed): once zero end-to-end verification
 
 The existing multi-gateway tests stop at the IMetaStore layer (two
 `RedisMetaStore` / `TikvMetaStore` instances sharing a prefix: unique
@@ -107,7 +107,10 @@ two `DuoStoreBackend` instances sharing the same meta + data; the four
 multipart steps have never been executed across instances; e2e
 (`tests/e2e/run_e2e.sh`) and the compose profiles are all single-gateway.
 
-### 3.4 Gap G3: nothing in docs or config carries it
+**Now**: §4 ② landed — `tests/unit/multi_gateway_suite.h`, the two-gateway
+segment of `run_e2e.sh`, the compose `multi` profile.
+
+### 3.4 Gap G3 (docs / config closed, the misconfiguration warning goes to ④): once carried nowhere
 
 - The premise table in [duostore-data-rados-design.md](duostore-data-rados-design.md)
   §8.3 has no row for multipart / write-side in-flight data;
@@ -116,6 +119,10 @@ multipart steps have never been executed across instances; e2e
   `gc_enabled` comment does not mention the write-side constraint.
 - The **unsupported** `redis/tikv meta + fs data` combination starts without a
   warning; the misconfiguration surfaces only as failing cross-gateway GETs.
+
+**Now**: the first item closed with §4 ③ (premise table, §9.1, the
+`read_lease` sample, the multi-gateway section [../deployment.md §5](../deployment.md));
+the second waits for §4 ④.
 
 ## 4. Steps to close the gaps
 
@@ -220,20 +227,26 @@ e2e, two layers:
   here, so bringing it up goes to [../../todo.md](../../todo.md) §2 pending
   verification.
 
-### ③ Docs and config
+### ③ Docs and config — implemented
 
 - [duostore-data-rados-design.md](duostore-data-rados-design.md) §8.3 premise
-  table: add rows "write-side in-flight vs peer orphan scan: write lease (§4 ①)"
-  and "multipart across gateways: verified (§4 ②)";
-  [duostore-core.md](../../storage/duostore-core.md) §9 gains a multi-gateway
-  subsection, §8.5 is retitled "read / write leases".
-- `config/lights3.yaml` duostore section: add a `read_lease: 5s` comment
-  (mandatory with multiple gateways, 0 = off); the `gc_enabled` comment points
-  at this document.
-- [../deployment.md](../deployment.md) gains a "multi-gateway deployment"
-  section: support matrix (§2), required configuration (`gc_enabled` on one
-  instance, `read_lease` on, NTP, the `meta_cache_ttl` constraint), no load
-  balancer affinity needed.
+  table: the "write-side pin vs peer orphan scan" row came with ①; this step
+  adds "multipart across gateways: verified (§4 ②)" and replaces the "not
+  implemented for now" closing note with the coarse lease that did land;
+  [duostore-core.md](../../storage/duostore-core.md) §8.5 was retitled
+  "multi-gateway read / write leases" with ①, this step adds §9.1 (global
+  uniqueness, race convergence, in-flight protection, single executor, the
+  cases, fs data outside the matrix).
+- `config/lights3.yaml` duostore section: `read_lease: 5s` comment (mandatory
+  with multiple gateways, `0s` = off, and then `gc_grace` must cover the
+  longest GET and upload); the `gc_enabled` comment points at this document
+  and deployment.md §5.
+- [../deployment.md](../deployment.md) §5 "Multi-gateway deployment" (+en):
+  support matrix (§2), required-configuration table (`gc_enabled` on one
+  instance, `read_lease` on, NTP, the `meta_cache_ttl` constraint, identical
+  prefixes / namespace, instance-level background jobs on one instance only),
+  load balancing without affinity (pass `Host` through, no request buffering).
+  The former §5 / §6 become §6 / §7.
 
 ### ④ Misconfiguration guard
 

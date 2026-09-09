@@ -423,6 +423,7 @@ gaps item by item:
 | meta transactions globally atomic | Satisfied: Lua scripts are server-side atomic (redis-meta §3.4) |
 | read-side pin vs another gateway's GC | **Closed** (roadmap §3.7): the pin table stays per-process, but every gateway publishes its oldest in-flight read start time to the shared meta every `read_lease` (default 5s); the GC gateway only reclaims gcq entries every peer's in-flight read provably cannot reference, and empty packs first seen empty before the lease floor (storage/duostore-core.md §8.5). With `read_lease: 0` the old constraint `gc_grace` ≥ the longest expected GET duration applies again |
 | write-side pin vs another gateway's orphan scan | **Closed** ([multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) §4 ①): chunks an in-flight PUT / part has landed but not yet referenced were guarded only by the per-process write pin, so an upload longer than `gc_grace` looked like crash residue to a peer's orphan scan; the same lease now carries the "oldest in-flight write start", and the orphan scan only unlinks unreferenced chunks whose mtime is older than that floor minus a skew margin (storage/duostore-core.md §8.5) |
+| multipart across gateways | **Verified** ([multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) §4 ②): create / upload_part / complete / abort may land on different gateways — upload_id and file_id are globally unique, each step is one transaction, complete is pure meta assembly; covered by the suite of two `DuoStoreBackend`s sharing meta + one data-plane object (`tests/unit/multi_gateway_suite.h`, 5 cases each on redis / tikv), the two-gateway segment of `run_e2e.sh` and the compose `multi` profile |
 | who runs GC / the orphan scan | **Must be a single instance** (configuration designates which gateway runs GC), otherwise concurrent compaction/scans trample each other |
 
 Deployment constraint (carried by configuration since C4): **with multiple
@@ -443,11 +444,13 @@ now; preferred direction = lease-based)**:
 | `rados_lock_shared/exclusive` | Readers take shared locks, GC tries exclusive — strongest object-level correctness; but every GET adds lock+unlock, two RTTs; locks left by crashed readers are broken by timeout (small = hurts long reads, large = slows GC), and GC must try-lock candidates one by one, O(n) RTTs. Rejected |
 | watch/notify broadcast pins | Notification fan-out = number of gateways, not objects (good); but reply aggregation is a homegrown protocol, an unresponsive gateway makes notify wait out its timeout (default 30s) slowing every GC round, and under partition "no reply" is indistinguishable from "not reading" — grace backstop still required on top. Rejected |
 
-Implement the lease-based scheme when a real multi-gateway shared-data
-deployment need arrives; for now the `gc_enabled` + grace constraints have
-narrowed the risk to engineering acceptability. The main document §12 warning
-"the pin table is no longer sufficient when meta is shared across gateways"
-lands here as a concrete item.
+The lease-based scheme has since landed along these lines (read side roadmap
+§3.7, write side multi-gateway-multipart §4 ①, duostore-core.md §8.5) — not a
+per-extent file_id→deadline table but one coarse row per gateway carrying its
+"oldest in-flight read / write start", so the GET hot path pays no extra shared
+write. The main document §12 warning "the pin table is no longer sufficient
+when meta is shared across gateways" lands here as a concrete item and is
+closed; the deployment checklist is in [../deployment.md §5](../deployment.md).
 
 ## 9. Build Integration
 

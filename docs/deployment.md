@@ -202,7 +202,45 @@ docker compose --profile e2e down -v
 `LIGHTS3_TEST_REDIS_URI=redis://127.0.0.1:16399 ctest -R e2e_duostore_redis`），
 外部与自起两条路径都已本机验证 202/202。
 
-## 5. 升级、回滚、卸载（`install.sh` 渠道）
+## 5. 多网关部署
+
+多个 `lights3` 进程指向同一份共享存储、前置负载均衡、无会话粘连
+（[storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md)）。
+
+### 5.1 支持矩阵
+
+| 后端 | 多网关 |
+| --- | --- |
+| memory | 不适用 |
+| localfs / xlocalfs / tiered | 不支持：分片状态在本地 staging，共享文件系统上的 rename / xattr 语义未论证，多网关 complete 同 key 互相覆盖 |
+| cloudproxy | 支持：纯透传，网关无本地状态 |
+| duostore + rocksdb / sqlite meta | 不可能：本地引擎单进程独占 |
+| duostore + redis / tikv meta + fs data | 不支持：数据在各网关本地盘，对端读不到；共享 meta 只换来 meta 侧高可用，只能单网关 |
+| duostore + redis / tikv meta + rados data | **支持**（下文） |
+
+### 5.2 必要配置（duostore + redis/tikv meta + rados data）
+
+| 项 | 要求 | 原因 |
+| --- | --- | --- |
+| `gc_enabled` | 恰好一个网关 `true`，其余 `false` | GC、孤儿扫描、mpu_ttl 清理单执行者；`try_gc_lease` 只是兜底，两台都开会互踩压实 |
+| `read_lease` | 所有网关开启（默认 5s，勿关） | 各网关把"最老在途读 / 写开始时间"发布到共享 meta，GC 网关据此推迟回收（[storage/duostore-core.md §8.5](storage/duostore-core.md)）；设 `0s` 则须 `gc_grace` ≥ 最长预期 GET **与上传**时长，代码不校验 |
+| 时钟 | 网关间 NTP，偏差 ≪ `gc_grace` | 租约与 GC 租约按 unix 时间比较；rados 对象 mtime 由 OSD 打 |
+| `meta_cache_entries` / `meta_cache_ttl` | 共享引擎默认关；开启须 `0 < ttl < gc_grace` | 对端写入对本网关缓存不可见直到过期；redis 有 pub/sub 失效广播（`meta_cache_feed`），tikv 只靠 TTL |
+| `redis_prefix` / `tikv_prefix`、`rados_pool` + `rados_namespace` | 所有网关一致 | 同一逻辑后端；前缀 / namespace 不同 = 互不相见的两套存储 |
+| `root` | 各网关本地路径 | 只放隔离区账本等本地状态，不放数据 |
+| 实例级后台任务（`usage.reconcile`、tiered 扫描等） | 只在一台开 | 同 `gc_enabled` 的指定实例语义（[multi-tenancy.md](multi-tenancy.md)） |
+| 凭证与 `.sys` | 同一份配置（凭证、区域、密钥） | STS 会话经 `.sys/sts` 写穿共享；静态凭证各网关自持 |
+
+### 5.3 负载均衡
+
+无需会话粘连：multipart 的 create / upload_part / complete / abort 可落在任意
+网关（§4 ② 用例已验证），upload_id 全局唯一，分片记录与数据对全体可见。
+代理侧注意两点：SigV4 签名覆盖 `Host`，须原样透传（nginx
+`proxy_set_header Host $http_host`）；S3 body 大，关闭请求缓冲
+（`proxy_request_buffering off`，`client_max_body_size 0`）。compose 的 `multi`
+profile（§4.2）就是这样一套最小部署，`deploy/docker/nginx-multi.conf` 可作起点。
+
+## 6. 升级、回滚、卸载（`install.sh` 渠道）
 
 ```bash
 sudo ./scripts/install.sh            # 升级：保留配置/密钥，旧二进制留作 *.prev
@@ -223,7 +261,7 @@ sudo ./scripts/uninstall.sh --purge  # 连配置、密钥、数据、日志、�
 - **uninstall.sh**：`remove` → 删文件 → `daemon-reload`；`--purge` 追加 helper 的
   `purge`。包安装的实例用包管理器卸载（§3.1）。
 
-## 6. 本机验证记录（2026-09-05）
+## 7. 本机验证记录（2026-09-05）
 
 | 项 | 结果 |
 | --- | --- |

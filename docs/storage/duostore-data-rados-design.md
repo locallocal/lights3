@@ -336,6 +336,7 @@ RedisMetaStore + RadosDataStore = 主文档 §12 组合矩阵里"全分布式网
 | meta 事务全局原子 | 已满足：Lua 脚本服务端原子（redis-meta §3.4） |
 | 读侧 pin vs 他网关 GC | **已补**（roadmap §3.7）：pin 表虽为进程内，但各网关经 `read_lease`（默认 5s）向共享 meta 发布"最老在途读开始时间"，GC 网关只回收所有对端在途读都晚于其入队的 gcq 项/见空早于下限的空 pack（[storage/duostore-core.md §8.5](duostore-core.md)）；`read_lease: 0` 关闭时回落旧约束 `gc_grace` ≥ 最长预期 GET 时长 |
 | 写侧 pin vs 他网关孤儿扫描 | **已补**（[multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) §4 ①）：在途 PUT / 分片已落盘未入 refs 的 chunk 只有进程内写侧 pin 保护，超过 `gc_grace` 的长上传会被对端孤儿扫描当作崩溃遗留删除；现在同一条租约携带"最老在途写开始时间"，孤儿扫描只删 mtime 早于该下限（减偏差余量）的无 refs chunk（[storage/duostore-core.md §8.5](duostore-core.md)） |
+| multipart 跨网关 | **已验证**（[multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) §4 ②）：create / upload_part / complete / abort 可落在不同网关——upload_id 与 file_id 全局唯一、四步各为单事务、complete 纯 meta 装配；两个 `DuoStoreBackend` 共享 meta + 数据面对象的单测套件（`tests/unit/multi_gateway_suite.h`，redis / tikv 各 5 例）、`run_e2e.sh` 双网关段与 compose `multi` profile 覆盖 |
 | GC/孤儿扫描的执行者 | **需单实例执行**（配置指定哪个网关跑 GC），否则并发压实/扫描互踩 |
 
 部署约束（C4 起有配置承载）：**多网关时 GC 仅由指定的单一实例执行**；
@@ -353,9 +354,11 @@ read-lease 关闭时另需 `gc_grace` ≥ 最长预期 GET **与上传**时长�
 | `rados_lock_shared/exclusive` | 读者共享锁、GC 试排他锁，对象级正确性最强；但每 GET 增 lock+unlock 两次 RTT，读者崩溃遗留锁靠超时打破（选小误伤长读、选大拖慢 GC），GC 要逐候选对象试锁 O(n) RTT。否决 |
 | watch/notify 广播 pin | 通知面 = 网关数而非对象数（优）；但回报聚合是自建协议，网关无响应时 notify 等超时（默认 30s）拖慢每轮 GC，且分区下"没回报"与"没在读"不可区分，仍须叠加 grace 兜底。否决 |
 
-真实多网关共享 data 的部署需求出现时再实现租约式；当前
-`gc_enabled` + grace 约束已把风险收敛到工程可接受。主文档 §12 "跨
-网关共享 meta 时 pin 表不再充分"的预警在此落为具体条目。
+租约式已按此方向落地（读侧 roadmap §3.7，写侧 multi-gateway-multipart §4 ①，
+[duostore-core.md §8.5](duostore-core.md)）——不是逐 extent 的 file_id→deadline
+表，而是每网关一行"最老在途读 / 写开始时间"的粗粒度租约，GET 热路径不多
+一次共享写。主文档 §12 "跨网关共享 meta 时 pin 表不再充分"的预警在此落为
+具体条目并已关闭；部署清单见 [../deployment.md §5](../deployment.md)。
 
 ## 9. 构建接入
 

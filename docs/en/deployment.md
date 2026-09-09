@@ -175,6 +175,8 @@ aws --endpoint-url http://127.0.0.1:9000 s3 mb s3://demo
 docker compose --profile redis up -d          # adds :9001 = duostore + redis meta
 docker compose --profile tikv up -d           # :9002 = duostore + TiKV meta (pd0 + tikv0, image lights3:full)
 docker compose --profile rados up -d          # :9003 = duostore + RADOS data (ceph/demo single node, image lights3:full)
+docker compose --profile multi up -d          # :9004 = nginx round robin over two gateways sharing redis meta + RADOS data (image lights3:full)
+docker compose --profile multi run --rm e2e-multi   # a 5-part multipart spread over both gateways (multi-gateway-multipart §4 ②)
 ```
 
 | profile | Services | Notes |
@@ -183,6 +185,7 @@ docker compose --profile rados up -d          # :9003 = duostore + RADOS data (c
 | `redis` | `redis` (`redis:7-alpine`, AOF on), `lights3-redis` | `deploy/docker/lights3-redis.yaml` mounted read-only as `/etc/lights3/lights3.yaml` |
 | `tikv` | `pd0`, `tikv0` (`pingcap/{pd,tikv}:${TIKV_VERSION:-v8.5.2}`), `lights3-tikv` | single PD, single TiKV; `lights3:full` is built with `LIGHTS3_RADOS=ON LIGHTS3_TIKV=ON` |
 | `rados` | `ceph` (`${CEPH_IMAGE:-quay.io/ceph/demo:latest}`, fixed IP 172.28.0.10), `rados-init` (one-shot pool creation), `lights3-rados` | `ceph.conf` + admin keyring shared read-only through the `ceph-etc` volume; the keyring is root-only, so the consumers run as root |
+| `multi` | `redis`, `ceph`, `rados-init`, `lights3-multi-a` / `-b`, `nginx-multi`, `e2e-multi` | multi-gateway shared storage (the combination [storage/multi-gateway-multipart-design.md §2](storage/multi-gateway-multipart-design.md) supports): both gateways use `deploy/docker/lights3-multi.yaml` (redis meta + RADOS data, `read_lease: 5s`), `LIGHTS3_GC_ENABLED` true on a only; `nginx-multi.conf` rotates per request with no stickiness; `e2e-multi.sh` runs a 5-part multipart through nginx and checks the combined ETag, the GET bytes and both gateways' request counters |
 
 `LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build`
 stamps the images. Data lives in named volumes (`lights3-data`, …);
@@ -217,7 +220,48 @@ probes `run_e2e.sh` already had:
 `LIGHTS3_TEST_REDIS_URI=redis://127.0.0.1:16399 ctest -R e2e_duostore_redis`);
 both the external and the spawned path were verified locally at 202/202.
 
-## 5. Upgrade, rollback, uninstall (the `install.sh` channel)
+## 5. Multi-gateway deployment
+
+Several `lights3` processes pointing at one shared storage behind a load
+balancer, with no session affinity
+([storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md)).
+
+### 5.1 Support matrix
+
+| Backend | Multiple gateways |
+| --- | --- |
+| memory | n/a |
+| localfs / xlocalfs / tiered | unsupported: part state lives in local staging, rename / xattr semantics on a shared filesystem were never argued, two gateways completing the same key overwrite each other |
+| cloudproxy | supported: pure pass-through, no local state |
+| duostore + rocksdb / sqlite meta | impossible: local engines are single-process |
+| duostore + redis / tikv meta + fs data | unsupported: data sits on each gateway's local disk, invisible to the peer; shared meta only buys meta-side availability, single gateway only |
+| duostore + redis / tikv meta + rados data | **supported** (below) |
+
+### 5.2 Required configuration (duostore + redis/tikv meta + rados data)
+
+| Item | Requirement | Why |
+| --- | --- | --- |
+| `gc_enabled` | `true` on exactly one gateway, `false` on the others | single executor for GC, the orphan scan and mpu_ttl cleanup; `try_gc_lease` is only a backstop, two enabled instances trample each other's compaction |
+| `read_lease` | on for every gateway (default 5s, do not switch off) | each gateway publishes its "oldest in-flight read / write start" to the shared meta and the GC gateway defers reclamation accordingly ([storage/duostore-core.md §8.5](../storage/duostore-core.md)); with `0s`, `gc_grace` must exceed the longest expected GET **and upload**, unchecked by code |
+| clocks | NTP between gateways, skew ≪ `gc_grace` | leases and the GC lease compare unix time; rados object mtimes are stamped by the OSDs |
+| `meta_cache_entries` / `meta_cache_ttl` | off by default on shared engines; enabling needs `0 < ttl < gc_grace` | a peer's write stays invisible to a cached record until expiry; redis pushes invalidations over pub/sub (`meta_cache_feed`), tikv relies on the TTL alone |
+| `redis_prefix` / `tikv_prefix`, `rados_pool` + `rados_namespace` | identical on every gateway | one logical backend; differing prefixes / namespaces are two stores that never see each other |
+| `root` | a local path per gateway | holds local state such as the quarantine ledger only, never data |
+| instance-level background jobs (`usage.reconcile`, tiered scans, …) | on one instance only | the same designated-instance semantics as `gc_enabled` ([multi-tenancy.md](multi-tenancy.md)) |
+| credentials and `.sys` | the same configuration (credentials, region, secrets) | STS sessions are written through to the shared `.sys/sts`; static credentials are held by every gateway |
+
+### 5.3 Load balancing
+
+No affinity needed: a multipart's create / upload_part / complete / abort may
+land on any gateway (verified by the §4 ② cases), upload_ids are globally
+unique, and part records and data are visible to all. Two things on the
+proxy: SigV4 signs `Host`, so pass it through verbatim (nginx
+`proxy_set_header Host $http_host`); S3 bodies are large, so disable request
+buffering (`proxy_request_buffering off`, `client_max_body_size 0`). The
+compose `multi` profile (§4.2) is exactly such a minimal deployment;
+`deploy/docker/nginx-multi.conf` is a usable starting point.
+
+## 6. Upgrade, rollback, uninstall (the `install.sh` channel)
 
 ```bash
 sudo ./scripts/install.sh            # upgrade: keeps config / secrets, old binaries become *.prev
@@ -244,7 +288,7 @@ sudo ./scripts/uninstall.sh --purge  # also delete config, secrets, data, logs a
   the helper's `purge`. Package installs are removed with the package manager
   (§3.1).
 
-## 6. Local verification record (2026-09-05)
+## 7. Local verification record (2026-09-05)
 
 | Item | Result |
 | --- | --- |

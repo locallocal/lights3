@@ -1,6 +1,6 @@
 # 多网关共享存储下的 Multipart：现状核对与补齐步骤
 
-> 状态：**§4 ① 写侧租约（2026-09-08）与 ② 双实例测试（2026-09-09）已实现，③④ 待做**。本文回答一个问题：
+> 状态：**§4 ① 写侧租约（2026-09-08）、② 双实例测试与 ③ 文档配置（2026-09-09）已实现，④ 待做**。本文回答一个问题：
 > 多个 lights3 网关指向同一份共享存储时，一个 multipart 上传的
 > create / upload_part / complete / abort 能否落在**不同网关**上。结论先行：
 > 只有 **duostore（redis / tikv meta + rados data）** 与 **cloudproxy** 在设计上
@@ -83,20 +83,26 @@ read-lease 把它搬到共享介质，写侧当时**没有对应物**。
 只删 mtime 早于该下限的无 refs chunk。`read_lease: 0` 关闭租约时仍回落到
 "`gc_grace` ≥ 最长预期分片/对象上传时长"的运维约定（代码不校验）。
 
-### 3.3 缺口 G2：零端到端验证
+### 3.3 缺口 G2（已关闭）：曾经零端到端验证
 
 现有多网关测试只在 IMetaStore 层（两个 `RedisMetaStore` / `TikvMetaStore`
 实例共前缀：号段唯一、CAS 收敛、GC 租约、read-lease），**没有**两个
 `DuoStoreBackend` 共享同一 meta + data 的用例，multipart 跨实例的四步从未被
 执行过；e2e（`tests/e2e/run_e2e.sh`）与 compose profile 都是单网关。
 
-### 3.4 缺口 G3：文档与配置无承载
+**现状**：§4 ② 已落地——`tests/unit/multi_gateway_suite.h`、`run_e2e.sh` 双网关段、
+compose `multi` profile。
+
+### 3.4 缺口 G3（文档配置已关闭，误配告警归 ④）：曾经无承载
 
 - [duostore-data-rados-design.md](duostore-data-rados-design.md) §8.3 的前提表
   没有 multipart / 写侧在途一行；[duostore-core.md](duostore-core.md) §9 无多网关
   说明；`config/lights3.yaml` 未列 `read_lease`，`gc_enabled` 注释未提写侧约束。
 - `redis/tikv meta + fs data` 这条**不支持**的组合启动时无任何告警，误配只在
   跨网关 GET 失败时暴露。
+
+**现状**：第一条随 §4 ③ 关闭（前提表、§9.1、`read_lease` 样例、
+[../deployment.md §5](../deployment.md) 多网关小节）；第二条待 §4 ④。
 
 ## 4. 补齐步骤
 
@@ -182,17 +188,21 @@ e2e 两层：
   `docker compose --profile multi config` 通过；本机无 docker daemon，实际拉起归入
   [../todo.md](../todo.md) §2 待验证。
 
-### ③ 文档与配置
+### ③ 文档与配置 —— 已实现
 
-- [duostore-data-rados-design.md](duostore-data-rados-design.md) §8.3 前提表加
-  "写侧在途 vs 他网关孤儿扫描：write-lease（§4 ①）"与"multipart 跨网关：已验证
-  （§4 ②）"两行；[duostore-core.md](duostore-core.md) §9 加多网关小节，§8.5 改题
-  为"读写租约"。
-- `config/lights3.yaml` duostore 段补 `read_lease: 5s`（多网关必开，0 = 关）
-  注释，`gc_enabled` 注释指向本文。
-- [../deployment.md](../deployment.md) 新增"多网关部署"小节：支持矩阵（§2）、
-  必要配置（`gc_enabled` 单实例、`read_lease` 开启、NTP、`meta_cache_ttl` 约束）、
-  负载均衡无需粘连。
+- [duostore-data-rados-design.md](duostore-data-rados-design.md) §8.3 前提表：
+  "写侧 pin vs 他网关孤儿扫描"行随 ① 加入，本步补"multipart 跨网关：已验证
+  （§4 ②）"行，并把"暂不实现租约式"的结语改为已落地的粗粒度租约；
+  [duostore-core.md](duostore-core.md) §8.5 已随 ① 改题为"多网关读写租约"，
+  本步加 §9.1 多网关小节（全局唯一、竞态收敛、在途保护、单执行者、用例、
+  fs data 不在矩阵内）。
+- `config/lights3.yaml` duostore 段补 `read_lease: 5s`（多网关必开，`0s` = 关，
+  关则 `gc_grace` 须盖过最长 GET 与上传）注释，`gc_enabled` 注释指向本文与
+  deployment.md §5。
+- [../deployment.md](../deployment.md) §5 "多网关部署"（+en）：支持矩阵（§2）、
+  必要配置表（`gc_enabled` 单实例、`read_lease` 开启、NTP、`meta_cache_ttl`
+  约束、前缀 / namespace 一致、实例级后台任务单开）、负载均衡无需粘连
+  （透传 `Host`、关请求缓冲）。原 §5 / §6 顺延为 §6 / §7。
 
 ### ④ 误配防线
 

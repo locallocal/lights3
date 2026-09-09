@@ -23,18 +23,25 @@ struct redisReply;
 namespace lights3::storage::duostore {
 
 struct RedisMetaOptions {
-    std::string uri;              // redis://[:pass@]host[:port][/db] or unix://<path>
-    std::string prefix = "duo:";  // prefix for all keys (§2.1 multi-instance/test isolation)
-    int timeout_ms = 3000;        // connect + per-command timeout (§5.4)
-    int pool_size = 8;            // connection pool size (§5.2)
-    int wait_replicas = 0;        // replicas to WAIT for after commit-class commands (§6; 0 = no wait)
-    MetricsScope metrics;         // CAS retry / reconnect counters (R4; empty scope = detached instances)
+    // redis://[:pass@]host[:port][/db] or unix://<path>
+    std::string uri;
+    // prefix for all keys (§2.1 multi-instance/test isolation)
+    std::string prefix = "duo:";
+    // connect + per-command timeout (§5.4)
+    int timeout_ms = 3000;
+    // connection pool size (§5.2)
+    int pool_size = 8;
+    // replicas to WAIT for after commit-class commands (§6; 0 = no wait)
+    int wait_replicas = 0;
+    // CAS retry / reconnect counters (R4; empty scope = detached instances)
+    MetricsScope metrics;
 };
 
 class RedisBatch;
 
 struct RedisReplyDeleter {
-    void operator()(redisReply* r) const;  // freeReplyObject
+    // freeReplyObject
+    void operator()(redisReply* r) const;
 };
 using RedisReplyPtr = std::unique_ptr<redisReply, RedisReplyDeleter>;
 
@@ -110,7 +117,8 @@ public:
 private:
     friend class RedisBatch;
 
-    struct Conn;  // hiredis connection (defined in the .cc; the header leaks no hiredis types)
+    // hiredis connection (defined in the .cc; the header leaks no hiredis types)
+    struct Conn;
     using ReplyPtr = RedisReplyPtr;
 
     // Id-segment reservation (§4, isomorphic to RocksMetaStore): one INCRBY of +kIdSegment, then
@@ -125,7 +133,8 @@ private:
     // ---- Connection pool (§5.2): mutex-protected idle stack, RAII acquire/release ----
     std::unique_ptr<Conn> acquire();
     void release(std::unique_ptr<Conn> c);
-    std::unique_ptr<Conn> make_conn();  // connect + AUTH/SELECT (§5.4)
+    // connect + AUTH/SELECT (§5.4)
+    std::unique_ptr<Conn> make_conn();
 
     // Command execution (always redisCommandArgv, binary-safe, §5.1). read_retry: read-only may
     // retry once on a fresh connection; commit-class IO failure = result unknown → InternalError
@@ -144,20 +153,26 @@ private:
     // ---- Key construction (§2.2; prefix + '\0'-separated compound segments) ----
     std::string key(std::string_view suffix) const;
     std::string buckets_key() const;
-    std::string objects_key(std::string_view b) const;   // o:<b>   HASH
-    std::string zindex_key(std::string_view b) const;    // oz:<b>  ZSET
-    std::string uploads_key(std::string_view b) const;   // up:<b>  HASH
-    std::string uploads_zkey(std::string_view b) const;  // uz:<b>  ZSET (lex index over up:<b> fields, roadmap §3.5)
+    // o:<b>   HASH
+    std::string objects_key(std::string_view b) const;
+    // oz:<b>  ZSET
+    std::string zindex_key(std::string_view b) const;
+    // up:<b>  HASH
+    std::string uploads_key(std::string_view b) const;
+    // uz:<b>  ZSET (lex index over up:<b> fields, roadmap §3.5)
+    std::string uploads_zkey(std::string_view b) const;
     // Full HSCAN of up:<b> plus reconciliation of uz:<b> against it (legacy tables written
     // before the index existed, or by an older gateway sharing the meta). Returns everything
     std::vector<UploadInfo> list_uploads_rebuild(std::string_view b);
     std::string parts_key(std::string_view b, std::string_view k, std::string_view id) const;
     std::string refs_key() const;
     std::string gcq_key() const;
-    std::string pack_key(uint64_t pack_id) const;  // pack:<id> HASH (§2.2 pack liveness accounting)
+    // pack:<id> HASH (§2.2 pack liveness accounting)
+    std::string pack_key(uint64_t pack_id) const;
 
     // ---- High-level helpers ----
-    void require_bucket(std::string_view b);  // missing → NoSuchBucket (read-only precheck)
+    // missing → NoSuchBucket (read-only precheck)
+    void require_bucket(std::string_view b);
     std::optional<std::string> hget_raw(const std::string& k, std::string_view field);
     std::optional<std::string> upload_raw(std::string_view b, std::string_view k, std::string_view id);
     uint64_t alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n = 1);
@@ -192,12 +207,15 @@ private:
     // Separate small lock for id-segment handout (alloc is called on the data plane whenever a chunk opens; must not
     // queue behind business commits)
     std::mutex alloc_mu_;
-    IdRange file_ids_[2];  // indexed by Extent::Kind
-    IdRange seqs_;         // gcq seq
+    // indexed by Extent::Kind
+    IdRange file_ids_[2];
+    // gcq seq
+    IdRange seqs_;
 
     // Invalidation subscriber (backlog-sequence ⑤)
     void subscriber_loop();
-    std::string origin_;  // random per-store id stamped into published invalidations
+    // random per-store id stamped into published invalidations
+    std::string origin_;
     std::thread sub_thread_;
     std::atomic<bool> sub_stop_{false};
     InvalidationSink sub_on_key_;

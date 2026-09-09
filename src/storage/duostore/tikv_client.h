@@ -22,7 +22,8 @@ struct Cluster;
 namespace lights3::storage::duostore {
 
 struct TikvOptions {
-    std::vector<std::string> pd_endpoints;  // list of "host:port"
+    // list of "host:port"
+    std::vector<std::string> pd_endpoints;
     // mTLS triple (optional; enabled only when all three are given, docs/storage/duostore-meta-tikv-design.md §9)
     std::string ca_path;
     std::string cert_path;
@@ -39,15 +40,18 @@ struct TikvOptions {
 enum class TikvOp : uint8_t {
     kPut,
     kDel,
-    kLock,    // placeholder lock record: materializes write-skew conflicts for read-only preconditions (§4.3 guard
-              // shards)
-    kInsert,  // put + must-not-exist (create_bucket → BucketAlreadyOwnedByYou)
+    // placeholder lock record: materializes write-skew conflicts for read-only preconditions (§4.3 guard
+    // shards)
+    kLock,
+    // put + must-not-exist (create_bucket → BucketAlreadyOwnedByYou)
+    kInsert,
 };
 
 struct TikvMutation {
     TikvOp op;
     std::string key;
-    std::string value;  // always empty for kDel/kLock
+    // always empty for kDel/kLock
+    std::string value;
 };
 
 // ---- Commit outcome classification (§4.1/§4.6; the meta store decides retry/mapping by category) ----

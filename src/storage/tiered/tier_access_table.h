@@ -76,7 +76,8 @@ public:
         } catch (const std::exception& e) {
             LOG_WARN("tiered: access table snapshot failed: {}", e.what());
             std::lock_guard lk(m_);
-            dirty_ = true;  // retry next round
+            // retry next round
+            dirty_ = true;
         }
     }
 

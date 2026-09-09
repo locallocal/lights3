@@ -124,14 +124,19 @@ struct BodyState {
     ConnReader* conn = nullptr;
     Io* io = nullptr;
     driver::ConnCounters* counters = nullptr;
-    bool need_continue = false;  // Expect: 100-continue not yet answered; reply only on first read
+    // Expect: 100-continue not yet answered; reply only on first read
+    bool need_continue = false;
     bool chunked = false;
-    uint64_t remaining = 0;         // Fixed-length mode: bytes remaining
-    uint64_t chunk_left = 0;        // chunked mode: remaining in the current chunk
-    bool after_chunk_data = false;  // Just finished a chunk's data; next line must be CRLF
+    // Fixed-length mode: bytes remaining
+    uint64_t remaining = 0;
+    // chunked mode: remaining in the current chunk
+    uint64_t chunk_left = 0;
+    // Just finished a chunk's data; next line must be CRLF
+    bool after_chunk_data = false;
     bool chunk_eof = false;
     bool error = false;
-    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
+    // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
+    size_t trailer_max = 16 * 1024;
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -250,7 +255,8 @@ private:
 struct ConnShared {
     HttpConfig cfg;
     Handler handler;
-    driver::ConnCounters counters;  // IHttpServer::stats() (roadmap §4.2)
+    // IHttpServer::stats() (roadmap §4.2)
+    driver::ConnCounters counters;
     // TLS (roadmap §4.1): the holder supplies certificates/SNI/client CA per
     // handshake and hot-reloads them; the SSL_CTX carries the static knobs. Both
     // live here because connection threads outlive the server object
@@ -358,7 +364,8 @@ Task<bool> stream_body(Io& io, HttpResponse& resp, bool chunked, size_t io_chunk
             chunk = co_await pf.next();
         } catch (const std::exception& e) {
             LOG_ERROR("stream body read failed mid-response: {}", e.what());
-            co_return false;  // Response head already sent; can only disconnect
+            // Response head already sent; can only disconnect
+            co_return false;
         }
         co_await resume_on(exec);
         size_t n = chunk.size();
@@ -568,7 +575,8 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     Io io;
     io.fd = fd;
     std::optional<TlsIdentity> tls_identity;
-    io.set_recv_timeout(sh.cfg.header_timeout_sec);  // covers the TLS handshake too
+    // covers the TLS handshake too
+    io.set_recv_timeout(sh.cfg.header_timeout_sec);
     io.set_send_timeout(sh.cfg.write_timeout_sec);
     if (sh.tls_ctx) {
         // TLS handshake on the connection thread (blocking, bounded by the socket
@@ -593,8 +601,9 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     }
 
     ConnReader reader;
-    reader.io = &io;  // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset
-                      // 16KiB)
+    // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset
+    // 16KiB)
+    reader.io = &io;
     bool keep_alive = true;
     int served = 0;
     while (keep_alive && !sh.stopping.load()) {
@@ -602,7 +611,8 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
         ++served;
     }
     if (io.ssl) {
-        SSL_shutdown(io.ssl);  // best-effort close_notify; TCP is closed right after anyway
+        // best-effort close_notify; TCP is closed right after anyway
+        SSL_shutdown(io.ssl);
         SSL_free(io.ssl);
         ERR_clear_error();
     }

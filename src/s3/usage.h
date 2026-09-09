@@ -40,11 +40,14 @@ namespace lights3::s3 {
 
 struct BucketUsage {
     int64_t objects = 0;
-    int64_t bytes = 0;      // committed object bytes
-    int64_t mpu_bytes = 0;  // in-flight multipart part bytes (counted toward quotas)
+    // committed object bytes
+    int64_t bytes = 0;
+    // in-flight multipart part bytes (counted toward quotas)
+    int64_t mpu_bytes = 0;
     // Last full count by any instance; epoch = never scanned (counters started from zero)
     std::chrono::system_clock::time_point scanned_at{};
-    bool dirty = false;  // has unflushed local deltas (never persisted)
+    // has unflushed local deltas (never persisted)
+    bool dirty = false;
 
     int64_t total_bytes() const { return bytes + mpu_bytes; }
     bool scanned() const { return scanned_at.time_since_epoch().count() != 0; }
@@ -125,8 +128,10 @@ private:
 
     mutable std::mutex mu_;
     std::map<std::string, BucketUsage> usage_;
-    std::set<std::string> scanning_;  // single-flight per bucket
-    std::set<std::string> gauged_;    // buckets with registered per-bucket gauges
+    // single-flight per bucket
+    std::set<std::string> scanning_;
+    // buckets with registered per-bucket gauges
+    std::set<std::string> gauged_;
     static constexpr size_t kMaxGaugedBuckets = 512;
     std::atomic<bool> sys_bucket_ready_{false};
     std::atomic<size_t> scans_{0};

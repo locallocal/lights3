@@ -19,7 +19,8 @@
 #include "storage/duostore/meta_backup.h"
 #include "storage/duostore/rocks_meta_store.h"
 #include "storage/listing.h"
-#include "storage/localfs/fs_util.h"  // StubRace: shared tiered vocabulary
+// StubRace: shared tiered vocabulary
+#include "storage/localfs/fs_util.h"
 #include "storage/multipart.h"
 #include "storage/scrub_throttle.h"
 #include "storage/xlocalfs/uring.h"
@@ -90,7 +91,8 @@ void PinTable::unpin_key(bool is_pack, uint64_t id) {
     std::lock_guard lk(s.m);
     auto& refs = is_pack ? s.pack_refs : s.chunk_refs;
     auto it = refs.find(id);
-    if (it == refs.end()) return;  // should not happen; tolerated defensively
+    // should not happen; tolerated defensively
+    if (it == refs.end()) return;
     if (--it->second <= 0) refs.erase(it);
 }
 
@@ -139,10 +141,12 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     // of rewriting the whole manifest per record
     struct Group {
         std::string b, k;
-        std::vector<size_t> recs;  // batch indices, in scan order
+        // batch indices, in scan order
+        std::vector<size_t> recs;
     };
     std::vector<Group> groups;
-    std::map<std::string, size_t> by_owner;  // "b\0k" -> groups index
+    // "b\0k" -> groups index
+    std::map<std::string, size_t> by_owner;
     for (size_t i = 0; i < batch.size(); ++i) {
         // Canonical parser (docs/archive/gaps.md §6.1: the three owner forms converge in
         // codec, offline forensics tools reuse the same entry point);
@@ -161,15 +165,19 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     // assembled from distinct records; positions are still marked as paired for
     // defense)
     struct LiveRec {
-        size_t group;       // groups index
-        size_t manifest_i;  // position replaced within that group's manifest
-        size_t rec_i;       // batch index
+        // groups index
+        size_t group;
+        // position replaced within that group's manifest
+        size_t manifest_i;
+        // batch index
+        size_t rec_i;
     };
     std::vector<LiveRec> live;
     std::vector<std::optional<ObjectRec>> group_rec(groups.size());
     for (size_t g = 0; g < groups.size(); ++g) {
         auto rec = meta.get_object(groups[g].b, groups[g].k);
-        if (!rec) continue;  // object missing = all dead region / in-flight mpu, conservatively not migrated
+        // object missing = all dead region / in-flight mpu, conservatively not migrated
+        if (!rec) continue;
         std::vector<bool> used(rec->data.extents.size(), false);
         for (size_t ri : groups[g].recs)
             for (size_t i = 0; i < rec->data.extents.size(); ++i)
@@ -202,7 +210,8 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
     reqs.reserve(groups.size());
     for (size_t g = 0; g < groups.size(); ++g) {
         if (!group_rec[g]) continue;
-        std::map<size_t, size_t> repl;  // manifest position -> live index
+        // manifest position -> live index
+        std::map<size_t, size_t> repl;
         for (size_t i = 0; i < live.size(); ++i)
             if (live[i].group == g) repl[live[i].manifest_i] = i;
         if (repl.empty()) continue;
@@ -261,7 +270,8 @@ namespace {
 
 bool parse_bool_param(const std::string& name, const char* key, const std::string& v) {
     try {
-        return parse_bool(v);  // shared token set (core/config.h)
+        // shared token set (core/config.h)
+        return parse_bool(v);
     } catch (...) {
         bad_param(name, key, v);
     }
@@ -672,8 +682,9 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         meta_ = std::make_unique<RocksMetaStore>(RocksMetaOptions{
             cfg_.meta_path.string(), cfg_.meta_sync, cfg_.rocksdb_block_cache, cfg_.rocksdb_write_buffer,
             cfg_.rocksdb_max_write_buffers, cfg_.rocksdb_max_background_jobs, metrics});
-    IMetaStore* meta = meta_.get();  // the alloc callback does not extend meta's lifetime: this class owns both, data
-                                     // closes first
+    // the alloc callback does not extend meta's lifetime: this class owns both, data
+    // closes first
+    IMetaStore* meta = meta_.get();
     auto alloc = [meta](Extent::Kind kind, uint32_t n) { return meta->alloc_file_run(kind, n); };
     // Read-path crc mismatch reporting (P5 corruption metric): captures only the
     // counter shared_ptr — the callback stays safe after readers holding options
@@ -692,7 +703,8 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
         ro.op_timeout_sec = cfg_.rados_op_timeout_sec;
         ro.verify_chunk_crc = cfg_.verify_chunk_crc;
         ro.on_corruption = on_corruption;
-        ro.metrics = metrics;  // op latency/error metrics (C4, docs/storage/duostore-data-rados-design.md §10)
+        // op latency/error metrics (C4, docs/storage/duostore-data-rados-design.md §10)
+        ro.metrics = metrics;
         // Write-side pins injected from the same source as the fs path
         // (docs/archive/gaps.md §1.2): the rados branch used to miss this entirely, and
         // the orphan scan would delete the already-landed parts of an in-flight
@@ -1038,8 +1050,10 @@ bool DuoStoreBackend::quarantine_release(uint64_t pack_id) {
 Task<bool> DuoStoreBackend::quarantine_purge(uint64_t pack_id) {
     co_await pool_->schedule();
     BackgroundTaskGroup::Scope scope(bg_);
-    if (!scope.ok()) co_return false;          // shutting down
-    auto permit = co_await gc_sem_.acquire();  // no GC round while the file goes away
+    // shutting down
+    if (!scope.ok()) co_return false;
+    // no GC round while the file goes away
+    auto permit = co_await gc_sem_.acquire();
     {
         std::lock_guard lk(q_mu_);
         auto it = quarantined_.find(pack_id);
@@ -1076,7 +1090,8 @@ Task<void> DuoStoreBackend::close() {
     if (closed_.exchange(true)) co_return;
     // Cancel the GC timers, wait for in-flight GC coroutines to end (§9 lifecycle)
     shutdown_background();
-    co_await data_->close();  // seal active packs (P2)
+    // seal active packs (P2)
+    co_await data_->close();
     co_await pool_->schedule();
     meta_->close();
 }
@@ -1089,7 +1104,8 @@ void DuoStoreBackend::require_bucket(std::string_view bucket) {
 ObjectRec DuoStoreBackend::require_object(std::string_view bucket, std::string_view key) {
     auto rec = meta_->get_object(bucket, key);
     if (!rec) {
-        require_bucket(bucket);  // distinguish NoSuchBucket / NoSuchKey
+        // distinguish NoSuchBucket / NoSuchKey
+        require_bucket(bucket);
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
     return std::move(*rec);
@@ -1161,7 +1177,8 @@ public:
           ticket_(ticket) {}
     ~PinnedReader() override {
         pins_->unpin(ids_);
-        clock_->end(ticket_);  // the read-lease registration ends with the read (roadmap §3.7)
+        // the read-lease registration ends with the read (roadmap §3.7)
+        clock_->end(ticket_);
     }
 
     Task<size_t> read(std::span<std::byte> buf) override { return inner_->read(buf); }
@@ -1250,9 +1267,11 @@ Task<PutResult> DuoStoreBackend::put_object(std::string_view bucket, std::string
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     co_await pool_->schedule();
-    require_bucket(bucket);  // precheck; the authoritative check is redone inside the commit transaction (§6.1 ②)
+    // precheck; the authoritative check is redone inside the commit transaction (§6.1 ②)
+    require_bucket(bucket);
 
-    WriteTicket wt(write_clock_);  // write lease: registered before the first chunk lands
+    // write lease: registered before the first chunk lands
+    WriteTicket wt(write_clock_);
     auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     ObjectRec rec;
@@ -1289,7 +1308,8 @@ Task<void> DuoStoreBackend::tier_commit_stub(std::string_view bucket, std::strin
     ObjectRec rec;
     rec.meta = meta;
     rec.meta.key = std::string(key);
-    rec.tier = ts;  // data stays empty: the meta transaction sends the old extents to the gcq
+    // data stays empty: the meta transaction sends the old extents to the gcq
+    rec.tier = ts;
     PutCondition cond;
     cond.if_match_etag = meta.etag;
     auto inv = meta_cache_->invalidate_on_exit(bucket, key);
@@ -1299,10 +1319,12 @@ Task<void> DuoStoreBackend::tier_commit_stub(std::string_view bucket, std::strin
 Task<void> DuoStoreBackend::tier_commit_cached(std::string_view bucket, std::string_view key, http::BodyReader& body,
                                                const ObjectMeta& meta, const TierState& ts) {
     co_await pool_->schedule();
-    WriteTicket wt(write_clock_);  // write lease: registered before the first chunk lands
+    // write lease: registered before the first chunk lands
+    WriteTicket wt(write_clock_);
     auto pumped = co_await pump_body(*data_, body, codec::object_key(bucket, key));
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
-    if (pumped.ref.total() != meta.size) {  // the fill was verified upstream; defend anyway
+    if (pumped.ref.total() != meta.size) {
+        // the fill was verified upstream; defend anyway
         try {
             co_await data_->remove(pumped.ref.extents);
         } catch (...) {
@@ -1399,7 +1421,8 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
             std::rethrow_exception(err);
         }
         out.body = std::make_unique<PinnedReader>(std::move(inner), pins_, std::move(ids), read_clock_, ticket.ticket);
-        ticket.clock.reset();  // ownership handed to the reader
+        // ownership handed to the reader
+        ticket.clock.reset();
     }
     co_return out;
 }
@@ -1407,7 +1430,8 @@ Task<ObjectStream> DuoStoreBackend::get_object(std::string_view bucket, std::str
 Task<std::optional<ObjectLayout>> DuoStoreBackend::inspect_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     co_await pool_->schedule();
-    auto rec = meta_->get_object(bucket, key);  // authoritative: bypasses the cache on purpose
+    // authoritative: bypasses the cache on purpose
+    auto rec = meta_->get_object(bucket, key);
     if (!rec) {
         require_bucket(bucket);
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
@@ -1445,7 +1469,8 @@ Task<ObjectMeta> DuoStoreBackend::head_object(std::string_view bucket, std::stri
     // meta-only read (docs/archive/gaps.md §3.9): HEAD does not pay for the whole manifest
     auto meta = meta_->head_object(bucket, key);
     if (!meta) {
-        require_bucket(bucket);  // distinguish NoSuchBucket / NoSuchKey
+        // distinguish NoSuchBucket / NoSuchKey
+        require_bucket(bucket);
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
     auto e = std::make_shared<CachedObject>();
@@ -1458,8 +1483,9 @@ Task<void> DuoStoreBackend::delete_object(std::string_view bucket, std::string_v
     validate_object_key(key);
     co_await pool_->schedule();
     auto inv = meta_cache_->invalidate_on_exit(bucket, key);
-    meta_->delete_object(bucket, key);  // idempotent (returns false if absent); physical reclamation realized
-                                        // asynchronously by GC (§6.2)
+    // idempotent (returns false if absent); physical reclamation realized
+    // asynchronously by GC (§6.2)
+    meta_->delete_object(bucket, key);
 }
 
 Task<ListResult> DuoStoreBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
@@ -1480,10 +1506,12 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
                                              int part_no, http::BodyReader& body,
                                              const std::optional<PartChecksum>& checksum) {
     validate_part_number(part_no);
-    validate_object_key(key);  // the key enters the '\0'-separated encoding (§4.1), so the multipart entry validates
-                               // too
+    // the key enters the '\0'-separated encoding (§4.1), so the multipart entry validates
+    // too
+    validate_object_key(key);
     co_await pool_->schedule();
-    meta_->require_upload(bucket, key, upload_id);  // precheck; redone at commit
+    // precheck; redone at commit
+    meta_->require_upload(bucket, key, upload_id);
 
     // The mpu owner carries b/k (P4 §9.2): after complete, the part record's
     // owning object can be reverse-looked-up from it, so compaction does not lose
@@ -1498,7 +1526,8 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     owner += upload_id;
     owner += '\0';
     owner += std::to_string(part_no);
-    WriteTicket wt(write_clock_);  // write lease: registered before the first chunk lands
+    // write lease: registered before the first chunk lands
+    WriteTicket wt(write_clock_);
     auto pumped = co_await pump_body(*data_, body, std::move(owner));
     WritePinRelease wp(write_pins_, pins_.get(), pumped.ref);
     PartRec p;
@@ -1507,7 +1536,8 @@ Task<PutResult> DuoStoreBackend::upload_part(std::string_view bucket, std::strin
     p.etag = pumped.md5;
     p.modified_ms = codec::to_unix_ms(std::chrono::system_clock::now());
     p.data = pumped.ref;
-    if (checksum) {  // resolved() only after pump_body drained the body (trailer form)
+    if (checksum) {
+        // resolved() only after pump_body drained the body (trailer form)
         p.checksum_algorithm = checksum->algorithm;
         p.checksum_value = checksum->resolved();
     }
@@ -1569,8 +1599,9 @@ Task<ListUploadsResult> DuoStoreBackend::list_multipart_uploads(std::string_view
 
 namespace {
 
-constexpr size_t kGcBatch = 256;  // per-round peek batch; advance after ack between batches, preventing one batch of a
-                                  // large backlog from blowing memory
+// per-round peek batch; advance after ack between batches, preventing one batch of a
+// large backlog from blowing memory
+constexpr size_t kGcBatch = 256;
 // Cumulative per-batch extent cap (gaps §2.11): count-based batching under a
 // "deleted TB-scale objects" ledger can reach GB-scale residency per batch — the
 // enqueue side already splits by kReclaimMaxExtents; this covers legacy entries
@@ -1586,8 +1617,10 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     // worker share one ledger, so there is no "check closed_ only once" TOCTOU window
     BackgroundTaskGroup::Scope scope(bg_);
     DuoGcStats st;
-    if (!scope.ok()) co_return st;             // shutting down
-    auto permit = co_await gc_sem_.acquire();  // manual hook vs background worker mutual exclusion
+    // shutting down
+    if (!scope.ok()) co_return st;
+    // manual hook vs background worker mutual exclusion
+    auto permit = co_await gc_sem_.acquire();
     // Multi-gateway lease (§6.1): gc_enabled is only a convention; two
     // misconfigured instances both running GC would unlink each other's
     // determined-empty packs. Shared meta (redis/tikv) claims atomically here;
@@ -1634,7 +1667,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                     uploads = meta_->list_uploads(bk.name);
                 } catch (const std::exception& e) {
                     LOG_WARN("duostore '{}': gc list uploads of bucket {} failed: {}", cfg_.name, bk.name, e.what());
-                    continue;  // bucket deleted/temporarily unreadable: skip it without affecting the other steps
+                    // bucket deleted/temporarily unreadable: skip it without affecting the other steps
+                    continue;
                 }
                 for (const auto& u : uploads) {
                     if (now - codec::to_unix_ms(u.initiated) < ttl_ms) continue;
@@ -1669,7 +1703,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     uint64_t next_seq = 0;
     if (gcq_skips_.any) next_seq = round_now < gcq_skips_.retry_at_ms ? gcq_hi_ : gcq_skips_.lo_seq;
     const bool full_scan = !gcq_skips_.any || next_seq == gcq_skips_.lo_seq;
-    GcqSkips skips;  // skips newly added this round
+    // skips newly added this round
+    GcqSkips skips;
     auto note_skip = [&skips](uint64_t seq, int64_t retry_at) {
         if (!skips.any || seq < skips.lo_seq) skips.lo_seq = seq;
         if (!skips.any || retry_at < skips.retry_at_ms) skips.retry_at_ms = retry_at;
@@ -1694,19 +1729,22 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
         for (const auto& [seq, rc] : batch) {
             if (batch_now - rc.enqueue_ms < grace_ms) {
                 ++st.skipped_grace;
-                note_skip(seq, rc.enqueue_ms + grace_ms);  // deterministic lower bound
+                // deterministic lower bound
+                note_skip(seq, rc.enqueue_ms + grace_ms);
                 continue;
             }
             // A peer gateway's in-flight read started before this entry was
             // enqueued could still hold the old ref (roadmap §3.7)
             if (lease_floor && rc.enqueue_ms >= *lease_floor) {
                 ++st.skipped_leased;
-                note_skip(seq, batch_now);  // when the peer read finishes is unknowable
+                // when the peer read finishes is unknowable
+                note_skip(seq, batch_now);
                 continue;
             }
             if (pins_->any_pinned(rc.extents)) {
                 ++st.skipped_pinned;
-                note_skip(seq, batch_now);  // when the pin releases is unknown: retry next round
+                // when the pin releases is unknown: retry next round
+                note_skip(seq, batch_now);
                 continue;
             }
             try {
@@ -1717,7 +1755,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
                 co_await data_->remove(rc.extents);
             } catch (const std::exception& e) {
                 LOG_WARN("duostore '{}': gc remove (seq {}) failed: {}", cfg_.name, seq, e.what());
-                note_skip(seq, batch_now);  // do not settle; the gcq residue retries next round
+                // do not settle; the gcq residue retries next round
+                note_skip(seq, batch_now);
                 continue;
             }
             for (const auto& e : rc.extents)
@@ -1726,13 +1765,15 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
             acked.push_back(seq);
         }
         if (!acked.empty()) {
-            meta_->ack_reclaims(acked);  // batch settle (one transaction/batch; cost argument in the interface comment)
+            // batch settle (one transaction/batch; cost argument in the interface comment)
+            meta_->ack_reclaims(acked);
             st.reclaims_acked += acked.size();
         }
     }
     gcq_hi_ = std::max(gcq_hi_, next_seq);
     if (full_scan) {
-        gcq_skips_ = skips;  // full round: the watermark is rebuilt wholesale from this round's observation
+        // full round: the watermark is rebuilt wholesale from this round's observation
+        gcq_skips_ = skips;
         // Depth and head age also refresh only on full rounds: incremental rounds
         // scan from the previous high watermark and cannot see queue-head backlog;
         // updating from them would periodically misreport the depth as 0
@@ -1773,8 +1814,10 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
     // space falls back as quickly as possible
     struct CompactCand {
         uint64_t pack_id = 0;
-        uint64_t file_size = 0;   // 0 = unknown (stat unsupported and crash-leftover seal(0))
-        int64_t reclaimable = 0;  // file_size - live_bytes; always 0 for unknown size
+        // 0 = unknown (stat unsupported and crash-leftover seal(0))
+        uint64_t file_size = 0;
+        // file_size - live_bytes; always 0 for unknown size
+        int64_t reclaimable = 0;
     };
     std::vector<CompactCand> cands;
     const int64_t compact_now = codec::to_unix_ms(std::chrono::system_clock::now());
@@ -1836,7 +1879,8 @@ Task<DuoGcStats> DuoStoreBackend::run_gc_once() {
 
     std::vector<uint64_t> rewritten;
     // Per-pack scan outcome for the quarantine strike accounting below (roadmap §3.7)
-    std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> rw_by_pack;  // migrated, corrupt
+    // migrated, corrupt
+    std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> rw_by_pack;
     uint64_t scanned_bytes = 0;
     for (size_t ci = 0; ci < cands.size(); ++ci) {
         const auto& cd = cands[ci];
@@ -2007,10 +2051,12 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     co_await pool_->schedule();
     BackgroundTaskGroup::Scope scope(bg_);
     DuoOrphanStats st;
-    if (!scope.ok()) co_return st;             // shutting down
-    auto permit = co_await gc_sem_.acquire();  // mutual exclusion with GC/background
-                                               // workers (prerequisite for the reverse
-                                               // reconciliation)
+    // shutting down
+    if (!scope.ok()) co_return st;
+    // mutual exclusion with GC/background
+    // workers (prerequisite for the reverse
+    // reconciliation)
+    auto permit = co_await gc_sem_.acquire();
     // Same lease as GC (§6.1): the orphan scan's unlinks likewise must not run
     // concurrently with another gateway's GC
     const int64_t lease_ttl_ms = std::max<int64_t>(2 * int64_t(cfg_.gc_interval_sec), 600) * 1000;
@@ -2038,7 +2084,8 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     meta_->scan_refs([&](uint64_t id) { refs.push_back(id); });
     std::sort(refs.begin(), refs.end());
     refs.erase(std::unique(refs.begin(), refs.end()), refs.end());
-    std::vector<bool> ref_seen(refs.size(), false);  // reverse reconciliation: on-disk hit marks
+    // reverse reconciliation: on-disk hit marks
+    std::vector<bool> ref_seen(refs.size(), false);
 
     // Chunks with a pending gcq entry are left to the gcq consumer (roadmap
     // §3.7): every once-referenced chunk enters the gcq atomically with its
@@ -2101,7 +2148,8 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
             return;
         }
         if (gcq_pending.count(id)) {
-            ++st.skipped_gcq;  // deref'd, pending reclaim: the gcq path owns it (lease-gated)
+            // deref'd, pending reclaim: the gcq path owns it (lease-gated)
+            ++st.skipped_gcq;
             return;
         }
         if (now - mtime_ms < grace_ms) {
@@ -2109,7 +2157,8 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
             return;
         }
         if (write_floor && mtime_ms >= *write_floor) {
-            ++st.skipped_leased;  // may belong to a peer's in-flight write
+            // may belong to a peer's in-flight write
+            ++st.skipped_leased;
             return;
         }
         if (pins_->pinned_chunk(id)) {
@@ -2120,7 +2169,8 @@ Task<duostore::DuoOrphanStats> DuoStoreBackend::run_orphan_scan_once() {
     });
 
     for (uint64_t id : orphans) {
-        if (meta_->chunk_referenced(id)) continue;  // new reference committed in the scan gap
+        // new reference committed in the scan gap
+        if (meta_->chunk_referenced(id)) continue;
         // kind follows the data engine (C4): RadosDataStore::remove only
         // accepts kRados (foreign-kind extents are skipped as engine-switch
         // leftovers), so hardcoding kChunk would make rados orphan deletion
@@ -2305,8 +2355,9 @@ Task<duostore::DuoScrubStats> DuoStoreBackend::run_scrub_once(duostore::DuoScrub
         st.aborted = true;
         co_return st;
     }
-    auto permit = co_await gc_sem_.acquire();  // our GC/orphan scan stands still: nothing
-                                               // gets unlinked while manifests are read back
+    // our GC/orphan scan stands still: nothing
+    // gets unlinked while manifests are read back
+    auto permit = co_await gc_sem_.acquire();
     // Renew the lease best-effort so a peer gateway's GC defers too. Unlike the
     // orphan scan the round is not skipped on failure — the scrub deletes
     // nothing; a racing peer GC can at worst surface overwritten-and-reclaimed
@@ -2347,7 +2398,8 @@ Task<duostore::DuoScrubStats> DuoStoreBackend::run_scrub_once(duostore::DuoScrub
                         break;
                     }
                     auto rec = meta_->get_object(b.name, om.key);
-                    if (!rec) continue;  // deleted mid-walk
+                    // deleted mid-walk
+                    if (!rec) continue;
                     auto refetch = [&]() -> std::optional<DataRef> {
                         auto cur = meta_->get_object(b.name, om.key);
                         if (!cur) return std::nullopt;
@@ -2372,7 +2424,8 @@ Task<duostore::DuoScrubStats> DuoStoreBackend::run_scrub_once(duostore::DuoScrub
                 try {
                     parts = meta_->list_parts(b.name, up.key, up.upload_id);
                 } catch (const S3Error&) {
-                    continue;  // completed/aborted mid-walk
+                    // completed/aborted mid-walk
+                    continue;
                 }
                 for (const auto& p : parts) {
                     auto refetch = [&]() -> std::optional<DataRef> {
@@ -2426,7 +2479,8 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_dump(std::ostream& out) 
     co_await pool_->schedule();
     BackgroundTaskGroup::Scope scope(bg_);
     if (!scope.ok()) throw S3Error(S3ErrorCode::InternalError, "duostore meta dump: backend closing");
-    auto permit = co_await gc_sem_.acquire();  // no GC unlinks while the dump references extents
+    // no GC unlinks while the dump references extents
+    auto permit = co_await gc_sem_.acquire();
     // Online dump (roadmap §3.7): engines with MVCC/read transactions hand out a
     // consistent point-in-time view and business writes may continue; redis
     // cannot and keeps the historical writes-stopped contract
@@ -2469,7 +2523,8 @@ Task<duostore::MetaBackupEntry> DuoStoreBackend::run_meta_backup(const std::file
     co_await pool_->schedule();
     BackgroundTaskGroup::Scope scope(bg_);
     if (!scope.ok()) throw S3Error(S3ErrorCode::InternalError, "duostore meta backup: backend closing");
-    auto permit = co_await gc_sem_.acquire();  // no GC unlinks while the backup references extents
+    // no GC unlinks while the backup references extents
+    auto permit = co_await gc_sem_.acquire();
     auto manifest = duostore::BackupManifest::load(dir);
     const char* engine = cfg_.meta_kind_name();
     if (!manifest.entries.empty() && manifest.engine != engine)
@@ -2534,7 +2589,8 @@ Task<duostore::MetaDumpStats> DuoStoreBackend::run_meta_load(std::istream& in) {
         if (!scope.ok()) throw S3Error(S3ErrorCode::InternalError, "duostore meta load: backend closing");
         auto permit = co_await gc_sem_.acquire();
         st = duostore::load_meta(*meta_, in);
-        meta_cache_->clear();  // the restored records replace whatever was cached (roadmap §3.8)
+        // the restored records replace whatever was cached (roadmap §3.8)
+        meta_cache_->clear();
     }  // semaphore released at block exit — the orphan scan below must re-acquire the same one
     // Tail end of the restore-and-solidify flow (operational contract in
     // meta_dump.h): a forced orphan scan reclaims the extra data-side files
@@ -2555,7 +2611,8 @@ Task<void> DuoStoreBackend::gc_tick() {
         err = std::current_exception();
     }
     schedule_gc();
-    if (err) std::rethrow_exception(err);  // let BackgroundTaskGroup log it
+    // let BackgroundTaskGroup log it
+    if (err) std::rethrow_exception(err);
 }
 
 void DuoStoreBackend::schedule_gc() {
@@ -2570,7 +2627,8 @@ void DuoStoreBackend::schedule_gc() {
             cfg_.name);
         return;
     }
-    if (cfg_.gc_interval_sec <= 0) return;  // 0 = background GC disabled (manual hooks for tests)
+    // 0 = background GC disabled (manual hooks for tests)
+    if (cfg_.gc_interval_sec <= 0) return;
     bg_.if_open([&] {
         gc_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.gc_interval_sec),
                                                [this] { bg_.spawn(gc_tick()); });
@@ -2586,12 +2644,15 @@ Task<void> DuoStoreBackend::orphan_tick() {
         err = std::current_exception();
     }
     schedule_orphan_scan();
-    if (err) std::rethrow_exception(err);  // let BackgroundTaskGroup log it
+    // let BackgroundTaskGroup log it
+    if (err) std::rethrow_exception(err);
 }
 
 void DuoStoreBackend::schedule_orphan_scan() {
-    if (!cfg_.gc_enabled) return;                    // same gate as GC (§8.3 single-instance execution)
-    if (cfg_.orphan_scan_interval_sec <= 0) return;  // 0 = disabled (manual hooks for tests)
+    // same gate as GC (§8.3 single-instance execution)
+    if (!cfg_.gc_enabled) return;
+    // 0 = disabled (manual hooks for tests)
+    if (cfg_.orphan_scan_interval_sec <= 0) return;
     bg_.if_open([&] {
         orphan_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.orphan_scan_interval_sec),
                                                    [this] { bg_.spawn(orphan_tick()); });
@@ -2634,7 +2695,8 @@ Task<void> DuoStoreBackend::lease_tick() {
 }
 
 void DuoStoreBackend::schedule_read_lease() {
-    if (cfg_.read_lease_sec <= 0) return;  // 0 = off (single-gateway deployments)
+    // 0 = off (single-gateway deployments)
+    if (cfg_.read_lease_sec <= 0) return;
     bg_.if_open([&] {
         lease_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.read_lease_sec),
                                                   [this] { bg_.spawn(lease_tick()); });

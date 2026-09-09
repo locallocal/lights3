@@ -17,13 +17,15 @@
 #include "storage/duostore/data_store.h"
 
 namespace lights3::storage {
-class UringEngine;  // storage/xlocalfs/uring.h; held only by shared_ptr here
-}
+// storage/xlocalfs/uring.h; held only by shared_ptr here
+class UringEngine;
+}  // namespace lights3::storage
 
 namespace lights3::storage::duostore {
 
 struct FsDataOptions {
-    std::filesystem::path root;  // chunks/ and packs/ live underneath (§5)
+    // chunks/ and packs/ live underneath (§5)
+    std::filesystem::path root;
     uint64_t chunk_size = 8ull << 20;
     // Chunk crc verification on the GET path (default off, §7): only applies to
     // chunks read completely from start to end — a partial read of a Range hitting
@@ -36,8 +38,10 @@ struct FsDataOptions {
     // Default 0 keeps the P1 behavior when FsDataStore is constructed standalone
     // (tests); DuoStoreBackend injects the real default (128KiB) from config
     uint64_t pack_threshold = 0;
-    uint64_t pack_max_size = 128ull << 20;  // active pack sealing threshold
-    int pack_writers = 4;                   // number of concurrent active packs
+    // active pack sealing threshold
+    uint64_t pack_max_size = 128ull << 20;
+    // number of concurrent active packs
+    int pack_writers = 4;
     // Age-based rotation (docs/archive/gaps.md §6.1): an active pack is sealed once its
     // first record was written longer than this ago, complementing the capacity
     // threshold. With capacity-only sealing under low write volume, an active pack
@@ -115,7 +119,8 @@ private:
         std::mutex m;
         int fd = -1;
         uint64_t id = 0;
-        uint64_t size = 0;  // current append offset = file size
+        // current append offset = file size
+        uint64_t size = 0;
         // Moment the first record landed (steady_clock, criterion for age-based
         // rotation). Monotonic clock rather than wall clock: the question is "how
         // long has this pack been open", and an NTP step must not make it never
@@ -156,8 +161,10 @@ private:
     Task<void> scan_shard_tree(const char* sub, const char* suffix,
                                const std::function<void(uint64_t, int64_t, uint64_t)>& cb);
 
-    bool slot_aged(const ActivePack& slot) const;  // call with slot.m held; always false when pack_max_age_sec<=0
-    void close_slot_locked(ActivePack& slot);      // call with slot.m held
+    // call with slot.m held; always false when pack_max_age_sec<=0
+    bool slot_aged(const ActivePack& slot) const;
+    // call with slot.m held
+    void close_slot_locked(ActivePack& slot);
     // Commit backlogged seals; failures go back onto the queue (the append path
     // warns and retries later, the close path rethrows)
     void flush_seals(bool rethrow);
@@ -171,10 +178,13 @@ private:
     std::mutex dir_mu_;
     std::array<int, 256> chunk_dirfds_;
     std::array<int, 256> pack_dirfds_;
-    std::vector<std::unique_ptr<ActivePack>> packs_;  // pack_writers slots
-    std::atomic<unsigned> pack_rr_{0};                // round-robin cursor
+    // pack_writers slots
+    std::vector<std::unique_ptr<ActivePack>> packs_;
+    // round-robin cursor
+    std::atomic<unsigned> pack_rr_{0};
     std::mutex seal_mu_;
-    std::vector<PendingSeal> seal_retry_;  // packs with fd closed but sealing not yet confirmed in meta
+    // packs with fd closed but sealing not yet confirmed in meta
+    std::vector<PendingSeal> seal_retry_;
 };
 
 }  // namespace lights3::storage::duostore

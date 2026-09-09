@@ -39,15 +39,20 @@
 namespace lights3::storage {
 
 struct MetaCacheOptions {
-    size_t max_entries = 0;            // total budget across shards; 0 = disabled
-    std::chrono::milliseconds ttl{0};  // 0 = never expires (invalidation only)
-    size_t shards = 64;                // lock striping (the fill token is per shard)
+    // total budget across shards; 0 = disabled
+    size_t max_entries = 0;
+    // 0 = never expires (invalidation only)
+    std::chrono::milliseconds ttl{0};
+    // lock striping (the fill token is per shard)
+    size_t shards = 64;
 };
 
 struct MetaCacheStats {
     uint64_t hits = 0, misses = 0, invalidations = 0;
-    uint64_t stale = 0;          // present but rejected by the caller's validation (counted as a miss too)
-    uint64_t fills_dropped = 0;  // inserts refused by the generation token
+    // present but rejected by the caller's validation (counted as a miss too)
+    uint64_t stale = 0;
+    // inserts refused by the generation token
+    uint64_t fills_dropped = 0;
     size_t entries = 0;
 };
 
@@ -105,9 +110,11 @@ public:
             }
             s.stale++;
             m_stale_->inc();
-            s.gen++;  // like an invalidation: a fill racing this rejection is refused
+            // like an invalidation: a fill racing this rejection is refused
+            s.gen++;
         }
-        if (it != s.map.end()) erase_locked(s, it);  // expired or stale: drop now
+        // expired or stale: drop now
+        if (it != s.map.end()) erase_locked(s, it);
         s.misses++;
         m_misses_->inc();
         if (tok) *tok = Token{si, s.gen};
@@ -223,7 +230,8 @@ private:
     struct Shard {
         mutable std::mutex m;
         std::unordered_map<std::string, Node> map;
-        std::list<std::string> lru;  // front = most recent
+        // front = most recent
+        std::list<std::string> lru;
         uint64_t gen = 0;
         uint64_t hits = 0, misses = 0, invalidations = 0, stale = 0, fills_dropped = 0;
     };
@@ -232,7 +240,8 @@ private:
         std::string k;
         k.reserve(bucket.size() + 1 + key.size());
         k.append(bucket);
-        k.push_back('\0');  // neither side may contain NUL (validated upstream)
+        // neither side may contain NUL (validated upstream)
+        k.push_back('\0');
         k.append(key);
         return k;
     }

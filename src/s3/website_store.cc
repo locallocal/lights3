@@ -7,7 +7,8 @@
 
 #include "core/log.h"
 #include "http/model.h"
-#include "s3/auth/credential_store.h"  // kSysBucket
+// kSysBucket
+#include "s3/auth/credential_store.h"
 #include "s3/errors.h"
 
 namespace lights3::s3 {
@@ -104,7 +105,8 @@ Task<std::string> read_all(http::BodyReader& body, size_t max_size = 64 * 1024) 
 std::shared_ptr<WebsiteStore> WebsiteStore::make_static(std::vector<WebsiteBucket> entries) {
     auto store = std::shared_ptr<WebsiteStore>(new WebsiteStore());
     store->static_entries_ = std::move(entries);
-    store->rebuild_snapshot_locked();  // single-threaded here, no lock needed yet
+    // single-threaded here, no lock needed yet
+    store->rebuild_snapshot_locked();
     return store;
 }
 
@@ -277,12 +279,14 @@ Task<void> WebsiteStore::sync_now() {
         auto now = std::chrono::steady_clock::now();
         std::erase_if(tombstones_, [&](auto& kv) { return now - kv.second > kTombstoneTtl; });
         for (auto& [b, w] : on_storage) {
-            if (tombstones_.contains(b)) continue;  // just removed locally, don't resurrect
+            // just removed locally, don't resurrect
+            if (tombstones_.contains(b)) continue;
             auto it = dynamic_.find(b);
             if (it == dynamic_.end()) {
                 dynamic_.emplace(b, std::move(w));
                 ++added;
-            } else if (!(it->second == w)) {  // full-entry compare: rules/redirect/rate too
+            } else if (!(it->second == w)) {
+                // full-entry compare: rules/redirect/rate too
                 it->second = std::move(w);
                 ++added;
             }
@@ -296,7 +300,8 @@ Task<void> WebsiteStore::sync_now() {
 }
 
 Task<void> WebsiteStore::sync_tick() {
-    co_await pool_->schedule();  // the timer thread only dispatches; IO moves to a pool thread
+    // the timer thread only dispatches; IO moves to a pool thread
+    co_await pool_->schedule();
     std::exception_ptr err;
     try {
         co_await sync_now();
@@ -304,7 +309,8 @@ Task<void> WebsiteStore::sync_tick() {
         err = std::current_exception();
     }
     schedule_sync();
-    if (err) std::rethrow_exception(err);  // hand off to BackgroundTaskGroup for logging
+    // hand off to BackgroundTaskGroup for logging
+    if (err) std::rethrow_exception(err);
 }
 
 void WebsiteStore::schedule_sync() {

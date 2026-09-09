@@ -12,10 +12,14 @@ struct Extent {
     // kRados: file_id maps to the rados object name (docs/storage/duostore-data-rados-design.md §3.1)
     enum class Kind : uint8_t { kChunk = 0, kPack = 1, kRados = 2 };
     Kind kind = Kind::kChunk;
-    uint64_t file_id = 0;  // chunk / pack file number (globally monotonic allocation, §4.5)
-    uint64_t offset = 0;   // payload start offset within the pack; always 0 for chunk/rados
-    uint64_t length = 0;   // byte count of this extent
-    uint32_t crc32c = 0;   // content checksum of this extent
+    // chunk / pack file number (globally monotonic allocation, §4.5)
+    uint64_t file_id = 0;
+    // payload start offset within the pack; always 0 for chunk/rados
+    uint64_t offset = 0;
+    // byte count of this extent
+    uint64_t length = 0;
+    // content checksum of this extent
+    uint32_t crc32c = 0;
 
     bool operator==(const Extent&) const = default;
 };
@@ -26,7 +30,8 @@ struct Extent {
 inline constexpr uint32_t kMaxIdRun = 64;
 
 struct DataRef {
-    std::vector<Extent> extents;  // empty = 0-byte object; persisted via run encoding (§4.3)
+    // empty = 0-byte object; persisted via run encoding (§4.3)
+    std::vector<Extent> extents;
 
     uint64_t total() const {
         uint64_t sum = 0;

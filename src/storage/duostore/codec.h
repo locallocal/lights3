@@ -37,9 +37,11 @@ std::string object_key(std::string_view bucket, std::string_view key);
 std::string upload_key(std::string_view bucket, std::string_view key, std::string_view id);
 std::string parts_prefix(std::string_view bucket, std::string_view key, std::string_view id);
 std::string part_key(std::string_view bucket, std::string_view key, std::string_view id, int part_no);
-int part_no_of_key(std::string_view parts_cf_key);  // trailing be16
+// trailing be16
+int part_no_of_key(std::string_view parts_cf_key);
 
-std::string be64_key(uint64_t v);  // big-endian key for refs / gcq
+// big-endian key for refs / gcq
+std::string be64_key(uint64_t v);
 uint64_t parse_be64(std::string_view k);
 
 // Successor seek point for delimiter group skipping (main doc §4.4): increment the
@@ -65,16 +67,19 @@ std::vector<Extent> decode_extents(std::string_view v);
 std::string encode_bucket(int64_t created_ms);
 int64_t decode_bucket(std::string_view v);
 
-std::string encode_object(const ObjectRec& rec);  // key not stored in value (it is the CF key)
+// key not stored in value (it is the CF key)
+std::string encode_object(const ObjectRec& rec);
 ObjectRec decode_object(std::string key, std::string_view v);
 // Decode only ObjectMeta (for list, §4.4): arithmetically skips the extent runs,
 // avoiding materializing a large object's Extent array
 ObjectMeta decode_object_meta(std::string key, std::string_view v);
 
-std::string encode_upload(const UploadRec& rec);  // key/upload_id not stored in value
+// key/upload_id not stored in value
+std::string encode_upload(const UploadRec& rec);
 UploadRec decode_upload(std::string key, std::string upload_id, std::string_view v);
 
-std::string encode_part(const PartRec& rec);  // part_no not stored in value (it is in the CF key)
+// part_no not stored in value (it is in the CF key)
+std::string encode_part(const PartRec& rec);
 PartRec decode_part(int part_no, std::string_view v);
 
 std::string encode_reclaim(const Reclaim& r, int64_t enqueue_ms);
@@ -93,9 +98,12 @@ int64_t decode_counter(std::string_view v);
 // registered here
 struct PackOwner {
     enum class Kind { kObject, kPart, kLegacyPart, kUnknown } kind = Kind::kUnknown;
-    std::string_view bucket, key;  // valid for kObject/kPart (points into the input string)
-    std::string_view upload_id;    // valid for kPart/kLegacyPart
-    int part_no = 0;               // valid for kPart/kLegacyPart
+    // valid for kObject/kPart (points into the input string)
+    std::string_view bucket, key;
+    // valid for kPart/kLegacyPart
+    std::string_view upload_id;
+    // valid for kPart/kLegacyPart
+    int part_no = 0;
 };
 PackOwner parse_pack_owner(std::string_view owner);
 

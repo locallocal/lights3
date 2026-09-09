@@ -47,16 +47,20 @@ public:
     ~UringReadStream();
     UringReadStream(const UringReadStream&) = delete;
 
-    Task<size_t> read(std::span<std::byte> out);  // 0 = EOF
+    // 0 = EOF
+    Task<size_t> read(std::span<std::byte> out);
     uint64_t remaining() const { return remaining_; }
 
 private:
-    void fill();  // submit read-ahead into free slots
+    // submit read-ahead into free slots
+    void fill();
 
     uring_detail::StreamState* st_;
     uint64_t remaining_;
-    unsigned head_ = 0;      // slot index the consumer reads next
-    unsigned inflight_ = 0;  // slots submitted and not yet consumed (ring order from head_)
+    // slot index the consumer reads next
+    unsigned head_ = 0;
+    // slots submitted and not yet consumed (ring order from head_)
+    unsigned inflight_ = 0;
     bool done_ = false;
 };
 
@@ -96,13 +100,16 @@ public:
     uint64_t written() const { return written_; }
 
 private:
-    Task<void> settle_oldest();  // wait for the oldest in-flight write, resubmit short writes
+    // wait for the oldest in-flight write, resubmit short writes
+    Task<void> settle_oldest();
 
     uring_detail::StreamState* st_;
     uint64_t off_;
     uint64_t written_ = 0;
-    int held_ = -1;     // slot handed out by acquire(), not yet committed
-    int pending_ = -1;  // committed but deliberately not yet pushed (finish() links it)
+    // slot handed out by acquire(), not yet committed
+    int held_ = -1;
+    // committed but deliberately not yet pushed (finish() links it)
+    int pending_ = -1;
     bool finished_ = false;
 };
 

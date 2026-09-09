@@ -34,33 +34,41 @@ namespace lights3::storage::duostore {
 struct TierState {
     enum : uint8_t { kLocal = 0, kRemote = 1, kCached = 2 };
     uint8_t tier = kLocal;
-    std::string remote_etag;  // cloud replica ETag (unquoted), never exposed
-    std::string remote_at;    // iso8601 upload time
+    // cloud replica ETag (unquoted), never exposed
+    std::string remote_etag;
+    // iso8601 upload time
+    std::string remote_at;
 };
 
 struct ObjectRec {
-    ObjectMeta meta;  // key/size/etag/content_type/last_modified/user_meta
+    // key/size/etag/content_type/last_modified/user_meta
+    ObjectMeta meta;
     DataRef data;
-    uint64_t version = 0;  // +1 on every write (maintained by the implementation); optimistic check for GC compaction
-                           // ref swap (§9.2)
-    TierState tier;        // tiered local-side state (v3); meta.size stays the logical size even when data is empty
+    // +1 on every write (maintained by the implementation); optimistic check for GC compaction
+    // ref swap (§9.2)
+    uint64_t version = 0;
+    // tiered local-side state (v3); meta.size stays the logical size even when data is empty
+    TierState tier;
 };
 
 struct UploadRec {
     std::string upload_id;
-    ObjectMeta meta;  // key + content_type/user_meta (take effect at complete)
+    // key + content_type/user_meta (take effect at complete)
+    ObjectMeta meta;
     int64_t initiated_ms = 0;
 };
 
 struct PartRec {
     int part_no = 0;
     uint64_t size = 0;
-    std::string etag;  // MD5 of the part content (unquoted hex)
+    // MD5 of the part content (unquoted hex)
+    std::string etag;
     int64_t modified_ms = 0;
     DataRef data;
     // Verified part checksum (roadmap §2.2), codec part-record v2; empty = none
     std::string checksum_algorithm;
-    std::string checksum_value;  // base64
+    // base64
+    std::string checksum_value;
 };
 
 // gcq entry source (docs/archive/gaps.md §6.1): only with per-source bucketed counters can
@@ -69,12 +77,18 @@ struct PartRec {
 // (previously always written as 0 and discarded on decode); old entries decode to
 // kUnknown
 enum class ReclaimReason : uint8_t {
-    kUnknown = 0,        // old entries enqueued before P4
-    kOverwrite = 1,      // put_object / complete_upload overwriting the old version of a same-name object
-    kDelete = 2,         // delete_object
-    kPartOverwrite = 3,  // same-number part re-upload (last-write-wins)
-    kAbort = 4,          // abort_upload (including GC's mpu_ttl expiry cleanup)
-    kComplete = 5,       // parts not selected by complete_upload
+    // old entries enqueued before P4
+    kUnknown = 0,
+    // put_object / complete_upload overwriting the old version of a same-name object
+    kOverwrite = 1,
+    // delete_object
+    kDelete = 2,
+    // same-number part re-upload (last-write-wins)
+    kPartOverwrite = 3,
+    // abort_upload (including GC's mpu_ttl expiry cleanup)
+    kAbort = 4,
+    // parts not selected by complete_upload
+    kComplete = 5,
 };
 
 // For metric labels and logging; unknown values always fall back to "unknown"
@@ -98,15 +112,18 @@ inline const char* reclaim_reason_name(ReclaimReason r) {
 }
 
 struct Reclaim {
-    std::vector<Extent> extents;  // pending physical reclaim
-    int64_t enqueue_ms = 0;       // enqueue time (unix ms); the GC consumer judges gc_grace by it (§9.1)
+    // pending physical reclaim
+    std::vector<Extent> extents;
+    // enqueue time (unix ms); the GC consumer judges gc_grace by it (§9.1)
+    int64_t enqueue_ms = 0;
     ReclaimReason reason = ReclaimReason::kUnknown;
 };
 
 struct PackStat {
     uint64_t pack_id = 0;
-    uint64_t file_size = 0;  // reported by the data plane at seal time; 0 = unknown (crash leftover; stat again at
-                             // compaction)
+    // reported by the data plane at seal time; 0 = unknown (crash leftover; stat again at
+    // compaction)
+    uint64_t file_size = 0;
     int64_t live_bytes = 0;
     int64_t live_recs = 0;
     bool sealed = false;
@@ -162,16 +179,21 @@ struct IMetaReadView {
 struct MetaBackupEntry {
     uint64_t id = 0;
     bool full = true;
-    int64_t ts_ms = 0;   // wall clock at the backup point
-    std::string file;    // relative to the backup directory (empty: engine-managed, e.g. rocksdb's BackupEngine tree)
-    std::string marker;  // engine-specific restore point: rocksdb backup id, sqlite WAL segment no., redis repl offset,
-                         // tikv TSO
-    uint64_t bytes = 0;  // payload written by this entry
+    // wall clock at the backup point
+    int64_t ts_ms = 0;
+    // relative to the backup directory (empty: engine-managed, e.g. rocksdb's BackupEngine tree)
+    std::string file;
+    // engine-specific restore point: rocksdb backup id, sqlite WAL segment no., redis repl offset,
+    // tikv TSO
+    std::string marker;
+    // payload written by this entry
+    uint64_t bytes = 0;
 };
 
 struct IMetaStore : IMetaReadView {
     // ---- bucket ----
-    virtual void create_bucket(std::string_view b) = 0;  // already exists -> BucketAlreadyOwnedByYou
+    // already exists -> BucketAlreadyOwnedByYou
+    virtual void create_bucket(std::string_view b) = 0;
     // Missing -> NoSuchBucket; has objects or in-progress multipart -> BucketNotEmpty (aligned with AWS)
     virtual void delete_bucket(std::string_view b) = 0;
     virtual bool bucket_exists(std::string_view b) = 0;
@@ -187,14 +209,15 @@ struct IMetaStore : IMetaReadView {
     // PreconditionFailed / NoSuchKey and the transaction does not commit (shared
     // check in meta_util.h check_put_condition)
     virtual void put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond = {}) = 0;
-    virtual bool delete_object(std::string_view b, std::string_view k) = 0;  // returns false if missing (idempotent)
+    // returns false if missing (idempotent)
+    virtual bool delete_object(std::string_view b, std::string_view k) = 0;
 
     // ---- multipart ----
     virtual std::string create_upload(std::string_view b, std::string_view k, ObjectMeta meta) = 0;
-    virtual UploadRec require_upload(std::string_view b, std::string_view k,
-                                     std::string_view id) = 0;  // missing -> NoSuchUpload
-    virtual void put_part(std::string_view b, std::string_view k, std::string_view id,
-                          PartRec p) = 0;  // the old same-number part enters the GC ledger in the same batch
+    // missing -> NoSuchUpload
+    virtual UploadRec require_upload(std::string_view b, std::string_view k, std::string_view id) = 0;
+    // the old same-number part enters the GC ledger in the same batch
+    virtual void put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) = 0;
     virtual std::vector<PartRec> list_parts(std::string_view b, std::string_view k, std::string_view id) = 0;
     // Pagination hint (docs/archive/gaps.md §5.1): return entries with (key, upload_id)
     // strictly greater than (key_marker, id_marker), in ascending order; with
@@ -214,8 +237,9 @@ struct IMetaStore : IMetaReadView {
     virtual std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
                                                  std::string_view id_marker = {}, int limit = 0,
                                                  std::string_view prefix = {}) = 0;
+    // returns the aggregate ETag (§8)
     virtual std::string complete_upload(std::string_view b, std::string_view k, std::string_view id,
-                                        std::span<const PartInfo> parts) = 0;  // returns the aggregate ETag (§8)
+                                        std::span<const PartInfo> parts) = 0;
     virtual void abort_upload(std::string_view b, std::string_view k, std::string_view id) = 0;
 
     // ---- resource allocation and GC accounting (§9) ----
@@ -238,7 +262,8 @@ struct IMetaStore : IMetaReadView {
     // be consumable)
     virtual std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                                     size_t max_extents = SIZE_MAX) = 0;
-    virtual void ack_reclaim(uint64_t seq) = 0;  // write off after successful physical deletion
+    // write off after successful physical deletion
+    virtual void ack_reclaim(uint64_t seq) = 0;
     // Batch write-off: forwards entry by entry by default; implementations may
     // override with a single-transaction/single-batch commit. The GC consumer
     // should prefer this interface — per-entry ack cost varies wildly by
@@ -263,8 +288,9 @@ struct IMetaStore : IMetaReadView {
     // Write off after successfully unlinking an empty pack's whole file (same §9.1
     // ordering iron rule as ack_reclaim: physical delete first, then write off)
     virtual void drop_pack_stat(uint64_t pack_id) = 0;
+    // compaction ref swap
     virtual bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
-                              const DataRef& to) = 0;  // compaction ref swap
+                              const DataRef& to) = 0;
     // Batch ref swap (docs/archive/gaps.md §2.13 batched compaction): independent CAS per
     // item, returns per-item success/failure. Forwards entry by entry by default;
     // local engines (rocks/sqlite) override with a single-batch/single-transaction
@@ -339,7 +365,8 @@ struct IMetaStore : IMetaReadView {
         throw s3::S3Error(s3::S3ErrorCode::InvalidRequest, "this meta engine has no gateway-side physical backup");
     }
     virtual std::string restore_marker() { return ""; }
-    virtual bool chunk_referenced(uint64_t file_id) = 0;  // orphan scan
+    // orphan scan
+    virtual bool chunk_referenced(uint64_t file_id) = 0;
     // Orphan reverse reconciliation (§9.3): iterate every file_id in the refs table
     // (chunk/rados share the ledger; order not guaranteed). Snapshot semantics are
     // lenient: concurrent adds/removes during iteration may or may not be visible —

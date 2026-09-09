@@ -106,7 +106,8 @@ private:
     // Positioned at '<'; parse the whole element (including children and text)
     XmlNode parse_element() {
         if (++depth_ > 32) bad("nesting too deep");
-        ++pos_;  // '<'
+        // '<'
+        ++pos_;
         XmlNode node;
         node.name = parse_name();
 
@@ -121,7 +122,8 @@ private:
             if (starts_with("/>")) {
                 pos_ += 2;
                 --depth_;
-                return node;  // self-closing
+                // self-closing
+                return node;
             }
             parse_attribute();
         }

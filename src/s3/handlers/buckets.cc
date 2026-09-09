@@ -10,7 +10,8 @@ namespace lights3::s3 {
 Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
     // Aggregate across backends; deduplicate by name (first backend wins)
     std::vector<storage::BucketInfo> all;
-    auto backends = router_.backends();  // snapshot across the co_awaits
+    // snapshot across the co_awaits
+    auto backends = router_.backends();
     for (auto& [_, backend] : *backends) {
         auto part = co_await backend->list_buckets();
         for (auto& b : part) {

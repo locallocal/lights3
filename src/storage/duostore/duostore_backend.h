@@ -77,8 +77,10 @@ struct PinTable {
     void pin_id(uint64_t file_id);
     void unpin_id(uint64_t file_id);
     bool any_pinned(std::span<const Extent> extents);
-    bool pinned_chunk(uint64_t file_id);  // orphan scan (chunk/rados entities)
-    bool pinned_pack(uint64_t pack_id);   // whole empty-pack deletion
+    // orphan scan (chunk/rados entities)
+    bool pinned_chunk(uint64_t file_id);
+    // whole empty-pack deletion
+    bool pinned_pack(uint64_t pack_id);
 
 private:
     // file_id hash sharding: the GET hot path's pin/unpin and GC's bulk
@@ -110,8 +112,10 @@ private:
 // same lifetime shape as PinTable
 class InFlightClock {
 public:
-    uint64_t begin();           // returns a ticket id (monotonic)
-    void end(uint64_t ticket);  // idempotent for unknown ids
+    // returns a ticket id (monotonic)
+    uint64_t begin();
+    // idempotent for unknown ids
+    void end(uint64_t ticket);
     // Start time of the oldest in-flight operation, or fallback when none (the
     // publisher passes "now": an idle gateway holds nothing back)
     int64_t oldest_or(int64_t fallback);
@@ -128,19 +132,32 @@ private:
 // into the lights3_duostore_gc_* counters/gauges at the end of every completed
 // round — see init_metrics)
 struct DuoGcStats {
-    uint64_t reclaims_acked = 0;          // gcq entries settled
-    uint64_t files_removed = 0;           // chunk/rados extents physically deleted (pack records excluded)
-    uint64_t skipped_grace = 0;           // gcq entries skipped for not yet exceeding gc_grace
-    uint64_t skipped_pinned = 0;          // gcq entries skipped because an involved file was pinned
-    uint64_t skipped_leased = 0;          // gcq entries deferred by a peer gateway's read lease (roadmap §3.7)
-    uint64_t packs_removed = 0;           // empty packs deleted whole (sealed with live_recs==0)
-    uint64_t uploads_expired = 0;         // multiparts internally aborted after mpu_ttl expiry
-    uint64_t packs_sealed_aged = 0;       // active packs sealed by aging (§6.1)
-    uint64_t packs_compacted = 0;         // low-liveness packs sequentially scanned (rewrite_pack) this round (P4 §9.2)
-    uint64_t packs_compact_deferred = 0;  // packs eligible but squeezed out by this round's budget (§6.1)
-    uint64_t records_migrated = 0;        // records whose refs were successfully swapped by compaction migration
-    uint64_t records_corrupt = 0;    // corrupt records detected by the compaction scan (skipped + warned, not deleted)
-    uint64_t packs_quarantined = 0;  // packs moved to the corruption quarantine this round (roadmap §3.7)
+    // gcq entries settled
+    uint64_t reclaims_acked = 0;
+    // chunk/rados extents physically deleted (pack records excluded)
+    uint64_t files_removed = 0;
+    // gcq entries skipped for not yet exceeding gc_grace
+    uint64_t skipped_grace = 0;
+    // gcq entries skipped because an involved file was pinned
+    uint64_t skipped_pinned = 0;
+    // gcq entries deferred by a peer gateway's read lease (roadmap §3.7)
+    uint64_t skipped_leased = 0;
+    // empty packs deleted whole (sealed with live_recs==0)
+    uint64_t packs_removed = 0;
+    // multiparts internally aborted after mpu_ttl expiry
+    uint64_t uploads_expired = 0;
+    // active packs sealed by aging (§6.1)
+    uint64_t packs_sealed_aged = 0;
+    // low-liveness packs sequentially scanned (rewrite_pack) this round (P4 §9.2)
+    uint64_t packs_compacted = 0;
+    // packs eligible but squeezed out by this round's budget (§6.1)
+    uint64_t packs_compact_deferred = 0;
+    // records whose refs were successfully swapped by compaction migration
+    uint64_t records_migrated = 0;
+    // corrupt records detected by the compaction scan (skipped + warned, not deleted)
+    uint64_t records_corrupt = 0;
+    // packs moved to the corruption quarantine this round (roadmap §3.7)
+    uint64_t packs_quarantined = 0;
 };
 
 // Corrupt-pack quarantine entry (roadmap §3.7): a pack whose compaction made no
@@ -152,38 +169,56 @@ struct DuoGcStats {
 // (a separate process) see the same ledger
 struct DuoQuarantineEntry {
     uint64_t pack_id = 0;
-    int64_t live_recs = 0;         // live account at quarantine time (auto-release trigger baseline)
-    uint64_t corrupt_records = 0;  // corrupt records the last scan counted
-    int64_t quarantined_ms = 0;    // unix ms of quarantine entry
-    bool purged = false;           // pack file removed by `quarantine purge` (accounting kept until live drains)
+    // live account at quarantine time (auto-release trigger baseline)
+    int64_t live_recs = 0;
+    // corrupt records the last scan counted
+    uint64_t corrupt_records = 0;
+    // unix ms of quarantine entry
+    int64_t quarantined_ms = 0;
+    // pack file removed by `quarantine purge` (accounting kept until live drains)
+    bool purged = false;
 };
 
 // Reconciliation statistics for run_orphan_scan_once() (§9.3)
 struct DuoOrphanStats {
-    uint64_t chunks_scanned = 0;   // chunk entities enumerated on the data plane
-    uint64_t orphans_removed = 0;  // orphans unreferenced and beyond grace → unlinked
-    uint64_t skipped_grace = 0;    // unreferenced but mtime not yet beyond gc_grace (suspected in-flight write)
-    uint64_t skipped_pinned = 0;   // unreferenced but pinned (write-side pin / in-flight reader)
-    uint64_t refs_missing = 0;     // reverse: refs present but file missing (sign of data loss; warn only, never delete
-                                   // meta)
+    // chunk entities enumerated on the data plane
+    uint64_t chunks_scanned = 0;
+    // orphans unreferenced and beyond grace → unlinked
+    uint64_t orphans_removed = 0;
+    // unreferenced but mtime not yet beyond gc_grace (suspected in-flight write)
+    uint64_t skipped_grace = 0;
+    // unreferenced but pinned (write-side pin / in-flight reader)
+    uint64_t skipped_pinned = 0;
+    // reverse: refs present but file missing (sign of data loss; warn only, never delete
+    // meta)
+    uint64_t refs_missing = 0;
     // Reverse reconciliation of packs/ (docs/archive/gaps.md §6.1)
-    uint64_t packs_scanned = 0;         // pack files enumerated on disk
-    uint64_t orphan_packs_removed = 0;  // unaccounted pack files (crash after file creation, before the first record
-                                        // committed)
-    uint64_t packs_skipped_active = 0;  // unaccounted but lock-held by a live writer / within grace / pinned
-    uint64_t pack_stats_missing = 0;    // reverse: packstat present but file missing (sign of data loss)
-    uint64_t chunk_bytes = 0;           // total bytes of on-disk chunk entities (usage metric)
-    uint64_t pack_bytes = 0;            // total bytes of on-disk pack files (usage metric)
-    uint64_t skipped_gcq = 0;           // unreferenced chunks left to the gcq path (pending entry exists;
-                                        // closes the cross-gateway reader race, roadmap §3.7)
-    uint64_t skipped_leased = 0;        // unreferenced chunks newer than a peer gateway's oldest
-                                        // in-flight write (write lease, multi-gateway-multipart §4 ①)
+    // pack files enumerated on disk
+    uint64_t packs_scanned = 0;
+    // unaccounted pack files (crash after file creation, before the first record
+    // committed)
+    uint64_t orphan_packs_removed = 0;
+    // unaccounted but lock-held by a live writer / within grace / pinned
+    uint64_t packs_skipped_active = 0;
+    // reverse: packstat present but file missing (sign of data loss)
+    uint64_t pack_stats_missing = 0;
+    // total bytes of on-disk chunk entities (usage metric)
+    uint64_t chunk_bytes = 0;
+    // total bytes of on-disk pack files (usage metric)
+    uint64_t pack_bytes = 0;
+    // unreferenced chunks left to the gcq path (pending entry exists;
+    // closes the cross-gateway reader race, roadmap §3.7)
+    uint64_t skipped_gcq = 0;
+    // unreferenced chunks newer than a peer gateway's oldest
+    // in-flight write (write lease, multi-gateway-multipart §4 ①)
+    uint64_t skipped_leased = 0;
 };
 
 // run_scrub_once knobs (roadmap §3.1). Rate limiting is per-call rather than
 // config: a scrub is an operator-invoked traversal (CLI), not a resident worker
 struct DuoScrubOptions {
-    uint64_t max_bytes_per_sec = 0;  // 0 = unthrottled
+    // 0 = unthrottled
+    uint64_t max_bytes_per_sec = 0;
 };
 
 // Integrity report of run_scrub_once() (roadmap §3.1). Read-only: the scrub
@@ -192,18 +227,27 @@ struct DuoScrubOptions {
 // refs_stale is a space-leak suspect that can also be a transient artifact of
 // an MPU completing mid-scrub (re-run to confirm)
 struct DuoScrubStats {
-    uint64_t objects_scanned = 0;  // committed objects fully walked
-    uint64_t parts_scanned = 0;    // in-flight multipart parts walked
+    // committed objects fully walked
+    uint64_t objects_scanned = 0;
+    // in-flight multipart parts walked
+    uint64_t parts_scanned = 0;
     uint64_t extents_checked = 0;
     uint64_t bytes_read = 0;
-    uint64_t corrupt_extents = 0;     // read back fine but crc32c != manifest
-    uint64_t unreadable_extents = 0;  // open/read failed or short (includes pack-side crc aborts)
-    uint64_t objects_bad = 0;         // objects/parts with >= 1 corrupt or unreadable extent
-    uint64_t refs_missing = 0;        // manifest references a chunk id absent from the refs
-                                      // ledger — the orphan scan could unlink live data
-    uint64_t refs_stale = 0;          // refs entry no object/part manifest references (leak suspect)
-    uint64_t meta_errors = 0;         // bucket enumerations that failed and were skipped
-    bool aborted = false;             // backend close interrupted the scrub (stats are partial)
+    // read back fine but crc32c != manifest
+    uint64_t corrupt_extents = 0;
+    // open/read failed or short (includes pack-side crc aborts)
+    uint64_t unreadable_extents = 0;
+    // objects/parts with >= 1 corrupt or unreadable extent
+    uint64_t objects_bad = 0;
+    // manifest references a chunk id absent from the refs
+    // ledger — the orphan scan could unlink live data
+    uint64_t refs_missing = 0;
+    // refs entry no object/part manifest references (leak suspect)
+    uint64_t refs_stale = 0;
+    // bucket enumerations that failed and were skipped
+    uint64_t meta_errors = 0;
+    // backend close interrupted the scrub (stats are partial)
+    bool aborted = false;
 };
 
 // Standard implementation of PackMigrateFn (§9.2 steps 2-3; shared by the cfg
@@ -237,35 +281,55 @@ enum class DuoDataKind { kFs, kRados };
 
 struct DuoStoreConfig {
     std::string name;
-    std::filesystem::path root;       // required; meta/ chunks/ packs/ all live underneath
-    std::filesystem::path meta_path;  // default <root>/meta (may point separately to SSD)
+    // required; meta/ chunks/ packs/ all live underneath
+    std::filesystem::path root;
+    // default <root>/meta (may point separately to SSD)
+    std::filesystem::path meta_path;
     DuoMetaKind meta_kind = DuoMetaKind::kRocksDb;
-    std::string redis_uri;                     // required when meta=redis
-    std::string redis_prefix = "duo:";         // key prefix (multi-instance/test isolation)
-    int redis_timeout_sec = 3;                 // connect + per-command timeout
-    int redis_pool_size = 8;                   // connection pool size
-    int redis_wait_replicas = 0;               // replicas to WAIT for after commit (0 = no wait)
-    std::filesystem::path sqlite_path;         // meta=sqlite: DB file, default <root>/meta.sqlite3
-    size_t sqlite_cache = 64ull << 20;         // page cache (PRAGMA cache_size)
-    std::filesystem::path sqlite_wal_archive;  // meta=sqlite: backup chain dir for incremental backups
-                                               // (backlog-sequence ⑧); empty = full backups only
-    std::vector<std::string> pd_endpoints;     // required when meta=tikv (docs/storage/duostore-meta-tikv-design.md §9)
-    std::string tikv_prefix = "duo:";          // key prefix (multi-instance/test isolation)
-    std::string tikv_ca;                       // mTLS triple (enabled only when all three are given)
+    // required when meta=redis
+    std::string redis_uri;
+    // key prefix (multi-instance/test isolation)
+    std::string redis_prefix = "duo:";
+    // connect + per-command timeout
+    int redis_timeout_sec = 3;
+    // connection pool size
+    int redis_pool_size = 8;
+    // replicas to WAIT for after commit (0 = no wait)
+    int redis_wait_replicas = 0;
+    // meta=sqlite: DB file, default <root>/meta.sqlite3
+    std::filesystem::path sqlite_path;
+    // page cache (PRAGMA cache_size)
+    size_t sqlite_cache = 64ull << 20;
+    // meta=sqlite: backup chain dir for incremental backups
+    // (backlog-sequence ⑧); empty = full backups only
+    std::filesystem::path sqlite_wal_archive;
+    // required when meta=tikv (docs/storage/duostore-meta-tikv-design.md §9)
+    std::vector<std::string> pd_endpoints;
+    // key prefix (multi-instance/test isolation)
+    std::string tikv_prefix = "duo:";
+    // mTLS triple (enabled only when all three are given)
+    std::string tikv_ca;
     std::string tikv_cert;
     std::string tikv_key;
-    int tikv_backoff_ms = 0;          // sidecar-path backoff budget (0 = client-c library default)
-    int tikv_gc_interval_sec = 60;    // GC safepoint advance period (0 = off, §7.3)
-    int tikv_gc_retention_sec = 600;  // safepoint retention window (now − retention)
+    // sidecar-path backoff budget (0 = client-c library default)
+    int tikv_backoff_ms = 0;
+    // GC safepoint advance period (0 = off, §7.3)
+    int tikv_gc_interval_sec = 60;
+    // safepoint retention window (now − retention)
+    int tikv_gc_retention_sec = 600;
     DuoDataKind data_kind = DuoDataKind::kFs;
-    std::string rados_conf = "/etc/ceph/ceph.conf";  // data=rados keys (docs/storage/duostore-data-rados-design.md §10)
+    // data=rados keys (docs/storage/duostore-data-rados-design.md §10)
+    std::string rados_conf = "/etc/ceph/ceph.conf";
     std::string rados_client = "client.admin";
-    std::string rados_pool;       // required when data=rados
-    std::string rados_namespace;  // logical isolation within the pool (multi-instance/tests)
+    // required when data=rados
+    std::string rados_pool;
+    // logical isolation within the pool (multi-instance/tests)
+    std::string rados_namespace;
     uint64_t rados_chunk_size = 8ull << 20;
     uint64_t rados_buffer_total = 256ull << 20;
     int rados_connect_timeout_sec = 5;
-    int rados_op_timeout_sec = 0;  // 0 = no op timeout
+    // 0 = no op timeout
+    int rados_op_timeout_sec = 0;
     uint64_t chunk_size = 8ull << 20;
     // io_uring fs data plane (roadmap §3.4 ⑤, data=fs only): chunk/pack byte transfers
     // and durability syncs go through the shared UringEngine; opt-in, and on engine
@@ -274,15 +338,18 @@ struct DuoStoreConfig {
     bool fs_uring = false;
     unsigned fs_uring_queue_depth = 256;
     bool fs_uring_sqpoll = false;
-    unsigned fs_uring_rings = 1;          // 0 = auto (hardware threads / 8, clamped to [1,8])
-    uint64_t pack_threshold = 128 << 10;  // ≤ this goes into packs; 0 = disabled (everything via chunks)
+    // 0 = auto (hardware threads / 8, clamped to [1,8])
+    unsigned fs_uring_rings = 1;
+    // ≤ this goes into packs; 0 = disabled (everything via chunks)
+    uint64_t pack_threshold = 128 << 10;
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;
     // Age-based sealing of active packs (docs/archive/gaps.md §6.1): with capacity-only
     // sealing under low write volume a pack never rotates, and its dead regions
     // never enter the compaction candidate set. 0 = disabled
     int pack_max_age_sec = 3600;
-    double pack_gc_ratio = 0.5;  // effective with P4 compaction
+    // effective with P4 compaction
+    double pack_gc_ratio = 0.5;
     // Per-round compaction budget (docs/archive/gaps.md §6.1): candidates sorted by
     // reclaimable bytes descending, take the top N / cumulative file_size at most
     // max_bytes. Without a budget, "one GC round rewriting every eligible pack
@@ -318,12 +385,14 @@ struct DuoStoreConfig {
     // on shared engines unless configured; the constructor refuses a TTL-less cache
     // on a shared engine
     size_t meta_cache_entries = size_t(1) << 16;
-    int meta_cache_ttl_sec = 0;  // 0 = no expiry
+    // 0 = no expiry
+    int meta_cache_ttl_sec = 0;
     // Subscribe the cache to the engine's invalidation feed when it has one (redis
     // pub/sub, backlog-sequence ⑤); false = TTL-only bounded staleness, the
     // pre-feed behaviour (an ops kill switch, and what the staleness tests exercise)
     bool meta_cache_feed = true;
-    int orphan_scan_interval_sec = 86400;  // effective with P4
+    // effective with P4
+    int orphan_scan_interval_sec = 86400;
     int mpu_ttl_sec = 7 * 86400;
     bool meta_sync = true;
     bool verify_chunk_crc = false;
@@ -483,7 +552,8 @@ public:
     const std::shared_ptr<ThreadPool>& pool() const { return pool_; }
 
 private:
-    void require_bucket(std::string_view bucket);  // called on a pool thread
+    // called on a pool thread
+    void require_bucket(std::string_view bucket);
     // Fetch the object record; on absence distinguish NoSuchBucket / NoSuchKey
     // (GET/HEAD error semantics must agree)
     duostore::ObjectRec require_object(std::string_view bucket, std::string_view key);
@@ -498,13 +568,15 @@ private:
     // to reach zero)
     void schedule_gc();
     Task<void> gc_tick();
-    void schedule_orphan_scan();  // independent low-frequency timer (orphan_scan_interval; 0 = off)
+    // independent low-frequency timer (orphan_scan_interval; 0 = off)
+    void schedule_orphan_scan();
     Task<void> orphan_tick();
     // Lease publisher (roadmap §3.7, read + write floors): periodic timer on
     // every gateway; the tick stands down permanently when the engine reports
     // leases unsupported (local engines — in-process pins are already exact there)
     void schedule_read_lease();
-    void warn_deployment();  // multi-gateway-multipart §4 ④
+    // multi-gateway-multipart §4 ④
+    void warn_deployment();
     Task<void> lease_tick();
     // One manifest's worth of scrub work (run_scrub_once): refs-ledger presence
     // per chunk/rados extent + full read-back with crc recomputation. refetch
@@ -532,7 +604,8 @@ private:
     // after commit/discard. The injection constructor has no hooks by default —
     // blind unpinning would wrongly decrement concurrent readers' pins
     bool write_pins_ = false;
-    std::atomic<bool> closed_{false};  // close() idempotence latch; in-flight checks go through bg_
+    // close() idempotence latch; in-flight checks go through bg_
+    std::atomic<bool> closed_{false};
 
     // Accumulated once at the end of a completed GC round (run_gc_once's
     // DuoGcStats → monotonic counters)
@@ -553,7 +626,8 @@ private:
     std::shared_ptr<MetricCounter> m_cache_peer_invalidations_;
     std::shared_ptr<MetricCounter> m_cache_feed_resets_;
     void wire_cache_invalidation();
-    std::shared_ptr<MetricGauge> m_orphan_refs_missing_;  // files missing in the latest reverse reconciliation round
+    // files missing in the latest reverse reconciliation round
+    std::shared_ptr<MetricGauge> m_orphan_refs_missing_;
 
     // GC per-round bookkeeping (read/written only while holding gc_sem_, so
     // lock-free):
@@ -586,8 +660,10 @@ private:
     // list/release (purge additionally holds gc_sem_ for the physical removal)
     std::filesystem::path quarantine_dir() const;
     void load_quarantine();
-    void quarantine_save(const duostore::DuoQuarantineEntry& e);  // write-through (logs on failure)
-    void quarantine_drop(uint64_t pack_id);                       // erase entry + file
+    // write-through (logs on failure)
+    void quarantine_save(const duostore::DuoQuarantineEntry& e);
+    // erase entry + file
+    void quarantine_drop(uint64_t pack_id);
     std::mutex q_mu_;
     std::map<uint64_t, duostore::DuoQuarantineEntry> quarantined_;
     // gcq scan watermark (gaps §2.13: rescanning all unreclaimable entries from
@@ -603,11 +679,14 @@ private:
     // full scan, correctness unaffected
     struct GcqSkips {
         bool any = false;
-        uint64_t lo_seq = 0;      // seq of the earliest skipped entry (valid when any)
-        int64_t retry_at_ms = 0;  // earliest retry time among skipped entries
+        // seq of the earliest skipped entry (valid when any)
+        uint64_t lo_seq = 0;
+        // earliest retry time among skipped entries
+        int64_t retry_at_ms = 0;
     };
     GcqSkips gcq_skips_;
-    uint64_t gcq_hi_ = 0;  // high watermark of scanned seqs (next unseen seq)
+    // high watermark of scanned seqs (next unseen seq)
+    uint64_t gcq_hi_ = 0;
 
     // Instance identity for the multi-gateway GC lease (§6.1): randomly generated
     // in-process; a restart simply gets a new one — the old lease yields via TTL

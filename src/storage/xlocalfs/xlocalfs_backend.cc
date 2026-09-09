@@ -113,7 +113,8 @@ Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStrea
             ws.commit(0);
             break;
         }
-        if (int fe = fault::check("xlocalfs.write")) {  // roadmap §6.1: the io_uring write path
+        if (int fe = fault::check("xlocalfs.write")) {
+            // roadmap §6.1: the io_uring write path
             ws.commit(0);
             throw s3::S3Error(s3::S3ErrorCode::InternalError,
                               std::string("write staging tmp (uring): ") + std::strerror(fe));
@@ -133,8 +134,10 @@ Task<void> XLocalFsBackend::sync_dir(fs::path dir) {
         co_return;
     }
     FdGuard d{::open(dir.c_str(), O_RDONLY | O_DIRECTORY)};
-    if (d.fd < 0) co_return;             // same as fsync_dir: an unreadable directory must not take down the write path
-    (void)co_await uring_->fsync(d.fd);  // failure silent, matching fsync_dir
+    // same as fsync_dir: an unreadable directory must not take down the write path
+    if (d.fd < 0) co_return;
+    // failure silent, matching fsync_dir
+    (void)co_await uring_->fsync(d.fd);
 }
 
 Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const ObjectMeta& meta, std::string_view key,
@@ -194,7 +197,8 @@ Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string
     // key; the conditional-PUT check is inside the same lock (PutCondition contract)
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
-    auto inv = invalidate_on_exit(bucket, key);  // roadmap §3.8
+    // roadmap §3.8
+    auto inv = invalidate_on_exit(bucket, key);
     fs::path dest = object_path(bucket, key);
     fsutil::check_put_condition(dest, cond, key);
     co_await commit_prepared(dest, tmp, meta, key, xattr_ok);
@@ -221,7 +225,8 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     // populated the inode) and stays a plain syscall
     int fd = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
     if (fd < 0) {
-        require_bucket(bucket);  // NoSuchBucket takes precedence over NoSuchKey
+        // NoSuchBucket takes precedence over NoSuchKey
+        require_bucket(bucket);
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
     struct stat st{};
@@ -363,7 +368,8 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket, std
     if (tmp.fd < 0) throw_uring("open complete tmp", tmp.fd);
     UringWriteStream ws(uring_, tmp.fd, 0, std::nullopt);
     uint64_t total = 0;
-    std::vector<uint64_t> sizes;  // per-part layout for GET ?partNumber (roadmap §2.5)
+    // per-part layout for GET ?partNumber (roadmap §2.5)
+    std::vector<uint64_t> sizes;
     for (auto& path : paths) {
         int in = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
         if (in < 0) throw_uring("open part", in);
@@ -372,7 +378,8 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket, std
             ::close(in);
             throw_errno("fstat part");
         }
-        UringReadStream rs(uring_, in, 0, uint64_t(pst.st_size));  // fd owned by the stream
+        // fd owned by the stream
+        UringReadStream rs(uring_, in, 0, uint64_t(pst.st_size));
         uint64_t part_bytes = 0;
         for (;;) {
             std::span<std::byte> wb = co_await ws.acquire();
@@ -395,13 +402,16 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket, std
     meta.last_modified = std::chrono::system_clock::now();
     meta.part_sizes = std::move(sizes);
     PutResult result{meta.etag};
-    apply_composite_checksum(digests, meta, result);  // roadmap §2.2
+    // roadmap §2.2
+    apply_composite_checksum(digests, meta, result);
     bool xattr_ok = fsutil::set_meta_xattr(tmp.path, meta, fsutil::TierInfo{}, &xattr_);
-    co_await ws.finish(fsutil::fsync_enabled());  // final write + fdatasync linked
+    // final write + fdatasync linked
+    co_await ws.finish(fsutil::fsync_enabled());
     ::close(tmp.fd);
     tmp.fd = -1;
     {
-        auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT
+        // same as PUT
+        auto lk = co_await commit_lock(bucket, key).acquire();
         co_await pool_->schedule();
         auto inv = invalidate_on_exit(bucket, key);
         co_await commit_prepared(object_path(bucket, key), tmp, meta, key, xattr_ok);
@@ -458,7 +468,8 @@ Task<void> XLocalFsBackend::delete_object(std::string_view bucket, std::string_v
 
 Task<void> XLocalFsBackend::close() {
     uring_->shutdown();
-    co_await LocalFsBackend::close();  // cancel the periodic mpu cleanup timer (base-class background task)
+    // cancel the periodic mpu cleanup timer (base-class background task)
+    co_await LocalFsBackend::close();
 }
 
 }  // namespace lights3::storage

@@ -60,7 +60,8 @@ std::optional<LocalObject> DuoStoreTierLocal::read(std::string_view bucket, std:
     LocalObject o;
     o.meta = std::move(rec->meta);
     o.tier = to_tier_info(rec->tier);
-    o.local_bytes = rec->data.total();  // a stub has no extents
+    // a stub has no extents
+    o.local_bytes = rec->data.total();
     o.mtime = std::chrono::system_clock::to_time_t(o.meta.last_modified);
     return o;
 }
@@ -121,7 +122,8 @@ public:
     }
 
     Task<void> commit(const ObjectMeta& meta, const TierInfo& tier) override {
-        int fd = ::dup(tmp_.fd);  // the reader owns its fd; TmpFile keeps unlinking on destruction
+        // the reader owns its fd; TmpFile keeps unlinking on destruction
+        int fd = ::dup(tmp_.fd);
         if (fd < 0) fsutil::throw_errno("dup cache fill");
         fsutil::FdStreamReader body(fd, 0, written_, owner_.duostore()->pool());
         co_await owner_.duostore()->tier_commit_cached(bucket_, key_, body, meta, to_tier_state(tier));
@@ -171,7 +173,8 @@ public:
             ListResult page;
             try {
                 page = co_await owner_.duo_->list_objects(bucket, lopt);
-            } catch (const S3Error&) {  // bucket deleted mid-walk
+            } catch (const S3Error&) {
+                // bucket deleted mid-walk
                 ++bi_;
                 cursor_.clear();
                 continue;

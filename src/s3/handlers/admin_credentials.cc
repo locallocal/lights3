@@ -56,12 +56,14 @@ json to_json(const CredentialInfo& c, bool with_secret) {
     j["source"] = source_name(c.source);
     if (c.source == CredSource::kDynamic) {
         j["created_at"] = util::iso8601(c.created);
-        j["rev"] = c.rev;  // edit counter (roadmap §2.5)
+        // edit counter (roadmap §2.5)
+        j["rev"] = c.rev;
     }
     if (!c.is_static()) {
         if (!c.comment.empty()) j["comment"] = c.comment;
         if (c.policy) j["policy"] = json::parse(policy_to_json(*c.policy));
-        if (!c.tenant.empty()) {  // docs/multi-tenancy.md §4
+        if (!c.tenant.empty()) {
+            // docs/multi-tenancy.md §4
             j["tenant"] = c.tenant;
             j["role"] = c.tenant_admin ? "admin" : "user";
         }
@@ -74,8 +76,10 @@ json to_json(const CredentialInfo& c, bool with_secret) {
 struct CreateRequest {
     std::string comment;
     std::optional<CredentialPolicy> policy;
-    std::string tenant;         // docs/multi-tenancy.md §4: owning tenant (optional)
-    bool tenant_admin = false;  // "role": "admin"
+    // docs/multi-tenancy.md §4: owning tenant (optional)
+    std::string tenant;
+    // "role": "admin"
+    bool tenant_admin = false;
 };
 
 Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
@@ -101,7 +105,8 @@ Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
     for (auto& [k, v] : j.items()) {
         if (k == "comment") {
             if (!v.is_string()) throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
-            out.comment = v.get<std::string>();  // body takes precedence over ?comment=
+            // body takes precedence over ?comment=
+            out.comment = v.get<std::string>();
         } else if (k == "policy") {
             out.policy = parse_policy_json(v.dump());
         } else if (k == "tenant") {
@@ -135,7 +140,8 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req, st
             throw S3Error(S3ErrorCode::AccessDenied,
                           "Admin API requires a root (statically configured) credential "
                           "or a tenant admin.");
-        const std::string& own = ident.tenant;  // empty for root
+        // empty for root
+        const std::string& own = ident.tenant;
         auto visible = [&](const CredentialInfo& c) { return root || c.tenant == own; };
         // A foreign credential reads as nonexistent: the admin plane must not let a
         // tenant enumerate other tenants' access keys

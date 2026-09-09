@@ -52,7 +52,8 @@ TEST(memory_backend_capacity_no_ghost) {
     CHECK(sync_wait(b.list_objects("bkt", {})).objects.empty());
     CHECK_EQ(b.used_bytes(), uint64_t{0});
 
-    put(b, "bkt", "small", "1234");  // a normal in-capacity write is unaffected
+    // a normal in-capacity write is unaffected
+    put(b, "bkt", "small", "1234");
     CHECK_EQ(read_all(*sync_wait(b.get_object("bkt", "small", std::nullopt)).body), "1234");
 
     // Same-shaped multipart defect: an over-limit upload_part leaves no ghost part
@@ -99,7 +100,8 @@ TEST(tiered_backend_suite) {
     auto pool = std::make_shared<ThreadPool>(4);
     auto local = std::make_shared<LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
     TieredConfig cfg;
-    cfg.scan_interval_sec = 0;  // no background tasks in unit tests
+    // no background tasks in unit tests
+    cfg.scan_interval_sec = 0;
     auto b = std::make_shared<TieredBackend>(local, std::make_shared<MemoryBackend>(), pool, cfg);
     run_backend_suite(*b);
     sync_wait(b->close());
@@ -130,8 +132,10 @@ TEST(duostore_backend_suite_small_chunk) {
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
     cfg.chunk_size = 4096;
-    cfg.pack_threshold = 0;  // pack off: this variant specifically tests the multi-chunk manifest path
-    cfg.meta_sync = false;   // the variant also covers the meta_sync-off path (§6.3)
+    // pack off: this variant specifically tests the multi-chunk manifest path
+    cfg.pack_threshold = 0;
+    // the variant also covers the meta_sync-off path (§6.3)
+    cfg.meta_sync = false;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
     run_backend_suite(*b);
     sync_wait(b->close());
@@ -144,8 +148,10 @@ TEST(duostore_backend_suite_all_pack) {
     cfg.name = "suite-pack";
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
-    cfg.pack_threshold = 8 << 10;  // all suite objects are <= 8KiB -> force all-pack (§14 variant)
-    cfg.pack_max_size = 8 << 10;   // threshold == cap: small packs rotate frequently, exercising the sealing path fully
+    // all suite objects are <= 8KiB -> force all-pack (§14 variant)
+    cfg.pack_threshold = 8 << 10;
+    // threshold == cap: small packs rotate frequently, exercising the sealing path fully
+    cfg.pack_max_size = 8 << 10;
     cfg.pack_writers = 2;
     cfg.meta_sync = false;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
@@ -195,7 +201,8 @@ TEST(xlocalfs_large_object_roundtrip) {
     XLocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool);
     sync_wait(b.create_bucket("bkt"));
 
-    std::string data(1 << 20, '\0');  // 1 MiB of pseudo-random content
+    // 1 MiB of pseudo-random content
+    std::string data(1 << 20, '\0');
     uint32_t x = 0x12345678;
     for (auto& c : data) {
         x = x * 1664525 + 1013904223;
@@ -282,7 +289,8 @@ TEST(xlocalfs_uring_batched_submit_under_concurrency) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(8);
     auto eng = std::make_shared<UringEngine>(pool, UringOptions{/*entries=*/8});
-    constexpr int kN = 16;  // minimal thread count needed: SQ depth 8 already covers "SQ full -> wait for flusher"
+    // minimal thread count needed: SQ depth 8 already covers "SQ full -> wait for flusher"
+    constexpr int kN = 16;
     std::vector<int> fds(kN, -1);
     for (int i = 0; i < kN; ++i) {
         auto p = tmp.path / ("c" + std::to_string(i) + ".bin");
@@ -329,7 +337,8 @@ TEST(localfs_copy_object_fast) {
     meta.user_meta["origin"] = "fast";
     auto r = sync_wait(b.copy_object_fast("bkt", "src.bin", "bkt", "dst/copy.bin", meta));
     CHECK(r.has_value());
-    CHECK_EQ(r->etag, pr.etag);  // bytes unchanged, etag identical to the source
+    // bytes unchanged, etag identical to the source
+    CHECK_EQ(r->etag, pr.etag);
     auto got = sync_wait(b.get_object("bkt", "dst/copy.bin", std::nullopt));
     CHECK_EQ(read_all(*got.body), data);
     CHECK_EQ(got.meta.content_type, std::string("application/x-copied"));
@@ -403,7 +412,8 @@ TEST(localfs_concurrent_put_same_key_not_torn) {
     for (int round = 0; round < 40; ++round) {
         std::vector<std::string> bodies;
         for (int i = 0; i < 16; ++i) bodies.push_back(std::string(4096, char('a' + i)) + std::to_string(round));
-        std::map<std::string, std::string> etag_of;  // etag → body
+        // etag → body
+        std::map<std::string, std::string> etag_of;
         std::mutex m;
         std::vector<std::thread> writers;
         for (auto& body : bodies) {
@@ -467,8 +477,10 @@ TEST(localfs_get_meta_matches_open_inode) {
     std::string v1(8192, 'x');
     auto pr1 = put(b, "bkt", "k.bin", v1);
 
-    auto s = sync_wait(b.get_object("bkt", "k.bin", std::nullopt));  // holds an fd on the old inode
-    put(b, "bkt", "k.bin", std::string(64, 'y'));                    // overwrite with a shorter new object
+    // holds an fd on the old inode
+    auto s = sync_wait(b.get_object("bkt", "k.bin", std::nullopt));
+    // overwrite with a shorter new object
+    put(b, "bkt", "k.bin", std::string(64, 'y'));
     std::string got = read_all(*s.body);
     // A second stat on the path would swap size to the new object's 64 and etag to the new etag, while the body is
     // still the old inode's content -- all three must be consistent
@@ -486,7 +498,8 @@ TEST(localfs_orphan_sidecar_reaped_by_list) {
     put(b, "bkt", "gone.bin", "x");
     put(b, "bkt", "stay.bin", "y");
 
-    fs::remove(tmp.path / "data/bkt/gone.bin");  // simulate "data deleted, sidecar not deleted"
+    // simulate "data deleted, sidecar not deleted"
+    fs::remove(tmp.path / "data/bkt/gone.bin");
     fs::path orphan = tmp.path / "data/bkt/gone.bin.lights3-meta";
     CHECK(fs::exists(orphan));
 
@@ -542,7 +555,8 @@ TEST(localfs_scrub_verifies_and_detects) {
     auto st2 = sync_wait(b.run_scrub_once());
     CHECK_EQ(st2.objects_scanned, uint64_t(3));
     CHECK_EQ(st2.orphan_sidecars, uint64_t(1));
-    CHECK(fs::exists(tmp.path / "data/bkt/ok.bin.lights3-meta"));  // reported, not healed
+    // reported, not healed
+    CHECK(fs::exists(tmp.path / "data/bkt/ok.bin.lights3-meta"));
 }
 
 // A multipart object whose metadata predates part_sizes has unrecoverable part
@@ -616,7 +630,8 @@ TEST(localfs_commit_cached_persists_data_before_sidecar) {
     auto local = std::make_shared<LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
     TieredConfig cfg;
     cfg.scan_interval_sec = 0;
-    cfg.cold_after_sec = 0;  // considered cold immediately
+    // considered cold immediately
+    cfg.cold_after_sec = 0;
     auto cloud = std::make_shared<MemoryBackend>();
     auto b = std::make_shared<TieredBackend>(local, cloud, pool, cfg);
     sync_wait(b->create_bucket("bkt"));
@@ -626,7 +641,8 @@ TEST(localfs_commit_cached_persists_data_before_sidecar) {
     // Sink to the cloud (local becomes a stub), then GET triggers Tee backfill -> commit_cached
     sync_wait(b->scan_once());
     auto s1 = sync_wait(b->get_object("bkt", "k.bin", std::nullopt));
-    CHECK_EQ(read_all(*s1.body), data);  // backfill commits at EOF
+    // backfill commits at EOF
+    CHECK_EQ(read_all(*s1.body), data);
 
     // Content read via the cache-hit path must match the original byte for byte (a wrong commit order reads
     // truncated/zero blocks)
@@ -789,7 +805,8 @@ TEST(localfs_list_parallel_meta_and_dir_cache_match_reference) {
         put(lf, "bkt", k, "v" + std::string(num));
         put(mem, "bkt", k, "v" + std::string(num));
     }
-    put(lf, "bkt", "d1/", "");  // directory-marker object sorts first inside d1/
+    // directory-marker object sorts first inside d1/
+    put(lf, "bkt", "d1/", "");
     put(mem, "bkt", "d1/", "");
     backdate_dirs(tmp.path / "data" / "bkt");
 
@@ -808,7 +825,8 @@ TEST(localfs_list_parallel_meta_and_dir_cache_match_reference) {
     check_listing_matches(lf, mem, mid);
     auto st = lf.list_cache_stats();
     CHECK(st.misses > 0);
-    CHECK(st.hits > st.misses);  // the paged walks re-read the same directories from the snapshot
+    // the paged walks re-read the same directories from the snapshot
+    CHECK(st.hits > st.misses);
     CHECK(st.entries > 0);
 }
 
@@ -828,10 +846,13 @@ TEST(localfs_list_dir_cache_invalidates_on_change) {
     CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));
     CHECK_EQ(b.list_cache_stats().hits, uint64_t(0));
     backdate_dirs(tmp.path / "data" / "bkt");
-    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));  // fills
-    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));  // hits
+    // fills
+    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));
+    // hits
+    CHECK_EQ(sync_wait(b.list_objects("bkt", {})).objects.size(), size_t(3));
     CHECK_EQ(b.list_cache_stats().hits, uint64_t(1));
-    put(b, "bkt", "d", "x");  // mtime bumps → stale snapshot dropped
+    // mtime bumps → stale snapshot dropped
+    put(b, "bkt", "d", "x");
     auto r = sync_wait(b.list_objects("bkt", {}));
     CHECK_EQ(r.objects.size(), size_t(4));
     CHECK_EQ(r.objects[3].key, std::string("d"));
@@ -839,7 +860,8 @@ TEST(localfs_list_dir_cache_invalidates_on_change) {
     r = sync_wait(b.list_objects("bkt", {}));
     CHECK_EQ(r.objects.size(), size_t(3));
     CHECK_EQ(r.objects[0].key, std::string("b"));
-    CHECK_EQ(b.list_cache_stats().hits, uint64_t(1));  // nothing served stale
+    // nothing served stale
+    CHECK_EQ(b.list_cache_stats().hits, uint64_t(1));
 }
 
 // A key deleted between the directory read and its stat drops out of the page instead of
@@ -931,7 +953,8 @@ TEST(localfs_sidecar_modes) {
         ObjectMeta m;
         m.user_meta["big"] = std::string(70000, 'x');
         put(b, "bkt", "big.bin", "payload", m);
-        CHECK(fs::exists(root / "bkt/big.bin.lights3-meta"));  // written inline, before the response
+        // written inline, before the response
+        CHECK(fs::exists(root / "bkt/big.bin.lights3-meta"));
         CHECK_EQ(sync_wait(b.head_object("bkt", "big.bin")).user_meta["big"].size(), size_t(70000));
         CHECK_EQ(b.xattr_policy().failure_count.load(), uint64_t(1));
         sync_wait(b.close());
@@ -957,7 +980,8 @@ TEST(localfs_xattr_fallback_gauge_and_require_xattr) {
         std::string out = reg->render();
         CHECK(out.find("lights3_localfs_xattr_fallback{backend=\"lf\"} 0") != std::string::npos);
         ObjectMeta m;
-        m.user_meta["big"] = std::string(70000, 'x');  // > XATTR_SIZE_MAX → E2BIG, degrades to sidecar
+        // > XATTR_SIZE_MAX → E2BIG, degrades to sidecar
+        m.user_meta["big"] = std::string(70000, 'x');
         put(b, "bkt", "big.bin", "payload", m);
         CHECK_EQ(b.xattr_policy().failure_count.load(), uint64_t(1));
         out = reg->render();
@@ -970,13 +994,16 @@ TEST(localfs_xattr_fallback_gauge_and_require_xattr) {
         LocalFsOptions o;
         o.require_xattr = true;
         o.sidecar_scan_interval_sec = 0;
-        LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);  // probe passes here
+        // probe passes here
+        LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);
         ObjectMeta m;
         m.user_meta["big"] = std::string(70000, 'x');
         CHECK_THROWS_S3(put(b, "bkt", "strict.bin", "payload", m), S3ErrorCode::InternalError);
         CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "strict.bin")), S3ErrorCode::NoSuchKey);
-        CHECK(fs::is_empty(tmp.path / "staging/put"));  // tmp discarded, nothing half-committed
-        put(b, "bkt", "ok.bin", "payload");             // normal writes unaffected
+        // tmp discarded, nothing half-committed
+        CHECK(fs::is_empty(tmp.path / "staging/put"));
+        // normal writes unaffected
+        put(b, "bkt", "ok.bin", "payload");
         CHECK_EQ(sync_wait(b.head_object("bkt", "ok.bin")).size, uint64_t(7));
         sync_wait(b.close());
     }
@@ -988,12 +1015,14 @@ TEST(localfs_orphan_sidecar_sweep) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     LocalFsOptions o;
-    o.sidecar_scan_interval_sec = 0;  // drive it by hand
+    // drive it by hand
+    o.sidecar_scan_interval_sec = 0;
     LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);
     sync_wait(b.create_bucket("bkt"));
     put(b, "bkt", "a/b.bin", "x");
     put(b, "bkt", "keep.bin", "y");
-    put(b, "bkt", "dir/", "");  // marker object: sidecar is dir/.lights3-dir.lights3-meta
+    // marker object: sidecar is dir/.lights3-dir.lights3-meta
+    put(b, "bkt", "dir/", "");
     fs::remove(tmp.path / "data/bkt/a/b.bin");
     fs::remove(tmp.path / "data/bkt/dir/.lights3-dir");
     CHECK(fs::exists(tmp.path / "data/bkt/a/b.bin.lights3-meta"));
@@ -1045,7 +1074,8 @@ TEST(uring_read_stream_readahead_roundtrip) {
     int fd = ::open(path.c_str(), O_RDONLY);
     CHECK(fd >= 0);
     auto io = [&]() -> Task<std::string> {
-        UringReadStream rs(eng, fd, 0, data.size());  // fd ownership moves to the stream
+        // fd ownership moves to the stream
+        UringReadStream rs(eng, fd, 0, data.size());
         std::string got;
         std::vector<std::byte> buf(40000);
         for (;;) {
@@ -1060,7 +1090,8 @@ TEST(uring_read_stream_readahead_roundtrip) {
     int fd2 = ::open(path.c_str(), O_RDONLY);
     CHECK(fd2 >= 0);
     auto ranged = [&]() -> Task<std::string> {
-        UringReadStream rs(eng, fd2, 65530, 16);  // crosses the 64KiB block boundary
+        // crosses the 64KiB block boundary
+        UringReadStream rs(eng, fd2, 65530, 16);
         std::string got(16, '\0');
         size_t off = 0;
         while (off < got.size()) {
@@ -1092,9 +1123,11 @@ TEST(uring_read_stream_abandon_inflight_safe) {
         auto io = [&]() -> Task<void> {
             UringReadStream rs(eng, fd, 0, uint64_t(2 << 20));
             std::byte buf[1000];
-            size_t n = co_await rs.read(std::span(buf));  // fills the read-ahead window
+            // fills the read-ahead window
+            size_t n = co_await rs.read(std::span(buf));
             CHECK(n > 0);
-            co_return;  // rs destroyed with up to 3 reads still in flight
+            // rs destroyed with up to 3 reads still in flight
+            co_return;
         };
         sync_wait(io());
     }
@@ -1158,7 +1191,8 @@ TEST(uring_fixed_buffers_exhaust_and_return) {
     uo.fixed_buffers = 2;
     uo.read_depth = 2;
     auto eng = std::make_shared<UringEngine>(pool, uo);
-    if (!eng->features().fixed_buffers) {  // registration refused (old kernel/quota): nothing to assert
+    if (!eng->features().fixed_buffers) {
+        // registration refused (old kernel/quota): nothing to assert
         eng->shutdown();
         return;
     }
@@ -1168,7 +1202,8 @@ TEST(uring_fixed_buffers_exhaust_and_return) {
     write_file(path, data);
     auto io = [&]() -> Task<void> {
         std::vector<std::unique_ptr<UringReadStream>> streams;
-        for (int i = 0; i < 3; ++i) {  // 3 streams x depth 2 > 2 registered blocks
+        for (int i = 0; i < 3; ++i) {
+            // 3 streams x depth 2 > 2 registered blocks
             int fd = ::open(path.c_str(), O_RDONLY);
             CHECK(fd >= 0);
             streams.push_back(std::make_unique<UringReadStream>(eng, fd, 0, uint64_t(data.size())));
@@ -1186,7 +1221,8 @@ TEST(uring_fixed_buffers_exhaust_and_return) {
         co_return;
     };
     sync_wait(io());
-    CHECK_EQ(eng->fixed_free(0), 2u);  // all registered blocks returned
+    // all registered blocks returned
+    CHECK_EQ(eng->fixed_free(0), 2u);
     eng->shutdown();
 }
 
@@ -1221,7 +1257,8 @@ TEST(uring_fixed_files_register_roundtrip) {
     };
     CHECK_EQ(sync_wait(io()), data);
     eng->unregister_file(0, slot);
-    int slot2 = eng->register_file(0, fd);  // the slot came back to the free pool
+    // the slot came back to the free pool
+    int slot2 = eng->register_file(0, fd);
     CHECK(slot2 >= 0);
     eng->unregister_file(0, slot2);
     ::close(fd);
@@ -1262,7 +1299,8 @@ TEST(uring_meta_opcodes_roundtrip) {
         CHECK(fs::exists(q));
         if (f.op_unlinkat) {
             CHECK_EQ(co_await eng->unlinkat(AT_FDCWD, q.c_str(), 0), 0);
-            CHECK_EQ(co_await eng->unlinkat(AT_FDCWD, q.c_str(), 0), -ENOENT);  // idempotence signal
+            // idempotence signal
+            CHECK_EQ(co_await eng->unlinkat(AT_FDCWD, q.c_str(), 0), -ENOENT);
             CHECK(!fs::exists(q));
         }
         co_return;
@@ -1360,7 +1398,8 @@ TEST(meta_cache_lru_token_ttl) {
     c.insert(stale, "b", "k2", std::make_shared<int>(2));
     CHECK(c.lookup("b", "k2") == nullptr);
     CHECK_EQ(c.stats().fills_dropped, uint64_t(1));
-    CHECK(c.lookup("b", "k1") == nullptr);  // invalidated
+    // invalidated
+    CHECK(c.lookup("b", "k1") == nullptr);
     CHECK_EQ(c.stats().invalidations, uint64_t(1));
 
     // LRU eviction under the budget: k3..k6 fill it, touching k3 keeps it, k4 goes
@@ -1387,12 +1426,14 @@ TEST(meta_cache_lru_token_ttl) {
     // fill whose token predates the rejection
     {
         MetaCache<int>::Token before;
-        c.lookup("b", "k-none", &before);  // token from an unrelated miss on the same shard
+        // token from an unrelated miss on the same shard
+        c.lookup("b", "k-none", &before);
         MetaCache<int>::Token t;
         CHECK(c.lookup("b", "k3", &t, [](const int& v) { return v != 3; }) == nullptr);
         CHECK_EQ(c.stats().stale, uint64_t(1));
         CHECK(c.lookup("b", "k3") == nullptr);
-        c.insert(before, "b", "k3", std::make_shared<int>(33));  // stale token: dropped
+        // stale token: dropped
+        c.insert(before, "b", "k3", std::make_shared<int>(33));
         CHECK(c.lookup("b", "k3") == nullptr);
         c.insert(t, "b", "k3", std::make_shared<int>(3));
         CHECK_EQ(*c.lookup("b", "k3", nullptr, [](const int& v) { return v == 3; }), 3);
@@ -1429,17 +1470,21 @@ TEST(localfs_meta_cache_hits_and_write_invalidation) {
     LocalFsBackend b(tmp.path / "data", tmp.path / "staging", pool, o);
     sync_wait(b.create_bucket("bkt"));
     auto p1 = put(b, "bkt", "k", "v1");
-    CHECK_EQ(b.meta_cache_stats().entries, size_t(0));  // PUT does not populate
+    // PUT does not populate
+    CHECK_EQ(b.meta_cache_stats().entries, size_t(0));
 
-    auto h1 = sync_wait(b.head_object("bkt", "k"));  // miss + fill
+    // miss + fill
+    auto h1 = sync_wait(b.head_object("bkt", "k"));
     CHECK_EQ(h1.etag, p1.etag);
     CHECK_EQ(b.meta_cache_stats().misses, uint64_t(1));
     CHECK_EQ(b.meta_cache_stats().entries, size_t(1));
-    auto h2 = sync_wait(b.head_object("bkt", "k"));  // validated hit
+    // validated hit
+    auto h2 = sync_wait(b.head_object("bkt", "k"));
     CHECK_EQ(h2.etag, p1.etag);
     CHECK_EQ(b.meta_cache_stats().hits, uint64_t(1));
     {
-        auto s = sync_wait(b.get_object("bkt", "k", std::nullopt));  // hit via the fstat stamp
+        // hit via the fstat stamp
+        auto s = sync_wait(b.get_object("bkt", "k", std::nullopt));
         CHECK_EQ(s.meta.etag, p1.etag);
         CHECK_EQ(read_all(*s.body), std::string("v1"));
     }
@@ -1490,12 +1535,15 @@ TEST(localfs_meta_cache_stamp_catches_external_write) {
     LocalFsOptions o;
     o.sidecar_scan_interval_sec = 0;
     LocalFsBackend a(tmp.path / "data", tmp.path / "staging", pool, o);
-    LocalFsBackend w(tmp.path / "data", tmp.path / "staging2", pool, o);  // "another process"
+    // "another process"
+    LocalFsBackend w(tmp.path / "data", tmp.path / "staging2", pool, o);
     sync_wait(a.create_bucket("bkt"));
     auto p1 = put(a, "bkt", "k", "v1");
-    CHECK_EQ(sync_wait(a.head_object("bkt", "k")).etag, p1.etag);  // fill
+    // fill
+    CHECK_EQ(sync_wait(a.head_object("bkt", "k")).etag, p1.etag);
     auto p2 = put(w, "bkt", "k", "v2-longer");
-    auto h = sync_wait(a.head_object("bkt", "k"));  // stamp mismatch → stale, refetch
+    // stamp mismatch → stale, refetch
+    auto h = sync_wait(a.head_object("bkt", "k"));
     CHECK_EQ(h.etag, p2.etag);
     CHECK_EQ(h.size, uint64_t(9));
     CHECK_EQ(a.meta_cache_stats().hits, uint64_t(0));
@@ -1516,7 +1564,8 @@ TEST(localfs_meta_cache_stamp_catches_external_write) {
     auto p3 = put(t, "bkt", "k", "v3");
     CHECK_EQ(sync_wait(t.head_object("bkt", "k")).etag, p3.etag);
     auto p4 = put(w, "bkt", "k", "v4");
-    CHECK_EQ(sync_wait(t.head_object("bkt", "k")).etag, p3.etag);  // unvalidated hit: stale by design
+    // unvalidated hit: stale by design
+    CHECK_EQ(sync_wait(t.head_object("bkt", "k")).etag, p3.etag);
     CHECK_EQ(t.meta_cache_stats().hits, uint64_t(1));
     // GET always validates against the fd it holds, so it refetches and repairs the record
     {
@@ -1544,10 +1593,12 @@ TEST(xlocalfs_meta_cache_paths) {
     sync_wait(b.create_bucket("bkt"));
     auto p1 = put(b, "bkt", "k", "one");
     {
-        auto s = sync_wait(b.get_object("bkt", "k", std::nullopt));  // miss + fill
+        // miss + fill
+        auto s = sync_wait(b.get_object("bkt", "k", std::nullopt));
         CHECK_EQ(read_all(*s.body), std::string("one"));
     }
-    CHECK_EQ(sync_wait(b.head_object("bkt", "k")).etag, p1.etag);  // hit
+    // hit
+    CHECK_EQ(sync_wait(b.head_object("bkt", "k")).etag, p1.etag);
     CHECK_EQ(b.meta_cache_stats().hits, uint64_t(1));
     auto p2 = put(b, "bkt", "k", "two-2");
     {

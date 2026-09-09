@@ -93,7 +93,8 @@ public:
         size_t removed = items_.size() - w;
         items_.resize(w);
         tags_.resize(w);
-        if (removed) {  // another header may share the tag: rebuild the set from what is left
+        if (removed) {
+            // another header may share the tag: rebuild the set from what is left
             present_ = {};
             for (uint8_t r : tags_) present_[r >> 6] |= uint64_t(1) << (r & 63);
         }
@@ -155,9 +156,11 @@ private:
     }
 
     std::vector<std::pair<std::string, std::string>> items_;
-    std::vector<uint8_t> tags_;          // tag(items_[i].first), kept in lockstep with items_
-    std::array<uint64_t, 4> present_{};  // set of tags in tags_ (a superset after remove is fine, but it is rebuilt
-                                         // exactly)
+    // tag(items_[i].first), kept in lockstep with items_
+    std::vector<uint8_t> tags_;
+    // set of tags in tags_ (a superset after remove is fine, but it is rebuilt
+    // exactly)
+    std::array<uint64_t, 4> present_{};
 };
 
 // Zero-copy exit for file-backed bodies (roadmap §4.3 ④, docs/http-adapter.md §1):
@@ -171,7 +174,8 @@ struct FileSpan {
 // Streaming request/response body: pull model. Returns bytes read; 0 means EOF.
 struct BodyReader {
     virtual Task<size_t> read(std::span<std::byte> buf) = 0;
-    virtual std::optional<uint64_t> length() const = 0;  // nullopt when chunked
+    // nullopt when chunked
+    virtual std::optional<uint64_t> length() const = 0;
     // Optional sendfile(2) fast path. A reader whose remaining bytes are one
     // contiguous file range may expose it; a driver that takes the offer moves
     // the bytes kernel-side and reports them through file_bytes_sent() so the
@@ -205,19 +209,27 @@ private:
 
 // The identity-bearing fields of a verified client certificate (mTLS)
 struct TlsIdentity {
-    std::string subject_cn;  // subject commonName (empty when the subject has none)
-    std::string san_uri;     // first URI subjectAltName (empty when there is none)
+    // subject commonName (empty when the subject has none)
+    std::string subject_cn;
+    // first URI subjectAltName (empty when there is none)
+    std::string san_uri;
 };
 
 struct HttpRequest {
-    std::string method;                                      // "GET" "PUT" ...
-    std::string raw_path;                                    // Undecoded (needed for the SigV4 canonical URI)
-    std::string raw_query;                                   // Undecoded raw query string (needed for SigV4)
-    std::string path;                                        // Decoded
-    std::vector<std::pair<std::string, std::string>> query;  // Decoded, order-preserving
+    // "GET" "PUT" ...
+    std::string method;
+    // Undecoded (needed for the SigV4 canonical URI)
+    std::string raw_path;
+    // Undecoded raw query string (needed for SigV4)
+    std::string raw_query;
+    // Decoded
+    std::string path;
+    // Decoded, order-preserving
+    std::vector<std::pair<std::string, std::string>> query;
     HeaderMap headers;
     std::string remote_addr;
-    std::unique_ptr<BodyReader> body;  // May be nullptr (no body)
+    // May be nullptr (no body)
+    std::unique_ptr<BodyReader> body;
     // Cancellation signal (docs/concurrency.md §5): the driver/assembly layer
     // attaches this request's token, L2 merges it with the request-level
     // timeout into one source, and the whole coroutine chain unwinds from it.
@@ -249,7 +261,8 @@ struct HttpResponse {
     // Body is one of the two: small_body for small responses, stream_body for large ones
     std::string small_body;
     std::unique_ptr<BodyReader> stream_body;
-    std::optional<uint64_t> content_length;  // Set with stream_body; otherwise the driver uses chunked
+    // Set with stream_body; otherwise the driver uses chunked
+    std::optional<uint64_t> content_length;
 };
 
 }  // namespace lights3::http

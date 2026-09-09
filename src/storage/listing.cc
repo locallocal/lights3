@@ -14,14 +14,16 @@ std::pair<uint64_t, uint64_t> resolve_range(const ByteRange& r, uint64_t size) {
         if (l < f) fail();
         return {f, l};
     }
-    if (r.last) {  // suffix of n bytes
+    if (r.last) {
+        // suffix of n bytes
         uint64_t n = *r.last;
         if (n == 0) fail();
         uint64_t f = n >= size ? 0 : size - n;
         return {f, size - 1};
     }
     fail();
-    return {0, 0};  // unreachable
+    // unreachable
+    return {0, 0};
 }
 
 ListResult apply_listing(const std::vector<std::string>& keys, const ListOptions& opt,
@@ -41,7 +43,8 @@ ListResult apply_listing(const std::vector<std::string>& keys, const ListOptions
     std::string last_emitted_key;
     for (; it != keys.end(); ++it) {
         const std::string& key = *it;
-        if (key.compare(0, prefix.size(), prefix) != 0) break;  // sorted, stop once past the prefix range
+        // sorted, stop once past the prefix range
+        if (key.compare(0, prefix.size(), prefix) != 0) break;
 
         if (count >= opt.max_keys) {
             out.is_truncated = true;
@@ -73,7 +76,8 @@ ListPartsResult apply_parts_page(std::vector<PartMeta> sorted, const ListPartsOp
     ListPartsResult out;
     if (opt.max_parts <= 0) return out;
     for (auto& p : sorted) {
-        if (p.part_no <= opt.part_number_marker) continue;  // the marker means "strictly greater than"
+        // the marker means "strictly greater than"
+        if (p.part_no <= opt.part_number_marker) continue;
         if (out.parts.size() >= size_t(opt.max_parts)) {
             out.is_truncated = true;
             // the next page starts after the last returned part number
@@ -101,7 +105,8 @@ ListUploadsResult apply_uploads_page(std::vector<UploadInfo> sorted, const ListU
 
         if (out.uploads.size() + out.common_prefixes.size() >= size_t(opt.max_uploads)) {
             out.is_truncated = true;
-            return out;  // next_* already record the position of the previous round's output item
+            // next_* already record the position of the previous round's output item
+            return out;
         }
 
         if (!group.empty()) {

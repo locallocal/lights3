@@ -28,7 +28,8 @@ void run_tier_scan(const Cmd& c) {
     Application app(c->var<std::string>("config"));
     app.open_storage();
     auto* t = find_tiered(app, one_backend_arg(c));
-    auto st = sync_wait(t->scan_once());  // demotions/reclaim are logged by the scan itself
+    // demotions/reclaim are logged by the scan itself
+    auto st = sync_wait(t->scan_once());
     LOG_INFO(
         "tier admin: {} scan round complete: {} {}, cold {}, recovered {}, enrolled {}, "
         "evicted {} ({} bytes), watermark short by {}",

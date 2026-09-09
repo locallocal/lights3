@@ -100,22 +100,28 @@ private:
     // Declaration order = construction order; shutdown() releases in reverse
     std::string config_path_;
     std::atomic<int> shutdown_errors_{0};
-    std::mutex reload_mu_;  // one reload at a time (SIGHUP and the admin API may race)
+    // one reload at a time (SIGHUP and the admin API may race)
+    std::mutex reload_mu_;
     std::shared_ptr<std::atomic<long>> stall_sec_;
-    std::shared_ptr<http::AdmissionCounters> admission_counters_;  // roadmap §5.3  // transfer_stall_timeout, read per
-                                                                   // request
+    // roadmap §5.3  // transfer_stall_timeout, read per
+    // request
+    std::shared_ptr<http::AdmissionCounters> admission_counters_;
     Config cfg_;
     std::shared_ptr<ThreadPool> pool_;
     std::shared_ptr<MetricsRegistry> metrics_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
-    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> metered_;  // roadmap §5.1 decorators
+    // roadmap §5.1 decorators
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> metered_;
     std::mutex retire_mu_;
-    std::vector<std::thread> retiring_;     // backlog-sequence ⑦: removed backends draining
-    std::atomic<bool> retire_stop_{false};  // shutdown: stop waiting, close what is left
+    // backlog-sequence ⑦: removed backends draining
+    std::vector<std::thread> retiring_;
+    // shutdown: stop waiting, close what is left
+    std::atomic<bool> retire_stop_{false};
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;
     std::shared_ptr<s3::CorsStore> cors_store_;
-    std::shared_ptr<s3::TlsIdentityStore> tls_identity_store_;  // backlog-sequence ⑥
+    // backlog-sequence ⑥
+    std::shared_ptr<s3::TlsIdentityStore> tls_identity_store_;
     std::shared_ptr<s3::LifecycleStore> lifecycle_store_;
     std::unique_ptr<s3::LifecycleRunner> lifecycle_runner_;
     // roadmap §3.9: usage accounting, quotas, tenancy, audit (docs/multi-tenancy.md)
@@ -129,7 +135,8 @@ private:
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;
     std::shared_ptr<AsyncSemaphore> inflight_;
     std::shared_ptr<CancelSource> shutdown_src_;
-    std::unique_ptr<AdminJobs> admin_jobs_;  // /-/admin/fsck|duostore|tier/<backend>[/<op>]
+    // /-/admin/fsck|duostore|tier/<backend>[/<op>]
+    std::unique_ptr<AdminJobs> admin_jobs_;
     std::unique_ptr<http::IHttpServer> server_;
     // Separate admin listener (backlog-sequence ②): same driver (builtin when the
     // data plane runs seastar, whose engine is a process singleton), same admission

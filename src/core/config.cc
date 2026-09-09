@@ -16,8 +16,10 @@ namespace {
 
 struct Line {
     int indent = 0;
-    int lineno = 0;    // original line number (1-based), for error reporting
-    std::string text;  // content with indentation and comments stripped
+    // original line number (1-based), for error reporting
+    int lineno = 0;
+    // content with indentation and comments stripped
+    std::string text;
 };
 
 // ${VAR} -> environment variable value. Undefined is an error: silently expanding
@@ -120,7 +122,8 @@ public:
     }
 
 private:
-    static constexpr int kMaxDepth = 64;  // guards against stack overflow on pathologically deep input
+    // guards against stack overflow on pathologically deep input
+    static constexpr int kMaxDepth = 64;
 
     // Parse the block starting at the current line whose indentation is exactly `indent`
     YamlNode parse_block(int indent, int depth) {
@@ -225,8 +228,9 @@ int parse_duration_sec(const std::string& s) {
         mult = 60;
     else if (unit == "h")
         mult = 3600;
+    // tiered storage's cold_after (docs/storage/tiered-design.md §8)
     else if (unit == "d")
-        mult = 86400;  // tiered storage's cold_after (docs/storage/tiered-design.md §8)
+        mult = 86400;
     else
         throw std::runtime_error("bad duration unit: " + s);
     if (num < 0 || num > INT_MAX / mult) throw std::runtime_error("duration out of range: " + s);
@@ -327,7 +331,8 @@ Config Config::from_string(const std::string& text) {
                 "(or bind the admin listener to another address)");
         if (auto v = http->get("io_threads"); !v.empty()) {
             cfg.http.io_threads = to_int("http.io_threads", v, cfg.http.io_threads);
-            cfg.http.io_threads_set = true;  // the builtin driver WARNs based on this (docs/archive/gaps.md §7)
+            // the builtin driver WARNs based on this (docs/archive/gaps.md §7)
+            cfg.http.io_threads_set = true;
         }
         cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
         if (auto v = http->get("max_header_size"); !v.empty()) cfg.http.max_header_size = parse_size(v);

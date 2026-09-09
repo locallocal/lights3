@@ -117,9 +117,9 @@ MetaDumpStats dump_meta(IMetaReadView& src, std::ostream& out) {
             auto res = src.list_objects(b.name, opt);
             for (const auto& om : res.objects) {
                 auto rec = src.get_object(b.name, om.key);
-                if (!rec)
-                    continue;  // invisible under a snapshot view; on a live store (redis) a concurrent delete is
-                               // skipped defensively
+                // invisible under a snapshot view; on a live store (redis) a concurrent delete is
+                // skipped defensively
+                if (!rec) continue;
                 auto val = codec::encode_object(*rec);
                 w.u8('O');
                 w.str32(b.name);
@@ -132,8 +132,8 @@ MetaDumpStats dump_meta(IMetaReadView& src, std::ostream& out) {
         }
     }
     for (const auto& ps : src.pack_stats()) {
-        if (!ps.sealed)
-            continue;  // unsealed packs' ledger is rebuilt by object replay; the ledger gets sealed on restart
+        // unsealed packs' ledger is rebuilt by object replay; the ledger gets sealed on restart
+        if (!ps.sealed) continue;
         w.u8('S');
         w.u64(ps.pack_id);
         w.u64(ps.file_size);
@@ -192,7 +192,8 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
             ++st.sealed_packs;
         } else if (tag == 'E') {
             uint64_t nb = r.u64(), no = r.u64(), np = r.u64();
-            uint32_t want = r.crc;  // accumulated value after the count fields, before the crc field
+            // accumulated value after the count fields, before the crc field
+            uint32_t want = r.crc;
             uint8_t b[4];
             r.raw(b, 4);
             uint32_t got = uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 | uint32_t(b[3]) << 24;
@@ -211,7 +212,8 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
     // terminates
     for (auto [kind, floor] :
          {std::pair{Extent::Kind::kChunk, next_chunk}, std::pair{Extent::Kind::kPack, next_pack}}) {
-        if (floor == 0) continue;  // no extent of this kind was ever seen
+        // no extent of this kind was ever seen
+        if (floor == 0) continue;
         for (;;) {
             uint64_t got = dst.alloc_file_run(kind, 1);
             if (got >= floor) break;

@@ -174,16 +174,16 @@ TEST(duostore_tikv_write_skew_guard) {
             try {
                 a.put_object(bkt, "k", make_rec("k", {}));
             } catch (const s3::S3Error& e) {
-                if (e.code != s3::S3ErrorCode::NoSuchBucket)  // legitimate failure when bucket deletion wins
-                    errs[0] = std::current_exception();
+                // legitimate failure when bucket deletion wins
+                if (e.code != s3::S3ErrorCode::NoSuchBucket) errs[0] = std::current_exception();
             }
         });
         std::thread t2([&] {
             try {
                 b.delete_bucket(bkt);
             } catch (const s3::S3Error& e) {
-                if (e.code != s3::S3ErrorCode::BucketNotEmpty)  // legitimate failure when the put wins
-                    errs[1] = std::current_exception();
+                // legitimate failure when the put wins
+                if (e.code != s3::S3ErrorCode::BucketNotEmpty) errs[1] = std::current_exception();
             }
         });
         t1.join();
@@ -226,8 +226,8 @@ TEST(duostore_tikv_part_abort_guard) {
                 p.etag = "d41d8cd98f00b204e9800998ecf8427e";
                 a.put_part("pg", "k", id, p);
             } catch (const s3::S3Error& e) {
-                if (e.code != s3::S3ErrorCode::NoSuchUpload)  // legitimate failure when abort wins
-                    errs[0] = std::current_exception();
+                // legitimate failure when abort wins
+                if (e.code != s3::S3ErrorCode::NoSuchUpload) errs[0] = std::current_exception();
             }
         });
         std::thread t2([&] {
@@ -264,7 +264,8 @@ TEST(duostore_tikv_object_manifest_size_guard) {
     // Interleaved ids break the run encoding (pathological shape); the count exceeds kMaxObjectExtents
     for (size_t i = 0; i < 200'001; ++i) huge.push_back(chunk_extent(i * 2 + 1, 1));
     CHECK_THROWS_S3(m.put_object("etl", "k", make_rec("k", std::move(huge))), s3::S3ErrorCode::EntityTooLarge);
-    CHECK(!m.get_object("etl", "k").has_value());  // nothing was written
+    // nothing was written
+    CHECK(!m.get_object("etl", "k").has_value());
     m.delete_bucket("etl");
     m.close();
 }
@@ -278,9 +279,11 @@ TEST(duostore_tikv_swap_extents_cas) {
     uint64_t id2 = m.alloc_file_id(Extent::Kind::kChunk);
     DataRef from{{chunk_extent(id1, 8)}};
     DataRef to{{chunk_extent(id2, 8)}};
-    m.put_object("swap", "k", make_rec("k", from.extents));  // version=1
+    // version=1
+    m.put_object("swap", "k", make_rec("k", from.extents));
 
-    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version mismatch
+    // version mismatch
+    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));
     CHECK(m.chunk_referenced(id1));
     CHECK(!m.chunk_referenced(id2));
 
@@ -397,7 +400,8 @@ TEST(duostore_tikv_conflict_metric_counts) {
             if (e) std::rethrow_exception(e);
         retries = metric_value(reg->render(), "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}");
     }
-    CHECK(retries > 0);  // the counter only ever increases
+    // the counter only ever increases
+    CHECK(retries > 0);
 
     CHECK(g1.delete_object("cm", "hot"));
     g1.delete_bucket("cm");
@@ -413,7 +417,8 @@ TEST(duostore_tikv_gc_safepoint_advances) {
     TIKV_OR_SKIP();
     auto reg = std::make_shared<MetricsRegistry>();
     auto opts = tikv_opts(unique_prefix());
-    opts.gc_retention_s = 60;  // shared cluster: keep a 60s window, do not disturb other cases' in-flight snapshots
+    // shared cluster: keep a 60s window, do not disturb other cases' in-flight snapshots
+    opts.gc_retention_s = 60;
     opts.metrics = MetricsScope(reg, {{"backend", "t5sp"}});
     TikvMetaStore m(opts);
     CHECK_EQ(metric_value(reg->render(), "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"), 0);
@@ -421,7 +426,8 @@ TEST(duostore_tikv_gc_safepoint_advances) {
     CHECK(sp1 > 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     uint64_t sp2 = m.update_gc_safepoint_once();
-    CHECK(sp2 >= sp1);  // monotonic, forward-only on the PD side
+    // monotonic, forward-only on the PD side
+    CHECK(sp2 >= sp1);
     // gauge = physical ms of the most recently advanced cluster safepoint
     CHECK_EQ(metric_value(reg->render(), "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"),
              (long long)(sp2 >> 18));
@@ -532,12 +538,15 @@ TEST(duostore_tikv_gc_lease) {
     std::string prefix = unique_prefix();
     TikvMetaStore a(tikv_opts(prefix)), b(tikv_opts(prefix));
     CHECK(a.try_gc_lease("owner-a", 60'000));
-    CHECK(!b.try_gc_lease("owner-b", 60'000));  // held by another and not expired
-    CHECK(a.try_gc_lease("owner-a", 60'000));   // same owner renews
+    // held by another and not expired
+    CHECK(!b.try_gc_lease("owner-b", 60'000));
+    // same owner renews
+    CHECK(a.try_gc_lease("owner-a", 60'000));
     TikvMetaStore c(tikv_opts(unique_prefix()));
     CHECK(c.try_gc_lease("x", 100));
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    CHECK(c.try_gc_lease("y", 60'000));  // x's lease has expired (wall-clock judgment)
+    // x's lease has expired (wall-clock judgment)
+    CHECK(c.try_gc_lease("y", 60'000));
     a.close();
     b.close();
     c.close();
@@ -559,11 +568,13 @@ TEST(duostore_tikv_read_lease) {
     CHECK_EQ(min->oldest_read_ms, int64_t(500));
     CHECK(min->oldest_write_ms.has_value());
     CHECK_EQ(*min->oldest_write_ms, int64_t(3'000));
-    CHECK(b.publish_lease("gw-b", LeaseInfo{2'000, 2'500}, 60'000));  // b's oldest read finished, a write began
+    // b's oldest read finished, a write began
+    CHECK(b.publish_lease("gw-b", LeaseInfo{2'000, 2'500}, 60'000));
     min = a.min_lease();
     CHECK_EQ(min->oldest_read_ms, int64_t(1'000));
     CHECK_EQ(*min->oldest_write_ms, int64_t(2'500));
-    CHECK(a.publish_lease("gw-c", LeaseInfo{1, 1}, 100));  // expires almost immediately
+    // expires almost immediately
+    CHECK(a.publish_lease("gw-c", LeaseInfo{1, 1}, 100));
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     min = a.min_lease();
     CHECK_EQ(min->oldest_read_ms, int64_t(1'000));
@@ -588,7 +599,8 @@ TEST(duostore_tikv_snapshot_dump_is_consistent) {
 
     auto view = m.snapshot();
     CHECK(view != nullptr);
-    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));  // after the snapshot
+    // after the snapshot
+    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));
     m.delete_object("b", "k1");
     m.create_bucket("b2");
 
@@ -600,7 +612,8 @@ TEST(duostore_tikv_snapshot_dump_is_consistent) {
     CHECK_EQ(st.buckets, uint64_t(1));
     CHECK_EQ(st.objects, uint64_t(2));
     view.reset();
-    CHECK(m.get_object("b", "k3").has_value());  // the live store sees everything
+    // the live store sees everything
+    CHECK(m.get_object("b", "k3").has_value());
     m.delete_bucket("b2");
     m.close();
 }
@@ -614,7 +627,8 @@ TEST(duostore_tikv_backup_marker) {
     auto a = m.restore_marker();
     CHECK(!a.empty());
     auto b = m.restore_marker();
-    CHECK(std::stoull(b) > std::stoull(a));  // TSOs are monotonic
+    // TSOs are monotonic
+    CHECK(std::stoull(b) > std::stoull(a));
     m.close();
 }
 
@@ -622,7 +636,8 @@ TEST(duostore_tikv_backup_marker) {
 // client-c -- structured code when the submodule carries ErrorCodes::WriteConflict
 // (third_party/patches/client-c), message string at @78a557e. No cluster needed
 TEST(duostore_tikv_write_conflict_classification) {
-    constexpr int kUnknownError = 21;  // pingcap::ErrorCodes::UnknownError at @78a557e
+    // pingcap::ErrorCodes::UnknownError at @78a557e
+    constexpr int kUnknownError = 21;
     int code = client_c_write_conflict_code();
     if (code >= 0) {
         CHECK(code != kUnknownError);

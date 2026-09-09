@@ -31,7 +31,8 @@ int g_sig_pipe[2] = {-1, -1};
 void on_signal(int sig) {
     unsigned char b = static_cast<unsigned char>(sig);
     ssize_t n = ::write(g_sig_pipe[1], &b, 1);
-    (void)n;  // A full pipe means a signal is already pending; dropping is fine
+    // A full pipe means a signal is already pending; dropping is fine
+    (void)n;
 }
 
 }  // namespace
@@ -342,11 +343,14 @@ int Application::run() {
     });
     struct sigaction sa{};
     sa.sa_handler = on_signal;
-    sigemptyset(&sa.sa_mask);  // An uninitialized mask is an undefined blocking set
-    sa.sa_flags = SA_RESTART;  // With the self-pipe scheme, no need to interrupt syscalls via EINTR
+    // An uninitialized mask is an undefined blocking set
+    sigemptyset(&sa.sa_mask);
+    // With the self-pipe scheme, no need to interrupt syscalls via EINTR
+    sa.sa_flags = SA_RESTART;
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
-    sigaction(SIGHUP, &sa, nullptr);  // reload, not terminate
+    // reload, not terminate
+    sigaction(SIGHUP, &sa, nullptr);
     signal(SIGPIPE, SIG_IGN);
 
     LOG_INFO("lights3 {} (git {}, {}) started: driver={} backends={} pool={}", version(), git_commit(), build_type(),
@@ -356,9 +360,11 @@ int Application::run() {
     // watchdog so the order of teardown stays: listeners, watchdog, in-flight drain
     std::thread admin_thread;
     if (admin_server_) admin_thread = std::thread([this] { admin_server_->run(); });
-    server_->run();  // Blocks until SIGINT/SIGTERM
+    // Blocks until SIGINT/SIGTERM
+    server_->run();
     if (admin_thread.joinable()) {
-        admin_server_->shutdown();  // no-op when the watchdog already did it
+        // no-op when the watchdog already did it
+        admin_server_->shutdown();
         admin_thread.join();
     }
 
@@ -567,7 +573,8 @@ ConfigReloadReport Application::reload_config() {
     ConfigReloadReport report;
     Config fresh;
     try {
-        fresh = Config::load(config_path_);  // same parser + validation as startup
+        // same parser + validation as startup
+        fresh = Config::load(config_path_);
     } catch (const std::exception& e) {
         report.error = e.what();
         LOG_WARN("config reload refused, keeping the running configuration: {}", e.what());
@@ -641,7 +648,8 @@ ConfigReloadReport Application::reload_config() {
             auto metered = std::dynamic_pointer_cast<storage::MeteredBackend>(metered_[name]);
             backends_.erase(name);
             metered_.erase(name);
-            if (!admin_jobs_->remove_backend(name))  // a job slipped in since the plan: it aborts on close
+            // a job slipped in since the plan: it aborts on close
+            if (!admin_jobs_->remove_backend(name))
                 LOG_WARN("backend {} removed while a maintenance job runs on it; the job will abort", name);
             std::erase_if(cfg_.backends, [&](const BackendConfig& b) { return b.name == name; });
             retire_backend(name, std::move(raw), std::move(metered));
@@ -719,7 +727,8 @@ ConfigReloadReport Application::reload_config() {
     // TLS certificate material: always re-read on an explicit reload (the periodic
     // poll may be off); the paths/knobs themselves are startup-only
     if (server_ && !cfg_.http.tls_cert.empty()) {
-        if (admin_server_) admin_server_->reload_tls();  // same files, its own holder
+        // same files, its own holder
+        if (admin_server_) admin_server_->reload_tls();
         if (server_->reload_tls())
             report.applied.push_back("http.tls: certificate material re-read");
         else if (cfg_.http.driver == "seastar")
@@ -790,7 +799,8 @@ void Application::close_backends() noexcept {
             sync_wait(backend->close());
         } catch (const std::exception& e) {
             LOG_ERROR("backend {} close failed: {}", name, e.what());
-            ++shutdown_errors_;  // surfaces as a non-zero exit code (roadmap §4.5)
+            // surfaces as a non-zero exit code (roadmap §4.5)
+            ++shutdown_errors_;
         }
     }
 }
@@ -812,7 +822,8 @@ void Application::shutdown() noexcept {
         if (cors_store_) cors_store_->shutdown_background();
         if (lifecycle_runner_) lifecycle_runner_->shutdown_background();
         if (lifecycle_store_) lifecycle_store_->shutdown_background();
-        if (usage_) usage_->shutdown_background();  // final counter flush happens here
+        // final counter flush happens here
+        if (usage_) usage_->shutdown_background();
         if (quota_store_) quota_store_->shutdown_background();
         if (tenant_store_) tenant_store_->shutdown_background();
         if (owner_store_) owner_store_->shutdown_background();
@@ -833,7 +844,8 @@ void Application::shutdown() noexcept {
     admin_server_.reset();
     server_.reset();
     service_.reset();
-    inflight_.reset();  // holds a raw pointer into pool_exec_; must go first
+    // holds a raw pointer into pool_exec_; must go first
+    inflight_.reset();
     pool_exec_.reset();
     shutdown_src_.reset();
     cred_store_.reset();

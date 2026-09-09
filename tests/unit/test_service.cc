@@ -76,7 +76,8 @@ bool contains(const std::string& s, const std::string& sub) { return s.find(sub)
 class HangingReader final : public http::BodyReader {
 public:
     Task<size_t> read(std::span<std::byte>) override {
-        auto p = co_await sem_.acquire();  // token propagates down automatically via the Task promise
+        // token propagates down automatically via the Task promise
+        auto p = co_await sem_.acquire();
         co_return 0;
     }
     std::optional<uint64_t> length() const override { return std::nullopt; }
@@ -212,13 +213,15 @@ TEST(service_delete_semantics) {
     auto del = sync_wait(svc.dispatch(make_req("DELETE", "/bkt/k")));
     CHECK_EQ(del.status, 204);
     auto again = sync_wait(svc.dispatch(make_req("DELETE", "/bkt/k")));
-    CHECK_EQ(again.status, 204);  // idempotent
+    // idempotent
+    CHECK_EQ(again.status, 204);
 
     auto delb = sync_wait(svc.dispatch(make_req("DELETE", "/bkt")));
     CHECK_EQ(delb.status, 204);
     auto headb = sync_wait(svc.dispatch(make_req("HEAD", "/bkt")));
     CHECK_EQ(headb.status, 404);
-    CHECK_EQ(headb.small_body, "");  // HEAD error responses carry no body
+    // HEAD error responses carry no body
+    CHECK_EQ(headb.small_body, "");
 }
 
 TEST(service_not_implemented_apis) {
@@ -240,7 +243,8 @@ TEST(service_not_implemented_apis) {
 
 TEST(service_upload_part_copy) {
     auto svc = make_service_noauth();
-    svc.set_min_part_size(0);  // this case tests the flow, not the 5MiB rule (see service_multipart_constraints)
+    // this case tests the flow, not the 5MiB rule (see service_multipart_constraints)
+    svc.set_min_part_size(0);
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/src.bin", "0123456789")));
 
@@ -642,7 +646,8 @@ TEST(service_website_redirect_location) {
 
 TEST(service_multipart_flow) {
     auto svc = make_service_noauth();
-    svc.set_min_part_size(0);  // this case tests the flow, not the 5MiB rule (see service_multipart_constraints)
+    // this case tests the flow, not the 5MiB rule (see service_multipart_constraints)
+    svc.set_min_part_size(0);
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
 
     // Create → UploadId
@@ -681,14 +686,16 @@ TEST(service_multipart_flow) {
         "</CompleteMultipartUpload>";
     auto done = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", cxml, {{"uploadId", uid}})));
     CHECK_EQ(done.status, 200);
-    CHECK(contains(xelem(body_of(done), "ETag"), "-2"));  // composite ETag rule
+    // composite ETag rule
+    CHECK(contains(xelem(body_of(done), "ETag"), "-2"));
 
     auto get = sync_wait(svc.dispatch(make_req("GET", "/bkt/mp.bin")));
     CHECK_EQ(body_of(get), "hello world");
 
     // Abort path + upload gone after completion
     auto again = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", cxml, {{"uploadId", uid}})));
-    CHECK_EQ(again.status, 404);  // NoSuchUpload
+    // NoSuchUpload
+    CHECK_EQ(again.status, 404);
     auto init2 = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
     std::string uid2 = xelem(body_of(init2), "UploadId");
     auto ab = sync_wait(svc.dispatch(make_req("DELETE", "/bkt/mp.bin", "", {{"uploadId", uid2}})));
@@ -818,7 +825,8 @@ TEST(service_virtual_host_style) {
     CHECK_EQ(sync_wait(svc.dispatch(std::move(create))).status, 200);
 
     auto put = make_req("PUT", "/dir/a.txt", "vh data");
-    put.headers.set("Host", "vbkt.s3.local:9000");  // port is stripped
+    // port is stripped
+    put.headers.set("Host", "vbkt.s3.local:9000");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(put))).status, 200);
 
     auto get = make_req("GET", "/dir/a.txt");
@@ -875,7 +883,8 @@ TEST(service_version_id_rejected) {
     auto del = sync_wait(svc.dispatch(make_req("DELETE", "/bkt/k", "", {{"versionId", "abc"}})));
     CHECK_EQ(del.status, 501);
     auto get = sync_wait(svc.dispatch(make_req("GET", "/bkt/k")));
-    CHECK_EQ(get.status, 200);  // object was not deleted by mistake
+    // object was not deleted by mistake
+    CHECK_EQ(get.status, 200);
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{"versionId", "abc"}}))).status, 501);
 }
 
@@ -905,7 +914,8 @@ TEST(service_precondition_beats_range) {
 
     auto req = make_req("GET", "/bkt/k");
     req.headers.add("If-Match", "\"wrong-etag\"");
-    req.headers.add("Range", "bytes=99-");  // would 416 on its own
+    // would 416 on its own
+    req.headers.add("Range", "bytes=99-");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(req))).status, 412);
 }
 
@@ -1087,7 +1097,8 @@ TEST(service_sts_token_no_longer_501) {
     auto req = make_req("GET", "/bkt/nothere");
     req.headers.add("x-amz-security-token", "FwoGZXIvYXdzEXAMPLETOKEN");
     auto resp = sync_wait(svc.dispatch(std::move(req)));
-    CHECK_EQ(resp.status, 404);  // NoSuchKey, not NotImplemented
+    // NoSuchKey, not NotImplemented
+    CHECK_EQ(resp.status, 404);
 
     auto q = sync_wait(svc.dispatch(make_req("GET", "/bkt/nothere", "", {{"X-Amz-Security-Token", "tok"}})));
     CHECK_EQ(q.status, 404);
@@ -1139,7 +1150,8 @@ TEST(service_internal_endpoints_not_shadowing_vhost_keys) {
     get.headers.set("Host", "vbkt.s3.local");
     auto resp = sync_wait(svc.dispatch(std::move(get)));
     CHECK_EQ(resp.status, 200);
-    CHECK_EQ(body_of(resp), "real object data");  // object content, not Prometheus text
+    // object content, not Prometheus text
+    CHECK_EQ(body_of(resp), "real object data");
 
     // Path-style internal endpoints still work, but only for GET/HEAD: PUT is 405 rather than
     // "200 with data loss"
@@ -1149,7 +1161,8 @@ TEST(service_internal_endpoints_not_shadowing_vhost_keys) {
     auto pm = sync_wait(svc.dispatch(make_req("PUT", "/-/metrics", "x")));
     CHECK_EQ(pm.status, 405);
     auto hh = sync_wait(svc.dispatch(make_req("HEAD", "/-/healthz")));
-    CHECK_EQ(hh.status, 200);  // health probes commonly use HEAD
+    // health probes commonly use HEAD
+    CHECK_EQ(hh.status, 200);
 }
 
 // ---------- gaps §4: syntactically invalid Range ignored → 200; V2 token opaque round-trip ----------
@@ -1183,7 +1196,8 @@ TEST(service_v2_token_opaque_roundtrip) {
     CHECK(contains(b1, "<IsTruncated>true</IsTruncated>"));
     std::string tok = xelem(b1, "NextContinuationToken");
     CHECK(!tok.empty());
-    CHECK(tok != "b");  // opaque (base64), no longer a plaintext key
+    // opaque (base64), no longer a plaintext key
+    CHECK(tok != "b");
 
     auto p2 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"continuation-token", tok}})));
     auto b2 = body_of(p2);
@@ -1289,10 +1303,12 @@ TEST(service_response_override_params) {
                                               {"response-content-disposition", "attachment; filename=\"x.txt\""},
                                               {"response-cache-control", "no-store"}})));
     CHECK_EQ(r.status, 200);
-    CHECK_EQ(*r.headers.get("Content-Type"), "text/plain");  // overrides the object's own value
+    // overrides the object's own value
+    CHECK_EQ(*r.headers.get("Content-Type"), "text/plain");
     CHECK_EQ(*r.headers.get("Content-Disposition"), "attachment; filename=\"x.txt\"");
     CHECK_EQ(*r.headers.get("Cache-Control"), "no-store");
-    CHECK_EQ(body_of(r), "payload");  // headers change, body doesn't
+    // headers change, body doesn't
+    CHECK_EQ(body_of(r), "payload");
 
     // Query values are attacker-controlled: CR/LF must be blocked before they reach response
     // headers (response splitting)
@@ -1311,8 +1327,10 @@ TEST(service_list_marker_semantics) {
     // <Marker> must be empty
     auto v1 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"start-after", "b"}})));
     CHECK_EQ(v1.status, 200);
-    CHECK(contains(v1.small_body, "<Key>a</Key>"));       // start-after did not take effect
-    CHECK(contains(v1.small_body, "<Marker></Marker>"));  // don't echo a value the client never sent
+    // start-after did not take effect
+    CHECK(contains(v1.small_body, "<Key>a</Key>"));
+    // don't echo a value the client never sent
+    CHECK(contains(v1.small_body, "<Marker></Marker>"));
 
     auto v1m = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"marker", "b"}})));
     CHECK(!contains(v1m.small_body, "<Key>a</Key>"));
@@ -1365,7 +1383,8 @@ TEST(service_create_bucket_location_constraint) {
     auto ok = sync_wait(svc.dispatch(make_req("PUT", "/loc1",
                                               "<CreateBucketConfiguration><LocationConstraint></LocationConstraint>"
                                               "</CreateBucketConfiguration>")));
-    CHECK_EQ(ok.status, 200);  // empty constraint = us-east-1 = this implementation's default region
+    // empty constraint = us-east-1 = this implementation's default region
+    CHECK_EQ(ok.status, 200);
 
     auto bad = sync_wait(svc.dispatch(make_req("PUT", "/loc2",
                                                "<CreateBucketConfiguration><LocationConstraint>eu-west-1"
@@ -1503,7 +1522,8 @@ TEST(service_delete_objects_requires_digest) {
     auto missing = sync_wait(svc.dispatch(make_req("POST", "/bkt", xml, {{"delete", ""}})));
     CHECK_EQ(missing.status, 400);
     CHECK(contains(missing.small_body, "Content-MD5"));
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);  // not deleted
+    // not deleted
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
 
     // With the correct digest it goes through
     CHECK_EQ(sync_wait(svc.dispatch(make_delete_req("/bkt", xml, {{"delete", ""}}))).status, 200);
@@ -1520,11 +1540,13 @@ TEST(service_multipart_constraints) {
     auto put_part = [&](int no, const std::string& data) {
         auto r = sync_wait(svc.dispatch(
             make_req("PUT", "/bkt/mp.bin", data, {{"partNumber", std::to_string(no)}, {"uploadId", uid}})));
-        std::string e = *r.headers.get("ETag");  // strip quotes: the complete XML carries ETags unquoted
+        // strip quotes: the complete XML carries ETags unquoted
+        std::string e = *r.headers.get("ETag");
         if (e.size() >= 2 && e.front() == '"') e = e.substr(1, e.size() - 2);
         return e;
     };
-    std::string e1 = put_part(1, "small");  // 5 bytes, not the last part
+    // 5 bytes, not the last part
+    std::string e1 = put_part(1, "small");
     std::string e2 = put_part(2, "tail");
     auto complete_xml = [](std::vector<std::pair<int, std::string>> ps) {
         std::string x = "<CompleteMultipartUpload>";
@@ -1609,17 +1631,21 @@ TEST(service_multipart_listing_pagination) {
         size_t pos = 0;
         while ((pos = body.find("<Key>", pos)) != std::string::npos) {
             size_t end = body.find("</Key>", pos);
-            CHECK(seen.insert(body.substr(pos + 5, end - pos - 5)).second);  // no duplicates
+            // no duplicates
+            CHECK(seen.insert(body.substr(pos + 5, end - pos - 5)).second);
             pos = end;
         }
-        if (++pages > 10) break;  // defensive: don't page forever if the cursor stops advancing
+        // defensive: don't page forever if the cursor stops advancing
+        if (++pages > 10) break;
         if (!contains(body, "<IsTruncated>true</IsTruncated>")) break;
         km = xelem(body, "NextKeyMarker");
         im = xelem(body, "NextUploadIdMarker");
         CHECK(!km.empty());
     }
-    CHECK_EQ(seen.size(), size_t(4));  // a/b/c + mp.bin
-    CHECK(pages > 1);                  // actually paged
+    // a/b/c + mp.bin
+    CHECK_EQ(seen.size(), size_t(4));
+    // actually paged
+    CHECK(pages > 1);
 
     // prefix filtering and delimiter grouping
     auto pref = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"uploads", ""}, {"prefix", "a."}})));
@@ -1651,7 +1677,8 @@ TEST(service_request_timeout_cancels_and_returns_503) {
     svc.set_request_timeout(std::chrono::seconds(1));
 
     auto req = make_req("PUT", "/bkt/hung");
-    req.body = std::make_unique<HangingReader>();  // body never yields: the timeout must be able to break it
+    // body never yields: the timeout must be able to break it
+    req.body = std::make_unique<HangingReader>();
     auto t0 = std::chrono::steady_clock::now();
     auto resp = sync_wait(svc.dispatch(std::move(req)));
     CHECK_EQ(resp.status, 503);
@@ -1912,7 +1939,8 @@ TEST(service_cors_actual_request_headers) {
     auto other = with_origin("GET", "/site/o.txt", "http://evil.net");
     CHECK_EQ(other.status, 200);
     CHECK(!other.headers.has("Access-Control-Allow-Origin"));
-    auto del = with_origin("DELETE", "/site/o.txt", "http://other.net");  // '*' rule is HEAD-only
+    // '*' rule is HEAD-only
+    auto del = with_origin("DELETE", "/site/o.txt", "http://other.net");
     CHECK(!del.headers.has("Access-Control-Allow-Origin"));
 }
 
@@ -2044,7 +2072,8 @@ TEST(service_website_rate_limit) {
     CHECK_EQ(env.call(make_req("GET", "/lim/f.txt")).status, 200);
     auto limited = env.call(make_req("GET", "/lim/f.txt"));
     CHECK_EQ(limited.status, 503);
-    CHECK(contains(body_of(limited), "<Code>SlowDown</Code>"));  // XML, not the error page
+    // XML, not the error page
+    CHECK(contains(body_of(limited), "<Code>SlowDown</Code>"));
 
     // Signed requests are not rate-limited (the limiter guards the anonymous plane)
     CHECK_EQ(env.signed_call("GET", "/lim/f.txt").status, 200);
@@ -2095,7 +2124,8 @@ TEST(service_checksum_persist_and_echo) {
     CHECK_EQ(gr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
     CHECK_EQ(gr.headers.get("x-amz-checksum-type").value_or(""), "FULL_OBJECT");
     auto head = make_req("HEAD", "/ckb/o.bin");
-    head.headers.add("x-amz-checksum-mode", "enabled");  // case-insensitive
+    // case-insensitive
+    head.headers.add("x-amz-checksum-mode", "enabled");
     auto hr = sync_wait(svc.dispatch(std::move(head)));
     CHECK_EQ(hr.headers.get("x-amz-checksum-crc32").value_or(""), "NhCmhg==");
 
@@ -2111,7 +2141,8 @@ TEST(service_checksum_persist_and_echo) {
 
     // A checksum header that fails verification never commits (guard wiring intact)
     auto bad = make_req("PUT", "/ckb/bad.bin", "hello");
-    bad.headers.add("x-amz-checksum-crc32", "OncRQw==");  // crc32("world")
+    // crc32("world")
+    bad.headers.add("x-amz-checksum-crc32", "OncRQw==");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(bad))).status, 400);
     CHECK_EQ(sync_wait(svc.dispatch(make_req("HEAD", "/ckb/bad.bin"))).status, 404);
 
@@ -2304,7 +2335,8 @@ TEST(service_object_tagging) {
 // ---- roadmap §2.4: lifecycle minimal subset ----
 
 TEST(service_bucket_lifecycle_api) {
-    CorsEnv env;  // root credential + memory backend; lifecycle store added on top
+    // root credential + memory backend; lifecycle store added on top
+    CorsEnv env;
     auto lstore = sync_wait(LifecycleStore::load(env.backend));
     env.svc->set_lifecycle_store(lstore);
     CHECK_EQ(env.signed_call("PUT", "/data").status, 200);
@@ -2353,8 +2385,10 @@ TEST(service_bucket_lifecycle_api) {
         "<Rule><Status>Enabled</Status><Expiration>"
         "<Date>2030-01-01T00:00:00Z</Date></Expiration></Rule>",
         501);
-    expect("<Rule><Status>Enabled</Status></Rule>", 400);                 // no action
-    expect("<Rule><Expiration><Days>1</Days></Expiration></Rule>", 400);  // no Status
+    // no action
+    expect("<Rule><Status>Enabled</Status></Rule>", 400);
+    // no Status
+    expect("<Rule><Expiration><Days>1</Days></Expiration></Rule>", 400);
     expect("<Rule><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule>", 400);
 
     // DELETE revokes, idempotent
@@ -2434,8 +2468,10 @@ TEST(service_website_metrics_events) {
     }
     signed_put("/site/index.html", "<h1>root</h1>");
     signed_put("/site/error.html", "<h1>err</h1>");
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/"))).status, 200);      // index rewrite
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/nope"))).status, 404);  // error document
+    // index rewrite
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/"))).status, 200);
+    // error document
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/nope"))).status, 404);
     // Third anonymous read within the same second trips the per-bucket limit (max_rps = 2)
     int throttled = 0;
     for (int i = 0; i < 3; ++i)

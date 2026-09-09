@@ -34,8 +34,10 @@ using DirEntries = std::shared_ptr<const std::vector<DirEntry>>;
 class DirListCache {
 public:
     struct Options {
-        size_t max_entries = size_t(1) << 20;  // total cached DirEntry budget (0 = disabled)
-        size_t min_dir_entries = 256;          // smaller directories are cheap to re-read; not cached
+        // total cached DirEntry budget (0 = disabled)
+        size_t max_entries = size_t(1) << 20;
+        // smaller directories are cheap to re-read; not cached
+        size_t min_dir_entries = 256;
         // A directory whose mtime falls within this window before the readdir is not
         // cached: with coarse timestamp granularity a modification in the same tick as the
         // stamp would be indistinguishable from the stamped state (git's racy-index rule)
@@ -89,7 +91,8 @@ private:
     std::shared_ptr<MetricGauge> m_resident_;
     mutable std::mutex m_;
     std::unordered_map<std::string, Node> map_;
-    std::list<std::string> lru_;  // front = most recent
+    // front = most recent
+    std::list<std::string> lru_;
     size_t total_entries_ = 0;
     uint64_t hits_ = 0, misses_ = 0;
 };

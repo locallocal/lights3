@@ -26,16 +26,21 @@ namespace lights3::storage::duostore {
 
 struct RocksMetaOptions {
     std::string path;
-    bool sync = true;  // whether commits WAL-fsync (§6.3 meta_sync)
+    // whether commits WAL-fsync (§6.3 meta_sync)
+    bool sync = true;
     size_t block_cache_bytes = 64ull << 20;
     // Tuning knobs exposed (P5, docs/storage/duostore-design.md §11); defaults = RocksDB's
     // own defaults, so existing deployments keep their behavior. Compression is
     // always off (§13.3) and not exposed
-    size_t write_buffer_bytes = 64ull << 20;  // memtable capacity per CF
-    int max_write_buffers = 2;                // max memtable count per CF
-    int max_background_jobs = 2;              // total flush/compaction background threads
-    MetricsScope metrics;  // empty scope = isolated instance (tests construct directly with zero wiring,
-                           // docs/archive/gaps.md §6.1)
+    // memtable capacity per CF
+    size_t write_buffer_bytes = 64ull << 20;
+    // max memtable count per CF
+    int max_write_buffers = 2;
+    // total flush/compaction background threads
+    int max_background_jobs = 2;
+    // empty scope = isolated instance (tests construct directly with zero wiring,
+    // docs/archive/gaps.md §6.1)
+    MetricsScope metrics;
 };
 
 class RocksMetaStore final : public IMetaStore {
@@ -79,7 +84,8 @@ public:
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
-    void ack_reclaims(std::span<const uint64_t> seqs) override;  // single WriteBatch
+    // single WriteBatch
+    void ack_reclaims(std::span<const uint64_t> seqs) override;
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
@@ -134,7 +140,8 @@ private:
     std::vector<PartRec> scan_parts(std::string_view b, std::string_view k, std::string_view id);
     uint64_t alloc_id(std::string_view counter_key, IdRange& r, uint32_t n = 1);
     void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref, ReclaimReason reason);
-    void migrate_schema(const std::string& stored);  // version check + migration chain (called by ctor)
+    // version check + migration chain (called by ctor)
+    void migrate_schema(const std::string& stored);
     // Maintain refs (chunk reference table, §4.1) in the same batch: add = write the
     // owner, otherwise delete
     void batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add, std::string_view owner);
@@ -164,8 +171,10 @@ private:
     // plane every time a chunk is opened (fs_data_store) and must not queue behind
     // business commits' WAL fsync. Lock order is always mu_ -> alloc_mu_, no cycle
     std::mutex alloc_mu_;
-    IdRange file_ids_[2];  // indexed by Extent::Kind
-    IdRange seqs_;         // gcq seq
+    // indexed by Extent::Kind
+    IdRange file_ids_[2];
+    // gcq seq
+    IdRange seqs_;
 };
 
 }  // namespace lights3::storage::duostore

@@ -135,7 +135,8 @@ class Sha256VerifyingReader final : public http::BodyReader {
 public:
     Sha256VerifyingReader(std::unique_ptr<http::BodyReader> inner, std::string expected_hex)
         : inner_(std::move(inner)),
-          expected_(lower(std::move(expected_hex))),  // AWS digests are always lowercase; tolerate uppercase input
+          // AWS digests are always lowercase; tolerate uppercase input
+          expected_(lower(std::move(expected_hex))),
           hash_(util::HashStream::Algo::Sha256) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {
@@ -177,7 +178,8 @@ bool is_hex_digest(const std::string& s) {
 // HMAC chain derives the signing key: date -> region -> service -> "aws4_request"
 util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::string& date, const std::string& region,
                                       const std::string& service) {
-    util::SecretString init = "AWS4" + secret_key;  // SK derivative, wiped when it leaves scope
+    // SK derivative, wiped when it leaves scope
+    util::SecretString init = "AWS4" + secret_key;
     auto k = util::hmac_sha256(std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
     k = util::hmac_sha256(k, region);
     k = util::hmac_sha256(k, service);
@@ -187,7 +189,8 @@ util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::
 // A trailer declared via x-amz-trailer: the digest of the whole decoded payload arrives *after* the
 // data, so it is verified here rather than by the header-driven ChecksumVerifyingReader
 struct DeclaredTrailer {
-    std::string name;  // lowercase x-amz-checksum-*
+    // lowercase x-amz-checksum-*
+    std::string name;
     ExpectedDigest::Algo algo;
     size_t bytes;
 };
@@ -222,7 +225,8 @@ public:
     Task<size_t> read(std::span<std::byte> out) override {
         while (state_ != State::Done) {
             if (state_ == State::Header) {
-                if (!co_await parse_header()) continue;  // needs more data
+                // needs more data
+                if (!co_await parse_header()) continue;
             } else if (state_ == State::Data) {
                 if (chunk_remaining_ == 0) {
                     co_await finish_chunk();
@@ -243,7 +247,8 @@ public:
                 if (chunk_remaining_ == 0 && decoded_length_ && delivered_ == *decoded_length_)
                     co_await drain_to_done();
                 co_return n;
-            } else {  // Trailer
+            } else {
+                // Trailer
                 co_await consume_trailer();
             }
         }
@@ -282,7 +287,8 @@ private:
                     throw S3Error(S3ErrorCode::InvalidRequest,
                                   "Decoded body size does not match x-amz-decoded-content-length.");
                 co_await finish_chunk();
-            } else {  // Trailer
+            } else {
+                // Trailer
                 co_await consume_trailer();
             }
         }
@@ -306,7 +312,8 @@ private:
             }
             std::string line = buf_.substr(0, eol);
             buf_.erase(0, eol + 2);
-            if (line.empty()) break;  // end of the trailer section
+            // end of the trailer section
+            if (line.empty()) break;
             trailer_bytes_ += line.size() + 2;
             if (trailer_bytes_ > kTrailerMax) malformed_body("trailer too long");
             auto colon = line.find(':');
@@ -445,8 +452,10 @@ private:
     bool trailer_expected_;
     bool trailer_signed_;
     std::vector<DeclaredTrailer> declared_;
-    std::vector<StreamingDigest> trailer_digests_;  // over the decoded payload, one per declared
-    std::map<std::string, std::string> trailers_;   // parsed trailer lines (sorted for canon)
+    // over the decoded payload, one per declared
+    std::vector<StreamingDigest> trailer_digests_;
+    // parsed trailer lines (sorted for canon)
+    std::map<std::string, std::string> trailers_;
     size_t trailer_bytes_ = 0;
 };
 
@@ -518,7 +527,8 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req, cons
 
     std::string sts = std::string(kAlgo) + "\n" + amz_date + "\n" + scope + "\n" + util::sha256_hex(canonical.str());
 
-    auto parts = split(scope, '/');  // date/region/service/aws4_request
+    // date/region/service/aws4_request
+    auto parts = split(scope, '/');
     auto k = derive_signing_key(secret_key, parts[0], parts[1], parts[2]);
     return util::to_hex(util::hmac_sha256(k, sts));
 }
@@ -535,7 +545,8 @@ std::optional<std::string> SigV4Authenticator::peek_access_key(const http::HttpR
         if (f.access_key.empty()) return std::nullopt;
         return f.access_key;
     } catch (const S3Error&) {
-        return std::nullopt;  // verify reports the malformed header itself
+        // verify reports the malformed header itself
+        return std::nullopt;
     }
 }
 
@@ -550,7 +561,8 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::st
         if (!date) date = req.headers.get("Date");
         if (!date) malformed("missing x-amz-date");
         f.amz_date = *date;
-    } else if (auto alg = req.query_get("X-Amz-Algorithm")) {  // presigned URL
+    } else if (auto alg = req.query_get("X-Amz-Algorithm")) {
+        // presigned URL
         if (*alg != kAlgo) malformed("unsupported signing algorithm");
         f.presigned = true;
         parse_credential(req.query_get("X-Amz-Credential").value_or(""), f);
@@ -639,7 +651,8 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::st
     std::string payload_hash;
     bool chunked_signed = false, chunked_unsigned = false, trailer_variant = false;
     if (explicit_payload_hash) {
-        payload_hash = *explicit_payload_hash;  // STS form POST: caller hashed the body
+        // STS form POST: caller hashed the body
+        payload_hash = *explicit_payload_hash;
     } else if (f.presigned) {
         payload_hash = "UNSIGNED-PAYLOAD";
     } else if (auto h = req.headers.get("x-amz-content-sha256")) {

@@ -19,7 +19,8 @@
 
 #include "core/task.h"
 #include "storage/backend.h"
-#include "storage/localfs/fs_util.h"  // Tier / TierInfo are the shared vocabulary
+// Tier / TierInfo are the shared vocabulary
+#include "storage/localfs/fs_util.h"
 
 namespace lights3::storage::tier {
 
@@ -48,10 +49,13 @@ using fsutil::TierInfo;
 
 // One object's tiering state as the local side sees it
 struct LocalObject {
-    ObjectMeta meta;  // external metadata (etag = the original, never the cloud's)
+    // external metadata (etag = the original, never the cloud's)
+    ObjectMeta meta;
     TierInfo tier;
-    uint64_t local_bytes = 0;  // object bytes actually held locally (0 for a clean stub)
-    int64_t mtime = 0;         // epoch seconds of the local record (access-time fallback)
+    // object bytes actually held locally (0 for a clean stub)
+    uint64_t local_bytes = 0;
+    // epoch seconds of the local record (access-time fallback)
+    int64_t mtime = 0;
 };
 
 // Per-object access record (docs/storage/tiered-design.md §4.3): last access, a saturating
@@ -62,15 +66,18 @@ struct LocalObject {
 struct AccessRec {
     int64_t atime = 0;
     uint32_t hits = 0;
-    int64_t enrolled = -1;  // -1 = not enrolled
+    // -1 = not enrolled
+    int64_t enrolled = -1;
 };
 
 // Full-rescan enumeration item
 struct WalkEntry {
     std::string bucket, key;
     Tier tier = Tier::kLocal;
-    uint64_t size = 0;         // logical object size
-    uint64_t local_bytes = 0;  // bytes held locally (stub = 0)
+    // logical object size
+    uint64_t size = 0;
+    // bytes held locally (stub = 0)
+    uint64_t local_bytes = 0;
     int64_t mtime = 0;
 };
 
@@ -89,7 +96,8 @@ public:
 class ICacheFill {
 public:
     virtual ~ICacheFill() = default;
-    virtual bool write(const std::byte* p, size_t n) = 0;  // false = local write failure (caller degrades)
+    // false = local write failure (caller degrades)
+    virtual bool write(const std::byte* p, size_t n) = 0;
     virtual Task<void> commit(const ObjectMeta& meta, const TierInfo& tier) = 0;
 };
 
@@ -100,14 +108,18 @@ class IRangeCache {
 public:
     virtual ~IRangeCache() = default;
     virtual uint64_t block_size() const = 0;
-    virtual uint64_t size() const = 0;                          // object size
-    virtual bool has(uint64_t first, uint64_t last) const = 0;  // every block covering [first,last] present
+    // object size
+    virtual uint64_t size() const = 0;
+    // every block covering [first,last] present
+    virtual bool has(uint64_t first, uint64_t last) const = 0;
     virtual std::unique_ptr<http::BodyReader> open(uint64_t first, uint64_t last) = 0;
-    virtual bool write(uint64_t off, const std::byte* p, size_t n) = 0;  // pwrite; false = failure
+    // pwrite; false = failure
+    virtual bool write(uint64_t off, const std::byte* p, size_t n) = 0;
     // Persist presence of blocks [first_block, last_block] (merged with what is on disk
     // — concurrent fillers of the same key only ever add bits)
     virtual void mark_present(uint64_t first_block, uint64_t last_block) = 0;
-    virtual uint64_t resident_bytes() const = 0;  // real disk usage of the cache file
+    // real disk usage of the cache file
+    virtual uint64_t resident_bytes() const = 0;
 };
 
 class ITierLocal {
@@ -119,7 +131,8 @@ public:
     // the same filesystem as tmp_dir() (rename atomicity)
     virtual const std::filesystem::path& state_dir() const = 0;
     virtual std::filesystem::path tmp_dir() const = 0;
-    virtual const char* kind() const = 0;  // "localfs" / "duostore" (logs, docs)
+    // "localfs" / "duostore" (logs, docs)
+    virtual const char* kind() const = 0;
     virtual Task<void> close() = 0;
 
     // ---- state (synchronous; call on a pool thread) ----
@@ -144,8 +157,8 @@ public:
     // verified the state; also finishes a half-done stub (remote with data still present)
     virtual Task<void> commit_stub(std::string_view bucket, std::string_view key, const ObjectMeta& meta,
                                    const TierInfo& tier) = 0;
-    virtual std::unique_ptr<ICacheFill> begin_cache_fill(std::string_view bucket,
-                                                         std::string_view key) = 0;  // null = cannot
+    // null = cannot
+    virtual std::unique_ptr<ICacheFill> begin_cache_fill(std::string_view bucket, std::string_view key) = 0;
 
     // ---- space ----
     virtual bool cache_space_ok(uint64_t size, uint64_t min_free_bytes) const = 0;

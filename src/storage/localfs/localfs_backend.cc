@@ -156,7 +156,8 @@ Task<void> LocalFsBackend::run_periodic(TimerQueue::Id* slot, int interval_sec, 
 }
 
 Task<void> LocalFsBackend::mpu_scan_task() {
-    co_await pool_->schedule();  // directory walk is blocking IO, go to the pool
+    // directory walk is blocking IO, go to the pool
+    co_await pool_->schedule();
     cleanup_stale_uploads();
 }
 
@@ -256,7 +257,8 @@ Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
     int fd = ::open(marker.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) throw_errno("create bucket marker");
     try {
-        fsutil::fsync_file(fd);  // uses the shared switch, moves in lockstep with the object write path
+        // uses the shared switch, moves in lockstep with the object write path
+        fsutil::fsync_file(fd);
     } catch (...) {
         ::close(fd);
         throw;
@@ -342,7 +344,8 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
         const char* p = reinterpret_cast<const char*>(buf);
         size_t left = n;
         while (left > 0) {
-            if (int fe = fault::check("localfs.write")) {  // roadmap §6.1
+            if (int fe = fault::check("localfs.write")) {
+                // roadmap §6.1
                 errno = fe;
                 throw_errno("write staging tmp");
             }
@@ -367,8 +370,10 @@ Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_
     // The conditional PUT check sits inside the same lock (PutCondition contract): check
     // and commit are atomic with respect to concurrent writers
     auto lk = co_await commit_lock(bucket, key).acquire();
-    co_await pool_->schedule();  // the lock wakeup may resume on another thread; do blocking IO back on a pool thread
-    auto inv = invalidate_on_exit(bucket, key);  // cached record dropped after the commit (roadmap §3.8)
+    // the lock wakeup may resume on another thread; do blocking IO back on a pool thread
+    co_await pool_->schedule();
+    // cached record dropped after the commit (roadmap §3.8)
+    auto inv = invalidate_on_exit(bucket, key);
     fs::path dest = object_path(bucket, key);
     fsutil::check_put_condition(dest, cond, key);
     if (commit_object_file(dest, tmp, meta, staging_ / "put", key, commit_options()))
@@ -398,7 +403,8 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     fs::path path = object_path(bucket, key);
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
-        require_bucket(bucket);  // NoSuchBucket takes precedence over NoSuchKey
+        // NoSuchBucket takes precedence over NoSuchKey
+        require_bucket(bucket);
         throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
     struct stat st{};
@@ -440,7 +446,8 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         } else if (out.meta.size == 0) {
             len = 0;
         }
-        out.body = std::make_unique<fsutil::FdStreamReader>(fd, f, len, pool_);  // fd ownership transferred
+        // fd ownership transferred
+        out.body = std::make_unique<fsutil::FdStreamReader>(fd, f, len, pool_);
     } catch (...) {
         ::close(fd);
         throw;
@@ -473,8 +480,10 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(std::string_view
 
     fs::path src = object_path(src_bucket, src_key);
     fsutil::TierInfo tier;
-    ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);  // missing → NoSuchKey
-    if (tier.tier != fsutil::Tier::kLocal) {                                     // data not local (tiered stub)
+    // missing → NoSuchKey
+    ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);
+    if (tier.tier != fsutil::Tier::kLocal) {
+        // data not local (tiered stub)
         g.ok = true;
         co_return std::nullopt;
     }
@@ -504,19 +513,21 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(std::string_view
                                  in_off == 0;
             int err = errno;
             ::close(sfd);
-            if (not_supported) {  // TmpFile RAII discards
+            if (not_supported) {
+                // TmpFile RAII discards
                 g.ok = true;
                 co_return std::nullopt;
             }
             errno = err;
             throw_errno("copy_file_range");
         }
-        if (n == 0)
-            break;  // source truncated concurrently: go with what was actually copied (verified below via fstat)
+        // source truncated concurrently: go with what was actually copied (verified below via fstat)
+        if (n == 0) break;
         remaining -= uint64_t(n);
     }
     ::close(sfd);
-    if (remaining != 0) {  // source shrank (concurrent overwrite): fall back to streaming for a consistent snapshot
+    if (remaining != 0) {
+        // source shrank (concurrent overwrite): fall back to streaming for a consistent snapshot
         g.ok = true;
         co_return std::nullopt;
     }
@@ -728,12 +739,14 @@ struct DirReader {
 // "collect everything + full sort" byte for byte, without materializing the whole tree.
 struct ListWalker {
     const std::string& prefix;
-    const std::string& start_after;  // only entries strictly greater than this key are visible
+    // only entries strictly greater than this key are visible
+    const std::string& start_after;
     DirReader& reader;
     // Returning false terminates the whole walk (truncation); the callback may set
     // skip_prefix to skip a delimiter group
     std::function<bool(std::string&&)> on_key;
-    std::string skip_prefix;  // non-empty: every key/subtree with this prefix is skipped wholesale
+    // non-empty: every key/subtree with this prefix is skipped wholesale
+    std::string skip_prefix;
     bool stopped = false;
 
     // Whether the subtree (key prefix q) may contain matching keys: it intersects prefix,
@@ -771,7 +784,8 @@ struct ListWalker {
         for (size_t i = first_visible(*es, rel); i < es->size(); ++i) {
             const DirEntry& e = (*es)[i];
             if (stopped) return;
-            std::string q = rel + e.sort_key;  // file: full key; directory: subtree prefix
+            // file: full key; directory: subtree prefix
+            std::string q = rel + e.sort_key;
             // Delimiter group skipping: an item fully inside the group is skipped
             // outright; when the group prefix continues into the subtree (skip_prefix is
             // longer than q and starts with q) we still need to descend
@@ -786,7 +800,8 @@ struct ListWalker {
                 continue;
             }
             if (q.compare(0, prefix.size(), prefix) != 0) {
-                if (q > prefix) return;  // sorted: stop once past the prefix range (at this directory level)
+                // sorted: stop once past the prefix range (at this directory level)
+                if (q > prefix) return;
                 continue;
             }
             if (!start_after.empty() && q <= start_after) continue;
@@ -860,9 +875,11 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
 
     const std::string& delim = opt.delimiter;
     int count = 0;
-    std::string last_emitted;  // last emitted entry (key or group name)
+    // last emitted entry (key or group name)
+    std::string last_emitted;
     bool last_is_group = false;
-    std::vector<std::string> page_keys;  // metadata is loaded after the walk, in parallel
+    // metadata is loaded after the walk, in parallel
+    std::vector<std::string> page_keys;
 
     DirReader reader{dir_cache_.get(), {}};
     ListWalker walker{opt.prefix, opt.start_after, reader, nullptr, {}, false};
@@ -887,7 +904,8 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
                     return false;
                 }
                 out.common_prefixes.push_back(group);
-                walker.skip_prefix = group;  // prune the rest of the group's keys/subtrees wholesale
+                // prune the rest of the group's keys/subtrees wholesale
+                walker.skip_prefix = group;
                 last_emitted = std::move(group);
                 last_is_group = true;
                 ++count;
@@ -922,13 +940,15 @@ Task<void> LocalFsBackend::load_page_meta(const fs::path& base, const std::vecto
     size_t stride = size_t(std::max(1, opt_.list_meta_concurrency));
     stride = std::min({stride, pool_->size(), (n + kMinKeysPerMetaWorker - 1) / kMinKeysPerMetaWorker});
     if (stride <= 1) {
-        co_await load_meta_slice(base, keys, 0, 1, metas);  // already on a pool thread
+        // already on a pool thread
+        co_await load_meta_slice(base, keys, 0, 1, metas);
     } else {
         std::vector<Task<void>> workers;
         workers.reserve(stride);
         for (size_t w = 0; w < stride; ++w) workers.push_back(load_meta_slice(base, keys, w, stride, metas));
         co_await when_all(std::move(workers));
-        co_await pool_->schedule();  // when_all resumes on the last worker's thread; stay on the pool
+        // when_all resumes on the last worker's thread; stay on the pool
+        co_await pool_->schedule();
     }
     out.reserve(out.size() + n);
     for (auto& m : metas)
@@ -960,12 +980,13 @@ Task<bool> LocalFsBackend::reap_orphan_sidecar(std::string bucket, fs::path side
     if (rel.empty() || rel.starts_with("..") || !rel.ends_with(kSidecarSuffix)) co_return false;
     std::string key = rel.substr(0, rel.size() - std::strlen(kSidecarSuffix));
     fs::path data = bucket_dir(bucket) / fs::path(key);
-    if (key.ends_with(fsutil::kDirMarker))  // marker object: lock the "<dir>/" key PUT uses
-        key.resize(key.size() - std::strlen(fsutil::kDirMarker));
+    // marker object: lock the "<dir>/" key PUT uses
+    if (key.ends_with(fsutil::kDirMarker)) key.resize(key.size() - std::strlen(fsutil::kDirMarker));
     auto lk = co_await commit_lock(bucket, key).acquire();
     co_await pool_->schedule();
     std::error_code ec;
-    if (fs::exists(data, ec)) co_return false;  // a PUT landed meanwhile: not an orphan any more
+    // a PUT landed meanwhile: not an orphan any more
+    if (fs::exists(data, ec)) co_return false;
     bool removed = fs::remove(sidecar, ec) && !ec;
     if (removed) m_orphans_removed_->inc();
     co_return removed;
@@ -975,7 +996,8 @@ Task<void> LocalFsBackend::reap_orphan_sidecars(std::string bucket, std::vector<
     for (auto& p : list) {
         try {
             co_await reap_orphan_sidecar(bucket, p);
-        } catch (const std::exception& e) {  // best effort: never fail the listing over it
+        } catch (const std::exception& e) {
+            // best effort: never fail the listing over it
             LOG_WARN("localfs: orphan sidecar {} not removed: {}", p.string(), e.what());
         }
     }
@@ -1034,7 +1056,8 @@ Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::stri
     auto inv = invalidate_on_exit(bucket, key);
     fs::path p = object_path(bucket, key);
     fsutil::TierInfo tier;
-    ObjectMeta meta = load_object_meta(p, std::string(key), &tier);  // missing -> NoSuchKey
+    // missing -> NoSuchKey
+    ObjectMeta meta = load_object_meta(p, std::string(key), &tier);
     meta.tagging = std::move(tagging);
     fsutil::rewrite_object_meta(p, meta, tier, staging_ / "put", opt_.sidecar, &xattr_);
 }
@@ -1093,7 +1116,8 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
         const char* p = reinterpret_cast<const char*>(buf);
         size_t left = n;
         while (left > 0) {
-            if (int fe = fault::check("localfs.write")) {  // roadmap §6.1
+            if (int fe = fault::check("localfs.write")) {
+                // roadmap §6.1
                 errno = fe;
                 throw_errno("write part tmp");
             }
@@ -1103,7 +1127,8 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
             left -= static_cast<size_t>(w);
         }
     }
-    fsutil::fsync_file(tmp.fd);  // part data persisted first: only then is .md5's presence evidence of durable data
+    // part data persisted first: only then is .md5's presence evidence of durable data
+    fsutil::fsync_file(tmp.fd);
     ::close(tmp.fd);
     tmp.fd = -1;
     std::string etag = md5.final_hex();
@@ -1177,7 +1202,8 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std:
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (tmp.fd < 0) throw_errno("open complete tmp");
     uint64_t total = 0;
-    std::vector<uint64_t> sizes;  // per-part layout for GET ?partNumber (roadmap §2.5)
+    // per-part layout for GET ?partNumber (roadmap §2.5)
+    std::vector<uint64_t> sizes;
     std::vector<char> buf(256 * 1024);
     for (auto& path : paths) {
         uint64_t part_bytes = 0;
@@ -1193,7 +1219,8 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std:
             const char* p = buf.data();
             size_t left = static_cast<size_t>(n);
             while (left > 0) {
-                int fe = fault::check("localfs.write");  // roadmap §6.1
+                // roadmap §6.1
+                int fe = fault::check("localfs.write");
                 ssize_t w = fe ? -1 : ::write(tmp.fd, p, left);
                 if (w < 0) {
                     if (fe) errno = fe;
@@ -1223,7 +1250,8 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std:
     // Composite checksum from the stored, verified per-part values (roadmap §2.2)
     apply_composite_checksum(digests, meta, result);
     {
-        auto lk = co_await commit_lock(bucket, key).acquire();  // same as PUT: serialize the commit section
+        // same as PUT: serialize the commit section
+        auto lk = co_await commit_lock(bucket, key).acquire();
         co_await pool_->schedule();
         auto inv = invalidate_on_exit(bucket, key);
         fs::path dest = object_path(bucket, key);
@@ -1409,7 +1437,8 @@ Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::st
                                         ScrubThrottle& throttle, std::vector<uint8_t>& buf, FsScrubStats& st) {
     int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
-        if (errno != ENOENT) {  // ENOENT = deleted mid-walk, not a finding
+        if (errno != ENOENT) {
+            // ENOENT = deleted mid-walk, not a finding
             ++st.read_errors;
             LOG_ERROR("localfs: scrub {}/{}: open failed: {}", bucket, key, strerror(errno));
         }
@@ -1435,7 +1464,8 @@ Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::st
     }
     ++st.objects_scanned;
     if (tier.tier == fsutil::Tier::kRemote) {
-        ++st.skipped_stubs;  // data lives on the cloud side; nothing local to hash
+        // data lives on the cloud side; nothing local to hash
+        ++st.skipped_stubs;
         co_return;
     }
     if (meta.etag.empty()) {
@@ -1477,7 +1507,8 @@ Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::st
         LOG_ERROR("localfs: scrub {}/{}: read failed: {}", bucket, key, ex.what());
         co_return;
     }
-    if (st.aborted) co_return;  // partial hash after an interrupted pace is meaningless
+    // partial hash after an interrupted pace is meaningless
+    if (st.aborted) co_return;
     if (computed == meta.etag) co_return;
     // The metadata is read by path while the content hash used the fd: a
     // concurrent overwrite between the two is a torn snapshot, not corruption
@@ -1497,7 +1528,8 @@ Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::st
 Task<std::string> LocalFsBackend::md5_range(int fd, uint64_t off, uint64_t len, ScrubThrottle& throttle,
                                             std::vector<uint8_t>& buf, FsScrubStats& st) {
     util::HashStream md5(util::HashStream::Algo::Md5);
-    while (len > 0 && !st.aborted) {  // an aborted multipart verify skips its remaining parts
+    while (len > 0 && !st.aborted) {
+        // an aborted multipart verify skips its remaining parts
         // Hop per buffer like FdStreamReader: a full-store scrub must not sit
         // on one pool thread for its whole duration
         co_await pool_->schedule();
@@ -1515,7 +1547,8 @@ Task<std::string> LocalFsBackend::md5_range(int fd, uint64_t off, uint64_t len, 
         co_await throttle.pace(uint64_t(n));
         if (st.aborted || bg_.closing()) {
             st.aborted = true;
-            break;  // caller sees st.aborted and discards the partial hash
+            // caller sees st.aborted and discards the partial hash
+            break;
         }
     }
     co_return md5.final_hex();

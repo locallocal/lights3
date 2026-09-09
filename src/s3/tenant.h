@@ -32,11 +32,14 @@ struct TenantQuota {
 };
 
 struct Tenant {
-    std::string id;            // [a-z0-9][a-z0-9._-]{0,63}; doubles as the .sys object key
-    std::string display_name;  // shown as Owner/DisplayName; defaults to id
+    // [a-z0-9][a-z0-9._-]{0,63}; doubles as the .sys object key
+    std::string id;
+    // shown as Owner/DisplayName; defaults to id
+    std::string display_name;
     std::chrono::system_clock::time_point created;
     TenantQuota quota;
-    uint64_t rev = 1;  // edit counter (sync change detection, mirrors credentials)
+    // edit counter (sync change detection, mirrors credentials)
+    uint64_t rev = 1;
     bool operator==(const Tenant&) const = default;
 };
 
@@ -56,7 +59,8 @@ using TenantStore = SysConfigStore<TenantTraits>;
 
 struct BucketOwner {
     std::string tenant;
-    std::string assigned_by;  // access key that created the bucket / assigned the owner
+    // access key that created the bucket / assigned the owner
+    std::string assigned_by;
     std::chrono::system_clock::time_point assigned;
     bool operator==(const BucketOwner&) const = default;
 };
@@ -82,8 +86,10 @@ public:
     // Owner tenant id of a bucket, empty when unowned
     std::string owner_of(const std::string& bucket) const;
     std::optional<Tenant> find(const std::string& id) const;
-    std::vector<Tenant> list() const;                                  // sorted by id
-    std::vector<std::string> buckets_of(const std::string& id) const;  // sorted
+    // sorted by id
+    std::vector<Tenant> list() const;
+    // sorted
+    std::vector<std::string> buckets_of(const std::string& id) const;
 
     // Ownership mutation (write-through). assign refuses a bucket already owned by
     // another tenant unless force; unassign of an unowned bucket is a no-op

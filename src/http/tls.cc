@@ -45,7 +45,8 @@ std::string lower(std::string s) {
 // label in front of ".example.com" (RFC 6125 §6.4.3 shape), never the bare domain
 bool host_matches(const std::string& pattern, std::string_view host) {
     if (pattern.rfind("*.", 0) != 0) return pattern == host;
-    std::string_view suffix = std::string_view(pattern).substr(1);  // ".example.com"
+    // ".example.com"
+    std::string_view suffix = std::string_view(pattern).substr(1);
     if (host.size() <= suffix.size() || !host.ends_with(suffix)) return false;
     std::string_view label = host.substr(0, host.size() - suffix.size());
     return !label.empty() && label.find('.') == std::string_view::npos;
@@ -68,7 +69,8 @@ void load_cert_file(const std::string& path, CertBundle& out) {
     for (;;) {
         X509* extra = PEM_read_bio_X509(bio.get(), nullptr, nullptr, nullptr);
         if (!extra) {
-            ERR_clear_error();  // EOF, not an error
+            // EOF, not an error
+            ERR_clear_error();
             break;
         }
         sk_X509_push(out.chain, extra);

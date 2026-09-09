@@ -43,7 +43,8 @@ public:
         std::unique_lock lk(m_);
         cv_push_.wait(lk, [&] { return bytes_ < cap_ || cancelled_; });
         if (cancelled_) return false;
-        if (n == 0) return true;  // an empty block would read as EOF on the pop side
+        // an empty block would read as EOF on the pop side
+        if (n == 0) return true;
         // Append to the tail while it is a coalescing block with room; the consumer
         // may be draining the same block (front_pos_ < size), which is safe: both
         // sides hold m_ for the whole copy
@@ -120,7 +121,8 @@ private:
     std::mutex m_;
     std::condition_variable cv_push_, cv_pop_;
     std::deque<std::string> blocks_;
-    bool tail_open_ = false;  // blocks_.back() is a coalescing block push(const char*) may still append to
+    // blocks_.back() is a coalescing block push(const char*) may still append to
+    bool tail_open_ = false;
     size_t front_pos_ = 0;
     size_t bytes_ = 0;
     size_t cap_;

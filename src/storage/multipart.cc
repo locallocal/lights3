@@ -91,7 +91,8 @@ std::optional<std::string> composite_checksum(std::string_view algorithm,
         uint32_t crc = algorithm == "CRC32" ? util::crc32_update(0, span_of()) : util::crc32c_update(0, span_of());
         for (int s = 24; s >= 0; s -= 8) out.push_back(char((crc >> s) & 0xff));
     } else {
-        return std::nullopt;  // CRC64NVME composites are not a thing (full-object only)
+        // CRC64NVME composites are not a thing (full-object only)
+        return std::nullopt;
     }
     return util::base64_encode(std::span(reinterpret_cast<const uint8_t*>(out.data()), out.size())) + "-" +
            std::to_string(part_values_b64.size());
@@ -136,7 +137,8 @@ std::vector<uint64_t> parse_part_sizes(std::string_view s) {
         uint64_t v = 0;
         auto sub = s.substr(pos, comma - pos);
         auto [p, ec] = std::from_chars(sub.data(), sub.data() + sub.size(), v);
-        if (ec != std::errc() || p != sub.data() + sub.size()) return {};  // malformed → unknown
+        // malformed → unknown
+        if (ec != std::errc() || p != sub.data() + sub.size()) return {};
         out.push_back(v);
         pos = comma + 1;
     }

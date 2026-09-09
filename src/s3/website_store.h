@@ -66,19 +66,24 @@ public:
 
 private:
     WebsiteStore() = default;
-    void rebuild_snapshot_locked();  // caller holds mu_ exclusively
+    // caller holds mu_ exclusively
+    void rebuild_snapshot_locked();
     Task<void> ensure_sys_bucket();
     Task<void> sync_tick();
     void schedule_sync();
 
-    std::shared_ptr<storage::IStorageBackend> backend_;  // null = static-only
+    // null = static-only
+    std::shared_ptr<storage::IStorageBackend> backend_;
     std::shared_ptr<ThreadPool> pool_;
     int sync_interval_sec_ = 0;
 
     mutable std::shared_mutex mu_;
-    std::vector<WebsiteBucket> static_entries_;     // as configured (names unique)
-    std::map<std::string, WebsiteBucket> dynamic_;  // bucket -> entry
-    Snapshot snap_;                                 // rebuilt after each mutation
+    // as configured (names unique)
+    std::vector<WebsiteBucket> static_entries_;
+    // bucket -> entry
+    std::map<std::string, WebsiteBucket> dynamic_;
+    // rebuilt after each mutation
+    Snapshot snap_;
     std::map<std::string, std::chrono::steady_clock::time_point> tombstones_;
     std::atomic<bool> sys_bucket_ready_{false};
 

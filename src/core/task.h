@@ -137,13 +137,15 @@ struct PromiseBase {
                 transfer(p.continuation);
                 return std::noop_coroutine();
             }
-            if (p.event) p.event->set();  // top-level sync_wait
+            // top-level sync_wait
+            if (p.event) p.event->set();
             return std::noop_coroutine();
         }
         void await_resume() const noexcept {}
     };
 
-    std::suspend_always initial_suspend() noexcept { return {}; }  // lazy start
+    // lazy start
+    std::suspend_always initial_suspend() noexcept { return {}; }
     FinalAwaiter final_suspend() noexcept { return {}; }
 };
 
@@ -158,7 +160,8 @@ std::coroutine_handle<> task_await_suspend(std::coroutine_handle<Promise> task, 
     // Do not override a token the child task already carries (explicitly attached
     // via with_cancel); otherwise inherit the caller's
     if (!p.cancel.valid()) p.cancel = parent_cancel;
-    transfer(task);  // starts the awaited task (flat, see Trampoline)
+    // starts the awaited task (flat, see Trampoline)
+    transfer(task);
     return std::noop_coroutine();
 }
 
@@ -174,7 +177,8 @@ struct CurrentCancel {
                           { h.promise().cancel } -> std::convertible_to<CancelToken>;
                       })
             tok = h.promise().cancel;
-        return false;  // resume immediately
+        // resume immediately
+        return false;
     }
     CancelToken await_resume() noexcept { return std::move(tok); }
 };
@@ -387,9 +391,11 @@ struct PumpRunner {
     struct promise_type {
         PumpRunner get_return_object() { return {std::coroutine_handle<promise_type>::from_promise(*this)}; }
         std::suspend_always initial_suspend() noexcept { return {}; }
-        std::suspend_never final_suspend() noexcept { return {}; }  // self-destructs on completion
+        // self-destructs on completion
+        std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // coroutine body catches everything
+        // coroutine body catches everything
+        void unhandled_exception() { std::terminate(); }
     };
     std::coroutine_handle<> h;
     void start() { drive(h); }
@@ -476,9 +482,11 @@ struct WhenAllRunner {
     struct promise_type {
         WhenAllRunner get_return_object() { return {std::coroutine_handle<promise_type>::from_promise(*this)}; }
         std::suspend_always initial_suspend() noexcept { return {}; }
-        std::suspend_never final_suspend() noexcept { return {}; }  // self-destructs on completion
+        // self-destructs on completion
+        std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // coroutine body catches everything
+        // coroutine body catches everything
+        void unhandled_exception() { std::terminate(); }
     };
     std::coroutine_handle<> h;
     void start() { drive(h); }
@@ -582,7 +590,8 @@ inline Task<void> when_all(std::vector<Task<void>> tasks) {
 namespace detail {
 
 struct StartedState {
-    std::atomic<int> votes{2};  // child + collecting coroutine; wait() never votes
+    // child + collecting coroutine; wait() never votes
+    std::atomic<int> votes{2};
     std::coroutine_handle<> continuation;
     std::mutex m;
     std::condition_variable cv;

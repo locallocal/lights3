@@ -25,11 +25,13 @@ class Result;
 namespace lights3::storage {
 
 struct CloudProxyConfig {
-    std::string endpoint;  // scheme://host[:port]
+    // scheme://host[:port]
+    std::string endpoint;
     std::string region = "us-east-1";
     std::string access_key;
     std::string secret_key;
-    std::string bucket_prefix;  // remote bucket = prefix + local name
+    // remote bucket = prefix + local name
+    std::string bucket_prefix;
     // false = virtual-hosted style (docs/storage/cloudproxy-design.md §7): connection and SNI always
     // point at the endpoint; only Host/signature and path vary per bucket -- requires the
     // remote to accept vhost Hosts under the endpoint certificate (the common shape for AWS
@@ -50,7 +52,8 @@ struct CloudProxyConfig {
     // pool_idle_timeout is never reused (a NAT/remote that silently dropped it would
     // surface as periodic first-request retry spikes) and is closed by a light reaper;
     // pool_max_lifetime additionally retires connections by age at release (0 = off)
-    int pool_idle_timeout_ms = 60'000;  // 0 = never expire idles
+    // 0 = never expire idles
+    int pool_idle_timeout_ms = 60'000;
     int pool_max_lifetime_ms = 0;
     // Circuit breaker (roadmap §3.3): after `breaker_threshold` consecutive definitive
     // failures (transport error or 5xx; 429 is neutral) requests fail fast with SlowDown
@@ -65,22 +68,26 @@ struct CloudProxyConfig {
     // EC2 metadata service base URL for the credential chain (overridable for tests /
     // IMDS proxies); used only when access_key/secret_key are not configured
     std::string imds_endpoint = "http://169.254.169.254";
-    bool verify_etag = true;  // docs/storage/cloudproxy-design.md §6: single-part PUT compares MD5 against the remote
-                              // ETag
-    size_t queue_cap_bytes = 1 << 20;  // data-plane BlockQueue capacity (backpressure watermark)
+    // docs/storage/cloudproxy-design.md §6: single-part PUT compares MD5 against the remote
+    // ETag
+    bool verify_etag = true;
+    // data-plane BlockQueue capacity (backpressure watermark)
+    size_t queue_cap_bytes = 1 << 20;
     // Spool for length-less uploads (docs/archive/gaps.md §6.2): 0 = disabled (back to
     // NotImplemented). The cap guards against abuse -- the spool lands on the gateway's
     // local disk, and AWS's 5GiB single-PUT limit is the natural default
     uint64_t spool_max_bytes = 5ull << 30;
-    std::string spool_dir;  // empty = std::filesystem::temp_directory_path()
+    // empty = std::filesystem::temp_directory_path()
+    std::string spool_dir;
 
     // BackendConfig::params -> config; invalid values throw std::runtime_error at config-load time
     static CloudProxyConfig from_params(const std::string& name, const std::map<std::string, std::string>& params);
 };
 
 namespace cloudproxy {
-struct RemoteContext;  // remote_client.h: ClientPool + signing pipeline + error mapping
-}
+// remote_client.h: ClientPool + signing pipeline + error mapping
+struct RemoteContext;
+}  // namespace cloudproxy
 
 class CloudProxyBackend final : public IStorageBackend {
 public:
@@ -167,7 +174,8 @@ private:
 
     std::shared_ptr<cloudproxy::RemoteContext> ctx_;
     std::shared_ptr<ThreadPool> pool_;
-    ThreadPoolExecutor exec_{*pool_};  // continuation posting after a control_in_pump private thread finishes (§2.3)
+    // continuation posting after a control_in_pump private thread finishes (§2.3)
+    ThreadPoolExecutor exec_{*pool_};
 };
 
 }  // namespace lights3::storage

@@ -65,7 +65,8 @@ public:
                     tls_holder_->configure(&ctx);
                     return true;
                 } catch (const std::exception& e) {
-                    setup_error = e.what();  // no exception through httplib's constructor
+                    // no exception through httplib's constructor
+                    setup_error = e.what();
                     return false;
                 }
             });
@@ -136,7 +137,8 @@ public:
             if (!driver::parse_body_framing(headers).valid) {
                 auto bad = driver::bad_request_response("Invalid message framing.");
                 apply_fallback(rs, bad);
-                return bad.status;  // Not 100/417: upstream sends this response and closes the connection
+                // Not 100/417: upstream sends this response and closes the connection
+                return bad.status;
             }
             return static_cast<int>(httplib::StatusCode::Continue_100);
         });
@@ -157,7 +159,8 @@ public:
             // website error document must not be rewritten into 405 (found by the
             // website / fault e2e cases, roadmap §6.1)
             if (rs.has_header("x-amz-request-id") || rs.has_header("Server")) return HR::Unhandled;
-            if (rs.status == 400 || rs.status == 431) counters_.parse_error();  // upstream parser verdicts
+            // upstream parser verdicts
+            if (rs.status == 400 || rs.status == 431) counters_.parse_error();
             s3::S3ErrorCode code = s3::S3ErrorCode::InternalError;
             switch (rs.status) {
                 case 404:
@@ -182,8 +185,9 @@ public:
                     if (rs.status < 500) code = s3::S3ErrorCode::InvalidRequest;
                     break;
             }
-            int status = rs.status;  // Already set per upstream semantics above; must not be overridden by the fallback
-                                     // mapping
+            // Already set per upstream semantics above; must not be overridden by the fallback
+            // mapping
+            int status = rs.status;
             apply_fallback(rs, driver::upstream_error_response(code, "Request rejected by the HTTP layer."));
             rs.status = status;
             return HR::Handled;
@@ -194,7 +198,8 @@ public:
         auto with_body = [this](const httplib::Request& rq, httplib::Response& rs, const httplib::ContentReader& cr) {
             handle(rq, rs, &cr);
         };
-        svr_->Get(pat, no_body);  // HEAD reuses the Get route in httplib
+        // HEAD reuses the Get route in httplib
+        svr_->Get(pat, no_body);
         svr_->Options(pat, no_body);
         svr_->Post(pat, with_body);
         svr_->Put(pat, with_body);
@@ -231,8 +236,9 @@ public:
         // three drivers): without this check, stop() in that ordering is a
         // no-op (is_running_ not yet set) and listen never returns
         if (!stopping_.load()) {
-            svr_->listen_after_bind();  // httplib's thread pool is joined before returning (in-flight requests
-                                        // finished)
+            // httplib's thread pool is joined before returning (in-flight requests
+            // finished)
+            svr_->listen_after_bind();
         }
         LOG_INFO("httplib http server stopped");
     }
@@ -279,7 +285,8 @@ private:
         auto reject = [&](const char* why) {
             counters_.parse_error();
             apply_fallback(rs, driver::bad_request_response(why));
-            rs.set_header("Connection", "close");  // Framing is suspect; do not reuse the connection
+            // Framing is suspect; do not reuse the connection
+            rs.set_header("Connection", "close");
         };
         auto framing = driver::parse_body_framing(req.headers);
         if (!framing.valid) {
@@ -292,13 +299,15 @@ private:
         // single-line cap CPPHTTPLIB_HEADER_MAX_LENGTH; the configured value
         // gets an aggregate check here
         size_t header_bytes = 0;
+        // ": " + CRLF
         for (auto& [k, v] : rq.headers)
-            if (!is_pseudo_header(k)) header_bytes += k.size() + v.size() + 4;  // ": " + CRLF
+            if (!is_pseudo_header(k)) header_bytes += k.size() + v.size() + 4;
         if (header_bytes > cfg_.max_header_size) {
             counters_.parse_error();
             apply_fallback(rs, driver::upstream_error_response(s3::S3ErrorCode::InvalidRequest,
                                                                "Request header fields too large."));
-            rs.status = 431;  // InvalidRequest maps to 400; reply 431 here per upstream semantics
+            // InvalidRequest maps to 400; reply 431 here per upstream semantics
+            rs.status = 431;
             rs.set_header("Connection", "close");
             return;
         }
@@ -336,7 +345,8 @@ private:
                 queue->close(ok);
             });
         } else if (content_length) {
-            req.body = std::make_unique<StringBodyReader>("");  // Content-Length: 0
+            // Content-Length: 0
+            req.body = std::make_unique<StringBodyReader>("");
         }
 
         HttpResponse resp;
@@ -381,7 +391,8 @@ private:
             if (HeaderMap::ieq(k, "Content-Type")) {
                 content_type = v;
                 has_content_type = true;
-                continue;  // The set_content family writes it; avoid duplication
+                // The set_content family writes it; avoid duplication
+                continue;
             }
             // Length/encoding/connection management is httplib's internal responsibility (contract 5)
             if (HeaderMap::ieq(k, "Content-Length") || HeaderMap::ieq(k, "Transfer-Encoding") ||
@@ -423,23 +434,25 @@ private:
         };
         auto st = std::make_shared<Stream>(std::move(resp.stream_body), cfg_.io_chunk_size);
         if (resp.content_length) {
-            rs.set_content_provider(
-                static_cast<size_t>(*resp.content_length), content_type,
-                [st](size_t /*offset*/, size_t length, httplib::DataSink& sink) {
-                    std::span<const std::byte> chunk;
-                    try {
-                        chunk = st->pf.next_sync();
-                    } catch (const std::exception& e) {
-                        LOG_ERROR("stream body read failed mid-response: {}", e.what());
-                        return false;  // Response head already sent; can only disconnect (contract 3)
-                    }
-                    if (chunk.empty()) return false;  // EOF before the length is reached counts as an error
-                    if (chunk.size() > length) {
-                        LOG_ERROR("stream body overruns declared Content-Length ({} > {} left)", chunk.size(), length);
-                        return false;
-                    }
-                    return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
-                });
+            rs.set_content_provider(static_cast<size_t>(*resp.content_length), content_type,
+                                    [st](size_t /*offset*/, size_t length, httplib::DataSink& sink) {
+                                        std::span<const std::byte> chunk;
+                                        try {
+                                            chunk = st->pf.next_sync();
+                                        } catch (const std::exception& e) {
+                                            LOG_ERROR("stream body read failed mid-response: {}", e.what());
+                                            // Response head already sent; can only disconnect (contract 3)
+                                            return false;
+                                        }
+                                        // EOF before the length is reached counts as an error
+                                        if (chunk.empty()) return false;
+                                        if (chunk.size() > length) {
+                                            LOG_ERROR("stream body overruns declared Content-Length ({} > {} left)",
+                                                      chunk.size(), length);
+                                            return false;
+                                        }
+                                        return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
+                                    });
         } else {
             rs.set_chunked_content_provider(content_type, [st](size_t /*offset*/, httplib::DataSink& sink) {
                 std::span<const std::byte> chunk;
@@ -464,7 +477,8 @@ private:
     // Declared before svr_: the SSL_CTX's certificate callback points at the
     // holder, so the holder must outlive the server (members destroy in reverse)
     std::shared_ptr<tls::Holder> tls_holder_;
-    std::unique_ptr<httplib::Server> svr_;  // Actually an SSLServer under TLS (decided in the constructor)
+    // Actually an SSLServer under TLS (decided in the constructor)
+    std::unique_ptr<httplib::Server> svr_;
     bool tls_ = false;
     uint16_t port_ = 0;
     std::atomic<bool> stopping_{false};

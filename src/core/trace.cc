@@ -62,7 +62,8 @@ std::optional<TraceContext> TraceContext::parse(std::string_view tp, std::string
     TraceContext c;
     c.trace_id = std::string(trace);
     c.parent_span_id = std::string(span);
-    c.span_id = random_hex(8);  // this hop's own span
+    // this hop's own span
+    c.span_id = random_hex(8);
     c.sampled = (flags[1] == '1' || flags[1] == '3' || flags[1] == '5' || flags[1] == '7' || flags[1] == '9' ||
                  flags[1] == 'b' || flags[1] == 'd' || flags[1] == 'f');
     c.tracestate = std::string(ts);

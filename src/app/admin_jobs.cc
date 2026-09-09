@@ -267,7 +267,8 @@ const AdminJobs::Job* AdminJobs::running_of(const Slots& s) {
 uint64_t AdminJobs::start(const std::string& backend, JobOp op, uint64_t max_bytes_per_sec) {
     std::shared_ptr<storage::IStorageBackend> b;
     {
-        std::lock_guard lk(m_);  // the set changes under backend hot add / remove
+        // the set changes under backend hot add / remove
+        std::lock_guard lk(m_);
         auto it = backends_.find(backend);
         if (it == backends_.end()) throw Failure{Error::NoSuchBackend, "no backend named '" + backend + "'"};
         b = it->second;
@@ -305,7 +306,8 @@ uint64_t AdminJobs::start(const std::string& backend, JobOp op, uint64_t max_byt
         throw Failure{Error::Busy, std::string(job_group_name(op)) + " " + job_op_name(op) + ": job " +
                                        std::to_string(r->id) + " is still running on '" + backend + "'"};
     Job& j = slots[op];
-    if (j.thread.joinable()) j.thread.join();  // reap the previous run's thread
+    // reap the previous run's thread
+    if (j.thread.joinable()) j.thread.join();
     j.id = next_id_++;
     j.running = true;
     j.max_mbps = max_bytes_per_sec / (1000 * 1000);

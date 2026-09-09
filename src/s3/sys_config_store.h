@@ -185,7 +185,8 @@ public:
             auto now = std::chrono::steady_clock::now();
             std::erase_if(tombstones_, [&](auto& kv) { return now - kv.second > kTombstoneTtl; });
             for (auto& [b, e] : on_storage) {
-                if (tombstones_.contains(b)) continue;  // just removed locally, don't resurrect
+                // just removed locally, don't resurrect
+                if (tombstones_.contains(b)) continue;
                 auto it = entries_.find(b);
                 if (it == entries_.end()) {
                     entries_.emplace(b, std::move(e));
@@ -250,7 +251,8 @@ private:
         co_return out;
     }
 
-    void rebuild_snapshot_locked() {  // caller holds mu_ exclusively (or is single-threaded)
+    void rebuild_snapshot_locked() {
+        // caller holds mu_ exclusively (or is single-threaded)
         snap_ = std::make_shared<const std::map<std::string, Entry>>(entries_);
     }
 
@@ -265,7 +267,8 @@ private:
     }
 
     Task<void> sync_tick() {
-        co_await pool_->schedule();  // the timer thread only dispatches; IO moves to a pool thread
+        // the timer thread only dispatches; IO moves to a pool thread
+        co_await pool_->schedule();
         std::exception_ptr err;
         try {
             co_await sync_now();
@@ -273,7 +276,8 @@ private:
             err = std::current_exception();
         }
         schedule_sync();
-        if (err) std::rethrow_exception(err);  // hand off to BackgroundTaskGroup for logging
+        // hand off to BackgroundTaskGroup for logging
+        if (err) std::rethrow_exception(err);
     }
 
     void schedule_sync() {
@@ -284,7 +288,8 @@ private:
         });
     }
 
-    std::shared_ptr<storage::IStorageBackend> backend_;  // null = detached (tests)
+    // null = detached (tests)
+    std::shared_ptr<storage::IStorageBackend> backend_;
     std::shared_ptr<ThreadPool> pool_;
     int sync_interval_sec_ = 0;
 

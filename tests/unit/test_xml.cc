@@ -20,7 +20,8 @@ TEST(xml_parse_delete_objects_shape) {
         if (c.name == "Object") keys.push_back(c.get("Key"));
     CHECK_EQ(keys.size(), size_t(2));
     CHECK_EQ(keys[0], "dir/a.txt");
-    CHECK_EQ(keys[1], "b & c.bin");  // entity decoding
+    // entity decoding
+    CHECK_EQ(keys[1], "b & c.bin");
 }
 
 TEST(xml_parse_complete_multipart_shape) {
@@ -49,9 +50,12 @@ TEST(xml_parse_entities_cdata_comments) {
 // &#x1F600; were once wrongly rejected as MalformedXML by the length guard
 TEST(xml_parse_supplementary_plane_char_refs) {
     auto root = xml_parse("<R><A>&#x1F600;</A><B>&#x10FFFF;</B><C>&#1114111;</C></R>");
-    CHECK_EQ(root.get("A"), "\xF0\x9F\x98\x80");  // U+1F600
-    CHECK_EQ(root.get("B"), "\xF4\x8F\xBF\xBF");  // U+10FFFF
-    CHECK_EQ(root.get("C"), "\xF4\x8F\xBF\xBF");  // same code point, decimal form
+    // U+1F600
+    CHECK_EQ(root.get("A"), "\xF0\x9F\x98\x80");
+    // U+10FFFF
+    CHECK_EQ(root.get("B"), "\xF4\x8F\xBF\xBF");
+    // same code point, decimal form
+    CHECK_EQ(root.get("C"), "\xF4\x8F\xBF\xBF");
     // Guard still in place: absurdly long references are rejected as before
     CHECK_THROWS_S3(xml_parse("<A>&#x000000000000000041;</A>"), S3ErrorCode::MalformedXML);
 }

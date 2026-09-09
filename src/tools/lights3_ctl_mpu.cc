@@ -30,7 +30,8 @@ namespace util = lights3::util;
 
 struct Upload {
     std::string key, upload_id, initiated;
-    int64_t age_sec = -1;  // -1 = unparsable Initiated
+    // -1 = unparsable Initiated
+    int64_t age_sec = -1;
 };
 
 // Every page of ListMultipartUploads under prefix; throws S3Error on a non-200
@@ -61,7 +62,8 @@ std::vector<Upload> list_all(SignedClient& cli, const std::string& bucket, const
         if (root.get("IsTruncated") != "true") break;
         key_marker = root.get("NextKeyMarker");
         id_marker = root.get("NextUploadIdMarker");
-        if (key_marker.empty() && id_marker.empty()) break;  // defensive: never loop on a broken cursor
+        // defensive: never loop on a broken cursor
+        if (key_marker.empty() && id_marker.empty()) break;
     }
     return out;
 }

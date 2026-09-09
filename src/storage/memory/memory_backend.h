@@ -75,11 +75,13 @@ private:
     };
     struct Bucket {
         BucketInfo info;
-        std::map<std::string, Object> objects;  // keys ordered
+        // keys ordered
+        std::map<std::string, Object> objects;
     };
     struct Part {
         std::string data;
-        std::string etag;  // part content MD5 hex
+        // part content MD5 hex
+        std::string etag;
         std::chrono::system_clock::time_point uploaded;
         // Verified part checksum (roadmap §2.2); empty = none declared
         std::string checksum_algorithm;
@@ -89,7 +91,8 @@ private:
         std::string bucket;
         std::string key;
         ObjectMeta meta;
-        std::map<int, Part> parts;  // part_no ordered
+        // part_no ordered
+        std::map<int, Part> parts;
         std::chrono::system_clock::time_point initiated;
     };
 
@@ -101,13 +104,16 @@ private:
     // Early gate while reading the body (called without m_): throws SlowDown once
     // used + this request's buffered bytes exceed the limit
     void check_inflight(size_t buffered) const;
-    void expire_uploads_locked();  // mpu_ttl expiry cleanup (holding m_)
+    // mpu_ttl expiry cleanup (holding m_)
+    void expire_uploads_locked();
 
     MemoryOptions opt_;
     mutable std::mutex m_;
-    uint64_t used_bytes_ = 0;  // byte sum of objects + in-flight parts (guarded by m_)
+    // byte sum of objects + in-flight parts (guarded by m_)
+    uint64_t used_bytes_ = 0;
     std::map<std::string, Bucket> buckets_;
-    std::map<std::string, Upload> uploads_;  // upload_id → state
+    // upload_id → state
+    std::map<std::string, Upload> uploads_;
 };
 
 }  // namespace lights3::storage

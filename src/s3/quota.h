@@ -16,8 +16,10 @@ namespace lights3::s3 {
 
 // 0 = unlimited on that axis; an entry with both zero is refused at PUT (delete it instead)
 struct BucketQuota {
-    uint64_t max_bytes = 0;    // committed object bytes + in-flight multipart part bytes
-    uint64_t max_objects = 0;  // committed objects
+    // committed object bytes + in-flight multipart part bytes
+    uint64_t max_bytes = 0;
+    // committed objects
+    uint64_t max_objects = 0;
     bool operator==(const BucketQuota&) const = default;
 };
 

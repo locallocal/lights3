@@ -49,15 +49,18 @@ constexpr char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
 }  // namespace
 
 uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) {
-    return table_crc<0x82F63B78u>(crc, data);  // Castagnoli, reflected polynomial
+    // Castagnoli, reflected polynomial
+    return table_crc<0x82F63B78u>(crc, data);
 }
 
 uint32_t crc32_update(uint32_t crc, std::span<const std::byte> data) {
-    return table_crc<0xEDB88320u>(crc, data);  // IEEE 802.3, reflected polynomial
+    // IEEE 802.3, reflected polynomial
+    return table_crc<0xEDB88320u>(crc, data);
 }
 
 uint64_t crc64nvme_update(uint64_t crc, std::span<const std::byte> data) {
-    return table_crc64<0x9A6C9329AC4BC9B5ull>(crc, data);  // NVMe, reflected polynomial
+    // NVMe, reflected polynomial
+    return table_crc64<0x9A6C9329AC4BC9B5ull>(crc, data);
 }
 
 std::string base64_encode(std::span<const uint8_t> in) {
@@ -109,7 +112,8 @@ std::optional<std::string> base64_decode(std::string_view in) {
                 ++pad;
             } else {
                 v[j] = val(c);
-                if (v[j] < 0 || pad > 0) return std::nullopt;  // '=' may only appear at the end
+                // '=' may only appear at the end
+                if (v[j] < 0 || pad > 0) return std::nullopt;
             }
         }
         uint32_t x = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) | (uint32_t(v[2]) << 6) | uint32_t(v[3]);

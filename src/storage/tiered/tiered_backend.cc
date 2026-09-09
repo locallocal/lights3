@@ -36,7 +36,8 @@ using tier::TierInfo;
 
 namespace {
 
-constexpr int64_t kAccessFlushSec = 300;  // access flush period (docs/storage/tiered-design.md §4.3)
+// access flush period (docs/storage/tiered-design.md §4.3)
+constexpr int64_t kAccessFlushSec = 300;
 
 // For demotion uploads: layers synchronous MD5 and byte counting on top of the local
 // side's snapshot stream (docs/storage/tiered-design.md §5.2 step 3 verification)
@@ -96,7 +97,8 @@ public:
           src_(std::move(src)),
           fill_(std::move(fill)) {}
 
-    ~TeeCacheReader() override { release_inflight(); }  // safety net for mid-transfer disconnect destruction
+    // safety net for mid-transfer disconnect destruction
+    ~TeeCacheReader() override { release_inflight(); }
 
     Task<size_t> read(std::span<std::byte> buf) override {
         size_t n = co_await src_->read(buf);
@@ -104,8 +106,9 @@ public:
         if (n > 0) {
             if (!degraded_) {
                 md5_.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
-                if (!fill_->write(buf.data(), n)) {  // ENOSPC etc.: degrade to pure passthrough, invisible to the
-                                                     // client
+                if (!fill_->write(buf.data(), n)) {
+                    // ENOSPC etc.: degrade to pure passthrough, invisible to the
+                    // client
                     LOG_WARN("tiered: cache fill write failed for {}/{}, passthrough only", bucket_, key_);
                     degraded_ = true;
                 } else {
@@ -152,8 +155,10 @@ private:
 
     std::shared_ptr<TieredBackend> owner_;
     std::string bucket_, key_;
-    ObjectMeta meta_;  // local metadata snapshot (external-meta invariance principle)
-    TierInfo tier_;    // expected remote version, re-verified before commit
+    // local metadata snapshot (external-meta invariance principle)
+    ObjectMeta meta_;
+    // expected remote version, re-verified before commit
+    TierInfo tier_;
     std::unique_ptr<http::BodyReader> src_;
     std::unique_ptr<tier::ICacheFill> fill_;
     util::HashStream md5_{util::HashStream::Algo::Md5};
@@ -525,7 +530,8 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
     fsutil::reject_reserved_key(key);
     for (int attempt = 0;; ++attempt) {
         co_await pool_->schedule();
-        auto obj = local_->read(bucket, key);  // absent: let local distinguish NoSuchBucket/NoSuchKey
+        // absent: let local distinguish NoSuchBucket/NoSuchKey
+        auto obj = local_->read(bucket, key);
         if (obj) touch(bucket, key);
 
         if (!obj || obj->tier.tier != Tier::kRemote) {
@@ -538,7 +544,8 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
                 co_return os;
             } catch (const fsutil::StubRace&) {
                 if (attempt >= 2) throw;
-                continue;  // open raced with stubbing: re-read the tier and go to the cloud
+                // open raced with stubbing: re-read the tier and go to the cloud
+                continue;
             }
         }
         const ObjectMeta& m = obj->meta;
@@ -547,7 +554,8 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
         // remote + Range: block cache (roadmap §3.6 ⑦) when enabled, else passthrough
         // (docs/storage/tiered-design.md §6.3); external meta is always the local original
         if (range && cfg_.range_cache && local_->supports_range_cache() && m.size > 0) {
-            auto [f, l] = resolve_range(*range, m.size);  // InvalidRange here matches what the cloud would say
+            // InvalidRange here matches what the cloud would say
+            auto [f, l] = resolve_range(*range, m.size);
             auto rc = local_->open_range_cache(bucket, key, *obj, cfg_.range_cache_block);
             if (rc && rc->has(f, l)) {
                 if (auto body = rc->open(f, l)) {
@@ -595,7 +603,8 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
         out.meta = m;
         out.range = cs.range;
         if (range) {
-            out.body = std::move(cs.body);  // Range does no whole-object caching (§6.3)
+            // Range does no whole-object caching (§6.3)
+            out.body = std::move(cs.body);
             if (cfg_.cache_fill_on_range) bg_.spawn(promote_quiet(std::string(bucket), std::string(key)));
             g.ok = true;
             co_return out;
@@ -603,7 +612,8 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
         std::string ikey = make_ikey(bucket, key);
         if (m.size > 0 && cache_space_ok(m.size) && inflight_try_begin(ikey)) {
             auto fill = local_->begin_cache_fill(bucket, key);
-            if (!fill) {  // cannot open a fill: pure-passthrough fallback (requirement 3)
+            if (!fill) {
+                // cannot open a fill: pure-passthrough fallback (requirement 3)
                 inflight_end(ikey);
                 out.body = std::move(cs.body);
             } else {
@@ -611,7 +621,8 @@ Task<ObjectStream> TieredBackend::get_object(std::string_view bucket, std::strin
                                                             m, t, std::move(cs.body), std::move(fill));
             }
         } else {
-            out.body = std::move(cs.body);  // insufficient space or a fill already in flight: pure passthrough
+            // insufficient space or a fill already in flight: pure passthrough
+            out.body = std::move(cs.body);
         }
         g.ok = true;
         co_return out;
@@ -704,7 +715,8 @@ Task<void> TieredBackend::delete_object(std::string_view bucket, std::string_vie
 Task<ListResult> TieredBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
     OpGuard g{this, Op::kList};
     validate_bucket_name(bucket, kAllowReserved);
-    auto r = co_await local_->backend().list_objects(bucket, opt);  // stubs list with their logical size
+    // stubs list with their logical size
+    auto r = co_await local_->backend().list_objects(bucket, opt);
     g.ok = true;
     co_return r;
 }
@@ -731,7 +743,8 @@ Task<PutResult> TieredBackend::complete_multipart(std::string_view bucket, std::
     TierInfo prior = local_->read_tier_only(bucket, key);
     auto r = co_await local_->backend().complete_multipart(bucket, key, upload_id, parts);
     touch(bucket, key);
-    if (prior.tier != Tier::kLocal) {  // same as PUT overwrite
+    if (prior.tier != Tier::kLocal) {
+        // same as PUT overwrite
         enqueue_gc(bucket, key, prior.remote_etag);
         local_->drop_range_cache(bucket, key);
     }
@@ -751,10 +764,12 @@ Task<ListUploadsResult> TieredBackend::list_multipart_uploads(std::string_view b
 // ---------- Demotion (docs/storage/tiered-design.md §5) ----------
 
 Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
-    auto permit = co_await transfers_.acquire();  // max_concurrent_transfers throttle
+    // max_concurrent_transfers throttle
+    auto permit = co_await transfers_.acquire();
     co_await pool_->schedule();
     auto o0 = local_->read(bucket, key);
-    if (!o0) co_return;  // gone
+    // gone
+    if (!o0) co_return;
     const ObjectMeta m0 = o0->meta;
     const TierInfo t0 = o0->tier;
 
@@ -763,8 +778,9 @@ Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
         // was not reclaimed -> finish the stubbing
         if (o0->local_bytes > 0) {
             auto lk = co_await key_lock(bucket, key).acquire();
-            co_await pool_->schedule();  // the lock wakeup may resume on another thread; blocking IO goes back to the
-                                         // pool
+            // the lock wakeup may resume on another thread; blocking IO goes back to the
+            // pool
+            co_await pool_->schedule();
             auto o1 = local_->read(bucket, key);
             if (o1 && o1->tier.tier == Tier::kRemote && o1->local_bytes > 0)
                 co_await local_->commit_stub(bucket, key, o1->meta, o1->tier);
@@ -773,7 +789,8 @@ Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
     }
 
     std::string ikey = make_ikey(bucket, key);
-    if (!inflight_try_begin(ikey)) co_return;  // demotion/fill already in flight (also blocks erroneous GC deletion)
+    // demotion/fill already in flight (also blocks erroneous GC deletion)
+    if (!inflight_try_begin(ikey)) co_return;
     InflightRelease rel{this, ikey};
 
     std::string remote_etag, remote_at;
@@ -809,8 +826,9 @@ Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
         // When the cloud returns a single-part etag (pure MD5), transfer integrity can be
         // checked once more
         if (ok && cloud_etag.find('-') == std::string::npos && cloud_etag != md5) ok = false;
-        if (!ok) {  // object overwritten during upload or cloud verification failed: replica goes to GC, give up this
-                    // round
+        if (!ok) {
+            // object overwritten during upload or cloud verification failed: replica goes to GC, give up this
+            // round
             enqueue_gc(bucket, key, cloud_etag);
             co_return;
         }
@@ -821,19 +839,24 @@ Task<void> TieredBackend::demote_object(std::string bucket, std::string key) {
     // Step 4 commit under the per-key lock: re-verify we were not beaten by a concurrent
     // write, then stub
     auto lk = co_await key_lock(bucket, key).acquire();
-    co_await pool_->schedule();  // as above: the critical section is synchronous IO, must be on a pool thread
+    // as above: the critical section is synchronous IO, must be on a pool thread
+    co_await pool_->schedule();
     auto o1 = local_->read(bucket, key);
-    if (!o1) {  // DELETEd in the meantime: DELETE wins (§7.3)
+    if (!o1) {
+        // DELETEd in the meantime: DELETE wins (§7.3)
         enqueue_gc(bucket, key, remote_etag);
         co_return;
     }
-    if (o1->meta.etag != m0.etag) {  // overwritten by PUT in the meantime: PUT wins (§7.3)
+    if (o1->meta.etag != m0.etag) {
+        // overwritten by PUT in the meantime: PUT wins (§7.3)
         enqueue_gc(bucket, key, remote_etag);
         co_return;
     }
-    if (o1->tier.tier == Tier::kRemote) co_return;  // already stubbed by someone else
+    // already stubbed by someone else
+    if (o1->tier.tier == Tier::kRemote) co_return;
     co_await local_->commit_stub(bucket, key, o1->meta, TierInfo{Tier::kRemote, remote_etag, remote_at});
-    forget_access(bucket, key);  // a stub needs no access record until it is touched again
+    // a stub needs no access record until it is touched again
+    forget_access(bucket, key);
     // Count only when the stub actually lands; the crash-recovery stub completion above
     // does not count -- that demotion was already counted before the crash, and re-counting
     // after restart would inflate
@@ -851,9 +874,11 @@ Task<void> TieredBackend::promote_object(std::string bucket, std::string key) {
     if (!o0 || o0->tier.tier != Tier::kRemote) co_return;
     const ObjectMeta m0 = o0->meta;
     const TierInfo t0 = o0->tier;
-    if (m0.size > 0 && !cache_space_ok(m0.size)) co_return;  // insufficient space: give up (requirement 3)
+    // insufficient space: give up (requirement 3)
+    if (m0.size > 0 && !cache_space_ok(m0.size)) co_return;
     std::string ikey = make_ikey(bucket, key);
-    if (!inflight_try_begin(ikey)) co_return;  // single-flight (§6.4)
+    // single-flight (§6.4)
+    if (!inflight_try_begin(ikey)) co_return;
     InflightRelease rel{this, ikey};
 
     ObjectStream cs = co_await cloud_->get_object(bucket, key, std::nullopt);
@@ -867,7 +892,8 @@ Task<void> TieredBackend::promote_object(std::string bucket, std::string key) {
         size_t n = co_await cs.body->read(std::span(buf));
         if (n == 0) break;
         md5.update(std::span(reinterpret_cast<const uint8_t*>(buf.data()), n));
-        if (!fill->write(buf.data(), n)) co_return;  // ENOSPC etc.: the fill's RAII discards
+        // ENOSPC etc.: the fill's RAII discards
+        if (!fill->write(buf.data(), n)) co_return;
         written += n;
     }
 
@@ -888,7 +914,8 @@ Task<void> TieredBackend::commit_cache_fill(std::string bucket, std::string key,
     // (renames + fsyncs) would land directly on the HTTP response thread
     co_await pool_->schedule();
     auto o1 = local_->read(bucket, key);
-    if (!o1) co_return;  // DELETEd in the meantime: discard the fill (§7.3)
+    // DELETEd in the meantime: discard the fill (§7.3)
+    if (!o1) co_return;
     // Re-verify it is still the same remote version; discard if overwritten by PUT or
     // already filled (user writes win)
     if (o1->tier.tier != Tier::kRemote || o1->meta.etag != expect.etag ||
@@ -916,7 +943,8 @@ void TieredBackend::touch(std::string_view bucket, std::string_view key) {
         if (t.hits < UINT32_MAX) ++t.hits;
         kick = access_dirty_.size() >= cfg_.access_buffer_max;
     }
-    if (kick) maybe_kick_flush();  // bounded buffer: flush early rather than grow
+    // bounded buffer: flush early rather than grow
+    if (kick) maybe_kick_flush();
 }
 
 void TieredBackend::forget_access(std::string_view bucket, std::string_view key) {
@@ -938,7 +966,8 @@ AccessRec TieredBackend::access_of(std::string_view bucket, std::string_view key
     if (auto stored = local_->load_access(bucket, key)) {
         r = *stored;
     } else {
-        r.atime = fallback_mtime;  // never recorded: the local record's mtime stands in
+        // never recorded: the local record's mtime stands in
+        r.atime = fallback_mtime;
     }
     if (pending) {
         r.atime = std::max(r.atime, pending->atime);
@@ -950,7 +979,8 @@ AccessRec TieredBackend::access_of(std::string_view bucket, std::string_view key
 bool TieredBackend::persist_access(std::string_view bucket, std::string_view key, AccessRec rec) {
     bool appended = false;
     int64_t ca = cold_after_for(bucket, key);
-    if (ca >= 0) {  // pinned keys are never enrolled: nothing will ever pick them up
+    if (ca >= 0) {
+        // pinned keys are never enrolled: nothing will ever pick them up
         int64_t slot = wheel_slot_for(rec.atime, ca);
         if (slot != rec.enrolled) {
             wheel_append(slot, bucket, key);
@@ -1024,7 +1054,8 @@ std::vector<std::pair<int64_t, fs::path>> TieredBackend::wheel_slots() const {
         std::string name = e.path().filename().string();
         int64_t slot = 0;
         auto r = std::from_chars(name.data(), name.data() + name.size(), slot);
-        if (r.ec != std::errc() || r.ptr != name.data() + name.size()) continue;  // consuming-* etc.
+        // consuming-* etc.
+        if (r.ec != std::errc() || r.ptr != name.data() + name.size()) continue;
         out.emplace_back(slot, e.path());
     }
     std::sort(out.begin(), out.end());
@@ -1051,10 +1082,14 @@ Task<void> TieredBackend::flush_task() {
 struct TieredBackend::ScanCtx {
     int64_t now = 0;
     TierScanStats st;
-    std::set<std::string> chosen;   // launched this round (dedupe across passes)
-    std::vector<Task<void>> batch;  // bounded coroutine frames (docs/archive/gaps.md §2.13)
-    uint64_t local_bytes = 0;       // measured usage (full scan only)
-    uint64_t cold_freed = 0;        // bytes the coldness-selected objects will free
+    // launched this round (dedupe across passes)
+    std::set<std::string> chosen;
+    // bounded coroutine frames (docs/archive/gaps.md §2.13)
+    std::vector<Task<void>> batch;
+    // measured usage (full scan only)
+    uint64_t local_bytes = 0;
+    // bytes the coldness-selected objects will free
+    uint64_t cold_freed = 0;
     static constexpr size_t kScanBatch = 128;
 
     void pick(TieredBackend& self, const std::string& b, const std::string& k) {
@@ -1074,7 +1109,8 @@ double TieredBackend::evict_score(const AccessRec& a, uint64_t size, int64_t now
     double age = double(std::max<int64_t>(1, now - a.atime));
     double size_term = 1.0 + cfg_.evict_size_weight * std::log2(1.0 + double(size) / double(1 << 20));
     double freq_term = 1.0 + cfg_.evict_frequency_weight * double(a.hits);
-    return age * size_term / freq_term;  // higher = better victim
+    // higher = better victim
+    return age * size_term / freq_term;
 }
 
 // One candidate: coldness / crash recovery / wheel (re-)enrollment. The caller supplies
@@ -1083,7 +1119,8 @@ Task<void> TieredBackend::consider(ScanCtx& cx, const std::string& bucket, const
     const bool from_wheel = from_slot >= 0;
     auto o = local_->read(bucket, key);
     if (!o) {
-        if (from_wheel) ++cx.st.stale;  // enrolled, since deleted
+        // enrolled, since deleted
+        if (from_wheel) ++cx.st.stale;
         co_return;
     }
     ++cx.st.walked;
@@ -1098,9 +1135,11 @@ Task<void> TieredBackend::consider(ScanCtx& cx, const std::string& bucket, const
         co_return;
     }
     int64_t ca = cold_after_for(bucket, key);
-    if (ca < 0 || o->local_bytes == 0) co_return;  // pinned, or nothing to free
+    // pinned, or nothing to free
+    if (ca < 0 || o->local_bytes == 0) co_return;
     AccessRec a = access_of(bucket, key, o->mtime);
-    if (cx.now - a.atime >= ca) {  // trigger 1: coldness
+    if (cx.now - a.atime >= ca) {
+        // trigger 1: coldness
         cx.pick(*this, bucket, key);
         ++cx.st.cold_picked;
         cx.cold_freed += o->local_bytes;
@@ -1128,7 +1167,8 @@ Task<void> TieredBackend::scan_full(ScanCtx& cx) {
         for (auto& e : entries) co_await consider(cx, e.bucket, e.key, /*from_slot=*/-1);
     }
     cx.local_bytes += local_->sweep_range_cache();
-    local_bytes_est_->store(int64_t(cx.local_bytes), std::memory_order_relaxed);  // incremental-books calibration
+    // incremental-books calibration
+    local_bytes_est_->store(int64_t(cx.local_bytes), std::memory_order_relaxed);
     last_full_scan_ = cx.now;
 }
 
@@ -1155,7 +1195,8 @@ Task<void> TieredBackend::scan_incremental(ScanCtx& cx) {
         if (slot > due) break;
         fs::path aside = wheel_dir_ / ("consuming-" + path.filename().string());
         {
-            std::lock_guard lk(wheel_m_);  // no append may straddle the rename
+            // no append may straddle the rename
+            std::lock_guard lk(wheel_m_);
             fs::rename(path, aside, ec);
         }
         if (ec) continue;
@@ -1173,7 +1214,8 @@ Task<void> TieredBackend::scan_incremental(ScanCtx& cx) {
             co_await consider(cx, bucket, key, slot);
         }
         in.close();
-        fs::remove(path, ec);  // consumed: survivors were re-enrolled
+        // consumed: survivors were re-enrolled
+        fs::remove(path, ec);
     }
 }
 
@@ -1185,8 +1227,10 @@ Task<void> TieredBackend::scan_incremental(ScanCtx& cx) {
 Task<void> TieredBackend::scan_evict(ScanCtx& cx, uint64_t need) {
     struct Evict {
         std::string bucket, key;
-        int rank;      // cached / range-cache residue = 0, local = 1
-        double score;  // higher first within a rank
+        // cached / range-cache residue = 0, local = 1
+        int rank;
+        // higher first within a rank
+        double score;
         uint64_t size;
         bool rcache;
         bool operator<(const Evict& o) const {
@@ -1211,7 +1255,8 @@ Task<void> TieredBackend::scan_evict(ScanCtx& cx, uint64_t need) {
             std::string ik = make_ikey(bucket, key);
             if (cx.chosen.count(ik) || !seen.insert(ik).second) continue;
             auto o = local_->read(bucket, key);
-            if (!o || cold_after_for(bucket, key) < 0) continue;  // gone or pinned
+            // gone or pinned
+            if (!o || cold_after_for(bucket, key) < 0) continue;
             Evict c{bucket, key, 1, 0.0, o->local_bytes, false};
             if (o->tier.tier == Tier::kRemote) {
                 c.size = local_->range_cache_bytes(bucket, key);
@@ -1369,18 +1414,22 @@ Task<TierGcStats> TieredBackend::run_gc_once() {
                 std::from_chars(v.data(), v.data() + v.size(), retry_at);
         }
         if (bucket.empty() || key.empty() || etag.empty()) {
-            fs::remove(p, ec);  // corrupt entry
+            // corrupt entry
+            fs::remove(p, ec);
             ++st.resolved;
             continue;
         }
-        if (retry_at > now) {  // exponential backoff not yet due (§9), skip this round
+        if (retry_at > now) {
+            // exponential backoff not yet due (§9), skip this round
             ++st.deferred;
             continue;
         }
-        if (inflight_contains(make_ikey(bucket, key))) continue;  // demotion in flight, revisit next round
+        // demotion in flight, revisit next round
+        if (inflight_contains(make_ikey(bucket, key))) continue;
 
         auto lk = co_await key_lock(bucket, key).acquire();
-        co_await pool_->schedule();  // lock wakeup thread is indeterminate; local IO goes back to the pool
+        // lock wakeup thread is indeterminate; local IO goes back to the pool
+        co_await pool_->schedule();
         // The local record still references this cloud replica -> live reference (e.g.
         // same content re-demoted), entry invalidated
         TierInfo cur = local_->read_tier_only(bucket, key);
@@ -1401,7 +1450,8 @@ Task<TierGcStats> TieredBackend::run_gc_once() {
             ++st.resolved;
         } catch (const S3Error& e) {
             if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket) {
-                fs::remove(p, ec);  // the cloud never had it
+                // the cloud never had it
+                fs::remove(p, ec);
                 ++st.resolved;
                 continue;
             }
@@ -1595,7 +1645,8 @@ Task<bool> TieredBackend::quarantine_purge(std::string bucket, std::string key) 
     }
     if (!e) co_return false;
     auto o = local_->read(bucket, key);
-    if (!o || o->tier.tier != Tier::kRemote) {  // already rewritten/deleted by the user: nothing dead left
+    if (!o || o->tier.tier != Tier::kRemote) {
+        // already rewritten/deleted by the user: nothing dead left
         quarantine_forget(bucket, key);
         co_return false;
     }
@@ -1617,7 +1668,8 @@ Task<bool> TieredBackend::quarantine_purge(std::string bucket, std::string key) 
         "tiered: quarantine purge {}/{}: deleting dead stub (cloud copy {} is gone, "
         "data loss acknowledged by operator)",
         bucket, key, o->tier.remote_etag);
-    co_await delete_object(bucket, key);  // the GC entry it enqueues resolves as "cloud never had it"
+    // the GC entry it enqueues resolves as "cloud never had it"
+    co_await delete_object(bucket, key);
     quarantine_forget(bucket, key);
     co_return true;
 }
@@ -1627,14 +1679,16 @@ Task<bool> TieredBackend::quarantine_purge(std::string bucket, std::string key) 
 Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
     co_await pool_->schedule();
     TierReconcileStats st;
-    std::set<std::string> seen;  // quarantine findings reproduced this round
+    // quarantine findings reproduced this round
+    std::set<std::string> seen;
     std::error_code ec;
 
     // GC queue snapshot: a cloud replica already queued for deletion is not an orphan --
     // rebuilding would resurrect a just-DELETEd object (the window where the local delete
     // happened but the cloud-delete entry has not been cashed in); skip them all and let GC
     // converge
-    std::set<std::string> gc_pending;  // "bucket/key\tetag"
+    // "bucket/key\tetag"
+    std::set<std::string> gc_pending;
     for (auto& e : fs::directory_iterator(gc_dir_, ec)) {
         if (!e.is_regular_file()) continue;
         std::string b, k, t;
@@ -1657,7 +1711,8 @@ Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
         // memory -- previously both full key sets were materialized in memory (~1.5-2GB for
         // tens of millions of objects). The tier is read fresh per key
         std::deque<std::string> lkeys;
-        std::deque<std::pair<std::string, std::string>> ckeys;  // (key, unquoted etag)
+        // (key, unquoted etag)
+        std::deque<std::pair<std::string, std::string>> ckeys;
         ListOptions lopt, copt;
         lopt.max_keys = copt.max_keys = 1000;
         bool ldone = false, cdone = false;
@@ -1678,10 +1733,12 @@ Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
                     r = co_await cloud_->list_objects(bucket, copt);
                 } catch (const S3Error& e) {
                     if (e.code == S3ErrorCode::NoSuchBucket) {
-                        cdone = true;  // no such bucket in the cloud = never demoted, empty set
+                        // no such bucket in the cloud = never demoted, empty set
+                        cdone = true;
                         co_return;
                     }
-                    throw;  // cloud unreachable: this round fails, the scheduler retries next round
+                    // cloud unreachable: this round fails, the scheduler retries next round
+                    throw;
                 }
                 for (auto& o : r.objects) ckeys.emplace_back(o.key, std::string(strip_etag_quotes(o.etag)));
                 if (!r.is_truncated || r.next_token.empty())
@@ -1715,7 +1772,8 @@ Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
                         ++st.orphans_skipped;
                         co_await reconcile_ref_missing(bucket, key, t, st, seen);
                     }
-                    continue;  // association healthy
+                    // association healthy
+                    continue;
                 }
                 // Local is back at the local tier (a stale replica GC lost track of): the
                 // full data is on hand locally, so deletion is always safe
@@ -1727,7 +1785,8 @@ Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
                 ckeys.pop_front();
                 ++st.cloud_objects;
                 if (gc_pending.count(make_ikey(bucket, key) + "\t" + ce)) continue;
-                if (inflight_contains(make_ikey(bucket, key))) continue;  // demotion in flight
+                // demotion in flight
+                if (inflight_contains(make_ikey(bucket, key))) continue;
                 co_await reconcile_orphan(bucket, key, ce, /*local_is_live=*/false, st, seen);
             } else {
                 // Local has it, cloud does not: missing remote/cached reference candidate
@@ -1752,7 +1811,8 @@ Task<TierReconcileStats> TieredBackend::run_reconcile_once() {
 // reconciliation) before deciding the warning level
 Task<void> TieredBackend::reconcile_ref_missing(std::string bucket, std::string key, TierInfo t, TierReconcileStats& st,
                                                 std::set<std::string>& seen) {
-    if (inflight_contains(make_ikey(bucket, key))) co_return;  // demotion/fill intermediate state
+    // demotion/fill intermediate state
+    if (inflight_contains(make_ikey(bucket, key))) co_return;
     bool present = false;
     try {
         auto cm = co_await cloud_->head_object(bucket, key);
@@ -1784,7 +1844,8 @@ Task<void> TieredBackend::reconcile_ref_missing(std::string bucket, std::string 
 Task<void> TieredBackend::reconcile_orphan(std::string bucket, std::string key, std::string cloud_etag,
                                            bool local_is_live, TierReconcileStats& st, std::set<std::string>& seen) {
     auto lk = co_await key_lock(bucket, key).acquire();
-    co_await pool_->schedule();  // lock wakeup thread is indeterminate; inside the lock is synchronous IO
+    // lock wakeup thread is indeterminate; inside the lock is synchronous IO
+    co_await pool_->schedule();
     // Re-verify local state under the lock: a PUT/demotion/DELETE may have happened during
     // the listing; if the state changed, step aside and do not adjudicate
     auto o = local_->read(bucket, key);
@@ -1793,7 +1854,8 @@ Task<void> TieredBackend::reconcile_orphan(std::string bucket, std::string key, 
 
     try {
         auto cm = co_await cloud_->head_object(bucket, key);
-        if (std::string(strip_etag_quotes(cm.etag)) != cloud_etag) co_return;  // cloud already rewritten
+        // cloud already rewritten
+        if (std::string(strip_etag_quotes(cm.etag)) != cloud_etag) co_return;
         if (local_is_live || cfg_.reconcile_delete_orphans) {
             // Deleting a stale replica whose local tier is `local` is always safe (full
             // data on hand); pure-orphan deletion follows configuration
@@ -1836,8 +1898,8 @@ Task<void> TieredBackend::reconcile_orphan(std::string bucket, std::string key, 
         ++st.stubs_rebuilt;
         LOG_INFO("tiered reconcile: rebuilt stub {}/{} from cloud redundant headers", bucket, key);
     } catch (const S3Error& e) {
-        if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket)
-            co_return;  // gone by re-verification: someone else finished handling it
+        // gone by re-verification: someone else finished handling it
+        if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket) co_return;
         // A single-object failure is only skipped (cloud errors from head/delete); the
         // round continues. Transient by nature: not quarantined
         ++st.orphans_skipped;
@@ -1882,7 +1944,8 @@ bool TieredBackend::inflight_contains(const std::string& ikey) {
 
 void TieredBackend::note_local_delta(int64_t delta) {
     int64_t est = local_bytes_est_->load(std::memory_order_relaxed);
-    if (est < 0) return;  // no bookkeeping before the first scan calibrates (avoids negative books)
+    // no bookkeeping before the first scan calibrates (avoids negative books)
+    if (est < 0) return;
     local_bytes_est_->fetch_add(delta, std::memory_order_relaxed);
 }
 
@@ -1890,7 +1953,8 @@ void TieredBackend::maybe_kick_quota_scan() {
     if (cfg_.quota_bytes == 0) return;
     int64_t est = local_bytes_est_->load(std::memory_order_relaxed);
     if (est < 0 || double(est) <= cfg_.space_high_watermark * double(cfg_.quota_bytes)) return;
-    if (quota_kick_inflight_.exchange(true)) return;  // an early round is already in flight
+    // an early round is already in flight
+    if (quota_kick_inflight_.exchange(true)) return;
     bool spawned = bg_.spawn([](TieredBackend* self) -> Task<void> {
         struct Clear {
             std::atomic<bool>& f;
@@ -1899,7 +1963,8 @@ void TieredBackend::maybe_kick_quota_scan() {
         LOG_INFO("tiered: quota estimate above high watermark, starting early scan");
         co_await self->scan_and_gc();
     }(this));
-    if (!spawned) quota_kick_inflight_.store(false);  // shutting down
+    // shutting down
+    if (!spawned) quota_kick_inflight_.store(false);
 }
 
 // ---------- Background task management (core/background.h wait group) ----------
@@ -1968,7 +2033,8 @@ Task<void> TieredBackend::close() {
     bg_.wait_idle();
     co_await pool_->schedule();
     flush_access_sync();
-    co_await local_->close();  // flushes the local side's tables, cancels its own timers
+    // flushes the local side's tables, cancels its own timers
+    co_await local_->close();
     co_return;
 }
 

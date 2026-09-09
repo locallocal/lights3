@@ -17,8 +17,9 @@ ThreadPool::ThreadPool(size_t threads, size_t queue_capacity) : capacity_(queue_
 ThreadPool::~ThreadPool() { join(); }
 
 void ThreadPool::post(std::function<void()> fn) {
-    auto now = Clock::now();  // read the clock outside the lock: the enqueue side should not bring clock reads into the
-                              // critical section either
+    // read the clock outside the lock: the enqueue side should not bring clock reads into the
+    // critical section either
+    auto now = Clock::now();
     bool queued = false;
     {
         std::lock_guard lk(m_);
@@ -28,8 +29,9 @@ void ThreadPool::post(std::function<void()> fn) {
         }
     }
     if (queued) {
-        cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately
-                           // collide with the lock
+        // notify outside the lock: notifying while holding it makes the woken thread immediately
+        // collide with the lock
+        cv_.notify_one();
         return;
     }
     // Continuation delivery after join must not fail: the consumers
@@ -42,7 +44,8 @@ void ThreadPool::post(std::function<void()> fn) {
 }
 
 void ThreadPool::enqueue_bounded(std::function<void()> fn) {
-    auto now = Clock::now();  // same as post: clock reads stay out of the critical section
+    // same as post: clock reads stay out of the critical section
+    auto now = Clock::now();
     {
         std::lock_guard lk(m_);
         if (stopping_) throw std::runtime_error("ThreadPool: schedule after join");
@@ -93,7 +96,8 @@ void ThreadPool::worker_loop() {
         {
             std::unique_lock lk(m_);
             cv_.wait(lk, [&] { return stopping_ || !cont_queue_.empty() || !queue_.empty() || !backlog_.empty(); });
-            if (cont_queue_.empty() && queue_.empty() && backlog_.empty()) return;  // stopping and fully drained
+            // stopping and fully drained
+            if (cont_queue_.empty() && queue_.empty() && backlog_.empty()) return;
             // Continuations first (§4): they are existing work that already yielded
             // the thread; queuing them behind new blocking tasks would turn
             // "suspend-resume" into "suspend-wait-in-a-long-line"
@@ -169,7 +173,8 @@ bool ThreadPool::ScheduleAwaiter::suspend_impl(std::coroutine_handle<> h) {
     // covers the cancelled-before-registration race
     if (tok.cancelled() && !s->claimed.exchange(true, std::memory_order_acq_rel)) {
         s->cancelled = true;
-        return false;  // do not suspend; await_resume throws in place
+        // do not suspend; await_resume throws in place
+        return false;
     }
     try {
         p.enqueue_bounded([s] {
@@ -180,7 +185,8 @@ bool ThreadPool::ScheduleAwaiter::suspend_impl(std::coroutine_handle<> h) {
         // the cancel callback; if the cancel callback already claimed it, it will
         // resume, so treat this as suspended
         if (s->claimed.exchange(true, std::memory_order_acq_rel)) return true;
-        throw;  // await_suspend throws -> the coroutine did not suspend, and the exception surfaces at the co_await
+        // await_suspend throws -> the coroutine did not suspend, and the exception surfaces at the co_await
+        throw;
     }
     return true;
 }

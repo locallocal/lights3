@@ -104,7 +104,8 @@ inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const Part
         md5s.push_back(sit->second.etag);
         selected.insert(pi.part_no);
         rec.meta.size += sit->second.size;
-        rec.meta.part_sizes.push_back(sit->second.size);  // GET ?partNumber layout (§2.5)
+        // GET ?partNumber layout (§2.5)
+        rec.meta.part_sizes.push_back(sit->second.size);
         digests.push_back({sit->second.checksum_algorithm, sit->second.checksum_value});
         const auto& ex = sit->second.data.extents;
         rec.data.extents.insert(rec.data.extents.end(), ex.begin(), ex.end());
@@ -134,8 +135,10 @@ inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const Part
 // unaffected, so this helper serves only the refs side; kPack extents never enter
 // refs and are filtered out here as well.
 struct RefsDelta {
-    DataRef added;    // extents needing a refs Put
-    DataRef removed;  // extents needing a refs Delete
+    // extents needing a refs Put
+    DataRef added;
+    // extents needing a refs Delete
+    DataRef removed;
 };
 
 inline RefsDelta refs_delta(const DataRef& from, const DataRef& to) {

@@ -307,7 +307,8 @@ private:
             }
             req.set_primary_lock(primary_);
             req.set_start_version(start_ts_);
-            req.set_lock_ttl(lock_ttl_);  // scales with transaction size (txn_lock_ttl, §6.3)
+            // scales with transaction size (txn_lock_ttl, §6.3)
+            req.set_lock_ttl(lock_ttl_);
             req.set_txn_size(keys_.size());
             req.set_min_commit_ts(start_ts_ + 1);
 
@@ -327,7 +328,8 @@ private:
                 if (err.has_already_exist()) throw TikvAlreadyExist{err.already_exist().key()};
                 if (err.has_conflict()) throw TikvConflict{err.conflict().ShortDebugString()};
                 if (!err.retryable().empty()) throw TikvConflict{err.retryable()};
-                auto lock = pingcap::kv::extractLockFromKeyErr(err);  // throws internally on unknown errors
+                // throws internally on unknown errors
+                auto lock = pingcap::kv::extractLockFromKeyErr(err);
                 // A live lock held by a newer optimistic txn = the condition under which
                 // resolveLocksForWrite must throw (upstream expresses it as a bare
                 // Exception("write conflict"); LockResolver.cc carries its own TODO) — classify
@@ -396,11 +398,13 @@ private:
                 // commit_ts_ frozen by the primary (upstream refetches the TSO for secondaries
                 // too, which forks primary/secondary commit_ts — a test-grade defect of theirs; not followed)
                 if (primary_phase) commit_ts_ = cluster_->pd_client->getTS();
-                return false;  // hand back to the caller's work stack to re-resolve routing and redo
+                // hand back to the caller's work stack to re-resolve routing and redo
+                return false;
             }
             if (!resp.has_error()) return true;
             if (primary_phase && resp.error().has_commit_ts_expired() && ts_refresh < kMaxTsRefresh) {
-                commit_ts_ = cluster_->pd_client->getTS();  // the TSO fetch's own latency acts as throttling
+                // the TSO fetch's own latency acts as throttling
+                commit_ts_ = cluster_->pd_client->getTS();
                 continue;
             }
             throw TikvConflict{resp.error().ShortDebugString()};
@@ -440,7 +444,8 @@ private:
 
 struct TikvClient::Impl {
     std::unique_ptr<Cluster> cluster;
-    pingcap::ClusterConfig cluster_cfg;  // the direct safepoint channel reuses the same TLS config
+    // the direct safepoint channel reuses the same TLS config
+    pingcap::ClusterConfig cluster_cfg;
     int backoff_budget_ms = 0;
 
     // ---- Direct PD-leader stub for GC safepoint (§7.3) ----
@@ -457,7 +462,8 @@ struct TikvClient::Impl {
         std::lock_guard lk(pd_mu);
         std::string url = cluster->pd_client->getLeaderUrl();
         if (!pd_stub || url != pd_url) {
-            Poco::URI uri(url);  // the leader URL looks like http(s)://host:port; grpc only needs the authority
+            // the leader URL looks like http(s)://host:port; grpc only needs the authority
+            Poco::URI uri(url);
             auto creds = cluster_cfg.hasTlsConfig() ? grpc::SslCredentials(cluster_cfg.getGrpcCredentials())
                                                     : grpc::InsecureChannelCredentials();
             pd_stub = ::pdpb::PD::NewStub(grpc::CreateChannel(uri.getAuthority(), creds));
@@ -473,7 +479,8 @@ struct TikvClient::Impl {
                 std::string(what) + " failed: " + std::to_string(st.error_code()) + ": " + st.error_message(),
                 pingcap::ErrorCodes::GRPCErrorCode);
         }
-        if (resp.header().has_error()) {  // PD-level errors such as not-leader
+        if (resp.header().has_error()) {
+            // PD-level errors such as not-leader
             pd_stub.reset();
             throw Exception(std::string(what) + " rejected: " + resp.header().error().message(),
                             pingcap::ErrorCodes::UnknownError);
@@ -482,14 +489,16 @@ struct TikvClient::Impl {
     }
 
     ::pdpb::RequestHeader* pd_header() {
-        auto* h = new ::pdpb::RequestHeader();  // set_allocated_* takes ownership
+        // set_allocated_* takes ownership
+        auto* h = new ::pdpb::RequestHeader();
         h->set_cluster_id(cluster->pd_client->getClusterID());
         return h;
     }
 };
 
 TikvClient::TikvClient(const TikvOptions& opt) : impl_(std::make_unique<Impl>()) {
-    bridge_poco_logs_once();  // before the first pingcap logger is created (see the comment at the bridge definition)
+    // before the first pingcap logger is created (see the comment at the bridge definition)
+    bridge_poco_logs_once();
     pingcap::ClusterConfig cfg;
     cfg.ca_path = opt.ca_path;
     cfg.cert_path = opt.cert_path;
@@ -507,7 +516,8 @@ uint64_t TikvClient::get_ts() { return impl_->cluster->pd_client->getTS(); }
 std::optional<std::string> TikvClient::get(uint64_t version, const std::string& key) {
     pingcap::kv::Snapshot snap(impl_->cluster.get(), version);
     std::string v = snap.Get(key);
-    if (v.empty()) return std::nullopt;  // codec values are never empty; an empty string means absent (§3.1)
+    // codec values are never empty; an empty string means absent (§3.1)
+    if (v.empty()) return std::nullopt;
     return v;
 }
 
@@ -544,7 +554,8 @@ std::vector<std::optional<std::string>> TikvClient::batch_get(uint64_t version, 
             try {
                 rc.sendReqToRegion<pingcap::kv::RPC_NAME(KvBatchGet)>(bo, req, &resp);
             } catch (Exception& e) {
-                bo.backoff(pingcap::kv::boRegionMiss, e);  // region changed: regroup next round
+                // region changed: regroup next round
+                bo.backoff(pingcap::kv::boRegionMiss, e);
                 retry.insert(retry.end(), group_keys.begin(), group_keys.end());
                 continue;
             }
@@ -591,7 +602,8 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
     using pingcap::kv::KeyLocation;
     using pingcap::kv::LockPtr;
     Backoffer bo(impl_->backoff_budget_ms > 0 ? impl_->backoff_budget_ms : pingcap::kv::scanMaxBackoff);
-    for (;;) {  // outer loop: restart from scratch when the region topology changes
+    for (;;) {
+        // outer loop: restart from scratch when the region topology changes
         // Walk forward collecting the regions covering [lo, hi) (mostly cache hits, zero data
         // transfer), then reverse-scan limit=1 region by region from the tail — sidestepping
         // "locate the predecessor region by upper bound", a primitive client-c does not provide
@@ -609,9 +621,11 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
             // Intersection with [lo, hi) (an empty start_key = start of the keyspace, always < lo)
             std::string r_hi = (it->end_key.empty() || it->end_key >= hi) ? hi : it->end_key;
             std::string r_lo = it->start_key < lo ? lo : it->start_key;
-            for (;;) {  // lock-resolution retry for this region
+            for (;;) {
+                // lock-resolution retry for this region
                 ::kvrpcpb::ScanRequest req;
-                req.set_start_key(r_hi);  // reverse: scan [end_key, start_key) descending
+                // reverse: scan [end_key, start_key) descending
+                req.set_start_key(r_hi);
                 req.set_end_key(r_lo);
                 req.set_limit(1);
                 req.set_version(version);
@@ -635,7 +649,8 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
                                                Exception("last_key blocked by lock", pingcap::ErrorCodes::LockError));
                     continue;
                 }
-                if (resp.pairs_size() == 0) break;  // no key in this region's intersection; try the previous region
+                // no key in this region's intersection; try the previous region
+                if (resp.pairs_size() == 0) break;
                 const auto& pair = resp.pairs(0);
                 if (pair.has_error()) {
                     // Tail key locked (possibly an uncommitted insert): resolve, then rescan this region

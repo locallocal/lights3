@@ -30,11 +30,15 @@ public:
     static constexpr std::array<double, kWaitBuckets - 1> kWaitBucketBounds{0.001, 0.01, 0.1, 1.0};
 
     struct Stats {
-        size_t queue_depth = 0;  // ready queue length
-        size_t backlogged = 0;   // schedule tasks held on the wait list by backpressure when the queue is full
-        uint64_t completed = 0;  // tasks fully executed
+        // ready queue length
+        size_t queue_depth = 0;
+        // schedule tasks held on the wait list by backpressure when the queue is full
+        size_t backlogged = 0;
+        // tasks fully executed
+        uint64_t completed = 0;
         std::array<uint64_t, kWaitBuckets> wait_hist{};
-        uint64_t wait_sum_us = 0;  // cumulative wait time (microseconds), the histogram's _sum
+        // cumulative wait time (microseconds), the histogram's _sum
+        uint64_t wait_sum_us = 0;
     };
 
     explicit ThreadPool(size_t threads, size_t queue_capacity = 4096);
@@ -45,7 +49,8 @@ public:
     // wait; calling after join does not throw (noexcept consumers) — instead it logs
     // ERROR and runs in place on the calling thread
     void post(std::function<void()> fn);
-    void join();  // stop accepting new tasks, drain the queue, and wait for threads to exit
+    // stop accepting new tasks, drain the queue, and wait for threads to exit
+    void join();
     size_t size() const { return workers_.size(); }
     Stats stats() const;
 
@@ -57,7 +62,8 @@ public:
         struct Slot {
             std::coroutine_handle<> h;
             std::atomic<bool> claimed{false};
-            bool cancelled = false;  // written only by the successful claimer, read on the same thread after resume
+            // written only by the successful claimer, read on the same thread after resume
+            bool cancelled = false;
             // Deregistration info for the cancel callback: reg_id is written by
             // on_cancel_publish inside the registration critical section
             std::atomic<uint64_t> reg_id{0};
@@ -114,8 +120,10 @@ private:
     // shared 4096 queue a continuation would queue behind 4096 IOs under pressure.
     // Workers always drain the continuation queue first — continuations are existing
     // work that already yielded the thread, hence naturally higher priority
-    std::deque<Item> cont_queue_;  // post: unbounded
-    std::deque<Item> queue_;       // schedule: bounded by capacity_
+    // post: unbounded
+    std::deque<Item> cont_queue_;
+    // schedule: bounded by capacity_
+    std::deque<Item> queue_;
     std::deque<Item> backlog_;
     size_t capacity_;
     // Lock-free per-task accounting (docs/archive/gaps.md §4: completed_ taking a lock per

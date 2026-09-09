@@ -30,10 +30,12 @@ std::pair<uint64_t, uint64_t> resolve_range(const ByteRange& r, uint64_t size);
 struct ObjectMeta {
     std::string key;
     uint64_t size = 0;
-    std::string etag;  // hex without quotes
+    // hex without quotes
+    std::string etag;
     std::string content_type = "binary/octet-stream";
     std::chrono::system_clock::time_point last_modified;
-    std::map<std::string, std::string> user_meta;  // x-amz-meta-* kv pairs with the prefix stripped
+    // x-amz-meta-* kv pairs with the prefix stripped
+    std::map<std::string, std::string> user_meta;
 
     // First-class S3 object metadata (docs/archive/gaps.md §5.2): previously all dropped on PUT and
     // never returned on GET. Dropping content_encoding=gzip leaves browsers with a byte
@@ -43,7 +45,8 @@ struct ObjectMeta {
     std::string content_disposition;
     std::string content_encoding;
     std::string content_language;
-    std::string expires;  // HTTP-date text stored verbatim
+    // HTTP-date text stored verbatim
+    std::string expires;
     // Website redirect (docs/static-website.md phase ③): echoed as a header on GET/HEAD
     // like the fields above; the anonymous website plane additionally answers 301 with
     // it as Location. Value must start with '/', 'http://' or 'https://' (checked at PUT)
@@ -101,8 +104,10 @@ std::vector<uint64_t> parse_part_sizes(std::string_view s);
 // serialization all iterate this table -- adding a field only touches this spot, avoiding
 // the half-done "stored but never returned" state
 struct StdMetaField {
-    const char* header;     // S3 request/response header name
-    const char* store_key;  // key name used for backend persistence
+    // S3 request/response header name
+    const char* header;
+    // key name used for backend persistence
+    const char* store_key;
     std::string ObjectMeta::* field;
     // false = persisted/extracted via the table but not echoed as a response header
     // (tagging answers via x-amz-tagging-count / ?tagging instead)
@@ -119,9 +124,12 @@ inline constexpr StdMetaField kStdMetaFields[] = {
 };
 
 struct ObjectStream {
-    ObjectMeta meta;                         // size is the full object length
-    std::unique_ptr<http::BodyReader> body;  // already trimmed to the range
-    std::optional<ByteRange> range;          // the effective range (suffix resolved / clamped)
+    // size is the full object length
+    ObjectMeta meta;
+    // already trimmed to the range
+    std::unique_ptr<http::BodyReader> body;
+    // the effective range (suffix resolved / clamped)
+    std::optional<ByteRange> range;
 };
 
 // Object layout for operators (roadmap §6.2, `lights3-ctl object inspect` via
@@ -130,14 +138,18 @@ struct ObjectStream {
 // pieces (a file, pack/chunk records, rados objects). Engines without an internal
 // layout worth showing (memory, cloudproxy) answer nullopt
 struct ObjectLayout {
-    std::string engine;  // "localfs" "xlocalfs" "duostore" "tiered"
+    // "localfs" "xlocalfs" "duostore" "tiered"
+    std::string engine;
     std::vector<std::pair<std::string, std::string>> attrs;
     struct Extent {
-        std::string kind;  // "file" | "chunk" | "pack" | "rados"
-        uint64_t id = 0;   // inode / chunk or pack file id / rados object id
+        // "file" | "chunk" | "pack" | "rados"
+        std::string kind;
+        // inode / chunk or pack file id / rados object id
+        uint64_t id = 0;
         uint64_t offset = 0;
         uint64_t length = 0;
-        uint32_t crc32c = 0;  // 0 = engine keeps no per-extent checksum
+        // 0 = engine keeps no per-extent checksum
+        uint32_t crc32c = 0;
     };
     std::vector<Extent> extents;
 };
@@ -169,9 +181,11 @@ struct PutCondition {
 
 struct ListOptions {
     std::string prefix;
-    std::string delimiter;  // arbitrary string ("" = no grouping); grouping is a generic substring find
+    // arbitrary string ("" = no grouping); grouping is a generic substring find
+    std::string delimiter;
     int max_keys = 1000;
-    std::string start_after;  // continuation-token / start-after (a key value)
+    // continuation-token / start-after (a key value)
+    std::string start_after;
 };
 
 struct ListResult {
@@ -189,20 +203,25 @@ struct BucketInfo {
 // One entry of a CompleteMultipartUpload request: part number and ETag declared by the client
 struct PartInfo {
     int part_no = 0;
-    std::string etag;  // may be quoted; quotes are stripped before comparison
+    // may be quoted; quotes are stripped before comparison
+    std::string etag;
     // Optional client-declared part checksum from the complete XML (roadmap §2.2):
     // validated at L2 against the stored per-part value; never trusted as a source
     std::string checksum_algorithm;
-    std::string checksum_value;  // base64
+    // base64
+    std::string checksum_value;
 };
 
 // Client-declared, gateway-verified checksum accompanying an UploadPart body
 // (roadmap §2.2): persisted with the part record so complete can compute the
 // composite ("-N") object checksum from verified values only
 struct PartChecksum {
-    std::string algorithm;                       // uppercase wire name: CRC32 / CRC32C / SHA1 / SHA256
-    std::string value;                           // base64; empty for trailer-form uploads until the body drains
-    std::shared_ptr<const std::string> pending;  // trailer capture slot (see ObjectMeta)
+    // uppercase wire name: CRC32 / CRC32C / SHA1 / SHA256
+    std::string algorithm;
+    // base64; empty for trailer-form uploads until the body drains
+    std::string value;
+    // trailer capture slot (see ObjectMeta)
+    std::shared_ptr<const std::string> pending;
     std::string resolved() const {
         if (!value.empty()) return value;
         return pending ? *pending : std::string();
@@ -217,7 +236,8 @@ struct PartMeta {
     std::chrono::system_clock::time_point last_modified;
     // Verified checksum recorded at upload time; empty = the part carried none
     std::string checksum_algorithm;
-    std::string checksum_value;  // base64
+    // base64
+    std::string checksum_value;
 };
 
 // ListMultipartUploads result entry
@@ -233,17 +253,21 @@ struct UploadInfo {
 // while a single request built the whole table in memory
 struct ListPartsOptions {
     int max_parts = 1000;
-    int part_number_marker = 0;  // only return parts with part_no > this value (0 = from the start)
+    // only return parts with part_no > this value (0 = from the start)
+    int part_number_marker = 0;
 };
 struct ListPartsResult {
-    std::vector<PartMeta> parts;  // ascending by part_no
+    // ascending by part_no
+    std::vector<PartMeta> parts;
     bool is_truncated = false;
-    int next_part_number_marker = 0;  // meaningful only when is_truncated
+    // meaningful only when is_truncated
+    int next_part_number_marker = 0;
 };
 
 struct ListUploadsOptions {
     std::string prefix;
-    std::string delimiter;  // arbitrary string ("" = no grouping), same semantics as ListOptions
+    // arbitrary string ("" = no grouping), same semantics as ListOptions
+    std::string delimiter;
     int max_uploads = 1000;
     // (key_marker, upload_id_marker) form a composite cursor: only entries strictly greater
     // than the pair are returned. An empty upload_id_marker means "key > key_marker"
@@ -251,7 +275,8 @@ struct ListUploadsOptions {
     std::string upload_id_marker;
 };
 struct ListUploadsResult {
-    std::vector<UploadInfo> uploads;  // ascending by (key, upload_id)
+    // ascending by (key, upload_id)
+    std::vector<UploadInfo> uploads;
     std::vector<std::string> common_prefixes;
     bool is_truncated = false;
     std::string next_key_marker;
@@ -261,7 +286,8 @@ struct ListUploadsResult {
 struct IStorageBackend {
     // ---- bucket ----
     virtual Task<void> create_bucket(std::string_view bucket) = 0;
-    virtual Task<void> delete_bucket(std::string_view bucket) = 0;  // must be empty
+    // must be empty
+    virtual Task<void> delete_bucket(std::string_view bucket) = 0;
     virtual Task<bool> bucket_exists(std::string_view bucket) = 0;
     virtual Task<std::vector<BucketInfo>> list_buckets() = 0;
 
@@ -316,7 +342,8 @@ struct IStorageBackend {
         throw s3::S3Error(s3::S3ErrorCode::NotImplemented,
                           "In-place object tag modification is not implemented for this "
                           "storage backend; set x-amz-tagging when writing the object.");
-        co_return;  // unreachable; keeps this a coroutine
+        // unreachable; keeps this a coroutine
+        co_return;
     }
 
     // S3 semantics: also return success for a non-existent key (idempotent delete)

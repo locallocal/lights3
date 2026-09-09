@@ -342,7 +342,8 @@ TEST(quota_multipart_mid_flight_semantics) {
                            "</ETag></Part></CompleteMultipartUpload>";
     auto done = env.as_root("POST", "/bkt/mp", {{"uploadId", id}}, complete);
     CHECK_EQ(done.status, 403);
-    CHECK_EQ(env.as_root("GET", "/bkt/mp", {{"uploadId", id}}).status, 200);  // still listable
+    // still listable
+    CHECK_EQ(env.as_root("GET", "/bkt/mp", {{"uploadId", id}}).status, 200);
     CHECK_EQ(env.usage_of("bkt").mpu_bytes, int64_t(8));
     // Once a bucket is full, new uploads are refused up front
     CHECK_EQ(env.as_root("POST", "/bkt/other", {{"uploads", ""}}).status, 403);
@@ -399,7 +400,8 @@ TEST(tenant_isolation_on_the_data_plane) {
              std::string("NoSuchTenant"));
     auto c1 = env.mint(env.root, {{"tenant", "t1"}});
     auto c2 = env.mint(env.root, {{"tenant", "t2"}});
-    CHECK_EQ(env.as_root("PUT", "/legacy").status, 200);  // unowned
+    // unowned
+    CHECK_EQ(env.as_root("PUT", "/legacy").status, 200);
 
     // t1 creates a bucket -> owned by t1
     CHECK_EQ(env.call("PUT", "/bk1", c1).status, 200);
@@ -457,7 +459,8 @@ TEST(tenant_quota_aggregates_over_owned_buckets) {
     CHECK(contains(over.small_body, "tenant"));
     CHECK_EQ(env.call("PUT", "/bkt/1", c, {}, "1234").status, 200);
     CHECK_EQ(env.call("PUT", "/bkt/2", c, {}, "").status, 200);
-    CHECK_EQ(env.call("PUT", "/bkt/3", c, {}, "").status, 403);  // 4th object
+    // 4th object
+    CHECK_EQ(env.call("PUT", "/bkt/3", c, {}, "").status, 403);
     auto tj = env.admin(env.root, "GET", "/-/admin/tenants/t");
     CHECK_EQ(tj["usage"]["bytes"].get<int64_t>(), int64_t(10));
     CHECK_EQ(tj["usage"]["objects"].get<int64_t>(), int64_t(3));
@@ -522,7 +525,8 @@ TEST(tenant_admin_is_scoped_to_its_tenant) {
     CHECK_EQ(env.call("HEAD", "/theirs", a1).status, 200);
     auto detached = env.admin(env.root, "PUT", "/-/admin/credentials/" + a1.access_key, {{"tenant", nullptr}});
     CHECK(!detached.contains("tenant"));
-    CHECK_EQ(env.call("HEAD", "/own", a1).status, 200);  // legacy credential again: sees everything
+    // legacy credential again: sees everything
+    CHECK_EQ(env.call("HEAD", "/own", a1).status, 200);
 }
 
 TEST(tenant_sessions_inherit_tenant_but_never_admin) {

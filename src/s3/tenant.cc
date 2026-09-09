@@ -110,8 +110,9 @@ std::optional<Tenant> TenantRegistry::find(const std::string& id) const {
 std::vector<Tenant> TenantRegistry::list() const {
     std::vector<Tenant> out;
     auto snap = tenants_->snapshot();
+    // std::map: already sorted by id
     if (snap)
-        for (auto& [_, t] : *snap) out.push_back(t);  // std::map: already sorted by id
+        for (auto& [_, t] : *snap) out.push_back(t);
     return out;
 }
 

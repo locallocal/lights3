@@ -189,10 +189,15 @@ directories under `*SAN_OPTIONS` so findings fail, and a summary table at the
 end; `--configure` creates missing directories through `build.sh`.
 ## 9. Code formatting
 
-`make format` rewrites every git-tracked `.h` / `.cc` under `src/` and `tests/` in
-place with the repository's `.clang-format` (Google style + 4-space indent + 120
-columns; every other deviation is commented in the file); `make format-check`
-only lists the files that would change and exits 1, for pre-commit hooks and CI.
+`make format` first runs `scripts/check_comments.py --fix`, which moves every
+trailing `//` comment onto its own line above the statement (a line ending in `{`
+gets it as the first line inside the block; list elements, labels and
+preprocessor lines get it right above themselves; the closers `}  // namespace x`,
+`#endif  // X`, `// NOLINT` and `// clang-format off` stay), then rewrites every
+git-tracked `.h` / `.cc` under `src/` and `tests/` in place with the repository's
+`.clang-format` (Google style + 4-space indent + 120 columns; every other
+deviation is commented in the file); `make format-check` lists trailing comments
+and the files clang-format would change, and exits 1, for pre-commit hooks and CI.
 `CLANG_FORMAT=clang-format-23 make format` selects the binary; the Google preset
 drifts slightly between LLVM major versions, so pin one. The whole tree was
 formatted once on 2026-09-09; later PRs should carry no formatting noise.

@@ -16,12 +16,18 @@
 namespace lights3 {
 
 struct TraceContext {
-    std::string trace_id;        // 32 lowercase hex, never all zeros
-    std::string span_id;         // 16 lowercase hex: this hop's span
-    std::string parent_span_id;  // the caller's span (empty when this hop started the trace)
-    bool sampled = true;         // trace-flags bit 0
-    std::string tracestate;      // vendor state, opaque, passed through unchanged
-    bool inherited = false;      // true = trace_id came from the client
+    // 32 lowercase hex, never all zeros
+    std::string trace_id;
+    // 16 lowercase hex: this hop's span
+    std::string span_id;
+    // the caller's span (empty when this hop started the trace)
+    std::string parent_span_id;
+    // trace-flags bit 0
+    bool sampled = true;
+    // vendor state, opaque, passed through unchanged
+    std::string tracestate;
+    // true = trace_id came from the client
+    bool inherited = false;
 
     bool valid() const { return !trace_id.empty(); }
     // "00-<trace_id>-<span_id>-<flags>": the header sent to the next hop

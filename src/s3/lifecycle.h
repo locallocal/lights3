@@ -26,9 +26,12 @@ namespace lights3::s3 {
 struct LifecycleRule {
     std::string id;
     bool enabled = true;
-    std::string prefix;             // "" = whole bucket
-    int expiration_days = 0;        // 0 = no object expiration
-    int abort_incomplete_days = 0;  // 0 = no stale-MPU abort
+    // "" = whole bucket
+    std::string prefix;
+    // 0 = no object expiration
+    int expiration_days = 0;
+    // 0 = no stale-MPU abort
+    int abort_incomplete_days = 0;
 
     bool operator==(const LifecycleRule&) const = default;
 };

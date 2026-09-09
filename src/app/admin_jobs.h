@@ -34,7 +34,8 @@ struct JobOutcome {
     std::string kind;
     nlohmann::json stats;
     uint64_t findings = 0;
-    bool aborted = false;  // backend close interrupted the round (stats are partial)
+    // backend close interrupted the round (stats are partial)
+    bool aborted = false;
 };
 using FsckOutcome = JobOutcome;
 
@@ -98,21 +99,27 @@ public:
     // dropped with the backend
     void add_backend(const std::string& name, std::shared_ptr<storage::IStorageBackend> b);
     bool remove_backend(const std::string& name);
-    bool busy(const std::string& name) const;  // a job of any op is running on that backend
+    // a job of any op is running on that backend
+    bool busy(const std::string& name) const;
 
 private:
     struct Job {
         uint64_t id = 0;
         bool running = false;
         uint64_t max_mbps = 0;
-        int64_t started_ms = 0;   // unix ms
-        int64_t finished_ms = 0;  // 0 while running
-        JobOutcome outcome;       // of the last completed job
+        // unix ms
+        int64_t started_ms = 0;
+        // 0 while running
+        int64_t finished_ms = 0;
+        // of the last completed job
+        JobOutcome outcome;
         bool has_outcome = false;
-        std::string error;  // exception text if the last job threw
+        // exception text if the last job threw
+        std::string error;
         std::thread thread;
     };
-    using Slots = std::map<JobOp, Job>;  // one slot per op, at most one running per backend
+    // one slot per op, at most one running per backend
+    using Slots = std::map<JobOp, Job>;
     void finish_job(Job& j, JobOp op, JobOutcome out, std::string error);
     static const Job* running_of(const Slots& s);
 

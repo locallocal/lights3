@@ -51,7 +51,8 @@ TEST(config_parses_sample) {
 
     CHECK_EQ(cfg.auth.credentials.size(), size_t(1));
     CHECK_EQ(cfg.auth.credentials[0].access_key, "AK1");
-    CHECK_EQ(cfg.auth.credentials[0].secret_key, "sekrit");  // ${ENV} expansion
+    // ${ENV} expansion
+    CHECK_EQ(cfg.auth.credentials[0].secret_key, "sekrit");
     CHECK_EQ(cfg.auth.region, "us-west-2");
 
     CHECK_EQ(cfg.backends.size(), size_t(2));
@@ -90,7 +91,8 @@ TEST(config_website_buckets) {
         "  - bucket: site-b\n    index_suffix: home.htm\n    error_key: errors/404.html\n");
     CHECK_EQ(cfg.website.buckets.size(), size_t(2));
     CHECK_EQ(cfg.website.buckets[0].bucket, "site-a");
-    CHECK_EQ(cfg.website.buckets[0].index_suffix, "index.html");  // default
+    // default
+    CHECK_EQ(cfg.website.buckets[0].index_suffix, "index.html");
     CHECK_EQ(cfg.website.buckets[0].error_key, "");
     CHECK_EQ(cfg.website.buckets[1].bucket, "site-b");
     CHECK_EQ(cfg.website.buckets[1].index_suffix, "home.htm");
@@ -121,7 +123,8 @@ TEST(config_defaults) {
     auto cfg = Config::from_string("backends:\n  - name: m\n    type: memory\n");
     CHECK_EQ(cfg.http.driver, "builtin");
     CHECK_EQ(static_cast<int>(cfg.http.port), 9000);
-    CHECK_EQ(cfg.buckets.default_backend, "m");  // defaults to the first backend
+    // defaults to the first backend
+    CHECK_EQ(cfg.buckets.default_backend, "m");
     CHECK(cfg.auth.credentials.empty());
 }
 
@@ -146,13 +149,16 @@ bool throws(F&& fn) {
 }  // namespace
 
 TEST(parse_size_rejects_negative_and_overflow) {
-    CHECK(throws([] { parse_size("-1"); }));            // stoull wraps around to 2^64-1
-    CHECK(throws([] { parse_size("20000000000G"); }));  // << 30 wraps around
+    // stoull wraps around to 2^64-1
+    CHECK(throws([] { parse_size("-1"); }));
+    // << 30 wraps around
+    CHECK(throws([] { parse_size("20000000000G"); }));
     CHECK_EQ(parse_size("0"), size_t(0));
 }
 
 TEST(parse_duration_rejects_negative_and_overflow) {
-    CHECK(throws([] { parse_duration_sec("30000000h"); }));  // int multiplication overflow
+    // int multiplication overflow
+    CHECK(throws([] { parse_duration_sec("30000000h"); }));
     CHECK(throws([] { parse_duration_sec("-5s"); }));
     CHECK_EQ(parse_duration_sec("24h"), 86400);
     CHECK_EQ(parse_duration_sec("2d"), 172800);

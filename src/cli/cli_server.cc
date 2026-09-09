@@ -41,7 +41,8 @@ int check_config(const std::string& path) {
     // selection, ranges, compiled-in engines) and the deployment sanity warning is
     // surfaced here too (docs/archive/multi-gateway-multipart-design.md §4 ④): a
     // dry run must say what startup would say. Other backends validate lazily
-    std::map<std::string, std::string> engines;  // backend name -> "meta=… data=…"
+    // backend name -> "meta=… data=…"
+    std::map<std::string, std::string> engines;
 #ifdef LIGHTS3_DUOSTORE
     for (auto& b : cfg.backends) {
         if (b.type != "duostore") continue;

@@ -20,7 +20,8 @@ Task<int> add(int a, int b) {
 
 Task<int> boom() {
     throw std::runtime_error("boom");
-    co_return 0;  // unreachable
+    // unreachable
+    co_return 0;
 }
 
 Task<std::thread::id> on_pool(ThreadPool& pool) {
@@ -87,7 +88,8 @@ TEST(many_concurrent_tasks) {
         });
     }
     for (auto& t : threads) t.join();
-    CHECK_EQ(sum.load(), 31 * 32);  // 2 * (0+1+...+31)
+    // 2 * (0+1+...+31)
+    CHECK_EQ(sum.load(), 31 * 32);
 }
 
 // ---------- sync_wait_pumping / PumpExecutor（docs/archive/gaps.md §2.10）----------
@@ -165,7 +167,8 @@ TEST(started_collect_by_co_await_and_exception) {
     // Already-finished child: co_await must not hang and must return the value
     auto late = [&]() -> Task<int> {
         Started<int> st(child(pool, false));
-        st.wait();  // collected synchronously; a second collect is the caller's error, so restart
+        // collected synchronously; a second collect is the caller's error, so restart
+        st.wait();
         st.start(child(pool, false));
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
         co_return co_await st;
@@ -201,7 +204,8 @@ TEST(pump_executor_resume_on_inline_when_running) {
     auto t = [](PumpExecutor& e) -> Task<bool> {
         bool inside = e.running_in_this_thread();
         auto before = std::this_thread::get_id();
-        co_await resume_on(e);  // fast path: already on the pumping thread
+        // fast path: already on the pumping thread
+        co_await resume_on(e);
         co_return inside&& std::this_thread::get_id() == before;
     };
     CHECK(sync_wait_pumping(ex, t(ex)));
@@ -268,7 +272,8 @@ Task<size_t> started_chain(size_t n) {
 // drive() must run the nested chain to completion instead of queueing it behind
 // the blocked caller
 Task<size_t> nested_sync_wait(size_t n) {
-    co_await sync_child(0);  // enters the loop
+    // enters the loop
+    co_await sync_child(0);
     co_return sync_wait(deep_sync_chain(n));
 }
 

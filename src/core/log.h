@@ -26,7 +26,8 @@ public:
     static void init(const LogConfig& cfg, std::shared_ptr<spdlog::sinks::sink> sink);
     // Runtime change (config hot reload, roadmap §4.4)
     static void set_level(LogLevel lv);
-    static LogLevel parse_level(std::string_view s);  // unknown -> Info (config.cc rejects those first)
+    // unknown -> Info (config.cc rejects those first)
+    static LogLevel parse_level(std::string_view s);
     // Drains the async queue and drops the writer thread; logging keeps working
     // afterwards, synchronously, on the same sink. Idempotent
     static void shutdown();

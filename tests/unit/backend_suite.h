@@ -86,7 +86,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     meta.content_type = "text/plain";
     meta.user_meta["color"] = "red";
     auto r = put(b, "suite-bkt", "dir/a.txt", "hello world", meta);
-    CHECK_EQ(r.etag, "5eb63bbbe01eeed093cb22bb8f5acdc3");  // md5("hello world")
+    // md5("hello world")
+    CHECK_EQ(r.etag, "5eb63bbbe01eeed093cb22bb8f5acdc3");
 
     auto got = sync_wait(b.get_object("suite-bkt", "dir/a.txt", std::nullopt));
     CHECK_EQ(got.meta.size, uint64_t(11));
@@ -100,7 +101,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     if (checksum_roundtrip) {
         ObjectMeta cm;
         cm.checksum_algorithm = "CRC32";
-        cm.checksum_value = "NhCmhg==";  // crc32("hello"), base64 big-endian
+        // crc32("hello"), base64 big-endian
+        cm.checksum_value = "NhCmhg==";
         cm.checksum_type = "FULL_OBJECT";
         put(b, "suite-bkt", "ck.bin", "hello", cm);
         auto hm = sync_wait(b.head_object("suite-bkt", "ck.bin"));
@@ -113,7 +115,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         um.checksum_type = "COMPOSITE";
         auto uid = sync_wait(b.create_multipart("suite-bkt", "ckm.bin", um));
         PartChecksum c1{"CRC32", "NhCmhg==", nullptr};
-        PartChecksum c2{"CRC32", "OncRQw==", nullptr};  // crc32("world")
+        // crc32("world")
+        PartChecksum c2{"CRC32", "OncRQw==", nullptr};
         http::StringBodyReader p1("hello"), p2("world");
         auto r1 = sync_wait(b.upload_part("suite-bkt", "ckm.bin", uid, 1, p1, c1));
         auto r2 = sync_wait(b.upload_part("suite-bkt", "ckm.bin", uid, 2, p2, c2));
@@ -122,7 +125,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         CHECK_EQ(lp.parts.at(0).checksum_value, "NhCmhg==");
         std::vector<PartInfo> pis{{1, r1.etag, "", ""}, {2, r2.etag, "", ""}};
         auto cr = sync_wait(b.complete_multipart("suite-bkt", "ckm.bin", uid, pis));
-        CHECK_EQ(cr.checksum_value, "wpn7tg==-2");  // crc32(raw1 || raw2) + "-2"
+        // crc32(raw1 || raw2) + "-2"
+        CHECK_EQ(cr.checksum_value, "wpn7tg==-2");
         CHECK_EQ(cr.checksum_type, "COMPOSITE");
         auto cmm = sync_wait(b.head_object("suite-bkt", "ckm.bin"));
         CHECK_EQ(cmm.checksum_algorithm, "CRC32");
@@ -186,12 +190,15 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         PutCondition none_match;
         none_match.if_none_match = true;
         CHECK_THROWS_S3(put_if("dir/a.txt", "clobber", none_match), S3ErrorCode::PreconditionFailed);
-        auto created = put_if("cond/new.txt", "fresh", none_match);  // absent -> create
+        // absent -> create
+        auto created = put_if("cond/new.txt", "fresh", none_match);
         PutCondition match_ok;
         match_ok.if_match_etag = created.etag;
-        put_if("cond/new.txt", "fresh2", match_ok);  // etag matches -> overwrite
+        // etag matches -> overwrite
+        put_if("cond/new.txt", "fresh2", match_ok);
         PutCondition match_stale;
-        match_stale.if_match_etag = created.etag;  // overwritten by the previous step, etag is stale
+        // overwritten by the previous step, etag is stale
+        match_stale.if_match_etag = created.etag;
         CHECK_THROWS_S3(put_if("cond/new.txt", "x", match_stale), S3ErrorCode::PreconditionFailed);
         PutCondition match_absent;
         match_absent.if_match_etag = created.etag;
@@ -230,7 +237,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         lo.prefix = "folder/";
         auto lr = sync_wait(b.list_objects("suite-bkt", lo));
         CHECK_EQ(lr.objects.size(), size_t(2));
-        CHECK_EQ(lr.objects[0].key, "folder/");  // lexicographic order: the directory marker precedes its contents
+        // lexicographic order: the directory marker precedes its contents
+        CHECK_EQ(lr.objects[0].key, "folder/");
         CHECK_EQ(lr.objects[1].key, "folder/file.txt");
         sync_wait(b.delete_object("suite-bkt", "folder/file.txt"));
         sync_wait(b.delete_object("suite-bkt", "folder/"));
@@ -247,7 +255,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     auto la = sync_wait(b.list_objects("suite-bkt", all));
     CHECK_EQ(la.objects.size(), size_t(5));
     CHECK(!la.is_truncated);
-    CHECK_EQ(la.objects[0].key, "dir/a.txt");  // lexicographic order
+    // lexicographic order
+    CHECK_EQ(la.objects[0].key, "dir/a.txt");
 
     ListOptions pre;
     pre.prefix = "photos/2026/";
@@ -257,8 +266,10 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     ListOptions delim;
     delim.delimiter = "/";
     auto ld = sync_wait(b.list_objects("suite-bkt", delim));
-    CHECK_EQ(ld.objects.size(), size_t(1));          // readme.md
-    CHECK_EQ(ld.common_prefixes.size(), size_t(2));  // dir/ photos/
+    // readme.md
+    CHECK_EQ(ld.objects.size(), size_t(1));
+    // dir/ photos/
+    CHECK_EQ(ld.common_prefixes.size(), size_t(2));
     CHECK_EQ(ld.common_prefixes[0], "dir/");
     CHECK_EQ(ld.common_prefixes[1], "photos/");
 
@@ -291,10 +302,13 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         return sync_wait(b.upload_part("suite-bkt", "mp/joined.bin", id, no, body));
     };
     auto r1 = upload(uid, 1, "hello ");
-    CHECK_EQ(r1.etag, "f814893777bcc2295fff05f00e508da6");  // md5("hello ")
+    // md5("hello ")
+    CHECK_EQ(r1.etag, "f814893777bcc2295fff05f00e508da6");
     auto r2 = upload(uid, 2, "world");
-    CHECK_EQ(r2.etag, "7d793037a0760186574b0282f2f435e7");  // md5("world")
-    auto r1b = upload(uid, 1, "hello ");                    // re-upload with the same part number is last-write-wins
+    // md5("world")
+    CHECK_EQ(r2.etag, "7d793037a0760186574b0282f2f435e7");
+    // re-upload with the same part number is last-write-wins
+    auto r1b = upload(uid, 1, "hello ");
     CHECK_EQ(r1b.etag, r1.etag);
 
     // Part number out of range / unknown upload id
@@ -370,7 +384,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         auto up2 = sync_wait(b.list_multipart_uploads("suite-bkt", uo));
         CHECK_EQ(up2.uploads.size(), size_t(1));
         CHECK(!up2.is_truncated);
-        CHECK(up2.uploads[0].key != up1.uploads[0].key);  // no duplicates
+        // no duplicates
+        CHECK(up2.uploads[0].key != up1.uploads[0].key);
         // prefix filtering
         ListUploadsOptions fo;
         fo.prefix = "mp/other";
@@ -402,7 +417,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     for (auto& k :
          {"dir/a.txt", "photos/2026/a.jpg", "photos/2026/b.jpg", "photos/2027/c.jpg", "readme.md", "mp/joined.bin"})
         sync_wait(b.delete_object("suite-bkt", k));
-    sync_wait(b.delete_object("suite-bkt", "dir/a.txt"));  // deleting again does not error
+    // deleting again does not error
+    sync_wait(b.delete_object("suite-bkt", "dir/a.txt"));
     auto empty = sync_wait(b.list_objects("suite-bkt", {}));
     CHECK_EQ(empty.objects.size(), size_t(0));
     sync_wait(b.delete_bucket("suite-bkt"));

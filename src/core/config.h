@@ -18,7 +18,8 @@ struct YamlNode {
     enum class Type { Scalar, Map, List };
     Type type = Type::Scalar;
     std::string scalar;
-    std::vector<std::pair<std::string, YamlNode>> map;  // order-preserving
+    // order-preserving
+    std::vector<std::pair<std::string, YamlNode>> map;
     std::vector<YamlNode> list;
 
     // Special members out of line: the recursive pair<string, YamlNode> member
@@ -37,7 +38,8 @@ struct YamlNode {
     std::string get(const std::string& key, const std::string& def = "") const;
 };
 
-YamlNode yaml_parse(const std::string& text);  // throws std::runtime_error on syntax errors
+// throws std::runtime_error on syntax errors
+YamlNode yaml_parse(const std::string& text);
 
 // ---------- Typed configuration ----------
 // Extra certificate served by SNI (roadmap §4.1, docs/tls.md §2.3): hosts is a
@@ -67,10 +69,14 @@ struct HttpConfig {
     // [1s, 86400s]; 0 is rejected: drivers disagree on its meaning (builtin's
     // SO_RCVTIMEO 0 = never time out, beast's expires_after(0s) = expire
     // immediately), so "no timeout" is not a supported configuration
-    int idle_timeout_sec = 60;    // keep-alive: waiting for the next request on an idle connection
-    int header_timeout_sec = 30;  // a new connection's request line + header block (slowloris bound)
-    int body_timeout_sec = 60;    // inactivity bound on one request-body read (slow uploader)
-    int write_timeout_sec = 60;   // inactivity bound on one response write (slow downloader)
+    // keep-alive: waiting for the next request on an idle connection
+    int idle_timeout_sec = 60;
+    // a new connection's request line + header block (slowloris bound)
+    int header_timeout_sec = 30;
+    // inactivity bound on one request-body read (slow uploader)
+    int body_timeout_sec = 60;
+    // inactivity bound on one response write (slow downloader)
+    int write_timeout_sec = 60;
     // Requests served over one keep-alive connection before the server answers
     // Connection: close (lets load balancers re-balance long-lived connections);
     // 0 = unlimited. httplib had a hard-coded 1024 before, the other three had none
@@ -100,38 +106,53 @@ struct HttpConfig {
     // /-/metrics exposure (roadmap §5.3): anonymous (default, classic scrape) or
     // root (a statically configured credential must sign the GET). Hot-reloadable
     std::string metrics_access = "anonymous";
-    std::string base_domain;  // non-empty enables virtual-host style (docs/s3-protocol.md §2)
+    // non-empty enables virtual-host style (docs/s3-protocol.md §2)
+    std::string base_domain;
     // TLS (docs/archive/gaps.md §7): HTTPS is enabled when both cert and key are given.
     // SigV4's UNSIGNED-PAYLOAD integrity relies on transport-layer encryption, and
     // this covers the inbound direction. Only the httplib/beast drivers support it;
     // builtin/seastar error out at startup if TLS is configured — never
     // "configured but silently running plaintext"
-    std::string tls_cert;  // path to PEM certificate chain
-    std::string tls_key;   // path to PEM private key
+    // path to PEM certificate chain
+    std::string tls_cert;
+    // path to PEM private key
+    std::string tls_key;
     // TLS knobs (roadmap §4.1, docs/tls.md): all four drivers honor them (seastar
     // maps versions/client auth onto GnuTLS, see docs/tls.md §4)
-    std::string tls_client_ca;            // PEM CA bundle for client certificates (mTLS); empty = none
-    std::string tls_client_auth = "off";  // off | optional | require (the latter two need tls_client_ca)
-    std::string tls_min_version = "1.2";  // 1.2 | 1.3
-    std::string tls_ciphers;              // OpenSSL cipher list for TLS <= 1.2; empty = library default
-    std::string tls_ciphersuites;         // OpenSSL TLS 1.3 suites; empty = library default
-    int tls_reload_interval_sec = 60;     // certificate file polling period (hot reload); 0 = off
-    std::vector<TlsSniEntry> tls_sni;     // extra certificates selected by SNI
+    // PEM CA bundle for client certificates (mTLS); empty = none
+    std::string tls_client_ca;
+    // off | optional | require (the latter two need tls_client_ca)
+    std::string tls_client_auth = "off";
+    // 1.2 | 1.3
+    std::string tls_min_version = "1.2";
+    // OpenSSL cipher list for TLS <= 1.2; empty = library default
+    std::string tls_ciphers;
+    // OpenSSL TLS 1.3 suites; empty = library default
+    std::string tls_ciphersuites;
+    // certificate file polling period (hot reload); 0 = off
+    int tls_reload_interval_sec = 60;
+    // extra certificates selected by SNI
+    std::vector<TlsSniEntry> tls_sni;
     // The builtin driver is thread-per-connection, so io_threads is meaningless for
     // it; when explicitly configured, WARN at startup instead of silently ignoring
     // (docs/archive/gaps.md §7). Set by the parser
     bool io_threads_set = false;
     // ---- Shutdown/backpressure knobs (docs/archive/gaps.md §7): formerly hard-coded once per driver ----
-    uint64_t drain_limit = 4 * 1024 * 1024;  // max request body drained before returning an error
-    size_t trailer_max_size = 16 * 1024;     // chunked trailer section limit (builtin/seastar)
-    size_t io_chunk_size = 64 * 1024;        // streaming read/write chunk size
+    // max request body drained before returning an error
+    uint64_t drain_limit = 4 * 1024 * 1024;
+    // chunked trailer section limit (builtin/seastar)
+    size_t trailer_max_size = 16 * 1024;
+    // streaming read/write chunk size
+    size_t io_chunk_size = 64 * 1024;
     // sendfile(2) for file-backed fixed-length plaintext responses (roadmap §4.3 ④;
     // builtin driver; TLS / chunked / non-file bodies always take the read() path)
     bool sendfile = true;
-    size_t body_queue_cap = 256 *
-                            1024;  // push-to-pull body queue capacity (httplib only, i.e. the backpressure watermark)
-    int shutdown_grace_sec = 10;   // grace period waiting for in-flight requests on shutdown
-    int shutdown_force_wait_sec = 5;  // second wait after forced disconnect
+    // push-to-pull body queue capacity (httplib only, i.e. the backpressure watermark)
+    size_t body_queue_cap = 256 * 1024;
+    // grace period waiting for in-flight requests on shutdown
+    int shutdown_grace_sec = 10;
+    // second wait after forced disconnect
+    int shutdown_force_wait_sec = 5;
 };
 
 struct RuntimeConfig {
@@ -143,43 +164,57 @@ struct RuntimeConfig {
 // concurrency cap per source IP (decided before signature verification) and per
 // access key (after it). 0 = that limit off. Over the limit answers 503 SlowDown
 struct RateLimitConfig {
-    int per_ip_rps = 0;           // sustained requests/second per client IP
-    int per_ip_burst = 0;         // bucket size; 0 = same as rps
-    int per_ip_max_inflight = 0;  // concurrent requests per client IP
-    int per_ak_rps = 0;           // sustained requests/second per access key
+    // sustained requests/second per client IP
+    int per_ip_rps = 0;
+    // bucket size; 0 = same as rps
+    int per_ip_burst = 0;
+    // concurrent requests per client IP
+    int per_ip_max_inflight = 0;
+    // sustained requests/second per access key
+    int per_ak_rps = 0;
     int per_ak_burst = 0;
     int per_ak_max_inflight = 0;
-    int max_tracked = 10000;  // distinct keys kept per table (LRU beyond that)
+    // distinct keys kept per table (LRU beyond that)
+    int max_tracked = 10000;
 };
 
 struct Credential {
     std::string access_key;
-    util::SecretString secret_key;  // wiped on destruction (docs/archive/gaps.md §4)
+    // wiped on destruction (docs/archive/gaps.md §4)
+    util::SecretString secret_key;
 };
 
 struct AuthConfig {
-    std::vector<Credential> credentials;  // empty disables auth (for demos/tests)
+    // empty disables auth (for demos/tests)
+    std::vector<Credential> credentials;
     std::string region = "us-east-1";
     std::string service = "s3";
     // Credential management phase 2 (docs/credential-management.md §10)
-    std::string credentials_file;          // external credentials file (JSON, hot-reloaded); empty = disabled
-    int credentials_file_reload_sec = 30;  // file mtime polling period; 0 = load at startup only
-    int sync_interval_sec = 0;             // multi-instance: periodic incremental reload of .sys; 0 = disabled
+    // external credentials file (JSON, hot-reloaded); empty = disabled
+    std::string credentials_file;
+    // file mtime polling period; 0 = load at startup only
+    int credentials_file_reload_sec = 30;
+    // multi-instance: periodic incremental reload of .sys; 0 = disabled
+    int sync_interval_sec = 0;
     // mTLS identity mapping (backlog-sequence ⑥, docs/tls.md §2.1): which field of a
     // verified client certificate names the identity looked up in
     // .sys/tls-identities/. off = certificates stay transport admission only.
     // Needs http.tls_client_auth optional|require
-    std::string tls_identity = "off";  // off | subject-cn | san-uri
+    // off | subject-cn | san-uri
+    std::string tls_identity = "off";
 };
 
 struct BackendConfig {
     std::string name;
-    std::string type;                           // localfs | memory | ...
-    std::map<std::string, std::string> params;  // root/staging/endpoint/... interpreted by each backend
+    // localfs | memory | ...
+    std::string type;
+    // root/staging/endpoint/... interpreted by each backend
+    std::map<std::string, std::string> params;
 };
 
 struct BucketRule {
-    std::string match;  // glob
+    // glob
+    std::string match;
     std::string backend;
 };
 
@@ -193,11 +228,15 @@ struct BucketRule {
 struct WebsiteRoutingRule {
     // Condition
     std::string key_prefix_equals;
-    int http_error_code_equals = 0;  // 0 = unset; else matched against the error status
+    // 0 = unset; else matched against the error status
+    int http_error_code_equals = 0;
     // Redirect
-    std::string protocol;                                // "http"/"https"; "" = request scheme
-    std::string host_name;                               // "" = this gateway
-    std::optional<std::string> replace_key_prefix_with;  // exclusive with replace_key_with
+    // "http"/"https"; "" = request scheme
+    std::string protocol;
+    // "" = this gateway
+    std::string host_name;
+    // exclusive with replace_key_with
+    std::optional<std::string> replace_key_prefix_with;
     std::optional<std::string> replace_key_with;
     int http_redirect_code = 301;
 
@@ -245,32 +284,47 @@ struct BucketsConfig {
 // L2, updated at every write commit, persisted to .sys/usage/<bucket> and reconciled
 // by a periodic full listing (docs/multi-tenancy.md §2)
 struct UsageConfig {
-    bool enabled = true;                 // false = no counters, no quota enforcement (skips the pre-write HEAD)
-    int flush_interval_sec = 60;         // persist dirty counters; 0 = only at shutdown / after a scan
-    int reconcile_interval_sec = 86400;  // full re-count of every bucket; 0 = never (manual rescan only)
-    bool reconcile = true;               // false = non-designated instance in a multi-gateway setup
+    // false = no counters, no quota enforcement (skips the pre-write HEAD)
+    bool enabled = true;
+    // persist dirty counters; 0 = only at shutdown / after a scan
+    int flush_interval_sec = 60;
+    // full re-count of every bucket; 0 = never (manual rescan only)
+    int reconcile_interval_sec = 86400;
+    // false = non-designated instance in a multi-gateway setup
+    bool reconcile = true;
 };
 
 // Audit log (roadmap §3.9 ④): JSON lines to a rotating file; empty path = off
 // (control-plane events still go to the regular log at INFO)
 struct AuditConfig {
     std::string path;
-    bool data_plane = false;               // also record one line per data-plane request
-    uint64_t max_size = 64 * 1024 * 1024;  // rotate above this many bytes
-    int max_files = 10;                    // rotated files kept
+    // also record one line per data-plane request
+    bool data_plane = false;
+    // rotate above this many bytes
+    uint64_t max_size = 64 * 1024 * 1024;
+    // rotated files kept
+    int max_files = 10;
 };
 
 // Operational log (roadmap §5.2). Every knob but level / slow_request_threshold is
 // fixed at startup (the sink and the formatter are built once; docs/config-reload.md §4)
 struct LogConfig {
-    std::string level = "info";            // debug | info | warn | error (hot-reloadable)
-    std::string format = "text";           // text = one human-readable line; json = one JSON object per line
-    std::string file;                      // empty = stderr; otherwise a size-rotated file
-    uint64_t max_size = 64 * 1024 * 1024;  // rotate the file above this many bytes
-    int max_files = 10;                    // rotated files kept
-    bool async = false;                    // true = a dedicated writer thread; request threads only enqueue
-    int async_queue = 8192;                // queue capacity (records)
-    std::string async_overflow = "block";  // block = the caller waits on a full queue; drop = overwrite the oldest
+    // debug | info | warn | error (hot-reloadable)
+    std::string level = "info";
+    // text = one human-readable line; json = one JSON object per line
+    std::string format = "text";
+    // empty = stderr; otherwise a size-rotated file
+    std::string file;
+    // rotate the file above this many bytes
+    uint64_t max_size = 64 * 1024 * 1024;
+    // rotated files kept
+    int max_files = 10;
+    // true = a dedicated writer thread; request threads only enqueue
+    bool async = false;
+    // queue capacity (records)
+    int async_queue = 8192;
+    // block = the caller waits on a full queue; drop = overwrite the oldest
+    std::string async_overflow = "block";
     // Requests taking at least this long are logged at WARN with per-stage timings
     // (auth / handler / backend / TTFB / total); 0 = off (hot-reloadable)
     int slow_request_threshold_ms = 0;
@@ -298,15 +352,20 @@ struct Config {
 // file was refused (the old configuration then stays in force, untouched)
 struct ConfigReloadReport {
     bool ok = false;
-    std::string error;                          // parse/validation failure (nothing applied)
-    std::vector<std::string> applied;           // "log.level: info -> debug"
-    std::vector<std::string> requires_restart;  // "http.port" ...
+    // parse/validation failure (nothing applied)
+    std::string error;
+    // "log.level: info -> debug"
+    std::vector<std::string> applied;
+    // "http.port" ...
+    std::vector<std::string> requires_restart;
 };
 
 // Parsing helpers for values like "16KiB" / "1MB" / "60s" / "true"
 size_t parse_size(const std::string& s);
 int parse_duration_sec(const std::string& s);
-int parse_duration_ms(const std::string& s);  // same units plus "ms"; a bare number is seconds
-bool parse_bool(const std::string& s);        // true/1/yes/on | false/0/no/off; anything else throws runtime_error
+// same units plus "ms"; a bare number is seconds
+int parse_duration_ms(const std::string& s);
+// true/1/yes/on | false/0/no/off; anything else throws runtime_error
+bool parse_bool(const std::string& s);
 
 }  // namespace lights3

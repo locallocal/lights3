@@ -40,7 +40,8 @@ std::string ak_path(const std::string& ak) {
 
 std::string load_policy_arg(const std::string& arg) {
     std::string text = arg;
-    if (!arg.empty() && arg.front() == '@') {  // @file: curl convention
+    if (!arg.empty() && arg.front() == '@') {
+        // @file: curl convention
         std::ifstream f(arg.substr(1));
         if (!f) throw std::runtime_error("cannot read policy file: " + arg.substr(1));
         std::ostringstream ss;

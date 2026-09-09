@@ -25,20 +25,31 @@ class logger;
 namespace lights3::s3 {
 
 struct AuditEvent {
-    std::string_view event;   // e.g. "cred.create", "quota.reject", "access"
-    std::string_view actor;   // access key (empty = anonymous / auth disabled)
-    std::string_view tenant;  // actor's tenant (empty = none / root)
+    // e.g. "cred.create", "quota.reject", "access"
+    std::string_view event;
+    // access key (empty = anonymous / auth disabled)
+    std::string_view actor;
+    // actor's tenant (empty = none / root)
+    std::string_view tenant;
     std::string_view request_id;
-    std::string_view trace_id;  // W3C trace id of the request (roadmap §5.4), data plane
+    // W3C trace id of the request (roadmap §5.4), data plane
+    std::string_view trace_id;
     std::string_view bucket;
     std::string_view key;
-    std::string_view target;  // object of the action: another AK, a tenant id, ...
-    std::string_view action;  // read / write / delete for data-plane records
-    std::string_view detail;  // free text (what changed, why refused)
-    std::string_view method;  // data plane only
-    std::string_view path;    // data plane only
-    int status = 0;           // HTTP status (0 = not applicable)
-    int64_t bytes = -1;       // -1 = not applicable
+    // object of the action: another AK, a tenant id, ...
+    std::string_view target;
+    // read / write / delete for data-plane records
+    std::string_view action;
+    // free text (what changed, why refused)
+    std::string_view detail;
+    // data plane only
+    std::string_view method;
+    // data plane only
+    std::string_view path;
+    // HTTP status (0 = not applicable)
+    int status = 0;
+    // -1 = not applicable
+    int64_t bytes = -1;
 };
 
 class AuditLog {

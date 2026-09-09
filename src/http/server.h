@@ -16,14 +16,22 @@ using Handler = std::function<Task<HttpResponse>(HttpRequest)>;
 // fills what its model can observe; httplib (upstream accept loop) reports only
 // what its socket hook sees. Timeouts are attributed to the phase that expired
 struct ConnStats {
-    uint64_t accepted = 0;          // connections accepted
-    uint64_t rejected_limit = 0;    // refused by http.max_connections
-    uint64_t active = 0;            // currently open
-    uint64_t keepalive_closes = 0;  // closed after http.max_requests_per_connection
-    uint64_t timeouts_idle = 0;     // keep-alive wait expired (idle_timeout)
-    uint64_t timeouts_header = 0;   // request line / headers (header_timeout)
-    uint64_t timeouts_body = 0;     // body read (body_timeout)
-    uint64_t timeouts_write = 0;    // response write (write_timeout)
+    // connections accepted
+    uint64_t accepted = 0;
+    // refused by http.max_connections
+    uint64_t rejected_limit = 0;
+    // currently open
+    uint64_t active = 0;
+    // closed after http.max_requests_per_connection
+    uint64_t keepalive_closes = 0;
+    // keep-alive wait expired (idle_timeout)
+    uint64_t timeouts_idle = 0;
+    // request line / headers (header_timeout)
+    uint64_t timeouts_header = 0;
+    // body read (body_timeout)
+    uint64_t timeouts_body = 0;
+    // response write (write_timeout)
+    uint64_t timeouts_write = 0;
     // roadmap §5.3: requests parsed at L1 (requests / accepted = keep-alive reuse
     // factor), TLS handshake outcomes, and request-line / header / framing
     // parse failures (answered 400 or closed without a response)
@@ -36,10 +44,14 @@ struct ConnStats {
 struct IHttpServer {
     virtual void set_handler(Handler h) = 0;
     virtual void listen(const std::string& addr, uint16_t port) = 0;
-    virtual void run() = 0;                         // Blocks until shutdown
-    virtual void shutdown() = 0;                    // Thread-safe & signal-safe
-    virtual uint16_t bound_port() const = 0;        // Actual port after listen (useful when port=0)
-    virtual ConnStats stats() const { return {}; }  // Thread-safe snapshot of the counters
+    // Blocks until shutdown
+    virtual void run() = 0;
+    // Thread-safe & signal-safe
+    virtual void shutdown() = 0;
+    // Actual port after listen (useful when port=0)
+    virtual uint16_t bound_port() const = 0;
+    // Thread-safe snapshot of the counters
+    virtual ConnStats stats() const { return {}; }
     // Re-read the TLS certificate material now (config hot reload, roadmap §4.4);
     // false = no TLS listener, or the driver reloads on its own (seastar)
     virtual bool reload_tls() { return false; }

@@ -30,7 +30,8 @@ std::optional<std::string> composite_checksum(std::string_view algorithm,
 // untouched. part_checksums[i] pairs with part i of the completed list
 struct PartDigest {
     std::string algorithm;
-    std::string value;  // base64
+    // base64
+    std::string value;
 };
 void apply_composite_checksum(const std::vector<PartDigest>& parts, ObjectMeta& meta, PutResult& result);
 

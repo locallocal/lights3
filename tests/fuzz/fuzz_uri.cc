@@ -16,7 +16,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     std::string q = percent_decode_query(in);
     for (bool slash : {true, false}) {
         std::string enc = aws_uri_encode(d, slash);
-        if (percent_decode(enc) != d) std::abort();  // round trip is a hard invariant
+        // round trip is a hard invariant
+        if (percent_decode(enc) != d) std::abort();
     }
     (void)q;
     return 0;

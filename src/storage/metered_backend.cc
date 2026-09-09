@@ -98,7 +98,8 @@ Task<T> MeteredBackend::timed(const char* name, Task<T> inner) {
     // The token is inherited from the awaiting handler chain: it carries the
     // request's RequestBackendStats when dispatch attached one
     CancelToken tok = co_await current_cancel();
-    Lease lease(inflight_);  // held for the call's duration (backlog-sequence ⑦)
+    // held for the call's duration (backlog-sequence ⑦)
+    Lease lease(inflight_);
     OpMetrics& m = op(name);
     auto t0 = std::chrono::steady_clock::now();
     std::exception_ptr ep;

@@ -102,7 +102,8 @@ TEST(shutdown_drain_waits_on_the_semaphore) {
     // roadmap §4.5: the drain deadline waits on a condition variable that fires when
     // the last permit returns, instead of polling
     AsyncSemaphore sem(2);
-    CHECK(sem.wait_drained(std::chrono::milliseconds(10)));  // nothing out: immediately
+    // nothing out: immediately
+    CHECK(sem.wait_drained(std::chrono::milliseconds(10)));
     auto p = sync_wait(acquire_task(sem));
     auto t0 = std::chrono::steady_clock::now();
     CHECK(!sem.wait_drained(std::chrono::milliseconds(100)));
@@ -122,13 +123,15 @@ TEST(reload_bucket_router_table_swap) {
     BucketsConfig cfg;
     cfg.default_backend = "a";
     auto router = storage::BucketRouter::build(cfg, backends);
-    storage::BucketRouter copy = router;  // shares the table
+    // shares the table
+    storage::BucketRouter copy = router;
     CHECK_EQ(&router.resolve("logs-1"), static_cast<storage::IStorageBackend*>(a.get()));
     BucketsConfig fresh = cfg;
     fresh.rules.push_back({"logs-*", "b"});
     router.update(fresh);
     CHECK_EQ(&router.resolve("logs-1"), static_cast<storage::IStorageBackend*>(b.get()));
-    CHECK_EQ(&copy.resolve("logs-1"), static_cast<storage::IStorageBackend*>(b.get()));  // the copy sees it
+    // the copy sees it
+    CHECK_EQ(&copy.resolve("logs-1"), static_cast<storage::IStorageBackend*>(b.get()));
     CHECK_EQ(&copy.resolve("other"), static_cast<storage::IStorageBackend*>(a.get()));
     CHECK_EQ(router.rule_count(), size_t(1));
     // Refused updates leave the table untouched
@@ -192,12 +195,15 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     CHECK(has(r1.requires_restart, "http.max_connections"));
     CHECK_EQ(r1.requires_restart.size(), size_t(2));
     CHECK_EQ(app.config().log.slow_request_threshold_ms, 250);
-    CHECK_EQ(app.config().log.format, "text");  // the running value stays
+    // the running value stays
+    CHECK_EQ(app.config().log.format, "text");
     CHECK_EQ(app.config().http.request_timeout_sec, 120);
     CHECK_EQ(app.config().runtime.max_inflight_requests, 200);
     CHECK_EQ(app.config().buckets.rules.size(), size_t(1));
-    CHECK_EQ(app.config().http.max_connections, 4096);  // the running value stays
-    Logger::set_level(LogLevel::Info);                  // keep the test log readable
+    // the running value stays
+    CHECK_EQ(app.config().http.max_connections, 4096);
+    // keep the test log readable
+    Logger::set_level(LogLevel::Info);
     // A broken file is refused as a whole and the running config is untouched
     write_file(path, base_config("  request_timeout: 5s\n  idle_timeout: 0s\n"));
     auto r2 = app.reload_config();
@@ -213,7 +219,8 @@ TEST(reload_application_applies_subset_and_reports_rest) {
                                  "' applied=" + std::to_string(r3.applied.size()));
     CHECK_EQ(app.config().http.request_timeout_sec, 120);
     app.shutdown();
-    CHECK(app.shutdown_clean());  // roadmap §4.5: a clean teardown reports clean
+    // roadmap §4.5: a clean teardown reports clean
+    CHECK(app.shutdown_clean());
     std::filesystem::remove(path);
 }
 
@@ -235,10 +242,12 @@ TEST(application_admin_listener_bound_and_restart_only) {
     CHECK(r1.ok);
     CHECK(has(r1.requires_restart, "http.admin_bind/admin_port"));
     CHECK_EQ(r1.requires_restart.size(), size_t(1));
-    write_file(path, base_config(""));  // dropping the listener is restart-only too
+    // dropping the listener is restart-only too
+    write_file(path, base_config(""));
     auto r2 = app.reload_config();
     CHECK(has(r2.requires_restart, "http.admin_bind/admin_port"));
-    CHECK(app.admin_bound_port() != 0);  // still bound: nothing was applied
+    // still bound: nothing was applied
+    CHECK(app.admin_bound_port() != 0);
     app.shutdown();
     CHECK(app.shutdown_clean());
 
@@ -316,7 +325,8 @@ TEST(reload_bucket_router_backend_set_swap) {
     cfg.default_backend = "a";
     auto router = storage::BucketRouter::build(cfg, {{"a", a}, {"b", b}});
     storage::BucketRouter copy = router;
-    auto before = router.backends();  // snapshot taken before the swap
+    // snapshot taken before the swap
+    auto before = router.backends();
     BucketsConfig fresh = cfg;
     fresh.rules.push_back({"c-*", "c"});
     // A rule naming c without c in the set is refused
@@ -327,12 +337,14 @@ TEST(reload_bucket_router_backend_set_swap) {
         threw = contains(e.what(), "unknown backend");
     }
     CHECK(threw);
-    router.update(fresh, {{"a", a}, {"c", c}});  // b dropped, c added, rule routes to it
+    // b dropped, c added, rule routes to it
+    router.update(fresh, {{"a", a}, {"c", c}});
     CHECK_EQ(&copy.resolve("c-1"), static_cast<storage::IStorageBackend*>(c.get()));
     CHECK_EQ(&copy.resolve("other"), static_cast<storage::IStorageBackend*>(a.get()));
     CHECK_EQ(router.backends()->size(), size_t(2));
     CHECK(router.backends()->count("c") == 1 && router.backends()->count("b") == 0);
-    CHECK_EQ(before->size(), size_t(2));  // the old snapshot is untouched
+    // the old snapshot is untouched
+    CHECK_EQ(before->size(), size_t(2));
     CHECK(before->count("b") == 1);
     // Dropping the default backend, or swapping it for another instance, is refused
     for (auto bad :
@@ -345,7 +357,8 @@ TEST(reload_bucket_router_backend_set_swap) {
         }
         CHECK(threw);
     }
-    CHECK_EQ(router.backends()->size(), size_t(2));  // still the previous set
+    // still the previous set
+    CHECK_EQ(router.backends()->size(), size_t(2));
 }
 
 // The metered decorator counts calls in progress and open get_object streams;
@@ -355,11 +368,13 @@ TEST(metered_backend_inflight_leases) {
     auto m = std::make_shared<storage::MeteredBackend>("m", inner, nullptr);
     sync_wait(m->create_bucket("bkt"));
     sync_wait(put_small(*m, "bkt", "k", "hello"));
-    CHECK_EQ(m->inflight(), 0L);  // every call released its lease
+    // every call released its lease
+    CHECK_EQ(m->inflight(), 0L);
     CHECK(m->wait_idle(std::chrono::milliseconds(1)));
     {
         auto stream = sync_wait(open_object(*m, "bkt", "k"));
-        CHECK_EQ(m->inflight(), 1L);  // the open stream holds the lease
+        // the open stream holds the lease
+        CHECK_EQ(m->inflight(), 1L);
         auto t0 = std::chrono::steady_clock::now();
         CHECK(!m->wait_idle(std::chrono::milliseconds(60)));
         CHECK(std::chrono::steady_clock::now() - t0 >= std::chrono::milliseconds(50));
@@ -390,7 +405,8 @@ TEST(admin_jobs_dynamic_backend_set) {
     jobs.add_backend("c", std::make_shared<storage::MemoryBackend>());
     CHECK(!jobs.status("c", JobOp::Fsck)["running"].get<bool>());
     CHECK(jobs.remove_backend("c"));
-    CHECK(jobs.remove_backend("c"));  // idempotent
+    // idempotent
+    CHECK(jobs.remove_backend("c"));
     threw = false;
     try {
         jobs.status("c", JobOp::Fsck);

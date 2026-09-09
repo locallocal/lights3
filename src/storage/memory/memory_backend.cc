@@ -142,7 +142,8 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
     meta.size = data.size();
     meta.etag = md5.final_hex();
     meta.last_modified = std::chrono::system_clock::now();
-    finalize_checksum(meta);  // trailer-form value exists now that the body is drained (§2.2)
+    // trailer-form value exists now that the body is drained (§2.2)
+    finalize_checksum(meta);
     auto blob = std::make_shared<const std::string>(std::move(data));
 
     std::lock_guard lk(m_);
@@ -273,7 +274,8 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
     validate_part_number(part_no);
     {
         std::lock_guard lk(m_);
-        upload_or_throw(bucket, key, upload_id);  // fail early; read the body without the lock
+        // fail early; read the body without the lock
+        upload_or_throw(bucket, key, upload_id);
     }
     std::string data;
     std::byte buf[64 * 1024];
@@ -288,14 +290,16 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
     std::string etag = md5.final_hex();
 
     std::lock_guard lk(m_);
-    auto& up = upload_or_throw(bucket, key, upload_id);  // may have been aborted while reading the body
+    // may have been aborted while reading the body
+    auto& up = upload_or_throw(bucket, key, upload_id);
     // Same-number re-upload is last-write-wins; only touch the map after the capacity
     // check passes (same as put_object, otherwise a throw from reserve leaves a ghost part
     // with an empty etag)
     auto it = up.parts.find(part_no);
     reserve_locked(int64_t(data.size()) - (it != up.parts.end() ? int64_t(it->second.data.size()) : 0));
     Part part{std::move(data), etag, std::chrono::system_clock::now(), "", ""};
-    if (checksum) {  // resolved() only after the body was drained above (trailer form)
+    if (checksum) {
+        // resolved() only after the body was drained above (trailer form)
         part.checksum_algorithm = checksum->algorithm;
         part.checksum_value = checksum->resolved();
     }
@@ -335,7 +339,8 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
     meta.size = data.size();
     meta.etag = combined_etag(md5s);
     meta.last_modified = std::chrono::system_clock::now();
-    meta.part_sizes = std::move(sizes);  // GET ?partNumber layout (roadmap §2.5)
+    // GET ?partNumber layout (roadmap §2.5)
+    meta.part_sizes = std::move(sizes);
     PutResult r{meta.etag};
     // Composite checksum from the stored, verified per-part values (roadmap §2.2)
     apply_composite_checksum(digests, meta, r);

@@ -102,7 +102,8 @@ public:
             co_return n;
         }
         if (stage_ == 1) {
-            gate_.acquire();  // parks a pool thread; the pool has spare threads for the peer
+            // parks a pool thread; the pool has spare threads for the peer
+            gate_.acquire();
             stage_ = 2;
         }
         size_t n = std::min(buf.size(), rest_.size() - off_);
@@ -168,8 +169,10 @@ struct Cluster {
     TmpDir tmp;
     std::shared_ptr<ThreadPool> pool = std::make_shared<ThreadPool>(6);
     DuoStoreConfig cfg;
-    std::unique_ptr<IMetaStore> alloc_meta;  // file-id allocation for the shared data plane
-    std::shared_ptr<FsDataStore> data;       // the ONE data engine both gateways share
+    // file-id allocation for the shared data plane
+    std::unique_ptr<IMetaStore> alloc_meta;
+    // the ONE data engine both gateways share
+    std::shared_ptr<FsDataStore> data;
     std::shared_ptr<DuoStoreBackend> a, b;
 
     // Both gateways publish their leases right before the peer consumes them —
@@ -247,11 +250,13 @@ inline void cross_gateway_multipart(const MetaFactory& make_meta, DuoMetaKind ki
     auto id = sync_wait(c->a->create_multipart("bkt", "obj", {}));
     auto e1 = upload(*c->b, "bkt", "obj", id, 1, p1).etag;
     auto e2 = upload(*c->b, "bkt", "obj", id, 2, p2).etag;
-    CHECK_EQ(parts_of(*c->a, "bkt", "obj", id).size(), size_t(2));  // B's parts visible from A
+    // B's parts visible from A
+    CHECK_EQ(parts_of(*c->a, "bkt", "obj", id).size(), size_t(2));
     std::vector<PartInfo> parts{part_info(1, e1), part_info(2, e2)};
     auto done = sync_wait(c->a->complete_multipart("bkt", "obj", id, parts));
     CHECK_EQ(done.etag, combined_etag({e1, e2}));
-    CHECK(uploads_of(*c->b, "bkt").empty());  // complete on A retired the upload for B too
+    // complete on A retired the upload for B too
+    CHECK(uploads_of(*c->b, "bkt").empty());
     auto h = sync_wait(c->b->head_object("bkt", "obj"));
     CHECK_EQ(h.etag, done.etag);
     CHECK_EQ(h.size, uint64_t(p1.size() + p2.size()));
@@ -268,7 +273,8 @@ inline void cross_gateway_multipart(const MetaFactory& make_meta, DuoMetaKind ki
     auto st = sync_wait(c->a->run_orphan_scan_once());
     CHECK_EQ(st.orphans_removed, uint64_t(0));
     CHECK_EQ(st.refs_missing, uint64_t(0));
-    CHECK_EQ(count_chunk_files(c->cfg.root), size_t(4));  // 2 + 2 chunks at 4 KiB
+    // 2 + 2 chunks at 4 KiB
+    CHECK_EQ(count_chunk_files(c->cfg.root), size_t(4));
     sync_wait(c->a->delete_object("bkt", "obj"));
     sync_wait(c->b->delete_bucket("bkt"));
     c->close();
@@ -291,13 +297,15 @@ inline void abort_while_peer_pumps(const MetaFactory& make_meta, DuoMetaKind kin
             err = std::current_exception();
         }
     });
-    wait_chunks_at_least(c->cfg.root, 1);  // A's first chunk is on the shared plane
+    // A's first chunk is on the shared plane
+    wait_chunks_at_least(c->cfg.root, 1);
     sync_wait(c->b->abort_multipart("bkt", "obj", id));
     body.release();
     writer.join();
     CHECK(bool(err));
     CHECK_THROWS_S3(std::rethrow_exception(err), s3::S3ErrorCode::NoSuchUpload);
-    CHECK_EQ(count_chunk_files(c->cfg.root), size_t(0));  // discarded by A itself
+    // discarded by A itself
+    CHECK_EQ(count_chunk_files(c->cfg.root), size_t(0));
     CHECK(uploads_of(*c->a, "bkt").empty());
     c->publish_leases();
     auto st = sync_wait(c->b->run_orphan_scan_once());
@@ -305,7 +313,8 @@ inline void abort_while_peer_pumps(const MetaFactory& make_meta, DuoMetaKind kin
     CHECK_EQ(st.orphans_removed, uint64_t(0));
     CHECK_EQ(st.refs_missing, uint64_t(0));
     auto gc = sync_wait(c->b->run_gc_once());
-    CHECK_EQ(gc.files_removed, uint64_t(0));  // the abort had no committed parts to book
+    // the abort had no committed parts to book
+    CHECK_EQ(gc.files_removed, uint64_t(0));
     sync_wait(c->b->delete_bucket("bkt"));
     c->close();
 }
@@ -353,7 +362,8 @@ inline void same_part_concurrent(const MetaFactory& make_meta, DuoMetaKind kind)
     const bool a_won = listed[0].etag == ra.etag;
     CHECK(a_won || listed[0].etag == rb.etag);
     const std::string& winner = a_won ? da : db;
-    CHECK_EQ(parts_of(*c->a, "bkt", "obj", id)[0].etag, listed[0].etag);  // same view from A
+    // same view from A
+    CHECK_EQ(parts_of(*c->a, "bkt", "obj", id)[0].etag, listed[0].etag);
 
     std::vector<PartInfo> parts{part_info(1, listed[0].etag)};
     auto done = sync_wait(c->b->complete_multipart("bkt", "obj", id, parts));
@@ -372,7 +382,8 @@ inline void same_part_concurrent(const MetaFactory& make_meta, DuoMetaKind kind)
     CHECK_EQ(gc.skipped_leased, uint64_t(0));
     CHECK_EQ(count_chunk_files(c->cfg.root), size_t(2));
     {
-        auto g = sync_wait(c->b->get_object("bkt", "obj", std::nullopt));  // winner intact
+        // winner intact
+        auto g = sync_wait(c->b->get_object("bkt", "obj", std::nullopt));
         CHECK_EQ(read_all(*g.body), winner);
     }
     sync_wait(c->a->delete_object("bkt", "obj"));
@@ -387,19 +398,23 @@ inline void mpu_ttl_single_executor(const MetaFactory& make_meta, DuoMetaKind ki
     auto c = make_cluster(make_meta, kind, [](DuoStoreConfig& cfg) { cfg.mpu_ttl_sec = 1; });
     sync_wait(c->a->create_bucket("bkt"));
     auto id1 = sync_wait(c->a->create_multipart("bkt", "one", {}));
-    upload(*c->b, "bkt", "one", id1, 1, pattern_bytes(6000));  // 2 chunks
+    // 2 chunks
+    upload(*c->b, "bkt", "one", id1, 1, pattern_bytes(6000));
     CHECK_EQ(count_chunk_files(c->cfg.root), size_t(2));
-    std::this_thread::sleep_for(std::chrono::milliseconds(1100));  // past the 1 s ttl
+    // past the 1 s ttl
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
 
     c->publish_leases();
-    auto sa = sync_wait(c->a->run_gc_once());  // A takes the GC lease
+    // A takes the GC lease
+    auto sa = sync_wait(c->a->run_gc_once());
     CHECK_EQ(sa.uploads_expired, uint64_t(1));
     // The abort inside the round enqueued the parts after the peer's published
     // read floor: deferred this round (a reader on B that started before the
     // abort could still hold the ref), reclaimed once the floor moves past it
     CHECK_EQ(sa.skipped_leased, uint64_t(1));
     CHECK_EQ(sa.files_removed, uint64_t(0));
-    auto sb = sync_wait(c->b->run_gc_once());  // lease held by A: B does nothing
+    // lease held by A: B does nothing
+    auto sb = sync_wait(c->b->run_gc_once());
     CHECK_EQ(sb.uploads_expired, uint64_t(0));
     CHECK_EQ(sb.reclaims_acked, uint64_t(0));
     CHECK(uploads_of(*c->b, "bkt").empty());
@@ -412,12 +427,14 @@ inline void mpu_ttl_single_executor(const MetaFactory& make_meta, DuoMetaKind ki
     // A second expired upload: B still cannot sweep it (A's lease outlives the
     // round), A does
     auto id2 = sync_wait(c->b->create_multipart("bkt", "two", {}));
-    upload(*c->a, "bkt", "two", id2, 1, pattern_bytes(3000));  // 1 chunk
+    // 1 chunk
+    upload(*c->a, "bkt", "two", id2, 1, pattern_bytes(3000));
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     c->publish_leases();
     sb = sync_wait(c->b->run_gc_once());
     CHECK_EQ(sb.uploads_expired, uint64_t(0));
-    CHECK_EQ(uploads_of(*c->a, "bkt").size(), size_t(1));  // untouched
+    // untouched
+    CHECK_EQ(uploads_of(*c->a, "bkt").size(), size_t(1));
     sa = sync_wait(c->a->run_gc_once());
     CHECK_EQ(sa.uploads_expired, uint64_t(1));
     c->publish_leases();
@@ -441,7 +458,8 @@ inline void listings_are_shared(const MetaFactory& make_meta, DuoMetaKind kind) 
     auto c = make_cluster(make_meta, kind);
     sync_wait(c->b->create_bucket("bkt"));
     auto u1 = sync_wait(c->a->create_multipart("bkt", "k1", {}));
-    auto u2 = sync_wait(c->b->create_multipart("bkt", "k1", {}));  // second upload on the same key
+    // second upload on the same key
+    auto u2 = sync_wait(c->b->create_multipart("bkt", "k1", {}));
     auto u3 = sync_wait(c->b->create_multipart("bkt", "k2", {}));
     upload(*c->a, "bkt", "k1", u1, 1, pattern_bytes(5000, 'a'));
     upload(*c->b, "bkt", "k1", u1, 2, pattern_bytes(4500, 'b'));
@@ -479,7 +497,8 @@ inline void listings_are_shared(const MetaFactory& make_meta, DuoMetaKind kind) 
     CHECK(uploads_of(*c->b, "bkt").empty());
     c->publish_leases();
     auto gc = sync_wait(c->a->run_gc_once());
-    CHECK_EQ(gc.files_removed, uint64_t(7));  // u1: 2 + 2 + 1 chunks, u3: 2 chunks
+    // u1: 2 + 2 + 1 chunks, u3: 2 chunks
+    CHECK_EQ(gc.files_removed, uint64_t(7));
     CHECK_EQ(count_chunk_files(c->cfg.root), size_t(0));
     sync_wait(c->a->delete_bucket("bkt"));
     c->close();

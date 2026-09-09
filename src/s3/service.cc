@@ -103,7 +103,8 @@ struct MetricsEndGuard {
 struct AccessRecord {
     std::chrono::steady_clock::time_point start;
     std::string request_id, remote, access_key, method, path, query, bucket, key, user_agent, api, backend;
-    std::string trace_id, span_id, parent_span_id;  // roadmap §5.4
+    // roadmap §5.4
+    std::string trace_id, span_id, parent_span_id;
     int status = 0;
     double auth_ms = 0, handler_ms = 0, backend_ms = 0, ttfb_ms = 0;
     uint32_t backend_calls = 0;
@@ -152,7 +153,8 @@ void emit_access(const AccessRecord& r, uint64_t bytes, bool truncated) {
         return v.empty() ? kDash : v;
     };
     if (Logger::json()) {
-        auto ms3 = [](double v) { return std::round(v * 1000.0) / 1000.0; };  // 3 decimals: no float noise
+        // 3 decimals: no float noise
+        auto ms3 = [](double v) { return std::round(v * 1000.0) / 1000.0; };
         nlohmann::json j;
         j["request_id"] = r.request_id;
         if (!r.remote.empty()) j["remote"] = r.remote;
@@ -316,10 +318,14 @@ void reject_unsupported_subresource(const http::HttpRequest& req) {
 // implementation's actual semantics)
 void reject_unsupported_headers(const http::HttpRequest& req) {
     constexpr std::string_view kPrefixes[] = {
-        "x-amz-server-side-encryption",  // the whole SSE and SSE-C family (including -customer-*, -aws-kms-*)
-        "x-amz-copy-source-server-side-encryption",  // the three SSE-C headers on the copy source side
-        "x-amz-object-lock-",                        // mode / retain-until-date / legal-hold
-        "x-amz-grant-",                              // the five ACL grant headers, same class as x-amz-acl
+        // the whole SSE and SSE-C family (including -customer-*, -aws-kms-*)
+        "x-amz-server-side-encryption",
+        // the three SSE-C headers on the copy source side
+        "x-amz-copy-source-server-side-encryption",
+        // mode / retain-until-date / legal-hold
+        "x-amz-object-lock-",
+        // the five ACL grant headers, same class as x-amz-acl
+        "x-amz-grant-",
     };
     // x-amz-website-redirect-location left this list with docs/static-website.md phase ③,
     // x-amz-tagging with roadmap §2.5: both are first-class metadata fields now
@@ -360,7 +366,8 @@ constexpr std::string_view kCommonQueryKeys[] = {
     "X-Amz-SignedHeaders",
     "X-Amz-Content-Sha256",
     "X-Amz-Security-Token",
-    "x-id",  // tracing parameter aws-sdk-js v3 attaches to every operation, no semantics
+    // tracing parameter aws-sdk-js v3 attaches to every operation, no semantics
+    "x-id",
 };
 
 bool word_in(std::string_view list, std::string_view w) {
@@ -543,7 +550,8 @@ bool S3Service::website_rate_admit(const std::string& bucket, uint32_t rps) {
     std::lock_guard lk(rate_mu_);
     auto& b = rate_[bucket];
     if (b.last.time_since_epoch().count() == 0) {
-        b.tokens = rps;  // fresh bucket starts full (burst = rps)
+        // fresh bucket starts full (burst = rps)
+        b.tokens = rps;
     } else {
         b.tokens = std::min<double>(rps, b.tokens + std::chrono::duration<double>(now - b.last).count() * rps);
     }
@@ -561,7 +569,8 @@ bool S3Service::website_rate_admit(const std::string& bucket, uint32_t rps) {
 Task<http::HttpResponse> S3Service::website_error_page(const S3Error& e, const WebsiteBucket& site, bool head_only) {
     http::HttpResponse resp;
     resp.status = http_status(e.code);
-    for (auto& [k, v] : e.headers) resp.headers.set(k, v);  // e.g. Allow on 405
+    // e.g. Allow on 405
+    for (auto& [k, v] : e.headers) resp.headers.set(k, v);
     if (!site.error_key.empty()) {
         try {
             auto& backend = router_.resolve(site.bucket);
@@ -637,14 +646,16 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // evaluation in the error path below (addr itself lives inside the try block)
     std::string anon_orig_key;
     bool vhost = false;
-    std::string tenant_for_log;  // actor's tenant for the audit record (empty = none)
+    // actor's tenant for the audit record (empty = none)
+    std::string tenant_for_log;
     // API x backend dimension (roadmap §5.1): the route name becomes the api label,
     // the routed backend the backend label; the accumulator travels on the
     // request's cancellation token and collects the backend share of the latency
     std::string_view api_name;
     std::string backend_name;
     auto backend_stats = std::make_shared<storage::RequestBackendStats>();
-    backend_stats->trace = ctx.trace;  // outbound hops forward it as traceparent (roadmap §5.4)
+    // outbound hops forward it as traceparent (roadmap §5.4)
+    backend_stats->trace = ctx.trace;
     // Rate-limit slots (roadmap §4.2) held for the whole dispatch; released on return
     // The limiter instances are pinned here so a hot-reload swap cannot destroy
     // one while this request still holds a slot in it (declared before the slots:
@@ -931,7 +942,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 // the nearest cancellable suspension point (pool.schedule / semaphore.acquire). The token propagates
                 // down the Task promise automatically, no per-handler/backend signature changes needed
                 CancelSource req_src;
-                req_src.set_data(backend_stats);  // reachable from the metered backends (roadmap §5.1)
+                // reachable from the metered backends (roadmap §5.1)
+                req_src.set_data(backend_stats);
                 CancelRegistration link;
                 if (ctx.cancel.valid()) {
                     link = ctx.cancel.on_cancel([&req_src] { req_src.request_cancel(); });
@@ -1255,8 +1267,8 @@ std::span<const S3Service::Route> S3Service::route_table() {
          }},
 
         // Object level: data plane
-        {"PUT", Scope::Object, "", "",  // PutObject / CopyObject (steered by x-amz-copy-source)
-         Action::Write, "PutObject",
+        // PutObject / CopyObject (steered by x-amz-copy-source)
+        {"PUT", Scope::Object, "", "", Action::Write, "PutObject",
          [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth& auth) {
              if (req.headers.has("x-amz-copy-source")) return s.copy_object(req, std::move(b), std::move(k), auth);
              return s.put_object(req, std::move(b), std::move(k), auth);
@@ -1308,7 +1320,8 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
     std::string allow;
     for (auto& r : route_table()) {
         if (r.scope != scope || !flag_matches(req, r.flag)) continue;
-        if (allow.find(r.method) != std::string::npos) continue;  // multiple routes per method listed once
+        // multiple routes per method listed once
+        if (allow.find(r.method) != std::string::npos) continue;
         if (!allow.empty()) allow += ", ";
         allow += r.method;
     }

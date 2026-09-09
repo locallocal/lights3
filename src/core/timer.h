@@ -33,12 +33,17 @@ public:
     static constexpr size_t kExecBuckets = 5;
 
     struct Stats {
-        size_t pending = 0;  // timers not yet due
-        size_t due = 0;      // timers due but still queued ahead of the callback thread
-        uint64_t fired = 0;  // total callbacks fully executed
-        uint64_t slow = 0;   // callbacks exceeding 1s (each accompanied by a WARN log)
+        // timers not yet due
+        size_t pending = 0;
+        // timers due but still queued ahead of the callback thread
+        size_t due = 0;
+        // total callbacks fully executed
+        uint64_t fired = 0;
+        // callbacks exceeding 1s (each accompanied by a WARN log)
+        uint64_t slow = 0;
         std::array<uint64_t, kExecBuckets> exec_hist{};
-        uint64_t exec_sum_us = 0;  // cumulative callback execution time (microseconds)
+        // cumulative callback execution time (microseconds)
+        uint64_t exec_sum_us = 0;
         // Head-of-queue lag: how late the earliest due/executing callback already is
         // (seconds, 0 = no backlog). "Timers were blocked 3 seconds by some callback"
         // reads straight off this number
@@ -70,15 +75,20 @@ public:
     bool cancel(Id id);
 
 private:
-    void loop();       // scheduling thread: only determines expiry and dequeues
-    void fire_loop();  // callback thread: executes due callbacks serially
+    // scheduling thread: only determines expiry and dequeues
+    void loop();
+    // callback thread: executes due callbacks serially
+    void fire_loop();
     bool pending_locked(Id id) const;
     static size_t exec_bucket(Clock::duration d);
 
     mutable std::mutex m_;
-    std::condition_variable cv_;       // scheduling thread
-    std::condition_variable fire_cv_;  // callback thread
-    std::condition_variable done_cv_;  // callback-finished notification (for cancel's blocking wait)
+    // scheduling thread
+    std::condition_variable cv_;
+    // callback thread
+    std::condition_variable fire_cv_;
+    // callback-finished notification (for cancel's blocking wait)
+    std::condition_variable done_cv_;
     // Pending table ordered by (deadline, id); deadlines_ provides reverse lookup by id
     std::map<std::pair<Clock::time_point, Id>, std::function<void()>> items_;
     std::map<Id, Clock::time_point> deadlines_;
@@ -91,7 +101,8 @@ private:
     };
     std::deque<DueItem> due_;
     Id next_id_ = 0;
-    Id running_id_ = 0;  // id of the currently executing callback (0 = none)
+    // id of the currently executing callback (0 = none)
+    Id running_id_ = 0;
     bool stopping_ = false;
     // Callback duration observability (docs/archive/gaps.md §7); atomic storage, so stats()
     // reads without contending on locks with callbacks

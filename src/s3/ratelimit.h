@@ -20,9 +20,12 @@ namespace lights3::s3 {
 class RateLimiter {
 public:
     struct Limits {
-        int rps = 0;           // 0 = no rate limit
-        int burst = 0;         // bucket capacity; 0 = rps
-        int max_inflight = 0;  // 0 = no concurrency cap
+        // 0 = no rate limit
+        int rps = 0;
+        // bucket capacity; 0 = rps
+        int burst = 0;
+        // 0 = no concurrency cap
+        int max_inflight = 0;
         bool any() const { return rps > 0 || max_inflight > 0; }
     };
     using Clock = std::chrono::steady_clock;
@@ -79,7 +82,8 @@ private:
     size_t max_tracked_;
     mutable std::mutex mu_;
     std::unordered_map<std::string, Entry> table_;
-    std::list<std::string> lru_;  // front = most recently used
+    // front = most recently used
+    std::list<std::string> lru_;
 };
 
 }  // namespace lights3::s3

@@ -90,7 +90,8 @@ void S3Service::check_quota(const std::string& bucket, int64_t add_bytes, int64_
 Task<void> S3Service::require_tenant_bucket(const std::string& bucket, std::string_view tenant, bool creating) {
     std::string owner = tenants_->owner_of(bucket);
     if (owner == tenant) co_return;
-    if (creating && owner.empty()) co_return;  // create_bucket records ownership on success
+    // create_bucket records ownership on success
+    if (creating && owner.empty()) co_return;
     // Unowned or foreign: a missing bucket stays a 404 (SDK existence probes rely on
     // it); anything that exists is invisible to this tenant beyond "forbidden"
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);

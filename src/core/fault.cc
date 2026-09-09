@@ -16,7 +16,8 @@ std::atomic<int> g_armed{0};
 namespace {
 
 struct Armed {
-    int remaining;  // -1 = unlimited
+    // -1 = unlimited
+    int remaining;
     int err;
 };
 

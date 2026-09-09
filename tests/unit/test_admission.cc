@@ -87,15 +87,18 @@ TEST(admission_streaming_body_holds_permit_until_dropped) {
     });
     auto resp = env.call();
     CHECK(resp.stream_body != nullptr);
-    CHECK_EQ(env.inflight->available(), 0L);  // the permit is held by the response body
+    // the permit is held by the response body
+    CHECK_EQ(env.inflight->available(), 0L);
 
     std::byte buf[256];
     CHECK_EQ(sync_wait(resp.stream_body->read(std::span(buf))), size_t{128});
-    CHECK_EQ(sync_wait(resp.stream_body->read(std::span(buf))), size_t{0});  // EOF
-    CHECK_EQ(env.inflight->available(),
-             0L);  // still not returned after reading everything: the return point is destruction
+    // EOF
+    CHECK_EQ(sync_wait(resp.stream_body->read(std::span(buf))), size_t{0});
+    // still not returned after reading everything: the return point is destruction
+    CHECK_EQ(env.inflight->available(), 0L);
 
-    resp.stream_body.reset();  // driver drops the response body (finished reading and disconnect share this path)
+    // driver drops the response body (finished reading and disconnect share this path)
+    resp.stream_body.reset();
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
 }
 
@@ -111,7 +114,8 @@ TEST(admission_over_limit_queues_until_streaming_peer_disconnects) {
         co_return r;
     });
 
-    auto first = env.call();  // holds the only permit
+    // holds the only permit
+    auto first = env.call();
     CHECK_EQ(dispatched.load(), 1);
 
     std::atomic<bool> second_done{false};
@@ -126,7 +130,8 @@ TEST(admission_over_limit_queues_until_streaming_peer_disconnects) {
     CHECK_EQ(dispatched.load(), 1);
     CHECK(!second_done.load());
 
-    first.stream_body.reset();  // simulate client disconnect / driver drop -> permit returned
+    // simulate client disconnect / driver drop -> permit returned
+    first.stream_body.reset();
     second.join();
     CHECK_EQ(dispatched.load(), 2);
     CHECK(second_done.load());
@@ -142,13 +147,15 @@ TEST(admission_queued_request_cancelled_returns_503) {
         r.stream_body = std::make_unique<ZeroReader>(64);
         co_return r;
     });
-    auto first = env.call();  // holds the only permit
+    // holds the only permit
+    auto first = env.call();
 
     CancelSource src;
     std::atomic<bool> got_503{false};
     std::thread second([&] {
         HttpRequest req;
-        req.cancel = src.token();  // the connection token the driver attached should be kept and used
+        // the connection token the driver attached should be kept and used
+        req.cancel = src.token();
         auto resp = env.call(std::move(req));
         got_503 = resp.status == 503 && resp.small_body.find("<Code>SlowDown</Code>") != std::string::npos;
     });
@@ -177,7 +184,8 @@ TEST(admission_shutdown_broadcast_cancels_queued) {
 
     std::atomic<bool> got_503{false};
     std::thread second([&] {
-        auto resp = env.call();  // no token -> attached to shutdown_src
+        // no token -> attached to shutdown_src
+        auto resp = env.call();
         got_503 = resp.status == 503;
     });
     CHECK(eventually([&] { return env.inflight->waiting() == 1; }));
@@ -225,7 +233,8 @@ TEST(stall_guard_kills_dripping_transfer) {
     // 1-second window: drip-style progress (far below 64KiB per window) must be cut off once the window passes
     auto guarded = guard_stalls(std::make_unique<DripReader>(), 1s);
     std::byte b[1];
-    CHECK_EQ(sync_wait(guarded->read(std::span(b))), size_t{1});  // no false kill within the window
+    // no false kill within the window
+    CHECK_EQ(sync_wait(guarded->read(std::span(b))), size_t{1});
     std::this_thread::sleep_for(1100ms);
     CHECK_THROWS_S3(sync_wait(guarded->read(std::span(b))), s3::S3ErrorCode::RequestTimeout);
 }
@@ -235,7 +244,8 @@ TEST(stall_guard_progress_resets_window) {
     // unaffected
     auto guarded = guard_stalls(std::make_unique<ZeroReader>(256 * 1024), 1s);
     std::vector<std::byte> buf(StallGuardReader::kMinProgressBytes);
-    CHECK_EQ(sync_wait(guarded->read(std::span(buf))), buf.size());  // one read fills a full window's worth
+    // one read fills a full window's worth
+    CHECK_EQ(sync_wait(guarded->read(std::span(buf))), buf.size());
     std::this_thread::sleep_for(1100ms);
     // The previous read reset the timer; this read's window counts from the reset point -- not killed for absolute
     // elapsed time
@@ -282,7 +292,8 @@ TEST(admission_counters_wait_queue_and_cancel) {
         co_return r;
     });
     auto ld = [](const std::atomic<uint64_t>& a) { return a.load(); };
-    auto first = env.call();  // immediate
+    // immediate
+    auto first = env.call();
     CHECK_EQ(ld(env.counters->wait_count), uint64_t{1});
     CHECK_EQ(ld(env.counters->wait_hist[0]), uint64_t{1});
     CHECK_EQ(ld(env.counters->queued), uint64_t{0});
@@ -293,13 +304,15 @@ TEST(admission_counters_wait_queue_and_cancel) {
         resp.stream_body.reset();
     });
     CHECK(eventually([&] { return env.inflight->waiting() == 1; }));
-    std::this_thread::sleep_for(30ms);  // measurable wait
+    // measurable wait
+    std::this_thread::sleep_for(30ms);
     first.stream_body.reset();
     second.join();
     CHECK_EQ(ld(env.counters->wait_count), uint64_t{2});
     CHECK_EQ(ld(env.counters->queued), uint64_t{1});
     CHECK(ld(env.counters->wait_sum_us) >= 20'000);
-    CHECK_EQ(ld(env.counters->wait_hist[0]), uint64_t{1});  // the queued one is in a later bucket
+    // the queued one is in a later bucket
+    CHECK_EQ(ld(env.counters->wait_hist[0]), uint64_t{1});
     CHECK_EQ(ld(env.counters->cancelled), uint64_t{0});
 
     // Cancelled while queued: 503 and the cancellation counter, no wait sample
@@ -345,7 +358,8 @@ TEST(admission_counters_stall_cuts_per_direction) {
             std::byte buf[1];
             co_await req.body->read(std::span(buf));
             std::this_thread::sleep_for(1100ms);
-            co_await req.body->read(std::span(buf));  // throws RequestTimeout
+            // throws RequestTimeout
+            co_await req.body->read(std::span(buf));
             co_return HttpResponse{};
         },
         1s);

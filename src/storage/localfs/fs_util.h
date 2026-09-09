@@ -73,8 +73,10 @@ std::vector<std::pair<std::string, std::string>> read_tsv(const std::filesystem:
 // "warn once, degrade" behavior
 struct MetaXattrPolicy {
     bool required = false;
-    std::shared_ptr<MetricGauge> fallback;    // 1 once any xattr write has failed (resident)
-    std::shared_ptr<MetricCounter> failures;  // every failed setxattr
+    // 1 once any xattr write has failed (resident)
+    std::shared_ptr<MetricGauge> fallback;
+    // every failed setxattr
+    std::shared_ptr<MetricCounter> failures;
     std::atomic<uint64_t> failure_count{0};
     void note_failure() {
         failure_count.fetch_add(1, std::memory_order_relaxed);
@@ -98,7 +100,8 @@ int probe_meta_xattr(const std::filesystem::path& dir);
 // synchronous sidecar write whenever the xattr write failed -- then the sidecar is the
 // only metadata source and must be committed before the caller answers
 enum class SidecarMode { kSync, kAsync, kLazy };
-SidecarMode parse_sidecar_mode(std::string_view s);  // sync|async|lazy, else runtime_error
+// sync|async|lazy, else runtime_error
+SidecarMode parse_sidecar_mode(std::string_view s);
 const char* sidecar_mode_name(SidecarMode m);
 
 struct CommitOptions {
@@ -146,8 +149,10 @@ enum class Tier { kLocal, kRemote, kCached };
 
 struct TierInfo {
     Tier tier = Tier::kLocal;
-    std::string remote_etag;  // cloud replica ETag (unquoted hex; for verification and GC, never exposed)
-    std::string remote_at;    // upload time (iso8601)
+    // cloud replica ETag (unquoted hex; for verification and GC, never exposed)
+    std::string remote_etag;
+    // upload time (iso8601)
+    std::string remote_at;
 };
 
 // Write metadata into the data file's xattr (used inside commit_object_file; xlocalfs
@@ -238,7 +243,8 @@ std::string part_file_name(int part_no);
 
 struct UploadState {
     std::filesystem::path dir;
-    ObjectMeta meta;  // content_type / user_meta recorded in the manifest
+    // content_type / user_meta recorded in the manifest
+    ObjectMeta meta;
 };
 
 // upload_id validity + manifest existence + bucket/key match; any failure counts as NoSuchUpload

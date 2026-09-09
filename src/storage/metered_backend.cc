@@ -65,7 +65,8 @@ bool MeteredBackend::wait_idle(std::chrono::milliseconds timeout) {
 
 MeteredBackend::MeteredBackend(std::string name, std::shared_ptr<IStorageBackend> inner,
                                std::shared_ptr<MetricsRegistry> registry)
-    : name_(std::move(name)), inner_(std::move(inner)),
+    : name_(std::move(name)),
+      inner_(std::move(inner)),
       scope_(registry ? MetricsScope(std::move(registry), {{"backend", name_}}) : MetricsScope()) {}
 
 MeteredBackend::OpMetrics& MeteredBackend::op(const char* name) {
@@ -73,17 +74,14 @@ MeteredBackend::OpMetrics& MeteredBackend::op(const char* name) {
     auto it = ops_.find(name);
     if (it != ops_.end()) return it->second;
     OpMetrics m;
-    m.latency = scope_.histogram("lights3_backend_op_seconds",
-                                 "Storage backend operation wall time by backend and op",
+    m.latency = scope_.histogram("lights3_backend_op_seconds", "Storage backend operation wall time by backend and op",
                                  kOpBounds, {{"op", name}});
     m.errors = scope_.counter("lights3_backend_errors_total",
-                              "Storage backend operations that failed (5xx or transport error)",
-                              {{"op", name}});
+                              "Storage backend operations that failed (5xx or transport error)", {{"op", name}});
     return ops_.emplace(name, std::move(m)).first->second;
 }
 
-void MeteredBackend::record(OpMetrics& m, std::chrono::steady_clock::duration dt, bool error,
-                            const CancelToken& tok) {
+void MeteredBackend::record(OpMetrics& m, std::chrono::steady_clock::duration dt, bool error, const CancelToken& tok) {
     double secs = std::chrono::duration<double>(dt).count();
     m.latency->observe(secs);
     if (error) m.errors->inc();
@@ -143,40 +141,32 @@ Task<ObjectStream> MeteredBackend::get_object(std::string_view bucket, std::stri
     auto stream = co_await timed("get_object", inner_->get_object(bucket, key, range));
     // The open is timed; the bytes stream afterwards -- keep the backend "in flight"
     // until the request lets go of the body
-    if (stream.body)
-        stream.body = std::make_unique<LeasedBodyReader>(std::move(stream.body), Lease(inflight_));
+    if (stream.body) stream.body = std::make_unique<LeasedBodyReader>(std::move(stream.body), Lease(inflight_));
     co_return stream;
 }
-Task<PutResult> MeteredBackend::put_object(std::string_view bucket, std::string_view key,
-                                           ObjectMeta meta, http::BodyReader& body,
-                                           PutCondition cond) {
+Task<PutResult> MeteredBackend::put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
+                                           http::BodyReader& body, PutCondition cond) {
     co_return co_await timed("put_object", inner_->put_object(bucket, key, std::move(meta), body, cond));
 }
 Task<ObjectMeta> MeteredBackend::head_object(std::string_view bucket, std::string_view key) {
     co_return co_await timed("head_object", inner_->head_object(bucket, key));
 }
-Task<std::optional<ObjectLayout>> MeteredBackend::inspect_object(std::string_view bucket,
-                                                                 std::string_view key) {
+Task<std::optional<ObjectLayout>> MeteredBackend::inspect_object(std::string_view bucket, std::string_view key) {
     co_return co_await timed("inspect_object", inner_->inspect_object(bucket, key));
 }
-Task<std::optional<PutResult>> MeteredBackend::copy_object_fast(std::string_view src_bucket,
-                                                                std::string_view src_key,
-                                                                std::string_view dst_bucket,
-                                                                std::string_view dst_key,
+Task<std::optional<PutResult>> MeteredBackend::copy_object_fast(std::string_view src_bucket, std::string_view src_key,
+                                                                std::string_view dst_bucket, std::string_view dst_key,
                                                                 ObjectMeta meta) {
     co_return co_await timed("copy_object",
-                             inner_->copy_object_fast(src_bucket, src_key, dst_bucket, dst_key,
-                                                      std::move(meta)));
+                             inner_->copy_object_fast(src_bucket, src_key, dst_bucket, dst_key, std::move(meta)));
 }
-Task<std::optional<IStorageBackend::ObjectPartExtent>> MeteredBackend::resolve_object_part(
-    std::string_view bucket, std::string_view key, int part_no) {
-    co_return co_await timed("resolve_object_part",
-                             inner_->resolve_object_part(bucket, key, part_no));
+Task<std::optional<IStorageBackend::ObjectPartExtent>> MeteredBackend::resolve_object_part(std::string_view bucket,
+                                                                                           std::string_view key,
+                                                                                           int part_no) {
+    co_return co_await timed("resolve_object_part", inner_->resolve_object_part(bucket, key, part_no));
 }
-Task<void> MeteredBackend::set_object_tagging(std::string_view bucket, std::string_view key,
-                                              std::string tagging) {
-    co_return co_await timed("set_object_tagging",
-                             inner_->set_object_tagging(bucket, key, std::move(tagging)));
+Task<void> MeteredBackend::set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) {
+    co_return co_await timed("set_object_tagging", inner_->set_object_tagging(bucket, key, std::move(tagging)));
 }
 Task<void> MeteredBackend::delete_object(std::string_view bucket, std::string_view key) {
     co_return co_await timed("delete_object", inner_->delete_object(bucket, key));
@@ -184,34 +174,26 @@ Task<void> MeteredBackend::delete_object(std::string_view bucket, std::string_vi
 Task<ListResult> MeteredBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
     co_return co_await timed("list_objects", inner_->list_objects(bucket, opt));
 }
-Task<std::string> MeteredBackend::create_multipart(std::string_view bucket, std::string_view key,
-                                                   ObjectMeta meta) {
+Task<std::string> MeteredBackend::create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) {
     co_return co_await timed("create_multipart", inner_->create_multipart(bucket, key, std::move(meta)));
 }
-Task<PutResult> MeteredBackend::upload_part(std::string_view bucket, std::string_view key,
-                                            std::string_view upload_id, int part_no,
-                                            http::BodyReader& body,
+Task<PutResult> MeteredBackend::upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id,
+                                            int part_no, http::BodyReader& body,
                                             const std::optional<PartChecksum>& checksum) {
-    co_return co_await timed("upload_part",
-                             inner_->upload_part(bucket, key, upload_id, part_no, body, checksum));
+    co_return co_await timed("upload_part", inner_->upload_part(bucket, key, upload_id, part_no, body, checksum));
 }
 Task<PutResult> MeteredBackend::complete_multipart(std::string_view bucket, std::string_view key,
-                                                   std::string_view upload_id,
-                                                   std::span<const PartInfo> parts) {
-    co_return co_await timed("complete_multipart",
-                             inner_->complete_multipart(bucket, key, upload_id, parts));
+                                                   std::string_view upload_id, std::span<const PartInfo> parts) {
+    co_return co_await timed("complete_multipart", inner_->complete_multipart(bucket, key, upload_id, parts));
 }
-Task<void> MeteredBackend::abort_multipart(std::string_view bucket, std::string_view key,
-                                           std::string_view upload_id) {
+Task<void> MeteredBackend::abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) {
     co_return co_await timed("abort_multipart", inner_->abort_multipart(bucket, key, upload_id));
 }
 Task<ListPartsResult> MeteredBackend::list_parts(std::string_view bucket, std::string_view key,
-                                                 std::string_view upload_id,
-                                                 const ListPartsOptions& opt) {
+                                                 std::string_view upload_id, const ListPartsOptions& opt) {
     co_return co_await timed("list_parts", inner_->list_parts(bucket, key, upload_id, opt));
 }
-Task<ListUploadsResult> MeteredBackend::list_multipart_uploads(std::string_view bucket,
-                                                               const ListUploadsOptions& opt) {
+Task<ListUploadsResult> MeteredBackend::list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) {
     co_return co_await timed("list_multipart_uploads", inner_->list_multipart_uploads(bucket, opt));
 }
 
@@ -219,8 +201,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> meter_backends(
     const std::map<std::string, std::shared_ptr<IStorageBackend>>& backends,
     std::shared_ptr<MetricsRegistry> registry) {
     std::map<std::string, std::shared_ptr<IStorageBackend>> out;
-    for (auto& [name, b] : backends)
-        out[name] = std::make_shared<MeteredBackend>(name, b, registry);
+    for (auto& [name, b] : backends) out[name] = std::make_shared<MeteredBackend>(name, b, registry);
     return out;
 }
 

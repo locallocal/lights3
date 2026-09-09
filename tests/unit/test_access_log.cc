@@ -13,8 +13,8 @@
 
 #include "core/config.h"
 #include "core/log.h"
-#include "core/task.h"
 #include "core/metrics.h"
+#include "core/task.h"
 #include "s3/service.h"
 #include "storage/memory/memory_backend.h"
 #include "storage/metered_backend.h"
@@ -31,8 +31,7 @@ bool contains(const std::string& s, const std::string& sub) { return s.find(sub)
 // remaining tests do not write into a destroyed stream
 struct Capture {
     std::ostringstream out;
-    std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink =
-        std::make_shared<spdlog::sinks::ostream_sink_mt>(out);
+    std::shared_ptr<spdlog::sinks::ostream_sink_mt> sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(out);
     explicit Capture(const std::string& format) {
         LogConfig cfg;
         cfg.format = format;
@@ -59,12 +58,11 @@ struct Capture {
 // slots (calls / ms) of the line are populated
 S3Service make_service() {
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends;
-    backends["mem"] = std::make_shared<storage::MeteredBackend>(
-        "mem", std::make_shared<storage::MemoryBackend>(), std::make_shared<MetricsRegistry>());
+    backends["mem"] = std::make_shared<storage::MeteredBackend>("mem", std::make_shared<storage::MemoryBackend>(),
+                                                                std::make_shared<MetricsRegistry>());
     BucketsConfig cfg;
     cfg.default_backend = "mem";
-    return S3Service(storage::BucketRouter::build(cfg, std::move(backends)),
-                     SigV4Authenticator::build(AuthConfig{}));
+    return S3Service(storage::BucketRouter::build(cfg, std::move(backends)), SigV4Authenticator::build(AuthConfig{}));
 }
 
 http::HttpRequest make_req(std::string method, std::string path, std::string body = "") {
@@ -222,7 +220,7 @@ TEST(access_log_json_records) {
     CHECK(j["backend_calls"].get<int>() >= 1);
     CHECK(j["backend_ms"].get<double>() >= 0);
     CHECK(j["ms"].get<double>() >= j["ttfb_ms"].get<double>());
-    CHECK(!j.contains("ak"));      // auth disabled: omitted, never ""
+    CHECK(!j.contains("ak"));  // auth disabled: omitted, never ""
     CHECK(!j.contains("slow"));
     CHECK(!j.contains("query"));
     // Streaming GET: bytes = what went out, total >= ttfb, and a slow one says so
@@ -261,8 +259,7 @@ TEST(access_log_level_gates_lines) {
 }
 
 TEST(logger_async_rotating_file) {
-    auto dir = std::filesystem::temp_directory_path() /
-               ("lights3-log-" + std::to_string(::getpid()));
+    auto dir = std::filesystem::temp_directory_path() / ("lights3-log-" + std::to_string(::getpid()));
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
     auto path = (dir / "lights3.log").string();
@@ -280,7 +277,7 @@ TEST(logger_async_rotating_file) {
     // rotation set; logging still works synchronously on the same file
     Logger::shutdown();
     LOG_WARN("after shutdown");
-    Logger::shutdown();  // idempotent
+    Logger::shutdown();         // idempotent
     Logger::init(LogConfig{});  // back to stderr for the remaining tests
     std::string all;
     size_t files = 0;

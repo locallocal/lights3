@@ -45,9 +45,9 @@
 #include <mutex>
 #include <optional>
 #include <set>
-#include <unordered_set>
 #include <sstream>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "core/log.h"
@@ -76,8 +76,7 @@ public:
         std::lock_guard lk(m_);
         if (started_) {
             if (io_threads != smp_)
-                LOG_WARN("seastar engine already running with smp={}, ignoring io_threads={}",
-                         smp_, io_threads);
+                LOG_WARN("seastar engine already running with smp={}, ignoring io_threads={}", smp_, io_threads);
             return;
         }
         smp_ = std::max(1, io_threads);
@@ -123,16 +122,16 @@ private:
         std::vector<char*> argv{arg0, arg1, smp_arg.data(), nullptr};
 
         try {
-            app.run(static_cast<int>(argv.size()) - 1, argv.data(),
-                    [this, ready] { return engine_main(ready); });
+            app.run(static_cast<int>(argv.size()) - 1, argv.data(), [this, ready] { return engine_main(ready); });
         } catch (...) {
             if (!ready_signaled_.exchange(true)) ready->set_exception(std::current_exception());
             return;
         }
-        // app.run returned normally without ever entering the main function (e.g. bad arguments): carry the failure back to ensure_started
+        // app.run returned normally without ever entering the main function (e.g. bad arguments): carry the failure
+        // back to ensure_started
         if (!ready_signaled_.exchange(true))
-            ready->set_exception(std::make_exception_ptr(
-                std::runtime_error("seastar engine failed to start (see stderr)")));
+            ready->set_exception(
+                std::make_exception_ptr(std::runtime_error("seastar engine failed to start (see stderr)")));
     }
 
     void stop() {
@@ -198,12 +197,9 @@ FutAwaiter<T> fut_await(ss::future<T> f) {
 struct ResumeOnShard {
     unsigned shard;
 
-    bool await_ready() const noexcept {
-        return ss::engine_is_ready() && ss::this_shard_id() == shard;
-    }
+    bool await_ready() const noexcept { return ss::engine_is_ready() && ss::this_shard_id() == shard; }
     void await_suspend(std::coroutine_handle<> h) const {
-        ss::alien::run_on(SeastarEngine::instance().alien(), shard,
-                          [h]() noexcept { h.resume(); });
+        ss::alien::run_on(SeastarEngine::instance().alien(), shard, [h]() noexcept { h.resume(); });
     }
     void await_resume() const noexcept {}
 };
@@ -265,8 +261,7 @@ struct SeaConn {
         }
     };
 
-    explicit SeaConn(ss::connected_socket s)
-        : cs(std::move(s)), in(cs.input()), out(cs.output()) {}
+    explicit SeaConn(ss::connected_socket s) : cs(std::move(s)), in(cs.input()), out(cs.output()) {}
 
     // Ensures the buffer is non-empty; returns false on EOF
     Task<bool> fill() {
@@ -337,7 +332,8 @@ struct BodyState {
     Task<size_t> read_some(std::byte* dst, size_t want) {
         co_await ResumeOnShard{shard};  // The consumer may resume on a pool thread
         if (error) fail("read after connection error");
-        // Deferred 100-continue: the client is told to send only once the handler decides it wants the body (docs/http-adapter.md §3.1)
+        // Deferred 100-continue: the client is told to send only once the handler decides it wants the body
+        // (docs/http-adapter.md §3.1)
         if (need_continue) {
             need_continue = false;
             try {
@@ -377,8 +373,7 @@ struct BodyState {
                 std::string t;
                 size_t trailer_bytes = 0;
                 for (;;) {
-                    if (!co_await conn->read_line(t, 1024))
-                        fail("client disconnected in trailers");
+                    if (!co_await conn->read_line(t, 1024)) fail("client disconnected in trailers");
                     if (t.empty()) break;
                     trailer_bytes += t.size();
                     if (trailer_bytes > trailer_max) fail("trailer section too large");
@@ -421,9 +416,7 @@ struct BodyState {
 class SeastarBodyReader final : public BodyReader {
 public:
     SeastarBodyReader(BodyState* st, std::optional<uint64_t> len) : st_(st), len_(len) {}
-    Task<size_t> read(std::span<std::byte> buf) override {
-        co_return co_await st_->read_some(buf.data(), buf.size());
-    }
+    Task<size_t> read(std::span<std::byte> buf) override { co_return co_await st_->read_some(buf.data(), buf.size()); }
     std::optional<uint64_t> length() const override { return len_; }
 
 private:
@@ -478,8 +471,7 @@ struct ServerCore {
     }
 };
 
-Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, bool keep,
-                          size_t io_chunk,
+Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, bool keep, size_t io_chunk,
                           unsigned shard) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
     auto head = driver::render_response_head(resp, keep, head_request);
@@ -520,17 +512,15 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
                     // A fixed-length response that wrote too little must not
                     // stay keep-alive: the client would read the next response
                     // head as the rest of this body -> responses misaligned
-                    LOG_ERROR("stream body short of declared Content-Length ({} != {})",
-                              written, *resp.content_length);
+                    LOG_ERROR("stream body short of declared Content-Length ({} != {})", written, *resp.content_length);
                     co_return false;
                 }
                 co_await conn.flush();
                 co_return true;
             }
-            if (!head.chunked && resp.content_length &&
-                written + n > *resp.content_length) {
-                LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})",
-                          written, n, *resp.content_length);
+            if (!head.chunked && resp.content_length && written + n > *resp.content_length) {
+                LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})", written, n,
+                          *resp.content_length);
                 co_return false;
             }
             if (head.chunked) {
@@ -547,8 +537,8 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
     }
 }
 
-Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session> sess,
-                       std::string peer, unsigned shard) {
+Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session> sess, std::string peer,
+                       unsigned shard) {
     auto& conn = sess->conn;
     conn.cs.set_nodelay(true);
     // Idle/slow timeout: on expiry both directions are shut down, pending
@@ -561,7 +551,8 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         try {
             sess->conn.cs.shutdown_input();
             sess->conn.cs.shutdown_output();
-        } catch (...) {}
+        } catch (...) {
+        }
     });
     conn.idle = &idle_timer;
     auto set_phase = [&](driver::Phase p, int sec) {
@@ -577,160 +568,164 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     // it throws, hence the gate on the config
     std::optional<TlsIdentity> tls_identity;
 
-    // Socket errors such as a peer RST surface from seastar futures as exceptions: catch them and take the unified stream-close wrap-up
+    // Socket errors such as a peer RST surface from seastar futures as exceptions: catch them and take the unified
+    // stream-close wrap-up
     try {
-    if (!core->cfg.tls_cert.empty() && core->cfg.tls_client_auth != "off") {
-        set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
-        SeaConn::ArmGuard arm(conn);
-        auto dn = co_await fut_await(ss::tls::get_dn_information(conn.cs));
-        if (dn) {
-            TlsIdentity id;
-            id.subject_cn = tls::cn_of_dn(std::string_view(dn->subject.data(), dn->subject.size()));
-            auto sans = co_await fut_await(ss::tls::get_alt_name_information(
-                conn.cs, {ss::tls::subject_alt_name_type::uri}));
-            for (auto& san : sans)
-                if (auto* v = std::get_if<ss::sstring>(&san.value)) {
-                    id.san_uri.assign(v->data(), v->size());
+        if (!core->cfg.tls_cert.empty() && core->cfg.tls_client_auth != "off") {
+            set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
+            SeaConn::ArmGuard arm(conn);
+            auto dn = co_await fut_await(ss::tls::get_dn_information(conn.cs));
+            if (dn) {
+                TlsIdentity id;
+                id.subject_cn = tls::cn_of_dn(std::string_view(dn->subject.data(), dn->subject.size()));
+                auto sans = co_await fut_await(
+                    ss::tls::get_alt_name_information(conn.cs, {ss::tls::subject_alt_name_type::uri}));
+                for (auto& san : sans)
+                    if (auto* v = std::get_if<ss::sstring>(&san.value)) {
+                        id.san_uri.assign(v->data(), v->size());
+                        break;
+                    }
+                tls_identity = std::move(id);
+            }
+        }
+        while (keep && !core->stopping.load(std::memory_order_relaxed)) {
+            const size_t max_line = core->cfg.max_header_size;
+            std::string line;
+            // Request line: idle wait on a reused connection, header bound on a fresh one
+            if (served == 0)
+                set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
+            else
+                set_phase(driver::Phase::Idle, core->cfg.idle_timeout_sec);
+            bool got = co_await conn.read_line(line, max_line);
+            if (!got || line.empty()) break;
+            set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
+
+            HttpRequest req;
+            req.remote_addr = peer;
+            req.tls_identity = tls_identity;
+            {
+                auto sp1 = line.find(' ');
+                auto sp2 = line.rfind(' ');
+                if (sp1 == std::string::npos || sp2 == sp1) {
+                    core->counters.parse_error();
                     break;
                 }
-            tls_identity = std::move(id);
-        }
-    }
-    while (keep && !core->stopping.load(std::memory_order_relaxed)) {
-        const size_t max_line = core->cfg.max_header_size;
-        std::string line;
-        // Request line: idle wait on a reused connection, header bound on a fresh one
-        if (served == 0) set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
-        else set_phase(driver::Phase::Idle, core->cfg.idle_timeout_sec);
-        bool got = co_await conn.read_line(line, max_line);
-        if (!got || line.empty()) break;
-        set_phase(driver::Phase::Header, core->cfg.header_timeout_sec);
+                req.method = line.substr(0, sp1);
+                std::string target = line.substr(sp1 + 1, sp2 - sp1 - 1);
+                std::string version = line.substr(sp2 + 1);
+                if (version == "HTTP/1.0") keep = false;
+                driver::parse_target(target, req);
+            }
 
-        HttpRequest req;
-        req.remote_addr = peer;
-        req.tls_identity = tls_identity;
-        {
-            auto sp1 = line.find(' ');
-            auto sp2 = line.rfind(' ');
-            if (sp1 == std::string::npos || sp2 == sp1) {
+            // Headers
+            bool bad = false;     // malformed header block (counted as a parse error)
+            bool closed = false;  // peer gone / timed out mid-headers (not a parse error)
+            size_t header_bytes = 0;
+            for (;;) {
+                if (!co_await conn.read_line(line, max_line)) {
+                    closed = true;
+                    break;
+                }
+                if (line.empty()) break;
+                header_bytes += line.size();
+                if (header_bytes > core->cfg.max_header_size) {
+                    bad = true;
+                    break;
+                }
+                // A bare CR must not remain in the header name/value (read_line only strips the single trailing \r)
+                auto colon = line.find(':');
+                if (colon == std::string::npos || colon == 0 || line.find('\r') != std::string::npos) {
+                    bad = true;
+                    break;
+                }
+                std::string k = line.substr(0, colon);
+                std::string v = line.substr(colon + 1);
+                v.erase(0, v.find_first_not_of(" \t"));
+                auto tail = v.find_last_not_of(" \t");
+                if (tail != std::string::npos) v.erase(tail + 1);
+                req.headers.add(std::move(k), std::move(v));
+            }
+            if (closed) break;
+            if (bad) {
                 core->counters.parse_error();
                 break;
             }
-            req.method = line.substr(0, sp1);
-            std::string target = line.substr(sp1 + 1, sp2 - sp1 - 1);
-            std::string version = line.substr(sp2 + 1);
-            if (version == "HTTP/1.0") keep = false;
-            driver::parse_target(target, req);
-        }
+            sess->in_flight = true;
 
-        // Headers
-        bool bad = false;     // malformed header block (counted as a parse error)
-        bool closed = false;  // peer gone / timed out mid-headers (not a parse error)
-        size_t header_bytes = 0;
-        for (;;) {
-            if (!co_await conn.read_line(line, max_line)) {
-                closed = true;
+            if (req.headers.has("Connection")) {
+                // List header: "Connection: close, Upgrade" is valid; full-equality comparison would miss the close
+                if (req.headers.has_token("Connection", "close"))
+                    keep = false;
+                else if (req.headers.has_token("Connection", "keep-alive"))
+                    keep = true;
+            }
+
+            // Body framing: CL/TE conflict, duplicate CL, and invalid values are
+            // all rejected with the connection closed (request-smuggling
+            // preconditions, see drivers/common.h parse_body_framing)
+            auto framing = driver::parse_body_framing(req.headers);
+            if (!framing.valid) {
+                core->counters.parse_error();
+                auto bad = driver::bad_request_response("Invalid message framing.");
+                co_await write_response(conn, bad, req.method == "HEAD", /*keep=*/false, core->cfg.io_chunk_size,
+                                        shard);
                 break;
             }
-            if (line.empty()) break;
-            header_bytes += line.size();
-            if (header_bytes > core->cfg.max_header_size) {
-                bad = true;
-                break;
+            core->counters.request_parsed();
+            set_phase(driver::Phase::Body, core->cfg.body_timeout_sec);
+            BodyState bstate;
+            bstate.conn = &conn;
+            bstate.shard = shard;
+            bstate.trailer_max = core->cfg.trailer_max_size;
+            std::optional<uint64_t> content_length = framing.content_length;
+            bool has_body = false;
+            if (framing.chunked) {
+                bstate.chunked = true;
+                has_body = true;
+            } else if (content_length) {
+                bstate.remaining = *content_length;
+                has_body = *content_length > 0;
             }
-            // A bare CR must not remain in the header name/value (read_line only strips the single trailing \r)
-            auto colon = line.find(':');
-            if (colon == std::string::npos || colon == 0 ||
-                line.find('\r') != std::string::npos) {
-                bad = true;
-                break;
+            if (has_body || content_length) req.body = std::make_unique<SeastarBodyReader>(&bstate, content_length);
+            if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
+                bstate.need_continue = true;
+
+            bool head_request = req.method == "HEAD";
+            HttpResponse resp;
+            try {
+                resp = co_await core->handler(std::move(req));
+            } catch (const std::exception& e) {
+                // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2)
+                resp = driver::internal_error_response(e.what());
+                keep = false;
             }
-            std::string k = line.substr(0, colon);
-            std::string v = line.substr(colon + 1);
-            v.erase(0, v.find_first_not_of(" \t"));
-            auto tail = v.find_last_not_of(" \t");
-            if (tail != std::string::npos) v.erase(tail + 1);
-            req.headers.add(std::move(k), std::move(v));
-        }
-        if (closed) break;
-        if (bad) {
-            core->counters.parse_error();
-            break;
-        }
-        sess->in_flight = true;
+            co_await ResumeOnShard{shard};  // The handler may resume on a pool thread
 
-        if (req.headers.has("Connection")) {
-            // List header: "Connection: close, Upgrade" is valid; full-equality comparison would miss the close
-            if (req.headers.has_token("Connection", "close")) keep = false;
-            else if (req.headers.has_token("Connection", "keep-alive")) keep = true;
-        }
+            if (core->stopping.load(std::memory_order_relaxed)) keep = false;
+            // The unconsumed body must be drained before reusing the connection.
+            // If the body errored, the stream is out of sync (leftover bytes
+            // would be parsed as the next request), so the connection must close;
+            // if 100-continue was never sent, the client may never send a body —
+            // do not wait blindly, close as well
+            if (bstate.error)
+                keep = false;
+            else if (!bstate.at_eof()) {
+                if (bstate.need_continue)
+                    keep = false;
+                else if (keep)
+                    keep = co_await bstate.drain(core->cfg.drain_limit);
+            }
 
-        // Body framing: CL/TE conflict, duplicate CL, and invalid values are
-        // all rejected with the connection closed (request-smuggling
-        // preconditions, see drivers/common.h parse_body_framing)
-        auto framing = driver::parse_body_framing(req.headers);
-        if (!framing.valid) {
-            core->counters.parse_error();
-            auto bad = driver::bad_request_response("Invalid message framing.");
-            co_await write_response(conn, bad, req.method == "HEAD", /*keep=*/false,
-                                    core->cfg.io_chunk_size, shard);
-            break;
+            if (keep && driver::keepalive_budget_exhausted(served + 1, core->cfg.max_requests_per_connection)) {
+                keep = false;
+                core->counters.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
+            }
+            set_phase(driver::Phase::Write, core->cfg.write_timeout_sec);
+            bool ok = co_await write_response(conn, resp, head_request, keep, core->cfg.io_chunk_size, shard);
+            sess->in_flight = false;
+            if (!ok) break;
+            ++served;
         }
-        core->counters.request_parsed();
-        set_phase(driver::Phase::Body, core->cfg.body_timeout_sec);
-        BodyState bstate;
-        bstate.conn = &conn;
-        bstate.shard = shard;
-        bstate.trailer_max = core->cfg.trailer_max_size;
-        std::optional<uint64_t> content_length = framing.content_length;
-        bool has_body = false;
-        if (framing.chunked) {
-            bstate.chunked = true;
-            has_body = true;
-        } else if (content_length) {
-            bstate.remaining = *content_length;
-            has_body = *content_length > 0;
-        }
-        if (has_body || content_length)
-            req.body = std::make_unique<SeastarBodyReader>(&bstate, content_length);
-        if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
-            bstate.need_continue = true;
-
-        bool head_request = req.method == "HEAD";
-        HttpResponse resp;
-        try {
-            resp = co_await core->handler(std::move(req));
-        } catch (const std::exception& e) {
-            // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2)
-            resp = driver::internal_error_response(e.what());
-            keep = false;
-        }
-        co_await ResumeOnShard{shard};  // The handler may resume on a pool thread
-
-        if (core->stopping.load(std::memory_order_relaxed)) keep = false;
-        // The unconsumed body must be drained before reusing the connection.
-        // If the body errored, the stream is out of sync (leftover bytes
-        // would be parsed as the next request), so the connection must close;
-        // if 100-continue was never sent, the client may never send a body —
-        // do not wait blindly, close as well
-        if (bstate.error) keep = false;
-        else if (!bstate.at_eof()) {
-            if (bstate.need_continue) keep = false;
-            else if (keep) keep = co_await bstate.drain(core->cfg.drain_limit);
-        }
-
-        if (keep && driver::keepalive_budget_exhausted(served + 1,
-                                                       core->cfg.max_requests_per_connection)) {
-            keep = false;
-            core->counters.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
-        }
-        set_phase(driver::Phase::Write, core->cfg.write_timeout_sec);
-        bool ok = co_await write_response(conn, resp, head_request, keep,
-                                          core->cfg.io_chunk_size, shard);
-        sess->in_flight = false;
-        if (!ok) break;
-        ++served;
-    }
     } catch (const std::exception& e) {
         LOG_DEBUG("seastar session ended with error: {}", e.what());
     }
@@ -740,15 +735,16 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
     // output_stream must be closed explicitly (flush + release); failure (peer already gone) is ignored
     try {
         co_await fut_await(conn.out.close());
-    } catch (...) {}
+    } catch (...) {
+    }
     try {
         co_await fut_await(conn.in.close());
-    } catch (...) {}
+    } catch (...) {
+    }
 }
 
 // Accept loop: one per shard; abort_accept() makes accept() return with an exception and exit
-ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<ShardState> st,
-                         unsigned shard) {
+ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<ShardState> st, unsigned shard) {
     while (!st->stopping) {
         std::optional<ss::accept_result> ar;
         bool retry = false;  // co_await cannot appear inside a catch block; record a flag, then back off
@@ -771,8 +767,7 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
         // four drivers): apportioned per shard; over the limit new
         // connections are dropped (ar closes on destruction) — without a
         // cap, per-connection coroutine frames/buffers can exhaust memory
-        size_t shard_cap = std::max<size_t>(
-            1, static_cast<size_t>(core->cfg.max_connections) / ss::smp::count);
+        size_t shard_cap = std::max<size_t>(1, static_cast<size_t>(core->cfg.max_connections) / ss::smp::count);
         if (st->sessions.size() >= shard_cap) {
             LOG_WARN("connection limit ({}/shard) reached, rejecting", shard_cap);
             core->counters.rejected_limit.fetch_add(1, std::memory_order_relaxed);
@@ -799,8 +794,7 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
 ss::future<size_t> count_sessions(std::shared_ptr<ServerCore> core) {
     size_t total = 0;
     for (unsigned s = 0; s < core->shards.size(); ++s)
-        total += co_await ss::smp::submit_to(
-            s, [st = core->shards[s].get()] { return st->sessions.size(); });
+        total += co_await ss::smp::submit_to(s, [st = core->shards[s].get()] { return st->sessions.size(); });
     co_return total;
 }
 
@@ -839,8 +833,7 @@ ss::future<> stop_watcher(std::shared_ptr<ServerCore> core, ss::readable_eventfd
     if (left > 0) {
         LOG_WARN("forcing {} connection(s) closed on shutdown", left);
         co_await shutdown_sessions(core, /*idle_only=*/false);
-        left = co_await wait_drained(core,
-                                     std::chrono::seconds(core->cfg.shutdown_force_wait_sec));
+        left = co_await wait_drained(core, std::chrono::seconds(core->cfg.shutdown_force_wait_sec));
         if (left > 0) LOG_WARN("{} connection(s) still alive after force close", left);
     }
     core->notify_stopped();
@@ -892,8 +885,7 @@ ss::future<ss::shared_ptr<ss::tls::server_credentials>> build_tls_credentials(co
 }
 
 // One shard's listener (+ TLS wrap) and accept loop; runs on that shard
-ss::future<> setup_shard(std::shared_ptr<ServerCore> core, std::string addr, uint16_t p,
-                         unsigned s) {
+ss::future<> setup_shard(std::shared_ptr<ServerCore> core, std::string addr, uint16_t p, unsigned s) {
     auto st = std::make_shared<ShardState>();
     ss::listen_options lo;
     lo.reuse_address = true;
@@ -931,13 +923,11 @@ uint16_t probe_free_port(const std::string& addr) {
     sockaddr_storage ss{};
     socklen_t sslen = 0;
     int family = AF_INET;
-    if (auto* v6 = reinterpret_cast<sockaddr_in6*>(&ss);
-        inet_pton(AF_INET6, addr.c_str(), &v6->sin6_addr) == 1) {
+    if (auto* v6 = reinterpret_cast<sockaddr_in6*>(&ss); inet_pton(AF_INET6, addr.c_str(), &v6->sin6_addr) == 1) {
         family = AF_INET6;
         v6->sin6_family = AF_INET6;
         sslen = sizeof(sockaddr_in6);
-    } else if (auto* v4 = reinterpret_cast<sockaddr_in*>(&ss);
-               inet_pton(AF_INET, addr.c_str(), &v4->sin_addr) == 1) {
+    } else if (auto* v4 = reinterpret_cast<sockaddr_in*>(&ss); inet_pton(AF_INET, addr.c_str(), &v4->sin_addr) == 1) {
         v4->sin_family = AF_INET;
         sslen = sizeof(sockaddr_in);
     } else {
@@ -957,9 +947,8 @@ uint16_t probe_free_port(const std::string& addr) {
     socklen_t blen = sizeof(bound);
     getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &blen);
     ::close(fd);
-    return ntohs(bound.ss_family == AF_INET6
-                     ? reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port
-                     : reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
+    return ntohs(bound.ss_family == AF_INET6 ? reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port
+                                             : reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
 }
 
 class SeastarServer final : public IHttpServer {
@@ -979,9 +968,10 @@ public:
                     throw std::runtime_error("seastar driver: cannot read TLS file " + *path);
             }
             if (!cfg.tls_ciphers.empty() || !cfg.tls_ciphersuites.empty())
-                LOG_WARN("seastar driver: tls_ciphers/tls_ciphersuites only apply to a "
-                         "seastar built with the OpenSSL backend (GnuTLS uses its own priority "
-                         "string, docs/tls.md §4)");
+                LOG_WARN(
+                    "seastar driver: tls_ciphers/tls_ciphersuites only apply to a "
+                    "seastar built with the OpenSSL backend (GnuTLS uses its own priority "
+                    "string, docs/tls.md §4)");
         }
     }
 
@@ -1012,9 +1002,7 @@ public:
         core_->shards.resize(eng.shards());
 
         auto core = core_;
-        stop_fd_ = ss::alien::submit_to(eng.alien(), 0, [core, addr, p] {
-            return setup_server(core, addr, p);
-        }).get();
+        stop_fd_ = ss::alien::submit_to(eng.alien(), 0, [core, addr, p] { return setup_server(core, addr, p); }).get();
 
         port_ = p;
         // When shutdown() arrives before listen(), stop_fd_ is still -1 and
@@ -1061,9 +1049,8 @@ private:
 }  // namespace
 
 void register_seastar_driver() {
-    HttpServerFactory::register_driver("seastar", [](const HttpConfig& cfg) {
-        return std::make_unique<SeastarServer>(cfg);
-    });
+    HttpServerFactory::register_driver("seastar",
+                                       [](const HttpConfig& cfg) { return std::make_unique<SeastarServer>(cfg); });
 }
 
 }  // namespace lights3::http

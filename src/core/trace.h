@@ -29,13 +29,11 @@ struct TraceContext {
 
     // Strict W3C parse: version 00 (any other version is accepted with its first
     // four fields, ff is rejected), lowercase hex, non-zero ids. nullopt = malformed
-    static std::optional<TraceContext> parse(std::string_view traceparent,
-                                             std::string_view tracestate = {});
+    static std::optional<TraceContext> parse(std::string_view traceparent, std::string_view tracestate = {});
     // A fresh trace (new trace id + span id, sampled)
     static TraceContext start();
     // The request's context: parsed when valid, else a fresh trace
-    static TraceContext from_headers(std::optional<std::string> traceparent,
-                                     std::optional<std::string> tracestate);
+    static TraceContext from_headers(std::optional<std::string> traceparent, std::optional<std::string> tracestate);
 };
 
 }  // namespace lights3

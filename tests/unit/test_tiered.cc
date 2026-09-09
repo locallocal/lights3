@@ -1,6 +1,6 @@
 // Tiered storage backend unit tests (docs/storage/tiered-design.md §10 P1-P4 acceptance):
-// consistency suite, tier state machine, overwrite/delete entering GC, scanner cold detection and crash recovery, space fallback.
-// The cloud side is played by MemoryBackend (wrapped with counters to assert the number of cloud calls).
+// consistency suite, tier state machine, overwrite/delete entering GC, scanner cold detection and crash recovery, space
+// fallback. The cloud side is played by MemoryBackend (wrapped with counters to assert the number of cloud calls).
 #include <sys/xattr.h>
 
 #include <atomic>
@@ -11,9 +11,9 @@
 #include <thread>
 
 #include "core/thread_pool.h"
+#include "storage/bucket_router.h"
 #include "storage/localfs/fs_util.h"
 #include "storage/memory/memory_backend.h"
-#include "storage/bucket_router.h"
 #include "storage/registry.h"
 #include "storage/tiered/tiered_backend.h"
 #ifdef LIGHTS3_DUOSTORE
@@ -40,16 +40,16 @@ std::string read_all(http::BodyReader& r) {
     return out;
 }
 
-PutResult put(IStorageBackend& b, const std::string& bkt, const std::string& key,
-              const std::string& data, ObjectMeta meta = {}) {
+PutResult put(IStorageBackend& b, const std::string& bkt, const std::string& key, const std::string& data,
+              ObjectMeta meta = {}) {
     http::StringBodyReader body(data);
     return sync_wait(b.put_object(bkt, key, std::move(meta), body));
 }
 
 using TmpDir = backend_suite::TmpDir;
 
-// Counting wrapper: asserts when tiered actually touches the cloud; fail_cloud simulates an unreachable cloud (injection for the
-// GC backoff / reconciliation failure paths)
+// Counting wrapper: asserts when tiered actually touches the cloud; fail_cloud simulates an unreachable cloud
+// (injection for the GC backoff / reconciliation failure paths)
 class CountingCloud final : public IStorageBackend {
 public:
     std::shared_ptr<MemoryBackend> inner = std::make_shared<MemoryBackend>();
@@ -57,29 +57,19 @@ public:
     std::atomic<bool> fail_cloud{false};
 
     void require_up() const {
-        if (fail_cloud)
-            throw s3::S3Error(s3::S3ErrorCode::InternalError, "injected: cloud unreachable");
+        if (fail_cloud) throw s3::S3Error(s3::S3ErrorCode::InternalError, "injected: cloud unreachable");
     }
 
-    Task<void> create_bucket(std::string_view b) override {
-        co_return co_await inner->create_bucket(b);
-    }
-    Task<void> delete_bucket(std::string_view b) override {
-        co_return co_await inner->delete_bucket(b);
-    }
-    Task<bool> bucket_exists(std::string_view b) override {
-        co_return co_await inner->bucket_exists(b);
-    }
-    Task<std::vector<BucketInfo>> list_buckets() override {
-        co_return co_await inner->list_buckets();
-    }
-    Task<ObjectStream> get_object(std::string_view b, std::string_view k,
-                                  std::optional<ByteRange> r) override {
+    Task<void> create_bucket(std::string_view b) override { co_return co_await inner->create_bucket(b); }
+    Task<void> delete_bucket(std::string_view b) override { co_return co_await inner->delete_bucket(b); }
+    Task<bool> bucket_exists(std::string_view b) override { co_return co_await inner->bucket_exists(b); }
+    Task<std::vector<BucketInfo>> list_buckets() override { co_return co_await inner->list_buckets(); }
+    Task<ObjectStream> get_object(std::string_view b, std::string_view k, std::optional<ByteRange> r) override {
         ++gets;
         co_return co_await inner->get_object(b, k, r);
     }
-    Task<PutResult> put_object(std::string_view b, std::string_view k, ObjectMeta m,
-                               http::BodyReader& body, PutCondition cond = {}) override {
+    Task<PutResult> put_object(std::string_view b, std::string_view k, ObjectMeta m, http::BodyReader& body,
+                               PutCondition cond = {}) override {
         ++puts;
         co_return co_await inner->put_object(b, k, std::move(m), body, cond);
     }
@@ -97,32 +87,26 @@ public:
         require_up();
         co_return co_await inner->list_objects(b, o);
     }
-    Task<std::string> create_multipart(std::string_view b, std::string_view k,
-                                       ObjectMeta m) override {
+    Task<std::string> create_multipart(std::string_view b, std::string_view k, ObjectMeta m) override {
         co_return co_await inner->create_multipart(b, k, std::move(m));
     }
     using IStorageBackend::upload_part;
-    Task<PutResult> upload_part(std::string_view b, std::string_view k, std::string_view id,
-                                int no, http::BodyReader& body,
-                                const std::optional<PartChecksum>& checksum) override {
+    Task<PutResult> upload_part(std::string_view b, std::string_view k, std::string_view id, int no,
+                                http::BodyReader& body, const std::optional<PartChecksum>& checksum) override {
         co_return co_await inner->upload_part(b, k, id, no, body, checksum);
     }
-    Task<PutResult> complete_multipart(std::string_view b, std::string_view k,
-                                       std::string_view id,
+    Task<PutResult> complete_multipart(std::string_view b, std::string_view k, std::string_view id,
                                        std::span<const PartInfo> parts) override {
         co_return co_await inner->complete_multipart(b, k, id, parts);
     }
-    Task<void> abort_multipart(std::string_view b, std::string_view k,
-                               std::string_view id) override {
+    Task<void> abort_multipart(std::string_view b, std::string_view k, std::string_view id) override {
         co_return co_await inner->abort_multipart(b, k, id);
     }
-    Task<ListPartsResult> list_parts(std::string_view b, std::string_view k,
-                                     std::string_view id,
+    Task<ListPartsResult> list_parts(std::string_view b, std::string_view k, std::string_view id,
                                      const ListPartsOptions& opt) override {
         co_return co_await inner->list_parts(b, k, id, opt);
     }
-    Task<ListUploadsResult> list_multipart_uploads(std::string_view b,
-                                                   const ListUploadsOptions& opt) override {
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view b, const ListUploadsOptions& opt) override {
         co_return co_await inner->list_multipart_uploads(b, opt);
     }
 };
@@ -141,9 +125,7 @@ struct Fixture {
     }
     ~Fixture() { sync_wait(tiered->close()); }
 
-    fs::path data_path(const std::string& bkt, const std::string& key) const {
-        return tmp.path / "data" / bkt / key;
-    }
+    fs::path data_path(const std::string& bkt, const std::string& key) const { return tmp.path / "data" / bkt / key; }
     fsutil::TierInfo tier_of(const std::string& bkt, const std::string& key) const {
         fsutil::TierInfo t;
         fsutil::load_object_meta(data_path(bkt, key), key, &t);
@@ -227,8 +209,7 @@ TEST(tiered_range_get_passthrough) {
     put(*f.tiered, "bkt", "r.bin", data);
     sync_wait(f.tiered->demote_object("bkt", "r.bin"));
 
-    auto mid = sync_wait(f.tiered->get_object("bkt", "r.bin",
-                                              ByteRange{uint64_t(1000), uint64_t(2999)}));
+    auto mid = sync_wait(f.tiered->get_object("bkt", "r.bin", ByteRange{uint64_t(1000), uint64_t(2999)}));
     CHECK(read_all(*mid.body) == data.substr(1000, 2000));
     CHECK(mid.range.has_value());
     CHECK_EQ(mid.meta.size, uint64_t(data.size()));  // the 206 total length comes from local meta
@@ -251,8 +232,8 @@ TEST(tiered_multipart_object_demote) {
     http::StringBodyReader b1(p1), b2(p2);
     auto r1 = sync_wait(f.tiered->upload_part("bkt", "mp.bin", uid, 1, b1));
     auto r2 = sync_wait(f.tiered->upload_part("bkt", "mp.bin", uid, 2, b2));
-    auto cr = sync_wait(f.tiered->complete_multipart(
-        "bkt", "mp.bin", uid, std::vector<PartInfo>{{1, r1.etag}, {2, r2.etag}}));
+    auto cr = sync_wait(
+        f.tiered->complete_multipart("bkt", "mp.bin", uid, std::vector<PartInfo>{{1, r1.etag}, {2, r2.etag}}));
     CHECK(cr.etag.find('-') != std::string::npos);
 
     sync_wait(f.tiered->demote_object("bkt", "mp.bin"));
@@ -291,8 +272,7 @@ TEST(tiered_overwrite_and_delete_gc) {
     CHECK_EQ(f.gc_entries(), size_t(1));
     sync_wait(f.tiered->run_gc_once());
     CHECK_EQ(f.gc_entries(), size_t(0));
-    CHECK_THROWS_S3(sync_wait(f.cloud->inner->get_object("bkt", "o.bin", std::nullopt)),
-                    s3::S3ErrorCode::NoSuchKey);
+    CHECK_THROWS_S3(sync_wait(f.cloud->inner->get_object("bkt", "o.bin", std::nullopt)), s3::S3ErrorCode::NoSuchKey);
 }
 
 // GC never deletes a live copy: after the same key is demoted again, the old expired entry is simply voided
@@ -313,8 +293,8 @@ TEST(tiered_gc_never_deletes_live_copy) {
     CHECK(read_all(*got.body) == data);
 }
 
-// GC with the cloud unreachable: entries back off exponentially (attempts/retry_at persisted in the TSV, not reset on restart),
-// and resume liquidation once due (todo §3.4; docs/storage/tiered-design.md §9)
+// GC with the cloud unreachable: entries back off exponentially (attempts/retry_at persisted in the TSV, not reset on
+// restart), and resume liquidation once due (todo §3.4; docs/storage/tiered-design.md §9)
 TEST(tiered_gc_retry_exponential_backoff) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -347,12 +327,13 @@ TEST(tiered_gc_retry_exponential_backoff) {
     CHECK_EQ(st2.deferred, uint64_t(1));
     CHECK_EQ(f.cloud->heads.load(), heads_before);
 
-    // Manually dial the clock past the due point (simulating the backoff window elapsing), still failing -> attempts=2, backoff doubles (~=120s)
+    // Manually dial the clock past the due point (simulating the backoff window elapsing), still failing -> attempts=2,
+    // backoff doubles (~=120s)
     auto rewind = [&] {
         auto kv = read_entry();
         std::ofstream out(entry, std::ios::trunc);
-        out << "bucket\t" << kv["bucket"] << "\nkey\t" << kv["key"] << "\netag\t" << kv["etag"]
-            << "\nattempts\t" << kv["attempts"] << "\nretry_at\t0\n";
+        out << "bucket\t" << kv["bucket"] << "\nkey\t" << kv["key"] << "\netag\t" << kv["etag"] << "\nattempts\t"
+            << kv["attempts"] << "\nretry_at\t0\n";
     };
     rewind();
     auto st3 = sync_wait(f.tiered->run_gc_once());
@@ -372,8 +353,8 @@ TEST(tiered_gc_retry_exponential_backoff) {
     CHECK_EQ(f.gc_entries(), size_t(0));
 }
 
-// Reconciliation forward direction (docs/storage/tiered-design.md §9): a manually mis-deleted stub is rebuilt from the lights3-* redundant headers;
-// foreign objects without the redundant headers are skipped untouched
+// Reconciliation forward direction (docs/storage/tiered-design.md §9): a manually mis-deleted stub is rebuilt from the
+// lights3-* redundant headers; foreign objects without the redundant headers are skipped untouched
 TEST(tiered_reconcile_rebuilds_lost_stub) {
     Fixture f;
     sync_wait(f.tiered->create_bucket("bkt"));
@@ -413,14 +394,14 @@ TEST(tiered_reconcile_rebuilds_lost_stub) {
     got.body.reset();
     // The foreign object is preserved as is, and no local object was created
     CHECK_EQ(sync_wait(f.cloud->inner->head_object("bkt", "foreign.bin")).size, uint64_t(7));
-    CHECK_THROWS_S3(sync_wait(f.tiered->head_object("bkt", "foreign.bin")),
-                    s3::S3ErrorCode::NoSuchKey);
+    CHECK_THROWS_S3(sync_wait(f.tiered->head_object("bkt", "foreign.bin")), s3::S3ErrorCode::NoSuchKey);
     // Convergence: another round rebuilds nothing
     auto st2 = sync_wait(f.tiered->run_reconcile_once());
     CHECK_EQ(st2.stubs_rebuilt, uint64_t(0));
 }
 
-// Reconciliation delete mode + GC pending entries do not resurrect + cleanup of stale cloud copies for local-tier objects (§9)
+// Reconciliation delete mode + GC pending entries do not resurrect + cleanup of stale cloud copies for local-tier
+// objects (§9)
 TEST(tiered_reconcile_delete_mode_and_stale_copy) {
     TieredConfig cfg;
     cfg.reconcile_delete_orphans = true;
@@ -432,7 +413,8 @@ TEST(tiered_reconcile_delete_mode_and_stale_copy) {
     sync_wait(f.tiered->delete_object("bkt", "o.bin"));  // GC queued, cloud copy still present for now
     CHECK_EQ(f.gc_entries(), size_t(1));
 
-    // A pending GC entry exists -> reconciliation neither rebuilds nor deletes (prevents resurrecting a just-DELETEd object), waits for GC to liquidate
+    // A pending GC entry exists -> reconciliation neither rebuilds nor deletes (prevents resurrecting a just-DELETEd
+    // object), waits for GC to liquidate
     auto st1 = sync_wait(f.tiered->run_reconcile_once());
     CHECK_EQ(st1.cloud_objects, uint64_t(1));
     CHECK_EQ(st1.stubs_rebuilt + st1.orphans_deleted, uint64_t(0));
@@ -447,10 +429,10 @@ TEST(tiered_reconcile_delete_mode_and_stale_copy) {
     }
     auto st2 = sync_wait(f.tiered->run_reconcile_once());
     CHECK_EQ(st2.orphans_deleted, uint64_t(1));
-    CHECK_THROWS_S3(sync_wait(f.cloud->inner->head_object("bkt", "orphan.bin")),
-                    s3::S3ErrorCode::NoSuchKey);
+    CHECK_THROWS_S3(sync_wait(f.cloud->inner->head_object("bkt", "orphan.bin")), s3::S3ErrorCode::NoSuchKey);
 
-    // A stale cloud copy whose local object is back to local (the GC lost-entry shape): deletion is always safe (local holds the full data)
+    // A stale cloud copy whose local object is back to local (the GC lost-entry shape): deletion is always safe (local
+    // holds the full data)
     put(*f.tiered, "bkt", "s.bin", data);
     sync_wait(f.tiered->demote_object("bkt", "s.bin"));
     put(*f.tiered, "bkt", "s.bin", make_data(2 * 1024));  // overwrite -> old copy enters GC
@@ -478,14 +460,14 @@ TEST(tiered_reconcile_reverse_alarm_keeps_stub) {
     CHECK_EQ(lr.objects.size(), size_t(1));  // for manual intervention
 }
 
-// Reconciliation/backoff config parsing: valid parameters land in config; invalid reconcile_orphans / gc_retry ranges error out
+// Reconciliation/backoff config parsing: valid parameters land in config; invalid reconcile_orphans / gc_retry ranges
+// error out
 TEST(tiered_reconcile_config_validation) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     auto try_build = [&](std::map<std::string, std::string> extra) {
         std::vector<BackendConfig> cfgs = {
-            {"l", "localfs",
-             {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}},
+            {"l", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}},
             {"m", "memory", {}}};
         extra.emplace("local", "l");
         extra.emplace("cloud", "m");
@@ -503,10 +485,10 @@ TEST(tiered_reconcile_config_validation) {
     CHECK_EQ(t->config().gc_retry_base_sec, int64_t(30));
     CHECK_EQ(t->config().gc_retry_cap_sec, int64_t(600));
     sync_wait(t->close());
-    for (const auto& bad : std::vector<std::map<std::string, std::string>>{
-             {{"reconcile_orphans", "maybe"}},
-             {{"gc_retry_base", "0s"}},
-             {{"gc_retry_base", "2h"}, {"gc_retry_cap", "1h"}}}) {
+    for (const auto& bad :
+         std::vector<std::map<std::string, std::string>>{{{"reconcile_orphans", "maybe"}},
+                                                         {{"gc_retry_base", "0s"}},
+                                                         {{"gc_retry_base", "2h"}, {"gc_retry_cap", "1h"}}}) {
         bool threw = false;
         try {
             try_build(bad);
@@ -517,7 +499,8 @@ TEST(tiered_reconcile_config_validation) {
     }
 }
 
-// scanner: cold_after=0 demotes everything as cold; crash recovery (remote but data not reclaimed) finishes the stub conversion
+// scanner: cold_after=0 demotes everything as cold; crash recovery (remote but data not reclaimed) finishes the stub
+// conversion
 TEST(tiered_scanner_cold_and_crash_recovery) {
     TieredConfig cfg;
     cfg.cold_after_sec = 0;
@@ -585,8 +568,8 @@ TEST(tiered_space_fallback_passthrough) {
 // Quota watermark reclamation: cached first (zero upload) then local, stops once below the low watermark
 TEST(tiered_quota_watermark_eviction) {
     TieredConfig cfg;
-    cfg.cold_after_sec = 1 << 30;      // cold detection never triggers, testing watermarks only
-    cfg.quota_bytes = 100 * 1024;      // high watermark 85KiB, low watermark 70KiB
+    cfg.cold_after_sec = 1 << 30;  // cold detection never triggers, testing watermarks only
+    cfg.quota_bytes = 100 * 1024;  // high watermark 85KiB, low watermark 70KiB
     Fixture f(cfg);
     sync_wait(f.tiered->create_bucket("bkt"));
     std::string a = make_data(40 * 1024), b = make_data(50 * 1024);
@@ -600,10 +583,11 @@ TEST(tiered_quota_watermark_eviction) {
 
     int puts_before = f.cloud->puts.load();
     sync_wait(f.tiered->scan_once());
-    // 90K->85K exceeded, must reclaim down to 70K: cached warm (50K) is the preferred victim; after reclaiming, 40K passes
+    // 90K->85K exceeded, must reclaim down to 70K: cached warm (50K) is the preferred victim; after reclaiming, 40K
+    // passes
     CHECK(f.tier_of("bkt", "warm.bin").tier == fsutil::Tier::kRemote);
     CHECK(f.tier_of("bkt", "hot.bin").tier == fsutil::Tier::kLocal);  // local needs no upload
-    CHECK_EQ(f.cloud->puts.load(), puts_before);  // zero upload traffic
+    CHECK_EQ(f.cloud->puts.load(), puts_before);                      // zero upload traffic
 }
 
 // Local-tier capacity gauges (backlog-sequence ①): what the space watermark sees,
@@ -613,12 +597,16 @@ TEST(tiered_local_capacity_gauges) {
     auto pool = std::make_shared<ThreadPool>(2);
     auto metrics = std::make_shared<MetricsRegistry>();
     std::vector<BackendConfig> cfgs;
-    cfgs.push_back({"localdata", "localfs",
-                    {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
+    cfgs.push_back(
+        {"localdata", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
     cfgs.push_back({"mem", "memory", {}});
-    cfgs.push_back({"tier", "tiered",
-                    {{"local", "localdata"}, {"cloud", "mem"}, {"scan_interval", "0s"},
-                     {"cold_after", "30d"}, {"space_high_watermark", "85%"},
+    cfgs.push_back({"tier",
+                    "tiered",
+                    {{"local", "localdata"},
+                     {"cloud", "mem"},
+                     {"scan_interval", "0s"},
+                     {"cold_after", "30d"},
+                     {"space_high_watermark", "85%"},
                      {"quota_bytes", "64MiB"}}});
     auto out = StorageRegistry::build(cfgs, pool, metrics);
     auto tiered = std::dynamic_pointer_cast<TieredBackend>(out.at("tier"));
@@ -658,37 +646,40 @@ TEST(tiered_local_capacity_gauges) {
     CHECK(gauge("lights3_tiered_local_total_bytes") > 0);
 }
 
-// Two-phase registry construction: tiered references leaf backends; cycles/unknown references and an invalid local error out
+// Two-phase registry construction: tiered references leaf backends; cycles/unknown references and an invalid local
+// error out
 TEST(tiered_registry_two_phase_build) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     std::vector<BackendConfig> cfgs;
-    cfgs.push_back({"localdata", "localfs",
-                    {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
+    cfgs.push_back(
+        {"localdata", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
     cfgs.push_back({"mem", "memory", {}});
-    cfgs.push_back({"tier", "tiered",
-                    {{"local", "localdata"}, {"cloud", "mem"}, {"scan_interval", "0s"},
-                     {"cold_after", "30d"}, {"space_high_watermark", "85%"},
+    cfgs.push_back({"tier",
+                    "tiered",
+                    {{"local", "localdata"},
+                     {"cloud", "mem"},
+                     {"scan_interval", "0s"},
+                     {"cold_after", "30d"},
+                     {"space_high_watermark", "85%"},
                      {"min_free_bytes", "1GiB"}}});
     auto out = StorageRegistry::build(cfgs, pool);
     CHECK_EQ(out.size(), size_t(3));
     auto tiered = std::dynamic_pointer_cast<TieredBackend>(out.at("tier"));
     CHECK(tiered != nullptr);
     CHECK_EQ(tiered->config().cold_after_sec, int64_t(30) * 86400);
-    CHECK(tiered->config().space_high_watermark > 0.84 &&
-          tiered->config().space_high_watermark < 0.86);
+    CHECK(tiered->config().space_high_watermark > 0.84 && tiered->config().space_high_watermark < 0.86);
     sync_wait(tiered->close());
 
-    // Watermark parsing (gaps §3.9): "1%" means 1% -- the old implementation dropped the "%" and then 1.0 skipped the /100,
-    // parsing as 100%; (used-low) went negative, wrapped around, and demoted the entire bucket
+    // Watermark parsing (gaps §3.9): "1%" means 1% -- the old implementation dropped the "%" and then 1.0 skipped the
+    // /100, parsing as 100%; (used-low) went negative, wrapped around, and demoted the entire bucket
     std::vector<BackendConfig> pct = cfgs;
     pct[2].params["space_high_watermark"] = "5%";
     pct[2].params["space_low_watermark"] = "1%";
     auto out2 = StorageRegistry::build(pct, pool);
     auto t2 = std::dynamic_pointer_cast<TieredBackend>(out2.at("tier"));
     CHECK(t2->config().space_low_watermark > 0.009 && t2->config().space_low_watermark < 0.011);
-    CHECK(t2->config().space_high_watermark > 0.049 &&
-          t2->config().space_high_watermark < 0.051);
+    CHECK(t2->config().space_high_watermark > 0.049 && t2->config().space_high_watermark < 0.051);
     sync_wait(t2->close());
 
     // Out-of-range values error at startup instead of wrapping at runtime
@@ -703,8 +694,7 @@ TEST(tiered_registry_two_phase_build) {
     CHECK(oob_threw);
 
     // Unknown reference
-    std::vector<BackendConfig> bad1 = {
-        {"t", "tiered", {{"local", "nope"}, {"cloud", "mem"}}}};
+    std::vector<BackendConfig> bad1 = {{"t", "tiered", {{"local", "nope"}, {"cloud", "mem"}}}};
     bool threw = false;
     try {
         StorageRegistry::build(bad1, pool);
@@ -715,9 +705,7 @@ TEST(tiered_registry_two_phase_build) {
 
     // local must be of the localfs family
     std::vector<BackendConfig> bad2 = {
-        {"mem", "memory", {}},
-        {"mem2", "memory", {}},
-        {"t", "tiered", {{"local", "mem"}, {"cloud", "mem2"}}}};
+        {"mem", "memory", {}}, {"mem2", "memory", {}}, {"t", "tiered", {{"local", "mem"}, {"cloud", "mem2"}}}};
     threw = false;
     try {
         StorageRegistry::build(bad2, pool);
@@ -727,9 +715,8 @@ TEST(tiered_registry_two_phase_build) {
     CHECK(threw);
 
     // tiered referencing each other (a cycle)
-    std::vector<BackendConfig> bad3 = {
-        {"a", "tiered", {{"local", "b"}, {"cloud", "b"}}},
-        {"b", "tiered", {{"local", "a"}, {"cloud", "a"}}}};
+    std::vector<BackendConfig> bad3 = {{"a", "tiered", {{"local", "b"}, {"cloud", "b"}}},
+                                       {"b", "tiered", {{"local", "a"}, {"cloud", "a"}}}};
     threw = false;
     try {
         StorageRegistry::build(bad3, pool);
@@ -739,18 +726,18 @@ TEST(tiered_registry_two_phase_build) {
     CHECK(threw);
 }
 
-// Per-backend dedicated IO pool (docs/concurrency.md §3.1): the io_threads parameter builds a dedicated pool for that backend
-// (a generic key for any type), pool observability metrics carry the backend label; backends without it share the global pool
-// (no such metric); invalid values error at configuration time
+// Per-backend dedicated IO pool (docs/concurrency.md §3.1): the io_threads parameter builds a dedicated pool for that
+// backend (a generic key for any type), pool observability metrics carry the backend label; backends without it share
+// the global pool (no such metric); invalid values error at configuration time
 TEST(registry_per_backend_thread_pool) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     auto metrics = std::make_shared<MetricsRegistry>();
     std::vector<BackendConfig> cfgs;
-    cfgs.push_back({"fast", "localfs",
-                    {{"root", (tmp.path / "d").string()},
-                     {"staging", (tmp.path / "s").string()},
-                     {"io_threads", "3"}}});
+    cfgs.push_back(
+        {"fast",
+         "localfs",
+         {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}, {"io_threads", "3"}}});
     cfgs.push_back({"mem", "memory", {}});
     auto out = StorageRegistry::build(cfgs, pool, metrics);
     CHECK_EQ(out.size(), size_t(2));
@@ -764,8 +751,7 @@ TEST(registry_per_backend_thread_pool) {
 
     auto text = metrics->render();
     CHECK(text.find("lights3_backend_pool_threads{backend=\"fast\"} 3") != std::string::npos);
-    CHECK(text.find("lights3_backend_pool_queue_depth{backend=\"fast\"}") !=
-          std::string::npos);
+    CHECK(text.find("lights3_backend_pool_queue_depth{backend=\"fast\"}") != std::string::npos);
     CHECK(text.find("lights3_backend_pool_completed{backend=\"fast\"}") != std::string::npos);
     // The shared-pool backend has no **pool** metrics (the memory backend's own usage gauge is not among these)
     CHECK(text.find("lights3_backend_pool_threads{backend=\"mem\"}") == std::string::npos);
@@ -784,8 +770,9 @@ TEST(registry_per_backend_thread_pool) {
     }
 }
 
-// Incremental quota maintenance (docs/archive/gaps.md §6.3): PUT accumulates the estimate in place and kicks an early scan round when
-// over the watermark -- previously a quota breach between two scans (default 1 hour) was completely invisible
+// Incremental quota maintenance (docs/archive/gaps.md §6.3): PUT accumulates the estimate in place and kicks an early
+// scan round when over the watermark -- previously a quota breach between two scans (default 1 hour) was completely
+// invisible
 TEST(tiered_quota_incremental_kicks_early_scan) {
     TieredConfig cfg;
     cfg.cold_after_sec = 1 << 30;
@@ -800,8 +787,8 @@ TEST(tiered_quota_incremental_kicks_early_scan) {
     put(*f.tiered, "bkt", "a.bin", make_data(30 * 1024));
     put(*f.tiered, "bkt", "b.bin", make_data(30 * 1024));
     put(*f.tiered, "bkt", "c.bin", make_data(30 * 1024));
-    // The early round is a background coroutine: poll until it brings local usage down (no assertion on who gets demoted --
-    // atimes are extremely close, the choice is an implementation detail)
+    // The early round is a background coroutine: poll until it brings local usage down (no assertion on who gets
+    // demoted -- atimes are extremely close, the choice is an implementation detail)
     bool converged = false;
     for (int i = 0; i < 100 && !converged; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -871,7 +858,7 @@ TEST(tiered_access_record_in_xattr_survives_restart) {
         CHECK_EQ(sscanf(rec.c_str(), "%lld %lld %lld", &a, &hits, &slot), 3);
         atime = a;
         CHECK(a >= ::time(nullptr) - 5);
-        CHECK_EQ(hits, 4LL);  // PUT + 3 GETs
+        CHECK_EQ(hits, 4LL);                // PUT + 3 GETs
         CHECK_EQ(slot, (a + 3600) / 3600);  // enrolled at its deadline slot
         sync_wait(t->close());
     }
@@ -1011,7 +998,7 @@ TEST(tiered_range_cache_blocks) {
     CHECK(fs::exists(rc));
     CHECK_EQ(fs::file_size(rc), uint64_t(data.size()));  // sparse container of the object's size
     CHECK(fs::exists(f.tmp.path / "staging/tier/rcache/map/bkt/r.bin"));
-    CHECK(get_range(70000, 149999) == data.substr(70000, 80000));  // hit
+    CHECK(get_range(70000, 149999) == data.substr(70000, 80000));    // hit
     CHECK(get_range(100000, 120000) == data.substr(100000, 20001));  // inside cached blocks: hit
     CHECK(get_range(65536, 196607) == data.substr(65536, 131072));   // exactly the two blocks: hit
     CHECK_EQ(f.cloud->gets.load(), gets0 + 1);
@@ -1103,12 +1090,19 @@ TEST(tiered_rules_config_parsing) {
     std::vector<BackendConfig> cfgs = {
         {"l", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}},
         {"m", "memory", {}},
-        {"t", "tiered",
-         {{"local", "l"}, {"cloud", "m"}, {"scan_interval", "0s"},
-          {"rules.0.match", "arch-*/raw/*"}, {"rules.0.cold_after", "7d"},
-          {"rules.1.match", "arch-*/keep/*"}, {"rules.1.cold_after", "never"},
-          {"full_scan_interval", "12h"}, {"evict_frequency_weight", "0.5"},
-          {"range_cache", "true"}, {"range_cache_block", "256KiB"}}}};
+        {"t",
+         "tiered",
+         {{"local", "l"},
+          {"cloud", "m"},
+          {"scan_interval", "0s"},
+          {"rules.0.match", "arch-*/raw/*"},
+          {"rules.0.cold_after", "7d"},
+          {"rules.1.match", "arch-*/keep/*"},
+          {"rules.1.cold_after", "never"},
+          {"full_scan_interval", "12h"},
+          {"evict_frequency_weight", "0.5"},
+          {"range_cache", "true"},
+          {"range_cache_block", "256KiB"}}}};
     auto out = StorageRegistry::build(cfgs, pool);
     auto t = std::dynamic_pointer_cast<TieredBackend>(out.at("t"));
     CHECK_EQ(t->config().rules.size(), size_t(2));
@@ -1119,10 +1113,10 @@ TEST(tiered_rules_config_parsing) {
     CHECK(t->config().range_cache);
     CHECK_EQ(t->config().range_cache_block, uint64_t(256 * 1024));
     sync_wait(t->close());
-    for (const auto& bad : std::vector<std::map<std::string, std::string>>{
-             {{"rules.0.match", "x/*"}},                     // missing cold_after
-             {{"evict_size_weight", "-1"}},
-             {{"range_cache_block", "1KiB"}}}) {
+    for (const auto& bad :
+         std::vector<std::map<std::string, std::string>>{{{"rules.0.match", "x/*"}},  // missing cold_after
+                                                         {{"evict_size_weight", "-1"}},
+                                                         {{"range_cache_block", "1KiB"}}}) {
         std::vector<BackendConfig> c2 = cfgs;
         c2[2].params = {{"local", "l"}, {"cloud", "m"}, {"scan_interval", "0s"}};
         for (auto& [k, v] : bad) c2[2].params[k] = v;
@@ -1155,8 +1149,7 @@ TEST(tiered_duostore_local_side) {
     TieredConfig cfg;
     cfg.scan_interval_sec = 0;
     cfg.cold_after_sec = 1 << 30;
-    auto t = std::make_shared<TieredBackend>(std::make_shared<tier::DuoStoreTierLocal>(duo),
-                                             cloud, pool, cfg);
+    auto t = std::make_shared<TieredBackend>(std::make_shared<tier::DuoStoreTierLocal>(duo), cloud, pool, cfg);
     CHECK_EQ(std::string(t->local().kind()), std::string("duostore"));
     sync_wait(t->create_bucket("bkt"));
     std::string data = make_data(200 * 1024);
@@ -1166,15 +1159,14 @@ TEST(tiered_duostore_local_side) {
     auto rec = duo->tier_read("bkt", "dir/cold.bin");
     CHECK(rec.has_value());
     CHECK_EQ(int(rec->tier.tier), int(duostore::TierState::kRemote));
-    CHECK(rec->data.extents.empty());          // local data released to the gcq
+    CHECK(rec->data.extents.empty());                 // local data released to the gcq
     CHECK_EQ(rec->meta.size, uint64_t(data.size()));  // logical size kept
     CHECK_EQ(cloud->puts.load(), 1);
     // HEAD/list local, GET goes to the cloud and caches back into fresh extents
     CHECK_EQ(sync_wait(t->head_object("bkt", "dir/cold.bin")).etag, pr.etag);
     CHECK_EQ(sync_wait(t->list_objects("bkt", {})).objects[0].size, uint64_t(data.size()));
     // Direct GET on the stub through duostore itself is refused loudly, not served empty
-    CHECK_THROWS_S3(sync_wait(duo->get_object("bkt", "dir/cold.bin", std::nullopt)),
-                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(sync_wait(duo->get_object("bkt", "dir/cold.bin", std::nullopt)), s3::S3ErrorCode::InternalError);
     auto got = sync_wait(t->get_object("bkt", "dir/cold.bin", std::nullopt));
     CHECK_EQ(got.meta.etag, pr.etag);
     CHECK(read_all(*got.body) == data);
@@ -1231,7 +1223,8 @@ TEST(bucket_router_validation_and_negation) {
         return false;
     };
 
-    // Unclosed character class; literal characters impossible in bucket names (uppercase/underscore) -- rules that silently never match
+    // Unclosed character class; literal characters impossible in bucket names (uppercase/underscore) -- rules that
+    // silently never match
     CHECK(throws({{"log[a-z", "m2"}}));
     CHECK(throws({{"Logs-*", "m2"}}));
     CHECK(throws({{"my_bucket", "m2"}}));

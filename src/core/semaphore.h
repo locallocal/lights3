@@ -5,9 +5,9 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
 #include <cassert>
 #include <concepts>
+#include <condition_variable>
 #include <coroutine>
 #include <deque>
 #include <memory>
@@ -39,8 +39,7 @@ public:
     // frames being the conservative lesser of two evils
     ~AsyncSemaphore() {
         std::lock_guard lk(m_);
-        if (!waiters_.empty())
-            LOG_ERROR("AsyncSemaphore destroyed with {} waiter(s); frames leaked", waiters_.size());
+        if (!waiters_.empty()) LOG_ERROR("AsyncSemaphore destroyed with {} waiter(s); frames leaked", waiters_.size());
         assert(waiters_.empty());
     }
 
@@ -132,8 +131,7 @@ public:
             auto* s = &sem;
             auto wp = w;
             CancelToken tok = token;
-            tok.on_cancel_publish([s, wp] { s->cancel_waiter(wp); }, wp->reg_id,
-                                  wp->cancel_state);
+            tok.on_cancel_publish([s, wp] { s->cancel_waiter(wp); }, wp->reg_id, wp->cancel_state);
             bool pre_cancelled = tok.cancelled();  // cancelled before registration: the callback will not be invoked
             {
                 std::lock_guard lk(s->m_);
@@ -156,8 +154,7 @@ public:
 
         Permit await_resume() {
             if (w) {
-                if (w->cancel_state)
-                    w->cancel_state->remove_callback(w->reg_id.load(std::memory_order_acquire));
+                if (w->cancel_state) w->cancel_state->remove_callback(w->reg_id.load(std::memory_order_acquire));
                 if (w->cancelled) throw OperationCancelled();
             } else if (immediate_fail) {
                 throw OperationCancelled();
@@ -225,13 +222,17 @@ public:
                         break;
                     }
                 }
-                if (next) wake.push_back(std::move(next));
-                else ++permits_;
+                if (next)
+                    wake.push_back(std::move(next));
+                else
+                    ++permits_;
             }
         }
         for (auto& w : wake) {
-            if (exec_) exec_->post(w->h);
-            else w->h.resume();
+            if (exec_)
+                exec_->post(w->h);
+            else
+                w->h.resume();
         }
     }
 
@@ -274,8 +275,10 @@ private:
                 return;
             }
         }
-        if (exec_) exec_->post(next->h);
-        else next->h.resume();
+        if (exec_)
+            exec_->post(next->h);
+        else
+            next->h.resume();
     }
 
     // Cancel callback: claim + unlink + resume in place. In place is deliberate —

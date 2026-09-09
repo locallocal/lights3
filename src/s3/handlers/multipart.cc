@@ -1,15 +1,15 @@
 // multipart handler: Create/UploadPart/Complete/Abort/ListParts/ListMultipartUploads
 // (docs/s3-protocol.md §1; storage-layer semantics in docs/storage/storage-backend.md §3.2)
-#include <charconv>
 #include <algorithm>
+#include <charconv>
 #include <map>
 
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "s3/handlers/common.h"
-#include "storage/multipart.h"
 #include "s3/service.h"
 #include "s3/xml.h"
+#include "storage/multipart.h"
 
 namespace lights3::s3 {
 
@@ -25,15 +25,13 @@ int parse_part_number(const http::HttpRequest& req) {
         if (ec != std::errc() || p != v->data() + v->size()) no = 0;
     }
     if (no < 1 || no > 10000)
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Part number must be an integer between 1 and 10000.");
+        throw S3Error(S3ErrorCode::InvalidArgument, "Part number must be an integer between 1 and 10000.");
     return no;
 }
 
 std::string require_upload_id(const http::HttpRequest& req) {
     auto v = req.query_get("uploadId");
-    if (!v || v->empty())
-        throw S3Error(S3ErrorCode::InvalidArgument, "Missing uploadId query parameter.");
+    if (!v || v->empty()) throw S3Error(S3ErrorCode::InvalidArgument, "Missing uploadId query parameter.");
     return *v;
 }
 
@@ -57,8 +55,9 @@ int parse_max(const http::HttpRequest& req, const char* name, int cap) {
     return std::min(v, cap);
 }
 
-// "scheme://host": Location must be a full URL (docs/archive/gaps.md §5.7). The scheme can only be relayed by the reverse
-// proxy -- on direct connections this implementation is plaintext HTTP, TLS is terminated by a front proxy (docs/s3-protocol.md)
+// "scheme://host": Location must be a full URL (docs/archive/gaps.md §5.7). The scheme can only be relayed by the
+// reverse proxy -- on direct connections this implementation is plaintext HTTP, TLS is terminated by a front proxy
+// (docs/s3-protocol.md)
 std::string request_base_url(const http::HttpRequest& req) {
     std::string scheme = "http";
     if (auto p = req.headers.get("X-Forwarded-Proto"); p && !p->empty()) scheme = *p;
@@ -78,11 +77,10 @@ struct PartTotals {
     uint64_t requested = 0;  // sum over parts named in the complete XML
     uint64_t stored = 0;     // sum over every part currently under the upload
 };
-Task<PartTotals> check_parts_before_complete(storage::IStorageBackend& backend,
-                                             const std::string& bucket, const std::string& key,
-                                             const std::string& upload_id,
-                                             const std::vector<storage::PartInfo>& parts,
-                                             uint64_t min_size, bool want_sizes) {
+Task<PartTotals> check_parts_before_complete(storage::IStorageBackend& backend, const std::string& bucket,
+                                             const std::string& key, const std::string& upload_id,
+                                             const std::vector<storage::PartInfo>& parts, uint64_t min_size,
+                                             bool want_sizes) {
     PartTotals totals;
     bool need_sizes = min_size > 0 && parts.size() > 1;
     bool need_checksums = false;
@@ -106,21 +104,19 @@ Task<PartTotals> check_parts_before_complete(storage::IStorageBackend& backend,
         if (need_sizes && i + 1 < parts.size() && it->second->size < min_size)  // last part exempt
             throw S3Error(S3ErrorCode::EntityTooSmall,
                           "Your proposed upload is smaller than the minimum allowed size. "
-                          "Part " + std::to_string(parts[i].part_no) + " is " +
-                              std::to_string(it->second->size) + " bytes; the minimum is " +
-                              std::to_string(min_size) + " bytes.");
+                          "Part " +
+                              std::to_string(parts[i].part_no) + " is " + std::to_string(it->second->size) +
+                              " bytes; the minimum is " + std::to_string(min_size) + " bytes.");
         if (!parts[i].checksum_value.empty()) {
             if (it->second->checksum_value.empty())
-                throw S3Error(S3ErrorCode::InvalidPart,
-                              "Part " + std::to_string(parts[i].part_no) +
-                                  " was uploaded without a checksum but the complete "
-                                  "request declares one.");
+                throw S3Error(S3ErrorCode::InvalidPart, "Part " + std::to_string(parts[i].part_no) +
+                                                            " was uploaded without a checksum but the complete "
+                                                            "request declares one.");
             if (it->second->checksum_algorithm != parts[i].checksum_algorithm ||
                 it->second->checksum_value != parts[i].checksum_value)
-                throw S3Error(S3ErrorCode::BadDigest,
-                              "The Checksum" + parts[i].checksum_algorithm + " of part " +
-                                  std::to_string(parts[i].part_no) +
-                                  " did not match what we received.");
+                throw S3Error(S3ErrorCode::BadDigest, "The Checksum" + parts[i].checksum_algorithm + " of part " +
+                                                          std::to_string(parts[i].part_no) +
+                                                          " did not match what we received.");
         }
     }
     co_return totals;
@@ -148,8 +144,7 @@ storage::ByteRange parse_copy_source_range(const std::string& v, uint64_t src_si
     if (first > last) bad();
     if (last >= src_size)
         throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Range specified is not valid for source object of size: " +
-                          std::to_string(src_size));
+                      "Range specified is not valid for source object of size: " + std::to_string(src_size));
     storage::ByteRange r;
     r.first = first;
     r.last = last;
@@ -158,8 +153,8 @@ storage::ByteRange parse_copy_source_range(const std::string& v, uint64_t src_si
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std::string bucket,
-                                                     std::string key, const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std::string bucket, std::string key,
+                                                     const RequestAuth& auth) {
     // Quota gate (roadmap §3.9 ②): a bucket already over its limit refuses to start an
     // upload at all; the per-part gate in upload_part then judges each part's bytes
     check_quota(bucket, 0, 0, auth);
@@ -186,11 +181,9 @@ Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std
                           "Full-object multipart checksums are not implemented; only "
                           "COMPOSITE is supported.");
         if (!http::HeaderMap::ieq(*t, "COMPOSITE"))
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Invalid x-amz-checksum-type value: " + *t);
+            throw S3Error(S3ErrorCode::InvalidRequest, "Invalid x-amz-checksum-type value: " + *t);
     }
-    auto upload_id =
-        co_await router_.resolve(bucket).create_multipart(bucket, key, std::move(meta));
+    auto upload_id = co_await router_.resolve(bucket).create_multipart(bucket, key, std::move(meta));
     metrics_.mpu_created();
 
     XmlWriter w;
@@ -205,8 +198,8 @@ Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::string bucket,
-                                                std::string key, const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::string bucket, std::string key,
+                                                const RequestAuth& auth) {
     int part_no = parse_part_number(req);
     std::string upload_id = require_upload_id(req);
 
@@ -219,15 +212,13 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
         auto src_meta = co_await src_backend.head_object(src_bucket, src_key);
         check_copy_preconditions(req, src_meta);
         std::optional<storage::ByteRange> range;
-        if (auto r = req.headers.get("x-amz-copy-source-range"))
-            range = parse_copy_source_range(*r, src_meta.size);
+        if (auto r = req.headers.get("x-amz-copy-source-range")) range = parse_copy_source_range(*r, src_meta.size);
         // Part bytes count toward the bucket (in-flight multipart bytes, roadmap §3.9 ②)
         uint64_t part_bytes = range ? (*range->last - *range->first + 1) : src_meta.size;
         check_quota(bucket, static_cast<int64_t>(part_bytes), 0, auth);
 
         auto stream = co_await src_backend.get_object(src_bucket, src_key, range);
-        auto result = co_await router_.resolve(bucket).upload_part(bucket, key, upload_id,
-                                                                   part_no, *stream.body);
+        auto result = co_await router_.resolve(bucket).upload_part(bucket, key, upload_id, part_no, *stream.body);
         note_usage(bucket, 0, 0, static_cast<int64_t>(part_bytes));
 
         XmlWriter w;
@@ -254,8 +245,7 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
     auto part_checksum = extract_part_checksum(req);
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
-    auto result = co_await router_.resolve(bucket).upload_part(bucket, key, upload_id, part_no,
-                                                               body, part_checksum);
+    auto result = co_await router_.resolve(bucket).upload_part(bucket, key, upload_id, part_no, body, part_checksum);
     note_usage(bucket, 0, 0, static_cast<int64_t>(written));
 
     http::HttpResponse resp;
@@ -271,8 +261,7 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
-                                                       std::string bucket, std::string key,
+Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req, std::string bucket, std::string key,
                                                        const RequestAuth& auth) {
     std::string upload_id = require_upload_id(req);
     std::string body = co_await read_body(req);
@@ -302,8 +291,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
             std::string v = child.get("Checksum" + std::string(a));
             if (v.empty()) continue;
             if (!p.checksum_value.empty())
-                throw S3Error(S3ErrorCode::MalformedXML,
-                              "A Part may declare at most one checksum value.");
+                throw S3Error(S3ErrorCode::MalformedXML, "A Part may declare at most one checksum value.");
             p.checksum_algorithm = std::string(a);
             p.checksum_value = std::move(v);
         }
@@ -316,8 +304,8 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     // complete's per-part open/read/write concatenation is a cheap amplification surface. Only the storage layer
     // knows sizes, hence the upfront listing; declared part checksums cross-check in the same pass
     bool accounting = usage_ && usage_->enabled();
-    auto totals = co_await check_parts_before_complete(backend, bucket, key, upload_id, parts,
-                                                       min_part_size(), accounting);
+    auto totals = co_await check_parts_before_complete(backend, bucket, key, upload_id, parts, min_part_size(),
+                                                       accounting);
     // Accounting at complete (roadmap §3.9 ①②): the named parts become the object's
     // bytes, every stored part leaves the in-flight pool, and a replaced object is
     // netted out. The gate therefore only refuses when the finished object would
@@ -336,8 +324,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     metrics_.mpu_finished();
     if (accounting)
         note_usage(bucket, replaced ? 0 : 1,
-                   static_cast<int64_t>(totals.requested) -
-                       static_cast<int64_t>(replaced.value_or(0)),
+                   static_cast<int64_t>(totals.requested) - static_cast<int64_t>(replaced.value_or(0)),
                    -static_cast<int64_t>(totals.stored));
 
     XmlWriter w;
@@ -351,8 +338,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     // Composite checksum echo (roadmap §2.2): present when every part carried one
     if (!result.checksum_value.empty()) {
         w.element("Checksum" + result.checksum_algorithm, result.checksum_value);
-        w.element("ChecksumType",
-                  result.checksum_type.empty() ? "COMPOSITE" : result.checksum_type);
+        w.element("ChecksumType", result.checksum_type.empty() ? "COMPOSITE" : result.checksum_type);
     }
     w.close();
     http::HttpResponse resp;
@@ -361,8 +347,7 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req,
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std::string bucket,
-                                                    std::string key) {
+Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std::string bucket, std::string key) {
     std::string upload_id = require_upload_id(req);
     auto& backend = router_.resolve(bucket);
     // In-flight bytes leave the pool with the upload (roadmap §3.9 ①); a missing upload
@@ -376,24 +361,20 @@ Task<http::HttpResponse> S3Service::abort_multipart(http::HttpRequest& req, std:
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::string bucket,
-                                               std::string key) {
+Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::string bucket, std::string key) {
     std::string upload_id = require_upload_id(req);
     // Previously neither max-parts nor part-number-marker was read, and IsTruncated=false was always reported
-    //（docs/archive/gaps.md §5.1）
+    // （docs/archive/gaps.md §5.1）
     storage::ListPartsOptions opt;
     opt.max_parts = parse_max(req, "max-parts", 1000);
     opt.part_number_marker = parse_int_param(req, "part-number-marker", 0);
-    if (opt.part_number_marker < 0)
-        throw S3Error(S3ErrorCode::InvalidArgument, "Invalid part-number-marker value");
+    if (opt.part_number_marker < 0) throw S3Error(S3ErrorCode::InvalidArgument, "Invalid part-number-marker value");
 
     // encoding-type=url (roadmap §2.5): SDKs occasionally pass it through; before it entered
     // the allowlist the whole request was 501. Same semantics as the two bucket listings
     bool encode_url = false;
     if (auto et = req.query_get("encoding-type")) {
-        if (*et != "url")
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "Invalid Encoding Method specified in Request");
+        if (*et != "url") throw S3Error(S3ErrorCode::InvalidArgument, "Invalid Encoding Method specified in Request");
         encode_url = true;
     }
 
@@ -407,8 +388,7 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
     w.element("UploadId", upload_id);
     w.element("StorageClass", "STANDARD");
     w.element("PartNumberMarker", static_cast<uint64_t>(opt.part_number_marker));
-    if (res.is_truncated)
-        w.element("NextPartNumberMarker", static_cast<uint64_t>(res.next_part_number_marker));
+    if (res.is_truncated) w.element("NextPartNumberMarker", static_cast<uint64_t>(res.next_part_number_marker));
     w.element("MaxParts", static_cast<uint64_t>(opt.max_parts));
     w.element("IsTruncated", res.is_truncated ? "true" : "false");
     for (auto& p : res.parts) {
@@ -429,8 +409,7 @@ Task<http::HttpResponse> S3Service::list_parts(http::HttpRequest& req, std::stri
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& req,
-                                                           std::string bucket,
+Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& req, std::string bucket,
                                                            const RequestAuth& auth) {
     // Previously `(void)req;` -- none of prefix/delimiter/the three markers/max-uploads was read,
     // yet MaxUploads=1000 and IsTruncated=false were hardcoded and every upload returned
@@ -442,31 +421,23 @@ Task<http::HttpResponse> S3Service::list_multipart_uploads(http::HttpRequest& re
     opt.upload_id_marker = req.query_get("upload-id-marker").value_or("");
     // upload-id-marker alone is meaningless (the cursor is a pair); AWS likewise treats it as 400
     if (opt.key_marker.empty() && !opt.upload_id_marker.empty())
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "upload-id-marker requires key-marker to be specified.");
+        throw S3Error(S3ErrorCode::InvalidArgument, "upload-id-marker requires key-marker to be specified.");
     // encoding-type=url: same semantics as list_objects -- previously the parameter was accepted but nothing
     // was ever encoded, a silent wrong answer
     bool encode_url = false;
     if (auto et = req.query_get("encoding-type")) {
-        if (*et != "url")
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "Invalid Encoding Method specified in Request");
+        if (*et != "url") throw S3Error(S3ErrorCode::InvalidArgument, "Invalid Encoding Method specified in Request");
         encode_url = true;
     }
-    auto enc = [&](const std::string& s) {
-        return encode_url ? util::aws_uri_encode(s, /*encode_slash=*/false) : s;
-    };
+    auto enc = [&](const std::string& s) { return encode_url ? util::aws_uri_encode(s, /*encode_slash=*/false) : s; };
 
     auto res = co_await router_.resolve(bucket).list_multipart_uploads(bucket, opt);
 
     // Policy prefix filtering: same as list_objects -- otherwise a prefix-restricted credential could enumerate
     // other tenants' in-progress upload keys
     if (auth.policy && !auth.policy->prefixes.empty()) {
-        std::erase_if(res.uploads,
-                      [&](const auto& u) { return !auth.policy->allows_key(u.key); });
-        std::erase_if(res.common_prefixes, [&](const std::string& p) {
-            return !auth.policy->prefix_may_contain(p);
-        });
+        std::erase_if(res.uploads, [&](const auto& u) { return !auth.policy->allows_key(u.key); });
+        std::erase_if(res.common_prefixes, [&](const std::string& p) { return !auth.policy->prefix_may_contain(p); });
     }
 
     XmlWriter w;

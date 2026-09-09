@@ -61,8 +61,8 @@ TEST(fault_spec_grammar_and_countdown) {
     FaultReset guard;
     CHECK_EQ(fault::check("localfs.write"), 0);  // nothing armed: the fast path
     fault::arm("localfs.write:2:ENOSPC, duostore.pack.pwrite");
-    CHECK_EQ(fault::describe(), "duostore.pack.pwrite:1:" + std::to_string(EIO) +
-                                    ", localfs.write:2:" + std::to_string(ENOSPC));
+    CHECK_EQ(fault::describe(),
+             "duostore.pack.pwrite:1:" + std::to_string(EIO) + ", localfs.write:2:" + std::to_string(ENOSPC));
     CHECK_EQ(fault::check("localfs.write"), ENOSPC);
     CHECK_EQ(fault::check("localfs.rename"), 0);  // not armed
     CHECK_EQ(fault::check("localfs.write"), ENOSPC);

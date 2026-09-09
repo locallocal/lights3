@@ -29,8 +29,7 @@ using nlohmann::json;
 
 void fill_random(uint8_t* buf, size_t n) {
     // getentropy caps a single call at 256 bytes; at most 30 bytes here
-    if (::getentropy(buf, n) != 0)
-        throw std::runtime_error("getentropy failed: cannot generate credentials");
+    if (::getentropy(buf, n) != 0) throw std::runtime_error("getentropy failed: cannot generate credentials");
 }
 
 // AK: L3AK + 16 base32 chars (A-Z2-7), 20 characters total, aligned with the AWS AKIA... shape
@@ -45,8 +44,7 @@ std::string random_access_key() {
 
 // SK: 30 random bytes base64 -> 40 characters, aligned with the AWS SK length
 std::string random_secret_key() {
-    static constexpr char kBase64[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    static constexpr char kBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     uint8_t raw[30];
     fill_random(raw, sizeof(raw));
     std::string sk;
@@ -63,53 +61,44 @@ std::string random_secret_key() {
 // ---------- policy JSON conventions (docs/credential-management.md §10.4) ----------
 
 CredentialPolicy policy_from_json_obj(const json& j) {
-    if (!j.is_object())
-        throw S3Error(S3ErrorCode::InvalidRequest, "policy must be a JSON object.");
+    if (!j.is_object()) throw S3Error(S3ErrorCode::InvalidRequest, "policy must be a JSON object.");
     CredentialPolicy p;
     for (auto& [k, v] : j.items()) {
         if (k == "buckets") {
             if (!v.is_array())
-                throw S3Error(S3ErrorCode::InvalidRequest,
-                              "policy.buckets must be an array of bucket glob strings.");
+                throw S3Error(S3ErrorCode::InvalidRequest, "policy.buckets must be an array of bucket glob strings.");
             for (auto& g : v) {
                 if (!g.is_string() || g.get<std::string>().empty())
-                    throw S3Error(S3ErrorCode::InvalidRequest,
-                                  "policy.buckets entries must be non-empty strings.");
+                    throw S3Error(S3ErrorCode::InvalidRequest, "policy.buckets entries must be non-empty strings.");
                 p.buckets.push_back(g.get<std::string>());
             }
         } else if (k == "prefixes") {
             // Key prefix allowlist (docs/archive/gaps.md §5.10): without it, multi-tenant shared buckets degrade into
             // "one bucket per tenant"
             if (!v.is_array())
-                throw S3Error(S3ErrorCode::InvalidRequest,
-                              "policy.prefixes must be an array of key prefix strings.");
+                throw S3Error(S3ErrorCode::InvalidRequest, "policy.prefixes must be an array of key prefix strings.");
             for (auto& g : v) {
                 if (!g.is_string() || g.get<std::string>().empty())
-                    throw S3Error(S3ErrorCode::InvalidRequest,
-                                  "policy.prefixes entries must be non-empty strings.");
+                    throw S3Error(S3ErrorCode::InvalidRequest, "policy.prefixes entries must be non-empty strings.");
                 p.prefixes.push_back(g.get<std::string>());
             }
         } else if (k == "actions") {
             if (!v.is_array())
-                throw S3Error(S3ErrorCode::InvalidRequest,
-                              "policy.actions must be an array of action names.");
+                throw S3Error(S3ErrorCode::InvalidRequest, "policy.actions must be an array of action names.");
             for (auto& a : v) {
                 if (!a.is_string())
-                    throw S3Error(S3ErrorCode::InvalidRequest,
-                                  "policy.actions entries must be strings.");
+                    throw S3Error(S3ErrorCode::InvalidRequest, "policy.actions entries must be strings.");
                 auto act = action_from_name(a.get<std::string>());
                 if (!act)
                     throw S3Error(S3ErrorCode::InvalidRequest,
-                                  "unknown policy action '" + a.get<std::string>() +
-                                      "' (expected read/write/delete).");
+                                  "unknown policy action '" + a.get<std::string>() + "' (expected read/write/delete).");
                 p.actions.push_back(*act);
             }
             if (p.actions.empty())
                 throw S3Error(S3ErrorCode::InvalidRequest,
                               "policy.actions must not be empty (omit the field for no limit).");
         } else if (k == "readonly") {
-            if (!v.is_boolean())
-                throw S3Error(S3ErrorCode::InvalidRequest, "policy.readonly must be a boolean.");
+            if (!v.is_boolean()) throw S3Error(S3ErrorCode::InvalidRequest, "policy.readonly must be a boolean.");
             p.readonly = v.get<bool>();
         } else {
             // Unknown fields strictly rejected: silently ignoring a misspelled restriction field grants access
@@ -134,25 +123,22 @@ json policy_to_json_obj(const CredentialPolicy& p) {
 
 // ---------- On-disk format (docs/credential-management.md §4.2 / §10.1) ----------
 
-std::string object_key(std::string_view ak) {
-    return std::string(kCredPrefix) + std::string(ak);
-}
+std::string object_key(std::string_view ak) { return std::string(kCredPrefix) + std::string(ak); }
 
 std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256Key>& key) {
     json j;
     if (key) {
         j["version"] = 2;
         std::string sealed = util::aes256gcm_seal(*key, c.secret_key);
-        j["sk_enc"] = util::to_hex(
-            std::span(reinterpret_cast<const uint8_t*>(sealed.data()), sealed.size()));
+        j["sk_enc"] = util::to_hex(std::span(reinterpret_cast<const uint8_t*>(sealed.data()), sealed.size()));
     } else {
         j["version"] = 1;
-        // v1 is the plaintext form without a master key; the SK has to hit disk anyway, and this json buffer cannot be wiped
+        // v1 is the plaintext form without a master key; the SK has to hit disk anyway, and this json buffer cannot be
+        // wiped
         j["sk"] = static_cast<const std::string&>(c.secret_key);
     }
     j["created"] = util::iso8601(c.created);  // for humans
-    j["created_unix"] = std::chrono::duration_cast<std::chrono::seconds>(
-                            c.created.time_since_epoch())
+    j["created_unix"] = std::chrono::duration_cast<std::chrono::seconds>(c.created.time_since_epoch())
                             .count();  // for parsing (no ready-made inverse for iso8601)
     j["comment"] = c.comment;
     j["rev"] = c.rev;  // monotonic edit counter (roadmap §2.5), independent of "version"
@@ -171,9 +157,7 @@ bool parse_role(const std::string& role) { return parse_credential_role(role); }
 // token are AES-256-GCM sealed (version 2), without one they are plaintext
 // (version 1). An instance without the key cannot verify sessions minted by an
 // instance with it (deserialize throws -> logged, session stays unknown there)
-std::string session_object_key(std::string_view ak) {
-    return std::string(kStsPrefix) + std::string(ak);
-}
+std::string session_object_key(std::string_view ak) { return std::string(kStsPrefix) + std::string(ak); }
 
 std::string seal_or_plain(const std::string& v, const std::optional<util::Aes256Key>& key) {
     if (!key) return v;
@@ -181,18 +165,17 @@ std::string seal_or_plain(const std::string& v, const std::optional<util::Aes256
     return util::to_hex(std::span(reinterpret_cast<const uint8_t*>(sealed.data()), sealed.size()));
 }
 
-std::optional<std::string> open_or_plain(const std::string& v, const std::optional<util::Aes256Key>& key,
-                                         int version, std::string_view ak, const char* field) {
+std::optional<std::string> open_or_plain(const std::string& v, const std::optional<util::Aes256Key>& key, int version,
+                                         std::string_view ak, const char* field) {
     if (version == 1) return v;
     if (!key)
         throw std::runtime_error("session object " + std::string(ak) + " is encrypted (version 2) but " +
                                  kMasterKeyEnv + " is not set");
     auto blob = util::from_hex(v);
-    auto out = util::aes256gcm_open(
-        *key, std::string_view(reinterpret_cast<const char*>(blob.data()), blob.size()));
+    auto out = util::aes256gcm_open(*key, std::string_view(reinterpret_cast<const char*>(blob.data()), blob.size()));
     if (!out)
-        throw std::runtime_error("session object " + std::string(ak) + ": " + field +
-                                 " decryption failed (wrong " + kMasterKeyEnv + " or corrupted object)");
+        throw std::runtime_error("session object " + std::string(ak) + ": " + field + " decryption failed (wrong " +
+                                 kMasterKeyEnv + " or corrupted object)");
     return out;
 }
 
@@ -201,8 +184,7 @@ std::optional<std::string> open_or_plain(const std::string& v, const std::option
 // better to block startup.
 // was_plaintext: the object is still v1 plaintext (load uses this for the v1->v2 upgrade)
 std::optional<CredentialInfo> deserialize(std::string_view ak, const std::string& body,
-                                          const std::optional<util::Aes256Key>& key,
-                                          bool* was_plaintext = nullptr) {
+                                          const std::optional<util::Aes256Key>& key, bool* was_plaintext = nullptr) {
     try {
         json j = json::parse(body);
         int ver = j.at("version").get<int>();
@@ -214,23 +196,19 @@ std::optional<CredentialInfo> deserialize(std::string_view ak, const std::string
             if (was_plaintext) *was_plaintext = true;
         } else if (ver == 2) {
             if (!key)
-                throw std::runtime_error(
-                    "credential object " + std::string(ak) +
-                    " is encrypted (version 2) but " + kMasterKeyEnv + " is not set");
+                throw std::runtime_error("credential object " + std::string(ak) + " is encrypted (version 2) but " +
+                                         kMasterKeyEnv + " is not set");
             auto blob = util::from_hex(j.at("sk_enc").get<std::string>());
-            auto sk = util::aes256gcm_open(
-                *key, std::string_view(reinterpret_cast<const char*>(blob.data()),
-                                       blob.size()));
+            auto sk = util::aes256gcm_open(*key,
+                                           std::string_view(reinterpret_cast<const char*>(blob.data()), blob.size()));
             if (!sk)
-                throw std::runtime_error("credential object " + std::string(ak) +
-                                         ": decryption failed (wrong " + kMasterKeyEnv +
-                                         " or corrupted object)");
+                throw std::runtime_error("credential object " + std::string(ak) + ": decryption failed (wrong " +
+                                         kMasterKeyEnv + " or corrupted object)");
             c.secret_key = std::move(*sk);
         } else {
             return std::nullopt;
         }
-        c.created = std::chrono::system_clock::time_point(
-            std::chrono::seconds(j.value("created_unix", int64_t{0})));
+        c.created = std::chrono::system_clock::time_point(std::chrono::seconds(j.value("created_unix", int64_t{0})));
         c.comment = j.value("comment", "");
         c.rev = j.value("rev", uint64_t{1});
         if (j.contains("policy")) c.policy = policy_from_json_obj(j.at("policy"));
@@ -250,8 +228,7 @@ Task<std::string> read_all(http::BodyReader& body, size_t max_size = 64 * 1024) 
     for (;;) {
         size_t n = co_await body.read(std::span(buf));
         if (n == 0) break;
-        if (out.size() + n > max_size)
-            throw std::runtime_error("credential object exceeds size limit");
+        if (out.size() + n > max_size) throw std::runtime_error("credential object exceeds size limit");
         out.append(reinterpret_cast<const char*>(buf), n);
     }
     co_return out;
@@ -261,8 +238,7 @@ Task<std::string> read_all(http::BodyReader& body, size_t max_size = 64 * 1024) 
 // {"credentials": [{"access_key","secret_key","comment"?,"policy"?}]}
 // Failure throws runtime_error (fail-fast at startup; on hot reload the caller warns and keeps the old table)
 
-std::vector<CredentialInfo> parse_credentials_file_text(const std::string& text,
-                                                        const std::string& path) {
+std::vector<CredentialInfo> parse_credentials_file_text(const std::string& text, const std::string& path) {
     std::vector<CredentialInfo> out;
     try {
         json j = json::parse(text);
@@ -301,9 +277,12 @@ std::string read_file_text(const std::string& path) {
 
 const char* action_name(Action a) {
     switch (a) {
-        case Action::Read: return "read";
-        case Action::Write: return "write";
-        case Action::Delete: return "delete";
+        case Action::Read:
+            return "read";
+        case Action::Write:
+            return "write";
+        case Action::Delete:
+            return "delete";
     }
     return "read";
 }
@@ -335,8 +314,7 @@ bool CredentialPolicy::allows_bucket(std::string_view bucket) const {
     return false;
 }
 
-bool CredentialPolicy::allows(std::string_view bucket, std::string_view key,
-                              Action action) const {
+bool CredentialPolicy::allows(std::string_view bucket, std::string_view key, Action action) const {
     if (!allows_action(action)) return false;
     // Empty bucket = account-level operation (ListBuckets): admitted; results are policy-filtered by the caller
     if (!allows_bucket(bucket)) return false;
@@ -377,8 +355,8 @@ std::string policy_to_json(const CredentialPolicy& p) { return policy_to_json_ob
 
 // ---------- Loading (docs/credential-management.md §5.1 / §10) ----------
 
-Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
-    std::shared_ptr<storage::IStorageBackend> backend, const AuthConfig& cfg) {
+Task<std::shared_ptr<CredentialStore>> CredentialStore::load(std::shared_ptr<storage::IStorageBackend> backend,
+                                                             const AuthConfig& cfg) {
     auto store = std::shared_ptr<CredentialStore>(new CredentialStore);
     store->backend_ = std::move(backend);
     store->cfg_ = cfg;
@@ -406,13 +384,11 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
             for (auto& obj : page.objects) {
                 std::string_view ak(obj.key);
                 ak.remove_prefix(kCredPrefix.size());
-                auto stream = co_await store->backend_->get_object(kSysBucket, obj.key,
-                                                                  std::nullopt);
+                auto stream = co_await store->backend_->get_object(kSysBucket, obj.key, std::nullopt);
                 auto body = co_await read_all(*stream.body);
                 bool was_plaintext = false;
                 if (auto c = deserialize(ak, body, store->master_key_, &was_plaintext)) {
-                    if (was_plaintext && store->master_key_)
-                        plaintext_aks.push_back(c->access_key);
+                    if (was_plaintext && store->master_key_) plaintext_aks.push_back(c->access_key);
                     c->storage_etag = obj.etag;  // sync change detection (roadmap §2.5)
                     store->creds_.emplace(c->access_key, std::move(*c));
                 } else {
@@ -433,23 +409,19 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
         storage::ObjectMeta meta;
         meta.content_type = "application/json";
         http::StringBodyReader body(serialize(it->second, store->master_key_));
-        auto pr = co_await store->backend_->put_object(kSysBucket, object_key(ak),
-                                                       std::move(meta), body);
+        auto pr = co_await store->backend_->put_object(kSysBucket, object_key(ak), std::move(meta), body);
         it->second.storage_etag = pr.etag;
     }
     if (!plaintext_aks.empty())
-        LOG_INFO("re-encrypted {} plaintext credential object(s) with {}",
-                 plaintext_aks.size(), kMasterKeyEnv);
+        LOG_INFO("re-encrypted {} plaintext credential object(s) with {}", plaintext_aks.size(), kMasterKeyEnv);
 
-    // External credentials file (§10.2): a parse failure at startup fails fast (only hot-reload failures tolerate keeping the old table)
+    // External credentials file (§10.2): a parse failure at startup fails fast (only hot-reload failures tolerate
+    // keeping the old table)
     if (!cfg.credentials_file.empty()) {
         std::error_code ec;
         auto mtime = std::filesystem::last_write_time(cfg.credentials_file, ec);
-        if (ec)
-            throw std::runtime_error("cannot stat credentials file " +
-                                     cfg.credentials_file + ": " + ec.message());
-        auto file_creds = parse_credentials_file_text(
-            read_file_text(cfg.credentials_file), cfg.credentials_file);
+        if (ec) throw std::runtime_error("cannot stat credentials file " + cfg.credentials_file + ": " + ec.message());
+        auto file_creds = parse_credentials_file_text(read_file_text(cfg.credentials_file), cfg.credentials_file);
         size_t n = file_creds.size();
         store->apply_file_credentials(std::move(file_creds));
         store->file_mtime_ = mtime;
@@ -464,12 +436,9 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(
         info.source = CredSource::kStatic;
         auto [it, inserted] = store->creds_.insert_or_assign(c.access_key, std::move(info));
         (void)it;
-        if (!inserted)
-            LOG_WARN("credential {} exists in both config and storage/file: config wins",
-                     c.access_key);
+        if (!inserted) LOG_WARN("credential {} exists in both config and storage/file: config wins", c.access_key);
     }
-    if (dynamic_count > 0)
-        LOG_INFO("loaded {} dynamic credential(s) from {}", dynamic_count, kSysBucket);
+    if (dynamic_count > 0) LOG_INFO("loaded {} dynamic credential(s) from {}", dynamic_count, kSysBucket);
     co_return store;
 }
 
@@ -489,8 +458,7 @@ std::optional<CredentialLookup> CredentialStore::lookup(std::string_view ak) con
     // InvalidAccessKeyId would read as a configuration error
     auto sit = sessions_.find(ak);
     if (sit == sessions_.end()) return std::nullopt;
-    CredentialLookup l{sit->second.secret_key, sit->second.policy, sit->second.token,
-                       sit->second.expires};
+    CredentialLookup l{sit->second.secret_key, sit->second.policy, sit->second.token, sit->second.expires};
     l.tenant = sit->second.tenant;
     return l;
 }
@@ -506,16 +474,15 @@ bool CredentialStore::is_root(std::string_view ak) const {
     return it != creds_.end() && it->second.is_static();
 }
 
-void CredentialStore::authorize(std::string_view ak, std::string_view bucket,
-                                std::string_view key, Action action) const {
+void CredentialStore::authorize(std::string_view ak, std::string_view bucket, std::string_view key,
+                                Action action) const {
     if (ak.empty()) return;  // auth disabled
     std::shared_lock lk(mu_);
     auto it = creds_.find(ak);
     if (it == creds_.end()) return;  // in-flight revocation race: already-verified requests complete naturally (§7)
     if (!it->second.policy) return;
     if (!it->second.policy->allows(bucket, key, action))
-        throw S3Error(S3ErrorCode::AccessDenied,
-                      "Access denied by credential policy.");
+        throw S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
 }
 
 std::optional<CredentialInfo> CredentialStore::find(std::string_view ak) const {
@@ -551,8 +518,7 @@ bool parse_credential_role(const std::string& role) {
 
 // ---------- Admin plane ----------
 
-Task<CredentialInfo> CredentialStore::generate(std::string comment,
-                                               std::optional<CredentialPolicy> policy,
+Task<CredentialInfo> CredentialStore::generate(std::string comment, std::optional<CredentialPolicy> policy,
                                                std::string tenant, bool tenant_admin) {
     CredentialInfo c;
     c.comment = std::move(comment);
@@ -564,9 +530,7 @@ Task<CredentialInfo> CredentialStore::generate(std::string comment,
         c.access_key = random_access_key();
         std::shared_lock lk(mu_);
         if (!creds_.contains(c.access_key)) break;
-        if (attempt >= 3)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "failed to generate a unique access key");
+        if (attempt >= 3) throw S3Error(S3ErrorCode::InternalError, "failed to generate a unique access key");
     }
     c.secret_key = random_secret_key();
 
@@ -584,16 +548,14 @@ Task<CredentialInfo> CredentialStore::generate(std::string comment,
     storage::ObjectMeta meta;
     meta.content_type = "application/json";
     http::StringBodyReader body(serialize(c, master_key_));
-    auto pr =
-        co_await backend_->put_object(kSysBucket, object_key(c.access_key), std::move(meta), body);
+    auto pr = co_await backend_->put_object(kSysBucket, object_key(c.access_key), std::move(meta), body);
     c.storage_etag = pr.etag;
 
     {
         std::unique_lock lk(mu_);
         creds_[c.access_key] = c;
     }
-    LOG_INFO("generated credential {} ({}{})", c.access_key,
-             c.comment.empty() ? "no comment" : c.comment,
+    LOG_INFO("generated credential {} ({}{})", c.access_key, c.comment.empty() ? "no comment" : c.comment,
              c.tenant.empty() ? "" : ", tenant " + c.tenant + (c.tenant_admin ? " admin" : ""));
     co_return c;
 }
@@ -603,17 +565,16 @@ Task<void> CredentialStore::remove(std::string_view ak) {
         std::shared_lock lk(mu_);
         auto it = creds_.find(ak);
         if (it == creds_.end())
-            throw S3Error(S3ErrorCode::InvalidAccessKeyId,
-                          "The specified access key does not exist.");
+            throw S3Error(S3ErrorCode::InvalidAccessKeyId, "The specified access key does not exist.");
         if (it->second.source == CredSource::kStatic)
-            throw S3Error(S3ErrorCode::MethodNotAllowed,
-                          "Static credentials are managed via the config file.");
+            throw S3Error(S3ErrorCode::MethodNotAllowed, "Static credentials are managed via the config file.");
         if (it->second.source == CredSource::kFile)
             throw S3Error(S3ErrorCode::MethodNotAllowed,
                           "File-sourced credentials are managed via the credentials file.");
     }
     // The tombstone is recorded before the delete: when interleaved with sync_now's list (list takes effect
-    // before delete, emplace after the erase below), the add branch uses it to refuse pulling the just-revoked AK back into memory
+    // before delete, emplace after the erase below), the add branch uses it to refuse pulling the just-revoked AK back
+    // into memory
     {
         std::unique_lock lk(mu_);
         tombstones_[std::string(ak)] = std::chrono::steady_clock::now();
@@ -639,11 +600,9 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
         std::shared_lock lk(mu_);
         auto it = creds_.find(ak);
         if (it == creds_.end())
-            throw S3Error(S3ErrorCode::InvalidAccessKeyId,
-                          "The specified access key does not exist.");
+            throw S3Error(S3ErrorCode::InvalidAccessKeyId, "The specified access key does not exist.");
         if (it->second.source == CredSource::kStatic)
-            throw S3Error(S3ErrorCode::MethodNotAllowed,
-                          "Static credentials are managed via the config file.");
+            throw S3Error(S3ErrorCode::MethodNotAllowed, "Static credentials are managed via the config file.");
         if (it->second.source == CredSource::kFile)
             throw S3Error(S3ErrorCode::MethodNotAllowed,
                           "File-sourced credentials are managed via the credentials file.");
@@ -660,8 +619,7 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
     storage::ObjectMeta meta;
     meta.content_type = "application/json";
     http::StringBodyReader body(serialize(c, master_key_));
-    auto pr =
-        co_await backend_->put_object(kSysBucket, object_key(c.access_key), std::move(meta), body);
+    auto pr = co_await backend_->put_object(kSysBucket, object_key(c.access_key), std::move(meta), body);
     c.storage_etag = pr.etag;
     {
         std::unique_lock lk(mu_);
@@ -674,8 +632,7 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
                 co_await backend_->delete_object(kSysBucket, object_key(c.access_key));
             } catch (...) {
             }
-            throw S3Error(S3ErrorCode::InvalidAccessKeyId,
-                          "The specified access key does not exist.");
+            throw S3Error(S3ErrorCode::InvalidAccessKeyId, "The specified access key does not exist.");
         }
         it->second = c;
     }
@@ -720,8 +677,7 @@ Task<std::string> CredentialStore::persist_session(const std::string& ak, const 
     co_return pr.etag;
 }
 
-Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::string_view parent_ak,
-                                                                       int duration_sec) {
+Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::string_view parent_ak, int duration_sec) {
     // Bound the table: an unauthenticated caller cannot reach here, but a runaway
     // client must not grow the map without limit
     constexpr size_t kMaxSessions = 100000;
@@ -748,10 +704,9 @@ Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::stri
         auto pit = creds_.find(parent_ak);
         // A session AK lives in sessions_, not creds_: a session can never assume again
         if (pit == creds_.end())
-            throw S3Error(S3ErrorCode::AccessDenied,
-                          "Session credentials cannot call AssumeRole.");
-        entry = SessionEntry{out.secret_key, out.token, out.expires, pit->second.policy,
-                             pit->second.tenant, std::string(parent_ak), now};
+            throw S3Error(S3ErrorCode::AccessDenied, "Session credentials cannot call AssumeRole.");
+        entry = SessionEntry{out.secret_key,         out.token, out.expires, pit->second.policy, pit->second.tenant,
+                             std::string(parent_ak), now};
     }
     // Persist first, then take effect (write-through, same rule as generate): another
     // instance that sees the session AK before this put lands answers
@@ -771,9 +726,7 @@ Task<void> CredentialStore::ensure_session_loaded(std::string_view ak_view) {
         std::shared_lock lk(mu_);
         if (sessions_.contains(ak)) co_return;
         auto mit = session_misses_.find(ak);
-        if (mit != session_misses_.end() &&
-            std::chrono::steady_clock::now() - mit->second < kSessionMissTtl)
-            co_return;
+        if (mit != session_misses_.end() && std::chrono::steady_clock::now() - mit->second < kSessionMissTtl) co_return;
     }
     std::optional<SessionEntry> entry;
     bool missing = false;
@@ -792,8 +745,10 @@ Task<void> CredentialStore::ensure_session_loaded(std::string_view ak_view) {
         if (j.contains("policy")) e.policy = policy_from_json_obj(j.at("policy"));
         entry = std::move(e);
     } catch (const S3Error& e) {
-        if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket) missing = true;
-        else LOG_WARN("sts: reading session {} failed: {}", ak, e.message);
+        if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket)
+            missing = true;
+        else
+            LOG_WARN("sts: reading session {} failed: {}", ak, e.message);
     } catch (const std::exception& e) {
         LOG_WARN("sts: session object {} unusable: {}", ak, e.what());
         missing = true;  // malformed / undecryptable: do not retry on every request
@@ -863,13 +818,10 @@ Task<void> CredentialStore::sync_sessions(bool startup) {
     {
         std::set<std::string, std::less<>> listed(on_storage.begin(), on_storage.end());
         std::unique_lock lk(mu_);
-        std::erase_if(sessions_, [&](auto& kv) {
-            return !listed.contains(kv.first) && kv.second.expires < now;
-        });
+        std::erase_if(sessions_, [&](auto& kv) { return !listed.contains(kv.first) && kv.second.expires < now; });
     }
     if (added || expired)
-        LOG_INFO("sts: session sync{}: {} loaded, {} expired reaped", startup ? " (startup)" : "",
-                 added, expired);
+        LOG_INFO("sts: session sync{}: {} loaded, {} expired reaped", startup ? " (startup)" : "", added, expired);
 }
 
 size_t CredentialStore::session_count() const {
@@ -885,10 +837,10 @@ void CredentialStore::apply_file_credentials(std::vector<CredentialInfo> creds) 
     // `{"credentials": []}` is valid JSON, and accepting it would empty the table enabled() depends on.
     // Keep the old table, set degraded (readyz turns 503); the next round recovers once the file is fixed
     if (!creds_.empty() && creds.empty() &&
-        std::all_of(creds_.begin(), creds_.end(),
-                    [](auto& kv) { return kv.second.source == CredSource::kFile; })) {
-        LOG_ERROR("credentials file would empty the credential table; keeping previous "
-                  "table (authentication stays enabled)");
+        std::all_of(creds_.begin(), creds_.end(), [](auto& kv) { return kv.second.source == CredSource::kFile; })) {
+        LOG_ERROR(
+            "credentials file would empty the credential table; keeping previous "
+            "table (authentication stays enabled)");
         degraded_.store(true, std::memory_order_relaxed);
         return;
     }
@@ -900,12 +852,16 @@ void CredentialStore::apply_file_credentials(std::vector<CredentialInfo> creds) 
         auto it = creds_.find(c.access_key);
         if (it != creds_.end()) {
             if (it->second.source == CredSource::kStatic) {
-                LOG_WARN("credential {} exists in both config and credentials file: "
-                         "config wins", c.access_key);
+                LOG_WARN(
+                    "credential {} exists in both config and credentials file: "
+                    "config wins",
+                    c.access_key);
                 continue;
             }
-            LOG_WARN("credential {} exists in both credentials file and storage: "
-                     "file wins", c.access_key);
+            LOG_WARN(
+                "credential {} exists in both credentials file and storage: "
+                "file wins",
+                c.access_key);
         }
         creds_.insert_or_assign(c.access_key, std::move(c));
     }
@@ -916,20 +872,20 @@ void CredentialStore::reload_file_now() {
     std::error_code ec;
     auto mtime = std::filesystem::last_write_time(cfg_.credentials_file, ec);
     if (ec) {
-        // File temporarily invisible (mid-state of an editor's atomic replace, etc.): keep the old table and retry next round
-        LOG_WARN("credentials file {} not readable ({}): keeping previous table",
-                 cfg_.credentials_file, ec.message());
+        // File temporarily invisible (mid-state of an editor's atomic replace, etc.): keep the old table and retry next
+        // round
+        LOG_WARN("credentials file {} not readable ({}): keeping previous table", cfg_.credentials_file, ec.message());
         return;
     }
     try {
-        auto creds = parse_credentials_file_text(read_file_text(cfg_.credentials_file),
-                                                 cfg_.credentials_file);
+        auto creds = parse_credentials_file_text(read_file_text(cfg_.credentials_file), cfg_.credentials_file);
         size_t n = creds.size();
         apply_file_credentials(std::move(creds));
         file_mtime_ = mtime;
         LOG_INFO("reloaded {} credential(s) from {}", n, cfg_.credentials_file);
     } catch (const std::exception& e) {
-        // Hot reload failure keeps the old table: better that old credentials live one more round than a parse error wiping the whole table
+        // Hot reload failure keeps the old table: better that old credentials live one more round than a parse error
+        // wiping the whole table
         LOG_ERROR("credentials file reload failed: {}", e.what());
     }
 }
@@ -939,7 +895,8 @@ void CredentialStore::reload_file_now() {
 Task<void> CredentialStore::sync_now() {
     // The memory snapshot must be taken before the list: write-through guarantees every dynamic credential in the
     // snapshot was persisted at snapshot time, so "in snapshot + not in list" can only mean revoked elsewhere;
-    // credentials newly generated by this instance during/after the list are not in the snapshot and cannot be wrongly deleted
+    // credentials newly generated by this instance during/after the list are not in the snapshot and cannot be wrongly
+    // deleted
     std::vector<std::string> snapshot;
     {
         std::shared_lock lk(mu_);
@@ -956,8 +913,7 @@ Task<void> CredentialStore::sync_now() {
         opt.prefix = std::string(kCredPrefix);
         for (;;) {
             auto page = co_await backend_->list_objects(kSysBucket, opt);
-            for (auto& obj : page.objects)
-                on_storage.emplace(obj.key.substr(kCredPrefix.size()), obj.etag);
+            for (auto& obj : page.objects) on_storage.emplace(obj.key.substr(kCredPrefix.size()), obj.etag);
             if (!page.is_truncated) break;
             opt.start_after = page.next_token;
         }
@@ -965,7 +921,8 @@ Task<void> CredentialStore::sync_now() {
     size_t added = 0, removed = 0;
 
     // Tombstone cleanup and snapshot: expired entries are dropped; recently revoked AKs are skipped by the add branch
-    // (when remove interleaves with this round's list, the object may still be listed; without the guard a revoked credential would be resurrected)
+    // (when remove interleaves with this round's list, the object may still be listed; without the guard a revoked
+    // credential would be resurrected)
     const auto now = std::chrono::steady_clock::now();
     const auto ttl = std::chrono::seconds(std::max(60, 2 * cfg_.sync_interval_sec));
     std::set<std::string, std::less<>> recently_revoked;
@@ -986,19 +943,17 @@ Task<void> CredentialStore::sync_now() {
     for (auto& [ak, etag] : on_storage) {
         bool changed = false;
         if (auto cur = find(ak)) {
-            if (cur->source != CredSource::kDynamic) continue;  // static/file shadows it
+            if (cur->source != CredSource::kDynamic) continue;        // static/file shadows it
             if (etag.empty() || cur->storage_etag == etag) continue;  // unchanged
             changed = true;
         }
         if (!changed && recently_revoked.contains(ak)) continue;
         try {
-            auto stream = co_await backend_->get_object(kSysBucket, object_key(ak),
-                                                        std::nullopt);
+            auto stream = co_await backend_->get_object(kSysBucket, object_key(ak), std::nullopt);
             auto body = co_await read_all(*stream.body);
             auto c = deserialize(ak, body, master_key_);
             if (!c) {
-                LOG_WARN("sync: skipping malformed credential object {}/{}{}", kSysBucket,
-                         kCredPrefix, ak);
+                LOG_WARN("sync: skipping malformed credential object {}/{}{}", kSysBucket, kCredPrefix, ak);
                 continue;
             }
             c->storage_etag = etag;
@@ -1007,8 +962,7 @@ Task<void> CredentialStore::sync_now() {
                 auto it = creds_.find(ak);
                 // Replace only a still-dynamic entry with a strictly newer rev — an
                 // equal-rev ETag drift (e.g. a v1->v2 re-encryption) keeps local state
-                if (it != creds_.end() && it->second.source == CredSource::kDynamic &&
-                    c->rev >= it->second.rev) {
+                if (it != creds_.end() && it->second.source == CredSource::kDynamic && c->rev >= it->second.rev) {
                     bool newer = c->rev > it->second.rev;
                     it->second = std::move(*c);
                     if (newer) ++added;
@@ -1030,8 +984,10 @@ Task<void> CredentialStore::sync_now() {
         auto it = creds_.find(ak);
         if (it != creds_.end() && it->second.source == CredSource::kDynamic) {
             if (creds_.size() == 1) {
-                LOG_ERROR("credential sync would empty the credential table (\"{}\" gone "
-                          "from storage); keeping it (authentication stays enabled)", ak);
+                LOG_ERROR(
+                    "credential sync would empty the credential table (\"{}\" gone "
+                    "from storage); keeping it (authentication stays enabled)",
+                    ak);
                 degraded_.store(true, std::memory_order_relaxed);
                 break;
             }
@@ -1039,13 +995,13 @@ Task<void> CredentialStore::sync_now() {
             ++removed;
         }
     }
-    if (added || removed)
-        LOG_INFO("credential sync: {} added, {} revoked", added, removed);
+    if (added || removed) LOG_INFO("credential sync: {} added, {} revoked", added, removed);
     // STS sessions (backlog-sequence ④): new ones minted elsewhere, expired ones reaped
     co_await sync_sessions(/*startup=*/false);
 }
 
-// ---------- Background task assembly (§10.2/§10.3; same pattern as duostore GC: re-arm after completion, no overlap) ----------
+// ---------- Background task assembly (§10.2/§10.3; same pattern as duostore GC: re-arm after completion, no overlap)
+// ----------
 
 Task<void> CredentialStore::file_tick() {
     co_await pool_->schedule();  // the timer thread only dispatches; file IO moves to a pool thread
@@ -1076,9 +1032,8 @@ Task<void> CredentialStore::sync_tick() {
 void CredentialStore::schedule_file_reload() {
     if (cfg_.credentials_file.empty() || cfg_.credentials_file_reload_sec <= 0) return;
     bg_.if_open([&] {
-        file_timer_ = TimerQueue::instance().add(
-            std::chrono::seconds(cfg_.credentials_file_reload_sec),
-            [this] { bg_.spawn(file_tick()); });
+        file_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.credentials_file_reload_sec),
+                                                 [this] { bg_.spawn(file_tick()); });
     });
 }
 
@@ -1098,7 +1053,8 @@ void CredentialStore::start_background(std::shared_ptr<ThreadPool> pool) {
 
 void CredentialStore::shutdown_background() {
     bg_.begin_close();
-    // cancel must be called outside the group lock (TimerQueue::cancel blocks on in-flight callbacks, which take the group lock)
+    // cancel must be called outside the group lock (TimerQueue::cancel blocks on in-flight callbacks, which take the
+    // group lock)
     TimerQueue::instance().cancel(file_timer_);
     TimerQueue::instance().cancel(sync_timer_);
     bg_.wait_idle();

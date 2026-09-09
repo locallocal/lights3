@@ -36,9 +36,9 @@ struct ConnStats {
 struct IHttpServer {
     virtual void set_handler(Handler h) = 0;
     virtual void listen(const std::string& addr, uint16_t port) = 0;
-    virtual void run() = 0;                 // Blocks until shutdown
-    virtual void shutdown() = 0;            // Thread-safe & signal-safe
-    virtual uint16_t bound_port() const = 0;  // Actual port after listen (useful when port=0)
+    virtual void run() = 0;                         // Blocks until shutdown
+    virtual void shutdown() = 0;                    // Thread-safe & signal-safe
+    virtual uint16_t bound_port() const = 0;        // Actual port after listen (useful when port=0)
     virtual ConnStats stats() const { return {}; }  // Thread-safe snapshot of the counters
     // Re-read the TLS certificate material now (config hot reload, roadmap §4.4);
     // false = no TLS listener, or the driver reloads on its own (seastar)

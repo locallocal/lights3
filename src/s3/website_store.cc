@@ -6,9 +6,9 @@
 #include <nlohmann/json.hpp>
 
 #include "core/log.h"
+#include "http/model.h"
 #include "s3/auth/credential_store.h"  // kSysBucket
 #include "s3/errors.h"
-#include "http/model.h"
 
 namespace lights3::s3 {
 
@@ -20,9 +20,7 @@ constexpr std::string_view kWebsitePrefix = "website/";
 // remove()d entries stay tombstoned this long so a concurrent sync list cannot resurrect them
 constexpr auto kTombstoneTtl = std::chrono::minutes(5);
 
-std::string object_key(const std::string& bucket) {
-    return std::string(kWebsitePrefix) + bucket;
-}
+std::string object_key(const std::string& bucket) { return std::string(kWebsitePrefix) + bucket; }
 
 std::string serialize(const WebsiteBucket& w) {
     json j;
@@ -30,8 +28,7 @@ std::string serialize(const WebsiteBucket& w) {
     if (!w.error_key.empty()) j["error_key"] = w.error_key;
     if (!w.redirect_all_host.empty()) {
         j["redirect_all_host"] = w.redirect_all_host;
-        if (!w.redirect_all_protocol.empty())
-            j["redirect_all_protocol"] = w.redirect_all_protocol;
+        if (!w.redirect_all_protocol.empty()) j["redirect_all_protocol"] = w.redirect_all_protocol;
     }
     if (!w.routing_rules.empty()) {
         json rules = json::array();
@@ -41,8 +38,7 @@ std::string serialize(const WebsiteBucket& w) {
             if (r.http_error_code_equals) jr["http_error_code_equals"] = r.http_error_code_equals;
             if (!r.protocol.empty()) jr["protocol"] = r.protocol;
             if (!r.host_name.empty()) jr["host_name"] = r.host_name;
-            if (r.replace_key_prefix_with)
-                jr["replace_key_prefix_with"] = *r.replace_key_prefix_with;
+            if (r.replace_key_prefix_with) jr["replace_key_prefix_with"] = *r.replace_key_prefix_with;
             if (r.replace_key_with) jr["replace_key_with"] = *r.replace_key_with;
             if (r.http_redirect_code != 301) jr["http_redirect_code"] = r.http_redirect_code;
             rules.push_back(std::move(jr));
@@ -62,13 +58,11 @@ std::optional<WebsiteBucket> deserialize(const std::string& bucket, const std::s
         w.bucket = bucket;
         w.index_suffix = j.value("index_suffix", w.index_suffix);
         w.error_key = j.value("error_key", "");
-        if (w.index_suffix.empty() || w.index_suffix.find('/') != std::string::npos)
-            return std::nullopt;
+        if (w.index_suffix.empty() || w.index_suffix.find('/') != std::string::npos) return std::nullopt;
         if (!w.error_key.empty() && w.error_key.front() == '/') return std::nullopt;
         w.redirect_all_host = j.value("redirect_all_host", "");
         w.redirect_all_protocol = j.value("redirect_all_protocol", "");
-        if (!w.redirect_all_protocol.empty() && w.redirect_all_protocol != "http" &&
-            w.redirect_all_protocol != "https")
+        if (!w.redirect_all_protocol.empty() && w.redirect_all_protocol != "http" && w.redirect_all_protocol != "https")
             return std::nullopt;
         if (j.contains("routing_rules")) {
             for (auto& jr : j["routing_rules"]) {
@@ -79,12 +73,10 @@ std::optional<WebsiteBucket> deserialize(const std::string& bucket, const std::s
                 r.host_name = jr.value("host_name", "");
                 if (jr.contains("replace_key_prefix_with"))
                     r.replace_key_prefix_with = jr["replace_key_prefix_with"].get<std::string>();
-                if (jr.contains("replace_key_with"))
-                    r.replace_key_with = jr["replace_key_with"].get<std::string>();
+                if (jr.contains("replace_key_with")) r.replace_key_with = jr["replace_key_with"].get<std::string>();
                 r.http_redirect_code = jr.value("http_redirect_code", 301);
                 if (r.replace_key_prefix_with && r.replace_key_with) return std::nullopt;
-                if (r.http_redirect_code < 300 || r.http_redirect_code > 399)
-                    return std::nullopt;
+                if (r.http_redirect_code < 300 || r.http_redirect_code > 399) return std::nullopt;
                 w.routing_rules.push_back(std::move(r));
             }
         }
@@ -116,9 +108,8 @@ std::shared_ptr<WebsiteStore> WebsiteStore::make_static(std::vector<WebsiteBucke
     return store;
 }
 
-Task<std::shared_ptr<WebsiteStore>> WebsiteStore::load(
-    std::shared_ptr<storage::IStorageBackend> backend,
-    std::vector<WebsiteBucket> static_entries) {
+Task<std::shared_ptr<WebsiteStore>> WebsiteStore::load(std::shared_ptr<storage::IStorageBackend> backend,
+                                                       std::vector<WebsiteBucket> static_entries) {
     auto store = std::shared_ptr<WebsiteStore>(new WebsiteStore());
     store->backend_ = std::move(backend);
     store->static_entries_ = std::move(static_entries);
@@ -131,8 +122,7 @@ Task<std::shared_ptr<WebsiteStore>> WebsiteStore::load(
             auto page = co_await store->backend_->list_objects(kSysBucket, opt);
             for (auto& obj : page.objects) {
                 std::string bucket = obj.key.substr(kWebsitePrefix.size());
-                auto stream =
-                    co_await store->backend_->get_object(kSysBucket, obj.key, std::nullopt);
+                auto stream = co_await store->backend_->get_object(kSysBucket, obj.key, std::nullopt);
                 auto body = co_await read_all(*stream.body);
                 if (auto w = deserialize(bucket, body))
                     store->dynamic_[bucket] = std::move(*w);
@@ -145,8 +135,7 @@ Task<std::shared_ptr<WebsiteStore>> WebsiteStore::load(
     }
     store->rebuild_snapshot_locked();
     if (!store->dynamic_.empty())
-        LOG_INFO("website: loaded {} dynamic entries from {}/{}", store->dynamic_.size(),
-                 kSysBucket, kWebsitePrefix);
+        LOG_INFO("website: loaded {} dynamic entries from {}/{}", store->dynamic_.size(), kSysBucket, kWebsitePrefix);
     co_return store;
 }
 
@@ -158,15 +147,13 @@ void WebsiteStore::rebuild_snapshot_locked() {
         bool shadowed = false;
         for (auto& s : static_entries_)
             if (s.bucket == b) {
-                LOG_WARN("website: bucket {} is configured statically; ignoring the dynamic entry",
-                         b);
+                LOG_WARN("website: bucket {} is configured statically; ignoring the dynamic entry", b);
                 shadowed = true;
                 break;
             }
         if (!shadowed) v->push_back(w);
     }
-    std::sort(v->begin(), v->end(),
-              [](const WebsiteBucket& a, const WebsiteBucket& b) { return a.bucket < b.bucket; });
+    std::sort(v->begin(), v->end(), [](const WebsiteBucket& a, const WebsiteBucket& b) { return a.bucket < b.bucket; });
     snap_ = std::move(v);
 }
 
@@ -177,9 +164,8 @@ WebsiteStore::Snapshot WebsiteStore::snapshot() const {
 
 const WebsiteBucket* WebsiteStore::find(const Snapshot& snap, const std::string& bucket) {
     if (!snap) return nullptr;
-    auto it = std::lower_bound(
-        snap->begin(), snap->end(), bucket,
-        [](const WebsiteBucket& w, const std::string& b) { return w.bucket < b; });
+    auto it = std::lower_bound(snap->begin(), snap->end(), bucket,
+                               [](const WebsiteBucket& w, const std::string& b) { return w.bucket < b; });
     return it != snap->end() && it->bucket == bucket ? &*it : nullptr;
 }
 
@@ -275,8 +261,7 @@ Task<void> WebsiteStore::sync_now() {
                 if (auto w = deserialize(bucket, body))
                     on_storage.emplace(bucket, std::move(*w));
                 else
-                    LOG_WARN("website sync: skipping malformed object {}/{}", kSysBucket,
-                             obj.key);
+                    LOG_WARN("website sync: skipping malformed object {}/{}", kSysBucket, obj.key);
             } catch (const std::exception& e) {
                 // A single failed fetch does not abort the sync; the entry keeps its old value
                 LOG_WARN("website sync: failed to load {}: {}", obj.key, e.what());
@@ -307,8 +292,7 @@ Task<void> WebsiteStore::sync_now() {
         }
         if (added || removed) rebuild_snapshot_locked();
     }
-    if (added || removed)
-        LOG_INFO("website sync: {} added/updated, {} removed", added, removed);
+    if (added || removed) LOG_INFO("website sync: {} added/updated, {} removed", added, removed);
 }
 
 Task<void> WebsiteStore::sync_tick() {

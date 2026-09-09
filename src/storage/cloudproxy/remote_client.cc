@@ -23,8 +23,7 @@ const std::string* find(const std::map<std::string, std::string>& p, const char*
     return it == p.end() ? nullptr : &it->second;
 }
 
-int int_param(const std::map<std::string, std::string>& p, const char* k, int def,
-              const std::string& name) {
+int int_param(const std::map<std::string, std::string>& p, const char* k, int def, const std::string& name) {
     auto* v = find(p, k);
     if (!v) return def;
     try {
@@ -34,8 +33,7 @@ int int_param(const std::map<std::string, std::string>& p, const char* k, int de
     }
 }
 
-bool bool_param(const std::map<std::string, std::string>& p, const char* k, bool def,
-                const std::string& name) {
+bool bool_param(const std::map<std::string, std::string>& p, const char* k, bool def, const std::string& name) {
     auto* v = find(p, k);
     if (!v) return def;
     try {
@@ -47,12 +45,11 @@ bool bool_param(const std::map<std::string, std::string>& p, const char* k, bool
 
 }  // namespace
 
-CloudProxyConfig CloudProxyConfig::from_params(
-    const std::string& name, const std::map<std::string, std::string>& params) {
+CloudProxyConfig CloudProxyConfig::from_params(const std::string& name,
+                                               const std::map<std::string, std::string>& params) {
     CloudProxyConfig c;
     if (auto* v = find(params, "endpoint")) c.endpoint = *v;
-    if (c.endpoint.empty())
-        throw std::runtime_error("cloudproxy backend '" + name + "' needs endpoint");
+    if (c.endpoint.empty()) throw std::runtime_error("cloudproxy backend '" + name + "' needs endpoint");
     if (auto* v = find(params, "region")) c.region = *v;
     if (auto* v = find(params, "access_key")) c.access_key = *v;
     if (auto* v = find(params, "secret_key")) c.secret_key = *v;
@@ -77,16 +74,14 @@ CloudProxyConfig CloudProxyConfig::from_params(
         try {
             c.queue_cap_bytes = parse_size(*v);
         } catch (...) {
-            throw std::runtime_error("cloudproxy backend '" + name + "': invalid queue_cap: " +
-                                     *v);
+            throw std::runtime_error("cloudproxy backend '" + name + "': invalid queue_cap: " + *v);
         }
     }
     if (auto* v = find(params, "spool_max_bytes")) {
         try {
             c.spool_max_bytes = parse_size(*v);
         } catch (...) {
-            throw std::runtime_error("cloudproxy backend '" + name +
-                                     "': invalid spool_max_bytes: " + *v);
+            throw std::runtime_error("cloudproxy backend '" + name + "': invalid spool_max_bytes: " + *v);
         }
     }
     if (auto* v = find(params, "spool_dir")) c.spool_dir = *v;
@@ -94,9 +89,8 @@ CloudProxyConfig CloudProxyConfig::from_params(
     // (e.g. backoff overflow)
     auto require_range = [&](const char* k, int64_t v, int64_t lo, int64_t hi) {
         if (v < lo || v > hi)
-            throw std::runtime_error("cloudproxy backend '" + name + "': " + k + "=" +
-                                     std::to_string(v) + " out of range [" + std::to_string(lo) +
-                                     ", " + std::to_string(hi) + "]");
+            throw std::runtime_error("cloudproxy backend '" + name + "': " + k + "=" + std::to_string(v) +
+                                     " out of range [" + std::to_string(lo) + ", " + std::to_string(hi) + "]");
     };
     require_range("connect_timeout_ms", c.connect_timeout_ms, 1, 600'000);
     require_range("request_timeout_ms", c.request_timeout_ms, 1, 3'600'000);
@@ -111,8 +105,7 @@ CloudProxyConfig CloudProxyConfig::from_params(
     require_range("queue_cap", static_cast<int64_t>(c.queue_cap_bytes), 4096, 1 << 30);
     if (!c.imds_endpoint.empty() && c.imds_endpoint.rfind("http://", 0) != 0 &&
         c.imds_endpoint.rfind("https://", 0) != 0)
-        throw std::runtime_error("cloudproxy backend '" + name +
-                                 "': imds_endpoint must be an http(s) URL");
+        throw std::runtime_error("cloudproxy backend '" + name + "': imds_endpoint must be an http(s) URL");
     // virtual-hosted style (force_path_style=false): connection and SNI always point at the
     // endpoint; only Host/signature and path vary per bucket (docs/storage/cloudproxy-design.md §7);
     // bucket names containing '.' will mismatch under TLS wildcard certificates -- a
@@ -125,8 +118,8 @@ CloudProxyConfig CloudProxyConfig::from_params(
         try {
             validate_bucket_name(c.bucket_prefix + "aaa");
         } catch (const s3::S3Error& e) {
-            throw std::runtime_error("cloudproxy backend '" + name + "': invalid bucket_prefix '" +
-                                     c.bucket_prefix + "': " + e.message);
+            throw std::runtime_error("cloudproxy backend '" + name + "': invalid bucket_prefix '" + c.bucket_prefix +
+                                     "': " + e.message);
         }
     }
     cloudproxy::Endpoint::parse(c.endpoint);  // validate early, surfacing errors at load time
@@ -152,8 +145,7 @@ Endpoint Endpoint::parse(const std::string& url) {
         ep.https = false;
         rest = url.substr(7);
     } else {
-        throw std::runtime_error("cloudproxy endpoint must start with http:// or https://: " +
-                                 url);
+        throw std::runtime_error("cloudproxy endpoint must start with http:// or https://: " + url);
     }
     if (!rest.empty() && rest.back() == '/') rest.pop_back();
     if (rest.empty() || rest.find('/') != std::string::npos)
@@ -169,17 +161,14 @@ Endpoint Endpoint::parse(const std::string& url) {
         } catch (...) {
             throw std::runtime_error("cloudproxy endpoint has invalid port: " + url);
         }
-        if (ep.port < 1 || ep.port > 65535)
-            throw std::runtime_error("cloudproxy endpoint has invalid port: " + url);
+        if (ep.port < 1 || ep.port > 65535) throw std::runtime_error("cloudproxy endpoint has invalid port: " + url);
     }
-    if (ep.host.empty())
-        throw std::runtime_error("cloudproxy endpoint has empty host: " + url);
+    if (ep.host.empty()) throw std::runtime_error("cloudproxy endpoint has empty host: " + url);
     // httplib's Host header: default port sends host only, otherwise host:port (the
     // consistency trap of docs/storage/cloudproxy-design.md §2.2)
     bool default_port = ep.port == (ep.https ? 443 : 80);
     ep.signed_host = default_port ? ep.host : ep.host + ":" + std::to_string(ep.port);
-    ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" +
-                  std::to_string(ep.port);
+    ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" + std::to_string(ep.port);
     return ep;
 }
 
@@ -190,8 +179,7 @@ RemoteMetrics::RemoteMetrics(const MetricsScope& scope) : scope_(scope) {
         "lights3_cloudproxy_etag_mismatch_total",
         "Uploads where remote ETag disagreed with locally computed MD5 (in-transit corruption)");
     pool_wait = scope.histogram("lights3_cloudproxy_pool_wait_seconds",
-                                "Time spent waiting for a free remote connection lease",
-                                {0.001, 0.01, 0.1, 1, 10});
+                                "Time spent waiting for a free remote connection lease", {0.001, 0.01, 0.1, 1, 10});
 }
 
 std::shared_ptr<MetricHistogram> RemoteMetrics::op_seconds(const char* op) const {
@@ -209,8 +197,7 @@ void RemoteMetrics::count_retry(const char* op) const {
     std::lock_guard lk(m_);
     auto& c = retries_[op];
     if (!c)
-        c = scope_.counter("lights3_cloudproxy_retries_total",
-                           "Remote request retries (backoff taken)", {{"op", op}});
+        c = scope_.counter("lights3_cloudproxy_retries_total", "Remote request retries (backoff taken)", {{"op", op}});
     c->inc();
 }
 
@@ -219,15 +206,13 @@ void RemoteMetrics::count_error(const std::string& code) const {
     auto& c = errors_[code];
     if (!c)
         c = scope_.counter("lights3_cloudproxy_remote_errors_total",
-                           "Remote failures mapped to local errors, by remote code",
-                           {{"code", code}});
+                           "Remote failures mapped to local errors, by remote code", {{"code", code}});
     c->inc();
 }
 
 // ---------- ClientPool ----------
 
-ClientPool::ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep,
-                       std::shared_ptr<MetricHistogram> wait_hist)
+ClientPool::ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep, std::shared_ptr<MetricHistogram> wait_hist)
     : cfg_(cfg), ep_(ep), wait_hist_(std::move(wait_hist)) {
     schedule_reaper();
 }
@@ -274,8 +259,7 @@ void ClientPool::reap_stale_locked() {
 
 void ClientPool::schedule_reaper() {
     if (cfg_.pool_idle_timeout_ms <= 0) return;
-    auto interval = std::chrono::milliseconds(
-        std::max(cfg_.pool_idle_timeout_ms / 2, 1000));
+    auto interval = std::chrono::milliseconds(std::max(cfg_.pool_idle_timeout_ms / 2, 1000));
     std::lock_guard lk(m_);
     if (stopping_) return;
     reaper_ = TimerQueue::instance().add(interval, [this] {
@@ -325,9 +309,7 @@ ClientPool::Lease ClientPool::acquire() {
     // is thrown -- worsening queueing is the direct signal for tuning max_connections
     auto observe = [&] {
         if (wait_hist_)
-            wait_hist_->observe(std::chrono::duration<double>(
-                                    std::chrono::steady_clock::now() - start)
-                                    .count());
+            wait_hist_->observe(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
     };
     std::unique_lock lk(m_);
     for (;;) {
@@ -351,11 +333,9 @@ ClientPool::Lease ClientPool::acquire() {
                 throw;
             }
         }
-        if (!cv_.wait_until(lk, deadline,
-                            [&] { return !idle_.empty() || total_ < cfg_.max_connections; })) {
+        if (!cv_.wait_until(lk, deadline, [&] { return !idle_.empty() || total_ < cfg_.max_connections; })) {
             observe();
-            throw S3Error(S3ErrorCode::SlowDown,
-                          "cloudproxy: all remote connections busy, try again later");
+            throw S3Error(S3ErrorCode::SlowDown, "cloudproxy: all remote connections busy, try again later");
         }
     }
 }
@@ -364,9 +344,7 @@ Task<ClientPool::Lease> ClientPool::acquire_async() {
     auto start = std::chrono::steady_clock::now();
     auto observe = [&] {
         if (wait_hist_)
-            wait_hist_->observe(std::chrono::duration<double>(
-                                    std::chrono::steady_clock::now() - start)
-                                    .count());
+            wait_hist_->observe(std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
     };
 
     struct Acquire {
@@ -397,31 +375,29 @@ Task<ClientPool::Lease> ClientPool::acquire_async() {
             // callback touches only the shared Waiter — no cancel bookkeeping needed;
             // release() skips entries already marked done
             auto wp = w;
-            TimerQueue::instance().add(
-                std::chrono::milliseconds(pool->cfg_.request_timeout_ms), [wp] {
-                    std::coroutine_handle<> hh{};
-                    {
-                        std::lock_guard g(wp->m);
-                        if (!wp->done) {
-                            wp->done = true;
-                            wp->timed_out = true;
-                            hh = wp->h;
-                        }
+            TimerQueue::instance().add(std::chrono::milliseconds(pool->cfg_.request_timeout_ms), [wp] {
+                std::coroutine_handle<> hh{};
+                {
+                    std::lock_guard g(wp->m);
+                    if (!wp->done) {
+                        wp->done = true;
+                        wp->timed_out = true;
+                        hh = wp->h;
                     }
-                    if (!hh) return;
-                    if (wp->ex)
-                        wp->ex->post(hh);
-                    else
-                        hh.resume();
-                });
+                }
+                if (!hh) return;
+                if (wp->ex)
+                    wp->ex->post(hh);
+                else
+                    hh.resume();
+            });
             return true;
         }
         void await_resume() {
             if (!w) return;
             std::lock_guard g(w->m);
             if (w->timed_out)
-                throw S3Error(S3ErrorCode::SlowDown,
-                              "cloudproxy: all remote connections busy, try again later");
+                throw S3Error(S3ErrorCode::SlowDown, "cloudproxy: all remote connections busy, try again later");
             granted = std::move(w->granted);
             create_new = w->create_new;
         }
@@ -450,8 +426,7 @@ void ClientPool::release(PooledClient pc) {
     auto now = std::chrono::steady_clock::now();
     // Age retirement (roadmap §3.3): drop instead of pooling; the connection closes
     // when pc goes out of scope below, outside any handoff
-    if (cfg_.pool_max_lifetime_ms > 0 &&
-        now - pc.created > std::chrono::milliseconds(cfg_.pool_max_lifetime_ms)) {
+    if (cfg_.pool_max_lifetime_ms > 0 && now - pc.created > std::chrono::milliseconds(cfg_.pool_max_lifetime_ms)) {
         pc.c.reset();  // close the socket before any waiter bookkeeping
         retire_slot();
         return;
@@ -489,18 +464,17 @@ ClientPool::Stats ClientPool::stats() {
 
 Target RemoteContext::target(const std::string& remote_bucket) const {
     if (cfg.force_path_style)
-        return {"/" + util::aws_uri_encode(remote_bucket, /*encode_slash=*/false),
-                ep.signed_host};
+        return {"/" + util::aws_uri_encode(remote_bucket, /*encode_slash=*/false), ep.signed_host};
     // virtual-hosted (§7): Host = <rb>.<endpoint-host>[:port], path excludes the bucket.
     // httplib only sets Host itself when it is absent; this pipeline always carries the
     // signed Host explicitly, so no connection changes are needed
     return {"", remote_bucket + "." + ep.signed_host};
 }
 
-httplib::Headers RemoteContext::signed_headers(
-    const std::string& method, const std::string& raw_path, const std::string& raw_query,
-    const std::vector<std::pair<std::string, std::string>>& extra,
-    const std::string& payload_hash, const std::string& host) const {
+httplib::Headers RemoteContext::signed_headers(const std::string& method, const std::string& raw_path,
+                                               const std::string& raw_query,
+                                               const std::vector<std::pair<std::string, std::string>>& extra,
+                                               const std::string& payload_hash, const std::string& host) const {
     http::HttpRequest req;
     req.method = method;
     req.raw_path = raw_path;
@@ -529,8 +503,7 @@ std::optional<S3ErrorCode> map_remote_code(std::string_view wire) {
     if (auto c = s3::code_from_wire(wire)) return c;
     // Near-synonym codes absent from the local vocabulary
     if (wire == "BucketAlreadyExists") return S3ErrorCode::BucketAlreadyOwnedByYou;
-    if (wire == "TooManyRequests" || wire == "RequestLimitExceeded")
-        return S3ErrorCode::SlowDown;
+    if (wire == "TooManyRequests" || wire == "RequestLimitExceeded") return S3ErrorCode::SlowDown;
     return std::nullopt;
 }
 
@@ -554,17 +527,16 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
 
     // 429/503/SlowDown -> local 503; clients may back off and retry
     if (status == 429 || status == 503 || remote_code == "SlowDown")
-        throw S3Error(S3ErrorCode::SlowDown,
-                      remote_msg.empty() ? "remote replied slow down" : remote_msg, res);
+        throw S3Error(S3ErrorCode::SlowDown, remote_msg.empty() ? "remote replied slow down" : remote_msg, res);
 
     // A 403 is a gateway cloud-credential/permission fault; do not pass AccessDenied
     // through and mislead clients into debugging their own credentials
     if (status == 403) {
-        LOG_WARN("cloudproxy: remote returned 403 ({}) for {} — check gateway cloud "
-                 "credentials",
-                 remote_code.empty() ? "unparsable body" : remote_code, res);
-        throw S3Error(S3ErrorCode::InternalError,
-                      "remote access failure (gateway-side cloud credentials)", res);
+        LOG_WARN(
+            "cloudproxy: remote returned 403 ({}) for {} — check gateway cloud "
+            "credentials",
+            remote_code.empty() ? "unparsable body" : remote_code, res);
+        throw S3Error(S3ErrorCode::InternalError, "remote access failure (gateway-side cloud credentials)", res);
     }
 
     if (status >= 400 && status < 500) {
@@ -576,22 +548,17 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
         // backend.h PutCondition): even with an unparsable body it must be mapped by
         // semantics, not dropped into InternalError
         if (status == 412)
-            throw S3Error(S3ErrorCode::PreconditionFailed,
-                          remote_msg.empty()
-                              ? "At least one of the pre-conditions you specified did not hold"
-                              : remote_msg,
-                          res);
+            throw S3Error(
+                S3ErrorCode::PreconditionFailed,
+                remote_msg.empty() ? "At least one of the pre-conditions you specified did not hold" : remote_msg, res);
         if (status == 404) {
             switch (ctx) {
                 case ErrCtx::Key:
-                    throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist.",
-                                  res);
+                    throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist.", res);
                 case ErrCtx::Bucket:
-                    throw S3Error(S3ErrorCode::NoSuchBucket,
-                                  "The specified bucket does not exist.", res);
+                    throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist.", res);
                 case ErrCtx::Upload:
-                    throw S3Error(S3ErrorCode::NoSuchUpload,
-                                  "The specified upload does not exist.", res);
+                    throw S3Error(S3ErrorCode::NoSuchUpload, "The specified upload does not exist.", res);
                 case ErrCtx::None:
                     break;
             }
@@ -609,16 +576,15 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
 
     // 5xx / everything else: local 500 (no 502 introduced; the S3 error vocabulary has no BadGateway)
     throw S3Error(S3ErrorCode::InternalError,
-                  "remote returned " + std::to_string(status) +
-                      (remote_code.empty() ? "" : " (" + remote_code + ")"),
+                  "remote returned " + std::to_string(status) + (remote_code.empty() ? "" : " (" + remote_code + ")"),
                   res);
 }
 
 void RemoteContext::throw_transport_error(httplib::Error err) const {
-    metrics.count_error("transport");  // §8.2: connection/DNS/timeout classes share one bucket, details go into the message
+    metrics.count_error("transport");  // §8.2: connection/DNS/timeout classes share one bucket, details go into the
+                                       // message
     throw S3Error(S3ErrorCode::InternalError,
-                  "cloudproxy: request to " + cfg.endpoint +
-                      " failed: " + httplib::to_string(err));
+                  "cloudproxy: request to " + cfg.endpoint + " failed: " + httplib::to_string(err));
 }
 
 std::optional<int64_t> RemoteContext::retry_after_hint(const httplib::Result& r) {
@@ -635,16 +601,14 @@ std::optional<int64_t> RemoteContext::retry_after_hint(const httplib::Result& r)
         }
     }
     if (auto t = util::parse_http_date(v)) {
-        auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         *t - std::chrono::system_clock::now())
+        auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(*t - std::chrono::system_clock::now())
                          .count();
         return std::clamp<int64_t>(delta, 0, 60'000);
     }
     return std::nullopt;
 }
 
-int64_t RemoteContext::backoff_delay_ms(int attempt,
-                                        std::optional<int64_t> retry_after_ms) const {
+int64_t RemoteContext::backoff_delay_ms(int attempt, std::optional<int64_t> retry_after_ms) const {
     // The server's own hint wins over the formula (roadmap §3.3): it knows its
     // overload horizon; the clamp in retry_after_hint bounds a hostile value
     if (retry_after_ms) return *retry_after_ms;
@@ -658,8 +622,7 @@ int64_t RemoteContext::backoff_delay_ms(int attempt,
 }
 
 void RemoteContext::backoff(int attempt, std::optional<int64_t> retry_after_ms) const {
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(backoff_delay_ms(attempt, retry_after_ms)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(backoff_delay_ms(attempt, retry_after_ms)));
 }
 
 // ---------- Circuit breaker (roadmap §3.3) ----------
@@ -687,12 +650,12 @@ void RemoteContext::breaker_report(bool ok) {
     }
     ++consec_failures_;
     if (consec_failures_ >= cfg.breaker_threshold) {
-        breaker_open_until_ = std::chrono::steady_clock::now() +
-                              std::chrono::milliseconds(cfg.breaker_cooldown_ms);
+        breaker_open_until_ = std::chrono::steady_clock::now() + std::chrono::milliseconds(cfg.breaker_cooldown_ms);
         if (consec_failures_ == cfg.breaker_threshold)
-            LOG_WARN("cloudproxy: {} consecutive remote failures, circuit breaker open for "
-                     "{}ms (endpoint {})",
-                     consec_failures_, cfg.breaker_cooldown_ms, cfg.endpoint);
+            LOG_WARN(
+                "cloudproxy: {} consecutive remote failures, circuit breaker open for "
+                "{}ms (endpoint {})",
+                consec_failures_, cfg.breaker_cooldown_ms, cfg.endpoint);
     }
 }
 
@@ -710,8 +673,7 @@ void RemoteContext::breaker_gate() {
     if (breaker_allow()) return;
     metrics.count_error("breaker_open");  // §8.2: shed load is visible per remote
     throw S3Error(S3ErrorCode::SlowDown,
-                  "cloudproxy: circuit breaker open (remote " + cfg.endpoint +
-                      " failing), request shed");
+                  "cloudproxy: circuit breaker open (remote " + cfg.endpoint + " failing), request shed");
 }
 
 // ---------- Pagination helpers ----------

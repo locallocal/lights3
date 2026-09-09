@@ -14,8 +14,8 @@
 namespace lights3::storage {
 
 // scope carries the backend=<name> base label; factories that don't consume metrics can ignore it
-using BackendFactory = std::function<std::shared_ptr<IStorageBackend>(
-    const BackendConfig&, std::shared_ptr<ThreadPool>, MetricsScope)>;
+using BackendFactory = std::function<std::shared_ptr<IStorageBackend>(const BackendConfig&, std::shared_ptr<ThreadPool>,
+                                                                      MetricsScope)>;
 
 class StorageRegistry {
 public:

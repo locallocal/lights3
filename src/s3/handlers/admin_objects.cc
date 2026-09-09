@@ -12,8 +12,7 @@ namespace lights3::s3 {
 using namespace handlers;
 using nlohmann::json;
 
-Task<http::HttpResponse> S3Service::admin_object_inspect(http::HttpRequest& req,
-                                                         std::string& access_key,
+Task<http::HttpResponse> S3Service::admin_object_inspect(http::HttpRequest& req, std::string& access_key,
                                                          const RequestContext& ctx) {
     (void)ctx;
     try {
@@ -24,8 +23,7 @@ Task<http::HttpResponse> S3Service::admin_object_inspect(http::HttpRequest& req,
                           "Inspecting object layout requires a root (statically configured) "
                           "credential.");
         if (req.method != "GET")
-            throw S3Error(S3ErrorCode::MethodNotAllowed,
-                          "The specified method is not allowed against this resource.");
+            throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
         constexpr std::string_view kBase = "/-/admin/objects";
         std::string rest = req.path.substr(kBase.size());
         if (rest.size() < 2 || rest.front() != '/')
@@ -33,8 +31,7 @@ Task<http::HttpResponse> S3Service::admin_object_inspect(http::HttpRequest& req,
         rest.erase(0, 1);
         size_t slash = rest.find('/');
         if (slash == std::string::npos || slash == 0 || slash + 1 >= rest.size())
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Usage: /-/admin/objects/<bucket>/<key>.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "Usage: /-/admin/objects/<bucket>/<key>.");
         std::string bucket = rest.substr(0, slash);
         std::string key = rest.substr(slash + 1);
         storage::validate_bucket_name(bucket);

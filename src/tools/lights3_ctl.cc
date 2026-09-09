@@ -16,25 +16,25 @@
 #include "tools/lights3_ctl_cred.h"
 #include "tools/lights3_ctl_fsck.h"
 #include "tools/lights3_ctl_jobs.h"
+#include "tools/lights3_ctl_mpu.h"
+#include "tools/lights3_ctl_object.h"
 #include "tools/lights3_ctl_quota.h"
 #include "tools/lights3_ctl_reload.h"
 #include "tools/lights3_ctl_tenant.h"
-#include "tools/lights3_ctl_mpu.h"
-#include "tools/lights3_ctl_object.h"
 #include "tools/lights3_ctl_usage.h"
 #include "tools/lights3_ctl_website.h"
 
 namespace lights3_ctl {
 
-// ccmd callbacks return nothing; the process exit code is carried out through this (0 success / 1 request failure / 2 usage error)
+// ccmd callbacks return nothing; the process exit code is carried out through this (0 success / 1 request failure / 2
+// usage error)
 int g_exit = 0;
 
 }  // namespace lights3_ctl
 
 int main(int argc, char* argv[]) {
     auto root = std::make_shared<ccmd::c_command>(
-        "lights3-ctl", "lights3-ctl cred list --endpoint=http://127.0.0.1:9000",
-        "lights3-ctl <command> [options]",
+        "lights3-ctl", "lights3-ctl cred list --endpoint=http://127.0.0.1:9000", "lights3-ctl <command> [options]",
         "lights3 ops CLI (docs/credential-management.md). Credential management "
         "lives under the `cred` command group, benchmarking under `bench`, bucket "
         "website configuration under `website`, online object verification under "

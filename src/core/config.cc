@@ -37,11 +37,13 @@ std::string expand_env(const std::string& s) {
                     var = expr.substr(0, d);
                     def = expr.substr(d + 2);
                 }
-                if (const char* v = getenv(var.c_str())) out += v;
-                else if (def) out += *def;
+                if (const char* v = getenv(var.c_str()))
+                    out += v;
+                else if (def)
+                    out += *def;
                 else
-                    throw std::runtime_error("config: undefined environment variable ${" + var +
-                                             "} (use ${" + var + ":-default} if optional)");
+                    throw std::runtime_error("config: undefined environment variable ${" + var + "} (use ${" + var +
+                                             ":-default} if optional)");
                 i = end + 1;
                 continue;
             }
@@ -59,8 +61,7 @@ std::string trim(const std::string& s) {
 }
 
 std::string unquote(const std::string& s) {
-    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') ||
-                          (s.front() == '\'' && s.back() == '\'')))
+    if (s.size() >= 2 && ((s.front() == '"' && s.back() == '"') || (s.front() == '\'' && s.back() == '\'')))
         return s.substr(1, s.size() - 2);
     return s;
 }
@@ -75,8 +76,7 @@ std::vector<Line> to_lines(const std::string& text) {
         if (!raw.empty() && raw.back() == '\r') raw.pop_back();
         size_t indent = 0;
         while (indent < raw.size() && raw[indent] == ' ') ++indent;
-        if (indent < raw.size() && raw[indent] == '\t')
-            throw std::runtime_error("yaml: tab indentation not supported");
+        if (indent < raw.size() && raw[indent] == '\t') throw std::runtime_error("yaml: tab indentation not supported");
         std::string content = raw.substr(indent);
         // Comments: a leading # or an unquoted " #". A " #" inside quotes is not a
         // comment — a naive find(" #") would truncate secret_key: "a #b" to "a,
@@ -115,8 +115,7 @@ public:
         // consuming it; without this check it is silently dropped (a lost optional
         // parameter fails without a sound), so always report an error here
         if (i_ < lines_.size())
-            throw std::runtime_error("yaml: unexpected indent at line " +
-                                     std::to_string(lines_[i_].lineno));
+            throw std::runtime_error("yaml: unexpected indent at line " + std::to_string(lines_[i_].lineno));
         return root;
     }
 
@@ -126,13 +125,11 @@ private:
     // Parse the block starting at the current line whose indentation is exactly `indent`
     YamlNode parse_block(int indent, int depth) {
         if (depth > kMaxDepth)
-            throw std::runtime_error("yaml: nesting too deep at line " +
-                                     std::to_string(lines_[i_].lineno));
+            throw std::runtime_error("yaml: nesting too deep at line " + std::to_string(lines_[i_].lineno));
         YamlNode node;
         if (i_ < lines_.size() && lines_[i_].text.rfind("- ", 0) == 0) {
             node.type = YamlNode::Type::List;
-            while (i_ < lines_.size() && lines_[i_].indent == indent &&
-                   lines_[i_].text.rfind("- ", 0) == 0) {
+            while (i_ < lines_.size() && lines_[i_].indent == indent && lines_[i_].text.rfind("- ", 0) == 0) {
                 // Treat "- xxx" as a line indented at indent+2; together with
                 // following lines at the same indentation it forms one item
                 lines_[i_].text = lines_[i_].text.substr(2);
@@ -142,12 +139,10 @@ private:
             return node;
         }
         node.type = YamlNode::Type::Map;
-        while (i_ < lines_.size() && lines_[i_].indent == indent &&
-               lines_[i_].text.rfind("- ", 0) != 0) {
+        while (i_ < lines_.size() && lines_[i_].indent == indent && lines_[i_].text.rfind("- ", 0) != 0) {
             auto& text = lines_[i_].text;
             auto colon = text.find(':');
-            if (colon == std::string::npos)
-                throw std::runtime_error("yaml: expected 'key:' at '" + text + "'");
+            if (colon == std::string::npos) throw std::runtime_error("yaml: expected 'key:' at '" + text + "'");
             std::string key = trim(text.substr(0, colon));
             std::string val = trim(text.substr(colon + 1));
             ++i_;
@@ -160,11 +155,9 @@ private:
                 // Nested block: use the next line's indentation (must be deeper);
                 // no content means an empty map
                 if (i_ < lines_.size() && lines_[i_].indent > indent) {
-                    node.map.emplace_back(std::move(key),
-                                          parse_block(lines_[i_].indent, depth + 1));
+                    node.map.emplace_back(std::move(key), parse_block(lines_[i_].indent, depth + 1));
                 } else {
-                    node.map.emplace_back(std::move(key),
-                                          YamlNode(YamlNode::Type::Map));
+                    node.map.emplace_back(std::move(key), YamlNode(YamlNode::Type::Map));
                 }
             }
         }
@@ -201,17 +194,21 @@ YamlNode yaml_parse(const std::string& text) { return Parser(to_lines(text)).par
 
 size_t parse_size(const std::string& s) {
     // stoull accepts "-1" and wraps it to 2^64-1, so reject the minus sign explicitly
-    if (s.find('-') != std::string::npos)
-        throw std::runtime_error("negative size not allowed: " + s);
+    if (s.find('-') != std::string::npos) throw std::runtime_error("negative size not allowed: " + s);
     size_t pos = 0;
     unsigned long long num = std::stoull(s, &pos);
     std::string unit = trim(s.substr(pos));
     int shift = 0;
-    if (unit.empty() || unit == "B") shift = 0;
-    else if (unit == "KiB" || unit == "KB" || unit == "K" || unit == "k") shift = 10;
-    else if (unit == "MiB" || unit == "MB" || unit == "M" || unit == "m") shift = 20;
-    else if (unit == "GiB" || unit == "GB" || unit == "G" || unit == "g") shift = 30;
-    else throw std::runtime_error("bad size unit: " + s);
+    if (unit.empty() || unit == "B")
+        shift = 0;
+    else if (unit == "KiB" || unit == "KB" || unit == "K" || unit == "k")
+        shift = 10;
+    else if (unit == "MiB" || unit == "MB" || unit == "M" || unit == "m")
+        shift = 20;
+    else if (unit == "GiB" || unit == "GB" || unit == "G" || unit == "g")
+        shift = 30;
+    else
+        throw std::runtime_error("bad size unit: " + s);
     if (shift && num > (std::numeric_limits<size_t>::max() >> shift))
         throw std::runtime_error("size out of range: " + s);
     return static_cast<size_t>(num) << shift;
@@ -222,13 +219,17 @@ int parse_duration_sec(const std::string& s) {
     long long num = std::stoll(s, &pos);
     std::string unit = trim(s.substr(pos));
     long long mult = 0;
-    if (unit.empty() || unit == "s") mult = 1;
-    else if (unit == "m") mult = 60;
-    else if (unit == "h") mult = 3600;
-    else if (unit == "d") mult = 86400;  // tiered storage's cold_after (docs/storage/tiered-design.md §8)
-    else throw std::runtime_error("bad duration unit: " + s);
-    if (num < 0 || num > INT_MAX / mult)
-        throw std::runtime_error("duration out of range: " + s);
+    if (unit.empty() || unit == "s")
+        mult = 1;
+    else if (unit == "m")
+        mult = 60;
+    else if (unit == "h")
+        mult = 3600;
+    else if (unit == "d")
+        mult = 86400;  // tiered storage's cold_after (docs/storage/tiered-design.md §8)
+    else
+        throw std::runtime_error("bad duration unit: " + s);
+    if (num < 0 || num > INT_MAX / mult) throw std::runtime_error("duration out of range: " + s);
     return static_cast<int>(num * mult);
 }
 
@@ -237,14 +238,19 @@ int parse_duration_ms(const std::string& s) {
     long long num = std::stoll(s, &pos);
     std::string unit = trim(s.substr(pos));
     long long mult = 0;
-    if (unit == "ms") mult = 1;
-    else if (unit.empty() || unit == "s") mult = 1000;
-    else if (unit == "m") mult = 60'000;
-    else if (unit == "h") mult = 3'600'000;
-    else if (unit == "d") mult = 86'400'000;
-    else throw std::runtime_error("bad duration unit: " + s);
-    if (num < 0 || num > INT_MAX / mult)
-        throw std::runtime_error("duration out of range: " + s);
+    if (unit == "ms")
+        mult = 1;
+    else if (unit.empty() || unit == "s")
+        mult = 1000;
+    else if (unit == "m")
+        mult = 60'000;
+    else if (unit == "h")
+        mult = 3'600'000;
+    else if (unit == "d")
+        mult = 86'400'000;
+    else
+        throw std::runtime_error("bad duration unit: " + s);
+    if (num < 0 || num > INT_MAX / mult) throw std::runtime_error("duration out of range: " + s);
     return static_cast<int>(num * mult);
 }
 
@@ -271,17 +277,15 @@ int to_int(const std::string& key, const std::string& s, int def) {
     } catch (const std::exception&) {
         throw std::runtime_error("config: " + key + " is not an integer: '" + s + "'");
     }
-    if (trim(s.substr(pos)) != "")
-        throw std::runtime_error("config: " + key + " has trailing garbage: '" + s + "'");
-    if (v < INT_MIN || v > INT_MAX)
-        throw std::runtime_error("config: " + key + " out of range: '" + s + "'");
+    if (trim(s.substr(pos)) != "") throw std::runtime_error("config: " + key + " has trailing garbage: '" + s + "'");
+    if (v < INT_MIN || v > INT_MAX) throw std::runtime_error("config: " + key + " out of range: '" + s + "'");
     return static_cast<int>(v);
 }
 
 void check_range(const std::string& key, int v, int lo, int hi) {
     if (v < lo || v > hi)
-        throw std::runtime_error("config: " + key + " must be in [" + std::to_string(lo) + "," +
-                                 std::to_string(hi) + "], got " + std::to_string(v));
+        throw std::runtime_error("config: " + key + " must be in [" + std::to_string(lo) + "," + std::to_string(hi) +
+                                 "], got " + std::to_string(v));
 }
 
 // Size-typed parameters (parse_size returns 64 bits): the int overload would
@@ -289,8 +293,8 @@ void check_range(const std::string& key, int v, int lo, int hi) {
 // "got" would be wrong
 void check_range(const std::string& key, long long v, long long lo, long long hi) {
     if (v < lo || v > hi)
-        throw std::runtime_error("config: " + key + " must be in [" + std::to_string(lo) + "," +
-                                 std::to_string(hi) + "], got " + std::to_string(v));
+        throw std::runtime_error("config: " + key + " must be in [" + std::to_string(lo) + "," + std::to_string(hi) +
+                                 "], got " + std::to_string(v));
 }
 
 }  // namespace
@@ -318,39 +322,32 @@ Config Config::from_string(const std::string& text) {
         // picks", which can never collide
         if (cfg.http.admin_port > 0 && cfg.http.admin_port == int(cfg.http.port) &&
             (cfg.http.admin_bind.empty() || cfg.http.admin_bind == cfg.http.bind))
-            throw std::runtime_error("config: http.admin_port must differ from http.port "
-                                     "(or bind the admin listener to another address)");
+            throw std::runtime_error(
+                "config: http.admin_port must differ from http.port "
+                "(or bind the admin listener to another address)");
         if (auto v = http->get("io_threads"); !v.empty()) {
             cfg.http.io_threads = to_int("http.io_threads", v, cfg.http.io_threads);
             cfg.http.io_threads_set = true;  // the builtin driver WARNs based on this (docs/archive/gaps.md §7)
         }
         cfg.http.base_domain = http->get("base_domain", cfg.http.base_domain);
-        if (auto v = http->get("max_header_size"); !v.empty())
-            cfg.http.max_header_size = parse_size(v);
-        if (auto v = http->get("idle_timeout"); !v.empty())
-            cfg.http.idle_timeout_sec = parse_duration_sec(v);
+        if (auto v = http->get("max_header_size"); !v.empty()) cfg.http.max_header_size = parse_size(v);
+        if (auto v = http->get("idle_timeout"); !v.empty()) cfg.http.idle_timeout_sec = parse_duration_sec(v);
         // Timeout family (roadmap §4.2): header / body / write phases
-        if (auto v = http->get("header_timeout"); !v.empty())
-            cfg.http.header_timeout_sec = parse_duration_sec(v);
-        if (auto v = http->get("body_timeout"); !v.empty())
-            cfg.http.body_timeout_sec = parse_duration_sec(v);
-        if (auto v = http->get("write_timeout"); !v.empty())
-            cfg.http.write_timeout_sec = parse_duration_sec(v);
-        cfg.http.max_requests_per_connection =
-            to_int("http.max_requests_per_connection", http->get("max_requests_per_connection"),
-                   cfg.http.max_requests_per_connection);
-        check_range("http.max_requests_per_connection", cfg.http.max_requests_per_connection, 0,
-                    1'000'000);
+        if (auto v = http->get("header_timeout"); !v.empty()) cfg.http.header_timeout_sec = parse_duration_sec(v);
+        if (auto v = http->get("body_timeout"); !v.empty()) cfg.http.body_timeout_sec = parse_duration_sec(v);
+        if (auto v = http->get("write_timeout"); !v.empty()) cfg.http.write_timeout_sec = parse_duration_sec(v);
+        cfg.http.max_requests_per_connection = to_int("http.max_requests_per_connection",
+                                                      http->get("max_requests_per_connection"),
+                                                      cfg.http.max_requests_per_connection);
+        check_range("http.max_requests_per_connection", cfg.http.max_requests_per_connection, 0, 1'000'000);
         // Per-request timeout and transfer stall limit (docs/archive/gaps.md §3.3): 0 = disabled
-        if (auto v = http->get("request_timeout"); !v.empty())
-            cfg.http.request_timeout_sec = parse_duration_sec(v);
+        if (auto v = http->get("request_timeout"); !v.empty()) cfg.http.request_timeout_sec = parse_duration_sec(v);
         // Minimum multipart part size (docs/archive/gaps.md §5.7): 0 = no limit
-        if (auto v = http->get("min_part_size"); !v.empty())
-            cfg.http.min_part_size = parse_size(v);
+        if (auto v = http->get("min_part_size"); !v.empty()) cfg.http.min_part_size = parse_size(v);
         if (auto v = http->get("transfer_stall_timeout"); !v.empty())
             cfg.http.transfer_stall_timeout_sec = parse_duration_sec(v);
-        cfg.http.max_connections =
-            to_int("http.max_connections", http->get("max_connections"), cfg.http.max_connections);
+        cfg.http.max_connections = to_int("http.max_connections", http->get("max_connections"),
+                                          cfg.http.max_connections);
         check_range("http.max_connections", cfg.http.max_connections, 1, 1'000'000);
         cfg.http.metrics_access = http->get("metrics_access", cfg.http.metrics_access);
         if (cfg.http.metrics_access != "anonymous" && cfg.http.metrics_access != "root")
@@ -360,8 +357,7 @@ Config Config::from_string(const std::string& text) {
         cfg.http.tls_cert = http->get("tls_cert", cfg.http.tls_cert);
         cfg.http.tls_key = http->get("tls_key", cfg.http.tls_key);
         if (cfg.http.tls_cert.empty() != cfg.http.tls_key.empty())
-            throw std::runtime_error(
-                "config: http.tls_cert and http.tls_key must be set together");
+            throw std::runtime_error("config: http.tls_cert and http.tls_key must be set together");
         // TLS knobs (roadmap §4.1): every one of them presupposes a TLS listener, so
         // any of them without tls_cert is a configuration that looks secured but is not
         cfg.http.tls_client_ca = http->get("tls_client_ca", cfg.http.tls_client_ca);
@@ -376,20 +372,17 @@ Config Config::from_string(const std::string& text) {
             for (auto& e : sni->list) {
                 TlsSniEntry s{e.get("hosts"), e.get("cert"), e.get("key")};
                 if (s.hosts.empty() || s.cert.empty() || s.key.empty())
-                    throw std::runtime_error(
-                        "config: each http.tls_sni entry needs hosts + cert + key");
+                    throw std::runtime_error("config: each http.tls_sni entry needs hosts + cert + key");
                 cfg.http.tls_sni.push_back(std::move(s));
             }
         }
         if (cfg.http.tls_client_auth != "off" && cfg.http.tls_client_auth != "optional" &&
             cfg.http.tls_client_auth != "require")
-            throw std::runtime_error(
-                "config: http.tls_client_auth must be off|optional|require, got '" +
-                cfg.http.tls_client_auth + "'");
+            throw std::runtime_error("config: http.tls_client_auth must be off|optional|require, got '" +
+                                     cfg.http.tls_client_auth + "'");
         if (cfg.http.tls_client_auth != "off" && cfg.http.tls_client_ca.empty())
-            throw std::runtime_error(
-                "config: http.tls_client_auth=" + cfg.http.tls_client_auth +
-                " requires http.tls_client_ca");
+            throw std::runtime_error("config: http.tls_client_auth=" + cfg.http.tls_client_auth +
+                                     " requires http.tls_client_ca");
         if (cfg.http.tls_min_version != "1.2" && cfg.http.tls_min_version != "1.3")
             throw std::runtime_error("config: http.tls_min_version must be 1.2 or 1.3, got '" +
                                      cfg.http.tls_min_version + "'");
@@ -401,26 +394,19 @@ Config Config::from_string(const std::string& text) {
                 "config: http.tls_* options require http.tls_cert and http.tls_key (no TLS "
                 "listener is configured)");
         // Shutdown/backpressure knobs (docs/archive/gaps.md §7)
-        if (auto v = http->get("drain_limit"); !v.empty())
-            cfg.http.drain_limit = parse_size(v);
-        if (auto v = http->get("trailer_max_size"); !v.empty())
-            cfg.http.trailer_max_size = parse_size(v);
-        if (auto v = http->get("io_chunk_size"); !v.empty())
-            cfg.http.io_chunk_size = parse_size(v);
+        if (auto v = http->get("drain_limit"); !v.empty()) cfg.http.drain_limit = parse_size(v);
+        if (auto v = http->get("trailer_max_size"); !v.empty()) cfg.http.trailer_max_size = parse_size(v);
+        if (auto v = http->get("io_chunk_size"); !v.empty()) cfg.http.io_chunk_size = parse_size(v);
         if (auto v = http->get("sendfile"); !v.empty()) cfg.http.sendfile = parse_bool(v);
-        if (auto v = http->get("body_queue_cap"); !v.empty())
-            cfg.http.body_queue_cap = parse_size(v);
-        if (auto v = http->get("shutdown_grace"); !v.empty())
-            cfg.http.shutdown_grace_sec = parse_duration_sec(v);
+        if (auto v = http->get("body_queue_cap"); !v.empty()) cfg.http.body_queue_cap = parse_size(v);
+        if (auto v = http->get("shutdown_grace"); !v.empty()) cfg.http.shutdown_grace_sec = parse_duration_sec(v);
         if (auto v = http->get("shutdown_force_wait"); !v.empty())
             cfg.http.shutdown_force_wait_sec = parse_duration_sec(v);
     }
     if (auto* rt = root.find("runtime")) {
-        cfg.runtime.io_threads =
-            to_int("runtime.io_threads", rt->get("io_threads"), cfg.runtime.io_threads);
-        cfg.runtime.max_inflight_requests = to_int(
-            "runtime.max_inflight_requests", rt->get("max_inflight_requests"),
-            cfg.runtime.max_inflight_requests);
+        cfg.runtime.io_threads = to_int("runtime.io_threads", rt->get("io_threads"), cfg.runtime.io_threads);
+        cfg.runtime.max_inflight_requests = to_int("runtime.max_inflight_requests", rt->get("max_inflight_requests"),
+                                                   cfg.runtime.max_inflight_requests);
     }
     if (auto* auth = root.find("auth")) {
         cfg.auth.region = auth->get("region", cfg.auth.region);
@@ -428,14 +414,12 @@ Config Config::from_string(const std::string& text) {
         cfg.auth.credentials_file = auth->get("credentials_file", cfg.auth.credentials_file);
         if (auto v = auth->get("credentials_file_reload"); !v.empty())
             cfg.auth.credentials_file_reload_sec = parse_duration_sec(v);
-        if (auto v = auth->get("sync_interval"); !v.empty())
-            cfg.auth.sync_interval_sec = parse_duration_sec(v);
+        if (auto v = auth->get("sync_interval"); !v.empty()) cfg.auth.sync_interval_sec = parse_duration_sec(v);
         cfg.auth.tls_identity = auth->get("tls_identity", cfg.auth.tls_identity);
         if (cfg.auth.tls_identity != "off" && cfg.auth.tls_identity != "subject-cn" &&
             cfg.auth.tls_identity != "san-uri")
-            throw std::runtime_error(
-                "config: auth.tls_identity must be off|subject-cn|san-uri, got '" +
-                cfg.auth.tls_identity + "'");
+            throw std::runtime_error("config: auth.tls_identity must be off|subject-cn|san-uri, got '" +
+                                     cfg.auth.tls_identity + "'");
         // The mapping only ever sees certificates the listener verified: without
         // client auth it would be a knob that looks like security and does nothing
         if (cfg.auth.tls_identity != "off" && cfg.http.tls_client_auth == "off")
@@ -454,9 +438,12 @@ Config Config::from_string(const std::string& text) {
         for (auto& b : bs->list) {
             BackendConfig bc;
             for (auto& [k, v] : b.map) {
-                if (k == "name") bc.name = v.scalar;
-                else if (k == "type") bc.type = v.scalar;
-                else if (v.type == YamlNode::Type::Scalar) bc.params[k] = v.scalar;
+                if (k == "name")
+                    bc.name = v.scalar;
+                else if (k == "type")
+                    bc.type = v.scalar;
+                else if (v.type == YamlNode::Type::Scalar)
+                    bc.params[k] = v.scalar;
                 else if (v.type == YamlNode::Type::List) {
                     // A list of maps under a backend entry (tiered `rules`, roadmap §3.6 ②)
                     // is flattened into scalar params "k.<index>.<field>" so BackendConfig
@@ -471,14 +458,12 @@ Config Config::from_string(const std::string& text) {
                     }
                 }
             }
-            if (bc.name.empty() || bc.type.empty())
-                throw std::runtime_error("config: backend needs name + type");
+            if (bc.name.empty() || bc.type.empty()) throw std::runtime_error("config: backend needs name + type");
             // Duplicate backend names: the registry keys by name, so the later one
             // silently overwrites the earlier one and which one bucket routing hits
             // depends on insertion order — error out at startup
             for (auto& prev : cfg.backends)
-                if (prev.name == bc.name)
-                    throw std::runtime_error("config: duplicate backend name '" + bc.name + "'");
+                if (prev.name == bc.name) throw std::runtime_error("config: duplicate backend name '" + bc.name + "'");
             cfg.backends.push_back(std::move(bc));
         }
     }
@@ -506,8 +491,7 @@ Config Config::from_string(const std::string& text) {
             // AWS rule: the index suffix is non-empty and contains no '/' — with a slash,
             // "docs/" would map to a key outside that directory
             if (wb.index_suffix.empty() || wb.index_suffix.find('/') != std::string::npos)
-                throw std::runtime_error(
-                    "config: website index_suffix must be non-empty and contain no '/'");
+                throw std::runtime_error("config: website index_suffix must be non-empty and contain no '/'");
             // Keys never start with '/' (the path form "/bucket/key" strips it); a leading
             // slash here would make the error object silently unreachable
             if (!wb.error_key.empty() && wb.error_key.front() == '/')
@@ -519,11 +503,9 @@ Config Config::from_string(const std::string& text) {
             wb.redirect_all_protocol = w.get("redirect_all_protocol");
             if (!wb.redirect_all_protocol.empty() && wb.redirect_all_protocol != "http" &&
                 wb.redirect_all_protocol != "https")
-                throw std::runtime_error(
-                    "config: website redirect_all_protocol must be http or https");
+                throw std::runtime_error("config: website redirect_all_protocol must be http or https");
             if (!wb.redirect_all_protocol.empty() && wb.redirect_all_host.empty())
-                throw std::runtime_error(
-                    "config: website redirect_all_protocol requires redirect_all_host");
+                throw std::runtime_error("config: website redirect_all_protocol requires redirect_all_host");
             // Anonymous rate limit (roadmap §2.3): 0 = unlimited
             int rps = to_int("website.max_rps", w.get("max_rps"), 0);
             check_range("website.max_rps", rps, 0, 1'000'000);
@@ -532,8 +514,7 @@ Config Config::from_string(const std::string& text) {
             // the second one was meant to be a different bucket
             for (auto& prev : cfg.website.buckets)
                 if (prev.bucket == wb.bucket)
-                    throw std::runtime_error("config: duplicate website bucket '" + wb.bucket +
-                                             "'");
+                    throw std::runtime_error("config: duplicate website bucket '" + wb.bucket + "'");
             cfg.website.buckets.push_back(std::move(wb));
         }
     }
@@ -545,8 +526,7 @@ Config Config::from_string(const std::string& text) {
     }
     if (auto* us = root.find("usage")) {
         if (std::string v = us->get("enabled"); !v.empty()) cfg.usage.enabled = parse_bool(v);
-        if (std::string v = us->get("flush_interval"); !v.empty())
-            cfg.usage.flush_interval_sec = parse_duration_sec(v);
+        if (std::string v = us->get("flush_interval"); !v.empty()) cfg.usage.flush_interval_sec = parse_duration_sec(v);
         if (std::string v = us->get("reconcile_interval"); !v.empty())
             cfg.usage.reconcile_interval_sec = parse_duration_sec(v);
         if (std::string v = us->get("reconcile"); !v.empty()) cfg.usage.reconcile = parse_bool(v);
@@ -556,13 +536,11 @@ Config Config::from_string(const std::string& text) {
     }
     if (auto* au = root.find("audit")) {
         cfg.audit.path = au->get("path", cfg.audit.path);
-        if (std::string v = au->get("data_plane"); !v.empty())
-            cfg.audit.data_plane = parse_bool(v);
+        if (std::string v = au->get("data_plane"); !v.empty()) cfg.audit.data_plane = parse_bool(v);
         if (std::string v = au->get("max_size"); !v.empty()) cfg.audit.max_size = parse_size(v);
         cfg.audit.max_files = to_int("audit.max_files", au->get("max_files"), cfg.audit.max_files);
         // Lower bound keeps a rotation from thrashing on every line; upper bound guards a slipped unit
-        check_range("audit.max_size", static_cast<long long>(cfg.audit.max_size), 65536LL,
-                    64LL * 1'073'741'824LL);
+        check_range("audit.max_size", static_cast<long long>(cfg.audit.max_size), 65536LL, 64LL * 1'073'741'824LL);
         check_range("audit.max_files", cfg.audit.max_files, 1, 1000);
         // data_plane without a file is a knob that looks configured but records nothing
         if (cfg.audit.path.empty() && cfg.audit.data_plane)
@@ -572,19 +550,18 @@ Config Config::from_string(const std::string& text) {
         auto& r = cfg.ratelimit;
         r.per_ip_rps = to_int("ratelimit.per_ip_rps", rl->get("per_ip_rps"), r.per_ip_rps);
         r.per_ip_burst = to_int("ratelimit.per_ip_burst", rl->get("per_ip_burst"), r.per_ip_burst);
-        r.per_ip_max_inflight = to_int("ratelimit.per_ip_max_inflight",
-                                       rl->get("per_ip_max_inflight"), r.per_ip_max_inflight);
+        r.per_ip_max_inflight = to_int("ratelimit.per_ip_max_inflight", rl->get("per_ip_max_inflight"),
+                                       r.per_ip_max_inflight);
         r.per_ak_rps = to_int("ratelimit.per_ak_rps", rl->get("per_ak_rps"), r.per_ak_rps);
         r.per_ak_burst = to_int("ratelimit.per_ak_burst", rl->get("per_ak_burst"), r.per_ak_burst);
-        r.per_ak_max_inflight = to_int("ratelimit.per_ak_max_inflight",
-                                       rl->get("per_ak_max_inflight"), r.per_ak_max_inflight);
+        r.per_ak_max_inflight = to_int("ratelimit.per_ak_max_inflight", rl->get("per_ak_max_inflight"),
+                                       r.per_ak_max_inflight);
         r.max_tracked = to_int("ratelimit.max_tracked", rl->get("max_tracked"), r.max_tracked);
-        for (auto [name, v] : {std::pair{"ratelimit.per_ip_rps", r.per_ip_rps},
-                               std::pair{"ratelimit.per_ip_burst", r.per_ip_burst},
-                               std::pair{"ratelimit.per_ip_max_inflight", r.per_ip_max_inflight},
-                               std::pair{"ratelimit.per_ak_rps", r.per_ak_rps},
-                               std::pair{"ratelimit.per_ak_burst", r.per_ak_burst},
-                               std::pair{"ratelimit.per_ak_max_inflight", r.per_ak_max_inflight}})
+        for (auto [name, v] :
+             {std::pair{"ratelimit.per_ip_rps", r.per_ip_rps}, std::pair{"ratelimit.per_ip_burst", r.per_ip_burst},
+              std::pair{"ratelimit.per_ip_max_inflight", r.per_ip_max_inflight},
+              std::pair{"ratelimit.per_ak_rps", r.per_ak_rps}, std::pair{"ratelimit.per_ak_burst", r.per_ak_burst},
+              std::pair{"ratelimit.per_ak_max_inflight", r.per_ak_max_inflight}})
             check_range(name, v, 0, 10'000'000);
         check_range("ratelimit.max_tracked", r.max_tracked, 1, 10'000'000);
         // A burst without a rate has nothing to refill it: reject rather than let it read as a limit
@@ -607,19 +584,14 @@ Config Config::from_string(const std::string& text) {
     // Logger::parse_level maps anything unknown to Info, so a misspelled level
     // ("warning", "trace") would silently downgrade — the operator believes debug
     // logging is on while it is not. Reject it here instead
-    if (cfg.log.level != "debug" && cfg.log.level != "info" && cfg.log.level != "warn" &&
-        cfg.log.level != "error")
-        throw std::runtime_error("config: log.level must be one of debug|info|warn|error, got '" +
-                                 cfg.log.level + "'");
+    if (cfg.log.level != "debug" && cfg.log.level != "info" && cfg.log.level != "warn" && cfg.log.level != "error")
+        throw std::runtime_error("config: log.level must be one of debug|info|warn|error, got '" + cfg.log.level + "'");
     if (cfg.log.format != "text" && cfg.log.format != "json")
-        throw std::runtime_error("config: log.format must be text|json, got '" + cfg.log.format +
-                                 "'");
+        throw std::runtime_error("config: log.format must be text|json, got '" + cfg.log.format + "'");
     if (cfg.log.async_overflow != "block" && cfg.log.async_overflow != "drop")
-        throw std::runtime_error("config: log.async_overflow must be block|drop, got '" +
-                                 cfg.log.async_overflow + "'");
+        throw std::runtime_error("config: log.async_overflow must be block|drop, got '" + cfg.log.async_overflow + "'");
     // Same bounds as the audit file: a rotation must not thrash per line, a slipped unit must not pass
-    check_range("log.max_size", static_cast<long long>(cfg.log.max_size), 65536LL,
-                64LL * 1'073'741'824LL);
+    check_range("log.max_size", static_cast<long long>(cfg.log.max_size), 65536LL, 64LL * 1'073'741'824LL);
     check_range("log.max_files", cfg.log.max_files, 1, 1000);
     // spdlog's queue is preallocated as a whole: a fat-fingered 1e9 would OOM at startup
     check_range("log.async_queue", cfg.log.async_queue, 64, 1'048'576);
@@ -636,8 +608,7 @@ Config Config::from_string(const std::string& text) {
     // 4GiB truncates to 0 there and every request is rejected with "header too big".
     // The upper bound also guards a slipped unit (KiB written as GiB); the lower
     // bound keeps room for a request line plus SigV4 auth headers
-    check_range("http.max_header_size", static_cast<long long>(cfg.http.max_header_size),
-                1024LL, 1'048'576LL);
+    check_range("http.max_header_size", static_cast<long long>(cfg.http.max_header_size), 1024LL, 1'048'576LL);
     // 0 means "never time out" to builtin (SO_RCVTIMEO of 0 disables the timeout)
     // but "already expired" to beast (expires_after(0s)) — rather than silently
     // picking one meaning per driver, reject it: an idle timeout must be positive
@@ -649,24 +620,18 @@ Config Config::from_string(const std::string& text) {
     check_range("http.transfer_stall_timeout", cfg.http.transfer_stall_timeout_sec, 0, 86400);
     // Cross-item consistency: the per-request timeout always fires first, so a stall
     // window longer than it is a knob that looks configured but can never take effect
-    if (cfg.http.request_timeout_sec > 0 &&
-        cfg.http.transfer_stall_timeout_sec > cfg.http.request_timeout_sec)
-        throw std::runtime_error(
-            "config: http.transfer_stall_timeout (" +
-            std::to_string(cfg.http.transfer_stall_timeout_sec) +
-            "s) exceeds http.request_timeout (" + std::to_string(cfg.http.request_timeout_sec) +
-            "s) — the stall guard would never fire; lower it or set it to 0 to disable");
+    if (cfg.http.request_timeout_sec > 0 && cfg.http.transfer_stall_timeout_sec > cfg.http.request_timeout_sec)
+        throw std::runtime_error("config: http.transfer_stall_timeout (" +
+                                 std::to_string(cfg.http.transfer_stall_timeout_sec) +
+                                 "s) exceeds http.request_timeout (" + std::to_string(cfg.http.request_timeout_sec) +
+                                 "s) — the stall guard would never fire; lower it or set it to 0 to disable");
     // Shutdown/backpressure knobs (docs/archive/gaps.md §7). Lower bounds guard against
     // "configured to 0 -> write loop spins / never drains"; upper bounds guard
     // against a slipped unit (MiB written as GiB) eating all memory outright
-    check_range("http.drain_limit", static_cast<long long>(cfg.http.drain_limit),
-                64LL * 1024, 1'073'741'824LL);
-    check_range("http.trailer_max_size", static_cast<long long>(cfg.http.trailer_max_size),
-                1024LL, 1'048'576LL);
-    check_range("http.io_chunk_size", static_cast<long long>(cfg.http.io_chunk_size),
-                4096LL, 8LL * 1'048'576);
-    check_range("http.body_queue_cap", static_cast<long long>(cfg.http.body_queue_cap),
-                4096LL, 1'073'741'824LL);
+    check_range("http.drain_limit", static_cast<long long>(cfg.http.drain_limit), 64LL * 1024, 1'073'741'824LL);
+    check_range("http.trailer_max_size", static_cast<long long>(cfg.http.trailer_max_size), 1024LL, 1'048'576LL);
+    check_range("http.io_chunk_size", static_cast<long long>(cfg.http.io_chunk_size), 4096LL, 8LL * 1'048'576);
+    check_range("http.body_queue_cap", static_cast<long long>(cfg.http.body_queue_cap), 4096LL, 1'073'741'824LL);
     check_range("http.shutdown_grace", cfg.http.shutdown_grace_sec, 0, 300);
     check_range("http.shutdown_force_wait", cfg.http.shutdown_force_wait_sec, 0, 300);
     if (cfg.backends.empty()) throw std::runtime_error("config: no backends configured");
@@ -679,8 +644,7 @@ Config Config::from_string(const std::string& text) {
     if (!has_backend(cfg.buckets.default_backend))
         throw std::runtime_error("config: unknown default_backend " + cfg.buckets.default_backend);
     for (auto& r : cfg.buckets.rules)
-        if (!has_backend(r.backend))
-            throw std::runtime_error("config: rule references unknown backend " + r.backend);
+        if (!has_backend(r.backend)) throw std::runtime_error("config: rule references unknown backend " + r.backend);
     return cfg;
 }
 

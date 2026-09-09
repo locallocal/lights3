@@ -21,8 +21,7 @@ namespace uring_detail {
 namespace {
 
 [[noreturn]] void throw_uring(const char* what, int neg_errno) {
-    throw S3Error(S3ErrorCode::InternalError,
-                  std::string(what) + ": " + std::strerror(-neg_errno));
+    throw S3Error(S3ErrorCode::InternalError, std::string(what) + ": " + std::strerror(-neg_errno));
 }
 
 // Register the fd in the fixed file table only when the stream is long enough for the
@@ -44,9 +43,9 @@ struct StreamState;
 struct Slot final : UringEngine::Op {
     StreamState* st = nullptr;
     std::span<std::byte> mem;
-    UringEngine::FixedBuf fixed;             // index<0 = heap block
+    UringEngine::FixedBuf fixed;  // index<0 = heap block
     std::unique_ptr<std::byte[]> heap;
-    struct iovec iov {};                     // READV/WRITEV fallback framing (pre-5.6)
+    struct iovec iov{};  // READV/WRITEV fallback framing (pre-5.6)
     std::atomic<uintptr_t> sync{kIdle};
     int res = 0;
     uint64_t off = 0;      // file offset of the current op
@@ -59,17 +58,13 @@ struct Slot final : UringEngine::Op {
 
     struct Awaiter {
         Slot& s;
-        bool await_ready() const noexcept {
-            return s.sync.load(std::memory_order_acquire) == kDone;
-        }
+        bool await_ready() const noexcept { return s.sync.load(std::memory_order_acquire) == kDone; }
         bool await_suspend(std::coroutine_handle<> h) noexcept {
             uintptr_t expected = kInflight;
             // CAS failure = the completion already landed between ready and here: resume
             // in place instead of suspending
-            return s.sync.compare_exchange_strong(expected,
-                                                  reinterpret_cast<uintptr_t>(h.address()),
-                                                  std::memory_order_acq_rel,
-                                                  std::memory_order_acquire);
+            return s.sync.compare_exchange_strong(expected, reinterpret_cast<uintptr_t>(h.address()),
+                                                  std::memory_order_acq_rel, std::memory_order_acquire);
         }
         int await_resume() const noexcept { return s.res; }
     };
@@ -88,11 +83,11 @@ struct StreamState {
     bool own_fd = false;
     int file_slot = -1;
     unsigned block = 0;
-    unsigned depth = 0;      // data slots
-    int fsync_slot = -1;     // extra bufferless slot (write streams)
+    unsigned depth = 0;   // data slots
+    int fsync_slot = -1;  // extra bufferless slot (write streams)
     std::vector<Slot> slots;
     // Write-stream bookkeeping (owner-thread only)
-    std::deque<int> wq;      // in-flight write slots, oldest first
+    std::deque<int> wq;  // in-flight write slots, oldest first
     std::vector<int> free_;
     // Read-stream bookkeeping (owner-thread only)
     uint64_t next_off = 0;
@@ -112,9 +107,8 @@ struct StreamState {
         if (own_fd && fd >= 0) ::close(fd);
     }
 
-    static StreamState* make(std::shared_ptr<UringEngine> eng, int fd, bool own_fd,
-                             unsigned data_slots, bool with_fsync_slot,
-                             std::optional<uint64_t> expected_len) {
+    static StreamState* make(std::shared_ptr<UringEngine> eng, int fd, bool own_fd, unsigned data_slots,
+                             bool with_fsync_slot, std::optional<uint64_t> expected_len) {
         auto* st = new StreamState;
         st->eng = std::move(eng);
         st->ring = st->eng->pick_ring();
@@ -137,8 +131,7 @@ struct StreamState {
             st->fsync_slot = int(data_slots);
             st->slots[data_slots].st = st;
         }
-        if (expected_len && *expected_len >= kFixedFileMinBytes)
-            st->file_slot = st->eng->register_file(st->ring, fd);
+        if (expected_len && *expected_len >= kFixedFileMinBytes) st->file_slot = st->eng->register_file(st->ring, fd);
         return st;
     }
 
@@ -192,8 +185,7 @@ struct StreamState {
         ref();
         UringEngine::Op* ops[1] = {&s};
         try {
-            eng->submit(ring, std::span<const UringEngine::Sqe>(&q, 1),
-                        std::span<UringEngine::Op* const>(ops, 1));
+            eng->submit(ring, std::span<const UringEngine::Sqe>(&q, 1), std::span<UringEngine::Op* const>(ops, 1));
         } catch (...) {
             s.sync.store(kIdle, std::memory_order_relaxed);
             unref();
@@ -234,9 +226,7 @@ void Slot::complete(int r) noexcept {
         // A consumer is parked on this slot (it cannot be the owner tearing the stream
         // down -- a parked consumer is suspended); hand its continuation to the pool
         state->eng->pool().post(
-            [h = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(prev))] {
-                h.resume();
-            });
+            [h = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(prev))] { h.resume(); });
     state->unref();  // may delete the state (and this slot) -- must be the last access
 }
 
@@ -250,15 +240,13 @@ using uring_detail::StreamState;
 // UringReadStream
 // ---------------------------------------------------------------------------
 
-UringReadStream::UringReadStream(std::shared_ptr<UringEngine> eng, int fd, uint64_t off,
-                                 uint64_t len, bool own_fd)
+UringReadStream::UringReadStream(std::shared_ptr<UringEngine> eng, int fd, uint64_t off, uint64_t len, bool own_fd)
     : remaining_(len) {
     unsigned depth = eng->options().read_depth;
     // No point keeping more blocks in flight than the stream has
     uint64_t blocks = (len + eng->options().block_size - 1) / eng->options().block_size;
     depth = unsigned(std::clamp<uint64_t>(blocks, 1, depth));
-    st_ = StreamState::make(std::move(eng), fd, own_fd, depth, /*with_fsync_slot=*/false,
-                            len);
+    st_ = StreamState::make(std::move(eng), fd, own_fd, depth, /*with_fsync_slot=*/false, len);
     st_->next_off = off;
     st_->end_off = off + len;
 }
@@ -342,9 +330,7 @@ UringWriteStream::UringWriteStream(std::shared_ptr<UringEngine> eng, int fd, uin
     // finish, on top of write_depth in flight
     unsigned depth = eng->options().write_depth + 2;
     int dfd = ::dup(fd);
-    if (dfd < 0)
-        throw S3Error(S3ErrorCode::InternalError,
-                      std::string("dup write fd: ") + std::strerror(errno));
+    if (dfd < 0) throw S3Error(S3ErrorCode::InternalError, std::string("dup write fd: ") + std::strerror(errno));
     st_ = StreamState::make(std::move(eng), dfd, /*own_fd=*/true, depth,
                             /*with_fsync_slot=*/true, expected_len);
     st_->free_.reserve(depth);
@@ -431,8 +417,7 @@ Task<void> UringWriteStream::finish(bool fdatasync) {
             for (;;) {
                 int r = co_await w.wait();
                 if (r < 0) uring_detail::throw_uring("io_uring write", r);
-                if (r == 0)
-                    throw S3Error(S3ErrorCode::InternalError, "io_uring write returned 0");
+                if (r == 0) throw S3Error(S3ErrorCode::InternalError, "io_uring write returned 0");
                 if (unsigned(r) < w.len) {
                     // A short write fails the link: the fsync completes with -ECANCELED
                     // and is retried standalone below
@@ -474,8 +459,7 @@ Task<void> UringWriteStream::finish(bool fdatasync) {
         // Pre-5.1-baseline gap: no FSYNC opcode probed. finish() resumed on a pool thread
         // (continuations post there), so a blocking fdatasync is acceptable here
         if (::fdatasync(st.fd) != 0 && errno != EINVAL)
-            throw S3Error(S3ErrorCode::InternalError,
-                          std::string("fdatasync: ") + std::strerror(errno));
+            throw S3Error(S3ErrorCode::InternalError, std::string("fdatasync: ") + std::strerror(errno));
     }
 }
 

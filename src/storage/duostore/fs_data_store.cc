@@ -22,9 +22,9 @@
 
 namespace lights3::storage::duostore {
 
+using fsutil::throw_errno;
 using s3::S3Error;
 using s3::S3ErrorCode;
-using fsutil::throw_errno;
 
 namespace {
 
@@ -33,8 +33,7 @@ namespace {
 // for one write session converge to 1-2 instead of one directory per chunk (§5.1)
 unsigned shard_of(uint64_t id) { return unsigned((id >> 8) & 0xff); }
 
-std::filesystem::path shard_file(const std::filesystem::path& base, uint64_t id,
-                                 const char* suffix) {
+std::filesystem::path shard_file(const std::filesystem::path& base, uint64_t id, const char* suffix) {
     char ss[3], name[32];
     std::snprintf(ss, sizeof ss, "%02x", shard_of(id));
     std::snprintf(name, sizeof name, "%016llx%s", (unsigned long long)id, suffix);
@@ -136,8 +135,7 @@ public:
         if (fd_ >= 0) co_await seal_chunk();
         // fsync the shard directories touched by this session at its end (§5.1)
         for (unsigned s = 0; s < 256; ++s)
-            if (touched_[s] && ::fsync(store_->shard_dirfd(s)) != 0)
-                throw_errno("fsync chunk shard dir");
+            if (touched_[s] && ::fsync(store_->shard_dirfd(s)) != 0) throw_errno("fsync chunk shard dir");
         finished_ = true;
         co_return DataRef{std::move(extents_)};
     }
@@ -156,7 +154,8 @@ private:
             run_limit_ = run_next_ + run_len_;
         }
         cur_id_ = run_next_++;
-        // Pin before creating the file: once the file exists it is protected by the write-side pin, leaving the orphan scan no observation window
+        // Pin before creating the file: once the file exists it is protected by the write-side pin, leaving the orphan
+        // scan no observation window
         if (store_->pins_.pin) {
             store_->pins_.pin(cur_id_);
             pinned_.push_back(cur_id_);
@@ -167,8 +166,7 @@ private:
         fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
         if (fd_ < 0) throw_errno("open chunk");
         if (store_->opt_.uring)
-            ws_ = std::make_unique<UringWriteStream>(store_->opt_.uring, fd_, 0,
-                                                     store_->opt_.chunk_size);
+            ws_ = std::make_unique<UringWriteStream>(store_->opt_.uring, fd_, 0, store_->opt_.chunk_size);
         touched_[shard] = true;
         cur_len_ = 0;
         cur_crc_ = 0;
@@ -191,7 +189,8 @@ private:
 
     FsDataStore* store_;
     std::vector<Extent> extents_;
-    std::vector<uint64_t> pinned_;  // ids write-side pinned by this session (ownership transfers to the caller after finish)
+    std::vector<uint64_t> pinned_;  // ids write-side pinned by this session (ownership transfers to the caller after
+                                    // finish)
     std::bitset<256> touched_;
     std::unique_ptr<UringWriteStream> ws_;  // current chunk's write pipeline (uring mode)
     int fd_ = -1;
@@ -214,8 +213,7 @@ private:
 
 class FsPackedWriter final : public DataWriter {
 public:
-    FsPackedWriter(FsDataStore* store, std::string owner)
-        : store_(store), owner_(std::move(owner)) {}
+    FsPackedWriter(FsDataStore* store, std::string owner) : store_(store), owner_(std::move(owner)) {}
 
     Task<void> write(std::span<const std::byte> buf) override {
         if (spill_) co_return co_await spill_->write(buf);
@@ -223,7 +221,8 @@ public:
             buf_.insert(buf_.end(), buf.begin(), buf.end());
             co_return;
         }
-        // Threshold exceeded (unknown-length stream of a chunked PUT): flush the buffer via the chunk path, then go streaming
+        // Threshold exceeded (unknown-length stream of a chunked PUT): flush the buffer via the chunk path, then go
+        // streaming
         spill_ = std::make_unique<ChunkWriter>(store_);
         co_await spill_->write(std::span<const std::byte>(buf_.data(), buf_.size()));
         buf_.clear();
@@ -234,8 +233,7 @@ public:
     Task<DataRef> finish() override {
         if (spill_) co_return co_await spill_->finish();
         if (buf_.empty()) co_return DataRef{};  // 0-byte object: empty DataRef
-        Extent e = co_await store_->append_pack_record(
-            owner_, std::span<const std::byte>(buf_.data(), buf_.size()));
+        Extent e = co_await store_->append_pack_record(owner_, std::span<const std::byte>(buf_.data(), buf_.size()));
         co_return DataRef{{e}};
     }
 
@@ -262,10 +260,13 @@ namespace {
 
 class ExtentChainReader final : public http::BodyReader {
 public:
-    ExtentChainReader(FsDataOptions opt, std::vector<Extent> extents, uint64_t first,
-                      uint64_t last, std::shared_ptr<ThreadPool> pool)
-        : opt_(std::move(opt)), extents_(std::move(extents)), remaining_(last - first + 1),
-          total_(remaining_), pool_(std::move(pool)) {
+    ExtentChainReader(FsDataOptions opt, std::vector<Extent> extents, uint64_t first, uint64_t last,
+                      std::shared_ptr<ThreadPool> pool)
+        : opt_(std::move(opt)),
+          extents_(std::move(extents)),
+          remaining_(last - first + 1),
+          total_(remaining_),
+          pool_(std::move(pool)) {
         uint64_t off = first;
         while (idx_ < extents_.size() && off >= extents_[idx_].length) {
             off -= extents_[idx_].length;
@@ -287,14 +288,14 @@ public:
         if (e.kind == Extent::Kind::kPack) co_return co_await read_pack(e, buf);
         if (fd_ < 0 && !stream_) {
             int fd = open_extent(e);
-            // crc verification is only feasible when reading the full extent from start to end (a Range hitting the middle cannot be verified, §7)
+            // crc verification is only feasible when reading the full extent from start to end (a Range hitting the
+            // middle cannot be verified, §7)
             crc_active_ = opt_.verify_chunk_crc && cur_off_ == 0 && remaining_ >= e.length;
             crc_acc_ = 0;
             if (opt_.uring)
                 // Read-ahead chunk stream (roadmap §3.4 ⑤①); fd ownership moves to it
-                stream_ = std::make_unique<UringReadStream>(
-                    opt_.uring, fd, e.offset + cur_off_,
-                    std::min<uint64_t>(e.length - cur_off_, remaining_));
+                stream_ = std::make_unique<UringReadStream>(opt_.uring, fd, e.offset + cur_off_,
+                                                            std::min<uint64_t>(e.length - cur_off_, remaining_));
             else
                 fd_ = fd;
         }
@@ -306,16 +307,14 @@ public:
             n = ::pread(fd_, buf.data(), want, off_t(e.offset + cur_off_));
             if (n < 0) throw_errno("pread extent");
         }
-        if (n == 0)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore: extent shorter than manifest");
+        if (n == 0) throw S3Error(S3ErrorCode::InternalError, "duostore: extent shorter than manifest");
         if (crc_active_) crc_acc_ = codec::crc32c_update(crc_acc_, buf.first(size_t(n)));
         cur_off_ += uint64_t(n);
         remaining_ -= uint64_t(n);
         if (cur_off_ == e.length) {
             if (crc_active_ && crc_acc_ != e.crc32c) {
-                LOG_ERROR("duostore: chunk {:016x} crc mismatch (stored {:08x} got {:08x})",
-                          e.file_id, e.crc32c, crc_acc_);
+                LOG_ERROR("duostore: chunk {:016x} crc mismatch (stored {:08x} got {:08x})", e.file_id, e.crc32c,
+                          crc_acc_);
                 if (opt_.on_corruption) opt_.on_corruption();
                 throw S3Error(S3ErrorCode::InternalError, "duostore: chunk crc mismatch");
             }
@@ -327,13 +326,12 @@ public:
 private:
     int open_extent(const Extent& e) {
         auto base = e.kind == Extent::Kind::kChunk ? opt_.root / "chunks" : opt_.root / "packs";
-        auto path =
-            shard_file(base, e.file_id, e.kind == Extent::Kind::kChunk ? ".chk" : ".pak");
+        auto path = shard_file(base, e.file_id, e.kind == Extent::Kind::kChunk ? ".chk" : ".pak");
         int fd = ::open(path.c_str(), O_RDONLY);
         if (fd < 0) {
-            // refs present but file missing = sign of data loss (§10); the GC concurrency window is guarded by pin+grace
-            LOG_ERROR("duostore: open extent {} failed: {}", path.string(),
-                      std::strerror(errno));
+            // refs present but file missing = sign of data loss (§10); the GC concurrency window is guarded by
+            // pin+grace
+            LOG_ERROR("duostore: open extent {} failed: {}", path.string(), std::strerror(errno));
             throw S3Error(S3ErrorCode::InternalError, "duostore: extent file missing");
         }
         return fd;
@@ -349,18 +347,15 @@ private:
                 UringReadStream rs(opt_.uring, fd, e.offset, e.length);  // owns fd
                 size_t got = 0;
                 while (got < pack_buf_.size()) {
-                    size_t n = co_await rs.read(
-                        std::span(pack_buf_.data() + got, pack_buf_.size() - got));
+                    size_t n = co_await rs.read(std::span(pack_buf_.data() + got, pack_buf_.size() - got));
                     if (n == 0)
-                        throw S3Error(S3ErrorCode::InternalError,
-                                      "duostore: pack record shorter than manifest");
+                        throw S3Error(S3ErrorCode::InternalError, "duostore: pack record shorter than manifest");
                     got += n;
                 }
             } else {
                 size_t got = 0;
                 while (got < pack_buf_.size()) {
-                    ssize_t n = ::pread(fd, pack_buf_.data() + got, pack_buf_.size() - got,
-                                        off_t(e.offset + got));
+                    ssize_t n = ::pread(fd, pack_buf_.data() + got, pack_buf_.size() - got, off_t(e.offset + got));
                     if (n < 0) {
                         int err = errno;
                         ::close(fd);
@@ -369,18 +364,16 @@ private:
                     }
                     if (n == 0) {
                         ::close(fd);
-                        throw S3Error(S3ErrorCode::InternalError,
-                                      "duostore: pack record shorter than manifest");
+                        throw S3Error(S3ErrorCode::InternalError, "duostore: pack record shorter than manifest");
                     }
                     got += size_t(n);
                 }
                 ::close(fd);
             }
-            uint32_t crc = codec::crc32c_of(
-                std::span<const std::byte>(pack_buf_.data(), pack_buf_.size()));
+            uint32_t crc = codec::crc32c_of(std::span<const std::byte>(pack_buf_.data(), pack_buf_.size()));
             if (crc != e.crc32c) {
-                LOG_ERROR("duostore: pack {:016x}+{} crc mismatch (stored {:08x} got {:08x})",
-                          e.file_id, e.offset, e.crc32c, crc);
+                LOG_ERROR("duostore: pack {:016x}+{} crc mismatch (stored {:08x} got {:08x})", e.file_id, e.offset,
+                          e.crc32c, crc);
                 if (opt_.on_corruption) opt_.on_corruption();
                 throw S3Error(S3ErrorCode::InternalError, "duostore: pack record crc mismatch");
             }
@@ -425,10 +418,14 @@ private:
 
 // ---------- FsDataStore ----------
 
-FsDataStore::FsDataStore(FsDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc,
-                         PackSeal seal, PackMigrateFn migrate, ChunkPinHooks pins)
-    : opt_(std::move(opt)), pool_(std::move(pool)), alloc_(std::move(alloc)),
-      seal_(std::move(seal)), migrate_(std::move(migrate)), pins_(std::move(pins)) {
+FsDataStore::FsDataStore(FsDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc, PackSeal seal,
+                         PackMigrateFn migrate, ChunkPinHooks pins)
+    : opt_(std::move(opt)),
+      pool_(std::move(pool)),
+      alloc_(std::move(alloc)),
+      seal_(std::move(seal)),
+      migrate_(std::move(migrate)),
+      pins_(std::move(pins)) {
     chunk_dirfds_.fill(-1);
     pack_dirfds_.fill(-1);
     std::filesystem::create_directories(opt_.root / "chunks");
@@ -483,21 +480,18 @@ Task<std::unique_ptr<DataWriter>> FsDataStore::open_writer(WriteHint hint) {
     // to chunk; everything else (including unknown length) goes to the buffering
     // writer — at EOF, ≤ threshold goes into a pack as a whole, over the limit
     // switches to chunk
-    if (opt_.pack_threshold == 0 ||
-        (hint.content_length && *hint.content_length > opt_.pack_threshold))
+    if (opt_.pack_threshold == 0 || (hint.content_length && *hint.content_length > opt_.pack_threshold))
         co_return std::make_unique<ChunkWriter>(this);
     co_return std::make_unique<FsPackedWriter>(this, std::move(hint.owner));
 }
 
-Task<Extent> FsDataStore::append_pack_record(std::string_view owner,
-                                             std::span<const std::byte> payload) {
+Task<Extent> FsDataStore::append_pack_record(std::string_view owner, std::span<const std::byte> payload) {
     PackAppendItem item{owner, payload};  // lives in this frame, valid across the co_await
     auto v = co_await append_pack_records({&item, 1});
     co_return v.at(0);
 }
 
-Task<std::vector<Extent>> FsDataStore::append_pack_records(
-    std::span<const PackAppendItem> items) {
+Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackAppendItem> items) {
     std::vector<Extent> out;
     if (items.empty()) co_return out;
     out.reserve(items.size());
@@ -510,7 +504,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(
     // durability is settled before the extents are returned
     int async_sync_fd = -1;
     {
-        // Round-robin lock acquisition (§5.2): first sweep with try_lock to spread queuing; if all busy, block on the starting slot
+        // Round-robin lock acquisition (§5.2): first sweep with try_lock to spread queuing; if all busy, block on the
+        // starting slot
         const unsigned start = pack_rr_.fetch_add(1, std::memory_order_relaxed) % packs_.size();
         ActivePack* slot = nullptr;
         std::unique_lock<std::mutex> lk;
@@ -543,62 +538,62 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(
         };
 
         for (const auto& item : items) {
-        uint32_t crc = codec::crc32c_of(item.payload);
-        std::string header = build_pack_header(item.owner, item.payload.size(), crc);
-        const uint64_t rec_size = header.size() + item.payload.size();
+            uint32_t crc = codec::crc32c_of(item.payload);
+            std::string header = build_pack_header(item.owner, item.payload.size(), crc);
+            const uint64_t rec_size = header.size() + item.payload.size();
 
-        // Seal and switch to a new pack_id upon reaching pack_max_size or being
-        // open longer than pack_max_age; the size>0 guard ensures a single
-        // over-limit record (the threshold==max edge configuration) can still land
-        // in a pack of its own. Before sealing, flush this batch's unsynced writes
-        // — the file_size reported by the seal callback must correspond to
-        // persisted bytes
-        if (slot->fd >= 0 && slot->size > 0 &&
-            (slot->size + rec_size > opt_.pack_max_size || slot_aged(*slot))) {
-            sync_slot();
-            close_slot_locked(*slot);
-        }
-        if (slot->fd < 0) {
-            slot->id = alloc_(Extent::Kind::kPack, 1);
-            unsigned shard = shard_of(slot->id);
-            int dirfd = pack_dirfd(shard);  // ensure the shard directory exists
-            auto path = pack_path(slot->id);
-            slot->fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
-            if (slot->fd < 0) throw_errno("open pack");
-            // Take an advisory lock on the active pack, auto-released when the fd
-            // closes (sealing / process exit / crash all count). It is the only
-            // reliable signal that "this pack is being written by a live process":
-            // another instance starting up uses it to distinguish "packs left by my
-            // previous generation" from "packs someone else is writing", avoiding
-            // catch-up sealing the latter and then rewriting or even deleting it as
-            // a low-liveness pack (docs/archive/gaps.md §1.4)
-            if (::flock(slot->fd, LOCK_EX | LOCK_NB) != 0)
-                LOG_WARN("duostore: cannot lock active pack {} ({}); concurrent-writer "
-                         "detection degraded", slot->id, std::strerror(errno));
-            slot->size = 0;
-            slot->opened = std::chrono::steady_clock::now();  // age-based rotation start point (§6.1)
-            // pack creation is low-frequency (rotation granularity), fsync the directory immediately (chunks batch at session end, §5.1)
-            if (::fsync(dirfd) != 0) throw_errno("fsync pack shard dir");
-        }
-
-        // One pwrite for header+payload (§5.2; group-commit aggregation is a non-goal §6.3)
-        std::string rec = std::move(header);
-        rec.append(reinterpret_cast<const char*>(item.payload.data()), item.payload.size());
-        size_t off = 0;
-        while (off < rec.size()) {
-            if (int fe = fault::check("duostore.pack.pwrite")) {  // roadmap §6.1
-                errno = fe;
-                throw_errno("pwrite pack record");
+            // Seal and switch to a new pack_id upon reaching pack_max_size or being
+            // open longer than pack_max_age; the size>0 guard ensures a single
+            // over-limit record (the threshold==max edge configuration) can still land
+            // in a pack of its own. Before sealing, flush this batch's unsynced writes
+            // — the file_size reported by the seal callback must correspond to
+            // persisted bytes
+            if (slot->fd >= 0 && slot->size > 0 && (slot->size + rec_size > opt_.pack_max_size || slot_aged(*slot))) {
+                sync_slot();
+                close_slot_locked(*slot);
             }
-            ssize_t w = ::pwrite(slot->fd, rec.data() + off, rec.size() - off,
-                                 off_t(slot->size + off));
-            if (w < 0) throw_errno("pwrite pack record");
-            off += size_t(w);
-        }
-        dirty = true;
+            if (slot->fd < 0) {
+                slot->id = alloc_(Extent::Kind::kPack, 1);
+                unsigned shard = shard_of(slot->id);
+                int dirfd = pack_dirfd(shard);  // ensure the shard directory exists
+                auto path = pack_path(slot->id);
+                slot->fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+                if (slot->fd < 0) throw_errno("open pack");
+                // Take an advisory lock on the active pack, auto-released when the fd
+                // closes (sealing / process exit / crash all count). It is the only
+                // reliable signal that "this pack is being written by a live process":
+                // another instance starting up uses it to distinguish "packs left by my
+                // previous generation" from "packs someone else is writing", avoiding
+                // catch-up sealing the latter and then rewriting or even deleting it as
+                // a low-liveness pack (docs/archive/gaps.md §1.4)
+                if (::flock(slot->fd, LOCK_EX | LOCK_NB) != 0)
+                    LOG_WARN(
+                        "duostore: cannot lock active pack {} ({}); concurrent-writer "
+                        "detection degraded",
+                        slot->id, std::strerror(errno));
+                slot->size = 0;
+                slot->opened = std::chrono::steady_clock::now();  // age-based rotation start point (§6.1)
+                // pack creation is low-frequency (rotation granularity), fsync the directory immediately (chunks batch
+                // at session end, §5.1)
+                if (::fsync(dirfd) != 0) throw_errno("fsync pack shard dir");
+            }
 
-            out.push_back({Extent::Kind::kPack, slot->id,
-                           slot->size + (rec.size() - item.payload.size()),
+            // One pwrite for header+payload (§5.2; group-commit aggregation is a non-goal §6.3)
+            std::string rec = std::move(header);
+            rec.append(reinterpret_cast<const char*>(item.payload.data()), item.payload.size());
+            size_t off = 0;
+            while (off < rec.size()) {
+                if (int fe = fault::check("duostore.pack.pwrite")) {  // roadmap §6.1
+                    errno = fe;
+                    throw_errno("pwrite pack record");
+                }
+                ssize_t w = ::pwrite(slot->fd, rec.data() + off, rec.size() - off, off_t(slot->size + off));
+                if (w < 0) throw_errno("pwrite pack record");
+                off += size_t(w);
+            }
+            dirty = true;
+
+            out.push_back({Extent::Kind::kPack, slot->id, slot->size + (rec.size() - item.payload.size()),
                            item.payload.size(), crc});
             slot->size += rec_size;
         }
@@ -619,8 +614,7 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(
         }
         ::close(async_sync_fd);
         if (r < 0 && r != -EINVAL)  // EINVAL: fs unsupported, matching fsync_file semantics
-            throw S3Error(S3ErrorCode::InternalError,
-                          std::string("fdatasync pack: ") + std::strerror(-r));
+            throw S3Error(S3ErrorCode::InternalError, std::string("fdatasync pack: ") + std::strerror(-r));
     }
     // The seal's meta commit is submitted outside the slot lock (docs/archive/gaps.md
     // §3.9); failure only warns, and (id,size) stays in the queue for later
@@ -639,8 +633,7 @@ Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendIt
     std::vector<size_t> pack_idx;
     std::vector<PackAppendItem> pk;
     for (size_t i = 0; i < items.size(); ++i)
-        if (opt_.pack_threshold > 0 && !items[i].payload.empty() &&
-            items[i].payload.size() <= opt_.pack_threshold) {
+        if (opt_.pack_threshold > 0 && !items[i].payload.empty() && items[i].payload.size() <= opt_.pack_threshold) {
             pack_idx.push_back(i);
             pk.push_back(items[i]);
         }
@@ -661,8 +654,7 @@ Task<std::vector<DataRef>> FsDataStore::write_batch(std::span<const PackAppendIt
 
 bool FsDataStore::slot_aged(const ActivePack& slot) const {
     if (opt_.pack_max_age_sec <= 0) return false;
-    return std::chrono::steady_clock::now() - slot.opened >=
-           std::chrono::seconds(opt_.pack_max_age_sec);
+    return std::chrono::steady_clock::now() - slot.opened >= std::chrono::seconds(opt_.pack_max_age_sec);
 }
 
 // Age-based rotation (docs/archive/gaps.md §6.1): the write path only checks age when
@@ -719,37 +711,36 @@ void FsDataStore::flush_seals(bool rethrow) {
                 seal_retry_.insert(seal_retry_.end(), todo.begin() + i, todo.end());
             }
             if (rethrow) throw;
-            LOG_WARN("duostore: seal_pack({}) failed; queued for retry on next write/close",
-                     todo[i].id);
+            LOG_WARN("duostore: seal_pack({}) failed; queued for retry on next write/close", todo[i].id);
             return;
         }
     }
 }
 
-Task<std::unique_ptr<http::BodyReader>> FsDataStore::open_reader(DataRef ref, uint64_t first,
-                                                                 uint64_t last) {
+Task<std::unique_ptr<http::BodyReader>> FsDataStore::open_reader(DataRef ref, uint64_t first, uint64_t last) {
     uint64_t total = ref.total();
     if (first > last || last >= total)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore: reader range beyond manifest");  // caller already ran resolve_range
-    co_return std::make_unique<ExtentChainReader>(opt_, std::move(ref.extents), first, last,
-                                                  pool_);
+    co_return std::make_unique<ExtentChainReader>(opt_, std::move(ref.extents), first, last, pool_);
 }
 
 Task<void> FsDataStore::remove(std::span<const Extent> extents) {
     co_await pool_->schedule();
     size_t done = 0;
     for (const auto& e : extents) {
-        if (e.kind == Extent::Kind::kPack) continue;  // pack records become dead regions, reclaimed via compaction (§9.1)
+        if (e.kind == Extent::Kind::kPack)
+            continue;  // pack records become dead regions, reclaimed via compaction (§9.1)
         if (e.kind != Extent::Kind::kChunk) {
             // Engine mismatch (fs data engine received a kRados extent): silently
             // skipping would let GC spin uselessly with no way to notice
             // (docs/archive/gaps.md §4). Warn once to keep the reclaim loop from flooding logs
             static std::atomic<bool> warned{false};
             if (!warned.exchange(true))
-                LOG_ERROR("duostore-fs: remove() got extent kind {} — data/meta engine "
-                          "mismatch, these extents cannot be reclaimed by this engine",
-                          int(e.kind));
+                LOG_ERROR(
+                    "duostore-fs: remove() got extent kind {} — data/meta engine "
+                    "mismatch, these extents cannot be reclaimed by this engine",
+                    int(e.kind));
             continue;
         }
         if (::unlink(chunk_path(e.file_id).c_str()) != 0 && errno != ENOENT)
@@ -857,11 +848,12 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
     uint64_t off = 0;
     while (off + kPackHeaderFixed <= st.file_size) {
         if (pread_upto(rfd, hdr.data(), hdr.size(), off) < hdr.size()) break;
-        if (std::memcmp(hdr.data(), kPackMagic, sizeof kPackMagic) != 0 ||
-            uint8_t(hdr[4]) != 1) {
+        if (std::memcmp(hdr.data(), kPackMagic, sizeof kPackMagic) != 0 || uint8_t(hdr[4]) != 1) {
             ++st.corrupt;
-            LOG_WARN("duostore: pack {:016x} record at {} has bad magic/version, "
-                     "aborting scan (pack kept for manual inspection)", pack_id, off);
+            LOG_WARN(
+                "duostore: pack {:016x} record at {} has bad magic/version, "
+                "aborting scan (pack kept for manual inspection)",
+                pack_id, off);
             break;
         }
         const uint64_t header_len = get_le(hdr.data() + 6, 2);
@@ -870,23 +862,22 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
         const uint64_t owner_len = get_le(hdr.data() + 20, 2);
         if (header_len != kPackHeaderFixed + owner_len) {
             ++st.corrupt;
-            LOG_WARN("duostore: pack {:016x} record at {} has inconsistent header, "
-                     "aborting scan", pack_id, off);
+            LOG_WARN(
+                "duostore: pack {:016x} record at {} has inconsistent header, "
+                "aborting scan",
+                pack_id, off);
             break;
         }
         if (off + header_len + payload_len > st.file_size) break;  // torn tail (expected)
         owner.resize(owner_len);
         if (owner_len > 0 &&
-            pread_upto(rfd, reinterpret_cast<std::byte*>(owner.data()), owner_len,
-                       off + kPackHeaderFixed) < owner_len)
+            pread_upto(rfd, reinterpret_cast<std::byte*>(owner.data()), owner_len, off + kPackHeaderFixed) < owner_len)
             break;
         payload.resize(payload_len);
-        if (pread_upto(rfd, payload.data(), payload_len, off + header_len) < payload_len)
-            break;
+        if (pread_upto(rfd, payload.data(), payload_len, off + header_len) < payload_len) break;
         if (codec::crc32c_of(std::span<const std::byte>(payload)) != crc) {
             ++st.corrupt;
-            LOG_WARN("duostore: pack {:016x} record at {} crc mismatch, skipping record",
-                     pack_id, off);
+            LOG_WARN("duostore: pack {:016x} record at {} crc mismatch, skipping record", pack_id, off);
             off += header_len + payload_len;
             continue;
         }
@@ -896,8 +887,7 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
             batch.push_back({owner, from, std::move(payload)});
             payload = {};  // reset moved-from state (the next record's resize reallocates)
             batch_bytes += payload_len;
-            if (batch.size() >= kMigrateBatchRecs || batch_bytes >= kMigrateBatchBytes)
-                co_await flush_batch();
+            if (batch.size() >= kMigrateBatchRecs || batch_bytes >= kMigrateBatchBytes) co_await flush_batch();
         }
         off += header_len + payload_len;
     }
@@ -906,9 +896,8 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
 }
 
 // chunks/ and packs/ have isomorphic layouts (shard directory + <id:016x><suffix>), so the enumeration logic is shared
-Task<void> FsDataStore::scan_shard_tree(
-    const char* sub, const char* suffix,
-    const std::function<void(uint64_t, int64_t, uint64_t)>& cb) {
+Task<void> FsDataStore::scan_shard_tree(const char* sub, const char* suffix,
+                                        const std::function<void(uint64_t, int64_t, uint64_t)>& cb) {
     co_await pool_->schedule();
     std::error_code ec;
     std::filesystem::directory_iterator shards(opt_.root / sub, ec);
@@ -921,27 +910,23 @@ Task<void> FsDataStore::scan_shard_tree(
         for (const auto& f : files) {
             // <file_id:016x><suffix>; other files (temporary/foreign) do not belong to this store — ignore
             std::string name = f.path().filename().string();
-            if (name.size() != 16 + suffix_len || name.compare(16, suffix_len, suffix) != 0)
-                continue;
+            if (name.size() != 16 + suffix_len || name.compare(16, suffix_len, suffix) != 0) continue;
             uint64_t id = 0;
             auto r = std::from_chars(name.data(), name.data() + 16, id, 16);
             if (r.ec != std::errc() || r.ptr != name.data() + 16) continue;
             struct stat sb;
             if (::stat(f.path().c_str(), &sb) != 0) continue;  // tolerate concurrent-unlink races
-            cb(id, int64_t(sb.st_mtim.tv_sec) * 1000 + sb.st_mtim.tv_nsec / 1000000,
-               uint64_t(sb.st_size));
+            cb(id, int64_t(sb.st_mtim.tv_sec) * 1000 + sb.st_mtim.tv_nsec / 1000000, uint64_t(sb.st_size));
         }
     }
     co_return;
 }
 
-Task<void> FsDataStore::scan_chunks(
-    const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) {
+Task<void> FsDataStore::scan_chunks(const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) {
     return scan_shard_tree("chunks", ".chk", cb);
 }
 
-Task<void> FsDataStore::scan_packs(
-    const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& cb) {
+Task<void> FsDataStore::scan_packs(const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& cb) {
     return scan_shard_tree("packs", ".pak", cb);
 }
 

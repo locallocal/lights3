@@ -63,8 +63,9 @@ public:
     HashStream(const HashStream&) = delete;
 
     void update(std::span<const uint8_t> data);
-    std::string final_hex();                  // may be called only once
-    std::vector<uint8_t> final_bytes();       // ditto, pick one of the two. base64-style digests use it to skip the hex round-trip
+    std::string final_hex();             // may be called only once
+    std::vector<uint8_t> final_bytes();  // ditto, pick one of the two. base64-style digests use it to skip the hex
+                                         // round-trip
 
 private:
     struct Impl;

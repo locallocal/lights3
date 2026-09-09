@@ -1,12 +1,12 @@
-// Dedicated RadosDataStore unit tests (docs/storage/duostore-data-rados-design.md §11): the injected combination runs the backend
-// suite, multi-chunk roundtrip and cross-extent Range, unknown-length streaming, idempotent remove, namespace
-// isolation, semaphore backpressure, the alarm path for refs-present-but-object-missing, bitrot detection, close
-// guard; C3 double-buffered pipeline (including serial degradation), C4 orphan scan (forward/reverse/grace/foreign
-// objects) and op metrics.
-// Real-cluster acquisition: runs only when the environment variables LIGHTS3_TEST_RADOS_CONF +
-// LIGHTS3_TEST_RADOS_POOL are both set (optional LIGHTS3_TEST_RADOS_CLIENT, default client.admin), otherwise an
-// explicit SKIP (not a failure; same mechanism as test_duostore_redis.cc). Isolation: a unique rados_namespace per
-// case, and teardown lists and deletes all objects in that namespace -- multiple test suites can share one pool.
+// Dedicated RadosDataStore unit tests (docs/storage/duostore-data-rados-design.md §11): the injected combination runs
+// the backend suite, multi-chunk roundtrip and cross-extent Range, unknown-length streaming, idempotent remove,
+// namespace isolation, semaphore backpressure, the alarm path for refs-present-but-object-missing, bitrot detection,
+// close guard; C3 double-buffered pipeline (including serial degradation), C4 orphan scan
+// (forward/reverse/grace/foreign objects) and op metrics. Real-cluster acquisition: runs only when the environment
+// variables LIGHTS3_TEST_RADOS_CONF + LIGHTS3_TEST_RADOS_POOL are both set (optional LIGHTS3_TEST_RADOS_CLIENT, default
+// client.admin), otherwise an explicit SKIP (not a failure; same mechanism as test_duostore_redis.cc). Isolation: a
+// unique rados_namespace per case, and teardown lists and deletes all objects in that namespace -- multiple test suites
+// can share one pool.
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_RADOS_DATA)
 
 #include <rados/librados.h>
@@ -58,10 +58,10 @@ private:
     }
 };
 
-#define RADOS_OR_SKIP()                                                                       \
-    if (!RadosTestEnv::instance().available) {                                                \
-        printf("       [SKIP] LIGHTS3_TEST_RADOS_CONF/LIGHTS3_TEST_RADOS_POOL not set\n");    \
-        return;                                                                               \
+#define RADOS_OR_SKIP()                                                                    \
+    if (!RadosTestEnv::instance().available) {                                             \
+        printf("       [SKIP] LIGHTS3_TEST_RADOS_CONF/LIGHTS3_TEST_RADOS_POOL not set\n"); \
+        return;                                                                            \
     }
 
 // A unique namespace per case (the counterpart of the redis_prefix technique, §11.2)
@@ -81,7 +81,8 @@ RadosDataOptions rados_opts(const std::string& ns, uint64_t chunk_size = 8ull <<
     return o;
 }
 
-// Direct-to-cluster channel for observation/injection/cleanup (librados C API): list the namespace, delete/modify objects bypassing the store
+// Direct-to-cluster channel for observation/injection/cleanup (librados C API): list the namespace, delete/modify
+// objects bypassing the store
 struct RadosRaw {
     rados_t cluster = nullptr;
     rados_ioctx_t io = nullptr;
@@ -89,8 +90,7 @@ struct RadosRaw {
     explicit RadosRaw(const std::string& ns) {
         auto& env = RadosTestEnv::instance();
         if (rados_create2(&cluster, "ceph", env.client.c_str(), 0) < 0 ||
-            rados_conf_read_file(cluster, env.conf.c_str()) < 0 ||
-            rados_connect(cluster) < 0 ||
+            rados_conf_read_file(cluster, env.conf.c_str()) < 0 || rados_connect(cluster) < 0 ||
             rados_ioctx_create(cluster, env.pool.c_str(), &io) < 0)
             throw std::runtime_error("rados test harness: cluster connect failed");
         rados_ioctx_set_namespace(io, ns.c_str());
@@ -102,12 +102,10 @@ struct RadosRaw {
 
     std::vector<std::string> list() {
         rados_list_ctx_t ctx;
-        if (rados_nobjects_list_open(io, &ctx) < 0)
-            throw std::runtime_error("rados test harness: list_open failed");
+        if (rados_nobjects_list_open(io, &ctx) < 0) throw std::runtime_error("rados test harness: list_open failed");
         std::vector<std::string> out;
         const char* entry = nullptr;
-        while (rados_nobjects_list_next(ctx, &entry, nullptr, nullptr) == 0)
-            out.emplace_back(entry);
+        while (rados_nobjects_list_next(ctx, &entry, nullptr, nullptr) == 0) out.emplace_back(entry);
         rados_nobjects_list_close(ctx);
         return out;
     }
@@ -186,8 +184,7 @@ TEST(duostore_rados_multichunk_roundtrip_and_layout) {
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-multi";
@@ -232,8 +229,7 @@ TEST(duostore_rados_unknown_length_stream) {
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-chunked";
@@ -291,8 +287,7 @@ TEST(duostore_rados_buffer_backpressure) {
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-sem";
@@ -326,15 +321,15 @@ TEST(duostore_rados_buffer_backpressure) {
     sync_wait(b->close());
 }
 
-// Refs present but object missing (§6.3/§11.4): injected by manually deleting the rados object -> GET 500, not a silent empty read
+// Refs present but object missing (§6.3/§11.4): injected by manually deleting the rados object -> GET 500, not a silent
+// empty read
 TEST(duostore_rados_missing_object_alarm) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-missing";
@@ -359,8 +354,7 @@ TEST(duostore_rados_get_detects_bitrot) {
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-crc";
@@ -386,15 +380,15 @@ TEST(duostore_rados_get_detects_bitrot) {
     sync_wait(b->close());
 }
 
-// run_gc_once converges after overwrite/delete (§11.4, backfilled with mainline P3): rados objects disappear, gcq drains
+// run_gc_once converges after overwrite/delete (§11.4, backfilled with mainline P3): rados objects disappear, gcq
+// drains
 TEST(duostore_rados_gc_reclaims_after_delete) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-gc";
@@ -424,15 +418,15 @@ TEST(duostore_rados_gc_reclaims_after_delete) {
 }
 
 // GC skips while a concurrent GET holds the pin (§8.1/§11.4: rados has no POSIX open-fd safety net, the pin is
-// the read side's only defense, must be tested): delete during read + GC does not remove; content intact after reading; reclaimed once unpinned
+// the read side's only defense, must be tested): delete during read + GC does not remove; content intact after reading;
+// reclaimed once unpinned
 TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
     RADOS_OR_SKIP();
     std::string ns = unique_ns();
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-gc-pin";
@@ -469,11 +463,12 @@ TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
 
 // C3 double-buffered pipeline (§4.2): a multi-chunk stream through the "write N while collecting N+1" path
 // roundtrips without distortion; with buffer_total = chunk_size (try_acquire always fails) it degrades to
-// single-buffer serial with the same result. CRC on throughout (full read verifies segment by segment), extent accounting and object counts land correctly
+// single-buffer serial with the same result. CRC on throughout (full read verifies segment by segment), extent
+// accounting and object counts land correctly
 TEST(duostore_rados_pipeline_multi_chunk_stream) {
     RADOS_OR_SKIP();
     auto pool = std::make_shared<ThreadPool>(4);
-    std::string body = patterned(100000);  // 100000B / 4KiB = 25 objects
+    std::string body = patterned(100000);                   // 100000B / 4KiB = 25 objects
     for (uint64_t buffer_total : {8 * 4096ull, 4096ull}) {  // pipelined / serial degradation
         std::string ns = unique_ns();
         NsCleaner cleaner(ns);
@@ -483,8 +478,7 @@ TEST(duostore_rados_pipeline_multi_chunk_stream) {
         RadosDataStore d(opts, pool, counter_alloc());
         auto w = sync_wait(d.open_writer({std::nullopt}));
         // Writes in 7000B strides: write boundaries interleave with chunk boundaries, covering cross-slice copying
-        std::span<const std::byte> rest(reinterpret_cast<const std::byte*>(body.data()),
-                                        body.size());
+        std::span<const std::byte> rest(reinterpret_cast<const std::byte*>(body.data()), body.size());
         while (!rest.empty()) {
             size_t n = std::min<size_t>(7000, rest.size());
             sync_wait(w->write(rest.first(n)));
@@ -508,8 +502,7 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     NsCleaner cleaner(ns);
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp.path / "meta").string(), false, 8ull << 20});
     IMetaStore* mp = meta.get();
     DuoStoreConfig cfg;
     cfg.name = "rados-orphan";
@@ -524,15 +517,15 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", patterned(10000));  // 3 objects on the books
 
-    // Orphan injection: write objects directly to the data store without committing meta (crash-residue shape); ids taken far away to avoid the id segment
+    // Orphan injection: write objects directly to the data store without committing meta (crash-residue shape); ids
+    // taken far away to avoid the id segment
     {
         auto far = std::make_shared<std::atomic<uint64_t>>(0xabc0);
         RadosDataStore orphan_src(rados_opts(ns, 4096), pool,
                                   [far](Extent::Kind, uint32_t n) { return far->fetch_add(n); });
         auto w = sync_wait(orphan_src.open_writer({std::nullopt}));
         std::string junk = patterned(5000);  // 2 objects
-        sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(junk.data()),
-                                     junk.size())));
+        sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(junk.data()), junk.size())));
         (void)sync_wait(w->finish());  // DataRef discarded as soon as it lands -- meta has no record
         sync_wait(orphan_src.close());
     }
@@ -550,7 +543,8 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     CHECK_EQ(read_all(*got.body), patterned(10000));
     got.body.reset();
 
-    // Reverse: delete one on-the-books object bypassing the store -> only a warning count, meta kept (a lead for manual intervention)
+    // Reverse: delete one on-the-books object bypassing the store -> only a warning count, meta kept (a lead for manual
+    // intervention)
     for (const auto& o : raw.list())
         if (o.rfind("c.", 0) == 0) {
             CHECK(rados_remove(raw.io, o.c_str()) == 0);
@@ -563,20 +557,20 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta untouched
     sync_wait(b->close());
 
-    // Grace shields fresh writes: unreferenced objects within the grace period are untouched (suspected in-flight writes)
+    // Grace shields fresh writes: unreferenced objects within the grace period are untouched (suspected in-flight
+    // writes)
     std::string ns2 = unique_ns();
     NsCleaner cleaner2(ns2);
     TmpDir tmp2;
-    auto meta2 = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{(tmp2.path / "meta").string(), false, 8ull << 20});
+    auto meta2 = std::make_unique<RocksMetaStore>(RocksMetaOptions{(tmp2.path / "meta").string(), false, 8ull << 20});
     DuoStoreConfig cfg2 = cfg;
     cfg2.name = "rados-orphan-grace";
     cfg2.root = tmp2.path / "duo";
     cfg2.gc_grace_sec = 3600;
     fs::create_directories(cfg2.root);
     auto far2 = std::make_shared<std::atomic<uint64_t>>(1);
-    auto data2 = std::make_unique<RadosDataStore>(
-        rados_opts(ns2, 4096), pool, [far2](Extent::Kind, uint32_t n) { return far2->fetch_add(n); });
+    auto data2 = std::make_unique<RadosDataStore>(rados_opts(ns2, 4096), pool,
+                                                  [far2](Extent::Kind, uint32_t n) { return far2->fetch_add(n); });
     auto b2 = std::make_shared<DuoStoreBackend>(cfg2, pool, std::move(meta2), std::move(data2));
     {
         RadosDataStore orphan_src(rados_opts(ns2, 4096), pool,

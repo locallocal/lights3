@@ -31,29 +31,26 @@ struct Env {
     AuthConfig acfg;
     SigV4Authenticator auth;
     S3Service svc;
-    Env(std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends,
-        std::vector<BucketRule> rules = {}, std::string def = "main")
+    Env(std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends, std::vector<BucketRule> rules = {},
+        std::string def = "main")
         : acfg(make_auth()),
           auth(SigV4Authenticator::build(acfg)),
           svc(make_router(std::move(backends), std::move(rules), std::move(def)), auth) {
-        svc.set_credential_store(
-            sync_wait(CredentialStore::load(std::make_shared<storage::MemoryBackend>(), acfg)));
+        svc.set_credential_store(sync_wait(CredentialStore::load(std::make_shared<storage::MemoryBackend>(), acfg)));
     }
     static AuthConfig make_auth() {
         AuthConfig a;
         a.credentials = {{"ROOTAK", "root-sk"}};
         return a;
     }
-    static storage::BucketRouter make_router(
-        std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends,
-        std::vector<BucketRule> rules, std::string def) {
+    static storage::BucketRouter make_router(std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends,
+                                             std::vector<BucketRule> rules, std::string def) {
         BucketsConfig cfg;
         cfg.default_backend = std::move(def);
         cfg.rules = std::move(rules);
         return storage::BucketRouter::build(cfg, std::move(backends));
     }
-    http::HttpRequest req(std::string method, std::string path, std::string body = "",
-                          bool sign = true) {
+    http::HttpRequest req(std::string method, std::string path, std::string body = "", bool sign = true) {
         http::HttpRequest r;
         r.method = std::move(method);
         r.raw_path = path;
@@ -68,14 +65,13 @@ struct Env {
     json inspect(const std::string& bucket, const std::string& key, int expect = 200) {
         auto resp = sync_wait(svc.dispatch(req("GET", "/-/admin/objects/" + bucket + "/" + key)));
         if (resp.status != expect)
-            throw mini_test::Failure("inspect " + bucket + "/" + key + ": status " +
-                                     std::to_string(resp.status) + " body " + resp.small_body);
+            throw mini_test::Failure("inspect " + bucket + "/" + key + ": status " + std::to_string(resp.status) +
+                                     " body " + resp.small_body);
         return json::parse(resp.small_body);
     }
     void put(const std::string& path, const std::string& body) {
         auto resp = sync_wait(svc.dispatch(req("PUT", path, body)));
-        if (resp.status != 200)
-            throw mini_test::Failure("PUT " + path + ": " + std::to_string(resp.status));
+        if (resp.status != 200) throw mini_test::Failure("PUT " + path + ": " + std::to_string(resp.status));
     }
 };
 
@@ -136,8 +132,8 @@ TEST(admin_inspect_tiered_layout) {
     auto local = std::make_shared<storage::LocalFsBackend>(tmp.path / "data", tmp.path / "staging", pool);
     storage::TieredConfig tcfg;
     tcfg.scan_interval_sec = 0;
-    auto tiered = std::make_shared<storage::TieredBackend>(local, std::make_shared<storage::MemoryBackend>(),
-                                                           pool, tcfg);
+    auto tiered = std::make_shared<storage::TieredBackend>(local, std::make_shared<storage::MemoryBackend>(), pool,
+                                                           tcfg);
     Env env({{"main", tiered}});
     env.put("/bkt", "");
     env.put("/bkt/hot", "hot bytes");

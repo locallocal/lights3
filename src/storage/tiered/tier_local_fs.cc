@@ -22,9 +22,7 @@ using s3::S3ErrorCode;
 
 namespace {
 
-std::string ikey_of(std::string_view b, std::string_view k) {
-    return std::string(b) + "/" + std::string(k);
-}
+std::string ikey_of(std::string_view b, std::string_view k) { return std::string(b) + "/" + std::string(k); }
 
 // user xattr capability probe on the staging filesystem (same filesystem as root)
 bool xattr_supported(const fs::path& dir) {
@@ -38,8 +36,7 @@ bool xattr_supported(const fs::path& dir) {
 }
 
 std::string encode_access(const AccessRec& r) {
-    return std::to_string(r.atime) + " " + std::to_string(r.hits) + " " +
-           std::to_string(r.enrolled);
+    return std::to_string(r.atime) + " " + std::to_string(r.hits) + " " + std::to_string(r.enrolled);
 }
 
 std::optional<AccessRec> decode_access(std::string_view s) {
@@ -54,7 +51,7 @@ std::optional<AccessRec> decode_access(std::string_view s) {
         return true;
     };
     if (!num(r.atime)) return std::nullopt;
-    if (!num(r.hits)) r.hits = 0;         // legacy "atime only" values
+    if (!num(r.hits)) r.hits = 0;  // legacy "atime only" values
     if (!num(r.enrolled)) r.enrolled = -1;
     return r;
 }
@@ -78,10 +75,11 @@ LocalFsTierLocal::LocalFsTierLocal(std::shared_ptr<LocalFsBackend> local)
     fs::create_directories(state_dir_ / "rcache" / "map");
     resident_ = !xattr_supported(local_->staging() / "put");
     if (resident_)
-        LOG_WARN("tiered: filesystem under {} has no xattr support; access records stay in a "
-                 "resident table + atime.tsv snapshot (memory grows with the object count, "
-                 "docs/storage/tiered-design.md §4.3)",
-                 local_->root().string());
+        LOG_WARN(
+            "tiered: filesystem under {} has no xattr support; access records stay in a "
+            "resident table + atime.tsv snapshot (memory grows with the object count, "
+            "docs/storage/tiered-design.md §4.3)",
+            local_->root().string());
     load_access_table();
 }
 
@@ -134,20 +132,20 @@ TierInfo LocalFsTierLocal::read_tier_only(std::string_view bucket, std::string_v
     for (auto& [k, v] : fsutil::read_tsv(path.string() + fsutil::kSidecarSuffix)) {
         if (k == "tier")
             t.tier = v == "remote" ? Tier::kRemote : v == "cached" ? Tier::kCached : Tier::kLocal;
-        else if (k == "remote.etag") t.remote_etag = v;
-        else if (k == "remote.at") t.remote_at = v;
+        else if (k == "remote.etag")
+            t.remote_etag = v;
+        else if (k == "remote.at")
+            t.remote_at = v;
     }
     return t;
 }
 
 // ---------- access records ----------
 
-std::optional<AccessRec> LocalFsTierLocal::load_access(std::string_view bucket,
-                                                       std::string_view key) {
+std::optional<AccessRec> LocalFsTierLocal::load_access(std::string_view bucket, std::string_view key) {
     if (!resident_) {
         char buf[96];
-        ssize_t n = ::getxattr(local_->object_data_path(bucket, key).c_str(), kAccessXattr, buf,
-                               sizeof(buf));
+        ssize_t n = ::getxattr(local_->object_data_path(bucket, key).c_str(), kAccessXattr, buf, sizeof(buf));
         if (n > 0) return decode_access(std::string_view(buf, size_t(n)));
     }
     std::lock_guard lk(table_m_);
@@ -156,15 +154,13 @@ std::optional<AccessRec> LocalFsTierLocal::load_access(std::string_view bucket,
     return it->second;
 }
 
-void LocalFsTierLocal::store_access(std::string_view bucket, std::string_view key,
-                                    const AccessRec& rec) {
+void LocalFsTierLocal::store_access(std::string_view bucket, std::string_view key, const AccessRec& rec) {
     std::string ik = ikey_of(bucket, key);
     if (!resident_) {
         std::string v = encode_access(rec);
         // Failure (object just deleted, ENOSPC on the xattr block) only costs coldness
         // precision — the mtime fallback still reaches a conclusion
-        if (::setxattr(local_->object_data_path(bucket, key).c_str(), kAccessXattr, v.data(),
-                       v.size(), 0) == 0) {
+        if (::setxattr(local_->object_data_path(bucket, key).c_str(), kAccessXattr, v.data(), v.size(), 0) == 0) {
             std::lock_guard lk(table_m_);
             if (table_.erase(ik) > 0) table_dirty_ = true;  // legacy fallback entry superseded
             return;
@@ -191,8 +187,8 @@ void LocalFsTierLocal::flush_access() {
         kv.reserve(table_.size());
         for (auto& [k, r] : table_) {
             if (k.find('\t') != std::string::npos || k.find('\n') != std::string::npos) continue;
-            kv.emplace_back(k, std::to_string(r.atime) + "\t" + std::to_string(r.hits) + "\t" +
-                                   std::to_string(r.enrolled));
+            kv.emplace_back(
+                k, std::to_string(r.atime) + "\t" + std::to_string(r.hits) + "\t" + std::to_string(r.enrolled));
         }
     }
     fs::path snap = state_dir_ / "atime.tsv";
@@ -212,8 +208,7 @@ void LocalFsTierLocal::flush_access() {
 
 // ---------- data plane ----------
 
-Task<std::unique_ptr<http::BodyReader>> LocalFsTierLocal::open_snapshot(std::string_view bucket,
-                                                                        std::string_view key,
+Task<std::unique_ptr<http::BodyReader>> LocalFsTierLocal::open_snapshot(std::string_view bucket, std::string_view key,
                                                                         uint64_t size) {
     fs::path path = local_->object_data_path(bucket, key);
     int fd = ::open(path.c_str(), O_RDONLY);
@@ -228,8 +223,8 @@ Task<std::unique_ptr<http::BodyReader>> LocalFsTierLocal::open_snapshot(std::str
     co_return std::make_unique<fsutil::FdStreamReader>(fd, 0, size, local_->pool());
 }
 
-Task<void> LocalFsTierLocal::commit_stub(std::string_view bucket, std::string_view key,
-                                         const ObjectMeta& meta, const TierInfo& tier) {
+Task<void> LocalFsTierLocal::commit_stub(std::string_view bucket, std::string_view key, const ObjectMeta& meta,
+                                         const TierInfo& tier) {
     fs::path path = local_->object_data_path(bucket, key);
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);  // reconcile rebuilds into a possibly missing tree
@@ -265,7 +260,7 @@ public:
         tmp_.fd = -1;
         fsutil::commit_cached(owner_.data_path(bucket_, key_), tmp_, meta, tier, owner_.tmp_dir());
         owner_.localfs()->invalidate_object_meta(bucket_, key_);  // roadmap §3.8
-        owner_.drop_range_cache(bucket_, key_);  // the whole object is local now
+        owner_.drop_range_cache(bucket_, key_);                   // the whole object is local now
         co_return;
     }
 
@@ -277,8 +272,7 @@ private:
 
 }  // namespace
 
-std::unique_ptr<ICacheFill> LocalFsTierLocal::begin_cache_fill(std::string_view bucket,
-                                                               std::string_view key) {
+std::unique_ptr<ICacheFill> LocalFsTierLocal::begin_cache_fill(std::string_view bucket, std::string_view key) {
     auto f = std::make_unique<FsCacheFill>(*this, std::string(bucket), std::string(key),
                                            tmp_dir() / fsutil::next_tmp_name());
     if (!f->ok()) return nullptr;
@@ -292,9 +286,7 @@ bool LocalFsTierLocal::cache_space_ok(uint64_t size, uint64_t min_free_bytes) co
     return s && s->avail_bytes > size + min_free_bytes;
 }
 
-std::optional<SpaceUsage> LocalFsTierLocal::space_usage() const {
-    return probe_space(local_->root());
-}
+std::optional<SpaceUsage> LocalFsTierLocal::space_usage() const { return probe_space(local_->root()); }
 
 // ---------- enumeration ----------
 
@@ -324,8 +316,7 @@ public:
             if (!entry.is_regular_file(ec)) continue;
             std::string name = entry.path().filename().string();
             if (name == fsutil::kBucketMarker || name.ends_with(fsutil::kSidecarSuffix)) continue;
-            std::string key =
-                key_of_rel(entry.path().lexically_relative(bucket_dir_).generic_string());
+            std::string key = key_of_rel(entry.path().lexically_relative(bucket_dir_).generic_string());
             if (key == "/") continue;
             struct stat st{};
             if (::stat(entry.path().c_str(), &st) != 0) continue;
@@ -388,11 +379,17 @@ fs::path LocalFsTierLocal::rcache_map_path(std::string_view bucket, std::string_
 
 class FsRangeCache final : public IRangeCache {
 public:
-    FsRangeCache(LocalFsTierLocal& owner, std::string bucket, std::string key, uint64_t size,
-                 std::string etag, uint64_t block)
-        : owner_(owner), bucket_(std::move(bucket)), key_(std::move(key)), size_(size),
-          etag_(std::move(etag)), block_(block), nblocks_((size + block - 1) / block),
-          data_(owner.rcache_data_path(bucket_, key_)), map_(owner.rcache_map_path(bucket_, key_)) {
+    FsRangeCache(LocalFsTierLocal& owner, std::string bucket, std::string key, uint64_t size, std::string etag,
+                 uint64_t block)
+        : owner_(owner),
+          bucket_(std::move(bucket)),
+          key_(std::move(key)),
+          size_(size),
+          etag_(std::move(etag)),
+          block_(block),
+          nblocks_((size + block - 1) / block),
+          data_(owner.rcache_data_path(bucket_, key_)),
+          map_(owner.rcache_map_path(bucket_, key_)) {
         bits_.assign((nblocks_ + 7) / 8, 0);
         if (!load_map()) {  // missing / other replica / other geometry: start empty
             owner_.drop_range_cache(bucket_, key_);
@@ -416,8 +413,7 @@ public:
     std::unique_ptr<http::BodyReader> open(uint64_t first, uint64_t last) override {
         int fd = ::open(data_.c_str(), O_RDONLY);
         if (fd < 0) return nullptr;
-        return std::make_unique<fsutil::FdStreamReader>(fd, first, last - first + 1,
-                                                        owner_.local_->pool());
+        return std::make_unique<fsutil::FdStreamReader>(fd, first, last - first + 1, owner_.local_->pool());
     }
 
     bool write(uint64_t off, const std::byte* p, size_t n) override {
@@ -511,13 +507,11 @@ private:
     int fd_ = -1;
 };
 
-std::unique_ptr<IRangeCache> LocalFsTierLocal::open_range_cache(std::string_view bucket,
-                                                                std::string_view key,
-                                                                const LocalObject& obj,
-                                                                uint64_t block_size) {
+std::unique_ptr<IRangeCache> LocalFsTierLocal::open_range_cache(std::string_view bucket, std::string_view key,
+                                                                const LocalObject& obj, uint64_t block_size) {
     if (obj.tier.tier != Tier::kRemote || obj.meta.size == 0 || block_size == 0) return nullptr;
-    return std::make_unique<FsRangeCache>(*this, std::string(bucket), std::string(key),
-                                          obj.meta.size, obj.tier.remote_etag, block_size);
+    return std::make_unique<FsRangeCache>(*this, std::string(bucket), std::string(key), obj.meta.size,
+                                          obj.tier.remote_etag, block_size);
 }
 
 void LocalFsTierLocal::drop_range_cache(std::string_view bucket, std::string_view key) {
@@ -548,8 +542,8 @@ uint64_t LocalFsTierLocal::sweep_range_cache() {
     fs::path root = state_dir_ / "rcache" / "data";
     std::error_code ec;
     std::vector<std::pair<std::string, std::string>> drop;
-    for (auto it = fs::recursive_directory_iterator(root, ec);
-         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
         std::error_code tec;
         if (!it->is_regular_file(tec)) continue;
         fs::path rel = it->path().lexically_relative(root);

@@ -71,8 +71,7 @@ TEST(admin_jobs_run_scrub_dispatches_and_reports) {
     TmpDirF tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     std::vector<BackendConfig> cfgs;
-    cfgs.push_back({"fs", "localfs",
-                    {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
+    cfgs.push_back({"fs", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
     cfgs.push_back({"mem", "memory", {}});
     auto out = StorageRegistry::build(cfgs, pool);
     auto& fs = *out.at("fs");
@@ -110,8 +109,7 @@ TEST(admin_jobs_one_job_per_backend_with_polling) {
     TmpDirF tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     std::vector<BackendConfig> cfgs;
-    cfgs.push_back({"fs", "localfs",
-                    {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
+    cfgs.push_back({"fs", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
     cfgs.push_back({"mem", "memory", {}});
     auto out = StorageRegistry::build(cfgs, pool);
     auto& fs = *out.at("fs");
@@ -175,8 +173,7 @@ TEST(admin_jobs_op_names_and_parse) {
     CHECK_EQ(std::string(job_op_name(JobOp::TierReconcile)), "reconcile");
     CHECK_EQ(std::string(job_group_name(JobOp::TierGc)), "tier");
     // Every op round-trips through its (group, op) pair
-    for (JobOp op : {JobOp::Fsck, JobOp::DuoGc, JobOp::DuoScan, JobOp::TierScan, JobOp::TierGc,
-                     JobOp::TierReconcile}) {
+    for (JobOp op : {JobOp::Fsck, JobOp::DuoGc, JobOp::DuoScan, JobOp::TierScan, JobOp::TierGc, JobOp::TierReconcile}) {
         auto back = parse_job_op(job_group_name(op), job_op_name(op));
         CHECK(back && *back == op);
     }
@@ -196,12 +193,16 @@ TEST(admin_jobs_tier_rounds_and_ledger) {
     TmpDirF tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     std::vector<BackendConfig> cfgs;
-    cfgs.push_back({"localdata", "localfs",
-                    {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
+    cfgs.push_back(
+        {"localdata", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
     cfgs.push_back({"cloud", "memory", {}});
-    cfgs.push_back({"tier", "tiered",
-                    {{"local", "localdata"}, {"cloud", "cloud"}, {"scan_interval", "0s"},
-                     {"cold_after", "30d"}, {"space_high_watermark", "85%"},
+    cfgs.push_back({"tier",
+                    "tiered",
+                    {{"local", "localdata"},
+                     {"cloud", "cloud"},
+                     {"scan_interval", "0s"},
+                     {"cold_after", "30d"},
+                     {"space_high_watermark", "85%"},
                      {"quota_bytes", "64MiB"}}});
     auto out = StorageRegistry::build(cfgs, pool);
     auto& t = *out.at("tier");
@@ -365,9 +366,7 @@ TEST(service_admin_fsck_endpoint) {
         [&](const std::string& b, const std::string& group, const std::string& op, uint64_t bps) {
             JobOp o = check_op(b, group, op);
             if (running)
-                throw S3Error(o == JobOp::Fsck ? S3ErrorCode::ScrubInProgress
-                                               : S3ErrorCode::JobInProgress,
-                              "busy");
+                throw S3Error(o == JobOp::Fsck ? S3ErrorCode::ScrubInProgress : S3ErrorCode::JobInProgress, "busy");
             running = true;
             last_backend = b;
             last_op = group + "." + op;
@@ -379,12 +378,9 @@ TEST(service_admin_fsck_endpoint) {
             return json{{"backend", b}, {"op", op}, {"running", running}, {"job_id", 7}};
         },
         [&](const std::string& b, const std::string& group) {
-            if (b != "tier" && b != "duo")
-                throw S3Error(S3ErrorCode::NoSuchKey, "no backend named '" + b + "'");
-            if ((group == "tier") != (b == "tier"))
-                throw S3Error(S3ErrorCode::InvalidRequest, "wrong backend type");
-            return json{{"backend", b}, {"kind", b == "tier" ? "tiered" : "duostore"},
-                        {"entries", json::array()}};
+            if (b != "tier" && b != "duo") throw S3Error(S3ErrorCode::NoSuchKey, "no backend named '" + b + "'");
+            if ((group == "tier") != (b == "tier")) throw S3Error(S3ErrorCode::InvalidRequest, "wrong backend type");
+            return json{{"backend", b}, {"kind", b == "tier" ? "tiered" : "duostore"}, {"entries", json::array()}};
         });
     SigV4Authenticator signer = SigV4Authenticator::build(acfg);
     Credential root{"FSCKROOT", util::SecretString(std::string("root-sk"))};
@@ -430,19 +426,18 @@ TEST(service_admin_fsck_endpoint) {
     // ---- /-/admin/duostore|tier/<backend>/<op> (handlers/admin_jobs.cc) ----
     CHECK_EQ(call("POST", "/-/admin/tier/tier/scan", "", nullptr).status, 403);
     CHECK_EQ(call("POST", "/-/admin/tier/tier/scan", "", &p).status, 403);
-    CHECK_EQ(call("POST", "/-/admin/tier/", "", &root).status, 400);     // no backend
-    CHECK_EQ(call("POST", "/-/admin/tier/tier", "", &root).status, 400); // no op
+    CHECK_EQ(call("POST", "/-/admin/tier/", "", &root).status, 400);      // no backend
+    CHECK_EQ(call("POST", "/-/admin/tier/tier", "", &root).status, 400);  // no op
     CHECK_EQ(call("POST", "/-/admin/tier/tier/", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/tier//scan", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/tier/tier/scan/extra", "", &root).status, 400);
     CHECK_EQ(call("DELETE", "/-/admin/tier/tier/scan", "", &root).status, 405);
-    CHECK_EQ(call("POST", "/-/admin/tier/tier/fsck", "", &root).status, 400);       // not a tier op
+    CHECK_EQ(call("POST", "/-/admin/tier/tier/fsck", "", &root).status, 400);  // not a tier op
     CHECK_EQ(call("POST", "/-/admin/duostore/duo/reconcile", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/tier/nope/scan", "", &root).status, 404);
     CHECK_EQ(call("POST", "/-/admin/duostore/tier/gc", "", &root).status, 400);  // wrong type
-    for (const char* path : {"/-/admin/tier/tier/scan", "/-/admin/tier/tier/gc",
-                             "/-/admin/tier/tier/reconcile", "/-/admin/duostore/duo/gc",
-                             "/-/admin/duostore/duo/scan"}) {
+    for (const char* path : {"/-/admin/tier/tier/scan", "/-/admin/tier/tier/gc", "/-/admin/tier/tier/reconcile",
+                             "/-/admin/duostore/duo/gc", "/-/admin/duostore/duo/scan"}) {
         auto idle = call("GET", path, "", &root);
         CHECK_EQ(idle.status, 200);
         CHECK(!json::parse(idle.small_body)["running"].get<bool>());

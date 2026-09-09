@@ -63,18 +63,14 @@ struct SharedDataStore final : IDataStore {
     Task<std::vector<DataRef>> write_batch(std::span<const PackAppendItem> items) override {
         return inner->write_batch(items);
     }
-    Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
-                                                       uint64_t last) override {
+    Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first, uint64_t last) override {
         return inner->open_reader(std::move(ref), first, last);
     }
     Task<void> remove(std::span<const Extent> extents) override { return inner->remove(extents); }
     Task<void> remove_pack(uint64_t pack_id) override { return inner->remove_pack(pack_id); }
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override { return inner->rewrite_pack(pack_id); }
-    Task<uint64_t> seal_aged_packs(int64_t max_age_ms) override {
-        return inner->seal_aged_packs(max_age_ms);
-    }
-    Task<void> scan_chunks(
-        const std::function<void(uint64_t, int64_t, uint64_t)>& cb) override {
+    Task<uint64_t> seal_aged_packs(int64_t max_age_ms) override { return inner->seal_aged_packs(max_age_ms); }
+    Task<void> scan_chunks(const std::function<void(uint64_t, int64_t, uint64_t)>& cb) override {
         return inner->scan_chunks(cb);
     }
     Task<void> scan_packs(const std::function<void(uint64_t, int64_t, uint64_t)>& cb) override {
@@ -90,8 +86,7 @@ struct SharedDataStore final : IDataStore {
 class GatedReader final : public http::BodyReader {
 public:
     GatedReader(std::string first, std::string rest)
-        : first_(std::move(first)), rest_(std::move(rest)),
-          total_(first_.size() + rest_.size()) {}
+        : first_(std::move(first)), rest_(std::move(rest)), total_(first_.size() + rest_.size()) {}
 
     std::optional<uint64_t> length() const override { return total_; }
 
@@ -141,8 +136,8 @@ inline size_t count_chunk_files(const fs::path& root) {
     return n;
 }
 
-inline PutResult upload(DuoStoreBackend& gw, const std::string& bkt, const std::string& key,
-                        const std::string& id, int part_no, const std::string& data) {
+inline PutResult upload(DuoStoreBackend& gw, const std::string& bkt, const std::string& key, const std::string& id,
+                        int part_no, const std::string& data) {
     http::StringBodyReader body(data);
     return sync_wait(gw.upload_part(bkt, key, id, part_no, body));
 }
@@ -154,8 +149,8 @@ inline PartInfo part_info(int part_no, const std::string& etag) {
     return p;
 }
 
-inline std::vector<PartMeta> parts_of(DuoStoreBackend& gw, const std::string& bkt,
-                                      const std::string& key, const std::string& id) {
+inline std::vector<PartMeta> parts_of(DuoStoreBackend& gw, const std::string& bkt, const std::string& key,
+                                      const std::string& id) {
     return sync_wait(gw.list_parts(bkt, key, id, {})).parts;
 }
 
@@ -201,12 +196,10 @@ struct Cluster {
     ~Cluster() { close(); }
 };
 
-inline std::shared_ptr<DuoStoreBackend> make_gateway(Cluster& c, const MetaFactory& make_meta,
-                                                     const char* name) {
+inline std::shared_ptr<DuoStoreBackend> make_gateway(Cluster& c, const MetaFactory& make_meta, const char* name) {
     auto cfg = c.cfg;
     cfg.name = name;
-    return std::make_shared<DuoStoreBackend>(cfg, c.pool, make_meta(),
-                                             std::make_unique<SharedDataStore>(c.data));
+    return std::make_shared<DuoStoreBackend>(cfg, c.pool, make_meta(), std::make_unique<SharedDataStore>(c.data));
 }
 
 inline std::unique_ptr<Cluster> make_cluster(const MetaFactory& make_meta, DuoMetaKind kind,
@@ -232,8 +225,7 @@ inline std::unique_ptr<Cluster> make_cluster(const MetaFactory& make_meta, DuoMe
     fopt.verify_chunk_crc = c->cfg.verify_chunk_crc;
     fopt.pack_threshold = c->cfg.pack_threshold;
     c->data = std::make_shared<FsDataStore>(
-        std::move(fopt), c->pool,
-        [mp](Extent::Kind k, uint32_t n) { return mp->alloc_file_run(k, n); },
+        std::move(fopt), c->pool, [mp](Extent::Kind k, uint32_t n) { return mp->alloc_file_run(k, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     c->a = make_gateway(*c, make_meta, "gw-a");
     c->b = make_gateway(*c, make_meta, "gw-b");
@@ -436,8 +428,7 @@ inline void mpu_ttl_single_executor(const MetaFactory& make_meta, DuoMetaKind ki
     CHECK_EQ(count_chunk_files(c->cfg.root), size_t(0));
     {
         http::StringBodyReader part("x");
-        CHECK_THROWS_S3(sync_wait(c->b->upload_part("bkt", "two", id2, 2, part)),
-                        s3::S3ErrorCode::NoSuchUpload);
+        CHECK_THROWS_S3(sync_wait(c->b->upload_part("bkt", "two", id2, 2, part)), s3::S3ErrorCode::NoSuchUpload);
     }
     sync_wait(c->a->delete_bucket("bkt"));
     c->close();
@@ -467,8 +458,7 @@ inline void listings_are_shared(const MetaFactory& make_meta, DuoMetaKind kind) 
     std::set<std::string> ids{u1, u2, u3};
     for (const auto& u : la) CHECK(ids.count(u.upload_id) == 1);
 
-    const std::vector<std::tuple<std::string, std::string, size_t>> expect{
-        {"k1", u1, 3}, {"k1", u2, 0}, {"k2", u3, 1}};
+    const std::vector<std::tuple<std::string, std::string, size_t>> expect{{"k1", u1, 3}, {"k1", u2, 0}, {"k2", u3, 1}};
     for (const auto& [key, id, n] : expect) {
         auto pa = parts_of(*c->a, "bkt", key, id), pb = parts_of(*c->b, "bkt", key, id);
         CHECK_EQ(pa.size(), n);

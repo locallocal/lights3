@@ -44,7 +44,7 @@ struct TieredConfig {
     uint64_t min_free_bytes = 1ull << 30;     // minimum headroom required for cache fill (requirement 3)
     bool cache_fill_on_range = true;          // background whole-object promotion when a Range hits remote
     int max_concurrent_transfers = 4;
-    uint64_t quota_bytes = 0;                 // 0 = logical quota disabled
+    uint64_t quota_bytes = 0;  // 0 = logical quota disabled
     // Exponential backoff for failed GC entries (docs/storage/tiered-design.md §9): delay =
     // base x 2^attempts, clamped to cap; persisted per entry (attempts/retry_at land in the
     // TSV, not reset by restart)
@@ -76,7 +76,8 @@ struct TieredConfig {
 
 // Statistics for run_gc_once() (for backoff / test assertions)
 struct TierGcStats {
-    uint64_t resolved = 0;       // entries conclusively removed (delete succeeded / cloud never had it / live reference invalidated / corrupt)
+    uint64_t resolved = 0;       // entries conclusively removed (delete succeeded / cloud never had it / live reference
+                                 // invalidated / corrupt)
     uint64_t removed_cloud = 0;  // orphan cloud replicas actually deleted
     uint64_t deferred = 0;       // backoff not yet due, skipped this round
     uint64_t failed = 0;         // failed this round, rescheduled with exponential backoff
@@ -96,34 +97,32 @@ struct TierReconcileStats {
 
 // One scan round's report (roadmap §3.6 ①)
 struct TierScanStats {
-    bool full = false;             // full enumeration vs time-wheel round
-    uint64_t walked = 0;           // objects enumerated (full) or wheel candidates verified (incremental)
-    uint64_t cold_picked = 0;      // coldness demotions launched
-    uint64_t recovered = 0;        // half-done stubs finished
-    uint64_t enrolled = 0;         // wheel enrollments written
-    uint64_t stale = 0;            // wheel entries whose object is gone
-    uint64_t evicted = 0;          // watermark victims launched
+    bool full = false;         // full enumeration vs time-wheel round
+    uint64_t walked = 0;       // objects enumerated (full) or wheel candidates verified (incremental)
+    uint64_t cold_picked = 0;  // coldness demotions launched
+    uint64_t recovered = 0;    // half-done stubs finished
+    uint64_t enrolled = 0;     // wheel enrollments written
+    uint64_t stale = 0;        // wheel entries whose object is gone
+    uint64_t evicted = 0;      // watermark victims launched
     uint64_t evicted_bytes = 0;
-    uint64_t need_remaining = 0;   // bytes the watermark could not cover
+    uint64_t need_remaining = 0;  // bytes the watermark could not cover
 };
 
 // Quarantine ledger entry (roadmap §3.6 ④): a reconciliation finding that is repeated
 // every round until an operator acts on it
 struct QuarantineEntry {
-    std::string kind;    // refs_missing | foreign
+    std::string kind;  // refs_missing | foreign
     std::string bucket, key, etag;
     int64_t first_seen = 0, last_seen = 0;
     uint64_t count = 0;
 };
 
-class TieredBackend final : public IStorageBackend,
-                            public std::enable_shared_from_this<TieredBackend> {
+class TieredBackend final : public IStorageBackend, public std::enable_shared_from_this<TieredBackend> {
 public:
     // StorageRegistry two-phase construction entry: local/cloud in params reference
     // already-built backends by name
     static std::shared_ptr<TieredBackend> from_config(
-        const BackendConfig& cfg,
-        const std::map<std::string, std::shared_ptr<IStorageBackend>>& built,
+        const BackendConfig& cfg, const std::map<std::string, std::shared_ptr<IStorageBackend>>& built,
         std::shared_ptr<ThreadPool> pool, MetricsScope metrics = {});
 
     TieredBackend(std::shared_ptr<tier::ITierLocal> local, std::shared_ptr<IStorageBackend> cloud,
@@ -142,36 +141,27 @@ public:
     // ---- object: tier-aware (docs/storage/tiered-design.md §6/§7) ----
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
-    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
-                               http::BodyReader& body,
+    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta, http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     // Tier state + local bytes from the local side, followed by the local engine's own
     // layout (roadmap §6.2 `lights3-ctl object inspect`)
-    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket,
-                                                     std::string_view key) override;
+    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket, std::string_view key) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
-    Task<void> set_object_tagging(std::string_view bucket, std::string_view key,
-                                  std::string tagging) override;
+    Task<void> set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
     // ---- multipart: fully delegated to local; when complete overwrites an old cloud replica it goes to GC ----
-    Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
-                                       ObjectMeta meta) override;
+    Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) override;
     using IStorageBackend::upload_part;
-    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                std::string_view upload_id, int part_no, http::BodyReader& body,
-                                const std::optional<PartChecksum>& checksum) override;
-    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
-                                       std::string_view upload_id,
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id, int part_no,
+                                http::BodyReader& body, const std::optional<PartChecksum>& checksum) override;
+    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;
-    Task<void> abort_multipart(std::string_view bucket, std::string_view key,
-                               std::string_view upload_id) override;
-    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
-                                     std::string_view upload_id,
+    Task<void> abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) override;
+    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                      const ListPartsOptions& opt) override;
-    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
-                                                   const ListUploadsOptions& opt) override;
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) override;
 
     // Stop background timers, wait for in-flight background coroutines, persist buffered
     // access records. Does not close the cloud backend (held independently by the
@@ -241,7 +231,8 @@ private:
         ~OpGuard() { self->record_op(op, ok); }
     };
 
-    // ---- per-key locks (docs/storage/tiered-design.md §7.3): striped async mutexes, protecting only the state-commit section ----
+    // ---- per-key locks (docs/storage/tiered-design.md §7.3): striped async mutexes, protecting only the state-commit
+    // section ----
     static constexpr size_t kLockStripes = 64;
     AsyncSemaphore& key_lock(std::string_view bucket, std::string_view key);
 
@@ -267,9 +258,7 @@ private:
     bool persist_access(std::string_view bucket, std::string_view key, tier::AccessRec rec);
     void flush_access_sync();
     static constexpr int64_t kWheelSlotSec = 3600;
-    int64_t wheel_slot_for(int64_t atime, int64_t cold_after) const {
-        return (atime + cold_after) / kWheelSlotSec;
-    }
+    int64_t wheel_slot_for(int64_t atime, int64_t cold_after) const { return (atime + cold_after) / kWheelSlotSec; }
     void wheel_append(int64_t slot, std::string_view bucket, std::string_view key);
     std::vector<std::pair<int64_t, std::filesystem::path>> wheel_slots() const;  // ascending
     void maybe_kick_flush();
@@ -284,20 +273,17 @@ private:
     // object, applies rules, decides cold/recovery/enroll
     // from_slot: the wheel slot being consumed (-1 = full enumeration); a key that stays
     // hot but was enrolled in that very slot is re-appended, since the file goes away
-    Task<void> consider(ScanCtx& cx, const std::string& bucket, const std::string& key,
-                        int64_t from_slot);
+    Task<void> consider(ScanCtx& cx, const std::string& bucket, const std::string& key, int64_t from_slot);
     double evict_score(const tier::AccessRec& a, uint64_t size, int64_t now) const;
 
     // ---- GC queue (docs/storage/tiered-design.md §7.2): <state>/gc/<seq>, one TSV per entry ----
     void enqueue_gc(std::string_view bucket, std::string_view key, std::string_view remote_etag);
 
     // ---- Quarantine ledger (④): <state>/quarantine/<md5(kind|bucket|key)> ----
-    std::filesystem::path quarantine_path(std::string_view kind, std::string_view bucket,
-                                          std::string_view key) const;
+    std::filesystem::path quarantine_path(std::string_view kind, std::string_view bucket, std::string_view key) const;
     // Record a finding; returns true when it is new (caller logs loudly only then)
-    bool quarantine_note(std::string_view kind, std::string_view bucket, std::string_view key,
-                         std::string_view etag, std::set<std::string>& seen,
-                         TierReconcileStats& st);
+    bool quarantine_note(std::string_view kind, std::string_view bucket, std::string_view key, std::string_view etag,
+                         std::set<std::string>& seen, TierReconcileStats& st);
     void quarantine_sweep(const std::set<std::string>& seen, TierReconcileStats& st);
     void refresh_quarantine_gauges();
 
@@ -305,8 +291,8 @@ private:
     Task<void> ensure_cloud_bucket(std::string_view bucket);
     // Cache-fill commit: re-verify under the per-key lock that the object is still the
     // same remote version, then commit the fill as cached
-    Task<void> commit_cache_fill(std::string bucket, std::string key, ObjectMeta expect,
-                                 tier::TierInfo expect_tier, tier::ICacheFill& fill);
+    Task<void> commit_cache_fill(std::string bucket, std::string key, ObjectMeta expect, tier::TierInfo expect_tier,
+                                 tier::ICacheFill& fill);
     // statvfs headroom precheck (docs/storage/tiered-design.md §6.2 step 2)
     bool cache_space_ok(uint64_t size) const { return local_->cache_space_ok(size, cfg_.min_free_bytes); }
 
@@ -328,13 +314,12 @@ private:
     Task<void> reconcile_task();
     // Reconciliation's orphan handling (executed after re-verification under the per-key
     // lock); reports whether the cloud/local side was touched
-    Task<void> reconcile_orphan(std::string bucket, std::string key, std::string cloud_etag,
-                                bool local_is_live, TierReconcileStats& st,
-                                std::set<std::string>& seen);
+    Task<void> reconcile_orphan(std::string bucket, std::string key, std::string cloud_etag, bool local_is_live,
+                                TierReconcileStats& st, std::set<std::string>& seen);
     // Reverse adjudication: when a local remote/cached reference is missing in the cloud or
     // its etag mismatches, re-verify with a HEAD at the current point before warning
-    Task<void> reconcile_ref_missing(std::string bucket, std::string key, tier::TierInfo t,
-                                     TierReconcileStats& st, std::set<std::string>& seen);
+    Task<void> reconcile_ref_missing(std::string bucket, std::string key, tier::TierInfo t, TierReconcileStats& st,
+                                     std::set<std::string>& seen);
 
     std::shared_ptr<tier::ITierLocal> local_;
     std::shared_ptr<IStorageBackend> cloud_;
@@ -377,8 +362,8 @@ private:
     std::atomic<uint64_t> gc_seq_{0};
     // Shared with the lights3_tiered_local_cached_bytes callback gauge, which may be
     // rendered after this backend is gone (the registry outlives backends)
-    std::shared_ptr<std::atomic<int64_t>> local_bytes_est_ =
-        std::make_shared<std::atomic<int64_t>>(-1);  // -1 = not yet calibrated by scan
+    std::shared_ptr<std::atomic<int64_t>> local_bytes_est_ = std::make_shared<std::atomic<int64_t>>(
+        -1);                                        // -1 = not yet calibrated by scan
     std::atomic<bool> quota_kick_inflight_{false};  // only one early-kicked scan at a time
 
     BackgroundTaskGroup bg_{"tiered"};

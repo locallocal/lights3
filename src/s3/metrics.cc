@@ -60,8 +60,7 @@ void Metrics::record_bucket_request(std::string_view bucket) {
     bucket_slot_locked(bucket).requests += 1;
 }
 
-void Metrics::record_api(std::string_view api, std::string_view backend, int status,
-                         double seconds) {
+void Metrics::record_api(std::string_view api, std::string_view backend, int status, double seconds) {
     if (api.empty()) return;
     std::string key(api);
     key.push_back('\0');
@@ -112,23 +111,18 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
     uint64_t cum = 0;
     for (size_t i = 0; i < kLatencyBuckets.size(); ++i) {
         cum += latency_hist_[i].load(std::memory_order_relaxed);
-        os << "lights3_request_duration_seconds_bucket{le=\"" << kLatencyBuckets[i] << "\"} "
-           << cum << "\n";
+        os << "lights3_request_duration_seconds_bucket{le=\"" << kLatencyBuckets[i] << "\"} " << cum << "\n";
     }
     cum += latency_hist_[kLatencyBuckets.size()].load(std::memory_order_relaxed);
     os << "lights3_request_duration_seconds_bucket{le=\"+Inf\"} " << cum << "\n";
-    os << "lights3_request_duration_seconds_sum "
-       << latency_sum_us_.load(std::memory_order_relaxed) / 1e6 << "\n";
-    os << "lights3_request_duration_seconds_count "
-       << latency_count_.load(std::memory_order_relaxed) << "\n";
+    os << "lights3_request_duration_seconds_sum " << latency_sum_us_.load(std::memory_order_relaxed) / 1e6 << "\n";
+    os << "lights3_request_duration_seconds_count " << latency_count_.load(std::memory_order_relaxed) << "\n";
 
     os << "# TYPE lights3_s3_errors_total counter\n";
     for (size_t i = 0; i < kS3ErrorCodeCount; ++i) {
         uint64_t n = errors_[i].load(std::memory_order_relaxed);
         // Only render codes that have occurred (matches the old map behavior; avoids 25 always-zero series)
-        if (n > 0)
-            os << "lights3_s3_errors_total{code=\"" << wire_code(S3ErrorCode(i)) << "\"} "
-               << n << "\n";
+        if (n > 0) os << "lights3_s3_errors_total{code=\"" << wire_code(S3ErrorCode(i)) << "\"} " << n << "\n";
     }
 
     os << "# TYPE lights3_multipart_active gauge\n";
@@ -148,34 +142,30 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
             for (auto& [key, st] : by_api_)
                 for (int cls = 2; cls <= 5; ++cls)
                     if (st.by_class[cls])
-                        os << "lights3_api_requests_total{" << labels(key) << ",class=\"" << cls
-                           << "xx\"} " << st.by_class[cls] << "\n";
+                        os << "lights3_api_requests_total{" << labels(key) << ",class=\"" << cls << "xx\"} "
+                           << st.by_class[cls] << "\n";
             os << "# TYPE lights3_api_request_duration_seconds histogram\n";
             for (auto& [key, st] : by_api_) {
                 std::string l = labels(key);
                 uint64_t c = 0;
                 for (size_t i = 0; i < kLatencyBuckets.size(); ++i) {
                     c += st.hist[i];
-                    os << "lights3_api_request_duration_seconds_bucket{" << l << ",le=\""
-                       << kLatencyBuckets[i] << "\"} " << c << "\n";
+                    os << "lights3_api_request_duration_seconds_bucket{" << l << ",le=\"" << kLatencyBuckets[i]
+                       << "\"} " << c << "\n";
                 }
                 c += st.hist[kLatencyBuckets.size()];
-                os << "lights3_api_request_duration_seconds_bucket{" << l << ",le=\"+Inf\"} " << c
-                   << "\n";
+                os << "lights3_api_request_duration_seconds_bucket{" << l << ",le=\"+Inf\"} " << c << "\n";
                 os << "lights3_api_request_duration_seconds_sum{" << l << "} " << st.sum << "\n";
-                os << "lights3_api_request_duration_seconds_count{" << l << "} " << st.count
-                   << "\n";
+                os << "lights3_api_request_duration_seconds_count{" << l << "} " << st.count << "\n";
             }
         }
     }
 
     // Static-website plane (roadmap §5.3)
     {
-        static constexpr const char* kWebsiteEvents[] = {"anon_read", "index_rewrite",
-                                                         "error_document", "redirect",
+        static constexpr const char* kWebsiteEvents[] = {"anon_read", "index_rewrite", "error_document", "redirect",
                                                          "throttled"};
-        static_assert(sizeof(kWebsiteEvents) / sizeof(kWebsiteEvents[0]) ==
-                      size_t(WebsiteEvent::Count_));
+        static_assert(sizeof(kWebsiteEvents) / sizeof(kWebsiteEvents[0]) == size_t(WebsiteEvent::Count_));
         os << "# TYPE lights3_website_events_total counter\n";
         for (size_t i = 0; i < size_t(WebsiteEvent::Count_); ++i)
             os << "lights3_website_events_total{event=\"" << kWebsiteEvents[i] << "\"} "
@@ -184,30 +174,24 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
 
     // Per-client rate limiting (roadmap §4.2)
     os << "# TYPE lights3_ratelimit_rejections_total counter\n";
-    os << "lights3_ratelimit_rejections_total{scope=\"ip\"} "
-       << rl_ip_.load(std::memory_order_relaxed) << "\n";
-    os << "lights3_ratelimit_rejections_total{scope=\"ak\"} "
-       << rl_ak_.load(std::memory_order_relaxed) << "\n";
+    os << "lights3_ratelimit_rejections_total{scope=\"ip\"} " << rl_ip_.load(std::memory_order_relaxed) << "\n";
+    os << "lights3_ratelimit_rejections_total{scope=\"ak\"} " << rl_ak_.load(std::memory_order_relaxed) << "\n";
 
     // Byte counts and per-bucket dimension (docs/archive/gaps.md §7)
     os << "# TYPE lights3_bytes_total counter\n";
-    os << "lights3_bytes_total{direction=\"in\"} "
-       << bytes_in_.load(std::memory_order_relaxed) << "\n";
-    os << "lights3_bytes_total{direction=\"out\"} "
-       << bytes_out_.load(std::memory_order_relaxed) << "\n";
+    os << "lights3_bytes_total{direction=\"in\"} " << bytes_in_.load(std::memory_order_relaxed) << "\n";
+    os << "lights3_bytes_total{direction=\"out\"} " << bytes_out_.load(std::memory_order_relaxed) << "\n";
     {
         std::lock_guard lk(bucket_m_);
         if (!by_bucket_.empty()) {
             os << "# TYPE lights3_bucket_requests_total counter\n";
             for (auto& [name, st] : by_bucket_)
-                os << "lights3_bucket_requests_total{bucket=\"" << name << "\"} " << st.requests
-                   << "\n";
+                os << "lights3_bucket_requests_total{bucket=\"" << name << "\"} " << st.requests << "\n";
             os << "# TYPE lights3_bucket_bytes_total counter\n";
             for (auto& [name, st] : by_bucket_) {
-                os << "lights3_bucket_bytes_total{bucket=\"" << name
-                   << "\",direction=\"in\"} " << st.bytes_in << "\n";
-                os << "lights3_bucket_bytes_total{bucket=\"" << name
-                   << "\",direction=\"out\"} " << st.bytes_out << "\n";
+                os << "lights3_bucket_bytes_total{bucket=\"" << name << "\",direction=\"in\"} " << st.bytes_in << "\n";
+                os << "lights3_bucket_bytes_total{bucket=\"" << name << "\",direction=\"out\"} " << st.bytes_out
+                   << "\n";
             }
         }
     }
@@ -221,13 +205,14 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "# TYPE lights3_pool_completed_total counter\n";
         os << "lights3_pool_completed_total " << st.completed << "\n";
         // Wait-duration histogram (docs/archive/gaps.md §7): docs/concurrency.md §3.1 defines "this histogram
-        // shifting right" as the sole criterion for enabling dedicated per-backend pools; it used to be collected but never emitted
+        // shifting right" as the sole criterion for enabling dedicated per-backend pools; it used to be collected but
+        // never emitted
         os << "# TYPE lights3_pool_wait_seconds histogram\n";
         uint64_t wcum = 0;
         for (size_t i = 0; i < ThreadPool::kWaitBucketBounds.size(); ++i) {
             wcum += st.wait_hist[i];
-            os << "lights3_pool_wait_seconds_bucket{le=\"" << ThreadPool::kWaitBucketBounds[i]
-               << "\"} " << wcum << "\n";
+            os << "lights3_pool_wait_seconds_bucket{le=\"" << ThreadPool::kWaitBucketBounds[i] << "\"} " << wcum
+               << "\n";
         }
         wcum += st.wait_hist[ThreadPool::kWaitBuckets - 1];
         os << "lights3_pool_wait_seconds_bucket{le=\"+Inf\"} " << wcum << "\n";
@@ -241,8 +226,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         auto st = conn();
         os << "# TYPE lights3_http_connections_total counter\n";
         os << "lights3_http_connections_total{result=\"accepted\"} " << st.accepted << "\n";
-        os << "lights3_http_connections_total{result=\"rejected_limit\"} " << st.rejected_limit
-           << "\n";
+        os << "lights3_http_connections_total{result=\"rejected_limit\"} " << st.rejected_limit << "\n";
         os << "# TYPE lights3_http_connections_active gauge\n";
         os << "lights3_http_connections_active " << st.active << "\n";
         os << "# TYPE lights3_http_keepalive_closes_total counter\n";
@@ -258,13 +242,13 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         os << "lights3_http_requests_total " << st.requests << "\n";
         os << "# TYPE lights3_http_tls_handshakes_total counter\n";
         os << "lights3_http_tls_handshakes_total{result=\"ok\"} " << st.tls_handshakes_ok << "\n";
-        os << "lights3_http_tls_handshakes_total{result=\"failed\"} " << st.tls_handshakes_failed
-           << "\n";
+        os << "lights3_http_tls_handshakes_total{result=\"failed\"} " << st.tls_handshakes_failed << "\n";
         os << "# TYPE lights3_http_parse_errors_total counter\n";
         os << "lights3_http_parse_errors_total " << st.parse_errors << "\n";
     }
 
-    // Ingress throttling queue depth (docs/archive/gaps.md §7): the inflight semaphore is the process-wide sole admission gate
+    // Ingress throttling queue depth (docs/archive/gaps.md §7): the inflight semaphore is the process-wide sole
+    // admission gate
     if (admission) {
         auto st = admission();
         os << "# TYPE lights3_admission_capacity gauge\n";
@@ -281,8 +265,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
             uint64_t acum = 0;
             for (size_t i = 0; i < 5; ++i) {
                 acum += st.wait_hist[i];
-                os << "lights3_admission_wait_seconds_bucket{le=\"" << kWaitBounds[i] << "\"} "
-                   << acum << "\n";
+                os << "lights3_admission_wait_seconds_bucket{le=\"" << kWaitBounds[i] << "\"} " << acum << "\n";
             }
             acum += st.wait_hist[5];
             os << "lights3_admission_wait_seconds_bucket{le=\"+Inf\"} " << acum << "\n";
@@ -315,8 +298,7 @@ std::string Metrics::render(const std::function<ThreadPool::Stats()>& pool_stats
         uint64_t tcum = 0;
         for (size_t i = 0; i < 4; ++i) {
             tcum += st.exec_hist[i];
-            os << "lights3_timer_callback_seconds_bucket{le=\"" << kExecBounds[i] << "\"} "
-               << tcum << "\n";
+            os << "lights3_timer_callback_seconds_bucket{le=\"" << kExecBounds[i] << "\"} " << tcum << "\n";
         }
         tcum += st.exec_hist[TimerQueue::kExecBuckets - 1];
         os << "lights3_timer_callback_seconds_bucket{le=\"+Inf\"} " << tcum << "\n";

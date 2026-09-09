@@ -56,8 +56,7 @@ public:
     // Startup: load every .sys/<prefix>* object. A missing .sys counts as empty; a
     // malformed object is skipped with a WARN — broken per-bucket config must not block
     // startup (worst case one bucket loses the feature, nothing is locked out)
-    static Task<std::shared_ptr<SysConfigStore>> load(
-        std::shared_ptr<storage::IStorageBackend> backend) {
+    static Task<std::shared_ptr<SysConfigStore>> load(std::shared_ptr<storage::IStorageBackend> backend) {
         auto store = std::shared_ptr<SysConfigStore>(new SysConfigStore());
         store->backend_ = std::move(backend);
         if (store->backend_ && co_await store->backend_->bucket_exists(kSysConfigBucket)) {
@@ -67,14 +66,12 @@ public:
                 auto page = co_await store->backend_->list_objects(kSysConfigBucket, opt);
                 for (auto& obj : page.objects) {
                     std::string bucket = decode_key(obj.key.substr(Traits::kPrefix.size()));
-                    auto stream = co_await store->backend_->get_object(kSysConfigBucket,
-                                                                       obj.key, std::nullopt);
+                    auto stream = co_await store->backend_->get_object(kSysConfigBucket, obj.key, std::nullopt);
                     auto body = co_await read_all(*stream.body);
                     if (auto e = Traits::deserialize(bucket, body))
                         store->entries_[bucket] = std::move(*e);
                     else
-                        LOG_WARN("{}: skipping malformed object {}/{}", Traits::kName,
-                                 kSysConfigBucket, obj.key);
+                        LOG_WARN("{}: skipping malformed object {}/{}", Traits::kName, kSysConfigBucket, obj.key);
                 }
                 if (!page.is_truncated) break;
                 opt.start_after = page.next_token;
@@ -82,8 +79,8 @@ public:
         }
         store->rebuild_snapshot_locked();
         if (!store->entries_.empty())
-            LOG_INFO("{}: loaded {} entries from {}/{}", Traits::kName,
-                     store->entries_.size(), kSysConfigBucket, Traits::kPrefix);
+            LOG_INFO("{}: loaded {} entries from {}/{}", Traits::kName, store->entries_.size(), kSysConfigBucket,
+                     Traits::kPrefix);
         co_return store;
     }
 
@@ -114,8 +111,7 @@ public:
         storage::ObjectMeta meta;
         meta.content_type = "application/json";
         http::StringBodyReader body(Traits::serialize(entry));
-        co_await backend_->put_object(kSysConfigBucket, object_key(bucket), std::move(meta),
-                                      body);
+        co_await backend_->put_object(kSysConfigBucket, object_key(bucket), std::move(meta), body);
         {
             std::unique_lock lk(mu_);
             tombstones_.erase(bucket);
@@ -168,18 +164,15 @@ public:
             for (auto& obj : page.objects) {
                 std::string bucket = decode_key(obj.key.substr(Traits::kPrefix.size()));
                 try {
-                    auto stream = co_await backend_->get_object(kSysConfigBucket, obj.key,
-                                                                std::nullopt);
+                    auto stream = co_await backend_->get_object(kSysConfigBucket, obj.key, std::nullopt);
                     auto body = co_await read_all(*stream.body);
                     if (auto e = Traits::deserialize(bucket, body))
                         on_storage.emplace(bucket, std::move(*e));
                     else
-                        LOG_WARN("{} sync: skipping malformed object {}/{}", Traits::kName,
-                                 kSysConfigBucket, obj.key);
+                        LOG_WARN("{} sync: skipping malformed object {}/{}", Traits::kName, kSysConfigBucket, obj.key);
                 } catch (const std::exception& e) {
                     // A single failed fetch does not abort the sync; the entry keeps its old value
-                    LOG_WARN("{} sync: failed to load {}: {}", Traits::kName, obj.key,
-                             e.what());
+                    LOG_WARN("{} sync: failed to load {}: {}", Traits::kName, obj.key, e.what());
                 }
             }
             if (!page.is_truncated) break;
@@ -190,8 +183,7 @@ public:
         {
             std::unique_lock lk(mu_);
             auto now = std::chrono::steady_clock::now();
-            std::erase_if(tombstones_,
-                          [&](auto& kv) { return now - kv.second > kTombstoneTtl; });
+            std::erase_if(tombstones_, [&](auto& kv) { return now - kv.second > kTombstoneTtl; });
             for (auto& [b, e] : on_storage) {
                 if (tombstones_.contains(b)) continue;  // just removed locally, don't resurrect
                 auto it = entries_.find(b);
@@ -207,8 +199,7 @@ public:
                 if (!on_storage.contains(b) && entries_.erase(b)) ++removed;
             if (added || removed) rebuild_snapshot_locked();
         }
-        if (added || removed)
-            LOG_INFO("{} sync: {} added/updated, {} removed", Traits::kName, added, removed);
+        if (added || removed) LOG_INFO("{} sync: {} added/updated, {} removed", Traits::kName, added, removed);
     }
 
     void start_background(std::shared_ptr<ThreadPool> pool, int sync_interval_sec) {
@@ -235,15 +226,16 @@ private:
             return std::string(Traits::kPrefix) + bucket;
     }
     static std::string decode_key(const std::string& suffix) {
-        if constexpr (requires { Traits::decode_key(suffix); }) return Traits::decode_key(suffix);
-        else return suffix;
+        if constexpr (requires { Traits::decode_key(suffix); })
+            return Traits::decode_key(suffix);
+        else
+            return suffix;
     }
 
     void require_backend() const {
         if (!backend_)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          std::string("Dynamic ") + Traits::kName +
-                              " configuration is not available on this deployment.");
+            throw S3Error(S3ErrorCode::InvalidRequest, std::string("Dynamic ") + Traits::kName +
+                                                           " configuration is not available on this deployment.");
     }
 
     static Task<std::string> read_all(http::BodyReader& body, size_t max_size = 256 * 1024) {
@@ -252,8 +244,7 @@ private:
         for (;;) {
             size_t n = co_await body.read(std::span(buf));
             if (n == 0) break;
-            if (out.size() + n > max_size)
-                throw std::runtime_error(std::string(Traits::kName) + " object too large");
+            if (out.size() + n > max_size) throw std::runtime_error(std::string(Traits::kName) + " object too large");
             out.append(reinterpret_cast<const char*>(buf), n);
         }
         co_return out;

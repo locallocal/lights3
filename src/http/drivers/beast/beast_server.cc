@@ -30,8 +30,8 @@
 #include "core/task.h"
 #include "core/util/time.h"
 #include "http/drivers/common.h"
-#include "http/tls.h"
 #include "http/server.h"
+#include "http/tls.h"
 
 namespace lights3::http {
 
@@ -104,12 +104,11 @@ struct AcceptAwaiter {
             h.resume();
         });
     }
-    std::pair<beast::error_code, tcp::socket> await_resume() {
-        return {ec, std::move(*sock)};
-    }
+    std::pair<beast::error_code, tcp::socket> await_resume() { return {ec, std::move(*sock)}; }
 };
 
-// Fire-and-forget launch of a Task<void>: the driver's entry point for running the handler coroutine to completion in its own execution environment
+// Fire-and-forget launch of a Task<void>: the driver's entry point for running the handler coroutine to completion in
+// its own execution environment
 struct Detached {
     struct promise_type {
         Detached get_return_object() { return {}; }
@@ -170,13 +169,12 @@ public:
     Task<size_t> read(std::span<std::byte> buf) override {
         co_await ResumeOn{ctx_->stream->get_executor()};
         if (ctx_->errored) throw std::runtime_error("http body: read after connection error");
-        // Deferred 100-continue: the client is told to send only once the handler decides it wants the body (docs/http-adapter.md §3.1)
+        // Deferred 100-continue: the client is told to send only once the handler decides it wants the body
+        // (docs/http-adapter.md §3.1)
         if (ctx_->need_100) {
             ctx_->need_100 = false;
             bhttp::response<bhttp::empty_body> cont{bhttp::status::continue_, 11};
-            auto [ec, n] = co_await io_op([&](auto cb) {
-                bhttp::async_write(*ctx_->stream, cont, std::move(cb));
-            });
+            auto [ec, n] = co_await io_op([&](auto cb) { bhttp::async_write(*ctx_->stream, cont, std::move(cb)); });
             (void)n;
             if (ec) fail(ec, "failed to send 100 Continue");
         }
@@ -185,15 +183,12 @@ public:
         auto& body = ctx_->parser->get().body();
         body.data = buf.data();
         body.size = buf.size();
-        beast::get_lowest_layer(*ctx_->stream)
-            .expires_after(std::chrono::seconds(ctx_->idle_timeout_sec));
-        auto [ec, n] = co_await io_op([&](auto cb) {
-            bhttp::async_read(*ctx_->stream, *ctx_->buffer, *ctx_->parser, std::move(cb));
-        });
+        beast::get_lowest_layer(*ctx_->stream).expires_after(std::chrono::seconds(ctx_->idle_timeout_sec));
+        auto [ec, n] = co_await io_op(
+            [&](auto cb) { bhttp::async_read(*ctx_->stream, *ctx_->buffer, *ctx_->parser, std::move(cb)); });
         (void)n;
         beast::get_lowest_layer(*ctx_->stream).expires_never();
-        if (ec == beast::error::timeout && ctx_->counters)
-            driver::count_timeout(*ctx_->counters, driver::Phase::Body);
+        if (ec == beast::error::timeout && ctx_->counters) driver::count_timeout(*ctx_->counters, driver::Phase::Body);
         if (ec == bhttp::error::need_buffer) ec = {};
         if (ec) fail(ec, "client disconnected mid-body");
         size_t got = buf.size() - body.size;
@@ -229,8 +224,7 @@ public:
                 tls_ctx_.emplace(asio::ssl::context::tls_server);
                 tls_holder_->configure(tls_ctx_->native_handle());
             } catch (const std::exception& e) {
-                throw std::runtime_error(std::string("beast driver: failed to set up TLS: ") +
-                                         e.what());
+                throw std::runtime_error(std::string("beast driver: failed to set up TLS: ") + e.what());
             }
         }
     }
@@ -261,10 +255,9 @@ public:
         event_fd_ = ::eventfd(0, EFD_CLOEXEC);
         if (event_fd_ < 0) throw std::runtime_error("eventfd() failed");
         stop_event_.emplace(ctl_strand_, event_fd_);
-        stop_event_->async_read_some(asio::buffer(&stop_buf_, sizeof(stop_buf_)),
-                                     [this](beast::error_code e, size_t) {
-                                         if (!e) on_stop_signal();
-                                     });
+        stop_event_->async_read_some(asio::buffer(&stop_buf_, sizeof(stop_buf_)), [this](beast::error_code e, size_t) {
+            if (!e) on_stop_signal();
+        });
 
         work_.emplace(asio::make_work_guard(ioc_));
         spawn_detached(accept_loop(), [] {});
@@ -313,12 +306,12 @@ private:
             auto [ec, sock] = co_await AcceptAwaiter{*acceptor_, ioc_, {}, {}};
             if (ec) {
                 if (stopping_.load() || ec == asio::error::operation_aborted) break;
-                // Retrying transient errors (fd exhaustion like EMFILE) immediately would busy-spin; back off, then continue
+                // Retrying transient errors (fd exhaustion like EMFILE) immediately would busy-spin; back off, then
+                // continue
                 LOG_WARN("accept failed: {}, throttling", ec.message());
                 asio::steady_timer backoff(ctl_strand_, std::chrono::milliseconds(100));
                 co_await io_op([&](auto cb) {
-                    backoff.async_wait(
-                        [cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
+                    backoff.async_wait([cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
                 });
                 continue;
             }
@@ -326,7 +319,8 @@ private:
             {
                 std::lock_guard lk(m_);
                 if (stopping_.load()) break;
-                // Concurrent-connection cap (uniform across the four drivers): without one, per-connection coroutine frames/buffers can exhaust memory
+                // Concurrent-connection cap (uniform across the four drivers): without one, per-connection coroutine
+                // frames/buffers can exhaust memory
                 if (sessions_.size() >= static_cast<size_t>(cfg_.max_connections)) {
                     LOG_WARN("connection limit ({}) reached, rejecting", cfg_.max_connections);
                     counters_.rejected_limit.fetch_add(1, std::memory_order_relaxed);
@@ -352,24 +346,23 @@ private:
             sess->stream.expires_after(idle);
             auto [hec, hn] = co_await io_op([&](auto cb) {
                 tls.async_handshake(asio::ssl::stream_base::server,
-                                    [cb = std::move(cb)](beast::error_code e) mutable {
-                                        cb(e, size_t{0});
-                                    });
+                                    [cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
             });
             (void)hn;
             sess->stream.expires_never();
             counters_.tls_handshake(!hec);
             if (hec) {
-                // Plaintext client hitting the TLS port / probe traffic: one warning line suffices; skip the request loop
+                // Plaintext client hitting the TLS port / probe traffic: one warning line suffices; skip the request
+                // loop
                 LOG_WARN("TLS handshake failed from client: {}", hec.message());
             } else {
                 // Verified client certificate (backlog-sequence ⑥): once per connection
                 co_await session_loop(sess, tls, tls::peer_identity(tls.native_handle()));
-                // Best-effort close_notify (with a timeout backstop); failure is fine, TCP gets closed right after anyway
+                // Best-effort close_notify (with a timeout backstop); failure is fine, TCP gets closed right after
+                // anyway
                 sess->stream.expires_after(idle);
                 co_await io_op([&](auto cb) {
-                    tls.async_shutdown(
-                        [cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
+                    tls.async_shutdown([cb = std::move(cb)](beast::error_code e) mutable { cb(e, size_t{0}); });
                 });
                 sess->stream.expires_never();
             }
@@ -381,8 +374,7 @@ private:
     }
 
     template <class Stream>
-    Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream,
-                            std::optional<TlsIdentity> tls_identity) {
+    Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream, std::optional<TlsIdentity> tls_identity) {
         beast::flat_buffer buffer;  // Kept across keep-alive requests (the parser may over-read)
         // Socket reads are sized by beast::read_size = max(512, capacity - size):
         // an unreserved flat_buffer grows to 512 bytes on the first read and then
@@ -406,17 +398,15 @@ private:
             // are bounded by header_timeout, a reused one's wait by idle_timeout (one
             // read op covers both, so the two cannot be told apart finer than this)
             bool fresh = served == 0;
-            beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(
-                fresh ? cfg_.header_timeout_sec : cfg_.idle_timeout_sec));
+            beast::get_lowest_layer(stream).expires_after(
+                std::chrono::seconds(fresh ? cfg_.header_timeout_sec : cfg_.idle_timeout_sec));
             {
-                auto [ec, n] = co_await io_op([&](auto cb) {
-                    bhttp::async_read_header(stream, buffer, parser, std::move(cb));
-                });
+                auto [ec, n] = co_await io_op(
+                    [&](auto cb) { bhttp::async_read_header(stream, buffer, parser, std::move(cb)); });
                 (void)n;
                 beast::get_lowest_layer(stream).expires_never();
                 if (ec == beast::error::timeout)
-                    driver::count_timeout(counters_,
-                                          fresh ? driver::Phase::Header : driver::Phase::Idle);
+                    driver::count_timeout(counters_, fresh ? driver::Phase::Header : driver::Phase::Idle);
                 // A parser verdict (bad request line / header, header_limit) is a
                 // malformed request (roadmap §5.3); a peer that closed mid-message
                 // (end_of_stream / partial_message) or a transport error is not
@@ -430,10 +420,8 @@ private:
             auto& preq = parser.get();
             HttpRequest req;
             req.method = std::string(preq.method_string().data(), preq.method_string().size());
-            driver::parse_target(
-                std::string_view(preq.target().data(), preq.target().size()), req);
-            for (auto& f : preq.base())
-                req.headers.add(std::string(f.name_string()), std::string(f.value()));
+            driver::parse_target(std::string_view(preq.target().data(), preq.target().size()), req);
+            for (auto& f : preq.base()) req.headers.add(std::string(f.name_string()), std::string(f.value()));
             {
                 beast::error_code epc;
                 auto ep = beast::get_lowest_layer(stream).socket().remote_endpoint(epc);
@@ -455,8 +443,7 @@ private:
             counters_.request_parsed();
 
             BodyCtx<Stream> bctx{&parser, &stream, &buffer, cfg_.body_timeout_sec, &counters_};
-            if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
-                bctx.need_100 = true;
+            if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue")) bctx.need_100 = true;
             std::optional<uint64_t> content_length;
             if (auto l = parser.content_length()) content_length = *l;
             if (!parser.is_done() || content_length)
@@ -479,12 +466,13 @@ private:
             // connection; if 100-continue was never sent, the client may
             // never send a body — do not wait blindly, just close
             if (!parser.is_done()) {
-                if (bctx.need_100 || bctx.errored) keep = false;
-                else if (keep) keep = co_await drain_body(bctx);
+                if (bctx.need_100 || bctx.errored)
+                    keep = false;
+                else if (keep)
+                    keep = co_await drain_body(bctx);
             }
 
-            if (keep && driver::keepalive_budget_exhausted(served + 1,
-                                                           cfg_.max_requests_per_connection)) {
+            if (keep && driver::keepalive_budget_exhausted(served + 1, cfg_.max_requests_per_connection)) {
                 keep = false;
                 counters_.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
             }
@@ -503,11 +491,9 @@ private:
             auto& body = ctx.parser->get().body();
             body.data = tmp.data();
             body.size = tmp.size();
-            beast::get_lowest_layer(*ctx.stream)
-                .expires_after(std::chrono::seconds(ctx.idle_timeout_sec));
-            auto [ec, n] = co_await io_op([&](auto cb) {
-                bhttp::async_read(*ctx.stream, *ctx.buffer, *ctx.parser, std::move(cb));
-            });
+            beast::get_lowest_layer(*ctx.stream).expires_after(std::chrono::seconds(ctx.idle_timeout_sec));
+            auto [ec, n] = co_await io_op(
+                [&](auto cb) { bhttp::async_read(*ctx.stream, *ctx.buffer, *ctx.parser, std::move(cb)); });
             (void)n;
             beast::get_lowest_layer(*ctx.stream).expires_never();
             if (ec == bhttp::error::need_buffer) ec = {};
@@ -519,13 +505,11 @@ private:
     }
 
     template <class Stream>
-    Task<bool> write_response(Stream& stream, HttpResponse& resp, bool head_request,
-                              bool keep) {
+    Task<bool> write_response(Stream& stream, HttpResponse& resp, bool head_request, bool keep) {
         bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
         auto idle = std::chrono::seconds(cfg_.write_timeout_sec);  // write_timeout per write op
         auto note_write = [&](const beast::error_code& ec) {
-            if (ec == beast::error::timeout)
-                driver::count_timeout(counters_, driver::Phase::Write);
+            if (ec == beast::error::timeout) driver::count_timeout(counters_, driver::Phase::Write);
         };
 
         // Small response / HEAD / bodyless status code: write the whole message at once
@@ -540,9 +524,7 @@ private:
             // come from upstream S3 / duostore metadata storage, outside L1
             // inbound filtering); an over-long header would also throw and
             // prevent any response from being sent at all
-            driver::emit_headers(resp.headers, [&](const std::string& k, const std::string& v) {
-                res.insert(k, v);
-            });
+            driver::emit_headers(resp.headers, [&](const std::string& k, const std::string& v) { res.insert(k, v); });
             if (!resp.headers.has("Date"))
                 res.set(bhttp::field::date, util::http_date(std::chrono::system_clock::now()));
             // HEAD with unknown length (streaming without content_length):
@@ -554,17 +536,14 @@ private:
             if (head_unknown_len) keep = false;
             res.keep_alive(keep);
             if (!no_body_status && !head_unknown_len) {
-                uint64_t len = resp.content_length.value_or(
-                    resp.stream_body && resp.stream_body->length()
-                        ? *resp.stream_body->length()
-                        : resp.small_body.size());
+                uint64_t len = resp.content_length.value_or(resp.stream_body && resp.stream_body->length()
+                                                                ? *resp.stream_body->length()
+                                                                : resp.small_body.size());
                 res.set(bhttp::field::content_length, std::to_string(len));
                 if (!head_request) res.body() = std::move(resp.small_body);
             }
             beast::get_lowest_layer(stream).expires_after(idle);
-            auto [ec, n] = co_await io_op([&](auto cb) {
-                bhttp::async_write(stream, res, std::move(cb));
-            });
+            auto [ec, n] = co_await io_op([&](auto cb) { bhttp::async_write(stream, res, std::move(cb)); });
             (void)n;
             beast::get_lowest_layer(stream).expires_never();
             note_write(ec);
@@ -575,11 +554,8 @@ private:
         bhttp::response<bhttp::buffer_body> res;
         res.result(static_cast<unsigned>(resp.status));
         res.version(11);
-        driver::emit_headers(resp.headers, [&](const std::string& k, const std::string& v) {
-            res.insert(k, v);
-        });
-        if (!resp.headers.has("Date"))
-            res.set(bhttp::field::date, util::http_date(std::chrono::system_clock::now()));
+        driver::emit_headers(resp.headers, [&](const std::string& k, const std::string& v) { res.insert(k, v); });
+        if (!resp.headers.has("Date")) res.set(bhttp::field::date, util::http_date(std::chrono::system_clock::now()));
         res.keep_alive(keep);
         if (resp.content_length)
             res.content_length(*resp.content_length);
@@ -591,9 +567,7 @@ private:
         bhttp::response_serializer<bhttp::buffer_body> sr{res};
         beast::get_lowest_layer(stream).expires_after(idle);
         {
-            auto [ec, n] = co_await io_op([&](auto cb) {
-                bhttp::async_write_header(stream, sr, std::move(cb));
-            });
+            auto [ec, n] = co_await io_op([&](auto cb) { bhttp::async_write_header(stream, sr, std::move(cb)); });
             (void)n;
             beast::get_lowest_layer(stream).expires_never();
             note_write(ec);
@@ -619,13 +593,12 @@ private:
             // writing too little must not stay keep-alive — the client would
             // read the next response's status line as the rest of this body
             if (resp.content_length && written + n > *resp.content_length) {
-                LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})",
-                          written, n, *resp.content_length);
+                LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})", written, n,
+                          *resp.content_length);
                 co_return false;
             }
             if (n == 0 && resp.content_length && written != *resp.content_length) {
-                LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
-                          *resp.content_length);
+                LOG_ERROR("stream body short of declared Content-Length ({} != {})", written, *resp.content_length);
                 co_return false;
             }
             written += n;
@@ -638,9 +611,7 @@ private:
                 res.body().more = true;
             }
             beast::get_lowest_layer(stream).expires_after(idle);
-            auto [ec, wrote] = co_await io_op([&](auto cb) {
-                bhttp::async_write(stream, sr, std::move(cb));
-            });
+            auto [ec, wrote] = co_await io_op([&](auto cb) { bhttp::async_write(stream, sr, std::move(cb)); });
             (void)wrote;
             beast::get_lowest_layer(stream).expires_never();
             if (ec == bhttp::error::need_buffer) ec = {};
@@ -754,9 +725,8 @@ private:
 }  // namespace
 
 void register_beast_driver() {
-    HttpServerFactory::register_driver("beast", [](const HttpConfig& cfg) {
-        return std::make_unique<BeastServer>(cfg);
-    });
+    HttpServerFactory::register_driver("beast",
+                                       [](const HttpConfig& cfg) { return std::make_unique<BeastServer>(cfg); });
 }
 
 }  // namespace lights3::http

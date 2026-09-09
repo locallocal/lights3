@@ -35,8 +35,8 @@ int print_doc(const httplib::Result& r) {
 
 }  // namespace
 
-int run_job(SignedClient& cli, const std::string& path, const std::string& label, uint64_t mbps,
-            bool wait, bool status_only) {
+int run_job(SignedClient& cli, const std::string& path, const std::string& label, uint64_t mbps, bool wait,
+            bool status_only) {
     if (status_only) {
         auto r = cli.get(path, "");
         if (!r || r->status != 200) return finish(r, 200);
@@ -75,21 +75,19 @@ int print_ledger(SignedClient& cli, const std::string& path) {
 namespace {
 
 // One round leaf: `lights3-ctl <group> <op> <backend> [--no-wait | --status]`
-std::shared_ptr<ccmd::c_command> make_round(const std::string& group, const std::string& op,
-                                            const std::string& what, const std::string& findings) {
+std::shared_ptr<ccmd::c_command> make_round(const std::string& group, const std::string& op, const std::string& what,
+                                            const std::string& findings) {
     std::string label = group + " " + op;
     auto cmd = std::make_shared<ccmd::c_command>(
-        op, "lights3-ctl " + label + " " + group + "data",
-        "lights3-ctl " + label + " <backend> [--no-wait | --status]",
-        "Run one " + what + " on the running gateway (POST /-/admin/" + group + "/<backend>/" +
-            op + ", root credential), wait for it and print the outcome document " +
+        op, "lights3-ctl " + label + " " + group + "data", "lights3-ctl " + label + " <backend> [--no-wait | --status]",
+        "Run one " + what + " on the running gateway (POST /-/admin/" + group + "/<backend>/" + op +
+            ", root credential), wait for it and print the outcome document " +
             "(\"stats\" mirrors the round's statistics struct). Exit code 1 when the job " +
             "failed, was aborted by a gateway shutdown, or " + findings +
             ". --no-wait returns the job id at once; --status prints the running/last " +
             "outcome instead of starting anything. One job per backend at a time, whatever " +
             "the operation (409 JobInProgress).",
-        "run one " + what + ".",
-        [group, op, label](const std::shared_ptr<ccmd::c_command>& c) {
+        "run one " + what + ".", [group, op, label](const std::shared_ptr<ccmd::c_command>& c) {
             bool status = c->var<bool>("status");
             bool wait = !c->var<bool>("no-wait");
             if (c->args().size() != 1 || (status && !wait)) {
@@ -98,9 +96,7 @@ std::shared_ptr<ccmd::c_command> make_round(const std::string& group, const std:
                 return;
             }
             std::string path = "/-/admin/" + group + "/" + c->args().front() + "/" + op;
-            run_admin(c, [&](SignedClient& cli) {
-                return run_job(cli, path, label, 0, wait, status);
-            });
+            run_admin(c, [&](SignedClient& cli) { return run_job(cli, path, label, 0, wait, status); });
         });
     cmd->var<bool>("no-wait", false, "return right after starting the job (prints the job id).");
     cmd->var<bool>("status", false, "print the running/last outcome instead of starting a job.");
@@ -114,12 +110,10 @@ std::shared_ptr<ccmd::c_command> make_quarantine(const std::string& group, const
     auto list = std::make_shared<ccmd::c_command>(
         "list", "lights3-ctl " + group + " quarantine list " + group + "data",
         "lights3-ctl " + group + " quarantine list <backend>",
-        "Print the " + what + " of a backend on the running gateway as JSON (GET /-/admin/" +
-            group + "/<backend>/quarantine, root credential): {\"backend\",\"kind\"," +
-            "\"entries\":[{" + fields + "}]}. Read-only; acting on an entry stays with the " +
-            "offline `lights3 " + group + " quarantine` verbs.",
-        "print the " + what + ".",
-        [group](const std::shared_ptr<ccmd::c_command>& c) {
+        "Print the " + what + " of a backend on the running gateway as JSON (GET /-/admin/" + group +
+            "/<backend>/quarantine, root credential): {\"backend\",\"kind\"," + "\"entries\":[{" + fields +
+            "}]}. Read-only; acting on an entry stays with the " + "offline `lights3 " + group + " quarantine` verbs.",
+        "print the " + what + ".", [group](const std::shared_ptr<ccmd::c_command>& c) {
             if (c->args().size() != 1) {
                 fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
@@ -132,8 +126,7 @@ std::shared_ptr<ccmd::c_command> make_quarantine(const std::string& group, const
     auto cmd = std::make_shared<ccmd::c_command>(
         "quarantine", "lights3-ctl " + group + " quarantine list " + group + "data",
         "lights3-ctl " + group + " quarantine list <backend>", "The " + what + " (read-only).",
-        "inspect the " + what + ".",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "inspect the " + what + ".", [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;
         });
@@ -161,12 +154,11 @@ std::shared_ptr<ccmd::c_command> make_duostore() {
                                    "duostore GC round (mpu_ttl expiry, gcq consumption, "
                                    "pack sealing / compaction, empty-pack removal)",
                                    "records_corrupt + packs_quarantined > 0"));
-    cmd->add_subcommand(make_round("duostore", "scan",
-                                   "duostore orphan scan (disk vs refs / packstat, both ways)",
+    cmd->add_subcommand(make_round("duostore", "scan", "duostore orphan scan (disk vs refs / packstat, both ways)",
                                    "refs_missing + pack_stats_missing > 0"));
-    cmd->add_subcommand(make_quarantine(
-        "duostore", "corrupt-pack quarantine ledger",
-        "\"pack_id\",\"live_recs\",\"corrupt_records\",\"quarantined_at_ms\",\"purged\""));
+    cmd->add_subcommand(
+        make_quarantine("duostore", "corrupt-pack quarantine ledger",
+                        "\"pack_id\",\"live_recs\",\"corrupt_records\",\"quarantined_at_ms\",\"purged\""));
     return cmd;
 }
 
@@ -194,9 +186,9 @@ std::shared_ptr<ccmd::c_command> make_tier() {
                                    "local/cloud reconciliation round (stubs rebuilt, cloud "
                                    "orphans, refs_missing findings into the quarantine ledger)",
                                    "refs_missing > 0"));
-    cmd->add_subcommand(make_quarantine(
-        "tier", "reconciliation quarantine ledger",
-        "\"kind\",\"bucket\",\"key\",\"etag\",\"first_seen_ms\",\"last_seen_ms\",\"count\""));
+    cmd->add_subcommand(
+        make_quarantine("tier", "reconciliation quarantine ledger",
+                        "\"kind\",\"bucket\",\"key\",\"etag\",\"first_seen_ms\",\"last_seen_ms\",\"count\""));
     return cmd;
 }
 

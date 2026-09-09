@@ -19,8 +19,7 @@ namespace {
 }  // namespace
 
 int64_t backup_now_ms() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::system_clock::now().time_since_epoch())
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
 
@@ -45,8 +44,7 @@ BackupManifest BackupManifest::load(const std::filesystem::path& dir) {
     } catch (const json::exception& e) {
         bad(std::string("malformed ") + kBackupManifest + ": " + e.what());
     }
-    if (!j.is_object() || !j.contains("engine") || !j.contains("entries") ||
-        !j["entries"].is_array())
+    if (!j.is_object() || !j.contains("engine") || !j.contains("entries") || !j["entries"].is_array())
         bad(std::string("malformed ") + kBackupManifest + ": missing engine/entries");
     m.engine = j.value("engine", "");
     m.backend = j.value("backend", "");
@@ -105,8 +103,7 @@ std::vector<MetaBackupEntry> BackupManifest::plan(std::optional<uint64_t> to_id,
     if (to_id && to_ts_ms) invalid("give either --to-id or --to-ts, not both");
     std::vector<MetaBackupEntry> out;
     if (to_id) {
-        if (*to_id < 1 || *to_id > entries.back().id)
-            invalid("no backup entry with id " + std::to_string(*to_id));
+        if (*to_id < 1 || *to_id > entries.back().id) invalid("no backup entry with id " + std::to_string(*to_id));
         for (auto& e : entries)
             if (e.id <= *to_id) out.push_back(e);
     } else if (to_ts_ms) {

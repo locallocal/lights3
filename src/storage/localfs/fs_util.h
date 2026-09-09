@@ -1,6 +1,7 @@
 // L3: on-disk primitives shared by the localfs family of backends (tmp files, TSV
 // sidecar/manifest, atomic commit).
-// localfs and xlocalfs share the same disk layout (docs/storage/storage-backend.md §3.1/§3.2); they differ only in data-plane IO style.
+// localfs and xlocalfs share the same disk layout (docs/storage/storage-backend.md §3.1/§3.2); they differ only in
+// data-plane IO style.
 #pragma once
 
 #include <sys/stat.h>
@@ -116,8 +117,7 @@ struct CommitOptions {
 // with a successful xattr): the caller must schedule write_object_sidecar off the request
 // path. Every other mode returns false with the on-disk state complete
 bool commit_object_file(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                        const std::filesystem::path& staging_put, std::string_view key,
-                        const CommitOptions& opt = {});
+                        const std::filesystem::path& staging_put, std::string_view key, const CommitOptions& opt = {});
 
 // The two synchronous halves of commit_object_file, exposed separately so xlocalfs can run
 // the data rename and the directory fsync in between through io_uring (RENAMEAT + FSYNC
@@ -132,15 +132,13 @@ void write_object_sidecar(const std::filesystem::path& dest, const ObjectMeta& m
 // nothing; async+xattr_ok → write nothing and return true (caller defers); any mode with
 // xattr_ok=false → write now (the sidecar is the only source). Returns "deferred"
 bool finish_object_sidecar(const std::filesystem::path& dest, const ObjectMeta& meta,
-                           const std::filesystem::path& staging_put, SidecarMode mode,
-                           bool xattr_ok);
+                           const std::filesystem::path& staging_put, SidecarMode mode, bool xattr_ok);
 
 // Commit-point check for conditional PUT (PutCondition contract, storage/backend.h): the
 // caller must hold the commit lock for the same key so the check and the following rename
 // commit are atomic. Metadata is read via xattr/sidecar and is equally authoritative for
 // tier stubs (a stub keeps the original etag); tiered reuses this check directly
-void check_put_condition(const std::filesystem::path& data_path, const PutCondition& cond,
-                         std::string_view key);
+void check_put_condition(const std::filesystem::path& data_path, const PutCondition& cond, std::string_view key);
 
 // ---- Sidecar extensions for tiered storage (docs/storage/tiered-design.md §4) ----
 
@@ -157,15 +155,14 @@ struct TierInfo {
 // fdatasync for io_uring's FSYNC SQE). Returns false when the write failed and the object
 // will rely on its sidecar (accounted on policy when given; throws InternalError instead
 // under policy->required)
-bool set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta,
-                    const TierInfo& tier, MetaXattrPolicy* policy = nullptr);
+bool set_meta_xattr(const std::filesystem::path& path, const ObjectMeta& meta, const TierInfo& tier,
+                    MetaXattrPolicy* policy = nullptr);
 
 // stat the data file + read metadata (xattr first, fall back to sidecar); when
 // tier != local the size comes from the metadata (a stub data file has zero length,
 // docs/storage/tiered-design.md §4.1).
 // Missing / not a regular file throws NoSuchKey.
-ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key,
-                            TierInfo* tier_out = nullptr);
+ObjectMeta load_object_meta(const std::filesystem::path& data_path, std::string key, TierInfo* tier_out = nullptr);
 // Whether the data file carries the metadata xattr (operator introspection, roadmap §6.2)
 bool has_meta_xattr(const std::filesystem::path& data_path);
 
@@ -173,8 +170,8 @@ bool has_meta_xattr(const std::filesystem::path& data_path);
 // on the already-open fd**: a second stat on the path after a concurrent overwrite would
 // pick up the new object's size/etag while paired with the old inode's body (size grew →
 // pread hits early EOF, short body; shrank → body truncated), silent corruption
-ObjectMeta load_object_meta_stat(const std::filesystem::path& data_path, std::string key,
-                                 const struct stat& st, TierInfo* tier_out = nullptr);
+ObjectMeta load_object_meta_stat(const std::filesystem::path& data_path, std::string key, const struct stat& st,
+                                 TierInfo* tier_out = nullptr);
 
 // The object got stubbed between GET's open(data) and reading the sidecar: the held fd is
 // a 0-length new inode while the sidecar claims size>0. TieredBackend catches this and
@@ -193,9 +190,8 @@ struct StubRace : s3::S3Error {
 // Under SidecarMode::kLazy the sidecar is rewritten only if one exists or the xattr
 // failed (a rare operator path: async deferral is not worth its complexity here).
 // Caller holds the per-key commit lock
-void rewrite_object_meta(const std::filesystem::path& data_path, const ObjectMeta& meta,
-                         const TierInfo& tier, const std::filesystem::path& staging_put,
-                         SidecarMode mode = SidecarMode::kSync,
+void rewrite_object_meta(const std::filesystem::path& data_path, const ObjectMeta& meta, const TierInfo& tier,
+                         const std::filesystem::path& staging_put, SidecarMode mode = SidecarMode::kSync,
                          MetaXattrPolicy* policy = nullptr);
 
 void commit_stub(const std::filesystem::path& dest, const ObjectMeta& meta, const TierInfo& tier,
@@ -205,8 +201,8 @@ void commit_stub(const std::filesystem::path& dest, const ObjectMeta& meta, cons
 // write the tier=cached sidecar
 // (on a crash in between, the sidecar still says remote and reads keep going to the cloud unaffected).
 // dest must previously be a stub (parent directory already exists), so no directory-conflict check.
-void commit_cached(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                   const TierInfo& tier, const std::filesystem::path& staging_put);
+void commit_cached(const std::filesystem::path& dest, TmpFile& tmp, const ObjectMeta& meta, const TierInfo& tier,
+                   const std::filesystem::path& staging_put);
 
 // pread streaming reader; each chunk runs on the thread pool (blocking IO stays off the
 // HTTP execution environment).
@@ -215,16 +211,13 @@ void commit_cached(const std::filesystem::path& dest, TmpFile& tmp, const Object
 class FdStreamReader final : public http::BodyReader {
 public:
     FdStreamReader(int fd, uint64_t offset, uint64_t remaining, std::shared_ptr<ThreadPool> pool)
-        : fd_(fd), offset_(offset), remaining_(remaining), total_(remaining),
-          pool_(std::move(pool)) {}
+        : fd_(fd), offset_(offset), remaining_(remaining), total_(remaining), pool_(std::move(pool)) {}
     ~FdStreamReader() override;
 
     Task<size_t> read(std::span<std::byte> buf) override;
     std::optional<uint64_t> length() const override { return total_; }
     // sendfile exit (roadmap §4.3 ④): the remaining range, as-is
-    std::optional<http::FileSpan> try_as_file() override {
-        return http::FileSpan{fd_, offset_, remaining_};
-    }
+    std::optional<http::FileSpan> try_as_file() override { return http::FileSpan{fd_, offset_, remaining_}; }
     void file_bytes_sent(uint64_t n) override {
         n = std::min(n, remaining_);
         offset_ += n;
@@ -249,13 +242,13 @@ struct UploadState {
 };
 
 // upload_id validity + manifest existence + bucket/key match; any failure counts as NoSuchUpload
-UploadState require_upload(const std::filesystem::path& staging, std::string_view bucket,
-                           std::string_view key, std::string_view upload_id,
+UploadState require_upload(const std::filesystem::path& staging, std::string_view bucket, std::string_view key,
+                           std::string_view upload_id,
                            const std::vector<std::pair<std::string, std::string>>& manifest);
 
 // Check the id's format and existence before reading the manifest (the id is spliced into
 // a path, so format validation doubles as escape prevention)
-std::vector<std::pair<std::string, std::string>> load_manifest(
-    const std::filesystem::path& staging, std::string_view upload_id);
+std::vector<std::pair<std::string, std::string>> load_manifest(const std::filesystem::path& staging,
+                                                               std::string_view upload_id);
 
 }  // namespace lights3::storage::fsutil

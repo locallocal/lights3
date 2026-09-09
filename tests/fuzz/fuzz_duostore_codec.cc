@@ -17,12 +17,24 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     std::string_view v(reinterpret_cast<const char*>(data + 1), size - 1);
     try {
         switch (data[0] % 7) {
-            case 0: (void)decode_object("bkt\0key", v); break;
-            case 1: (void)decode_object_meta("bkt\0key", v); break;
-            case 2: (void)decode_upload("bkt\0key", "upl", v); break;
-            case 3: (void)decode_part(1, v); break;
-            case 4: (void)decode_reclaim(v); break;
-            case 5: (void)decode_extents(v); break;
+            case 0:
+                (void)decode_object("bkt\0key", v);
+                break;
+            case 1:
+                (void)decode_object_meta("bkt\0key", v);
+                break;
+            case 2:
+                (void)decode_upload("bkt\0key", "upl", v);
+                break;
+            case 3:
+                (void)decode_part(1, v);
+                break;
+            case 4:
+                (void)decode_reclaim(v);
+                break;
+            case 5:
+                (void)decode_extents(v);
+                break;
             default:
                 (void)decode_counter(v);
                 (void)decode_bucket(v);

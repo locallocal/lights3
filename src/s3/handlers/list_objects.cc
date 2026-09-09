@@ -19,14 +19,11 @@ namespace {
 // but V2 passed through in plaintext, inconsistent across versions and exposing the internal key order as API.
 // A base64 layer aligns with the AWS shape
 std::string token_encode(const std::string& in) { return util::base64_encode(in); }
-std::optional<std::string> token_decode(const std::string& in) {
-    return util::base64_decode(in);
-}
+std::optional<std::string> token_decode(const std::string& in) { return util::base64_decode(in); }
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::string bucket,
-                                                 const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::string bucket, const RequestAuth& auth) {
     storage::ListOptions opt;
     opt.prefix = req.query_get("prefix").value_or("");
     opt.delimiter = req.query_get("delimiter").value_or("");
@@ -36,8 +33,7 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
         } catch (...) {
             throw S3Error(S3ErrorCode::InvalidArgument, "Invalid max-keys value");
         }
-        if (opt.max_keys < 0)
-            throw S3Error(S3ErrorCode::InvalidArgument, "Invalid max-keys value");
+        if (opt.max_keys < 0) throw S3Error(S3ErrorCode::InvalidArgument, "Invalid max-keys value");
         // S3 semantics: cap at 1000, silently clamp beyond it -- without clamping, max-keys=INT_MAX would
         // build the whole bucket listing in memory at once (hundreds of MB of XML, a single-request OOM surface)
         opt.max_keys = std::min(opt.max_keys, 1000);
@@ -46,21 +42,16 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     // other values are rejected
     bool encode_url = false;
     if (auto et = req.query_get("encoding-type")) {
-        if (*et != "url")
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "Invalid Encoding Method specified in Request");
+        if (*et != "url") throw S3Error(S3ErrorCode::InvalidArgument, "Invalid Encoding Method specified in Request");
         encode_url = true;
     }
-    auto enc = [&](const std::string& s) {
-        return encode_url ? util::aws_uri_encode(s, /*encode_slash=*/false) : s;
-    };
+    auto enc = [&](const std::string& s) { return encode_url ? util::aws_uri_encode(s, /*encode_slash=*/false) : s; };
     // V2 (?list-type=2) vs V1 differences: KeyCount/ContinuationToken vs Marker.
     // Any other list-type value (e.g. a future V3) is InvalidArgument (roadmap §2.5) --
     // silently serving it with V1 semantics would answer a request shape we do not speak
     auto list_type = req.query_get("list-type");
     if (list_type && *list_type != "2")
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Invalid List Type specified in Request");
+        throw S3Error(S3ErrorCode::InvalidArgument, "Invalid List Type specified in Request");
     bool v2 = list_type.value_or("") == "2";
     // The three markers each belong to their own version (docs/archive/gaps.md §5.5): previously they collapsed into a
     // single start_after, so a V1 request with start-after took effect and the response echoed a <Marker> the
@@ -70,9 +61,7 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     if (v2) {
         if (auto tok = req.query_get("continuation-token")) {
             auto key = token_decode(*tok);
-            if (!key)
-                throw S3Error(S3ErrorCode::InvalidArgument,
-                              "The continuation token provided is incorrect.");
+            if (!key) throw S3Error(S3ErrorCode::InvalidArgument, "The continuation token provided is incorrect.");
             opt.start_after = std::move(*key);
             // AWS: when both are present, continuation-token wins and start-after is ignored
             start_after_param = req.query_get("start-after");
@@ -91,13 +80,12 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     // Policy prefix filtering: with Bucket-scope authorization the key is empty and the prefix check is skipped,
     // while opt.prefix is fully client-controlled -- without filtering here, a prefix-restricted credential
     // (multi-tenant shared bucket) could enumerate every key in the bucket via GET /bucket with no prefix.
-    // The pagination cursor remains the backend's (a page may hold fewer entries than max-keys, allowed by S3 semantics)
+    // The pagination cursor remains the backend's (a page may hold fewer entries than max-keys, allowed by S3
+    // semantics)
     if (auth.policy && !auth.policy->prefixes.empty()) {
-        std::erase_if(result.objects,
-                      [&](const auto& o) { return !auth.policy->allows_key(o.key); });
-        std::erase_if(result.common_prefixes, [&](const std::string& p) {
-            return !auth.policy->prefix_may_contain(p);
-        });
+        std::erase_if(result.objects, [&](const auto& o) { return !auth.policy->allows_key(o.key); });
+        std::erase_if(result.common_prefixes,
+                      [&](const std::string& p) { return !auth.policy->prefix_may_contain(p); });
     }
 
     XmlWriter w;
@@ -108,10 +96,8 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     if (!opt.delimiter.empty()) w.element("Delimiter", enc(opt.delimiter));
     w.element("MaxKeys", static_cast<uint64_t>(opt.max_keys));
     if (v2) {
-        w.element("KeyCount",
-                  static_cast<uint64_t>(result.objects.size() + result.common_prefixes.size()));
-        if (auto tok = req.query_get("continuation-token"))
-            w.element("ContinuationToken", *tok);
+        w.element("KeyCount", static_cast<uint64_t>(result.objects.size() + result.common_prefixes.size()));
+        if (auto tok = req.query_get("continuation-token")) w.element("ContinuationToken", *tok);
         if (start_after_param) w.element("StartAfter", enc(*start_after_param));
     } else {
         w.element("Marker", enc(opt.start_after));

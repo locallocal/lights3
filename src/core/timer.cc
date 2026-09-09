@@ -50,7 +50,9 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
         // previously every add did notify_all)
         wake = items_.begin()->first == std::make_pair(deadline, id);
     }
-    if (wake) cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately collide with the lock
+    if (wake)
+        cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately
+                           // collide with the lock
     return id;
 }
 
@@ -79,8 +81,10 @@ TimerQueue::Stats TimerQueue::stats() const {
         // Head-of-queue lag: the executing callback takes precedence (it has the
         // earliest deadline), otherwise look at the head of the pending queue
         Clock::time_point head{};
-        if (running_id_ != 0) head = running_deadline_;
-        else if (!due_.empty()) head = due_.front().deadline;
+        if (running_id_ != 0)
+            head = running_deadline_;
+        else if (!due_.empty())
+            head = due_.front().deadline;
         if (head != Clock::time_point{}) {
             auto lag = Clock::now() - head;
             if (lag.count() > 0) st.lag_seconds = std::chrono::duration<double>(lag).count();
@@ -89,8 +93,7 @@ TimerQueue::Stats TimerQueue::stats() const {
     st.fired = fired_.load(std::memory_order_relaxed);
     st.slow = slow_.load(std::memory_order_relaxed);
     st.exec_sum_us = exec_sum_us_.load(std::memory_order_relaxed);
-    for (size_t i = 0; i < kExecBuckets; ++i)
-        st.exec_hist[i] = exec_hist_[i].load(std::memory_order_relaxed);
+    for (size_t i = 0; i < kExecBuckets; ++i) st.exec_hist[i] = exec_hist_[i].load(std::memory_order_relaxed);
     return st;
 }
 

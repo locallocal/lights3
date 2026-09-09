@@ -90,8 +90,7 @@ void load_key_file(const std::string& path, CertBundle& out) {
 // ---------- CertBundle ----------
 
 CertBundle::CertBundle(CertBundle&& o) noexcept
-    : leaf(o.leaf), chain(o.chain), key(o.key), hosts(std::move(o.hosts)),
-      subject(std::move(o.subject)) {
+    : leaf(o.leaf), chain(o.chain), key(o.key), hosts(std::move(o.hosts)), subject(std::move(o.subject)) {
     o.leaf = nullptr;
     o.chain = nullptr;
     o.key = nullptr;
@@ -118,8 +117,7 @@ Material::Stamp Material::stamp_of(const std::string& path) {
 
 std::shared_ptr<const Material> Material::load(const HttpConfig& cfg) {
     auto m = std::shared_ptr<Material>(new Material());
-    auto load_bundle = [&](const std::string& cert, const std::string& key,
-                           const std::string& hosts) {
+    auto load_bundle = [&](const std::string& cert, const std::string& key, const std::string& hosts) {
         CertBundle b;
         // Stamps are taken before the parse: a file rewritten during the load is
         // seen as "changed" on the next poll and loaded again, never missed
@@ -133,8 +131,10 @@ std::shared_ptr<const Material> Material::load(const HttpConfig& cfg) {
             if (comma == std::string::npos) comma = hosts.size();
             std::string h = hosts.substr(pos, comma - pos);
             h.erase(0, h.find_first_not_of(" \t"));
-            if (auto t = h.find_last_not_of(" \t"); t != std::string::npos) h.erase(t + 1);
-            else h.clear();
+            if (auto t = h.find_last_not_of(" \t"); t != std::string::npos)
+                h.erase(t + 1);
+            else
+                h.clear();
             if (!h.empty()) b.hosts.push_back(lower(h));
             pos = comma + 1;
         }
@@ -145,14 +145,10 @@ std::shared_ptr<const Material> Material::load(const HttpConfig& cfg) {
     if (!cfg.tls_client_ca.empty()) {
         m->stamps_.push_back(stamp_of(cfg.tls_client_ca));
         m->client_store_ = X509_STORE_new();
-        if (!m->client_store_ ||
-            X509_STORE_load_locations(m->client_store_, cfg.tls_client_ca.c_str(), nullptr) != 1)
-            throw std::runtime_error("cannot load client CA bundle " + cfg.tls_client_ca + ": " +
-                                     ssl_errors());
+        if (!m->client_store_ || X509_STORE_load_locations(m->client_store_, cfg.tls_client_ca.c_str(), nullptr) != 1)
+            throw std::runtime_error("cannot load client CA bundle " + cfg.tls_client_ca + ": " + ssl_errors());
         m->ca_names_ = SSL_load_client_CA_file(cfg.tls_client_ca.c_str());
-        if (!m->ca_names_)
-            throw std::runtime_error("no CA certificates in " + cfg.tls_client_ca + ": " +
-                                     ssl_errors());
+        if (!m->ca_names_) throw std::runtime_error("no CA certificates in " + cfg.tls_client_ca + ": " + ssl_errors());
     }
     return m;
 }
@@ -244,8 +240,10 @@ std::string cn_of_dn(std::string_view dn) {
                 ++end;
                 continue;
             }
-            if (c == '"') quoted = !quoted;
-            else if (c == ',' && !quoted) break;
+            if (c == '"')
+                quoted = !quoted;
+            else if (c == ',' && !quoted)
+                break;
         }
         std::string_view rdn = dn.substr(start, end - start);
         while (!rdn.empty() && rdn.front() == ' ') rdn.remove_prefix(1);
@@ -253,13 +251,11 @@ std::string cn_of_dn(std::string_view dn) {
         if (eq != std::string_view::npos) {
             std::string_view type = rdn.substr(0, eq);
             while (!type.empty() && type.back() == ' ') type.remove_suffix(1);
-            if (type.size() == 2 && (type[0] == 'C' || type[0] == 'c') &&
-                (type[1] == 'N' || type[1] == 'n')) {
+            if (type.size() == 2 && (type[0] == 'C' || type[0] == 'c') && (type[1] == 'N' || type[1] == 'n')) {
                 std::string_view raw = rdn.substr(eq + 1);
                 while (!raw.empty() && raw.front() == ' ') raw.remove_prefix(1);
                 while (!raw.empty() && raw.back() == ' ') raw.remove_suffix(1);
-                if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"')
-                    raw = raw.substr(1, raw.size() - 2);
+                if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') raw = raw.substr(1, raw.size() - 2);
                 std::string out;
                 for (size_t i = 0; i < raw.size(); ++i) {
                     if (raw[i] == '\\' && i + 1 < raw.size()) {
@@ -289,8 +285,7 @@ Holder::Holder(const HttpConfig& cfg) : cfg_(cfg) {
     std::string s = "min " + (cfg.tls_min_version.empty() ? std::string("1.2") : cfg.tls_min_version);
     if (!cfg.tls_sni.empty()) s += ", " + std::to_string(cfg.tls_sni.size()) + " SNI cert(s)";
     if (!cfg.tls_client_ca.empty()) s += ", client auth " + cfg.tls_client_auth;
-    if (cfg.tls_reload_interval_sec > 0)
-        s += ", reload every " + std::to_string(cfg.tls_reload_interval_sec) + "s";
+    if (cfg.tls_reload_interval_sec > 0) s += ", reload every " + std::to_string(cfg.tls_reload_interval_sec) + "s";
     summary_ = s;
 }
 
@@ -307,16 +302,18 @@ void Holder::configure(SSL_CTX* ctx) {
     // Modern-only floor (the pre-existing behavior: no SSLv3/TLS1.0/1.1) plus the
     // configured minimum; renegotiation and compression stay off
     SSL_CTX_set_min_proto_version(ctx, static_cast<int>(min_version_of(cfg_.tls_min_version)));
-    SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION |
-                                 SSL_OP_CIPHER_SERVER_PREFERENCE);
+    SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION | SSL_OP_NO_RENEGOTIATION | SSL_OP_CIPHER_SERVER_PREFERENCE);
     if (!cfg_.tls_ciphers.empty() && SSL_CTX_set_cipher_list(ctx, cfg_.tls_ciphers.c_str()) != 1)
         throw std::runtime_error("tls_ciphers: no cipher matched '" + cfg_.tls_ciphers + "'");
-    if (!cfg_.tls_ciphersuites.empty() &&
-        SSL_CTX_set_ciphersuites(ctx, cfg_.tls_ciphersuites.c_str()) != 1)
+    if (!cfg_.tls_ciphersuites.empty() && SSL_CTX_set_ciphersuites(ctx, cfg_.tls_ciphersuites.c_str()) != 1)
         throw std::runtime_error("tls_ciphersuites: invalid '" + cfg_.tls_ciphersuites + "'");
     switch (parse_client_auth(cfg_.tls_client_auth)) {
-        case ClientAuth::Off: SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr); break;
-        case ClientAuth::Optional: SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr); break;
+        case ClientAuth::Off:
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, nullptr);
+            break;
+        case ClientAuth::Optional:
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+            break;
         case ClientAuth::Require:
             SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, nullptr);
             break;
@@ -355,8 +352,8 @@ bool Holder::reload_now() {
         std::lock_guard lk(mu_);
         cur_ = fresh;
     }
-    LOG_INFO("tls: certificate material reloaded ({} bundle(s), default {})",
-             fresh->stamps().size(), fresh->select("").subject);
+    LOG_INFO("tls: certificate material reloaded ({} bundle(s), default {})", fresh->stamps().size(),
+             fresh->select("").subject);
     return true;
 }
 

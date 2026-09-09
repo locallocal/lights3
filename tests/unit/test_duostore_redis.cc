@@ -1,8 +1,9 @@
 // RedisMetaStore dedicated unit tests (docs/storage/duostore-meta-redis-design.md §9): meta consistency suite,
-// backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS, multiple gateways sharing meta (+ the multi-gateway multipart suite),
-// concurrent CAS convergence. Obtaining a real redis: probe for redis-server in PATH and start a private instance
-// on a unix socket (--save '' --appendonly no); if none is found, SKIP explicitly (not a failure).
-// LIGHTS3_TEST_REDIS_URI can override with an external instance (isolation relies on a random per-case key prefix).
+// backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS, multiple
+// gateways sharing meta (+ the multi-gateway multipart suite), concurrent CAS convergence. Obtaining a real redis:
+// probe for redis-server in PATH and start a private instance on a unix socket (--save '' --appendonly no); if none is
+// found, SKIP explicitly (not a failure). LIGHTS3_TEST_REDIS_URI can override with an external instance (isolation
+// relies on a random per-case key prefix).
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_REDIS_META)
 
 #include <hiredis.h>
@@ -39,8 +40,8 @@ using namespace lights3::storage::duostore;
 namespace {
 
 // Process-level singleton for the private redis-server: lazily started by the first test case, reaped at process exit.
-// A unix socket avoids port allocation conflicts; --appendonly no (unit tests do not test crash semantics, the same tradeoff
-// as sync=false in the rocks unit tests).
+// A unix socket avoids port allocation conflicts; --appendonly no (unit tests do not test crash semantics, the same
+// tradeoff as sync=false in the rocks unit tests).
 class RedisTestServer {
 public:
     static RedisTestServer& instance() {
@@ -78,15 +79,15 @@ private:
         sock_ = dir_ + "/redis.sock";
         pid_ = fork();
         if (pid_ == 0) {
-            // Child process: keep logs in the temp dir for troubleshooting; exit if execlp fails (parent side times out and skips)
+            // Child process: keep logs in the temp dir for troubleshooting; exit if execlp fails (parent side times out
+            // and skips)
             std::string logfile = dir_ + "/redis.log";
             if (FILE* f = fopen(logfile.c_str(), "w")) {
                 dup2(fileno(f), 1);
                 dup2(fileno(f), 2);
             }
-            execlp("redis-server", "redis-server", "--port", "0", "--unixsocket",
-                   sock_.c_str(), "--save", "", "--appendonly", "no", "--dir", dir_.c_str(),
-                   (char*)nullptr);
+            execlp("redis-server", "redis-server", "--port", "0", "--unixsocket", sock_.c_str(), "--save", "",
+                   "--appendonly", "no", "--dir", dir_.c_str(), (char*)nullptr);
             _exit(127);
         }
         if (pid_ < 0) return;
@@ -152,7 +153,8 @@ private:
     pid_t pid_ = -1;
 };
 
-// Independent prefix per test case: multiple suites (and repeated runs against an external override instance) do not pollute each other (§2.1)
+// Independent prefix per test case: multiple suites (and repeated runs against an external override instance) do not
+// pollute each other (§2.1)
 std::string unique_prefix() {
     static std::atomic<int> counter{0};
     return "t" + std::to_string(getpid()) + "-" + std::to_string(counter++) + ":";
@@ -167,19 +169,19 @@ RedisMetaOptions redis_opts(const std::string& prefix) {
     return o;
 }
 
-#define REDIS_OR_SKIP()                                                       \
-    if (!RedisTestServer::instance().available) {                             \
-        printf("       [SKIP] redis-server not available\n");                \
-        return;                                                               \
+#define REDIS_OR_SKIP()                                       \
+    if (!RedisTestServer::instance().available) {             \
+        printf("       [SKIP] redis-server not available\n"); \
+        return;                                               \
     }
 
 // Cases that need server-global injection such as SCRIPT FLUSH / CLIENT KILL: skip when pointing at an external shared
 // instance -- this neither disrupts others nor lets other connections distort the exact reconnects assertion
-#define OWNED_REDIS_OR_SKIP()                                                 \
-    REDIS_OR_SKIP();                                                          \
-    if (!RedisTestServer::instance().owned) {                                 \
+#define OWNED_REDIS_OR_SKIP()                                                       \
+    REDIS_OR_SKIP();                                                                \
+    if (!RedisTestServer::instance().owned) {                                       \
         printf("       [SKIP] external redis: server-wide commands not allowed\n"); \
-        return;                                                               \
+        return;                                                                     \
     }
 
 using backend_suite::put;
@@ -194,8 +196,7 @@ using meta_store_suite::make_rec;
 TEST(duostore_redis_meta_store_suite) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
-    meta_store_suite::run_meta_store_suite(
-        [&] { return std::make_unique<RedisMetaStore>(redis_opts(prefix)); });
+    meta_store_suite::run_meta_store_suite([&] { return std::make_unique<RedisMetaStore>(redis_opts(prefix)); });
 }
 
 // Run the backend consistency suite over the injected combination (RedisMetaStore + FsDataStore) (§9.3)
@@ -210,8 +211,13 @@ TEST(duostore_redis_backend_suite) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers, {}},
+        FsDataOptions{cfg.root,
+                      cfg.chunk_size,
+                      cfg.verify_chunk_crc,
+                      cfg.pack_threshold,
+                      cfg.pack_max_size,
+                      cfg.pack_writers,
+                      {}},
         pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -233,7 +239,8 @@ TEST(duostore_redis_prefix_isolation) {
     b.close();
 }
 
-// Multiple gateways sharing meta (§3.4): two instances with the same prefix share metadata; segment allocation never collides
+// Multiple gateways sharing meta (§3.4): two instances with the same prefix share metadata; segment allocation never
+// collides
 TEST(duostore_redis_multi_gateway_shared_meta) {
     REDIS_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -311,7 +318,8 @@ TEST(duostore_redis_concurrent_cas_converges) {
     g1.create_bucket("race");
     constexpr int kPerWriter = 25;
 
-    // Exceptions in threads are carried back via exception_ptr and rethrown on the main thread (otherwise terminate hides the assertion info)
+    // Exceptions in threads are carried back via exception_ptr and rethrown on the main thread (otherwise terminate
+    // hides the assertion info)
     std::exception_ptr errs[2];
     auto writer = [&](RedisMetaStore& m, std::exception_ptr& err) {
         try {
@@ -368,28 +376,23 @@ TEST(duostore_redis_config_wait_replicas) {
     CHECK(threw);
 }
 
-// R4 metrics + reconnect edge cases (§5.3/§3.5): zero values registered at construction are visible; after CLIENT KILL kills a pooled
-// connection -- pure reads retry on a fresh connection (reconnects increments), while an IO failure on a commit-class single command = outcome
-// unknown -> InternalError (blind-retry ban), and the store is not disabled (the next call creates a new connection as usual)
+// R4 metrics + reconnect edge cases (§5.3/§3.5): zero values registered at construction are visible; after CLIENT KILL
+// kills a pooled connection -- pure reads retry on a fresh connection (reconnects increments), while an IO failure on a
+// commit-class single command = outcome unknown -> InternalError (blind-retry ban), and the store is not disabled (the
+// next call creates a new connection as usual)
 TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
     OWNED_REDIS_OR_SKIP();
     auto reg = std::make_shared<MetricsRegistry>();
     auto opts = redis_opts(unique_prefix());
     opts.metrics = MetricsScope(reg, {{"backend", "r4"}});
     RedisMetaStore m(opts);
-    CHECK(reg->render().find(
-              "lights3_duostore_redis_cas_retries_total{backend=\"r4\"} 0\n") !=
-          std::string::npos);
-    CHECK(reg->render().find(
-              "lights3_duostore_redis_reconnects_total{backend=\"r4\"} 0\n") !=
-          std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_redis_cas_retries_total{backend=\"r4\"} 0\n") != std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_redis_reconnects_total{backend=\"r4\"} 0\n") != std::string::npos);
 
     m.create_bucket("kill");
     CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
     CHECK(m.bucket_exists("kill"));  // pure read: bad connection dropped, reconnect and retry succeed
-    CHECK(reg->render().find(
-              "lights3_duostore_redis_reconnects_total{backend=\"r4\"} 1\n") !=
-          std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_redis_reconnects_total{backend=\"r4\"} 1\n") != std::string::npos);
 
     CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
     CHECK_THROWS_S3(m.ack_reclaim(1), s3::S3ErrorCode::InternalError);
@@ -398,7 +401,8 @@ TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
 }
 
 // R4 wait_replicas (§6): on standalone (0 replicas), WAIT falling short of the replica count only WARNs instead of
-// erroring -- the write already took effect on the primary, and an error would mislead clients into retrying. timeout shortened to bound case duration
+// erroring -- the write already took effect on the primary, and an error would mislead clients into retrying. timeout
+// shortened to bound case duration
 TEST(duostore_redis_wait_replicas_no_replica_tolerated) {
     REDIS_OR_SKIP();
     auto opts = redis_opts(unique_prefix());
@@ -415,13 +419,14 @@ TEST(duostore_redis_wait_replicas_no_replica_tolerated) {
     m.close();
 }
 
-// R4 list_uploads HSCAN batching (§2.2): the uploads table still returns completely beyond the listpack threshold and a single-batch
-// COUNT, in (key, upload_id) lexicographic order, with contents matching what was registered
+// R4 list_uploads HSCAN batching (§2.2): the uploads table still returns completely beyond the listpack threshold and a
+// single-batch COUNT, in (key, upload_id) lexicographic order, with contents matching what was registered
 TEST(duostore_redis_list_uploads_hscan_batches) {
     REDIS_OR_SKIP();
     RedisMetaStore m(redis_opts(unique_prefix()));
     m.create_bucket("many");
-    constexpr int kUploads = 600;  // > hash-max-listpack-entries(128) converts to a real hashtable, > COUNT 512 spans batches
+    constexpr int kUploads = 600;  // > hash-max-listpack-entries(128) converts to a real hashtable, > COUNT 512 spans
+                                   // batches
     std::set<std::pair<std::string, std::string>> expect;
     for (int i = 0; i < kUploads; ++i) {
         std::string k = "k" + std::to_string(i % 40);  // multiple uploads mixed on the same key
@@ -430,8 +435,7 @@ TEST(duostore_redis_list_uploads_hscan_batches) {
     auto got = m.list_uploads("many", {}, {}, 0);
     CHECK_EQ(got.size(), size_t(kUploads));
     for (size_t i = 1; i < got.size(); ++i)
-        CHECK(std::pair(got[i - 1].key, got[i - 1].upload_id) <
-              std::pair(got[i].key, got[i].upload_id));
+        CHECK(std::pair(got[i - 1].key, got[i - 1].upload_id) < std::pair(got[i].key, got[i].upload_id));
     for (const auto& u : got) CHECK(expect.count({u.key, u.upload_id}) == 1);
     for (const auto& u : got) m.abort_upload("many", u.key, u.upload_id);
     m.delete_bucket("many");
@@ -523,8 +527,13 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
         cfg.meta_cache_feed = false;
         fs::create_directories(cfg.root);
         auto data = std::make_unique<FsDataStore>(
-            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                          cfg.pack_max_size, cfg.pack_writers, {}},
+            FsDataOptions{cfg.root,
+                          cfg.chunk_size,
+                          cfg.verify_chunk_crc,
+                          cfg.pack_threshold,
+                          cfg.pack_max_size,
+                          cfg.pack_writers,
+                          {}},
             pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
             [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
         return std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -569,9 +578,8 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     sync_wait(b->close());
 
     // from_params: redis defaults the cache off; enabling it needs a TTL below gc_grace
-    std::map<std::string, std::string> base{{"root", (tmp.path / "p").string()},
-                                            {"meta", "redis"},
-                                            {"redis_uri", RedisTestServer::instance().uri}};
+    std::map<std::string, std::string> base{
+        {"root", (tmp.path / "p").string()}, {"meta", "redis"}, {"redis_uri", RedisTestServer::instance().uri}};
     CHECK_EQ(DuoStoreConfig::from_params("p", base).meta_cache_entries, size_t(0));
     auto on = base;
     on["meta_cache_entries"] = "1K";
@@ -623,8 +631,13 @@ TEST(duostore_redis_cache_invalidation_feed) {
         cfg.meta_cache_ttl_sec = 100;  // long TTL: only the feed can make a peer's write visible in time
         fs::create_directories(cfg.root);
         auto data = std::make_unique<FsDataStore>(
-            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                          cfg.pack_max_size, cfg.pack_writers, {}},
+            FsDataOptions{cfg.root,
+                          cfg.chunk_size,
+                          cfg.verify_chunk_crc,
+                          cfg.pack_threshold,
+                          cfg.pack_max_size,
+                          cfg.pack_writers,
+                          {}},
             pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
             [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
         return std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data),
@@ -641,9 +654,12 @@ TEST(duostore_redis_cache_invalidation_feed) {
         }
         return pred();
     };
-    CHECK(wait_for([&] {
-        return metrics->render().find("lights3_duostore_redis_invalidation_subscribes_total{backend=\"gw-a\"} 1") != std::string::npos;
-    }, 3000));
+    CHECK(wait_for(
+        [&] {
+            return metrics->render().find("lights3_duostore_redis_invalidation_subscribes_total{backend=\"gw-a\"} 1") !=
+                   std::string::npos;
+        },
+        3000));
 
     sync_wait(a->create_bucket("bkt"));
     auto p1 = put(*a, "bkt", "k", "v1");
@@ -661,17 +677,20 @@ TEST(duostore_redis_cache_invalidation_feed) {
     // Peer delete
     sync_wait(a->head_object("bkt", "k"));  // re-cache
     sync_wait(b->delete_object("bkt", "k"));
-    CHECK(wait_for([&] {
-        try {
-            sync_wait(a->head_object("bkt", "k"));
-            return false;
-        } catch (const s3::S3Error& e) {
-            return e.code == s3::S3ErrorCode::NoSuchKey;
-        }
-    }, 3000));
+    CHECK(wait_for(
+        [&] {
+            try {
+                sync_wait(a->head_object("bkt", "k"));
+                return false;
+            } catch (const s3::S3Error& e) {
+                return e.code == s3::S3ErrorCode::NoSuchKey;
+            }
+        },
+        3000));
     // The feed counter on a saw both messages (its own put is published too and
     // dropped harmlessly after the write path's own invalidation)
-    CHECK(metrics->render().find("lights3_duostore_meta_cache_feed_invalidations_total{backend=\"gw-a\"}") != std::string::npos);
+    CHECK(metrics->render().find("lights3_duostore_meta_cache_feed_invalidations_total{backend=\"gw-a\"}") !=
+          std::string::npos);
 
     // Feed loss: killing the pub/sub clients makes each store reconnect and reset
     // (clear) its cache -- only on a private server (CLIENT KILL is server-global)
@@ -680,9 +699,12 @@ TEST(duostore_redis_cache_invalidation_feed) {
         sync_wait(a->head_object("bkt", "k2"));
         CHECK(a->meta_cache_stats().entries >= 1);
         CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE pubsub"));
-        CHECK(wait_for([&] {
-            return metrics->render().find("lights3_duostore_meta_cache_feed_resets_total{backend=\"gw-a\"} 2") != std::string::npos;
-        }, 6000));
+        CHECK(wait_for(
+            [&] {
+                return metrics->render().find("lights3_duostore_meta_cache_feed_resets_total{backend=\"gw-a\"} 2") !=
+                       std::string::npos;
+            },
+            6000));
         CHECK_EQ(a->meta_cache_stats().entries, size_t(0));
         // ...and keeps working afterwards
         auto p3 = put(*b, "bkt", "k2", "after-reconnect");
@@ -710,8 +732,7 @@ TEST(duostore_redis_list_uploads_lex_index) {
     auto full = m.list_uploads("idx");
     CHECK_EQ(full.size(), size_t(kUploads));
     for (size_t i = 1; i < full.size(); ++i)
-        CHECK(std::pair(full[i - 1].key, full[i - 1].upload_id) <
-              std::pair(full[i].key, full[i].upload_id));
+        CHECK(std::pair(full[i - 1].key, full[i - 1].upload_id) < std::pair(full[i].key, full[i].upload_id));
     for (const auto& u : full) CHECK(expect.count({u.key, u.upload_id}) == 1);
 
     // Cursor pushdown: walk in pages of 97 and compare with the full list
@@ -735,9 +756,7 @@ TEST(duostore_redis_list_uploads_lex_index) {
     CHECK_EQ(p3.size(), size_t(10));
     for (auto& u : p3) CHECK(u.key.compare(0, 3, "p3/") == 0);
     CHECK_EQ(p3[0].key, full[std::lower_bound(full.begin(), full.end(), std::string("p3/"),
-                                              [](const UploadInfo& u, const std::string& k) {
-                                                  return u.key < k;
-                                              }) -
+                                              [](const UploadInfo& u, const std::string& k) { return u.key < k; }) -
                              full.begin()]
                             .key);
 
@@ -753,8 +772,7 @@ TEST(duostore_redis_list_uploads_lex_index) {
     // surfaced. The cardinality check routes this listing through the rebuild, which
     // drops the member; the next one is indexed again and honors the limit
     m.abort_upload("idx", full[0].key, full[0].upload_id);
-    CHECK(RedisTestServer::instance().raw_command(
-        ("ZADD " + prefix + "uz:idx 0 zz-stale-member").c_str()));
+    CHECK(RedisTestServer::instance().raw_command(("ZADD " + prefix + "uz:idx 0 zz-stale-member").c_str()));
     auto rest = m.list_uploads("idx");
     CHECK_EQ(rest.size(), size_t(kUploads - 1));
     for (const auto& u : rest) CHECK(u.key.compare(0, 2, "zz") != 0);
@@ -767,7 +785,6 @@ TEST(duostore_redis_list_uploads_lex_index) {
     m.delete_bucket("idx");
     m.close();
 }
-
 
 // roadmap §6.1: the redis.command fault point simulates a connection-level
 // failure — a read retries once on a fresh connection (reconnect counted), a write
@@ -825,32 +842,27 @@ multi_gateway_suite::MetaFactory redis_shared_meta(const std::string& prefix) {
 
 TEST(duostore_redis_multi_gateway_multipart) {
     REDIS_OR_SKIP();
-    multi_gateway_suite::cross_gateway_multipart(redis_shared_meta(unique_prefix()),
-                                                 DuoMetaKind::kRedis);
+    multi_gateway_suite::cross_gateway_multipart(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
 
 TEST(duostore_redis_multi_gateway_abort_while_peer_pumps) {
     REDIS_OR_SKIP();
-    multi_gateway_suite::abort_while_peer_pumps(redis_shared_meta(unique_prefix()),
-                                                DuoMetaKind::kRedis);
+    multi_gateway_suite::abort_while_peer_pumps(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
 
 TEST(duostore_redis_multi_gateway_same_part_concurrent) {
     REDIS_OR_SKIP();
-    multi_gateway_suite::same_part_concurrent(redis_shared_meta(unique_prefix()),
-                                              DuoMetaKind::kRedis);
+    multi_gateway_suite::same_part_concurrent(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
 
 TEST(duostore_redis_multi_gateway_mpu_ttl_single_executor) {
     REDIS_OR_SKIP();
-    multi_gateway_suite::mpu_ttl_single_executor(redis_shared_meta(unique_prefix()),
-                                                 DuoMetaKind::kRedis);
+    multi_gateway_suite::mpu_ttl_single_executor(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
 
 TEST(duostore_redis_multi_gateway_listings_shared) {
     REDIS_OR_SKIP();
-    multi_gateway_suite::listings_are_shared(redis_shared_meta(unique_prefix()),
-                                             DuoMetaKind::kRedis);
+    multi_gateway_suite::listings_are_shared(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META

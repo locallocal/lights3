@@ -6,9 +6,9 @@
 #include "core/util/time.h"
 #include "core/util/uri.h"
 #include "s3/handlers/common.h"
-#include "storage/multipart.h"
 #include "s3/service.h"
 #include "s3/xml.h"
+#include "storage/multipart.h"
 
 namespace lights3::s3 {
 
@@ -42,7 +42,8 @@ std::optional<storage::ByteRange> parse_range_header(const std::string& v) {
         if (!r.last) return std::nullopt;
     }
     // "bytes=5-3" is syntactically invalid (RFC 9110 §14.1.1 requires last >= first): the whole header is
-    // ignored as invalid and 200 with the full object returned -- previously it fell into resolve_range and became 416 (docs/archive/gaps.md §4)
+    // ignored as invalid and 200 with the full object returned -- previously it fell into resolve_range and became 416
+    // (docs/archive/gaps.md §4)
     if (r.first && r.last && *r.last < *r.first) return std::nullopt;
     return r;
 }
@@ -96,8 +97,7 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
         if (f.echo && !(meta.*f.field).empty()) resp.headers.set(f.header, meta.*f.field);
     // x-amz-tagging-count (roadmap §2.5): number of tags, never the values
     if (!meta.tagging.empty()) {
-        size_t n = 1 + static_cast<size_t>(std::count(meta.tagging.begin(),
-                                                      meta.tagging.end(), '&'));
+        size_t n = 1 + static_cast<size_t>(std::count(meta.tagging.begin(), meta.tagging.end(), '&'));
         resp.headers.set("x-amz-tagging-count", std::to_string(n));
     }
     for (auto& [k, v] : meta.user_meta) resp.headers.set("x-amz-meta-" + k, v);
@@ -105,8 +105,7 @@ void fill_object_headers(http::HttpResponse& resp, const storage::ObjectMeta& me
 
 // GET/HEAD conditional requests (docs/s3-protocol.md §6, precedence follows RFC 7232:
 // If-Match > If-Unmodified-Since；If-None-Match > If-Modified-Since）
-void check_read_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& meta,
-                              bool& not_modified) {
+void check_read_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& meta, bool& not_modified) {
     if (auto v = req.headers.get("If-Match")) {
         if (*v != "*" && strip_quotes(*v) != meta.etag)
             throw S3Error(S3ErrorCode::PreconditionFailed,
@@ -126,8 +125,8 @@ void check_read_preconditions(const http::HttpRequest& req, const storage::Objec
 }
 
 bool has_read_preconditions(const http::HttpRequest& req) {
-    return req.headers.has("If-Match") || req.headers.has("If-None-Match") ||
-           req.headers.has("If-Modified-Since") || req.headers.has("If-Unmodified-Since");
+    return req.headers.has("If-Match") || req.headers.has("If-None-Match") || req.headers.has("If-Modified-Since") ||
+           req.headers.has("If-Unmodified-Since");
 }
 
 // If-Range (RFC 7233 §3.2): Range takes effect only when the validator (strong ETag, or HTTP-date exactly
@@ -150,8 +149,8 @@ bool has_response_override(const http::HttpRequest& req) {
 }
 }  // namespace handlers
 
-Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket,
-                                               std::string key, const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket, std::string key,
+                                               const RequestAuth& auth) {
     require_content_length(req);  // 411 (roadmap §2.5); CopyObject is body-less and exempt
     auto& backend = router_.resolve(bucket);
 
@@ -160,22 +159,21 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
     // length (aws-chunked bodies expose their decoded length) before any byte streams
     std::optional<uint64_t> replaced = co_await existing_size(backend, bucket, key);
     uint64_t declared = req.body && req.body->length() ? *req.body->length() : 0;
-    check_quota(bucket, static_cast<int64_t>(declared) - static_cast<int64_t>(replaced.value_or(0)),
-                replaced ? 0 : 1, auth);
+    check_quota(bucket, static_cast<int64_t>(declared) - static_cast<int64_t>(replaced.value_or(0)), replaced ? 0 : 1,
+                auth);
     uint64_t written = 0;
     if (usage_ && usage_->enabled() && req.body)
         req.body = std::make_unique<ByteCountingReader>(std::move(req.body), &written);
 
-    // PUT conditional requests (docs/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is optimistic concurrency.
-    // "Check + commit" is done by the backend at its atomic commit point (PutCondition contract, backend.h) -- here
-    // only one lock-free head precheck is done, so obviously failing requests get their 412/404 without uploading the full body.
-    // The precheck is non-atomic and carries no correctness burden; the old L2 striped lock spanned the entire body
-    // upload, so 64 slow connections could block all conditional writes gateway-wide, and it could never hold in multi-instance deployments anyway
+    // PUT conditional requests (docs/s3-protocol.md §6): If-None-Match:* prevents overwrite, If-Match is optimistic
+    // concurrency. "Check + commit" is done by the backend at its atomic commit point (PutCondition contract,
+    // backend.h) -- here only one lock-free head precheck is done, so obviously failing requests get their 412/404
+    // without uploading the full body. The precheck is non-atomic and carries no correctness burden; the old L2 striped
+    // lock spanned the entire body upload, so 64 slow connections could block all conditional writes gateway-wide, and
+    // it could never hold in multi-instance deployments anyway
     storage::PutCondition cond;
     if (auto v = req.headers.get("If-None-Match")) {
-        if (*v != "*")
-            throw S3Error(S3ErrorCode::NotImplemented,
-                          "PUT If-None-Match only supports '*'.");
+        if (*v != "*") throw S3Error(S3ErrorCode::NotImplemented, "PUT If-None-Match only supports '*'.");
         cond.if_none_match = true;
         bool exists = true;
         try {
@@ -206,8 +204,7 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
     http::StringBodyReader empty{""};
     http::BodyReader& body = req.body ? *req.body : static_cast<http::BodyReader&>(empty);
     auto result = co_await backend.put_object(bucket, key, std::move(meta), body, cond);
-    note_usage(bucket, replaced ? 0 : 1,
-               static_cast<int64_t>(written) - static_cast<int64_t>(replaced.value_or(0)));
+    note_usage(bucket, replaced ? 0 : 1, static_cast<int64_t>(written) - static_cast<int64_t>(replaced.value_or(0)));
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));
@@ -223,8 +220,8 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::string bucket,
-                                                std::string key, const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::string bucket, std::string key,
+                                                const RequestAuth& auth) {
     auto [src_bucket, src_key] = parse_copy_source(*req.headers.get("x-amz-copy-source"));
     auto& src_backend = router_.resolve(src_bucket);
 
@@ -251,7 +248,8 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
         meta.part_sizes = src_meta.part_sizes;
     } else {
         // COPY: the whole metadata set travels with the object. Field-by-field copying once missed newly added
-        // first-class fields (§5.2); here only the three items bound to the new object (key/size/etag) are left for the backend to recompute
+        // first-class fields (§5.2); here only the three items bound to the new object (key/size/etag) are left for the
+        // backend to recompute
         meta = src_meta;
         meta.key.clear();
         meta.size = 0;
@@ -260,13 +258,13 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
 
     // Same-backend fast path (docs/archive/gaps.md §6.2/§6.3): localfs uses kernel copy_file_range,
     // cloudproxy uses remote server-side COPY -- both skip "read into the gateway then write back". nullopt = the
-    // backend has no fast path or it is unavailable this time (tier stub, cross-device); falls back to the streaming path, semantically equivalent
+    // backend has no fast path or it is unavailable this time (tier stub, cross-device); falls back to the streaming
+    // path, semantically equivalent
     auto& dst_backend = router_.resolve(bucket);
     // Accounting (roadmap §3.9): the copy's size is the source's; the destination's
     // previous size (if any) is netted out
     std::optional<uint64_t> replaced = co_await existing_size(dst_backend, bucket, key);
-    check_quota(bucket,
-                static_cast<int64_t>(src_meta.size) - static_cast<int64_t>(replaced.value_or(0)),
+    check_quota(bucket, static_cast<int64_t>(src_meta.size) - static_cast<int64_t>(replaced.value_or(0)),
                 replaced ? 0 : 1, auth);
     storage::PutResult result;
     std::optional<storage::PutResult> fast;
@@ -292,8 +290,8 @@ Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::str
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::string bucket,
-                                               std::string key, bool head_only) {
+Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::string bucket, std::string key,
+                                               bool head_only) {
     auto& backend = router_.resolve(bucket);
 
     std::optional<storage::ByteRange> range;
@@ -308,10 +306,8 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     if (auto v = req.query_get("partNumber")) {
         int no = 0;
         auto [p, ec] = std::from_chars(v->data(), v->data() + v->size(), no);
-        if (ec != std::errc() || p != v->data() + v->size() || no < 1 ||
-            no > storage::kMaxParts)
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "Part number must be an integer between 1 and 10000.");
+        if (ec != std::errc() || p != v->data() + v->size() || no < 1 || no > storage::kMaxParts)
+            throw S3Error(S3ErrorCode::InvalidArgument, "Part number must be an integer between 1 and 10000.");
         if (range)
             throw S3Error(S3ErrorCode::InvalidRequest,
                           "Cannot specify both Range header and partNumber query parameter.");
@@ -321,8 +317,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         if (!meta.part_sizes.empty()) {
             parts_count = static_cast<int>(meta.part_sizes.size());
             if (no > parts_count)
-                throw S3Error(S3ErrorCode::InvalidPartNumber,
-                              "The requested partnumber is not satisfiable", key);
+                throw S3Error(S3ErrorCode::InvalidPartNumber, "The requested partnumber is not satisfiable", key);
             for (int i = 0; i < no - 1; ++i) off += meta.part_sizes[size_t(i)];
             sz = meta.part_sizes[size_t(no - 1)];
         } else if (auto pe = co_await backend.resolve_object_part(bucket, key, no)) {
@@ -337,8 +332,7 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         } else {
             parts_count = 1;
             if (no > 1)
-                throw S3Error(S3ErrorCode::InvalidPartNumber,
-                              "The requested partnumber is not satisfiable", key);
+                throw S3Error(S3ErrorCode::InvalidPartNumber, "The requested partnumber is not satisfiable", key);
             sz = meta.size;
         }
         if (sz > 0) range = storage::ByteRange{off, off + sz - 1};
@@ -360,9 +354,8 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         if (range) {  // aligned with GET: 206 + Content-Range, no body, length only
             auto [f, l] = storage::resolve_range(*range, meta.size);  // unsatisfiable -> 416
             resp.status = 206;
-            resp.headers.set("Content-Range", "bytes " + std::to_string(f) + "-" +
-                                                  std::to_string(l) + "/" +
-                                                  std::to_string(meta.size));
+            resp.headers.set("Content-Range",
+                             "bytes " + std::to_string(f) + "-" + std::to_string(l) + "/" + std::to_string(meta.size));
             resp.content_length = l - f + 1;
         } else {
             resp.content_length = meta.size;  // no body, the driver sends only Content-Length
@@ -373,7 +366,8 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     }
 
     // When conditional headers are present, decide via head before opening the stream: 412/304 comes before
-    // range's 416 (RFC 7232), and it also avoids backends like cloudproxy pulling the object from upstream only to discard it all
+    // range's 416 (RFC 7232), and it also avoids backends like cloudproxy pulling the object from upstream only to
+    // discard it all
     if (has_read_preconditions(req) || (range && req.headers.has("If-Range"))) {
         auto meta = co_await backend.head_object(bucket, key);
         bool not_modified = false;
@@ -388,19 +382,20 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     auto stream = co_await backend.get_object(bucket, key, range);
 
     fill_object_headers(resp, stream.meta);
-    // Overrides are applied before 206/Content-Range: those two are determined by this transfer and cannot be client-specified
+    // Overrides are applied before 206/Content-Range: those two are determined by this transfer and cannot be
+    // client-specified
     apply_response_overrides(req, resp);
     uint64_t len = stream.meta.size;
     if (stream.range) {
-        // Backend contract: the returned range must have both ends resolved; leaving one unset is a backend defect, no UB dereference
+        // Backend contract: the returned range must have both ends resolved; leaving one unset is a backend defect, no
+        // UB dereference
         if (!stream.range->first || !stream.range->last)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "storage backend returned an unresolved range");
+            throw S3Error(S3ErrorCode::InternalError, "storage backend returned an unresolved range");
         uint64_t f = *stream.range->first, l = *stream.range->last;
         len = l - f + 1;
         resp.status = 206;
-        resp.headers.set("Content-Range", "bytes " + std::to_string(f) + "-" + std::to_string(l) +
-                                              "/" + std::to_string(stream.meta.size));
+        resp.headers.set("Content-Range", "bytes " + std::to_string(f) + "-" + std::to_string(l) + "/" +
+                                              std::to_string(stream.meta.size));
     }
     resp.content_length = len;
     resp.stream_body = std::move(stream.body);
@@ -440,33 +435,25 @@ Task<http::HttpResponse> S3Service::get_object_tagging(std::string bucket, std::
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::put_object_tagging(http::HttpRequest& req,
-                                                       std::string bucket, std::string key) {
+Task<http::HttpResponse> S3Service::put_object_tagging(http::HttpRequest& req, std::string bucket, std::string key) {
     std::string body = co_await read_body(req);
     auto root = xml_parse(body);
-    if (root.name != "Tagging")
-        throw S3Error(S3ErrorCode::MalformedXML, "Expected <Tagging> root element.");
+    if (root.name != "Tagging") throw S3Error(S3ErrorCode::MalformedXML, "Expected <Tagging> root element.");
     const XmlNode* set = root.find("TagSet");
-    if (!set)
-        throw S3Error(S3ErrorCode::MalformedXML, "Tagging must contain a TagSet element.");
+    if (!set) throw S3Error(S3ErrorCode::MalformedXML, "Tagging must contain a TagSet element.");
     std::vector<std::pair<std::string, std::string>> tags;
     for (auto& t : set->children) {
         if (t.name != "Tag") continue;
         std::string k = t.get("Key");
         if (k.empty() || k.size() > 128)
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "Tag keys must be 1-128 characters long.");
+            throw S3Error(S3ErrorCode::InvalidArgument, "Tag keys must be 1-128 characters long.");
         std::string v = t.get("Value");
         if (v.size() > 256)
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "Tag values must be at most 256 characters long.");
+            throw S3Error(S3ErrorCode::InvalidArgument, "Tag values must be at most 256 characters long.");
         for (auto& [ek, ev] : tags)
-            if (ek == k)
-                throw S3Error(S3ErrorCode::InvalidArgument, "Duplicate tag key '" + k + "'.");
+            if (ek == k) throw S3Error(S3ErrorCode::InvalidArgument, "Duplicate tag key '" + k + "'.");
         tags.emplace_back(std::move(k), std::move(v));
-        if (tags.size() > 10)
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "An object may carry at most 10 tags.");
+        if (tags.size() > 10) throw S3Error(S3ErrorCode::InvalidArgument, "An object may carry at most 10 tags.");
     }
     co_await router_.resolve(bucket).set_object_tagging(bucket, key, encode_tagging(tags));
     co_return http::HttpResponse{};
@@ -483,10 +470,10 @@ namespace {
 
 // Single-key deletion with exceptions folded into a result value (docs/archive/gaps.md §3.9): no key failure may abort
 // the batch -- already-deleted keys must appear in the response, or clients cannot tell which deletions succeeded.
-// A standalone function rather than a capturing lambda: the lambda temporary is destroyed while the coroutine is suspended, so captures would dangle
-Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend,
-                                        const std::string& bucket, const std::string& key,
-                                        UsageTracker* usage) {
+// A standalone function rather than a capturing lambda: the lambda temporary is destroyed while the coroutine is
+// suspended, so captures would dangle
+Task<std::optional<S3Error>> delete_one(storage::IStorageBackend& backend, const std::string& bucket,
+                                        const std::string& key, UsageTracker* usage) {
     try {
         // Usage accounting (roadmap §3.9 ①): same HEAD-before-delete as the single delete
         std::optional<uint64_t> removed;
@@ -516,14 +503,14 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
                                                    const RequestAuth& auth) {
     // AWS **requires** an integrity header for this operation (docs/archive/gaps.md §5.6): batch deletion is the one
     // operation where "a rewritten request body silently deletes extra objects"; absence is 400. The digest itself
-    // is verified while reading the body by the ChecksumVerifyingReader that dispatch installs; here only "is one declared" is checked
+    // is verified while reading the body by the ChecksumVerifyingReader that dispatch installs; here only "is one
+    // declared" is checked
     constexpr std::string_view kChecksumPrefix = "x-amz-checksum-";
     bool has_digest = req.headers.has("Content-MD5");
     if (!has_digest)
         for (auto& [k, v] : req.headers.items())
             if (k.size() > kChecksumPrefix.size() &&
-                http::HeaderMap::ieq(std::string_view(k).substr(0, kChecksumPrefix.size()),
-                                     kChecksumPrefix))
+                http::HeaderMap::ieq(std::string_view(k).substr(0, kChecksumPrefix.size()), kChecksumPrefix))
                 has_digest = true;
     if (!has_digest)
         throw S3Error(S3ErrorCode::InvalidRequest,
@@ -531,28 +518,24 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
                       "(or a x-amz-checksum-* header).");
     std::string body = co_await read_body(req);
     XmlNode root = xml_parse(body);
-    if (root.name != "Delete")
-        throw S3Error(S3ErrorCode::MalformedXML, "Expected <Delete> root element.");
+    if (root.name != "Delete") throw S3Error(S3ErrorCode::MalformedXML, "Expected <Delete> root element.");
     bool quiet = root.get("Quiet") == "true";
 
     std::vector<std::string> keys;
     for (auto& child : root.children) {
         if (child.name != "Object") continue;
-        // Missing <Key>/empty Key is a malformed request, the whole batch is rejected (matching AWS) -- not per-key errors
+        // Missing <Key>/empty Key is a malformed request, the whole batch is rejected (matching AWS) -- not per-key
+        // errors
         std::string k = child.get("Key");
-        if (k.empty())
-            throw S3Error(S3ErrorCode::MalformedXML,
-                          "Each <Object> must contain a non-empty <Key>.");
+        if (k.empty()) throw S3Error(S3ErrorCode::MalformedXML, "Each <Object> must contain a non-empty <Key>.");
         // Silently ignoring <VersionId> would turn "delete a specific version" into "delete the current object" --
         // far more dangerous than erroring (docs/archive/gaps.md §3.9)
         if (!child.get("VersionId").empty())
             throw S3Error(S3ErrorCode::NotImplemented, "Versioning is not implemented.");
         keys.push_back(std::move(k));
     }
-    if (keys.empty())
-        throw S3Error(S3ErrorCode::MalformedXML, "Delete must contain at least one <Object>.");
-    if (keys.size() > 1000)
-        throw S3Error(S3ErrorCode::MalformedXML, "DeleteObjects accepts at most 1000 keys.");
+    if (keys.empty()) throw S3Error(S3ErrorCode::MalformedXML, "Delete must contain at least one <Object>.");
+    if (keys.size() > 1000) throw S3Error(S3ErrorCode::MalformedXML, "DeleteObjects accepts at most 1000 keys.");
 
     auto& backend = router_.resolve(bucket);
     std::vector<std::optional<S3Error>> outcome(keys.size());
@@ -562,8 +545,7 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
     if (auth.policy)
         for (size_t i = 0; i < keys.size(); ++i)
             if (!auth.policy->allows(bucket, keys[i], Action::Delete))
-                outcome[i] =
-                    S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
+                outcome[i] = S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
     // Bounded concurrency (docs/archive/gaps.md §3.9): serial co_await on cloudproxy/duostore means
     // 1000 sequential RTTs. The batch size caps the concurrency hit on a single backend; batches still proceed in order
     constexpr size_t kBatch = 32;

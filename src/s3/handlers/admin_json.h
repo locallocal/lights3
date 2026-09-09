@@ -31,8 +31,7 @@ inline Task<nlohmann::json> read_json_object(http::HttpRequest& req, bool allow_
         for (;;) {
             size_t n = co_await req.body->read(std::span(buf));
             if (n == 0) break;
-            if (text.size() + n > 64 * 1024)
-                throw S3Error(S3ErrorCode::InvalidRequest, "Request body too large.");
+            if (text.size() + n > 64 * 1024) throw S3Error(S3ErrorCode::InvalidRequest, "Request body too large.");
             text.append(reinterpret_cast<const char*>(buf), n);
         }
     }
@@ -46,8 +45,7 @@ inline Task<nlohmann::json> read_json_object(http::HttpRequest& req, bool allow_
     } catch (const nlohmann::json::exception&) {
         throw S3Error(S3ErrorCode::InvalidRequest, "Request body is not valid JSON.");
     }
-    if (!j.is_object())
-        throw S3Error(S3ErrorCode::InvalidRequest, "Request body must be a JSON object.");
+    if (!j.is_object()) throw S3Error(S3ErrorCode::InvalidRequest, "Request body must be a JSON object.");
     co_return j;
 }
 
@@ -65,8 +63,7 @@ inline http::HttpResponse admin_error(const S3Error& e, const http::HttpRequest&
 
 inline uint64_t json_u64(const nlohmann::json& v, const char* field) {
     if (!v.is_number_unsigned() && !(v.is_number_integer() && v.get<int64_t>() >= 0))
-        throw S3Error(S3ErrorCode::InvalidRequest,
-                      std::string(field) + " must be a non-negative integer.");
+        throw S3Error(S3ErrorCode::InvalidRequest, std::string(field) + " must be a non-negative integer.");
     return v.get<uint64_t>();
 }
 

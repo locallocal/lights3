@@ -25,8 +25,7 @@ ListResult apply_listing(const std::vector<std::string>& sorted_keys, const List
 // send clients that loop on IsTruncated into an infinite loop (same as apply_listing's
 // max_keys=0)
 ListPartsResult apply_parts_page(std::vector<PartMeta> sorted, const ListPartsOptions& opt);
-ListUploadsResult apply_uploads_page(std::vector<UploadInfo> sorted,
-                                     const ListUploadsOptions& opt);
+ListUploadsResult apply_uploads_page(std::vector<UploadInfo> sorted, const ListUploadsOptions& opt);
 
 // Marker comparison: the uploads cursor is the (key, upload_id) pair
 inline bool upload_after_marker(const UploadInfo& u, const ListUploadsOptions& opt) {

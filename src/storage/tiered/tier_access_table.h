@@ -62,8 +62,8 @@ public:
             dirty_ = false;
             for (auto& [k, r] : map_) {
                 if (k.find('\t') != std::string::npos || k.find('\n') != std::string::npos) continue;
-                kv.emplace_back(k, std::to_string(r.atime) + "\t" + std::to_string(r.hits) + "\t" +
-                                       std::to_string(r.enrolled));
+                kv.emplace_back(
+                    k, std::to_string(r.atime) + "\t" + std::to_string(r.hits) + "\t" + std::to_string(r.enrolled));
             }
         }
         try {

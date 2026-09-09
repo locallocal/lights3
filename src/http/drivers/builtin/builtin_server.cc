@@ -1,5 +1,6 @@
 // L1: builtin driver — zero-dependency POSIX socket HTTP/1.1, thread-per-connection synchronous model.
-// Demonstrates how a synchronous driver plugs into the adapter layer (coroutines bridged via sync_wait; see docs/http-adapter.md §3.0, docs/concurrency.md §4.2).
+// Demonstrates how a synchronous driver plugs into the adapter layer (coroutines bridged via sync_wait; see
+// docs/http-adapter.md §3.0, docs/concurrency.md §4.2).
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -123,10 +124,10 @@ struct BodyState {
     ConnReader* conn = nullptr;
     Io* io = nullptr;
     driver::ConnCounters* counters = nullptr;
-    bool need_continue = false;   // Expect: 100-continue not yet answered; reply only on first read
+    bool need_continue = false;  // Expect: 100-continue not yet answered; reply only on first read
     bool chunked = false;
-    uint64_t remaining = 0;       // Fixed-length mode: bytes remaining
-    uint64_t chunk_left = 0;      // chunked mode: remaining in the current chunk
+    uint64_t remaining = 0;         // Fixed-length mode: bytes remaining
+    uint64_t chunk_left = 0;        // chunked mode: remaining in the current chunk
     bool after_chunk_data = false;  // Just finished a chunk's data; next line must be CRLF
     bool chunk_eof = false;
     bool error = false;
@@ -144,8 +145,7 @@ struct BodyState {
         // cases like auth failure can reject outright without receiving the body
         if (need_continue) {
             need_continue = false;
-            if (!io->send_all("HTTP/1.1 100 Continue\r\n\r\n", 25))
-                fail("failed to send 100 Continue");
+            if (!io->send_all("HTTP/1.1 100 Continue\r\n\r\n", 25)) fail("failed to send 100 Continue");
         }
         if (!chunked) {
             if (remaining == 0) return 0;
@@ -200,9 +200,7 @@ struct BodyState {
         return n;
     }
 
-    bool at_eof() const {
-        return error || (chunked ? chunk_eof : remaining == 0);
-    }
+    bool at_eof() const { return error || (chunked ? chunk_eof : remaining == 0); }
     // Drains leftover body after the response so the connection can be
     // reused; gives up if too large or on error (the caller then closes the connection)
     bool drain(uint64_t limit) {
@@ -345,8 +343,8 @@ std::optional<bool> sendfile_body(Io& io, HttpResponse& resp, bool chunked, bool
 // continuation comes back to the connection thread through the pump queue --
 // inline when already there. Sends stay on the connection thread: a slow
 // client must never pin a shared pool thread
-Task<bool> stream_body(Io& io, HttpResponse& resp, bool chunked, size_t io_chunk,
-                       PumpExecutor& exec, driver::ConnCounters* counters) {
+Task<bool> stream_body(Io& io, HttpResponse& resp, bool chunked, size_t io_chunk, PumpExecutor& exec,
+                       driver::ConnCounters* counters) {
     auto send = [&](const char* p, size_t n) {
         if (io.send_all(p, n)) return true;
         if (Io::timed_out() && counters) driver::count_timeout(*counters, driver::Phase::Write);
@@ -366,8 +364,7 @@ Task<bool> stream_body(Io& io, HttpResponse& resp, bool chunked, size_t io_chunk
         size_t n = chunk.size();
         if (n == 0) break;
         if (!chunked && resp.content_length && written + n > *resp.content_length) {
-            LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})", written, n,
-                      *resp.content_length);
+            LOG_ERROR("stream body overruns declared Content-Length ({} + {} > {})", written, n, *resp.content_length);
             co_return false;
         }
         if (chunked) {
@@ -380,18 +377,18 @@ Task<bool> stream_body(Io& io, HttpResponse& resp, bool chunked, size_t io_chunk
         written += n;
     }
     if (chunked) co_return send("0\r\n\r\n", 5);
-    // A fixed-length response that wrote too little must not stay keep-alive: the client would read the next response head as the rest of this body
+    // A fixed-length response that wrote too little must not stay keep-alive: the client would read the next response
+    // head as the rest of this body
     if (resp.content_length && written != *resp.content_length) {
-        LOG_ERROR("stream body short of declared Content-Length ({} != {})", written,
-                  *resp.content_length);
+        LOG_ERROR("stream body short of declared Content-Length ({} != {})", written, *resp.content_length);
         co_return false;
     }
     co_return true;
 }
 
 bool write_response(Io& io, HttpResponse& resp, bool head_request, bool keep_alive,
-                    size_t io_chunk = driver::kIoChunkBytes,
-                    driver::ConnCounters* counters = nullptr, bool sendfile_enabled = true) {
+                    size_t io_chunk = driver::kIoChunkBytes, driver::ConnCounters* counters = nullptr,
+                    bool sendfile_enabled = true) {
     // A send that fails with EAGAIN hit write_timeout (roadmap §4.2)
     auto send = [&](const char* p, size_t n) {
         if (io.send_all(p, n)) return true;
@@ -440,8 +437,7 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     }
     if (!got) {
         if (Io::timed_out())
-            driver::count_timeout(sh.counters,
-                                  served == 0 ? driver::Phase::Header : driver::Phase::Idle);
+            driver::count_timeout(sh.counters, served == 0 ? driver::Phase::Header : driver::Phase::Idle);
         return false;
     }
     if (line.empty()) return false;
@@ -491,8 +487,10 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
 
     if (req.headers.has("Connection")) {
         // List header: "Connection: close, Upgrade" is valid; full-equality comparison would miss the close
-        if (req.headers.has_token("Connection", "close")) keep_alive = false;
-        else if (req.headers.has_token("Connection", "keep-alive")) keep_alive = true;
+        if (req.headers.has_token("Connection", "close"))
+            keep_alive = false;
+        else if (req.headers.has_token("Connection", "keep-alive"))
+            keep_alive = true;
     }
 
     // Body framing: CL/TE conflict, duplicate CL, and invalid values are all
@@ -523,16 +521,17 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     PumpExecutor conn_exec;
     if (has_body || content_length)
         req.body = std::make_unique<SocketBodyReader>(&body_state, content_length, &conn_exec);
-    if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue"))
-        body_state.need_continue = true;
+    if (auto e = req.headers.get("Expect"); e && HeaderMap::ieq(*e, "100-continue")) body_state.need_continue = true;
 
     bool head_request = req.method == "HEAD";
     HttpResponse resp;
     try {
-        // Pumping variant: while waiting, the connection thread runs the conn_exec queue, taking over the body's blocking reads
+        // Pumping variant: while waiting, the connection thread runs the conn_exec queue, taking over the body's
+        // blocking reads
         resp = sync_wait_pumping(conn_exec, sh.handler(std::move(req)));
     } catch (const std::exception& e) {
-        // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2: 500 + InternalError XML)
+        // L2 catches all exceptions; reaching here means something failed outside L2 (contract 2: 500 + InternalError
+        // XML)
         resp = driver::internal_error_response(e.what());
         keep_alive = false;
     }
@@ -542,21 +541,22 @@ bool serve_one(ConnShared& sh, Io& io, ConnReader& reader, const std::string& pe
     // parsed as the next request), so the connection must close; if
     // 100-continue was never sent, the client may never send a body — do not
     // wait blindly, close as well
-    if (body_state.error) keep_alive = false;
+    if (body_state.error)
+        keep_alive = false;
     else if (!body_state.at_eof()) {
-        if (body_state.need_continue) keep_alive = false;
-        else if (keep_alive) keep_alive = body_state.drain(sh.cfg.drain_limit);
+        if (body_state.need_continue)
+            keep_alive = false;
+        else if (keep_alive)
+            keep_alive = body_state.drain(sh.cfg.drain_limit);
     }
 
     // Keep-alive budget (http.max_requests_per_connection): the last allowed
     // response already announces Connection: close
-    if (keep_alive && driver::keepalive_budget_exhausted(served + 1,
-                                                         sh.cfg.max_requests_per_connection)) {
+    if (keep_alive && driver::keepalive_budget_exhausted(served + 1, sh.cfg.max_requests_per_connection)) {
         keep_alive = false;
         sh.counters.keepalive_closes.fetch_add(1, std::memory_order_relaxed);
     }
-    if (!write_response(io, resp, head_request, keep_alive, sh.cfg.io_chunk_size, &sh.counters,
-                        sh.cfg.sendfile))
+    if (!write_response(io, resp, head_request, keep_alive, sh.cfg.io_chunk_size, &sh.counters, sh.cfg.sendfile))
         return false;
     return keep_alive;
 }
@@ -593,7 +593,8 @@ void handle_connection(ConnShared& sh, int fd, const std::string& peer) {
     }
 
     ConnReader reader;
-    reader.io = &io;  // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset 16KiB)
+    reader.io = &io;  // Field-by-field assignment: aggregate init would value-initialize the unlisted buf (memset
+                      // 16KiB)
     bool keep_alive = true;
     int served = 0;
     while (keep_alive && !sh.stopping.load()) {
@@ -621,8 +622,7 @@ public:
                 if (!shared_->tls_ctx) throw std::runtime_error("SSL_CTX_new failed");
                 shared_->tls->configure(shared_->tls_ctx);
             } catch (const std::exception& e) {
-                throw std::runtime_error(std::string("builtin driver: failed to set up TLS: ") +
-                                         e.what());
+                throw std::runtime_error(std::string("builtin driver: failed to set up TLS: ") + e.what());
             }
             // SSL_write goes through write(2) (no MSG_NOSIGNAL): a client that
             // vanished mid-response must not SIGPIPE the process. The app installs
@@ -653,8 +653,7 @@ public:
         sockaddr_storage ss{};
         socklen_t sslen = 0;
         int family = AF_INET;
-        if (auto* v6 = reinterpret_cast<sockaddr_in6*>(&ss);
-            inet_pton(AF_INET6, addr.c_str(), &v6->sin6_addr) == 1) {
+        if (auto* v6 = reinterpret_cast<sockaddr_in6*>(&ss); inet_pton(AF_INET6, addr.c_str(), &v6->sin6_addr) == 1) {
             family = AF_INET6;
             v6->sin6_family = AF_INET6;
             v6->sin6_port = htons(port);
@@ -682,12 +681,11 @@ public:
         sockaddr_storage bound{};
         socklen_t blen = sizeof(bound);
         getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound), &blen);
-        port_ = ntohs(bound.ss_family == AF_INET6
-                          ? reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port
-                          : reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
+        port_ = ntohs(bound.ss_family == AF_INET6 ? reinterpret_cast<sockaddr_in6*>(&bound)->sin6_port
+                                                  : reinterpret_cast<sockaddr_in*>(&bound)->sin_port);
         if (shared_->tls) shared_->tls->start_watch(shared_->cfg.tls_reload_interval_sec);
-        LOG_INFO("builtin http{} server listening on {}:{}{}", shared_->tls ? "s" : "", addr,
-                 port_, shared_->tls ? std::string(" (tls: ") + shared_->tls->summary() + ")" : "");
+        LOG_INFO("builtin http{} server listening on {}:{}{}", shared_->tls ? "s" : "", addr, port_,
+                 shared_->tls ? std::string(" (tls: ") + shared_->tls->summary() + ")" : "");
     }
 
     uint16_t bound_port() const override { return port_; }
@@ -707,7 +705,8 @@ public:
                 if (sh.stopping.load()) break;
                 if (errno == EINTR || errno == ECONNABORTED) continue;
                 if (errno == EMFILE || errno == ENFILE) {
-                    // fd exhaustion is transient (in-flight connections will release some); back off and continue rather than stop accepting
+                    // fd exhaustion is transient (in-flight connections will release some); back off and continue
+                    // rather than stop accepting
                     LOG_WARN("accept: {}, throttling", strerror(errno));
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
                     continue;
@@ -721,11 +720,9 @@ public:
             }
             char ip[INET6_ADDRSTRLEN] = {0};
             if (peer.ss_family == AF_INET6)
-                inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&peer)->sin6_addr, ip,
-                          sizeof(ip));
+                inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6*>(&peer)->sin6_addr, ip, sizeof(ip));
             else
-                inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&peer)->sin_addr, ip,
-                          sizeof(ip));
+                inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(&peer)->sin_addr, ip, sizeof(ip));
             {
                 std::lock_guard lk(sh.m);
                 // Hard cap on concurrent connections (cfg.max_connections,
@@ -733,8 +730,7 @@ public:
                 // thread-per-connection model's one-thread-per-connection can
                 // exhaust memory/thread counts
                 if (sh.active >= sh.cfg.max_connections) {
-                    LOG_WARN("connection limit ({}) reached, rejecting {}",
-                             sh.cfg.max_connections, ip);
+                    LOG_WARN("connection limit ({}) reached, rejecting {}", sh.cfg.max_connections, ip);
                     sh.counters.rejected_limit.fetch_add(1, std::memory_order_relaxed);
                     ::close(fd);
                     continue;
@@ -773,12 +769,10 @@ public:
         // after the server is destroyed — no dangling references
         std::unique_lock lk(sh.m);
         for (int cfd : sh.idle) ::shutdown(cfd, SHUT_RDWR);
-        if (!sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_grace_sec),
-                            [&] { return sh.active == 0; })) {
+        if (!sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_grace_sec), [&] { return sh.active == 0; })) {
             LOG_WARN("forcing {} connection(s) closed on shutdown", sh.active);
             for (int fd : sh.conns) ::shutdown(fd, SHUT_RDWR);
-            sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_force_wait_sec),
-                           [&] { return sh.active == 0; });
+            sh.cv.wait_for(lk, std::chrono::seconds(sh.cfg.shutdown_force_wait_sec), [&] { return sh.active == 0; });
         }
         LOG_INFO("builtin http server stopped");
     }
@@ -798,9 +792,8 @@ private:
 }  // namespace
 
 void register_builtin_driver() {
-    HttpServerFactory::register_driver("builtin", [](const HttpConfig& cfg) {
-        return std::make_unique<BuiltinServer>(cfg);
-    });
+    HttpServerFactory::register_driver("builtin",
+                                       [](const HttpConfig& cfg) { return std::make_unique<BuiltinServer>(cfg); });
 }
 
 }  // namespace lights3::http

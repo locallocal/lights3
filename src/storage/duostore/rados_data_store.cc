@@ -28,8 +28,7 @@ namespace {
 // librados returns negative errno; unified InternalError exit (modeled on the fs/rocks throw_status, §6.3)
 [[noreturn]] void throw_rados(const char* what, int ret) {
     LOG_ERROR("duostore-rados: {} failed: {} (errno {})", what, std::strerror(-ret), -ret);
-    throw S3Error(S3ErrorCode::InternalError,
-                  std::string("duostore-rados: ") + what + " failed");
+    throw S3Error(S3ErrorCode::InternalError, std::string("duostore-rados: ") + what + " failed");
 }
 
 rados_ioctx_t io(const std::shared_ptr<RadosDataStore::Conn>& c);  // fwd (defined below)
@@ -99,15 +98,11 @@ struct AioPending {
     static void on_complete(rados_completion_t c, void* arg) {
         auto* p = static_cast<AioPending*>(arg);
         p->ret.store(rados_aio_get_return_value(c), std::memory_order_relaxed);
-        if (p->lat)
-            p->lat->observe(
-                std::chrono::duration<double>(std::chrono::steady_clock::now() - p->t0)
-                    .count());
+        if (p->lat) p->lat->observe(std::chrono::duration<double>(std::chrono::steady_clock::now() - p->t0).count());
         IExecutor* ex = p->ex;
         uintptr_t prev = p->state.exchange(kDone, std::memory_order_acq_rel);
         p->unref();  // must not touch p after this: a parked waiter may release the last reference once resumed
-        if (prev)
-            ex->post(std::coroutine_handle<>::from_address(reinterpret_cast<void*>(prev)));
+        if (prev) ex->post(std::coroutine_handle<>::from_address(reinterpret_cast<void*>(prev)));
     }
 };
 
@@ -117,14 +112,11 @@ struct AioPending {
 // handling belongs to the caller
 struct AioAwait {
     AioPending* p;
-    bool await_ready() const noexcept {
-        return p->state.load(std::memory_order_acquire) == AioPending::kDone;
-    }
+    bool await_ready() const noexcept { return p->state.load(std::memory_order_acquire) == AioPending::kDone; }
     bool await_suspend(std::coroutine_handle<> h) noexcept {
         uintptr_t expected = 0;
-        return p->state.compare_exchange_strong(
-            expected, reinterpret_cast<uintptr_t>(h.address()), std::memory_order_release,
-            std::memory_order_acquire);
+        return p->state.compare_exchange_strong(expected, reinterpret_cast<uintptr_t>(h.address()),
+                                                std::memory_order_release, std::memory_order_acquire);
     }
     int await_resume() const noexcept { return p->ret.load(std::memory_order_relaxed); }
 };
@@ -153,22 +145,23 @@ bool parse_object_name(const char* name, uint64_t& id) {
 
 // ---------- construction / shutdown ----------
 
-RadosDataStore::RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool> pool,
-                               FileIdAlloc alloc)
-    : conn_(std::make_shared<Conn>()), opt_(std::move(opt)), pool_(std::move(pool)),
-      alloc_(std::move(alloc)), exec_(*pool_),
+RadosDataStore::RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc)
+    : conn_(std::make_shared<Conn>()),
+      opt_(std::move(opt)),
+      pool_(std::move(pool)),
+      alloc_(std::move(alloc)),
+      exec_(*pool_),
       buffer_sem_(std::max<long>(1, long(opt_.buffer_total / opt_.chunk_size)), &exec_) {
-    // op latency/error metrics (C4, §10): registered at construction so zero values are visible; an empty scope yields an isolated instance
+    // op latency/error metrics (C4, §10): registered at construction so zero values are visible; an empty scope yields
+    // an isolated instance
     const std::vector<double> bounds{0.001, 0.005, 0.02, 0.1, 0.5, 2, 10};
     auto lat = [&](const char* op) {
-        return opt_.metrics.histogram(
-            "lights3_duostore_rados_op_duration_seconds",
-            "RADOS data op latency from submit to completion callback", bounds, {{"op", op}});
+        return opt_.metrics.histogram("lights3_duostore_rados_op_duration_seconds",
+                                      "RADOS data op latency from submit to completion callback", bounds, {{"op", op}});
     };
     auto err = [&](const char* op) {
-        return opt_.metrics.counter(
-            "lights3_duostore_rados_op_errors_total",
-            "RADOS data op failures (idempotent -ENOENT on remove excluded)", {{"op", op}});
+        return opt_.metrics.counter("lights3_duostore_rados_op_errors_total",
+                                    "RADOS data op failures (idempotent -ENOENT on remove excluded)", {{"op", op}});
     };
     m_lat_write_ = lat("write_full");
     m_lat_read_ = lat("read");
@@ -178,33 +171,33 @@ RadosDataStore::RadosDataStore(RadosDataOptions opt, std::shared_ptr<ThreadPool>
     m_err_remove_ = err("remove");
     m_err_scan_ = err("scan");
 
-    // Connection sequence (§6.1): failure means construction failure — configuration/environment errors surface at startup (fail fast)
+    // Connection sequence (§6.1): failure means construction failure — configuration/environment errors surface at
+    // startup (fail fast)
     auto fail = [this](const char* what, int ret) {
         conn_->shutdown();
-        throw std::runtime_error(std::string("duostore-rados: ") + what + " failed: " +
-                                 std::strerror(-ret));
+        throw std::runtime_error(std::string("duostore-rados: ") + what + " failed: " + std::strerror(-ret));
     };
     rados_t cluster = nullptr;
     int r = rados_create2(&cluster, "ceph", opt_.client_name.c_str(), 0);
     if (r < 0) fail("rados_create2", r);
     conn_->cluster = cluster;
-    if ((r = rados_conf_read_file(cluster, opt_.conf_path.c_str())) < 0)
-        fail("rados_conf_read_file", r);
+    if ((r = rados_conf_read_file(cluster, opt_.conf_path.c_str())) < 0) fail("rados_conf_read_file", r);
     std::string mount_timeout = std::to_string(opt_.connect_timeout_sec);
     if ((r = rados_conf_set(cluster, "client_mount_timeout", mount_timeout.c_str())) < 0)
         fail("rados_conf_set client_mount_timeout", r);
     if (opt_.op_timeout_sec > 0) {
-        // When non-zero, a -ETIMEDOUT op's outcome is indeterminate — the writer enters failed state to handle it (§4.4/§6.4)
+        // When non-zero, a -ETIMEDOUT op's outcome is indeterminate — the writer enters failed state to handle it
+        // (§4.4/§6.4)
         std::string op_timeout = std::to_string(opt_.op_timeout_sec);
         if ((r = rados_conf_set(cluster, "rados_osd_op_timeout", op_timeout.c_str())) < 0)
             fail("rados_conf_set rados_osd_op_timeout", r);
     }
     if ((r = rados_connect(cluster)) < 0) fail("rados_connect", r);
     rados_ioctx_t ioctx = nullptr;
-    if ((r = rados_ioctx_create(cluster, opt_.pool.c_str(), &ioctx)) < 0)
-        fail("rados_ioctx_create", r);
+    if ((r = rados_ioctx_create(cluster, opt_.pool.c_str(), &ioctx)) < 0) fail("rados_ioctx_create", r);
     conn_->ioctx = ioctx;
-    // ioctx attributes (namespace) never change after this — the thread-safety precondition for process-wide sharing of a single ioctx (§6.1)
+    // ioctx attributes (namespace) never change after this — the thread-safety precondition for process-wide sharing of
+    // a single ioctx (§6.1)
     rados_ioctx_set_namespace(ioctx, opt_.ns.c_str());
 }
 
@@ -242,8 +235,7 @@ constexpr char kOwnerXattr[] = "lights3.owner";
 
 class RadosChunkWriter final : public DataWriter {
 public:
-    RadosChunkWriter(RadosDataStore* store, std::string owner)
-        : store_(store), owner_(std::move(owner)) {}
+    RadosChunkWriter(RadosDataStore* store, std::string owner) : store_(store), owner_(std::move(owner)) {}
 
     // Destruction without finish = discard (§4.3): does not wait for the in-flight
     // ticket — its buffer/permit are released when the completion callback lands
@@ -261,7 +253,8 @@ public:
     Task<void> write(std::span<const std::byte> buf) override {
         require_usable();
         if (!permit_) {
-            // First write acquires a buffer permit; when exhausted it suspends, and backpressure propagates along the coroutine chain back to the socket read loop (§4.2)
+            // First write acquires a buffer permit; when exhausted it suspends, and backpressure propagates along the
+            // coroutine chain back to the socket read loop (§4.2)
             permit_ = co_await store_->buffer_sem_.acquire();
             buf_.reserve(store_->opt_.chunk_size);
         }
@@ -276,21 +269,22 @@ public:
     Task<DataRef> finish() override {
         require_usable();
         if (pending_) co_await harvest_pending();
-        // Small object / final slice: the degenerate buffered-until-EOF case (§4.2), the tail slice waits synchronously; total length 0 = empty DataRef
+        // Small object / final slice: the degenerate buffered-until-EOF case (§4.2), the tail slice waits
+        // synchronously; total length 0 = empty DataRef
         if (!buf_.empty()) {
             co_await start_flush();
             co_await harvest_pending();
         }
         finished_ = true;
-        pinned_.clear();  // unpin responsibility transfers to the caller with the DataRef (same semantics as the fs version)
+        pinned_.clear();  // unpin responsibility transfers to the caller with the DataRef (same semantics as the fs
+                          // version)
         co_return DataRef{std::move(extents_)};
     }
 
 private:
     void require_usable() {
         if (finished_ || failed_)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore-rados: writer reused after finish/failure");
+            throw S3Error(S3ErrorCode::InternalError, "duostore-rados: writer reused after finish/failure");
     }
 
     // Buffer full: harvest the previous ticket (at most 1 in flight, so extent
@@ -311,7 +305,8 @@ private:
             buf_ = {};
             buf_.reserve(store_->opt_.chunk_size);
         } else {
-            co_await harvest_pending();  // serial degradation: wait for this slice to land, reclaim the buffer, continue
+            co_await harvest_pending();  // serial degradation: wait for this slice to land, reclaim the buffer,
+                                         // continue
             permit_ = std::move(spare_permit_);
             buf_ = std::move(spare_);
         }
@@ -358,17 +353,14 @@ private:
             // is atomic — data and the owner xattr are either both present or both
             // absent, never the intermediate "object without ownership" state
             rados_write_op_t op = rados_create_write_op();
-            rados_write_op_write_full(op, reinterpret_cast<const char*>(p->data.data()),
-                                      p->data.size());
+            rados_write_op_write_full(op, reinterpret_cast<const char*>(p->data.data()), p->data.size());
             rados_write_op_setxattr(op, kOwnerXattr, owner_.data(), owner_.size());
-            r = rados_aio_write_op_operate(op, ctx, p->comp,
-                                           RadosDataStore::object_name(p->file_id).c_str(),
-                                           nullptr, 0);
+            r = rados_aio_write_op_operate(op, ctx, p->comp, RadosDataStore::object_name(p->file_id).c_str(), nullptr,
+                                           0);
             rados_release_write_op(op);
         } else {
-            r = rados_aio_write_full(ctx, RadosDataStore::object_name(p->file_id).c_str(),
-                                     p->comp, reinterpret_cast<const char*>(p->data.data()),
-                                     p->data.size());
+            r = rados_aio_write_full(ctx, RadosDataStore::object_name(p->file_id).c_str(), p->comp,
+                                     reinterpret_cast<const char*>(p->data.data()), p->data.size());
         }
         if (r < 0) {
             p->unref();
@@ -406,9 +398,9 @@ private:
     std::vector<Extent> extents_;
     AsyncSemaphore::Permit permit_;
     AsyncSemaphore::Permit spare_permit_;
-    AioPending* pending_ = nullptr;  // in-flight ticket (at most 1: receiving slice N+1 while writing slice N)
-    std::vector<uint64_t> pinned_;   // write-side pins this writer established (cleared after finish)
-    std::string owner_;              // each slice object gets kOwnerXattr on write (empty = skip)
+    AioPending* pending_ = nullptr;          // in-flight ticket (at most 1: receiving slice N+1 while writing slice N)
+    std::vector<uint64_t> pinned_;           // write-side pins this writer established (cleared after finish)
+    std::string owner_;                      // each slice object gets kOwnerXattr on write (empty = skip)
     uint64_t run_next_ = 0, run_limit_ = 0;  // this session's contiguous id run (§3.9 batch allocation)
     uint32_t run_len_ = 0;
     bool finished_ = false;
@@ -428,15 +420,19 @@ namespace {
 
 class RadosExtentReader final : public http::BodyReader {
 public:
-    RadosExtentReader(std::shared_ptr<RadosDataStore::Conn> conn,
-                      std::shared_ptr<ThreadPool> pool, bool verify_crc,
-                      std::function<void()> on_corruption,
-                      std::shared_ptr<MetricHistogram> lat, std::shared_ptr<MetricCounter> err,
-                      std::vector<Extent> extents, uint64_t first, uint64_t last)
-        : conn_(std::move(conn)), pool_(std::move(pool)), exec_(*pool_),
-          verify_crc_(verify_crc), on_corruption_(std::move(on_corruption)),
-          lat_(std::move(lat)), err_(std::move(err)), extents_(std::move(extents)),
-          remaining_(last - first + 1), total_(remaining_) {
+    RadosExtentReader(std::shared_ptr<RadosDataStore::Conn> conn, std::shared_ptr<ThreadPool> pool, bool verify_crc,
+                      std::function<void()> on_corruption, std::shared_ptr<MetricHistogram> lat,
+                      std::shared_ptr<MetricCounter> err, std::vector<Extent> extents, uint64_t first, uint64_t last)
+        : conn_(std::move(conn)),
+          pool_(std::move(pool)),
+          exec_(*pool_),
+          verify_crc_(verify_crc),
+          on_corruption_(std::move(on_corruption)),
+          lat_(std::move(lat)),
+          err_(std::move(err)),
+          extents_(std::move(extents)),
+          remaining_(last - first + 1),
+          total_(remaining_) {
         uint64_t off = first;
         while (idx_ < extents_.size() && off >= extents_[idx_].length) {
             off -= extents_[idx_].length;
@@ -453,7 +449,8 @@ public:
         rados_ioctx_t ctx = io(conn_);
         const Extent& e = extents_[idx_];
         if (at_start_) {
-            // crc verification is only feasible when reading the full extent from start to end (a Range hitting the middle cannot be verified, §5)
+            // crc verification is only feasible when reading the full extent from start to end (a Range hitting the
+            // middle cannot be verified, §5)
             crc_active_ = verify_crc_ && cur_off_ == 0 && remaining_ >= e.length;
             crc_acc_ = 0;
             at_start_ = false;
@@ -467,9 +464,11 @@ public:
         // the remote completion still write through freed memory
         p->data.resize(want);
         int r = fault::check("rados.submit");
-        if (r) r = -r;
-        else r = rados_aio_read(ctx, RadosDataStore::object_name(e.file_id).c_str(), p->comp,
-                                reinterpret_cast<char*>(p->data.data()), want, cur_off_);
+        if (r)
+            r = -r;
+        else
+            r = rados_aio_read(ctx, RadosDataStore::object_name(e.file_id).c_str(), p->comp,
+                               reinterpret_cast<char*>(p->data.data()), want, cur_off_);
         if (r < 0) {
             p->unref();
             p->unref();
@@ -482,8 +481,7 @@ public:
         if (n == -ENOENT) {
             // refs present but object missing = sign of data loss, or pin/grace failure (§6.3; same as main doc §10)
             err_->inc();
-            LOG_ERROR("duostore-rados: extent object {} missing",
-                      RadosDataStore::object_name(e.file_id));
+            LOG_ERROR("duostore-rados: extent object {} missing", RadosDataStore::object_name(e.file_id));
             throw S3Error(S3ErrorCode::InternalError, "duostore-rados: extent object missing");
         }
         if (n < 0) {
@@ -492,8 +490,7 @@ public:
         }
         if (n == 0) {
             err_->inc();
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore-rados: extent shorter than manifest");
+            throw S3Error(S3ErrorCode::InternalError, "duostore-rados: extent shorter than manifest");
         }
         if (crc_active_) crc_acc_ = codec::crc32c_update(crc_acc_, buf.first(size_t(n)));
         cur_off_ += uint64_t(n);
@@ -542,16 +539,14 @@ Task<std::unique_ptr<DataWriter>> RadosDataStore::open_writer(WriteHint hint) {
     co_return std::make_unique<RadosChunkWriter>(this, std::move(hint.owner));
 }
 
-Task<std::unique_ptr<http::BodyReader>> RadosDataStore::open_reader(DataRef ref, uint64_t first,
-                                                                    uint64_t last) {
+Task<std::unique_ptr<http::BodyReader>> RadosDataStore::open_reader(DataRef ref, uint64_t first, uint64_t last) {
     uint64_t total = ref.total();
     if (first > last || last >= total)
         throw S3Error(S3ErrorCode::InternalError,
                       "duostore-rados: reader range beyond manifest");  // caller already ran resolve_range
-    io(conn_);  // close guard
-    co_return std::make_unique<RadosExtentReader>(conn_, pool_, opt_.verify_chunk_crc,
-                                                  opt_.on_corruption, m_lat_read_, m_err_read_,
-                                                  std::move(ref.extents), first, last);
+    io(conn_);                                                          // close guard
+    co_return std::make_unique<RadosExtentReader>(conn_, pool_, opt_.verify_chunk_crc, opt_.on_corruption, m_lat_read_,
+                                                  m_err_read_, std::move(ref.extents), first, last);
 }
 
 Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
@@ -570,11 +565,14 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
         int first_err = 0;
         for (; i < extents.size() && n < kWindow; ++i) {
             const auto& e = extents[i];
-            if (e.kind != Extent::Kind::kRados) continue;  // foreign-kind extents (leftovers from a data engine switch) do not belong to this store
+            if (e.kind != Extent::Kind::kRados)
+                continue;  // foreign-kind extents (leftovers from a data engine switch) do not belong to this store
             AioPending* p = make_pending(exec_, m_lat_remove_);
             int r = fault::check("rados.submit");
-            if (r) r = -r;
-            else r = rados_aio_remove(ctx, object_name(e.file_id).c_str(), p->comp);
+            if (r)
+                r = -r;
+            else
+                r = rados_aio_remove(ctx, object_name(e.file_id).c_str(), p->comp);
             if (r < 0) {
                 p->unref();
                 p->unref();
@@ -606,13 +604,15 @@ Task<void> RadosDataStore::remove(std::span<const Extent> extents) {
 // EC/compression on the pool rather than expect gateway aggregation
 
 Task<void> RadosDataStore::remove_pack(uint64_t pack_id) {
-    // No packs: pack_stats is always empty, so this is never actually called (§3.3); explicit no-op rather than an interface default
+    // No packs: pack_stats is always empty, so this is never actually called (§3.3); explicit no-op rather than an
+    // interface default
     (void)pack_id;
     co_return;
 }
 
 Task<GcRewrite> RadosDataStore::rewrite_pack(uint64_t pack_id) {
-    // No packs: meta never has a kRados pack record, the compaction candidate set is always empty, so this is never actually called (§3.3)
+    // No packs: meta never has a kRados pack record, the compaction candidate set is always empty, so this is never
+    // actually called (§3.3)
     (void)pack_id;
     co_return GcRewrite{};
 }
@@ -639,7 +639,8 @@ Task<void> RadosDataStore::scan_chunks(
         if (!parse_object_name(entry, id)) continue;
         uint64_t size = 0;
         time_t mtime = 0;
-        // Second-resolution mtime suffices (grace determination is minute-scale); stat failure = concurrent-remove race, tolerated and skipped
+        // Second-resolution mtime suffices (grace determination is minute-scale); stat failure = concurrent-remove
+        // race, tolerated and skipped
         if (rados_stat(ctx, entry, &size, &mtime) != 0) continue;
         cb(id, int64_t(mtime) * 1000, size);
     }

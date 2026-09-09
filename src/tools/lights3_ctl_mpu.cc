@@ -34,8 +34,7 @@ struct Upload {
 };
 
 // Every page of ListMultipartUploads under prefix; throws S3Error on a non-200
-std::vector<Upload> list_all(SignedClient& cli, const std::string& bucket,
-                             const std::string& prefix) {
+std::vector<Upload> list_all(SignedClient& cli, const std::string& bucket, const std::string& prefix) {
     std::vector<Upload> out;
     std::string key_marker, id_marker;
     auto now = std::chrono::system_clock::now();
@@ -84,8 +83,8 @@ std::string human_age(int64_t sec) {
     return std::to_string(sec / 86400) + "d";
 }
 
-bool read_common(const std::shared_ptr<ccmd::c_command>& c, std::string& bucket,
-                 std::string& prefix, int64_t& older_sec, std::string& output) {
+bool read_common(const std::shared_ptr<ccmd::c_command>& c, std::string& bucket, std::string& prefix,
+                 int64_t& older_sec, std::string& output) {
     prefix = c->var<std::string>("prefix");
     output = c->var<std::string>("output");
     if (output != "text" && output != "json") {
@@ -138,8 +137,8 @@ void print_uploads(const std::vector<Upload>& ups, const std::string& output, co
         return;
     }
     for (auto& u : ups)
-        printf("%-24s %8s  %s  %s\n", u.initiated.c_str(), human_age(u.age_sec).c_str(),
-               u.upload_id.c_str(), u.key.c_str());
+        printf("%-24s %8s  %s  %s\n", u.initiated.c_str(), human_age(u.age_sec).c_str(), u.upload_id.c_str(),
+               u.key.c_str());
     printf("%zu upload(s)\n", ups.size());
 }
 
@@ -149,8 +148,7 @@ std::shared_ptr<ccmd::c_command> make_list() {
         "List in-progress multipart uploads of a bucket (every page), one line per upload: "
         "initiated, age, upload id, key. --older-than / --prefix narrow the set — the same "
         "selection `abort --all` acts on.",
-        "list in-progress multipart uploads.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "list in-progress multipart uploads.", [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string bucket, prefix, output;
             int64_t older = 0;
             if (!read_common(c, bucket, prefix, older, output)) return;
@@ -175,8 +173,7 @@ std::shared_ptr<ccmd::c_command> make_abort() {
         "Abort multipart uploads: one upload given as <key> <upload-id>, or --all for every "
         "upload the --prefix / --older-than selection matches (zombie cleanup). Prints one "
         "line per aborted upload; a 404 (already gone) counts as done.",
-        "abort multipart uploads.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "abort multipart uploads.", [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string bucket, prefix, output;
             int64_t older = 0;
             if (!read_common(c, bucket, prefix, older, output)) return;
@@ -188,22 +185,24 @@ std::shared_ptr<ccmd::c_command> make_abort() {
             }
             run_admin(c, [&](SignedClient& cli) {
                 std::vector<Upload> targets;
-                if (all) targets = select(list_all(cli, bucket, prefix), older);
-                else targets.push_back({c->args()[1], c->args()[2], "", -1});
+                if (all)
+                    targets = select(list_all(cli, bucket, prefix), older);
+                else
+                    targets.push_back({c->args()[1], c->args()[2], "", -1});
                 int rc = 0;
                 size_t aborted = 0;
                 for (auto& u : targets) {
-                    auto r = cli.del("/" + util::aws_uri_encode(bucket, true) + "/" +
-                                         util::aws_uri_encode(u.key, false),
-                                     "uploadId=" + util::aws_uri_encode(u.upload_id, true));
+                    auto r = cli.del(
+                        "/" + util::aws_uri_encode(bucket, true) + "/" + util::aws_uri_encode(u.key, false),
+                        "uploadId=" + util::aws_uri_encode(u.upload_id, true));
                     if (r && (r->status == 204 || r->status == 404)) {
                         ++aborted;
                         if (output == "text") printf("aborted %s %s\n", u.upload_id.c_str(), u.key.c_str());
                     } else {
                         rc = 1;
-                        fprintf(stderr, "lights3-ctl: abort %s %s: %s\n", u.upload_id.c_str(), u.key.c_str(),
-                                r ? ("HTTP " + std::to_string(r->status)).c_str()
-                                  : httplib::to_string(r.error()).c_str());
+                        fprintf(
+                            stderr, "lights3-ctl: abort %s %s: %s\n", u.upload_id.c_str(), u.key.c_str(),
+                            r ? ("HTTP " + std::to_string(r->status)).c_str() : httplib::to_string(r.error()).c_str());
                     }
                 }
                 if (output == "json") {
@@ -234,8 +233,7 @@ std::shared_ptr<ccmd::c_command> make_mpu() {
         "AbortMultipartUpload): list in-progress uploads with their age, abort one or every "
         "stale one (roadmap §6.2). Works with any credential allowed on the bucket. Options "
         "must follow the leaf subcommand as --name=value.",
-        "list / abort multipart uploads.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "list / abort multipart uploads.", [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;
         });

@@ -29,8 +29,7 @@ std::string cors_xml(const std::vector<CorsRule>& rules) {
         for (auto& m : r.allowed_methods) x.element("AllowedMethod", m);
         for (auto& h : r.allowed_headers) x.element("AllowedHeader", h);
         for (auto& e : r.expose_headers) x.element("ExposeHeader", e);
-        if (r.max_age_seconds >= 0)
-            x.element("MaxAgeSeconds", static_cast<uint64_t>(r.max_age_seconds));
+        if (r.max_age_seconds >= 0) x.element("MaxAgeSeconds", static_cast<uint64_t>(r.max_age_seconds));
         x.close();
     }
     x.close();
@@ -55,8 +54,7 @@ std::vector<CorsRule> parse_cors_xml(const std::string& body) {
     for (auto& child : root.children) {
         if (child.name != "CORSRule") continue;
         if (rules.size() >= 100)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "The CORS configuration may contain at most 100 rules.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "The CORS configuration may contain at most 100 rules.");
         CorsRule r;
         r.id = child.get("ID");
         for (auto& e : child.children) {
@@ -70,7 +68,8 @@ std::vector<CorsRule> parse_cors_xml(const std::string& body) {
                 if (!known)
                     throw S3Error(S3ErrorCode::InvalidRequest,
                                   "Found unsupported HTTP method in CORS config. "
-                                  "Unsupported method is " + e.text);
+                                  "Unsupported method is " +
+                                      e.text);
                 r.allowed_methods.push_back(e.text);
             } else if (e.name == "AllowedHeader") {
                 check_single_wildcard("AllowedHeader", e.text);
@@ -80,8 +79,9 @@ std::vector<CorsRule> parse_cors_xml(const std::string& body) {
             } else if (e.name == "ExposeHeader") {
                 if (e.text.find('*') != std::string::npos)
                     throw S3Error(S3ErrorCode::InvalidRequest,
-                                  "ExposeHeader \"" + e.text + "\" contains wildcard. We "
-                                  "currently do not support wildcard for ExposeHeader.");
+                                  "ExposeHeader \"" + e.text +
+                                      "\" contains wildcard. We "
+                                      "currently do not support wildcard for ExposeHeader.");
                 r.expose_headers.push_back(e.text);
             }
         }
@@ -100,8 +100,7 @@ std::vector<CorsRule> parse_cors_xml(const std::string& body) {
         rules.push_back(std::move(r));
     }
     if (rules.empty())
-        throw S3Error(S3ErrorCode::MalformedXML,
-                      "The CORS configuration must contain at least one CORSRule.");
+        throw S3Error(S3ErrorCode::MalformedXML, "The CORS configuration must contain at least one CORSRule.");
     return rules;
 }
 
@@ -117,9 +116,12 @@ std::vector<std::string> parse_request_headers(const http::HttpRequest& req) {
         cur.clear();
     };
     for (char c : *v) {
-        if (c == ',') flush();
-        else if ((c == ' ' || c == '\t') && cur.empty()) continue;
-        else cur.push_back(http::HeaderMap::lower(c));
+        if (c == ',')
+            flush();
+        else if ((c == ' ' || c == '\t') && cur.empty())
+            continue;
+        else
+            cur.push_back(http::HeaderMap::lower(c));
     }
     flush();
     return out;
@@ -151,14 +153,11 @@ void require_root(const std::shared_ptr<CredentialStore>& store, std::string_vie
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::get_bucket_cors(std::string bucket,
-                                                    const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::get_bucket_cors(std::string bucket, const RequestAuth& auth) {
     require_root(cred_store_, auth.access_key);
     auto snap = cors_store_ ? cors_store_->snapshot() : CorsStore::Snapshot{};
     const auto* rules = CorsStore::find(snap, bucket);
-    if (!rules)
-        throw S3Error(S3ErrorCode::NoSuchCORSConfiguration,
-                      "The CORS configuration does not exist", bucket);
+    if (!rules) throw S3Error(S3ErrorCode::NoSuchCORSConfiguration, "The CORS configuration does not exist", bucket);
     http::HttpResponse resp;
     resp.headers.set("Content-Type", "application/xml");
     resp.small_body = cors_xml(*rules);
@@ -169,28 +168,23 @@ Task<http::HttpResponse> S3Service::put_bucket_cors(http::HttpRequest& req, std:
                                                     const RequestAuth& auth) {
     require_root(cred_store_, auth.access_key);
     if (!cors_store_)
-        throw S3Error(S3ErrorCode::InvalidRequest,
-                      "Dynamic CORS configuration is not available on this deployment.");
+        throw S3Error(S3ErrorCode::InvalidRequest, "Dynamic CORS configuration is not available on this deployment.");
     // AWS parity: configuring CORS on a bucket that does not exist is NoSuchBucket
     if (!co_await router_.resolve(bucket).bucket_exists(bucket))
         throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
     auto body = co_await handlers::read_body(req);
     auto rules = parse_cors_xml(body);
     co_await cors_store_->put(bucket, std::move(rules));
-    LOG_INFO("cors: configuration for bucket {} set by {}", bucket,
-             std::string(auth.access_key));
+    LOG_INFO("cors: configuration for bucket {} set by {}", bucket, std::string(auth.access_key));
     co_return http::HttpResponse{};
 }
 
-Task<http::HttpResponse> S3Service::delete_bucket_cors(std::string bucket,
-                                                       const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::delete_bucket_cors(std::string bucket, const RequestAuth& auth) {
     require_root(cred_store_, auth.access_key);
     if (!cors_store_)
-        throw S3Error(S3ErrorCode::InvalidRequest,
-                      "Dynamic CORS configuration is not available on this deployment.");
+        throw S3Error(S3ErrorCode::InvalidRequest, "Dynamic CORS configuration is not available on this deployment.");
     co_await cors_store_->remove(bucket);
-    LOG_INFO("cors: configuration for bucket {} deleted by {}", bucket,
-             std::string(auth.access_key));
+    LOG_INFO("cors: configuration for bucket {} deleted by {}", bucket, std::string(auth.access_key));
     http::HttpResponse resp;
     resp.status = 204;
     co_return resp;
@@ -200,17 +194,14 @@ Task<http::HttpResponse> S3Service::delete_bucket_cors(std::string bucket,
 // signature material to preflights, and the preflighted request is verified on its own.
 // The only information disclosed is whether a CORS rule admits the (origin, method)
 // pair; object existence is never consulted
-Task<http::HttpResponse> S3Service::cors_preflight(http::HttpRequest& req,
-                                                   std::string bucket) {
+Task<http::HttpResponse> S3Service::cors_preflight(http::HttpRequest& req, std::string bucket) {
     auto origin = req.headers.get("Origin");
     auto acrm = req.headers.get("Access-Control-Request-Method");
     if (!origin || !acrm)
         throw S3Error(S3ErrorCode::AccessDenied,
                       "Insufficient information. Origin and Access-Control-Request-Method "
                       "request headers are needed.");
-    if (bucket.empty())
-        throw S3Error(S3ErrorCode::AccessDenied,
-                      "CORS preflight requires a bucket-scoped request.");
+    if (bucket.empty()) throw S3Error(S3ErrorCode::AccessDenied, "CORS preflight requires a bucket-scoped request.");
 
     auto deny = [&] {
         return S3Error(S3ErrorCode::AccessDenied,
@@ -234,22 +225,17 @@ Task<http::HttpResponse> S3Service::cors_preflight(http::HttpRequest& req,
         resp.headers.set("Access-Control-Allow-Credentials", "true");
     }
     resp.headers.set("Access-Control-Allow-Methods", join(r->allowed_methods));
-    if (!req_headers.empty())
-        resp.headers.set("Access-Control-Allow-Headers", join(req_headers));
-    if (!r->expose_headers.empty())
-        resp.headers.set("Access-Control-Expose-Headers", join(r->expose_headers));
-    if (r->max_age_seconds >= 0)
-        resp.headers.set("Access-Control-Max-Age", std::to_string(r->max_age_seconds));
-    resp.headers.set("Vary",
-                     "Origin, Access-Control-Request-Headers, Access-Control-Request-Method");
+    if (!req_headers.empty()) resp.headers.set("Access-Control-Allow-Headers", join(req_headers));
+    if (!r->expose_headers.empty()) resp.headers.set("Access-Control-Expose-Headers", join(r->expose_headers));
+    if (r->max_age_seconds >= 0) resp.headers.set("Access-Control-Max-Age", std::to_string(r->max_age_seconds));
+    resp.headers.set("Vary", "Origin, Access-Control-Request-Headers, Access-Control-Request-Method");
     co_return resp;
 }
 
 // Cross-origin actual requests (success AND error responses — the browser needs the
 // allow header to surface either to the page). Never applied to OPTIONS (preflight
 // builds its own full set)
-void S3Service::apply_cors_headers(const http::HttpRequest& req, const std::string& bucket,
-                                   http::HttpResponse& resp) {
+void S3Service::apply_cors_headers(const http::HttpRequest& req, const std::string& bucket, http::HttpResponse& resp) {
     if (!cors_store_ || bucket.empty()) return;
     auto origin = req.headers.get("Origin");
     if (!origin) return;
@@ -264,8 +250,7 @@ void S3Service::apply_cors_headers(const http::HttpRequest& req, const std::stri
         resp.headers.set("Access-Control-Allow-Origin", *origin);
         resp.headers.set("Access-Control-Allow-Credentials", "true");
     }
-    if (!r->expose_headers.empty())
-        resp.headers.set("Access-Control-Expose-Headers", join(r->expose_headers));
+    if (!r->expose_headers.empty()) resp.headers.set("Access-Control-Expose-Headers", join(r->expose_headers));
     resp.headers.set("Vary", "Origin");
 }
 

@@ -187,3 +187,12 @@ ubsan / cov / sqlite / redis / rados / tikv / seastar / fuzz) an incremental
 build + `ctest -LE "mint|perf|soak"` (opened up by the flags), sanitizer
 directories under `*SAN_OPTIONS` so findings fail, and a summary table at the
 end; `--configure` creates missing directories through `build.sh`.
+## 9. Code formatting
+
+`make format` rewrites every git-tracked `.h` / `.cc` under `src/` and `tests/` in
+place with the repository's `.clang-format` (Google style + 4-space indent + 120
+columns; every other deviation is commented in the file); `make format-check`
+only lists the files that would change and exits 1, for pre-commit hooks and CI.
+`CLANG_FORMAT=clang-format-23 make format` selects the binary; the Google preset
+drifts slightly between LLVM major versions, so pin one. The whole tree was
+formatted once on 2026-09-09; later PRs should carry no formatting noise.

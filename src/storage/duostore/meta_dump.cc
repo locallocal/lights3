@@ -38,12 +38,10 @@ struct CrcWriter {
 
     void raw(const void* p, size_t n) {
         out.write(static_cast<const char*>(p), std::streamsize(n));
-        if (!out)
-            throw S3Error(S3ErrorCode::InternalError, "duostore meta dump: write failed");
+        if (!out) throw S3Error(S3ErrorCode::InternalError, "duostore meta dump: write failed");
     }
     void body(const void* p, size_t n) {
-        crc = codec::crc32c_update(crc,
-                                   std::span(static_cast<const std::byte*>(p), n));
+        crc = codec::crc32c_update(crc, std::span(static_cast<const std::byte*>(p), n));
         raw(p, n);
     }
     void u8(uint8_t v) { body(&v, 1); }
@@ -69,8 +67,7 @@ struct CrcReader {
     void raw(void* p, size_t n) {
         in.read(static_cast<char*>(p), std::streamsize(n));
         if (size_t(in.gcount()) != n)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore meta load: truncated archive");
+            throw S3Error(S3ErrorCode::InternalError, "duostore meta load: truncated archive");
     }
     void body(void* p, size_t n) {
         raw(p, n);
@@ -84,8 +81,7 @@ struct CrcReader {
     uint32_t u32() {
         uint8_t b[4];
         body(b, 4);
-        return uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 |
-               uint32_t(b[3]) << 24;
+        return uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 | uint32_t(b[3]) << 24;
     }
     uint64_t u64() {
         uint8_t b[8];
@@ -121,7 +117,9 @@ MetaDumpStats dump_meta(IMetaReadView& src, std::ostream& out) {
             auto res = src.list_objects(b.name, opt);
             for (const auto& om : res.objects) {
                 auto rec = src.get_object(b.name, om.key);
-                if (!rec) continue;  // invisible under a snapshot view; on a live store (redis) a concurrent delete is skipped defensively
+                if (!rec)
+                    continue;  // invisible under a snapshot view; on a live store (redis) a concurrent delete is
+                               // skipped defensively
                 auto val = codec::encode_object(*rec);
                 w.u8('O');
                 w.str32(b.name);
@@ -134,7 +132,8 @@ MetaDumpStats dump_meta(IMetaReadView& src, std::ostream& out) {
         }
     }
     for (const auto& ps : src.pack_stats()) {
-        if (!ps.sealed) continue;  // unsealed packs' ledger is rebuilt by object replay; the ledger gets sealed on restart
+        if (!ps.sealed)
+            continue;  // unsealed packs' ledger is rebuilt by object replay; the ledger gets sealed on restart
         w.u8('S');
         w.u64(ps.pack_id);
         w.u64(ps.file_size);
@@ -156,8 +155,7 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
     char magic[kMagicLen];
     in.read(magic, std::streamsize(kMagicLen));
     if (size_t(in.gcount()) != kMagicLen || std::memcmp(magic, kMagic, kMagicLen) != 0)
-        throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta load: not a duostore meta archive");
+        throw S3Error(S3ErrorCode::InternalError, "duostore meta load: not a duostore meta archive");
     CrcReader r{in};
     MetaDumpStats st;
     // Largest file_id seen (kChunk and kRados share the id segment, see the
@@ -181,8 +179,7 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
             std::string v = r.str32();
             ObjectRec rec = codec::decode_object(k, v);
             for (const auto& e : rec.data.extents) {
-                uint64_t& next =
-                    e.kind == Extent::Kind::kPack ? next_pack : next_chunk;
+                uint64_t& next = e.kind == Extent::Kind::kPack ? next_pack : next_chunk;
                 next = std::max(next, e.file_id + 1);
             }
             dst.put_object(b, k, std::move(rec));
@@ -198,18 +195,13 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
             uint32_t want = r.crc;  // accumulated value after the count fields, before the crc field
             uint8_t b[4];
             r.raw(b, 4);
-            uint32_t got = uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 |
-                           uint32_t(b[3]) << 24;
-            if (got != want)
-                throw S3Error(S3ErrorCode::InternalError,
-                              "duostore meta load: archive crc mismatch");
+            uint32_t got = uint32_t(b[0]) | uint32_t(b[1]) << 8 | uint32_t(b[2]) << 16 | uint32_t(b[3]) << 24;
+            if (got != want) throw S3Error(S3ErrorCode::InternalError, "duostore meta load: archive crc mismatch");
             if (nb != st.buckets || no != st.objects || np != st.sealed_packs)
-                throw S3Error(S3ErrorCode::InternalError,
-                              "duostore meta load: record count mismatch");
+                throw S3Error(S3ErrorCode::InternalError, "duostore meta load: record count mismatch");
             break;
         } else {
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore meta load: unknown record tag " + std::to_string(tag));
+            throw S3Error(S3ErrorCode::InternalError, "duostore meta load: unknown record tag " + std::to_string(tag));
         }
     }
     // Counter raising: post-restore new writes must not allocate file numbers <=
@@ -217,8 +209,8 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
     // silent mutual overwrite). Raised by burning id segments through the
     // interface — alloc is monotonically increasing, so the loop necessarily
     // terminates
-    for (auto [kind, floor] : {std::pair{Extent::Kind::kChunk, next_chunk},
-                               std::pair{Extent::Kind::kPack, next_pack}}) {
+    for (auto [kind, floor] :
+         {std::pair{Extent::Kind::kChunk, next_chunk}, std::pair{Extent::Kind::kPack, next_pack}}) {
         if (floor == 0) continue;  // no extent of this kind was ever seen
         for (;;) {
             uint64_t got = dst.alloc_file_run(kind, 1);
@@ -231,8 +223,8 @@ MetaDumpStats load_meta(IMetaStore& dst, std::istream& in) {
             }
         }
     }
-    LOG_INFO("duostore meta load: {} buckets, {} objects, {} sealed packs restored",
-             st.buckets, st.objects, st.sealed_packs);
+    LOG_INFO("duostore meta load: {} buckets, {} objects, {} sealed packs restored", st.buckets, st.objects,
+             st.sealed_packs);
     return st;
 }
 

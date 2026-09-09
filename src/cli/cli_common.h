@@ -32,26 +32,22 @@ void add_config_flag(const Cmd& cmd);
 std::string one_backend_arg(const Cmd& c);
 
 // Leaf factory for commands taking only `<backend>` (+ --config)
-Cmd make_backend_leaf(const char* name, const char* example, const char* usage,
-                      const char* help_long, const char* help_short, void (*run)(const Cmd&));
+Cmd make_backend_leaf(const char* name, const char* example, const char* usage, const char* help_long,
+                      const char* help_short, void (*run)(const Cmd&));
 
 // Group node whose own invocation is a usage error: prints help, exit code 2
-Cmd make_group(const char* name, const char* example, const char* usage, const char* help_long,
-               const char* help_short);
+Cmd make_group(const char* name, const char* example, const char* usage, const char* help_long, const char* help_short);
 
 // Looks up a built backend by name and downcasts it to the concrete type the
 // command operates on; `tag` prefixes the error messages ("duostore" / "tier"),
 // `kind` names the expected type in them
 template <class Backend>
-Backend* find_backend_as(lights3::Application& app, const std::string& name, const char* tag,
-                         const char* kind) {
+Backend* find_backend_as(lights3::Application& app, const std::string& name, const char* tag, const char* kind) {
     const auto& backends = app.backends();
     auto it = backends.find(name);
-    if (it == backends.end())
-        throw std::runtime_error(std::string(tag) + ": no backend named '" + name + "'");
+    if (it == backends.end()) throw std::runtime_error(std::string(tag) + ": no backend named '" + name + "'");
     auto* b = dynamic_cast<Backend*>(it->second.get());
-    if (!b)
-        throw std::runtime_error(std::string(tag) + ": backend '" + name + "' is not " + kind);
+    if (!b) throw std::runtime_error(std::string(tag) + ": backend '" + name + "' is not " + kind);
     return b;
 }
 

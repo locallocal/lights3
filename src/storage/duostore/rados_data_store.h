@@ -63,17 +63,14 @@ public:
     RadosDataStore(const RadosDataStore&) = delete;
 
     Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) override;
-    Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
-                                                        uint64_t last) override;
+    Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first, uint64_t last) override;
     Task<void> remove(std::span<const Extent> extents) override;
     Task<void> remove_pack(uint64_t pack_id) override;        // no-op (no packs, §3.3)
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;  // always {} (no packs, §3.3)
     // Orphan-scan enumeration (C4, §8.2): rados_nobjects_list_* (ioctx already
     // limited to the namespace) + rados_stat; foreign objects not matching our
     // naming (not c.<016x>) are ignored
-    Task<void> scan_chunks(
-        const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb)
-        override;
+    Task<void> scan_chunks(const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) override;
     Task<void> close() override;
 
     // Object naming: c.<file_id:016x> (§3.1); for test observation

@@ -25,11 +25,10 @@ std::map<std::string, Armed, std::less<>> g_points;
 
 int errno_of(std::string_view s) {
     static const std::map<std::string_view, int> kNames = {
-        {"EIO", EIO},         {"ENOSPC", ENOSPC},   {"EDQUOT", EDQUOT},
-        {"EACCES", EACCES},   {"EROFS", EROFS},     {"ETIMEDOUT", ETIMEDOUT},
-        {"ECONNRESET", ECONNRESET}, {"ECONNREFUSED", ECONNREFUSED}, {"EPIPE", EPIPE},
-        {"ENOENT", ENOENT},   {"EAGAIN", EAGAIN},   {"EMFILE", EMFILE},
-        {"ENOMEM", ENOMEM},   {"EINVAL", EINVAL},   {"EBUSY", EBUSY},
+        {"EIO", EIO},       {"ENOSPC", ENOSPC},       {"EDQUOT", EDQUOT},         {"EACCES", EACCES},
+        {"EROFS", EROFS},   {"ETIMEDOUT", ETIMEDOUT}, {"ECONNRESET", ECONNRESET}, {"ECONNREFUSED", ECONNREFUSED},
+        {"EPIPE", EPIPE},   {"ENOENT", ENOENT},       {"EAGAIN", EAGAIN},         {"EMFILE", EMFILE},
+        {"ENOMEM", ENOMEM}, {"EINVAL", EINVAL},       {"EBUSY", EBUSY},
     };
     if (auto it = kNames.find(s); it != kNames.end()) return it->second;
     char* end = nullptr;
@@ -52,7 +51,8 @@ void arm(std::string_view spec) {
     size_t pos = 0;
     while (pos <= spec.size()) {
         size_t comma = spec.find(',', pos);
-        std::string_view item = spec.substr(pos, comma == std::string_view::npos ? std::string_view::npos : comma - pos);
+        std::string_view item = spec.substr(pos,
+                                            comma == std::string_view::npos ? std::string_view::npos : comma - pos);
         pos = comma == std::string_view::npos ? spec.size() + 1 : comma + 1;
         // trim
         while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.remove_prefix(1);
@@ -75,8 +75,7 @@ void arm(std::string_view spec) {
             }
             if (c2 != std::string_view::npos) a.err = errno_of(rest.substr(c2 + 1));
         }
-        if (!known_point(name))
-            throw std::runtime_error("fault: unknown point '" + std::string(name) + "'");
+        if (!known_point(name)) throw std::runtime_error("fault: unknown point '" + std::string(name) + "'");
         parsed.emplace_back(std::string(name), a);
     }
     std::lock_guard lk(g_mu);
@@ -111,8 +110,7 @@ std::string describe() {
     std::string out;
     for (auto& [name, a] : g_points) {
         if (!out.empty()) out += ", ";
-        out += name + ":" + (a.remaining < 0 ? "*" : std::to_string(a.remaining)) + ":" +
-               std::to_string(a.err);
+        out += name + ":" + (a.remaining < 0 ? "*" : std::to_string(a.remaining)) + ":" + std::to_string(a.err);
     }
     return out;
 }

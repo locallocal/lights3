@@ -39,7 +39,8 @@ struct TikvOptions {
 enum class TikvOp : uint8_t {
     kPut,
     kDel,
-    kLock,    // placeholder lock record: materializes write-skew conflicts for read-only preconditions (§4.3 guard shards)
+    kLock,    // placeholder lock record: materializes write-skew conflicts for read-only preconditions (§4.3 guard
+              // shards)
     kInsert,  // put + must-not-exist (create_bucket → BucketAlreadyOwnedByYou)
 };
 
@@ -94,23 +95,20 @@ public:
     // Batched snapshot read (KvBatchGet, grouped by region); returns a value array of
     // the same length and order as keys. Locked keys fall back to single-key Get
     // (which resolves locks internally)
-    std::vector<std::optional<std::string>> batch_get(uint64_t version,
-                                                      const std::vector<std::string>& keys);
+    std::vector<std::optional<std::string>> batch_get(uint64_t version, const std::vector<std::string>& keys);
 
     // Range scan [begin, end), at most limit entries (empty end = no upper bound).
     // limit is pushed down exactly as the scan batch size — an existence probe
     // (limit=1) fetches just 1 entry, no implicit over-fetch. Multiple calls at the
     // same version form a consistent view (MVCC, §3.3)
-    std::vector<std::pair<std::string, std::string>> scan(uint64_t version,
-                                                          const std::string& begin,
+    std::vector<std::pair<std::string, std::string>> scan(uint64_t version, const std::string& begin,
                                                           const std::string& end, size_t limit);
 
     // Last key within [lo, hi); nullopt if none. Key-only reverse scan: region lookup
     // goes through the cache + typically 1 RPC — the O(1) primitive for list group-tail
     // tokens (§3.3, counterpart of the RocksDB version's SeekForPrev; client-c Scanner
     // does not wrap reverse, so raw KvScan is used here)
-    std::optional<std::string> last_key(uint64_t version, const std::string& lo,
-                                        const std::string& hi);
+    std::optional<std::string> last_key(uint64_t version, const std::string& lo, const std::string& hi);
 
     // Optimistic 2PC commit (§4). muts must be non-empty; primary = muts[0].key.
     // Multiple mutations on the same key merge in order of appearance, last one wins
@@ -127,8 +125,7 @@ public:
     // Register/renew this service's service safepoint (TTL in seconds; PD removes it
     // automatically on expiry) and return the minimum across all services. Semantics:
     // declare "this service no longer reads versions before safe_point"
-    uint64_t update_service_gc_safepoint(const std::string& service_id, int64_t ttl_s,
-                                         uint64_t safe_point);
+    uint64_t update_service_gc_safepoint(const std::string& service_id, int64_t ttl_s, uint64_t safe_point);
     // Advance the cluster GC safepoint (monotonic forward-only on the PD side; a
     // lagging value just returns the current value unchanged). The argument must
     // always be the min returned by update_service_gc_safepoint — going past any live

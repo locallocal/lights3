@@ -38,13 +38,11 @@ public:
     bool access_resident() const override { return resident_; }
     void flush_access() override;
 
-    Task<std::unique_ptr<http::BodyReader>> open_snapshot(std::string_view bucket,
-                                                          std::string_view key,
+    Task<std::unique_ptr<http::BodyReader>> open_snapshot(std::string_view bucket, std::string_view key,
                                                           uint64_t size) override;
     Task<void> commit_stub(std::string_view bucket, std::string_view key, const ObjectMeta& meta,
                            const TierInfo& tier) override;
-    std::unique_ptr<ICacheFill> begin_cache_fill(std::string_view bucket,
-                                                 std::string_view key) override;
+    std::unique_ptr<ICacheFill> begin_cache_fill(std::string_view bucket, std::string_view key) override;
 
     bool cache_space_ok(uint64_t size, uint64_t min_free_bytes) const override;
     std::optional<SpaceUsage> space_usage() const override;
@@ -52,8 +50,7 @@ public:
     std::unique_ptr<IWalker> walk() override;
 
     bool supports_range_cache() const override { return true; }
-    std::unique_ptr<IRangeCache> open_range_cache(std::string_view bucket, std::string_view key,
-                                                  const LocalObject& obj,
+    std::unique_ptr<IRangeCache> open_range_cache(std::string_view bucket, std::string_view key, const LocalObject& obj,
                                                   uint64_t block_size) override;
     void drop_range_cache(std::string_view bucket, std::string_view key) override;
     uint64_t range_cache_bytes(std::string_view bucket, std::string_view key) const override;

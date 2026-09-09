@@ -109,8 +109,7 @@ TEST(dispatch_records_api_by_backend_series) {
     BucketsConfig bcfg;
     bcfg.default_backend = "mem";
     bcfg.rules.push_back({"cold-*", "cold"});
-    S3Service svc(storage::BucketRouter::build(bcfg, metered),
-                  SigV4Authenticator::build(AuthConfig{}));
+    S3Service svc(storage::BucketRouter::build(bcfg, metered), SigV4Authenticator::build(AuthConfig{}));
     svc.set_backend_metrics(reg);
     auto call = [&](http::HttpRequest req) { return sync_wait(svc.dispatch(std::move(req))); };
     CHECK_EQ(call(make_req("PUT", "/bkt")).status, 200);
@@ -132,7 +131,8 @@ TEST(dispatch_records_api_by_backend_series) {
     CHECK(contains(out, "lights3_api_requests_total{api=\"PutObject\",backend=\"cold\",class=\"2xx\"} 1"));
     CHECK(contains(out, "lights3_api_requests_total{api=\"ListBuckets\",backend=\"-\",class=\"2xx\"} 1"));
     CHECK(contains(out, "lights3_api_request_duration_seconds_count{api=\"GetObject\",backend=\"mem\"} 2"));
-    CHECK(contains(out, "lights3_api_request_duration_seconds_bucket{api=\"PutObject\",backend=\"mem\",le=\"+Inf\"} 1"));
+    CHECK(
+        contains(out, "lights3_api_request_duration_seconds_bucket{api=\"PutObject\",backend=\"mem\",le=\"+Inf\"} 1"));
     // The backend-level series rendered from the shared registry follow
     CHECK(contains(out, "lights3_backend_op_seconds_count{backend=\"cold\",op=\"put_object\"} 1"));
     // GET a, GET nope (404 reaches the backend), and the CopyObject fallback's source read

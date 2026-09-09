@@ -21,8 +21,8 @@ class SignedClient;
 // returns 0 -- poll every 0.5 s until our job stops running and print the
 // outcome document. Exit code 1 on a transport / HTTP failure, an "error"
 // field, "aborted" or "findings" > 0; `label` names the command in messages
-int run_job(SignedClient& cli, const std::string& path, const std::string& label, uint64_t mbps,
-            bool wait, bool status_only);
+int run_job(SignedClient& cli, const std::string& path, const std::string& label, uint64_t mbps, bool wait,
+            bool status_only);
 // GET a quarantine ledger endpoint and print it; 0 unless the request failed
 int print_ledger(SignedClient& cli, const std::string& path);
 

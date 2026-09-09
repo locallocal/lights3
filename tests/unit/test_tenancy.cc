@@ -34,9 +34,7 @@ AuthConfig root_cfg() {
     return cfg;
 }
 
-std::string temp_path(const char* stem) {
-    return "/tmp/lights3-tenancy-" + std::to_string(::getpid()) + "-" + stem;
-}
+std::string temp_path(const char* stem) { return "/tmp/lights3-tenancy-" + std::to_string(::getpid()) + "-" + stem; }
 
 // Everything §3.9 wires in main, on one memory backend (data plane + .sys)
 struct Env {
@@ -65,8 +63,7 @@ struct Env {
         cred_store = sync_wait(CredentialStore::load(backend, cfg));
         auto auth = SigV4Authenticator::build(cfg);
         auth.set_provider(cred_store);
-        usage = sync_wait(UsageTracker::load(storage::BucketRouter::build(bcfg, backends), ucfg,
-                                             nullptr));
+        usage = sync_wait(UsageTracker::load(storage::BucketRouter::build(bcfg, backends), ucfg, nullptr));
         quota = sync_wait(QuotaStore::load(backend));
         tenant_store = sync_wait(TenantStore::load(backend));
         owner_store = sync_wait(OwnerStore::load(backend));
@@ -82,8 +79,7 @@ struct Env {
     }
 
     http::HttpResponse call(std::string method, std::string path, const Credential& cred,
-                            std::vector<std::pair<std::string, std::string>> query = {},
-                            std::string body = "",
+                            std::vector<std::pair<std::string, std::string>> query = {}, std::string body = "",
                             std::vector<std::pair<std::string, std::string>> headers = {}) {
         http::HttpRequest req;
         req.method = std::move(method);
@@ -103,31 +99,24 @@ struct Env {
         return sync_wait(svc->dispatch(std::move(req)));
     }
     http::HttpResponse as_root(std::string method, std::string path,
-                               std::vector<std::pair<std::string, std::string>> query = {},
-                               std::string body = "",
+                               std::vector<std::pair<std::string, std::string>> query = {}, std::string body = "",
                                std::vector<std::pair<std::string, std::string>> headers = {}) {
-        return call(std::move(method), std::move(path), root, std::move(query), std::move(body),
-                    std::move(headers));
+        return call(std::move(method), std::move(path), root, std::move(query), std::move(body), std::move(headers));
     }
     // Admin plane helpers (JSON in/out)
     json admin(const Credential& cred, std::string method, std::string path, json body = {},
                std::vector<std::pair<std::string, std::string>> query = {}, int expect = 200) {
-        auto r = call(std::move(method), std::move(path), cred, std::move(query),
-                      body.is_null() ? "" : body.dump());
+        auto r = call(std::move(method), std::move(path), cred, std::move(query), body.is_null() ? "" : body.dump());
         if (r.status != expect)
-            throw mini_test::Failure("admin " + path + " -> HTTP " + std::to_string(r.status) +
-                                     " " + r.small_body);
+            throw mini_test::Failure("admin " + path + " -> HTTP " + std::to_string(r.status) + " " + r.small_body);
         if (r.small_body.empty()) return json::object();
         return json::parse(r.small_body);
     }
     Credential mint(const Credential& by, json body) {
         auto j = admin(by, "POST", "/-/admin/credentials", std::move(body), {}, 201);
-        return Credential{j["access_key"].get<std::string>(),
-                          util::SecretString(j["secret_key"].get<std::string>())};
+        return Credential{j["access_key"].get<std::string>(), util::SecretString(j["secret_key"].get<std::string>())};
     }
-    BucketUsage usage_of(const std::string& bucket) {
-        return usage->get(bucket).value_or(BucketUsage{});
-    }
+    BucketUsage usage_of(const std::string& bucket) { return usage->get(bucket).value_or(BucketUsage{}); }
 };
 
 std::string md5_header(const std::string& body) {
@@ -137,9 +126,7 @@ std::string md5_header(const std::string& body) {
     return util::base64_encode(std::span(d.data(), d.size()));
 }
 
-bool contains(const std::string& s, const std::string& sub) {
-    return s.find(sub) != std::string::npos;
-}
+bool contains(const std::string& s, const std::string& sub) { return s.find(sub) != std::string::npos; }
 
 std::string xelem(const std::string& xml, const std::string& tag) {
     auto open = "<" + tag + ">", close = "</" + tag + ">";
@@ -180,11 +167,10 @@ TEST(usage_counters_follow_every_write_path) {
     // Batch delete
     CHECK_EQ(env.as_root("PUT", "/bkt/x", {}, "xxxx").status, 200);
     CHECK_EQ(env.as_root("PUT", "/bkt/y", {}, "yy").status, 200);
-    std::string del = "<Delete><Object><Key>x</Key></Object><Object><Key>y</Key></Object>"
-                      "<Object><Key>missing</Key></Object></Delete>";
-    CHECK_EQ(env.as_root("POST", "/bkt", {{"delete", ""}}, del, {{"Content-MD5", md5_header(del)}})
-                 .status,
-             200);
+    std::string del =
+        "<Delete><Object><Key>x</Key></Object><Object><Key>y</Key></Object>"
+        "<Object><Key>missing</Key></Object></Delete>";
+    CHECK_EQ(env.as_root("POST", "/bkt", {{"delete", ""}}, del, {{"Content-MD5", md5_header(del)}}).status, 200);
     u = env.usage_of("bkt");
     CHECK_EQ(u.objects, int64_t(1));
     CHECK_EQ(u.bytes, int64_t(3));
@@ -200,9 +186,9 @@ TEST(usage_counters_follow_every_write_path) {
     u = env.usage_of("bkt");
     CHECK_EQ(u.mpu_bytes, int64_t(8));
     CHECK_EQ(u.bytes, int64_t(3));
-    std::string complete = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
-                           *p1.headers.get("ETag") + "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" +
-                           *p2.headers.get("ETag") + "</ETag></Part></CompleteMultipartUpload>";
+    std::string complete = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + *p1.headers.get("ETag") +
+                           "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" + *p2.headers.get("ETag") +
+                           "</ETag></Part></CompleteMultipartUpload>";
     CHECK_EQ(env.as_root("POST", "/bkt/mp", {{"uploadId", upload_id}}, complete).status, 200);
     u = env.usage_of("bkt");
     CHECK_EQ(u.objects, int64_t(2));
@@ -285,8 +271,7 @@ TEST(usage_admin_api_and_rescan) {
     auto one = env.admin(env.root, "POST", "/-/admin/usage/bkt/rescan");
     CHECK(one["scanned"].get<bool>());
     CHECK_EQ(one["objects"].get<int64_t>(), int64_t(1));
-    CHECK_EQ(env.admin(env.root, "GET", "/-/admin/usage/nope", {}, {}, 404)["code"],
-             std::string("NoSuchBucket"));
+    CHECK_EQ(env.admin(env.root, "GET", "/-/admin/usage/nope", {}, {}, 404)["code"], std::string("NoSuchBucket"));
     // Plain dynamic credentials are not admins
     auto plain = env.mint(env.root, {{"comment", "plain"}});
     CHECK_EQ(env.call("GET", "/-/admin/usage", plain).status, 403);
@@ -352,9 +337,9 @@ TEST(quota_multipart_mid_flight_semantics) {
     CHECK_EQ(p2.status, 200);
     // Quota lowered below the finished object: complete refused, upload kept for abort
     CHECK_EQ(env.as_root("PUT", "/bkt", {{"quota", ""}}, quota_xml({5, 0})).status, 200);
-    std::string complete = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
-                           *p1.headers.get("ETag") + "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" +
-                           *p2.headers.get("ETag") + "</ETag></Part></CompleteMultipartUpload>";
+    std::string complete = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + *p1.headers.get("ETag") +
+                           "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" + *p2.headers.get("ETag") +
+                           "</ETag></Part></CompleteMultipartUpload>";
     auto done = env.as_root("POST", "/bkt/mp", {{"uploadId", id}}, complete);
     CHECK_EQ(done.status, 403);
     CHECK_EQ(env.as_root("GET", "/bkt/mp", {{"uploadId", id}}).status, 200);  // still listable
@@ -376,15 +361,13 @@ TEST(tenant_admin_api_lifecycle) {
     CHECK_EQ(env.admin(env.root, "POST", "/-/admin/tenants", {{"id", "acme"}, {"x", 1}}, {}, 400)["code"],
              std::string("InvalidRequest"));
     auto t = env.admin(env.root, "POST", "/-/admin/tenants",
-                       {{"id", "acme"}, {"display_name", "ACME"}, {"quota", {{"max_buckets", 2}}}},
-                       {}, 201);
+                       {{"id", "acme"}, {"display_name", "ACME"}, {"quota", {{"max_buckets", 2}}}}, {}, 201);
     CHECK_EQ(t["id"].get<std::string>(), std::string("acme"));
     CHECK_EQ(t["quota"]["max_buckets"].get<uint64_t>(), uint64_t(2));
     CHECK_EQ(env.admin(env.root, "POST", "/-/admin/tenants", {{"id", "acme"}}, {}, 409)["code"],
              std::string("TenantAlreadyExists"));
     CHECK_EQ(env.admin(env.root, "GET", "/-/admin/tenants")["tenants"].size(), size_t(1));
-    CHECK_EQ(env.admin(env.root, "GET", "/-/admin/tenants/ghost", {}, {}, 404)["code"],
-             std::string("NoSuchTenant"));
+    CHECK_EQ(env.admin(env.root, "GET", "/-/admin/tenants/ghost", {}, {}, 404)["code"], std::string("NoSuchTenant"));
     // Update replaces the quota as a whole
     auto upd = env.admin(env.root, "PUT", "/-/admin/tenants/acme",
                          {{"display_name", "ACME Corp"}, {"quota", {{"max_bytes", 100}}}});
@@ -460,8 +443,7 @@ TEST(tenant_isolation_on_the_data_plane) {
 TEST(tenant_quota_aggregates_over_owned_buckets) {
     Env env;
     env.admin(env.root, "POST", "/-/admin/tenants",
-              {{"id", "t"}, {"quota", {{"max_bytes", 10}, {"max_objects", 3}, {"max_buckets", 2}}}},
-              {}, 201);
+              {{"id", "t"}, {"quota", {{"max_bytes", 10}, {"max_objects", 3}, {"max_buckets", 2}}}}, {}, 201);
     auto c = env.mint(env.root, {{"tenant", "t"}});
     CHECK_EQ(env.call("PUT", "/bka", c).status, 200);
     CHECK_EQ(env.call("PUT", "/bkt", c).status, 200);
@@ -516,8 +498,7 @@ TEST(tenant_admin_is_scoped_to_its_tenant) {
     CHECK_EQ(env.admin(a1, "GET", "/-/admin/tenants")["tenants"].size(), size_t(1));
     env.admin(a1, "GET", "/-/admin/tenants/t1");
     CHECK_EQ(env.admin(a1, "GET", "/-/admin/tenants/t2", {}, {}, 403)["code"], std::string("AccessDenied"));
-    CHECK_EQ(env.admin(a1, "POST", "/-/admin/tenants", {{"id", "t3"}}, {}, 403)["code"],
-             std::string("AccessDenied"));
+    CHECK_EQ(env.admin(a1, "POST", "/-/admin/tenants", {{"id", "t3"}}, {}, 403)["code"], std::string("AccessDenied"));
     CHECK_EQ(env.admin(a1, "PUT", "/-/admin/tenants/t1", {{"quota", {{"max_bytes", 1}}}}, {}, 403)["code"],
              std::string("AccessDenied"));
     // Usage plane: own buckets only, rescan allowed on them
@@ -680,9 +661,10 @@ TEST(config_usage_and_audit_sections) {
     CHECK_EQ(cfg.usage.reconcile_interval_sec, 86400);
     CHECK(cfg.usage.reconcile);
     CHECK(cfg.audit.path.empty());
-    cfg = Config::from_string(base +
-                              "usage:\n  enabled: false\n  flush_interval: 5m\n  reconcile_interval: 0s\n  reconcile: false\n"
-                              "audit:\n  path: /tmp/a.log\n  data_plane: true\n  max_size: 1MiB\n  max_files: 3\n");
+    cfg = Config::from_string(
+        base +
+        "usage:\n  enabled: false\n  flush_interval: 5m\n  reconcile_interval: 0s\n  reconcile: false\n"
+        "audit:\n  path: /tmp/a.log\n  data_plane: true\n  max_size: 1MiB\n  max_files: 3\n");
     CHECK(!cfg.usage.enabled);
     CHECK_EQ(cfg.usage.flush_interval_sec, 300);
     CHECK_EQ(cfg.usage.reconcile_interval_sec, 0);

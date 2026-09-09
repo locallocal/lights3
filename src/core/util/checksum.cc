@@ -112,8 +112,7 @@ std::optional<std::string> base64_decode(std::string_view in) {
                 if (v[j] < 0 || pad > 0) return std::nullopt;  // '=' may only appear at the end
             }
         }
-        uint32_t x = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) | (uint32_t(v[2]) << 6) |
-                     uint32_t(v[3]);
+        uint32_t x = (uint32_t(v[0]) << 18) | (uint32_t(v[1]) << 12) | (uint32_t(v[2]) << 6) | uint32_t(v[3]);
         out.push_back(char((x >> 16) & 0xff));
         if (pad < 2) out.push_back(char((x >> 8) & 0xff));
         if (pad < 1) out.push_back(char(x & 0xff));

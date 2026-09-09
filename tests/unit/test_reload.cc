@@ -7,8 +7,8 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
-#include "app/app.h"
 #include "app/admin_jobs.h"
+#include "app/app.h"
 #include "core/semaphore.h"
 #include "core/util/crypto.h"
 #include "s3/auth/credential_store.h"
@@ -24,9 +24,7 @@ using nlohmann::json;
 
 namespace {
 
-std::string temp_path(const char* stem) {
-    return "/tmp/lights3-reload-" + std::to_string(::getpid()) + "-" + stem;
-}
+std::string temp_path(const char* stem) { return "/tmp/lights3-reload-" + std::to_string(::getpid()) + "-" + stem; }
 void write_file(const std::string& p, const std::string& text) {
     std::ofstream f(p);
     f << text;
@@ -49,7 +47,8 @@ Task<void> acquire_and_flag(AsyncSemaphore& s, bool& got) {
 std::string base_config(const std::string& extra, const std::string& rules = "  rules: []\n") {
     return "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n" + extra +
            "backends:\n  - name: a\n    type: memory\n  - name: b\n    type: memory\n"
-           "buckets:\n  default_backend: a\n" + rules + "log:\n  level: info\n";
+           "buckets:\n  default_backend: a\n" +
+           rules + "log:\n  level: info\n";
 }
 
 // Request through the assembled service (auth is off in these configs, so no
@@ -65,12 +64,10 @@ int call(Application& app, std::string method, std::string path, std::string bod
     return sync_wait(app.service()->dispatch(std::move(req))).status;
 }
 // Free coroutine (a lambda's frame would not outlive the sync_wait)
-Task<storage::ObjectStream> open_object(storage::IStorageBackend& b, std::string bucket,
-                                        std::string key) {
+Task<storage::ObjectStream> open_object(storage::IStorageBackend& b, std::string bucket, std::string key) {
     co_return co_await b.get_object(bucket, key, std::nullopt);
 }
-Task<void> put_small(storage::IStorageBackend& b, std::string bucket, std::string key,
-                     std::string data) {
+Task<void> put_small(storage::IStorageBackend& b, std::string bucket, std::string key, std::string data) {
     http::StringBodyReader body(std::move(data));
     co_await b.put_object(bucket, key, {}, body, {});
 }
@@ -85,8 +82,7 @@ TEST(reload_semaphore_capacity_grows_and_shrinks) {
     // A second acquirer queues; growing the capacity wakes it
     bool got = false;
     std::thread th([&] { sync_wait(acquire_and_flag(sem, got)); });
-    for (int i = 0; i < 100 && sem.waiting() == 0; ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    for (int i = 0; i < 100 && sem.waiting() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(10));
     CHECK_EQ(sem.waiting(), size_t(1));
     sem.set_capacity(2);
     th.join();
@@ -178,8 +174,7 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     {
         std::ifstream in(path);
         std::string text((std::istreambuf_iterator<char>(in)), {});
-        text.replace(text.find("level: info"), 11,
-                     "level: debug\n  slow_request_threshold: 250ms\n  format: json");
+        text.replace(text.find("level: info"), 11, "level: debug\n  slow_request_threshold: 250ms\n  format: json");
         write_file(path, text);
     }
     auto r1 = app.reload_config();
@@ -202,7 +197,7 @@ TEST(reload_application_applies_subset_and_reports_rest) {
     CHECK_EQ(app.config().runtime.max_inflight_requests, 200);
     CHECK_EQ(app.config().buckets.rules.size(), size_t(1));
     CHECK_EQ(app.config().http.max_connections, 4096);  // the running value stays
-    Logger::set_level(LogLevel::Info);  // keep the test log readable
+    Logger::set_level(LogLevel::Info);                  // keep the test log readable
     // A broken file is refused as a whole and the running config is untouched
     write_file(path, base_config("  request_timeout: 5s\n  idle_timeout: 0s\n"));
     auto r2 = app.reload_config();
@@ -340,8 +335,8 @@ TEST(reload_bucket_router_backend_set_swap) {
     CHECK_EQ(before->size(), size_t(2));  // the old snapshot is untouched
     CHECK(before->count("b") == 1);
     // Dropping the default backend, or swapping it for another instance, is refused
-    for (auto bad : {storage::BucketRouter::BackendMap{{"c", c}},
-                     storage::BucketRouter::BackendMap{{"a", c}, {"c", c}}}) {
+    for (auto bad :
+         {storage::BucketRouter::BackendMap{{"c", c}}, storage::BucketRouter::BackendMap{{"a", c}, {"c", c}}}) {
         threw = false;
         try {
             router.update(cfg, bad);
@@ -480,9 +475,10 @@ TEST(reload_application_adds_and_removes_backends) {
 
     // Removing the default backend is deferred (with the changed default reported),
     // everything else in the same file still applies
-    write_file(path, "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
-                     "backends:\n  - name: b\n    type: memory\n"
-                     "buckets:\n  default_backend: b\nlog:\n  level: warn\n");
+    write_file(path,
+               "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
+               "backends:\n  - name: b\n    type: memory\n"
+               "buckets:\n  default_backend: b\nlog:\n  level: warn\n");
     auto r6 = app.reload_config();
     CHECK(r6.ok);
     CHECK(has(r6.applied, "log.level: info -> warn"));
@@ -493,18 +489,20 @@ TEST(reload_application_adds_and_removes_backends) {
 
     // A tiered entry referencing a removed backend, and a backend that fails to
     // construct, are refused as a whole
-    write_file(path, "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
-                     "backends:\n  - name: a\n    type: memory\n"
-                     "  - name: t\n    type: tiered\n    local: b\n    cloud: a\n"
-                     "buckets:\n  default_backend: a\nlog:\n  level: info\n");
+    write_file(path,
+               "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
+               "backends:\n  - name: a\n    type: memory\n"
+               "  - name: t\n    type: tiered\n    local: b\n    cloud: a\n"
+               "buckets:\n  default_backend: a\nlog:\n  level: info\n");
     auto r7 = app.reload_config();
     CHECK(!r7.ok);
     CHECK(contains(r7.error, "cannot remove 'b'") && contains(r7.error, "tiered backend 't'"));
     // A backend that does not construct (localfs without root)
-    write_file(path, "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
-                     "backends:\n  - name: a\n    type: memory\n  - name: b\n    type: memory\n"
-                     "  - name: bad\n    type: localfs\n"
-                     "buckets:\n  default_backend: a\nlog:\n  level: info\n");
+    write_file(path,
+               "http:\n  driver: builtin\n  bind: 127.0.0.1\n  port: 0\n"
+               "backends:\n  - name: a\n    type: memory\n  - name: b\n    type: memory\n"
+               "  - name: bad\n    type: localfs\n"
+               "buckets:\n  default_backend: a\nlog:\n  level: info\n");
     auto r8 = app.reload_config();
     CHECK(!r8.ok);
     CHECK(contains(r8.error, "backends:") && contains(r8.error, "bad"));

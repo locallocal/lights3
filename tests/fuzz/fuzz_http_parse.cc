@@ -36,7 +36,8 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
             size_t pos = 0;
             while (pos < rest.size()) {
                 size_t nl = rest.find('\n', pos);
-                std::string_view line = rest.substr(pos, nl == std::string_view::npos ? std::string_view::npos : nl - pos);
+                std::string_view line = rest.substr(pos,
+                                                    nl == std::string_view::npos ? std::string_view::npos : nl - pos);
                 pos = nl == std::string_view::npos ? rest.size() : nl + 1;
                 size_t colon = line.find(':');
                 if (colon == std::string_view::npos || colon == 0) continue;

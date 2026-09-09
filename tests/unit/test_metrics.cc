@@ -1,5 +1,5 @@
-// Unit tests for the backend-level metrics registration mechanism (core/metrics.h): instance reuse/type conflicts/label escaping/
-// histogram rendering/callback gauges/harmless empty scope/concurrent-increment smoke test
+// Unit tests for the backend-level metrics registration mechanism (core/metrics.h): instance reuse/type conflicts/label
+// escaping/ histogram rendering/callback gauges/harmless empty scope/concurrent-increment smoke test
 #include <limits>
 #include <memory>
 #include <string>
@@ -15,9 +15,7 @@ using namespace lights3;
 
 namespace {
 
-bool contains(const std::string& s, const std::string& sub) {
-    return s.find(sub) != std::string::npos;
-}
+bool contains(const std::string& s, const std::string& sub) { return s.find(sub) != std::string::npos; }
 
 }  // namespace
 
@@ -41,7 +39,8 @@ TEST(metrics_counter_gauge_render) {
 
 TEST(metrics_get_or_create_identity) {
     MetricsRegistry reg;
-    // Same name and labels -> same instance (repeated registration is idempotent); same name, different labels -> new child instance within the family
+    // Same name and labels -> same instance (repeated registration is idempotent); same name, different labels -> new
+    // child instance within the family
     auto a = reg.counter("lights3_test_total", "", {{"k", "a"}});
     auto a2 = reg.counter("lights3_test_total", "", {{"k", "a"}});
     auto b = reg.counter("lights3_test_total", "", {{"k", "b"}});
@@ -53,8 +52,7 @@ TEST(metrics_get_or_create_identity) {
     CHECK(contains(out, "lights3_test_total{k=\"a\"} 3\n"));
     CHECK(contains(out, "lights3_test_total{k=\"b\"} 1\n"));
     // # TYPE emitted only once per family
-    CHECK_EQ(out.find("# TYPE lights3_test_total"),
-             out.rfind("# TYPE lights3_test_total"));
+    CHECK_EQ(out.find("# TYPE lights3_test_total"), out.rfind("# TYPE lights3_test_total"));
 
     // Same name with different types = assembly error
     bool thrown = false;
@@ -102,12 +100,9 @@ TEST(metrics_nonfinite_render) {
     // Non-finite values must use the Prometheus spelling (docs/archive/gaps.md §4): the raw to_chars output
     // "inf"/"nan" would make the scraper reject the entire target, same failure mode as bucket-bound collapsing
     MetricsRegistry reg;
-    reg.gauge_callback("lights3_test_nf_pos", "cb",
-                       [] { return std::numeric_limits<double>::infinity(); });
-    reg.gauge_callback("lights3_test_nf_neg", "cb",
-                       [] { return -std::numeric_limits<double>::infinity(); });
-    reg.gauge_callback("lights3_test_nf_nan", "cb",
-                       [] { return std::numeric_limits<double>::quiet_NaN(); });
+    reg.gauge_callback("lights3_test_nf_pos", "cb", [] { return std::numeric_limits<double>::infinity(); });
+    reg.gauge_callback("lights3_test_nf_neg", "cb", [] { return -std::numeric_limits<double>::infinity(); });
+    reg.gauge_callback("lights3_test_nf_nan", "cb", [] { return std::numeric_limits<double>::quiet_NaN(); });
     auto out = reg.render();
     CHECK(contains(out, "lights3_test_nf_pos +Inf\n"));
     CHECK(contains(out, "lights3_test_nf_neg -Inf\n"));
@@ -117,8 +112,8 @@ TEST(metrics_nonfinite_render) {
 }
 
 TEST(metrics_large_bucket_bounds_render) {
-    // Bucket bounds >= 1e6 were once rendered with 6 significant digits as "1.04858e+06", and nearby bounds could even collapse
-    // into duplicate le sequences -- Prometheus rejects the entire target on a duplicate le
+    // Bucket bounds >= 1e6 were once rendered with 6 significant digits as "1.04858e+06", and nearby bounds could even
+    // collapse into duplicate le sequences -- Prometheus rejects the entire target on a duplicate le
     MetricsRegistry reg;
     auto h = reg.histogram("lights3_test_bytes", "sz", {1048576.0, 1048577.0, 1e9});
     h->observe(1.0);
@@ -126,21 +121,20 @@ TEST(metrics_large_bucket_bounds_render) {
     CHECK(contains(out, "le=\"1048576\""));
     CHECK(contains(out, "le=\"1048577\""));  // must not collapse into the same le as the previous bucket
     CHECK(!contains(out, "e+06"));
-    // Shortest round-trip allows exponent notation (1e+09 reads back exactly, Prometheus accepts it); the key point is no precision loss
+    // Shortest round-trip allows exponent notation (1e+09 reads back exactly, Prometheus accepts it); the key point is
+    // no precision loss
     CHECK(contains(out, "le=\"1e+09\""));
 }
 
 TEST(metrics_gauge_callback) {
     MetricsRegistry reg;
     int depth = 3;
-    reg.gauge_callback("lights3_test_cb_depth", "cb", [&] { return double(depth); },
-                       {{"backend", "b1"}});
+    reg.gauge_callback("lights3_test_cb_depth", "cb", [&] { return double(depth); }, {{"backend", "b1"}});
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 3\n"));
     depth = 9;  // instantaneous value pulled at render time
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 9\n"));
     // With the same name and labels, the later registrant overrides
-    reg.gauge_callback("lights3_test_cb_depth", "cb", [] { return 1.0; },
-                       {{"backend", "b1"}});
+    reg.gauge_callback("lights3_test_cb_depth", "cb", [] { return 1.0; }, {{"backend", "b1"}});
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 1\n"));
 }
 
@@ -154,13 +148,13 @@ TEST(metrics_scope_base_labels) {
     CHECK(contains(out, "lights3_test_scoped_total{backend=\"duo1\",op=\"gc\"} 5\n"));
     CHECK(contains(out, "lights3_test_engine_total{backend=\"duo1\",engine=\"redis\"} 1\n"));
     // Scope and direct registry lookup with the same name and labels -> same instance
-    auto direct = reg->counter("lights3_test_scoped_total", "",
-                               {{"backend", "duo1"}, {"op", "gc"}});
+    auto direct = reg->counter("lights3_test_scoped_total", "", {{"backend", "duo1"}, {"op", "gc"}});
     CHECK_EQ(direct->value(), uint64_t(5));
 }
 
 TEST(metrics_empty_scope_harmless) {
-    // Empty scope (default path for directly constructed backends in tests): instance usable but not registered, not rendered
+    // Empty scope (default path for directly constructed backends in tests): instance usable but not registered, not
+    // rendered
     MetricsScope scope;
     CHECK(!scope);
     auto c = scope.counter("lights3_test_orphan_total", "");
@@ -195,7 +189,8 @@ TEST(metrics_concurrent_smoke) {
 // ---------- §7 increment for L2 request metrics (docs/archive/gaps.md §7) ----------
 
 TEST(s3_metrics_renders_pool_wait_histogram) {
-    // The dedicated-pool criterion of concurrency.md §3.1 depends on this histogram; once collected it must be readable from /-/metrics
+    // The dedicated-pool criterion of concurrency.md §3.1 depends on this histogram; once collected it must be readable
+    // from /-/metrics
     s3::Metrics m;
     ThreadPool::Stats st;
     st.wait_hist = {5, 3, 1, 0, 1};
@@ -229,8 +224,7 @@ TEST(s3_metrics_renders_admission_and_timer) {
     CHECK(out.find("lights3_timer_pending 7") != std::string::npos);
     CHECK(out.find("lights3_timer_lag_seconds 3.5") != std::string::npos);
     CHECK(out.find("lights3_timer_slow_callbacks_total 1") != std::string::npos);
-    CHECK(out.find("lights3_timer_callback_seconds_bucket{le=\"+Inf\"} 100") !=
-          std::string::npos);
+    CHECK(out.find("lights3_timer_callback_seconds_bucket{le=\"+Inf\"} 100") != std::string::npos);
 }
 
 TEST(s3_metrics_bytes_and_per_bucket) {
@@ -243,10 +237,8 @@ TEST(s3_metrics_bytes_and_per_bucket) {
     CHECK(out.find("lights3_bytes_total{direction=\"in\"} 1000") != std::string::npos);
     CHECK(out.find("lights3_bytes_total{direction=\"out\"} 2050") != std::string::npos);
     CHECK(out.find("lights3_bucket_requests_total{bucket=\"photos\"} 1") != std::string::npos);
-    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"in\"} 1000") !=
-          std::string::npos);
-    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"out\"} 2000") !=
-          std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"in\"} 1000") != std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"out\"} 2000") != std::string::npos);
 }
 
 TEST(s3_metrics_split_totals_and_bucket_batches) {
@@ -261,10 +253,8 @@ TEST(s3_metrics_split_totals_and_bucket_batches) {
     auto out = m.render({});
     CHECK(out.find("lights3_bytes_total{direction=\"out\"} 131072") != std::string::npos);
     CHECK(out.find("lights3_bytes_total{direction=\"in\"} 10") != std::string::npos);
-    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"out\"} 131072") !=
-          std::string::npos);
-    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"in\"} 10") !=
-          std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"out\"} 131072") != std::string::npos);
+    CHECK(out.find("lights3_bucket_bytes_total{bucket=\"photos\",direction=\"in\"} 10") != std::string::npos);
 }
 
 TEST(s3_metrics_bucket_cardinality_capped) {

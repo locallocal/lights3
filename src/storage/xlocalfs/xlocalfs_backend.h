@@ -18,21 +18,17 @@ class XLocalFsBackend final : public LocalFsBackend {
     const char* engine_name() const override { return "xlocalfs"; }
 
 public:
-    XLocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
-                    std::shared_ptr<ThreadPool> pool, UringOptions uring_opt = {},
-                    LocalFsOptions fs_opt = {}, MetricsScope metrics = {});
+    XLocalFsBackend(std::filesystem::path root, std::filesystem::path staging, std::shared_ptr<ThreadPool> pool,
+                    UringOptions uring_opt = {}, LocalFsOptions fs_opt = {}, MetricsScope metrics = {});
 
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
-    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
-                               http::BodyReader& body,
+    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta, http::BodyReader& body,
                                PutCondition cond = {}) override;
     using LocalFsBackend::upload_part;
-    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                std::string_view upload_id, int part_no, http::BodyReader& body,
-                                const std::optional<PartChecksum>& checksum) override;
-    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
-                                       std::string_view upload_id,
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id, int part_no,
+                                http::BodyReader& body, const std::optional<PartChecksum>& checksum) override;
+    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;
     // UNLINKAT via the ring when the kernel has it (roadmap §3.4 ③): unlinking a large
     // file is real disk work on ext4/xfs; falls through to the base implementation otherwise
@@ -47,15 +43,14 @@ private:
     // Out-params instead of a return value: when a co_await result carries a std::string,
     // a throw from body makes the compiler destroy a never-constructed binding target
     // (double free / SEGV, docs/archive/gaps.md §5.6)
-    Task<void> drain_to_tmp(http::BodyReader& body, UringWriteStream& ws, uint64_t& total_out,
-                            std::string& etag_out);
+    Task<void> drain_to_tmp(http::BodyReader& body, UringWriteStream& ws, uint64_t& total_out, std::string& etag_out);
     // The rename + directory-fsync + sidecar tail of fsutil::commit_object_file, with the
     // rename going through RENAMEAT and the directory fsync through an FSYNC SQE when
     // available (same on-disk result; the caller already persisted xattr + data).
     // By-value paths: coroutine parameters must not bind temporaries. xattr_ok is the
     // outcome of the caller's set_meta_xattr (drives the sidecar policy, roadmap §3.5)
-    Task<void> commit_prepared(std::filesystem::path dest, fsutil::TmpFile& tmp,
-                               const ObjectMeta& meta, std::string_view key, bool xattr_ok);
+    Task<void> commit_prepared(std::filesystem::path dest, fsutil::TmpFile& tmp, const ObjectMeta& meta,
+                               std::string_view key, bool xattr_ok);
     // fsync the directory entry via an FSYNC SQE (silent-failure semantics of
     // fsutil::fsync_dir); no-op under LIGHTS3_FSYNC=0
     Task<void> sync_dir(std::filesystem::path dir);

@@ -50,9 +50,8 @@ public:
         struct timespec mtime{};
         struct timespec ctime{};
         bool operator==(const Stamp& o) const {
-            return dev == o.dev && ino == o.ino && mtime.tv_sec == o.mtime.tv_sec &&
-                   mtime.tv_nsec == o.mtime.tv_nsec && ctime.tv_sec == o.ctime.tv_sec &&
-                   ctime.tv_nsec == o.ctime.tv_nsec;
+            return dev == o.dev && ino == o.ino && mtime.tv_sec == o.mtime.tv_sec && mtime.tv_nsec == o.mtime.tv_nsec &&
+                   ctime.tv_sec == o.ctime.tv_sec && ctime.tv_nsec == o.ctime.tv_nsec;
         }
     };
     // false = stat failed (directory vanished); the caller falls through to a plain readdir
@@ -64,8 +63,7 @@ public:
     };
 
     explicit DirListCache(Options opt, std::shared_ptr<MetricCounter> hits = {},
-                          std::shared_ptr<MetricCounter> misses = {},
-                          std::shared_ptr<MetricGauge> resident = {});
+                          std::shared_ptr<MetricCounter> misses = {}, std::shared_ptr<MetricGauge> resident = {});
 
     bool enabled() const { return opt_.max_entries > 0; }
     // Snapshot matching (dir, stamp) or null. Counts a hit/miss either way

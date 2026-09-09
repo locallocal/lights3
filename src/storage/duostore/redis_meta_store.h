@@ -10,9 +10,9 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "core/metrics.h"
@@ -51,18 +51,14 @@ public:
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
     std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override;
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
-                    PutCondition cond = {}) override;
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
     ListResult list_objects(std::string_view b, const ListOptions& opt) override;
 
     std::string create_upload(std::string_view b, std::string_view k, ObjectMeta meta) override;
-    UploadRec require_upload(std::string_view b, std::string_view k,
-                             std::string_view id) override;
-    void put_part(std::string_view b, std::string_view k, std::string_view id,
-                  PartRec p) override;
-    std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
-                                    std::string_view id) override;
+    UploadRec require_upload(std::string_view b, std::string_view k, std::string_view id) override;
+    void put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) override;
+    std::vector<PartRec> list_parts(std::string_view b, std::string_view k, std::string_view id) override;
     std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
                                          std::string_view id_marker = {}, int limit = 0,
                                          std::string_view prefix = {}) override;
@@ -93,8 +89,8 @@ public:
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
-    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
-                      const DataRef& from, const DataRef& to) override;
+    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
+                      const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     // Invalidation feed (backlog-sequence ⑤, docs/storage/duostore-meta-redis-design.md §3.6): every
@@ -103,8 +99,7 @@ public:
     // this starts a dedicated subscriber connection + thread that feeds on_key, calls
     // on_reset on every (re)connect, and reconnects with backoff. One subscription
     // per store; a second call replaces nothing and returns false
-    bool subscribe_invalidations(InvalidationSink on_key,
-                                 std::function<void()> on_reset) override;
+    bool subscribe_invalidations(InvalidationSink on_key, std::function<void()> on_reset) override;
     std::string invalidation_channel() const;
     // Payload of one invalidation message: "<origin>\0<bucket>\0<key>"; origin is this
     // store's random id, so a subscriber skips its own commits (the write path already
@@ -164,8 +159,7 @@ private:
     // ---- High-level helpers ----
     void require_bucket(std::string_view b);  // missing → NoSuchBucket (read-only precheck)
     std::optional<std::string> hget_raw(const std::string& k, std::string_view field);
-    std::optional<std::string> upload_raw(std::string_view b, std::string_view k,
-                                          std::string_view id);
+    std::optional<std::string> upload_raw(std::string_view b, std::string_view k, std::string_view id);
     uint64_t alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n = 1);
     // gcq enqueue (§2.2): member = be64(seq) ‖ encode_reclaim; seq pre-allocation keeps the script deterministic
     void enqueue_reclaim(RedisBatch& bt, const DataRef& ref, ReclaimReason reason);
@@ -177,8 +171,7 @@ private:
     // same accounting basis as file_size (docs/archive/gaps.md §2.3a)
     void batch_pack_delta(RedisBatch& bt, const DataRef& ref, int sign, int64_t rec_overhead);
     // Read the parts HASH: raw values (for the sha1 fingerprint) + decoded records, ascending by part_no
-    std::vector<std::pair<std::string, PartRec>> scan_parts(std::string_view b,
-                                                            std::string_view k,
+    std::vector<std::pair<std::string, PartRec>> scan_parts(std::string_view b, std::string_view k,
                                                             std::string_view id);
 
     RedisMetaOptions opt_;
@@ -196,7 +189,8 @@ private:
     std::vector<std::unique_ptr<Conn>> idle_;
     bool closed_ = false;
 
-    // Separate small lock for id-segment handout (alloc is called on the data plane whenever a chunk opens; must not queue behind business commits)
+    // Separate small lock for id-segment handout (alloc is called on the data plane whenever a chunk opens; must not
+    // queue behind business commits)
     std::mutex alloc_mu_;
     IdRange file_ids_[2];  // indexed by Extent::Kind
     IdRange seqs_;         // gcq seq

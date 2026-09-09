@@ -36,11 +36,10 @@ inline std::chrono::system_clock::time_point from_unix_ms(int64_t ms) {
 std::string object_key(std::string_view bucket, std::string_view key);
 std::string upload_key(std::string_view bucket, std::string_view key, std::string_view id);
 std::string parts_prefix(std::string_view bucket, std::string_view key, std::string_view id);
-std::string part_key(std::string_view bucket, std::string_view key, std::string_view id,
-                     int part_no);
+std::string part_key(std::string_view bucket, std::string_view key, std::string_view id, int part_no);
 int part_no_of_key(std::string_view parts_cf_key);  // trailing be16
 
-std::string be64_key(uint64_t v);       // big-endian key for refs / gcq
+std::string be64_key(uint64_t v);  // big-endian key for refs / gcq
 uint64_t parse_be64(std::string_view k);
 
 // Successor seek point for delimiter group skipping (main doc §4.4): increment the
@@ -117,12 +116,11 @@ inline constexpr int64_t kPackRecHeaderFixed = 22;
 inline int64_t pack_rec_overhead(std::string_view b, std::string_view k) {
     return kPackRecHeaderFixed + int64_t(b.size()) + 1 + int64_t(k.size());
 }
-inline int64_t pack_rec_overhead_part(std::string_view b, std::string_view k,
-                                      std::string_view id, int part_no) {
+inline int64_t pack_rec_overhead_part(std::string_view b, std::string_view k, std::string_view id, int part_no) {
     int digits = 1;
     for (int v = part_no; v >= 10; v /= 10) ++digits;
-    return kPackRecHeaderFixed + 3 + 1 + int64_t(b.size()) + 1 + int64_t(k.size()) + 1 +
-           int64_t(id.size()) + 1 + digits;
+    return kPackRecHeaderFixed + 3 + 1 + int64_t(b.size()) + 1 + int64_t(k.size()) + 1 + int64_t(id.size()) + 1 +
+           digits;
 }
 
 }  // namespace lights3::storage::duostore::codec

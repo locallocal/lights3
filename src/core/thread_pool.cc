@@ -8,18 +8,17 @@ namespace lights3 {
 
 using Clock = std::chrono::steady_clock;
 
-ThreadPool::ThreadPool(size_t threads, size_t queue_capacity)
-    : capacity_(queue_capacity ? queue_capacity : 1) {
+ThreadPool::ThreadPool(size_t threads, size_t queue_capacity) : capacity_(queue_capacity ? queue_capacity : 1) {
     if (threads == 0) threads = 1;
     workers_.reserve(threads);
-    for (size_t i = 0; i < threads; ++i)
-        workers_.emplace_back([this] { worker_loop(); });
+    for (size_t i = 0; i < threads; ++i) workers_.emplace_back([this] { worker_loop(); });
 }
 
 ThreadPool::~ThreadPool() { join(); }
 
 void ThreadPool::post(std::function<void()> fn) {
-    auto now = Clock::now();  // read the clock outside the lock: the enqueue side should not bring clock reads into the critical section either
+    auto now = Clock::now();  // read the clock outside the lock: the enqueue side should not bring clock reads into the
+                              // critical section either
     bool queued = false;
     {
         std::lock_guard lk(m_);
@@ -29,7 +28,8 @@ void ThreadPool::post(std::function<void()> fn) {
         }
     }
     if (queued) {
-        cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately collide with the lock
+        cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately
+                           // collide with the lock
         return;
     }
     // Continuation delivery after join must not fail: the consumers
@@ -73,8 +73,7 @@ ThreadPool::Stats ThreadPool::stats() const {
         st.backlogged = backlog_.size();
     }
     st.completed = completed_.load(std::memory_order_relaxed);
-    for (size_t i = 0; i < kWaitBuckets; ++i)
-        st.wait_hist[i] = wait_hist_[i].load(std::memory_order_relaxed);
+    for (size_t i = 0; i < kWaitBuckets; ++i) st.wait_hist[i] = wait_hist_[i].load(std::memory_order_relaxed);
     st.wait_sum_us = wait_sum_us_.load(std::memory_order_relaxed);
     return st;
 }
@@ -93,12 +92,8 @@ void ThreadPool::worker_loop() {
         Item item;
         {
             std::unique_lock lk(m_);
-            cv_.wait(lk, [&] {
-                return stopping_ || !cont_queue_.empty() || !queue_.empty() ||
-                       !backlog_.empty();
-            });
-            if (cont_queue_.empty() && queue_.empty() && backlog_.empty())
-                return;  // stopping and fully drained
+            cv_.wait(lk, [&] { return stopping_ || !cont_queue_.empty() || !queue_.empty() || !backlog_.empty(); });
+            if (cont_queue_.empty() && queue_.empty() && backlog_.empty()) return;  // stopping and fully drained
             // Continuations first (§4): they are existing work that already yielded
             // the thread; queuing them behind new blocking tasks would turn
             // "suspend-resume" into "suspend-wait-in-a-long-line"
@@ -124,8 +119,7 @@ void ThreadPool::worker_loop() {
         auto waited = Clock::now() - item.enqueued;
         wait_hist_[wait_bucket(waited)].fetch_add(1, std::memory_order_relaxed);
         wait_sum_us_.fetch_add(
-            static_cast<uint64_t>(
-                std::chrono::duration_cast<std::chrono::microseconds>(waited).count()),
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(waited).count()),
             std::memory_order_relaxed);
         // Exception firewall: a task exception escaping the thread function means
         // std::terminate (coroutine continuations catch everything themselves; this

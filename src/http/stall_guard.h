@@ -36,8 +36,7 @@ public:
 
     // stalls: optional counter bumped on every cut (roadmap §5.3)
     StallGuardReader(std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
-                     uint64_t min_progress = kMinProgressBytes,
-                     std::atomic<uint64_t>* stalls = nullptr)
+                     uint64_t min_progress = kMinProgressBytes, std::atomic<uint64_t>* stalls = nullptr)
         : inner_(std::move(inner)),
           window_(window),
           min_progress_(min_progress ? min_progress : 1),
@@ -54,9 +53,9 @@ public:
             mark_ = now;
         } else if (now - mark_ > window_) {
             if (stalls_) stalls_->fetch_add(1, std::memory_order_relaxed);
-            throw s3::S3Error(s3::S3ErrorCode::RequestTimeout,
-                              "Transfer stalled: less than " + std::to_string(min_progress_) +
-                                  " bytes moved within the transfer stall timeout.");
+            throw s3::S3Error(s3::S3ErrorCode::RequestTimeout, "Transfer stalled: less than " +
+                                                                   std::to_string(min_progress_) +
+                                                                   " bytes moved within the transfer stall timeout.");
         }
         co_return n;
     }
@@ -74,10 +73,9 @@ private:
 };
 
 // Returns the reader unchanged when window <= 0 (guard disabled)
-inline std::unique_ptr<BodyReader> guard_stalls(
-    std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
-    uint64_t min_progress = StallGuardReader::kMinProgressBytes,
-    std::atomic<uint64_t>* stalls = nullptr) {
+inline std::unique_ptr<BodyReader> guard_stalls(std::unique_ptr<BodyReader> inner, std::chrono::seconds window,
+                                                uint64_t min_progress = StallGuardReader::kMinProgressBytes,
+                                                std::atomic<uint64_t>* stalls = nullptr) {
     if (!inner || window.count() <= 0) return inner;
     return std::make_unique<StallGuardReader>(std::move(inner), window, min_progress, stalls);
 }

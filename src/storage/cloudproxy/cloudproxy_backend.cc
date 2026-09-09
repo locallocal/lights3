@@ -42,9 +42,7 @@ bool is_md5_hex(const std::string& s) { return util::from_hex(s).size() == 16; }
 
 // The key's path segment ("/key" after encoding); the bucket segment is carried by
 // Target::prefix ("/<rb>" for path-style, empty for vhost, docs/storage/cloudproxy-design.md §7)
-std::string key_path(std::string_view key) {
-    return "/" + util::aws_uri_encode(key, /*encode_slash=*/false);
-}
+std::string key_path(std::string_view key) { return "/" + util::aws_uri_encode(key, /*encode_slash=*/false); }
 
 std::string qv(std::string_view v) { return util::aws_uri_encode(v, /*encode_slash=*/true); }
 
@@ -87,13 +85,11 @@ uint64_t parse_u64(const std::string& s) {
 // out over silently truncating to length 0
 uint64_t require_content_length(const httplib::Response& res) {
     if (!res.has_header("Content-Length"))
-        throw S3Error(S3ErrorCode::InternalError,
-                      "cloudproxy: remote response lacks Content-Length");
+        throw S3Error(S3ErrorCode::InternalError, "cloudproxy: remote response lacks Content-Length");
     try {
         return std::stoull(res.get_header_value("Content-Length"));
     } catch (...) {
-        throw S3Error(S3ErrorCode::InternalError,
-                      "cloudproxy: remote sent invalid Content-Length");
+        throw S3Error(S3ErrorCode::InternalError, "cloudproxy: remote sent invalid Content-Length");
     }
 }
 
@@ -103,22 +99,20 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
     m.etag = strip_etag_quotes(res.get_header_value("ETag"));
     m.size = require_content_length(res);
     if (res.has_header("Content-Type")) m.content_type = res.get_header_value("Content-Type");
-    if (auto t = util::parse_http_date(res.get_header_value("Last-Modified")))
-        m.last_modified = *t;
+    if (auto t = util::parse_http_date(res.get_header_value("Last-Modified"))) m.last_modified = *t;
     for (auto& f : kStdMetaFields)
         if (res.has_header(f.header)) m.*f.field = res.get_header_value(f.header);
     // Remote checksum echo (roadmap §2.2): present when the request carried
     // x-amz-checksum-mode: ENABLED (GET/HEAD below always send it)
     for (auto& [k, v] : res.headers) {
         constexpr std::string_view kCk = "x-amz-checksum-";
-        if (k.size() > kCk.size() &&
-            http::HeaderMap::ieq(std::string_view(k).substr(0, kCk.size()), kCk)) {
+        if (k.size() > kCk.size() && http::HeaderMap::ieq(std::string_view(k).substr(0, kCk.size()), kCk)) {
             std::string algo = k.substr(kCk.size());
             for (char& c : algo) c = http::HeaderMap::lower(c);
             if (algo == "type") {
                 m.checksum_type = v;
-            } else if (algo == "crc32" || algo == "crc32c" || algo == "crc64nvme" ||
-                       algo == "sha1" || algo == "sha256") {
+            } else if (algo == "crc32" || algo == "crc32c" || algo == "crc64nvme" || algo == "sha1" ||
+                       algo == "sha256") {
                 for (char& c : algo) c = char(toupper(static_cast<unsigned char>(c)));
                 m.checksum_algorithm = std::move(algo);
                 m.checksum_value = v;
@@ -128,8 +122,7 @@ ObjectMeta meta_from_response(std::string_view key, const httplib::Response& res
     for (auto& [k, v] : res.headers) {
         constexpr std::string_view kMetaPrefix = "x-amz-meta-";
         if (k.size() > kMetaPrefix.size() &&
-            http::HeaderMap::ieq(std::string_view(k).substr(0, kMetaPrefix.size()),
-                                 kMetaPrefix)) {
+            http::HeaderMap::ieq(std::string_view(k).substr(0, kMetaPrefix.size()), kMetaPrefix)) {
             std::string mk = k.substr(kMetaPrefix.size());
             for (char& c : mk) c = http::HeaderMap::lower(c);
             m.user_meta[mk] = v;
@@ -159,8 +152,7 @@ GetHead head_from_response(std::string_view key, const httplib::Response& res) {
         unsigned long long a = 0, b = 0, total = 0;
         if (sscanf(cr.c_str(), "bytes %llu-%llu/%llu", &a, &b, &total) != 3)
             throw S3Error(S3ErrorCode::InternalError,
-                          "cloudproxy: remote 206 has missing or unparsable Content-Range: " +
-                              cr);
+                          "cloudproxy: remote 206 has missing or unparsable Content-Range: " + cr);
         h.meta.size = total;
         h.range = ByteRange{a, b};
         h.body_len = b - a + 1;
@@ -203,10 +195,8 @@ struct TransferAbort {
 class PumpBodyReader final : public http::BodyReader {
 public:
     PumpBodyReader(std::shared_ptr<http::BlockQueue> q, std::optional<uint64_t> len,
-                   std::shared_ptr<TransferAbort> abort, std::thread pump,
-                   std::shared_ptr<ThreadPool> pool)
-        : q_(q), inner_(std::move(q), len), abort_(std::move(abort)), pump_(std::move(pump)),
-          pool_(std::move(pool)) {}
+                   std::shared_ptr<TransferAbort> abort, std::thread pump, std::shared_ptr<ThreadPool> pool)
+        : q_(q), inner_(std::move(q), len), abort_(std::move(abort)), pump_(std::move(pump)), pool_(std::move(pool)) {}
     ~PumpBodyReader() override {
         q_->cancel();
         abort_->abort();
@@ -255,20 +245,18 @@ std::string expected_total_etag(std::span<const PartInfo> parts) {
 
 // ---------- Construction ----------
 
-CloudProxyBackend::CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<ThreadPool> pool,
-                                     MetricsScope metrics)
+CloudProxyBackend::CloudProxyBackend(CloudProxyConfig cfg, std::shared_ptr<ThreadPool> pool, MetricsScope metrics)
     : pool_(std::move(pool)) {
     auto ep = Endpoint::parse(cfg.endpoint);
     ctx_ = std::make_shared<RemoteContext>(std::move(cfg), ep, metrics);
     // Async pool waiters resume business logic on pool threads, never on the
     // releasing/timer thread (roadmap §3.3)
     ctx_->pool.set_resume_executor(&exec_);
-    LOG_INFO("cloudproxy backend: endpoint={} region={} prefix='{}' style={} control={} "
-             "credentials={}",
-             ctx_->cfg.endpoint, ctx_->cfg.region, ctx_->cfg.bucket_prefix,
-             ctx_->cfg.force_path_style ? "path" : "vhost",
-             ctx_->cfg.control_in_pump ? "pump" : "pool",
-             ctx_->cred_chain ? "chain(env/container/imds)" : "static");
+    LOG_INFO(
+        "cloudproxy backend: endpoint={} region={} prefix='{}' style={} control={} "
+        "credentials={}",
+        ctx_->cfg.endpoint, ctx_->cfg.region, ctx_->cfg.bucket_prefix, ctx_->cfg.force_path_style ? "path" : "vhost",
+        ctx_->cfg.control_in_pump ? "pump" : "pool", ctx_->cred_chain ? "chain(env/container/imds)" : "static");
 }
 
 CloudProxyBackend::~CloudProxyBackend() = default;
@@ -293,7 +281,8 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
         std::optional<R> result;
         std::exception_ptr err;
         std::thread th;
-        std::binary_semaphore gate{0};  // gate the thread body: it must not run before the move-assignment to th completes
+        std::binary_semaphore gate{0};  // gate the thread body: it must not run before the move-assignment to th
+                                        // completes
         bool await_ready() const noexcept { return false; }
         void await_suspend(std::coroutine_handle<> h) {
             // Without the gate there is a race: a very fast fn could post before the
@@ -308,7 +297,8 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
                 }
                 ex->post(h);  // the private thread only posts; business logic continues on a pool thread
             });
-            gate.release();  // must not touch any member after this (the coroutine may have already resumed on a pool thread)
+            gate.release();  // must not touch any member after this (the coroutine may have already resumed on a pool
+                             // thread)
         }
         R await_resume() {
             th.join();  // the thread wraps up right after post; the join is only microseconds
@@ -349,12 +339,10 @@ Task<httplib::Result> CloudProxyBackend::retry_io(const char* op, Fn fn) {
         ctx_->breaker_gate();
         httplib::Result r = co_await [&]() -> Task<httplib::Result> {
             auto lease = co_await ctx_->pool.acquire_async();
-            co_return co_await control_io(
-                [&] { return ctx_->attempt(hist, lease.client(), fn); });
+            co_return co_await control_io([&] { return ctx_->attempt(hist, lease.client(), fn); });
         }();
         ctx_->breaker_observe(r);
-        bool retry = !r ? RemoteContext::retryable_transport(r.error())
-                        : ctx_->retryable_status(r->status);
+        bool retry = !r ? RemoteContext::retryable_transport(r.error()) : ctx_->retryable_status(r->status);
         if (!retry || attempt >= ctx_->cfg.retry_max) co_return r;
         auto delay = ctx_->backoff_delay_ms(attempt, RemoteContext::retry_after_hint(r));
         if (!RemoteContext::deadline_allows(deadline, delay)) co_return r;
@@ -379,14 +367,12 @@ std::string CloudProxyBackend::remote_bucket(std::string_view bucket) const {
         // Name-collision guard: a user bucket that happens to bear the transliterated name
         // would merge with the remote credential bucket, and being able to read .sys
         // objects means credential leakage -- the name is reserved for this backend
-        throw S3Error(S3ErrorCode::InvalidBucketName,
-                      "bucket name is reserved by the cloudproxy backend",
+        throw S3Error(S3ErrorCode::InvalidBucketName, "bucket name is reserved by the cloudproxy backend",
                       std::string(bucket));
     }
     std::string rb = ctx_->cfg.bucket_prefix + std::string(local);
     if (rb.size() > 63)
-        throw S3Error(S3ErrorCode::InvalidBucketName,
-                      "bucket name with cloudproxy bucket_prefix exceeds 63 bytes",
+        throw S3Error(S3ErrorCode::InvalidBucketName, "bucket name with cloudproxy bucket_prefix exceeds 63 bytes",
                       std::string(bucket));
     return rb;
 }
@@ -408,9 +394,7 @@ Task<void> CloudProxyBackend::create_bucket(std::string_view bucket) {
     }
     auto tp = co_await trace_extra();
     auto res = co_await retry_io("create_bucket", [&](httplib::Client& c) {
-        auto headers = ctx_->signed_headers("PUT", path, "", tp,
-                                            body.empty() ? "" : util::sha256_hex(body),
-                                            t.host);
+        auto headers = ctx_->signed_headers("PUT", path, "", tp, body.empty() ? "" : util::sha256_hex(body), t.host);
         return c.Put(path, headers, body, body.empty() ? "" : "application/xml");
     });
     if (!res) ctx_->throw_transport_error(res.error());
@@ -454,12 +438,10 @@ Task<bool> CloudProxyBackend::bucket_exists(std::string_view bucket) {
 Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
     // Service-level operations always go to the endpoint itself, regardless of addressing style
     auto tp = co_await trace_extra();
-    auto res = co_await retry_io("list_buckets", [&](httplib::Client& c) {
-        return c.Get("/", ctx_->signed_headers("GET", "/", "", tp, ""));
-    });
+    auto res = co_await retry_io(
+        "list_buckets", [&](httplib::Client& c) { return c.Get("/", ctx_->signed_headers("GET", "/", "", tp, "")); });
     if (!res) ctx_->throw_transport_error(res.error());
-    if (res->status != 200)
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::None, "/");
+    if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::None, "/");
     std::vector<BucketInfo> out;
     auto root = s3::xml_parse(res->body);
     const auto& prefix = ctx_->cfg.bucket_prefix;
@@ -469,8 +451,7 @@ Task<std::vector<BucketInfo>> CloudProxyBackend::list_buckets() {
             std::string name = b.get("Name");
             // Keep only prefixed names and return them with the prefix stripped; the rest
             // are unrelated buckets under the remote account
-            if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0)
-                continue;
+            if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0) continue;
             BucketInfo info;
             info.name = name.substr(prefix.size());
             // Reverse the transliteration (dual of remote_bucket): the upper layer still
@@ -508,10 +489,9 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
 
     // pump: the ResponseHandler delivers meta on arrival; the ContentReceiver converts push
     // to pull through the queue (§3.1)
-    std::thread pump([ctx, queue, abortst, prom, path, extra, resource, keycopy,
-                      host = t.host] {
+    std::thread pump([ctx, queue, abortst, prom, path, extra, resource, keycopy, host = t.host] {
         auto op_hist = ctx->metrics.op_seconds("get");  // §8.2: the whole transfer is one observation
-        const auto deadline = ctx->op_deadline();  // §3.3: caps the retry loop, not a transfer
+        const auto deadline = ctx->op_deadline();       // §3.3: caps the retry loop, not a transfer
         bool delivered = false;
         try {
             for (int attempt = 0;; ++attempt) {
@@ -547,9 +527,7 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                             return true;
                         });
                     abortst->disarm();
-                    op_hist->observe(std::chrono::duration<double>(
-                                         std::chrono::steady_clock::now() - t0)
-                                         .count());
+                    op_hist->observe(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
                     // A deliberately aborted transfer (client gone) says nothing about
                     // the remote's health
                     if (!abortst->is_aborted()) ctx->breaker_observe(res);
@@ -564,16 +542,13 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                                        : ctx->retryable_status(res->status)) &&
                                  attempt < ctx->cfg.retry_max;
                     if (retry) {
-                        delay_ms = ctx->backoff_delay_ms(
-                            attempt, RemoteContext::retry_after_hint(res));
-                        if (!RemoteContext::deadline_allows(deadline, delay_ms))
-                            retry = false;
+                        delay_ms = ctx->backoff_delay_ms(attempt, RemoteContext::retry_after_hint(res));
+                        if (!RemoteContext::deadline_allows(deadline, delay_ms)) retry = false;
                     }
                     if (!retry) {
                         try {
                             if (!res) ctx->throw_transport_error(res.error());
-                            ctx->throw_remote_error(res->status, err_body, ErrCtx::Key,
-                                                    resource);
+                            ctx->throw_remote_error(res->status, err_body, ErrCtx::Key, resource);
                         } catch (...) {
                             prom->set_exception(std::current_exception());
                         }
@@ -602,17 +577,15 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
         // everything stalls. Leave headroom for the connection-establishment budget: the
         // retry chain is at worst (retry_max+1) rounds, and each round's actual IO is
         // backstopped by httplib's own timeouts
-        auto budget = std::chrono::milliseconds(ctx_->cfg.request_timeout_ms) *
-                      (ctx_->cfg.retry_max + 1);
+        auto budget = std::chrono::milliseconds(ctx_->cfg.request_timeout_ms) * (ctx_->cfg.retry_max + 1);
         if (ctx_->cfg.op_deadline_ms > 0)  // §3.3: the per-op deadline caps the whole loop
             budget = std::min(budget, std::chrono::milliseconds(ctx_->cfg.op_deadline_ms));
         if (fut.wait_for(budget) != std::future_status::ready) {
-            abortst->abort();   // interrupt in-flight socket IO; do not sit out httplib's timeout
+            abortst->abort();  // interrupt in-flight socket IO; do not sit out httplib's timeout
             queue->cancel();
             pump.join();
             ctx_->metrics.count_error("transport");
-            throw S3Error(S3ErrorCode::SlowDown,
-                          "cloudproxy: timed out waiting for remote response headers");
+            throw S3Error(S3ErrorCode::SlowDown, "cloudproxy: timed out waiting for remote response headers");
         }
         head = fut.get();
     } catch (...) {
@@ -622,15 +595,14 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
     ObjectStream out;
     out.meta = std::move(head.meta);
     out.range = head.range;
-    out.body = std::make_unique<PumpBodyReader>(queue, head.body_len, abortst,
-                                                std::move(pump), pool_);
+    out.body = std::make_unique<PumpBodyReader>(queue, head.body_len, abortst, std::move(pump), pool_);
     co_return out;
 }
 
-Task<PutResult> CloudProxyBackend::stream_upload(
-    std::string raw_path, std::string raw_query, std::string host, std::string content_type,
-    std::vector<std::pair<std::string, std::string>> extra, http::BodyReader& body,
-    std::string resource, bool multipart_ctx) {
+Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::string raw_query, std::string host,
+                                                 std::string content_type,
+                                                 std::vector<std::pair<std::string, std::string>> extra,
+                                                 http::BodyReader& body, std::string resource, bool multipart_ctx) {
     extra = co_await trace_extra(std::move(extra));
     auto len_opt = body.length();
     // AWS rejects bare chunked uploads (§3.2). Without a length (chunked and no
@@ -642,9 +614,8 @@ Task<PutResult> CloudProxyBackend::stream_upload(
             throw S3Error(S3ErrorCode::NotImplemented,
                           "cloudproxy: upload without content length is not supported "
                           "(spool disabled)");
-        co_return co_await spool_and_upload(std::move(raw_path), std::move(raw_query),
-                                            std::move(host), std::move(content_type),
-                                            std::move(extra), body, std::move(resource),
+        co_return co_await spool_and_upload(std::move(raw_path), std::move(raw_query), std::move(host),
+                                            std::move(content_type), std::move(extra), body, std::move(resource),
                                             multipart_ctx);
     }
     const uint64_t len = *len_opt;
@@ -667,10 +638,9 @@ Task<PutResult> CloudProxyBackend::stream_upload(
 
     // pump: pull-to-pull, the Provider takes data from the queue and writes the DataSink (§3.2)
     const char* op = multipart_ctx ? "upload_part" : "put";
-    std::thread pump([ctx, queue, abortst, out, raw_path, raw_query, host, full, content_type,
-                      extra, len, op] {
+    std::thread pump([ctx, queue, abortst, out, raw_path, raw_query, host, full, content_type, extra, len, op] {
         auto op_hist = ctx->metrics.op_seconds(op);  // §8.2: the whole transfer is one observation
-        const auto deadline = ctx->op_deadline();  // §3.3: caps the retry loop, not a transfer
+        const auto deadline = ctx->op_deadline();    // §3.3: caps the retry loop, not a transfer
         try {
             for (int attempt = 0;; ++attempt) {
                 ctx->breaker_gate();  // fail fast while the remote is decidedly down (§3.3)
@@ -679,8 +649,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(
                 bool provider_called = false;
                 auto lease = ctx->pool.acquire();
                 abortst->arm(lease.client());
-                auto headers = ctx->signed_headers("PUT", raw_path, raw_query, extra,
-                                                   kUnsignedPayload, host);
+                auto headers = ctx->signed_headers("PUT", raw_path, raw_query, extra, kUnsignedPayload, host);
                 auto t0 = std::chrono::steady_clock::now();
                 auto res = lease.client().Put(
                     full, headers, static_cast<size_t>(len),
@@ -699,22 +668,18 @@ Task<PutResult> CloudProxyBackend::stream_upload(
                     },
                     content_type);
                 abortst->disarm();
-                op_hist->observe(std::chrono::duration<double>(
-                                     std::chrono::steady_clock::now() - t0)
-                                     .count());
+                op_hist->observe(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
                 // A deliberately aborted transfer says nothing about the remote's
                 // health; nor does a mid-transfer failure with no response — it may be
                 // our own producer breaking off (provider false ⇒ canceled), so only a
                 // response or a pre-provider (connection-stage) failure is observed
-                if (!abortst->is_aborted() && (res || !provider_called))
-                    ctx->breaker_observe(res);
+                if (!abortst->is_aborted() && (res || !provider_called)) ctx->breaker_observe(res);
                 // Retry only when the failure is in the connection-establishment stage and
                 // the Provider was never called (queue unconsumed) (§5.2); a deliberately
                 // aborted transfer is not retried, and a backoff past the per-op deadline
                 // is not taken
                 if (!res && !provider_called && !abortst->is_aborted() &&
-                    RemoteContext::connection_stage_error(res.error()) &&
-                    attempt < ctx->cfg.retry_max) {
+                    RemoteContext::connection_stage_error(res.error()) && attempt < ctx->cfg.retry_max) {
                     auto delay = ctx->backoff_delay_ms(attempt);
                     if (RemoteContext::deadline_allows(deadline, delay)) {
                         ctx->metrics.count_retry(op);
@@ -793,8 +758,7 @@ Task<PutResult> CloudProxyBackend::stream_upload(
         }
         co_return PutResult{etag};
     }
-    ctx->throw_remote_error(out->status, out->resp_body,
-                            multipart_ctx ? ErrCtx::Upload : ErrCtx::Bucket, resource);
+    ctx->throw_remote_error(out->status, out->resp_body, multipart_ctx ? ErrCtx::Upload : ErrCtx::Bucket, resource);
 }
 
 // Spool for length-less uploads (docs/archive/gaps.md §6.2): the body lands fully in a temp file
@@ -802,14 +766,13 @@ Task<PutResult> CloudProxyBackend::stream_upload(
 // fall back to unlink-after-open); once the length is known, go through the known-length
 // stream_upload via FdStreamReader. The cost is one local disk write/read plus
 // full-arrival latency -- a trade-off for "rare-path availability"
-Task<PutResult> CloudProxyBackend::spool_and_upload(
-    std::string raw_path, std::string raw_query, std::string host, std::string content_type,
-    std::vector<std::pair<std::string, std::string>> extra, http::BodyReader& body,
-    std::string resource, bool multipart_ctx) {
+Task<PutResult> CloudProxyBackend::spool_and_upload(std::string raw_path, std::string raw_query, std::string host,
+                                                    std::string content_type,
+                                                    std::vector<std::pair<std::string, std::string>> extra,
+                                                    http::BodyReader& body, std::string resource, bool multipart_ctx) {
     co_await pool_->schedule();
     namespace fs = std::filesystem;
-    fs::path dir = ctx_->cfg.spool_dir.empty() ? fs::temp_directory_path()
-                                               : fs::path(ctx_->cfg.spool_dir);
+    fs::path dir = ctx_->cfg.spool_dir.empty() ? fs::temp_directory_path() : fs::path(ctx_->cfg.spool_dir);
     int fd = ::open(dir.c_str(), O_TMPFILE | O_RDWR, 0600);
     if (fd < 0) {
         // O_TMPFILE unsupported (old kernels/NFS): create named, then unlink immediately;
@@ -817,8 +780,7 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
         fs::path p = dir / ("lights3-spool-" + std::to_string(::getpid()) + "-" +
                             std::to_string(reinterpret_cast<uintptr_t>(&body)));
         fd = ::open(p.c_str(), O_RDWR | O_CREAT | O_EXCL, 0600);
-        if (fd < 0)
-            throw S3Error(S3ErrorCode::InternalError, "cloudproxy: cannot create spool file");
+        if (fd < 0) throw S3Error(S3ErrorCode::InternalError, "cloudproxy: cannot create spool file");
         ::unlink(p.c_str());
     }
     struct FdGuard {
@@ -834,8 +796,7 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
         if (n == 0) break;
         total += n;
         if (total > ctx_->cfg.spool_max_bytes)
-            throw S3Error(S3ErrorCode::EntityTooLarge,
-                          "cloudproxy: unsized upload exceeds spool_max_bytes");
+            throw S3Error(S3ErrorCode::EntityTooLarge, "cloudproxy: unsized upload exceeds spool_max_bytes");
         const char* p = reinterpret_cast<const char*>(buf.data());
         size_t left = n;
         while (left > 0) {
@@ -850,8 +811,8 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
     guard.fd = -1;
     fsutil::FdStreamReader replay(owned, 0, total, pool_);
     co_return co_await stream_upload(std::move(raw_path), std::move(raw_query), std::move(host),
-                                     std::move(content_type), std::move(extra), replay,
-                                     std::move(resource), multipart_ctx);
+                                     std::move(content_type), std::move(extra), replay, std::move(resource),
+                                     multipart_ctx);
 }
 
 // Server-side COPY (docs/archive/gaps.md §6.2): previously a copy within the same cloudproxy
@@ -859,9 +820,10 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(
 // and cost, when the remote could have done it with one x-amz-copy-source. Always send
 // REPLACE + our metadata -- the handler has already folded COPY/REPLACE semantics into
 // meta, and the remote just copies it verbatim
-Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
-    std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
-    std::string_view dst_key, ObjectMeta meta) {
+Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(std::string_view src_bucket,
+                                                                   std::string_view src_key,
+                                                                   std::string_view dst_bucket,
+                                                                   std::string_view dst_key, ObjectMeta meta) {
     validate_object_key(src_key);
     validate_object_key(dst_key);
     auto src_rb = remote_bucket(src_bucket);
@@ -872,30 +834,25 @@ Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
 
     std::vector<std::pair<std::string, std::string>> extra = meta_headers(meta);
     extra.emplace_back("x-amz-copy-source",
-                       "/" + util::aws_uri_encode(src_rb, /*encode_slash=*/false) +
-                           std::string(key_path(src_key)));
+                       "/" + util::aws_uri_encode(src_rb, /*encode_slash=*/false) + std::string(key_path(src_key)));
     extra.emplace_back("x-amz-metadata-directive", "REPLACE");
     extra = co_await trace_extra(std::move(extra));
 
     // Server-side COPY is an idempotent PUT: transport/5xx retries are safe, and the
     // 200-with-error-body trap is resolved after the loop like complete's (§4.4)
     auto res = co_await retry_io("copy", [&](httplib::Client& c) {
-        auto headers = ctx_->signed_headers("PUT", path, "", extra,
-                                            util::sha256_hex(""), tgt.host);
-        return c.Put(path, headers, "", meta.content_type.empty()
-                                            ? "application/octet-stream"
-                                            : meta.content_type.c_str());
+        auto headers = ctx_->signed_headers("PUT", path, "", extra, util::sha256_hex(""), tgt.host);
+        return c.Put(path, headers, "",
+                     meta.content_type.empty() ? "application/octet-stream" : meta.content_type.c_str());
     });
     if (!res) ctx_->throw_transport_error(res.error());
-    if (res->status != 200)
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource);
+    if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource);
     // COPY shares complete's trap: a slow copy returns 200 first with the error in the body (§4.4)
     s3::XmlNode root;
     try {
         root = s3::xml_parse(res->body);
     } catch (...) {
-        throw S3Error(S3ErrorCode::InternalError,
-                      "cloudproxy: remote returned unparsable CopyObjectResult body");
+        throw S3Error(S3ErrorCode::InternalError, "cloudproxy: remote returned unparsable CopyObjectResult body");
     }
     if (root.name == "Error") {
         auto code = map_remote_code(root.get("Code"));
@@ -904,9 +861,8 @@ Task<std::optional<PutResult>> CloudProxyBackend::copy_object_fast(
     co_return PutResult{std::string(strip_etag_quotes(root.get("ETag")))};
 }
 
-Task<PutResult> CloudProxyBackend::put_object(std::string_view bucket, std::string_view key,
-                                              ObjectMeta meta, http::BodyReader& body,
-                                              PutCondition cond) {
+Task<PutResult> CloudProxyBackend::put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
+                                              http::BodyReader& body, PutCondition cond) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
@@ -917,13 +873,11 @@ Task<PutResult> CloudProxyBackend::put_object(std::string_view bucket, std::stri
     auto extra = meta_headers(meta);
     if (cond.if_none_match) extra.emplace_back("If-None-Match", "*");
     if (cond.if_match_etag) extra.emplace_back("If-Match", "\"" + *cond.if_match_etag + "\"");
-    co_return co_await stream_upload(t.object_path(key_path(key)), "", t.host,
-                                     meta.content_type, std::move(extra), body,
-                                     resource_of(bucket, key), /*multipart_ctx=*/false);
+    co_return co_await stream_upload(t.object_path(key_path(key)), "", t.host, meta.content_type, std::move(extra),
+                                     body, resource_of(bucket, key), /*multipart_ctx=*/false);
 }
 
-Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
-                                                std::string_view key) {
+Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket, std::string_view key) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
@@ -939,8 +893,9 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket,
     ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
 }
 
-Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolve_object_part(
-    std::string_view bucket, std::string_view key, int part_no) {
+Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolve_object_part(std::string_view bucket,
+                                                                                              std::string_view key,
+                                                                                              int part_no) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
@@ -953,11 +908,9 @@ Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolv
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status == 416)
-        throw S3Error(S3ErrorCode::InvalidPartNumber,
-                      "The requested partnumber is not satisfiable", std::string(key));
+        throw S3Error(S3ErrorCode::InvalidPartNumber, "The requested partnumber is not satisfiable", std::string(key));
     if (res->status != 200 && res->status != 206)
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key,
-                                 resource_of(bucket, key));
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
     int count = 1;
     if (res->has_header("x-amz-mp-parts-count")) {
         try {
@@ -982,8 +935,7 @@ Task<std::optional<IStorageBackend::ObjectPartExtent>> CloudProxyBackend::resolv
     co_return pe;
 }
 
-Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
-                                                 std::string_view key, std::string tagging) {
+Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
@@ -993,13 +945,11 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
     if (tagging.empty()) {  // DeleteObjectTagging upstream
         auto tp = co_await trace_extra();
         auto res = co_await retry_io("delete_tagging", [&](httplib::Client& c) {
-            return c.Delete(full,
-                            ctx_->signed_headers("DELETE", path, query, tp, "", t.host));
+            return c.Delete(full, ctx_->signed_headers("DELETE", path, query, tp, "", t.host));
         });
         if (!res) ctx_->throw_transport_error(res.error());
         if (res->status / 100 == 2) co_return;
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key,
-                                 resource_of(bucket, key));
+        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Key, resource_of(bucket, key));
     }
     // Rebuild the Tagging XML from the canonical encoded form
     s3::XmlWriter w;
@@ -1012,10 +962,8 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
         std::string item = tagging.substr(pos, amp - pos);
         auto eq = item.find('=');
         w.open("Tag");
-        w.element("Key", util::percent_decode(eq == std::string::npos ? item
-                                                                      : item.substr(0, eq)));
-        w.element("Value",
-                  eq == std::string::npos ? "" : util::percent_decode(item.substr(eq + 1)));
+        w.element("Key", util::percent_decode(eq == std::string::npos ? item : item.substr(0, eq)));
+        w.element("Value", eq == std::string::npos ? "" : util::percent_decode(item.substr(eq + 1)));
         w.close();
         pos = amp + 1;
     }
@@ -1025,9 +973,7 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket,
     const std::string body_hash = util::sha256_hex(body);
     auto tp = co_await trace_extra();
     auto res = co_await retry_io("put_tagging", [&](httplib::Client& c) {
-        return c.Put(full,
-                     ctx_->signed_headers("PUT", path, query, tp, body_hash, t.host),
-                     body, "application/xml");
+        return c.Put(full, ctx_->signed_headers("PUT", path, query, tp, body_hash, t.host), body, "application/xml");
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
@@ -1051,8 +997,7 @@ Task<void> CloudProxyBackend::delete_object(std::string_view bucket, std::string
 
 // ---------- list (docs/storage/cloudproxy-design.md §4.2: always paginate with start-after) ----------
 
-Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
-                                                 const ListOptions& opt) {
+Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket, const ListOptions& opt) {
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.bucket_path();
@@ -1067,8 +1012,7 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
         return c.Get(full, ctx_->signed_headers("GET", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
-    if (res->status != 200)
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket, resource_of(bucket));
+    if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket, resource_of(bucket));
 
     ListResult out;
     auto root = s3::xml_parse(res->body);
@@ -1101,8 +1045,7 @@ Task<ListResult> CloudProxyBackend::list_objects(std::string_view bucket,
 
 // ---------- multipart passthrough (docs/storage/cloudproxy-design.md §4.4) ----------
 
-Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
-                                                      std::string_view key, ObjectMeta meta) {
+Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
@@ -1110,38 +1053,31 @@ Task<std::string> CloudProxyBackend::create_multipart(std::string_view bucket,
     std::string query = "uploads";
     std::string full = path + "?" + query;
     auto extra = meta_headers(meta);
-    if (!meta.checksum_algorithm.empty())
-        extra.emplace_back("x-amz-checksum-algorithm", meta.checksum_algorithm);
+    if (!meta.checksum_algorithm.empty()) extra.emplace_back("x-amz-checksum-algorithm", meta.checksum_algorithm);
     // Note: create retries may leave empty orphan uploads on the remote (a known §5.2
     // trade-off, standard industry practice) -- recommend configuring an
     // AbortIncompleteMultipartUpload lifecycle rule on the remote account
     extra = co_await trace_extra(std::move(extra));
     auto res = co_await retry_io("create_multipart", [&](httplib::Client& c) {
-        return c.Post(full, ctx_->signed_headers("POST", path, query, extra, "", t.host),
-                      "", meta.content_type);
+        return c.Post(full, ctx_->signed_headers("POST", path, query, extra, "", t.host), "", meta.content_type);
     });
     if (!res) ctx_->throw_transport_error(res.error());
-    if (res->status != 200)
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket,
-                                 resource_of(bucket, key));
+    if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket, resource_of(bucket, key));
     auto root = s3::xml_parse(res->body);
     std::string id = root.get("UploadId");
     if (root.name != "InitiateMultipartUploadResult" || id.empty())
-        throw S3Error(S3ErrorCode::InternalError,
-                      "cloudproxy: remote returned unexpected CreateMultipartUpload body");
+        throw S3Error(S3ErrorCode::InternalError, "cloudproxy: remote returned unexpected CreateMultipartUpload body");
     co_return id;
 }
 
 Task<PutResult> CloudProxyBackend::upload_part(std::string_view bucket, std::string_view key,
-                                               std::string_view upload_id, int part_no,
-                                               http::BodyReader& body,
+                                               std::string_view upload_id, int part_no, http::BodyReader& body,
                                                const std::optional<PartChecksum>& checksum) {
     validate_object_key(key);
     validate_part_number(part_no);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
-    std::string query =
-        "partNumber=" + std::to_string(part_no) + "&uploadId=" + qv(upload_id);
+    std::string query = "partNumber=" + std::to_string(part_no) + "&uploadId=" + qv(upload_id);
     // Header-form part checksum forwarded so the remote verifies/stores it too (§2.2);
     // trailer-form values arrive after the headers left — this gateway verified them,
     // the remote just is not told (documented limitation)
@@ -1151,15 +1087,13 @@ Task<PutResult> CloudProxyBackend::upload_part(std::string_view bucket, std::str
         for (char c : checksum->algorithm) h.push_back(http::HeaderMap::lower(c));
         extra.emplace_back(std::move(h), checksum->value);
     }
-    co_return co_await stream_upload(t.object_path(key_path(key)), query, t.host, "",
-                                     std::move(extra), body, resource_of(bucket, key),
+    co_return co_await stream_upload(t.object_path(key_path(key)), query, t.host, "", std::move(extra), body,
+                                     resource_of(bucket, key),
                                      /*multipart_ctx=*/true);
 }
 
-Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
-                                                      std::string_view key,
-                                                      std::string_view upload_id,
-                                                      std::span<const PartInfo> parts) {
+Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket, std::string_view key,
+                                                      std::string_view upload_id, std::span<const PartInfo> parts) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto tgt = ctx_->target(rb);
@@ -1177,8 +1111,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
         // Client-declared part checksum forwarded verbatim; the remote re-validates (§2.2)
         if (!p.checksum_algorithm.empty() && !p.checksum_value.empty()) {
             std::string tag = "Checksum";
-            for (char c : p.checksum_algorithm)
-                tag.push_back(c);  // wire names are already uppercase
+            for (char c : p.checksum_algorithm) tag.push_back(c);  // wire names are already uppercase
             w.element(tag, p.checksum_value);
         }
         w.close();
@@ -1206,30 +1139,25 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             auto lease = co_await ctx_->pool.acquire_async();
             co_return co_await control_io([&] {
                 return ctx_->attempt(op_hist, lease.client(), [&](httplib::Client& c) {
-                    return c.Post(full,
-                                  ctx_->signed_headers("POST", path, query, tp, body_hash,
-                                                       tgt.host),
-                                  body, "application/xml");
+                    return c.Post(full, ctx_->signed_headers("POST", path, query, tp, body_hash, tgt.host), body,
+                                  "application/xml");
                 });
             });
         }();
         ctx_->breaker_observe(res);
-        bool retry = !res ? RemoteContext::retryable_transport(res.error())
-                          : ctx_->retryable_status(res->status);
+        bool retry = !res ? RemoteContext::retryable_transport(res.error()) : ctx_->retryable_status(res->status);
         // S3 quirk: a long-running complete returns 200 first with the error in the
         // body (§4.4). InternalError/SlowDown in the body are the same thing as their
         // namesake HTTP statuses and equally worth retrying -- not retrying turns
         // straight into a 500 for the client, whose retry then goes through the
         // NoSuchUpload ambiguity resolution, wasting a round trip. A post-retry
         // NoSuchUpload is resolved by the retried branch below
-        if (!retry && res && res->status == 200 &&
-            res->body.find("<Error") != std::string::npos) {
+        if (!retry && res && res->status == 200 && res->body.find("<Error") != std::string::npos) {
             try {
                 auto root = s3::xml_parse(res->body);
                 if (root.name == "Error") {
                     auto code = map_remote_code(root.get("Code"));
-                    retry = code == S3ErrorCode::InternalError ||
-                            code == S3ErrorCode::SlowDown;
+                    retry = code == S3ErrorCode::InternalError || code == S3ErrorCode::SlowDown;
                 }
             } catch (...) {  // unparsable: leave it to the unified handling below
             }
@@ -1245,8 +1173,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
         const bool retried = attempt > 0;
         if (!res) ctx_->throw_transport_error(res.error());
         try {
-            if (res->status != 200)
-                ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
+            if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
             // S3 quirk: a long-running complete returns 200 first with the error in the
             // body (docs/storage/cloudproxy-design.md §4.4)
             s3::XmlNode root;
@@ -1259,8 +1186,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
             }
             if (root.name == "Error") {
                 auto code = map_remote_code(root.get("Code"));
-                throw S3Error(code.value_or(S3ErrorCode::InternalError),
-                              root.get("Message"), resource);
+                throw S3Error(code.value_or(S3ErrorCode::InternalError), root.get("Message"), resource);
             }
             outcome.etag = std::string(strip_etag_quotes(root.get("ETag")));
             for (std::string_view a : {"CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"}) {
@@ -1298,8 +1224,7 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket,
         if (!completed_before) std::rethrow_exception(outcome.ambiguous);
         etag_out = expect;
     }
-    co_return PutResult{etag_out, outcome.checksum_algorithm, outcome.checksum_value,
-                        outcome.checksum_type};
+    co_return PutResult{etag_out, outcome.checksum_algorithm, outcome.checksum_value, outcome.checksum_type};
 }
 
 Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::string_view key,
@@ -1316,8 +1241,7 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
     });
     if (!res) ctx_->throw_transport_error(res.error());
     if (res->status / 100 == 2) co_return;
-    ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload,
-                             resource_of(bucket, key));
+    ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource_of(bucket, key));
 }
 
 // Now that the contract carries pagination fields, this changed from "accumulate all pages
@@ -1325,10 +1249,8 @@ Task<void> CloudProxyBackend::abort_multipart(std::string_view bucket, std::stri
 // the remote's marker directly, and the remote's IsTruncated is passed back verbatim.
 // Previously the bare-vector contract forced pulling every remote page, so a client wanting
 // just the first page still waited for everything
-Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
-                                                    std::string_view key,
-                                                    std::string_view upload_id,
-                                                    const ListPartsOptions& opt) {
+Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket, std::string_view key,
+                                                    std::string_view upload_id, const ListPartsOptions& opt) {
     validate_object_key(key);
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
@@ -1337,18 +1259,15 @@ Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
     ListPartsResult out;
     if (opt.max_parts <= 0) co_return out;
 
-    std::string query = "uploadId=" + qv(upload_id) +
-                        "&max-parts=" + std::to_string(opt.max_parts);
-    if (opt.part_number_marker > 0)
-        query += "&part-number-marker=" + std::to_string(opt.part_number_marker);
+    std::string query = "uploadId=" + qv(upload_id) + "&max-parts=" + std::to_string(opt.max_parts);
+    if (opt.part_number_marker > 0) query += "&part-number-marker=" + std::to_string(opt.part_number_marker);
     std::string full = path + "?" + query;
     auto tp = co_await trace_extra();
     auto res = co_await retry_io("list_parts", [&](httplib::Client& c) {
         return c.Get(full, ctx_->signed_headers("GET", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
-    if (res->status != 200)
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
+    if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::Upload, resource);
     auto root = s3::xml_parse(res->body);
     for (auto& child : root.children) {
         if (child.name != "Part") continue;
@@ -1361,8 +1280,7 @@ Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
     }
     out.is_truncated = root.get("IsTruncated") == "true";
     if (out.is_truncated) {
-        out.next_part_number_marker =
-            static_cast<int>(parse_u64(root.get("NextPartNumberMarker")));
+        out.next_part_number_marker = static_cast<int>(parse_u64(root.get("NextPartNumberMarker")));
         // Remote truncated but gave no cursor: continuation has nothing to go on; better to
         // report honestly to the end than let the client loop forever
         if (out.next_part_number_marker == 0 && !out.parts.empty())
@@ -1371,8 +1289,8 @@ Task<ListPartsResult> CloudProxyBackend::list_parts(std::string_view bucket,
     co_return out;
 }
 
-Task<ListUploadsResult> CloudProxyBackend::list_multipart_uploads(
-    std::string_view bucket, const ListUploadsOptions& opt) {
+Task<ListUploadsResult> CloudProxyBackend::list_multipart_uploads(std::string_view bucket,
+                                                                  const ListUploadsOptions& opt) {
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.bucket_path();
@@ -1384,16 +1302,14 @@ Task<ListUploadsResult> CloudProxyBackend::list_multipart_uploads(
     if (!opt.prefix.empty()) query += "&prefix=" + qv(opt.prefix);
     if (!opt.delimiter.empty()) query += "&delimiter=" + qv(opt.delimiter);
     if (!opt.key_marker.empty())
-        query += "&key-marker=" + qv(opt.key_marker) +
-                 "&upload-id-marker=" + qv(opt.upload_id_marker);
+        query += "&key-marker=" + qv(opt.key_marker) + "&upload-id-marker=" + qv(opt.upload_id_marker);
     std::string full = path + "?" + query;
     auto tp = co_await trace_extra();
     auto res = co_await retry_io("list_uploads", [&](httplib::Client& c) {
         return c.Get(full, ctx_->signed_headers("GET", path, query, tp, "", t.host));
     });
     if (!res) ctx_->throw_transport_error(res.error());
-    if (res->status != 200)
-        ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket, resource);
+    if (res->status != 200) ctx_->throw_remote_error(res->status, res->body, ErrCtx::Bucket, resource);
     auto root = s3::xml_parse(res->body);
     for (auto& child : root.children) {
         if (child.name == "Upload") {

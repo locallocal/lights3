@@ -43,8 +43,7 @@ class UringReadStream {
 public:
     // Reads [off, off+len) from fd. own_fd: the stream closes fd once the last reference
     // (including abandoned in-flight ops) is gone
-    UringReadStream(std::shared_ptr<UringEngine> eng, int fd, uint64_t off, uint64_t len,
-                    bool own_fd = true);
+    UringReadStream(std::shared_ptr<UringEngine> eng, int fd, uint64_t off, uint64_t len, bool own_fd = true);
     ~UringReadStream();
     UringReadStream(const UringReadStream&) = delete;
 
@@ -56,8 +55,8 @@ private:
 
     uring_detail::StreamState* st_;
     uint64_t remaining_;
-    unsigned head_ = 0;     // slot index the consumer reads next
-    unsigned inflight_ = 0; // slots submitted and not yet consumed (ring order from head_)
+    unsigned head_ = 0;      // slot index the consumer reads next
+    unsigned inflight_ = 0;  // slots submitted and not yet consumed (ring order from head_)
     bool done_ = false;
 };
 

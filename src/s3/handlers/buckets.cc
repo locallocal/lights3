@@ -21,16 +21,14 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
             // credentials should not see that buckets outside their allowlist exist
             if (auth.policy && !auth.policy->allows_bucket(b.name)) continue;
             // Tenant credentials see only their tenant's buckets (docs/multi-tenancy.md §4.3)
-            if (!auth.tenant.empty() && tenants_ && tenants_->owner_of(b.name) != auth.tenant)
-                continue;
+            if (!auth.tenant.empty() && tenants_ && tenants_->owner_of(b.name) != auth.tenant) continue;
             bool dup = false;
             for (auto& e : all)
                 if (e.name == b.name) dup = true;
             if (!dup) all.push_back(b);
         }
     }
-    std::sort(all.begin(), all.end(),
-              [](const auto& a, const auto& b) { return a.name < b.name; });
+    std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
 
     XmlWriter w;
     w.open("ListAllMyBucketsResult", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
@@ -65,22 +63,21 @@ Task<http::HttpResponse> S3Service::list_buckets(const RequestAuth& auth) {
 // Previously the request body was never read, so cross-region bucket creation silently succeeded while a later
 // GetBucketLocation echoed the local region -- leading clients to conclude the data lived elsewhere. Empty body
 // and empty LocationConstraint are both treated as us-east-1 (S3 convention: that region writes no constraint)
-Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::string bucket,
-                                                  const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::string bucket, const RequestAuth& auth) {
     std::string body = co_await handlers::read_body(req);
     if (!body.empty()) {
         XmlNode root = xml_parse(body);
         if (root.name != "CreateBucketConfiguration")
-            throw S3Error(S3ErrorCode::MalformedXML,
-                          "The XML you provided was not well-formed or did not validate.");
+            throw S3Error(S3ErrorCode::MalformedXML, "The XML you provided was not well-formed or did not validate.");
         std::string want = root.get("LocationConstraint");
         const std::string& region = auth_.region();
-        // Empty constraint = us-east-1; this implementation serves a single region, mismatches are rejected rather than silently rewritten
+        // Empty constraint = us-east-1; this implementation serves a single region, mismatches are rejected rather than
+        // silently rewritten
         if (want.empty()) want = "us-east-1";
         if (want != region)
             throw S3Error(S3ErrorCode::InvalidLocationConstraint,
-                          "The specified location-constraint '" + want +
-                              "' is not valid for this endpoint (region '" + region + "').",
+                          "The specified location-constraint '" + want + "' is not valid for this endpoint (region '" +
+                              region + "').",
                           bucket);
     }
     auto& backend = router_.resolve(bucket);
@@ -89,11 +86,8 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
     // because no owner record exists, so the existence check happens here
     if (!auth.tenant.empty() && tenants_) {
         auto t = tenants_->find(std::string(auth.tenant));
-        if (!t)
-            throw S3Error(S3ErrorCode::AccessDenied,
-                          "The credential's tenant no longer exists.", bucket);
-        if (t->quota.max_buckets &&
-            tenants_->buckets_of(t->id).size() >= t->quota.max_buckets) {
+        if (!t) throw S3Error(S3ErrorCode::AccessDenied, "The credential's tenant no longer exists.", bucket);
+        if (t->quota.max_buckets && tenants_->buckets_of(t->id).size() >= t->quota.max_buckets) {
             if (usage_) usage_->quota_rejected(true);
             AuditEvent e;
             e.event = "quota.reject";
@@ -104,20 +98,17 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
             e.detail = "buckets " + std::to_string(t->quota.max_buckets) + " reached";
             audit(e);
             throw S3Error(S3ErrorCode::QuotaExceeded,
-                          "The tenant has reached its bucket limit (" +
-                              std::to_string(t->quota.max_buckets) + ").",
+                          "The tenant has reached its bucket limit (" + std::to_string(t->quota.max_buckets) + ").",
                           bucket);
         }
         if (co_await backend.bucket_exists(bucket))
-            throw S3Error(S3ErrorCode::BucketAlreadyExists,
-                          "The requested bucket name is not available.", bucket);
+            throw S3Error(S3ErrorCode::BucketAlreadyExists, "The requested bucket name is not available.", bucket);
     }
     co_await backend.create_bucket(bucket);
     if (!auth.tenant.empty() && tenants_) {
         std::exception_ptr err;
         try {
-            co_await tenants_->assign(bucket, std::string(auth.tenant),
-                                      std::string(auth.access_key), /*force=*/true);
+            co_await tenants_->assign(bucket, std::string(auth.tenant), std::string(auth.access_key), /*force=*/true);
         } catch (...) {
             err = std::current_exception();
         }
@@ -153,16 +144,14 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
 
 Task<http::HttpResponse> S3Service::head_bucket(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
-    if (!exists)
-        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
+    if (!exists) throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
     // boto3's cross-region redirect depends on this header (docs/archive/gaps.md §5.9)
     http::HttpResponse resp;
     resp.headers.set("x-amz-bucket-region", auth_.region());
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket,
-                                                  const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket, const RequestAuth& auth) {
     co_await router_.resolve(bucket).delete_bucket(bucket);
     // Per-bucket records this feature set owns die with the bucket. Failures here
     // only leave a stale record (harmless: an owner entry for a missing bucket is
@@ -191,11 +180,11 @@ Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket,
     co_return resp;
 }
 
-// GetBucketLocation: echoes the configured region (docs/s3-protocol.md §1: LocationConstraint carries no region constraint)
+// GetBucketLocation: echoes the configured region (docs/s3-protocol.md §1: LocationConstraint carries no region
+// constraint)
 Task<http::HttpResponse> S3Service::get_bucket_location(std::string bucket) {
     bool exists = co_await router_.resolve(bucket).bucket_exists(bucket);
-    if (!exists)
-        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
+    if (!exists) throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
     XmlWriter w;
     // us-east-1 returns an empty LocationConstraint per S3 convention
     const std::string& region = auth_.region();

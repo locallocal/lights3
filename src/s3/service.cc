@@ -57,12 +57,11 @@ http::HttpResponse error_response(const S3Error& e, const RequestContext& ctx, b
 }
 
 // Raw InternalError/SlowDown text may contain internal topology such as upstream endpoints (cloudproxy
-// transport errors embed the endpoint directly): the original goes to the log only (correlated via request_id), the response body uses fixed wording
-S3Error public_error(const S3Error& e, const std::string& request_id,
-                     const http::HttpRequest& req) {
+// transport errors embed the endpoint directly): the original goes to the log only (correlated via request_id), the
+// response body uses fixed wording
+S3Error public_error(const S3Error& e, const std::string& request_id, const http::HttpRequest& req) {
     if (e.code == S3ErrorCode::InternalError) {
-        LOG_ERROR("req {} {} {} internal error: {}", request_id, req.method, req.path,
-                  e.message);
+        LOG_ERROR("req {} {} {} internal error: {}", request_id, req.method, req.path, e.message);
         return S3Error(e.code, "We encountered an internal error. Please try again.");
     }
     if (e.code == S3ErrorCode::SlowDown) {
@@ -77,7 +76,8 @@ S3Error public_error(const S3Error& e, const std::string& request_id,
 }
 
 // RAII pairing of request_start/request_end: request_end also runs when the driver destroys the request
-// coroutine early (client disconnect, shutdown), so the inflight count does not leak; that path is recorded as 499 in the status distribution
+// coroutine early (client disconnect, shutdown), so the inflight count does not leak; that path is recorded as 499 in
+// the status distribution
 struct MetricsEndGuard {
     Metrics& m;
     std::string method;
@@ -89,8 +89,7 @@ struct MetricsEndGuard {
     }
     double finish(int status) {
         done = true;
-        double secs =
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         m.request_end(method, status, secs);
         return secs;
     }
@@ -103,8 +102,7 @@ struct MetricsEndGuard {
 // thread after the service is gone
 struct AccessRecord {
     std::chrono::steady_clock::time_point start;
-    std::string request_id, remote, access_key, method, path, query, bucket, key, user_agent,
-        api, backend;
+    std::string request_id, remote, access_key, method, path, query, bucket, key, user_agent, api, backend;
     std::string trace_id, span_id, parent_span_id;  // roadmap §5.4
     int status = 0;
     double auth_ms = 0, handler_ms = 0, backend_ms = 0, ttfb_ms = 0;
@@ -186,32 +184,27 @@ void emit_access(const AccessRecord& r, uint64_t bytes, bool truncated) {
     std::string line = spdlog::fmt_lib::format(
         "access {} {} {} {} {} {} {}ms api={} backend={}:{:.1f}ms remote={} bucket={} ttfb={:.1f}ms ua={} trace={}/{}",
         r.request_id, dash(r.access_key), r.method, quote_field(r.path), r.status, bytes,
-        static_cast<uint64_t>(total_ms), dash(r.api), dash(r.backend), r.backend_ms,
-        dash(r.remote), dash(r.bucket), r.ttfb_ms, quote_field(r.user_agent), r.trace_id,
-        r.span_id);
+        static_cast<uint64_t>(total_ms), dash(r.api), dash(r.backend), r.backend_ms, dash(r.remote), dash(r.bucket),
+        r.ttfb_ms, quote_field(r.user_agent), r.trace_id, r.span_id);
     if (!r.parent_span_id.empty()) line += " parent=" + r.parent_span_id;
     if (truncated) line += " truncated=1";
     if (slow)
         line += spdlog::fmt_lib::format(" slow=1 auth={:.1f}ms handler={:.1f}ms backend_calls={}", r.auth_ms,
-                            r.handler_ms, r.backend_calls);
+                                        r.handler_ms, r.backend_calls);
     log.log(level, "{}", line);
 }
 
 // Byte-counting decorators (docs/archive/gaps.md §7): inbound wraps outside the checksum/de-framing decorators
 // (counting the payload bytes the handler actually consumes); outbound wraps outside stream_body (counting the
-// bytes the driver actually pulls -- streaming responses are written after dispatch returns, and only a decorator can see them).
-// The outbound side also carries the access record (roadmap §5.2): emitted at EOF, or from the destructor
+// bytes the driver actually pulls -- streaming responses are written after dispatch returns, and only a decorator can
+// see them). The outbound side also carries the access record (roadmap §5.2): emitted at EOF, or from the destructor
 // when the driver stopped pulling early (client gone, backend read failure, HEAD) -- then flagged truncated
 // whenever fewer bytes than announced went out
 class CountingBodyReader final : public http::BodyReader {
 public:
-    CountingBodyReader(std::unique_ptr<http::BodyReader> inner, Metrics* m, std::string bucket,
-                       bool inbound, std::unique_ptr<AccessRecord> access = nullptr)
-        : inner_(std::move(inner)),
-          m_(m),
-          bucket_(std::move(bucket)),
-          inbound_(inbound),
-          access_(std::move(access)) {}
+    CountingBodyReader(std::unique_ptr<http::BodyReader> inner, Metrics* m, std::string bucket, bool inbound,
+                       std::unique_ptr<AccessRecord> access = nullptr)
+        : inner_(std::move(inner)), m_(m), bucket_(std::move(bucket)), inbound_(inbound), access_(std::move(access)) {}
 
     ~CountingBodyReader() override {
         flush_bucket();
@@ -244,16 +237,20 @@ private:
     // (roadmap §4.3 ⑦: one mutex round per stream or per 16MiB, not per 64KiB)
     void account(uint64_t n) {
         if (n == 0) return;
-        if (inbound_) m_->add_bytes_in_total(n);
-        else m_->add_bytes_out_total(n);
+        if (inbound_)
+            m_->add_bytes_in_total(n);
+        else
+            m_->add_bytes_out_total(n);
         total_ += n;
         pending_bucket_ += n;
         if (pending_bucket_ >= kBucketFlushBytes) flush_bucket();
     }
     void flush_bucket() {
         if (pending_bucket_ == 0) return;
-        if (inbound_) m_->add_bucket_bytes(bucket_, pending_bucket_, 0);
-        else m_->add_bucket_bytes(bucket_, 0, pending_bucket_);
+        if (inbound_)
+            m_->add_bucket_bytes(bucket_, pending_bucket_, 0);
+        else
+            m_->add_bucket_bytes(bucket_, 0, pending_bucket_);
         pending_bucket_ = 0;
     }
     void finish_if_complete() {
@@ -277,27 +274,46 @@ private:
     bool eof_ = false;
 };
 
-// Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into the List/Get fallback
+// Explicitly unsupported subresources (docs/s3-protocol.md §1): explicit 501, avoiding wrong answers from falling into
+// the List/Get fallback
 constexpr std::string_view kUnsupportedSubresources[] = {
-    "acl",         "policy",       "versioning",     "versions",
-    "encryption",  "object-lock",
-    "legal-hold",  "retention",    "torrent",        "replication",    "logging",
-    "notification", "requestPayment", "accelerate",  "analytics",      "inventory",
-    "intelligent-tiering", "metrics", "ownershipControls", "publicAccessBlock",
-    "restore",     "select",       "policyStatus",   "versionId",
+    "acl",
+    "policy",
+    "versioning",
+    "versions",
+    "encryption",
+    "object-lock",
+    "legal-hold",
+    "retention",
+    "torrent",
+    "replication",
+    "logging",
+    "notification",
+    "requestPayment",
+    "accelerate",
+    "analytics",
+    "inventory",
+    "intelligent-tiering",
+    "metrics",
+    "ownershipControls",
+    "publicAccessBlock",
+    "restore",
+    "select",
+    "policyStatus",
+    "versionId",
 };
 
 void reject_unsupported_subresource(const http::HttpRequest& req) {
     for (auto& sub : kUnsupportedSubresources)
         if (req.query_has(sub))
             throw S3Error(S3ErrorCode::NotImplemented,
-                          "The requested sub-resource '" + std::string(sub) +
-                              "' is not implemented.");
+                          "The requested sub-resource '" + std::string(sub) + "' is not implemented.");
 }
 
 // Explicitly unsupported **request headers** (docs/archive/gaps.md §3.4): SSE/SSE-C, tagging, object-lock, and
 // ACL-grant classes used to be silently swallowed -- 200 with the semantics unfulfilled; in compliance scenarios
-// clients would conclude the object is encrypted/locked. A hit is 501; x-amz-acl alone admits private (this implementation's actual semantics)
+// clients would conclude the object is encrypted/locked. A hit is 501; x-amz-acl alone admits private (this
+// implementation's actual semantics)
 void reject_unsupported_headers(const http::HttpRequest& req) {
     constexpr std::string_view kPrefixes[] = {
         "x-amz-server-side-encryption",  // the whole SSE and SSE-C family (including -customer-*, -aws-kms-*)
@@ -312,8 +328,7 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
         lk.reserve(k.size());
         for (char c : k) lk.push_back(http::HeaderMap::lower(c));
         auto refuse = [&] {
-            throw S3Error(S3ErrorCode::NotImplemented,
-                          "The request header '" + lk + "' is not implemented.");
+            throw S3Error(S3ErrorCode::NotImplemented, "The request header '" + lk + "' is not implemented.");
         };
         if (lk == "x-amz-acl") {
             // private = this implementation's only semantics, accepted; silently accepting the rest
@@ -337,9 +352,14 @@ void reject_unsupported_headers(const http::HttpRequest& req) {
 // X-Amz-Security-Token joined the list with real STS support (roadmap §2.6): presigned
 // URLs minted from session credentials carry it, and verify validates it
 constexpr std::string_view kCommonQueryKeys[] = {
-    "X-Amz-Algorithm",     "X-Amz-Credential", "X-Amz-Date",
-    "X-Amz-Expires",       "X-Amz-Signature",  "X-Amz-SignedHeaders",
-    "X-Amz-Content-Sha256", "X-Amz-Security-Token",
+    "X-Amz-Algorithm",
+    "X-Amz-Credential",
+    "X-Amz-Date",
+    "X-Amz-Expires",
+    "X-Amz-Signature",
+    "X-Amz-SignedHeaders",
+    "X-Amz-Content-Sha256",
+    "X-Amz-Security-Token",
     "x-id",  // tracing parameter aws-sdk-js v3 attaches to every operation, no semantics
 };
 
@@ -366,8 +386,7 @@ void enforce_query_whitelist(const http::HttpRequest& req, const S3Service::Rout
                 break;
             }
         if (common) continue;
-        throw S3Error(S3ErrorCode::NotImplemented,
-                      "The query parameter '" + k + "' is not implemented.");
+        throw S3Error(S3ErrorCode::NotImplemented, "The query parameter '" + k + "' is not implemented.");
     }
 }
 
@@ -422,11 +441,20 @@ std::string html_escape(const std::string& s) {
     out.reserve(s.size());
     for (char c : s) {
         switch (c) {
-            case '&': out += "&amp;"; break;
-            case '<': out += "&lt;"; break;
-            case '>': out += "&gt;"; break;
-            case '"': out += "&quot;"; break;
-            default: out += c;
+            case '&':
+                out += "&amp;";
+                break;
+            case '<':
+                out += "&lt;";
+                break;
+            case '>':
+                out += "&gt;";
+                break;
+            case '"':
+                out += "&quot;";
+                break;
+            default:
+                out += c;
         }
     }
     return out;
@@ -454,9 +482,8 @@ http::HttpResponse redirect_response(int status, std::string location) {
 // Location for a website redirect target. Empty host+protocol stays on this gateway as
 // a relative path (bucket prefix added under path-style addressing); anything else
 // becomes an absolute URL. The key is percent-encoded — it flows into a header
-std::string website_location(const http::HttpRequest& req, const std::string& bucket,
-                             bool vhost, const std::string& protocol, const std::string& host,
-                             const std::string& key) {
+std::string website_location(const http::HttpRequest& req, const std::string& bucket, bool vhost,
+                             const std::string& protocol, const std::string& host, const std::string& key) {
     std::string path = "/" + util::aws_uri_encode(key, /*encode_slash=*/false);
     if (host.empty() && protocol.empty()) {
         return vhost ? path : "/" + bucket + path;
@@ -472,8 +499,8 @@ std::string website_location(const http::HttpRequest& req, const std::string& bu
 // error_status == 0 selects the pre-request phase (rules without an error-code
 // condition); a non-zero status selects error-phase rules with that exact code.
 // First match wins (AWS evaluates rules in order)
-const WebsiteRoutingRule* match_routing_rule(const std::vector<WebsiteRoutingRule>& rules,
-                                             const std::string& key, int error_status) {
+const WebsiteRoutingRule* match_routing_rule(const std::vector<WebsiteRoutingRule>& rules, const std::string& key,
+                                             int error_status) {
     for (auto& r : rules) {
         if (r.http_error_code_equals != error_status) continue;
         if (!r.key_prefix_equals.empty() && key.rfind(r.key_prefix_equals, 0) != 0) continue;
@@ -482,9 +509,8 @@ const WebsiteRoutingRule* match_routing_rule(const std::vector<WebsiteRoutingRul
     return nullptr;
 }
 
-http::HttpResponse routing_redirect(const http::HttpRequest& req,
-                                    const WebsiteRoutingRule& rule, const std::string& key,
-                                    const std::string& bucket, bool vhost) {
+http::HttpResponse routing_redirect(const http::HttpRequest& req, const WebsiteRoutingRule& rule,
+                                    const std::string& key, const std::string& bucket, bool vhost) {
     std::string new_key = key;
     if (rule.replace_key_with) {
         new_key = *rule.replace_key_with;
@@ -492,23 +518,19 @@ http::HttpResponse routing_redirect(const http::HttpRequest& req,
         // substr is safe: the rule matched, so key starts with the condition prefix
         new_key = *rule.replace_key_prefix_with + key.substr(rule.key_prefix_equals.size());
     }
-    return redirect_response(
-        rule.http_redirect_code,
-        website_location(req, bucket, vhost, rule.protocol, rule.host_name, new_key));
+    return redirect_response(rule.http_redirect_code,
+                             website_location(req, bucket, vhost, rule.protocol, rule.host_name, new_key));
 }
 
 // Pre-request redirects, evaluated on the ORIGINAL key before the index rewrite:
 // RedirectAllRequestsTo first (exclusive with everything else by construction), then
 // prefix-only routing rules. nullopt = proceed with the normal read
-std::optional<http::HttpResponse> website_redirect_response(const http::HttpRequest& req,
-                                                            const WebsiteBucket& site,
-                                                            const std::string& key,
-                                                            const std::string& bucket,
+std::optional<http::HttpResponse> website_redirect_response(const http::HttpRequest& req, const WebsiteBucket& site,
+                                                            const std::string& key, const std::string& bucket,
                                                             bool vhost) {
     if (!site.redirect_all_host.empty())
-        return redirect_response(301,
-                                 website_location(req, bucket, vhost, site.redirect_all_protocol,
-                                                  site.redirect_all_host, key));
+        return redirect_response(
+            301, website_location(req, bucket, vhost, site.redirect_all_protocol, site.redirect_all_host, key));
     if (const auto* r = match_routing_rule(site.routing_rules, key, 0))
         return routing_redirect(req, *r, key, bucket, vhost);
     return std::nullopt;
@@ -523,8 +545,7 @@ bool S3Service::website_rate_admit(const std::string& bucket, uint32_t rps) {
     if (b.last.time_since_epoch().count() == 0) {
         b.tokens = rps;  // fresh bucket starts full (burst = rps)
     } else {
-        b.tokens = std::min<double>(
-            rps, b.tokens + std::chrono::duration<double>(now - b.last).count() * rps);
+        b.tokens = std::min<double>(rps, b.tokens + std::chrono::duration<double>(now - b.last).count() * rps);
     }
     b.last = now;
     if (b.tokens < 1.0) return false;
@@ -537,9 +558,7 @@ bool S3Service::website_rate_admit(const std::string& bucket, uint32_t rps) {
 // crawlers). A missing/unreadable error object falls back to the built-in page — the
 // site owner's misconfiguration must not turn a 404 into a 500 — and the error object
 // is read directly from the backend, so this never re-enters dispatch (no recursion)
-Task<http::HttpResponse> S3Service::website_error_page(const S3Error& e,
-                                                       const WebsiteBucket& site,
-                                                       bool head_only) {
+Task<http::HttpResponse> S3Service::website_error_page(const S3Error& e, const WebsiteBucket& site, bool head_only) {
     http::HttpResponse resp;
     resp.status = http_status(e.code);
     for (auto& [k, v] : e.headers) resp.headers.set(k, v);  // e.g. Allow on 405
@@ -551,24 +570,22 @@ Task<http::HttpResponse> S3Service::website_error_page(const S3Error& e,
                 resp.headers.set("Content-Type", meta.content_type);
                 resp.content_length = meta.size;
             } else {
-                auto stream =
-                    co_await backend.get_object(site.bucket, site.error_key, std::nullopt);
+                auto stream = co_await backend.get_object(site.bucket, site.error_key, std::nullopt);
                 resp.headers.set("Content-Type", stream.meta.content_type);
                 resp.content_length = stream.meta.size;
                 resp.stream_body = std::move(stream.body);
             }
             co_return resp;
         } catch (const std::exception& err) {
-            LOG_WARN("website: error document {}/{} unreadable ({}), serving built-in page",
-                     site.bucket, site.error_key, err.what());
+            LOG_WARN("website: error document {}/{} unreadable ({}), serving built-in page", site.bucket,
+                     site.error_key, err.what());
         }
     }
     resp.headers.set("Content-Type", "text/html; charset=utf-8");
     if (!head_only) {
         std::string title = std::to_string(resp.status) + " " + wire_code(e.code);
-        resp.small_body = "<!DOCTYPE html><html><head><title>" + title +
-                          "</title></head><body><h1>" + title + "</h1><p>" +
-                          html_escape(e.message) + "</p></body></html>\n";
+        resp.small_body = "<!DOCTYPE html><html><head><title>" + title + "</title></head><body><h1>" + title +
+                          "</h1><p>" + html_escape(e.message) + "</p></body></html>\n";
     }
     co_return resp;
 }
@@ -582,8 +599,7 @@ bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Addre
     // signature must stay an auth error, not silently degrade into an anonymous success
     // (which would both mask client misconfiguration and let expired links "work")
     if (req.headers.has("Authorization")) return false;
-    if (req.query_has("X-Amz-Algorithm") || req.query_has("X-Amz-Signature") ||
-        req.query_has("X-Amz-Credential"))
+    if (req.query_has("X-Amz-Algorithm") || req.query_has("X-Amz-Signature") || req.query_has("X-Amz-Credential"))
         return false;
     // Service scope stays out (ListBuckets must never be anonymous); an empty key is
     // admitted — the index rewrite in dispatch resolves it to an object read
@@ -595,8 +611,7 @@ bool S3Service::anonymous_website_read(const http::HttpRequest& req, const Addre
 
 Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     RequestContext ctx{make_request_id(), make_host_id(), req.cancel,
-                       TraceContext::from_headers(req.headers.get("traceparent"),
-                                                  req.headers.get("tracestate"))};
+                       TraceContext::from_headers(req.headers.get("traceparent"), req.headers.get("tracestate"))};
     bool head = req.method == "HEAD";
     auto start = std::chrono::steady_clock::now();
     metrics_.request_start();
@@ -638,16 +653,15 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     std::optional<RateLimiter::Token> ip_slot, ak_slot;
     auto throttle = [&](bool by_ak) {
         metrics_.ratelimit_rejected(by_ak);
-        throw S3Error(S3ErrorCode::SlowDown,
-                      by_ak ? "Request rate limit exceeded for this access key."
-                            : "Request rate limit exceeded for this client address.")
+        throw S3Error(S3ErrorCode::SlowDown, by_ak ? "Request rate limit exceeded for this access key."
+                                                   : "Request rate limit exceeded for this client address.")
             .with_header("Retry-After", "1");
     };
     try {
-        // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path is
-        // the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a
-        // GET into anonymous metrics and a PUT into "200 but the object was never written" silent data loss.
-        // Only the /-/ prefix under path addressing (non-vhost) enters the internal branch
+        // Resolve addressing before steering to internal endpoints (docs/archive/gaps.md §3.8): under vhost, req.path
+        // is the key, and "/-/metrics" may be a legitimate object in mybucket -- exact path comparison would turn a GET
+        // into anonymous metrics and a PUT into "200 but the object was never written" silent data loss. Only the /-/
+        // prefix under path addressing (non-vhost) enters the internal branch
         auto addr = resolve_address(req);
         vhost = addr.vhost;
         bool internal = !addr.vhost && req.path.rfind("/-/", 0) == 0;
@@ -659,16 +673,14 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         if (admin_split_.load(std::memory_order_relaxed)) {
             bool both = internal && (req.path == "/-/healthz" || req.path == "/-/readyz");
             if (req.admin_face ? !internal : (internal && !both))
-                throw S3Error(S3ErrorCode::NoSuchKey,
-                              req.admin_face
-                                  ? "The admin listener serves only the /-/ endpoints."
-                                  : "This endpoint is served on the admin listener "
-                                    "(http.admin_port), not on the data-plane port.");
+                throw S3Error(S3ErrorCode::NoSuchKey, req.admin_face
+                                                          ? "The admin listener serves only the /-/ endpoints."
+                                                          : "This endpoint is served on the admin listener "
+                                                            "(http.admin_port), not on the data-plane port.");
         }
         // Per-IP limit before anything costly (signature verification, backend
         // access); the internal read endpoints (health/metrics probes) stay exempt
-        bool probe = internal && (req.path == "/-/healthz" || req.path == "/-/readyz" ||
-                                  req.path == "/-/metrics");
+        bool probe = internal && (req.path == "/-/healthz" || req.path == "/-/readyz" || req.path == "/-/metrics");
         if (ip_lim && !probe) {
             ip_slot = ip_lim->admit(req.remote_addr);
             if (!ip_slot) throttle(false);
@@ -696,31 +708,31 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                                   "Reading metrics requires a root (statically configured) "
                                   "credential on this deployment (http.metrics_access: root).");
             }
-            resp.small_body =
-                metrics_.render(pool_stats_, admission_stats_, timer_stats_, conn_stats_);
+            resp.small_body = metrics_.render(pool_stats_, admission_stats_, timer_stats_, conn_stats_);
             // The backend-level registry is appended after the L2 request metrics
             if (backend_metrics_) resp.small_body += backend_metrics_->render();
             resp.headers.set("Content-Type", "text/plain; version=0.0.4");
         } else if (internal && internal_get("/-/readyz")) {
             api_name = "readyz";
             resp = co_await readyz();
-        } else if (internal && (req.path == "/-/admin/credentials" ||
-                                req.path.rfind("/-/admin/credentials/", 0) == 0)) {
-            // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin plane too
+        } else if (internal &&
+                   (req.path == "/-/admin/credentials" || req.path.rfind("/-/admin/credentials/", 0) == 0)) {
+            // The boundary must land on '/': bare prefix matching would let /-/admin/credentialsXYZ into the admin
+            // plane too
             api_name = "AdminCredentials";
             resp = co_await admin_credentials(req, access_key);
         } else if (internal && req.path == "/-/admin/config/reload") {
             // Config hot reload (roadmap §4.4, docs/config-reload.md)
             api_name = "AdminConfigReload";
             resp = co_await admin_config_reload(req, access_key, ctx);
-        } else if (internal && (req.path == "/-/admin/tenants" || req.path == "/-/admin/usage" ||
-                                req.path.rfind("/-/admin/tenants/", 0) == 0 ||
-                                req.path.rfind("/-/admin/usage/", 0) == 0)) {
+        } else if (internal &&
+                   (req.path == "/-/admin/tenants" || req.path == "/-/admin/usage" ||
+                    req.path.rfind("/-/admin/tenants/", 0) == 0 || req.path.rfind("/-/admin/usage/", 0) == 0)) {
             // Tenancy + usage admin plane (docs/multi-tenancy.md §6), same JSON conventions
             api_name = "AdminTenancy";
             resp = co_await admin_tenancy(req, access_key, ctx);
-        } else if (internal && (req.path == "/-/admin/tls-identities" ||
-                                req.path.rfind("/-/admin/tls-identities/", 0) == 0)) {
+        } else if (internal &&
+                   (req.path == "/-/admin/tls-identities" || req.path.rfind("/-/admin/tls-identities/", 0) == 0)) {
             // mTLS certificate -> credential bindings (backlog-sequence ⑥, root only)
             api_name = "AdminTlsIdentities";
             resp = co_await admin_tls_identities(req, access_key, ctx);
@@ -728,8 +740,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // Offline scrub on a live gateway (backlog-sequence ③, `lights3-ctl fsck --offline`)
             api_name = "AdminFsck";
             resp = co_await admin_fsck(req, access_key, ctx);
-        } else if (internal && (req.path.rfind("/-/admin/duostore/", 0) == 0 ||
-                                req.path.rfind("/-/admin/tier/", 0) == 0)) {
+        } else if (internal &&
+                   (req.path.rfind("/-/admin/duostore/", 0) == 0 || req.path.rfind("/-/admin/tier/", 0) == 0)) {
             // Background rounds on demand + quarantine ledgers (docs/cli.md §3.12,
             // `lights3-ctl duostore|tier ...`), same job model as fsck
             api_name = req.path.rfind("/-/admin/tier/", 0) == 0 ? "AdminTier" : "AdminDuostore";
@@ -766,10 +778,9 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             if (website_store_) web_snap = website_store_->snapshot();
             // A bound client certificate (backlog-sequence ⑥) is an identity, not an
             // anonymous reader: it takes the verified path below
-            bool anon = auth_.enabled() && !tls_identity_bound(req) &&
-                        anonymous_website_read(req, addr, web_snap);
-            // Authorization uses the verify-time policy snapshot (docs/archive/gaps.md §3.7): with a second store lookup
-            // after verification, the policy would vanish entirely in the race window where sync/remove deletes
+            bool anon = auth_.enabled() && !tls_identity_bound(req) && anonymous_website_read(req, addr, web_snap);
+            // Authorization uses the verify-time policy snapshot (docs/archive/gaps.md §3.7): with a second store
+            // lookup after verification, the policy would vanish entirely in the race window where sync/remove deletes
             // the credential -- a readonly credential becomes unrestricted within the window. The snapshot makes
             // in-flight requests complete strictly with verify-time semantics
             // STS sessions minted on another instance (backlog-sequence ④): verify's
@@ -787,16 +798,17 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                 ak_slot = ak_lim->admit(access_key);
                 if (!ak_slot) throttle(true);
             }
-            // Content-MD5 / x-amz-checksum-* (docs/archive/gaps.md §5.6): installed after verify, hence wrapping outside
-            // the sha256/aws-chunked decorators -- digests are computed over the de-framed plaintext, the same
+            // Content-MD5 / x-amz-checksum-* (docs/archive/gaps.md §5.6): installed after verify, hence wrapping
+            // outside the sha256/aws-chunked decorators -- digests are computed over the de-framed plaintext, the same
             // bytes the client computed over. Independent of the signature; also effective with auth disabled
             install_checksum_guard(req);
             bucket = std::move(addr.bucket);
             key = std::move(addr.key);
-            // Inbound byte counting (docs/archive/gaps.md §7): bucket already resolved, decorated at the outermost layer
+            // Inbound byte counting (docs/archive/gaps.md §7): bucket already resolved, decorated at the outermost
+            // layer
             if (req.body)
-                req.body = std::make_unique<CountingBodyReader>(std::move(req.body), &metrics_,
-                                                                bucket, /*inbound=*/true);
+                req.body = std::make_unique<CountingBodyReader>(std::move(req.body), &metrics_, bucket,
+                                                                /*inbound=*/true);
             // User-requested bucket names pass full validation here, the **single** authoritative gate
             // (docs/archive/gaps.md §1.1). Previously only the first character was checked for '.', while under vhost
             // addressing the bucket comes entirely from the Host header and may contain '/' or even start with
@@ -807,9 +819,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // allow_reserved=true -- user requests never get that parameter
             if (!bucket.empty()) storage::validate_bucket_name(bucket);
             {
-                Scope scope = bucket.empty() ? Scope::Service
-                              : key.empty()  ? Scope::Bucket
-                                             : Scope::Object;
+                Scope scope = bucket.empty() ? Scope::Service : key.empty() ? Scope::Bucket : Scope::Object;
                 if (const Route* r = match_route(req, scope)) {
                     api_name = r->name;
                     bool copy = req.headers.has("x-amz-copy-source");
@@ -841,129 +851,123 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                     metrics_.website(WebsiteEvent::Redirect);
                     early = std::move(*redirect);
                 } else {
-                // Index document (docs/static-website.md phase ②): an empty key (bucket
-                // root, with or without trailing slash) or a directory-style key
-                // ("docs/") maps to the index object. Rewriting before the route gate
-                // also turns what would be a bucket-scope listing into a plain object
-                // read -- anonymous listing stays impossible by construction
-                if (key.empty() || key.back() == '/') {
-                    key += anon_site->index_suffix;
-                    metrics_.website(WebsiteEvent::IndexRewrite);
-                }
-                // Anonymous scope is pinned by route, not just policy: only the bare
-                // GET/HEAD object routes (flag == "", Action::Read) qualify -- a query
-                // flag steers to a different operation (?uploadId is ListParts), and
-                // those stay authenticated-only along with all listing
-                const Route* r = match_route(req, Scope::Object);
-                if (!r || !r->flag.empty() || r->action != Action::Read)
-                    throw S3Error(S3ErrorCode::AccessDenied,
-                                  "Anonymous access is limited to object reads.");
-                // response-* overrides are refused for anonymous requests (AWS does the
-                // same): on a public bucket a crafted link could otherwise hang an
-                // arbitrary Content-Disposition off the bucket's domain (objects.cc §5.3)
-                if (handlers::has_response_override(req))
-                    throw S3Error(S3ErrorCode::InvalidRequest,
-                                  "Request specific response headers cannot be used for "
-                                  "anonymous requests.");
-                // Defense in depth: the standard policy block below re-checks bucket/key
-                // through the same allows() path every credential goes through
-                CredentialPolicy p;
-                p.buckets = {bucket};
-                p.readonly = true;
-                ident.policy = std::move(p);
+                    // Index document (docs/static-website.md phase ②): an empty key (bucket
+                    // root, with or without trailing slash) or a directory-style key
+                    // ("docs/") maps to the index object. Rewriting before the route gate
+                    // also turns what would be a bucket-scope listing into a plain object
+                    // read -- anonymous listing stays impossible by construction
+                    if (key.empty() || key.back() == '/') {
+                        key += anon_site->index_suffix;
+                        metrics_.website(WebsiteEvent::IndexRewrite);
+                    }
+                    // Anonymous scope is pinned by route, not just policy: only the bare
+                    // GET/HEAD object routes (flag == "", Action::Read) qualify -- a query
+                    // flag steers to a different operation (?uploadId is ListParts), and
+                    // those stay authenticated-only along with all listing
+                    const Route* r = match_route(req, Scope::Object);
+                    if (!r || !r->flag.empty() || r->action != Action::Read)
+                        throw S3Error(S3ErrorCode::AccessDenied, "Anonymous access is limited to object reads.");
+                    // response-* overrides are refused for anonymous requests (AWS does the
+                    // same): on a public bucket a crafted link could otherwise hang an
+                    // arbitrary Content-Disposition off the bucket's domain (objects.cc §5.3)
+                    if (handlers::has_response_override(req))
+                        throw S3Error(S3ErrorCode::InvalidRequest,
+                                      "Request specific response headers cannot be used for "
+                                      "anonymous requests.");
+                    // Defense in depth: the standard policy block below re-checks bucket/key
+                    // through the same allows() path every credential goes through
+                    CredentialPolicy p;
+                    p.buckets = {bucket};
+                    p.readonly = true;
+                    ident.policy = std::move(p);
                 }
             }
             if (early) {
                 resp = std::move(*early);
             } else {
-            // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
-            // route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
-            // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
-            // The decision input is the snapshot verify returned, never a store lookup (§3.7)
-            RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr, ident.tenant,
-                             ident.tenant_admin, ctx.request_id};
-            tenant_for_log = ident.tenant;
-            if (ident.policy) {
-                auto deny = [] {
-                    throw S3Error(S3ErrorCode::AccessDenied,
-                                  "Access denied by credential policy.");
-                };
-                Scope scope = bucket.empty() ? Scope::Service
-                              : key.empty()  ? Scope::Bucket
-                                             : Scope::Object;
-                const Route* r = match_route(req, scope);
-                // No matched route means no action to decide on: leave it to route() to return 405;
-                // unsupported methods are not a privilege-escalation surface anyway
-                if (r) {
-                    if (!ident.policy->allows(bucket, key, r->action)) deny();
-                    // CopyObject / UploadPartCopy carry the source in a header, bypassing the check above:
-                    // do a separate read authorization for the source bucket+key, so policy credentials cannot use copy to read data outside the allowlist
-                    if (auto src = req.headers.get("x-amz-copy-source")) {
-                        auto [sb, sk] = handlers::parse_copy_source(*src);
-                        if (!ident.policy->allows(sb, sk, Action::Read)) deny();
+                // per-credential policy (docs/credential-management.md §10.4): the action comes from the matched
+                // route, not the HTTP method (docs/archive/gaps.md §5.10) -- DeleteObjects is a POST yet a delete,
+                // CreateMultipartUpload is also a POST yet a write; the method dimension cannot separate the two.
+                // The decision input is the snapshot verify returned, never a store lookup (§3.7)
+                RequestAuth auth{access_key, ident.policy ? &*ident.policy : nullptr, ident.tenant, ident.tenant_admin,
+                                 ctx.request_id};
+                tenant_for_log = ident.tenant;
+                if (ident.policy) {
+                    auto deny = [] { throw S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy."); };
+                    Scope scope = bucket.empty() ? Scope::Service : key.empty() ? Scope::Bucket : Scope::Object;
+                    const Route* r = match_route(req, scope);
+                    // No matched route means no action to decide on: leave it to route() to return 405;
+                    // unsupported methods are not a privilege-escalation surface anyway
+                    if (r) {
+                        if (!ident.policy->allows(bucket, key, r->action)) deny();
+                        // CopyObject / UploadPartCopy carry the source in a header, bypassing the check above:
+                        // do a separate read authorization for the source bucket+key, so policy credentials cannot use
+                        // copy to read data outside the allowlist
+                        if (auto src = req.headers.get("x-amz-copy-source")) {
+                            auto [sb, sk] = handlers::parse_copy_source(*src);
+                            if (!ident.policy->allows(sb, sk, Action::Read)) deny();
+                        }
                     }
                 }
-            }
-            // Tenant ownership (docs/multi-tenancy.md §4.3): a tenant credential is
-            // confined to the buckets its tenant owns, on top of its policy. Service
-            // scope (ListBuckets) filters in the handler instead. Decided on the
-            // verify-time snapshot like the policy; the owner table is a snapshot too
-            if (!ident.tenant.empty() && tenants_ && !bucket.empty()) {
-                Scope scope = key.empty() ? Scope::Bucket : Scope::Object;
-                const Route* r = match_route(req, scope);
-                if (r) {
-                    bool creating = scope == Scope::Bucket && req.method == "PUT" && r->flag.empty();
-                    co_await require_tenant_bucket(bucket, ident.tenant, creating);
-                    if (auto src = req.headers.get("x-amz-copy-source")) {
-                        auto [sb, sk] = handlers::parse_copy_source(*src);
-                        co_await require_tenant_bucket(sb, ident.tenant, false);
+                // Tenant ownership (docs/multi-tenancy.md §4.3): a tenant credential is
+                // confined to the buckets its tenant owns, on top of its policy. Service
+                // scope (ListBuckets) filters in the handler instead. Decided on the
+                // verify-time snapshot like the policy; the owner table is a snapshot too
+                if (!ident.tenant.empty() && tenants_ && !bucket.empty()) {
+                    Scope scope = key.empty() ? Scope::Bucket : Scope::Object;
+                    const Route* r = match_route(req, scope);
+                    if (r) {
+                        bool creating = scope == Scope::Bucket && req.method == "PUT" && r->flag.empty();
+                        co_await require_tenant_bucket(bucket, ident.tenant, creating);
+                        if (auto src = req.headers.get("x-amz-copy-source")) {
+                            auto [sb, sk] = handlers::parse_copy_source(*src);
+                            co_await require_tenant_bucket(sb, ident.tenant, false);
+                        }
                     }
                 }
-            }
-            // Per-request timeout + cancellation wiring (docs/archive/gaps.md §3.1/§3.3): req_src is dedicated to this
-            // request; external tokens (process shutdown, plus client disconnect once the driver is wired) attach
-            // to the same source -- any trigger converges the whole L2/L3 chain with OperationCancelled from the
-            // nearest cancellable suspension point (pool.schedule / semaphore.acquire). The token propagates down
-            // the Task promise automatically, no per-handler/backend signature changes needed
-            CancelSource req_src;
-            req_src.set_data(backend_stats);  // reachable from the metered backends (roadmap §5.1)
-            CancelRegistration link;
-            if (ctx.cancel.valid()) {
-                link = ctx.cancel.on_cancel([&req_src] { req_src.request_cancel(); });
-                if (ctx.cancel.cancelled()) req_src.request_cancel();
-            }
-            std::chrono::milliseconds request_timeout(
-                request_timeout_ms_.load(std::memory_order_relaxed));
-            route_start = std::chrono::steady_clock::now();
-            if (request_timeout.count() > 0)
-                resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout, req_src);
-            else
-                resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
-            route_end = std::chrono::steady_clock::now();
-            // Object-level website redirect (docs/static-website.md phase ③): on the
-            // anonymous plane, x-amz-website-redirect-location turns the response into a
-            // 301 — the header value was prefix-validated at PUT, so it is Location-safe.
-            // Signed (REST) requests keep the object body + echo header, matching AWS
-            if (anon_site && (resp.status == 200 || resp.status == 206)) {
-                if (auto loc = resp.headers.get("x-amz-website-redirect-location")) {
-                    http::HttpResponse redirect;
-                    redirect.status = 301;
-                    redirect.headers.set("Location", *loc);
-                    resp = std::move(redirect);
-                    metrics_.website(WebsiteEvent::Redirect);
+                // Per-request timeout + cancellation wiring (docs/archive/gaps.md §3.1/§3.3): req_src is dedicated to
+                // this request; external tokens (process shutdown, plus client disconnect once the driver is wired)
+                // attach to the same source -- any trigger converges the whole L2/L3 chain with OperationCancelled from
+                // the nearest cancellable suspension point (pool.schedule / semaphore.acquire). The token propagates
+                // down the Task promise automatically, no per-handler/backend signature changes needed
+                CancelSource req_src;
+                req_src.set_data(backend_stats);  // reachable from the metered backends (roadmap §5.1)
+                CancelRegistration link;
+                if (ctx.cancel.valid()) {
+                    link = ctx.cancel.on_cancel([&req_src] { req_src.request_cancel(); });
+                    if (ctx.cancel.cancelled()) req_src.request_cancel();
                 }
-            }
+                std::chrono::milliseconds request_timeout(request_timeout_ms_.load(std::memory_order_relaxed));
+                route_start = std::chrono::steady_clock::now();
+                if (request_timeout.count() > 0)
+                    resp = co_await with_timeout(route(req, bucket, key, auth), request_timeout, req_src);
+                else
+                    resp = co_await std::move(route(req, bucket, key, auth).with_cancel(req_src.token()));
+                route_end = std::chrono::steady_clock::now();
+                // Object-level website redirect (docs/static-website.md phase ③): on the
+                // anonymous plane, x-amz-website-redirect-location turns the response into a
+                // 301 — the header value was prefix-validated at PUT, so it is Location-safe.
+                // Signed (REST) requests keep the object body + echo header, matching AWS
+                if (anon_site && (resp.status == 200 || resp.status == 206)) {
+                    if (auto loc = resp.headers.get("x-amz-website-redirect-location")) {
+                        http::HttpResponse redirect;
+                        redirect.status = 301;
+                        redirect.headers.set("Location", *loc);
+                        resp = std::move(redirect);
+                        metrics_.website(WebsiteEvent::Redirect);
+                    }
+                }
             }  // !early
         }
     } catch (const OperationCancelled&) {
         // Timeout/disconnect/shutdown: 503 lets SDKs retry. Blocking syscalls already running on pool threads are
-        // not preempted; this response only means "the gateway stops waiting for it" (the cooperative semantics of docs/concurrency.md §5)
-        LOG_WARN("req {} {} {} cancelled (timeout or shutdown) trace={}", ctx.request_id,
-                 req.method, req.path, ctx.trace.trace_id);
+        // not preempted; this response only means "the gateway stops waiting for it" (the cooperative semantics of
+        // docs/concurrency.md §5)
+        LOG_WARN("req {} {} {} cancelled (timeout or shutdown) trace={}", ctx.request_id, req.method, req.path,
+                 ctx.trace.trace_id);
         metrics_.s3_error(S3ErrorCode::SlowDown);
-        resp = error_response(
-            S3Error(S3ErrorCode::SlowDown, "Request cancelled: timed out or server shutting down."),
-            ctx, head);
+        resp = error_response(S3Error(S3ErrorCode::SlowDown, "Request cancelled: timed out or server shutting down."),
+                              ctx, head);
     } catch (const S3Error& e) {
         metrics_.s3_error(e.code);
         if (anon_site)
@@ -971,8 +975,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
         else
             resp = error_response(public_error(e, ctx.request_id, req), ctx, head);
     } catch (const std::exception& e) {
-        LOG_ERROR("req {} {} {} internal error: {} trace={}", ctx.request_id, req.method,
-                  req.path, e.what(), ctx.trace.trace_id);
+        LOG_ERROR("req {} {} {} internal error: {} trace={}", ctx.request_id, req.method, req.path, e.what(),
+                  ctx.trace.trace_id);
         metrics_.s3_error(S3ErrorCode::InternalError);
         S3Error internal(S3ErrorCode::InternalError, "We encountered an internal error.");
         if (anon_site)
@@ -998,16 +1002,14 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // object exists — the most common felt difference from AWS for real sites
             bool have_index = false;
             try {
-                co_await router_.resolve(bucket).head_object(
-                    bucket, anon_orig_key + "/" + anon_site->index_suffix);
+                co_await router_.resolve(bucket).head_object(bucket, anon_orig_key + "/" + anon_site->index_suffix);
                 have_index = true;
             } catch (const std::exception&) {
                 // any failure (NoSuchKey included) keeps the original error
             }
             if (have_index) {
                 std::string loc = (vhost ? "/" : "/" + bucket + "/") +
-                                  util::aws_uri_encode(anon_orig_key, /*encode_slash=*/false) +
-                                  "/";
+                                  util::aws_uri_encode(anon_orig_key, /*encode_slash=*/false) + "/";
                 resp = redirect_response(302, std::move(loc));
                 website_err.reset();
                 metrics_.website(WebsiteEvent::Redirect);
@@ -1064,10 +1066,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // the bytes actually sent and the full wall time); small responses have a known length by now
     metrics_.record_bucket_request(bucket);
     if (resp.stream_body) {
-        resp.stream_body = std::make_unique<CountingBodyReader>(std::move(resp.stream_body),
-                                                                &metrics_, bucket,
-                                                                /*inbound=*/false,
-                                                                std::move(access));
+        resp.stream_body = std::make_unique<CountingBodyReader>(std::move(resp.stream_body), &metrics_, bucket,
+                                                                /*inbound=*/false, std::move(access));
     } else {
         metrics_.add_bytes_out(bucket, resp.small_body.size());
         emit_access(*access, bytes, /*truncated=*/false);
@@ -1119,246 +1119,182 @@ const S3Service::Route* S3Service::match_route(const http::HttpRequest& req, Sco
 std::span<const S3Service::Route> S3Service::route_table() {
     using Scope = S3Service::Scope;
     static constexpr Route kRoutes[] = {
-    // Service level
-    {"GET", Scope::Service, "", "",
-     Action::Read, "ListBuckets",
-     [](S3Service& s, http::HttpRequest&, std::string, std::string,
-        const RequestAuth& auth) {
-         return s.list_buckets(auth);
-     }},
+        // Service level
+        {"GET", Scope::Service, "", "", Action::Read, "ListBuckets",
+         [](S3Service& s, http::HttpRequest&, std::string, std::string, const RequestAuth& auth) {
+             return s.list_buckets(auth);
+         }},
 
-    // Bucket level
-    {"GET", Scope::Bucket, "location", "",
-     Action::Read, "GetBucketLocation",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth&) {
-         return s.get_bucket_location(std::move(b));
-     }},
-    // ?website subresource (docs/static-website.md phase ③): flagged routes must precede
-    // the flagless fallbacks of the same method, or PUT /bucket?website would create a bucket
-    {"GET", Scope::Bucket, "website", "",
-     Action::Read, "GetBucketWebsite",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.get_bucket_website(std::move(b), auth);
-     }},
-    {"PUT", Scope::Bucket, "website", "",
-     Action::Write, "PutBucketWebsite",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.put_bucket_website(req, std::move(b), auth);
-     }},
-    {"DELETE", Scope::Bucket, "website", "",
-     Action::Delete, "DeleteBucketWebsite",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.delete_bucket_website(std::move(b), auth);
-     }},
-    // ?lifecycle subresource (roadmap §2.4, root credential only, same model as ?website)
-    {"GET", Scope::Bucket, "lifecycle", "",
-     Action::Read, "GetBucketLifecycle",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.get_bucket_lifecycle(std::move(b), auth);
-     }},
-    {"PUT", Scope::Bucket, "lifecycle", "",
-     Action::Write, "PutBucketLifecycle",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.put_bucket_lifecycle(req, std::move(b), auth);
-     }},
-    {"DELETE", Scope::Bucket, "lifecycle", "",
-     Action::Delete, "DeleteBucketLifecycle",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.delete_bucket_lifecycle(std::move(b), auth);
-     }},
-    // ?cors subresource (roadmap §2.1, root credential only, same model as ?website)
-    {"GET", Scope::Bucket, "cors", "",
-     Action::Read, "GetBucketCors",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.get_bucket_cors(std::move(b), auth);
-     }},
-    {"PUT", Scope::Bucket, "cors", "",
-     Action::Write, "PutBucketCors",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.put_bucket_cors(req, std::move(b), auth);
-     }},
-    {"DELETE", Scope::Bucket, "cors", "",
-     Action::Delete, "DeleteBucketCors",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.delete_bucket_cors(std::move(b), auth);
-     }},
-    // ?quota subresource (roadmap §3.9 ②, docs/multi-tenancy.md §3): GET for anyone
-    // admitted to the bucket, PUT/DELETE root only
-    {"GET", Scope::Bucket, "quota", "",
-     Action::Read, "GetBucketQuota",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.get_bucket_quota(std::move(b), auth);
-     }},
-    {"PUT", Scope::Bucket, "quota", "",
-     Action::Write, "PutBucketQuota",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.put_bucket_quota(req, std::move(b), auth);
-     }},
-    {"DELETE", Scope::Bucket, "quota", "",
-     Action::Delete, "DeleteBucketQuota",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.delete_bucket_quota(std::move(b), auth);
-     }},
-    // All five parameters now take effect (docs/archive/gaps.md §5.1): previously pagination parameters were "allowed
-    // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
-    {"GET", Scope::Bucket, "uploads",
-     "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
-     Action::Read, "ListMultipartUploads",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.list_multipart_uploads(req, std::move(b), auth);
-     }},
-    // ListObjectsV2 and V1 compatibility share one entry. fetch-owner allowed but ignored: V2 omits Owner by
-    // default, so ignoring equals =false and is not a "silent wrong answer"
-    {"GET", Scope::Bucket, "",
-     "list-type prefix delimiter marker continuation-token start-after max-keys "
-     "encoding-type fetch-owner",
-     Action::Read, "ListObjects",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.list_objects(req, std::move(b), auth);
-     }},
-    {"PUT", Scope::Bucket, "", "",
-     Action::Write, "CreateBucket",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.create_bucket(req, std::move(b), auth);
-     }},
-    {"HEAD", Scope::Bucket, "", "",
-     Action::Read, "HeadBucket",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth&) {
-         return s.head_bucket(std::move(b));
-     }},
-    {"DELETE", Scope::Bucket, "", "",
-     Action::Delete, "DeleteBucket",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.delete_bucket(std::move(b), auth);
-     }},
-    {"POST", Scope::Bucket, "delete", "",
-     Action::Delete, "DeleteObjects",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string,
-        const RequestAuth& auth) {
-         return s.delete_objects(req, std::move(b), auth);
-     }},
+        // Bucket level
+        {"GET", Scope::Bucket, "location", "", Action::Read, "GetBucketLocation",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth&) {
+             return s.get_bucket_location(std::move(b));
+         }},
+        // ?website subresource (docs/static-website.md phase ③): flagged routes must precede
+        // the flagless fallbacks of the same method, or PUT /bucket?website would create a bucket
+        {"GET", Scope::Bucket, "website", "", Action::Read, "GetBucketWebsite",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.get_bucket_website(std::move(b), auth);
+         }},
+        {"PUT", Scope::Bucket, "website", "", Action::Write, "PutBucketWebsite",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.put_bucket_website(req, std::move(b), auth);
+         }},
+        {"DELETE", Scope::Bucket, "website", "", Action::Delete, "DeleteBucketWebsite",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.delete_bucket_website(std::move(b), auth);
+         }},
+        // ?lifecycle subresource (roadmap §2.4, root credential only, same model as ?website)
+        {"GET", Scope::Bucket, "lifecycle", "", Action::Read, "GetBucketLifecycle",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.get_bucket_lifecycle(std::move(b), auth);
+         }},
+        {"PUT", Scope::Bucket, "lifecycle", "", Action::Write, "PutBucketLifecycle",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.put_bucket_lifecycle(req, std::move(b), auth);
+         }},
+        {"DELETE", Scope::Bucket, "lifecycle", "", Action::Delete, "DeleteBucketLifecycle",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.delete_bucket_lifecycle(std::move(b), auth);
+         }},
+        // ?cors subresource (roadmap §2.1, root credential only, same model as ?website)
+        {"GET", Scope::Bucket, "cors", "", Action::Read, "GetBucketCors",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.get_bucket_cors(std::move(b), auth);
+         }},
+        {"PUT", Scope::Bucket, "cors", "", Action::Write, "PutBucketCors",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.put_bucket_cors(req, std::move(b), auth);
+         }},
+        {"DELETE", Scope::Bucket, "cors", "", Action::Delete, "DeleteBucketCors",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.delete_bucket_cors(std::move(b), auth);
+         }},
+        // ?quota subresource (roadmap §3.9 ②, docs/multi-tenancy.md §3): GET for anyone
+        // admitted to the bucket, PUT/DELETE root only
+        {"GET", Scope::Bucket, "quota", "", Action::Read, "GetBucketQuota",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.get_bucket_quota(std::move(b), auth);
+         }},
+        {"PUT", Scope::Bucket, "quota", "", Action::Write, "PutBucketQuota",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.put_bucket_quota(req, std::move(b), auth);
+         }},
+        {"DELETE", Scope::Bucket, "quota", "", Action::Delete, "DeleteBucketQuota",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.delete_bucket_quota(std::move(b), auth);
+         }},
+        // All five parameters now take effect (docs/archive/gaps.md §5.1): previously pagination parameters were
+        // "allowed
+        // but ignored" and prefix/delimiter simply not admitted (ignoring them would mix in uploads outside the filter)
+        {"GET", Scope::Bucket, "uploads", "max-uploads key-marker upload-id-marker prefix delimiter encoding-type",
+         Action::Read, "ListMultipartUploads",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.list_multipart_uploads(req, std::move(b), auth);
+         }},
+        // ListObjectsV2 and V1 compatibility share one entry. fetch-owner allowed but ignored: V2 omits Owner by
+        // default, so ignoring equals =false and is not a "silent wrong answer"
+        {"GET", Scope::Bucket, "",
+         "list-type prefix delimiter marker continuation-token start-after max-keys "
+         "encoding-type fetch-owner",
+         Action::Read, "ListObjects",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.list_objects(req, std::move(b), auth);
+         }},
+        {"PUT", Scope::Bucket, "", "", Action::Write, "CreateBucket",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.create_bucket(req, std::move(b), auth);
+         }},
+        {"HEAD", Scope::Bucket, "", "", Action::Read, "HeadBucket",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth&) {
+             return s.head_bucket(std::move(b));
+         }},
+        {"DELETE", Scope::Bucket, "", "", Action::Delete, "DeleteBucket",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string, const RequestAuth& auth) {
+             return s.delete_bucket(std::move(b), auth);
+         }},
+        {"POST", Scope::Bucket, "delete", "", Action::Delete, "DeleteObjects",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string, const RequestAuth& auth) {
+             return s.delete_objects(req, std::move(b), auth);
+         }},
 
-    // ?tagging subresource (roadmap §2.5)
-    {"GET", Scope::Object, "tagging", "",
-     Action::Read, "GetObjectTagging",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.get_object_tagging(std::move(b), std::move(k));
-     }},
-    {"PUT", Scope::Object, "tagging", "",
-     Action::Write, "PutObjectTagging",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.put_object_tagging(req, std::move(b), std::move(k));
-     }},
-    {"DELETE", Scope::Object, "tagging", "",
-     Action::Delete, "DeleteObjectTagging",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.delete_object_tagging(std::move(b), std::move(k));
-     }},
+        // ?tagging subresource (roadmap §2.5)
+        {"GET", Scope::Object, "tagging", "", Action::Read, "GetObjectTagging",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string k, const RequestAuth&) {
+             return s.get_object_tagging(std::move(b), std::move(k));
+         }},
+        {"PUT", Scope::Object, "tagging", "", Action::Write, "PutObjectTagging",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth&) {
+             return s.put_object_tagging(req, std::move(b), std::move(k));
+         }},
+        {"DELETE", Scope::Object, "tagging", "", Action::Delete, "DeleteObjectTagging",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string k, const RequestAuth&) {
+             return s.delete_object_tagging(std::move(b), std::move(k));
+         }},
 
-    // Object level: multipart
-    {"POST", Scope::Object, "uploads", "",
-     Action::Write, "CreateMultipartUpload",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth& auth) {
-         return s.create_multipart(req, std::move(b), std::move(k), auth);
-     }},
-    {"POST", Scope::Object, "uploadId", "",
-     Action::Write, "CompleteMultipartUpload",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth& auth) {
-         return s.complete_multipart(req, std::move(b), std::move(k), auth);
-     }},
-    {"PUT", Scope::Object, "partNumber", "uploadId",
-     Action::Write, "UploadPart",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth& auth) {
-         return s.upload_part(req, std::move(b), std::move(k), auth);
-     }},
-    {"GET", Scope::Object, "uploadId", "max-parts part-number-marker encoding-type",
-     Action::Read, "ListParts",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.list_parts(req, std::move(b), std::move(k));
-     }},
-    {"DELETE", Scope::Object, "uploadId", "",
-     Action::Delete, "AbortMultipartUpload",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.abort_multipart(req, std::move(b), std::move(k));
-     }},
+        // Object level: multipart
+        {"POST", Scope::Object, "uploads", "", Action::Write, "CreateMultipartUpload",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth& auth) {
+             return s.create_multipart(req, std::move(b), std::move(k), auth);
+         }},
+        {"POST", Scope::Object, "uploadId", "", Action::Write, "CompleteMultipartUpload",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth& auth) {
+             return s.complete_multipart(req, std::move(b), std::move(k), auth);
+         }},
+        {"PUT", Scope::Object, "partNumber", "uploadId", Action::Write, "UploadPart",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth& auth) {
+             return s.upload_part(req, std::move(b), std::move(k), auth);
+         }},
+        {"GET", Scope::Object, "uploadId", "max-parts part-number-marker encoding-type", Action::Read, "ListParts",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth&) {
+             return s.list_parts(req, std::move(b), std::move(k));
+         }},
+        {"DELETE", Scope::Object, "uploadId", "", Action::Delete, "AbortMultipartUpload",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth&) {
+             return s.abort_multipart(req, std::move(b), std::move(k));
+         }},
 
-    // Object level: data plane
-    {"PUT", Scope::Object, "", "",  // PutObject / CopyObject (steered by x-amz-copy-source)
-     Action::Write, "PutObject",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth& auth) {
-         if (req.headers.has("x-amz-copy-source"))
-             return s.copy_object(req, std::move(b), std::move(k), auth);
-         return s.put_object(req, std::move(b), std::move(k), auth);
-     }},
-    // response-* override parameters (docs/archive/gaps.md §5.3): the family most used in presigned download links
-    // partNumber (roadmap §2.5): reads one part of a completed multipart object; ranges
-    // resolve from the part_sizes layout recorded at complete
-    {"GET", Scope::Object, "",
-     "response-content-type response-content-language response-expires "
-     "response-cache-control response-content-disposition response-content-encoding "
-     "partNumber",
-     Action::Read, "GetObject",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.get_object(req, std::move(b), std::move(k), false);
-     }},
-    {"HEAD", Scope::Object, "",
-     "response-content-type response-content-language response-expires "
-     "response-cache-control response-content-disposition response-content-encoding "
-     "partNumber",
-     Action::Read, "HeadObject",
-     [](S3Service& s, http::HttpRequest& req, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.get_object(req, std::move(b), std::move(k), true);
-     }},
-    {"DELETE", Scope::Object, "", "",
-     Action::Delete, "DeleteObject",
-     [](S3Service& s, http::HttpRequest&, std::string b, std::string k,
-        const RequestAuth&) {
-         return s.delete_object(std::move(b), std::move(k));
-     }},
+        // Object level: data plane
+        {"PUT", Scope::Object, "", "",  // PutObject / CopyObject (steered by x-amz-copy-source)
+         Action::Write, "PutObject",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth& auth) {
+             if (req.headers.has("x-amz-copy-source")) return s.copy_object(req, std::move(b), std::move(k), auth);
+             return s.put_object(req, std::move(b), std::move(k), auth);
+         }},
+        // response-* override parameters (docs/archive/gaps.md §5.3): the family most used in presigned download links
+        // partNumber (roadmap §2.5): reads one part of a completed multipart object; ranges
+        // resolve from the part_sizes layout recorded at complete
+        {"GET", Scope::Object, "",
+         "response-content-type response-content-language response-expires "
+         "response-cache-control response-content-disposition response-content-encoding "
+         "partNumber",
+         Action::Read, "GetObject",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth&) {
+             return s.get_object(req, std::move(b), std::move(k), false);
+         }},
+        {"HEAD", Scope::Object, "",
+         "response-content-type response-content-language response-expires "
+         "response-cache-control response-content-disposition response-content-encoding "
+         "partNumber",
+         Action::Read, "HeadObject",
+         [](S3Service& s, http::HttpRequest& req, std::string b, std::string k, const RequestAuth&) {
+             return s.get_object(req, std::move(b), std::move(k), true);
+         }},
+        {"DELETE", Scope::Object, "", "", Action::Delete, "DeleteObject",
+         [](S3Service& s, http::HttpRequest&, std::string b, std::string k, const RequestAuth&) {
+             return s.delete_object(std::move(b), std::move(k));
+         }},
     };
     return kRoutes;
 }
 
-Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bucket,
-                                          std::string key, const RequestAuth& auth) {
-
-
+Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bucket, std::string key,
+                                          const RequestAuth& auth) {
     // The blocklist goes first only to give known subresources a clearer error message; the structural defenses
     // are the per-route query allowlist below (§3.5) and the request-header check (§3.4)
     reject_unsupported_subresource(req);
     reject_unsupported_headers(req);
-    Scope scope = bucket.empty() ? Scope::Service
-                  : key.empty() ? Scope::Bucket
-                                : Scope::Object;
+    Scope scope = bucket.empty() ? Scope::Service : key.empty() ? Scope::Bucket : Scope::Object;
     if (const Route* r = match_route(req, scope)) {
         // Allowlist (§3.5): a query key outside this route's list -> 501. Under a blocklist model, any omission
         // silently degrades into "read/write the whole object" (?attributes returns the object body, ?partNumber
@@ -1367,7 +1303,8 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
         co_return co_await r->fn(*this, req, std::move(bucket), std::move(key), auth);
     }
     // 405 must carry Allow (RFC 9110 §15.5.6, docs/archive/gaps.md §5.9): the answer is the other methods in the same
-    // scope that would also match this request's query -- the list comes from the dispatch table itself, so it cannot drift from it
+    // scope that would also match this request's query -- the list comes from the dispatch table itself, so it cannot
+    // drift from it
     std::string allow;
     for (auto& r : route_table()) {
         if (r.scope != scope || !flag_matches(req, r.flag)) continue;
@@ -1376,10 +1313,8 @@ Task<http::HttpResponse> S3Service::route(http::HttpRequest& req, std::string bu
         allow += r.method;
     }
     // Driver/upstream semantics where HEAD is served by GET routes: listing GET lists HEAD along with it
-    if (allow.find("GET") != std::string::npos && allow.find("HEAD") == std::string::npos)
-        allow += ", HEAD";
-    throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.")
-        .with_header("Allow", allow);
+    if (allow.find("GET") != std::string::npos && allow.find("HEAD") == std::string::npos) allow += ", HEAD";
+    throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed.").with_header("Allow", allow);
 }
 
 // ---------- readyz (docs/s3-protocol.md §7: per-backend liveness probes) ----------
@@ -1389,7 +1324,8 @@ Task<http::HttpResponse> S3Service::readyz() {
     resp.headers.set("Content-Type", "text/plain");
 
     // The endpoint is anonymously reachable while the probe issues real calls to every backend (cloudproxy is a
-    // billed remote ListBuckets): short result cache + single-flight, so an anonymous loop cannot generate amplified traffic
+    // billed remote ListBuckets): short result cache + single-flight, so an anonymous loop cannot generate amplified
+    // traffic
     constexpr auto kTtl = std::chrono::seconds(5);
     {
         std::lock_guard lk(readyz_mu_);
@@ -1402,7 +1338,8 @@ Task<http::HttpResponse> S3Service::readyz() {
         }
         readyz_inflight_ = true;
     }
-    // The single-flight flag must also reset if the coroutine is destroyed early (disconnect), or readyz returns stale values forever
+    // The single-flight flag must also reset if the coroutine is destroyed early (disconnect), or readyz returns stale
+    // values forever
     struct InflightReset {
         S3Service* s;
         ~InflightReset() {
@@ -1420,12 +1357,14 @@ Task<http::HttpResponse> S3Service::readyz() {
             report += name + " ok\n";
         } catch (const std::exception& e) {
             ok = false;
-            // Exception text may contain topology such as upstream endpoints: log only, never returned to anonymous callers
+            // Exception text may contain topology such as upstream endpoints: log only, never returned to anonymous
+            // callers
             LOG_WARN("readyz: backend {} probe failed: {}", name, e.what());
             report += name + " FAIL\n";
         }
     }
-    // The credential-table wipe guard has fired (fail-open guard, README §1.2): report unhealthy to prompt ops intervention
+    // The credential-table wipe guard has fired (fail-open guard, README §1.2): report unhealthy to prompt ops
+    // intervention
     if (cred_store_ && cred_store_->degraded()) {
         ok = false;
         report += "credential-store DEGRADED\n";

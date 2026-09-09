@@ -54,13 +54,11 @@ void HttpServerFactory::register_driver(const std::string& name, DriverFactory f
     registry()[name] = std::move(factory);
 }
 
-std::unique_ptr<IHttpServer> HttpServerFactory::create(const std::string& driver,
-                                                       const HttpConfig& cfg) {
+std::unique_ptr<IHttpServer> HttpServerFactory::create(const std::string& driver, const HttpConfig& cfg) {
     ensure_registered();
     auto it = registry().find(driver);
     if (it == registry().end())
-        throw std::runtime_error("unknown http driver: " + driver +
-                                 " (not compiled in or misspelled)");
+        throw std::runtime_error("unknown http driver: " + driver + " (not compiled in or misspelled)");
     return it->second(cfg);
 }
 

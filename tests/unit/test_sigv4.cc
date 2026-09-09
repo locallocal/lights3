@@ -31,11 +31,10 @@ http::HttpRequest vector_request() {
     req.path = "/";
     req.headers.add("Host", "example.amazonaws.com");
     req.headers.add("x-amz-date", "20150830T123600Z");
-    req.headers.add(
-        "Authorization",
-        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, "
-        "SignedHeaders=host;x-amz-date, "
-        "Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31");
+    req.headers.add("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, "
+                    "SignedHeaders=host;x-amz-date, "
+                    "Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31");
     return req;
 }
 
@@ -105,7 +104,8 @@ TEST(sigv4_sign_then_verify_roundtrip) {
 
     // verify should wrap the body for streaming SHA256 validation; reading to EOF must not throw
     std::byte buf[64];
-    while (sync_wait(req.body->read(std::span(buf))) > 0) {}
+    while (sync_wait(req.body->read(std::span(buf))) > 0) {
+    }
 }
 
 TEST(sigv4_detects_payload_mismatch) {
@@ -126,7 +126,8 @@ TEST(sigv4_detects_payload_mismatch) {
     std::byte buf[64];
     bool thrown = false;
     try {
-        while (sync_wait(req.body->read(std::span(buf))) > 0) {}
+        while (sync_wait(req.body->read(std::span(buf))) > 0) {
+        }
     } catch (const S3Error& e) {
         thrown = true;
         CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::XAmzContentSHA256Mismatch));
@@ -140,8 +141,7 @@ namespace {
 
 util::Sha256Digest test_signing_key(const std::string& secret, const std::string& date) {
     std::string init = "AWS4" + secret;
-    auto k = util::hmac_sha256(
-        std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
+    auto k = util::hmac_sha256(std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
     k = util::hmac_sha256(k, "us-east-1");
     k = util::hmac_sha256(k, "s3");
     return util::hmac_sha256(k, "aws4_request");
@@ -160,8 +160,8 @@ std::string read_all_body(http::BodyReader& r) {
 
 // Build a correctly signed aws-chunked request; on tamper, corrupt the second chunk's data;
 // on bad_final, replace the zero-length trailer chunk's signature with garbage (final-chunk validation path)
-http::HttpRequest make_chunked_request(SigV4Authenticator& auth, const Credential& cred,
-                                       bool tamper, bool bad_final = false) {
+http::HttpRequest make_chunked_request(SigV4Authenticator& auth, const Credential& cred, bool tamper,
+                                       bool bad_final = false) {
     http::HttpRequest req;
     req.method = "PUT";
     req.raw_path = "/bkt/big";
@@ -178,16 +178,15 @@ http::HttpRequest make_chunked_request(SigV4Authenticator& auth, const Credentia
     auto key = test_signing_key(cred.secret_key, date);
 
     auto chunk_sig = [&](const std::string& prev, const std::string& data) {
-        std::string sts = "AWS4-HMAC-SHA256-PAYLOAD\n" + amz_date + "\n" + scope + "\n" +
-                          prev + "\n" + util::sha256_hex("") + "\n" + util::sha256_hex(data);
+        std::string sts = "AWS4-HMAC-SHA256-PAYLOAD\n" + amz_date + "\n" + scope + "\n" + prev + "\n" +
+                          util::sha256_hex("") + "\n" + util::sha256_hex(data);
         return util::to_hex(util::hmac_sha256(key, sts));
     };
     std::string s1 = chunk_sig(seed, "hello ");
     std::string s2 = chunk_sig(s1, "world");
     std::string s3 = bad_final ? std::string(64, '0') : chunk_sig(s2, "");
-    std::string body = "6;chunk-signature=" + s1 + "\r\nhello \r\n" +
-                       "5;chunk-signature=" + s2 + "\r\n" + (tamper ? "worlx" : "world") +
-                       "\r\n0;chunk-signature=" + s3 + "\r\n\r\n";
+    std::string body = "6;chunk-signature=" + s1 + "\r\nhello \r\n" + "5;chunk-signature=" + s2 + "\r\n" +
+                       (tamper ? "worlx" : "world") + "\r\n0;chunk-signature=" + s3 + "\r\n\r\n";
     req.body = std::make_unique<http::StringBodyReader>(std::move(body));
     return req;
 }
@@ -242,8 +241,7 @@ std::string be_bytes(uint64_t v, int bytes) {
 // STREAMING-UNSIGNED-PAYLOAD-TRAILER: the default upload path of post-2025 SDKs -- chunks are
 // unsigned, the trailing checksum is the only end-to-end integrity cover
 http::HttpRequest make_unsigned_trailer_request(SigV4Authenticator& auth, const Credential& cred,
-                                                const std::string& payload,
-                                                const std::string& declared_name,
+                                                const std::string& payload, const std::string& declared_name,
                                                 const std::string& trailer_line) {
     http::HttpRequest req;
     req.method = "PUT";
@@ -265,11 +263,8 @@ http::HttpRequest make_unsigned_trailer_request(SigV4Authenticator& auth, const 
 }
 
 std::string crc32_trailer_value(const std::string& payload) {
-    return util::base64_encode(
-        be_bytes(util::crc32_update(
-                     0, std::span(reinterpret_cast<const std::byte*>(payload.data()),
-                                  payload.size())),
-                 4));
+    return util::base64_encode(be_bytes(
+        util::crc32_update(0, std::span(reinterpret_cast<const std::byte*>(payload.data()), payload.size())), 4));
 }
 
 }  // namespace
@@ -280,16 +275,14 @@ TEST(sigv4_unsigned_trailer_checksum_verified) {
     auto auth = SigV4Authenticator::build(cfg);
     std::string payload = "hello trailer world";
 
-    auto ok = make_unsigned_trailer_request(
-        auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
-        "x-amz-checksum-crc32:" + crc32_trailer_value(payload));
+    auto ok = make_unsigned_trailer_request(auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
+                                            "x-amz-checksum-crc32:" + crc32_trailer_value(payload));
     auth.verify(ok);
     CHECK_EQ(read_all_body(*ok.body), payload);
 
     // crc64nvme goes through the same path (the post-2025 SDK default algorithm)
     auto v64 = util::base64_encode(be_bytes(util::crc64nvme_of(payload), 8));
-    auto ok64 = make_unsigned_trailer_request(auth, cfg.credentials[0], payload,
-                                              "x-amz-checksum-crc64nvme",
+    auto ok64 = make_unsigned_trailer_request(auth, cfg.credentials[0], payload, "x-amz-checksum-crc64nvme",
                                               "x-amz-checksum-crc64nvme:" + v64);
     auth.verify(ok64);
     CHECK_EQ(read_all_body(*ok64.body), payload);
@@ -302,9 +295,8 @@ TEST(sigv4_unsigned_trailer_checksum_mismatch) {
     std::string payload = "hello trailer world";
 
     // Trailer carries the checksum of different bytes -> BadDigest before EOF is reported
-    auto req = make_unsigned_trailer_request(
-        auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
-        "x-amz-checksum-crc32:" + crc32_trailer_value("tampered payload!!!"));
+    auto req = make_unsigned_trailer_request(auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
+                                             "x-amz-checksum-crc32:" + crc32_trailer_value("tampered payload!!!"));
     auth.verify(req);
     bool thrown = false;
     try {
@@ -316,8 +308,7 @@ TEST(sigv4_unsigned_trailer_checksum_mismatch) {
     CHECK(thrown);
 
     // Not-base64 trailer value -> InvalidDigest, distinct from the mismatch case
-    auto junk = make_unsigned_trailer_request(auth, cfg.credentials[0], payload,
-                                              "x-amz-checksum-crc32",
+    auto junk = make_unsigned_trailer_request(auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
                                               "x-amz-checksum-crc32:not-base64!!");
     auth.verify(junk);
     thrown = false;
@@ -337,9 +328,8 @@ TEST(sigv4_trailer_declaration_enforced_both_ways) {
     std::string payload = "hello trailer world";
 
     // Declared crc32 but the body carries crc32c -> both "missing declared" and "undeclared"
-    auto swapped = make_unsigned_trailer_request(
-        auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
-        "x-amz-checksum-crc32c:" + crc32_trailer_value(payload));
+    auto swapped = make_unsigned_trailer_request(auth, cfg.credentials[0], payload, "x-amz-checksum-crc32",
+                                                 "x-amz-checksum-crc32c:" + crc32_trailer_value(payload));
     auth.verify(swapped);
     bool thrown = false;
     try {
@@ -351,8 +341,7 @@ TEST(sigv4_trailer_declaration_enforced_both_ways) {
     CHECK(thrown);
 
     // Unknown checksum trailer name is 501 at verify time, not silently skipped
-    auto unknown = make_unsigned_trailer_request(auth, cfg.credentials[0], payload,
-                                                 "x-amz-checksum-md99",
+    auto unknown = make_unsigned_trailer_request(auth, cfg.credentials[0], payload, "x-amz-checksum-md99",
                                                  "x-amz-checksum-md99:AAAA");
     CHECK_THROWS_S3(auth.verify(unknown), S3ErrorCode::NotImplemented);
 
@@ -373,8 +362,8 @@ TEST(sigv4_trailer_declaration_enforced_both_ways) {
 namespace {
 
 http::HttpRequest make_signed_trailer_request(SigV4Authenticator& auth, const Credential& cred,
-                                              const std::string& checksum_value,
-                                              bool bad_trailer_sig, bool omit_trailer_sig) {
+                                              const std::string& checksum_value, bool bad_trailer_sig,
+                                              bool omit_trailer_sig) {
     http::HttpRequest req;
     req.method = "PUT";
     req.raw_path = "/bkt/big";
@@ -392,20 +381,18 @@ http::HttpRequest make_signed_trailer_request(SigV4Authenticator& auth, const Cr
     auto key = test_signing_key(cred.secret_key, date);
 
     auto chunk_sig = [&](const std::string& prev, const std::string& data) {
-        std::string sts = "AWS4-HMAC-SHA256-PAYLOAD\n" + amz_date + "\n" + scope + "\n" +
-                          prev + "\n" + util::sha256_hex("") + "\n" + util::sha256_hex(data);
+        std::string sts = "AWS4-HMAC-SHA256-PAYLOAD\n" + amz_date + "\n" + scope + "\n" + prev + "\n" +
+                          util::sha256_hex("") + "\n" + util::sha256_hex(data);
         return util::to_hex(util::hmac_sha256(key, sts));
     };
     std::string s1 = chunk_sig(seed, "hello ");
     std::string s2 = chunk_sig(s1, "world");
     std::string s3 = chunk_sig(s2, "");
     std::string trailer_line = "x-amz-checksum-crc32:" + checksum_value;
-    std::string tsig_sts = "AWS4-HMAC-SHA256-TRAILER\n" + amz_date + "\n" + scope + "\n" + s3 +
-                           "\n" + util::sha256_hex(trailer_line + "\n");
-    std::string tsig = bad_trailer_sig ? std::string(64, '0')
-                                       : util::to_hex(util::hmac_sha256(key, tsig_sts));
-    std::string body = "6;chunk-signature=" + s1 + "\r\nhello \r\n" +
-                       "5;chunk-signature=" + s2 + "\r\nworld\r\n" +
+    std::string tsig_sts = "AWS4-HMAC-SHA256-TRAILER\n" + amz_date + "\n" + scope + "\n" + s3 + "\n" +
+                           util::sha256_hex(trailer_line + "\n");
+    std::string tsig = bad_trailer_sig ? std::string(64, '0') : util::to_hex(util::hmac_sha256(key, tsig_sts));
+    std::string body = "6;chunk-signature=" + s1 + "\r\nhello \r\n" + "5;chunk-signature=" + s2 + "\r\nworld\r\n" +
                        "0;chunk-signature=" + s3 + "\r\n" + trailer_line + "\r\n";
     if (!omit_trailer_sig) body += "x-amz-trailer-signature:" + tsig + "\r\n";
     body += "\r\n";
@@ -420,14 +407,12 @@ TEST(sigv4_signed_trailer_verified) {
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
     auto auth = SigV4Authenticator::build(cfg);
 
-    auto ok = make_signed_trailer_request(auth, cfg.credentials[0],
-                                          crc32_trailer_value("hello world"), false, false);
+    auto ok = make_signed_trailer_request(auth, cfg.credentials[0], crc32_trailer_value("hello world"), false, false);
     auth.verify(ok);
     CHECK_EQ(read_all_body(*ok.body), "hello world");
 
     // Corrupt trailer signature -> SignatureDoesNotMatch (checked before the checksum)
-    auto bad = make_signed_trailer_request(auth, cfg.credentials[0],
-                                           crc32_trailer_value("hello world"), true, false);
+    auto bad = make_signed_trailer_request(auth, cfg.credentials[0], crc32_trailer_value("hello world"), true, false);
     auth.verify(bad);
     bool thrown = false;
     try {
@@ -439,8 +424,8 @@ TEST(sigv4_signed_trailer_verified) {
     CHECK(thrown);
 
     // Correctly signed but wrong checksum (client-side digest bug) -> BadDigest
-    auto mismatch = make_signed_trailer_request(auth, cfg.credentials[0],
-                                                crc32_trailer_value("other bytes"), false, false);
+    auto mismatch = make_signed_trailer_request(auth, cfg.credentials[0], crc32_trailer_value("other bytes"), false,
+                                                false);
     auth.verify(mismatch);
     thrown = false;
     try {
@@ -452,8 +437,8 @@ TEST(sigv4_signed_trailer_verified) {
     CHECK(thrown);
 
     // Missing x-amz-trailer-signature in the signed variant -> InvalidRequest
-    auto omitted = make_signed_trailer_request(auth, cfg.credentials[0],
-                                               crc32_trailer_value("hello world"), false, true);
+    auto omitted = make_signed_trailer_request(auth, cfg.credentials[0], crc32_trailer_value("hello world"), false,
+                                               true);
     auth.verify(omitted);
     thrown = false;
     try {
@@ -467,7 +452,8 @@ TEST(sigv4_signed_trailer_verified) {
 
 // ---------- Regression cases found in review ----------
 
-// Validation must not be tied to EOF: a consumer that reads exactly length() bytes (cloudproxy's consumption pattern) must also detect the mismatch
+// Validation must not be tied to EOF: a consumer that reads exactly length() bytes (cloudproxy's consumption pattern)
+// must also detect the mismatch
 TEST(sigv4_payload_mismatch_detected_without_eof_read) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -487,8 +473,7 @@ TEST(sigv4_payload_mismatch_detected_without_eof_read) {
     bool thrown = false;
     try {
         size_t got = 0;
-        while (got < len)
-            got += sync_wait(req.body->read(std::span(buf.data() + got, len - got)));
+        while (got < len) got += sync_wait(req.body->read(std::span(buf.data() + got, len - got)));
     } catch (const S3Error& e) {
         thrown = true;
         CHECK_EQ(wire_code(e.code), wire_code(S3ErrorCode::XAmzContentSHA256Mismatch));
@@ -496,7 +481,8 @@ TEST(sigv4_payload_mismatch_detected_without_eof_read) {
     CHECK(thrown);
 }
 
-// Same for chunked: reading the full decoded length triggers final-chunk/zero-trailer verification, no extra EOF read needed
+// Same for chunked: reading the full decoded length triggers final-chunk/zero-trailer verification, no extra EOF read
+// needed
 TEST(sigv4_chunked_final_signature_checked_without_eof_read) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -556,7 +542,8 @@ TEST(sigv4_empty_digest_with_nonempty_body_rejected) {
     CHECK(thrown);
 }
 
-// Uppercase hex digest: the signature uses the literal value, content comparison is case-insensitive -> a correct body should pass
+// Uppercase hex digest: the signature uses the literal value, content comparison is case-insensitive -> a correct body
+// should pass
 TEST(sigv4_uppercase_hex_digest_accepted) {
     AuthConfig cfg;
     cfg.credentials = {{"TESTAK", "test-secret-key"}};
@@ -577,7 +564,8 @@ TEST(sigv4_uppercase_hex_digest_accepted) {
     CHECK_EQ(read_all_body(*req.body), body);  // no throw = validation passed
 }
 
-// host not in SignedHeaders -> reject (under vhost, a signature not bound to host could be replayed across buckets by swapping the Host header)
+// host not in SignedHeaders -> reject (under vhost, a signature not bound to host could be replayed across buckets by
+// swapping the Host header)
 TEST(sigv4_requires_host_in_signed_headers) {
     auto auth = SigV4Authenticator::build(vector_auth_config());
     auth.clock = vector_time;
@@ -604,14 +592,12 @@ TEST(sigv4_presigned_url_expiry) {
 
     std::string amz_date = "20260714T000000Z", date = "20260714";
     std::string cred = "TESTAK/" + date + "/us-east-1/s3/aws4_request";
-    std::string cq = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=" +
-                     util::aws_uri_encode(cred, true) + "&X-Amz-Date=" + amz_date +
-                     "&X-Amz-Expires=300&X-Amz-SignedHeaders=host";
+    std::string cq = "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=" + util::aws_uri_encode(cred, true) +
+                     "&X-Amz-Date=" + amz_date + "&X-Amz-Expires=300&X-Amz-SignedHeaders=host";
     std::string canonical = "GET\n/bkt/k\n" + cq + "\nhost:localhost\n\nhost\nUNSIGNED-PAYLOAD";
-    std::string sts = "AWS4-HMAC-SHA256\n" + amz_date + "\n" + date +
-                      "/us-east-1/s3/aws4_request\n" + util::sha256_hex(canonical);
-    std::string sig =
-        util::to_hex(util::hmac_sha256(test_signing_key("test-secret-key", date), sts));
+    std::string sts = "AWS4-HMAC-SHA256\n" + amz_date + "\n" + date + "/us-east-1/s3/aws4_request\n" +
+                      util::sha256_hex(canonical);
+    std::string sig = util::to_hex(util::hmac_sha256(test_signing_key("test-secret-key", date), sts));
 
     auto make = [&] {
         http::HttpRequest req;
@@ -639,8 +625,8 @@ TEST(sigv4_presigned_url_expiry) {
     auto expired = make();
     CHECK_THROWS_S3(auth.verify(expired), S3ErrorCode::AccessDenied);
 
-    // Issued in the future (docs/s3-protocol.md §3.4): X-Amz-Date 16min later than now -> rejected as not yet effective;
-    // clock skew within 15min is allowed
+    // Issued in the future (docs/s3-protocol.md §3.4): X-Amz-Date 16min later than now -> rejected as not yet
+    // effective; clock skew within 15min is allowed
     auth.clock = [] { return *util::parse_amz_date("20260713T234400Z"); };
     auto future = make();
     CHECK_THROWS_S3(auth.verify(future), S3ErrorCode::AccessDenied);

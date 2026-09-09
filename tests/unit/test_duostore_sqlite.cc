@@ -1,6 +1,7 @@
 // SqliteMetaStore dedicated unit tests (docs/storage/duostore-meta-sqlite-design.md §9): meta consistency suite,
-// backend suite over the injected combination, BLOB key ordering (non-UTF-8 bytes), reopen durability, single-file cold backup,
-// swap_extents CAS, file lineage validation. Zero external dependencies -- no probe/SKIP path like the Redis version.
+// backend suite over the injected combination, BLOB key ordering (non-UTF-8 bytes), reopen durability, single-file cold
+// backup, swap_extents CAS, file lineage validation. Zero external dependencies -- no probe/SKIP path like the Redis
+// version.
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_SQLITE_META)
 
 #include <signal.h>
@@ -41,7 +42,8 @@ using meta_store_suite::chunk_extent;
 using meta_store_suite::make_rec;
 
 SqliteMetaOptions sqlite_opts(const fs::path& file) {
-    // Unit tests need no fsync (crash semantics are tested separately; the segment connection is internally always FULL, unaffected by this)
+    // Unit tests need no fsync (crash semantics are tested separately; the segment connection is internally always
+    // FULL, unaffected by this)
     SqliteMetaOptions o;
     o.path = file.string();
     o.sync = false;
@@ -53,12 +55,12 @@ SqliteMetaOptions sqlite_opts(const fs::path& file) {
 }  // namespace
 
 // Same meta semantics baseline (suite shared with RocksMetaStore / RedisMetaStore, §9.1);
-// the factory repeatedly opens/closes the same DB file, naturally covering restart semantics (segments never roll back, schema validation)
+// the factory repeatedly opens/closes the same DB file, naturally covering restart semantics (segments never roll back,
+// schema validation)
 TEST(duostore_sqlite_meta_store_suite) {
     TmpDir tmp;
-    meta_store_suite::run_meta_store_suite([&] {
-        return std::make_unique<SqliteMetaStore>(sqlite_opts(tmp.path / "meta.sqlite3"));
-    });
+    meta_store_suite::run_meta_store_suite(
+        [&] { return std::make_unique<SqliteMetaStore>(sqlite_opts(tmp.path / "meta.sqlite3")); });
 }
 
 // Run the backend consistency suite over the injected combination (SqliteMetaStore + FsDataStore) (§9.2)
@@ -72,8 +74,13 @@ TEST(duostore_sqlite_backend_suite) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers, {}},
+        FsDataOptions{cfg.root,
+                      cfg.chunk_size,
+                      cfg.verify_chunk_crc,
+                      cfg.pack_threshold,
+                      cfg.pack_max_size,
+                      cfg.pack_writers,
+                      {}},
         pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -88,10 +95,10 @@ TEST(duostore_sqlite_binary_key_ordering) {
     m.create_bucket("bin");
     // memcmp ascending (literals split up so \x does not greedily swallow following hex characters)
     std::vector<std::string> keys = {
-        std::string("a\x01") + "b",        // 0x01 control byte
-        "a\x7f",                           // DEL
-        "a\xc3\x28",                       // invalid UTF-8 sequence
-        "a\xff",                           // 0xff (a classic pitfall under TEXT storage)
+        std::string("a\x01") + "b",  // 0x01 control byte
+        "a\x7f",                     // DEL
+        "a\xc3\x28",                 // invalid UTF-8 sequence
+        "a\xff",                     // 0xff (a classic pitfall under TEXT storage)
         "b",
     };
     for (auto it = keys.rbegin(); it != keys.rend(); ++it)  // write out of order
@@ -186,7 +193,8 @@ TEST(duostore_sqlite_create_bucket_duplicate) {
     m.close();
 }
 
-// swap_extents optimistic abandon path (§3.3 / main doc §9.2): mismatch -> false, and the transaction rolls back writing nothing
+// swap_extents optimistic abandon path (§3.3 / main doc §9.2): mismatch -> false, and the transaction rolls back
+// writing nothing
 TEST(duostore_sqlite_swap_extents_cas) {
     TmpDir tmp;
     SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
@@ -223,24 +231,20 @@ TEST(duostore_sqlite_rejects_foreign_file) {
         std::ofstream f(garbage);
         f << "this is not a sqlite database";
     }
-    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(garbage)),
-                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(garbage)), s3::S3ErrorCode::InternalError);
 }
 
-// File lineage (§2.2): app_id=0/ver=0 but tables already exist = somebody else's SQLite database (typical in the wild) --
-// reject without leaving a trace: no table creation, no stamping, no WAL conversion
+// File lineage (§2.2): app_id=0/ver=0 but tables already exist = somebody else's SQLite database (typical in the wild)
+// -- reject without leaving a trace: no table creation, no stamping, no WAL conversion
 TEST(duostore_sqlite_rejects_foreign_populated_db) {
     TmpDir tmp;
     fs::path foreign = tmp.path / "foreign.sqlite3";
     sqlite3* db = nullptr;
     CHECK_EQ(sqlite3_open(foreign.string().c_str(), &db), SQLITE_OK);
-    CHECK_EQ(sqlite3_exec(db, "CREATE TABLE their_data(x INTEGER)", nullptr, nullptr,
-                          nullptr),
-             SQLITE_OK);
+    CHECK_EQ(sqlite3_exec(db, "CREATE TABLE their_data(x INTEGER)", nullptr, nullptr, nullptr), SQLITE_OK);
     sqlite3_close(db);
 
-    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(foreign)),
-                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(foreign)), s3::S3ErrorCode::InternalError);
 
     // Unpolluted: no stamp (app_id still 0), no duostore tables, journal not converted to WAL
     CHECK_EQ(sqlite3_open(foreign.string().c_str(), &db), SQLITE_OK);
@@ -257,14 +261,13 @@ TEST(duostore_sqlite_rejects_foreign_populated_db) {
     sqlite3_close(db);
 }
 
-// Single-process exclusivity fail-fast (§1): a second instance (same process simulating a second process's open) is rejected
-// by flock; reopening works after close releases the lock
+// Single-process exclusivity fail-fast (§1): a second instance (same process simulating a second process's open) is
+// rejected by flock; reopening works after close releases the lock
 TEST(duostore_sqlite_single_process_lock) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
     SqliteMetaStore a(sqlite_opts(db));
-    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)),
-                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)), s3::S3ErrorCode::InternalError);
     a.close();
     SqliteMetaStore b(sqlite_opts(db));  // lock has been released
     CHECK(!b.bucket_exists("x"));
@@ -282,9 +285,10 @@ TEST(duostore_sqlite_closed_store_throws) {
 
 // ---------- S4 crash simulation (§9/§10 S4: WAL replay reconciliation after kill) ----------
 // The child process (execv of ourselves into duostore-sqlite-crash-child mode) commits in a loop with sync=true
-// and reports line by line (each line is written only after the COMMIT's WAL fsync); the parent SIGKILLs at a random moment.
-// After restart: every reported commit must exist (durability contract), refs<->objects reconcile both ways, gcq has
-// no phantom entries, segments never roll back, integrity_check is clean -- the full acceptance test for WAL replay
+// and reports line by line (each line is written only after the COMMIT's WAL fsync); the parent SIGKILLs at a random
+// moment. After restart: every reported commit must exist (durability contract), refs<->objects reconcile both ways,
+// gcq has no phantom entries, segments never roll back, integrity_check is clean -- the full acceptance test for WAL
+// replay
 
 namespace {
 
@@ -304,8 +308,7 @@ int sqlite_crash_child(int argc, char** argv) {
     }
 }
 
-mini_test::ChildRegistrar sqlite_crash_reg("duostore-sqlite-crash-child",
-                                           sqlite_crash_child);
+mini_test::ChildRegistrar sqlite_crash_reg("duostore-sqlite-crash-child", sqlite_crash_child);
 
 pid_t spawn_sqlite_crash_child(const fs::path& db, int* out_fd) {
     int pfd[2] = {-1, -1};
@@ -362,8 +365,7 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
         if (line.rfind("ok ", 0) != 0) continue;
         size_t sp = line.find(' ', 3);
         CHECK(sp != std::string::npos);
-        reported.emplace_back(std::stoi(line.substr(3, sp - 3)),
-                              std::stoull(line.substr(sp + 1)));
+        reported.emplace_back(std::stoi(line.substr(3, sp - 3)), std::stoull(line.substr(sp + 1)));
     }
     CHECK(!reported.empty());
     CHECK(fs::exists(db.string() + "-wal"));  // not closed: WAL awaiting replay
@@ -380,8 +382,8 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
             CHECK(m.chunk_referenced(id));
             max_id = std::max(max_id, id);
         }
-        // Reconciliation: the refs table = the union of all surviving objects' extents (may include committed-but-unreported
-        // tail objects -- which must hold too; no orphan refs, no missing refs)
+        // Reconciliation: the refs table = the union of all surviving objects' extents (may include
+        // committed-but-unreported tail objects -- which must hold too; no orphan refs, no missing refs)
         std::set<uint64_t> live;
         ListOptions lo;
         for (;;) {
@@ -399,7 +401,8 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
         CHECK(live == refs);
         // Unique keys with no overwrites -> gcq must be empty (no phantom entries)
         CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(0));
-        // Segments never roll back: ids allocated after the crash are strictly greater than every used id (the counters connection is always FULL)
+        // Segments never roll back: ids allocated after the crash are strictly greater than every used id (the counters
+        // connection is always FULL)
         CHECK(m.alloc_file_id(Extent::Kind::kChunk) > max_id);
         m.close();
     }
@@ -409,14 +412,14 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
     sqlite3_stmt* st = nullptr;
     CHECK_EQ(sqlite3_prepare_v2(raw, "PRAGMA integrity_check", -1, &st, nullptr), SQLITE_OK);
     CHECK_EQ(sqlite3_step(st), SQLITE_ROW);
-    CHECK_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 0))),
-             std::string("ok"));
+    CHECK_EQ(std::string(reinterpret_cast<const char*>(sqlite3_column_text(st, 0))), std::string("ok"));
     sqlite3_finalize(st);
     sqlite3_close(raw);
 }
 
-// S4 consistent-view injection (§2.3/§9): commit concurrently from the write connection mid-iteration of a list -- this list's WAL
-// snapshot must stand rock solid (inserts invisible, deletions still visible, overwrites do not bleed through); the next list sees the new state
+// S4 consistent-view injection (§2.3/§9): commit concurrently from the write connection mid-iteration of a list -- this
+// list's WAL snapshot must stand rock solid (inserts invisible, deletions still visible, overwrites do not bleed
+// through); the next list sees the new state
 TEST(duostore_sqlite_list_consistent_view_under_concurrent_write) {
     TmpDir tmp;
     SqliteMetaStore m(sqlite_opts(tmp.path / "meta.sqlite3"));
@@ -449,9 +452,10 @@ TEST(duostore_sqlite_list_consistent_view_under_concurrent_write) {
     m.close();
 }
 
-// S4 metrics: BUSY counter -- an external raw connection holds the write lock (flock only blocks our own instances, so it
-// plays the "out-of-process visitor" perfectly, the BUSY row of the §5.4 table): a single-statement write exhausting busy_timeout -> 500 counts 1;
-// segment reservation starving through all 4 bounded retry rounds -> 500 counts 4; recovers after the lock is released. busy_timeout_ms shortened to bound the duration
+// S4 metrics: BUSY counter -- an external raw connection holds the write lock (flock only blocks our own instances, so
+// it plays the "out-of-process visitor" perfectly, the BUSY row of the §5.4 table): a single-statement write exhausting
+// busy_timeout -> 500 counts 1; segment reservation starving through all 4 bounded retry rounds -> 500 counts 4;
+// recovers after the lock is released. busy_timeout_ms shortened to bound the duration
 TEST(duostore_sqlite_busy_metric_counts_starvation) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -461,28 +465,25 @@ TEST(duostore_sqlite_busy_metric_counts_starvation) {
     opts.metrics = MetricsScope(reg, {{"backend", "s4"}});
     SqliteMetaStore m(opts);
     // Registered at construction: zero value visible
-    CHECK(reg->render().find(
-              "lights3_duostore_sqlite_busy_total{backend=\"s4\"} 0\n") != std::string::npos);
-    CHECK(reg->render().find(
-              "lights3_duostore_sqlite_corruption_total{backend=\"s4\"} 0\n") !=
-          std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_sqlite_busy_total{backend=\"s4\"} 0\n") != std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_sqlite_corruption_total{backend=\"s4\"} 0\n") != std::string::npos);
 
     sqlite3* ext = nullptr;
     CHECK_EQ(sqlite3_open(db.string().c_str(), &ext), SQLITE_OK);
     CHECK_EQ(sqlite3_exec(ext, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
-    CHECK_THROWS_S3(m.seal_pack(1, 0), s3::S3ErrorCode::InternalError);          // +1
+    CHECK_THROWS_S3(m.seal_pack(1, 0), s3::S3ErrorCode::InternalError);  // +1
     CHECK_THROWS_S3(m.alloc_file_id(Extent::Kind::kChunk),
-                    s3::S3ErrorCode::InternalError);                             // +4 (4 starved rounds)
+                    s3::S3ErrorCode::InternalError);  // +4 (4 starved rounds)
     CHECK_EQ(sqlite3_exec(ext, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
     sqlite3_close(ext);
 
     m.seal_pack(1, 0);  // recovers after the lock is released
-    CHECK(reg->render().find(
-              "lights3_duostore_sqlite_busy_total{backend=\"s4\"} 5\n") != std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_sqlite_busy_total{backend=\"s4\"} 5\n") != std::string::npos);
     m.close();
 }
 
-// S4 metrics: corruption counter -- reopen after scribbling the file header; the open path's NOTADB is counted and loudly rejected
+// S4 metrics: corruption counter -- reopen after scribbling the file header; the open path's NOTADB is counted and
+// loudly rejected
 TEST(duostore_sqlite_corruption_metric_counts_notadb) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -499,15 +500,13 @@ TEST(duostore_sqlite_corruption_metric_counts_notadb) {
     auto opts = sqlite_opts(db);
     opts.metrics = MetricsScope(reg, {{"backend", "s4c"}});
     CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(opts), s3::S3ErrorCode::InternalError);
-    CHECK(reg->render().find(
-              "lights3_duostore_sqlite_corruption_total{backend=\"s4c\"} 1\n") !=
-          std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_sqlite_corruption_total{backend=\"s4c\"} 1\n") != std::string::npos);
 }
 
 // meta backup/restore doubling as cross-engine migration (docs/archive/gaps.md §6.1, meta_dump.h): rocks source dump ->
-// sqlite target load, data directory shared in place (the unit-test incarnation of the restore procedure "place data first,
-// then load meta"). Asserts: objects restored byte for byte (both pack and multi-chunk extents covered), deleted objects
-// do not resurrect, new writes after restore do not collide with existing file numbers (counter is raised)
+// sqlite target load, data directory shared in place (the unit-test incarnation of the restore procedure "place data
+// first, then load meta"). Asserts: objects restored byte for byte (both pack and multi-chunk extents covered), deleted
+// objects do not resurrect, new writes after restore do not collide with existing file numbers (counter is raised)
 TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -519,13 +518,18 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
     fs::create_directories(cfg.root);
     auto mk_data = [&](IMetaStore* mp) {
         return std::make_unique<FsDataStore>(
-            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                          cfg.pack_max_size, cfg.pack_writers, {}},
+            FsDataOptions{cfg.root,
+                          cfg.chunk_size,
+                          cfg.verify_chunk_crc,
+                          cfg.pack_threshold,
+                          cfg.pack_max_size,
+                          cfg.pack_writers,
+                          {}},
             pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
             [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     };
-    const std::string small(200, 's');    // pack record
-    const std::string big(10000, 'b');    // a 3-chunk file
+    const std::string small(200, 's');  // pack record
+    const std::string big(10000, 'b');  // a 3-chunk file
     std::stringstream archive;
     {
         cfg.name = "migrate-src";
@@ -554,9 +558,9 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
         CHECK_EQ(backend_suite::read_all(*g1.body), small);
         auto g2 = sync_wait(b->get_object("bkt", "big", std::nullopt));
         CHECK_EQ(backend_suite::read_all(*g2.body), big);
-        CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "doomed")),
-                        s3::S3ErrorCode::NoSuchKey);
-        // Counter raised: file numbers allocated by new writes must not collide with existing ones (a collision = silently clobbering existing data)
+        CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "doomed")), s3::S3ErrorCode::NoSuchKey);
+        // Counter raised: file numbers allocated by new writes must not collide with existing ones (a collision =
+        // silently clobbering existing data)
         const std::string fresh(9000, 'n');
         backend_suite::put(*b, "bkt", "fresh", fresh);
         auto g3 = sync_wait(b->get_object("bkt", "fresh", std::nullopt));
@@ -568,8 +572,9 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
 }
 
 // Schema evolution policy (docs/archive/gaps.md §6.1): user_version newer than this build -> refuse to run downgraded;
-// older than current with no migration in the chain -> loud failure ("changing layout without leaving a migration" is a programming error).
-// Neither rejection may pollute the database -- after restoring the real version it must reopen normally
+// older than current with no migration in the chain -> loud failure ("changing layout without leaving a migration" is a
+// programming error). Neither rejection may pollute the database -- after restoring the real version it must reopen
+// normally
 TEST(duostore_sqlite_schema_version_policy) {
     TmpDir tmp;
     fs::path db = tmp.path / "meta.sqlite3";
@@ -586,8 +591,7 @@ TEST(duostore_sqlite_schema_version_policy) {
         sqlite3_close(raw);
     };
     set_user_version(999);  // future version: a database written by a newer program
-    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)),
-                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)), s3::S3ErrorCode::InternalError);
     set_user_version(1);  // restore the real version; the database was not polluted by the rejection paths
     {
         SqliteMetaStore m(sqlite_opts(db));
@@ -628,7 +632,6 @@ TEST(duostore_sqlite_snapshot_dump_is_consistent) {
     CHECK_EQ(m.list_buckets().size(), size_t(2));
     m.close();
 }
-
 
 // backlog-sequence ⑧: backup chain = full copy + WAL segments, restored to any
 // entry (id or time). The close-time segment completes the chain; a store that

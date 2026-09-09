@@ -42,14 +42,14 @@ std::string describe();
 // The points wired into the tree (kept in one list so docs/tests and the code
 // cannot drift apart; tests assert every entry here appears in the sources)
 constexpr std::string_view kPoints[] = {
-    "localfs.write",           // ::write into the staging tmp (put / upload_part / copy)
-    "localfs.rename",          // the commit rename of an object / cached data
-    "localfs.fsync",           // fdatasync of a staged file
-    "xlocalfs.write",          // the io_uring staging write pipeline (xlocalfs backend)
-    "duostore.pack.pwrite",    // pack record append
-    "duostore.pack.fdatasync", // pack durability sync
-    "redis.command",           // hiredis command: simulated connection failure
-    "rados.submit",            // rados_aio_* submission: returns -errno
+    "localfs.write",            // ::write into the staging tmp (put / upload_part / copy)
+    "localfs.rename",           // the commit rename of an object / cached data
+    "localfs.fsync",            // fdatasync of a staged file
+    "xlocalfs.write",           // the io_uring staging write pipeline (xlocalfs backend)
+    "duostore.pack.pwrite",     // pack record append
+    "duostore.pack.fdatasync",  // pack durability sync
+    "redis.command",            // hiredis command: simulated connection failure
+    "rados.submit",             // rados_aio_* submission: returns -errno
 };
 
 }  // namespace lights3::fault

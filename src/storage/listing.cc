@@ -5,10 +5,7 @@
 namespace lights3::storage {
 
 std::pair<uint64_t, uint64_t> resolve_range(const ByteRange& r, uint64_t size) {
-    auto fail = [&] {
-        throw s3::S3Error(s3::S3ErrorCode::InvalidRange,
-                          "The requested range is not satisfiable");
-    };
+    auto fail = [&] { throw s3::S3Error(s3::S3ErrorCode::InvalidRange, "The requested range is not satisfiable"); };
     if (size == 0) fail();
     if (r.first) {
         uint64_t f = *r.first;
@@ -39,8 +36,7 @@ ListResult apply_listing(const std::vector<std::string>& keys, const ListOptions
 
     // Locate the start: >= prefix and > start_after
     auto it = std::lower_bound(keys.begin(), keys.end(), prefix);
-    if (!opt.start_after.empty())
-        it = std::upper_bound(it, keys.end(), opt.start_after);
+    if (!opt.start_after.empty()) it = std::upper_bound(it, keys.end(), opt.start_after);
 
     std::string last_emitted_key;
     for (; it != keys.end(); ++it) {
@@ -61,9 +57,7 @@ ListResult apply_listing(const std::vector<std::string>& keys, const ListOptions
                 ++count;
                 // Skip the remaining keys of the same group so the token semantics
                 // ("start after") land on the group's tail
-                while (std::next(it) != keys.end() &&
-                       std::next(it)->compare(0, group.size(), group) == 0)
-                    ++it;
+                while (std::next(it) != keys.end() && std::next(it)->compare(0, group.size(), group) == 0) ++it;
                 last_emitted_key = *it;
                 continue;
             }
@@ -91,8 +85,7 @@ ListPartsResult apply_parts_page(std::vector<PartMeta> sorted, const ListPartsOp
     return out;
 }
 
-ListUploadsResult apply_uploads_page(std::vector<UploadInfo> sorted,
-                                     const ListUploadsOptions& opt) {
+ListUploadsResult apply_uploads_page(std::vector<UploadInfo> sorted, const ListUploadsOptions& opt) {
     ListUploadsResult out;
     if (opt.max_uploads <= 0) return out;
     for (size_t i = 0; i < sorted.size(); ++i) {
@@ -117,9 +110,7 @@ ListUploadsResult apply_uploads_page(std::vector<UploadInfo> sorted,
             // entry of the group** -- if the group name itself were used as the cursor,
             // "a/" < "a/x" and the next page would list the whole group again
             // (apply_listing handles this the same way)
-            while (i + 1 < sorted.size() &&
-                   sorted[i + 1].key.compare(0, group.size(), group) == 0)
-                ++i;
+            while (i + 1 < sorted.size() && sorted[i + 1].key.compare(0, group.size(), group) == 0) ++i;
             out.next_key_marker = sorted[i].key;
             out.next_upload_id_marker = sorted[i].upload_id;
         } else {

@@ -34,7 +34,8 @@ struct Endpoint {
     bool https = false;
     std::string host;
     int port = 0;             // explicit, or defaulted per scheme
-    std::string signed_host;  // byte-identical to the Host header httplib actually sends (docs/storage/cloudproxy-design.md §2.2)
+    std::string signed_host;  // byte-identical to the Host header httplib actually sends
+                              // (docs/storage/cloudproxy-design.md §2.2)
     std::string base_url;     // scheme://host:port, input to httplib's universal Client
 
     static Endpoint parse(const std::string& url);  // throws std::runtime_error on invalid input
@@ -48,9 +49,7 @@ struct Target {
     std::string prefix;  // "/<rb>" (already encoded) for path-style; empty for vhost
     std::string host;    // value that goes into the Host header and SigV4
     std::string bucket_path() const { return prefix.empty() ? "/" : prefix; }
-    std::string object_path(std::string_view encoded_key_path) const {
-        return prefix + std::string(encoded_key_path);
-    }
+    std::string object_path(std::string_view encoded_key_path) const { return prefix + std::string(encoded_key_path); }
 };
 
 // Remote observability metrics (docs/storage/cloudproxy-design.md §8.2): with an empty scope all
@@ -80,8 +79,7 @@ private:
 // retires connections by age at release. total_ shrinks accordingly.
 class ClientPool {
 public:
-    ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep,
-               std::shared_ptr<MetricHistogram> wait_hist = nullptr);
+    ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep, std::shared_ptr<MetricHistogram> wait_hist = nullptr);
     ~ClientPool();  // stops the reaper (blocks on an in-flight tick)
 
     // Creation time travels with the client so max-lifetime survives lease cycles
@@ -178,8 +176,7 @@ struct RemoteContext {
           ep(ep_in),
           metrics(scope),
           pool(cfg, ep, metrics.pool_wait),
-          auth(s3::SigV4Authenticator::build(
-              AuthConfig{.credentials = {}, .region = cfg.region, .service = "s3"})),
+          auth(s3::SigV4Authenticator::build(AuthConfig{.credentials = {}, .region = cfg.region, .service = "s3"})),
           cred{cfg.access_key, cfg.secret_key} {
         // Credential chain (roadmap §3.3): only when no static keys are configured —
         // env → container endpoint → EC2 IMDSv2, resolved lazily on first signing
@@ -194,10 +191,10 @@ struct RemoteContext {
     // httplib::Headers (docs/storage/cloudproxy-design.md §2.2). x-amz-* entries in extra
     // automatically enter SignedHeaders; Content-Type goes through the httplib parameter,
     // do not put it here. Empty host = endpoint Host; vhost requests pass Target::host
-    httplib::Headers signed_headers(
-        const std::string& method, const std::string& raw_path, const std::string& raw_query,
-        const std::vector<std::pair<std::string, std::string>>& extra,
-        const std::string& payload_hash, const std::string& host = "") const;
+    httplib::Headers signed_headers(const std::string& method, const std::string& raw_path,
+                                    const std::string& raw_query,
+                                    const std::vector<std::pair<std::string, std::string>>& extra,
+                                    const std::string& payload_hash, const std::string& host = "") const;
 
     // Remote error -> local S3Error (single-point implementation of the
     // docs/storage/cloudproxy-design.md §5.1 mapping matrix)
@@ -206,13 +203,11 @@ struct RemoteContext {
     [[noreturn]] void throw_transport_error(httplib::Error err) const;
 
     bool retryable_status(int status) const {
-        return status == 429 || status == 500 || status == 502 || status == 503 ||
-               status == 504;
+        return status == 429 || status == 500 || status == 502 || status == 503 || status == 504;
     }
     static bool retryable_transport(httplib::Error e) {
         return e == httplib::Error::Connection || e == httplib::Error::ConnectionTimeout ||
-               e == httplib::Error::SSLConnection || e == httplib::Error::Read ||
-               e == httplib::Error::Write;
+               e == httplib::Error::SSLConnection || e == httplib::Error::Read || e == httplib::Error::Write;
     }
     // Connection-establishment-stage errors (the subset safely retryable for PUT-like ops,
     // docs/storage/cloudproxy-design.md §5.2)
@@ -243,27 +238,21 @@ struct RemoteContext {
     // ---- Per-op deadline (roadmap §3.3) ----
     // Steady deadline for one operation's whole retry loop; max() when disabled
     std::chrono::steady_clock::time_point op_deadline() const {
-        return cfg.op_deadline_ms > 0
-                   ? std::chrono::steady_clock::now() +
-                         std::chrono::milliseconds(cfg.op_deadline_ms)
-                   : std::chrono::steady_clock::time_point::max();
+        return cfg.op_deadline_ms > 0 ? std::chrono::steady_clock::now() + std::chrono::milliseconds(cfg.op_deadline_ms)
+                                      : std::chrono::steady_clock::time_point::max();
     }
-    static bool deadline_allows(std::chrono::steady_clock::time_point deadline,
-                                int64_t next_delay_ms) {
+    static bool deadline_allows(std::chrono::steady_clock::time_point deadline, int64_t next_delay_ms) {
         return deadline == std::chrono::steady_clock::time_point::max() ||
-               std::chrono::steady_clock::now() + std::chrono::milliseconds(next_delay_ms) <
-                   deadline;
+               std::chrono::steady_clock::now() + std::chrono::milliseconds(next_delay_ms) < deadline;
     }
 
     // One measured attempt on a leased client (blocking; the caller owns retry policy —
     // see CloudProxyBackend::retry_io for the coroutine driver)
     template <class F>
-    httplib::Result attempt(const std::shared_ptr<MetricHistogram>& hist,
-                            httplib::Client& client, F&& fn) {
+    httplib::Result attempt(const std::shared_ptr<MetricHistogram>& hist, httplib::Client& client, F&& fn) {
         auto t0 = std::chrono::steady_clock::now();
         auto res = fn(client);
-        hist->observe(
-            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        hist->observe(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         return res;
     }
 

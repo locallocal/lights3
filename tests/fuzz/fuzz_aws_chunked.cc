@@ -51,7 +51,7 @@ void run(std::string_view body, bool signed_chunks, bool trailer) {
     req.headers.add("Content-Encoding", "aws-chunked");
     if (trailer) req.headers.add("x-amz-trailer", "x-amz-checksum-crc32c");
     std::string hash = signed_chunks ? (trailer ? "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
-                                               : "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
+                                                : "STREAMING-AWS4-HMAC-SHA256-PAYLOAD")
                                      : "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
     req.headers.add("x-amz-content-sha256", hash);
     req.body = std::make_unique<http::StringBodyReader>(std::string(body));

@@ -24,8 +24,7 @@ std::string LifecycleTraits::serialize(const Entry& rules) {
     return json{{"rules", std::move(arr)}}.dump();
 }
 
-std::optional<LifecycleTraits::Entry> LifecycleTraits::deserialize(const std::string&,
-                                                                   const std::string& body) {
+std::optional<LifecycleTraits::Entry> LifecycleTraits::deserialize(const std::string&, const std::string& body) {
     try {
         auto j = json::parse(body);
         Entry rules;
@@ -71,16 +70,14 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
                     for (;;) {
                         auto page = co_await backend.list_multipart_uploads(bucket, opt);
                         for (auto& u : page.uploads) {
-                            if (now() - u.initiated < rule.abort_incomplete_days * kDay)
-                                continue;
+                            if (now() - u.initiated < rule.abort_incomplete_days * kDay) continue;
                             try {
                                 // Usage accounting (roadmap §3.9 ①): in-flight bytes leave with the upload
                                 int64_t stored = 0;
                                 if (usage_ && usage_->enabled()) {
                                     storage::ListPartsOptions popt;
                                     popt.max_parts = storage::kMaxParts;
-                                    auto parts = co_await backend.list_parts(bucket, u.key,
-                                                                             u.upload_id, popt);
+                                    auto parts = co_await backend.list_parts(bucket, u.key, u.upload_id, popt);
                                     for (auto& p : parts.parts) stored += int64_t(p.size);
                                 }
                                 co_await backend.abort_multipart(bucket, u.key, u.upload_id);
@@ -89,8 +86,8 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
                             } catch (const std::exception& e) {
                                 // Raced with a concurrent complete/abort: skip, next
                                 // pass settles it
-                                LOG_WARN("lifecycle: abort {}/{} upload {} failed: {}",
-                                         bucket, u.key, u.upload_id, e.what());
+                                LOG_WARN("lifecycle: abort {}/{} upload {} failed: {}", bucket, u.key, u.upload_id,
+                                         e.what());
                             }
                         }
                         if (!page.is_truncated) break;
@@ -104,15 +101,13 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
                     for (;;) {
                         auto page = co_await backend.list_objects(bucket, opt);
                         for (auto& o : page.objects) {
-                            if (now() - o.last_modified < rule.expiration_days * kDay)
-                                continue;
+                            if (now() - o.last_modified < rule.expiration_days * kDay) continue;
                             try {
                                 co_await backend.delete_object(bucket, o.key);
                                 if (usage_) usage_->apply(bucket, -1, -int64_t(o.size));
                                 ++stats.objects_expired;
                             } catch (const std::exception& e) {
-                                LOG_WARN("lifecycle: expire {}/{} failed: {}", bucket, o.key,
-                                         e.what());
+                                LOG_WARN("lifecycle: expire {}/{} failed: {}", bucket, o.key, e.what());
                             }
                         }
                         if (!page.is_truncated) break;
@@ -127,8 +122,8 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
         }
     }
     if (stats.objects_expired || stats.uploads_aborted)
-        LOG_INFO("lifecycle: expired {} object(s), aborted {} stale upload(s)",
-                 stats.objects_expired, stats.uploads_aborted);
+        LOG_INFO("lifecycle: expired {} object(s), aborted {} stale upload(s)", stats.objects_expired,
+                 stats.uploads_aborted);
     co_return stats;
 }
 
@@ -140,7 +135,7 @@ Task<void> LifecycleRunner::scan_tick() {
     } catch (...) {
         err = std::current_exception();
     }
-    schedule_scan();  // re-arm after completion: rounds never overlap (localfs mpu pattern)
+    schedule_scan();                       // re-arm after completion: rounds never overlap (localfs mpu pattern)
     if (err) std::rethrow_exception(err);  // hand off to BackgroundTaskGroup for logging
 }
 
@@ -152,8 +147,7 @@ void LifecycleRunner::schedule_scan() {
     });
 }
 
-void LifecycleRunner::start_background(std::shared_ptr<ThreadPool> pool,
-                                       int scan_interval_sec) {
+void LifecycleRunner::start_background(std::shared_ptr<ThreadPool> pool, int scan_interval_sec) {
     pool_ = std::move(pool);
     scan_interval_sec_ = scan_interval_sec;
     schedule_scan();

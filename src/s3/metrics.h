@@ -29,20 +29,20 @@ struct AdmissionStats {
     std::array<uint64_t, 6> wait_hist{};  // bounds = AdmissionCounters::kWaitBounds + Inf
     uint64_t wait_sum_us = 0;
     uint64_t wait_count = 0;
-    uint64_t queued = 0;         // had to wait for a permit
-    uint64_t cancelled = 0;      // cancelled while queued (503 SlowDown)
-    uint64_t stalls_in = 0;      // transfer stall cuts, request bodies
-    uint64_t stalls_out = 0;     // transfer stall cuts, response bodies
+    uint64_t queued = 0;      // had to wait for a permit
+    uint64_t cancelled = 0;   // cancelled while queued (503 SlowDown)
+    uint64_t stalls_in = 0;   // transfer stall cuts, request bodies
+    uint64_t stalls_out = 0;  // transfer stall cuts, response bodies
 };
 
 // Static-website plane events (roadmap §5.3, docs/static-website.md)
 enum class WebsiteEvent {
-    AnonRead = 0,       // request admitted on the anonymous plane
-    IndexRewrite,       // key rewritten to the index document
-    ErrorDocument,      // error answered with the site's error document / built-in page
-    Redirect,           // 301/302 answered by the website layer (RedirectAllRequestsTo,
-                        // RoutingRules, slash redirect, x-amz-website-redirect-location)
-    Throttled,          // per-bucket anonymous rate limit (503)
+    AnonRead = 0,   // request admitted on the anonymous plane
+    IndexRewrite,   // key rewritten to the index document
+    ErrorDocument,  // error answered with the site's error document / built-in page
+    Redirect,       // 301/302 answered by the website layer (RedirectAllRequestsTo,
+                    // RoutingRules, slash redirect, x-amz-website-redirect-location)
+    Throttled,      // per-bucket anonymous rate limit (503)
     Count_
 };
 
@@ -52,8 +52,7 @@ public:
     // 30/60/300 cover the large-object band: request_timeout defaults to 300s, and
     // with a 10s top bucket everything from 10s to 300s piled into +Inf — P99 for
     // big transfers was unreadable (roadmap §1.5)
-    static constexpr std::array<double, 9> kLatencyBuckets{0.005, 0.02, 0.1,  0.5, 2.0,
-                                                           10.0,  30.0, 60.0, 300.0};
+    static constexpr std::array<double, 9> kLatencyBuckets{0.005, 0.02, 0.1, 0.5, 2.0, 10.0, 30.0, 60.0, 300.0};
 
     // API x backend dimension (roadmap §5.1): per (api, backend) latency histogram
     // and per-status-class counter, keyed by the Route name and the routed backend.
@@ -64,24 +63,21 @@ public:
     void request_end(std::string_view method, int status, double seconds);
     // Lock-free (docs/archive/gaps.md §4: previously every error response contended on one global mutex): the code set
     // is bounded and shares its source with the enum; fixed-size atomic array indexed by enum value
-    void s3_error(S3ErrorCode code) {
-        errors_[size_t(code)].fetch_add(1, std::memory_order_relaxed);
-    }
+    void s3_error(S3ErrorCode code) { errors_[size_t(code)].fetch_add(1, std::memory_order_relaxed); }
 
     // Per-client rate limiting (roadmap §4.2): rejections by key space
     void ratelimit_rejected(bool by_access_key) {
         (by_access_key ? rl_ak_ : rl_ip_).fetch_add(1, std::memory_order_relaxed);
     }
 
-    void website(WebsiteEvent e) {
-        website_[size_t(e)].fetch_add(1, std::memory_order_relaxed);
-    }
+    void website(WebsiteEvent e) { website_[size_t(e)].fetch_add(1, std::memory_order_relaxed); }
 
     void mpu_created() { mpu_created_.fetch_add(1, std::memory_order_relaxed); }
     void mpu_finished() { mpu_finished_.fetch_add(1, std::memory_order_relaxed); }
 
     // Byte counts and per-bucket dimension (docs/archive/gaps.md §7). bucket may be empty (service-level
-    // requests count only globally); tracked bucket count is capped, overflow folds into "_other" to prevent label cardinality explosion
+    // requests count only globally); tracked bucket count is capped, overflow folds into "_other" to prevent label
+    // cardinality explosion
     void add_bytes_in(std::string_view bucket, uint64_t n);
     void add_bytes_out(std::string_view bucket, uint64_t n);
     // Split form for streaming decorators (roadmap §4.3 ⑦): the global totals are
@@ -134,13 +130,14 @@ private:
     std::atomic<uint64_t> latency_sum_us_{0};
     std::atomic<uint64_t> latency_count_{0};
     std::atomic<uint64_t> mpu_created_{0};
-    std::atomic<uint64_t> mpu_finished_{0};  // complete + abort
+    std::atomic<uint64_t> mpu_finished_{0};      // complete + abort
     std::atomic<uint64_t> rl_ip_{0}, rl_ak_{0};  // rate-limit rejections (roadmap §4.2)
     std::atomic<uint64_t> bytes_in_{0};
     std::atomic<uint64_t> bytes_out_{0};
 
     // per-bucket table: hot path locks once per 64KiB chunk, critical section is just a map lookup + integer add;
-    // a tier below the request main path's lock-free atomics but acceptable (the bucket dimension inherently needs a name key)
+    // a tier below the request main path's lock-free atomics but acceptable (the bucket dimension inherently needs a
+    // name key)
     mutable std::mutex bucket_m_;
     std::map<std::string, BucketStats, std::less<>> by_bucket_;
 

@@ -150,10 +150,8 @@ struct PromiseBase {
 // Common suspend logic for co_await: record the continuation and inherit the
 // caller's home executor and cancellation token
 template <class Promise>
-std::coroutine_handle<> task_await_suspend(std::coroutine_handle<Promise> task,
-                                           std::coroutine_handle<> cont,
-                                           IExecutor* parent_executor,
-                                           const CancelToken& parent_cancel) noexcept {
+std::coroutine_handle<> task_await_suspend(std::coroutine_handle<Promise> task, std::coroutine_handle<> cont,
+                                           IExecutor* parent_executor, const CancelToken& parent_cancel) noexcept {
     auto& p = task.promise();
     p.continuation = cont;
     if (!p.cont_executor) p.cont_executor = parent_executor;
@@ -191,9 +189,7 @@ public:
     struct promise_type : detail::PromiseBase {
         std::variant<std::monostate, T, std::exception_ptr> result;
 
-        Task get_return_object() {
-            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
+        Task get_return_object() { return Task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
         template <class U>
         void return_value(U&& v) {
             result.template emplace<1>(std::forward<U>(v));
@@ -272,8 +268,7 @@ public:
 private:
     explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
     void check_valid(const char* op) const {
-        if (!h_)
-            throw std::logic_error(std::string("Task: ") + op + " on a moved-from task");
+        if (!h_) throw std::logic_error(std::string("Task: ") + op + " on a moved-from task");
     }
     void destroy() {
         if (h_) h_.destroy();
@@ -287,9 +282,7 @@ public:
     struct promise_type : detail::PromiseBase {
         std::exception_ptr error;
 
-        Task get_return_object() {
-            return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
+        Task get_return_object() { return Task{std::coroutine_handle<promise_type>::from_promise(*this)}; }
         void return_void() {}
         void unhandled_exception() { error = std::current_exception(); }
     };
@@ -353,8 +346,7 @@ public:
 private:
     explicit Task(std::coroutine_handle<promise_type> h) : h_(h) {}
     void check_valid(const char* op) const {
-        if (!h_)
-            throw std::logic_error(std::string("Task: ") + op + " on a moved-from task");
+        if (!h_) throw std::logic_error(std::string("Task: ") + op + " on a moved-from task");
     }
     void destroy() {
         if (h_) h_.destroy();
@@ -379,10 +371,9 @@ inline void sync_wait(Task<void> t) {
     t.take_result();
 }
 
-// ---------- sync_wait_pumping: the request thread acts as an executor while it waits (docs/archive/gaps.md §2.10) ----------
-// Difference from sync_wait: while waiting, ex's queue is run on the current thread,
-// and the body reader switches blocking reads back onto this thread via
-// resume_on(ex). For the synchronous drivers (builtin/httplib) only.
+// ---------- sync_wait_pumping: the request thread acts as an executor while it waits (docs/archive/gaps.md §2.10)
+// ---------- Difference from sync_wait: while waiting, ex's queue is run on the current thread, and the body reader
+// switches blocking reads back onto this thread via resume_on(ex). For the synchronous drivers (builtin/httplib) only.
 
 namespace detail {
 
@@ -394,9 +385,7 @@ namespace detail {
 // (a transfer left in an enclosing trampoline loop would deadlock the pump)
 struct PumpRunner {
     struct promise_type {
-        PumpRunner get_return_object() {
-            return {std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
+        PumpRunner get_return_object() { return {std::coroutine_handle<promise_type>::from_promise(*this)}; }
         std::suspend_always initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }  // self-destructs on completion
         void return_void() {}
@@ -407,8 +396,7 @@ struct PumpRunner {
 };
 
 template <class T>
-PumpRunner pump_run(Task<T> t, PumpExecutor& ex, std::optional<T>& out,
-                    std::exception_ptr& err) {
+PumpRunner pump_run(Task<T> t, PumpExecutor& ex, std::optional<T>& out, std::exception_ptr& err) {
     try {
         out.emplace(co_await std::move(t));
     } catch (...) {
@@ -486,9 +474,7 @@ struct WhenAllAwaiter {
 // returns, which a Started::wait() right after relies on
 struct WhenAllRunner {
     struct promise_type {
-        WhenAllRunner get_return_object() {
-            return {std::coroutine_handle<promise_type>::from_promise(*this)};
-        }
+        WhenAllRunner get_return_object() { return {std::coroutine_handle<promise_type>::from_promise(*this)}; }
         std::suspend_always initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }  // self-destructs on completion
         void return_void() {}
@@ -499,8 +485,7 @@ struct WhenAllRunner {
 };
 
 template <class T>
-WhenAllRunner when_all_run(Task<T> t, WhenAllLatch& latch, std::optional<T>& out,
-                           std::exception_ptr& err) {
+WhenAllRunner when_all_run(Task<T> t, WhenAllLatch& latch, std::optional<T>& out, std::exception_ptr& err) {
     try {
         out.emplace(co_await std::move(t));
     } catch (...) {
@@ -536,9 +521,7 @@ Task<std::vector<T>> when_all(std::vector<Task<T>> tasks) {
     size_t started = 0;
     for (; started < tasks.size(); ++started) {
         try {
-            detail::when_all_run(std::move(tasks[started]), latch, results[started],
-                                 errors[started])
-                .start();
+            detail::when_all_run(std::move(tasks[started]), latch, results[started], errors[started]).start();
         } catch (...) {
             spawn_err = std::current_exception();
             break;
@@ -573,8 +556,7 @@ inline Task<void> when_all(std::vector<Task<void>> tasks) {
             break;
         }
     }
-    if (spawn_err)
-        latch.pending.fetch_sub(tasks.size() - started, std::memory_order_acq_rel);
+    if (spawn_err) latch.pending.fetch_sub(tasks.size() - started, std::memory_order_acq_rel);
     co_await detail::WhenAllAwaiter{latch};
     if (spawn_err) std::rethrow_exception(spawn_err);
     for (auto& e : errors)
@@ -644,8 +626,7 @@ struct StartedAwaiter {
 };
 
 template <class T>
-WhenAllRunner started_run(Task<T> t, StartedState& st, std::optional<T>& out,
-                          std::exception_ptr& err) {
+WhenAllRunner started_run(Task<T> t, StartedState& st, std::optional<T>& out, std::exception_ptr& err) {
     try {
         out.emplace(co_await std::move(t));
     } catch (...) {
@@ -683,8 +664,10 @@ public:
         collected_ = false;
         if constexpr (!std::is_void_v<T>) out_.reset();
         err_ = nullptr;
-        if constexpr (std::is_void_v<T>) detail::started_run(std::move(t), *st_, err_).start();
-        else detail::started_run(std::move(t), *st_, out_, err_).start();
+        if constexpr (std::is_void_v<T>)
+            detail::started_run(std::move(t), *st_, err_).start();
+        else
+            detail::started_run(std::move(t), *st_, out_, err_).start();
     }
     // A child is running or finished but not yet collected
     bool pending() const { return st_ && !collected_; }
@@ -702,9 +685,7 @@ public:
             Started& s;
             detail::StartedAwaiter inner;
             bool await_ready() const noexcept { return false; }
-            std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept {
-                return inner.await_suspend(h);
-            }
+            std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) noexcept { return inner.await_suspend(h); }
             T await_resume() { return s.take(); }
         };
         return Awaiter{*this, detail::StartedAwaiter{*st_}};

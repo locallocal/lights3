@@ -36,7 +36,7 @@ struct Tenant {
     std::string display_name;  // shown as Owner/DisplayName; defaults to id
     std::chrono::system_clock::time_point created;
     TenantQuota quota;
-    uint64_t rev = 1;          // edit counter (sync change detection, mirrors credentials)
+    uint64_t rev = 1;  // edit counter (sync change detection, mirrors credentials)
     bool operator==(const Tenant&) const = default;
 };
 
@@ -82,7 +82,7 @@ public:
     // Owner tenant id of a bucket, empty when unowned
     std::string owner_of(const std::string& bucket) const;
     std::optional<Tenant> find(const std::string& id) const;
-    std::vector<Tenant> list() const;                              // sorted by id
+    std::vector<Tenant> list() const;                                  // sorted by id
     std::vector<std::string> buckets_of(const std::string& id) const;  // sorted
 
     // Ownership mutation (write-through). assign refuses a bucket already owned by

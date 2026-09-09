@@ -64,17 +64,23 @@ public:
             hash_ = std::make_unique<util::HashStream>(a);  // HashStream is not movable
         };
         switch (algo) {
-            case ExpectedDigest::Algo::Md5: make(util::HashStream::Algo::Md5); break;
-            case ExpectedDigest::Algo::Sha1: make(util::HashStream::Algo::Sha1); break;
-            case ExpectedDigest::Algo::Sha256: make(util::HashStream::Algo::Sha256); break;
-            default: break;  // crc family accumulates in crc_
+            case ExpectedDigest::Algo::Md5:
+                make(util::HashStream::Algo::Md5);
+                break;
+            case ExpectedDigest::Algo::Sha1:
+                make(util::HashStream::Algo::Sha1);
+                break;
+            case ExpectedDigest::Algo::Sha256:
+                make(util::HashStream::Algo::Sha256);
+                break;
+            default:
+                break;  // crc family accumulates in crc_
         }
     }
 
     void update(std::span<const std::byte> data) {
         if (hash_) {
-            hash_->update(
-                std::span(reinterpret_cast<const uint8_t*>(data.data()), data.size()));
+            hash_->update(std::span(reinterpret_cast<const uint8_t*>(data.data()), data.size()));
         } else if (algo_ == ExpectedDigest::Algo::Crc32) {
             crc_ = util::crc32_update(static_cast<uint32_t>(crc_), data);
         } else if (algo_ == ExpectedDigest::Algo::Crc32c) {
@@ -103,8 +109,7 @@ private:
 
 class ChecksumVerifyingReader final : public http::BodyReader {
 public:
-    ChecksumVerifyingReader(std::unique_ptr<http::BodyReader> inner,
-                            std::vector<ExpectedDigest> expected)
+    ChecksumVerifyingReader(std::unique_ptr<http::BodyReader> inner, std::vector<ExpectedDigest> expected)
         : inner_(std::move(inner)), expected_(std::move(expected)) {
         for (auto& e : expected_) digests_.emplace_back(e.algo);
     }
@@ -129,8 +134,7 @@ private:
         for (size_t i = 0; i < expected_.size(); ++i) {
             if (digests_[i].final_raw() != expected_[i].expected)
                 throw S3Error(S3ErrorCode::BadDigest,
-                              "The " + expected_[i].header +
-                                  " you specified did not match what we received.");
+                              "The " + expected_[i].header + " you specified did not match what we received.");
         }
     }
 
@@ -151,16 +155,14 @@ inline std::vector<ExpectedDigest> parse_expected_digests(const http::HttpReques
         auto raw = util::base64_decode(*v);
         if (!raw || raw->size() != bytes)
             throw S3Error(S3ErrorCode::InvalidDigest,
-                          std::string("The ") + std::string(header) +
-                              " you specified is not valid.");
+                          std::string("The ") + std::string(header) + " you specified is not valid.");
         return raw;
     };
     std::vector<ExpectedDigest> out;
     if (auto raw = decode("Content-MD5", 16))
         out.push_back({ExpectedDigest::Algo::Md5, "Content-MD5", std::move(*raw)});
     for (auto& sp : kChecksumSpecs)
-        if (auto raw = decode(sp.header, sp.bytes))
-            out.push_back({sp.algo, std::string(sp.header), std::move(*raw)});
+        if (auto raw = decode(sp.header, sp.bytes)) out.push_back({sp.algo, std::string(sp.header), std::move(*raw)});
     return out;
 }
 
@@ -201,8 +203,7 @@ inline void validate_checksum_algorithm(const http::HttpRequest& req) {
         std::string name = "x-amz-checksum-";
         for (char c : *v) name.push_back(http::HeaderMap::lower(c));
         if (!checksum_spec(name))
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Unsupported value for " + std::string(h) + ": " + *v);
+            throw S3Error(S3ErrorCode::InvalidRequest, "Unsupported value for " + std::string(h) + ": " + *v);
         bool provided = req.headers.get(name).has_value();
         if (!provided)
             for (auto& t : parse_declared_trailers(req))
@@ -210,8 +211,7 @@ inline void validate_checksum_algorithm(const http::HttpRequest& req) {
         bool has_body = req.body && req.body->length().value_or(1) > 0;
         if (!provided && has_body)
             throw S3Error(S3ErrorCode::InvalidRequest,
-                          "The " + std::string(h) + " header requires a matching " + name +
-                              " header or trailer.");
+                          "The " + std::string(h) + " header requires a matching " + name + " header or trailer.");
     }
 }
 
@@ -231,7 +231,7 @@ inline std::string checksum_wire_name(const ChecksumSpec& sp) {
 // — persistence records exactly one checksum per object
 struct RequestChecksum {
     const ChecksumSpec* spec = nullptr;
-    std::string value;   // base64; empty for the trailer form
+    std::string value;  // base64; empty for the trailer form
     bool trailer = false;
 };
 inline std::optional<RequestChecksum> request_checksum(const http::HttpRequest& req) {
@@ -280,8 +280,7 @@ private:
         if (done_) return;
         done_ = true;
         auto raw = digest_.final_raw();
-        *out_ = util::base64_encode(
-            std::span(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()));
+        *out_ = util::base64_encode(std::span(reinterpret_cast<const uint8_t*>(raw.data()), raw.size()));
     }
     std::unique_ptr<http::BodyReader> inner_;
     StreamingDigest digest_;
@@ -297,8 +296,7 @@ inline void install_checksum_guard(http::HttpRequest& req) {
     auto expected = parse_expected_digests(req);
     if (expected.empty()) return;
     if (!req.body) req.body = std::make_unique<http::StringBodyReader>("");
-    req.body = std::make_unique<ChecksumVerifyingReader>(std::move(req.body),
-                                                         std::move(expected));
+    req.body = std::make_unique<ChecksumVerifyingReader>(std::move(req.body), std::move(expected));
 }
 
 }  // namespace lights3::s3

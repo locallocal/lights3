@@ -40,7 +40,7 @@ int check_config(const std::string& path) {
         }
     // duostore parameters are parsed the way the backend constructor would (engine
     // selection, ranges, compiled-in engines) and the deployment sanity warning is
-    // surfaced here too (docs/storage/multi-gateway-multipart-design.md §4 ④): a
+    // surfaced here too (docs/archive/multi-gateway-multipart-design.md §4 ④): a
     // dry run must say what startup would say. Other backends validate lazily
     std::map<std::string, std::string> engines;  // backend name -> "meta=… data=…"
 #ifdef LIGHTS3_DUOSTORE

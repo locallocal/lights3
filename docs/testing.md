@@ -40,7 +40,7 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   `bench put/get` 零错误、`fsck` 对 bench 对象零 mismatch；原有 `usage/quota/
   tenant/reload` 保留。
 - **多网关 multipart**（`duostore-redis` 变体，
-  [storage/multi-gateway-multipart-design.md §4 ②](storage/multi-gateway-multipart-design.md)）：
+  [archive/multi-gateway-multipart-design.md §4 ②](archive/multi-gateway-multipart-design.md)）：
   同一 redis meta + 同一数据根起两个网关，create 在 A、5 个分片 B/A 交替上传、
   两侧 ListParts / ListMultipartUploads 一致、B complete、A HEAD/GET；合成 ETag 由
   脚本从各分片 ETag 独立算出再比对。单测侧同一场景矩阵在

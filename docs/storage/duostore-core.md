@@ -181,7 +181,7 @@ run = { u8 kind, u64 first_file_id, u32 count,
   关闭时回落 `gc_grace ≥ 最长预期 GET / 上传时长` 的旧约束。
 - `publish_lease(owner, LeaseInfo{oldest_read_ms, oldest_write_ms}, ttl)` /
   `min_lease() -> optional<LeaseInfo>`：多网关读写租约（roadmap §3.7；写侧
-  [multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) §4 ①，
+  [multi-gateway-multipart-design.md](../archive/multi-gateway-multipart-design.md) §4 ①，
   语义与安全论证见 §8.5）。共享引擎实现，min 逐字段取最小；任一存活租约缺
   write 字段（旧版本网关写的）则 `oldest_write_ms` 为 nullopt = 写侧下限未知。
   本地引擎默认 publish 返回 false（unsupported，发布器停摆）、min 返回 nullopt。
@@ -540,7 +540,7 @@ extent 粒度探测，中断置 `aborted`（统计为部分结果）。
 
 ### 9.1 多网关
 
-四步可落在不同网关（[multi-gateway-multipart-design.md](multi-gateway-multipart-design.md)），
+四步可落在不同网关（[multi-gateway-multipart-design.md](../archive/multi-gateway-multipart-design.md)），
 前提是共享 meta（redis / tikv）+ 共享数据面（rados）；部署清单见
 [../deployment.md §5](../deployment.md)：
 

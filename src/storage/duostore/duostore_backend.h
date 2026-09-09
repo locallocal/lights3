@@ -98,7 +98,7 @@ private:
 };
 
 // In-flight operation registry for the multi-gateway read / write leases
-// (roadmap §3.7; write side: docs/storage/multi-gateway-multipart-design.md §4 ①).
+// (roadmap §3.7; write side: docs/archive/multi-gateway-multipart-design.md §4 ①).
 // Read side: get_object registers a ticket *before* fetching the manifest and
 // the reader's destructor ends it, so "oldest in-flight read start" published to
 // the shared meta soundly covers every reader that may hold a pre-deref manifest
@@ -338,7 +338,7 @@ struct DuoStoreConfig {
     const char* meta_kind_name() const;
     // "fs" | "rados"
     const char* data_kind_name() const;
-    // Deployment sanity (docs/storage/multi-gateway-multipart-design.md §4 ④):
+    // Deployment sanity (docs/archive/multi-gateway-multipart-design.md §4 ④):
     // shared meta (redis / tikv) over local fs data is a single-gateway deployment
     // only — chunks and packs live on this gateway's disk, so objects written by
     // another gateway are unreadable here and its GC would mis-account theirs.

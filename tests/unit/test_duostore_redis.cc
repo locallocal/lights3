@@ -813,7 +813,7 @@ TEST(duostore_redis_backup_marker_and_logical_chain) {
     m.close();
 }
 
-// ---------- multi-gateway multipart (docs/storage/multi-gateway-multipart-design.md §4 ②) ----------
+// ---------- multi-gateway multipart (docs/archive/multi-gateway-multipart-design.md §4 ②) ----------
 // Two backends over one redis prefix and one shared data engine; the scenarios
 // live in unit/multi_gateway_suite.h and run identically over tikv
 

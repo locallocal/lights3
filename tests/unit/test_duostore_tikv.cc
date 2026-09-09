@@ -643,7 +643,7 @@ TEST(duostore_tikv_write_conflict_classification) {
     CHECK(!is_upstream_write_conflict(0, ""));
 }
 
-// ---------- multi-gateway multipart (docs/storage/multi-gateway-multipart-design.md §4 ②) ----------
+// ---------- multi-gateway multipart (docs/archive/multi-gateway-multipart-design.md §4 ②) ----------
 // Two backends over one tikv prefix and one shared data engine; the scenarios
 // live in unit/multi_gateway_suite.h and run identically over redis
 

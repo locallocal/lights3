@@ -1,5 +1,5 @@
 # compose profile `multi`: one of N identical gateways over shared storage
-# (docs/storage/multi-gateway-multipart-design.md §4 ②) — metadata in the redis
+# (docs/archive/multi-gateway-multipart-design.md §4 ②) — metadata in the redis
 # service, chunk data in the ceph demo cluster (the combination the design supports
 # for multi-gateway deployments). read_lease on so every gateway publishes its
 # in-flight read / write floors; gc_enabled is set per instance from the environment

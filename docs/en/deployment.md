@@ -72,7 +72,7 @@ scripts — no root, no packaging tools needed.
 ## 3. deb / rpm (CPack)
 
 ```bash
-cmake --build build --target package        # or: cd build && cpack
+cmake --build build --target package        # or: cd build && cpack; `make package` = Release build + this step, output in build-rel/packages/
 cpack --config build/CPackConfig.cmake -G DEB   # explicit generator: DEB | RPM | TGZ
 ls build/packages/                          # lights3_0.1.0_amd64.deb / lights3-0.1.0-1.x86_64.rpm
 ```

@@ -187,7 +187,17 @@ ubsan / cov / sqlite / redis / rados / tikv / seastar / fuzz) an incremental
 build + `ctest -LE "mint|perf|soak"` (opened up by the flags), sanitizer
 directories under `*SAN_OPTIONS` so findings fail, and a summary table at the
 end; `--configure` creates missing directories through `build.sh`.
-## 9. Code formatting
+## 9. Makefile: builds and code formatting
+
+The top-level `Makefile` is a thin wrapper over `build.sh` and CPack: `make release`
+(Release, `build-rel/`), `make debug` (Debug, `build/`), `make package` (release,
+then CPack; output in `build-rel/packages/`, the generator picked from the host's
+dpkg-deb / rpmbuild, TGZ otherwise), `make clean` (removes only those two
+directories, every other `build-*` variant stays). `JOBS=` sets the parallelism
+(default: half the cores), `BUILD_ARGS="--redis --sqlite"` forwards build.sh flags,
+`RELEASE_DIR=` / `DEBUG_DIR=` move the directories. `make help` lists every target.
+
+### 9.1 Code formatting
 
 `make format` first runs `scripts/check_comments.py --fix`, which moves every
 trailing `//` comment onto its own line above the statement (a line ending in `{`

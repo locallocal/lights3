@@ -27,7 +27,8 @@ namespace {
 
 // File lineage (§2.2): application_id marks "this is a duostore sqlite meta file",
 // user_version is the schema version — SQLite built-in mechanisms, zero tables needed
-constexpr int64_t kAppId = 0x4C335351;  // "L3SQ"
+// "L3SQ"
+constexpr int64_t kAppId = 0x4C335351;
 constexpr int64_t kSchemaVersion = 1;
 
 // The counters table stores only file_id segments ('chunk' / 'pack'); gcq seq uses AUTOINCREMENT (§2.2)
@@ -133,7 +134,8 @@ constexpr const char* kPackDrop = "DELETE FROM pack_stats WHERE pack_id=?1";
 
 int64_t now_ms() { return codec::to_unix_ms(std::chrono::system_clock::now()); }
 
-using codec::bump_last_byte;  // successor for delimiter group skipping (codec.h, shared by meta store impls)
+// successor for delimiter group skipping (codec.h, shared by meta store impls)
+using codec::bump_last_byte;
 
 }  // namespace
 
@@ -141,7 +143,8 @@ using codec::bump_last_byte;  // successor for delimiter group skipping (codec.h
 
 struct SqliteMetaStore::Conn {
     sqlite3* db = nullptr;
-    std::map<const char*, sqlite3_stmt*> stmts;  // key = SQL literal address (§5.3)
+    // key = SQL literal address (§5.3)
+    std::map<const char*, sqlite3_stmt*> stmts;
     // S4 metrics: error-classification counters (§5.4). Assigned by open_raw;
     // isolated instances under an empty scope, always non-null
     std::shared_ptr<MetricCounter> busy;
@@ -220,7 +223,8 @@ public:
         return *this;
     }
 
-    bool step() {  // true = row available, false = done
+    bool step() {
+        // true = row available, false = done
         int rc = sqlite3_step(s_);
         if (rc == SQLITE_ROW) return true;
         if (rc == SQLITE_DONE) return false;
@@ -234,12 +238,14 @@ public:
         if (rc == SQLITE_ROW) return true;
         if (rc == SQLITE_DONE) return false;
         if (rc == SQLITE_BUSY) {
-            if (c_.busy) c_.busy->inc();  // count once per starvation round (S4 metric)
+            // count once per starvation round (S4 metric)
+            if (c_.busy) c_.busy->inc();
             return std::nullopt;
         }
         c_.raise("step");
     }
-    void exec() {  // run to completion (DML / draining RETURNING)
+    void exec() {
+        // run to completion (DML / draining RETURNING)
         while (step()) {
         }
     }
@@ -399,7 +405,8 @@ void SqliteMetaStore::init_schema(Conn& c) {
         Stmt st(c, "PRAGMA user_version");
         if (st.step()) ver = st.col_i64(0);
     }
-    if (ver != 0) return;  // already our database (version validated by check_lineage)
+    // already our database (version validated by check_lineage)
+    if (ver != 0) return;
     Txn t(c);
     c.exec(kSchemaDdl, "create schema");
     for (const char* n : {kCtrChunk, kCtrPack}) {
@@ -445,10 +452,12 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
     // does not run when the constructor throws, leaking the lock and connections
     try {
         wc_ = open_raw();
-        check_lineage(*wc_);  // lineage check before any write/WAL conversion (§2.2)
+        // lineage check before any write/WAL conversion (§2.2)
+        check_lineage(*wc_);
         apply_pragmas(*wc_, opt_.sync);
         init_schema(*wc_);
-        ac_ = open_conn(/*full_sync=*/true);  // id-segment connection is always FULL (§4)
+        // id-segment connection is always FULL (§4)
+        ac_ = open_conn(/*full_sync=*/true);
         // Backup chain (backlog-sequence ⑧): an existing chain in wal_archive means
         // the WAL must keep every commit until the next segment is archived
         if (!opt_.wal_archive.empty()) {
@@ -483,7 +492,8 @@ void SqliteMetaStore::shutdown(bool graceful) {
     closed_ = true;
     idle_.clear();
     ac_.reset();
-    if (wc_ && !graceful) wc_.reset();  // constructor-failure cleanup: db never opened cleanly, skip graceful wrap-up
+    // constructor-failure cleanup: db never opened cleanly, skip graceful wrap-up
+    if (wc_ && !graceful) wc_.reset();
     if (wc_ && archive_active_) {
         // Clean close under an active chain: the checkpoint below would fold the
         // frames since the last segment into the database file, where no later
@@ -534,7 +544,8 @@ void SqliteMetaStore::shutdown(bool graceful) {
         wc_.reset();
     }
     if (lock_fd_ >= 0) {
-        ::close(lock_fd_);  // release the flock (§1 single-process exclusivity)
+        // release the flock (§1 single-process exclusivity)
+        ::close(lock_fd_);
         lock_fd_ = -1;
     }
 }
@@ -564,7 +575,8 @@ SqliteMetaStore::Lease SqliteMetaStore::read_conn() {
         }
     }
     if (!c) {
-        c = open_conn(/*full_sync=*/false);  // read-only connection, sync level irrelevant
+        // read-only connection, sync level irrelevant
+        c = open_conn(/*full_sync=*/false);
         // TOCTOU defense: close() may have completed (checkpoint + truncate) while
         // the connection was being opened — discard the new connection (destruction
         // closes it; closing the last connection removes the recreated -wal/-shm)
@@ -595,17 +607,21 @@ void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
         }
     }
     std::lock_guard lk(pool_mu_);
-    if (!c || closed_ || int(idle_.size()) >= opt_.pool_size) return;  // destroy outright
+    // destroy outright
+    if (!c || closed_ || int(idle_.size()) >= opt_.pool_size) return;
     idle_.push_back(std::move(c));
 }
 
 // ---------- Id segments (§4) ----------
 
 uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_t n) {
-    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
-    std::lock_guard lk(alloc_mu_);  // lock order alloc_mu_ → mu_; no reverse nesting (alloc_mu_ only taken here)
-    if (r.limit - r.next < n) {     // discard the remainder when switching segments (run batch dispatch requires
-                                    // contiguity within a segment, docs/archive/gaps.md §3.9)
+    // run ≤ kMaxIdRun << kIdSegment
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);
+    // lock order alloc_mu_ → mu_; no reverse nesting (alloc_mu_ only taken here)
+    std::lock_guard lk(alloc_mu_);
+    if (r.limit - r.next < n) {
+        // discard the remainder when switching segments (run batch dispatch requires
+        // contiguity within a segment, docs/archive/gaps.md §3.9)
         // The segment reservation must be persisted before dispensing — the dedicated
         // connection is always synchronous=FULL (independent of opt_.sync); otherwise
         // a crash losing the reservation would re-issue used file_ids after restart,
@@ -636,7 +652,8 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_
             }
             if (!*row) throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): counter vanished");
             hi = uint64_t(st.col_i64(0));
-            st.exec();  // drain RETURNING to DONE; the statement commits only when complete
+            // drain RETURNING to DONE; the statement commits only when complete
+            st.exec();
             break;
         }
         r.limit = hi;
@@ -671,9 +688,9 @@ std::optional<std::string> SqliteMetaStore::object_raw(Conn& c, std::string_view
 
 void SqliteMetaStore::write_refs(Conn& c, const DataRef& ref, bool add, std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack)
-            continue;  // pack liveness goes through pack_stats (P2);
-                       // chunk/rados both enter refs by file_id
+        // pack liveness goes through pack_stats (P2);
+        // chunk/rados both enter refs by file_id
+        if (e.kind == Extent::Kind::kPack) continue;
         if (add) {
             Stmt st(c, kRefPut);
             st.i64(1, int64_t(e.file_id)).blob(2, owner);
@@ -691,7 +708,8 @@ void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign, in
     // per pack (§9.1: increments/decrements batched with the business transaction);
     // each record counts payload + header overhead, same accounting basis as
     // file_size (docs/archive/gaps.md §2.3a)
-    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
+    // pack_id -> (bytes, recs)
+    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
         auto& [bytes, recs] = agg[e.file_id];
@@ -731,7 +749,8 @@ std::vector<PartRec> SqliteMetaStore::scan_parts(Conn& c, std::string_view b, st
     Stmt st(c, kPartScan);
     st.blob(1, b).blob(2, k).blob(3, id);
     while (st.step()) out.push_back(codec::decode_part(int(st.col_i64(0)), st.col_blob(1)));
-    return out;  // the numeric part_no column is naturally ascending
+    // the numeric part_no column is naturally ascending
+    return out;
 }
 
 UploadRec SqliteMetaStore::require_upload_in(Conn& c, std::string_view b, std::string_view k, std::string_view id) {
@@ -800,7 +819,8 @@ std::vector<BucketInfo> SqliteMetaStore::list_buckets_in(Conn& c) {
     Stmt st(c, kBucketList);
     while (st.step())
         out.push_back({std::string(st.col_blob(0)), codec::from_unix_ms(codec::decode_bucket(st.col_blob(1)))});
-    return out;  // the primary-key B-tree provides name order for free
+    // the primary-key B-tree provides name order for free
+    return out;
 }
 
 // ---------- object ----------
@@ -826,7 +846,8 @@ void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectR
     require_bucket(c, b);
     std::optional<ObjectRec> old;
     if (auto v = object_raw(c, b, k)) old = codec::decode_object(std::string(k), *v);
-    check_put_condition(cond, old, k);  // checked in-transaction; throwing rolls back (PutCondition contract)
+    // checked in-transaction; throwing rolls back (PutCondition contract)
+    check_put_condition(cond, old, k);
     rec.version = old ? old->version + 1 : 1;
 
     std::string owner = std::string(b) + '/' + std::string(k);
@@ -852,7 +873,8 @@ bool SqliteMetaStore::delete_object(std::string_view b, std::string_view k) {
     Txn t(c);
     require_bucket(c, b);
     auto v = object_raw(c, b, k);
-    if (!v) return false;  // idempotent; Txn destructor rolls back (read-only up to here, nothing to undo)
+    // idempotent; Txn destructor rolls back (read-only up to here, nothing to undo)
+    if (!v) return false;
     auto old = codec::decode_object(std::string(k), *v);
     {
         Stmt st(c, kObjDel);
@@ -917,7 +939,8 @@ ListResult SqliteMetaStore::list_objects_in(Conn& c, std::string_view b, const L
     };
     while (it->step()) {
         std::string uk(it->col_blob(0));
-        if (uk.compare(0, prefix.size(), prefix) != 0) break;  // stop once past the prefix range
+        // stop once past the prefix range
+        if (uk.compare(0, prefix.size(), prefix) != 0) break;
         if (count >= opt.max_keys) {
             out.is_truncated = true;
             out.next_token = last_emitted;
@@ -950,7 +973,8 @@ ListResult SqliteMetaStore::list_objects_in(Conn& c, std::string_view b, const L
         ++count;
         pause_hook();
     }
-    it.reset();  // finish the statement before the caller finishes the transaction
+    // finish the statement before the caller finishes the transaction
+    it.reset();
     return out;
 }
 
@@ -998,7 +1022,8 @@ void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::stri
     write_refs(c, p.data, /*add=*/true, owner);
     const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
     write_pack_delta(c, p.data, +1, ov);
-    if (old) {  // same-number re-upload is last-write-wins: old part enters GC accounting in the same batch
+    if (old) {
+        // same-number re-upload is last-write-wins: old part enters GC accounting in the same batch
         enqueue_reclaim(c, old->data, ReclaimReason::kPartOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, ov);
@@ -1026,11 +1051,13 @@ std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b, std::s
     st.blob(6, prefix);
     while (st.step()) {
         std::string_view k = st.col_blob(0);
-        if (k.substr(0, prefix.size()) != prefix) break;  // ordered: past the prefix range (roadmap §3.5)
+        // ordered: past the prefix range (roadmap §3.5)
+        if (k.substr(0, prefix.size()) != prefix) break;
         auto rec = codec::decode_upload(std::string(k), std::string(st.col_blob(1)), st.col_blob(2));
         out.push_back({rec.meta.key, rec.upload_id, codec::from_unix_ms(rec.initiated_ms)});
     }
-    return out;  // primary-key order = (key, upload_id) order
+    // primary-key order = (key, upload_id) order
+    return out;
 }
 
 // complete is a pure metadata transaction, zero data movement (main doc §8); the
@@ -1066,7 +1093,8 @@ std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_vie
         st.exec();
     }
     {
-        Stmt st(c, kPartDelAll);  // whole prefix in one statement (corresponds to RocksDB DeleteRange)
+        // whole prefix in one statement (corresponds to RocksDB DeleteRange)
+        Stmt st(c, kPartDelAll);
         st.blob(1, b).blob(2, k).blob(3, id);
         st.exec();
     }
@@ -1080,13 +1108,15 @@ std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_vie
             write_refs(c, p.data, /*add=*/true, owner);
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
             write_pack_delta(c, p.data, +1, codec::pack_rec_overhead(b, k));
-        } else {  // unselected parts enter GC accounting
+        } else {
+            // unselected parts enter GC accounting
             enqueue_reclaim(c, p.data, ReclaimReason::kComplete);
             write_refs(c, p.data, /*add=*/false, {});
             write_pack_delta(c, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
-    if (old) {  // old same-name object enters GC accounting
+    if (old) {
+        // old same-name object enters GC accounting
         enqueue_reclaim(c, old->data, ReclaimReason::kOverwrite);
         write_refs(c, old->data, /*add=*/false, {});
         write_pack_delta(c, old->data, -1, codec::pack_rec_overhead(b, k));
@@ -1234,7 +1264,8 @@ bool SqliteMetaStore::swap_extents(std::string_view b, std::string_view k, uint6
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
-    if (!apply_swap(c, b, k, expect_version, from, to)) return false;  // Txn destructor rolls back
+    // Txn destructor rolls back
+    if (!apply_swap(c, b, k, expect_version, from, to)) return false;
     t.commit();
     return true;
 }
@@ -1255,7 +1286,8 @@ std::vector<bool> SqliteMetaStore::swap_extents_batch(std::span<const SwapReq> r
         any = any || ok;
         out.push_back(ok);
     }
-    if (any) t.commit();  // all failed: Txn destructor rolls back (nothing written, pure no-op)
+    // all failed: Txn destructor rolls back (nothing written, pure no-op)
+    if (any) t.commit();
     return out;
 }
 
@@ -1479,7 +1511,8 @@ void SqliteMetaStore::restore_physical(const std::filesystem::path& dir, const s
         if (e.full)
             throw S3Error(S3ErrorCode::InternalError,
                           "duostore meta(sqlite) restore: unexpected full entry inside the chain");
-        if (e.bytes == 0 || e.file.empty()) continue;  // nothing was committed in that window
+        // nothing was committed in that window
+        if (e.bytes == 0 || e.file.empty()) continue;
         std::filesystem::copy_file(dir / e.file, db_path.string() + "-wal",
                                    std::filesystem::copy_options::overwrite_existing, ec);
         if (ec)

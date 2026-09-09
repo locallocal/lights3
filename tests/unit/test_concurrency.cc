@@ -88,7 +88,8 @@ TEST(when_all_rethrows_after_all_complete) {
         CHECK_EQ(std::string(e.what()), "shard failed");
     }
     CHECK(thrown);
-    CHECK_EQ(completed.load(), 2);  // the exception does not interrupt the other shards
+    // the exception does not interrupt the other shards
+    CHECK_EQ(completed.load(), 2);
 }
 
 // ---------- Cancellation ----------
@@ -99,7 +100,8 @@ TEST(schedule_precancelled_throws) {
     src.request_cancel();
     auto t = [](ThreadPool& p, CancelToken tok) -> Task<int> {
         co_await p.schedule(std::move(tok));
-        co_return 1;  // should not be reached
+        // should not be reached
+        co_return 1;
     };
     bool thrown = false;
     try {
@@ -114,7 +116,8 @@ TEST(cancel_resumes_queued_task_with_exception) {
     ThreadPool pool(1);
     std::promise<void> gate;
     auto blocked = gate.get_future().share();
-    pool.post([blocked] { blocked.wait(); });  // occupies the only worker
+    // occupies the only worker
+    pool.post([blocked] { blocked.wait(); });
 
     CancelSource src;
     auto t = [](ThreadPool& p, CancelToken tok) -> Task<int> {
@@ -129,8 +132,10 @@ TEST(cancel_resumes_queued_task_with_exception) {
             cancelled = true;
         }
     });
-    std::this_thread::sleep_for(20ms);  // let the task enter the queue
-    src.request_cancel();               // worker still occupied: the cancellation path resumes it
+    // let the task enter the queue
+    std::this_thread::sleep_for(20ms);
+    // worker still occupied: the cancellation path resumes it
+    src.request_cancel();
     waiter.join();
     CHECK(cancelled.load());
     gate.set_value();
@@ -186,7 +191,8 @@ TEST(with_timeout_cancels_cooperatively) {
     auto slow = [](ThreadPool& p, CancelToken tok) -> Task<int> {
         for (int i = 0; i < 1000; ++i) {
             co_await p.schedule(tok);
-            std::this_thread::sleep_for(5ms);  // the "blocking segment" on a pool thread
+            // the "blocking segment" on a pool thread
+            std::this_thread::sleep_for(5ms);
             tok.throw_if_cancelled();
         }
         co_return 0;
@@ -199,7 +205,8 @@ TEST(with_timeout_cancels_cooperatively) {
         thrown = true;
     }
     CHECK(thrown);
-    CHECK(std::chrono::steady_clock::now() - begin < 2s);  // far earlier than 1000*5ms
+    // far earlier than 1000*5ms
+    CHECK(std::chrono::steady_clock::now() - begin < 2s);
 }
 
 // ---------- Switching back to the home executor (docs/concurrency.md §3) ----------
@@ -215,14 +222,17 @@ TEST(continuation_posted_back_to_home_executor) {
             co_await p.schedule();
             co_return std::this_thread::get_id();
         };
-        auto child_tid = co_await child(wp);  // the child task inherits the home executor
+        // the child task inherits the home executor
+        auto child_tid = co_await child(wp);
         co_return std::make_pair(child_tid, std::this_thread::get_id());
     };
     auto t = parent(work);
     t.via(home_exec);
     auto [child_tid, parent_tid] = sync_wait(std::move(t));
-    CHECK(child_tid != home_id);    // the blocking segment runs on a pool thread
-    CHECK_EQ(parent_tid, home_id);  // the continuation is posted back to home
+    // the blocking segment runs on a pool thread
+    CHECK(child_tid != home_id);
+    // the continuation is posted back to home
+    CHECK_EQ(parent_tid, home_id);
 }
 
 TEST(resume_on_switches_executor) {
@@ -240,7 +250,8 @@ TEST(inline_executor_resumes_in_place) {
     ThreadPool pool(2);
     auto t = [](ThreadPool& p) -> Task<std::thread::id> {
         co_await p.schedule();
-        co_return std::this_thread::get_id();  // inline: the continuation stays on the pool thread
+        // inline: the continuation stays on the pool thread
+        co_return std::this_thread::get_id();
     };
     auto task = t(pool);
     task.via(InlineExecutor::instance());
@@ -253,7 +264,8 @@ TEST(bounded_queue_backpressure) {
     ThreadPool pool(1, /*queue_capacity=*/1);
     std::promise<void> gate;
     auto blocked = gate.get_future().share();
-    pool.post([blocked] { blocked.wait(); });  // occupies the only worker
+    // occupies the only worker
+    pool.post([blocked] { blocked.wait(); });
 
     std::atomic<int> done{0};
     auto t = [&](ThreadPool& p) -> Task<void> {
@@ -278,9 +290,11 @@ TEST(bounded_queue_backpressure) {
     s = pool.stats();
     CHECK_EQ(s.queue_depth, size_t(0));
     CHECK_EQ(s.backlogged, size_t(0));
-    CHECK_EQ(s.completed, uint64_t(4));  // the gate task + 3 schedules
+    // the gate task + 3 schedules
+    CHECK_EQ(s.completed, uint64_t(4));
     uint64_t hist_total = std::accumulate(s.wait_hist.begin(), s.wait_hist.end(), uint64_t(0));
-    CHECK_EQ(hist_total, uint64_t(4));  // every dequeued task recorded its wait time
+    // every dequeued task recorded its wait time
+    CHECK_EQ(hist_total, uint64_t(4));
 }
 
 // ---------- AsyncSemaphore（docs/concurrency.md §6）----------
@@ -305,7 +319,8 @@ TEST(semaphore_limits_concurrency) {
     sync_wait(when_all(std::move(tasks)));
     CHECK_EQ(done.load(), 16);
     CHECK(peak.load() <= 2);
-    CHECK_EQ(sem.available(), 2L);  // all permits returned
+    // all permits returned
+    CHECK_EQ(sem.available(), 2L);
     CHECK_EQ(sem.waiting(), size_t(0));
 }
 
@@ -315,11 +330,14 @@ TEST(semaphore_try_acquire_nonblocking) {
     AsyncSemaphore sem(1);
     auto p1 = sem.try_acquire();
     CHECK(p1.has_value());
-    CHECK(*p1);                             // held state
-    CHECK(!sem.try_acquire().has_value());  // exhausted: immediate nullopt, no queueing
+    // held state
+    CHECK(*p1);
+    // exhausted: immediate nullopt, no queueing
+    CHECK(!sem.try_acquire().has_value());
     CHECK_EQ(sem.waiting(), size_t(0));
     p1->release();
-    CHECK(!*p1);  // empty after release
+    // empty after release
+    CHECK(!*p1);
     auto p2 = sem.try_acquire();
     CHECK(p2.has_value());
     CHECK_EQ(sem.available(), 0L);
@@ -340,7 +358,8 @@ TEST(semaphore_permit_released_on_exception) {
         thrown = true;
     }
     CHECK(thrown);
-    CHECK_EQ(sem.available(), 1L);  // the exception path also returns the permit
+    // the exception path also returns the permit
+    CHECK_EQ(sem.available(), 1L);
 }
 
 // ---------- Posting during shutdown and the exception firewall (gaps §2.1/§2.2) ----------
@@ -359,7 +378,8 @@ TEST(pool_task_exception_does_not_kill_worker) {
     ThreadPool pool(1);
     pool.post([] { throw std::runtime_error("escaped task exception"); });
     std::promise<void> done;
-    pool.post([&] { done.set_value(); });  // the same worker thread is still alive
+    // the same worker thread is still alive
+    pool.post([&] { done.set_value(); });
     CHECK(done.get_future().wait_for(5s) == std::future_status::ready);
 }
 
@@ -368,13 +388,15 @@ TEST(pool_task_exception_does_not_kill_worker) {
 TEST(semaphore_acquire_is_cancellable) {
     AsyncSemaphore sem(1);
     ThreadPool pool(1);
-    auto hold = sem.try_acquire();  // holds the only permit
+    // holds the only permit
+    auto hold = sem.try_acquire();
     CHECK(hold.has_value());
 
     CancelSource src;
     auto t = [](AsyncSemaphore& s, CancelToken tok) -> Task<int> {
         auto p = co_await s.acquire(std::move(tok));
-        co_return 1;  // should not be reached
+        // should not be reached
+        co_return 1;
     };
     std::atomic<bool> cancelled{false};
     std::thread waiter([&] {
@@ -384,19 +406,21 @@ TEST(semaphore_acquire_is_cancellable) {
             cancelled = true;
         }
     });
-    while (sem.waiting() < 1) std::this_thread::sleep_for(1ms);  // wait for it to enter the wait queue
+    // wait for it to enter the wait queue
+    while (sem.waiting() < 1) std::this_thread::sleep_for(1ms);
     CHECK_EQ(sem.waiting(), size_t(1));
     src.request_cancel();
     waiter.join();
     CHECK(cancelled.load());
-    CHECK_EQ(sem.waiting(),
-             size_t(0));  // the cancelled waiter is unlinked; the permit will not be handed to a dead waiter
+    // the cancelled waiter is unlinked; the permit will not be handed to a dead waiter
+    CHECK_EQ(sem.waiting(), size_t(0));
     hold.reset();
     CHECK_EQ(sem.available(), 1L);
 }
 
 TEST(semaphore_close_wakes_all_waiters) {
-    AsyncSemaphore sem(0);  // no permits: everyone queues
+    // no permits: everyone queues
+    AsyncSemaphore sem(0);
     auto t = [](AsyncSemaphore& s) -> Task<int> {
         auto p = co_await s.acquire();
         co_return 1;
@@ -431,10 +455,12 @@ TEST(cancel_token_propagates_down_task_chain) {
     ThreadPool pool(1);
     std::promise<void> gate;
     auto blocked = gate.get_future().share();
-    pool.post([blocked] { blocked.wait(); });  // occupies the only worker
+    // occupies the only worker
+    pool.post([blocked] { blocked.wait(); });
 
     auto inner = [](ThreadPool& p) -> Task<int> {
-        co_await p.schedule();  // no argument: the token comes from promise inheritance
+        // no argument: the token comes from promise inheritance
+        co_await p.schedule();
         co_return 1;
     };
     auto outer = [&inner](ThreadPool& p) -> Task<int> { co_return co_await inner(p); };
@@ -470,7 +496,8 @@ TEST(cancel_registration_reset_waits_for_inflight_callback) {
     while (!in_cb.load()) std::this_thread::sleep_for(1ms);
     reg.reset();
     reset_returned = true;
-    CHECK(cb_done.load());  // the callback finished during reset, it is not running concurrently
+    // the callback finished during reset, it is not running concurrently
+    CHECK(cb_done.load());
     trigger.join();
     CHECK(reset_returned.load());
 }

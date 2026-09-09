@@ -100,7 +100,8 @@ WebsiteBucket parse_website_xml(const std::string& body, std::string bucket) {
     if (auto* rules = root.find("RoutingRules")) {
         for (auto& rr : rules->children) {
             if (rr.name != "RoutingRule") continue;
-            if (w.routing_rules.size() >= 50)  // AWS quota
+            // AWS quota
+            if (w.routing_rules.size() >= 50)
                 throw S3Error(S3ErrorCode::InvalidArgument, "RoutingRules may contain at most 50 rules.");
             WebsiteRoutingRule r;
             if (auto* cond = rr.find("Condition")) {

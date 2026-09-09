@@ -94,7 +94,8 @@ struct ChildRegistrar {
     ChildRegistrar(const char* name, ChildFn fn) { child_registry().push_back({name, fn}); }
 };
 
-inline int run_child(int argc, char** argv) {  // argv[1] = child mode name
+inline int run_child(int argc, char** argv) {
+    // argv[1] = child mode name
     for (auto& c : child_registry())
         if (std::string(argv[1]) == c.name) return c.fn(argc, argv);
     fprintf(stderr, "unknown child mode: %s\n", argv[1]);

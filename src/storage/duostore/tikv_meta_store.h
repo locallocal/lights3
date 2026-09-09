@@ -26,8 +26,10 @@
 namespace lights3::storage::duostore {
 
 struct TikvMetaOptions {
-    std::vector<std::string> pd_endpoints;  // required when meta=tikv
-    std::string prefix = "duo:";            // prefix for all keys (multi-instance/test isolation, §3.1)
+    // required when meta=tikv
+    std::vector<std::string> pd_endpoints;
+    // prefix for all keys (multi-instance/test isolation, §3.1)
+    std::string prefix = "duo:";
     // mTLS triple (optional; enabled only when all three are given, §9)
     std::string ca_path;
     std::string cert_path;
@@ -41,8 +43,10 @@ struct TikvMetaOptions {
     // cluster safepoint push; concurrent advancement by multiple gateways naturally
     // converges via PD's min/monotonic semantics)
     int gc_safepoint_interval_s = 0;
-    int gc_retention_s = 600;  // retention window: only needs to cover the longest list/transaction duration (§7.3)
-    MetricsScope metrics;      // conflict retry / safepoint counters (T5; empty scope means isolated instances)
+    // retention window: only needs to cover the longest list/transaction duration (§7.3)
+    int gc_retention_s = 600;
+    // conflict retry / safepoint counters (T5; empty scope means isolated instances)
+    MetricsScope metrics;
 };
 
 class TikvMetaStore final : public IMetaStore {
@@ -96,7 +100,8 @@ public:
     // Restore marker (backlog-sequence ⑧): a fresh PD TSO -- the --backupts / point
     // in time for the cluster-side BR restore that precedes a logical load
     std::string restore_marker() override;
-    void ack_reclaims(std::span<const uint64_t> seqs) override;  // batch write-off in one transaction
+    // batch write-off in one transaction
+    void ack_reclaims(std::span<const uint64_t> seqs) override;
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
@@ -117,7 +122,8 @@ public:
 private:
     class SnapshotView;
 
-    void migrate_schema(int64_t ver);  // migration chain for version < current (called by open schema)
+    // migration chain for version < current (called by open schema)
+    void migrate_schema(int64_t ver);
 
     // Version-parameterized read bodies shared by the live methods (fresh TSO per
     // call) and SnapshotView (one fixed version for the whole dump). fold=false
@@ -148,17 +154,23 @@ private:
 
     // ---- key construction (§3.2: prefix + one-char table tag + codec composite segment) ----
     std::string tkey(char tag, std::string_view rest) const;
-    std::string bucket_key(std::string_view b) const;                      // 'B'
-    std::string bucket_guard(std::string_view b, uint32_t shard) const;    // 'b'
-    std::string object_key(std::string_view b, std::string_view k) const;  // 'O'
+    // 'B'
+    std::string bucket_key(std::string_view b) const;
+    // 'b'
+    std::string bucket_guard(std::string_view b, uint32_t shard) const;
+    // 'O'
+    std::string object_key(std::string_view b, std::string_view k) const;
     std::string upload_key(std::string_view b, std::string_view k, std::string_view id) const;
-    std::string upload_guard(std::string_view b, std::string_view k, std::string_view id,
-                             uint32_t shard) const;  // 'u'
-    std::string part_key(std::string_view b, std::string_view k, std::string_view id,
-                         int part_no) const;       // 'P'
-    std::string refs_key(uint64_t file_id) const;  // 'R'
-    std::string gcq_key(uint64_t seq) const;       // 'G'
-    std::string counter_key(char kind) const;      // 'C'
+    // 'u'
+    std::string upload_guard(std::string_view b, std::string_view k, std::string_view id, uint32_t shard) const;
+    // 'P'
+    std::string part_key(std::string_view b, std::string_view k, std::string_view id, int part_no) const;
+    // 'R'
+    std::string refs_key(uint64_t file_id) const;
+    // 'G'
+    std::string gcq_key(uint64_t seq) const;
+    // 'C'
+    std::string counter_key(char kind) const;
     // Pack liveness ledger ('S' table, §3.2): delta rows S<be64 id>d<be64 delta_id>
     // (value = le64 bytes ‖ le64 recs) + seal row S<be64 id>s (value = le64
     // file_size). Each business transaction writes a unique delta row —
@@ -205,12 +217,14 @@ private:
 
     TikvMetaOptions opt_;
     std::unique_ptr<TikvClient> client_owned_;
-    std::atomic<TikvClient*> client_{nullptr};  // nulled after close (see client() comment)
+    // nulled after close (see client() comment)
+    std::atomic<TikvClient*> client_{nullptr};
 
     // T5 metrics (registered at construction; zero values are visible)
     std::shared_ptr<MetricCounter> m_conflict_retries_;
     std::shared_ptr<MetricCounter> m_safepoint_failures_;
-    std::shared_ptr<MetricGauge> m_safepoint_ms_;  // most recently pushed cluster safepoint (physical ms)
+    // most recently pushed cluster safepoint (physical ms)
+    std::shared_ptr<MetricGauge> m_safepoint_ms_;
 
     // safepoint worker (§7.3): the cv wait can be woken immediately for exit; close()
     // stops the worker before detaching the client (the worker gets its handle via
@@ -224,9 +238,12 @@ private:
     // each time a chunk opens; it must not queue behind business commits); network
     // segment renewal on exhaustion happens outside the lock (see alloc_id comment)
     std::mutex alloc_mu_;
-    IdRange file_ids_[2];  // indexed by Extent::Kind
-    IdRange seqs_;         // gcq seq
-    IdRange pack_deltas_;  // pack ledger delta row id (uniqueness suffices, 'd' counter)
+    // indexed by Extent::Kind
+    IdRange file_ids_[2];
+    // gcq seq
+    IdRange seqs_;
+    // pack ledger delta row id (uniqueness suffices, 'd' counter)
+    IdRange pack_deltas_;
 };
 
 }  // namespace lights3::storage::duostore

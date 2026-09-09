@@ -45,7 +45,8 @@ public:
 
     Task<size_t> read(std::span<std::byte> buf) override {
         size_t n = co_await inner_->read(buf);
-        if (n == 0) co_return 0;  // EOF: no stall check
+        // EOF: no stall check
+        if (n == 0) co_return 0;
         moved_ += n;
         auto now = Clock::now();
         if (moved_ >= min_progress_) {

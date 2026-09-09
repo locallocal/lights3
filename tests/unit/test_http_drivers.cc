@@ -59,8 +59,10 @@ private:
 
 // File-backed body for the sendfile contract (roadmap §4.3 ④): pread on the
 // calling thread (tests only), remaining range exposed through try_as_file
-std::atomic<uint64_t> g_file_bytes_sent{0};  // bytes moved by a driver's sendfile path
-std::atomic<uint64_t> g_file_bytes_read{0};  // bytes pulled through read()
+// bytes moved by a driver's sendfile path
+std::atomic<uint64_t> g_file_bytes_sent{0};
+// bytes pulled through read()
+std::atomic<uint64_t> g_file_bytes_read{0};
 
 class FileRangeReader final : public BodyReader {
 public:
@@ -160,7 +162,8 @@ Task<HttpResponse> test_handler(HttpRequest req) {
     HttpResponse resp;
     resp.headers.set("Content-Type", "text/plain");
 
-    if (req.path == "/method") {  // echo the method: verifies whether L1 forwards unknown methods verbatim
+    if (req.path == "/method") {
+        // echo the method: verifies whether L1 forwards unknown methods verbatim
         resp.small_body = req.method;
         co_return resp;
     }
@@ -173,7 +176,8 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         try {
             co_return co_await consume_and_sum(std::move(req), std::move(resp));
         } catch (const std::exception&) {
-            g_disconnect_seen.store(true);  // contract 3: disconnect propagates to the consumer as an exception
+            // contract 3: disconnect propagates to the consumer as an exception
+            g_disconnect_seen.store(true);
             throw;
         }
     }
@@ -183,41 +187,48 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         if (req.path == "/stream") resp.content_length = size;
         co_return resp;
     }
-    if (req.path == "/file") {  // file-backed body: sendfile on builtin/plaintext, read() elsewhere
+    if (req.path == "/file") {
+        // file-backed body: sendfile on builtin/plaintext, read() elsewhere
         uint64_t size = std::stoull(req.query_get("size").value_or("0"));
         uint64_t off = std::stoull(req.query_get("off").value_or("0"));
-        bool short_file = req.query_has("short");  // file ends halfway through the declared range
+        // file ends halfway through the declared range
+        bool short_file = req.query_has("short");
         int fd = pattern_file(off + (short_file ? size / 2 : size));
         resp.stream_body = std::make_unique<ForwardingCounter>(std::make_unique<FileRangeReader>(fd, off, size));
         resp.content_length = size;
         co_return resp;
     }
-    if (req.path == "/failing") {  // backend error mid-stream, after `at` successful chunks
+    if (req.path == "/failing") {
+        // backend error mid-stream, after `at` successful chunks
         uint64_t size = std::stoull(req.query_get("size").value_or("0"));
         int at = std::stoi(req.query_get("at").value_or("3"));
         resp.stream_body = std::make_unique<FailingReader>(size, at);
         resp.content_length = size;
         co_return resp;
     }
-    if (req.path == "/short") {  // backend truncation: declares size but delivers only half
+    if (req.path == "/short") {
+        // backend truncation: declares size but delivers only half
         uint64_t size = std::stoull(req.query_get("size").value_or("0"));
         resp.stream_body = std::make_unique<PatternReader>(size / 2);
         resp.content_length = size;
         co_return resp;
     }
-    if (req.path == "/noread") {  // deliberately do not consume the body (100-continue rejection scenario)
+    if (req.path == "/noread") {
+        // deliberately do not consume the body (100-continue rejection scenario)
         resp.small_body = "ok";
         co_return resp;
     }
-    if (req.path == "/badheader") {  // outbound header injection surface: CR/LF values and illegal header names must be
-                                     // dropped
+    if (req.path == "/badheader") {
+        // outbound header injection surface: CR/LF values and illegal header names must be
+        // dropped
         resp.headers.set("X-Evil", "a\r\nInjected: 1");
         resp.headers.set("Bad Name", "v");
         resp.headers.set("X-Fine", "ok");
         resp.small_body = "ok";
         co_return resp;
     }
-    if (req.path == "/slow") {  // ms tunable: the shutdown contract tests use it to simulate in-flight requests
+    if (req.path == "/slow") {
+        // ms tunable: the shutdown contract tests use it to simulate in-flight requests
         uint64_t ms = std::stoull(req.query_get("ms").value_or("500"));
         std::this_thread::sleep_for(std::chrono::milliseconds(ms));
         resp.small_body = "done";
@@ -396,7 +407,8 @@ struct Client {
                 if (!read_line(line)) return r;
                 if (line.empty()) continue;
                 size_t sz = std::stoull(line, nullptr, 16);
-                if (sz == 0) {  // trailers until the empty line
+                if (sz == 0) {
+                    // trailers until the empty line
                     while (read_line(line) && !line.empty()) {
                     }
                     r.ok = true;
@@ -444,7 +456,8 @@ std::string make_pattern(uint64_t n) {
 std::string expected_sum(uint64_t n) { return std::to_string(n) + ":" + std::to_string(pattern_sum(n)) + ":eof-ok"; }
 
 void for_each_driver(const std::function<void(const std::string&)>& fn) {
-    signal(SIGPIPE, SIG_IGN);  // in disconnect scenarios the driver may write to an already-closed socket
+    // in disconnect scenarios the driver may write to an already-closed socket
+    signal(SIGPIPE, SIG_IGN);
     auto drivers = HttpServerFactory::drivers();
     CHECK(!drivers.empty());
     for (auto& d : drivers) {
@@ -592,13 +605,16 @@ TEST(io_buffer_pool_reuses_per_thread) {
     }
     CHECK_EQ(IoBuffer::cached_count(), base + 1);
     {
-        IoBuffer b(32 * 1024);  // a cached buffer with enough capacity is handed out
+        // a cached buffer with enough capacity is handed out
+        IoBuffer b(32 * 1024);
         CHECK(b.data() == first);
-        CHECK_EQ(b.size(), size_t{32 * 1024});  // ...but presents only the requested size
+        // ...but presents only the requested size
+        CHECK_EQ(b.size(), size_t{32 * 1024});
         CHECK_EQ(b.capacity(), size_t{64 * 1024});
         CHECK_EQ(b.span().size(), size_t{32 * 1024});
         CHECK_EQ(IoBuffer::cached_count(), base);
-        IoBuffer c(128 * 1024);  // none large enough: fresh allocation
+        // none large enough: fresh allocation
+        IoBuffer c(128 * 1024);
         CHECK(c.data() != first);
     }
     CHECK_EQ(IoBuffer::cached_count(), base + 2);
@@ -624,12 +640,14 @@ TEST(stream_prefetch_delivers_in_order_and_surfaces_errors) {
         }
         CHECK(got == make_pattern(size));
         CHECK(pf.at_eof());
-        CHECK(pf.next_sync().empty());  // EOF is sticky
+        // EOF is sticky
+        CHECK(pf.next_sync().empty());
     }
     {
         FailingReader r(size, 2);
         StreamPrefetch pf(r, 64 * 1024);
-        CHECK_EQ(pf.next_sync().size(), size_t{64 * 1024});  // chunk 1 fine, chunk 2 is prefetched and fails
+        // chunk 1 fine, chunk 2 is prefetched and fails
+        CHECK_EQ(pf.next_sync().size(), size_t{64 * 1024});
         bool threw = false;
         try {
             pf.next_sync();
@@ -677,7 +695,8 @@ TEST(http_driver_chunked_request) {
         c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\n\r\n");
         auto data = make_pattern(size);
         size_t sent = 0;
-        while (sent < data.size()) {  // send in irregular pieces
+        while (sent < data.size()) {
+            // send in irregular pieces
             size_t n = std::min<size_t>(data.size() - sent, 40000);
             char hdr[32];
             snprintf(hdr, sizeof(hdr), "%zx\r\n", n);
@@ -702,7 +721,8 @@ TEST(http_driver_expect_100_continue) {
         c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: " + std::to_string(size) +
                    "\r\n\r\n");
         Client::Head h;
-        CHECK(c.read_head(h));  // all drivers eventually send 100 (beast replies only at the handler's first read)
+        // all drivers eventually send 100 (beast replies only at the handler's first read)
+        CHECK(c.read_head(h));
         CHECK_EQ(h.status, 100);
         c.send_str(make_pattern(size));
         auto r = c.read_response();
@@ -746,7 +766,8 @@ TEST(http_driver_handler_exception_500_xml) {
         c.send_str("GET /throw HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r = c.read_response();
         CHECK(r.ok);
-        CHECK_EQ(r.status, 500);  // contract 2: 500 + S3 InternalError XML
+        // contract 2: 500 + S3 InternalError XML
+        CHECK_EQ(r.status, 500);
         CHECK(r.body.find("<Code>InternalError</Code>") != std::string::npos);
     });
 }
@@ -759,9 +780,11 @@ TEST(http_driver_keep_alive) {
         auto r1 = c.read_response();
         CHECK(r1.ok);
         CHECK_EQ(r1.status, 200);
-        CHECK_EQ(r1.body, "nobody");  // GET has no body: req.body is nullptr
+        // GET has no body: req.body is nullptr
+        CHECK_EQ(r1.body, "nobody");
         c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 5\r\n\r\nhello");
-        auto r2 = c.read_response();  // second request on the same connection
+        // second request on the same connection
+        auto r2 = c.read_response();
         CHECK(r2.ok);
         CHECK_EQ(r2.status, 200);
         uint64_t hsum = 0;
@@ -797,12 +820,14 @@ TEST(http_driver_mid_body_disconnect) {
         {
             Client c(ts.port);
             c.send_str("PUT /disc HTTP/1.1\r\nHost: t\r\nContent-Length: 1000000\r\n\r\n");
-            c.send_str(make_pattern(1000));  // send only 1KB then disconnect
+            // send only 1KB then disconnect
+            c.send_str(make_pattern(1000));
         }
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (!g_disconnect_seen.load() && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        CHECK(g_disconnect_seen.load());  // contract 3: disconnect propagates as a body->read() exception
+        // contract 3: disconnect propagates as a body->read() exception
+        CHECK(g_disconnect_seen.load());
     });
 }
 
@@ -811,15 +836,18 @@ TEST(http_driver_concurrent_shutdown) {
         TestServer ts(d);
         Client c(ts.port);
         c.send_str("GET /slow HTTP/1.1\r\nHost: t\r\n\r\n");
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));  // request is in flight
+        // request is in flight
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
         auto t0 = std::chrono::steady_clock::now();
         ts.srv->shutdown();
-        auto r = c.read_response();  // contract 4: the in-flight request must complete
+        // contract 4: the in-flight request must complete
+        auto r = c.read_response();
         CHECK(r.ok);
         CHECK_EQ(r.status, 200);
         CHECK_EQ(r.body, "done");
         c.close_now();
-        ts.th.join();  // run() returns after the in-flight request completes
+        // run() returns after the in-flight request completes
+        ts.th.join();
         auto elapsed = std::chrono::steady_clock::now() - t0;
         CHECK(elapsed < std::chrono::seconds(8));
     });
@@ -922,7 +950,8 @@ TEST(http_driver_truncated_stream_closes_connection) {
         // treat the next response head as the remainder of this body (response misalignment)
         c.send_str("GET /short?size=100000 HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r = c.read_response();
-        CHECK(!r.ok);  // the declared byte count cannot be read in full, the connection is closed
+        // the declared byte count cannot be read in full, the connection is closed
+        CHECK(!r.ok);
         // The connection is indeed unusable: subsequent requests get no response
         c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r2 = c.read_response();
@@ -982,15 +1011,18 @@ TEST(block_queue_cancel_wakes_blocked_consumer) {
         }
         done.store(true);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));  // make sure it is blocked in pop
+    // make sure it is blocked in pop
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
     CHECK(!done.load());
-    q->cancel();  // must also wake the pop side, otherwise the consumer blocks forever
+    // must also wake the pop side, otherwise the consumer blocks forever
+    q->cancel();
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!done.load() && std::chrono::steady_clock::now() < deadline)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     consumer.join();
     CHECK(done.load());
-    CHECK(threw.load());  // cancel is not a normal EOF, it propagates as an exception
+    // cancel is not a normal EOF, it propagates as an exception
+    CHECK(threw.load());
 }
 
 // backlog-sequence ⑩: pieces pushed from a borrowed buffer coalesce into one tail
@@ -999,7 +1031,8 @@ TEST(block_queue_cancel_wakes_blocked_consumer) {
 TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
     auto q = std::make_shared<BlockQueue>(1 << 20);
     std::string expect;
-    for (int i = 0; i < 16; ++i) {  // 16 x 16 KiB slices, the httplib receiver's shape (CPPHTTPLIB_RECV_BUFSIZ)
+    for (int i = 0; i < 16; ++i) {
+        // 16 x 16 KiB slices, the httplib receiver's shape (CPPHTTPLIB_RECV_BUFSIZ)
         std::string piece(16384, char('a' + i));
         expect += piece;
         CHECK(q->push(piece.data(), piece.size()));
@@ -1009,7 +1042,8 @@ TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
     CHECK(q->push(std::move(owned)));
     CHECK(q->push("tail", 4));
     expect += "tail";
-    CHECK(q->push("", 0));  // empty pieces are dropped, never a zero-size block (= EOF to pop)
+    // empty pieces are dropped, never a zero-size block (= EOF to pop)
+    CHECK(q->push("", 0));
     CHECK(q->push(std::string()));
     q->close(true);
     std::vector<std::byte> buf(1 << 20);
@@ -1022,7 +1056,8 @@ TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
         ++pops;
     }
     CHECK_EQ(got, expect);
-    CHECK_EQ(pops, size_t(3));  // one coalesced block, the owned block, a new tail after it
+    // one coalesced block, the owned block, a new tail after it
+    CHECK_EQ(pops, size_t(3));
 
     // A piece larger than the target becomes its own block; the consumer can drain
     // the block the producer is still appending to (both under the lock)
@@ -1032,7 +1067,8 @@ TEST(block_queue_coalesces_borrowed_pieces_and_takes_owned_blocks) {
     CHECK(q2->push("ab", 2));
     std::byte small[3];
     CHECK_EQ(q2->pop(std::span(small)), size_t(3));
-    CHECK(q2->push("cd", 2));  // appends to the open tail while it is partly consumed
+    // appends to the open tail while it is partly consumed
+    CHECK(q2->push("cd", 2));
     q2->close(true);
     std::string rest;
     for (;;) {
@@ -1076,7 +1112,8 @@ TEST(header_map_tag_prefilter_keeps_semantics) {
     CHECK_EQ(h.get_all("X-AMZ-META-A").size(), size_t(2));
     CHECK_EQ(*h.get_all("X-AMZ-META-A")[1], "2");
     CHECK(!h.has("content-typo"));
-    h.set("content-type", "text/html");  // replaces in place, keeps position
+    // replaces in place, keeps position
+    h.set("content-type", "text/html");
     CHECK_EQ(h.items()[0].second, "text/html");
     CHECK_EQ(h.items().size(), size_t(5));
     CHECK_EQ(h.remove("SET-COOKIE"), size_t(2));
@@ -1119,7 +1156,8 @@ TEST(block_queue_normal_eof_still_returns_zero) {
     q->close(true);
     std::byte buf[16];
     CHECK_EQ(q->pop(std::span(buf)), size_t(5));
-    CHECK_EQ(q->pop(std::span(buf)), size_t(0));  // normal EOF
+    // normal EOF
+    CHECK_EQ(q->pop(std::span(buf)), size_t(0));
     // cancel after close (the usual order in the consumer's destructor) must not turn EOF into an exception
     q->cancel();
     CHECK_EQ(q->pop(std::span(buf)), size_t(0));
@@ -1171,7 +1209,8 @@ TEST(http_driver_unknown_method_forwarded_or_s3_xml) {
         auto r = c.read_response();
         CHECK(r.ok);
         if (r.status < 400) {
-            CHECK_EQ(r.body, "BREW");  // forwarded to the handler
+            // forwarded to the handler
+            CHECK_EQ(r.body, "BREW");
         } else {
             CHECK(r.body.find("<Error>") != std::string::npos);
             CHECK(r.body.find("<Code>") != std::string::npos);
@@ -1368,7 +1407,8 @@ TEST(http_driver_tls_round_trip) {
 TEST(http_driver_tls_file_body_falls_back_to_read) {
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
-        if (d == "seastar") continue;  // seastar::tls is covered by its own build
+        // seastar::tls is covered by its own build
+        if (d == "seastar") continue;
         try {
             TestServer ts(d, certs.cert_path, certs.key_path);
             g_file_bytes_sent = 0;
@@ -1397,7 +1437,8 @@ TEST(http_driver_tls_plaintext_client_rejected) {
             Client c(ts.port);
             c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             auto r = c.read_response();
-            CHECK(!r.ok);  // only a disconnect (or TLS alert noise) is possible, never an HTTP 200
+            // only a disconnect (or TLS alert noise) is possible, never an HTTP 200
+            CHECK(!r.ok);
         }
         // roadmap §5.3: the failed handshake is counted (OpenSSL-backed drivers with
         // their own accept loop; httplib and seastar handshake inside upstream)
@@ -1423,7 +1464,8 @@ TEST(http_driver_request_and_parse_error_counters) {
         try {
             TestServer ts(d);
             {
-                Client c(ts.port);  // two requests over one keep-alive connection
+                // two requests over one keep-alive connection
+                Client c(ts.port);
                 c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
                 CHECK(c.read_response().ok);
                 c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
@@ -1433,20 +1475,23 @@ TEST(http_driver_request_and_parse_error_counters) {
             if (d != "httplib") CHECK_EQ(ts.srv->stats().accepted, uint64_t(1));
             CHECK_EQ(ts.srv->stats().parse_errors, uint64_t(0));
             {
-                Client c(ts.port);  // no request line structure at all
+                // no request line structure at all
+                Client c(ts.port);
                 c.send_str("GARBAGE\r\n\r\n");
                 auto r = c.read_response();
                 CHECK(!r.ok || r.status >= 400);
             }
             CHECK(eventually([&] { return ts.srv->stats().parse_errors >= 1; }));
             {
-                Client c(ts.port);  // framing rejected by the shared validator: 400 + close
+                // framing rejected by the shared validator: 400 + close
+                Client c(ts.port);
                 c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: abc\r\n\r\n");
                 auto r = c.read_response();
                 CHECK(!r.ok || r.status == 400);
             }
             CHECK(eventually([&] { return ts.srv->stats().parse_errors >= 2; }));
-            CHECK_EQ(ts.srv->stats().requests, uint64_t(2));  // malformed ones are not requests
+            // malformed ones are not requests
+            CHECK_EQ(ts.srv->stats().requests, uint64_t(2));
         } catch (const mini_test::Failure& f) {
             throw mini_test::Failure("[driver=" + d + "] " + f.what());
         }
@@ -1503,11 +1548,14 @@ TEST(http_driver_idle_timeout_closes_idle_connection) {
             TestServer ts(d, [](HttpConfig& c) { c.idle_timeout_sec = 1; });
             Client c(ts.port);
             c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
-            CHECK(c.read_response().ok);  // keep-alive connection established
+            // keep-alive connection established
+            CHECK(c.read_response().ok);
             auto t0 = std::chrono::steady_clock::now();
             char b;
-            ssize_t n = ::recv(c.fd, &b, 1, 0);  // block waiting for the peer to close (SO_RCVTIMEO=10s as backstop)
-            CHECK_EQ(n, ssize_t{0});             // 0=peer closed; -1=the driver never closed (timeout)
+            // block waiting for the peer to close (SO_RCVTIMEO=10s as backstop)
+            ssize_t n = ::recv(c.fd, &b, 1, 0);
+            // 0=peer closed; -1=the driver never closed (timeout)
+            CHECK_EQ(n, ssize_t{0});
             CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8));
         } catch (const mini_test::Failure& f) {
             throw mini_test::Failure("[driver=" + d + "] " + f.what());
@@ -1531,9 +1579,11 @@ TEST(http_driver_header_timeout_bounds_slow_headers) {
                 c.write_timeout_sec = 30;
             });
             Client c(ts.port);
-            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nX-Slow: ");  // headers never finish
+            // headers never finish
+            c.send_str("GET /small HTTP/1.1\r\nHost: t\r\nX-Slow: ");
             auto t0 = std::chrono::steady_clock::now();
-            auto r = c.read_response();  // a plain close, or httplib's 408 — never a success
+            // a plain close, or httplib's 408 — never a success
+            auto r = c.read_response();
             CHECK(!r.ok || r.status >= 400);
             CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8));
             if (d != "httplib") {
@@ -1561,7 +1611,8 @@ TEST(http_driver_body_timeout_bounds_stalled_upload) {
             Client c(ts.port);
             c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 100\r\n\r\nabc");
             auto t0 = std::chrono::steady_clock::now();
-            auto r = c.read_response();  // either an error response or a plain close
+            // either an error response or a plain close
+            auto r = c.read_response();
             CHECK(!r.ok || r.status >= 400);
             CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(8));
             if (d != "httplib") {
@@ -1590,7 +1641,8 @@ TEST(http_driver_keepalive_request_budget) {
             CHECK(r2.ok);
             CHECK(r2.header("Connection") && HeaderMap::ieq(*r2.header("Connection"), "close"));
             c.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
-            CHECK(!c.read_response().ok);  // budget spent: closed
+            // budget spent: closed
+            CHECK(!c.read_response().ok);
             Client c2(ts.port);
             c2.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             CHECK(c2.read_response().ok);
@@ -1652,10 +1704,13 @@ TEST(http_driver_max_connections_rejects_excess) {
             a.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             CHECK(a.read_response().ok);
             b.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
-            CHECK(b.read_response().ok);  // two keep-alive connections fill the limit
-            Client c3(ts.port);           // the TCP three-way handshake still succeeds at the backlog layer
+            // two keep-alive connections fill the limit
+            CHECK(b.read_response().ok);
+            // the TCP three-way handshake still succeeds at the backlog layer
+            Client c3(ts.port);
             c3.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
-            CHECK(!c3.read_response().ok);  // the third must get no response (closed/discarded)
+            // the third must get no response (closed/discarded)
+            CHECK(!c3.read_response().ok);
             // Established connections are unaffected
             a.send_str("GET /small HTTP/1.1\r\nHost: t\r\n\r\n");
             CHECK(a.read_response().ok);
@@ -1674,8 +1729,10 @@ TEST(http_driver_shutdown_waits_for_inflight_within_grace) {
             TestServer ts(d, [](HttpConfig& c) { c.shutdown_grace_sec = 5; });
             Client c(ts.port);
             c.send_str("GET /slow?ms=600 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let the request enter the handler
-            ts.stop();                                                    // shutdown + join run()
+            // let the request enter the handler
+            std::this_thread::sleep_for(std::chrono::milliseconds(150));
+            // shutdown + join run()
+            ts.stop();
             auto r = c.read_response();
             CHECK(r.ok);
             CHECK_EQ(r.body, "done");
@@ -1727,7 +1784,8 @@ TEST(http_driver_shutdown_force_deadline_builtin) {
     auto t0 = std::chrono::steady_clock::now();
     ts.stop();
     auto took = std::chrono::steady_clock::now() - t0;
-    CHECK(took < std::chrono::milliseconds(3500));  // did not wait out the handler's 4s sleep
+    // did not wait out the handler's 4s sleep
+    CHECK(took < std::chrono::milliseconds(3500));
     c.close_now();
     // Let the leftover handler finish sleeping before the case exits: no race with process teardown
     std::this_thread::sleep_for(std::chrono::milliseconds(4200));

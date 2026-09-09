@@ -39,7 +39,8 @@ namespace {
 
 namespace asio = boost::asio;
 namespace beast = boost::beast;
-namespace bhttp = boost::beast::http;  // Avoids clashing with lights3::http
+// Avoids clashing with lights3::http
+namespace bhttp = boost::beast::http;
 using tcp = asio::ip::tcp;
 
 // Adapts (error_code, size_t)-shaped asio async operations into an awaiter;
@@ -115,7 +116,8 @@ struct Detached {
         std::suspend_never initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // spawn_detached already catches everything
+        // spawn_detached already catches everything
+        void unhandled_exception() { std::terminate(); }
     };
 };
 
@@ -155,9 +157,11 @@ struct BodyCtx {
     bhttp::request_parser<bhttp::buffer_body>* parser;
     Stream* stream;
     beast::flat_buffer* buffer;
-    int idle_timeout_sec;  // body_timeout: inactivity bound on one body read (roadmap §4.2)
+    // body_timeout: inactivity bound on one body read (roadmap §4.2)
+    int idle_timeout_sec;
     driver::ConnCounters* counters = nullptr;
-    bool need_100 = false;  // Expect: 100-continue not yet answered; reply only on the first body read
+    // Expect: 100-continue not yet answered; reply only on the first body read
+    bool need_100 = false;
     bool errored = false;
 };
 
@@ -324,7 +328,8 @@ private:
                 if (sessions_.size() >= static_cast<size_t>(cfg_.max_connections)) {
                     LOG_WARN("connection limit ({}) reached, rejecting", cfg_.max_connections);
                     counters_.rejected_limit.fetch_add(1, std::memory_order_relaxed);
-                    continue;  // sess closes the socket as it leaves scope
+                    // sess closes the socket as it leaves scope
+                    continue;
                 }
                 sessions_.insert(sess);
                 counters_.accepted.fetch_add(1, std::memory_order_relaxed);
@@ -340,7 +345,8 @@ private:
     // — destroyed only after session_loop completes, so nothing dangles
     Task<void> session_run(std::shared_ptr<Session> sess) {
         sess->stream.socket().set_option(tcp::no_delay(true));
-        auto idle = std::chrono::seconds(cfg_.header_timeout_sec);  // handshake: header bound
+        // handshake: header bound
+        auto idle = std::chrono::seconds(cfg_.header_timeout_sec);
         if (tls_ctx_) {
             TlsStream tls(sess->stream, *tls_ctx_);
             sess->stream.expires_after(idle);
@@ -375,7 +381,8 @@ private:
 
     template <class Stream>
     Task<void> session_loop(std::shared_ptr<Session> sess, Stream& stream, std::optional<TlsIdentity> tls_identity) {
-        beast::flat_buffer buffer;  // Kept across keep-alive requests (the parser may over-read)
+        // Kept across keep-alive requests (the parser may over-read)
+        beast::flat_buffer buffer;
         // Socket reads are sized by beast::read_size = max(512, capacity - size):
         // an unreserved flat_buffer grows to 512 bytes on the first read and then
         // stays there, so a 4MiB request body was pulled in ~8000 recv calls
@@ -383,7 +390,8 @@ private:
         // io chunk makes every body read a full-size recv
         buffer.reserve(cfg_.io_chunk_size);
         bool keep = true;
-        int served = 0;  // keep-alive budget (http.max_requests_per_connection)
+        // keep-alive budget (http.max_requests_per_connection)
+        int served = 0;
 
         while (keep && !stopping_.load()) {
             bhttp::request_parser<bhttp::buffer_body> parser;
@@ -413,7 +421,8 @@ private:
                 else if (ec && ec.category() == bhttp::make_error_code(bhttp::error::bad_method).category() &&
                          ec != bhttp::error::end_of_stream && ec != bhttp::error::partial_message)
                     counters_.parse_error();
-                if (ec) break;  // eof / timeout / closed by shutdown
+                // eof / timeout / closed by shutdown
+                if (ec) break;
             }
             sess->in_flight.store(true);
 
@@ -459,7 +468,8 @@ private:
                 resp = driver::internal_error_response(e.what());
                 keep = false;
             }
-            co_await ResumeOn{stream.get_executor()};  // The handler may resume on a pool thread
+            // The handler may resume on a pool thread
+            co_await ResumeOn{stream.get_executor()};
 
             if (stopping_.load() || !client_keep) keep = false;
             // The unconsumed body must be drained before reusing the
@@ -499,7 +509,8 @@ private:
             if (ec == bhttp::error::need_buffer) ec = {};
             if (ec) co_return false;
             drained += tmp.size() - body.size;
-            if (drained > cfg_.drain_limit) co_return false;  // Too large; give up and close the connection
+            // Too large; give up and close the connection
+            if (drained > cfg_.drain_limit) co_return false;
         }
         co_return true;
     }
@@ -507,7 +518,8 @@ private:
     template <class Stream>
     Task<bool> write_response(Stream& stream, HttpResponse& resp, bool head_request, bool keep) {
         bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
-        auto idle = std::chrono::seconds(cfg_.write_timeout_sec);  // write_timeout per write op
+        // write_timeout per write op
+        auto idle = std::chrono::seconds(cfg_.write_timeout_sec);
         auto note_write = [&](const beast::error_code& ec) {
             if (ec == beast::error::timeout) driver::count_timeout(counters_, driver::Phase::Write);
         };
@@ -584,7 +596,8 @@ private:
                 chunk = co_await pf.next();
             } catch (const std::exception& e) {
                 LOG_ERROR("stream body read failed mid-response: {}", e.what());
-                co_return false;  // Response head already sent; can only disconnect (contract 3: discard the result)
+                // Response head already sent; can only disconnect (contract 3: discard the result)
+                co_return false;
             }
             co_await ResumeOn{stream.get_executor()};
             size_t n = chunk.size();
@@ -606,7 +619,8 @@ private:
                 res.body().data = nullptr;
                 res.body().more = false;
             } else {
-                res.body().data = const_cast<std::byte*>(chunk.data());  // buffer_body wants void*; beast only reads
+                // buffer_body wants void*; beast only reads
+                res.body().data = const_cast<std::byte*>(chunk.data());
                 res.body().size = n;
                 res.body().more = true;
             }
@@ -640,7 +654,8 @@ private:
                 if (!s->in_flight.load()) idle.push_back(s);
             empty = sessions_.empty();
         }
-        for (auto& s : idle) close_session(s);  // Idle keep-alive connections get cut directly
+        // Idle keep-alive connections get cut directly
+        for (auto& s : idle) close_session(s);
         if (empty) {
             finish();
             return;
@@ -657,7 +672,8 @@ private:
             for (auto& s : rest) close_session(s);
             force_timer_.emplace(ctl_strand_, std::chrono::seconds(cfg_.shutdown_force_wait_sec));
             force_timer_->async_wait([this](beast::error_code e2) {
-                if (!e2) ioc_.stop();  // Last resort: stop waiting for stuck sessions
+                // Last resort: stop waiting for stuck sessions
+                if (!e2) ioc_.stop();
             });
         });
     }
@@ -692,15 +708,18 @@ private:
                 if (force_timer_) force_timer_->cancel();
                 beast::error_code ig;
                 if (stop_event_) stop_event_->close(ig);
-                work_.reset();  // run() returns once the io_context drains
+                // run() returns once the io_context drains
+                work_.reset();
             });
         });
     }
 
     HttpConfig cfg_;
     Handler handler_;
-    std::shared_ptr<tls::Holder> tls_holder_;    // Declared before tls_ctx_: the context's cert callback points here
-    std::optional<asio::ssl::context> tls_ctx_;  // Present means HTTPS (knobs applied at construction)
+    // Declared before tls_ctx_: the context's cert callback points here
+    std::shared_ptr<tls::Holder> tls_holder_;
+    // Present means HTTPS (knobs applied at construction)
+    std::optional<asio::ssl::context> tls_ctx_;
     asio::io_context ioc_;
     // Control-plane strand: all operations on acceptor / stop_event /
     // grace_timer / force_timer serialize here (the data plane still has one
@@ -716,9 +735,11 @@ private:
     uint16_t port_ = 0;
     std::atomic<bool> stopping_{false};
     std::mutex m_;
-    bool stop_handled_ = false;  // on_stop_signal has run (guarded by m_)
+    // on_stop_signal has run (guarded by m_)
+    bool stop_handled_ = false;
     std::set<std::shared_ptr<Session>> sessions_;
-    driver::ConnCounters counters_;  // IHttpServer::stats() (roadmap §4.2)
+    // IHttpServer::stats() (roadmap §4.2)
+    driver::ConnCounters counters_;
     std::once_flag finish_once_;
 };
 

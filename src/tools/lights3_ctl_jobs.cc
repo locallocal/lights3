@@ -59,7 +59,8 @@ int run_job(SignedClient& cli, const std::string& path, const std::string& label
             return 1;
         }
         if (doc.value("running", false)) continue;
-        if (doc.value("job_id", uint64_t(0)) != job) continue;  // a newer job replaced ours
+        // a newer job replaced ours
+        if (doc.value("job_id", uint64_t(0)) != job) continue;
         return print_doc(st);
     }
 }

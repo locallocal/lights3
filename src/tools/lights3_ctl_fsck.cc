@@ -35,9 +35,12 @@ struct FsckStats {
     uint64_t objects = 0;
     uint64_t bytes = 0;
     uint64_t mismatches = 0;
-    uint64_t errors = 0;        // transport/HTTP failures
-    uint64_t unverifiable = 0;  // non-MD5 ETag or legacy multipart without a part layout
-    uint64_t skipped = 0;       // deleted between list and GET
+    // transport/HTTP failures
+    uint64_t errors = 0;
+    // non-MD5 ETag or legacy multipart without a part layout
+    uint64_t unverifiable = 0;
+    // deleted between list and GET
+    uint64_t skipped = 0;
 };
 
 // Client-side pacing: the tool is synchronous, so a plain sleep suffices.
@@ -83,7 +86,8 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
             return;
         }
         if (r->status == 404) {
-            ++st.skipped;  // deleted between list and GET
+            // deleted between list and GET
+            ++st.skipped;
             return;
         }
         if (r->status != 200) {
@@ -172,7 +176,8 @@ int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& pr
         }
         if (root.get("IsTruncated") != "true") break;
         token = root.get("NextContinuationToken");
-        if (token.empty()) break;  // defensive: a truncated page must carry a token
+        // defensive: a truncated page must carry a token
+        if (token.empty()) break;
     }
     printf(
         "fsck %s: %llu objects, %llu bytes; %llu mismatches, %llu errors, "

@@ -20,7 +20,8 @@ namespace {
 std::optional<storage::ByteRange> parse_range_header(const std::string& v) {
     if (v.rfind("bytes=", 0) != 0) return std::nullopt;
     std::string spec = v.substr(6);
-    if (spec.find(',') != std::string::npos) return std::nullopt;  // multi-range not supported
+    // multi-range not supported
+    if (spec.find(',') != std::string::npos) return std::nullopt;
     auto dash = spec.find('-');
     if (dash == std::string::npos) return std::nullopt;
     auto to_u64 = [](std::string_view s) -> std::optional<uint64_t> {
@@ -151,7 +152,8 @@ bool has_response_override(const http::HttpRequest& req) {
 
 Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::string bucket, std::string key,
                                                const RequestAuth& auth) {
-    require_content_length(req);  // 411 (roadmap §2.5); CopyObject is body-less and exempt
+    // 411 (roadmap §2.5); CopyObject is body-less and exempt
+    require_content_length(req);
     auto& backend = router_.resolve(bucket);
 
     // Usage accounting + quota gate (roadmap §3.9 ①②): what this PUT replaces is read
@@ -187,7 +189,8 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
                           "At least one of the pre-conditions you specified did not hold");
     } else if (auto v2 = req.headers.get("If-Match")) {
         cond.if_match_etag = strip_quotes(*v2);
-        auto cur = co_await backend.head_object(bucket, key);  // missing -> NoSuchKey(404)
+        // missing -> NoSuchKey(404)
+        auto cur = co_await backend.head_object(bucket, key);
         if (*cond.if_match_etag != cur.etag)
             throw S3Error(S3ErrorCode::PreconditionFailed,
                           "At least one of the pre-conditions you specified did not hold");
@@ -351,17 +354,21 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
         fill_object_headers(resp, meta);
         apply_response_overrides(req, resp);
         if (range && !if_range_matches(req, meta)) range.reset();
-        if (range) {  // aligned with GET: 206 + Content-Range, no body, length only
-            auto [f, l] = storage::resolve_range(*range, meta.size);  // unsatisfiable -> 416
+        if (range) {
+            // aligned with GET: 206 + Content-Range, no body, length only
+            // unsatisfiable -> 416
+            auto [f, l] = storage::resolve_range(*range, meta.size);
             resp.status = 206;
             resp.headers.set("Content-Range",
                              "bytes " + std::to_string(f) + "-" + std::to_string(l) + "/" + std::to_string(meta.size));
             resp.content_length = l - f + 1;
         } else {
-            resp.content_length = meta.size;  // no body, the driver sends only Content-Length
+            // no body, the driver sends only Content-Length
+            resp.content_length = meta.size;
         }
         if (part_no) resp.headers.set("x-amz-mp-parts-count", std::to_string(parts_count));
-        apply_checksum_echo(req, meta, resp);  // §2.2 (no-op on 206)
+        // §2.2 (no-op on 206)
+        apply_checksum_echo(req, meta, resp);
         co_return resp;
     }
 
@@ -400,7 +407,8 @@ Task<http::HttpResponse> S3Service::get_object(http::HttpRequest& req, std::stri
     resp.content_length = len;
     resp.stream_body = std::move(stream.body);
     if (part_no) resp.headers.set("x-amz-mp-parts-count", std::to_string(parts_count));
-    apply_checksum_echo(req, stream.meta, resp);  // §2.2 (no-op on 206)
+    // §2.2 (no-op on 206)
+    apply_checksum_echo(req, stream.meta, resp);
     co_return resp;
 }
 

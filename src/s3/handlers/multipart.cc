@@ -74,8 +74,10 @@ std::string request_base_url(const http::HttpRequest& req) {
 // bytes of the parts named in the request plus the bytes of every stored part
 struct PartTotals {
     bool listed = false;
-    uint64_t requested = 0;  // sum over parts named in the complete XML
-    uint64_t stored = 0;     // sum over every part currently under the upload
+    // sum over parts named in the complete XML
+    uint64_t requested = 0;
+    // sum over every part currently under the upload
+    uint64_t stored = 0;
 };
 Task<PartTotals> check_parts_before_complete(storage::IStorageBackend& backend, const std::string& bucket,
                                              const std::string& key, const std::string& upload_id,
@@ -101,7 +103,8 @@ Task<PartTotals> check_parts_before_complete(storage::IStorageBackend& backend, 
         auto it = by_no.find(parts[i].part_no);
         if (it == by_no.end()) continue;
         totals.requested += it->second->size;
-        if (need_sizes && i + 1 < parts.size() && it->second->size < min_size)  // last part exempt
+        // last part exempt
+        if (need_sizes && i + 1 < parts.size() && it->second->size < min_size)
             throw S3Error(S3ErrorCode::EntityTooSmall,
                           "Your proposed upload is smaller than the minimum allowed size. "
                           "Part " +
@@ -165,7 +168,8 @@ Task<http::HttpResponse> S3Service::create_multipart(http::HttpRequest& req, std
     // checksum at complete time
     for (std::string_view h : {"x-amz-checksum-algorithm", "x-amz-sdk-checksum-algorithm"}) {
         auto v = req.headers.get(h);
-        if (!v) continue;  // unknown values were already rejected by the dispatch guard
+        // unknown values were already rejected by the dispatch guard
+        if (!v) continue;
         std::string algo;
         for (char c : *v) algo.push_back(char(toupper(static_cast<unsigned char>(c))));
         if (algo == "CRC64NVME")
@@ -232,7 +236,8 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
         co_return resp;
     }
 
-    require_content_length(req);  // 411 (roadmap §2.5); UploadPartCopy above is body-less and exempt
+    // 411 (roadmap §2.5); UploadPartCopy above is body-less and exempt
+    require_content_length(req);
     // Quota gate on the declared part length, then count what actually streamed
     // (roadmap §3.9 ②; a re-uploaded part number over-counts until complete/abort
     // settle the upload against the stored parts)
@@ -250,7 +255,8 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
 
     http::HttpResponse resp;
     resp.headers.set("ETag", quote_etag(result.etag));
-    if (part_checksum) {  // body drained: trailer-form value is resolvable now
+    if (part_checksum) {
+        // body drained: trailer-form value is resolvable now
         std::string v = part_checksum->resolved();
         if (!v.empty()) {
             std::string h = "x-amz-checksum-";
@@ -297,7 +303,8 @@ Task<http::HttpResponse> S3Service::complete_multipart(http::HttpRequest& req, s
         }
         parts.push_back(std::move(p));
     }
-    storage::validate_part_order(parts);  // out of order -> InvalidPartOrder, decided before the backend
+    // out of order -> InvalidPartOrder, decided before the backend
+    storage::validate_part_order(parts);
 
     auto& backend = router_.resolve(bucket);
     // Minimum part size 5MiB (last part exempt): without the check, 10000 one-byte parts could be committed, and

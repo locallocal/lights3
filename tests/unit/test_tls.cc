@@ -93,7 +93,8 @@ struct Server {
 struct ClientOpts {
     std::string sni;
     const tls_test::Cert* client_cert = nullptr;
-    int max_version = 0;  // 0 = library default
+    // 0 = library default
+    int max_version = 0;
     std::string ciphersuites;
 };
 
@@ -227,7 +228,8 @@ TEST(tls_min_version_and_ciphersuites) {
             CHECK_EQ(std::string(SSL_get_version(ok.ssl)), std::string("TLSv1.3"));
             Client v12(s.port, {.max_version = TLS1_2_VERSION});
             CHECK(!v12.handshake_ok);
-            if (d == "seastar") continue;  // cipher strings only reach seastar's OpenSSL backend
+            // cipher strings only reach seastar's OpenSSL backend
+            if (d == "seastar") continue;
             CHECK_EQ(std::string(SSL_get_cipher_name(ok.ssl)), std::string("TLS_AES_256_GCM_SHA384"));
             Client chacha(s.port, {.ciphersuites = "TLS_CHACHA20_POLY1305_SHA256"});
             CHECK(!chacha.handshake_ok);
@@ -273,7 +275,8 @@ TEST(tls_client_auth_require_and_optional) {
                 Client with(s.port, {.client_cert = &good});
                 CHECK(contains(with.request("GET", "/id"), "GET /id"));
                 Client foreign(s.port, {.client_cert = &bad});
-                CHECK(foreign.request("GET", "/x").empty());  // presented but invalid: still refused
+                // presented but invalid: still refused
+                CHECK(foreign.request("GET", "/x").empty());
             }
         } catch (const mini_test::Failure& f) {
             Driver(d).fail(f);
@@ -413,8 +416,10 @@ TEST(tls_holder_reload_semantics) {
     cfg.tls_key = files.put("key.pem", a.key_pem);
     tls::Holder h(cfg);
     CHECK(contains(h.current()->select("").subject, "a.test"));
-    CHECK(!h.reload_if_changed());      // nothing changed
-    files.put("cert.pem", b.cert_pem);  // cert only: key mismatch -> refused, old kept
+    // nothing changed
+    CHECK(!h.reload_if_changed());
+    // cert only: key mismatch -> refused, old kept
+    files.put("cert.pem", b.cert_pem);
     CHECK(!h.reload_if_changed());
     CHECK(contains(h.current()->select("").subject, "a.test"));
     files.put("key.pem", b.key_pem);
@@ -459,12 +464,17 @@ TEST(tls_config_validation) {
         }
         return false;
     };
-    CHECK(rejects(base + "  tls_client_auth: require\n"));                                          // needs a CA
-    CHECK(rejects(base + "  tls_client_auth: always\n"));                                           // unknown mode
-    CHECK(rejects(base + "  tls_min_version: \"1.1\"\n"));                                          // below the floor
-    CHECK(rejects(base + "  tls_sni:\n    - hosts: x\n      cert: /x.pem\n"));                      // missing key
-    CHECK(rejects("backends:\n  - name: m\n    type: memory\nhttp:\n  tls_client_ca: /ca.pem\n"));  // knob without
-                                                                                                    // listener
+    // needs a CA
+    CHECK(rejects(base + "  tls_client_auth: require\n"));
+    // unknown mode
+    CHECK(rejects(base + "  tls_client_auth: always\n"));
+    // below the floor
+    CHECK(rejects(base + "  tls_min_version: \"1.1\"\n"));
+    // missing key
+    CHECK(rejects(base + "  tls_sni:\n    - hosts: x\n      cert: /x.pem\n"));
+    // knob without
+    // listener
+    CHECK(rejects("backends:\n  - name: m\n    type: memory\nhttp:\n  tls_client_ca: /ca.pem\n"));
     // auth.tls_identity (backlog-sequence ⑥) presupposes client auth
     CHECK(rejects(base + "  tls_client_ca: /ca.pem\n  tls_client_auth: require\nauth:\n  tls_identity: cn\n"));
     CHECK(rejects(base + "auth:\n  tls_identity: subject-cn\n"));

@@ -33,11 +33,13 @@ enum class CredSource { kStatic, kFile, kDynamic };
 
 struct CredentialInfo {
     std::string access_key;
-    util::SecretString secret_key;  // wiped on destruction (docs/archive/gaps.md §4)
+    // wiped on destruction (docs/archive/gaps.md §4)
+    util::SecretString secret_key;
     CredSource source = CredSource::kDynamic;
     std::string comment;
     std::chrono::system_clock::time_point created;
-    std::optional<CredentialPolicy> policy;  // file/dynamic only; static credentials are always unrestricted
+    // file/dynamic only; static credentials are always unrestricted
+    std::optional<CredentialPolicy> policy;
     // Edit propagation (roadmap §2.5): rev is a monotonic edit counter persisted in the
     // JSON (distinct from "version", which encodes the encryption format); storage_etag
     // is the credential object's ETag as last seen by this instance — sync re-reads an
@@ -48,7 +50,8 @@ struct CredentialInfo {
     // belongs to (empty = legacy credential: no ownership filter, as before) and its
     // role inside that tenant. Static credentials never carry a tenant (they are root)
     std::string tenant;
-    bool tenant_admin = false;  // may manage credentials/quotas of its own tenant
+    // may manage credentials/quotas of its own tenant
+    bool tenant_admin = false;
 
     bool is_static() const { return source == CredSource::kStatic; }
 };
@@ -112,8 +115,10 @@ public:
     struct Update {
         std::optional<std::string> comment;
         bool set_policy = false;
-        std::optional<CredentialPolicy> policy;  // meaningful only when set_policy
-        std::optional<std::string> tenant;       // "" = detach from its tenant
+        // meaningful only when set_policy
+        std::optional<CredentialPolicy> policy;
+        // "" = detach from its tenant
+        std::optional<std::string> tenant;
         std::optional<bool> tenant_admin;
     };
     Task<CredentialInfo> update(std::string_view ak, Update upd);
@@ -129,9 +134,11 @@ public:
     // pulls new sessions and deletes expired objects, and expired entries are swept
     // from memory opportunistically
     struct SessionCredential {
-        std::string access_key;  // L3SA + 16 base32 chars
+        // L3SA + 16 base32 chars
+        std::string access_key;
         util::SecretString secret_key;
-        std::string token;  // opaque base64
+        // opaque base64
+        std::string token;
         std::chrono::system_clock::time_point expires;
     };
     Task<SessionCredential> mint_session(std::string_view parent_ak, int duration_sec);
@@ -145,7 +152,8 @@ public:
     static constexpr std::chrono::seconds kSessionMissTtl{60};
 
     std::optional<CredentialInfo> find(std::string_view ak) const;
-    std::vector<CredentialInfo> list() const;  // sorted by AK
+    // sorted by AK
+    std::vector<CredentialInfo> list() const;
     // Non-session credentials of one tenant (admin plane scoping / tenant deletion guard)
     std::vector<CredentialInfo> list_tenant(std::string_view tenant) const;
 
@@ -187,8 +195,10 @@ private:
         std::string token;
         std::chrono::system_clock::time_point expires;
         std::optional<CredentialPolicy> policy;
-        std::string tenant;  // inherited; sessions are never tenant admins (data plane only)
-        std::string parent;  // the AK that assumed (audit trail; not re-checked at verify)
+        // inherited; sessions are never tenant admins (data plane only)
+        std::string tenant;
+        // the AK that assumed (audit trail; not re-checked at verify)
+        std::string parent;
         std::chrono::system_clock::time_point created;
     };
     std::map<std::string, SessionEntry, std::less<>> sessions_;
@@ -205,7 +215,8 @@ private:
     // object, and without a tombstone it would be pulled back into memory, resurrected for one sync cycle
     std::map<std::string, std::chrono::steady_clock::time_point, std::less<>> tombstones_;
     std::atomic<bool> degraded_{false};
-    std::atomic<bool> sys_bucket_ready_{false};  // lazy create_bucket(".sys") happens only once
+    // lazy create_bucket(".sys") happens only once
+    std::atomic<bool> sys_bucket_ready_{false};
 
     // mtime snapshot of credentials_file (polling change detection; touched only by the background/manual reload
     // thread)

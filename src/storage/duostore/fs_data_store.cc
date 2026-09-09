@@ -71,8 +71,10 @@ std::string build_pack_header(std::string_view owner, uint64_t payload_len, uint
     std::string h;
     h.reserve(header_len);
     h.append(kPackMagic, sizeof kPackMagic);
-    h.push_back(1);  // ver
-    h.push_back(0);  // flags
+    // ver
+    h.push_back(1);
+    // flags
+    h.push_back(0);
     put_le(h, header_len, 2);
     put_le(h, payload_len, 8);
     put_le(h, crc, 4);
@@ -161,7 +163,8 @@ private:
             pinned_.push_back(cur_id_);
         }
         unsigned shard = shard_of(cur_id_);
-        store_->shard_dirfd(shard);  // ensure the shard directory exists
+        // ensure the shard directory exists
+        store_->shard_dirfd(shard);
         auto path = store_->chunk_path(cur_id_);
         fd_ = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
         if (fd_ < 0) throw_errno("open chunk");
@@ -189,15 +192,18 @@ private:
 
     FsDataStore* store_;
     std::vector<Extent> extents_;
-    std::vector<uint64_t> pinned_;  // ids write-side pinned by this session (ownership transfers to the caller after
-                                    // finish)
+    // ids write-side pinned by this session (ownership transfers to the caller after
+    // finish)
+    std::vector<uint64_t> pinned_;
     std::bitset<256> touched_;
-    std::unique_ptr<UringWriteStream> ws_;  // current chunk's write pipeline (uring mode)
+    // current chunk's write pipeline (uring mode)
+    std::unique_ptr<UringWriteStream> ws_;
     int fd_ = -1;
     uint64_t cur_id_ = 0;
     uint64_t cur_len_ = 0;
     uint32_t cur_crc_ = 0;
-    uint64_t run_next_ = 0, run_limit_ = 0;  // this session's contiguous id run (§3.9 batch allocation)
+    // this session's contiguous id run (§3.9 batch allocation)
+    uint64_t run_next_ = 0, run_limit_ = 0;
     uint32_t run_len_ = 0;
     bool finished_ = false;
 };
@@ -232,7 +238,8 @@ public:
 
     Task<DataRef> finish() override {
         if (spill_) co_return co_await spill_->finish();
-        if (buf_.empty()) co_return DataRef{};  // 0-byte object: empty DataRef
+        // 0-byte object: empty DataRef
+        if (buf_.empty()) co_return DataRef{};
         Extent e = co_await store_->append_pack_record(owner_, std::span<const std::byte>(buf_.data(), buf_.size()));
         co_return DataRef{{e}};
     }
@@ -344,7 +351,8 @@ private:
             int fd = open_extent(e);
             pack_buf_.resize(size_t(e.length));
             if (opt_.uring) {
-                UringReadStream rs(opt_.uring, fd, e.offset, e.length);  // owns fd
+                // owns fd
+                UringReadStream rs(opt_.uring, fd, e.offset, e.length);
                 size_t got = 0;
                 while (got < pack_buf_.size()) {
                     size_t n = co_await rs.read(std::span(pack_buf_.data() + got, pack_buf_.size() - got));
@@ -406,7 +414,8 @@ private:
     uint64_t remaining_;
     uint64_t total_;
     int fd_ = -1;
-    std::unique_ptr<UringReadStream> stream_;  // current chunk extent's read-ahead stream (uring mode)
+    // current chunk extent's read-ahead stream (uring mode)
+    std::unique_ptr<UringReadStream> stream_;
     bool crc_active_ = false;
     uint32_t crc_acc_ = 0;
     bool pack_loaded_ = false;
@@ -486,7 +495,8 @@ Task<std::unique_ptr<DataWriter>> FsDataStore::open_writer(WriteHint hint) {
 }
 
 Task<Extent> FsDataStore::append_pack_record(std::string_view owner, std::span<const std::byte> payload) {
-    PackAppendItem item{owner, payload};  // lives in this frame, valid across the co_await
+    // lives in this frame, valid across the co_await
+    PackAppendItem item{owner, payload};
     auto v = co_await append_pack_records({&item, 1});
     co_return v.at(0);
 }
@@ -529,7 +539,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
         bool dirty = false;
         auto sync_slot = [&] {
             if (!dirty) return;
-            if (int fe = fault::check("duostore.pack.fdatasync")) {  // roadmap §6.1
+            if (int fe = fault::check("duostore.pack.fdatasync")) {
+                // roadmap §6.1
                 errno = fe;
                 throw_errno("fdatasync pack");
             }
@@ -555,7 +566,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
             if (slot->fd < 0) {
                 slot->id = alloc_(Extent::Kind::kPack, 1);
                 unsigned shard = shard_of(slot->id);
-                int dirfd = pack_dirfd(shard);  // ensure the shard directory exists
+                // ensure the shard directory exists
+                int dirfd = pack_dirfd(shard);
                 auto path = pack_path(slot->id);
                 slot->fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
                 if (slot->fd < 0) throw_errno("open pack");
@@ -572,7 +584,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
                         "detection degraded",
                         slot->id, std::strerror(errno));
                 slot->size = 0;
-                slot->opened = std::chrono::steady_clock::now();  // age-based rotation start point (§6.1)
+                // age-based rotation start point (§6.1)
+                slot->opened = std::chrono::steady_clock::now();
                 // pack creation is low-frequency (rotation granularity), fsync the directory immediately (chunks batch
                 // at session end, §5.1)
                 if (::fsync(dirfd) != 0) throw_errno("fsync pack shard dir");
@@ -583,7 +596,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
             rec.append(reinterpret_cast<const char*>(item.payload.data()), item.payload.size());
             size_t off = 0;
             while (off < rec.size()) {
-                if (int fe = fault::check("duostore.pack.pwrite")) {  // roadmap §6.1
+                if (int fe = fault::check("duostore.pack.pwrite")) {
+                    // roadmap §6.1
                     errno = fe;
                     throw_errno("pwrite pack record");
                 }
@@ -599,7 +613,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
         }
         if (dirty && opt_.uring) {
             async_sync_fd = ::dup(slot->fd);
-            if (async_sync_fd < 0) sync_slot();  // dup failed: fall back to the blocking sync
+            // dup failed: fall back to the blocking sync
+            if (async_sync_fd < 0) sync_slot();
         } else {
             sync_slot();
         }
@@ -613,7 +628,8 @@ Task<std::vector<Extent>> FsDataStore::append_pack_records(std::span<const PackA
             throw;
         }
         ::close(async_sync_fd);
-        if (r < 0 && r != -EINVAL)  // EINVAL: fs unsupported, matching fsync_file semantics
+        // EINVAL: fs unsupported, matching fsync_file semantics
+        if (r < 0 && r != -EINVAL)
             throw S3Error(S3ErrorCode::InternalError, std::string("fdatasync pack: ") + std::strerror(-r));
     }
     // The seal's meta commit is submitted outside the slot lock (docs/archive/gaps.md
@@ -680,7 +696,8 @@ Task<uint64_t> FsDataStore::seal_aged_packs(int64_t max_age_ms) {
         close_slot_locked(*slot);
         ++sealed;
     }
-    flush_seals(/*rethrow=*/false);  // same as the append path: failures stay queued, retried on the next write/close
+    // same as the append path: failures stay queued, retried on the next write/close
+    flush_seals(/*rethrow=*/false);
     co_return sealed;
 }
 
@@ -719,9 +736,9 @@ void FsDataStore::flush_seals(bool rethrow) {
 
 Task<std::unique_ptr<http::BodyReader>> FsDataStore::open_reader(DataRef ref, uint64_t first, uint64_t last) {
     uint64_t total = ref.total();
+    // caller already ran resolve_range
     if (first > last || last >= total)
-        throw S3Error(S3ErrorCode::InternalError,
-                      "duostore: reader range beyond manifest");  // caller already ran resolve_range
+        throw S3Error(S3ErrorCode::InternalError, "duostore: reader range beyond manifest");
     co_return std::make_unique<ExtentChainReader>(opt_, std::move(ref.extents), first, last, pool_);
 }
 
@@ -729,8 +746,8 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
     co_await pool_->schedule();
     size_t done = 0;
     for (const auto& e : extents) {
-        if (e.kind == Extent::Kind::kPack)
-            continue;  // pack records become dead regions, reclaimed via compaction (§9.1)
+        // pack records become dead regions, reclaimed via compaction (§9.1)
+        if (e.kind == Extent::Kind::kPack) continue;
         if (e.kind != Extent::Kind::kChunk) {
             // Engine mismatch (fs data engine received a kRados extent): silently
             // skipping would let GC spin uselessly with no way to notice
@@ -743,8 +760,8 @@ Task<void> FsDataStore::remove(std::span<const Extent> extents) {
                     int(e.kind));
             continue;
         }
-        if (::unlink(chunk_path(e.file_id).c_str()) != 0 && errno != ENOENT)
-            throw_errno("unlink chunk");  // idempotent: ENOENT ignored
+        // idempotent: ENOENT ignored
+        if (::unlink(chunk_path(e.file_id).c_str()) != 0 && errno != ENOENT) throw_errno("unlink chunk");
         // TB-scale objects have hundreds of thousands of extents: yield
         // periodically instead of monopolizing one pool thread for minutes (gaps §2.11)
         if (++done % 1024 == 0) co_await pool_->schedule();
@@ -766,7 +783,8 @@ bool FsDataStore::pack_write_locked(uint64_t pack_id) {
     // gone with the process too); EWOULDBLOCK ⇒ another live writer exists.
     // Unlock immediately after acquiring; no state is changed
     int fd = ::open(pack_path(pack_id).c_str(), O_RDONLY);
-    if (fd < 0) return false;  // file missing/unreadable: leave it to the caller's original logic
+    // file missing/unreadable: leave it to the caller's original logic
+    if (fd < 0) return false;
     bool locked_by_other = ::flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
     if (!locked_by_other) ::flock(fd, LOCK_UN);
     ::close(fd);
@@ -775,8 +793,8 @@ bool FsDataStore::pack_write_locked(uint64_t pack_id) {
 
 Task<void> FsDataStore::remove_pack(uint64_t pack_id) {
     co_await pool_->schedule();
-    if (::unlink(pack_path(pack_id).c_str()) != 0 && errno != ENOENT)
-        throw_errno("unlink pack");  // idempotent: ENOENT ignored
+    // idempotent: ENOENT ignored
+    if (::unlink(pack_path(pack_id).c_str()) != 0 && errno != ENOENT) throw_errno("unlink pack");
     co_return;
 }
 
@@ -839,7 +857,8 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
         st.migrated += co_await migrate_(*this, std::move(batch));
         batch.clear();
         batch_bytes = 0;
-        co_await pool_->schedule();  // migration involves IO + meta commits; yield the pool thread between batches
+        // migration involves IO + meta commits; yield the pool thread between batches
+        co_await pool_->schedule();
     };
 
     std::vector<std::byte> hdr(kPackHeaderFixed);
@@ -868,7 +887,8 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
                 pack_id, off);
             break;
         }
-        if (off + header_len + payload_len > st.file_size) break;  // torn tail (expected)
+        // torn tail (expected)
+        if (off + header_len + payload_len > st.file_size) break;
         owner.resize(owner_len);
         if (owner_len > 0 &&
             pread_upto(rfd, reinterpret_cast<std::byte*>(owner.data()), owner_len, off + kPackHeaderFixed) < owner_len)
@@ -885,7 +905,8 @@ Task<GcRewrite> FsDataStore::rewrite_pack(uint64_t pack_id) {
         Extent from{Extent::Kind::kPack, pack_id, off + header_len, payload_len, crc};
         if (migrate_) {
             batch.push_back({owner, from, std::move(payload)});
-            payload = {};  // reset moved-from state (the next record's resize reallocates)
+            // reset moved-from state (the next record's resize reallocates)
+            payload = {};
             batch_bytes += payload_len;
             if (batch.size() >= kMigrateBatchRecs || batch_bytes >= kMigrateBatchBytes) co_await flush_batch();
         }
@@ -901,7 +922,8 @@ Task<void> FsDataStore::scan_shard_tree(const char* sub, const char* suffix,
     co_await pool_->schedule();
     std::error_code ec;
     std::filesystem::directory_iterator shards(opt_.root / sub, ec);
-    if (ec) co_return;  // directory missing = no entities
+    // directory missing = no entities
+    if (ec) co_return;
     const size_t suffix_len = std::strlen(suffix);
     for (const auto& sd : shards) {
         if (!sd.is_directory(ec) || ec) continue;
@@ -915,7 +937,8 @@ Task<void> FsDataStore::scan_shard_tree(const char* sub, const char* suffix,
             auto r = std::from_chars(name.data(), name.data() + 16, id, 16);
             if (r.ec != std::errc() || r.ptr != name.data() + 16) continue;
             struct stat sb;
-            if (::stat(f.path().c_str(), &sb) != 0) continue;  // tolerate concurrent-unlink races
+            // tolerate concurrent-unlink races
+            if (::stat(f.path().c_str(), &sb) != 0) continue;
             cb(id, int64_t(sb.st_mtim.tv_sec) * 1000 + sb.st_mtim.tv_nsec / 1000000, uint64_t(sb.st_size));
         }
     }
@@ -939,7 +962,8 @@ Task<void> FsDataStore::close() {
         std::lock_guard lk(slot->m);
         if (slot->fd >= 0) close_slot_locked(*slot);
     }
-    flush_seals(/*rethrow=*/true);  // sealing failures on the shutdown path must be visible to the caller
+    // sealing failures on the shutdown path must be visible to the caller
+    flush_seals(/*rethrow=*/true);
     // Stop the engine's reaper threads; escaped readers keep the engine object alive via
     // their options copies, but their next submission fails with InternalError (same
     // close-ordering assumption as xlocalfs)

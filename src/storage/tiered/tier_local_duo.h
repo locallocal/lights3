@@ -49,7 +49,8 @@ private:
     friend class DuoCacheFill;
     friend class DuoWalker;
     std::shared_ptr<DuoStoreBackend> duo_;
-    std::filesystem::path state_dir_;  // <root>/tier
+    // <root>/tier
+    std::filesystem::path state_dir_;
     AccessTable table_;
 };
 

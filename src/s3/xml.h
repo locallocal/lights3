@@ -18,11 +18,14 @@ std::string xml_escape(const std::string& s);
 
 struct XmlNode {
     std::string name;
-    std::string text;  // direct text (concatenated, leading/trailing whitespace trimmed)
+    // direct text (concatenated, leading/trailing whitespace trimmed)
+    std::string text;
     std::vector<XmlNode> children;
 
-    const XmlNode* find(std::string_view child_name) const;  // first child with the given name
-    std::string get(std::string_view child_name) const;      // child node text, "" if absent
+    // first child with the given name
+    const XmlNode* find(std::string_view child_name) const;
+    // child node text, "" if absent
+    std::string get(std::string_view child_name) const;
 };
 
 XmlNode xml_parse(std::string_view input, size_t max_size = 1024 * 1024);

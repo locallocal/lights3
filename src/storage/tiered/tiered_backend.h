@@ -37,14 +37,21 @@ struct TierRule {
 };
 
 struct TieredConfig {
-    int64_t cold_after_sec = 30 * 24 * 3600;  // coldness threshold (docs/storage/tiered-design.md §5.1)
-    int64_t scan_interval_sec = 3600;         // 0 = disable the background task (manual hook for tests)
-    double space_high_watermark = 0.85;       // triggers space reclamation
-    double space_low_watermark = 0.70;        // reclamation target
-    uint64_t min_free_bytes = 1ull << 30;     // minimum headroom required for cache fill (requirement 3)
-    bool cache_fill_on_range = true;          // background whole-object promotion when a Range hits remote
+    // coldness threshold (docs/storage/tiered-design.md §5.1)
+    int64_t cold_after_sec = 30 * 24 * 3600;
+    // 0 = disable the background task (manual hook for tests)
+    int64_t scan_interval_sec = 3600;
+    // triggers space reclamation
+    double space_high_watermark = 0.85;
+    // reclamation target
+    double space_low_watermark = 0.70;
+    // minimum headroom required for cache fill (requirement 3)
+    uint64_t min_free_bytes = 1ull << 30;
+    // background whole-object promotion when a Range hits remote
+    bool cache_fill_on_range = true;
     int max_concurrent_transfers = 4;
-    uint64_t quota_bytes = 0;  // 0 = logical quota disabled
+    // 0 = logical quota disabled
+    uint64_t quota_bytes = 0;
     // Exponential backoff for failed GC entries (docs/storage/tiered-design.md §9): delay =
     // base x 2^attempts, clamped to cap; persisted per entry (attempts/retry_at land in the
     // TSV, not reset by restart)
@@ -61,7 +68,8 @@ struct TieredConfig {
     // full_scan_interval (enrolls untracked objects, recalibrates the quota books, does
     // crash recovery); rounds in between consume the time wheel. 0 = every round is full
     int64_t full_scan_interval_sec = 86400;
-    std::vector<TierRule> rules;  // ② prefix policies, first match wins
+    // ② prefix policies, first match wins
+    std::vector<TierRule> rules;
     // ③ Eviction score = age × (1 + size_weight × log2(1 + size/1MiB)) / (1 + frequency_weight × hits);
     // both 0 = pure LRU (the previous behavior)
     double evict_size_weight = 0.0;
@@ -76,42 +84,62 @@ struct TieredConfig {
 
 // Statistics for run_gc_once() (for backoff / test assertions)
 struct TierGcStats {
-    uint64_t resolved = 0;       // entries conclusively removed (delete succeeded / cloud never had it / live reference
-                                 // invalidated / corrupt)
-    uint64_t removed_cloud = 0;  // orphan cloud replicas actually deleted
-    uint64_t deferred = 0;       // backoff not yet due, skipped this round
-    uint64_t failed = 0;         // failed this round, rescheduled with exponential backoff
+    // entries conclusively removed (delete succeeded / cloud never had it / live reference
+    // invalidated / corrupt)
+    uint64_t resolved = 0;
+    // orphan cloud replicas actually deleted
+    uint64_t removed_cloud = 0;
+    // backoff not yet due, skipped this round
+    uint64_t deferred = 0;
+    // failed this round, rescheduled with exponential backoff
+    uint64_t failed = 0;
 };
 
 // Bidirectional reconciliation statistics for run_reconcile_once() (docs/storage/tiered-design.md §9)
 struct TierReconcileStats {
-    uint64_t cloud_objects = 0;    // objects visited in the cloud walk
-    uint64_t stubs_rebuilt = 0;    // cloud has it, local does not -> stub rebuilt from redundant headers
-    uint64_t orphans_deleted = 0;  // cloud orphans deleted (delete mode, or stale replicas at the local `local` tier)
-    uint64_t orphans_skipped = 0;  // undecidable (no lights3 redundant headers / etag ambiguity) -> warn and skip
-    uint64_t refs_missing = 0;     // local remote, cloud missing -> warn (data loss; never delete the stub)
+    // objects visited in the cloud walk
+    uint64_t cloud_objects = 0;
+    // cloud has it, local does not -> stub rebuilt from redundant headers
+    uint64_t stubs_rebuilt = 0;
+    // cloud orphans deleted (delete mode, or stale replicas at the local `local` tier)
+    uint64_t orphans_deleted = 0;
+    // undecidable (no lights3 redundant headers / etag ambiguity) -> warn and skip
+    uint64_t orphans_skipped = 0;
+    // local remote, cloud missing -> warn (data loss; never delete the stub)
+    uint64_t refs_missing = 0;
     // Quarantine ledger movement this round (roadmap §3.6 ④)
-    uint64_t quarantined_new = 0;       // findings seen for the first time (logged at WARN/ERROR)
-    uint64_t quarantined_resolved = 0;  // ledger entries whose finding disappeared
+    // findings seen for the first time (logged at WARN/ERROR)
+    uint64_t quarantined_new = 0;
+    // ledger entries whose finding disappeared
+    uint64_t quarantined_resolved = 0;
 };
 
 // One scan round's report (roadmap §3.6 ①)
 struct TierScanStats {
-    bool full = false;         // full enumeration vs time-wheel round
-    uint64_t walked = 0;       // objects enumerated (full) or wheel candidates verified (incremental)
-    uint64_t cold_picked = 0;  // coldness demotions launched
-    uint64_t recovered = 0;    // half-done stubs finished
-    uint64_t enrolled = 0;     // wheel enrollments written
-    uint64_t stale = 0;        // wheel entries whose object is gone
-    uint64_t evicted = 0;      // watermark victims launched
+    // full enumeration vs time-wheel round
+    bool full = false;
+    // objects enumerated (full) or wheel candidates verified (incremental)
+    uint64_t walked = 0;
+    // coldness demotions launched
+    uint64_t cold_picked = 0;
+    // half-done stubs finished
+    uint64_t recovered = 0;
+    // wheel enrollments written
+    uint64_t enrolled = 0;
+    // wheel entries whose object is gone
+    uint64_t stale = 0;
+    // watermark victims launched
+    uint64_t evicted = 0;
     uint64_t evicted_bytes = 0;
-    uint64_t need_remaining = 0;  // bytes the watermark could not cover
+    // bytes the watermark could not cover
+    uint64_t need_remaining = 0;
 };
 
 // Quarantine ledger entry (roadmap §3.6 ④): a reconciliation finding that is repeated
 // every round until an operator acts on it
 struct QuarantineEntry {
-    std::string kind;  // refs_missing | foreign
+    // refs_missing | foreign
+    std::string kind;
     std::string bucket, key, etag;
     int64_t first_seen = 0, last_seen = 0;
     uint64_t count = 0;
@@ -247,7 +275,8 @@ private:
     // ---- Access records + time wheel (docs/storage/tiered-design.md §4.3 / §5.1) ----
     struct Touch {
         int64_t atime = 0;
-        uint32_t hits = 0;  // touches since the last flush (merged into the stored count)
+        // touches since the last flush (merged into the stored count)
+        uint32_t hits = 0;
     };
     void touch(std::string_view bucket, std::string_view key);
     void forget_access(std::string_view bucket, std::string_view key);
@@ -260,7 +289,8 @@ private:
     static constexpr int64_t kWheelSlotSec = 3600;
     int64_t wheel_slot_for(int64_t atime, int64_t cold_after) const { return (atime + cold_after) / kWheelSlotSec; }
     void wheel_append(int64_t slot, std::string_view bucket, std::string_view key);
-    std::vector<std::pair<int64_t, std::filesystem::path>> wheel_slots() const;  // ascending
+    // ascending
+    std::vector<std::pair<int64_t, std::filesystem::path>> wheel_slots() const;
     void maybe_kick_flush();
 
     // ---- Scan internals ----
@@ -300,7 +330,8 @@ private:
     // close() waits for zero)
     void schedule_scan();
     void schedule_flush();
-    void schedule_reconcile();  // independent low-frequency timer (reconcile_interval; 0 = off)
+    // independent low-frequency timer (reconcile_interval; 0 = off)
+    void schedule_reconcile();
 
     Task<void> demote_quiet(std::string bucket, std::string key);
     Task<void> promote_quiet(std::string bucket, std::string key);
@@ -329,49 +360,61 @@ private:
     // Metric instances claimed at construction (same paradigm as duostore); with an empty
     // scope they are orphan instances and calls are harmless
     std::array<std::shared_ptr<MetricCounter>, kOpCount> m_ops_, m_op_errors_;
-    std::shared_ptr<MetricCounter> m_get_local_, m_get_cloud_;  // GET traffic source split
+    // GET traffic source split
+    std::shared_ptr<MetricCounter> m_get_local_, m_get_cloud_;
     std::shared_ptr<MetricCounter> m_demoted_, m_promoted_;
     std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_removed_, m_gc_failed_;
-    std::shared_ptr<MetricGauge> m_gc_deferred_;  // per-round observation (non-monotonic, see init_metrics)
+    // per-round observation (non-monotonic, see init_metrics)
+    std::shared_ptr<MetricGauge> m_gc_deferred_;
     std::shared_ptr<MetricHistogram> m_scan_duration_;
     std::shared_ptr<MetricCounter> m_scan_full_, m_scan_incr_, m_evicted_bytes_, m_access_flushed_;
     std::shared_ptr<MetricCounter> m_rcache_hit_, m_rcache_fill_, m_rcache_pass_;
     std::shared_ptr<MetricGauge> m_q_refs_missing_, m_q_foreign_;
-    std::filesystem::path tier_dir_;        // local_->state_dir()
-    std::filesystem::path gc_dir_;          // <state>/gc
-    std::filesystem::path wheel_dir_;       // <state>/wheel
-    std::filesystem::path quarantine_dir_;  // <state>/quarantine
+    // local_->state_dir()
+    std::filesystem::path tier_dir_;
+    // <state>/gc
+    std::filesystem::path gc_dir_;
+    // <state>/wheel
+    std::filesystem::path wheel_dir_;
+    // <state>/quarantine
+    std::filesystem::path quarantine_dir_;
 
     // Semaphores uniformly take the pool executor: release posts the waiter's continuation
     // back to a pool thread, eradicating the path where "in-place resume pins blocking IO
     // on the HTTP response thread" (docs/archive/gaps.md §2.4)
     ThreadPoolExecutor pool_exec_{*pool_};
     std::vector<std::unique_ptr<AsyncSemaphore>> key_locks_;
-    AsyncSemaphore transfers_;  // max_concurrent_transfers throttle (docs/storage/tiered-design.md §5.1)
+    // max_concurrent_transfers throttle (docs/storage/tiered-design.md §5.1)
+    AsyncSemaphore transfers_;
 
     std::mutex inflight_m_;
     std::set<std::string> inflight_;
 
     std::mutex access_m_;
-    std::unordered_map<std::string, Touch> access_dirty_;  // ikey -> pending touch
+    // ikey -> pending touch
+    std::unordered_map<std::string, Touch> access_dirty_;
     std::atomic<bool> flush_inflight_{false};
     std::mutex wheel_m_;
-    int64_t last_full_scan_ = 0;  // 0 = never (the first round after startup is full)
+    // 0 = never (the first round after startup is full)
+    int64_t last_full_scan_ = 0;
     mutable std::mutex quarantine_m_;
 
     std::atomic<uint64_t> gc_seq_{0};
     // Shared with the lights3_tiered_local_cached_bytes callback gauge, which may be
     // rendered after this backend is gone (the registry outlives backends)
-    std::shared_ptr<std::atomic<int64_t>> local_bytes_est_ = std::make_shared<std::atomic<int64_t>>(
-        -1);                                        // -1 = not yet calibrated by scan
-    std::atomic<bool> quota_kick_inflight_{false};  // only one early-kicked scan at a time
+    // -1 = not yet calibrated by scan
+    std::shared_ptr<std::atomic<int64_t>> local_bytes_est_ = std::make_shared<std::atomic<int64_t>>(-1);
+    // only one early-kicked scan at a time
+    std::atomic<bool> quota_kick_inflight_{false};
 
     BackgroundTaskGroup bg_{"tiered"};
     // Timer ids are written only inside bg_.if_open; unchanged after begin_close (readers
     // need no lock). 0 when not armed: TimerQueue ids start at 1, cancel(0) is a safe no-op
     TimerQueue::Id scan_timer_ = 0;
-    TimerQueue::Id flush_timer_ = 0;      // access flush period (§4.3, fixed 5 min)
-    TimerQueue::Id reconcile_timer_ = 0;  // reconciliation period (§9, default 1d)
+    // access flush period (§4.3, fixed 5 min)
+    TimerQueue::Id flush_timer_ = 0;
+    // reconciliation period (§9, default 1d)
+    TimerQueue::Id reconcile_timer_ = 0;
 };
 
 }  // namespace lights3::storage

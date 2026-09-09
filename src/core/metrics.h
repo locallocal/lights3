@@ -61,7 +61,8 @@ public:
     }
 
     struct Snapshot {
-        std::vector<uint64_t> buckets;  // aligned with bounds + trailing overflow bucket, non-cumulative
+        // aligned with bounds + trailing overflow bucket, non-cumulative
+        std::vector<uint64_t> buckets;
         double sum = 0;
         uint64_t count = 0;
     };
@@ -110,14 +111,16 @@ private:
     struct Family {
         Kind kind{};
         std::string help;
-        std::vector<double> bounds;  // family-level histogram bucket bounds
+        // family-level histogram bucket bounds
+        std::vector<double> bounds;
         // key = normalized label string (e.g. backend="a",op="get")
         std::map<std::string, std::shared_ptr<MetricCounter>> counters;
         std::map<std::string, std::shared_ptr<MetricGauge>> gauges;
         std::map<std::string, std::shared_ptr<MetricHistogram>> histograms;
         std::map<std::string, std::function<double()>> callbacks;
     };
-    Family& family_of(const std::string& name, Kind kind, const std::string& help);  // lock must be held
+    // lock must be held
+    Family& family_of(const std::string& name, Kind kind, const std::string& help);
 
     mutable std::mutex m_;
     std::map<std::string, Family> families_;

@@ -26,14 +26,17 @@ namespace lights3::storage::duostore {
 inline constexpr const char* kBackupManifest = "manifest.json";
 
 struct BackupManifest {
-    std::string engine;   // "sqlite" | "rocksdb" | "redis" | "tikv"
-    std::string backend;  // configured backend name (informational)
+    // "sqlite" | "rocksdb" | "redis" | "tikv"
+    std::string engine;
+    // configured backend name (informational)
+    std::string backend;
     std::vector<MetaBackupEntry> entries;
 
     // Parse / render. load throws InternalError on a malformed file, returns an
     // empty manifest (no entries) when the file does not exist
     static BackupManifest load(const std::filesystem::path& dir);
-    void save(const std::filesystem::path& dir) const;  // atomic replace (write tmp + rename)
+    // atomic replace (write tmp + rename)
+    void save(const std::filesystem::path& dir) const;
 
     uint64_t next_id() const { return entries.empty() ? 1 : entries.back().id + 1; }
     // The chain prefix to replay for a target: nullopt target = everything.

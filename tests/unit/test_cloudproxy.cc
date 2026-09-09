@@ -169,7 +169,8 @@ TEST(cloudproxy_error_mapping) {
             case 1:
                 co_return xml_error(503, "SlowDown");
             case 2: {
-                http::HttpResponse r;  // 404 with an unparseable body
+                // 404 with an unparseable body
+                http::HttpResponse r;
                 r.status = 404;
                 co_return r;
             }
@@ -186,12 +187,14 @@ TEST(cloudproxy_error_mapping) {
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::InternalError);
     mode = 1;
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::SlowDown);
-    mode = 2;  // 404 without a body: semantics filled in from the operation context
+    // 404 without a body: semantics filled in from the operation context
+    mode = 2;
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::NoSuchKey);
     CHECK(!sync_wait(b.bucket_exists("bkt")));
     mode = 3;
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), S3ErrorCode::InternalError);
-    mode = 4;  // parseable 4xx -> wire code passed through as-is
+    // parseable 4xx -> wire code passed through as-is
+    mode = 4;
     CHECK_THROWS_S3(sync_wait(b.get_object("bkt", "k", std::nullopt)), S3ErrorCode::InvalidPart);
 }
 
@@ -216,7 +219,8 @@ TEST(cloudproxy_retry_on_5xx) {
     auto pool = std::make_shared<ThreadPool>(2);
     CloudProxyBackend b(cfg_for(remote.port, /*retry_max=*/3), pool);
     CHECK(sync_wait(b.bucket_exists("bkt")));
-    CHECK_EQ(hits.load(), 3);  // 2 times 503 + 1 success
+    // 2 times 503 + 1 success
+    CHECK_EQ(hits.load(), 3);
 
     // Retries exhausted -> mapped to SlowDown
     HandlerServer always503(
@@ -242,7 +246,8 @@ TEST(cloudproxy_get_cancel_mid_stream) {
     RemoteStack remote;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = remote.proxy_cfg();
-    cfg.queue_cap_bytes = 64 * 1024;  // small queue, guaranteeing the pump blocks on push
+    // small queue, guaranteeing the pump blocks on push
+    cfg.queue_cap_bytes = 64 * 1024;
     CloudProxyBackend b(cfg, pool);
 
     sync_wait(b.create_bucket("big"));
@@ -318,7 +323,8 @@ TEST(cloudproxy_range_forms) {
     auto r1 = sync_wait(b.get_object("rng", "k", ByteRange{2, 5}));
     CHECK_EQ(read_all(*r1.body), "2345");
     CHECK(r1.range.has_value());
-    CHECK_EQ(r1.meta.size, uint64_t(10));  // size is always the full object length
+    // size is always the full object length
+    CHECK_EQ(r1.meta.size, uint64_t(10));
     CHECK_EQ(*r1.range->first, uint64_t(2));
     CHECK_EQ(*r1.range->last, uint64_t(5));
 
@@ -345,7 +351,8 @@ TEST(cloudproxy_list_pagination_boundary_key) {
     sync_wait(b.create_bucket("pgb"));
     backend_suite::put(b, "pgb", "a/1", "x");
     backend_suite::put(b, "pgb", "a/2", "y");
-    backend_suite::put(b, "pgb", "a0", "z");  // "a0" == "a/" with the last character +1, was once skipped
+    // "a0" == "a/" with the last character +1, was once skipped
+    backend_suite::put(b, "pgb", "a0", "z");
 
     ListOptions opt;
     opt.delimiter = "/";
@@ -401,18 +408,22 @@ TEST(cloudproxy_config_load_validation) {
         }
         CHECK(threw);
     };
-    expect_reject({{"bucket_prefix", "-stage-"}});  // first character invalid after concatenation
-    expect_reject({{"bucket_prefix", "a..b-"}});    // contains ".." after concatenation
+    // first character invalid after concatenation
+    expect_reject({{"bucket_prefix", "-stage-"}});
+    // contains ".." after concatenation
+    expect_reject({{"bucket_prefix", "a..b-"}});
     expect_reject({{"retry_base_ms", "0"}});
     expect_reject({{"retry_base_ms", "-5"}});
     expect_reject({{"retry_max", "100"}});
-    expect_reject({{"queue_cap", "1KiB"}});  // below the lower bound
+    // below the lower bound
+    expect_reject({{"queue_cap", "1KiB"}});
     expect_reject({{"max_connections", "0"}});
 
     auto ok = CloudProxyConfig::from_params(
         "t", {{"endpoint", "http://127.0.0.1:1"}, {"queue_cap", "64KiB"}, {"bucket_prefix", "px-"}});
     CHECK_EQ(ok.queue_cap_bytes, size_t(64 * 1024));
-    CHECK(ok.force_path_style && !ok.control_in_pump);  // defaults
+    // defaults
+    CHECK(ok.force_path_style && !ok.control_in_pump);
 
     // P4 remainder (docs/storage/cloudproxy-design.md §2.3/§7): both keys parse, vhost no longer errors
     auto ok2 = CloudProxyConfig::from_params(
@@ -426,7 +437,8 @@ TEST(cloudproxy_config_load_validation) {
 // Host/signature and path vary by bucket; the remote accepts vhost via base_domain, and passing the full suite =
 // addressing/signing/pagination/multipart are all self-consistent under vhost
 TEST(cloudproxy_virtual_hosted_style) {
-    RemoteStack remote("127.0.0.1");  // remote vhost domain = <bucket>.127.0.0.1
+    // remote vhost domain = <bucket>.127.0.0.1
+    RemoteStack remote("127.0.0.1");
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = remote.proxy_cfg();
     cfg.force_path_style = false;
@@ -523,7 +535,8 @@ TEST(cloudproxy_chunked_upload_spools) {
     CloudProxyBackend b(remote.proxy_cfg(), pool);
     sync_wait(b.create_bucket("bkt"));
 
-    std::string data(300 * 1024, 'q');  // spans multiple 64KiB chunks
+    // spans multiple 64KiB chunks
+    std::string data(300 * 1024, 'q');
     for (size_t i = 0; i < data.size(); i += 7) data[i] = char('a' + (i % 26));
     NoLenReader body(data);
     auto pr = sync_wait(b.put_object("bkt", "k", {}, body));
@@ -591,7 +604,8 @@ TEST(cloudproxy_retry_after_respected_and_deadline_caps) {
     CloudProxyBackend b(cfg, pool);
     auto t0 = std::chrono::steady_clock::now();
     CHECK_THROWS_S3(sync_wait(b.head_object("bkt", "k")), s3::S3ErrorCode::SlowDown);
-    CHECK_EQ(hits.load(), 1);  // no retry: 5s hint > 300ms deadline
+    // no retry: 5s hint > 300ms deadline
+    CHECK_EQ(hits.load(), 1);
     CHECK(std::chrono::steady_clock::now() - t0 < std::chrono::seconds(2));
 }
 
@@ -645,7 +659,8 @@ TEST(cloudproxy_breaker_opens_and_recovers) {
     std::this_thread::sleep_for(std::chrono::milliseconds(400));
     CHECK(sync_wait(b.bucket_exists("bkt")));
     CHECK_EQ(hits.load(), 4);
-    CHECK(sync_wait(b.bucket_exists("bkt")));  // closed: normal traffic
+    // closed: normal traffic
+    CHECK(sync_wait(b.bucket_exists("bkt")));
     CHECK_EQ(hits.load(), 5);
 }
 
@@ -656,7 +671,8 @@ TEST(cloudproxy_pool_idle_reap_and_max_lifetime) {
     cloudproxy::Endpoint ep = cloudproxy::Endpoint::parse("http://127.0.0.1:1");
     {
         CloudProxyConfig cfg = cfg_for(1);
-        cfg.pool_idle_timeout_ms = 100;  // reaper interval clamps to 1s
+        // reaper interval clamps to 1s
+        cfg.pool_idle_timeout_ms = 100;
         cloudproxy::ClientPool pool(cfg, ep);
         {
             auto lease = pool.acquire();
@@ -665,7 +681,8 @@ TEST(cloudproxy_pool_idle_reap_and_max_lifetime) {
         CHECK_EQ(st.total, 1);
         CHECK_EQ(st.idle, size_t(1));
         std::this_thread::sleep_for(std::chrono::milliseconds(1300));
-        st = pool.stats();  // background reaper dropped the stale idle
+        // background reaper dropped the stale idle
+        st = pool.stats();
         CHECK_EQ(st.total, 0);
         CHECK_EQ(st.idle, size_t(0));
         {
@@ -685,7 +702,8 @@ TEST(cloudproxy_pool_idle_reap_and_max_lifetime) {
         {
             auto lease = pool.acquire();
         }  // reused, now past its lifetime
-        auto st = pool.stats();  // -> retired at release
+        // -> retired at release
+        auto st = pool.stats();
         CHECK_EQ(st.total, 0);
         CHECK_EQ(st.idle, size_t(0));
     }
@@ -704,7 +722,8 @@ TEST(cloudproxy_pool_async_acquire_handoff_and_timeout) {
     {
         auto held = pool.acquire();
         std::thread waiter([&] { CHECK_THROWS_S3(sync_wait(pool.acquire_async()), s3::S3ErrorCode::SlowDown); });
-        waiter.join();  // timed out while the lease was held
+        // timed out while the lease was held
+        waiter.join();
     }
     {
         auto held = std::make_optional(pool.acquire());
@@ -715,7 +734,8 @@ TEST(cloudproxy_pool_async_acquire_handoff_and_timeout) {
         });
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
         CHECK(!got.load());
-        held.reset();  // release: direct handoff to the waiter
+        // release: direct handoff to the waiter
+        held.reset();
         waiter.join();
         CHECK(got.load());
     }
@@ -761,7 +781,8 @@ TEST(cloudproxy_credential_chain_imds) {
 
     sync_wait(b.create_bucket("chain"));
     CHECK(sync_wait(b.bucket_exists("chain")));
-    CHECK(token_hits.load() >= 2);  // near-expiry doc forced a refresh per signing
+    // near-expiry doc forced a refresh per signing
+    CHECK(token_hits.load() >= 2);
     sync_wait(b.delete_bucket("chain"));
 }
 
@@ -774,8 +795,9 @@ TEST(cloudproxy_credential_chain_session_token_header) {
         } else if (req.path == "/latest/meta-data/iam/security-credentials/") {
             r.small_body = "role";
         } else if (req.path == "/latest/meta-data/iam/security-credentials/role") {
+            // no Expiration: cached forever
             r.small_body = std::string("{\"AccessKeyId\":\"") + kAk + "\",\"SecretAccessKey\":\"" + kSk +
-                           "\",\"Token\":\"sess-token\"}";  // no Expiration: cached forever
+                           "\",\"Token\":\"sess-token\"}";
         } else {
             r.status = 404;
         }
@@ -805,11 +827,13 @@ TEST(cloudproxy_credential_chain_session_token_header) {
 // remote logs it as parent; background work without a request context sends none
 TEST(cloudproxy_propagates_traceparent) {
     std::mutex m;
-    std::vector<std::pair<std::string, std::string>> seen;  // (traceparent, tracestate)
+    // (traceparent, tracestate)
+    std::vector<std::pair<std::string, std::string>> seen;
     HandlerServer remote([&](http::HttpRequest req) -> Task<http::HttpResponse> {
         std::lock_guard lk(m);
         seen.emplace_back(req.headers.get("traceparent").value_or(""), req.headers.get("tracestate").value_or(""));
-        co_return xml_error(403, "AccessDenied");  // head_bucket: 403 = exists
+        // head_bucket: 403 = exists
+        co_return xml_error(403, "AccessDenied");
     });
     auto pool = std::make_shared<ThreadPool>(2);
     CloudProxyBackend b(cfg_for(remote.port), pool);
@@ -821,14 +845,17 @@ TEST(cloudproxy_propagates_traceparent) {
     auto t = b.bucket_exists("bkt");
     t.with_cancel(src.token());
     CHECK(sync_wait(std::move(t)));
-    CHECK(sync_wait(b.bucket_exists("bkt")));  // no request context
+    // no request context
+    CHECK(sync_wait(b.bucket_exists("bkt")));
     std::lock_guard lk(m);
     CHECK_EQ(seen.size(), size_t(2));
     auto hop = TraceContext::parse(seen[0].first);
     CHECK(hop.has_value());
     CHECK_EQ(hop->trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
-    CHECK_EQ(hop->parent_span_id, stats->trace.span_id);  // the gateway's span is the parent
-    CHECK(hop->parent_span_id != "00f067aa0ba902b7");     // not the client's span
+    // the gateway's span is the parent
+    CHECK_EQ(hop->parent_span_id, stats->trace.span_id);
+    // not the client's span
+    CHECK(hop->parent_span_id != "00f067aa0ba902b7");
     CHECK_EQ(seen[0].second, "vendor=abc");
     CHECK(seen[1].first.empty() && seen[1].second.empty());
 }

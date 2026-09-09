@@ -43,16 +43,23 @@ struct StreamState;
 struct Slot final : UringEngine::Op {
     StreamState* st = nullptr;
     std::span<std::byte> mem;
-    UringEngine::FixedBuf fixed;  // index<0 = heap block
+    // index<0 = heap block
+    UringEngine::FixedBuf fixed;
     std::unique_ptr<std::byte[]> heap;
-    struct iovec iov{};  // READV/WRITEV fallback framing (pre-5.6)
+    // READV/WRITEV fallback framing (pre-5.6)
+    struct iovec iov{};
     std::atomic<uintptr_t> sync{kIdle};
     int res = 0;
-    uint64_t off = 0;      // file offset of the current op
-    unsigned len = 0;      // bytes requested by the current op
-    unsigned mem_off = 0;  // block offset (short-write resubmission)
-    unsigned pos = 0;      // consumer cursor within res (read stream)
-    uint32_t gen = 0;      // read stream staleness marker
+    // file offset of the current op
+    uint64_t off = 0;
+    // bytes requested by the current op
+    unsigned len = 0;
+    // block offset (short-write resubmission)
+    unsigned mem_off = 0;
+    // consumer cursor within res (read stream)
+    unsigned pos = 0;
+    // read stream staleness marker
+    uint32_t gen = 0;
 
     void complete(int r) noexcept override;
 
@@ -83,11 +90,14 @@ struct StreamState {
     bool own_fd = false;
     int file_slot = -1;
     unsigned block = 0;
-    unsigned depth = 0;   // data slots
-    int fsync_slot = -1;  // extra bufferless slot (write streams)
+    // data slots
+    unsigned depth = 0;
+    // extra bufferless slot (write streams)
+    int fsync_slot = -1;
     std::vector<Slot> slots;
     // Write-stream bookkeeping (owner-thread only)
-    std::deque<int> wq;  // in-flight write slots, oldest first
+    // in-flight write slots, oldest first
+    std::deque<int> wq;
     std::vector<int> free_;
     // Read-stream bookkeeping (owner-thread only)
     uint64_t next_off = 0;
@@ -139,7 +149,8 @@ struct StreamState {
         const UringFeatures& feat = eng->features();
         UringEngine::Sqe q;
         std::byte* p = s.mem.data() + s.mem_off;
-        if (s.fixed.index >= 0) {  // registration is gated on op_fixed_rw
+        if (s.fixed.index >= 0) {
+            // registration is gated on op_fixed_rw
             q.opcode = write ? uint8_t(IORING_OP_WRITE_FIXED) : uint8_t(IORING_OP_READ_FIXED);
             q.buf_index = uint16_t(s.fixed.index);
             q.addr = reinterpret_cast<uint64_t>(p);
@@ -227,7 +238,8 @@ void Slot::complete(int r) noexcept {
         // down -- a parked consumer is suspended); hand its continuation to the pool
         state->eng->pool().post(
             [h = std::coroutine_handle<>::from_address(reinterpret_cast<void*>(prev))] { h.resume(); });
-    state->unref();  // may delete the state (and this slot) -- must be the last access
+    // may delete the state (and this slot) -- must be the last access
+    state->unref();
 }
 
 }  // namespace uring_detail
@@ -273,7 +285,8 @@ Task<size_t> UringReadStream::read(std::span<std::byte> out) {
     StreamState& st = *st_;
     for (;;) {
         fill();
-        if (inflight_ == 0) {  // [off, end) exhausted
+        if (inflight_ == 0) {
+            // [off, end) exhausted
             done_ = true;
             co_return 0;
         }
@@ -291,7 +304,8 @@ Task<size_t> UringReadStream::read(std::span<std::byte> out) {
             done_ = true;
             uring_detail::throw_uring("io_uring read", r);
         }
-        if (r == 0) {  // file truncated externally, early EOF (FdStreamReader semantics)
+        if (r == 0) {
+            // file truncated externally, early EOF (FdStreamReader semantics)
             done_ = true;
             remaining_ = 0;
             co_return 0;
@@ -301,7 +315,8 @@ Task<size_t> UringReadStream::read(std::span<std::byte> out) {
             // one targets offsets beyond the gap. Bump the generation so they complete as
             // discards and resume submission from the actual position
             ++st.gen;
-            s.gen = st.gen;  // this block's bytes are still valid
+            // this block's bytes are still valid
+            s.gen = st.gen;
             st.next_off = s.off + unsigned(r);
         }
         size_t n = std::min({out.size(), size_t(unsigned(r) - s.pos), size_t(remaining_)});
@@ -313,7 +328,8 @@ Task<size_t> UringReadStream::read(std::span<std::byte> out) {
             s.sync.store(kIdle, std::memory_order_relaxed);
             head_ = (head_ + 1) % st.depth;
             --inflight_;
-            if (!done_) fill();  // keep the pipeline full before handing bytes up
+            // keep the pipeline full before handing bytes up
+            if (!done_) fill();
         }
         co_return n;
     }
@@ -399,7 +415,8 @@ void UringWriteStream::commit(size_t n) {
 Task<void> UringWriteStream::finish(bool fdatasync) {
     finished_ = true;
     StreamState& st = *st_;
-    if (held_ >= 0) {  // acquired but never committed
+    if (held_ >= 0) {
+        // acquired but never committed
         st.free_.push_back(held_);
         held_ = -1;
     }
@@ -440,8 +457,8 @@ Task<void> UringWriteStream::finish(bool fdatasync) {
                 fr = co_await f.wait();
                 f.sync.store(kIdle, std::memory_order_relaxed);
             }
-            if (fr < 0 && fr != -EINVAL)  // EINVAL: fs unsupported, same as fsync_file
-                uring_detail::throw_uring("io_uring fdatasync", fr);
+            // EINVAL: fs unsupported, same as fsync_file
+            if (fr < 0 && fr != -EINVAL) uring_detail::throw_uring("io_uring fdatasync", fr);
             co_return;
         }
         st.submit_rw(w, /*write=*/true);

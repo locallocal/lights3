@@ -22,18 +22,24 @@
 namespace lights3::storage::duostore {
 
 struct SqliteMetaOptions {
-    std::string path;                  // DB file path (single-file deployment, §1)
-    bool sync = true;                  // durable commits: synchronous FULL/NORMAL (§6)
-    size_t cache_bytes = 64ull << 20;  // page cache capacity (PRAGMA cache_size, §8)
-    int pool_size = 8;                 // read connection pool cap (§3.1)
-    int busy_timeout_ms = 5000;        // busy handler wait (§5.2; not in YAML, tests may shorten)
+    // DB file path (single-file deployment, §1)
+    std::string path;
+    // durable commits: synchronous FULL/NORMAL (§6)
+    bool sync = true;
+    // page cache capacity (PRAGMA cache_size, §8)
+    size_t cache_bytes = 64ull << 20;
+    // read connection pool cap (§3.1)
+    int pool_size = 8;
+    // busy handler wait (§5.2; not in YAML, tests may shorten)
+    int busy_timeout_ms = 5000;
     // Backup chain directory (backlog-sequence ⑧, docs/storage/duostore-meta-sqlite.md
     // §10): when set and a full backup has started a chain there, auto-checkpoints
     // are off and the WAL is archived as one segment per `backup --incremental`
     // (and once more at close), so every commit reaches the chain. Empty = off
     // (full backups still work; incremental ones are refused)
     std::string wal_archive;
-    MetricsScope metrics;  // BUSY / corruption counters (S4; empty scope = isolated instance)
+    // BUSY / corruption counters (S4; empty scope = isolated instance)
+    MetricsScope metrics;
 };
 
 class SqliteMetaStore final : public IMetaStore {
@@ -68,7 +74,8 @@ public:
     std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
                                                             size_t max_extents = SIZE_MAX) override;
     void ack_reclaim(uint64_t seq) override;
-    void ack_reclaims(std::span<const uint64_t> seqs) override;  // one txn, one fsync (§3.3)
+    // one txn, one fsync (§3.3)
+    void ack_reclaims(std::span<const uint64_t> seqs) override;
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
@@ -104,7 +111,8 @@ public:
     void set_list_pause_for_test(std::function<void()> hook) { list_pause_for_test_ = std::move(hook); }
 
 private:
-    struct Conn;  // sqlite3* + resident prepared-statement cache (defined in the .cc; header leaks no sqlite3 types)
+    // sqlite3* + resident prepared-statement cache (defined in the .cc; header leaks no sqlite3 types)
+    struct Conn;
     class Stmt;
 
     // Shared body of close(): graceful=false is for constructor-failure cleanup — it
@@ -135,9 +143,11 @@ private:
     };
     static constexpr uint64_t kIdSegment = 4096;
 
-    std::unique_ptr<Conn> open_raw();  // open + busy_timeout only (no file writes before lineage check)
+    // open + busy_timeout only (no file writes before lineage check)
+    std::unique_ptr<Conn> open_raw();
     void apply_pragmas(Conn& c, bool full_sync);
-    std::unique_ptr<Conn> open_conn(bool full_sync);  // open_raw + apply_pragmas
+    // open_raw + apply_pragmas
+    std::unique_ptr<Conn> open_conn(bool full_sync);
     // Lineage check (§2.2): runs before any write (including the WAL journal
     // conversion) — app_id/ver both 0 but sqlite_master non-empty = someone else's
     // database; refuse without leaving a trace
@@ -149,11 +159,14 @@ private:
     void checkpoint_truncate_locked(const char* what);
     uint64_t archive_wal_segment_locked(const std::filesystem::path& dir, uint64_t id, std::string& file);
     void set_archiving_locked(bool on);
-    void migrate_schema(Conn& c, int64_t ver);  // migration chain for version < current (called by check_lineage)
+    // migration chain for version < current (called by check_lineage)
+    void migrate_schema(Conn& c, int64_t ver);
     void init_schema(Conn& c);
-    Lease read_conn();  // take from pool; throws InternalError after close
+    // take from pool; throws InternalError after close
+    Lease read_conn();
     void release(std::unique_ptr<Conn> c);
-    Conn& wconn();  // write connection; mu_ must be held; throws InternalError after close
+    // write connection; mu_ must be held; throws InternalError after close
+    Conn& wconn();
 
     class SnapshotView;
 
@@ -196,7 +209,8 @@ private:
     // completes inside the lock, so write throughput caps at ≈ 1/fsync latency —
     // same trade-off as the RocksDB version (accepted at P1; no group commit)
     std::mutex mu_;
-    std::unique_ptr<Conn> wc_;  // dedicated write connection (BEGIN IMMEDIATE txns always on it)
+    // dedicated write connection (BEGIN IMMEDIATE txns always on it)
+    std::unique_ptr<Conn> wc_;
     // Dedicated id-segment connection, always synchronous=FULL (independent of
     // opt_.sync, §4); alloc_mu_ protects the IdRange and this connection. Lock order
     // alloc_mu_ → mu_ (mu_ is held during reservation to keep business writers out,
@@ -204,12 +218,14 @@ private:
     // transactions, so no reverse nesting
     std::mutex alloc_mu_;
     std::unique_ptr<Conn> ac_;
-    IdRange file_ids_[2];  // indexed by Extent::Kind
+    // indexed by Extent::Kind
+    IdRange file_ids_[2];
 
     std::mutex pool_mu_;
     std::vector<std::unique_ptr<Conn>> idle_;
     bool closed_ = false;
-    bool archive_active_ = false;  // a chain exists in opt_.wal_archive: auto-checkpoint off, WAL archived
+    // a chain exists in opt_.wal_archive: auto-checkpoint off, WAL archived
+    bool archive_active_ = false;
 
     // S4 metrics (registered at construction, visible at value 0); connections hold
     // shared_ptr copies and increment them on error paths

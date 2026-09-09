@@ -151,10 +151,14 @@ private:
     // SQ (submit side, protected by submit_mu_)
     std::mutex submit_mu_;
     bool stopped_ = false;
-    bool failed_ = false;     // reaper/submit hit an unrecoverable error; all later submissions rejected
-    bool flushing_ = false;   // a thread is already running io_uring_enter (on-duty marker for batched submission)
-    unsigned submitted_ = 0;  // count of SQEs handed to the kernel (same sequence as sq_tail_)
-    std::condition_variable sq_cv_;  // SQ full / flusher progressed
+    // reaper/submit hit an unrecoverable error; all later submissions rejected
+    bool failed_ = false;
+    // a thread is already running io_uring_enter (on-duty marker for batched submission)
+    bool flushing_ = false;
+    // count of SQEs handed to the kernel (same sequence as sq_tail_)
+    unsigned submitted_ = 0;
+    // SQ full / flusher progressed
+    std::condition_variable sq_cv_;
     // In-flight op registry (protected by submit_mu_): when the reaper thread fails, wake all
     // in-flight coroutines with -EIO (otherwise GETs hang forever and connections are never
     // released); shutdown relies on it to wait for drain
@@ -164,7 +168,8 @@ private:
     unsigned sq_mask_ = 0;
     unsigned* sq_head_ = nullptr;
     unsigned* sq_tail_ = nullptr;
-    unsigned* sq_flags_ = nullptr;  // IORING_SQ_NEED_WAKEUP for SQPOLL
+    // IORING_SQ_NEED_WAKEUP for SQPOLL
+    unsigned* sq_flags_ = nullptr;
     unsigned* sq_array_ = nullptr;
     io_uring_sqe* sqes_ = nullptr;
 
@@ -176,7 +181,8 @@ private:
 
     void* sq_ring_ptr_ = nullptr;
     size_t sq_ring_bytes_ = 0;
-    void* cq_ring_ptr_ = nullptr;  // same as sq_ring_ptr_ under FEAT_SINGLE_MMAP
+    // same as sq_ring_ptr_ under FEAT_SINGLE_MMAP
+    void* cq_ring_ptr_ = nullptr;
     size_t cq_ring_bytes_ = 0;
     size_t sqes_bytes_ = 0;
 
@@ -287,7 +293,8 @@ void UringRing::probe_features(const io_uring_params& p, UringFeatures& feat) {
         feat.op_statx = supported(IORING_OP_STATX);
         feat.op_renameat = supported(IORING_OP_RENAMEAT);
         feat.op_unlinkat = supported(IORING_OP_UNLINKAT);
-        feat.links = true;  // IOSQE_IO_LINK is 5.3+, implied by the probe's 5.6
+        // IOSQE_IO_LINK is 5.3+, implied by the probe's 5.6
+        feat.links = true;
         return;
     }
 #endif
@@ -444,7 +451,8 @@ void UringRing::unregister_file(int slot) {
 }
 
 void UringRing::push_sqe_locked(const Sqe& d, uint64_t user_data) {
-    unsigned tail = *sq_tail_;  // sole writer under the lock, a plain read suffices
+    // sole writer under the lock, a plain read suffices
+    unsigned tail = *sq_tail_;
     unsigned idx = tail & sq_mask_;
     io_uring_sqe& sqe = sqes_[idx];
     std::memset(&sqe, 0, sizeof(sqe));
@@ -485,7 +493,8 @@ int UringRing::flush_locked(std::unique_lock<std::mutex>& lk, std::span<Op* cons
             int err = errno;
             lk.lock();
             if (ret >= 0) {
-                submitted_ = *sq_tail_;  // once woken, the poll thread takes everything
+                // once woken, the poll thread takes everything
+                submitted_ = *sq_tail_;
                 break;
             }
             if (err == EINTR || err == EAGAIN || err == EBUSY) {
@@ -502,7 +511,8 @@ int UringRing::flush_locked(std::unique_lock<std::mutex>& lk, std::span<Op* cons
         if (ret > 0) {
             submitted_ += unsigned(ret);
             spin = 0;
-            sq_cv_.notify_all();  // SQ slots freed up
+            // SQ slots freed up
+            sq_cv_.notify_all();
             continue;
         }
         if (ret == 0 || err == EINTR || err == EAGAIN || err == EBUSY) {
@@ -563,20 +573,23 @@ void UringRing::submit(std::span<const Sqe> chain, std::span<Op* const> ops) {
         push_sqe_locked(chain[i], reinterpret_cast<uint64_t>(ops[i]));
     }
     if (int err = flush_locked(lk, ops)) {
-        for (Op* op : ops) inflight_.erase(op);  // treated as never submitted; other in-flight already woken with -EIO
+        // treated as never submitted; other in-flight already woken with -EIO
+        for (Op* op : ops) inflight_.erase(op);
         throw S3Error(S3ErrorCode::InternalError, std::string("io_uring_enter: ") + std::strerror(err));
     }
 }
 
 void UringRing::reap_loop() {
     for (;;) {
-        unsigned head = *cq_head_;  // sole consumer, a plain read suffices
+        // sole consumer, a plain read suffices
+        unsigned head = *cq_head_;
         unsigned tail = load_acquire(cq_tail_);
         bool stop = false;
         while (head != tail) {
             const io_uring_cqe& cqe = cqes_[head & cq_mask_];
             if (cqe.user_data == 0) {
-                stop = true;  // NOP sentinel submitted by shutdown
+                // NOP sentinel submitted by shutdown
+                stop = true;
             } else {
                 Op* op = reinterpret_cast<Op*>(static_cast<uintptr_t>(cqe.user_data));
                 bool ours, drained;
@@ -648,7 +661,8 @@ void UringRing::shutdown() {
         if (reaper_.joinable()) reaper_.join();
         return;
     }
-    stopped_ = true;  // reject new submissions first; only then can draining mean anything
+    // reject new submissions first; only then can draining mean anything
+    stopped_ = true;
     sq_cv_.notify_all();
     if (!failed_) {
         // Wait for in-flight CQEs to reach zero before posting the sentinel: CQE ordering
@@ -661,8 +675,10 @@ void UringRing::shutdown() {
                       inflight_.size());
     }
     if (!failed_ && reaper_.joinable()) {
-        push_sqe_locked(Sqe{}, /*user_data=*/0);  // NOP sentinel
-        flush_locked(lk, {});  // on failure it already set failed_ and woke in-flight; do not rethrow here
+        // NOP sentinel
+        push_sqe_locked(Sqe{}, /*user_data=*/0);
+        // on failure it already set failed_ and woke in-flight; do not rethrow here
+        flush_locked(lk, {});
     }
     lk.unlock();
     if (reaper_.joinable()) reaper_.join();

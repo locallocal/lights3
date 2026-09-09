@@ -50,9 +50,9 @@ TimerQueue::Id TimerQueue::add(Clock::duration delay, std::function<void()> fn) 
         // previously every add did notify_all)
         wake = items_.begin()->first == std::make_pair(deadline, id);
     }
-    if (wake)
-        cv_.notify_one();  // notify outside the lock: notifying while holding it makes the woken thread immediately
-                           // collide with the lock
+    // notify outside the lock: notifying while holding it makes the woken thread immediately
+    // collide with the lock
+    if (wake) cv_.notify_one();
     return id;
 }
 

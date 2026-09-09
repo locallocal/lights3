@@ -82,8 +82,10 @@ bool S3Service::tls_identity_bound(const http::HttpRequest& req) const {
 void S3Service::enforce_tls_tenant(const http::HttpRequest& req, const VerifiedIdentity& ident) const {
     auto subject = tls_subject_of(req);
     if (!subject) return;
-    if (ident.access_key.empty()) return;   // auth disabled: nothing to compare
-    if (is_root(ident.access_key)) return;  // an operator's certificate fronts anything
+    // auth disabled: nothing to compare
+    if (ident.access_key.empty()) return;
+    // an operator's certificate fronts anything
+    if (is_root(ident.access_key)) return;
     const TlsBinding* b = tls_store_ ? TlsIdentityStore::find(tls_store_->snapshot(), *subject) : nullptr;
     if (!b)
         throw S3Error(S3ErrorCode::AccessDenied,

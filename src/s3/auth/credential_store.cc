@@ -137,11 +137,13 @@ std::string serialize(const CredentialInfo& c, const std::optional<util::Aes256K
         // wiped
         j["sk"] = static_cast<const std::string&>(c.secret_key);
     }
-    j["created"] = util::iso8601(c.created);  // for humans
-    j["created_unix"] = std::chrono::duration_cast<std::chrono::seconds>(c.created.time_since_epoch())
-                            .count();  // for parsing (no ready-made inverse for iso8601)
+    // for humans
+    j["created"] = util::iso8601(c.created);
+    // for parsing (no ready-made inverse for iso8601)
+    j["created_unix"] = std::chrono::duration_cast<std::chrono::seconds>(c.created.time_since_epoch()).count();
     j["comment"] = c.comment;
-    j["rev"] = c.rev;  // monotonic edit counter (roadmap §2.5), independent of "version"
+    // monotonic edit counter (roadmap §2.5), independent of "version"
+    j["rev"] = c.rev;
     if (c.policy) j["policy"] = policy_to_json_obj(*c.policy);
     if (!c.tenant.empty()) {
         j["tenant"] = c.tenant;
@@ -217,7 +219,8 @@ std::optional<CredentialInfo> deserialize(std::string_view ak, const std::string
         return c;
     } catch (const json::exception&) {
         return std::nullopt;
-    } catch (const S3Error&) {  // corrupt policy field = corrupt object
+    } catch (const S3Error&) {
+        // corrupt policy field = corrupt object
         return std::nullopt;
     }
 }
@@ -374,7 +377,8 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(std::shared_ptr<sto
     }
 
     // Dynamic credentials: no .sys = none ever generated
-    std::vector<std::string> plaintext_aks;  // v1 objects, upgraded to v2 after load (§10.1)
+    // v1 objects, upgraded to v2 after load (§10.1)
+    std::vector<std::string> plaintext_aks;
     if (co_await store->backend_->bucket_exists(kSysBucket)) {
         store->sys_bucket_ready_ = true;
         storage::ListOptions opt;
@@ -389,7 +393,8 @@ Task<std::shared_ptr<CredentialStore>> CredentialStore::load(std::shared_ptr<sto
                 bool was_plaintext = false;
                 if (auto c = deserialize(ak, body, store->master_key_, &was_plaintext)) {
                     if (was_plaintext && store->master_key_) plaintext_aks.push_back(c->access_key);
-                    c->storage_etag = obj.etag;  // sync change detection (roadmap §2.5)
+                    // sync change detection (roadmap §2.5)
+                    c->storage_etag = obj.etag;
                     store->creds_.emplace(c->access_key, std::move(*c));
                 } else {
                     LOG_WARN("skipping malformed credential object {}/{}", kSysBucket, obj.key);
@@ -476,10 +481,12 @@ bool CredentialStore::is_root(std::string_view ak) const {
 
 void CredentialStore::authorize(std::string_view ak, std::string_view bucket, std::string_view key,
                                 Action action) const {
-    if (ak.empty()) return;  // auth disabled
+    // auth disabled
+    if (ak.empty()) return;
     std::shared_lock lk(mu_);
     auto it = creds_.find(ak);
-    if (it == creds_.end()) return;  // in-flight revocation race: already-verified requests complete naturally (§7)
+    // in-flight revocation race: already-verified requests complete naturally (§7)
+    if (it == creds_.end()) return;
     if (!it->second.policy) return;
     if (!it->second.policy->allows(bucket, key, action))
         throw S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
@@ -497,7 +504,8 @@ std::vector<CredentialInfo> CredentialStore::list() const {
     std::vector<CredentialInfo> out;
     out.reserve(creds_.size());
     for (auto& [_, c] : creds_) out.push_back(c);
-    return out;  // the map is already ordered by AK
+    // the map is already ordered by AK
+    return out;
 }
 
 std::vector<CredentialInfo> CredentialStore::list_tenant(std::string_view tenant) const {
@@ -584,7 +592,8 @@ Task<void> CredentialStore::remove(std::string_view ak) {
         co_await backend_->delete_object(kSysBucket, object_key(ak));
     } catch (...) {
         std::unique_lock lk(mu_);
-        tombstones_.erase(std::string(ak));  // revocation failed, must not block subsequent sync
+        // revocation failed, must not block subsequent sync
+        tombstones_.erase(std::string(ak));
         throw;
     }
     {
@@ -612,7 +621,8 @@ Task<CredentialInfo> CredentialStore::update(std::string_view ak, Update upd) {
     if (upd.set_policy) c.policy = std::move(upd.policy);
     if (upd.tenant) c.tenant = std::move(*upd.tenant);
     if (upd.tenant_admin) c.tenant_admin = *upd.tenant_admin;
-    if (c.tenant.empty()) c.tenant_admin = false;  // the role only exists inside a tenant
+    // the role only exists inside a tenant
+    if (c.tenant.empty()) c.tenant_admin = false;
     ++c.rev;
 
     // Write-through, same ordering as generate: storage first, then memory
@@ -683,7 +693,8 @@ Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::stri
     constexpr size_t kMaxSessions = 100000;
 
     SessionCredential out;
-    out.access_key = std::string(kSessionAkPrefix) + random_access_key().substr(4);  // session-prefixed AK shape
+    // session-prefixed AK shape
+    out.access_key = std::string(kSessionAkPrefix) + random_access_key().substr(4);
     out.secret_key = random_secret_key();
     {
         uint8_t raw[48];
@@ -751,7 +762,8 @@ Task<void> CredentialStore::ensure_session_loaded(std::string_view ak_view) {
             LOG_WARN("sts: reading session {} failed: {}", ak, e.message);
     } catch (const std::exception& e) {
         LOG_WARN("sts: session object {} unusable: {}", ak, e.what());
-        missing = true;  // malformed / undecryptable: do not retry on every request
+        // malformed / undecryptable: do not retry on every request
+        missing = true;
     }
     std::unique_lock lk(mu_);
     if (entry) {
@@ -787,7 +799,8 @@ Task<void> CredentialStore::sync_sessions(bool startup) {
         }
         if (!known) {
             std::unique_lock lk(mu_);
-            session_misses_.erase(ak);  // a listing beats a stale miss
+            // a listing beats a stale miss
+            session_misses_.erase(ak);
         }
         if (!known) {
             co_await ensure_session_loaded(ak);
@@ -907,7 +920,8 @@ Task<void> CredentialStore::sync_now() {
     // Full set of dynamic-credential AKs currently in storage, with the listed object
     // ETag: an ETag differing from the one this instance last saw means the credential
     // was edited elsewhere (policy update, roadmap §2.5) and must be re-read
-    std::map<std::string, std::string, std::less<>> on_storage;  // ak -> etag
+    // ak -> etag
+    std::map<std::string, std::string, std::less<>> on_storage;
     if (co_await backend_->bucket_exists(kSysBucket)) {
         storage::ListOptions opt;
         opt.prefix = std::string(kCredPrefix);
@@ -943,8 +957,10 @@ Task<void> CredentialStore::sync_now() {
     for (auto& [ak, etag] : on_storage) {
         bool changed = false;
         if (auto cur = find(ak)) {
-            if (cur->source != CredSource::kDynamic) continue;        // static/file shadows it
-            if (etag.empty() || cur->storage_etag == etag) continue;  // unchanged
+            // static/file shadows it
+            if (cur->source != CredSource::kDynamic) continue;
+            // unchanged
+            if (etag.empty() || cur->storage_etag == etag) continue;
             changed = true;
         }
         if (!changed && recently_revoked.contains(ak)) continue;
@@ -1004,7 +1020,8 @@ Task<void> CredentialStore::sync_now() {
 // ----------
 
 Task<void> CredentialStore::file_tick() {
-    co_await pool_->schedule();  // the timer thread only dispatches; file IO moves to a pool thread
+    // the timer thread only dispatches; file IO moves to a pool thread
+    co_await pool_->schedule();
     std::exception_ptr err;
     try {
         std::error_code ec;
@@ -1014,7 +1031,8 @@ Task<void> CredentialStore::file_tick() {
         err = std::current_exception();
     }
     schedule_file_reload();
-    if (err) std::rethrow_exception(err);  // hand off to BackgroundTaskGroup for logging
+    // hand off to BackgroundTaskGroup for logging
+    if (err) std::rethrow_exception(err);
 }
 
 Task<void> CredentialStore::sync_tick() {

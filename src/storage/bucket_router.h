@@ -59,7 +59,8 @@ public:
 private:
     struct Rule {
         std::string glob;
-        bool negate = false;  // "!pattern": buckets NOT matching pattern hit this rule
+        // "!pattern": buckets NOT matching pattern hit this rule
+        bool negate = false;
         std::shared_ptr<IStorageBackend> backend;
         std::string backend_name;
     };

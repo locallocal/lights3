@@ -44,7 +44,8 @@ TEST(timer_fires_after_delay) {
     auto t0 = TimerQueue::Clock::now();
     q.add(20ms, [&] { s.hit(); });
     CHECK(s.wait_for_count(1, 5000ms));
-    CHECK(TimerQueue::Clock::now() - t0 >= 20ms);  // must not fire early
+    // must not fire early
+    CHECK(TimerQueue::Clock::now() - t0 >= 20ms);
 }
 
 TEST(timer_fires_in_deadline_order) {
@@ -80,8 +81,10 @@ TEST(timer_cancel_prevents_fire) {
     TimerQueue q;
     std::atomic<bool> fired{false};
     auto id = q.add(std::chrono::seconds(10), [&] { fired = true; });
-    CHECK(q.cancel(id));   // not yet fired: cancel succeeds
-    CHECK(!q.cancel(id));  // no longer exists: false
+    // not yet fired: cancel succeeds
+    CHECK(q.cancel(id));
+    // no longer exists: false
+    CHECK(!q.cancel(id));
     CHECK(!fired.load());
 }
 
@@ -97,9 +100,12 @@ TEST(timer_cancel_waits_for_running_callback) {
         while (!release.load()) std::this_thread::yield();
         done = true;
     });
-    CHECK(started.wait_for_count(1, 5000ms));  // callback is already executing
-    release = true;                            // after release, cancel must wait until done is set before returning
-    CHECK(!q.cancel(id));                      // already-fired semantics: false, but blocks until the callback returns
+    // callback is already executing
+    CHECK(started.wait_for_count(1, 5000ms));
+    // after release, cancel must wait until done is set before returning
+    release = true;
+    // already-fired semantics: false, but blocks until the callback returns
+    CHECK(!q.cancel(id));
     CHECK(done.load());
 }
 
@@ -113,7 +119,8 @@ TEST(timer_cancel_from_callback_no_deadlock) {
         std::lock_guard lk(idm);
         id = q.add(1ms, [&] {
             std::lock_guard lk2(idm);
-            CHECK(!q.cancel(id));  // self-cancel: returns false immediately, no deadlock
+            // self-cancel: returns false immediately, no deadlock
+            CHECK(!q.cancel(id));
             s.hit();
         });
     }
@@ -125,7 +132,8 @@ TEST(timer_cancel_after_fire_returns_false) {
     Signal s;
     auto id = q.add(1ms, [&] { s.hit(); });
     CHECK(s.wait_for_count(1, 5000ms));
-    CHECK(!q.cancel(id));  // already fired: semantics say false
+    // already fired: semantics say false
+    CHECK(!q.cancel(id));
 }
 
 TEST(timer_destructor_with_pending_items_returns) {
@@ -158,7 +166,8 @@ TEST(timer_callback_exception_does_not_wedge_cancel) {
         throw std::runtime_error("timer callback failure");
     });
     CHECK(s.wait_for_count(1, 5000ms));
-    CHECK(!q.cancel(id));  // already fired: returns false immediately instead of hanging
+    // already fired: returns false immediately instead of hanging
+    CHECK(!q.cancel(id));
     // The queue thread is still alive; subsequent entries fire as usual
     Signal s2;
     q.add(1ms, [&] { s2.hit(); });
@@ -179,7 +188,8 @@ TEST(slow_callback_does_not_stall_deadline_tracking) {
     });
     Id2 second = q.add(40ms, [] {});
     CHECK(slow_started.wait_for_count(1, 2s));
-    std::this_thread::sleep_for(120ms);  // well past the second entry's expiry time
+    // well past the second entry's expiry time
+    std::this_thread::sleep_for(120ms);
     // The slow callback is still running (300ms not yet up). If the second entry were still in the pending table,
     // cancel would return true -- meaning the scheduling thread was stuck in the callback. Returning false = it was
     // removed on time and is merely queued for execution
@@ -198,16 +208,20 @@ TEST(cancel_waits_for_due_but_unstarted_callback) {
     });
     Id2 second = q.add(20ms, [&] { second_ran = true; });
     CHECK(first_started.wait_for_count(1, 2s));
-    std::this_thread::sleep_for(60ms);  // the second entry has expired and is queued behind the slow callback
-    CHECK(!q.cancel(second));           // returns false = already fired
-    CHECK(second_ran.load());           // and by the time it returns it has indeed finished executing
+    // the second entry has expired and is queued behind the slow callback
+    std::this_thread::sleep_for(60ms);
+    // returns false = already fired
+    CHECK(!q.cancel(second));
+    // and by the time it returns it has indeed finished executing
+    CHECK(second_ran.load());
 }
 
 TEST(timer_stats_track_fired_and_pending) {
     // Timer observability (docs/archive/gaps.md §7): pending/fired/latency histogram have an outlet
     TimerQueue q;
     std::atomic<int> fired{0};
-    q.add(std::chrono::hours(1), [] {});  // long-hanging: permanently pending
+    // long-hanging: permanently pending
+    q.add(std::chrono::hours(1), [] {});
     q.add(std::chrono::milliseconds(1), [&] { fired.fetch_add(1); });
     for (int i = 0; i < 200 && fired.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     CHECK_EQ(fired.load(), 1);

@@ -56,7 +56,8 @@ struct BenchOpts {
     int objects = 64;
     int max_keys = 100;
     bool keep = false;
-    bool json = false;  // --output=json: no per-second table, one JSON summary on stdout
+    // --output=json: no per-second table, one JSON summary on stdout
+    bool json = false;
 };
 
 // "4096" / "8K" / "1M" / "2G" (binary units); capped so the shared upload buffer stays sane
@@ -122,7 +123,8 @@ std::string obj_path(const BenchOpts& o, int i) {
 // bucket-interpolated approximations
 struct Stats {
     std::atomic<uint64_t> ops{0}, bytes{0}, errs{0}, lat_sum_us{0};
-    std::atomic<uint64_t> interval_max_us{0};  // reporter resets each tick
+    // reporter resets each tick
+    std::atomic<uint64_t> interval_max_us{0};
     std::atomic<uint64_t> total_max_us{0};
     std::array<std::atomic<uint64_t>, 65> hist{};
     std::mutex err_mu;
@@ -332,7 +334,8 @@ int run_bench(Mode mode, const BenchOpts& o) {
     std::string body;
     if (mode == Mode::Put || needs_prepare) {
         body.resize(o.size);
-        std::mt19937_64 rng(0x5335334d42454e43ULL);  // fixed seed: runs are comparable
+        // fixed seed: runs are comparable
+        std::mt19937_64 rng(0x5335334d42454e43ULL);
         for (size_t i = 0; i + 8 <= body.size(); i += 8) {
             uint64_t v = rng();
             memcpy(&body[i], &v, 8);

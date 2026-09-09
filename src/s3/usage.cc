@@ -235,10 +235,11 @@ Task<BucketUsage> UsageTracker::rescan(std::string bucket) {
 
     auto& backend = router_.resolve(bucket);
     BucketUsage u;
-    u.scanned_at = std::chrono::system_clock::now();  // taken before the walk: writes
-                                                      // landing during it may or may
-                                                      // not be counted, so the stamp
-                                                      // must not claim them
+    // taken before the walk: writes
+    // landing during it may or may
+    // not be counted, so the stamp
+    // must not claim them
+    u.scanned_at = std::chrono::system_clock::now();
     storage::ListOptions opt;
     opt.max_keys = 1000;
     for (;;) {
@@ -263,7 +264,8 @@ Task<BucketUsage> UsageTracker::rescan(std::string bucket) {
                 auto parts = co_await backend.list_parts(bucket, up.key, up.upload_id, popt);
                 for (auto& p : parts.parts) u.mpu_bytes += static_cast<int64_t>(p.size);
             } catch (const S3Error& e) {
-                if (e.code != S3ErrorCode::NoSuchUpload) throw;  // completed/aborted meanwhile
+                // completed/aborted meanwhile
+                if (e.code != S3ErrorCode::NoSuchUpload) throw;
             }
         }
         if (!page.is_truncated) break;
@@ -289,7 +291,8 @@ Task<BucketUsage> UsageTracker::rescan(std::string bucket) {
 Task<size_t> UsageTracker::reconcile_all() {
     size_t n = 0;
     std::set<std::string> seen;
-    auto backends = router_.backends();  // snapshot: a reload may swap the set meanwhile
+    // snapshot: a reload may swap the set meanwhile
+    auto backends = router_.backends();
     for (auto& [name, backend] : *backends) {
         std::vector<storage::BucketInfo> buckets;
         try {

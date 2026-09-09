@@ -167,9 +167,13 @@ sqlite / redis / rados / tikv / seastar / fuzz）逐个增量构建 + `ctest -LE
 
 ## 9. 代码格式
 
-`make format` 用仓库根目录的 `.clang-format`（Google 风格 + 4 空格缩进 + 120 列，
+`make format` 先跑 `scripts/check_comments.py --fix` 把行尾 `//` 注释挪到所在语句
+的上一行（以 `{` 结尾的行挪进块内第一行；列表元素、标签、预处理行放在自身上一行；
+`}  // namespace x`、`#endif  // X`、`// NOLINT`、`// clang-format off` 这几类收尾
+注释保留），再用仓库根目录的 `.clang-format`（Google 风格 + 4 空格缩进 + 120 列，
 其余偏离项在文件内逐条注明）就地重排 `src/`、`tests/` 下全部受 git 跟踪的 `.h` /
-`.cc`；`make format-check` 只列出会被改动的文件并以 1 退出，供提交前与 CI 用。
+`.cc`；`make format-check` 列出行尾注释与会被 clang-format 改动的文件并以 1 退出，
+供提交前与 CI 用。
 `CLANG_FORMAT=clang-format-23 make format` 可指定二进制；Google 预设在 LLVM 大版本
 之间有细微漂移，团队应钉住一个主版本。全仓已于 2026-09-09 按此格式化过一次，
 之后的 PR 不应再夹带格式噪音。

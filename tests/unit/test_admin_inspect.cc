@@ -122,7 +122,8 @@ TEST(admin_inspect_localfs_layout) {
     CHECK_EQ(l["extents"].size(), size_t(1));
     CHECK_EQ(l["extents"][0]["kind"].get<std::string>(), "file");
     CHECK_EQ(l["extents"][0]["length"].get<uint64_t>(), uint64_t(12));
-    CHECK(l["extents"][0]["id"].get<uint64_t>() > 0);  // inode
+    // inode
+    CHECK(l["extents"][0]["id"].get<uint64_t>() > 0);
     sync_wait(fs->close());
 }
 
@@ -165,12 +166,15 @@ TEST(admin_inspect_duostore_layout) {
     cfg.meta_path = cfg.root / "meta";
     cfg.meta_sync = false;
     cfg.chunk_size = 4096;
-    cfg.pack_threshold = 8192;  // <= 8KiB packed, above chunked
+    // <= 8KiB packed, above chunked
+    cfg.pack_threshold = 8192;
     auto duo = std::make_shared<storage::DuoStoreBackend>(std::move(cfg), pool);
     Env env({{"main", duo}});
     env.put("/bkt", "");
-    env.put("/bkt/small", "packed");               // below pack_threshold -> one pack extent
-    env.put("/bkt/big", std::string(20000, 'x'));  // 5 chunks of 4KiB
+    // below pack_threshold -> one pack extent
+    env.put("/bkt/small", "packed");
+    // 5 chunks of 4KiB
+    env.put("/bkt/big", std::string(20000, 'x'));
     auto j = env.inspect("bkt", "small");
     auto& l = j["layout"];
     CHECK_EQ(l["engine"].get<std::string>(), "duostore");

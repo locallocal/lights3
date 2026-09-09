@@ -51,7 +51,8 @@ std::optional<AccessRec> decode_access(std::string_view s) {
         return true;
     };
     if (!num(r.atime)) return std::nullopt;
-    if (!num(r.hits)) r.hits = 0;  // legacy "atime only" values
+    // legacy "atime only" values
+    if (!num(r.hits)) r.hits = 0;
     if (!num(r.enrolled)) r.enrolled = -1;
     return r;
 }
@@ -162,7 +163,8 @@ void LocalFsTierLocal::store_access(std::string_view bucket, std::string_view ke
         // precision — the mtime fallback still reaches a conclusion
         if (::setxattr(local_->object_data_path(bucket, key).c_str(), kAccessXattr, v.data(), v.size(), 0) == 0) {
             std::lock_guard lk(table_m_);
-            if (table_.erase(ik) > 0) table_dirty_ = true;  // legacy fallback entry superseded
+            // legacy fallback entry superseded
+            if (table_.erase(ik) > 0) table_dirty_ = true;
             return;
         }
     }
@@ -202,7 +204,8 @@ void LocalFsTierLocal::flush_access() {
     } catch (const std::exception& e) {
         LOG_WARN("tiered: access table snapshot failed: {}", e.what());
         std::lock_guard lk(table_m_);
-        table_dirty_ = true;  // retry next round
+        // retry next round
+        table_dirty_ = true;
     }
 }
 
@@ -227,9 +230,11 @@ Task<void> LocalFsTierLocal::commit_stub(std::string_view bucket, std::string_vi
                                          const TierInfo& tier) {
     fs::path path = local_->object_data_path(bucket, key);
     std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);  // reconcile rebuilds into a possibly missing tree
+    // reconcile rebuilds into a possibly missing tree
+    fs::create_directories(path.parent_path(), ec);
     fsutil::commit_stub(path, meta, tier, tmp_dir());
-    local_->invalidate_object_meta(bucket, key);  // roadmap §3.8: the record changed under the backend
+    // roadmap §3.8: the record changed under the backend
+    local_->invalidate_object_meta(bucket, key);
     co_return;
 }
 
@@ -259,8 +264,10 @@ public:
         ::close(tmp_.fd);
         tmp_.fd = -1;
         fsutil::commit_cached(owner_.data_path(bucket_, key_), tmp_, meta, tier, owner_.tmp_dir());
-        owner_.localfs()->invalidate_object_meta(bucket_, key_);  // roadmap §3.8
-        owner_.drop_range_cache(bucket_, key_);                   // the whole object is local now
+        // roadmap §3.8
+        owner_.localfs()->invalidate_object_meta(bucket_, key_);
+        // the whole object is local now
+        owner_.drop_range_cache(bucket_, key_);
         co_return;
     }
 
@@ -328,7 +335,8 @@ public:
                 ObjectMeta m = fsutil::load_object_meta_stat(entry.path(), w.key, st, &t);
                 w.size = m.size;
             } catch (const S3Error&) {
-                continue;  // raced with a concurrent delete
+                // raced with a concurrent delete
+                continue;
             }
             w.tier = t.tier;
             w.local_bytes = static_cast<uint64_t>(st.st_size);
@@ -391,7 +399,8 @@ public:
           data_(owner.rcache_data_path(bucket_, key_)),
           map_(owner.rcache_map_path(bucket_, key_)) {
         bits_.assign((nblocks_ + 7) / 8, 0);
-        if (!load_map()) {  // missing / other replica / other geometry: start empty
+        if (!load_map()) {
+            // missing / other replica / other geometry: start empty
             owner_.drop_range_cache(bucket_, key_);
             std::fill(bits_.begin(), bits_.end(), 0);
         }
@@ -422,7 +431,8 @@ public:
             fs::create_directories(data_.parent_path(), ec);
             fd_ = ::open(data_.c_str(), O_WRONLY | O_CREAT, 0644);
             if (fd_ < 0) return false;
-            if (::ftruncate(fd_, off_t(size_)) != 0) return false;  // sparse container of the object's size
+            // sparse container of the object's size
+            if (::ftruncate(fd_, off_t(size_)) != 0) return false;
         }
         const char* c = reinterpret_cast<const char*>(p);
         while (n > 0) {
@@ -553,7 +563,8 @@ uint64_t LocalFsTierLocal::sweep_range_cache() {
         std::string key = rel.lexically_relative(fs::path(bucket)).generic_string();
         auto obj = read(bucket, key);
         bool keep = obj && obj->tier.tier == Tier::kRemote;
-        if (keep) {  // the map must still describe this replica
+        if (keep) {
+            // the map must still describe this replica
             std::ifstream f(rcache_map_path(bucket, key), std::ios::binary);
             std::string head;
             std::string ver, etag;

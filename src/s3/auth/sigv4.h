@@ -25,8 +25,10 @@ namespace lights3::s3 {
 // SK and a policy snapshot (docs/archive/gaps.md §3.7): querying the store again for the policy after verify risks the
 // credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race window
 struct CredentialLookup {
-    util::SecretString secret_key;           // wiped on destruction (docs/archive/gaps.md §4)
-    std::optional<CredentialPolicy> policy;  // snapshot at lookup time; nullopt = unrestricted
+    // wiped on destruction (docs/archive/gaps.md §4)
+    util::SecretString secret_key;
+    // snapshot at lookup time; nullopt = unrestricted
+    std::optional<CredentialPolicy> policy;
     // STS session credentials (roadmap §2.6): set for session AKs. verify() then
     // requires a matching X-Amz-Security-Token (mismatch -> InvalidToken) and refuses
     // past-expiry requests (ExpiredToken). Returned by the same single lookup so the
@@ -58,9 +60,12 @@ struct ICredentialProvider {
 // missed second lookup would make the policy vanish entirely
 // (a readonly credential becomes unrestricted within the window, docs/archive/gaps.md §3.7)
 struct VerifiedIdentity {
-    std::string access_key;                  // empty when auth is disabled (for access logs)
-    std::optional<CredentialPolicy> policy;  // nullopt = unrestricted
-    std::string tenant;                      // empty = not a tenant credential
+    // empty when auth is disabled (for access logs)
+    std::string access_key;
+    // nullopt = unrestricted
+    std::optional<CredentialPolicy> policy;
+    // empty = not a tenant credential
+    std::string tenant;
     bool tenant_admin = false;
 };
 

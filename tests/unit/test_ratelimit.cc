@@ -68,15 +68,20 @@ TEST(ratelimit_token_bucket_refills_at_rps) {
         CHECK(t.has_value());
         held.push_back(std::move(*t));
     }
-    CHECK(!rl.admit("a", t0));                                   // burst spent
-    CHECK(rl.admit("b", t0));                                    // other keys unaffected
-    CHECK(!rl.admit("a", t0 + std::chrono::milliseconds(400)));  // 0.8 tokens: not yet
-    CHECK(rl.admit("a", t0 + std::chrono::milliseconds(600)));   // 1.2 tokens
+    // burst spent
+    CHECK(!rl.admit("a", t0));
+    // other keys unaffected
+    CHECK(rl.admit("b", t0));
+    // 0.8 tokens: not yet
+    CHECK(!rl.admit("a", t0 + std::chrono::milliseconds(400)));
+    // 1.2 tokens
+    CHECK(rl.admit("a", t0 + std::chrono::milliseconds(600)));
     // A long pause refills to the burst cap, never beyond
     held.clear();
     for (int i = 0; i < 4; ++i) CHECK(rl.admit("a", t0 + std::chrono::seconds(100)));
     CHECK(!rl.admit("a", t0 + std::chrono::seconds(100)));
-    CHECK(rl.admit("", t0));  // empty key: never accounted
+    // empty key: never accounted
+    CHECK(rl.admit("", t0));
 }
 
 TEST(ratelimit_inflight_cap_and_release) {
@@ -84,11 +89,13 @@ TEST(ratelimit_inflight_cap_and_release) {
     auto a = rl.admit("k"), b = rl.admit("k");
     CHECK(a && b);
     CHECK(!rl.admit("k"));
-    a->reset();  // slot returned
+    // slot returned
+    a->reset();
     auto c = rl.admit("k");
     CHECK(c.has_value());
     {
-        RateLimiter::Token moved = std::move(*c);  // move keeps exactly one release
+        // move keeps exactly one release
+        RateLimiter::Token moved = std::move(*c);
     }
     CHECK(rl.admit("k").has_value());
 }
@@ -103,7 +110,8 @@ TEST(ratelimit_table_is_bounded) {
     auto x = rl2.admit("x"), y = rl2.admit("y");
     (void)rl2.admit("z", t0);
     (void)rl2.admit("w", t0);
-    CHECK(rl2.admit("x").has_value());  // still tracked, still has its slot accounting
+    // still tracked, still has its slot accounting
+    CHECK(rl2.admit("x").has_value());
     CHECK(rl2.tracked() <= size_t(4));
     // Every tracked key in flight + a table already full: the newcomer must still be
     // admitted safely (it is never evicted out from under its own admission)
@@ -124,7 +132,8 @@ TEST(ratelimit_dispatch_per_ip_and_per_ak) {
     // Per-IP: 2 from one address, the third is throttled with Retry-After; another address is fine
     auto r1 = env.call("/", "10.0.0.1", nullptr);
     auto r2 = env.call("/", "10.0.0.1", nullptr);
-    CHECK_EQ(r1.status, 403);  // unsigned: rejected by auth, but admitted by the limiter
+    // unsigned: rejected by auth, but admitted by the limiter
+    CHECK_EQ(r1.status, 403);
     CHECK_EQ(r2.status, 403);
     auto r3 = env.call("/", "10.0.0.1", nullptr);
     CHECK_EQ(r3.status, 503);
@@ -178,6 +187,7 @@ TEST(ratelimit_and_timeout_config_surface) {
     CHECK(rejects("http:\n  header_timeout: 0s\n"));
     CHECK(rejects("http:\n  body_timeout: 2d\n"));
     CHECK(rejects("http:\n  max_requests_per_connection: -1\n"));
-    CHECK(rejects("ratelimit:\n  per_ip_burst: 10\n"));  // burst without rps
+    // burst without rps
+    CHECK(rejects("ratelimit:\n  per_ip_burst: 10\n"));
     CHECK(rejects("ratelimit:\n  max_tracked: 0\n"));
 }

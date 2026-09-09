@@ -85,7 +85,8 @@ std::vector<LifecycleRule> parse_lifecycle_xml(const std::string& body) {
                                   "Lifecycle filters other than Prefix are not implemented.");
             r.prefix = f->get("Prefix");
         } else {
-            r.prefix = rn.get("Prefix");  // legacy top-level Prefix form
+            // legacy top-level Prefix form
+            r.prefix = rn.get("Prefix");
         }
         if (auto* e = rn.find("Expiration")) {
             for (const char* unsupported : {"Date", "ExpiredObjectDeleteMarker"})

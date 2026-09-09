@@ -18,7 +18,8 @@ struct RequestBackendStats {
     std::atomic<int64_t> nanos{0};
     std::atomic<uint32_t> calls{0};
     std::atomic<uint32_t> errors{0};
-    TraceContext trace;  // set once at dispatch, read-only afterwards
+    // set once at dispatch, read-only afterwards
+    TraceContext trace;
     double millis() const { return static_cast<double>(nanos.load(std::memory_order_relaxed)) / 1e6; }
 };
 

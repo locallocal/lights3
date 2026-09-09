@@ -59,18 +59,22 @@ size_t count_files_with(const fs::path& dir, const std::string& needle) {
 
 TEST(fault_spec_grammar_and_countdown) {
     FaultReset guard;
-    CHECK_EQ(fault::check("localfs.write"), 0);  // nothing armed: the fast path
+    // nothing armed: the fast path
+    CHECK_EQ(fault::check("localfs.write"), 0);
     fault::arm("localfs.write:2:ENOSPC, duostore.pack.pwrite");
     CHECK_EQ(fault::describe(),
              "duostore.pack.pwrite:1:" + std::to_string(EIO) + ", localfs.write:2:" + std::to_string(ENOSPC));
     CHECK_EQ(fault::check("localfs.write"), ENOSPC);
-    CHECK_EQ(fault::check("localfs.rename"), 0);  // not armed
+    // not armed
+    CHECK_EQ(fault::check("localfs.rename"), 0);
     CHECK_EQ(fault::check("localfs.write"), ENOSPC);
-    CHECK_EQ(fault::check("localfs.write"), 0);  // count exhausted, point cleared
+    // count exhausted, point cleared
+    CHECK_EQ(fault::check("localfs.write"), 0);
     CHECK_EQ(fault::check("duostore.pack.pwrite"), EIO);
     CHECK_EQ(fault::check("duostore.pack.pwrite"), 0);
     CHECK_EQ(fault::describe(), "");
-    fault::arm("localfs.fsync:0:5");  // 0 = sticky, numeric errno
+    // 0 = sticky, numeric errno
+    fault::arm("localfs.fsync:0:5");
     for (int i = 0; i < 5; ++i) CHECK_EQ(fault::check("localfs.fsync"), 5);
     fault::reset();
     CHECK_EQ(fault::check("localfs.fsync"), 0);
@@ -83,7 +87,8 @@ TEST(fault_spec_grammar_and_countdown) {
 
 TEST(fault_points_are_wired_in_sources) {
     fs::path src = fs::path(__FILE__).parent_path().parent_path().parent_path() / "src";
-    if (!fs::exists(src)) return;  // installed-tree run: nothing to cross-check
+    // installed-tree run: nothing to cross-check
+    if (!fs::exists(src)) return;
     for (auto p : fault::kPoints)
         if (count_files_with(src, std::string(p)) == 0)
             throw mini_test::Failure("fault point not wired anywhere: " + std::string(p));
@@ -140,7 +145,8 @@ TEST(fault_localfs_write_rename_fsync) {
     } catch (const S3Error& e) {
         failed = e.code == S3ErrorCode::InternalError;
     }
-    CHECK(failed || !fsutil::fsync_enabled());  // LIGHTS3_FSYNC=0 makes the point unreachable
+    // LIGHTS3_FSYNC=0 makes the point unreachable
+    CHECK(failed || !fsutil::fsync_enabled());
     fault::reset();
     CHECK(!put(*b, "bkt", "k3", "y").etag.empty());
     sync_wait(b->close());
@@ -158,7 +164,8 @@ TEST(fault_duostore_pack_pwrite_and_fdatasync) {
     cfg.meta_sync = false;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "before", "small");  // small objects land in packs (default threshold)
+    // small objects land in packs (default threshold)
+    put(*b, "bkt", "before", "small");
 
     fault::arm("duostore.pack.pwrite:1:EIO");
     try {

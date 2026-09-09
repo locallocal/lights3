@@ -21,10 +21,14 @@ std::optional<Action> action_from_name(std::string_view s);
 
 // Default (nullopt) = unrestricted
 struct CredentialPolicy {
-    std::vector<std::string> buckets;   // bucket glob allowlist; empty = all
-    std::vector<std::string> prefixes;  // key prefix allowlist; empty = all (§5.10)
-    bool readonly = false;              // equivalent to actions = [read], kept for compatibility
-    std::vector<Action> actions;        // empty = determined by readonly
+    // bucket glob allowlist; empty = all
+    std::vector<std::string> buckets;
+    // key prefix allowlist; empty = all (§5.10)
+    std::vector<std::string> prefixes;
+    // equivalent to actions = [read], kept for compatibility
+    bool readonly = false;
+    // empty = determined by readonly
+    std::vector<Action> actions;
 
     // Empty bucket means an account-level operation (ListBuckets). Empty key means "this check is
     // unrelated to a specific object" (create bucket, list objects in a bucket, etc.); prefixes are not checked then

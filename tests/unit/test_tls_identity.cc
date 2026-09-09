@@ -245,7 +245,8 @@ TEST(tls_identity_san_uri_mode) {
         c.access_key);
 
     CHECK_EQ(env.call("GET", "/bkt", nullptr, Cert{"anything", uri}).status, 200);
-    CHECK_EQ(env.call("GET", "/bkt", nullptr, Cert{uri, ""}).status, 403);  // CN is not the subject here
+    // CN is not the subject here
+    CHECK_EQ(env.call("GET", "/bkt", nullptr, Cert{uri, ""}).status, 403);
     CHECK_EQ(env.call("GET", "/bkt", nullptr, Cert{"", "spiffe://example.org/other"}).status, 403);
 }
 

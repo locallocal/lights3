@@ -86,7 +86,8 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req, std::s
         if (!tenants_ || !usage_)
             throw S3Error(S3ErrorCode::InvalidRequest,
                           "Tenancy and usage accounting are not available on this deployment.");
-        const std::string& own = ident.tenant;  // empty for root
+        // empty for root
+        const std::string& own = ident.tenant;
         auto require_root = [&](const char* what) {
             if (!root) throw S3Error(S3ErrorCode::AccessDenied, std::string(what) + " requires a root credential.");
         };

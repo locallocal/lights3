@@ -41,7 +41,8 @@ struct SvcEnv {
     std::shared_ptr<storage::MemoryBackend> backend;
     std::shared_ptr<CredentialStore> store;
     std::unique_ptr<S3Service> svc;
-    SigV4Authenticator signer;  // test-side signer (same region/service as the server)
+    // test-side signer (same region/service as the server)
+    SigV4Authenticator signer;
 
     explicit SvcEnv(AuthConfig cfg = root_cfg()) : SvcEnv(std::make_shared<storage::MemoryBackend>(), cfg) {}
     // A second "instance" over the same backend (multi-instance sharing of .sys)
@@ -109,7 +110,8 @@ TEST(credstore_reload_restores_generated) {
     auto be = std::make_shared<storage::MemoryBackend>();
     auto c = sync_wait(load_store(be, root_cfg())->generate("persist-me"));
 
-    auto reloaded = load_store(be, root_cfg());  // simulates a process restart
+    // simulates a process restart
+    auto reloaded = load_store(be, root_cfg());
     CHECK(reloaded->secret_for(c.access_key).value_or("") == c.secret_key);
     auto info = reloaded->find(c.access_key);
     CHECK(info && info->comment == "persist-me" && !info->is_static());
@@ -214,7 +216,8 @@ TEST(admin_api_requires_root) {
 }
 
 TEST(admin_api_denied_when_auth_disabled) {
-    SvcEnv env{AuthConfig{}};  // no static credentials: auth is off, and without root there is no admin plane
+    // no static credentials: auth is off, and without root there is no admin plane
+    SvcEnv env{AuthConfig{}};
     http::HttpRequest req;
     req.method = "POST";
     req.raw_path = "/-/admin/credentials";
@@ -239,7 +242,8 @@ namespace {
 // 64 hex chars = 32-byte master key (fixed value for tests)
 constexpr const char* kTestMasterKeyHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
-struct EnvGuard {  // sets an environment variable for the test, cleared when the scope ends
+struct EnvGuard {
+    // sets an environment variable for the test, cleared when the scope ends
     const char* name;
     EnvGuard(const char* n, const char* v) : name(n) { ::setenv(n, v, 1); }
     ~EnvGuard() { ::unsetenv(name); }
@@ -275,7 +279,8 @@ TEST(aes256gcm_roundtrip_and_tamper) {
     util::Aes256Key key{};
     for (size_t i = 0; i < key.size(); ++i) key[i] = static_cast<uint8_t>(i);
     auto sealed = util::aes256gcm_seal(key, "hello secret");
-    CHECK_EQ(sealed.size(), size_t{12 + 12 + 16});  // nonce + ct + tag
+    // nonce + ct + tag
+    CHECK_EQ(sealed.size(), size_t{12 + 12 + 16});
     CHECK_EQ(util::aes256gcm_open(key, sealed).value_or(""), "hello secret");
 
     auto tampered = sealed;
@@ -297,7 +302,8 @@ TEST(credstore_encrypted_at_rest) {
     auto raw = read_object_raw(*be, "credentials/" + c.access_key);
     CHECK(raw.find("\"version\": 2") != std::string::npos);
     CHECK(raw.find("sk_enc") != std::string::npos);
-    CHECK(raw.find(c.secret_key) == std::string::npos);  // the plaintext SK never hits disk
+    // the plaintext SK never hits disk
+    CHECK(raw.find(c.secret_key) == std::string::npos);
 
     auto reloaded = load_store(be, root_cfg());
     CHECK(reloaded->secret_for(c.access_key).value_or("") == c.secret_key);
@@ -324,11 +330,13 @@ TEST(credstore_v2_requires_correct_master_key) {
 
 TEST(credstore_v1_upgraded_to_v2_on_load) {
     auto be = std::make_shared<storage::MemoryBackend>();
-    auto c = sync_wait(load_store(be, root_cfg())->generate("old"));  // no key: v1 plaintext
+    // no key: v1 plaintext
+    auto c = sync_wait(load_store(be, root_cfg())->generate("old"));
     CHECK(read_object_raw(*be, "credentials/" + c.access_key).find("\"sk\"") != std::string::npos);
 
     EnvGuard env(kMasterKeyEnv, kTestMasterKeyHex);
-    auto store = load_store(be, root_cfg());  // upgraded in place at load time
+    // upgraded in place at load time
+    auto store = load_store(be, root_cfg());
     CHECK(store->secret_for(c.access_key).value_or("") == c.secret_key);
     auto raw = read_object_raw(*be, "credentials/" + c.access_key);
     CHECK(raw.find("\"version\": 2") != std::string::npos);
@@ -343,15 +351,19 @@ TEST(credstore_policy_enforced_and_persisted) {
     p.readonly = true;
     auto c = sync_wait(store->generate("scoped", p));
 
-    store->authorize(c.access_key, "logs-app", "", Action::Read);  // matches the glob
-    store->authorize(c.access_key, "", "", Action::Read);          // ListBuckets allowed
-    store->authorize(kRootAk, "anything", "", Action::Write);      // root is unrestricted
-    CHECK_THROWS_S3(store->authorize(c.access_key, "logs-app", "", Action::Write),
-                    S3ErrorCode::AccessDenied);  // readonly
-    CHECK_THROWS_S3(store->authorize(c.access_key, "other", "", Action::Read),
-                    S3ErrorCode::AccessDenied);  // outside the allowlist
+    // matches the glob
+    store->authorize(c.access_key, "logs-app", "", Action::Read);
+    // ListBuckets allowed
+    store->authorize(c.access_key, "", "", Action::Read);
+    // root is unrestricted
+    store->authorize(kRootAk, "anything", "", Action::Write);
+    // readonly
+    CHECK_THROWS_S3(store->authorize(c.access_key, "logs-app", "", Action::Write), S3ErrorCode::AccessDenied);
+    // outside the allowlist
+    CHECK_THROWS_S3(store->authorize(c.access_key, "other", "", Action::Read), S3ErrorCode::AccessDenied);
 
-    auto info = load_store(be, root_cfg())->find(c.access_key);  // persisted
+    // persisted
+    auto info = load_store(be, root_cfg())->find(c.access_key);
     CHECK(info && info->policy && info->policy->readonly);
     CHECK(info->policy->buckets == std::vector<std::string>{"logs-*"});
 }
@@ -372,8 +384,10 @@ TEST(admin_api_policy_flow) {
     Credential dyn{j.at("access_key").get<std::string>(), j.at("secret_key").get<std::string>()};
 
     CHECK_EQ(env.call("GET", "/logs-a/k", dyn).status, 200);
-    CHECK_EQ(env.call("PUT", "/logs-a/new", dyn, {}, "x").status, 403);  // readonly
-    CHECK_EQ(env.call("GET", "/private/k", dyn).status, 403);            // outside the allowlist
+    // readonly
+    CHECK_EQ(env.call("PUT", "/logs-a/new", dyn, {}, "x").status, 403);
+    // outside the allowlist
+    CHECK_EQ(env.call("GET", "/private/k", dyn).status, 403);
     // ListBuckets is now filtered by policy (docs/archive/gaps.md §5.10): bucket names are precisely the first step
     // of an attack chain, and a restricted credential should not see that buckets outside its allowlist exist
     auto lb = env.call("GET", "/", dyn);
@@ -410,8 +424,10 @@ TEST(credstore_file_provider_and_hot_reload) {
     auto store = load_store(be, cfg);
 
     CHECK(store->secret_for("FILEAKAAA").value_or("") == "file-secret-1");
-    CHECK(!store->is_root("FILEAKAAA"));                        // file-sourced credentials are data-plane only
-    CHECK(store->secret_for(kRootAk).value_or("") == kRootSk);  // static wins for the same AK
+    // file-sourced credentials are data-plane only
+    CHECK(!store->is_root("FILEAKAAA"));
+    // static wins for the same AK
+    CHECK(store->secret_for(kRootAk).value_or("") == kRootSk);
     CHECK_THROWS_S3(store->authorize("FILEAKBBB", "b", "", Action::Write), S3ErrorCode::AccessDenied);
     CHECK_THROWS_S3(sync_wait(store->remove("FILEAKAAA")), S3ErrorCode::MethodNotAllowed);
     auto info = store->find("FILEAKAAA");
@@ -433,7 +449,8 @@ TEST(credstore_file_provider_and_hot_reload) {
 }
 
 TEST(credstore_multi_instance_sync) {
-    auto be = std::make_shared<storage::MemoryBackend>();  // two instances share the same backend
+    // two instances share the same backend
+    auto be = std::make_shared<storage::MemoryBackend>();
     auto a = load_store(be, root_cfg());
     auto b = load_store(be, root_cfg());
 
@@ -453,7 +470,8 @@ TEST(credstore_multi_instance_sync) {
 TEST(sys_bucket_hidden_from_data_plane) {
     SvcEnv env;
     Credential root{kRootAk, kRootSk};
-    env.call("POST", "/-/admin/credentials", root);  // triggers creation of the .sys bucket
+    // triggers creation of the .sys bucket
+    env.call("POST", "/-/admin/credentials", root);
 
     // User requests cannot reach .sys (intercepted at L2), and ListBuckets does not show it
     CHECK_EQ(env.call("GET", "/.sys/credentials/x", root).status, 400);
@@ -470,7 +488,8 @@ TEST(credstore_file_reload_refuses_empty_table) {
     auto path = fs::temp_directory_path() / ("lights3-test-empty-creds-" + std::to_string(::getpid()) + ".json");
     std::ofstream(path) << R"({"credentials":[
         {"access_key":"FILEAKAAA","secret_key":"file-secret-1"}]})";
-    AuthConfig cfg;  // no static credentials: auth depends entirely on the file
+    // no static credentials: auth depends entirely on the file
+    AuthConfig cfg;
     cfg.credentials_file = path.string();
     auto be = std::make_shared<storage::MemoryBackend>();
     auto store = load_store(be, cfg);
@@ -479,7 +498,8 @@ TEST(credstore_file_reload_refuses_empty_table) {
 
     std::ofstream(path, std::ios::trunc) << R"({"credentials":[]})";
     store->reload_file_now();
-    CHECK(store->secret_for("FILEAKAAA").has_value());  // the old table is kept, no anonymous open access
+    // the old table is kept, no anonymous open access
+    CHECK(store->secret_for("FILEAKAAA").has_value());
     CHECK(store->degraded());
 
     // File restored -> applied normally and the flag resets
@@ -518,7 +538,8 @@ TEST(credstore_sync_tombstone_blocks_revival) {
     sync_wait(be->put_object(kSysBucket, obj_key, std::move(meta), rb));
 
     sync_wait(store->sync_now());
-    CHECK(!store->secret_for(c.access_key));  // revocation takes effect immediately, no resurrection
+    // revocation takes effect immediately, no resurrection
+    CHECK(!store->secret_for(c.access_key));
 }
 
 // gaps §3.7: authorization uses the policy snapshot taken at signature-verification time. When a credential is
@@ -569,7 +590,8 @@ TEST(policy_action_and_prefix_granularity) {
     CHECK_EQ(env.call("GET", "/data/keep.txt", backup).status, 200);
     CHECK_EQ(env.call("PUT", "/data/new.txt", backup, {}, "x").status, 200);
     CHECK_EQ(env.call("DELETE", "/data/keep.txt", backup).status, 403);
-    CHECK_EQ(env.call("GET", "/data/keep.txt", root).status, 200);  // indeed not deleted
+    // indeed not deleted
+    CHECK_EQ(env.call("GET", "/data/keep.txt", root).status, 200);
     // DeleteObjects is a POST, but classified by action it is still a delete -- the method dimension cannot tell these
     // apart
     CHECK_EQ(
@@ -604,7 +626,8 @@ TEST(policy_glob_does_not_cross_slash) {
     CredentialPolicy q;
     q.buckets = {"a/*"};
     CHECK(q.allows_bucket("a/b"));
-    CHECK(!q.allows_bucket("a/b/c"));  // '*' does not cross '/'
+    // '*' does not cross '/'
+    CHECK(!q.allows_bucket("a/b/c"));
 }
 
 TEST(admin_api_never_returns_static_secret) {
@@ -668,7 +691,8 @@ TEST(policy_prefix_batch_delete_and_listing) {
     CHECK_EQ(resp.status, 200);
     CHECK(resp.small_body.find("<Error><Key>other/secret</Key><Code>AccessDenied</Code>") != std::string::npos);
     CHECK(resp.small_body.find("<Deleted><Key>logs/mine</Key>") != std::string::npos);
-    CHECK_EQ(env.call("GET", "/shared/other/secret", root).status, 200);  // not deleted beyond authority
+    // not deleted beyond authority
+    CHECK_EQ(env.call("GET", "/shared/other/secret", root).status, 200);
     CHECK_EQ(env.call("GET", "/shared/logs/mine", root).status, 404);
 }
 
@@ -868,9 +892,11 @@ TEST(sts_session_shared_across_instances) {
     auto resp2 = sts_call(a, root, "Action=AssumeRole&DurationSeconds=900");
     std::string ak2 = xtext(resp2.small_body, "AccessKeyId");
     SvcEnv c(a.backend);
-    CHECK_EQ(c.store->session_count(), size_t{2});  // startup load sees both
+    // startup load sees both
+    CHECK_EQ(c.store->session_count(), size_t{2});
     SvcEnv d(a.backend);
-    sync_wait(a.store->mint_session(kRootAk, 900));  // a third one after d loaded
+    // a third one after d loaded
+    sync_wait(a.store->mint_session(kRootAk, 900));
     CHECK_EQ(d.store->session_count(), size_t{2});
     sync_wait(d.store->sync_now());
     CHECK_EQ(d.store->session_count(), size_t{3});

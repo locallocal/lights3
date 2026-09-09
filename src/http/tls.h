@@ -39,10 +39,13 @@ namespace lights3::http::tls {
 // answers for (empty = the default certificate)
 struct CertBundle {
     X509* leaf = nullptr;
-    STACK_OF_X509* chain = nullptr;  // intermediates in file order (may be empty)
+    // intermediates in file order (may be empty)
+    STACK_OF_X509* chain = nullptr;
     EVP_PKEY* key = nullptr;
-    std::vector<std::string> hosts;  // lowercase; "*.example.com" matches one label
-    std::string subject;             // for logs
+    // lowercase; "*.example.com" matches one label
+    std::vector<std::string> hosts;
+    // for logs
+    std::string subject;
 
     CertBundle() = default;
     CertBundle(const CertBundle&) = delete;
@@ -62,8 +65,10 @@ public:
 
     // SNI selection: exact host, then wildcard, else the default certificate
     const CertBundle& select(std::string_view servername) const;
-    X509_STORE* client_store() const { return client_store_; }         // null = no client CA
-    STACK_OF_X509_NAME* client_ca_names() const { return ca_names_; }  // null = no client CA
+    // null = no client CA
+    X509_STORE* client_store() const { return client_store_; }
+    // null = no client CA
+    STACK_OF_X509_NAME* client_ca_names() const { return ca_names_; }
 
     // The files this snapshot came from with their (size, mtime) at load time;
     // reload_if_changed compares against the current filesystem state
@@ -73,11 +78,13 @@ public:
         std::filesystem::file_time_type mtime{};
     };
     const std::vector<Stamp>& stamps() const { return stamps_; }
-    static Stamp stamp_of(const std::string& path);  // throws when the file cannot be stat'ed
+    // throws when the file cannot be stat'ed
+    static Stamp stamp_of(const std::string& path);
 
 private:
     Material() = default;
-    std::vector<CertBundle> bundles_;  // [0] = default
+    // [0] = default
+    std::vector<CertBundle> bundles_;
     X509_STORE* client_store_ = nullptr;
     STACK_OF_X509_NAME* ca_names_ = nullptr;
     std::vector<Stamp> stamps_;
@@ -85,7 +92,8 @@ private:
 
 // Client authentication mode from http.tls_client_auth
 enum class ClientAuth { Off, Optional, Require };
-ClientAuth parse_client_auth(const std::string& s);  // throws std::runtime_error on unknown
+// throws std::runtime_error on unknown
+ClientAuth parse_client_auth(const std::string& s);
 
 // Per-server holder: current snapshot + reload watch + SSL_CTX configuration
 class Holder {
@@ -111,7 +119,8 @@ public:
     void stop_watch();
 
     const HttpConfig& config() const { return cfg_; }
-    const char* summary() const;  // one-line description for the listen log
+    // one-line description for the listen log
+    const char* summary() const;
 
 private:
     static int cert_cb(SSL* ssl, void* arg);
@@ -128,7 +137,8 @@ private:
 };
 
 // Static knobs shared by the drivers (also used by tests to build client contexts)
-long min_version_of(const std::string& s);  // "1.2" -> TLS1_2_VERSION, "1.3" -> TLS1_3_VERSION
+// "1.2" -> TLS1_2_VERSION, "1.3" -> TLS1_3_VERSION
+long min_version_of(const std::string& s);
 
 // Identity of the peer certificate after the handshake (backlog-sequence ⑥):
 // nullopt when the peer presented none or verification did not succeed (the

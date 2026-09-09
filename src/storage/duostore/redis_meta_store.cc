@@ -36,7 +36,8 @@ constexpr const char* kCounterPack = "ctr:pack";
 constexpr const char* kCounterSeq = "ctr:seq";
 // Distinguishes lineage from RocksDB's "1" (§2.2); see meta_util.h parse_schema_marker for the version evolution policy
 constexpr int64_t kSchemaCurrent = 1;
-constexpr const char* kSchemaValue = "r1";  // = "r" + kSchemaCurrent (written on first creation)
+// = "r" + kSchemaCurrent (written on first creation)
+constexpr const char* kSchemaValue = "r1";
 // CAS retry cap (§3.2): throw InternalError past the cap — under pathological hotspot contention,
 // failing loudly beats a livelock. A tight loop without backoff would be starved by a peer's
 // continuous commit stream (hot key across multiple gateways), so back off exponentially before retrying
@@ -235,7 +236,8 @@ RedisReplyPtr run_on(redisContext* ctx, const std::vector<std::string>& args, st
         argv[i] = args[i].data();
         lens[i] = args[i].size();
     }
-    if (int fe = fault::check("redis.command")) {  // roadmap §6.1: connection-level failure
+    if (int fe = fault::check("redis.command")) {
+        // roadmap §6.1: connection-level failure
         *err = std::string("injected: ") + std::strerror(fe);
         return nullptr;
     }
@@ -336,7 +338,8 @@ private:
 
     RedisMetaStore& store_;
     std::vector<std::string> keys_;
-    std::vector<std::string> checks_;  // flattened 4-tuples
+    // flattened 4-tuples
+    std::vector<std::string> checks_;
     std::vector<std::string> ops_;
 };
 
@@ -344,8 +347,10 @@ private:
 
 void RedisMetaStore::cas_backoff(int attempt) {
     if (attempt == 0) return;
-    m_cas_retries_->inc();                 // the previous commit round failed its guard; this round is the retry
-    int shift = std::min(attempt - 1, 6);  // 100µs … 6.4ms, 16 attempts total ≈ 80ms
+    // the previous commit round failed its guard; this round is the retry
+    m_cas_retries_->inc();
+    // 100µs … 6.4ms, 16 attempts total ≈ 80ms
+    int shift = std::min(attempt - 1, 6);
     std::this_thread::sleep_for(std::chrono::microseconds(100 << shift));
 }
 
@@ -385,8 +390,8 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         if (auto at = rest.rfind('@'); at != std::string::npos) {
             std::string userinfo = rest.substr(0, at);
             rest = rest.substr(at + 1);
-            if (auto colon = userinfo.find(':'); colon != std::string::npos)
-                password_ = userinfo.substr(colon + 1);  // user part ignored (no ACL requirement)
+            // user part ignored (no ACL requirement)
+            if (auto colon = userinfo.find(':'); colon != std::string::npos) password_ = userinfo.substr(colon + 1);
         }
         if (auto colon = rest.rfind(':'); colon != std::string::npos) {
             std::string port = rest.substr(colon + 1);
@@ -413,7 +418,8 @@ RedisMetaStore::RedisMetaStore(RedisMetaOptions opt) : opt_(std::move(opt)) {
         origin_ = buf;
     }
 
-    auto c = make_conn();  // an unreachable server fails loudly here
+    // an unreachable server fails loudly here
+    auto c = make_conn();
     std::string err;
 
     // Script preload (§3.5): SHAs are content-addressed; after a server restart/SCRIPT FLUSH, NOSCRIPT self-heals by
@@ -486,7 +492,8 @@ void RedisMetaStore::close() {
     {
         std::lock_guard lk(pool_mu_);
         closed_ = true;
-        idle_.clear();  // redisFree all idle connections; calls after close fail cleanly in acquire() (500)
+        // redisFree all idle connections; calls after close fail cleanly in acquire() (500)
+        idle_.clear();
     }
     // Stop the invalidation feed outside the pool lock: the thread polls with a short
     // timeout and checks the flag, so the join is bounded
@@ -640,7 +647,8 @@ std::unique_ptr<RedisMetaStore::Conn> RedisMetaStore::acquire() {
 
 void RedisMetaStore::release(std::unique_ptr<Conn> c) {
     std::lock_guard lk(pool_mu_);
-    if (closed_ || idle_.size() >= size_t(opt_.pool_size)) return;  // redisFree directly
+    // redisFree directly
+    if (closed_ || idle_.size() >= size_t(opt_.pool_size)) return;
     idle_.push_back(std::move(c));
 }
 
@@ -666,8 +674,8 @@ RedisMetaStore::ReplyPtr RedisMetaStore::exec(const std::vector<std::string>& ar
     }
     // After a successful commit-class command (!read_retry), WAIT on the same connection (§6) — WAIT only covers writes
     // previously issued on this connection
-    if (!read_retry && opt_.wait_replicas > 0 && !wait_for_replicas(*c))
-        return r;  // connection is bad: do not return it to the pool (the write itself succeeded)
+    // connection is bad: do not return it to the pool (the write itself succeeded)
+    if (!read_retry && opt_.wait_replicas > 0 && !wait_for_replicas(*c)) return r;
     release(std::move(c));
     return r;
 }
@@ -758,9 +766,9 @@ std::optional<std::string> RedisMetaStore::upload_raw(std::string_view b, std::s
 
 void RedisMetaStore::batch_refs(RedisBatch& bt, const DataRef& ref, bool add, std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack)
-            continue;  // pack liveness is tracked via stats (P2);
-                       // chunk/rados both enter refs by file_id
+        // pack liveness is tracked via stats (P2);
+        // chunk/rados both enter refs by file_id
+        if (e.kind == Extent::Kind::kPack) continue;
         if (add)
             bt.hset(refs_key(), std::to_string(e.file_id), owner);
         else
@@ -772,7 +780,8 @@ void RedisMetaStore::batch_pack_delta(RedisBatch& bt, const DataRef& ref, int si
     // Aggregate multiple extents of the same pack first, then two HINCRBYs per pack (§9.1,
     // adjusted in the same batch as the business script); each record counts payload + header
     // overhead, the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
-    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
+    // pack_id -> (bytes, recs)
+    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
         auto& [bytes, recs] = agg[e.file_id];
@@ -805,7 +814,8 @@ void RedisMetaStore::enqueue_reclaim(RedisBatch& bt, const DataRef& ref, Reclaim
 }
 
 uint64_t RedisMetaStore::alloc_id(std::string_view counter_suffix, IdRange& r, uint32_t n) {
-    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
+    // run ≤ kMaxIdRun << kIdSegment
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);
     std::lock_guard lk(alloc_mu_);
     if (r.limit - r.next < n) {
         // The first reservation burns one extra segment (§4 mitigation 2): skips ids that may
@@ -862,7 +872,8 @@ void RedisMetaStore::delete_bucket(std::string_view b) {
         bt.expect_hlen0(uploads_key(b));
         bt.hdel(buckets_key(), b);
         bt.del(zindex_key(b));
-        bt.del(uploads_zkey(b));  // empty by the hlen0 guard, but a stale member must not outlive the bucket
+        // empty by the hlen0 guard, but a stale member must not outlive the bucket
+        bt.del(uploads_zkey(b));
         if (bt.commit()) return;
     }
     throw_internal("delete_bucket", "too many CAS retries");
@@ -915,7 +926,8 @@ void RedisMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
         rec.version = old ? old->version + 1 : 1;
 
         RedisBatch bt(*this);
-        bt.expect_exists(buckets_key(), b);  // bucket existence is atomic with the commit, same script (§3.3)
+        // bucket existence is atomic with the commit, same script (§3.3)
+        bt.expect_exists(buckets_key(), b);
         if (oldv)
             bt.expect_eq(objects_key(b), k, *oldv);
         else
@@ -941,9 +953,9 @@ bool RedisMetaStore::delete_object(std::string_view b, std::string_view k) {
         cas_backoff(attempt);
         require_bucket(b);
         auto oldv = hget_raw(objects_key(b), k);
-        if (!oldv)
-            return false;  // idempotent (when the object exists the bucket is necessarily non-empty; no bucket guard
-                           // needed)
+        // idempotent (when the object exists the bucket is necessarily non-empty; no bucket guard
+        // needed)
+        if (!oldv) return false;
         auto old = codec::decode_object(std::string(k), *oldv);
 
         RedisBatch bt(*this);
@@ -996,7 +1008,8 @@ std::string RedisMetaStore::create_upload(std::string_view b, std::string_view k
         RedisBatch bt(*this);
         bt.expect_exists(buckets_key(), b);
         bt.hset(uploads_key(b), field, codec::encode_upload(rec));
-        bt.zadd(uploads_zkey(b), "0", field);  // lex index (§2.1 principle 3, same as oz:<b>)
+        // lex index (§2.1 principle 3, same as oz:<b>)
+        bt.zadd(uploads_zkey(b), "0", field);
         if (bt.commit()) return rec.upload_id;
     }
     throw_internal("create_upload", "too many CAS retries");
@@ -1013,7 +1026,8 @@ UploadRec RedisMetaStore::require_upload(std::string_view b, std::string_view k,
 }
 
 void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) {
-    require_upload(b, k, id);  // semantic validation (incl. id format); atomicity is rechecked by the script guards
+    // semantic validation (incl. id format); atomicity is rechecked by the script guards
+    require_upload(b, k, id);
     std::string ufield = std::string(k) + '\0' + std::string(id);
     std::string pkey = parts_key(b, k, id);
     std::string pfield = std::to_string(p.part_no);
@@ -1036,13 +1050,15 @@ void RedisMetaStore::put_part(std::string_view b, std::string_view k, std::strin
         batch_refs(bt, p.data, /*add=*/true, owner);
         const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
         batch_pack_delta(bt, p.data, +1, ov);
-        if (old) {  // same-number re-upload is last-write-wins: the old part enters GC accounting in the same batch
+        if (old) {
+            // same-number re-upload is last-write-wins: the old part enters GC accounting in the same batch
             enqueue_reclaim(bt, old->data, ReclaimReason::kPartOverwrite);
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, ov);
         }
         if (bt.commit()) return;
-        if (!upload_raw(b, k, id))  // a concurrent complete/abort won
+        // a concurrent complete/abort won
+        if (!upload_raw(b, k, id))
             throw S3Error(S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.", std::string(id));
     }
     throw_internal("put_part", "too many CAS retries");
@@ -1120,7 +1136,8 @@ std::vector<UploadInfo> RedisMetaStore::list_uploads(std::string_view b, std::st
         bool past_prefix = false;
         for (size_t i = 0; i < r->elements; ++i) {
             std::string_view m = reply_str(r->element[i]);
-            if (m.substr(0, prefix.size()) != prefix) {  // sorted: nothing after this matches
+            if (m.substr(0, prefix.size()) != prefix) {
+                // sorted: nothing after this matches
                 past_prefix = true;
                 break;
             }
@@ -1232,7 +1249,8 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
 
         auto scanned = scan_parts(b, k, id);
         std::string concat;
-        for (const auto& [raw, p] : scanned) concat += raw;  // ascending part_no (same order as the script)
+        // ascending part_no (same order as the script)
+        for (const auto& [raw, p] : scanned) concat += raw;
         std::string fingerprint = sha1_hex(concat);
         std::map<int, PartRec> stored;
         for (auto& [raw, p] : scanned) stored.emplace(p.part_no, std::move(p));
@@ -1267,13 +1285,15 @@ std::string RedisMetaStore::complete_upload(std::string_view b, std::string_view
                 batch_refs(bt, p.data, /*add=*/true, okey_owner);
                 batch_pack_delta(bt, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
                 batch_pack_delta(bt, p.data, +1, codec::pack_rec_overhead(b, k));
-            } else {  // unselected parts enter GC accounting
+            } else {
+                // unselected parts enter GC accounting
                 enqueue_reclaim(bt, p.data, ReclaimReason::kComplete);
                 batch_refs(bt, p.data, /*add=*/false, {});
                 batch_pack_delta(bt, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
-        if (old) {  // the old same-name object enters GC accounting
+        if (old) {
+            // the old same-name object enters GC accounting
             enqueue_reclaim(bt, old->data, ReclaimReason::kOverwrite);
             batch_refs(bt, old->data, /*add=*/false, {});
             batch_pack_delta(bt, old->data, -1, codec::pack_rec_overhead(b, k));
@@ -1294,7 +1314,8 @@ void RedisMetaStore::abort_upload(std::string_view b, std::string_view k, std::s
         auto scanned = scan_parts(b, k, id);
         std::string concat;
         for (const auto& [raw, p] : scanned) concat += raw;
-        std::string fingerprint = sha1_hex(concat);  // prevents unaccounted parts from a concurrent put_part
+        // prevents unaccounted parts from a concurrent put_part
+        std::string fingerprint = sha1_hex(concat);
 
         RedisBatch bt(*this);
         bt.expect_exists(uploads_key(b), ufield);
@@ -1327,7 +1348,8 @@ std::vector<std::pair<uint64_t, Reclaim>> RedisMetaStore::peek_reclaims(size_t m
     for (size_t i = 0; i < r->elements; ++i) {
         auto member = reply_str(r->element[i]);
         if (member.size() < 8) throw_internal("peek_reclaims", "bad gcq member");
-        uint64_t seq = codec::parse_be64(member.substr(0, 8));  // first 8 bytes of the member are the seq
+        // first 8 bytes of the member are the seq
+        uint64_t seq = codec::parse_be64(member.substr(0, 8));
         out.emplace_back(seq, codec::decode_reclaim(member.substr(8)));
         // Cumulative extent cap (gaps §2.11): return at least 1 entry (over-fetched members are dropped in place)
         extents += out.back().second.extents.size();
@@ -1403,7 +1425,8 @@ std::optional<LeaseInfo> RedisMetaStore::min_lease() {
     pattern.push_back('*');
 
     std::optional<LeaseInfo> min;
-    bool write_unknown = false;  // some live lease carries no write field (older build)
+    // some live lease carries no write field (older build)
+    bool write_unknown = false;
     std::string cursor = "0";
     do {
         auto r = exec({"SCAN", cursor, "MATCH", pattern, "COUNT", "64"}, /*read_retry=*/true);
@@ -1419,7 +1442,8 @@ std::optional<LeaseInfo> RedisMetaStore::min_lease() {
         if (vals->type != REDIS_REPLY_ARRAY) throw_internal("min_lease", "unexpected MGET reply");
         for (size_t i = 0; i < vals->elements; ++i) {
             const redisReply* v = vals->element[i];
-            if (v->type != REDIS_REPLY_STRING) continue;  // expired between SCAN and MGET
+            // expired between SCAN and MGET
+            if (v->type != REDIS_REPLY_STRING) continue;
             auto sv = reply_str(v);
             int64_t read = 0;
             auto res = std::from_chars(sv.data(), sv.data() + sv.size(), read);
@@ -1446,7 +1470,8 @@ std::vector<PackStat> RedisMetaStore::pack_stats() {
     // SCAN MATCH <prefix>pack:* (cursor iteration, does not block the server) + per-key HGETALL.
     // Low-frequency GC path, per-key round trips acceptable; returns entries with live=0 and unsealed ones
     std::string pattern;
-    for (char ch : key("pack:")) {  // escape glob metacharacters (the prefix may contain arbitrary bytes)
+    for (char ch : key("pack:")) {
+        // escape glob metacharacters (the prefix may contain arbitrary bytes)
         if (ch == '*' || ch == '?' || ch == '[' || ch == ']' || ch == '\\') pattern.push_back('\\');
         pattern.push_back(ch);
     }
@@ -1467,7 +1492,8 @@ std::vector<PackStat> RedisMetaStore::pack_stats() {
             try {
                 id = std::stoull(kstr.substr(skip));
             } catch (const std::exception&) {
-                continue;  // not this store's format (prefix collision), skip
+                // not this store's format (prefix collision), skip
+                continue;
             }
             auto h = exec({"HGETALL", kstr}, /*read_retry=*/true);
             check_reply_error("pack_stats hgetall", h.get());
@@ -1565,12 +1591,14 @@ void RedisMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
         if (r->type != REDIS_REPLY_ARRAY || r->elements != 2) throw_internal("scan_refs", "unexpected HSCAN reply");
         cursor = std::string(reply_str(r->element[0]));
         const redisReply* kv = r->element[1];
-        for (size_t i = 0; i + 1 < kv->elements; i += 2) {  // field,value pairs; only the field is used
+        for (size_t i = 0; i + 1 < kv->elements; i += 2) {
+            // field,value pairs; only the field is used
             uint64_t id = 0;
             try {
                 id = std::stoull(std::string(reply_str(kv->element[i])));
             } catch (const std::exception&) {
-                continue;  // not this store's format (prefix collision), skip
+                // not this store's format (prefix collision), skip
+                continue;
             }
             cb(id);
         }

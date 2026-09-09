@@ -101,7 +101,8 @@ void BucketRouter::update(const BucketsConfig& cfg) {
     if (cfg.default_backend != shared_->default_name)
         throw std::runtime_error("buckets.default_backend cannot change at runtime (" + shared_->default_name + " -> " +
                                  cfg.default_backend + "): it hosts .sys and the stores loaded from it");
-    auto fresh = compile(cfg, table()->backends);  // validates before anything is swapped
+    // validates before anything is swapped
+    auto fresh = compile(cfg, table()->backends);
     shared_->table.store(std::move(fresh), std::memory_order_release);
 }
 

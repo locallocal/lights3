@@ -77,7 +77,8 @@ TEST(metrics_histogram_render) {
     h->observe(0.05);
     h->observe(0.05);
     h->observe(0.5);
-    h->observe(30);  // overflow bucket
+    // overflow bucket
+    h->observe(30);
     auto out = reg.render();
     CHECK(contains(out, "# TYPE lights3_test_seconds histogram\n"));
     CHECK(contains(out, "lights3_test_seconds_bucket{op=\"get\",le=\"0.1\"} 2\n"));
@@ -119,7 +120,8 @@ TEST(metrics_large_bucket_bounds_render) {
     h->observe(1.0);
     auto out = reg.render();
     CHECK(contains(out, "le=\"1048576\""));
-    CHECK(contains(out, "le=\"1048577\""));  // must not collapse into the same le as the previous bucket
+    // must not collapse into the same le as the previous bucket
+    CHECK(contains(out, "le=\"1048577\""));
     CHECK(!contains(out, "e+06"));
     // Shortest round-trip allows exponent notation (1e+09 reads back exactly, Prometheus accepts it); the key point is
     // no precision loss
@@ -131,7 +133,8 @@ TEST(metrics_gauge_callback) {
     int depth = 3;
     reg.gauge_callback("lights3_test_cb_depth", "cb", [&] { return double(depth); }, {{"backend", "b1"}});
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 3\n"));
-    depth = 9;  // instantaneous value pulled at render time
+    // instantaneous value pulled at render time
+    depth = 9;
     CHECK(contains(reg.render(), "lights3_test_cb_depth{backend=\"b1\"} 9\n"));
     // With the same name and labels, the later registrant overrides
     reg.gauge_callback("lights3_test_cb_depth", "cb", [] { return 1.0; }, {{"backend", "b1"}});
@@ -232,7 +235,8 @@ TEST(s3_metrics_bytes_and_per_bucket) {
     m.record_bucket_request("photos");
     m.add_bytes_in("photos", 1000);
     m.add_bytes_out("photos", 2000);
-    m.add_bytes_out("", 50);  // service-level request: counts only toward the global
+    // service-level request: counts only toward the global
+    m.add_bytes_out("", 50);
     auto out = m.render({});
     CHECK(out.find("lights3_bytes_total{direction=\"in\"} 1000") != std::string::npos);
     CHECK(out.find("lights3_bytes_total{direction=\"out\"} 2050") != std::string::npos);
@@ -249,7 +253,8 @@ TEST(s3_metrics_split_totals_and_bucket_batches) {
     m.add_bytes_out_total(64 * 1024);
     m.add_bytes_in_total(10);
     m.add_bucket_bytes("photos", 10, 128 * 1024);
-    m.add_bucket_bytes("", 5, 5);  // no bucket: nothing to attribute
+    // no bucket: nothing to attribute
+    m.add_bucket_bytes("", 5, 5);
     auto out = m.render({});
     CHECK(out.find("lights3_bytes_total{direction=\"out\"} 131072") != std::string::npos);
     CHECK(out.find("lights3_bytes_total{direction=\"in\"} 10") != std::string::npos);
@@ -280,7 +285,8 @@ TEST(s3_metrics_status_codes_and_website_events) {
     CHECK(out.find("lights3_responses_by_status_total{status=\"206\"} 1\n") != std::string::npos);
     CHECK(out.find("lights3_responses_by_status_total{status=\"304\"} 2\n") != std::string::npos);
     CHECK(out.find("lights3_responses_by_status_total{status=\"404\"} 1\n") != std::string::npos);
-    CHECK(out.find("status=\"500\"") == std::string::npos);  // sparse: never occurred
+    // sparse: never occurred
+    CHECK(out.find("status=\"500\"") == std::string::npos);
     CHECK(out.find("lights3_responses_total{class=\"3xx\"} 2") != std::string::npos);
     CHECK(out.find("lights3_website_events_total{event=\"index_rewrite\"} 2\n") != std::string::npos);
     CHECK(out.find("lights3_website_events_total{event=\"redirect\"} 1\n") != std::string::npos);

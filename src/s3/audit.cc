@@ -21,7 +21,8 @@ std::shared_ptr<AuditLog> AuditLog::open(const AuditConfig& cfg) {
     auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(cfg.path, cfg.max_size,
                                                                        static_cast<size_t>(cfg.max_files));
     log->logger_ = std::make_shared<spdlog::logger>("lights3-audit", std::move(sink));
-    log->logger_->set_pattern("%v");  // the line is a complete JSON document
+    // the line is a complete JSON document
+    log->logger_->set_pattern("%v");
     log->logger_->set_level(spdlog::level::info);
     log->data_plane_ = cfg.data_plane;
     LOG_INFO("audit: writing to {} (data plane {})", cfg.path, cfg.data_plane ? "on" : "off");

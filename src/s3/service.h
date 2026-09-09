@@ -37,7 +37,8 @@
 
 namespace lights3::s3 {
 
-class CredentialStore;  // auth/credential_store.h (only the admin handler's .cc needs the full definition)
+// auth/credential_store.h (only the admin handler's .cc needs the full definition)
+class CredentialStore;
 
 struct RequestContext {
     std::string request_id;
@@ -124,7 +125,8 @@ public:
     // stay transport admission only, the table is still manageable. Restart-only
     // (auth.* is not hot-reloadable), so plain members set at assembly
     enum class TlsIdentityMode { Off, SubjectCn, SanUri };
-    static TlsIdentityMode parse_tls_identity_mode(const std::string& s);  // throws on unknown
+    // throws on unknown
+    static TlsIdentityMode parse_tls_identity_mode(const std::string& s);
     void set_tls_identity_store(std::shared_ptr<TlsIdentityStore> s) { tls_store_ = std::move(s); }
     void set_tls_identity_mode(TlsIdentityMode m) { tls_mode_ = m; }
     TlsIdentityMode tls_identity_mode() const { return tls_mode_; }
@@ -190,11 +192,15 @@ public:
     // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
     struct RequestAuth {
-        std::string_view access_key;               // empty when auth is disabled
-        const CredentialPolicy* policy = nullptr;  // nullptr = unrestricted
-        std::string_view tenant;                   // empty = not a tenant credential (docs/multi-tenancy.md §4)
+        // empty when auth is disabled
+        std::string_view access_key;
+        // nullptr = unrestricted
+        const CredentialPolicy* policy = nullptr;
+        // empty = not a tenant credential (docs/multi-tenancy.md §4)
+        std::string_view tenant;
         bool tenant_admin = false;
-        std::string_view request_id;  // for audit records
+        // for audit records
+        std::string_view request_id;
     };
 
     // Explicit dispatch table (docs/s3-protocol.md §2): (method, scope, query-flag) -> handler, matched in declaration
@@ -205,7 +211,8 @@ public:
     struct Route {
         std::string_view method;
         Scope scope;
-        std::string_view flag;  // "" = fallback; "k" matches on query presence; "k=v" matches on value
+        // "" = fallback; "k" matches on query presence; "k=v" matches on value
+        std::string_view flag;
         // Query allowlist (docs/archive/gaps.md §3.5): extra query keys this route permits (space-separated).
         // The flag key and presigned signature params are inherently allowed; a key outside the list -> 501.
         // The structural flaw of a blocklist fallback is that any omission silently degrades into
@@ -401,15 +408,23 @@ private:
     std::atomic<bool> admin_split_{false};
     std::shared_ptr<MetricsRegistry> backend_metrics_;
     std::shared_ptr<CredentialStore> cred_store_;
-    std::shared_ptr<TlsIdentityStore> tls_store_;  // null = no binding table (tests / static assemblies)
+    // null = no binding table (tests / static assemblies)
+    std::shared_ptr<TlsIdentityStore> tls_store_;
     TlsIdentityMode tls_mode_ = TlsIdentityMode::Off;
-    std::shared_ptr<WebsiteStore> website_store_;      // null = website hosting off
-    std::shared_ptr<CorsStore> cors_store_;            // null = CORS off (OPTIONS -> 403)
-    std::shared_ptr<LifecycleStore> lifecycle_store_;  // null = ?lifecycle unavailable
-    std::shared_ptr<UsageTracker> usage_;              // null = no usage accounting / quotas
-    std::shared_ptr<QuotaStore> quota_store_;          // null = ?quota unavailable
-    std::shared_ptr<TenantRegistry> tenants_;          // null = tenancy off (legacy model)
-    std::shared_ptr<AuditLog> audit_;                  // null = no audit file
+    // null = website hosting off
+    std::shared_ptr<WebsiteStore> website_store_;
+    // null = CORS off (OPTIONS -> 403)
+    std::shared_ptr<CorsStore> cors_store_;
+    // null = ?lifecycle unavailable
+    std::shared_ptr<LifecycleStore> lifecycle_store_;
+    // null = no usage accounting / quotas
+    std::shared_ptr<UsageTracker> usage_;
+    // null = ?quota unavailable
+    std::shared_ptr<QuotaStore> quota_store_;
+    // null = tenancy off (legacy model)
+    std::shared_ptr<TenantRegistry> tenants_;
+    // null = no audit file
+    std::shared_ptr<AuditLog> audit_;
 
     // Anonymous website rate limiting (roadmap §2.3): one token bucket per website
     // bucket; entries are bounded by the number of configured website buckets
@@ -424,7 +439,8 @@ private:
     // without a cache, an anonymous loop can amplify into billed/rate-limited upstream calls)
     std::mutex readyz_mu_;
     std::chrono::steady_clock::time_point readyz_at_{};
-    int readyz_status_ = 0;  // 0 = no result yet
+    // 0 = no result yet
+    int readyz_status_ = 0;
     std::string readyz_body_;
     bool readyz_inflight_ = false;
 };

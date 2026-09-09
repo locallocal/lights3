@@ -18,7 +18,8 @@ TEST(trace_parse_valid_traceparent) {
     CHECK(c.has_value());
     CHECK_EQ(c->trace_id, "4bf92f3577b34da6a3ce929d0e0e4736");
     CHECK_EQ(c->parent_span_id, "00f067aa0ba902b7");
-    CHECK(lower_hex(c->span_id, 16));  // this hop gets its own span
+    // this hop gets its own span
+    CHECK(lower_hex(c->span_id, 16));
     CHECK(c->span_id != c->parent_span_id);
     CHECK(c->sampled);
     CHECK(c->inherited);
@@ -36,15 +37,24 @@ TEST(trace_parse_valid_traceparent) {
 TEST(trace_parse_rejects_malformed) {
     for (const char* bad : {
              "",
-             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7",       // missing flags
-             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-x",  // v00 with trailer
-             "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",    // uppercase
-             "00-00000000000000000000000000000000-00f067aa0ba902b7-01",    // zero trace id
-             "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",    // zero span id
-             "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",    // version ff
-             "00_4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",    // bad separator
-             "00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01",    // non-hex
-             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0z",    // non-hex flags
+             // missing flags
+             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7",
+             // v00 with trailer
+             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-x",
+             // uppercase
+             "00-4BF92F3577B34DA6A3CE929D0E0E4736-00f067aa0ba902b7-01",
+             // zero trace id
+             "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+             // zero span id
+             "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+             // version ff
+             "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+             // bad separator
+             "00_4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+             // non-hex
+             "00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01",
+             // non-hex flags
+             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0z",
          })
         CHECK(!TraceContext::parse(bad).has_value());
     // from_headers falls back to a fresh trace rather than failing the request

@@ -57,7 +57,8 @@ Task<http::HttpResponse> S3Service::list_objects(http::HttpRequest& req, std::st
     // single start_after, so a V1 request with start-after took effect and the response echoed a <Marker> the
     // client never sent. V2 accepts continuation-token (the opaque string this implementation issues) plus
     // start-after; V1 accepts only marker; both carry the plaintext "start after this key" semantics
-    std::optional<std::string> start_after_param;  // V2 only, must be echoed verbatim
+    // V2 only, must be echoed verbatim
+    std::optional<std::string> start_after_param;
     if (v2) {
         if (auto tok = req.query_get("continuation-token")) {
             auto key = token_decode(*tok);

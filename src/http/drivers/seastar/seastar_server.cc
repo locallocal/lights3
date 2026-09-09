@@ -84,7 +84,8 @@ public:
         auto fut = ready->get_future();
         thread_ = std::thread([this, ready] { engine_thread(ready); });
         try {
-            fut.get();  // Startup failures (missing dependency, smp above core count, etc.) are thrown to the caller
+            // Startup failures (missing dependency, smp above core count, etc.) are thrown to the caller
+            fut.get();
         } catch (...) {
             thread_.join();
             throw;
@@ -114,7 +115,8 @@ private:
     void engine_thread(std::shared_ptr<std::promise<void>> ready) {
         ss::app_template::config cfg;
         cfg.name = "lights3-seastar";
-        cfg.auto_handle_sigint_sigterm = false;  // Signal handling belongs to main
+        // Signal handling belongs to main
+        cfg.auto_handle_sigint_sigterm = false;
         ss::app_template app(std::move(cfg));
 
         std::string smp_arg = std::to_string(smp_);
@@ -211,7 +213,8 @@ struct Detached {
         std::suspend_never initial_suspend() noexcept { return {}; }
         std::suspend_never final_suspend() noexcept { return {}; }
         void return_void() {}
-        void unhandled_exception() { std::terminate(); }  // spawn_detached already catches everything
+        // spawn_detached already catches everything
+        void unhandled_exception() { std::terminate(); }
     };
 };
 
@@ -315,14 +318,17 @@ struct SeaConn {
 struct BodyState {
     SeaConn* conn = nullptr;
     unsigned shard = 0;
-    bool need_continue = false;  // Expect: 100-continue not yet answered; reply only on first read
+    // Expect: 100-continue not yet answered; reply only on first read
+    bool need_continue = false;
     bool chunked = false;
     uint64_t remaining = 0;
     uint64_t chunk_left = 0;
-    bool after_chunk_data = false;  // Just finished a chunk's data; next line must be CRLF
+    // Just finished a chunk's data; next line must be CRLF
+    bool after_chunk_data = false;
     bool chunk_eof = false;
     bool error = false;
-    size_t trailer_max = 16 * 1024;  // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
+    // Overridden by http.trailer_max_size (docs/archive/gaps.md §7)
+    size_t trailer_max = 16 * 1024;
 
     [[noreturn]] void fail(const char* what) {
         error = true;
@@ -330,7 +336,8 @@ struct BodyState {
     }
 
     Task<size_t> read_some(std::byte* dst, size_t want) {
-        co_await ResumeOnShard{shard};  // The consumer may resume on a pool thread
+        // The consumer may resume on a pool thread
+        co_await ResumeOnShard{shard};
         if (error) fail("read after connection error");
         // Deferred 100-continue: the client is told to send only once the handler decides it wants the body
         // (docs/http-adapter.md §3.1)
@@ -426,7 +433,8 @@ private:
 
 struct Session {
     SeaConn conn;
-    bool in_flight = false;  // Read/written only on this shard
+    // Read/written only on this shard
+    bool in_flight = false;
 
     explicit Session(ss::connected_socket s) : conn(std::move(s)) {}
 };
@@ -446,7 +454,8 @@ struct ShardState {
 struct ServerCore {
     HttpConfig cfg;
     Handler handler;
-    driver::ConnCounters counters;  // IHttpServer::stats(); shards increment concurrently (atomics)
+    // IHttpServer::stats(); shards increment concurrently (atomics)
+    driver::ConnCounters counters;
     std::vector<std::shared_ptr<ShardState>> shards;
     std::atomic<bool> stopping{false};
 
@@ -487,7 +496,8 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
             co_return true;
         }
     } catch (...) {
-        co_return false;  // Write failure such as peer disconnect: close the connection
+        // Write failure such as peer disconnect: close the connection
+        co_return false;
     }
 
     // Streaming response: pulled in http.io_chunk_size chunks (docs/architecture.md
@@ -500,7 +510,8 @@ Task<bool> write_response(SeaConn& conn, HttpResponse& resp, bool head_request, 
             chunk = co_await pf.next();
         } catch (const std::exception& e) {
             LOG_ERROR("stream body read failed mid-response: {}", e.what());
-            co_return false;  // Response head already sent; can only disconnect (contract 3: discard the result)
+            // Response head already sent; can only disconnect (contract 3: discard the result)
+            co_return false;
         }
         co_await ResumeOnShard{shard};
         size_t n = chunk.size();
@@ -560,7 +571,8 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         conn.phase_timeout = std::chrono::seconds(sec);
     };
     bool keep = true;
-    int served = 0;  // keep-alive budget (http.max_requests_per_connection)
+    // keep-alive budget (http.max_requests_per_connection)
+    int served = 0;
     // Verified client certificate (backlog-sequence ⑥): seastar::tls answers DN /
     // SAN queries per socket (forcing the handshake first), read once per
     // connection. Only asked for when client auth is on -- the query on a
@@ -618,8 +630,10 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
             }
 
             // Headers
-            bool bad = false;     // malformed header block (counted as a parse error)
-            bool closed = false;  // peer gone / timed out mid-headers (not a parse error)
+            // malformed header block (counted as a parse error)
+            bool bad = false;
+            // peer gone / timed out mid-headers (not a parse error)
+            bool closed = false;
             size_t header_bytes = 0;
             for (;;) {
                 if (!co_await conn.read_line(line, max_line)) {
@@ -699,7 +713,8 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
                 resp = driver::internal_error_response(e.what());
                 keep = false;
             }
-            co_await ResumeOnShard{shard};  // The handler may resume on a pool thread
+            // The handler may resume on a pool thread
+            co_await ResumeOnShard{shard};
 
             if (core->stopping.load(std::memory_order_relaxed)) keep = false;
             // The unconsumed body must be drained before reusing the connection.
@@ -730,7 +745,8 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
         LOG_DEBUG("seastar session ended with error: {}", e.what());
     }
     idle_timer.cancel();
-    conn.idle = nullptr;  // The timer is about to be destroyed with this frame; ArmGuard must not touch it again
+    // The timer is about to be destroyed with this frame; ArmGuard must not touch it again
+    conn.idle = nullptr;
     sess->in_flight = false;
     // output_stream must be closed explicitly (flush + release); failure (peer already gone) is ignored
     try {
@@ -747,11 +763,13 @@ Task<void> session_run(std::shared_ptr<ServerCore> core, std::shared_ptr<Session
 ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<ShardState> st, unsigned shard) {
     while (!st->stopping) {
         std::optional<ss::accept_result> ar;
-        bool retry = false;  // co_await cannot appear inside a catch block; record a flag, then back off
+        // co_await cannot appear inside a catch block; record a flag, then back off
+        bool retry = false;
         try {
             ar.emplace(co_await st->listener->accept());
         } catch (const std::exception& e) {
-            if (st->stopping) break;  // Normal exit path of abort_accept
+            // Normal exit path of abort_accept
+            if (st->stopping) break;
             // Transient errors (fd exhaustion etc.): back off and continue; accepting must not stop permanently
             LOG_WARN("seastar accept failed: {}, throttling", e.what());
             retry = true;
@@ -762,7 +780,8 @@ ss::future<> accept_loop(std::shared_ptr<ServerCore> core, std::shared_ptr<Shard
             co_await ss::sleep(std::chrono::milliseconds(100));
             continue;
         }
-        if (st->stopping) break;  // Connections landing in the race window are simply dropped (closed on destruction)
+        // Connections landing in the race window are simply dropped (closed on destruction)
+        if (st->stopping) break;
         // Concurrent-connection cap (cfg.max_connections, uniform across the
         // four drivers): apportioned per shard; over the limit new
         // connections are dropped (ar closes on destruction) — without a
@@ -910,7 +929,8 @@ ss::future<int> setup_server(std::shared_ptr<ServerCore> core, std::string addr,
     int wfd = evfd.get_write_fd();
     (void)stop_watcher(core, std::move(evfd)).handle_exception([core](std::exception_ptr) {
         LOG_ERROR("seastar stop watcher failed unexpectedly");
-        core->notify_stopped();  // run() must never hang, no matter what
+        // run() must never hang, no matter what
+        core->notify_stopped();
     });
     co_return wfd;
 }

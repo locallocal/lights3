@@ -15,7 +15,8 @@
 
 #include "storage/duostore/codec.h"
 #include "storage/duostore/meta_store.h"
-#include "storage/duostore/meta_util.h"  // kReclaimMaxExtents (gcq split cap)
+// kReclaimMaxExtents (gcq split cap)
+#include "storage/duostore/meta_util.h"
 #include "unit/mini_test.h"
 
 namespace meta_store_suite {
@@ -78,7 +79,8 @@ inline void case_gc_accounting(const MetaFactory& make) {
     auto rs = m->peek_reclaims(10);
     CHECK_EQ(rs.size(), size_t(1));
     CHECK_EQ(rs[0].second.extents.at(0).file_id, id1);
-    CHECK(rs[0].second.enqueue_ms > 0);  // enqueue timestamp returned (GC consumer checks gc_grace, §9.1)
+    // enqueue timestamp returned (GC consumer checks gc_grace, §9.1)
+    CHECK(rs[0].second.enqueue_ms > 0);
     // The entry's origin is persisted with the record (docs/archive/gaps.md §6.1): GC buckets its counts by it
     CHECK(rs[0].second.reason == ReclaimReason::kOverwrite);
     CHECK(!m->chunk_referenced(id1));
@@ -133,13 +135,16 @@ inline void case_reclaim_reasons(const MetaFactory& make) {
     // Build up step by step: same-number re-upload -> not selected at complete -> complete overwrites same-named object
     // -> abort -> delete
     m->put_object("ms-reason", "k", make_rec("k", {pack_extent(pid, 900, 10)}));
-    drain_gcq(*m);  // the put above only exists so complete has an old object to overwrite; not part of the assertions
+    // the put above only exists so complete has an old object to overwrite; not part of the assertions
+    drain_gcq(*m);
 
     m->put_part("ms-reason", "k", id, part(1, 0, 100));
-    m->put_part("ms-reason", "k", id, part(1, 100, 100));  // same-number re-upload
+    // same-number re-upload
+    m->put_part("ms-reason", "k", id, part(1, 100, 100));
     m->put_part("ms-reason", "k", id, part(2, 200, 50));
     std::vector<PartInfo> sel1 = {{1, "deadbeef"}};
-    m->complete_upload("ms-reason", "k", id, sel1);  // part2 not selected + overwrites the old object
+    // part2 not selected + overwrites the old object
+    m->complete_upload("ms-reason", "k", id, sel1);
 
     auto id2 = m->create_upload("ms-reason", "k2", meta);
     m->put_part("ms-reason", "k2", id2, part(1, 400, 30));
@@ -167,7 +172,8 @@ inline void case_reclaim_reasons(const MetaFactory& make) {
                 break;
             case ReclaimReason::kUnknown:
                 CHECK(false);
-                break;  // new entries must not record unknown
+                // new entries must not record unknown
+                break;
         }
     }
     CHECK(part_ovw);
@@ -210,7 +216,8 @@ inline void case_delete_bucket_blocks_on_mpu(const MetaFactory& make) {
     auto id = m->create_upload("ms-mpu", "k", meta);
     CHECK_THROWS_S3(m->delete_bucket("ms-mpu"), lights3::s3::S3ErrorCode::BucketNotEmpty);
     m->abort_upload("ms-mpu", "k", id);
-    m->delete_bucket("ms-mpu");  // deletable after abort
+    // deletable after abort
+    m->delete_bucket("ms-mpu");
     CHECK(!m->bucket_exists("ms-mpu"));
     m->close();
 }
@@ -247,7 +254,8 @@ inline void case_list_delimiter_paging(const MetaFactory& make) {
     CHECK_EQ(p1.common_prefixes.size(), size_t(1));
     CHECK_EQ(p1.common_prefixes[0], "b/");
     CHECK(p1.is_truncated);
-    CHECK_EQ(p1.next_token, "b/3");  // token semantics (start after) must land at the group tail
+    // token semantics (start after) must land at the group tail
+    CHECK_EQ(p1.next_token, "b/3");
 
     opt.start_after = p1.next_token;
     auto p2 = m->list_objects("ms-page", opt);
@@ -275,7 +283,8 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-pk");
     uint64_t pid = m->alloc_file_id(Extent::Kind::kPack);
-    CHECK(!find_pack(*m, pid).has_value());  // no entry until something is written
+    // no entry until something is written
+    CHECK(!find_pack(*m, pid).has_value());
 
     // Each record counts a 29B header (22 fixed + "ms-pk\0<k>" owner, same accounting basis as §2.3a)
     m->put_object("ms-pk", "a", make_rec("a", {pack_extent(pid, 30, 100)}));
@@ -307,8 +316,9 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
     ps = find_pack(*m, pid);
     CHECK_EQ(ps->live_bytes, int64_t(0));
     CHECK_EQ(ps->live_recs, int64_t(0));
-    CHECK(ps->sealed);  // a sealed pack with live=0 stays visible -- candidate for whole-pack deletion of empty packs
-                        // (§9.1)
+    // a sealed pack with live=0 stays visible -- candidate for whole-pack deletion of empty packs
+    // (§9.1)
+    CHECK(ps->sealed);
     auto ps2 = find_pack(*m, pid2);
     CHECK_EQ(ps2->live_bytes, int64_t(70 + 29));
 
@@ -423,10 +433,12 @@ inline void case_scan_refs(const MetaFactory& make) {
 
     CHECK(m->delete_object("ms-scanrefs", "k1"));
     ids = collect();
-    CHECK(!has(ids, a));  // delete clears the ref in the same batch (§4.5)
+    // delete clears the ref in the same batch (§4.5)
+    CHECK(!has(ids, a));
     CHECK(has(ids, b));
     CHECK(has(ids, c));
-    CHECK(!m->chunk_referenced(a));  // point lookup consistent with traversal
+    // point lookup consistent with traversal
+    CHECK(!m->chunk_referenced(a));
     CHECK(m->chunk_referenced(b));
 
     CHECK(m->delete_object("ms-scanrefs", "k2"));
@@ -444,7 +456,8 @@ inline void case_scan_refs(const MetaFactory& make) {
 inline void case_reclaim_split_and_capped_peek(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-split");
-    const size_t total = kReclaimMaxExtents + 700;  // splits into 2 entries: 4096 + 700
+    // splits into 2 entries: 4096 + 700
+    const size_t total = kReclaimMaxExtents + 700;
     std::vector<Extent> big;
     big.reserve(total);
     for (size_t i = 0; i < total; ++i) big.push_back(chunk_extent(m->alloc_file_id(Extent::Kind::kChunk), 1));
@@ -486,8 +499,9 @@ inline void case_swap_extents_batch(const MetaFactory& make) {
     std::vector<SwapReq> reqs;
     reqs.push_back({"ms-swapb", "a", /*expect_version=*/1, DataRef{{pack_extent(pid, 30, 100)}},
                     DataRef{{chunk_extent(ca, 100)}}});
-    reqs.push_back({"ms-swapb", "b", /*expect_version=*/7,  // version mismatch: this item must fail
-                    DataRef{{pack_extent(pid, 160, 50)}}, DataRef{{chunk_extent(cb, 50)}}});
+    // version mismatch: this item must fail
+    reqs.push_back(
+        {"ms-swapb", "b", /*expect_version=*/7, DataRef{{pack_extent(pid, 160, 50)}}, DataRef{{chunk_extent(cb, 50)}}});
     auto ok = m->swap_extents_batch(reqs);
     CHECK_EQ(ok.size(), size_t(2));
     CHECK(ok[0]);
@@ -495,12 +509,16 @@ inline void case_swap_extents_batch(const MetaFactory& make) {
 
     auto ra = m->get_object("ms-swapb", "a");
     CHECK(ra->data.extents[0].kind == Extent::Kind::kChunk);
-    CHECK_EQ(ra->version, uint64_t(2));  // successful item's version increments
+    // successful item's version increments
+    CHECK_EQ(ra->version, uint64_t(2));
     auto rb = m->get_object("ms-swapb", "b");
-    CHECK(rb->data.extents[0].kind == Extent::Kind::kPack);  // failed item untouched
+    // failed item untouched
+    CHECK(rb->data.extents[0].kind == Extent::Kind::kPack);
     CHECK_EQ(rb->version, uint64_t(1));
-    CHECK(m->chunk_referenced(ca));   // refs migrate with the successful item
-    CHECK(!m->chunk_referenced(cb));  // failed item writes nothing
+    // refs migrate with the successful item
+    CHECK(m->chunk_referenced(ca));
+    // failed item writes nothing
+    CHECK(!m->chunk_referenced(cb));
 
     CHECK(m->delete_object("ms-swapb", "a"));
     CHECK(m->delete_object("ms-swapb", "b"));

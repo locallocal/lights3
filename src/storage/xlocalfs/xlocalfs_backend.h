@@ -33,7 +33,8 @@ public:
     // UNLINKAT via the ring when the kernel has it (roadmap §3.4 ③): unlinking a large
     // file is real disk work on ext4/xfs; falls through to the base implementation otherwise
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
-    Task<void> close() override;  // stop the uring reaper threads
+    // stop the uring reaper threads
+    Task<void> close() override;
 
 private:
     // Stream the body into the write pipeline, yielding (byte count, MD5 hex) via

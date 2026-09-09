@@ -17,11 +17,15 @@ namespace lights3::s3 {
 // RFC 9110, origin matching is exact/case-sensitive like AWS)
 struct CorsRule {
     std::string id;
-    std::vector<std::string> allowed_origins;  // "*" or scheme://host[:port], at most one '*' each
-    std::vector<std::string> allowed_methods;  // subset of GET PUT POST DELETE HEAD
-    std::vector<std::string> allowed_headers;  // lowercase, at most one '*' each
+    // "*" or scheme://host[:port], at most one '*' each
+    std::vector<std::string> allowed_origins;
+    // subset of GET PUT POST DELETE HEAD
+    std::vector<std::string> allowed_methods;
+    // lowercase, at most one '*' each
+    std::vector<std::string> allowed_headers;
     std::vector<std::string> expose_headers;
-    int max_age_seconds = -1;  // -1 = unset
+    // -1 = unset
+    int max_age_seconds = -1;
 
     bool operator==(const CorsRule&) const = default;
 };

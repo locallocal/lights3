@@ -106,7 +106,8 @@ private:
                 }
             }
             int status = 0;
-            if (waitpid(pid_, &status, WNOHANG) == pid_) {  // exec failed / died right at startup
+            if (waitpid(pid_, &status, WNOHANG) == pid_) {
+                // exec failed / died right at startup
                 pid_ = -1;
                 break;
             }
@@ -271,8 +272,10 @@ TEST(duostore_redis_noscript_selfheal) {
     m.create_bucket("heal");
     m.put_object("heal", "k1", make_rec("k1", {}));
     CHECK(RedisTestServer::instance().raw_command("SCRIPT FLUSH"));
-    m.put_object("heal", "k2", make_rec("k2", {}));  // commit script self-heals
-    auto r = m.list_objects("heal", {});             // list script self-heals
+    // commit script self-heals
+    m.put_object("heal", "k2", make_rec("k2", {}));
+    // list script self-heals
+    auto r = m.list_objects("heal", {});
     CHECK_EQ(r.objects.size(), size_t(2));
     for (auto k : {"k1", "k2"}) m.delete_object("heal", k);
     m.delete_bucket("heal");
@@ -288,9 +291,11 @@ TEST(duostore_redis_swap_extents_cas) {
     uint64_t id2 = m.alloc_file_id(Extent::Kind::kChunk);
     DataRef from{{chunk_extent(id1, 8)}};
     DataRef to{{chunk_extent(id2, 8)}};
-    m.put_object("swap", "k", make_rec("k", from.extents));  // version=1
+    // version=1
+    m.put_object("swap", "k", make_rec("k", from.extents));
 
-    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version mismatch
+    // version mismatch
+    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));
     CHECK(m.chunk_referenced(id1));
     CHECK(!m.chunk_referenced(id2));
 
@@ -391,12 +396,14 @@ TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
 
     m.create_bucket("kill");
     CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
-    CHECK(m.bucket_exists("kill"));  // pure read: bad connection dropped, reconnect and retry succeed
+    // pure read: bad connection dropped, reconnect and retry succeed
+    CHECK(m.bucket_exists("kill"));
     CHECK(reg->render().find("lights3_duostore_redis_reconnects_total{backend=\"r4\"} 1\n") != std::string::npos);
 
     CHECK(RedisTestServer::instance().raw_command("CLIENT KILL TYPE normal"));
     CHECK_THROWS_S3(m.ack_reclaim(1), s3::S3ErrorCode::InternalError);
-    m.delete_bucket("kill");  // bad connection already discarded, a fresh connection works as usual
+    // bad connection already discarded, a fresh connection works as usual
+    m.delete_bucket("kill");
     m.close();
 }
 
@@ -406,7 +413,8 @@ TEST(duostore_redis_reconnect_metric_and_commit_boundary) {
 TEST(duostore_redis_wait_replicas_no_replica_tolerated) {
     REDIS_OR_SKIP();
     auto opts = redis_opts(unique_prefix());
-    opts.timeout_ms = 400;  // WAIT timeout is halved = 200ms per commit
+    // WAIT timeout is halved = 200ms per commit
+    opts.timeout_ms = 400;
     opts.wait_replicas = 1;
     RedisMetaStore m(opts);
     m.create_bucket("wr");
@@ -425,11 +433,13 @@ TEST(duostore_redis_list_uploads_hscan_batches) {
     REDIS_OR_SKIP();
     RedisMetaStore m(redis_opts(unique_prefix()));
     m.create_bucket("many");
-    constexpr int kUploads = 600;  // > hash-max-listpack-entries(128) converts to a real hashtable, > COUNT 512 spans
-                                   // batches
+    // > hash-max-listpack-entries(128) converts to a real hashtable, > COUNT 512 spans
+    // batches
+    constexpr int kUploads = 600;
     std::set<std::pair<std::string, std::string>> expect;
     for (int i = 0; i < kUploads; ++i) {
-        std::string k = "k" + std::to_string(i % 40);  // multiple uploads mixed on the same key
+        // multiple uploads mixed on the same key
+        std::string k = "k" + std::to_string(i % 40);
         expect.emplace(k, m.create_upload("many", k, {}));
     }
     auto got = m.list_uploads("many", {}, {}, 0);
@@ -449,13 +459,16 @@ TEST(duostore_redis_gc_lease) {
     std::string prefix = unique_prefix();
     RedisMetaStore a(redis_opts(prefix)), b(redis_opts(prefix));
     CHECK(a.try_gc_lease("owner-a", 60'000));
-    CHECK(!b.try_gc_lease("owner-b", 60'000));  // held by another and not expired
-    CHECK(a.try_gc_lease("owner-a", 60'000));   // same owner renews
+    // held by another and not expired
+    CHECK(!b.try_gc_lease("owner-b", 60'000));
+    // same owner renews
+    CHECK(a.try_gc_lease("owner-a", 60'000));
     // Takeover after a short lease expires
     RedisMetaStore c(redis_opts(unique_prefix()));
     CHECK(c.try_gc_lease("x", 100));
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    CHECK(c.try_gc_lease("y", 60'000));  // x's lease has expired
+    // x's lease has expired
+    CHECK(c.try_gc_lease("y", 60'000));
     a.close();
     b.close();
     c.close();
@@ -479,7 +492,8 @@ TEST(duostore_redis_read_lease) {
     CHECK_EQ(min->oldest_read_ms, int64_t(500));
     CHECK(min->oldest_write_ms.has_value());
     CHECK_EQ(*min->oldest_write_ms, int64_t(3'000));
-    CHECK(b.publish_lease("gw-b", LeaseInfo{2'000, 2'500}, 60'000));  // b's oldest read finished, a write began
+    // b's oldest read finished, a write began
+    CHECK(b.publish_lease("gw-b", LeaseInfo{2'000, 2'500}, 60'000));
     min = a.min_lease();
     CHECK_EQ(min->oldest_read_ms, int64_t(1'000));
     CHECK_EQ(*min->oldest_write_ms, int64_t(2'500));
@@ -495,7 +509,8 @@ TEST(duostore_redis_read_lease) {
     min = a.min_lease();
     CHECK_EQ(min->oldest_read_ms, int64_t(700));
     CHECK(!min->oldest_write_ms.has_value());
-    CHECK(a.snapshot() == nullptr);  // documented engine limitation
+    // documented engine limitation
+    CHECK(a.snapshot() == nullptr);
     a.close();
     b.close();
 }
@@ -521,7 +536,8 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
         cfg.pack_threshold = 0;
         cfg.gc_interval_sec = 0;
         cfg.read_lease_sec = 1;
-        cfg.meta_cache_ttl_sec = 1;  // default budget stays (direct construction); ttl < gc_grace (300)
+        // default budget stays (direct construction); ttl < gc_grace (300)
+        cfg.meta_cache_ttl_sec = 1;
         // The TTL contract on its own: with the invalidation feed on (the default), a
         // peer's write would be visible at once -- that path has its own test below
         cfg.meta_cache_feed = false;
@@ -544,10 +560,12 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     sync_wait(a->create_bucket("bkt"));
     auto p1 = put(*a, "bkt", "k", "v1");
     {
-        auto g = sync_wait(a->get_object("bkt", "k", std::nullopt));  // a caches the full record
+        // a caches the full record
+        auto g = sync_wait(a->get_object("bkt", "k", std::nullopt));
         CHECK_EQ(read_all(*g.body), std::string("v1"));
     }
-    auto p2 = put(*b, "bkt", "k", "v2-two");  // peer overwrite: a's record is now stale
+    // peer overwrite: a's record is now stale
+    auto p2 = put(*b, "bkt", "k", "v2-two");
     CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p2.etag);
     // Within the TTL a still answers from its cache (bounded staleness by contract); the
     // old chunks are still on a's disk (no GC ran), so even the body is the old one
@@ -585,12 +603,14 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     on["meta_cache_entries"] = "1K";
     bool thrown = false;
     try {
-        DuoStoreConfig::from_params("p", on);  // no ttl
+        // no ttl
+        DuoStoreConfig::from_params("p", on);
     } catch (const std::runtime_error&) {
         thrown = true;
     }
     CHECK(thrown);
-    on["meta_cache_ttl"] = "300s";  // == gc_grace default
+    // == gc_grace default
+    on["meta_cache_ttl"] = "300s";
     thrown = false;
     try {
         DuoStoreConfig::from_params("p", on);
@@ -602,7 +622,8 @@ TEST(duostore_redis_meta_cache_bounded_staleness) {
     auto c = DuoStoreConfig::from_params("p", on);
     CHECK_EQ(c.meta_cache_entries, size_t(1024));
     CHECK_EQ(c.meta_cache_ttl_sec, 2);
-    CHECK(c.meta_cache_feed);  // the feed is on by default
+    // the feed is on by default
+    CHECK(c.meta_cache_feed);
     on["meta_cache_feed"] = "false";
     CHECK(!DuoStoreConfig::from_params("p", on).meta_cache_feed);
 }
@@ -628,7 +649,8 @@ TEST(duostore_redis_cache_invalidation_feed) {
         cfg.pack_threshold = 0;
         cfg.gc_interval_sec = 0;
         cfg.read_lease_sec = 1;
-        cfg.meta_cache_ttl_sec = 100;  // long TTL: only the feed can make a peer's write visible in time
+        // long TTL: only the feed can make a peer's write visible in time
+        cfg.meta_cache_ttl_sec = 100;
         fs::create_directories(cfg.root);
         auto data = std::make_unique<FsDataStore>(
             FsDataOptions{cfg.root,
@@ -663,7 +685,8 @@ TEST(duostore_redis_cache_invalidation_feed) {
 
     sync_wait(a->create_bucket("bkt"));
     auto p1 = put(*a, "bkt", "k", "v1");
-    CHECK_EQ(sync_wait(a->head_object("bkt", "k")).etag, p1.etag);  // a caches the record
+    // a caches the record
+    CHECK_EQ(sync_wait(a->head_object("bkt", "k")).etag, p1.etag);
     CHECK(a->meta_cache_stats().entries >= 1);
     // Peer overwrite: the feed drops a's record and the next read sees v2 -- well
     // inside the 100 s TTL
@@ -675,7 +698,8 @@ TEST(duostore_redis_cache_invalidation_feed) {
     }
     CHECK(a->meta_cache_stats().invalidations >= 1);
     // Peer delete
-    sync_wait(a->head_object("bkt", "k"));  // re-cache
+    // re-cache
+    sync_wait(a->head_object("bkt", "k"));
     sync_wait(b->delete_object("bkt", "k"));
     CHECK(wait_for(
         [&] {
@@ -723,7 +747,8 @@ TEST(duostore_redis_list_uploads_lex_index) {
     std::string prefix = unique_prefix();
     RedisMetaStore m(redis_opts(prefix));
     m.create_bucket("idx");
-    constexpr int kUploads = 700;  // > one ZRANGEBYLEX page (512)
+    // > one ZRANGEBYLEX page (512)
+    constexpr int kUploads = 700;
     std::set<std::pair<std::string, std::string>> expect;
     for (int i = 0; i < kUploads; ++i) {
         std::string k = "p" + std::to_string(i % 7) + "/k" + std::to_string(i % 50);
@@ -764,7 +789,8 @@ TEST(duostore_redis_list_uploads_lex_index) {
     CHECK(RedisTestServer::instance().raw_command(("DEL " + prefix + "uz:idx").c_str()));
     auto legacy = m.list_uploads("idx");
     CHECK_EQ(legacy.size(), size_t(kUploads));
-    auto again = m.list_uploads("idx", {}, {}, 5);  // indexed again: limited page comes back
+    // indexed again: limited page comes back
+    auto again = m.list_uploads("idx", {}, {}, 5);
     CHECK_EQ(again.size(), size_t(5));
     CHECK_EQ(again[0].upload_id, full[0].upload_id);
 
@@ -776,7 +802,8 @@ TEST(duostore_redis_list_uploads_lex_index) {
     auto rest = m.list_uploads("idx");
     CHECK_EQ(rest.size(), size_t(kUploads - 1));
     for (const auto& u : rest) CHECK(u.key.compare(0, 2, "zz") != 0);
-    auto tail = m.list_uploads("idx", "zz", {}, 5);  // indexed: nothing at or after "zz"
+    // indexed: nothing at or after "zz"
+    auto tail = m.list_uploads("idx", "zz", {}, 5);
     CHECK(tail.empty());
     auto lim = m.list_uploads("idx", {}, {}, 3);
     CHECK_EQ(lim.size(), size_t(3));
@@ -794,7 +821,8 @@ TEST(duostore_redis_fault_point) {
     RedisMetaStore a(redis_opts(unique_prefix()));
     a.create_bucket("flt");
     fault::arm("redis.command:1:ECONNRESET");
-    CHECK(a.bucket_exists("flt"));  // read: retried on a fresh connection
+    // read: retried on a fresh connection
+    CHECK(a.bucket_exists("flt"));
     fault::arm("redis.command:1:ECONNRESET");
     CHECK_THROWS_S3(a.create_bucket("flt2"), s3::S3ErrorCode::InternalError);
     fault::reset();

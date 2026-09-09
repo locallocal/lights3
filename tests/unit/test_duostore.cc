@@ -252,11 +252,12 @@ TEST(duostore_rocks_schema_marker_validation) {
 TEST(duostore_schema_marker_lineage_prefixes) {
     CHECK_EQ(parse_schema_marker("r1", "r", 1, "t"), 1);
     CHECK_EQ(parse_schema_marker("t1", "t", 1, "t"), 1);
-    CHECK_EQ(parse_schema_marker("r1", "r", 3, "t"), 1);  // an old version passes, handed to the migration chain
-    CHECK_THROWS_S3(parse_schema_marker("r2", "r", 1, "t"),
-                    s3::S3ErrorCode::InternalError);  // newer than this build
-    CHECK_THROWS_S3(parse_schema_marker("t1", "r", 1, "t"),
-                    s3::S3ErrorCode::InternalError);  // lineage mismatch
+    // an old version passes, handed to the migration chain
+    CHECK_EQ(parse_schema_marker("r1", "r", 3, "t"), 1);
+    // newer than this build
+    CHECK_THROWS_S3(parse_schema_marker("r2", "r", 1, "t"), s3::S3ErrorCode::InternalError);
+    // lineage mismatch
+    CHECK_THROWS_S3(parse_schema_marker("t1", "r", 1, "t"), s3::S3ErrorCode::InternalError);
     CHECK_THROWS_S3(parse_schema_marker("r", "r", 1, "t"), s3::S3ErrorCode::InternalError);
     CHECK_THROWS_S3(parse_schema_marker("r-1", "r", 1, "t"), s3::S3ErrorCode::InternalError);
 }
@@ -278,7 +279,8 @@ TEST(duostore_multichunk_roundtrip_and_layout) {
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
     cfg.chunk_size = 4096;
-    cfg.pack_threshold = 0;  // this case tests chunk layout specifically (pack specials are below)
+    // this case tests chunk layout specifically (pack specials are below)
+    cfg.pack_threshold = 0;
     cfg.meta_sync = false;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
     sync_wait(b->create_bucket("bkt"));
@@ -322,7 +324,8 @@ TEST(duostore_get_detects_chunk_bitrot) {
     cfg.name = "crc";
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
-    cfg.pack_threshold = 0;  // take the chunk path: packs always verify crc and have their own case
+    // take the chunk path: packs always verify crc and have their own case
+    cfg.pack_threshold = 0;
     cfg.meta_sync = false;
     cfg.verify_chunk_crc = true;
     auto b = std::make_shared<DuoStoreBackend>(std::move(cfg), pool);
@@ -391,8 +394,10 @@ TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
 
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
-    put(*b, "bkt", "k", patterned(5000));   // overwrite: old 3 chunks enter gcq, new 2 chunks
+    // 3 chunks
+    put(*b, "bkt", "k", patterned(10000));
+    // overwrite: old 3 chunks enter gcq, new 2 chunks
+    put(*b, "bkt", "k", patterned(5000));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(5));
 
     auto st1 = sync_wait(b->run_gc_once());
@@ -450,7 +455,8 @@ struct LeaseBoard {
 // RocksMetaStore (possibly shared between two wrappers; only the owner closes it)
 struct LeaseSimMeta final : IMetaStore {
     std::shared_ptr<RocksMetaStore> inner;
-    std::optional<int64_t> floor;  // read floor reported when !use_board
+    // read floor reported when !use_board
+    std::optional<int64_t> floor;
     std::shared_ptr<LeaseBoard> board;
     bool use_board = false;
     bool owns_close = true;
@@ -535,7 +541,8 @@ struct LeaseSimMeta final : IMetaStore {
 // object-level sharing a rados data plane gives every gateway)
 struct LeaseHarness {
     std::shared_ptr<DuoStoreBackend> b;
-    LeaseSimMeta* meta = nullptr;  // lifetime follows b
+    // lifetime follows b
+    LeaseSimMeta* meta = nullptr;
     std::shared_ptr<RocksMetaStore> rocks;
 };
 
@@ -583,7 +590,8 @@ TEST(duostore_gc_defers_to_peer_read_lease) {
     auto h = make_lease_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
 
-    put(*h.b, "bkt", "k", patterned(100));  // 1 chunk
+    // 1 chunk
+    put(*h.b, "bkt", "k", patterned(100));
     sync_wait(h.b->delete_object("bkt", "k"));
     const int64_t now = codec::to_unix_ms(std::chrono::system_clock::now());
 
@@ -620,13 +628,15 @@ TEST(duostore_orphan_scan_leaves_gcq_pending_chunks) {
     auto cfg = gc_cfg(tmp, "orphan-gcq");
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(100));  // 1 chunk
+    // 1 chunk
+    put(*b, "bkt", "k", patterned(100));
     sync_wait(b->delete_object("bkt", "k"));
 
     auto st = sync_wait(b->run_orphan_scan_once());
     CHECK_EQ(st.orphans_removed, uint64_t(0));
     CHECK_EQ(st.skipped_gcq, uint64_t(1));
-    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(1));  // still owned by the gcq path
+    // still owned by the gcq path
+    CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(1));
 
     auto gc = sync_wait(b->run_gc_once());
     CHECK_EQ(gc.files_removed, uint64_t(1));
@@ -647,7 +657,8 @@ TEST(duostore_meta_snapshot_dump_is_consistent) {
 
     auto view = m.snapshot();
     CHECK(view != nullptr);
-    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));  // after the snapshot
+    // after the snapshot
+    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));
     m.delete_object("b", "k1");
     m.create_bucket("b2");
 
@@ -663,7 +674,8 @@ TEST(duostore_meta_snapshot_dump_is_consistent) {
     std::istringstream in(out.str());
     auto lst = load_meta(m2, in);
     CHECK_EQ(lst.objects, uint64_t(2));
-    CHECK(m2.get_object("b", "k1").has_value());  // deleted only after the snapshot
+    // deleted only after the snapshot
+    CHECK(m2.get_object("b", "k1").has_value());
     CHECK(m2.get_object("b", "k2").has_value());
     CHECK(!m2.get_object("b", "k3").has_value());
     CHECK(!m2.bucket_exists("b2"));
@@ -679,12 +691,15 @@ TEST(duostore_read_clock_oldest) {
     int64_t o1 = c.oldest_or(0);
     CHECK(o1 > 0);
     uint64_t t2 = c.begin();
-    CHECK_EQ(c.oldest_or(0), o1);  // the older read still anchors the clock
+    // the older read still anchors the clock
+    CHECK_EQ(c.oldest_or(0), o1);
     c.end(t1);
-    CHECK(c.oldest_or(0) >= o1);  // now anchored by the second read
+    // now anchored by the second read
+    CHECK(c.oldest_or(0) >= o1);
     c.end(t2);
     CHECK_EQ(c.oldest_or(7), int64_t(7));
-    c.end(t2);  // idempotent
+    // idempotent
+    c.end(t2);
 }
 
 // Backend-level metrics: GC counts land in the registry via MetricsScope,
@@ -697,7 +712,8 @@ TEST(duostore_gc_metrics_registered) {
     auto reg = std::make_shared<MetricsRegistry>();
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, MetricsScope(reg, {{"backend", "gcm"}}));
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
+    // 3 chunks
+    put(*b, "bkt", "k", patterned(10000));
     sync_wait(b->delete_object("bkt", "k"));
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.reclaims_acked, uint64_t(1));
@@ -756,7 +772,8 @@ TEST(duostore_gc_pin_blocks_unlink_during_get) {
     std::string rest = read_all(*got.body);
     CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n0) + rest, body);
 
-    got.body.reset();  // destruction releases the pin
+    // destruction releases the pin
+    got.body.reset();
     auto st2 = sync_wait(b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(1));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
@@ -769,18 +786,21 @@ TEST(duostore_gc_mpu_ttl_expiry) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = gc_cfg(tmp, "gc-mpu");
-    cfg.mpu_ttl_sec = 1;  // smallest positive ttl (0 = cleanup disabled, not "expire immediately")
+    // smallest positive ttl (0 = cleanup disabled, not "expire immediately")
+    cfg.mpu_ttl_sec = 1;
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
 
     auto id = sync_wait(b->create_multipart("bkt", "mpu", {}));
     {
-        http::StringBodyReader part(patterned(6000));  // 2 chunks
+        // 2 chunks
+        http::StringBodyReader part(patterned(6000));
         sync_wait(b->upload_part("bkt", "mpu", id, 1, part));
     }
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(2));
 
-    usleep(1100 * 1000);  // past the 1s ttl
+    // past the 1s ttl
+    usleep(1100 * 1000);
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.uploads_expired, uint64_t(1));
     // Parts entered into the gcq by the abort are consumed in the same round (mpu cleanup precedes gcq consumption)
@@ -841,11 +861,14 @@ TEST(duostore_gc_skipped_head_does_not_stall_round) {
     for (int i = 0; i < kN; ++i) sync_wait(b->delete_object("bkt", "k" + std::to_string(i)));
 
     auto st = sync_wait(b->run_gc_once());
-    CHECK_EQ(st.skipped_pinned, uint64_t(kN - 1));  // each item counted only once
-    CHECK_EQ(st.reclaims_acked, uint64_t(1));       // a fully pinned head does not block reclaiming the tail
+    // each item counted only once
+    CHECK_EQ(st.skipped_pinned, uint64_t(kN - 1));
+    // a fully pinned head does not block reclaiming the tail
+    CHECK_EQ(st.reclaims_acked, uint64_t(1));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(kN - 1));
 
-    readers.clear();  // full convergence once unpinned
+    // full convergence once unpinned
+    readers.clear();
     auto st2 = sync_wait(b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(kN - 1));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
@@ -894,7 +917,8 @@ TEST(duostore_gc_close_and_dtor_cancel_worker) {
         cfg.root = tmp.path / "duo2";
         cfg.meta_path = cfg.root / "meta";
         cfg.gc_interval_sec = 300;
-        DuoStoreBackend b(cfg, pool);  // dtor fallback path
+        // dtor fallback path
+        DuoStoreBackend b(cfg, pool);
     }
 }
 
@@ -916,7 +940,8 @@ TEST(duostore_gc_manual_hook_vs_close) {
     std::thread closer([&] { sync_wait(b->close()); });
     gc.join();
     closer.join();
-    auto st = sync_wait(b->run_gc_once());  // already closed: refuses entry
+    // already closed: refuses entry
+    auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.reclaims_acked, uint64_t(0));
 }
 
@@ -937,7 +962,8 @@ TEST(duostore_fs_remove_pack_idempotent) {
     CHECK(fs::exists(p));
     sync_wait(d.remove_pack(7));
     CHECK(!fs::exists(p));
-    sync_wait(d.remove_pack(7));  // double delete is idempotent (ENOENT ignored)
+    // double delete is idempotent (ENOENT ignored)
+    sync_wait(d.remove_pack(7));
     sync_wait(d.close());
 }
 
@@ -956,8 +982,9 @@ DuoStoreConfig pack_cfg(const TmpDir& tmp, const char* name) {
     cfg.pack_threshold = 1024;
     cfg.pack_max_size = 64 << 10;
     cfg.pack_writers = 1;
-    cfg.pack_max_age_sec = 0;  // age rotation off by default: layout assertions are only deterministic with
-                               // capacity-based rotation
+    // age rotation off by default: layout assertions are only deterministic with
+    // capacity-based rotation
+    cfg.pack_max_age_sec = 0;
     cfg.meta_sync = false;
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
@@ -1005,7 +1032,8 @@ private:
 // Injected assembly: keeps a raw meta pointer to assert pack liveness accounting (the backend owns it)
 struct PackHarness {
     std::shared_ptr<DuoStoreBackend> b;
-    RocksMetaStore* meta = nullptr;  // lifetime follows b
+    // lifetime follows b
+    RocksMetaStore* meta = nullptr;
 };
 
 PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadPool> pool) {
@@ -1056,7 +1084,8 @@ TEST(duostore_pack_layout_roundtrip_and_stats) {
     std::string d1 = patterned(600), d2 = patterned(500);
     put(*h.b, "bkt", "k1", d1);
     put(*h.b, "bkt", "k2", d2);
-    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));  // appended into the same active pack
+    // appended into the same active pack
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
     CHECK_EQ(chunk_files_on_disk(cfg.root), size_t(0));
 
     // Record format on disk: the file starts with the "LP3R" magic, owner = "bucket\0key" embedded
@@ -1114,7 +1143,8 @@ TEST(duostore_pack_chunked_put_buffer_and_spill) {
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
 
-    std::string exact = patterned(1024);  // == pack_threshold: goes into the pack whole at EOF
+    // == pack_threshold: goes into the pack whole at EOF
+    std::string exact = patterned(1024);
     {
         UnknownLenReader body(exact);
         sync_wait(h.b->put_object("bkt", "fit", {}, body));
@@ -1124,7 +1154,8 @@ TEST(duostore_pack_chunked_put_buffer_and_spill) {
     auto g1 = sync_wait(h.b->get_object("bkt", "fit", std::nullopt));
     CHECK_EQ(read_all(*g1.body), exact);
 
-    std::string spill = patterned(10000);  // over the threshold: buffer spills to disk + switches to chunks (3×4KiB)
+    // over the threshold: buffer spills to disk + switches to chunks (3×4KiB)
+    std::string spill = patterned(10000);
     {
         UnknownLenReader body(spill);
         sync_wait(h.b->put_object("bkt", "spill", {}, body));
@@ -1143,11 +1174,13 @@ TEST(duostore_pack_rotation_seals_and_close_seals_rest) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "pack-rot");
-    cfg.pack_max_size = 2048;  // record ≈ 600+29 -> each pack fills at 3 records
+    // record ≈ 600+29 -> each pack fills at 3 records
+    cfg.pack_max_size = 2048;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     for (int i = 0; i < 4; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
-    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // 3 + 1 distribution
+    // 3 + 1 distribution
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     auto stats = h.meta->pack_stats();
     CHECK_EQ(stats.size(), size_t(2));
@@ -1155,7 +1188,8 @@ TEST(duostore_pack_rotation_seals_and_close_seals_rest) {
     for (const auto& ps : stats) {
         if (ps.sealed) {
             ++sealed;
-            CHECK(ps.file_size > 0);  // rotation sealing reports the final file size
+            // rotation sealing reports the final file size
+            CHECK(ps.file_size > 0);
             CHECK_EQ(ps.live_recs, int64_t(3));
         } else {
             ++active;
@@ -1164,14 +1198,17 @@ TEST(duostore_pack_rotation_seals_and_close_seals_rest) {
     }
     CHECK_EQ(sealed, size_t(1));
     CHECK_EQ(active, size_t(1));
-    for (int i = 0; i < 4; ++i) {  // all readable across packs
+    for (int i = 0; i < 4; ++i) {
+        // all readable across packs
         auto g = sync_wait(h.b->get_object("bkt", "k" + std::to_string(i), std::nullopt));
         CHECK_EQ(read_all(*g.body), patterned(600));
     }
 
     IMetaStore* mp = h.meta;
-    sync_wait(h.b->close());  // seals the remaining active pack (§9 lifecycle: within close, data before meta)
-    (void)mp;                 // meta is closed after close; re-checking the accounting is left to the restart cases
+    // seals the remaining active pack (§9 lifecycle: within close, data before meta)
+    sync_wait(h.b->close());
+    // meta is closed after close; re-checking the accounting is left to the restart cases
+    (void)mp;
 }
 
 // Pack records always verify crc (§7): payload bitrot is detected at GET (500), independent of the
@@ -1188,7 +1225,8 @@ TEST(duostore_pack_get_detects_bitrot) {
     CHECK(!p.empty());
     {
         std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
-        f.seekp(-10, std::ios::end);  // payload tail (the header is at the start of the file)
+        // payload tail (the header is at the start of the file)
+        f.seekp(-10, std::ios::end);
         f.put('!');
     }
     auto got = sync_wait(h.b->get_object("bkt", "k", std::nullopt));
@@ -1207,10 +1245,12 @@ TEST(duostore_read_corruption_metric) {
     auto reg = std::make_shared<MetricsRegistry>();
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, MetricsScope(reg, {{"backend", "corrupt"}}));
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "small", patterned(600));  // <= threshold: pack record
-    put(*b, "bkt", "big", patterned(5000));   // > threshold: 2 chunks (chunk_size 4KiB)
-    CHECK(reg->render().find("lights3_duostore_read_corruption_total{backend=\"corrupt\"} 0\n") !=
-          std::string::npos);  // registered at construction, zero value visible
+    // <= threshold: pack record
+    put(*b, "bkt", "small", patterned(600));
+    // > threshold: 2 chunks (chunk_size 4KiB)
+    put(*b, "bkt", "big", patterned(5000));
+    // registered at construction, zero value visible
+    CHECK(reg->render().find("lights3_duostore_read_corruption_total{backend=\"corrupt\"} 0\n") != std::string::npos);
 
     fs::path chunk;
     for (auto& e : fs::recursive_directory_iterator(cfg.root / "chunks"))
@@ -1228,7 +1268,8 @@ TEST(duostore_read_corruption_metric) {
     CHECK(!p.empty());
     {
         std::fstream f(p, std::ios::in | std::ios::out | std::ios::binary);
-        f.seekp(-10, std::ios::end);  // payload tail (the header is at the start of the record)
+        // payload tail (the header is at the start of the record)
+        f.seekp(-10, std::ios::end);
         f.put('!');
     }
     auto got2 = sync_wait(b->get_object("bkt", "small", std::nullopt));
@@ -1265,7 +1306,8 @@ TEST(duostore_config_rocksdb_tuning_params) {
 // plane the multi-gateway deployment actually uses
 TEST(duostore_config_deployment_warning) {
     DuoStoreConfig c;
-    CHECK(!c.deployment_warning().has_value());  // rocksdb + fs
+    // rocksdb + fs
+    CHECK(!c.deployment_warning().has_value());
     c.meta_kind = DuoMetaKind::kSqlite;
     CHECK(!c.deployment_warning().has_value());
     for (auto shared : {DuoMetaKind::kRedis, DuoMetaKind::kTikv}) {
@@ -1289,7 +1331,8 @@ TEST(duostore_config_gc_enabled_gates_background_only) {
     std::map<std::string, std::string> p{{"root", "/tmp/duo-cfg"}, {"gc_enabled", "false"}};
     auto c = DuoStoreConfig::from_params("t", p);
     CHECK(!c.gc_enabled);
-    CHECK(DuoStoreConfig::from_params("t", {{"root", "/tmp/duo-cfg"}}).gc_enabled);  // on by default
+    // on by default
+    CHECK(DuoStoreConfig::from_params("t", {{"root", "/tmp/duo-cfg"}}).gc_enabled);
     p["gc_enabled"] = "not-a-bool";
     bool threw = false;
     try {
@@ -1313,7 +1356,8 @@ TEST(duostore_config_gc_enabled_gates_background_only) {
     sync_wait(b->delete_object("bkt", "k"));
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.reclaims_acked, uint64_t(1));
-    CHECK_EQ(st.files_removed, uint64_t(2));  // 5000B / 4KiB = 2 chunks
+    // 5000B / 4KiB = 2 chunks
+    CHECK_EQ(st.files_removed, uint64_t(2));
     auto ost = sync_wait(b->run_orphan_scan_once());
     CHECK_EQ(ost.orphans_removed, uint64_t(0));
     sync_wait(b->close());
@@ -1325,30 +1369,42 @@ TEST(duostore_pack_gc_empty_pack_removal_respects_pin) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "pack-gc");
-    cfg.pack_max_size = 1024;  // one record fills it: writing the second object seals the first pack
+    // one record fills it: writing the second object seals the first pack
+    cfg.pack_max_size = 1024;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
-    put(*h.b, "bkt", "k1", patterned(600));  // pack P1
-    put(*h.b, "bkt", "k2", patterned(600));  // P1 sealed, P2 active
+    // pack P1
+    put(*h.b, "bkt", "k1", patterned(600));
+    // P1 sealed, P2 active
+    put(*h.b, "bkt", "k2", patterned(600));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     uint64_t p1 = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
-    auto got = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));  // holds a pin
-    sync_wait(h.b->delete_object("bkt", "k1"));                        // live_recs(P1) -> 0
+    // holds a pin
+    auto got = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
+    // live_recs(P1) -> 0
+    sync_wait(h.b->delete_object("bkt", "k1"));
 
     auto st1 = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st1.skipped_pinned, uint64_t(1));  // the gcq item is blocked by the pin
-    CHECK_EQ(st1.packs_removed, uint64_t(0));   // whole-empty-pack deletion is blocked by the pin as well
+    // the gcq item is blocked by the pin
+    CHECK_EQ(st1.skipped_pinned, uint64_t(1));
+    // whole-empty-pack deletion is blocked by the pin as well
+    CHECK_EQ(st1.packs_removed, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
-    CHECK_EQ(read_all(*got.body), patterned(600));  // the reader is unaffected
+    // the reader is unaffected
+    CHECK_EQ(read_all(*got.body), patterned(600));
 
-    got.body.reset();  // release the pin
+    // release the pin
+    got.body.reset();
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(1));
-    CHECK_EQ(st2.files_removed, uint64_t(0));  // pack records do not count as physical deletions
-    CHECK_EQ(st2.packs_removed, uint64_t(1));  // whole-file unlink
+    // pack records do not count as physical deletions
+    CHECK_EQ(st2.files_removed, uint64_t(0));
+    // whole-file unlink
+    CHECK_EQ(st2.packs_removed, uint64_t(1));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
-    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat cleared
+    // packstat cleared
+    CHECK(!find_pack_stat(*h.meta, p1).has_value());
     sync_wait(h.b->close());
 }
 
@@ -1370,28 +1426,33 @@ TEST(duostore_pack_restart_abandons_active) {
         // Torn tail injection (§5.2/§6.2): a crash may leave half a record mid-append --
         // unreferenced means dead space, and it must not affect reading committed objects
         std::ofstream f(sole_pack_file(cfg.root), std::ios::binary | std::ios::app);
-        f << "LP3R" << std::string(7, '\x5a');  // magic + truncated header
+        // magic + truncated header
+        f << "LP3R" << std::string(7, '\x5a');
     }
     auto h = make_pack_backend(cfg, pool);
     auto stats = h.meta->pack_stats();
     CHECK_EQ(stats.size(), size_t(1));
-    CHECK(stats[0].sealed);                     // back-sealed at construction (abandon_stale_packs)
-    CHECK_EQ(stats[0].file_size, uint64_t(0));  // size unknown, 0 placeholder
+    // back-sealed at construction (abandon_stale_packs)
+    CHECK(stats[0].sealed);
+    // size unknown, 0 placeholder
+    CHECK_EQ(stats[0].file_size, uint64_t(0));
     uint64_t p1 = stats[0].pack_id;
 
     auto g = sync_wait(h.b->get_object("bkt", "old", std::nullopt));
-    CHECK_EQ(read_all(*g.body), patterned(600));  // the old pack is merely abandoned, reads are unaffected
+    // the old pack is merely abandoned, reads are unaffected
+    CHECK_EQ(read_all(*g.body), patterned(600));
     g.body.reset();
 
-    put(*h.b, "bkt", "fresh", patterned(600));  // a new write opens a new pack (does not reuse the old active)
+    // a new write opens a new pack (does not reuse the old active)
+    put(*h.b, "bkt", "fresh", patterned(600));
     uint64_t p2 = h.meta->get_object("bkt", "fresh")->data.extents[0].file_id;
     CHECK(p2 != p1);
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     sync_wait(h.b->delete_object("bkt", "old"));
     auto st = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st.packs_removed,
-             uint64_t(1));  // only after back-sealing can the old pack become a whole-deletion candidate
+    // only after back-sealing can the old pack become a whole-deletion candidate
+    CHECK_EQ(st.packs_removed, uint64_t(1));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
     auto g2 = sync_wait(h.b->get_object("bkt", "fresh", std::nullopt));
     CHECK_EQ(read_all(*g2.body), patterned(600));
@@ -1429,11 +1490,13 @@ TEST(duostore_compact_low_liveness_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact");
-    cfg.pack_max_size = 2048;  // 600B record ≈ 629B, fills and rotates at 3 records
+    // 600B record ≈ 629B, fills and rotates at 3 records
+    cfg.pack_max_size = 2048;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     for (int i = 0; i < 4; ++i) put(*h.b, "bkt", "k" + std::to_string(i), patterned(600));
-    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));  // P1 sealed (k0-k2), P2 active (k3)
+    // P1 sealed (k0-k2), P2 active (k3)
+    CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     uint64_t p1 = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
 
@@ -1455,13 +1518,15 @@ TEST(duostore_compact_low_liveness_pack) {
     // Liveness 1/3 (0.32 < 0.5) -> compaction: k2 migrates, P1 empties, whole-deleted in the same round
     sync_wait(h.b->delete_object("bkt", "k1"));
     auto st2 = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(h.b->meta_cache_stats().entries, size_t(0));  // ref swaps drop the cache
+    // ref swaps drop the cache
+    CHECK_EQ(h.b->meta_cache_stats().entries, size_t(0));
     CHECK_EQ(st2.packs_compacted, uint64_t(1));
     CHECK_EQ(st2.records_migrated, uint64_t(1));
     CHECK_EQ(st2.records_corrupt, uint64_t(0));
     CHECK_EQ(st2.packs_removed, uint64_t(1));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
-    CHECK(!find_pack_stat(*h.meta, p1).has_value());  // packstat cleared
+    // packstat cleared
+    CHECK(!find_pack_stat(*h.meta, p1).has_value());
 
     // After the ref swap, k2 points at the new pack and is byte-for-byte correct; k3 is undisturbed
     auto rec = h.meta->get_object("bkt", "k2");
@@ -1494,14 +1559,16 @@ TEST(duostore_pack_age_rotation_seals_idle_pack) {
     uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
     auto before = find_pack_stat(*h.meta, pid);
     CHECK(before.has_value());
-    CHECK(!before->sealed);  // far from pack_max_size: the capacity criterion would never seal it
+    // far from pack_max_size: the capacity criterion would never seal it
+    CHECK(!before->sealed);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(20));
     CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(1));
     auto after = find_pack_stat(*h.meta, pid);
     CHECK(after.has_value());
     CHECK(after->sealed);
-    CHECK(after->file_size > 0);  // reported truthfully, not the restart back-seal's "unknown 0"
+    // reported truthfully, not the restart back-seal's "unknown 0"
+    CHECK(after->file_size > 0);
     CHECK_EQ(after->live_recs, int64_t(3));
 
     // Idempotent: returns 0 when there is no active pack to seal
@@ -1530,7 +1597,8 @@ TEST(duostore_pack_age_rotation_runs_in_gc) {
     put(*h.b, "bkt", "k0", patterned(600));
     uint64_t pid = h.meta->get_object("bkt", "k0")->data.extents[0].file_id;
 
-    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(0));  // not due yet
+    // not due yet
+    CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(0));
     std::this_thread::sleep_for(std::chrono::milliseconds(1100));
     CHECK_EQ(sync_wait(h.b->run_gc_once()).packs_sealed_aged, uint64_t(1));
     CHECK(find_pack_stat(*h.meta, pid)->sealed);
@@ -1544,8 +1612,10 @@ TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "budget");
-    cfg.pack_max_size = 2048;      // 600B record ≈ 629B, fills and rotates at 3 records
-    cfg.gc_compact_max_packs = 1;  // only one per round
+    // 600B record ≈ 629B, fills and rotates at 3 records
+    cfg.pack_max_size = 2048;
+    // only one per round
+    cfg.gc_compact_max_packs = 1;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     // Three full packs (k0-k2 / k3-k5 / k6-k8) + one active (k9)
@@ -1564,8 +1634,10 @@ TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     sync_wait(h.b->delete_object("bkt", "k7"));
 
     auto st1 = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st1.packs_compacted, uint64_t(1));         // budget cap
-    CHECK_EQ(st1.packs_compact_deferred, uint64_t(2));  // the rest are deferred
+    // budget cap
+    CHECK_EQ(st1.packs_compacted, uint64_t(1));
+    // the rest are deferred
+    CHECK_EQ(st1.packs_compact_deferred, uint64_t(2));
 
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.packs_compacted, uint64_t(1));
@@ -1592,22 +1664,28 @@ TEST(duostore_compact_corrupt_dead_record) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact-cdead");
-    cfg.pack_max_size = 1400;  // fills at 2 records (the 3rd triggers rotation sealing)
+    // fills at 2 records (the 3rd triggers rotation sealing)
+    cfg.pack_max_size = 1400;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     put(*h.b, "bkt", "k1", patterned(600));
     put(*h.b, "bkt", "k2", patterned(600));
-    auto old2 = h.meta->get_object("bkt", "k2")->data.extents[0];  // P1 location before the overwrite
-    put(*h.b, "bkt", "k2",
-        patterned(500));  // 3rd record -> P1 sealed, the new value goes to P2; old k2 becomes dead space
+    // P1 location before the overwrite
+    auto old2 = h.meta->get_object("bkt", "k2")->data.extents[0];
+    // 3rd record -> P1 sealed, the new value goes to P2; old k2 becomes dead space
+    put(*h.b, "bkt", "k2", patterned(500));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
-    corrupt_file_at(pack_file_path(cfg.root, old2.file_id), old2.offset + 10);  // corrupt the dead space
+    // corrupt the dead space
+    corrupt_file_at(pack_file_path(cfg.root, old2.file_id), old2.offset + 10);
     auto st = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st.packs_compacted, uint64_t(1));
-    CHECK_EQ(st.records_corrupt, uint64_t(1));   // corrupt dead space: warn and skip
-    CHECK_EQ(st.records_migrated, uint64_t(1));  // live k1 migrates as usual
-    CHECK_EQ(st.packs_removed, uint64_t(1));  // live reaches zero -> whole-delete the empty pack (dead space included)
+    // corrupt dead space: warn and skip
+    CHECK_EQ(st.records_corrupt, uint64_t(1));
+    // live k1 migrates as usual
+    CHECK_EQ(st.records_migrated, uint64_t(1));
+    // live reaches zero -> whole-delete the empty pack (dead space included)
+    CHECK_EQ(st.packs_removed, uint64_t(1));
     auto g1 = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
     CHECK_EQ(read_all(*g1.body), patterned(600));
     auto g2 = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
@@ -1622,22 +1700,27 @@ TEST(duostore_compact_corrupt_live_record_keeps_pack) {
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "compact-clive");
     cfg.pack_max_size = 1400;
-    cfg.gc_grace_sec = 3600;  // cooldown window in effect (also used to verify the re-scan is skipped)
+    // cooldown window in effect (also used to verify the re-scan is skipped)
+    cfg.gc_grace_sec = 3600;
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     put(*h.b, "bkt", "k1", patterned(600));
     put(*h.b, "bkt", "k2", patterned(600));
-    put(*h.b, "bkt", "filler", patterned(600));  // P1 sealed
-    sync_wait(h.b->delete_object("bkt", "k1"));  // P1 liveness 1/2 -> candidate
+    // P1 sealed
+    put(*h.b, "bkt", "filler", patterned(600));
+    // P1 liveness 1/2 -> candidate
+    sync_wait(h.b->delete_object("bkt", "k1"));
 
     auto live2 = h.meta->get_object("bkt", "k2")->data.extents[0];
-    corrupt_file_at(pack_file_path(cfg.root, live2.file_id), live2.offset + 10);  // corrupt the survivor
+    // corrupt the survivor
+    corrupt_file_at(pack_file_path(cfg.root, live2.file_id), live2.offset + 10);
 
     auto st1 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st1.packs_compacted, uint64_t(1));
     CHECK_EQ(st1.records_corrupt, uint64_t(1));
     CHECK_EQ(st1.records_migrated, uint64_t(0));
-    CHECK_EQ(st1.packs_removed, uint64_t(0));  // live>0: the pack is kept (do not lose data destined for manual rescue)
+    // live>0: the pack is kept (do not lose data destined for manual rescue)
+    CHECK_EQ(st1.packs_removed, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     // No accounting progress + within the cooldown window: the next round skips the re-scan
@@ -1654,15 +1737,18 @@ TEST(duostore_corrupt_pack_quarantine_lifecycle) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "quarantine");
-    cfg.pack_max_size = 1400;  // grace stays 0: every round rescans, strikes accumulate fast
+    // grace stays 0: every round rescans, strikes accumulate fast
+    cfg.pack_max_size = 1400;
     uint64_t pid = 0;
     {
         auto h = make_pack_backend(cfg, pool);
         sync_wait(h.b->create_bucket("bkt"));
         put(*h.b, "bkt", "k1", patterned(600));
         put(*h.b, "bkt", "k2", patterned(600));
-        put(*h.b, "bkt", "filler", patterned(600));  // P1 sealed
-        sync_wait(h.b->delete_object("bkt", "k1"));  // liveness 1/2 -> candidate
+        // P1 sealed
+        put(*h.b, "bkt", "filler", patterned(600));
+        // liveness 1/2 -> candidate
+        sync_wait(h.b->delete_object("bkt", "k1"));
 
         auto live2 = h.meta->get_object("bkt", "k2")->data.extents[0];
         pid = live2.file_id;
@@ -1704,20 +1790,23 @@ TEST(duostore_corrupt_pack_quarantine_lifecycle) {
     }
     // release -> compaction retries (and the corruption is found again)
     CHECK(h.b->quarantine_release(pid));
-    CHECK(!h.b->quarantine_release(pid));  // second release: nothing to drop
+    // second release: nothing to drop
+    CHECK(!h.b->quarantine_release(pid));
     auto st5 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st5.packs_compacted, uint64_t(1));
     CHECK_EQ(st5.records_corrupt, uint64_t(1));
     sync_wait(h.b->run_gc_once());
     auto st7 = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st7.packs_quarantined, uint64_t(1));  // three fruitless scans re-park it
+    // three fruitless scans re-park it
+    CHECK_EQ(st7.packs_quarantined, uint64_t(1));
 
     // purge: file gone, accounting and (purged) ledger entry kept
     CHECK(sync_wait(h.b->quarantine_purge(pid)));
     CHECK(!fs::exists(pack_file_path(cfg.root, pid)));
     CHECK(find_pack_stat(*h.meta, pid).has_value());
     CHECK(h.b->quarantine_list().at(0).purged);
-    CHECK(!sync_wait(h.b->quarantine_purge(pid)));  // already purged
+    // already purged
+    CHECK(!sync_wait(h.b->quarantine_purge(pid)));
 
     // Deleting the owner drains the account; GC retires packstat + ledger entry
     sync_wait(h.b->delete_object("bkt", "k2"));
@@ -1749,14 +1838,16 @@ TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
         etag = sync_wait(h.b->upload_part("bkt", "mp", id, 1, body)).etag;
     }
     put(*h.b, "bkt", "f1", patterned(600));
-    put(*h.b, "bkt", "f2", patterned(600));  // P1 (part+f1) sealed, f2 goes to P2
+    // P1 (part+f1) sealed, f2 goes to P2
+    put(*h.b, "bkt", "f2", patterned(600));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
-    sync_wait(h.b->delete_object("bkt", "f1"));  // P1 liveness = 1 in-progress part -> candidate
+    // P1 liveness = 1 in-progress part -> candidate
+    sync_wait(h.b->delete_object("bkt", "f1"));
 
     auto st1 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st1.packs_compacted, uint64_t(1));
-    CHECK_EQ(st1.records_migrated,
-             uint64_t(0));  // in-progress mpu: the object does not exist -> conservatively not migrated
+    // in-progress mpu: the object does not exist -> conservatively not migrated
+    CHECK_EQ(st1.records_migrated, uint64_t(0));
     CHECK_EQ(st1.packs_removed, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
@@ -1808,12 +1899,14 @@ TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
         else
             chunk_ids.push_back(e.file_id);
     }
-    CHECK(has_pack && !chunk_ids.empty());  // it really is a mixed object
+    // it really is a mixed object
+    CHECK(has_pack && !chunk_ids.empty());
     for (uint64_t cid : chunk_ids) CHECK(h.meta->chunk_referenced(cid));
 
     // Drop that pack's liveness below the threshold -> compaction migrates that one pack extent
     put(*h.b, "bkt", "f1", patterned(600));
-    put(*h.b, "bkt", "f2", patterned(600));  // triggers rotation sealing
+    // triggers rotation sealing
+    put(*h.b, "bkt", "f2", patterned(600));
     sync_wait(h.b->delete_object("bkt", "f1"));
     auto st = sync_wait(h.b->run_gc_once());
     CHECK(st.records_migrated >= uint64_t(1));
@@ -1841,14 +1934,16 @@ TEST(duostore_active_pack_of_other_writer_not_sealed) {
     auto cfg = pack_cfg(tmp, "pack-owner");
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
-    put(*h.b, "bkt", "k1", patterned(600));  // creates an active (unsealed) pack
+    // creates an active (unsealed) pack
+    put(*h.b, "bkt", "k1", patterned(600));
 
     uint64_t pack_id = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
     auto stats = h.meta->pack_stats();
     bool unsealed = false;
     for (const auto& ps : stats)
         if (ps.pack_id == pack_id && !ps.sealed) unsealed = true;
-    CHECK(unsealed);  // premise: the pack really is in the active state
+    // premise: the pack really is in the active state
+    CHECK(unsealed);
 
     // This instance holds the write lock -> the probe should report "being written"
     CHECK(h.b->data_for_test().pack_write_locked(pack_id));
@@ -1880,10 +1975,12 @@ TEST(duostore_gc_stat_backfills_crash_leftover_pack) {
     uint64_t pid = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
     auto ps0 = find_pack_stat(*h.meta, pid);
     CHECK(ps0->sealed);
-    CHECK_EQ(ps0->file_size, uint64_t(0));  // size unknown at back-seal time
+    // size unknown at back-seal time
+    CHECK_EQ(ps0->file_size, uint64_t(0));
 
     auto st = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st.packs_compacted, uint64_t(0));  // 100% live: after the backfill the liveness ratio skips the rewrite
+    // 100% live: after the backfill the liveness ratio skips the rewrite
+    CHECK_EQ(st.packs_compacted, uint64_t(0));
     auto ps1 = find_pack_stat(*h.meta, pid);
     CHECK_EQ(ps1->file_size, uint64_t(fs::file_size(pack_file_path(cfg.root, pid))));
 
@@ -1918,13 +2015,17 @@ TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
     }
     auto rw = sync_wait(d.rewrite_pack(e1.file_id));
     CHECK_EQ(rw.scanned, uint64_t(2));
-    CHECK_EQ(rw.migrated, uint64_t(0));  // no migration callback: scan only, no migration
-    CHECK_EQ(rw.corrupt, uint64_t(0));   // torn tail does not count as corruption
+    // no migration callback: scan only, no migration
+    CHECK_EQ(rw.migrated, uint64_t(0));
+    // torn tail does not count as corruption
+    CHECK_EQ(rw.corrupt, uint64_t(0));
     CHECK_EQ(rw.file_size, real_size + 11);
 
-    corrupt_file_at(pack_file_path(tmp.path / "duo", e1.file_id), 0);  // corrupt the magic
+    // corrupt the magic
+    corrupt_file_at(pack_file_path(tmp.path / "duo", e1.file_id), 0);
     auto rw2 = sync_wait(d.rewrite_pack(e1.file_id));
-    CHECK_EQ(rw2.scanned, uint64_t(0));  // cannot resynchronize: stops the scan loudly
+    // cannot resynchronize: stops the scan loudly
+    CHECK_EQ(rw2.scanned, uint64_t(0));
     CHECK_EQ(rw2.corrupt, uint64_t(1));
     sync_wait(d.close());
     meta.close();
@@ -1968,7 +2069,8 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
         r2.meta.last_modified = std::chrono::system_clock::now();
         r2.data.extents = {modern};
         meta.put_object("bkt", "knew", std::move(r2));
-        sync_wait(d1.close());  // seals the pack (the migration target must be a different active pack)
+        // seals the pack (the migration target must be a different active pack)
+        sync_wait(d1.close());
     }
     FsDataStore d2(
         opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
@@ -1978,9 +2080,12 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
         });
     auto rw = sync_wait(d2.rewrite_pack(pack_id));
     CHECK_EQ(rw.scanned, uint64_t(2));
-    CHECK_EQ(rw.migrated, uint64_t(1));  // new format migrates; legacy format conservatively shelved
-    CHECK(meta.get_object("bkt", "kold")->data.extents[0].file_id == pack_id);  // ref untouched
-    CHECK(meta.get_object("bkt", "knew")->data.extents[0].file_id != pack_id);  // ref swapped
+    // new format migrates; legacy format conservatively shelved
+    CHECK_EQ(rw.migrated, uint64_t(1));
+    // ref untouched
+    CHECK(meta.get_object("bkt", "kold")->data.extents[0].file_id == pack_id);
+    // ref swapped
+    CHECK(meta.get_object("bkt", "knew")->data.extents[0].file_id != pack_id);
     // Both objects are readable with correct content
     auto read_obj = [&](const char* k, size_t n) {
         auto rec = meta.get_object("bkt", k);
@@ -2004,7 +2109,8 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     auto cfg = gc_cfg(tmp, "orphan");
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunks on record
+    // 3 chunks on record
+    put(*b, "bkt", "k", patterned(10000));
 
     // Inject an orphan shaped like crash residue (file on disk, no meta record);
     // pick a far-away id to stay clear of the allocated range
@@ -2046,7 +2152,8 @@ TEST(duostore_orphan_scan_forward_and_reverse) {
     CHECK_EQ(st2.orphans_removed, uint64_t(0));
     CHECK_EQ(st2.refs_missing, uint64_t(1));
     (void)lost;
-    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta untouched
+    // meta untouched
+    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);
     sync_wait(b->close());
 
     // Grace shields fresh writes: unreferenced files within the grace window stay
@@ -2096,14 +2203,16 @@ TEST(duostore_orphan_scan_reconciles_packs) {
 
     // Reverse: manually delete the recorded pack file → count + alert, packstat
     // kept for manual intervention
-    sync_wait(h.b->close());  // shut down the writer first, or we'd delete the
-                              // active pack this process holds locked
+    // shut down the writer first, or we'd delete the
+    // active pack this process holds locked
+    sync_wait(h.b->close());
     auto h2 = make_pack_backend(cfg, pool);
     fs::remove(pack_file_path(cfg.root, live_pack));
     auto st2 = sync_wait(h2.b->run_orphan_scan_once());
     CHECK_EQ(st2.packs_scanned, uint64_t(0));
     CHECK_EQ(st2.pack_stats_missing, uint64_t(1));
-    CHECK(find_pack_stat(*h2.meta, live_pack).has_value());  // record untouched
+    // record untouched
+    CHECK(find_pack_stat(*h2.meta, live_pack).has_value());
     sync_wait(h2.b->close());
 }
 
@@ -2131,8 +2240,9 @@ public:
             co_return n;
         }
         if (stage_ == 1) {
-            gate_.acquire();  // blocks a pool thread until release() (pool has >1
-                              // thread, so the scan is not blocked)
+            // blocks a pool thread until release() (pool has >1
+            // thread, so the scan is not blocked)
+            gate_.acquire();
             stage_ = 2;
         }
         size_t n = std::min(buf.size(), rest_.size() - off_);
@@ -2175,7 +2285,8 @@ TEST(duostore_orphan_scan_write_pin_protects_inflight_put) {
     CHECK(on_disk >= 1);
 
     auto st1 = sync_wait(b->run_orphan_scan_once());
-    CHECK(st1.skipped_pinned >= 1);  // grace=0: the write-side pin is the only defense
+    // grace=0: the write-side pin is the only defense
+    CHECK(st1.skipped_pinned >= 1);
     CHECK_EQ(st1.orphans_removed, uint64_t(0));
     CHECK(chunk_files_on_disk(cfg.root) >= on_disk);
 
@@ -2206,7 +2317,8 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
     auto pool = std::make_shared<ThreadPool>(6);
     auto board = std::make_shared<LeaseBoard>();
     auto cfg_a = gc_cfg(tmp, "wl-a");
-    cfg_a.read_lease_sec = 0;  // A publishes through the manual hook (deterministic ordering)
+    // A publishes through the manual hook (deterministic ordering)
+    cfg_a.read_lease_sec = 0;
     auto a = make_lease_backend(cfg_a, pool, nullptr, board);
     a.meta->use_board = true;
     sync_wait(a.b->create_bucket("bkt"));
@@ -2230,12 +2342,15 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
         std::unique_ptr<GatedReader> body;
         std::thread writer;
         start_slow_put("slow0", data, body, writer);
-        CHECK(sync_wait(a.b->publish_lease_once()));  // published, but b does not consult it
+        // published, but b does not consult it
+        CHECK(sync_wait(a.b->publish_lease_once()));
         auto st = sync_wait(b.b->run_orphan_scan_once());
-        CHECK(st.orphans_removed >= 1);  // A's in-flight chunk mistaken for crash residue
+        // A's in-flight chunk mistaken for crash residue
+        CHECK(st.orphans_removed >= 1);
         CHECK_EQ(st.skipped_leased, uint64_t(0));
         body->release();
-        writer.join();  // A commits refs to a deleted chunk: the object is now corrupt
+        // A commits refs to a deleted chunk: the object is now corrupt
+        writer.join();
         auto st2 = sync_wait(b.b->run_orphan_scan_once());
         CHECK(st2.refs_missing >= 1);
         sync_wait(b.b->close());
@@ -2244,7 +2359,8 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
     // Phase 2 — lease on: the peer's in-flight write is respected
     {
         auto cfg_b = gc_cfg(tmp, "wl-b1");
-        cfg_b.read_lease_sec = 1;  // consumer gate; B's own timer lease says "idle" (now)
+        // consumer gate; B's own timer lease says "idle" (now)
+        cfg_b.read_lease_sec = 1;
         auto b = make_lease_backend(cfg_b, pool, a.rocks, board);
         b.meta->use_board = true;
         const size_t before = chunk_files_on_disk(cfg_a.root);
@@ -2252,20 +2368,24 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
         std::unique_ptr<GatedReader> body;
         std::thread writer;
         start_slow_put("slow1", data, body, writer);
-        CHECK(sync_wait(a.b->publish_lease_once()));  // oldest_write = the slow PUT's start
+        // oldest_write = the slow PUT's start
+        CHECK(sync_wait(a.b->publish_lease_once()));
         auto st = sync_wait(b.b->run_orphan_scan_once());
         CHECK_EQ(st.orphans_removed, uint64_t(0));
         CHECK(st.skipped_leased >= 1);
-        CHECK_EQ(st.skipped_pinned, uint64_t(0));  // B holds no pin for A's write
+        // B holds no pin for A's write
+        CHECK_EQ(st.skipped_pinned, uint64_t(0));
         CHECK(chunk_files_on_disk(cfg_a.root) > before);
 
         body->release();
         writer.join();
-        CHECK(sync_wait(a.b->publish_lease_once()));  // A idle again: floor moves to now
+        // A idle again: floor moves to now
+        CHECK(sync_wait(a.b->publish_lease_once()));
         auto st2 = sync_wait(b.b->run_orphan_scan_once());
         CHECK_EQ(st2.orphans_removed, uint64_t(0));
         CHECK_EQ(st2.skipped_leased, uint64_t(0));
-        auto g = sync_wait(b.b->get_object("bkt", "slow1", std::nullopt));  // readable from the peer
+        // readable from the peer
+        auto g = sync_wait(b.b->get_object("bkt", "slow1", std::nullopt));
         CHECK_EQ(read_all(*g.body), data);
         g.body.reset();
 
@@ -2318,11 +2438,14 @@ TEST(duostore_scrub_clean_state) {
     auto cfg = gc_cfg(tmp, "scrub-clean");
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
-    put(*b, "bkt", "empty", "");            // zero extents
+    // 3 chunks
+    put(*b, "bkt", "k", patterned(10000));
+    // zero extents
+    put(*b, "bkt", "empty", "");
     auto id = sync_wait(b->create_multipart("bkt", "mp", {}));
     {
-        http::StringBodyReader part(patterned(6000));  // 2 chunks, in-flight
+        // 2 chunks, in-flight
+        http::StringBodyReader part(patterned(6000));
         sync_wait(b->upload_part("bkt", "mp", id, 1, part));
     }
 
@@ -2350,7 +2473,8 @@ TEST(duostore_scrub_detects_chunk_bitrot_and_loss) {
     auto cfg = gc_cfg(tmp, "scrub-rot");
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 chunks
+    // 3 chunks
+    put(*b, "bkt", "k", patterned(10000));
     auto chunks = chunk_paths_on_disk(cfg.root);
     CHECK_EQ(chunks.size(), size_t(3));
 
@@ -2376,7 +2500,8 @@ TEST(duostore_scrub_detects_pack_corruption) {
     auto cfg = pack_cfg(tmp, "scrub-pack");
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "small", patterned(600));  // <= threshold: pack record
+    // <= threshold: pack record
+    put(*b, "bkt", "small", patterned(600));
 
     auto st0 = sync_wait(b->run_scrub_once());
     CHECK_EQ(st0.extents_checked, uint64_t(1));
@@ -2384,7 +2509,8 @@ TEST(duostore_scrub_detects_pack_corruption) {
 
     fs::path pak = sole_pack_file(cfg.root);
     CHECK(!pak.empty());
-    flip_byte_at(pak, std::streamoff(fs::file_size(pak)) - 1);  // last payload byte
+    // last payload byte
+    flip_byte_at(pak, std::streamoff(fs::file_size(pak)) - 1);
     auto st1 = sync_wait(b->run_scrub_once());
     CHECK_EQ(st1.unreadable_extents, uint64_t(1));
     CHECK_EQ(st1.objects_bad, uint64_t(1));
@@ -2399,10 +2525,12 @@ TEST(duostore_scrub_rate_limited) {
     auto cfg = gc_cfg(tmp, "scrub-rate");
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(8192));  // 2 chunks
+    // 2 chunks
+    put(*b, "bkt", "k", patterned(8192));
 
     DuoScrubOptions opt;
-    opt.max_bytes_per_sec = 1 << 20;  // 8KiB at 1MiB/s: fast but exercises pacing
+    // 8KiB at 1MiB/s: fast but exercises pacing
+    opt.max_bytes_per_sec = 1 << 20;
     auto st = sync_wait(b->run_scrub_once(opt));
     CHECK_EQ(st.bytes_read, uint64_t(8192));
     CHECK_EQ(st.corrupt_extents, uint64_t(0));
@@ -2428,7 +2556,8 @@ DuoStoreConfig crash_cfg(const fs::path& root) {
     cfg.pack_threshold = 1024;
     cfg.pack_max_size = 64 << 10;
     cfg.pack_writers = 1;
-    cfg.meta_sync = true;  // the crash-semantics linchpin: commit point = WAL fsync (§6)
+    // the crash-semantics linchpin: commit point = WAL fsync (§6)
+    cfg.meta_sync = true;
     cfg.gc_interval_sec = 0;
     cfg.orphan_scan_interval_sec = 0;
     cfg.gc_grace_sec = 0;
@@ -2478,10 +2607,12 @@ int duostore_crash_child(int argc, char** argv) {
         put(*b, "bkt", "before", patterned(600));
         ExitMidwayReader body(patterned(20000), 9000);
         sync_wait(b->put_object("bkt", "victim", {}, body));
-        return 3;  // unreachable: the body _exits at byte 9000
+        // unreachable: the body _exits at byte 9000
+        return 3;
     } else if (mode == "afterdelete") {
         put(*b, "bkt", "gone", patterned(10000));
-        sync_wait(b->delete_object("bkt", "gone"));  // gcq entry recorded, files not yet reclaimed
+        // gcq entry recorded, files not yet reclaimed
+        sync_wait(b->delete_object("bkt", "gone"));
     } else if (mode == "spin") {
         // Commit in a loop and report each one; the parent SIGKILLs at a random
         // moment. The line is written only after put returns (WAL fsync) — any
@@ -2495,8 +2626,9 @@ int duostore_crash_child(int argc, char** argv) {
     } else {
         return 2;
     }
-    ::_exit(0);  // equivalent to kill -9: no close, no destructors (WAL replay and
-                 // active-pack abandonment are left to the restart)
+    // equivalent to kill -9: no close, no destructors (WAL replay and
+    // active-pack abandonment are left to the restart)
+    ::_exit(0);
 }
 
 mini_test::ChildRegistrar crash_child_reg("duostore-crash-child", duostore_crash_child);
@@ -2539,8 +2671,9 @@ std::string expect_body(int i) { return patterned((i % 2) ? 600 : 10000); }
 void verify_converged(DuoStoreBackend& b) {
     sync_wait(b.run_gc_once());
     sync_wait(b.run_orphan_scan_once());
-    sync_wait(b.run_gc_once());  // one more round to realize second-order effects
-                                 // (e.g. empty packs unlocked by compaction)
+    // one more round to realize second-order effects
+    // (e.g. empty packs unlocked by compaction)
+    sync_wait(b.run_gc_once());
     auto gc = sync_wait(b.run_gc_once());
     CHECK_EQ(gc.reclaims_acked, uint64_t(0));
     CHECK_EQ(gc.files_removed, uint64_t(0));
@@ -2574,8 +2707,9 @@ TEST(duostore_crash_after_commit_recovers_all) {
     check_body(*b, "big", patterned(10000));
     check_body(*b, "mp", patterned(6000) + patterned(6000));
     verify_converged(*b);
-    check_body(*b, "small", patterned(600));  // recheck: convergence (incl. compaction
-                                              // migration) leaves content untouched
+    // recheck: convergence (incl. compaction
+    // migration) leaves content untouched
+    check_body(*b, "small", patterned(600));
     check_body(*b, "big", patterned(10000));
     check_body(*b, "mp", patterned(6000) + patterned(6000));
     sync_wait(b->close());
@@ -2597,8 +2731,9 @@ TEST(duostore_crash_mid_put_leaves_no_garbage) {
     auto os = sync_wait(b->run_orphan_scan_once());
     CHECK_EQ(os.orphans_removed, uint64_t(3));
     CHECK_EQ(os.refs_missing, uint64_t(0));
-    CHECK_EQ(chunk_files_on_disk(root), size_t(0));  // "before" is a pack object, so
-                                                     // chunks/ should be clean
+    // "before" is a pack object, so
+    // chunks/ should be clean
+    CHECK_EQ(chunk_files_on_disk(root), size_t(0));
     verify_converged(*b);
     check_body(*b, "before", patterned(600));
     sync_wait(b->close());
@@ -2616,7 +2751,8 @@ TEST(duostore_crash_after_delete_converges) {
     CHECK_THROWS_S3(sync_wait(b->head_object("bkt", "gone")), s3::S3ErrorCode::NoSuchKey);
     auto gc = sync_wait(b->run_gc_once());
     CHECK_EQ(gc.reclaims_acked, uint64_t(1));
-    CHECK_EQ(gc.files_removed, uint64_t(3));  // 10000B / 4096 → 3 chunks
+    // 10000B / 4096 → 3 chunks
+    CHECK_EQ(gc.files_removed, uint64_t(3));
     CHECK_EQ(chunk_files_on_disk(root), size_t(0));
     verify_converged(*b);
     sync_wait(b->close());
@@ -2637,7 +2773,8 @@ TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
     char c;
     while (buf.find('\n') == std::string::npos && ::read(fd, &c, 1) == 1) buf.push_back(c);
     CHECK(buf.find('\n') != std::string::npos);
-    usleep((200 + unsigned(::getpid()) % 500) * 1000);  // 200-700ms random window
+    // 200-700ms random window
+    usleep((200 + unsigned(::getpid()) % 500) * 1000);
     CHECK_EQ(::kill(pid, SIGKILL), 0);
     int stat = wait_child(pid);
     CHECK(WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL);
@@ -2652,7 +2789,8 @@ TEST(duostore_crash_random_sigkill_keeps_reported_commits) {
     std::vector<int> committed;
     for (size_t pos = 0; pos < buf.size();) {
         size_t nl = buf.find('\n', pos);
-        if (nl == std::string::npos) break;  // trailing partial line: doesn't count
+        // trailing partial line: doesn't count
+        if (nl == std::string::npos) break;
         std::string line = buf.substr(pos, nl - pos);
         pos = nl + 1;
         if (line.rfind("ok ", 0) == 0) committed.push_back(std::stoi(line.substr(3)));
@@ -2678,19 +2816,23 @@ TEST(duostore_chunk_ids_batched_in_runs) {
     FsDataStore d(FsDataOptions{tmp.path / "duo", 64, false, 0, 128ull << 20, 4, {}}, pool,
                   [&](Extent::Kind, uint32_t n) {
                       uint64_t f = next_id;
-                      next_id += n + 7;  // simulate concurrent writers consuming ids
-                                         // between two batch grabs
+                      // simulate concurrent writers consuming ids
+                      // between two batch grabs
+                      next_id += n + 7;
                       return f;
                   });
     auto w = sync_wait(d.open_writer({std::nullopt, "t/runs"}));
-    std::string body(64 * 7, 'x');  // 7 chunks: run sequence 1, 2, 4
+    // 7 chunks: run sequence 1, 2, 4
+    std::string body(64 * 7, 'x');
     sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
     auto ref = sync_wait(w->finish());
     CHECK_EQ(ref.extents.size(), size_t(7));
-    CHECK_EQ(ref.extents[2].file_id, ref.extents[1].file_id + 1);  // contiguous within run(2)
-    for (size_t i = 4; i <= 6; ++i)                                // contiguous within run(4)
-        CHECK_EQ(ref.extents[i].file_id, ref.extents[3].file_id + (i - 3));
-    CHECK(ref.extents[1].file_id != ref.extents[0].file_id + 1);  // interleaving really happened
+    // contiguous within run(2)
+    CHECK_EQ(ref.extents[2].file_id, ref.extents[1].file_id + 1);
+    // contiguous within run(4)
+    for (size_t i = 4; i <= 6; ++i) CHECK_EQ(ref.extents[i].file_id, ref.extents[3].file_id + (i - 3));
+    // interleaving really happened
+    CHECK(ref.extents[1].file_id != ref.extents[0].file_id + 1);
     sync_wait(d.close());
 }
 
@@ -2705,7 +2847,8 @@ TEST(duostore_fs_data_store_uring_roundtrip) {
     try {
         eng = std::make_shared<UringEngine>(pool, UringOptions{});
     } catch (const std::exception&) {
-        return;  // io_uring unavailable here: the sync suites already cover the layout
+        // io_uring unavailable here: the sync suites already cover the layout
+        return;
     }
     uint64_t next_id = 1;
     FsDataOptions opt;
@@ -2776,20 +2919,25 @@ TEST(duostore_meta_cache_hits_and_invalidation) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     CHECK(b->meta_cache_enabled());
     sync_wait(b->create_bucket("bkt"));
-    auto p1 = put(*b, "bkt", "k", patterned(10000));  // 3 chunks
+    // 3 chunks
+    auto p1 = put(*b, "bkt", "k", patterned(10000));
     CHECK_EQ(b->meta_cache_stats().entries, size_t(0));
 
-    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p1.etag);  // miss: meta-only fill
+    // miss: meta-only fill
+    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p1.etag);
     CHECK_EQ(b->meta_cache_stats().misses, uint64_t(1));
-    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p1.etag);  // hit
+    // hit
+    CHECK_EQ(sync_wait(b->head_object("bkt", "k")).etag, p1.etag);
     CHECK_EQ(b->meta_cache_stats().hits, uint64_t(1));
     {
-        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));  // meta-only entry: upgrade
+        // meta-only entry: upgrade
+        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));
         CHECK_EQ(read_all(*g.body), patterned(10000));
     }
     CHECK_EQ(b->meta_cache_stats().entries, size_t(1));
     {
-        auto g = sync_wait(b->get_object("bkt", "k", ByteRange{100, 199}));  // full hit, ranged
+        // full hit, ranged
+        auto g = sync_wait(b->get_object("bkt", "k", ByteRange{100, 199}));
         CHECK_EQ(read_all(*g.body), patterned(10000).substr(100, 100));
     }
     CHECK_EQ(b->meta_cache_stats().hits, uint64_t(3));
@@ -2806,7 +2954,8 @@ TEST(duostore_meta_cache_hits_and_invalidation) {
     auto st = sync_wait(b->run_gc_once());
     CHECK_EQ(st.files_removed, uint64_t(3));
     {
-        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));  // cached manifest is the live one
+        // cached manifest is the live one
+        auto g = sync_wait(b->get_object("bkt", "k", std::nullopt));
         CHECK_EQ(read_all(*g.body), patterned(5000));
     }
 
@@ -2852,7 +3001,8 @@ TEST(duostore_meta_cache_shared_engine_needs_ttl) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
     auto cfg = gc_cfg(tmp, "shared");
-    cfg.meta_kind = DuoMetaKind::kRedis;  // engine kind only; the injected stores are local
+    // engine kind only; the injected stores are local
+    cfg.meta_kind = DuoMetaKind::kRedis;
     cfg.gc_grace_sec = 300;
     auto build = [&] {
         fs::create_directories(cfg.root);
@@ -2873,12 +3023,14 @@ TEST(duostore_meta_cache_shared_engine_needs_ttl) {
     };
     bool thrown = false;
     try {
-        build();  // entries > 0, ttl = 0
+        // entries > 0, ttl = 0
+        build();
     } catch (const std::runtime_error&) {
         thrown = true;
     }
     CHECK(thrown);
-    cfg.meta_cache_ttl_sec = 300;  // == gc_grace: refused too
+    // == gc_grace: refused too
+    cfg.meta_cache_ttl_sec = 300;
     thrown = false;
     try {
         build();
@@ -2921,7 +3073,8 @@ TEST(duostore_backup_manifest_plan) {
         for (auto& e : v) s += std::to_string(e.id);
         return s;
     };
-    CHECK_EQ(ids(l.plan(std::nullopt, std::nullopt)), std::string("45"));  // from the last full entry
+    // from the last full entry
+    CHECK_EQ(ids(l.plan(std::nullopt, std::nullopt)), std::string("45"));
     CHECK_EQ(ids(l.plan(uint64_t{3}, std::nullopt)), std::string("123"));
     CHECK_EQ(ids(l.plan(std::nullopt, int64_t{3500})), std::string("123"));
     CHECK_EQ(ids(l.plan(std::nullopt, int64_t{4000})), std::string("4"));
@@ -3019,7 +3172,8 @@ TEST(duostore_backend_backup_and_restore_pitr) {
     cfg.name = "pitr";
     cfg.root = tmp.path / "duo";
     cfg.meta_path = cfg.root / "meta";
-    cfg.pack_threshold = 0;  // chunks only
+    // chunks only
+    cfg.pack_threshold = 0;
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
     {
@@ -3067,7 +3221,8 @@ TEST(duostore_backend_backup_and_restore_pitr) {
         } catch (const s3::S3Error&) {
             present = false;
         }
-        CHECK(present);  // the record is back (its chunk was reclaimed above: a real PITR keeps the data copy)
+        // the record is back (its chunk was reclaimed above: a real PITR keeps the data copy)
+        CHECK(present);
         sync_wait(b.close());
     }
     pool->join();

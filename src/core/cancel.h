@@ -119,12 +119,15 @@ public:
 
 private:
     std::atomic<bool> cancelled_{false};
-    std::shared_ptr<void> data_;  // request-scoped payload (guarded by m_)
+    // request-scoped payload (guarded by m_)
+    std::shared_ptr<void> data_;
     mutable std::mutex m_;
     std::condition_variable fired_cv_;
     uint64_t next_id_ = 0;
-    bool firing_ = false;              // callback batch is executing outside the lock
-    std::thread::id firing_thread_{};  // thread executing that batch
+    // callback batch is executing outside the lock
+    bool firing_ = false;
+    // thread executing that batch
+    std::thread::id firing_thread_{};
     std::map<uint64_t, std::function<void()>> callbacks_;
 };
 

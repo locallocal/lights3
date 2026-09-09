@@ -65,12 +65,13 @@ bool fsync_enabled() {
 
 void fsync_file(int fd) {
     if (!fsync_enabled()) return;
-    if (int fe = fault::check("localfs.fsync")) {  // roadmap §6.1
+    if (int fe = fault::check("localfs.fsync")) {
+        // roadmap §6.1
         errno = fe;
         throw_errno("fdatasync");
     }
-    if (::fdatasync(fd) != 0 && errno != EINVAL)  // EINVAL: target fs unsupported, ignore
-        throw_errno("fdatasync");
+    // EINVAL: target fs unsupported, ignore
+    if (::fdatasync(fd) != 0 && errno != EINVAL) throw_errno("fdatasync");
 }
 
 void fsync_dir(const fs::path& dir) {
@@ -78,7 +79,8 @@ void fsync_dir(const fs::path& dir) {
     // Persist the directory entry: rename itself only guarantees atomicity, not that the
     // parent directory has been persisted
     int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return;  // an unreadable directory should not take down the write path
+    // an unreadable directory should not take down the write path
+    if (fd < 0) return;
     ::fsync(fd);
     ::close(fd);
 }
@@ -109,7 +111,8 @@ void write_tsv(const fs::path& dest, const fs::path& tmp_dir,
         for (auto& [k, v] : kv) f << k << "\t" << v << "\n";
         if (!f.flush()) throw_errno("write meta");
     }
-    fsync_path(tmp);  // persist the content first, then let rename splice it into the tree
+    // persist the content first, then let rename splice it into the tree
+    fsync_path(tmp);
     std::error_code ec;
     fs::rename(tmp, dest, ec);
     if (ec) {
@@ -314,7 +317,8 @@ bool commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
     // fallback on filesystems without xattr support)
     if (!opt.prepared) {
         xattr_ok = set_meta_xattr(tmp.path, meta, TierInfo{}, opt.xattr);
-        fsync_path(tmp.path);  // persist the data content first, then splice it into the tree
+        // persist the data content first, then splice it into the tree
+        fsync_path(tmp.path);
     }
     if (int fe = fault::check("localfs.rename"))
         ec = std::error_code(fe, std::generic_category());
@@ -332,7 +336,8 @@ void rewrite_object_meta(const fs::path& data_path, const ObjectMeta& meta, cons
     fs::path sidecar(data_path.string() + kSidecarSuffix);
     if (mode == SidecarMode::kLazy && xattr_ok) {
         std::error_code ec;
-        if (!fs::exists(sidecar, ec)) return;  // lazy: nothing to keep consistent
+        // lazy: nothing to keep consistent
+        if (!fs::exists(sidecar, ec)) return;
     }
     write_sidecar(sidecar, meta, staging_put, tier);
 }
@@ -476,7 +481,8 @@ Task<size_t> FdStreamReader::read(std::span<std::byte> buf) {
     size_t want = std::min<uint64_t>(buf.size(), remaining_);
     ssize_t n = ::pread(fd_, buf.data(), want, static_cast<off_t>(offset_));
     if (n < 0) throw_errno("pread");
-    if (n == 0) remaining_ = 0;  // file truncated externally, early EOF
+    // file truncated externally, early EOF
+    if (n == 0) remaining_ = 0;
     offset_ += static_cast<uint64_t>(n);
     remaining_ -= static_cast<uint64_t>(n);
     co_return static_cast<size_t>(n);

@@ -23,7 +23,8 @@ std::optional<BucketQuota> QuotaTraits::deserialize(const std::string&, const st
         BucketQuota q;
         q.max_bytes = j.value("max_bytes", uint64_t{0});
         q.max_objects = j.value("max_objects", uint64_t{0});
-        if (!q.max_bytes && !q.max_objects) return std::nullopt;  // never a valid live entry
+        // never a valid live entry
+        if (!q.max_bytes && !q.max_objects) return std::nullopt;
         return q;
     } catch (const json::exception&) {
         return std::nullopt;

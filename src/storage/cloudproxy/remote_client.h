@@ -33,12 +33,16 @@ inline constexpr const char* kUnsignedPayload = "UNSIGNED-PAYLOAD";
 struct Endpoint {
     bool https = false;
     std::string host;
-    int port = 0;             // explicit, or defaulted per scheme
-    std::string signed_host;  // byte-identical to the Host header httplib actually sends
-                              // (docs/storage/cloudproxy-design.md §2.2)
-    std::string base_url;     // scheme://host:port, input to httplib's universal Client
+    // explicit, or defaulted per scheme
+    int port = 0;
+    // byte-identical to the Host header httplib actually sends
+    // (docs/storage/cloudproxy-design.md §2.2)
+    std::string signed_host;
+    // scheme://host:port, input to httplib's universal Client
+    std::string base_url;
 
-    static Endpoint parse(const std::string& url);  // throws std::runtime_error on invalid input
+    // throws std::runtime_error on invalid input
+    static Endpoint parse(const std::string& url);
 };
 
 // Addressing target (docs/storage/cloudproxy-design.md §7): path-style = "/bucket/..." + endpoint
@@ -46,8 +50,10 @@ struct Endpoint {
 // connection and SNI always point at the endpoint (ClientPool does not specialize); only
 // Host/signature and path vary
 struct Target {
-    std::string prefix;  // "/<rb>" (already encoded) for path-style; empty for vhost
-    std::string host;    // value that goes into the Host header and SigV4
+    // "/<rb>" (already encoded) for path-style; empty for vhost
+    std::string prefix;
+    // value that goes into the Host header and SigV4
+    std::string host;
     std::string bucket_path() const { return prefix.empty() ? "/" : prefix; }
     std::string object_path(std::string_view encoded_key_path) const { return prefix + std::string(encoded_key_path); }
 };
@@ -58,7 +64,8 @@ struct Target {
 // "http_<status>" + "transport"
 struct RemoteMetrics {
     explicit RemoteMetrics(const MetricsScope& scope);
-    std::shared_ptr<MetricHistogram> op_seconds(const char* op) const;  // cached registration per op
+    // cached registration per op
+    std::shared_ptr<MetricHistogram> op_seconds(const char* op) const;
     void count_retry(const char* op) const;
     void count_error(const std::string& code) const;
     std::shared_ptr<MetricCounter> etag_mismatch;
@@ -66,7 +73,8 @@ struct RemoteMetrics {
 
 private:
     MetricsScope scope_;
-    mutable std::mutex m_;  // op/code -> instance cache (avoids the registry's global lock on every call)
+    // op/code -> instance cache (avoids the registry's global lock on every call)
+    mutable std::mutex m_;
     mutable std::map<std::string, std::shared_ptr<MetricHistogram>> ops_;
     mutable std::map<std::string, std::shared_ptr<MetricCounter>> retries_, errors_;
 };
@@ -80,7 +88,8 @@ private:
 class ClientPool {
 public:
     ClientPool(const CloudProxyConfig& cfg, const Endpoint& ep, std::shared_ptr<MetricHistogram> wait_hist = nullptr);
-    ~ClientPool();  // stops the reaper (blocks on an in-flight tick)
+    // stops the reaper (blocks on an in-flight tick)
+    ~ClientPool();
 
     // Creation time travels with the client so max-lifetime survives lease cycles
     struct PooledClient {
@@ -118,7 +127,8 @@ public:
         int total = 0;
         size_t idle = 0;
     };
-    Stats stats();  // tests/observability
+    // tests/observability
+    Stats stats();
 
 private:
     friend class Lease;
@@ -131,7 +141,8 @@ private:
         IExecutor* ex = nullptr;
         bool done = false;
         bool timed_out = false;
-        bool create_new = false;  // granted a capacity slot: make the client after resume
+        // granted a capacity slot: make the client after resume
+        bool create_new = false;
         PooledClient granted;
     };
 
@@ -142,7 +153,8 @@ private:
 
     std::unique_ptr<httplib::Client> make_client() const;
     void release(PooledClient pc);
-    void reap_stale_locked();  // drop idles beyond pool_idle_timeout (requires m_)
+    // drop idles beyond pool_idle_timeout (requires m_)
+    void reap_stale_locked();
     // Capacity slot freed (lifetime retirement / creation rollback): --total_, then hand
     // the slot to an async waiter or wake a cv waiter; resumes outside the pool lock
     void retire_slot();
@@ -150,11 +162,13 @@ private:
 
     const CloudProxyConfig cfg_;
     const Endpoint ep_;
-    std::shared_ptr<MetricHistogram> wait_hist_;  // acquire wait duration (§8.2; may be null)
+    // acquire wait duration (§8.2; may be null)
+    std::shared_ptr<MetricHistogram> wait_hist_;
     IExecutor* resume_ex_ = nullptr;
     std::mutex m_;
     std::condition_variable cv_;
-    std::deque<IdleEntry> idle_;  // back = most recently used; stale ones age out at the front
+    // back = most recently used; stale ones age out at the front
+    std::deque<IdleEntry> idle_;
     std::deque<std::shared_ptr<Waiter>> waiters_;
     int total_ = 0;
     bool stopping_ = false;
@@ -261,8 +275,10 @@ struct RemoteContext {
     RemoteMetrics metrics;
     ClientPool pool;
     s3::SigV4Authenticator auth;
-    Credential cred;                                 // static keys (may be empty)
-    std::unique_ptr<CredentialProvider> cred_chain;  // set when static keys are absent
+    // static keys (may be empty)
+    Credential cred;
+    // set when static keys are absent
+    std::unique_ptr<CredentialProvider> cred_chain;
 
 private:
     // Breaker state: consecutive definitive failures; >= threshold = open until the

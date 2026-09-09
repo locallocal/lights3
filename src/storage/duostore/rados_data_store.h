@@ -22,15 +22,24 @@
 namespace lights3::storage::duostore {
 
 struct RadosDataOptions {
-    std::string conf_path = "/etc/ceph/ceph.conf";  // mon addresses and keyring reference
-    std::string client_name = "client.admin";       // cephx identity
-    std::string pool;                               // required; replication/EC policy is pool-level (§3.2)
-    std::string ns;                                 // rados namespace (empty = default)
-    uint64_t chunk_size = 8ull << 20;               // slice granularity = per-object cap (§3.4)
-    uint64_t buffer_total = 256ull << 20;           // total writer buffer budget (§4.2)
-    int connect_timeout_sec = 5;                    // client_mount_timeout
-    int op_timeout_sec = 0;                         // 0 = unset (§6.4)
-    bool verify_chunk_crc = false;                  // same semantics as the fs version (§5)
+    // mon addresses and keyring reference
+    std::string conf_path = "/etc/ceph/ceph.conf";
+    // cephx identity
+    std::string client_name = "client.admin";
+    // required; replication/EC policy is pool-level (§3.2)
+    std::string pool;
+    // rados namespace (empty = default)
+    std::string ns;
+    // slice granularity = per-object cap (§3.4)
+    uint64_t chunk_size = 8ull << 20;
+    // total writer buffer budget (§4.2)
+    uint64_t buffer_total = 256ull << 20;
+    // client_mount_timeout
+    int connect_timeout_sec = 5;
+    // 0 = unset (§6.4)
+    int op_timeout_sec = 0;
+    // same semantics as the fs version (§5)
+    bool verify_chunk_crc = false;
     // Reporting of crc mismatches on the read path (P5 corruption metric; empty =
     // no reporting); same lifetime constraints as the fs version
     std::function<void()> on_corruption;
@@ -65,8 +74,10 @@ public:
     Task<std::unique_ptr<DataWriter>> open_writer(WriteHint hint) override;
     Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first, uint64_t last) override;
     Task<void> remove(std::span<const Extent> extents) override;
-    Task<void> remove_pack(uint64_t pack_id) override;        // no-op (no packs, §3.3)
-    Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;  // always {} (no packs, §3.3)
+    // no-op (no packs, §3.3)
+    Task<void> remove_pack(uint64_t pack_id) override;
+    // always {} (no packs, §3.3)
+    Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
     // Orphan-scan enumeration (C4, §8.2): rados_nobjects_list_* (ioctx already
     // limited to the namespace) + rados_stat; foreign objects not matching our
     // naming (not c.<016x>) are ignored
@@ -83,10 +94,13 @@ public:
     // the last holder; after close() sets closed, new ops throw a clean 500
     // (§6.5 guard)
     struct Conn {
-        void* cluster = nullptr;  // rados_t
-        void* ioctx = nullptr;    // rados_ioctx_t
+        // rados_t
+        void* cluster = nullptr;
+        // rados_ioctx_t
+        void* ioctx = nullptr;
         std::atomic<bool> closed{false};
-        void shutdown();  // idempotent: ioctx_destroy + rados_shutdown
+        // idempotent: ioctx_destroy + rados_shutdown
+        void shutdown();
         ~Conn() { shutdown(); }
     };
 
@@ -97,8 +111,10 @@ private:
     RadosDataOptions opt_;
     std::shared_ptr<ThreadPool> pool_;
     FileIdAlloc alloc_;
-    ThreadPoolExecutor exec_;    // semaphore wakeups and aio completion continuations all post via the pool (§6.2)
-    AsyncSemaphore buffer_sem_;  // permits = buffer_total / chunk_size (§4.2)
+    // semaphore wakeups and aio completion continuations all post via the pool (§6.2)
+    ThreadPoolExecutor exec_;
+    // permits = buffer_total / chunk_size (§4.2)
+    AsyncSemaphore buffer_sem_;
 
     // op latency histograms (submit → completion callback, including the cluster
     // round trip) and error counters (C4, §10); registered at construction so

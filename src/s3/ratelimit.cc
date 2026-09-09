@@ -21,7 +21,8 @@ std::optional<RateLimiter::Token> RateLimiter::admit(std::string_view key, Clock
         if (table_.size() >= max_tracked_) evict_locked();
         lru_.push_front(k);
         Entry e;
-        e.tokens = limits_.burst;  // a new key starts with a full bucket
+        // a new key starts with a full bucket
+        e.tokens = limits_.burst;
         e.last = now;
         e.lru = lru_.begin();
         it = table_.emplace(k, e).first;
@@ -71,7 +72,8 @@ void RateLimiter::evict_locked() {
             }
             if (it == lru_.begin()) break;
         }
-        if (!removed) break;  // everything tracked is in flight: nothing to evict
+        // everything tracked is in flight: nothing to evict
+        if (!removed) break;
     }
 }
 

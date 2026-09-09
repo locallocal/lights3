@@ -54,8 +54,8 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
         return n;
     };
     if (cfg.params.count("list_meta_concurrency")) o.list_meta_concurrency = small_int("list_meta_concurrency", 1, 256);
-    if (cfg.params.count("list_cache_entries"))
-        o.list_cache_entries = parse_size(cfg.params.at("list_cache_entries"));  // plain count; K/M suffixes allowed
+    // plain count; K/M suffixes allowed
+    if (cfg.params.count("list_cache_entries")) o.list_cache_entries = parse_size(cfg.params.at("list_cache_entries"));
     if (cfg.params.count("list_cache_min_dir_entries"))
         o.list_cache_min_dir_entries = size_t(small_int("list_cache_min_dir_entries", 1, 1 << 30));
     if (cfg.params.count("sidecar_scan_interval"))
@@ -121,7 +121,8 @@ void ensure_registered() {
                 if (cfg.params.count("sqpoll_idle"))
                     uo.sqpoll_idle_ms = parse_duration_sec(cfg.params.at("sqpoll_idle")) * 1000;
                 // roadmap §3.4: ring sharding, registered buffers/files, stream depths
-                if (cfg.params.count("rings")) uo.rings = unsigned(std::stoul(cfg.params.at("rings")));  // 0 = auto
+                // 0 = auto
+                if (cfg.params.count("rings")) uo.rings = unsigned(std::stoul(cfg.params.at("rings")));
                 if (cfg.params.count("fixed_buffers"))
                     uo.fixed_buffers = unsigned(std::stoul(cfg.params.at("fixed_buffers")));
                 if (cfg.params.count("fixed_files"))
@@ -198,7 +199,8 @@ std::vector<std::string> StorageRegistry::registered_types() {
     ensure_registered();
     std::vector<std::string> out;
     for (auto& [type, _] : registry()) out.push_back(type);
-    out.push_back("tiered");  // composite, assembled by build() itself rather than a factory
+    // composite, assembled by build() itself rather than a factory
+    out.push_back("tiered");
     std::sort(out.begin(), out.end());
     return out;
 }
@@ -237,7 +239,8 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
         bool done = false;
         ~BuildRollback() {
             if (done) return;
-            if (metrics)  // test harnesses may run without a registry
+            // test harnesses may run without a registry
+            if (metrics)
                 for (auto& name : scopes) metrics->remove_labeled("backend", name);
             out->clear();
         }
@@ -294,7 +297,8 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     if (!deferred.empty())
         throw std::runtime_error("tiered backend '" + deferred.front()->name +
                                  "' has unknown or circular local/cloud reference");
-    rollback.done = true;  // everything ready: disarm the guard, hand over the backend table
+    // everything ready: disarm the guard, hand over the backend table
+    rollback.done = true;
     return out;
 }
 

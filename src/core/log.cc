@@ -24,7 +24,8 @@ constexpr const char* kMainLoggerName = "lights3";
 constexpr const char* kTextPattern = "%Y-%m-%dT%H:%M:%S.%eZ %-5!l %v";
 
 std::mutex g_mu;
-std::shared_ptr<spdlog::logger> g_access;  // the registered access logger (null before init)
+// the registered access logger (null before init)
+std::shared_ptr<spdlog::logger> g_access;
 std::atomic<bool> g_json{false};
 bool g_async = false;
 
@@ -112,7 +113,8 @@ public:
             append(dest, ",\"msg\":\"access\"");
             if (payload.size() > 2) {
                 dest.push_back(',');
-                append(dest, payload.substr(1));  // members + closing brace
+                // members + closing brace
+                append(dest, payload.substr(1));
             } else {
                 dest.push_back('}');
             }
@@ -156,7 +158,8 @@ void install_sync(std::vector<spdlog::sink_ptr> sinks, bool json, spdlog::level:
     spdlog::set_default_logger(main);
     spdlog::register_logger(access);
     g_access = access;
-    spdlog::details::registry::instance().set_tp(nullptr);  // joins the old writer (if any)
+    // joins the old writer (if any)
+    spdlog::details::registry::instance().set_tp(nullptr);
     g_async = false;
     for (auto& l : {main, access}) {
         apply_format(*l, json);

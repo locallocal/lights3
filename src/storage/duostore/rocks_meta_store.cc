@@ -85,7 +85,8 @@ std::string_view strip_prefix(const rocksdb::Slice& k, size_t prefix_len) {
     return {k.data() + prefix_len, k.size() - prefix_len};
 }
 
-using codec::bump_last_byte;  // successor for delimiter group skipping (codec.h, shared by meta store impls)
+// successor for delimiter group skipping (codec.h, shared by meta store impls)
+using codec::bump_last_byte;
 
 }  // namespace
 
@@ -101,7 +102,8 @@ RocksMetaStore::RocksMetaStore(RocksMetaOptions opt) : opt_(std::move(opt)) {
 
     rocksdb::ColumnFamilyOptions cf_opt;
     cf_opt.table_factory = table_factory;
-    cf_opt.compression = rocksdb::kNoCompression;  // compression fully disabled (§13.3)
+    // compression fully disabled (§13.3)
+    cf_opt.compression = rocksdb::kNoCompression;
     cf_opt.write_buffer_size = opt_.write_buffer_bytes;
     cf_opt.max_write_buffer_number = opt_.max_write_buffers;
     rocksdb::ColumnFamilyOptions stats_opt = cf_opt;
@@ -233,7 +235,8 @@ rocksdb::DB* RocksMetaStore::db() const {
 }
 
 std::optional<std::string> RocksMetaStore::get_raw(int cf, std::string_view key, const rocksdb::Snapshot* snap) {
-    auto* d = db();  // fetch the handle before touching cfs_ (close nulls db_ before clearing cfs_)
+    // fetch the handle before touching cfs_ (close nulls db_ before clearing cfs_)
+    auto* d = db();
     std::string v;
     rocksdb::ReadOptions ro;
     ro.snapshot = snap;
@@ -257,9 +260,9 @@ void RocksMetaStore::require_bucket_locked(std::string_view b) {
 
 void RocksMetaStore::batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add, std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack)
-            continue;  // pack liveness goes through the stats accounting (P2);
-                       // chunk/rados both enter refs by file_id
+        // pack liveness goes through the stats accounting (P2);
+        // chunk/rados both enter refs by file_id
+        if (e.kind == Extent::Kind::kPack) continue;
         if (add)
             batch.Put(cfs_[kRefs], codec::be64_key(e.file_id), slice(owner));
         else
@@ -272,7 +275,8 @@ void RocksMetaStore::batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef&
     // (§9.1: incremented/decremented in the same batch as the business transaction);
     // each record counts payload + header overhead, matching the file_size accounting
     // basis (docs/archive/gaps.md §2.3a)
-    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;  // pack_id -> (bytes, recs)
+    // pack_id -> (bytes, recs)
+    std::map<uint64_t, std::pair<int64_t, int64_t>> agg;
     for (const auto& e : ref.extents) {
         if (e.kind != Extent::Kind::kPack) continue;
         auto& [bytes, recs] = agg[e.file_id];
@@ -303,8 +307,10 @@ void RocksMetaStore::enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const Da
 }
 
 uint64_t RocksMetaStore::alloc_id(std::string_view counter_key, IdRange& r, uint32_t n) {
-    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
-    std::lock_guard lk(alloc_mu_);              // independent of mu_: the common path is a pure in-memory next += n
+    // run ≤ kMaxIdRun << kIdSegment
+    n = std::clamp<uint32_t>(n, 1, kMaxIdRun);
+    // independent of mu_: the common path is a pure in-memory next += n
+    std::lock_guard lk(alloc_mu_);
     if (r.limit - r.next < n) {
         // The segment reservation must be persisted before ids are handed out, and
         // always with WAL fsync (independent of meta_sync) — otherwise a crash that
@@ -388,7 +394,8 @@ std::vector<BucketInfo> RocksMetaStore::list_buckets_snap(const rocksdb::Snapsho
         out.push_back({it->key().ToString(), codec::from_unix_ms(created)});
     }
     if (!it->status().ok()) throw_status("list_buckets", it->status());
-    return out;  // key byte order is lexicographic order
+    // key byte order is lexicographic order
+    return out;
 }
 
 // ---------- object ----------
@@ -411,7 +418,8 @@ void RocksMetaStore::put_object(std::string_view b, std::string_view k, ObjectRe
     std::string okey = codec::object_key(b, k);
     std::optional<ObjectRec> old;
     if (auto oldv = get_raw(kObjects, okey)) old = codec::decode_object(std::string(k), *oldv);
-    check_put_condition(cond, old, k);  // same lock as the commit (PutCondition contract)
+    // same lock as the commit (PutCondition contract)
+    check_put_condition(cond, old, k);
     rec.version = old ? old->version + 1 : 1;
 
     rocksdb::WriteBatch batch;
@@ -460,8 +468,8 @@ ListResult RocksMetaStore::list_objects_snap(std::string_view b, const ListOptio
     // S3: max-keys=0 returns empty with IsTruncated=false (consistent with apply_listing)
     if (opt.max_keys <= 0) return out;
     std::string base = std::string(b) + '\0';
-    std::string upper = std::string(b) +
-                        '\x01';  // bucket names contain no NUL, so '\0'+1 is the bucket range upper bound
+    // bucket names contain no NUL, so '\0'+1 is the bucket range upper bound
+    std::string upper = std::string(b) + '\x01';
 
     rocksdb::ReadOptions ro;
     auto* d = db();
@@ -477,14 +485,15 @@ ListResult RocksMetaStore::list_objects_snap(std::string_view b, const ListOptio
     const std::string& delim = opt.delimiter;
     std::string seek = base + std::max(prefix, opt.start_after);
     it->Seek(seek);
-    if (!opt.start_after.empty() && it->Valid() && it->key() == slice(base + opt.start_after))
-        it->Next();  // step past start_after when it matches itself
+    // step past start_after when it matches itself
+    if (!opt.start_after.empty() && it->Valid() && it->key() == slice(base + opt.start_after)) it->Next();
 
     std::string last_emitted;
     int count = 0;
     while (it->Valid()) {
         std::string_view uk = strip_prefix(it->key(), base.size());
-        if (uk.compare(0, prefix.size(), prefix) != 0) break;  // stop once past the prefix range
+        // stop once past the prefix range
+        if (uk.compare(0, prefix.size(), prefix) != 0) break;
         if (count >= opt.max_keys) {
             out.is_truncated = true;
             out.next_token = last_emitted;
@@ -561,7 +570,8 @@ void RocksMetaStore::put_part(std::string_view b, std::string_view k, std::strin
     batch_refs(batch, p.data, /*add=*/true, pkey);
     const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
     batch_pack_delta(batch, p.data, +1, ov);
-    if (old) {  // same-number re-upload is last-write-wins: the old part enters the GC ledger in the same batch
+    if (old) {
+        // same-number re-upload is last-write-wins: the old part enters the GC ledger in the same batch
         enqueue_reclaim_locked(batch, old->data, ReclaimReason::kPartOverwrite);
         batch_refs(batch, old->data, /*add=*/false, {});
         batch_pack_delta(batch, old->data, -1, ov);
@@ -578,7 +588,8 @@ std::vector<PartRec> RocksMetaStore::scan_parts(std::string_view b, std::string_
         out.push_back(codec::decode_part(no, {it->value().data(), it->value().size()}));
     }
     if (!it->status().ok()) throw_status("scan parts", it->status());
-    return out;  // be16 part_no guarantees ascending order (§4.1)
+    // be16 part_no guarantees ascending order (§4.1)
+    return out;
 }
 
 std::vector<PartRec> RocksMetaStore::list_parts(std::string_view b, std::string_view k, std::string_view id) {
@@ -589,7 +600,8 @@ std::vector<PartRec> RocksMetaStore::list_parts(std::string_view b, std::string_
 std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b, std::string_view key_marker,
                                                      std::string_view id_marker, int limit,
                                                      std::string_view key_prefix) {
-    require_bucket_locked(b);  // pure read; the lock-free get is idempotent and safe
+    // pure read; the lock-free get is idempotent and safe
+    require_bucket_locked(b);
     std::string prefix = std::string(b) + '\0';
     // Cursor pushdown (docs/archive/gaps.md §5.1): the key encoding is already in
     // (key, upload_id) order, so seeking past the marker suffices — not a single
@@ -601,7 +613,8 @@ std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b, std::st
         seek += std::string(key_marker);
         seek += '\0';
         seek += std::string(id_marker);
-        seek += '\0';  // trailing '\0' makes the seek land just after that (key,id)
+        // trailing '\0' makes the seek land just after that (key,id)
+        seek += '\0';
     } else if (!key_marker.empty()) {
         seek += std::string(key_marker);
         seek += '\x01';
@@ -613,7 +626,8 @@ std::vector<UploadInfo> RocksMetaStore::list_uploads(std::string_view b, std::st
         if (limit > 0 && out.size() >= size_t(limit)) break;
         // key = <bucket>\0<key>\0<upload_id>; the prefix scan is naturally sorted by (key, upload_id)
         std::string_view rest = strip_prefix(it->key(), prefix.size());
-        if (rest.substr(0, key_prefix.size()) != key_prefix) break;  // sorted: past the prefix range
+        // sorted: past the prefix range
+        if (rest.substr(0, key_prefix.size()) != key_prefix) break;
         auto sep = rest.rfind('\0');
         if (sep == std::string_view::npos) continue;
         auto rec = codec::decode_upload(std::string(rest.substr(0, sep)), std::string(rest.substr(sep + 1)),
@@ -663,13 +677,15 @@ std::string RocksMetaStore::complete_upload(std::string_view b, std::string_view
             batch_refs(batch, p.data, /*add=*/true, okey);
             batch_pack_delta(batch, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
             batch_pack_delta(batch, p.data, +1, codec::pack_rec_overhead(b, k));
-        } else {  // unselected parts enter the GC ledger
+        } else {
+            // unselected parts enter the GC ledger
             enqueue_reclaim_locked(batch, p.data, ReclaimReason::kComplete);
             batch_refs(batch, p.data, /*add=*/false, {});
             batch_pack_delta(batch, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
         }
     }
-    if (old) {  // the old same-name object enters the GC ledger
+    if (old) {
+        // the old same-name object enters the GC ledger
         enqueue_reclaim_locked(batch, old->data, ReclaimReason::kOverwrite);
         batch_refs(batch, old->data, /*add=*/false, {});
         batch_pack_delta(batch, old->data, -1, codec::pack_rec_overhead(b, k));
@@ -725,7 +741,8 @@ void RocksMetaStore::ack_reclaim(uint64_t seq) {
 
 void RocksMetaStore::ack_reclaims(std::span<const uint64_t> seqs) {
     if (seqs.empty()) return;
-    rocksdb::WriteBatch batch;  // one batch, one commit (overrides the interface's default per-entry forwarding)
+    // one batch, one commit (overrides the interface's default per-entry forwarding)
+    rocksdb::WriteBatch batch;
     for (uint64_t s : seqs) batch.Delete(cfs_[kGcq], codec::be64_key(s));
     commit(batch);
 }
@@ -743,7 +760,8 @@ std::vector<PackStat> RocksMetaStore::pack_stats_snap(const rocksdb::Snapshot* s
     auto it = std::unique_ptr<rocksdb::Iterator>(db()->NewIterator(ro, cfs_[kStats]));
     for (it->Seek("p"); it->Valid() && it->key().starts_with("p"); it->Next()) {
         std::string_view k(it->key().data(), it->key().size());
-        if (k.size() != 10) continue;  // 'p' + be64 + field
+        // 'p' + be64 + field
+        if (k.size() != 10) continue;
         uint64_t id = codec::parse_be64(k.substr(1, 8));
         std::string_view v(it->value().data(), it->value().size());
         if (out.empty() || out.back().pack_id != id) out.push_back({.pack_id = id});
@@ -767,9 +785,11 @@ std::vector<PackStat> RocksMetaStore::pack_stats_snap(const rocksdb::Snapshot* s
 }
 
 void RocksMetaStore::seal_pack(uint64_t pack_id, uint64_t file_size) {
-    std::lock_guard lk(mu_);  // read-modify-write (keeps an already-recorded size), serialized against concurrent seals
+    // read-modify-write (keeps an already-recorded size), serialized against concurrent seals
+    std::lock_guard lk(mu_);
     std::string skey = pack_stat_key(pack_id, 's');
-    if (file_size == 0 && get_raw(kStats, skey)) return;  // idempotent: 0 does not overwrite a known size
+    // idempotent: 0 does not overwrite a known size
+    if (file_size == 0 && get_raw(kStats, skey)) return;
     rocksdb::WriteBatch batch;
     batch.Put(cfs_[kStats], skey, codec::encode_counter_delta(int64_t(file_size)));
     commit(batch);
@@ -877,7 +897,8 @@ std::unique_ptr<IMetaReadView> RocksMetaStore::snapshot() { return std::make_uni
 namespace {
 rocksdb::BackupEngineOptions backup_options(const std::filesystem::path& dir) {
     rocksdb::BackupEngineOptions bo((dir / "rocksdb").string());
-    bo.share_table_files = true;  // incremental by construction: unchanged SSTs are linked, not copied
+    // incremental by construction: unchanged SSTs are linked, not copied
+    bo.share_table_files = true;
     bo.sync = true;
     return bo;
 }
@@ -890,7 +911,8 @@ MetaBackupEntry RocksMetaStore::backup_physical(const std::filesystem::path& dir
     if (!s.ok()) throw_status("backup engine open", s);
     std::unique_ptr<rocksdb::BackupEngine> be(raw);
     rocksdb::CreateBackupOptions co;
-    co.flush_before_backup = true;  // the memtable goes into the backup, not just the WAL
+    // the memtable goes into the backup, not just the WAL
+    co.flush_before_backup = true;
     s = be->CreateNewBackupWithMetadata(co, db(), "lights3 entry " + std::to_string(id));
     if (!s.ok()) throw_status("backup", s);
     std::vector<rocksdb::BackupInfo> infos;

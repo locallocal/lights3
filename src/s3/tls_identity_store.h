@@ -19,10 +19,12 @@
 namespace lights3::s3 {
 
 struct TlsBinding {
-    std::string access_key;  // the credential the certificate acts as
+    // the credential the certificate acts as
+    std::string access_key;
     std::string comment;
     std::chrono::system_clock::time_point created;
-    std::string created_by;  // root AK that bound it (audit trail)
+    // root AK that bound it (audit trail)
+    std::string created_by;
 
     bool operator==(const TlsBinding&) const = default;
 };

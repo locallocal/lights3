@@ -28,7 +28,8 @@
 namespace lights3::storage {
 
 struct UringOptions {
-    unsigned entries = 256;  // SQ depth per ring
+    // SQ depth per ring
+    unsigned entries = 256;
     // SQPOLL (docs/archive/gaps.md §6.3): the kernel polls the SQ, so in the common case submission
     // never enters the kernel (only a wakeup enter after the poll thread has gone to sleep).
     // The cost is a resident kernel thread, and before 5.11 it needs CAP_SYS_ADMIN -- on
@@ -65,19 +66,32 @@ struct UringOptions {
 // 5.1-5.5 kernels every IO would get -EINVAL, presenting as "io_uring sets up fine but all
 // reads/writes fail". After probing, old kernels fall back to READV/WRITEV (single iovec)
 struct UringFeatures {
-    uint32_t setup_features = 0;  // io_uring_params.features bitmap
-    bool op_read_write = false;   // IORING_OP_READ / IORING_OP_WRITE (5.6+)
-    bool op_fsync = false;        // IORING_OP_FSYNC (5.1+, still probed explicitly)
-    bool op_fixed_rw = false;     // IORING_OP_READ_FIXED / WRITE_FIXED (5.1+, probed)
-    bool op_openat = false;       // IORING_OP_OPENAT (5.6+)
-    bool op_statx = false;        // IORING_OP_STATX (5.6+)
-    bool op_renameat = false;     // IORING_OP_RENAMEAT (5.11+)
-    bool op_unlinkat = false;     // IORING_OP_UNLINKAT (5.11+)
-    bool links = false;           // IOSQE_IO_LINK usable (5.3+; tied to the probe = 5.6+)
-    bool sqpoll = false;          // actually enabled (false if requested but setup failed)
-    bool probed = false;          // IORING_REGISTER_PROBE available; else assume conservative 5.1 baseline
-    bool fixed_buffers = false;   // IORING_REGISTER_BUFFERS succeeded on every ring
-    bool fixed_files = false;     // sparse IORING_REGISTER_FILES succeeded on every ring
+    // io_uring_params.features bitmap
+    uint32_t setup_features = 0;
+    // IORING_OP_READ / IORING_OP_WRITE (5.6+)
+    bool op_read_write = false;
+    // IORING_OP_FSYNC (5.1+, still probed explicitly)
+    bool op_fsync = false;
+    // IORING_OP_READ_FIXED / WRITE_FIXED (5.1+, probed)
+    bool op_fixed_rw = false;
+    // IORING_OP_OPENAT (5.6+)
+    bool op_openat = false;
+    // IORING_OP_STATX (5.6+)
+    bool op_statx = false;
+    // IORING_OP_RENAMEAT (5.11+)
+    bool op_renameat = false;
+    // IORING_OP_UNLINKAT (5.11+)
+    bool op_unlinkat = false;
+    // IOSQE_IO_LINK usable (5.3+; tied to the probe = 5.6+)
+    bool links = false;
+    // actually enabled (false if requested but setup failed)
+    bool sqpoll = false;
+    // IORING_REGISTER_PROBE available; else assume conservative 5.1 baseline
+    bool probed = false;
+    // IORING_REGISTER_BUFFERS succeeded on every ring
+    bool fixed_buffers = false;
+    // sparse IORING_REGISTER_FILES succeeded on every ring
+    bool fixed_files = false;
     unsigned rings = 1;
 
     std::string describe() const;
@@ -118,7 +132,8 @@ public:
     // union (fsync_flags / open_flags / statx_flags / rename_flags / unlink_flags)
     struct Sqe {
         uint8_t opcode = IORING_OP_NOP;
-        uint8_t flags = 0;  // IOSQE_IO_LINK / IOSQE_FIXED_FILE
+        // IOSQE_IO_LINK / IOSQE_FIXED_FILE
+        uint8_t flags = 0;
         int fd = -1;
         uint64_t addr = 0;
         uint32_t len = 0;
@@ -150,7 +165,8 @@ public:
     struct Awaitable {
         UringEngine& eng;
         Sqe sqe;
-        int ring = -1;  // <0 = pick round-robin at suspension
+        // <0 = pick round-robin at suspension
+        int ring = -1;
         // iovec for the READV/WRITEV fallback path: lives in the coroutine frame with the
         // Awaitable, so it stays valid across suspension
         struct iovec iov{};
@@ -182,7 +198,8 @@ public:
     // ---- Fixed buffers (ring-scoped) ----
     struct FixedBuf {
         unsigned ring = 0;
-        int index = -1;  // <0 = none
+        // <0 = none
+        int index = -1;
         std::span<std::byte> mem;
     };
     // Non-blocking; false when the ring has no registered buffers or the pool is exhausted

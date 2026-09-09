@@ -43,7 +43,8 @@ public:
             auto delay = next_ - Clock::now();
             if (delay <= Clock::duration::zero()) break;
             co_await async_sleep(std::min<Clock::duration>(delay, kSlice));
-            co_await pool_->schedule();  // off the timer callback thread
+            // off the timer callback thread
+            co_await pool_->schedule();
         }
     }
 

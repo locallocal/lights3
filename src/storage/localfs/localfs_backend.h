@@ -54,8 +54,10 @@ struct LocalFsOptions {
     // Orphaned multipart cleanup (docs/archive/gaps.md §6.3): previously kMpuTtl was hardcoded to
     // 7 days and only scanned once at startup -- a gateway running for months without a
     // restart would accumulate never-completed/aborted upload directories without bound
-    int mpu_ttl_sec = 7 * 86400;           // 0 = no cleanup
-    int mpu_scan_interval_sec = 6 * 3600;  // 0 = scan only at startup
+    // 0 = no cleanup
+    int mpu_ttl_sec = 7 * 86400;
+    // 0 = scan only at startup
+    int mpu_scan_interval_sec = 6 * 3600;
 
     // ---- roadmap §3.5 (docs/storage/localfs.md §2/§3/§6/§12) ----
     // Fail at construction (and on every write) when the root filesystem cannot store the
@@ -83,14 +85,16 @@ struct LocalFsOptions {
     // backend's own write paths invalidate it or meta_cache_ttl expires -- only for roots
     // this process owns exclusively
     size_t meta_cache_entries = size_t(1) << 16;
-    int meta_cache_ttl_sec = 0;  // 0 = no expiry
+    // 0 = no expiry
+    int meta_cache_ttl_sec = 0;
     bool meta_cache_validate = true;
 };
 
 // run_scrub_once knobs (roadmap §3.1); per-call rather than config — a scrub is
 // an operator-invoked traversal (CLI), not a resident worker
 struct FsScrubOptions {
-    uint64_t max_bytes_per_sec = 0;  // 0 = unthrottled
+    // 0 = unthrottled
+    uint64_t max_bytes_per_sec = 0;
 };
 
 // Integrity report of run_scrub_once() (roadmap §3.1). Read-only; every finding
@@ -100,13 +104,20 @@ struct FsScrubOptions {
 struct FsScrubStats {
     uint64_t objects_scanned = 0;
     uint64_t bytes_read = 0;
-    uint64_t etag_mismatches = 0;  // content MD5 no longer matches the stored ETag
-    uint64_t read_errors = 0;      // open/read failures (EIO, truncation under scrub)
-    uint64_t unverifiable = 0;     // no ETag recorded, or legacy multipart without part_sizes
-    uint64_t skipped_stubs = 0;    // tiered stubs (data lives remote)
-    uint64_t skipped_races = 0;    // object overwritten/deleted mid-verify
-    uint64_t orphan_sidecars = 0;  // sidecar whose data file is gone (listing normally self-heals)
-    bool aborted = false;          // backend close interrupted the scrub (stats are partial)
+    // content MD5 no longer matches the stored ETag
+    uint64_t etag_mismatches = 0;
+    // open/read failures (EIO, truncation under scrub)
+    uint64_t read_errors = 0;
+    // no ETag recorded, or legacy multipart without part_sizes
+    uint64_t unverifiable = 0;
+    // tiered stubs (data lives remote)
+    uint64_t skipped_stubs = 0;
+    // object overwritten/deleted mid-verify
+    uint64_t skipped_races = 0;
+    // sidecar whose data file is gone (listing normally self-heals)
+    uint64_t orphan_sidecars = 0;
+    // backend close interrupted the scrub (stats are partial)
+    bool aborted = false;
 };
 
 class LocalFsBackend : public IStorageBackend {
@@ -197,7 +208,8 @@ protected:
     virtual const char* engine_name() const { return "localfs"; }
     std::filesystem::path bucket_dir(std::string_view bucket) const;
     std::filesystem::path object_path(std::string_view bucket, std::string_view key) const;
-    void require_bucket(std::string_view bucket) const;  // throws NoSuchBucket if missing
+    // throws NoSuchBucket if missing
+    void require_bucket(std::string_view bucket) const;
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
 
     // ---- metadata cache plumbing (roadmap §3.8) ----
@@ -259,7 +271,8 @@ protected:
     std::shared_ptr<ThreadPool> pool_;
     LocalFsOptions opt_;
     mutable fsutil::MetaXattrPolicy xattr_;
-    std::unique_ptr<FsMetaCache> meta_cache_;  // roadmap §3.8; xlocalfs's data plane consults it too
+    // roadmap §3.8; xlocalfs's data plane consults it too
+    std::unique_ptr<FsMetaCache> meta_cache_;
 
 private:
     // run_scrub_once helpers (pool thread): one bucket's ordered walk, then one
@@ -282,16 +295,20 @@ private:
     Task<bool> reap_orphan_sidecar(std::string bucket, std::filesystem::path sidecar);
     Task<void> reap_orphan_sidecars(std::string bucket, std::vector<std::filesystem::path> list);
 
-    void init_metrics(const MetricsScope& metrics);  // one-time acquisition at construction (same pattern as duostore)
-    void cleanup_stale_uploads();                    // remove mpu directories past mpu_ttl (startup + periodic)
-    Task<void> mpu_scan_task();                      // pool hop + cleanup_stale_uploads
+    // one-time acquisition at construction (same pattern as duostore)
+    void init_metrics(const MetricsScope& metrics);
+    // remove mpu directories past mpu_ttl (startup + periodic)
+    void cleanup_stale_uploads();
+    // pool hop + cleanup_stale_uploads
+    Task<void> mpu_scan_task();
     Task<void> sidecar_sweep_task();
     // Re-arm a periodic maintenance task after it completes (same shape as duostore's GC
     // worker): runs never overlap, a slow run just pushes back the next trigger
     void schedule_periodic(TimerQueue::Id& id, int interval_sec, Task<void> (LocalFsBackend::*fn)());
-    Task<void> run_periodic(TimerQueue::Id* slot, int interval_sec,
-                            Task<void> (LocalFsBackend::*fn)());  // one run, then re-arm
-    void shutdown_background();  // shared by close/dtor: cancel timers + wait in-flight scans
+    // one run, then re-arm
+    Task<void> run_periodic(TimerQueue::Id* slot, int interval_sec, Task<void> (LocalFsBackend::*fn)());
+    // shared by close/dtor: cancel timers + wait in-flight scans
+    void shutdown_background();
 
     // Instances fully pre-registered across the op dimension (acquired at construction,
     // hot path only inc/observe); the latency histogram is non-null only at the
@@ -302,8 +319,10 @@ private:
     std::vector<std::unique_ptr<AsyncSemaphore>> commit_locks_;
     std::unique_ptr<fsutil::DirListCache> dir_cache_;
     BackgroundTaskGroup bg_{"localfs"};
-    TimerQueue::Id mpu_timer_ = 0;      // written only inside bg_.if_open; 0 = not armed
-    TimerQueue::Id sidecar_timer_ = 0;  // same discipline
+    // written only inside bg_.if_open; 0 = not armed
+    TimerQueue::Id mpu_timer_ = 0;
+    // same discipline
+    TimerQueue::Id sidecar_timer_ = 0;
     std::atomic<bool> closed_{false};
 };
 

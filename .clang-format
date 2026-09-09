@@ -18,3 +18,11 @@ IncludeBlocks: Preserve
 # rather than splitting the declaration in front of them (`x =\n 0;  // ...`).
 PenaltyBreakAssignment: 1000
 PenaltyBreakComment: 60
+# Trailing comments are not used (scripts/check_comments.py moves them above the
+# code); the closers that remain (`}  // namespace`, `#endif  // X`) are never
+# column-aligned with each other.
+AlignTrailingComments: Never
+# Every file ends with exactly one newline; a stray `;` after a function body or a
+# namespace is dropped.
+InsertNewlineAtEOF: true
+RemoveSemicolon: true

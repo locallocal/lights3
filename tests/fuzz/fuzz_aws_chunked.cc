@@ -34,7 +34,8 @@ s3::SigV4Authenticator& auth() {
 
 Task<void> drain(http::BodyReader& r) {
     std::byte buf[512];
-    for (int i = 0; i < 4096; ++i) {  // bounded: a parser must not loop forever on garbage
+    for (int i = 0; i < 4096; ++i) {
+        // bounded: a parser must not loop forever on garbage
         size_t n = co_await r.read(std::span(buf));
         if (n == 0) break;
     }
@@ -57,7 +58,8 @@ void run(std::string_view body, bool signed_chunks, bool trailer) {
     req.body = std::make_unique<http::StringBodyReader>(std::string(body));
     auth().sign(req, cred(), hash);
     try {
-        auth().verify(req);  // installs the de-framing reader over req.body
+        // installs the de-framing reader over req.body
+        auth().verify(req);
         sync_wait(drain(*req.body));
     } catch (const s3::S3Error&) {
     }

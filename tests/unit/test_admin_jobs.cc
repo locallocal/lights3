@@ -154,7 +154,8 @@ TEST(admin_jobs_one_job_per_backend_with_polling) {
     CHECK_EQ(done["kind"].get<std::string>(), "localfs");
     CHECK_EQ(done["findings"].get<uint64_t>(), uint64_t(0));
     CHECK_EQ(done["stats"]["objects_scanned"].get<uint64_t>(), uint64_t(4));
-    CHECK(done["duration_ms"].get<int64_t>() >= 1000);  // throttled: ~4 s
+    // throttled: ~4 s
+    CHECK(done["duration_ms"].get<int64_t>() >= 1000);
     CHECK(!done["aborted"].get<bool>());
 
     // A second job gets the next id and can start once the first is done
@@ -225,7 +226,8 @@ TEST(admin_jobs_tier_rounds_and_ledger) {
     CHECK(threw);
     threw = false;
     try {
-        run_job(JobOp::Fsck, t, 0);  // tiered has no offline scrub
+        // tiered has no offline scrub
+        run_job(JobOp::Fsck, t, 0);
     } catch (const std::invalid_argument&) {
         threw = true;
     }
@@ -255,7 +257,8 @@ TEST(admin_jobs_tier_rounds_and_ledger) {
     CHECK_EQ(d1["job_id"].get<uint64_t>(), uint64_t(1));
     CHECK_EQ(d1["op"].get<std::string>(), "scan");
     CHECK_EQ(d1["kind"].get<std::string>(), "tiered");
-    CHECK(!d1.contains("max_mbps"));  // fsck-only field
+    // fsck-only field
+    CHECK(!d1.contains("max_mbps"));
     CHECK(!d1.contains("error"));
     CHECK(d1["stats"].contains("cold_picked"));
     CHECK_EQ(d1["findings"].get<uint64_t>(), uint64_t(0));
@@ -266,7 +269,8 @@ TEST(admin_jobs_tier_rounds_and_ledger) {
     json d3 = run_and_wait(jobs, "tier", JobOp::TierReconcile);
     CHECK_EQ(d3["job_id"].get<uint64_t>(), uint64_t(3));
     CHECK_EQ(d3["stats"]["refs_missing"].get<uint64_t>(), uint64_t(0));
-    CHECK_EQ(d3["stats"]["cloud_objects"].get<uint64_t>(), uint64_t(0));  // nothing demoted
+    // nothing demoted
+    CHECK_EQ(d3["stats"]["cloud_objects"].get<uint64_t>(), uint64_t(0));
     CHECK_EQ(d3["findings"].get<uint64_t>(), uint64_t(0));
     // Each op keeps its own last document
     CHECK_EQ(jobs.status("tier", JobOp::TierScan)["job_id"].get<uint64_t>(), uint64_t(1));
@@ -426,16 +430,20 @@ TEST(service_admin_fsck_endpoint) {
     // ---- /-/admin/duostore|tier/<backend>/<op> (handlers/admin_jobs.cc) ----
     CHECK_EQ(call("POST", "/-/admin/tier/tier/scan", "", nullptr).status, 403);
     CHECK_EQ(call("POST", "/-/admin/tier/tier/scan", "", &p).status, 403);
-    CHECK_EQ(call("POST", "/-/admin/tier/", "", &root).status, 400);      // no backend
-    CHECK_EQ(call("POST", "/-/admin/tier/tier", "", &root).status, 400);  // no op
+    // no backend
+    CHECK_EQ(call("POST", "/-/admin/tier/", "", &root).status, 400);
+    // no op
+    CHECK_EQ(call("POST", "/-/admin/tier/tier", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/tier/tier/", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/tier//scan", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/tier/tier/scan/extra", "", &root).status, 400);
     CHECK_EQ(call("DELETE", "/-/admin/tier/tier/scan", "", &root).status, 405);
-    CHECK_EQ(call("POST", "/-/admin/tier/tier/fsck", "", &root).status, 400);  // not a tier op
+    // not a tier op
+    CHECK_EQ(call("POST", "/-/admin/tier/tier/fsck", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/duostore/duo/reconcile", "", &root).status, 400);
     CHECK_EQ(call("POST", "/-/admin/tier/nope/scan", "", &root).status, 404);
-    CHECK_EQ(call("POST", "/-/admin/duostore/tier/gc", "", &root).status, 400);  // wrong type
+    // wrong type
+    CHECK_EQ(call("POST", "/-/admin/duostore/tier/gc", "", &root).status, 400);
     for (const char* path : {"/-/admin/tier/tier/scan", "/-/admin/tier/tier/gc", "/-/admin/tier/tier/reconcile",
                              "/-/admin/duostore/duo/gc", "/-/admin/duostore/duo/scan"}) {
         auto idle = call("GET", path, "", &root);
@@ -448,7 +456,8 @@ TEST(service_admin_fsck_endpoint) {
     CHECK_EQ(json::parse(tstart.small_body)["op"].get<std::string>(), "reconcile");
     CHECK_EQ(last_backend, "tier");
     CHECK_EQ(last_op, "tier.reconcile");
-    CHECK_EQ(last_bps, uint64_t(0));  // the rounds take no throttle
+    // the rounds take no throttle
+    CHECK_EQ(last_bps, uint64_t(0));
     auto tbusy = call("POST", "/-/admin/tier/tier/gc", "", &root);
     CHECK_EQ(tbusy.status, 409);
     CHECK_EQ(json::parse(tbusy.small_body)["code"].get<std::string>(), "JobInProgress");

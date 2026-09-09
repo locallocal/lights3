@@ -20,7 +20,8 @@ AuthConfig vector_auth_config() {
     AuthConfig cfg;
     cfg.credentials = {{"AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"}};
     cfg.region = "us-east-1";
-    cfg.service = "service";  // service name used by the official vector
+    // service name used by the official vector
+    cfg.service = "service";
     return cfg;
 }
 
@@ -44,7 +45,8 @@ TEST(sigv4_official_get_vanilla_vector) {
     auto auth = SigV4Authenticator::build(vector_auth_config());
     auth.clock = vector_time;
     auto req = vector_request();
-    auth.verify(req);  // passing = no throw
+    // passing = no throw
+    auth.verify(req);
 }
 
 TEST(sigv4_rejects_tampered_signature) {
@@ -121,7 +123,8 @@ TEST(sigv4_detects_payload_mismatch) {
     // Declared payload hash does not match the actual body
     req.body = std::make_unique<http::StringBodyReader>("actual body");
     auth.sign(req, cfg.credentials[0], util::sha256_hex("declared body"));
-    auth.verify(req);  // header signature matches, passes at first
+    // header signature matches, passes at first
+    auth.verify(req);
 
     std::byte buf[64];
     bool thrown = false;
@@ -211,7 +214,8 @@ TEST(sigv4_chunked_rejects_tampered_chunk) {
     auto auth = SigV4Authenticator::build(cfg);
 
     auto req = make_chunked_request(auth, cfg.credentials[0], true);
-    auth.verify(req);  // header signature still matches
+    // header signature still matches
+    auth.verify(req);
     bool thrown = false;
     try {
         read_all_body(*req.body);
@@ -257,7 +261,8 @@ http::HttpRequest make_unsigned_trailer_request(SigV4Authenticator& auth, const 
     std::string body;
     for (auto& c : {half1, half2})
         if (!c.empty()) body += hex_size(c.size()) + "\r\n" + c + "\r\n";
-    body += "0\r\n" + trailer_line + "\r\n\r\n";  // trailer section ends with a blank line
+    // trailer section ends with a blank line
+    body += "0\r\n" + trailer_line + "\r\n\r\n";
     req.body = std::make_unique<http::StringBodyReader>(std::move(body));
     return req;
 }
@@ -561,7 +566,8 @@ TEST(sigv4_uppercase_hex_digest_accepted) {
     req.body = std::make_unique<http::StringBodyReader>(body);
     auth.sign(req, cfg.credentials[0], upper);
     auth.verify(req);
-    CHECK_EQ(read_all_body(*req.body), body);  // no throw = validation passed
+    // no throw = validation passed
+    CHECK_EQ(read_all_body(*req.body), body);
 }
 
 // host not in SignedHeaders -> reject (under vhost, a signature not bound to host could be replayed across buckets by

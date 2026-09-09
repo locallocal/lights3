@@ -76,7 +76,8 @@ public:
     struct Waiter {
         std::coroutine_handle<> h;
         std::atomic<bool> claimed{false};
-        bool cancelled = false;  // written only by the successful claimer, read on the same thread after resume
+        // written only by the successful claimer, read on the same thread after resume
+        bool cancelled = false;
         std::atomic<uint64_t> reg_id{0};
         std::shared_ptr<detail::CancelState> cancel_state;
     };
@@ -84,8 +85,10 @@ public:
     struct AcquireAwaiter {
         AsyncSemaphore& sem;
         CancelToken token;
-        std::shared_ptr<Waiter> w;    // allocated only when suspending or when a cancel callback must be registered
-        bool immediate_fail = false;  // failed without suspending (already closed / cancelled before registration)
+        // allocated only when suspending or when a cancel callback must be registered
+        std::shared_ptr<Waiter> w;
+        // failed without suspending (already closed / cancelled before registration)
+        bool immediate_fail = false;
 
         bool await_ready() const noexcept { return false; }
         // Same as ThreadPool::schedule: when no token is passed explicitly, inherit
@@ -132,7 +135,8 @@ public:
             auto wp = w;
             CancelToken tok = token;
             tok.on_cancel_publish([s, wp] { s->cancel_waiter(wp); }, wp->reg_id, wp->cancel_state);
-            bool pre_cancelled = tok.cancelled();  // cancelled before registration: the callback will not be invoked
+            // cancelled before registration: the callback will not be invoked
+            bool pre_cancelled = tok.cancelled();
             {
                 std::lock_guard lk(s->m_);
                 if (s->closed_ || pre_cancelled) {

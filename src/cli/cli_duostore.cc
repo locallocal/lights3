@@ -259,7 +259,8 @@ uint64_t parse_pack_id(const std::string& s) {
         base = 16;
         off = 2;
     } else if (s.size() == 16) {
-        base = 16;  // the {:016x} form GC logs and `quarantine list` print
+        // the {:016x} form GC logs and `quarantine list` print
+        base = 16;
     }
     auto res = std::from_chars(s.data() + off, s.data() + s.size(), id, base);
     if (res.ec != std::errc{} || res.ptr != s.data() + s.size())

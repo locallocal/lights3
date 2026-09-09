@@ -19,8 +19,10 @@ namespace lights3::storage::cloudproxy {
 struct AwsCreds {
     std::string access_key;
     std::string secret_key;
-    std::string session_token;                       // empty for long-lived keys
-    std::chrono::system_clock::time_point expiry{};  // zero = never expires
+    // empty for long-lived keys
+    std::string session_token;
+    // zero = never expires
+    std::chrono::system_clock::time_point expiry{};
     bool valid() const { return !access_key.empty() && !secret_key.empty(); }
 };
 
@@ -45,8 +47,10 @@ private:
     const std::string imds_endpoint_;
     std::mutex m_;
     AwsCreds cached_;
-    std::string source_;                                    // last successful source, for change logging
-    std::chrono::system_clock::time_point next_attempt_{};  // negative-result cache
+    // last successful source, for change logging
+    std::string source_;
+    // negative-result cache
+    std::chrono::system_clock::time_point next_attempt_{};
 };
 
 }  // namespace lights3::storage::cloudproxy

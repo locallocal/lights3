@@ -20,7 +20,8 @@
 namespace lights3::fault {
 
 namespace detail {
-extern std::atomic<int> g_armed;  // number of armed points
+// number of armed points
+extern std::atomic<int> g_armed;
 int check_slow(std::string_view point);
 }  // namespace detail
 
@@ -42,14 +43,22 @@ std::string describe();
 // The points wired into the tree (kept in one list so docs/tests and the code
 // cannot drift apart; tests assert every entry here appears in the sources)
 constexpr std::string_view kPoints[] = {
-    "localfs.write",            // ::write into the staging tmp (put / upload_part / copy)
-    "localfs.rename",           // the commit rename of an object / cached data
-    "localfs.fsync",            // fdatasync of a staged file
-    "xlocalfs.write",           // the io_uring staging write pipeline (xlocalfs backend)
-    "duostore.pack.pwrite",     // pack record append
-    "duostore.pack.fdatasync",  // pack durability sync
-    "redis.command",            // hiredis command: simulated connection failure
-    "rados.submit",             // rados_aio_* submission: returns -errno
+    // ::write into the staging tmp (put / upload_part / copy)
+    "localfs.write",
+    // the commit rename of an object / cached data
+    "localfs.rename",
+    // fdatasync of a staged file
+    "localfs.fsync",
+    // the io_uring staging write pipeline (xlocalfs backend)
+    "xlocalfs.write",
+    // pack record append
+    "duostore.pack.pwrite",
+    // pack durability sync
+    "duostore.pack.fdatasync",
+    // hiredis command: simulated connection failure
+    "redis.command",
+    // rados_aio_* submission: returns -errno
+    "rados.submit",
 };
 
 }  // namespace lights3::fault

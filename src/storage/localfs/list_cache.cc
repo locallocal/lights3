@@ -23,7 +23,8 @@ DirEntries DirListCache::lookup(const std::string& dir, const Stamp& stamp) {
     if (it == map_.end() || !(it->second.stamp == stamp)) {
         ++misses_;
         if (m_misses_) m_misses_->inc();
-        if (it != map_.end()) {  // stale snapshot: drop now rather than waiting for LRU pressure
+        if (it != map_.end()) {
+            // stale snapshot: drop now rather than waiting for LRU pressure
             total_entries_ -= it->second.entries->size();
             lru_.erase(it->second.lru);
             map_.erase(it);

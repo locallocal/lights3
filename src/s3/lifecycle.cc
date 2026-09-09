@@ -128,15 +128,18 @@ Task<LifecycleRunner::PassStats> LifecycleRunner::run_once() {
 }
 
 Task<void> LifecycleRunner::scan_tick() {
-    co_await pool_->schedule();  // the timer thread only dispatches; IO moves to a pool thread
+    // the timer thread only dispatches; IO moves to a pool thread
+    co_await pool_->schedule();
     std::exception_ptr err;
     try {
         co_await run_once();
     } catch (...) {
         err = std::current_exception();
     }
-    schedule_scan();                       // re-arm after completion: rounds never overlap (localfs mpu pattern)
-    if (err) std::rethrow_exception(err);  // hand off to BackgroundTaskGroup for logging
+    // re-arm after completion: rounds never overlap (localfs mpu pattern)
+    schedule_scan();
+    // hand off to BackgroundTaskGroup for logging
+    if (err) std::rethrow_exception(err);
 }
 
 void LifecycleRunner::schedule_scan() {

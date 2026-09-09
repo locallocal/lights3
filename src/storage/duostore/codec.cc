@@ -161,12 +161,17 @@ void skip_extent_runs(Cursor& c) {
     uint32_t n_runs = c.u32();
     if (size_t(n_runs) * 33 > c.s.size() - c.pos) corrupt("run count beyond payload");
     for (uint32_t i = 0; i < n_runs; ++i) {
-        c.u8();   // kind
-        c.u64();  // first_file_id
+        // kind
+        c.u8();
+        // first_file_id
+        c.u64();
         uint32_t count = c.u32();
-        c.u64();  // chunk_len
-        c.u64();  // last_len
-        c.u64();  // pack_offset
+        // chunk_len
+        c.u64();
+        // last_len
+        c.u64();
+        // pack_offset
+        c.u64();
         c.skip(size_t(count) * 4);
     }
 }
@@ -309,7 +314,8 @@ std::string parts_prefix(std::string_view bucket, std::string_view key, std::str
 
 std::string part_key(std::string_view bucket, std::string_view key, std::string_view id, int part_no) {
     std::string s = parts_prefix(bucket, key, id);
-    s.push_back(char(uint8_t(part_no >> 8)));  // big-endian: byte order ascending == part_no ascending
+    // big-endian: byte order ascending == part_no ascending
+    s.push_back(char(uint8_t(part_no >> 8)));
     s.push_back(char(uint8_t(part_no)));
     return s;
 }
@@ -400,17 +406,20 @@ ObjectMeta decode_object_meta(std::string key, std::string_view v) {
     m.key = std::move(key);
     m.size = c.u64();
     m.last_modified = from_unix_ms(int64_t(c.u64()));
-    c.u64();  // version
+    // version
+    c.u64();
     m.etag = std::string(c.str());
     m.content_type = std::string(c.str());
     m.user_meta = read_user_meta(c);
     if (ver >= 2) read_std_meta(c, m);
-    if (ver >= 3) {  // tier section: not part of ObjectMeta
+    if (ver >= 3) {
+        // tier section: not part of ObjectMeta
         c.u8();
         c.str();
         c.str();
     }
-    skip_extent_runs(c);  // list needs no location info; avoids materializing a large object's Extent array (§4.4)
+    // list needs no location info; avoids materializing a large object's Extent array (§4.4)
+    skip_extent_runs(c);
     c.done();
     return m;
 }

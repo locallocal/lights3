@@ -131,14 +131,16 @@ TEST(access_log_text_line_fields) {
     resp = sync_wait(svc.dispatch(make_req("GET", "/bkt/a b\"c.txt")));
     CHECK_EQ(resp.status, 200);
     CHECK(resp.stream_body != nullptr);
-    CHECK(!contains(cap.last_access(), " GET "));  // not yet: body still pending
+    // not yet: body still pending
+    CHECK(!contains(cap.last_access(), " GET "));
     CHECK_EQ(sync_wait(drain(*resp.stream_body)), uint64_t(5));
     line = cap.last_access();
     CHECK(contains(line, " GET \"/bkt/a b\\\"c.txt\" 200 5 "));
     CHECK(contains(line, "api=GetObject backend=mem:"));
     CHECK(!contains(line, "truncated"));
     size_t before = cap.lines().size();
-    resp.stream_body.reset();  // already emitted: destroying the reader adds nothing
+    // already emitted: destroying the reader adds nothing
+    resp.stream_body.reset();
     CHECK_EQ(cap.lines().size(), before);
 }
 
@@ -220,7 +222,8 @@ TEST(access_log_json_records) {
     CHECK(j["backend_calls"].get<int>() >= 1);
     CHECK(j["backend_ms"].get<double>() >= 0);
     CHECK(j["ms"].get<double>() >= j["ttfb_ms"].get<double>());
-    CHECK(!j.contains("ak"));  // auth disabled: omitted, never ""
+    // auth disabled: omitted, never ""
+    CHECK(!j.contains("ak"));
     CHECK(!j.contains("slow"));
     CHECK(!j.contains("query"));
     // Streaming GET: bytes = what went out, total >= ttfb, and a slow one says so
@@ -229,7 +232,8 @@ TEST(access_log_json_records) {
     req.query = {{"response-content-type", "text/plain"}};
     auto resp = sync_wait(svc.dispatch(std::move(req)));
     CHECK(resp.stream_body != nullptr);
-    std::this_thread::sleep_for(std::chrono::milliseconds(25));  // a slow client
+    // a slow client
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
     CHECK_EQ(sync_wait(drain(*resp.stream_body)), uint64_t(5));
     j = nlohmann::json::parse(cap.last_access());
     CHECK_EQ(j["level"].get<std::string>(), "warn");
@@ -248,12 +252,14 @@ TEST(access_log_level_gates_lines) {
     svc.set_slow_request_threshold(std::chrono::milliseconds(20));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/fast", "x")));
-    CHECK(cap.lines().empty());  // INFO access lines are dropped at warn
+    // INFO access lines are dropped at warn
+    CHECK(cap.lines().empty());
     auto req = make_req("PUT", "/bkt/slow");
     req.headers.set("Content-Length", "5");
     req.body = std::make_unique<SlowBodyReader>("hello");
     sync_wait(svc.dispatch(std::move(req)));
-    CHECK_EQ(cap.lines().size(), size_t(1));  // the slow one still surfaces
+    // the slow one still surfaces
+    CHECK_EQ(cap.lines().size(), size_t(1));
     CHECK(contains(cap.lines()[0], "slow=1"));
     Logger::set_level(LogLevel::Info);
 }
@@ -277,8 +283,10 @@ TEST(logger_async_rotating_file) {
     // rotation set; logging still works synchronously on the same file
     Logger::shutdown();
     LOG_WARN("after shutdown");
-    Logger::shutdown();         // idempotent
-    Logger::init(LogConfig{});  // back to stderr for the remaining tests
+    // idempotent
+    Logger::shutdown();
+    // back to stderr for the remaining tests
+    Logger::init(LogConfig{});
     std::string all;
     size_t files = 0;
     for (auto& e : std::filesystem::directory_iterator(dir)) {
@@ -286,7 +294,8 @@ TEST(logger_async_rotating_file) {
         std::ifstream in(e.path());
         all += std::string((std::istreambuf_iterator<char>(in)), {});
     }
-    CHECK(files >= 2 && files <= 3);  // rotated: lights3.log + .1 (+ .2)
+    // rotated: lights3.log + .1 (+ .2)
+    CHECK(files >= 2 && files <= 3);
     CHECK(contains(all, "line 999 "));
     CHECK(contains(all, "access probe"));
     CHECK(contains(all, "after shutdown"));

@@ -235,7 +235,8 @@ std::string expected_total_etag(std::span<const PartInfo> parts) {
     md5s.reserve(parts.size());
     for (auto& p : parts) {
         std::string hex(strip_etag_quotes(p.etag));
-        if (!is_md5_hex(hex)) return "";  // non-md5-shaped part etag: unpredictable
+        // non-md5-shaped part etag: unpredictable
+        if (!is_md5_hex(hex)) return "";
         md5s.push_back(std::move(hex));
     }
     return combined_etag(md5s);
@@ -281,8 +282,9 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
         std::optional<R> result;
         std::exception_ptr err;
         std::thread th;
-        std::binary_semaphore gate{0};  // gate the thread body: it must not run before the move-assignment to th
-                                        // completes
+        // gate the thread body: it must not run before the move-assignment to th
+        // completes
+        std::binary_semaphore gate{0};
         bool await_ready() const noexcept { return false; }
         void await_suspend(std::coroutine_handle<> h) {
             // Without the gate there is a race: a very fast fn could post before the
@@ -295,13 +297,16 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
                 } catch (...) {
                     err = std::current_exception();
                 }
-                ex->post(h);  // the private thread only posts; business logic continues on a pool thread
+                // the private thread only posts; business logic continues on a pool thread
+                ex->post(h);
             });
-            gate.release();  // must not touch any member after this (the coroutine may have already resumed on a pool
-                             // thread)
+            // must not touch any member after this (the coroutine may have already resumed on a pool
+            // thread)
+            gate.release();
         }
         R await_resume() {
-            th.join();  // the thread wraps up right after post; the join is only microseconds
+            // the thread wraps up right after post; the join is only microseconds
+            th.join();
             if (err) std::rethrow_exception(err);
             return std::move(*result);
         }
@@ -320,7 +325,8 @@ Task<CloudProxyBackend::Extra> CloudProxyBackend::trace_extra(Extra extra) {
 
 Task<void> CloudProxyBackend::async_backoff(int64_t delay_ms) {
     co_await async_sleep(std::chrono::milliseconds(delay_ms));
-    co_await pool_->schedule();  // off the timer callback thread before any business logic
+    // off the timer callback thread before any business logic
+    co_await pool_->schedule();
 }
 
 // Coroutine retry driver for idempotent control-plane requests (roadmap §3.3): replaces
@@ -476,7 +482,8 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
     auto resource = resource_of(bucket, key);
     std::vector<std::pair<std::string, std::string>> extra;
     if (range) extra.emplace_back("Range", format_range(*range));
-    extra.emplace_back("x-amz-checksum-mode", "ENABLED");  // capture the remote checksum (§2.2)
+    // capture the remote checksum (§2.2)
+    extra.emplace_back("x-amz-checksum-mode", "ENABLED");
     extra = co_await trace_extra(std::move(extra));
 
     co_await pool_->schedule();
@@ -490,12 +497,15 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
     // pump: the ResponseHandler delivers meta on arrival; the ContentReceiver converts push
     // to pull through the queue (§3.1)
     std::thread pump([ctx, queue, abortst, prom, path, extra, resource, keycopy, host = t.host] {
-        auto op_hist = ctx->metrics.op_seconds("get");  // §8.2: the whole transfer is one observation
-        const auto deadline = ctx->op_deadline();       // §3.3: caps the retry loop, not a transfer
+        // §8.2: the whole transfer is one observation
+        auto op_hist = ctx->metrics.op_seconds("get");
+        // §3.3: caps the retry loop, not a transfer
+        const auto deadline = ctx->op_deadline();
         bool delivered = false;
         try {
             for (int attempt = 0;; ++attempt) {
-                ctx->breaker_gate();  // fail fast while the remote is decidedly down (§3.3)
+                // fail fast while the remote is decidedly down (§3.3)
+                ctx->breaker_gate();
                 std::string err_body;
                 int64_t delay_ms = 0;
                 {
@@ -532,7 +542,8 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
                     // the remote's health
                     if (!abortst->is_aborted()) ctx->breaker_observe(res);
                     if (delivered) {
-                        queue->close(static_cast<bool>(res));  // empty res = transfer failed midway
+                        // empty res = transfer failed midway
+                        queue->close(static_cast<bool>(res));
                         return;
                     }
                     // Headers not delivered: retry or deliver the mapped exception.
@@ -578,10 +589,12 @@ Task<ObjectStream> CloudProxyBackend::get_object(std::string_view bucket, std::s
         // retry chain is at worst (retry_max+1) rounds, and each round's actual IO is
         // backstopped by httplib's own timeouts
         auto budget = std::chrono::milliseconds(ctx_->cfg.request_timeout_ms) * (ctx_->cfg.retry_max + 1);
-        if (ctx_->cfg.op_deadline_ms > 0)  // §3.3: the per-op deadline caps the whole loop
+        // §3.3: the per-op deadline caps the whole loop
+        if (ctx_->cfg.op_deadline_ms > 0)
             budget = std::min(budget, std::chrono::milliseconds(ctx_->cfg.op_deadline_ms));
         if (fut.wait_for(budget) != std::future_status::ready) {
-            abortst->abort();  // interrupt in-flight socket IO; do not sit out httplib's timeout
+            // interrupt in-flight socket IO; do not sit out httplib's timeout
+            abortst->abort();
             queue->cancel();
             pump.join();
             ctx_->metrics.count_error("transport");
@@ -639,11 +652,14 @@ Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::stri
     // pump: pull-to-pull, the Provider takes data from the queue and writes the DataSink (§3.2)
     const char* op = multipart_ctx ? "upload_part" : "put";
     std::thread pump([ctx, queue, abortst, out, raw_path, raw_query, host, full, content_type, extra, len, op] {
-        auto op_hist = ctx->metrics.op_seconds(op);  // §8.2: the whole transfer is one observation
-        const auto deadline = ctx->op_deadline();    // §3.3: caps the retry loop, not a transfer
+        // §8.2: the whole transfer is one observation
+        auto op_hist = ctx->metrics.op_seconds(op);
+        // §3.3: caps the retry loop, not a transfer
+        const auto deadline = ctx->op_deadline();
         try {
             for (int attempt = 0;; ++attempt) {
-                ctx->breaker_gate();  // fail fast while the remote is decidedly down (§3.3)
+                // fail fast while the remote is decidedly down (§3.3)
+                ctx->breaker_gate();
                 // Single-threaded reads/writes within the pump suffice, no atomics needed:
                 // only used for the connection-stage retry decision
                 bool provider_called = false;
@@ -661,9 +677,11 @@ Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::stri
                         try {
                             n = queue->pop(std::span(buf, want));
                         } catch (...) {
-                            return false;  // producer (client upstream) failed midway
+                            // producer (client upstream) failed midway
+                            return false;
                         }
-                        if (n == 0) return false;  // EOF before Content-Length: abort
+                        // EOF before Content-Length: abort
+                        if (n == 0) return false;
                         return sink.write(reinterpret_cast<const char*>(buf), n);
                     },
                     content_type);
@@ -701,7 +719,8 @@ Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::stri
         } catch (...) {
             out->exc = std::current_exception();
         }
-        queue->cancel();  // release the producer from a possible push block
+        // release the producer from a possible push block
+        queue->cancel();
     });
 
     // Producer: the handler coroutine chain drives body.read, with incremental MD5
@@ -740,17 +759,20 @@ Task<PutResult> CloudProxyBackend::stream_upload(std::string raw_path, std::stri
     // When the upstream breaks, the pump may be blocked in a socket write waiting for the
     // remote to accept data: interrupt proactively, do not sit out the timeout
     if (read_err) abortst->abort();
-    co_await pool_->schedule();  // the join waits at most one remote response cycle, likewise off the driver thread
+    // the join waits at most one remote response cycle, likewise off the driver thread
+    co_await pool_->schedule();
     pump.join();
 
     if (out->exc) std::rethrow_exception(out->exc);
-    if (read_err) std::rethrow_exception(read_err);  // client upstream broke off
+    // client upstream broke off
+    if (read_err) std::rethrow_exception(read_err);
     if (!out->has_response) ctx->throw_transport_error(out->err);
     if (out->status / 100 == 2) {
         std::string etag(strip_etag_quotes(out->etag));
         if (ctx->cfg.verify_etag && is_md5_hex(etag)) {
             if (etag != md5.final_hex()) {
-                ctx->metrics.etag_mismatch->inc();  // §8.2: in-transit corruption signal
+                // §8.2: in-transit corruption signal
+                ctx->metrics.etag_mismatch->inc();
                 throw S3Error(S3ErrorCode::InternalError,
                               "cloudproxy: upload corrupted in transit (remote etag != "
                               "local md5)");
@@ -792,7 +814,8 @@ Task<PutResult> CloudProxyBackend::spool_and_upload(std::string raw_path, std::s
     std::vector<std::byte> buf(256 * 1024);
     for (;;) {
         size_t n = co_await body.read(std::span(buf));
-        co_await pool_->schedule();  // read may resume the coroutine on a driver thread; write to disk back on the pool
+        // read may resume the coroutine on a driver thread; write to disk back on the pool
+        co_await pool_->schedule();
         if (n == 0) break;
         total += n;
         if (total > ctx_->cfg.spool_max_bytes)
@@ -882,7 +905,8 @@ Task<ObjectMeta> CloudProxyBackend::head_object(std::string_view bucket, std::st
     auto rb = remote_bucket(bucket);
     auto t = ctx_->target(rb);
     auto path = t.object_path(key_path(key));
-    auto tp = co_await trace_extra({{"x-amz-checksum-mode", "ENABLED"}});  // §2.2
+    // §2.2
+    auto tp = co_await trace_extra({{"x-amz-checksum-mode", "ENABLED"}});
     auto res = co_await retry_io("head", [&](httplib::Client& c) {
         return c.Head(path, ctx_->signed_headers("HEAD", path, "", tp, "", t.host));
     });
@@ -942,7 +966,8 @@ Task<void> CloudProxyBackend::set_object_tagging(std::string_view bucket, std::s
     auto path = t.object_path(key_path(key));
     std::string query = "tagging";
     std::string full = path + "?" + query;
-    if (tagging.empty()) {  // DeleteObjectTagging upstream
+    if (tagging.empty()) {
+        // DeleteObjectTagging upstream
         auto tp = co_await trace_extra();
         auto res = co_await retry_io("delete_tagging", [&](httplib::Client& c) {
             return c.Delete(full, ctx_->signed_headers("DELETE", path, query, tp, "", t.host));
@@ -1111,7 +1136,8 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket, s
         // Client-declared part checksum forwarded verbatim; the remote re-validates (§2.2)
         if (!p.checksum_algorithm.empty() && !p.checksum_value.empty()) {
             std::string tag = "Checksum";
-            for (char c : p.checksum_algorithm) tag.push_back(c);  // wire names are already uppercase
+            // wire names are already uppercase
+            for (char c : p.checksum_algorithm) tag.push_back(c);
             w.element(tag, p.checksum_value);
         }
         w.close();
@@ -1159,7 +1185,8 @@ Task<PutResult> CloudProxyBackend::complete_multipart(std::string_view bucket, s
                     auto code = map_remote_code(root.get("Code"));
                     retry = code == S3ErrorCode::InternalError || code == S3ErrorCode::SlowDown;
                 }
-            } catch (...) {  // unparsable: leave it to the unified handling below
+            } catch (...) {
+                // unparsable: leave it to the unified handling below
             }
         }
         if (retry && attempt < ctx_->cfg.retry_max) {

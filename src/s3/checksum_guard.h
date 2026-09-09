@@ -31,15 +31,19 @@ namespace lights3::s3 {
 struct ExpectedDigest {
     enum class Algo { Md5, Sha1, Sha256, Crc32, Crc32c, Crc64Nvme };
     Algo algo;
-    std::string header;    // points back to the specific header when reporting errors
-    std::string expected;  // decoded raw bytes
+    // points back to the specific header when reporting errors
+    std::string header;
+    // decoded raw bytes
+    std::string expected;
 };
 
 // The x-amz-checksum-* family (header or trailer form; Content-MD5 is header-only and handled apart)
 struct ChecksumSpec {
-    std::string_view header;  // lowercase
+    // lowercase
+    std::string_view header;
     ExpectedDigest::Algo algo;
-    size_t bytes;  // decoded digest length; CRCs travel base64-encoded big-endian
+    // decoded digest length; CRCs travel base64-encoded big-endian
+    size_t bytes;
 };
 inline constexpr ChecksumSpec kChecksumSpecs[] = {
     {"x-amz-checksum-crc32", ExpectedDigest::Algo::Crc32, 4},
@@ -61,7 +65,8 @@ class StreamingDigest {
 public:
     explicit StreamingDigest(ExpectedDigest::Algo algo) : algo_(algo) {
         auto make = [this](util::HashStream::Algo a) {
-            hash_ = std::make_unique<util::HashStream>(a);  // HashStream is not movable
+            // HashStream is not movable
+            hash_ = std::make_unique<util::HashStream>(a);
         };
         switch (algo) {
             case ExpectedDigest::Algo::Md5:
@@ -74,7 +79,8 @@ public:
                 make(util::HashStream::Algo::Sha256);
                 break;
             default:
-                break;  // crc family accumulates in crc_
+                // crc family accumulates in crc_
+                break;
         }
     }
 
@@ -90,7 +96,8 @@ public:
         }
     }
 
-    std::string final_raw() {  // may be called only once (HashStream contract)
+    std::string final_raw() {
+        // may be called only once (HashStream contract)
         if (hash_) {
             auto b = hash_->final_bytes();
             return {b.begin(), b.end()};
@@ -181,7 +188,8 @@ inline std::vector<std::string> parse_declared_trailers(const http::HttpRequest&
         if (c == ',') {
             flush();
         } else if ((c == ' ' || c == '\t') && cur.empty()) {
-            continue;  // leading OWS
+            // leading OWS
+            continue;
         } else {
             cur.push_back(http::HeaderMap::lower(c));
         }
@@ -231,7 +239,8 @@ inline std::string checksum_wire_name(const ChecksumSpec& sp) {
 // — persistence records exactly one checksum per object
 struct RequestChecksum {
     const ChecksumSpec* spec = nullptr;
-    std::string value;  // base64; empty for the trailer form
+    // base64; empty for the trailer form
+    std::string value;
     bool trailer = false;
 };
 inline std::optional<RequestChecksum> request_checksum(const http::HttpRequest& req) {

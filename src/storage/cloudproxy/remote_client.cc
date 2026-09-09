@@ -37,7 +37,8 @@ bool bool_param(const std::map<std::string, std::string>& p, const char* k, bool
     auto* v = find(p, k);
     if (!v) return def;
     try {
-        return parse_bool(*v);  // shared token set (core/config.h), consistent with duostore
+        // shared token set (core/config.h), consistent with duostore
+        return parse_bool(*v);
     } catch (...) {
         throw std::runtime_error("cloudproxy backend '" + name + "': invalid " + k + ": " + *v);
     }
@@ -122,7 +123,8 @@ CloudProxyConfig CloudProxyConfig::from_params(const std::string& name,
                                      "': " + e.message);
         }
     }
-    cloudproxy::Endpoint::parse(c.endpoint);  // validate early, surfacing errors at load time
+    // validate early, surfacing errors at load time
+    cloudproxy::Endpoint::parse(c.endpoint);
     return c;
 }
 
@@ -268,7 +270,8 @@ void ClientPool::schedule_reaper() {
             if (stopping_) return;
             reap_stale_locked();
         }
-        schedule_reaper();  // re-arm after completion (never overlaps)
+        // re-arm after completion (never overlaps)
+        schedule_reaper();
     });
 }
 
@@ -288,11 +291,13 @@ void ClientPool::retire_slot() {
         waiters_.pop_front();
         {
             std::lock_guard g(w->m);
-            if (w->done) continue;  // timed out; zombie entry
+            // timed out; zombie entry
+            if (w->done) continue;
             w->done = true;
             w->create_new = true;
         }
-        ++total_;  // the slot transfers to the waiter's upcoming client
+        // the slot transfers to the waiter's upcoming client
+        ++total_;
         lk.unlock();
         if (w->ex)
             w->ex->post(w->h);
@@ -360,7 +365,8 @@ Task<ClientPool::Lease> ClientPool::acquire_async() {
             if (!pool->idle_.empty()) {
                 granted = std::move(pool->idle_.back().pc);
                 pool->idle_.pop_back();
-                return false;  // fast path: resume synchronously
+                // fast path: resume synchronously
+                return false;
             }
             if (pool->total_ < pool->cfg_.max_connections) {
                 ++pool->total_;
@@ -427,7 +433,8 @@ void ClientPool::release(PooledClient pc) {
     // Age retirement (roadmap §3.3): drop instead of pooling; the connection closes
     // when pc goes out of scope below, outside any handoff
     if (cfg_.pool_max_lifetime_ms > 0 && now - pc.created > std::chrono::milliseconds(cfg_.pool_max_lifetime_ms)) {
-        pc.c.reset();  // close the socket before any waiter bookkeeping
+        // close the socket before any waiter bookkeeping
+        pc.c.reset();
         retire_slot();
         return;
     }
@@ -444,7 +451,8 @@ void ClientPool::release(PooledClient pc) {
             w->granted = std::move(pc);
             h = w->h;
         }
-        lk.unlock();  // resume outside the pool lock
+        // resume outside the pool lock
+        lk.unlock();
         if (w->ex)
             w->ex->post(h);
         else
@@ -581,8 +589,9 @@ void RemoteContext::throw_remote_error(int status, const std::string& body, ErrC
 }
 
 void RemoteContext::throw_transport_error(httplib::Error err) const {
-    metrics.count_error("transport");  // §8.2: connection/DNS/timeout classes share one bucket, details go into the
-                                       // message
+    // §8.2: connection/DNS/timeout classes share one bucket, details go into the
+    // message
+    metrics.count_error("transport");
     throw S3Error(S3ErrorCode::InternalError,
                   "cloudproxy: request to " + cfg.endpoint + " failed: " + httplib::to_string(err));
 }
@@ -633,7 +642,8 @@ bool RemoteContext::breaker_allow() {
     if (consec_failures_ < cfg.breaker_threshold) return true;
     auto now = std::chrono::steady_clock::now();
     if (now < breaker_open_until_) return false;
-    if (probe_inflight_) return false;  // half-open: exactly one probe decides
+    // half-open: exactly one probe decides
+    if (probe_inflight_) return false;
     probe_inflight_ = true;
     return true;
 }
@@ -664,14 +674,16 @@ void RemoteContext::breaker_observe(const httplib::Result& r) {
         breaker_report(false);
     } else if (r->status >= 500) {
         breaker_report(false);
-    } else if (r->status != 429) {  // 429 = throttling, neither up nor down
+    } else if (r->status != 429) {
+        // 429 = throttling, neither up nor down
         breaker_report(true);
     }
 }
 
 void RemoteContext::breaker_gate() {
     if (breaker_allow()) return;
-    metrics.count_error("breaker_open");  // §8.2: shed load is visible per remote
+    // §8.2: shed load is visible per remote
+    metrics.count_error("breaker_open");
     throw S3Error(S3ErrorCode::SlowDown,
                   "cloudproxy: circuit breaker open (remote " + cfg.endpoint + " failing), request shed");
 }

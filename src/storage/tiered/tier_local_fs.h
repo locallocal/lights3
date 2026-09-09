@@ -66,11 +66,14 @@ public:
 private:
     friend class FsRangeCache;
     friend class FsWalker;
-    void load_access_table();  // resident mode + legacy atime.tsv migration
+    // resident mode + legacy atime.tsv migration
+    void load_access_table();
 
     std::shared_ptr<LocalFsBackend> local_;
-    std::filesystem::path state_dir_;  // <staging>/tier
-    bool resident_ = false;            // no xattr support → table mode
+    // <staging>/tier
+    std::filesystem::path state_dir_;
+    // no xattr support → table mode
+    bool resident_ = false;
     // Resident table (table mode), or the legacy atime.tsv contents used as a
     // read-through fallback while xattr records are being populated (xattr mode)
     mutable std::mutex table_m_;

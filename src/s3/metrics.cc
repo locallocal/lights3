@@ -68,7 +68,8 @@ void Metrics::record_api(std::string_view api, std::string_view backend, int sta
     std::lock_guard lk(api_m_);
     auto it = by_api_.find(key);
     if (it == by_api_.end()) {
-        if (by_api_.size() >= kMaxApiSeries) return;  // label-cardinality guard
+        // label-cardinality guard
+        if (by_api_.size() >= kMaxApiSeries) return;
         it = by_api_.emplace(key, ApiStats{}).first;
     }
     auto& st = it->second;

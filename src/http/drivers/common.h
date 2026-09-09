@@ -26,8 +26,10 @@ namespace lights3::http::driver {
 // Shutdown/backpressure bounds (drain cap, trailer cap, chunk size, shutdown
 // grace) have been promoted to HttpConfig options (docs/archive/gaps.md §7), with
 // defaults consolidated in config.h; only purely internal values remain here
-inline constexpr size_t kIoChunkBytes = 64 * 1024;  // Streaming read/write chunk size (default of http.io_chunk_size)
-inline constexpr size_t kScratchBytes = 16 * 1024;  // Scratch buffer for draining, line parsing, etc.
+// Streaming read/write chunk size (default of http.io_chunk_size)
+inline constexpr size_t kIoChunkBytes = 64 * 1024;
+// Scratch buffer for draining, line parsing, etc.
+inline constexpr size_t kScratchBytes = 16 * 1024;
 
 // ---------- Pooled I/O buffers (roadmap §4.3 ②) ----------
 // Streaming responses used to construct a zero-initialized std::vector per
@@ -62,7 +64,8 @@ public:
     size_t capacity() const { return cap_; }
     std::span<std::byte> span() { return {p_.get(), size_}; }
 
-    static constexpr size_t kPerThreadCap = 16;  // cached buffers per thread
+    // cached buffers per thread
+    static constexpr size_t kPerThreadCap = 16;
     static size_t cached_count() { return cache().size(); }
 
 private:
@@ -85,7 +88,8 @@ private:
                 return;
             }
         }
-        p_ = std::unique_ptr<std::byte[]>(new std::byte[n]);  // default-init: no memset
+        // default-init: no memset
+        p_ = std::unique_ptr<std::byte[]>(new std::byte[n]);
         cap_ = n;
     }
     void release() {
@@ -147,13 +151,15 @@ private:
         }
         size_t cur = reading_;
         reading_ ^= 1;
-        start_read();  // overlap the next read with the caller's write of `cur`
+        // overlap the next read with the caller's write of `cur`
+        start_read();
         return std::span<const std::byte>(bufs_[cur].data(), n);
     }
 
     BodyReader& reader_;
     IoBuffer bufs_[2];
-    size_t reading_ = 0;  // index of the buffer the in-flight read fills
+    // index of the buffer the in-flight read fills
+    size_t reading_ = 0;
     Started<size_t> pending_;
     bool eof_ = false;
 };
@@ -163,7 +169,8 @@ private:
 struct ConnCounters {
     std::atomic<uint64_t> accepted{0}, rejected_limit{0}, active{0}, keepalive_closes{0};
     std::atomic<uint64_t> timeouts_idle{0}, timeouts_header{0}, timeouts_body{0}, timeouts_write{0};
-    std::atomic<uint64_t> requests{0}, tls_ok{0}, tls_failed{0}, parse_errors{0};  // roadmap §5.3
+    // roadmap §5.3
+    std::atomic<uint64_t> requests{0}, tls_ok{0}, tls_failed{0}, parse_errors{0};
     ConnStats snapshot() const {
         auto ld = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
         return {ld(accepted),      ld(rejected_limit),  ld(active),        ld(keepalive_closes),
@@ -261,8 +268,10 @@ inline bool parse_chunk_size(std::string_view line, uint64_t& out) {
         if (v > (UINT64_MAX >> 4)) return false;
         v = (v << 4) | static_cast<uint64_t>(d);
     }
-    if (i == 0) return false;                             // No hex digits
-    if (i < line.size() && line[i] != ';') return false;  // Trailing garbage
+    // No hex digits
+    if (i == 0) return false;
+    // Trailing garbage
+    if (i < line.size() && line[i] != ';') return false;
     out = v;
     return true;
 }
@@ -291,7 +300,8 @@ inline BodyFraming parse_body_framing(const HeaderMap& headers) {
             ++te_count;
             te = v;
         } else if (HeaderMap::ieq(k, "Content-Length")) {
-            if (cl && *cl != v) return f;  // Two differing lengths: framing disagreement
+            // Two differing lengths: framing disagreement
+            if (cl && *cl != v) return f;
             cl = v;
         }
     }
@@ -412,8 +422,10 @@ inline const char* reason_phrase(int status) {
 // themselves (builtin/seastar). The body form is decided uniformly here:
 // fixed length uses Content-Length, streaming without a length uses chunked.
 struct ResponseHead {
-    std::string text;      // Status line + all headers + blank line
-    bool chunked = false;  // Body must be written with chunked encoding
+    // Status line + all headers + blank line
+    std::string text;
+    // Body must be written with chunked encoding
+    bool chunked = false;
 };
 
 // Whether an outbound header can be written into the message as-is: the name

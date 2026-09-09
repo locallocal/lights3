@@ -240,7 +240,8 @@ TEST(duostore_rados_unknown_length_stream) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
-    size_t sizes[] = {100, 4096, 5000};  // < cut point / exactly the cut point / > cut point
+    // < cut point / exactly the cut point / > cut point
+    size_t sizes[] = {100, 4096, 5000};
     for (size_t n : sizes) {
         std::string body = patterned(n);
         ChunkedBody reader(body);
@@ -275,7 +276,8 @@ TEST(duostore_rados_remove_idempotent_and_ns_isolation) {
 
     sync_wait(a.remove(ref.extents));
     CHECK_EQ(RadosRaw(ns_a).list().size(), size_t(0));
-    sync_wait(a.remove(ref.extents));  // double delete: -ENOENT idempotently ignored
+    // double delete: -ENOENT idempotently ignored
+    sync_wait(a.remove(ref.extents));
     sync_wait(a.close());
     sync_wait(other.close());
 }
@@ -294,7 +296,8 @@ TEST(duostore_rados_buffer_backpressure) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto opts = rados_opts(ns, 4096);
-    opts.buffer_total = 2 * 4096;  // 2 quota slots, 6-way concurrency
+    // 2 quota slots, 6-way concurrency
+    opts.buffer_total = 2 * 4096;
     auto data = std::make_unique<RadosDataStore>(
         opts, pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -341,7 +344,8 @@ TEST(duostore_rados_missing_object_alarm) {
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", std::string(1000, 'x'));
 
-    RadosRaw(ns).remove_all();  // delete data-plane objects bypassing the store, meta refs remain
+    // delete data-plane objects bypassing the store, meta refs remain
+    RadosRaw(ns).remove_all();
     auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
     CHECK_THROWS_S3(read_all(*got.body), s3::S3ErrorCode::InternalError);
     sync_wait(b->close());
@@ -393,7 +397,8 @@ TEST(duostore_rados_gc_reclaims_after_delete) {
     DuoStoreConfig cfg;
     cfg.name = "rados-gc";
     cfg.root = tmp.path / "duo";
-    cfg.gc_interval_sec = 0;  // background off, tests the manual hook specifically
+    // background off, tests the manual hook specifically
+    cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
     auto data = std::make_unique<RadosDataStore>(
@@ -401,8 +406,10 @@ TEST(duostore_rados_gc_reclaims_after_delete) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
 
-    put(*b, "bkt", "k", patterned(10000));  // 3 objects
-    put(*b, "bkt", "k", patterned(5000));   // overwrite: old 3 enter gcq, new 2
+    // 3 objects
+    put(*b, "bkt", "k", patterned(10000));
+    // overwrite: old 3 enter gcq, new 2
+    put(*b, "bkt", "k", patterned(5000));
     sync_wait(b->delete_object("bkt", "k"));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(5));
 
@@ -451,10 +458,12 @@ TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
     CHECK_EQ(st1.skipped_pinned, uint64_t(1));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(3));
 
-    std::string rest = read_all(*got.body);  // no -ENOENT
+    // no -ENOENT
+    std::string rest = read_all(*got.body);
     CHECK_EQ(std::string(reinterpret_cast<char*>(buf), n0) + rest, body);
 
-    got.body.reset();  // destruction releases the pin
+    // destruction releases the pin
+    got.body.reset();
     auto st2 = sync_wait(b->run_gc_once());
     CHECK_EQ(st2.reclaims_acked, uint64_t(1));
     CHECK_EQ(RadosRaw(ns).list().size(), size_t(0));
@@ -468,8 +477,10 @@ TEST(duostore_rados_gc_pin_blocks_remove_during_get) {
 TEST(duostore_rados_pipeline_multi_chunk_stream) {
     RADOS_OR_SKIP();
     auto pool = std::make_shared<ThreadPool>(4);
-    std::string body = patterned(100000);                   // 100000B / 4KiB = 25 objects
-    for (uint64_t buffer_total : {8 * 4096ull, 4096ull}) {  // pipelined / serial degradation
+    // 100000B / 4KiB = 25 objects
+    std::string body = patterned(100000);
+    for (uint64_t buffer_total : {8 * 4096ull, 4096ull}) {
+        // pipelined / serial degradation
         std::string ns = unique_ns();
         NsCleaner cleaner(ns);
         auto opts = rados_opts(ns, 4096);
@@ -507,7 +518,8 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     DuoStoreConfig cfg;
     cfg.name = "rados-orphan";
     cfg.root = tmp.path / "duo";
-    cfg.data_kind = DuoDataKind::kRados;  // determines the extent kind for orphan unlink
+    // determines the extent kind for orphan unlink
+    cfg.data_kind = DuoDataKind::kRados;
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
     fs::create_directories(cfg.root);
@@ -515,7 +527,8 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
         rados_opts(ns, 4096), pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     sync_wait(b->create_bucket("bkt"));
-    put(*b, "bkt", "k", patterned(10000));  // 3 objects on the books
+    // 3 objects on the books
+    put(*b, "bkt", "k", patterned(10000));
 
     // Orphan injection: write objects directly to the data store without committing meta (crash-residue shape); ids
     // taken far away to avoid the id segment
@@ -524,9 +537,11 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
         RadosDataStore orphan_src(rados_opts(ns, 4096), pool,
                                   [far](Extent::Kind, uint32_t n) { return far->fetch_add(n); });
         auto w = sync_wait(orphan_src.open_writer({std::nullopt}));
-        std::string junk = patterned(5000);  // 2 objects
+        // 2 objects
+        std::string junk = patterned(5000);
         sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(junk.data()), junk.size())));
-        (void)sync_wait(w->finish());  // DataRef discarded as soon as it lands -- meta has no record
+        // DataRef discarded as soon as it lands -- meta has no record
+        (void)sync_wait(w->finish());
         sync_wait(orphan_src.close());
     }
     // Foreign object: not named c.<016x>, ignored by enumeration (§8.2)
@@ -534,11 +549,13 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     CHECK(rados_write_full(raw.io, "not-ours", "x", 1) == 0);
 
     auto st1 = sync_wait(b->run_orphan_scan_once());
-    CHECK_EQ(st1.chunks_scanned, uint64_t(5));  // 3 on the books + 2 orphans; foreign objects not counted
+    // 3 on the books + 2 orphans; foreign objects not counted
+    CHECK_EQ(st1.chunks_scanned, uint64_t(5));
     CHECK_EQ(st1.orphans_removed, uint64_t(2));
     CHECK_EQ(st1.refs_missing, uint64_t(0));
     auto after = raw.list();
-    CHECK_EQ(after.size(), size_t(4));  // 3 on the books + not-ours
+    // 3 on the books + not-ours
+    CHECK_EQ(after.size(), size_t(4));
     auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
     CHECK_EQ(read_all(*got.body), patterned(10000));
     got.body.reset();
@@ -554,7 +571,8 @@ TEST(duostore_rados_orphan_scan_forward_reverse_and_grace) {
     CHECK_EQ(st2.chunks_scanned, uint64_t(2));
     CHECK_EQ(st2.orphans_removed, uint64_t(0));
     CHECK_EQ(st2.refs_missing, uint64_t(1));
-    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);  // meta untouched
+    // meta untouched
+    CHECK(sync_wait(b->head_object("bkt", "k")).size == 10000);
     sync_wait(b->close());
 
     // Grace shields fresh writes: unreferenced objects within the grace period are untouched (suspected in-flight
@@ -602,7 +620,8 @@ TEST(duostore_rados_op_metrics_registered) {
     CHECK(text0.find("lights3_duostore_rados_op_errors_total") != std::string::npos);
 
     auto w = sync_wait(d.open_writer({std::nullopt}));
-    std::string body = patterned(9000);  // 3 objects
+    // 3 objects
+    std::string body = patterned(9000);
     sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
     DataRef ref = sync_wait(w->finish());
     auto r = sync_wait(d.open_reader(ref, 0, ref.total() - 1));

@@ -95,14 +95,18 @@ TEST(duostore_sqlite_binary_key_ordering) {
     m.create_bucket("bin");
     // memcmp ascending (literals split up so \x does not greedily swallow following hex characters)
     std::vector<std::string> keys = {
-        std::string("a\x01") + "b",  // 0x01 control byte
-        "a\x7f",                     // DEL
-        "a\xc3\x28",                 // invalid UTF-8 sequence
-        "a\xff",                     // 0xff (a classic pitfall under TEXT storage)
+        // 0x01 control byte
+        std::string("a\x01") + "b",
+        // DEL
+        "a\x7f",
+        // invalid UTF-8 sequence
+        "a\xc3\x28",
+        // 0xff (a classic pitfall under TEXT storage)
+        "a\xff",
         "b",
     };
-    for (auto it = keys.rbegin(); it != keys.rend(); ++it)  // write out of order
-        m.put_object("bin", *it, make_rec(*it, {}));
+    // write out of order
+    for (auto it = keys.rbegin(); it != keys.rend(); ++it) m.put_object("bin", *it, make_rec(*it, {}));
 
     ListOptions opt;
     opt.max_keys = 2;
@@ -146,7 +150,8 @@ TEST(duostore_sqlite_persistence_across_reopen) {
         id1 = m.alloc_file_id(Extent::Kind::kChunk);
         id2 = m.alloc_file_id(Extent::Kind::kChunk);
         m.put_object("keep", "k", make_rec("k", {chunk_extent(id1, 7)}));
-        m.put_object("keep", "k", make_rec("k", {chunk_extent(id2, 7)}));  // version=2
+        // version=2
+        m.put_object("keep", "k", make_rec("k", {chunk_extent(id2, 7)}));
         m.close();
     }
     {
@@ -158,7 +163,8 @@ TEST(duostore_sqlite_persistence_across_reopen) {
         CHECK_EQ(rec->data.extents.at(0).file_id, id2);
         CHECK(m.chunk_referenced(id2));
         CHECK(!m.chunk_referenced(id1));
-        CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(1));  // the overwrite's old ledger entry is still there
+        // the overwrite's old ledger entry is still there
+        CHECK_EQ(m.peek_reclaims(10, 0).size(), size_t(1));
         m.close();
     }
 }
@@ -203,9 +209,11 @@ TEST(duostore_sqlite_swap_extents_cas) {
     uint64_t id2 = m.alloc_file_id(Extent::Kind::kChunk);
     DataRef from{{chunk_extent(id1, 8)}};
     DataRef to{{chunk_extent(id2, 8)}};
-    m.put_object("swap", "k", make_rec("k", from.extents));  // version=1
+    // version=1
+    m.put_object("swap", "k", make_rec("k", from.extents));
 
-    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));  // version mismatch
+    // version mismatch
+    CHECK(!m.swap_extents("swap", "k", /*expect_version=*/2, from, to));
     CHECK(m.chunk_referenced(id1));
     CHECK(!m.chunk_referenced(id2));
 
@@ -269,7 +277,8 @@ TEST(duostore_sqlite_single_process_lock) {
     SqliteMetaStore a(sqlite_opts(db));
     CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)), s3::S3ErrorCode::InternalError);
     a.close();
-    SqliteMetaStore b(sqlite_opts(db));  // lock has been released
+    // lock has been released
+    SqliteMetaStore b(sqlite_opts(db));
     CHECK(!b.bucket_exists("x"));
     b.close();
 }
@@ -296,7 +305,8 @@ int sqlite_crash_child(int argc, char** argv) {
     if (argc < 3) return 2;
     SqliteMetaOptions o;
     o.path = argv[2];
-    o.sync = true;  // the star of crash semantics: commit point = WAL fsync (§6)
+    // the star of crash semantics: commit point = WAL fsync (§6)
+    o.sync = true;
     SqliteMetaStore m(o);
     m.create_bucket("bkt");
     for (int i = 0;; ++i) {
@@ -344,22 +354,26 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
     char ch;
     while (buf.find('\n') == std::string::npos && ::read(fd, &ch, 1) == 1) buf.push_back(ch);
     CHECK(buf.find('\n') != std::string::npos);
-    usleep((100 + unsigned(::getpid()) % 300) * 1000);  // 100-400ms random window
+    // 100-400ms random window
+    usleep((100 + unsigned(::getpid()) % 300) * 1000);
     CHECK_EQ(::kill(pid, SIGKILL), 0);
     int stat = 0;
     CHECK(::waitpid(pid, &stat, 0) == pid);
     CHECK(WIFSIGNALED(stat) && WTERMSIG(stat) == SIGKILL);
-    for (;;) {  // drain the pipe; only complete lines count
+    for (;;) {
+        // drain the pipe; only complete lines count
         char rb[4096];
         ssize_t n = ::read(fd, rb, sizeof rb);
         if (n <= 0) break;
         buf.append(rb, size_t(n));
     }
     ::close(fd);
-    std::vector<std::pair<int, uint64_t>> reported;  // (i, file_id)
+    // (i, file_id)
+    std::vector<std::pair<int, uint64_t>> reported;
     for (size_t pos = 0; pos < buf.size();) {
         size_t nl = buf.find('\n', pos);
-        if (nl == std::string::npos) break;  // trailing partial line: does not count
+        // trailing partial line: does not count
+        if (nl == std::string::npos) break;
         std::string line = buf.substr(pos, nl - pos);
         pos = nl + 1;
         if (line.rfind("ok ", 0) != 0) continue;
@@ -368,7 +382,8 @@ TEST(duostore_sqlite_crash_wal_replay_reconciles) {
         reported.emplace_back(std::stoi(line.substr(3, sp - 3)), std::stoull(line.substr(sp + 1)));
     }
     CHECK(!reported.empty());
-    CHECK(fs::exists(db.string() + "-wal"));  // not closed: WAL awaiting replay
+    // not closed: WAL awaiting replay
+    CHECK(fs::exists(db.string() + "-wal"));
 
     uint64_t max_id = 0;
     {
@@ -429,18 +444,23 @@ TEST(duostore_sqlite_list_consistent_view_under_concurrent_write) {
     int fired = 0;
     m.set_list_pause_for_test([&] {
         ++fired;
-        m.put_object("iso", "bb", make_rec("bb", {}));  // insert in an unvisited range
-        CHECK(m.delete_object("iso", "d"));             // delete an unvisited key
-        m.put_object("iso", "a", make_rec("a", {}));    // overwrite an already-visited key
+        // insert in an unvisited range
+        m.put_object("iso", "bb", make_rec("bb", {}));
+        // delete an unvisited key
+        CHECK(m.delete_object("iso", "d"));
+        // overwrite an already-visited key
+        m.put_object("iso", "a", make_rec("a", {}));
     });
     auto r1 = m.list_objects("iso", {});
     CHECK_EQ(fired, 1);
-    CHECK_EQ(r1.objects.size(), size_t(4));  // snapshot: exactly a b c d
+    // snapshot: exactly a b c d
+    CHECK_EQ(r1.objects.size(), size_t(4));
     const char* want1[] = {"a", "b", "c", "d"};
     for (size_t i = 0; i < 4; ++i) CHECK_EQ(r1.objects[i].key, std::string(want1[i]));
 
     m.set_list_pause_for_test(nullptr);
-    auto r2 = m.list_objects("iso", {});  // new view: bb visible, d gone
+    // new view: bb visible, d gone
+    auto r2 = m.list_objects("iso", {});
     CHECK_EQ(r2.objects.size(), size_t(4));
     const char* want2[] = {"a", "b", "bb", "c"};
     for (size_t i = 0; i < 4; ++i) CHECK_EQ(r2.objects[i].key, std::string(want2[i]));
@@ -471,13 +491,15 @@ TEST(duostore_sqlite_busy_metric_counts_starvation) {
     sqlite3* ext = nullptr;
     CHECK_EQ(sqlite3_open(db.string().c_str(), &ext), SQLITE_OK);
     CHECK_EQ(sqlite3_exec(ext, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
-    CHECK_THROWS_S3(m.seal_pack(1, 0), s3::S3ErrorCode::InternalError);  // +1
-    CHECK_THROWS_S3(m.alloc_file_id(Extent::Kind::kChunk),
-                    s3::S3ErrorCode::InternalError);  // +4 (4 starved rounds)
+    // +1
+    CHECK_THROWS_S3(m.seal_pack(1, 0), s3::S3ErrorCode::InternalError);
+    // +4 (4 starved rounds)
+    CHECK_THROWS_S3(m.alloc_file_id(Extent::Kind::kChunk), s3::S3ErrorCode::InternalError);
     CHECK_EQ(sqlite3_exec(ext, "ROLLBACK", nullptr, nullptr, nullptr), SQLITE_OK);
     sqlite3_close(ext);
 
-    m.seal_pack(1, 0);  // recovers after the lock is released
+    // recovers after the lock is released
+    m.seal_pack(1, 0);
     CHECK(reg->render().find("lights3_duostore_sqlite_busy_total{backend=\"s4\"} 5\n") != std::string::npos);
     m.close();
 }
@@ -494,7 +516,8 @@ TEST(duostore_sqlite_corruption_metric_counts_notadb) {
     }
     {
         std::fstream f(db, std::ios::in | std::ios::out | std::ios::binary);
-        f.write("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", 32);  // overwrite the SQLite file header magic
+        // overwrite the SQLite file header magic
+        f.write("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX", 32);
     }
     auto reg = std::make_shared<MetricsRegistry>();
     auto opts = sqlite_opts(db);
@@ -512,9 +535,12 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
     auto pool = std::make_shared<ThreadPool>(4);
     DuoStoreConfig cfg;
     cfg.root = tmp.path / "duo";
-    cfg.chunk_size = 4096;      // force multi-chunk manifests
-    cfg.pack_threshold = 1024;  // small objects go to pack
-    cfg.gc_interval_sec = 0;    // manual hook; no background contention
+    // force multi-chunk manifests
+    cfg.chunk_size = 4096;
+    // small objects go to pack
+    cfg.pack_threshold = 1024;
+    // manual hook; no background contention
+    cfg.gc_interval_sec = 0;
     fs::create_directories(cfg.root);
     auto mk_data = [&](IMetaStore* mp) {
         return std::make_unique<FsDataStore>(
@@ -528,8 +554,10 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
             pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
             [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     };
-    const std::string small(200, 's');  // pack record
-    const std::string big(10000, 'b');  // a 3-chunk file
+    // pack record
+    const std::string small(200, 's');
+    // a 3-chunk file
+    const std::string big(10000, 'b');
     std::stringstream archive;
     {
         cfg.name = "migrate-src";
@@ -541,7 +569,8 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
         backend_suite::put(*b, "bkt", "small", small);
         backend_suite::put(*b, "bkt", "big", big);
         backend_suite::put(*b, "bkt", "doomed", "gone");
-        sync_wait(b->delete_object("bkt", "doomed"));  // create a gcq entry (deliberately not archived)
+        // create a gcq entry (deliberately not archived)
+        sync_wait(b->delete_object("bkt", "doomed"));
         auto st = sync_wait(b->run_meta_dump(archive));
         CHECK_EQ(st.buckets, uint64_t(1));
         CHECK_EQ(st.objects, uint64_t(2));
@@ -552,7 +581,8 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
         auto meta = std::make_unique<SqliteMetaStore>(sqlite_opts(tmp.path / "meta.sqlite3"));
         IMetaStore* mp = meta.get();
         auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), mk_data(mp));
-        auto st = sync_wait(b->run_meta_load(archive));  // built-in forced orphan scan
+        // built-in forced orphan scan
+        auto st = sync_wait(b->run_meta_load(archive));
         CHECK_EQ(st.objects, uint64_t(2));
         auto g1 = sync_wait(b->get_object("bkt", "small", std::nullopt));
         CHECK_EQ(backend_suite::read_all(*g1.body), small);
@@ -566,7 +596,8 @@ TEST(duostore_meta_dump_migrates_rocks_to_sqlite) {
         auto g3 = sync_wait(b->get_object("bkt", "fresh", std::nullopt));
         CHECK_EQ(backend_suite::read_all(*g3.body), fresh);
         auto g4 = sync_wait(b->get_object("bkt", "big", std::nullopt));
-        CHECK_EQ(backend_suite::read_all(*g4.body), big);  // existing data not clobbered
+        // existing data not clobbered
+        CHECK_EQ(backend_suite::read_all(*g4.body), big);
         sync_wait(b->close());
     }
 }
@@ -590,9 +621,11 @@ TEST(duostore_sqlite_schema_version_policy) {
         CHECK_EQ(sqlite3_exec(raw, sql.c_str(), nullptr, nullptr, nullptr), SQLITE_OK);
         sqlite3_close(raw);
     };
-    set_user_version(999);  // future version: a database written by a newer program
+    // future version: a database written by a newer program
+    set_user_version(999);
     CHECK_THROWS_S3(std::make_unique<SqliteMetaStore>(sqlite_opts(db)), s3::S3ErrorCode::InternalError);
-    set_user_version(1);  // restore the real version; the database was not polluted by the rejection paths
+    // restore the real version; the database was not polluted by the rejection paths
+    set_user_version(1);
     {
         SqliteMetaStore m(sqlite_opts(db));
         CHECK(m.bucket_exists("x"));
@@ -612,7 +645,8 @@ TEST(duostore_sqlite_snapshot_dump_is_consistent) {
 
     auto view = m.snapshot();
     CHECK(view != nullptr);
-    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));  // after the snapshot
+    // after the snapshot
+    m.put_object("b", "k3", make_rec("k3", {chunk_extent(3, 10)}));
     m.delete_object("b", "k1");
     m.create_bucket("b2");
 
@@ -665,7 +699,8 @@ TEST(duostore_sqlite_backup_chain_pitr) {
         m.put_object("b", "a", make_rec("a", {chunk_extent(1, 5)}));
         auto e1 = record(m.backup_physical(bk, man.next_id(), /*full=*/true));
         CHECK(e1.full && e1.bytes > 0);
-        CHECK(m.archiving());  // the chain started: WAL kept for the segments
+        // the chain started: WAL kept for the segments
+        CHECK(m.archiving());
         m.put_object("b", "bb", make_rec("bb", {chunk_extent(2, 5)}));
         auto e2 = record(m.backup_physical(bk, man.next_id(), /*full=*/false));
         CHECK(!e2.full && e2.bytes > 32);
@@ -680,7 +715,8 @@ TEST(duostore_sqlite_backup_chain_pitr) {
         CHECK(e4.file.empty());
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
         m.put_object("b", "d", make_rec("d", {chunk_extent(4, 5)}));
-        m.close();  // archives the closing segment as entry 5 on its own
+        // archives the closing segment as entry 5 on its own
+        m.close();
     }
     auto loaded = BackupManifest::load(bk);
     CHECK_EQ(loaded.entries.size(), size_t(5));
@@ -714,7 +750,8 @@ TEST(duostore_sqlite_backup_chain_pitr) {
     }
     loaded = BackupManifest::load(bk);
     auto tail = loaded.plan(std::nullopt, std::nullopt);
-    CHECK_EQ(tail.size(), size_t(1));  // the plan starts at the last full entry
+    // the plan starts at the last full entry
+    CHECK_EQ(tail.size(), size_t(1));
     CHECK(tail.front().full);
     CHECK_EQ(objects_at(tail), std::string("bbcde"));
 }
@@ -754,7 +791,8 @@ TEST(duostore_sqlite_backend_backup_and_restore_pitr) {
         // The chain lives in sqlite_wal_archive: another directory is refused
         CHECK_THROWS_S3(sync_wait(b.run_meta_backup(tmp.path / "elsewhere", /*incremental=*/true)),
                         s3::S3ErrorCode::InvalidRequest);
-        sync_wait(b.close());  // nothing committed since entry 3: no closing segment
+        // nothing committed since entry 3: no closing segment
+        sync_wait(b.close());
     }
     auto man = BackupManifest::load(bk);
     CHECK_EQ(man.engine, std::string("sqlite"));

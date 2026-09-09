@@ -20,29 +20,42 @@ namespace lights3::s3 {
 // Admission snapshot of ingress throttling (the runtime.max_inflight_requests semaphore) (docs/archive/gaps.md §7):
 // under load testing, these two numbers distinguish "stuck at admission" from "stuck in the pool"
 struct AdmissionStats {
-    long capacity = 0;   // total permits
-    long available = 0;  // remaining permits (capacity - available = in flight)
-    size_t waiting = 0;  // requests queued on the semaphore
+    // total permits
+    long capacity = 0;
+    // remaining permits (capacity - available = in flight)
+    long available = 0;
+    // requests queued on the semaphore
+    size_t waiting = 0;
     // Cumulative counters (roadmap §5.3, http/admission.h AdmissionCounters);
     // rendered only when `counters` is set (test/static assemblies may not wire them)
     bool counters = false;
-    std::array<uint64_t, 6> wait_hist{};  // bounds = AdmissionCounters::kWaitBounds + Inf
+    // bounds = AdmissionCounters::kWaitBounds + Inf
+    std::array<uint64_t, 6> wait_hist{};
     uint64_t wait_sum_us = 0;
     uint64_t wait_count = 0;
-    uint64_t queued = 0;      // had to wait for a permit
-    uint64_t cancelled = 0;   // cancelled while queued (503 SlowDown)
-    uint64_t stalls_in = 0;   // transfer stall cuts, request bodies
-    uint64_t stalls_out = 0;  // transfer stall cuts, response bodies
+    // had to wait for a permit
+    uint64_t queued = 0;
+    // cancelled while queued (503 SlowDown)
+    uint64_t cancelled = 0;
+    // transfer stall cuts, request bodies
+    uint64_t stalls_in = 0;
+    // transfer stall cuts, response bodies
+    uint64_t stalls_out = 0;
 };
 
 // Static-website plane events (roadmap §5.3, docs/static-website.md)
 enum class WebsiteEvent {
-    AnonRead = 0,   // request admitted on the anonymous plane
-    IndexRewrite,   // key rewritten to the index document
-    ErrorDocument,  // error answered with the site's error document / built-in page
-    Redirect,       // 301/302 answered by the website layer (RedirectAllRequestsTo,
-                    // RoutingRules, slash redirect, x-amz-website-redirect-location)
-    Throttled,      // per-bucket anonymous rate limit (503)
+    // request admitted on the anonymous plane
+    AnonRead = 0,
+    // key rewritten to the index document
+    IndexRewrite,
+    // error answered with the site's error document / built-in page
+    ErrorDocument,
+    // 301/302 answered by the website layer (RedirectAllRequestsTo,
+    // RoutingRules, slash redirect, x-amz-website-redirect-location)
+    Redirect,
+    // per-bucket anonymous rate limit (503)
+    Throttled,
     Count_
 };
 
@@ -111,7 +124,8 @@ private:
         uint64_t by_class[6] = {};
     };
     mutable std::mutex api_m_;
-    std::map<std::string, ApiStats> by_api_;  // key = api + '\0' + backend
+    // key = api + '\0' + backend
+    std::map<std::string, ApiStats> by_api_;
 
     struct BucketStats {
         uint64_t requests = 0;
@@ -123,15 +137,19 @@ private:
 
     std::atomic<uint64_t> inflight_{0};
     std::atomic<uint64_t> by_method_[kMethodCount]{};
-    std::atomic<uint64_t> by_status_class_[6]{};  // 1xx..5xx (index = hundreds digit)
-    std::atomic<uint64_t> by_status_[600]{};      // exact code (roadmap §5.3); only nonzero rendered
+    // 1xx..5xx (index = hundreds digit)
+    std::atomic<uint64_t> by_status_class_[6]{};
+    // exact code (roadmap §5.3); only nonzero rendered
+    std::atomic<uint64_t> by_status_[600]{};
     std::atomic<uint64_t> website_[size_t(WebsiteEvent::Count_)]{};
     std::atomic<uint64_t> latency_hist_[kLatencyBuckets.size() + 1]{};
     std::atomic<uint64_t> latency_sum_us_{0};
     std::atomic<uint64_t> latency_count_{0};
     std::atomic<uint64_t> mpu_created_{0};
-    std::atomic<uint64_t> mpu_finished_{0};      // complete + abort
-    std::atomic<uint64_t> rl_ip_{0}, rl_ak_{0};  // rate-limit rejections (roadmap §4.2)
+    // complete + abort
+    std::atomic<uint64_t> mpu_finished_{0};
+    // rate-limit rejections (roadmap §4.2)
+    std::atomic<uint64_t> rl_ip_{0}, rl_ak_{0};
     std::atomic<uint64_t> bytes_in_{0};
     std::atomic<uint64_t> bytes_out_{0};
 
@@ -141,7 +159,8 @@ private:
     mutable std::mutex bucket_m_;
     std::map<std::string, BucketStats, std::less<>> by_bucket_;
 
-    std::atomic<uint64_t> errors_[kS3ErrorCodeCount]{};  // indexed by S3ErrorCode
+    // indexed by S3ErrorCode
+    std::atomic<uint64_t> errors_[kS3ErrorCodeCount]{};
 };
 
 }  // namespace lights3::s3

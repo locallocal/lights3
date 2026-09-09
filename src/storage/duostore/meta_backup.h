@@ -39,8 +39,7 @@ struct BackupManifest {
     // The chain prefix to replay for a target: nullopt target = everything.
     // Throws InvalidRequest when the target precedes the first full entry, names
     // an unknown id, or the manifest is empty
-    std::vector<MetaBackupEntry> plan(std::optional<uint64_t> to_id,
-                                      std::optional<int64_t> to_ts_ms) const;
+    std::vector<MetaBackupEntry> plan(std::optional<uint64_t> to_id, std::optional<int64_t> to_ts_ms) const;
 };
 
 // "2026-09-06T12:34:56Z" (or with fractional seconds / offset) -> unix ms; also

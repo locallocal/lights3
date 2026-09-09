@@ -30,20 +30,18 @@ inline std::string strip_quotes(std::string s) {
 }
 
 // Both TSV and headers are line-oriented: CR/LF in metadata values would tear sidecar records apart, and is
-// also a response-header injection surface. First-class fields are rejected just like user-meta (docs/archive/gaps.md §5.2)
+// also a response-header injection surface. First-class fields are rejected just like user-meta (docs/archive/gaps.md
+// §5.2)
 inline void reject_control_chars(std::string_view name, const std::string& v) {
     if (v.find('\n') != std::string::npos || v.find('\r') != std::string::npos)
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Header '" + std::string(name) + "' must not contain line breaks.");
+        throw S3Error(S3ErrorCode::InvalidArgument, "Header '" + std::string(name) + "' must not contain line breaks.");
 }
 
 // Object tagging (roadmap §2.5): "k=v&k2=v2", both sides percent-encoded. AWS limits:
 // at most 10 tags, unique keys, key 1..128 chars, value 0..256 chars (decoded)
 inline std::vector<std::pair<std::string, std::string>> parse_tagging(const std::string& s) {
     std::vector<std::pair<std::string, std::string>> out;
-    auto bad = [](const std::string& why) {
-        throw S3Error(S3ErrorCode::InvalidArgument, "Invalid tag set: " + why);
-    };
+    auto bad = [](const std::string& why) { throw S3Error(S3ErrorCode::InvalidArgument, "Invalid tag set: " + why); };
     size_t pos = 0;
     while (pos < s.size()) {
         size_t amp = s.find('&', pos);
@@ -70,8 +68,7 @@ inline std::string encode_tagging(const std::vector<std::pair<std::string, std::
     std::string out;
     for (auto& [k, v] : tags) {
         if (!out.empty()) out += '&';
-        out += util::aws_uri_encode(k, /*encode_slash=*/true) + "=" +
-               util::aws_uri_encode(v, /*encode_slash=*/true);
+        out += util::aws_uri_encode(k, /*encode_slash=*/true) + "=" + util::aws_uri_encode(v, /*encode_slash=*/true);
     }
     return out;
 }
@@ -99,8 +96,7 @@ inline storage::ObjectMeta meta_from_headers(const http::HttpRequest& req) {
     // served verbatim as a Location header on the anonymous website plane, so free-form
     // schemes (javascript:, data:) must never get in
     if (!meta.website_redirect.empty() && meta.website_redirect.front() != '/' &&
-        meta.website_redirect.rfind("http://", 0) != 0 &&
-        meta.website_redirect.rfind("https://", 0) != 0)
+        meta.website_redirect.rfind("http://", 0) != 0 && meta.website_redirect.rfind("https://", 0) != 0)
         throw S3Error(S3ErrorCode::InvalidArgument,
                       "x-amz-website-redirect-location must start with '/', 'http://' or "
                       "'https://'.");
@@ -140,11 +136,9 @@ inline int64_t to_epoch_sec(util::SysTime t) {
 }
 
 // Source conditions shared by CopyObject / UploadPartCopy (x-amz-copy-source-if-*): any unmet condition yields 412
-inline void check_copy_preconditions(const http::HttpRequest& req,
-                                     const storage::ObjectMeta& src) {
+inline void check_copy_preconditions(const http::HttpRequest& req, const storage::ObjectMeta& src) {
     auto fail = [] {
-        throw S3Error(S3ErrorCode::PreconditionFailed,
-                      "At least one of the pre-conditions you specified did not hold");
+        throw S3Error(S3ErrorCode::PreconditionFailed, "At least one of the pre-conditions you specified did not hold");
     };
     if (auto v = req.headers.get("x-amz-copy-source-if-match"))
         if (strip_quotes(*v) != src.etag) fail();
@@ -176,7 +170,8 @@ inline std::pair<std::string, std::string> parse_copy_source(const std::string& 
     std::string bucket = s.substr(0, slash);
     // copy-source arrives via header and bypasses dispatch's bucket gate, so it must be validated here independently --
     // otherwise CopyObject could copy credential objects from .sys into user-readable objects. Uses the same
-    // validation function as dispatch (previously a third independent '.'-prefix heuristic; three copies evolving separately was a drift source)
+    // validation function as dispatch (previously a third independent '.'-prefix heuristic; three copies evolving
+    // separately was a drift source)
     storage::validate_bucket_name(bucket);
     return {std::move(bucket), s.substr(slash + 1)};
 }
@@ -197,8 +192,7 @@ inline void attach_request_checksum(http::HttpRequest& req, storage::ObjectMeta&
     auto slot = std::make_shared<std::string>();
     meta.checksum_pending = slot;
     if (!req.body) req.body = std::make_unique<http::StringBodyReader>("");
-    req.body =
-        std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
+    req.body = std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
 }
 
 // UploadPart variant: same extraction, result travels as the upload_part checksum
@@ -215,8 +209,7 @@ inline std::optional<storage::PartChecksum> extract_part_checksum(http::HttpRequ
     auto slot = std::make_shared<std::string>();
     pc.pending = slot;
     if (!req.body) req.body = std::make_unique<http::StringBodyReader>("");
-    req.body =
-        std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
+    req.body = std::make_unique<DigestCaptureReader>(std::move(req.body), rc->spec->algo, slot);
     return pc;
 }
 
@@ -232,8 +225,7 @@ inline void apply_checksum_echo(const http::HttpRequest& req, const storage::Obj
     std::string h = "x-amz-checksum-";
     for (char c : meta.checksum_algorithm) h.push_back(http::HeaderMap::lower(c));
     resp.headers.set(h, meta.checksum_value);
-    resp.headers.set("x-amz-checksum-type",
-                     meta.checksum_type.empty() ? "FULL_OBJECT" : meta.checksum_type);
+    resp.headers.set("x-amz-checksum-type", meta.checksum_type.empty() ? "FULL_OBJECT" : meta.checksum_type);
 }
 
 // PutObject/UploadPart require a request framing that carries a body (roadmap §2.5): a PUT
@@ -242,8 +234,7 @@ inline void apply_checksum_echo(const http::HttpRequest& req, const storage::Obj
 // answer (MissingContentLength was previously dead code in the error table)
 inline void require_content_length(const http::HttpRequest& req) {
     if (!req.headers.has("Content-Length") && !req.headers.has("Transfer-Encoding"))
-        throw S3Error(S3ErrorCode::MissingContentLength,
-                      "You must provide the Content-Length HTTP header.");
+        throw S3Error(S3ErrorCode::MissingContentLength, "You must provide the Content-Length HTTP header.");
 }
 
 // Read the entire request body (XML requests capped at 1MiB, docs/s3-protocol.md §4); over the cap throws MalformedXML
@@ -254,8 +245,7 @@ inline Task<std::string> read_body(http::HttpRequest& req, size_t max_size = 102
     for (;;) {
         size_t n = co_await req.body->read(std::span(buf));
         if (n == 0) break;
-        if (out.size() + n > max_size)
-            throw S3Error(S3ErrorCode::MalformedXML, "Request body exceeds the size limit.");
+        if (out.size() + n > max_size) throw S3Error(S3ErrorCode::MalformedXML, "Request body exceeds the size limit.");
         out.append(reinterpret_cast<const char*>(buf), n);
     }
     co_return out;

@@ -39,31 +39,23 @@ public:
 
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
-    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
-                               http::BodyReader& body,
+    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta, http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
-    Task<void> set_object_tagging(std::string_view bucket, std::string_view key,
-                                  std::string tagging) override;
+    Task<void> set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
-    Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
-                                       ObjectMeta meta) override;
+    Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) override;
     using IStorageBackend::upload_part;
-    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                std::string_view upload_id, int part_no, http::BodyReader& body,
-                                const std::optional<PartChecksum>& checksum) override;
-    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
-                                       std::string_view upload_id,
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id, int part_no,
+                                http::BodyReader& body, const std::optional<PartChecksum>& checksum) override;
+    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;
-    Task<void> abort_multipart(std::string_view bucket, std::string_view key,
-                               std::string_view upload_id) override;
-    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
-                                     std::string_view upload_id,
+    Task<void> abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) override;
+    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                      const ListPartsOptions& opt) override;
-    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
-                                                   const ListUploadsOptions& opt) override;
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) override;
     // Release everything resident (shutdown returns the memory; previously there was no
     // close and it stayed occupied until process teardown)
     Task<void> close() override;
@@ -102,8 +94,7 @@ private:
     };
 
     Bucket& bucket_or_throw(const std::string& name);
-    Upload& upload_or_throw(std::string_view bucket, std::string_view key,
-                            std::string_view upload_id);
+    Upload& upload_or_throw(std::string_view bucket, std::string_view key, std::string_view upload_id);
     // Capacity gate (called holding m_): delta is this call's net byte increase; over the
     // limit throws SlowDown without touching the books
     void reserve_locked(int64_t delta);

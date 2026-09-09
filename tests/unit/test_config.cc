@@ -98,16 +98,15 @@ TEST(config_website_buckets) {
 
     // Startup errors: empty bucket, duplicates, index_suffix with '/', empty
     // index_suffix, error_key with a leading '/'
-    for (const char* bad :
-         {"backends:\n  - name: m\n    type: memory\nwebsite:\n  - bucket: \"\"\n",
-          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: dup\n  - bucket: dup\n",
-          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: b\n    index_suffix: sub/index.html\n",
-          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: b\n    index_suffix: \"\"\n",
-          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: b\n    error_key: /error.html\n"}) {
+    for (const char* bad : {"backends:\n  - name: m\n    type: memory\nwebsite:\n  - bucket: \"\"\n",
+                            "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: dup\n  - bucket: dup\n",
+                            "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: b\n    index_suffix: sub/index.html\n",
+                            "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: b\n    index_suffix: \"\"\n",
+                            "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: b\n    error_key: /error.html\n"}) {
         bool thrown = false;
         try {
             Config::from_string(bad);
@@ -161,13 +160,9 @@ TEST(parse_duration_rejects_negative_and_overflow) {
 
 TEST(yaml_rejects_unexpected_indent) {
     // A list-item parameter indented two spaces too far: previously silently dropped, now an error
-    CHECK(throws([] {
-        yaml_parse("backends:\n  - name: a\n      type: memory\n");
-    }));
+    CHECK(throws([] { yaml_parse("backends:\n  - name: a\n      type: memory\n"); }));
     // A list-item parameter under-indented: also an error rather than being dropped
-    CHECK(throws([] {
-        yaml_parse("backends:\n  - name: a\n type: memory\n");
-    }));
+    CHECK(throws([] { yaml_parse("backends:\n  - name: a\n type: memory\n"); }));
     // Normal nesting is unaffected
     auto n = yaml_parse("backends:\n  - name: a\n    type: memory\n");
     CHECK_EQ(n.find("backends")->list.size(), size_t(1));
@@ -175,41 +170,24 @@ TEST(yaml_rejects_unexpected_indent) {
 
 TEST(config_rejects_out_of_range_values) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  port: 70000\n") + backends);
-    }));
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  port: -1\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  port: 70000\n") + backends); }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  port: -1\n") + backends); }));
     // port 0 is valid: the kernel assigns a free port
-    CHECK_EQ(static_cast<int>(
-                 Config::from_string(std::string("http:\n  port: 0\n") + backends).http.port),
-             0);
-    CHECK(throws([&] {
-        Config::from_string(std::string("runtime:\n  max_inflight_requests: 0\n") + backends);
-    }));
-    CHECK(throws([&] {
-        Config::from_string(std::string("runtime:\n  io_threads: -2\n") + backends);
-    }));
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  io_threads: 0\n") + backends);
-    }));
+    CHECK_EQ(static_cast<int>(Config::from_string(std::string("http:\n  port: 0\n") + backends).http.port), 0);
+    CHECK(throws([&] { Config::from_string(std::string("runtime:\n  max_inflight_requests: 0\n") + backends); }));
+    CHECK(throws([&] { Config::from_string(std::string("runtime:\n  io_threads: -2\n") + backends); }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  io_threads: 0\n") + backends); }));
 }
 
 // ---------- Validation gaps (gaps §3.9) ----------
 
 TEST(config_rejects_absurd_thread_counts) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
-    // Upper bound aligned with the per-backend parameter of the same name [1,1024]: a fat-fingered 100000 would drag the process down at startup
-    CHECK(throws([&] {
-        Config::from_string(std::string("runtime:\n  io_threads: 100000\n") + backends);
-    }));
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  io_threads: 2048\n") + backends);
-    }));
-    CHECK_EQ(Config::from_string(std::string("runtime:\n  io_threads: 1024\n") + backends)
-                 .runtime.io_threads,
-             1024);
+    // Upper bound aligned with the per-backend parameter of the same name [1,1024]: a fat-fingered 100000 would drag
+    // the process down at startup
+    CHECK(throws([&] { Config::from_string(std::string("runtime:\n  io_threads: 100000\n") + backends); }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  io_threads: 2048\n") + backends); }));
+    CHECK_EQ(Config::from_string(std::string("runtime:\n  io_threads: 1024\n") + backends).runtime.io_threads, 1024);
 }
 
 TEST(config_int_errors_name_the_key_and_value) {
@@ -224,9 +202,7 @@ TEST(config_int_errors_name_the_key_and_value) {
     CHECK(msg.find("runtime.io_threads") != std::string::npos);
     CHECK(msg.find("eight") != std::string::npos);
     // Trailing garbage is no longer treated as a valid prefix
-    CHECK(throws([&] {
-        Config::from_string(std::string("runtime:\n  io_threads: 8x\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("runtime:\n  io_threads: 8x\n") + backends); }));
 }
 
 // ---------- Validation gaps, second round (docs/archive/roadmap.md §1.2) ----------
@@ -234,9 +210,7 @@ TEST(config_int_errors_name_the_key_and_value) {
 TEST(config_port_rejects_trailing_garbage) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // port was the last field going through bare stoi: "9000abc" silently became 9000
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  port: 9000abc\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  port: 9000abc\n") + backends); }));
     std::string msg;
     try {
         Config::from_string(std::string("http:\n  port: nine\n") + backends);
@@ -254,42 +228,30 @@ TEST(config_admin_port_parsed_and_distinct) {
     auto off = Config::from_string(std::string("http:\n  port: 9000\n") + backends);
     CHECK_EQ(off.http.admin_port, -1);
     CHECK(off.http.admin_bind.empty());
-    auto on = Config::from_string(
-        std::string("http:\n  port: 9000\n  admin_port: 0\n  admin_bind: 127.0.0.1\n") + backends);
+    auto on = Config::from_string(std::string("http:\n  port: 9000\n  admin_port: 0\n  admin_bind: 127.0.0.1\n") +
+                                  backends);
     CHECK_EQ(on.http.admin_port, 0);
     CHECK_EQ(on.http.admin_bind, "127.0.0.1");
-    CHECK_EQ(Config::from_string(std::string("http:\n  port: 9000\n  admin_port: 9001\n") + backends)
-                 .http.admin_port,
+    CHECK_EQ(Config::from_string(std::string("http:\n  port: 9000\n  admin_port: 9001\n") + backends).http.admin_port,
              9001);
     // Same port on the same address: two listeners cannot both bind
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  port: 9000\n  admin_port: 9000\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  port: 9000\n  admin_port: 9000\n") + backends); }));
     // Same port on a different address is legal
     CHECK_EQ(Config::from_string(std::string("http:\n  bind: 0.0.0.0\n  port: 9000\n"
                                              "  admin_port: 9000\n  admin_bind: 127.0.0.1\n") +
                                  backends)
                  .http.admin_port,
              9000);
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  admin_port: 70000\n") + backends);
-    }));
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  admin_port: nine\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  admin_port: 70000\n") + backends); }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  admin_port: nine\n") + backends); }));
 }
 
 TEST(config_max_header_size_bounded) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // 4GiB truncates to 0 in beast's parser.header_limit(uint32_t) and rejects everything
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  max_header_size: 4GiB\n") + backends);
-    }));
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  max_header_size: 512\n") + backends);
-    }));
-    CHECK_EQ(Config::from_string(std::string("http:\n  max_header_size: 1MiB\n") + backends)
-                 .http.max_header_size,
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  max_header_size: 4GiB\n") + backends); }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  max_header_size: 512\n") + backends); }));
+    CHECK_EQ(Config::from_string(std::string("http:\n  max_header_size: 1MiB\n") + backends).http.max_header_size,
              size_t(1024 * 1024));
 }
 
@@ -297,27 +259,17 @@ TEST(config_idle_timeout_rejects_zero) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // 0 means "never" to builtin but "expire immediately" to beast — rejected rather
     // than silently meaning opposite things per driver
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  idle_timeout: 0s\n") + backends);
-    }));
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  idle_timeout: 2d\n") + backends);
-    }));
-    CHECK_EQ(Config::from_string(std::string("http:\n  idle_timeout: 24h\n") + backends)
-                 .http.idle_timeout_sec,
-             86400);
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  idle_timeout: 0s\n") + backends); }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  idle_timeout: 2d\n") + backends); }));
+    CHECK_EQ(Config::from_string(std::string("http:\n  idle_timeout: 24h\n") + backends).http.idle_timeout_sec, 86400);
 }
 
 TEST(config_log_level_rejects_typos) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // "warning" used to silently downgrade to info — the operator thinks the level took effect
-    CHECK(throws([&] {
-        Config::from_string(std::string("log:\n  level: warning\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("log:\n  level: warning\n") + backends); }));
     for (const char* ok : {"debug", "info", "warn", "error"})
-        CHECK_EQ(Config::from_string(std::string("log:\n  level: ") + ok + "\n" + backends)
-                     .log.level,
-                 ok);
+        CHECK_EQ(Config::from_string(std::string("log:\n  level: ") + ok + "\n" + backends).log.level, ok);
 }
 
 TEST(config_log_section) {
@@ -346,9 +298,8 @@ TEST(config_log_section) {
     CHECK_EQ(Config::from_string(std::string("log:\n  slow_request_threshold: 2s\n") + backends)
                  .log.slow_request_threshold_ms,
              2000);
-    for (const char* bad : {"  format: xml\n", "  async_overflow: panic\n", "  async_queue: 8\n",
-                            "  max_files: 0\n", "  max_size: 1KiB\n",
-                            "  slow_request_threshold: -1s\n", "  slow_request_threshold: 1x\n"})
+    for (const char* bad : {"  format: xml\n", "  async_overflow: panic\n", "  async_queue: 8\n", "  max_files: 0\n",
+                            "  max_size: 1KiB\n", "  slow_request_threshold: -1s\n", "  slow_request_threshold: 1x\n"})
         CHECK(throws([&] { Config::from_string(std::string("log:\n") + bad + backends); }));
     CHECK_EQ(parse_duration_ms("250ms"), 250);
     CHECK_EQ(parse_duration_ms("3"), 3000);
@@ -359,28 +310,21 @@ TEST(config_log_section) {
 TEST(config_metrics_access) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     CHECK_EQ(Config::from_string(backends).http.metrics_access, "anonymous");
-    CHECK_EQ(Config::from_string(std::string("http:\n  metrics_access: root\n") + backends)
-                 .http.metrics_access,
+    CHECK_EQ(Config::from_string(std::string("http:\n  metrics_access: root\n") + backends).http.metrics_access,
              "root");
-    CHECK(throws([&] {
-        Config::from_string(std::string("http:\n  metrics_access: public\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("http:\n  metrics_access: public\n") + backends); }));
 }
 
 TEST(config_bucket_rule_rejects_empty_fields) {
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // An empty glob can never match a bucket name; an empty backend surfaced as unknown backend ""
     CHECK(throws([&] {
-        Config::from_string(std::string(backends) +
-                            "buckets:\n  rules:\n    - match: \"\"\n      backend: m\n");
+        Config::from_string(std::string(backends) + "buckets:\n  rules:\n    - match: \"\"\n      backend: m\n");
     }));
     CHECK(throws([&] {
-        Config::from_string(std::string(backends) +
-                            "buckets:\n  rules:\n    - match: \"a-*\"\n      backend: \"\"\n");
+        Config::from_string(std::string(backends) + "buckets:\n  rules:\n    - match: \"a-*\"\n      backend: \"\"\n");
     }));
-    CHECK(throws([&] {
-        Config::from_string(std::string(backends) + "buckets:\n  rules:\n    - match: \"a-*\"\n");
-    }));
+    CHECK(throws([&] { Config::from_string(std::string(backends) + "buckets:\n  rules:\n    - match: \"a-*\"\n"); }));
 }
 
 TEST(config_stall_timeout_must_not_exceed_request_timeout) {
@@ -405,10 +349,8 @@ TEST(config_stall_timeout_must_not_exceed_request_timeout) {
 }
 
 TEST(config_rejects_duplicate_backend_name) {
-    CHECK(throws([] {
-        Config::from_string(
-            "backends:\n  - name: dup\n    type: memory\n  - name: dup\n    type: memory\n");
-    }));
+    CHECK(throws(
+        [] { Config::from_string("backends:\n  - name: dup\n    type: memory\n  - name: dup\n    type: memory\n"); }));
 }
 
 TEST(config_keeps_hash_inside_quotes) {
@@ -427,18 +369,15 @@ TEST(config_undefined_env_is_an_error_unless_defaulted) {
     unsetenv("LIGHTS3_DEFINITELY_UNSET");
     const char* backends = "backends:\n  - name: m\n    type: memory\n";
     // Silently expanding to an empty string would turn "misspelled variable name" into "value quietly becomes empty"
-    CHECK(throws([&] {
-        Config::from_string(std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET}\n") + backends);
-    }));
+    CHECK(throws([&] { Config::from_string(std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET}\n") + backends); }));
     // Genuinely optional values are written ${VAR:-default}
-    auto cfg = Config::from_string(
-        std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET:-debug}\n") + backends);
+    auto cfg = Config::from_string(std::string("log:\n  level: ${LIGHTS3_DEFINITELY_UNSET:-debug}\n") + backends);
     CHECK_EQ(cfg.log.level, "debug");
 }
 
 TEST(config_tls_requires_both_cert_and_key) {
-    // Providing only one half is necessarily a misconfiguration (docs/archive/gaps.md §7): silently ignoring it would let
-    // an instance that "thinks TLS is on" run in plaintext
+    // Providing only one half is necessarily a misconfiguration (docs/archive/gaps.md §7): silently ignoring it would
+    // let an instance that "thinks TLS is on" run in plaintext
     auto one_sided = R"(
 http:
   tls_cert: /etc/lights3/server.crt
@@ -501,7 +440,8 @@ backends:
     CHECK_EQ(tuned.http.body_queue_cap, size_t(512 * 1024));
     CHECK_EQ(tuned.http.shutdown_grace_sec, 3);
     CHECK_EQ(tuned.http.shutdown_force_wait_sec, 1);
-    // Set when io_threads is configured explicitly (the builtin driver uses this to WARN instead of silently ignoring it)
+    // Set when io_threads is configured explicitly (the builtin driver uses this to WARN instead of silently ignoring
+    // it)
     CHECK(tuned.http.io_threads_set);
 
     bool threw = false;
@@ -532,15 +472,14 @@ TEST(config_website_redirect_and_rate) {
     CHECK_EQ(cfg.website.buckets[1].redirect_all_host, "");
 
     // Rejections: bad protocol, protocol without host, out-of-range / garbage max_rps
-    for (const char* bad :
-         {"backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: b\n    redirect_all_host: h\n    redirect_all_protocol: ftp\n",
-          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: b\n    redirect_all_protocol: https\n",
-          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: b\n    max_rps: -1\n",
-          "backends:\n  - name: m\n    type: memory\nwebsite:\n"
-          "  - bucket: b\n    max_rps: 10x\n"}) {
+    for (const char* bad : {"backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: b\n    redirect_all_host: h\n    redirect_all_protocol: ftp\n",
+                            "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: b\n    redirect_all_protocol: https\n",
+                            "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: b\n    max_rps: -1\n",
+                            "backends:\n  - name: m\n    type: memory\nwebsite:\n"
+                            "  - bucket: b\n    max_rps: 10x\n"}) {
         bool thrown = false;
         try {
             Config::from_string(bad);

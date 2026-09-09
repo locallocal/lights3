@@ -153,7 +153,7 @@ public:
         int ring = -1;  // <0 = pick round-robin at suspension
         // iovec for the READV/WRITEV fallback path: lives in the coroutine frame with the
         // Awaitable, so it stays valid across suspension
-        struct iovec iov {};
+        struct iovec iov{};
         CoroOp op;
 
         bool await_ready() const noexcept { return false; }

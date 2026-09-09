@@ -1,4 +1,5 @@
-// docs/credential-management.md: CredentialStore persistence / two-tier permissions + the full /-/admin/credentials flow
+// docs/credential-management.md: CredentialStore persistence / two-tier permissions + the full /-/admin/credentials
+// flow
 // + phase two (§10): at-rest encryption / per-credential policy / file hot reload / multi-instance incremental sync
 #include <unistd.h>
 
@@ -7,12 +8,12 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 
+#include <thread>
 #include "core/util/checksum.h"
 #include "core/util/crypto.h"
 #include "s3/auth/credential_store.h"
 #include "s3/service.h"
 #include "storage/memory/memory_backend.h"
-#include <thread>
 
 #include "unit/mini_test.h"
 
@@ -31,8 +32,7 @@ AuthConfig root_cfg() {
     return cfg;
 }
 
-std::shared_ptr<CredentialStore> load_store(std::shared_ptr<storage::IStorageBackend> be,
-                                            const AuthConfig& cfg) {
+std::shared_ptr<CredentialStore> load_store(std::shared_ptr<storage::IStorageBackend> be, const AuthConfig& cfg) {
     return sync_wait(CredentialStore::load(std::move(be), cfg));
 }
 
@@ -46,9 +46,7 @@ struct SvcEnv {
     explicit SvcEnv(AuthConfig cfg = root_cfg()) : SvcEnv(std::make_shared<storage::MemoryBackend>(), cfg) {}
     // A second "instance" over the same backend (multi-instance sharing of .sys)
     SvcEnv(std::shared_ptr<storage::MemoryBackend> shared, AuthConfig cfg = root_cfg())
-        : backend(std::move(shared)),
-          store(load_store(backend, cfg)),
-          signer(SigV4Authenticator::build(cfg)) {
+        : backend(std::move(shared)), store(load_store(backend, cfg)), signer(SigV4Authenticator::build(cfg)) {
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends;
         backends["mem"] = backend;
         BucketsConfig bcfg;
@@ -61,8 +59,7 @@ struct SvcEnv {
     }
 
     http::HttpResponse call(std::string method, std::string path, const Credential& cred,
-                            std::vector<std::pair<std::string, std::string>> query = {},
-                            std::string body = "",
+                            std::vector<std::pair<std::string, std::string>> query = {}, std::string body = "",
                             std::vector<std::pair<std::string, std::string>> headers = {}) {
         http::HttpRequest req;
         req.method = std::move(method);
@@ -133,7 +130,8 @@ TEST(credstore_remove_semantics) {
 
 TEST(credstore_static_wins_on_conflict) {
     auto be = std::make_shared<storage::MemoryBackend>();
-    // A store without a static table generates a dynamic credential, then reloads with a "static table with the same AK"
+    // A store without a static table generates a dynamic credential, then reloads with a "static table with the same
+    // AK"
     auto c = sync_wait(load_store(be, AuthConfig{})->generate(""));
     AuthConfig cfg;
     cfg.credentials = {{c.access_key, "static-overrides"}};
@@ -168,8 +166,7 @@ TEST(admin_api_full_flow) {
     auto created = env.call("POST", "/-/admin/credentials", root, {{"comment", "ci"}});
     CHECK_EQ(created.status, 201);
     auto j = body_json(created);
-    Credential dyn{j.at("access_key").get<std::string>(),
-                   j.at("secret_key").get<std::string>()};
+    Credential dyn{j.at("access_key").get<std::string>(), j.at("secret_key").get<std::string>()};
     CHECK_EQ(j.at("source").get<std::string>(), "dynamic");
     CHECK_EQ(j.at("comment").get<std::string>(), "ci");
 
@@ -191,8 +188,7 @@ TEST(admin_api_full_flow) {
     // Single lookup: masked by default, show-secret requests it explicitly
     auto masked = env.call("GET", "/-/admin/credentials/" + dyn.access_key, root);
     CHECK(!body_json(masked).contains("secret_key"));
-    auto shown = env.call("GET", "/-/admin/credentials/" + dyn.access_key, root,
-                          {{"show-secret", "true"}});
+    auto shown = env.call("GET", "/-/admin/credentials/" + dyn.access_key, root, {{"show-secret", "true"}});
     CHECK_EQ(body_json(shown).at("secret_key").get<std::string>(), dyn.secret_key);
 
     // Revoke: 204 -> new data-plane requests get 403, admin single lookup gets 403
@@ -207,8 +203,7 @@ TEST(admin_api_requires_root) {
     SvcEnv env;
     Credential root{kRootAk, kRootSk};
     auto j = body_json(env.call("POST", "/-/admin/credentials", root));
-    Credential dyn{j.at("access_key").get<std::string>(),
-                   j.at("secret_key").get<std::string>()};
+    Credential dyn{j.at("access_key").get<std::string>(), j.at("secret_key").get<std::string>()};
 
     // A dynamic credential cannot mint credentials (privilege-escalation chain)
     auto resp = env.call("POST", "/-/admin/credentials", dyn);
@@ -242,8 +237,7 @@ TEST(admin_api_method_not_allowed) {
 namespace {
 
 // 64 hex chars = 32-byte master key (fixed value for tests)
-constexpr const char* kTestMasterKeyHex =
-    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+constexpr const char* kTestMasterKeyHex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
 struct EnvGuard {  // sets an environment variable for the test, cleared when the scope ends
     const char* name;
@@ -315,11 +309,11 @@ TEST(credstore_v2_requires_correct_master_key) {
         EnvGuard env(kMasterKeyEnv, kTestMasterKeyHex);
         sync_wait(load_store(be, root_cfg())->generate("enc"));
     }
-    // No key / wrong key / malformed key are all configuration errors: fail fast rather than silently losing credentials
+    // No key / wrong key / malformed key are all configuration errors: fail fast rather than silently losing
+    // credentials
     CHECK(load_throws(be, root_cfg()));
     {
-        EnvGuard env(kMasterKeyEnv,
-                     "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+        EnvGuard env(kMasterKeyEnv, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
         CHECK(load_throws(be, root_cfg()));
     }
     {
@@ -331,8 +325,7 @@ TEST(credstore_v2_requires_correct_master_key) {
 TEST(credstore_v1_upgraded_to_v2_on_load) {
     auto be = std::make_shared<storage::MemoryBackend>();
     auto c = sync_wait(load_store(be, root_cfg())->generate("old"));  // no key: v1 plaintext
-    CHECK(read_object_raw(*be, "credentials/" + c.access_key).find("\"sk\"") !=
-          std::string::npos);
+    CHECK(read_object_raw(*be, "credentials/" + c.access_key).find("\"sk\"") != std::string::npos);
 
     EnvGuard env(kMasterKeyEnv, kTestMasterKeyHex);
     auto store = load_store(be, root_cfg());  // upgraded in place at load time
@@ -351,8 +344,8 @@ TEST(credstore_policy_enforced_and_persisted) {
     auto c = sync_wait(store->generate("scoped", p));
 
     store->authorize(c.access_key, "logs-app", "", Action::Read);  // matches the glob
-    store->authorize(c.access_key, "", "", Action::Read);            // ListBuckets allowed
-    store->authorize(kRootAk, "anything", "", Action::Write);        // root is unrestricted
+    store->authorize(c.access_key, "", "", Action::Read);          // ListBuckets allowed
+    store->authorize(kRootAk, "anything", "", Action::Write);      // root is unrestricted
     CHECK_THROWS_S3(store->authorize(c.access_key, "logs-app", "", Action::Write),
                     S3ErrorCode::AccessDenied);  // readonly
     CHECK_THROWS_S3(store->authorize(c.access_key, "other", "", Action::Read),
@@ -370,15 +363,13 @@ TEST(admin_api_policy_flow) {
     CHECK_EQ(env.call("PUT", "/logs-a/k", root, {}, "v").status, 200);
     CHECK_EQ(env.call("PUT", "/private", root).status, 200);
 
-    auto created = env.call(
-        "POST", "/-/admin/credentials", root, {},
-        R"({"comment":"scoped","policy":{"buckets":["logs-*"],"readonly":true}})");
+    auto created = env.call("POST", "/-/admin/credentials", root, {},
+                            R"({"comment":"scoped","policy":{"buckets":["logs-*"],"readonly":true}})");
     CHECK_EQ(created.status, 201);
     auto j = body_json(created);
     CHECK_EQ(j.at("comment").get<std::string>(), "scoped");
     CHECK(j.at("policy").at("readonly").get<bool>());
-    Credential dyn{j.at("access_key").get<std::string>(),
-                   j.at("secret_key").get<std::string>()};
+    Credential dyn{j.at("access_key").get<std::string>(), j.at("secret_key").get<std::string>()};
 
     CHECK_EQ(env.call("GET", "/logs-a/k", dyn).status, 200);
     CHECK_EQ(env.call("PUT", "/logs-a/new", dyn, {}, "x").status, 403);  // readonly
@@ -390,47 +381,36 @@ TEST(admin_api_policy_flow) {
     CHECK(lb.small_body.find("<Name>logs-a</Name>") != std::string::npos);
     CHECK(lb.small_body.find("<Name>private</Name>") == std::string::npos);
 
-    // copy-source is also policy-constrained (sealing the read side channel, docs/credential-management.md §10.4): a writable scoped
-    // credential copying from a bucket outside the allowlist -> 403, inside -> 200
-    auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {},
-                                 R"({"policy":{"buckets":["logs-*"]}})"));
-    Credential dyn2{j2.at("access_key").get<std::string>(),
-                    j2.at("secret_key").get<std::string>()};
-    CHECK_EQ(env.call("PUT", "/logs-a/stolen", dyn2, {}, "",
-                      {{"x-amz-copy-source", "/private/k"}})
-                 .status,
-             403);
+    // copy-source is also policy-constrained (sealing the read side channel, docs/credential-management.md §10.4): a
+    // writable scoped credential copying from a bucket outside the allowlist -> 403, inside -> 200
+    auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {}, R"({"policy":{"buckets":["logs-*"]}})"));
+    Credential dyn2{j2.at("access_key").get<std::string>(), j2.at("secret_key").get<std::string>()};
+    CHECK_EQ(env.call("PUT", "/logs-a/stolen", dyn2, {}, "", {{"x-amz-copy-source", "/private/k"}}).status, 403);
     CHECK_EQ(env.call("PUT", "/private/k", root, {}, "secret").status, 200);
-    CHECK_EQ(env.call("PUT", "/logs-a/copied", dyn2, {}, "",
-                      {{"x-amz-copy-source", "/logs-a/k"}})
-                 .status,
-             200);
+    CHECK_EQ(env.call("PUT", "/logs-a/copied", dyn2, {}, "", {{"x-amz-copy-source", "/logs-a/k"}}).status, 200);
 
     // Strict validation: unknown field / invalid policy -> 400
-    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {}, R"({"bogus":1})").status,
-             400);
-    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {},
-                      R"({"policy":{"buckets":"not-an-array"}})")
-                 .status,
+    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {}, R"({"bogus":1})").status, 400);
+    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {}, R"({"policy":{"buckets":"not-an-array"}})").status,
              400);
 }
 
 TEST(credstore_file_provider_and_hot_reload) {
     namespace fs = std::filesystem;
     // With pid: unit_tests of multiple build variants running in parallel must not overwrite each other
-    auto path = fs::temp_directory_path() /
-                ("lights3-test-creds-" + std::to_string(::getpid()) + ".json");
+    auto path = fs::temp_directory_path() / ("lights3-test-creds-" + std::to_string(::getpid()) + ".json");
     std::ofstream(path) << R"({"credentials":[
         {"access_key":"FILEAKAAA","secret_key":"file-secret-1","comment":"from-file"},
         {"access_key":"FILEAKBBB","secret_key":"file-secret-2","policy":{"readonly":true}},
-        {"access_key":")" << kRootAk << R"(","secret_key":"file-tries-override"}]})";
+        {"access_key":")"
+                        << kRootAk << R"(","secret_key":"file-tries-override"}]})";
     AuthConfig cfg = root_cfg();
     cfg.credentials_file = path.string();
     auto be = std::make_shared<storage::MemoryBackend>();
     auto store = load_store(be, cfg);
 
     CHECK(store->secret_for("FILEAKAAA").value_or("") == "file-secret-1");
-    CHECK(!store->is_root("FILEAKAAA"));  // file-sourced credentials are data-plane only
+    CHECK(!store->is_root("FILEAKAAA"));                        // file-sourced credentials are data-plane only
     CHECK(store->secret_for(kRootAk).value_or("") == kRootSk);  // static wins for the same AK
     CHECK_THROWS_S3(store->authorize("FILEAKBBB", "b", "", Action::Write), S3ErrorCode::AccessDenied);
     CHECK_THROWS_S3(sync_wait(store->remove("FILEAKAAA")), S3ErrorCode::MethodNotAllowed);
@@ -483,11 +463,11 @@ TEST(sys_bucket_hidden_from_data_plane) {
 
 // ---------- Regression cases found in review (auth fail-open protection / revocation races) ----------
 
-// Fail-open protection: in the pure-file configuration, the file being wiped to an empty array must not empty the credential table (keep the old table + degraded)
+// Fail-open protection: in the pure-file configuration, the file being wiped to an empty array must not empty the
+// credential table (keep the old table + degraded)
 TEST(credstore_file_reload_refuses_empty_table) {
     namespace fs = std::filesystem;
-    auto path = fs::temp_directory_path() /
-                ("lights3-test-empty-creds-" + std::to_string(::getpid()) + ".json");
+    auto path = fs::temp_directory_path() / ("lights3-test-empty-creds-" + std::to_string(::getpid()) + ".json");
     std::ofstream(path) << R"({"credentials":[
         {"access_key":"FILEAKAAA","secret_key":"file-secret-1"}]})";
     AuthConfig cfg;  // no static credentials: auth depends entirely on the file
@@ -564,7 +544,8 @@ TEST(credstore_policy_snapshot_survives_revocation) {
     CHECK(ident.policy && ident.policy->readonly);
 
     sync_wait(env.store->remove(c.access_key));
-    // In-flight requests keep deciding by the snapshot: writes still denied, reads still allowed, matching verification time
+    // In-flight requests keep deciding by the snapshot: writes still denied, reads still allowed, matching verification
+    // time
     CHECK(!ident.policy->allows("bkt", "", Action::Write));
     CHECK(ident.policy->allows("bkt", "", Action::Read));
     // A new request after revocation cannot find the AK -> InvalidAccessKeyId (fail-closed, not unrestricted)
@@ -572,7 +553,8 @@ TEST(credstore_policy_snapshot_survives_revocation) {
 }
 
 TEST(policy_action_and_prefix_granularity) {
-    // §5.10: previously readonly was the only switch, so "can write" necessarily meant "can delete"; there was no key-prefix granularity either
+    // §5.10: previously readonly was the only switch, so "can write" necessarily meant "can delete"; there was no
+    // key-prefix granularity either
     SvcEnv env;
     Credential root{kRootAk, kRootSk};
     CHECK_EQ(env.call("PUT", "/data", root).status, 200);
@@ -581,27 +563,25 @@ TEST(policy_action_and_prefix_granularity) {
     CHECK_EQ(env.call("PUT", "/data/tenant-b/x", root, {}, "v").status, 200);
 
     // Backup scenario: can read and write, cannot delete
-    auto j = body_json(env.call("POST", "/-/admin/credentials", root, {},
-                                R"({"policy":{"actions":["read","write"]}})"));
-    Credential backup{j.at("access_key").get<std::string>(),
-                      j.at("secret_key").get<std::string>()};
+    auto j = body_json(
+        env.call("POST", "/-/admin/credentials", root, {}, R"({"policy":{"actions":["read","write"]}})"));
+    Credential backup{j.at("access_key").get<std::string>(), j.at("secret_key").get<std::string>()};
     CHECK_EQ(env.call("GET", "/data/keep.txt", backup).status, 200);
     CHECK_EQ(env.call("PUT", "/data/new.txt", backup, {}, "x").status, 200);
     CHECK_EQ(env.call("DELETE", "/data/keep.txt", backup).status, 403);
     CHECK_EQ(env.call("GET", "/data/keep.txt", root).status, 200);  // indeed not deleted
-    // DeleteObjects is a POST, but classified by action it is still a delete -- the method dimension cannot tell these apart
-    CHECK_EQ(env.call("POST", "/data", backup, {{"delete", ""}},
-                      "<Delete><Object><Key>keep.txt</Key></Object></Delete>")
-                 .status,
-             403);
+    // DeleteObjects is a POST, but classified by action it is still a delete -- the method dimension cannot tell these
+    // apart
+    CHECK_EQ(
+        env.call("POST", "/data", backup, {{"delete", ""}}, "<Delete><Object><Key>keep.txt</Key></Object></Delete>")
+            .status,
+        403);
     // Creating a multipart upload is a write, allowed (also a POST; the method dimension cannot tell these two apart)
     CHECK_EQ(env.call("POST", "/data/mp", backup, {{"uploads", ""}}).status, 200);
 
     // Multi-tenant shared bucket: key-prefix granularity
-    auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {},
-                                 R"({"policy":{"prefixes":["tenant-a/"]}})"));
-    Credential ta{j2.at("access_key").get<std::string>(),
-                  j2.at("secret_key").get<std::string>()};
+    auto j2 = body_json(env.call("POST", "/-/admin/credentials", root, {}, R"({"policy":{"prefixes":["tenant-a/"]}})"));
+    Credential ta{j2.at("access_key").get<std::string>(), j2.at("secret_key").get<std::string>()};
     CHECK_EQ(env.call("GET", "/data/tenant-a/x", ta).status, 200);
     CHECK_EQ(env.call("GET", "/data/tenant-b/x", ta).status, 403);
     CHECK_EQ(env.call("PUT", "/data/tenant-b/y", ta, {}, "x").status, 403);
@@ -610,14 +590,8 @@ TEST(policy_action_and_prefix_granularity) {
     CHECK_EQ(env.call("GET", "/data", ta).status, 200);
 
     // Invalid action name -> 400 (silently ignoring a misspelled restriction field amounts to granting access)
-    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {},
-                      R"({"policy":{"actions":["destroy"]}})")
-                 .status,
-             400);
-    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {},
-                      R"({"policy":{"actions":[]}})")
-                 .status,
-             400);
+    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {}, R"({"policy":{"actions":["destroy"]}})").status, 400);
+    CHECK_EQ(env.call("POST", "/-/admin/credentials", root, {}, R"({"policy":{"actions":[]}})").status, 400);
 }
 
 TEST(policy_glob_does_not_cross_slash) {
@@ -637,8 +611,8 @@ TEST(admin_api_never_returns_static_secret) {
     // §5.10: root's plaintext SK could be retrieved with a single HTTP GET, yet it cannot be revoked via the admin API
     SvcEnv env;
     Credential root{kRootAk, kRootSk};
-    auto got = body_json(env.call("GET", std::string("/-/admin/credentials/") + kRootAk, root,
-                                  {{"show-secret", "true"}}));
+    auto got = body_json(
+        env.call("GET", std::string("/-/admin/credentials/") + kRootAk, root, {{"show-secret", "true"}}));
     CHECK(!got.contains("secret_key"));
     CHECK(got.contains("secret_key_masked"));
     CHECK(got.at("secret_key_masked").get<std::string>().find(kRootSk) == std::string::npos);
@@ -646,15 +620,15 @@ TEST(admin_api_never_returns_static_secret) {
     // Dynamic credentials are unaffected: issued by the API, they can also be revoked by the API
     auto j = body_json(env.call("POST", "/-/admin/credentials", root, {}, "{}"));
     std::string ak = j.at("access_key").get<std::string>();
-    auto dyn = body_json(env.call("GET", "/-/admin/credentials/" + ak, root,
-                                  {{"show-secret", "true"}}));
+    auto dyn = body_json(env.call("GET", "/-/admin/credentials/" + ak, root, {{"show-secret", "true"}}));
     CHECK(dyn.contains("secret_key"));
 }
 
 // Per-key policy re-check for batch delete and listing: POST /bucket?delete and GET /bucket are both authorized
 // at bucket scope (the key is empty, so the prefix check is skipped entirely); batch delete must re-examine every
 // Key in the XML with the same decision as a single delete, and listing must filter results by the policy's
-// prefixes -- otherwise a prefix-restricted credential (multi-tenant shared bucket) could delete/enumerate objects outside its allowlist
+// prefixes -- otherwise a prefix-restricted credential (multi-tenant shared bucket) could delete/enumerate objects
+// outside its allowlist
 TEST(policy_prefix_batch_delete_and_listing) {
     SvcEnv env;
     Credential root{kRootAk, kRootSk};
@@ -662,11 +636,10 @@ TEST(policy_prefix_batch_delete_and_listing) {
     CHECK_EQ(env.call("PUT", "/shared/logs/mine", root, {}, "v1").status, 200);
     CHECK_EQ(env.call("PUT", "/shared/other/secret", root, {}, "v2").status, 200);
 
-    auto j = body_json(env.call(
-        "POST", "/-/admin/credentials", root, {},
-        R"({"policy":{"buckets":["shared"],"actions":["read","delete"],"prefixes":["logs/"]}})"));
-    Credential dyn{j.at("access_key").get<std::string>(),
-                   j.at("secret_key").get<std::string>()};
+    auto j = body_json(
+        env.call("POST", "/-/admin/credentials", root, {},
+                 R"({"policy":{"buckets":["shared"],"actions":["read","delete"],"prefixes":["logs/"]}})"));
+    Credential dyn{j.at("access_key").get<std::string>(), j.at("secret_key").get<std::string>()};
 
     // Single-delete benchmark: outside the allowlist gets 403 -- the batch-delete decision must match it
     CHECK_EQ(env.call("DELETE", "/shared/other/secret", dyn).status, 403);
@@ -682,17 +655,18 @@ TEST(policy_prefix_batch_delete_and_listing) {
     CHECK(lg.small_body.find("<Prefix>logs/</Prefix>") != std::string::npos);
     CHECK(lg.small_body.find("<Prefix>other/</Prefix>") == std::string::npos);
 
-    // Batch delete mixing inside and outside the allowlist: outside keys get per-key AccessDenied with the object intact, inside keys delete normally
-    std::string xml = "<Delete><Object><Key>other/secret</Key></Object>"
-                      "<Object><Key>logs/mine</Key></Object></Delete>";
+    // Batch delete mixing inside and outside the allowlist: outside keys get per-key AccessDenied with the object
+    // intact, inside keys delete normally
+    std::string xml =
+        "<Delete><Object><Key>other/secret</Key></Object>"
+        "<Object><Key>logs/mine</Key></Object></Delete>";
     util::HashStream h(util::HashStream::Algo::Md5);
     h.update(std::span(reinterpret_cast<const uint8_t*>(xml.data()), xml.size()));
     auto d = h.final_bytes();
     auto resp = env.call("POST", "/shared", dyn, {{"delete", ""}}, xml,
                          {{"Content-MD5", util::base64_encode(std::span(d.data(), d.size()))}});
     CHECK_EQ(resp.status, 200);
-    CHECK(resp.small_body.find("<Error><Key>other/secret</Key><Code>AccessDenied</Code>") !=
-          std::string::npos);
+    CHECK(resp.small_body.find("<Error><Key>other/secret</Key><Code>AccessDenied</Code>") != std::string::npos);
     CHECK(resp.small_body.find("<Deleted><Key>logs/mine</Key>") != std::string::npos);
     CHECK_EQ(env.call("GET", "/shared/other/secret", root).status, 200);  // not deleted beyond authority
     CHECK_EQ(env.call("GET", "/shared/logs/mine", root).status, 404);
@@ -728,32 +702,19 @@ TEST(admin_api_update_credential) {
     CHECK_EQ(env.call("PUT", "/boxa/k2", dyn, {}, "v").status, 403);
 
     // "policy": null clears the restriction; comment-only update keeps it cleared
-    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {},
-                      R"({"policy": null})")
-                 .status,
-             200);
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {}, R"({"policy": null})").status, 200);
     CHECK_EQ(env.call("PUT", "/boxa/k3", dyn, {}, "v").status, 200);
-    auto commented = env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {},
-                              R"({"comment": "after"})");
+    auto commented = env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {}, R"({"comment": "after"})");
     CHECK_EQ(commented.status, 200);
     CHECK_EQ(body_json(commented)["comment"], "after");
     CHECK_EQ(body_json(commented)["rev"].get<uint64_t>(), uint64_t{4});
 
     // Rejections: static credential, unknown AK, empty body, unknown fields
-    CHECK_EQ(env.call("PUT", std::string("/-/admin/credentials/") + kRootAk, root, {},
-                      R"({"comment": "x"})")
-                 .status,
+    CHECK_EQ(env.call("PUT", std::string("/-/admin/credentials/") + kRootAk, root, {}, R"({"comment": "x"})").status,
              405);
-    CHECK_EQ(env.call("PUT", "/-/admin/credentials/L3AKNOPE", root, {},
-                      R"({"comment": "x"})")
-                 .status,
-             403);
-    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {}, "").status,
-             400);
-    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {},
-                      R"({"nope": 1})")
-                 .status,
-             400);
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/L3AKNOPE", root, {}, R"({"comment": "x"})").status, 403);
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {}, "").status, 400);
+    CHECK_EQ(env.call("PUT", "/-/admin/credentials/" + dyn.access_key, root, {}, R"({"nope": 1})").status, 400);
 
     // Update survives a reload (write-through persisted the new rev)
     auto store2 = load_store(env.backend, root_cfg());
@@ -848,8 +809,7 @@ TEST(sts_assume_role_flow) {
     // Missing token → AccessDenied; wrong token → InvalidToken (both 4xx, never a
     // silent anonymous downgrade)
     CHECK_EQ(env.call("GET", "/stsb/k", sess).status, 403);
-    auto badtok = env.call("GET", "/stsb/k", sess, {}, "",
-                           {{"x-amz-security-token", "wrong-token"}});
+    auto badtok = env.call("GET", "/stsb/k", sess, {}, "", {{"x-amz-security-token", "wrong-token"}});
     CHECK_EQ(badtok.status, 400);
     CHECK(badtok.small_body.find("InvalidToken") != std::string::npos);
 
@@ -910,7 +870,7 @@ TEST(sts_session_shared_across_instances) {
     SvcEnv c(a.backend);
     CHECK_EQ(c.store->session_count(), size_t{2});  // startup load sees both
     SvcEnv d(a.backend);
-    sync_wait(a.store->mint_session(kRootAk, 900));   // a third one after d loaded
+    sync_wait(a.store->mint_session(kRootAk, 900));  // a third one after d loaded
     CHECK_EQ(d.store->session_count(), size_t{2});
     sync_wait(d.store->sync_now());
     CHECK_EQ(d.store->session_count(), size_t{3});
@@ -951,8 +911,7 @@ TEST(sts_session_policy_and_expiry) {
     Credential dcred{dyn.access_key, dyn.secret_key};
     auto resp = sts_call(env, dcred, "Action=AssumeRole&DurationSeconds=900");
     CHECK_EQ(resp.status, 200);
-    Credential sess{xtext(resp.small_body, "AccessKeyId"),
-                    xtext(resp.small_body, "SecretAccessKey")};
+    Credential sess{xtext(resp.small_body, "AccessKeyId"), xtext(resp.small_body, "SecretAccessKey")};
     std::string token = xtext(resp.small_body, "SessionToken");
     std::vector<std::pair<std::string, std::string>> tok{{"x-amz-security-token", token}};
     CHECK_EQ(env.call("PUT", "/boxa/k", sess, {}, "v", tok).status, 200);

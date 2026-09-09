@@ -85,14 +85,11 @@ constexpr const char* kBucketPut = "INSERT INTO buckets(name,val) VALUES(?1,?2)"
 constexpr const char* kBucketDel = "DELETE FROM buckets WHERE name=?1";
 constexpr const char* kBucketList = "SELECT name,val FROM buckets ORDER BY name";
 constexpr const char* kObjGet = "SELECT val FROM objects WHERE bucket=?1 AND key=?2";
-constexpr const char* kObjPut =
-    "INSERT OR REPLACE INTO objects(bucket,key,val) VALUES(?1,?2,?3)";
+constexpr const char* kObjPut = "INSERT OR REPLACE INTO objects(bucket,key,val) VALUES(?1,?2,?3)";
 constexpr const char* kObjDel = "DELETE FROM objects WHERE bucket=?1 AND key=?2";
 constexpr const char* kObjAny = "SELECT 1 FROM objects WHERE bucket=?1 LIMIT 1";
-constexpr const char* kObjScanGe =
-    "SELECT key,val FROM objects WHERE bucket=?1 AND key>=?2 ORDER BY key";
-constexpr const char* kObjPrev =
-    "SELECT key FROM objects WHERE bucket=?1 AND key<?2 ORDER BY key DESC LIMIT 1";
+constexpr const char* kObjScanGe = "SELECT key,val FROM objects WHERE bucket=?1 AND key>=?2 ORDER BY key";
+constexpr const char* kObjPrev = "SELECT key FROM objects WHERE bucket=?1 AND key<?2 ORDER BY key DESC LIMIT 1";
 constexpr const char* kUpGet = "SELECT val FROM uploads WHERE bucket=?1 AND key=?2 AND id=?3";
 constexpr const char* kUpPut = "INSERT INTO uploads(bucket,key,id,val) VALUES(?1,?2,?3,?4)";
 constexpr const char* kUpDel = "DELETE FROM uploads WHERE bucket=?1 AND key=?2 AND id=?3";
@@ -105,12 +102,9 @@ constexpr const char* kUpAny = "SELECT 1 FROM uploads WHERE bucket=?1 LIMIT 1";
 constexpr const char* kUpList =
     "SELECT key,id,val FROM uploads WHERE bucket=?1 AND (key,id) > (?2,?3) "
     "AND (?5 = 0 OR key > ?2) AND key >= ?6 ORDER BY key,id LIMIT ?4";
-constexpr const char* kPartGet =
-    "SELECT val FROM parts WHERE bucket=?1 AND key=?2 AND id=?3 AND part_no=?4";
-constexpr const char* kPartPut =
-    "INSERT OR REPLACE INTO parts(bucket,key,id,part_no,val) VALUES(?1,?2,?3,?4,?5)";
-constexpr const char* kPartScan =
-    "SELECT part_no,val FROM parts WHERE bucket=?1 AND key=?2 AND id=?3 ORDER BY part_no";
+constexpr const char* kPartGet = "SELECT val FROM parts WHERE bucket=?1 AND key=?2 AND id=?3 AND part_no=?4";
+constexpr const char* kPartPut = "INSERT OR REPLACE INTO parts(bucket,key,id,part_no,val) VALUES(?1,?2,?3,?4,?5)";
+constexpr const char* kPartScan = "SELECT part_no,val FROM parts WHERE bucket=?1 AND key=?2 AND id=?3 ORDER BY part_no";
 constexpr const char* kPartDelAll = "DELETE FROM parts WHERE bucket=?1 AND key=?2 AND id=?3";
 constexpr const char* kRefPut = "INSERT OR REPLACE INTO refs(file_id,owner) VALUES(?1,?2)";
 constexpr const char* kRefDel = "DELETE FROM refs WHERE file_id=?1";
@@ -119,8 +113,7 @@ constexpr const char* kRefScan = "SELECT file_id FROM refs";
 constexpr const char* kGcqPut = "INSERT INTO gcq(val) VALUES(?1)";
 constexpr const char* kGcqPeek = "SELECT seq,val FROM gcq WHERE seq>=?2 ORDER BY seq LIMIT ?1";
 constexpr const char* kGcqDel = "DELETE FROM gcq WHERE seq=?1";
-constexpr const char* kCtrReserve =
-    "UPDATE counters SET val=val+?1 WHERE name=?2 RETURNING val";
+constexpr const char* kCtrReserve = "UPDATE counters SET val=val+?1 WHERE name=?2 RETURNING val";
 constexpr const char* kCtrSeed = "INSERT OR IGNORE INTO counters(name,val) VALUES(?1,0)";
 constexpr const char* kAnyTable = "SELECT 1 FROM sqlite_master LIMIT 1";
 // Pack liveness accounting (§2.2: native numeric columns, arithmetic UPDATE gives
@@ -134,8 +127,8 @@ constexpr const char* kPackSeal =
     "INSERT INTO pack_stats(pack_id,file_size,sealed) VALUES(?1,?2,1) "
     "ON CONFLICT(pack_id) DO UPDATE SET sealed=1,file_size=CASE WHEN "
     "excluded.file_size>0 THEN excluded.file_size ELSE file_size END";
-constexpr const char* kPackList =
-    "SELECT pack_id,file_size,live_bytes,live_recs,sealed FROM pack_stats ORDER BY pack_id";
+constexpr const char*
+    kPackList = "SELECT pack_id,file_size,live_bytes,live_recs,sealed FROM pack_stats ORDER BY pack_id";
 constexpr const char* kPackDrop = "DELETE FROM pack_stats WHERE pack_id=?1";
 
 int64_t now_ms() { return codec::to_unix_ms(std::chrono::system_clock::now()); }
@@ -170,8 +163,7 @@ struct SqliteMetaStore::Conn {
         if (rc == SQLITE_BUSY && busy) busy->inc();
         if ((rc == SQLITE_CORRUPT || rc == SQLITE_NOTADB) && corrupt) {
             corrupt->inc();
-            LOG_ERROR("duostore meta(sqlite): corruption detected (rc={}) — data loss signal",
-                      rc);
+            LOG_ERROR("duostore meta(sqlite): corruption detected (rc={}) — data loss signal", rc);
         }
     }
 
@@ -179,8 +171,7 @@ struct SqliteMetaStore::Conn {
         std::string msg = db ? sqlite3_errmsg(db) : "no connection";
         classify_error();
         LOG_ERROR("duostore meta(sqlite): {}: {}", what, msg);
-        throw S3Error(S3ErrorCode::InternalError,
-                      std::string("duostore meta(sqlite): ") + what + ": " + msg);
+        throw S3Error(S3ErrorCode::InternalError, std::string("duostore meta(sqlite): ") + what + ": " + msg);
     }
 
     sqlite3_stmt* get(const char* sql) {
@@ -200,8 +191,7 @@ struct SqliteMetaStore::Conn {
             sqlite3_free(err);
             classify_error();
             LOG_ERROR("duostore meta(sqlite): {}: {}", what, msg);
-            throw S3Error(S3ErrorCode::InternalError,
-                          std::string("duostore meta(sqlite): ") + what + ": " + msg);
+            throw S3Error(S3ErrorCode::InternalError, std::string("duostore meta(sqlite): ") + what + ": " + msg);
         }
     }
 };
@@ -221,8 +211,7 @@ public:
 
     Stmt& blob(int i, std::string_view v) {
         // An empty string must pass a non-null pointer: bind_blob(nullptr) means SQL NULL, not a zero-length BLOB
-        if (sqlite3_bind_blob(s_, i, v.empty() ? "" : v.data(), int(v.size()),
-                              SQLITE_TRANSIENT) != SQLITE_OK)
+        if (sqlite3_bind_blob(s_, i, v.empty() ? "" : v.data(), int(v.size()), SQLITE_TRANSIENT) != SQLITE_OK)
             c_.raise("bind blob");
         return *this;
     }
@@ -274,9 +263,7 @@ private:
 // automatically, ruling out half-done state residue
 class SqliteMetaStore::Txn {
 public:
-    explicit Txn(Conn& c, bool immediate = true) : c_(c) {
-        Stmt(c_, immediate ? kBeginImmediate : kBegin).exec();
-    }
+    explicit Txn(Conn& c, bool immediate = true) : c_(c) { Stmt(c_, immediate ? kBeginImmediate : kBegin).exec(); }
     ~Txn() {
         if (done_) return;
         try {
@@ -295,8 +282,7 @@ private:
     bool done_ = false;
 };
 
-SqliteMetaStore::Lease::Lease(SqliteMetaStore* s, std::unique_ptr<Conn> c)
-    : store(s), conn(std::move(c)) {}
+SqliteMetaStore::Lease::Lease(SqliteMetaStore* s, std::unique_ptr<Conn> c) : store(s), conn(std::move(c)) {}
 SqliteMetaStore::Lease::Lease(Lease&&) noexcept = default;
 SqliteMetaStore::Conn& SqliteMetaStore::Lease::operator*() const { return *conn; }
 
@@ -310,14 +296,13 @@ std::unique_ptr<SqliteMetaStore::Conn> SqliteMetaStore::open_raw() {
     auto c = std::make_unique<Conn>();
     c->busy = m_busy_;
     c->corrupt = m_corrupt_;
-    if (sqlite3_open_v2(opt_.path.c_str(), &c->db,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
+    if (sqlite3_open_v2(opt_.path.c_str(), &c->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
         std::string msg = c->db ? sqlite3_errmsg(c->db) : "out of memory";
         LOG_ERROR("duostore meta(sqlite): open {}: {}", opt_.path, msg);
-        throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite): open " + opt_.path + ": " + msg);
+        throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): open " + opt_.path + ": " + msg);
     }
-    // Defense in depth: in-process code should never see prolonged BUSY (§5.2); tests shorten busy_timeout_ms for injection
+    // Defense in depth: in-process code should never see prolonged BUSY (§5.2); tests shorten busy_timeout_ms for
+    // injection
     sqlite3_busy_timeout(c->db, opt_.busy_timeout_ms);
     return c;
 }
@@ -329,19 +314,20 @@ void SqliteMetaStore::apply_pragmas(Conn& c, bool full_sync) {
     // a 256KiB floor covers any division edge cases (negative value is in KiB).
     // journal_mode is a persistent property of the database, written into the file
     // header by the first connection
-    size_t per_conn_kib =
-        std::max<size_t>(opt_.cache_bytes / size_t(opt_.pool_size + 2) / 1024, 256);
+    size_t per_conn_kib = std::max<size_t>(opt_.cache_bytes / size_t(opt_.pool_size + 2) / 1024, 256);
     // journal_size_limit (S4 tuning, §6): after auto-checkpoint (default 1000 pages)
     // drains the WAL, truncate the -wal file back to the limit — otherwise the WAL
     // stays at its high-water size for the whole run. Everything else keeps defaults
     // (assessment in §6: no extra checkpoint policy or optimize scheduling)
-    c.exec("PRAGMA journal_mode=WAL;"
-           "PRAGMA synchronous=" + std::string(full_sync ? "FULL" : "NORMAL") + ";" +
-           "PRAGMA cache_size=-" + std::to_string(per_conn_kib) + ";" +
-           "PRAGMA journal_size_limit=4194304;"
-           "PRAGMA temp_store=MEMORY;"
-           "PRAGMA foreign_keys=OFF;",
-           "open pragmas");
+    c.exec(
+        "PRAGMA journal_mode=WAL;"
+        "PRAGMA synchronous=" +
+            std::string(full_sync ? "FULL" : "NORMAL") + ";" + "PRAGMA cache_size=-" + std::to_string(per_conn_kib) +
+            ";" +
+            "PRAGMA journal_size_limit=4194304;"
+            "PRAGMA temp_store=MEMORY;"
+            "PRAGMA foreign_keys=OFF;",
+        "open pragmas");
 }
 
 std::unique_ptr<SqliteMetaStore::Conn> SqliteMetaStore::open_conn(bool full_sync) {
@@ -369,20 +355,19 @@ void SqliteMetaStore::check_lineage(Conn& c) {
         if (st.step())
             throw S3Error(S3ErrorCode::InternalError,
                           "duostore meta(sqlite): not a duostore meta database "
-                          "(existing tables without lineage mark): " + opt_.path);
+                          "(existing tables without lineage mark): " +
+                              opt_.path);
         return;
     }
     if (app_id != kAppId)
-        throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite): not a duostore meta database: " + opt_.path);
+        throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): not a duostore meta database: " + opt_.path);
     // Version-evolution policy matches the other three engines (docs/archive/gaps.md §6.1):
     // a newer database refuses to run downgraded, an older one climbs the migration
     // chain step by step (user_version is an integer lineage, no string prefix)
     if (ver > kSchemaVersion)
-        throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite): database schema v" + std::to_string(ver) +
-                          " is newer than this build (v" + std::to_string(kSchemaVersion) +
-                          "); refusing to run downgraded");
+        throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): database schema v" + std::to_string(ver) +
+                                                      " is newer than this build (v" + std::to_string(kSchemaVersion) +
+                                                      "); refusing to run downgraded");
     if (ver < kSchemaVersion) migrate_schema(c, ver);
 }
 
@@ -423,7 +408,7 @@ void SqliteMetaStore::init_schema(Conn& c) {
         st.exec();
     }
     c.exec("PRAGMA application_id=" + std::to_string(kAppId) + ";" +
-           "PRAGMA user_version=" + std::to_string(kSchemaVersion) + ";",
+               "PRAGMA user_version=" + std::to_string(kSchemaVersion) + ";",
            "stamp schema");
     t.commit();
 }
@@ -432,13 +417,11 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
     // S4 metrics: registered before any connection — NOTADB/CORRUPT on the open
     // path (wrong file, broken database) must also be counted; an empty scope
     // returns isolated instances, so tests construct directly with zero wiring cost
-    m_busy_ = opt_.metrics.counter(
-        "lights3_duostore_sqlite_busy_total",
-        "Statements that saw SQLITE_BUSY (busy_timeout exhausted: external writer "
-        "on the db file, or starved id reservation)");
-    m_corrupt_ = opt_.metrics.counter(
-        "lights3_duostore_sqlite_corruption_total",
-        "SQLITE_CORRUPT/SQLITE_NOTADB errors observed (data loss signal)");
+    m_busy_ = opt_.metrics.counter("lights3_duostore_sqlite_busy_total",
+                                   "Statements that saw SQLITE_BUSY (busy_timeout exhausted: external writer "
+                                   "on the db file, or starved id reservation)");
+    m_corrupt_ = opt_.metrics.counter("lights3_duostore_sqlite_corruption_total",
+                                      "SQLITE_CORRUPT/SQLITE_NOTADB errors observed (data loss signal)");
 
     // The parent directory is created by this store itself (the file belongs to us,
     // covering every caller; failures are left for open to report)
@@ -451,21 +434,18 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
     // connection-level lock and would exclude our own connection pool
     std::string lock_path = opt_.path + ".lock";
     lock_fd_ = ::open(lock_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0644);
-    if (lock_fd_ < 0)
-        throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite): cannot create " + lock_path);
+    if (lock_fd_ < 0) throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): cannot create " + lock_path);
     if (::flock(lock_fd_, LOCK_EX | LOCK_NB) != 0) {
         ::close(lock_fd_);
         lock_fd_ = -1;
         throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite): " + opt_.path +
-                          " is locked by another process (single-process store)");
+                      "duostore meta(sqlite): " + opt_.path + " is locked by another process (single-process store)");
     }
     // After the lock is taken, any failure must go through close() — the destructor
     // does not run when the constructor throws, leaking the lock and connections
     try {
         wc_ = open_raw();
-        check_lineage(*wc_);         // lineage check before any write/WAL conversion (§2.2)
+        check_lineage(*wc_);  // lineage check before any write/WAL conversion (§2.2)
         apply_pragmas(*wc_, opt_.sync);
         init_schema(*wc_);
         ac_ = open_conn(/*full_sync=*/true);  // id-segment connection is always FULL (§4)
@@ -475,12 +455,11 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
             auto m = BackupManifest::load(opt_.wal_archive);
             if (!m.entries.empty() && m.engine != "sqlite")
                 throw S3Error(S3ErrorCode::InternalError,
-                              "duostore meta(sqlite): " + opt_.wal_archive +
-                                  " holds a " + m.engine + " backup chain");
+                              "duostore meta(sqlite): " + opt_.wal_archive + " holds a " + m.engine + " backup chain");
             if (!m.entries.empty()) {
                 set_archiving_locked(true);
-                LOG_INFO("duostore meta(sqlite): WAL archiving on ({} entries in {})",
-                         m.entries.size(), opt_.wal_archive);
+                LOG_INFO("duostore meta(sqlite): WAL archiving on ({} entries in {})", m.entries.size(),
+                         opt_.wal_archive);
             }
         }
     } catch (...) {
@@ -520,13 +499,16 @@ void SqliteMetaStore::shutdown(bool graceful) {
             if (e.bytes > 0) {
                 m.entries.push_back(e);
                 m.save(opt_.wal_archive);
-                LOG_INFO("duostore meta(sqlite): archived the closing WAL segment as entry {} "
-                         "({} bytes)", e.id, e.bytes);
+                LOG_INFO(
+                    "duostore meta(sqlite): archived the closing WAL segment as entry {} "
+                    "({} bytes)",
+                    e.id, e.bytes);
             }
         } catch (const std::exception& e) {
-            LOG_ERROR("duostore meta(sqlite): closing WAL segment not archived: {} -- the "
-                      "backup chain in {} misses the commits since its last entry",
-                      e.what(), opt_.wal_archive);
+            LOG_ERROR(
+                "duostore meta(sqlite): closing WAL segment not archived: {} -- the "
+                "backup chain in {} misses the commits since its last entry",
+                e.what(), opt_.wal_archive);
         }
     }
     if (wc_) {
@@ -543,12 +525,12 @@ void SqliteMetaStore::shutdown(bool graceful) {
             LOG_WARN("duostore meta(sqlite): optimize skipped: {}", e.what());
         }
         int n_log = 0, n_ckpt = 0;
-        int rc = sqlite3_wal_checkpoint_v2(wc_->db, nullptr, SQLITE_CHECKPOINT_TRUNCATE,
-                                           &n_log, &n_ckpt);
+        int rc = sqlite3_wal_checkpoint_v2(wc_->db, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &n_log, &n_ckpt);
         if (rc != SQLITE_OK || n_log != 0)
-            LOG_WARN("duostore meta(sqlite): final checkpoint incomplete "
-                     "(rc={}, wal frames={}) — cold backup must include the -wal file",
-                     rc, n_log);
+            LOG_WARN(
+                "duostore meta(sqlite): final checkpoint incomplete "
+                "(rc={}, wal frames={}) — cold backup must include the -wal file",
+                rc, n_log);
         wc_.reset();
     }
     if (lock_fd_ >= 0) {
@@ -561,8 +543,7 @@ SqliteMetaStore::Conn& SqliteMetaStore::wconn() {
     // Throw InternalError after close — defense in depth: misuse becomes a 500
     // instead of a crash (the contract remains that close must be called after
     // in-flight requests finish)
-    if (!wc_)
-        throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): store is closed");
+    if (!wc_) throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): store is closed");
     // Defense: if COMMIT and the fallback ROLLBACK both fail (the Txn destructor
     // swallows the exception) an open transaction lingers — entering a new commit
     // with it hits "transaction within a transaction" and becomes permanent (the
@@ -576,9 +557,7 @@ SqliteMetaStore::Lease SqliteMetaStore::read_conn() {
     std::unique_ptr<Conn> c;
     {
         std::lock_guard lk(pool_mu_);
-        if (closed_)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore meta(sqlite): store is closed");
+        if (closed_) throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): store is closed");
         if (!idle_.empty()) {
             c = std::move(idle_.back());
             idle_.pop_back();
@@ -591,9 +570,7 @@ SqliteMetaStore::Lease SqliteMetaStore::read_conn() {
         // closes it; closing the last connection removes the recreated -wal/-shm)
         // and fail as already-closed
         std::lock_guard lk(pool_mu_);
-        if (closed_)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore meta(sqlite): store is closed");
+        if (closed_) throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): store is closed");
     }
     return {this, std::move(c)};
 }
@@ -610,8 +587,10 @@ void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
         try {
             Stmt(*c, kRollback).exec();
         } catch (const std::exception& e) {
-            LOG_WARN("duostore meta(sqlite): rollback on release failed, dropping "
-                     "connection: {}", e.what());
+            LOG_WARN(
+                "duostore meta(sqlite): rollback on release failed, dropping "
+                "connection: {}",
+                e.what());
             c.reset();
         }
     }
@@ -625,7 +604,8 @@ void SqliteMetaStore::release(std::unique_ptr<Conn> c) {
 uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_t n) {
     n = std::clamp<uint32_t>(n, 1, kMaxIdRun);  // run ≤ kMaxIdRun << kIdSegment
     std::lock_guard lk(alloc_mu_);  // lock order alloc_mu_ → mu_; no reverse nesting (alloc_mu_ only taken here)
-    if (r.limit - r.next < n) {  // discard the remainder when switching segments (run batch dispatch requires contiguity within a segment, docs/archive/gaps.md §3.9)
+    if (r.limit - r.next < n) {     // discard the remainder when switching segments (run batch dispatch requires
+                                    // contiguity within a segment, docs/archive/gaps.md §3.9)
         // The segment reservation must be persisted before dispensing — the dedicated
         // connection is always synchronous=FULL (independent of opt_.sync); otherwise
         // a crash losing the reservation would re-issue used file_ids after restart,
@@ -640,9 +620,7 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_
         // Bounded retries are kept, but only for external writers that bypass the
         // single-process lock (flock cannot stop a bare sqlite3 tool; the BUSY row
         // of the §5.4 table)
-        if (!ac_)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore meta(sqlite): store is closed");
+        if (!ac_) throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): store is closed");
         std::lock_guard wl(mu_);
         uint64_t hi = 0;
         for (int attempt = 0;; ++attempt) {
@@ -656,9 +634,7 @@ uint64_t SqliteMetaStore::alloc_id(std::string_view counter, IdRange& r, uint32_
                                   "(write lock busy — external writer?)");
                 continue;
             }
-            if (!*row)
-                throw S3Error(S3ErrorCode::InternalError,
-                              "duostore meta(sqlite): counter vanished");
+            if (!*row) throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite): counter vanished");
             hi = uint64_t(st.col_i64(0));
             st.exec();  // drain RETURNING to DONE; the statement commits only when complete
             break;
@@ -675,8 +651,7 @@ uint64_t SqliteMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
     // kRados shares the segment with kChunk (same argument as the rocks version:
     // refs does not distinguish kind, preventing cross-kind id collisions)
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
-    return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack,
-                    file_ids_[size_t(kind)], n);
+    return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack, file_ids_[size_t(kind)], n);
 }
 
 // ---------- Shared in-transaction pieces ----------
@@ -684,24 +659,21 @@ uint64_t SqliteMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
 void SqliteMetaStore::require_bucket(Conn& c, std::string_view b) {
     Stmt st(c, kBucketGet);
     st.blob(1, b);
-    if (!st.step())
-        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist",
-                      std::string(b));
+    if (!st.step()) throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", std::string(b));
 }
 
-std::optional<std::string> SqliteMetaStore::object_raw(Conn& c, std::string_view b,
-                                                       std::string_view k) {
+std::optional<std::string> SqliteMetaStore::object_raw(Conn& c, std::string_view b, std::string_view k) {
     Stmt st(c, kObjGet);
     st.blob(1, b).blob(2, k);
     if (!st.step()) return std::nullopt;
     return std::string(st.col_blob(0));
 }
 
-void SqliteMetaStore::write_refs(Conn& c, const DataRef& ref, bool add,
-                                 std::string_view owner) {
+void SqliteMetaStore::write_refs(Conn& c, const DataRef& ref, bool add, std::string_view owner) {
     for (const auto& e : ref.extents) {
-        if (e.kind == Extent::Kind::kPack) continue;  // pack liveness goes through pack_stats (P2);
-                                                      // chunk/rados both enter refs by file_id
+        if (e.kind == Extent::Kind::kPack)
+            continue;  // pack liveness goes through pack_stats (P2);
+                       // chunk/rados both enter refs by file_id
         if (add) {
             Stmt st(c, kRefPut);
             st.i64(1, int64_t(e.file_id)).blob(2, owner);
@@ -714,8 +686,7 @@ void SqliteMetaStore::write_refs(Conn& c, const DataRef& ref, bool add,
     }
 }
 
-void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign,
-                                       int64_t rec_overhead) {
+void SqliteMetaStore::write_pack_delta(Conn& c, const DataRef& ref, int sign, int64_t rec_overhead) {
     // Aggregate multiple extents of the same pack first, then one arithmetic UPDATE
     // per pack (§9.1: increments/decrements batched with the business transaction);
     // each record counts payload + header overhead, same accounting basis as
@@ -755,21 +726,17 @@ void SqliteMetaStore::enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason
     }
 }
 
-std::vector<PartRec> SqliteMetaStore::scan_parts(Conn& c, std::string_view b,
-                                                 std::string_view k, std::string_view id) {
+std::vector<PartRec> SqliteMetaStore::scan_parts(Conn& c, std::string_view b, std::string_view k, std::string_view id) {
     std::vector<PartRec> out;
     Stmt st(c, kPartScan);
     st.blob(1, b).blob(2, k).blob(3, id);
-    while (st.step())
-        out.push_back(codec::decode_part(int(st.col_i64(0)), st.col_blob(1)));
+    while (st.step()) out.push_back(codec::decode_part(int(st.col_i64(0)), st.col_blob(1)));
     return out;  // the numeric part_no column is naturally ascending
 }
 
-UploadRec SqliteMetaStore::require_upload_in(Conn& c, std::string_view b, std::string_view k,
-                                             std::string_view id) {
+UploadRec SqliteMetaStore::require_upload_in(Conn& c, std::string_view b, std::string_view k, std::string_view id) {
     auto missing = [&]() -> S3Error {
-        return {S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.",
-                std::string(id)};
+        return {S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.", std::string(id)};
     };
     if (!is_valid_upload_id(id)) throw missing();
     Stmt st(c, kUpGet);
@@ -787,9 +754,7 @@ void SqliteMetaStore::create_bucket(std::string_view b) {
     {
         Stmt st(c, kBucketGet);
         st.blob(1, b);
-        if (st.step())
-            throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists",
-                          std::string(b));
+        if (st.step()) throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists", std::string(b));
     }
     Stmt st(c, kBucketPut);
     st.blob(1, b).blob(2, codec::encode_bucket(now_ms()));
@@ -810,8 +775,7 @@ void SqliteMetaStore::delete_bucket(std::string_view b) {
         Stmt st(c, sql);
         st.blob(1, b);
         if (st.step())
-            throw S3Error(S3ErrorCode::BucketNotEmpty,
-                          "The bucket you tried to delete is not empty", std::string(b));
+            throw S3Error(S3ErrorCode::BucketNotEmpty, "The bucket you tried to delete is not empty", std::string(b));
     }
     Stmt st(c, kBucketDel);
     st.blob(1, b);
@@ -835,8 +799,7 @@ std::vector<BucketInfo> SqliteMetaStore::list_buckets_in(Conn& c) {
     std::vector<BucketInfo> out;
     Stmt st(c, kBucketList);
     while (st.step())
-        out.push_back({std::string(st.col_blob(0)),
-                       codec::from_unix_ms(codec::decode_bucket(st.col_blob(1)))});
+        out.push_back({std::string(st.col_blob(0)), codec::from_unix_ms(codec::decode_bucket(st.col_blob(1)))});
     return out;  // the primary-key B-tree provides name order for free
 }
 
@@ -856,8 +819,7 @@ std::optional<ObjectMeta> SqliteMetaStore::head_object(std::string_view b, std::
     return codec::decode_object_meta(std::string(k), *v);
 }
 
-void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
-                                 PutCondition cond) {
+void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond) {
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
@@ -920,8 +882,7 @@ ListResult SqliteMetaStore::list_objects(std::string_view b, const ListOptions& 
 // Transaction managed by the caller: the live path wraps one read transaction per
 // call, the snapshot view (roadmap §3.7) runs every call inside its one long-held
 // read transaction — an inner BEGIN here would nest and fail
-ListResult SqliteMetaStore::list_objects_in(Conn& c, std::string_view b,
-                                            const ListOptions& opt) {
+ListResult SqliteMetaStore::list_objects_in(Conn& c, std::string_view b, const ListOptions& opt) {
     require_bucket(c, b);
     ListResult out;
     // S3: max-keys=0 returns empty with IsTruncated=false
@@ -995,8 +956,7 @@ ListResult SqliteMetaStore::list_objects_in(Conn& c, std::string_view b,
 
 // ---------- multipart ----------
 
-std::string SqliteMetaStore::create_upload(std::string_view b, std::string_view k,
-                                           ObjectMeta meta) {
+std::string SqliteMetaStore::create_upload(std::string_view b, std::string_view k, ObjectMeta meta) {
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
@@ -1013,14 +973,12 @@ std::string SqliteMetaStore::create_upload(std::string_view b, std::string_view 
     return rec.upload_id;
 }
 
-UploadRec SqliteMetaStore::require_upload(std::string_view b, std::string_view k,
-                                          std::string_view id) {
+UploadRec SqliteMetaStore::require_upload(std::string_view b, std::string_view k, std::string_view id) {
     auto lease = read_conn();
     return require_upload_in(*lease, b, k, id);
 }
 
-void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::string_view id,
-                               PartRec p) {
+void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) {
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
@@ -1031,8 +989,7 @@ void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::stri
         st.blob(1, b).blob(2, k).blob(3, id).i64(4, p.part_no);
         if (st.step()) old = codec::decode_part(p.part_no, st.col_blob(0));
     }
-    std::string owner = std::string(b) + '/' + std::string(k) + '/' + std::string(id) + '/' +
-                        std::to_string(p.part_no);
+    std::string owner = std::string(b) + '/' + std::string(k) + '/' + std::string(id) + '/' + std::to_string(p.part_no);
     {
         Stmt st(c, kPartPut);
         st.blob(1, b).blob(2, k).blob(3, id).i64(4, p.part_no).blob(5, codec::encode_part(p));
@@ -1049,17 +1006,14 @@ void SqliteMetaStore::put_part(std::string_view b, std::string_view k, std::stri
     t.commit();
 }
 
-std::vector<PartRec> SqliteMetaStore::list_parts(std::string_view b, std::string_view k,
-                                                 std::string_view id) {
+std::vector<PartRec> SqliteMetaStore::list_parts(std::string_view b, std::string_view k, std::string_view id) {
     auto lease = read_conn();
     require_upload_in(*lease, b, k, id);
     return scan_parts(*lease, b, k, id);
 }
 
-std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b,
-                                                     std::string_view key_marker,
-                                                     std::string_view id_marker, int limit,
-                                                     std::string_view prefix) {
+std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b, std::string_view key_marker,
+                                                      std::string_view id_marker, int limit, std::string_view prefix) {
     auto lease = read_conn();
     require_bucket(*lease, b);
     std::vector<UploadInfo> out;
@@ -1073,8 +1027,7 @@ std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b,
     while (st.step()) {
         std::string_view k = st.col_blob(0);
         if (k.substr(0, prefix.size()) != prefix) break;  // ordered: past the prefix range (roadmap §3.5)
-        auto rec = codec::decode_upload(std::string(k), std::string(st.col_blob(1)),
-                                        st.col_blob(2));
+        auto rec = codec::decode_upload(std::string(k), std::string(st.col_blob(1)), st.col_blob(2));
         out.push_back({rec.meta.key, rec.upload_id, codec::from_unix_ms(rec.initiated_ms)});
     }
     return out;  // primary-key order = (key, upload_id) order
@@ -1083,8 +1036,7 @@ std::vector<UploadInfo> SqliteMetaStore::list_uploads(std::string_view b,
 // complete is a pure metadata transaction, zero data movement (main doc §8); the
 // parts set is read inside the same transaction and is therefore naturally fresh —
 // no Redis-version sha1 fingerprint, no RocksDB-version in-lock rescan concept (§3.4)
-std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_view k,
-                                             std::string_view id,
+std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_view k, std::string_view id,
                                              std::span<const PartInfo> parts) {
     std::lock_guard lk(mu_);
     Conn& c = wconn();
@@ -1143,8 +1095,7 @@ std::string SqliteMetaStore::complete_upload(std::string_view b, std::string_vie
     return rec.meta.etag;
 }
 
-void SqliteMetaStore::abort_upload(std::string_view b, std::string_view k,
-                                   std::string_view id) {
+void SqliteMetaStore::abort_upload(std::string_view b, std::string_view k, std::string_view id) {
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     Txn t(c);
@@ -1167,8 +1118,7 @@ void SqliteMetaStore::abort_upload(std::string_view b, std::string_view k,
 
 // ---------- GC accounting ----------
 
-std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t max,
-                                                                         uint64_t min_seq,
+std::vector<std::pair<uint64_t, Reclaim>> SqliteMetaStore::peek_reclaims(size_t max, uint64_t min_seq,
                                                                          size_t max_extents) {
     auto lease = read_conn();
     std::vector<std::pair<uint64_t, Reclaim>> out;
@@ -1225,8 +1175,8 @@ std::vector<PackStat> SqliteMetaStore::pack_stats_in(Conn& c) {
     std::vector<PackStat> out;
     Stmt st(c, kPackList);
     while (st.step())
-        out.push_back({uint64_t(st.col_i64(0)), uint64_t(st.col_i64(1)), st.col_i64(2),
-                       st.col_i64(3), st.col_i64(4) != 0});
+        out.push_back(
+            {uint64_t(st.col_i64(0)), uint64_t(st.col_i64(1)), st.col_i64(2), st.col_i64(3), st.col_i64(4) != 0});
     return out;
 }
 
@@ -1249,9 +1199,8 @@ void SqliteMetaStore::drop_pack_stat(uint64_t pack_id) {
     st.exec();
 }
 
-bool SqliteMetaStore::apply_swap(Conn& c, std::string_view b, std::string_view k,
-                                 uint64_t expect_version, const DataRef& from,
-                                 const DataRef& to) {
+bool SqliteMetaStore::apply_swap(Conn& c, std::string_view b, std::string_view k, uint64_t expect_version,
+                                 const DataRef& from, const DataRef& to) {
     auto v = object_raw(c, b, k);
     if (!v) return false;
     auto rec = codec::decode_object(std::string(k), *v);
@@ -1280,8 +1229,7 @@ bool SqliteMetaStore::apply_swap(Conn& c, std::string_view b, std::string_view k
     return true;
 }
 
-bool SqliteMetaStore::swap_extents(std::string_view b, std::string_view k,
-                                   uint64_t expect_version, const DataRef& from,
+bool SqliteMetaStore::swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
                                    const DataRef& to) {
     std::lock_guard lk(mu_);
     Conn& c = wconn();
@@ -1333,8 +1281,7 @@ void SqliteMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
 // destroyed (rolled back) before the connection returns to the pool
 class SqliteMetaStore::SnapshotView final : public IMetaReadView {
 public:
-    explicit SnapshotView(SqliteMetaStore& store)
-        : store_(store), lease_(store.read_conn()) {
+    explicit SnapshotView(SqliteMetaStore& store) : store_(store), lease_(store.read_conn()) {
         txn_.emplace(*lease_, /*immediate=*/false);
         // A deferred BEGIN only takes its WAL snapshot at the first read; force it
         // now so writes committed after snapshot() never leak into the view
@@ -1358,10 +1305,7 @@ private:
     std::optional<Txn> txn_;
 };
 
-std::unique_ptr<IMetaReadView> SqliteMetaStore::snapshot() {
-    return std::make_unique<SnapshotView>(*this);
-}
-
+std::unique_ptr<IMetaReadView> SqliteMetaStore::snapshot() { return std::make_unique<SnapshotView>(*this); }
 
 // ---------- Backup chain (backlog-sequence ⑧) ----------
 
@@ -1382,8 +1326,7 @@ void backup_db_file(sqlite3* src, const std::filesystem::path& dest) {
     remove_quiet(dest.string() + "-wal");
     remove_quiet(dest.string() + "-shm");
     sqlite3* out = nullptr;
-    if (sqlite3_open_v2(dest.c_str(), &out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) !=
-        SQLITE_OK) {
+    if (sqlite3_open_v2(dest.c_str(), &out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) != SQLITE_OK) {
         std::string msg = out ? sqlite3_errmsg(out) : "out of memory";
         sqlite3_close(out);
         throw S3Error(S3ErrorCode::InternalError,
@@ -1431,15 +1374,14 @@ void SqliteMetaStore::checkpoint_truncate_locked(const char* what) {
     int n_log = 0, n_ckpt = 0;
     int rc = sqlite3_wal_checkpoint_v2(wc_->db, nullptr, SQLITE_CHECKPOINT_TRUNCATE, &n_log, &n_ckpt);
     if (rc != SQLITE_OK || n_log != 0)
-        throw S3Error(S3ErrorCode::InternalError,
-                      std::string("duostore meta(sqlite) ") + what +
-                          ": checkpoint incomplete (rc=" + std::to_string(rc) + ", " +
-                          std::to_string(n_log) + " WAL frame(s) left -- a snapshot reader is "
-                          "open? retry)");
+        throw S3Error(S3ErrorCode::InternalError, std::string("duostore meta(sqlite) ") + what +
+                                                      ": checkpoint incomplete (rc=" + std::to_string(rc) + ", " +
+                                                      std::to_string(n_log) +
+                                                      " WAL frame(s) left -- a snapshot reader is "
+                                                      "open? retry)");
 }
 
-uint64_t SqliteMetaStore::archive_wal_segment_locked(const std::filesystem::path& dir, uint64_t id,
-                                                     std::string& file) {
+uint64_t SqliteMetaStore::archive_wal_segment_locked(const std::filesystem::path& dir, uint64_t id, std::string& file) {
     std::error_code ec;
     auto wal = std::filesystem::path(wal_path_of(opt_.path));
     uint64_t size = std::filesystem::exists(wal, ec) ? std::filesystem::file_size(wal, ec) : 0;
@@ -1456,8 +1398,7 @@ uint64_t SqliteMetaStore::archive_wal_segment_locked(const std::filesystem::path
     std::filesystem::copy_file(wal, dest, std::filesystem::copy_options::overwrite_existing, ec);
     if (ec)
         throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite) backup: cannot copy WAL to " + dest.string() + ": " +
-                          ec.message());
+                      "duostore meta(sqlite) backup: cannot copy WAL to " + dest.string() + ": " + ec.message());
     file = name;
     return std::filesystem::file_size(dest, ec);
 }
@@ -1466,24 +1407,21 @@ void SqliteMetaStore::set_archiving_locked(bool on) {
     archive_active_ = on;
     // Auto-checkpoints restart the WAL behind the archive's back; commits happen on
     // the write connection, so its setting is the one that matters
-    wc_->exec(on ? "PRAGMA wal_autocheckpoint=0" : "PRAGMA wal_autocheckpoint=1000",
-              "wal_autocheckpoint");
+    wc_->exec(on ? "PRAGMA wal_autocheckpoint=0" : "PRAGMA wal_autocheckpoint=1000", "wal_autocheckpoint");
 }
 
-MetaBackupEntry SqliteMetaStore::backup_physical(const std::filesystem::path& dir, uint64_t id,
-                                                 bool full) {
+MetaBackupEntry SqliteMetaStore::backup_physical(const std::filesystem::path& dir, uint64_t id, bool full) {
     std::error_code ec;
-    bool same_dir = !opt_.wal_archive.empty() &&
-                    std::filesystem::weakly_canonical(dir, ec) ==
-                        std::filesystem::weakly_canonical(opt_.wal_archive, ec);
+    bool same_dir = !opt_.wal_archive.empty() && std::filesystem::weakly_canonical(dir, ec) ==
+                                                     std::filesystem::weakly_canonical(opt_.wal_archive, ec);
     if (!full && opt_.wal_archive.empty())
         throw S3Error(S3ErrorCode::InvalidRequest,
                       "duostore meta(sqlite): incremental backup needs sqlite_wal_archive "
                       "pointing at the backup directory");
     if (!opt_.wal_archive.empty() && !same_dir)
         throw S3Error(S3ErrorCode::InvalidRequest,
-                      "duostore meta(sqlite): the backup chain lives in sqlite_wal_archive (" +
-                          opt_.wal_archive + "), not in " + dir.string());
+                      "duostore meta(sqlite): the backup chain lives in sqlite_wal_archive (" + opt_.wal_archive +
+                          "), not in " + dir.string());
     std::lock_guard lk(mu_);
     Conn& c = wconn();
     (void)c;
@@ -1507,8 +1445,7 @@ MetaBackupEntry SqliteMetaStore::backup_physical(const std::filesystem::path& di
     }
     if (!archive_active_)
         throw S3Error(S3ErrorCode::InvalidRequest,
-                      "duostore meta(sqlite): no full backup has started a chain in " +
-                          dir.string() + " yet");
+                      "duostore meta(sqlite): no full backup has started a chain in " + dir.string() + " yet");
     e.bytes = archive_wal_segment_locked(dir, id, e.file);
     e.marker = "wal";
     // The segment is on disk: reset the WAL so the next segment starts clean. An
@@ -1518,8 +1455,7 @@ MetaBackupEntry SqliteMetaStore::backup_physical(const std::filesystem::path& di
     return e;
 }
 
-void SqliteMetaStore::restore_physical(const std::filesystem::path& dir,
-                                       const std::vector<MetaBackupEntry>& chain,
+void SqliteMetaStore::restore_physical(const std::filesystem::path& dir, const std::vector<MetaBackupEntry>& chain,
                                        const std::filesystem::path& db_path) {
     if (chain.empty() || !chain.front().full)
         throw S3Error(S3ErrorCode::InvalidRequest,
@@ -1529,12 +1465,11 @@ void SqliteMetaStore::restore_physical(const std::filesystem::path& dir,
     remove_quiet(db_path);
     remove_quiet(db_path.string() + "-wal");
     remove_quiet(db_path.string() + "-shm");
-    std::filesystem::copy_file(dir / chain.front().file, db_path,
-                               std::filesystem::copy_options::overwrite_existing, ec);
+    std::filesystem::copy_file(dir / chain.front().file, db_path, std::filesystem::copy_options::overwrite_existing,
+                               ec);
     if (ec)
         throw S3Error(S3ErrorCode::InternalError,
-                      "duostore meta(sqlite) restore: cannot copy " + chain.front().file + ": " +
-                          ec.message());
+                      "duostore meta(sqlite) restore: cannot copy " + chain.front().file + ": " + ec.message());
     // Belt and braces for a full copy made by an older build: WAL mode before any segment
     exec_on_file(db_path, "PRAGMA journal_mode=WAL", "restore");
     remove_quiet(db_path.string() + "-wal");
@@ -1568,10 +1503,9 @@ void SqliteMetaStore::restore_physical(const std::filesystem::path& dir,
         std::string msg = rc == SQLITE_OK ? "" : sqlite3_errmsg(db);
         sqlite3_close(db);
         if (rc != SQLITE_OK || n_log != 0)
-            throw S3Error(S3ErrorCode::InternalError,
-                          "duostore meta(sqlite) restore: segment " + e.file + " did not apply (rc=" +
-                              std::to_string(rc) + " " + msg + ", frames left " +
-                              std::to_string(n_log) + ")");
+            throw S3Error(S3ErrorCode::InternalError, "duostore meta(sqlite) restore: segment " + e.file +
+                                                          " did not apply (rc=" + std::to_string(rc) + " " + msg +
+                                                          ", frames left " + std::to_string(n_log) + ")");
     }
     remove_quiet(db_path.string() + "-wal");
     remove_quiet(db_path.string() + "-shm");

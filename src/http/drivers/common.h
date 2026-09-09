@@ -6,11 +6,11 @@
 #include <cstddef>
 #include <cstdio>
 #include <memory>
-#include <span>
-#include <vector>
 #include <random>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/log.h"
 #include "core/task.h"
@@ -41,9 +41,7 @@ class IoBuffer {
 public:
     IoBuffer() = default;
     explicit IoBuffer(size_t n) { acquire(n); }
-    IoBuffer(IoBuffer&& o) noexcept : p_(std::move(o.p_)), size_(o.size_), cap_(o.cap_) {
-        o.size_ = o.cap_ = 0;
-    }
+    IoBuffer(IoBuffer&& o) noexcept : p_(std::move(o.p_)), size_(o.size_), cap_(o.cap_) { o.size_ = o.cap_ = 0; }
     IoBuffer& operator=(IoBuffer&& o) noexcept {
         if (this != &o) {
             release();
@@ -141,9 +139,7 @@ public:
     bool at_eof() const { return eof_; }
 
 private:
-    void start_read() {
-        pending_.start(reader_.read(bufs_[reading_].span()));
-    }
+    void start_read() { pending_.start(reader_.read(bufs_[reading_].span())); }
     std::span<const std::byte> finish(size_t n) {
         if (n == 0) {
             eof_ = true;
@@ -170,9 +166,9 @@ struct ConnCounters {
     std::atomic<uint64_t> requests{0}, tls_ok{0}, tls_failed{0}, parse_errors{0};  // roadmap §5.3
     ConnStats snapshot() const {
         auto ld = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
-        return {ld(accepted),      ld(rejected_limit), ld(active),        ld(keepalive_closes),
+        return {ld(accepted),      ld(rejected_limit),  ld(active),        ld(keepalive_closes),
                 ld(timeouts_idle), ld(timeouts_header), ld(timeouts_body), ld(timeouts_write),
-                ld(requests),      ld(tls_ok),         ld(tls_failed),    ld(parse_errors)};
+                ld(requests),      ld(tls_ok),          ld(tls_failed),    ld(parse_errors)};
     }
     void request_parsed() { requests.fetch_add(1, std::memory_order_relaxed); }
     void parse_error() { parse_errors.fetch_add(1, std::memory_order_relaxed); }
@@ -183,10 +179,18 @@ struct ConnCounters {
 enum class Phase { Idle, Header, Body, Write };
 inline void count_timeout(ConnCounters& c, Phase p) {
     switch (p) {
-        case Phase::Idle: c.timeouts_idle.fetch_add(1, std::memory_order_relaxed); break;
-        case Phase::Header: c.timeouts_header.fetch_add(1, std::memory_order_relaxed); break;
-        case Phase::Body: c.timeouts_body.fetch_add(1, std::memory_order_relaxed); break;
-        case Phase::Write: c.timeouts_write.fetch_add(1, std::memory_order_relaxed); break;
+        case Phase::Idle:
+            c.timeouts_idle.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case Phase::Header:
+            c.timeouts_header.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case Phase::Body:
+            c.timeouts_body.fetch_add(1, std::memory_order_relaxed);
+            break;
+        case Phase::Write:
+            c.timeouts_write.fetch_add(1, std::memory_order_relaxed);
+            break;
     }
 }
 
@@ -238,17 +242,22 @@ inline bool parse_content_length(std::string_view s, uint64_t& out) {
     return true;
 }
 
-// chunk-size line: 1*HEXDIG, followed only by an optional ";ext" (extension content ignored); rejects empty/signs/whitespace/overflow
+// chunk-size line: 1*HEXDIG, followed only by an optional ";ext" (extension content ignored); rejects
+// empty/signs/whitespace/overflow
 inline bool parse_chunk_size(std::string_view line, uint64_t& out) {
     size_t i = 0;
     uint64_t v = 0;
     for (; i < line.size(); ++i) {
         char c = line[i];
         int d;
-        if (c >= '0' && c <= '9') d = c - '0';
-        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-        else break;
+        if (c >= '0' && c <= '9')
+            d = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            d = c - 'A' + 10;
+        else
+            break;
         if (v > (UINT64_MAX >> 4)) return false;
         v = (v << 4) | static_cast<uint64_t>(d);
     }
@@ -309,8 +318,7 @@ inline BodyFraming parse_body_framing(const HeaderMap& headers) {
 inline std::string fallback_request_id() {
     static thread_local std::mt19937_64 rng{std::random_device{}()};
     char buf[17];
-    std::snprintf(buf, sizeof(buf), "%016llX",
-                  static_cast<unsigned long long>(rng()));
+    std::snprintf(buf, sizeof(buf), "%016llX", static_cast<unsigned long long>(rng()));
     return std::string(buf, 16);
 }
 
@@ -349,7 +357,8 @@ inline HttpResponse bad_request_response(const char* why) {
     return resp;
 }
 
-// Error responses produced by the upstream driver itself (httplib routing/header rejections, etc.): still need an id to be traceable
+// Error responses produced by the upstream driver itself (httplib routing/header rejections, etc.): still need an id to
+// be traceable
 inline HttpResponse upstream_error_response(s3::S3ErrorCode code, const char* why) {
     s3::S3Error err(code, why);
     std::string rid = fallback_request_id();
@@ -364,22 +373,38 @@ inline HttpResponse upstream_error_response(s3::S3ErrorCode code, const char* wh
 
 inline const char* reason_phrase(int status) {
     switch (status) {
-        case 100: return "Continue";
-        case 200: return "OK";
-        case 204: return "No Content";
-        case 206: return "Partial Content";
-        case 304: return "Not Modified";
-        case 400: return "Bad Request";
-        case 403: return "Forbidden";
-        case 404: return "Not Found";
-        case 405: return "Method Not Allowed";
-        case 409: return "Conflict";
-        case 412: return "Precondition Failed";
-        case 416: return "Range Not Satisfiable";
-        case 500: return "Internal Server Error";
-        case 501: return "Not Implemented";
-        case 503: return "Service Unavailable";
-        default: return "Unknown";
+        case 100:
+            return "Continue";
+        case 200:
+            return "OK";
+        case 204:
+            return "No Content";
+        case 206:
+            return "Partial Content";
+        case 304:
+            return "Not Modified";
+        case 400:
+            return "Bad Request";
+        case 403:
+            return "Forbidden";
+        case 404:
+            return "Not Found";
+        case 405:
+            return "Method Not Allowed";
+        case 409:
+            return "Conflict";
+        case 412:
+            return "Precondition Failed";
+        case 416:
+            return "Range Not Satisfiable";
+        case 500:
+            return "Internal Server Error";
+        case 501:
+            return "Not Implemented";
+        case 503:
+            return "Service Unavailable";
+        default:
+            return "Unknown";
     }
 }
 
@@ -431,27 +456,19 @@ inline void emit_headers(const HeaderMap& headers, SetFn&& set) {
 //    chunked would require chunk frames to follow, but HEAD sends no body
 //    (old builtin/seastar behavior). L2's HEAD path always provides a length,
 //    so this is only a fallback — but all four drivers must give the same answer
-inline bool head_length_known(const HttpResponse& resp) {
-    return resp.content_length.has_value() || !resp.stream_body;
-}
+inline bool head_length_known(const HttpResponse& resp) { return resp.content_length.has_value() || !resp.stream_body; }
 
-inline ResponseHead render_response_head(const HttpResponse& resp, bool keep_alive,
-                                         bool head_request = false) {
+inline ResponseHead render_response_head(const HttpResponse& resp, bool keep_alive, bool head_request = false) {
     bool no_body_status = resp.status == 204 || resp.status == 304 || resp.status < 200;
     if (head_request && !head_length_known(resp)) keep_alive = false;
     ResponseHead out;
-    out.text = "HTTP/1.1 " + std::to_string(resp.status) + " " + reason_phrase(resp.status) +
-               "\r\n";
-    emit_headers(resp.headers, [&](const std::string& k, const std::string& v) {
-        out.text += k + ": " + v + "\r\n";
-    });
-    if (!resp.headers.has("Date"))
-        out.text += "Date: " + util::http_date(std::chrono::system_clock::now()) + "\r\n";
+    out.text = "HTTP/1.1 " + std::to_string(resp.status) + " " + reason_phrase(resp.status) + "\r\n";
+    emit_headers(resp.headers, [&](const std::string& k, const std::string& v) { out.text += k + ": " + v + "\r\n"; });
+    if (!resp.headers.has("Date")) out.text += "Date: " + util::http_date(std::chrono::system_clock::now()) + "\r\n";
     if (!no_body_status) {
         if (head_request) {
             if (head_length_known(resp))
-                out.text += "Content-Length: " +
-                            std::to_string(resp.content_length.value_or(resp.small_body.size())) +
+                out.text += "Content-Length: " + std::to_string(resp.content_length.value_or(resp.small_body.size())) +
                             "\r\n";
         } else if (resp.stream_body && !resp.content_length) {
             out.chunked = true;

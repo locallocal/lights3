@@ -9,8 +9,7 @@ RateLimiter::RateLimiter(Limits limits, size_t max_tracked)
     if (limits_.burst <= 0) limits_.burst = limits_.rps;
 }
 
-std::optional<RateLimiter::Token> RateLimiter::admit(std::string_view key,
-                                                     Clock::time_point now) {
+std::optional<RateLimiter::Token> RateLimiter::admit(std::string_view key, Clock::time_point now) {
     if (!enabled() || key.empty()) return Token{};
     std::string k(key);
     std::lock_guard lk(mu_);

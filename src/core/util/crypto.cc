@@ -31,8 +31,8 @@ std::string sha256_hex(std::string_view data) {
 Sha256Digest hmac_sha256(std::span<const uint8_t> key, std::string_view data) {
     Sha256Digest out{};
     unsigned int len = 0;
-    if (!HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()),
-              reinterpret_cast<const uint8_t*>(data.data()), data.size(), out.data(), &len))
+    if (!HMAC(EVP_sha256(), key.data(), static_cast<int>(key.size()), reinterpret_cast<const uint8_t*>(data.data()),
+              data.size(), out.data(), &len))
         throw std::runtime_error("HMAC(sha256) failed");
     return out;
 }
@@ -57,20 +57,17 @@ std::string aes256gcm_seal(const Aes256Key& key, std::string_view plaintext) {
         throw std::runtime_error("getentropy failed: cannot generate GCM nonce");
 
     CipherCtx c;
-    if (!c.ctx ||
-        !EVP_EncryptInit_ex(c.ctx, EVP_aes_256_gcm(), nullptr, key.data(), nonce))
+    if (!c.ctx || !EVP_EncryptInit_ex(c.ctx, EVP_aes_256_gcm(), nullptr, key.data(), nonce))
         throw std::runtime_error("EVP_EncryptInit(aes-256-gcm) failed");
 
     std::string out(kGcmNonceLen + plaintext.size() + kGcmTagLen, '\0');
     memcpy(out.data(), nonce, kGcmNonceLen);
     auto* ct = reinterpret_cast<uint8_t*>(out.data()) + kGcmNonceLen;
     int n = 0;
-    if (!EVP_EncryptUpdate(c.ctx, ct, &n,
-                           reinterpret_cast<const uint8_t*>(plaintext.data()),
+    if (!EVP_EncryptUpdate(c.ctx, ct, &n, reinterpret_cast<const uint8_t*>(plaintext.data()),
                            static_cast<int>(plaintext.size())) ||
         !EVP_EncryptFinal_ex(c.ctx, ct + n, &n) ||
-        !EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_GET_TAG, kGcmTagLen,
-                             out.data() + kGcmNonceLen + plaintext.size()))
+        !EVP_CIPHER_CTX_ctrl(c.ctx, EVP_CTRL_GCM_GET_TAG, kGcmTagLen, out.data() + kGcmNonceLen + plaintext.size()))
         throw std::runtime_error("EVP_Encrypt(aes-256-gcm) failed");
     return out;
 }
@@ -88,8 +85,8 @@ std::optional<std::string> aes256gcm_open(const Aes256Key& key, std::string_view
     int n = 0;
     // Failure paths wipe the partially decrypted plaintext (tag verification happens
     // in Final; bytes are already readable during the Update phase)
-    if (!EVP_DecryptUpdate(c.ctx, reinterpret_cast<uint8_t*>(out.data()), &n,
-                           p + kGcmNonceLen, static_cast<int>(ct_len))) {
+    if (!EVP_DecryptUpdate(c.ctx, reinterpret_cast<uint8_t*>(out.data()), &n, p + kGcmNonceLen,
+                           static_cast<int>(ct_len))) {
         secure_wipe(out);
         return std::nullopt;
     }
@@ -119,11 +116,8 @@ struct HashStream::Impl {
 
 HashStream::HashStream(Algo algo) : impl_(std::make_unique<Impl>()) {
     impl_->ctx = EVP_MD_CTX_new();
-    const EVP_MD* md = (algo == Algo::Sha256)  ? EVP_sha256()
-                       : (algo == Algo::Sha1) ? EVP_sha1()
-                                              : EVP_md5();
-    if (!impl_->ctx || !EVP_DigestInit_ex(impl_->ctx, md, nullptr))
-        throw std::runtime_error("EVP_DigestInit failed");
+    const EVP_MD* md = (algo == Algo::Sha256) ? EVP_sha256() : (algo == Algo::Sha1) ? EVP_sha1() : EVP_md5();
+    if (!impl_->ctx || !EVP_DigestInit_ex(impl_->ctx, md, nullptr)) throw std::runtime_error("EVP_DigestInit failed");
 }
 
 HashStream::~HashStream() {
@@ -131,8 +125,7 @@ HashStream::~HashStream() {
 }
 
 void HashStream::update(std::span<const uint8_t> data) {
-    if (!EVP_DigestUpdate(impl_->ctx, data.data(), data.size()))
-        throw std::runtime_error("EVP_DigestUpdate failed");
+    if (!EVP_DigestUpdate(impl_->ctx, data.data(), data.size())) throw std::runtime_error("EVP_DigestUpdate failed");
 }
 
 std::string HashStream::final_hex() {
@@ -143,8 +136,7 @@ std::string HashStream::final_hex() {
 std::vector<uint8_t> HashStream::final_bytes() {
     uint8_t buf[EVP_MAX_MD_SIZE];
     unsigned int len = 0;
-    if (!EVP_DigestFinal_ex(impl_->ctx, buf, &len))
-        throw std::runtime_error("EVP_DigestFinal failed");
+    if (!EVP_DigestFinal_ex(impl_->ctx, buf, &len)) throw std::runtime_error("EVP_DigestFinal failed");
     return std::vector<uint8_t>(buf, buf + len);
 }
 

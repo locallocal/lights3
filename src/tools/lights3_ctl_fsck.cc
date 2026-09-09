@@ -17,10 +17,10 @@
 #include <thread>
 #include <vector>
 
+#include <nlohmann/json.hpp>
 #include "core/util/uri.h"
 #include "s3/xml.h"
 #include "storage/multipart.h"
-#include <nlohmann/json.hpp>
 #include "tools/lights3_ctl_common.h"
 #include "tools/lights3_ctl_jobs.h"
 
@@ -62,13 +62,12 @@ bool is_md5_hex(std::string_view s) {
     return true;
 }
 
-void verify_object(SignedClient& cli, const std::string& bucket, const std::string& key,
-                   const std::string& etag, FsckStats& st, RateLimiter& rl) {
+void verify_object(SignedClient& cli, const std::string& bucket, const std::string& key, const std::string& etag,
+                   FsckStats& st, RateLimiter& rl) {
     ++st.objects;
     std::string path = "/" + bucket + "/" + util::aws_uri_encode(key, /*encode_slash=*/false);
     auto dash = etag.find('-');
-    if (!is_md5_hex(dash == std::string::npos ? std::string_view(etag)
-                                              : std::string_view(etag).substr(0, dash))) {
+    if (!is_md5_hex(dash == std::string::npos ? std::string_view(etag) : std::string_view(etag).substr(0, dash))) {
         ++st.unverifiable;
         printf("UNVERIFIABLE %s (ETag is not an MD5: %s)\n", key.c_str(), etag.c_str());
         return;
@@ -80,8 +79,7 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         rl.pace(st.bytes - before);
         if (!r) {
             ++st.errors;
-            fprintf(stderr, "lights3-ctl: fsck: GET %s: %s\n", key.c_str(),
-                    httplib::to_string(r.error()).c_str());
+            fprintf(stderr, "lights3-ctl: fsck: GET %s: %s\n", key.c_str(), httplib::to_string(r.error()).c_str());
             return;
         }
         if (r->status == 404) {
@@ -100,8 +98,7 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         auto h = cli.head(path, "partNumber=1");
         if (!h) {
             ++st.errors;
-            fprintf(stderr, "lights3-ctl: fsck: HEAD %s: %s\n", key.c_str(),
-                    httplib::to_string(h.error()).c_str());
+            fprintf(stderr, "lights3-ctl: fsck: HEAD %s: %s\n", key.c_str(), httplib::to_string(h.error()).c_str());
             return;
         }
         if (h->status == 404) {
@@ -110,22 +107,19 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         }
         if (h->status == 501) {
             ++st.unverifiable;
-            printf("UNVERIFIABLE %s (multipart object without a recorded part layout)\n",
-                   key.c_str());
+            printf("UNVERIFIABLE %s (multipart object without a recorded part layout)\n", key.c_str());
             return;
         }
         if (h->status != 206) {
             ++st.errors;
-            fprintf(stderr, "lights3-ctl: fsck: HEAD %s?partNumber=1: HTTP %d\n", key.c_str(),
-                    h->status);
+            fprintf(stderr, "lights3-ctl: fsck: HEAD %s?partNumber=1: HTTP %d\n", key.c_str(), h->status);
             return;
         }
         int parts = atoi(h->get_header_value("x-amz-mp-parts-count").c_str());
         long declared = strtol(etag.c_str() + dash + 1, nullptr, 10);
         if (parts <= 0 || parts != declared) {
             ++st.unverifiable;
-            printf("UNVERIFIABLE %s (parts count %d does not match ETag suffix %ld)\n",
-                   key.c_str(), parts, declared);
+            printf("UNVERIFIABLE %s (parts count %d does not match ETag suffix %ld)\n", key.c_str(), parts, declared);
             return;
         }
         std::vector<std::string> md5s;
@@ -133,14 +127,12 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
         for (int i = 1; i <= parts; ++i) {
             std::string part_hex;
             uint64_t before = st.bytes;
-            auto r = cli.get_hashed(path, "partNumber=" + std::to_string(i), &part_hex,
-                                    &st.bytes);
+            auto r = cli.get_hashed(path, "partNumber=" + std::to_string(i), &part_hex, &st.bytes);
             rl.pace(st.bytes - before);
             if (!r || r->status != 206) {
                 ++st.errors;
                 fprintf(stderr, "lights3-ctl: fsck: GET %s?partNumber=%d: %s\n", key.c_str(), i,
-                        r ? ("HTTP " + std::to_string(r->status)).c_str()
-                          : httplib::to_string(r.error()).c_str());
+                        r ? ("HTTP " + std::to_string(r->status)).c_str() : httplib::to_string(r.error()).c_str());
                 return;
             }
             md5s.push_back(std::move(part_hex));
@@ -149,21 +141,18 @@ void verify_object(SignedClient& cli, const std::string& bucket, const std::stri
     }
     if (computed != etag) {
         ++st.mismatches;
-        printf("MISMATCH %s (stored %s, computed %s)\n", key.c_str(), etag.c_str(),
-               computed.c_str());
+        printf("MISMATCH %s (stored %s, computed %s)\n", key.c_str(), etag.c_str(), computed.c_str());
     }
 }
 
-int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& prefix,
-             uint64_t bps) {
+int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& prefix, uint64_t bps) {
     FsckStats st;
     RateLimiter rl{bps};
     std::string token;
     for (;;) {
         std::string q = "list-type=2&max-keys=1000";
         if (!prefix.empty()) q += "&prefix=" + util::aws_uri_encode(prefix, /*encode_slash=*/true);
-        if (!token.empty())
-            q += "&continuation-token=" + util::aws_uri_encode(token, /*encode_slash=*/true);
+        if (!token.empty()) q += "&continuation-token=" + util::aws_uri_encode(token, /*encode_slash=*/true);
         auto r = cli.get("/" + bucket, q);
         if (!r) {
             fprintf(stderr, "lights3-ctl: fsck: list: %s\n", httplib::to_string(r.error()).c_str());
@@ -178,19 +167,18 @@ int run_fsck(SignedClient& cli, const std::string& bucket, const std::string& pr
             if (child.name != "Contents") continue;
             std::string etag = child.get("ETag");
             // The XML parser resolves &quot;; strip the literal quotes S3 wraps ETags in
-            if (etag.size() >= 2 && etag.front() == '"' && etag.back() == '"')
-                etag = etag.substr(1, etag.size() - 2);
+            if (etag.size() >= 2 && etag.front() == '"' && etag.back() == '"') etag = etag.substr(1, etag.size() - 2);
             verify_object(cli, bucket, child.get("Key"), etag, st, rl);
         }
         if (root.get("IsTruncated") != "true") break;
         token = root.get("NextContinuationToken");
         if (token.empty()) break;  // defensive: a truncated page must carry a token
     }
-    printf("fsck %s: %llu objects, %llu bytes; %llu mismatches, %llu errors, "
-           "%llu unverifiable, %llu skipped\n",
-           bucket.c_str(), (unsigned long long)st.objects, (unsigned long long)st.bytes,
-           (unsigned long long)st.mismatches, (unsigned long long)st.errors,
-           (unsigned long long)st.unverifiable, (unsigned long long)st.skipped);
+    printf(
+        "fsck %s: %llu objects, %llu bytes; %llu mismatches, %llu errors, "
+        "%llu unverifiable, %llu skipped\n",
+        bucket.c_str(), (unsigned long long)st.objects, (unsigned long long)st.bytes, (unsigned long long)st.mismatches,
+        (unsigned long long)st.errors, (unsigned long long)st.unverifiable, (unsigned long long)st.skipped);
     return (st.mismatches || st.errors) ? 1 : 0;
 }
 
@@ -202,15 +190,15 @@ namespace lights3_ctl {
 // on the shared job driver (lights3_ctl_jobs.h): POST starts one round (409
 // while one runs), GET polls; the final document is printed as JSON and
 // findings > 0 make the exit code 1 like `lights3 fsck`
-int run_fsck_offline(SignedClient& cli, const std::string& backend, uint64_t mbps, bool wait,
-                     bool status_only) {
+int run_fsck_offline(SignedClient& cli, const std::string& backend, uint64_t mbps, bool wait, bool status_only) {
     return run_job(cli, "/-/admin/fsck/" + backend, "fsck", mbps, wait, status_only);
 }
 
 std::shared_ptr<ccmd::c_command> make_fsck() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "fsck", "lights3-ctl fsck my-bucket --prefix=photos/ --max-mbps=50",
-        "lights3-ctl fsck <bucket> [options] | lights3-ctl fsck --offline <backend> [--max-mbps=N] [--no-wait] | lights3-ctl fsck --status <backend>",
+        "lights3-ctl fsck <bucket> [options] | lights3-ctl fsck --offline <backend> [--max-mbps=N] [--no-wait] | "
+        "lights3-ctl fsck --status <backend>",
         "Verify a bucket's objects end to end through the S3 API: every listed object "
         "is downloaded and its MD5 recomputed against the ETag (multipart composites "
         "via GET ?partNumber per part). Read-only; prints MISMATCH/UNVERIFIABLE lines "
@@ -221,8 +209,7 @@ std::shared_ptr<ccmd::c_command> make_fsck() {
         "it and print the outcome document (exit 1 on findings; --no-wait returns the "
         "job id at once). --status <backend>: print the running/last outcome. One job "
         "per backend at a time (409 ScrubInProgress).",
-        "verify a bucket's objects against their ETags.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "verify a bucket's objects against their ETags.", [](const std::shared_ptr<ccmd::c_command>& c) {
             bool offline = c->var<bool>("offline");
             bool status = c->var<bool>("status");
             if (c->args().size() != 1 || (offline && status)) {
@@ -240,18 +227,18 @@ std::shared_ptr<ccmd::c_command> make_fsck() {
             }
             if (offline || status) {
                 bool wait = !c->var<bool>("no-wait");
-                run_admin(c, [&](SignedClient& cli) {
-                    return run_fsck_offline(cli, target, uint64_t(mbps), wait, status);
-                });
+                run_admin(
+                    c, [&](SignedClient& cli) { return run_fsck_offline(cli, target, uint64_t(mbps), wait, status); });
                 return;
             }
-            run_admin(c, [&](SignedClient& cli) {
-                return run_fsck(cli, target, prefix, uint64_t(mbps) * 1000 * 1000);
-            });
+            run_admin(c,
+                      [&](SignedClient& cli) { return run_fsck(cli, target, prefix, uint64_t(mbps) * 1000 * 1000); });
         });
     cmd->varp<std::string>("prefix", "p", "", "only verify keys under this prefix.");
-    cmd->var<int>("max-mbps", 0, "read throttle in MB/s (0 = unthrottled); online: download, --offline: server-side scrub.");
-    cmd->var<bool>("offline", false, "<backend> is a backend name: run the server-side scrub via /-/admin/fsck (root).");
+    cmd->var<int>("max-mbps", 0,
+                  "read throttle in MB/s (0 = unthrottled); online: download, --offline: server-side scrub.");
+    cmd->var<bool>("offline", false,
+                   "<backend> is a backend name: run the server-side scrub via /-/admin/fsck (root).");
     cmd->var<bool>("status", false, "<backend> is a backend name: print the running/last scrub outcome.");
     cmd->var<bool>("no-wait", false, "with --offline: return right after starting the job.");
     lights3_ctl::add_conn_flags(cmd);

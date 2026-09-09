@@ -33,10 +33,10 @@ public:
     static constexpr size_t kExecBuckets = 5;
 
     struct Stats {
-        size_t pending = 0;        // timers not yet due
-        size_t due = 0;            // timers due but still queued ahead of the callback thread
-        uint64_t fired = 0;        // total callbacks fully executed
-        uint64_t slow = 0;         // callbacks exceeding 1s (each accompanied by a WARN log)
+        size_t pending = 0;  // timers not yet due
+        size_t due = 0;      // timers due but still queued ahead of the callback thread
+        uint64_t fired = 0;  // total callbacks fully executed
+        uint64_t slow = 0;   // callbacks exceeding 1s (each accompanied by a WARN log)
         std::array<uint64_t, kExecBuckets> exec_hist{};
         uint64_t exec_sum_us = 0;  // cumulative callback execution time (microseconds)
         // Head-of-queue lag: how late the earliest due/executing callback already is

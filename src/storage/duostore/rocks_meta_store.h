@@ -26,7 +26,7 @@ namespace lights3::storage::duostore {
 
 struct RocksMetaOptions {
     std::string path;
-    bool sync = true;                        // whether commits WAL-fsync (§6.3 meta_sync)
+    bool sync = true;  // whether commits WAL-fsync (§6.3 meta_sync)
     size_t block_cache_bytes = 64ull << 20;
     // Tuning knobs exposed (P5, docs/storage/duostore-design.md §11); defaults = RocksDB's
     // own defaults, so existing deployments keep their behavior. Compression is
@@ -34,7 +34,8 @@ struct RocksMetaOptions {
     size_t write_buffer_bytes = 64ull << 20;  // memtable capacity per CF
     int max_write_buffers = 2;                // max memtable count per CF
     int max_background_jobs = 2;              // total flush/compaction background threads
-    MetricsScope metrics;  // empty scope = isolated instance (tests construct directly with zero wiring, docs/archive/gaps.md §6.1)
+    MetricsScope metrics;  // empty scope = isolated instance (tests construct directly with zero wiring,
+                           // docs/archive/gaps.md §6.1)
 };
 
 class RocksMetaStore final : public IMetaStore {
@@ -59,18 +60,14 @@ public:
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
     std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override;
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
-                    PutCondition cond = {}) override;
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
     ListResult list_objects(std::string_view b, const ListOptions& opt) override;
 
     std::string create_upload(std::string_view b, std::string_view k, ObjectMeta meta) override;
-    UploadRec require_upload(std::string_view b, std::string_view k,
-                             std::string_view id) override;
-    void put_part(std::string_view b, std::string_view k, std::string_view id,
-                  PartRec p) override;
-    std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
-                                    std::string_view id) override;
+    UploadRec require_upload(std::string_view b, std::string_view k, std::string_view id) override;
+    void put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) override;
+    std::vector<PartRec> list_parts(std::string_view b, std::string_view k, std::string_view id) override;
     std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
                                          std::string_view id_marker = {}, int limit = 0,
                                          std::string_view prefix = {}) override;
@@ -86,8 +83,8 @@ public:
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
-    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
-                      const DataRef& from, const DataRef& to) override;
+    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
+                      const DataRef& to) override;
     // Single WriteBatch, single commit (batched compaction, gaps §2.13); per-item CAS is independent
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
@@ -102,8 +99,7 @@ public:
     // Online: the engine flushes the memtable and copies the live files, no write
     // pause
     bool supports_physical_backup() const override { return true; }
-    MetaBackupEntry backup_physical(const std::filesystem::path& dir, uint64_t id,
-                                    bool full) override;
+    MetaBackupEntry backup_physical(const std::filesystem::path& dir, uint64_t id, bool full) override;
     // Restore backup `marker` (the id recorded by backup_physical) into db_path
     // with the store closed; db_path is wiped first
     static void restore_physical(const std::filesystem::path& dir, const std::string& marker,
@@ -127,39 +123,33 @@ private:
     // must be called after in-flight requests finish (§9 lifecycle)
     rocksdb::DB* db() const;
     // snap = pinned snapshot for the online-dump view (nullptr = latest state)
-    std::optional<std::string> get_raw(int cf, std::string_view key,
-                                       const rocksdb::Snapshot* snap = nullptr);
+    std::optional<std::string> get_raw(int cf, std::string_view key, const rocksdb::Snapshot* snap = nullptr);
     // Snapshot-parameterized read bodies shared by the live methods (nullptr =
     // per-call snapshot / latest) and SnapshotView (roadmap §3.7 online dump)
     std::vector<BucketInfo> list_buckets_snap(const rocksdb::Snapshot* snap);
-    ListResult list_objects_snap(std::string_view b, const ListOptions& opt,
-                                 const rocksdb::Snapshot* snap);
+    ListResult list_objects_snap(std::string_view b, const ListOptions& opt, const rocksdb::Snapshot* snap);
     std::vector<PackStat> pack_stats_snap(const rocksdb::Snapshot* snap);
     void commit(rocksdb::WriteBatch& batch);
     void require_bucket_locked(std::string_view b);
-    std::vector<PartRec> scan_parts(std::string_view b, std::string_view k,
-                                    std::string_view id);
+    std::vector<PartRec> scan_parts(std::string_view b, std::string_view k, std::string_view id);
     uint64_t alloc_id(std::string_view counter_key, IdRange& r, uint32_t n = 1);
-    void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref,
-                                ReclaimReason reason);
+    void enqueue_reclaim_locked(rocksdb::WriteBatch& batch, const DataRef& ref, ReclaimReason reason);
     void migrate_schema(const std::string& stored);  // version check + migration chain (called by ctor)
     // Maintain refs (chunk reference table, §4.1) in the same batch: add = write the
     // owner, otherwise delete
-    void batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add,
-                    std::string_view owner);
+    void batch_refs(rocksdb::WriteBatch& batch, const DataRef& ref, bool add, std::string_view owner);
     // Maintain the pack liveness ledger (incremental merge on the stats CF, §9.1)
     // in the same batch. Separate from batch_refs: complete's refs transfer (owner
     // rewrite) must be a no-op for packs, and mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*);
     // live_bytes uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
-    void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign,
-                          int64_t rec_overhead);
+    void batch_pack_delta(rocksdb::WriteBatch& batch, const DataRef& ref, int sign, int64_t rec_overhead);
     // Single-item CAS core of swap (called holding mu_): on successful validation it
     // appends the whole mutation set to the batch and returns true; on mismatch it
     // returns false without touching the batch. Shared by swap_extents /
     // swap_extents_batch
-    bool stage_swap_locked(rocksdb::WriteBatch& batch, std::string_view b, std::string_view k,
-                          uint64_t expect_version, const DataRef& from, const DataRef& to);
+    bool stage_swap_locked(rocksdb::WriteBatch& batch, std::string_view b, std::string_view k, uint64_t expect_version,
+                           const DataRef& from, const DataRef& to);
 
     RocksMetaOptions opt_;
     std::atomic<rocksdb::DB*> db_{nullptr};

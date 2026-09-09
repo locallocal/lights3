@@ -23,19 +23,16 @@ Task<http::HttpResponse> S3Service::admin_fsck(http::HttpRequest& req, std::stri
                           "Running fsck requires a root (statically configured) credential.");
         constexpr std::string_view kBase = "/-/admin/fsck";
         std::string backend = req.path.substr(kBase.size());
-        if (backend.size() < 2 || backend.front() != '/' ||
-            backend.find('/', 1) != std::string::npos)
+        if (backend.size() < 2 || backend.front() != '/' || backend.find('/', 1) != std::string::npos)
             throw S3Error(S3ErrorCode::InvalidRequest, "Usage: /-/admin/fsck/<backend>.");
         backend.erase(0, 1);
         if (!job_start_ || !job_status_)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "fsck is not available on this deployment.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "fsck is not available on this deployment.");
         if (req.method == "GET") {
             co_return json_response(200, job_status_(backend, "fsck", "fsck"));
         }
         if (req.method != "POST")
-            throw S3Error(S3ErrorCode::MethodNotAllowed,
-                          "The specified method is not allowed against this resource.");
+            throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
         uint64_t mbps = 0;
         if (auto v = req.query_get("max_mbps")) {
             if (v->empty() || v->find_first_not_of("0123456789") != std::string::npos)
@@ -47,8 +44,8 @@ Task<http::HttpResponse> S3Service::admin_fsck(http::HttpRequest& req, std::stri
         e.event = "fsck.start";
         e.actor = access_key;
         e.request_id = ctx.request_id;
-        e.detail = "backend " + backend + " job " + j.value("job_id", json(0)).dump() +
-                   " max_mbps " + std::to_string(mbps);
+        e.detail = "backend " + backend + " job " + j.value("job_id", json(0)).dump() + " max_mbps " +
+                   std::to_string(mbps);
         audit(e);
         co_return json_response(202, j);
     } catch (const S3Error& e) {

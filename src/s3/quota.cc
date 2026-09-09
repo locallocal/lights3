@@ -49,8 +49,7 @@ BucketQuota parse_quota_xml(const std::string& body) {
         uint64_t out = 0;
         auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
         if (ec != std::errc() || p != v.data() + v.size())
-            throw S3Error(S3ErrorCode::MalformedXML,
-                          std::string("Invalid ") + tag + " value (non-negative integer).");
+            throw S3Error(S3ErrorCode::MalformedXML, std::string("Invalid ") + tag + " value (non-negative integer).");
         return out;
     };
     BucketQuota q;

@@ -11,18 +11,27 @@ std::string xml_escape(const std::string& s) {
     out.reserve(s.size());
     for (char c : s) {
         switch (c) {
-            case '&': out += "&amp;"; break;
-            case '<': out += "&lt;"; break;
-            case '>': out += "&gt;"; break;
-            case '"': out += "&quot;"; break;
-            case '\'': out += "&apos;"; break;
+            case '&':
+                out += "&amp;";
+                break;
+            case '<':
+                out += "&lt;";
+                break;
+            case '>':
+                out += "&gt;";
+                break;
+            case '"':
+                out += "&quot;";
+                break;
+            case '\'':
+                out += "&apos;";
+                break;
             default:
                 // XML 1.0 forbids most C0 control characters (even character references are illegal):
-                // drop them outright, an output-side safety net against reflection (docs/archive/gaps.md §4 -- <Resource> echoes
-                // request-side strings; beyond upstream validation, output must always remain valid XML)
-                if (static_cast<unsigned char>(c) < 0x20 && c != '\t' && c != '\n' &&
-                    c != '\r')
-                    break;
+                // drop them outright, an output-side safety net against reflection (docs/archive/gaps.md §4 --
+                // <Resource> echoes request-side strings; beyond upstream validation, output must always remain valid
+                // XML)
+                if (static_cast<unsigned char>(c) < 0x20 && c != '\t' && c != '\n' && c != '\r') break;
                 out.push_back(c);
         }
     }
@@ -34,8 +43,7 @@ std::string xml_escape(const std::string& s) {
 namespace {
 
 [[noreturn]] void bad(const std::string& why) {
-    throw S3Error(S3ErrorCode::MalformedXML,
-                  "The XML you provided was not well-formed: " + why);
+    throw S3Error(S3ErrorCode::MalformedXML, "The XML you provided was not well-formed: " + why);
 }
 
 class Parser {
@@ -66,14 +74,19 @@ private:
         pos_ = at + end.size();
     }
 
-    // Misc content before/after the root element and between elements: whitespace, declarations, comments, DOCTYPE (skipped, entities not expanded)
+    // Misc content before/after the root element and between elements: whitespace, declarations, comments, DOCTYPE
+    // (skipped, entities not expanded)
     void skip_misc() {
         for (;;) {
             skip_ws();
-            if (starts_with("<?")) skip_until("?>", "processing instruction");
-            else if (starts_with("<!--")) skip_until("-->", "comment");
-            else if (starts_with("<!DOCTYPE")) skip_until(">", "DOCTYPE");
-            else return;
+            if (starts_with("<?"))
+                skip_until("?>", "processing instruction");
+            else if (starts_with("<!--"))
+                skip_until("-->", "comment");
+            else if (starts_with("<!DOCTYPE"))
+                skip_until(">", "DOCTYPE");
+            else
+                return;
         }
     }
 
@@ -81,8 +94,7 @@ private:
         size_t start = pos_;
         while (!eof()) {
             char c = peek();
-            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' ||
-                c == '.' || c == ':')
+            if (std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' || c == '.' || c == ':')
                 ++pos_;
             else
                 break;
@@ -121,8 +133,7 @@ private:
             if (starts_with("</")) {
                 pos_ += 2;
                 std::string close = parse_name();
-                if (close != node.name)
-                    bad("mismatched close tag </" + close + "> for <" + node.name + ">");
+                if (close != node.name) bad("mismatched close tag </" + close + "> for <" + node.name + ">");
                 skip_ws();
                 if (eof() || peek() != '>') bad("malformed close tag");
                 ++pos_;
@@ -178,17 +189,21 @@ private:
         if (semi == std::string_view::npos || semi - pos_ > 16) bad("malformed entity");
         std::string_view e = s_.substr(pos_ + 1, semi - pos_ - 1);
         pos_ = semi + 1;
-        if (e == "lt") out.push_back('<');
-        else if (e == "gt") out.push_back('>');
-        else if (e == "amp") out.push_back('&');
-        else if (e == "quot") out.push_back('"');
-        else if (e == "apos") out.push_back('\'');
+        if (e == "lt")
+            out.push_back('<');
+        else if (e == "gt")
+            out.push_back('>');
+        else if (e == "amp")
+            out.push_back('&');
+        else if (e == "quot")
+            out.push_back('"');
+        else if (e == "apos")
+            out.push_back('\'');
         else if (!e.empty() && e[0] == '#') {
             long code = 0;
             try {
-                code = (e.size() > 1 && (e[1] == 'x' || e[1] == 'X'))
-                           ? std::stol(std::string(e.substr(2)), nullptr, 16)
-                           : std::stol(std::string(e.substr(1)));
+                code = (e.size() > 1 && (e[1] == 'x' || e[1] == 'X')) ? std::stol(std::string(e.substr(2)), nullptr, 16)
+                                                                      : std::stol(std::string(e.substr(1)));
             } catch (...) {
                 bad("malformed character reference");
             }
@@ -243,8 +258,7 @@ std::string XmlNode::get(std::string_view child_name) const {
 }
 
 XmlNode xml_parse(std::string_view input, size_t max_size) {
-    if (input.size() > max_size)
-        throw S3Error(S3ErrorCode::MalformedXML, "Request XML exceeds the size limit.");
+    if (input.size() > max_size) throw S3Error(S3ErrorCode::MalformedXML, "Request XML exceeds the size limit.");
     return Parser(input).parse_document();
 }
 

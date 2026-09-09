@@ -96,21 +96,21 @@ TEST(pump_executor_runs_resume_on_caller_thread) {
     ThreadPool pool(2);
     PumpExecutor ex;
     auto caller = std::this_thread::get_id();
-    // The task chain first hops to a pool thread, then switches back to the request thread via resume_on (the blocking-read switch path)
-    auto t = [](ThreadPool& p, PumpExecutor& e,
-                std::thread::id caller) -> Task<bool> {
+    // The task chain first hops to a pool thread, then switches back to the request thread via resume_on (the
+    // blocking-read switch path)
+    auto t = [](ThreadPool& p, PumpExecutor& e, std::thread::id caller) -> Task<bool> {
         co_await p.schedule();
         bool on_pool = std::this_thread::get_id() != caller;
         co_await resume_on(e);
         bool back_on_caller = std::this_thread::get_id() == caller;
-        co_return on_pool && back_on_caller;
+        co_return on_pool&& back_on_caller;
     };
     CHECK(sync_wait_pumping(ex, t(pool, ex, caller)));
 }
 
 TEST(pump_executor_value_and_exception) {
     PumpExecutor ex1;
-    auto v = []( ) -> Task<int> { co_return 7; };
+    auto v = []() -> Task<int> { co_return 7; };
     CHECK_EQ(sync_wait_pumping(ex1, v()), 7);
     PumpExecutor ex2;
     auto boom = []() -> Task<void> {
@@ -202,7 +202,7 @@ TEST(pump_executor_resume_on_inline_when_running) {
         bool inside = e.running_in_this_thread();
         auto before = std::this_thread::get_id();
         co_await resume_on(e);  // fast path: already on the pumping thread
-        co_return inside && std::this_thread::get_id() == before;
+        co_return inside&& std::this_thread::get_id() == before;
     };
     CHECK(sync_wait_pumping(ex, t(ex)));
 }

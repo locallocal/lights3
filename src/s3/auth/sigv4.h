@@ -1,5 +1,6 @@
 // L2: AWS Signature V4 authentication (see docs/s3-protocol.md §3)
-// Self-implemented verification + signing (the signing side is reused by unit tests and later by cloudproxy forwarding).
+// Self-implemented verification + signing (the signing side is reused by unit tests and later by cloudproxy
+// forwarding).
 #pragma once
 
 #include <atomic>
@@ -18,12 +19,13 @@
 
 namespace lights3::s3 {
 
-// Credential lookup interface (docs/s3-protocol.md §3.5, docs/credential-management.md §5.2): called synchronously on the verification hot path; implementations must be thread-safe.
-// build() wraps a static-table implementation by default; CredentialStore implements this interface and is injected via set_provider.
-// A single lookup returns both the SK and a policy snapshot (docs/archive/gaps.md §3.7): querying the store again for the
-// policy after verify risks the credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race window
+// Credential lookup interface (docs/s3-protocol.md §3.5, docs/credential-management.md §5.2): called synchronously on
+// the verification hot path; implementations must be thread-safe. build() wraps a static-table implementation by
+// default; CredentialStore implements this interface and is injected via set_provider. A single lookup returns both the
+// SK and a policy snapshot (docs/archive/gaps.md §3.7): querying the store again for the policy after verify risks the
+// credential having been deleted by sync/remove -- a miss then is not "unrestricted" but a race window
 struct CredentialLookup {
-    util::SecretString secret_key;  // wiped on destruction (docs/archive/gaps.md §4)
+    util::SecretString secret_key;           // wiped on destruction (docs/archive/gaps.md §4)
     std::optional<CredentialPolicy> policy;  // snapshot at lookup time; nullopt = unrestricted
     // STS session credentials (roadmap §2.6): set for session AKs. verify() then
     // requires a matching X-Amz-Security-Token (mismatch -> InvalidToken) and refuses
@@ -72,7 +74,8 @@ public:
 
     static SigV4Authenticator build(const AuthConfig& cfg);
 
-    // require_auth_ is atomic (not implicitly copyable/movable): moving by value during assembly needs explicit definitions
+    // require_auth_ is atomic (not implicitly copyable/movable): moving by value during assembly needs explicit
+    // definitions
     SigV4Authenticator() = default;
     SigV4Authenticator(SigV4Authenticator&& o) noexcept
         : clock(std::move(o.clock)),
@@ -88,7 +91,6 @@ public:
           service_(o.service_) {}
 
     void set_provider(std::shared_ptr<const ICredentialProvider> p) {
-
         provider_ = std::move(p);
         if (provider_ && provider_->has_credentials()) require_auth_.store(true);
     }
@@ -111,9 +113,7 @@ public:
     //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] -> aws-chunked de-framing +
     //    per-chunk signature chain verification (docs/s3-protocol.md §3.2)
     //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER -> de-framing only
-    VerifiedIdentity verify(http::HttpRequest& req) const {
-        return verify_impl(req, service_, nullptr);
-    }
+    VerifiedIdentity verify(http::HttpRequest& req) const { return verify_impl(req, service_, nullptr); }
     // STS AssumeRole endpoint (roadmap §2.6): scope service "sts", payload hash computed
     // by the caller from the already-read form body (generic SigV4 carries the hash only
     // inside the canonical request, not as an x-amz-content-sha256 header)
@@ -126,8 +126,7 @@ public:
 
     // Adds x-amz-date / x-amz-content-sha256 / Authorization to the request
     // (empty payload_hash computes as an empty body)
-    void sign(http::HttpRequest& req, const Credential& cred,
-              std::string payload_hash = "") const;
+    void sign(http::HttpRequest& req, const Credential& cred, std::string payload_hash = "") const;
 
     // Injectable clock (fixed time in unit tests)
     std::function<util::SysTime()> clock = [] { return std::chrono::system_clock::now(); };
@@ -141,9 +140,8 @@ private:
     VerifiedIdentity verify_impl(http::HttpRequest& req, std::string_view service,
                                  const std::string* explicit_payload_hash) const;
     // With presigned=true, X-Amz-Signature is excluded from the canonical query (presigned requests only)
-    std::string signature_for(const http::HttpRequest& req, const std::string& secret_key,
-                              const std::string& amz_date, const std::string& scope,
-                              const std::string& signed_headers,
+    std::string signature_for(const http::HttpRequest& req, const std::string& secret_key, const std::string& amz_date,
+                              const std::string& scope, const std::string& signed_headers,
                               const std::string& payload_hash, bool presigned = false) const;
 
     std::shared_ptr<const ICredentialProvider> provider_;

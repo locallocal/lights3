@@ -11,10 +11,10 @@
 #include <optional>
 #include <vector>
 
+#include "core/background.h"
 #include "core/metrics.h"
 #include "core/semaphore.h"
 #include "core/thread_pool.h"
-#include "core/background.h"
 #include "core/timer.h"
 #include "storage/backend.h"
 #include "storage/localfs/fs_util.h"
@@ -35,13 +35,10 @@ struct FsMetaStamp {
     off_t size = 0;
     struct timespec mtime{};
     struct timespec ctime{};
-    static FsMetaStamp of(const struct stat& st) {
-        return {st.st_dev, st.st_ino, st.st_size, st.st_mtim, st.st_ctim};
-    }
+    static FsMetaStamp of(const struct stat& st) { return {st.st_dev, st.st_ino, st.st_size, st.st_mtim, st.st_ctim}; }
     bool operator==(const FsMetaStamp& o) const {
-        return dev == o.dev && ino == o.ino && size == o.size &&
-               mtime.tv_sec == o.mtime.tv_sec && mtime.tv_nsec == o.mtime.tv_nsec &&
-               ctime.tv_sec == o.ctime.tv_sec && ctime.tv_nsec == o.ctime.tv_nsec;
+        return dev == o.dev && ino == o.ino && size == o.size && mtime.tv_sec == o.mtime.tv_sec &&
+               mtime.tv_nsec == o.mtime.tv_nsec && ctime.tv_sec == o.ctime.tv_sec && ctime.tv_nsec == o.ctime.tv_nsec;
     }
 };
 struct FsCachedMeta {
@@ -57,8 +54,8 @@ struct LocalFsOptions {
     // Orphaned multipart cleanup (docs/archive/gaps.md §6.3): previously kMpuTtl was hardcoded to
     // 7 days and only scanned once at startup -- a gateway running for months without a
     // restart would accumulate never-completed/aborted upload directories without bound
-    int mpu_ttl_sec = 7 * 86400;          // 0 = no cleanup
-    int mpu_scan_interval_sec = 6 * 3600; // 0 = scan only at startup
+    int mpu_ttl_sec = 7 * 86400;           // 0 = no cleanup
+    int mpu_scan_interval_sec = 6 * 3600;  // 0 = scan only at startup
 
     // ---- roadmap §3.5 (docs/storage/localfs.md §2/§3/§6/§12) ----
     // Fail at construction (and on every write) when the root filesystem cannot store the
@@ -114,9 +111,8 @@ struct FsScrubStats {
 
 class LocalFsBackend : public IStorageBackend {
 public:
-    LocalFsBackend(std::filesystem::path root, std::filesystem::path staging,
-                   std::shared_ptr<ThreadPool> pool, LocalFsOptions opt = {},
-                   MetricsScope metrics = {});
+    LocalFsBackend(std::filesystem::path root, std::filesystem::path staging, std::shared_ptr<ThreadPool> pool,
+                   LocalFsOptions opt = {}, MetricsScope metrics = {});
     ~LocalFsBackend() override;
     // Cancel the periodic cleanup timer and wait for in-flight scans (xlocalfs overrides
     // must chain back to this implementation)
@@ -129,46 +125,35 @@ public:
 
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
-    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
-                               http::BodyReader& body,
+    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta, http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     // Data path, on-disk vs. logical size, metadata source (xattr / sidecar), tier
     // sidecar fields; one "file" extent (roadmap §6.2)
-    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket,
-                                                     std::string_view key) override;
+    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket, std::string_view key) override;
     // Same-backend copy fast path (docs/archive/gaps.md §6.3): copy_file_range moves data in the
     // kernel (an O(1) clone on reflink-capable filesystems), bypassing user-space buffers.
     // Tier stubs (data not local) return nullopt to fall back to the streaming path
-    Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket,
-                                                    std::string_view src_key,
-                                                    std::string_view dst_bucket,
-                                                    std::string_view dst_key,
+    Task<std::optional<PutResult>> copy_object_fast(std::string_view src_bucket, std::string_view src_key,
+                                                    std::string_view dst_bucket, std::string_view dst_key,
                                                     ObjectMeta meta) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     // ?tagging in-place meta rewrite (roadmap §2.5): xattr + sidecar under the per-key commit lock
-    Task<void> set_object_tagging(std::string_view bucket, std::string_view key,
-                                  std::string tagging) override;
+    Task<void> set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
     // multipart: parts land in <staging>/mpu/<upload_id>/part.NNNNN, complete concatenates
     // and then takes the same atomic rename commit as PUT (docs/storage/storage-backend.md §3.2)
-    Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
-                                       ObjectMeta meta) override;
+    Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) override;
     using IStorageBackend::upload_part;
-    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                std::string_view upload_id, int part_no, http::BodyReader& body,
-                                const std::optional<PartChecksum>& checksum) override;
-    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
-                                       std::string_view upload_id,
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id, int part_no,
+                                http::BodyReader& body, const std::optional<PartChecksum>& checksum) override;
+    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;
-    Task<void> abort_multipart(std::string_view bucket, std::string_view key,
-                               std::string_view upload_id) override;
-    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
-                                     std::string_view upload_id,
+    Task<void> abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) override;
+    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                      const ListPartsOptions& opt) override;
-    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
-                                                   const ListUploadsOptions& opt) override;
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) override;
 
     // Full-verify scrub (roadmap §3.1): walks every bucket directory, re-reads
     // each object's content and compares the recomputed MD5 against the stored
@@ -195,9 +180,7 @@ public:
     // fs_util primitives directly (tiered stub / cache-fill commits) must call this after
     // their commit point; the stat stamp would catch it anyway under
     // meta_cache_validate, this keeps validate=false exact for in-process writers
-    void invalidate_object_meta(std::string_view bucket, std::string_view key) {
-        meta_cache_->invalidate(bucket, key);
-    }
+    void invalidate_object_meta(std::string_view bucket, std::string_view key) { meta_cache_->invalidate(bucket, key); }
 
     static constexpr const char* kSidecarSuffix = fsutil::kSidecarSuffix;
     static constexpr const char* kBucketMarker = fsutil::kBucketMarker;
@@ -214,7 +197,7 @@ protected:
     virtual const char* engine_name() const { return "localfs"; }
     std::filesystem::path bucket_dir(std::string_view bucket) const;
     std::filesystem::path object_path(std::string_view bucket, std::string_view key) const;
-    void require_bucket(std::string_view bucket) const;      // throws NoSuchBucket if missing
+    void require_bucket(std::string_view bucket) const;  // throws NoSuchBucket if missing
     ObjectMeta load_meta(const std::filesystem::path& data_path, std::string key) const;
 
     // ---- metadata cache plumbing (roadmap §3.8) ----
@@ -222,14 +205,12 @@ protected:
     // cache with the record + that stat's stamp. tok must predate the metadata read (the
     // lookup that missed hands it out), so a write racing the read cannot leave a stale
     // record behind
-    ObjectMeta meta_from_stat(std::string_view bucket, std::string_view key,
-                              const std::filesystem::path& path, const struct stat& st,
-                              const FsMetaCache::Token& tok,
+    ObjectMeta meta_from_stat(std::string_view bucket, std::string_view key, const std::filesystem::path& path,
+                              const struct stat& st, const FsMetaCache::Token& tok,
                               fsutil::TierInfo* tier_out = nullptr) const;
     // Invalidation on frame exit, declared right before a commit section (xlocalfs's
     // ring-based commits share it); see MetaCache::InvalidateGuard
-    [[nodiscard]] FsMetaCache::InvalidateGuard invalidate_on_exit(std::string_view bucket,
-                                                                  std::string_view key) {
+    [[nodiscard]] FsMetaCache::InvalidateGuard invalidate_on_exit(std::string_view bucket, std::string_view key) {
         return meta_cache_->invalidate_on_exit(bucket, key);
     }
 
@@ -237,9 +218,7 @@ protected:
     // Enum values are the metric array indices; the data-plane methods xlocalfs overrides
     // share the same instances (overrides don't go through the base implementation, each
     // instruments at its own entry, so no double counting by construction)
-    enum class Op : size_t {
-        kPut, kGet, kHead, kDelete, kList, kCopy, kUploadPart, kCompleteMpu
-    };
+    enum class Op : size_t { kPut, kGet, kHead, kDelete, kList, kCopy, kUploadPart, kCompleteMpu };
     static constexpr size_t kOpCount = 8;
     void record_op(Op op, double secs, bool ok);
     // RAII inside the coroutine frame: accounts on frame destruction (including exception
@@ -252,10 +231,7 @@ protected:
         std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
         bool ok = false;
         ~OpGuard() {
-            self->record_op(op,
-                            std::chrono::duration<double>(std::chrono::steady_clock::now() -
-                                                          start).count(),
-                            ok);
+            self->record_op(op, std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), ok);
         }
     };
 
@@ -288,12 +264,10 @@ protected:
 private:
     // run_scrub_once helpers (pool thread): one bucket's ordered walk, then one
     // object's hash-and-compare; md5_range streams [off, off+len) of an open fd
-    Task<void> scrub_bucket(const std::string& bucket, const std::filesystem::path& dir,
-                            class ScrubThrottle& throttle, std::vector<uint8_t>& buf,
-                            FsScrubStats& st);
-    Task<void> scrub_object(const std::string& bucket, const std::string& key,
-                            const std::filesystem::path& path, class ScrubThrottle& throttle,
+    Task<void> scrub_bucket(const std::string& bucket, const std::filesystem::path& dir, class ScrubThrottle& throttle,
                             std::vector<uint8_t>& buf, FsScrubStats& st);
+    Task<void> scrub_object(const std::string& bucket, const std::string& key, const std::filesystem::path& path,
+                            class ScrubThrottle& throttle, std::vector<uint8_t>& buf, FsScrubStats& st);
     Task<std::string> md5_range(int fd, uint64_t off, uint64_t len, class ScrubThrottle& throttle,
                                 std::vector<uint8_t>& buf, FsScrubStats& st);
 
@@ -301,26 +275,23 @@ private:
     // strided workers over the pool (each key = stat + getxattr; a key deleted between
     // readdir and stat is dropped, not an error), then orphan sidecars spotted during the
     // walk are reaped under the per-key lock
-    Task<void> load_page_meta(const std::filesystem::path& base,
-                              const std::vector<std::string>& keys,
+    Task<void> load_page_meta(const std::filesystem::path& base, const std::vector<std::string>& keys,
                               std::vector<ObjectMeta>& out);
-    Task<void> load_meta_slice(const std::filesystem::path& base,
-                               const std::vector<std::string>& keys, size_t first, size_t stride,
-                               std::vector<std::optional<ObjectMeta>>& metas);
+    Task<void> load_meta_slice(const std::filesystem::path& base, const std::vector<std::string>& keys, size_t first,
+                               size_t stride, std::vector<std::optional<ObjectMeta>>& metas);
     Task<bool> reap_orphan_sidecar(std::string bucket, std::filesystem::path sidecar);
     Task<void> reap_orphan_sidecars(std::string bucket, std::vector<std::filesystem::path> list);
 
     void init_metrics(const MetricsScope& metrics);  // one-time acquisition at construction (same pattern as duostore)
-    void cleanup_stale_uploads();  // remove mpu directories past mpu_ttl (startup + periodic)
-    Task<void> mpu_scan_task();    // pool hop + cleanup_stale_uploads
+    void cleanup_stale_uploads();                    // remove mpu directories past mpu_ttl (startup + periodic)
+    Task<void> mpu_scan_task();                      // pool hop + cleanup_stale_uploads
     Task<void> sidecar_sweep_task();
     // Re-arm a periodic maintenance task after it completes (same shape as duostore's GC
     // worker): runs never overlap, a slow run just pushes back the next trigger
-    void schedule_periodic(TimerQueue::Id& id, int interval_sec,
-                           Task<void> (LocalFsBackend::*fn)());
+    void schedule_periodic(TimerQueue::Id& id, int interval_sec, Task<void> (LocalFsBackend::*fn)());
     Task<void> run_periodic(TimerQueue::Id* slot, int interval_sec,
                             Task<void> (LocalFsBackend::*fn)());  // one run, then re-arm
-    void shutdown_background();    // shared by close/dtor: cancel timers + wait in-flight scans
+    void shutdown_background();  // shared by close/dtor: cancel timers + wait in-flight scans
 
     // Instances fully pre-registered across the op dimension (acquired at construction,
     // hot path only inc/observe); the latency histogram is non-null only at the

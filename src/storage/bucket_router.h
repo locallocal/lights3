@@ -72,8 +72,7 @@ private:
         std::string default_name;
         std::atomic<std::shared_ptr<const Table>> table;
     };
-    static std::shared_ptr<const Table> compile(const BucketsConfig& cfg,
-                                                std::shared_ptr<const BackendMap> backends);
+    static std::shared_ptr<const Table> compile(const BucketsConfig& cfg, std::shared_ptr<const BackendMap> backends);
     std::shared_ptr<const Table> table() const { return shared_->table.load(std::memory_order_acquire); }
 
     std::shared_ptr<Shared> shared_;

@@ -32,15 +32,14 @@ bool one_bucket_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& bu
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "get", "lights3-ctl quota get logs", "lights3-ctl quota get <bucket> [options]",
-        "Print a bucket's quota XML (404 NoSuchQuotaConfiguration when none is set).",
-        "show a bucket's quota.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "Print a bucket's quota XML (404 NoSuchQuotaConfiguration when none is set).", "show a bucket's quota.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             run_admin(c, [&](SignedClient& cli) {
                 auto r = cli.get("/" + bucket, "quota");
                 int rc = finish(r, 200);
-                if (rc == 0 && r && !r->body.empty() && r->body.back() != '\n')
-                    fputc('\n', stdout);
+                if (rc == 0 && r && !r->body.empty() && r->body.back() != '\n') fputc('\n', stdout);
                 return rc;
             });
         });
@@ -68,8 +67,8 @@ std::shared_ptr<ccmd::c_command> make_set() {
                     fprintf(stderr, "lights3-ctl: give --max-bytes and/or --max-objects (> 0)\n");
                     return 2;
                 }
-                return finish(cli.put_unsigned("/" + bucket, lights3::s3::quota_xml(q), "quota"),
-                              200, "quota set for " + bucket);
+                return finish(cli.put_unsigned("/" + bucket, lights3::s3::quota_xml(q), "quota"), 200,
+                              "quota set for " + bucket);
             });
         });
     cmd->varp<std::string>("max-bytes", "b", "", "byte limit (committed + in-flight multipart bytes); 0 = unlimited.");

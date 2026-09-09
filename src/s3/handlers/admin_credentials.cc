@@ -32,9 +32,12 @@ std::string mask(const std::string& sk) {
 
 const char* source_name(CredSource s) {
     switch (s) {
-        case CredSource::kStatic: return "static";
-        case CredSource::kFile: return "file";
-        case CredSource::kDynamic: return "dynamic";
+        case CredSource::kStatic:
+            return "static";
+        case CredSource::kFile:
+            return "file";
+        case CredSource::kDynamic:
+            return "dynamic";
     }
     return "dynamic";
 }
@@ -71,7 +74,7 @@ json to_json(const CredentialInfo& c, bool with_secret) {
 struct CreateRequest {
     std::string comment;
     std::optional<CredentialPolicy> policy;
-    std::string tenant;        // docs/multi-tenancy.md §4: owning tenant (optional)
+    std::string tenant;         // docs/multi-tenancy.md §4: owning tenant (optional)
     bool tenant_admin = false;  // "role": "admin"
 };
 
@@ -84,8 +87,7 @@ Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
     for (;;) {
         size_t n = co_await req.body->read(std::span(buf));
         if (n == 0) break;
-        if (text.size() + n > 64 * 1024)
-            throw S3Error(S3ErrorCode::InvalidRequest, "Request body too large.");
+        if (text.size() + n > 64 * 1024) throw S3Error(S3ErrorCode::InvalidRequest, "Request body too large.");
         text.append(reinterpret_cast<const char*>(buf), n);
     }
     if (text.empty()) co_return out;
@@ -95,36 +97,30 @@ Task<CreateRequest> parse_create_body(http::HttpRequest& req) {
     } catch (const json::exception&) {
         throw S3Error(S3ErrorCode::InvalidRequest, "Request body is not valid JSON.");
     }
-    if (!j.is_object())
-        throw S3Error(S3ErrorCode::InvalidRequest, "Request body must be a JSON object.");
+    if (!j.is_object()) throw S3Error(S3ErrorCode::InvalidRequest, "Request body must be a JSON object.");
     for (auto& [k, v] : j.items()) {
         if (k == "comment") {
-            if (!v.is_string())
-                throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
+            if (!v.is_string()) throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
             out.comment = v.get<std::string>();  // body takes precedence over ?comment=
         } else if (k == "policy") {
             out.policy = parse_policy_json(v.dump());
         } else if (k == "tenant") {
-            if (!v.is_string())
-                throw S3Error(S3ErrorCode::InvalidRequest, "tenant must be a string.");
+            if (!v.is_string()) throw S3Error(S3ErrorCode::InvalidRequest, "tenant must be a string.");
             out.tenant = v.get<std::string>();
         } else if (k == "role") {
-            if (!v.is_string())
-                throw S3Error(S3ErrorCode::InvalidRequest, "role must be a string.");
+            if (!v.is_string()) throw S3Error(S3ErrorCode::InvalidRequest, "role must be a string.");
             out.tenant_admin = parse_credential_role(v.get<std::string>());
         } else {
             throw S3Error(S3ErrorCode::InvalidRequest, "unknown field '" + k + "'.");
         }
     }
-    if (out.tenant_admin && out.tenant.empty())
-        throw S3Error(S3ErrorCode::InvalidRequest, "role requires a tenant.");
+    if (out.tenant_admin && out.tenant.empty()) throw S3Error(S3ErrorCode::InvalidRequest, "role requires a tenant.");
     co_return out;
 }
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
-                                                      std::string& access_key) {
+Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req, std::string& access_key) {
     constexpr std::string_view kBase = "/-/admin/credentials";
     try {
         auto ident = verify_identity(req);
@@ -146,17 +142,14 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
         auto require_visible = [&](const std::string& ak) {
             auto c = cred_store_->find(ak);
             if (!c || !visible(*c))
-                throw S3Error(S3ErrorCode::InvalidAccessKeyId,
-                              "The specified access key does not exist.");
+                throw S3Error(S3ErrorCode::InvalidAccessKeyId, "The specified access key does not exist.");
             return *c;
         };
         auto require_tenant_exists = [&](const std::string& id) {
             if (!tenants_ || !tenants_->find(id))
-                throw S3Error(S3ErrorCode::NoSuchTenant,
-                              "Tenant '" + id + "' does not exist.");
+                throw S3Error(S3ErrorCode::NoSuchTenant, "Tenant '" + id + "' does not exist.");
         };
-        auto audit_event = [&](std::string_view event, std::string_view target,
-                               std::string detail) {
+        auto audit_event = [&](std::string_view event, std::string_view target, std::string detail) {
             AuditEvent e;
             e.event = event;
             e.actor = access_key;
@@ -184,12 +177,10 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
             } else if (!body.tenant.empty()) {
                 require_tenant_exists(body.tenant);
             }
-            auto c = co_await cred_store_->generate(std::move(body.comment),
-                                                    std::move(body.policy), body.tenant,
+            auto c = co_await cred_store_->generate(std::move(body.comment), std::move(body.policy), body.tenant,
                                                     body.tenant_admin);
             audit_event("cred.create", c.access_key,
-                        c.tenant.empty() ? "" : "tenant=" + c.tenant +
-                                                   (c.tenant_admin ? " role=admin" : ""));
+                        c.tenant.empty() ? "" : "tenant=" + c.tenant + (c.tenant_admin ? " role=admin" : ""));
             co_return json_response(201, to_json(c, /*with_secret=*/true));
         }
         if (req.method == "GET" && rest.empty()) {
@@ -207,8 +198,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                 LOG_WARN("admin: plaintext secret requested for {} by {} {}{}", c.access_key,
                          root ? "root" : "tenant admin", access_key,
                          c.is_static() ? " (static credential — refused)" : "");
-                audit_event("cred.show_secret", c.access_key,
-                            c.is_static() ? "refused (static)" : "granted");
+                audit_event("cred.show_secret", c.access_key, c.is_static() ? "refused (static)" : "granted");
             }
             co_return json_response(200, to_json(c, show));
         }
@@ -228,44 +218,36 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
                 }
             }
             if (text.empty())
-                throw S3Error(S3ErrorCode::InvalidRequest,
-                              "Update requires a JSON body with comment and/or policy.");
+                throw S3Error(S3ErrorCode::InvalidRequest, "Update requires a JSON body with comment and/or policy.");
             json j;
             try {
                 j = json::parse(text);
             } catch (const json::exception&) {
                 throw S3Error(S3ErrorCode::InvalidRequest, "Request body is not valid JSON.");
             }
-            if (!j.is_object())
-                throw S3Error(S3ErrorCode::InvalidRequest,
-                              "Request body must be a JSON object.");
+            if (!j.is_object()) throw S3Error(S3ErrorCode::InvalidRequest, "Request body must be a JSON object.");
             require_visible(rest);
             CredentialStore::Update upd;
             for (auto& [k, v] : j.items()) {
                 if (k == "comment") {
-                    if (!v.is_string())
-                        throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
+                    if (!v.is_string()) throw S3Error(S3ErrorCode::InvalidRequest, "comment must be a string.");
                     upd.comment = v.get<std::string>();
                 } else if (k == "policy") {
                     upd.set_policy = true;
                     if (!v.is_null()) upd.policy = parse_policy_json(v.dump());
                 } else if (k == "tenant") {
                     // Moving a credential between tenants is an operator action
-                    if (!root)
-                        throw S3Error(S3ErrorCode::AccessDenied,
-                                      "Only root may change a credential's tenant.");
+                    if (!root) throw S3Error(S3ErrorCode::AccessDenied, "Only root may change a credential's tenant.");
                     if (v.is_null()) {
                         upd.tenant = "";
                     } else {
                         if (!v.is_string())
-                            throw S3Error(S3ErrorCode::InvalidRequest,
-                                          "tenant must be a string or null.");
+                            throw S3Error(S3ErrorCode::InvalidRequest, "tenant must be a string or null.");
                         upd.tenant = v.get<std::string>();
                         if (!upd.tenant->empty()) require_tenant_exists(*upd.tenant);
                     }
                 } else if (k == "role") {
-                    if (!v.is_string())
-                        throw S3Error(S3ErrorCode::InvalidRequest, "role must be a string.");
+                    if (!v.is_string()) throw S3Error(S3ErrorCode::InvalidRequest, "role must be a string.");
                     upd.tenant_admin = parse_credential_role(v.get<std::string>());
                 } else {
                     throw S3Error(S3ErrorCode::InvalidRequest, "unknown field '" + k + "'.");
@@ -287,8 +269,7 @@ Task<http::HttpResponse> S3Service::admin_credentials(http::HttpRequest& req,
             resp.status = 204;
             co_return resp;
         }
-        throw S3Error(S3ErrorCode::MethodNotAllowed,
-                      "The specified method is not allowed against this resource.");
+        throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
     } catch (const S3Error& e) {
         metrics_.s3_error(e.code);
         json j;

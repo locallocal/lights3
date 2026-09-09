@@ -155,8 +155,9 @@ private:
     }
 
     std::vector<std::pair<std::string, std::string>> items_;
-    std::vector<uint8_t> tags_;  // tag(items_[i].first), kept in lockstep with items_
-    std::array<uint64_t, 4> present_{};  // set of tags in tags_ (a superset after remove is fine, but it is rebuilt exactly)
+    std::vector<uint8_t> tags_;          // tag(items_[i].first), kept in lockstep with items_
+    std::array<uint64_t, 4> present_{};  // set of tags in tags_ (a superset after remove is fine, but it is rebuilt
+                                         // exactly)
 };
 
 // Zero-copy exit for file-backed bodies (roadmap §4.3 ④, docs/http-adapter.md §1):
@@ -209,10 +210,10 @@ struct TlsIdentity {
 };
 
 struct HttpRequest {
-    std::string method;    // "GET" "PUT" ...
-    std::string raw_path;  // Undecoded (needed for the SigV4 canonical URI)
-    std::string raw_query; // Undecoded raw query string (needed for SigV4)
-    std::string path;      // Decoded
+    std::string method;                                      // "GET" "PUT" ...
+    std::string raw_path;                                    // Undecoded (needed for the SigV4 canonical URI)
+    std::string raw_query;                                   // Undecoded raw query string (needed for SigV4)
+    std::string path;                                        // Decoded
     std::vector<std::pair<std::string, std::string>> query;  // Decoded, order-preserving
     HeaderMap headers;
     std::string remote_addr;

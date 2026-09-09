@@ -37,8 +37,8 @@ inline constexpr size_t kReclaimMaxExtents = 4096;
 //   version ≤ current           → returned; for versions < current the caller runs its own migration chain.
 // engine is the error-message prefix (reusing each engine's existing wording, e.g.
 // "duostore redis meta")
-inline int64_t parse_schema_marker(const std::string& stored, std::string_view lineage,
-                                   int64_t current, const std::string& engine) {
+inline int64_t parse_schema_marker(const std::string& stored, std::string_view lineage, int64_t current,
+                                   const std::string& engine) {
     int64_t ver = -1;
     if (stored.size() > lineage.size() && stored.compare(0, lineage.size(), lineage) == 0) {
         const char* b = stored.data() + lineage.size();
@@ -47,24 +47,20 @@ inline int64_t parse_schema_marker(const std::string& stored, std::string_view l
         if (r.ec != std::errc() || r.ptr != e) ver = -1;
     }
     if (ver < 0)
-        throw s3::S3Error(s3::S3ErrorCode::InternalError,
-                          engine + ": unrecognized schema marker '" + stored + "'");
+        throw s3::S3Error(s3::S3ErrorCode::InternalError, engine + ": unrecognized schema marker '" + stored + "'");
     if (ver > current)
         throw s3::S3Error(s3::S3ErrorCode::InternalError,
-                          engine + ": database schema '" + stored +
-                              "' is newer than this build (v" + std::to_string(current) +
-                              "); refusing to run downgraded");
+                          engine + ": database schema '" + stored + "' is newer than this build (v" +
+                              std::to_string(current) + "); refusing to run downgraded");
     return ver;
 }
 
 // Unified error for a gap in the migration chain ("changing the layout without
 // leaving a migration" is a programming error; failing loudly at startup beats
 // running impaired)
-[[noreturn]] inline void throw_no_migration(int64_t from, int64_t current,
-                                            const std::string& engine) {
-    throw s3::S3Error(s3::S3ErrorCode::InternalError,
-                      engine + ": no migration path from schema v" + std::to_string(from) +
-                          " to v" + std::to_string(current));
+[[noreturn]] inline void throw_no_migration(int64_t from, int64_t current, const std::string& engine) {
+    throw s3::S3Error(s3::S3ErrorCode::InternalError, engine + ": no migration path from schema v" +
+                                                          std::to_string(from) + " to v" + std::to_string(current));
 }
 
 // Atomic-section check for conditional PUT (PutCondition contract, storage/backend.h):
@@ -72,21 +68,16 @@ inline int64_t parse_schema_marker(const std::string& stored, std::string_view l
 // transaction; throwing abandons the commit (rollback holds naturally for local
 // engines; redis calls it before assembling the batch and tikv before filling
 // mutations, so neither issues any write)
-inline void check_put_condition(const PutCondition& cond, const std::optional<ObjectRec>& old,
-                                std::string_view key) {
+inline void check_put_condition(const PutCondition& cond, const std::optional<ObjectRec>& old, std::string_view key) {
     if (!cond.active()) return;
     if (cond.if_none_match && old)
         throw s3::S3Error(s3::S3ErrorCode::PreconditionFailed,
-                          "At least one of the pre-conditions you specified did not hold",
-                          std::string(key));
+                          "At least one of the pre-conditions you specified did not hold", std::string(key));
     if (cond.if_match_etag) {
-        if (!old)
-            throw s3::S3Error(s3::S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                              std::string(key));
+        if (!old) throw s3::S3Error(s3::S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
         if (*cond.if_match_etag != old->meta.etag)
             throw s3::S3Error(s3::S3ErrorCode::PreconditionFailed,
-                              "At least one of the pre-conditions you specified did not hold",
-                              std::string(key));
+                              "At least one of the pre-conditions you specified did not hold", std::string(key));
     }
 }
 
@@ -98,8 +89,7 @@ inline void check_put_condition(const PutCondition& cond, const std::optional<Ob
 // vs. GC accounting for unselected parts. version is set separately by the caller
 // after reading the old object.
 inline ObjectRec assemble_completed_object(ObjectMeta meta, std::span<const PartInfo> parts,
-                                           const std::map<int, PartRec>& stored,
-                                           std::set<int>& selected) {
+                                           const std::map<int, PartRec>& stored, std::set<int>& selected) {
     ObjectRec rec;
     rec.meta = std::move(meta);
     std::vector<std::string> md5s;
@@ -159,13 +149,11 @@ inline RefsDelta refs_delta(const DataRef& from, const DataRef& to) {
     RefsDelta d;
     std::set<uint64_t> seen;
     for (const auto& e : to.extents)
-        if (e.kind != Extent::Kind::kPack && !from_ids.count(e.file_id) &&
-            seen.insert(e.file_id).second)
+        if (e.kind != Extent::Kind::kPack && !from_ids.count(e.file_id) && seen.insert(e.file_id).second)
             d.added.extents.push_back(e);
     seen.clear();
     for (const auto& e : from.extents)
-        if (e.kind != Extent::Kind::kPack && !to_ids.count(e.file_id) &&
-            seen.insert(e.file_id).second)
+        if (e.kind != Extent::Kind::kPack && !to_ids.count(e.file_id) && seen.insert(e.file_id).second)
             d.removed.extents.push_back(e);
     return d;
 }

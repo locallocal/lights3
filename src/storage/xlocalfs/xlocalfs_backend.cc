@@ -19,7 +19,6 @@ namespace lights3::storage {
 using s3::S3Error;
 using s3::S3ErrorCode;
 
-using fsutil::TmpFile;
 using fsutil::load_manifest;
 using fsutil::next_tmp_name;
 using fsutil::part_file_name;
@@ -27,13 +26,13 @@ using fsutil::read_tsv;
 using fsutil::reject_reserved_key;
 using fsutil::require_upload;
 using fsutil::throw_errno;
+using fsutil::TmpFile;
 using fsutil::write_tsv;
 
 namespace {
 
 [[noreturn]] void throw_uring(const char* what, int neg_errno) {
-    throw S3Error(S3ErrorCode::InternalError,
-                  std::string(what) + ": " + std::strerror(-neg_errno));
+    throw S3Error(S3ErrorCode::InternalError, std::string(what) + ": " + std::strerror(-neg_errno));
 }
 
 struct FdGuard {
@@ -49,8 +48,7 @@ struct FdGuard {
 // the SQE up). All return the syscall convention (fd / 0 on success, -errno on failure)
 
 Task<int> uring_open(UringEngine& eng, const char* path, int flags, mode_t mode) {
-    if (eng.features().op_openat && eng.options().meta_ops)
-        co_return co_await eng.openat(AT_FDCWD, path, flags, mode);
+    if (eng.features().op_openat && eng.options().meta_ops) co_return co_await eng.openat(AT_FDCWD, path, flags, mode);
     int fd = ::open(path, flags, mode);
     co_return fd < 0 ? -errno : fd;
 }
@@ -62,14 +60,13 @@ Task<int> uring_rename(UringEngine& eng, const char* oldp, const char* newp) {
 }
 
 Task<int> uring_unlink(UringEngine& eng, const char* path) {
-    if (eng.features().op_unlinkat && eng.options().meta_ops)
-        co_return co_await eng.unlinkat(AT_FDCWD, path, 0);
+    if (eng.features().op_unlinkat && eng.options().meta_ops) co_return co_await eng.unlinkat(AT_FDCWD, path, 0);
     co_return ::unlink(path) == 0 ? 0 : -errno;
 }
 
 Task<bool> uring_exists(UringEngine& eng, const char* path) {
     if (eng.features().op_statx && eng.options().meta_ops) {
-        struct ::statx stx {};
+        struct ::statx stx{};
         int r = co_await eng.statx(AT_FDCWD, path, 0, STATX_TYPE, &stx);
         co_return r == 0;
     }
@@ -95,17 +92,16 @@ private:
 
 }  // namespace
 
-XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging,
-                                 std::shared_ptr<ThreadPool> pool, UringOptions uring_opt,
-                                 LocalFsOptions fs_opt, MetricsScope metrics)
+XLocalFsBackend::XLocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool,
+                                 UringOptions uring_opt, LocalFsOptions fs_opt, MetricsScope metrics)
     // Metrics pass through to the base class: xlocalfs and localfs share on-disk semantics,
     // so sharing the lights3_localfs_* namespace and distinguishing instances by backend
     // label is enough -- no need for a duplicate set of identical metrics
     : LocalFsBackend(std::move(root), std::move(staging), pool, fs_opt, std::move(metrics)),
       uring_(std::make_shared<UringEngine>(std::move(pool), uring_opt)) {}
 
-Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStream& ws,
-                                         uint64_t& total_out, std::string& etag_out) {
+Task<void> XLocalFsBackend::drain_to_tmp(http::BodyReader& body, UringWriteStream& ws, uint64_t& total_out,
+                                         std::string& etag_out) {
     util::HashStream md5(util::HashStream::Algo::Md5);
     uint64_t total = 0;
     for (;;) {
@@ -137,12 +133,12 @@ Task<void> XLocalFsBackend::sync_dir(fs::path dir) {
         co_return;
     }
     FdGuard d{::open(dir.c_str(), O_RDONLY | O_DIRECTORY)};
-    if (d.fd < 0) co_return;  // same as fsync_dir: an unreadable directory must not take down the write path
+    if (d.fd < 0) co_return;             // same as fsync_dir: an unreadable directory must not take down the write path
     (void)co_await uring_->fsync(d.fd);  // failure silent, matching fsync_dir
 }
 
-Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const ObjectMeta& meta,
-                                            std::string_view key, bool xattr_ok) {
+Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const ObjectMeta& meta, std::string_view key,
+                                            bool xattr_ok) {
     fsutil::prepare_object_dest(dest, key);
     // Same ordering as fsutil::commit_object_file with prepared=true: data rename ->
     // directory fsync -> sidecar; only the first two go through the ring
@@ -155,9 +151,8 @@ Task<void> XLocalFsBackend::commit_prepared(fs::path dest, TmpFile& tmp, const O
         defer_sidecar(std::move(dest), meta);
 }
 
-Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key,
-                                            ObjectMeta meta, http::BodyReader& body,
-                                            PutCondition cond) {
+Task<PutResult> XLocalFsBackend::put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
+                                            http::BodyReader& body, PutCondition cond) {
     // This override bypasses the base implementation, so the accounting entry point is
     // re-planted here (same base-class instance, no double counting)
     OpGuard g{this, Op::kPut};
@@ -227,15 +222,13 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     int fd = co_await uring_open(*uring_, path.c_str(), O_RDONLY, 0);
     if (fd < 0) {
         require_bucket(bucket);  // NoSuchBucket takes precedence over NoSuchKey
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
     struct stat st{};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);
         require_bucket(bucket);
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
 
     ObjectStream out;
@@ -245,9 +238,7 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
         // and body coming from different inodes; the cached record must match that fstat
         FsMetaCache::Token tok;
         const FsMetaStamp stamp = FsMetaStamp::of(st);
-        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) {
-                return v.stamp == stamp;
-            })) {
+        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) { return v.stamp == stamp; })) {
             out.meta = c->meta;
             tier = c->tier;
         } else {
@@ -278,15 +269,13 @@ Task<ObjectStream> XLocalFsBackend::get_object(std::string_view bucket, std::str
     co_return out;
 }
 
-Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::string_view key,
-                                             std::string_view upload_id, int part_no,
-                                             http::BodyReader& body,
+Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id,
+                                             int part_no, http::BodyReader& body,
                                              const std::optional<PartChecksum>& checksum) {
     OpGuard g{this, Op::kUploadPart};
     validate_part_number(part_no);
     co_await pool_->schedule();
-    auto up = require_upload(staging_, bucket, key, upload_id,
-                             load_manifest(staging_, upload_id));
+    auto up = require_upload(staging_, bucket, key, upload_id, load_manifest(staging_, upload_id));
 
     // Stream into the staging temp file through the write pipeline (same as PUT)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
@@ -313,8 +302,7 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     if (r < 0) {
         // The upload may have been aborted (directory removed) while we were reading the body
         if (!fs::exists(up.dir))
-            throw S3Error(S3ErrorCode::NoSuchUpload,
-                          "The specified multipart upload does not exist.",
+            throw S3Error(S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.",
                           std::string(upload_id));
         throw S3Error(S3ErrorCode::InternalError, "rename part failed");
     }
@@ -331,15 +319,12 @@ Task<PutResult> XLocalFsBackend::upload_part(std::string_view bucket, std::strin
     co_return PutResult{etag};
 }
 
-Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
-                                                    std::string_view key,
-                                                    std::string_view upload_id,
-                                                    std::span<const PartInfo> parts) {
+Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket, std::string_view key,
+                                                    std::string_view upload_id, std::span<const PartInfo> parts) {
     OpGuard g{this, Op::kCompleteMpu};
     validate_part_order(parts);
     co_await pool_->schedule();
-    auto up = require_upload(staging_, bucket, key, upload_id,
-                             load_manifest(staging_, upload_id));
+    auto up = require_upload(staging_, bucket, key, upload_id, load_manifest(staging_, upload_id));
     require_bucket(bucket);
 
     // 1. Validate each declared part: it exists (STATX via the ring) and the ETag matches
@@ -352,13 +337,15 @@ Task<PutResult> XLocalFsBackend::complete_multipart(std::string_view bucket,
         std::string stored;
         PartDigest digest;
         for (auto& [k, v] : read_tsv(up.dir / (name + ".md5"))) {
-            if (k == "md5") stored = v;
-            else if (k == "checksum_algorithm") digest.algorithm = v;
-            else if (k == "checksum_value") digest.value = v;
+            if (k == "md5")
+                stored = v;
+            else if (k == "checksum_algorithm")
+                digest.algorithm = v;
+            else if (k == "checksum_value")
+                digest.value = v;
         }
         fs::path part_path = up.dir / name;
-        if (stored.empty() || !co_await uring_exists(*uring_, part_path.c_str()) ||
-            stored != strip_etag_quotes(p.etag))
+        if (stored.empty() || !co_await uring_exists(*uring_, part_path.c_str()) || stored != strip_etag_quotes(p.etag))
             throw S3Error(S3ErrorCode::InvalidPart,
                           "One or more of the specified parts could not be found or the "
                           "ETag did not match.",
@@ -452,12 +439,10 @@ Task<void> XLocalFsBackend::delete_object(std::string_view bucket, std::string_v
         r = 0;
     }
     if (r < 0 && r != -ENOENT)
-        throw S3Error(S3ErrorCode::InternalError,
-                      std::string("delete object: ") + std::strerror(-r));
+        throw S3Error(S3ErrorCode::InternalError, std::string("delete object: ") + std::strerror(-r));
     r = co_await uring_unlink(*uring_, sidecar.c_str());
     if (r < 0 && r != -ENOENT)
-        throw S3Error(S3ErrorCode::InternalError,
-                      std::string("delete object sidecar: ") + std::strerror(-r));
+        throw S3Error(S3ErrorCode::InternalError, std::string("delete object sidecar: ") + std::strerror(-r));
     // Clean up empty parent directories up to the bucket root (same as the base)
     std::error_code ec;
     fs::path dir = path.parent_path(), root = bucket_dir(bucket);

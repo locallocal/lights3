@@ -68,10 +68,10 @@ TEST(ratelimit_token_bucket_refills_at_rps) {
         CHECK(t.has_value());
         held.push_back(std::move(*t));
     }
-    CHECK(!rl.admit("a", t0));                                     // burst spent
-    CHECK(rl.admit("b", t0));                                      // other keys unaffected
-    CHECK(!rl.admit("a", t0 + std::chrono::milliseconds(400)));   // 0.8 tokens: not yet
-    CHECK(rl.admit("a", t0 + std::chrono::milliseconds(600)));    // 1.2 tokens
+    CHECK(!rl.admit("a", t0));                                   // burst spent
+    CHECK(rl.admit("b", t0));                                    // other keys unaffected
+    CHECK(!rl.admit("a", t0 + std::chrono::milliseconds(400)));  // 0.8 tokens: not yet
+    CHECK(rl.admit("a", t0 + std::chrono::milliseconds(600)));   // 1.2 tokens
     // A long pause refills to the burst cap, never beyond
     held.clear();
     for (int i = 0; i < 4; ++i) CHECK(rl.admit("a", t0 + std::chrono::seconds(100)));

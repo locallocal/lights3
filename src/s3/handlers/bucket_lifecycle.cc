@@ -46,8 +46,7 @@ int parse_days(const std::string& v, const char* what) {
     int out = 0;
     auto [p, ec] = std::from_chars(v.data(), v.data() + v.size(), out);
     if (ec != std::errc() || p != v.data() + v.size() || out < 1)
-        throw S3Error(S3ErrorCode::MalformedXML,
-                      std::string(what) + " must be a positive integer.");
+        throw S3Error(S3ErrorCode::MalformedXML, std::string(what) + " must be a positive integer.");
     return out;
 }
 
@@ -61,28 +60,26 @@ std::vector<LifecycleRule> parse_lifecycle_xml(const std::string& body) {
     for (auto& rn : root.children) {
         if (rn.name != "Rule") continue;
         if (rules.size() >= 1000)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "The lifecycle configuration may contain at most 1000 rules.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "The lifecycle configuration may contain at most 1000 rules.");
         // Explicit 501s for the rest of the AWS surface — silently dropping any of
         // these would claim semantics this gateway does not provide
-        for (const char* unsupported :
-             {"Transition", "NoncurrentVersionExpiration", "NoncurrentVersionTransition"})
+        for (const char* unsupported : {"Transition", "NoncurrentVersionExpiration", "NoncurrentVersionTransition"})
             if (rn.find(unsupported))
-                throw S3Error(S3ErrorCode::NotImplemented,
-                              std::string(unsupported) + " lifecycle rules are not "
-                              "implemented (only Expiration.Days and "
-                              "AbortIncompleteMultipartUpload).");
+                throw S3Error(S3ErrorCode::NotImplemented, std::string(unsupported) +
+                                                               " lifecycle rules are not "
+                                                               "implemented (only Expiration.Days and "
+                                                               "AbortIncompleteMultipartUpload).");
         LifecycleRule r;
         r.id = rn.get("ID");
         std::string status = rn.get("Status");
-        if (status == "Enabled") r.enabled = true;
-        else if (status == "Disabled") r.enabled = false;
+        if (status == "Enabled")
+            r.enabled = true;
+        else if (status == "Disabled")
+            r.enabled = false;
         else
-            throw S3Error(S3ErrorCode::MalformedXML,
-                          "Each Rule requires a Status of Enabled or Disabled.");
+            throw S3Error(S3ErrorCode::MalformedXML, "Each Rule requires a Status of Enabled or Disabled.");
         if (auto* f = rn.find("Filter")) {
-            for (const char* unsupported :
-                 {"Tag", "And", "ObjectSizeGreaterThan", "ObjectSizeLessThan"})
+            for (const char* unsupported : {"Tag", "And", "ObjectSizeGreaterThan", "ObjectSizeLessThan"})
                 if (f->find(unsupported))
                     throw S3Error(S3ErrorCode::NotImplemented,
                                   "Lifecycle filters other than Prefix are not implemented.");
@@ -93,13 +90,11 @@ std::vector<LifecycleRule> parse_lifecycle_xml(const std::string& body) {
         if (auto* e = rn.find("Expiration")) {
             for (const char* unsupported : {"Date", "ExpiredObjectDeleteMarker"})
                 if (e->find(unsupported))
-                    throw S3Error(S3ErrorCode::NotImplemented,
-                                  "Only Expiration.Days is implemented.");
+                    throw S3Error(S3ErrorCode::NotImplemented, "Only Expiration.Days is implemented.");
             r.expiration_days = parse_days(e->get("Days"), "Expiration.Days");
         }
         if (auto* a = rn.find("AbortIncompleteMultipartUpload"))
-            r.abort_incomplete_days = parse_days(a->get("DaysAfterInitiation"),
-                                                 "DaysAfterInitiation");
+            r.abort_incomplete_days = parse_days(a->get("DaysAfterInitiation"), "DaysAfterInitiation");
         if (!r.expiration_days && !r.abort_incomplete_days)
             throw S3Error(S3ErrorCode::InvalidRequest,
                           "Each Rule must specify Expiration and/or "
@@ -107,8 +102,7 @@ std::vector<LifecycleRule> parse_lifecycle_xml(const std::string& body) {
         rules.push_back(std::move(r));
     }
     if (rules.empty())
-        throw S3Error(S3ErrorCode::MalformedXML,
-                      "The lifecycle configuration must contain at least one Rule.");
+        throw S3Error(S3ErrorCode::MalformedXML, "The lifecycle configuration must contain at least one Rule.");
     return rules;
 }
 
@@ -122,22 +116,19 @@ void require_root(const std::shared_ptr<CredentialStore>& store, std::string_vie
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::get_bucket_lifecycle(std::string bucket,
-                                                         const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::get_bucket_lifecycle(std::string bucket, const RequestAuth& auth) {
     require_root(cred_store_, auth.access_key);
     auto snap = lifecycle_store_ ? lifecycle_store_->snapshot() : LifecycleStore::Snapshot{};
     const auto* rules = LifecycleStore::find(snap, bucket);
     if (!rules)
-        throw S3Error(S3ErrorCode::NoSuchLifecycleConfiguration,
-                      "The lifecycle configuration does not exist", bucket);
+        throw S3Error(S3ErrorCode::NoSuchLifecycleConfiguration, "The lifecycle configuration does not exist", bucket);
     http::HttpResponse resp;
     resp.headers.set("Content-Type", "application/xml");
     resp.small_body = lifecycle_xml(*rules);
     co_return resp;
 }
 
-Task<http::HttpResponse> S3Service::put_bucket_lifecycle(http::HttpRequest& req,
-                                                         std::string bucket,
+Task<http::HttpResponse> S3Service::put_bucket_lifecycle(http::HttpRequest& req, std::string bucket,
                                                          const RequestAuth& auth) {
     require_root(cred_store_, auth.access_key);
     if (!lifecycle_store_)
@@ -148,20 +139,17 @@ Task<http::HttpResponse> S3Service::put_bucket_lifecycle(http::HttpRequest& req,
     auto body = co_await handlers::read_body(req);
     auto rules = parse_lifecycle_xml(body);
     co_await lifecycle_store_->put(bucket, std::move(rules));
-    LOG_INFO("lifecycle: configuration for bucket {} set by {}", bucket,
-             std::string(auth.access_key));
+    LOG_INFO("lifecycle: configuration for bucket {} set by {}", bucket, std::string(auth.access_key));
     co_return http::HttpResponse{};
 }
 
-Task<http::HttpResponse> S3Service::delete_bucket_lifecycle(std::string bucket,
-                                                            const RequestAuth& auth) {
+Task<http::HttpResponse> S3Service::delete_bucket_lifecycle(std::string bucket, const RequestAuth& auth) {
     require_root(cred_store_, auth.access_key);
     if (!lifecycle_store_)
         throw S3Error(S3ErrorCode::InvalidRequest,
                       "Dynamic lifecycle configuration is not available on this deployment.");
     co_await lifecycle_store_->remove(bucket);
-    LOG_INFO("lifecycle: configuration for bucket {} deleted by {}", bucket,
-             std::string(auth.access_key));
+    LOG_INFO("lifecycle: configuration for bucket {} deleted by {}", bucket, std::string(auth.access_key));
     http::HttpResponse resp;
     resp.status = 204;
     co_return resp;

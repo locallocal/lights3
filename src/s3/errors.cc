@@ -29,8 +29,7 @@ std::optional<S3ErrorCode> code_from_wire(std::string_view wire) {
     return std::nullopt;
 }
 
-std::string error_xml(const S3Error& e, const std::string& request_id,
-                      const std::string& host_id) {
+std::string error_xml(const S3Error& e, const std::string& request_id, const std::string& host_id) {
     XmlWriter w;
     w.open("Error");
     w.element("Code", wire_code(e.code));

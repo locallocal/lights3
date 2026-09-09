@@ -23,8 +23,8 @@ using lights3_ctl::SignedClient;
 namespace util = lights3::util;
 
 void print_text(const nlohmann::json& j) {
-    printf("bucket   %s\nkey      %s\nbackend  %s\n", j.value("bucket", "").c_str(),
-           j.value("key", "").c_str(), j.value("backend", "").c_str());
+    printf("bucket   %s\nkey      %s\nbackend  %s\n", j.value("bucket", "").c_str(), j.value("key", "").c_str(),
+           j.value("backend", "").c_str());
     if (!j.contains("layout") || j["layout"].is_null()) {
         printf("layout   (none) %s\n", j.value("note", "").c_str());
         return;
@@ -34,8 +34,8 @@ void print_text(const nlohmann::json& j) {
     for (auto& [k, v] : l["attrs"].items())
         printf("  %-16s %s\n", k.c_str(), v.is_string() ? v.get<std::string>().c_str() : v.dump().c_str());
     if (l.contains("extents") && !l["extents"].empty()) {
-        printf("extents  %zu\n  %-7s %20s %12s %12s %10s\n", l["extents"].size(), "kind", "id",
-               "offset", "length", "crc32c");
+        printf("extents  %zu\n  %-7s %20s %12s %12s %10s\n", l["extents"].size(), "kind", "id", "offset", "length",
+               "crc32c");
         for (auto& e : l["extents"])
             printf("  %-7s %20llu %12llu %12llu %10u\n", e.value("kind", "").c_str(),
                    (unsigned long long)e.value("id", 0ULL), (unsigned long long)e.value("offset", 0ULL),
@@ -52,8 +52,7 @@ std::shared_ptr<ccmd::c_command> make_inspect() {
         "chunk/pack/rados extents (file id, offset, length, crc32c) for duostore; the "
         "tiering view plus the local engine's layout for tiered. memory and cloudproxy "
         "expose no layout. Requires the root credential.",
-        "print an object's internal layout.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "print an object's internal layout.", [](const std::shared_ptr<ccmd::c_command>& c) {
             if (c->args().size() != 2) {
                 fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
@@ -87,13 +86,11 @@ namespace lights3_ctl {
 
 std::shared_ptr<ccmd::c_command> make_object() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "object", "lights3-ctl object inspect photos 2026/01/a.jpg",
-        "lights3-ctl object <command> [options]",
+        "object", "lights3-ctl object inspect photos 2026/01/a.jpg", "lights3-ctl object <command> [options]",
         "Object-level operator commands (roadmap §6.2). `inspect` prints the internal "
         "layout of one object; requires the root static credential like `cred`. Options "
         "must follow the leaf subcommand as --name=value.",
-        "object-level operator commands.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "object-level operator commands.", [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;
         });

@@ -15,11 +15,11 @@
 
 namespace {
 
-using nlohmann::json;
 using lights3_ctl::finish;
 using lights3_ctl::g_exit;
 using lights3_ctl::run_admin;
 using lights3_ctl::SignedClient;
+using nlohmann::json;
 namespace util = lights3::util;
 
 constexpr const char* kBase = "/-/admin/tenants";
@@ -74,8 +74,8 @@ std::shared_ptr<ccmd::c_command> make_list() {
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "get", "lights3-ctl tenant get acme", "lights3-ctl tenant get <id> [options]",
-        "Show one tenant: quota, owned buckets, aggregate usage, credential count.",
-        "show one tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "Show one tenant: quota, owned buckets, aggregate usage, credential count.", "show one tenant.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!n_args(c, 1)) return;
             std::string id = c->args().front();
             run_admin(c, [&](SignedClient& cli) { return finish(cli.get(tenant_path(id), ""), 200); });
@@ -114,16 +114,14 @@ std::shared_ptr<ccmd::c_command> make_update() {
         "lights3-ctl tenant update <id> [options]",
         "Replace a tenant's quota and/or display name. The quota is replaced as a whole: "
         "axes not given become unlimited.",
-        "update a tenant's quota / display name.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "update a tenant's quota / display name.", [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!n_args(c, 1)) return;
             std::string id = c->args().front();
             run_admin(c, [&](SignedClient& cli) {
                 json body = json::object();
                 auto name = c->var<std::string>("display-name");
                 if (!name.empty()) body["display_name"] = name;
-                if (!c->var<std::string>("max-bytes").empty() ||
-                    !c->var<std::string>("max-objects").empty() ||
+                if (!c->var<std::string>("max-bytes").empty() || !c->var<std::string>("max-objects").empty() ||
                     !c->var<std::string>("max-buckets").empty() || c->var<bool>("clear-quota"))
                     body["quota"] = quota_from_flags(c, /*all=*/true);
                 if (body.empty()) {
@@ -143,13 +141,12 @@ std::shared_ptr<ccmd::c_command> make_update() {
 std::shared_ptr<ccmd::c_command> make_delete() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "delete", "lights3-ctl tenant delete acme", "lights3-ctl tenant delete <id> [options]",
-        "Delete a tenant. Refused while it still owns buckets or has credentials.",
-        "delete a tenant.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "Delete a tenant. Refused while it still owns buckets or has credentials.", "delete a tenant.",
+        [](const std::shared_ptr<ccmd::c_command>& c) {
             if (!n_args(c, 1)) return;
             std::string id = c->args().front();
-            run_admin(c, [&](SignedClient& cli) {
-                return finish(cli.del(tenant_path(id)), 204, "deleted tenant " + id);
-            });
+            run_admin(c,
+                      [&](SignedClient& cli) { return finish(cli.del(tenant_path(id)), 204, "deleted tenant " + id); });
         });
     lights3_ctl::add_conn_flags(cmd);
     return cmd;
@@ -165,8 +162,7 @@ std::shared_ptr<ccmd::c_command> make_assign() {
             std::string id = c->args()[0], bucket = c->args()[1];
             bool force = c->var<bool>("force");
             run_admin(c, [&](SignedClient& cli) {
-                std::string path = tenant_path(id) + "/buckets/" +
-                                   util::aws_uri_encode(bucket, /*encode_slash=*/true);
+                std::string path = tenant_path(id) + "/buckets/" + util::aws_uri_encode(bucket, /*encode_slash=*/true);
                 return finish(cli.put_json(path, "", force ? "force=true" : ""), 200);
             });
         });
@@ -185,8 +181,7 @@ std::shared_ptr<ccmd::c_command> make_unassign() {
             if (!n_args(c, 2)) return;
             std::string id = c->args()[0], bucket = c->args()[1];
             run_admin(c, [&](SignedClient& cli) {
-                std::string path = tenant_path(id) + "/buckets/" +
-                                   util::aws_uri_encode(bucket, /*encode_slash=*/true);
+                std::string path = tenant_path(id) + "/buckets/" + util::aws_uri_encode(bucket, /*encode_slash=*/true);
                 return finish(cli.del(path), 204, "detached " + bucket + " from " + id);
             });
         });
@@ -200,14 +195,12 @@ namespace lights3_ctl {
 
 std::shared_ptr<ccmd::c_command> make_tenant() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "tenant", "lights3-ctl tenant list --endpoint=http://127.0.0.1:9000",
-        "lights3-ctl tenant <command> [options]",
+        "tenant", "lights3-ctl tenant list --endpoint=http://127.0.0.1:9000", "lights3-ctl tenant <command> [options]",
         "Manage tenants and bucket ownership via /-/admin/tenants (docs/multi-tenancy.md). "
         "Mutations need the root credential; `list`/`get` also work for a tenant admin "
         "on its own tenant. Options must follow the leaf subcommand; long options take "
         "values as --name=value.",
-        "manage tenants and bucket ownership.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "manage tenants and bucket ownership.", [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;
         });

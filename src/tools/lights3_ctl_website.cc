@@ -31,16 +31,14 @@ bool one_bucket_arg(const std::shared_ptr<ccmd::c_command>& cmd, std::string& bu
 std::shared_ptr<ccmd::c_command> make_get() {
     auto cmd = std::make_shared<ccmd::c_command>(
         "get", "lights3-ctl website get my-site", "lights3-ctl website get <bucket> [options]",
-        "Print a bucket's website configuration XML (404 when none is set).",
-        "show a bucket's website configuration.",
+        "Print a bucket's website configuration XML (404 when none is set).", "show a bucket's website configuration.",
         [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             run_admin(c, [&](SignedClient& cli) {
                 auto r = cli.get("/" + bucket, "website");
                 int rc = finish(r, 200);
-                if (rc == 0 && r && !r->body.empty() && r->body.back() != '\n')
-                    fputc('\n', stdout);
+                if (rc == 0 && r && !r->body.empty() && r->body.back() != '\n') fputc('\n', stdout);
                 return rc;
             });
         });
@@ -56,8 +54,7 @@ std::shared_ptr<ccmd::c_command> make_set() {
         "readable (GET/HEAD objects only) with index/error document semantics "
         "(docs/static-website.md). Buckets configured statically in the server config "
         "are refused (405).",
-        "set a bucket's website configuration.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "set a bucket's website configuration.", [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             auto suffix = c->var<std::string>("index-suffix");
@@ -65,8 +62,7 @@ std::shared_ptr<ccmd::c_command> make_set() {
             run_admin(c, [&](SignedClient& cli) {
                 // Same XML shape the server round-trips on `website get`
                 lights3::s3::XmlWriter x;
-                x.open("WebsiteConfiguration",
-                       R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
+                x.open("WebsiteConfiguration", R"(xmlns="http://s3.amazonaws.com/doc/2006-03-01/")");
                 x.open("IndexDocument");
                 x.element("Suffix", suffix);
                 x.close();
@@ -80,8 +76,7 @@ std::shared_ptr<ccmd::c_command> make_set() {
                               "website configuration set for " + bucket);
             });
         });
-    cmd->varp<std::string>("index-suffix", "i", "index.html",
-                           "index document suffix (no '/').");
+    cmd->varp<std::string>("index-suffix", "i", "index.html", "index document suffix (no '/').");
     cmd->varp<std::string>("error-key", "k", "",
                            "error document key (served on anonymous 4xx/5xx); empty = "
                            "built-in error page.");
@@ -94,13 +89,11 @@ std::shared_ptr<ccmd::c_command> make_delete() {
         "delete", "lights3-ctl website delete my-site", "lights3-ctl website delete <bucket> [options]",
         "Remove a bucket's website configuration (idempotent); the bucket stops being "
         "anonymously readable.",
-        "remove a bucket's website configuration.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "remove a bucket's website configuration.", [](const std::shared_ptr<ccmd::c_command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             run_admin(c, [&](SignedClient& cli) {
-                return finish(cli.del("/" + bucket, "website"), 204,
-                              "website configuration deleted for " + bucket);
+                return finish(cli.del("/" + bucket, "website"), 204, "website configuration deleted for " + bucket);
             });
         });
     lights3_ctl::add_conn_flags(cmd);
@@ -115,15 +108,13 @@ namespace lights3_ctl {
 // convention as `cred`)
 std::shared_ptr<ccmd::c_command> make_website() {
     auto cmd = std::make_shared<ccmd::c_command>(
-        "website", "lights3-ctl website set my-site --error-key=error.html",
-        "lights3-ctl website <command> [options]",
+        "website", "lights3-ctl website set my-site --error-key=error.html", "lights3-ctl website <command> [options]",
         "Manage per-bucket static website configuration via the ?website subresource "
         "(docs/static-website.md; requires the root static credential, like `cred`). "
         "Credentials come from each subcommand's --ak=/--sk= or from env "
         "LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK; options must follow the leaf subcommand as "
         "--name=value.",
-        "manage bucket website configuration.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "manage bucket website configuration.", [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;
         });

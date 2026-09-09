@@ -38,13 +38,16 @@ json usage_json(const BucketUsage& u) {
 
 // {"max_bytes"?, "max_objects"?, "max_buckets"?}; unknown fields are refused
 TenantQuota parse_tenant_quota(const json& j, TenantQuota base) {
-    if (!j.is_object())
-        throw S3Error(S3ErrorCode::InvalidRequest, "quota must be a JSON object.");
+    if (!j.is_object()) throw S3Error(S3ErrorCode::InvalidRequest, "quota must be a JSON object.");
     for (auto& [k, v] : j.items()) {
-        if (k == "max_bytes") base.max_bytes = json_u64(v, "quota.max_bytes");
-        else if (k == "max_objects") base.max_objects = json_u64(v, "quota.max_objects");
-        else if (k == "max_buckets") base.max_buckets = json_u64(v, "quota.max_buckets");
-        else throw S3Error(S3ErrorCode::InvalidRequest, "unknown quota field '" + k + "'.");
+        if (k == "max_bytes")
+            base.max_bytes = json_u64(v, "quota.max_bytes");
+        else if (k == "max_objects")
+            base.max_objects = json_u64(v, "quota.max_objects");
+        else if (k == "max_buckets")
+            base.max_buckets = json_u64(v, "quota.max_buckets");
+        else
+            throw S3Error(S3ErrorCode::InvalidRequest, "unknown quota field '" + k + "'.");
     }
     return base;
 }
@@ -70,8 +73,7 @@ std::vector<std::string> path_segments(const std::string& path, std::string_view
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
-                                                  std::string& access_key,
+Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req, std::string& access_key,
                                                   const RequestContext& ctx) {
     try {
         auto ident = verify_identity(req);
@@ -80,21 +82,16 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
         // Tenant admins reach this plane for their own tenant only; sessions never do
         // (mint_session drops the admin role, and root is decided on the live table)
         if (!root && !ident.tenant_admin)
-            throw S3Error(S3ErrorCode::AccessDenied,
-                          "Admin API requires a root credential or a tenant admin.");
+            throw S3Error(S3ErrorCode::AccessDenied, "Admin API requires a root credential or a tenant admin.");
         if (!tenants_ || !usage_)
             throw S3Error(S3ErrorCode::InvalidRequest,
                           "Tenancy and usage accounting are not available on this deployment.");
         const std::string& own = ident.tenant;  // empty for root
         auto require_root = [&](const char* what) {
-            if (!root)
-                throw S3Error(S3ErrorCode::AccessDenied,
-                              std::string(what) + " requires a root credential.");
+            if (!root) throw S3Error(S3ErrorCode::AccessDenied, std::string(what) + " requires a root credential.");
         };
         auto may_see_tenant = [&](const std::string& id) { return root || id == own; };
-        auto may_see_bucket = [&](const std::string& bucket) {
-            return root || tenants_->owner_of(bucket) == own;
-        };
+        auto may_see_bucket = [&](const std::string& bucket) { return root || tenants_->owner_of(bucket) == own; };
         auto tenant_json = [&](const Tenant& t) {
             json j;
             j["id"] = t.id;
@@ -121,8 +118,8 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
             }
             return j;
         };
-        auto audit_event = [&](std::string_view event, std::string_view target,
-                               std::string_view bucket, std::string detail) {
+        auto audit_event = [&](std::string_view event, std::string_view target, std::string_view bucket,
+                               std::string detail) {
             AuditEvent e;
             e.event = event;
             e.actor = access_key;
@@ -143,13 +140,11 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
                 Tenant t;
                 for (auto& [k, v] : body.items()) {
                     if (k == "id") {
-                        if (!v.is_string())
-                            throw S3Error(S3ErrorCode::InvalidRequest, "id must be a string.");
+                        if (!v.is_string()) throw S3Error(S3ErrorCode::InvalidRequest, "id must be a string.");
                         t.id = v.get<std::string>();
                     } else if (k == "display_name") {
                         if (!v.is_string())
-                            throw S3Error(S3ErrorCode::InvalidRequest,
-                                          "display_name must be a string.");
+                            throw S3Error(S3ErrorCode::InvalidRequest, "display_name must be a string.");
                         t.display_name = v.get<std::string>();
                     } else if (k == "quota") {
                         t.quota = parse_tenant_quota(v, {});
@@ -159,11 +154,9 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
                 }
                 validate_tenant_id(t.id);
                 if (t.display_name.empty()) t.display_name = t.id;
-                if (t.display_name.size() > 256)
-                    throw S3Error(S3ErrorCode::InvalidRequest, "display_name too long.");
+                if (t.display_name.size() > 256) throw S3Error(S3ErrorCode::InvalidRequest, "display_name too long.");
                 if (tenants_->find(t.id))
-                    throw S3Error(S3ErrorCode::TenantAlreadyExists,
-                                  "Tenant '" + t.id + "' already exists.");
+                    throw S3Error(S3ErrorCode::TenantAlreadyExists, "Tenant '" + t.id + "' already exists.");
                 t.created = std::chrono::system_clock::now();
                 co_await tenants_->tenants().put(t.id, t);
                 LOG_INFO("tenant: {} created by {}", t.id, access_key);
@@ -180,30 +173,24 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
             if (seg.size() == 1) {
                 const std::string& id = seg[0];
                 if (!may_see_tenant(id))
-                    throw S3Error(S3ErrorCode::AccessDenied,
-                                  "Tenant admins may only access their own tenant.");
+                    throw S3Error(S3ErrorCode::AccessDenied, "Tenant admins may only access their own tenant.");
                 auto t = tenants_->find(id);
-                if (!t)
-                    throw S3Error(S3ErrorCode::NoSuchTenant,
-                                  "The specified tenant does not exist.");
+                if (!t) throw S3Error(S3ErrorCode::NoSuchTenant, "The specified tenant does not exist.");
                 if (req.method == "GET") co_return json_response(200, tenant_json(*t));
                 if (req.method == "PUT") {
                     require_root("Updating a tenant");
                     json body = co_await read_json_object(req, /*allow_empty=*/false);
                     for (auto& [k, v] : body.items()) {
                         if (k == "display_name") {
-                            if (!v.is_string() || v.get<std::string>().empty() ||
-                                v.get<std::string>().size() > 256)
-                                throw S3Error(S3ErrorCode::InvalidRequest,
-                                              "display_name must be a non-empty string.");
+                            if (!v.is_string() || v.get<std::string>().empty() || v.get<std::string>().size() > 256)
+                                throw S3Error(S3ErrorCode::InvalidRequest, "display_name must be a non-empty string.");
                             t->display_name = v.get<std::string>();
                         } else if (k == "quota") {
                             // Replace semantics: axes absent from the body are cleared,
                             // so a PUT is the complete new quota, never a merge
                             t->quota = parse_tenant_quota(v, {});
                         } else {
-                            throw S3Error(S3ErrorCode::InvalidRequest,
-                                          "unknown field '" + k + "'.");
+                            throw S3Error(S3ErrorCode::InvalidRequest, "unknown field '" + k + "'.");
                         }
                     }
                     ++t->rev;
@@ -216,14 +203,12 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
                     require_root("Deleting a tenant");
                     auto buckets = tenants_->buckets_of(id);
                     if (!buckets.empty())
-                        throw S3Error(S3ErrorCode::TenantNotEmpty,
-                                      "Tenant '" + id + "' still owns " +
-                                          std::to_string(buckets.size()) +
-                                          " bucket(s); reassign or delete them first.");
+                        throw S3Error(S3ErrorCode::TenantNotEmpty, "Tenant '" + id + "' still owns " +
+                                                                       std::to_string(buckets.size()) +
+                                                                       " bucket(s); reassign or delete them first.");
                     if (cred_store_ && !cred_store_->list_tenant(id).empty())
                         throw S3Error(S3ErrorCode::TenantNotEmpty,
-                                      "Tenant '" + id +
-                                          "' still has credentials; revoke them first.");
+                                      "Tenant '" + id + "' still has credentials; revoke them first.");
                     co_await tenants_->tenants().remove(id);
                     LOG_INFO("tenant: {} deleted by {}", id, access_key);
                     audit_event("tenant.delete", id, "", "");
@@ -238,12 +223,10 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
                 const std::string& bucket = seg[2];
                 storage::validate_bucket_name(bucket);
                 if (!tenants_->find(id))
-                    throw S3Error(S3ErrorCode::NoSuchTenant,
-                                  "The specified tenant does not exist.");
+                    throw S3Error(S3ErrorCode::NoSuchTenant, "The specified tenant does not exist.");
                 if (req.method == "PUT") {
                     if (!co_await router_.resolve(bucket).bucket_exists(bucket))
-                        throw S3Error(S3ErrorCode::NoSuchBucket,
-                                      "The specified bucket does not exist", bucket);
+                        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
                     bool force = req.query_get("force").value_or("") == "true";
                     co_await tenants_->assign(bucket, id, access_key, force);
                     LOG_INFO("tenant: bucket {} assigned to {} by {}", bucket, id, access_key);
@@ -256,19 +239,16 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
                 if (req.method == "DELETE") {
                     if (tenants_->owner_of(bucket) != id)
                         throw S3Error(S3ErrorCode::InvalidRequest,
-                                      "Bucket " + bucket + " is not owned by tenant '" + id +
-                                          "'.");
+                                      "Bucket " + bucket + " is not owned by tenant '" + id + "'.");
                     co_await tenants_->unassign(bucket);
-                    LOG_INFO("tenant: bucket {} detached from {} by {}", bucket, id,
-                             access_key);
+                    LOG_INFO("tenant: bucket {} detached from {} by {}", bucket, id, access_key);
                     audit_event("tenant.unassign_bucket", id, bucket, "");
                     http::HttpResponse resp;
                     resp.status = 204;
                     co_return resp;
                 }
             }
-            throw S3Error(S3ErrorCode::MethodNotAllowed,
-                          "The specified method is not allowed against this resource.");
+            throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
         }
 
         // ---------- /-/admin/usage ----------
@@ -289,31 +269,24 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
             const std::string& bucket = seg[0];
             storage::validate_bucket_name(bucket);
             if (!may_see_bucket(bucket))
-                throw S3Error(S3ErrorCode::AccessDenied,
-                              "Tenant admins may only inspect their own buckets.");
+                throw S3Error(S3ErrorCode::AccessDenied, "Tenant admins may only inspect their own buckets.");
             if (seg.size() == 1 && req.method == "GET") {
-                if (!usage_->get(bucket) &&
-                    !co_await router_.resolve(bucket).bucket_exists(bucket))
-                    throw S3Error(S3ErrorCode::NoSuchBucket,
-                                  "The specified bucket does not exist", bucket);
+                if (!usage_->get(bucket) && !co_await router_.resolve(bucket).bucket_exists(bucket))
+                    throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
                 co_return json_response(200, bucket_usage_json(bucket));
             }
             if (seg.size() == 2 && seg[1] == "rescan" && req.method == "POST") {
                 if (!usage_->enabled())
-                    throw S3Error(S3ErrorCode::InvalidRequest,
-                                  "Usage accounting is disabled (usage.enabled).");
+                    throw S3Error(S3ErrorCode::InvalidRequest, "Usage accounting is disabled (usage.enabled).");
                 if (!co_await router_.resolve(bucket).bucket_exists(bucket))
-                    throw S3Error(S3ErrorCode::NoSuchBucket,
-                                  "The specified bucket does not exist", bucket);
+                    throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", bucket);
                 auto u = co_await usage_->rescan(bucket);
                 audit_event("usage.rescan", "", bucket,
-                            "objects=" + std::to_string(u.objects) +
-                                " bytes=" + std::to_string(u.bytes));
+                            "objects=" + std::to_string(u.objects) + " bytes=" + std::to_string(u.bytes));
                 co_return json_response(200, bucket_usage_json(bucket));
             }
         }
-        throw S3Error(S3ErrorCode::MethodNotAllowed,
-                      "The specified method is not allowed against this resource.");
+        throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
     } catch (const S3Error& e) {
         metrics_.s3_error(e.code);
         co_return admin_error(e, req);
@@ -327,8 +300,7 @@ Task<http::HttpResponse> S3Service::admin_tenancy(http::HttpRequest& req,
 // POST /-/admin/config/reload (roadmap §4.4): root only; the app's hook re-reads
 // the file, applies the reloadable subset and reports the rest. The same path a
 // SIGHUP takes, exposed so `lights3-ctl reload` can drive it and read the outcome
-Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req,
-                                                        std::string& access_key,
+Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req, std::string& access_key,
                                                         const RequestContext& ctx) {
     try {
         auto ident = verify_identity(req);
@@ -338,11 +310,9 @@ Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req,
                           "Reloading the configuration requires a root (statically "
                           "configured) credential.");
         if (req.method != "POST")
-            throw S3Error(S3ErrorCode::MethodNotAllowed,
-                          "The specified method is not allowed against this resource.");
+            throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
         if (!reload_hook_)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Configuration reload is not available on this deployment.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "Configuration reload is not available on this deployment.");
         ConfigReloadReport r = reload_hook_();
         json j;
         j["ok"] = r.ok;
@@ -353,8 +323,7 @@ Task<http::HttpResponse> S3Service::admin_config_reload(http::HttpRequest& req,
         e.event = "config.reload";
         e.actor = access_key;
         e.request_id = ctx.request_id;
-        std::string detail = r.ok ? "applied " + std::to_string(r.applied.size()) +
-                                        ", requires_restart " +
+        std::string detail = r.ok ? "applied " + std::to_string(r.applied.size()) + ", requires_restart " +
                                         std::to_string(r.requires_restart.size())
                                   : "refused: " + r.error;
         e.detail = detail;

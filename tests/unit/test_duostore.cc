@@ -14,10 +14,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <map>
-#include <mutex>
 #include <iterator>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <semaphore>
 #include <sstream>
 #include <string>
@@ -53,9 +53,7 @@ RocksMetaOptions meta_opts(const TmpDir& tmp) {
     return {(tmp.path / "meta").string(), /*sync=*/false, /*block_cache=*/8ull << 20};
 }
 
-Extent chunk_extent(uint64_t id, uint64_t len, uint32_t crc = 0) {
-    return {Extent::Kind::kChunk, id, 0, len, crc};
-}
+Extent chunk_extent(uint64_t id, uint64_t len, uint32_t crc = 0) { return {Extent::Kind::kChunk, id, 0, len, crc}; }
 
 ObjectRec make_rec(std::string key, std::vector<Extent> extents) {
     ObjectRec rec;
@@ -75,17 +73,16 @@ TEST(duostore_crc32c_vectors) {
     // Chained incremental == one-shot
     uint32_t chained = codec::crc32c_of(std::string_view("12345"));
     std::string_view rest = "6789";
-    chained = codec::crc32c_update(
-        chained, std::span(reinterpret_cast<const std::byte*>(rest.data()), rest.size()));
+    chained = codec::crc32c_update(chained, std::span(reinterpret_cast<const std::byte*>(rest.data()), rest.size()));
     CHECK_EQ(chained, 0xE3069283u);
     CHECK_EQ(codec::crc32c_of(std::string_view("")), 0u);
 }
 
 TEST(duostore_extent_run_roundtrip) {
-    // Fixed-length chunks with consecutive file_ids (last block short) compress into a single run: 4B n_runs + 37B run header + 5×4B crc
+    // Fixed-length chunks with consecutive file_ids (last block short) compress into a single run: 4B n_runs + 37B run
+    // header + 5×4B crc
     std::vector<Extent> ex;
-    for (uint64_t i = 0; i < 5; ++i)
-        ex.push_back(chunk_extent(100 + i, i == 4 ? 1000 : 8192, uint32_t(i)));
+    for (uint64_t i = 0; i < 5; ++i) ex.push_back(chunk_extent(100 + i, i == 4 ? 1000 : 8192, uint32_t(i)));
     std::string enc = codec::encode_extents(ex);
     CHECK_EQ(enc.size(), size_t(4 + 37 + 5 * 4));
     CHECK(codec::decode_extents(enc) == ex);
@@ -95,24 +92,21 @@ TEST(duostore_extent_run_roundtrip) {
     CHECK(codec::decode_extents(codec::encode_extents(ex)) == ex);
 
     // A short block in the middle blocks merging (within a run all but the last segment must be full-length)
-    std::vector<Extent> mixed = {chunk_extent(1, 8192, 1), chunk_extent(2, 100, 2),
-                                 chunk_extent(3, 8192, 3)};
+    std::vector<Extent> mixed = {chunk_extent(1, 8192, 1), chunk_extent(2, 100, 2), chunk_extent(3, 8192, 3)};
     CHECK(codec::decode_extents(codec::encode_extents(mixed)) == mixed);
 
     // Pack extents do not merge and keep their offset
-    std::vector<Extent> packs = {{Extent::Kind::kPack, 7, 4096, 100, 42},
-                                 {Extent::Kind::kPack, 7, 8192, 50, 43}};
+    std::vector<Extent> packs = {{Extent::Kind::kPack, 7, 4096, 100, 42}, {Extent::Kind::kPack, 7, 8192, 50, 43}};
     CHECK(codec::decode_extents(codec::encode_extents(packs)) == packs);
 
-    // kRados merges isomorphically to kChunk (docs/storage/duostore-data-rados-design.md §3.1): consecutive ids compress into a
-    // single run; adjacent extents of different kinds do not merge
+    // kRados merges isomorphically to kChunk (docs/storage/duostore-data-rados-design.md §3.1): consecutive ids
+    // compress into a single run; adjacent extents of different kinds do not merge
     std::vector<Extent> rados;
     for (uint64_t i = 0; i < 4; ++i)
         rados.push_back({Extent::Kind::kRados, 500 + i, 0, uint64_t(i == 3 ? 100 : 8192), uint32_t(i)});
     CHECK_EQ(codec::encode_extents(rados).size(), size_t(4 + 37 + 4 * 4));
     CHECK(codec::decode_extents(codec::encode_extents(rados)) == rados);
-    std::vector<Extent> cross = {chunk_extent(600, 8192, 1),
-                                 {Extent::Kind::kRados, 601, 0, 8192, 2}};
+    std::vector<Extent> cross = {chunk_extent(600, 8192, 1), {Extent::Kind::kRados, 601, 0, 8192, 2}};
     CHECK(codec::decode_extents(codec::encode_extents(cross)) == cross);
 
     // Empty = 0-byte object
@@ -130,8 +124,7 @@ TEST(duostore_value_codec_roundtrip) {
     CHECK_EQ(back.meta.etag, rec.meta.etag);
     CHECK_EQ(back.meta.content_type, rec.meta.content_type);
     CHECK(back.meta.user_meta == rec.meta.user_meta);
-    CHECK_EQ(codec::to_unix_ms(back.meta.last_modified),
-             codec::to_unix_ms(rec.meta.last_modified));
+    CHECK_EQ(codec::to_unix_ms(back.meta.last_modified), codec::to_unix_ms(rec.meta.last_modified));
     CHECK_EQ(back.version, rec.version);
     CHECK(back.data.extents == rec.data.extents);
 
@@ -170,14 +163,15 @@ TEST(duostore_value_codec_roundtrip) {
 }
 
 // Meta-semantics baseline (GC accounting, monotonic id segments, MPU blocking bucket delete, max-keys=0, delimiter
-// pagination): the interfaced suite, RocksMetaStore always runs; the same suite for RedisMetaStore is in test_duostore_redis.cc
+// pagination): the interfaced suite, RocksMetaStore always runs; the same suite for RedisMetaStore is in
+// test_duostore_redis.cc
 TEST(duostore_meta_store_suite_rocksdb) {
     TmpDir tmp;
-    meta_store_suite::run_meta_store_suite(
-        [&] { return std::make_unique<RocksMetaStore>(meta_opts(tmp)); });
+    meta_store_suite::run_meta_store_suite([&] { return std::make_unique<RocksMetaStore>(meta_opts(tmp)); });
 }
 
-// RocksDB implementation detail: the pack counter starts at 0 (the Redis version burns its first segment; the absolute value is an implementation freedom)
+// RocksDB implementation detail: the pack counter starts at 0 (the Redis version burns its first segment; the absolute
+// value is an implementation freedom)
 TEST(duostore_alloc_pack_counter_starts_at_zero) {
     TmpDir tmp;
     RocksMetaStore m(meta_opts(tmp));
@@ -202,7 +196,8 @@ TEST(duostore_decode_object_meta_parity) {
     CHECK_EQ(codec::to_unix_ms(lite.last_modified), codec::to_unix_ms(full.last_modified));
 }
 
-// Canonical parsing of the pack record owner (docs/archive/gaps.md §6.1): three historical forms converge on a single entry point
+// Canonical parsing of the pack record owner (docs/archive/gaps.md §6.1): three historical forms converge on a single
+// entry point
 TEST(duostore_parse_pack_owner_forms) {
     using codec::PackOwner;
     // parse_pack_owner returns string_views into the argument's bytes: the input string must outlive the assertions
@@ -212,7 +207,10 @@ TEST(duostore_parse_pack_owner_forms) {
     CHECK_EQ(std::string(obj.bucket), "bkt");
     CHECK_EQ(std::string(obj.key), "some/key");
 
-    const std::string part_in("mpu\0b\0k\0uid42\0" "7", 15);
+    const std::string part_in(
+        "mpu\0b\0k\0uid42\0"
+        "7",
+        15);
     auto part = codec::parse_pack_owner(part_in);
     CHECK(part.kind == PackOwner::Kind::kPart);
     CHECK_EQ(std::string(part.bucket), "b");
@@ -220,35 +218,34 @@ TEST(duostore_parse_pack_owner_forms) {
     CHECK_EQ(std::string(part.upload_id), "uid42");
     CHECK_EQ(part.part_no, 7);
 
-    const std::string legacy_in("mpu\0uid42\0" "300", 13);
+    const std::string legacy_in(
+        "mpu\0uid42\0"
+        "300",
+        13);
     auto legacy = codec::parse_pack_owner(legacy_in);
     CHECK(legacy.kind == PackOwner::Kind::kLegacyPart);
     CHECK_EQ(std::string(legacy.upload_id), "uid42");
     CHECK_EQ(legacy.part_no, 300);
 
-    // Malformed inputs are all kUnknown (compaction conservatively does not migrate them): empty string, wrong segment count, non-numeric part_no
+    // Malformed inputs are all kUnknown (compaction conservatively does not migrate them): empty string, wrong segment
+    // count, non-numeric part_no
     CHECK(codec::parse_pack_owner("").kind == PackOwner::Kind::kUnknown);
     CHECK(codec::parse_pack_owner("solo").kind == PackOwner::Kind::kUnknown);
-    CHECK(codec::parse_pack_owner(std::string("mpu\0b\0k\0uid\0x7", 14)).kind ==
-          PackOwner::Kind::kUnknown);
+    CHECK(codec::parse_pack_owner(std::string("mpu\0b\0k\0uid\0x7", 14)).kind == PackOwner::Kind::kUnknown);
     CHECK(codec::parse_pack_owner(std::string("\0k", 2)).kind == PackOwner::Kind::kUnknown);
 }
 
 // Schema marker validation (the pure precondition of the migration hook, docs/archive/gaps.md §6.1): equal to current
-// passes straight through, newer than this build is rejected (prevents a downgrade silently corrupting writes), garbage is rejected
+// passes straight through, newer than this build is rejected (prevents a downgrade silently corrupting writes), garbage
+// is rejected
 TEST(duostore_rocks_schema_marker_validation) {
-    CHECK_EQ(RocksMetaStore::validate_schema_marker(
-                 std::to_string(RocksMetaStore::kSchemaCurrent)),
+    CHECK_EQ(RocksMetaStore::validate_schema_marker(std::to_string(RocksMetaStore::kSchemaCurrent)),
              RocksMetaStore::kSchemaCurrent);
-    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(
-                        std::to_string(RocksMetaStore::kSchemaCurrent + 1)),
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(std::to_string(RocksMetaStore::kSchemaCurrent + 1)),
                     s3::S3ErrorCode::InternalError);
-    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("banana"),
-                    s3::S3ErrorCode::InternalError);
-    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("1x"),
-                    s3::S3ErrorCode::InternalError);
-    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(""),
-                    s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("banana"), s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker("1x"), s3::S3ErrorCode::InternalError);
+    CHECK_THROWS_S3(RocksMetaStore::validate_schema_marker(""), s3::S3ErrorCode::InternalError);
 }
 
 // Lineage-prefix semantics of the shared parse_schema_marker check (redis "r" and tikv "t" use the same entry point)
@@ -264,7 +261,8 @@ TEST(duostore_schema_marker_lineage_prefixes) {
     CHECK_THROWS_S3(parse_schema_marker("r-1", "r", 1, "t"), s3::S3ErrorCode::InternalError);
 }
 
-// Defense in depth for the '\0'-delimited encoding: a segment containing NUL entering a key constructor must fail loudly (§4.1)
+// Defense in depth for the '\0'-delimited encoding: a segment containing NUL entering a key constructor must fail
+// loudly (§4.1)
 TEST(duostore_codec_rejects_nul_key) {
     std::string nul_key("k\0x", 3);
     CHECK_THROWS_S3(codec::object_key("b", nul_key), s3::S3ErrorCode::InternalError);
@@ -346,12 +344,14 @@ TEST(duostore_get_detects_chunk_bitrot) {
     sync_wait(b->close());
 }
 
-// ---------- GC phase-one specials (§9/§15 P3 acceptance: convergence after overwrite/delete/abort + GET vs GC) ----------
+// ---------- GC phase-one specials (§9/§15 P3 acceptance: convergence after overwrite/delete/abort + GET vs GC)
+// ----------
 
 namespace {
 
 // Uniform config for the GC specials: 4KiB chunks force multi-chunk, pack disabled (chunk unlink semantics tested
-// specifically; pack-side GC has its own cases), grace=0 for immediate reclaimability, background worker off (tests the manual hook specifically)
+// specifically; pack-side GC has its own cases), grace=0 for immediate reclaimability, background worker off (tests the
+// manual hook specifically)
 DuoStoreConfig gc_cfg(const TmpDir& tmp, const char* name) {
     DuoStoreConfig cfg;
     cfg.name = name;
@@ -382,7 +382,8 @@ std::string patterned(size_t n) {
 
 }  // namespace
 
-// run_gc_once converges after overwrite + delete: chunks physically disappear, gcq drains, another round performs zero actions
+// run_gc_once converges after overwrite + delete: chunks physically disappear, gcq drains, another round performs zero
+// actions
 TEST(duostore_gc_reclaims_after_overwrite_and_delete) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -478,29 +479,21 @@ struct LeaseSimMeta final : IMetaStore {
     std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override {
         return inner->head_object(b, k);
     }
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
-                    PutCondition cond = {}) override {
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond = {}) override {
         inner->put_object(b, k, std::move(rec), std::move(cond));
     }
-    bool delete_object(std::string_view b, std::string_view k) override {
-        return inner->delete_object(b, k);
-    }
-    ListResult list_objects(std::string_view b, const ListOptions& opt) override {
-        return inner->list_objects(b, opt);
-    }
+    bool delete_object(std::string_view b, std::string_view k) override { return inner->delete_object(b, k); }
+    ListResult list_objects(std::string_view b, const ListOptions& opt) override { return inner->list_objects(b, opt); }
     std::string create_upload(std::string_view b, std::string_view k, ObjectMeta meta) override {
         return inner->create_upload(b, k, std::move(meta));
     }
-    UploadRec require_upload(std::string_view b, std::string_view k,
-                             std::string_view id) override {
+    UploadRec require_upload(std::string_view b, std::string_view k, std::string_view id) override {
         return inner->require_upload(b, k, id);
     }
-    void put_part(std::string_view b, std::string_view k, std::string_view id,
-                  PartRec p) override {
+    void put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) override {
         inner->put_part(b, k, id, std::move(p));
     }
-    std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
-                                    std::string_view id) override {
+    std::vector<PartRec> list_parts(std::string_view b, std::string_view k, std::string_view id) override {
         return inner->list_parts(b, k, id);
     }
     std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
@@ -515,22 +508,18 @@ struct LeaseSimMeta final : IMetaStore {
     void abort_upload(std::string_view b, std::string_view k, std::string_view id) override {
         inner->abort_upload(b, k, id);
     }
-    uint64_t alloc_file_run(Extent::Kind kind, uint32_t n) override {
-        return inner->alloc_file_run(kind, n);
-    }
-    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(
-        size_t max, uint64_t min_seq = 0, size_t max_extents = SIZE_MAX) override {
+    uint64_t alloc_file_run(Extent::Kind kind, uint32_t n) override { return inner->alloc_file_run(kind, n); }
+    std::vector<std::pair<uint64_t, Reclaim>> peek_reclaims(size_t max, uint64_t min_seq = 0,
+                                                            size_t max_extents = SIZE_MAX) override {
         return inner->peek_reclaims(max, min_seq, max_extents);
     }
     void ack_reclaim(uint64_t seq) override { inner->ack_reclaim(seq); }
     void ack_reclaims(std::span<const uint64_t> seqs) override { inner->ack_reclaims(seqs); }
     std::vector<PackStat> pack_stats() override { return inner->pack_stats(); }
-    void seal_pack(uint64_t pack_id, uint64_t file_size) override {
-        inner->seal_pack(pack_id, file_size);
-    }
+    void seal_pack(uint64_t pack_id, uint64_t file_size) override { inner->seal_pack(pack_id, file_size); }
     void drop_pack_stat(uint64_t pack_id) override { inner->drop_pack_stat(pack_id); }
-    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
-                      const DataRef& from, const DataRef& to) override {
+    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
+                      const DataRef& to) override {
         return inner->swap_extents(b, k, expect_version, from, to);
     }
     bool chunk_referenced(uint64_t file_id) override { return inner->chunk_referenced(file_id); }
@@ -556,14 +545,19 @@ LeaseHarness make_lease_backend(const DuoStoreConfig& cfg, std::shared_ptr<Threa
     fs::create_directories(cfg.root);
     const bool owner = !rocks;
     if (!rocks)
-        rocks = std::make_shared<RocksMetaStore>(
-            RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
+        rocks = std::make_shared<RocksMetaStore>(RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
     auto meta = std::make_unique<LeaseSimMeta>(rocks, std::move(board));
     meta->owns_close = owner;
     auto* mp = meta.get();
     auto data = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
+        FsDataOptions{cfg.root,
+                      cfg.chunk_size,
+                      cfg.verify_chunk_crc,
+                      cfg.pack_threshold,
+                      cfg.pack_max_size,
+                      cfg.pack_writers,
+                      cfg.pack_max_age_sec,
+                      {}},
         pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
         [mp](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
@@ -687,21 +681,21 @@ TEST(duostore_read_clock_oldest) {
     uint64_t t2 = c.begin();
     CHECK_EQ(c.oldest_or(0), o1);  // the older read still anchors the clock
     c.end(t1);
-    CHECK(c.oldest_or(0) >= o1);   // now anchored by the second read
+    CHECK(c.oldest_or(0) >= o1);  // now anchored by the second read
     c.end(t2);
     CHECK_EQ(c.oldest_or(7), int64_t(7));
     c.end(t2);  // idempotent
 }
 
 // Backend-level metrics: GC counts land in the registry via MetricsScope,
-// the backend label comes from the assembly side; the direct-construction (default empty scope) path is covered by the other GC cases
+// the backend label comes from the assembly side; the direct-construction (default empty scope) path is covered by the
+// other GC cases
 TEST(duostore_gc_metrics_registered) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = gc_cfg(tmp, "gcm");
     auto reg = std::make_shared<MetricsRegistry>();
-    auto b = std::make_shared<DuoStoreBackend>(cfg, pool,
-                                               MetricsScope(reg, {{"backend", "gcm"}}));
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool, MetricsScope(reg, {{"backend", "gcm"}}));
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "k", patterned(10000));  // 3 chunks
     sync_wait(b->delete_object("bkt", "k"));
@@ -710,10 +704,8 @@ TEST(duostore_gc_metrics_registered) {
 
     auto out = reg->render();
     CHECK(out.find("lights3_duostore_gc_runs_total{backend=\"gcm\"} 1\n") != std::string::npos);
-    CHECK(out.find("lights3_duostore_gc_reclaims_total{backend=\"gcm\"} 1\n") !=
-          std::string::npos);
-    CHECK(out.find("lights3_duostore_gc_files_removed_total{backend=\"gcm\"} 3\n") !=
-          std::string::npos);
+    CHECK(out.find("lights3_duostore_gc_reclaims_total{backend=\"gcm\"} 1\n") != std::string::npos);
+    CHECK(out.find("lights3_duostore_gc_files_removed_total{backend=\"gcm\"} 3\n") != std::string::npos);
     sync_wait(b->close());
 }
 
@@ -736,7 +728,8 @@ TEST(duostore_gc_grace_defers_reclaim) {
 }
 
 // Concurrent GET vs GC (§7 pin counting; §15 P3 acceptance "no ENOENT"): the object is deleted mid-read, the pin
-// keeps GC from unlinking; the full content is verified after reading; the next round reclaims once the reader's destruction releases the pin
+// keeps GC from unlinking; the full content is verified after reading; the next round reclaims once the reader's
+// destruction releases the pin
 TEST(duostore_gc_pin_blocks_unlink_during_get) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -747,7 +740,8 @@ TEST(duostore_gc_pin_blocks_unlink_during_get) {
     put(*b, "bkt", "k", body);
 
     auto got = sync_wait(b->get_object("bkt", "k", std::nullopt));
-    // Read a small piece (the first chunk is open), later chunks rely on lazy opening -- exactly the window the pin protects
+    // Read a small piece (the first chunk is open), later chunks rely on lazy opening -- exactly the window the pin
+    // protects
     std::byte buf[100];
     size_t n0 = sync_wait(got.body->read(std::span(buf)));
     CHECK(n0 > 0);
@@ -796,8 +790,7 @@ TEST(duostore_gc_mpu_ttl_expiry) {
     CHECK_EQ(sync_wait(b->list_multipart_uploads("bkt", {})).uploads.size(), size_t(0));
     {
         http::StringBodyReader part("x");
-        CHECK_THROWS_S3(sync_wait(b->upload_part("bkt", "mpu", id, 2, part)),
-                        s3::S3ErrorCode::NoSuchUpload);
+        CHECK_THROWS_S3(sync_wait(b->upload_part("bkt", "mpu", id, 2, part)), s3::S3ErrorCode::NoSuchUpload);
     }
     sync_wait(b->close());
 }
@@ -838,10 +831,10 @@ TEST(duostore_gc_skipped_head_does_not_stall_round) {
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool);
     sync_wait(b->create_bucket("bkt"));
 
-    // 257 single-chunk objects: readers hold pins on the first 256 (filling a full peek batch), the 257th is reclaimable
+    // 257 single-chunk objects: readers hold pins on the first 256 (filling a full peek batch), the 257th is
+    // reclaimable
     constexpr int kN = 257;
-    for (int i = 0; i < kN; ++i)
-        put(*b, "bkt", "k" + std::to_string(i), patterned(64));
+    for (int i = 0; i < kN; ++i) put(*b, "bkt", "k" + std::to_string(i), patterned(64));
     std::vector<ObjectStream> readers;
     for (int i = 0; i < kN - 1; ++i)
         readers.push_back(sync_wait(b->get_object("bkt", "k" + std::to_string(i), std::nullopt)));
@@ -859,7 +852,8 @@ TEST(duostore_gc_skipped_head_does_not_stall_round) {
     sync_wait(b->close());
 }
 
-// Background worker (§9): reclaims automatically on a gc_interval=1s cadence; close cancels the timer and waits for in-flight GC
+// Background worker (§9): reclaims automatically on a gc_interval=1s cadence; close cancels the timer and waits for
+// in-flight GC
 TEST(duostore_gc_background_worker_runs) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -874,8 +868,10 @@ TEST(duostore_gc_background_worker_runs) {
     // Wait at most 15s to converge (normally 1-2 cycles)
     bool converged = false;
     for (int i = 0; i < 150 && !converged; ++i) {
-        if (chunk_files_on_disk(cfg.root) == 0) converged = true;
-        else usleep(100 * 1000);
+        if (chunk_files_on_disk(cfg.root) == 0)
+            converged = true;
+        else
+            usleep(100 * 1000);
     }
     CHECK(converged);
     sync_wait(b->close());
@@ -903,7 +899,8 @@ TEST(duostore_gc_close_and_dtor_cancel_worker) {
 }
 
 // close concurrent with the manual run_gc_once: the manual hook registers in-flight via the wait group, and close
-// waits for it before tearing down meta/data; after close the manual hook refuses entry and returns zero stats (verified UAF-free under the asan/tsan matrix)
+// waits for it before tearing down meta/data; after close the manual hook refuses entry and returns zero stats
+// (verified UAF-free under the asan/tsan matrix)
 TEST(duostore_gc_manual_hook_vs_close) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -929,7 +926,11 @@ TEST(duostore_fs_remove_pack_idempotent) {
     auto pool = std::make_shared<ThreadPool>(2);
     uint64_t next_id = 1;
     FsDataStore d(FsDataOptions{tmp.path / "duo", 4096, false, 0, 128ull << 20, 4, {}}, pool,
-                  [&](Extent::Kind, uint32_t n) { uint64_t f = next_id; next_id += n; return f; });
+                  [&](Extent::Kind, uint32_t n) {
+                      uint64_t f = next_id;
+                      next_id += n;
+                      return f;
+                  });
     auto p = d.pack_path(7);
     fs::create_directories(p.parent_path());
     std::ofstream(p) << "stub";
@@ -955,7 +956,8 @@ DuoStoreConfig pack_cfg(const TmpDir& tmp, const char* name) {
     cfg.pack_threshold = 1024;
     cfg.pack_max_size = 64 << 10;
     cfg.pack_writers = 1;
-    cfg.pack_max_age_sec = 0;  // age rotation off by default: layout assertions are only deterministic with capacity-based rotation
+    cfg.pack_max_age_sec = 0;  // age rotation off by default: layout assertions are only deterministic with
+                               // capacity-based rotation
     cfg.meta_sync = false;
     cfg.gc_interval_sec = 0;
     cfg.gc_grace_sec = 0;
@@ -1008,14 +1010,20 @@ struct PackHarness {
 
 PackHarness make_pack_backend(const DuoStoreConfig& cfg, std::shared_ptr<ThreadPool> pool) {
     fs::create_directories(cfg.root);
-    auto meta = std::make_unique<RocksMetaStore>(
-        RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
+    auto meta = std::make_unique<RocksMetaStore>(RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
     auto* mp = meta.get();
     // Migration callback matches the cfg-constructed assembly (the standard migrate_pack_record implementation); the
-    // write-side pin hook is not wired -- the compaction cases' migration payloads are <= the threshold and always take the pack path, so passing empty pins suffices
+    // write-side pin hook is not wired -- the compaction cases' migration payloads are <= the threshold and always take
+    // the pack path, so passing empty pins suffices
     auto data = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
+        FsDataOptions{cfg.root,
+                      cfg.chunk_size,
+                      cfg.verify_chunk_crc,
+                      cfg.pack_threshold,
+                      cfg.pack_max_size,
+                      cfg.pack_writers,
+                      cfg.pack_max_age_sec,
+                      {}},
         pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); },
         [mp](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
@@ -1036,7 +1044,8 @@ std::optional<PackStat> find_pack_stat(IMetaStore& m, uint64_t pack_id) {
 }  // namespace
 
 // Routing + layout + record format (§5.2): <= threshold appends into the same active pack (zero chunks),
-// magic/owner persisted, > threshold takes the chunk path, GET full and Range, liveness accounting accumulates with writes
+// magic/owner persisted, > threshold takes the chunk path, GET full and Range, liveness accounting accumulates with
+// writes
 TEST(duostore_pack_layout_roundtrip_and_stats) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1188,20 +1197,19 @@ TEST(duostore_pack_get_detects_bitrot) {
 }
 
 // P5 corruption metric: crc mismatches on the GET read path land in the registry via the on_corruption callback --
-// the chunk and pack integration points each count once (cfg-constructed assembly; the injected assembly does not wire the hook, so the other bitrot cases do not count)
+// the chunk and pack integration points each count once (cfg-constructed assembly; the injected assembly does not wire
+// the hook, so the other bitrot cases do not count)
 TEST(duostore_read_corruption_metric) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "corrupt");
     cfg.verify_chunk_crc = true;
     auto reg = std::make_shared<MetricsRegistry>();
-    auto b = std::make_shared<DuoStoreBackend>(cfg, pool,
-                                               MetricsScope(reg, {{"backend", "corrupt"}}));
+    auto b = std::make_shared<DuoStoreBackend>(cfg, pool, MetricsScope(reg, {{"backend", "corrupt"}}));
     sync_wait(b->create_bucket("bkt"));
     put(*b, "bkt", "small", patterned(600));  // <= threshold: pack record
     put(*b, "bkt", "big", patterned(5000));   // > threshold: 2 chunks (chunk_size 4KiB)
-    CHECK(reg->render().find(
-              "lights3_duostore_read_corruption_total{backend=\"corrupt\"} 0\n") !=
+    CHECK(reg->render().find("lights3_duostore_read_corruption_total{backend=\"corrupt\"} 0\n") !=
           std::string::npos);  // registered at construction, zero value visible
 
     fs::path chunk;
@@ -1226,9 +1234,7 @@ TEST(duostore_read_corruption_metric) {
     auto got2 = sync_wait(b->get_object("bkt", "small", std::nullopt));
     CHECK_THROWS_S3(read_all(*got2.body), s3::S3ErrorCode::InternalError);
 
-    CHECK(reg->render().find(
-              "lights3_duostore_read_corruption_total{backend=\"corrupt\"} 2\n") !=
-          std::string::npos);
+    CHECK(reg->render().find("lights3_duostore_read_corruption_total{backend=\"corrupt\"} 2\n") != std::string::npos);
     sync_wait(b->close());
 }
 
@@ -1276,8 +1282,9 @@ TEST(duostore_config_deployment_warning) {
     CHECK_EQ(std::string(c.data_kind_name()), std::string("rados"));
 }
 
-// Single-instance execution gating for multiple gateways (C4, docs/storage/duostore-data-rados-design.md §8.3): gc_enabled=false
-// only stops the scheduling of the background worker/orphan scan; the manual hooks (test/ops channel) are not gated
+// Single-instance execution gating for multiple gateways (C4, docs/storage/duostore-data-rados-design.md §8.3):
+// gc_enabled=false only stops the scheduling of the background worker/orphan scan; the manual hooks (test/ops channel)
+// are not gated
 TEST(duostore_config_gc_enabled_gates_background_only) {
     std::map<std::string, std::string> p{{"root", "/tmp/duo-cfg"}, {"gc_enabled", "false"}};
     auto c = DuoStoreConfig::from_params("t", p);
@@ -1292,7 +1299,8 @@ TEST(duostore_config_gc_enabled_gates_background_only) {
     }
     CHECK(threw);
 
-    // Behavior: gc_enabled=false + gc_interval>0 still schedules no background worker; the manual hook reclaims as usual
+    // Behavior: gc_enabled=false + gc_interval>0 still schedules no background worker; the manual hook reclaims as
+    // usual
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = gc_cfg(tmp, "gc-gated");
@@ -1326,7 +1334,7 @@ TEST(duostore_pack_gc_empty_pack_removal_respects_pin) {
 
     uint64_t p1 = h.meta->get_object("bkt", "k1")->data.extents[0].file_id;
     auto got = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));  // holds a pin
-    sync_wait(h.b->delete_object("bkt", "k1"));  // live_recs(P1) -> 0
+    sync_wait(h.b->delete_object("bkt", "k1"));                        // live_recs(P1) -> 0
 
     auto st1 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st1.skipped_pinned, uint64_t(1));  // the gcq item is blocked by the pin
@@ -1367,7 +1375,7 @@ TEST(duostore_pack_restart_abandons_active) {
     auto h = make_pack_backend(cfg, pool);
     auto stats = h.meta->pack_stats();
     CHECK_EQ(stats.size(), size_t(1));
-    CHECK(stats[0].sealed);  // back-sealed at construction (abandon_stale_packs)
+    CHECK(stats[0].sealed);                     // back-sealed at construction (abandon_stale_packs)
     CHECK_EQ(stats[0].file_size, uint64_t(0));  // size unknown, 0 placeholder
     uint64_t p1 = stats[0].pack_id;
 
@@ -1382,7 +1390,8 @@ TEST(duostore_pack_restart_abandons_active) {
 
     sync_wait(h.b->delete_object("bkt", "old"));
     auto st = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st.packs_removed, uint64_t(1));  // only after back-sealing can the old pack become a whole-deletion candidate
+    CHECK_EQ(st.packs_removed,
+             uint64_t(1));  // only after back-sealing can the old pack become a whole-deletion candidate
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
     auto g2 = sync_wait(h.b->get_object("bkt", "fresh", std::nullopt));
     CHECK_EQ(read_all(*g2.body), patterned(600));
@@ -1393,7 +1402,8 @@ TEST(duostore_pack_restart_abandons_active) {
 
 namespace {
 
-// Pack file path (matches the FsDataStore layout convention; computed directly in the test to avoid holding a store pointer)
+// Pack file path (matches the FsDataStore layout convention; computed directly in the test to avoid holding a store
+// pointer)
 fs::path pack_file_path(const fs::path& root, uint64_t pack_id) {
     char ss[3], name[32];
     std::snprintf(ss, sizeof ss, "%02x", unsigned((pack_id >> 8) & 0xff));
@@ -1413,7 +1423,8 @@ void corrupt_file_at(const fs::path& p, uint64_t off) {
 }  // namespace
 
 // Low-liveness compaction converges: high liveness does not trigger it; once below pack_gc_ratio, a sequential scan
-// migrates live records to the active pack, swap replaces the ref, and the empty pack is whole-deleted in the same round (grace=0); object reads are seamless
+// migrates live records to the active pack, swap replaces the ref, and the empty pack is whole-deleted in the same
+// round (grace=0); object reads are seamless
 TEST(duostore_compact_low_liveness_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1468,9 +1479,10 @@ TEST(duostore_compact_low_liveness_pack) {
     sync_wait(h.b->close());
 }
 
-// Age rotation (docs/archive/gaps.md §6.1): under low write volume an active pack sealed only by capacity never rotates,
-// and its dead space can never enter the compaction candidate set. seal_aged_packs seals over-age active packs,
-// reporting file_size truthfully (not the crash back-seal's 0), after which the dead space can be reclaimed by compaction
+// Age rotation (docs/archive/gaps.md §6.1): under low write volume an active pack sealed only by capacity never
+// rotates, and its dead space can never enter the compaction candidate set. seal_aged_packs seals over-age active
+// packs, reporting file_size truthfully (not the crash back-seal's 0), after which the dead space can be reclaimed by
+// compaction
 TEST(duostore_pack_age_rotation_seals_idle_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1495,7 +1507,8 @@ TEST(duostore_pack_age_rotation_seals_idle_pack) {
     // Idempotent: returns 0 when there is no active pack to seal
     CHECK_EQ(sync_wait(h.b->data_for_test().seal_aged_packs(10)), uint64_t(0));
 
-    // After sealing the dead space is reclaimable: deleting down to 1/3 liveness drops below pack_gc_ratio, compaction converges as usual
+    // After sealing the dead space is reclaimable: deleting down to 1/3 liveness drops below pack_gc_ratio, compaction
+    // converges as usual
     sync_wait(h.b->delete_object("bkt", "k0"));
     sync_wait(h.b->delete_object("bkt", "k1"));
     auto st = sync_wait(h.b->run_gc_once());
@@ -1525,13 +1538,14 @@ TEST(duostore_pack_age_rotation_runs_in_gc) {
 }
 
 // Compaction budget and priority (docs/archive/gaps.md §6.1): capped at N per round, taken in descending order of
-// reclaimable bytes -- previously it was "rewrite every eligible pack in one round", and after a bulk delete a single round could hold the lock for hours
+// reclaimable bytes -- previously it was "rewrite every eligible pack in one round", and after a bulk delete a single
+// round could hold the lock for hours
 TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
     auto cfg = pack_cfg(tmp, "budget");
-    cfg.pack_max_size = 2048;          // 600B record ≈ 629B, fills and rotates at 3 records
-    cfg.gc_compact_max_packs = 1;      // only one per round
+    cfg.pack_max_size = 2048;      // 600B record ≈ 629B, fills and rotates at 3 records
+    cfg.gc_compact_max_packs = 1;  // only one per round
     auto h = make_pack_backend(cfg, pool);
     sync_wait(h.b->create_bucket("bkt"));
     // Three full packs (k0-k2 / k3-k5 / k6-k8) + one active (k9)
@@ -1550,7 +1564,7 @@ TEST(duostore_compact_budget_prioritises_by_reclaimable) {
     sync_wait(h.b->delete_object("bkt", "k7"));
 
     auto st1 = sync_wait(h.b->run_gc_once());
-    CHECK_EQ(st1.packs_compacted, uint64_t(1));       // budget cap
+    CHECK_EQ(st1.packs_compacted, uint64_t(1));         // budget cap
     CHECK_EQ(st1.packs_compact_deferred, uint64_t(2));  // the rest are deferred
 
     auto st2 = sync_wait(h.b->run_gc_once());
@@ -1572,7 +1586,8 @@ TEST(duostore_compact_budget_prioritises_by_reclaimable) {
 }
 
 // A corrupt dead record does not block compaction (§10): the liveness accounting proves the corrupt one is dead --
-// the survivors migrate as usual, and once live reaches zero the empty pack (corrupt dead space included) is whole-deleted without losing any data
+// the survivors migrate as usual, and once live reaches zero the empty pack (corrupt dead space included) is
+// whole-deleted without losing any data
 TEST(duostore_compact_corrupt_dead_record) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1583,7 +1598,8 @@ TEST(duostore_compact_corrupt_dead_record) {
     put(*h.b, "bkt", "k1", patterned(600));
     put(*h.b, "bkt", "k2", patterned(600));
     auto old2 = h.meta->get_object("bkt", "k2")->data.extents[0];  // P1 location before the overwrite
-    put(*h.b, "bkt", "k2", patterned(500));  // 3rd record -> P1 sealed, the new value goes to P2; old k2 becomes dead space
+    put(*h.b, "bkt", "k2",
+        patterned(500));  // 3rd record -> P1 sealed, the new value goes to P2; old k2 becomes dead space
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     corrupt_file_at(pack_file_path(cfg.root, old2.file_id), old2.offset + 10);  // corrupt the dead space
@@ -1591,7 +1607,7 @@ TEST(duostore_compact_corrupt_dead_record) {
     CHECK_EQ(st.packs_compacted, uint64_t(1));
     CHECK_EQ(st.records_corrupt, uint64_t(1));   // corrupt dead space: warn and skip
     CHECK_EQ(st.records_migrated, uint64_t(1));  // live k1 migrates as usual
-    CHECK_EQ(st.packs_removed, uint64_t(1));     // live reaches zero -> whole-delete the empty pack (dead space included)
+    CHECK_EQ(st.packs_removed, uint64_t(1));  // live reaches zero -> whole-delete the empty pack (dead space included)
     auto g1 = sync_wait(h.b->get_object("bkt", "k1", std::nullopt));
     CHECK_EQ(read_all(*g1.body), patterned(600));
     auto g2 = sync_wait(h.b->get_object("bkt", "k2", std::nullopt));
@@ -1713,7 +1729,8 @@ TEST(duostore_corrupt_pack_quarantine_lifecycle) {
 }
 
 // Compaction of mpu parts (§9.2 owner hint): pack parts of an in-progress upload cannot migrate (conservatively
-// blocked, pack kept); after complete, the b/k embedded in the owner looks up the owning object -> migration unlocks, pack reclaimed
+// blocked, pack kept); after complete, the b/k embedded in the owner looks up the owning object -> migration unlocks,
+// pack reclaimed
 TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1738,14 +1755,16 @@ TEST(duostore_compact_mpu_part_blocks_then_migrates_after_complete) {
 
     auto st1 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st1.packs_compacted, uint64_t(1));
-    CHECK_EQ(st1.records_migrated, uint64_t(0));  // in-progress mpu: the object does not exist -> conservatively not migrated
+    CHECK_EQ(st1.records_migrated,
+             uint64_t(0));  // in-progress mpu: the object does not exist -> conservatively not migrated
     CHECK_EQ(st1.packs_removed, uint64_t(0));
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(2));
 
     std::vector<PartInfo> parts = {{1, etag}};
     sync_wait(h.b->complete_multipart("bkt", "mp", id, parts));
 
-    // After complete (grace=0, no cooldown): the owner's b/k hint successfully looks up the object -> migrate + whole-delete
+    // After complete (grace=0, no cooldown): the owner's b/k hint successfully looks up the object -> migrate +
+    // whole-delete
     auto st2 = sync_wait(h.b->run_gc_once());
     CHECK_EQ(st2.records_migrated, uint64_t(1));
     CHECK_EQ(st2.packs_removed, uint64_t(1));
@@ -1784,8 +1803,10 @@ TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
     std::vector<uint64_t> chunk_ids;
     bool has_pack = false;
     for (const auto& e : rec->data.extents) {
-        if (e.kind == Extent::Kind::kPack) has_pack = true;
-        else chunk_ids.push_back(e.file_id);
+        if (e.kind == Extent::Kind::kPack)
+            has_pack = true;
+        else
+            chunk_ids.push_back(e.file_id);
     }
     CHECK(has_pack && !chunk_ids.empty());  // it really is a mixed object
     for (uint64_t cid : chunk_ids) CHECK(h.meta->chunk_referenced(cid));
@@ -1812,7 +1833,8 @@ TEST(duostore_compact_mixed_object_keeps_chunk_refs) {
 
 // P0 §1.4: an active pack another instance is writing must not be back-sealed (back-seal -> full compaction
 // rewrite -> whole-deletion once the accounting zeroes out, while the other side still appends via its fd = silent
-// data loss). A second FsDataStore holding an active pack on the same root simulates "another gateway", verifying pack_write_locked can detect it
+// data loss). A second FsDataStore holding an active pack on the same root simulates "another gateway", verifying
+// pack_write_locked can detect it
 TEST(duostore_active_pack_of_other_writer_not_sealed) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1833,15 +1855,16 @@ TEST(duostore_active_pack_of_other_writer_not_sealed) {
 
     // After closing this instance (fd closed -> lock released), the same pack is no longer judged as being written
     sync_wait(h.b->close());
-    FsDataOptions probe_opt{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc,
-                            cfg.pack_threshold, cfg.pack_max_size, cfg.pack_writers, {}};
+    FsDataOptions probe_opt{
+        cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold, cfg.pack_max_size, cfg.pack_writers, {}};
     FsDataStore probe(probe_opt, pool, [](Extent::Kind, uint32_t) -> uint64_t { return 0; });
     CHECK(!probe.pack_write_locked(pack_id));
     sync_wait(probe.close());
 }
 
 // Denominator backfill for crash-leftover packs (gaps §2.3b): after the seal(0) back-seal, the first GC round uses
-// one stat_pack stat to backfill file_size -- packs with healthy liveness no longer unconditionally enter the full sequential-scan rewrite
+// one stat_pack stat to backfill file_size -- packs with healthy liveness no longer unconditionally enter the full
+// sequential-scan rewrite
 TEST(duostore_gc_stat_backfills_crash_leftover_pack) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(4);
@@ -1890,8 +1913,7 @@ TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
     uint64_t real_size = fs::file_size(pack_file_path(tmp.path / "duo", e1.file_id));
     {
         // Torn tail injection: a truncated record header (crash residue)
-        std::ofstream f(pack_file_path(tmp.path / "duo", e1.file_id),
-                        std::ios::binary | std::ios::app);
+        std::ofstream f(pack_file_path(tmp.path / "duo", e1.file_id), std::ios::binary | std::ios::app);
         f << "LP3R" << std::string(7, '\x5a');
     }
     auto rw = sync_wait(d.rewrite_pack(e1.file_id));
@@ -1909,7 +1931,8 @@ TEST(duostore_rewrite_pack_scan_stats_and_torn_tail) {
 }
 
 // Pre-P4 legacy mpu owner format ("mpu\0<id>\0<no>", no b/k): cannot be looked up -> conservatively not migrated,
-// pack kept, object stays readable; the new format (with b/k) migrates normally via object lookup -- two on-disk generations coexist safely
+// pack kept, object stays readable; the new format (with b/k) migrates normally via object lookup -- two on-disk
+// generations coexist safely
 TEST(duostore_compact_legacy_mpu_owner_blocks) {
     TmpDir tmp;
     auto pool = std::make_shared<ThreadPool>(2);
@@ -1918,18 +1941,18 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
     FsDataOptions opt{tmp.path / "duo", 4096, false, /*pack_threshold=*/1024, 64 << 10, 1, {}};
     uint64_t pack_id = 0;
     {
-        FsDataStore d1(opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
-                       [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); });
+        FsDataStore d1(
+            opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
+            [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); });
         auto write_rec = [&](std::string owner, const std::string& data) {
             auto w = sync_wait(d1.open_writer({uint64_t(data.size()), std::move(owner)}));
-            sync_wait(w->write(
-                std::span(reinterpret_cast<const std::byte*>(data.data()), data.size())));
+            sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(data.data()), data.size())));
             return sync_wait(w->finish()).extents.at(0);
         };
-        // One record each in the legacy format (simulating a pre-P4 leftover disk) and the new format, both belonging to completed objects
+        // One record each in the legacy format (simulating a pre-P4 leftover disk) and the new format, both belonging
+        // to completed objects
         auto legacy = write_rec(std::string("mpu\0oldid\0001", 11), patterned(300));
-        auto modern =
-            write_rec(std::string("mpu\0bkt\0knew\0newid\0001", 20), patterned(400));
+        auto modern = write_rec(std::string("mpu\0bkt\0knew\0newid\0001", 20), patterned(400));
         pack_id = legacy.file_id;
         ObjectRec r1;
         r1.meta.key = "kold";
@@ -1947,11 +1970,12 @@ TEST(duostore_compact_legacy_mpu_owner_blocks) {
         meta.put_object("bkt", "knew", std::move(r2));
         sync_wait(d1.close());  // seals the pack (the migration target must be a different active pack)
     }
-    FsDataStore d2(opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
-                   [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); },
-                   [&](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
-                       return migrate_pack_records(meta, ds, nullptr, std::move(batch));
-                   });
+    FsDataStore d2(
+        opt, pool, [&](Extent::Kind k, uint32_t n) { return meta.alloc_file_run(k, n); },
+        [&](uint64_t id, uint64_t sz) { meta.seal_pack(id, sz); },
+        [&](IDataStore& ds, std::vector<PackScanRecord>&& batch) {
+            return migrate_pack_records(meta, ds, nullptr, std::move(batch));
+        });
     auto rw = sync_wait(d2.rewrite_pack(pack_id));
     CHECK_EQ(rw.scanned, uint64_t(2));
     CHECK_EQ(rw.migrated, uint64_t(1));  // new format migrates; legacy format conservatively shelved
@@ -2068,8 +2092,7 @@ TEST(duostore_orphan_scan_reconciles_packs) {
     CHECK(!fs::exists(cfg.root / "packs" / "ab" / "000000000000abcd.pak"));
     // Recorded pack untouched — it is still the active pack this process is writing
     CHECK_EQ(pack_files_on_disk(cfg.root), size_t(1));
-    CHECK_EQ(read_all(*sync_wait(h.b->get_object("bkt", "k", std::nullopt)).body),
-             patterned(600));
+    CHECK_EQ(read_all(*sync_wait(h.b->get_object("bkt", "k", std::nullopt)).body), patterned(600));
 
     // Reverse: manually delete the recorded pack file → count + alert, packstat
     // kept for manual intervention
@@ -2092,8 +2115,7 @@ namespace {
 class GatedReader final : public http::BodyReader {
 public:
     GatedReader(std::string first, std::string rest)
-        : first_(std::move(first)), rest_(std::move(rest)),
-          total_(first_.size() + rest_.size()) {}
+        : first_(std::move(first)), rest_(std::move(rest)), total_(first_.size() + rest_.size()) {}
 
     std::optional<uint64_t> length() const override { return total_; }
 
@@ -2662,8 +2684,7 @@ TEST(duostore_chunk_ids_batched_in_runs) {
                   });
     auto w = sync_wait(d.open_writer({std::nullopt, "t/runs"}));
     std::string body(64 * 7, 'x');  // 7 chunks: run sequence 1, 2, 4
-    sync_wait(
-        w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
+    sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(body.data()), body.size())));
     auto ref = sync_wait(w->finish());
     CHECK_EQ(ref.extents.size(), size_t(7));
     CHECK_EQ(ref.extents[2].file_id, ref.extents[1].file_id + 1);  // contiguous within run(2)
@@ -2687,8 +2708,14 @@ TEST(duostore_fs_data_store_uring_roundtrip) {
         return;  // io_uring unavailable here: the sync suites already cover the layout
     }
     uint64_t next_id = 1;
-    FsDataOptions opt{tmp.path / "duo", 64 * 1024, /*verify_chunk_crc=*/true,
-                      /*pack_threshold=*/1024, 64 << 10, 1, 0, {}, eng};
+    FsDataOptions opt;
+    opt.root = tmp.path / "duo";
+    opt.chunk_size = 64 * 1024;
+    opt.verify_chunk_crc = true;
+    opt.pack_threshold = 1024;
+    opt.pack_max_size = 64 << 10;
+    opt.pack_writers = 1;
+    opt.uring = eng;
     FsDataStore d(std::move(opt), pool, [&](Extent::Kind, uint32_t n) {
         uint64_t f = next_id;
         next_id += n;
@@ -2716,8 +2743,7 @@ TEST(duostore_fs_data_store_uring_roundtrip) {
     size_t off = 0, step = 3000;
     while (off < body.size()) {
         size_t n = std::min(step, body.size() - off);
-        sync_wait(w->write(
-            std::span(reinterpret_cast<const std::byte*>(body.data()) + off, n)));
+        sync_wait(w->write(std::span(reinterpret_cast<const std::byte*>(body.data()) + off, n)));
         off += n;
         step += 1777;
     }
@@ -2726,19 +2752,16 @@ TEST(duostore_fs_data_store_uring_roundtrip) {
     DataRef ref_copy = ref;
     CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(ref), 0, body.size() - 1))), body);
     // Range crossing the first chunk boundary (also disables crc, the partial-read branch)
-    CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(ref_copy), 65530, 67529))),
-             body.substr(65530, 2000));
+    CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(ref_copy), 65530, 67529))), body.substr(65530, 2000));
 
     // pack path: small object, ring-side fdatasync off the slot lock
     std::string small(600, 's');
     auto wp = sync_wait(d.open_writer({uint64_t(small.size()), "t/small"}));
-    sync_wait(wp->write(
-        std::span(reinterpret_cast<const std::byte*>(small.data()), small.size())));
+    sync_wait(wp->write(std::span(reinterpret_cast<const std::byte*>(small.data()), small.size())));
     auto pref = sync_wait(wp->finish());
     CHECK_EQ(pref.extents.size(), size_t(1));
     CHECK(pref.extents[0].kind == Extent::Kind::kPack);
-    CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(pref), 0, small.size() - 1))),
-             small);
+    CHECK_EQ(read_span(*sync_wait(d.open_reader(std::move(pref), 0, small.size() - 1))), small);
     sync_wait(d.close());
 }
 
@@ -2837,8 +2860,14 @@ TEST(duostore_meta_cache_shared_engine_needs_ttl) {
             RocksMetaOptions{cfg.meta_path.string(), /*sync=*/false, 8ull << 20});
         auto* mp = meta.get();
         auto data = std::make_unique<FsDataStore>(
-            FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                          cfg.pack_max_size, cfg.pack_writers, cfg.pack_max_age_sec, {}},
+            FsDataOptions{cfg.root,
+                          cfg.chunk_size,
+                          cfg.verify_chunk_crc,
+                          cfg.pack_threshold,
+                          cfg.pack_max_size,
+                          cfg.pack_writers,
+                          cfg.pack_max_age_sec,
+                          {}},
             pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); });
         return std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
     };
@@ -2865,17 +2894,14 @@ TEST(duostore_meta_cache_shared_engine_needs_ttl) {
     // from_params: rocksdb defaults the budget on; a bare shared engine would default it
     // off (the redis branch needs the engine compiled in, so only the local side is
     // exercised here), negative TTLs are rejected
-    std::map<std::string, std::string> params{{"root", (tmp.path / "p").string()},
-                                              {"meta_cache_entries", "1K"},
-                                              {"meta_cache_ttl", "10s"}};
+    std::map<std::string, std::string> params{
+        {"root", (tmp.path / "p").string()}, {"meta_cache_entries", "1K"}, {"meta_cache_ttl", "10s"}};
     auto c = DuoStoreConfig::from_params("p", params);
     CHECK_EQ(c.meta_cache_entries, size_t(1024));
     CHECK_EQ(c.meta_cache_ttl_sec, 10);
-    CHECK_EQ(DuoStoreConfig::from_params("p", {{"root", (tmp.path / "p").string()}})
-                 .meta_cache_entries,
-             size_t(1) << 16);
+    CHECK_EQ(DuoStoreConfig::from_params("p", {{"root", (tmp.path / "p").string()}}).meta_cache_entries, size_t(1)
+                                                                                                             << 16);
 }
-
 
 // ---------- backlog-sequence ⑧: backup chains / PITR ----------
 
@@ -2900,7 +2926,8 @@ TEST(duostore_backup_manifest_plan) {
     CHECK_EQ(ids(l.plan(std::nullopt, int64_t{3500})), std::string("123"));
     CHECK_EQ(ids(l.plan(std::nullopt, int64_t{4000})), std::string("4"));
     for (auto bad : {std::pair<std::optional<uint64_t>, std::optional<int64_t>>{uint64_t{9}, std::nullopt},
-                     {std::nullopt, int64_t{5}}, {uint64_t{2}, int64_t{2000}}}) {
+                     {std::nullopt, int64_t{5}},
+                     {uint64_t{2}, int64_t{2000}}}) {
         bool threw = false;
         try {
             l.plan(bad.first, bad.second);
@@ -3011,8 +3038,7 @@ TEST(duostore_backend_backup_and_restore_pitr) {
     CHECK_EQ(man.backend, std::string("pitr"));
     CHECK_EQ(man.entries.size(), size_t(2));
     // Back to entry 1: "second" is gone from the meta, its chunk becomes an orphan
-    RocksMetaStore::restore_physical(bk, man.plan(uint64_t{1}, std::nullopt).back().marker,
-                                     cfg.meta_path);
+    RocksMetaStore::restore_physical(bk, man.plan(uint64_t{1}, std::nullopt).back().marker, cfg.meta_path);
     {
         DuoStoreBackend b(cfg, pool);
         CHECK_EQ(get_body(b, "bkt", "first"), std::string("one"));

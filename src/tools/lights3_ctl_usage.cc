@@ -36,13 +36,10 @@ std::shared_ptr<ccmd::c_command> make_usage() {
             }
             run_admin(c, [&](SignedClient& cli) {
                 if (c->args().empty()) {
-                    std::string q = tenant.empty()
-                                        ? ""
-                                        : "tenant=" + util::aws_uri_encode(tenant, true);
+                    std::string q = tenant.empty() ? "" : "tenant=" + util::aws_uri_encode(tenant, true);
                     return finish(cli.get("/-/admin/usage", q), 200);
                 }
-                std::string path =
-                    "/-/admin/usage/" + util::aws_uri_encode(c->args().front(), true);
+                std::string path = "/-/admin/usage/" + util::aws_uri_encode(c->args().front(), true);
                 if (rescan) return finish(cli.post_empty(path + "/rescan"), 200);
                 return finish(cli.get(path, ""), 200);
             });

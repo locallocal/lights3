@@ -38,9 +38,8 @@ public:
     // static wins with a WARN). A missing .sys counts as empty; a malformed JSON
     // object is skipped with a WARN — a broken website entry must not block startup
     // (worst case one site serves 403, nothing is locked out, unlike credentials)
-    static Task<std::shared_ptr<WebsiteStore>> load(
-        std::shared_ptr<storage::IStorageBackend> backend,
-        std::vector<WebsiteBucket> static_entries);
+    static Task<std::shared_ptr<WebsiteStore>> load(std::shared_ptr<storage::IStorageBackend> backend,
+                                                    std::vector<WebsiteBucket> static_entries);
 
     ~WebsiteStore() { shutdown_background(); }
 
@@ -77,9 +76,9 @@ private:
     int sync_interval_sec_ = 0;
 
     mutable std::shared_mutex mu_;
-    std::vector<WebsiteBucket> static_entries_;            // as configured (names unique)
-    std::map<std::string, WebsiteBucket> dynamic_;         // bucket -> entry
-    Snapshot snap_;                                        // rebuilt after each mutation
+    std::vector<WebsiteBucket> static_entries_;     // as configured (names unique)
+    std::map<std::string, WebsiteBucket> dynamic_;  // bucket -> entry
+    Snapshot snap_;                                 // rebuilt after each mutation
     std::map<std::string, std::chrono::steady_clock::time_point> tombstones_;
     std::atomic<bool> sys_bucket_ready_{false};
 

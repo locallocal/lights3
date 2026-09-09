@@ -42,8 +42,7 @@ std::string encode_pack_delta(int64_t bytes, int64_t recs) {
 }
 
 std::pair<int64_t, int64_t> decode_pack_delta(std::string_view v) {
-    if (v.size() != 16)
-        throw S3Error(S3ErrorCode::InternalError, "duostore tikv meta: bad pack delta row");
+    if (v.size() != 16) throw S3Error(S3ErrorCode::InternalError, "duostore tikv meta: bad pack delta row");
     return {codec::decode_counter(v.substr(0, 8)), codec::decode_counter(v.substr(8, 8))};
 }
 
@@ -76,25 +75,21 @@ constexpr size_t kMaxObjectExtents = 200'000;
 void check_object_value(std::string_view k, size_t n_extents, size_t encoded_bytes) {
     if (n_extents <= kMaxObjectExtents && encoded_bytes <= kMaxObjectValueBytes) return;
     throw S3Error(S3ErrorCode::EntityTooLarge,
-                  "duostore tikv meta: object manifest too large for a single TiKV value (" +
-                      std::string(k) + ": " + std::to_string(n_extents) + " extents, " +
-                      std::to_string(encoded_bytes) + " bytes)");
+                  "duostore tikv meta: object manifest too large for a single TiKV value (" + std::string(k) + ": " +
+                      std::to_string(n_extents) + " extents, " + std::to_string(encoded_bytes) + " bytes)");
 }
 
 [[noreturn]] void throw_internal(const char* what, const std::string& detail) {
     LOG_ERROR("duostore tikv meta: {}: {}", what, detail);
-    throw S3Error(S3ErrorCode::InternalError,
-                  std::string("duostore tikv meta: ") + what + ": " + detail);
+    throw S3Error(S3ErrorCode::InternalError, std::string("duostore tikv meta: ") + what + ": " + detail);
 }
 
 [[noreturn]] void throw_no_bucket(std::string_view b) {
-    throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist",
-                  std::string(b));
+    throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", std::string(b));
 }
 
 [[noreturn]] void throw_no_upload(std::string_view id) {
-    throw S3Error(S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.",
-                  std::string(id));
+    throw S3Error(S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.", std::string(id));
 }
 
 // FNV-1a: guard shard hashing (§4.3). Only needs stable dispersion, not collision resistance
@@ -130,33 +125,27 @@ std::string TikvMetaStore::object_key(std::string_view b, std::string_view k) co
     return tkey('O', codec::object_key(b, k));
 }
 
-std::string TikvMetaStore::upload_key(std::string_view b, std::string_view k,
-                                      std::string_view id) const {
+std::string TikvMetaStore::upload_key(std::string_view b, std::string_view k, std::string_view id) const {
     return tkey('U', codec::upload_key(b, k, id));
 }
 
-std::string TikvMetaStore::upload_guard(std::string_view b, std::string_view k,
-                                        std::string_view id, uint32_t shard) const {
+std::string TikvMetaStore::upload_guard(std::string_view b, std::string_view k, std::string_view id,
+                                        uint32_t shard) const {
     std::string rest = codec::upload_key(b, k, id);
     rest += '\0';
     rest += char(shard);
     return tkey('u', rest);
 }
 
-std::string TikvMetaStore::part_key(std::string_view b, std::string_view k, std::string_view id,
-                                    int part_no) const {
+std::string TikvMetaStore::part_key(std::string_view b, std::string_view k, std::string_view id, int part_no) const {
     return tkey('P', codec::part_key(b, k, id, part_no));
 }
 
-std::string TikvMetaStore::refs_key(uint64_t file_id) const {
-    return tkey('R', codec::be64_key(file_id));
-}
+std::string TikvMetaStore::refs_key(uint64_t file_id) const { return tkey('R', codec::be64_key(file_id)); }
 
 std::string TikvMetaStore::gcq_key(uint64_t seq) const { return tkey('G', codec::be64_key(seq)); }
 
-std::string TikvMetaStore::counter_key(char kind) const {
-    return tkey('C', std::string_view(&kind, 1));
-}
+std::string TikvMetaStore::counter_key(char kind) const { return tkey('C', std::string_view(&kind, 1)); }
 
 std::string TikvMetaStore::pack_delta_key(uint64_t pack_id, uint64_t delta_id) const {
     std::string rest = codec::be64_key(pack_id);
@@ -171,11 +160,11 @@ std::string TikvMetaStore::pack_seal_key(uint64_t pack_id) const {
     return tkey('S', rest);
 }
 
-std::pair<std::string, std::string> TikvMetaStore::range_of(char tag,
-                                                            std::string_view rest) const {
+std::pair<std::string, std::string> TikvMetaStore::range_of(char tag, std::string_view rest) const {
     std::string lo = tkey(tag, rest);
     std::string hi = lo;
-    codec::bump_last_byte(hi);  // last key byte is never 0xff (guaranteed by table tag / composite segment construction)
+    codec::bump_last_byte(hi);  // last key byte is never 0xff (guaranteed by table tag / composite segment
+                                // construction)
     return {std::move(lo), std::move(hi)};
 }
 
@@ -219,8 +208,7 @@ auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
                     return true;
                 } catch (const TikvConflict& c) {
                     m_conflict_retries_->inc();  // count once per conflict retry round (T5 metric)
-                    if (attempt + 1 >= kMaxTxnRetries)
-                        throw_internal(what, "txn conflict storm: " + c.what);
+                    if (attempt + 1 >= kMaxTxnRetries) throw_internal(what, "txn conflict storm: " + c.what);
                     conflict_backoff(attempt);
                     return false;
                 }
@@ -245,16 +233,14 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
     m_conflict_retries_ = opt_.metrics.counter(
         "lights3_duostore_tikv_txn_conflict_retries_total",
         "Optimistic txn retries after WriteConflict/lock contention (one per retry round)");
-    m_safepoint_failures_ = opt_.metrics.counter(
-        "lights3_duostore_tikv_safepoint_update_failures_total",
-        "Failed GC safepoint update rounds (retried next tick)");
+    m_safepoint_failures_ = opt_.metrics.counter("lights3_duostore_tikv_safepoint_update_failures_total",
+                                                 "Failed GC safepoint update rounds (retried next tick)");
     m_safepoint_ms_ = opt_.metrics.gauge(
         "lights3_duostore_tikv_gc_safepoint_ms",
         "Cluster GC safepoint as of last successful push (unix ms, 0 until first push)");
 
-    client_owned_ = std::make_unique<TikvClient>(TikvOptions{opt_.pd_endpoints, opt_.ca_path,
-                                                             opt_.cert_path, opt_.key_path,
-                                                             opt_.backoff_budget_ms});
+    client_owned_ = std::make_unique<TikvClient>(
+        TikvOptions{opt_.pd_endpoints, opt_.ca_path, opt_.cert_path, opt_.key_path, opt_.backoff_budget_ms});
     client_.store(client_owned_.get(), std::memory_order_release);
     // Schema lineage check (§3.2): Insert expresses "first creation only". Multiple
     // gateways first-starting on the same prefix is a supported, legitimate race —
@@ -274,8 +260,7 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
         for (int attempt = 0;; ++attempt) {
             auto ts = client().get_ts();
             if (auto v = snap_get(ts, skey)) {
-                int64_t ver = parse_schema_marker(*v, /*lineage=*/"t", kSchemaCurrent,
-                                                  "duostore tikv meta");
+                int64_t ver = parse_schema_marker(*v, /*lineage=*/"t", kSchemaCurrent, "duostore tikv meta");
                 if (ver == kSchemaCurrent) return;
                 migrate_schema(ver);
                 return;
@@ -284,13 +269,12 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
                 client().commit(ts, {{TikvOp::kInsert, skey, marker}});
                 return;
             } catch (const TikvAlreadyExist&) {  // concurrent first creation succeeded; read and verify next round
-            } catch (const TikvConflict&) {  // concurrent first creation in progress
+            } catch (const TikvConflict&) {      // concurrent first creation in progress
                 m_conflict_retries_->inc();
             } catch (const TikvUndetermined&) {  // the write is a constant; re-read next round to decide
             }
             if (attempt + 1 >= kMaxTxnRetries)
-                throw S3Error(S3ErrorCode::InternalError,
-                              "duostore tikv meta: schema init did not converge");
+                throw S3Error(S3ErrorCode::InternalError, "duostore tikv meta: schema init did not converge");
             conflict_backoff(attempt);
         }
     });
@@ -308,12 +292,10 @@ TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {
                     update_gc_safepoint_once();
                 } catch (const std::exception& e) {
                     m_safepoint_failures_->inc();
-                    LOG_WARN("duostore tikv meta: gc safepoint push failed (retry next tick): {}",
-                             e.what());
+                    LOG_WARN("duostore tikv meta: gc safepoint push failed (retry next tick): {}", e.what());
                 }
                 lk.lock();
-                sp_cv_.wait_for(lk, std::chrono::seconds(opt_.gc_safepoint_interval_s),
-                                [this] { return sp_stop_; });
+                sp_cv_.wait_for(lk, std::chrono::seconds(opt_.gc_safepoint_interval_s), [this] { return sp_stop_; });
             }
         });
     }
@@ -358,8 +340,7 @@ uint64_t TikvMetaStore::update_gc_safepoint_once() {
     //    forever. PD forces infinite TTL for the gc_worker entry. Clusters shared with
     //    TiDB must disable this pusher (interval=0), otherwise it races writes with
     //    the real gc_worker (harmless under monotonic semantics but pointless)
-    uint64_t min_sp = client().update_service_gc_safepoint(
-        "gc_worker", std::numeric_limits<int64_t>::max(), target);
+    uint64_t min_sp = client().update_service_gc_safepoint("gc_worker", std::numeric_limits<int64_t>::max(), target);
     // 3) Push the cluster safepoint with the min: the min covers all live services
     //    (including external ones like BR/CDC), never passing any service's declared
     //    snapshot; PD is monotonic forward-only and returns the current value
@@ -412,8 +393,8 @@ std::optional<std::string> TikvMetaStore::snap_get(uint64_t ver, const std::stri
     }
 }
 
-std::vector<std::optional<std::string>> TikvMetaStore::snap_get_many(
-    uint64_t ver, const std::vector<std::string>& keys) {
+std::vector<std::optional<std::string>> TikvMetaStore::snap_get_many(uint64_t ver,
+                                                                     const std::vector<std::string>& keys) {
     try {
         return client().batch_get(ver, keys);
     } catch (const pingcap::Exception& e) {
@@ -433,8 +414,7 @@ void TikvMetaStore::scan_range(uint64_t ver, std::string lo, const std::string& 
     }
 }
 
-void TikvMetaStore::mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add,
-                             std::string_view owner) {
+void TikvMetaStore::mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add, std::string_view owner) {
     for (const auto& e : ref.extents) {
         if (e.kind == Extent::Kind::kPack) continue;  // pack liveness goes through the stats ledger (P2)
         if (add)
@@ -444,8 +424,8 @@ void TikvMetaStore::mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref
     }
 }
 
-void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref,
-                                   int sign, int64_t rec_overhead) {
+void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign,
+                                   int64_t rec_overhead) {
     // Aggregate multiple extents of the same pack first; one unique delta row per pack
     // (id pre-dispatched, the ledger entry is pure-write — read-modify-write of a
     // shared ledger row would make concurrent small-object PUT prewrites on the same
@@ -459,13 +439,11 @@ void TikvMetaStore::mut_pack_delta(std::vector<TikvMutation>& muts, const DataRe
     }
     for (const auto& [id, d] : agg) {
         uint64_t delta_id = alloc_id(kCtrPackDelta, pack_deltas_);
-        muts.push_back(
-            {TikvOp::kPut, pack_delta_key(id, delta_id), encode_pack_delta(d.first, d.second)});
+        muts.push_back({TikvOp::kPut, pack_delta_key(id, delta_id), encode_pack_delta(d.first, d.second)});
     }
 }
 
-void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref,
-                                    ReclaimReason reason) {
+void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref, ReclaimReason reason) {
     if (ref.extents.empty()) return;
     // Oversized DataRefs are split into multiple entries (docs/archive/gaps.md §2.11): keeps
     // GC per-batch decode memory bounded and a single gcq value away from the raft
@@ -477,7 +455,8 @@ void TikvMetaStore::enqueue_reclaim(std::vector<TikvMutation>& muts, const DataR
         Reclaim r;
         r.extents.assign(ref.extents.begin() + i, ref.extents.begin() + i + n);
         r.reason = reason;
-        uint64_t seq = alloc_id(kCtrSeq, seqs_);  // pre-dispatched (independent small txn); the ledger entry stays pure-write
+        uint64_t seq = alloc_id(kCtrSeq,
+                                seqs_);  // pre-dispatched (independent small txn); the ledger entry stays pure-write
         muts.push_back({TikvOp::kPut, gcq_key(seq), codec::encode_reclaim(r, ts)});
     }
 }
@@ -502,16 +481,13 @@ uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r, uint32_t n) {
     std::string ck = counter_key(kind);
     uint64_t hi;
     try {
-        hi = txn_retry(
-            "reserve id segment",
-            [&](uint64_t ts, std::vector<TikvMutation>& muts) -> uint64_t {
-                uint64_t cur = 0;
-                if (auto v = snap_get(ts, ck)) cur = uint64_t(codec::decode_counter(*v));
-                uint64_t next_hi = cur + kIdSegment;
-                muts.push_back(
-                    {TikvOp::kPut, ck, codec::encode_counter_delta(int64_t(next_hi))});
-                return next_hi;
-            });
+        hi = txn_retry("reserve id segment", [&](uint64_t ts, std::vector<TikvMutation>& muts) -> uint64_t {
+            uint64_t cur = 0;
+            if (auto v = snap_get(ts, ck)) cur = uint64_t(codec::decode_counter(*v));
+            uint64_t next_hi = cur + kIdSegment;
+            muts.push_back({TikvOp::kPut, ck, codec::encode_counter_delta(int64_t(next_hi))});
+            return next_hi;
+        });
     } catch (const UndeterminedCommit& u) {
         // An "outcome unknown" on the id-segment counter transaction only means a
         // segment of ids may be burned (holes are harmless), while the **outer
@@ -521,13 +497,13 @@ uint64_t TikvMetaStore::alloc_id(char kind, IdRange& r, uint32_t n) {
         // "business commit outcome unknown" and refuse to clean up already-written
         // data extents, creating needless orphans (docs/archive/gaps.md §3.9). Downgrade to
         // a deterministic failure
-        throw S3Error(S3ErrorCode::InternalError,
-                      std::string("duostore tikv meta: id segment reservation failed "
-                                  "(business txn not committed): ") +
-                          u.what());
+        throw S3Error(S3ErrorCode::InternalError, std::string("duostore tikv meta: id segment reservation failed "
+                                                              "(business txn not committed): ") +
+                                                      u.what());
     }
     std::lock_guard lk(alloc_mu_);
-    if (r.limit - r.next < n) {  // if someone else renewed and it suffices, use theirs; discard ours (holes harmless, as above)
+    if (r.limit - r.next < n) {  // if someone else renewed and it suffices, use theirs; discard ours (holes harmless,
+                                 // as above)
         r.limit = hi;
         r.next = hi - kIdSegment;
     }
@@ -540,8 +516,7 @@ uint64_t TikvMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
     // kRados and kChunk share a segment (same argument as the rocks version: refs are
     // accounted by raw file_id regardless of kind)
     if (kind == Extent::Kind::kRados) kind = Extent::Kind::kChunk;
-    return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack,
-                    file_ids_[size_t(kind)], n);
+    return alloc_id(kind == Extent::Kind::kChunk ? kCtrChunk : kCtrPack, file_ids_[size_t(kind)], n);
 }
 
 // ---------- bucket ----------
@@ -549,12 +524,12 @@ uint64_t TikvMetaStore::alloc_file_run(Extent::Kind kind, uint32_t n) {
 void TikvMetaStore::create_bucket(std::string_view b) {
     try {
         txn_retry("create_bucket", [&](uint64_t, std::vector<TikvMutation>& muts) {
-            // Insert expresses "must not exist" at the protocol level (§4.4) — no read needed; a key collision is a structured rejection
+            // Insert expresses "must not exist" at the protocol level (§4.4) — no read needed; a key collision is a
+            // structured rejection
             muts.push_back({TikvOp::kInsert, bucket_key(b), codec::encode_bucket(now_ms())});
         });
     } catch (const TikvAlreadyExist&) {
-        throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists",
-                      std::string(b));
+        throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists", std::string(b));
     }
 }
 
@@ -567,21 +542,19 @@ void TikvMetaStore::delete_bucket(std::string_view b) {
         for (char tag : {'O', 'U'}) {
             auto [lo, hi] = range_of(tag, std::string(b) + '\0');
             if (!client().scan(ts, lo, hi, 1).empty())
-                throw S3Error(S3ErrorCode::BucketNotEmpty,
-                              "The bucket you tried to delete is not empty", std::string(b));
+                throw S3Error(S3ErrorCode::BucketNotEmpty, "The bucket you tried to delete is not empty",
+                              std::string(b));
         }
         // Del the bucket + all guard shards: forms a write-write conflict with the
         // guard Locks of concurrent put_object/create_upload, materializing the
         // emptiness check's write skew (§4.3)
         muts.push_back({TikvOp::kDel, bucket_key(b), {}});
-        for (uint32_t s = 0; s < kGuardShards; ++s)
-            muts.push_back({TikvOp::kLock, bucket_guard(b, s), {}});
+        for (uint32_t s = 0; s < kGuardShards; ++s) muts.push_back({TikvOp::kLock, bucket_guard(b, s), {}});
     });
 }
 
 bool TikvMetaStore::bucket_exists(std::string_view b) {
-    return guarded("bucket_exists",
-                   [&] { return snap_get(client().get_ts(), bucket_key(b)).has_value(); });
+    return guarded("bucket_exists", [&] { return snap_get(client().get_ts(), bucket_key(b)).has_value(); });
 }
 
 std::vector<BucketInfo> TikvMetaStore::list_buckets() {
@@ -607,8 +580,7 @@ std::optional<ObjectRec> TikvMetaStore::get_object(std::string_view b, std::stri
     return get_object_at(guarded("get_object", [&] { return client().get_ts(); }), b, k);
 }
 
-std::optional<ObjectRec> TikvMetaStore::get_object_at(uint64_t ts, std::string_view b,
-                                                      std::string_view k) {
+std::optional<ObjectRec> TikvMetaStore::get_object_at(uint64_t ts, std::string_view b, std::string_view k) {
     return guarded("get_object", [&]() -> std::optional<ObjectRec> {
         auto v = snap_get(ts, object_key(b, k));
         if (!v) return std::nullopt;
@@ -624,8 +596,7 @@ std::optional<ObjectMeta> TikvMetaStore::head_object(std::string_view b, std::st
     });
 }
 
-void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec,
-                               PutCondition cond) {
+void TikvMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond) {
     txn_retry("put_object", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         std::string okey = object_key(b, k);
         auto vals = snap_get_many(ts, {bucket_key(b), okey});  // read all preconditions in one round trip
@@ -682,8 +653,7 @@ ListResult TikvMetaStore::list_objects(std::string_view b, const ListOptions& op
     return list_objects_at(guarded("list_objects", [&] { return client().get_ts(); }), b, opt);
 }
 
-ListResult TikvMetaStore::list_objects_at(uint64_t ts, std::string_view b,
-                                          const ListOptions& opt) {
+ListResult TikvMetaStore::list_objects_at(uint64_t ts, std::string_view b, const ListOptions& opt) {
     return guarded("list_objects", [&] {
         ListResult out;
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
@@ -693,7 +663,8 @@ ListResult TikvMetaStore::list_objects_at(uint64_t ts, std::string_view b,
         const std::string& prefix = opt.prefix;
         const std::string& delim = opt.delimiter;
 
-        // Simple cursor: page buffer + continuation (delimiter needs to change the seek point at will; a callback style doesn't fit)
+        // Simple cursor: page buffer + continuation (delimiter needs to change the seek point at will; a callback style
+        // doesn't fit)
         std::vector<std::pair<std::string, std::string>> page;
         size_t idx = 0;
         bool eof = false;
@@ -731,8 +702,7 @@ ListResult TikvMetaStore::list_objects_at(uint64_t ts, std::string_view b,
                     std::string glo = base + last_group;
                     std::string ghi = glo;
                     codec::bump_last_byte(ghi);
-                    if (auto tail = client().last_key(ts, glo, ghi))
-                        last_emitted = tail->substr(base.size());
+                    if (auto tail = client().last_key(ts, glo, ghi)) last_emitted = tail->substr(base.size());
                 }
                 out.next_token = last_emitted;
                 break;
@@ -762,8 +732,7 @@ ListResult TikvMetaStore::list_objects_at(uint64_t ts, std::string_view b,
 
 // ---------- multipart ----------
 
-std::string TikvMetaStore::create_upload(std::string_view b, std::string_view k,
-                                         ObjectMeta meta) {
+std::string TikvMetaStore::create_upload(std::string_view b, std::string_view k, ObjectMeta meta) {
     UploadRec rec;
     rec.upload_id = new_upload_id();
     rec.meta = std::move(meta);
@@ -771,16 +740,14 @@ std::string TikvMetaStore::create_upload(std::string_view b, std::string_view k,
     rec.initiated_ms = now_ms();
     txn_retry("create_upload", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
-        muts.push_back(
-            {TikvOp::kPut, upload_key(b, k, rec.upload_id), codec::encode_upload(rec)});
+        muts.push_back({TikvOp::kPut, upload_key(b, k, rec.upload_id), codec::encode_upload(rec)});
         // Guard: materializes the write skew of delete_bucket's emptiness check (§4.3, same as put_object)
         muts.push_back({TikvOp::kLock, bucket_guard(b, uint32_t(fnv1a(k) % kGuardShards)), {}});
     });
     return rec.upload_id;
 }
 
-UploadRec TikvMetaStore::require_upload(std::string_view b, std::string_view k,
-                                        std::string_view id) {
+UploadRec TikvMetaStore::require_upload(std::string_view b, std::string_view k, std::string_view id) {
     return guarded("require_upload", [&] {
         if (!is_valid_upload_id(id)) throw_no_upload(id);
         auto v = snap_get(client().get_ts(), upload_key(b, k, id));
@@ -789,8 +756,7 @@ UploadRec TikvMetaStore::require_upload(std::string_view b, std::string_view k,
     });
 }
 
-void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string_view id,
-                             PartRec p) {
+void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) {
     txn_retry("put_part", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         if (!is_valid_upload_id(id)) throw_no_upload(id);
         std::string pkey = part_key(b, k, id, p.part_no);
@@ -804,8 +770,7 @@ void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string
         // (§4.3); sharded by part_no, so concurrent uploads of different part numbers
         // within the same upload don't block each other (1/16 false-collision
         // probability, retries are cheap)
-        muts.push_back(
-            {TikvOp::kLock, upload_guard(b, k, id, uint32_t(p.part_no) % kGuardShards), {}});
+        muts.push_back({TikvOp::kLock, upload_guard(b, k, id, uint32_t(p.part_no) % kGuardShards), {}});
         mut_refs(muts, p.data, /*add=*/true, pkey);
         const int64_t ov = codec::pack_rec_overhead_part(b, k, id, p.part_no);
         mut_pack_delta(muts, p.data, +1, ov);
@@ -817,8 +782,8 @@ void TikvMetaStore::put_part(std::string_view b, std::string_view k, std::string
     });
 }
 
-std::vector<PartRec> TikvMetaStore::scan_parts(uint64_t ver, std::string_view b,
-                                               std::string_view k, std::string_view id) {
+std::vector<PartRec> TikvMetaStore::scan_parts(uint64_t ver, std::string_view b, std::string_view k,
+                                               std::string_view id) {
     std::vector<PartRec> out;
     auto [lo, hi] = range_of('P', codec::parts_prefix(b, k, id));
     size_t plen = opt_.prefix.size() + 1;
@@ -830,8 +795,7 @@ std::vector<PartRec> TikvMetaStore::scan_parts(uint64_t ver, std::string_view b,
     return out;  // be16 part_no guarantees ascending order
 }
 
-std::vector<PartRec> TikvMetaStore::list_parts(std::string_view b, std::string_view k,
-                                               std::string_view id) {
+std::vector<PartRec> TikvMetaStore::list_parts(std::string_view b, std::string_view k, std::string_view id) {
     return guarded("list_parts", [&] {
         uint64_t ts = client().get_ts();
         if (!is_valid_upload_id(id) || !snap_get(ts, upload_key(b, k, id))) throw_no_upload(id);
@@ -839,10 +803,8 @@ std::vector<PartRec> TikvMetaStore::list_parts(std::string_view b, std::string_v
     });
 }
 
-std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
-                                                   std::string_view key_marker,
-                                                   std::string_view id_marker, int limit,
-                                                   std::string_view prefix) {
+std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b, std::string_view key_marker,
+                                                    std::string_view id_marker, int limit, std::string_view prefix) {
     return guarded("list_uploads", [&] {
         uint64_t ts = client().get_ts();
         if (!snap_get(ts, bucket_key(b))) throw_no_bucket(b);
@@ -873,8 +835,7 @@ std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
             if (rest.substr(0, prefix.size()) != prefix) return false;  // past the prefix range
             auto sep = rest.rfind('\0');
             if (sep == std::string_view::npos) return true;
-            auto rec = codec::decode_upload(std::string(rest.substr(0, sep)),
-                                            std::string(rest.substr(sep + 1)), v);
+            auto rec = codec::decode_upload(std::string(rest.substr(0, sep)), std::string(rest.substr(sep + 1)), v);
             out.push_back({rec.meta.key, rec.upload_id, codec::from_unix_ms(rec.initiated_ms)});
             return true;
         });
@@ -886,8 +847,7 @@ std::vector<UploadInfo> TikvMetaStore::list_uploads(std::string_view b,
 // parts enter the write set (Del one by one) → conflicts with concurrent same-number
 // put_part are naturally checked by prewrite; new-number put_part is materialized by
 // the Ug guard
-std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view k,
-                                           std::string_view id,
+std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view k, std::string_view id,
                                            std::span<const PartInfo> parts) {
     return txn_retry("complete_upload", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         if (!is_valid_upload_id(id)) throw_no_upload(id);
@@ -907,10 +867,9 @@ std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view 
 
         std::string oval = codec::encode_object(rec);
         check_object_value(k, rec.data.extents.size(), oval.size());  // §2.12 fail-fast
-        muts.push_back({TikvOp::kPut, okey, std::move(oval)});  // primary
+        muts.push_back({TikvOp::kPut, okey, std::move(oval)});        // primary
         muts.push_back({TikvOp::kDel, upload_key(b, k, id), {}});
-        for (uint32_t s = 0; s < kGuardShards; ++s)
-            muts.push_back({TikvOp::kLock, upload_guard(b, k, id, s), {}});
+        for (uint32_t s = 0; s < kGuardShards; ++s) muts.push_back({TikvOp::kLock, upload_guard(b, k, id, s), {}});
         for (const auto& [no, p] : stored) {
             muts.push_back({TikvOp::kDel, part_key(b, k, id, no), {}});
             if (selected.count(no)) {
@@ -920,14 +879,12 @@ std::string TikvMetaStore::complete_upload(std::string_view b, std::string_view 
                 // out): guarantees a later object delete, deducting on the object
                 // basis, zeroes the ledger exactly
                 mut_refs(muts, p.data, /*add=*/true, okey);
-                mut_pack_delta(muts, p.data, -1,
-                               codec::pack_rec_overhead_part(b, k, id, no));
+                mut_pack_delta(muts, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
                 mut_pack_delta(muts, p.data, +1, codec::pack_rec_overhead(b, k));
             } else {  // unselected parts enter the GC ledger
                 enqueue_reclaim(muts, p.data, ReclaimReason::kComplete);
                 mut_refs(muts, p.data, /*add=*/false, {});
-                mut_pack_delta(muts, p.data, -1,
-                               codec::pack_rec_overhead_part(b, k, id, no));
+                mut_pack_delta(muts, p.data, -1, codec::pack_rec_overhead_part(b, k, id, no));
             }
         }
         if (old) {  // the old same-name object enters the GC ledger
@@ -943,22 +900,19 @@ void TikvMetaStore::abort_upload(std::string_view b, std::string_view k, std::st
     txn_retry("abort_upload", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         if (!is_valid_upload_id(id) || !snap_get(ts, upload_key(b, k, id))) throw_no_upload(id);
         muts.push_back({TikvOp::kDel, upload_key(b, k, id), {}});  // primary
-        for (uint32_t s = 0; s < kGuardShards; ++s)
-            muts.push_back({TikvOp::kLock, upload_guard(b, k, id, s), {}});
+        for (uint32_t s = 0; s < kGuardShards; ++s) muts.push_back({TikvOp::kLock, upload_guard(b, k, id, s), {}});
         for (const auto& p : scan_parts(ts, b, k, id)) {
             muts.push_back({TikvOp::kDel, part_key(b, k, id, p.part_no), {}});
             enqueue_reclaim(muts, p.data, ReclaimReason::kAbort);
             mut_refs(muts, p.data, /*add=*/false, {});
-            mut_pack_delta(muts, p.data, -1,
-                           codec::pack_rec_overhead_part(b, k, id, p.part_no));
+            mut_pack_delta(muts, p.data, -1, codec::pack_rec_overhead_part(b, k, id, p.part_no));
         }
     });
 }
 
 // ---------- GC accounting ----------
 
-std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t max,
-                                                                       uint64_t min_seq,
+std::vector<std::pair<uint64_t, Reclaim>> TikvMetaStore::peek_reclaims(size_t max, uint64_t min_seq,
                                                                        size_t max_extents) {
     return guarded("peek_reclaims", [&] {
         std::vector<std::pair<uint64_t, Reclaim>> out;
@@ -1018,8 +972,7 @@ bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
 // contention to arbitrate; TTL expiry is judged by wall clock exactly like
 // try_gc_lease. Rows written by builds before the write lease end after
 // expiry_ms; min_lease treats them as "write floor unknown"
-bool TikvMetaStore::publish_lease(std::string_view owner, const LeaseInfo& info,
-                                  int64_t ttl_ms) {
+bool TikvMetaStore::publish_lease(std::string_view owner, const LeaseInfo& info, int64_t ttl_ms) {
     txn_retry("publish_lease", [&](uint64_t, std::vector<TikvMutation>& muts) {
         std::string val = std::to_string(info.oldest_read_ms);
         val += '\0';
@@ -1056,9 +1009,7 @@ std::optional<LeaseInfo> TikvMetaStore::min_lease() {
             std::optional<int64_t> write;
             if (nul2 != std::string::npos) {
                 int64_t w = 0;
-                if (std::from_chars(v.data() + nul2 + 1, v.data() + v.size(), w).ec ==
-                    std::errc{})
-                    write = w;
+                if (std::from_chars(v.data() + nul2 + 1, v.data() + v.size(), w).ec == std::errc{}) write = w;
             }
             if (!write) write_unknown = true;
             if (!min) {
@@ -1066,8 +1017,7 @@ std::optional<LeaseInfo> TikvMetaStore::min_lease() {
                 return true;
             }
             min->oldest_read_ms = std::min(min->oldest_read_ms, read);
-            if (write && min->oldest_write_ms)
-                min->oldest_write_ms = std::min(*min->oldest_write_ms, *write);
+            if (write && min->oldest_write_ms) min->oldest_write_ms = std::min(*min->oldest_write_ms, *write);
             return true;
         });
     });
@@ -1146,7 +1096,8 @@ std::vector<PackStat> TikvMetaStore::pack_stats_at(uint64_t ver, bool fold) {
                 int64_t bytes = 0, recs = 0;
                 for (const auto& dk : a.delta_keys) {
                     auto v = snap_get(ts, dk);
-                    if (!v) {  // someone else already folded: give up (clear muts to avoid a half-way commit losing ledger entries)
+                    if (!v) {  // someone else already folded: give up (clear muts to avoid a half-way commit losing
+                               // ledger entries)
                         muts.clear();
                         return;
                     }
@@ -1156,8 +1107,7 @@ std::vector<PackStat> TikvMetaStore::pack_stats_at(uint64_t ver, bool fold) {
                     muts.push_back({TikvOp::kDel, dk, {}});
                 }
                 uint64_t delta_id = alloc_id(kCtrPackDelta, pack_deltas_);
-                muts.push_back({TikvOp::kPut, pack_delta_key(a.ps.pack_id, delta_id),
-                                encode_pack_delta(bytes, recs)});
+                muts.push_back({TikvOp::kPut, pack_delta_key(a.ps.pack_id, delta_id), encode_pack_delta(bytes, recs)});
             });
         } catch (const std::exception& e) {
             LOG_WARN("duostore tikv meta: pack {} fold skipped: {}", a.ps.pack_id, e.what());
@@ -1191,8 +1141,7 @@ void TikvMetaStore::drop_pack_stat(uint64_t pack_id) {
     });
 }
 
-bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k,
-                                 uint64_t expect_version, const DataRef& from,
+bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
                                  const DataRef& to) {
     return txn_retry("swap_extents", [&](uint64_t ts, std::vector<TikvMutation>& muts) {
         std::string okey = object_key(b, k);
@@ -1224,8 +1173,7 @@ bool TikvMetaStore::swap_extents(std::string_view b, std::string_view k,
 }
 
 bool TikvMetaStore::chunk_referenced(uint64_t file_id) {
-    return guarded("chunk_referenced",
-                   [&] { return snap_get(client().get_ts(), refs_key(file_id)).has_value(); });
+    return guarded("chunk_referenced", [&] { return snap_get(client().get_ts(), refs_key(file_id)).has_value(); });
 }
 
 void TikvMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
@@ -1235,8 +1183,7 @@ void TikvMetaStore::scan_refs(const std::function<void(uint64_t)>& cb) {
         auto [lo, hi] = range_of('R', {});
         const size_t suffix = codec::be64_key(0).size();
         scan_range(client().get_ts(), lo, hi, [&](const std::string& key, const std::string&) {
-            if (key.size() >= suffix)
-                cb(codec::parse_be64(std::string_view(key).substr(key.size() - suffix)));
+            if (key.size() >= suffix) cb(codec::parse_be64(std::string_view(key).substr(key.size() - suffix)));
             return true;
         });
         return 0;
@@ -1258,9 +1205,7 @@ public:
     ListResult list_objects(std::string_view b, const ListOptions& opt) override {
         return store_.list_objects_at(ver_, b, opt);
     }
-    std::vector<PackStat> pack_stats() override {
-        return store_.pack_stats_at(ver_, /*fold=*/false);
-    }
+    std::vector<PackStat> pack_stats() override { return store_.pack_stats_at(ver_, /*fold=*/false); }
 
 private:
     TikvMetaStore& store_;

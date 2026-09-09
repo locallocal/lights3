@@ -46,9 +46,7 @@ bool lower_hex(std::string_view s) {
 
 }  // namespace
 
-std::string TraceContext::traceparent() const {
-    return "00-" + trace_id + "-" + span_id + (sampled ? "-01" : "-00");
-}
+std::string TraceContext::traceparent() const { return "00-" + trace_id + "-" + span_id + (sampled ? "-01" : "-00"); }
 
 std::optional<TraceContext> TraceContext::parse(std::string_view tp, std::string_view ts) {
     // version(2)-trace_id(32)-span_id(16)-flags(2); a future version may append
@@ -60,14 +58,13 @@ std::optional<TraceContext> TraceContext::parse(std::string_view tp, std::string
     if (!lower_hex(version) || version == "ff") return std::nullopt;
     if (version == "00" && tp.size() != 55) return std::nullopt;
     if (tp.size() > 55 && tp[55] != '-') return std::nullopt;
-    if (!lower_hex_nonzero(trace) || !lower_hex_nonzero(span) || !lower_hex(flags))
-        return std::nullopt;
+    if (!lower_hex_nonzero(trace) || !lower_hex_nonzero(span) || !lower_hex(flags)) return std::nullopt;
     TraceContext c;
     c.trace_id = std::string(trace);
     c.parent_span_id = std::string(span);
     c.span_id = random_hex(8);  // this hop's own span
-    c.sampled = (flags[1] == '1' || flags[1] == '3' || flags[1] == '5' || flags[1] == '7' ||
-                 flags[1] == '9' || flags[1] == 'b' || flags[1] == 'd' || flags[1] == 'f');
+    c.sampled = (flags[1] == '1' || flags[1] == '3' || flags[1] == '5' || flags[1] == '7' || flags[1] == '9' ||
+                 flags[1] == 'b' || flags[1] == 'd' || flags[1] == 'f');
     c.tracestate = std::string(ts);
     c.inherited = true;
     return c;
@@ -80,8 +77,7 @@ TraceContext TraceContext::start() {
     return c;
 }
 
-TraceContext TraceContext::from_headers(std::optional<std::string> tp,
-                                        std::optional<std::string> ts) {
+TraceContext TraceContext::from_headers(std::optional<std::string> tp, std::optional<std::string> ts) {
     if (tp)
         if (auto c = parse(*tp, ts.value_or(""))) return *c;
     return start();

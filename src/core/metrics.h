@@ -50,8 +50,7 @@ private:
 // the +Inf last bucket); observe is lock-free
 class MetricHistogram {
 public:
-    explicit MetricHistogram(std::vector<double> bounds)
-        : bounds_(std::move(bounds)), buckets_(bounds_.size() + 1) {}
+    explicit MetricHistogram(std::vector<double> bounds) : bounds_(std::move(bounds)), buckets_(bounds_.size() + 1) {}
 
     void observe(double v) {
         size_t b = 0;
@@ -88,14 +87,13 @@ public:
     std::shared_ptr<MetricGauge> gauge(const std::string& name, const std::string& help,
                                        const MetricLabels& labels = {});
     std::shared_ptr<MetricHistogram> histogram(const std::string& name, const std::string& help,
-                                               std::vector<double> bounds,
-                                               const MetricLabels& labels = {});
+                                               std::vector<double> bounds, const MetricLabels& labels = {});
     // Callback gauge: pulls the instantaneous value at render time (queue-depth-style
     // metrics avoid a resident atomic); the callback runs on the rendering thread,
     // must be thread-safe on its own, and must not block. Later registration with
     // the same name and labels overrides the earlier one
-    void gauge_callback(const std::string& name, const std::string& help,
-                        std::function<double()> fn, const MetricLabels& labels = {});
+    void gauge_callback(const std::string& name, const std::string& help, std::function<double()> fn,
+                        const MetricLabels& labels = {});
 
     // Remove all series under a given label value (callback gauges included). Used
     // for rollback on wiring failure: an orphaned instance's callback closure holds
@@ -141,10 +139,9 @@ public:
     std::shared_ptr<MetricGauge> gauge(const std::string& name, const std::string& help,
                                        const MetricLabels& extra = {}) const;
     std::shared_ptr<MetricHistogram> histogram(const std::string& name, const std::string& help,
-                                               std::vector<double> bounds,
-                                               const MetricLabels& extra = {}) const;
-    void gauge_callback(const std::string& name, const std::string& help,
-                        std::function<double()> fn, const MetricLabels& extra = {}) const;
+                                               std::vector<double> bounds, const MetricLabels& extra = {}) const;
+    void gauge_callback(const std::string& name, const std::string& help, std::function<double()> fn,
+                        const MetricLabels& extra = {}) const;
 
     // Derive a child scope (e.g. the meta/data subcomponent dimension): base labels with extra appended
     MetricsScope with(const MetricLabels& extra) const;

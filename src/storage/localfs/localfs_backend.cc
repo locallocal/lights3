@@ -28,7 +28,6 @@ using s3::S3Error;
 using s3::S3ErrorCode;
 
 // On-disk primitives live in fs_util, shared with xlocalfs
-using fsutil::TmpFile;
 using fsutil::commit_object_file;
 using fsutil::load_manifest;
 using fsutil::next_tmp_name;
@@ -37,18 +36,18 @@ using fsutil::read_tsv;
 using fsutil::reject_reserved_key;
 using fsutil::require_upload;
 using fsutil::throw_errno;
+using fsutil::TmpFile;
 using fsutil::write_tsv;
 
-LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool,
-                               LocalFsOptions opt, MetricsScope metrics)
+LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<ThreadPool> pool, LocalFsOptions opt,
+                               MetricsScope metrics)
     : root_(std::move(root)), staging_(std::move(staging)), pool_(std::move(pool)), opt_(opt) {
     fs::create_directories(root_);
     fs::create_directories(staging_ / "put");
     fs::create_directories(staging_ / "mpu");
     init_metrics(metrics);
     commit_locks_.reserve(kLockStripes);
-    for (size_t i = 0; i < kLockStripes; ++i)
-        commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
+    for (size_t i = 0; i < kLockStripes; ++i) commit_locks_.push_back(std::make_unique<AsyncSemaphore>(1));
     // xattr capability probe (roadmap §3.5): staging shares root's filesystem (rename
     // atomicity), so a probe there answers for the whole layout. A negative result is
     // either fatal (require_xattr) or made visible on the metrics plane right away --
@@ -56,21 +55,20 @@ LocalFsBackend::LocalFsBackend(fs::path root, fs::path staging, std::shared_ptr<
     xattr_.required = opt_.require_xattr;
     if (int err = fsutil::probe_meta_xattr(staging_ / "put"); err != 0) {
         if (opt_.require_xattr)
-            throw std::runtime_error(
-                std::string("localfs: filesystem under ") + root_.string() +
-                " cannot store the metadata xattr (" + strerror(err) +
-                ") and require_xattr is set");
-        LOG_WARN("localfs: filesystem under {} has no usable xattr support ({}); object "
-                 "metadata runs sidecar-only (two-rename consistency model), see "
-                 "lights3_localfs_xattr_fallback",
-                 root_.string(), strerror(err));
+            throw std::runtime_error(std::string("localfs: filesystem under ") + root_.string() +
+                                     " cannot store the metadata xattr (" + strerror(err) +
+                                     ") and require_xattr is set");
+        LOG_WARN(
+            "localfs: filesystem under {} has no usable xattr support ({}); object "
+            "metadata runs sidecar-only (two-rename consistency model), see "
+            "lights3_localfs_xattr_fallback",
+            root_.string(), strerror(err));
         xattr_.note_failure();
     }
     cleanup_stale_uploads();
     schedule_periodic(mpu_timer_, opt_.mpu_ttl_sec > 0 ? opt_.mpu_scan_interval_sec : 0,
                       &LocalFsBackend::mpu_scan_task);
-    schedule_periodic(sidecar_timer_, opt_.sidecar_scan_interval_sec,
-                      &LocalFsBackend::sidecar_sweep_task);
+    schedule_periodic(sidecar_timer_, opt_.sidecar_scan_interval_sec, &LocalFsBackend::sidecar_sweep_task);
 }
 
 void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
@@ -79,16 +77,14 @@ void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
     // making "errors suddenly vanished" look identical to "never had errors".
     // An empty scope returns detached instances (non-null pointers), so the hot path never
     // checks for null
-    static constexpr std::array<const char*, kOpCount> kOpNames = {
-        "put", "get", "head", "delete", "list", "copy", "upload_part", "complete_mpu"};
+    static constexpr std::array<const char*, kOpCount> kOpNames = {"put",  "get",  "head",        "delete",
+                                                                   "list", "copy", "upload_part", "complete_mpu"};
     for (size_t i = 0; i < kOpCount; ++i) {
-        m_ops_[i] = metrics.counter("lights3_localfs_ops_total",
-                                    "Data-path operations finished (success and failure)",
+        m_ops_[i] = metrics.counter("lights3_localfs_ops_total", "Data-path operations finished (success and failure)",
                                     {{"op", kOpNames[i]}});
         m_op_errors_[i] = metrics.counter(
             "lights3_localfs_op_errors_total",
-            "Data-path operations that exited via an error (any exception, incl. client 4xx)",
-            {{"op", kOpNames[i]}});
+            "Data-path operations that exited via an error (any exception, incl. client 4xx)", {{"op", kOpNames[i]}});
     }
     // Latency is measured only for put/get/list: they cover the three cost shapes "disk
     // write, disk read, directory walk", enough to localize disk degradation; the other
@@ -96,32 +92,28 @@ void LocalFsBackend::init_metrics(const MetricsScope& metrics) {
     // /-/metrics
     for (Op op : {Op::kPut, Op::kGet, Op::kList})
         m_op_seconds_[size_t(op)] = metrics.histogram(
-            "lights3_localfs_op_seconds", "Wall time of a data-path operation",
-            {0.001, 0.005, 0.02, 0.1, 0.5, 2, 10}, {{"op", kOpNames[size_t(op)]}});
+            "lights3_localfs_op_seconds", "Wall time of a data-path operation", {0.001, 0.005, 0.02, 0.1, 0.5, 2, 10},
+            {{"op", kOpNames[size_t(op)]}});
     // roadmap §3.5: xattr degradation as a resident gauge (same rationale as
     // lights3_xlocalfs_uring_fallback -- a startup WARN vanishes with log rotation, a gauge
     // stays on the dashboard), plus the sweep and directory-cache counters
-    xattr_.fallback = metrics.gauge(
-        "lights3_localfs_xattr_fallback",
-        "1 = metadata xattr unavailable, objects rely on the sidecar (two-rename model)");
+    xattr_.fallback = metrics.gauge("lights3_localfs_xattr_fallback",
+                                    "1 = metadata xattr unavailable, objects rely on the sidecar (two-rename model)");
     xattr_.failures = metrics.counter("lights3_localfs_xattr_write_failures_total",
                                       "Object metadata xattr writes that failed");
     m_orphans_removed_ = metrics.counter("lights3_localfs_orphan_sidecars_removed_total",
                                          "Orphan sidecar files removed (listing + sweep)");
     dir_cache_ = std::make_unique<fsutil::DirListCache>(
         fsutil::DirListCache::Options{opt_.list_cache_entries, opt_.list_cache_min_dir_entries},
-        metrics.counter("lights3_localfs_list_dir_cache_total",
-                        "Listing directory-snapshot cache lookups", {{"result", "hit"}}),
-        metrics.counter("lights3_localfs_list_dir_cache_total",
-                        "Listing directory-snapshot cache lookups", {{"result", "miss"}}),
-        metrics.gauge("lights3_localfs_list_dir_cache_entries",
-                      "Directory entries resident in the listing cache"));
+        metrics.counter("lights3_localfs_list_dir_cache_total", "Listing directory-snapshot cache lookups",
+                        {{"result", "hit"}}),
+        metrics.counter("lights3_localfs_list_dir_cache_total", "Listing directory-snapshot cache lookups",
+                        {{"result", "miss"}}),
+        metrics.gauge("lights3_localfs_list_dir_cache_entries", "Directory entries resident in the listing cache"));
     // Object metadata cache (roadmap §3.8); metric family shared across backends
     // (lights3_meta_cache_*, distinguished by the backend label)
     meta_cache_ = std::make_unique<FsMetaCache>(
-        MetaCacheOptions{opt_.meta_cache_entries,
-                         std::chrono::seconds(std::max(0, opt_.meta_cache_ttl_sec))},
-        metrics);
+        MetaCacheOptions{opt_.meta_cache_entries, std::chrono::seconds(std::max(0, opt_.meta_cache_ttl_sec))}, metrics);
 }
 
 void LocalFsBackend::record_op(Op op, double secs, bool ok) {
@@ -146,19 +138,16 @@ Task<void> LocalFsBackend::close() {
 // for months without a restart would accumulate never-completed/aborted upload directories
 // without bound. Each task re-arms itself after completion (same as the duostore worker):
 // runs never overlap/pile up, a slow run just pushes back the next trigger
-void LocalFsBackend::schedule_periodic(TimerQueue::Id& id, int interval_sec,
-                                       Task<void> (LocalFsBackend::*fn)()) {
+void LocalFsBackend::schedule_periodic(TimerQueue::Id& id, int interval_sec, Task<void> (LocalFsBackend::*fn)()) {
     if (interval_sec <= 0) return;
     bg_.if_open([&] {
-        id = TimerQueue::instance().add(std::chrono::seconds(interval_sec),
-                                        [this, slot = &id, interval_sec, fn] {
-                                            bg_.spawn(run_periodic(slot, interval_sec, fn));
-                                        });
+        id = TimerQueue::instance().add(std::chrono::seconds(interval_sec), [this, slot = &id, interval_sec, fn] {
+            bg_.spawn(run_periodic(slot, interval_sec, fn));
+        });
     });
 }
 
-Task<void> LocalFsBackend::run_periodic(TimerQueue::Id* slot, int interval_sec,
-                                        Task<void> (LocalFsBackend::*fn)()) {
+Task<void> LocalFsBackend::run_periodic(TimerQueue::Id* slot, int interval_sec, Task<void> (LocalFsBackend::*fn)()) {
     // Two statements on purpose: GCC 15 ICEs (gimplify.cc gimple_add_tmp_var) on
     // co_await'ing a pointer-to-member call expression directly
     Task<void> run = (this->*fn)();
@@ -195,14 +184,11 @@ void LocalFsBackend::defer_sidecar(fs::path dest, ObjectMeta meta) {
 }
 
 AsyncSemaphore& LocalFsBackend::commit_lock(std::string_view bucket, std::string_view key) {
-    size_t h = std::hash<std::string_view>()(bucket) * 1315423911u ^
-               std::hash<std::string_view>()(key);
+    size_t h = std::hash<std::string_view>()(bucket) * 1315423911u ^ std::hash<std::string_view>()(key);
     return *commit_locks_[h % kLockStripes];
 }
 
-fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const {
-    return root_ / fs::path(std::string(bucket));
-}
+fs::path LocalFsBackend::bucket_dir(std::string_view bucket) const { return root_ / fs::path(std::string(bucket)); }
 
 fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view key) const {
     // Directory-marker object (docs/archive/gaps.md §6.3): "a/b/" has no corresponding file name
@@ -221,15 +207,13 @@ fs::path LocalFsBackend::object_path(std::string_view bucket, std::string_view k
     fs::path base = root_.lexically_normal();
     auto [it, _] = std::mismatch(base.begin(), base.end(), norm.begin(), norm.end());
     if (it != base.end())
-        throw S3Error(S3ErrorCode::InvalidBucketName,
-                      "The specified bucket is not valid.", std::string(bucket));
+        throw S3Error(S3ErrorCode::InvalidBucketName, "The specified bucket is not valid.", std::string(bucket));
     return p;
 }
 
 void LocalFsBackend::require_bucket(std::string_view bucket) const {
     if (!fs::exists(bucket_dir(bucket) / kBucketMarker))
-        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist",
-                      std::string(bucket));
+        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", std::string(bucket));
 }
 
 ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key) const {
@@ -240,9 +224,8 @@ ObjectMeta LocalFsBackend::load_meta(const fs::path& data_path, std::string key)
 
 // ---------- object metadata cache (roadmap §3.8) ----------
 
-ObjectMeta LocalFsBackend::meta_from_stat(std::string_view bucket, std::string_view key,
-                                          const fs::path& path, const struct stat& st,
-                                          const FsMetaCache::Token& tok,
+ObjectMeta LocalFsBackend::meta_from_stat(std::string_view bucket, std::string_view key, const fs::path& path,
+                                          const struct stat& st, const FsMetaCache::Token& tok,
                                           fsutil::TierInfo* tier_out) const {
     auto rec = std::make_shared<FsCachedMeta>();
     rec->meta = fsutil::load_object_meta_stat(path, std::string(key), st, &rec->tier);
@@ -260,8 +243,7 @@ Task<void> LocalFsBackend::create_bucket(std::string_view bucket) {
     co_await pool_->schedule();
     fs::path dir = bucket_dir(bucket);
     if (fs::exists(dir / kBucketMarker))
-        throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists",
-                      std::string(bucket));
+        throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists", std::string(bucket));
     std::error_code ec;
     fs::create_directories(dir, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "create bucket dir: " + ec.message());
@@ -292,8 +274,8 @@ Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
     fs::path dir = bucket_dir(bucket);
     for (auto& e : fs::directory_iterator(dir)) {
         if (e.path().filename() != kBucketMarker)
-            throw S3Error(S3ErrorCode::BucketNotEmpty,
-                          "The bucket you tried to delete is not empty", std::string(bucket));
+            throw S3Error(S3ErrorCode::BucketNotEmpty, "The bucket you tried to delete is not empty",
+                          std::string(bucket));
     }
     // The throwing overloads would leak filesystem_error (not an S3Error) straight through
     // as a 500; and if the directory cannot be removed after the marker is deleted (a
@@ -308,8 +290,7 @@ Task<void> LocalFsBackend::delete_bucket(std::string_view bucket) {
         // Non-empty directory means a concurrent write won the race: restore the marker so
         // the bucket stays visible, report NotEmpty
         std::ofstream marker(dir / kBucketMarker);
-        throw S3Error(S3ErrorCode::BucketNotEmpty,
-                      "The bucket you tried to delete is not empty", std::string(bucket));
+        throw S3Error(S3ErrorCode::BucketNotEmpty, "The bucket you tried to delete is not empty", std::string(bucket));
     }
     co_return;
 }
@@ -328,19 +309,16 @@ Task<std::vector<BucketInfo>> LocalFsBackend::list_buckets() {
         struct stat st{};
         fs::path marker = e.path() / kBucketMarker;
         if (::stat(marker.c_str(), &st) != 0) continue;
-        out.push_back({e.path().filename().string(),
-                       std::chrono::system_clock::from_time_t(st.st_mtime)});
+        out.push_back({e.path().filename().string(), std::chrono::system_clock::from_time_t(st.st_mtime)});
     }
-    std::sort(out.begin(), out.end(),
-              [](const BucketInfo& a, const BucketInfo& b) { return a.name < b.name; });
+    std::sort(out.begin(), out.end(), [](const BucketInfo& a, const BucketInfo& b) { return a.name < b.name; });
     co_return out;
 }
 
 // ---------- object ----------
 
-Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_view key,
-                                           ObjectMeta meta, http::BodyReader& body,
-                                           PutCondition cond) {
+Task<PutResult> LocalFsBackend::put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
+                                           http::BodyReader& body, PutCondition cond) {
     OpGuard g{this, Op::kPut};
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
@@ -421,15 +399,13 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
     int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
         require_bucket(bucket);  // NoSuchBucket takes precedence over NoSuchKey
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
     struct stat st{};
     if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(fd);
         require_bucket(bucket);
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     }
 
     ObjectStream out;
@@ -442,9 +418,7 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
         // same fstat; otherwise the authoritative read refills it
         FsMetaCache::Token tok;
         const FsMetaStamp stamp = FsMetaStamp::of(st);
-        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) {
-                return v.stamp == stamp;
-            })) {
+        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) { return v.stamp == stamp; })) {
             out.meta = c->meta;
             tier = c->tier;
         } else {
@@ -480,9 +454,9 @@ Task<ObjectStream> LocalFsBackend::get_object(std::string_view bucket, std::stri
 // in the kernel (direct page-cache copy; O(1) metadata clone on btrfs/xfs reflink).
 // Unavailable (cross-device EXDEV, old-kernel ENOSYS, filesystem EINVAL) returns nullopt
 // to fall back to the streaming path -- the fallback is semantically equivalent
-Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
-    std::string_view src_bucket, std::string_view src_key, std::string_view dst_bucket,
-    std::string_view dst_key, ObjectMeta meta) {
+Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(std::string_view src_bucket, std::string_view src_key,
+                                                                std::string_view dst_bucket, std::string_view dst_key,
+                                                                ObjectMeta meta) {
     // The nullopt fallback (mechanism unavailable / source concurrently shortened) is not
     // an error: the semantically equivalent streaming path takes over
     OpGuard g{this, Op::kCopy};
@@ -500,20 +474,17 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     fs::path src = object_path(src_bucket, src_key);
     fsutil::TierInfo tier;
     ObjectMeta sm = fsutil::load_object_meta(src, std::string(src_key), &tier);  // missing → NoSuchKey
-    if (tier.tier != fsutil::Tier::kLocal) {  // data not local (tiered stub)
+    if (tier.tier != fsutil::Tier::kLocal) {                                     // data not local (tiered stub)
         g.ok = true;
         co_return std::nullopt;
     }
 
     int sfd = ::open(src.c_str(), O_RDONLY);
-    if (sfd < 0)
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(src_key));
+    if (sfd < 0) throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(src_key));
     struct stat st{};
     if (::fstat(sfd, &st) != 0 || !S_ISREG(st.st_mode)) {
         ::close(sfd);
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(src_key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(src_key));
     }
 
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
@@ -529,8 +500,7 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
         if (n < 0) {
             // Failure before the first byte = mechanism unavailable → fall back; mid-way
             // failure is treated as an IO error
-            bool not_supported = (errno == EXDEV || errno == EINVAL || errno == ENOSYS ||
-                                  errno == EOPNOTSUPP) &&
+            bool not_supported = (errno == EXDEV || errno == EINVAL || errno == ENOSYS || errno == EOPNOTSUPP) &&
                                  in_off == 0;
             int err = errno;
             ::close(sfd);
@@ -541,7 +511,8 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
             errno = err;
             throw_errno("copy_file_range");
         }
-        if (n == 0) break;  // source truncated concurrently: go with what was actually copied (verified below via fstat)
+        if (n == 0)
+            break;  // source truncated concurrently: go with what was actually copied (verified below via fstat)
         remaining -= uint64_t(n);
     }
     ::close(sfd);
@@ -567,15 +538,13 @@ Task<std::optional<PutResult>> LocalFsBackend::copy_object_fast(
     co_return PutResult{meta.etag};
 }
 
-Task<std::optional<ObjectLayout>> LocalFsBackend::inspect_object(std::string_view bucket,
-                                                                 std::string_view key) {
+Task<std::optional<ObjectLayout>> LocalFsBackend::inspect_object(std::string_view bucket, std::string_view key) {
     require_bucket(bucket);
     co_await pool_->schedule();
     fs::path path = object_path(bucket, key);
-    struct stat st {};
+    struct stat st{};
     if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode))
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist.",
-                      std::string(key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist.", std::string(key));
     fsutil::TierInfo tier;
     ObjectMeta meta = fsutil::load_object_meta(path, std::string(key), &tier);
     ObjectLayout L;
@@ -589,9 +558,7 @@ Task<std::optional<ObjectLayout>> LocalFsBackend::inspect_object(std::string_vie
     a.emplace_back("content_type", meta.content_type);
     a.emplace_back("last_modified", util::iso8601(meta.last_modified));
     a.emplace_back("meta_xattr", fsutil::has_meta_xattr(path) ? "present" : "absent");
-    a.emplace_back("sidecar", fs::exists(fs::path(path.string() + fsutil::kSidecarSuffix))
-                                  ? "present"
-                                  : "absent");
+    a.emplace_back("sidecar", fs::exists(fs::path(path.string() + fsutil::kSidecarSuffix)) ? "present" : "absent");
     a.emplace_back("tier", tier.tier == fsutil::Tier::kLocal    ? "local"
                            : tier.tier == fsutil::Tier::kRemote ? "remote"
                                                                 : "cached");
@@ -599,8 +566,7 @@ Task<std::optional<ObjectLayout>> LocalFsBackend::inspect_object(std::string_vie
         a.emplace_back("remote_etag", tier.remote_etag);
         a.emplace_back("remote_at", tier.remote_at);
     }
-    L.extents.push_back({"file", static_cast<uint64_t>(st.st_ino), 0,
-                         static_cast<uint64_t>(st.st_size), 0});
+    L.extents.push_back({"file", static_cast<uint64_t>(st.st_ino), 0, static_cast<uint64_t>(st.st_size), 0});
     co_return L;
 }
 
@@ -635,17 +601,14 @@ Task<ObjectMeta> LocalFsBackend::head_object(std::string_view bucket, std::strin
     } else {
         present = ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
         const FsMetaStamp stamp = FsMetaStamp::of(st);
-        if (auto c = meta_cache_->lookup(bucket, key, &tok, [&](const FsCachedMeta& v) {
-                return present && v.stamp == stamp;
-            })) {
+        if (auto c = meta_cache_->lookup(bucket, key, &tok,
+                                         [&](const FsCachedMeta& v) { return present && v.stamp == stamp; })) {
             g.ok = true;
             co_return c->meta;
         }
     }
     require_bucket(bucket);
-    if (!present)
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
+    if (!present) throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     auto m = meta_from_stat(bucket, key, path, st, tok);
     g.ok = true;
     co_return m;
@@ -669,8 +632,7 @@ Task<void> LocalFsBackend::delete_object(std::string_view bucket, std::string_vi
     fs::remove(path, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "delete object: " + ec.message());
     fs::remove(path.string() + kSidecarSuffix, ec);
-    if (ec)
-        throw S3Error(S3ErrorCode::InternalError, "delete object sidecar: " + ec.message());
+    if (ec) throw S3Error(S3ErrorCode::InternalError, "delete object sidecar: " + ec.message());
     // Clean up empty parent directories up to the bucket root
     fs::path dir = path.parent_path(), root = bucket_dir(bucket);
     while (dir != root && dir.string().size() > root.string().size()) {
@@ -719,8 +681,7 @@ DirEntries read_dir_sorted(const fs::path& dir, std::vector<fs::path>* orphans) 
         }
         if (e.is_regular_file(tec)) es->push_back({std::move(name), false});
     }
-    std::sort(es->begin(), es->end(),
-              [](const DirEntry& a, const DirEntry& b) { return a.sort_key < b.sort_key; });
+    std::sort(es->begin(), es->end(), [](const DirEntry& a, const DirEntry& b) { return a.sort_key < b.sort_key; });
     if (!sidecars.empty()) {
         // Orphan sidecar detection: delete_object is a two-step "data first, then sidecar",
         // and a crash in between leaves an orphan that occupies space forever. Membership
@@ -728,9 +689,8 @@ DirEntries read_dir_sorted(const fs::path& dir, std::vector<fs::path>* orphans) 
         // file is the marker itself)
         auto has = [&](const std::string& data_name) {
             const std::string& sk = data_name == fsutil::kDirMarker ? std::string() : data_name;
-            auto it = std::lower_bound(
-                es->begin(), es->end(), sk,
-                [](const DirEntry& e, const std::string& k) { return e.sort_key < k; });
+            auto it = std::lower_bound(es->begin(), es->end(), sk,
+                                       [](const DirEntry& e, const std::string& k) { return e.sort_key < k; });
             return it != es->end() && !it->is_dir && it->sort_key == sk;
         };
         for (auto& sc : sidecars) {
@@ -797,8 +757,7 @@ struct ListWalker {
             return rel > start_after ? 0 : es.size();
         std::string_view tail(start_after);
         tail.remove_prefix(rel.size());
-        size_t i = std::partition_point(es.begin(), es.end(),
-                                        [&](const DirEntry& e) { return e.sort_key <= tail; }) -
+        size_t i = std::partition_point(es.begin(), es.end(), [&](const DirEntry& e) { return e.sort_key <= tail; }) -
                    es.begin();
         // The directory right before the boundary may be an ancestor of start_after (its
         // "name/" is a prefix of the tail): the marker lies inside it, keep descending
@@ -818,8 +777,7 @@ struct ListWalker {
             // longer than q and starts with q) we still need to descend
             if (!skip_prefix.empty()) {
                 if (q.compare(0, skip_prefix.size(), skip_prefix) == 0) continue;
-                if (!(e.is_dir && skip_prefix.compare(0, q.size(), q) == 0))
-                    skip_prefix.clear();
+                if (!(e.is_dir && skip_prefix.compare(0, q.size(), q) == 0)) skip_prefix.clear();
             }
             if (e.is_dir) {
                 if (!subtree_may_match(q)) continue;
@@ -853,8 +811,7 @@ std::string max_key_with_prefix(DirReader& reader, const fs::path& dir, const st
         if (e.is_dir) {
             // The whole subtree is inside the group (q starts with want), or the group
             // prefix passes through the subtree (want starts with q)
-            if (q.compare(0, want.size(), want) != 0 && want.compare(0, q.size(), q) != 0)
-                continue;
+            if (q.compare(0, want.size(), want) != 0 && want.compare(0, q.size(), q) != 0) continue;
             fs::path sub = dir / e.sort_key.substr(0, e.sort_key.size() - 1);
             auto r = max_key_with_prefix(reader, sub, q, want);
             if (!r.empty()) return r;
@@ -893,8 +850,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     // Prefix pruning: the part before the last '/' locates the starting directory
     // directly; if it doesn't exist there is no match
     std::string dir_rel;
-    if (auto slash = opt.prefix.rfind('/'); slash != std::string::npos)
-        dir_rel = opt.prefix.substr(0, slash + 1);
+    if (auto slash = opt.prefix.rfind('/'); slash != std::string::npos) dir_rel = opt.prefix.substr(0, slash + 1);
     fs::path start_dir = dir_rel.empty() ? base : base / fs::path(dir_rel);
     std::error_code ec;
     if (!fs::is_directory(start_dir, ec)) {
@@ -904,7 +860,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
 
     const std::string& delim = opt.delimiter;
     int count = 0;
-    std::string last_emitted;   // last emitted entry (key or group name)
+    std::string last_emitted;  // last emitted entry (key or group name)
     bool last_is_group = false;
     std::vector<std::string> page_keys;  // metadata is loaded after the walk, in parallel
 
@@ -950,8 +906,7 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
     };
     walker.walk(start_dir, dir_rel);
     co_await load_page_meta(base, page_keys, out.objects);
-    if (!reader.orphans.empty())
-        co_await reap_orphan_sidecars(std::string(bucket), std::move(reader.orphans));
+    if (!reader.orphans.empty()) co_await reap_orphan_sidecars(std::string(bucket), std::move(reader.orphans));
     g.ok = true;
     co_return out;
 }
@@ -959,22 +914,19 @@ Task<ListResult> LocalFsBackend::list_objects(std::string_view bucket, const Lis
 // roadmap §3.5 ①: one page = up to max_keys × (stat + getxattr), previously serial on a
 // single pool thread (2000+ syscalls behind one request). Strided fan-out over the pool;
 // results keep the walk order by index
-Task<void> LocalFsBackend::load_page_meta(const fs::path& base,
-                                          const std::vector<std::string>& keys,
+Task<void> LocalFsBackend::load_page_meta(const fs::path& base, const std::vector<std::string>& keys,
                                           std::vector<ObjectMeta>& out) {
     const size_t n = keys.size();
     if (n == 0) co_return;
     std::vector<std::optional<ObjectMeta>> metas(n);
     size_t stride = size_t(std::max(1, opt_.list_meta_concurrency));
-    stride = std::min({stride, pool_->size(),
-                       (n + kMinKeysPerMetaWorker - 1) / kMinKeysPerMetaWorker});
+    stride = std::min({stride, pool_->size(), (n + kMinKeysPerMetaWorker - 1) / kMinKeysPerMetaWorker});
     if (stride <= 1) {
         co_await load_meta_slice(base, keys, 0, 1, metas);  // already on a pool thread
     } else {
         std::vector<Task<void>> workers;
         workers.reserve(stride);
-        for (size_t w = 0; w < stride; ++w)
-            workers.push_back(load_meta_slice(base, keys, w, stride, metas));
+        for (size_t w = 0; w < stride; ++w) workers.push_back(load_meta_slice(base, keys, w, stride, metas));
         co_await when_all(std::move(workers));
         co_await pool_->schedule();  // when_all resumes on the last worker's thread; stay on the pool
     }
@@ -983,10 +935,8 @@ Task<void> LocalFsBackend::load_page_meta(const fs::path& base,
         if (m) out.push_back(std::move(*m));
 }
 
-Task<void> LocalFsBackend::load_meta_slice(const fs::path& base,
-                                           const std::vector<std::string>& keys, size_t first,
-                                           size_t stride,
-                                           std::vector<std::optional<ObjectMeta>>& metas) {
+Task<void> LocalFsBackend::load_meta_slice(const fs::path& base, const std::vector<std::string>& keys, size_t first,
+                                           size_t stride, std::vector<std::optional<ObjectMeta>>& metas) {
     if (stride > 1) co_await pool_->schedule();
     for (size_t i = first; i < keys.size(); i += stride) {
         try {
@@ -1037,8 +987,7 @@ Task<uint64_t> LocalFsBackend::run_sidecar_sweep_once() {
     if (!scope.ok()) co_return 0;
     uint64_t removed = 0, seen = 0, candidates = 0;
     std::error_code ec;
-    for (auto bit = fs::directory_iterator(root_, ec); !ec && bit != fs::directory_iterator();
-         bit.increment(ec)) {
+    for (auto bit = fs::directory_iterator(root_, ec); !ec && bit != fs::directory_iterator(); bit.increment(ec)) {
         std::error_code sec;
         if (bg_.closing()) break;
         if (!bit->is_directory(sec) || !fs::exists(bit->path() / kBucketMarker, sec)) continue;
@@ -1053,15 +1002,13 @@ Task<uint64_t> LocalFsBackend::run_sidecar_sweep_once() {
             if (!it->is_regular_file(tec)) continue;
             std::string name = it->path().filename().string();
             if (!name.ends_with(kSidecarSuffix)) continue;
-            fs::path data = it->path().parent_path() /
-                            name.substr(0, name.size() - std::strlen(kSidecarSuffix));
+            fs::path data = it->path().parent_path() / name.substr(0, name.size() - std::strlen(kSidecarSuffix));
             if (fs::exists(data, tec)) continue;
             ++candidates;
             try {
                 if (co_await reap_orphan_sidecar(bucket, it->path())) ++removed;
             } catch (const std::exception& e) {
-                LOG_WARN("localfs: sweep: orphan sidecar {} not removed: {}", it->path().string(),
-                         e.what());
+                LOG_WARN("localfs: sweep: orphan sidecar {} not removed: {}", it->path().string(), e.what());
             }
         }
         if (wec) LOG_WARN("localfs: sweep {}: directory walk failed: {}", bucket, wec.message());
@@ -1073,8 +1020,7 @@ Task<uint64_t> LocalFsBackend::run_sidecar_sweep_once() {
     co_return removed;
 }
 
-Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::string_view key,
-                                              std::string tagging) {
+Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
@@ -1099,8 +1045,7 @@ Task<void> LocalFsBackend::set_object_tagging(std::string_view bucket, std::stri
 // is durable (complete trusts .md5 without recomputing the checksum, and that trust
 // requires this ordering)
 
-Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
-                                                   std::string_view key, ObjectMeta meta) {
+Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     validate_fs_object_key(key);
@@ -1115,11 +1060,8 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
     if (ec) throw S3Error(S3ErrorCode::InternalError, "create mpu dir: " + ec.message());
 
     std::vector<std::pair<std::string, std::string>> kv{
-        {"bucket", std::string(bucket)},
-        {"key", std::string(key)},
-        {"content_type", meta.content_type}};
-    if (!meta.checksum_algorithm.empty())
-        kv.emplace_back("checksum_algorithm", meta.checksum_algorithm);
+        {"bucket", std::string(bucket)}, {"key", std::string(key)}, {"content_type", meta.content_type}};
+    if (!meta.checksum_algorithm.empty()) kv.emplace_back("checksum_algorithm", meta.checksum_algorithm);
     // First-class metadata must also survive create→complete (docs/archive/gaps.md §5.2); key
     // names share their source with the sidecar
     for (auto& f : kStdMetaFields)
@@ -1129,15 +1071,13 @@ Task<std::string> LocalFsBackend::create_multipart(std::string_view bucket,
     co_return id;
 }
 
-Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string_view key,
-                                            std::string_view upload_id, int part_no,
-                                            http::BodyReader& body,
+Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id,
+                                            int part_no, http::BodyReader& body,
                                             const std::optional<PartChecksum>& checksum) {
     OpGuard g{this, Op::kUploadPart};
     validate_part_number(part_no);
     co_await pool_->schedule();
-    auto up = require_upload(staging_, bucket, key, upload_id,
-                             load_manifest(staging_, upload_id));
+    auto up = require_upload(staging_, bucket, key, upload_id, load_manifest(staging_, upload_id));
 
     // Stream into a staging tmp file, computing the part MD5 as we write (same as PUT)
     TmpFile tmp{staging_ / "put" / next_tmp_name()};
@@ -1179,8 +1119,7 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
     if (ec) {
         // The upload may have been aborted (directory removed) while the body was being read
         if (!fs::exists(up.dir))
-            throw S3Error(S3ErrorCode::NoSuchUpload,
-                          "The specified multipart upload does not exist.",
+            throw S3Error(S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.",
                           std::string(upload_id));
         throw S3Error(S3ErrorCode::InternalError, "rename part failed");
     }
@@ -1198,15 +1137,12 @@ Task<PutResult> LocalFsBackend::upload_part(std::string_view bucket, std::string
     co_return PutResult{etag};
 }
 
-Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
-                                                   std::string_view key,
-                                                   std::string_view upload_id,
-                                                   std::span<const PartInfo> parts) {
+Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket, std::string_view key,
+                                                   std::string_view upload_id, std::span<const PartInfo> parts) {
     OpGuard g{this, Op::kCompleteMpu};
     validate_part_order(parts);
     co_await pool_->schedule();
-    auto up = require_upload(staging_, bucket, key, upload_id,
-                             load_manifest(staging_, upload_id));
+    auto up = require_upload(staging_, bucket, key, upload_id, load_manifest(staging_, upload_id));
     require_bucket(bucket);
 
     // 1. Validate every declared part: exists and ETag matches
@@ -1219,12 +1155,14 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
         std::string stored;
         PartDigest digest;
         for (auto& [k, v] : read_tsv(up.dir / (name + ".md5"))) {
-            if (k == "md5") stored = v;
-            else if (k == "checksum_algorithm") digest.algorithm = v;
-            else if (k == "checksum_value") digest.value = v;
+            if (k == "md5")
+                stored = v;
+            else if (k == "checksum_algorithm")
+                digest.algorithm = v;
+            else if (k == "checksum_value")
+                digest.value = v;
         }
-        if (stored.empty() || !fs::exists(up.dir / name) ||
-            stored != strip_etag_quotes(p.etag))
+        if (stored.empty() || !fs::exists(up.dir / name) || stored != strip_etag_quotes(p.etag))
             throw S3Error(S3ErrorCode::InvalidPart,
                           "One or more of the specified parts could not be found or the "
                           "ETag did not match.",
@@ -1299,11 +1237,9 @@ Task<PutResult> LocalFsBackend::complete_multipart(std::string_view bucket,
     co_return result;
 }
 
-Task<void> LocalFsBackend::abort_multipart(std::string_view bucket, std::string_view key,
-                                           std::string_view upload_id) {
+Task<void> LocalFsBackend::abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) {
     co_await pool_->schedule();
-    auto up = require_upload(staging_, bucket, key, upload_id,
-                             load_manifest(staging_, upload_id));
+    auto up = require_upload(staging_, bucket, key, upload_id, load_manifest(staging_, upload_id));
     std::error_code ec;
     fs::remove_all(up.dir, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "remove mpu dir: " + ec.message());
@@ -1311,11 +1247,9 @@ Task<void> LocalFsBackend::abort_multipart(std::string_view bucket, std::string_
 }
 
 Task<ListPartsResult> LocalFsBackend::list_parts(std::string_view bucket, std::string_view key,
-                                                 std::string_view upload_id,
-                                                 const ListPartsOptions& opt) {
+                                                 std::string_view upload_id, const ListPartsOptions& opt) {
     co_await pool_->schedule();
-    auto up = require_upload(staging_, bucket, key, upload_id,
-                             load_manifest(staging_, upload_id));
+    auto up = require_upload(staging_, bucket, key, upload_id, load_manifest(staging_, upload_id));
     // Directory enumeration is unordered: first collect and sort only the part numbers,
     // then stat + read .md5 only for **this page's** entries. Previously every part got a
     // stat and a sidecar read, wasting 9999 of them per page turn
@@ -1334,8 +1268,7 @@ Task<ListPartsResult> LocalFsBackend::list_parts(std::string_view bucket, std::s
     std::sort(nos.begin(), nos.end());
     // Fetch one extra to determine is_truncated, then hand off to apply_parts_page for the
     // uniform trim
-    if (opt.max_parts > 0 && nos.size() > size_t(opt.max_parts) + 1)
-        nos.resize(size_t(opt.max_parts) + 1);
+    if (opt.max_parts > 0 && nos.size() > size_t(opt.max_parts) + 1) nos.resize(size_t(opt.max_parts) + 1);
     std::vector<PartMeta> out;
     for (int no : nos) {
         std::string name = part_file_name(no);
@@ -1343,18 +1276,20 @@ Task<ListPartsResult> LocalFsBackend::list_parts(std::string_view bucket, std::s
         if (::stat((up.dir / name).c_str(), &st) != 0) continue;
         std::string etag, calgo, cval;
         for (auto& [k, v] : read_tsv(up.dir / (name + ".md5"))) {
-            if (k == "md5") etag = v;
-            else if (k == "checksum_algorithm") calgo = v;
-            else if (k == "checksum_value") cval = v;
+            if (k == "md5")
+                etag = v;
+            else if (k == "checksum_algorithm")
+                calgo = v;
+            else if (k == "checksum_value")
+                cval = v;
         }
-        out.push_back({no, static_cast<uint64_t>(st.st_size), etag,
-                       std::chrono::system_clock::from_time_t(st.st_mtime), calgo, cval});
+        out.push_back({no, static_cast<uint64_t>(st.st_size), etag, std::chrono::system_clock::from_time_t(st.st_mtime),
+                       calgo, cval});
     }
     co_return apply_parts_page(std::move(out), opt);
 }
 
-Task<ListUploadsResult> LocalFsBackend::list_multipart_uploads(std::string_view bucket,
-                                                               const ListUploadsOptions& opt) {
+Task<ListUploadsResult> LocalFsBackend::list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) {
     co_await pool_->schedule();
     require_bucket(bucket);
     // mpu is a single flat directory shared by the whole instance: knowing which bucket an
@@ -1368,8 +1303,10 @@ Task<ListUploadsResult> LocalFsBackend::list_multipart_uploads(std::string_view 
         std::string id = e.path().filename().string();
         std::string m_bucket, m_key;
         for (auto& [k, v] : read_tsv(e.path() / "manifest")) {
-            if (k == "bucket") m_bucket = v;
-            else if (k == "key") m_key = v;
+            if (k == "bucket")
+                m_bucket = v;
+            else if (k == "key")
+                m_key = v;
         }
         if (m_bucket != bucket) continue;
         struct stat st{};
@@ -1391,13 +1328,10 @@ void LocalFsBackend::cleanup_stale_uploads() {
         if (!e.is_directory()) continue;
         std::error_code tec;
         fs::path manifest = e.path() / "manifest";
-        auto t = fs::exists(manifest, tec) ? fs::last_write_time(manifest, tec)
-                                           : fs::last_write_time(e.path(), tec);
+        auto t = fs::exists(manifest, tec) ? fs::last_write_time(manifest, tec) : fs::last_write_time(e.path(), tec);
         if (tec || now - t <= std::chrono::seconds(opt_.mpu_ttl_sec)) continue;
         fs::remove_all(e.path(), tec);
-        if (!tec)
-            LOG_INFO("localfs: removed stale multipart upload {}",
-                     e.path().filename().string());
+        if (!tec) LOG_INFO("localfs: removed stale multipart upload {}", e.path().filename().string());
     }
 }
 
@@ -1414,35 +1348,32 @@ Task<FsScrubStats> LocalFsBackend::run_scrub_once(FsScrubOptions opt) {
     ScrubThrottle throttle(opt.max_bytes_per_sec, pool_, [this] { return bg_.closing(); });
     std::vector<uint8_t> buf(256 << 10);
     std::error_code ec;
-    for (auto it = fs::directory_iterator(root_, ec); !ec && it != fs::directory_iterator();
-         it.increment(ec)) {
+    for (auto it = fs::directory_iterator(root_, ec); !ec && it != fs::directory_iterator(); it.increment(ec)) {
         if (st.aborted || bg_.closing()) {
             st.aborted = true;
             break;
         }
         std::error_code sec;
-        if (!it->is_directory(sec) || !fs::exists(it->path() / fsutil::kBucketMarker, sec))
-            continue;
+        if (!it->is_directory(sec) || !fs::exists(it->path() / fsutil::kBucketMarker, sec)) continue;
         co_await scrub_bucket(it->path().filename().string(), it->path(), throttle, buf, st);
     }
     if (ec) {
         ++st.read_errors;
         LOG_ERROR("localfs: scrub: root enumeration failed: {}", ec.message());
     }
-    LOG_INFO("localfs: scrub{}: {} objects, {} bytes read; mismatches {}, read errors {}, "
-             "unverifiable {}, stubs skipped {}, races skipped {}, orphan sidecars {}",
-             st.aborted ? " (aborted)" : "", st.objects_scanned, st.bytes_read,
-             st.etag_mismatches, st.read_errors, st.unverifiable, st.skipped_stubs,
-             st.skipped_races, st.orphan_sidecars);
+    LOG_INFO(
+        "localfs: scrub{}: {} objects, {} bytes read; mismatches {}, read errors {}, "
+        "unverifiable {}, stubs skipped {}, races skipped {}, orphan sidecars {}",
+        st.aborted ? " (aborted)" : "", st.objects_scanned, st.bytes_read, st.etag_mismatches, st.read_errors,
+        st.unverifiable, st.skipped_stubs, st.skipped_races, st.orphan_sidecars);
     co_return st;
 }
 
-Task<void> LocalFsBackend::scrub_bucket(const std::string& bucket, const fs::path& dir,
-                                        ScrubThrottle& throttle, std::vector<uint8_t>& buf,
-                                        FsScrubStats& st) {
+Task<void> LocalFsBackend::scrub_bucket(const std::string& bucket, const fs::path& dir, ScrubThrottle& throttle,
+                                        std::vector<uint8_t>& buf, FsScrubStats& st) {
     std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(dir, ec);
-         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+    for (auto it = fs::recursive_directory_iterator(dir, ec); !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
         if (bg_.closing()) {
             st.aborted = true;
             co_return;
@@ -1455,8 +1386,7 @@ Task<void> LocalFsBackend::scrub_bucket(const std::string& bucket, const fs::pat
         if (name.ends_with(fsutil::kSidecarSuffix)) {
             // Delete crashes leave "sidecar without data"; listing self-heals
             // only directories it visits, so the scrub reports the leftovers
-            fs::path data = p.parent_path() /
-                            name.substr(0, name.size() - strlen(fsutil::kSidecarSuffix));
+            fs::path data = p.parent_path() / name.substr(0, name.size() - strlen(fsutil::kSidecarSuffix));
             if (!fs::exists(data, sec)) {
                 ++st.orphan_sidecars;
                 LOG_WARN("localfs: scrub {}: orphan sidecar {}", bucket, p.string());
@@ -1466,9 +1396,7 @@ Task<void> LocalFsBackend::scrub_bucket(const std::string& bucket, const fs::pat
         std::string rel = fs::relative(p, dir, sec).generic_string();
         if (sec) continue;
         // Directory-marker file maps back to the trailing-slash key it stands for
-        std::string key = name == fsutil::kDirMarker
-                              ? rel.substr(0, rel.size() - strlen(fsutil::kDirMarker))
-                              : rel;
+        std::string key = name == fsutil::kDirMarker ? rel.substr(0, rel.size() - strlen(fsutil::kDirMarker)) : rel;
         co_await scrub_object(bucket, key, p, throttle, buf, st);
     }
     if (ec) {
@@ -1477,9 +1405,8 @@ Task<void> LocalFsBackend::scrub_bucket(const std::string& bucket, const fs::pat
     }
 }
 
-Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::string& key,
-                                        const fs::path& path, ScrubThrottle& throttle,
-                                        std::vector<uint8_t>& buf, FsScrubStats& st) {
+Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::string& key, const fs::path& path,
+                                        ScrubThrottle& throttle, std::vector<uint8_t>& buf, FsScrubStats& st) {
     int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         if (errno != ENOENT) {  // ENOENT = deleted mid-walk, not a finding
@@ -1528,12 +1455,12 @@ Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::st
             uint64_t declared_parts = strtoull(meta.etag.c_str() + dash + 1, nullptr, 10);
             uint64_t sum = 0;
             for (uint64_t s : meta.part_sizes) sum += s;
-            if (meta.part_sizes.empty() || meta.part_sizes.size() != declared_parts ||
-                sum != uint64_t(sb.st_size)) {
+            if (meta.part_sizes.empty() || meta.part_sizes.size() != declared_parts || sum != uint64_t(sb.st_size)) {
                 ++st.unverifiable;
-                LOG_WARN("localfs: scrub {}/{}: multipart ETag without a usable part layout "
-                         "(legacy object), cannot verify",
-                         bucket, key);
+                LOG_WARN(
+                    "localfs: scrub {}/{}: multipart ETag without a usable part layout "
+                    "(legacy object), cannot verify",
+                    bucket, key);
                 co_return;
             }
             std::vector<std::string> md5s;
@@ -1555,21 +1482,20 @@ Task<void> LocalFsBackend::scrub_object(const std::string& bucket, const std::st
     // The metadata is read by path while the content hash used the fd: a
     // concurrent overwrite between the two is a torn snapshot, not corruption
     struct stat sb2{};
-    if (::stat(path.c_str(), &sb2) != 0 || sb2.st_ino != sb.st_ino ||
-        sb2.st_size != sb.st_size || sb2.st_mtim.tv_sec != sb.st_mtim.tv_sec ||
-        sb2.st_mtim.tv_nsec != sb.st_mtim.tv_nsec) {
+    if (::stat(path.c_str(), &sb2) != 0 || sb2.st_ino != sb.st_ino || sb2.st_size != sb.st_size ||
+        sb2.st_mtim.tv_sec != sb.st_mtim.tv_sec || sb2.st_mtim.tv_nsec != sb.st_mtim.tv_nsec) {
         ++st.skipped_races;
         co_return;
     }
     ++st.etag_mismatches;
-    LOG_ERROR("localfs: scrub {}/{}: ETag mismatch (stored {}, computed {}) — silent data "
-              "corruption",
-              bucket, key, meta.etag, computed);
+    LOG_ERROR(
+        "localfs: scrub {}/{}: ETag mismatch (stored {}, computed {}) — silent data "
+        "corruption",
+        bucket, key, meta.etag, computed);
 }
 
-Task<std::string> LocalFsBackend::md5_range(int fd, uint64_t off, uint64_t len,
-                                            ScrubThrottle& throttle, std::vector<uint8_t>& buf,
-                                            FsScrubStats& st) {
+Task<std::string> LocalFsBackend::md5_range(int fd, uint64_t off, uint64_t len, ScrubThrottle& throttle,
+                                            std::vector<uint8_t>& buf, FsScrubStats& st) {
     util::HashStream md5(util::HashStream::Algo::Md5);
     while (len > 0 && !st.aborted) {  // an aborted multipart verify skips its remaining parts
         // Hop per buffer like FdStreamReader: a full-store scrub must not sit

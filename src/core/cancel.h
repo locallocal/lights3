@@ -91,8 +91,7 @@ public:
     // resume in the window "after registration, before the writes land", making
     // those writes race with the consumer's reads
     uint64_t add_callback_publish(std::function<void()> fn, std::atomic<uint64_t>& out_id,
-                                  std::shared_ptr<CancelState>& out_state,
-                                  std::shared_ptr<CancelState> self) {
+                                  std::shared_ptr<CancelState>& out_state, std::shared_ptr<CancelState> self) {
         std::lock_guard lk(m_);
         if (cancelled_.load(std::memory_order_relaxed)) {
             out_id.store(0, std::memory_order_release);
@@ -115,8 +114,7 @@ public:
         if (id == 0) return;
         std::unique_lock lk(m_);
         callbacks_.erase(id);
-        if (firing_ && firing_thread_ != std::this_thread::get_id())
-            fired_cv_.wait(lk, [&] { return !firing_; });
+        if (firing_ && firing_thread_ != std::this_thread::get_id()) fired_cv_.wait(lk, [&] { return !firing_; });
     }
 
 private:
@@ -137,10 +135,8 @@ private:
 class CancelRegistration {
 public:
     CancelRegistration() = default;
-    CancelRegistration(std::shared_ptr<detail::CancelState> s, uint64_t id)
-        : state_(std::move(s)), id_(id) {}
-    CancelRegistration(CancelRegistration&& o) noexcept
-        : state_(std::move(o.state_)), id_(std::exchange(o.id_, 0)) {}
+    CancelRegistration(std::shared_ptr<detail::CancelState> s, uint64_t id) : state_(std::move(s)), id_(id) {}
+    CancelRegistration(CancelRegistration&& o) noexcept : state_(std::move(o.state_)), id_(std::exchange(o.id_, 0)) {}
     CancelRegistration& operator=(CancelRegistration&& o) noexcept {
         if (this != &o) {
             reset();

@@ -71,8 +71,7 @@ std::string label_str(const MetricLabels& labels) {
 
 // Series name + labels: name{...}; histogram bucket lines append le after the
 // existing labels via the extra parameter
-std::string series(const std::string& name, const std::string& labels,
-                   const std::string& extra = "") {
+std::string series(const std::string& name, const std::string& labels, const std::string& extra = "") {
     std::string all = labels;
     if (!extra.empty()) {
         if (!all.empty()) all += ',';
@@ -83,9 +82,12 @@ std::string series(const std::string& name, const std::string& labels,
 
 const char* kind_str(int k) {
     switch (k) {
-        case 0: return "counter";
-        case 1: return "gauge";
-        default: return "histogram";
+        case 0:
+            return "counter";
+        case 1:
+            return "gauge";
+        default:
+            return "histogram";
     }
 }
 
@@ -100,27 +102,23 @@ MetricHistogram::Snapshot MetricHistogram::snapshot() const {
     return s;
 }
 
-MetricsRegistry::Family& MetricsRegistry::family_of(const std::string& name, Kind kind,
-                                                    const std::string& help) {
+MetricsRegistry::Family& MetricsRegistry::family_of(const std::string& name, Kind kind, const std::string& help) {
     auto [it, inserted] = families_.try_emplace(name);
     if (inserted) {
         it->second.kind = kind;
         it->second.help = help;
     } else if (it->second.kind != kind) {
-        throw std::runtime_error("metric '" + name + "' re-registered as " +
-                                 kind_str(int(kind)) + ", was " +
+        throw std::runtime_error("metric '" + name + "' re-registered as " + kind_str(int(kind)) + ", was " +
                                  kind_str(int(it->second.kind)));
     } else if (!help.empty() && it->second.help != help) {
         // Keep the first help (a family renders only one # HELP line), but no longer
         // silently (docs/archive/gaps.md §4)
-        LOG_WARN("metric '{}' re-registered with different help text; keeping the first",
-                 name);
+        LOG_WARN("metric '{}' re-registered with different help text; keeping the first", name);
     }
     return it->second;
 }
 
-std::shared_ptr<MetricCounter> MetricsRegistry::counter(const std::string& name,
-                                                        const std::string& help,
+std::shared_ptr<MetricCounter> MetricsRegistry::counter(const std::string& name, const std::string& help,
                                                         const MetricLabels& labels) {
     std::lock_guard lk(m_);
     auto& c = family_of(name, Kind::kCounter, help).counters[label_str(labels)];
@@ -128,8 +126,7 @@ std::shared_ptr<MetricCounter> MetricsRegistry::counter(const std::string& name,
     return c;
 }
 
-std::shared_ptr<MetricGauge> MetricsRegistry::gauge(const std::string& name,
-                                                    const std::string& help,
+std::shared_ptr<MetricGauge> MetricsRegistry::gauge(const std::string& name, const std::string& help,
                                                     const MetricLabels& labels) {
     std::lock_guard lk(m_);
     auto& g = family_of(name, Kind::kGauge, help).gauges[label_str(labels)];
@@ -137,10 +134,8 @@ std::shared_ptr<MetricGauge> MetricsRegistry::gauge(const std::string& name,
     return g;
 }
 
-std::shared_ptr<MetricHistogram> MetricsRegistry::histogram(const std::string& name,
-                                                            const std::string& help,
-                                                            std::vector<double> bounds,
-                                                            const MetricLabels& labels) {
+std::shared_ptr<MetricHistogram> MetricsRegistry::histogram(const std::string& name, const std::string& help,
+                                                            std::vector<double> bounds, const MetricLabels& labels) {
     std::lock_guard lk(m_);
     auto& fam = family_of(name, Kind::kHistogram, help);
     if (fam.histograms.empty() && fam.callbacks.empty())
@@ -152,22 +147,20 @@ std::shared_ptr<MetricHistogram> MetricsRegistry::histogram(const std::string& n
     return h;
 }
 
-void MetricsRegistry::gauge_callback(const std::string& name, const std::string& help,
-                                     std::function<double()> fn, const MetricLabels& labels) {
+void MetricsRegistry::gauge_callback(const std::string& name, const std::string& help, std::function<double()> fn,
+                                     const MetricLabels& labels) {
     std::lock_guard lk(m_);
     family_of(name, Kind::kGauge, help).callbacks[label_str(labels)] = std::move(fn);
 }
 
-void MetricsRegistry::remove_labeled(const std::string& label_key,
-                                     const std::string& label_value) {
+void MetricsRegistry::remove_labeled(const std::string& label_key, const std::string& label_value) {
     std::string needle = label_key + "=\"";
     append_escaped(needle, label_value);
     needle += '"';
     auto hit = [&](const std::string& ls) {
         // Label strings look like a="1",backend="x": a match must land on separator
         // boundaries, so backend="x" cannot hit prefix look-alikes such as backend="xy"
-        for (size_t at = ls.find(needle); at != std::string::npos;
-             at = ls.find(needle, at + 1)) {
+        for (size_t at = ls.find(needle); at != std::string::npos; at = ls.find(needle, at + 1)) {
             bool left_ok = at == 0 || ls[at - 1] == ',';
             size_t end = at + needle.size();
             bool right_ok = end == ls.size() || ls[end] == ',';
@@ -179,8 +172,7 @@ void MetricsRegistry::remove_labeled(const std::string& label_key,
     for (auto& [name, fam] : families_) {
         (void)name;
         auto prune = [&](auto& map) {
-            for (auto it = map.begin(); it != map.end();)
-                it = hit(it->first) ? map.erase(it) : std::next(it);
+            for (auto it = map.begin(); it != map.end();) it = hit(it->first) ? map.erase(it) : std::next(it);
         };
         prune(fam.counters);
         prune(fam.gauges);
@@ -211,22 +203,18 @@ std::string MetricsRegistry::render() const {
     for (const auto& [name, fam] : families_) {
         if (!fam.help.empty()) os << "# HELP " << name << " " << escape_help(fam.help) << "\n";
         os << "# TYPE " << name << " " << kind_str(int(fam.kind)) << "\n";
-        for (const auto& [ls, c] : fam.counters)
-            os << series(name, ls) << " " << c->value() << "\n";
-        for (const auto& [ls, g] : fam.gauges)
-            os << series(name, ls) << " " << g->value() << "\n";
+        for (const auto& [ls, c] : fam.counters) os << series(name, ls) << " " << c->value() << "\n";
+        for (const auto& [ls, g] : fam.gauges) os << series(name, ls) << " " << g->value() << "\n";
         for (const auto& [ls, fn] : fam.callbacks) {
             auto it = cb_vals.find({name, ls});
-            if (it != cb_vals.end())
-                os << series(name, ls) << " " << fmt_double(it->second) << "\n";
+            if (it != cb_vals.end()) os << series(name, ls) << " " << fmt_double(it->second) << "\n";
         }
         for (const auto& [ls, h] : fam.histograms) {
             auto snap = h->snapshot();
             uint64_t cum = 0;
             for (size_t i = 0; i < fam.bounds.size(); ++i) {
                 cum += snap.buckets[i];
-                os << series(name + "_bucket", ls, "le=\"" + fmt_double(fam.bounds[i]) + "\"")
-                   << " " << cum << "\n";
+                os << series(name + "_bucket", ls, "le=\"" + fmt_double(fam.bounds[i]) + "\"") << " " << cum << "\n";
             }
             cum += snap.buckets[fam.bounds.size()];
             os << series(name + "_bucket", ls, "le=\"+Inf\"") << " " << cum << "\n";
@@ -243,36 +231,30 @@ MetricLabels MetricsScope::merged(const MetricLabels& extra) const {
     return out;
 }
 
-std::shared_ptr<MetricCounter> MetricsScope::counter(const std::string& name,
-                                                     const std::string& help,
+std::shared_ptr<MetricCounter> MetricsScope::counter(const std::string& name, const std::string& help,
                                                      const MetricLabels& extra) const {
     if (!reg_) return std::make_shared<MetricCounter>();
     return reg_->counter(name, help, merged(extra));
 }
 
-std::shared_ptr<MetricGauge> MetricsScope::gauge(const std::string& name,
-                                                 const std::string& help,
+std::shared_ptr<MetricGauge> MetricsScope::gauge(const std::string& name, const std::string& help,
                                                  const MetricLabels& extra) const {
     if (!reg_) return std::make_shared<MetricGauge>();
     return reg_->gauge(name, help, merged(extra));
 }
 
-std::shared_ptr<MetricHistogram> MetricsScope::histogram(const std::string& name,
-                                                         const std::string& help,
-                                                         std::vector<double> bounds,
-                                                         const MetricLabels& extra) const {
+std::shared_ptr<MetricHistogram> MetricsScope::histogram(const std::string& name, const std::string& help,
+                                                         std::vector<double> bounds, const MetricLabels& extra) const {
     if (!reg_) return std::make_shared<MetricHistogram>(std::move(bounds));
     return reg_->histogram(name, help, std::move(bounds), merged(extra));
 }
 
-void MetricsScope::gauge_callback(const std::string& name, const std::string& help,
-                                  std::function<double()> fn, const MetricLabels& extra) const {
+void MetricsScope::gauge_callback(const std::string& name, const std::string& help, std::function<double()> fn,
+                                  const MetricLabels& extra) const {
     if (!reg_) return;
     reg_->gauge_callback(name, help, std::move(fn), merged(extra));
 }
 
-MetricsScope MetricsScope::with(const MetricLabels& extra) const {
-    return MetricsScope(reg_, merged(extra));
-}
+MetricsScope MetricsScope::with(const MetricLabels& extra) const { return MetricsScope(reg_, merged(extra)); }
 
 }  // namespace lights3

@@ -47,8 +47,7 @@ Task<HttpResponse> echo_handler(HttpRequest req) {
 std::vector<std::string> tls_drivers(bool with_seastar = false) {
     std::vector<std::string> out;
     for (auto& d : HttpServerFactory::drivers())
-        if (d == "builtin" || d == "beast" || d == "httplib" || (with_seastar && d == "seastar"))
-            out.push_back(d);
+        if (d == "builtin" || d == "beast" || d == "httplib" || (with_seastar && d == "seastar")) out.push_back(d);
     return out;
 }
 
@@ -119,14 +118,12 @@ struct Client {
         if (o.max_version) SSL_CTX_set_max_proto_version(ctx, o.max_version);
         if (!o.ciphersuites.empty()) CHECK(SSL_CTX_set_ciphersuites(ctx, o.ciphersuites.c_str()) == 1);
         if (o.client_cert) {
-            BIO* b = BIO_new_mem_buf(o.client_cert->cert_pem.data(),
-                                     static_cast<int>(o.client_cert->cert_pem.size()));
+            BIO* b = BIO_new_mem_buf(o.client_cert->cert_pem.data(), static_cast<int>(o.client_cert->cert_pem.size()));
             X509* x = PEM_read_bio_X509(b, nullptr, nullptr, nullptr);
             BIO_free(b);
             CHECK(SSL_CTX_use_certificate(ctx, x) == 1);
             X509_free(x);
-            BIO* kb = BIO_new_mem_buf(o.client_cert->key_pem.data(),
-                                      static_cast<int>(o.client_cert->key_pem.size()));
+            BIO* kb = BIO_new_mem_buf(o.client_cert->key_pem.data(), static_cast<int>(o.client_cert->key_pem.size()));
             EVP_PKEY* k = PEM_read_bio_PrivateKey(kb, nullptr, nullptr, nullptr);
             BIO_free(kb);
             CHECK(SSL_CTX_use_PrivateKey(ctx, k) == 1);
@@ -161,12 +158,11 @@ struct Client {
         return buf;
     }
     // One request with Connection: close; empty result = the server refused/closed
-    std::string request(const std::string& method, const std::string& path,
-                        const std::string& body = "") {
+    std::string request(const std::string& method, const std::string& path, const std::string& body = "") {
         if (!handshake_ok) return "";
         std::string req = method + " " + path + " HTTP/1.1\r\nHost: t\r\nConnection: close\r\n" +
-                          (body.empty() ? "" : "Content-Length: " + std::to_string(body.size()) + "\r\n") +
-                          "\r\n" + body;
+                          (body.empty() ? "" : "Content-Length: " + std::to_string(body.size()) + "\r\n") + "\r\n" +
+                          body;
         if (SSL_write(ssl, req.data(), static_cast<int>(req.size())) <= 0) return "";
         std::string out;
         char buf[4096];
@@ -302,8 +298,7 @@ TEST(tls_client_identity_reaches_the_request) {
     auto identity_handler = [](HttpRequest req) -> Task<HttpResponse> {
         HttpResponse resp;
         resp.headers.set("Content-Type", "text/plain");
-        resp.small_body = req.tls_identity ? "cn=" + req.tls_identity->subject_cn +
-                                                 " uri=" + req.tls_identity->san_uri
+        resp.small_body = req.tls_identity ? "cn=" + req.tls_identity->subject_cn + " uri=" + req.tls_identity->san_uri
                                            : "none";
         co_return resp;
     };
@@ -312,8 +307,7 @@ TEST(tls_client_identity_reaches_the_request) {
             Server s(d, cfg, identity_handler);
             Client with(s.port, {.client_cert = &alice});
             CHECK(with.handshake_ok);
-            CHECK(contains(with.request("GET", "/id"),
-                           "cn=alice uri=spiffe://example.org/ns/alice"));
+            CHECK(contains(with.request("GET", "/id"), "cn=alice uri=spiffe://example.org/ns/alice"));
             Client none(s.port);
             CHECK(contains(none.request("GET", "/anon"), "none"));
         } catch (const mini_test::Failure& f) {
@@ -353,10 +347,10 @@ TEST(tls_sni_selects_certificate) {
     HttpConfig cfg;
     cfg.tls_cert = files.put("cert.pem", def.cert_pem);
     cfg.tls_key = files.put("key.pem", def.key_pem);
-    cfg.tls_sni.push_back({"alt.example, ALT2.example", files.put("alt.pem", alt.cert_pem),
-                           files.put("alt.key", alt.key_pem)});
-    cfg.tls_sni.push_back({"*.wild.example", files.put("wild.pem", wild.cert_pem),
-                           files.put("wild.key", wild.key_pem)});
+    cfg.tls_sni.push_back(
+        {"alt.example, ALT2.example", files.put("alt.pem", alt.cert_pem), files.put("alt.key", alt.key_pem)});
+    cfg.tls_sni.push_back(
+        {"*.wild.example", files.put("wild.pem", wild.cert_pem), files.put("wild.key", wild.key_pem)});
     cfg.tls_reload_interval_sec = 0;
     for (auto& d : tls_drivers()) {
         try {
@@ -419,7 +413,7 @@ TEST(tls_holder_reload_semantics) {
     cfg.tls_key = files.put("key.pem", a.key_pem);
     tls::Holder h(cfg);
     CHECK(contains(h.current()->select("").subject, "a.test"));
-    CHECK(!h.reload_if_changed());  // nothing changed
+    CHECK(!h.reload_if_changed());      // nothing changed
     files.put("cert.pem", b.cert_pem);  // cert only: key mismatch -> refused, old kept
     CHECK(!h.reload_if_changed());
     CHECK(contains(h.current()->select("").subject, "a.test"));
@@ -447,10 +441,11 @@ TEST(tls_holder_reload_semantics) {
 
 TEST(tls_config_validation) {
     std::string base = "backends:\n  - name: m\n    type: memory\nhttp:\n  tls_cert: /c.pem\n  tls_key: /k.pem\n";
-    auto cfg = Config::from_string(base + "  tls_client_ca: /ca.pem\n  tls_client_auth: require\n"
-                                          "  tls_min_version: \"1.3\"\n  tls_ciphersuites: TLS_AES_128_GCM_SHA256\n"
-                                          "  tls_reload_interval: 5m\n  tls_sni:\n    - hosts: a.example, *.b.example\n"
-                                          "      cert: /a.pem\n      key: /a.key\n");
+    auto cfg = Config::from_string(base +
+                                   "  tls_client_ca: /ca.pem\n  tls_client_auth: require\n"
+                                   "  tls_min_version: \"1.3\"\n  tls_ciphersuites: TLS_AES_128_GCM_SHA256\n"
+                                   "  tls_reload_interval: 5m\n  tls_sni:\n    - hosts: a.example, *.b.example\n"
+                                   "      cert: /a.pem\n      key: /a.key\n");
     CHECK_EQ(cfg.http.tls_client_auth, std::string("require"));
     CHECK_EQ(cfg.http.tls_min_version, std::string("1.3"));
     CHECK_EQ(cfg.http.tls_reload_interval_sec, 300);
@@ -464,15 +459,17 @@ TEST(tls_config_validation) {
         }
         return false;
     };
-    CHECK(rejects(base + "  tls_client_auth: require\n"));                       // needs a CA
-    CHECK(rejects(base + "  tls_client_auth: always\n"));                        // unknown mode
-    CHECK(rejects(base + "  tls_min_version: \"1.1\"\n"));                        // below the floor
-    CHECK(rejects(base + "  tls_sni:\n    - hosts: x\n      cert: /x.pem\n"));   // missing key
-    CHECK(rejects("backends:\n  - name: m\n    type: memory\nhttp:\n  tls_client_ca: /ca.pem\n"));  // knob without listener
+    CHECK(rejects(base + "  tls_client_auth: require\n"));                                          // needs a CA
+    CHECK(rejects(base + "  tls_client_auth: always\n"));                                           // unknown mode
+    CHECK(rejects(base + "  tls_min_version: \"1.1\"\n"));                                          // below the floor
+    CHECK(rejects(base + "  tls_sni:\n    - hosts: x\n      cert: /x.pem\n"));                      // missing key
+    CHECK(rejects("backends:\n  - name: m\n    type: memory\nhttp:\n  tls_client_ca: /ca.pem\n"));  // knob without
+                                                                                                    // listener
     // auth.tls_identity (backlog-sequence ⑥) presupposes client auth
     CHECK(rejects(base + "  tls_client_ca: /ca.pem\n  tls_client_auth: require\nauth:\n  tls_identity: cn\n"));
     CHECK(rejects(base + "auth:\n  tls_identity: subject-cn\n"));
-    auto with_id = Config::from_string(base + "  tls_client_ca: /ca.pem\n  tls_client_auth: optional\nauth:\n  tls_identity: san-uri\n");
+    auto with_id = Config::from_string(
+        base + "  tls_client_ca: /ca.pem\n  tls_client_auth: optional\nauth:\n  tls_identity: san-uri\n");
     CHECK_EQ(with_id.auth.tls_identity, std::string("san-uri"));
     CHECK(rejects(base + "  tls_reload_interval: 2d\n"));
     CHECK(!rejects(base + "  tls_reload_interval: 0s\n"));

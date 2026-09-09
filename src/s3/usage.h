@@ -44,7 +44,7 @@ struct BucketUsage {
     int64_t mpu_bytes = 0;  // in-flight multipart part bytes (counted toward quotas)
     // Last full count by any instance; epoch = never scanned (counters started from zero)
     std::chrono::system_clock::time_point scanned_at{};
-    bool dirty = false;     // has unflushed local deltas (never persisted)
+    bool dirty = false;  // has unflushed local deltas (never persisted)
 
     int64_t total_bytes() const { return bytes + mpu_bytes; }
     bool scanned() const { return scanned_at.time_since_epoch().count() != 0; }
@@ -54,8 +54,7 @@ class UsageTracker {
 public:
     // Loads .sys/usage/* from the router's default backend. A missing .sys or a
     // malformed object just means "not scanned yet"
-    static Task<std::shared_ptr<UsageTracker>> load(storage::BucketRouter router,
-                                                    UsageConfig cfg,
+    static Task<std::shared_ptr<UsageTracker>> load(storage::BucketRouter router, UsageConfig cfg,
                                                     std::shared_ptr<MetricsRegistry> metrics);
     ~UsageTracker();
 
@@ -63,8 +62,7 @@ public:
 
     // Incremental deltas (post-commit). Counters clamp at zero: a negative excursion
     // means the base was stale, and reconcile fixes the base
-    void apply(const std::string& bucket, int64_t d_objects, int64_t d_bytes,
-               int64_t d_mpu_bytes = 0);
+    void apply(const std::string& bucket, int64_t d_objects, int64_t d_bytes, int64_t d_mpu_bytes = 0);
 
     std::optional<BucketUsage> get(const std::string& bucket) const;
     std::map<std::string, BucketUsage> all() const;
@@ -97,9 +95,7 @@ private:
     UsageTracker() = default;
 
     static constexpr std::string_view kPrefix = "usage/";
-    static std::string object_key(const std::string& bucket) {
-        return std::string(kPrefix) + bucket;
-    }
+    static std::string object_key(const std::string& bucket) { return std::string(kPrefix) + bucket; }
     static std::string serialize(const BucketUsage& u);
     static std::optional<BucketUsage> deserialize(const std::string& body);
 
@@ -129,8 +125,8 @@ private:
 
     mutable std::mutex mu_;
     std::map<std::string, BucketUsage> usage_;
-    std::set<std::string> scanning_;      // single-flight per bucket
-    std::set<std::string> gauged_;        // buckets with registered per-bucket gauges
+    std::set<std::string> scanning_;  // single-flight per bucket
+    std::set<std::string> gauged_;    // buckets with registered per-bucket gauges
     static constexpr size_t kMaxGaugedBuckets = 512;
     std::atomic<bool> sys_bucket_ready_{false};
     std::atomic<size_t> scans_{0};

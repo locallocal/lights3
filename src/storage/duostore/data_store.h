@@ -32,10 +32,12 @@ struct DataWriter {
 
 // Result statistics of the P4 compaction sequential scan (docs/storage/duostore-design.md §9.2)
 struct GcRewrite {
-    uint64_t scanned = 0;    // records fully parsed (including crc pass)
-    uint64_t migrated = 0;   // records confirmed live and successfully ref-swapped
-    uint64_t corrupt = 0;    // records with corrupt magic/header/crc (torn tail excluded — the expected form discarded on restart)
-    uint64_t file_size = 0;  // actual file size; packs left as seal(0) by a crash use this to backfill the liveness-ratio denominator
+    uint64_t scanned = 0;   // records fully parsed (including crc pass)
+    uint64_t migrated = 0;  // records confirmed live and successfully ref-swapped
+    uint64_t corrupt = 0;  // records with corrupt magic/header/crc (torn tail excluded — the expected form discarded on
+                           // restart)
+    uint64_t file_size = 0;  // actual file size; packs left as seal(0) by a crash use this to backfill the
+                             // liveness-ratio denominator
 };
 
 struct IDataStore;
@@ -61,8 +63,7 @@ struct PackScanRecord {
 // goes through the "live account reaches zero + delete the whole empty pack"
 // path, so a misjudgment loses no data.
 // See migrate_pack_records in duostore_backend.h for the standard implementation
-using PackMigrateFn = std::function<Task<uint64_t>(IDataStore& self,
-                                                   std::vector<PackScanRecord>&& batch)>;
+using PackMigrateFn = std::function<Task<uint64_t>(IDataStore& self, std::vector<PackScanRecord>&& batch)>;
 
 // Input item for write_batch (compaction migration only): payload is held by the
 // caller until the call returns
@@ -109,8 +110,7 @@ struct IDataStore {
         co_return out;
     }
     // [first,last] is the closed interval after resolve_range; returns a streaming BodyReader (length()=last-first+1)
-    virtual Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
-                                                               uint64_t last) = 0;
+    virtual Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first, uint64_t last) = 0;
     virtual Task<void> remove(std::span<const Extent> extents) = 0;  // idempotent (ENOENT ignored)
     // Whole pack file deletion (§9.1: packs that are sealed with live_recs==0);
     // idempotent. Pure virtual: engines without pack entities write an explicit
@@ -118,7 +118,7 @@ struct IDataStore {
     // default would let a new engine that "has packs but forgot to implement
     // deletion" compile, with GC keeping accounts but never freeing bytes
     virtual Task<void> remove_pack(uint64_t pack_id) = 0;
-    virtual Task<GcRewrite> rewrite_pack(uint64_t pack_id) = 0;      // compaction sequential scan (§9.2)
+    virtual Task<GcRewrite> rewrite_pack(uint64_t pack_id) = 0;  // compaction sequential scan (§9.2)
     // Age-based rotation (docs/archive/gaps.md §6.1): seals active packs whose first
     // record was written more than max_age_ms ago, returns the number sealed this
     // time. GC calls it once per round — with capacity-only sealing, an active

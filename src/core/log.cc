@@ -6,10 +6,10 @@
 #include <spdlog/sinks/rotating_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
-#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -28,9 +28,7 @@ std::shared_ptr<spdlog::logger> g_access;  // the registered access logger (null
 std::atomic<bool> g_json{false};
 bool g_async = false;
 
-void append(spdlog::memory_buf_t& dest, std::string_view s) {
-    dest.append(s.data(), s.data() + s.size());
-}
+void append(spdlog::memory_buf_t& dest, std::string_view s) { dest.append(s.data(), s.data() + s.size()); }
 
 // JSON string escaping per RFC 8259: the two mandatory escapes plus control
 // characters; everything else (UTF-8 included) passes through
@@ -38,11 +36,21 @@ void append_json_string(spdlog::memory_buf_t& dest, std::string_view s) {
     dest.push_back('"');
     for (unsigned char c : s) {
         switch (c) {
-            case '"': append(dest, "\\\""); break;
-            case '\\': append(dest, "\\\\"); break;
-            case '\n': append(dest, "\\n"); break;
-            case '\r': append(dest, "\\r"); break;
-            case '\t': append(dest, "\\t"); break;
+            case '"':
+                append(dest, "\\\"");
+                break;
+            case '\\':
+                append(dest, "\\\\");
+                break;
+            case '\n':
+                append(dest, "\\n");
+                break;
+            case '\r':
+                append(dest, "\\r");
+                break;
+            case '\t':
+                append(dest, "\\t");
+                break;
             default:
                 if (c < 0x20) {
                     char buf[8];
@@ -60,13 +68,20 @@ void append_json_string(spdlog::memory_buf_t& dest, std::string_view s) {
 // "warning"/"err", so a consumer filters on the names the operator configured
 std::string_view level_name(spdlog::level::level_enum lv) {
     switch (lv) {
-        case spdlog::level::trace: return "trace";
-        case spdlog::level::debug: return "debug";
-        case spdlog::level::info: return "info";
-        case spdlog::level::warn: return "warn";
-        case spdlog::level::err: return "error";
-        case spdlog::level::critical: return "critical";
-        default: return "off";
+        case spdlog::level::trace:
+            return "trace";
+        case spdlog::level::debug:
+            return "debug";
+        case spdlog::level::info:
+            return "info";
+        case spdlog::level::warn:
+            return "warn";
+        case spdlog::level::err:
+            return "error";
+        case spdlog::level::critical:
+            return "critical";
+        default:
+            return "off";
     }
 }
 
@@ -77,17 +92,14 @@ std::string_view level_name(spdlog::level::level_enum lv) {
 class JsonFormatter final : public spdlog::formatter {
 public:
     void format(const spdlog::details::log_msg& msg, spdlog::memory_buf_t& dest) override {
-        auto ms_total = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            msg.time.time_since_epoch())
-                            .count();
+        auto ms_total = std::chrono::duration_cast<std::chrono::milliseconds>(msg.time.time_since_epoch()).count();
         std::time_t secs = static_cast<std::time_t>(ms_total / 1000);
         int ms = static_cast<int>(ms_total % 1000);
         std::tm tm{};
         gmtime_r(&secs, &tm);
         char buf[64];
-        std::snprintf(buf, sizeof(buf), "{\"ts\":\"%04d-%02d-%02dT%02d:%02d:%02d.%03dZ\",",
-                      tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
-                      tm.tm_sec, ms);
+        std::snprintf(buf, sizeof(buf), "{\"ts\":\"%04d-%02d-%02dT%02d:%02d:%02d.%03dZ\",", tm.tm_year + 1900,
+                      tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec, ms);
         append(dest, buf);
         append(dest, "\"level\":\"");
         append(dest, level_name(msg.level));
@@ -111,33 +123,35 @@ public:
         }
         dest.push_back('\n');
     }
-    std::unique_ptr<spdlog::formatter> clone() const override {
-        return std::make_unique<JsonFormatter>();
-    }
+    std::unique_ptr<spdlog::formatter> clone() const override { return std::make_unique<JsonFormatter>(); }
 };
 
 spdlog::level::level_enum to_spdlog(LogLevel lv) {
     switch (lv) {
-        case LogLevel::Debug: return spdlog::level::debug;
-        case LogLevel::Warn: return spdlog::level::warn;
-        case LogLevel::Error: return spdlog::level::err;
-        default: return spdlog::level::info;
+        case LogLevel::Debug:
+            return spdlog::level::debug;
+        case LogLevel::Warn:
+            return spdlog::level::warn;
+        case LogLevel::Error:
+            return spdlog::level::err;
+        default:
+            return spdlog::level::info;
     }
 }
 
 void apply_format(spdlog::logger& l, bool json) {
-    if (json) l.set_formatter(std::make_unique<JsonFormatter>());
-    else l.set_pattern(kTextPattern, spdlog::pattern_time_type::utc);
+    if (json)
+        l.set_formatter(std::make_unique<JsonFormatter>());
+    else
+        l.set_pattern(kTextPattern, spdlog::pattern_time_type::utc);
 }
 
 // Replaces the registered pair (main + access) with synchronous loggers over the
 // given sinks and drops the writer thread: its destructor drains the queue and
 // joins, so every record enqueued before the call reaches the sink. Caller holds g_mu
-void install_sync(std::vector<spdlog::sink_ptr> sinks, bool json,
-                  spdlog::level::level_enum level) {
+void install_sync(std::vector<spdlog::sink_ptr> sinks, bool json, spdlog::level::level_enum level) {
     auto main = std::make_shared<spdlog::logger>(kMainLoggerName, sinks.begin(), sinks.end());
-    auto access = std::make_shared<spdlog::logger>(std::string(Logger::kAccessLoggerName),
-                                                   sinks.begin(), sinks.end());
+    auto access = std::make_shared<spdlog::logger>(std::string(Logger::kAccessLoggerName), sinks.begin(), sinks.end());
     spdlog::drop(std::string(Logger::kAccessLoggerName));
     spdlog::set_default_logger(main);
     spdlog::register_logger(access);
@@ -165,8 +179,8 @@ void Logger::init(const LogConfig& cfg) {
     if (cfg.file.empty()) {
         sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
     } else {
-        sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-            cfg.file, cfg.max_size, static_cast<size_t>(cfg.max_files));
+        sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(cfg.file, cfg.max_size,
+                                                                      static_cast<size_t>(cfg.max_files));
         // File output sits in the stdio buffer otherwise; a periodic flush keeps
         // `tail -f` honest without paying a syscall per line
         spdlog::flush_every(std::chrono::seconds(1));
@@ -189,10 +203,9 @@ void Logger::init(const LogConfig& cfg, std::shared_ptr<spdlog::sinks::sink> sin
     spdlog::init_thread_pool(static_cast<size_t>(cfg.async_queue), 1);
     auto policy = cfg.async_overflow == "drop" ? spdlog::async_overflow_policy::overrun_oldest
                                                : spdlog::async_overflow_policy::block;
-    auto main = std::make_shared<spdlog::async_logger>(kMainLoggerName, sink,
-                                                       spdlog::thread_pool(), policy);
-    auto access = std::make_shared<spdlog::async_logger>(std::string(kAccessLoggerName), sink,
-                                                         spdlog::thread_pool(), policy);
+    auto main = std::make_shared<spdlog::async_logger>(kMainLoggerName, sink, spdlog::thread_pool(), policy);
+    auto access = std::make_shared<spdlog::async_logger>(std::string(kAccessLoggerName), sink, spdlog::thread_pool(),
+                                                         policy);
     spdlog::drop(std::string(kAccessLoggerName));
     spdlog::set_default_logger(main);
     spdlog::register_logger(access);
@@ -217,8 +230,8 @@ spdlog::logger& Logger::access() {
     std::lock_guard<std::mutex> lk(g_mu);
     if (!g_access) {
         auto def = spdlog::default_logger();
-        auto l = std::make_shared<spdlog::logger>(std::string(kAccessLoggerName),
-                                                  def->sinks().begin(), def->sinks().end());
+        auto l = std::make_shared<spdlog::logger>(std::string(kAccessLoggerName), def->sinks().begin(),
+                                                  def->sinks().end());
         l->set_level(def->level());
         spdlog::drop(std::string(kAccessLoggerName));
         spdlog::register_logger(l);

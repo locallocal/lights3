@@ -5,12 +5,13 @@
 
 #include <atomic>
 #include <map>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "app/admin_jobs.h"
 #include "core/cancel.h"
 #include "core/config.h"
 #include "core/metrics.h"
@@ -18,7 +19,6 @@
 #include "core/thread_pool.h"
 #include "http/admission.h"
 #include "http/server.h"
-#include "app/admin_jobs.h"
 #include "s3/audit.h"
 #include "s3/auth/credential_store.h"
 #include "s3/quota.h"
@@ -79,9 +79,7 @@ public:
     // rest. Driven by SIGHUP and POST /-/admin/config/reload. Never partial: a
     // file that fails validation changes nothing
     ConfigReloadReport reload_config();
-    const std::map<std::string, std::shared_ptr<storage::IStorageBackend>>& backends() const {
-        return backends_;
-    }
+    const std::map<std::string, std::shared_ptr<storage::IStorageBackend>>& backends() const { return backends_; }
     // The assembled L2 service (null before start_server): tests drive dispatch
     // directly instead of running the listener
     const std::shared_ptr<s3::S3Service>& service() const { return service_; }
@@ -104,14 +102,15 @@ private:
     std::atomic<int> shutdown_errors_{0};
     std::mutex reload_mu_;  // one reload at a time (SIGHUP and the admin API may race)
     std::shared_ptr<std::atomic<long>> stall_sec_;
-    std::shared_ptr<http::AdmissionCounters> admission_counters_;  // roadmap §5.3  // transfer_stall_timeout, read per request
+    std::shared_ptr<http::AdmissionCounters> admission_counters_;  // roadmap §5.3  // transfer_stall_timeout, read per
+                                                                   // request
     Config cfg_;
     std::shared_ptr<ThreadPool> pool_;
     std::shared_ptr<MetricsRegistry> metrics_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> backends_;
     std::map<std::string, std::shared_ptr<storage::IStorageBackend>> metered_;  // roadmap §5.1 decorators
     std::mutex retire_mu_;
-    std::vector<std::thread> retiring_;   // backlog-sequence ⑦: removed backends draining
+    std::vector<std::thread> retiring_;     // backlog-sequence ⑦: removed backends draining
     std::atomic<bool> retire_stop_{false};  // shutdown: stop waiting, close what is left
     std::shared_ptr<s3::CredentialStore> cred_store_;
     std::shared_ptr<s3::WebsiteStore> website_store_;

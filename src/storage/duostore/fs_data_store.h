@@ -77,8 +77,8 @@ public:
 
     // migrate (§9.2): compaction migration callback; empty = rewrite_pack scans
     // without migrating (statistics are still produced)
-    FsDataStore(FsDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc,
-                PackSeal seal = {}, PackMigrateFn migrate = {}, ChunkPinHooks pins = {});
+    FsDataStore(FsDataOptions opt, std::shared_ptr<ThreadPool> pool, FileIdAlloc alloc, PackSeal seal = {},
+                PackMigrateFn migrate = {}, ChunkPinHooks pins = {});
     ~FsDataStore() override;
     FsDataStore(const FsDataStore&) = delete;
 
@@ -88,20 +88,15 @@ public:
     // items over the threshold / with packs disabled fall back to the per-item
     // open_writer path
     Task<std::vector<DataRef>> write_batch(std::span<const PackAppendItem> items) override;
-    Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first,
-                                                        uint64_t last) override;
+    Task<std::unique_ptr<http::BodyReader>> open_reader(DataRef ref, uint64_t first, uint64_t last) override;
     Task<void> remove(std::span<const Extent> extents) override;
     Task<void> remove_pack(uint64_t pack_id) override;
     bool pack_write_locked(uint64_t pack_id) override;
     uint64_t stat_pack(uint64_t pack_id) override;
     Task<GcRewrite> rewrite_pack(uint64_t pack_id) override;
     Task<uint64_t> seal_aged_packs(int64_t max_age_ms) override;
-    Task<void> scan_chunks(
-        const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb)
-        override;
-    Task<void> scan_packs(
-        const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& cb)
-        override;
+    Task<void> scan_chunks(const std::function<void(uint64_t file_id, int64_t mtime_ms, uint64_t size)>& cb) override;
+    Task<void> scan_packs(const std::function<void(uint64_t pack_id, int64_t mtime_ms, uint64_t size)>& cb) override;
     Task<void> close() override;
 
     // Layout paths (§5); for test observation

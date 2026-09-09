@@ -39,20 +39,17 @@ Endpoint Endpoint::parse(const std::string& url) {
         } catch (...) {
             throw std::runtime_error("endpoint has an invalid port: " + url);
         }
-        if (ep.port < 1 || ep.port > 65535)
-            throw std::runtime_error("endpoint has an invalid port: " + url);
+        if (ep.port < 1 || ep.port > 65535) throw std::runtime_error("endpoint has an invalid port: " + url);
     }
     if (ep.host.empty()) throw std::runtime_error("endpoint has an empty host: " + url);
     bool default_port = ep.port == (ep.https ? 443 : 80);
     ep.signed_host = default_port ? ep.host : ep.host + ":" + std::to_string(ep.port);
-    ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" +
-                  std::to_string(ep.port);
+    ep.base_url = std::string(ep.https ? "https://" : "http://") + ep.host + ":" + std::to_string(ep.port);
     return ep;
 }
 
 void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
-    cmd->varp<std::string>("endpoint", "e", "http://127.0.0.1:9000",
-                           "lights3 endpoint (scheme://host[:port]).");
+    cmd->varp<std::string>("endpoint", "e", "http://127.0.0.1:9000", "lights3 endpoint (scheme://host[:port]).");
     cmd->var<std::string>("ak", "", "access key; falls back to env LIGHTS3_ADMIN_AK.");
     cmd->var<std::string>("sk", "",
                           "secret key; falls back to env LIGHTS3_ADMIN_SK "
@@ -60,8 +57,7 @@ void add_conn_flags(const std::shared_ptr<ccmd::c_command>& cmd) {
     cmd->var<std::string>("region", "us-east-1", "SigV4 region; must match the server auth.region.");
     cmd->var<bool>("insecure", false, "skip server certificate verification for https (self-signed deployments).");
     cmd->var<int>("timeout-sec", 10, "connect/read/write timeout in seconds.");
-    cmd->var<std::string>("cert", "",
-                          "client certificate (PEM) for mTLS listeners; needs --key.");
+    cmd->var<std::string>("cert", "", "client certificate (PEM) for mTLS listeners; needs --key.");
     cmd->var<std::string>("key", "", "private key (PEM) of --cert.");
 }
 
@@ -103,8 +99,8 @@ bool read_conn_opts(const std::shared_ptr<ccmd::c_command>& cmd, ConnOpts& out) 
 SignedClient::SignedClient(const ConnOpts& conn)
     : ep_(conn.ep),
       cli_(conn.ep.base_url, conn.client_cert, conn.client_key),
-      auth_(s3::SigV4Authenticator::build(lights3::AuthConfig{
-          .credentials = {}, .region = conn.region, .service = "s3"})),
+      auth_(s3::SigV4Authenticator::build(
+          lights3::AuthConfig{.credentials = {}, .region = conn.region, .service = "s3"})),
       cred_(lights3::Credential{conn.ak, util::SecretString(std::string(conn.sk))}) {
     auto t = std::chrono::seconds(conn.timeout_sec);
     cli_.set_connection_timeout(t);
@@ -121,20 +117,18 @@ SignedClient::SignedClient(const ConnOpts& conn)
 }
 
 httplib::Result SignedClient::get(const std::string& path, const std::string& query) {
-    return cli_.Get(path + (query.empty() ? "" : "?" + query),
-                    sign("GET", path, query, ""));
+    return cli_.Get(path + (query.empty() ? "" : "?" + query), sign("GET", path, query, ""));
 }
 
 httplib::Result SignedClient::get_discard(const std::string& path, uint64_t* bytes) {
-    return cli_.Get(path, sign("GET", path, "", ""),
-                    [bytes](const char*, size_t n) {
-                        *bytes += n;
-                        return true;
-                    });
+    return cli_.Get(path, sign("GET", path, "", ""), [bytes](const char*, size_t n) {
+        *bytes += n;
+        return true;
+    });
 }
 
-httplib::Result SignedClient::get_hashed(const std::string& path, const std::string& query,
-                                         std::string* md5_hex, uint64_t* bytes) {
+httplib::Result SignedClient::get_hashed(const std::string& path, const std::string& query, std::string* md5_hex,
+                                         uint64_t* bytes) {
     util::HashStream md5(util::HashStream::Algo::Md5);
     auto r = cli_.Get(path + (query.empty() ? "" : "?" + query), sign("GET", path, query, ""),
                       [&](const char* data, size_t n) {
@@ -147,37 +141,31 @@ httplib::Result SignedClient::get_hashed(const std::string& path, const std::str
 }
 
 httplib::Result SignedClient::head(const std::string& path, const std::string& query) {
-    return cli_.Head(path + (query.empty() ? "" : "?" + query),
-                     sign("HEAD", path, query, ""));
+    return cli_.Head(path + (query.empty() ? "" : "?" + query), sign("HEAD", path, query, ""));
 }
 
-httplib::Result SignedClient::put_unsigned(const std::string& path, const std::string& body,
-                                           const std::string& query) {
-    return cli_.Put(path + (query.empty() ? "" : "?" + query),
-                    sign("PUT", path, query, "UNSIGNED-PAYLOAD"), body,
+httplib::Result SignedClient::put_unsigned(const std::string& path, const std::string& body, const std::string& query) {
+    return cli_.Put(path + (query.empty() ? "" : "?" + query), sign("PUT", path, query, "UNSIGNED-PAYLOAD"), body,
                     "application/octet-stream");
 }
 
 httplib::Result SignedClient::post_json(const std::string& path, const std::string& body) {
     // Content-Type does not go into SignedHeaders (sign only takes host + x-amz-*); passed as an httplib parameter
-    return cli_.Post(path, sign("POST", path, "", util::sha256_hex(body)), body,
-                     "application/json");
+    return cli_.Post(path, sign("POST", path, "", util::sha256_hex(body)), body, "application/json");
 }
 
-httplib::Result SignedClient::put_json(const std::string& path, const std::string& body,
-                                       const std::string& query) {
-    return cli_.Put(path + (query.empty() ? "" : "?" + query),
-                    sign("PUT", path, query, util::sha256_hex(body)), body, "application/json");
+httplib::Result SignedClient::put_json(const std::string& path, const std::string& body, const std::string& query) {
+    return cli_.Put(path + (query.empty() ? "" : "?" + query), sign("PUT", path, query, util::sha256_hex(body)), body,
+                    "application/json");
 }
 
 httplib::Result SignedClient::post_empty(const std::string& path, const std::string& query) {
-    return cli_.Post(path + (query.empty() ? "" : "?" + query),
-                     sign("POST", path, query, util::sha256_hex("")), "", "application/json");
+    return cli_.Post(path + (query.empty() ? "" : "?" + query), sign("POST", path, query, util::sha256_hex("")), "",
+                     "application/json");
 }
 
 httplib::Result SignedClient::del(const std::string& path, const std::string& query) {
-    return cli_.Delete(path + (query.empty() ? "" : "?" + query),
-                       sign("DELETE", path, query, ""));
+    return cli_.Delete(path + (query.empty() ? "" : "?" + query), sign("DELETE", path, query, ""));
 }
 
 int finish(const httplib::Result& r, int expect, const std::string& ok_note) {
@@ -198,8 +186,7 @@ int finish(const httplib::Result& r, int expect, const std::string& ok_note) {
 }
 
 httplib::Headers SignedClient::sign(const std::string& method, const std::string& raw_path,
-                                    const std::string& raw_query,
-                                    const std::string& payload_hash) {
+                                    const std::string& raw_query, const std::string& payload_hash) {
     lights3::http::HttpRequest req;
     req.method = method;
     req.raw_path = raw_path;

@@ -14,8 +14,7 @@ using s3::S3ErrorCode;
 namespace {
 
 [[noreturn]] void corrupt(const char* what) {
-    throw S3Error(S3ErrorCode::InternalError,
-                  std::string("duostore: corrupt meta value: ") + what);
+    throw S3Error(S3ErrorCode::InternalError, std::string("duostore: corrupt meta value: ") + what);
 }
 
 // Precondition for the '\0'-separated encoding (§4.1): the shared validation
@@ -26,8 +25,7 @@ namespace {
 // loudly.
 void require_no_nul(std::string_view part) {
     if (part.find('\0') != std::string_view::npos)
-        throw S3Error(S3ErrorCode::InternalError,
-                      "duostore: key component contains NUL (validation bypassed)");
+        throw S3Error(S3ErrorCode::InternalError, "duostore: key component contains NUL (validation bypassed)");
 }
 
 // ---- little-endian integers and length-prefixed strings ----
@@ -46,8 +44,7 @@ void put_u64(std::string& s, uint64_t v) {
 // corruption (docs/archive/gaps.md §4): a user submitting oversized user-meta should get
 // a 400, not a 500 "corrupt meta value"
 [[noreturn]] void too_large(const char* what) {
-    throw S3Error(S3ErrorCode::InvalidArgument,
-                  std::string("Metadata field too large: ") + what);
+    throw S3Error(S3ErrorCode::InvalidArgument, std::string("Metadata field too large: ") + what);
 }
 
 void put_str(std::string& s, std::string_view v) {
@@ -137,9 +134,8 @@ void append_extent_runs(std::string& out, const std::vector<Extent>& extents) {
     for (const auto& e : extents) {
         if (!runs.empty()) {
             Run& r = runs.back();
-            if (r.kind == e.kind && e.kind != Extent::Kind::kPack &&
-                e.file_id == r.first_id + r.count && e.offset == 0 &&
-                r.last_len == r.chunk_len) {
+            if (r.kind == e.kind && e.kind != Extent::Kind::kPack && e.file_id == r.first_id + r.count &&
+                e.offset == 0 && r.last_len == r.chunk_len) {
                 ++r.count;
                 r.last_len = e.length;
                 r.crcs.push_back(e.crc32c);
@@ -238,10 +234,8 @@ void put_std_meta(std::string& s, const ObjectMeta& m) {
     // kv section exactly as its header comment invites — no version bump needed.
     // Trailer-form checksum values resolve from checksum_pending (body drained by now)
     std::vector<std::pair<std::string_view, std::string>> extra;
-    if (!m.checksum_algorithm.empty())
-        extra.emplace_back("checksum_algorithm", m.checksum_algorithm);
-    if (std::string cv = resolved_checksum_value(m); !cv.empty())
-        extra.emplace_back("checksum_value", std::move(cv));
+    if (!m.checksum_algorithm.empty()) extra.emplace_back("checksum_algorithm", m.checksum_algorithm);
+    if (std::string cv = resolved_checksum_value(m); !cv.empty()) extra.emplace_back("checksum_value", std::move(cv));
     if (!m.checksum_type.empty()) extra.emplace_back("checksum_type", m.checksum_type);
     if (!m.part_sizes.empty()) extra.emplace_back("part_sizes", join_part_sizes(m.part_sizes));
     uint16_t n = uint16_t(extra.size());
@@ -264,10 +258,14 @@ void read_std_meta(Cursor& c, ObjectMeta& m) {
     for (uint16_t i = 0; i < n; ++i) {
         std::string k(c.str());
         std::string v(c.str());
-        if (k == "checksum_algorithm") m.checksum_algorithm = std::move(v);
-        else if (k == "checksum_value") m.checksum_value = std::move(v);
-        else if (k == "checksum_type") m.checksum_type = std::move(v);
-        else if (k == "part_sizes") m.part_sizes = parse_part_sizes(v);
+        if (k == "checksum_algorithm")
+            m.checksum_algorithm = std::move(v);
+        else if (k == "checksum_value")
+            m.checksum_value = std::move(v);
+        else if (k == "checksum_type")
+            m.checksum_type = std::move(v);
+        else if (k == "part_sizes")
+            m.part_sizes = parse_part_sizes(v);
         else
             for (auto& f : kStdMetaFields)
                 if (k == f.store_key) m.*f.field = std::move(v);
@@ -280,9 +278,7 @@ void read_std_meta(Cursor& c, ObjectMeta& m) {
 // The implementation was hoisted into core/util/checksum.h (shared with S3's
 // x-amz-checksum-crc32c); the forwarder under the duostore namespace is kept
 // here so call sites stay untouched
-uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) {
-    return util::crc32c_update(crc, data);
-}
+uint32_t crc32c_update(uint32_t crc, std::span<const std::byte> data) { return util::crc32c_update(crc, data); }
 
 // ---- key encoding ----
 
@@ -311,8 +307,7 @@ std::string parts_prefix(std::string_view bucket, std::string_view key, std::str
     return s;
 }
 
-std::string part_key(std::string_view bucket, std::string_view key, std::string_view id,
-                     int part_no) {
+std::string part_key(std::string_view bucket, std::string_view key, std::string_view id, int part_no) {
     std::string s = parts_prefix(bucket, key, id);
     s.push_back(char(uint8_t(part_no >> 8)));  // big-endian: byte order ascending == part_no ascending
     s.push_back(char(uint8_t(part_no)));
@@ -321,8 +316,7 @@ std::string part_key(std::string_view bucket, std::string_view key, std::string_
 
 int part_no_of_key(std::string_view parts_cf_key) {
     if (parts_cf_key.size() < 2) corrupt("parts key too short");
-    return int(uint8_t(parts_cf_key[parts_cf_key.size() - 2])) << 8 |
-           int(uint8_t(parts_cf_key.back()));
+    return int(uint8_t(parts_cf_key[parts_cf_key.size() - 2])) << 8 | int(uint8_t(parts_cf_key.back()));
 }
 
 std::string be64_key(uint64_t v) {
@@ -524,8 +518,7 @@ Reclaim decode_reclaim(std::string_view v, int64_t* enqueue_ms) {
     int64_t ms = int64_t(c.u64());
     if (enqueue_ms) *enqueue_ms = ms;
     Reclaim r{read_extent_runs(c), ms,
-              reason <= uint8_t(ReclaimReason::kComplete) ? ReclaimReason(reason)
-                                                          : ReclaimReason::kUnknown};
+              reason <= uint8_t(ReclaimReason::kComplete) ? ReclaimReason(reason) : ReclaimReason::kUnknown};
     c.done();
     return r;
 }
@@ -571,8 +564,8 @@ PackOwner parse_pack_owner(std::string_view owner) {
         o.kind = PackOwner::Kind::kObject;
         o.bucket = parts[0];
         o.key = parts[1];
-    } else if (parts.size() == 5 && parts[0] == "mpu" && !parts[1].empty() &&
-               !parts[2].empty() && parse_no(parts[4], o.part_no)) {
+    } else if (parts.size() == 5 && parts[0] == "mpu" && !parts[1].empty() && !parts[2].empty() &&
+               parse_no(parts[4], o.part_no)) {
         o.kind = PackOwner::Kind::kPart;
         o.bucket = parts[1];
         o.key = parts[2];

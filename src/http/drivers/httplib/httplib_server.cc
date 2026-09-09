@@ -16,9 +16,9 @@
 #include "core/task.h"
 #include "core/util/time.h"
 #include "http/drivers/common.h"
-#include "http/tls.h"
 #include "http/pushpull.h"
 #include "http/server.h"
+#include "http/tls.h"
 
 namespace lights3::http {
 
@@ -57,8 +57,7 @@ public:
             try {
                 tls_holder_ = std::make_shared<tls::Holder>(cfg);
             } catch (const std::exception& e) {
-                throw std::runtime_error(std::string("httplib driver: failed to load TLS material: ") +
-                                         e.what());
+                throw std::runtime_error(std::string("httplib driver: failed to load TLS material: ") + e.what());
             }
             std::string setup_error;
             auto ssl = std::make_unique<httplib::SSLServer>([&](SSL_CTX& ctx) {
@@ -72,16 +71,14 @@ public:
             });
             if (!ssl->is_valid())
                 throw std::runtime_error("httplib driver: TLS setup failed: " +
-                                         (setup_error.empty() ? std::string("no SSL context")
-                                                              : setup_error));
+                                         (setup_error.empty() ? std::string("no SSL context") : setup_error));
             svr_ = std::move(ssl);
             tls_ = true;
 #else
             // The macro is defined whenever any httplib consumer (this driver
             // or cloudproxy) is enabled on the CMake side; reaching here means
             // the build configuration was hand-edited
-            throw std::runtime_error(
-                "httplib driver was built without CPPHTTPLIB_OPENSSL_SUPPORT; TLS unavailable");
+            throw std::runtime_error("httplib driver was built without CPPHTTPLIB_OPENSSL_SUPPORT; TLS unavailable");
 #endif
         } else {
             svr_ = std::make_unique<httplib::Server>();
@@ -109,20 +106,19 @@ public:
         svr_->set_keep_alive_max_count(cfg.max_requests_per_connection > 0
                                            ? static_cast<size_t>(cfg.max_requests_per_connection)
                                            : static_cast<size_t>(1) << 40);
-        LOG_INFO("httplib driver: io_threads={} -> request thread pool of {} (floor 8)",
-                 cfg.io_threads, std::max(cfg.io_threads, 8));
-        svr_->set_exception_handler(
-            [](const httplib::Request&, httplib::Response& rs, std::exception_ptr ep) {
-                std::string what;
-                try {
-                    if (ep) std::rethrow_exception(ep);
-                } catch (const std::exception& e) {
-                    what = e.what();
-                } catch (...) {
-                    what = "<non-std exception>";
-                }
-                apply_fallback(rs, driver::internal_error_response(what));
-            });
+        LOG_INFO("httplib driver: io_threads={} -> request thread pool of {} (floor 8)", cfg.io_threads,
+                 std::max(cfg.io_threads, 8));
+        svr_->set_exception_handler([](const httplib::Request&, httplib::Response& rs, std::exception_ptr ep) {
+            std::string what;
+            try {
+                if (ep) std::rethrow_exception(ep);
+            } catch (const std::exception& e) {
+                what = e.what();
+            } catch (...) {
+                what = "<non-std exception>";
+            }
+            apply_fallback(rs, driver::internal_error_response(what));
+        });
         // Expect: 100-continue (docs/http-adapter.md §3.1 requires deferred
         // reply). The upstream API offers only three outcomes: reply 100
         // immediately / reply 417 / close the connection with a final
@@ -133,18 +129,17 @@ public:
         // + connection close). What we can do here: reject framing violations
         // with 400 before inviting the client to upload, instead of
         // "reply 100 first, then reject"
-        svr_->set_expect_100_continue_handler(
-            [](const httplib::Request& rq, httplib::Response& rs) {
-                HeaderMap headers;
-                for (auto& [k, v] : rq.headers)
-                    if (!is_pseudo_header(k)) headers.add(k, v);
-                if (!driver::parse_body_framing(headers).valid) {
-                    auto bad = driver::bad_request_response("Invalid message framing.");
-                    apply_fallback(rs, bad);
-                    return bad.status;  // Not 100/417: upstream sends this response and closes the connection
-                }
-                return static_cast<int>(httplib::StatusCode::Continue_100);
-            });
+        svr_->set_expect_100_continue_handler([](const httplib::Request& rq, httplib::Response& rs) {
+            HeaderMap headers;
+            for (auto& [k, v] : rq.headers)
+                if (!is_pseudo_header(k)) headers.add(k, v);
+            if (!driver::parse_body_framing(headers).valid) {
+                auto bad = driver::bad_request_response("Invalid message framing.");
+                apply_fallback(rs, bad);
+                return bad.status;  // Not 100/417: upstream sends this response and closes the connection
+            }
+            return static_cast<int>(httplib::StatusCode::Continue_100);
+        });
 
         // Error responses produced by upstream itself (unregistered method ->
         // routing 404, invalid request line/headers -> 400, etc.) previously
@@ -165,29 +160,41 @@ public:
             if (rs.status == 400 || rs.status == 431) counters_.parse_error();  // upstream parser verdicts
             s3::S3ErrorCode code = s3::S3ErrorCode::InternalError;
             switch (rs.status) {
-                case 404: rs.status = 405; code = s3::S3ErrorCode::MethodNotAllowed; break;
-                case 405: code = s3::S3ErrorCode::MethodNotAllowed; break;
-                case 413: code = s3::S3ErrorCode::EntityTooLarge; break;
+                case 404:
+                    rs.status = 405;
+                    code = s3::S3ErrorCode::MethodNotAllowed;
+                    break;
+                case 405:
+                    code = s3::S3ErrorCode::MethodNotAllowed;
+                    break;
+                case 413:
+                    code = s3::S3ErrorCode::EntityTooLarge;
+                    break;
                 case 400:
-                case 431: code = s3::S3ErrorCode::InvalidRequest; break;
+                case 431:
+                    code = s3::S3ErrorCode::InvalidRequest;
+                    break;
                 case 501:
-                case 505: code = s3::S3ErrorCode::NotImplemented; break;
-                default: if (rs.status < 500) code = s3::S3ErrorCode::InvalidRequest; break;
+                case 505:
+                    code = s3::S3ErrorCode::NotImplemented;
+                    break;
+                default:
+                    if (rs.status < 500) code = s3::S3ErrorCode::InvalidRequest;
+                    break;
             }
-            int status = rs.status;  // Already set per upstream semantics above; must not be overridden by the fallback mapping
-            apply_fallback(rs,
-                           driver::upstream_error_response(code, "Request rejected by the HTTP layer."));
+            int status = rs.status;  // Already set per upstream semantics above; must not be overridden by the fallback
+                                     // mapping
+            apply_fallback(rs, driver::upstream_error_response(code, "Request rejected by the HTTP layer."));
             rs.status = status;
             return HR::Handled;
         });
 
         const std::string pat = ".*";
-        auto no_body = [this](const httplib::Request& rq, httplib::Response& rs) {
-            handle(rq, rs, nullptr);
+        auto no_body = [this](const httplib::Request& rq, httplib::Response& rs) { handle(rq, rs, nullptr); };
+        auto with_body = [this](const httplib::Request& rq, httplib::Response& rs, const httplib::ContentReader& cr) {
+            handle(rq, rs, &cr);
         };
-        auto with_body = [this](const httplib::Request& rq, httplib::Response& rs,
-                                const httplib::ContentReader& cr) { handle(rq, rs, &cr); };
-        svr_->Get(pat, no_body);       // HEAD reuses the Get route in httplib
+        svr_->Get(pat, no_body);  // HEAD reuses the Get route in httplib
         svr_->Options(pat, no_body);
         svr_->Post(pat, with_body);
         svr_->Put(pat, with_body);
@@ -208,8 +215,7 @@ public:
             port_ = static_cast<uint16_t>(p);
         } else {
             if (!svr_->bind_to_port(addr, port))
-                throw std::runtime_error("httplib bind failed on " + addr + ":" +
-                                         std::to_string(port));
+                throw std::runtime_error("httplib bind failed on " + addr + ":" + std::to_string(port));
             port_ = port;
         }
         if (tls_holder_) tls_holder_->start_watch(cfg_.tls_reload_interval_sec);
@@ -225,7 +231,8 @@ public:
         // three drivers): without this check, stop() in that ordering is a
         // no-op (is_running_ not yet set) and listen never returns
         if (!stopping_.load()) {
-            svr_->listen_after_bind();  // httplib's thread pool is joined before returning (in-flight requests finished)
+            svr_->listen_after_bind();  // httplib's thread pool is joined before returning (in-flight requests
+                                        // finished)
         }
         LOG_INFO("httplib http server stopped");
     }
@@ -249,8 +256,7 @@ public:
     }
 
 private:
-    void handle(const httplib::Request& rq, httplib::Response& rs,
-                const httplib::ContentReader* content_reader) {
+    void handle(const httplib::Request& rq, httplib::Response& rs, const httplib::ContentReader* content_reader) {
         // Range is handled by L2, which replies 206 directly; clear ranges so httplib does not re-slice 2xx responses
         const_cast<httplib::Request&>(rq).ranges.clear();
 
@@ -291,7 +297,7 @@ private:
         if (header_bytes > cfg_.max_header_size) {
             counters_.parse_error();
             apply_fallback(rs, driver::upstream_error_response(s3::S3ErrorCode::InvalidRequest,
-                                                              "Request header fields too large."));
+                                                               "Request header fields too large."));
             rs.status = 431;  // InvalidRequest maps to 400; reply 431 here per upstream semantics
             rs.set_header("Connection", "close");
             return;
@@ -326,8 +332,7 @@ private:
             queue = std::make_shared<BlockQueue>(cfg_.body_queue_cap);
             req.body = std::make_unique<QueueBodyReader>(queue, content_length, &req_exec);
             pump = std::thread([content_reader, queue] {
-                bool ok = (*content_reader)(
-                    [&](const char* data, size_t n) { return queue->push(data, n); });
+                bool ok = (*content_reader)([&](const char* data, size_t n) { return queue->push(data, n); });
                 queue->close(ok);
             });
         } else if (content_length) {
@@ -343,7 +348,8 @@ private:
         }
 
         if (pump.joinable()) {
-            // The handler may not have read the whole body: drain a bounded amount to keep the connection, cancel if too large (connection closes afterwards)
+            // The handler may not have read the whole body: drain a bounded amount to keep the connection, cancel if
+            // too large (connection closes afterwards)
             try {
                 std::byte tmp[driver::kScratchBytes];
                 uint64_t drained = 0;
@@ -383,8 +389,7 @@ private:
                 continue;
             rs.set_header(k, v);
         }
-        if (!rs.has_header("Date"))
-            rs.set_header("Date", util::http_date(std::chrono::system_clock::now()));
+        if (!rs.has_header("Date")) rs.set_header("Date", util::http_date(std::chrono::system_clock::now()));
 
         if (head_request) {
             // HEAD skips the set_content family (httplib writes no body); the
@@ -394,16 +399,14 @@ private:
             // four drivers) — writing 0 would be a lie
             if (has_content_type) rs.set_header("Content-Type", content_type);
             if (driver::head_length_known(resp))
-                rs.set_header("Content-Length",
-                              std::to_string(resp.content_length.value_or(resp.small_body.size())));
+                rs.set_header("Content-Length", std::to_string(resp.content_length.value_or(resp.small_body.size())));
             else
                 rs.set_header("Connection", "close");
             return;
         }
 
         if (!resp.stream_body) {
-            if (!resp.small_body.empty())
-                rs.set_content(std::move(resp.small_body), content_type);
+            if (!resp.small_body.empty()) rs.set_content(std::move(resp.small_body), content_type);
             return;
         }
 
@@ -432,28 +435,26 @@ private:
                     }
                     if (chunk.empty()) return false;  // EOF before the length is reached counts as an error
                     if (chunk.size() > length) {
-                        LOG_ERROR("stream body overruns declared Content-Length ({} > {} left)",
-                                  chunk.size(), length);
+                        LOG_ERROR("stream body overruns declared Content-Length ({} > {} left)", chunk.size(), length);
                         return false;
                     }
                     return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
                 });
         } else {
-            rs.set_chunked_content_provider(
-                content_type, [st](size_t /*offset*/, httplib::DataSink& sink) {
-                    std::span<const std::byte> chunk;
-                    try {
-                        chunk = st->pf.next_sync();
-                    } catch (const std::exception& e) {
-                        LOG_ERROR("stream body read failed mid-response: {}", e.what());
-                        return false;
-                    }
-                    if (chunk.empty()) {
-                        sink.done();
-                        return true;
-                    }
-                    return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
-                });
+            rs.set_chunked_content_provider(content_type, [st](size_t /*offset*/, httplib::DataSink& sink) {
+                std::span<const std::byte> chunk;
+                try {
+                    chunk = st->pf.next_sync();
+                } catch (const std::exception& e) {
+                    LOG_ERROR("stream body read failed mid-response: {}", e.what());
+                    return false;
+                }
+                if (chunk.empty()) {
+                    sink.done();
+                    return true;
+                }
+                return sink.write(reinterpret_cast<const char*>(chunk.data()), chunk.size());
+            });
         }
     }
 
@@ -472,9 +473,8 @@ private:
 }  // namespace
 
 void register_httplib_driver() {
-    HttpServerFactory::register_driver("httplib", [](const HttpConfig& cfg) {
-        return std::make_unique<HttplibServer>(cfg);
-    });
+    HttpServerFactory::register_driver("httplib",
+                                       [](const HttpConfig& cfg) { return std::make_unique<HttplibServer>(cfg); });
 }
 
 }  // namespace lights3::http

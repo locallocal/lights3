@@ -51,8 +51,7 @@ void MemoryBackend::reserve_locked(int64_t delta) {
     if (delta > 0 && opt_.max_bytes) {
         uint64_t want = used_bytes_ + uint64_t(delta);
         if (want > opt_.max_bytes)
-            throw S3Error(S3ErrorCode::SlowDown,
-                          "memory backend is at its configured max_bytes capacity");
+            throw S3Error(S3ErrorCode::SlowDown, "memory backend is at its configured max_bytes capacity");
     }
     used_bytes_ = uint64_t(int64_t(used_bytes_) + delta);
 }
@@ -64,8 +63,7 @@ void MemoryBackend::reserve_locked(int64_t delta) {
 // buffered bytes" and return 503 over the limit (same semantics as reserve_locked)
 void MemoryBackend::check_inflight(size_t buffered) const {
     if (opt_.max_bytes && used_bytes() + buffered > opt_.max_bytes)
-        throw S3Error(S3ErrorCode::SlowDown,
-                      "memory backend is at its configured max_bytes capacity");
+        throw S3Error(S3ErrorCode::SlowDown, "memory backend is at its configured max_bytes capacity");
 }
 
 // mpu expiry cleanup (docs/archive/gaps.md §6.3): this backend takes no timer (having no
@@ -89,8 +87,7 @@ void MemoryBackend::expire_uploads_locked() {
 
 MemoryBackend::Bucket& MemoryBackend::bucket_or_throw(const std::string& name) {
     auto it = buckets_.find(name);
-    if (it == buckets_.end())
-        throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", name);
+    if (it == buckets_.end()) throw S3Error(S3ErrorCode::NoSuchBucket, "The specified bucket does not exist", name);
     return it->second;
 }
 
@@ -98,8 +95,7 @@ Task<void> MemoryBackend::create_bucket(std::string_view bucket) {
     validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     std::string name(bucket);
-    if (buckets_.count(name))
-        throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists", name);
+    if (buckets_.count(name)) throw S3Error(S3ErrorCode::BucketAlreadyOwnedByYou, "Bucket already exists", name);
     buckets_[name].info = {name, std::chrono::system_clock::now()};
     co_return;
 }
@@ -109,8 +105,7 @@ Task<void> MemoryBackend::delete_bucket(std::string_view bucket) {
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
     if (!b.objects.empty())
-        throw S3Error(S3ErrorCode::BucketNotEmpty, "The bucket you tried to delete is not empty",
-                      std::string(bucket));
+        throw S3Error(S3ErrorCode::BucketNotEmpty, "The bucket you tried to delete is not empty", std::string(bucket));
     buckets_.erase(std::string(bucket));
     co_return;
 }
@@ -128,9 +123,8 @@ Task<std::vector<BucketInfo>> MemoryBackend::list_buckets() {
     co_return out;
 }
 
-Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_view key,
-                                          ObjectMeta meta, http::BodyReader& body,
-                                          PutCondition cond) {
+Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
+                                          http::BodyReader& body, PutCondition cond) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     // Read the body to the end first (without the lock), then commit
@@ -158,16 +152,13 @@ Task<PutResult> MemoryBackend::put_object(std::string_view bucket, std::string_v
         auto it = b.objects.find(std::string(key));
         if (cond.if_none_match && it != b.objects.end())
             throw S3Error(S3ErrorCode::PreconditionFailed,
-                          "At least one of the pre-conditions you specified did not hold",
-                          std::string(key));
+                          "At least one of the pre-conditions you specified did not hold", std::string(key));
         if (cond.if_match_etag) {
             if (it == b.objects.end())
-                throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                              std::string(key));
+                throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
             if (*cond.if_match_etag != it->second.meta.etag)
                 throw S3Error(S3ErrorCode::PreconditionFailed,
-                              "At least one of the pre-conditions you specified did not hold",
-                              std::string(key));
+                              "At least one of the pre-conditions you specified did not hold", std::string(key));
         }
     }
     PutResult r{meta.etag};
@@ -194,8 +185,7 @@ Task<ObjectStream> MemoryBackend::get_object(std::string_view bucket, std::strin
         auto& b = bucket_or_throw(std::string(bucket));
         auto it = b.objects.find(std::string(key));
         if (it == b.objects.end())
-            throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                          std::string(key));
+            throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
         out.meta = it->second.meta;
         blob = it->second.data;
     }
@@ -216,21 +206,18 @@ Task<ObjectMeta> MemoryBackend::head_object(std::string_view bucket, std::string
     auto& b = bucket_or_throw(std::string(bucket));
     auto it = b.objects.find(std::string(key));
     if (it == b.objects.end())
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     co_return it->second.meta;
 }
 
-Task<void> MemoryBackend::set_object_tagging(std::string_view bucket, std::string_view key,
-                                             std::string tagging) {
+Task<void> MemoryBackend::set_object_tagging(std::string_view bucket, std::string_view key, std::string tagging) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     std::lock_guard lk(m_);
     auto& b = bucket_or_throw(std::string(bucket));
     auto it = b.objects.find(std::string(key));
     if (it == b.objects.end())
-        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                      std::string(key));
+        throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
     it->second.meta.tagging = std::move(tagging);
     co_return;
 }
@@ -260,32 +247,28 @@ Task<ListResult> MemoryBackend::list_objects(std::string_view bucket, const List
 
 // ---------- multipart ----------
 
-MemoryBackend::Upload& MemoryBackend::upload_or_throw(std::string_view bucket,
-                                                      std::string_view key,
+MemoryBackend::Upload& MemoryBackend::upload_or_throw(std::string_view bucket, std::string_view key,
                                                       std::string_view upload_id) {
     auto it = uploads_.find(std::string(upload_id));
     if (it == uploads_.end() || it->second.bucket != bucket || it->second.key != key)
-        throw S3Error(S3ErrorCode::NoSuchUpload,
-                      "The specified multipart upload does not exist.", std::string(upload_id));
+        throw S3Error(S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.",
+                      std::string(upload_id));
     return it->second;
 }
 
-Task<std::string> MemoryBackend::create_multipart(std::string_view bucket, std::string_view key,
-                                                  ObjectMeta meta) {
+Task<std::string> MemoryBackend::create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) {
     validate_bucket_name(bucket, kAllowReserved);
     validate_object_key(key);
     std::lock_guard lk(m_);
     expire_uploads_locked();
     bucket_or_throw(std::string(bucket));
     std::string id = new_upload_id();
-    uploads_[id] = Upload{std::string(bucket), std::string(key), std::move(meta), {},
-                          std::chrono::system_clock::now()};
+    uploads_[id] = Upload{std::string(bucket), std::string(key), std::move(meta), {}, std::chrono::system_clock::now()};
     co_return id;
 }
 
-Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_view key,
-                                           std::string_view upload_id, int part_no,
-                                           http::BodyReader& body,
+Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id,
+                                           int part_no, http::BodyReader& body,
                                            const std::optional<PartChecksum>& checksum) {
     validate_part_number(part_no);
     {
@@ -310,8 +293,7 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
     // check passes (same as put_object, otherwise a throw from reserve leaves a ghost part
     // with an empty etag)
     auto it = up.parts.find(part_no);
-    reserve_locked(int64_t(data.size()) -
-                   (it != up.parts.end() ? int64_t(it->second.data.size()) : 0));
+    reserve_locked(int64_t(data.size()) - (it != up.parts.end() ? int64_t(it->second.data.size()) : 0));
     Part part{std::move(data), etag, std::chrono::system_clock::now(), "", ""};
     if (checksum) {  // resolved() only after the body was drained above (trailer form)
         part.checksum_algorithm = checksum->algorithm;
@@ -322,8 +304,7 @@ Task<PutResult> MemoryBackend::upload_part(std::string_view bucket, std::string_
 }
 
 Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::string_view key,
-                                                  std::string_view upload_id,
-                                                  std::span<const PartInfo> parts) {
+                                                  std::string_view upload_id, std::span<const PartInfo> parts) {
     validate_part_order(parts);
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);
@@ -366,9 +347,8 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
     auto it = b.objects.find(std::string(key));
     int64_t old = it != b.objects.end() && it->second.data ? int64_t(it->second.data->size()) : 0;
     reserve_locked(int64_t(data.size()) - old);
-    b.objects.insert_or_assign(
-        std::string(key),
-        Object{std::move(meta), std::make_shared<const std::string>(std::move(data))});
+    b.objects.insert_or_assign(std::string(key),
+                               Object{std::move(meta), std::make_shared<const std::string>(std::move(data))});
     int64_t freed = 0;
     for (auto& [no, part] : up.parts) freed += int64_t(part.data.size());
     reserve_locked(-freed);
@@ -376,8 +356,7 @@ Task<PutResult> MemoryBackend::complete_multipart(std::string_view bucket, std::
     co_return r;
 }
 
-Task<void> MemoryBackend::abort_multipart(std::string_view bucket, std::string_view key,
-                                          std::string_view upload_id) {
+Task<void> MemoryBackend::abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) {
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);
     int64_t freed = 0;
@@ -388,8 +367,7 @@ Task<void> MemoryBackend::abort_multipart(std::string_view bucket, std::string_v
 }
 
 Task<ListPartsResult> MemoryBackend::list_parts(std::string_view bucket, std::string_view key,
-                                                std::string_view upload_id,
-                                                const ListPartsOptions& opt) {
+                                                std::string_view upload_id, const ListPartsOptions& opt) {
     std::lock_guard lk(m_);
     auto& up = upload_or_throw(bucket, key, upload_id);
     // parts is a std::map<int,...>, so iteration is already ascending; entries before the
@@ -401,8 +379,7 @@ Task<ListPartsResult> MemoryBackend::list_parts(std::string_view bucket, std::st
     co_return apply_parts_page(std::move(all), opt);
 }
 
-Task<ListUploadsResult> MemoryBackend::list_multipart_uploads(std::string_view bucket,
-                                                              const ListUploadsOptions& opt) {
+Task<ListUploadsResult> MemoryBackend::list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) {
     validate_bucket_name(bucket, kAllowReserved);
     std::lock_guard lk(m_);
     expire_uploads_locked();

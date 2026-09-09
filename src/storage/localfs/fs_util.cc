@@ -30,8 +30,7 @@ using s3::S3ErrorCode;
 std::string next_tmp_name() {
     static std::atomic<uint64_t> seq{0};
     std::ostringstream os;
-    os << ::getpid() << "-" << std::chrono::steady_clock::now().time_since_epoch().count()
-       << "-" << seq.fetch_add(1);
+    os << ::getpid() << "-" << std::chrono::steady_clock::now().time_since_epoch().count() << "-" << seq.fetch_add(1);
     return os.str();
 }
 
@@ -132,10 +131,8 @@ std::vector<std::pair<std::string, std::string>> read_tsv(const fs::path& path) 
     return out;
 }
 
-std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
-                                                         const TierInfo& tier) {
-    std::vector<std::pair<std::string, std::string>> kv{{"etag", meta.etag},
-                                                        {"content_type", meta.content_type}};
+std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta, const TierInfo& tier) {
+    std::vector<std::pair<std::string, std::string>> kv{{"etag", meta.etag}, {"content_type", meta.content_type}};
     if (tier.tier != Tier::kLocal) {
         kv.emplace_back("tier", tier.tier == Tier::kRemote ? "remote" : "cached");
         kv.emplace_back("size", std::to_string(meta.size));
@@ -154,8 +151,7 @@ std::vector<std::pair<std::string, std::string>> meta_kv(const ObjectMeta& meta,
         kv.emplace_back("checksum_value", cv);
         if (!meta.checksum_type.empty()) kv.emplace_back("checksum_type", meta.checksum_type);
     }
-    if (!meta.part_sizes.empty())
-        kv.emplace_back("part_sizes", join_part_sizes(meta.part_sizes));
+    if (!meta.part_sizes.empty()) kv.emplace_back("part_sizes", join_part_sizes(meta.part_sizes));
     for (auto& [k, v] : meta.user_meta) kv.emplace_back("meta." + k, v);
     return kv;
 }
@@ -168,8 +164,7 @@ std::string kv_to_tsv(const std::vector<std::pair<std::string, std::string>>& kv
 
 // When tier=local, do not write the tier/size/remote.* keys: keeps the format of existing
 // sidecars unchanged
-static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
-                          const fs::path& staging_dir,
+static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta, const fs::path& staging_dir,
                           const TierInfo& tier = TierInfo{}) {
     write_tsv(sidecar, staging_dir, meta_kv(meta, tier));
 }
@@ -185,24 +180,23 @@ static void write_sidecar(const fs::path& sidecar, const ObjectMeta& meta,
 // -- but must leave a trace: degradation means falling back to the "two-rename"
 // consistency model, and if it happens silently operators have no way to know
 // (docs/archive/gaps.md §3.9). Warn only once per errno kind to avoid flooding the write path
-bool set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier,
-                    MetaXattrPolicy* policy) {
+bool set_meta_xattr(const fs::path& path, const ObjectMeta& meta, const TierInfo& tier, MetaXattrPolicy* policy) {
     std::string blob = kv_to_tsv(meta_kv(meta, tier));
     if (::setxattr(path.c_str(), kMetaXattr, blob.data(), blob.size(), 0) == 0) return true;
     static std::atomic<int> last_errno{0};
     int e = errno;
     if (last_errno.exchange(e) != e)
-        LOG_WARN("setxattr({}) failed: {} — object metadata falls back to sidecar-only "
-                 "(two-rename consistency model)",
-                 path.string(), strerror(e));
+        LOG_WARN(
+            "setxattr({}) failed: {} — object metadata falls back to sidecar-only "
+            "(two-rename consistency model)",
+            path.string(), strerror(e));
     if (policy) {
         policy->note_failure();
         // Fail-fast (roadmap §3.5): the caller has not renamed yet, so refusing here leaves
         // no half-committed object -- the tmp is discarded by TmpFile RAII
         if (policy->required)
             throw S3Error(S3ErrorCode::InternalError,
-                          std::string("object metadata xattr write failed (require_xattr): ") +
-                              strerror(e));
+                          std::string("object metadata xattr write failed (require_xattr): ") + strerror(e));
     }
     return false;
 }
@@ -228,15 +222,17 @@ SidecarMode parse_sidecar_mode(std::string_view s) {
     if (s == "sync") return SidecarMode::kSync;
     if (s == "async") return SidecarMode::kAsync;
     if (s == "lazy") return SidecarMode::kLazy;
-    throw std::runtime_error("sidecar must be one of sync|async|lazy, got '" + std::string(s) +
-                             "'");
+    throw std::runtime_error("sidecar must be one of sync|async|lazy, got '" + std::string(s) + "'");
 }
 
 const char* sidecar_mode_name(SidecarMode m) {
     switch (m) {
-        case SidecarMode::kSync: return "sync";
-        case SidecarMode::kAsync: return "async";
-        case SidecarMode::kLazy: return "lazy";
+        case SidecarMode::kSync:
+            return "sync";
+        case SidecarMode::kAsync:
+            return "async";
+        case SidecarMode::kLazy:
+            return "lazy";
     }
     return "?";
 }
@@ -268,23 +264,21 @@ void prepare_object_dest(const fs::path& dest, std::string_view key) {
         // are all 500 -- mapping them to 400 means clients won't retry and operators never
         // get the disk-full signal (docs/archive/gaps.md §3.9)
         if (ec == std::errc::not_a_directory || ec == std::errc::file_exists)
-            throw S3Error(S3ErrorCode::InvalidArgument,
-                          "Object key conflicts with an existing object path", std::string(key));
-        throw S3Error(S3ErrorCode::InternalError,
-                      "create object directory: " + ec.message(), std::string(key));
+            throw S3Error(S3ErrorCode::InvalidArgument, "Object key conflicts with an existing object path",
+                          std::string(key));
+        throw S3Error(S3ErrorCode::InternalError, "create object directory: " + ec.message(), std::string(key));
     }
     if (fs::is_directory(dest))
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Object key conflicts with an existing key prefix", std::string(key));
+        throw S3Error(S3ErrorCode::InvalidArgument, "Object key conflicts with an existing key prefix",
+                      std::string(key));
 }
 
-void write_object_sidecar(const fs::path& dest, const ObjectMeta& meta,
-                          const fs::path& staging_put) {
+void write_object_sidecar(const fs::path& dest, const ObjectMeta& meta, const fs::path& staging_put) {
     write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put);
 }
 
-bool finish_object_sidecar(const fs::path& dest, const ObjectMeta& meta,
-                           const fs::path& staging_put, SidecarMode mode, bool xattr_ok) {
+bool finish_object_sidecar(const fs::path& dest, const ObjectMeta& meta, const fs::path& staging_put, SidecarMode mode,
+                           bool xattr_ok) {
     // A failed xattr makes the sidecar the only metadata source: it must be on disk
     // before the caller answers, whatever the configured mode
     if (!xattr_ok || mode == SidecarMode::kSync) {
@@ -300,9 +294,8 @@ bool finish_object_sidecar(const fs::path& dest, const ObjectMeta& meta,
     return false;
 }
 
-bool commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                        const fs::path& staging_put, std::string_view key,
-                        const CommitOptions& opt) {
+bool commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta, const fs::path& staging_put,
+                        std::string_view key, const CommitOptions& opt) {
     prepare_object_dest(dest, key);
     std::error_code ec;
     bool xattr_ok = opt.xattr_ok;
@@ -323,17 +316,18 @@ bool commit_object_file(const fs::path& dest, TmpFile& tmp, const ObjectMeta& me
         xattr_ok = set_meta_xattr(tmp.path, meta, TierInfo{}, opt.xattr);
         fsync_path(tmp.path);  // persist the data content first, then splice it into the tree
     }
-    if (int fe = fault::check("localfs.rename")) ec = std::error_code(fe, std::generic_category());
-    else fs::rename(tmp.path, dest, ec);
+    if (int fe = fault::check("localfs.rename"))
+        ec = std::error_code(fe, std::generic_category());
+    else
+        fs::rename(tmp.path, dest, ec);
     if (ec) throw S3Error(S3ErrorCode::InternalError, "rename object failed: " + ec.message());
     tmp.committed = true;
     fsync_dir(dest.parent_path());
     return finish_object_sidecar(dest, meta, staging_put, opt.sidecar, xattr_ok);
 }
 
-void rewrite_object_meta(const fs::path& data_path, const ObjectMeta& meta,
-                         const TierInfo& tier, const fs::path& staging_put, SidecarMode mode,
-                         MetaXattrPolicy* policy) {
+void rewrite_object_meta(const fs::path& data_path, const ObjectMeta& meta, const TierInfo& tier,
+                         const fs::path& staging_put, SidecarMode mode, MetaXattrPolicy* policy) {
     bool xattr_ok = set_meta_xattr(data_path, meta, tier, policy);
     fs::path sidecar(data_path.string() + kSidecarSuffix);
     if (mode == SidecarMode::kLazy && xattr_ok) {
@@ -343,8 +337,7 @@ void rewrite_object_meta(const fs::path& data_path, const ObjectMeta& meta,
     write_sidecar(sidecar, meta, staging_put, tier);
 }
 
-void check_put_condition(const fs::path& data_path, const PutCondition& cond,
-                         std::string_view key) {
+void check_put_condition(const fs::path& data_path, const PutCondition& cond, std::string_view key) {
     if (!cond.active()) return;
     std::optional<ObjectMeta> cur;
     try {
@@ -353,43 +346,47 @@ void check_put_condition(const fs::path& data_path, const PutCondition& cond,
         if (e.code != S3ErrorCode::NoSuchKey) throw;
     }
     if (cond.if_none_match && cur)
-        throw S3Error(S3ErrorCode::PreconditionFailed,
-                      "At least one of the pre-conditions you specified did not hold",
+        throw S3Error(S3ErrorCode::PreconditionFailed, "At least one of the pre-conditions you specified did not hold",
                       std::string(key));
     if (cond.if_match_etag) {
-        if (!cur)
-            throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist",
-                          std::string(key));
+        if (!cur) throw S3Error(S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
         if (*cond.if_match_etag != cur->etag)
             throw S3Error(S3ErrorCode::PreconditionFailed,
-                          "At least one of the pre-conditions you specified did not hold",
-                          std::string(key));
+                          "At least one of the pre-conditions you specified did not hold", std::string(key));
     }
 }
 
 // ---- Tiered storage extensions (docs/storage/tiered-design.md §4) ----
 
 // Metadata TSV parsing (xattr and sidecar share the same format)
-static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier,
-                           uint64_t& declared_size) {
+static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier, uint64_t& declared_size) {
     std::string line;
     while (std::getline(in, line)) {
         auto tab = line.find('\t');
         if (tab == std::string::npos) continue;
         std::string k = line.substr(0, tab), v = line.substr(tab + 1);
-        if (k == "etag") meta.etag = v;
-        else if (k == "content_type") meta.content_type = v;
-        else if (k == "tier") tier.tier = (v == "remote") ? Tier::kRemote
-                                          : (v == "cached") ? Tier::kCached
-                                                            : Tier::kLocal;
-        else if (k == "size") std::from_chars(v.data(), v.data() + v.size(), declared_size);
-        else if (k == "remote.etag") tier.remote_etag = v;
-        else if (k == "remote.at") tier.remote_at = v;
-        else if (k == "checksum_algorithm") meta.checksum_algorithm = v;
-        else if (k == "checksum_value") meta.checksum_value = v;
-        else if (k == "checksum_type") meta.checksum_type = v;
-        else if (k == "part_sizes") meta.part_sizes = parse_part_sizes(v);
-        else if (k.rfind("meta.", 0) == 0) meta.user_meta[k.substr(5)] = v;
+        if (k == "etag")
+            meta.etag = v;
+        else if (k == "content_type")
+            meta.content_type = v;
+        else if (k == "tier")
+            tier.tier = (v == "remote") ? Tier::kRemote : (v == "cached") ? Tier::kCached : Tier::kLocal;
+        else if (k == "size")
+            std::from_chars(v.data(), v.data() + v.size(), declared_size);
+        else if (k == "remote.etag")
+            tier.remote_etag = v;
+        else if (k == "remote.at")
+            tier.remote_at = v;
+        else if (k == "checksum_algorithm")
+            meta.checksum_algorithm = v;
+        else if (k == "checksum_value")
+            meta.checksum_value = v;
+        else if (k == "checksum_type")
+            meta.checksum_type = v;
+        else if (k == "part_sizes")
+            meta.part_sizes = parse_part_sizes(v);
+        else if (k.rfind("meta.", 0) == 0)
+            meta.user_meta[k.substr(5)] = v;
         else {
             for (auto& f : kStdMetaFields)
                 if (k == f.store_key) meta.*f.field = v;
@@ -397,9 +394,7 @@ static void parse_meta_tsv(std::istream& in, ObjectMeta& meta, TierInfo& tier,
     }
 }
 
-bool has_meta_xattr(const fs::path& data_path) {
-    return ::getxattr(data_path.c_str(), kMetaXattr, nullptr, 0) >= 0;
-}
+bool has_meta_xattr(const fs::path& data_path) { return ::getxattr(data_path.c_str(), kMetaXattr, nullptr, 0) >= 0; }
 
 ObjectMeta load_object_meta(const fs::path& data_path, std::string key, TierInfo* tier_out) {
     struct stat st{};
@@ -408,8 +403,8 @@ ObjectMeta load_object_meta(const fs::path& data_path, std::string key, TierInfo
     return load_object_meta_stat(data_path, std::move(key), st, tier_out);
 }
 
-ObjectMeta load_object_meta_stat(const fs::path& data_path, std::string key,
-                                 const struct stat& st, TierInfo* tier_out) {
+ObjectMeta load_object_meta_stat(const fs::path& data_path, std::string key, const struct stat& st,
+                                 TierInfo* tier_out) {
     ObjectMeta meta;
     meta.key = std::move(key);
     meta.size = static_cast<uint64_t>(st.st_size);
@@ -434,8 +429,7 @@ ObjectMeta load_object_meta_stat(const fs::path& data_path, std::string key,
     return meta;
 }
 
-void commit_stub(const fs::path& dest, const ObjectMeta& meta, const TierInfo& tier,
-                 const fs::path& staging_put) {
+void commit_stub(const fs::path& dest, const ObjectMeta& meta, const TierInfo& tier, const fs::path& staging_put) {
     write_sidecar(fs::path(dest.string() + kSidecarSuffix), meta, staging_put, tier);
     TmpFile tmp{staging_put / next_tmp_name()};
     tmp.fd = ::open(tmp.path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
@@ -448,8 +442,8 @@ void commit_stub(const fs::path& dest, const ObjectMeta& meta, const TierInfo& t
     tmp.committed = true;
 }
 
-void commit_cached(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
-                   const TierInfo& tier, const fs::path& staging_put) {
+void commit_cached(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta, const TierInfo& tier,
+                   const fs::path& staging_put) {
     // The opposite of stubbing: rename the data first, then write the sidecar. On a crash
     // in between, the sidecar still says remote (reads go to the cloud, correct), and the
     // data file is reclaimed by the scanner via "remote but size>0"; the reverse order has
@@ -464,8 +458,10 @@ void commit_cached(const fs::path& dest, TmpFile& tmp, const ObjectMeta& meta,
     // commit_object_file's ordering
     fsync_path(tmp.path);
     std::error_code ec;
-    if (int fe = fault::check("localfs.rename")) ec = std::error_code(fe, std::generic_category());
-    else fs::rename(tmp.path, dest, ec);
+    if (int fe = fault::check("localfs.rename"))
+        ec = std::error_code(fe, std::generic_category());
+    else
+        fs::rename(tmp.path, dest, ec);
     if (ec) throw s3::S3Error(s3::S3ErrorCode::InternalError, "rename cached data failed: " + ec.message());
     tmp.committed = true;
     fsync_dir(dest.parent_path());
@@ -492,31 +488,35 @@ std::string part_file_name(int part_no) {
     return buf;
 }
 
-UploadState require_upload(const fs::path& staging, std::string_view bucket,
-                           std::string_view key, std::string_view upload_id,
+UploadState require_upload(const fs::path& staging, std::string_view bucket, std::string_view key,
+                           std::string_view upload_id,
                            const std::vector<std::pair<std::string, std::string>>& manifest) {
     UploadState up;
     up.dir = staging / "mpu" / std::string(upload_id);
     std::string m_bucket, m_key;
     for (auto& [k, v] : manifest) {
-        if (k == "bucket") m_bucket = v;
-        else if (k == "key") m_key = v;
-        else if (k == "content_type") up.meta.content_type = v;
-        else if (k == "checksum_algorithm") up.meta.checksum_algorithm = v;
-        else if (k.rfind("meta.", 0) == 0) up.meta.user_meta[k.substr(5)] = v;
+        if (k == "bucket")
+            m_bucket = v;
+        else if (k == "key")
+            m_key = v;
+        else if (k == "content_type")
+            up.meta.content_type = v;
+        else if (k == "checksum_algorithm")
+            up.meta.checksum_algorithm = v;
+        else if (k.rfind("meta.", 0) == 0)
+            up.meta.user_meta[k.substr(5)] = v;
         else {
             for (auto& f : kStdMetaFields)
                 if (k == f.store_key) up.meta.*f.field = v;
         }
     }
     if (manifest.empty() || m_bucket != bucket || m_key != key)
-        throw S3Error(S3ErrorCode::NoSuchUpload,
-                      "The specified multipart upload does not exist.", std::string(upload_id));
+        throw S3Error(S3ErrorCode::NoSuchUpload, "The specified multipart upload does not exist.",
+                      std::string(upload_id));
     return up;
 }
 
-std::vector<std::pair<std::string, std::string>> load_manifest(const fs::path& staging,
-                                                               std::string_view upload_id) {
+std::vector<std::pair<std::string, std::string>> load_manifest(const fs::path& staging, std::string_view upload_id) {
     if (!is_valid_upload_id(upload_id)) return {};
     fs::path manifest = staging / "mpu" / std::string(upload_id) / "manifest";
     if (!fs::exists(manifest)) return {};

@@ -101,8 +101,8 @@ std::vector<uint64_t> parse_part_sizes(std::string_view s);
 // serialization all iterate this table -- adding a field only touches this spot, avoiding
 // the half-done "stored but never returned" state
 struct StdMetaField {
-    const char* header;              // S3 request/response header name
-    const char* store_key;           // key name used for backend persistence
+    const char* header;     // S3 request/response header name
+    const char* store_key;  // key name used for backend persistence
     std::string ObjectMeta::* field;
     // false = persisted/extracted via the table but not echoed as a response header
     // (tagging answers via x-amz-tagging-count / ?tagging instead)
@@ -169,7 +169,7 @@ struct PutCondition {
 
 struct ListOptions {
     std::string prefix;
-    std::string delimiter;    // arbitrary string ("" = no grouping); grouping is a generic substring find
+    std::string delimiter;  // arbitrary string ("" = no grouping); grouping is a generic substring find
     int max_keys = 1000;
     std::string start_after;  // continuation-token / start-after (a key value)
 };
@@ -200,8 +200,8 @@ struct PartInfo {
 // (roadmap §2.2): persisted with the part record so complete can compute the
 // composite ("-N") object checksum from verified values only
 struct PartChecksum {
-    std::string algorithm;  // uppercase wire name: CRC32 / CRC32C / SHA1 / SHA256
-    std::string value;      // base64; empty for trailer-form uploads until the body drains
+    std::string algorithm;                       // uppercase wire name: CRC32 / CRC32C / SHA1 / SHA256
+    std::string value;                           // base64; empty for trailer-form uploads until the body drains
     std::shared_ptr<const std::string> pending;  // trailer capture slot (see ObjectMeta)
     std::string resolved() const {
         if (!value.empty()) return value;
@@ -275,9 +275,8 @@ struct IStorageBackend {
     // body.read throwing => the backend must not commit the object (staging discarded /
     // remote transfer aborted);
     // when cond.active(), validate atomically at the commit point per the PutCondition contract
-    virtual Task<PutResult> put_object(std::string_view bucket, std::string_view key,
-                                       ObjectMeta meta, http::BodyReader& body,
-                                       PutCondition cond = {}) = 0;
+    virtual Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
+                                       http::BodyReader& body, PutCondition cond = {}) = 0;
     virtual Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) = 0;
     // Same-backend copy fast path (docs/archive/gaps.md §6.3): when src and dst both belong to this
     // backend, the CopyObject handler tries this hook first. Returning nullopt = no fast
@@ -290,8 +289,7 @@ struct IStorageBackend {
     virtual Task<std::optional<PutResult>> copy_object_fast(std::string_view /*src_bucket*/,
                                                             std::string_view /*src_key*/,
                                                             std::string_view /*dst_bucket*/,
-                                                            std::string_view /*dst_key*/,
-                                                            ObjectMeta /*meta*/) {
+                                                            std::string_view /*dst_key*/, ObjectMeta /*meta*/) {
         co_return std::nullopt;
     }
     // GET ?partNumber support (roadmap §2.5): byte extent of one part of a completed
@@ -303,8 +301,8 @@ struct IStorageBackend {
         uint64_t size = 0;
         int parts_count = 0;
     };
-    virtual Task<std::optional<ObjectPartExtent>> resolve_object_part(
-        std::string_view /*bucket*/, std::string_view /*key*/, int /*part_no*/) {
+    virtual Task<std::optional<ObjectPartExtent>> resolve_object_part(std::string_view /*bucket*/,
+                                                                      std::string_view /*key*/, int /*part_no*/) {
         co_return std::nullopt;
     }
 
@@ -327,22 +325,19 @@ struct IStorageBackend {
 
     // ---- multipart (docs/storage/storage-backend.md §1/§3.2) ----
     // Returns upload_id; meta carries the desired content_type/user_meta, applied at complete
-    virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
-                                               ObjectMeta meta) = 0;
+    virtual Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) = 0;
     // part_no ∈ [1,10000]; re-uploading the same number is last-write-wins; returns the
     // part's ETag (content MD5). checksum (roadmap §2.2): nullopt = no checksum declared;
     // implementations persist checksum->resolved() with the part record AFTER draining
     // the body (trailer-form values only exist by then). Overrides must re-export the
     // convenience overload with `using IStorageBackend::upload_part;`
-    virtual Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                        std::string_view upload_id, int part_no,
-                                        http::BodyReader& body,
+    virtual Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id,
+                                        int part_no, http::BodyReader& body,
                                         const std::optional<PartChecksum>& checksum) = 0;
     // A coroutine, not a plain forwarder: the checksum argument must outlive the inner
     // coroutine's suspension points, so it lives in this wrapper's frame (a temporary
     // bound to the inner call's reference parameter would dangle)
-    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                std::string_view upload_id, int part_no,
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id, int part_no,
                                 http::BodyReader& body) {
         std::optional<PartChecksum> none;
         co_return co_await upload_part(bucket, key, upload_id, part_no, body, none);
@@ -350,25 +345,20 @@ struct IStorageBackend {
     // parts must have strictly increasing part numbers and ETags matching the uploaded parts;
     // total ETag = md5(concatenation of each part's binary md5)-N (same rule as S3)
     virtual Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
-                                               std::string_view upload_id,
-                                               std::span<const PartInfo> parts) = 0;
-    virtual Task<void> abort_multipart(std::string_view bucket, std::string_view key,
-                                       std::string_view upload_id) = 0;
+                                               std::string_view upload_id, std::span<const PartInfo> parts) = 0;
+    virtual Task<void> abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) = 0;
     // Ascending by part_no, report is_truncated truthfully; missing upload throws NoSuchUpload.
     // Pagination semantics are defined once by apply_parts_page in storage/listing.h;
     // implementations may push the marker down first and then hand off to it, but must not
     // invent their own truncation rules
-    virtual Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
-                                             std::string_view upload_id,
+    virtual Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                              const ListPartsOptions& opt) = 0;
     // Active uploads of the bucket, ascending by (key, upload_id), report is_truncated truthfully
-    virtual Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
-                                                           const ListUploadsOptions& opt) = 0;
+    virtual Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) = 0;
 
     // Operator introspection (roadmap §6.2): nullopt = this engine exposes no layout.
     // Missing bucket/key throw NoSuchBucket/NoSuchKey like head_object
-    virtual Task<std::optional<ObjectLayout>> inspect_object(std::string_view /*bucket*/,
-                                                             std::string_view /*key*/) {
+    virtual Task<std::optional<ObjectLayout>> inspect_object(std::string_view /*bucket*/, std::string_view /*key*/) {
         co_return std::nullopt;
     }
     virtual Task<void> close() { co_return; }

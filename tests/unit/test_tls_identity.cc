@@ -8,9 +8,9 @@
 #include "core/util/crypto.h"
 #include "http/tls.h"
 #include "s3/auth/credential_store.h"
+#include "s3/quota.h"
 #include "s3/service.h"
 #include "s3/tenant.h"
-#include "s3/quota.h"
 #include "s3/tls_identity_store.h"
 #include "s3/usage.h"
 #include "s3/website_store.h"
@@ -65,11 +65,9 @@ struct Env {
         tenant_store = sync_wait(TenantStore::load(backend));
         owner_store = sync_wait(OwnerStore::load(backend));
         tenants = std::make_shared<TenantRegistry>(tenant_store, owner_store);
-        usage = sync_wait(UsageTracker::load(storage::BucketRouter::build(bcfg, backends), {},
-                                             nullptr));
+        usage = sync_wait(UsageTracker::load(storage::BucketRouter::build(bcfg, backends), {}, nullptr));
         quota = sync_wait(QuotaStore::load(backend));
-        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, backends),
-                                          std::move(auth));
+        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, backends), std::move(auth));
         svc->set_usage_tracker(usage);
         svc->set_quota_store(quota);
         svc->set_credential_store(cred_store);
@@ -79,9 +77,8 @@ struct Env {
     }
 
     // cred = nullptr -> unsigned; cert = nullopt -> no client certificate
-    http::HttpResponse call(std::string method, std::string path, const Credential* cred,
-                            std::optional<Cert> cert, std::string body = "",
-                            std::vector<std::pair<std::string, std::string>> query = {}) {
+    http::HttpResponse call(std::string method, std::string path, const Credential* cred, std::optional<Cert> cert,
+                            std::string body = "", std::vector<std::pair<std::string, std::string>> query = {}) {
         http::HttpRequest req;
         req.method = std::move(method);
         req.raw_path = path;
@@ -99,30 +96,24 @@ struct Env {
         if (cred) signer.sign(req, *cred, hash);
         return sync_wait(svc->dispatch(std::move(req)));
     }
-    json admin(const Credential* cred, std::optional<Cert> cert, std::string method,
-               std::string path, json body = {}, int expect = 200) {
-        auto r = call(std::move(method), path, cred, std::move(cert),
-                      body.is_null() ? "" : body.dump());
+    json admin(const Credential* cred, std::optional<Cert> cert, std::string method, std::string path, json body = {},
+               int expect = 200) {
+        auto r = call(std::move(method), path, cred, std::move(cert), body.is_null() ? "" : body.dump());
         if (r.status != expect)
-            throw mini_test::Failure("admin " + path + " -> HTTP " + std::to_string(r.status) +
-                                     " " + r.small_body);
+            throw mini_test::Failure("admin " + path + " -> HTTP " + std::to_string(r.status) + " " + r.small_body);
         if (r.small_body.empty()) return json::object();
         return json::parse(r.small_body);
     }
     Credential mint(json body) {
         auto j = admin(&root, std::nullopt, "POST", "/-/admin/credentials", std::move(body), 201);
-        return Credential{j["access_key"].get<std::string>(),
-                          util::SecretString(j["secret_key"].get<std::string>())};
+        return Credential{j["access_key"].get<std::string>(), util::SecretString(j["secret_key"].get<std::string>())};
     }
     void bind(const std::string& subject, const std::string& ak, int expect = 201) {
-        admin(&root, std::nullopt, "PUT", "/-/admin/tls-identities/" + subject,
-              {{"access_key", ak}}, expect);
+        admin(&root, std::nullopt, "PUT", "/-/admin/tls-identities/" + subject, {{"access_key", ak}}, expect);
     }
 };
 
-bool contains(const std::string& s, const std::string& sub) {
-    return s.find(sub) != std::string::npos;
-}
+bool contains(const std::string& s, const std::string& sub) { return s.find(sub) != std::string::npos; }
 
 Cert cn(std::string c) { return Cert{std::move(c), ""}; }
 
@@ -249,9 +240,9 @@ TEST(tls_identity_san_uri_mode) {
     CHECK_EQ(list["mode"].get<std::string>(), std::string("san-uri"));
     CHECK_EQ(list["identities"].size(), size_t(1));
     CHECK_EQ(list["identities"][0]["subject"].get<std::string>(), uri);
-    CHECK_EQ(env.admin(&env.root, std::nullopt, "GET", "/-/admin/tls-identities/" + uri)["access_key"]
-                 .get<std::string>(),
-             c.access_key);
+    CHECK_EQ(
+        env.admin(&env.root, std::nullopt, "GET", "/-/admin/tls-identities/" + uri)["access_key"].get<std::string>(),
+        c.access_key);
 
     CHECK_EQ(env.call("GET", "/bkt", nullptr, Cert{"anything", uri}).status, 200);
     CHECK_EQ(env.call("GET", "/bkt", nullptr, Cert{uri, ""}).status, 403);  // CN is not the subject here
@@ -267,13 +258,13 @@ TEST(tls_identity_admin_api_and_persistence) {
 
     // Only root manages bindings
     CHECK_EQ(env.call("GET", kBase, &c, std::nullopt).status, 403);
-    CHECK_EQ(env.call("PUT", std::string(kBase) + "/x", &c, std::nullopt,
-                      json{{"access_key", c.access_key}}.dump()).status, 403);
+    CHECK_EQ(
+        env.call("PUT", std::string(kBase) + "/x", &c, std::nullopt, json{{"access_key", c.access_key}}.dump()).status,
+        403);
     // Validation
-    CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x", {}, 400)["code"],
-             "InvalidRequest");
-    CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x",
-                       {{"access_key", "L3AKDOESNOTEXIST"}}, 403)["code"],
+    CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x", {}, 400)["code"], "InvalidRequest");
+    CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x", {{"access_key", "L3AKDOESNOTEXIST"}},
+                       403)["code"],
              "InvalidAccessKeyId");
     CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x",
                        {{"access_key", "L3SASESSIONSESSION"}}, 400)["code"],
@@ -281,13 +272,12 @@ TEST(tls_identity_admin_api_and_persistence) {
     CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x",
                        {{"access_key", c.access_key}, {"bogus", 1}}, 400)["code"],
              "InvalidRequest");
-    CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/ bad",
-                       {{"access_key", c.access_key}}, 400)["code"],
+    CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/ bad", {{"access_key", c.access_key}},
+                       400)["code"],
              "InvalidRequest");
     CHECK_EQ(env.admin(&env.root, std::nullopt, "PUT", kBase, {{"access_key", c.access_key}}, 400)["code"],
              "InvalidRequest");
-    CHECK_EQ(env.admin(&env.root, std::nullopt, "GET", std::string(kBase) + "/nobody", {}, 404)["code"],
-             "NoSuchKey");
+    CHECK_EQ(env.admin(&env.root, std::nullopt, "GET", std::string(kBase) + "/nobody", {}, 404)["code"], "NoSuchKey");
     CHECK_EQ(env.admin(&env.root, std::nullopt, "POST", std::string(kBase) + "/x", {}, 405)["code"],
              "MethodNotAllowed");
 
@@ -296,12 +286,12 @@ TEST(tls_identity_admin_api_and_persistence) {
                           {{"access_key", c.access_key}, {"comment", "first"}}, 201);
     CHECK_EQ(made["subject"].get<std::string>(), "x");
     CHECK_EQ(made["created_by"].get<std::string>(), std::string(kRootAk));
-    auto re = env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x",
-                        {{"access_key", other.access_key}}, 200);
+    auto re = env.admin(&env.root, std::nullopt, "PUT", std::string(kBase) + "/x", {{"access_key", other.access_key}},
+                        200);
     CHECK_EQ(re["access_key"].get<std::string>(), other.access_key);
     CHECK(!re.contains("comment"));
-    auto q = env.call("PUT", kBase, &env.root, std::nullopt,
-                      json{{"access_key", c.access_key}}.dump(), {{"subject", "CN=y, O=z"}});
+    auto q = env.call("PUT", kBase, &env.root, std::nullopt, json{{"access_key", c.access_key}}.dump(),
+                      {{"subject", "CN=y, O=z"}});
     CHECK_EQ(q.status, 201);
     CHECK_EQ(env.admin(&env.root, std::nullopt, "GET", kBase)["identities"].size(), size_t(2));
 

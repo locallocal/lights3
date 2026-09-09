@@ -65,10 +65,20 @@ uint64_t parse_size(const std::string& s) {
     uint64_t mult = 1;
     std::string num = s;
     switch (s.back()) {
-        case 'k': case 'K': mult = 1024ULL; break;
-        case 'm': case 'M': mult = 1024ULL * 1024; break;
-        case 'g': case 'G': mult = 1024ULL * 1024 * 1024; break;
-        default: break;
+        case 'k':
+        case 'K':
+            mult = 1024ULL;
+            break;
+        case 'm':
+        case 'M':
+            mult = 1024ULL * 1024;
+            break;
+        case 'g':
+        case 'G':
+            mult = 1024ULL * 1024 * 1024;
+            break;
+        default:
+            break;
     }
     if (mult != 1) num.pop_back();
     uint64_t v;
@@ -80,8 +90,7 @@ uint64_t parse_size(const std::string& s) {
         throw std::runtime_error("invalid --size: " + s + " (use bytes or K/M/G suffix)");
     }
     v *= mult;
-    if (v > 1024ULL * 1024 * 1024)
-        throw std::runtime_error("--size too large (max 1G): " + s);
+    if (v > 1024ULL * 1024 * 1024) throw std::runtime_error("--size too large (max 1G): " + s);
     return v;
 }
 
@@ -131,7 +140,8 @@ struct Stats {
         }
     }
 
-    // Errors count toward neither latency nor bytes; the first one is echoed to stderr so a 100%-failure run is diagnosable
+    // Errors count toward neither latency nor bytes; the first one is echoed to stderr so a 100%-failure run is
+    // diagnosable
     void record_err(const std::string& msg) {
         errs.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lk(err_mu);
@@ -169,8 +179,8 @@ double hist_pct(const std::array<std::atomic<uint64_t>, 65>& hist, uint64_t tota
 }
 
 // One benchmark iteration; returns bytes moved via *nbytes and ok/expected-status
-bool do_op(Mode mode, SignedClient& cli, const BenchOpts& o, int idx, const std::string& body,
-           uint64_t* nbytes, std::string* err) {
+bool do_op(Mode mode, SignedClient& cli, const BenchOpts& o, int idx, const std::string& body, uint64_t* nbytes,
+           std::string* err) {
     httplib::Result r;
     int expect = 200;
     switch (mode) {
@@ -185,9 +195,8 @@ bool do_op(Mode mode, SignedClient& cli, const BenchOpts& o, int idx, const std:
             r = cli.head(obj_path(o, idx));
             break;
         case Mode::List:
-            r = cli.get("/" + o.bucket,
-                        "list-type=2&max-keys=" + std::to_string(o.max_keys) +
-                            "&prefix=" + util::aws_uri_encode(o.prefix, /*encode_slash=*/true));
+            r = cli.get("/" + o.bucket, "list-type=2&max-keys=" + std::to_string(o.max_keys) +
+                                            "&prefix=" + util::aws_uri_encode(o.prefix, /*encode_slash=*/true));
             if (r) *nbytes = r->body.size();
             break;
         case Mode::ListBuckets:
@@ -200,8 +209,7 @@ bool do_op(Mode mode, SignedClient& cli, const BenchOpts& o, int idx, const std:
     return false;
 }
 
-void worker(Mode mode, const BenchOpts& o, int id, const std::string& body,
-            std::atomic<bool>& stop, Stats& st) {
+void worker(Mode mode, const BenchOpts& o, int id, const std::string& body, std::atomic<bool>& stop, Stats& st) {
     try {
         SignedClient cli(o.conn);
         // Stagger start offsets so concurrent GET/STAT workers spread over the key pool
@@ -210,11 +218,8 @@ void worker(Mode mode, const BenchOpts& o, int id, const std::string& body,
             uint64_t nbytes = 0;
             std::string err;
             auto t0 = Clock::now();
-            bool ok = do_op(mode, cli, o, int(i % uint64_t(o.objects ? o.objects : 1)), body,
-                            &nbytes, &err);
-            auto us = uint64_t(
-                std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0)
-                    .count());
+            bool ok = do_op(mode, cli, o, int(i % uint64_t(o.objects ? o.objects : 1)), body, &nbytes, &err);
+            auto us = uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count());
             if (ok)
                 st.record(us, nbytes);
             else
@@ -228,28 +233,23 @@ void worker(Mode mode, const BenchOpts& o, int id, const std::string& body,
 }
 
 void reporter(Stats& st, std::atomic<bool>& done) {
-    printf("%5s %10s %8s %10s %8s %8s %8s\n", "sec", "ops", "ops/s", "MiB/s", "avg-ms",
-           "max-ms", "errs");
+    printf("%5s %10s %8s %10s %8s %8s %8s\n", "sec", "ops", "ops/s", "MiB/s", "avg-ms", "max-ms", "errs");
     fflush(stdout);
     uint64_t l_ops = 0, l_bytes = 0, l_lat = 0, l_errs = 0;
     int sec = 0;
     auto next = Clock::now() + std::chrono::seconds(1);
     while (!done.load()) {
         // Sleep in slices so the thread exits promptly when the run ends mid-tick
-        while (!done.load() && Clock::now() < next)
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        while (!done.load() && Clock::now() < next) std::this_thread::sleep_for(std::chrono::milliseconds(50));
         if (done.load()) break;
         next += std::chrono::seconds(1);
         ++sec;
-        uint64_t ops = st.ops.load(), bytes = st.bytes.load(), lat = st.lat_sum_us.load(),
-                 errs = st.errs.load();
-        uint64_t d_ops = ops - l_ops, d_bytes = bytes - l_bytes, d_lat = lat - l_lat,
-                 d_errs = errs - l_errs;
+        uint64_t ops = st.ops.load(), bytes = st.bytes.load(), lat = st.lat_sum_us.load(), errs = st.errs.load();
+        uint64_t d_ops = ops - l_ops, d_bytes = bytes - l_bytes, d_lat = lat - l_lat, d_errs = errs - l_errs;
         uint64_t imax = st.interval_max_us.exchange(0);
         // ops column is cumulative; ops/s and the rest are this interval's
-        printf("%5d %10llu %8llu %10.2f %8.2f %8.1f %8llu\n", sec, (unsigned long long)ops,
-               (unsigned long long)d_ops, d_bytes / (1024.0 * 1024.0),
-               d_ops ? double(d_lat) / double(d_ops) / 1000.0 : 0.0, imax / 1000.0,
+        printf("%5d %10llu %8llu %10.2f %8.2f %8.1f %8llu\n", sec, (unsigned long long)ops, (unsigned long long)d_ops,
+               d_bytes / (1024.0 * 1024.0), d_ops ? double(d_lat) / double(d_ops) / 1000.0 : 0.0, imax / 1000.0,
                (unsigned long long)d_errs);
         fflush(stdout);
         l_ops = ops;
@@ -263,8 +263,7 @@ void reporter(Stats& st, std::atomic<bool>& done) {
 bool ensure_bucket(SignedClient& cli, const BenchOpts& o) {
     auto r = cli.put_unsigned("/" + o.bucket, "");
     if (r && (r->status == 200 || r->status == 409)) return true;
-    fprintf(stderr, "lights3-ctl: bench: create bucket %s failed: %s\n", o.bucket.c_str(),
-            result_err(r).c_str());
+    fprintf(stderr, "lights3-ctl: bench: create bucket %s failed: %s\n", o.bucket.c_str(), result_err(r).c_str());
     return false;
 }
 
@@ -282,13 +281,12 @@ bool prepare_pool(const BenchOpts& o, const std::string& body) {
                     auto r = cli.put_unsigned(obj_path(o, i), body);
                     if (!r || r->status != 200) {
                         if (!failed.exchange(true))
-                            fprintf(stderr, "lights3-ctl: bench: prepare %s failed: %s\n",
-                                    obj_key(o, i).c_str(), result_err(r).c_str());
+                            fprintf(stderr, "lights3-ctl: bench: prepare %s failed: %s\n", obj_key(o, i).c_str(),
+                                    result_err(r).c_str());
                     }
                 }
             } catch (const std::exception& e) {
-                if (!failed.exchange(true))
-                    fprintf(stderr, "lights3-ctl: bench: prepare failed: %s\n", e.what());
+                if (!failed.exchange(true)) fprintf(stderr, "lights3-ctl: bench: prepare failed: %s\n", e.what());
             }
         });
     for (auto& t : ts) t.join();
@@ -303,9 +301,8 @@ void cleanup_pool(const BenchOpts& o) {
             auto r = cli.del(obj_path(o, i));
             if (r && r->status == 204) ++deleted;
         }
-        fprintf(o.json ? stderr : stdout,
-                "cleanup: deleted %d/%d objects under %s/%s (skip with --keep)\n", deleted,
-               o.objects, o.bucket.c_str(), o.prefix.c_str());
+        fprintf(o.json ? stderr : stdout, "cleanup: deleted %d/%d objects under %s/%s (skip with --keep)\n", deleted,
+                o.objects, o.bucket.c_str(), o.prefix.c_str());
     } catch (const std::exception& e) {
         fprintf(stderr, "lights3-ctl: bench: cleanup failed: %s\n", e.what());
     }
@@ -313,11 +310,16 @@ void cleanup_pool(const BenchOpts& o) {
 
 const char* mode_name(Mode m) {
     switch (m) {
-        case Mode::Put: return "put";
-        case Mode::Get: return "get";
-        case Mode::Stat: return "stat";
-        case Mode::List: return "list";
-        case Mode::ListBuckets: return "list-buckets";
+        case Mode::Put:
+            return "put";
+        case Mode::Get:
+            return "get";
+        case Mode::Stat:
+            return "stat";
+        case Mode::List:
+            return "list";
+        case Mode::ListBuckets:
+            return "list-buckets";
     }
     return "?";
 }
@@ -342,18 +344,16 @@ int run_bench(Mode mode, const BenchOpts& o) {
         if (!ensure_bucket(setup, o)) return 1;
         if (needs_prepare) {
             fprintf(o.json ? stderr : stdout, "preparing %d objects of %s under %s/%s ...\n", o.objects,
-                   human_size(o.size).c_str(), o.bucket.c_str(), o.prefix.c_str());
+                    human_size(o.size).c_str(), o.bucket.c_str(), o.prefix.c_str());
             fflush(stdout);
             if (!prepare_pool(o, body)) return 1;
         }
     }
 
-    fprintf(o.json ? stderr : stdout, "bench %s: %d workers, %d s%s\n", mode_name(mode),
-            o.concurrency, o.duration_sec,
-           mode == Mode::Put || mode == Mode::Get
-               ? (", " + human_size(o.size) + " objects, " + std::to_string(o.objects) + " keys")
-                     .c_str()
-               : "");
+    fprintf(o.json ? stderr : stdout, "bench %s: %d workers, %d s%s\n", mode_name(mode), o.concurrency, o.duration_sec,
+            mode == Mode::Put || mode == Mode::Get
+                ? (", " + human_size(o.size) + " objects, " + std::to_string(o.objects) + " keys").c_str()
+                : "");
     fflush(stdout);
 
     Stats st;
@@ -361,8 +361,7 @@ int run_bench(Mode mode, const BenchOpts& o) {
     auto t_start = Clock::now();
     std::vector<std::thread> workers;
     for (int i = 0; i < o.concurrency; ++i)
-        workers.emplace_back(worker, mode, std::cref(o), i, std::cref(body), std::ref(stop),
-                             std::ref(st));
+        workers.emplace_back(worker, mode, std::cref(o), i, std::cref(body), std::ref(stop), std::ref(st));
     std::thread rep;
     if (!o.json) rep = std::thread(reporter, std::ref(st), std::ref(done));
 
@@ -406,13 +405,13 @@ int run_bench(Mode mode, const BenchOpts& o) {
     printf("---- bench %s summary ----\n", mode_name(mode));
     printf("wall %.2f s   workers %d%s\n", wall, o.concurrency,
            has_pool ? ("   keys " + std::to_string(o.objects)).c_str() : "");
-    printf("ops %llu ok, %llu err   %.1f ops/s   %.2f MiB/s\n", (unsigned long long)ops,
-           (unsigned long long)errs, ops / wall, bytes / (1024.0 * 1024.0) / wall);
+    printf("ops %llu ok, %llu err   %.1f ops/s   %.2f MiB/s\n", (unsigned long long)ops, (unsigned long long)errs,
+           ops / wall, bytes / (1024.0 * 1024.0) / wall);
     if (ops)
         printf("latency ms: avg %.2f   p50 ~%.2f   p90 ~%.2f   p99 ~%.2f   max %.2f\n",
-               double(st.lat_sum_us.load()) / double(ops) / 1000.0,
-               hist_pct(st.hist, ops, 0.50) / 1000.0, hist_pct(st.hist, ops, 0.90) / 1000.0,
-               hist_pct(st.hist, ops, 0.99) / 1000.0, st.total_max_us.load() / 1000.0);
+               double(st.lat_sum_us.load()) / double(ops) / 1000.0, hist_pct(st.hist, ops, 0.50) / 1000.0,
+               hist_pct(st.hist, ops, 0.90) / 1000.0, hist_pct(st.hist, ops, 0.99) / 1000.0,
+               st.total_max_us.load() / 1000.0);
     fflush(stdout);
 
     if (has_pool && !o.keep) cleanup_pool(o);
@@ -421,13 +420,11 @@ int run_bench(Mode mode, const BenchOpts& o) {
 
 // ---- flags & subcommand wiring ----
 
-void add_bench_flags(const std::shared_ptr<ccmd::c_command>& cmd, const char* def_size,
-                     bool with_pool) {
+void add_bench_flags(const std::shared_ptr<ccmd::c_command>& cmd, const char* def_size, bool with_pool) {
     if (with_pool) {
         cmd->varp<std::string>("bucket", "b", "", "target bucket (created if missing).");
         cmd->var<std::string>("prefix", "lights3-ctl-bench/", "key prefix for benchmark objects.");
-        cmd->varp<std::string>("size", "s", def_size,
-                               "object size (bytes, or K/M/G suffix, max 1G).");
+        cmd->varp<std::string>("size", "s", def_size, "object size (bytes, or K/M/G suffix, max 1G).");
         cmd->varp<int>("objects", "n", 64, "key pool size (put overwrites round-robin).");
         cmd->var<bool>("keep", false, "keep benchmark objects instead of deleting them at the end.");
     }
@@ -502,14 +499,11 @@ void run_mode(const std::shared_ptr<ccmd::c_command>& c, Mode mode) {
     }
 }
 
-std::shared_ptr<ccmd::c_command> make_mode(Mode mode, const char* name, const char* example,
-                                           const char* usage, const char* desc,
-                                           const char* brief, const char* def_size) {
+std::shared_ptr<ccmd::c_command> make_mode(Mode mode, const char* name, const char* example, const char* usage,
+                                           const char* desc, const char* brief, const char* def_size) {
     auto cmd = std::make_shared<ccmd::c_command>(
-        name, example, usage, desc, brief,
-        [mode](const std::shared_ptr<ccmd::c_command>& c) { run_mode(c, mode); });
-    if (mode == Mode::List)
-        cmd->var<int>("max-keys", 100, "max-keys per ListObjectsV2 request.");
+        name, example, usage, desc, brief, [mode](const std::shared_ptr<ccmd::c_command>& c) { run_mode(c, mode); });
+    if (mode == Mode::List) cmd->var<int>("max-keys", 100, "max-keys per ListObjectsV2 request.");
     add_bench_flags(cmd, def_size, mode != Mode::ListBuckets);
     return cmd;
 }
@@ -530,41 +524,35 @@ std::shared_ptr<ccmd::c_command> make_bench() {
         "end unless --keep. Credentials come from each subcommand's --ak=/--sk= or from "
         "env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK; options must follow the leaf subcommand "
         "as --name=value.",
-        "benchmark S3 IO and non-IO APIs.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "benchmark S3 IO and non-IO APIs.", [](const std::shared_ptr<ccmd::c_command>& c) {
             c->print_help();
             g_exit = 2;
         });
-    cmd->add_subcommand(make_mode(
-        Mode::Put, "put", "lights3-ctl bench put --bucket=test --size=4M --concurrency=8",
-        "lights3-ctl bench put [options]",
-        "Upload benchmark: PUT objects of --size round-robin over the key pool "
-        "(UNSIGNED-PAYLOAD, so no client-side SHA-256).",
-        "object upload benchmark.", "1M"));
-    cmd->add_subcommand(make_mode(
-        Mode::Get, "get", "lights3-ctl bench get --bucket=test --size=4M --concurrency=8",
-        "lights3-ctl bench get [options]",
-        "Download benchmark: pre-uploads the key pool, then GETs it round-robin "
-        "(bodies are streamed and discarded).",
-        "object download benchmark.", "1M"));
-    cmd->add_subcommand(make_mode(
-        Mode::Stat, "stat", "lights3-ctl bench stat --bucket=test --concurrency=16",
-        "lights3-ctl bench stat [options]",
-        "HeadObject benchmark (non-IO): pre-uploads the key pool, then HEADs it "
-        "round-robin.",
-        "HeadObject (metadata) benchmark.", "4K"));
-    cmd->add_subcommand(make_mode(
-        Mode::List, "list", "lights3-ctl bench list --bucket=test --max-keys=100",
-        "lights3-ctl bench list [options]",
-        "ListObjectsV2 benchmark (non-IO): pre-uploads the key pool, then lists "
-        "under --prefix with --max-keys per request.",
-        "ListObjectsV2 benchmark.", "4K"));
-    cmd->add_subcommand(make_mode(
-        Mode::ListBuckets, "list-buckets", "lights3-ctl bench list-buckets --concurrency=16",
-        "lights3-ctl bench list-buckets [options]",
-        "ListBuckets benchmark (non-IO): GET / in a loop; needs no bucket and "
-        "creates no objects.",
-        "ListBuckets benchmark.", "4K"));
+    cmd->add_subcommand(make_mode(Mode::Put, "put", "lights3-ctl bench put --bucket=test --size=4M --concurrency=8",
+                                  "lights3-ctl bench put [options]",
+                                  "Upload benchmark: PUT objects of --size round-robin over the key pool "
+                                  "(UNSIGNED-PAYLOAD, so no client-side SHA-256).",
+                                  "object upload benchmark.", "1M"));
+    cmd->add_subcommand(make_mode(Mode::Get, "get", "lights3-ctl bench get --bucket=test --size=4M --concurrency=8",
+                                  "lights3-ctl bench get [options]",
+                                  "Download benchmark: pre-uploads the key pool, then GETs it round-robin "
+                                  "(bodies are streamed and discarded).",
+                                  "object download benchmark.", "1M"));
+    cmd->add_subcommand(make_mode(Mode::Stat, "stat", "lights3-ctl bench stat --bucket=test --concurrency=16",
+                                  "lights3-ctl bench stat [options]",
+                                  "HeadObject benchmark (non-IO): pre-uploads the key pool, then HEADs it "
+                                  "round-robin.",
+                                  "HeadObject (metadata) benchmark.", "4K"));
+    cmd->add_subcommand(make_mode(Mode::List, "list", "lights3-ctl bench list --bucket=test --max-keys=100",
+                                  "lights3-ctl bench list [options]",
+                                  "ListObjectsV2 benchmark (non-IO): pre-uploads the key pool, then lists "
+                                  "under --prefix with --max-keys per request.",
+                                  "ListObjectsV2 benchmark.", "4K"));
+    cmd->add_subcommand(make_mode(Mode::ListBuckets, "list-buckets", "lights3-ctl bench list-buckets --concurrency=16",
+                                  "lights3-ctl bench list-buckets [options]",
+                                  "ListBuckets benchmark (non-IO): GET / in a loop; needs no bucket and "
+                                  "creates no objects.",
+                                  "ListBuckets benchmark.", "4K"));
     return cmd;
 }
 

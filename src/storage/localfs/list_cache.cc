@@ -12,11 +12,9 @@ bool DirListCache::stamp_of(const std::filesystem::path& dir, Stamp& out) {
     return true;
 }
 
-DirListCache::DirListCache(Options opt, std::shared_ptr<MetricCounter> hits,
-                           std::shared_ptr<MetricCounter> misses,
+DirListCache::DirListCache(Options opt, std::shared_ptr<MetricCounter> hits, std::shared_ptr<MetricCounter> misses,
                            std::shared_ptr<MetricGauge> resident)
-    : opt_(opt), m_hits_(std::move(hits)), m_misses_(std::move(misses)),
-      m_resident_(std::move(resident)) {}
+    : opt_(opt), m_hits_(std::move(hits)), m_misses_(std::move(misses)), m_resident_(std::move(resident)) {}
 
 DirEntries DirListCache::lookup(const std::string& dir, const Stamp& stamp) {
     if (!enabled()) return nullptr;
@@ -41,9 +39,7 @@ DirEntries DirListCache::lookup(const std::string& dir, const Stamp& stamp) {
 
 void DirListCache::insert(const std::string& dir, const Stamp& stamp, DirEntries entries,
                           std::chrono::system_clock::time_point readdir_started) {
-    if (!enabled() || !entries || entries->size() < opt_.min_dir_entries ||
-        entries->size() > opt_.max_entries)
-        return;
+    if (!enabled() || !entries || entries->size() < opt_.min_dir_entries || entries->size() > opt_.max_entries) return;
     // Racy-window rule: only cache a directory whose last modification is comfortably
     // older than the read; anything being written right now would be re-read anyway.
     // mtime only: entry add/remove/rename always moves mtime, whereas ctime also moves

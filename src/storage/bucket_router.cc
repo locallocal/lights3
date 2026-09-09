@@ -16,9 +16,7 @@ namespace {
 // bucket-name character set (lowercase/digits/'-'/'.') -- uppercase, '_', '/', etc. --
 // which a valid bucket name can never match
 void validate_glob(const std::string& pattern) {
-    auto fail = [&](const std::string& why) {
-        throw std::runtime_error("bucket rule glob '" + pattern + "': " + why);
-    };
+    auto fail = [&](const std::string& why) { throw std::runtime_error("bucket rule glob '" + pattern + "': " + why); };
     if (pattern.empty()) fail("empty pattern");
     bool in_class = false;
     for (size_t i = 0; i < pattern.size(); ++i) {
@@ -53,14 +51,13 @@ bool glob_match(const std::string& glob, std::string_view bucket) {
 
 }  // namespace
 
-std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(
-    const BucketsConfig& cfg, std::shared_ptr<const BackendMap> backends) {
+std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(const BucketsConfig& cfg,
+                                                                 std::shared_ptr<const BackendMap> backends) {
     auto t = std::make_shared<Table>();
     t->backends = std::move(backends);
     auto find = [&](const std::string& name) {
         auto it = t->backends->find(name);
-        if (it == t->backends->end())
-            throw std::runtime_error("bucket rule references unknown backend: " + name);
+        if (it == t->backends->end()) throw std::runtime_error("bucket rule references unknown backend: " + name);
         return it->second;
     };
     bool saw_catch_all = false;
@@ -73,15 +70,13 @@ std::shared_ptr<const BucketRouter::Table> BucketRouter::compile(
         // catch-all can never be reached -- that is a configuration error (most likely the
         // default rule was written first), and ignoring it silently only breeds confusion
         if (saw_catch_all)
-            throw std::runtime_error("bucket rule '" + rule.match +
-                                     "' is unreachable: it follows a catch-all rule");
+            throw std::runtime_error("bucket rule '" + rule.match + "' is unreachable: it follows a catch-all rule");
         for (auto& prev : t->rules)
             if (prev.glob == glob && prev.negate == negate)
                 throw std::runtime_error("bucket rule '" + rule.match +
                                          "' is unreachable: duplicate of an earlier rule");
         if (!negate && (glob == "*" || glob == "**")) saw_catch_all = true;
-        if (negate && glob.find_first_of("*?[") == std::string::npos &&
-            glob.find('\\') == std::string::npos) {
+        if (negate && glob.find_first_of("*?[") == std::string::npos && glob.find('\\') == std::string::npos) {
             // "!fixed-string" matches every bucket except one name -- it is itself a catch-all
             saw_catch_all = true;
         }
@@ -95,8 +90,7 @@ BucketRouter BucketRouter::build(const BucketsConfig& cfg, BackendMap backends) 
     r.shared_ = std::make_shared<Shared>();
     auto set = std::make_shared<const BackendMap>(std::move(backends));
     auto it = set->find(cfg.default_backend);
-    if (it == set->end())
-        throw std::runtime_error("bucket rule references unknown backend: " + cfg.default_backend);
+    if (it == set->end()) throw std::runtime_error("bucket rule references unknown backend: " + cfg.default_backend);
     r.shared_->default_backend = it->second;
     r.shared_->default_name = cfg.default_backend;
     r.shared_->table.store(compile(cfg, std::move(set)), std::memory_order_release);
@@ -105,22 +99,20 @@ BucketRouter BucketRouter::build(const BucketsConfig& cfg, BackendMap backends) 
 
 void BucketRouter::update(const BucketsConfig& cfg) {
     if (cfg.default_backend != shared_->default_name)
-        throw std::runtime_error("buckets.default_backend cannot change at runtime (" +
-                                 shared_->default_name + " -> " + cfg.default_backend +
-                                 "): it hosts .sys and the stores loaded from it");
+        throw std::runtime_error("buckets.default_backend cannot change at runtime (" + shared_->default_name + " -> " +
+                                 cfg.default_backend + "): it hosts .sys and the stores loaded from it");
     auto fresh = compile(cfg, table()->backends);  // validates before anything is swapped
     shared_->table.store(std::move(fresh), std::memory_order_release);
 }
 
 void BucketRouter::update(const BucketsConfig& cfg, BackendMap backends) {
     if (cfg.default_backend != shared_->default_name)
-        throw std::runtime_error("buckets.default_backend cannot change at runtime (" +
-                                 shared_->default_name + " -> " + cfg.default_backend +
-                                 "): it hosts .sys and the stores loaded from it");
+        throw std::runtime_error("buckets.default_backend cannot change at runtime (" + shared_->default_name + " -> " +
+                                 cfg.default_backend + "): it hosts .sys and the stores loaded from it");
     auto it = backends.find(cfg.default_backend);
     if (it == backends.end() || it->second != shared_->default_backend)
-        throw std::runtime_error("backend set must keep the default backend '" +
-                                 shared_->default_name + "' (same instance)");
+        throw std::runtime_error("backend set must keep the default backend '" + shared_->default_name +
+                                 "' (same instance)");
     auto fresh = compile(cfg, std::make_shared<const BackendMap>(std::move(backends)));
     shared_->table.store(std::move(fresh), std::memory_order_release);
 }

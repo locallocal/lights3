@@ -44,7 +44,6 @@ bool cors_pattern_matches(std::string_view pattern, std::string_view value);
 // First rule matching (origin, method, requested headers); nullptr = no match.
 // req_headers must already be lowercase
 const CorsRule* match_cors_rule(const std::vector<CorsRule>& rules, const std::string& origin,
-                                const std::string& method,
-                                const std::vector<std::string>& req_headers);
+                                const std::string& method, const std::vector<std::string>& req_headers);
 
 }  // namespace lights3::s3

@@ -39,9 +39,9 @@
 namespace lights3::storage {
 
 struct MetaCacheOptions {
-    size_t max_entries = 0;               // total budget across shards; 0 = disabled
-    std::chrono::milliseconds ttl{0};     // 0 = never expires (invalidation only)
-    size_t shards = 64;                   // lock striping (the fill token is per shard)
+    size_t max_entries = 0;            // total budget across shards; 0 = disabled
+    std::chrono::milliseconds ttl{0};  // 0 = never expires (invalidation only)
+    size_t shards = 64;                // lock striping (the fill token is per shard)
 };
 
 struct MetaCacheStats {
@@ -62,24 +62,22 @@ public:
         uint64_t gen = 0;
     };
 
-    explicit MetaCache(MetaCacheOptions opt, const MetricsScope& metrics = {})
-        : opt_(opt) {
+    explicit MetaCache(MetaCacheOptions opt, const MetricsScope& metrics = {}) : opt_(opt) {
         if (opt_.shards == 0) opt_.shards = 1;
         if (opt_.max_entries > 0 && opt_.max_entries < opt_.shards) opt_.shards = opt_.max_entries;
         nshards_ = opt_.shards;
         shards_ = std::make_unique<Shard[]>(nshards_);
         per_shard_ = opt_.max_entries / opt_.shards;
         if (opt_.max_entries > 0 && per_shard_ == 0) per_shard_ = 1;
-        m_hits_ = metrics.counter("lights3_meta_cache_lookups_total",
-                                  "Object metadata cache lookups", {{"result", "hit"}});
-        m_misses_ = metrics.counter("lights3_meta_cache_lookups_total",
-                                    "Object metadata cache lookups", {{"result", "miss"}});
-        m_stale_ = metrics.counter("lights3_meta_cache_lookups_total",
-                                   "Object metadata cache lookups", {{"result", "stale"}});
+        m_hits_ = metrics.counter("lights3_meta_cache_lookups_total", "Object metadata cache lookups",
+                                  {{"result", "hit"}});
+        m_misses_ = metrics.counter("lights3_meta_cache_lookups_total", "Object metadata cache lookups",
+                                    {{"result", "miss"}});
+        m_stale_ = metrics.counter("lights3_meta_cache_lookups_total", "Object metadata cache lookups",
+                                   {{"result", "stale"}});
         m_invalidations_ = metrics.counter("lights3_meta_cache_invalidations_total",
                                            "Object metadata cache entries dropped by writes");
-        m_entries_ = metrics.gauge("lights3_meta_cache_entries",
-                                   "Object metadata records resident in the cache");
+        m_entries_ = metrics.gauge("lights3_meta_cache_entries", "Object metadata records resident in the cache");
     }
 
     bool enabled() const { return opt_.max_entries > 0; }
@@ -192,14 +190,12 @@ public:
     struct InvalidateGuard {
         MetaCache* cache;
         std::string bucket, key;
-        InvalidateGuard(MetaCache* c, std::string_view b, std::string_view k)
-            : cache(c), bucket(b), key(k) {}
+        InvalidateGuard(MetaCache* c, std::string_view b, std::string_view k) : cache(c), bucket(b), key(k) {}
         InvalidateGuard(const InvalidateGuard&) = delete;
         InvalidateGuard& operator=(const InvalidateGuard&) = delete;
         ~InvalidateGuard() { cache->invalidate(bucket, key); }
     };
-    [[nodiscard]] InvalidateGuard invalidate_on_exit(std::string_view bucket,
-                                                     std::string_view key) {
+    [[nodiscard]] InvalidateGuard invalidate_on_exit(std::string_view bucket, std::string_view key) {
         return InvalidateGuard(this, bucket, key);
     }
 
@@ -240,12 +236,8 @@ private:
         k.append(key);
         return k;
     }
-    uint32_t shard_of(const std::string& k) const {
-        return uint32_t(std::hash<std::string>{}(k) % nshards_);
-    }
-    bool expired(const Node& n) const {
-        return opt_.ttl.count() > 0 && std::chrono::steady_clock::now() >= n.expires;
-    }
+    uint32_t shard_of(const std::string& k) const { return uint32_t(std::hash<std::string>{}(k) % nshards_); }
+    bool expired(const Node& n) const { return opt_.ttl.count() > 0 && std::chrono::steady_clock::now() >= n.expires; }
     void erase_locked(Shard& s, typename std::unordered_map<std::string, Node>::iterator it) {
         s.lru.erase(it->second.lru);
         s.map.erase(it);

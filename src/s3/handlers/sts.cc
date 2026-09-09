@@ -58,8 +58,7 @@ http::HttpResponse sts_error(const S3Error& e, const std::string& request_id) {
 
 }  // namespace
 
-Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
-                                                 const RequestContext& ctx,
+Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req, const RequestContext& ctx,
                                                  std::string& access_key) {
     try {
         // The form body is read BEFORE verification: generic (non-S3) SigV4 carries the
@@ -68,15 +67,12 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
         auto ident = auth_.verify_sts(req, util::sha256_hex(body));
         enforce_tls_tenant(req, ident);  // a bound certificate must agree with the caller (backlog-sequence ⑥)
         access_key = ident.access_key;
-        if (!auth_.enabled())
-            throw S3Error(S3ErrorCode::AccessDenied,
-                          "STS requires authentication to be enabled.");
+        if (!auth_.enabled()) throw S3Error(S3ErrorCode::AccessDenied, "STS requires authentication to be enabled.");
 
         auto params = parse_form(body);
         std::string action = params.count("Action") ? params["Action"] : "";
         if (action != "AssumeRole")
-            throw S3Error(S3ErrorCode::NotImplemented,
-                          "Only the AssumeRole action is implemented.");
+            throw S3Error(S3ErrorCode::NotImplemented, "Only the AssumeRole action is implemented.");
         int duration = 3600;
         if (auto it = params.find("DurationSeconds"); it != params.end()) {
             try {
@@ -86,19 +82,14 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
             }
             // AWS bounds for AssumeRole
             if (duration < 900 || duration > 43200)
-                throw S3Error(S3ErrorCode::InvalidArgument,
-                              "DurationSeconds must be between 900 and 43200.");
+                throw S3Error(S3ErrorCode::InvalidArgument, "DurationSeconds must be between 900 and 43200.");
         }
         std::string role_arn = params.count("RoleArn") ? params["RoleArn"] : "";
-        std::string session_name =
-            params.count("RoleSessionName") ? params["RoleSessionName"] : "session";
+        std::string session_name = params.count("RoleSessionName") ? params["RoleSessionName"] : "session";
 
-        if (!cred_store_)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "STS is not available on this deployment.");
+        if (!cred_store_) throw S3Error(S3ErrorCode::InvalidRequest, "STS is not available on this deployment.");
         auto sc = co_await cred_store_->mint_session(access_key, duration);
-        LOG_INFO("sts: session {} minted for {} ({}s, role '{}')", sc.access_key, access_key,
-                 duration, role_arn);
+        LOG_INFO("sts: session {} minted for {} ({}s, role '{}')", sc.access_key, access_key, duration, role_arn);
         {
             AuditEvent e;
             e.event = "sts.assume_role";
@@ -119,8 +110,7 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
         // No role catalog: the ARN names this gateway and the caller so audits can
         // trace the session back; it is not an IAM role reference
         x.element("AssumedRoleId", sc.access_key + ":" + session_name);
-        x.element("Arn", "arn:lights3:sts::assumed-role/" + std::string(access_key) + "/" +
-                             session_name);
+        x.element("Arn", "arn:lights3:sts::assumed-role/" + std::string(access_key) + "/" + session_name);
         x.close();
         x.open("Credentials");
         x.element("AccessKeyId", sc.access_key);
@@ -143,9 +133,7 @@ Task<http::HttpResponse> S3Service::sts_endpoint(http::HttpRequest& req,
     } catch (const std::exception& e) {
         LOG_ERROR("sts: internal error: {}", e.what());
         metrics_.s3_error(S3ErrorCode::InternalError);
-        co_return sts_error(S3Error(S3ErrorCode::InternalError,
-                                    "We encountered an internal error."),
-                            ctx.request_id);
+        co_return sts_error(S3Error(S3ErrorCode::InternalError, "We encountered an internal error."), ctx.request_id);
     }
 }
 

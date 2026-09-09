@@ -1,8 +1,8 @@
 // TikvMetaStore dedicated unit tests (docs/storage/duostore-meta-tikv-design.md §10): meta consistency suite,
-// backend suite over the injected combination, prefix isolation, multiple gateways sharing meta, write-skew guard materialization (Op::Lock semantics
-// smoke test), swap_extents CAS, concurrent conflict convergence, close guard.
-// Obtaining a real cluster: runs only if the env var LIGHTS3_TEST_PD_ADDR is set (comma-separated PD addresses pointing at a tiup
-// playground / existing test cluster), otherwise SKIP explicitly (not a failure, same mechanism as
+// backend suite over the injected combination, prefix isolation, multiple gateways sharing meta, write-skew guard
+// materialization (Op::Lock semantics smoke test), swap_extents CAS, concurrent conflict convergence, close guard.
+// Obtaining a real cluster: runs only if the env var LIGHTS3_TEST_PD_ADDR is set (comma-separated PD addresses pointing
+// at a tiup playground / existing test cluster), otherwise SKIP explicitly (not a failure, same mechanism as
 // test_duostore_rados.cc). Isolation: a unique tikv_prefix per test case -- the cluster is reusable and multiple
 // test suites do not pollute each other (version garbage is handled by the cluster GC safepoint, §7.3).
 #if defined(LIGHTS3_DUOSTORE) && defined(LIGHTS3_DUOSTORE_TIKV_META)
@@ -22,8 +22,8 @@
 #include "core/metrics.h"
 #include "core/thread_pool.h"
 #include "storage/duostore/duostore_backend.h"
-#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/fs_data_store.h"
+#include "storage/duostore/meta_backup.h"
 #include "storage/duostore/meta_dump.h"
 #include "storage/duostore/tikv_meta_store.h"
 #include "unit/backend_suite.h"
@@ -66,10 +66,10 @@ private:
     }
 };
 
-#define TIKV_OR_SKIP()                                                        \
-    if (!TikvTestEnv::instance().available) {                                 \
-        printf("       [SKIP] LIGHTS3_TEST_PD_ADDR not set\n");               \
-        return;                                                               \
+#define TIKV_OR_SKIP()                                          \
+    if (!TikvTestEnv::instance().available) {                   \
+        printf("       [SKIP] LIGHTS3_TEST_PD_ADDR not set\n"); \
+        return;                                                 \
     }
 
 // Unique prefix per test case: the cluster is reusable, multiple suites/runs do not pollute each other (§3.1)
@@ -95,8 +95,7 @@ using meta_store_suite::make_rec;
 TEST(duostore_tikv_meta_store_suite) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
-    meta_store_suite::run_meta_store_suite(
-        [&] { return std::make_unique<TikvMetaStore>(tikv_opts(prefix)); });
+    meta_store_suite::run_meta_store_suite([&] { return std::make_unique<TikvMetaStore>(tikv_opts(prefix)); });
 }
 
 // Run the backend consistency suite over the injected combination (TikvMetaStore + FsDataStore) (§10)
@@ -111,8 +110,8 @@ TEST(duostore_tikv_backend_suite) {
     cfg.root = tmp.path / "duo";
     fs::create_directories(cfg.root);
     auto data = std::make_unique<FsDataStore>(
-        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold,
-                      cfg.pack_max_size, cfg.pack_writers},
+        FsDataOptions{cfg.root, cfg.chunk_size, cfg.verify_chunk_crc, cfg.pack_threshold, cfg.pack_max_size,
+                      cfg.pack_writers},
         pool, [mp](Extent::Kind kind, uint32_t n) { return mp->alloc_file_run(kind, n); },
         [mp](uint64_t id, uint64_t sz) { mp->seal_pack(id, sz); });
     auto b = std::make_shared<DuoStoreBackend>(cfg, pool, std::move(meta), std::move(data));
@@ -134,7 +133,8 @@ TEST(duostore_tikv_prefix_isolation) {
     b.close();
 }
 
-// Multiple gateways sharing meta (§4.5): two instances with the same prefix share metadata; segment allocation is globally unique
+// Multiple gateways sharing meta (§4.5): two instances with the same prefix share metadata; segment allocation is
+// globally unique
 TEST(duostore_tikv_multi_gateway_shared_meta) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -158,9 +158,9 @@ TEST(duostore_tikv_multi_gateway_shared_meta) {
     g2.close();
 }
 
-// Write-skew guard materialization (§4.3, T1 verification item: Op::Lock records participate in subsequent prewrite conflict detection):
-// put_object and delete_bucket race concurrently; under any interleaving the ghost state "bucket deleted yet object
-// remains" must never appear -- with the guard broken this invariant is violated within a few rounds
+// Write-skew guard materialization (§4.3, T1 verification item: Op::Lock records participate in subsequent prewrite
+// conflict detection): put_object and delete_bucket race concurrently; under any interleaving the ghost state "bucket
+// deleted yet object remains" must never appear -- with the guard broken this invariant is violated within a few rounds
 TEST(duostore_tikv_write_skew_guard) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -192,7 +192,8 @@ TEST(duostore_tikv_write_skew_guard) {
             if (e) std::rethrow_exception(e);
 
         if (!a.bucket_exists(bkt)) {
-            // Bucket deletion succeeded => the put must not have left a ghost object (get_object does not check the bucket, so it can see residue)
+            // Bucket deletion succeeded => the put must not have left a ghost object (get_object does not check the
+            // bucket, so it can see residue)
             CHECK(!a.get_object(bkt, "k").has_value());
         } else {
             // put wins => object exists, bucket exists; the bucket is deletable after cleanup
@@ -241,8 +242,8 @@ TEST(duostore_tikv_part_abort_guard) {
         for (auto& e : errs)
             if (e) std::rethrow_exception(e);
         // abort committed (no concurrent complete, so it must succeed) => the upload is gone; orphan part detection:
-        // with the guard broken, put_part can land after the abort, leaving a residual part row and leaked refs -- observed
-        // via chunk_referenced (this case's parts have no extents, so it degrades to a list semantics check)
+        // with the guard broken, put_part can land after the abort, leaving a residual part row and leaked refs --
+        // observed via chunk_referenced (this case's parts have no extents, so it degrades to a list semantics check)
         CHECK_THROWS_S3(a.list_parts("pg", "k", id), s3::S3ErrorCode::NoSuchUpload);
     }
     a.delete_bucket("pg");
@@ -252,7 +253,8 @@ TEST(duostore_tikv_part_abort_guard) {
 }
 
 // Single-value size protection (gaps §2.12): a manifest exceeding what a raft entry can carry fail-fasts with
-// EntityTooLarge (400) instead of a 500 from a permanently failing prewrite -- unable to write yet unable to delete hurts most
+// EntityTooLarge (400) instead of a 500 from a permanently failing prewrite -- unable to write yet unable to delete
+// hurts most
 TEST(duostore_tikv_object_manifest_size_guard) {
     TIKV_OR_SKIP();
     TikvMetaStore m(tikv_opts(unique_prefix()));
@@ -260,10 +262,8 @@ TEST(duostore_tikv_object_manifest_size_guard) {
     std::vector<Extent> huge;
     huge.reserve(200'001);
     // Interleaved ids break the run encoding (pathological shape); the count exceeds kMaxObjectExtents
-    for (size_t i = 0; i < 200'001; ++i)
-        huge.push_back(chunk_extent(i * 2 + 1, 1));
-    CHECK_THROWS_S3(m.put_object("etl", "k", make_rec("k", std::move(huge))),
-                    s3::S3ErrorCode::EntityTooLarge);
+    for (size_t i = 0; i < 200'001; ++i) huge.push_back(chunk_extent(i * 2 + 1, 1));
+    CHECK_THROWS_S3(m.put_object("etl", "k", make_rec("k", std::move(huge))), s3::S3ErrorCode::EntityTooLarge);
     CHECK(!m.get_object("etl", "k").has_value());  // nothing was written
     m.delete_bucket("etl");
     m.close();
@@ -299,7 +299,8 @@ TEST(duostore_tikv_swap_extents_cas) {
 }
 
 // Concurrent conflict convergence (§4.1): two "gateways" race to overwrite the same key -- WriteConflict retries
-// guarantee serializability: version counts strictly, refs keeps only the final extent, gcq has exactly (total writes - 1) entries
+// guarantee serializability: version counts strictly, refs keeps only the final extent, gcq has exactly (total writes -
+// 1) entries
 TEST(duostore_tikv_concurrent_conflict_converges) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -308,7 +309,8 @@ TEST(duostore_tikv_concurrent_conflict_converges) {
     g1.create_bucket("race");
     constexpr int kPerWriter = 25;
 
-    // Exceptions in threads are carried back via exception_ptr and rethrown on the main thread (otherwise terminate hides the assertion info)
+    // Exceptions in threads are carried back via exception_ptr and rethrown on the main thread (otherwise terminate
+    // hides the assertion info)
     std::exception_ptr errs[2];
     auto writer = [&](TikvMetaStore& m, std::exception_ptr& err) {
         try {
@@ -370,18 +372,13 @@ TEST(duostore_tikv_conflict_metric_counts) {
     opts.backoff_budget_ms = 5000;
     opts.metrics = MetricsScope(reg, {{"backend", "t5m"}});
     TikvMetaStore g1(opts);
-    CHECK_EQ(metric_value(
-                 reg->render(),
-                 "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}"),
-             0);
-    CHECK_EQ(metric_value(reg->render(),
-                          "lights3_duostore_tikv_safepoint_update_failures_total{backend=\"t5m\"}"),
-             0);
+    CHECK_EQ(metric_value(reg->render(), "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}"), 0);
+    CHECK_EQ(metric_value(reg->render(), "lights3_duostore_tikv_safepoint_update_failures_total{backend=\"t5m\"}"), 0);
 
     TikvMetaStore g2(tikv_opts(prefix));
     g1.create_bucket("cm");
-    // Conflicts are a product of concurrent interleaving; a single batch may happen to miss -- run bounded rounds until observed
-    // (2x15 hot-key overwrites per round; normally shows up within a round or two)
+    // Conflicts are a product of concurrent interleaving; a single batch may happen to miss -- run bounded rounds until
+    // observed (2x15 hot-key overwrites per round; normally shows up within a round or two)
     long long retries = 0;
     for (int round = 0; round < 20 && retries <= 0; ++round) {
         std::exception_ptr errs[2];
@@ -398,8 +395,7 @@ TEST(duostore_tikv_conflict_metric_counts) {
         t2.join();
         for (auto& e : errs)
             if (e) std::rethrow_exception(e);
-        retries = metric_value(
-            reg->render(), "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}");
+        retries = metric_value(reg->render(), "lights3_duostore_tikv_txn_conflict_retries_total{backend=\"t5m\"}");
     }
     CHECK(retries > 0);  // the counter only ever increases
 
@@ -411,7 +407,8 @@ TEST(duostore_tikv_conflict_metric_counts) {
 }
 
 // T5 GC safepoint (§7.3): a single-round advance = service safepoint declaration + cluster safepoint
-// advance, returns >0 and is monotonic across rounds; worker mode (interval>0) advances automatically in the background, close stops cleanly
+// advance, returns >0 and is monotonic across rounds; worker mode (interval>0) advances automatically in the
+// background, close stops cleanly
 TEST(duostore_tikv_gc_safepoint_advances) {
     TIKV_OR_SKIP();
     auto reg = std::make_shared<MetricsRegistry>();
@@ -419,17 +416,14 @@ TEST(duostore_tikv_gc_safepoint_advances) {
     opts.gc_retention_s = 60;  // shared cluster: keep a 60s window, do not disturb other cases' in-flight snapshots
     opts.metrics = MetricsScope(reg, {{"backend", "t5sp"}});
     TikvMetaStore m(opts);
-    CHECK_EQ(metric_value(reg->render(),
-                          "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"),
-             0);
+    CHECK_EQ(metric_value(reg->render(), "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"), 0);
     uint64_t sp1 = m.update_gc_safepoint_once();
     CHECK(sp1 > 0);
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     uint64_t sp2 = m.update_gc_safepoint_once();
     CHECK(sp2 >= sp1);  // monotonic, forward-only on the PD side
     // gauge = physical ms of the most recently advanced cluster safepoint
-    CHECK_EQ(metric_value(reg->render(),
-                          "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"),
+    CHECK_EQ(metric_value(reg->render(), "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5sp\"}"),
              (long long)(sp2 >> 18));
     m.close();
 
@@ -442,19 +436,19 @@ TEST(duostore_tikv_gc_safepoint_advances) {
     long long pushed = 0;
     for (int i = 0; i < 200 && pushed <= 0; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        pushed = metric_value(reg->render(),
-                              "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5spw\"}");
+        pushed = metric_value(reg->render(), "lights3_duostore_tikv_gc_safepoint_ms{backend=\"t5spw\"}");
     }
     CHECK(pushed > 0);
     w.close();
 }
 
-// T5 ten-thousand-part complete special (§6.3): a complete_upload of 10000 parts is the largest transaction in the whole
-// implementation (object + upload deletion + full guard + ten-thousand-scale part deletion/refs transfer ~= 20k mutations).
-// Verifies: prewrite/commit converge within the scaled lock_ttl (txn_lock_ttl, sqrt(MiB) amplification); concurrent
-// readers drive the LockResolver's TTL judgment on the in-flight primary the whole time -- with insufficient TTL they would
-// judge the prewriting transaction dead and roll it back, and complete could not succeed. The rationale for not wiring up
-// the TTLManager heartbeat is also here: transaction size is bounded (S3 caps at 10k parts), the scaled TTL is enough to cover it
+// T5 ten-thousand-part complete special (§6.3): a complete_upload of 10000 parts is the largest transaction in the
+// whole implementation (object + upload deletion + full guard + ten-thousand-scale part deletion/refs transfer ~= 20k
+// mutations). Verifies: prewrite/commit converge within the scaled lock_ttl (txn_lock_ttl, sqrt(MiB) amplification);
+// concurrent readers drive the LockResolver's TTL judgment on the in-flight primary the whole time -- with insufficient
+// TTL they would judge the prewriting transaction dead and roll it back, and complete could not succeed. The rationale
+// for not wiring up the TTLManager heartbeat is also here: transaction size is bounded (S3 caps at 10k parts), the
+// scaled TTL is enough to cover it
 TEST(duostore_tikv_bulk_complete_10k_parts) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -467,7 +461,8 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     constexpr int kParts = 10000;
     const char* kEtag = "d41d8cd98f00b204e9800998ecf8427e";
     std::vector<uint64_t> ids(kParts + 1, 0);
-    // 8 threads split work by part_no residue class: the guard shards by part_no % 16, residue classes are disjoint -> zero false collisions
+    // 8 threads split work by part_no residue class: the guard shards by part_no % 16, residue classes are disjoint ->
+    // zero false collisions
     std::exception_ptr errs[8];
     std::vector<std::thread> ths;
     for (int t = 0; t < 8; ++t) {
@@ -492,7 +487,8 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     for (auto& e : errs)
         if (e) std::rethrow_exception(e);
 
-    // Concurrent readers: keep reading the same key during complete, driving the lock-resolution path to judge the primary's TTL
+    // Concurrent readers: keep reading the same key during complete, driving the lock-resolution path to judge the
+    // primary's TTL
     std::atomic<bool> stop{false};
     std::thread reader([&] {
         while (!stop.load(std::memory_order_relaxed)) reader_store.get_object("big", "k");
@@ -503,9 +499,7 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     for (int no = 1; no <= kParts; ++no) parts.push_back({no, kEtag});
     auto t0 = std::chrono::steady_clock::now();
     std::string etag = m.complete_upload("big", "k", id, parts);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                  std::chrono::steady_clock::now() - t0)
-                  .count();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
     stop.store(true);
     reader.join();
     printf("       [info] 10k-part complete_upload took %lld ms\n", (long long)ms);
@@ -519,7 +513,8 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     CHECK(m.chunk_referenced(ids[kParts]));
     CHECK_THROWS_S3(m.list_parts("big", "k", id), s3::S3ErrorCode::NoSuchUpload);
 
-    // Cleanup: delete the object (a second ten-thousand-scale mutation transaction) -> refs emptied, GC ledger written off
+    // Cleanup: delete the object (a second ten-thousand-scale mutation transaction) -> refs emptied, GC ledger written
+    // off
     CHECK(m.delete_object("big", "k"));
     CHECK(!m.chunk_referenced(ids[1]));
     m.delete_bucket("big");
@@ -530,8 +525,8 @@ TEST(duostore_tikv_bulk_complete_10k_parts) {
     reader_store.close();
 }
 
-// Multi-gateway GC lease (docs/archive/gaps.md §6.1, same semantics as the redis version): of two instances with the same prefix only one
-// wins; the same owner renews; another owner's expired lease can be taken over
+// Multi-gateway GC lease (docs/archive/gaps.md §6.1, same semantics as the redis version): of two instances with the
+// same prefix only one wins; the same owner renews; another owner's expired lease can be taken over
 TEST(duostore_tikv_gc_lease) {
     TIKV_OR_SKIP();
     std::string prefix = unique_prefix();
@@ -655,32 +650,27 @@ multi_gateway_suite::MetaFactory tikv_shared_meta(const std::string& prefix) {
 
 TEST(duostore_tikv_multi_gateway_multipart) {
     TIKV_OR_SKIP();
-    multi_gateway_suite::cross_gateway_multipart(tikv_shared_meta(unique_prefix()),
-                                                 DuoMetaKind::kTikv);
+    multi_gateway_suite::cross_gateway_multipart(tikv_shared_meta(unique_prefix()), DuoMetaKind::kTikv);
 }
 
 TEST(duostore_tikv_multi_gateway_abort_while_peer_pumps) {
     TIKV_OR_SKIP();
-    multi_gateway_suite::abort_while_peer_pumps(tikv_shared_meta(unique_prefix()),
-                                                DuoMetaKind::kTikv);
+    multi_gateway_suite::abort_while_peer_pumps(tikv_shared_meta(unique_prefix()), DuoMetaKind::kTikv);
 }
 
 TEST(duostore_tikv_multi_gateway_same_part_concurrent) {
     TIKV_OR_SKIP();
-    multi_gateway_suite::same_part_concurrent(tikv_shared_meta(unique_prefix()),
-                                              DuoMetaKind::kTikv);
+    multi_gateway_suite::same_part_concurrent(tikv_shared_meta(unique_prefix()), DuoMetaKind::kTikv);
 }
 
 TEST(duostore_tikv_multi_gateway_mpu_ttl_single_executor) {
     TIKV_OR_SKIP();
-    multi_gateway_suite::mpu_ttl_single_executor(tikv_shared_meta(unique_prefix()),
-                                                 DuoMetaKind::kTikv);
+    multi_gateway_suite::mpu_ttl_single_executor(tikv_shared_meta(unique_prefix()), DuoMetaKind::kTikv);
 }
 
 TEST(duostore_tikv_multi_gateway_listings_shared) {
     TIKV_OR_SKIP();
-    multi_gateway_suite::listings_are_shared(tikv_shared_meta(unique_prefix()),
-                                             DuoMetaKind::kTikv);
+    multi_gateway_suite::listings_are_shared(tikv_shared_meta(unique_prefix()), DuoMetaKind::kTikv);
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_TIKV_META

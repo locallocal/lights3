@@ -110,8 +110,8 @@ private:
 // same lifetime shape as PinTable
 class InFlightClock {
 public:
-    uint64_t begin();          // returns a ticket id (monotonic)
-    void end(uint64_t ticket); // idempotent for unknown ids
+    uint64_t begin();           // returns a ticket id (monotonic)
+    void end(uint64_t ticket);  // idempotent for unknown ids
     // Start time of the oldest in-flight operation, or fallback when none (the
     // publisher passes "now": an idle gateway holds nothing back)
     int64_t oldest_or(int64_t fallback);
@@ -128,19 +128,19 @@ private:
 // into the lights3_duostore_gc_* counters/gauges at the end of every completed
 // round — see init_metrics)
 struct DuoGcStats {
-    uint64_t reclaims_acked = 0;    // gcq entries settled
-    uint64_t files_removed = 0;     // chunk/rados extents physically deleted (pack records excluded)
-    uint64_t skipped_grace = 0;     // gcq entries skipped for not yet exceeding gc_grace
-    uint64_t skipped_pinned = 0;    // gcq entries skipped because an involved file was pinned
-    uint64_t skipped_leased = 0;    // gcq entries deferred by a peer gateway's read lease (roadmap §3.7)
-    uint64_t packs_removed = 0;     // empty packs deleted whole (sealed with live_recs==0)
-    uint64_t uploads_expired = 0;   // multiparts internally aborted after mpu_ttl expiry
-    uint64_t packs_sealed_aged = 0; // active packs sealed by aging (§6.1)
-    uint64_t packs_compacted = 0;   // low-liveness packs sequentially scanned (rewrite_pack) this round (P4 §9.2)
+    uint64_t reclaims_acked = 0;          // gcq entries settled
+    uint64_t files_removed = 0;           // chunk/rados extents physically deleted (pack records excluded)
+    uint64_t skipped_grace = 0;           // gcq entries skipped for not yet exceeding gc_grace
+    uint64_t skipped_pinned = 0;          // gcq entries skipped because an involved file was pinned
+    uint64_t skipped_leased = 0;          // gcq entries deferred by a peer gateway's read lease (roadmap §3.7)
+    uint64_t packs_removed = 0;           // empty packs deleted whole (sealed with live_recs==0)
+    uint64_t uploads_expired = 0;         // multiparts internally aborted after mpu_ttl expiry
+    uint64_t packs_sealed_aged = 0;       // active packs sealed by aging (§6.1)
+    uint64_t packs_compacted = 0;         // low-liveness packs sequentially scanned (rewrite_pack) this round (P4 §9.2)
     uint64_t packs_compact_deferred = 0;  // packs eligible but squeezed out by this round's budget (§6.1)
-    uint64_t records_migrated = 0;  // records whose refs were successfully swapped by compaction migration
-    uint64_t records_corrupt = 0;   // corrupt records detected by the compaction scan (skipped + warned, not deleted)
-    uint64_t packs_quarantined = 0; // packs moved to the corruption quarantine this round (roadmap §3.7)
+    uint64_t records_migrated = 0;        // records whose refs were successfully swapped by compaction migration
+    uint64_t records_corrupt = 0;    // corrupt records detected by the compaction scan (skipped + warned, not deleted)
+    uint64_t packs_quarantined = 0;  // packs moved to the corruption quarantine this round (roadmap §3.7)
 };
 
 // Corrupt-pack quarantine entry (roadmap §3.7): a pack whose compaction made no
@@ -152,10 +152,10 @@ struct DuoGcStats {
 // (a separate process) see the same ledger
 struct DuoQuarantineEntry {
     uint64_t pack_id = 0;
-    int64_t live_recs = 0;        // live account at quarantine time (auto-release trigger baseline)
-    uint64_t corrupt_records = 0; // corrupt records the last scan counted
-    int64_t quarantined_ms = 0;   // unix ms of quarantine entry
-    bool purged = false;          // pack file removed by `quarantine purge` (accounting kept until live drains)
+    int64_t live_recs = 0;         // live account at quarantine time (auto-release trigger baseline)
+    uint64_t corrupt_records = 0;  // corrupt records the last scan counted
+    int64_t quarantined_ms = 0;    // unix ms of quarantine entry
+    bool purged = false;           // pack file removed by `quarantine purge` (accounting kept until live drains)
 };
 
 // Reconciliation statistics for run_orphan_scan_once() (§9.3)
@@ -164,10 +164,12 @@ struct DuoOrphanStats {
     uint64_t orphans_removed = 0;  // orphans unreferenced and beyond grace → unlinked
     uint64_t skipped_grace = 0;    // unreferenced but mtime not yet beyond gc_grace (suspected in-flight write)
     uint64_t skipped_pinned = 0;   // unreferenced but pinned (write-side pin / in-flight reader)
-    uint64_t refs_missing = 0;     // reverse: refs present but file missing (sign of data loss; warn only, never delete meta)
+    uint64_t refs_missing = 0;     // reverse: refs present but file missing (sign of data loss; warn only, never delete
+                                   // meta)
     // Reverse reconciliation of packs/ (docs/archive/gaps.md §6.1)
     uint64_t packs_scanned = 0;         // pack files enumerated on disk
-    uint64_t orphan_packs_removed = 0;  // unaccounted pack files (crash after file creation, before the first record committed)
+    uint64_t orphan_packs_removed = 0;  // unaccounted pack files (crash after file creation, before the first record
+                                        // committed)
     uint64_t packs_skipped_active = 0;  // unaccounted but lock-held by a live writer / within grace / pinned
     uint64_t pack_stats_missing = 0;    // reverse: packstat present but file missing (sign of data loss)
     uint64_t chunk_bytes = 0;           // total bytes of on-disk chunk entities (usage metric)
@@ -190,8 +192,8 @@ struct DuoScrubOptions {
 // refs_stale is a space-leak suspect that can also be a transient artifact of
 // an MPU completing mid-scrub (re-run to confirm)
 struct DuoScrubStats {
-    uint64_t objects_scanned = 0;     // committed objects fully walked
-    uint64_t parts_scanned = 0;       // in-flight multipart parts walked
+    uint64_t objects_scanned = 0;  // committed objects fully walked
+    uint64_t parts_scanned = 0;    // in-flight multipart parts walked
     uint64_t extents_checked = 0;
     uint64_t bytes_read = 0;
     uint64_t corrupt_extents = 0;     // read back fine but crc32c != manifest
@@ -224,9 +226,9 @@ Task<uint64_t> migrate_pack_records(IMetaStore& meta, IDataStore& data, PinTable
 
 }  // namespace duostore
 
-// meta engine selection (docs/storage/duostore-meta-redis-design.md §8 / docs/storage/duostore-meta-sqlite-design.md §8 /
-// docs/storage/duostore-meta-tikv-design.md §9): redis / sqlite / tikv require the corresponding
-// compile-time option, otherwise from_params throws "not compiled in"
+// meta engine selection (docs/storage/duostore-meta-redis-design.md §8 / docs/storage/duostore-meta-sqlite-design.md §8
+// / docs/storage/duostore-meta-tikv-design.md §9): redis / sqlite / tikv require the corresponding compile-time option,
+// otherwise from_params throws "not compiled in"
 enum class DuoMetaKind { kRocksDb, kRedis, kSqlite, kTikv };
 
 // data engine selection (docs/storage/duostore-data-rados-design.md §10, dual of meta_kind):
@@ -238,31 +240,32 @@ struct DuoStoreConfig {
     std::filesystem::path root;       // required; meta/ chunks/ packs/ all live underneath
     std::filesystem::path meta_path;  // default <root>/meta (may point separately to SSD)
     DuoMetaKind meta_kind = DuoMetaKind::kRocksDb;
-    std::string redis_uri;                // required when meta=redis
-    std::string redis_prefix = "duo:";    // key prefix (multi-instance/test isolation)
-    int redis_timeout_sec = 3;            // connect + per-command timeout
-    int redis_pool_size = 8;              // connection pool size
-    int redis_wait_replicas = 0;          // replicas to WAIT for after commit (0 = no wait)
-    std::filesystem::path sqlite_path;    // meta=sqlite: DB file, default <root>/meta.sqlite3
-    size_t sqlite_cache = 64ull << 20;    // page cache (PRAGMA cache_size)
-    std::filesystem::path sqlite_wal_archive;  // meta=sqlite: backup chain dir for incremental backups (backlog-sequence ⑧); empty = full backups only
-    std::vector<std::string> pd_endpoints;  // required when meta=tikv (docs/storage/duostore-meta-tikv-design.md §9)
-    std::string tikv_prefix = "duo:";       // key prefix (multi-instance/test isolation)
-    std::string tikv_ca;                    // mTLS triple (enabled only when all three are given)
+    std::string redis_uri;                     // required when meta=redis
+    std::string redis_prefix = "duo:";         // key prefix (multi-instance/test isolation)
+    int redis_timeout_sec = 3;                 // connect + per-command timeout
+    int redis_pool_size = 8;                   // connection pool size
+    int redis_wait_replicas = 0;               // replicas to WAIT for after commit (0 = no wait)
+    std::filesystem::path sqlite_path;         // meta=sqlite: DB file, default <root>/meta.sqlite3
+    size_t sqlite_cache = 64ull << 20;         // page cache (PRAGMA cache_size)
+    std::filesystem::path sqlite_wal_archive;  // meta=sqlite: backup chain dir for incremental backups
+                                               // (backlog-sequence ⑧); empty = full backups only
+    std::vector<std::string> pd_endpoints;     // required when meta=tikv (docs/storage/duostore-meta-tikv-design.md §9)
+    std::string tikv_prefix = "duo:";          // key prefix (multi-instance/test isolation)
+    std::string tikv_ca;                       // mTLS triple (enabled only when all three are given)
     std::string tikv_cert;
     std::string tikv_key;
-    int tikv_backoff_ms = 0;                // sidecar-path backoff budget (0 = client-c library default)
-    int tikv_gc_interval_sec = 60;          // GC safepoint advance period (0 = off, §7.3)
-    int tikv_gc_retention_sec = 600;        // safepoint retention window (now − retention)
+    int tikv_backoff_ms = 0;          // sidecar-path backoff budget (0 = client-c library default)
+    int tikv_gc_interval_sec = 60;    // GC safepoint advance period (0 = off, §7.3)
+    int tikv_gc_retention_sec = 600;  // safepoint retention window (now − retention)
     DuoDataKind data_kind = DuoDataKind::kFs;
     std::string rados_conf = "/etc/ceph/ceph.conf";  // data=rados keys (docs/storage/duostore-data-rados-design.md §10)
     std::string rados_client = "client.admin";
-    std::string rados_pool;                          // required when data=rados
-    std::string rados_namespace;                     // logical isolation within the pool (multi-instance/tests)
+    std::string rados_pool;       // required when data=rados
+    std::string rados_namespace;  // logical isolation within the pool (multi-instance/tests)
     uint64_t rados_chunk_size = 8ull << 20;
     uint64_t rados_buffer_total = 256ull << 20;
     int rados_connect_timeout_sec = 5;
-    int rados_op_timeout_sec = 0;                    // 0 = no op timeout
+    int rados_op_timeout_sec = 0;  // 0 = no op timeout
     uint64_t chunk_size = 8ull << 20;
     // io_uring fs data plane (roadmap §3.4 ⑤, data=fs only): chunk/pack byte transfers
     // and durability syncs go through the shared UringEngine; opt-in, and on engine
@@ -271,15 +274,15 @@ struct DuoStoreConfig {
     bool fs_uring = false;
     unsigned fs_uring_queue_depth = 256;
     bool fs_uring_sqpoll = false;
-    unsigned fs_uring_rings = 1;  // 0 = auto (hardware threads / 8, clamped to [1,8])
-    uint64_t pack_threshold = 128 << 10;   // ≤ this goes into packs; 0 = disabled (everything via chunks)
+    unsigned fs_uring_rings = 1;          // 0 = auto (hardware threads / 8, clamped to [1,8])
+    uint64_t pack_threshold = 128 << 10;  // ≤ this goes into packs; 0 = disabled (everything via chunks)
     uint64_t pack_max_size = 128ull << 20;
     int pack_writers = 4;
     // Age-based sealing of active packs (docs/archive/gaps.md §6.1): with capacity-only
     // sealing under low write volume a pack never rotates, and its dead regions
     // never enter the compaction candidate set. 0 = disabled
     int pack_max_age_sec = 3600;
-    double pack_gc_ratio = 0.5;            // effective with P4 compaction
+    double pack_gc_ratio = 0.5;  // effective with P4 compaction
     // Per-round compaction budget (docs/archive/gaps.md §6.1): candidates sorted by
     // reclaimable bytes descending, take the top N / cumulative file_size at most
     // max_bytes. Without a budget, "one GC round rewriting every eligible pack
@@ -332,8 +335,7 @@ struct DuoStoreConfig {
 
     // Centralized parsing + range validation (docs/storage/duostore-design.md §11);
     // configuration errors throw std::runtime_error
-    static DuoStoreConfig from_params(const std::string& name,
-                                      const std::map<std::string, std::string>& params);
+    static DuoStoreConfig from_params(const std::string& name, const std::map<std::string, std::string>& params);
     // "rocksdb" | "sqlite" | "redis" | "tikv" (manifest engine tag, log labels)
     const char* meta_kind_name() const;
     // "fs" | "rados"
@@ -352,13 +354,11 @@ class DuoStoreBackend final : public IStorageBackend {
 public:
     // metrics defaults to an empty scope: tests construct directly without
     // assembly, counters land in an isolated instance
-    DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
-                    MetricsScope metrics = {});
+    DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool, MetricsScope metrics = {});
     // For test injection: self-assembled meta/data. Note cfg.data_kind must match
     // the injected data engine — it determines the extent kind the orphan scan
     // unlinks (the rados engine only accepts kRados)
-    DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
-                    std::unique_ptr<duostore::IMetaStore> meta,
+    DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool, std::unique_ptr<duostore::IMetaStore> meta,
                     std::unique_ptr<duostore::IDataStore> data, MetricsScope metrics = {});
     ~DuoStoreBackend() override;
 
@@ -369,33 +369,25 @@ public:
 
     Task<ObjectStream> get_object(std::string_view bucket, std::string_view key,
                                   std::optional<ByteRange> range) override;
-    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta,
-                               http::BodyReader& body,
+    Task<PutResult> put_object(std::string_view bucket, std::string_view key, ObjectMeta meta, http::BodyReader& body,
                                PutCondition cond = {}) override;
     Task<ObjectMeta> head_object(std::string_view bucket, std::string_view key) override;
     // Meta record version, tier state, and the extent list (chunk / pack / rados
     // with file id, offset, length, crc32c) — roadmap §6.2 `lights3-ctl object inspect`
-    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket,
-                                                     std::string_view key) override;
+    Task<std::optional<ObjectLayout>> inspect_object(std::string_view bucket, std::string_view key) override;
     Task<void> delete_object(std::string_view bucket, std::string_view key) override;
     Task<ListResult> list_objects(std::string_view bucket, const ListOptions& opt) override;
 
-    Task<std::string> create_multipart(std::string_view bucket, std::string_view key,
-                                       ObjectMeta meta) override;
+    Task<std::string> create_multipart(std::string_view bucket, std::string_view key, ObjectMeta meta) override;
     using IStorageBackend::upload_part;
-    Task<PutResult> upload_part(std::string_view bucket, std::string_view key,
-                                std::string_view upload_id, int part_no, http::BodyReader& body,
-                                const std::optional<PartChecksum>& checksum) override;
-    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key,
-                                       std::string_view upload_id,
+    Task<PutResult> upload_part(std::string_view bucket, std::string_view key, std::string_view upload_id, int part_no,
+                                http::BodyReader& body, const std::optional<PartChecksum>& checksum) override;
+    Task<PutResult> complete_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                        std::span<const PartInfo> parts) override;
-    Task<void> abort_multipart(std::string_view bucket, std::string_view key,
-                               std::string_view upload_id) override;
-    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key,
-                                     std::string_view upload_id,
+    Task<void> abort_multipart(std::string_view bucket, std::string_view key, std::string_view upload_id) override;
+    Task<ListPartsResult> list_parts(std::string_view bucket, std::string_view key, std::string_view upload_id,
                                      const ListPartsOptions& opt) override;
-    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket,
-                                                   const ListUploadsOptions& opt) override;
+    Task<ListUploadsResult> list_multipart_uploads(std::string_view bucket, const ListUploadsOptions& opt) override;
 
     Task<void> close() override;
 
@@ -447,8 +439,7 @@ public:
     // a snapshot as a full entry plus the engine's restore marker (replication
     // offset / TSO) for the cluster-side tooling -- incremental=true is refused
     // there. Holds the GC semaphore like dump
-    Task<duostore::MetaBackupEntry> run_meta_backup(const std::filesystem::path& dir,
-                                                    bool incremental);
+    Task<duostore::MetaBackupEntry> run_meta_backup(const std::filesystem::path& dir, bool incremental);
     const DuoStoreConfig& config() const { return cfg_; }
     // The engine's current restore marker ("" for local engines)
     std::string meta_restore_marker() { return meta_->restore_marker(); }
@@ -481,14 +472,13 @@ public:
     // Stub commit: rewrite the record with no extents and tier=remote, CAS on meta.etag
     // (the old extents enter the gcq in the same meta transaction — that *is* the local
     // space reclamation). Throws PreconditionFailed when beaten by a concurrent write
-    Task<void> tier_commit_stub(std::string_view bucket, std::string_view key,
-                                const ObjectMeta& meta, const duostore::TierState& ts);
+    Task<void> tier_commit_stub(std::string_view bucket, std::string_view key, const ObjectMeta& meta,
+                                const duostore::TierState& ts);
     // Cache-fill commit: pump body into the data plane, then rewrite the record with the
     // new extents and tier=cached, CAS on meta.etag; the produced extents are discarded
     // when the commit fails (same shape as PUT)
-    Task<void> tier_commit_cached(std::string_view bucket, std::string_view key,
-                                  http::BodyReader& body, const ObjectMeta& meta,
-                                  const duostore::TierState& ts);
+    Task<void> tier_commit_cached(std::string_view bucket, std::string_view key, http::BodyReader& body,
+                                  const ObjectMeta& meta, const duostore::TierState& ts);
     const std::filesystem::path& root() const { return cfg_.root; }
     const std::shared_ptr<ThreadPool>& pool() const { return pool_; }
 
@@ -521,11 +511,9 @@ private:
     // re-reads the current manifest to separate a genuine refs hole from a
     // concurrent overwrite/delete; returns whether any extent failed
     Task<bool> scrub_manifest(const duostore::DataRef& ref, const std::string& what,
-                              const std::vector<uint64_t>& refs_snapshot,
-                              std::vector<bool>& ref_seen,
+                              const std::vector<uint64_t>& refs_snapshot, std::vector<bool>& ref_seen,
                               const std::function<std::optional<duostore::DataRef>()>& refetch,
-                              class ScrubThrottle& throttle, std::vector<std::byte>& buf,
-                              duostore::DuoScrubStats& st);
+                              class ScrubThrottle& throttle, std::vector<std::byte>& buf, duostore::DuoScrubStats& st);
     void shutdown_background();
     // GC counter metric registration (shared by both constructors)
     void init_metrics(const MetricsScope& metrics);
@@ -548,16 +536,14 @@ private:
 
     // Accumulated once at the end of a completed GC round (run_gc_once's
     // DuoGcStats → monotonic counters)
-    std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_,
-        m_gc_packs_removed_, m_gc_uploads_expired_, m_gc_packs_compacted_,
-        m_gc_packs_sealed_aged_, m_gc_records_migrated_, m_gc_records_corrupt_, m_orphan_runs_,
-        m_orphan_removed_, m_orphan_packs_removed_;
+    std::shared_ptr<MetricCounter> m_gc_runs_, m_gc_reclaims_, m_gc_files_removed_, m_gc_packs_removed_,
+        m_gc_uploads_expired_, m_gc_packs_compacted_, m_gc_packs_sealed_aged_, m_gc_records_migrated_,
+        m_gc_records_corrupt_, m_orphan_runs_, m_orphan_removed_, m_orphan_packs_removed_;
     // Reclamation source buckets (§6.1): index = ReclaimReason
     std::array<std::shared_ptr<MetricCounter>, 6> m_gc_reclaims_by_reason_;
-    std::shared_ptr<MetricGauge> m_gc_compact_deferred_, m_gcq_depth_, m_gcq_oldest_age_,
-        m_gc_skipped_grace_, m_gc_skipped_pinned_, m_gc_skipped_leased_, m_bytes_chunks_,
-        m_bytes_packs_, m_pack_accounted_bytes_, m_pack_live_bytes_, m_packs_total_,
-        m_packs_quarantined_, m_orphan_packstats_missing_;
+    std::shared_ptr<MetricGauge> m_gc_compact_deferred_, m_gcq_depth_, m_gcq_oldest_age_, m_gc_skipped_grace_,
+        m_gc_skipped_pinned_, m_gc_skipped_leased_, m_bytes_chunks_, m_bytes_packs_, m_pack_accounted_bytes_,
+        m_pack_live_bytes_, m_packs_total_, m_packs_quarantined_, m_orphan_packstats_missing_;
     std::shared_ptr<MetricHistogram> m_gc_duration_;
     // GET read-path crc mismatch counter (P5 corruption metric): data-plane
     // readers increment via the on_corruption callback — the callback captures
@@ -617,11 +603,11 @@ private:
     // full scan, correctness unaffected
     struct GcqSkips {
         bool any = false;
-        uint64_t lo_seq = 0;       // seq of the earliest skipped entry (valid when any)
-        int64_t retry_at_ms = 0;   // earliest retry time among skipped entries
+        uint64_t lo_seq = 0;      // seq of the earliest skipped entry (valid when any)
+        int64_t retry_at_ms = 0;  // earliest retry time among skipped entries
     };
     GcqSkips gcq_skips_;
-    uint64_t gcq_hi_ = 0;          // high watermark of scanned seqs (next unseen seq)
+    uint64_t gcq_hi_ = 0;  // high watermark of scanned seqs (next unseen seq)
 
     // Instance identity for the multi-gateway GC lease (§6.1): randomly generated
     // in-process; a restart simply gets a new one — the old lease yields via TTL
@@ -630,10 +616,8 @@ private:
     std::string gc_owner_;
     // In-flight read / write registries for the leases (roadmap §3.7,
     // multi-gateway-multipart §4 ①); shared with escaping readers like pins_
-    std::shared_ptr<duostore::InFlightClock> read_clock_ =
-        std::make_shared<duostore::InFlightClock>();
-    std::shared_ptr<duostore::InFlightClock> write_clock_ =
-        std::make_shared<duostore::InFlightClock>();
+    std::shared_ptr<duostore::InFlightClock> read_clock_ = std::make_shared<duostore::InFlightClock>();
+    std::shared_ptr<duostore::InFlightClock> write_clock_ = std::make_shared<duostore::InFlightClock>();
     BackgroundTaskGroup bg_{"duostore"};
     // Written only inside bg_.if_open, unchanged after begin_close (readers are
     // lock-free); 0 = not armed (cancel(0) is safe)

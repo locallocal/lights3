@@ -158,10 +158,14 @@ void bridge_poco_logs_once() {
 
 ::kvrpcpb::Op to_pb_op(TikvOp op) {
     switch (op) {
-        case TikvOp::kPut: return ::kvrpcpb::Put;
-        case TikvOp::kDel: return ::kvrpcpb::Del;
-        case TikvOp::kLock: return ::kvrpcpb::Lock;
-        case TikvOp::kInsert: return ::kvrpcpb::Insert;
+        case TikvOp::kPut:
+            return ::kvrpcpb::Put;
+        case TikvOp::kDel:
+            return ::kvrpcpb::Del;
+        case TikvOp::kLock:
+            return ::kvrpcpb::Lock;
+        case TikvOp::kInsert:
+            return ::kvrpcpb::Insert;
     }
     __builtin_unreachable();
 }
@@ -192,8 +196,7 @@ struct Batch {
 //     the transaction first rather than parallelize
 class Committer {
 public:
-    Committer(Cluster* cluster, uint64_t start_ts, const std::vector<TikvMutation>& muts,
-              int backoff_budget_ms)
+    Committer(Cluster* cluster, uint64_t start_ts, const std::vector<TikvMutation>& muts, int backoff_budget_ms)
         : cluster_(cluster), start_ts_(start_ts) {
         keys_.reserve(muts.size());
         uint64_t bytes = 0;
@@ -211,10 +214,8 @@ public:
         lock_ttl_ = txn_lock_ttl(bytes);
         primary_ = keys_.front();
         // Budget parameterization (§6.1, T5): commit uses 2× to match upstream's commit:prewrite ≈ 2:1
-        prewrite_budget_ = backoff_budget_ms > 0 ? backoff_budget_ms
-                                                 : pingcap::kv::prewriteMaxBackoff;
-        commit_budget_ = backoff_budget_ms > 0 ? 2 * backoff_budget_ms
-                                               : pingcap::kv::commitMaxBackoff;
+        prewrite_budget_ = backoff_budget_ms > 0 ? backoff_budget_ms : pingcap::kv::prewriteMaxBackoff;
+        commit_budget_ = backoff_budget_ms > 0 ? 2 * backoff_budget_ms : pingcap::kv::commitMaxBackoff;
     }
 
     void execute() {
@@ -235,7 +236,8 @@ public:
             Backoffer bo(commit_budget_);
             commit_keys(bo, {primary_}, /*primary_phase=*/true);
         } catch (TikvConflict&) {
-            // TiKV's commit is idempotent for a committed transaction and returns ok; an explicit rejection = already rolled back — safe to retry
+            // TiKV's commit is idempotent for a committed transaction and returns ok; an explicit rejection = already
+            // rolled back — safe to retry
             throw;
         } catch (Exception& e) {
             throw TikvUndetermined{e.displayText()};
@@ -256,8 +258,7 @@ public:
 
 private:
     // Region grouping + byte-bounded batching (mirrors the shape of client-c doActionOnKeys)
-    std::vector<Batch> make_batches(Backoffer& bo, const std::vector<std::string>& keys,
-                                    bool with_values) {
+    std::vector<Batch> make_batches(Backoffer& bo, const std::vector<std::string>& keys, bool with_values) {
         auto [groups, first_region] = cluster_->region_cache->groupKeysByRegion(bo, keys);
         std::ignore = first_region;
         std::vector<Batch> batches;
@@ -315,7 +316,8 @@ private:
             try {
                 rc.sendReqToRegion<pingcap::kv::RPC_NAME(KvPrewrite)>(bo, req, &resp);
             } catch (Exception& e) {
-                // region-level error (split/migration): back off, then hand back to the caller's work stack to re-resolve routing and redo
+                // region-level error (split/migration): back off, then hand back to the caller's work stack to
+                // re-resolve routing and redo
                 bo.backoff(pingcap::kv::boRegionMiss, e);
                 return false;
             }
@@ -334,8 +336,7 @@ private:
                 // retry's fresh start_ts is necessarily greater than its txn_id (a TSO from a
                 // past moment), so progress goes through the resolver cleanup path; convergence is safe
                 if (lock->lock_type != ::kvrpcpb::PessimisticLock && lock->txn_id > start_ts_)
-                    throw TikvConflict{"blocked by newer optimistic txn " +
-                                       std::to_string(lock->txn_id)};
+                    throw TikvConflict{"blocked by newer optimistic txn " + std::to_string(lock->txn_id)};
                 locks.push_back(std::move(lock));
             }
             int64_t before_expired = 0;
@@ -346,15 +347,13 @@ private:
                 // WriteConflict error code where the linked client-c has it, by message at
                 // @78a557e (see is_upstream_write_conflict) — the prewrite phase is
                 // definitively uncommitted, so classify as conflict and retry
-                if (is_upstream_write_conflict(e.code(), e.displayText()))
-                    throw TikvConflict{e.displayText()};
+                if (is_upstream_write_conflict(e.code(), e.displayText())) throw TikvConflict{e.displayText()};
                 throw;
             }
             if (before_expired > 0) {
-                bo.backoffWithMaxSleep(
-                    pingcap::kv::boTxnLock, static_cast<int>(before_expired),
-                    Exception("prewrite blocked by " + std::to_string(locks.size()) + " locks",
-                              pingcap::ErrorCodes::LockError));
+                bo.backoffWithMaxSleep(pingcap::kv::boTxnLock, static_cast<int>(before_expired),
+                                       Exception("prewrite blocked by " + std::to_string(locks.size()) + " locks",
+                                                 pingcap::ErrorCodes::LockError));
             }
         }
     }
@@ -400,8 +399,7 @@ private:
                 return false;  // hand back to the caller's work stack to re-resolve routing and redo
             }
             if (!resp.has_error()) return true;
-            if (primary_phase && resp.error().has_commit_ts_expired() &&
-                ts_refresh < kMaxTsRefresh) {
+            if (primary_phase && resp.error().has_commit_ts_expired() && ts_refresh < kMaxTsRefresh) {
                 commit_ts_ = cluster_->pd_client->getTS();  // the TSO fetch's own latency acts as throttling
                 continue;
             }
@@ -460,9 +458,8 @@ struct TikvClient::Impl {
         std::string url = cluster->pd_client->getLeaderUrl();
         if (!pd_stub || url != pd_url) {
             Poco::URI uri(url);  // the leader URL looks like http(s)://host:port; grpc only needs the authority
-            auto creds = cluster_cfg.hasTlsConfig()
-                             ? grpc::SslCredentials(cluster_cfg.getGrpcCredentials())
-                             : grpc::InsecureChannelCredentials();
+            auto creds = cluster_cfg.hasTlsConfig() ? grpc::SslCredentials(cluster_cfg.getGrpcCredentials())
+                                                    : grpc::InsecureChannelCredentials();
             pd_stub = ::pdpb::PD::NewStub(grpc::CreateChannel(uri.getAuthority(), creds));
             pd_url = url;
         }
@@ -472,9 +469,9 @@ struct TikvClient::Impl {
         grpc::Status st = rpc(&ctx, *pd_stub, &resp);
         if (!st.ok()) {
             pd_stub.reset();
-            throw Exception(std::string(what) + " failed: " + std::to_string(st.error_code()) +
-                                ": " + st.error_message(),
-                            pingcap::ErrorCodes::GRPCErrorCode);
+            throw Exception(
+                std::string(what) + " failed: " + std::to_string(st.error_code()) + ": " + st.error_message(),
+                pingcap::ErrorCodes::GRPCErrorCode);
         }
         if (resp.header().has_error()) {  // PD-level errors such as not-leader
             pd_stub.reset();
@@ -514,12 +511,11 @@ std::optional<std::string> TikvClient::get(uint64_t version, const std::string& 
     return v;
 }
 
-std::vector<std::pair<std::string, std::string>> TikvClient::scan(uint64_t version,
-                                                                  const std::string& begin,
-                                                                  const std::string& end,
-                                                                  size_t limit) {
+std::vector<std::pair<std::string, std::string>> TikvClient::scan(uint64_t version, const std::string& begin,
+                                                                  const std::string& end, size_t limit) {
     pingcap::kv::Snapshot snap(impl_->cluster.get(), version);
-    // Push limit down as the batch size (Snapshot::Scan is fixed at 256): a limit=1 existence probe fetches only 1 entry
+    // Push limit down as the batch size (Snapshot::Scan is fixed at 256): a limit=1 existence probe fetches only 1
+    // entry
     int batch = int(std::min<size_t>(std::max<size_t>(limit, 1), 1024));
     pingcap::kv::Scanner scanner(snap, begin, end, batch);
     std::vector<std::pair<std::string, std::string>> out;
@@ -530,13 +526,11 @@ std::vector<std::pair<std::string, std::string>> TikvClient::scan(uint64_t versi
     return out;
 }
 
-std::vector<std::optional<std::string>> TikvClient::batch_get(
-    uint64_t version, const std::vector<std::string>& keys) {
+std::vector<std::optional<std::string>> TikvClient::batch_get(uint64_t version, const std::vector<std::string>& keys) {
     using pingcap::kv::LockPtr;
     std::unordered_map<std::string, std::string> found;
     std::vector<std::string> pending = keys;
-    Backoffer bo(impl_->backoff_budget_ms > 0 ? impl_->backoff_budget_ms
-                                              : pingcap::kv::GetMaxBackoff);
+    Backoffer bo(impl_->backoff_budget_ms > 0 ? impl_->backoff_budget_ms : pingcap::kv::GetMaxBackoff);
     while (!pending.empty()) {
         auto [groups, first_region] = impl_->cluster->region_cache->groupKeysByRegion(bo, pending);
         std::ignore = first_region;
@@ -555,14 +549,14 @@ std::vector<std::optional<std::string>> TikvClient::batch_get(
                 continue;
             }
             if (resp.has_error()) {
-                // Response-level lock error: pairs is empty; resolve, then redo the whole group (semantics per the proto comment)
+                // Response-level lock error: pairs is empty; resolve, then redo the whole group (semantics per the
+                // proto comment)
                 std::vector<LockPtr> locks{pingcap::kv::extractLockFromKeyErr(resp.error())};
                 std::vector<uint64_t> pushed;
                 auto ms = impl_->cluster->lock_resolver->resolveLocks(bo, version, locks, pushed);
                 if (ms > 0)
-                    bo.backoffWithMaxSleep(
-                        pingcap::kv::boTxnLockFast, static_cast<int>(ms),
-                        Exception("batch_get blocked by lock", pingcap::ErrorCodes::LockError));
+                    bo.backoffWithMaxSleep(pingcap::kv::boTxnLockFast, static_cast<int>(ms),
+                                           Exception("batch_get blocked by lock", pingcap::ErrorCodes::LockError));
                 retry.insert(retry.end(), group_keys.begin(), group_keys.end());
                 continue;
             }
@@ -585,18 +579,18 @@ std::vector<std::optional<std::string>> TikvClient::batch_get(
     for (auto& k : keys) {
         auto it = found.find(k);
         // Missing or empty (codec values are never empty) both count as absent — same disambiguation as get()
-        if (it == found.end() || it->second.empty()) out.emplace_back(std::nullopt);
-        else out.emplace_back(it->second);
+        if (it == found.end() || it->second.empty())
+            out.emplace_back(std::nullopt);
+        else
+            out.emplace_back(it->second);
     }
     return out;
 }
 
-std::optional<std::string> TikvClient::last_key(uint64_t version, const std::string& lo,
-                                                const std::string& hi) {
+std::optional<std::string> TikvClient::last_key(uint64_t version, const std::string& lo, const std::string& hi) {
     using pingcap::kv::KeyLocation;
     using pingcap::kv::LockPtr;
-    Backoffer bo(impl_->backoff_budget_ms > 0 ? impl_->backoff_budget_ms
-                                              : pingcap::kv::scanMaxBackoff);
+    Backoffer bo(impl_->backoff_budget_ms > 0 ? impl_->backoff_budget_ms : pingcap::kv::scanMaxBackoff);
     for (;;) {  // outer loop: restart from scratch when the region topology changes
         // Walk forward collecting the regions covering [lo, hi) (mostly cache hits, zero data
         // transfer), then reverse-scan limit=1 region by region from the tail — sidestepping
@@ -635,12 +629,10 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
                 if (resp.has_error()) {
                     std::vector<LockPtr> locks{pingcap::kv::extractLockFromKeyErr(resp.error())};
                     std::vector<uint64_t> pushed;
-                    auto ms =
-                        impl_->cluster->lock_resolver->resolveLocks(bo, version, locks, pushed);
+                    auto ms = impl_->cluster->lock_resolver->resolveLocks(bo, version, locks, pushed);
                     if (ms > 0)
                         bo.backoffWithMaxSleep(pingcap::kv::boTxnLockFast, static_cast<int>(ms),
-                                               Exception("last_key blocked by lock",
-                                                         pingcap::ErrorCodes::LockError));
+                                               Exception("last_key blocked by lock", pingcap::ErrorCodes::LockError));
                     continue;
                 }
                 if (resp.pairs_size() == 0) break;  // no key in this region's intersection; try the previous region
@@ -649,12 +641,10 @@ std::optional<std::string> TikvClient::last_key(uint64_t version, const std::str
                     // Tail key locked (possibly an uncommitted insert): resolve, then rescan this region
                     std::vector<LockPtr> locks{pingcap::kv::extractLockFromKeyErr(pair.error())};
                     std::vector<uint64_t> pushed;
-                    auto ms =
-                        impl_->cluster->lock_resolver->resolveLocks(bo, version, locks, pushed);
+                    auto ms = impl_->cluster->lock_resolver->resolveLocks(bo, version, locks, pushed);
                     if (ms > 0)
                         bo.backoffWithMaxSleep(pingcap::kv::boTxnLockFast, static_cast<int>(ms),
-                                               Exception("last_key blocked by lock",
-                                                         pingcap::ErrorCodes::LockError));
+                                               Exception("last_key blocked by lock", pingcap::ErrorCodes::LockError));
                     continue;
                 }
                 return pair.key();
@@ -681,23 +671,22 @@ constexpr size_t kMaxTxnMutations = 300'000;
 
 void check_txn_size(const std::vector<TikvMutation>& muts) {
     if (muts.size() > kMaxTxnMutations)
-        throw Exception("tikv txn rejected: " + std::to_string(muts.size()) +
-                            " mutations exceed limit " + std::to_string(kMaxTxnMutations),
+        throw Exception("tikv txn rejected: " + std::to_string(muts.size()) + " mutations exceed limit " +
+                            std::to_string(kMaxTxnMutations),
                         pingcap::ErrorCodes::LogicalError);
     uint64_t total = 0;
     for (const auto& m : muts) {
         uint64_t sz = m.key.size() + m.value.size();
         if (m.value.size() > kMaxMutationValueBytes)
-            throw Exception("tikv txn rejected: mutation value " +
-                                std::to_string(m.value.size()) + " bytes exceeds limit " +
-                                std::to_string(kMaxMutationValueBytes) +
+            throw Exception("tikv txn rejected: mutation value " + std::to_string(m.value.size()) +
+                                " bytes exceeds limit " + std::to_string(kMaxMutationValueBytes) +
                                 " (raft entry cap; key " + m.key.substr(0, 64) + ")",
                             pingcap::ErrorCodes::LogicalError);
         total += sz;
     }
     if (total > kMaxTxnTotalBytes)
-        throw Exception("tikv txn rejected: " + std::to_string(total) +
-                            " total bytes exceed limit " + std::to_string(kMaxTxnTotalBytes),
+        throw Exception("tikv txn rejected: " + std::to_string(total) + " total bytes exceed limit " +
+                            std::to_string(kMaxTxnTotalBytes),
                         pingcap::ErrorCodes::LogicalError);
 }
 
@@ -711,8 +700,7 @@ void TikvClient::commit(uint64_t start_ts, const std::vector<TikvMutation>& muts
 
 // ---------- GC safepoint (§7.3) ----------
 
-uint64_t TikvClient::update_service_gc_safepoint(const std::string& service_id, int64_t ttl_s,
-                                                 uint64_t safe_point) {
+uint64_t TikvClient::update_service_gc_safepoint(const std::string& service_id, int64_t ttl_s, uint64_t safe_point) {
     ::pdpb::UpdateServiceGCSafePointRequest req;
     req.set_allocated_header(impl_->pd_header());
     req.set_service_id(service_id);
@@ -720,8 +708,7 @@ uint64_t TikvClient::update_service_gc_safepoint(const std::string& service_id, 
     req.set_safe_point(safe_point);
     auto resp = impl_->pd_call<::pdpb::UpdateServiceGCSafePointResponse>(
         "update_service_gc_safepoint",
-        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub,
-            ::pdpb::UpdateServiceGCSafePointResponse* r) {
+        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub, ::pdpb::UpdateServiceGCSafePointResponse* r) {
             return stub.UpdateServiceGCSafePoint(ctx, req, r);
         });
     return resp.min_safe_point();
@@ -733,8 +720,9 @@ uint64_t TikvClient::update_gc_safepoint(uint64_t safe_point) {
     req.set_safe_point(safe_point);
     auto resp = impl_->pd_call<::pdpb::UpdateGCSafePointResponse>(
         "update_gc_safepoint",
-        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub,
-            ::pdpb::UpdateGCSafePointResponse* r) { return stub.UpdateGCSafePoint(ctx, req, r); });
+        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub, ::pdpb::UpdateGCSafePointResponse* r) {
+            return stub.UpdateGCSafePoint(ctx, req, r);
+        });
     return resp.new_safe_point();
 }
 
@@ -744,8 +732,7 @@ uint64_t TikvClient::get_gc_safepoint() {
     ::pdpb::GetGCSafePointRequest req;
     req.set_allocated_header(impl_->pd_header());
     auto resp = impl_->pd_call<::pdpb::GetGCSafePointResponse>(
-        "get_gc_safepoint",
-        [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub, ::pdpb::GetGCSafePointResponse* r) {
+        "get_gc_safepoint", [&](grpc::ClientContext* ctx, ::pdpb::PD::Stub& stub, ::pdpb::GetGCSafePointResponse* r) {
             return stub.GetGCSafePoint(ctx, req, r);
         });
     return resp.safe_point();

@@ -52,8 +52,7 @@ std::optional<BucketUsage> UsageTracker::deserialize(const std::string& body) {
         u.objects = std::max<int64_t>(0, j.value("objects", int64_t{0}));
         u.bytes = std::max<int64_t>(0, j.value("bytes", int64_t{0}));
         u.mpu_bytes = std::max<int64_t>(0, j.value("mpu_bytes", int64_t{0}));
-        u.scanned_at = std::chrono::system_clock::time_point(
-            std::chrono::seconds(j.value("scanned_unix", int64_t{0})));
+        u.scanned_at = std::chrono::system_clock::time_point(std::chrono::seconds(j.value("scanned_unix", int64_t{0})));
         return u;
     } catch (const json::exception&) {
         return std::nullopt;
@@ -62,8 +61,7 @@ std::optional<BucketUsage> UsageTracker::deserialize(const std::string& body) {
 
 // ---------- lifecycle ----------
 
-Task<std::shared_ptr<UsageTracker>> UsageTracker::load(storage::BucketRouter router,
-                                                       UsageConfig cfg,
+Task<std::shared_ptr<UsageTracker>> UsageTracker::load(storage::BucketRouter router, UsageConfig cfg,
                                                        std::shared_ptr<MetricsRegistry> metrics) {
     auto t = std::shared_ptr<UsageTracker>(new UsageTracker());
     t->router_ = std::move(router);
@@ -71,15 +69,11 @@ Task<std::shared_ptr<UsageTracker>> UsageTracker::load(storage::BucketRouter rou
     t->metrics_ = std::move(metrics);
     if (t->metrics_) {
         const char* help = "Writes refused by a quota, by the scope that was exceeded";
-        t->m_reject_bucket_ =
-            t->metrics_->counter("lights3_quota_rejections_total", help, {{"scope", "bucket"}});
-        t->m_reject_tenant_ =
-            t->metrics_->counter("lights3_quota_rejections_total", help, {{"scope", "tenant"}});
-        t->m_scans_ = t->metrics_->counter("lights3_usage_scans_total",
-                                           "Full bucket usage counts completed");
-        t->m_last_scan_ = t->metrics_->gauge(
-            "lights3_usage_last_scan_timestamp_seconds",
-            "Unix time of the most recent full bucket usage count on this instance");
+        t->m_reject_bucket_ = t->metrics_->counter("lights3_quota_rejections_total", help, {{"scope", "bucket"}});
+        t->m_reject_tenant_ = t->metrics_->counter("lights3_quota_rejections_total", help, {{"scope", "tenant"}});
+        t->m_scans_ = t->metrics_->counter("lights3_usage_scans_total", "Full bucket usage counts completed");
+        t->m_last_scan_ = t->metrics_->gauge("lights3_usage_last_scan_timestamp_seconds",
+                                             "Unix time of the most recent full bucket usage count on this instance");
     }
     if (cfg.enabled) {
         auto persisted = co_await t->read_persisted();
@@ -93,8 +87,8 @@ Task<std::shared_ptr<UsageTracker>> UsageTracker::load(storage::BucketRouter rou
         }
         for (auto& b : fresh) t->register_gauges(b);
         if (!persisted.empty())
-            LOG_INFO("usage: loaded counters for {} bucket(s) from {}/{}", persisted.size(),
-                     storage::kSysBucketName, kPrefix);
+            LOG_INFO("usage: loaded counters for {} bucket(s) from {}/{}", persisted.size(), storage::kSysBucketName,
+                     kPrefix);
     }
     co_return t;
 }
@@ -113,14 +107,12 @@ Task<std::map<std::string, BucketUsage>> UsageTracker::read_persisted() {
         for (auto& obj : page.objects) {
             std::string bucket = obj.key.substr(kPrefix.size());
             try {
-                auto stream =
-                    co_await backend->get_object(storage::kSysBucketName, obj.key, std::nullopt);
+                auto stream = co_await backend->get_object(storage::kSysBucketName, obj.key, std::nullopt);
                 auto body = co_await read_all(*stream.body);
                 if (auto u = deserialize(body))
                     out.emplace(std::move(bucket), *u);
                 else
-                    LOG_WARN("usage: skipping malformed object {}/{}", storage::kSysBucketName,
-                             obj.key);
+                    LOG_WARN("usage: skipping malformed object {}/{}", storage::kSysBucketName, obj.key);
             } catch (const std::exception& e) {
                 LOG_WARN("usage: failed to load {}: {}", obj.key, e.what());
             }
@@ -146,8 +138,7 @@ Task<void> UsageTracker::persist(const std::string& bucket, BucketUsage u) {
     storage::ObjectMeta meta;
     meta.content_type = "application/json";
     http::StringBodyReader body(serialize(u));
-    co_await router_.default_backend()->put_object(storage::kSysBucketName, object_key(bucket),
-                                                   std::move(meta), body);
+    co_await router_.default_backend()->put_object(storage::kSysBucketName, object_key(bucket), std::move(meta), body);
 }
 
 // ---------- counters ----------
@@ -161,26 +152,23 @@ bool UsageTracker::claim_gauge_locked(const std::string& bucket) {
 void UsageTracker::register_gauges(const std::string& bucket) {
     // Callback gauges read the map under the lock at render time; the closure only
     // captures `this` and the name, and shutdown removes the series before teardown
-    metrics_->gauge_callback(
-        "lights3_bucket_usage_bytes", "Committed object bytes per bucket (usage accounting)",
-        [this, bucket] {
-            std::lock_guard lk(mu_);
-            auto it = usage_.find(bucket);
-            return it == usage_.end() ? 0.0 : double(it->second.bytes);
-        },
-        {{"bucket", bucket}});
-    metrics_->gauge_callback(
-        "lights3_bucket_usage_objects", "Committed objects per bucket (usage accounting)",
-        [this, bucket] {
-            std::lock_guard lk(mu_);
-            auto it = usage_.find(bucket);
-            return it == usage_.end() ? 0.0 : double(it->second.objects);
-        },
-        {{"bucket", bucket}});
+    metrics_->gauge_callback("lights3_bucket_usage_bytes", "Committed object bytes per bucket (usage accounting)",
+                             [this, bucket] {
+                                 std::lock_guard lk(mu_);
+                                 auto it = usage_.find(bucket);
+                                 return it == usage_.end() ? 0.0 : double(it->second.bytes);
+                             },
+                             {{"bucket", bucket}});
+    metrics_->gauge_callback("lights3_bucket_usage_objects", "Committed objects per bucket (usage accounting)",
+                             [this, bucket] {
+                                 std::lock_guard lk(mu_);
+                                 auto it = usage_.find(bucket);
+                                 return it == usage_.end() ? 0.0 : double(it->second.objects);
+                             },
+                             {{"bucket", bucket}});
 }
 
-void UsageTracker::apply(const std::string& bucket, int64_t d_objects, int64_t d_bytes,
-                         int64_t d_mpu_bytes) {
+void UsageTracker::apply(const std::string& bucket, int64_t d_objects, int64_t d_bytes, int64_t d_mpu_bytes) {
     if (!cfg_.enabled) return;
     bool fresh = false;
     {
@@ -293,8 +281,8 @@ Task<BucketUsage> UsageTracker::rescan(std::string bucket) {
     scans_.fetch_add(1);
     if (m_scans_) m_scans_->inc();
     if (m_last_scan_) m_last_scan_->set(to_unix(u.scanned_at));
-    LOG_INFO("usage: bucket {} counted: {} object(s), {} byte(s), {} in-flight multipart byte(s)",
-             bucket, u.objects, u.bytes, u.mpu_bytes);
+    LOG_INFO("usage: bucket {} counted: {} object(s), {} byte(s), {} in-flight multipart byte(s)", bucket, u.objects,
+             u.bytes, u.mpu_bytes);
     co_return u;
 }
 
@@ -382,8 +370,8 @@ Task<void> UsageTracker::flush() {
             std::lock_guard lk(mu_);
             auto it = usage_.find(b);
             // Clear only if nothing changed meanwhile (compare the persisted snapshot)
-            if (it != usage_.end() && it->second.objects == u.objects &&
-                it->second.bytes == u.bytes && it->second.mpu_bytes == u.mpu_bytes)
+            if (it != usage_.end() && it->second.objects == u.objects && it->second.bytes == u.bytes &&
+                it->second.mpu_bytes == u.mpu_bytes)
                 it->second.dirty = false;
         } catch (const std::exception& e) {
             LOG_WARN("usage: flush of bucket {} failed: {}", b, e.what());
@@ -425,8 +413,7 @@ Task<void> UsageTracker::remove(const std::string& bucket) {
     if (gauged && metrics_) metrics_->remove_labeled("bucket", bucket);
     if (!cfg_.enabled) co_return;
     try {
-        co_await router_.default_backend()->delete_object(storage::kSysBucketName,
-                                                          object_key(bucket));
+        co_await router_.default_backend()->delete_object(storage::kSysBucketName, object_key(bucket));
     } catch (const S3Error& e) {
         if (e.code != S3ErrorCode::NoSuchKey && e.code != S3ErrorCode::NoSuchBucket) throw;
     }
@@ -522,9 +509,8 @@ void UsageTracker::schedule_flush() {
 void UsageTracker::schedule_reconcile() {
     if (!cfg_.reconcile || cfg_.reconcile_interval_sec <= 0) return;
     bg_.if_open([&] {
-        reconcile_timer_ =
-            TimerQueue::instance().add(std::chrono::seconds(cfg_.reconcile_interval_sec),
-                                       [this] { bg_.spawn(reconcile_tick()); });
+        reconcile_timer_ = TimerQueue::instance().add(std::chrono::seconds(cfg_.reconcile_interval_sec),
+                                                      [this] { bg_.spawn(reconcile_tick()); });
     });
 }
 

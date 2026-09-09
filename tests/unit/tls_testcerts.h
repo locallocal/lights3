@@ -66,8 +66,8 @@ inline void add_ext(X509* cert, X509* issuer, int nid, const char* value) {
 // issuer = nullptr -> self-signed. ca = true marks the certificate as a CA.
 // Server/client leaves get SAN DNS:localhost, IP:127.0.0.1 (+ the CN as DNS);
 // uri_san adds a URI entry (client identities, backlog-sequence ⑥)
-inline Cert make_cert(const std::string& cn, const Cert* issuer = nullptr, bool ca = false,
-                      long serial = 0, const std::string& uri_san = "") {
+inline Cert make_cert(const std::string& cn, const Cert* issuer = nullptr, bool ca = false, long serial = 0,
+                      const std::string& uri_san = "") {
     static long next_serial = 1000;
     EVP_PKEY* key = EVP_PKEY_Q_keygen(nullptr, nullptr, "EC", "P-256");
     if (!key) throw std::runtime_error("keygen failed");
@@ -78,20 +78,17 @@ inline Cert make_cert(const std::string& cn, const Cert* issuer = nullptr, bool 
     X509_gmtime_adj(X509_getm_notAfter(x), 3600L * 24 * 365);
     X509_set_pubkey(x, key);
     X509_NAME* name = X509_get_subject_name(x);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-                               reinterpret_cast<const unsigned char*>(cn.c_str()), -1, -1, 0);
+    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>(cn.c_str()), -1, -1, 0);
     X509* issuer_x = issuer ? detail::x509_of(issuer->cert_pem) : nullptr;
     EVP_PKEY* issuer_key = issuer ? detail::key_of(issuer->key_pem) : nullptr;
     X509_set_issuer_name(x, issuer_x ? X509_get_subject_name(issuer_x) : name);
-    detail::add_ext(x, issuer_x ? issuer_x : x, NID_basic_constraints,
-                    ca ? "critical,CA:TRUE" : "critical,CA:FALSE");
+    detail::add_ext(x, issuer_x ? issuer_x : x, NID_basic_constraints, ca ? "critical,CA:TRUE" : "critical,CA:FALSE");
     if (!ca) {
         std::string san = "DNS:localhost,IP:127.0.0.1,DNS:" + cn;
         if (!uri_san.empty()) san += ",URI:" + uri_san;
         detail::add_ext(x, issuer_x ? issuer_x : x, NID_subject_alt_name, san.c_str());
     }
-    if (X509_sign(x, issuer_key ? issuer_key : key, EVP_sha256()) == 0)
-        throw std::runtime_error("sign failed");
+    if (X509_sign(x, issuer_key ? issuer_key : key, EVP_sha256()) == 0) throw std::runtime_error("sign failed");
     Cert out{detail::pem_of(x), detail::pem_of(key), cn};
     X509_free(x);
     EVP_PKEY_free(key);

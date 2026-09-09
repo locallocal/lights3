@@ -1,4 +1,5 @@
-// L2: small XML generator and parser (S3 request/response structures are shallow and fixed-shape; no XML library dependency)
+// L2: small XML generator and parser (S3 request/response structures are shallow and fixed-shape; no XML library
+// dependency)
 #pragma once
 
 #include <cstdint>
@@ -10,17 +11,18 @@ namespace lights3::s3 {
 
 std::string xml_escape(const std::string& s);
 
-// ---------- Parsing (docs/s3-protocol.md §4: only shallow structures such as CompleteMultipartUpload / DeleteObjects) ----------
-// Supports: nested elements, text, entities (lt gt amp quot apos #dd #xhh), comments, XML declaration, CDATA.
-// Attributes are skipped (S3 request XML only carries xmlns). Malformed input or exceeding max_size throws S3Error{MalformedXML}.
+// ---------- Parsing (docs/s3-protocol.md §4: only shallow structures such as CompleteMultipartUpload / DeleteObjects)
+// ---------- Supports: nested elements, text, entities (lt gt amp quot apos #dd #xhh), comments, XML declaration,
+// CDATA. Attributes are skipped (S3 request XML only carries xmlns). Malformed input or exceeding max_size throws
+// S3Error{MalformedXML}.
 
 struct XmlNode {
     std::string name;
     std::string text;  // direct text (concatenated, leading/trailing whitespace trimmed)
     std::vector<XmlNode> children;
 
-    const XmlNode* find(std::string_view child_name) const;   // first child with the given name
-    std::string get(std::string_view child_name) const;       // child node text, "" if absent
+    const XmlNode* find(std::string_view child_name) const;  // first child with the given name
+    std::string get(std::string_view child_name) const;      // child node text, "" if absent
 };
 
 XmlNode xml_parse(std::string_view input, size_t max_size = 1024 * 1024);

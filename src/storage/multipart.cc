@@ -20,8 +20,7 @@ std::string new_upload_id() {
     // recovered from ~2496 outputs, and a random_device seed carries only 32 bits of
     // entropy -- predictable means enumerable/forgeable (docs/archive/gaps.md §3.9). Must use a CSPRNG
     uint8_t bytes[16];
-    if (::getentropy(bytes, sizeof(bytes)) != 0)
-        throw S3Error(S3ErrorCode::InternalError, "cannot generate upload id");
+    if (::getentropy(bytes, sizeof(bytes)) != 0) throw S3Error(S3ErrorCode::InternalError, "cannot generate upload id");
     return util::to_hex(bytes);
 }
 
@@ -42,14 +41,12 @@ std::string combined_etag(const std::vector<std::string>& part_md5_hex) {
 }
 
 std::string_view strip_etag_quotes(std::string_view etag) {
-    if (etag.size() >= 2 && etag.front() == '"' && etag.back() == '"')
-        return etag.substr(1, etag.size() - 2);
+    if (etag.size() >= 2 && etag.front() == '"' && etag.back() == '"') return etag.substr(1, etag.size() - 2);
     return etag;
 }
 
 void validate_part_order(std::span<const PartInfo> parts) {
-    if (parts.empty())
-        throw S3Error(S3ErrorCode::InvalidPart, "You must specify at least one part.");
+    if (parts.empty()) throw S3Error(S3ErrorCode::InvalidPart, "You must specify at least one part.");
     int prev = 0;
     for (auto& p : parts) {
         // Out-of-order has its own error code (docs/archive/gaps.md §5.7): InvalidPart means "this
@@ -65,8 +62,7 @@ void validate_part_order(std::span<const PartInfo> parts) {
 
 void validate_part_number(int part_no) {
     if (part_no < 1 || part_no > 10000)
-        throw S3Error(S3ErrorCode::InvalidArgument,
-                      "Part number must be an integer between 1 and 10000.");
+        throw S3Error(S3ErrorCode::InvalidArgument, "Part number must be an integer between 1 and 10000.");
 }
 
 // ---- Checksum closure (roadmap §2.2) ----
@@ -84,30 +80,24 @@ std::optional<std::string> composite_checksum(std::string_view algorithm,
         if (raw->size() != digest_len || digest_len == 0) return std::nullopt;
         concat += *raw;
     }
-    auto span_of = [&] {
-        return std::span(reinterpret_cast<const std::byte*>(concat.data()), concat.size());
-    };
+    auto span_of = [&] { return std::span(reinterpret_cast<const std::byte*>(concat.data()), concat.size()); };
     std::string out;
     if (algorithm == "SHA1" || algorithm == "SHA256") {
-        util::HashStream h(algorithm == "SHA1" ? util::HashStream::Algo::Sha1
-                                               : util::HashStream::Algo::Sha256);
+        util::HashStream h(algorithm == "SHA1" ? util::HashStream::Algo::Sha1 : util::HashStream::Algo::Sha256);
         h.update(std::span(reinterpret_cast<const uint8_t*>(concat.data()), concat.size()));
         auto d = h.final_bytes();
         out.assign(d.begin(), d.end());
     } else if (algorithm == "CRC32" || algorithm == "CRC32C") {
-        uint32_t crc = algorithm == "CRC32" ? util::crc32_update(0, span_of())
-                                            : util::crc32c_update(0, span_of());
+        uint32_t crc = algorithm == "CRC32" ? util::crc32_update(0, span_of()) : util::crc32c_update(0, span_of());
         for (int s = 24; s >= 0; s -= 8) out.push_back(char((crc >> s) & 0xff));
     } else {
         return std::nullopt;  // CRC64NVME composites are not a thing (full-object only)
     }
-    return util::base64_encode(
-               std::span(reinterpret_cast<const uint8_t*>(out.data()), out.size())) +
-           "-" + std::to_string(part_values_b64.size());
+    return util::base64_encode(std::span(reinterpret_cast<const uint8_t*>(out.data()), out.size())) + "-" +
+           std::to_string(part_values_b64.size());
 }
 
-void apply_composite_checksum(const std::vector<PartDigest>& parts, ObjectMeta& meta,
-                              PutResult& result) {
+void apply_composite_checksum(const std::vector<PartDigest>& parts, ObjectMeta& meta, PutResult& result) {
     if (parts.empty()) return;
     const std::string& algo = parts.front().algorithm;
     for (auto& p : parts)

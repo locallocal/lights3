@@ -79,12 +79,11 @@ AwsCreds CredentialProvider::from_container() {
     std::string path = path_start == std::string::npos ? "/" : url.substr(path_start);
     auto cli = metadata_client(base);
     httplib::Headers headers;
-    if (auto tok = env("AWS_CONTAINER_AUTHORIZATION_TOKEN"); !tok.empty())
-        headers.emplace("Authorization", tok);
+    if (auto tok = env("AWS_CONTAINER_AUTHORIZATION_TOKEN"); !tok.empty()) headers.emplace("Authorization", tok);
     auto r = cli.Get(path, headers);
     if (!r || r->status != 200) {
-        LOG_WARN("cloudproxy '{}': container credential endpoint {} unreachable ({})", name_,
-                 base, r ? "HTTP " + std::to_string(r->status) : httplib::to_string(r.error()));
+        LOG_WARN("cloudproxy '{}': container credential endpoint {} unreachable ({})", name_, base,
+                 r ? "HTTP " + std::to_string(r->status) : httplib::to_string(r.error()));
         return {};
     }
     return parse_credential_doc(r->body, "container endpoint");
@@ -94,9 +93,8 @@ AwsCreds CredentialProvider::from_imds() {
     auto cli = metadata_client(imds_endpoint_);
     // IMDSv2 only: the session token PUT also serves as the hop-limit/SSRF guard;
     // no v1 fallback (v1 is disabled on hardened instances anyway)
-    auto tok = cli.Put("/latest/api/token", httplib::Headers{{
-                           "X-aws-ec2-metadata-token-ttl-seconds", "21600"}},
-                       "", "text/plain");
+    auto tok = cli.Put("/latest/api/token", httplib::Headers{{"X-aws-ec2-metadata-token-ttl-seconds", "21600"}}, "",
+                       "text/plain");
     if (!tok || tok->status != 200 || tok->body.empty()) return {};
     httplib::Headers auth{{"X-aws-ec2-metadata-token", tok->body}};
     auto role = cli.Get("/latest/meta-data/iam/security-credentials/", auth);
@@ -113,21 +111,18 @@ AwsCreds CredentialProvider::from_imds() {
 
 AwsCreds CredentialProvider::resolve() {
     if (auto c = from_env(); c.valid()) {
-        if (source_ != "environment")
-            LOG_INFO("cloudproxy '{}': using AWS credentials from the environment", name_);
+        if (source_ != "environment") LOG_INFO("cloudproxy '{}': using AWS credentials from the environment", name_);
         source_ = "environment";
         return c;
     }
     if (auto c = from_container(); c.valid()) {
         if (source_ != "container")
-            LOG_INFO("cloudproxy '{}': using AWS credentials from the container endpoint",
-                     name_);
+            LOG_INFO("cloudproxy '{}': using AWS credentials from the container endpoint", name_);
         source_ = "container";
         return c;
     }
     if (auto c = from_imds(); c.valid()) {
-        if (source_ != "imds")
-            LOG_INFO("cloudproxy '{}': using AWS credentials from EC2 IMDSv2", name_);
+        if (source_ != "imds") LOG_INFO("cloudproxy '{}': using AWS credentials from EC2 IMDSv2", name_);
         source_ = "imds";
         return c;
     }
@@ -137,10 +132,9 @@ AwsCreds CredentialProvider::resolve() {
 AwsCreds CredentialProvider::get() {
     std::lock_guard lk(m_);
     auto now = std::chrono::system_clock::now();
-    bool stale = !cached_.valid()
-                     ? now >= next_attempt_
-                     : cached_.expiry != std::chrono::system_clock::time_point{} &&
-                           now >= cached_.expiry - kRefreshMargin;
+    bool stale = !cached_.valid() ? now >= next_attempt_
+                                  : cached_.expiry != std::chrono::system_clock::time_point{} &&
+                                        now >= cached_.expiry - kRefreshMargin;
     if (stale) {
         auto fresh = resolve();
         if (fresh.valid()) {
@@ -151,10 +145,11 @@ AwsCreds CredentialProvider::get() {
             // pay a metadata connect timeout per request
             next_attempt_ = now + kNegativeCacheTtl;
             if (!cached_.valid())
-                LOG_WARN("cloudproxy '{}': no AWS credentials found (static config, "
-                         "environment, container endpoint, IMDS all empty); requests "
-                         "will be signed with empty keys",
-                         name_);
+                LOG_WARN(
+                    "cloudproxy '{}': no AWS credentials found (static config, "
+                    "environment, container endpoint, IMDS all empty); requests "
+                    "will be signed with empty keys",
+                    name_);
         }
     }
     return cached_;

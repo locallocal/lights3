@@ -1,8 +1,8 @@
 #include "app/app.h"
 
-#include <csignal>
 #include <fcntl.h>
 #include <unistd.h>
+#include <csignal>
 
 #include <algorithm>
 #include <chrono>
@@ -36,8 +36,7 @@ void on_signal(int sig) {
 
 }  // namespace
 
-Application::Application(const std::string& config_path)
-    : config_path_(config_path), cfg_(Config::load(config_path)) {
+Application::Application(const std::string& config_path) : config_path_(config_path), cfg_(Config::load(config_path)) {
     Logger::init(cfg_.log);
     // Fault injection (roadmap §6.1): LIGHTS3_FAULTS arms named IO failure points
     fault::arm_from_env();
@@ -54,8 +53,9 @@ void Application::open_storage() {
     // Build identity as a constant-1 gauge (the Prometheus *_build_info idiom,
     // roadmap §6.3): `lights3_build_info{version=,commit=,build_type=}` lets a
     // fleet dashboard tell which build every instance is running
-    metrics_->gauge("lights3_build_info", "Build identity of this lights3 process (always 1)",
-                    {{"version", version()}, {"commit", git_commit()}, {"build_type", build_type()}})
+    metrics_
+        ->gauge("lights3_build_info", "Build identity of this lights3 process (always 1)",
+                {{"version", version()}, {"commit", git_commit()}, {"build_type", build_type()}})
         ->set(1);
     backends_ = storage::StorageRegistry::build(cfg_.backends, pool_, metrics_);
 }
@@ -67,18 +67,17 @@ void Application::start_server() {
     metered_ = storage::meter_backends(backends_, metrics_);
     auto router = storage::BucketRouter::build(cfg_.buckets, metered_);
     auto auth = s3::SigV4Authenticator::build(cfg_.auth);
-    // Dynamic credentials (docs/credential-management.md): loaded from the default backend, replacing the static lookup table
+    // Dynamic credentials (docs/credential-management.md): loaded from the default backend, replacing the static lookup
+    // table
     cred_store_ = sync_wait(s3::CredentialStore::load(router.default_backend(), cfg_.auth));
     auth.set_provider(cred_store_);
     bool auth_enabled = auth.enabled();
-    if (!auth_enabled)
-        LOG_WARN("no credentials configured: authentication is DISABLED");
+    if (!auth_enabled) LOG_WARN("no credentials configured: authentication is DISABLED");
     // Static website hosting (docs/static-website.md): the store always exists — even
     // with an empty YAML list, PUT ?website can add sites at runtime. Static names get
     // the same validation gate as user requests (reserved names fail startup)
     for (auto& w : cfg_.website.buckets) storage::validate_bucket_name(w.bucket);
-    website_store_ =
-        sync_wait(s3::WebsiteStore::load(router.default_backend(), cfg_.website.buckets));
+    website_store_ = sync_wait(s3::WebsiteStore::load(router.default_backend(), cfg_.website.buckets));
     // CORS rules (roadmap §2.1): dynamic-only (?cors API), persisted next to the
     // website entries in .sys
     cors_store_ = sync_wait(s3::CorsStore::load(router.default_backend()));
@@ -101,15 +100,12 @@ void Application::start_server() {
     owner_store_ = sync_wait(s3::OwnerStore::load(router.default_backend()));
     tenants_ = std::make_shared<s3::TenantRegistry>(tenant_store_, owner_store_);
     lifecycle_runner_->set_usage_tracker(usage_);
-    if (!cfg_.usage.enabled)
-        LOG_WARN("usage accounting is disabled: bucket/tenant quotas are not enforced");
-    service_ = std::make_shared<s3::S3Service>(std::move(router), std::move(auth),
-                                               cfg_.http.base_domain);
+    if (!cfg_.usage.enabled) LOG_WARN("usage accounting is disabled: bucket/tenant quotas are not enforced");
+    service_ = std::make_shared<s3::S3Service>(std::move(router), std::move(auth), cfg_.http.base_domain);
     service_->set_pool_stats([pool = pool_] { return pool->stats(); });
     service_->set_request_timeout(std::chrono::seconds(cfg_.http.request_timeout_sec));
     service_->set_min_part_size(cfg_.http.min_part_size);
-    service_->set_slow_request_threshold(
-        std::chrono::milliseconds(cfg_.log.slow_request_threshold_ms));
+    service_->set_slow_request_threshold(std::chrono::milliseconds(cfg_.log.slow_request_threshold_ms));
     service_->set_backend_metrics(metrics_);
     service_->set_credential_store(cred_store_);
     service_->set_website_store(website_store_);
@@ -118,11 +114,13 @@ void Application::start_server() {
     service_->set_tls_identity_mode(s3::S3Service::parse_tls_identity_mode(cfg_.auth.tls_identity));
     if (cfg_.auth.tls_identity != "off") {
         if (!auth_enabled)
-            LOG_WARN("auth.tls_identity={} but authentication is disabled: certificate "
-                     "bindings have nothing to map to", cfg_.auth.tls_identity);
+            LOG_WARN(
+                "auth.tls_identity={} but authentication is disabled: certificate "
+                "bindings have nothing to map to",
+                cfg_.auth.tls_identity);
         else
-            LOG_INFO("mTLS identity mapping on ({}): {} binding(s) in .sys/tls-identities",
-                     cfg_.auth.tls_identity, tls_identity_store_->snapshot()->size());
+            LOG_INFO("mTLS identity mapping on ({}): {} binding(s) in .sys/tls-identities", cfg_.auth.tls_identity,
+                     tls_identity_store_->snapshot()->size());
     }
     service_->set_lifecycle_store(lifecycle_store_);
     service_->set_usage_tracker(usage_);
@@ -130,8 +128,9 @@ void Application::start_server() {
     service_->set_tenant_registry(tenants_);
     service_->set_audit_log(audit_);
     if (!cfg_.website.buckets.empty() && !auth_enabled)
-        LOG_WARN("website: buckets configured but authentication is disabled; "
-                 "all buckets are already anonymously accessible");
+        LOG_WARN(
+            "website: buckets configured but authentication is disabled; "
+            "all buckets are already anonymously accessible");
     // Phase-2 background tasks (docs/credential-management.md
     // §10.2/§10.3): credentials_file hot-reload polling + periodic
     // multi-instance incremental sync (both gated by config)
@@ -155,32 +154,28 @@ void Application::start_server() {
     // rejected; waiters are woken via the pool executor, avoiding running
     // an entire request coroutine chain inline on the releasing call stack
     pool_exec_ = std::make_shared<ThreadPoolExecutor>(*pool_);
-    inflight_ = std::make_shared<AsyncSemaphore>(cfg_.runtime.max_inflight_requests,
-                                                 pool_exec_.get());
+    inflight_ = std::make_shared<AsyncSemaphore>(cfg_.runtime.max_inflight_requests, pool_exec_.get());
     // Observability for the admission gate and the timer thread
     // (docs/archive/gaps.md §7): under load testing, "stuck at admission" vs
     // "stuck in the pool" and "how long the timer was blocked by a slow
     // callback" can all be read straight from /-/metrics
     admission_counters_ = std::make_shared<http::AdmissionCounters>();
-    service_->set_admission_stats(
-        [inflight = inflight_, ctr = admission_counters_]() -> s3::AdmissionStats {
-            s3::AdmissionStats st;
-            st.capacity = inflight->capacity();
-            st.available = inflight->available();
-            st.waiting = inflight->waiting();
-            st.counters = true;
-            auto ld = [](const std::atomic<uint64_t>& a) {
-                return a.load(std::memory_order_relaxed);
-            };
-            for (size_t i = 0; i < st.wait_hist.size(); ++i) st.wait_hist[i] = ld(ctr->wait_hist[i]);
-            st.wait_sum_us = ld(ctr->wait_sum_us);
-            st.wait_count = ld(ctr->wait_count);
-            st.queued = ld(ctr->queued);
-            st.cancelled = ld(ctr->cancelled);
-            st.stalls_in = ld(ctr->stalls_in);
-            st.stalls_out = ld(ctr->stalls_out);
-            return st;
-        });
+    service_->set_admission_stats([inflight = inflight_, ctr = admission_counters_]() -> s3::AdmissionStats {
+        s3::AdmissionStats st;
+        st.capacity = inflight->capacity();
+        st.available = inflight->available();
+        st.waiting = inflight->waiting();
+        st.counters = true;
+        auto ld = [](const std::atomic<uint64_t>& a) { return a.load(std::memory_order_relaxed); };
+        for (size_t i = 0; i < st.wait_hist.size(); ++i) st.wait_hist[i] = ld(ctr->wait_hist[i]);
+        st.wait_sum_us = ld(ctr->wait_sum_us);
+        st.wait_count = ld(ctr->wait_count);
+        st.queued = ld(ctr->queued);
+        st.cancelled = ld(ctr->cancelled);
+        st.stalls_in = ld(ctr->stalls_in);
+        st.stalls_out = ld(ctr->stalls_out);
+        return st;
+    });
     service_->set_metrics_root_only(cfg_.http.metrics_access == "root");
     service_->set_reload_hook([this] { return reload_config(); });
     // Maintenance jobs on the live gateway (backlog-sequence ③ fsck; duostore
@@ -192,11 +187,12 @@ void Application::start_server() {
     admin_jobs_ = std::make_unique<AdminJobs>(backends_);
     auto job_failure = [](const AdminJobs::Failure& f, bool fsck) -> s3::S3Error {
         switch (f.code) {
-            case AdminJobs::Error::NoSuchBackend: return s3::S3Error(s3::S3ErrorCode::NoSuchKey, f.message);
-            case AdminJobs::Error::Unsupported: return s3::S3Error(s3::S3ErrorCode::InvalidRequest, f.message);
+            case AdminJobs::Error::NoSuchBackend:
+                return s3::S3Error(s3::S3ErrorCode::NoSuchKey, f.message);
+            case AdminJobs::Error::Unsupported:
+                return s3::S3Error(s3::S3ErrorCode::InvalidRequest, f.message);
             case AdminJobs::Error::Busy:
-                return s3::S3Error(fsck ? s3::S3ErrorCode::ScrubInProgress : s3::S3ErrorCode::JobInProgress,
-                                   f.message);
+                return s3::S3Error(fsck ? s3::S3ErrorCode::ScrubInProgress : s3::S3ErrorCode::JobInProgress, f.message);
         }
         return s3::S3Error(s3::S3ErrorCode::InternalError, f.message);
     };
@@ -206,8 +202,8 @@ void Application::start_server() {
         return *o;
     };
     service_->set_job_hooks(
-        [this, job_failure, op_of](const std::string& backend, const std::string& group,
-                                   const std::string& op, uint64_t bps) {
+        [this, job_failure, op_of](const std::string& backend, const std::string& group, const std::string& op,
+                                   uint64_t bps) {
             JobOp o = op_of(group, op);
             try {
                 nlohmann::json j = admin_jobs_->status(backend, o);
@@ -219,8 +215,7 @@ void Application::start_server() {
                 throw job_failure(f, o == JobOp::Fsck);
             }
         },
-        [this, job_failure, op_of](const std::string& backend, const std::string& group,
-                                   const std::string& op) {
+        [this, job_failure, op_of](const std::string& backend, const std::string& group, const std::string& op) {
             JobOp o = op_of(group, op);
             try {
                 return admin_jobs_->status(backend, o);
@@ -270,8 +265,8 @@ void Application::start_server() {
                 static_cast<size_t>(rl.max_tracked));
         if (ip || ak)
             LOG_INFO("rate limits: per-ip rps={} burst={} inflight={}; per-ak rps={} burst={} inflight={}",
-                     rl.per_ip_rps, rl.per_ip_burst, rl.per_ip_max_inflight, rl.per_ak_rps,
-                     rl.per_ak_burst, rl.per_ak_max_inflight);
+                     rl.per_ip_rps, rl.per_ip_burst, rl.per_ip_max_inflight, rl.per_ak_rps, rl.per_ak_burst,
+                     rl.per_ak_max_inflight);
         service_->set_rate_limiters(std::move(ip), std::move(ak));
     }
     // Process shutdown broadcast (the third cancel source of
@@ -280,16 +275,15 @@ void Application::start_server() {
     // instead of waiting out their individual request_timeouts
     shutdown_src_ = std::make_shared<CancelSource>();
     stall_sec_ = std::make_shared<std::atomic<long>>(cfg_.http.transfer_stall_timeout_sec);
-    // Assembly of queueing / Permit lifetime / cancellation convergence lives in http/admission.h (shared with the unit tests)
-    // The stall guard's progress threshold must not exceed the streaming chunk size:
-    // with io_chunk_size configured below 64KiB, a single read could never count as
-    // progress and every window would kill a healthy slow connection (roadmap §1.4)
-    auto stall_progress = std::min<uint64_t>(http::StallGuardReader::kMinProgressBytes,
-                                             cfg_.http.io_chunk_size);
+    // Assembly of queueing / Permit lifetime / cancellation convergence lives in http/admission.h (shared with the unit
+    // tests) The stall guard's progress threshold must not exceed the streaming chunk size: with io_chunk_size
+    // configured below 64KiB, a single read could never count as progress and every window would kill a healthy slow
+    // connection (roadmap §1.4)
+    auto stall_progress = std::min<uint64_t>(http::StallGuardReader::kMinProgressBytes, cfg_.http.io_chunk_size);
     server_->set_handler(http::make_admission_handler(
         inflight_, stall_sec_, shutdown_src_,
-        [service = service_](http::HttpRequest req) { return service->dispatch(std::move(req)); },
-        stall_progress, admission_counters_));
+        [service = service_](http::HttpRequest req) { return service->dispatch(std::move(req)); }, stall_progress,
+        admission_counters_));
     server_->listen(cfg_.http.bind, cfg_.http.port);
 
     // Separate admin listener (http.admin_port, backlog-sequence ②): the same
@@ -302,8 +296,9 @@ void Application::start_server() {
         if (admin_driver == "seastar") {
             auto drivers = http::HttpServerFactory::drivers();
             if (std::find(drivers.begin(), drivers.end(), "builtin") == drivers.end())
-                throw std::runtime_error("http.admin_port with the seastar driver needs the "
-                                         "builtin driver compiled in for the admin listener");
+                throw std::runtime_error(
+                    "http.admin_port with the seastar driver needs the "
+                    "builtin driver compiled in for the admin listener");
             admin_driver = "builtin";
         }
         admin_server_ = http::HttpServerFactory::create(admin_driver, cfg_.http);
@@ -317,21 +312,19 @@ void Application::start_server() {
         service_->set_admin_split(true);
         const std::string& abind = cfg_.http.admin_bind.empty() ? cfg_.http.bind : cfg_.http.admin_bind;
         admin_server_->listen(abind, static_cast<uint16_t>(cfg_.http.admin_port));
-        LOG_INFO("admin listener ({}): {}:{} serves /-/ (metrics, admin API); the data-plane "
-                 "port answers 404 for it",
-                 admin_driver, abind, admin_server_->bound_port());
+        LOG_INFO(
+            "admin listener ({}): {}:{} serves /-/ (metrics, admin API); the data-plane "
+            "port answers 404 for it",
+            admin_driver, abind, admin_server_->bound_port());
     }
 }
 
 uint16_t Application::bound_port() const { return server_ ? server_->bound_port() : 0; }
-uint16_t Application::admin_bound_port() const {
-    return admin_server_ ? admin_server_->bound_port() : 0;
-}
+uint16_t Application::admin_bound_port() const { return admin_server_ ? admin_server_->bound_port() : 0; }
 
 int Application::run() {
     // Signal -> self-pipe -> watchdog-thread shutdown (see the comment on on_signal)
-    if (::pipe2(g_sig_pipe, O_CLOEXEC) != 0)
-        throw std::runtime_error("cannot create signal pipe");
+    if (::pipe2(g_sig_pipe, O_CLOEXEC) != 0) throw std::runtime_error("cannot create signal pipe");
     std::thread sig_thread([this] {
         unsigned char b = 0;
         while (::read(g_sig_pipe[0], &b, 1) == 1) {
@@ -356,9 +349,8 @@ int Application::run() {
     sigaction(SIGHUP, &sa, nullptr);  // reload, not terminate
     signal(SIGPIPE, SIG_IGN);
 
-    LOG_INFO("lights3 {} (git {}, {}) started: driver={} backends={} pool={}", version(),
-             git_commit(), build_type(), cfg_.http.driver, cfg_.backends.size(),
-             cfg_.runtime.io_threads);
+    LOG_INFO("lights3 {} (git {}, {}) started: driver={} backends={} pool={}", version(), git_commit(), build_type(),
+             cfg_.http.driver, cfg_.backends.size(), cfg_.runtime.io_threads);
     // The admin listener runs on its own thread for the lifetime of the data-plane
     // run(); both are stopped by the watchdog thread on a signal. Joined before the
     // watchdog so the order of teardown stays: listeners, watchdog, in-flight drain
@@ -393,17 +385,20 @@ int Application::run() {
         // one meaning; the wait is a condition variable, not a polling loop
         auto grace = std::chrono::seconds(cfg_.http.shutdown_grace_sec);
         if (!inflight_->wait_drained(grace)) {
-            LOG_ERROR("{} request(s) still in flight after http.shutdown_grace={}s; "
-                      "proceeding with shutdown",
-                      inflight_->capacity() - inflight_->available(), grace.count());
+            LOG_ERROR(
+                "{} request(s) still in flight after http.shutdown_grace={}s; "
+                "proceeding with shutdown",
+                inflight_->capacity() - inflight_->available(), grace.count());
             rc = kExitUncleanShutdown;
         }
     }
 
     shutdown();
     if (!shutdown_clean()) rc = kExitUncleanShutdown;
-    if (rc == 0) LOG_INFO("lights3 exited cleanly");
-    else LOG_ERROR("lights3 exited with shutdown errors (exit code {})", rc);
+    if (rc == 0)
+        LOG_INFO("lights3 exited cleanly");
+    else
+        LOG_ERROR("lights3 exited with shutdown errors (exit code {})", rc);
     return rc;
 }
 
@@ -438,8 +433,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
     cmp(x.header_timeout_sec != y.header_timeout_sec, "http.header_timeout");
     cmp(x.body_timeout_sec != y.body_timeout_sec, "http.body_timeout");
     cmp(x.write_timeout_sec != y.write_timeout_sec, "http.write_timeout");
-    cmp(x.max_requests_per_connection != y.max_requests_per_connection,
-        "http.max_requests_per_connection");
+    cmp(x.max_requests_per_connection != y.max_requests_per_connection, "http.max_requests_per_connection");
     cmp(x.max_connections != y.max_connections, "http.max_connections");
     cmp(x.base_domain != y.base_domain, "http.base_domain");
     cmp(x.tls_cert != y.tls_cert || x.tls_key != y.tls_key, "http.tls_cert/tls_key (paths)");
@@ -459,8 +453,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
     cmp(x.drain_limit != y.drain_limit || x.trailer_max_size != y.trailer_max_size ||
             x.io_chunk_size != y.io_chunk_size || x.body_queue_cap != y.body_queue_cap,
         "http.drain_limit/trailer_max_size/io_chunk_size/body_queue_cap");
-    cmp(x.shutdown_grace_sec != y.shutdown_grace_sec ||
-            x.shutdown_force_wait_sec != y.shutdown_force_wait_sec,
+    cmp(x.shutdown_grace_sec != y.shutdown_grace_sec || x.shutdown_force_wait_sec != y.shutdown_force_wait_sec,
         "http.shutdown_grace/shutdown_force_wait");
     cmp(a.runtime.io_threads != b.runtime.io_threads, "runtime.io_threads");
     auto& p = a.auth;
@@ -472,8 +465,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
                            static_cast<const std::string&>(q.credentials[i].secret_key);
     cmp(creds_differ, "auth.credentials");
     cmp(p.region != q.region || p.service != q.service, "auth.region/service");
-    cmp(p.credentials_file != q.credentials_file ||
-            p.credentials_file_reload_sec != q.credentials_file_reload_sec,
+    cmp(p.credentials_file != q.credentials_file || p.credentials_file_reload_sec != q.credentials_file_reload_sec,
         "auth.credentials_file/credentials_file_reload");
     cmp(p.sync_interval_sec != q.sync_interval_sec, "auth.sync_interval");
     cmp(p.tls_identity != q.tls_identity, "auth.tls_identity");
@@ -483,18 +475,16 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
     cmp(a.website.buckets != b.website.buckets, "website");
     cmp(a.lifecycle.scan_interval_sec != b.lifecycle.scan_interval_sec, "lifecycle.scan_interval");
     cmp(a.usage.enabled != b.usage.enabled || a.usage.flush_interval_sec != b.usage.flush_interval_sec ||
-            a.usage.reconcile_interval_sec != b.usage.reconcile_interval_sec ||
-            a.usage.reconcile != b.usage.reconcile,
+            a.usage.reconcile_interval_sec != b.usage.reconcile_interval_sec || a.usage.reconcile != b.usage.reconcile,
         "usage");
     cmp(a.audit.path != b.audit.path || a.audit.data_plane != b.audit.data_plane ||
             a.audit.max_size != b.audit.max_size || a.audit.max_files != b.audit.max_files,
         "audit");
     cmp(a.ratelimit.max_tracked != b.ratelimit.max_tracked, "ratelimit.max_tracked");
     // Sink and formatter are built once at Logger::init (roadmap §5.2)
-    cmp(a.log.format != b.log.format || a.log.file != b.log.file ||
-            a.log.max_size != b.log.max_size || a.log.max_files != b.log.max_files ||
-            a.log.async != b.log.async || a.log.async_queue != b.log.async_queue ||
-            a.log.async_overflow != b.log.async_overflow,
+    cmp(a.log.format != b.log.format || a.log.file != b.log.file || a.log.max_size != b.log.max_size ||
+            a.log.max_files != b.log.max_files || a.log.async != b.log.async ||
+            a.log.async_queue != b.log.async_queue || a.log.async_overflow != b.log.async_overflow,
         "log.format/file/max_size/max_files/async*");
     return out;
 }
@@ -502,8 +492,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
 bool rules_differ(const BucketsConfig& a, const BucketsConfig& b) {
     if (a.rules.size() != b.rules.size()) return true;
     for (size_t i = 0; i < a.rules.size(); ++i)
-        if (a.rules[i].match != b.rules[i].match || a.rules[i].backend != b.rules[i].backend)
-            return true;
+        if (a.rules[i].match != b.rules[i].match || a.rules[i].backend != b.rules[i].backend) return true;
     return false;
 }
 
@@ -556,8 +545,8 @@ BackendPlan plan_backends(const std::vector<BackendConfig>& running, const Confi
                 return it != b.params.end() && it->second == old.name;
             };
             if (ref("local") || ref("cloud")) {
-                plan.error = "backends: cannot remove '" + old.name + "': tiered backend '" +
-                             b.name + "' references it as " + (ref("local") ? "local" : "cloud");
+                plan.error = "backends: cannot remove '" + old.name + "': tiered backend '" + b.name +
+                             "' references it as " + (ref("local") ? "local" : "cloud");
                 return plan;
             }
         }
@@ -595,8 +584,7 @@ ConfigReloadReport Application::reload_config() {
     // New instances are built, metered and swapped into the router together with
     // the rules (one snapshot, backlog-sequence ⑦); removed ones leave the router
     // here and are closed on a retiring thread once their in-flight requests drain
-    BackendPlan plan = plan_backends(cfg_.backends, fresh, cfg_.buckets.default_backend,
-                                     admin_jobs_.get());
+    BackendPlan plan = plan_backends(cfg_.backends, fresh, cfg_.buckets.default_backend, admin_jobs_.get());
     if (!plan.error.empty()) {
         report.error = plan.error;
         LOG_WARN("config reload refused, keeping the running configuration: {}", report.error);
@@ -606,8 +594,7 @@ ConfigReloadReport Application::reload_config() {
     if (rules_changed || !plan.added.empty() || !plan.removed.empty()) {
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> built;
         try {
-            if (!plan.added.empty())
-                built = storage::StorageRegistry::build(plan.added, pool_, metrics_, &backends_);
+            if (!plan.added.empty()) built = storage::StorageRegistry::build(plan.added, pool_, metrics_, &backends_);
         } catch (const std::exception& e) {
             report.error = std::string("backends: ") + e.what();
             LOG_WARN("config reload refused, keeping the running configuration: {}", report.error);
@@ -638,8 +625,8 @@ ConfigReloadReport Application::reload_config() {
             return report;
         }
         if (rules_changed) {
-            report.applied.push_back(change("buckets.rules", cfg_.buckets.rules.size(),
-                                            fresh.buckets.rules.size()) + " rule(s)");
+            report.applied.push_back(change("buckets.rules", cfg_.buckets.rules.size(), fresh.buckets.rules.size()) +
+                                     " rule(s)");
             cfg_.buckets.rules = fresh.buckets.rules;
         }
         for (auto& bc : plan.added) {
@@ -658,8 +645,7 @@ ConfigReloadReport Application::reload_config() {
                 LOG_WARN("backend {} removed while a maintenance job runs on it; the job will abort", name);
             std::erase_if(cfg_.backends, [&](const BackendConfig& b) { return b.name == name; });
             retire_backend(name, std::move(raw), std::move(metered));
-            report.applied.push_back("backends: removed " + name +
-                                     " (closing after in-flight requests drain)");
+            report.applied.push_back("backends: removed " + name + " (closing after in-flight requests drain)");
         }
     }
     if (cfg_.log.level != fresh.log.level) {
@@ -668,42 +654,36 @@ ConfigReloadReport Application::reload_config() {
         cfg_.log.level = fresh.log.level;
     }
     if (cfg_.log.slow_request_threshold_ms != fresh.log.slow_request_threshold_ms) {
-        service_->set_slow_request_threshold(
-            std::chrono::milliseconds(fresh.log.slow_request_threshold_ms));
-        report.applied.push_back(change("log.slow_request_threshold(ms)",
-                                        cfg_.log.slow_request_threshold_ms,
+        service_->set_slow_request_threshold(std::chrono::milliseconds(fresh.log.slow_request_threshold_ms));
+        report.applied.push_back(change("log.slow_request_threshold(ms)", cfg_.log.slow_request_threshold_ms,
                                         fresh.log.slow_request_threshold_ms));
         cfg_.log.slow_request_threshold_ms = fresh.log.slow_request_threshold_ms;
     }
     if (cfg_.http.request_timeout_sec != fresh.http.request_timeout_sec) {
         service_->set_request_timeout(std::chrono::seconds(fresh.http.request_timeout_sec));
-        report.applied.push_back(change("http.request_timeout", cfg_.http.request_timeout_sec,
-                                        fresh.http.request_timeout_sec));
+        report.applied.push_back(
+            change("http.request_timeout", cfg_.http.request_timeout_sec, fresh.http.request_timeout_sec));
         cfg_.http.request_timeout_sec = fresh.http.request_timeout_sec;
     }
     if (cfg_.http.transfer_stall_timeout_sec != fresh.http.transfer_stall_timeout_sec) {
         stall_sec_->store(fresh.http.transfer_stall_timeout_sec, std::memory_order_relaxed);
-        report.applied.push_back(change("http.transfer_stall_timeout",
-                                        cfg_.http.transfer_stall_timeout_sec,
+        report.applied.push_back(change("http.transfer_stall_timeout", cfg_.http.transfer_stall_timeout_sec,
                                         fresh.http.transfer_stall_timeout_sec));
         cfg_.http.transfer_stall_timeout_sec = fresh.http.transfer_stall_timeout_sec;
     }
     if (cfg_.http.metrics_access != fresh.http.metrics_access) {
         service_->set_metrics_root_only(fresh.http.metrics_access == "root");
-        report.applied.push_back(
-            change("http.metrics_access", cfg_.http.metrics_access, fresh.http.metrics_access));
+        report.applied.push_back(change("http.metrics_access", cfg_.http.metrics_access, fresh.http.metrics_access));
         cfg_.http.metrics_access = fresh.http.metrics_access;
     }
     if (cfg_.http.min_part_size != fresh.http.min_part_size) {
         service_->set_min_part_size(fresh.http.min_part_size);
-        report.applied.push_back(
-            change("http.min_part_size", cfg_.http.min_part_size, fresh.http.min_part_size));
+        report.applied.push_back(change("http.min_part_size", cfg_.http.min_part_size, fresh.http.min_part_size));
         cfg_.http.min_part_size = fresh.http.min_part_size;
     }
     if (cfg_.runtime.max_inflight_requests != fresh.runtime.max_inflight_requests) {
         inflight_->set_capacity(fresh.runtime.max_inflight_requests);
-        report.applied.push_back(change("runtime.max_inflight_requests",
-                                        cfg_.runtime.max_inflight_requests,
+        report.applied.push_back(change("runtime.max_inflight_requests", cfg_.runtime.max_inflight_requests,
                                         fresh.runtime.max_inflight_requests));
         cfg_.runtime.max_inflight_requests = fresh.runtime.max_inflight_requests;
     }
@@ -711,9 +691,8 @@ ConfigReloadReport Application::reload_config() {
         auto& o = cfg_.ratelimit;
         auto& n = fresh.ratelimit;
         bool differs = o.per_ip_rps != n.per_ip_rps || o.per_ip_burst != n.per_ip_burst ||
-                       o.per_ip_max_inflight != n.per_ip_max_inflight ||
-                       o.per_ak_rps != n.per_ak_rps || o.per_ak_burst != n.per_ak_burst ||
-                       o.per_ak_max_inflight != n.per_ak_max_inflight;
+                       o.per_ip_max_inflight != n.per_ip_max_inflight || o.per_ak_rps != n.per_ak_rps ||
+                       o.per_ak_burst != n.per_ak_burst || o.per_ak_max_inflight != n.per_ak_max_inflight;
         if (differs) {
             std::shared_ptr<s3::RateLimiter> ip, ak;
             if (n.per_ip_rps > 0 || n.per_ip_max_inflight > 0)
@@ -725,12 +704,10 @@ ConfigReloadReport Application::reload_config() {
                     s3::RateLimiter::Limits{n.per_ak_rps, n.per_ak_burst, n.per_ak_max_inflight},
                     static_cast<size_t>(o.max_tracked));
             service_->set_rate_limiters(std::move(ip), std::move(ak));
-            report.applied.push_back("ratelimit: per-ip rps=" + std::to_string(n.per_ip_rps) +
-                                     " burst=" + std::to_string(n.per_ip_burst) +
-                                     " inflight=" + std::to_string(n.per_ip_max_inflight) +
-                                     ", per-ak rps=" + std::to_string(n.per_ak_rps) +
-                                     " burst=" + std::to_string(n.per_ak_burst) +
-                                     " inflight=" + std::to_string(n.per_ak_max_inflight));
+            report.applied.push_back(
+                "ratelimit: per-ip rps=" + std::to_string(n.per_ip_rps) + " burst=" + std::to_string(n.per_ip_burst) +
+                " inflight=" + std::to_string(n.per_ip_max_inflight) + ", per-ak rps=" + std::to_string(n.per_ak_rps) +
+                " burst=" + std::to_string(n.per_ak_burst) + " inflight=" + std::to_string(n.per_ak_max_inflight));
             o.per_ip_rps = n.per_ip_rps;
             o.per_ip_burst = n.per_ip_burst;
             o.per_ip_max_inflight = n.per_ip_max_inflight;
@@ -743,15 +720,15 @@ ConfigReloadReport Application::reload_config() {
     // poll may be off); the paths/knobs themselves are startup-only
     if (server_ && !cfg_.http.tls_cert.empty()) {
         if (admin_server_) admin_server_->reload_tls();  // same files, its own holder
-        if (server_->reload_tls()) report.applied.push_back("http.tls: certificate material re-read");
+        if (server_->reload_tls())
+            report.applied.push_back("http.tls: certificate material re-read");
         else if (cfg_.http.driver == "seastar")
             report.applied.push_back("http.tls: seastar reloads certificates on file change");
     }
     report.requires_restart = restart_only_changes(cfg_, fresh);
     for (auto& r : plan.requires_restart) report.requires_restart.push_back(r);
     report.ok = true;
-    if (report.applied.empty() && report.requires_restart.empty())
-        LOG_INFO("config reload: no changes");
+    if (report.applied.empty() && report.requires_restart.empty()) LOG_INFO("config reload: no changes");
     for (auto& a : report.applied) LOG_INFO("config reload: applied {}", a);
     for (auto& r : report.requires_restart)
         LOG_WARN("config reload: {} changed on disk but needs a restart to take effect", r);
@@ -767,15 +744,13 @@ void Application::retire_backend(std::string name, std::shared_ptr<storage::ISto
         // shutdown can cut the wait short; log while it takes long
         if (metered) {
             int waited = 0;
-            while (!retire_stop_.load(std::memory_order_relaxed) &&
-                   !metered->wait_idle(std::chrono::seconds(1))) {
+            while (!retire_stop_.load(std::memory_order_relaxed) && !metered->wait_idle(std::chrono::seconds(1))) {
                 if (++waited % 10 == 0)
                     LOG_INFO("backend {} removed: still waiting for {} in-flight request(s)", name,
                              metered->inflight());
             }
             if (long left = metered->inflight(); left > 0)
-                LOG_WARN("backend {} removed: closing with {} request(s) still in flight (shutdown)",
-                         name, left);
+                LOG_WARN("backend {} removed: closing with {} request(s) still in flight (shutdown)", name, left);
         }
         std::string failure;
         try {

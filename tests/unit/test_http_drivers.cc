@@ -152,8 +152,7 @@ Task<HttpResponse> consume_and_sum(HttpRequest req, HttpResponse resp) {
     }
     // Contract 1: calls after EOF still return 0
     size_t again = co_await req.body->read(std::span(buf));
-    resp.small_body = std::to_string(total) + ":" + std::to_string(sum) + ":" +
-                      (again == 0 ? "eof-ok" : "eof-bad");
+    resp.small_body = std::to_string(total) + ":" + std::to_string(sum) + ":" + (again == 0 ? "eof-ok" : "eof-bad");
     co_return resp;
 }
 
@@ -189,8 +188,7 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         uint64_t off = std::stoull(req.query_get("off").value_or("0"));
         bool short_file = req.query_has("short");  // file ends halfway through the declared range
         int fd = pattern_file(off + (short_file ? size / 2 : size));
-        resp.stream_body = std::make_unique<ForwardingCounter>(
-            std::make_unique<FileRangeReader>(fd, off, size));
+        resp.stream_body = std::make_unique<ForwardingCounter>(std::make_unique<FileRangeReader>(fd, off, size));
         resp.content_length = size;
         co_return resp;
     }
@@ -211,7 +209,8 @@ Task<HttpResponse> test_handler(HttpRequest req) {
         resp.small_body = "ok";
         co_return resp;
     }
-    if (req.path == "/badheader") {  // outbound header injection surface: CR/LF values and illegal header names must be dropped
+    if (req.path == "/badheader") {  // outbound header injection surface: CR/LF values and illegal header names must be
+                                     // dropped
         resp.headers.set("X-Evil", "a\r\nInjected: 1");
         resp.headers.set("Bad Name", "v");
         resp.headers.set("X-Fine", "ok");
@@ -236,10 +235,10 @@ struct TestServer {
     std::thread th;
     uint16_t port = 0;
 
-    // A non-empty tls_cert/tls_key starts the TLS port. The unwind path of a failed assertion is joined by the destructor --
-    // with a hand-written joinable std::thread in a test case, unwinding would destroy the thread first, i.e. std::terminate
-    explicit TestServer(const std::string& driver, const std::string& tls_cert = "",
-                        const std::string& tls_key = "") {
+    // A non-empty tls_cert/tls_key starts the TLS port. The unwind path of a failed assertion is joined by the
+    // destructor -- with a hand-written joinable std::thread in a test case, unwinding would destroy the thread first,
+    // i.e. std::terminate
+    explicit TestServer(const std::string& driver, const std::string& tls_cert = "", const std::string& tls_key = "") {
         HttpConfig cfg;
         cfg.driver = driver;
         cfg.io_threads = 2;
@@ -398,7 +397,8 @@ struct Client {
                 if (line.empty()) continue;
                 size_t sz = std::stoull(line, nullptr, 16);
                 if (sz == 0) {  // trailers until the empty line
-                    while (read_line(line) && !line.empty()) {}
+                    while (read_line(line) && !line.empty()) {
+                    }
                     r.ok = true;
                     return r;
                 }
@@ -441,9 +441,7 @@ std::string make_pattern(uint64_t n) {
     return s;
 }
 
-std::string expected_sum(uint64_t n) {
-    return std::to_string(n) + ":" + std::to_string(pattern_sum(n)) + ":eof-ok";
-}
+std::string expected_sum(uint64_t n) { return std::to_string(n) + ":" + std::to_string(pattern_sum(n)) + ":eof-ok"; }
 
 void for_each_driver(const std::function<void(const std::string&)>& fn) {
     signal(SIGPIPE, SIG_IGN);  // in disconnect scenarios the driver may write to an already-closed socket
@@ -466,9 +464,7 @@ void for_each_driver(const std::function<void(const std::string&)>& fn) {
 
 TEST(http_driver_registry_complete) {
     auto ds = HttpServerFactory::drivers();
-    auto has = [&](const char* name) {
-        return std::find(ds.begin(), ds.end(), name) != ds.end();
-    };
+    auto has = [&](const char* name) { return std::find(ds.begin(), ds.end(), name) != ds.end(); };
 #ifdef LIGHTS3_DRIVER_BUILTIN
     CHECK(has("builtin"));
 #endif
@@ -488,8 +484,7 @@ TEST(http_driver_large_put) {
         TestServer ts(d);
         const uint64_t size = 8 * 1024 * 1024;
         Client c(ts.port);
-        c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(size) +
-                   "\r\n\r\n");
+        c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(size) + "\r\n\r\n");
         c.send_str(make_pattern(size));
         auto r = c.read_response();
         CHECK(r.ok);
@@ -704,8 +699,8 @@ TEST(http_driver_expect_100_continue) {
         TestServer ts(d);
         const uint64_t size = 100 * 1000;
         Client c(ts.port);
-        c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: " +
-                   std::to_string(size) + "\r\n\r\n");
+        c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\nContent-Length: " + std::to_string(size) +
+                   "\r\n\r\n");
         Client::Head h;
         CHECK(c.read_head(h));  // all drivers eventually send 100 (beast replies only at the handler's first read)
         CHECK_EQ(h.status, 100);
@@ -721,10 +716,12 @@ TEST(http_driver_expect_100_rejected_without_body) {
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
-        c.send_str("PUT /noread HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\n"
-                   "Content-Length: 1000000\r\n\r\n");
-        // The handler replies without reading the body. Drivers that delay the 100 (builtin/beast) send the final response directly,
-        // so the client need not upload 1MB; httplib sends 100 first and the client finishes the body per protocol
+        c.send_str(
+            "PUT /noread HTTP/1.1\r\nHost: t\r\nExpect: 100-continue\r\n"
+            "Content-Length: 1000000\r\n\r\n");
+        // The handler replies without reading the body. Drivers that delay the 100 (builtin/beast) send the final
+        // response directly, so the client need not upload 1MB; httplib sends 100 first and the client finishes the
+        // body per protocol
         Client::Head h;
         CHECK(c.read_head(h));
         if (h.status == 100) {
@@ -779,8 +776,7 @@ TEST(http_driver_unconsumed_body_then_reuse) {
         Client c(ts.port);
         // The handler does not read the body; the driver must drain it before the connection can be reused
         std::string body = make_pattern(100 * 1000);
-        c.send_str("PUT /noread HTTP/1.1\r\nHost: t\r\nContent-Length: " +
-                   std::to_string(body.size()) + "\r\n\r\n");
+        c.send_str("PUT /noread HTTP/1.1\r\nHost: t\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n");
         c.send_str(body);
         auto r1 = c.read_response();
         CHECK(r1.ok);
@@ -831,9 +827,11 @@ TEST(http_driver_concurrent_shutdown) {
 
 // ---------- Message boundaries (framing): request smuggling protection ----------
 //
-// RFC 9112 §6.1: requests with ambiguous boundaries must get a 400 or a closed connection. Two things are asserted uniformly across drivers:
+// RFC 9112 §6.1: requests with ambiguous boundaries must get a 400 or a closed connection. Two things are asserted
+// uniformly across drivers:
 //   1) the first response is not a success (an error status, or the connection simply closed);
-//   2) the second request embedded in the attack payload is not answered as an independent request (no smuggling happened).
+//   2) the second request embedded in the attack payload is not answered as an independent request (no smuggling
+//   happened).
 void check_framing_rejected(const std::string& driver, const std::string& raw) {
     TestServer ts(driver);
     Client c(ts.port);
@@ -920,8 +918,8 @@ TEST(http_driver_truncated_stream_closes_connection) {
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
-        // The backend delivers only half the declared length: the driver must disconnect, otherwise the client would treat the next
-        // response head as the remainder of this body (response misalignment)
+        // The backend delivers only half the declared length: the driver must disconnect, otherwise the client would
+        // treat the next response head as the remainder of this body (response misalignment)
         c.send_str("GET /short?size=100000 HTTP/1.1\r\nHost: t\r\n\r\n");
         auto r = c.read_response();
         CHECK(!r.ok);  // the declared byte count cannot be read in full, the connection is closed
@@ -960,7 +958,8 @@ TEST(http_driver_filters_header_injection) {
         auto r = c.read_response();
         CHECK(r.ok);
         CHECK_EQ(r.status, 200);
-        // CR/LF values (a response-splitting injection surface) and illegal header names are dropped entirely, normal headers kept
+        // CR/LF values (a response-splitting injection surface) and illegal header names are dropped entirely, normal
+        // headers kept
         CHECK(!r.header("Injected"));
         CHECK(!r.header("X-Evil"));
         CHECK(!r.header("Bad Name"));
@@ -1102,8 +1101,7 @@ TEST(header_map_tag_prefilter_keeps_semantics) {
                 std::string cand(len, 'q');
                 cand.front() = f;
                 cand.back() = l;
-                if (!HeaderMap::ieq(cand, "New-Header") &&
-                    HeaderMap::tag(cand) == HeaderMap::tag("New-Header"))
+                if (!HeaderMap::ieq(cand, "New-Header") && HeaderMap::tag(cand) == HeaderMap::tag("New-Header"))
                     other = cand;
             }
     CHECK(!other.empty());
@@ -1163,9 +1161,9 @@ TEST(http_driver_connection_close_token_list) {
 }
 
 TEST(http_driver_unknown_method_forwarded_or_s3_xml) {
-    // An unknown method has only two legitimate outcomes: handed verbatim to the handler for L2 to judge (builtin/beast/
-    // seastar), or rejected by the driver but with **S3 XML** (httplib cannot route unregistered methods and previously
-    // replied upstream with its own message, breaking four-driver consistency)
+    // An unknown method has only two legitimate outcomes: handed verbatim to the handler for L2 to judge
+    // (builtin/beast/ seastar), or rejected by the driver but with **S3 XML** (httplib cannot route unregistered
+    // methods and previously replied upstream with its own message, breaking four-driver consistency)
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
@@ -1182,7 +1180,8 @@ TEST(http_driver_unknown_method_forwarded_or_s3_xml) {
 }
 
 TEST(http_driver_rejects_oversized_headers) {
-    // http.max_header_size: httplib previously ignored this setting entirely, making the four drivers' acceptance sets inconsistent
+    // http.max_header_size: httplib previously ignored this setting entirely, making the four drivers' acceptance sets
+    // inconsistent
     for_each_driver([](const std::string& d) {
         TestServer ts(d);
         Client c(ts.port);
@@ -1194,10 +1193,10 @@ TEST(http_driver_rejects_oversized_headers) {
     });
 }
 
-
 // ---------- TLS（docs/archive/gaps.md §7）----------
 // Self-signed test certificate (CN=localhost, SAN includes 127.0.0.1, valid until 2126 -- embedded in source so the
-// tests have zero external dependencies; the client does no validation, so apart from expiry the certificate content does not matter)
+// tests have zero external dependencies; the client does no validation, so apart from expiry the certificate content
+// does not matter)
 constexpr const char* kTestTlsCert =
     "-----BEGIN CERTIFICATE-----\n"
     "MIIDJzCCAg+gAwIBAgIUQoKpxX6iKmcQaP/a3uSLGHSVf0MwDQYJKoZIhvcNAQEL\n"
@@ -1353,9 +1352,10 @@ TEST(http_driver_tls_round_trip) {
                 // Run a PUT with a body too: streaming reads under the TLS record layer hold as well
                 TlsClient c(ts.port);
                 std::string payload = make_pattern(1024);
-                c.send_str("PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 1024\r\n"
-                           "Connection: close\r\n\r\n" +
-                           payload);
+                c.send_str(
+                    "PUT /sum HTTP/1.1\r\nHost: t\r\nContent-Length: 1024\r\n"
+                    "Connection: close\r\n\r\n" +
+                    payload);
                 std::string r = c.read_all();
                 CHECK(r.find(expected_sum(1024)) != std::string::npos);
             }
@@ -1388,7 +1388,8 @@ TEST(http_driver_tls_file_body_falls_back_to_read) {
 }
 
 TEST(http_driver_tls_plaintext_client_rejected) {
-    // A plaintext client hitting the TLS port: handshake fails and the connection closes, it must never answer as plaintext HTTP
+    // A plaintext client hitting the TLS port: handshake fails and the connection closes, it must never answer as
+    // plaintext HTTP
     TlsCertFiles certs;
     for (auto& d : HttpServerFactory::drivers()) {
         TestServer ts(d, certs.cert_path, certs.key_path);
@@ -1491,7 +1492,8 @@ TEST(http_driver_tls_bad_cert_throws) {
 }
 
 // ---------- Timeouts / connection limit / shutdown contract (config.h timeout knobs section / http-adapter.md §5,
-// docs/archive/issues.md T10): each driver implements these behaviors on its own, most prone to divergence, must be asserted across all four ----------
+// docs/archive/issues.md T10): each driver implements these behaviors on its own, most prone to divergence, must be
+// asserted across all four ----------
 
 TEST(http_driver_idle_timeout_closes_idle_connection) {
     // An idle connection (keep-alive that has completed a request) must be closed by the server after idle_timeout;
@@ -1635,8 +1637,9 @@ TEST(http_driver_connection_counters) {
 }
 
 TEST(http_driver_max_connections_rejects_excess) {
-    // Over the limit, new connections are refused (builtin/beast close, seastar discards), established ones are unaffected.
-    // httplib's limit is implicitly constrained by its thread pool (as the config.h comment states), different semantics, skipped
+    // Over the limit, new connections are refused (builtin/beast close, seastar discards), established ones are
+    // unaffected. httplib's limit is implicitly constrained by its thread pool (as the config.h comment states),
+    // different semantics, skipped
     for (auto& d : HttpServerFactory::drivers()) {
         if (d == "httplib") continue;
         try {
@@ -1663,15 +1666,16 @@ TEST(http_driver_max_connections_rejects_excess) {
 }
 
 TEST(http_driver_shutdown_waits_for_inflight_within_grace) {
-    // First half of http-adapter.md contract 4: for an in-flight request finishing within the grace period, shutdown waits for it
-    // and run() returns only after the response is fully delivered -- in-flight requests must not be strangled
+    // First half of http-adapter.md contract 4: for an in-flight request finishing within the grace period, shutdown
+    // waits for it and run() returns only after the response is fully delivered -- in-flight requests must not be
+    // strangled
     for (auto& d : HttpServerFactory::drivers()) {
         try {
             TestServer ts(d, [](HttpConfig& c) { c.shutdown_grace_sec = 5; });
             Client c(ts.port);
             c.send_str("GET /slow?ms=600 HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
             std::this_thread::sleep_for(std::chrono::milliseconds(150));  // let the request enter the handler
-            ts.stop();  // shutdown + join run()
+            ts.stop();                                                    // shutdown + join run()
             auto r = c.read_response();
             CHECK(r.ok);
             CHECK_EQ(r.body, "done");
@@ -1682,10 +1686,11 @@ TEST(http_driver_shutdown_waits_for_inflight_within_grace) {
 }
 
 TEST(http_driver_shutdown_grace_bounds_return) {
-    // Second half of contract 4: "or timeout" -- an in-flight request exceeding the grace period is force-closed, and run() is not
-    // dragged out indefinitely by it. The handler (a blocking 2.2s sleep, unwakeable within the 1s grace) finishes on its own within
-    // the force window, and run() returns right after: the upper bound is far below the force backstop (1+3=4s), let alone unbounded.
-    // The lower bound confirms the grace period really exists -- not strangling in-flight requests and returning immediately
+    // Second half of contract 4: "or timeout" -- an in-flight request exceeding the grace period is force-closed, and
+    // run() is not dragged out indefinitely by it. The handler (a blocking 2.2s sleep, unwakeable within the 1s grace)
+    // finishes on its own within the force window, and run() returns right after: the upper bound is far below the
+    // force backstop (1+3=4s), let alone unbounded. The lower bound confirms the grace period really exists -- not
+    // strangling in-flight requests and returning immediately
     for (auto& d : HttpServerFactory::drivers()) {
         try {
             TestServer ts(d, [](HttpConfig& c) {
@@ -1707,10 +1712,11 @@ TEST(http_driver_shutdown_grace_bounds_return) {
 }
 
 TEST(http_driver_shutdown_force_deadline_builtin) {
-    // The strictest shape: the handler sleeps through the whole grace+force window (4s > 1+1+margin), run() must still return
-    // on time. builtin only -- it has an explicit design for "leftover threads hold shared state via shared_ptr and clean up on
-    // their own after run() returns or even after server destruction"; the force-close paths of beast/seastar abandon
-    // unfinished session coroutine frames (a bounded leak in the process-exit scenario), not reproducibly executable under ASan
+    // The strictest shape: the handler sleeps through the whole grace+force window (4s > 1+1+margin), run() must still
+    // return on time. builtin only -- it has an explicit design for "leftover threads hold shared state via shared_ptr
+    // and clean up on their own after run() returns or even after server destruction"; the force-close paths of
+    // beast/seastar abandon unfinished session coroutine frames (a bounded leak in the process-exit scenario), not
+    // reproducibly executable under ASan
     TestServer ts("builtin", [](HttpConfig& c) {
         c.shutdown_grace_sec = 1;
         c.shutdown_force_wait_sec = 1;

@@ -16,14 +16,12 @@ namespace lights3::s3 {
 namespace {
 
 constexpr const char* kAlgo = "AWS4-HMAC-SHA256";
-constexpr const char* kEmptySha256 =
-    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+constexpr const char* kEmptySha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 bool constant_time_eq(std::string_view a, std::string_view b) {
     if (a.size() != b.size()) return false;
     unsigned char diff = 0;
-    for (size_t i = 0; i < a.size(); ++i)
-        diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
+    for (size_t i = 0; i < a.size(); ++i) diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
     return diff == 0;
 }
 
@@ -92,9 +90,7 @@ struct AuthFields {
     bool presigned = false;
 };
 
-[[noreturn]] void malformed(const std::string& why) {
-    throw S3Error(S3ErrorCode::AuthorizationHeaderMalformed, why);
-}
+[[noreturn]] void malformed(const std::string& why) { throw S3Error(S3ErrorCode::AuthorizationHeaderMalformed, why); }
 
 void parse_credential(const std::string& cred, AuthFields& f) {
     auto parts = split(cred, '/');
@@ -118,9 +114,12 @@ AuthFields parse_auth_header(const std::string& value) {
         auto eq = p.find('=');
         if (eq == std::string::npos) continue;
         std::string k = p.substr(0, eq), val = p.substr(eq + 1);
-        if (k == "Credential") parse_credential(val, f);
-        else if (k == "SignedHeaders") f.signed_headers = lower(val);
-        else if (k == "Signature") f.signature = val;
+        if (k == "Credential")
+            parse_credential(val, f);
+        else if (k == "SignedHeaders")
+            f.signed_headers = lower(val);
+        else if (k == "Signature")
+            f.signature = val;
     }
     if (f.access_key.empty() || f.signed_headers.empty() || f.signature.empty())
         malformed("missing Credential/SignedHeaders/Signature");
@@ -130,7 +129,8 @@ AuthFields parse_auth_header(const std::string& value) {
 // Streaming SHA256-verifying decorator. Verification is not tied to EOF: it compares once the self-reported
 // length() is fully read (consumers like cloudproxy read exactly length() bytes and never do an extra read to EOF);
 // the EOF path covers the no-length case.
-// On mismatch, the exception fires before the last chunk is delivered downstream -- working with backend.h's "throw means no commit" contract.
+// On mismatch, the exception fires before the last chunk is delivered downstream -- working with backend.h's "throw
+// means no commit" contract.
 class Sha256VerifyingReader final : public http::BodyReader {
 public:
     Sha256VerifyingReader(std::unique_ptr<http::BodyReader> inner, std::string expected_hex)
@@ -175,11 +175,10 @@ bool is_hex_digest(const std::string& s) {
 }
 
 // HMAC chain derives the signing key: date -> region -> service -> "aws4_request"
-util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::string& date,
-                                      const std::string& region, const std::string& service) {
+util::Sha256Digest derive_signing_key(const std::string& secret_key, const std::string& date, const std::string& region,
+                                      const std::string& service) {
     util::SecretString init = "AWS4" + secret_key;  // SK derivative, wiped when it leaves scope
-    auto k = util::hmac_sha256(
-        std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
+    auto k = util::hmac_sha256(std::span(reinterpret_cast<const uint8_t*>(init.data()), init.size()), date);
     k = util::hmac_sha256(k, region);
     k = util::hmac_sha256(k, service);
     return util::hmac_sha256(k, "aws4_request");
@@ -203,11 +202,10 @@ struct DeclaredTrailer {
 // the canonicalized trailers, chained onto the final chunk signature).
 class ChunkedSigV4BodyReader final : public http::BodyReader {
 public:
-    ChunkedSigV4BodyReader(std::unique_ptr<http::BodyReader> inner, bool signed_chunks,
-                           util::Sha256Digest signing_key, std::string seed_signature,
-                           std::string amz_date, std::string scope,
-                           std::optional<uint64_t> decoded_length, bool trailer_expected,
-                           bool trailer_signed, std::vector<DeclaredTrailer> declared_trailers)
+    ChunkedSigV4BodyReader(std::unique_ptr<http::BodyReader> inner, bool signed_chunks, util::Sha256Digest signing_key,
+                           std::string seed_signature, std::string amz_date, std::string scope,
+                           std::optional<uint64_t> decoded_length, bool trailer_expected, bool trailer_signed,
+                           std::vector<DeclaredTrailer> declared_trailers)
         : inner_(std::move(inner)),
           signed_(signed_chunks),
           key_(signing_key),
@@ -231,22 +229,18 @@ public:
                     continue;
                 }
                 if (buf_.empty() && !co_await fill()) malformed_body("truncated chunk data");
-                size_t n = std::min({out.size(), buf_.size(),
-                                     static_cast<size_t>(chunk_remaining_)});
+                size_t n = std::min({out.size(), buf_.size(), static_cast<size_t>(chunk_remaining_)});
                 std::memcpy(out.data(), buf_.data(), n);
-                if (chunk_hash_)
-                    chunk_hash_->update(
-                        std::span(reinterpret_cast<const uint8_t*>(buf_.data()), n));
-                for (auto& d : trailer_digests_)
-                    d.update(std::span<const std::byte>(out.data(), n));
+                if (chunk_hash_) chunk_hash_->update(std::span(reinterpret_cast<const uint8_t*>(buf_.data()), n));
+                for (auto& d : trailer_digests_) d.update(std::span<const std::byte>(out.data(), n));
                 buf_.erase(0, n);
                 chunk_remaining_ -= n;
                 delivered_ += n;
                 // Verification is not tied to EOF: after delivering the declared length, synchronously finish the
                 // last-chunk verification, the zero-size final chunk, and the trailer -- consumers that stop after
-                // exactly length() bytes (cloudproxy) still get full verification; on failure, these n bytes are not delivered
-                if (chunk_remaining_ == 0 && decoded_length_ &&
-                    delivered_ == *decoded_length_)
+                // exactly length() bytes (cloudproxy) still get full verification; on failure, these n bytes are not
+                // delivered
+                if (chunk_remaining_ == 0 && decoded_length_ && delivered_ == *decoded_length_)
                     co_await drain_to_done();
                 co_return n;
             } else {  // Trailer
@@ -265,8 +259,7 @@ private:
     enum class State { Header, Data, Trailer, Done };
 
     [[noreturn]] static void malformed_body(const char* why) {
-        throw S3Error(S3ErrorCode::InvalidRequest,
-                      std::string("Malformed aws-chunked body: ") + why);
+        throw S3Error(S3ErrorCode::InvalidRequest, std::string("Malformed aws-chunked body: ") + why);
     }
 
     Task<bool> fill() {
@@ -286,9 +279,8 @@ private:
                 co_await parse_header();
             } else if (state_ == State::Data) {
                 if (chunk_remaining_ != 0)
-                    throw S3Error(
-                        S3ErrorCode::InvalidRequest,
-                        "Decoded body size does not match x-amz-decoded-content-length.");
+                    throw S3Error(S3ErrorCode::InvalidRequest,
+                                  "Decoded body size does not match x-amz-decoded-content-length.");
                 co_await finish_chunk();
             } else {  // Trailer
                 co_await consume_trailer();
@@ -308,8 +300,7 @@ private:
         for (;;) {
             auto eol = buf_.find("\r\n");
             if (eol == std::string::npos) {
-                if (trailer_bytes_ + buf_.size() > kTrailerMax)
-                    malformed_body("trailer too long");
+                if (trailer_bytes_ + buf_.size() > kTrailerMax) malformed_body("trailer too long");
                 if (!co_await fill()) malformed_body("truncated trailer");
                 continue;
             }
@@ -323,10 +314,8 @@ private:
             std::string name = lower(line.substr(0, colon));
             std::string value = line.substr(colon + 1);
             value.erase(0, value.find_first_not_of(" \t"));
-            if (auto end = value.find_last_not_of(" \t"); end != std::string::npos)
-                value.resize(end + 1);
-            if (!trailers_.emplace(std::move(name), std::move(value)).second)
-                malformed_body("duplicate trailer");
+            if (auto end = value.find_last_not_of(" \t"); end != std::string::npos) value.resize(end + 1);
+            if (!trailers_.emplace(std::move(name), std::move(value)).second) malformed_body("duplicate trailer");
         }
         verify_trailer();
         // Residue after the blank line (if any) stays undelivered and unread -- same
@@ -343,11 +332,10 @@ private:
             std::string canon;
             for (auto& [n, v] : trailers_)
                 if (n != "x-amz-trailer-signature") canon += n + ":" + v + "\n";
-            std::string sts = std::string("AWS4-HMAC-SHA256-TRAILER\n") + amz_date_ + "\n" +
-                              scope_ + "\n" + prev_sig_ + "\n" + util::sha256_hex(canon);
+            std::string sts = std::string("AWS4-HMAC-SHA256-TRAILER\n") + amz_date_ + "\n" + scope_ + "\n" + prev_sig_ +
+                              "\n" + util::sha256_hex(canon);
             if (!constant_time_eq(util::to_hex(util::hmac_sha256(key_, sts)), it->second))
-                throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
-                              "Trailer signature does not match.");
+                throw S3Error(S3ErrorCode::SignatureDoesNotMatch, "Trailer signature does not match.");
             trailers_.erase(it);
         } else if (trailers_.count("x-amz-trailer-signature")) {
             malformed_body("unexpected x-amz-trailer-signature");
@@ -367,12 +355,10 @@ private:
             auto& d = declared_[i];
             auto raw = util::base64_decode(trailers_[d.name]);
             if (!raw || raw->size() != d.bytes)
-                throw S3Error(S3ErrorCode::InvalidDigest,
-                              "The " + d.name + " trailer you specified is not valid.");
+                throw S3Error(S3ErrorCode::InvalidDigest, "The " + d.name + " trailer you specified is not valid.");
             if (trailer_digests_[i].final_raw() != *raw)
                 throw S3Error(S3ErrorCode::BadDigest,
-                              "The " + d.name +
-                                  " you specified did not match what we received.");
+                              "The " + d.name + " you specified did not match what we received.");
         }
     }
 
@@ -395,8 +381,7 @@ private:
             auto at = line.find(kSigKey, semi);
             if (at != std::string::npos) {
                 chunk_sig_ = line.substr(at + kSigKey.size());
-                if (auto extra = chunk_sig_.find(';'); extra != std::string::npos)
-                    chunk_sig_.resize(extra);
+                if (auto extra = chunk_sig_.find(';'); extra != std::string::npos) chunk_sig_.resize(extra);
             }
         }
         if (size_hex.empty() || size_hex.size() > 16) malformed_body("bad chunk size");
@@ -414,17 +399,17 @@ private:
         co_return true;
     }
 
-    // Current chunk data fully read: verify the signature, consume the trailing CRLF (the final chunk has no CRLF, goes straight to Trailer)
+    // Current chunk data fully read: verify the signature, consume the trailing CRLF (the final chunk has no CRLF, goes
+    // straight to Trailer)
     Task<void> finish_chunk() {
         if (signed_) {
             std::string data_hash = chunk_hash_->final_hex();
             chunk_hash_.reset();
-            std::string sts = std::string("AWS4-HMAC-SHA256-PAYLOAD\n") + amz_date_ + "\n" +
-                              scope_ + "\n" + prev_sig_ + "\n" + kEmptySha256 + "\n" + data_hash;
+            std::string sts = std::string("AWS4-HMAC-SHA256-PAYLOAD\n") + amz_date_ + "\n" + scope_ + "\n" + prev_sig_ +
+                              "\n" + kEmptySha256 + "\n" + data_hash;
             std::string expect = util::to_hex(util::hmac_sha256(key_, sts));
             if (!constant_time_eq(expect, chunk_sig_))
-                throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
-                              "Chunk signature does not match.");
+                throw S3Error(S3ErrorCode::SignatureDoesNotMatch, "Chunk signature does not match.");
             prev_sig_ = expect;
         }
         if (final_chunk_) {
@@ -497,12 +482,9 @@ SigV4Authenticator SigV4Authenticator::build(const AuthConfig& cfg) {
     return a;
 }
 
-std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
-                                              const std::string& secret_key,
-                                              const std::string& amz_date,
-                                              const std::string& scope,
-                                              const std::string& signed_headers,
-                                              const std::string& payload_hash,
+std::string SigV4Authenticator::signature_for(const http::HttpRequest& req, const std::string& secret_key,
+                                              const std::string& amz_date, const std::string& scope,
+                                              const std::string& signed_headers, const std::string& payload_hash,
                                               bool presigned) const {
     // canonical headers (values taken per the SignedHeaders list; the list must already be sorted;
     // same-name headers comma-joined in order of appearance -- SigV4 rule)
@@ -534,8 +516,7 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
               << signed_headers << "\n"
               << payload_hash;
 
-    std::string sts = std::string(kAlgo) + "\n" + amz_date + "\n" + scope + "\n" +
-                      util::sha256_hex(canonical.str());
+    std::string sts = std::string(kAlgo) + "\n" + amz_date + "\n" + scope + "\n" + util::sha256_hex(canonical.str());
 
     auto parts = split(scope, '/');  // date/region/service/aws4_request
     auto k = derive_signing_key(secret_key, parts[0], parts[1], parts[2]);
@@ -545,9 +526,12 @@ std::string SigV4Authenticator::signature_for(const http::HttpRequest& req,
 std::optional<std::string> SigV4Authenticator::peek_access_key(const http::HttpRequest& req) {
     try {
         AuthFields f;
-        if (auto auth = req.headers.get("Authorization")) f = parse_auth_header(*auth);
-        else if (auto cred = req.query_get("X-Amz-Credential")) parse_credential(*cred, f);
-        else return std::nullopt;
+        if (auto auth = req.headers.get("Authorization"))
+            f = parse_auth_header(*auth);
+        else if (auto cred = req.query_get("X-Amz-Credential"))
+            parse_credential(*cred, f);
+        else
+            return std::nullopt;
         if (f.access_key.empty()) return std::nullopt;
         return f.access_key;
     } catch (const S3Error&) {
@@ -555,8 +539,7 @@ std::optional<std::string> SigV4Authenticator::peek_access_key(const http::HttpR
     }
 }
 
-VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
-                                                 std::string_view service,
+VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::string_view service,
                                                  const std::string* explicit_payload_hash) const {
     if (!enabled()) return {};
 
@@ -582,10 +565,8 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
 
     // scope check
     if (f.terminal != "aws4_request" || f.service != service || f.region != region_)
-        malformed("credential scope does not match this endpoint (" + region_ + "/" +
-                  std::string(service) + ")");
-    if (f.amz_date.substr(0, 8) != f.date)
-        malformed("credential date does not match x-amz-date");
+        malformed("credential scope does not match this endpoint (" + region_ + "/" + std::string(service) + ")");
+    if (f.amz_date.substr(0, 8) != f.date) malformed("credential date does not match x-amz-date");
 
     // host must be in SignedHeaders (AWS requirement; under vhost the bucket comes from Host, and a signature
     // not bound to host could be replayed cross-bucket by swapping the Host header) -- enforced for presigned too
@@ -600,7 +581,8 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
     if (!t) malformed("cannot parse x-amz-date");
     if (f.presigned) {
         // presigned validity is judged by X-Amz-Expires (docs/s3-protocol.md §3.4). Expiry only constrains the
-        // past side; the issue time must not lead the server by more than 15min (prevents future timestamps from extending validity indefinitely)
+        // past side; the issue time must not lead the server by more than 15min (prevents future timestamps from
+        // extending validity indefinitely)
         if (*t - clock() > std::chrono::seconds(kMaxClockSkewSec))
             throw S3Error(S3ErrorCode::AccessDenied, "Request is not valid yet");
         auto exp = req.query_get("X-Amz-Expires");
@@ -617,13 +599,13 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
     } else {
         auto skew = std::chrono::duration_cast<std::chrono::seconds>(clock() - *t).count();
         if (skew > kMaxClockSkewSec || skew < -kMaxClockSkewSec)
-            throw S3Error(
-                S3ErrorCode::RequestTimeTooSkewed,
-                "The difference between the request time and the server's time is too large.");
+            throw S3Error(S3ErrorCode::RequestTimeTooSkewed,
+                          "The difference between the request time and the server's time is too large.");
     }
 
     // Credentials: one lookup returns both the SK and the policy snapshot (docs/archive/gaps.md §3.7) -- authorization
-    // uses this snapshot, so even if the credential is revoked while this request is in flight, it completes with verify-time semantics
+    // uses this snapshot, so even if the credential is revoked while this request is in flight, it completes with
+    // verify-time semantics
     auto cred = provider_->lookup(f.access_key);
     if (!cred)
         throw S3Error(S3ErrorCode::InvalidAccessKeyId,
@@ -635,22 +617,21 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
     // is judged before expiry so a wrong token never reads as merely "expired"
     {
         std::optional<std::string> req_token;
-        if (auto h = req.headers.get("x-amz-security-token")) req_token = *h;
-        else if (auto q = req.query_get("X-Amz-Security-Token")) req_token = *q;
+        if (auto h = req.headers.get("x-amz-security-token"))
+            req_token = *h;
+        else if (auto q = req.query_get("X-Amz-Security-Token"))
+            req_token = *q;
         if (cred->session_token) {
             if (!req_token)
                 throw S3Error(S3ErrorCode::AccessDenied,
                               "Session credentials require the X-Amz-Security-Token "
                               "header or query parameter.");
             if (!constant_time_eq(*req_token, *cred->session_token))
-                throw S3Error(S3ErrorCode::InvalidToken,
-                              "The security token included in the request is invalid.");
+                throw S3Error(S3ErrorCode::InvalidToken, "The security token included in the request is invalid.");
             if (cred->session_expires && clock() > *cred->session_expires)
-                throw S3Error(S3ErrorCode::ExpiredToken,
-                              "The provided security token has expired.");
+                throw S3Error(S3ErrorCode::ExpiredToken, "The provided security token has expired.");
         } else if (req_token) {
-            throw S3Error(S3ErrorCode::InvalidToken,
-                          "The security token included in the request is invalid.");
+            throw S3Error(S3ErrorCode::InvalidToken, "The security token included in the request is invalid.");
         }
     }
 
@@ -669,21 +650,16 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
         else if (payload_hash == "STREAMING-UNSIGNED-PAYLOAD-TRAILER")
             chunked_unsigned = true;
         else if (payload_hash.rfind("STREAMING-", 0) == 0)
-            throw S3Error(S3ErrorCode::NotImplemented,
-                          "This streaming payload type is not supported.");
-        trailer_variant = payload_hash.size() >= 8 &&
-                          payload_hash.compare(payload_hash.size() - 8, 8, "-TRAILER") == 0;
+            throw S3Error(S3ErrorCode::NotImplemented, "This streaming payload type is not supported.");
+        trailer_variant = payload_hash.size() >= 8 && payload_hash.compare(payload_hash.size() - 8, 8, "-TRAILER") == 0;
     } else {
         bool has_body = req.body && req.body->length().value_or(0) > 0;
-        if (has_body)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Missing required header: x-amz-content-sha256");
+        if (has_body) throw S3Error(S3ErrorCode::InvalidRequest, "Missing required header: x-amz-content-sha256");
         payload_hash = kEmptySha256;
     }
 
     std::string scope = f.date + "/" + f.region + "/" + f.service + "/aws4_request";
-    std::string expect = signature_for(req, secret_key, f.amz_date, scope, f.signed_headers,
-                                       payload_hash, f.presigned);
+    std::string expect = signature_for(req, secret_key, f.amz_date, scope, f.signed_headers, payload_hash, f.presigned);
     if (!constant_time_eq(expect, f.signature))
         throw S3Error(S3ErrorCode::SignatureDoesNotMatch,
                       "The request signature we calculated does not match the signature you "
@@ -695,20 +671,15 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
     std::vector<DeclaredTrailer> declared_trailers;
     for (auto& name : parse_declared_trailers(req)) {
         if (!trailer_variant)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "x-amz-trailer requires a STREAMING-*-TRAILER payload type.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "x-amz-trailer requires a STREAMING-*-TRAILER payload type.");
         auto* spec = checksum_spec(name);
         if (!spec) {
             if (name.rfind("x-amz-checksum-", 0) == 0)
-                throw S3Error(S3ErrorCode::NotImplemented,
-                              "The trailing checksum '" + name + "' is not implemented.");
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "The trailer '" + name + "' is not supported.");
+                throw S3Error(S3ErrorCode::NotImplemented, "The trailing checksum '" + name + "' is not implemented.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "The trailer '" + name + "' is not supported.");
         }
         for (auto& d : declared_trailers)
-            if (d.name == name)
-                throw S3Error(S3ErrorCode::InvalidRequest,
-                              "Duplicate trailer declared: " + name);
+            if (d.name == name) throw S3Error(S3ErrorCode::InvalidRequest, "Duplicate trailer declared: " + name);
         declared_trailers.push_back({std::move(name), spec->algo, spec->bytes});
     }
 
@@ -717,33 +688,26 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req,
         // AWS mandates this header for streaming variants; without it the decoded length is unknown, the
         // "verify when fully read" trigger cannot fire, and the length cannot be reported to the backend
         auto dl = req.headers.get("x-amz-decoded-content-length");
-        if (!dl)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Missing required header: x-amz-decoded-content-length");
+        if (!dl) throw S3Error(S3ErrorCode::InvalidRequest, "Missing required header: x-amz-decoded-content-length");
         uint64_t decoded_len = 0;
         try {
             decoded_len = std::stoull(*dl);
         } catch (...) {
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Invalid x-amz-decoded-content-length.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "Invalid x-amz-decoded-content-length.");
         }
         req.body = std::make_unique<ChunkedSigV4BodyReader>(
-            std::move(req.body), chunked_signed,
-            derive_signing_key(secret_key, f.date, f.region, f.service), f.signature,
-            f.amz_date, scope, decoded_len, trailer_variant,
-            /*trailer_signed=*/chunked_signed && trailer_variant,
-            std::move(declared_trailers));
+            std::move(req.body), chunked_signed, derive_signing_key(secret_key, f.date, f.region, f.service),
+            f.signature, f.amz_date, scope, decoded_len, trailer_variant,
+            /*trailer_signed=*/chunked_signed && trailer_variant, std::move(declared_trailers));
     } else if (!explicit_payload_hash && is_hex_digest(payload_hash) && req.body) {
         // A declared empty digest (sha256("")) still gets wrapped for verification: without checking that the
         // actual body is empty, empty digest + non-empty body would slip the body out of signature protection
         req.body = std::make_unique<Sha256VerifyingReader>(std::move(req.body), payload_hash);
     }
-    return {std::move(f.access_key), std::move(cred->policy), std::move(cred->tenant),
-            cred->tenant_admin};
+    return {std::move(f.access_key), std::move(cred->policy), std::move(cred->tenant), cred->tenant_admin};
 }
 
-void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred,
-                              std::string payload_hash) const {
+void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred, std::string payload_hash) const {
     if (payload_hash.empty()) payload_hash = kEmptySha256;
     std::string amz_date = util::amz_date(clock());
     req.headers.set("x-amz-date", amz_date);
@@ -762,11 +726,9 @@ void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred,
 
     std::string date = amz_date.substr(0, 8);
     std::string scope = date + "/" + region_ + "/" + service_ + "/aws4_request";
-    std::string sig =
-        signature_for(req, cred.secret_key, amz_date, scope, signed_headers, payload_hash);
-    req.headers.set("Authorization",
-                    std::string(kAlgo) + " Credential=" + cred.access_key + "/" + scope +
-                        ", SignedHeaders=" + signed_headers + ", Signature=" + sig);
+    std::string sig = signature_for(req, cred.secret_key, amz_date, scope, signed_headers, payload_hash);
+    req.headers.set("Authorization", std::string(kAlgo) + " Credential=" + cred.access_key + "/" + scope +
+                                         ", SignedHeaders=" + signed_headers + ", Signature=" + sig);
 }
 
 }  // namespace lights3::s3

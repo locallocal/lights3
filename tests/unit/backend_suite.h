@@ -1,5 +1,6 @@
-// Backend conformance suite (docs/storage/storage-backend.md §6): the same set of cases runs parameterized over all IStorageBackend implementations.
-// Extracted from test_storage.cc, reused by test_cloudproxy.cc (docs/storage/cloudproxy-design.md §10).
+// Backend conformance suite (docs/storage/storage-backend.md §6): the same set of cases runs parameterized over all
+// IStorageBackend implementations. Extracted from test_storage.cc, reused by test_cloudproxy.cc
+// (docs/storage/cloudproxy-design.md §10).
 #pragma once
 
 #include <unistd.h>
@@ -19,9 +20,8 @@ using namespace lights3::storage;
 struct TmpDir {
     std::filesystem::path path;
     explicit TmpDir(std::string_view prefix = "lights3-test-") {
-        path = std::filesystem::temp_directory_path() /
-               (std::string(prefix) + std::to_string(::getpid()) + "-" +
-                std::to_string(reinterpret_cast<uintptr_t>(this)));
+        path = std::filesystem::temp_directory_path() / (std::string(prefix) + std::to_string(::getpid()) + "-" +
+                                                         std::to_string(reinterpret_cast<uintptr_t>(this)));
         std::filesystem::create_directories(path);
     }
     ~TmpDir() {
@@ -41,8 +41,8 @@ inline std::string read_all(http::BodyReader& r) {
     return out;
 }
 
-inline PutResult put(IStorageBackend& b, const std::string& bkt, const std::string& key,
-                     const std::string& data, ObjectMeta meta = {}) {
+inline PutResult put(IStorageBackend& b, const std::string& bkt, const std::string& key, const std::string& data,
+                     ObjectMeta meta = {}) {
     http::StringBodyReader body(data);
     return sync_wait(b.put_object(bkt, key, std::move(meta), body));
 }
@@ -79,8 +79,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK_THROWS_S3(sync_wait(b.list_objects("suite-bkt", {})), S3ErrorCode::NoSuchBucket);
     sync_wait(b.create_bucket("suite-bkt"));
     CHECK(sync_wait(b.bucket_exists("suite-bkt")));
-    CHECK_THROWS_S3(sync_wait(b.create_bucket("suite-bkt")),
-                    S3ErrorCode::BucketAlreadyOwnedByYou);
+    CHECK_THROWS_S3(sync_wait(b.create_bucket("suite-bkt")), S3ErrorCode::BucketAlreadyOwnedByYou);
 
     // PUT / GET round trip, ETag = MD5 of content
     ObjectMeta meta;
@@ -139,8 +138,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         ObjectMeta tm;
         tm.tagging = "env=prod&team=data%20eng";
         put(b, "suite-bkt", "tg.bin", "x", tm);
-        CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging,
-                 "env=prod&team=data%20eng");
+        CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging, "env=prod&team=data%20eng");
         try {
             sync_wait(b.set_object_tagging("suite-bkt", "tg.bin", "k3=v3"));
             CHECK_EQ(sync_wait(b.head_object("suite-bkt", "tg.bin")).tagging, "k3=v3");
@@ -152,40 +150,34 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         sync_wait(b.delete_object("suite-bkt", "tg.bin"));
     }
 
-    // Body throws mid-read: the exception must propagate as-is, and no partial object may be left behind (backend.h contract).
-    // This is the shape shared by Content-MD5 mismatch (docs/archive/gaps.md §5.6) and client disconnect
+    // Body throws mid-read: the exception must propagate as-is, and no partial object may be left behind (backend.h
+    // contract). This is the shape shared by Content-MD5 mismatch (docs/archive/gaps.md §5.6) and client disconnect
     {
         ThrowingBodyReader bad("partial-", 64);
-        CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "torn.bin", ObjectMeta{}, bad)),
-                        S3ErrorCode::BadDigest);
-        CHECK_THROWS_S3(sync_wait(b.head_object("suite-bkt", "torn.bin")),
-                        S3ErrorCode::NoSuchKey);
+        CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "torn.bin", ObjectMeta{}, bad)), S3ErrorCode::BadDigest);
+        CHECK_THROWS_S3(sync_wait(b.head_object("suite-bkt", "torn.bin")), S3ErrorCode::NoSuchKey);
         // A failed overwrite must not corrupt the existing object either
         ThrowingBodyReader bad2("partial-", 64);
-        CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "dir/a.txt", ObjectMeta{}, bad2)),
-                        S3ErrorCode::BadDigest);
+        CHECK_THROWS_S3(sync_wait(b.put_object("suite-bkt", "dir/a.txt", ObjectMeta{}, bad2)), S3ErrorCode::BadDigest);
         CHECK_EQ(sync_wait(b.head_object("suite-bkt", "dir/a.txt")).etag, r.etag);
     }
 
     // Range: middle segment / open-ended / suffix / out of bounds
     auto mid = sync_wait(b.get_object("suite-bkt", "dir/a.txt", ByteRange{6, 10}));
     CHECK_EQ(read_all(*mid.body), "world");
-    auto tail = sync_wait(b.get_object("suite-bkt", "dir/a.txt",
-                                       ByteRange{std::nullopt, uint64_t(5)}));
+    auto tail = sync_wait(b.get_object("suite-bkt", "dir/a.txt", ByteRange{std::nullopt, uint64_t(5)}));
     CHECK_EQ(read_all(*tail.body), "world");
-    auto open_end = sync_wait(b.get_object("suite-bkt", "dir/a.txt",
-                                           ByteRange{uint64_t(6), std::nullopt}));
+    auto open_end = sync_wait(b.get_object("suite-bkt", "dir/a.txt", ByteRange{uint64_t(6), std::nullopt}));
     CHECK_EQ(read_all(*open_end.body), "world");
-    CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "dir/a.txt", ByteRange{99, 100})),
-                    S3ErrorCode::InvalidRange);
+    CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "dir/a.txt", ByteRange{99, 100})), S3ErrorCode::InvalidRange);
 
     // Overwrite is last-write-wins
     put(b, "suite-bkt", "dir/a.txt", "v2");
     auto v2 = sync_wait(b.get_object("suite-bkt", "dir/a.txt", std::nullopt));
     CHECK_EQ(read_all(*v2.body), "v2");
 
-    // Conditional PUT (PutCondition contract, storage/backend.h): the check completes atomically at the backend's commit point;
-    // a failure must not leave behind any trace of the write
+    // Conditional PUT (PutCondition contract, storage/backend.h): the check completes atomically at the backend's
+    // commit point; a failure must not leave behind any trace of the write
     {
         auto put_if = [&](const std::string& key, const std::string& data, PutCondition cond) {
             http::StringBodyReader body(data);
@@ -193,16 +185,14 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         };
         PutCondition none_match;
         none_match.if_none_match = true;
-        CHECK_THROWS_S3(put_if("dir/a.txt", "clobber", none_match),
-                        S3ErrorCode::PreconditionFailed);
+        CHECK_THROWS_S3(put_if("dir/a.txt", "clobber", none_match), S3ErrorCode::PreconditionFailed);
         auto created = put_if("cond/new.txt", "fresh", none_match);  // absent -> create
         PutCondition match_ok;
         match_ok.if_match_etag = created.etag;
         put_if("cond/new.txt", "fresh2", match_ok);  // etag matches -> overwrite
         PutCondition match_stale;
         match_stale.if_match_etag = created.etag;  // overwritten by the previous step, etag is stale
-        CHECK_THROWS_S3(put_if("cond/new.txt", "x", match_stale),
-                        S3ErrorCode::PreconditionFailed);
+        CHECK_THROWS_S3(put_if("cond/new.txt", "x", match_stale), S3ErrorCode::PreconditionFailed);
         PutCondition match_absent;
         match_absent.if_match_etag = created.etag;
         CHECK_THROWS_S3(put_if("cond/absent.txt", "x", match_absent), S3ErrorCode::NoSuchKey);
@@ -211,22 +201,18 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         CHECK_EQ(read_all(*cur.body), "fresh2");
         auto keep = sync_wait(b.get_object("suite-bkt", "dir/a.txt", std::nullopt));
         CHECK_EQ(read_all(*keep.body), "v2");
-        CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "cond/absent.txt", std::nullopt)),
-                        S3ErrorCode::NoSuchKey);
+        CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "cond/absent.txt", std::nullopt)), S3ErrorCode::NoSuchKey);
         sync_wait(b.delete_object("suite-bkt", "cond/new.txt"));
     }
 
     // Error paths
-    CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "missing", std::nullopt)),
-                    S3ErrorCode::NoSuchKey);
-    CHECK_THROWS_S3(sync_wait(b.get_object("no-such-bkt", "k", std::nullopt)),
-                    S3ErrorCode::NoSuchBucket);
+    CHECK_THROWS_S3(sync_wait(b.get_object("suite-bkt", "missing", std::nullopt)), S3ErrorCode::NoSuchKey);
+    CHECK_THROWS_S3(sync_wait(b.get_object("no-such-bkt", "k", std::nullopt)), S3ErrorCode::NoSuchBucket);
     CHECK_THROWS_S3(put(b, "suite-bkt", "../escape", "x"), S3ErrorCode::InvalidArgument);
     CHECK_THROWS_S3(put(b, "suite-bkt", "a/../b", "x"), S3ErrorCode::InvalidArgument);
-    // The 255B per-segment limit has been pushed down to localfs only (docs/archive/gaps.md §6.3 validate_fs_object_key);
-    // the shared layer here only guarantees the 1024B total-length limit still holds
-    CHECK_THROWS_S3(put(b, "suite-bkt", std::string(1100, 'x'), "x"),
-                    S3ErrorCode::KeyTooLongError);
+    // The 255B per-segment limit has been pushed down to localfs only (docs/archive/gaps.md §6.3
+    // validate_fs_object_key); the shared layer here only guarantees the 1024B total-length limit still holds
+    CHECK_THROWS_S3(put(b, "suite-bkt", std::string(1100, 'x'), "x"), S3ErrorCode::KeyTooLongError);
 
     // Directory marker objects (docs/archive/gaps.md §6.3): the S3 console's "create folder" and the directory
     // semantics of s3fs/goofys/rclone all depend on them. All backends support them uniformly -- localfs
@@ -248,8 +234,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         CHECK_EQ(lr.objects[1].key, "folder/file.txt");
         sync_wait(b.delete_object("suite-bkt", "folder/file.txt"));
         sync_wait(b.delete_object("suite-bkt", "folder/"));
-        CHECK_THROWS_S3(sync_wait(b.head_object("suite-bkt", "folder/")),
-                        S3ErrorCode::NoSuchKey);
+        CHECK_THROWS_S3(sync_wait(b.head_object("suite-bkt", "folder/")), S3ErrorCode::NoSuchKey);
     }
 
     // list: prefix / delimiter / pagination
@@ -272,7 +257,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     ListOptions delim;
     delim.delimiter = "/";
     auto ld = sync_wait(b.list_objects("suite-bkt", delim));
-    CHECK_EQ(ld.objects.size(), size_t(1));  // readme.md
+    CHECK_EQ(ld.objects.size(), size_t(1));          // readme.md
     CHECK_EQ(ld.common_prefixes.size(), size_t(2));  // dir/ photos/
     CHECK_EQ(ld.common_prefixes[0], "dir/");
     CHECK_EQ(ld.common_prefixes[1], "photos/");
@@ -299,8 +284,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     mmeta.user_meta["origin"] = "suite";
     auto uid = sync_wait(b.create_multipart("suite-bkt", "mp/joined.bin", mmeta));
     CHECK(!uid.empty());
-    CHECK_THROWS_S3(sync_wait(b.create_multipart("no-such-bkt", "k", {})),
-                    S3ErrorCode::NoSuchBucket);
+    CHECK_THROWS_S3(sync_wait(b.create_multipart("no-such-bkt", "k", {})), S3ErrorCode::NoSuchBucket);
 
     auto upload = [&](const std::string& id, int no, const std::string& data) {
         http::StringBodyReader body(data);
@@ -310,27 +294,25 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK_EQ(r1.etag, "f814893777bcc2295fff05f00e508da6");  // md5("hello ")
     auto r2 = upload(uid, 2, "world");
     CHECK_EQ(r2.etag, "7d793037a0760186574b0282f2f435e7");  // md5("world")
-    auto r1b = upload(uid, 1, "hello ");  // re-upload with the same part number is last-write-wins
+    auto r1b = upload(uid, 1, "hello ");                    // re-upload with the same part number is last-write-wins
     CHECK_EQ(r1b.etag, r1.etag);
 
     // Part number out of range / unknown upload id
     CHECK_THROWS_S3(upload(uid, 0, "x"), S3ErrorCode::InvalidArgument);
     CHECK_THROWS_S3(upload(uid, 10001, "x"), S3ErrorCode::InvalidArgument);
-    CHECK_THROWS_S3(upload("00000000000000000000000000000000", 1, "x"),
-                    S3ErrorCode::NoSuchUpload);
+    CHECK_THROWS_S3(upload("00000000000000000000000000000000", 1, "x"), S3ErrorCode::NoSuchUpload);
 
     auto complete = [&](const std::string& id, std::vector<PartInfo> parts) {
         return sync_wait(b.complete_multipart("suite-bkt", "mp/joined.bin", id, parts));
     };
-    // Out of order / ETag mismatch / missing part / empty parts. Out-of-order has its own code (docs/archive/gaps.md §5.7):
-    // InvalidPart would make clients re-upload parts, when what is actually needed is sorting the list
+    // Out of order / ETag mismatch / missing part / empty parts. Out-of-order has its own code (docs/archive/gaps.md
+    // §5.7): InvalidPart would make clients re-upload parts, when what is actually needed is sorting the list
     CHECK_THROWS_S3(complete(uid, {{2, r2.etag}, {1, r1.etag}}), S3ErrorCode::InvalidPartOrder);
     CHECK_THROWS_S3(complete(uid, {{1, "deadbeef"}}), S3ErrorCode::InvalidPart);
     CHECK_THROWS_S3(complete(uid, {{1, r1.etag}, {3, r2.etag}}), S3ErrorCode::InvalidPart);
     CHECK_THROWS_S3(complete(uid, {}), S3ErrorCode::InvalidPart);
     // key does not match the upload -> NoSuchUpload
-    CHECK_THROWS_S3(sync_wait(b.complete_multipart("suite-bkt", "other.bin", uid,
-                                                   std::vector<PartInfo>{{1, r1.etag}})),
+    CHECK_THROWS_S3(sync_wait(b.complete_multipart("suite-bkt", "other.bin", uid, std::vector<PartInfo>{{1, r1.etag}})),
                     S3ErrorCode::NoSuchUpload);
 
     // list_parts / list_multipart_uploads (backing docs/s3-protocol.md ListParts)
@@ -346,11 +328,11 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
     CHECK(!lups.is_truncated);
     CHECK_EQ(lups.uploads[0].key, "mp/joined.bin");
     CHECK_EQ(lups.uploads[0].upload_id, uid);
-    CHECK_THROWS_S3(sync_wait(b.list_parts("suite-bkt", "mp/joined.bin",
-                                           "00000000000000000000000000000000", {})),
+    CHECK_THROWS_S3(sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", "00000000000000000000000000000000", {})),
                     S3ErrorCode::NoSuchUpload);
 
-    // Pagination (docs/archive/gaps.md §5.1): this used to always report IsTruncated=false, which clients take to mean the end was reached
+    // Pagination (docs/archive/gaps.md §5.1): this used to always report IsTruncated=false, which clients take to mean
+    // the end was reached
     {
         ListPartsOptions po;
         po.max_parts = 1;
@@ -365,7 +347,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         CHECK_EQ(page2.parts.size(), size_t(1));
         CHECK_EQ(page2.parts[0].part_no, 2);
         CHECK(!page2.is_truncated);
-        // max=0 must be "empty and not truncated": an empty cursor + truncated would put loop-resuming clients into an infinite loop
+        // max=0 must be "empty and not truncated": an empty cursor + truncated would put loop-resuming clients into an
+        // infinite loop
         po.part_number_marker = 0;
         po.max_parts = 0;
         auto page0 = sync_wait(b.list_parts("suite-bkt", "mp/joined.bin", uid, po));
@@ -373,7 +356,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
         CHECK(!page0.is_truncated);
     }
     {
-        // Open a second upload so there is something to page over; the (key, upload_id) order of the two uploads is stable
+        // Open a second upload so there is something to page over; the (key, upload_id) order of the two uploads is
+        // stable
         std::string uid2 = sync_wait(b.create_multipart("suite-bkt", "mp/other.bin", {}));
         ListUploadsOptions uo;
         uo.max_uploads = 1;
@@ -407,8 +391,7 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
 
     // The upload disappears once completed; same after abort
     CHECK_THROWS_S3(complete(uid, {{1, r1.etag}}), S3ErrorCode::NoSuchUpload);
-    CHECK_THROWS_S3(sync_wait(b.abort_multipart("suite-bkt", "mp/joined.bin", uid)),
-                    S3ErrorCode::NoSuchUpload);
+    CHECK_THROWS_S3(sync_wait(b.abort_multipart("suite-bkt", "mp/joined.bin", uid)), S3ErrorCode::NoSuchUpload);
     auto uid2 = sync_wait(b.create_multipart("suite-bkt", "mp/joined.bin", {}));
     upload(uid2, 1, "zzz");
     sync_wait(b.abort_multipart("suite-bkt", "mp/joined.bin", uid2));
@@ -416,8 +399,8 @@ inline void run_backend_suite(IStorageBackend& b, bool checksum_roundtrip = true
 
     // Delete: idempotent + directory cleanup; only an empty bucket can be deleted
     CHECK_THROWS_S3(sync_wait(b.delete_bucket("suite-bkt")), S3ErrorCode::BucketNotEmpty);
-    for (auto& k : {"dir/a.txt", "photos/2026/a.jpg", "photos/2026/b.jpg",
-                    "photos/2027/c.jpg", "readme.md", "mp/joined.bin"})
+    for (auto& k :
+         {"dir/a.txt", "photos/2026/a.jpg", "photos/2026/b.jpg", "photos/2027/c.jpg", "readme.md", "mp/joined.bin"})
         sync_wait(b.delete_object("suite-bkt", k));
     sync_wait(b.delete_object("suite-bkt", "dir/a.txt"));  // deleting again does not error
     auto empty = sync_wait(b.list_objects("suite-bkt", {}));

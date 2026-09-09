@@ -29,10 +29,8 @@ std::map<std::string, BackendFactory>& registry() {
 // root/staging parameter parsing shared by localfs and xlocalfs
 std::pair<std::string, std::string> fs_backend_paths(const BackendConfig& cfg) {
     auto root = cfg.params.count("root") ? cfg.params.at("root") : "";
-    if (root.empty())
-        throw std::runtime_error(cfg.type + " backend '" + cfg.name + "' needs root");
-    auto staging = cfg.params.count("staging") ? cfg.params.at("staging")
-                                               : root + "/.lights3-staging";
+    if (root.empty()) throw std::runtime_error(cfg.type + " backend '" + cfg.name + "' needs root");
+    auto staging = cfg.params.count("staging") ? cfg.params.at("staging") : root + "/.lights3-staging";
     return {root, staging};
 }
 
@@ -51,13 +49,11 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
         int n = 0;
         auto r = std::from_chars(v.data(), v.data() + v.size(), n);
         if (r.ec != std::errc() || r.ptr != v.data() + v.size() || n < lo || n > hi)
-            throw std::runtime_error(cfg.type + " backend '" + cfg.name + "': " + k +
-                                     " must be an integer in [" + std::to_string(lo) + "," +
-                                     std::to_string(hi) + "]");
+            throw std::runtime_error(cfg.type + " backend '" + cfg.name + "': " + k + " must be an integer in [" +
+                                     std::to_string(lo) + "," + std::to_string(hi) + "]");
         return n;
     };
-    if (cfg.params.count("list_meta_concurrency"))
-        o.list_meta_concurrency = small_int("list_meta_concurrency", 1, 256);
+    if (cfg.params.count("list_meta_concurrency")) o.list_meta_concurrency = small_int("list_meta_concurrency", 1, 256);
     if (cfg.params.count("list_cache_entries"))
         o.list_cache_entries = parse_size(cfg.params.at("list_cache_entries"));  // plain count; K/M suffixes allowed
     if (cfg.params.count("list_cache_min_dir_entries"))
@@ -65,10 +61,8 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
     if (cfg.params.count("sidecar_scan_interval"))
         o.sidecar_scan_interval_sec = parse_duration_sec(cfg.params.at("sidecar_scan_interval"));
     // Object metadata cache (roadmap §3.8; docs/storage/localfs.md §5.1)
-    if (cfg.params.count("meta_cache_entries"))
-        o.meta_cache_entries = parse_size(cfg.params.at("meta_cache_entries"));
-    if (cfg.params.count("meta_cache_ttl"))
-        o.meta_cache_ttl_sec = parse_duration_sec(cfg.params.at("meta_cache_ttl"));
+    if (cfg.params.count("meta_cache_entries")) o.meta_cache_entries = parse_size(cfg.params.at("meta_cache_entries"));
+    if (cfg.params.count("meta_cache_ttl")) o.meta_cache_ttl_sec = parse_duration_sec(cfg.params.at("meta_cache_ttl"));
     if (cfg.params.count("meta_cache_validate"))
         o.meta_cache_validate = parse_bool(cfg.params.at("meta_cache_validate"));
     return o;
@@ -87,8 +81,7 @@ LocalFsOptions fs_backend_opts(const BackendConfig& cfg) {
 // Observability: the dedicated pool hangs gauge callbacks with the backend label (instant
 // values pulled at render time), namespaced apart from the global pool's lights3_pool_*
 // (rendered by s3::Metrics without labels) to avoid duplicate TYPE lines of the same name
-std::shared_ptr<ThreadPool> backend_pool(const BackendConfig& cfg,
-                                         const std::shared_ptr<ThreadPool>& shared,
+std::shared_ptr<ThreadPool> backend_pool(const BackendConfig& cfg, const std::shared_ptr<ThreadPool>& shared,
                                          const MetricsScope& scope) {
     auto it = cfg.params.find("io_threads");
     if (it == cfg.params.end()) return shared;
@@ -96,89 +89,74 @@ std::shared_ptr<ThreadPool> backend_pool(const BackendConfig& cfg,
     int n = 0;
     auto r = std::from_chars(v.data(), v.data() + v.size(), n);
     if (r.ec != std::errc() || r.ptr != v.data() + v.size() || n < 1 || n > 1024)
-        throw std::runtime_error("backend '" + cfg.name +
-                                 "': io_threads must be an integer in [1,1024]");
+        throw std::runtime_error("backend '" + cfg.name + "': io_threads must be an integer in [1,1024]");
     auto p = std::make_shared<ThreadPool>(size_t(n));
-    scope.gauge_callback("lights3_backend_pool_threads",
-                         "Dedicated per-backend IO pool size (io_threads)",
+    scope.gauge_callback("lights3_backend_pool_threads", "Dedicated per-backend IO pool size (io_threads)",
                          [n] { return double(n); });
-    scope.gauge_callback("lights3_backend_pool_queue_depth",
-                         "Dedicated per-backend IO pool ready-queue depth",
+    scope.gauge_callback("lights3_backend_pool_queue_depth", "Dedicated per-backend IO pool ready-queue depth",
                          [p] { return double(p->stats().queue_depth); });
     scope.gauge_callback("lights3_backend_pool_backlogged",
                          "Dedicated per-backend IO pool schedule() tasks held by backpressure",
                          [p] { return double(p->stats().backlogged); });
-    scope.gauge_callback("lights3_backend_pool_completed",
-                         "Dedicated per-backend IO pool completed tasks (monotonic)",
+    scope.gauge_callback("lights3_backend_pool_completed", "Dedicated per-backend IO pool completed tasks (monotonic)",
                          [p] { return double(p->stats().completed); });
     return p;
 }
 
 void ensure_registered() {
     static bool done = [] {
-        StorageRegistry::register_backend(
-            "localfs",
-            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
-                auto [root, staging] = fs_backend_paths(cfg);
-                return std::make_shared<LocalFsBackend>(root, staging, std::move(pool),
-                                                        fs_backend_opts(cfg), std::move(m));
-            });
+        StorageRegistry::register_backend("localfs", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool,
+                                                        MetricsScope m) {
+            auto [root, staging] = fs_backend_paths(cfg);
+            return std::make_shared<LocalFsBackend>(root, staging, std::move(pool), fs_backend_opts(cfg), std::move(m));
+        });
         StorageRegistry::register_backend(
             "xlocalfs",
             [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool,
                MetricsScope m) -> std::shared_ptr<IStorageBackend> {
                 auto [root, staging] = fs_backend_paths(cfg);
                 UringOptions uo;
-                if (cfg.params.count("queue_depth"))
-                    uo.entries = unsigned(std::stoul(cfg.params.at("queue_depth")));
+                if (cfg.params.count("queue_depth")) uo.entries = unsigned(std::stoul(cfg.params.at("queue_depth")));
                 if (cfg.params.count("sqpoll")) uo.sqpoll = parse_bool(cfg.params.at("sqpoll"));
                 if (cfg.params.count("sqpoll_idle"))
                     uo.sqpoll_idle_ms = parse_duration_sec(cfg.params.at("sqpoll_idle")) * 1000;
                 // roadmap §3.4: ring sharding, registered buffers/files, stream depths
-                if (cfg.params.count("rings"))
-                    uo.rings = unsigned(std::stoul(cfg.params.at("rings")));  // 0 = auto
+                if (cfg.params.count("rings")) uo.rings = unsigned(std::stoul(cfg.params.at("rings")));  // 0 = auto
                 if (cfg.params.count("fixed_buffers"))
                     uo.fixed_buffers = unsigned(std::stoul(cfg.params.at("fixed_buffers")));
                 if (cfg.params.count("fixed_files"))
                     uo.fixed_files = unsigned(std::stoul(cfg.params.at("fixed_files")));
-                if (cfg.params.count("block_size"))
-                    uo.block_size = unsigned(parse_size(cfg.params.at("block_size")));
-                if (cfg.params.count("read_depth"))
-                    uo.read_depth = unsigned(std::stoul(cfg.params.at("read_depth")));
+                if (cfg.params.count("block_size")) uo.block_size = unsigned(parse_size(cfg.params.at("block_size")));
+                if (cfg.params.count("read_depth")) uo.read_depth = unsigned(std::stoul(cfg.params.at("read_depth")));
                 if (cfg.params.count("write_depth"))
                     uo.write_depth = unsigned(std::stoul(cfg.params.at("write_depth")));
-                if (cfg.params.count("meta_ops"))
-                    uo.meta_ops = parse_bool(cfg.params.at("meta_ops"));
+                if (cfg.params.count("meta_ops")) uo.meta_ops = parse_bool(cfg.params.at("meta_ops"));
                 try {
-                    return std::make_shared<XLocalFsBackend>(root, staging, pool, uo,
-                                                             fs_backend_opts(cfg), m);
+                    return std::make_shared<XLocalFsBackend>(root, staging, pool, uo, fs_backend_opts(cfg), m);
                 } catch (const std::exception& e) {
                     // io_uring being unavailable (old kernel, container seccomp blocking
                     // io_uring_setup, insufficient memlock quota) used to crash the whole
                     // process (docs/archive/gaps.md §6.3). xlocalfs and localfs share the exact
                     // same on-disk layout and metadata semantics -- the fallback is
                     // lossless, only async IO is lost. Warn loudly, no silent degradation
-                    LOG_WARN("xlocalfs backend '{}': io_uring unavailable ({}); falling back "
-                             "to the localfs data path (same on-disk layout, synchronous IO)",
-                             cfg.name, e.what());
+                    LOG_WARN(
+                        "xlocalfs backend '{}': io_uring unavailable ({}); falling back "
+                        "to the localfs data path (same on-disk layout, synchronous IO)",
+                        cfg.name, e.what());
                     // The warning is a single log line at startup that vanishes after
                     // rotation; a persistent gauge keeps "thought we were running async IO
                     // but actually fell back to sync" visible on the monitoring plane
-                    m.gauge("lights3_xlocalfs_uring_fallback",
-                            "io_uring unavailable, fell back to localfs backend")
+                    m.gauge("lights3_xlocalfs_uring_fallback", "io_uring unavailable, fell back to localfs backend")
                         ->set(1);
-                    return std::make_shared<LocalFsBackend>(root, staging, std::move(pool),
-                                                            fs_backend_opts(cfg), std::move(m));
+                    return std::make_shared<LocalFsBackend>(root, staging, std::move(pool), fs_backend_opts(cfg),
+                                                            std::move(m));
                 }
             });
         StorageRegistry::register_backend(
-            "memory",
-            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool>, MetricsScope m) {
+            "memory", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool>, MetricsScope m) {
                 MemoryOptions mo;
-                if (cfg.params.count("max_bytes"))
-                    mo.max_bytes = parse_size(cfg.params.at("max_bytes"));
-                if (cfg.params.count("mpu_ttl"))
-                    mo.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
+                if (cfg.params.count("max_bytes")) mo.max_bytes = parse_size(cfg.params.at("max_bytes"));
+                if (cfg.params.count("mpu_ttl")) mo.mpu_ttl_sec = parse_duration_sec(cfg.params.at("mpu_ttl"));
                 auto b = std::make_shared<MemoryBackend>(mo);
                 // Usage observability (docs/archive/gaps.md §6.3): a misconfigured memory backend
                 // costs an OOM, so at least make "how far from the limit" visible. The
@@ -193,20 +171,16 @@ void ensure_registered() {
             });
 #ifdef LIGHTS3_CLOUDPROXY
         StorageRegistry::register_backend(
-            "cloudproxy",
-            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
+            "cloudproxy", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
                 auto c = CloudProxyConfig::from_params(cfg.name, cfg.params);
-                return std::make_shared<CloudProxyBackend>(std::move(c), std::move(pool),
-                                                           std::move(m));
+                return std::make_shared<CloudProxyBackend>(std::move(c), std::move(pool), std::move(m));
             });
 #endif
 #ifdef LIGHTS3_DUOSTORE
         StorageRegistry::register_backend(
-            "duostore",
-            [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
+            "duostore", [](const BackendConfig& cfg, std::shared_ptr<ThreadPool> pool, MetricsScope m) {
                 auto c = DuoStoreConfig::from_params(cfg.name, cfg.params);
-                return std::make_shared<DuoStoreBackend>(std::move(c), std::move(pool),
-                                                         std::move(m));
+                return std::make_shared<DuoStoreBackend>(std::move(c), std::move(pool), std::move(m));
             });
 #endif
         return true;
@@ -231,8 +205,7 @@ std::vector<std::string> StorageRegistry::registered_types() {
 
 std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
     const std::vector<BackendConfig>& configs, std::shared_ptr<ThreadPool> pool,
-    std::shared_ptr<MetricsRegistry> metrics,
-    const std::map<std::string, std::shared_ptr<IStorageBackend>>* existing) {
+    std::shared_ptr<MetricsRegistry> metrics, const std::map<std::string, std::shared_ptr<IStorageBackend>>* existing) {
     ensure_registered();
     // Two-phase build (docs/storage/tiered-design.md §2): construct all leaf backends first, then
     // construct composite backends iteratively by dependency
@@ -276,8 +249,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
             continue;
         }
         auto it = registry().find(cfg.type);
-        if (it == registry().end())
-            throw std::runtime_error("unknown storage backend type: " + cfg.type);
+        if (it == registry().end()) throw std::runtime_error("unknown storage backend type: " + cfg.type);
         // One scope per backend: instance-level backend=<name> label; factories add more
         // dimensions as needed
         MetricsScope scope(metrics, {{"backend", cfg.name}});
@@ -311,8 +283,7 @@ std::map<std::string, std::shared_ptr<IStorageBackend>> StorageRegistry::build(
                 std::map<std::string, std::shared_ptr<IStorageBackend>> built = out;
                 built[local] = lookup(local);
                 built[cloud] = lookup(cloud);
-                out[cfg.name] = TieredBackend::from_config(
-                    cfg, built, backend_pool(cfg, pool, scope), scope);
+                out[cfg.name] = TieredBackend::from_config(cfg, built, backend_pool(cfg, pool, scope), scope);
                 it = deferred.erase(it);
                 progress = true;
             } else {

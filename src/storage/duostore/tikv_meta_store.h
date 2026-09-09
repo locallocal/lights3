@@ -42,7 +42,7 @@ struct TikvMetaOptions {
     // converges via PD's min/monotonic semantics)
     int gc_safepoint_interval_s = 0;
     int gc_retention_s = 600;  // retention window: only needs to cover the longest list/transaction duration (§7.3)
-    MetricsScope metrics;  // conflict retry / safepoint counters (T5; empty scope means isolated instances)
+    MetricsScope metrics;      // conflict retry / safepoint counters (T5; empty scope means isolated instances)
 };
 
 class TikvMetaStore final : public IMetaStore {
@@ -62,18 +62,14 @@ public:
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
     std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override;
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
-                    PutCondition cond = {}) override;
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
     ListResult list_objects(std::string_view b, const ListOptions& opt) override;
 
     std::string create_upload(std::string_view b, std::string_view k, ObjectMeta meta) override;
-    UploadRec require_upload(std::string_view b, std::string_view k,
-                             std::string_view id) override;
-    void put_part(std::string_view b, std::string_view k, std::string_view id,
-                  PartRec p) override;
-    std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
-                                    std::string_view id) override;
+    UploadRec require_upload(std::string_view b, std::string_view k, std::string_view id) override;
+    void put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) override;
+    std::vector<PartRec> list_parts(std::string_view b, std::string_view k, std::string_view id) override;
     std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
                                          std::string_view id_marker = {}, int limit = 0,
                                          std::string_view prefix = {}) override;
@@ -104,8 +100,8 @@ public:
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
-    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
-                      const DataRef& from, const DataRef& to) override;
+    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
+                      const DataRef& to) override;
     bool chunk_referenced(uint64_t file_id) override;
     void scan_refs(const std::function<void(uint64_t file_id)>& cb) override;
     void close() override;
@@ -127,8 +123,7 @@ private:
     // call) and SnapshotView (one fixed version for the whole dump). fold=false
     // keeps pack_stats_at purely read-only (the view must not write)
     std::vector<BucketInfo> list_buckets_at(uint64_t ver);
-    std::optional<ObjectRec> get_object_at(uint64_t ver, std::string_view b,
-                                           std::string_view k);
+    std::optional<ObjectRec> get_object_at(uint64_t ver, std::string_view b, std::string_view k);
     ListResult list_objects_at(uint64_t ver, std::string_view b, const ListOptions& opt);
     std::vector<PackStat> pack_stats_at(uint64_t ver, bool fold);
 
@@ -153,17 +148,17 @@ private:
 
     // ---- key construction (§3.2: prefix + one-char table tag + codec composite segment) ----
     std::string tkey(char tag, std::string_view rest) const;
-    std::string bucket_key(std::string_view b) const;                  // 'B'
-    std::string bucket_guard(std::string_view b, uint32_t shard) const;  // 'b'
+    std::string bucket_key(std::string_view b) const;                      // 'B'
+    std::string bucket_guard(std::string_view b, uint32_t shard) const;    // 'b'
     std::string object_key(std::string_view b, std::string_view k) const;  // 'O'
     std::string upload_key(std::string_view b, std::string_view k, std::string_view id) const;
     std::string upload_guard(std::string_view b, std::string_view k, std::string_view id,
                              uint32_t shard) const;  // 'u'
     std::string part_key(std::string_view b, std::string_view k, std::string_view id,
-                         int part_no) const;                        // 'P'
-    std::string refs_key(uint64_t file_id) const;                   // 'R'
-    std::string gcq_key(uint64_t seq) const;                        // 'G'
-    std::string counter_key(char kind) const;                       // 'C'
+                         int part_no) const;       // 'P'
+    std::string refs_key(uint64_t file_id) const;  // 'R'
+    std::string gcq_key(uint64_t seq) const;       // 'G'
+    std::string counter_key(char kind) const;      // 'C'
     // Pack liveness ledger ('S' table, §3.2): delta rows S<be64 id>d<be64 delta_id>
     // (value = le64 bytes ‖ le64 recs) + seal row S<be64 id>s (value = le64
     // file_size). Each business transaction writes a unique delta row —
@@ -172,7 +167,8 @@ private:
     // the §3.2 warning); folding is in pack_stats()
     std::string pack_delta_key(uint64_t pack_id, uint64_t delta_id) const;
     std::string pack_seal_key(uint64_t pack_id) const;
-    // [lo, hi) prefix range (bucket names / upper-layer validation guarantee the composite segment has no NUL ambiguity)
+    // [lo, hi) prefix range (bucket names / upper-layer validation guarantee the composite segment has no NUL
+    // ambiguity)
     std::pair<std::string, std::string> range_of(char tag, std::string_view rest) const;
 
     // ---- Transaction and read helpers (implemented in the .cc) ----
@@ -188,8 +184,7 @@ private:
     std::optional<std::string> snap_get(uint64_t ver, const std::string& key);
     // Batched snapshot read (one KvBatchGet round trip instead of serial per-key
     // Gets), retry semantics same as snap_get
-    std::vector<std::optional<std::string>> snap_get_many(uint64_t ver,
-                                                          const std::vector<std::string>& keys);
+    std::vector<std::optional<std::string>> snap_get_many(uint64_t ver, const std::vector<std::string>& keys);
     // Paged scan of the full [lo, hi) (1024 per page); escape: callback returning false stops early
     template <typename Fn>
     void scan_range(uint64_t ver, std::string lo, const std::string& hi, Fn&& cb);
@@ -197,20 +192,16 @@ private:
     uint64_t alloc_id(char kind, IdRange& r, uint32_t n = 1);
     // gcq ledger entry: seq is pre-dispatched (independent small transaction), so the
     // entry itself stays a pure-write mutation
-    void enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref,
-                         ReclaimReason reason);
-    void mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add,
-                  std::string_view owner);
+    void enqueue_reclaim(std::vector<TikvMutation>& muts, const DataRef& ref, ReclaimReason reason);
+    void mut_refs(std::vector<TikvMutation>& muts, const DataRef& ref, bool add, std::string_view owner);
     // Maintains the pack liveness ledger in the same batch (unique delta rows,
     // pure-write, no conflict). Independent of mut_refs: complete's refs transfer
     // (owner rewrite) must be a no-op for packs — mixing them would double-count.
     // rec_overhead: per-record header overhead (codec::pack_rec_overhead*); live_bytes
     // uses the same accounting basis as file_size (docs/archive/gaps.md §2.3a)
-    void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign,
-                        int64_t rec_overhead);
+    void mut_pack_delta(std::vector<TikvMutation>& muts, const DataRef& ref, int sign, int64_t rec_overhead);
     // Full read of parts (ascending by part_no; the be16 suffix is naturally ordered)
-    std::vector<PartRec> scan_parts(uint64_t ver, std::string_view b, std::string_view k,
-                                    std::string_view id);
+    std::vector<PartRec> scan_parts(uint64_t ver, std::string_view b, std::string_view k, std::string_view id);
 
     TikvMetaOptions opt_;
     std::unique_ptr<TikvClient> client_owned_;

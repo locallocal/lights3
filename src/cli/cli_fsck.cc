@@ -38,8 +38,8 @@ void run_fsck(const Cmd& c) {
     } catch (const std::invalid_argument& e) {
         throw std::runtime_error("fsck: backend '" + backend + "': " + e.what());
     }
-    LOG_INFO("fsck '{}' ({}): findings {} aborted {} stats {}", backend, out.kind, out.findings,
-             out.aborted, out.stats.dump());
+    LOG_INFO("fsck '{}' ({}): findings {} aborted {} stats {}", backend, out.kind, out.findings, out.aborted,
+             out.stats.dump());
     app.shutdown();
     if (out.aborted) throw std::runtime_error("fsck: scrub aborted before completion");
     if (out.findings > 0) g_exit = 1;
@@ -48,16 +48,15 @@ void run_fsck(const Cmd& c) {
 }  // namespace
 
 Cmd make_fsck() {
-    auto cmd = make_backend_leaf(
-        "fsck", "lights3 fsck local --max-mbps=100 --config=config/lights3.yaml",
-        "lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]",
-        "Offline data-integrity scrub (read-only). duostore: read back every extent of "
-        "every object and in-flight multipart part, recompute crc32c against the "
-        "manifest, and reconcile the refs ledger both ways. localfs/xlocalfs: re-read "
-        "every object and compare the recomputed MD5 with the stored ETag (multipart "
-        "composites via the recorded part layout). Runs with the backends built but no "
-        "server listening; exit code 1 when integrity findings exist.",
-        "offline data-integrity scrub", run_fsck);
+    auto cmd = make_backend_leaf("fsck", "lights3 fsck local --max-mbps=100 --config=config/lights3.yaml",
+                                 "lights3 fsck <backend> [--max-mbps=<n>] [--config=<path>]",
+                                 "Offline data-integrity scrub (read-only). duostore: read back every extent of "
+                                 "every object and in-flight multipart part, recompute crc32c against the "
+                                 "manifest, and reconcile the refs ledger both ways. localfs/xlocalfs: re-read "
+                                 "every object and compare the recomputed MD5 with the stored ETag (multipart "
+                                 "composites via the recorded part layout). Runs with the backends built but no "
+                                 "server listening; exit code 1 when integrity findings exist.",
+                                 "offline data-integrity scrub", run_fsck);
     cmd->var<int>("max-mbps", 0, "read throttle in MB/s (0 = unthrottled)");
     return cmd;
 }

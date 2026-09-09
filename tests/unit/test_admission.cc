@@ -77,7 +77,8 @@ TEST(admission_small_body_releases_permit_on_return) {
 }
 
 // Streaming response: after the handler returns, the permit is still held by the response body (this is exactly the
-// point of "the limit covers the whole response transfer"); reading to EOF does not return it, only destruction (driver finished reading / dropped on disconnect) does
+// point of "the limit covers the whole response transfer"); reading to EOF does not return it, only destruction (driver
+// finished reading / dropped on disconnect) does
 TEST(admission_streaming_body_holds_permit_until_dropped) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         HttpResponse r;
@@ -91,7 +92,8 @@ TEST(admission_streaming_body_holds_permit_until_dropped) {
     std::byte buf[256];
     CHECK_EQ(sync_wait(resp.stream_body->read(std::span(buf))), size_t{128});
     CHECK_EQ(sync_wait(resp.stream_body->read(std::span(buf))), size_t{0});  // EOF
-    CHECK_EQ(env.inflight->available(), 0L);  // still not returned after reading everything: the return point is destruction
+    CHECK_EQ(env.inflight->available(),
+             0L);  // still not returned after reading everything: the return point is destruction
 
     resp.stream_body.reset();  // driver drops the response body (finished reading and disconnect share this path)
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
@@ -132,7 +134,8 @@ TEST(admission_over_limit_queues_until_streaming_peer_disconnects) {
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
 }
 
-// Cancelled while queued (shutdown broadcast / request timeout / disconnect): resolves to 503 SlowDown, and takes no quota
+// Cancelled while queued (shutdown broadcast / request timeout / disconnect): resolves to 503 SlowDown, and takes no
+// quota
 TEST(admission_queued_request_cancelled_returns_503) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         HttpResponse r;
@@ -147,8 +150,7 @@ TEST(admission_queued_request_cancelled_returns_503) {
         HttpRequest req;
         req.cancel = src.token();  // the connection token the driver attached should be kept and used
         auto resp = env.call(std::move(req));
-        got_503 = resp.status == 503 &&
-                  resp.small_body.find("<Code>SlowDown</Code>") != std::string::npos;
+        got_503 = resp.status == 503 && resp.small_body.find("<Code>SlowDown</Code>") != std::string::npos;
     });
     CHECK(eventually([&] { return env.inflight->waiting() == 1; }));
     src.request_cancel();
@@ -156,13 +158,15 @@ TEST(admission_queued_request_cancelled_returns_503) {
     CHECK(got_503.load());
     CHECK_EQ(env.inflight->waiting(), size_t{0});
 
-    // The cancelled requester takes no quota: the permit is still held by the first response body, and fully returns once dropped
+    // The cancelled requester takes no quota: the permit is still held by the first response body, and fully returns
+    // once dropped
     first.stream_body.reset();
     CHECK(eventually([&] { return env.inflight->available() == 1; }));
 }
 
 // Shutdown-source fallback: a request without a token is attached to shutdown_src, and the shutdown broadcast
-// surfaces queued requests as 503 (the premise for main.cc's shutdown using available() to detect in-flight work and close() to wake the queued)
+// surfaces queued requests as 503 (the premise for main.cc's shutdown using available() to detect in-flight work and
+// close() to wake the queued)
 TEST(admission_shutdown_broadcast_cancels_queued) {
     AdmissionEnv env(1, [](HttpRequest) -> Task<HttpResponse> {
         HttpResponse r;
@@ -227,12 +231,14 @@ TEST(stall_guard_kills_dripping_transfer) {
 }
 
 TEST(stall_guard_progress_resets_window) {
-    // Progress of >= 64KiB within the window resets the timer: genuinely slow but still-transferring connections are unaffected
+    // Progress of >= 64KiB within the window resets the timer: genuinely slow but still-transferring connections are
+    // unaffected
     auto guarded = guard_stalls(std::make_unique<ZeroReader>(256 * 1024), 1s);
     std::vector<std::byte> buf(StallGuardReader::kMinProgressBytes);
     CHECK_EQ(sync_wait(guarded->read(std::span(buf))), buf.size());  // one read fills a full window's worth
     std::this_thread::sleep_for(1100ms);
-    // The previous read reset the timer; this read's window counts from the reset point -- not killed for absolute elapsed time
+    // The previous read reset the timer; this read's window counts from the reset point -- not killed for absolute
+    // elapsed time
     CHECK_EQ(sync_wait(guarded->read(std::span(buf))), buf.size());
 }
 

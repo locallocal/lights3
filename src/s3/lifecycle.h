@@ -26,9 +26,9 @@ namespace lights3::s3 {
 struct LifecycleRule {
     std::string id;
     bool enabled = true;
-    std::string prefix;              // "" = whole bucket
-    int expiration_days = 0;         // 0 = no object expiration
-    int abort_incomplete_days = 0;   // 0 = no stale-MPU abort
+    std::string prefix;             // "" = whole bucket
+    int expiration_days = 0;        // 0 = no object expiration
+    int abort_incomplete_days = 0;  // 0 = no stale-MPU abort
 
     bool operator==(const LifecycleRule&) const = default;
 };
@@ -65,17 +65,13 @@ public:
     void shutdown_background();
 
     // Test hook: overrides "now" for age decisions (backends stamp real times)
-    void set_now_for_tests(std::function<std::chrono::system_clock::time_point()> fn) {
-        now_ = std::move(fn);
-    }
+    void set_now_for_tests(std::function<std::chrono::system_clock::time_point()> fn) { now_ = std::move(fn); }
     // Usage accounting (roadmap §3.9 ①): expirations and aborts adjust the counters
     // like their request-path twins
     void set_usage_tracker(std::shared_ptr<UsageTracker> u) { usage_ = std::move(u); }
 
 private:
-    std::chrono::system_clock::time_point now() const {
-        return now_ ? now_() : std::chrono::system_clock::now();
-    }
+    std::chrono::system_clock::time_point now() const { return now_ ? now_() : std::chrono::system_clock::now(); }
     Task<void> scan_tick();
     void schedule_scan();
 

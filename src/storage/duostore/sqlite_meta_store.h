@@ -33,7 +33,7 @@ struct SqliteMetaOptions {
     // (and once more at close), so every commit reaches the chain. Empty = off
     // (full backups still work; incremental ones are refused)
     std::string wal_archive;
-    MetricsScope metrics;              // BUSY / corruption counters (S4; empty scope = isolated instance)
+    MetricsScope metrics;  // BUSY / corruption counters (S4; empty scope = isolated instance)
 };
 
 class SqliteMetaStore final : public IMetaStore {
@@ -49,18 +49,14 @@ public:
 
     std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) override;
     std::optional<ObjectMeta> head_object(std::string_view b, std::string_view k) override;
-    void put_object(std::string_view b, std::string_view k, ObjectRec rec,
-                    PutCondition cond = {}) override;
+    void put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond = {}) override;
     bool delete_object(std::string_view b, std::string_view k) override;
     ListResult list_objects(std::string_view b, const ListOptions& opt) override;
 
     std::string create_upload(std::string_view b, std::string_view k, ObjectMeta meta) override;
-    UploadRec require_upload(std::string_view b, std::string_view k,
-                             std::string_view id) override;
-    void put_part(std::string_view b, std::string_view k, std::string_view id,
-                  PartRec p) override;
-    std::vector<PartRec> list_parts(std::string_view b, std::string_view k,
-                                    std::string_view id) override;
+    UploadRec require_upload(std::string_view b, std::string_view k, std::string_view id) override;
+    void put_part(std::string_view b, std::string_view k, std::string_view id, PartRec p) override;
+    std::vector<PartRec> list_parts(std::string_view b, std::string_view k, std::string_view id) override;
     std::vector<UploadInfo> list_uploads(std::string_view b, std::string_view key_marker = {},
                                          std::string_view id_marker = {}, int limit = 0,
                                          std::string_view prefix = {}) override;
@@ -76,8 +72,8 @@ public:
     std::vector<PackStat> pack_stats() override;
     void seal_pack(uint64_t pack_id, uint64_t file_size) override;
     void drop_pack_stat(uint64_t pack_id) override;
-    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version,
-                      const DataRef& from, const DataRef& to) override;
+    bool swap_extents(std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
+                      const DataRef& to) override;
     // One txn, one fsync (batched compaction, gaps §2.13); per-item CAS is independent
     std::vector<bool> swap_extents_batch(std::span<const SwapReq> reqs) override;
     bool chunk_referenced(uint64_t file_id) override;
@@ -92,13 +88,11 @@ public:
     // TRUNCATE checkpoint so the next segment starts clean. Writers are paused for
     // the duration (mu_). Incremental needs wal_archive to name dir
     bool supports_physical_backup() const override { return true; }
-    MetaBackupEntry backup_physical(const std::filesystem::path& dir, uint64_t id,
-                                    bool full) override;
+    MetaBackupEntry backup_physical(const std::filesystem::path& dir, uint64_t id, bool full) override;
     // Restore a chain prefix (BackupManifest::plan) into db_path with the store
     // closed: the full copy is put in place, then every non-empty WAL segment is
     // dropped next to it as <db>-wal and checkpointed in order
-    static void restore_physical(const std::filesystem::path& dir,
-                                 const std::vector<MetaBackupEntry>& chain,
+    static void restore_physical(const std::filesystem::path& dir, const std::vector<MetaBackupEntry>& chain,
                                  const std::filesystem::path& db_path);
     // Whether the WAL is being archived (a chain exists in wal_archive)
     bool archiving() const { return archive_active_; }
@@ -107,9 +101,7 @@ public:
     // Test-only (§9 S4 consistent-view case): each list_objects call invokes this hook
     // once after emitting the first entry — the hook commits concurrently from another
     // connection, validating the list read transaction's WAL snapshot
-    void set_list_pause_for_test(std::function<void()> hook) {
-        list_pause_for_test_ = std::move(hook);
-    }
+    void set_list_pause_for_test(std::function<void()> hook) { list_pause_for_test_ = std::move(hook); }
 
 private:
     struct Conn;  // sqlite3* + resident prepared-statement cache (defined in the .cc; header leaks no sqlite3 types)
@@ -143,7 +135,7 @@ private:
     };
     static constexpr uint64_t kIdSegment = 4096;
 
-    std::unique_ptr<Conn> open_raw();      // open + busy_timeout only (no file writes before lineage check)
+    std::unique_ptr<Conn> open_raw();  // open + busy_timeout only (no file writes before lineage check)
     void apply_pragmas(Conn& c, bool full_sync);
     std::unique_ptr<Conn> open_conn(bool full_sync);  // open_raw + apply_pragmas
     // Lineage check (§2.2): runs before any write (including the WAL journal
@@ -155,14 +147,13 @@ private:
     // into dir as segment `id` (bytes copied; 0 = nothing committed since the last
     // point, no file written), and the auto-checkpoint switch
     void checkpoint_truncate_locked(const char* what);
-    uint64_t archive_wal_segment_locked(const std::filesystem::path& dir, uint64_t id,
-                                        std::string& file);
+    uint64_t archive_wal_segment_locked(const std::filesystem::path& dir, uint64_t id, std::string& file);
     void set_archiving_locked(bool on);
     void migrate_schema(Conn& c, int64_t ver);  // migration chain for version < current (called by check_lineage)
     void init_schema(Conn& c);
-    Lease read_conn();                     // take from pool; throws InternalError after close
+    Lease read_conn();  // take from pool; throws InternalError after close
     void release(std::unique_ptr<Conn> c);
-    Conn& wconn();                         // write connection; mu_ must be held; throws InternalError after close
+    Conn& wconn();  // write connection; mu_ must be held; throws InternalError after close
 
     class SnapshotView;
 
@@ -174,8 +165,7 @@ private:
     std::vector<BucketInfo> list_buckets_in(Conn& c);
     ListResult list_objects_in(Conn& c, std::string_view b, const ListOptions& opt);
     std::vector<PackStat> pack_stats_in(Conn& c);
-    UploadRec require_upload_in(Conn& c, std::string_view b, std::string_view k,
-                                std::string_view id);
+    UploadRec require_upload_in(Conn& c, std::string_view b, std::string_view k, std::string_view id);
     // Maintain refs (chunk reference table) in the same batch: add=write owner, else delete
     void write_refs(Conn& c, const DataRef& ref, bool add, std::string_view owner);
     // Maintain pack liveness accounting in the same batch (arithmetic UPDATE on the
@@ -187,13 +177,12 @@ private:
     // Single-item CAS core of swap (mu_ held, runs inside the caller's transaction):
     // on successful validation writes and returns true; on mismatch returns false
     // without writing. Shared by swap_extents / swap_extents_batch
-    bool apply_swap(Conn& c, std::string_view b, std::string_view k, uint64_t expect_version,
-                    const DataRef& from, const DataRef& to);
+    bool apply_swap(Conn& c, std::string_view b, std::string_view k, uint64_t expect_version, const DataRef& from,
+                    const DataRef& to);
     // gcq bookkeeping: seq is allocated by AUTOINCREMENT with the transaction,
     // committing/rolling back in the same batch as the business write
     void enqueue_reclaim(Conn& c, const DataRef& ref, ReclaimReason reason);
-    std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k,
-                                    std::string_view id);
+    std::vector<PartRec> scan_parts(Conn& c, std::string_view b, std::string_view k, std::string_view id);
     uint64_t alloc_id(std::string_view counter, IdRange& r, uint32_t n = 1);
 
     SqliteMetaOptions opt_;

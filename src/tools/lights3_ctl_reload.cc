@@ -25,9 +25,7 @@ std::shared_ptr<ccmd::c_command> make_reload() {
                 g_exit = 2;
                 return;
             }
-            run_admin(c, [](SignedClient& cli) {
-                return finish(cli.post_empty("/-/admin/config/reload"), 200);
-            });
+            run_admin(c, [](SignedClient& cli) { return finish(cli.post_empty("/-/admin/config/reload"), 200); });
         });
     add_conn_flags(cmd);
     return cmd;

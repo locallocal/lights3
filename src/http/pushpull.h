@@ -89,8 +89,7 @@ public:
         if (blocks_.empty()) {
             // After cancel we must not keep waiting for the producer (it stops
             // pushing once it sees cancelled), nor report a normal EOF
-            if (cancelled_ && !closed_)
-                throw std::runtime_error("http body: transfer cancelled");
+            if (cancelled_ && !closed_) throw std::runtime_error("http body: transfer cancelled");
             if (!ok_) throw std::runtime_error("http body: peer disconnected mid-body");
             return 0;
         }
@@ -137,8 +136,7 @@ public:
     // idling in sync_wait_pumping), so it does not occupy a shared pool thread;
     // when null, it blocks in place (cloudproxy's pump direction already yields
     // per block on a pool thread, see the caller's comment)
-    QueueBodyReader(std::shared_ptr<BlockQueue> q, std::optional<uint64_t> len,
-                    IExecutor* request_thread = nullptr)
+    QueueBodyReader(std::shared_ptr<BlockQueue> q, std::optional<uint64_t> len, IExecutor* request_thread = nullptr)
         : q_(std::move(q)), len_(len), exec_(request_thread) {}
 
     Task<size_t> read(std::span<std::byte> buf) override {

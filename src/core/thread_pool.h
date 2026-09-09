@@ -27,13 +27,12 @@ public:
     // Histogram buckets for enqueue-to-start wait time: <1ms <10ms <100ms <1s >=1s
     static constexpr size_t kWaitBuckets = 5;
     // Bucket upper bounds (seconds) for Prometheus rendering (docs/archive/gaps.md §7); last bucket is +Inf
-    static constexpr std::array<double, kWaitBuckets - 1> kWaitBucketBounds{0.001, 0.01, 0.1,
-                                                                           1.0};
+    static constexpr std::array<double, kWaitBuckets - 1> kWaitBucketBounds{0.001, 0.01, 0.1, 1.0};
 
     struct Stats {
-        size_t queue_depth = 0;   // ready queue length
-        size_t backlogged = 0;    // schedule tasks held on the wait list by backpressure when the queue is full
-        uint64_t completed = 0;   // tasks fully executed
+        size_t queue_depth = 0;  // ready queue length
+        size_t backlogged = 0;   // schedule tasks held on the wait list by backpressure when the queue is full
+        uint64_t completed = 0;  // tasks fully executed
         std::array<uint64_t, kWaitBuckets> wait_hist{};
         uint64_t wait_sum_us = 0;  // cumulative wait time (microseconds), the histogram's _sum
     };
@@ -85,8 +84,7 @@ public:
         bool suspend_impl(std::coroutine_handle<> h);
         void await_resume() {
             if (!slot) return;
-            if (slot->cancel_state)
-                slot->cancel_state->remove_callback(slot->reg_id.load(std::memory_order_acquire));
+            if (slot->cancel_state) slot->cancel_state->remove_callback(slot->reg_id.load(std::memory_order_acquire));
             if (slot->cancelled) throw OperationCancelled();
         }
     };

@@ -164,3 +164,12 @@ docker 时显示 Not Run 而非通过）。跑完从 `log.json` 打印每套件 
 sqlite / redis / rados / tikv / seastar / fuzz）逐个增量构建 + `ctest -LE
 "mint|perf|soak"`（按旗标放开），sanitizer 目录带 `*SAN_OPTIONS` 使发现即失败，
 末尾打印汇总表；`--configure` 用 `build.sh` 创建缺失目录。
+
+## 9. 代码格式
+
+`make format` 用仓库根目录的 `.clang-format`（Google 风格 + 4 空格缩进 + 120 列，
+其余偏离项在文件内逐条注明）就地重排 `src/`、`tests/` 下全部受 git 跟踪的 `.h` /
+`.cc`；`make format-check` 只列出会被改动的文件并以 1 退出，供提交前与 CI 用。
+`CLANG_FORMAT=clang-format-23 make format` 可指定二进制；Google 预设在 LLVM 大版本
+之间有细微漂移，团队应钉住一个主版本。全仓已于 2026-09-09 按此格式化过一次，
+之后的 PR 不应再夹带格式噪音。

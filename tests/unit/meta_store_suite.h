@@ -1,8 +1,9 @@
-// Meta store conformance suite (docs/storage/duostore-meta-redis-design.md §9): the same set of cases runs parameterized
-// over all IMetaStore implementations (RocksMetaStore always, RedisMetaStore conditionally); both
+// Meta store conformance suite (docs/storage/duostore-meta-redis-design.md §9): the same set of cases runs
+// parameterized over all IMetaStore implementations (RocksMetaStore always, RedisMetaStore conditionally); both
 // implementations share the same semantic baseline. Extracted from the meta cases of test_duostore.cc.
 // Factory convention: each call opens a new instance on the same underlying storage ("restart" semantics);
-// scenarios within the suite are isolated by distinct bucket names, and instances open/close serially (RocksDB single-process lock).
+// scenarios within the suite are isolated by distinct bucket names, and instances open/close serially (RocksDB
+// single-process lock).
 #pragma once
 
 #include <algorithm>
@@ -59,7 +60,8 @@ inline ObjectRec make_rec(std::string key, std::vector<Extent> extents) {
     return rec;
 }
 
-// GC accounting for overwrite/delete (main doc §4.5 same-batch invariants): gcq entries, refs added/removed, version incremented
+// GC accounting for overwrite/delete (main doc §4.5 same-batch invariants): gcq entries, refs added/removed, version
+// incremented
 inline void case_gc_accounting(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-gc");
@@ -90,13 +92,15 @@ inline void case_gc_accounting(const MetaFactory& make) {
     auto rs2 = m->peek_reclaims(10);
     CHECK_EQ(rs2.size(), size_t(2));
     CHECK(rs2[1].second.reason == ReclaimReason::kDelete);
-    // min_seq resumable scan (§9.1): peeking from the second item's seq sees only what follows; past the tail it is empty
+    // min_seq resumable scan (§9.1): peeking from the second item's seq sees only what follows; past the tail it is
+    // empty
     auto tail = m->peek_reclaims(10, rs2[1].first);
     CHECK_EQ(tail.size(), size_t(1));
     CHECK_EQ(tail[0].first, rs2[1].first);
     CHECK_EQ(m->peek_reclaims(10, rs2[1].first + 1).size(), size_t(0));
 
-    // gcq is empty after acking: exercise both the per-item and batch interfaces (batch is the GC consumer's preferred form)
+    // gcq is empty after acking: exercise both the per-item and batch interfaces (batch is the GC consumer's preferred
+    // form)
     m->ack_reclaim(rs2[0].first);
     std::vector<uint64_t> rest;
     for (size_t i = 1; i < rs2.size(); ++i) rest.push_back(rs2[i].first);
@@ -108,7 +112,8 @@ inline void case_gc_accounting(const MetaFactory& make) {
 
 // gcq entry origins (docs/archive/gaps.md §6.1): each of the six origins records its own reason so GC can tell
 // whether reclaim pressure comes from overwrites, bulk deletes, or abandoned mpu parts. Assert per item
-// rather than by count -- the suite's cases share the underlying storage, and this case only looks at the entries it created
+// rather than by count -- the suite's cases share the underlying storage, and this case only looks at the entries it
+// created
 inline void case_reclaim_reasons(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-reason");
@@ -125,7 +130,8 @@ inline void case_reclaim_reasons(const MetaFactory& make) {
         p.data.extents = {pack_extent(pid, off, len)};
         return p;
     };
-    // Build up step by step: same-number re-upload -> not selected at complete -> complete overwrites same-named object -> abort -> delete
+    // Build up step by step: same-number re-upload -> not selected at complete -> complete overwrites same-named object
+    // -> abort -> delete
     m->put_object("ms-reason", "k", make_rec("k", {pack_extent(pid, 900, 10)}));
     drain_gcq(*m);  // the put above only exists so complete has an old object to overwrite; not part of the assertions
 
@@ -144,12 +150,24 @@ inline void case_reclaim_reasons(const MetaFactory& make) {
     for (const auto& [seq, rc] : m->peek_reclaims(256)) {
         (void)seq;
         switch (rc.reason) {
-            case ReclaimReason::kPartOverwrite: part_ovw = true; break;
-            case ReclaimReason::kComplete: complete = true; break;
-            case ReclaimReason::kOverwrite: overwrite = true; break;
-            case ReclaimReason::kAbort: abort = true; break;
-            case ReclaimReason::kDelete: del = true; break;
-            case ReclaimReason::kUnknown: CHECK(false); break;  // new entries must not record unknown
+            case ReclaimReason::kPartOverwrite:
+                part_ovw = true;
+                break;
+            case ReclaimReason::kComplete:
+                complete = true;
+                break;
+            case ReclaimReason::kOverwrite:
+                overwrite = true;
+                break;
+            case ReclaimReason::kAbort:
+                abort = true;
+                break;
+            case ReclaimReason::kDelete:
+                del = true;
+                break;
+            case ReclaimReason::kUnknown:
+                CHECK(false);
+                break;  // new entries must not record unknown
         }
     }
     CHECK(part_ovw);
@@ -164,7 +182,8 @@ inline void case_reclaim_reasons(const MetaFactory& make) {
 }
 
 // file_id segments: no rollback after restart (only uniqueness and monotonicity are required, not contiguity --
-// the absolute value is an implementation detail: RocksDB starts at 0, Redis burns the first segment and starts at kIdSegment, docs/storage/duostore-meta-redis-design.md §4)
+// the absolute value is an implementation detail: RocksDB starts at 0, Redis burns the first segment and starts at
+// kIdSegment, docs/storage/duostore-meta-redis-design.md §4)
 inline void case_alloc_monotonic_across_reopen(const MetaFactory& make) {
     uint64_t last = 0;
     {
@@ -182,7 +201,8 @@ inline void case_alloc_monotonic_across_reopen(const MetaFactory& make) {
     }
 }
 
-// delete_bucket: refused while a multipart upload is in progress (matches AWS; prevents permanent refs leaks and ghost-upload resurrection)
+// delete_bucket: refused while a multipart upload is in progress (matches AWS; prevents permanent refs leaks and
+// ghost-upload resurrection)
 inline void case_delete_bucket_blocks_on_mpu(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-mpu");
@@ -195,7 +215,8 @@ inline void case_delete_bucket_blocks_on_mpu(const MetaFactory& make) {
     m->close();
 }
 
-// max-keys=0: S3 semantics are an empty result + IsTruncated=false (otherwise the empty token puts clients into an infinite loop)
+// max-keys=0: S3 semantics are an empty result + IsTruncated=false (otherwise the empty token puts clients into an
+// infinite loop)
 inline void case_list_max_keys_zero(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-mk0");
@@ -210,12 +231,12 @@ inline void case_list_max_keys_zero(const MetaFactory& make) {
     m->close();
 }
 
-// list: skip-iteration over delimiter groups + pagination token lands at the group tail (main doc §4.4 / redis version §2.3)
+// list: skip-iteration over delimiter groups + pagination token lands at the group tail (main doc §4.4 / redis version
+// §2.3)
 inline void case_list_delimiter_paging(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-page");
-    for (auto k : {"a", "b/1", "b/2", "b/3", "c"})
-        m->put_object("ms-page", k, make_rec(k, {}));
+    for (auto k : {"a", "b/1", "b/2", "b/3", "c"}) m->put_object("ms-page", k, make_rec(k, {}));
 
     ListOptions opt;
     opt.delimiter = "/";
@@ -248,7 +269,8 @@ inline void case_list_delimiter_paging(const MetaFactory& make) {
 }
 
 // Pack liveness accounting (main doc §9.1/P2): commit-type transactions add/subtract in the same batch, seal is
-// idempotent and 0 does not overwrite a known size, swap accounting migrates with the extent, live=0 entries stay visible, drop clears the entry
+// idempotent and 0 does not overwrite a known size, swap accounting migrates with the extent, live=0 entries stay
+// visible, drop clears the entry
 inline void case_pack_stats_accounting(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-pk");
@@ -266,8 +288,8 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
 
     // Compaction swaps the ref: accounting migrates with the extent (−pack +chunk)
     uint64_t cid = m->alloc_file_id(Extent::Kind::kChunk);
-    CHECK(m->swap_extents("ms-pk", "a", /*expect_version=*/1,
-                          DataRef{{pack_extent(pid, 30, 100)}}, DataRef{{chunk_extent(cid, 100)}}));
+    CHECK(m->swap_extents("ms-pk", "a", /*expect_version=*/1, DataRef{{pack_extent(pid, 30, 100)}},
+                          DataRef{{chunk_extent(cid, 100)}}));
     ps = find_pack(*m, pid);
     CHECK_EQ(ps->live_bytes, int64_t(50 + 29));
     CHECK_EQ(ps->live_recs, int64_t(1));
@@ -285,7 +307,8 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
     ps = find_pack(*m, pid);
     CHECK_EQ(ps->live_bytes, int64_t(0));
     CHECK_EQ(ps->live_recs, int64_t(0));
-    CHECK(ps->sealed);  // a sealed pack with live=0 stays visible -- candidate for whole-pack deletion of empty packs (§9.1)
+    CHECK(ps->sealed);  // a sealed pack with live=0 stays visible -- candidate for whole-pack deletion of empty packs
+                        // (§9.1)
     auto ps2 = find_pack(*m, pid2);
     CHECK_EQ(ps2->live_bytes, int64_t(70 + 29));
 
@@ -307,7 +330,8 @@ inline void case_pack_stats_accounting(const MetaFactory& make) {
 }
 
 // Pack accounting for multipart: put_part counts in, same-number re-upload swaps the entry, parts selected at
-// complete are not double-counted (refs transfer != liveness change), unselected parts are deducted, abort deducts everything
+// complete are not double-counted (refs transfer != liveness change), unselected parts are deducted, abort deducts
+// everything
 inline void case_pack_stats_multipart(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-pmpu");
@@ -340,7 +364,8 @@ inline void case_pack_stats_multipart(const MetaFactory& make) {
     CHECK_EQ(ps->live_recs, int64_t(3));
 
     // complete selects 1/2: selected parts' liveness is unchanged but the accounting basis is rebalanced
-    // (-part header +object header, so a later object delete deducted on the object basis lands exactly at zero); unselected part3 deducts 40+header
+    // (-part header +object header, so a later object delete deducted on the object basis lands exactly at zero);
+    // unselected part3 deducts 40+header
     std::vector<PartInfo> sel = {{1, "deadbeef"}, {2, "deadbeef"}};
     m->complete_upload("ms-pmpu", "k", id, sel);
     ps = find_pack(*m, pid);
@@ -370,7 +395,8 @@ inline void case_pack_stats_multipart(const MetaFactory& make) {
 }
 
 // refs traversal (for reverse reconciliation, P4 §9.3): writes create refs, scan_refs sees them, they disappear after
-// delete; consistent with chunk_referenced point lookups. Assertions use containment semantics -- the suite's cases share the underlying storage, only this case's ids are checked
+// delete; consistent with chunk_referenced point lookups. Assertions use containment semantics -- the suite's cases
+// share the underlying storage, only this case's ids are checked
 inline void case_scan_refs(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-scanrefs");
@@ -378,8 +404,7 @@ inline void case_scan_refs(const MetaFactory& make) {
     uint64_t b = m->alloc_file_id(Extent::Kind::kChunk);
     uint64_t c = m->alloc_file_id(Extent::Kind::kChunk);
     m->put_object("ms-scanrefs", "k1", make_rec("k1", {chunk_extent(a, 10)}));
-    m->put_object("ms-scanrefs", "k2",
-                  make_rec("k2", {chunk_extent(b, 20), chunk_extent(c, 30)}));
+    m->put_object("ms-scanrefs", "k2", make_rec("k2", {chunk_extent(b, 20), chunk_extent(c, 30)}));
 
     auto collect = [&] {
         std::vector<uint64_t> ids;
@@ -414,15 +439,15 @@ inline void case_scan_refs(const MetaFactory& make) {
 }
 
 // gcq splitting (gaps §2.11): an oversized DataRef is split into multiple entries by kReclaimMaxExtents on enqueue;
-// peek's max_extents cap closes the batch early but returns at least 1 item; after full consumption the extent total is conserved
+// peek's max_extents cap closes the batch early but returns at least 1 item; after full consumption the extent total is
+// conserved
 inline void case_reclaim_split_and_capped_peek(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-split");
     const size_t total = kReclaimMaxExtents + 700;  // splits into 2 entries: 4096 + 700
     std::vector<Extent> big;
     big.reserve(total);
-    for (size_t i = 0; i < total; ++i)
-        big.push_back(chunk_extent(m->alloc_file_id(Extent::Kind::kChunk), 1));
+    for (size_t i = 0; i < total; ++i) big.push_back(chunk_extent(m->alloc_file_id(Extent::Kind::kChunk), 1));
     m->put_object("ms-split", "big", make_rec("big", std::move(big)));
     CHECK(m->delete_object("ms-split", "big"));
 
@@ -447,7 +472,8 @@ inline void case_reclaim_split_and_capped_peek(const MetaFactory& make) {
 }
 
 // swap_extents_batch (gaps §2.13 batched compaction): per-item CAS is independent -- an item with a mismatched
-// version fails without writing, the rest take effect as usual (rocks/sqlite override with a single-batch commit, redis/tikv use the default per-item forwarding)
+// version fails without writing, the rest take effect as usual (rocks/sqlite override with a single-batch commit,
+// redis/tikv use the default per-item forwarding)
 inline void case_swap_extents_batch(const MetaFactory& make) {
     auto m = make();
     m->create_bucket("ms-swapb");
@@ -458,8 +484,8 @@ inline void case_swap_extents_batch(const MetaFactory& make) {
     uint64_t ca = m->alloc_file_id(Extent::Kind::kChunk);
     uint64_t cb = m->alloc_file_id(Extent::Kind::kChunk);
     std::vector<SwapReq> reqs;
-    reqs.push_back({"ms-swapb", "a", /*expect_version=*/1,
-                    DataRef{{pack_extent(pid, 30, 100)}}, DataRef{{chunk_extent(ca, 100)}}});
+    reqs.push_back({"ms-swapb", "a", /*expect_version=*/1, DataRef{{pack_extent(pid, 30, 100)}},
+                    DataRef{{chunk_extent(ca, 100)}}});
     reqs.push_back({"ms-swapb", "b", /*expect_version=*/7,  // version mismatch: this item must fail
                     DataRef{{pack_extent(pid, 160, 50)}}, DataRef{{chunk_extent(cb, 50)}}});
     auto ok = m->swap_extents_batch(reqs);
@@ -498,8 +524,7 @@ inline void case_list_uploads_hints(const MetaFactory& make) {
     std::sort(b_ids.begin(), b_ids.end());
     auto ordered = [](const std::vector<UploadInfo>& v) {
         for (size_t i = 1; i < v.size(); ++i)
-            if (!(std::pair(v[i - 1].key, v[i - 1].upload_id) < std::pair(v[i].key, v[i].upload_id)))
-                return false;
+            if (!(std::pair(v[i - 1].key, v[i - 1].upload_id) < std::pair(v[i].key, v[i].upload_id))) return false;
         return true;
     };
     // prefix + limit: the page must come from inside the prefix range

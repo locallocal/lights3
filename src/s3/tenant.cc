@@ -12,15 +12,13 @@ using nlohmann::json;
 
 void validate_tenant_id(std::string_view id) {
     auto bad = [&](const char* why) {
-        throw S3Error(S3ErrorCode::InvalidRequest,
-                      "Invalid tenant id '" + std::string(id) + "': " + why);
+        throw S3Error(S3ErrorCode::InvalidRequest, "Invalid tenant id '" + std::string(id) + "': " + why);
     };
     if (id.empty() || id.size() > 64) bad("must be 1-64 characters");
     auto lower_alnum = [](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'); };
     if (!lower_alnum(id.front())) bad("must start with a lowercase letter or digit");
     for (char c : id)
-        if (!lower_alnum(c) && c != '-' && c != '_' && c != '.')
-            bad("allowed characters are a-z 0-9 . _ -");
+        if (!lower_alnum(c) && c != '-' && c != '_' && c != '.') bad("allowed characters are a-z 0-9 . _ -");
     if (id == "." || id == "..") bad("reserved");
 }
 
@@ -126,13 +124,12 @@ std::vector<std::string> TenantRegistry::buckets_of(const std::string& id) const
     return out;
 }
 
-Task<void> TenantRegistry::assign(std::string bucket, std::string tenant, std::string by,
-                                  bool force) {
+Task<void> TenantRegistry::assign(std::string bucket, std::string tenant, std::string by, bool force) {
     if (!force) {
         std::string cur = owner_of(bucket);
         if (!cur.empty() && cur != tenant)
-            throw S3Error(S3ErrorCode::BucketAlreadyExists,
-                          "Bucket " + bucket + " is owned by tenant '" + cur + "'.", bucket);
+            throw S3Error(S3ErrorCode::BucketAlreadyExists, "Bucket " + bucket + " is owned by tenant '" + cur + "'.",
+                          bucket);
     }
     BucketOwner o;
     o.tenant = std::move(tenant);
@@ -141,8 +138,6 @@ Task<void> TenantRegistry::assign(std::string bucket, std::string tenant, std::s
     co_await owners_->put(std::move(bucket), std::move(o));
 }
 
-Task<void> TenantRegistry::unassign(const std::string& bucket) {
-    co_await owners_->remove(bucket);
-}
+Task<void> TenantRegistry::unassign(const std::string& bucket) { co_await owners_->remove(bucket); }
 
 }  // namespace lights3::s3

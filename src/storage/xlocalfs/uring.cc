@@ -45,8 +45,7 @@ int sys_io_uring_setup(unsigned entries, io_uring_params* p) {
 }
 
 int sys_io_uring_enter(int fd, unsigned to_submit, unsigned min_complete, unsigned flags) {
-    return static_cast<int>(
-        ::syscall(__NR_io_uring_enter, fd, to_submit, min_complete, flags, nullptr, 0));
+    return static_cast<int>(::syscall(__NR_io_uring_enter, fd, to_submit, min_complete, flags, nullptr, 0));
 }
 
 int sys_io_uring_register(int fd, unsigned op, void* arg, unsigned nr) {
@@ -59,8 +58,7 @@ unsigned load_acquire(const unsigned* p) { return __atomic_load_n(p, __ATOMIC_AC
 void store_release(unsigned* p, unsigned v) { __atomic_store_n(p, v, __ATOMIC_RELEASE); }
 
 void* ring_mmap(int fd, size_t bytes, uint64_t offset) {
-    void* p = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd,
-                     static_cast<off_t>(offset));
+    void* p = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_POPULATE, fd, static_cast<off_t>(offset));
     return p == MAP_FAILED ? nullptr : p;
 }
 
@@ -68,10 +66,10 @@ void* ring_mmap(int fd, size_t bytes, uint64_t offset) {
 // full CQ). Yield for the first few rounds (the common case of transient jitter), then back
 // off exponentially, sleeping up to a 1ms cap to give up the CPU
 void enter_backoff(int spin) {
-    if (spin < 8) std::this_thread::yield();
+    if (spin < 8)
+        std::this_thread::yield();
     else
-        std::this_thread::sleep_for(
-            std::chrono::microseconds(std::min(1000, 16 << std::min(spin - 8, 6))));
+        std::this_thread::sleep_for(std::chrono::microseconds(std::min(1000, 16 << std::min(spin - 8, 6))));
 }
 
 }  // namespace
@@ -90,8 +88,10 @@ std::string UringFeatures::describe() const {
     if (op_statx) meta += "statx ";
     if (op_renameat) meta += "renameat ";
     if (op_unlinkat) meta += "unlinkat ";
-    if (meta.empty()) meta = "none";
-    else meta.pop_back();
+    if (meta.empty())
+        meta = "none";
+    else
+        meta.pop_back();
     s += ", meta ops: " + meta;
     s += sqpoll ? ", SQPOLL on" : ", SQPOLL off";
     if (setup_features & IORING_FEAT_SINGLE_MMAP) s += ", SINGLE_MMAP";
@@ -109,8 +109,7 @@ public:
     using Op = UringEngine::Op;
     using Sqe = UringEngine::Sqe;
 
-    UringRing(unsigned index, ThreadPool* pool, const UringOptions& opt, UringFeatures& feat,
-              bool probe);
+    UringRing(unsigned index, ThreadPool* pool, const UringOptions& opt, UringFeatures& feat, bool probe);
     ~UringRing();
     UringRing(const UringRing&) = delete;
 
@@ -152,9 +151,9 @@ private:
     // SQ (submit side, protected by submit_mu_)
     std::mutex submit_mu_;
     bool stopped_ = false;
-    bool failed_ = false;  // reaper/submit hit an unrecoverable error; all later submissions rejected
-    bool flushing_ = false;         // a thread is already running io_uring_enter (on-duty marker for batched submission)
-    unsigned submitted_ = 0;        // count of SQEs handed to the kernel (same sequence as sq_tail_)
+    bool failed_ = false;     // reaper/submit hit an unrecoverable error; all later submissions rejected
+    bool flushing_ = false;   // a thread is already running io_uring_enter (on-duty marker for batched submission)
+    unsigned submitted_ = 0;  // count of SQEs handed to the kernel (same sequence as sq_tail_)
     std::condition_variable sq_cv_;  // SQ full / flusher progressed
     // In-flight op registry (protected by submit_mu_): when the reaper thread fails, wake all
     // in-flight coroutines with -EIO (otherwise GETs hang forever and connections are never
@@ -198,8 +197,7 @@ private:
     std::thread reaper_;
 };
 
-UringRing::UringRing(unsigned index, ThreadPool* pool, const UringOptions& opt,
-                     UringFeatures& feat, bool probe)
+UringRing::UringRing(unsigned index, ThreadPool* pool, const UringOptions& opt, UringFeatures& feat, bool probe)
     : index_(index), pool_(pool) {
     io_uring_params p{};
     if (opt.sqpoll) {
@@ -212,13 +210,11 @@ UringRing::UringRing(unsigned index, ThreadPool* pool, const UringOptions& opt,
     // SQPOLL is a throughput optimization, not a correctness prerequisite
     if (ring_fd_ < 0 && opt.sqpoll && (errno == EPERM || errno == EINVAL)) {
         if (index == 0)
-            LOG_WARN("io_uring: SQPOLL setup refused ({}); falling back to plain submission",
-                     std::strerror(errno));
+            LOG_WARN("io_uring: SQPOLL setup refused ({}); falling back to plain submission", std::strerror(errno));
         p = io_uring_params{};
         ring_fd_ = sys_io_uring_setup(opt.entries, &p);
     }
-    if (ring_fd_ < 0)
-        throw std::runtime_error(std::string("io_uring_setup: ") + std::strerror(errno));
+    if (ring_fd_ < 0) throw std::runtime_error(std::string("io_uring_setup: ") + std::strerror(errno));
 
     sq_ring_bytes_ = p.sq_off.array + p.sq_entries * sizeof(unsigned);
     cq_ring_bytes_ = p.cq_off.cqes + p.cq_entries * sizeof(io_uring_cqe);
@@ -230,9 +226,7 @@ UringRing::UringRing(unsigned index, ThreadPool* pool, const UringOptions& opt,
     cq_ring_ptr_ = !sq_ring_ptr_ ? nullptr
                    : single_mmap ? sq_ring_ptr_
                                  : ring_mmap(ring_fd_, cq_ring_bytes_, IORING_OFF_CQ_RING);
-    sqes_ = cq_ring_ptr_ ? static_cast<io_uring_sqe*>(
-                               ring_mmap(ring_fd_, sqes_bytes_, IORING_OFF_SQES))
-                         : nullptr;
+    sqes_ = cq_ring_ptr_ ? static_cast<io_uring_sqe*>(ring_mmap(ring_fd_, sqes_bytes_, IORING_OFF_SQES)) : nullptr;
     if (!sqes_) {
         int saved = errno;
         unmap_rings();
@@ -319,8 +313,10 @@ void UringRing::register_resources(const UringOptions& opt, UringFeatures& feat)
         void* p = ::mmap(nullptr, fixed_arena_bytes_, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
         if (p == MAP_FAILED) {
-            LOG_WARN("io_uring ring {}: cannot allocate {} fixed buffers ({}); streams use "
-                     "heap blocks", index_, opt.fixed_buffers, std::strerror(errno));
+            LOG_WARN(
+                "io_uring ring {}: cannot allocate {} fixed buffers ({}); streams use "
+                "heap blocks",
+                index_, opt.fixed_buffers, std::strerror(errno));
             feat.fixed_buffers = false;
         } else {
             std::vector<struct iovec> iov(opt.fixed_buffers);
@@ -328,16 +324,16 @@ void UringRing::register_resources(const UringOptions& opt, UringFeatures& feat)
                 iov[i].iov_base = static_cast<std::byte*>(p) + size_t(i) * fixed_block_;
                 iov[i].iov_len = fixed_block_;
             }
-            if (sys_io_uring_register(ring_fd_, IORING_REGISTER_BUFFERS, iov.data(),
-                                      opt.fixed_buffers) == 0) {
+            if (sys_io_uring_register(ring_fd_, IORING_REGISTER_BUFFERS, iov.data(), opt.fixed_buffers) == 0) {
                 fixed_arena_ = static_cast<std::byte*>(p);
                 fixed_free_.reserve(opt.fixed_buffers);
                 for (int i = int(opt.fixed_buffers) - 1; i >= 0; --i) fixed_free_.push_back(i);
                 if (index_ == 0) feat.fixed_buffers = true;
             } else {
-                LOG_WARN("io_uring ring {}: IORING_REGISTER_BUFFERS({} x {}) refused ({}); "
-                         "streams use heap blocks", index_, opt.fixed_buffers, fixed_block_,
-                         std::strerror(errno));
+                LOG_WARN(
+                    "io_uring ring {}: IORING_REGISTER_BUFFERS({} x {}) refused ({}); "
+                    "streams use heap blocks",
+                    index_, opt.fixed_buffers, fixed_block_, std::strerror(errno));
                 ::munmap(p, fixed_arena_bytes_);
                 fixed_arena_bytes_ = 0;
                 feat.fixed_buffers = false;
@@ -351,15 +347,16 @@ void UringRing::register_resources(const UringOptions& opt, UringFeatures& feat)
     // sets and FILES_UPDATE are 5.5+, the non-quiescing update 5.6+ -- tie it to the probe
     if (opt.fixed_files > 0 && feat.probed) {
         std::vector<int> fds(opt.fixed_files, -1);
-        if (sys_io_uring_register(ring_fd_, IORING_REGISTER_FILES, fds.data(),
-                                  opt.fixed_files) == 0) {
+        if (sys_io_uring_register(ring_fd_, IORING_REGISTER_FILES, fds.data(), opt.fixed_files) == 0) {
             files_registered_ = true;
             file_slots_.reserve(opt.fixed_files);
             for (int i = int(opt.fixed_files) - 1; i >= 0; --i) file_slots_.push_back(i);
             if (index_ == 0) feat.fixed_files = true;
         } else {
-            LOG_WARN("io_uring ring {}: IORING_REGISTER_FILES({}) refused ({}); streams use "
-                     "plain fds", index_, opt.fixed_files, std::strerror(errno));
+            LOG_WARN(
+                "io_uring ring {}: IORING_REGISTER_FILES({}) refused ({}); streams use "
+                "plain fds",
+                index_, opt.fixed_files, std::strerror(errno));
             feat.fixed_files = false;
         }
     } else if (index_ == 0) {
@@ -438,8 +435,8 @@ void UringRing::unregister_file(int slot) {
     // A failed update leaves the kernel holding a reference to the file until the ring is
     // torn down; the slot is retired rather than handed out again with a stale file in it
     if (sys_io_uring_register(ring_fd_, IORING_REGISTER_FILES_UPDATE, &upd, 1) != 1) {
-        LOG_WARN("io_uring ring {}: FILES_UPDATE(unregister slot {}) failed ({}); slot retired",
-                 index_, slot, std::strerror(errno));
+        LOG_WARN("io_uring ring {}: FILES_UPDATE(unregister slot {}) failed ({}); slot retired", index_, slot,
+                 std::strerror(errno));
         return;
     }
     std::lock_guard lk(fixed_mu_);
@@ -524,8 +521,8 @@ int UringRing::flush_locked(std::unique_lock<std::mutex>& lk, std::span<Op* cons
     // state, wake all in-flight with -EIO; the caller notifies self via exception
     auto orphans = fail_all_locked(self);
     lk.unlock();
-    LOG_ERROR("io_uring ring {} submit failed fatally: {}; failing {} in-flight op(s) with EIO",
-              index_, std::strerror(fatal), orphans.size());
+    LOG_ERROR("io_uring ring {} submit failed fatally: {}; failing {} in-flight op(s) with EIO", index_,
+              std::strerror(fatal), orphans.size());
     for (Op* op : orphans) op->complete(-EIO);
     lk.lock();
     inflight_cv_.notify_all();
@@ -547,16 +544,14 @@ void UringRing::submit(std::span<const Sqe> chain, std::span<Op* const> ops) {
     std::unique_lock lk(submit_mu_);
     for (;;) {
         if (stopped_ || failed_)
-            throw S3Error(S3ErrorCode::InternalError,
-                          failed_ ? "io_uring engine failed" : "io_uring engine stopped");
+            throw S3Error(S3ErrorCode::InternalError, failed_ ? "io_uring engine failed" : "io_uring engine stopped");
         if (sq_entries_ - (*sq_tail_ - load_acquire(sq_head_)) >= need) break;
         // SQ full = the flusher lags behind filling. If we are not on duty, give it a push
         // ourselves; otherwise wait for the on-duty one to make progress (it will either
         // progress or set failed_, and both notify)
         if (!flushing_) {
             if (int err = flush_locked(lk, {}))
-                throw S3Error(S3ErrorCode::InternalError,
-                              std::string("io_uring_enter: ") + std::strerror(err));
+                throw S3Error(S3ErrorCode::InternalError, std::string("io_uring_enter: ") + std::strerror(err));
             continue;
         }
         sq_cv_.wait(lk);
@@ -569,8 +564,7 @@ void UringRing::submit(std::span<const Sqe> chain, std::span<Op* const> ops) {
     }
     if (int err = flush_locked(lk, ops)) {
         for (Op* op : ops) inflight_.erase(op);  // treated as never submitted; other in-flight already woken with -EIO
-        throw S3Error(S3ErrorCode::InternalError,
-                      std::string("io_uring_enter: ") + std::strerror(err));
+        throw S3Error(S3ErrorCode::InternalError, std::string("io_uring_enter: ") + std::strerror(err));
     }
 }
 
@@ -635,9 +629,10 @@ void UringRing::reap_loop() {
                 std::lock_guard lk(submit_mu_);
                 orphans = fail_all_locked({});
             }
-            LOG_ERROR("io_uring ring {} reaper exiting on fatal error: {}; failing {} in-flight "
-                      "op(s) with EIO",
-                      index_, std::strerror(err), orphans.size());
+            LOG_ERROR(
+                "io_uring ring {} reaper exiting on fatal error: {}; failing {} in-flight "
+                "op(s) with EIO",
+                index_, std::strerror(err), orphans.size());
             for (Op* op : orphans) op->complete(-EIO);
             sq_cv_.notify_all();
             inflight_cv_.notify_all();
@@ -661,10 +656,9 @@ void UringRing::shutdown() {
         // destructing/munmap-ing without draining lets the kernel keep writing into freed
         // user buffers (UAF). On timeout only warn, never deadlock process exit -- the risk
         // can no longer be eliminated at that point, so at least leave evidence
-        if (!inflight_cv_.wait_for(lk, std::chrono::seconds(10),
-                                   [&] { return inflight_.empty() || failed_; }))
-            LOG_ERROR("io_uring ring {} shutdown: {} op(s) still in flight after 10s; proceeding",
-                      index_, inflight_.size());
+        if (!inflight_cv_.wait_for(lk, std::chrono::seconds(10), [&] { return inflight_.empty() || failed_; }))
+            LOG_ERROR("io_uring ring {} shutdown: {} op(s) still in flight after 10s; proceeding", index_,
+                      inflight_.size());
     }
     if (!failed_ && reaper_.joinable()) {
         push_sqe_locked(Sqe{}, /*user_data=*/0);  // NOP sentinel
@@ -678,8 +672,7 @@ void UringRing::shutdown() {
 // UringEngine: facade over the rings
 // ---------------------------------------------------------------------------
 
-UringEngine::UringEngine(std::shared_ptr<ThreadPool> pool, UringOptions opt)
-    : pool_(std::move(pool)), opt_(opt) {
+UringEngine::UringEngine(std::shared_ptr<ThreadPool> pool, UringOptions opt) : pool_(std::move(pool)), opt_(opt) {
     if (opt_.block_size < 4096 || opt_.block_size % 4096 != 0)
         throw std::runtime_error("io_uring: block_size must be a multiple of 4096");
     if (opt_.read_depth == 0) opt_.read_depth = 1;
@@ -688,13 +681,11 @@ UringEngine::UringEngine(std::shared_ptr<ThreadPool> pool, UringOptions opt)
     if (n == 0) n = std::clamp(std::thread::hardware_concurrency() / 8, 1u, 8u);
     feat_.rings = n;
     rings_.reserve(n);
-    for (unsigned i = 0; i < n; ++i)
-        rings_.push_back(std::make_unique<UringRing>(i, pool_.get(), opt_, feat_, i == 0));
+    for (unsigned i = 0; i < n; ++i) rings_.push_back(std::make_unique<UringRing>(i, pool_.get(), opt_, feat_, i == 0));
     // The ring constructors ran the registrations; only now is it safe to start reaping
     for (auto& r : rings_) r->start_reaper();
-    LOG_INFO("xlocalfs {} (sq_entries={}, block={}, read_depth={}, write_depth={})",
-             feat_.describe(), opt_.entries, opt_.block_size, opt_.read_depth,
-             opt_.write_depth);
+    LOG_INFO("xlocalfs {} (sq_entries={}, block={}, read_depth={}, write_depth={})", feat_.describe(), opt_.entries,
+             opt_.block_size, opt_.read_depth, opt_.write_depth);
 }
 
 UringEngine::~UringEngine() { shutdown(); }
@@ -773,8 +764,7 @@ UringEngine::Awaitable UringEngine::openat(int dirfd, const char* path, int flag
     return {*this, s, -1, {}, {}};
 }
 
-UringEngine::Awaitable UringEngine::statx(int dirfd, const char* path, int flags, unsigned mask,
-                                          struct ::statx* out) {
+UringEngine::Awaitable UringEngine::statx(int dirfd, const char* path, int flags, unsigned mask, struct ::statx* out) {
     Sqe s;
     s.opcode = IORING_OP_STATX;
     s.fd = dirfd;
@@ -785,8 +775,7 @@ UringEngine::Awaitable UringEngine::statx(int dirfd, const char* path, int flags
     return {*this, s, -1, {}, {}};
 }
 
-UringEngine::Awaitable UringEngine::renameat(int olddirfd, const char* oldpath, int newdirfd,
-                                             const char* newpath) {
+UringEngine::Awaitable UringEngine::renameat(int olddirfd, const char* oldpath, int newdirfd, const char* newpath) {
     Sqe s;
     s.opcode = IORING_OP_RENAMEAT;
     s.fd = olddirfd;
@@ -805,9 +794,7 @@ UringEngine::Awaitable UringEngine::unlinkat(int dirfd, const char* path, int fl
     return {*this, s, -1, {}, {}};
 }
 
-bool UringEngine::try_acquire_fixed(unsigned ring, FixedBuf& out) {
-    return rings_[ring]->try_acquire_fixed(out);
-}
+bool UringEngine::try_acquire_fixed(unsigned ring, FixedBuf& out) { return rings_[ring]->try_acquire_fixed(out); }
 
 void UringEngine::release_fixed(const FixedBuf& b) {
     if (b.index >= 0) rings_[b.ring]->release_fixed(b.index);

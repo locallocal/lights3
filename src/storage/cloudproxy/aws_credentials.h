@@ -45,7 +45,7 @@ private:
     const std::string imds_endpoint_;
     std::mutex m_;
     AwsCreds cached_;
-    std::string source_;  // last successful source, for change logging
+    std::string source_;                                    // last successful source, for change logging
     std::chrono::system_clock::time_point next_attempt_{};  // negative-result cache
 };
 

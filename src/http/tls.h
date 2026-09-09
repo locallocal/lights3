@@ -62,7 +62,7 @@ public:
 
     // SNI selection: exact host, then wildcard, else the default certificate
     const CertBundle& select(std::string_view servername) const;
-    X509_STORE* client_store() const { return client_store_; }       // null = no client CA
+    X509_STORE* client_store() const { return client_store_; }         // null = no client CA
     STACK_OF_X509_NAME* client_ca_names() const { return ca_names_; }  // null = no client CA
 
     // The files this snapshot came from with their (size, mtime) at load time;

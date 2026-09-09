@@ -11,15 +11,13 @@ namespace fs = std::filesystem;
 
 namespace lights3::storage::tier {
 
+using duostore::TierState;
 using s3::S3Error;
 using s3::S3ErrorCode;
-using duostore::TierState;
 
 namespace {
 
-std::string ikey_of(std::string_view b, std::string_view k) {
-    return std::string(b) + "/" + std::string(k);
-}
+std::string ikey_of(std::string_view b, std::string_view k) { return std::string(b) + "/" + std::string(k); }
 
 TierInfo to_tier_info(const TierState& ts) {
     TierInfo t;
@@ -72,12 +70,10 @@ TierInfo DuoStoreTierLocal::read_tier_only(std::string_view bucket, std::string_
     return rec ? to_tier_info(rec->tier) : TierInfo{};
 }
 
-std::optional<AccessRec> DuoStoreTierLocal::load_access(std::string_view bucket,
-                                                        std::string_view key) {
+std::optional<AccessRec> DuoStoreTierLocal::load_access(std::string_view bucket, std::string_view key) {
     return table_.get(ikey_of(bucket, key));
 }
-void DuoStoreTierLocal::store_access(std::string_view bucket, std::string_view key,
-                                     const AccessRec& rec) {
+void DuoStoreTierLocal::store_access(std::string_view bucket, std::string_view key, const AccessRec& rec) {
     table_.set(ikey_of(bucket, key), rec);
 }
 void DuoStoreTierLocal::erase_access(std::string_view bucket, std::string_view key) {
@@ -85,8 +81,7 @@ void DuoStoreTierLocal::erase_access(std::string_view bucket, std::string_view k
 }
 void DuoStoreTierLocal::flush_access() { table_.flush(state_dir_ / "atime.tsv", tmp_dir()); }
 
-Task<std::unique_ptr<http::BodyReader>> DuoStoreTierLocal::open_snapshot(std::string_view bucket,
-                                                                         std::string_view key,
+Task<std::unique_ptr<http::BodyReader>> DuoStoreTierLocal::open_snapshot(std::string_view bucket, std::string_view key,
                                                                          uint64_t) {
     // Extents are immutable and pinned by the reader; an overwrite in the meantime lands
     // new extents and sends these to the gcq, which grace-waits for the pin
@@ -94,8 +89,8 @@ Task<std::unique_ptr<http::BodyReader>> DuoStoreTierLocal::open_snapshot(std::st
     co_return std::move(os.body);
 }
 
-Task<void> DuoStoreTierLocal::commit_stub(std::string_view bucket, std::string_view key,
-                                          const ObjectMeta& meta, const TierInfo& tier) {
+Task<void> DuoStoreTierLocal::commit_stub(std::string_view bucket, std::string_view key, const ObjectMeta& meta,
+                                          const TierInfo& tier) {
     co_await duo_->tier_commit_stub(bucket, key, meta, to_tier_state(tier));
 }
 
@@ -141,8 +136,7 @@ private:
 
 }  // namespace
 
-std::unique_ptr<ICacheFill> DuoStoreTierLocal::begin_cache_fill(std::string_view bucket,
-                                                                std::string_view key) {
+std::unique_ptr<ICacheFill> DuoStoreTierLocal::begin_cache_fill(std::string_view bucket, std::string_view key) {
     auto f = std::make_unique<DuoCacheFill>(*this, std::string(bucket), std::string(key),
                                             tmp_dir() / fsutil::next_tmp_name());
     if (!f->ok()) return nullptr;
@@ -154,9 +148,7 @@ bool DuoStoreTierLocal::cache_space_ok(uint64_t size, uint64_t min_free_bytes) c
     return s && s->avail_bytes > size + min_free_bytes;
 }
 
-std::optional<SpaceUsage> DuoStoreTierLocal::space_usage() const {
-    return probe_space(duo_->root());
-}
+std::optional<SpaceUsage> DuoStoreTierLocal::space_usage() const { return probe_space(duo_->root()); }
 
 // Meta-driven enumeration: buckets → paged key listing → one record read per key for
 // the tier/extent view (the listing carries metadata only)

@@ -40,8 +40,7 @@ Task<http::HttpResponse> S3Service::admin_jobs(http::HttpRequest& req, std::stri
         std::string backend = tail.substr(0, slash);
         std::string op = tail.substr(slash + 1);
         if (!job_start_ || !job_status_ || !job_ledger_)
-            throw S3Error(S3ErrorCode::InvalidRequest,
-                          "Maintenance jobs are not available on this deployment.");
+            throw S3Error(S3ErrorCode::InvalidRequest, "Maintenance jobs are not available on this deployment.");
         if (op == "quarantine") {
             if (req.method != "GET")
                 throw S3Error(S3ErrorCode::MethodNotAllowed,
@@ -52,8 +51,7 @@ Task<http::HttpResponse> S3Service::admin_jobs(http::HttpRequest& req, std::stri
             co_return json_response(200, job_status_(backend, group, op));
         }
         if (req.method != "POST")
-            throw S3Error(S3ErrorCode::MethodNotAllowed,
-                          "The specified method is not allowed against this resource.");
+            throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
         json j = job_start_(backend, group, op, 0);
         AuditEvent e;
         e.event = group + "." + op + ".start";

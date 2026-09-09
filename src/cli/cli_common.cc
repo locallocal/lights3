@@ -22,8 +22,8 @@ std::string one_backend_arg(const Cmd& c) {
     return backend;
 }
 
-Cmd make_backend_leaf(const char* name, const char* example, const char* usage,
-                      const char* help_long, const char* help_short, void (*run)(const Cmd&)) {
+Cmd make_backend_leaf(const char* name, const char* example, const char* usage, const char* help_long,
+                      const char* help_short, void (*run)(const Cmd&)) {
     auto cmd = std::make_shared<ccmd::c_command>(name, example, usage, help_long, help_short, run);
     add_config_flag(cmd);
     cmd->var<std::string>("backend", "", "backend name (alternative to the positional)");
@@ -32,11 +32,10 @@ Cmd make_backend_leaf(const char* name, const char* example, const char* usage,
 
 Cmd make_group(const char* name, const char* example, const char* usage, const char* help_long,
                const char* help_short) {
-    return std::make_shared<ccmd::c_command>(name, example, usage, help_long, help_short,
-                                             [](const Cmd& c) {
-                                                 c->print_help();
-                                                 g_exit = 2;
-                                             });
+    return std::make_shared<ccmd::c_command>(name, example, usage, help_long, help_short, [](const Cmd& c) {
+        c->print_help();
+        g_exit = 2;
+    });
 }
 
 }  // namespace lights3_cli

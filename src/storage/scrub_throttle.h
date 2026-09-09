@@ -23,8 +23,7 @@ public:
     // bytes_per_sec = 0 disables pacing entirely. abort is probed between sleep
     // slices (typically the owner's BackgroundTaskGroup::closing) so shutdown
     // does not sit out the full pacing debt.
-    ScrubThrottle(uint64_t bytes_per_sec, std::shared_ptr<ThreadPool> pool,
-                  std::function<bool()> abort = {})
+    ScrubThrottle(uint64_t bytes_per_sec, std::shared_ptr<ThreadPool> pool, std::function<bool()> abort = {})
         : bps_(bytes_per_sec), pool_(std::move(pool)), abort_(std::move(abort)) {}
 
     // Account n bytes just read and sleep off any budget surplus. Resumes on a

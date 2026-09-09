@@ -41,9 +41,7 @@ public:
     PermitBodyReader(std::unique_ptr<BodyReader> inner, AsyncSemaphore::Permit permit)
         : inner_(std::move(inner)), permit_(std::move(permit)) {}
 
-    Task<size_t> read(std::span<std::byte> buf) override {
-        co_return co_await inner_->read(buf);
-    }
+    Task<size_t> read(std::span<std::byte> buf) override { co_return co_await inner_->read(buf); }
     std::optional<uint64_t> length() const override { return inner_->length(); }
 
 private:
@@ -93,10 +91,8 @@ struct AdmissionCounters {
 // counters (optional) receives the queue-wait / cancellation / stall statistics
 inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
                                       std::shared_ptr<std::atomic<long>> stall_sec,
-                                      std::shared_ptr<CancelSource> shutdown_src,
-                                      Handler dispatch,
-                                      uint64_t stall_min_progress =
-                                          StallGuardReader::kMinProgressBytes,
+                                      std::shared_ptr<CancelSource> shutdown_src, Handler dispatch,
+                                      uint64_t stall_min_progress = StallGuardReader::kMinProgressBytes,
                                       std::shared_ptr<AdmissionCounters> counters = nullptr) {
     return [inflight, stall_sec, shutdown_src, stall_min_progress, counters,
             dispatch = std::move(dispatch)](HttpRequest req) -> Task<HttpResponse> {
@@ -116,46 +112,37 @@ inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
                 auto t0 = std::chrono::steady_clock::now();
                 permit = co_await inflight->acquire(tok);
                 if (counters)
-                    counters->record_wait(
-                        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-                            .count(),
-                        true);
+                    counters->record_wait(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+                                          true);
             }
             req.body = guard_stalls(std::move(req.body), stall, stall_min_progress, stalls_in);
             auto resp = co_await dispatch(std::move(req));
-            resp.stream_body =
-                guard_stalls(std::move(resp.stream_body), stall, stall_min_progress, stalls_out);
+            resp.stream_body = guard_stalls(std::move(resp.stream_body), stall, stall_min_progress, stalls_out);
             if (resp.stream_body)
-                resp.stream_body = std::make_unique<PermitBodyReader>(
-                    std::move(resp.stream_body), std::move(permit));
+                resp.stream_body = std::make_unique<PermitBodyReader>(std::move(resp.stream_body), std::move(permit));
             co_return resp;
         } catch (const OperationCancelled&) {
             if (counters) counters->cancelled.fetch_add(1, std::memory_order_relaxed);
             HttpResponse r;
             r.status = 503;
             r.headers.set("Content-Type", "application/xml");
-            r.small_body = s3::error_xml(
-                s3::S3Error(s3::S3ErrorCode::SlowDown,
-                            "Request cancelled while queued (server shutting down or "
-                            "request timed out)."),
-                "-");
+            r.small_body = s3::error_xml(s3::S3Error(s3::S3ErrorCode::SlowDown,
+                                                     "Request cancelled while queued (server shutting down or "
+                                                     "request timed out)."),
+                                         "-");
             co_return r;
         }
     };
 }
 
 // Fixed-stall convenience (tests / static assemblies)
-inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight,
-                                      std::chrono::seconds stall,
-                                      std::shared_ptr<CancelSource> shutdown_src,
-                                      Handler dispatch,
-                                      uint64_t stall_min_progress =
-                                          StallGuardReader::kMinProgressBytes,
+inline Handler make_admission_handler(std::shared_ptr<AsyncSemaphore> inflight, std::chrono::seconds stall,
+                                      std::shared_ptr<CancelSource> shutdown_src, Handler dispatch,
+                                      uint64_t stall_min_progress = StallGuardReader::kMinProgressBytes,
                                       std::shared_ptr<AdmissionCounters> counters = nullptr) {
-    return make_admission_handler(std::move(inflight),
-                                  std::make_shared<std::atomic<long>>(stall.count()),
-                                  std::move(shutdown_src), std::move(dispatch),
-                                  stall_min_progress, std::move(counters));
+    return make_admission_handler(std::move(inflight), std::make_shared<std::atomic<long>>(stall.count()),
+                                  std::move(shutdown_src), std::move(dispatch), stall_min_progress,
+                                  std::move(counters));
 }
 
 }  // namespace lights3::http

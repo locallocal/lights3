@@ -18,14 +18,13 @@ std::shared_ptr<AuditLog> AuditLog::open(const AuditConfig& cfg) {
     auto log = std::shared_ptr<AuditLog>(new AuditLog());
     // Own logger + own sink: the operational logger's level/pattern must not
     // apply here (an operator raising log.level to warn must not silence audit)
-    auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-        cfg.path, cfg.max_size, static_cast<size_t>(cfg.max_files));
+    auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(cfg.path, cfg.max_size,
+                                                                       static_cast<size_t>(cfg.max_files));
     log->logger_ = std::make_shared<spdlog::logger>("lights3-audit", std::move(sink));
     log->logger_->set_pattern("%v");  // the line is a complete JSON document
     log->logger_->set_level(spdlog::level::info);
     log->data_plane_ = cfg.data_plane;
-    LOG_INFO("audit: writing to {} (data plane {})", cfg.path,
-             cfg.data_plane ? "on" : "off");
+    LOG_INFO("audit: writing to {} (data plane {})", cfg.path, cfg.data_plane ? "on" : "off");
     return log;
 }
 

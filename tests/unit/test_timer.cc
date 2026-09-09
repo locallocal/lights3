@@ -1,11 +1,12 @@
 // TimerQueue unit tests (docs/concurrency.md §2/§5):
-// firing, expiry ordering, cancel semantics (true if not yet fired / false if fired or absent), no dangling on destruction,
-// wakeup when an earlier entry is inserted ahead. Timing assertions use only loose upper bounds (cv + timed waits) to avoid flakes on slow machines.
+// firing, expiry ordering, cancel semantics (true if not yet fired / false if fired or absent), no dangling on
+// destruction, wakeup when an earlier entry is inserted ahead. Timing assertions use only loose upper bounds (cv +
+// timed waits) to avoid flakes on slow machines.
 #include <atomic>
-#include <stdexcept>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -23,7 +24,8 @@ struct Signal {
     std::condition_variable cv;
     int count = 0;
     void hit() {
-        // Notify while holding the lock: once the waiter's predicate is satisfied it may destroy this object, and notifying outside the lock would use a destroyed cv
+        // Notify while holding the lock: once the waiter's predicate is satisfied it may destroy this object, and
+        // notifying outside the lock would use a destroyed cv
         std::lock_guard lk(m);
         ++count;
         cv.notify_all();
@@ -72,8 +74,9 @@ TEST(timer_fires_in_deadline_order) {
 }
 
 TEST(timer_cancel_prevents_fire) {
-    // A far-future deadline (10s) leaves ample scheduling slack between add and cancel (no flakes on slow machines/tsan);
-    // cancel returning true proves the entry was removed before firing, so it can never run afterwards -- no wait needed to verify
+    // A far-future deadline (10s) leaves ample scheduling slack between add and cancel (no flakes on slow
+    // machines/tsan); cancel returning true proves the entry was removed before firing, so it can never run afterwards
+    // -- no wait needed to verify
     TimerQueue q;
     std::atomic<bool> fired{false};
     auto id = q.add(std::chrono::seconds(10), [&] { fired = true; });
@@ -83,7 +86,8 @@ TEST(timer_cancel_prevents_fire) {
 }
 
 TEST(timer_cancel_waits_for_running_callback) {
-    // cancel blocks on a callback that is currently executing: once it returns, the callback has exited and captured resources can be destroyed safely
+    // cancel blocks on a callback that is currently executing: once it returns, the callback has exited and captured
+    // resources can be destroyed safely
     TimerQueue q;
     Signal started;
     std::atomic<bool> release{false};
@@ -135,7 +139,8 @@ TEST(timer_destructor_with_pending_items_returns) {
 }
 
 TEST(timer_add_earlier_item_preempts_wait) {
-    // Insert an earlier entry while the loop is waiting on a far-future one: the cv notification path must wake it promptly
+    // Insert an earlier entry while the loop is waiting on a far-future one: the cv notification path must wake it
+    // promptly
     TimerQueue q;
     Signal s;
     q.add(std::chrono::seconds(3600), [&] {});
@@ -163,8 +168,9 @@ TEST(timer_callback_exception_does_not_wedge_cancel) {
 // ---------- Callback thread separated from the scheduling thread (gaps §3.2) ----------
 
 TEST(slow_callback_does_not_stall_deadline_tracking) {
-    // A cancel callback unwinds the cancelled coroutine chain in place -- bounded but nonzero work. It must run on a dedicated callback
-    // thread: if it ran on the scheduling thread, other timers expiring meanwhile could not even get their expiry check
+    // A cancel callback unwinds the cancelled coroutine chain in place -- bounded but nonzero work. It must run on a
+    // dedicated callback thread: if it ran on the scheduling thread, other timers expiring meanwhile could not even get
+    // their expiry check
     TimerQueue q;
     Signal slow_started;
     q.add(10ms, [&] {
@@ -174,14 +180,15 @@ TEST(slow_callback_does_not_stall_deadline_tracking) {
     Id2 second = q.add(40ms, [] {});
     CHECK(slow_started.wait_for_count(1, 2s));
     std::this_thread::sleep_for(120ms);  // well past the second entry's expiry time
-    // The slow callback is still running (300ms not yet up). If the second entry were still in the pending table, cancel would return
-    // true -- meaning the scheduling thread was stuck in the callback. Returning false = it was removed on time and is merely queued for execution
+    // The slow callback is still running (300ms not yet up). If the second entry were still in the pending table,
+    // cancel would return true -- meaning the scheduling thread was stuck in the callback. Returning false = it was
+    // removed on time and is merely queued for execution
     CHECK(!q.cancel(second));
 }
 
 TEST(cancel_waits_for_due_but_unstarted_callback) {
-    // An entry that has expired but is still in the callback queue (not yet started): cancel must wait for it to settle,
-    // otherwise the caller would destroy resources the callback still needs to access
+    // An entry that has expired but is still in the callback queue (not yet started): cancel must wait for it to
+    // settle, otherwise the caller would destroy resources the callback still needs to access
     TimerQueue q;
     Signal first_started;
     std::atomic<bool> second_ran{false};
@@ -192,8 +199,8 @@ TEST(cancel_waits_for_due_but_unstarted_callback) {
     Id2 second = q.add(20ms, [&] { second_ran = true; });
     CHECK(first_started.wait_for_count(1, 2s));
     std::this_thread::sleep_for(60ms);  // the second entry has expired and is queued behind the slow callback
-    CHECK(!q.cancel(second));  // returns false = already fired
-    CHECK(second_ran.load());  // and by the time it returns it has indeed finished executing
+    CHECK(!q.cancel(second));           // returns false = already fired
+    CHECK(second_ran.load());           // and by the time it returns it has indeed finished executing
 }
 
 TEST(timer_stats_track_fired_and_pending) {
@@ -202,8 +209,7 @@ TEST(timer_stats_track_fired_and_pending) {
     std::atomic<int> fired{0};
     q.add(std::chrono::hours(1), [] {});  // long-hanging: permanently pending
     q.add(std::chrono::milliseconds(1), [&] { fired.fetch_add(1); });
-    for (int i = 0; i < 200 && fired.load() == 0; ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    for (int i = 0; i < 200 && fired.load() == 0; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     CHECK_EQ(fired.load(), 1);
     // No synchronization point between callback completion and accounting; poll briefly
     TimerQueue::Stats st;
@@ -232,8 +238,7 @@ TEST(timer_slow_callback_counted) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1100));
         done.store(true);
     });
-    for (int i = 0; i < 2000 && !done.load(); ++i)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    for (int i = 0; i < 2000 && !done.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(5));
     CHECK(done.load());
     TimerQueue::Stats st;
     for (int i = 0; i < 200; ++i) {

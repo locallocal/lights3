@@ -29,9 +29,7 @@ struct SpaceUsage {
     uint64_t used_bytes = 0;
     uint64_t total_bytes = 0;
     uint64_t avail_bytes = 0;
-    double used_fraction() const {
-        return total_bytes ? double(used_bytes) / double(total_bytes) : 0.0;
-    }
+    double used_fraction() const { return total_bytes ? double(used_bytes) / double(total_bytes) : 0.0; }
 };
 
 // statvfs on the local root; nullopt when the call fails or reports no blocks
@@ -50,7 +48,7 @@ using fsutil::TierInfo;
 
 // One object's tiering state as the local side sees it
 struct LocalObject {
-    ObjectMeta meta;           // external metadata (etag = the original, never the cloud's)
+    ObjectMeta meta;  // external metadata (etag = the original, never the cloud's)
     TierInfo tier;
     uint64_t local_bytes = 0;  // object bytes actually held locally (0 for a clean stub)
     int64_t mtime = 0;         // epoch seconds of the local record (access-time fallback)
@@ -102,7 +100,7 @@ class IRangeCache {
 public:
     virtual ~IRangeCache() = default;
     virtual uint64_t block_size() const = 0;
-    virtual uint64_t size() const = 0;  // object size
+    virtual uint64_t size() const = 0;                          // object size
     virtual bool has(uint64_t first, uint64_t last) const = 0;  // every block covering [first,last] present
     virtual std::unique_ptr<http::BodyReader> open(uint64_t first, uint64_t last) = 0;
     virtual bool write(uint64_t off, const std::byte* p, size_t n) = 0;  // pwrite; false = failure
@@ -140,13 +138,12 @@ public:
     // ---- data plane ----
     // Stable byte stream of the object's current local data (an inode/extent snapshot:
     // a concurrent overwrite or stubbing must not change what this stream yields)
-    virtual Task<std::unique_ptr<http::BodyReader>> open_snapshot(std::string_view bucket,
-                                                                  std::string_view key,
+    virtual Task<std::unique_ptr<http::BodyReader>> open_snapshot(std::string_view bucket, std::string_view key,
                                                                   uint64_t size) = 0;
     // Stub commit (docs/storage/tiered-design.md §5.2 ④): caller holds the per-key lock and has
     // verified the state; also finishes a half-done stub (remote with data still present)
-    virtual Task<void> commit_stub(std::string_view bucket, std::string_view key,
-                                   const ObjectMeta& meta, const TierInfo& tier) = 0;
+    virtual Task<void> commit_stub(std::string_view bucket, std::string_view key, const ObjectMeta& meta,
+                                   const TierInfo& tier) = 0;
     virtual std::unique_ptr<ICacheFill> begin_cache_fill(std::string_view bucket,
                                                          std::string_view key) = 0;  // null = cannot
 
@@ -168,8 +165,8 @@ public:
 
     // ---- range cache (optional) ----
     virtual bool supports_range_cache() const { return false; }
-    virtual std::unique_ptr<IRangeCache> open_range_cache(std::string_view, std::string_view,
-                                                          const LocalObject&, uint64_t) {
+    virtual std::unique_ptr<IRangeCache> open_range_cache(std::string_view, std::string_view, const LocalObject&,
+                                                          uint64_t) {
         return nullptr;
     }
     virtual void drop_range_cache(std::string_view, std::string_view) {}

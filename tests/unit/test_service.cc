@@ -23,9 +23,7 @@ storage::BucketRouter make_router() {
     return storage::BucketRouter::build(cfg, std::move(backends));
 }
 
-S3Service make_service_noauth() {
-    return S3Service(make_router(), SigV4Authenticator::build(AuthConfig{}));
-}
+S3Service make_service_noauth() { return S3Service(make_router(), SigV4Authenticator::build(AuthConfig{})); }
 
 http::HttpRequest make_req(std::string method, std::string path, std::string body = "",
                            std::vector<std::pair<std::string, std::string>> query = {}) {
@@ -70,9 +68,7 @@ std::string body_of(http::HttpResponse& resp) {
     return out;
 }
 
-bool contains(const std::string& s, const std::string& sub) {
-    return s.find(sub) != std::string::npos;
-}
+bool contains(const std::string& s, const std::string& sub) { return s.find(sub) != std::string::npos; }
 
 // A body that never yields data but can be cancelled: read() parks on a semaphore with no
 // permits; the request timeout's cooperative cancellation breaks it out of this suspension
@@ -198,8 +194,7 @@ TEST(service_list_objects_v2) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/a/2.txt", "y")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/b.txt", "z")));
 
-    auto resp = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"delimiter", "/"}})));
+    auto resp = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"delimiter", "/"}})));
     CHECK_EQ(resp.status, 200);
     CHECK(contains(resp.small_body, "<Key>b.txt</Key>"));
     CHECK(contains(resp.small_body, "<Prefix>a/</Prefix>"));
@@ -253,8 +248,7 @@ TEST(service_upload_part_copy) {
     std::string uid = xelem(body_of(init), "UploadId");
 
     auto copy_part = [&](int no, std::vector<std::pair<std::string, std::string>> hdrs) {
-        auto req = make_req("PUT", "/bkt/dst.bin", "",
-                            {{"partNumber", std::to_string(no)}, {"uploadId", uid}});
+        auto req = make_req("PUT", "/bkt/dst.bin", "", {{"partNumber", std::to_string(no)}, {"uploadId", uid}});
         req.headers.add("x-amz-copy-source", "/bkt/src.bin");
         for (auto& [k, v] : hdrs) req.headers.add(k, v);
         return sync_wait(svc.dispatch(std::move(req)));
@@ -269,10 +263,15 @@ TEST(service_upload_part_copy) {
     CHECK_EQ(p2.status, 200);
     std::string etag2 = xelem(body_of(p2), "ETag");
 
-    std::string cxml = "<CompleteMultipartUpload>"
-                       "<Part><PartNumber>1</PartNumber><ETag>" + etag1 + "</ETag></Part>"
-                       "<Part><PartNumber>2</PartNumber><ETag>" + etag2 + "</ETag></Part>"
-                       "</CompleteMultipartUpload>";
+    std::string cxml =
+        "<CompleteMultipartUpload>"
+        "<Part><PartNumber>1</PartNumber><ETag>" +
+        etag1 +
+        "</ETag></Part>"
+        "<Part><PartNumber>2</PartNumber><ETag>" +
+        etag2 +
+        "</ETag></Part>"
+        "</CompleteMultipartUpload>";
     auto done = sync_wait(svc.dispatch(make_req("POST", "/bkt/dst.bin", cxml, {{"uploadId", uid}})));
     CHECK_EQ(done.status, 200);
     auto get = sync_wait(svc.dispatch(make_req("GET", "/bkt/dst.bin")));
@@ -283,10 +282,8 @@ TEST(service_upload_part_copy) {
     auto init2 = sync_wait(svc.dispatch(make_req("POST", "/bkt/dst2.bin", "", {{"uploads", ""}})));
     uid = xelem(body_of(init2), "UploadId");
     // helper reuses uid, with the key switched to dst2
-    auto copy_part2 = [&](std::vector<std::pair<std::string, std::string>> hdrs,
-                          std::string src = "/bkt/src.bin") {
-        auto req = make_req("PUT", "/bkt/dst2.bin", "",
-                            {{"partNumber", "1"}, {"uploadId", uid}});
+    auto copy_part2 = [&](std::vector<std::pair<std::string, std::string>> hdrs, std::string src = "/bkt/src.bin") {
+        auto req = make_req("PUT", "/bkt/dst2.bin", "", {{"partNumber", "1"}, {"uploadId", uid}});
         req.headers.add("x-amz-copy-source", std::move(src));
         for (auto& [k, v] : hdrs) req.headers.add(k, v);
         return sync_wait(svc.dispatch(std::move(req)));
@@ -406,13 +403,12 @@ TEST(service_website_anonymous_read) {
     CHECK_EQ(sync_wait(svc.dispatch(make_req("DELETE", "/site/index.html"))).status, 403);
 
     // A query flag steers to a different operation (?uploadId = ListParts): denied
-    auto lp = sync_wait(
-        svc.dispatch(make_req("GET", "/site/index.html", "", {{"uploadId", "u1"}})));
+    auto lp = sync_wait(svc.dispatch(make_req("GET", "/site/index.html", "", {{"uploadId", "u1"}})));
     CHECK_EQ(lp.status, 403);
 
     // response-* overrides are refused for anonymous requests (objects.cc §5.3 risk)
-    auto ov = sync_wait(svc.dispatch(make_req(
-        "GET", "/site/index.html", "", {{"response-content-disposition", "attachment"}})));
+    auto ov = sync_wait(
+        svc.dispatch(make_req("GET", "/site/index.html", "", {{"response-content-disposition", "attachment"}})));
     CHECK_EQ(ov.status, 400);
     CHECK(contains(ov.small_body, "InvalidRequest"));
 
@@ -425,8 +421,8 @@ TEST(service_website_anonymous_read) {
     CHECK(contains(badresp.small_body, "SignatureDoesNotMatch"));
 
     // Partial presigned parameters do not degrade to anonymous either
-    auto part = sync_wait(svc.dispatch(
-        make_req("GET", "/site/index.html", "", {{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"}})));
+    auto part = sync_wait(
+        svc.dispatch(make_req("GET", "/site/index.html", "", {{"X-Amz-Algorithm", "AWS4-HMAC-SHA256"}})));
     CHECK(part.status != 200);
 }
 
@@ -476,8 +472,7 @@ TEST(service_website_index_and_error_documents) {
     CHECK_EQ(body_of(miss), "<h1>custom error</h1>");
     CHECK_EQ(miss.headers.get("Content-Type").value_or(""), "text/html");
     // ...including denied operations (?uploadId steers to ListParts → 403)
-    auto denied =
-        sync_wait(svc.dispatch(make_req("GET", "/site/x", "", {{"uploadId", "u"}})));
+    auto denied = sync_wait(svc.dispatch(make_req("GET", "/site/x", "", {{"uploadId", "u"}})));
     CHECK_EQ(denied.status, 403);
     CHECK_EQ(body_of(denied), "<h1>custom error</h1>");
 
@@ -538,17 +533,14 @@ TEST(service_bucket_website_api) {
         return r;
     };
     CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop"))).status, 200);
-    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop/index.html", "<h1>shop</h1>")))
-                 .status,
-             200);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop/index.html", "<h1>shop</h1>"))).status, 200);
 
     const std::string xml =
         "<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix></IndexDocument>"
         "<ErrorDocument><Key>error.html</Key></ErrorDocument></WebsiteConfiguration>";
 
     // Unsigned mutation never rides the anonymous path (PUT is not GET/HEAD)
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/shop", xml, {{"website", ""}}))).status,
-             403);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/shop", xml, {{"website", ""}}))).status, 403);
     // No configuration yet: anonymous read is refused, GET ?website is 404
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/shop/index.html"))).status, 403);
     auto none = sync_wait(svc.dispatch(signed_req("GET", "/shop", "", {{"website", ""}})));
@@ -556,9 +548,7 @@ TEST(service_bucket_website_api) {
     CHECK(contains(none.small_body, "NoSuchWebsiteConfiguration"));
 
     // Root PUT ?website enables the site; GET round-trips the XML
-    CHECK_EQ(
-        sync_wait(svc.dispatch(signed_req("PUT", "/shop", xml, {{"website", ""}}))).status,
-        200);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop", xml, {{"website", ""}}))).status, 200);
     auto got = sync_wait(svc.dispatch(signed_req("GET", "/shop", "", {{"website", ""}})));
     CHECK_EQ(got.status, 200);
     CHECK(contains(got.small_body, "<Suffix>index.html</Suffix>"));
@@ -576,51 +566,35 @@ TEST(service_bucket_website_api) {
     const std::string routed =
         "<WebsiteConfiguration><IndexDocument><Suffix>i.html</Suffix></IndexDocument>"
         "<RoutingRules></RoutingRules></WebsiteConfiguration>";
-    CHECK_EQ(
-        sync_wait(svc.dispatch(signed_req("PUT", "/shop", routed, {{"website", ""}}))).status,
-        400);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop", routed, {{"website", ""}}))).status, 400);
     const std::string badsfx =
         "<WebsiteConfiguration><IndexDocument><Suffix>a/b.html</Suffix></IndexDocument>"
         "</WebsiteConfiguration>";
-    CHECK_EQ(
-        sync_wait(svc.dispatch(signed_req("PUT", "/shop", badsfx, {{"website", ""}}))).status,
-        400);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop", badsfx, {{"website", ""}}))).status, 400);
     auto nob = sync_wait(svc.dispatch(signed_req("PUT", "/nobucket", xml, {{"website", ""}})));
     CHECK_EQ(nob.status, 404);
     CHECK(contains(nob.small_body, "NoSuchBucket"));
 
     // DELETE revokes: anonymous reverts to 403, GET ?website back to 404, and a second
     // DELETE stays 204 (idempotent)
-    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/shop", "", {{"website", ""}})))
-                 .status,
-             204);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/shop", "", {{"website", ""}}))).status, 204);
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/shop/index.html"))).status, 403);
-    CHECK_EQ(sync_wait(svc.dispatch(signed_req("GET", "/shop", "", {{"website", ""}})))
-                 .status,
-             404);
-    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/shop", "", {{"website", ""}})))
-                 .status,
-             204);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("GET", "/shop", "", {{"website", ""}}))).status, 404);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/shop", "", {{"website", ""}}))).status, 204);
 
     // Multi-instance sync: the removal converges into the second store; a re-add is
     // picked up on its next tick
     sync_wait(store2->sync_now());
     CHECK(WebsiteStore::find(store2->snapshot(), "shop") == nullptr);
-    CHECK_EQ(
-        sync_wait(svc.dispatch(signed_req("PUT", "/shop", xml, {{"website", ""}}))).status,
-        200);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/shop", xml, {{"website", ""}}))).status, 200);
     sync_wait(store2->sync_now());
     CHECK(WebsiteStore::find(store2->snapshot(), "shop") != nullptr);
 
     // Statically configured buckets refuse mutation (config file owns them)
     CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/fixed"))).status, 200);
     svc.set_website_store(WebsiteStore::make_static({{"fixed", "index.html", ""}}));
-    CHECK_EQ(
-        sync_wait(svc.dispatch(signed_req("PUT", "/fixed", xml, {{"website", ""}}))).status,
-        405);
-    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/fixed", "", {{"website", ""}})))
-                 .status,
-             405);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("PUT", "/fixed", xml, {{"website", ""}}))).status, 405);
+    CHECK_EQ(sync_wait(svc.dispatch(signed_req("DELETE", "/fixed", "", {{"website", ""}}))).status, 405);
 }
 
 // Static website hosting phase 3: x-amz-website-redirect-location — stored/echoed like
@@ -666,7 +640,6 @@ TEST(service_website_redirect_location) {
 
 // ---------- Additional coverage for docs/s3-protocol.md ----------
 
-
 TEST(service_multipart_flow) {
     auto svc = make_service_noauth();
     svc.set_min_part_size(0);  // this case tests the flow, not the 5MiB rule (see service_multipart_constraints)
@@ -679,12 +652,12 @@ TEST(service_multipart_flow) {
     CHECK(!uid.empty());
 
     // Two parts
-    auto p1 = sync_wait(svc.dispatch(
-        make_req("PUT", "/bkt/mp.bin", "hello ", {{"partNumber", "1"}, {"uploadId", uid}})));
+    auto p1 = sync_wait(
+        svc.dispatch(make_req("PUT", "/bkt/mp.bin", "hello ", {{"partNumber", "1"}, {"uploadId", uid}})));
     CHECK_EQ(p1.status, 200);
     std::string etag1 = *p1.headers.get("ETag");
-    auto p2 = sync_wait(svc.dispatch(
-        make_req("PUT", "/bkt/mp.bin", "world", {{"partNumber", "2"}, {"uploadId", uid}})));
+    auto p2 = sync_wait(
+        svc.dispatch(make_req("PUT", "/bkt/mp.bin", "world", {{"partNumber", "2"}, {"uploadId", uid}})));
     std::string etag2 = *p2.headers.get("ETag");
 
     // ListParts / ListMultipartUploads
@@ -697,12 +670,16 @@ TEST(service_multipart_flow) {
     CHECK(contains(body_of(lu), "<UploadId>" + uid + "</UploadId>"));
 
     // Complete (XML request body)
-    std::string cxml = "<CompleteMultipartUpload>"
-                       "<Part><PartNumber>1</PartNumber><ETag>" + etag1 + "</ETag></Part>"
-                       "<Part><PartNumber>2</PartNumber><ETag>" + etag2 + "</ETag></Part>"
-                       "</CompleteMultipartUpload>";
-    auto done = sync_wait(svc.dispatch(
-        make_req("POST", "/bkt/mp.bin", cxml, {{"uploadId", uid}})));
+    std::string cxml =
+        "<CompleteMultipartUpload>"
+        "<Part><PartNumber>1</PartNumber><ETag>" +
+        etag1 +
+        "</ETag></Part>"
+        "<Part><PartNumber>2</PartNumber><ETag>" +
+        etag2 +
+        "</ETag></Part>"
+        "</CompleteMultipartUpload>";
+    auto done = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", cxml, {{"uploadId", uid}})));
     CHECK_EQ(done.status, 200);
     CHECK(contains(xelem(body_of(done), "ETag"), "-2"));  // composite ETag rule
 
@@ -710,24 +687,22 @@ TEST(service_multipart_flow) {
     CHECK_EQ(body_of(get), "hello world");
 
     // Abort path + upload gone after completion
-    auto again = sync_wait(svc.dispatch(
-        make_req("POST", "/bkt/mp.bin", cxml, {{"uploadId", uid}})));
+    auto again = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", cxml, {{"uploadId", uid}})));
     CHECK_EQ(again.status, 404);  // NoSuchUpload
     auto init2 = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
     std::string uid2 = xelem(body_of(init2), "UploadId");
-    auto ab = sync_wait(svc.dispatch(
-        make_req("DELETE", "/bkt/mp.bin", "", {{"uploadId", uid2}})));
+    auto ab = sync_wait(svc.dispatch(make_req("DELETE", "/bkt/mp.bin", "", {{"uploadId", uid2}})));
     CHECK_EQ(ab.status, 204);
 }
 
 TEST(service_delete_objects_batch) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
-    for (auto* k : {"a", "b", "c"})
-        sync_wait(svc.dispatch(make_req("PUT", std::string("/bkt/") + k, "x")));
+    for (auto* k : {"a", "b", "c"}) sync_wait(svc.dispatch(make_req("PUT", std::string("/bkt/") + k, "x")));
 
-    std::string xml = "<Delete><Object><Key>a</Key></Object>"
-                      "<Object><Key>b</Key></Object></Delete>";
+    std::string xml =
+        "<Delete><Object><Key>a</Key></Object>"
+        "<Object><Key>b</Key></Object></Delete>";
     auto resp = sync_wait(svc.dispatch(make_delete_req("/bkt", xml, {{"delete", ""}})));
     CHECK_EQ(resp.status, 200);
     auto body = body_of(resp);
@@ -886,8 +861,7 @@ TEST(service_backend_metrics_appended) {
     auto metrics = sync_wait(svc.dispatch(make_req("GET", "/-/metrics")));
     CHECK_EQ(metrics.status, 200);
     CHECK(contains(metrics.small_body, "lights3_requests_total"));
-    CHECK(contains(metrics.small_body,
-                   "lights3_duostore_gc_runs_total{backend=\"duo1\"} 2\n"));
+    CHECK(contains(metrics.small_body, "lights3_duostore_gc_runs_total{backend=\"duo1\"} 2\n"));
 }
 
 // ---------- Regression cases found during review ----------
@@ -898,13 +872,11 @@ TEST(service_version_id_rejected) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/k", "keep me")));
 
-    auto del = sync_wait(
-        svc.dispatch(make_req("DELETE", "/bkt/k", "", {{"versionId", "abc"}})));
+    auto del = sync_wait(svc.dispatch(make_req("DELETE", "/bkt/k", "", {{"versionId", "abc"}})));
     CHECK_EQ(del.status, 501);
     auto get = sync_wait(svc.dispatch(make_req("GET", "/bkt/k")));
     CHECK_EQ(get.status, 200);  // object was not deleted by mistake
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "",
-                                             {{"versionId", "abc"}}))).status, 501);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/k", "", {{"versionId", "abc"}}))).status, 501);
 }
 
 // HEAD + Range: returns 206/Content-Range, aligned with GET; unsatisfiable → 416
@@ -965,19 +937,16 @@ TEST(service_max_keys_clamp_and_encoding_type) {
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
     sync_wait(svc.dispatch(make_req("PUT", "/bkt/a b.txt", "x")));
 
-    auto big = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"max-keys", "2147483647"}})));
+    auto big = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"max-keys", "2147483647"}})));
     CHECK_EQ(big.status, 200);
     CHECK(contains(body_of(big), "<MaxKeys>1000</MaxKeys>"));
 
-    auto enc = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"encoding-type", "url"}})));
+    auto enc = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"encoding-type", "url"}})));
     auto encb = body_of(enc);
     CHECK(contains(encb, "<EncodingType>url</EncodingType>"));
     CHECK(contains(encb, "<Key>a%20b.txt</Key>"));
 
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt", "",
-                                             {{"encoding-type", "zzz"}}))).status, 400);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"encoding-type", "zzz"}}))).status, 400);
 }
 
 // Control characters in object keys are rejected (0x01 makes the ListObjects XML unparseable
@@ -1020,8 +989,7 @@ TEST(service_ipv6_host_literal) {
 // arbitrary file reads
 TEST(service_vhost_bucket_name_validated) {
     S3Service svc(make_router(), SigV4Authenticator::build(AuthConfig{}), "s3.local");
-    for (const char* host : {"/etc.s3.local", "b/../.sys.s3.local", "b/x.s3.local",
-                             "ab.s3.local"}) {
+    for (const char* host : {"/etc.s3.local", "b/../.sys.s3.local", "b/x.s3.local", "ab.s3.local"}) {
         auto req = make_req("GET", "/passwd");
         req.headers.set("Host", host);
         auto resp = sync_wait(svc.dispatch(std::move(req)));
@@ -1097,8 +1065,7 @@ TEST(service_unsupported_headers_rejected) {
         return sync_wait(svc.dispatch(std::move(req)));
     };
     // x-amz-tagging left this list with roadmap §2.5 (now a first-class metadata field)
-    for (const char* h : {"x-amz-server-side-encryption",
-                          "x-amz-server-side-encryption-customer-algorithm",
+    for (const char* h : {"x-amz-server-side-encryption", "x-amz-server-side-encryption-customer-algorithm",
                           "x-amz-object-lock-mode", "x-amz-grant-read"}) {
         auto resp = try_put(h, "whatever");
         CHECK_EQ(resp.status, 501);
@@ -1122,8 +1089,7 @@ TEST(service_sts_token_no_longer_501) {
     auto resp = sync_wait(svc.dispatch(std::move(req)));
     CHECK_EQ(resp.status, 404);  // NoSuchKey, not NotImplemented
 
-    auto q = sync_wait(
-        svc.dispatch(make_req("GET", "/bkt/nothere", "", {{"X-Amz-Security-Token", "tok"}})));
+    auto q = sync_wait(svc.dispatch(make_req("GET", "/bkt/nothere", "", {{"X-Amz-Security-Token", "tok"}})));
     CHECK_EQ(q.status, 404);
 }
 
@@ -1144,8 +1110,8 @@ TEST(service_query_whitelist) {
 
     // Whitelisted params are unaffected; fetch-owner is implemented (§5.5), no longer "allowed
     // but ignored"
-    auto ls = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"prefix", ""}, {"fetch-owner", "true"}})));
+    auto ls = sync_wait(
+        svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"prefix", ""}, {"fetch-owner", "true"}})));
     CHECK_EQ(ls.status, 200);
     CHECK(contains(ls.small_body, "<Owner>"));
 
@@ -1210,26 +1176,23 @@ TEST(service_malformed_range_ignored) {
 TEST(service_v2_token_opaque_roundtrip) {
     auto svc = make_service_noauth();
     sync_wait(svc.dispatch(make_req("PUT", "/bkt")));
-    for (auto* k : {"a", "b", "c"})
-        sync_wait(svc.dispatch(make_req("PUT", std::string("/bkt/") + k, "x")));
+    for (auto* k : {"a", "b", "c"}) sync_wait(svc.dispatch(make_req("PUT", std::string("/bkt/") + k, "x")));
 
-    auto p1 = sync_wait(
-        svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"max-keys", "2"}})));
+    auto p1 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"max-keys", "2"}})));
     auto b1 = body_of(p1);
     CHECK(contains(b1, "<IsTruncated>true</IsTruncated>"));
     std::string tok = xelem(b1, "NextContinuationToken");
     CHECK(!tok.empty());
     CHECK(tok != "b");  // opaque (base64), no longer a plaintext key
 
-    auto p2 = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"continuation-token", tok}})));
+    auto p2 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"continuation-token", tok}})));
     auto b2 = body_of(p2);
     CHECK(contains(b2, "<Key>c</Key>"));
     CHECK(!contains(b2, "<Key>b</Key>"));
 
     // An undecodable token → InvalidArgument, rather than being silently used as a plaintext key
-    auto bad = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"continuation-token", "!!!"}})));
+    auto bad = sync_wait(
+        svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"continuation-token", "!!!"}})));
     CHECK_EQ(bad.status, 400);
     CHECK(contains(bad.small_body, "InvalidArgument"));
 }
@@ -1242,21 +1205,19 @@ TEST(service_delete_objects_malformed_inputs) {
 
     // An empty list and a missing <Key> are both malformed requests: the whole batch is
     // MalformedXML, not a 200 with an empty result
-    auto empty = sync_wait(
-        svc.dispatch(make_delete_req("/bkt", "<Delete></Delete>", {{"delete", ""}})));
+    auto empty = sync_wait(svc.dispatch(make_delete_req("/bkt", "<Delete></Delete>", {{"delete", ""}})));
     CHECK_EQ(empty.status, 400);
     CHECK(contains(empty.small_body, "MalformedXML"));
 
-    auto nokey = sync_wait(svc.dispatch(
-        make_delete_req("/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
+    auto nokey = sync_wait(
+        svc.dispatch(make_delete_req("/bkt", "<Delete><Object></Object></Delete>", {{"delete", ""}})));
     CHECK_EQ(nokey.status, 400);
     CHECK(contains(nokey.small_body, "MalformedXML"));
 
     // Silently ignoring <VersionId> would turn "delete this version" into "delete the current
     // object": 501, and the object stays
     auto ver = sync_wait(svc.dispatch(make_delete_req(
-        "/bkt", "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>",
-        {{"delete", ""}})));
+        "/bkt", "<Delete><Object><Key>a</Key><VersionId>v1</VersionId></Object></Delete>", {{"delete", ""}})));
     CHECK_EQ(ver.status, 501);
     CHECK(contains(ver.small_body, "NotImplemented"));
     CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/bkt/a"))).status, 200);
@@ -1323,11 +1284,10 @@ TEST(service_response_override_params) {
     put.headers.add("Content-Type", "application/octet-stream");
     sync_wait(svc.dispatch(std::move(put)));
 
-    auto r = sync_wait(svc.dispatch(make_req(
-        "GET", "/bkt/o.bin", "",
-        {{"response-content-type", "text/plain"},
-         {"response-content-disposition", "attachment; filename=\"x.txt\""},
-         {"response-cache-control", "no-store"}})));
+    auto r = sync_wait(svc.dispatch(make_req("GET", "/bkt/o.bin", "",
+                                             {{"response-content-type", "text/plain"},
+                                              {"response-content-disposition", "attachment; filename=\"x.txt\""},
+                                              {"response-cache-control", "no-store"}})));
     CHECK_EQ(r.status, 200);
     CHECK_EQ(*r.headers.get("Content-Type"), "text/plain");  // overrides the object's own value
     CHECK_EQ(*r.headers.get("Content-Disposition"), "attachment; filename=\"x.txt\"");
@@ -1336,8 +1296,8 @@ TEST(service_response_override_params) {
 
     // Query values are attacker-controlled: CR/LF must be blocked before they reach response
     // headers (response splitting)
-    auto inj = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt/o.bin", "", {{"response-content-type", "t\r\nX-Injected: 1"}})));
+    auto inj = sync_wait(
+        svc.dispatch(make_req("GET", "/bkt/o.bin", "", {{"response-content-type", "t\r\nX-Injected: 1"}})));
     CHECK_EQ(inj.status, 400);
 }
 
@@ -1351,7 +1311,7 @@ TEST(service_list_marker_semantics) {
     // <Marker> must be empty
     auto v1 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"start-after", "b"}})));
     CHECK_EQ(v1.status, 200);
-    CHECK(contains(v1.small_body, "<Key>a</Key>"));      // start-after did not take effect
+    CHECK(contains(v1.small_body, "<Key>a</Key>"));       // start-after did not take effect
     CHECK(contains(v1.small_body, "<Marker></Marker>"));  // don't echo a value the client never sent
 
     auto v1m = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"marker", "b"}})));
@@ -1360,8 +1320,7 @@ TEST(service_list_marker_semantics) {
     CHECK(contains(v1m.small_body, "<Marker>b</Marker>"));
 
     // V2 honors start-after and echoes <StartAfter>
-    auto v2 = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"list-type", "2"}, {"start-after", "a"}})));
+    auto v2 = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"list-type", "2"}, {"start-after", "a"}})));
     CHECK(!contains(v2.small_body, "<Key>a</Key>"));
     CHECK(contains(v2.small_body, "<StartAfter>a</StartAfter>"));
     CHECK(!contains(v2.small_body, "<Marker>"));
@@ -1403,14 +1362,14 @@ TEST(service_create_bucket_location_constraint) {
     // §5.4: previously the request body was never read; cross-region bucket creation silently
     // succeeded
     auto svc = make_service_noauth();
-    auto ok = sync_wait(svc.dispatch(make_req(
-        "PUT", "/loc1", "<CreateBucketConfiguration><LocationConstraint></LocationConstraint>"
-                      "</CreateBucketConfiguration>")));
+    auto ok = sync_wait(svc.dispatch(make_req("PUT", "/loc1",
+                                              "<CreateBucketConfiguration><LocationConstraint></LocationConstraint>"
+                                              "</CreateBucketConfiguration>")));
     CHECK_EQ(ok.status, 200);  // empty constraint = us-east-1 = this implementation's default region
 
-    auto bad = sync_wait(svc.dispatch(make_req(
-        "PUT", "/loc2", "<CreateBucketConfiguration><LocationConstraint>eu-west-1"
-                      "</LocationConstraint></CreateBucketConfiguration>")));
+    auto bad = sync_wait(svc.dispatch(make_req("PUT", "/loc2",
+                                               "<CreateBucketConfiguration><LocationConstraint>eu-west-1"
+                                               "</LocationConstraint></CreateBucketConfiguration>")));
     CHECK_EQ(bad.status, 400);
     CHECK(contains(bad.small_body, "<Code>InvalidLocationConstraint</Code>"));
     // after rejection the bucket must not exist
@@ -1476,8 +1435,7 @@ TEST(util_crc64nvme_vector) {
     // CRC-64/NVME catalog check value ("123456789" -> 0xAE8B14860A799888) + incremental chaining
     CHECK_EQ(util::crc64nvme_of(std::string_view("123456789")), 0xAE8B14860A799888ull);
     auto part = util::crc64nvme_of(std::string_view("12345"));
-    CHECK_EQ(util::crc64nvme_update(
-                 part, std::span(reinterpret_cast<const std::byte*>("6789"), 4)),
+    CHECK_EQ(util::crc64nvme_update(part, std::span(reinterpret_cast<const std::byte*>("6789"), 4)),
              0xAE8B14860A799888ull);
 }
 
@@ -1560,46 +1518,44 @@ TEST(service_multipart_constraints) {
     auto init = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
     std::string uid = xelem(body_of(init), "UploadId");
     auto put_part = [&](int no, const std::string& data) {
-        auto r = sync_wait(svc.dispatch(make_req(
-            "PUT", "/bkt/mp.bin", data, {{"partNumber", std::to_string(no)}, {"uploadId", uid}})));
+        auto r = sync_wait(svc.dispatch(
+            make_req("PUT", "/bkt/mp.bin", data, {{"partNumber", std::to_string(no)}, {"uploadId", uid}})));
         std::string e = *r.headers.get("ETag");  // strip quotes: the complete XML carries ETags unquoted
         if (e.size() >= 2 && e.front() == '"') e = e.substr(1, e.size() - 2);
         return e;
     };
-    std::string e1 = put_part(1, "small");                          // 5 bytes, not the last part
+    std::string e1 = put_part(1, "small");  // 5 bytes, not the last part
     std::string e2 = put_part(2, "tail");
     auto complete_xml = [](std::vector<std::pair<int, std::string>> ps) {
         std::string x = "<CompleteMultipartUpload>";
         for (auto& [n, e] : ps)
-            x += "<Part><PartNumber>" + std::to_string(n) + "</PartNumber><ETag>" + e +
-                 "</ETag></Part>";
+            x += "<Part><PartNumber>" + std::to_string(n) + "</PartNumber><ETag>" + e + "</ETag></Part>";
         return x + "</CompleteMultipartUpload>";
     };
 
     // A non-final part under 5MiB → EntityTooSmall (otherwise 10000 one-byte parts could be
     // committed)
-    auto small = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}, {2, e2}}),
-                                                 {{"uploadId", uid}})));
+    auto small = sync_wait(
+        svc.dispatch(make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}, {2, e2}}), {{"uploadId", uid}})));
     CHECK_EQ(small.status, 400);
     CHECK(contains(small.small_body, "<Code>EntityTooSmall</Code>"));
 
     // Out of order → InvalidPartOrder (previously InvalidPart, which would send clients off to
     // re-upload parts)
-    auto unordered = sync_wait(svc.dispatch(make_req(
-        "POST", "/bkt/mp.bin", complete_xml({{2, e2}, {1, e1}}), {{"uploadId", uid}})));
+    auto unordered = sync_wait(
+        svc.dispatch(make_req("POST", "/bkt/mp.bin", complete_xml({{2, e2}, {1, e1}}), {{"uploadId", uid}})));
     CHECK_EQ(unordered.status, 400);
     CHECK(contains(unordered.small_body, "<Code>InvalidPartOrder</Code>"));
 
     // Out-of-range part numbers must be re-checked on the complete side too (the upload side
     // validates a different input)
-    auto oob = sync_wait(svc.dispatch(make_req(
-        "POST", "/bkt/mp.bin", complete_xml({{99999, e1}}), {{"uploadId", uid}})));
+    auto oob = sync_wait(
+        svc.dispatch(make_req("POST", "/bkt/mp.bin", complete_xml({{99999, e1}}), {{"uploadId", uid}})));
     CHECK_EQ(oob.status, 400);
 
     // The last part is exempt from the minimum size: a single-part upload succeeds as usual,
     // and Location is a full URL
-    auto one = sync_wait(svc.dispatch(
-        make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}}), {{"uploadId", uid}})));
+    auto one = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", complete_xml({{1, e1}}), {{"uploadId", uid}})));
     CHECK_EQ(one.status, 200);
     CHECK(contains(one.small_body, "<Location>http://localhost/bkt/mp.bin</Location>"));
 }
@@ -1615,12 +1571,11 @@ TEST(service_multipart_listing_pagination) {
     auto init = sync_wait(svc.dispatch(make_req("POST", "/bkt/mp.bin", "", {{"uploads", ""}})));
     std::string uid = xelem(body_of(init), "UploadId");
     for (int i = 1; i <= 3; ++i)
-        sync_wait(svc.dispatch(make_req("PUT", "/bkt/mp.bin", "x",
-                                        {{"partNumber", std::to_string(i)}, {"uploadId", uid}})));
+        sync_wait(
+            svc.dispatch(make_req("PUT", "/bkt/mp.bin", "x", {{"partNumber", std::to_string(i)}, {"uploadId", uid}})));
 
     // ListParts: max-parts takes effect, truncation is reported truthfully, and the cursor resumes
-    auto p1 = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt/mp.bin", "", {{"uploadId", uid}, {"max-parts", "2"}})));
+    auto p1 = sync_wait(svc.dispatch(make_req("GET", "/bkt/mp.bin", "", {{"uploadId", uid}, {"max-parts", "2"}})));
     std::string b1 = body_of(p1);
     CHECK(contains(b1, "<IsTruncated>true</IsTruncated>"));
     CHECK(contains(b1, "<MaxParts>2</MaxParts>"));
@@ -1628,9 +1583,8 @@ TEST(service_multipart_listing_pagination) {
     CHECK(contains(b1, "<PartNumber>1</PartNumber>"));
     CHECK(!contains(b1, "<PartNumber>3</PartNumber>"));
 
-    auto p2 = sync_wait(svc.dispatch(make_req(
-        "GET", "/bkt/mp.bin", "",
-        {{"uploadId", uid}, {"max-parts", "2"}, {"part-number-marker", "2"}})));
+    auto p2 = sync_wait(svc.dispatch(
+        make_req("GET", "/bkt/mp.bin", "", {{"uploadId", uid}, {"max-parts", "2"}, {"part-number-marker", "2"}})));
     std::string b2 = body_of(p2);
     CHECK(contains(b2, "<IsTruncated>false</IsTruncated>"));
     CHECK(contains(b2, "<PartNumber>3</PartNumber>"));
@@ -1638,8 +1592,7 @@ TEST(service_multipart_listing_pagination) {
 
     // ListMultipartUploads: three uploads, paged by (key, upload_id) with no duplicates or gaps
     std::vector<std::string> keys{"a.bin", "b.bin", "c.bin"};
-    for (auto& k : keys)
-        sync_wait(svc.dispatch(make_req("POST", "/bkt/" + k, "", {{"uploads", ""}})));
+    for (auto& k : keys) sync_wait(svc.dispatch(make_req("POST", "/bkt/" + k, "", {{"uploads", ""}})));
 
     std::set<std::string> seen;
     std::string km, im;
@@ -1669,26 +1622,23 @@ TEST(service_multipart_listing_pagination) {
     CHECK(pages > 1);                  // actually paged
 
     // prefix filtering and delimiter grouping
-    auto pref = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"uploads", ""}, {"prefix", "a."}})));
+    auto pref = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"uploads", ""}, {"prefix", "a."}})));
     CHECK(contains(body_of(pref), "<Key>a.bin</Key>"));
     CHECK(!contains(body_of(pref), "<Key>b.bin</Key>"));
 
     // upload-id-marker on its own is meaningless (the cursor is a pair)
-    auto bad = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
+    auto bad = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"uploads", ""}, {"upload-id-marker", "x"}})));
     CHECK_EQ(bad.status, 400);
 
     // encoding-type=url (docs/archive/issues.md T13): previously the parameter was accepted but never
     // encoded -- a silent wrong answer
     sync_wait(svc.dispatch(make_req("POST", "/bkt/enc me.bin", "", {{"uploads", ""}})));
-    auto encp = sync_wait(svc.dispatch(make_req(
-        "GET", "/bkt", "", {{"uploads", ""}, {"encoding-type", "url"}, {"prefix", "enc "}})));
+    auto encp = sync_wait(
+        svc.dispatch(make_req("GET", "/bkt", "", {{"uploads", ""}, {"encoding-type", "url"}, {"prefix", "enc "}})));
     CHECK(contains(body_of(encp), "<EncodingType>url</EncodingType>"));
     CHECK(contains(body_of(encp), "<Key>enc%20me.bin</Key>"));
     CHECK(contains(body_of(encp), "<Prefix>enc%20</Prefix>"));
-    auto bad_enc = sync_wait(svc.dispatch(
-        make_req("GET", "/bkt", "", {{"uploads", ""}, {"encoding-type", "zzz"}})));
+    auto bad_enc = sync_wait(svc.dispatch(make_req("GET", "/bkt", "", {{"uploads", ""}, {"encoding-type", "zzz"}})));
     CHECK_EQ(bad_enc.status, 400);
 }
 
@@ -1764,23 +1714,21 @@ TEST(service_list_parts_encoding_type) {
     auto svc = make_service_noauth();
     svc.set_min_part_size(0);
     sync_wait(svc.dispatch(make_req("PUT", "/enc")));
-    auto init =
-        sync_wait(svc.dispatch(make_req("POST", "/enc/a b/c.bin", "", {{"uploads", ""}})));
+    auto init = sync_wait(svc.dispatch(make_req("POST", "/enc/a b/c.bin", "", {{"uploads", ""}})));
     std::string uid = xelem(body_of(init), "UploadId");
-    sync_wait(svc.dispatch(
-        make_req("PUT", "/enc/a b/c.bin", "x", {{"partNumber", "1"}, {"uploadId", uid}})));
+    sync_wait(svc.dispatch(make_req("PUT", "/enc/a b/c.bin", "x", {{"partNumber", "1"}, {"uploadId", uid}})));
 
     // encoding-type=url: Key comes back URL-encoded (slash preserved), EncodingType echoed
-    auto lp = sync_wait(svc.dispatch(
-        make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "url"}})));
+    auto lp = sync_wait(
+        svc.dispatch(make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "url"}})));
     CHECK_EQ(lp.status, 200);
     std::string b = body_of(lp);
     CHECK(contains(b, "<Key>a%20b/c.bin</Key>"));
     CHECK(contains(b, "<EncodingType>url</EncodingType>"));
 
     // Other values rejected, same as the two bucket listings
-    auto bad = sync_wait(svc.dispatch(
-        make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "xml"}})));
+    auto bad = sync_wait(
+        svc.dispatch(make_req("GET", "/enc/a b/c.bin", "", {{"uploadId", uid}, {"encoding-type", "xml"}})));
     CHECK_EQ(bad.status, 400);
 }
 
@@ -1791,8 +1739,7 @@ TEST(service_list_uploads_arbitrary_delimiter) {
         sync_wait(svc.dispatch(make_req("POST", std::string("/deli/") + k, "", {{"uploads", ""}})));
 
     // Non-'/' delimiters group generically (previously 501)
-    auto resp = sync_wait(
-        svc.dispatch(make_req("GET", "/deli", "", {{"uploads", ""}, {"delimiter", "|"}})));
+    auto resp = sync_wait(svc.dispatch(make_req("GET", "/deli", "", {{"uploads", ""}, {"delimiter", "|"}})));
     CHECK_EQ(resp.status, 200);
     std::string b = body_of(resp);
     CHECK(contains(b, "<Prefix>x|</Prefix>"));
@@ -1824,15 +1771,12 @@ struct CorsEnv {
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
         BucketsConfig bcfg;
         bcfg.default_backend = "mem";
-        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)),
-                                          auth);
+        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)), auth);
         svc->set_credential_store(cred_store);
         cors_store = sync_wait(CorsStore::load(backend));
         svc->set_cors_store(cors_store);
     }
-    http::HttpResponse call(http::HttpRequest req) {
-        return sync_wait(svc->dispatch(std::move(req)));
-    }
+    http::HttpResponse call(http::HttpRequest req) { return sync_wait(svc->dispatch(std::move(req))); }
     http::HttpResponse signed_call(std::string method, std::string path, std::string body = "",
                                    std::vector<std::pair<std::string, std::string>> query = {}) {
         auto r = make_req(std::move(method), std::move(path), body, std::move(query));
@@ -1894,10 +1838,7 @@ TEST(service_cors_config_api) {
                              {{"cors", ""}})
                  .status,
              400);
-    CHECK_EQ(env.signed_call("PUT", "/site", "<CORSConfiguration></CORSConfiguration>",
-                             {{"cors", ""}})
-                 .status,
-             400);
+    CHECK_EQ(env.signed_call("PUT", "/site", "<CORSConfiguration></CORSConfiguration>", {{"cors", ""}}).status, 400);
     CHECK_EQ(env.signed_call("PUT", "/nobucket", kCorsXml, {{"cors", ""}}).status, 404);
 
     // DELETE revokes, idempotent
@@ -1911,8 +1852,7 @@ TEST(service_cors_preflight) {
     CHECK_EQ(env.signed_call("PUT", "/site").status, 200);
     CHECK_EQ(env.signed_call("PUT", "/site", kCorsXml, {{"cors", ""}}).status, 200);
 
-    auto preflight = [&](std::string path, std::string origin, std::string method,
-                         std::string headers = "") {
+    auto preflight = [&](std::string path, std::string origin, std::string method, std::string headers = "") {
         auto r = make_req("OPTIONS", std::move(path));
         if (!origin.empty()) r.headers.add("Origin", origin);
         if (!method.empty()) r.headers.add("Access-Control-Request-Method", method);
@@ -1921,15 +1861,12 @@ TEST(service_cors_preflight) {
     };
 
     // Matching rule: unsigned OPTIONS answers 200 with the full CORS header set
-    auto ok = preflight("/site/some/key.js", "http://app.example.com", "PUT",
-                        "content-type, x-amz-meta-x");
+    auto ok = preflight("/site/some/key.js", "http://app.example.com", "PUT", "content-type, x-amz-meta-x");
     CHECK_EQ(ok.status, 200);
-    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""),
-             "http://app.example.com");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""), "http://app.example.com");
     CHECK_EQ(ok.headers.get("Access-Control-Allow-Credentials").value_or(""), "true");
     CHECK_EQ(ok.headers.get("Access-Control-Allow-Methods").value_or(""), "GET, PUT");
-    CHECK_EQ(ok.headers.get("Access-Control-Allow-Headers").value_or(""),
-             "content-type, x-amz-meta-x");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Headers").value_or(""), "content-type, x-amz-meta-x");
     CHECK_EQ(ok.headers.get("Access-Control-Expose-Headers").value_or(""), "ETag");
     CHECK_EQ(ok.headers.get("Access-Control-Max-Age").value_or(""), "300");
 
@@ -1962,16 +1899,14 @@ TEST(service_cors_actual_request_headers) {
     // Matching origin: Allow-Origin + Expose-Headers + Vary injected on success
     auto ok = with_origin("GET", "/site/o.txt", "http://app.example.com");
     CHECK_EQ(ok.status, 200);
-    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""),
-             "http://app.example.com");
+    CHECK_EQ(ok.headers.get("Access-Control-Allow-Origin").value_or(""), "http://app.example.com");
     CHECK_EQ(ok.headers.get("Access-Control-Expose-Headers").value_or(""), "ETag");
     CHECK_EQ(ok.headers.get("Vary").value_or(""), "Origin");
 
     // ...and on errors too (the browser cannot surface the 404 without it)
     auto err = with_origin("GET", "/site/missing", "http://app.example.com");
     CHECK_EQ(err.status, 404);
-    CHECK_EQ(err.headers.get("Access-Control-Allow-Origin").value_or(""),
-             "http://app.example.com");
+    CHECK_EQ(err.headers.get("Access-Control-Allow-Origin").value_or(""), "http://app.example.com");
 
     // Non-matching origin or method: no CORS headers
     auto other = with_origin("GET", "/site/o.txt", "http://evil.net");
@@ -1999,15 +1934,12 @@ struct WebEnv {
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
         BucketsConfig bcfg;
         bcfg.default_backend = "mem";
-        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)),
-                                          auth);
+        svc = std::make_unique<S3Service>(storage::BucketRouter::build(bcfg, std::move(bmap)), auth);
         svc->set_credential_store(cred_store);
         wstore = sync_wait(WebsiteStore::load(backend, std::move(statics)));
         svc->set_website_store(wstore);
     }
-    http::HttpResponse call(http::HttpRequest req) {
-        return sync_wait(svc->dispatch(std::move(req)));
-    }
+    http::HttpResponse call(http::HttpRequest req) { return sync_wait(svc->dispatch(std::move(req))); }
     http::HttpResponse signed_call(std::string method, std::string path, std::string body = "",
                                    std::vector<std::pair<std::string, std::string>> query = {}) {
         auto r = make_req(std::move(method), std::move(path), body, std::move(query));
@@ -2139,9 +2071,7 @@ TEST(service_website_anon_gates) {
     // Query-flag routes (?uploadId is ListParts) stay authenticated-only
     CHECK_EQ(env.call(make_req("GET", "/gate/f.txt", "", {{"uploadId", "u1"}})).status, 403);
     // response-* overrides refused anonymously
-    CHECK_EQ(env.call(make_req("GET", "/gate/f.txt", "",
-                               {{"response-content-disposition", "attachment"}}))
-                 .status,
+    CHECK_EQ(env.call(make_req("GET", "/gate/f.txt", "", {{"response-content-disposition", "attachment"}})).status,
              400);
 }
 
@@ -2188,8 +2118,7 @@ TEST(service_checksum_persist_and_echo) {
     // Two different checksum headers on one request are refused
     auto dup = make_req("PUT", "/ckb/dup.bin", "hello");
     dup.headers.add("x-amz-checksum-crc32", "NhCmhg==");
-    dup.headers.add("x-amz-checksum-sha256",
-                    "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=");
+    dup.headers.add("x-amz-checksum-sha256", "LPJNul+wow4m6DsqxbninhsWHlwfp0JecwQzYpOLmCQ=");
     CHECK_EQ(sync_wait(svc.dispatch(std::move(dup))).status, 400);
 
     // Copy preserves the checksum (bytes unchanged)
@@ -2239,23 +2168,20 @@ TEST(service_checksum_multipart_composite) {
     CHECK(contains(lpb, "<ChecksumCRC32>OncRQw==</ChecksumCRC32>"));
 
     // Complete with a WRONG per-part checksum claim: BadDigest, nothing committed
-    std::string bad_xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
-                          etag1 + "</ETag><ChecksumCRC32>OncRQw==</ChecksumCRC32></Part>" +
-                          "<Part><PartNumber>2</PartNumber><ETag>" + etag2 +
-                          "</ETag></Part></CompleteMultipartUpload>";
-    auto bad = sync_wait(
-        svc.dispatch(make_req("POST", "/ckm/o.bin", bad_xml, {{"uploadId", uid}})));
+    std::string bad_xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + etag1 +
+                          "</ETag><ChecksumCRC32>OncRQw==</ChecksumCRC32></Part>" +
+                          "<Part><PartNumber>2</PartNumber><ETag>" + etag2 + "</ETag></Part></CompleteMultipartUpload>";
+    auto bad = sync_wait(svc.dispatch(make_req("POST", "/ckm/o.bin", bad_xml, {{"uploadId", uid}})));
     CHECK_EQ(bad.status, 400);
     CHECK(contains(body_of(bad), "BadDigest"));
 
     // Correct complete: composite = crc32(raw1 || raw2) + "-2"
-    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
-                      etag1 + "</ETag><ChecksumCRC32>NhCmhg==</ChecksumCRC32></Part>" +
+    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + etag1 +
+                      "</ETag><ChecksumCRC32>NhCmhg==</ChecksumCRC32></Part>" +
                       "<Part><PartNumber>2</PartNumber><ETag>" + etag2 +
                       "</ETag><ChecksumCRC32>OncRQw==</ChecksumCRC32></Part>"
                       "</CompleteMultipartUpload>";
-    auto done = sync_wait(
-        svc.dispatch(make_req("POST", "/ckm/o.bin", xml, {{"uploadId", uid}})));
+    auto done = sync_wait(svc.dispatch(make_req("POST", "/ckm/o.bin", xml, {{"uploadId", uid}})));
     CHECK_EQ(done.status, 200);
     std::string db = body_of(done);
     CHECK(contains(db, "<ChecksumCRC32>wpn7tg==-2</ChecksumCRC32>"));
@@ -2280,16 +2206,14 @@ TEST(service_get_object_part_number) {
     std::string etags[2];
     const char* datas[2] = {"hello", "world"};
     for (int i = 0; i < 2; ++i) {
-        auto r = sync_wait(svc.dispatch(make_req(
-            "PUT", "/pnb/mp", datas[i], {{"partNumber", std::to_string(i + 1)}, {"uploadId", uid}})));
+        auto r = sync_wait(svc.dispatch(
+            make_req("PUT", "/pnb/mp", datas[i], {{"partNumber", std::to_string(i + 1)}, {"uploadId", uid}})));
         etags[i] = r.headers.get("ETag").value_or("");
     }
-    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" +
-                      etags[0] + "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" +
-                      etags[1] + "</ETag></Part></CompleteMultipartUpload>";
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("POST", "/pnb/mp", xml, {{"uploadId", uid}})))
-                 .status,
-             200);
+    std::string xml = "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>" + etags[0] +
+                      "</ETag></Part><Part><PartNumber>2</PartNumber><ETag>" + etags[1] +
+                      "</ETag></Part></CompleteMultipartUpload>";
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("POST", "/pnb/mp", xml, {{"uploadId", uid}}))).status, 200);
 
     // Part 2 = bytes 5-9 of the 10-byte object
     auto g2 = sync_wait(svc.dispatch(make_req("GET", "/pnb/mp", "", {{"partNumber", "2"}})));
@@ -2317,9 +2241,7 @@ TEST(service_get_object_part_number) {
     CHECK_EQ(s1.status, 206);
     CHECK_EQ(body_of(s1), "abc");
     CHECK_EQ(s1.headers.get("x-amz-mp-parts-count").value_or(""), "1");
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/pnb/simple", "", {{"partNumber", "2"}})))
-                 .status,
-             416);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/pnb/simple", "", {{"partNumber", "2"}}))).status, 416);
 }
 
 // ---- roadmap §2.5: object tagging ----
@@ -2346,11 +2268,8 @@ TEST(service_object_tagging) {
     CHECK(contains(b, "<Value>data eng</Value>"));
 
     // PUT ?tagging replaces the set in place
-    const std::string one =
-        "<Tagging><TagSet><Tag><Key>only</Key><Value>v1</Value></Tag></TagSet></Tagging>";
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", one, {{"tagging", ""}})))
-                 .status,
-             200);
+    const std::string one = "<Tagging><TagSet><Tag><Key>only</Key><Value>v1</Value></Tag></TagSet></Tagging>";
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", one, {{"tagging", ""}}))).status, 200);
     auto gt2 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
     std::string b2 = body_of(gt2);
     CHECK(contains(b2, "<Key>only</Key>"));
@@ -2359,13 +2278,10 @@ TEST(service_object_tagging) {
     CHECK_EQ(get2.headers.get("x-amz-tagging-count").value_or(""), "1");
 
     // DELETE ?tagging clears; count header disappears
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("DELETE", "/tagb/o.txt", "", {{"tagging", ""}})))
-                 .status,
-             204);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("DELETE", "/tagb/o.txt", "", {{"tagging", ""}}))).status, 204);
     auto gt3 = sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt", "", {{"tagging", ""}})));
     CHECK(contains(body_of(gt3), "<TagSet></TagSet>"));
-    CHECK(!sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt"))).headers
-               .has("x-amz-tagging-count"));
+    CHECK(!sync_wait(svc.dispatch(make_req("GET", "/tagb/o.txt"))).headers.has("x-amz-tagging-count"));
 
     // Validation: 11 tags and duplicate keys are refused on both planes
     std::string many;
@@ -2379,15 +2295,10 @@ TEST(service_object_tagging) {
     const std::string dupxml =
         "<Tagging><TagSet><Tag><Key>a</Key><Value>1</Value></Tag>"
         "<Tag><Key>a</Key><Value>2</Value></Tag></TagSet></Tagging>";
-    CHECK_EQ(
-        sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", dupxml, {{"tagging", ""}})))
-            .status,
-        400);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("PUT", "/tagb/o.txt", dupxml, {{"tagging", ""}}))).status, 400);
 
     // Missing object → 404
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/tagb/none", "", {{"tagging", ""}})))
-                 .status,
-             404);
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/tagb/none", "", {{"tagging", ""}}))).status, 404);
 }
 
 // ---- roadmap §2.4: lifecycle minimal subset ----
@@ -2427,20 +2338,24 @@ TEST(service_bucket_lifecycle_api) {
 
     // Unsupported elements answer 501, malformed shapes 400
     auto expect = [&](const char* rule_xml, int status) {
-        std::string full = std::string("<LifecycleConfiguration>") + rule_xml +
-                           "</LifecycleConfiguration>";
+        std::string full = std::string("<LifecycleConfiguration>") + rule_xml + "</LifecycleConfiguration>";
         CHECK_EQ(env.signed_call("PUT", "/data", full, {{"lifecycle", ""}}).status, status);
     };
-    expect("<Rule><Status>Enabled</Status><Transition><Days>1</Days>"
-           "<StorageClass>GLACIER</StorageClass></Transition></Rule>", 501);
-    expect("<Rule><Filter><Tag><Key>k</Key><Value>v</Value></Tag></Filter>"
-           "<Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule>", 501);
-    expect("<Rule><Status>Enabled</Status><Expiration>"
-           "<Date>2030-01-01T00:00:00Z</Date></Expiration></Rule>", 501);
-    expect("<Rule><Status>Enabled</Status></Rule>", 400);           // no action
+    expect(
+        "<Rule><Status>Enabled</Status><Transition><Days>1</Days>"
+        "<StorageClass>GLACIER</StorageClass></Transition></Rule>",
+        501);
+    expect(
+        "<Rule><Filter><Tag><Key>k</Key><Value>v</Value></Tag></Filter>"
+        "<Status>Enabled</Status><Expiration><Days>1</Days></Expiration></Rule>",
+        501);
+    expect(
+        "<Rule><Status>Enabled</Status><Expiration>"
+        "<Date>2030-01-01T00:00:00Z</Date></Expiration></Rule>",
+        501);
+    expect("<Rule><Status>Enabled</Status></Rule>", 400);                 // no action
     expect("<Rule><Expiration><Days>1</Days></Expiration></Rule>", 400);  // no Status
-    expect("<Rule><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule>",
-           400);
+    expect("<Rule><Status>Enabled</Status><Expiration><Days>0</Days></Expiration></Rule>", 400);
 
     // DELETE revokes, idempotent
     CHECK_EQ(env.signed_call("DELETE", "/data", "", {{"lifecycle", ""}}).status, 204);
@@ -2480,13 +2395,11 @@ TEST(lifecycle_runner_pass) {
 
     // Ten days later: the prefixed objects expire and the stale upload is aborted;
     // out-of-prefix objects survive
-    runner.set_now_for_tests(
-        [] { return std::chrono::system_clock::now() + std::chrono::hours(24 * 10); });
+    runner.set_now_for_tests([] { return std::chrono::system_clock::now() + std::chrono::hours(24 * 10); });
     auto s1 = sync_wait(runner.run_once());
     CHECK_EQ(s1.objects_expired, uint64_t{2});
     CHECK_EQ(s1.uploads_aborted, uint64_t{1});
-    CHECK_THROWS_S3(sync_wait(backend->head_object("lcb", "old/a.log")),
-                    S3ErrorCode::NoSuchKey);
+    CHECK_THROWS_S3(sync_wait(backend->head_object("lcb", "old/a.log")), S3ErrorCode::NoSuchKey);
     CHECK_EQ(sync_wait(backend->head_object("lcb", "keep/c.txt")).size, uint64_t{1});
     auto uploads = sync_wait(backend->list_multipart_uploads("lcb", {}));
     CHECK_EQ(uploads.uploads.size(), size_t{0});
@@ -2521,8 +2434,8 @@ TEST(service_website_metrics_events) {
     }
     signed_put("/site/index.html", "<h1>root</h1>");
     signed_put("/site/error.html", "<h1>err</h1>");
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/"))).status, 200);        // index rewrite
-    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/nope"))).status, 404);    // error document
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/"))).status, 200);      // index rewrite
+    CHECK_EQ(sync_wait(svc.dispatch(make_req("GET", "/site/nope"))).status, 404);  // error document
     // Third anonymous read within the same second trips the per-bucket limit (max_rps = 2)
     int throttled = 0;
     for (int i = 0; i < 3; ++i)

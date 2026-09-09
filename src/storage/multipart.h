@@ -32,8 +32,7 @@ struct PartDigest {
     std::string algorithm;
     std::string value;  // base64
 };
-void apply_composite_checksum(const std::vector<PartDigest>& parts, ObjectMeta& meta,
-                              PutResult& result);
+void apply_composite_checksum(const std::vector<PartDigest>& parts, ObjectMeta& meta, PutResult& result);
 
 // Strip the quotes around an ETag (clients may send the W3C quoted form)
 std::string_view strip_etag_quotes(std::string_view etag);

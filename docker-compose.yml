@@ -5,6 +5,8 @@
 #   docker compose --profile tikv up -d        # + duostore with TiKV metadata on :9002 (image lights3:full)
 #   docker compose --profile rados up -d       # + duostore with RADOS data on :9003 (image lights3:full, ceph demo)
 #   docker compose --profile e2e run --rm e2e  # the redis / tikv / rados e2e paths that SKIP on a dev box
+#   docker compose --profile multi up -d       # two gateways on one redis meta + one RADOS pool behind nginx on :9004
+#   docker compose --profile multi run --rm e2e-multi  # a multipart spread over both gateways (multi-gateway-multipart §4 ②)
 #
 # Environment: LIGHTS3_SECRET_1 (root secret, demo default below),
 # LIGHTS3_GIT_COMMIT (stamped into --version: LIGHTS3_GIT_COMMIT=$(git rev-parse --short=12 HEAD) docker compose build),
@@ -40,7 +42,7 @@ services:
   # ---- profile redis: duostore + redis metadata --------------------------------
   redis:
     image: redis:7-alpine
-    profiles: [redis, e2e]
+    profiles: [redis, e2e, multi]
     # AOF on: the redis meta store warns (and may lose commits on crash) without it
     command: ["redis-server", "--appendonly", "yes", "--save", ""]
     volumes:
@@ -112,7 +114,7 @@ services:
   # keyring is root-only, so the consumers run as root here
   ceph:
     image: ${CEPH_IMAGE:-quay.io/ceph/demo:latest}
-    profiles: [rados, e2e]
+    profiles: [rados, e2e, multi]
     environment:
       MON_IP: 172.28.0.10
       CEPH_PUBLIC_NETWORK: 172.28.0.0/16
@@ -135,7 +137,7 @@ services:
 
   rados-init:
     image: ${CEPH_IMAGE:-quay.io/ceph/demo:latest}
-    profiles: [rados]
+    profiles: [rados, multi]
     depends_on:
       ceph:
         condition: service_healthy
@@ -166,6 +168,69 @@ services:
       - ceph-etc:/etc/ceph:ro
       - ./deploy/docker/lights3-rados.yaml:/etc/lights3/lights3.yaml:ro
     restart: unless-stopped
+
+  # ---- profile multi: two gateways over shared storage behind a round-robin -----
+  # The multi-gateway deployment the design supports (docs/storage/multi-gateway-
+  # multipart-design.md §2): redis metadata + RADOS data shared by both instances,
+  # read/write leases on, GC on exactly one of them (LIGHTS3_GC_ENABLED), nginx
+  # rotating requests with no stickiness. Each gateway keeps its own root volume
+  # (quarantine ledger and the like); no chunk data lives there
+  lights3-multi-a: &lights3-multi
+    build: *full-build
+    image: lights3:full
+    profiles: [multi]
+    depends_on:
+      redis:
+        condition: service_healthy
+      rados-init:
+        condition: service_completed_successfully
+    user: "0:0"
+    environment:
+      <<: *lights3-env
+      LIGHTS3_RADOS_POOL: ${LIGHTS3_RADOS_POOL:-lights3}
+      LIGHTS3_GC_ENABLED: "true"
+    volumes:
+      - lights3-multi-a-data:/var/lib/lights3
+      - ceph-etc:/etc/ceph:ro
+      - ./deploy/docker/lights3-multi.yaml:/etc/lights3/lights3.yaml:ro
+    restart: unless-stopped
+
+  lights3-multi-b:
+    <<: *lights3-multi
+    environment:
+      <<: *lights3-env
+      LIGHTS3_RADOS_POOL: ${LIGHTS3_RADOS_POOL:-lights3}
+      LIGHTS3_GC_ENABLED: "false"
+    volumes:
+      - lights3-multi-b-data:/var/lib/lights3
+      - ceph-etc:/etc/ceph:ro
+      - ./deploy/docker/lights3-multi.yaml:/etc/lights3/lights3.yaml:ro
+
+  nginx-multi:
+    image: nginx:alpine
+    profiles: [multi]
+    depends_on: [lights3-multi-a, lights3-multi-b]
+    ports:
+      - "${LIGHTS3_MULTI_PORT:-9004}:9000"
+    volumes:
+      - ./deploy/docker/nginx-multi.conf:/etc/nginx/nginx.conf:ro
+    restart: unless-stopped
+
+  # docker compose --profile multi run --rm e2e-multi
+  e2e-multi:
+    build:
+      <<: *full-build
+      target: e2e
+    image: lights3:e2e
+    profiles: [multi]
+    depends_on: [nginx-multi]
+    entrypoint: ["/usr/local/bin/lights3-e2e-multi"]
+    environment:
+      LIGHTS3_E2E_ENDPOINT: http://nginx-multi:9000
+      LIGHTS3_E2E_GATEWAYS: http://lights3-multi-a:9000 http://lights3-multi-b:9000
+      LIGHTS3_SECRET_1: ${LIGHTS3_SECRET_1:-lights3-demo-secret}
+    volumes:
+      - ./deploy/docker/e2e-multi.sh:/usr/local/bin/lights3-e2e-multi:ro
 
   # ---- profile e2e: run the externally-backed e2e paths against the services --
   # docker compose --profile e2e run --rm e2e            # all three
@@ -203,6 +268,8 @@ volumes:
   lights3-redis-data:
   lights3-tikv-data:
   lights3-rados-data:
+  lights3-multi-a-data:
+  lights3-multi-b-data:
   redis-data:
   pd-data:
   tikv-data:

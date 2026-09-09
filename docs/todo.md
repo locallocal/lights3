@@ -21,7 +21,7 @@
 | Docker 镜像构建与 compose 四个 profile（默认 / redis / tikv / rados / e2e） | roadmap §6.3，[deployment.md §4](deployment.md) | 有 docker daemon 的机器：`docker compose build`，`docker compose --profile e2e run --rm e2e`（把 redis / tikv / rados 三条 SKIP 的 e2e 路径真正跑一次） |
 | CPack RPM | roadmap §6.3，[deployment.md §3.2](deployment.md) | 有 `rpmbuild` 的机器：`cpack -G RPM`，`rpm -qp --scripts` 核对 scriptlet，安装/升级/卸载各走一遍 |
 | `unit_tests` 偶发 `terminate called without an active exception` | 2026-09-05 本机 5 次全量运行中 2 次，均发生在 `timer_stats_track_fired_and_pending` 通过之后、`timer_slow_callback_counted` 的 1.1s 慢回调期间（日志先打 "callback took 1.100s"），gdb 下未复现；与业务改动无关 | 有空档时排查：怀疑 TimerQueue 或测试夹具里某个 joinable `std::thread` 在负载下的析构次序；先用 `catch throw`/`ulimit -c` 抓栈 |
-| 多网关 multipart e2e | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §4 ② | 有 docker 的机器：compose 增 `multi` profile（两 lights3 + redis + rados + nginx 轮询），aws cli 跑 5 分片 multipart 校验 ETag；依赖 §4 ① 先落地 |
+| 多网关 multipart 容器 e2e | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §4 ② | compose `multi` profile（两 lights3 + redis + rados + nginx 轮询）与 `deploy/docker/e2e-multi.sh` 已落地（2026-09-09，`docker compose --profile multi config` 通过）；有 docker 的机器：`docker compose --profile multi run --rm e2e-multi`。单测与本机 e2e（`run_e2e.sh` duostore-redis 段）已通过 |
 | mint 兼容基线 | roadmap §6.1，[testing.md §6](testing.md) | 有 docker 的机器跑 `ctest -R mint -V`，把每套件 PASS/FAIL/NA 计数记入 testing.md §6 |
 
 ## 3. 性能基线跑出的新问题（[performance-baseline.md](performance-baseline.md)）

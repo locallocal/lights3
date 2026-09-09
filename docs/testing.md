@@ -39,6 +39,13 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 lights3-ctl 写的配置）、
   `bench put/get` 零错误、`fsck` 对 bench 对象零 mismatch；原有 `usage/quota/
   tenant/reload` 保留。
+- **多网关 multipart**（`duostore-redis` 变体，
+  [storage/multi-gateway-multipart-design.md §4 ②](storage/multi-gateway-multipart-design.md)）：
+  同一 redis meta + 同一数据根起两个网关，create 在 A、5 个分片 B/A 交替上传、
+  两侧 ListParts / ListMultipartUploads 一致、B complete、A HEAD/GET；合成 ETag 由
+  脚本从各分片 ETag 独立算出再比对。单测侧同一场景矩阵在
+  `tests/unit/multi_gateway_suite.h`（redis / tikv 各实例化一次，缺实例 SKIP）；
+  compose `multi` profile 的容器版见 [deployment.md §4.2](deployment.md)。
 - **故障注入**（localfs / xlocalfs / tiered 变体）：以
   `LIGHTS3_FAULTS=localfs.write:1:EIO,xlocalfs.write:1:EIO` 再起一个实例：首个 PUT
   500、对象不存在、重试成功、`lights3_backend_errors_total{op="put_object"}` 与

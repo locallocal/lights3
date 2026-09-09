@@ -1,6 +1,6 @@
 # Multipart Across Gateways on Shared Storage: Audit and Gap-Closing Steps
 
-> Status: **§4 ① write lease implemented (2026-09-08); ②③④ pending**. Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
+> Status: **§4 ① write lease (2026-09-08) and ② two-instance tests (2026-09-09) implemented; ③④ pending**. Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
 > The question: when several lights3 gateways point at the same shared storage,
 > can the create / upload_part / complete / abort steps of one multipart upload
 > land on **different gateways**? Short answer: only **duostore (redis / tikv
@@ -172,29 +172,53 @@ ids — exact, but one extra shared write per allocation plus a renewal thread,
 and `alloc_file_run` is a hot path; the write lease is one row per gateway,
 one write per `read_lease` seconds, isomorphic to the existing skeleton. It wins.
 
-### ② Tests: two backend instances sharing meta + data
+### ② Tests: two backend instances sharing meta + data — implemented
 
-Unit tests (`tests/unit/test_duostore_redis.cc` / `test_duostore_tikv.cc`,
-SKIP without the external instance): use the existing injection constructor
-(`duostore_backend.h` "For test injection: self-assembled meta/data") to build
-two `DuoStoreBackend`s sharing **the same** `IMetaStore` target and **the same**
-`IDataStore` object (without rados on the machine, one `FsDataStore` instance
-shared by both sides — object-level sharing sidesteps the shared-root flock
-misconfiguration and is enough to verify the backend orchestration layer):
+The suite lives in `tests/unit/multi_gateway_suite.h`; `test_duostore_redis.cc`
+and `test_duostore_tikv.cc` each instantiate it with their own factory (SKIP
+without the external instance). It uses the existing injection constructor
+(`duostore_backend.h` "For test injection: self-assembled meta/data") to build two
+`DuoStoreBackend`s sharing **the same** `IMetaStore` target (one key prefix, a
+connection each) and **the same** `IDataStore` object (one `FsDataStore` behind
+the forwarding shell `SharedDataStore` — object-level sharing sidesteps the
+shared-root flock misconfiguration and is exactly what a rados data plane gives
+every gateway, enough to verify the backend orchestration layer). Both sides run
+with `read_lease: 1s`, the object cache off, `gc_grace: 0` and manual hooks only,
+so every reclaim decision is driven by refs / pins / leases rather than by time:
 
-| Case | Assertion |
+| Case (`duostore_{redis,tikv}_multi_gateway_*`) | Assertion |
 | --- | --- |
-| A create → B upload_part ×2 → A complete → B get | ETag = `combined_etag`, content byte-identical |
-| B aborts while A is pumping a part | A's put_part throws NoSuchUpload, the chunks A landed are removed by `commit_or_discard`, the orphan scan finds no residue |
-| same part number concurrently from A / B | the winner's content is readable, the loser's extents enter the gcq and are reclaimed by GC |
+| `multipart`: A create → B upload_part ×2 → A complete → B get | ETag = `combined_etag`, content byte-identical through A and B, orphan scan takes zero actions |
+| `abort_while_peer_pumps`: B aborts while A is pumping a part | A's put_part throws NoSuchUpload, the chunks A landed are removed by `commit_or_discard`, B's orphan scan reports `chunks_scanned=0` |
+| `same_part_concurrent`: same part number concurrently from A / B | exactly one winner, both gateways read its content; the loser's extents enter the gcq and A's GC reclaims 2 chunks |
 | **long write vs peer orphan scan** (G1 regression) | landed with ① (`duostore_orphan_scan_defers_to_peer_write_lease`) |
-| mpu_ttl cleanup | only the lease holder aborts the expired upload; the other instance reports `uploads_expired=0` |
-| list_parts / list_uploads across gateways | both gateways list the same set |
+| `mpu_ttl_single_executor`: mpu_ttl cleanup | only A, holding the GC lease, aborts the expired upload; B's round is a no-op with `uploads_expired=0`; the parts enqueued by the in-round abort are newer than the peer read floor, `skipped_leased` this round and reclaimed the next |
+| `listings_shared`: list_parts / list_uploads across gateways | both gateways list the same (key, upload_id) and (part_no, size, etag) sequences; an abort on one side is immediately invisible on the other |
 
-e2e: add a compose profile `multi` (two `lights3` + redis + rados behind a
-round-robin nginx); `run_e2e.sh` runs a 5-part multipart with the aws cli and
-checks the ETag. No docker daemon on this machine, so it goes to
-[../../todo.md](../../todo.md) §2 pending verification.
+Two testability details found on the way: the read-lease floor is unix-ms and
+**inclusive** (a gcq entry enqueued in the same millisecond as the floor is
+deferred), so the suite lets a few ms pass before publishing leases; parts
+enqueued by an mpu_ttl abort inside a GC round are necessarily newer than the
+floor published before the round and can only be reclaimed in the next one —
+design behaviour (the peer may have a read in flight that predates the abort),
+not a gap.
+
+e2e, two layers:
+
+- the `duostore-redis` variant of `run_e2e.sh` gains a "multi-gateway multipart"
+  segment: two gateways on one redis meta + one data root, create on A, five
+  parts alternating B / A, ListParts on both, complete on B, GET through A; the
+  expected ETag is recomputed by the script from the per-part ETags
+  (md5 of the concatenated binary md5s, `-5`). Runs on this machine and passes.
+- compose profile `multi`: `lights3-multi-a` / `-b` (redis meta + rados data,
+  `read_lease: 5s`, `LIGHTS3_GC_ENABLED` true on a only) + `nginx-multi`
+  (per-request round robin, no stickiness, :9004) + `e2e-multi`
+  (`deploy/docker/e2e-multi.sh`: a 5-part multipart through nginx, checking the
+  combined ETag, the GET bytes and that both gateways' request counters moved;
+  curl `--aws-sigv4` rather than the aws cli, matching the repository's e2e
+  toolchain). `docker compose --profile multi config` passes; no docker daemon
+  here, so bringing it up goes to [../../todo.md](../../todo.md) §2 pending
+  verification.
 
 ### ③ Docs and config
 

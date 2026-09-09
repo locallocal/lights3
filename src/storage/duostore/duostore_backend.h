@@ -336,6 +336,16 @@ struct DuoStoreConfig {
                                       const std::map<std::string, std::string>& params);
     // "rocksdb" | "sqlite" | "redis" | "tikv" (manifest engine tag, log labels)
     const char* meta_kind_name() const;
+    // "fs" | "rados"
+    const char* data_kind_name() const;
+    // Deployment sanity (docs/storage/multi-gateway-multipart-design.md §4 ④):
+    // shared meta (redis / tikv) over local fs data is a single-gateway deployment
+    // only — chunks and packs live on this gateway's disk, so objects written by
+    // another gateway are unreadable here and its GC would mis-account theirs.
+    // Returns the warning text, nullopt when the combination is fine. Logged by
+    // the constructor and printed by `lights3 --check-config`; never a hard error
+    // (shared meta on one gateway is legitimate: it buys meta-side availability)
+    std::optional<std::string> deployment_warning() const;
 };
 
 class DuoStoreBackend final : public IStorageBackend {
@@ -504,6 +514,7 @@ private:
     // every gateway; the tick stands down permanently when the engine reports
     // leases unsupported (local engines — in-process pins are already exact there)
     void schedule_read_lease();
+    void warn_deployment();  // multi-gateway-multipart §4 ④
     Task<void> lease_tick();
     // One manifest's worth of scrub work (run_scrub_once): refs-ledger presence
     // per chunk/rados extent + full read-back with crc recomputation. refetch

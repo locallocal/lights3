@@ -86,9 +86,15 @@ export LIGHTS3_SECRET_1=my-secret
 **`--check-config`** (roadmap §6.2): a dry run that only parses and validates the
 configuration — no backend is opened, no port bound. It runs the exact
 `Config::load` validation the server runs, then checks that `http.driver` and
-every `backends[].type` are compiled into this binary, and prints the resolved
-summary (driver/listener/TLS, threads, credential count, backends, routing
-rules, website entries, log and audit settings). Exit `0` = the file would
+every `backends[].type` are compiled into this binary; `type: duostore`
+backends additionally have their parameters parsed by the constructor's own
+`from_params` (engine selection, ranges, engines not compiled in fail right
+here), and the single-gateway combination of shared meta (redis / tikv) over
+local fs data is reported as `config warning:` on stderr without changing the
+exit code ([storage/multi-gateway-multipart-design.md §4 ④](storage/multi-gateway-multipart-design.md));
+then it prints the resolved summary (driver/listener/TLS, threads, credential
+count, backends — duostore with `meta=… data=…`, routing rules, website
+entries, log and audit settings). Exit `0` = the file would
 start (runtime failures such as an unwritable data directory excepted), `1` =
 rejected, with the same message the server prints as `fatal:`. Run it from
 deployment scripts before a reload/restart:

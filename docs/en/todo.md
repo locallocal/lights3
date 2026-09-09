@@ -39,7 +39,6 @@ design document -- no struck-through history here. Each entry carries
 
 | Item | Notes |
 | --- | --- |
-| Multi-gateway multipart: finish ④ | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §4: ①②③ landed (2026-09-09); ④ remains — a startup warning for the redis/tikv meta + fs data misconfiguration. Value medium / difficulty low |
 | Versioning | Architecture-level (key layout of six backends / List semantics / delete markers / GC all move); if ever, **start from duostore** (meta is a KV, add a version dimension), localfs's key→path mapping cannot hold multiple versions |
 | SSE-C / SSE-S3 | Server-side encryption; key sourcing and the ETag / checksum semantics have to be settled first |
 | Full OpenTelemetry instrumentation | The lightweight trace layer exists (W3C traceparent pass-through, one span per request, log correlation, [s3-protocol.md §7](s3-protocol.md)); exporting spans through otel-cpp is long-term |

@@ -780,6 +780,7 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     schedule_gc();
     schedule_orphan_scan();
     schedule_read_lease();
+    warn_deployment();
 }
 
 DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool,
@@ -795,6 +796,14 @@ DuoStoreBackend::DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool>
     schedule_gc();
     schedule_orphan_scan();
     schedule_read_lease();
+    warn_deployment();
+}
+
+// Misconfiguration guard (multi-gateway-multipart §4 ④): a WARN at startup, never
+// a refusal — the same combination is legitimate on a single gateway
+void DuoStoreBackend::warn_deployment() {
+    if (auto w = cfg_.deployment_warning())
+        LOG_WARN("duostore backend '{}': {}", cfg_.name, *w);
 }
 
 void DuoStoreBackend::init_metrics(const MetricsScope& metrics) {
@@ -2504,6 +2513,20 @@ const char* DuoStoreConfig::meta_kind_name() const {
         case DuoMetaKind::kTikv: return "tikv";
     }
     return "rocksdb";
+}
+
+const char* DuoStoreConfig::data_kind_name() const {
+    return data_kind == DuoDataKind::kRados ? "rados" : "fs";
+}
+
+std::optional<std::string> DuoStoreConfig::deployment_warning() const {
+    const bool shared_meta = meta_kind == DuoMetaKind::kRedis || meta_kind == DuoMetaKind::kTikv;
+    if (!shared_meta || data_kind != DuoDataKind::kFs) return std::nullopt;
+    return std::string("meta=") + meta_kind_name() +
+           " with data=fs: shared meta over local fs data is single-gateway only — chunks "
+           "and packs live on this gateway's disk, objects written by other gateways are "
+           "unreadable here and GC cannot account for theirs; for multiple gateways use "
+           "data=rados (docs/storage/multi-gateway-multipart-design.md §2)";
 }
 
 Task<duostore::MetaBackupEntry> DuoStoreBackend::run_meta_backup(const std::filesystem::path& dir,

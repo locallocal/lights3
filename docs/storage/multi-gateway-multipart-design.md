@@ -1,6 +1,6 @@
 # 多网关共享存储下的 Multipart：现状核对与补齐步骤
 
-> 状态：**§4 ① 写侧租约（2026-09-08）、② 双实例测试与 ③ 文档配置（2026-09-09）已实现，④ 待做**。本文回答一个问题：
+> 状态：**§4 ①–④ 全部实现（① 2026-09-08，②③④ 2026-09-09）**。本文回答一个问题：
 > 多个 lights3 网关指向同一份共享存储时，一个 multipart 上传的
 > create / upload_part / complete / abort 能否落在**不同网关**上。结论先行：
 > 只有 **duostore（redis / tikv meta + rados data）** 与 **cloudproxy** 在设计上
@@ -102,7 +102,8 @@ compose `multi` profile。
   跨网关 GET 失败时暴露。
 
 **现状**：第一条随 §4 ③ 关闭（前提表、§9.1、`read_lease` 样例、
-[../deployment.md §5](../deployment.md) 多网关小节）；第二条待 §4 ④。
+[../deployment.md §5](../deployment.md) 多网关小节）；第二条随 §4 ④ 关闭
+（启动 WARN + `--check-config` 同文）。
 
 ## 4. 补齐步骤
 
@@ -204,12 +205,24 @@ e2e 两层：
   约束、前缀 / namespace 一致、实例级后台任务单开）、负载均衡无需粘连
   （透传 `Host`、关请求缓冲）。原 §5 / §6 顺延为 §6 / §7。
 
-### ④ 误配防线
+### ④ 误配防线 —— 已实现
 
-`DuoStoreBackend` 构造末尾：meta 为 redis / tikv 且 data 为 fs 时
-`LOG_WARN("… shared meta with local fs data: single-gateway only, objects written
-by other gateways are unreadable here")`；`--check-config` 同步打印。不做硬拒绝
-（单网关用共享 meta 是合法的）。
+`DuoStoreConfig::deployment_warning()`：meta 为 redis / tikv 且 data 为 fs 时
+返回告警文本（"meta=<engine> with data=fs: shared meta over local fs data is
+single-gateway only — …for multiple gateways use data=rados"），其余组合
+nullopt。两个消费者：
+
+- `DuoStoreBackend` 两个构造末尾 `warn_deployment()` → `LOG_WARN`；
+- `lights3 --check-config` 对每个 `type: duostore` 后端跑一遍
+  `DuoStoreConfig::from_params`（此前 dry-run 不看后端参数）：引擎选择 / 取值
+  范围 / 未编入的引擎在这里就报 `config error` 并退出 1，告警以
+  `config warning: backends[<name>]: …` 打到 stderr、退出码不变，摘要行带
+  `meta=… data=…`。
+
+不做硬拒绝（单网关用共享 meta 合法，换来 meta 侧高可用）。用例：
+`duostore_config_deployment_warning`（四种 meta × 两种 data）；e2e 的
+duostore-redis / duostore-tikv 变体断言 check-config 与启动日志都带告警，
+其余变体断言两处都没有。
 
 ## 5. 不做
 

@@ -35,7 +35,6 @@
 
 | 条目 | 说明 |
 | --- | --- |
-| 多网关 multipart：收尾 ④ | [storage/multi-gateway-multipart-design.md](storage/multi-gateway-multipart-design.md) §4：①②③ 已落地（2026-09-09）；剩余 ④ redis/tikv meta + fs data 误配启动告警。价值 中 / 难度 低 |
 | Versioning | 架构级（六后端 key 布局 / List 语义 / delete marker / GC 全动）；若做，**从 duostore 侧切入成本最低**（meta 是 KV，加 version 维度即可），localfs 的 key→路径映射容纳不下多版本 |
 | SSE-C / SSE-S3 | 服务端加密；需先定密钥来源与 ETag/校验和语义 |
 | OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](s3-protocol.md)）；otel-cpp 导出 span 是长期项 |

@@ -1,6 +1,6 @@
 # Multipart Across Gateways on Shared Storage: Audit and Gap-Closing Steps
 
-> Status: **§4 ① write lease (2026-09-08), ② two-instance tests and ③ docs / config (2026-09-09) implemented; ④ pending**. Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
+> Status: **§4 ①–④ all implemented (① 2026-09-08, ②③④ 2026-09-09)**. Chinese original: [../../storage/multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md).
 > The question: when several lights3 gateways point at the same shared storage,
 > can the create / upload_part / complete / abort steps of one multipart upload
 > land on **different gateways**? Short answer: only **duostore (redis / tikv
@@ -122,7 +122,8 @@ segment of `run_e2e.sh`, the compose `multi` profile.
 
 **Now**: the first item closed with §4 ③ (premise table, §9.1, the
 `read_lease` sample, the multi-gateway section [../deployment.md §5](../deployment.md));
-the second waits for §4 ④.
+the second closed with §4 ④ (a startup WARN, the same text from
+`--check-config`).
 
 ## 4. Steps to close the gaps
 
@@ -248,12 +249,26 @@ e2e, two layers:
   load balancing without affinity (pass `Host` through, no request buffering).
   The former §5 / §6 become §6 / §7.
 
-### ④ Misconfiguration guard
+### ④ Misconfiguration guard — implemented
 
-At the end of the `DuoStoreBackend` constructor, when meta is redis / tikv and
-data is fs: `LOG_WARN("… shared meta with local fs data: single-gateway only,
-objects written by other gateways are unreadable here")`; `--check-config`
-prints the same. No hard rejection (shared meta on a single gateway is legal).
+`DuoStoreConfig::deployment_warning()`: with meta = redis / tikv and data = fs
+it returns the warning text ("meta=<engine> with data=fs: shared meta over
+local fs data is single-gateway only — … for multiple gateways use
+data=rados"), nullopt for every other combination. Two consumers:
+
+- both `DuoStoreBackend` constructors end with `warn_deployment()` → `LOG_WARN`;
+- `lights3 --check-config` runs `DuoStoreConfig::from_params` for every
+  `type: duostore` backend (the dry run ignored backend parameters before):
+  engine selection / ranges / engines not compiled in surface as
+  `config error` with exit 1 right there, the warning goes to stderr as
+  `config warning: backends[<name>]: …` without changing the exit code, and
+  the summary line carries `meta=… data=…`.
+
+No hard rejection (shared meta on a single gateway is legitimate: it buys
+meta-side availability). Cases: `duostore_config_deployment_warning` (four
+meta engines × two data planes); the duostore-redis / duostore-tikv e2e
+variants assert both check-config and the startup log carry the warning, every
+other variant asserts neither does.
 
 ## 5. Out of scope
 

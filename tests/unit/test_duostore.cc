@@ -1253,6 +1253,29 @@ TEST(duostore_config_rocksdb_tuning_params) {
     CHECK(threw);
 }
 
+// Misconfiguration guard (multi-gateway-multipart §4 ④): shared meta over local fs
+// data is flagged (a WARN at startup, the same text from --check-config), every
+// other combination is silent — including the local engines and the rados data
+// plane the multi-gateway deployment actually uses
+TEST(duostore_config_deployment_warning) {
+    DuoStoreConfig c;
+    CHECK(!c.deployment_warning().has_value());  // rocksdb + fs
+    c.meta_kind = DuoMetaKind::kSqlite;
+    CHECK(!c.deployment_warning().has_value());
+    for (auto shared : {DuoMetaKind::kRedis, DuoMetaKind::kTikv}) {
+        c.meta_kind = shared;
+        c.data_kind = DuoDataKind::kFs;
+        auto w = c.deployment_warning();
+        CHECK(w.has_value());
+        CHECK(w->find("single-gateway only") != std::string::npos);
+        CHECK(w->find(std::string("meta=") + c.meta_kind_name()) == 0);
+        c.data_kind = DuoDataKind::kRados;
+        CHECK(!c.deployment_warning().has_value());
+    }
+    CHECK_EQ(std::string(DuoStoreConfig{}.data_kind_name()), std::string("fs"));
+    CHECK_EQ(std::string(c.data_kind_name()), std::string("rados"));
+}
+
 // Single-instance execution gating for multiple gateways (C4, docs/storage/duostore-data-rados-design.md §8.3): gc_enabled=false
 // only stops the scheduling of the background worker/orphan scan; the manual hooks (test/ops channel) are not gated
 TEST(duostore_config_gc_enabled_gates_background_only) {

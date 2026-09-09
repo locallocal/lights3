@@ -326,6 +326,21 @@ sed 's/^  default_backend: tierdata$/  default_backend: ghost/' "$WORK/config.ya
 check "lights3 --check-config rejects a broken config with exit 1" "1" \
     "$("$BIN" --check-config --config="$WORK/config-bad.yaml" >/dev/null 2>&1; echo $?)"
 check "check-config leaves no data directories behind" "0" "$([[ ! -e "$WORK/check-config-data" ]]; echo $?)"
+# multi-gateway-multipart §4 ④: shared meta over local fs data is flagged by the dry run
+# (and by the server at startup), every other combination stays silent
+if [[ "$BACKEND" == "duostore-redis" || "$BACKEND" == "duostore-tikv" ]]; then
+    check "check-config warns about shared meta over local fs data" "0" \
+        "$(grep -q '^config warning: backends\[tierdata\]: meta=.* with data=fs: shared meta over local fs data is single-gateway only' "$WORK/check-config.out"; echo $?)"
+    check "check-config summary shows the duostore engines" "0" \
+        "$(grep -q '^    - tierdata: type=duostore meta=.* data=fs$' "$WORK/check-config.out"; echo $?)"
+    check "the server logged the same warning at startup" "0" \
+        "$(grep -q "duostore backend 'tierdata': meta=.* with data=fs: shared meta over local fs data is single-gateway only" "$WORK/server.log"; echo $?)"
+else
+    check "the server logged no deployment warning at startup" "1" \
+        "$(grep -q 'single-gateway only' "$WORK/server.log"; echo $?)"
+    check "check-config prints no deployment warning here" "1" \
+        "$(grep -q '^config warning:' "$WORK/check-config.out"; echo $?)"
+fi
 
 # ---------- Test cases ----------
 check "healthz (no auth)" "200" "$(curl -s -o /dev/null -w '%{http_code}' "$BASE/-/healthz")"

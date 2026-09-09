@@ -215,7 +215,7 @@ docker compose --profile e2e down -v
 | localfs / xlocalfs / tiered | 不支持：分片状态在本地 staging，共享文件系统上的 rename / xattr 语义未论证，多网关 complete 同 key 互相覆盖 |
 | cloudproxy | 支持：纯透传，网关无本地状态 |
 | duostore + rocksdb / sqlite meta | 不可能：本地引擎单进程独占 |
-| duostore + redis / tikv meta + fs data | 不支持：数据在各网关本地盘，对端读不到；共享 meta 只换来 meta 侧高可用，只能单网关 |
+| duostore + redis / tikv meta + fs data | 不支持：数据在各网关本地盘，对端读不到；共享 meta 只换来 meta 侧高可用，只能单网关。启动打 WARN，`--check-config` 打 `config warning:`（[cli.md §2.1](cli.md)） |
 | duostore + redis / tikv meta + rados data | **支持**（下文） |
 
 ### 5.2 必要配置（duostore + redis/tikv meta + rados data）

@@ -234,7 +234,7 @@ balancer, with no session affinity
 | localfs / xlocalfs / tiered | unsupported: part state lives in local staging, rename / xattr semantics on a shared filesystem were never argued, two gateways completing the same key overwrite each other |
 | cloudproxy | supported: pure pass-through, no local state |
 | duostore + rocksdb / sqlite meta | impossible: local engines are single-process |
-| duostore + redis / tikv meta + fs data | unsupported: data sits on each gateway's local disk, invisible to the peer; shared meta only buys meta-side availability, single gateway only |
+| duostore + redis / tikv meta + fs data | unsupported: data sits on each gateway's local disk, invisible to the peer; shared meta only buys meta-side availability, single gateway only. The server WARNs at startup and `--check-config` prints `config warning:` ([cli.md §2.1](cli.md)) |
 | duostore + redis / tikv meta + rados data | **supported** (below) |
 
 ### 5.2 Required configuration (duostore + redis/tikv meta + rados data)

@@ -2,11 +2,16 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
+#include <string>
 
 #include "app/app.h"
 #include "core/version.h"
 #include "http/server.h"
 #include "storage/registry.h"
+#ifdef LIGHTS3_DUOSTORE
+#include "storage/duostore/duostore_backend.h"
+#endif
 
 namespace lights3_cli {
 
@@ -33,6 +38,25 @@ int check_config(const std::string& path) {
                     b.name.c_str(), b.type.c_str());
             ++problems;
         }
+    // duostore parameters are parsed the way the backend constructor would (engine
+    // selection, ranges, compiled-in engines) and the deployment sanity warning is
+    // surfaced here too (docs/storage/multi-gateway-multipart-design.md §4 ④): a
+    // dry run must say what startup would say. Other backends validate lazily
+    std::map<std::string, std::string> engines;  // backend name -> "meta=… data=…"
+#ifdef LIGHTS3_DUOSTORE
+    for (auto& b : cfg.backends) {
+        if (b.type != "duostore") continue;
+        try {
+            auto dc = storage::DuoStoreConfig::from_params(b.name, b.params);
+            engines[b.name] = std::string("meta=") + dc.meta_kind_name() + " data=" + dc.data_kind_name();
+            if (auto w = dc.deployment_warning())
+                fprintf(stderr, "config warning: backends[%s]: %s\n", b.name.c_str(), w->c_str());
+        } catch (const std::exception& e) {
+            fprintf(stderr, "config error: %s\n", e.what());
+            ++problems;
+        }
+    }
+#endif
     printf("config %s: %s\n", path.c_str(), problems ? "REJECTED" : "ok");
     printf("  http      driver=%s bind=%s:%u tls=%s metrics_access=%s\n", cfg.http.driver.c_str(),
            cfg.http.bind.c_str(), unsigned(cfg.http.port), cfg.http.tls_cert.empty() ? "off" : "on",
@@ -48,7 +72,11 @@ int check_config(const std::string& path) {
            cfg.auth.credentials_file.empty() ? "-" : cfg.auth.credentials_file.c_str(),
            cfg.auth.region.c_str());
     printf("  backends  %zu\n", cfg.backends.size());
-    for (auto& b : cfg.backends) printf("    - %s: type=%s\n", b.name.c_str(), b.type.c_str());
+    for (auto& b : cfg.backends) {
+        auto it = engines.find(b.name);
+        printf("    - %s: type=%s%s%s\n", b.name.c_str(), b.type.c_str(), it == engines.end() ? "" : " ",
+               it == engines.end() ? "" : it->second.c_str());
+    }
     printf("  buckets   default_backend=%s rules=%zu\n", cfg.buckets.default_backend.c_str(),
            cfg.buckets.rules.size());
     printf("  website   static_entries=%zu\n", cfg.website.buckets.size());

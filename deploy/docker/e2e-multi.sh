@@ -1,5 +1,5 @@
 #!/bin/bash
-# Multi-gateway multipart e2e (docs/storage/multi-gateway-multipart-design.md §4 ②)
+# Multi-gateway multipart e2e (docs/archive/multi-gateway-multipart-design.md §4 ②)
 # against the `multi` compose profile: two lights3 on one redis meta + one rados pool
 # behind an nginx round-robin. A 5-part multipart whose steps land on whichever
 # gateway nginx picks; verified by the S3 combined ETag (recomputed here from the

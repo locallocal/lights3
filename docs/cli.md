@@ -76,7 +76,7 @@ export LIGHTS3_SECRET_1=my-secret
 `backends[].type` 是否编进了本二进制；`type: duostore` 的后端还按构造函数的
 同一套 `from_params` 解析参数（引擎选择、取值范围、未编入的引擎在此即报错），
 共享 meta（redis / tikv）配本地 fs data 的单网关组合以 `config warning:` 打到
-stderr、不改退出码（[storage/multi-gateway-multipart-design.md §4 ④](storage/multi-gateway-multipart-design.md)）；
+stderr、不改退出码（[archive/multi-gateway-multipart-design.md §4 ④](archive/multi-gateway-multipart-design.md)）；
 然后打印配置解析出的摘要（驱动/监听/TLS、线程数、凭证数、后端列表——duostore
 带 `meta=… data=…`、路由规则数、网站条目数、日志与审计设置）。退出码
 `0` = 此文件能启动（运行期失败如数据目录不可写除外），`1` = 被拒，错误信息与

@@ -293,7 +293,7 @@ struct IMetaStore : IMetaReadView {
     // engines, with gc_grace as the fallback when it is off
     virtual bool try_gc_lease(std::string_view /*owner*/, int64_t /*ttl_ms*/) { return true; }
     // Multi-gateway read / write leases (roadmap §3.7; write side:
-    // docs/storage/multi-gateway-multipart-design.md §4 ①): each gateway
+    // docs/archive/multi-gateway-multipart-design.md §4 ①): each gateway
     // periodically publishes, under its owner id with a TTL (crashed publishers
     // yield via expiry), the start time of its oldest in-flight read and of its
     // oldest in-flight write. The GC gateway reads the min across live leases:

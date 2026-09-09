@@ -33,7 +33,7 @@ LightS3 是一个用 C++20 实现的 S3 协议网关（Gateway）。它对外暴
 | [object-read-write-flow.md](object-read-write-flow.md) | 对象读写流程：三层代码路径串联、BodyReader 包装链、staging 原子提交、fd 快照读 |
 | [cli.md](cli.md) | 命令行工具：`lights3` 启动、`duostore dump/load/backup/restore/gc/scan`、`tier scan/gc/reconcile`、`fsck` 离线巡检、`lights3-ctl` 的 cred/website/bench/fsck/quota/tenant/usage 命令、ccmd 选项语义与退出码 |
 | [todo.md](todo.md) | 待办与规划：待验证项、基线跑出的新问题、长期项、明确不做清单；做完即删 |
-| [archive/](archive/gaps.md) | 已收口的历史底账（gaps.md / issues.md / roadmap.md / backlog.md / backlog-sequence.md），只读归档——源码注释中 `docs/archive/<name>.md §N`、`roadmap §N`、`backlog §N`、`backlog-sequence ①…⑩` 引用的论证出处 |
+| [archive/](archive/gaps.md) | 已收口的历史底账（gaps.md / issues.md / roadmap.md / backlog.md / backlog-sequence.md）与做完的设计步骤文档（multi-gateway-multipart-design.md），只读归档——源码注释中 `docs/archive/<name>.md §N`、`roadmap §N`、`backlog §N`、`backlog-sequence ①…⑩`、`multi-gateway-multipart §4 ①…④` 引用的论证出处 |
 
 *另有中文项目介绍 [README.zh-CN.md](README.zh-CN.md)（构建/运行/当前实现范围）；
 全部设计文档的英文翻译在 [en/](en/README.md)，章节编号与中文版一一对应，

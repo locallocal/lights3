@@ -91,7 +91,7 @@ backends additionally have their parameters parsed by the constructor's own
 `from_params` (engine selection, ranges, engines not compiled in fail right
 here), and the single-gateway combination of shared meta (redis / tikv) over
 local fs data is reported as `config warning:` on stderr without changing the
-exit code ([storage/multi-gateway-multipart-design.md §4 ④](storage/multi-gateway-multipart-design.md));
+exit code ([../archive/multi-gateway-multipart-design.md §4 ④](../archive/multi-gateway-multipart-design.md));
 then it prints the resolved summary (driver/listener/TLS, threads, credential
 count, backends — duostore with `meta=… data=…`, routing rules, website
 entries, log and audit settings). Exit `0` = the file would

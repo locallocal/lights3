@@ -1,4 +1,4 @@
-// Multi-gateway multipart suite (docs/storage/multi-gateway-multipart-design.md §4 ②):
+// Multi-gateway multipart suite (docs/archive/multi-gateway-multipart-design.md §4 ②):
 // two DuoStoreBackend instances ("gateways" A and B) over ONE shared meta target and
 // ONE shared data engine object, parameterized over the shared meta engines
 // (RedisMetaStore / TikvMetaStore — each engine file wires its own factory and SKIPs

@@ -174,7 +174,7 @@ backends:
   #   # -- Background GC and orphan scan (all effective; docs/storage/duostore-design.md §9) --
   #   gc_interval: 300s                # reclaim period; 0s = disable background GC
   #   gc_enabled: true                 # false = non-designated instance in a multi-gateway setup: exactly one gateway runs GC,
-  #                                    # the orphan scan and mpu_ttl cleanup (docs/storage/multi-gateway-multipart-design.md, docs/deployment.md §5)
+  #                                    # the orphan scan and mpu_ttl cleanup (docs/archive/multi-gateway-multipart-design.md, docs/deployment.md §5)
   #   gc_grace: 300s                   # delayed-deletion grace (defense in depth against concurrent reads)
   #   read_lease: 5s                   # multi-gateway read / write lease publish period (docs/storage/duostore-core.md §8.5): mandatory
   #                                    # when several gateways share redis/tikv meta + rados data, 0s = off (then gc_grace must exceed

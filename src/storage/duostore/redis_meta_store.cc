@@ -1452,7 +1452,7 @@ return 1
 }
 
 // Multi-gateway read / write leases (roadmap §3.7; write side:
-// docs/storage/multi-gateway-multipart-design.md §4 ①): plain SET with PX —
+// docs/archive/multi-gateway-multipart-design.md §4 ①): plain SET with PX —
 // each gateway only writes its own key, no arbitration needed; a crashed
 // publisher's key expires. Value "<oldest_read_ms> <oldest_write_ms>"; the
 // write field is absent in leases written by builds before the write lease

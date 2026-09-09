@@ -1012,7 +1012,7 @@ bool TikvMetaStore::try_gc_lease(std::string_view owner, int64_t ttl_ms) {
 }
 
 // Multi-gateway read / write leases (roadmap §3.7; write side:
-// docs/storage/multi-gateway-multipart-design.md §4 ①): 'L' table row
+// docs/archive/multi-gateway-multipart-design.md §4 ①): 'L' table row
 // "r<owner>", value "<oldest_read_ms>\0<expiry_ms>\0<oldest_write_ms>". A blind
 // single-key put — each gateway only ever writes its own row, so there is no
 // contention to arbitrate; TTL expiry is judged by wall clock exactly like

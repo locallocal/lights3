@@ -18,4 +18,11 @@ Chinese originals one to one.
 | [duostore-meta-sqlite-design.md](duostore-meta-sqlite-design.md) | [duostore-meta-sqlite-design.md](../../storage/duostore-meta-sqlite-design.md) / [duostore-meta-sqlite.md](../../storage/duostore-meta-sqlite.md) | SQLite IMetaStore: schema, transactions and concurrency, single-file deployment and backup |
 | [duostore-meta-tikv-design.md](duostore-meta-tikv-design.md) | [duostore-meta-tikv-design.md](../../storage/duostore-meta-tikv-design.md) / [duostore-meta-tikv.md](../../storage/duostore-meta-tikv.md) | TiKV IMetaStore: integration route survey, the 2PC sidecar prerequisite, data model and transaction invariants |
 | [duostore-data-rados-design.md](duostore-data-rados-design.md) | [duostore-data-rados-design.md](../../storage/duostore-data-rados-design.md) / [duostore-data-rados.md](../../storage/duostore-data-rados.md) | RADOS IDataStore: integration route, object mapping, write / read paths, consistency and multi-gateway GC |
-| [multi-gateway-multipart-design.md](multi-gateway-multipart-design.md) | [multi-gateway-multipart-design.md](../../storage/multi-gateway-multipart-design.md) / — (design, pending implementation) | Multipart across gateways on shared storage: per-backend support matrix, premise-by-premise audit of duostore (redis/tikv + rados), the write-side in-flight protection gap (write lease), gap-closing steps and test list |
+
+Archived design document (moved to `docs/archive/` once every step was done, Chinese
+only, no longer updated): [multi-gateway-multipart-design.md](../../archive/multi-gateway-multipart-design.md)
+— multipart across gateways on shared storage (support matrix, the duostore
+premise audit, the write lease, the two-instance tests, the misconfiguration
+guard; closed 2026-09-09; the lasting conclusions live in
+[deployment.md §5](../deployment.md), duostore-core.md §9.1 and
+[duostore-data-rados-design.md §8.3](duostore-data-rados-design.md)).

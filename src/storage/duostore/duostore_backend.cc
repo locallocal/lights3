@@ -2526,7 +2526,7 @@ std::optional<std::string> DuoStoreConfig::deployment_warning() const {
            " with data=fs: shared meta over local fs data is single-gateway only — chunks "
            "and packs live on this gateway's disk, objects written by other gateways are "
            "unreadable here and GC cannot account for theirs; for multiple gateways use "
-           "data=rados (docs/storage/multi-gateway-multipart-design.md §2)";
+           "data=rados (docs/archive/multi-gateway-multipart-design.md §2)";
 }
 
 Task<duostore::MetaBackupEntry> DuoStoreBackend::run_meta_backup(const std::filesystem::path& dir,

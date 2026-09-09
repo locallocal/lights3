@@ -1,5 +1,5 @@
 // RedisMetaStore dedicated unit tests (docs/storage/duostore-meta-redis-design.md §9): meta consistency suite,
-// backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS, multiple gateways sharing meta,
+// backend suite over the injected combination, prefix isolation, NOSCRIPT self-healing, swap_extents CAS, multiple gateways sharing meta (+ the multi-gateway multipart suite),
 // concurrent CAS convergence. Obtaining a real redis: probe for redis-server in PATH and start a private instance
 // on a unix socket (--save '' --appendonly no); if none is found, SKIP explicitly (not a failure).
 // LIGHTS3_TEST_REDIS_URI can override with an external instance (isolation relies on a random per-case key prefix).
@@ -29,6 +29,7 @@
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
 #include "unit/mini_test.h"
+#include "unit/multi_gateway_suite.h"
 
 namespace fs = std::filesystem;
 using namespace lights3;
@@ -810,6 +811,46 @@ TEST(duostore_redis_backup_marker_and_logical_chain) {
     }
     CHECK(threw);
     m.close();
+}
+
+// ---------- multi-gateway multipart (docs/storage/multi-gateway-multipart-design.md §4 ②) ----------
+// Two backends over one redis prefix and one shared data engine; the scenarios
+// live in unit/multi_gateway_suite.h and run identically over tikv
+
+namespace {
+multi_gateway_suite::MetaFactory redis_shared_meta(const std::string& prefix) {
+    return [prefix] { return std::make_unique<RedisMetaStore>(redis_opts(prefix)); };
+}
+}  // namespace
+
+TEST(duostore_redis_multi_gateway_multipart) {
+    REDIS_OR_SKIP();
+    multi_gateway_suite::cross_gateway_multipart(redis_shared_meta(unique_prefix()),
+                                                 DuoMetaKind::kRedis);
+}
+
+TEST(duostore_redis_multi_gateway_abort_while_peer_pumps) {
+    REDIS_OR_SKIP();
+    multi_gateway_suite::abort_while_peer_pumps(redis_shared_meta(unique_prefix()),
+                                                DuoMetaKind::kRedis);
+}
+
+TEST(duostore_redis_multi_gateway_same_part_concurrent) {
+    REDIS_OR_SKIP();
+    multi_gateway_suite::same_part_concurrent(redis_shared_meta(unique_prefix()),
+                                              DuoMetaKind::kRedis);
+}
+
+TEST(duostore_redis_multi_gateway_mpu_ttl_single_executor) {
+    REDIS_OR_SKIP();
+    multi_gateway_suite::mpu_ttl_single_executor(redis_shared_meta(unique_prefix()),
+                                                 DuoMetaKind::kRedis);
+}
+
+TEST(duostore_redis_multi_gateway_listings_shared) {
+    REDIS_OR_SKIP();
+    multi_gateway_suite::listings_are_shared(redis_shared_meta(unique_prefix()),
+                                             DuoMetaKind::kRedis);
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META

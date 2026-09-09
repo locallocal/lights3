@@ -1,6 +1,6 @@
 # 多网关共享存储下的 Multipart：现状核对与补齐步骤
 
-> 状态：**§4 ① 写侧租约已实现（2026-09-08），②③④ 待做**。本文回答一个问题：
+> 状态：**§4 ① 写侧租约（2026-09-08）与 ② 双实例测试（2026-09-09）已实现，③④ 待做**。本文回答一个问题：
 > 多个 lights3 网关指向同一份共享存储时，一个 multipart 上传的
 > create / upload_part / complete / abort 能否落在**不同网关**上。结论先行：
 > 只有 **duostore（redis / tikv meta + rados data）** 与 **cloudproxy** 在设计上
@@ -143,27 +143,44 @@ read-lease 把它搬到共享介质，写侧当时**没有对应物**。
 `alloc_file_run` 是热路径；write-lease 一个网关一行、每 `read_lease` 秒一次
 写，与现有骨架同构，胜出。
 
-### ② 测试：两个 backend 实例共享 meta + data
+### ② 测试：两个 backend 实例共享 meta + data —— 已实现
 
-单测（`tests/unit/test_duostore_redis.cc` / `test_duostore_tikv.cc`，外部实例缺席
-时 SKIP）：用现有注入构造（`duostore_backend.h` "For test injection:
-self-assembled meta/data"）建两个 `DuoStoreBackend`，共享**同一个**
-`IMetaStore` 连接目标与**同一个** `IDataStore` 对象（本机无 rados 时以一个
-`FsDataStore` 实例在两侧共享——对象级共享绕开了"共享 root 误配"的 flock
-问题，足以验证 backend 编排层）：
+单测套件 `tests/unit/multi_gateway_suite.h`，由 `test_duostore_redis.cc` /
+`test_duostore_tikv.cc` 各自带工厂实例化（外部实例缺席时 SKIP）：用现有注入构造
+（`duostore_backend.h` "For test injection: self-assembled meta/data"）建两个
+`DuoStoreBackend`，共享**同一个** `IMetaStore` 连接目标（同一 key 前缀，各自连接）
+与**同一个** `IDataStore` 对象（一个 `FsDataStore` 经转发壳 `SharedDataStore`
+在两侧共享——对象级共享绕开了"共享 root 误配"的 flock 问题，也正是 rados 数据面
+给每个网关的东西，足以验证 backend 编排层）。两侧 `read_lease: 1s`、对象缓存关、
+`gc_grace: 0`、只走手动钩子，回收判断全由 refs / pin / 租约驱动而非时间：
 
-| 用例 | 断言 |
+| 用例（`duostore_{redis,tikv}_multi_gateway_*`） | 断言 |
 | --- | --- |
-| A create → B upload_part ×2 → A complete → B get | ETag = `combined_etag`，内容逐字节相等 |
-| A upload_part 泵送中 → B abort | A 的 put_part 抛 NoSuchUpload，A 落盘的 chunk 被 `commit_or_discard` 删除，孤儿扫描无残留 |
-| 同号分片 A/B 并发 | 胜者内容可读，败者 extent 入 gcq 并被 GC 回收 |
+| `multipart`：A create → B upload_part ×2 → A complete → B get | ETag = `combined_etag`，A/B 读回内容逐字节相等，孤儿扫描零动作 |
+| `abort_while_peer_pumps`：A upload_part 泵送中 → B abort | A 的 put_part 抛 NoSuchUpload，A 落盘的 chunk 被 `commit_or_discard` 删除，B 的孤儿扫描 `chunks_scanned=0` |
+| `same_part_concurrent`：同号分片 A/B 并发 | 恰好一个胜者，两网关读到胜者内容；败者 extent 入 gcq，A 的 GC 回收 2 块 |
 | **长写 vs 对端孤儿扫描**（G1 回归） | 已随 ① 落地（`duostore_orphan_scan_defers_to_peer_write_lease`） |
-| mpu_ttl 清理 | 只有持租约的实例 abort 过期 upload；另一实例 `uploads_expired=0` |
-| list_parts / list_uploads 跨网关 | 任一网关列出的集合一致 |
+| `mpu_ttl_single_executor`：mpu_ttl 清理 | 只有持 GC 租约的 A abort 过期 upload；B 整轮空转 `uploads_expired=0`；轮内 abort 入 gcq 的分片晚于对端读下限，本轮 `skipped_leased`，下一轮回收 |
+| `listings_shared`：list_parts / list_uploads 跨网关 | 任一网关列出的 (key, upload_id) 与 (part_no, size, etag) 序列一致；一侧 abort 另一侧立即不可见 |
 
-e2e：compose 增加 profile `multi`（两个 `lights3` + redis + rados，前置一个
-nginx 轮询），`run_e2e.sh` 用 aws cli 跑 5 分片 multipart 并校验 ETag；本机无
-docker daemon，归入 [../todo.md](../todo.md) §2 待验证。
+实现时发现的两个可测性细节：读租约下限是 unix-ms 且**含等号**（与下限同一毫秒
+入队的 gcq 项被推迟），套件在发布租约前让几毫秒过去；GC 轮内 mpu_ttl abort 入队
+的分片必然晚于轮前发布的下限，只能在下一轮回收——这是设计行为（对端可能有早于
+abort 的在途读），不是缺口。
+
+e2e 两层：
+
+- `run_e2e.sh` 的 `duostore-redis` 变体新增"multi-gateway multipart"段：同一
+  redis meta + 同一数据根起两个网关，create 在 A、5 个分片 B/A 交替、两侧
+  ListParts、B complete、A GET；期望 ETag 由脚本用各分片 ETag 独立算出
+  （md5(拼接二进制 md5)-5）。本机可跑，已通过。
+- compose profile `multi`：`lights3-multi-a` / `-b`（redis meta + rados data，
+  `read_lease: 5s`，`LIGHTS3_GC_ENABLED` 仅 a 为 true）+ `nginx-multi`
+  （无粘连逐请求轮询，:9004）+ `e2e-multi`（`deploy/docker/e2e-multi.sh`：经
+  nginx 跑 5 分片 multipart，校验合成 ETag、GET 字节、两网关请求计数都在动；
+  用 curl `--aws-sigv4` 而非 aws cli，与仓库 e2e 工具链一致）。
+  `docker compose --profile multi config` 通过；本机无 docker daemon，实际拉起归入
+  [../todo.md](../todo.md) §2 待验证。
 
 ### ③ 文档与配置
 

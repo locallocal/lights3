@@ -1,0 +1,40 @@
+# compose profile `multi`: one of N identical gateways over shared storage
+# (docs/storage/multi-gateway-multipart-design.md §4 ②) — metadata in the redis
+# service, chunk data in the ceph demo cluster (the combination the design supports
+# for multi-gateway deployments). read_lease on so every gateway publishes its
+# in-flight read / write floors; gc_enabled is set per instance from the environment
+# (exactly one gateway runs GC / orphan scans, docs/storage/duostore-data-rados-design.md §8.3)
+http:
+  driver: builtin
+  bind: 0.0.0.0
+  port: 9000
+
+runtime:
+  io_threads: 16
+
+auth:
+  credentials:
+    - access_key: ${LIGHTS3_ACCESS_KEY:-AKIDEXAMPLE}
+      secret_key: ${LIGHTS3_SECRET_1}
+  region: ${LIGHTS3_REGION:-us-east-1}
+
+backends:
+  - name: duodata
+    type: duostore
+    root: /var/lib/lights3/duostore
+    meta: redis
+    redis_uri: ${LIGHTS3_REDIS_URI:-redis://redis:6379}
+    redis_prefix: "duo:"
+    data: rados
+    rados_conf: /etc/ceph/ceph.conf
+    rados_client: client.admin
+    rados_pool: ${LIGHTS3_RADOS_POOL:-lights3}
+    read_lease: 5s
+    gc_enabled: ${LIGHTS3_GC_ENABLED:-true}
+
+buckets:
+  default_backend: duodata
+  rules: []
+
+log:
+  level: ${LIGHTS3_LOG_LEVEL:-info}

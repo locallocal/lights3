@@ -1285,6 +1285,74 @@ if [[ "$BACKEND" == "duostore-redis" ]]; then
     wait "$INV_A" 2>/dev/null; wait "$INV_B" 2>/dev/null
 fi
 
+# ---------- multi-gateway-multipart §4 ②: one multipart upload spread over two gateways ----------
+# Two gateways on the same redis meta + the same data root (chunk data shared at
+# object level, as a rados data plane gives every gateway): create on A, parts
+# alternately on B and A, ListParts on both, complete on B, GET through A. The
+# object's ETag must be the S3 combined ETag over the parts, computed here
+# independently from the per-part ETags the two gateways returned
+if [[ "$BACKEND" == "duostore-redis" ]]; then
+    LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server-mga.log" 2>&1 &
+    MGA_PID=$!
+    LIGHTS3_MASTER_KEY=$MASTER_KEY "$BIN" --config "$WORK/config.yaml" > "$WORK/server-mgb.log" 2>&1 &
+    MGB_PID=$!
+    APORT=""; BPORT=""
+    for _ in $(seq 1 50); do
+        APORT=$(sed -n 's/.*http server listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-mga.log" | head -1)
+        BPORT=$(sed -n 's/.*http server listening on 127.0.0.1:\([0-9]*\).*/\1/p' "$WORK/server-mgb.log" | head -1)
+        [[ -n "$APORT" && -n "$BPORT" ]] && break
+        sleep 0.1
+    done
+    check "two gateways for the multi-gateway multipart started" "0" "$([[ -n "$APORT" && -n "$BPORT" ]]; echo $?)"
+    if [[ -n "$APORT" && -n "$BPORT" ]]; then
+        AB="http://127.0.0.1:$APORT"; BB="http://127.0.0.1:$BPORT"
+        s3curl -o /dev/null -X PUT "$AB/mgw"
+        MG_INIT=$(s3curl -X POST "$AB/mgw/spread.bin?uploads")
+        MG_ID=$(echo "$MG_INIT" | sed -n 's/.*<UploadId>\(.*\)<\/UploadId>.*/\1/p')
+        check "multi-gateway: CreateMultipartUpload on A" "0" "$([[ -n "$MG_ID" ]]; echo $?)"
+        # 5 parts: 1-4 at the 5 MiB minimum, the last one smaller; odd parts go to B, even to A
+        MG_ETAGS=()
+        MG_XML="<CompleteMultipartUpload>"
+        for n in 1 2 3 4 5; do
+            if [[ $n -lt 5 ]]; then dd if=/dev/urandom of="$WORK/mgp$n" bs=1M count=5 2>/dev/null
+            else dd if=/dev/urandom of="$WORK/mgp$n" bs=1K count=700 2>/dev/null; fi
+            GW=$BB; [[ $((n % 2)) -eq 0 ]] && GW=$AB
+            s3curl -o /dev/null -D "$WORK/mgh$n" --data-binary "@$WORK/mgp$n" -X PUT \
+                "$GW/mgw/spread.bin?partNumber=$n&uploadId=$MG_ID"
+            ET=$(tr -d '\r' < "$WORK/mgh$n" | sed -n 's/^etag: //Ip')
+            MG_ETAGS+=("$ET")
+            MG_XML+="<Part><PartNumber>$n</PartNumber><ETag>$ET</ETag></Part>"
+        done
+        MG_XML+="</CompleteMultipartUpload>"
+        check "multi-gateway: every part returned an ETag" "5" "$(printf '%s\n' "${MG_ETAGS[@]}" | grep -c '^"[0-9a-f]\{32\}"$')"
+        check "multi-gateway: ListParts on A sees the parts B recorded" "5" \
+            "$(s3curl "$AB/mgw/spread.bin?uploadId=$MG_ID" | grep -o '<PartNumber>' | wc -l)"
+        check "multi-gateway: ListParts on B sees the parts A recorded" "5" \
+            "$(s3curl "$BB/mgw/spread.bin?uploadId=$MG_ID" | grep -o '<PartNumber>' | wc -l)"
+        check "multi-gateway: ListMultipartUploads on B lists A's upload" "0" \
+            "$(s3curl "$BB/mgw?uploads" | grep -q "<UploadId>$MG_ID</UploadId>"; echo $?)"
+        MG_EXPECT=$(python3 -c 'import hashlib, sys
+parts = [p.strip("\"") for p in sys.argv[1:]]
+print(hashlib.md5(b"".join(bytes.fromhex(p) for p in parts)).hexdigest() + "-%d" % len(parts))' "${MG_ETAGS[@]}")
+        MG_DONE=$(s3curl -X POST --data-binary "$MG_XML" "$BB/mgw/spread.bin?uploadId=$MG_ID")
+        check "multi-gateway: complete on B returns the combined ETag" "$MG_EXPECT" \
+            "$(echo "$MG_DONE" | sed -n 's/.*<ETag>&quot;\([^&]*\)&quot;<\/ETag>.*/\1/p')"
+        check "multi-gateway: HEAD through A carries the same ETag" "\"$MG_EXPECT\"" \
+            "$(s3curl -sI "$AB/mgw/spread.bin" | tr -d '\r' | sed -n 's/^etag: //Ip')"
+        s3curl -o "$WORK/mg.out" "$AB/mgw/spread.bin"
+        check "multi-gateway: GET through A returns the bytes B and A stored" \
+            "$(cat "$WORK"/mgp1 "$WORK"/mgp2 "$WORK"/mgp3 "$WORK"/mgp4 "$WORK"/mgp5 | md5sum | cut -d' ' -f1)" \
+            "$(md5sum "$WORK/mg.out" | cut -d' ' -f1)"
+        check "multi-gateway: the upload is gone on A after B completed it" "0" \
+            "$(s3curl "$AB/mgw?uploads" | grep -c '<UploadId>')"
+        s3curl -o /dev/null -X DELETE "$BB/mgw/spread.bin"
+        s3curl -o /dev/null -X DELETE "$AB/mgw"
+        rm -f "$WORK"/mgp? "$WORK"/mgh? "$WORK/mg.out"
+    fi
+    kill -TERM "$MGA_PID" "$MGB_PID" 2>/dev/null
+    wait "$MGA_PID" 2>/dev/null; wait "$MGB_PID" 2>/dev/null
+fi
+
 # ---------- backlog-sequence ②: separate admin listener (docs/http-adapter.md §2.1) ----------
 # A third instance with http.admin_port: the /-/ face moves to the admin port, the
 # data-plane port answers 404 for it, probes stay on both, lights3-ctl points at the admin port

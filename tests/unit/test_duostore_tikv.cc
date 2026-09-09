@@ -29,6 +29,7 @@
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
 #include "unit/mini_test.h"
+#include "unit/multi_gateway_suite.h"
 
 namespace fs = std::filesystem;
 using namespace lights3;
@@ -640,6 +641,46 @@ TEST(duostore_tikv_write_conflict_classification) {
         CHECK(!is_upstream_write_conflict(kUnknownError, "resolve txn failed"));
     }
     CHECK(!is_upstream_write_conflict(0, ""));
+}
+
+// ---------- multi-gateway multipart (docs/storage/multi-gateway-multipart-design.md §4 ②) ----------
+// Two backends over one tikv prefix and one shared data engine; the scenarios
+// live in unit/multi_gateway_suite.h and run identically over redis
+
+namespace {
+multi_gateway_suite::MetaFactory tikv_shared_meta(const std::string& prefix) {
+    return [prefix] { return std::make_unique<TikvMetaStore>(tikv_opts(prefix)); };
+}
+}  // namespace
+
+TEST(duostore_tikv_multi_gateway_multipart) {
+    TIKV_OR_SKIP();
+    multi_gateway_suite::cross_gateway_multipart(tikv_shared_meta(unique_prefix()),
+                                                 DuoMetaKind::kTikv);
+}
+
+TEST(duostore_tikv_multi_gateway_abort_while_peer_pumps) {
+    TIKV_OR_SKIP();
+    multi_gateway_suite::abort_while_peer_pumps(tikv_shared_meta(unique_prefix()),
+                                                DuoMetaKind::kTikv);
+}
+
+TEST(duostore_tikv_multi_gateway_same_part_concurrent) {
+    TIKV_OR_SKIP();
+    multi_gateway_suite::same_part_concurrent(tikv_shared_meta(unique_prefix()),
+                                              DuoMetaKind::kTikv);
+}
+
+TEST(duostore_tikv_multi_gateway_mpu_ttl_single_executor) {
+    TIKV_OR_SKIP();
+    multi_gateway_suite::mpu_ttl_single_executor(tikv_shared_meta(unique_prefix()),
+                                                 DuoMetaKind::kTikv);
+}
+
+TEST(duostore_tikv_multi_gateway_listings_shared) {
+    TIKV_OR_SKIP();
+    multi_gateway_suite::listings_are_shared(tikv_shared_meta(unique_prefix()),
+                                             DuoMetaKind::kTikv);
 }
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_TIKV_META

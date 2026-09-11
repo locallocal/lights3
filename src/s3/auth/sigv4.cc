@@ -550,7 +550,7 @@ std::optional<std::string> SigV4Authenticator::peek_access_key(const http::HttpR
     }
 }
 
-VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::string_view service,
+VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::span<const std::string_view> services,
                                                  const std::string* explicit_payload_hash) const {
     if (!enabled()) return {};
 
@@ -575,9 +575,15 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::st
         throw S3Error(S3ErrorCode::AccessDenied, "Missing Authorization header");
     }
 
-    // scope check
-    if (f.terminal != "aws4_request" || f.service != service || f.region != region_)
-        malformed("credential scope does not match this endpoint (" + region_ + "/" + std::string(service) + ")");
+    // scope check: the service must be one of the names this endpoint answers to
+    bool service_ok = false;
+    std::string names;
+    for (auto sv : services) {
+        if (f.service == sv) service_ok = true;
+        names += (names.empty() ? "" : "|") + std::string(sv);
+    }
+    if (f.terminal != "aws4_request" || !service_ok || f.region != region_)
+        malformed("credential scope does not match this endpoint (" + region_ + "/" + names + ")");
     if (f.amz_date.substr(0, 8) != f.date) malformed("credential date does not match x-amz-date");
 
     // host must be in SignedHeaders (AWS requirement; under vhost the bucket comes from Host, and a signature
@@ -720,7 +726,9 @@ VerifiedIdentity SigV4Authenticator::verify_impl(http::HttpRequest& req, std::st
     return {std::move(f.access_key), std::move(cred->policy), std::move(cred->tenant), cred->tenant_admin};
 }
 
-void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred, std::string payload_hash) const {
+void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred, std::string payload_hash,
+                              std::string_view service) const {
+    const std::string svc = service.empty() ? service_ : std::string(service);
     if (payload_hash.empty()) payload_hash = kEmptySha256;
     std::string amz_date = util::amz_date(clock());
     req.headers.set("x-amz-date", amz_date);
@@ -738,7 +746,7 @@ void SigV4Authenticator::sign(http::HttpRequest& req, const Credential& cred, st
     for (auto& n : names) signed_headers += (signed_headers.empty() ? "" : ";") + n;
 
     std::string date = amz_date.substr(0, 8);
-    std::string scope = date + "/" + region_ + "/" + service_ + "/aws4_request";
+    std::string scope = date + "/" + region_ + "/" + svc + "/aws4_request";
     std::string sig = signature_for(req, cred.secret_key, amz_date, scope, signed_headers, payload_hash);
     req.headers.set("Authorization", std::string(kAlgo) + " Credential=" + cred.access_key + "/" + scope +
                                          ", SignedHeaders=" + signed_headers + ", Signature=" + sig);

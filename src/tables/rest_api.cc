@@ -58,6 +58,8 @@ constexpr RestApi::Route kRoutes[] = {
      &RestApi::rename_table},
     {"POST", "namespaces/{ns}/tables/{t}/metrics", Action::Read, RestApi::KeyKind::Table, false, "ReportMetrics", true,
      &RestApi::report_metrics},
+    {"GET", "namespaces/{ns}/tables/{t}/credentials", Action::Read, RestApi::KeyKind::Table, false, "LoadCredentials",
+     true, &RestApi::load_credentials},
     {"GET", "namespaces/{ns}/tables/{t}/metadata-location", Action::Read, RestApi::KeyKind::Table, false,
      "GetTableMetadataLocation", false, &RestApi::get_metadata_location},
     {"PUT", "namespaces/{ns}/tables/{t}/metadata-location", Action::Write, RestApi::KeyKind::Table, false,
@@ -96,6 +98,14 @@ json levels_json(const Levels& l) {
 }  // namespace
 
 std::span<const RestApi::Route> RestApi::routes() { return kRoutes; }
+
+// A table is addressed by "<ns>/<t>"; a policy scoped to the table's own prefix
+// ("<ns>/<t>/", what a vended session carries) must reach it too
+bool RestApi::allows_table(const s3::CredentialPolicy& p, std::string_view bucket, const Levels& ns,
+                           std::string_view table, s3::Action action) {
+    std::string key = ns_path(ns) + "/" + std::string(table);
+    return p.allows(bucket, key, action) || p.allows(bucket, key + "/", action);
+}
 
 std::vector<std::string> RestApi::advertised_endpoints() {
     std::vector<std::string> out;
@@ -329,15 +339,33 @@ Task<http::HttpResponse> RestApi::dispatch(http::HttpRequest& req, Hooks& hooks,
         s3::VerifiedIdentity ident = hooks.verify(req);
         access_key = ident.access_key;
         hooks.access_key = access_key;
+        hooks.tenant = ident.tenant;
+        hooks.policy = ident.policy;
         // authorization (design §6.2): catalog operations map onto (bucket, key, action)
         if (m.route->root_only && !hooks.is_root(access_key))
             throw forbidden("this operation requires a root (statically configured) credential");
         if (ident.policy && !m.bucket.empty()) {
-            std::string key;
-            if (m.route->key_kind == KeyKind::Namespace) key = ns_path(m.ns) + "/";
-            if (m.route->key_kind == KeyKind::Table) key = ns_path(m.ns) + "/" + m.table;
-            if (!ident.policy->allows(m.bucket, key, m.route->action))
-                throw forbidden("Access denied by credential policy.");
+            const s3::CredentialPolicy& p = *ident.policy;
+            bool ok = false;
+            switch (m.route->key_kind) {
+                case KeyKind::None:
+                    ok = p.allows(m.bucket, "", m.route->action);
+                    break;
+                case KeyKind::Namespace: {
+                    // reads follow the ListObjects CommonPrefixes rule (a credential scoped to
+                    // "sales/orders/" may look into namespace "sales"); writes need the prefix itself
+                    std::string key = ns_path(m.ns) + "/";
+                    ok = m.route->action == Action::Read
+                             ? p.allows_bucket(m.bucket) && p.allows_action(m.route->action) &&
+                                   p.prefix_may_contain(key)
+                             : p.allows(m.bucket, key, m.route->action);
+                    break;
+                }
+                case KeyKind::Table:
+                    ok = allows_table(p, m.bucket, m.ns, m.table, m.route->action);
+                    break;
+            }
+            if (!ok) throw forbidden("Access denied by credential policy.");
         }
         if (!ident.tenant.empty() && hooks.tenant_gate && !m.bucket.empty())
             co_await hooks.tenant_gate(m.bucket, ident.tenant);
@@ -424,7 +452,7 @@ Task<http::HttpResponse> RestApi::disable_bucket(http::HttpRequest&, Hooks& hook
     co_return empty_response(204);
 }
 
-Task<http::HttpResponse> RestApi::list_namespaces(http::HttpRequest& req, Hooks&, const Match& m) {
+Task<http::HttpResponse> RestApi::list_namespaces(http::HttpRequest& req, Hooks& hooks, const Match& m) {
     Levels parent;
     if (auto p = req.query_get("parent"); p && !p->empty()) parent = parse_namespace_path(*p);
     Match ctx = m;
@@ -433,7 +461,11 @@ Task<http::HttpResponse> RestApi::list_namespaces(http::HttpRequest& req, Hooks&
     auto page = co_await catalog_->list_namespaces(m.bucket, parent, c);
     json j;
     j["namespaces"] = json::array();
-    for (auto& l : page.items) j["namespaces"].push_back(levels_json(l));
+    // policy filtering (design §6.2): a prefix-scoped credential only sees namespaces
+    // that may hold keys under its prefixes (the ListObjects CommonPrefixes rule)
+    for (auto& l : page.items)
+        if (!hooks.policy || hooks.policy->prefix_may_contain(ns_path(l) + "/"))
+            j["namespaces"].push_back(levels_json(l));
     if (page.next_after.empty())
         j["next-page-token"] = nullptr;
     else
@@ -497,12 +529,13 @@ Task<http::HttpResponse> RestApi::update_namespace_properties(http::HttpRequest&
     co_return json_response(200, j);
 }
 
-Task<http::HttpResponse> RestApi::list_tables(http::HttpRequest& req, Hooks&, const Match& m) {
+Task<http::HttpResponse> RestApi::list_tables(http::HttpRequest& req, Hooks& hooks, const Match& m) {
     PageCursor c = page_cursor(req, "tables", m);
     auto page = co_await catalog_->list_tables(m.bucket, m.ns, c);
     json j;
     j["identifiers"] = json::array();
     for (auto& n : page.items) {
+        if (hooks.policy && !hooks.policy->allows_key(ns_path(m.ns) + "/" + n)) continue;
         json id;
         id["namespace"] = levels_json(m.ns);
         id["name"] = n;
@@ -522,11 +555,100 @@ json RestApi::load_table_result(std::string_view bucket, const Catalog::LoadedTa
     json cfg;
     cfg["s3.path-style-access"] = "true";
     cfg["lights3.credential-vending"] = cfg_.credential_vending ? "supported" : "disabled";
+    cfg["lights3.credential-scope"] = "table-prefix";
     cfg["lights3.table-location"] = t.entry.location;
     cfg["lights3.version-token"] = t.entry.version_token;
     cfg["lights3.snapshot-validation"] = "shallow";
     j["config"] = cfg;
     return j;
+}
+
+// ---------- credential vending (design §8.4) ----------
+
+namespace {
+
+bool wants_vended_credentials(const http::HttpRequest& req) {
+    auto h = req.headers.get("X-Iceberg-Access-Delegation");
+    if (!h) return false;
+    size_t pos = 0;
+    while (pos <= h->size()) {
+        size_t comma = h->find(',', pos);
+        if (comma == std::string::npos) comma = h->size();
+        std::string tok = h->substr(pos, comma - pos);
+        while (!tok.empty() && (tok.front() == ' ' || tok.front() == '\t')) tok.erase(0, 1);
+        while (!tok.empty() && (tok.back() == ' ' || tok.back() == '\t')) tok.pop_back();
+        for (char& c : tok) c = http::HeaderMap::lower(c);
+        if (tok == "vended-credentials") return true;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+}  // namespace
+
+Task<RestApi::Vending> RestApi::vend(Hooks& hooks, std::string_view bucket, const TableEntry& entry) {
+    Vending v;
+    v.prefix = entry.location + "/";
+    if (!cfg_.credential_vending || !hooks.mint) {
+        v.reason = "credential-vending-disabled";
+        co_return v;
+    }
+    // a read-only caller gets a read-only session; a session credential may not mint again
+    bool readonly = hooks.policy && !hooks.policy->allows_action(Action::Write);
+    s3::CredentialPolicy policy = co_await catalog_->vending_policy(bucket, entry, readonly);
+    std::optional<VendedSession> session;
+    std::string denied;
+    try {
+        session = co_await hooks.mint(hooks.access_key, std::move(policy), cfg_.credential_ttl_sec);
+    } catch (const s3::S3Error& e) {
+        if (e.code != s3::S3ErrorCode::AccessDenied) throw;
+        denied = e.message;
+    }
+    if (!session) {
+        v.reason = "credential-vending-not-authorized";
+        LOG_INFO("tables: credential vending refused for {} on {}: {}", hooks.access_key, entry.name, denied);
+        co_return v;
+    }
+    v.session = std::move(session);
+    co_return v;
+}
+
+void RestApi::add_vending(json& result, const Vending& v) {
+    json& cfg = result["config"];
+    if (!v.session) {
+        cfg["lights3.credential-vending"] = "disabled";
+        cfg["lights3.credential-vending-reason"] = v.reason;
+        cfg["lights3.credential-mode"] = "client-provided-s3-credentials-required";
+        return;
+    }
+    json c;
+    c["s3.access-key-id"] = v.session->access_key;
+    c["s3.secret-access-key"] = v.session->secret_key;
+    c["s3.session-token"] = v.session->token;
+    c["expiration-ms"] = std::to_string(v.session->expires_unix * 1000);
+    cfg["lights3.credential-vending"] = "supported";
+    cfg["lights3.credential-mode"] = "catalog-vended-temporary-credentials";
+    for (auto& [k, val] : c.items()) cfg[k] = val;
+    json sc;
+    sc["prefix"] = v.prefix;
+    sc["config"] = c;
+    result["storage-credentials"] = json::array({sc});
+}
+
+Task<http::HttpResponse> RestApi::load_credentials(http::HttpRequest&, Hooks& hooks, const Match& m) {
+    if (!cfg_.credential_vending) throw unsupported("credential vending is disabled on this deployment");
+    auto p = co_await catalog_->table_pointer(m.bucket, m.ns, m.table);
+    if (!p) throw not_found_table("table " + ns_display(m.ns) + "." + m.table + " does not exist");
+    Vending v = co_await vend(hooks, m.bucket, p->value);
+    if (!v.session) throw forbidden("credential vending is not authorized for this credential");
+    json j;
+    j["config"] = json::object();
+    add_vending(j, v);
+    j.erase("config");
+    audit(hooks, "vend_credentials", m, "session " + v.session->access_key);
+    auto resp = json_response(200, j);
+    resp.headers.set("Cache-Control", "no-store, private");
+    co_return resp;
 }
 
 Task<http::HttpResponse> RestApi::create_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
@@ -572,7 +694,7 @@ Task<http::HttpResponse> RestApi::register_table(http::HttpRequest& req, Hooks& 
     co_return resp;
 }
 
-Task<http::HttpResponse> RestApi::load_table(http::HttpRequest& req, Hooks&, const Match& m) {
+Task<http::HttpResponse> RestApi::load_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
     std::string mode = "all";
     if (auto s = req.query_get("snapshots")) {
         if (*s != "all" && *s != "refs") throw bad_request("snapshots must be 'all' or 'refs'");
@@ -589,8 +711,17 @@ Task<http::HttpResponse> RestApi::load_table(http::HttpRequest& req, Hooks&, con
             if (keep.count(s["snapshot-id"].get<int64_t>())) snaps.push_back(s);
         t.metadata["snapshots"] = snaps;
     }
-    auto resp = json_response(200, load_table_result(m.bucket, t));
+    json result = load_table_result(m.bucket, t);
+    bool vended = false;
+    if (wants_vended_credentials(req)) {
+        Vending v = co_await vend(hooks, m.bucket, t.entry);
+        add_vending(result, v);
+        vended = v.session.has_value();
+        if (vended) audit(hooks, "vend_credentials", m, "session " + v.session->access_key);
+    }
+    auto resp = json_response(200, result);
     resp.headers.set("ETag", "\"" + t.etag + "\"");
+    if (vended) resp.headers.set("Cache-Control", "no-store, private");
     co_return resp;
 }
 
@@ -659,10 +790,9 @@ Task<http::HttpResponse> RestApi::rename_table(http::HttpRequest& req, Hooks& ho
     auto [src_ns, src_name] = ident("source");
     auto [dst_ns, dst_name] = ident("destination");
     // policy: delete on the source, write on the destination (design §6.2)
-    s3::VerifiedIdentity id = hooks.verify(req);
-    if (id.policy) {
-        if (!id.policy->allows(m.bucket, ns_path(src_ns) + "/" + src_name, Action::Delete) ||
-            !id.policy->allows(m.bucket, ns_path(dst_ns) + "/" + dst_name, Action::Write))
+    if (hooks.policy) {
+        if (!allows_table(*hooks.policy, m.bucket, src_ns, src_name, Action::Delete) ||
+            !allows_table(*hooks.policy, m.bucket, dst_ns, dst_name, Action::Write))
             throw forbidden("Access denied by credential policy.");
     }
     co_await catalog_->rename_table(m.bucket, src_ns, src_name, dst_ns, dst_name);

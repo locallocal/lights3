@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -25,18 +26,31 @@ namespace lights3::tables {
 
 class RestApi {
 public:
+    // A session minted for credential vending (design §8.4); mirrors CredentialStore's
+    // SessionCredential without depending on its header
+    struct VendedSession {
+        std::string access_key;
+        std::string secret_key;
+        std::string token;
+        int64_t expires_unix = 0;
+    };
     struct Hooks {
         std::function<s3::VerifiedIdentity(http::HttpRequest&)> verify;
         std::function<bool(std::string_view ak)> is_root;
         std::function<void(const s3::AuditEvent&)> audit;
-        // tenant ownership gate (step ②); empty = no tenancy
+        // tenant ownership gate (design §6.2); empty = no tenancy
         std::function<Task<void>(std::string_view bucket, std::string_view tenant)> tenant_gate;
+        // credential vending (design §8.4): mint a session for `caller` narrowed to `policy`;
+        // empty = vending unavailable on this deployment
+        std::function<Task<VendedSession>(std::string_view caller, s3::CredentialPolicy policy, int ttl_sec)> mint;
         // quota / usage (may be empty)
         CommitHooks commit;
         std::string region;
         std::string_view request_id;
         // set by dispatch after verification
         std::string access_key;
+        std::string tenant;
+        std::optional<s3::CredentialPolicy> policy;
     };
 
     RestApi(std::shared_ptr<Catalog> catalog, TablesConfig cfg, MetricsScope metrics);
@@ -50,6 +64,7 @@ public:
     // The standard endpoints advertised by GET /v1/config (same source as the route table)
     static std::vector<std::string> advertised_endpoints();
     const std::string& prefix() const { return cfg_.path_prefix; }
+    const TablesConfig& config() const { return cfg_; }
 
     enum class KeyKind { None, Namespace, Table };
     struct Match;
@@ -76,6 +91,8 @@ public:
         std::string extra;
     };
     static std::span<const Route> routes();
+    static bool allows_table(const s3::CredentialPolicy& p, std::string_view bucket, const Levels& ns,
+                             std::string_view table, s3::Action action);
 
     // handlers (public so the route table can name them; not part of the API proper)
     Task<http::HttpResponse> get_config(http::HttpRequest&, Hooks&, const Match&);
@@ -99,6 +116,7 @@ public:
     Task<http::HttpResponse> get_metadata_location(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> put_metadata_location(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> report_metrics(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> load_credentials(http::HttpRequest&, Hooks&, const Match&);
 
 private:
     // path after "<prefix>/v1/" split on '/', percent-decoded per segment
@@ -110,6 +128,15 @@ private:
     PageCursor page_cursor(const http::HttpRequest& req, std::string_view op, const Match& m) const;
     std::string page_token(std::string_view op, const Match& m, std::string_view after) const;
     nlohmann::json load_table_result(std::string_view bucket, const Catalog::LoadedTable& t) const;
+    // Credential vending outcome for one LoadTable / LoadCredentials (design §8.4)
+    struct Vending {
+        // nullopt = not vended; `reason` explains why
+        std::optional<VendedSession> session;
+        std::string reason;
+        std::string prefix;
+    };
+    Task<Vending> vend(Hooks& hooks, std::string_view bucket, const TableEntry& entry);
+    static void add_vending(nlohmann::json& result, const Vending& v);
     void audit(Hooks& hooks, std::string_view op, const Match& m, std::string detail) const;
 
     std::shared_ptr<Catalog> catalog_;

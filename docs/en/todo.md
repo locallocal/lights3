@@ -40,7 +40,7 @@ design document -- no struck-through history here. Each entry carries
 | Item | Notes |
 | --- | --- |
 | Versioning | Architecture-level (key layout of six backends / List semantics / delete markers / GC all move); if ever, **start from duostore** (meta is a KV, add a version dimension), localfs's key→path mapping cannot hold multiple versions |
-| S3 Tables (Iceberg REST Catalog) | Design [s3-tables-design.md](s3-tables-design.md), implementation documents under `docs/s3-tables/`; **① implemented (2026-09-12)**: the `/iceberg/v1` catalog, table buckets, the commit protocol, the guard, unit tests and an e2e segment. Next ② (the policy triple mapping already landed with ①; the tenant gate, the `s3tables` signing name, credential vending and the lifecycle exclusion remain) → ③ deep Avro validation and diagnostics → ④ maintenance |
+| S3 Tables (Iceberg REST Catalog) | Design [s3-tables-design.md](s3-tables-design.md), implementation documents under `docs/s3-tables/`; **① and ② implemented (2026-09-12)**: catalog, table buckets, commit protocol, guard, policy / tenant gate, the `s3tables` signing name, credential vending, lifecycle exclusion, unit tests and an e2e segment. Next ③ deep Avro validation and diagnostics → ④ maintenance |
 | SSE-C / SSE-S3 | Server-side encryption; key sourcing and the ETag / checksum semantics have to be settled first |
 | Full OpenTelemetry instrumentation | The lightweight trace layer exists (W3C traceparent pass-through, one span per request, log correlation, [s3-protocol.md §7](s3-protocol.md)); exporting spans through otel-cpp is long-term |
 | HTTP/2 | Mainstream S3 SDKs still speak HTTP/1.1; only CDN / L7 fronting needs it; terminating h2 at a fronting proxy is in [tls.md §6](tls.md) |

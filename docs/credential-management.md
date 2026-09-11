@@ -262,6 +262,15 @@ root 凭证 POST 生成 → 解析响应 JSON 取出新 AK/SK（sed/grep 提取�
 | 一期 | 本方案全部：4 个 API、`.sys` 持久化、动态生效、两级权限、单测 + e2e | 已实现 |
 | 二期 | SK at-rest 加密（master key）、文件热加载 provider、多实例失效同步、per-credential policy（设计见 §10） | 已实现 |
 
+### 9.1 S3 Tables 的收窄会话（2026-09-12）
+
+`CredentialStore::mint_session(parent, ttl, narrow)` 的第三参数把会话 policy 收成
+`narrow_policy(父 policy, narrow)`（`s3/auth/policy.h`）：buckets / prefixes 逐项被父放行者
+保留、`readonly` 取或、actions 取交，交集为空即 `AccessDenied`——会话永远不超过父凭证。
+Iceberg REST catalog 的凭证下发（[s3-tables-design.md §8.4](s3-tables-design.md)）是目前唯一的
+调用方：会话限在一张表的数据前缀与其元数据目录。AssumeRole 表单的 `Policy` 参数仍不支持。
+持久化格式不变（`.sys/sts/<ak>` 已带 `policy`）。
+
 ## 10. 二期设计
 
 一期后的凭证来源从两级扩展为三来源：

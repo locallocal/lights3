@@ -7,7 +7,9 @@
 #include "core/util/crypto.h"
 #include "core/util/uri.h"
 #include "s3/auth/credential_store.h"
+#include "s3/lifecycle.h"
 #include "s3/service.h"
+#include "s3/tenant.h"
 #include "storage/memory/memory_backend.h"
 #include "tables/bucket_guard.h"
 #include "tables/catalog.h"
@@ -39,8 +41,22 @@ struct TablesEnv {
         return a;
     }
 
-    explicit TablesEnv(bool enabled = true) : acfg(root_acfg()), auth(SigV4Authenticator::build(acfg)) {
+    struct Options {
+        bool enabled = true;
+        bool vending = false;
+        bool accept_s3tables = true;
+        bool tenants = false;
+    };
+    std::shared_ptr<TenantStore> tenant_store;
+    std::shared_ptr<OwnerStore> owner_store;
+    std::shared_ptr<TenantRegistry> tenants;
+
+    explicit TablesEnv(bool enabled = true) : TablesEnv(Options{enabled}) {}
+    explicit TablesEnv(Options o) : acfg(root_acfg()), auth(SigV4Authenticator::build(acfg)) {
+        bool enabled = o.enabled;
         cfg.enabled = enabled;
+        cfg.credential_vending = o.vending;
+        cfg.accept_s3tables_signing = o.accept_s3tables;
         cred_store = sync_wait(CredentialStore::load(backend, acfg));
         auth.set_provider(cred_store);
         std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", backend}};
@@ -49,6 +65,12 @@ struct TablesEnv {
         auto router = storage::BucketRouter::build(bcfg, std::move(bmap));
         svc = std::make_unique<S3Service>(router, auth);
         svc->set_credential_store(cred_store);
+        if (o.tenants) {
+            tenant_store = sync_wait(TenantStore::load(backend));
+            owner_store = sync_wait(OwnerStore::load(backend));
+            tenants = std::make_shared<TenantRegistry>(tenant_store, owner_store);
+            svc->set_tenant_registry(tenants);
+        }
         if (enabled) {
             buckets = sync_wait(tables::TableBucketStore::load(backend));
             auto store = std::make_shared<tables::ObjectCatalogStore>(backend);
@@ -77,12 +99,20 @@ struct TablesEnv {
         if (!body.empty()) req.body = std::make_unique<http::StringBodyReader>(std::move(body));
         return req;
     }
+    http::HttpResponse call_as(const Credential& cred, std::string method, std::string raw_path, std::string body = "",
+                               std::vector<std::pair<std::string, std::string>> query = {},
+                               std::vector<std::pair<std::string, std::string>> headers = {},
+                               std::string_view service = {}) {
+        auto r = make_req(std::move(method), std::move(raw_path), body, std::move(query), std::move(headers));
+        auth.sign(r, cred, body.empty() ? "" : util::sha256_hex(body), service);
+        return sync_wait(svc->dispatch(std::move(r)));
+    }
     http::HttpResponse call(std::string method, std::string raw_path, std::string body = "",
                             std::vector<std::pair<std::string, std::string>> query = {},
-                            std::vector<std::pair<std::string, std::string>> headers = {}, size_t cred = 0) {
-        auto r = make_req(std::move(method), std::move(raw_path), body, std::move(query), std::move(headers));
-        auth.sign(r, acfg.credentials[cred], body.empty() ? "" : util::sha256_hex(body));
-        return sync_wait(svc->dispatch(std::move(r)));
+                            std::vector<std::pair<std::string, std::string>> headers = {}, size_t cred = 0,
+                            std::string_view service = {}) {
+        return call_as(acfg.credentials[cred], std::move(method), std::move(raw_path), std::move(body),
+                       std::move(query), std::move(headers), service);
     }
     http::HttpResponse anon(std::string method, std::string raw_path) {
         auto r = make_req(std::move(method), std::move(raw_path), "", {}, {});
@@ -91,8 +121,8 @@ struct TablesEnv {
     static json body_json(const http::HttpResponse& r) { return json::parse(r.small_body); }
     static std::string error_type(const http::HttpResponse& r) { return body_json(r)["error"]["type"]; }
     // adds a dynamic credential with a policy; returns its index in acfg.credentials
-    size_t add_policy_cred(const std::string& comment, const std::string& policy_json) {
-        auto info = sync_wait(cred_store->generate(comment, parse_policy_json(policy_json)));
+    size_t add_policy_cred(const std::string& comment, const std::string& policy_json, const std::string& tenant = "") {
+        auto info = sync_wait(cred_store->generate(comment, parse_policy_json(policy_json), tenant));
         Credential c;
         c.access_key = info.access_key;
         c.secret_key = info.secret_key;
@@ -392,4 +422,182 @@ TEST(tables_rest_disabled_leaves_s3_plane_untouched) {
     CHECK_EQ(env.call("PUT", "/iceberg/v1/config", "x").status, 200);
     CHECK_EQ(env.call("PUT", "/tbk").status, 200);
     CHECK_EQ(env.call("PUT", "/tbk/.lights3-table/x", "x").status, 200);
+}
+
+// ---- step ②: policy-filtered listings, s3tables signing, vending, tenants, lifecycle ----
+
+TEST(tables_rest_listing_filtered_by_policy) {
+    TablesEnv env;
+    CHECK_EQ(env.call("PUT", "/tbk").status, 200);
+    CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+    for (const char* n : {"sales", "hr"})
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", std::string(R"({"namespace":[")") + n + "\"]}").status,
+                 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", R"({"namespace":["sales","eu"]})").status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("orders")).status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("secret")).status, 200);
+    const size_t scoped = env.add_policy_cred("scoped",
+                                              R"({"buckets":["tbk"],"prefixes":["sales/orders","sales/eu/"]})");
+    // top level: "sales" may contain allowlisted keys, "hr" may not
+    auto ns = TablesEnv::body_json(env.call("GET", "/iceberg/v1/tbk/namespaces", "", {}, {}, scoped));
+    CHECK_EQ(ns["namespaces"].size(), size_t(1));
+    CHECK_EQ(ns["namespaces"][0][0].get<std::string>(), "sales");
+    auto kids = TablesEnv::body_json(
+        env.call("GET", "/iceberg/v1/tbk/namespaces", "", {{"parent", "sales"}}, {}, scoped));
+    CHECK_EQ(kids["namespaces"].size(), size_t(1));
+    // tables: only the allowlisted name
+    auto tl = TablesEnv::body_json(env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables", "", {}, {}, scoped));
+    CHECK_EQ(tl["identifiers"].size(), size_t(1));
+    CHECK_EQ(tl["identifiers"][0]["name"].get<std::string>(), "orders");
+    // root sees everything
+    CHECK_EQ(TablesEnv::body_json(env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables"))["identifiers"].size(),
+             size_t(2));
+}
+
+TEST(tables_rest_s3tables_signing_name) {
+    TablesEnv env;
+    CHECK_EQ(env.call("GET", "/iceberg/v1/config", "", {}, {}, 0, "s3tables").status, 200);
+    CHECK_EQ(env.call("GET", "/iceberg/v1/config", "", {}, {}, 0, "s3").status, 200);
+    auto other = env.call("GET", "/iceberg/v1/config", "", {}, {}, 0, "execute-api");
+    CHECK_EQ(other.status, 403);
+    CHECK_EQ(TablesEnv::error_type(other), "ForbiddenException");
+    // the S3 plane keeps accepting only "s3" (a foreign scope is a malformed Authorization header)
+    auto plane = env.call("PUT", "/tbk", "", {}, {}, 0, "s3tables");
+    CHECK_EQ(plane.status, 400);
+    CHECK(plane.small_body.find("AuthorizationHeaderMalformed") != std::string::npos);
+    TablesEnv strict(TablesEnv::Options{.accept_s3tables = false});
+    CHECK_EQ(strict.call("GET", "/iceberg/v1/config", "", {}, {}, 0, "s3tables").status, 403);
+    CHECK_EQ(strict.call("GET", "/iceberg/v1/config").status, 200);
+}
+
+TEST(tables_rest_credential_vending) {
+    TablesEnv env(TablesEnv::Options{.vending = true});
+    CHECK_EQ(env.call("PUT", "/tbk").status, 200);
+    CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", R"({"namespace":["sales"]})").status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("orders")).status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("other")).status, 200);
+    // no negotiation: no credentials, config says supported
+    auto plain = env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/orders");
+    CHECK_EQ(plain.status, 200);
+    CHECK(!TablesEnv::body_json(plain).contains("storage-credentials"));
+    CHECK_EQ(TablesEnv::body_json(plain)["config"]["lights3.credential-vending"].get<std::string>(), "supported");
+    // negotiated: a session scoped to the table prefix
+    auto r = env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/orders", "", {},
+                      {{"X-Iceberg-Access-Delegation", "remote-signing, Vended-Credentials"}});
+    CHECK_EQ(r.status, 200);
+    CHECK_EQ(r.headers.get("Cache-Control").value_or(""), "no-store, private");
+    auto j = TablesEnv::body_json(r);
+    CHECK_EQ(j["storage-credentials"].size(), size_t(1));
+    CHECK_EQ(j["storage-credentials"][0]["prefix"].get<std::string>(), "s3://tbk/sales/orders/");
+    auto c = j["storage-credentials"][0]["config"];
+    CHECK_EQ(j["config"]["lights3.credential-mode"].get<std::string>(), "catalog-vended-temporary-credentials");
+    CHECK_EQ(j["config"]["s3.access-key-id"].get<std::string>(), c["s3.access-key-id"].get<std::string>());
+    Credential sess{c["s3.access-key-id"].get<std::string>(),
+                    util::SecretString(c["s3.secret-access-key"].get<std::string>())};
+    std::vector<std::pair<std::string, std::string>> tok{
+        {"x-amz-security-token", c["s3.session-token"].get<std::string>()}};
+    CHECK_EQ(sess.access_key.rfind("L3SA", 0), size_t(0));
+    // the session works inside the table prefix, on its metadata (read), and nowhere else
+    CHECK_EQ(env.call_as(sess, "PUT", "/tbk/sales/orders/data/f.parquet", "bytes", {}, tok).status, 200);
+    CHECK_EQ(env.call_as(sess, "GET", "/tbk/sales/orders/data/f.parquet", "", {}, tok).status, 200);
+    CHECK_EQ(env.call_as(sess, "DELETE", "/tbk/sales/orders/data/f.parquet", "", {}, tok).status, 204);
+    std::string ml = j["metadata-location"];
+    CHECK_EQ(env.call_as(sess, "GET", "/tbk/" + ml.substr(std::string("s3://tbk/").size()), "", {}, tok).status, 200);
+    CHECK_EQ(env.call_as(sess, "PUT", "/tbk/" + ml.substr(std::string("s3://tbk/").size()), "x", {}, tok).status, 400);
+    CHECK_EQ(env.call_as(sess, "PUT", "/tbk/sales/other/data/f.parquet", "bytes", {}, tok).status, 403);
+    CHECK_EQ(env.call_as(sess, "PUT", "/tbk/elsewhere", "bytes", {}, tok).status, 403);
+    CHECK_EQ(env.call_as(sess, "GET", "/tbk", "", {}, tok).status, 200);
+    // the session may load the table through the catalog but cannot vend again
+    auto again = env.call_as(sess, "GET", "/iceberg/v1/tbk/namespaces/sales/tables/orders", "", {},
+                             {{"x-amz-security-token", c["s3.session-token"].get<std::string>()},
+                              {"X-Iceberg-Access-Delegation", "vended-credentials"}});
+    CHECK_EQ(again.status, 200);
+    auto aj = TablesEnv::body_json(again);
+    CHECK(!aj.contains("storage-credentials"));
+    CHECK_EQ(aj["config"]["lights3.credential-vending-reason"].get<std::string>(), "credential-vending-not-authorized");
+    // a read-only caller gets a read-only session
+    const size_t ro = env.add_policy_cred("ro", R"({"buckets":["tbk"],"readonly":true})");
+    auto rr = TablesEnv::body_json(
+        env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/orders/credentials", "", {}, {}, ro));
+    auto rc = rr["storage-credentials"][0]["config"];
+    Credential rsess{rc["s3.access-key-id"].get<std::string>(),
+                     util::SecretString(rc["s3.secret-access-key"].get<std::string>())};
+    std::vector<std::pair<std::string, std::string>> rtok{
+        {"x-amz-security-token", rc["s3.session-token"].get<std::string>()}};
+    CHECK_EQ(env.call_as(rsess, "PUT", "/tbk/sales/orders/data/g.parquet", "bytes", {}, rtok).status, 403);
+    CHECK_EQ(env.call_as(rsess, "GET", "/tbk/sales/orders/data/none", "", {}, rtok).status, 404);
+    // the dedicated endpoint returns the credentials only
+    auto ce = env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/orders/credentials");
+    CHECK_EQ(ce.status, 200);
+    CHECK(TablesEnv::body_json(ce).contains("storage-credentials"));
+    CHECK(!TablesEnv::body_json(ce).contains("config"));
+    CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/nope/credentials").status, 404);
+    CHECK_EQ(env.cred_store->session_count(), size_t(3));
+    // vending disabled: the table is served with an explicit reason, the endpoint is 406
+    TablesEnv off;
+    CHECK_EQ(off.call("PUT", "/tbk").status, 200);
+    CHECK_EQ(off.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+    CHECK_EQ(off.call("POST", "/iceberg/v1/tbk/namespaces", R"({"namespace":["sales"]})").status, 200);
+    CHECK_EQ(off.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("orders")).status, 200);
+    auto d = TablesEnv::body_json(off.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/orders", "", {},
+                                           {{"X-Iceberg-Access-Delegation", "vended-credentials"}}));
+    CHECK(!d.contains("storage-credentials"));
+    CHECK_EQ(d["config"]["lights3.credential-vending-reason"].get<std::string>(), "credential-vending-disabled");
+    CHECK_EQ(off.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/orders/credentials").status, 406);
+}
+
+TEST(tables_rest_tenant_gate) {
+    TablesEnv env(TablesEnv::Options{.tenants = true});
+    Tenant a, b;
+    a.id = "ta";
+    b.id = "tb";
+    sync_wait(env.tenant_store->put("ta", a));
+    sync_wait(env.tenant_store->put("tb", b));
+    CHECK_EQ(env.call("PUT", "/tbk").status, 200);
+    sync_wait(env.tenants->assign("tbk", "tb", "ROOTAK", true));
+    CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", R"({"namespace":["n"]})").status, 200);
+    const size_t ta = env.add_policy_cred("ta-user", R"({})", "ta");
+    const size_t tb = env.add_policy_cred("tb-user", R"({})", "tb");
+    auto denied = env.call("GET", "/iceberg/v1/tbk/namespaces", "", {}, {}, ta);
+    CHECK_EQ(denied.status, 403);
+    CHECK_EQ(TablesEnv::error_type(denied), "ForbiddenException");
+    CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces", "", {}, {}, tb).status, 200);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/n/tables", create_body("t"), {}, {}, ta).status, 403);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/n/tables", create_body("t"), {}, {}, tb).status, 200);
+    // config needs no bucket and is open to both
+    CHECK_EQ(env.call("GET", "/iceberg/v1/config", "", {}, {}, ta).status, 200);
+}
+
+TEST(tables_rest_lifecycle_skips_table_buckets) {
+    TablesEnv env;
+    CHECK_EQ(env.call("PUT", "/tbk").status, 200);
+    CHECK_EQ(env.call("PUT", "/plain").status, 200);
+    CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
+    CHECK_EQ(env.call("PUT", "/tbk/old/a.log", "x").status, 200);
+    CHECK_EQ(env.call("PUT", "/plain/old/a.log", "x").status, 200);
+    auto store = sync_wait(LifecycleStore::load(env.backend));
+    std::vector<LifecycleRule> rules;
+    rules.push_back({.id = "exp", .prefix = "old/", .expiration_days = 7});
+    sync_wait(store->put("tbk", rules));
+    sync_wait(store->put("plain", rules));
+    std::map<std::string, std::shared_ptr<storage::IStorageBackend>> bmap{{"mem", env.backend}};
+    BucketsConfig bcfg;
+    bcfg.default_backend = "mem";
+    LifecycleRunner runner(storage::BucketRouter::build(bcfg, std::move(bmap)), store);
+    runner.set_skip_predicate([guard = env.guard](std::string_view b) { return guard->is_table_bucket(b); });
+    runner.set_now_for_tests([] { return std::chrono::system_clock::now() + std::chrono::hours(24 * 10); });
+    auto st = sync_wait(runner.run_once());
+    CHECK_EQ(st.objects_expired, uint64_t(1));
+    CHECK_EQ(env.call("GET", "/tbk/old/a.log").status, 200);
+    CHECK_EQ(env.call("GET", "/plain/old/a.log").status, 404);
+    // the rule API accepts table buckets (like AWS) but the runner keeps ignoring them
+    env.svc->set_lifecycle_store(store);
+    CHECK_EQ(env.call("PUT", "/tbk",
+                      "<LifecycleConfiguration><Rule><ID>x</ID><Status>Enabled</Status><Filter><Prefix>old/</Prefix></"
+                      "Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>",
+                      {{"lifecycle", ""}})
+                 .status,
+             200);
 }

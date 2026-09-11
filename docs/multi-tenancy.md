@@ -226,6 +226,10 @@ dispatch 在 policy 判定之后追加归属判定（`require_tenant_bucket`）�
 ListBuckets 只列本租户的桶，`Owner` 输出租户 id 与 display_name（root/legacy
 仍是 `lights3`）；ListObjectsV2 `fetch-owner` 输出桶归属租户。
 
+Iceberg REST catalog（[s3-tables-design.md §6.2](s3-tables-design.md)）走同一道门：租户
+凭证的目录请求先过 `require_tenant_bucket(<warehouse 桶>)`，别的租户的表桶回 403
+`ForbiddenException`；`GET /iceberg/v1/config` 不涉及桶，任何租户可用。
+
 ### 4.4 分级管理面
 
 | 操作 | root | 租户 admin | 租户 user |

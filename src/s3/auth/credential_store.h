@@ -141,7 +141,10 @@ public:
         std::string token;
         std::chrono::system_clock::time_point expires;
     };
-    Task<SessionCredential> mint_session(std::string_view parent_ak, int duration_sec);
+    // narrow (docs/s3-tables-design.md §8.4): the session policy becomes
+    // narrow_policy(parent policy, *narrow) instead of the parent's verbatim copy
+    Task<SessionCredential> mint_session(std::string_view parent_ak, int duration_sec,
+                                         std::optional<CredentialPolicy> narrow = std::nullopt);
     // Read-through for a session AK this instance has not seen (minted elsewhere):
     // no-op for non-session AKs, for AKs already in memory, and for AKs that missed
     // within the last kSessionMissTtl (a bounded negative cache keeps a scan of

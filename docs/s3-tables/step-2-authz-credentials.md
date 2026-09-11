@@ -1,6 +1,7 @@
 # 步骤 ②：权限、租户、签名名与凭证下发
 
-> 状态：**未实现**（实施稿 2026-09-11）。对应设计 §6.2、§8.2–§8.4、§14 ②。
+> 状态：**已实现（2026-09-12，分支 feat/s3-tables-step2）**。对应设计 §6.2、§8.2–§8.4、§14 ②。
+> 实现与本稿的差异见文末 §12。
 > 依赖 ①。完成后：带 `prefixes` / `readonly` 的凭证在目录面按前缀限权；租户凭证
 > 只见本租户表桶；`s3tables` 签名名可用；`X-Iceberg-Access-Delegation: vended-credentials`
 > 得到按表前缀收窄的会话凭证；表桶不再被 lifecycle 扫描。
@@ -180,3 +181,35 @@ if (table_buckets_ && tables::TableBucketStore::find(tb_snap, bucket)) {
 - 会话凭证签名验证要求 `X-Amz-Security-Token`，PyIceberg 用 `s3.session-token` 会自动带；
   DuckDB SECRET 需 `SESSION_TOKEN` 字段——写进 `docs/s3-tables-design.md §13` 的模板。
 - `verify_services` 只在目录路径使用；S3 面继续只认 `s3`，否则等于全局放宽签名名。
+
+## 12. 实现记录（2026-09-12）
+
+- **签名名集合**：`SigV4Authenticator::verify_any(req, span<string_view>)`，`verify_impl`
+  改为接受 service 集合；`sign()` 加第四参数 `service` 供测试签 `s3tables`。目录路径按
+  `tables.accept_s3tables_signing` 选 `{s3, s3tables}` 或 `{s3}`；S3 面不变。scope 不符仍是
+  `AuthorizationHeaderMalformed`（400），目录面经 `from_s3_error` 变 403 `ForbiddenException`。
+  绑定了 mTLS 证书且未签名的请求仍走 `verify_identity`。
+- **授权粒度调整**（与本稿 §3 的差异）：namespace 的**读**类路由（load / exists / list tables）
+  按 `prefix_may_contain(ns + "/")` 判定——限在 `sales/orders/` 的凭证要能列出 namespace
+  `sales`，否则 PyIceberg 的 `list_tables` 不可用；写类路由仍要求 `allows(bucket, ns + "/")`。
+  表类路由同时接受 `<ns>/<t>` 与 `<ns>/<t>/` 两种 key（`RestApi::allows_table`），下发的会话
+  凭证（前缀 `<ns>/<t>/`）因此能 LoadTable。rename 用同一个 helper。
+- **列表过滤**：`list_namespaces` 用 `prefix_may_contain`，`list_tables` 用 `allows_key`，
+  分页之后过滤（可能出现空页而 token 非空，规范允许）。
+- **`narrow_policy(parent, narrow)`**（`s3/auth/policy.h`）：buckets / prefixes 逐项被父放行者
+  保留，`readonly` 取或，actions 取交；交集为空抛 `AccessDenied`。`mint_session` 第三参数
+  `std::optional<CredentialPolicy> narrow`；持久化格式未变。
+- **凭证下发**：`Catalog::vending_policy` 给出 `{bucket, prefixes: [<location>/, <reserved>/<ns>/<t>/metadata/], readonly}`；
+  `RestApi::vend` 经 `Hooks::mint` 铸会话；会话凭证再请求下发时 `mint_session` 拒绝 →
+  `credential-vending-not-authorized`（表照常返回）。响应 `storage-credentials[0].config`
+  含 `s3.access-key-id / s3.secret-access-key / s3.session-token / expiration-ms`，同四键并入
+  `config`，加 `lights3.credential-mode`；`Cache-Control: no-store, private`。`GET …/credentials`
+  未开启 → 406，未授权 → 403。
+- **租户门**：`Hooks::tenant_gate` 在 ① 已接线；本步补单测（租户 A 访问租户 B 的表桶 403）。
+- **配额预检**：`Hooks::commit.quota_check` 在 dispatch 里用 `hooks.access_key / policy / tenant`
+  构造 `RequestAuth` 调 `check_quota`；`QuotaExceeded` 经 `from_s3_error` → 409
+  `CommitFailedException "QuotaExceeded: …"`。
+- **lifecycle 排除**：`LifecycleRunner::set_skip_predicate`（不让 lifecycle 依赖 tables 头），
+  app 注入 `TableBucketGuard::is_table_bucket`；`PutBucketLifecycle` 对表桶照常保存并 WARN。
+- **e2e**：`tables.credential_vending: true`；`s3tables` 签名（curl `aws:amz:<region>:s3tables`）、
+  下发凭证在前缀内 PUT 200 / 前缀外 403 / 读 metadata 200 / AssumeRole 403、lifecycle WARN。

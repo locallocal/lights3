@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -118,20 +119,31 @@ public:
     //  - STREAMING-AWS4-HMAC-SHA256-PAYLOAD[-TRAILER] -> aws-chunked de-framing +
     //    per-chunk signature chain verification (docs/s3-protocol.md §3.2)
     //  - STREAMING-UNSIGNED-PAYLOAD-TRAILER -> de-framing only
-    VerifiedIdentity verify(http::HttpRequest& req) const { return verify_impl(req, service_, nullptr); }
+    VerifiedIdentity verify(http::HttpRequest& req) const {
+        std::string_view one[] = {service_};
+        return verify_impl(req, one, nullptr);
+    }
+    // Iceberg REST catalog paths (docs/s3-tables-design.md §6.2): the credential scope may
+    // name any of `services` (e.g. "s3" and "s3tables"); everything else is verify()
+    VerifiedIdentity verify_any(http::HttpRequest& req, std::span<const std::string_view> services) const {
+        return verify_impl(req, services, nullptr);
+    }
     // STS AssumeRole endpoint (roadmap §2.6): scope service "sts", payload hash computed
     // by the caller from the already-read form body (generic SigV4 carries the hash only
     // inside the canonical request, not as an x-amz-content-sha256 header)
     VerifiedIdentity verify_sts(http::HttpRequest& req, const std::string& payload_hash) const {
-        return verify_impl(req, "sts", &payload_hash);
+        std::string_view one[] = {"sts"};
+        return verify_impl(req, one, &payload_hash);
     }
 
     // X-Amz-Expires cap for presigned URLs (7 days, matching S3)
     static constexpr long kMaxPresignExpires = 7 * 24 * 3600;
 
     // Adds x-amz-date / x-amz-content-sha256 / Authorization to the request
-    // (empty payload_hash computes as an empty body)
-    void sign(http::HttpRequest& req, const Credential& cred, std::string payload_hash = "") const;
+    // (empty payload_hash computes as an empty body). service overrides the scope's
+    // service name (tests signing catalog requests as "s3tables"); empty = configured
+    void sign(http::HttpRequest& req, const Credential& cred, std::string payload_hash = "",
+              std::string_view service = {}) const;
 
     // Injectable clock (fixed time in unit tests)
     std::function<util::SysTime()> clock = [] { return std::chrono::system_clock::now(); };
@@ -142,7 +154,7 @@ private:
     // service = expected credential scope service; explicit_payload_hash != nullptr
     // supplies the hash directly (STS form POST) and skips body decorators — the caller
     // already consumed and hashed the body
-    VerifiedIdentity verify_impl(http::HttpRequest& req, std::string_view service,
+    VerifiedIdentity verify_impl(http::HttpRequest& req, std::span<const std::string_view> services,
                                  const std::string* explicit_payload_hash) const;
     // With presigned=true, X-Amz-Signature is excluded from the canonical query (presigned requests only)
     std::string signature_for(const http::HttpRequest& req, const std::string& secret_key, const std::string& amz_date,

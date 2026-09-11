@@ -16,6 +16,9 @@
 #include "s3/errors.h"
 #include "storage/bucket_router.h"
 #include "storage/registry.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/object_catalog_store.h"
+#endif
 
 namespace lights3 {
 
@@ -102,6 +105,29 @@ void Application::start_server() {
     tenants_ = std::make_shared<s3::TenantRegistry>(tenant_store_, owner_store_);
     lifecycle_runner_->set_usage_tracker(usage_);
     if (!cfg_.usage.enabled) LOG_WARN("usage accounting is disabled: bucket/tenant quotas are not enforced");
+#ifdef LIGHTS3_TABLES
+    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §3, docs/s3-tables/step-1-catalog-core.md
+    // §13): table-bucket markers next to the other .sys records, catalog state on the
+    // default backend, the REST surface and the S3-plane guard on the service
+    if (cfg_.tables.enabled) {
+        table_bucket_store_ = sync_wait(tables::TableBucketStore::load(router.default_backend()));
+        auto cat_store = std::make_shared<tables::ObjectCatalogStore>(router.default_backend());
+        tables_catalog_ = std::make_shared<tables::Catalog>(cat_store, table_bucket_store_, router, pool_, cfg_.tables,
+                                                            MetricsScope(metrics_, {{"feature", "tables"}}));
+        tables_api_ = std::make_shared<tables::RestApi>(tables_catalog_, cfg_.tables,
+                                                        MetricsScope(metrics_, {{"feature", "tables"}}));
+        table_guard_ = std::make_shared<tables::TableBucketGuard>(table_bucket_store_, tables_catalog_,
+                                                                  cfg_.tables.path_prefix, cfg_.tables.compat_prefix);
+        LOG_INFO("tables: Iceberg REST catalog at {}/v1 ({} table bucket(s))", cfg_.tables.path_prefix,
+                 table_bucket_store_->snapshot()->size());
+        // an existing bucket named after the prefix is shadowed by the catalog route
+        std::string shadow = cfg_.tables.path_prefix.substr(1);
+        if (auto pos = shadow.find('/'); pos != std::string::npos) shadow.resize(pos);
+        if (!shadow.empty() && sync_wait(router.default_backend()->bucket_exists(shadow)))
+            LOG_WARN("tables: bucket '{}' exists but its keys under v1/ are shadowed by the catalog prefix {}", shadow,
+                     cfg_.tables.path_prefix);
+    }
+#endif
     service_ = std::make_shared<s3::S3Service>(std::move(router), std::move(auth), cfg_.http.base_domain);
     service_->set_pool_stats([pool = pool_] { return pool->stats(); });
     service_->set_request_timeout(std::chrono::seconds(cfg_.http.request_timeout_sec));
@@ -128,6 +154,9 @@ void Application::start_server() {
     service_->set_quota_store(quota_store_);
     service_->set_tenant_registry(tenants_);
     service_->set_audit_log(audit_);
+#ifdef LIGHTS3_TABLES
+    if (tables_api_) service_->set_tables(tables_api_, table_guard_);
+#endif
     if (!cfg_.website.buckets.empty() && !auth_enabled)
         LOG_WARN(
             "website: buckets configured but authentication is disabled; "
@@ -144,6 +173,9 @@ void Application::start_server() {
     quota_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     tenant_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
     owner_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+#ifdef LIGHTS3_TABLES
+    if (table_bucket_store_) table_bucket_store_->start_background(pool_, cfg_.auth.sync_interval_sec);
+#endif
     // Counter flush / reconcile / multi-instance adoption (usage.*, auth.sync_interval)
     usage_->start_background(pool_, cfg_.auth.sync_interval_sec);
     // Enforcement scan (lifecycle.scan_interval, 0 = disabled)
@@ -480,6 +512,7 @@ std::vector<std::string> restart_only_changes(const Config& a, const Config& b) 
     cmp(a.buckets.default_backend != b.buckets.default_backend, "buckets.default_backend");
     cmp(a.website.buckets != b.website.buckets, "website");
     cmp(a.lifecycle.scan_interval_sec != b.lifecycle.scan_interval_sec, "lifecycle.scan_interval");
+    cmp(!(a.tables == b.tables), "tables");
     cmp(a.usage.enabled != b.usage.enabled || a.usage.flush_interval_sec != b.usage.flush_interval_sec ||
             a.usage.reconcile_interval_sec != b.usage.reconcile_interval_sec || a.usage.reconcile != b.usage.reconcile,
         "usage");
@@ -827,6 +860,9 @@ void Application::shutdown() noexcept {
         if (quota_store_) quota_store_->shutdown_background();
         if (tenant_store_) tenant_store_->shutdown_background();
         if (owner_store_) owner_store_->shutdown_background();
+#ifdef LIGHTS3_TABLES
+        if (table_bucket_store_) table_bucket_store_->shutdown_background();
+#endif
     } catch (const std::exception& e) {
         LOG_ERROR("store background shutdown failed: {}", e.what());
         ++shutdown_errors_;

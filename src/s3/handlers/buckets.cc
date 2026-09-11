@@ -3,6 +3,9 @@
 #include "core/util/time.h"
 #include "s3/handlers/common.h"
 #include "s3/service.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/bucket_guard.h"
+#endif
 #include "s3/xml.h"
 
 namespace lights3::s3 {
@@ -82,6 +85,10 @@ Task<http::HttpResponse> S3Service::create_bucket(http::HttpRequest& req, std::s
                           bucket);
     }
     auto& backend = router_.resolve(bucket);
+#ifdef LIGHTS3_TABLES
+    // The Iceberg catalog path prefix would shadow such a bucket (docs/s3-tables-design.md §6.1)
+    if (table_guard_) table_guard_->check_create_bucket(bucket);
+#endif
     // Tenant credential (docs/multi-tenancy.md §4.3): the bucket becomes the tenant's.
     // An existing unowned name must not be claimable — dispatch admitted the request
     // because no owner record exists, so the existence check happens here
@@ -153,7 +160,15 @@ Task<http::HttpResponse> S3Service::head_bucket(std::string bucket) {
 }
 
 Task<http::HttpResponse> S3Service::delete_bucket(std::string bucket, const RequestAuth& auth) {
+#ifdef LIGHTS3_TABLES
+    // Table buckets (docs/s3-tables-design.md §8.1): refuse while the catalog or the
+    // reserved prefix is non-empty; afterwards the catalog state dies with the bucket
+    if (table_guard_) co_await table_guard_->check_delete_bucket(bucket, router_.resolve(bucket));
+#endif
     co_await router_.resolve(bucket).delete_bucket(bucket);
+#ifdef LIGHTS3_TABLES
+    if (table_guard_) co_await table_guard_->forget_bucket(bucket);
+#endif
     // Per-bucket records this feature set owns die with the bucket. Failures here
     // only leave a stale record (harmless: an owner entry for a missing bucket is
     // ignored, and a re-created bucket by root gets a fresh assignment if needed)

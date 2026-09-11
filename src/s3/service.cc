@@ -1,4 +1,8 @@
 #include "s3/service.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/bucket_guard.h"
+#include "tables/rest_api.h"
+#endif
 #include "storage/metered_backend.h"
 
 #include <algorithm>
@@ -652,6 +656,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
     // the routed backend the backend label; the accumulator travels on the
     // request's cancellation token and collects the backend share of the latency
     std::string_view api_name;
+    // owner of api_name on the Iceberg REST path (the view must outlive the branch)
+    std::string tables_api;
     std::string backend_name;
     auto backend_stats = std::make_shared<storage::RequestBackendStats>();
     // outbound hops forward it as traceparent (roadmap §5.4)
@@ -761,6 +767,33 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // Object layout introspection (roadmap §6.2, `lights3-ctl object inspect`)
             api_name = "AdminObjectInspect";
             resp = co_await admin_object_inspect(req, access_key, ctx);
+#ifdef LIGHTS3_TABLES
+        } else if (tables_api_ && !addr.vhost && tables_api_->matches(req.path)) {
+            // Iceberg REST catalog (docs/s3-tables-design.md §6.1): path-style only; the
+            // handler verifies and authorizes on its own and renders errors as the
+            // Iceberg JSON envelope
+            tables::RestApi::Hooks hooks;
+            hooks.verify = [this](http::HttpRequest& r) { return verify_identity(r); };
+            hooks.is_root = [this](std::string_view ak) { return is_root(ak); };
+            hooks.audit = [this](const AuditEvent& e) { audit(e); };
+            if (tenants_)
+                hooks.tenant_gate = [this](std::string_view b, std::string_view t) -> Task<void> {
+                    co_await require_tenant_bucket(std::string(b), t, /*creating=*/false);
+                };
+            hooks.region = auth_.region();
+            hooks.request_id = ctx.request_id;
+            hooks.commit.note_usage = [this](std::string_view b, int64_t d_objects, int64_t d_bytes) {
+                note_usage(std::string(b), d_objects, d_bytes);
+            };
+            if (cred_store_) {
+                if (auto ak = SigV4Authenticator::peek_access_key(req))
+                    co_await cred_store_->ensure_session_loaded(*ak);
+            }
+            resp = co_await tables_api_->dispatch(req, hooks, access_key, tables_api);
+            if (tables_api.empty()) tables_api = "Iceberg";
+            api_name = tables_api;
+            auth_done = std::chrono::steady_clock::now();
+#endif
         } else if (!addr.vhost && req.path == "/" && req.method == "POST") {
             // STS AssumeRole (roadmap §2.6): SDKs pointed at this gateway as their STS
             // endpoint POST a form body to the service root. Path-style only — under
@@ -920,6 +953,12 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                         }
                     }
                 }
+#ifdef LIGHTS3_TABLES
+                // Table-bucket guard (docs/s3-tables-design.md §8.1): the reserved catalog
+                // prefix is read-only through the S3 plane
+                if (table_guard_ && !bucket.empty() && !key.empty())
+                    if (const Route* r = match_route(req, Scope::Object)) table_guard_->check(bucket, key, r->name);
+#endif
                 // Tenant ownership (docs/multi-tenancy.md §4.3): a tenant credential is
                 // confined to the buckets its tenant owns, on top of its policy. Service
                 // scope (ListBuckets) filters in the handler instead. Decided on the

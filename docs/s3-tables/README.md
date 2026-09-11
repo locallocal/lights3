@@ -1,6 +1,6 @@
 # S3 Tables 实施文档（按 [../s3-tables-design.md](../s3-tables-design.md) §14 分步）
 
-> 状态：**实施稿（2026-09-11），尚未动代码**。设计层文档是
+> 状态：**实施稿（2026-09-11）；① 已实现（2026-09-12），②–⑥ 未动代码**。设计层文档是
 > [../s3-tables-design.md](../s3-tables-design.md)（下文简称"设计 §N"）；本目录
 > 把 §14 的六个步骤各展开成一份可直接照着写代码的实现文档：新增/修改的文件、
 > 数据结构与函数签名、逐步流程、接入点（现有代码的文件与函数）、配置、单测清单、
@@ -10,7 +10,7 @@
 
 | 步骤 | 文档 | 内容 | 依赖 |
 | --- | --- | --- | --- |
-| ① | [step-1-catalog-core.md](step-1-catalog-core.md) | `tables:` 配置、表桶标记、`ITableCatalogStore` + `ObjectCatalogStore`、Iceberg 元数据模型（requirements / updates / 迁移不变量）、提交协议与幂等、REST 最小集（config / buckets / namespaces / tables / metadata-location）、错误模型、dispatch 分支、表桶守卫（保留前缀只读 + DeleteBucket）、审计与指标 | 无 |
+| ① **已实现** | [step-1-catalog-core.md](step-1-catalog-core.md) | `tables:` 配置、表桶标记、`ITableCatalogStore` + `ObjectCatalogStore`、Iceberg 元数据模型（requirements / updates / 迁移不变量）、提交协议与幂等、REST 最小集（config / buckets / namespaces / tables / metadata-location）、错误模型、dispatch 分支、表桶守卫（保留前缀只读 + DeleteBucket）、审计与指标 | 无 |
 | ② | [step-2-authz-credentials.md](step-2-authz-credentials.md) | policy 三元组映射、租户隔离、`s3tables` 签名名、`mint_session` 收窄参数与 `vended-credentials`、`GET …/credentials`、lifecycle 排除 | ① |
 | ③ | [step-3-validation-diagnostics.md](step-3-validation-diagnostics.md) | Avro OCF 读取器、快照图与冲突复核、`catalog/diagnostics` / `recovery`、rename 恢复、`fsck` 对账、LoadTable 的 ETag / If-None-Match | ① |
 | ④ | [step-4-maintenance.md](step-4-maintenance.md) | `JobOp::Table*`、plan / run / purge、`purgeRequested=true`、周期 runner、CLI、墓碑清理 | ①③ |

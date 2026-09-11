@@ -121,6 +121,19 @@ auth:
 # lifecycle:
 #   scan_interval: 1h            # 0s = enforcement off (the API still stores rules)
 
+# ---------- S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md, step ①) ----------
+# Off by default. When on, /iceberg/v1 answers the Iceberg REST catalog, a bucket
+# enabled with `PUT /iceberg/v1/buckets/<bucket>` (root) becomes a table bucket, and
+# its `.lights3-table/` prefix is read-only through the S3 API. Every key is restart-only
+# tables:
+#   enabled: true
+#   path_prefix: /iceberg          # the REST prefix (+ /v1); reserves the bucket name "iceberg"
+#   reserved_prefix: .lights3-table/
+#   metadata_max_size: 50MiB
+#   request_max_size: 1MiB
+#   metadata_log_keep: 100
+#   max_page_size: 1000
+
 # ---------- Usage accounting / quotas (roadmap §3.9, docs/multi-tenancy.md §2/§7) ----------
 # Per-bucket object/byte counters kept by the gateway (updated on every write,
 # persisted to .sys/usage/, recounted by a periodic full listing). Bucket quotas

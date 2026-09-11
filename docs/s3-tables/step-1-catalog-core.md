@@ -1,6 +1,7 @@
 # 步骤 ①：目录核心 + REST 最小集
 
-> 状态：**未实现**（实施稿 2026-09-11）。对应设计 §3–§7.3、§8.1、§10、§11、§14 ①。
+> 状态：**已实现（2026-09-12，分支 feat/s3-tables-step1）**。对应设计 §3–§7.3、§8.1、§10、§11、§14 ①。
+> 实现与本稿的差异见文末 §18。
 > 完成后 PyIceberg 能建 namespace / 表、append、reload、scan；DuckDB 能 ATTACH
 > 后建表插入（深校验在 ③ 补，此步只做快照的浅校验）。
 
@@ -695,3 +696,26 @@ create_table / commit / drop_* / rename / enable_bucket…），`bucket`、`key 
   ③ 的深校验直接复用。
 - **`tables.enabled: false` 必须零影响**：所有新成员为空指针即短路；`test_service.cc`
   既有用例不加任何配置即验证了这一点。
+
+## 18. 实现记录（2026-09-12）
+
+按本稿落地，差异与补充如下（设计文档对应章节已同步）：
+
+- **表桶端点路径**：`PUT|GET|DELETE /iceberg/v1/buckets/{bucket}`（无 warehouse 段，
+  与 RustFS 一致），不是 `/{w}/buckets/{w2}`。
+- **墓碑对"空"的判定**：`namespace_has_children` / `bucket_state_empty` 只认活跃对象，
+  drop 表留下的墓碑不算子项，drop namespace 时顺带删除其下墓碑；否则 PyIceberg
+  的"drop table → drop namespace"序列会 409。设计 §5.7 / §9.6 的表述随之修正。
+- **幂等重放读回文件**：STAGED 记录重放时不比对重算出的 metadata（`last-updated-ms`
+  必然不同），直接采用记录指向的文件；COMMITTED 重放同样读文件。
+- **表级锁**：仓库没有 `AsyncMutex`，用 `AsyncSemaphore(1)`；锁表按 `<bucket>/<table_id>`
+  只增不删（有界于表数）。
+- **`LoadTable.config`**：额外给出 `lights3.version-token`（省一次 metadata-location 调用）
+  与 `lights3.snapshot-validation: "shallow"`（③ 改为 `deep`）。
+- **指标**：`lights3_tables_commits_total{result}`、`lights3_tables_commit_seconds`、
+  `lights3_tables_requests_total`、`lights3_tables_requests_by_op_total{op,status}`。
+- **配额预检**（§9.2 g 步）留给 ②：`CommitHooks.quota_check` 已预留，dispatch 目前只注入
+  `note_usage`。
+- **GCC 15**：`co_await (this->*fn)(...)` 触发 ICE，先存成局部 `Task` 再 `co_await`。
+- **e2e**：`run_e2e.sh` 主配置打开 `tables.enabled`，六驱动矩阵全部跑 tables 段；
+  没有独立固件，manifest-list 用任意字节（浅校验只看存在性）。

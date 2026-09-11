@@ -32,8 +32,7 @@ const std::vector<double> kCommitBounds = {0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 
 }  // namespace
 
 Catalog::Catalog(std::shared_ptr<ITableCatalogStore> store, std::shared_ptr<TableBucketStore> buckets,
-                 storage::BucketRouter router, std::shared_ptr<ThreadPool> pool, TablesConfig cfg,
-                 MetricsScope metrics)
+                 storage::BucketRouter router, std::shared_ptr<ThreadPool> pool, TablesConfig cfg, MetricsScope metrics)
     : store_(std::move(store)),
       buckets_(std::move(buckets)),
       router_(std::move(router)),
@@ -41,9 +40,10 @@ Catalog::Catalog(std::shared_ptr<ITableCatalogStore> store, std::shared_ptr<Tabl
       cfg_(std::move(cfg)),
       metrics_(std::move(metrics)) {
     commits_ok_ = metrics_.counter("lights3_tables_commits_total", "Table commits by outcome", {{"result", "ok"}});
-    commits_conflict_ =
-        metrics_.counter("lights3_tables_commits_total", "Table commits by outcome", {{"result", "conflict"}});
-    commits_error_ = metrics_.counter("lights3_tables_commits_total", "Table commits by outcome", {{"result", "error"}});
+    commits_conflict_ = metrics_.counter("lights3_tables_commits_total", "Table commits by outcome",
+                                         {{"result", "conflict"}});
+    commits_error_ = metrics_.counter("lights3_tables_commits_total", "Table commits by outcome",
+                                      {{"result", "error"}});
     commit_seconds_ = metrics_.histogram("lights3_tables_commit_seconds", "Wall time of a table commit", kCommitBounds);
 }
 
@@ -76,8 +76,8 @@ std::string Catalog::to_client_location(std::string_view bucket, std::string_vie
 
 json Catalog::client_metadata(std::string_view, const json& md) const { return md; }
 
-std::string Catalog::metadata_key(const TableBucketEntry& tb, const Levels& levels, std::string_view name,
-                                  uint64_t gen, std::string_view token) const {
+std::string Catalog::metadata_key(const TableBucketEntry& tb, const Levels& levels, std::string_view name, uint64_t gen,
+                                  std::string_view token) const {
     char num[16];
     std::snprintf(num, sizeof(num), "%05llu", static_cast<unsigned long long>(gen));
     return tb.reserved_prefix + ns_path(levels) + "/" + std::string(name) + "/metadata/" + num + "-" +
@@ -164,7 +164,8 @@ Task<TableBucketEntry> Catalog::enable_bucket(std::string_view bucket) {
     auto snap = buckets_->snapshot();
     if (const TableBucketEntry* e = table_bucket(snap, bucket)) co_return *e;
     auto& backend = router_.resolve(bucket);
-    if (!co_await backend.bucket_exists(bucket)) throw not_found_ns("bucket " + std::string(bucket) + " does not exist");
+    if (!co_await backend.bucket_exists(bucket))
+        throw not_found_ns("bucket " + std::string(bucket) + " does not exist");
     storage::ListOptions opt;
     opt.prefix = cfg_.reserved_prefix;
     opt.max_keys = 1;
@@ -256,8 +257,8 @@ Task<ListPage<Levels>> Catalog::list_namespaces(std::string_view bucket, const L
 }
 
 Task<NamespacePropsResult> Catalog::update_namespace_properties(std::string_view bucket, const Levels& levels,
-                                                               const std::vector<std::string>& removals,
-                                                               const std::map<std::string, std::string>& updates) {
+                                                                const std::vector<std::string>& removals,
+                                                                const std::map<std::string, std::string>& updates) {
     auto e = co_await load_namespace(bucket, levels);
     if (!e) throw not_found_ns("namespace " + ns_display(levels) + " does not exist");
     NamespacePropsResult res;
@@ -356,9 +357,10 @@ Task<Catalog::LoadedTable> Catalog::load_table(std::string_view bucket, const Le
     co_return LoadedTable{std::move(cur.value), std::move(cur.etag), std::move(md)};
 }
 
-Task<Catalog::LoadedTable> Catalog::finish_create(std::string_view bucket, const TableBucketEntry&, const Levels& levels,
-                                                  std::string_view name, TableEntry entry, json md, std::string body,
-                                                  storage::IStorageBackend& backend, const CommitHooks& hooks) {
+Task<Catalog::LoadedTable> Catalog::finish_create(std::string_view bucket, const TableBucketEntry&,
+                                                  const Levels& levels, std::string_view name, TableEntry entry,
+                                                  json md, std::string body, storage::IStorageBackend& backend,
+                                                  const CommitHooks& hooks) {
     // tombstone → conditional replacement; otherwise the name must be free
     storage::PutCondition cond;
     auto existing = co_await store_->get_table(bucket, levels, name);
@@ -462,9 +464,8 @@ Task<Catalog::LoadedTable> Catalog::create_table(std::string_view bucket, const 
                                      backend, hooks);
 }
 
-Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, const Levels& levels,
-                                                   std::string_view name, std::string_view metadata_location,
-                                                   const CommitHooks& hooks) {
+Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, const Levels& levels, std::string_view name,
+                                                   std::string_view metadata_location, const CommitHooks& hooks) {
     TableBucketEntry tb = co_await require_table_bucket(bucket);
     require_segment("table name", name);
     if (!co_await namespace_exists(bucket, levels))
@@ -482,7 +483,8 @@ Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, cons
     try {
         md = co_await read_metadata(backend, bucket, src_key);
     } catch (const RestError& e) {
-        if (e.status == 500) throw not_found_table("metadata file " + std::string(metadata_location) + " does not exist");
+        if (e.status == 500)
+            throw not_found_table("metadata file " + std::string(metadata_location) + " does not exist");
         throw;
     }
     // the table location must sit in this bucket, outside the reserved prefix
@@ -503,8 +505,8 @@ Task<Catalog::LoadedTable> Catalog::register_table(std::string_view bucket, cons
     entry.created_unix = entry.updated_unix = now_unix();
     entry.metadata_location = metadata_key(tb, levels, name, 1, entry.table_id);
     std::string body = iceberg::canonical(md);
-    co_return co_await finish_create(bucket, tb, levels, name, std::move(entry), std::move(md), std::move(body), backend,
-                                     hooks);
+    co_return co_await finish_create(bucket, tb, levels, name, std::move(entry), std::move(md), std::move(body),
+                                     backend, hooks);
 }
 
 Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const Levels& levels, std::string_view name,
@@ -681,9 +683,8 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
     co_return LoadedTable{std::move(next_entry), std::move(etag1), std::move(next)};
 }
 
-Task<TableEntry> Catalog::update_metadata_location(std::string_view bucket, const Levels& levels,
-                                                   std::string_view name, std::string_view new_location,
-                                                   std::string_view expected_token) {
+Task<TableEntry> Catalog::update_metadata_location(std::string_view bucket, const Levels& levels, std::string_view name,
+                                                   std::string_view new_location, std::string_view expected_token) {
     TableBucketEntry tb = co_await require_table_bucket(bucket);
     auto& backend = router_.resolve(bucket);
     auto cur = co_await require_active(bucket, levels, name);

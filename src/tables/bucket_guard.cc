@@ -18,8 +18,15 @@ std::string first_segment(const std::string& prefix) {
 }
 
 constexpr std::string_view kMutatingRoutes[] = {
-    "PutObject",          "CopyObject",         "DeleteObject",        "CreateMultipartUpload", "UploadPart",
-    "UploadPartCopy",     "CompleteMultipartUpload", "AbortMultipartUpload", "PutObjectTagging",
+    "PutObject",
+    "CopyObject",
+    "DeleteObject",
+    "CreateMultipartUpload",
+    "UploadPart",
+    "UploadPartCopy",
+    "CompleteMultipartUpload",
+    "AbortMultipartUpload",
+    "PutObjectTagging",
     "DeleteObjectTagging",
 };
 

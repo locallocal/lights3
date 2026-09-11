@@ -132,8 +132,7 @@ struct ITableCatalogStore {
                                         const TableEntry& e, storage::PutCondition cond) = 0;
     virtual Task<void> delete_table(std::string_view bucket, const Levels& levels, std::string_view name) = 0;
 
-    virtual Task<std::optional<Versioned<CommitRecord>>> get_commit(std::string_view bucket,
-                                                                    std::string_view table_id,
+    virtual Task<std::optional<Versioned<CommitRecord>>> get_commit(std::string_view bucket, std::string_view table_id,
                                                                     std::string_view commit_id) = 0;
     virtual Task<void> put_commit(std::string_view bucket, std::string_view table_id, const CommitRecord& r,
                                   storage::PutCondition cond) = 0;

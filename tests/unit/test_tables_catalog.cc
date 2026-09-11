@@ -85,9 +85,10 @@ CommitRequest append_commit(int64_t snap, int64_t seq, const std::string& manife
     s["timestamp-ms"] = 1000 + snap;
     s["manifest-list"] = "s3://tbk/" + manifest;
     s["summary"] = json::object({{"operation", "append"}});
-    c.updates = json::array({json::object({{"action", "add-snapshot"}, {"snapshot", s}}),
-                             json::parse(R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":)" +
-                                         std::to_string(snap) + "}")});
+    c.updates = json::array(
+        {json::object({{"action", "add-snapshot"}, {"snapshot", s}}),
+         json::parse(R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":)" +
+                     std::to_string(snap) + "}")});
     return c;
 }
 
@@ -157,15 +158,16 @@ TEST(tables_catalog_namespaces_evidence_and_paging) {
     CHECK_EQ(kids.items.size(), size_t(2));
     CHECK_EQ(status_of([&] { sync_wait(env.catalog->list_namespaces("tbk", ns({"nope"}), PageCursor{})); }), 404);
     // properties
-    auto res = sync_wait(env.catalog->update_namespace_properties("tbk", ns({"sales", "eu"}), {"owner", "gone"},
-                                                                  {{"team", "x"}}));
+    auto res = sync_wait(
+        env.catalog->update_namespace_properties("tbk", ns({"sales", "eu"}), {"owner", "gone"}, {{"team", "x"}}));
     CHECK_EQ(res.removed.size(), size_t(1));
     CHECK_EQ(res.missing.size(), size_t(1));
     CHECK_EQ(res.updated.size(), size_t(1));
-    CHECK_EQ(status_of([&] {
-                 sync_wait(env.catalog->update_namespace_properties("tbk", ns({"sales", "eu"}), {"team"}, {{"team", "y"}}));
-             }),
-             422);
+    CHECK_EQ(
+        status_of([&] {
+            sync_wait(env.catalog->update_namespace_properties("tbk", ns({"sales", "eu"}), {"team"}, {{"team", "y"}}));
+        }),
+        422);
     // an evidence-only namespace becomes explicit when properties are set
     sync_wait(env.catalog->update_namespace_properties("tbk", ns({"sales"}), {}, {{"p", "q"}}));
     CHECK(sync_wait(env.catalog->load_namespace("tbk", ns({"sales"})))->explicit_entry);
@@ -241,14 +243,19 @@ TEST(tables_catalog_commit_protocol) {
     auto t = sync_wait(env.catalog->create_table("tbk", ns({"n"}), table_req("t"), {}));
     env.put("n/t/metadata/snap-1.avro");
     // missing manifest list -> 409
-    CHECK_EQ(status_of([&] { sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t", append_commit(1, 1, "n/t/metadata/missing.avro"), {})); }), 409);
+    CHECK_EQ(status_of([&] {
+                 sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t",
+                                                     append_commit(1, 1, "n/t/metadata/missing.avro"), {}));
+             }),
+             409);
     int64_t usage_objects = 0, usage_bytes = 0;
     CommitHooks hooks;
     hooks.note_usage = [&](std::string_view, int64_t o, int64_t b) {
         usage_objects += o;
         usage_bytes += b;
     };
-    auto c1 = sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t", append_commit(1, 1, "n/t/metadata/snap-1.avro", "c-1"), hooks));
+    auto c1 = sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t",
+                                                  append_commit(1, 1, "n/t/metadata/snap-1.avro", "c-1"), hooks));
     CHECK_EQ(c1.entry.generation, uint64_t(2));
     CHECK(c1.entry.version_token != t.entry.version_token);
     CHECK_EQ(iceberg::current_snapshot_id(c1.metadata), 1);
@@ -260,28 +267,44 @@ TEST(tables_catalog_commit_protocol) {
     auto rec = sync_wait(env.store->get_commit("tbk", t.entry.table_id, "c-1"));
     CHECK(rec && rec->value.status == "COMMITTED");
     // replay: same payload -> same result, nothing written; different payload -> 409
-    auto replay = sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t", append_commit(1, 1, "n/t/metadata/snap-1.avro", "c-1"), hooks));
+    auto replay = sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t",
+                                                      append_commit(1, 1, "n/t/metadata/snap-1.avro", "c-1"), hooks));
     CHECK_EQ(replay.entry.generation, uint64_t(2));
     CHECK_EQ(replay.entry.metadata_location, c1.entry.metadata_location);
     CHECK_EQ(usage_objects, 1);
-    CHECK_EQ(status_of([&] { sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t", append_commit(2, 2, "n/t/metadata/snap-1.avro", "c-1"), hooks)); }), 409);
+    CHECK_EQ(status_of([&] {
+                 sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t",
+                                                     append_commit(2, 2, "n/t/metadata/snap-1.avro", "c-1"), hooks));
+             }),
+             409);
     // stale requirement -> 409
     CommitRequest stale;
-    stale.requirements = json::array({json::parse(R"({"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null})")});
+    stale.requirements = json::array(
+        {json::parse(R"({"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null})")});
     CHECK_EQ(status_of([&] { sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t", stale, {})); }), 409);
     // a commit with no id is recorded too and advances the generation
     env.put("n/t/metadata/snap-2.avro");
-    auto c2 = sync_wait(env.catalog->commit_table("tbk", ns({"n"}), "t", append_commit(2, 2, "n/t/metadata/snap-2.avro"), {}));
+    auto c2 = sync_wait(
+        env.catalog->commit_table("tbk", ns({"n"}), "t", append_commit(2, 2, "n/t/metadata/snap-2.avro"), {}));
     CHECK_EQ(c2.entry.generation, uint64_t(3));
     CHECK_EQ(sync_wait(env.store->list_commits("tbk", t.entry.table_id)).size(), size_t(2));
     // pointer-only update: wrong token 409, outside the metadata dir 400, valid file OK
-    CHECK_EQ(status_of([&] { sync_wait(env.catalog->update_metadata_location("tbk", ns({"n"}), "t", "s3://tbk/" + c1.entry.metadata_location, "t-bogus")); }), 409);
-    CHECK_EQ(status_of([&] { sync_wait(env.catalog->update_metadata_location("tbk", ns({"n"}), "t", "s3://tbk/n/t/metadata/snap-2.avro", c2.entry.version_token)); }), 400);
+    CHECK_EQ(status_of([&] {
+                 sync_wait(env.catalog->update_metadata_location("tbk", ns({"n"}), "t",
+                                                                 "s3://tbk/" + c1.entry.metadata_location, "t-bogus"));
+             }),
+             409);
+    CHECK_EQ(status_of([&] {
+                 sync_wait(env.catalog->update_metadata_location(
+                     "tbk", ns({"n"}), "t", "s3://tbk/n/t/metadata/snap-2.avro", c2.entry.version_token));
+             }),
+             400);
     json md3 = c2.metadata;
     md3["properties"]["manual"] = "yes";
     std::string k3 = ".lights3-table/n/t/metadata/00004-manual.metadata.json";
     env.put(k3, iceberg::canonical(md3));
-    auto e3 = sync_wait(env.catalog->update_metadata_location("tbk", ns({"n"}), "t", "s3://tbk/" + k3, c2.entry.version_token));
+    auto e3 = sync_wait(
+        env.catalog->update_metadata_location("tbk", ns({"n"}), "t", "s3://tbk/" + k3, c2.entry.version_token));
     CHECK_EQ(e3.generation, uint64_t(4));
     CHECK_EQ(e3.metadata_location, k3);
     auto l3 = sync_wait(env.catalog->load_table("tbk", ns({"n"}), "t"));
@@ -296,7 +319,8 @@ TEST(tables_catalog_concurrent_commits_single_winner) {
     // every commit asserts main is unset: after the first wins the others fail the requirement
     auto make = [&](int i) -> Task<int> {
         auto c = append_commit(100 + i, 1, "n/t/metadata/snap.avro", "c-" + std::to_string(i));
-        c.requirements = json::array({json::parse(R"({"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null})")});
+        c.requirements = json::array(
+            {json::parse(R"({"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null})")});
         try {
             co_await env.catalog->commit_table("tbk", ns({"n"}), "t", c, {});
         } catch (const RestError& e) {
@@ -320,7 +344,8 @@ TEST(tables_catalog_concurrent_commits_single_winner) {
     // first gateway's cached view is impossible because every commit re-reads the pointer
     auto peer = env.peer();
     env.put("n/t/metadata/snap-2.avro");
-    auto c = sync_wait(peer->commit_table("tbk", ns({"n"}), "t", append_commit(200, 2, "n/t/metadata/snap-2.avro"), {}));
+    auto c = sync_wait(
+        peer->commit_table("tbk", ns({"n"}), "t", append_commit(200, 2, "n/t/metadata/snap-2.avro"), {}));
     CHECK_EQ(c.entry.generation, uint64_t(3));
     CHECK_EQ(sync_wait(env.catalog->load_table("tbk", ns({"n"}), "t")).entry.generation, uint64_t(3));
 }
@@ -388,7 +413,8 @@ TEST(tables_catalog_rename) {
     CHECK(tomb && tomb->value.state == TableState::Deleted);
     // commits after the rename write under the new name
     env.put("a/t/metadata/snap.avro");
-    auto c = sync_wait(env.catalog->commit_table("tbk", ns({"b"}), "t2", append_commit(1, 1, "a/t/metadata/snap.avro"), {}));
+    auto c = sync_wait(
+        env.catalog->commit_table("tbk", ns({"b"}), "t2", append_commit(1, 1, "a/t/metadata/snap.avro"), {}));
     CHECK_EQ(c.entry.metadata_location.rfind(".lights3-table/b/t2/metadata/00002-", 0), size_t(0));
     // a table stuck in RENAMING is unavailable to readers and writers
     TableEntry stuck = moved.entry;
@@ -411,16 +437,26 @@ TEST(tables_catalog_register_and_entity_identity) {
     in.now_ms = 1;
     json md = iceberg::initial_metadata(in);
     env.put("legacy/ext/metadata/v1.metadata.json", iceberg::canonical(md));
-    auto r = sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext", "s3://tbk/legacy/ext/metadata/v1.metadata.json", {}));
+    auto r = sync_wait(
+        env.catalog->register_table("tbk", ns({"n"}), "ext", "s3://tbk/legacy/ext/metadata/v1.metadata.json", {}));
     CHECK_EQ(r.entry.table_uuid, in.table_uuid);
     CHECK_EQ(r.entry.location, "s3://tbk/legacy/ext");
     CHECK_EQ(r.entry.metadata_location.rfind(".lights3-table/n/ext/metadata/00001-", 0), size_t(0));
     CHECK(env.exists("legacy/ext/metadata/v1.metadata.json"));
-    CHECK_EQ(status_of([&] { sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://tbk/legacy/nope.json", {})); }), 404);
-    CHECK_EQ(status_of([&] { sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://other/x.json", {})); }), 400);
-    CHECK_EQ(status_of([&] { sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://tbk/x.metadata.json.gz", {})); }), 406);
+    CHECK_EQ(status_of([&] {
+                 sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://tbk/legacy/nope.json", {}));
+             }),
+             404);
+    CHECK_EQ(
+        status_of([&] { sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://other/x.json", {})); }),
+        400);
+    CHECK_EQ(status_of([&] {
+                 sync_wait(env.catalog->register_table("tbk", ns({"n"}), "ext2", "s3://tbk/x.metadata.json.gz", {}));
+             }),
+             406);
     // a catalog entry copied to another key does not describe itself -> internal error
-    auto raw = sync_wait(env.backend->get_object(".sys", ObjectCatalogStore::tbl_key("tbk", ns({"n"}), "ext"), std::nullopt));
+    auto raw = sync_wait(
+        env.backend->get_object(".sys", ObjectCatalogStore::tbl_key("tbk", ns({"n"}), "ext"), std::nullopt));
     std::string body;
     std::byte buf[4096];
     for (;;) {
@@ -431,7 +467,8 @@ TEST(tables_catalog_register_and_entity_identity) {
     {
         storage::ObjectMeta meta;
         http::StringBodyReader rd(body);
-        sync_wait(env.backend->put_object(".sys", ObjectCatalogStore::tbl_key("tbk", ns({"n"}), "copy"), std::move(meta), rd));
+        sync_wait(env.backend->put_object(".sys", ObjectCatalogStore::tbl_key("tbk", ns({"n"}), "copy"),
+                                          std::move(meta), rd));
     }
     CHECK_THROWS_S3(sync_wait(env.store->get_table("tbk", ns({"n"}), "copy")), s3::S3ErrorCode::InternalError);
     // bucket state cleanup

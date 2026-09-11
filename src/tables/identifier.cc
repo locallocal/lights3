@@ -146,7 +146,8 @@ std::string location_to_key(std::string_view bucket, std::string_view reserved_p
     if (key->rfind(reserved_prefix, 0) == 0 || *key + "/" == reserved_prefix)
         throw bad_request("location must not lie under the reserved catalog prefix");
     for (char c : *key)
-        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) throw bad_request("location contains control characters");
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f)
+            throw bad_request("location contains control characters");
     return *key;
 }
 

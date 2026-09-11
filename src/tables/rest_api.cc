@@ -1,0 +1,713 @@
+#include "tables/rest_api.h"
+
+#include <algorithm>
+#include <map>
+#include <set>
+
+#include "core/log.h"
+#include "core/util/crypto.h"
+#include "core/util/uri.h"
+#include "s3/errors.h"
+#include "tables/iceberg/metadata.h"
+#include "tables/rest_error.h"
+
+namespace lights3::tables {
+
+using nlohmann::json;
+using s3::Action;
+
+// ---------- route table ----------
+
+namespace {
+
+constexpr RestApi::Route kRoutes[] = {
+    // config lives above the warehouse level; matched specially in dispatch
+    {"GET", "config", Action::Read, RestApi::KeyKind::None, false, "GetConfig", true, &RestApi::get_config},
+    {"PUT", "buckets/{w2}", Action::Write, RestApi::KeyKind::None, true, "EnableTableBucket", false,
+     &RestApi::enable_bucket},
+    {"GET", "buckets/{w2}", Action::Read, RestApi::KeyKind::None, false, "GetTableBucket", false,
+     &RestApi::get_bucket},
+    {"DELETE", "buckets/{w2}", Action::Delete, RestApi::KeyKind::None, true, "DisableTableBucket", false,
+     &RestApi::disable_bucket},
+    {"GET", "namespaces", Action::Read, RestApi::KeyKind::None, false, "ListNamespaces", true,
+     &RestApi::list_namespaces},
+    {"POST", "namespaces", Action::Write, RestApi::KeyKind::Namespace, false, "CreateNamespace", true,
+     &RestApi::create_namespace},
+    {"GET", "namespaces/{ns}", Action::Read, RestApi::KeyKind::Namespace, false, "LoadNamespace", true,
+     &RestApi::load_namespace},
+    {"HEAD", "namespaces/{ns}", Action::Read, RestApi::KeyKind::Namespace, false, "NamespaceExists", true,
+     &RestApi::namespace_exists},
+    {"DELETE", "namespaces/{ns}", Action::Delete, RestApi::KeyKind::Namespace, false, "DropNamespace", true,
+     &RestApi::drop_namespace},
+    {"POST", "namespaces/{ns}/properties", Action::Write, RestApi::KeyKind::Namespace, false,
+     "UpdateNamespaceProperties", true, &RestApi::update_namespace_properties},
+    {"GET", "namespaces/{ns}/tables", Action::Read, RestApi::KeyKind::Namespace, false, "ListTables", true,
+     &RestApi::list_tables},
+    {"POST", "namespaces/{ns}/tables", Action::Write, RestApi::KeyKind::Namespace, false, "CreateTable", true,
+     &RestApi::create_table},
+    {"POST", "namespaces/{ns}/register", Action::Write, RestApi::KeyKind::Namespace, false, "RegisterTable", true,
+     &RestApi::register_table},
+    {"GET", "namespaces/{ns}/tables/{t}", Action::Read, RestApi::KeyKind::Table, false, "LoadTable", true,
+     &RestApi::load_table},
+    {"HEAD", "namespaces/{ns}/tables/{t}", Action::Read, RestApi::KeyKind::Table, false, "TableExists", true,
+     &RestApi::table_exists},
+    {"POST", "namespaces/{ns}/tables/{t}", Action::Write, RestApi::KeyKind::Table, false, "CommitTable", true,
+     &RestApi::commit_table},
+    {"DELETE", "namespaces/{ns}/tables/{t}", Action::Delete, RestApi::KeyKind::Table, false, "DropTable", true,
+     &RestApi::drop_table},
+    {"POST", "tables/rename", Action::Write, RestApi::KeyKind::None, false, "RenameTable", true,
+     &RestApi::rename_table},
+    {"POST", "namespaces/{ns}/tables/{t}/metrics", Action::Read, RestApi::KeyKind::Table, false, "ReportMetrics",
+     true, &RestApi::report_metrics},
+    {"GET", "namespaces/{ns}/tables/{t}/metadata-location", Action::Read, RestApi::KeyKind::Table, false,
+     "GetTableMetadataLocation", false, &RestApi::get_metadata_location},
+    {"PUT", "namespaces/{ns}/tables/{t}/metadata-location", Action::Write, RestApi::KeyKind::Table, false,
+     "UpdateTableMetadataLocation", false, &RestApi::put_metadata_location},
+};
+
+std::vector<std::string_view> split(std::string_view s, char sep) {
+    std::vector<std::string_view> out;
+    size_t pos = 0;
+    while (pos <= s.size()) {
+        size_t next = s.find(sep, pos);
+        if (next == std::string_view::npos) next = s.size();
+        out.push_back(s.substr(pos, next - pos));
+        pos = next + 1;
+    }
+    return out;
+}
+
+std::map<std::string, std::string> string_map(const json& j, const char* what) {
+    std::map<std::string, std::string> out;
+    if (j.is_null()) return out;
+    if (!j.is_object()) throw bad_request(std::string(what) + " must be an object of strings");
+    for (auto& [k, v] : j.items()) {
+        if (!v.is_string()) throw bad_request(std::string(what) + "." + k + " must be a string");
+        out[k] = v.get<std::string>();
+    }
+    return out;
+}
+
+json levels_json(const Levels& l) {
+    json j = json::array();
+    for (auto& s : l) j.push_back(s);
+    return j;
+}
+
+}  // namespace
+
+std::span<const RestApi::Route> RestApi::routes() { return kRoutes; }
+
+std::vector<std::string> RestApi::advertised_endpoints() {
+    std::vector<std::string> out;
+    for (auto& r : kRoutes) {
+        if (!r.standard) continue;
+        std::string p = std::string(r.pattern);
+        if (p == "config") {
+            out.push_back("GET /v1/config");
+            continue;
+        }
+        size_t pos;
+        while ((pos = p.find("{ns}")) != std::string::npos) p.replace(pos, 4, "{namespace}");
+        while ((pos = p.find("{t}")) != std::string::npos) p.replace(pos, 3, "{table}");
+        out.push_back(std::string(r.method) + " /v1/{prefix}/" + p);
+    }
+    return out;
+}
+
+RestApi::RestApi(std::shared_ptr<Catalog> catalog, TablesConfig cfg, MetricsScope metrics)
+    : catalog_(std::move(catalog)), cfg_(std::move(cfg)), metrics_(std::move(metrics)) {
+    requests_ = metrics_.counter("lights3_tables_requests_total", "Iceberg REST catalog requests");
+}
+
+bool RestApi::matches(std::string_view path) const {
+    std::string base = cfg_.path_prefix + "/v1";
+    if (path == base) return true;
+    return path.size() > base.size() && path.compare(0, base.size(), base) == 0 && path[base.size()] == '/';
+}
+
+std::vector<std::string> RestApi::split_path(std::string_view raw_path, size_t skip) {
+    std::vector<std::string> out;
+    auto parts = split(raw_path, '/');
+    size_t seen = 0;
+    for (auto p : parts) {
+        if (p.empty()) continue;
+        if (seen++ < skip) continue;
+        out.push_back(util::percent_decode(p));
+    }
+    return out;
+}
+
+bool RestApi::match_route(const Route& r, const std::vector<std::string>& segs, Match& m) const {
+    auto pat = split(r.pattern, '/');
+    if (pat.size() != segs.size()) return false;
+    Match tmp;
+    tmp.route = &r;
+    for (size_t i = 0; i < pat.size(); ++i) {
+        if (pat[i] == "{ns}") {
+            // the segment is already percent-decoded; multi-level namespaces carry U+001F
+            tmp.ns = parse_namespace_path(segs[i]);
+        } else if (pat[i] == "{t}") {
+            tmp.table = segs[i];
+        } else if (pat[i] == "{w2}") {
+            tmp.extra = segs[i];
+        } else if (pat[i] != segs[i]) {
+            return false;
+        }
+    }
+    m = std::move(tmp);
+    return true;
+}
+
+http::HttpResponse RestApi::json_response(int status, const json& j) {
+    http::HttpResponse resp;
+    resp.status = status;
+    resp.small_body = j.dump();
+    resp.headers.set("Content-Type", "application/json");
+    return resp;
+}
+
+http::HttpResponse RestApi::empty_response(int status) {
+    http::HttpResponse resp;
+    resp.status = status;
+    return resp;
+}
+
+Task<json> RestApi::read_json(http::HttpRequest& req, bool allow_empty) const {
+    std::string text;
+    if (req.body) {
+        std::byte buf[16 * 1024];
+        for (;;) {
+            size_t n = co_await req.body->read(std::span(buf));
+            if (n == 0) break;
+            if (text.size() + n > cfg_.request_max_size) throw bad_request("request body exceeds the size limit");
+            text.append(reinterpret_cast<const char*>(buf), n);
+        }
+    }
+    if (text.empty()) {
+        if (allow_empty) co_return json::object();
+        throw bad_request("request requires a JSON body");
+    }
+    json j;
+    try {
+        j = json::parse(text);
+    } catch (const json::exception&) {
+        throw bad_request("request body is not valid JSON");
+    }
+    if (!j.is_object()) throw bad_request("request body must be a JSON object");
+    co_return j;
+}
+
+// ---------- pagination (design §4.6) ----------
+
+namespace {
+
+std::string page_context(std::string_view op, std::string_view bucket, const Levels& ns) {
+    std::string s(op);
+    s.push_back('\0');
+    s += bucket;
+    s.push_back('\0');
+    s += ns_path(ns);
+    return util::sha256_hex(s).substr(0, 32);
+}
+
+}  // namespace
+
+PageCursor RestApi::page_cursor(const http::HttpRequest& req, std::string_view op, const Match& m) const {
+    PageCursor c;
+    auto size = req.query_get("pageSize");
+    auto token = req.query_get("pageToken");
+    if (!size && !token) {
+        // unpaginated: everything the store can return (bounded by the max page size)
+        c.limit = cfg_.max_page_size;
+        return c;
+    }
+    c.limit = cfg_.max_page_size;
+    if (size) {
+        int n = 0;
+        try {
+            size_t pos = 0;
+            n = std::stoi(*size, &pos);
+            if (pos != size->size()) n = 0;
+        } catch (const std::exception&) {
+            n = 0;
+        }
+        if (n <= 0) throw bad_request("pageSize must be a positive integer");
+        c.limit = std::min(n, cfg_.max_page_size);
+    }
+    if (token && !token->empty()) {
+        if (token->size() > 4096) throw bad_request("pageToken is too long");
+        json j;
+        try {
+            j = json::parse(base64url_decode(*token));
+        } catch (const std::exception&) {
+            throw bad_request("pageToken is malformed");
+        }
+        if (!j.is_object() || j.value("v", 0) != 1 || j.value("ctx", "") != page_context(op, m.bucket, m.ns))
+            throw bad_request("pageToken query parameter does not match this list operation");
+        c.after = j.value("after", "");
+    }
+    return c;
+}
+
+std::string RestApi::page_token(std::string_view op, const Match& m, std::string_view after) const {
+    json j;
+    j["v"] = 1;
+    j["ctx"] = page_context(op, m.bucket, m.ns);
+    j["after"] = std::string(after);
+    return base64url(j.dump());
+}
+
+// ---------- dispatch ----------
+
+void RestApi::audit(Hooks& hooks, std::string_view op, const Match& m, std::string detail) const {
+    if (!hooks.audit) return;
+    std::string key = ns_path(m.ns);
+    if (!m.table.empty()) key += "/" + m.table;
+    s3::AuditEvent e;
+    std::string event = "tables." + std::string(op);
+    e.event = event;
+    e.actor = hooks.access_key;
+    e.request_id = hooks.request_id;
+    e.bucket = m.bucket;
+    e.key = key;
+    e.detail = detail;
+    hooks.audit(e);
+}
+
+Task<http::HttpResponse> RestApi::dispatch(http::HttpRequest& req, Hooks& hooks, std::string& access_key,
+                                           std::string& api_name) {
+    http::HttpResponse resp;
+    std::optional<RestError> failure;
+    try {
+        // "<prefix>/v1" has prefix_segments + 1 segments
+        size_t skip = 0;
+        for (auto p : split(cfg_.path_prefix, '/'))
+            if (!p.empty()) ++skip;
+        skip += 1;
+        auto segs = split_path(req.raw_path.empty() ? req.path : req.raw_path, skip);
+        Match m;
+        bool found = false;
+        bool method_mismatch = false;
+        if (segs.size() == 1 && segs[0] == "config") {
+            for (auto& r : kRoutes)
+                if (r.pattern == "config") {
+                    if (req.method == r.method) {
+                        m.route = &r;
+                        found = true;
+                    } else {
+                        method_mismatch = true;
+                    }
+                }
+        } else if (!segs.empty()) {
+            // "<prefix>/v1/buckets/{bucket}" (table-bucket admin, design §6.3) has no
+            // warehouse segment of its own: the bucket is the second segment
+            bool bucket_op = segs.size() == 2 && segs[0] == "buckets";
+            std::vector<std::string> rest(segs.begin() + (bucket_op ? 0 : 1), segs.end());
+            std::string bucket = bucket_op ? segs[1] : segs[0];
+            for (auto& r : kRoutes) {
+                if (r.pattern == "config") continue;
+                Match tmp;
+                if (!match_route(r, rest, tmp)) continue;
+                if (req.method != r.method) {
+                    method_mismatch = true;
+                    continue;
+                }
+                m = std::move(tmp);
+                m.bucket = bucket;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            if (method_mismatch) throw RestError(405, "MethodNotAllowedException", "method not allowed on this resource");
+            throw not_found_resource("no such catalog resource");
+        }
+        api_name = "Iceberg." + std::string(m.route->name);
+        if (!m.bucket.empty()) storage::validate_bucket_name(m.bucket);
+        // authentication
+        s3::VerifiedIdentity ident = hooks.verify(req);
+        access_key = ident.access_key;
+        hooks.access_key = access_key;
+        // authorization (design §6.2): catalog operations map onto (bucket, key, action)
+        if (m.route->root_only && !hooks.is_root(access_key))
+            throw forbidden("this operation requires a root (statically configured) credential");
+        if (ident.policy && !m.bucket.empty()) {
+            std::string key;
+            if (m.route->key_kind == KeyKind::Namespace) key = ns_path(m.ns) + "/";
+            if (m.route->key_kind == KeyKind::Table) key = ns_path(m.ns) + "/" + m.table;
+            if (!ident.policy->allows(m.bucket, key, m.route->action))
+                throw forbidden("Access denied by credential policy.");
+        }
+        if (!ident.tenant.empty() && hooks.tenant_gate && !m.bucket.empty())
+            co_await hooks.tenant_gate(m.bucket, ident.tenant);
+        // GCC ICEs on co_await of a member-pointer call: materialize the task first
+        Handler fn = m.route->fn;
+        Task<http::HttpResponse> task = (this->*fn)(req, hooks, m);
+        resp = co_await std::move(task);
+    } catch (const RestError& e) {
+        failure = e;
+    } catch (const s3::S3Error& e) {
+        failure = from_s3_error(e, req.path);
+        if (e.code == s3::S3ErrorCode::InternalError)
+            LOG_ERROR("tables: {} {} internal error: {}", req.method, req.path, e.message);
+    } catch (const std::exception& e) {
+        LOG_ERROR("tables: {} {} internal error: {}", req.method, req.path, e.what());
+        failure = internal("internal error");
+    }
+    if (failure) {
+        resp = json_response(failure->status, to_json(*failure));
+        for (auto& [k, v] : failure->headers) resp.headers.set(k, v);
+        if (req.method == "HEAD") resp.small_body.clear();
+    }
+    requests_->inc();
+    metrics_
+        .counter("lights3_tables_requests_by_op_total", "Iceberg REST catalog requests by operation and status",
+                 {{"op", api_name.empty() ? std::string("unmatched") : api_name},
+                  {"status", std::to_string(resp.status)}})
+        ->inc();
+    co_return resp;
+}
+
+// ---------- handlers ----------
+
+Task<http::HttpResponse> RestApi::get_config(http::HttpRequest& req, Hooks&, const Match&) {
+    json j;
+    j["defaults"] = json::object();
+    j["defaults"]["lights3.catalog-prefix"] = cfg_.path_prefix + "/v1";
+    j["overrides"] = json::object();
+    j["overrides"]["namespace-separator"] = "%1F";
+    if (auto w = req.query_get("warehouse")) {
+        if (w->empty()) throw bad_request("warehouse must not be empty");
+        storage::validate_bucket_name(*w);
+        j["defaults"]["warehouse"] = *w;
+        j["overrides"]["prefix"] = *w;
+    }
+    j["endpoints"] = advertised_endpoints();
+    co_return json_response(200, j);
+}
+
+namespace {
+
+json bucket_json(const std::string& bucket, const TableBucketEntry& e, const std::string& prefix) {
+    json j;
+    j["table-bucket"] = bucket;
+    j["enabled"] = e.enabled;
+    j["reserved-prefix"] = e.reserved_prefix;
+    j["warehouse-location"] = "s3://" + bucket + "/";
+    j["catalog-uri"] = prefix + "/v1/" + bucket;
+    j["properties"] = e.properties;
+    j["created-unix"] = e.created_unix;
+    return j;
+}
+
+}  // namespace
+
+Task<http::HttpResponse> RestApi::enable_bucket(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    if (m.extra != m.bucket) throw bad_request("warehouse and bucket in the path must match");
+    co_await read_json(req, /*allow_empty=*/true);
+    auto e = co_await catalog_->enable_bucket(m.bucket);
+    audit(hooks, "enable_bucket", m, "");
+    co_return json_response(200, bucket_json(m.bucket, e, cfg_.path_prefix));
+}
+
+Task<http::HttpResponse> RestApi::get_bucket(http::HttpRequest&, Hooks&, const Match& m) {
+    if (m.extra != m.bucket) throw bad_request("warehouse and bucket in the path must match");
+    auto e = co_await catalog_->require_table_bucket(m.bucket);
+    co_return json_response(200, bucket_json(m.bucket, e, cfg_.path_prefix));
+}
+
+Task<http::HttpResponse> RestApi::disable_bucket(http::HttpRequest&, Hooks& hooks, const Match& m) {
+    if (m.extra != m.bucket) throw bad_request("warehouse and bucket in the path must match");
+    co_await catalog_->disable_bucket(m.bucket);
+    audit(hooks, "disable_bucket", m, "");
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::list_namespaces(http::HttpRequest& req, Hooks&, const Match& m) {
+    Levels parent;
+    if (auto p = req.query_get("parent"); p && !p->empty())
+        parent = parse_namespace_path(*p);
+    Match ctx = m;
+    ctx.ns = parent;
+    PageCursor c = page_cursor(req, "namespaces", ctx);
+    auto page = co_await catalog_->list_namespaces(m.bucket, parent, c);
+    json j;
+    j["namespaces"] = json::array();
+    for (auto& l : page.items) j["namespaces"].push_back(levels_json(l));
+    if (page.next_after.empty())
+        j["next-page-token"] = nullptr;
+    else
+        j["next-page-token"] = page_token("namespaces", ctx, page.next_after);
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::create_namespace(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    if (!body.contains("namespace")) throw bad_request("'namespace' is required");
+    Levels levels = parse_namespace_json(body["namespace"]);
+    auto props = string_map(body.value("properties", json::object()), "properties");
+    auto e = co_await catalog_->create_namespace(m.bucket, levels, props);
+    Match ctx = m;
+    ctx.ns = levels;
+    audit(hooks, "create_namespace", ctx, "");
+    json j;
+    j["namespace"] = levels_json(e.levels);
+    j["properties"] = e.properties;
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::load_namespace(http::HttpRequest&, Hooks&, const Match& m) {
+    auto e = co_await catalog_->load_namespace(m.bucket, m.ns);
+    if (!e) throw not_found_ns("namespace " + ns_display(m.ns) + " does not exist");
+    json j;
+    j["namespace"] = levels_json(e->levels);
+    j["properties"] = e->properties;
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::namespace_exists(http::HttpRequest&, Hooks&, const Match& m) {
+    if (!co_await catalog_->namespace_exists(m.bucket, m.ns))
+        throw not_found_ns("namespace " + ns_display(m.ns) + " does not exist");
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::drop_namespace(http::HttpRequest&, Hooks& hooks, const Match& m) {
+    co_await catalog_->drop_namespace(m.bucket, m.ns);
+    audit(hooks, "drop_namespace", m, "");
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::update_namespace_properties(http::HttpRequest& req, Hooks& hooks,
+                                                              const Match& m) {
+    json body = co_await read_json(req, false);
+    std::vector<std::string> removals;
+    if (body.contains("removals") && !body["removals"].is_null()) {
+        if (!body["removals"].is_array()) throw bad_request("'removals' must be a list");
+        for (auto& r : body["removals"]) {
+            if (!r.is_string()) throw bad_request("removals must be strings");
+            removals.push_back(r.get<std::string>());
+        }
+    }
+    auto updates = string_map(body.value("updates", json::object()), "updates");
+    auto res = co_await catalog_->update_namespace_properties(m.bucket, m.ns, removals, updates);
+    audit(hooks, "update_namespace_properties", m, "");
+    json j;
+    j["updated"] = res.updated;
+    j["removed"] = res.removed;
+    j["missing"] = res.missing;
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::list_tables(http::HttpRequest& req, Hooks&, const Match& m) {
+    PageCursor c = page_cursor(req, "tables", m);
+    auto page = co_await catalog_->list_tables(m.bucket, m.ns, c);
+    json j;
+    j["identifiers"] = json::array();
+    for (auto& n : page.items) {
+        json id;
+        id["namespace"] = levels_json(m.ns);
+        id["name"] = n;
+        j["identifiers"].push_back(id);
+    }
+    if (page.next_after.empty())
+        j["next-page-token"] = nullptr;
+    else
+        j["next-page-token"] = page_token("tables", m, page.next_after);
+    co_return json_response(200, j);
+}
+
+json RestApi::load_table_result(std::string_view bucket, const Catalog::LoadedTable& t) const {
+    json j;
+    j["metadata-location"] = Catalog::to_client_location(bucket, t.entry.metadata_location);
+    j["metadata"] = catalog_->client_metadata(bucket, t.metadata);
+    json cfg;
+    cfg["s3.path-style-access"] = "true";
+    cfg["lights3.credential-vending"] = cfg_.credential_vending ? "supported" : "disabled";
+    cfg["lights3.table-location"] = t.entry.location;
+    cfg["lights3.version-token"] = t.entry.version_token;
+    cfg["lights3.snapshot-validation"] = "shallow";
+    j["config"] = cfg;
+    return j;
+}
+
+Task<http::HttpResponse> RestApi::create_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    if (body.value("stage-create", false)) throw unsupported("stage-create is not supported");
+    CreateTableRequest r;
+    if (!body.contains("name") || !body["name"].is_string()) throw bad_request("'name' is required");
+    r.name = body["name"].get<std::string>();
+    if (body.contains("location") && !body["location"].is_null()) {
+        if (!body["location"].is_string()) throw bad_request("'location' must be a string");
+        r.location = body["location"].get<std::string>();
+    }
+    if (!body.contains("schema") || !body["schema"].is_object()) throw bad_request("'schema' is required");
+    r.schema = body["schema"];
+    if (body.contains("partition-spec") && !body["partition-spec"].is_null()) r.partition_spec = body["partition-spec"];
+    if (body.contains("write-order") && !body["write-order"].is_null()) r.write_order = body["write-order"];
+    r.properties = string_map(body.value("properties", json::object()), "properties");
+    CommitHooks ch = hooks.commit;
+    auto t = co_await catalog_->create_table(m.bucket, m.ns, r, ch);
+    Match ctx = m;
+    ctx.table = r.name;
+    audit(hooks, "create_table", ctx, "table_id " + t.entry.table_id);
+    json j = load_table_result(m.bucket, t);
+    auto resp = json_response(200, j);
+    resp.headers.set("ETag", "\"" + t.etag + "\"");
+    co_return resp;
+}
+
+Task<http::HttpResponse> RestApi::register_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    if (body.value("overwrite", false)) throw unsupported("register with overwrite=true is not supported");
+    if (!body.contains("name") || !body["name"].is_string()) throw bad_request("'name' is required");
+    if (!body.contains("metadata-location") || !body["metadata-location"].is_string())
+        throw bad_request("'metadata-location' is required");
+    std::string name = body["name"].get<std::string>();
+    auto t = co_await catalog_->register_table(m.bucket, m.ns, name, body["metadata-location"].get<std::string>(),
+                                               hooks.commit);
+    Match ctx = m;
+    ctx.table = name;
+    audit(hooks, "register_table", ctx, "table_id " + t.entry.table_id);
+    auto resp = json_response(200, load_table_result(m.bucket, t));
+    resp.headers.set("ETag", "\"" + t.etag + "\"");
+    co_return resp;
+}
+
+Task<http::HttpResponse> RestApi::load_table(http::HttpRequest& req, Hooks&, const Match& m) {
+    std::string mode = "all";
+    if (auto s = req.query_get("snapshots")) {
+        if (*s != "all" && *s != "refs") throw bad_request("snapshots must be 'all' or 'refs'");
+        mode = *s;
+    }
+    auto t = co_await catalog_->load_table(m.bucket, m.ns, m.table);
+    if (mode == "refs") {
+        std::set<int64_t> keep;
+        keep.insert(iceberg::current_snapshot_id(t.metadata));
+        if (t.metadata.contains("refs"))
+            for (auto& [n, r] : t.metadata["refs"].items()) keep.insert(r.value("snapshot-id", int64_t(-1)));
+        json snaps = json::array();
+        for (auto& s : t.metadata["snapshots"])
+            if (keep.count(s["snapshot-id"].get<int64_t>())) snaps.push_back(s);
+        t.metadata["snapshots"] = snaps;
+    }
+    auto resp = json_response(200, load_table_result(m.bucket, t));
+    resp.headers.set("ETag", "\"" + t.etag + "\"");
+    co_return resp;
+}
+
+Task<http::HttpResponse> RestApi::table_exists(http::HttpRequest&, Hooks&, const Match& m) {
+    if (!co_await catalog_->table_exists(m.bucket, m.ns, m.table))
+        throw not_found_table("table " + ns_display(m.ns) + "." + m.table + " does not exist");
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::commit_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    if (body.contains("identifier") && !body["identifier"].is_null()) {
+        const json& id = body["identifier"];
+        bool same = id.is_object() && id.contains("namespace") && id.contains("name") && id["name"].is_string() &&
+                    id["name"].get<std::string>() == m.table && parse_namespace_json(id["namespace"]) == m.ns;
+        if (!same) throw bad_request("request identifier must match the resource URL");
+    }
+    CommitRequest r;
+    if (body.contains("commit-id") && body["commit-id"].is_string())
+        r.commit_id = body["commit-id"].get<std::string>();
+    else if (body.contains("idempotency-key") && body["idempotency-key"].is_string())
+        r.commit_id = "ik-" + util::sha256_hex(body["idempotency-key"].get<std::string>()).substr(0, 32);
+    if (!r.commit_id.empty()) {
+        if (r.commit_id.size() > 128) throw bad_request("commit-id is too long");
+        for (char c : r.commit_id)
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_'))
+                throw bad_request("commit-id may only contain letters, digits, '-' and '_'");
+    }
+    r.requirements = body.value("requirements", json::array());
+    r.updates = body.value("updates", json::array());
+    if (!r.requirements.is_array() || !r.updates.is_array())
+        throw bad_request("'requirements' and 'updates' must be lists");
+    if (r.requirements.size() > 1024 || r.updates.size() > 1024)
+        throw bad_request("at most 1024 requirements and 1024 updates per commit");
+    auto t = co_await catalog_->commit_table(m.bucket, m.ns, m.table, r, hooks.commit);
+    audit(hooks, "commit_table", m,
+          "generation " + std::to_string(t.entry.generation) + (r.commit_id.empty() ? "" : " commit " + r.commit_id));
+    json j;
+    j["metadata-location"] = Catalog::to_client_location(m.bucket, t.entry.metadata_location);
+    j["metadata"] = catalog_->client_metadata(m.bucket, t.metadata);
+    j["version-token"] = t.entry.version_token;
+    j["generation"] = t.entry.generation;
+    auto resp = json_response(200, j);
+    resp.headers.set("ETag", "\"" + t.etag + "\"");
+    co_return resp;
+}
+
+Task<http::HttpResponse> RestApi::drop_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    if (auto p = req.query_get("purgeRequested")) {
+        if (*p == "true") throw unsupported("purgeRequested=true is not supported yet");
+        if (*p != "false") throw bad_request("purgeRequested must be true or false");
+    }
+    co_await catalog_->drop_table(m.bucket, m.ns, m.table);
+    audit(hooks, "drop_table", m, "");
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::rename_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    auto ident = [&](const char* which) {
+        if (!body.contains(which) || !body[which].is_object() || !body[which].contains("namespace") ||
+            !body[which].contains("name") || !body[which]["name"].is_string())
+            throw bad_request(std::string("'") + which + "' must be {namespace, name}");
+        return std::make_pair(parse_namespace_json(body[which]["namespace"]), body[which]["name"].get<std::string>());
+    };
+    auto [src_ns, src_name] = ident("source");
+    auto [dst_ns, dst_name] = ident("destination");
+    // policy: delete on the source, write on the destination (design §6.2)
+    s3::VerifiedIdentity id = hooks.verify(req);
+    if (id.policy) {
+        if (!id.policy->allows(m.bucket, ns_path(src_ns) + "/" + src_name, Action::Delete) ||
+            !id.policy->allows(m.bucket, ns_path(dst_ns) + "/" + dst_name, Action::Write))
+            throw forbidden("Access denied by credential policy.");
+    }
+    co_await catalog_->rename_table(m.bucket, src_ns, src_name, dst_ns, dst_name);
+    Match ctx = m;
+    ctx.ns = src_ns;
+    ctx.table = src_name;
+    audit(hooks, "rename_table", ctx, "to " + ns_display(dst_ns) + "." + dst_name);
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::get_metadata_location(http::HttpRequest&, Hooks&, const Match& m) {
+    auto p = co_await catalog_->table_pointer(m.bucket, m.ns, m.table);
+    if (!p) throw not_found_table("table " + ns_display(m.ns) + "." + m.table + " does not exist");
+    json j;
+    j["metadataLocation"] = Catalog::to_client_location(m.bucket, p->value.metadata_location);
+    j["versionToken"] = p->value.version_token;
+    j["generation"] = p->value.generation;
+    j["warehouseLocation"] = p->value.location;
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::put_metadata_location(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    auto field = [&](const char* camel, const char* kebab) -> std::string {
+        if (body.contains(camel) && body[camel].is_string()) return body[camel].get<std::string>();
+        if (body.contains(kebab) && body[kebab].is_string()) return body[kebab].get<std::string>();
+        throw bad_request(std::string("'") + camel + "' is required");
+    };
+    std::string loc = field("metadataLocation", "metadata-location");
+    std::string token = field("versionToken", "version-token");
+    auto e = co_await catalog_->update_metadata_location(m.bucket, m.ns, m.table, loc, token);
+    audit(hooks, "update_metadata_location", m, "generation " + std::to_string(e.generation));
+    json j;
+    j["metadataLocation"] = Catalog::to_client_location(m.bucket, e.metadata_location);
+    j["versionToken"] = e.version_token;
+    j["generation"] = e.generation;
+    j["warehouseLocation"] = e.location;
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::report_metrics(http::HttpRequest& req, Hooks&, const Match&) {
+    co_await read_json(req, true);
+    co_return empty_response(204);
+}
+
+}  // namespace lights3::tables

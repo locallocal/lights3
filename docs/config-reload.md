@@ -66,6 +66,8 @@
   凭证、凭证文件与证书绑定表本就有各自的热加载 / 同步通道；
 - `website` 静态条目（动态条目走 `?website` API）、`lifecycle.scan_interval`、
   `usage.*`、`audit.*`、`ratelimit.max_tracked`、停机/背压边界；
+- `tables.*`（S3 Tables / Iceberg REST catalog，[s3-tables-design.md §10](s3-tables-design.md)）——
+  目录路由与守卫在装配期固化，整节 restart-only；
 - `log.format / file / max_size / max_files / async*`——sink 与格式器在
   `Logger::init` 一次性构建（roadmap §5.2）。
 

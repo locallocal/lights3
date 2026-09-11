@@ -1,6 +1,7 @@
 # S3 Tables: Apache Iceberg REST Catalog (design after studying RustFS)
 
-> Status: **design draft (2026-09-11), not implemented**. The document first answers
+> Status: **design draft (2026-09-11); §14 ① implemented (2026-09-12, implementation
+> notes in `docs/s3-tables/step-1-catalog-core.md` §18, Chinese), ②–⑥ not implemented**. The document first answers
 > "how does RustFS do S3 Tables" (§2, verified against source @853ae63 on
 > 2026-09-11), then gives the lights3 plan (§3–§13) and the implementation steps
 > (§14). Once code lands this file stays as the design-level document per repo
@@ -525,7 +526,8 @@ metadata nor data (`purgeRequested=false`, the spec default).
 `purgeRequested=true`: 406 `UnsupportedOperationException` at first; after §14 ④
 lands it becomes "tombstone first, then enqueue a purge job that deletes the
 reserved directory and the `location` prefix". `DELETE …/namespaces/{ns}`:
-non-empty by evidence → 409 `NamespaceNotEmptyException`.
+non-empty by evidence (active tables or child namespaces; tombstones of dropped tables
+do not count and are removed with the namespace) → 409 `NamespaceNotEmptyException`.
 
 ## 6. REST interface
 
@@ -947,7 +949,7 @@ under `docs/s3-tables/` (Chinese only, like the other implementation-level docs)
 
 | Step | Content | Acceptance |
 | --- | --- | --- |
-| ① catalog core + minimal REST | `TablesConfig`; `TableBucketStore`; `ITableCatalogStore` + `ObjectCatalogStore`; the metadata model of §7.1–7.3 (shallow snapshot check); commit protocol §5.2/5.3; endpoints: config / buckets / all namespace ops / tables list-create-load-commit-drop-exists-rename-register / metadata-location; error model; dispatch branch and bucket-name reservation; the guard's reserved-prefix read-only rule and DeleteBucket guard; audit and metrics | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` pass; new e2e segment passes; PyIceberg smoke (manual, local) create + append + scan passes |
+| ① catalog core + minimal REST (**implemented 2026-09-12**) | `TablesConfig`; `TableBucketStore`; `ITableCatalogStore` + `ObjectCatalogStore`; the metadata model of §7.1–7.3 (shallow snapshot check); commit protocol §5.2/5.3; endpoints: config / buckets / all namespace ops / tables list-create-load-commit-drop-exists-rename-register / metadata-location; error model; dispatch branch and bucket-name reservation; the guard's reserved-prefix read-only rule and DeleteBucket guard; audit and metrics | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` pass; new e2e segment passes; PyIceberg smoke (manual, local) create + append + scan passes |
 | ② permissions and credentials | the policy triple mapping of §6.2, tenant isolation, the `s3tables` signing name, the `mint_session` narrowing parameter and `vended-credentials` negotiation, `GET …/credentials`, lifecycle exclusion | prefix-scoped and read-only credential cases; vended credentials Put/Get/Delete inside the prefix pass, outside 403 |
 | ③ deep validation and diagnostics | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
 | ④ maintenance | `JobOp::Table*`, plan/run/purge, `purgeRequested=true`, periodic runner, CLI, `tombstone_ttl` cleanup | retained set / safety window / StalePlan cases; DuckDB smoke (manual, local) |

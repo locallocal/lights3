@@ -275,6 +275,34 @@ struct LifecycleConfig {
     int scan_interval_sec = 3600;
 };
 
+// S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §10): off by default,
+// every key is restart-only. path_prefix carries no "/v1" (appended by the router)
+struct TablesConfig {
+    bool enabled = false;
+    std::string path_prefix = "/iceberg";
+    // optional MinIO-style alias such as "/_iceberg" (design §14 ⑥); empty = off
+    std::string compat_prefix;
+    bool accept_s3tables_signing = true;
+    // reserved prefix inside table buckets; always ends with '/'
+    std::string reserved_prefix = ".lights3-table/";
+    size_t metadata_max_size = 50 * 1024 * 1024;
+    size_t request_max_size = 1024 * 1024;
+    int metadata_log_keep = 100;
+    int max_page_size = 1000;
+    int validate_concurrency = 16;
+    bool credential_vending = false;
+    int credential_ttl_sec = 900;
+    struct Maintenance {
+        int scan_interval_sec = 0;
+        int safety_window_sec = 900;
+        int retain_recent_metadata_files = 10;
+        bool delete_enabled = false;
+        int tombstone_ttl_sec = 86400;
+        bool operator==(const Maintenance&) const = default;
+    } maintenance;
+    bool operator==(const TablesConfig&) const = default;
+};
+
 struct BucketsConfig {
     std::string default_backend;
     std::vector<BucketRule> rules;
@@ -338,6 +366,7 @@ struct Config {
     BucketsConfig buckets;
     WebsiteConfig website;
     LifecycleConfig lifecycle;
+    TablesConfig tables;
     UsageConfig usage;
     AuditConfig audit;
     RateLimitConfig ratelimit;

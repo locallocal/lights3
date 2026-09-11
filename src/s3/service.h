@@ -35,6 +35,11 @@
 #include "storage/bucket_router.h"
 #include "storage/multipart.h"
 
+namespace lights3::tables {
+class RestApi;
+class TableBucketGuard;
+}  // namespace lights3::tables
+
 namespace lights3::s3 {
 
 // auth/credential_store.h (only the admin handler's .cc needs the full definition)
@@ -188,6 +193,15 @@ public:
     void set_tenant_registry(std::shared_ptr<TenantRegistry> t) { tenants_ = std::move(t); }
     void set_audit_log(std::shared_ptr<AuditLog> a) { audit_ = std::move(a); }
     const std::shared_ptr<UsageTracker>& usage_tracker() const { return usage_; }
+
+    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §3): the REST surface
+    // hangs off the catalog path prefix, the guard keeps the S3 plane off the reserved
+    // prefix. Not injected = feature off, every path behaves exactly as before
+    void set_tables(std::shared_ptr<tables::RestApi> api, std::shared_ptr<tables::TableBucketGuard> guard) {
+        tables_api_ = std::move(api);
+        table_guard_ = std::move(guard);
+    }
+    const std::shared_ptr<tables::TableBucketGuard>& table_guard() const { return table_guard_; }
 
     // Verification result passed down the dispatch chain to handlers (docs/archive/gaps.md §5.10): ListBuckets must
     // filter results by policy, and the policy previously lived only in dispatch's local variable
@@ -397,6 +411,8 @@ private:
     std::function<TimerQueue::Stats()> timer_stats_;
     std::function<http::ConnStats()> conn_stats_;
     std::function<ConfigReloadReport()> reload_hook_;
+    std::shared_ptr<tables::RestApi> tables_api_;
+    std::shared_ptr<tables::TableBucketGuard> table_guard_;
     JobStartHook job_start_;
     JobStatusHook job_status_;
     JobLedgerHook job_ledger_;

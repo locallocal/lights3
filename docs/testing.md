@@ -10,7 +10,7 @@ harness、故障注入门面、性能门禁与 soak、mint 挂 ctest、ubsan/cov
 | 测试 | 内容 | 标签 |
 | --- | --- | --- |
 | `unit_tests` | 全部单元用例（含 `test_fault.cc`）；`LIGHTS3_TEST_FILTER=子串1,子串2` 只跑名字含任一子串的用例（sanitizer 构建在某个文件上中止时仍能覆盖其它文件） | — |
-| `e2e_<driver>` / `e2e_<backend>` | 同一套 `run_e2e.sh` 按驱动 × 后端参数化（13 变体） | — |
+| `e2e_<driver>` / `e2e_<backend>` | 同一套 `run_e2e.sh` 按驱动 × 后端参数化（13 变体），含 S3 Tables 段（配置 `tables.enabled: true`） | — |
 | `fuzz_regression_<target>` | 6 个 harness 各自回放语料（§3） | `fuzz` |
 | `monitoring_assets` | 监控资产对账（[monitoring.md §5](monitoring.md)） | — |
 | `bench_gate` | 3 秒吞吐/延迟门禁（§5） | `perf` |
@@ -34,6 +34,15 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   `x-amz-website-redirect-location` 301、匿名 listing / `?uploads` / 写 / 删 /
   非网站桶一律拒绝、静态条目 API 不可改（405）、非 root 不能 Put 配置、删除配置后
   匿名面立即关闭、`lights3_website_events_total` 计数。
+- **S3 Tables 步骤 ①**（[s3-tables/step-1-catalog-core.md §16](s3-tables/step-1-catalog-core.md)）：
+  `/iceberg/v1/config` → 启用表桶（非 root 403）→ namespace / 表 → 保留前缀下的
+  metadata.json 可读不可写 → 手工 CommitTable（add-snapshot 指向预放的 manifest-list）
+  → 同 commit-id 重放幂等 → 陈旧 requirement 409 → 缺 manifest 409 → rename → 非空
+  表桶 DeleteBucket 409 → `purgeRequested=true` 406 → drop → 桶名 `iceberg` 400 →
+  `lights3_tables_commits_total` 计数。单测：`test_tables_iceberg.cc`（纯函数）、
+  `test_tables_catalog.cc`（提交协议、幂等重放、`tables.commit.after_stage|after_cas`
+  故障点的崩溃窗口、rename）、`test_tables_rest.cc`（端点、错误模型、policy、守卫、
+  `/config.endpoints` 与路由表一致）。
 - **lights3-ctl 交叉验证**：curl 用 libcurl 的 SigV4，lights3-ctl 用自实现签名，两套客户端
   打同一服务端。`cred create/list/get --show-secret/delete`（lights3-ctl 铸的凭证 curl
   能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 lights3-ctl 写的配置）、

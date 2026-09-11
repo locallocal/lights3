@@ -27,6 +27,7 @@ option(LIGHTS3_DUOSTORE_REDIS_META "Build the Redis-backed IMetaStore for duosto
 option(LIGHTS3_DUOSTORE_SQLITE_META "Build the SQLite-backed IMetaStore for duostore (sqlite submodule, docs/storage/duostore-meta-sqlite-design.md)" OFF)
 option(LIGHTS3_DUOSTORE_RADOS_DATA "Build the Ceph/RADOS-backed IDataStore for duostore (system librados, docs/storage/duostore-data-rados-design.md)" OFF)
 option(LIGHTS3_DUOSTORE_TIKV_META "Build the TiKV-backed IMetaStore for duostore (client-c submodule, docs/storage/duostore-meta-tikv-design.md)" OFF)
+option(LIGHTS3_TABLES "Build the S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md)" ON)
 option(LIGHTS3_BUILD_TESTS "Build unit tests" ON)
 option(LIGHTS3_FUZZ_LIBFUZZER "Link the fuzz harnesses against libFuzzer (clang, -fsanitize=fuzzer); off = standalone corpus replay (docs/testing.md §3)" OFF)
 
@@ -397,6 +398,24 @@ if(LIGHTS3_DRIVER_HTTPLIB)
   target_link_libraries(lights3_core PUBLIC OpenSSL::SSL)
 endif()
 
+if(LIGHTS3_TABLES)
+  # S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md, docs/s3-tables/step-1-catalog-core.md)
+  target_sources(lights3_core PRIVATE
+    src/tables/identifier.cc
+    src/tables/object_catalog_store.cc
+    src/tables/table_bucket_store.cc
+    src/tables/catalog.cc
+    src/tables/rest_api.cc
+    src/tables/bucket_guard.cc
+    src/tables/iceberg/metadata.cc
+    src/tables/iceberg/requirements.cc
+    src/tables/iceberg/updates.cc
+    src/tables/iceberg/transition.cc
+    src/tables/iceberg/snapshots.cc
+  )
+  target_compile_definitions(lights3_core PUBLIC LIGHTS3_TABLES)
+endif()
+
 if(LIGHTS3_CLOUDPROXY)
   target_sources(lights3_core PRIVATE
     src/storage/cloudproxy/remote_client.cc
@@ -560,6 +579,13 @@ if(LIGHTS3_BUILD_TESTS)
     tests/unit/test_http_drivers.cc
     tests/unit/test_admission.cc
   )
+  if(LIGHTS3_TABLES)
+    target_sources(unit_tests PRIVATE
+      tests/unit/test_tables_iceberg.cc
+      tests/unit/test_tables_catalog.cc
+      tests/unit/test_tables_rest.cc
+    )
+  endif()
   if(LIGHTS3_DUOSTORE)
     target_sources(unit_tests PRIVATE tests/unit/test_duostore.cc)
     if(LIGHTS3_DUOSTORE_REDIS_META)

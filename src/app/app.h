@@ -28,6 +28,12 @@
 #include "s3/website_store.h"
 #include "storage/backend.h"
 #include "storage/metered_backend.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/bucket_guard.h"
+#include "tables/catalog.h"
+#include "tables/rest_api.h"
+#include "tables/table_bucket_store.h"
+#endif
 
 namespace lights3 {
 
@@ -131,6 +137,13 @@ private:
     std::shared_ptr<s3::TenantStore> tenant_store_;
     std::shared_ptr<s3::OwnerStore> owner_store_;
     std::shared_ptr<s3::TenantRegistry> tenants_;
+#ifdef LIGHTS3_TABLES
+    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md); all null when tables.enabled is off
+    std::shared_ptr<tables::TableBucketStore> table_bucket_store_;
+    std::shared_ptr<tables::Catalog> tables_catalog_;
+    std::shared_ptr<tables::RestApi> tables_api_;
+    std::shared_ptr<tables::TableBucketGuard> table_guard_;
+#endif
     std::shared_ptr<s3::S3Service> service_;
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;
     std::shared_ptr<AsyncSemaphore> inflight_;

@@ -59,6 +59,11 @@ constexpr std::string_view kPoints[] = {
     "redis.command",
     // rados_aio_* submission: returns -errno
     "rados.submit",
+    // table catalog commit (docs/s3-tables-design.md §5.4): after the STAGED record,
+    // before the pointer CAS
+    "tables.commit.after_stage",
+    // after the pointer CAS, before the record is finalized
+    "tables.commit.after_cas",
 };
 
 }  // namespace lights3::fault

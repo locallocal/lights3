@@ -529,6 +529,67 @@ Config Config::from_string(const std::string& text) {
         // Upper bound one week: beyond that the operator almost certainly wanted "off" (0)
         check_range("lifecycle.scan_interval", cfg.lifecycle.scan_interval_sec, 0, 604800);
     }
+    if (auto* tb = root.find("tables")) {
+        auto& t = cfg.tables;
+        if (std::string v = tb->get("enabled"); !v.empty()) t.enabled = parse_bool(v);
+        if (std::string v = tb->get("path_prefix"); !v.empty()) t.path_prefix = v;
+        if (std::string v = tb->get("compat_prefix"); !v.empty()) t.compat_prefix = v;
+        if (std::string v = tb->get("accept_s3tables_signing"); !v.empty()) t.accept_s3tables_signing = parse_bool(v);
+        if (std::string v = tb->get("reserved_prefix"); !v.empty()) t.reserved_prefix = v;
+        if (std::string v = tb->get("metadata_max_size"); !v.empty()) t.metadata_max_size = parse_size(v);
+        if (std::string v = tb->get("request_max_size"); !v.empty()) t.request_max_size = parse_size(v);
+        if (std::string v = tb->get("metadata_log_keep"); !v.empty())
+            t.metadata_log_keep = to_int("tables.metadata_log_keep", v, 0);
+        if (std::string v = tb->get("max_page_size"); !v.empty())
+            t.max_page_size = to_int("tables.max_page_size", v, 0);
+        if (std::string v = tb->get("validate_concurrency"); !v.empty())
+            t.validate_concurrency = to_int("tables.validate_concurrency", v, 0);
+        if (std::string v = tb->get("credential_vending"); !v.empty()) t.credential_vending = parse_bool(v);
+        if (std::string v = tb->get("credential_ttl"); !v.empty()) t.credential_ttl_sec = parse_duration_sec(v);
+        if (auto* mt = tb->find("maintenance")) {
+            auto& m = t.maintenance;
+            if (std::string v = mt->get("scan_interval"); !v.empty()) m.scan_interval_sec = parse_duration_sec(v);
+            if (std::string v = mt->get("safety_window"); !v.empty()) m.safety_window_sec = parse_duration_sec(v);
+            if (std::string v = mt->get("retain_recent_metadata_files"); !v.empty())
+                m.retain_recent_metadata_files = to_int("tables.maintenance.retain_recent_metadata_files", v, 0);
+            if (std::string v = mt->get("delete_enabled"); !v.empty()) m.delete_enabled = parse_bool(v);
+            if (std::string v = mt->get("tombstone_ttl"); !v.empty()) m.tombstone_ttl_sec = parse_duration_sec(v);
+        }
+        auto prefix_ok = [](const std::string& p) {
+            return !p.empty() && p.front() == '/' && p.back() != '/' && p.find("/v1") == std::string::npos &&
+                   p.find("//") == std::string::npos;
+        };
+        if (!prefix_ok(t.path_prefix))
+            throw std::runtime_error(
+                "config: tables.path_prefix must start with '/', not end with '/' and not contain "
+                "'/v1' (got '" +
+                t.path_prefix + "')");
+        if (!t.compat_prefix.empty() && (!prefix_ok(t.compat_prefix) || t.compat_prefix == t.path_prefix))
+            throw std::runtime_error(
+                "config: tables.compat_prefix must differ from path_prefix and follow the same "
+                "rules (got '" +
+                t.compat_prefix + "')");
+        if (t.reserved_prefix.empty() || t.reserved_prefix.back() != '/' || t.reserved_prefix.front() == '/' ||
+            t.reserved_prefix.rfind(".sys", 0) == 0 || t.reserved_prefix.find("..") != std::string::npos)
+            throw std::runtime_error(
+                "config: tables.reserved_prefix must be a relative key prefix ending with '/' and not start with "
+                "'.sys' (got '" +
+                t.reserved_prefix + "')");
+        check_range("tables.metadata_max_size", static_cast<long long>(t.metadata_max_size), 1LL << 20, 512LL << 20);
+        check_range("tables.request_max_size", static_cast<long long>(t.request_max_size), 16LL << 10, 64LL << 20);
+        check_range("tables.metadata_log_keep", t.metadata_log_keep, 1, 10000);
+        check_range("tables.max_page_size", t.max_page_size, 1, 10000);
+        check_range("tables.validate_concurrency", t.validate_concurrency, 1, 256);
+        check_range("tables.credential_ttl", t.credential_ttl_sec, 60, 3600);
+        check_range("tables.maintenance.scan_interval", t.maintenance.scan_interval_sec, 0, 604800);
+        check_range("tables.maintenance.safety_window", t.maintenance.safety_window_sec, 0, 604800);
+        check_range("tables.maintenance.retain_recent_metadata_files", t.maintenance.retain_recent_metadata_files, 0,
+                    100000);
+        check_range("tables.maintenance.tombstone_ttl", t.maintenance.tombstone_ttl_sec, 0, 31536000);
+#ifndef LIGHTS3_TABLES
+        if (t.enabled) throw std::runtime_error("config: tables.enabled is set but this build has no tables support");
+#endif
+    }
     if (auto* us = root.find("usage")) {
         if (std::string v = us->get("enabled"); !v.empty()) cfg.usage.enabled = parse_bool(v);
         if (std::string v = us->get("flush_interval"); !v.empty()) cfg.usage.flush_interval_sec = parse_duration_sec(v);

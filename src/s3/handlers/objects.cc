@@ -7,6 +7,9 @@
 #include "core/util/uri.h"
 #include "s3/handlers/common.h"
 #include "s3/service.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/bucket_guard.h"
+#endif
 #include "s3/xml.h"
 #include "storage/multipart.h"
 
@@ -554,6 +557,13 @@ Task<http::HttpResponse> S3Service::delete_objects(http::HttpRequest& req, std::
         for (size_t i = 0; i < keys.size(); ++i)
             if (!auth.policy->allows(bucket, keys[i], Action::Delete))
                 outcome[i] = S3Error(S3ErrorCode::AccessDenied, "Access denied by credential policy.");
+#ifdef LIGHTS3_TABLES
+    // Reserved catalog keys of a table bucket fail per key (docs/s3-tables-design.md §8.1)
+    if (table_guard_)
+        for (size_t i = 0; i < keys.size(); ++i)
+            if (!outcome[i] && table_guard_->reserved_key(bucket, keys[i]))
+                outcome[i] = S3Error(S3ErrorCode::InvalidRequest, "Object key is reserved for the table catalog.");
+#endif
     // Bounded concurrency (docs/archive/gaps.md §3.9): serial co_await on cloudproxy/duostore means
     // 1000 sequential RTTs. The batch size caps the concurrency hit on a single backend; batches still proceed in order
     constexpr size_t kBatch = 32;

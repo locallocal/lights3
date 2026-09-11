@@ -296,6 +296,8 @@ website:
     error_key: error.html
 buckets:
   default_backend: tierdata
+tables:
+  enabled: true
 log:
   level: info
 EOF
@@ -1059,6 +1061,63 @@ check "access log carries remote/bucket/ttfb slots" "0" \
     "$(grep -q 'access .* PUT "/mybucket/dir/big.bin" 200 .* remote=127.0.0.1 bucket=mybucket ttfb=[0-9.]*ms ua="' "$WORK/server.log"; echo $?)"
 check "access log: streaming GET reports the bytes sent" "0" \
     "$(grep -q 'access .* GET "/mybucket/dir/big.bin" 200 [1-9][0-9]* .* api=GetObject ' "$WORK/server.log"; echo $?)"
+
+# ---------- S3 Tables step ①: Iceberg REST catalog over the live server (docs/s3-tables/step-1-catalog-core.md §16) ----------
+# The catalog answers JSON on the /iceberg/v1 prefix; namespace levels are joined with %1F
+TB="$BASE/iceberg/v1"
+TNS="$TB/tbe2e/namespaces/e2e%1Fdemo"
+jq_field() {  # jq_field <python expr over j> -- evaluate on the JSON on stdin
+    python3 -c "import json,sys; j=json.load(sys.stdin); print($1)" 2>/dev/null
+}
+check "tables: /config advertises the catalog" "tbe2e" \
+    "$(s3curl "$TB/config?warehouse=tbe2e" | jq_field 'j["overrides"]["prefix"]')"
+s3curl -o /dev/null -X PUT "$BASE/tbe2e"
+check "tables: enable the table bucket (root)" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$TB/buckets/tbe2e")"
+check "tables: a non-root credential may not enable table buckets" "403" \
+    "$(filecurl -o /dev/null -w '%{http_code}' -X PUT "$TB/buckets/tbe2e")"
+check "tables: create namespace" "200" "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d '{"namespace":["e2e","demo"],"properties":{"owner":"e2e"}}' "$TB/tbe2e/namespaces")"
+check "tables: namespace exists (HEAD 204)" "204" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS")"
+check "tables: list child namespaces" "demo" \
+    "$(s3curl "$TB/tbe2e/namespaces?parent=e2e" | jq_field 'j["namespaces"][0][1]')"
+check "tables: create table" "200" "$(s3curl -o "$WORK/tbl.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"orders","schema":{"type":"struct","fields":[{"id":1,"name":"id","required":true,"type":"long"}]}}' "$TNS/tables")"
+ML1=$(jq_field 'j["metadata-location"]' < "$WORK/tbl.json")
+ML_PREFIX="s3://tbe2e/.lights3-table/e2e/demo/orders/metadata/00001-"
+check "tables: metadata lives under the reserved prefix" "$ML_PREFIX" "${ML1:0:${#ML_PREFIX}}"
+check "tables: metadata.json is readable through the S3 plane" "200" \
+    "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/tbe2e/${ML1#s3://tbe2e/}")"
+check "tables: the reserved prefix is not writable through the S3 plane" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'x' "$BASE/tbe2e/.lights3-table/x")"
+s3curl -o /dev/null -X PUT --data-binary 'parquet-bytes' "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
+s3curl -o /dev/null -X PUT --data-binary 'avro-bytes' "$BASE/tbe2e/e2e/demo/orders/metadata/snap-1.avro"
+COMMIT_BODY='{"commit-id":"e2e00000-0000-4000-8000-000000000001","requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":1,"sequence-number":1,"timestamp-ms":1757600000000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/snap-1.avro","summary":{"operation":"append"}}},{"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":1}]}'
+check "tables: commit advances the generation" "2" \
+    "$(s3curl -X POST -H 'Content-Type: application/json' -d "$COMMIT_BODY" "$TNS/tables/orders" | jq_field 'j["generation"]')"
+check "tables: replaying the same commit-id is idempotent" "2" \
+    "$(s3curl -X POST -H 'Content-Type: application/json' -d "$COMMIT_BODY" "$TNS/tables/orders" | jq_field 'j["generation"]')"
+check "tables: a stale requirement is a 409 CommitFailedException" "CommitFailedException" \
+    "$(s3curl -X POST -H 'Content-Type: application/json' -d '{"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[]}' "$TNS/tables/orders" | jq_field 'j["error"]["type"]')"
+check "tables: a missing manifest list is refused" "409" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"requirements":[],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":2,"sequence-number":2,"timestamp-ms":1757600001000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/nope.avro","summary":{"operation":"append"}}}]}' "$TNS/tables/orders")"
+check "tables: load table shows the snapshot" "1" \
+    "$(s3curl "$TNS/tables/orders" | jq_field 'j["metadata"]["current-snapshot-id"]')"
+check "tables: metadata-location (AWS shape)" "2" "$(s3curl "$TNS/tables/orders/metadata-location" | jq_field 'j["generation"]')"
+check "tables: rename" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
+    -d '{"source":{"namespace":["e2e","demo"],"name":"orders"},"destination":{"namespace":["e2e","demo"],"name":"orders2"}}' "$TB/tbe2e/tables/rename")"
+check "tables: the old name is gone" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS/tables/orders")"
+check "tables: DeleteBucket refuses a non-empty table bucket" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/tbe2e")"
+check "tables: purgeRequested=true is not supported yet" "406" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2?purgeRequested=true")"
+check "tables: drop table" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2")"
+check "tables: drop namespace" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS")"
+check "tables: the catalog prefix's first segment is not a bucket name" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/iceberg")"
+check "tables: commits are counted" "0" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_tables_commits_total{feature="tables",result="ok"} 1'; echo $?)"
+# the reserved metadata objects stay until the maintenance step (④) removes them; the
+# work dir is deleted at exit anyway, so only the data files are cleaned here
+s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
+s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/metadata/snap-1.avro"
 
 # Graceful shutdown
 kill -TERM "$SRV_PID"

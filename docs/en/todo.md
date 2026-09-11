@@ -40,6 +40,7 @@ design document -- no struck-through history here. Each entry carries
 | Item | Notes |
 | --- | --- |
 | Versioning | Architecture-level (key layout of six backends / List semantics / delete markers / GC all move); if ever, **start from duostore** (meta is a KV, add a version dimension), localfs's key→path mapping cannot hold multiple versions |
+| S3 Tables (Iceberg REST Catalog) | Design draft written: [s3-tables-design.md](s3-tables-design.md) (2026-09-11, the plan after studying RustFS, implementation steps §14 ①–⑥); no code yet. Foundations exist: atomic `PutCondition` on every backend, `SysConfigStore`, STS sessions, AdminJobs; the first step is §14 ① |
 | SSE-C / SSE-S3 | Server-side encryption; key sourcing and the ETag / checksum semantics have to be settled first |
 | Full OpenTelemetry instrumentation | The lightweight trace layer exists (W3C traceparent pass-through, one span per request, log correlation, [s3-protocol.md §7](s3-protocol.md)); exporting spans through otel-cpp is long-term |
 | HTTP/2 | Mainstream S3 SDKs still speak HTTP/1.1; only CDN / L7 fronting needs it; terminating h2 at a fronting proxy is in [tls.md §6](tls.md) |

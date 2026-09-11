@@ -36,7 +36,7 @@
 | 条目 | 说明 |
 | --- | --- |
 | Versioning | 架构级（六后端 key 布局 / List 语义 / delete marker / GC 全动）；若做，**从 duostore 侧切入成本最低**（meta 是 KV，加 version 维度即可），localfs 的 key→路径映射容纳不下多版本 |
-| S3 Tables（Iceberg REST Catalog） | 设计稿已成文：[s3-tables-design.md](s3-tables-design.md)（2026-09-11，调研 RustFS 后的方案与 §14 实施拆分 ①–⑥）；未动代码。地基已具备：全后端原子 `PutCondition`、`SysConfigStore`、STS 会话、AdminJobs；首步是 §14 ① |
+| S3 Tables（Iceberg REST Catalog） | 设计稿已成文：[s3-tables-design.md](s3-tables-design.md)（2026-09-11，调研 RustFS 后的方案与 §14 实施拆分 ①–⑥）；实施文档 [s3-tables/](s3-tables/README.md) 六步已成文；未动代码。地基已具备：全后端原子 `PutCondition`、`SysConfigStore`、STS 会话、AdminJobs；首步是 §14 ① |
 | SSE-C / SSE-S3 | 服务端加密；需先定密钥来源与 ETag/校验和语义 |
 | OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](s3-protocol.md)）；otel-cpp 导出 span 是长期项 |
 | HTTP/2 | S3 SDK 主流仍 HTTP/1.1，CDN / L7 前置场景才需要；前置代理终结 h2 见 [tls.md §6](tls.md) |

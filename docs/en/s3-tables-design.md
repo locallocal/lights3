@@ -940,7 +940,10 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 ## 14. Implementation steps
 
 In dependency order; each step is independently mergeable with unit tests; when
-done, update the row to "implemented + date".
+done, update the row to "implemented + date". The implementation-level document of
+each step (file list, signatures, flows, integration points, unit-test list) lives
+under `docs/s3-tables/` (Chinese only, like the other implementation-level docs):
+`step-1-catalog-core.md` … `step-6-optional.md`.
 
 | Step | Content | Acceptance |
 | --- | --- | --- |

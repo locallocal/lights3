@@ -832,6 +832,14 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 ## 14. 实施拆分
 
 按依赖顺序；每步独立可合并、有单测，做完把本节对应行改为"已实现 + 日期"。
+每步的实现级文档（文件清单、签名、流程、接入点、单测清单）在
+[s3-tables/](s3-tables/README.md)：①
+[step-1-catalog-core.md](s3-tables/step-1-catalog-core.md)、②
+[step-2-authz-credentials.md](s3-tables/step-2-authz-credentials.md)、③
+[step-3-validation-diagnostics.md](s3-tables/step-3-validation-diagnostics.md)、④
+[step-4-maintenance.md](s3-tables/step-4-maintenance.md)、⑤
+[step-5-multi-gateway-docs.md](s3-tables/step-5-multi-gateway-docs.md)、⑥
+[step-6-optional.md](s3-tables/step-6-optional.md)。
 
 | 步骤 | 内容 | 验收 |
 | --- | --- | --- |

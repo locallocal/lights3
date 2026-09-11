@@ -78,8 +78,8 @@ public:
     Task<bool> namespace_exists(std::string_view bucket, const Levels& levels);
     Task<ListPage<Levels>> list_namespaces(std::string_view bucket, const Levels& parent, PageCursor cursor);
     Task<NamespacePropsResult> update_namespace_properties(std::string_view bucket, const Levels& levels,
-                                                          const std::vector<std::string>& removals,
-                                                          const std::map<std::string, std::string>& updates);
+                                                           const std::vector<std::string>& removals,
+                                                           const std::map<std::string, std::string>& updates);
     Task<void> drop_namespace(std::string_view bucket, const Levels& levels);
 
     // ---- tables ----

@@ -216,7 +216,8 @@ struct Applier {
         if (!snap.contains("timestamp-ms") || !snap["timestamp-ms"].is_number_integer())
             throw bad_request("add-snapshot needs an integer 'timestamp-ms'");
         int64_t id = snap["snapshot-id"].get<int64_t>();
-        if (find_snapshot(md, id)) throw commit_failed("add-snapshot: snapshot " + std::to_string(id) + " already exists");
+        if (find_snapshot(md, id))
+            throw commit_failed("add-snapshot: snapshot " + std::to_string(id) + " already exists");
         int fv = format_version(md);
         if (fv == 2) {
             if (snap.contains("manifests")) throw bad_request("v2 snapshots must use 'manifest-list', not 'manifests'");
@@ -334,7 +335,8 @@ struct Applier {
 
     void set_stats(const Json& u, const char* key, const char* field) {
         const Json& st = need(u, field);
-        if (!st.is_object() || !st.contains("snapshot-id")) throw bad_request(std::string(field) + " needs 'snapshot-id'");
+        if (!st.is_object() || !st.contains("snapshot-id"))
+            throw bad_request(std::string(field) + " needs 'snapshot-id'");
         int64_t id = st["snapshot-id"].get<int64_t>();
         if (!find_snapshot(md, id)) throw commit_failed("statistics reference unknown snapshot " + std::to_string(id));
         if (!md.contains(key)) md[key] = Json::array();
@@ -359,7 +361,8 @@ struct Applier {
         if (!ids.is_array()) throw bad_request("remove-partition-specs needs 'spec-ids'");
         std::set<int64_t> rm;
         for (auto& id : ids) rm.insert(id.get<int64_t>());
-        if (rm.count(md["default-spec-id"].get<int64_t>())) throw bad_request("cannot remove the default partition spec");
+        if (rm.count(md["default-spec-id"].get<int64_t>()))
+            throw bad_request("cannot remove the default partition spec");
         Json out = Json::array();
         for (auto& s : md["partition-specs"])
             if (!rm.count(s["spec-id"].get<int64_t>())) out.push_back(s);
@@ -438,10 +441,12 @@ Json apply_updates(const Json& current, const Json& updates, const ApplyOptions&
     Applier ap(current, opt);
     // uuid / format version first (Iceberg applies them ahead of everything else)
     for (auto& u : updates)
-        if (u.is_object() && (u.value("action", "") == "assign-uuid" || u.value("action", "") == "upgrade-format-version"))
+        if (u.is_object() &&
+            (u.value("action", "") == "assign-uuid" || u.value("action", "") == "upgrade-format-version"))
             ap.apply(u);
     for (auto& u : updates) {
-        if (u.is_object() && (u.value("action", "") == "assign-uuid" || u.value("action", "") == "upgrade-format-version"))
+        if (u.is_object() &&
+            (u.value("action", "") == "assign-uuid" || u.value("action", "") == "upgrade-format-version"))
             continue;
         ap.apply(u);
     }

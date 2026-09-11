@@ -160,9 +160,9 @@ std::optional<NamespaceEntry> namespace_from_json(const json& j) {
 
 std::optional<TableEntry> table_from_json(const json& j) {
     return guarded([&]() -> std::optional<TableEntry> {
-        reject_unknown(j, {"version", "levels", "name", "table_id", "table_uuid", "location", "metadata_location",
-                           "version_token", "generation", "format_version", "state", "rename_id", "created_unix",
-                           "updated_unix"});
+        reject_unknown(
+            j, {"version", "levels", "name", "table_id", "table_uuid", "location", "metadata_location", "version_token",
+                "generation", "format_version", "state", "rename_id", "created_unix", "updated_unix"});
         if (j.at("version").get<int>() != 1) return std::nullopt;
         TableEntry e;
         e.levels = levels_of(j.at("levels"));
@@ -400,8 +400,7 @@ Task<void> ObjectCatalogStore::delete_namespace(std::string_view bucket, const L
 
 // ---------- tables ----------
 
-Task<std::optional<Versioned<TableEntry>>> ObjectCatalogStore::get_table(std::string_view bucket,
-                                                                         const Levels& levels,
+Task<std::optional<Versioned<TableEntry>>> ObjectCatalogStore::get_table(std::string_view bucket, const Levels& levels,
                                                                          std::string_view name) {
     std::string key = tbl_key(bucket, levels, name);
     auto raw = co_await read(key);
@@ -530,8 +529,7 @@ Task<std::vector<RenameIntent>> ObjectCatalogStore::list_renames(std::string_vie
     co_return out;
 }
 
-Task<void> ObjectCatalogStore::put_rename(std::string_view bucket, const RenameIntent& r,
-                                          storage::PutCondition cond) {
+Task<void> ObjectCatalogStore::put_rename(std::string_view bucket, const RenameIntent& r, storage::PutCondition cond) {
     co_await write(rename_key(bucket, r.rename_id), to_json(r).dump(), cond);
 }
 

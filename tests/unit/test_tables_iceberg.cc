@@ -29,7 +29,8 @@ CreateTableInput input(int fv = 2) {
     in.name = "t";
     in.schema = simple_schema();
     in.partition_spec = json::parse(R"({"fields":[{"source-id":7,"name":"id_bucket","transform":"bucket[8]"}]})");
-    in.write_order = json::parse(R"({"fields":[{"source-id":7,"transform":"identity","direction":"asc","null-order":"nulls-first"}]})");
+    in.write_order = json::parse(
+        R"({"fields":[{"source-id":7,"transform":"identity","direction":"asc","null-order":"nulls-first"}]})");
     in.properties = {{"k", "v"}};
     in.format_version = fv;
     in.location = "s3://b/ns/t";
@@ -141,10 +142,12 @@ TEST(tables_iceberg_parse_and_validate) {
 
 TEST(tables_iceberg_requirements) {
     json md = initial_metadata(input());
-    json with_ref = apply_updates(md, json::array({json::parse(R"({"action":"add-snapshot","snapshot":)" +
-                                                              snapshot(1, 1).dump() + "}"),
-                                                   json::parse(R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":1})")}),
-                                  opts());
+    json with_ref = apply_updates(
+        md,
+        json::array(
+            {json::parse(R"({"action":"add-snapshot","snapshot":)" + snapshot(1, 1).dump() + "}"),
+             json::parse(R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":1})")}),
+        opts());
     auto req = [](const std::string& s) { return json::array({json::parse(s)}); };
     // pass
     check_requirements(md, req(R"({"type":"assert-table-uuid","uuid":"0e7c4f3a-0000-4000-8000-000000000001"})"), true);
@@ -191,16 +194,19 @@ TEST(tables_iceberg_updates_snapshots_and_refs) {
     json u2 = json::array();
     u2.push_back(json::parse(R"({"action":"add-snapshot","snapshot":)" + snapshot(2, 2, "overwrite", 1).dump() + "}"));
     u2.push_back(json::parse(R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":2})"));
-    u2.push_back(json::parse(R"({"action":"set-snapshot-ref","ref-name":"v1","type":"tag","snapshot-id":1,"max-ref-age-ms":100})"));
+    u2.push_back(json::parse(
+        R"({"action":"set-snapshot-ref","ref-name":"v1","type":"tag","snapshot-id":1,"max-ref-age-ms":100})"));
     json n2 = apply_updates(n1, u2, opts());
     CHECK_EQ(current_snapshot_id(n2), 2);
     CHECK_EQ(n2["refs"]["v1"]["max-ref-age-ms"].get<int>(), 100);
     check_transition(n1, n2);
-    json n3 = apply_updates(n2, json::array({json::parse(R"({"action":"remove-snapshots","snapshot-ids":[1]})")}), opts());
+    json n3 = apply_updates(n2, json::array({json::parse(R"({"action":"remove-snapshots","snapshot-ids":[1]})")}),
+                            opts());
     CHECK_EQ(n3["snapshots"].size(), size_t(1));
     CHECK(!n3["refs"].contains("v1"));
     CHECK_EQ(current_snapshot_id(n3), 2);
-    json n4 = apply_updates(n3, json::array({json::parse(R"({"action":"remove-snapshot-ref","ref-name":"main"})")}), opts());
+    json n4 = apply_updates(n3, json::array({json::parse(R"({"action":"remove-snapshot-ref","ref-name":"main"})")}),
+                            opts());
     CHECK_EQ(current_snapshot_id(n4), -1);
     // errors
     auto err = [&](const json& base, const std::string& s) {
@@ -209,10 +215,22 @@ TEST(tables_iceberg_updates_snapshots_and_refs) {
     CHECK_EQ(err(n1, R"({"action":"add-snapshot","snapshot":)" + snapshot(1, 5).dump() + "}"), 409);
     CHECK_EQ(err(n1, R"({"action":"add-snapshot","snapshot":)" + snapshot(3, 1).dump() + "}"), 409);
     CHECK_EQ(err(n1, R"({"action":"add-snapshot","snapshot":)" + snapshot(3, 3, "append", 77).dump() + "}"), 409);
-    CHECK_EQ(err(md, R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"timestamp-ms":1,"manifest-list":"s3://b/x"}})"), 400);
-    CHECK_EQ(err(md, R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"sequence-number":1,"timestamp-ms":1,"manifests":["s3://b/x"]}})"), 400);
-    CHECK_EQ(err(md, R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"sequence-number":1,"timestamp-ms":1,"manifest-list":"s3://other/x"}})"), 409);
-    CHECK_EQ(err(md, R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"sequence-number":1,"timestamp-ms":1,"manifest-list":"s3://b/x","summary":{"operation":"bogus"}}})"), 400);
+    CHECK_EQ(
+        err(md,
+            R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"timestamp-ms":1,"manifest-list":"s3://b/x"}})"),
+        400);
+    CHECK_EQ(
+        err(md,
+            R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"sequence-number":1,"timestamp-ms":1,"manifests":["s3://b/x"]}})"),
+        400);
+    CHECK_EQ(
+        err(md,
+            R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"sequence-number":1,"timestamp-ms":1,"manifest-list":"s3://other/x"}})"),
+        409);
+    CHECK_EQ(
+        err(md,
+            R"({"action":"add-snapshot","snapshot":{"snapshot-id":5,"sequence-number":1,"timestamp-ms":1,"manifest-list":"s3://b/x","summary":{"operation":"bogus"}}})"),
+        400);
     CHECK_EQ(err(md, R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":99})"), 409);
     CHECK_EQ(err(md, R"({"action":"set-snapshot-ref","ref-name":"main","type":"weird","snapshot-id":1})"), 400);
     CHECK_EQ(err(md, R"({"action":"nonsense"})"), 400);
@@ -234,62 +252,134 @@ TEST(tables_iceberg_updates_schema_spec_order_props) {
     CHECK_EQ(n1["last-column-id"].get<int>(), 8);
     check_transition(md, n1);
     // identical schema is reused, not duplicated
-    json n1b = apply_updates(n1, json::array({json::object({{"action", "add-schema"}, {"schema", schema}}),
-                                              json::parse(R"({"action":"set-current-schema","schema-id":-1})")}),
+    json n1b = apply_updates(n1,
+                             json::array({json::object({{"action", "add-schema"}, {"schema", schema}}),
+                                          json::parse(R"({"action":"set-current-schema","schema-id":-1})")}),
                              opts());
     CHECK_EQ(n1b["schemas"].size(), size_t(2));
     // illegal: long -> int, optional -> required, reused retired id
     json bad = schema;
     bad["fields"][0]["type"] = "int";
-    CHECK_EQ(status_of([&] { apply_updates(n1, json::array({json::object({{"action", "add-schema"}, {"schema", bad}})}), opts()); }), 400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n1, json::array({json::object({{"action", "add-schema"}, {"schema", bad}})}), opts());
+             }),
+             400);
     json bad2 = schema;
     bad2["fields"][3]["required"] = true;
-    CHECK_EQ(status_of([&] { apply_updates(n1, json::array({json::object({{"action", "add-schema"}, {"schema", bad2}})}), opts()); }), 400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n1, json::array({json::object({{"action", "add-schema"}, {"schema", bad2}})}), opts());
+             }),
+             400);
     json bad3 = schema;
     bad3["fields"].erase(3);
     bad3["fields"].push_back(json::parse(R"({"id":8,"name":"reused","required":false,"type":"int"})"));
     // same id 8 with another type: not a promotion of "added" (string) -> rejected
-    CHECK_EQ(status_of([&] { apply_updates(n1, json::array({json::object({{"action", "add-schema"}, {"schema", bad3}})}), opts()); }), 400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n1, json::array({json::object({{"action", "add-schema"}, {"schema", bad3}})}), opts());
+             }),
+             400);
     // spec: server assigns field ids and spec id; source must exist
-    json n2 = apply_updates(n1, json::array({json::parse(R"({"action":"add-spec","spec":{"fields":[{"source-id":8,"name":"added_trunc","transform":"truncate[4]"}]}})"),
-                                             json::parse(R"({"action":"set-default-spec","spec-id":-1})")}),
-                            opts());
+    json n2 = apply_updates(
+        n1,
+        json::array(
+            {json::parse(
+                 R"({"action":"add-spec","spec":{"fields":[{"source-id":8,"name":"added_trunc","transform":"truncate[4]"}]}})"),
+             json::parse(R"({"action":"set-default-spec","spec-id":-1})")}),
+        opts());
     CHECK_EQ(n2["default-spec-id"].get<int>(), 1);
     CHECK_EQ(n2["partition-specs"][1]["fields"][0]["field-id"].get<int>(), 1001);
     CHECK_EQ(n2["last-partition-id"].get<int>(), 1001);
-    CHECK_EQ(status_of([&] { apply_updates(n1, json::array({json::parse(R"({"action":"add-spec","spec":{"fields":[{"source-id":99,"name":"x","transform":"identity"}]}})")}), opts()); }), 400);
-    CHECK_EQ(status_of([&] { apply_updates(n1, json::array({json::parse(R"({"action":"set-default-spec","spec-id":9})")}), opts()); }), 400);
-    CHECK_EQ(status_of([&] { apply_updates(n2, json::array({json::parse(R"({"action":"remove-partition-specs","spec-ids":[1]})")}), opts()); }), 400);
-    json n2b = apply_updates(n2, json::array({json::parse(R"({"action":"remove-partition-specs","spec-ids":[0]})")}), opts());
+    CHECK_EQ(
+        status_of([&] {
+            apply_updates(
+                n1,
+                json::array({json::parse(
+                    R"({"action":"add-spec","spec":{"fields":[{"source-id":99,"name":"x","transform":"identity"}]}})")}),
+                opts());
+        }),
+        400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n1, json::array({json::parse(R"({"action":"set-default-spec","spec-id":9})")}), opts());
+             }),
+             400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n2, json::array({json::parse(R"({"action":"remove-partition-specs","spec-ids":[1]})")}),
+                               opts());
+             }),
+             400);
+    json n2b = apply_updates(n2, json::array({json::parse(R"({"action":"remove-partition-specs","spec-ids":[0]})")}),
+                             opts());
     CHECK_EQ(n2b["partition-specs"].size(), size_t(1));
     // sort order
-    json n3 = apply_updates(n2, json::array({json::parse(R"({"action":"add-sort-order","sort-order":{"fields":[]}})"),
-                                             json::parse(R"({"action":"set-default-sort-order","sort-order-id":-1})")}),
+    json n3 = apply_updates(n2,
+                            json::array({json::parse(R"({"action":"add-sort-order","sort-order":{"fields":[]}})"),
+                                         json::parse(R"({"action":"set-default-sort-order","sort-order-id":-1})")}),
                             opts());
     CHECK_EQ(n3["default-sort-order-id"].get<int>(), 0);
-    json n3b = apply_updates(n2, json::array({json::parse(R"({"action":"add-sort-order","sort-order":{"fields":[{"source-id":8,"transform":"identity","direction":"desc","null-order":"nulls-last"}]}})"),
-                                              json::parse(R"({"action":"set-default-sort-order","sort-order-id":-1})")}),
-                             opts());
+    json n3b = apply_updates(
+        n2,
+        json::array(
+            {json::parse(
+                 R"({"action":"add-sort-order","sort-order":{"fields":[{"source-id":8,"transform":"identity","direction":"desc","null-order":"nulls-last"}]}})"),
+             json::parse(R"({"action":"set-default-sort-order","sort-order-id":-1})")}),
+        opts());
     CHECK_EQ(n3b["default-sort-order-id"].get<int>(), 2);
     // properties, location, uuid, format version
-    json n4 = apply_updates(n3, json::array({json::parse(R"({"action":"set-properties","updates":{"a":"1","k":"v2"}})"),
-                                             json::parse(R"({"action":"remove-properties","removals":["k"]})"),
-                                             json::parse(R"({"action":"set-location","location":"s3://b/ns/elsewhere/"})")}),
-                            opts());
+    json n4 = apply_updates(
+        n3,
+        json::array({json::parse(R"({"action":"set-properties","updates":{"a":"1","k":"v2"}})"),
+                     json::parse(R"({"action":"remove-properties","removals":["k"]})"),
+                     json::parse(R"({"action":"set-location","location":"s3://b/ns/elsewhere/"})")}),
+        opts());
     CHECK_EQ(n4["properties"]["a"].get<std::string>(), "1");
     CHECK(!n4["properties"].contains("k"));
     CHECK_EQ(n4["location"].get<std::string>(), "s3://b/ns/elsewhere");
-    CHECK_EQ(status_of([&] { apply_updates(n3, json::array({json::parse(R"({"action":"set-properties","updates":{"a":1}})")}), opts()); }), 400);
-    CHECK_EQ(status_of([&] { apply_updates(n3, json::array({json::parse(R"({"action":"set-properties","updates":{"format-version":"2"}})")}), opts()); }), 400);
-    CHECK_EQ(status_of([&] { apply_updates(n3, json::array({json::parse(R"({"action":"set-location","location":"s3://b/.lights3-table/x"})")}), opts()); }), 400);
-    CHECK_EQ(status_of([&] { apply_updates(n3, json::array({json::parse(R"({"action":"set-location","location":"s3://other/x"})")}), opts()); }), 400);
-    CHECK_EQ(status_of([&] { apply_updates(n3, json::array({json::parse(R"({"action":"assign-uuid","uuid":"zzz"})")}), opts()); }), 409);
-    apply_updates(n3, json::array({json::parse(R"({"action":"assign-uuid","uuid":"0e7c4f3a-0000-4000-8000-000000000001"})")}), opts());
-    CHECK_EQ(status_of([&] { apply_updates(n3, json::array({json::parse(R"({"action":"upgrade-format-version","format-version":3})")}), opts()); }), 406);
-    CHECK_EQ(status_of([&] { apply_updates(n3, json::array({json::parse(R"({"action":"upgrade-format-version","format-version":1})")}), opts()); }), 400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n3, json::array({json::parse(R"({"action":"set-properties","updates":{"a":1}})")}),
+                               opts());
+             }),
+             400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(
+                     n3, json::array({json::parse(R"({"action":"set-properties","updates":{"format-version":"2"}})")}),
+                     opts());
+             }),
+             400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(
+                     n3,
+                     json::array({json::parse(R"({"action":"set-location","location":"s3://b/.lights3-table/x"})")}),
+                     opts());
+             }),
+             400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n3, json::array({json::parse(R"({"action":"set-location","location":"s3://other/x"})")}),
+                               opts());
+             }),
+             400);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n3, json::array({json::parse(R"({"action":"assign-uuid","uuid":"zzz"})")}), opts());
+             }),
+             409);
+    apply_updates(
+        n3, json::array({json::parse(R"({"action":"assign-uuid","uuid":"0e7c4f3a-0000-4000-8000-000000000001"})")}),
+        opts());
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n3,
+                               json::array({json::parse(R"({"action":"upgrade-format-version","format-version":3})")}),
+                               opts());
+             }),
+             406);
+    CHECK_EQ(status_of([&] {
+                 apply_updates(n3,
+                               json::array({json::parse(R"({"action":"upgrade-format-version","format-version":1})")}),
+                               opts());
+             }),
+             400);
     // v1 -> v2 upgrade adds sequence numbers
     json v1 = initial_metadata(input(1));
-    json v2 = apply_updates(v1, json::array({json::parse(R"({"action":"upgrade-format-version","format-version":2})")}), opts());
+    json v2 = apply_updates(v1, json::array({json::parse(R"({"action":"upgrade-format-version","format-version":2})")}),
+                            opts());
     CHECK_EQ(v2["format-version"].get<int>(), 2);
     CHECK_EQ(v2["last-sequence-number"].get<int>(), 0);
     CHECK(!v2.contains("schema"));
@@ -312,11 +402,13 @@ TEST(tables_iceberg_transition_invariants) {
     d["format-version"] = 1;
     CHECK_EQ(violates(d), 409);
     json e = md;
-    e["schemas"].push_back(json::parse(R"({"schema-id":1,"type":"struct","fields":[{"id":3,"name":"reuse","required":false,"type":"int"}]})"));
+    e["schemas"].push_back(json::parse(
+        R"({"schema-id":1,"type":"struct","fields":[{"id":3,"name":"reuse","required":false,"type":"int"}]})"));
     CHECK_EQ(violates(e), 409);
     // removing a schema is allowed, the remaining ones must be byte-identical
     json f = md;
-    f["schemas"].push_back(json::parse(R"({"schema-id":1,"type":"struct","fields":[{"id":9,"name":"n","required":false,"type":"int"}]})"));
+    f["schemas"].push_back(
+        json::parse(R"({"schema-id":1,"type":"struct","fields":[{"id":9,"name":"n","required":false,"type":"int"}]})"));
     f["last-column-id"] = 9;
     CHECK_EQ(violates(f), 0);
 }
@@ -328,7 +420,8 @@ TEST(tables_iceberg_finish_transition) {
     finish_transition(n, "s3://b/.lights3-table/ns/t/metadata/00001-x.metadata.json", 5000, MetadataLimits{2});
     CHECK_EQ(n["snapshot-log"].size(), size_t(0));
     CHECK_EQ(n["metadata-log"].size(), size_t(1));
-    CHECK_EQ(n["metadata-log"][0]["metadata-file"].get<std::string>(), "s3://b/.lights3-table/ns/t/metadata/00001-x.metadata.json");
+    CHECK_EQ(n["metadata-log"][0]["metadata-file"].get<std::string>(),
+             "s3://b/.lights3-table/ns/t/metadata/00001-x.metadata.json");
     CHECK_EQ(n["metadata-log"][0]["timestamp-ms"].get<int>(), 1000);
     CHECK_EQ(n["last-updated-ms"].get<int>(), 5000);
     finish_transition(n, "s3://b/two", 6000, MetadataLimits{2});

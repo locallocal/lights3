@@ -10,9 +10,9 @@ namespace lights3::tables::iceberg {
 
 namespace {
 
-const std::set<std::string> kPrimitiveTypes = {"boolean", "int",       "long",  "float", "double",        "date",
-                                               "time",    "timestamp", "timestamptz", "string", "uuid", "binary",
-                                               "timestamp_ns", "timestamptz_ns", "unknown"};
+const std::set<std::string> kPrimitiveTypes = {"boolean", "int",    "long",         "float",          "double",
+                                               "date",    "time",   "timestamp",    "timestamptz",    "string",
+                                               "uuid",    "binary", "timestamp_ns", "timestamptz_ns", "unknown"};
 
 bool is_primitive(const Json& t) {
     if (!t.is_string()) return false;
@@ -31,12 +31,14 @@ void require(bool cond, const std::string& msg) {
 void walk_type(const Json& t, std::vector<int64_t>& ids, std::map<int64_t, FieldInfo>* fields, int depth) {
     require(depth < 64, "schema nesting is too deep");
     if (is_primitive(t)) return;
-    require(t.is_object() && t.contains("type") && t["type"].is_string(), "schema type must be a primitive name or an object");
+    require(t.is_object() && t.contains("type") && t["type"].is_string(),
+            "schema type must be a primitive name or an object");
     std::string kind = t["type"].get<std::string>();
     if (kind == "struct") {
         require(t.contains("fields") && t["fields"].is_array(), "struct type requires 'fields'");
         for (auto& f : t["fields"]) {
-            require(f.is_object() && f.contains("id") && f["id"].is_number_integer(), "struct field requires an integer 'id'");
+            require(f.is_object() && f.contains("id") && f["id"].is_number_integer(),
+                    "struct field requires an integer 'id'");
             require(f.contains("name") && f["name"].is_string() && !f["name"].get<std::string>().empty(),
                     "struct field requires a 'name'");
             require(f.contains("type"), "struct field requires a 'type'");
@@ -279,7 +281,8 @@ void validate_metadata(const Json& mdc) {
         require(s.is_object() && s.contains("snapshot-id") && s["snapshot-id"].is_number_integer(),
                 "snapshot requires 'snapshot-id'");
         require(snap_ids.insert(s["snapshot-id"].get<int64_t>()).second, "snapshot-id is not unique");
-        require(s.contains("timestamp-ms") && s["timestamp-ms"].is_number_integer(), "snapshot requires 'timestamp-ms'");
+        require(s.contains("timestamp-ms") && s["timestamp-ms"].is_number_integer(),
+                "snapshot requires 'timestamp-ms'");
         if (fv == 2) {
             require(s.contains("manifest-list") && s["manifest-list"].is_string(),
                     "v2 snapshots require 'manifest-list'");
@@ -296,7 +299,8 @@ void validate_metadata(const Json& mdc) {
     if (!md.contains("refs")) md["refs"] = Json::object();
     require(md["refs"].is_object(), "'refs' must be an object");
     for (auto& [name, ref] : md["refs"].items()) {
-        require(ref.is_object() && ref.contains("snapshot-id") && ref.contains("type"), "ref requires snapshot-id/type");
+        require(ref.is_object() && ref.contains("snapshot-id") && ref.contains("type"),
+                "ref requires snapshot-id/type");
         require(snap_ids.count(ref["snapshot-id"].get<int64_t>()), "ref '" + name + "' points to an unknown snapshot");
         std::string t = ref["type"].get<std::string>();
         require(t == "branch" || t == "tag", "ref type must be branch|tag");
@@ -486,8 +490,7 @@ void synchronize_version_fields(Json& md) {
     }
 }
 
-void finish_transition(Json& md, std::string_view prev_metadata_location, int64_t now_ms,
-                       const MetadataLimits& lim) {
+void finish_transition(Json& md, std::string_view prev_metadata_location, int64_t now_ms, const MetadataLimits& lim) {
     std::set<int64_t> snap_ids;
     for (auto& s : md["snapshots"]) snap_ids.insert(s["snapshot-id"].get<int64_t>());
     Json log = Json::array();

@@ -31,8 +31,7 @@ void same_existing(const Json& cur, const Json& next, const char* list, const ch
 }  // namespace
 
 void check_transition(const Json& cur, const Json& next) {
-    if (cur.value("table-uuid", "") != next.value("table-uuid", ""))
-        throw commit_failed("table uuid cannot change");
+    if (cur.value("table-uuid", "") != next.value("table-uuid", "")) throw commit_failed("table uuid cannot change");
     if (format_version(next) < format_version(cur)) throw commit_failed("format-version cannot decrease");
     for (const char* f : {"last-column-id", "last-partition-id", "last-sequence-number"}) {
         int64_t a = cur.value(f, int64_t(0)), b = next.value(f, int64_t(0));

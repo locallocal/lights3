@@ -38,7 +38,8 @@ void check_requirements(const Json& current, const Json& requirements, bool tabl
             if (want == r.end() || want->is_null()) {
                 if (exists) throw commit_failed("requirement failed: branch or tag " + name + " already exists");
             } else {
-                if (!want->is_number_integer()) throw bad_request("assert-ref-snapshot-id needs an integer 'snapshot-id'");
+                if (!want->is_number_integer())
+                    throw bad_request("assert-ref-snapshot-id needs an integer 'snapshot-id'");
                 if (!exists) throw commit_failed("requirement failed: branch or tag " + name + " is missing");
                 if (refs[name].value("snapshot-id", int64_t(-1)) != want->get<int64_t>())
                     throw commit_failed("requirement failed: branch or tag " + name + " has changed");

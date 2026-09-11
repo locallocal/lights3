@@ -117,9 +117,10 @@ std::string append_body(int64_t snap, int64_t seq, const std::string& manifest, 
     json body;
     if (!commit_id.empty()) body["commit-id"] = commit_id;
     body["requirements"] = json::array();
-    body["updates"] = json::array({json::object({{"action", "add-snapshot"}, {"snapshot", s}}),
-                                   json::parse(R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":)" +
-                                               std::to_string(snap) + "}")});
+    body["updates"] = json::array(
+        {json::object({{"action", "add-snapshot"}, {"snapshot", s}}),
+         json::parse(R"({"action":"set-snapshot-ref","ref-name":"main","type":"branch","snapshot-id":)" +
+                     std::to_string(snap) + "}")});
     return body.dump();
 }
 
@@ -176,10 +177,12 @@ TEST(tables_rest_full_flow_and_error_model) {
     auto lst = env.call("GET", "/iceberg/v1/tbk/namespaces", "", {{"parent", "sales"}});
     CHECK_EQ(TablesEnv::body_json(lst)["namespaces"][0][1].get<std::string>(), "eu");
     CHECK(TablesEnv::body_json(lst)["next-page-token"].is_null());
-    auto props = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/properties", R"({"removals":["o"],"updates":{"x":"1"}})");
+    auto props = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/properties",
+                          R"({"removals":["o"],"updates":{"x":"1"}})");
     CHECK_EQ(props.status, 200);
     CHECK_EQ(TablesEnv::body_json(props)["removed"][0].get<std::string>(), "o");
-    auto both = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/properties", R"({"removals":["x"],"updates":{"x":"1"}})");
+    auto both = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/properties",
+                         R"({"removals":["x"],"updates":{"x":"1"}})");
     CHECK_EQ(both.status, 422);
     // tables
     auto ct = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables", create_body("orders"));
@@ -190,7 +193,10 @@ TEST(tables_rest_full_flow_and_error_model) {
     CHECK_EQ(ctj["config"]["s3.path-style-access"].get<std::string>(), "true");
     CHECK(ct.headers.has("ETag"));
     CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables", create_body("orders")).status, 409);
-    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables", R"({"name":"s","stage-create":true,"schema":{"type":"struct","fields":[]}})").status, 406);
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables",
+                      R"({"name":"s","stage-create":true,"schema":{"type":"struct","fields":[]}})")
+                 .status,
+             406);
     CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables", R"({"name":"x"})").status, 400);
     CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables", "not json").status, 400);
     CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders").status, 204);
@@ -220,8 +226,9 @@ TEST(tables_rest_full_flow_and_error_model) {
                            append_body(1, 1, "s3://tbk/sales/eu/orders/metadata/snap-1.avro", "c-1"));
     CHECK_EQ(replay.status, 200);
     CHECK_EQ(TablesEnv::body_json(replay)["generation"].get<int>(), 2);
-    auto stale = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders",
-                          R"({"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[]})");
+    auto stale = env.call(
+        "POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders",
+        R"({"requirements":[{"type":"assert-ref-snapshot-id","ref":"main","snapshot-id":null}],"updates":[]})");
     CHECK_EQ(stale.status, 409);
     CHECK_EQ(TablesEnv::error_type(stale), "CommitFailedException");
     auto badid = env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders",
@@ -235,7 +242,8 @@ TEST(tables_rest_full_flow_and_error_model) {
     auto ld = env.call("GET", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders", "", {{"snapshots", "refs"}});
     CHECK_EQ(ld.status, 200);
     CHECK_EQ(TablesEnv::body_json(ld)["metadata"]["snapshots"].size(), size_t(1));
-    CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders", "", {{"snapshots", "some"}}).status, 400);
+    CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders", "", {{"snapshots", "some"}}).status,
+             400);
     auto mlr = env.call("GET", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders/metadata-location");
     CHECK_EQ(mlr.status, 200);
     std::string token = TablesEnv::body_json(mlr)["versionToken"];
@@ -247,19 +255,28 @@ TEST(tables_rest_full_flow_and_error_model) {
                          json::object({{"metadataLocation", ml2}, {"versionToken", token}}).dump());
     CHECK_EQ(same.status, 200);
     // metrics report is accepted and discarded
-    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders/metrics", R"({"report-type":"scan-report"})").status, 204);
-    // rename / drop / namespace drop
-    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/tables/rename",
-                      R"({"source":{"namespace":["sales","eu"],"name":"orders"},"destination":{"namespace":["sales","eu"],"name":"orders2"}})")
+    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders/metrics",
+                      R"({"report-type":"scan-report"})")
                  .status,
              204);
+    // rename / drop / namespace drop
+    CHECK_EQ(
+        env.call(
+               "POST", "/iceberg/v1/tbk/tables/rename",
+               R"({"source":{"namespace":["sales","eu"],"name":"orders"},"destination":{"namespace":["sales","eu"],"name":"orders2"}})")
+            .status,
+        204);
     CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders").status, 404);
     CHECK_EQ(env.call("HEAD", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2").status, 204);
-    auto purge = env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2", "", {{"purgeRequested", "true"}});
+    auto purge = env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2", "",
+                          {{"purgeRequested", "true"}});
     CHECK_EQ(purge.status, 406);
     CHECK_EQ(TablesEnv::error_type(purge), "UnsupportedOperationException");
     CHECK_EQ(env.call("DELETE", "/tbk").status, 409);
-    CHECK_EQ(env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2", "", {{"purgeRequested", "false"}}).status, 204);
+    CHECK_EQ(
+        env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2", "", {{"purgeRequested", "false"}})
+            .status,
+        204);
     auto gone = env.call("GET", "/iceberg/v1/tbk/namespaces/sales%1Feu/tables/orders2");
     CHECK_EQ(gone.status, 404);
     CHECK_EQ(TablesEnv::error_type(gone), "NoSuchTableException");
@@ -293,7 +310,8 @@ TEST(tables_rest_delete_objects_per_key_and_bucket_lifecycle) {
     util::HashStream h(util::HashStream::Algo::Md5);
     h.update(std::span(reinterpret_cast<const uint8_t*>(body.data()), body.size()));
     auto d = h.final_bytes();
-    auto r = env.call("POST", "/tbk", body, {{"delete", ""}}, {{"Content-MD5", util::base64_encode(std::span(d.data(), d.size()))}});
+    auto r = env.call("POST", "/tbk", body, {{"delete", ""}},
+                      {{"Content-MD5", util::base64_encode(std::span(d.data(), d.size()))}});
     CHECK_EQ(r.status, 200);
     CHECK(r.small_body.find("<Deleted><Key>plain</Key>") != std::string::npos);
     CHECK(r.small_body.find("<Error><Key>.lights3-table/x</Key><Code>InvalidRequest</Code>") != std::string::npos);
@@ -310,11 +328,13 @@ TEST(tables_rest_delete_objects_per_key_and_bucket_lifecycle) {
     CHECK_EQ(env.call("PUT", "/tbk").status, 200);
     CHECK_EQ(env.call("PUT", "/iceberg/v1/buckets/tbk").status, 200);
     for (const char* n : {"a", "b", "c"})
-        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", std::string(R"({"namespace":[")") + n + "\"]}").status, 200);
+        CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces", std::string(R"({"namespace":[")") + n + "\"]}").status,
+                 200);
     auto p1 = TablesEnv::body_json(env.call("GET", "/iceberg/v1/tbk/namespaces", "", {{"pageSize", "2"}}));
     CHECK_EQ(p1["namespaces"].size(), size_t(2));
     std::string tok = p1["next-page-token"];
-    auto p2 = TablesEnv::body_json(env.call("GET", "/iceberg/v1/tbk/namespaces", "", {{"pageSize", "2"}, {"pageToken", tok}}));
+    auto p2 = TablesEnv::body_json(
+        env.call("GET", "/iceberg/v1/tbk/namespaces", "", {{"pageSize", "2"}, {"pageToken", tok}}));
     CHECK_EQ(p2["namespaces"].size(), size_t(1));
     CHECK_EQ(p2["namespaces"][0][0].get<std::string>(), "c");
     CHECK(p2["next-page-token"].is_null());
@@ -343,17 +363,23 @@ TEST(tables_rest_policy_and_root_gates) {
     // read-only: load yes, create no, commit no, drop no
     CHECK_EQ(env.call("GET", "/iceberg/v1/tbk/namespaces/sales/tables/t", "", {}, {}, ro).status, 200);
     CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables", create_body("u"), {}, {}, ro).status, 403);
-    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables/t", R"({"requirements":[],"updates":[]})", {}, {}, ro).status, 403);
+    CHECK_EQ(
+        env.call("POST", "/iceberg/v1/tbk/namespaces/sales/tables/t", R"({"requirements":[],"updates":[]})", {}, {}, ro)
+            .status,
+        403);
     CHECK_EQ(env.call("DELETE", "/iceberg/v1/tbk/namespaces/sales/tables/t", "", {}, {}, ro).status, 403);
     // rename needs delete on the source and write on the destination
     CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/tables/rename",
-                      R"({"source":{"namespace":["sales"],"name":"t"},"destination":{"namespace":["hr"],"name":"t"}})", {}, {}, scoped)
+                      R"({"source":{"namespace":["sales"],"name":"t"},"destination":{"namespace":["hr"],"name":"t"}})",
+                      {}, {}, scoped)
                  .status,
              403);
-    CHECK_EQ(env.call("POST", "/iceberg/v1/tbk/tables/rename",
-                      R"({"source":{"namespace":["sales"],"name":"t"},"destination":{"namespace":["sales"],"name":"t2"}})", {}, {}, scoped)
-                 .status,
-             204);
+    CHECK_EQ(
+        env.call("POST", "/iceberg/v1/tbk/tables/rename",
+                 R"({"source":{"namespace":["sales"],"name":"t"},"destination":{"namespace":["sales"],"name":"t2"}})",
+                 {}, {}, scoped)
+            .status,
+        204);
 }
 
 TEST(tables_rest_disabled_leaves_s3_plane_untouched) {

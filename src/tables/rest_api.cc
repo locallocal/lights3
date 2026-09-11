@@ -25,8 +25,7 @@ constexpr RestApi::Route kRoutes[] = {
     {"GET", "config", Action::Read, RestApi::KeyKind::None, false, "GetConfig", true, &RestApi::get_config},
     {"PUT", "buckets/{w2}", Action::Write, RestApi::KeyKind::None, true, "EnableTableBucket", false,
      &RestApi::enable_bucket},
-    {"GET", "buckets/{w2}", Action::Read, RestApi::KeyKind::None, false, "GetTableBucket", false,
-     &RestApi::get_bucket},
+    {"GET", "buckets/{w2}", Action::Read, RestApi::KeyKind::None, false, "GetTableBucket", false, &RestApi::get_bucket},
     {"DELETE", "buckets/{w2}", Action::Delete, RestApi::KeyKind::None, true, "DisableTableBucket", false,
      &RestApi::disable_bucket},
     {"GET", "namespaces", Action::Read, RestApi::KeyKind::None, false, "ListNamespaces", true,
@@ -57,8 +56,8 @@ constexpr RestApi::Route kRoutes[] = {
      &RestApi::drop_table},
     {"POST", "tables/rename", Action::Write, RestApi::KeyKind::None, false, "RenameTable", true,
      &RestApi::rename_table},
-    {"POST", "namespaces/{ns}/tables/{t}/metrics", Action::Read, RestApi::KeyKind::Table, false, "ReportMetrics",
-     true, &RestApi::report_metrics},
+    {"POST", "namespaces/{ns}/tables/{t}/metrics", Action::Read, RestApi::KeyKind::Table, false, "ReportMetrics", true,
+     &RestApi::report_metrics},
     {"GET", "namespaces/{ns}/tables/{t}/metadata-location", Action::Read, RestApi::KeyKind::Table, false,
      "GetTableMetadataLocation", false, &RestApi::get_metadata_location},
     {"PUT", "namespaces/{ns}/tables/{t}/metadata-location", Action::Write, RestApi::KeyKind::Table, false,
@@ -320,7 +319,8 @@ Task<http::HttpResponse> RestApi::dispatch(http::HttpRequest& req, Hooks& hooks,
             }
         }
         if (!found) {
-            if (method_mismatch) throw RestError(405, "MethodNotAllowedException", "method not allowed on this resource");
+            if (method_mismatch)
+                throw RestError(405, "MethodNotAllowedException", "method not allowed on this resource");
             throw not_found_resource("no such catalog resource");
         }
         api_name = "Iceberg." + std::string(m.route->name);
@@ -362,9 +362,9 @@ Task<http::HttpResponse> RestApi::dispatch(http::HttpRequest& req, Hooks& hooks,
     }
     requests_->inc();
     metrics_
-        .counter("lights3_tables_requests_by_op_total", "Iceberg REST catalog requests by operation and status",
-                 {{"op", api_name.empty() ? std::string("unmatched") : api_name},
-                  {"status", std::to_string(resp.status)}})
+        .counter(
+            "lights3_tables_requests_by_op_total", "Iceberg REST catalog requests by operation and status",
+            {{"op", api_name.empty() ? std::string("unmatched") : api_name}, {"status", std::to_string(resp.status)}})
         ->inc();
     co_return resp;
 }
@@ -426,8 +426,7 @@ Task<http::HttpResponse> RestApi::disable_bucket(http::HttpRequest&, Hooks& hook
 
 Task<http::HttpResponse> RestApi::list_namespaces(http::HttpRequest& req, Hooks&, const Match& m) {
     Levels parent;
-    if (auto p = req.query_get("parent"); p && !p->empty())
-        parent = parse_namespace_path(*p);
+    if (auto p = req.query_get("parent"); p && !p->empty()) parent = parse_namespace_path(*p);
     Match ctx = m;
     ctx.ns = parent;
     PageCursor c = page_cursor(req, "namespaces", ctx);
@@ -478,8 +477,7 @@ Task<http::HttpResponse> RestApi::drop_namespace(http::HttpRequest&, Hooks& hook
     co_return empty_response(204);
 }
 
-Task<http::HttpResponse> RestApi::update_namespace_properties(http::HttpRequest& req, Hooks& hooks,
-                                                              const Match& m) {
+Task<http::HttpResponse> RestApi::update_namespace_properties(http::HttpRequest& req, Hooks& hooks, const Match& m) {
     json body = co_await read_json(req, false);
     std::vector<std::string> removals;
     if (body.contains("removals") && !body["removals"].is_null()) {

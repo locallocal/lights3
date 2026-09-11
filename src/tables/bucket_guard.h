@@ -18,8 +18,8 @@ namespace lights3::tables {
 
 class TableBucketGuard {
 public:
-    TableBucketGuard(std::shared_ptr<TableBucketStore> store, std::shared_ptr<Catalog> catalog,
-                     std::string path_prefix, std::string compat_prefix);
+    TableBucketGuard(std::shared_ptr<TableBucketStore> store, std::shared_ptr<Catalog> catalog, std::string path_prefix,
+                     std::string compat_prefix);
 
     // Throws S3Error(InvalidRequest) for a mutating route on a reserved key
     void check(std::string_view bucket, std::string_view key, std::string_view route_name) const;

@@ -4,7 +4,8 @@
 > `docs/s3-tables/step-1-catalog-core.md` §18, `step-2-authz-credentials.md` §12,
 > `step-3-validation-diagnostics.md` §12, `step-4-maintenance.md` §10,
 > `step-5-multi-gateway-docs.md` §8 and `step-6-optional.md` §7 (Chinese); deviations are
-> folded into the sections here. The document first answers
+> folded into the sections here, and the loose ends and long-term items the notes left
+> behind are in [todo.md](todo.md) §2 / §4 / §5. The document first answers
 > "how does RustFS do S3 Tables" (§2, verified against source @853ae63 on
 > 2026-09-11), then gives the lights3 plan (§3–§13) and the implementation steps
 > (§14). Once code lands this file stays as the design-level document per repo
@@ -932,24 +933,25 @@ engine's own atomic section); `DuoMetaCatalogStore` uses the `ObjectCatalogStore
 
 ## 13. Observability and tests
 
-Metrics (`MetricsScope{feature=tables}`): `lights3_tables_requests_total{op,status}`,
-`lights3_tables_commit_seconds{result=ok|conflict|error}`,
-`lights3_tables_commit_conflicts_total`, `lights3_tables_validation_files_total`,
-`lights3_tables_maintenance_deleted_bytes_total`, `lights3_tables_finalization_gaps`
-(gauge, updated by diagnostic scans). Access log `api_name = Iceberg.<Op>`, slow
-request threshold unchanged.
+Metrics (`MetricsScope{feature=tables}`, as implemented): `lights3_tables_requests_total`,
+`lights3_tables_requests_by_op_total{op,status}`, `lights3_tables_commits_total{result=ok|conflict|error}`,
+`lights3_tables_commit_seconds`, `lights3_tables_validation_files_total`,
+`lights3_tables_validation_skipped_total`. The draft's `lights3_tables_maintenance_deleted_bytes_total`
+and `lights3_tables_finalization_gaps` (gauge) are not wired, see [todo.md §4](todo.md). Access log
+`api_name = Iceberg.<Op>`, slow request threshold unchanged.
 
 Tests (within the [testing.md](testing.md) system):
 
 | Layer | Content |
 | --- | --- |
-| `tests/unit/test_tables_iceberg.cc` | the pure functions of §7: 8 requirements × pass/fail; valid/invalid samples of every update; transition invariants; the Avro reader on manifests produced by PyIceberg (binary fixtures in the repo, ≤100 KiB) |
-| `tests/unit/test_tables_catalog.cc` | `ObjectCatalogStore` on `MemoryBackend`: evidence-based namespaces, pagination, rename crashed at each of the five steps (put/delete failures injected by attempt index through the `core/fault.h` facade), the four crash windows of §5.4 + the replay matrix of §5.3, 100 concurrent commits with a single winner |
+| `tests/unit/test_tables_iceberg.cc`, `test_tables_avro.cc` | the pure functions of §7: 8 requirements × pass/fail; valid/invalid samples of every update; transition invariants; the Avro reader on manifests produced by PyIceberg (binary fixtures in the repo, ≤100 KiB) |
+| `tests/unit/test_tables_catalog.cc` | `ObjectCatalogStore` on `MemoryBackend`: evidence-based namespaces, pagination, rename crashed at each of the five steps (put/delete failures injected by attempt index through the `core/fault.h` facade), the four crash windows of §5.4 + the replay matrix of §5.3, 20 concurrent commits with a single winner |
 | `tests/unit/test_tables_rest.cc` | in-process `S3Service`: endpoint shapes, error model, prefix-scoped policy, tenant isolation, `s3tables` signing, table-bucket guard (reserved-prefix PUT 400 / GET 200, DeleteBucket 409, lifecycle skip), consistency between `/config` `endpoints` and the route table (table-driven, prevents drift) |
-| `tests/unit/multi_gateway_suite.h` additions | two `S3Service`s sharing a `MemoryBackend` (or redis/tikv duostore): cross-gateway commit conflicts converge, rename recovery driven by the other gateway |
+| `tests/unit/tables_multi_gateway_suite.h` (memory / redis / tikv) | two `S3Service`s sharing a `MemoryBackend` (or redis/tikv duostore): cross-gateway commit conflicts converge, rename recovery driven by the other gateway |
+| `tests/unit/test_tables_maintenance.cc`, `test_tables_optional.cc`, `catalog_store_suite.h` | ④ retention set / snapshot expiry / orphans and fail-closed / StalePlan / purge / runner; ⑥ views, compaction candidates, `catalog_backing` configuration, atomic commit and export/import; the catalog-store suite runs the same cases on object (memory) and duostore (rocksdb / sqlite / redis / tikv) |
 | new segment in `tests/e2e/run_e2e.sh` | bash + curl: enable table bucket → create namespace/table → hand-written CommitTable (add-snapshot pointing at a bundled fixture) → conflict 409 → drop; runs on the six-driver matrix |
 | `scripts/tables/pyiceberg_smoke.py`, `duckdb_smoke.py` (ctest `tables_smoke`, label `tables-smoke`, opt-in) | the RustFS script sequence: enable the table bucket → create table → append twice → reload and scan → stale-handle commit (PyIceberg refreshes and retries) → idempotent replay of one commit-id → maintenance plan/run → diagnostics → purge; DuckDB ATTACHes with SigV4, lists namespaces and scans. `tests/e2e/run_tables_smoke.sh` starts a memory-backend gateway; `LIGHTS3_TABLES_SMOKE=1` runs it, otherwise SKIP (the tikv `LIGHTS3_TEST_PD_ADDR` pattern). **Passed**: PyIceberg 0.12.0 (pyarrow 22, boto3) and DuckDB 1.5.5 (iceberg extension, `SIGV4_REGION` + `SIGV4_SERVICE 's3'`), 2026-09-12, see [testing.md §6](testing.md) |
-| Spark / Trino | configuration templates only (appendix of §13); manual verification recorded in testing.md; no automation claimed |
+| Spark / Trino | configuration templates only (appendix of §13); **not yet verified manually** (no Spark / Trino on the development box, [todo.md §2](todo.md)); no automation claimed |
 
 Client configuration templates (for user docs, the same keys as the RustFS scripts):
 
@@ -983,14 +985,14 @@ under `docs/s3-tables/` (Chinese only, like the other implementation-level docs)
 | ③ deep validation and diagnostics (**implemented 2026-09-12, #122**) | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
 | ④ maintenance (**implemented 2026-09-12, #123**) | `JobOp::Table*`, plan/run/purge, `purgeRequested=true`, periodic runner, CLI, `tombstone_ttl` cleanup | retained set / safety window / StalePlan cases; DuckDB smoke (manual, local) |
 | ⑤ multi-gateway and docs (**implemented 2026-09-12**) | `tables_multi_gateway_suite.h` (memory / redis / tikv); `--check-config` misconfiguration WARN; a "table catalog" column in deployment.md §5; turn this document into an implementation document + `docs/en/` sync; README index | two-gateway cases; doc review |
-| ⑥ optional (**implemented 2026-09-12**) | views; the `/_iceberg/v1` alias; `reportMetrics` into audit; compaction candidate planning output; duostore-meta backing (§12) | `test_tables_optional` / `catalog_store_suite` (object + rocksdb / sqlite / redis) / `case_kv_facade`; REST and e2e cases for views / the alias / metrics |
+| ⑥ optional (**implemented 2026-09-12**) | views; the `/_iceberg/v1` alias; `reportMetrics` into audit; compaction candidate planning output; duostore-meta backing (§12) | `test_tables_optional` / `catalog_store_suite` (object + rocksdb / sqlite / redis / tikv) / `case_kv_facade`; REST and e2e cases for views / the alias / metrics |
 
 ## 15. Deliberately not done
 
 | Item | Reason |
 | --- | --- |
 | the AWS S3 Tables control-plane API (`s3tables.<region>` endpoint, ARN addressing, `CreateTableBucket` and ~50 operations) | the engine ecosystem goes through Iceberg REST; AWS itself has engines reach table buckets through the REST endpoint. RustFS makes no such claim either. Only the semantics and field names of `GetTableMetadataLocation` / `UpdateTableMetadataLocation` are borrowed |
-| multi-table transactions `/transactions/commit` | needs cross-object atomicity, which object CAS cannot give; revisit once the duostore-meta backing (§12) exists |
+| multi-table transactions `/transactions/commit` | needs cross-object atomicity, which object CAS cannot give; the duostore-meta backing (§12) landed with ⑥, so the atomicity precondition is met; kept as a long-term item in [todo.md §5](todo.md) |
 | server-side scan planning `/plan` `/tasks`, remote signing `/sign` | engine-local planning suffices; remote signing would have the gateway sign S3 requests on the client's behalf, conflicting with the policy model |
 | execution of compaction / delete-file rewrites | needs Parquet read/write and row-level semantics; left to engines (Spark `rewrite_data_files`) |
 | durable-strong single-snapshot backing | see §12 |

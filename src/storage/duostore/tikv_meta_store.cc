@@ -228,13 +228,37 @@ auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
 
 std::string TikvMetaStore::kv_key(std::string_view key) const { return tkey('T', key); }
 
+namespace {
+
+// TiKV cannot hold an empty value (TikvClient::get maps "" to "absent"), but the facade
+// contract says an empty value is a value (meta_store_suite case_kv_facade). Every stored
+// value carries a one-byte marker; etags are computed on the logical value
+constexpr char kKvValueMarker = '\x01';
+
+std::string kv_enc(std::string_view value) {
+    std::string out;
+    out.reserve(value.size() + 1);
+    out.push_back(kKvValueMarker);
+    out.append(value);
+    return out;
+}
+
+std::string kv_dec(std::string_view raw) {
+    if (!raw.empty() && raw.front() == kKvValueMarker) raw.remove_prefix(1);
+    return std::string(raw);
+}
+
+}  // namespace
+
 // ---------- KV facade (docs/s3-tables/step-6-optional.md §5) ----------
 
 std::optional<KvItem> TikvMetaStore::kv_get(std::string_view key) {
     return guarded("kv_get", [&]() -> std::optional<KvItem> {
         auto v = snap_get(client().get_ts(), kv_key(key));
         if (!v) return std::nullopt;
-        return KvItem{std::string(key), *v, kv_etag(*v)};
+        std::string value = kv_dec(*v);
+        std::string etag = kv_etag(value);
+        return KvItem{std::string(key), std::move(value), std::move(etag)};
     });
 }
 
@@ -249,12 +273,12 @@ std::vector<std::string> TikvMetaStore::kv_put_batch(std::span<const KvPut> puts
         for (const auto& p : puts) {
             std::string k = kv_key(p.key);
             std::optional<std::string> current;
-            if (auto v = snap_get(ts, k)) current = kv_etag(*v);
+            if (auto v = snap_get(ts, k)) current = kv_etag(kv_dec(*v));
             check_kv_condition(p.cond, current, p.key);
             // an unconditional overwrite of a key nobody read would not conflict: the
             // Put of the key itself is in the write set, so any concurrent write to it
             // between ts and commit is a WriteConflict → retry with a fresh read
-            muts.push_back({current ? TikvOp::kPut : TikvOp::kInsert, k, p.value});
+            muts.push_back({current ? TikvOp::kPut : TikvOp::kInsert, k, kv_enc(p.value)});
             etags.push_back(kv_etag(p.value));
         }
         return etags;
@@ -291,7 +315,9 @@ std::vector<KvItem> TikvMetaStore::kv_scan(std::string_view prefix, std::string_
                     break;
                 }
                 if (!after.empty() && rel <= after) continue;
-                out.push_back(KvItem{std::string(rel), v, kv_etag(v)});
+                std::string value = kv_dec(v);
+                std::string etag = kv_etag(value);
+                out.push_back(KvItem{std::string(rel), std::move(value), std::move(etag)});
                 if (out.size() >= limit) break;
             }
             if (done || page.size() < want) break;

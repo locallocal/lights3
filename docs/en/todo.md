@@ -27,6 +27,7 @@ design document -- no struck-through history here. Each entry carries
 | `unit_tests` intermittently dies with `terminate called without an active exception` | 2 of 5 full runs on 2026-09-05 on this box, always right after `timer_stats_track_fired_and_pending` passed, during the 1.1 s slow callback of `timer_slow_callback_counted` (the "callback took 1.100s" line prints first); not reproducible under gdb; unrelated to feature work | Investigate in a gap: suspect the destruction order of a joinable `std::thread` in TimerQueue or the test fixture under load; capture a stack with `ulimit -c` / `catch throw` first |
 | Multi-gateway multipart container e2e | [../archive/multi-gateway-multipart-design.md](../archive/multi-gateway-multipart-design.md) §4 ② | The compose `multi` profile (two lights3 + redis + rados + nginx round robin) and `deploy/docker/e2e-multi.sh` are in place (2026-09-09, `docker compose --profile multi config` passes); a machine with docker: `docker compose --profile multi run --rm e2e-multi`. The unit suite and the local e2e (the duostore-redis segment of `run_e2e.sh`) pass |
 | mint compatibility baseline | roadmap §6.1, [testing.md §6](testing.md) | A machine with docker: `ctest -R mint -V`, record the per-suite PASS/FAIL/NA counts in testing.md §6 |
+| S3 Tables manual verification with Spark / Trino | [s3-tables-design.md §13](s3-tables-design.md) | Only the PyIceberg / DuckDB smoke passed here (testing.md §6); no Spark / Trino on this box: configure `rest.sigv4-enabled` from the §13 templates, walk through create / append / `rewrite_data_files` (Spark) and SIGV4 read-write (Trino), record the result in testing.md §6; also add a Spark-written manifest (negative block counts) to `tests/fixtures/tables/` (every fixture there is PyIceberg-generated) |
 
 ## 3. Found by the performance baseline ([performance-baseline.md](performance-baseline.md))
 
@@ -35,7 +36,16 @@ design document -- no struck-through history here. Each entry carries
 | beast's TLS GET clearly lags | 4 MiB GET at 4.6k ops/s plaintext but 1.5k under TLS, while the other three drivers sit around 3.0k under TLS | The `TlsStream` write path in `src/http/drivers/beast/beast_server.cc`: asio ssl record splitting and one strand hop per chunk; start with an `strace -c` comparison of plaintext vs TLS syscall counts | medium | medium |
 | Request-body path not optimized symmetrically | PUT is flat across drivers; only beast improved, through the read-granularity bug fix; the queue block shaping of backlog-sequence ⑩ gained httplib's 4 MiB PUT only about 3% | The request body is a pull model that must keep backpressure, so prefetch needs care; candidates: larger recv calls in builtin's `SocketBodyReader`, beast's per-chunk `expires_after` timer re-arm | medium | medium |
 
-## 4. Long-term / architectural (settle the target scenario first)
+## 4. S3 Tables loose ends ([s3-tables-design.md](s3-tables-design.md) ①–⑥ are implemented; these are the gaps the implementation notes left behind)
+
+| Item | Source | State and entry point | Value | Difficulty |
+| --- | --- | --- | --- | --- |
+| Diagnostics and fsck reconciliation for views | `docs/s3-tables/step-6-optional.md` §7 | `rename_view` is a two-step "write the destination, then tombstone the source" without an intent, so a crash in between leaves both entries Active; neither `reconcile_catalog` (`tables/fsck.cc`) nor `catalog/diagnostics` looks at the `view/` directory. Entry: fsck findings `tables.malformed_entry` for view entries and "the same view uuid twice", diagnostics at least checks that the view's metadata pointer exists | medium | low |
+| gzip-compressed metadata.json | `docs/s3-tables/step-1-catalog-core.md` §9 (① deferred it to ③) | `.metadata.json.gz` still answers 406 `compressed metadata files are not supported` (the zlib that ③ introduced only inflates Avro deflate blocks); tables written by Spark with `write.metadata.compression-codec=gzip` cannot be registered or loaded. Entry: inflate in the `Catalog` metadata read under `LIGHTS3_TABLES_ZLIB` (the 50 MiB cap still applies), keep writing uncompressed | medium | low |
+| Two metrics of design §13 not wired | [s3-tables-design.md §13](s3-tables-design.md) | `lights3_tables_maintenance_deleted_bytes_total` (the run job's `stats` already carries `deleted_bytes`) and the `lights3_tables_finalization_gaps` gauge (the diagnostics result already counts them) are not on the `MetricsScope`; the `lights3.tables` alert group only uses commits / requests / validation. Entry: one line at the end of run in `maintenance.cc` and in the summary of `diagnostics.cc`, plus a panel in `gen_dashboard.py` | low | low |
+| `DuoMetaCatalogStore` KV calls block the caller | `docs/s3-tables/step-6-optional.md` §7 | The redis / tikv network round trips run on the calling (HTTP worker) thread; the catalog write path is small and serialized per table, so acceptable for now. Entry: hop to a pool thread via `pool->schedule()` as `DuoStoreBackend` does, or add an asynchronous KV facade to `IMetaStore` | low | medium |
+
+## 5. Long-term / architectural (settle the target scenario first)
 
 | Item | Notes |
 | --- | --- |
@@ -44,8 +54,9 @@ design document -- no struck-through history here. Each entry carries
 | Full OpenTelemetry instrumentation | The lightweight trace layer exists (W3C traceparent pass-through, one span per request, log correlation, [s3-protocol.md §7](s3-protocol.md)); exporting spans through otel-cpp is long-term |
 | HTTP/2 | Mainstream S3 SDKs still speak HTTP/1.1; only CDN / L7 fronting needs it; terminating h2 at a fronting proxy is in [tls.md §6](tls.md) |
 | Independent cancellation source on client disconnect | A deliberate trade-off: long handlers are bounded by `request_timeout`, drivers notice the disconnect at the next socket operation ([http-adapter.md §2.3](http-adapter.md)) |
+| Iceberg multi-table transactions `/transactions/commit` | [s3-tables-design.md §15](s3-tables-design.md) said "revisit once the duostore-meta backing exists"; ⑥ delivered it: one `kv_put_batch` can write the pointers + records of several tables, so atomicity is available. Missing: the endpoint itself, combined validation of requirements across tables, the refusal on the object backing (406, which cannot do it) and the engine-side switches (`DISABLE_MULTI_TABLE_COMMIT` in the DuckDB template). Confirm an engine actually needs it before starting |
 
-## 5. Explicitly not planned
+## 6. Explicitly not planned
 
 | Item | Reason |
 | --- | --- |
@@ -58,7 +69,7 @@ design document -- no struck-through history here. Each entry carries
 | CivetWeb or other new HTTP drivers | The four drivers cover the design space ([http-adapter.md §3.4](http-adapter.md)) |
 | GitHub Actions CI | Deliberately removed; automation investment goes into the local script matrix (`scripts/check-all.sh`, [testing.md §8](testing.md)) |
 
-## 6. Maintenance rules
+## 7. Maintenance rules
 
 - A new entry states its **source / entry point / value / difficulty**; delete
   it when done and write the implementation into the design document.

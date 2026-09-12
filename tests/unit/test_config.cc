@@ -495,3 +495,53 @@ TEST(config_website_redirect_and_rate) {
         CHECK(thrown);
     }
 }
+
+// S3 Tables deployment sanity (docs/s3-tables/step-5-multi-gateway-docs.md §3): the catalog
+// on a single-gateway default backend plus any multi-gateway signal is a warning
+TEST(config_tables_deployment_warning) {
+    const char* base = R"(
+backends:
+  - name: local
+    type: localfs
+    params: {root: /tmp/x, staging: /tmp/y}
+  - name: duo
+    type: duostore
+    params: {root: /tmp/d, meta: rocksdb}
+buckets:
+  default_backend: local
+tables:
+  enabled: true
+)";
+    auto cfg = Config::from_string(base);
+    // no signal → nothing
+    CHECK(!tables_deployment_warning(cfg).has_value());
+    // usage.reconcile: false is a signal
+    cfg.usage.reconcile = false;
+    auto w = tables_deployment_warning(cfg);
+    CHECK(w.has_value());
+    CHECK(w->find("usage.reconcile: false") != std::string::npos);
+    CHECK(w->find("'local' (localfs)") != std::string::npos);
+    // an explicit read_lease / gc_enabled: false on any duostore backend too
+    cfg.usage.reconcile = true;
+    cfg.backends[1].params["gc_enabled"] = "false";
+    w = tables_deployment_warning(cfg);
+    CHECK(w.has_value());
+    CHECK(w->find("backends[duo].gc_enabled: false") != std::string::npos);
+    cfg.backends[1].params.erase("gc_enabled");
+    cfg.backends[1].params["read_lease"] = "5s";
+    CHECK(tables_deployment_warning(cfg).has_value());
+    cfg.backends[1].params["read_lease"] = "0s";
+    CHECK(!tables_deployment_warning(cfg).has_value());
+    // shared default backends never warn; tables off never warns
+    cfg.usage.reconcile = false;
+    cfg.backends[1].params["meta"] = "redis";
+    cfg.buckets.default_backend = "duo";
+    CHECK(!tables_deployment_warning(cfg).has_value());
+    cfg.backends[0].type = "cloudproxy";
+    cfg.buckets.default_backend = "local";
+    CHECK(!tables_deployment_warning(cfg).has_value());
+    cfg.backends[0].type = "localfs";
+    CHECK(tables_deployment_warning(cfg).has_value());
+    cfg.tables.enabled = false;
+    CHECK(!tables_deployment_warning(cfg).has_value());
+}

@@ -336,3 +336,32 @@ groups:
         annotations:
           summary: "usage reconciliation has not run for 2 days on {{ $labels.instance }}"
           description: "usage.reconcile_interval elapsed twice without a full recount; counters may drift from the incremental path (docs/multi-tenancy.md §2)."
+
+  - name: lights3.tables
+    rules:
+      - alert: Lights3TablesCommitConflicts
+        expr: sum by (instance) (rate(lights3_tables_commits_total{result="conflict"}[10m])) / clamp_min(sum by (instance) (rate(lights3_tables_commits_total[10m])), 1e-9) > 0.5 and sum by (instance) (rate(lights3_tables_commits_total[10m])) > 0.05
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "S3 Tables: more than half of the commits on {{ $labels.instance }} lose the CAS"
+          description: "Writers keep colliding on the same tables (or a stale-token client retries blindly). Sustained conflict ratios mean the workload needs fewer concurrent writers per table (docs/s3-tables-design.md §5.2)."
+      - alert: Lights3TablesCommitErrors
+        expr: increase(lights3_tables_commits_total{result="error"}[10m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "S3 Tables: commit ended in CommitStateUnknown on {{ $labels.instance }}"
+          description: "The pointer CAS threw something other than a precondition failure: the storage backend failed mid-commit. Run GET .../catalog/diagnostics on the affected tables; a FinalizationRequired record is repaired by POST .../catalog/recovery (docs/s3-tables-design.md §5.4)."
+      - alert: Lights3TablesValidationSkipped
+        expr: increase(lights3_tables_validation_skipped_total[1h]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "S3 Tables: snapshots committed without deep validation on {{ $labels.instance }}"
+          description: "A manifest used an Avro codec this build cannot read (snappy / zstd, or deflate without zlib); the commit was accepted with lights3.snapshot-validation = skipped-codec. Build with zlib or make writers use deflate / null (docs/s3-tables-design.md §7.4)."
+      - alert: Lights3TablesCommitP99
+        expr: histogram_quantile(0.99, sum by (instance, le) (rate(lights3_tables_commit_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "S3 Tables: commit P99 {{ $value | humanizeDuration }} on {{ $labels.instance }}"
+          description: "A commit is metadata read + deep validation (one HEAD per data file, tables.validate_concurrency at a time) + four .sys writes; slow commits usually mean a large snapshot on a remote backend. Lower retain / expire snapshots or raise validate_concurrency."

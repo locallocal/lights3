@@ -10,8 +10,8 @@ test that reconciles them against the source's metric catalog.
 | File | Content |
 | --- | --- |
 | `deploy/prometheus/scrape.yml` | scrape config: `job_name: lights3`, `metrics_path: /-/metrics`, loads the rules; runnable standalone or merged into an existing prometheus.yml |
-| `deploy/prometheus/lights3.rules.yml` | 9 groups, 48 rules: 7 recording rules (5xx ratio, P99s, backend error ratio, cloudproxy retry ratio, keep-alive reuse) + 41 alerts |
-| `deploy/grafana/lights3.json` | the dashboard (uid `lights3-overview`, 63 panels / 9 rows), variables `DS` / `instance` / `backend` |
+| `deploy/prometheus/lights3.rules.yml` | 10 groups, 52 rules: 7 recording rules (5xx ratio, P99s, backend error ratio, cloudproxy retry ratio, keep-alive reuse) + 45 alerts |
+| `deploy/grafana/lights3.json` | the dashboard (uid `lights3-overview`, 69 panels / 10 rows), variables `DS` / `instance` / `backend` |
 | `deploy/grafana/gen_dashboard.py` | dashboard generator — the single source of truth for panels; rerun after editing |
 | `tests/monitoring/check_assets.py` | asset validation (§5), ctest name `monitoring_assets` |
 
@@ -80,6 +80,10 @@ the traffic shape. Three severities: critical (act now) / warning (act today)
 | | `Lights3CloudproxyPoolWait` | connection-pool wait P99 > 1s | warning |
 | tenancy | `Lights3QuotaRejections` | quota rejections within 1h | info |
 | | `Lights3UsageScanStale` | usage reconciliation not run for 2 days | info |
+| tables | `Lights3TablesCommitConflicts` | more than half of the table commits lose the CAS over 10m (with traffic), for 15m | warning |
+| | `Lights3TablesCommitErrors` | a `CommitStateUnknown` within 10m (the pointer CAS threw a non-precondition error; run `catalog/diagnostics`) | critical |
+| | `Lights3TablesValidationSkipped` | a snapshot skipped deep validation within 1h (unreadable Avro codec) | info |
+| | `Lights3TablesCommitP99` | table commit P99 > 5s for 10m | warning |
 
 Recording rules (shared by dashboard and alerts): `lights3:requests:rate5m`,
 `lights3:responses_5xx_ratio:rate5m`, `lights3:request_duration_seconds:p99_5m`,
@@ -99,6 +103,7 @@ Recording rules (shared by dashboard and alerts): `lights3:requests:rate5m`,
 | DuoStore | GC queue depth and head age (convergence criterion), rounds / reclaims / duration, skip reasons, pack live vs total, quarantine, corruption and orphans, the four meta-engine signals |
 | Tiered | read source, demotion / promotion / eviction, cloud GC, scans and quarantine, range cache, op errors |
 | CloudProxy | remote request P99, retry ratio, error codes, pool wait and ETag mismatches |
+| S3 Tables | catalog requests by op, 4xx / 5xx by status, commits by outcome (ok / conflict / error), commit P99, deep-validation files checked and snapshots skipped |
 
 **Tiered watermark**: five gauges give the position directly --
 `lights3_tiered_local_used_bytes` / `_total_bytes` / `_high_watermark_bytes`

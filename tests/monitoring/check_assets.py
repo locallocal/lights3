@@ -37,7 +37,9 @@ BACKEND_SPECIFIC = ("lights3_duostore_", "lights3_tiered_", "lights3_cloudproxy_
                     "lights3_meta_cache_", "lights3_backend_pool_", "lights3_bucket_usage_",
                     "lights3_usage_", "lights3_quota_", "lights3_backend_op_seconds",
                     "lights3_backend_errors_total", "lights3_bucket_requests_total",
-                    "lights3_bucket_bytes_total")
+                    "lights3_bucket_bytes_total",
+                    # S3 Tables (tables.enabled off on the checker's gateway)
+                    "lights3_tables_")
 HIST_SUFFIXES = ("_bucket", "_sum", "_count")
 
 failures = []

@@ -1,6 +1,7 @@
 # 步骤 ⑤：多网关验证、误配防线与文档转正
 
-> 状态：**未实现**（实施稿 2026-09-11）。对应设计 §5.5、§14 ⑤。依赖 ①–④。
+> 状态：**已实现（2026-09-12，分支 feat/s3-tables-step5）**。对应设计 §5.5、§14 ⑤。依赖 ①–④。
+> 实现与本稿的差异见文末 §8。
 > 完成后：两个网关共享同一份目录状态时提交冲突收敛、rename 恢复可由对端驱动；
 > 非共享默认后端上启用 tables 会得到明确 WARN；设计文档转为实现文档并同步英文版。
 
@@ -92,3 +93,42 @@ duostore redis/tikv + fs ✖（目录状态可共享但表数据不共享——�
 - worktree 里勿跑 `submodule update`（仓库约定）；变体构建用增量 `cmake --build build-redis`。
 - redis reconnect 类用例在普通 shell 下死于 SIGPIPE（既有），tables 用例不涉及断连，
   但同一进程里跑时注意 `LIGHTS3_TEST_FILTER`。
+
+## 8. 实现记录（2026-09-12）
+
+- **双网关用例**放在 `tests/unit/tables_multi_gateway_suite.h`（§7 的建议），入参是两个
+  `IStorageBackend` 句柄；用例直接在 `Catalog` 层跑（各自 `TableBucketStore` /
+  `ObjectCatalogStore` / `Catalog`），不再各起一个 `S3Service`——收敛与恢复都在目录层决定，
+  REST 面另有覆盖。接入点：`test_tables_multi_gateway.cc`（memory，同一实例作两个句柄）、
+  `test_duostore_redis.cc` / `test_duostore_tikv.cc`（`multi_gateway_suite::make_cluster` 的
+  两个 `DuoStoreBackend`：共享 meta + 一个 `SharedDataStore`，`#ifdef LIGHTS3_TABLES`，无实例
+  SKIP）。步骤 ③ 的中断点用 `tables.rename.after_destination`（稿子写的
+  `after_stage2` 不存在）；触发恢复的是 B 对**被 fence 的表**的写（writer 路径强制先
+  `recover_renames`），而不是任意 `create_table`（无关写只每 32 次调用扫一遍，用例里不确定）。
+  memory 与 redis 变体本机通过；tikv 变体无集群 SKIP。
+- **误配 WARN**：纯函数 `tables_deployment_warning(const Config&)`（`core/config.{h,cc}`），
+  `Application::start_server` 与 `--check-config`（`cli_server.cc`）各调一次。"多网关信号"按
+  **显式配置**判定：任一 duostore 后端 `read_lease` 显式 > 0、`gc_enabled: false`、或
+  `usage.reconcile: false`；`read_lease` 的默认值 5s 不算（否则每个 tables + localfs 的
+  单机配置都会被误报）。单测 `config_tables_deployment_warning`。
+- **SigV4 兼容修正**（冒烟时发现）：PyIceberg / Spark `rest.sigv4-enabled` 这类通用 SigV4
+  客户端把 payload 哈希算进 canonical request 但**不发 `x-amz-content-sha256` 头**，S3 面的
+  校验器把它当必需头 → 400。`RestApi::dispatch` 对无该头、非 presigned 的目录请求先把 body
+  读满（≤ `tables.request_max_size`）、算 sha256 填进该头再验签（客户端签的就是这个值）。
+  管理面 `/-/admin/...` 不变（`lights3-ctl` 一直带头）。
+- **冒烟脚本**入库并挂 ctest：`scripts/tables/pyiceberg_smoke.py`（PyIceberg 走 boto3 默认
+  凭证链，脚本把 `LIGHTS3_AK/SK` 放进 `AWS_ACCESS_KEY_ID/SECRET`；管理面调用用 botocore
+  自签）、`duckdb_smoke.py`（DuckDB 1.5.5 的 iceberg 扩展 ATTACH 须给
+  `SIGV4_REGION` + `SIGV4_SERVICE 's3'`，否则它试图从主机名解析 region / service）、
+  `tests/e2e/run_tables_smoke.sh`（起 memory 网关，`LIGHTS3_SMOKE_KEEP=1` 先留表给 DuckDB
+  再 purge）。ctest `tables_smoke`（标签 `tables-smoke`，`SKIP_RETURN_CODE 77`），
+  `check-all.sh --with-tables-smoke` 置 `LIGHTS3_TABLES_SMOKE=1`。本机结果：PyIceberg 0.12.0
+  16/16、DuckDB 1.5.5 5/5（依赖装在临时目录，`PYTHONPATH` 指过去）。
+- **监控资产**：`lights3.rules.yml` 加 `lights3.tables` 组 4 条告警，dashboard 加
+  "S3 Tables" 行 5 面板（`gen_dashboard.py` 生成），`check_assets.py` 把 `lights3_tables_`
+  列为特性相关（memory 网关不开 tables 时不在 `/-/metrics` 里）。
+- **文档**：deployment §5.1 加"表目录"列与 §5.2 段；设计文档中英文顶部状态改"已实现"、
+  §14 各行标 PR 号、§5.5 / §13 回写；`docs/README.md` 与 `docs/en/README.md` 去掉"未实现"；
+  testing.md §1 加 `tables_smoke` 行、§6 记客户端版本；monitoring.md 加 tables 组 / 行；
+  todo §4 的 S3 Tables 行改为 ⑥ 可选项。`docs/s3-protocol.md`、`docs/cli.md`、
+  `docs/config-reload.md` 在 ①–④ 已改，本步只改状态措辞。

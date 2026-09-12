@@ -228,14 +228,21 @@ balancer, with no session affinity
 
 ### 5.1 Support matrix
 
-| Backend | Multiple gateways |
-| --- | --- |
-| memory | n/a |
-| localfs / xlocalfs / tiered | unsupported: part state lives in local staging, rename / xattr semantics on a shared filesystem were never argued, two gateways completing the same key overwrite each other |
-| cloudproxy | supported: pure pass-through, no local state |
-| duostore + rocksdb / sqlite meta | impossible: local engines are single-process |
-| duostore + redis / tikv meta + fs data | unsupported: data sits on each gateway's local disk, invisible to the peer; shared meta only buys meta-side availability, single gateway only. The server WARNs at startup and `--check-config` prints `config warning:` ([cli.md §2.1](cli.md)) |
-| duostore + redis / tikv meta + rados data | **supported** (below) |
+| Backend | Multiple gateways | Table catalog (tables, as the default backend) |
+| --- | --- | --- |
+| memory | n/a | n/a |
+| localfs / xlocalfs / tiered | unsupported: part state lives in local staging, rename / xattr semantics on a shared filesystem were never argued, two gateways completing the same key overwrite each other | single gateway |
+| cloudproxy | supported: pure pass-through, no local state | ✔ (catalog state in the remote `.sys`, CAS by the remote's conditional writes) |
+| duostore + rocksdb / sqlite meta | impossible: local engines are single-process | single gateway |
+| duostore + redis / tikv meta + fs data | unsupported: data sits on each gateway's local disk, invisible to the peer; shared meta only buys meta-side availability, single gateway only. The server WARNs at startup and `--check-config` prints `config warning:` ([cli.md §2.1](cli.md)) | ✖ (the catalog state is shareable but the table data sits on the local disk, unreadable by the peer -- the same verdict as this row) |
+| duostore + redis / tikv meta + rados data | **supported** (below) | ✔ |
+
+The table-catalog column is about the **default backend** only (the catalog state lives in
+its `.sys`, [s3-tables-design.md §5.5](s3-tables-design.md)); a table bucket itself may
+live on any backend. `tables.enabled` on a single-gateway default backend together with a
+multi-gateway signal (an explicit `read_lease > 0`, `gc_enabled: false`,
+`usage.reconcile: false`) WARNs at startup and `--check-config` prints the same line as
+`config warning:`.
 
 ### 5.2 Required configuration (duostore + redis/tikv meta + rados data)
 
@@ -249,6 +256,16 @@ balancer, with no session affinity
 | `root` | a local path per gateway | holds local state such as the quarantine ledger only, never data |
 | instance-level background jobs (`usage.reconcile`, tiered scans, …) | on one instance only | the same designated-instance semantics as `gc_enabled` ([multi-tenancy.md](multi-tenancy.md)) |
 | credentials and `.sys` | the same configuration (credentials, region, secrets) | STS sessions are written through to the shared `.sys/sts`; static credentials are held by every gateway |
+
+**Table catalog across gateways** ([s3-tables-design.md §5.5](s3-tables-design.md)):
+`tables.enabled` and `tables.path_prefix` identical on every instance; a table-bucket
+enablement (`.sys/tables/`) reaches the peers on the `auth.sync_interval` pull (the same
+"write-through first, then visible, SDK retries" model as credentials -- until then the
+peer answers 404 `NoSuchNamespaceException`), while the catalog state itself is uncached
+and visible as soon as written; commits converge through the conditional writes on `.sys`,
+an interrupted rename is completed by the next write on any instance;
+`tables.maintenance.scan_interval` on one instance, or on all of them (deletes are
+idempotent and the safety window shields in-flight commits, the lifecycle policy).
 
 ### 5.3 Load balancing
 

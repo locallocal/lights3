@@ -602,6 +602,7 @@ if(LIGHTS3_BUILD_TESTS)
       tests/unit/test_tables_catalog.cc
       tests/unit/test_tables_rest.cc
       tests/unit/test_tables_maintenance.cc
+      tests/unit/test_tables_multi_gateway.cc
     )
   endif()
   if(LIGHTS3_DUOSTORE)
@@ -680,6 +681,15 @@ if(LIGHTS3_BUILD_TESTS)
     add_test(NAME soak_smoke
              COMMAND ${CMAKE_SOURCE_DIR}/scripts/soak.sh $<TARGET_FILE:lights3> $<TARGET_FILE:lights3-ctl> --seconds 30)
     set_tests_properties(soak_smoke PROPERTIES LABELS "perf;soak" TIMEOUT 900)
+  endif()
+
+  # S3 Tables client smoke (docs/s3-tables-design.md §13, docs/s3-tables/step-5-multi-gateway-docs.md
+  # §6): PyIceberg and DuckDB against a live gateway. Opt-in through
+  # LIGHTS3_TABLES_SMOKE=1 (python packages required); SKIP (77) otherwise
+  if(LIGHTS3_TABLES AND LIGHTS3_DRIVER_BUILTIN)
+    add_test(NAME tables_smoke
+             COMMAND ${CMAKE_SOURCE_DIR}/tests/e2e/run_tables_smoke.sh $<TARGET_FILE:lights3>)
+    set_tests_properties(tables_smoke PROPERTIES SKIP_RETURN_CODE 77 LABELS tables-smoke TIMEOUT 900)
   endif()
 
   # Install tree + --version (roadmap §6.3, docs/deployment.md): cmake --install into a

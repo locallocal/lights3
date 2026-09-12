@@ -258,6 +258,47 @@ int parse_duration_ms(const std::string& s) {
     return static_cast<int>(num * mult);
 }
 
+std::optional<std::string> tables_deployment_warning(const Config& cfg) {
+    if (!cfg.tables.enabled) return std::nullopt;
+    const BackendConfig* def = nullptr;
+    for (auto& b : cfg.backends)
+        if (b.name == cfg.buckets.default_backend) def = &b;
+    if (!def) return std::nullopt;
+    auto param = [](const BackendConfig& b, const char* k) -> std::string {
+        auto it = b.params.find(k);
+        return it == b.params.end() ? std::string() : it->second;
+    };
+    std::string meta = param(*def, "meta");
+    bool shared = def->type == "cloudproxy" || (def->type == "duostore" && (meta == "redis" || meta == "tikv"));
+    if (shared) return std::nullopt;
+    std::vector<std::string> signals;
+    if (!cfg.usage.reconcile) signals.push_back("usage.reconcile: false");
+    for (auto& b : cfg.backends) {
+        if (b.type != "duostore") continue;
+        std::string lease = param(b, "read_lease");
+        if (!lease.empty()) {
+            try {
+                if (parse_duration_sec(lease) > 0) signals.push_back("backends[" + b.name + "].read_lease");
+            } catch (const std::exception&) {
+            }
+        }
+        std::string gc = param(b, "gc_enabled");
+        if (!gc.empty()) {
+            try {
+                if (!parse_bool(gc)) signals.push_back("backends[" + b.name + "].gc_enabled: false");
+            } catch (const std::exception&) {
+            }
+        }
+    }
+    if (signals.empty()) return std::nullopt;
+    std::string joined;
+    for (auto& s : signals) joined += (joined.empty() ? "" : ", ") + s;
+    std::string kind = def->type + (meta.empty() ? "" : " meta=" + meta);
+    return "tables: catalog state lives on default backend '" + def->name + "' (" + kind +
+           ") which is single-gateway; multi-gateway signals present (" + joined +
+           ") -- table commits will not converge across gateways (docs/s3-tables-design.md §5.5)";
+}
+
 bool parse_bool(const std::string& s) {
     if (s == "true" || s == "1" || s == "yes" || s == "on") return true;
     if (s == "false" || s == "0" || s == "no" || s == "off") return false;

@@ -31,6 +31,9 @@
 #include "unit/meta_store_suite.h"
 #include "unit/mini_test.h"
 #include "unit/multi_gateway_suite.h"
+#ifdef LIGHTS3_TABLES
+#include "unit/tables_multi_gateway_suite.h"
+#endif
 
 namespace fs = std::filesystem;
 using namespace lights3;
@@ -892,5 +895,17 @@ TEST(duostore_redis_multi_gateway_listings_shared) {
     REDIS_OR_SKIP();
     multi_gateway_suite::listings_are_shared(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
+
+// ---------- two-gateway S3 Tables (docs/s3-tables/step-5-multi-gateway-docs.md §2) ----------
+// The catalog state is .sys objects on the shared meta; the fixtures and metadata files
+// go through the shared data engine, so both catalog stacks see everything
+#ifdef LIGHTS3_TABLES
+TEST(duostore_redis_tables_multi_gateway) {
+    REDIS_OR_SKIP();
+    auto c = multi_gateway_suite::make_cluster(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
+    tables_multi_gateway_suite::run(c->a, c->b);
+    c->close();
+}
+#endif
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_REDIS_META

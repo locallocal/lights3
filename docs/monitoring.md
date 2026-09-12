@@ -9,8 +9,8 @@
 | 文件 | 内容 |
 | --- | --- |
 | `deploy/prometheus/scrape.yml` | 抓取配置：`job_name: lights3`、`metrics_path: /-/metrics`、加载规则文件；可单独运行也可并入既有 prometheus.yml |
-| `deploy/prometheus/lights3.rules.yml` | 9 组 48 条：7 条 recording（5xx 率、P99、后端错误率、cloudproxy 重试率、keep-alive 复用率）+ 41 条告警 |
-| `deploy/grafana/lights3.json` | dashboard（uid `lights3-overview`，63 面板 / 9 行），变量 `DS` / `instance` / `backend` |
+| `deploy/prometheus/lights3.rules.yml` | 10 组 52 条：7 条 recording（5xx 率、P99、后端错误率、cloudproxy 重试率、keep-alive 复用率）+ 45 条告警 |
+| `deploy/grafana/lights3.json` | dashboard（uid `lights3-overview`，69 面板 / 10 行），变量 `DS` / `instance` / `backend` |
 | `deploy/grafana/gen_dashboard.py` | dashboard 的生成脚本——面板定义的唯一来源，改完重跑生成 JSON |
 | `tests/monitoring/check_assets.py` | 资产校验（§5），ctest 名 `monitoring_assets` |
 
@@ -75,6 +75,10 @@ critical（需即时处理）/ warning（需当天处理）/ info（趋势提示
 | | `Lights3CloudproxyPoolWait` | 连接池等待 P99 > 1s | warning |
 | tenancy | `Lights3QuotaRejections` | 1h 内有配额拒绝 | info |
 | | `Lights3UsageScanStale` | 用量全量校准超过 2 天未跑 | info |
+| tables | `Lights3TablesCommitConflicts` | 10m 内一半以上的表提交输在 CAS 上（且有量），持续 15m | warning |
+| | `Lights3TablesCommitErrors` | 10m 内出现 `CommitStateUnknown`（指针 CAS 抛非前置条件错误，跑 `catalog/diagnostics`） | critical |
+| | `Lights3TablesValidationSkipped` | 1h 内有快照因 Avro codec 不可读而跳过深校验 | info |
+| | `Lights3TablesCommitP99` | 表提交 P99 > 5s，10m | warning |
 
 Recording 规则（供 dashboard 与告警共用）：`lights3:requests:rate5m`、
 `lights3:responses_5xx_ratio:rate5m`、`lights3:request_duration_seconds:p99_5m`、
@@ -94,6 +98,7 @@ Recording 规则（供 dashboard 与告警共用）：`lights3:requests:rate5m`�
 | DuoStore | GC 队列深度与队头年龄（收敛判据）、轮次/回收/耗时、跳过原因、pack live vs total、隔离、损坏与孤儿、四种 meta 引擎信号 |
 | Tiered | 读来源、降冷/回热/逐出、本地层容量（文件系统已用 vs 高水位、账面本地字节 vs 配额）、云端 GC、扫描与隔离、range cache、op 错误 |
 | CloudProxy | 远端请求 P99、重试比、错误码、连接池等待与 ETag 不符 |
+| S3 Tables | 目录请求按 op、4xx/5xx 按状态、提交按结果（ok / conflict / error）、提交 P99、深校验检查文件数与跳过的快照 |
 
 **tiered 水位**：`lights3_tiered_local_used_bytes` / `_total_bytes` /
 `_high_watermark_bytes`（statvfs，正是水位逻辑看到的量）与

@@ -23,13 +23,16 @@ done
 if [[ $BUILD -eq 1 ]]; then
     ./build.sh --coverage -B "$BUILD_DIR" -j "$JOBS"
 fi
+# The report is produced even when a test fails, but a test process that crashed
+# (abort / signal) never flushes its counters, so the figures are then incomplete
+CTEST_RC=0
 if [[ $TEST -eq 1 ]]; then
     # Fresh counters for this run
     find "$BUILD_DIR" -name '*.gcda' -delete
     if [[ $E2E -eq 1 ]]; then
-        ctest --test-dir "$BUILD_DIR" -LE "perf|soak|mint" --output-on-failure || true
+        ctest --test-dir "$BUILD_DIR" -LE "perf|soak|mint" --output-on-failure || CTEST_RC=$?
     else
-        ctest --test-dir "$BUILD_DIR" -R '^unit_tests$|fuzz_regression' --output-on-failure || true
+        ctest --test-dir "$BUILD_DIR" -R '^unit_tests$|fuzz_regression' --output-on-failure || CTEST_RC=$?
     fi
 fi
 OUT="$BUILD_DIR/coverage"
@@ -52,4 +55,7 @@ else
     echo "gcovr/lcov not installed: aggregating gcov JSON for src/ (pip install gcovr for HTML)"
     ( cd "$BUILD_DIR" && find . -name '*.gcda' -print0 | xargs -0 -r -n 1 gcov --json-format --stdout 2>/dev/null ) |
         python3 "$(dirname "$0")/coverage_aggregate.py" "$PWD/src/" | tee "$OUT/summary.txt"
+fi
+if [[ $CTEST_RC -ne 0 ]]; then
+    echo "WARNING: ctest exited $CTEST_RC; a crashed test writes no counters, so the figures above are incomplete (re-run with --no-build)" >&2
 fi

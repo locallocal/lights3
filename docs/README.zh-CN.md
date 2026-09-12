@@ -70,6 +70,8 @@ ccmd、spdlog、httplib、nlohmann/json、rocksdb、hiredis、sqlite 以 git 子
 ```bash
 ./build.sh --test        # 子模块 + cmake + ninja + ctest 一步完成
 make release             # build-rel 下的 Release 构建（make debug → build 下的 Debug；make package → deb/rpm/tgz）
+make test                # Debug 构建后跑 ctest 快速集（除性能门禁、soak、mint 之外的全部）
+make coverage            # build-cov 的 -O0 --coverage 构建 + 单测 + 行覆盖率报告（scripts/coverage.sh）
 ```
 
 或手动：

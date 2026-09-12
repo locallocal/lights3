@@ -169,7 +169,7 @@ machine and paste the summary here.
 - `./build.sh --ubsan` (build-ubsan, `-fsanitize=undefined`); `check-all.sh` runs
   it with `UBSAN_OPTIONS=halt_on_error=1` so a finding fails the run.
 - `./build.sh --coverage` (build-cov, `-O0 --coverage`); `scripts/coverage.sh
-  [--e2e] [--no-build] [--no-test]` builds, tests and reports: HTML through
+  [--e2e] [--no-build] [--no-test]` (`make coverage`, §9) builds, tests and reports: HTML through
   gcovr or lcov when installed, otherwise `scripts/coverage_aggregate.py`
   parses `gcov --json-format` output and unions by (file, line number) for
   `src/` line coverage (written to `build-cov/coverage/summary.txt`; gcov's
@@ -189,13 +189,20 @@ directories under `*SAN_OPTIONS` so findings fail, and a summary table at the
 end; `--configure` creates missing directories through `build.sh`.
 ## 9. Makefile: builds and code formatting
 
-The top-level `Makefile` is a thin wrapper over `build.sh` and CPack: `make release`
-(Release, `build-rel/`), `make debug` (Debug, `build/`), `make package` (release,
-then CPack; output in `build-rel/packages/`, the generator picked from the host's
-dpkg-deb / rpmbuild, TGZ otherwise), `make clean` (removes only those two
-directories, every other `build-*` variant stays). `JOBS=` sets the parallelism
-(default: half the cores), `BUILD_ARGS="--redis --sqlite"` forwards build.sh flags,
-`RELEASE_DIR=` / `DEBUG_DIR=` move the directories. `make help` lists every target.
+The top-level `Makefile` is a thin wrapper over `build.sh`, ctest,
+`scripts/coverage.sh` and CPack: `make release` (Release, `build-rel/`), `make debug`
+(Debug, `build/`), `make test` (debug, then the quick set of §1 in `build/`:
+`ctest -LE "perf|soak|mint"`, the same filter `check-all.sh` uses;
+`CTEST_ARGS="-R tables"` / `CTEST_ARGS="-L perf"` add filters; ctest runs serially
+because the e2e sections bind fixed ports), `make coverage` (`scripts/coverage.sh`:
+the `-O0 --coverage` build in `build-cov/`, unit tests + fuzz replays, the
+line-coverage report of §7; `COVERAGE_ARGS="--e2e"` / `"--no-build"` / `"--no-test"`
+are forwarded), `make package` (release, then CPack; output in `build-rel/packages/`,
+the generator picked from the host's dpkg-deb / rpmbuild, TGZ otherwise),
+`make clean` (removes only `build-rel/`, `build/` and `build-cov/`, every other
+`build-*` variant stays). `JOBS=` sets the parallelism (default: half the cores),
+`BUILD_ARGS="--redis --sqlite"` forwards build.sh flags, `RELEASE_DIR=` /
+`DEBUG_DIR=` / `COVERAGE_DIR=` move the directories. `make help` lists every target.
 
 ### 9.1 Code formatting
 

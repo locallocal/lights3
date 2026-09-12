@@ -250,7 +250,7 @@ std::string kv_dec(std::string_view raw) {
 
 }  // namespace
 
-// ---------- KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+// ---------- KV facade (docs/s3-tables-design.md §12) ----------
 
 std::optional<KvItem> TikvMetaStore::kv_get(std::string_view key) {
     return guarded("kv_get", [&]() -> std::optional<KvItem> {

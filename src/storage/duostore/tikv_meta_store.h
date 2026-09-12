@@ -59,7 +59,7 @@ public:
     ~TikvMetaStore() override;
     TikvMetaStore(const TikvMetaStore&) = delete;
 
-    // KV facade (docs/s3-tables/step-6-optional.md §5): one optimistic transaction per
+    // KV facade (docs/s3-tables-design.md §12): one optimistic transaction per
     // put batch; the read of the checked key is in the write set, so a concurrent
     // change surfaces as WriteConflict and the retry re-evaluates the condition
     std::optional<KvItem> kv_get(std::string_view key) override;
@@ -163,7 +163,7 @@ private:
 
     // ---- key construction (§3.2: prefix + one-char table tag + codec composite segment) ----
     std::string tkey(char tag, std::string_view rest) const;
-    // 'T': the KV facade (docs/s3-tables/step-6-optional.md §5)
+    // 'T': the KV facade (docs/s3-tables-design.md §12)
     std::string kv_key(std::string_view key) const;
     // 'B'
     std::string bucket_key(std::string_view b) const;

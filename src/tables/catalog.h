@@ -1,5 +1,5 @@
-// Catalog: the business layer of the table catalog (docs/s3-tables-design.md §5, §6.5,
-// docs/s3-tables/step-1-catalog-core.md §9) -- namespace / table lifecycle and the
+// Catalog: the business layer of the table catalog (docs/s3-tables-design.md §5,
+// §6.5) -- namespace / table lifecycle and the
 // single-table commit protocol on top of ITableCatalogStore + PutCondition CAS. Storage
 // agnostic: the table bucket is reached through the router, catalog state through the
 // store. Throws RestError; storage errors propagate as s3::S3Error for the REST layer

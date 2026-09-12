@@ -496,7 +496,7 @@ TEST(config_website_redirect_and_rate) {
     }
 }
 
-// S3 Tables deployment sanity (docs/s3-tables/step-5-multi-gateway-docs.md §3): the catalog
+// S3 Tables deployment sanity (docs/s3-tables-design.md §5.5): the catalog
 // on a single-gateway default backend plus any multi-gateway signal is a warning
 TEST(config_tables_deployment_warning) {
     const char* base = R"(

@@ -1,4 +1,4 @@
-// ITableCatalogStore conformance suite (docs/s3-tables/step-6-optional.md §5): the same
+// ITableCatalogStore conformance suite (docs/s3-tables-design.md §12): the same
 // cases over every backing -- ObjectCatalogStore on a MemoryBackend and
 // DuoMetaCatalogStore on each meta engine's KV facade (rocksdb always; sqlite / redis /
 // tikv where built and reachable). Factory convention: one store per call over the same

@@ -384,7 +384,7 @@ struct IMetaStore : IMetaReadView {
     // borrows this store: it must be destroyed before close()
     virtual std::unique_ptr<IMetaReadView> snapshot() { return nullptr; }
 
-    // ---- generic KV facade (docs/s3-tables-design.md §12, docs/s3-tables/step-6-optional.md §5) ----
+    // ---- generic KV facade (docs/s3-tables-design.md §12) ----
     // An opaque, ordered key/value space apart from the object tables (rocksdb column
     // family "tc", sqlite table tc, redis hash + lex index, tikv key tag 'T'), the
     // backing of the S3 Tables catalog when tables.catalog_backing = duostore. Values

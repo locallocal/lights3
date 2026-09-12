@@ -56,7 +56,7 @@ struct TableEntry {
     int64_t updated_unix = 0;
 };
 
-// Iceberg view (docs/s3-tables/step-6-optional.md §1): the same shape as TableEntry
+// Iceberg view (docs/s3-tables-design.md §6.3): the same shape as TableEntry
 // minus the format / rename fields; views are format-version 1 only
 struct ViewEntry {
     int version = 1;
@@ -102,7 +102,7 @@ struct RenameIntent {
 const char* rename_stage_name(RenameIntent::Stage s);
 std::optional<RenameIntent::Stage> rename_stage_from_name(std::string_view s);
 
-// Per-table maintenance settings (docs/s3-tables/step-4-maintenance.md §3); every field
+// Per-table maintenance settings (docs/s3-tables-design.md §9); every field
 // optional -- unset falls back to tables.maintenance / the table's Iceberg properties
 struct MaintenanceConfig {
     int version = 1;

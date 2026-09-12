@@ -1,12 +1,6 @@
 # S3 Tables：Apache Iceberg REST Catalog（调研 RustFS 后的设计）
 
-> 状态：**已实现（§14 ①–⑥，2026-09-12）**。实现记录见
-> [s3-tables/step-1-catalog-core.md §18](s3-tables/step-1-catalog-core.md)、
-> [step-2-authz-credentials.md §12](s3-tables/step-2-authz-credentials.md)、
-> [step-3-validation-diagnostics.md §12](s3-tables/step-3-validation-diagnostics.md)、
-> [step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)、
-> [step-5-multi-gateway-docs.md §8](s3-tables/step-5-multi-gateway-docs.md)、
-> [step-6-optional.md §7](s3-tables/step-6-optional.md)；偏离设计的点已回写到对应章节，实现记录留下的收尾项与长期项在 [todo.md](todo.md) §2 / §4 / §5。本文先回答"RustFS 是怎么做 S3 Tables
+> 状态：**已实现（§14 ①–⑥，2026-09-12）**。各步的实现记录摘要见 §16（实施稿 `docs/s3-tables/` 已随 ①–⑥ 收口删除，历史在 git）；偏离设计的点已回写到对应章节，收尾项与长期项在 [todo.md](todo.md) §2 / §4 / §5。本文先回答"RustFS 是怎么做 S3 Tables
 > 的"（§2，源码核实 @853ae63，2026-09-11），再给出 lights3 的方案（§3–§13）与
 > 实施拆分（§14）。代码落地后，本文按仓库惯例保留为设计层文档，实现细节写进
 > 对应实现文档；源码注释用 `docs/s3-tables-design.md §N` 引用本文。
@@ -675,8 +669,7 @@ fixed/enum，Iceberg manifest 只用这些）、codec `null` 与 `deflate`（zli
 `lights3.snapshot-validation: "skipped-codec"`）；`snappy` / `zstd` 同样降级。
 不引入 avro-cpp（依赖 Boost 与 fmt，且只用到读的十分之一）。
 
-阶段 ① 先做"manifest-list 对象存在 + 大小"的浅校验；③ 已补齐 Avro 深校验（实现差异见
-[s3-tables/step-3-validation-diagnostics.md §12](s3-tables/step-3-validation-diagnostics.md)：冲突复核只看归属于新快照的条目，否则复用父 manifest 的正常 append 会被误判）。
+阶段 ① 先做"manifest-list 对象存在 + 大小"的浅校验；③ 已补齐 Avro 深校验（实现差异见 §16 ③：冲突复核只看归属于新快照的条目，否则复用父 manifest 的正常 append 会被误判）。
 
 ## 8. 数据面集成
 
@@ -759,7 +752,7 @@ AdminJobs 参数。`tables.maintenance.delete_enabled: false`（默认）时 run
 `write.target-file-size-bytes`，有 delete 文件的分区标 `row-level-required`）供外部引擎
 （Spark `rewrite_data_files`）使用（⑥ 已实现）。
 
-④ 已落地（实现差异见 [s3-tables/step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)）：
+④ 已落地（实现差异见 §16 ④）：
 维护配置对象在 `maint/` 目录而非与指针并列；快照过期只在配置了 age 时执行；周期 runner
 逐表等待作业结束；`lights3-ctl tables` 多一个 `config` 子命令。
 
@@ -863,15 +856,8 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 
 ## 14. 实施拆分
 
-按依赖顺序；每步独立可合并、有单测，做完把本节对应行改为"已实现 + 日期"。
-每步的实现级文档（文件清单、签名、流程、接入点、单测清单）在
-[s3-tables/](s3-tables/README.md)：①
-[step-1-catalog-core.md](s3-tables/step-1-catalog-core.md)、②
-[step-2-authz-credentials.md](s3-tables/step-2-authz-credentials.md)、③
-[step-3-validation-diagnostics.md](s3-tables/step-3-validation-diagnostics.md)、④
-[step-4-maintenance.md](s3-tables/step-4-maintenance.md)、⑤
-[step-5-multi-gateway-docs.md](s3-tables/step-5-multi-gateway-docs.md)、⑥
-[step-6-optional.md](s3-tables/step-6-optional.md)。
+按依赖顺序；每步独立可合并、有单测。六步的实施稿（文件清单、签名、流程、接入点、单测清单）
+在全部合并后删除，各步的实现记录摘要在 §16。
 
 | 步骤 | 内容 | 验收 |
 | --- | --- | --- |
@@ -893,3 +879,107 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 | durable-strong 单快照后备 | 见 §12 |
 | Delta Lake / Hudi、内置 SQL | 超出对象存储网关范围 |
 | 跨区域双活写 | 单表单写者是 Iceberg 的前提；多网关只在共享同一份目录状态时成立（§5.5） |
+
+## 16. 实现记录摘要（2026-09-12）
+
+六步的实施稿（`docs/s3-tables/`：每步一份文件清单、签名、流程、接入点、单测清单）在
+①–⑥ 全部合并后删除（历史在 git）。各步偏离设计或设计未写明的决定汇总如下；未完成项在
+[todo.md](todo.md) §2 / §4 / §5。
+
+**① 目录核心（#119）**
+
+- 表桶端点是 `PUT|GET|DELETE /iceberg/v1/buckets/{bucket}`（无 warehouse 段，与 RustFS 一致）。
+- 墓碑不算"子项"：`namespace_has_children` / `bucket_state_empty` 只认活跃对象，drop namespace
+  顺带删除其下墓碑（否则 PyIceberg 的 drop table → drop namespace 序列会 409）。
+- 幂等重放直接采用记录指向的文件，不比对重算的 metadata（`last-updated-ms` 必然不同）。
+- 表级锁是 `AsyncSemaphore(1)`，按 `<bucket>/<table_id>` 只增不删（有界于表数）。
+- `LoadTable.config` 额外给 `lights3.version-token`、`lights3.snapshot-validation`、
+  `lights3.catalog-etag`（③）。GCC 15 下 `co_await (this->*fn)(...)` 触发 ICE，先存局部 `Task`。
+- e2e 主配置打开 `tables.enabled`，六驱动矩阵全部跑 tables 段。
+
+**② 权限与凭证（#121）**
+
+- `SigV4Authenticator::verify_any` 接受 service 集合；目录路径按 `tables.accept_s3tables_signing`
+  取 `{s3, s3tables}`，S3 面不变；scope 不符仍 400，目录面映射成 403 `ForbiddenException`。
+- 授权粒度：namespace 的读类路由按 `prefix_may_contain(ns + "/")` 判定（限在 `sales/orders/`
+  的凭证要能列出 `sales`），写类路由要求 `allows(bucket, ns + "/")`；表类路由同时接受
+  `<ns>/<t>` 与 `<ns>/<t>/`（下发的会话凭证前缀带斜杠）；列表在分页之后过滤（可能空页而
+  token 非空，规范允许）。
+- `narrow_policy(parent, narrow)`：buckets / prefixes 逐项被父放行者保留，`readonly` 取或，
+  actions 取交，交集为空抛 `AccessDenied`；`mint_session` 第三参数，持久化格式未变。
+- 凭证下发 `{bucket, prefixes: [<location>/, <reserved>/<ns>/<t>/metadata/], readonly}`；会话
+  凭证再请求下发 → `credential-vending-not-authorized`（表照常返回）；响应
+  `Cache-Control: no-store, private`；`GET …/credentials` 未开启 406、未授权 403。
+- 配额预检走 `Hooks::commit.quota_check`，`QuotaExceeded` → 409 `CommitFailedException`。
+- lifecycle 排除经 `LifecycleRunner::set_skip_predicate`（lifecycle 不依赖 tables 头）；表桶上
+  的 lifecycle 规则照常保存并 WARN。
+
+**③ 深校验与诊断（#122）**
+
+- Avro 读取器：union 返回分支值本身，`logicalType` 一律忽略；深度上限 64、单条记录 16 MiB、
+  单块解压 128 MiB；负块计数（Spark 写法）支持；deflate 走 zlib raw inflate
+  （`LIGHTS3_TABLES_ZLIB`，`--version` 报 `tables: deflate=yes|no`）。不引入 avro-cpp。
+- manifest 的 `sequence_number` 继承（null 且 ADDED，或 manifest 序号为 0），与 PyIceberg 读回
+  逐字段一致；固件由 PyIceberg 0.12.0 生成（`scripts/tables/gen_fixtures.py`），路径写死在桶
+  `tbk` / `tbe2e`。
+- 冲突复核只看**归属于新快照**的条目（Iceberg 写者 append 时原样复用父快照的 manifest）；
+  manifest 长度用 GET 回来的 size，不另 HEAD；父快照已过期或 codec 不可读 → 跳过复核并记
+  `skipped_codec`。配置不新增键，上限用 `DeepCheckOptions` 默认值（10 000 manifest /
+  1 000 000 文件 / 128 MiB）。
+- `catalog/diagnostics` / `catalog/recovery` 不进 `/config.endpoints`；
+  `ITableCatalogStore::delete_commit` 供 prune。
+- rename：正常路径与恢复路径是同一段 `drive_rename`，每次阶段推进对 intent 本身 CAS
+  （`put_rename` 返回 ETag）；Prepared 阶段源 etag 已变、或超过 `tombstone_ttl` 仍未 fence →
+  放弃；目标被占 → 源改回 Active，409 `DestinationTaken`；写入口读到 `Renaming` 强制先恢复，
+  否则每桶每 32 次调用扫一遍 `renames/`；读入口 503。故障点
+  `tables.rename.after_prepare|after_fence|after_destination|after_tombstone|before_cleanup`。
+- ETag：`If-None-Match` 接受引号 / `W/` / 逗号列表 / `*`，命中 304 无 body、不读 metadata。
+- fsck 对账在 `tables/fsck.cc`（`reconcile_catalog`），在线 `/-/admin/fsck/<默认后端>` 与离线
+  `lights3 fsck` 都并进结论：`tables.orphan_state` / `dangling_pointer` / `stale_renaming` /
+  `inconsistent_rename` / `malformed_entry`；墓碑不查指针。
+
+**④ 维护（#123）**
+
+- 维护配置对象在 `maint/<ns-path>/<t>.json`（与指针并列会被当成表名）；解析顺序 Iceberg 属性
+  `history.expire.*` > 表对象 > `tables.maintenance`，不一致 → `effective.conflict` +
+  `manual_review`；快照过期只在配置了 `max_snapshot_age_ms` 时做（无默认 5 天）；purge 删配置
+  对象，drop 保留。
+- 保留集含每条 COMMITTED 记录的 `new_metadata_location`，正常提交产生的 metadata 永远不是
+  候选（候选只有无记录的文件）；非 Active 表 404 / 503；快照过期的 requirements 有 `main` 用
+  `assert-ref-snapshot-id` 否则 `assert-table-uuid`；manifest 上限 / 解析失败 / codec 不可读
+  一律 `manual_review` 且候选清空。
+- Runner：StalePlan → `InvalidRequest`；过期提交的 commit-id 为 `maint-<uuid>`；删文件前逐个
+  HEAD 复核 mtime，每 64 个删除让出一次；`purge_table` 要求墓碑。
+- 作业框架：`AdminJobs` 的 `JobOp::TablePlan|TableRun|TablePurge`（组 `tables`）、
+  `start_custom` / `status_by_id`；目录侧只见 `tables/jobs.h` 的 `JobHooks`，由 app 注入。
+- REST：plan 202；run 的 body 可为 `{"plan":…}` / `{"job_id":N}` / 空（该表最近一次 plan 作业），
+  `manual-review` 的 plan 400；`DELETE …?purgeRequested=true` → 204 + `x-lights3-job-id`
+  （无作业框架 406）；管理面 `POST/GET /-/admin/tables/<bucket>/<ns…>/<t>/<plan|run|purge>`。
+- 周期 runner：pass 逐表等待作业结束（同一时刻一张表），忙表 `skipped_busy`，`manual_review`
+  只出 plan；墓碑清理按 `tombstone_ttl`（≤ 0 关），每桶先 `recover_renames`。
+- `lights3-ctl tables` 多一个 `config` 子命令；`purge --yes` 必填并轮询作业。
+
+**⑤ 多网关与文档（#124）**
+
+- 双网关用例在 `Catalog` 层跑（不起两个 `S3Service`），接入 memory / redis / tikv；触发恢复的
+  是 B 对被 fence 的表的写（无关写只每 32 次调用扫一遍）。
+- `tables_deployment_warning` 的"多网关信号"只看显式配置（`read_lease` 显式 > 0、
+  `gc_enabled: false`、`usage.reconcile: false`），默认值不算。
+- SigV4：PyIceberg / Spark 这类通用客户端不发 `x-amz-content-sha256`，目录面对无该头、非
+  presigned 的请求先读满 body 算 sha256 再验签；管理面不变。
+- 冒烟：PyIceberg 走 boto3 默认凭证链；DuckDB ATTACH 须 `SIGV4_REGION` + `SIGV4_SERVICE 's3'`；
+  ctest `tables_smoke` opt-in。监控资产：`lights3.tables` 告警组 4 条、dashboard 行 5 面板。
+
+**⑥ 可选项（#125）**
+
+- views：rename 是"先写目标、再把源改墓碑"两步，无 intent；replace 不写 commit 记录；两种后备
+  的目录判空都认得 `view/`；fsck / diagnostics 不覆盖 view（todo §4）；`location` 默认
+  `s3://<bucket>/<ns>/<name>`。
+- 别名：`RestApi::matched_prefix` 决定 dispatch 跳过的段数（首段在 ① 就已保留）。
+- `reportMetrics` 解析后经 `Hooks::audit` 记 `tables.metrics`（≤ 64 KiB）。
+- compaction 候选：`iceberg::live_files_of_snapshot`，`DataFile.sort_order_id`，分区键用桶内目录。
+- duostore-meta：`kv_*` 加在 `IMetaStore` 上带默认 `NotImplemented`；app 取原始后端实例（不是
+  计量装饰器）做 `dynamic_cast`；`Catalog::commit_table` 按 `supports_atomic_commit()` 跳过
+  STAGED 写与 `tables.commit.*` 故障点；`--check-config` 对 `catalog_backing: duostore` + 非
+  duostore 默认后端报错；KV 调用在调用线程同步执行（todo §4）；TiKV 的 get 把空值当不存在，
+  tikv 的 KV 面给每个值加一字节标记；tikv 在 tiup playground 上通过。

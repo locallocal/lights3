@@ -44,7 +44,7 @@ void run_fsck(const Cmd& c) {
         throw std::runtime_error("fsck: backend '" + backend + "': " + e.what());
     }
 #ifdef LIGHTS3_TABLES
-    // S3 Tables catalog reconciliation (docs/s3-tables/step-3-validation-diagnostics.md §9):
+    // S3 Tables catalog reconciliation (docs/s3-tables-design.md §14 ③):
     // the catalog lives in .sys of the default backend, so only that backend's scrub
     // carries it; table buckets on other backends are reached through the router
     if (app.config().tables.enabled && backend == app.config().buckets.default_backend) {

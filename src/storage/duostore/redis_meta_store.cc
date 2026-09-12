@@ -900,7 +900,7 @@ std::vector<BucketInfo> RedisMetaStore::list_buckets() {
     return out;
 }
 
-// ---------- KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+// ---------- KV facade (docs/s3-tables-design.md §12) ----------
 // Value in HASH tc, its etag in HASH tce (the guarded commit compares the sha1 of a
 // field's value, so the etag lives in a field of its own), the key in the lex ZSET tcz
 // for ordered scans. A conditional put is one guarded EVALSHA: expect_absent /

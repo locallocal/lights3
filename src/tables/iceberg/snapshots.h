@@ -1,5 +1,5 @@
-// Snapshot-graph checks (docs/s3-tables-design.md §7.4, docs/s3-tables/step-3-validation-diagnostics.md
-// §5). The shallow check (step ①) only proves the manifest list exists inside the bucket;
+// Snapshot-graph checks (docs/s3-tables-design.md §7.4).
+// The shallow check (step ①) only proves the manifest list exists inside the bucket;
 // the deep check (step ③) walks manifest-list → manifests → data files through the Avro
 // reader: every referenced object exists in the bucket outside the reserved prefix, the
 // recorded lengths match, and the new snapshot does not re-add a live file, delete a

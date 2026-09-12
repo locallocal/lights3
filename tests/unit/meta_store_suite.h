@@ -572,7 +572,7 @@ inline void case_list_uploads_hints(const MetaFactory& make) {
     m->close();
 }
 
-// KV facade (docs/s3-tables/step-6-optional.md §5): opaque values, etag = sha256[:16],
+// KV facade (docs/s3-tables-design.md §12): opaque values, etag = sha256[:16],
 // PutCondition inside the engine's atomic section, ordered prefix scans with an
 // exclusive `after`, all-or-nothing batches, survival across reopen
 inline void case_kv_facade(const MetaFactory& make) {

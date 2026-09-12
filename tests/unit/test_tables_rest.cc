@@ -1,5 +1,5 @@
 // Iceberg REST surface through the full S3Service dispatch (docs/s3-tables-design.md §6, §8.1,
-// docs/s3-tables/step-1-catalog-core.md §15): endpoints, error model, guard, config drift
+// §13): endpoints, error model, guard, config drift
 #include <chrono>
 #include <filesystem>
 #include <fstream>

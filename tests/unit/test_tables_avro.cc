@@ -1,4 +1,4 @@
-// Avro OCF reader + manifest model (docs/s3-tables/step-3-validation-diagnostics.md §3–§4, §10):
+// Avro OCF reader + manifest model (docs/s3-tables-design.md §7.4, §13):
 // hand-built minimal containers for every Avro type, the PyIceberg-written fixtures under
 // tests/fixtures/tables (null and deflate codecs) checked field by field against what
 // PyIceberg reads back, and the failure modes (truncation, sync mismatch, depth,

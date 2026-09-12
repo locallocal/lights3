@@ -1064,7 +1064,7 @@ check "access log carries remote/bucket/ttfb slots" "0" \
 check "access log: streaming GET reports the bytes sent" "0" \
     "$(grep -q 'access .* GET "/mybucket/dir/big.bin" 200 [1-9][0-9]* .* api=GetObject ' "$WORK/server.log"; echo $?)"
 
-# ---------- S3 Tables step ①: Iceberg REST catalog over the live server (docs/s3-tables/step-1-catalog-core.md §16) ----------
+# ---------- S3 Tables step ①: Iceberg REST catalog over the live server (docs/s3-tables-design.md §13) ----------
 # The catalog answers JSON on the /iceberg/v1 prefix; namespace levels are joined with %1F
 TB="$BASE/iceberg/v1"
 TNS="$TB/tbe2e/namespaces/e2e%1Fdemo"
@@ -1108,7 +1108,7 @@ check "tables: a missing manifest list is refused" "409" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"requirements":[],"updates":[{"action":"add-snapshot","snapshot":{"snapshot-id":2,"sequence-number":2,"timestamp-ms":1757600001000,"manifest-list":"s3://tbe2e/e2e/demo/orders/metadata/nope.avro","summary":{"operation":"append"}}}]}' "$TNS/tables/orders")"
 check "tables: load table shows the snapshot" "1" \
     "$(s3curl "$TNS/tables/orders" | jq_field 'j["metadata"]["current-snapshot-id"]')"
-# step ③ (docs/s3-tables/step-3-validation-diagnostics.md): deep validation, ETag, diagnostics / recovery
+# step ③ (docs/s3-tables-design.md §7.4): deep validation, ETag, diagnostics / recovery
 check "tables: the snapshot was validated down to the data files" "deep" \
     "$(s3curl "$TNS/tables/orders" | jq_field 'j["config"]["lights3.snapshot-validation"]')"
 s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"
@@ -1146,7 +1146,7 @@ check "tables: the old name is gone" "404" "$(s3curl -o /dev/null -w '%{http_cod
 check "tables: DeleteBucket refuses a non-empty table bucket" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/tbe2e")"
 check "tables: purgeRequested must be a boolean" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2?purgeRequested=maybe")"
-# step ④ (docs/s3-tables/step-4-maintenance.md): settings, plan / run jobs, purge, lights3-ctl tables
+# step ④ (docs/s3-tables-design.md §9): settings, plan / run jobs, purge, lights3-ctl tables
 check "tables: maintenance settings default to no deletion" "false" \
     "$(s3curl "$TNS/tables/orders2/maintenance/config" | jq_field 'str(j["effective"]["delete_enabled"]).lower()')"
 check "tables: a table-level setting is stored and takes effect" "1" \
@@ -1192,7 +1192,7 @@ if [[ -x "$LIGHTS3_CTL" ]]; then
         "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/tbe2e/${TMP_ML#s3://tbe2e/}")"
     check "tables: the purged table is gone from the catalog" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS/tables/tmp")"
 fi
-# step ⑥ (docs/s3-tables/step-6-optional.md): the /_iceberg alias, views, reportMetrics
+# step ⑥ (docs/s3-tables-design.md §14 ⑥): the /_iceberg alias, views, reportMetrics
 check "tables: the compat prefix reaches the same catalog" "tbe2e" \
     "$(s3curl "$BASE/_iceberg/v1/config?warehouse=tbe2e" | jq_field 'j["overrides"]["prefix"]')"
 check "tables: /config advertises the compat prefix" "/_iceberg/v1" \
@@ -1224,7 +1224,7 @@ check "tables: drop namespace" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X
 check "tables: the catalog prefix's first segment is not a bucket name" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/iceberg")"
 check "tables: commits are counted" "0" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_tables_commits_total{feature="tables",result="ok"} 1'; echo $?)"
-# step ② (docs/s3-tables/step-2-authz-credentials.md): s3tables signing name, vended credentials, lifecycle exclusion
+# step ② (docs/s3-tables-design.md §6.2, §8.4): s3tables signing name, vended credentials, lifecycle exclusion
 tcurl() {  # sign the catalog request with credential scope service "s3tables"
     curl -sS --aws-sigv4 "aws:amz:$REGION:s3tables" --user "$AK:$SK" "$@"
 }

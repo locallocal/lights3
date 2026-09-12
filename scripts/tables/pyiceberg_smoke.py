@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""PyIceberg smoke against a live lights3 gateway (docs/s3-tables-design.md §13,
-docs/s3-tables/step-5-multi-gateway-docs.md §6): the RustFS script sequence -- enable the
+"""PyIceberg smoke against a live lights3 gateway (docs/s3-tables-design.md §13):
+the RustFS script sequence -- enable the
 table bucket, create namespace + table, append twice, reload + scan, a stale-handle commit
 conflict, an idempotent replay, maintenance plan / run, drop with purge.
 

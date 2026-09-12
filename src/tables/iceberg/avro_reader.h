@@ -1,5 +1,5 @@
-// Read-only Avro Object Container File decoder (docs/s3-tables-design.md §7.4,
-// docs/s3-tables/step-3-validation-diagnostics.md §3): the subset an Iceberg manifest-list /
+// Read-only Avro Object Container File decoder (docs/s3-tables-design.md
+// §7.4): the subset an Iceberg manifest-list /
 // manifest needs -- OCF header (magic, metadata, sync marker), schema-driven decoding of
 // every Avro type, codecs "null" and "deflate" (zlib, when built with LIGHTS3_TABLES_ZLIB).
 // The whole file is in memory (the caller bounds the read); records come back as JSON.

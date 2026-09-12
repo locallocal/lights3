@@ -151,7 +151,7 @@ dump/load 同模式：构建全部后端、不监听端口，跑完即退出；*
   unverifiable）；
 - 其余类型（memory/cloudproxy/tiered）报错退出；
 - **S3 Tables 目录对账**（`tables.enabled` 且 `<backend>` 是默认后端时追加，
-  [s3-tables/step-3-validation-diagnostics.md §9](s3-tables/step-3-validation-diagnostics.md)）：
+  [s3-tables-design.md §16 ③](s3-tables-design.md)）：
   `.sys/tables/` 的表桶标记与 `.sys/tables-catalog/<bucket>/` 的目录状态对照表桶本身：
   `tables.orphan_state`（标记或目录状态对应的桶不存在 / 未启用）、`tables.dangling_pointer`
   （表指针指向不存在的 metadata 对象）、`tables.stale_renaming`（表处于 RENAMING 但 intent
@@ -605,7 +605,7 @@ lights3-ctl tier quarantine list tierdata
 ### 3.13 `tables` —— S3 Tables 目录：表桶、列表、维护、诊断
 
 [s3-tables-design.md](s3-tables-design.md) 的运维入口（实现记录见
-[s3-tables/step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)）。目录调用打
+[s3-tables-design.md §16 ④](s3-tables-design.md)）。目录调用打
 `<prefix>/v1/...`（`--catalog-prefix`，默认 `/iceberg`，即 `tables.path_prefix`），签名
 service 固定 `s3`；`plan` / `run` 走管理面作业（root 凭证），与 §3.12 同一 job 模型
 （202 + job id、每 0.3s 轮询到结束、打印结论文档）。表以 `<namespace>.<table>` 给出，

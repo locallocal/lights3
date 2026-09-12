@@ -36,10 +36,10 @@
 
 | 条目 | 出处 | 现状与入口 | 价值 | 难度 |
 | --- | --- | --- | --- | --- |
-| view 的诊断与 fsck 对账 | [s3-tables/step-6-optional.md §7](s3-tables/step-6-optional.md) | `rename_view` 是"先写目标、再把源改墓碑"两步且无 intent，中间崩溃留下源与目标同时 Active 的双份；`reconcile_catalog`（`tables/fsck.cc`）与 `catalog/diagnostics` 都不看 `view/` 目录。入口：fsck 对 view 条目做 `tables.malformed_entry` 与"同一 view uuid 出现两次"两项发现，diagnostics 对 view 至少核对 metadata 指针存在 | 中 | 低 |
-| gzip 压缩的 metadata.json | [s3-tables/step-1-catalog-core.md §9](s3-tables/step-1-catalog-core.md)（① 留给 ③） | `.metadata.json.gz` 仍回 406 `compressed metadata files are not supported`（③ 引入的 zlib 只用于 Avro deflate 块）；Spark `write.metadata.compression-codec=gzip` 写出的表无法 register / LoadTable。入口：`Catalog` 读 metadata 处在 `LIGHTS3_TABLES_ZLIB` 下 inflate（仍受 50 MiB 上限），写侧保持不压缩 | 中 | 低 |
+| view 的诊断与 fsck 对账 | [s3-tables-design.md §16 ⑥](s3-tables-design.md) | `rename_view` 是"先写目标、再把源改墓碑"两步且无 intent，中间崩溃留下源与目标同时 Active 的双份；`reconcile_catalog`（`tables/fsck.cc`）与 `catalog/diagnostics` 都不看 `view/` 目录。入口：fsck 对 view 条目做 `tables.malformed_entry` 与"同一 view uuid 出现两次"两项发现，diagnostics 对 view 至少核对 metadata 指针存在 | 中 | 低 |
+| gzip 压缩的 metadata.json | [s3-tables-design.md §16 ①](s3-tables-design.md)（① 留给 ③） | `.metadata.json.gz` 仍回 406 `compressed metadata files are not supported`（③ 引入的 zlib 只用于 Avro deflate 块）；Spark `write.metadata.compression-codec=gzip` 写出的表无法 register / LoadTable。入口：`Catalog` 读 metadata 处在 `LIGHTS3_TABLES_ZLIB` 下 inflate（仍受 50 MiB 上限），写侧保持不压缩 | 中 | 低 |
 | 设计 §13 两个指标未加 | [s3-tables-design.md §13](s3-tables-design.md) | `lights3_tables_maintenance_deleted_bytes_total`（run 作业 `stats` 里已有 `deleted_bytes`）与 `lights3_tables_finalization_gaps` gauge（diagnostics 结果里已有计数）没接 `MetricsScope`；告警组 `lights3.tables` 只用 commits / requests / validation。入口：`maintenance.cc` 的 run 收尾与 `diagnostics.cc` 的汇总各加一处，`gen_dashboard.py` 加面板 | 低 | 低 |
-| `DuoMetaCatalogStore` 的 KV 调用同步阻塞 | [s3-tables/step-6-optional.md §7](s3-tables/step-6-optional.md) | redis / tikv 引擎的网络往返在调用线程（HTTP 工作线程）上执行；目录写路径量小且按表串行，暂可接受。入口：与 `DuoStoreBackend` 一致，经 `pool->schedule()` 挪到池线程，或给 `IMetaStore` 加异步 KV 面 | 低 | 中 |
+| `DuoMetaCatalogStore` 的 KV 调用同步阻塞 | [s3-tables-design.md §16 ⑥](s3-tables-design.md) | redis / tikv 引擎的网络往返在调用线程（HTTP 工作线程）上执行；目录写路径量小且按表串行，暂可接受。入口：与 `DuoStoreBackend` 一致，经 `pool->schedule()` 挪到池线程，或给 `IMetaStore` 加异步 KV 面 | 低 | 中 |
 
 ## 5. 长期 / 架构级（先想清目标场景再动）
 

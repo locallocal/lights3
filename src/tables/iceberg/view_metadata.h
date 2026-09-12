@@ -1,4 +1,4 @@
-// Iceberg view metadata (docs/s3-tables/step-6-optional.md §1; Iceberg view spec, format
+// Iceberg view metadata (docs/s3-tables-design.md §6.3; Iceberg view spec, format
 // version 1): pure functions over nlohmann::json, no IO -- the initial metadata of a
 // CreateView, structural validation, and the replace (commit) protocol's requirements /
 // updates. Views carry no snapshot graph: the only commit-time check is the version

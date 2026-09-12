@@ -1,4 +1,4 @@
-// Iceberg metadata pure functions (docs/s3-tables-design.md §7, docs/s3-tables/step-1-catalog-core.md §15)
+// Iceberg metadata pure functions (docs/s3-tables-design.md §7, §13)
 #include <nlohmann/json.hpp>
 
 #include "tables/iceberg/metadata.h"

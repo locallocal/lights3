@@ -1,5 +1,5 @@
 // lights3-ctl `tables` -- the S3 Tables catalog from the operator's side (docs/cli.md
-// §3.13, docs/s3-tables/step-4-maintenance.md §7): table buckets (enable / disable /
+// §3.13, docs/s3-tables-design.md §9): table buckets (enable / disable /
 // status), listing, maintenance (plan / run / purge / config), diagnostics and recovery.
 // Catalog calls go to "<prefix>/v1/..." signed with service "s3"; plan and run use the
 // admin plane (POST /-/admin/tables/<bucket>/<ns-path>/<t>/<op>, root) and poll the job

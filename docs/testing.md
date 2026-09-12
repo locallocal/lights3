@@ -17,8 +17,12 @@ harness、故障注入门面、性能门禁与 soak、mint 挂 ctest、ubsan/cov
 | `soak_smoke` | 30 秒 soak：RSS / fd / 泄漏断言（§5） | `perf` `soak` |
 | `mint` | MinIO mint 的 s3cmd + awscli 子集；无 docker 显式 SKIP（§6） | `mint` |
 | `install_tree` | `cmake --install` 进临时 prefix：布局、unit 搬迁、保留已有配置、`--version` 格式、维护脚本 `sh -n`（[deployment.md §2](deployment.md)） | — |
+| `tables_smoke` | S3 Tables 客户端冒烟：`run_tables_smoke.sh` 起 memory 网关，跑 `scripts/tables/pyiceberg_smoke.py` 与 `duckdb_smoke.py`；`LIGHTS3_TABLES_SMOKE=1` 才跑，否则 SKIP（§6） | `tables-smoke` |
 
-负载敏感或需要外部依赖的项按标签排除：`ctest -LE "perf|mint"`。
+负载敏感或需要外部依赖的项按标签排除：`ctest -LE "perf|mint"`（`tables-smoke` 默认
+自行 SKIP；`check-all.sh --with-tables-smoke` 打开）。双网关的 tables 用例
+（`tables_multi_gateway_suite.h`）在 `unit_tests` 里：memory 恒跑，redis / tikv 变体随
+`duostore_redis_*` / `duostore_tikv_*` 的外部依赖探测 SKIP。
 
 `e2e_duostore_redis` / `_tikv` / `_rados` 各自探测外部依赖，缺则显式 SKIP：
 redis 找 `redis-server` 自起私有实例，或 `LIGHTS3_TEST_REDIS_URI=redis://host:port`
@@ -170,6 +174,14 @@ LIGHTS3_FAULTS="localfs.write:1:EIO,duostore.pack.fdatasync:0:ENOSPC" lights3 --
 docker 时显示 Not Run 而非通过）。跑完从 `log.json` 打印每套件 PASS/FAIL/NA 计数
 作为基线记录。本机 docker daemon 不可达，**基线尚未记录**：在有权限的机器上
 `ctest -R mint -V` 一次，把汇总粘到本节即可。
+
+**S3 Tables 客户端冒烟**（ctest `tables_smoke`，[s3-tables-design.md §13](s3-tables-design.md)）：
+2026-09-12 本机通过——PyIceberg 0.12.0（pyarrow 22.0，boto3 走 SigV4，`rest.signing-name=s3`）
+16/16：启用表桶、建表、append ×2、重载 scan、陈旧句柄提交由 PyIceberg 自动刷新重试、同
+commit-id 幂等重放、维护 plan/run、diagnostics 全 Committed、purge；DuckDB 1.5.5（iceberg
+扩展，`ATTACH … (TYPE iceberg, AUTHORIZATION_TYPE 'sigv4', SECRET …, SIGV4_REGION …,
+SIGV4_SERVICE 's3')`）5/5：attach、列 namespace、scan。依赖装在 `pip --target` 目录、
+`PYTHONPATH` 指过去即可：`LIGHTS3_TABLES_SMOKE=1 PYTHONPATH=… ctest -R tables_smoke`。
 
 ## 7. ubsan / coverage
 

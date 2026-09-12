@@ -209,14 +209,19 @@ docker compose --profile e2e down -v
 
 ### 5.1 支持矩阵
 
-| 后端 | 多网关 |
-| --- | --- |
-| memory | 不适用 |
-| localfs / xlocalfs / tiered | 不支持：分片状态在本地 staging，共享文件系统上的 rename / xattr 语义未论证，多网关 complete 同 key 互相覆盖 |
-| cloudproxy | 支持：纯透传，网关无本地状态 |
-| duostore + rocksdb / sqlite meta | 不可能：本地引擎单进程独占 |
-| duostore + redis / tikv meta + fs data | 不支持：数据在各网关本地盘，对端读不到；共享 meta 只换来 meta 侧高可用，只能单网关。启动打 WARN，`--check-config` 打 `config warning:`（[cli.md §2.1](cli.md)） |
-| duostore + redis / tikv meta + rados data | **支持**（下文） |
+| 后端 | 多网关 | 表目录（tables，作为默认后端） |
+| --- | --- | --- |
+| memory | 不适用 | 不适用 |
+| localfs / xlocalfs / tiered | 不支持：分片状态在本地 staging，共享文件系统上的 rename / xattr 语义未论证，多网关 complete 同 key 互相覆盖 | 单网关 |
+| cloudproxy | 支持：纯透传，网关无本地状态 | ✔（目录状态在远端 `.sys`，CAS 由远端 S3 的条件写保证） |
+| duostore + rocksdb / sqlite meta | 不可能：本地引擎单进程独占 | 单网关 |
+| duostore + redis / tikv meta + fs data | 不支持：数据在各网关本地盘，对端读不到；共享 meta 只换来 meta 侧高可用，只能单网关。启动打 WARN，`--check-config` 打 `config warning:`（[cli.md §2.1](cli.md)） | ✖（目录状态可共享，但表数据在本地盘，对端读不到——与本行结论一致） |
+| duostore + redis / tikv meta + rados data | **支持**（下文） | ✔ |
+
+"表目录"列只看**默认后端**（目录状态在它的 `.sys` 里，[s3-tables-design.md §5.5](s3-tables-design.md)）；
+表桶自身可在任一后端。`tables.enabled` 配在单网关默认后端上、又出现多网关信号
+（显式 `read_lease > 0`、`gc_enabled: false`、`usage.reconcile: false`）时，启动打 WARN、
+`--check-config` 打同一句 `config warning:`。
 
 ### 5.2 必要配置（duostore + redis/tikv meta + rados data）
 
@@ -231,7 +236,12 @@ docker compose --profile e2e down -v
 | 实例级后台任务（`usage.reconcile`、tiered 扫描等） | 只在一台开 | 同 `gc_enabled` 的指定实例语义（[multi-tenancy.md](multi-tenancy.md)） |
 | 凭证与 `.sys` | 同一份配置（凭证、区域、密钥） | STS 会话经 `.sys/sts` 写穿共享；静态凭证各网关自持 |
 
-### 5.3 负载均衡
+**表目录多网关**（[s3-tables-design.md §5.5](s3-tables-design.md)）：`tables.enabled` 与
+`tables.path_prefix` 各实例一致；表桶启用（`.sys/tables/`）经 `auth.sync_interval` 的
+拉取周期才在对端可见（同凭证"写穿先于生效、SDK 重试"模型，未同步前对端回 404
+`NoSuchNamespaceException`），目录状态本身无缓存、写后即见；提交靠 `.sys` 的条件写收敛，
+rename 中断由任一实例的下一次写驱动完成；`tables.maintenance.scan_interval` 只在一台开，或
+全开（删除幂等、安全窗口挡在途提交，与 lifecycle 同策略）。
 
 无需会话粘连：multipart 的 create / upload_part / complete / abort 可落在任意
 网关（§4 ② 用例已验证），upload_id 全局唯一，分片记录与数据对全体可见。

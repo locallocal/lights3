@@ -1,10 +1,12 @@
 # S3 Tables：Apache Iceberg REST Catalog（调研 RustFS 后的设计）
 
-> 状态：**设计稿（2026-09-11）；§14 ①②③ 已实现（2026-09-12，实现记录见
+> 状态：**已实现（§14 ①–⑤，2026-09-12；⑥ 为可选项未做）**。实现记录见
 > [s3-tables/step-1-catalog-core.md §18](s3-tables/step-1-catalog-core.md)、
-> [step-2-authz-credentials.md §12](s3-tables/step-2-authz-credentials.md) 与
+> [step-2-authz-credentials.md §12](s3-tables/step-2-authz-credentials.md)、
 > [step-3-validation-diagnostics.md §12](s3-tables/step-3-validation-diagnostics.md)、
-> [step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)），⑤⑥ 未实现**。本文先回答"RustFS 是怎么做 S3 Tables
+> [step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)、
+> [step-5-multi-gateway-docs.md §8](s3-tables/step-5-multi-gateway-docs.md)；偏离设计的点已回写
+> 到对应章节。本文先回答"RustFS 是怎么做 S3 Tables
 > 的"（§2，源码核实 @853ae63，2026-09-11），再给出 lights3 的方案（§3–§13）与
 > 实施拆分（§14）。代码落地后，本文按仓库惯例保留为设计层文档，实现细节写进
 > 对应实现文档；源码注释用 `docs/s3-tables-design.md §N` 引用本文。
@@ -441,6 +443,13 @@ rocksdb / sqlite 默认后端只能单网关。`--check-config` 在 `tables.enab
 multi-gateway-multipart §4 ④ 同一防线。表桶自身可在任何后端（数据面无跨网关
 状态）。
 
+已实现（⑤）：`tables_deployment_warning(cfg)`（`core/config.h`）——`tables.enabled` 且默认
+后端不是 cloudproxy / duostore(redis|tikv meta)、且出现显式 `read_lease > 0`、`gc_enabled: false`
+或 `usage.reconcile: false` 之一时给出一句 WARN，启动日志与 `--check-config` 共用；
+双网关用例 `tests/unit/tables_multi_gateway_suite.h`（并发 20 提交恰一胜、A 的 rename 中断
+由 B 的写驱动完成、A drop 后 B 404、表桶标记须 `sync_now` 才在对端可见）在 memory /
+redis / tikv 三处接入。部署矩阵见 [deployment.md §5.1](deployment.md)。
+
 ### 5.6 rename 两阶段
 
 指针按名字寻址，rename 本质是"在 CAS 世界里搬一个对象"。照搬 RustFS 的
@@ -821,7 +830,7 @@ rocksdb WriteBatch），列表落到有序迭代；单表提交在一个事务�
 | `tests/unit/test_tables_rest.cc` | 进程内 `S3Service`：端点形态、错误模型、policy 前缀限权、租户隔离、`s3tables` 签名、表桶守卫（保留前缀 PUT 400 / GET 200、DeleteBucket 409、lifecycle 跳过）、`/config` 的 `endpoints` 与路由表一致性（表驱动，防漂移） |
 | `tests/unit/multi_gateway_suite.h` 追加 | 两个 `S3Service` 共享 `MemoryBackend`（或 redis/tikv duostore）：跨网关提交冲突收敛、rename 恢复由另一网关驱动 |
 | `tests/e2e/run_e2e.sh` 新段 | bash + curl：启用表桶 → 建 namespace/table → 手工 CommitTable（add-snapshot 指向预置固件）→ 冲突 409 → drop；六驱动矩阵照跑 |
-| `scripts/tables/pyiceberg_smoke.py`、`duckdb_smoke.py`（opt-in） | 借鉴 RustFS 脚本序列：建表 → append 2 行 → 重载 scan → 冲突/幂等探针 → 维护 plan/run → drop；依赖 `pyiceberg[pyarrow]` / `duckdb`，由 `LIGHTS3_TABLES_SMOKE=1` 触发，ctest 标签 `tables-smoke`，默认 SKIP（与 tikv 的 `LIGHTS3_TEST_PD_ADDR` 同一模式）；通过后把客户端版本记入 [testing.md §6](testing.md) |
+| `scripts/tables/pyiceberg_smoke.py`、`duckdb_smoke.py`（ctest `tables_smoke`，标签 `tables-smoke`，opt-in） | 借鉴 RustFS 脚本序列：启用表桶 → 建表 → append 2 次 → 重载 scan → 陈旧句柄提交（PyIceberg 自动刷新重试）→ 同 commit-id 幂等重放 → 维护 plan/run → diagnostics → purge；DuckDB 以 SigV4 ATTACH 后列 namespace 并 scan。`tests/e2e/run_tables_smoke.sh` 起 memory 后端网关，`LIGHTS3_TABLES_SMOKE=1` 触发否则 SKIP（与 tikv 的 `LIGHTS3_TEST_PD_ADDR` 同一模式）。**已通过**：PyIceberg 0.12.0（pyarrow 22、boto3）与 DuckDB 1.5.5（iceberg 扩展，`SIGV4_REGION` + `SIGV4_SERVICE 's3'`），2026-09-12，见 [testing.md §6](testing.md) |
 | Spark / Trino | 只给配置模板（§13 附录），人工验证记录进 testing.md；不声称自动化 |
 
 客户端配置模板（写进用户文档，与 RustFS 脚本一致的键）：
@@ -855,11 +864,11 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 
 | 步骤 | 内容 | 验收 |
 | --- | --- | --- |
-| ① 目录核心 + REST 最小集（**已实现 2026-09-12**） | `TablesConfig`；`TableBucketStore`；`ITableCatalogStore` + `ObjectCatalogStore`；§7.1–7.3 的 metadata 模型（浅快照校验）；§5.2/5.3 提交协议；端点：config / buckets / namespaces 全部 / tables list-create-load-commit-drop-exists-rename-register / metadata-location；错误模型；dispatch 分支与桶名保留；表桶守卫的保留前缀只读与 DeleteBucket 守卫；审计与指标 | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` 通过；e2e 新段通过；PyIceberg 冒烟（本机人工）建表 + append + scan 通过 |
-| ② 权限与凭证（**已实现 2026-09-12**） | policy 三元组映射表（§6.2）、租户隔离、`s3tables` 签名名、`mint_session` 收窄参数与 `vended-credentials` 协商、`GET …/credentials`、lifecycle 排除 | 前缀限权与只读凭证用例；下发凭证在前缀内 Put/Get/Delete 通过、前缀外 403 |
-| ③ 深校验与诊断（**已实现 2026-09-12**） | Avro 读取器；§7.4 快照图与冲突复核；`catalog/diagnostics` / `recovery`；`fsck` 对账项；ETag/If-None-Match on LoadTable | manifest 固件用例；崩溃窗口矩阵用例；rename 恢复用例 |
-| ④ 维护（**已实现 2026-09-12**） | `JobOp::Table*`、plan/run/purge、`purgeRequested=true`、周期 runner、CLI、`tombstone_ttl` 清理 | 保留集/安全窗口/StalePlan 用例；DuckDB 冒烟（本机人工） |
-| ⑤ 多网关与文档 | `multi_gateway_suite` 追加；`--check-config` 误配 WARN；deployment.md §5 矩阵加"表目录"列；本文转成实现文档 + `docs/en/` 同步；README 索引 | 双网关用例；文档评审 |
+| ① 目录核心 + REST 最小集（**已实现 2026-09-12，#119**） | `TablesConfig`；`TableBucketStore`；`ITableCatalogStore` + `ObjectCatalogStore`；§7.1–7.3 的 metadata 模型（浅快照校验）；§5.2/5.3 提交协议；端点：config / buckets / namespaces 全部 / tables list-create-load-commit-drop-exists-rename-register / metadata-location；错误模型；dispatch 分支与桶名保留；表桶守卫的保留前缀只读与 DeleteBucket 守卫；审计与指标 | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` 通过；e2e 新段通过；PyIceberg 冒烟（本机人工）建表 + append + scan 通过 |
+| ② 权限与凭证（**已实现 2026-09-12，#121**） | policy 三元组映射表（§6.2）、租户隔离、`s3tables` 签名名、`mint_session` 收窄参数与 `vended-credentials` 协商、`GET …/credentials`、lifecycle 排除 | 前缀限权与只读凭证用例；下发凭证在前缀内 Put/Get/Delete 通过、前缀外 403 |
+| ③ 深校验与诊断（**已实现 2026-09-12，#122**） | Avro 读取器；§7.4 快照图与冲突复核；`catalog/diagnostics` / `recovery`；`fsck` 对账项；ETag/If-None-Match on LoadTable | manifest 固件用例；崩溃窗口矩阵用例；rename 恢复用例 |
+| ④ 维护（**已实现 2026-09-12，#123**） | `JobOp::Table*`、plan/run/purge、`purgeRequested=true`、周期 runner、CLI、`tombstone_ttl` 清理 | 保留集/安全窗口/StalePlan 用例；DuckDB 冒烟（本机人工） |
+| ⑤ 多网关与文档（**已实现 2026-09-12**） | `tables_multi_gateway_suite.h`（memory / redis / tikv 三处接入）；`--check-config` 误配 WARN；deployment.md §5 矩阵加"表目录"列；本文转成实现文档 + `docs/en/` 同步；README 索引 | 双网关用例；文档评审 |
 | ⑥ 可选 | views；`/_iceberg/v1` 别名；`reportMetrics` 落审计；compaction 候选规划输出；duostore-meta 后备（§12） | 按需 |
 
 ## 15. 明确不做

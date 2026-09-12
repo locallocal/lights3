@@ -256,6 +256,17 @@ timeseries("Remote errors by code", [(f'sum by (backend, code) (rate(lights3_clo
 timeseries("Connection pool wait / ETag mismatches", [(q("lights3_cloudproxy_pool_wait_seconds", by=", backend", sel=f'{INST},{BK}'), "pool wait p99 (s) {{backend}}"),
                                                        (f'sum by (backend) (increase(lights3_cloudproxy_etag_mismatch_total{{{INST},{BK}}}[$__rate_interval]))', "etag mismatch {{backend}}")])
 
+row("S3 Tables (Iceberg REST catalog)")
+timeseries("Catalog requests by op", [(f'sum by (op) (rate(lights3_tables_requests_by_op_total{{{INST}}}[$__rate_interval]))', "{{op}}")], unit="reqps",
+           description="Iceberg REST catalog operations (api_name Iceberg.<Op>); the 4xx / 5xx split is in the status label")
+timeseries("Catalog errors by status", [(f'sum by (status) (rate(lights3_tables_requests_by_op_total{{{INST},status=~"4..|5.."}}[$__rate_interval]))', "{{status}}")], unit="reqps")
+timeseries("Commits by outcome", [(f'sum by (result) (rate(lights3_tables_commits_total{{{INST}}}[$__rate_interval]))', "{{result}}")], unit="reqps",
+           description="ok = pointer CAS won; conflict = 409 CommitFailedException (concurrent writer); error = CommitStateUnknown (backend failed mid-commit: run catalog/diagnostics)")
+timeseries("Commit P99", [(q("lights3_tables_commit_seconds"), "p99")], unit="s",
+           description="Metadata read + deep snapshot validation (one HEAD per data file) + the .sys writes")
+timeseries("Deep validation: files checked / snapshots skipped", [(f'sum (rate(lights3_tables_validation_files_total{{{INST}}}[$__rate_interval]))', "files checked / s"),
+                                                                    (f'sum (increase(lights3_tables_validation_skipped_total{{{INST}}}[$__rate_interval]))', "snapshots skipped (unreadable codec)")])
+
 dashboard = {
     "__inputs": [{"name": "DS", "label": "Prometheus", "type": "datasource", "pluginId": "prometheus"}],
     "title": "lights3",

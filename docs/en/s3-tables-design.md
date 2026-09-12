@@ -1,9 +1,9 @@
 # S3 Tables: Apache Iceberg REST Catalog (design after studying RustFS)
 
-> Status: **design draft (2026-09-11); §14 ①, ② and ③ implemented (2026-09-12, implementation
+> Status: **implemented (§14 ①–⑤, 2026-09-12; ⑥ is optional and not done)**. Implementation
 > notes in `docs/s3-tables/step-1-catalog-core.md` §18, `step-2-authz-credentials.md` §12,
-> `step-3-validation-diagnostics.md` §12 and `step-4-maintenance.md` §10, Chinese), ⑤ and ⑥ not
-> implemented**. The document first answers
+> `step-3-validation-diagnostics.md` §12, `step-4-maintenance.md` §10 and
+> `step-5-multi-gateway-docs.md` §8 (Chinese); deviations are folded into the sections here. The document first answers
 > "how does RustFS do S3 Tables" (§2, verified against source @853ae63 on
 > 2026-09-11), then gives the lights3 plan (§3–§13) and the implementation steps
 > (§14). Once code lands this file stays as the design-level document per repo
@@ -501,6 +501,15 @@ non-shared default backend, the same defence line as multi-gateway-multipart
 §4 ④. The table bucket itself can live on any backend (the data plane carries no
 cross-gateway state).
 
+Implemented (⑤): `tables_deployment_warning(cfg)` (`core/config.h`) -- `tables.enabled` on a
+default backend that is neither cloudproxy nor duostore with redis / tikv meta, together with
+an explicit `read_lease > 0`, `gc_enabled: false` or `usage.reconcile: false`, yields one
+WARN line shared by the startup log and `--check-config`; the two-gateway suite
+`tests/unit/tables_multi_gateway_suite.h` (20 concurrent commits, exactly one winner; a
+rename interrupted on A completed by B's write; a drop on A a 404 on B; the table-bucket
+marker needs `sync_now` to reach the peer) runs over memory, redis and tikv. The
+deployment matrix is in [deployment.md §5.1](deployment.md).
+
 ### 5.6 Two-phase rename
 
 Pointers are addressed by name, so a rename is "moving an object in a CAS
@@ -927,7 +936,7 @@ Tests (within the [testing.md](testing.md) system):
 | `tests/unit/test_tables_rest.cc` | in-process `S3Service`: endpoint shapes, error model, prefix-scoped policy, tenant isolation, `s3tables` signing, table-bucket guard (reserved-prefix PUT 400 / GET 200, DeleteBucket 409, lifecycle skip), consistency between `/config` `endpoints` and the route table (table-driven, prevents drift) |
 | `tests/unit/multi_gateway_suite.h` additions | two `S3Service`s sharing a `MemoryBackend` (or redis/tikv duostore): cross-gateway commit conflicts converge, rename recovery driven by the other gateway |
 | new segment in `tests/e2e/run_e2e.sh` | bash + curl: enable table bucket → create namespace/table → hand-written CommitTable (add-snapshot pointing at a bundled fixture) → conflict 409 → drop; runs on the six-driver matrix |
-| `scripts/tables/pyiceberg_smoke.py`, `duckdb_smoke.py` (opt-in) | the RustFS script sequence: create table → append 2 rows → reload and scan → conflict/idempotency probes → maintenance plan/run → drop; needs `pyiceberg[pyarrow]` / `duckdb`, triggered by `LIGHTS3_TABLES_SMOKE=1`, ctest label `tables-smoke`, SKIP by default (the same pattern as tikv's `LIGHTS3_TEST_PD_ADDR`); on success record the client versions in [testing.md §6](testing.md) |
+| `scripts/tables/pyiceberg_smoke.py`, `duckdb_smoke.py` (ctest `tables_smoke`, label `tables-smoke`, opt-in) | the RustFS script sequence: enable the table bucket → create table → append twice → reload and scan → stale-handle commit (PyIceberg refreshes and retries) → idempotent replay of one commit-id → maintenance plan/run → diagnostics → purge; DuckDB ATTACHes with SigV4, lists namespaces and scans. `tests/e2e/run_tables_smoke.sh` starts a memory-backend gateway; `LIGHTS3_TABLES_SMOKE=1` runs it, otherwise SKIP (the tikv `LIGHTS3_TEST_PD_ADDR` pattern). **Passed**: PyIceberg 0.12.0 (pyarrow 22, boto3) and DuckDB 1.5.5 (iceberg extension, `SIGV4_REGION` + `SIGV4_SERVICE 's3'`), 2026-09-12, see [testing.md §6](testing.md) |
 | Spark / Trino | configuration templates only (appendix of §13); manual verification recorded in testing.md; no automation claimed |
 
 Client configuration templates (for user docs, the same keys as the RustFS scripts):
@@ -957,11 +966,11 @@ under `docs/s3-tables/` (Chinese only, like the other implementation-level docs)
 
 | Step | Content | Acceptance |
 | --- | --- | --- |
-| ① catalog core + minimal REST (**implemented 2026-09-12**) | `TablesConfig`; `TableBucketStore`; `ITableCatalogStore` + `ObjectCatalogStore`; the metadata model of §7.1–7.3 (shallow snapshot check); commit protocol §5.2/5.3; endpoints: config / buckets / all namespace ops / tables list-create-load-commit-drop-exists-rename-register / metadata-location; error model; dispatch branch and bucket-name reservation; the guard's reserved-prefix read-only rule and DeleteBucket guard; audit and metrics | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` pass; new e2e segment passes; PyIceberg smoke (manual, local) create + append + scan passes |
-| ② permissions and credentials (**implemented 2026-09-12**) | the policy triple mapping of §6.2, tenant isolation, the `s3tables` signing name, the `mint_session` narrowing parameter and `vended-credentials` negotiation, `GET …/credentials`, lifecycle exclusion | prefix-scoped and read-only credential cases; vended credentials Put/Get/Delete inside the prefix pass, outside 403 |
-| ③ deep validation and diagnostics (**implemented 2026-09-12**) | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
-| ④ maintenance (**implemented 2026-09-12**) | `JobOp::Table*`, plan/run/purge, `purgeRequested=true`, periodic runner, CLI, `tombstone_ttl` cleanup | retained set / safety window / StalePlan cases; DuckDB smoke (manual, local) |
-| ⑤ multi-gateway and docs | `multi_gateway_suite` additions; `--check-config` misconfiguration WARN; a "table catalog" column in deployment.md §5; turn this document into an implementation document + `docs/en/` sync; README index | two-gateway cases; doc review |
+| ① catalog core + minimal REST (**implemented 2026-09-12, #119**) | `TablesConfig`; `TableBucketStore`; `ITableCatalogStore` + `ObjectCatalogStore`; the metadata model of §7.1–7.3 (shallow snapshot check); commit protocol §5.2/5.3; endpoints: config / buckets / all namespace ops / tables list-create-load-commit-drop-exists-rename-register / metadata-location; error model; dispatch branch and bucket-name reservation; the guard's reserved-prefix read-only rule and DeleteBucket guard; audit and metrics | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` pass; new e2e segment passes; PyIceberg smoke (manual, local) create + append + scan passes |
+| ② permissions and credentials (**implemented 2026-09-12, #121**) | the policy triple mapping of §6.2, tenant isolation, the `s3tables` signing name, the `mint_session` narrowing parameter and `vended-credentials` negotiation, `GET …/credentials`, lifecycle exclusion | prefix-scoped and read-only credential cases; vended credentials Put/Get/Delete inside the prefix pass, outside 403 |
+| ③ deep validation and diagnostics (**implemented 2026-09-12, #122**) | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
+| ④ maintenance (**implemented 2026-09-12, #123**) | `JobOp::Table*`, plan/run/purge, `purgeRequested=true`, periodic runner, CLI, `tombstone_ttl` cleanup | retained set / safety window / StalePlan cases; DuckDB smoke (manual, local) |
+| ⑤ multi-gateway and docs (**implemented 2026-09-12**) | `tables_multi_gateway_suite.h` (memory / redis / tikv); `--check-config` misconfiguration WARN; a "table catalog" column in deployment.md §5; turn this document into an implementation document + `docs/en/` sync; README index | two-gateway cases; doc review |
 | ⑥ optional | views; the `/_iceberg/v1` alias; `reportMetrics` into audit; compaction candidate planning output; duostore-meta backing (§12) | as needed |
 
 ## 15. Deliberately not done

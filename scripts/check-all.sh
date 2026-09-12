@@ -6,17 +6,18 @@
 # *SAN_OPTIONS so a finding fails the run instead of scrolling by.
 #
 # Usage: check-all.sh [--only build,build-asan,...] [--configure] [--with-perf]
-#                     [--with-soak] [-j N] [--ctest-args "..."]
+#                     [--with-soak] [--with-tables-smoke] [-j N] [--ctest-args "..."]
 set -u
 cd "$(dirname "$0")/.."
 JOBS=$(( $(nproc) / 2 )); [[ $JOBS -lt 1 ]] && JOBS=1
-ONLY=""; CONFIGURE=0; WITH_PERF=0; WITH_SOAK=0; CTEST_ARGS=""
+ONLY=""; CONFIGURE=0; WITH_PERF=0; WITH_SOAK=0; WITH_TABLES_SMOKE=0; CTEST_ARGS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --only) ONLY="$2"; shift ;;
         --configure) CONFIGURE=1 ;;
         --with-perf) WITH_PERF=1 ;;
         --with-soak) WITH_SOAK=1 ;;
+        --with-tables-smoke) WITH_TABLES_SMOKE=1 ;;
         -j) JOBS="$2"; shift ;;
         --ctest-args) CTEST_ARGS="$2"; shift ;;
         -h|--help) sed -n 2,10p "$0"; exit 0 ;;
@@ -42,6 +43,8 @@ VARIANTS=(
 EXCLUDE="mint"
 [[ $WITH_PERF -eq 0 ]] && EXCLUDE="$EXCLUDE|perf"
 [[ $WITH_SOAK -eq 0 ]] && EXCLUDE="$EXCLUDE|soak"
+# the S3 Tables client smoke (ctest label tables-smoke) needs pyiceberg / duckdb: opt-in
+[[ $WITH_TABLES_SMOKE -eq 1 ]] && export LIGHTS3_TABLES_SMOKE=1
 
 declare -a RESULTS
 run_variant() {  # run_variant <dir> <flags>

@@ -352,6 +352,23 @@ Task<http::HttpResponse> RestApi::dispatch(http::HttpRequest& req, Hooks& hooks,
         }
         api_name = "Iceberg." + std::string(m.route->name);
         if (!m.bucket.empty()) storage::validate_bucket_name(m.bucket);
+        // Generic SigV4 clients (PyIceberg / Spark with rest.sigv4-enabled, AWS SDKs
+        // signing for s3tables) hash the payload into the canonical request but send no
+        // x-amz-content-sha256 header, which the S3-plane verifier requires. Catalog
+        // bodies are small and bounded: buffer, hash, and present the hash as the header
+        // so the signature check sees what the client signed (docs/s3-tables-design.md §6.2)
+        if (req.body && !req.headers.has("x-amz-content-sha256") && !req.query_has("X-Amz-Algorithm")) {
+            std::string text;
+            std::byte buf[16 * 1024];
+            for (;;) {
+                size_t n = co_await req.body->read(std::span(buf));
+                if (n == 0) break;
+                if (text.size() + n > cfg_.request_max_size) throw bad_request("request body exceeds the size limit");
+                text.append(reinterpret_cast<const char*>(buf), n);
+            }
+            req.headers.set("x-amz-content-sha256", util::sha256_hex(text));
+            req.body = std::make_unique<http::StringBodyReader>(std::move(text));
+        }
         // authentication
         s3::VerifiedIdentity ident = hooks.verify(req);
         access_key = ident.access_key;

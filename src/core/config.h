@@ -389,6 +389,15 @@ struct ConfigReloadReport {
     std::vector<std::string> requires_restart;
 };
 
+// S3 Tables deployment sanity (docs/s3-tables-design.md §5.5, docs/s3-tables/step-5-multi-gateway-docs.md
+// §3): the catalog state lives in the default backend's .sys, so tables only converge
+// across gateways when that backend is shared (cloudproxy, duostore with redis / tikv
+// meta). tables.enabled on a single-gateway default backend together with any
+// multi-gateway signal (an explicit read_lease > 0, gc_enabled: false, usage.reconcile:
+// false) yields the warning text; nullopt = nothing to say. Startup logs it, --check-config
+// prints it
+std::optional<std::string> tables_deployment_warning(const Config& cfg);
+
 // Parsing helpers for values like "16KiB" / "1MB" / "60s" / "true"
 size_t parse_size(const std::string& s);
 int parse_duration_sec(const std::string& s);

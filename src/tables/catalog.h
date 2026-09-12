@@ -21,6 +21,7 @@
 #include "core/semaphore.h"
 #include "core/task.h"
 #include "core/thread_pool.h"
+#include "s3/auth/policy.h"
 #include "storage/bucket_router.h"
 #include "tables/catalog_store.h"
 #include "tables/table_bucket_store.h"
@@ -110,6 +111,10 @@ public:
     // ---- bucket lifecycle (DeleteBucket guard / cleanup) ----
     Task<bool> catalog_empty(std::string_view bucket);
     Task<void> forget_bucket(std::string_view bucket);
+
+    // The narrowed policy a vended session gets (design §8.4): the table's data prefix and
+    // its reserved metadata directory, nothing else in the bucket
+    Task<s3::CredentialPolicy> vending_policy(std::string_view bucket, const TableEntry& entry, bool readonly);
 
     // client-facing form of a bucket-relative key
     static std::string to_client_location(std::string_view bucket, std::string_view key);

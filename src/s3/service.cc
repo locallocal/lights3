@@ -773,7 +773,18 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             // handler verifies and authorizes on its own and renders errors as the
             // Iceberg JSON envelope
             tables::RestApi::Hooks hooks;
-            hooks.verify = [this](http::HttpRequest& r) { return verify_identity(r); };
+            // credential scope "s3" or "s3tables" (design §6.2); an unsigned request from
+            // a bound mTLS certificate keeps verify_identity's rules
+            hooks.verify = [this](http::HttpRequest& r) {
+                if (tls_identity_bound(r) && !r.headers.has("Authorization") && !r.query_has("X-Amz-Algorithm"))
+                    return verify_identity(r);
+                static constexpr std::string_view kBoth[] = {"s3", "s3tables"};
+                static constexpr std::string_view kS3[] = {"s3"};
+                auto ident = tables_api_->config().accept_s3tables_signing ? auth_.verify_any(r, kBoth)
+                                                                           : auth_.verify_any(r, kS3);
+                enforce_tls_tenant(r, ident);
+                return ident;
+            };
             hooks.is_root = [this](std::string_view ak) { return is_root(ak); };
             hooks.audit = [this](const AuditEvent& e) { audit(e); };
             if (tenants_)
@@ -785,6 +796,25 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             hooks.commit.note_usage = [this](std::string_view b, int64_t d_objects, int64_t d_bytes) {
                 note_usage(std::string(b), d_objects, d_bytes);
             };
+            // quota gate (design §8.3): decided before the metadata file is written
+            hooks.commit.quota_check = [this, &hooks, &ctx](std::string_view b, int64_t add_bytes,
+                                                            int64_t add_objects) {
+                RequestAuth a{hooks.access_key, hooks.policy ? &*hooks.policy : nullptr, hooks.tenant, false,
+                              ctx.request_id};
+                check_quota(std::string(b), add_bytes, add_objects, a);
+            };
+            if (cred_store_)
+                hooks.mint = [this](std::string_view caller, CredentialPolicy policy,
+                                    int ttl) -> Task<tables::RestApi::VendedSession> {
+                    auto sc = co_await cred_store_->mint_session(caller, ttl, std::move(policy));
+                    tables::RestApi::VendedSession v;
+                    v.access_key = sc.access_key;
+                    v.secret_key = static_cast<const std::string&>(sc.secret_key);
+                    v.token = sc.token;
+                    v.expires_unix = std::chrono::duration_cast<std::chrono::seconds>(sc.expires.time_since_epoch())
+                                         .count();
+                    co_return v;
+                };
             if (cred_store_) {
                 if (auto ak = SigV4Authenticator::peek_access_key(req))
                     co_await cred_store_->ensure_session_loaded(*ak);

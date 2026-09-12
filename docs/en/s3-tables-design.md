@@ -1,7 +1,8 @@
 # S3 Tables: Apache Iceberg REST Catalog (design after studying RustFS)
 
-> Status: **design draft (2026-09-11); §14 ① implemented (2026-09-12, implementation
-> notes in `docs/s3-tables/step-1-catalog-core.md` §18, Chinese), ②–⑥ not implemented**. The document first answers
+> Status: **design draft (2026-09-11); §14 ① and ② implemented (2026-09-12, implementation
+> notes in `docs/s3-tables/step-1-catalog-core.md` §18 and `step-2-authz-credentials.md` §12,
+> Chinese), ③–⑥ not implemented**. The document first answers
 > "how does RustFS do S3 Tables" (§2, verified against source @853ae63 on
 > 2026-09-11), then gives the lights3 plan (§3–§13) and the implementation steps
 > (§14). Once code lands this file stays as the design-level document per repo
@@ -574,6 +575,10 @@ do not count and are removed with the namespace) → 409 `NamespaceNotEmptyExcep
 | rename | source Delete + destination Write | |
 | PUT/DELETE buckets/{w} (enable/disable table bucket) | root only | |
 
+Namespace reads are judged with `prefix_may_contain(<ns-path>/)` (a credential scoped
+to `sales/orders/` can still list `sales`, the ListObjects CommonPrefixes rule), namespace
+writes need the prefix itself; table operations accept both `<ns-path>/<t>` and
+`<ns-path>/<t>/` as the key, so a vended session (prefix `<ns-path>/<t>/`) can LoadTable.
 Hence a credential with `prefixes: ["sales/"]` can only touch namespace `sales`
 (and children) and their data objects; a `readonly: true` credential can only
 load / list / read data. Tenant credentials see only their tenant's table buckets
@@ -950,7 +955,7 @@ under `docs/s3-tables/` (Chinese only, like the other implementation-level docs)
 | Step | Content | Acceptance |
 | --- | --- | --- |
 | ① catalog core + minimal REST (**implemented 2026-09-12**) | `TablesConfig`; `TableBucketStore`; `ITableCatalogStore` + `ObjectCatalogStore`; the metadata model of §7.1–7.3 (shallow snapshot check); commit protocol §5.2/5.3; endpoints: config / buckets / all namespace ops / tables list-create-load-commit-drop-exists-rename-register / metadata-location; error model; dispatch branch and bucket-name reservation; the guard's reserved-prefix read-only rule and DeleteBucket guard; audit and metrics | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` pass; new e2e segment passes; PyIceberg smoke (manual, local) create + append + scan passes |
-| ② permissions and credentials | the policy triple mapping of §6.2, tenant isolation, the `s3tables` signing name, the `mint_session` narrowing parameter and `vended-credentials` negotiation, `GET …/credentials`, lifecycle exclusion | prefix-scoped and read-only credential cases; vended credentials Put/Get/Delete inside the prefix pass, outside 403 |
+| ② permissions and credentials (**implemented 2026-09-12**) | the policy triple mapping of §6.2, tenant isolation, the `s3tables` signing name, the `mint_session` narrowing parameter and `vended-credentials` negotiation, `GET …/credentials`, lifecycle exclusion | prefix-scoped and read-only credential cases; vended credentials Put/Get/Delete inside the prefix pass, outside 403 |
 | ③ deep validation and diagnostics | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
 | ④ maintenance | `JobOp::Table*`, plan/run/purge, `purgeRequested=true`, periodic runner, CLI, `tombstone_ttl` cleanup | retained set / safety window / StalePlan cases; DuckDB smoke (manual, local) |
 | ⑤ multi-gateway and docs | `multi_gateway_suite` additions; `--check-config` misconfiguration WARN; a "table catalog" column in deployment.md §5; turn this document into an implementation document + `docs/en/` sync; README index | two-gateway cases; doc review |

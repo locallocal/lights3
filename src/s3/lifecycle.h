@@ -72,6 +72,10 @@ public:
     // Usage accounting (roadmap §3.9 ①): expirations and aborts adjust the counters
     // like their request-path twins
     void set_usage_tracker(std::shared_ptr<UsageTracker> u) { usage_ = std::move(u); }
+    // Buckets the pass must leave alone (docs/s3-tables-design.md §8.2: table buckets
+    // keep their files until catalog maintenance removes them). Consulted per bucket,
+    // per pass; a skipped bucket is logged once per pass
+    void set_skip_predicate(std::function<bool(std::string_view)> skip) { skip_ = std::move(skip); }
 
 private:
     std::chrono::system_clock::time_point now() const { return now_ ? now_() : std::chrono::system_clock::now(); }
@@ -82,6 +86,7 @@ private:
     std::shared_ptr<LifecycleStore> store_;
     std::shared_ptr<UsageTracker> usage_;
     std::function<std::chrono::system_clock::time_point()> now_;
+    std::function<bool(std::string_view)> skip_;
 
     std::shared_ptr<ThreadPool> pool_;
     int scan_interval_sec_ = 0;

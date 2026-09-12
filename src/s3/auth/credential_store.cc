@@ -333,6 +333,34 @@ bool CredentialPolicy::allows_key(std::string_view key) const {
     return false;
 }
 
+CredentialPolicy narrow_policy(const std::optional<CredentialPolicy>& parent, const CredentialPolicy& narrow) {
+    if (!parent) return narrow;
+    CredentialPolicy out;
+    // buckets: the narrow list filtered by the parent; a narrow wildcard-free list is
+    // required so the result never widens ("" would mean every bucket)
+    if (narrow.buckets.empty()) {
+        out.buckets = parent->buckets;
+    } else {
+        for (auto& b : narrow.buckets)
+            if (parent->allows_bucket(b)) out.buckets.push_back(b);
+        if (out.buckets.empty())
+            throw S3Error(S3ErrorCode::AccessDenied, "requested session scope exceeds the caller's policy");
+    }
+    if (narrow.prefixes.empty()) {
+        out.prefixes = parent->prefixes;
+    } else {
+        for (auto& pre : narrow.prefixes)
+            if (parent->allows_key(pre)) out.prefixes.push_back(pre);
+        if (out.prefixes.empty())
+            throw S3Error(S3ErrorCode::AccessDenied, "requested session scope exceeds the caller's policy");
+    }
+    out.readonly = parent->readonly || narrow.readonly;
+    for (Action a : {Action::Read, Action::Write, Action::Delete})
+        if (parent->allows_action(a) && narrow.allows_action(a)) out.actions.push_back(a);
+    if (out.actions.empty()) throw S3Error(S3ErrorCode::AccessDenied, "requested session scope allows no action");
+    return out;
+}
+
 bool CredentialPolicy::prefix_may_contain(std::string_view group_prefix) const {
     if (prefixes.empty()) return true;
     // Either the group itself lies within an allowlisted prefix ("logs/2024/" vs allowlist "logs/"), or the
@@ -687,7 +715,8 @@ Task<std::string> CredentialStore::persist_session(const std::string& ak, const 
     co_return pr.etag;
 }
 
-Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::string_view parent_ak, int duration_sec) {
+Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::string_view parent_ak, int duration_sec,
+                                                                       std::optional<CredentialPolicy> narrow) {
     // Bound the table: an unauthenticated caller cannot reach here, but a runaway
     // client must not grow the map without limit
     constexpr size_t kMaxSessions = 100000;
@@ -716,7 +745,9 @@ Task<CredentialStore::SessionCredential> CredentialStore::mint_session(std::stri
         // A session AK lives in sessions_, not creds_: a session can never assume again
         if (pit == creds_.end())
             throw S3Error(S3ErrorCode::AccessDenied, "Session credentials cannot call AssumeRole.");
-        entry = SessionEntry{out.secret_key,         out.token, out.expires, pit->second.policy, pit->second.tenant,
+        std::optional<CredentialPolicy> policy = pit->second.policy;
+        if (narrow) policy = narrow_policy(pit->second.policy, *narrow);
+        entry = SessionEntry{out.secret_key,         out.token, out.expires, std::move(policy), pit->second.tenant,
                              std::string(parent_ak), now};
     }
     // Persist first, then take effect (write-through, same rule as generate): another

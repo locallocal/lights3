@@ -156,6 +156,9 @@ void Application::start_server() {
     service_->set_audit_log(audit_);
 #ifdef LIGHTS3_TABLES
     if (tables_api_) service_->set_tables(tables_api_, table_guard_);
+    if (table_guard_)
+        lifecycle_runner_->set_skip_predicate(
+            [guard = table_guard_](std::string_view b) { return guard->is_table_bucket(b); });
 #endif
     if (!cfg_.website.buckets.empty() && !auth_enabled)
         LOG_WARN(

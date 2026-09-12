@@ -1,7 +1,8 @@
 # S3 Tables：Apache Iceberg REST Catalog（调研 RustFS 后的设计）
 
-> 状态：**设计稿（2026-09-11）；§14 ① 已实现（2026-09-12，实现记录见
-> [s3-tables/step-1-catalog-core.md §18](s3-tables/step-1-catalog-core.md)），②–⑥ 未实现**。本文先回答"RustFS 是怎么做 S3 Tables
+> 状态：**设计稿（2026-09-11）；§14 ①② 已实现（2026-09-12，实现记录见
+> [s3-tables/step-1-catalog-core.md §18](s3-tables/step-1-catalog-core.md) 与
+> [step-2-authz-credentials.md §12](s3-tables/step-2-authz-credentials.md)），③–⑥ 未实现**。本文先回答"RustFS 是怎么做 S3 Tables
 > 的"（§2，源码核实 @853ae63，2026-09-11），再给出 lights3 的方案（§3–§13）与
 > 实施拆分（§14）。代码落地后，本文按仓库惯例保留为设计层文档，实现细节写进
 > 对应实现文档；源码注释用 `docs/s3-tables-design.md §N` 引用本文。
@@ -504,8 +505,11 @@ intent 方案，去掉反向索引那一步：
 | rename | 源 Delete + 目标 Write | |
 | PUT/DELETE buckets/{w}（启用/禁用表桶） | root 专属 | |
 
-于是 `prefixes: ["sales/"]` 的凭证只能操作 namespace `sales`（及子级）与其
-数据对象；`readonly: true` 的凭证只能 load / list / 读数据。租户凭证只见本
+namespace 的读类操作按 `prefix_may_contain(<ns-path>/)` 判定（限在 `sales/orders/` 的
+凭证仍能列出 `sales`，与 ListObjects 的 CommonPrefixes 规则一致），写类操作要求前缀本身
+被允许；表类操作同时接受 `<ns-path>/<t>` 与 `<ns-path>/<t>/` 两种 key，下发的会话凭证
+（前缀 `<ns-path>/<t>/`）因此能 LoadTable。于是 `prefixes: ["sales/"]` 的凭证只能操作
+namespace `sales`（及子级）与其数据对象；`readonly: true` 的凭证只能 load / list / 读数据。租户凭证只见本
 租户的表桶（`require_tenant_bucket`）。每个目录请求进审计日志，`api_name` 为
 `Iceberg.<Op>`。
 
@@ -845,7 +849,7 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 | 步骤 | 内容 | 验收 |
 | --- | --- | --- |
 | ① 目录核心 + REST 最小集（**已实现 2026-09-12**） | `TablesConfig`；`TableBucketStore`；`ITableCatalogStore` + `ObjectCatalogStore`；§7.1–7.3 的 metadata 模型（浅快照校验）；§5.2/5.3 提交协议；端点：config / buckets / namespaces 全部 / tables list-create-load-commit-drop-exists-rename-register / metadata-location；错误模型；dispatch 分支与桶名保留；表桶守卫的保留前缀只读与 DeleteBucket 守卫；审计与指标 | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` 通过；e2e 新段通过；PyIceberg 冒烟（本机人工）建表 + append + scan 通过 |
-| ② 权限与凭证 | policy 三元组映射表（§6.2）、租户隔离、`s3tables` 签名名、`mint_session` 收窄参数与 `vended-credentials` 协商、`GET …/credentials`、lifecycle 排除 | 前缀限权与只读凭证用例；下发凭证在前缀内 Put/Get/Delete 通过、前缀外 403 |
+| ② 权限与凭证（**已实现 2026-09-12**） | policy 三元组映射表（§6.2）、租户隔离、`s3tables` 签名名、`mint_session` 收窄参数与 `vended-credentials` 协商、`GET …/credentials`、lifecycle 排除 | 前缀限权与只读凭证用例；下发凭证在前缀内 Put/Get/Delete 通过、前缀外 403 |
 | ③ 深校验与诊断 | Avro 读取器；§7.4 快照图与冲突复核；`catalog/diagnostics` / `recovery`；`fsck` 对账项；ETag/If-None-Match on LoadTable | manifest 固件用例；崩溃窗口矩阵用例；rename 恢复用例 |
 | ④ 维护 | `JobOp::Table*`、plan/run/purge、`purgeRequested=true`、周期 runner、CLI、`tombstone_ttl` 清理 | 保留集/安全窗口/StalePlan 用例；DuckDB 冒烟（本机人工） |
 | ⑤ 多网关与文档 | `multi_gateway_suite` 追加；`--check-config` 误配 WARN；deployment.md §5 矩阵加"表目录"列；本文转成实现文档 + `docs/en/` 同步；README 索引 | 双网关用例；文档评审 |

@@ -10,6 +10,9 @@
 #include "s3/handlers/common.h"
 #include "s3/lifecycle.h"
 #include "s3/service.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/bucket_guard.h"
+#endif
 #include "s3/xml.h"
 
 namespace lights3::s3 {
@@ -141,6 +144,11 @@ Task<http::HttpResponse> S3Service::put_bucket_lifecycle(http::HttpRequest& req,
     auto rules = parse_lifecycle_xml(body);
     co_await lifecycle_store_->put(bucket, std::move(rules));
     LOG_INFO("lifecycle: configuration for bucket {} set by {}", bucket, std::string(auth.access_key));
+#ifdef LIGHTS3_TABLES
+    // accepted like AWS does, but never enforced (docs/s3-tables-design.md §8.2)
+    if (table_guard_ && table_guard_->is_table_bucket(bucket))
+        LOG_WARN("lifecycle: bucket {} is a table bucket, lifecycle rules are ignored on table buckets", bucket);
+#endif
     co_return http::HttpResponse{};
 }
 

@@ -972,3 +972,63 @@ TEST(sts_session_policy_and_expiry) {
     shifted.sign(req2, sess);
     CHECK_THROWS_S3(shifted.verify(req2), S3ErrorCode::ExpiredToken);
 }
+
+// ---- docs/s3-tables-design.md §8.4: narrowed session policies ----
+
+TEST(policy_narrowing_for_vended_sessions) {
+    CredentialPolicy narrow;
+    narrow.buckets = {"tbk"};
+    narrow.prefixes = {"sales/orders/", ".lights3-table/sales/orders/metadata/"};
+    // unrestricted parent: the narrow policy is used as-is
+    auto p0 = narrow_policy(std::nullopt, narrow);
+    CHECK_EQ(p0.buckets.size(), size_t{1});
+    CHECK_EQ(p0.prefixes.size(), size_t{2});
+    CHECK(!p0.readonly);
+    // parent scoped to one prefix: only the covered prefix survives, readonly propagates
+    CredentialPolicy parent;
+    parent.buckets = {"tbk", "other"};
+    parent.prefixes = {"sales/"};
+    parent.readonly = true;
+    auto p1 = narrow_policy(parent, narrow);
+    CHECK_EQ(p1.buckets.size(), size_t{1});
+    CHECK_EQ(p1.prefixes.size(), size_t{1});
+    CHECK_EQ(p1.prefixes[0], "sales/orders/");
+    CHECK(p1.readonly);
+    CHECK_EQ(p1.actions.size(), size_t{1});
+    CHECK(p1.allows("tbk", "sales/orders/x", Action::Read));
+    CHECK(!p1.allows("tbk", "sales/orders/x", Action::Write));
+    CHECK(!p1.allows("tbk", "sales/other/x", Action::Read));
+    // no bucket / no prefix in common -> the session would exceed its parent
+    CredentialPolicy elsewhere;
+    elsewhere.buckets = {"zzz"};
+    CHECK_THROWS_S3(narrow_policy(elsewhere, narrow), S3ErrorCode::AccessDenied);
+    CredentialPolicy hr;
+    hr.prefixes = {"hr/"};
+    CHECK_THROWS_S3(narrow_policy(hr, narrow), S3ErrorCode::AccessDenied);
+    // actions intersect: a write-only parent and a read-only narrow share nothing
+    CredentialPolicy writer;
+    writer.actions = {Action::Write};
+    CredentialPolicy ro = narrow;
+    ro.readonly = true;
+    CHECK_THROWS_S3(narrow_policy(writer, ro), S3ErrorCode::AccessDenied);
+    // the persisted session carries the narrowed policy and verify enforces it
+    auto backend = std::make_shared<storage::MemoryBackend>();
+    AuthConfig cfg;
+    cfg.credentials = {{"ROOTAK", "root-sk"}};
+    auto store = sync_wait(CredentialStore::load(backend, cfg));
+    auto info = sync_wait(store->generate("parent", parent));
+    auto sc = sync_wait(store->mint_session(info.access_key, 900, narrow));
+    auto look = store->lookup(sc.access_key);
+    CHECK(look && look->policy);
+    CHECK_EQ(look->policy->prefixes.size(), size_t{1});
+    CHECK(look->policy->readonly);
+    auto stream = sync_wait(backend->get_object(".sys", "sts/" + sc.access_key, std::nullopt));
+    std::string body;
+    std::byte buf[4096];
+    for (;;) {
+        size_t n = sync_wait(stream.body->read(std::span(buf)));
+        if (!n) break;
+        body.append(reinterpret_cast<const char*>(buf), n);
+    }
+    CHECK(json::parse(body)["policy"]["prefixes"].size() == 1);
+}

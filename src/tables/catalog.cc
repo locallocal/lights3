@@ -756,6 +756,16 @@ Task<TableEntry> Catalog::update_metadata_location(std::string_view bucket, cons
     co_return next_entry;
 }
 
+Task<s3::CredentialPolicy> Catalog::vending_policy(std::string_view bucket, const TableEntry& entry, bool readonly) {
+    TableBucketEntry tb = co_await require_table_bucket(bucket);
+    s3::CredentialPolicy p;
+    p.buckets = {std::string(bucket)};
+    p.prefixes = {location_to_key(bucket, tb.reserved_prefix, entry.location) + "/",
+                  tb.reserved_prefix + ns_path(entry.levels) + "/" + entry.name + "/metadata/"};
+    p.readonly = readonly;
+    co_return p;
+}
+
 Task<void> Catalog::rename_table(std::string_view bucket, const Levels& src_levels, std::string_view src_name,
                                  const Levels& dst_levels, std::string_view dst_name) {
     co_await require_table_bucket(bucket);

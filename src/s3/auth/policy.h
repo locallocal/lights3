@@ -42,6 +42,14 @@ struct CredentialPolicy {
     bool prefix_may_contain(std::string_view group_prefix) const;
 };
 
+// Narrowing (docs/s3-tables-design.md §8.4, STS-vended table credentials): the session
+// policy is `narrow` restricted to what `parent` already allows -- buckets kept only
+// when the parent admits them, prefixes kept only when the parent admits keys under
+// them, readonly / actions intersected. A nullopt parent (root / unrestricted) yields
+// `narrow` itself. When the requested scope has nothing left (no bucket or no prefix
+// survives) the caller gets S3Error(AccessDenied): a session may never exceed its parent
+CredentialPolicy narrow_policy(const std::optional<CredentialPolicy>& parent, const CredentialPolicy& narrow);
+
 // JSON field conventions for policy
 // （{"buckets": [...], "prefixes": [...], "readonly": bool, "actions": [...]}），
 // Shared by the admin handler, on-disk objects, and credentials_file; implemented in credential_store.cc

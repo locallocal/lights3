@@ -298,6 +298,7 @@ buckets:
   default_backend: tierdata
 tables:
   enabled: true
+  credential_vending: true
 log:
   level: info
 EOF
@@ -1114,6 +1115,39 @@ check "tables: drop namespace" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X
 check "tables: the catalog prefix's first segment is not a bucket name" "400" \
     "$(s3curl -o /dev/null -w '%{http_code}' -X PUT "$BASE/iceberg")"
 check "tables: commits are counted" "0" "$(curl -s "$BASE/-/metrics" | grep -q 'lights3_tables_commits_total{feature="tables",result="ok"} 1'; echo $?)"
+# step ② (docs/s3-tables/step-2-authz-credentials.md): s3tables signing name, vended credentials, lifecycle exclusion
+tcurl() {  # sign the catalog request with credential scope service "s3tables"
+    curl -sS --aws-sigv4 "aws:amz:$REGION:s3tables" --user "$AK:$SK" "$@"
+}
+check "tables: the s3tables signing name is accepted on the catalog" "tbe2e" \
+    "$(tcurl "$TB/config?warehouse=tbe2e" | jq_field 'j["overrides"]["prefix"]')"
+check "tables: the s3tables signing name is refused on the S3 plane" "400" \
+    "$(tcurl -o /dev/null -w '%{http_code}' "$BASE/tbe2e?list-type=2")"
+s3curl -o /dev/null -X POST -H 'Content-Type: application/json' -d '{"namespace":["e2e","vend"]}' "$TB/tbe2e/namespaces"
+s3curl -o /dev/null -X POST -H 'Content-Type: application/json' \
+    -d '{"name":"scoped","schema":{"type":"struct","fields":[{"id":1,"name":"id","required":true,"type":"long"}]}}' "$TB/tbe2e/namespaces/e2e%1Fvend/tables"
+s3curl -o "$WORK/vend.json" -H 'X-Iceberg-Access-Delegation: vended-credentials' "$TB/tbe2e/namespaces/e2e%1Fvend/tables/scoped"
+VAK=$(jq_field 'j["storage-credentials"][0]["config"]["s3.access-key-id"]' < "$WORK/vend.json")
+VSK=$(jq_field 'j["storage-credentials"][0]["config"]["s3.secret-access-key"]' < "$WORK/vend.json")
+VTOK=$(jq_field 'j["storage-credentials"][0]["config"]["s3.session-token"]' < "$WORK/vend.json")
+check "tables: LoadTable vends a session credential" "L3SA" "${VAK:0:4}"
+check "tables: vended prefix is the table location" "s3://tbe2e/e2e/vend/scoped/" "$(jq_field 'j["storage-credentials"][0]["prefix"]' < "$WORK/vend.json")"
+vcurl() { curl -sS --aws-sigv4 "aws:amz:$REGION:s3" --user "$VAK:$VSK" -H "x-amz-security-token: $VTOK" "$@"; }
+check "tables: vended credential writes inside the table prefix" "200" \
+    "$(vcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'row' "$BASE/tbe2e/e2e/vend/scoped/data/p.parquet")"
+check "tables: vended credential is confined to the table prefix" "403" \
+    "$(vcurl -o /dev/null -w '%{http_code}' -X PUT --data-binary 'row' "$BASE/tbe2e/e2e/vend/elsewhere")"
+check "tables: vended credential reads the table metadata" "200" \
+    "$(vcurl -o /dev/null -w '%{http_code}' "$BASE/tbe2e/$(jq_field 'j["metadata-location"]' < "$WORK/vend.json" | sed 's#^s3://tbe2e/##')")"
+check "tables: vended credential cannot assume a role" "403" \
+    "$(curl -sS --aws-sigv4 "aws:amz:$REGION:sts" --user "$VAK:$VSK" -H "x-amz-security-token: $VTOK" -o /dev/null -w '%{http_code}' -X POST --data 'Action=AssumeRole&Version=2011-06-15' "$BASE/")"
+vcurl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/vend/scoped/data/p.parquet"
+s3curl -o /dev/null -X PUT -H 'Content-Type: application/xml' --data-binary '<LifecycleConfiguration><Rule><ID>x</ID><Status>Enabled</Status><Filter><Prefix>e2e/</Prefix></Filter><Expiration><Days>1</Days></Expiration></Rule></LifecycleConfiguration>' "$BASE/tbe2e?lifecycle"
+check "tables: lifecycle rules on a table bucket are accepted but flagged" "0" \
+    "$(grep -q 'lifecycle rules are ignored on table buckets' "$WORK/server.log"; echo $?)"
+s3curl -o /dev/null -X DELETE "$BASE/tbe2e?lifecycle"
+s3curl -o /dev/null -X DELETE "$TB/tbe2e/namespaces/e2e%1Fvend/tables/scoped"
+s3curl -o /dev/null -X DELETE "$TB/tbe2e/namespaces/e2e%1Fvend"
 # the reserved metadata objects stay until the maintenance step (④) removes them; the
 # work dir is deleted at exit anyway, so only the data files are cleaned here
 s3curl -o /dev/null -X DELETE "$BASE/tbe2e/e2e/demo/orders/data/f1.parquet"

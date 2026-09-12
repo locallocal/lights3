@@ -39,10 +39,13 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   metadata.json 可读不可写 → 手工 CommitTable（add-snapshot 指向预放的 manifest-list）
   → 同 commit-id 重放幂等 → 陈旧 requirement 409 → 缺 manifest 409 → rename → 非空
   表桶 DeleteBucket 409 → `purgeRequested=true` 406 → drop → 桶名 `iceberg` 400 →
-  `lights3_tables_commits_total` 计数。单测：`test_tables_iceberg.cc`（纯函数）、
+  `lights3_tables_commits_total` 计数；步骤 ②：`s3tables` 签名名在目录面通过、S3 面 400，
+  `X-Iceberg-Access-Delegation` 下发的会话凭证在表前缀内 PUT 200 / 前缀外 403 / 读 metadata
+  200 / AssumeRole 403，表桶上的 lifecycle 规则被接受但 WARN。单测：`test_tables_iceberg.cc`（纯函数）、
   `test_tables_catalog.cc`（提交协议、幂等重放、`tables.commit.after_stage|after_cas`
-  故障点的崩溃窗口、rename）、`test_tables_rest.cc`（端点、错误模型、policy、守卫、
-  `/config.endpoints` 与路由表一致）。
+  故障点的崩溃窗口、rename）、`test_tables_rest.cc`（端点、错误模型、policy 与列表过滤、租户门、`s3tables` 签名、
+  凭证下发、lifecycle 跳过、守卫、`/config.endpoints` 与路由表一致）、`test_credentials.cc`
+  的 `policy_narrowing_for_vended_sessions`。
 - **lights3-ctl 交叉验证**：curl 用 libcurl 的 SigV4，lights3-ctl 用自实现签名，两套客户端
   打同一服务端。`cred create/list/get --show-secret/delete`（lights3-ctl 铸的凭证 curl
   能签、吊销后 curl 403）、`website set/get/delete`（curl 读回 lights3-ctl 写的配置）、

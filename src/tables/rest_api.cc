@@ -9,6 +9,7 @@
 #include "core/util/uri.h"
 #include "s3/errors.h"
 #include "tables/iceberg/metadata.h"
+#include "tables/maintenance.h"
 #include "tables/rest_error.h"
 
 namespace lights3::tables {
@@ -69,6 +70,17 @@ constexpr RestApi::Route kRoutes[] = {
      "DiagnoseTable", false, &RestApi::diagnose_table},
     {"POST", "namespaces/{ns}/tables/{t}/catalog/recovery", Action::Write, RestApi::KeyKind::Table, false,
      "RecoverTable", false, &RestApi::recover_table},
+    // maintenance (design §9, step ④): settings, plan / run jobs, job status
+    {"GET", "namespaces/{ns}/tables/{t}/maintenance/config", Action::Read, RestApi::KeyKind::Table, false,
+     "GetMaintenanceConfig", false, &RestApi::get_maintenance_config},
+    {"PUT", "namespaces/{ns}/tables/{t}/maintenance/config", Action::Write, RestApi::KeyKind::Table, false,
+     "PutMaintenanceConfig", false, &RestApi::put_maintenance_config},
+    {"POST", "namespaces/{ns}/tables/{t}/maintenance/plan", Action::Write, RestApi::KeyKind::Table, false,
+     "PlanMaintenance", false, &RestApi::plan_maintenance},
+    {"POST", "namespaces/{ns}/tables/{t}/maintenance/run", Action::Write, RestApi::KeyKind::Table, false,
+     "RunMaintenance", false, &RestApi::run_maintenance},
+    {"GET", "namespaces/{ns}/tables/{t}/maintenance/jobs/{w2}", Action::Read, RestApi::KeyKind::Table, false,
+     "GetMaintenanceJob", false, &RestApi::maintenance_job},
 };
 
 std::vector<std::string_view> split(std::string_view s, char sep) {
@@ -787,13 +799,24 @@ Task<http::HttpResponse> RestApi::commit_table(http::HttpRequest& req, Hooks& ho
 }
 
 Task<http::HttpResponse> RestApi::drop_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    bool purge = false;
     if (auto p = req.query_get("purgeRequested")) {
-        if (*p == "true") throw unsupported("purgeRequested=true is not supported yet");
-        if (*p != "false") throw bad_request("purgeRequested must be true or false");
+        if (*p == "true")
+            purge = true;
+        else if (*p != "false")
+            throw bad_request("purgeRequested must be true or false");
     }
+    if (purge && !jobs_) throw unsupported("purgeRequested=true needs the maintenance job framework");
     co_await catalog_->drop_table(m.bucket, m.ns, m.table);
-    audit(hooks, "drop_table", m, "");
-    co_return empty_response(204);
+    audit(hooks, "drop_table", m, purge ? "purge requested" : "");
+    auto resp = empty_response(204);
+    if (purge) {
+        // the tombstone is written; the data goes in a job (design §5.7 / step ④ §5)
+        json j = start_purge(m.bucket, m.ns, m.table, hooks.commit);
+        resp.headers.set("x-lights3-job-id", std::to_string(j.value("job_id", uint64_t(0))));
+        audit(hooks, "purge_table", m, "job " + std::to_string(j.value("job_id", uint64_t(0))));
+    }
+    co_return resp;
 }
 
 Task<http::HttpResponse> RestApi::rename_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
@@ -872,6 +895,219 @@ Task<http::HttpResponse> RestApi::recover_table(http::HttpRequest& req, Hooks& h
           "finalized " + std::to_string(rep.finalized) + " pruned " + std::to_string(rep.pruned) + " manual " +
               std::to_string(rep.manual));
     co_return json_response(200, rep.to_json());
+}
+
+// ---------- maintenance (design §9, step ④) ----------
+
+Task<EffectiveMaintenance> RestApi::effective_maintenance(std::string_view bucket, const Levels& levels,
+                                                          std::string_view table) {
+    auto t = co_await catalog_->load_table(bucket, levels, table);
+    auto table_cfg = co_await catalog_->store()->get_maintenance_config(bucket, levels, table);
+    co_return resolve_maintenance(cfg_, table_cfg, t.metadata.value("properties", json::object()));
+}
+
+Task<http::HttpResponse> RestApi::get_maintenance_config(http::HttpRequest&, Hooks&, const Match& m) {
+    EffectiveMaintenance eff = co_await effective_maintenance(m.bucket, m.ns, m.table);
+    auto table_cfg = co_await catalog_->store()->get_maintenance_config(m.bucket, m.ns, m.table);
+    json j;
+    j["effective"] = eff.to_json();
+    j["table-config"] = table_cfg ? tables::to_json(*table_cfg) : json();
+    j["defaults"]["retain_recent_metadata_files"] = cfg_.maintenance.retain_recent_metadata_files;
+    j["defaults"]["delete_enabled"] = cfg_.maintenance.delete_enabled;
+    j["defaults"]["safety_window_sec"] = cfg_.maintenance.safety_window_sec;
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::put_maintenance_config(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    if (!co_await catalog_->table_exists(m.bucket, m.ns, m.table))
+        throw not_found_table("table " + ns_display(m.ns) + "." + m.table + " does not exist");
+    MaintenanceConfig c;
+    for (auto& [k, v] : body.items()) {
+        if (v.is_null()) continue;
+        if (k == "retain_recent_metadata_files") {
+            if (!v.is_number_integer() || v.get<int64_t>() < 0 || v.get<int64_t>() > 100000)
+                throw bad_request("retain_recent_metadata_files must be an integer in [0, 100000]");
+            c.retain_recent_metadata_files = v.get<int>();
+        } else if (k == "delete_enabled") {
+            if (!v.is_boolean()) throw bad_request("delete_enabled must be a boolean");
+            c.delete_enabled = v.get<bool>();
+        } else if (k == "max_snapshot_age_ms") {
+            if (!v.is_number_integer() || v.get<int64_t>() <= 0)
+                throw bad_request("max_snapshot_age_ms must be a positive integer");
+            c.max_snapshot_age_ms = v.get<int64_t>();
+        } else if (k == "min_snapshots_to_keep") {
+            if (!v.is_number_integer() || v.get<int64_t>() < 1 || v.get<int64_t>() > 100000)
+                throw bad_request("min_snapshots_to_keep must be an integer in [1, 100000]");
+            c.min_snapshots_to_keep = v.get<int>();
+        } else if (k == "orphan_cleanup") {
+            if (!v.is_boolean()) throw bad_request("orphan_cleanup must be a boolean");
+            c.orphan_cleanup = v.get<bool>();
+        } else if (k != "version") {
+            throw bad_request("unknown maintenance setting '" + k + "'");
+        }
+    }
+    co_await catalog_->store()->put_maintenance_config(m.bucket, m.ns, m.table, c);
+    audit(hooks, "put_maintenance_config", m, tables::to_json(c).dump());
+    EffectiveMaintenance eff = co_await effective_maintenance(m.bucket, m.ns, m.table);
+    json j;
+    j["effective"] = eff.to_json();
+    j["table-config"] = tables::to_json(c);
+    co_return json_response(200, j);
+}
+
+json RestApi::start_plan(std::string_view bucket, const Levels& levels, std::string_view table) {
+    if (!jobs_) throw unsupported("maintenance jobs are not available on this deployment");
+    auto catalog = catalog_;
+    TablesConfig cfg = cfg_;
+    std::string b(bucket), t(table);
+    Levels l = levels;
+    JobHooks::Fn fn = [catalog, cfg, b, l, t]() -> json {
+        auto task = [&]() -> Task<json> {
+            auto loaded = co_await catalog->load_table(b, l, t);
+            auto table_cfg = co_await catalog->store()->get_maintenance_config(b, l, t);
+            EffectiveMaintenance eff = resolve_maintenance(cfg, table_cfg,
+                                                           loaded.metadata.value("properties", json::object()));
+            MaintenancePlan plan = co_await plan_table(*catalog, b, l, t, eff.planner, now_unix());
+            if (eff.conflict) {
+                plan.manual_review = true;
+                for (auto& n : eff.notes) plan.notes.push_back(n);
+            }
+            json out = plan.to_json();
+            out["effective"] = eff.to_json();
+            co_return out;
+        };
+        return sync_wait(task());
+    };
+    return jobs_.start(job_resource(bucket, levels, table), "plan", std::move(fn));
+}
+
+Task<json> RestApi::start_run(std::string_view bucket, const Levels& levels, std::string_view table, const json& body,
+                              CommitHooks commit) {
+    if (!jobs_) throw unsupported("maintenance jobs are not available on this deployment");
+    std::string resource = job_resource(bucket, levels, table);
+    // the plan: inline, by plan job id, or the table's most recent plan job
+    json plan_json;
+    if (body.contains("plan") && !body["plan"].is_null()) {
+        plan_json = body["plan"];
+    } else {
+        std::optional<json> st;
+        if (body.contains("job_id") && !body["job_id"].is_null()) {
+            if (!body["job_id"].is_number_unsigned()) throw bad_request("'job_id' must be a job id");
+            st = jobs_.status_by_id(body["job_id"].get<uint64_t>());
+            if (!st || st->value("backend", "") != resource || st->value("op", "") != "plan")
+                throw bad_request("'job_id' is not a plan job of this table");
+        } else {
+            st = jobs_.status(resource, "plan");
+        }
+        if (st->value("running", false)) throw bad_request("the plan job is still running");
+        if (!st->contains("stats")) throw bad_request("no completed plan for this table; run plan first");
+        plan_json = (*st)["stats"];
+    }
+    auto plan = MaintenancePlan::from_json(plan_json);
+    if (!plan) throw bad_request("'plan' is not a maintenance plan document");
+    if (plan->bucket != bucket || plan->levels != levels || plan->name != table)
+        throw bad_request("the plan belongs to another table");
+    if (plan->manual_review) throw bad_request("the plan is marked for manual review; it cannot be run");
+    EffectiveMaintenance eff = co_await effective_maintenance(bucket, levels, table);
+    RunOptions ro;
+    ro.delete_enabled = eff.delete_enabled;
+    ro.safety_window_sec = eff.planner.safety_window_sec;
+    ro.note_usage = commit.note_usage;
+    auto catalog = catalog_;
+    MaintenancePlan p = *plan;
+    JobHooks::Fn fn = [catalog, p, ro]() -> json {
+        RunReport rep = sync_wait(run_table(*catalog, p, ro, now_unix()));
+        return rep.to_json();
+    };
+    co_return jobs_.start(resource, "run", std::move(fn));
+}
+
+json RestApi::start_purge(std::string_view bucket, const Levels& levels, std::string_view table, CommitHooks commit) {
+    if (!jobs_) throw unsupported("maintenance jobs are not available on this deployment");
+    auto catalog = catalog_;
+    std::string b(bucket), t(table);
+    Levels l = levels;
+    RunOptions ro;
+    ro.note_usage = commit.note_usage;
+    JobHooks::Fn fn = [catalog, b, l, t, ro]() -> json {
+        PurgeReport rep = sync_wait(purge_table(*catalog, b, l, t, ro));
+        return rep.to_json();
+    };
+    return jobs_.start(job_resource(bucket, levels, table), "purge", std::move(fn));
+}
+
+Task<http::HttpResponse> RestApi::plan_maintenance(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    co_await read_json(req, true);
+    if (!co_await catalog_->table_exists(m.bucket, m.ns, m.table))
+        throw not_found_table("table " + ns_display(m.ns) + "." + m.table + " does not exist");
+    json j = start_plan(m.bucket, m.ns, m.table);
+    audit(hooks, "maintenance_plan", m, "job " + std::to_string(j.value("job_id", uint64_t(0))));
+    co_return json_response(202, j);
+}
+
+Task<http::HttpResponse> RestApi::run_maintenance(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, true);
+    if (!co_await catalog_->table_exists(m.bucket, m.ns, m.table))
+        throw not_found_table("table " + ns_display(m.ns) + "." + m.table + " does not exist");
+    json j = co_await start_run(m.bucket, m.ns, m.table, body, hooks.commit);
+    audit(hooks, "maintenance_run", m, "job " + std::to_string(j.value("job_id", uint64_t(0))));
+    co_return json_response(202, j);
+}
+
+Task<http::HttpResponse> RestApi::maintenance_job(http::HttpRequest&, Hooks&, const Match& m) {
+    if (!jobs_) throw unsupported("maintenance jobs are not available on this deployment");
+    uint64_t id = 0;
+    try {
+        size_t pos = 0;
+        id = std::stoull(m.extra, &pos);
+        if (pos != m.extra.size()) id = 0;
+    } catch (const std::exception&) {
+        id = 0;
+    }
+    if (id == 0) throw bad_request("job id must be a positive integer");
+    auto st = jobs_.status_by_id(id);
+    if (!st || st->value("backend", "") != job_resource(m.bucket, m.ns, m.table))
+        throw not_found_resource("no job " + m.extra + " on this table");
+    co_return json_response(200, *st);
+}
+
+Task<json> RestApi::admin_job(std::string_view method, std::string_view bucket, const Levels& levels,
+                              std::string_view table, std::string_view op, const json& body) {
+    using s3::S3Error;
+    using s3::S3ErrorCode;
+    if (op != "plan" && op != "run" && op != "purge")
+        throw S3Error(S3ErrorCode::InvalidRequest, "no operation '" + std::string(op) + "' in 'tables'.");
+    if (!jobs_) throw S3Error(S3ErrorCode::InvalidRequest, "Maintenance jobs are not available on this deployment.");
+    require_namespace(levels);
+    require_segment("table name", table);
+    std::string resource = job_resource(bucket, levels, table);
+    if (method == "GET") co_return jobs_.status(resource, std::string(op));
+    if (method != "POST")
+        throw S3Error(S3ErrorCode::MethodNotAllowed, "The specified method is not allowed against this resource.");
+    std::optional<RestError> failure;
+    json out;
+    try {
+        if (op == "plan") {
+            if (!co_await catalog_->table_exists(bucket, levels, table))
+                throw not_found_table("table " + ns_display(levels) + "." + std::string(table) + " does not exist");
+            out = start_plan(bucket, levels, table);
+        } else if (op == "run") {
+            if (!co_await catalog_->table_exists(bucket, levels, table))
+                throw not_found_table("table " + ns_display(levels) + "." + std::string(table) + " does not exist");
+            out = co_await start_run(bucket, levels, table, body, CommitHooks{});
+        } else {
+            out = start_purge(bucket, levels, table, CommitHooks{});
+        }
+    } catch (const RestError& e) {
+        failure = e;
+    }
+    if (failure) {
+        // the admin plane speaks S3 errors
+        S3ErrorCode code = failure->status == 404 ? S3ErrorCode::NoSuchKey : S3ErrorCode::InvalidRequest;
+        throw S3Error(code, failure->message);
+    }
+    co_return out;
 }
 
 }  // namespace lights3::tables

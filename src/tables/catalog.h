@@ -63,6 +63,9 @@ public:
             storage::BucketRouter router, std::shared_ptr<ThreadPool> pool, TablesConfig cfg, MetricsScope metrics);
 
     const TablesConfig& config() const { return cfg_; }
+    const std::shared_ptr<ThreadPool>& pool() const { return pool_; }
+    const std::shared_ptr<ITableCatalogStore>& store() const { return store_; }
+    storage::IStorageBackend& bucket_backend(std::string_view bucket) { return router_.resolve(bucket); }
     const std::shared_ptr<TableBucketStore>& bucket_store() const { return buckets_; }
 
     // ---- table buckets (root only; the caller checks) ----

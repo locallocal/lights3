@@ -31,6 +31,7 @@
 #ifdef LIGHTS3_TABLES
 #include "tables/bucket_guard.h"
 #include "tables/catalog.h"
+#include "tables/maintenance_runner.h"
 #include "tables/rest_api.h"
 #include "tables/table_bucket_store.h"
 #endif
@@ -143,6 +144,7 @@ private:
     std::shared_ptr<tables::Catalog> tables_catalog_;
     std::shared_ptr<tables::RestApi> tables_api_;
     std::shared_ptr<tables::TableBucketGuard> table_guard_;
+    std::unique_ptr<tables::MaintenanceRunner> tables_maintenance_;
 #endif
     std::shared_ptr<s3::S3Service> service_;
     std::shared_ptr<ThreadPoolExecutor> pool_exec_;

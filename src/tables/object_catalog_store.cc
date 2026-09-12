@@ -143,6 +143,36 @@ json to_json(const RenameIntent& r) {
     return j;
 }
 
+json to_json(const MaintenanceConfig& c) {
+    json j;
+    j["version"] = c.version;
+    j["retain_recent_metadata_files"] = c.retain_recent_metadata_files ? json(*c.retain_recent_metadata_files) : json();
+    j["delete_enabled"] = c.delete_enabled ? json(*c.delete_enabled) : json();
+    j["max_snapshot_age_ms"] = c.max_snapshot_age_ms ? json(*c.max_snapshot_age_ms) : json();
+    j["min_snapshots_to_keep"] = c.min_snapshots_to_keep ? json(*c.min_snapshots_to_keep) : json();
+    j["orphan_cleanup"] = c.orphan_cleanup ? json(*c.orphan_cleanup) : json();
+    return j;
+}
+
+std::optional<MaintenanceConfig> maintenance_from_json(const json& j) {
+    return guarded([&]() -> std::optional<MaintenanceConfig> {
+        reject_unknown(j, {"version", "retain_recent_metadata_files", "delete_enabled", "max_snapshot_age_ms",
+                           "min_snapshots_to_keep", "orphan_cleanup"});
+        if (j.at("version").get<int>() != 1) return std::nullopt;
+        MaintenanceConfig c;
+        auto opt = [&](const char* k) -> const json* {
+            auto it = j.find(k);
+            return it == j.end() || it->is_null() ? nullptr : &*it;
+        };
+        if (auto* v = opt("retain_recent_metadata_files")) c.retain_recent_metadata_files = v->get<int>();
+        if (auto* v = opt("delete_enabled")) c.delete_enabled = v->get<bool>();
+        if (auto* v = opt("max_snapshot_age_ms")) c.max_snapshot_age_ms = v->get<int64_t>();
+        if (auto* v = opt("min_snapshots_to_keep")) c.min_snapshots_to_keep = v->get<int>();
+        if (auto* v = opt("orphan_cleanup")) c.orphan_cleanup = v->get<bool>();
+        return c;
+    });
+}
+
 std::optional<NamespaceEntry> namespace_from_json(const json& j) {
     return guarded([&]() -> std::optional<NamespaceEntry> {
         reject_unknown(j, {"version", "levels", "properties", "created_unix", "updated_unix"});
@@ -251,6 +281,9 @@ std::string ObjectCatalogStore::commit_key(std::string_view bucket, std::string_
 std::string ObjectCatalogStore::rename_dir(std::string_view bucket) { return bucket_root(bucket) + "renames/"; }
 std::string ObjectCatalogStore::rename_key(std::string_view bucket, std::string_view id) {
     return rename_dir(bucket) + std::string(id) + ".json";
+}
+std::string ObjectCatalogStore::maint_key(std::string_view bucket, const Levels& levels, std::string_view name) {
+    return bucket_root(bucket) + "maint/" + ns_path(levels) + "/" + std::string(name) + ".json";
 }
 
 // ---------- raw object IO ----------
@@ -541,6 +574,33 @@ Task<std::string> ObjectCatalogStore::put_rename(std::string_view bucket, const 
 
 Task<void> ObjectCatalogStore::delete_rename(std::string_view bucket, std::string_view id) {
     co_await remove(rename_key(bucket, id));
+}
+
+// ---------- maintenance settings ----------
+
+Task<std::optional<MaintenanceConfig>> ObjectCatalogStore::get_maintenance_config(std::string_view bucket,
+                                                                                  const Levels& levels,
+                                                                                  std::string_view name) {
+    std::string key = maint_key(bucket, levels, name);
+    auto raw = co_await read(key);
+    if (!raw) co_return std::nullopt;
+    std::optional<MaintenanceConfig> c;
+    try {
+        c = maintenance_from_json(json::parse(raw->body));
+    } catch (const json::exception&) {
+    }
+    if (!c) throw S3Error(S3ErrorCode::InternalError, "catalog entry at " + key + " is malformed");
+    co_return c;
+}
+
+Task<void> ObjectCatalogStore::put_maintenance_config(std::string_view bucket, const Levels& levels,
+                                                      std::string_view name, const MaintenanceConfig& c) {
+    co_await write(maint_key(bucket, levels, name), to_json(c).dump(), {});
+}
+
+Task<void> ObjectCatalogStore::delete_maintenance_config(std::string_view bucket, const Levels& levels,
+                                                         std::string_view name) {
+    co_await remove(maint_key(bucket, levels, name));
 }
 
 // ---------- bucket state ----------

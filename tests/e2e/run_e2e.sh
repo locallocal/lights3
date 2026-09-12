@@ -1138,14 +1138,59 @@ check "tables: diagnostics is a read" "200" \
     "$(trocurl -o /dev/null -w '%{http_code}' "$TNS/tables/orders/catalog/diagnostics")"
 check "tables: recovery needs write access" "403" \
     "$(trocurl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$TNS/tables/orders/catalog/recovery")"
-s3curl -o /dev/null -X DELETE "$BASE/-/admin/credentials/$TRO_AK"
 check "tables: metadata-location (AWS shape)" "2" "$(s3curl "$TNS/tables/orders/metadata-location" | jq_field 'j["generation"]')"
 check "tables: rename" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' \
     -d '{"source":{"namespace":["e2e","demo"],"name":"orders"},"destination":{"namespace":["e2e","demo"],"name":"orders2"}}' "$TB/tbe2e/tables/rename")"
 check "tables: the old name is gone" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS/tables/orders")"
 check "tables: DeleteBucket refuses a non-empty table bucket" "409" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$BASE/tbe2e")"
-check "tables: purgeRequested=true is not supported yet" "406" \
-    "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2?purgeRequested=true")"
+check "tables: purgeRequested must be a boolean" "400" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2?purgeRequested=maybe")"
+# step ④ (docs/s3-tables/step-4-maintenance.md): settings, plan / run jobs, purge, lights3-ctl tables
+check "tables: maintenance settings default to no deletion" "false" \
+    "$(s3curl "$TNS/tables/orders2/maintenance/config" | jq_field 'str(j["effective"]["delete_enabled"]).lower()')"
+check "tables: a table-level setting is stored and takes effect" "1" \
+    "$(s3curl -X PUT -H 'Content-Type: application/json' -d '{"retain_recent_metadata_files":1}' "$TNS/tables/orders2/maintenance/config" | jq_field 'j["effective"]["retain_recent_metadata_files"]')"
+PLAN_JOB=$(s3curl -X POST "$TNS/tables/orders2/maintenance/plan" | jq_field 'j["job_id"]')
+check "tables: plan starts a job" "0" "$([[ "$PLAN_JOB" =~ ^[0-9]+$ ]]; echo $?)"
+for _ in $(seq 1 100); do
+    s3curl -o "$WORK/plan.json" "$TNS/tables/orders2/maintenance/jobs/$PLAN_JOB"
+    [[ "$(jq_field 'str(j["running"]).lower()' < "$WORK/plan.json")" == "false" ]] && break
+    sleep 0.1
+done
+check "tables: the plan is bound to the table's version token" "t-" \
+    "$(jq_field 'j["stats"]["version-token"][:2]' < "$WORK/plan.json")"
+check "tables: nothing is old enough to delete (safety window)" "0" \
+    "$(jq_field 'len(j["stats"]["metadata-candidates"]) + len(j["stats"]["orphan-candidates"])' < "$WORK/plan.json")"
+RUN_JOB=$(s3curl -X POST -H 'Content-Type: application/json' -d "{\"job_id\":$PLAN_JOB}" "$TNS/tables/orders2/maintenance/run" | jq_field 'j["job_id"]')
+for _ in $(seq 1 100); do
+    s3curl -o "$WORK/run.json" "$TNS/tables/orders2/maintenance/jobs/$RUN_JOB"
+    [[ "$(jq_field 'str(j["running"]).lower()' < "$WORK/run.json")" == "false" ]] && break
+    sleep 0.1
+done
+check "tables: run executes the plan without deleting" "0" "$(jq_field 'j["stats"]["deleted_metadata"] + j["stats"]["deleted_orphans"]' < "$WORK/run.json")"
+check "tables: maintenance jobs need write access" "403" \
+    "$(trocurl -o /dev/null -w '%{http_code}' -X POST "$TNS/tables/orders2/maintenance/plan")"
+check "tables: the admin plane runs the same jobs (root)" "202" \
+    "$(s3curl -o /dev/null -w '%{http_code}' -X POST "$BASE/-/admin/tables/tbe2e/e2e/demo/orders2/plan")"
+s3curl -o /dev/null -X DELETE "$BASE/-/admin/credentials/$TRO_AK"
+if [[ -x "$LIGHTS3_CTL" ]]; then
+    tadm() { LIGHTS3_ADMIN_AK=$AK LIGHTS3_ADMIN_SK=$SK "$LIGHTS3_CTL" tables "$@" --endpoint="$BASE" --region="$REGION"; }
+    check "lights3-ctl tables status" "true" "$(tadm status tbe2e | jq_field 'str(j["enabled"]).lower()')"
+    check "lights3-ctl tables list" "e2e.demo	orders2" "$(tadm list tbe2e --namespace=e2e.demo)"
+    check "lights3-ctl tables plan waits for the job" "plan" "$(tadm plan tbe2e e2e.demo.orders2 | jq_field 'j["op"]')"
+    check "lights3-ctl tables run executes the latest plan" "run" "$(tadm run tbe2e e2e.demo.orders2 | jq_field 'j["op"]')"
+    check "lights3-ctl tables diagnose" "Committed" "$(tadm diagnose tbe2e e2e.demo.orders2 | jq_field 'j["commits"][0]["state"]')"
+    check "lights3-ctl tables recover" "0" "$(tadm recover tbe2e e2e.demo.orders2 --prune | jq_field 'j["finalized"]')"
+    s3curl -o "$WORK/tmp.json" -X POST -H 'Content-Type: application/json' \
+        -d '{"name":"tmp","schema":{"type":"struct","fields":[{"id":1,"name":"id","required":true,"type":"long"}]}}' "$TNS/tables"
+    TMP_ML=$(jq_field 'j["metadata-location"]' < "$WORK/tmp.json")
+    check "lights3-ctl tables purge refuses without --yes" "2" "$(tadm purge tbe2e e2e.demo.tmp >/dev/null 2>&1; echo $?)"
+    check "lights3-ctl tables purge drops the table and its files" "true" \
+        "$(tadm purge tbe2e e2e.demo.tmp --yes | jq_field 'str(j["stats"]["tombstone_removed"]).lower()')"
+    check "tables: the purged table's metadata is gone" "404" \
+        "$(s3curl -o /dev/null -w '%{http_code}' "$BASE/tbe2e/${TMP_ML#s3://tbe2e/}")"
+    check "tables: the purged table is gone from the catalog" "404" "$(s3curl -o /dev/null -w '%{http_code}' -I "$TNS/tables/tmp")"
+fi
 check "tables: drop table" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS/tables/orders2")"
 check "tables: drop namespace" "204" "$(s3curl -o /dev/null -w '%{http_code}' -X DELETE "$TNS")"
 check "tables: the catalog prefix's first segment is not a bucket name" "400" \

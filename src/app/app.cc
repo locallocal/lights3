@@ -184,6 +184,14 @@ void Application::start_server() {
     usage_->start_background(pool_, cfg_.auth.sync_interval_sec);
     // Enforcement scan (lifecycle.scan_interval, 0 = disabled)
     lifecycle_runner_->start_background(pool_, cfg_.lifecycle.scan_interval_sec);
+#ifdef LIGHTS3_TABLES
+    if (tables_maintenance_) {
+        tables_maintenance_->start_background(pool_, cfg_.tables.maintenance.scan_interval_sec);
+        if (cfg_.tables.maintenance.scan_interval_sec > 0)
+            LOG_INFO("tables: periodic maintenance every {} s (delete_enabled={})",
+                     cfg_.tables.maintenance.scan_interval_sec, cfg_.tables.maintenance.delete_enabled);
+    }
+#endif
 
     server_ = http::HttpServerFactory::create(cfg_.http.driver, cfg_.http);
     // Dispatch-entry admission control (docs/concurrency.md §6):
@@ -237,6 +245,55 @@ void Application::start_server() {
             ext.stats = rep.to_json();
             ext.findings = rep.findings.size();
             return ext;
+        });
+    }
+#endif
+#ifdef LIGHTS3_TABLES
+    // Table maintenance jobs (step ④ §5): the catalog's REST / admin entries and the
+    // periodic runner all queue through AdminJobs under the table's resource key
+    if (tables_api_) {
+        auto to_s3 = [](const AdminJobs::Failure& f) -> s3::S3Error {
+            switch (f.code) {
+                case AdminJobs::Error::Busy:
+                    return s3::S3Error(s3::S3ErrorCode::JobInProgress, f.message);
+                case AdminJobs::Error::NoSuchBackend:
+                    return s3::S3Error(s3::S3ErrorCode::NoSuchKey, f.message);
+                case AdminJobs::Error::Unsupported:
+                    return s3::S3Error(s3::S3ErrorCode::InvalidRequest, f.message);
+            }
+            return s3::S3Error(s3::S3ErrorCode::InternalError, f.message);
+        };
+        tables::JobHooks jh;
+        jh.start = [this, to_s3](const std::string& resource, const std::string& op, tables::JobHooks::Fn fn) {
+            auto o = parse_job_op("tables", op);
+            if (!o) throw s3::S3Error(s3::S3ErrorCode::InvalidRequest, "no operation '" + op + "' in 'tables'.");
+            try {
+                uint64_t id = admin_jobs_->start_custom(resource, *o, [fn = std::move(fn)] {
+                    JobOutcome out;
+                    out.kind = "tables";
+                    out.stats = fn();
+                    return out;
+                });
+                nlohmann::json j = admin_jobs_->status(resource, *o);
+                j["job_id"] = id;
+                j["running"] = true;
+                j["busy"] = true;
+                return j;
+            } catch (const AdminJobs::Failure& f) {
+                throw to_s3(f);
+            }
+        };
+        jh.status = [this](const std::string& resource, const std::string& op) {
+            auto o = parse_job_op("tables", op);
+            if (!o) throw s3::S3Error(s3::S3ErrorCode::InvalidRequest, "no operation '" + op + "' in 'tables'.");
+            return admin_jobs_->status(resource, *o);
+        };
+        jh.status_by_id = [this](uint64_t id) { return admin_jobs_->status_by_id(id); };
+        tables_api_->set_job_hooks(jh);
+        tables_maintenance_ = std::make_unique<tables::MaintenanceRunner>(tables_catalog_, cfg_.tables);
+        tables_maintenance_->set_job_hooks(jh);
+        tables_maintenance_->set_usage_hook([this](std::string_view b, int64_t d_objects, int64_t d_bytes) {
+            if (usage_) usage_->apply(std::string(b), d_objects, d_bytes);
         });
     }
 #endif
@@ -877,6 +934,9 @@ void Application::shutdown() noexcept {
         if (cors_store_) cors_store_->shutdown_background();
         if (lifecycle_runner_) lifecycle_runner_->shutdown_background();
         if (lifecycle_store_) lifecycle_store_->shutdown_background();
+#ifdef LIGHTS3_TABLES
+        if (tables_maintenance_) tables_maintenance_->shutdown_background();
+#endif
         // final counter flush happens here
         if (usage_) usage_->shutdown_background();
         if (quota_store_) quota_store_->shutdown_background();
@@ -911,6 +971,9 @@ void Application::shutdown() noexcept {
     cors_store_.reset();
     lifecycle_runner_.reset();
     lifecycle_store_.reset();
+#ifdef LIGHTS3_TABLES
+    tables_maintenance_.reset();
+#endif
     tenants_.reset();
     owner_store_.reset();
     tenant_store_.reset();

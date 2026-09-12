@@ -350,6 +350,11 @@ private:
     // handlers/admin_jobs.cc: POST/GET /-/admin/duostore/<backend>/gc|scan and
     // /-/admin/tier/<backend>/scan|gc|reconcile, GET .../quarantine (root only)
     Task<http::HttpResponse> admin_jobs(http::HttpRequest& req, std::string& access_key, const RequestContext& ctx);
+#ifdef LIGHTS3_TABLES
+    // POST/GET /-/admin/tables/<bucket>/<ns-path>/<t>/<plan|run|purge> (step ④ §5, root)
+    Task<http::HttpResponse> admin_tables_jobs(http::HttpRequest& req, std::string& access_key,
+                                               const RequestContext& ctx);
+#endif
 
     // ---- usage / quota / tenancy helpers (handlers/quota_gate.cc) ----
     // Size of the object currently under (bucket,key) when usage accounting is on;

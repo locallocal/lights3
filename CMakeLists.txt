@@ -416,6 +416,8 @@ if(LIGHTS3_TABLES)
     src/tables/iceberg/manifest.cc
     src/tables/diagnostics.cc
     src/tables/fsck.cc
+    src/tables/maintenance.cc
+    src/tables/maintenance_runner.cc
   )
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_TABLES)
   # deflate-coded Avro manifests need zlib (docs/s3-tables-design.md §7.4); without it the
@@ -557,7 +559,7 @@ add_executable(lights3-ctl src/tools/lights3_ctl.cc src/tools/lights3_ctl_common
                      src/tools/lights3_ctl_tenant.cc src/tools/lights3_ctl_quota.cc
                      src/tools/lights3_ctl_usage.cc src/tools/lights3_ctl_reload.cc
                      src/tools/lights3_ctl_object.cc src/tools/lights3_ctl_mpu.cc
-                     src/tools/lights3_ctl_jobs.cc)
+                     src/tools/lights3_ctl_jobs.cc src/tools/lights3_ctl_tables.cc)
 target_link_libraries(lights3-ctl PRIVATE lights3_core ccmd::ccmd
                                     nlohmann_json::nlohmann_json)
 target_include_directories(lights3-ctl SYSTEM PRIVATE third_party)
@@ -599,6 +601,7 @@ if(LIGHTS3_BUILD_TESTS)
       tests/unit/test_tables_avro.cc
       tests/unit/test_tables_catalog.cc
       tests/unit/test_tables_rest.cc
+      tests/unit/test_tables_maintenance.cc
     )
   endif()
   if(LIGHTS3_DUOSTORE)

@@ -32,6 +32,9 @@ public:
 
     // Usage (for tests and the registry's metrics callback)
     uint64_t used_bytes() const;
+    // Test hook: back-date an object's last_modified (age-based decisions such as the
+    // table-maintenance safety window). false = no such object
+    bool set_mtime_for_tests(std::string_view bucket, std::string_view key, std::chrono::system_clock::time_point t);
     Task<void> create_bucket(std::string_view bucket) override;
     Task<void> delete_bucket(std::string_view bucket) override;
     Task<bool> bucket_exists(std::string_view bucket) override;

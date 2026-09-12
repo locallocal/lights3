@@ -347,4 +347,26 @@ Task<DeepCheckReport> check_new_snapshots_deep(const SnapshotCheckContext& ctx, 
     co_return report;
 }
 
+Task<std::optional<std::set<std::string>>> reachable_files(const SnapshotCheckContext& ctx, const Json& md,
+                                                           const DeepCheckOptions& opt, size_t& manifests_seen) {
+    std::set<std::string> reach;
+    if (!md.contains("snapshots") || !md["snapshots"].is_array()) co_return reach;
+    for (auto& s : md["snapshots"]) {
+        if (!s.is_object()) continue;
+        if (s.contains("manifest-list") && s["manifest-list"].is_string())
+            reach.insert(checked_key(ctx, s["manifest-list"].get<std::string>()));
+        SnapshotManifests sm = co_await manifests_of(ctx, s, opt);
+        if (sm.unsupported) co_return std::nullopt;
+        manifests_seen += sm.manifests.size();
+        if (manifests_seen > opt.max_manifests)
+            throw commit_failed("table references more than " + std::to_string(opt.max_manifests) + " manifests");
+        for (auto& m : sm.manifests) reach.insert(checked_key(ctx, m.path));
+        size_t files = 0;
+        auto entries = co_await entries_of(ctx, sm.manifests, opt, files);
+        if (!entries) co_return std::nullopt;
+        for (auto& e : *entries) reach.insert(checked_key(ctx, e.file.path));
+    }
+    co_return reach;
+}
+
 }  // namespace lights3::tables::iceberg

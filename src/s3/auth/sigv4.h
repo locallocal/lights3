@@ -34,12 +34,12 @@ struct CredentialLookup {
     // requires a matching X-Amz-Security-Token (mismatch -> InvalidToken) and refuses
     // past-expiry requests (ExpiredToken). Returned by the same single lookup so the
     // §3.7 snapshot invariant holds for sessions too
-    std::optional<std::string> session_token;
-    std::optional<std::chrono::system_clock::time_point> session_expires;
+    std::optional<std::string> session_token{};
+    std::optional<std::chrono::system_clock::time_point> session_expires{};
     // Multi-tenancy (roadmap §3.9 ③): the tenant the credential belongs to (empty =
     // legacy/root credential, sees every bucket) and whether it administers that
     // tenant. Snapshotted with the policy for the same §3.7 reason
-    std::string tenant;
+    std::string tenant{};
     bool tenant_admin = false;
 };
 

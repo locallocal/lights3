@@ -279,9 +279,9 @@ Task<std::invoke_result_t<Fn>> CloudProxyBackend::control_io(Fn fn) {
     struct Awaiter {
         Fn* fn;
         IExecutor* ex;
-        std::optional<R> result;
-        std::exception_ptr err;
-        std::thread th;
+        std::optional<R> result{};
+        std::exception_ptr err{};
+        std::thread th{};
         // gate the thread body: it must not run before the move-assignment to th
         // completes
         std::binary_semaphore gate{0};

@@ -40,7 +40,7 @@ struct RocksMetaOptions {
     int max_background_jobs = 2;
     // empty scope = isolated instance (tests construct directly with zero wiring,
     // docs/archive/gaps.md §6.1)
-    MetricsScope metrics;
+    MetricsScope metrics{};
 };
 
 class RocksMetaStore final : public IMetaStore {

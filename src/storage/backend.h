@@ -155,12 +155,12 @@ struct ObjectLayout {
 };
 
 struct PutResult {
-    std::string etag;
+    std::string etag{};
     // Filled by complete_multipart when a composite checksum was computed from the
     // stored per-part values (roadmap §2.2); the handler echoes it in the response XML
-    std::string checksum_algorithm;
-    std::string checksum_value;
-    std::string checksum_type;
+    std::string checksum_algorithm{};
+    std::string checksum_value{};
+    std::string checksum_type{};
 };
 
 // Conditional PUT (docs/s3-protocol.md §6): the check and the commit must both happen
@@ -204,12 +204,12 @@ struct BucketInfo {
 struct PartInfo {
     int part_no = 0;
     // may be quoted; quotes are stripped before comparison
-    std::string etag;
+    std::string etag{};
     // Optional client-declared part checksum from the complete XML (roadmap §2.2):
     // validated at L2 against the stored per-part value; never trusted as a source
-    std::string checksum_algorithm;
+    std::string checksum_algorithm{};
     // base64
-    std::string checksum_value;
+    std::string checksum_value{};
 };
 
 // Client-declared, gateway-verified checksum accompanying an UploadPart body

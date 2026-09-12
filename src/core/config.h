@@ -191,7 +191,7 @@ struct AuthConfig {
     std::string service = "s3";
     // Credential management phase 2 (docs/credential-management.md §10)
     // external credentials file (JSON, hot-reloaded); empty = disabled
-    std::string credentials_file;
+    std::string credentials_file{};
     // file mtime polling period; 0 = load at startup only
     int credentials_file_reload_sec = 30;
     // multi-instance: periodic incremental reload of .sys; 0 = disabled
@@ -250,13 +250,13 @@ struct WebsiteBucket {
     std::string index_suffix = "index.html";
     // Object served as the body of anonymous 4xx/5xx responses, keeping the original
     // status code; empty = built-in minimal HTML page
-    std::string error_key;
+    std::string error_key{};
     // RedirectAllRequestsTo (roadmap §2.3): every anonymous request answers 301 to
     // <protocol>://<host><path>; exclusive with index/error/rules (AWS shape).
     // Non-empty host enables it; empty protocol follows the request scheme
-    std::string redirect_all_host;
-    std::string redirect_all_protocol;
-    std::vector<WebsiteRoutingRule> routing_rules;
+    std::string redirect_all_host{};
+    std::string redirect_all_protocol{};
+    std::vector<WebsiteRoutingRule> routing_rules{};
     // Anonymous request rate limit, requests/second (roadmap §2.3: anonymous GET has
     // no signature cost — a public bucket is otherwise a free bandwidth amplifier).
     // 0 = unlimited. YAML/JSON only; the AWS XML shape has no such field

@@ -53,14 +53,14 @@ struct FsDataOptions {
     // no reporting). Readers hold a copy of these options that escapes the store's
     // lifetime — the callback must not reference the store/backend (the assembly
     // side captures only a counter)
-    std::function<void()> on_corruption;
+    std::function<void()> on_corruption{};
     // io_uring data plane (roadmap §3.4 ⑤): when set, chunk writes/reads and pack
     // record reads go through the shared engine's pipelined streams and the
     // durability fdatasyncs become FSYNC SQEs; null = the original synchronous
     // path. Layout is identical either way. Readers copy these options and escape
     // the store's lifetime, so they co-own the engine via this shared_ptr.
     // Deliberately last: existing positional FsDataOptions initializers stay valid
-    std::shared_ptr<UringEngine> uring;
+    std::shared_ptr<UringEngine> uring{};
 };
 
 class ChunkWriter;

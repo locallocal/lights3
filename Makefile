@@ -2,15 +2,19 @@
 #
 #   make release       Release build in $(RELEASE_DIR) (build-rel) via build.sh
 #   make debug         Debug build in $(DEBUG_DIR) (build) via build.sh
+#   make test          debug, then the quick ctest set in $(DEBUG_DIR) (-LE "perf|soak|mint"; CTEST_ARGS adds filters)
+#   make coverage      scripts/coverage.sh: -O0 --coverage build in $(COVERAGE_DIR) (build-cov), unit tests, line-coverage report
 #   make package       release, then CPack in $(RELEASE_DIR): deb / rpm / tgz under packages/
-#   make clean         remove $(RELEASE_DIR) and $(DEBUG_DIR) (other build-* variants are kept)
+#   make clean         remove $(RELEASE_DIR), $(DEBUG_DIR) and $(COVERAGE_DIR) (other build-* variants are kept)
 #   make format        move trailing comments above their code, then clang-format in place
 #   make format-check  list trailing comments and files clang-format would change; exit 1 if any
 #   make help          this text
 #
 # JOBS (default: half the cores) is the build parallelism; BUILD_ARGS passes extra
-# build.sh flags (e.g. BUILD_ARGS="--redis --sqlite"); RELEASE_DIR / DEBUG_DIR move
-# the build directories.  CLANG_FORMAT selects the formatter binary (a pinned major
+# build.sh flags (e.g. BUILD_ARGS="--redis --sqlite"); RELEASE_DIR / DEBUG_DIR /
+# COVERAGE_DIR move the build directories.  CTEST_ARGS is appended to the ctest line of
+# `make test` (e.g. CTEST_ARGS="-R tables" or CTEST_ARGS="-L perf"); COVERAGE_ARGS goes
+# to scripts/coverage.sh (e.g. COVERAGE_ARGS="--e2e" or "--no-build").  CLANG_FORMAT selects the formatter binary (a pinned major
 # version keeps the output stable across machines: the Google preset drifts slightly
 # between LLVM releases).
 
@@ -18,6 +22,9 @@ JOBS        ?= $(shell j=$$(( $$(nproc) / 2 )); echo $$(( j > 0 ? j : 1 )))
 BUILD_ARGS  ?=
 RELEASE_DIR ?= build-rel
 DEBUG_DIR   ?= build
+COVERAGE_DIR ?= build-cov
+CTEST_ARGS  ?=
+COVERAGE_ARGS ?=
 CLANG_FORMAT ?= clang-format
 # Tracked C++ sources under src/ and tests/ (git ls-files honours .gitignore, so
 # build-*/ never leaks in; third_party/ submodules carry their own style).
@@ -28,10 +35,10 @@ CXX_SOURCES := $(shell git ls-files -- 'src/*.h' 'src/*.cc' 'tests/*.h' 'tests/*
 # Google style asks for (`}  // namespace x`, `#endif  // GUARD`).
 COMMENT_LINT := python3 scripts/check_comments.py
 
-.PHONY: help release debug package clean format format-check
+.PHONY: help release debug test coverage package clean format format-check
 
 help:
-	@sed -n '3,9p' $(MAKEFILE_LIST) | sed 's/^#   //'
+	@sed -n '3,11p' $(MAKEFILE_LIST) | sed 's/^#   //'
 
 # build.sh initialises the submodules, configures (Ninja when present) and compiles;
 # the build type is sticky in the CMake cache, so each target owns its directory.
@@ -41,6 +48,18 @@ release:
 debug:
 	./build.sh --debug -B $(DEBUG_DIR) -j $(JOBS) $(BUILD_ARGS)
 
+# The quick set of docs/testing.md §1: everything except the 3-second bench gate, the
+# 30-second soak and the docker-only mint suite (the same filter scripts/check-all.sh
+# uses).  ctest runs serially: the e2e sections bind fixed ports and share temp dirs.
+test: debug
+	ctest --test-dir $(DEBUG_DIR) -LE "perf|soak|mint" --output-on-failure $(CTEST_ARGS)
+
+# scripts/coverage.sh builds $(COVERAGE_DIR) with build.sh --coverage, runs unit_tests +
+# the fuzz corpus replays with fresh counters, then reports line coverage of src/ with
+# gcovr / lcov / gcov (whichever is installed) into $(COVERAGE_DIR)/coverage/.
+coverage:
+	./scripts/coverage.sh -j $(JOBS) -B $(COVERAGE_DIR) $(COVERAGE_ARGS)
+
 # CPack picks the generators available on the host (cmake/Packaging.cmake): DEB when
 # dpkg-deb is present, RPM when rpmbuild is, TGZ otherwise; output in
 # $(RELEASE_DIR)/packages/.  Packages are always built from the Release tree.
@@ -49,7 +68,7 @@ package: release
 	@find $(RELEASE_DIR)/packages -maxdepth 1 -type f | sort
 
 clean:
-	rm -rf $(RELEASE_DIR) $(DEBUG_DIR)
+	rm -rf $(RELEASE_DIR) $(DEBUG_DIR) $(COVERAGE_DIR)
 
 format:
 	@$(COMMENT_LINT) --fix $(CXX_SOURCES)

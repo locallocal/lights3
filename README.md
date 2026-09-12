@@ -78,6 +78,8 @@ and sqlite serve its optional meta engines).
 ```bash
 ./build.sh --test        # submodules + cmake + ninja + ctest in one go
 make release             # Release build in build-rel (make debug -> Debug in build; make package -> deb/rpm/tgz)
+make test                # Debug build, then the quick ctest set (everything but the perf gate, soak and mint)
+make coverage            # -O0 --coverage build in build-cov, unit tests, line-coverage report (scripts/coverage.sh)
 ```
 
 or manually:

@@ -195,7 +195,7 @@ SIGV4_SERVICE 's3')`）5/5：attach、列 namespace、scan。依赖装在 `pip -
 - `./build.sh --ubsan`（build-ubsan，`-fsanitize=undefined`）；`check-all.sh` 以
   `UBSAN_OPTIONS=halt_on_error=1` 运行使发现即失败。
 - `./build.sh --coverage`（build-cov，`-O0 --coverage`）；`scripts/coverage.sh
-  [--e2e] [--no-build] [--no-test]` 构建、跑测、报告：有 gcovr 出 HTML，有 lcov 出
+  [--e2e] [--no-build] [--no-test]`（即 `make coverage`，§9）构建、跑测、报告：有 gcovr 出 HTML，有 lcov 出
   HTML，都没有则 `scripts/coverage_aggregate.py` 解析 `gcov --json-format` 输出、按
   (文件, 行号) 求并集给出 `src/` 行覆盖率（写入 `build-cov/coverage/summary.txt`；
   gcov 的文本汇总对模板实例化重复计行，不可直接相加）。**已知限制**：GCC 的 gcov
@@ -213,12 +213,18 @@ sqlite / redis / rados / tikv / seastar / fuzz）逐个增量构建 + `ctest -LE
 
 ## 9. Makefile：构建与代码格式
 
-根目录 `Makefile` 是 `build.sh` 与 CPack 的薄封装：`make release`（Release，`build-rel/`）、
-`make debug`（Debug，`build/`）、`make package`（先 release，再 CPack，产物在
-`build-rel/packages/`，生成器按机器上有的 dpkg-deb / rpmbuild 选，否则 TGZ）、
-`make clean`（只删这两个目录，其余 `build-*` 变体不动）。`JOBS=` 定并发（默认核数
-的一半），`BUILD_ARGS="--redis --sqlite"` 透传 build.sh 旗标，`RELEASE_DIR=` /
-`DEBUG_DIR=` 改目录。`make help` 列出全部目标。
+根目录 `Makefile` 是 `build.sh`、ctest、`scripts/coverage.sh` 与 CPack 的薄封装：
+`make release`（Release，`build-rel/`）、`make debug`（Debug，`build/`）、
+`make test`（先 debug，再在 `build/` 跑 §1 的快速集 `ctest -LE "perf|soak|mint"`，与
+`check-all.sh` 同一过滤；`CTEST_ARGS="-R tables"` / `CTEST_ARGS="-L perf"` 追加筛选；
+ctest 串行跑——e2e 段绑定固定端口）、`make coverage`（`scripts/coverage.sh`：`build-cov/`
+的 `-O0 --coverage` 构建 + 单测与 fuzz 回放 + §7 的行覆盖率报告；
+`COVERAGE_ARGS="--e2e"` / `"--no-build"` / `"--no-test"` 透传）、`make package`（先
+release，再 CPack，产物在 `build-rel/packages/`，生成器按机器上有的 dpkg-deb / rpmbuild
+选，否则 TGZ）、`make clean`（只删 `build-rel/`、`build/`、`build-cov/` 三个目录，其余
+`build-*` 变体不动）。`JOBS=` 定并发（默认核数的一半），`BUILD_ARGS="--redis --sqlite"`
+透传 build.sh 旗标，`RELEASE_DIR=` / `DEBUG_DIR=` / `COVERAGE_DIR=` 改目录。`make help`
+列出全部目标。
 
 ### 9.1 代码格式
 

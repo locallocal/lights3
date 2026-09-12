@@ -1,7 +1,9 @@
 # LightS3
 
 An S3-protocol gateway written in C++20. It exposes the standard S3 REST API on
-the outside, with pluggable HTTP drivers and storage backends on the inside.
+the outside, with pluggable HTTP drivers and storage backends on the inside, and
+serves an Apache Iceberg REST catalog (S3 Tables) on the same listener so that
+PyIceberg, DuckDB, Spark or Trino can use any bucket as a lakehouse catalog.
 Design documents live in [docs/](docs/README.md) (Chinese originals, English
 translations under [docs/en/](docs/en/README.md)); the current implementation
 follows the architecture described in
@@ -35,11 +37,13 @@ boundaries are `IHttpServer` (L1/L2) and `IStorageBackend` (L2/L3):
 │        └─ per-credential policy authorize (bucket glob / readonly)    │
 │             └─ route table (method + scope + query flag)              │
 │                  └─ handlers: buckets / objects / list / multipart    │
+│                  └─ /iceberg/v1/... → tables::RestApi (S3 Tables:     │
+│                       Iceberg REST catalog, namespaces/tables/views)  │
 │ XML codec · S3Error mapping · Metrics · access log                    │
 └─────────────────────────────────┬─────────────────────────────────────┘
                    IStorageBackend (Task<T>, streaming)
 ┌─ L3 · Storage ──────────────────▼─────────────────────────────────────┐
-│ BucketRouter: glob rules → backend; ".sys" reserved for credentials   │
+│ BucketRouter: glob rules → backend; ".sys": credentials + catalog     │
 │   localfs  : sidecar .meta JSON, atomic staging+rename                │
 │   xlocalfs : io_uring data plane (raw syscalls), reaper thread        │
 │   memory   : in-memory backend for tests                              │
@@ -125,8 +129,8 @@ export LIGHTS3_MASTER_KEY=$(openssl rand -hex 32)
 ./build/lights3 --config=config/lights3.yaml
 ```
 
-The ops CLI `lights3-ctl` (credentials, bucket websites, benchmarks) and the full
-`lights3` command tree are documented in [docs/en/cli.md](docs/en/cli.md).
+The ops CLI `lights3-ctl` (credentials, bucket websites, table buckets, benchmarks)
+and the full `lights3` command tree are documented in [docs/en/cli.md](docs/en/cli.md).
 
 Access it with any S3 client (the examples below use curl's SigV4 support):
 
@@ -139,6 +143,88 @@ s3curl -r 0-99 http://127.0.0.1:9000/mybucket/file.bin            # Range downlo
 ```
 
 Or use the aws cli: `aws --endpoint-url http://127.0.0.1:9000 s3 ls`.
+
+## S3 Tables (Apache Iceberg REST catalog)
+
+Next to the S3 API, lights3 serves an Iceberg REST catalog. A *table bucket*
+keeps Iceberg metadata and data files as ordinary objects; the catalog state
+(namespaces, table pointers, commit records) lives as JSON objects in the `.sys`
+bucket, and every metadata-pointer swap is one conditional write
+(`If-Match` / `If-None-Match: *`) on the storage backend. The same guarantees
+therefore hold on every backend and across several gateways that share one
+store, and the gateway generates and validates the Iceberg metadata itself, so
+engines need nothing beyond their stock REST-catalog settings.
+
+Enable it and create a table bucket:
+
+```yaml
+tables:
+  enabled: true                 # /iceberg/v1/... on the same listener
+  credential_vending: true      # optional: hand engines table-scoped STS sessions
+  maintenance:
+    scan_interval: 0s           # 0 = maintenance only on request (lights3-ctl / REST)
+```
+
+```bash
+./build/lights3-ctl tables enable lake     # root credential: PUT /iceberg/v1/buckets/lake
+```
+
+Point an engine at it (SigV4-signed REST calls, signing name `s3`):
+
+```python
+from pyiceberg.catalog import load_catalog
+cat = load_catalog("lake", **{
+    "uri": "http://127.0.0.1:9000/iceberg", "warehouse": "lake",
+    "rest.sigv4-enabled": "true", "rest.signing-name": "s3", "rest.signing-region": "us-east-1",
+    "s3.endpoint": "http://127.0.0.1:9000", "s3.path-style-access": "true", "s3.region": "us-east-1",
+    "s3.access-key-id": "AKIDEXAMPLE", "s3.secret-access-key": "my-secret",
+})
+cat.create_namespace("sales")
+```
+
+```sql
+-- DuckDB (iceberg + httpfs extensions)
+CREATE SECRET s3s (TYPE s3, PROVIDER config, KEY_ID 'AKIDEXAMPLE', SECRET 'my-secret',
+                   REGION 'us-east-1', ENDPOINT '127.0.0.1:9000', URL_STYLE 'path', USE_SSL false);
+ATTACH 'lake' AS lake (TYPE iceberg, ENDPOINT 'http://127.0.0.1:9000/iceberg',
+                       AUTHORIZATION_TYPE 'sigv4', SECRET s3s, SIGV4_REGION 'us-east-1', SIGV4_SERVICE 's3');
+SELECT * FROM lake.sales.orders LIMIT 10;
+```
+
+What the catalog provides:
+
+- **The standard REST catalog surface** on `/iceberg/v1` (optional `/_iceberg`
+  alias): `/config`, namespaces, tables (create / load / commit / register /
+  rename / drop, `metadata-location`), views, `reportMetrics`, Iceberg JSON
+  errors; format v1/v2 metadata with every requirement and update applied
+  server-side
+- **Safe commits**: single-table CAS with idempotent replay by commit id, a
+  documented crash-window matrix with `catalog/diagnostics` and
+  `catalog/recovery` endpoints, two-phase rename recoverable from any gateway,
+  and deep snapshot validation (manifest-list → manifests → data files, Avro
+  null / deflate) before a snapshot is accepted; LoadTable carries an `ETag`
+  and honors `If-None-Match`
+- **Access control that follows the object model**: per-credential policy on
+  (bucket, `<namespace>/<table>`), tenant isolation, the `s3tables` signing
+  name, table-scoped vended credentials
+  (`X-Iceberg-Access-Delegation: vended-credentials`); the reserved prefix is
+  read-only on the S3 side and lifecycle rules skip table buckets
+- **Maintenance as admin jobs**: `plan` (metadata retention, snapshot expiry,
+  orphan files, compaction candidates) / `run` / `purge` with a safety window
+  and pointer re-check, driven by `lights3-ctl tables …`, the REST endpoints or
+  an optional periodic runner; `fsck` reconciles the catalog with the buckets
+- **Deployment choices**: any backend as the object store; gateways that share
+  the default backend share the catalog; `tables.catalog_backing: duostore`
+  moves the catalog into the DuoStore meta engine (RocksDB / SQLite / Redis /
+  TiKV) with atomic commits, and `lights3 tables export|import` migrates
+  between the two backings
+
+Verified clients: PyIceberg 0.12 and DuckDB 1.5 (ctest `tables_smoke`); Spark
+and Trino use the same REST settings (templates in the design doc, not yet
+verified here). Design and implementation notes:
+[docs/en/s3-tables-design.md](docs/en/s3-tables-design.md); commands:
+[docs/en/cli.md](docs/en/cli.md) §2.6 and §3.13; endpoint list:
+[docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1.
 
 ## Install, package, containerize
 
@@ -239,6 +325,12 @@ lists the start / stop / restart / status / journal commands.
   parts counted); tenant entities with bucket ownership (credential
   `tenant`/`role`, tenants see only their own buckets, tiered admin plane);
   JSON-lines audit log
+- **S3 Tables / Iceberg REST catalog**
+  ([docs/en/s3-tables-design.md](docs/en/s3-tables-design.md)): table buckets,
+  catalog state on `.sys` with conditional-write commits and idempotent replay,
+  deep Avro validation, diagnostics / recovery, credential vending, maintenance
+  jobs, views, multi-gateway operation, optional DuoStore-meta catalog backing
+  (see the section above)
 
 Not supported by design (returns NotImplemented; see
 [docs/en/s3-protocol.md](docs/en/s3-protocol.md) §1): versioning, fine-grained
@@ -262,6 +354,7 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [s3-protocol](docs/en/s3-protocol.md) | API scope, SigV4 (incl. presigned & clock skew), XML codec, errors, mint gate |
 | [credential-management](docs/en/credential-management.md) | AK/SK admin API, three credential sources, `.sys` persistence, at-rest encryption, policy |
 | [multi-tenancy](docs/en/multi-tenancy.md) | Usage accounting, bucket/tenant quotas, tenants and bucket ownership, tiered admin plane, audit log |
+| [s3-tables-design](docs/en/s3-tables-design.md) | S3 Tables: Iceberg REST catalog on `.sys`, CAS commit protocol, deep validation, diagnostics / recovery, credentials, maintenance, DuoStore-meta backing |
 | [object-read-write-flow](docs/en/object-read-write-flow.md) | End-to-end read/write paths, BodyReader chains, staging commit, fd-snapshot reads |
 | [storage/tiered-design](docs/en/storage/tiered-design.md) | Cold-data tiering to cloud, stub metadata, transparent read-back |
 | [storage/cloudproxy-design](docs/en/storage/cloudproxy-design.md) | Self-signed SigV4 proxy to remote S3, streaming pumps, retries |
@@ -272,4 +365,4 @@ section numbering (source comments reference sections as `docs/<name>.md §N`).
 | [storage/duostore-meta-tikv-design](docs/en/storage/duostore-meta-tikv-design.md) | TiKV IMetaStore: client-c + 2PC sidecar |
 | [performance-baseline](docs/en/performance-baseline.md) | Driver × TLS bench matrix, before/after the data-plane optimizations |
 | [deployment](docs/en/deployment.md) | Version stamp, `cmake --install`, deb/rpm packages, Dockerfile + compose, rollback / uninstall |
-| [cli](docs/en/cli.md) | `lights3` / `lights3-ctl` command reference: startup, duostore dump/load/backup/restore, cred/website/bench/quota/tenant/usage |
+| [cli](docs/en/cli.md) | `lights3` / `lights3-ctl` command reference: startup, duostore dump/load/backup/restore, `tables export/import`, cred/website/bench/quota/tenant/usage/tables |

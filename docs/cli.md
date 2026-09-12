@@ -225,6 +225,15 @@ refs_stale 可能是巡检期间 MPU complete 造成的暂态，复跑确认。�
 ./build/lights3 tier quarantine purge tierdata archive photos/2024/a.jpg -c /etc/lights3/lights3.yaml
 ```
 
+### 2.5 配置热重载：`SIGHUP`
+
+`kill -HUP <pid>` 让服务进程重新读取 `--config` 指定的文件（roadmap §4.4，
+[config-reload.md](config-reload.md)）：整体校验后只应用可热更新子集（日志级别、
+`request_timeout`/`transfer_stall_timeout`、`max_inflight_requests`、`min_part_size`、
+限流、bucket 路由规则、后端实例的增删、TLS 证书内容），其余改动逐项 WARN "需重启"；文件校验失败
+则一字不改。systemd 单元可配 `ExecReload=/bin/kill -HUP $MAINPID`。同一动作也可经
+`lights3-ctl reload`（§3.9）触发并拿到报告。
+
 ### 2.6 `tables export` / `tables import`
 
 S3 Tables 目录状态在两种后备之间迁移（[s3-tables-design.md §12](s3-tables-design.md)，
@@ -238,15 +247,6 @@ lights3 tables import catalog.jsonl --backing=duostore --config=/etc/lights3/lig
 每行 `{"bucket","key","body"}`：`key` 是两种后备共用的目录键（`tables-catalog/<bucket>/…`），
 `body` 是对象 JSON；import 覆盖同键。表桶标记（`.sys/tables/`）不在其中——两种后备都读
 `.sys`。`--backing` 覆盖配置值，迁移即"旧配置 export → 改配置 → import"。
-
-### 2.5 配置热重载：`SIGHUP`
-
-`kill -HUP <pid>` 让服务进程重新读取 `--config` 指定的文件（roadmap §4.4，
-[config-reload.md](config-reload.md)）：整体校验后只应用可热更新子集（日志级别、
-`request_timeout`/`transfer_stall_timeout`、`max_inflight_requests`、`min_part_size`、
-限流、bucket 路由规则、后端实例的增删、TLS 证书内容），其余改动逐项 WARN "需重启"；文件校验失败
-则一字不改。systemd 单元可配 `ExecReload=/bin/kill -HUP $MAINPID`。同一动作也可经
-`lights3-ctl reload`（§3.9）触发并拿到报告。
 
 ## 3. `lights3-ctl` —— 运维 CLI
 

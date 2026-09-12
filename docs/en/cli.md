@@ -269,6 +269,24 @@ validation changes nothing. A systemd unit can use
 `ExecReload=/bin/kill -HUP $MAINPID`. The same action is available through
 `lights3-ctl reload` (§3.9), which also returns the report.
 
+### 2.6 `tables export` / `tables import`
+
+Moves the S3 Tables catalog state between the two backings
+([s3-tables-design.md §12](s3-tables-design.md), `tables.catalog_backing: object |
+duostore`). Offline: the backends are built, nothing listens; stop every gateway
+first.
+
+```bash
+lights3 tables export catalog.jsonl --config=/etc/lights3/lights3.yaml                 # reads the configured backing
+lights3 tables import catalog.jsonl --backing=duostore --config=/etc/lights3/lights3.yaml
+```
+
+One `{"bucket","key","body"}` per line: `key` is the catalog key both backings
+share (`tables-catalog/<bucket>/…`), `body` the object's JSON; import overwrites
+the same key. Table-bucket markers (`.sys/tables/`) are not included -- both
+backings read `.sys`. `--backing` overrides the configured value, so a migration
+is "export with the old configuration → change it → import".
+
 ## 3. `lights3-ctl` — ops CLI
 
 `src/tools/lights3-ctl*.cc`, built next to `lights3`. Command groups: `cred`
@@ -276,7 +294,8 @@ validation changes nothing. A systemd unit can use
 `bench` (load testing), `fsck` (online object verification), `quota` (bucket
 quotas), `tenant` (tenants and bucket ownership), `usage` (usage counters;
 roadmap §3.9, see [multi-tenancy.md](multi-tenancy.md)), `reload`
-(configuration hot reload, [config-reload.md](config-reload.md)). Every subcommand
+(configuration hot reload, [config-reload.md](config-reload.md)), `tables` (S3 Tables
+catalog: table buckets, listing, maintenance, diagnostics, §3.13). Every subcommand
 signs its own SigV4 requests against the lights3 HTTP endpoint; no aws cli
 needed.
 
@@ -641,6 +660,51 @@ lights3-ctl duostore scan duodata --no-wait       # just the job id
 lights3-ctl tier reconcile tierdata               # exit 1 when refs_missing > 0
 lights3-ctl tier scan tierdata --status           # progress / last outcome
 lights3-ctl tier quarantine list tierdata
+```
+
+### 3.13 `tables` — S3 Tables catalog: table buckets, listing, maintenance, diagnostics
+
+The operator's entry to [s3-tables-design.md](s3-tables-design.md) (implementation
+notes in [s3-tables-design.md §16 ④](s3-tables-design.md)). Catalog calls go to
+`<prefix>/v1/...` (`--catalog-prefix`, default `/iceberg`, i.e. `tables.path_prefix`),
+signed with service `s3`; `plan` / `run` are admin-plane jobs (root credential) on
+the same job model as §3.12 (202 + job id, polled every 0.3 s until done, the
+outcome document printed). Tables are given as `<namespace>.<table>`, nested
+namespaces joined with `.`.
+
+```text
+lights3-ctl tables enable|disable|status <bucket>          PUT / DELETE / GET <prefix>/v1/buckets/<bucket> (enable / disable need root)
+lights3-ctl tables list <bucket> [--namespace=a.b] [--json] one "<namespace>\t<table>" per line; without --namespace the whole tree
+lights3-ctl tables config <bucket> <ns.table> [--set=<json>]
+                                                            GET / PUT …/maintenance/config: effective / table-config / defaults;
+                                                            --set keys: retain_recent_metadata_files delete_enabled max_snapshot_age_ms
+                                                            min_snapshots_to_keep orphan_cleanup (omitted keys fall back to tables.maintenance)
+lights3-ctl tables plan <bucket> <ns.table> [--no-wait]     POST /-/admin/tables/<bucket>/<ns levels>/<table>/plan, read-only; "stats" is the plan
+lights3-ctl tables run <bucket> <ns.table> [--plan-job=<id>] [--yes] [--no-wait]
+                                                            runs the latest plan (or --plan-job): snapshot expiry is an ordinary commit;
+                                                            candidate files are deleted only with delete_enabled, and refused outright
+                                                            without --yes (exit 2); a table that changed since the plan → StalePlan
+lights3-ctl tables purge <bucket> <ns.table> --yes [--no-wait]
+                                                            DELETE …?purgeRequested=true: tombstone first, then the job removes the
+                                                            reserved directory, the location prefix, commit records and the tombstone;
+                                                            irreversible, --yes is mandatory
+lights3-ctl tables diagnose <bucket> <ns.table>            GET …/catalog/diagnostics (③)
+lights3-ctl tables recover <bucket> <ns.table> [--prune]   POST …/catalog/recovery (③)
+```
+
+Exit codes: 0 success; 1 request failed or job `error`; 2 usage error (including
+`run` / `purge` without `--yes`). A table whose plan says `manual-review: true` is
+refused by the server on `run` (400) -- read `notes` first (a ref with its own
+retention rules, table properties conflicting with the maintenance
+configuration, manifest parse failures, ...).
+
+```bash
+lights3-ctl tables enable lake
+lights3-ctl tables list lake
+lights3-ctl tables config lake sales.orders --set='{"delete_enabled":true,"max_snapshot_age_ms":432000000}'
+lights3-ctl tables plan lake sales.orders          # candidates and the snapshots to expire
+lights3-ctl tables run lake sales.orders --yes      # expiry commit + candidate deletion
+lights3-ctl tables purge lake sales.tmp --yes
 ```
 
 ## 4. Conventions for adding subcommands

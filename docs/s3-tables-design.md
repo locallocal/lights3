@@ -6,7 +6,7 @@
 > [step-3-validation-diagnostics.md §12](s3-tables/step-3-validation-diagnostics.md)、
 > [step-4-maintenance.md §10](s3-tables/step-4-maintenance.md)、
 > [step-5-multi-gateway-docs.md §8](s3-tables/step-5-multi-gateway-docs.md)、
-> [step-6-optional.md §7](s3-tables/step-6-optional.md)；偏离设计的点已回写到对应章节。本文先回答"RustFS 是怎么做 S3 Tables
+> [step-6-optional.md §7](s3-tables/step-6-optional.md)；偏离设计的点已回写到对应章节，实现记录留下的收尾项与长期项在 [todo.md](todo.md) §2 / §4 / §5。本文先回答"RustFS 是怎么做 S3 Tables
 > 的"（§2，源码核实 @853ae63，2026-09-11），再给出 lights3 的方案（§3–§13）与
 > 实施拆分（§14）。代码落地后，本文按仓库惯例保留为设计层文档，实现细节写进
 > 对应实现文档；源码注释用 `docs/s3-tables-design.md §N` 引用本文。
@@ -824,23 +824,25 @@ sha256 前 16 hex，引擎在自己的原子区内比对）；`DuoMetaCatalogSto
 
 ## 13. 可观测性与测试
 
-指标（`MetricsScope{feature=tables}`）：`lights3_tables_requests_total{op,status}`、
-`lights3_tables_commit_seconds{result=ok|conflict|error}`、
-`lights3_tables_commit_conflicts_total`、`lights3_tables_validation_files_total`、
-`lights3_tables_maintenance_deleted_bytes_total`、`lights3_tables_finalization_gaps`
-（gauge，诊断扫描时更新）。访问日志 `api_name = Iceberg.<Op>`，慢请求阈值照旧。
+指标（`MetricsScope{feature=tables}`，已落地）：`lights3_tables_requests_total`、
+`lights3_tables_requests_by_op_total{op,status}`、`lights3_tables_commits_total{result=ok|conflict|error}`、
+`lights3_tables_commit_seconds`、`lights3_tables_validation_files_total`、
+`lights3_tables_validation_skipped_total`。稿子里的 `lights3_tables_maintenance_deleted_bytes_total`
+与 `lights3_tables_finalization_gaps`（gauge）未加，记 [todo.md §4](todo.md)。访问日志
+`api_name = Iceberg.<Op>`，慢请求阈值照旧。
 
 测试（[testing.md](testing.md) 体系内）：
 
 | 层 | 内容 |
 | --- | --- |
-| `tests/unit/test_tables_iceberg.cc` | §7 纯函数：8 种 requirement × 通过/失败；每种 update 的合法/非法样例；迁移不变量；Avro 读取器对 PyIceberg 生成的 manifest 固件（二进制固件入库，≤100 KiB） |
-| `tests/unit/test_tables_catalog.cc` | `ObjectCatalogStore` on `MemoryBackend`：namespace 证据判定、分页、rename 五步逐点崩溃（复用 `core/fault.h` 门面按尝试序号注入 put/delete 失败）、§5.4 四个崩溃窗口 + 重放矩阵 §5.3、并发 100 提交单胜者 |
+| `tests/unit/test_tables_iceberg.cc`、`test_tables_avro.cc` | §7 纯函数：8 种 requirement × 通过/失败；每种 update 的合法/非法样例；迁移不变量；Avro 读取器对 PyIceberg 生成的 manifest 固件（二进制固件入库，≤100 KiB） |
+| `tests/unit/test_tables_catalog.cc` | `ObjectCatalogStore` on `MemoryBackend`：namespace 证据判定、分页、rename 五步逐点崩溃（复用 `core/fault.h` 门面按尝试序号注入 put/delete 失败）、§5.4 四个崩溃窗口 + 重放矩阵 §5.3、并发 20 提交单胜者 |
 | `tests/unit/test_tables_rest.cc` | 进程内 `S3Service`：端点形态、错误模型、policy 前缀限权、租户隔离、`s3tables` 签名、表桶守卫（保留前缀 PUT 400 / GET 200、DeleteBucket 409、lifecycle 跳过）、`/config` 的 `endpoints` 与路由表一致性（表驱动，防漂移） |
-| `tests/unit/multi_gateway_suite.h` 追加 | 两个 `S3Service` 共享 `MemoryBackend`（或 redis/tikv duostore）：跨网关提交冲突收敛、rename 恢复由另一网关驱动 |
+| `tests/unit/tables_multi_gateway_suite.h`（memory / redis / tikv 三处接入） | 两个 `S3Service` 共享 `MemoryBackend`（或 redis/tikv duostore）：跨网关提交冲突收敛、rename 恢复由另一网关驱动 |
+| `tests/unit/test_tables_maintenance.cc`、`test_tables_optional.cc`、`catalog_store_suite.h` | ④ 保留集 / 快照过期 / 孤儿与 fail-closed / StalePlan / purge / runner；⑥ views、compaction 候选、`catalog_backing` 配置、原子提交与 export/import；目录存储套件对 object（memory）与 duostore（rocksdb / sqlite / redis / tikv）跑同一组用例 |
 | `tests/e2e/run_e2e.sh` 新段 | bash + curl：启用表桶 → 建 namespace/table → 手工 CommitTable（add-snapshot 指向预置固件）→ 冲突 409 → drop；六驱动矩阵照跑 |
 | `scripts/tables/pyiceberg_smoke.py`、`duckdb_smoke.py`（ctest `tables_smoke`，标签 `tables-smoke`，opt-in） | 借鉴 RustFS 脚本序列：启用表桶 → 建表 → append 2 次 → 重载 scan → 陈旧句柄提交（PyIceberg 自动刷新重试）→ 同 commit-id 幂等重放 → 维护 plan/run → diagnostics → purge；DuckDB 以 SigV4 ATTACH 后列 namespace 并 scan。`tests/e2e/run_tables_smoke.sh` 起 memory 后端网关，`LIGHTS3_TABLES_SMOKE=1` 触发否则 SKIP（与 tikv 的 `LIGHTS3_TEST_PD_ADDR` 同一模式）。**已通过**：PyIceberg 0.12.0（pyarrow 22、boto3）与 DuckDB 1.5.5（iceberg 扩展，`SIGV4_REGION` + `SIGV4_SERVICE 's3'`），2026-09-12，见 [testing.md §6](testing.md) |
-| Spark / Trino | 只给配置模板（§13 附录），人工验证记录进 testing.md；不声称自动化 |
+| Spark / Trino | 只给配置模板（§13 附录），**尚未人工验证**（本机无 Spark / Trino，[todo.md §2](todo.md)）；不声称自动化 |
 
 客户端配置模板（写进用户文档，与 RustFS 脚本一致的键）：
 
@@ -878,14 +880,14 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 | ③ 深校验与诊断（**已实现 2026-09-12，#122**） | Avro 读取器；§7.4 快照图与冲突复核；`catalog/diagnostics` / `recovery`；`fsck` 对账项；ETag/If-None-Match on LoadTable | manifest 固件用例；崩溃窗口矩阵用例；rename 恢复用例 |
 | ④ 维护（**已实现 2026-09-12，#123**） | `JobOp::Table*`、plan/run/purge、`purgeRequested=true`、周期 runner、CLI、`tombstone_ttl` 清理 | 保留集/安全窗口/StalePlan 用例；DuckDB 冒烟（本机人工） |
 | ⑤ 多网关与文档（**已实现 2026-09-12**） | `tables_multi_gateway_suite.h`（memory / redis / tikv 三处接入）；`--check-config` 误配 WARN；deployment.md §5 矩阵加"表目录"列；本文转成实现文档 + `docs/en/` 同步；README 索引 | 双网关用例；文档评审 |
-| ⑥ 可选（**已实现 2026-09-12**） | views；`/_iceberg/v1` 别名；`reportMetrics` 落审计；compaction 候选规划输出；duostore-meta 后备（§12） | `test_tables_optional` / `catalog_store_suite`（object + rocksdb / sqlite / redis）/ `case_kv_facade`；REST 与 e2e 的 views / 别名 / metrics 用例 |
+| ⑥ 可选（**已实现 2026-09-12**） | views；`/_iceberg/v1` 别名；`reportMetrics` 落审计；compaction 候选规划输出；duostore-meta 后备（§12） | `test_tables_optional` / `catalog_store_suite`（object + rocksdb / sqlite / redis / tikv）/ `case_kv_facade`；REST 与 e2e 的 views / 别名 / metrics 用例 |
 
 ## 15. 明确不做
 
 | 条目 | 理由 |
 | --- | --- |
 | AWS S3 Tables 控制面 API（`s3tables.<region>` 端点、ARN 寻址、`CreateTableBucket` 等 50 个操作） | 引擎生态全部走 Iceberg REST；AWS 自己也让引擎经 REST 端点访问表桶。RustFS 同样不声称。只借用 `GetTableMetadataLocation` / `UpdateTableMetadataLocation` 的语义与字段名 |
-| 多表事务 `/transactions/commit` | 需要跨对象原子性，对象 CAS 做不到；duostore-meta 后备（§12）落地后再议 |
+| 多表事务 `/transactions/commit` | 需要跨对象原子性，对象 CAS 做不到；duostore-meta 后备（§12）已随 ⑥ 落地、原子性条件已满足，作为长期项记 [todo.md §5](todo.md) |
 | 服务端扫描规划 `/plan` `/tasks`、`remote-signing` `/sign` | 引擎本地规划已足够；remote-signing 需要网关替客户端签 S3 请求，与 policy 模型冲突 |
 | compaction / 删除文件重写的执行 | 需要 Parquet 读写与行级语义，交给引擎（Spark `rewrite_data_files`） |
 | durable-strong 单快照后备 | 见 §12 |

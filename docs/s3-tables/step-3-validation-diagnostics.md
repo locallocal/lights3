@@ -246,7 +246,7 @@ findings 计入 `JobOutcome.findings`，`kind = "tables"` 明细进 `stats`。�
   `tables.stale_renaming`、`tables.inconsistent_rename`（intent 与源/目标条目不符）、
   `tables.malformed_entry`。墓碑不查指针。
 - **固件**：`tests/fixtures/tables/`，PyIceberg 0.12.0 生成（本机无 Spark，Spark 固件未入
-  库；PyIceberg 与 Spark 的 Avro 写法差异只在块计数符号，负块计数已用手工构造覆盖）；
+  库，记 [todo §2](../todo.md)；PyIceberg 与 Spark 的 Avro 写法差异只在块计数符号，负块计数已用手工构造覆盖）；
   路径写死在桶 `tbk`（表 `n/t`）与 `tbe2e`（e2e）。单测：`test_tables_avro.cc`（新）、
   `test_tables_catalog.cc` 追加 4 例、`test_tables_rest.cc` 追加 1 例、`test_admin_jobs.cc`
   追加 2 例；e2e 段改用真固件并加深校验 409 / 304 / diagnostics / recovery / 只读凭证。

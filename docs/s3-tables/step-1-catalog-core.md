@@ -444,7 +444,7 @@ if (rec) {
 ### 9.4 `register_table`
 
 `metadata_location` → key（本桶内，任意位置）；`get_object` 读取（`.gz` 后缀：本步
-不支持 gzip → 406 "compressed metadata is not supported"；③ 若引入 zlib 再放开）；
+不支持 gzip → 406 "compressed metadata is not supported"；③ 引入 zlib 后未放开，记 [todo §4](../todo.md)）；
 `parse_and_validate`；`check_new_snapshots_shallow(ctx, /*current=*/empty, md)`（全部
 快照都算新增）；写保留目录 `00001-<table_id>.metadata.json`（内容 = `canonical(md)`），
 其余同 `create_table` 6–8；`table_uuid = md["table-uuid"]`、`location = md["location"]`

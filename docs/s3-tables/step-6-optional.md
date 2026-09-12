@@ -78,7 +78,8 @@
   `DuoStoreBackend::meta()` 暴露引擎；`app.cc` 取**原始**后端实例（不是计量装饰器）做
   `dynamic_cast`；`Catalog::commit_table` 按 `store_->supports_atomic_commit()` 跳过 STAGED 写与
   两个 `tables.commit.*` 故障点。`--check-config` 对 `catalog_backing: duostore` + 非 duostore
-  默认后端报错。tikv 变体只做了编译检查（无集群）。`DuoMetaCatalogStore` 的 KV 调用在调用线程
+  默认后端报错。tikv 在 tiup playground（v8.5.2）上跑通 `case_kv_facade` / `catalog_store_suite` /
+  双网关用例；TiKV 的 get 把空值当不存在，tikv 的 KV 面给每个值加一字节标记（etag 按逻辑值算）。`DuoMetaCatalogStore` 的 KV 调用在调用线程
   同步执行（redis / tikv 是网络往返；与 DuoStoreBackend 在池线程上跑 meta 的做法不同，
   目录写路径本就串行且量小）。
 - **文档**：设计文档中英文 §6.3 / §9 / §10 / §12 / §14 回写；cli.md §2.6；s3-protocol；testing；

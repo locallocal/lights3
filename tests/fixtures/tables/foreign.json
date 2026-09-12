@@ -1,0 +1,32 @@
+{
+ "manifest": [
+  {
+   "content": 0,
+   "file_format": "PARQUET",
+   "file_path": "s3://other/x.parquet",
+   "file_sequence_number": 1,
+   "file_size_in_bytes": 7,
+   "record_count": 1,
+   "sequence_number": 1,
+   "snapshot_id": 6,
+   "split_offsets": [
+    4
+   ],
+   "status": 1
+  }
+ ],
+ "manifest-list": [
+  {
+   "added_files_count": 1,
+   "added_snapshot_id": 6,
+   "content": 0,
+   "deleted_files_count": 0,
+   "existing_files_count": 0,
+   "manifest_length": 4137,
+   "manifest_path": "s3://tbk/n/t/metadata/m-foreign.avro",
+   "min_sequence_number": 1,
+   "partition_spec_id": 0,
+   "sequence_number": 1
+  }
+ ]
+}

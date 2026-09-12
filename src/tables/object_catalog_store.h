@@ -47,10 +47,11 @@ public:
     Task<void> put_commit(std::string_view bucket, std::string_view table_id, const CommitRecord& r,
                           storage::PutCondition cond) override;
     Task<std::vector<CommitRecord>> list_commits(std::string_view bucket, std::string_view table_id) override;
+    Task<void> delete_commit(std::string_view bucket, std::string_view table_id, std::string_view commit_id) override;
 
     Task<std::optional<Versioned<RenameIntent>>> get_rename(std::string_view bucket, std::string_view id) override;
     Task<std::vector<RenameIntent>> list_renames(std::string_view bucket) override;
-    Task<void> put_rename(std::string_view bucket, const RenameIntent& r, storage::PutCondition cond) override;
+    Task<std::string> put_rename(std::string_view bucket, const RenameIntent& r, storage::PutCondition cond) override;
     Task<void> delete_rename(std::string_view bucket, std::string_view id) override;
 
     Task<void> delete_bucket_state(std::string_view bucket) override;

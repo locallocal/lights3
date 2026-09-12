@@ -24,6 +24,8 @@
 #include "s3/auth/policy.h"
 #include "storage/bucket_router.h"
 #include "tables/catalog_store.h"
+#include "tables/diagnostics.h"
+#include "tables/iceberg/snapshots.h"
 #include "tables/table_bucket_store.h"
 
 namespace lights3::tables {
@@ -88,12 +90,19 @@ public:
         TableEntry entry;
         std::string etag;
         nlohmann::json metadata;
+        // "deep" | "skipped-codec": what the snapshot check of this commit covered (step ③)
+        std::string validation = "deep";
+        // load_table with a matching If-None-Match: entry + etag only, no metadata read
+        bool not_modified = false;
     };
     Task<LoadedTable> create_table(std::string_view bucket, const Levels& levels, const CreateTableRequest& req,
                                    const CommitHooks& hooks);
     Task<LoadedTable> register_table(std::string_view bucket, const Levels& levels, std::string_view name,
                                      std::string_view metadata_location, const CommitHooks& hooks);
-    Task<LoadedTable> load_table(std::string_view bucket, const Levels& levels, std::string_view name);
+    // if_none_match = the client's If-None-Match header (quoted / weak forms accepted);
+    // a hit returns not_modified without reading the metadata (step ③ §8)
+    Task<LoadedTable> load_table(std::string_view bucket, const Levels& levels, std::string_view name,
+                                 std::string_view if_none_match = {});
     // the pointer only (no metadata read); nullopt = no active table
     Task<std::optional<Versioned<TableEntry>>> table_pointer(std::string_view bucket, const Levels& levels,
                                                              std::string_view name);
@@ -107,6 +116,13 @@ public:
     Task<void> rename_table(std::string_view bucket, const Levels& src_levels, std::string_view src_name,
                             const Levels& dst_levels, std::string_view dst_name);
     Task<void> drop_table(std::string_view bucket, const Levels& levels, std::string_view name);
+
+    // ---- diagnostics and recovery (design §5.4, step ③ §6–§7) ----
+    Task<TableDiagnostics> diagnose(std::string_view bucket, const Levels& levels, std::string_view name);
+    Task<RecoveryReport> recover(std::string_view bucket, const Levels& levels, std::string_view name, bool prune);
+    // drive every pending rename intent of the bucket (writers do this on entry; exposed
+    // for the CLI and tests). Returns the number driven
+    Task<int> recover_renames(std::string_view bucket);
 
     // ---- bucket lifecycle (DeleteBucket guard / cleanup) ----
     Task<bool> catalog_empty(std::string_view bucket);
@@ -136,7 +152,16 @@ private:
                                      std::string body, bool if_none_match);
     Task<bool> object_exists(storage::IStorageBackend& backend, std::string_view bucket, std::string_view key);
     Task<void> best_effort_delete(storage::IStorageBackend& backend, std::string_view bucket, std::string_view key);
-    Task<Versioned<TableEntry>> require_active(std::string_view bucket, const Levels& levels, std::string_view name);
+    // writer = a write path: a RENAMING entry is first driven through the rename
+    // recovery and re-read (readers get 503 straight away, design §5.6)
+    Task<Versioned<TableEntry>> require_active(std::string_view bucket, const Levels& levels, std::string_view name,
+                                               bool writer = false);
+    // rename recovery on write entry: forced, or every kRenameRecoveryEvery-th call per
+    // bucket (the first call of a process counts)
+    Task<void> maybe_recover_renames(std::string_view bucket, bool force);
+    static constexpr unsigned kRenameRecoveryEvery = 32;
+    iceberg::DeepCheckOptions deep_options() const;
+    std::string metadata_dir(const TableBucketEntry& tb, const Levels& levels, std::string_view name) const;
     Task<LoadedTable> finish_create(std::string_view bucket, const TableBucketEntry& tb, const Levels& levels,
                                     std::string_view name, TableEntry entry, nlohmann::json md, std::string body,
                                     storage::IStorageBackend& backend, const CommitHooks& hooks);
@@ -150,10 +175,12 @@ private:
     TablesConfig cfg_;
     MetricsScope metrics_;
     std::shared_ptr<MetricCounter> commits_ok_, commits_conflict_, commits_error_;
+    std::shared_ptr<MetricCounter> validation_files_, validation_skipped_;
     std::shared_ptr<MetricHistogram> commit_seconds_;
 
     std::mutex locks_mu_;
     std::map<std::string, std::shared_ptr<TableLock>> locks_;
+    std::map<std::string, unsigned> recovery_calls_;
 };
 
 }  // namespace lights3::tables

@@ -19,6 +19,11 @@
 #ifdef LIGHTS3_DUOSTORE
 #include "storage/duostore/duostore_backend.h"
 #endif
+#ifdef LIGHTS3_TABLES
+#include "tables/catalog.h"
+#include "tables/fsck.h"
+#include "tables/object_catalog_store.h"
+#endif
 #include "unit/backend_suite.h"
 #include "unit/mini_test.h"
 
@@ -482,3 +487,125 @@ TEST(service_admin_fsck_endpoint) {
     CHECK_EQ(call("GET", "/-/admin/duostore/nope/quarantine", "", &root).status, 404);
     CHECK_EQ(call("GET", "/-/admin/tier/tier/quarantine", "", &p).status, 403);
 }
+
+// ---------- S3 Tables catalog reconciliation on fsck (docs/s3-tables/step-3-validation-diagnostics.md §9) ----------
+
+TEST(admin_jobs_fsck_extension_merges_into_the_scrub) {
+    TmpDirF tmp;
+    auto pool = std::make_shared<ThreadPool>(2);
+    std::vector<BackendConfig> cfgs;
+    cfgs.push_back({"fs", "localfs", {{"root", (tmp.path / "d").string()}, {"staging", (tmp.path / "s").string()}}});
+    auto out = StorageRegistry::build(cfgs, pool);
+    auto& fs = *out.at("fs");
+    sync_wait(fs.create_bucket("bkt"));
+    backend_suite::put(fs, "bkt", "a", "aaaa");
+    std::map<std::string, std::shared_ptr<IStorageBackend>> backends{{"fs", out.at("fs")}};
+    AdminJobs jobs(backends);
+    std::string seen;
+    jobs.set_fsck_extension([&](const std::string& name) -> std::optional<JobOutcome> {
+        seen = name;
+        JobOutcome o;
+        o.kind = "tables";
+        o.findings = 2;
+        o.stats = {{"tables", 1}, {"findings", json::array({{{"kind", "tables.dangling_pointer"}}})}};
+        return o;
+    });
+    json s = run_and_wait(jobs, "fs", JobOp::Fsck);
+    CHECK_EQ(seen, "fs");
+    CHECK_EQ(s["kind"].get<std::string>(), "localfs");
+    CHECK_EQ(s["findings"].get<uint64_t>(), uint64_t(2));
+    CHECK_EQ(s["stats"]["tables"]["tables"].get<int>(), 1);
+    CHECK_EQ(s["stats"]["objects_scanned"].get<int>(), 1);
+    // the extension is fsck-only: a tier op never sees it
+    JobOutcome base;
+    base.kind = "localfs";
+    base.stats = {{"objects_scanned", 3}};
+    JobOutcome ext;
+    ext.kind = "tables";
+    ext.findings = 1;
+    ext.stats = {{"tables", 4}};
+    merge_outcome(base, ext);
+    CHECK_EQ(base.findings, uint64_t(1));
+    CHECK_EQ(base.stats["tables"]["tables"].get<int>(), 4);
+    CHECK_EQ(base.stats["objects_scanned"].get<int>(), 3);
+    for (auto& b : backends) sync_wait(b.second->close());
+}
+
+#ifdef LIGHTS3_TABLES
+TEST(admin_jobs_tables_reconcile_findings) {
+    using namespace lights3::tables;
+    auto backend = std::make_shared<MemoryBackend>();
+    std::map<std::string, std::shared_ptr<IStorageBackend>> bmap{{"mem", backend}};
+    BucketsConfig bcfg;
+    bcfg.default_backend = "mem";
+    auto router = BucketRouter::build(bcfg, bmap);
+    // nothing enabled: an empty report
+    auto empty = sync_wait(reconcile_catalog(backend, router));
+    CHECK_EQ(empty.table_buckets, uint64_t(0));
+    CHECK(empty.findings.empty());
+    TablesConfig cfg;
+    cfg.enabled = true;
+    auto buckets = sync_wait(TableBucketStore::load(backend));
+    auto store = std::make_shared<ObjectCatalogStore>(backend);
+    Catalog catalog(store, buckets, router, nullptr, cfg, MetricsScope{});
+    sync_wait(backend->create_bucket("tbk"));
+    sync_wait(catalog.enable_bucket("tbk"));
+    Levels n{"n"};
+    sync_wait(catalog.create_namespace("tbk", n, {}));
+    CreateTableRequest r;
+    r.name = "t";
+    r.schema = json::parse(R"({"type":"struct","fields":[{"id":1,"name":"id","required":true,"type":"long"}]})");
+    auto t = sync_wait(catalog.create_table("tbk", n, r, {}));
+    r.name = "u";
+    auto u = sync_wait(catalog.create_table("tbk", n, r, {}));
+    r.name = "v";
+    sync_wait(catalog.create_table("tbk", n, r, {}));
+    auto clean = sync_wait(reconcile_catalog(backend, router));
+    CHECK_EQ(clean.table_buckets, uint64_t(1));
+    CHECK_EQ(clean.tables, uint64_t(3));
+    CHECK(clean.findings.empty());
+    // ① the pointer of t names a metadata object that is gone
+    sync_wait(backend->delete_object("tbk", t.entry.metadata_location));
+    // ② u is stuck in RENAMING without an intent
+    TableEntry stuck = u.entry;
+    stuck.state = TableState::Renaming;
+    stuck.rename_id = "gone";
+    sync_wait(store->put_table("tbk", n, "u", stuck, {}));
+    // ③ catalog state for a bucket that is not table-enabled
+    {
+        ObjectMeta meta;
+        http::StringBodyReader body("{}");
+        sync_wait(backend->put_object(".sys", ObjectCatalogStore::ns_key("ghost", Levels{"x"}), std::move(meta), body));
+    }
+    // ④ an intent whose destination was never written although its stage says so
+    RenameIntent bad;
+    bad.rename_id = "r-bad";
+    bad.src_levels = n;
+    bad.dst_levels = n;
+    bad.src_name = "v";
+    bad.dst_name = "w";
+    bad.src_etag = "x";
+    bad.stage = RenameIntent::Stage::DestinationWritten;
+    sync_wait(store->put_rename("tbk", bad, {}));
+    auto rep = sync_wait(reconcile_catalog(backend, router));
+    std::map<std::string, int> kinds;
+    for (auto& f : rep.findings) ++kinds[f.kind];
+    CHECK_EQ(kinds["tables.dangling_pointer"], 1);
+    CHECK_EQ(kinds["tables.stale_renaming"], 1);
+    CHECK_EQ(kinds["tables.orphan_state"], 1);
+    CHECK(kinds["tables.inconsistent_rename"] >= 1);
+    CHECK_EQ(rep.intents, uint64_t(1));
+    json j = rep.to_json();
+    CHECK_EQ(j["findings"].size(), rep.findings.size());
+    CHECK_EQ(j["table_buckets"].get<int>(), 1);
+    // a marker whose bucket vanished
+    sync_wait(backend->create_bucket("tb2"));
+    sync_wait(catalog.enable_bucket("tb2"));
+    sync_wait(backend->delete_bucket("tb2"));
+    rep = sync_wait(reconcile_catalog(backend, router));
+    int orphan_markers = 0;
+    for (auto& f : rep.findings)
+        if (f.kind == "tables.orphan_state" && f.bucket == "tb2") ++orphan_markers;
+    CHECK_EQ(orphan_markers, 1);
+}
+#endif

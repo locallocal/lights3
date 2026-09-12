@@ -202,6 +202,13 @@ int64_t now_ms() {
 
 }  // namespace
 
+void merge_outcome(JobOutcome& base, const JobOutcome& ext) {
+    base.findings += ext.findings;
+    base.aborted = base.aborted || ext.aborted;
+    if (!base.stats.is_object()) base.stats = json::object();
+    base.stats[ext.kind] = ext.stats;
+}
+
 JobOutcome run_job(JobOp op, storage::IStorageBackend& backend, uint64_t max_bytes_per_sec) {
     switch (op) {
         case JobOp::Fsck:
@@ -315,13 +322,16 @@ uint64_t AdminJobs::start(const std::string& backend, JobOp op, uint64_t max_byt
     j.finished_ms = 0;
     j.error.clear();
     uint64_t id = j.id;
+    FsckExtension ext = op == JobOp::Fsck ? fsck_extension_ : FsckExtension{};
     LOG_INFO("{} {} job {} started on '{}' (max {} MB/s)", job_group_name(op), job_op_name(op), id, backend,
              j.max_mbps);
-    j.thread = std::thread([this, backend, op, b, max_bytes_per_sec, id] {
+    j.thread = std::thread([this, backend, op, b, max_bytes_per_sec, id, ext] {
         JobOutcome out;
         std::string error;
         try {
             out = run_job(op, *b, max_bytes_per_sec);
+            if (ext)
+                if (auto extra = ext(backend)) merge_outcome(out, *extra);
         } catch (const std::exception& e) {
             error = e.what();
         }

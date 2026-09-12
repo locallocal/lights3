@@ -117,6 +117,8 @@ public:
     Task<http::HttpResponse> put_metadata_location(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> report_metrics(http::HttpRequest&, Hooks&, const Match&);
     Task<http::HttpResponse> load_credentials(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> diagnose_table(http::HttpRequest&, Hooks&, const Match&);
+    Task<http::HttpResponse> recover_table(http::HttpRequest&, Hooks&, const Match&);
 
 private:
     // path after "<prefix>/v1/" split on '/', percent-decoded per segment

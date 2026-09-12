@@ -1,8 +1,8 @@
 # S3 Tables: Apache Iceberg REST Catalog (design after studying RustFS)
 
-> Status: **design draft (2026-09-11); §14 ① and ② implemented (2026-09-12, implementation
-> notes in `docs/s3-tables/step-1-catalog-core.md` §18 and `step-2-authz-credentials.md` §12,
-> Chinese), ③–⑥ not implemented**. The document first answers
+> Status: **design draft (2026-09-11); §14 ①, ② and ③ implemented (2026-09-12, implementation
+> notes in `docs/s3-tables/step-1-catalog-core.md` §18, `step-2-authz-credentials.md` §12 and
+> `step-3-validation-diagnostics.md` §12, Chinese), ④–⑥ not implemented**. The document first answers
 > "how does RustFS do S3 Tables" (§2, verified against source @853ae63 on
 > 2026-09-11), then gives the lights3 plan (§3–§13) and the implementation steps
 > (§14). Once code lands this file stays as the design-level document per repo
@@ -750,8 +750,10 @@ response `config` reports `lights3.snapshot-validation: "skipped-codec"`);
 `snappy` / `zstd` degrade the same way. avro-cpp is not pulled in (depends on
 Boost and fmt, and only a tenth of it — reading — would be used).
 
-Step ① does the shallow "manifest-list object exists + size" check; the deep
-Avro validation comes with ③.
+Step ① does the shallow "manifest-list object exists + size" check; ③ added the deep
+Avro validation (implementation notes in `docs/s3-tables/step-3-validation-diagnostics.md`
+§12: the conflict re-check only considers entries attributed to the new snapshot, since
+a normal append reuses the parent's manifest files as they are).
 
 ## 8. Data-plane integration
 
@@ -882,8 +884,8 @@ misconfiguration WARN (§5.5).
 ## 11. Build integration and dependencies
 
 - Sources: `src/tables/{catalog_store.h, object_catalog_store.cc, catalog.cc,
-  rest_api.cc, rest_error.h, bucket_guard.cc, maintenance.cc,
-  iceberg/{metadata.cc, requirements.cc, updates.cc, snapshots.cc, avro_reader.cc}}`,
+  rest_api.cc, rest_error.h, bucket_guard.cc, diagnostics.cc, fsck.cc, maintenance.cc,
+  iceberg/{metadata.cc, requirements.cc, updates.cc, snapshots.cc, avro_reader.cc, manifest.cc}}`,
   compiled into `lights3_core`; CMake option `LIGHTS3_TABLES` (default ON; OFF
   compiles nothing and `tables.enabled: true` becomes a config error), gated like
   `LIGHTS3_CLOUDPROXY`.
@@ -956,7 +958,7 @@ under `docs/s3-tables/` (Chinese only, like the other implementation-level docs)
 | --- | --- | --- |
 | ① catalog core + minimal REST (**implemented 2026-09-12**) | `TablesConfig`; `TableBucketStore`; `ITableCatalogStore` + `ObjectCatalogStore`; the metadata model of §7.1–7.3 (shallow snapshot check); commit protocol §5.2/5.3; endpoints: config / buckets / all namespace ops / tables list-create-load-commit-drop-exists-rename-register / metadata-location; error model; dispatch branch and bucket-name reservation; the guard's reserved-prefix read-only rule and DeleteBucket guard; audit and metrics | `test_tables_iceberg` / `test_tables_catalog` / `test_tables_rest` pass; new e2e segment passes; PyIceberg smoke (manual, local) create + append + scan passes |
 | ② permissions and credentials (**implemented 2026-09-12**) | the policy triple mapping of §6.2, tenant isolation, the `s3tables` signing name, the `mint_session` narrowing parameter and `vended-credentials` negotiation, `GET …/credentials`, lifecycle exclusion | prefix-scoped and read-only credential cases; vended credentials Put/Get/Delete inside the prefix pass, outside 403 |
-| ③ deep validation and diagnostics | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
+| ③ deep validation and diagnostics (**implemented 2026-09-12**) | Avro reader; snapshot graph and conflict re-check of §7.4; `catalog/diagnostics` / `recovery`; `fsck` reconciliation item; ETag/If-None-Match on LoadTable | manifest fixture cases; crash-window matrix cases; rename recovery cases |
 | ④ maintenance | `JobOp::Table*`, plan/run/purge, `purgeRequested=true`, periodic runner, CLI, `tombstone_ttl` cleanup | retained set / safety window / StalePlan cases; DuckDB smoke (manual, local) |
 | ⑤ multi-gateway and docs | `multi_gateway_suite` additions; `--check-config` misconfiguration WARN; a "table catalog" column in deployment.md §5; turn this document into an implementation document + `docs/en/` sync; README index | two-gateway cases; doc review |
 | ⑥ optional | views; the `/_iceberg/v1` alias; `reportMetrics` into audit; compaction candidate planning output; duostore-meta backing (§12) | as needed |

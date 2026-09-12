@@ -64,6 +64,11 @@ constexpr RestApi::Route kRoutes[] = {
      "GetTableMetadataLocation", false, &RestApi::get_metadata_location},
     {"PUT", "namespaces/{ns}/tables/{t}/metadata-location", Action::Write, RestApi::KeyKind::Table, false,
      "UpdateTableMetadataLocation", false, &RestApi::put_metadata_location},
+    // commit-record diagnostics and recovery (design §5.4, step ③ §6)
+    {"GET", "namespaces/{ns}/tables/{t}/catalog/diagnostics", Action::Read, RestApi::KeyKind::Table, false,
+     "DiagnoseTable", false, &RestApi::diagnose_table},
+    {"POST", "namespaces/{ns}/tables/{t}/catalog/recovery", Action::Write, RestApi::KeyKind::Table, false,
+     "RecoverTable", false, &RestApi::recover_table},
 };
 
 std::vector<std::string_view> split(std::string_view s, char sep) {
@@ -558,7 +563,8 @@ json RestApi::load_table_result(std::string_view bucket, const Catalog::LoadedTa
     cfg["lights3.credential-scope"] = "table-prefix";
     cfg["lights3.table-location"] = t.entry.location;
     cfg["lights3.version-token"] = t.entry.version_token;
-    cfg["lights3.snapshot-validation"] = "shallow";
+    cfg["lights3.snapshot-validation"] = t.validation;
+    cfg["lights3.catalog-etag"] = t.etag;
     j["config"] = cfg;
     return j;
 }
@@ -700,7 +706,14 @@ Task<http::HttpResponse> RestApi::load_table(http::HttpRequest& req, Hooks& hook
         if (*s != "all" && *s != "refs") throw bad_request("snapshots must be 'all' or 'refs'");
         mode = *s;
     }
-    auto t = co_await catalog_->load_table(m.bucket, m.ns, m.table);
+    std::string inm = req.headers.get("If-None-Match").value_or("");
+    auto t = co_await catalog_->load_table(m.bucket, m.ns, m.table, inm);
+    if (t.not_modified) {
+        // step ③ §8: the client's cached copy is current; no metadata was read
+        auto resp = empty_response(304);
+        resp.headers.set("ETag", "\"" + t.etag + "\"");
+        co_return resp;
+    }
     if (mode == "refs") {
         std::set<int64_t> keep;
         keep.insert(iceberg::current_snapshot_id(t.metadata));
@@ -764,6 +777,10 @@ Task<http::HttpResponse> RestApi::commit_table(http::HttpRequest& req, Hooks& ho
     j["metadata"] = catalog_->client_metadata(m.bucket, t.metadata);
     j["version-token"] = t.entry.version_token;
     j["generation"] = t.entry.generation;
+    json cfg;
+    cfg["lights3.snapshot-validation"] = t.validation;
+    cfg["lights3.catalog-etag"] = t.etag;
+    j["config"] = cfg;
     auto resp = json_response(200, j);
     resp.headers.set("ETag", "\"" + t.etag + "\"");
     co_return resp;
@@ -836,6 +853,25 @@ Task<http::HttpResponse> RestApi::put_metadata_location(http::HttpRequest& req, 
 Task<http::HttpResponse> RestApi::report_metrics(http::HttpRequest& req, Hooks&, const Match&) {
     co_await read_json(req, true);
     co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::diagnose_table(http::HttpRequest&, Hooks&, const Match& m) {
+    auto d = co_await catalog_->diagnose(m.bucket, m.ns, m.table);
+    co_return json_response(200, d.to_json(m.bucket));
+}
+
+Task<http::HttpResponse> RestApi::recover_table(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, true);
+    bool prune = false;
+    if (body.contains("prune") && !body["prune"].is_null()) {
+        if (!body["prune"].is_boolean()) throw bad_request("'prune' must be a boolean");
+        prune = body["prune"].get<bool>();
+    }
+    auto rep = co_await catalog_->recover(m.bucket, m.ns, m.table, prune);
+    audit(hooks, "recovery", m,
+          "finalized " + std::to_string(rep.finalized) + " pruned " + std::to_string(rep.pruned) + " manual " +
+              std::to_string(rep.manual));
+    co_return json_response(200, rep.to_json());
 }
 
 }  // namespace lights3::tables

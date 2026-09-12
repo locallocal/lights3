@@ -347,6 +347,19 @@ Task<DeepCheckReport> check_new_snapshots_deep(const SnapshotCheckContext& ctx, 
     co_return report;
 }
 
+Task<std::optional<std::vector<DataFile>>> live_files_of_snapshot(const SnapshotCheckContext& ctx, const Json& snapshot,
+                                                                  const DeepCheckOptions& opt) {
+    SnapshotManifests sm = co_await manifests_of(ctx, snapshot, opt);
+    if (sm.unsupported) co_return std::nullopt;
+    size_t files = 0;
+    auto entries = co_await entries_of(ctx, sm.manifests, opt, files);
+    if (!entries) co_return std::nullopt;
+    std::vector<DataFile> out;
+    for (auto& e : *entries)
+        if (e.file.status != 2) out.push_back(std::move(e.file));
+    co_return out;
+}
+
 Task<std::optional<std::set<std::string>>> reachable_files(const SnapshotCheckContext& ctx, const Json& md,
                                                            const DeepCheckOptions& opt, size_t& manifests_seen) {
     std::set<std::string> reach;

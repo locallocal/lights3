@@ -11,9 +11,11 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <vector>
 
 #include "core/task.h"
 #include "storage/backend.h"
+#include "tables/iceberg/manifest.h"
 #include "tables/iceberg/metadata.h"
 
 namespace lights3::tables::iceberg {
@@ -49,6 +51,12 @@ struct DeepCheckReport {
 // conflict re-check against the parent snapshot's live file set. Throws RestError(409)
 Task<DeepCheckReport> check_new_snapshots_deep(const SnapshotCheckContext& ctx, const Json& current, const Json& next,
                                                const DeepCheckOptions& opt);
+
+// The live entries (status added / existing, any content) of one snapshot's manifests,
+// for the compaction planner (step ⑥ §4); nullopt when a codec could not be read.
+// Throws RestError(409) on malformed Avro
+Task<std::optional<std::vector<DataFile>>> live_files_of_snapshot(const SnapshotCheckContext& ctx, const Json& snapshot,
+                                                                  const DeepCheckOptions& opt);
 
 // Every bucket-relative key the snapshots of `md` reach -- manifest lists, manifests and
 // the files of every entry whatever its status (the maintenance planner's reachability

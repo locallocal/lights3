@@ -43,6 +43,14 @@ struct CreateTableRequest {
     std::map<std::string, std::string> properties;
 };
 
+struct CreateViewRequest {
+    std::string name;
+    std::optional<std::string> location;
+    nlohmann::json schema;
+    nlohmann::json view_version;
+    std::map<std::string, std::string> properties;
+};
+
 struct CommitRequest {
     // empty = not replayable (a fresh id is recorded)
     std::string commit_id;
@@ -120,6 +128,23 @@ public:
                             const Levels& dst_levels, std::string_view dst_name);
     Task<void> drop_table(std::string_view bucket, const Levels& levels, std::string_view name);
 
+    // ---- views (step ⑥ §1): the table lifecycle without the snapshot graph ----
+    struct LoadedView {
+        ViewEntry entry;
+        std::string etag;
+        nlohmann::json metadata;
+    };
+    Task<LoadedView> create_view(std::string_view bucket, const Levels& levels, const CreateViewRequest& req);
+    Task<LoadedView> load_view(std::string_view bucket, const Levels& levels, std::string_view name);
+    Task<bool> view_exists(std::string_view bucket, const Levels& levels, std::string_view name);
+    Task<ListPage<std::string>> list_views(std::string_view bucket, const Levels& levels, PageCursor cursor);
+    // replace: requirements (assert-view-uuid) + updates → new metadata file + pointer CAS
+    Task<LoadedView> replace_view(std::string_view bucket, const Levels& levels, std::string_view name,
+                                  const nlohmann::json& requirements, const nlohmann::json& updates);
+    Task<void> rename_view(std::string_view bucket, const Levels& src_levels, std::string_view src_name,
+                           const Levels& dst_levels, std::string_view dst_name);
+    Task<void> drop_view(std::string_view bucket, const Levels& levels, std::string_view name);
+
     // ---- diagnostics and recovery (design §5.4, step ③ §6–§7) ----
     Task<TableDiagnostics> diagnose(std::string_view bucket, const Levels& levels, std::string_view name);
     Task<RecoveryReport> recover(std::string_view bucket, const Levels& levels, std::string_view name, bool prune);
@@ -165,6 +190,11 @@ private:
     static constexpr unsigned kRenameRecoveryEvery = 32;
     iceberg::DeepCheckOptions deep_options() const;
     std::string metadata_dir(const TableBucketEntry& tb, const Levels& levels, std::string_view name) const;
+    // a name is either a table or a view in its namespace (step ⑥ §1)
+    Task<void> require_name_free(std::string_view bucket, const Levels& levels, std::string_view name, bool for_view);
+    Task<Versioned<ViewEntry>> require_view(std::string_view bucket, const Levels& levels, std::string_view name);
+    Task<nlohmann::json> read_view_metadata(storage::IStorageBackend& backend, std::string_view bucket,
+                                            std::string_view key);
     Task<LoadedTable> finish_create(std::string_view bucket, const TableBucketEntry& tb, const Levels& levels,
                                     std::string_view name, TableEntry entry, nlohmann::json md, std::string body,
                                     storage::IStorageBackend& backend, const CommitHooks& hooks);

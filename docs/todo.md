@@ -36,7 +36,6 @@
 | 条目 | 说明 |
 | --- | --- |
 | Versioning | 架构级（六后端 key 布局 / List 语义 / delete marker / GC 全动）；若做，**从 duostore 侧切入成本最低**（meta 是 KV，加 version 维度即可），localfs 的 key→路径映射容纳不下多版本 |
-| S3 Tables ⑥ 可选项 | ①–⑤ 已实现并合并（[s3-tables-design.md](s3-tables-design.md)）。剩下的都是可选：Iceberg views、`/_iceberg/v1` 别名（`tables.compat_prefix` 已解析未接线）、`reportMetrics` 落审计、compaction 候选规划输出、duostore-meta 目录后备（[s3-tables/step-6-optional.md](s3-tables/step-6-optional.md)）；有真实客户端需求再做 |
 | SSE-C / SSE-S3 | 服务端加密；需先定密钥来源与 ETag/校验和语义 |
 | OpenTelemetry 全量埋点 | 轻量 trace 层已做（W3C traceparent 透传、每请求一 span、日志关联，[s3-protocol.md §7](s3-protocol.md)）；otel-cpp 导出 span 是长期项 |
 | HTTP/2 | S3 SDK 主流仍 HTTP/1.1，CDN / L7 前置场景才需要；前置代理终结 h2 见 [tls.md §6](tls.md) |

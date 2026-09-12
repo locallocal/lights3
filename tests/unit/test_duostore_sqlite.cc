@@ -29,6 +29,10 @@
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
 #include "unit/mini_test.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/duo_meta_catalog_store.h"
+#include "unit/catalog_store_suite.h"
+#endif
 
 namespace fs = std::filesystem;
 using namespace lights3;
@@ -826,5 +830,15 @@ TEST(duostore_sqlite_backend_backup_and_restore_pitr) {
     }
     pool->join();
 }
+
+// ---------- S3 Tables catalog on the KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+#ifdef LIGHTS3_TABLES
+TEST(duostore_sqlite_tables_catalog_store) {
+    TmpDir tmp;
+    auto meta = std::make_unique<SqliteMetaStore>(sqlite_opts(tmp.path / "meta.sqlite3"));
+    catalog_store_suite::run([&] { return std::make_shared<lights3::tables::DuoMetaCatalogStore>(*meta); });
+    meta->close();
+}
+#endif
 
 #endif  // LIGHTS3_DUOSTORE && LIGHTS3_DUOSTORE_SQLITE_META

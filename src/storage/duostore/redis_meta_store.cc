@@ -730,6 +730,9 @@ std::string RedisMetaStore::key(std::string_view suffix) const {
     return k;
 }
 std::string RedisMetaStore::buckets_key() const { return key("buckets"); }
+std::string RedisMetaStore::kv_hash_key() const { return key("tc"); }
+std::string RedisMetaStore::kv_etag_key() const { return key("tce"); }
+std::string RedisMetaStore::kv_index_key() const { return key("tcz"); }
 std::string RedisMetaStore::objects_key(std::string_view b) const { return key(std::string("o:") + std::string(b)); }
 std::string RedisMetaStore::zindex_key(std::string_view b) const { return key(std::string("oz:") + std::string(b)); }
 std::string RedisMetaStore::uploads_key(std::string_view b) const { return key(std::string("up:") + std::string(b)); }
@@ -894,6 +897,91 @@ std::vector<BucketInfo> RedisMetaStore::list_buckets() {
         out.push_back({std::string(reply_str(r->element[i])), codec::from_unix_ms(created)});
     }
     std::sort(out.begin(), out.end(), [](const BucketInfo& a, const BucketInfo& x) { return a.name < x.name; });
+    return out;
+}
+
+// ---------- KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+// Value in HASH tc, its etag in HASH tce (the guarded commit compares the sha1 of a
+// field's value, so the etag lives in a field of its own), the key in the lex ZSET tcz
+// for ordered scans. A conditional put is one guarded EVALSHA: expect_absent /
+// expect_eq on tce, then hset both hashes + zadd
+
+std::optional<KvItem> RedisMetaStore::kv_get(std::string_view key) {
+    auto v = hget_raw(kv_hash_key(), key);
+    if (!v) return std::nullopt;
+    return KvItem{std::string(key), *v, kv_etag(*v)};
+}
+
+std::string RedisMetaStore::kv_put(std::string_view key, std::string_view value, PutCondition cond) {
+    KvPut one{std::string(key), std::string(value), cond};
+    return kv_put_batch(std::span<const KvPut>(&one, 1)).front();
+}
+
+std::vector<std::string> RedisMetaStore::kv_put_batch(std::span<const KvPut> puts) {
+    for (int attempt = 0; attempt < kMaxCasRetries; ++attempt) {
+        cas_backoff(attempt);
+        RedisBatch bt(*this);
+        std::vector<std::string> etags;
+        for (const auto& p : puts) {
+            std::optional<std::string> current = hget_raw(kv_etag_key(), p.key);
+            // the contract check outside the script; the script re-checks the same
+            // observation (absent / same etag) so a concurrent writer makes it retry
+            check_kv_condition(p.cond, current, p.key);
+            if (current)
+                bt.expect_eq(kv_etag_key(), p.key, *current);
+            else
+                bt.expect_absent(kv_etag_key(), p.key);
+            std::string etag = kv_etag(p.value);
+            bt.hset(kv_hash_key(), p.key, p.value);
+            bt.hset(kv_etag_key(), p.key, etag);
+            bt.zadd(kv_index_key(), "0", p.key);
+            etags.push_back(std::move(etag));
+        }
+        if (bt.commit()) return etags;
+    }
+    throw_internal("kv_put", "too many CAS retries");
+}
+
+bool RedisMetaStore::kv_delete(std::string_view key) {
+    for (int attempt = 0; attempt < kMaxCasRetries; ++attempt) {
+        cas_backoff(attempt);
+        std::optional<std::string> current = hget_raw(kv_etag_key(), key);
+        if (!current) return false;
+        RedisBatch bt(*this);
+        bt.expect_eq(kv_etag_key(), key, *current);
+        bt.hdel(kv_hash_key(), key);
+        bt.hdel(kv_etag_key(), key);
+        bt.zrem(kv_index_key(), key);
+        if (bt.commit()) return true;
+    }
+    throw_internal("kv_delete", "too many CAS retries");
+}
+
+std::vector<KvItem> RedisMetaStore::kv_scan(std::string_view prefix, std::string_view after, size_t limit) {
+    if (limit == 0) limit = 1000;
+    std::string lo = after.empty() ? "[" + std::string(prefix) : "(" + std::string(after);
+    auto r = exec({"ZRANGEBYLEX", kv_index_key(), lo, "+", "LIMIT", "0", std::to_string(limit)}, /*read_retry=*/true);
+    check_reply_error("kv_scan", r.get());
+    if (r->type != REDIS_REPLY_ARRAY) throw_internal("kv_scan", "unexpected reply type");
+    std::vector<std::string> keys;
+    for (size_t i = 0; i < r->elements; ++i) {
+        std::string k(reply_str(r->element[i]));
+        if (k.compare(0, prefix.size(), prefix) != 0) break;
+        keys.push_back(std::move(k));
+    }
+    std::vector<KvItem> out;
+    if (keys.empty()) return out;
+    std::vector<std::string> args{"HMGET", kv_hash_key()};
+    for (auto& k : keys) args.push_back(k);
+    auto vr = exec(args, /*read_retry=*/true);
+    check_reply_error("kv_scan", vr.get());
+    if (vr->type != REDIS_REPLY_ARRAY || vr->elements != keys.size()) throw_internal("kv_scan", "unexpected reply");
+    for (size_t i = 0; i < keys.size(); ++i) {
+        // a key deleted between the index read and the value read is simply not there
+        if (vr->element[i]->type != REDIS_REPLY_STRING) continue;
+        std::string v(reply_str(vr->element[i]));
+        out.push_back(KvItem{keys[i], v, kv_etag(v)});
+    }
     return out;
 }
 

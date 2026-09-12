@@ -22,6 +22,8 @@
 #include <utility>
 #include <vector>
 
+#include "core/util/crypto.h"
+
 #include "storage/backend.h"
 #include "storage/duostore/data_ref.h"
 
@@ -165,6 +167,36 @@ struct LeaseInfo {
 // Read-only slice of the meta shared by IMetaStore and its point-in-time
 // snapshots (roadmap §3.7 online meta dump): exactly the reads dump_meta needs.
 // A snapshot implementation must make every method observe one consistent state
+// KV facade records (see IMetaStore::kv_*)
+struct KvItem {
+    std::string key;
+    std::string value;
+    std::string etag;
+};
+struct KvPut {
+    std::string key;
+    std::string value;
+    PutCondition cond;
+};
+// the ETag of a KV value: sha256 hex, first 16 characters
+inline std::string kv_etag(std::string_view value) { return util::sha256_hex(value).substr(0, 16); }
+// The PutCondition contract over a KV entry (the engines call it inside their atomic
+// section): current = the stored value's etag, nullopt = missing
+inline void check_kv_condition(const PutCondition& cond, const std::optional<std::string>& current,
+                               std::string_view key) {
+    if (!cond.active()) return;
+    if (cond.if_none_match && current)
+        throw s3::S3Error(s3::S3ErrorCode::PreconditionFailed,
+                          "At least one of the pre-conditions you specified did not hold", std::string(key));
+    if (cond.if_match_etag) {
+        if (!current)
+            throw s3::S3Error(s3::S3ErrorCode::NoSuchKey, "The specified key does not exist", std::string(key));
+        if (*current != *cond.if_match_etag)
+            throw s3::S3Error(s3::S3ErrorCode::PreconditionFailed,
+                              "At least one of the pre-conditions you specified did not hold", std::string(key));
+    }
+}
+
 struct IMetaReadView {
     virtual std::vector<BucketInfo> list_buckets() = 0;
     virtual std::optional<ObjectRec> get_object(std::string_view b, std::string_view k) = 0;
@@ -351,6 +383,47 @@ struct IMetaStore : IMetaReadView {
     // must then guarantee write quiescence for a consistent dump. The view
     // borrows this store: it must be destroyed before close()
     virtual std::unique_ptr<IMetaReadView> snapshot() { return nullptr; }
+
+    // ---- generic KV facade (docs/s3-tables-design.md §12, docs/s3-tables/step-6-optional.md §5) ----
+    // An opaque, ordered key/value space apart from the object tables (rocksdb column
+    // family "tc", sqlite table tc, redis hash + lex index, tikv key tag 'T'), the
+    // backing of the S3 Tables catalog when tables.catalog_backing = duostore. Values
+    // are opaque bytes; the ETag of a value is kv_etag(value), computed by the engine
+    // and compared inside its own atomic section for PutCondition.if_match_etag
+    // (missing key → NoSuchKey, mismatch → PreconditionFailed; if_none_match on an
+    // existing key → PreconditionFailed). Engines without the facade throw
+    // NotImplemented (the object backing stays the default)
+    virtual std::optional<KvItem> kv_get(std::string_view key) {
+        (void)key;
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented, "this meta engine has no KV facade");
+    }
+    // returns the new ETag
+    virtual std::string kv_put(std::string_view key, std::string_view value, PutCondition cond = {}) {
+        (void)key;
+        (void)value;
+        (void)cond;
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented, "this meta engine has no KV facade");
+    }
+    // false = missing (idempotent)
+    virtual bool kv_delete(std::string_view key) {
+        (void)key;
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented, "this meta engine has no KV facade");
+    }
+    // keys starting with prefix, ascending, strictly greater than `after` when non-empty,
+    // at most `limit` (0 = the engine's page); values included
+    virtual std::vector<KvItem> kv_scan(std::string_view prefix, std::string_view after, size_t limit) {
+        (void)prefix;
+        (void)after;
+        (void)limit;
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented, "this meta engine has no KV facade");
+    }
+    // all-or-nothing multi-put, every item's condition checked in the same atomic
+    // section (the catalog's commit record + pointer land together); returns the new
+    // ETags in input order
+    virtual std::vector<std::string> kv_put_batch(std::span<const KvPut> puts) {
+        (void)puts;
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented, "this meta engine has no KV facade");
+    }
     // ---- Incremental backup / PITR (backlog-sequence ⑧) ----
     // Engines with a gateway-side physical mechanism (sqlite: WAL segment archive;
     // rocksdb: BackupEngine) implement backup_physical: write entry `id` into dir --

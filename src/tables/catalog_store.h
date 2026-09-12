@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/task.h"
+#include "s3/errors.h"
 #include "storage/backend.h"
 #include "tables/identifier.h"
 
@@ -51,6 +52,24 @@ struct TableEntry {
     int format_version = 2;
     TableState state = TableState::Active;
     std::string rename_id;
+    int64_t created_unix = 0;
+    int64_t updated_unix = 0;
+};
+
+// Iceberg view (docs/s3-tables/step-6-optional.md §1): the same shape as TableEntry
+// minus the format / rename fields; views are format-version 1 only
+struct ViewEntry {
+    int version = 1;
+    Levels levels;
+    std::string name;
+    std::string view_id;
+    std::string view_uuid;
+    std::string location;
+    // bucket-relative key under the reserved prefix (<reserved>/<ns>/<name>/view-metadata/)
+    std::string metadata_location;
+    std::string version_token;
+    uint64_t generation = 1;
+    TableState state = TableState::Active;
     int64_t created_unix = 0;
     int64_t updated_unix = 0;
 };
@@ -118,11 +137,20 @@ nlohmann::json to_json(const TableEntry&);
 nlohmann::json to_json(const CommitRecord&);
 nlohmann::json to_json(const RenameIntent&);
 nlohmann::json to_json(const MaintenanceConfig&);
+nlohmann::json to_json(const ViewEntry&);
 std::optional<NamespaceEntry> namespace_from_json(const nlohmann::json&);
 std::optional<TableEntry> table_from_json(const nlohmann::json&);
 std::optional<CommitRecord> commit_from_json(const nlohmann::json&);
 std::optional<RenameIntent> rename_from_json(const nlohmann::json&);
 std::optional<MaintenanceConfig> maintenance_from_json(const nlohmann::json&);
+std::optional<ViewEntry> view_from_json(const nlohmann::json&);
+
+// One raw catalog object, the unit of `lights3 tables export|import` (step ⑥ §5): the
+// key is the ObjectCatalogStore layout, shared by every backing
+struct RawEntry {
+    std::string key;
+    std::string body;
+};
 
 struct ITableCatalogStore {
     virtual ~ITableCatalogStore() = default;
@@ -168,6 +196,37 @@ struct ITableCatalogStore {
                                               const MaintenanceConfig& c) = 0;
     virtual Task<void> delete_maintenance_config(std::string_view bucket, const Levels& levels,
                                                  std::string_view name) = 0;
+
+    // ---- views (step ⑥ §1) ----
+    virtual Task<std::optional<Versioned<ViewEntry>>> get_view(std::string_view bucket, const Levels& levels,
+                                                               std::string_view name) = 0;
+    virtual Task<ListPage<std::string>> list_views(std::string_view bucket, const Levels& levels,
+                                                   PageCursor cursor) = 0;
+    virtual Task<std::string> put_view(std::string_view bucket, const Levels& levels, std::string_view name,
+                                       const ViewEntry& e, storage::PutCondition cond) = 0;
+    virtual Task<void> delete_view(std::string_view bucket, const Levels& levels, std::string_view name) = 0;
+
+    // ---- atomic commit (step ⑥ §5) ----
+    // A backing with transactions writes the COMMITTED record and the new pointer in
+    // one atomic step (the STAGED record and the finalization gap disappear). The
+    // pointer's condition is checked inside the same transaction; PreconditionFailed /
+    // NoSuchKey propagate like put_table's. Returns the pointer's new ETag
+    virtual bool supports_atomic_commit() const { return false; }
+    virtual Task<std::string> commit_atomic(std::string_view bucket, const Levels& levels, std::string_view name,
+                                            const TableEntry& next, storage::PutCondition table_cond,
+                                            const CommitRecord& committed) {
+        (void)bucket;
+        (void)levels;
+        (void)name;
+        (void)next;
+        (void)table_cond;
+        (void)committed;
+        throw s3::S3Error(s3::S3ErrorCode::NotImplemented, "this catalog backing has no atomic commit");
+    }
+
+    // ---- raw export / import (step ⑥ §5): every catalog object of the bucket ----
+    virtual Task<std::vector<RawEntry>> export_raw(std::string_view bucket) = 0;
+    virtual Task<void> import_raw(std::string_view bucket, const RawEntry& e) = 0;
 
     // DeleteBucket: drop everything the catalog holds for the bucket
     virtual Task<void> delete_bucket_state(std::string_view bucket) = 0;

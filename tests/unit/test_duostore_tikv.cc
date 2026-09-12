@@ -29,6 +29,10 @@
 #include "unit/backend_suite.h"
 #include "unit/meta_store_suite.h"
 #include "unit/mini_test.h"
+#ifdef LIGHTS3_TABLES
+#include "tables/duo_meta_catalog_store.h"
+#include "unit/catalog_store_suite.h"
+#endif
 #include "unit/multi_gateway_suite.h"
 #ifdef LIGHTS3_TABLES
 #include "unit/tables_multi_gateway_suite.h"
@@ -700,6 +704,17 @@ TEST(duostore_tikv_tables_multi_gateway) {
     auto c = multi_gateway_suite::make_cluster(tikv_shared_meta(unique_prefix()), DuoMetaKind::kTikv);
     tables_multi_gateway_suite::run(c->a, c->b);
     c->close();
+}
+#endif
+
+// ---------- S3 Tables catalog on the KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+#ifdef LIGHTS3_TABLES
+TEST(duostore_tikv_tables_catalog_store) {
+    TIKV_OR_SKIP();
+    std::string prefix = unique_prefix();
+    auto meta = std::make_unique<TikvMetaStore>(tikv_opts(prefix));
+    catalog_store_suite::run([&] { return std::make_shared<lights3::tables::DuoMetaCatalogStore>(*meta); });
+    meta->close();
 }
 #endif
 

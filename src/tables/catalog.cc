@@ -13,6 +13,7 @@
 #include "tables/iceberg/snapshots.h"
 #include "tables/iceberg/transition.h"
 #include "tables/iceberg/updates.h"
+#include "tables/iceberg/view_metadata.h"
 #include "tables/rest_error.h"
 
 namespace lights3::tables {
@@ -425,7 +426,8 @@ Task<Catalog::LoadedTable> Catalog::finish_create(std::string_view bucket, const
                                                   const Levels& levels, std::string_view name, TableEntry entry,
                                                   json md, std::string body, storage::IStorageBackend& backend,
                                                   const CommitHooks& hooks) {
-    // tombstone → conditional replacement; otherwise the name must be free
+    // tombstone → conditional replacement; otherwise the name must be free (of tables and views)
+    co_await require_name_free(bucket, levels, name, /*for_view=*/false);
     storage::PutCondition cond;
     auto existing = co_await store_->get_table(bucket, levels, name);
     if (existing && existing->value.state == TableState::Renaming) {
@@ -680,7 +682,9 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
         wrote = false;
     }
 
-    // ---- stage the commit record ----
+    // ---- stage the commit record (a transactional backing skips the stage: the record
+    // and the pointer land together below, step ⑥ §5) ----
+    const bool atomic = store_->supports_atomic_commit();
     CommitRecord rec;
     if (staged) {
         rec = *staged;
@@ -694,19 +698,21 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
         rec.status = "STAGED";
         rec.request_digest = digest;
         rec.created_unix = now_unix();
-        storage::PutCondition cond;
-        cond.if_none_match = true;
-        bool raced = false;
-        try {
-            co_await store_->put_commit(bucket, table_id, rec, cond);
-        } catch (const S3Error& e) {
-            if (!is_precondition(e)) throw;
-            raced = true;
+        if (!atomic) {
+            storage::PutCondition cond;
+            cond.if_none_match = true;
+            bool raced = false;
+            try {
+                co_await store_->put_commit(bucket, table_id, rec, cond);
+            } catch (const S3Error& e) {
+                if (!is_precondition(e)) throw;
+                raced = true;
+            }
+            if (raced) throw unavailable("commit " + commit_id + " is being processed by another gateway; retry");
         }
-        if (raced) throw unavailable("commit " + commit_id + " is being processed by another gateway; retry");
     }
 
-    if (fault::check("tables.commit.after_stage"))
+    if (!atomic && fault::check("tables.commit.after_stage"))
         throw S3Error(S3ErrorCode::InternalError, "injected failure after staging the commit");
 
     // ---- CAS the pointer (the only atomic point, design §5.2 step 8) ----
@@ -723,7 +729,13 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
     bool lost = false;
     std::exception_ptr err;
     try {
-        etag1 = co_await store_->put_table(bucket, levels, name, next_entry, cas);
+        if (atomic) {
+            CommitRecord fin = rec;
+            fin.status = "COMMITTED";
+            etag1 = co_await store_->commit_atomic(bucket, levels, name, next_entry, cas, fin);
+        } else {
+            etag1 = co_await store_->put_table(bucket, levels, name, next_entry, cas);
+        }
     } catch (const S3Error& e) {
         if (is_precondition(e))
             lost = true;
@@ -745,15 +757,17 @@ Task<Catalog::LoadedTable> Catalog::commit_table(std::string_view bucket, const 
         throw commit_state_unknown("the commit may or may not have been applied; reload the table before retrying");
     }
 
-    if (fault::check("tables.commit.after_cas"))
+    if (!atomic && fault::check("tables.commit.after_cas"))
         throw S3Error(S3ErrorCode::InternalError, "injected failure after the pointer CAS");
 
     // ---- finalize (best effort; the CAS already made the commit durable, design §5.4) ----
     rec.status = "COMMITTED";
-    try {
-        co_await store_->put_commit(bucket, table_id, rec, {});
-    } catch (const std::exception& e) {
-        LOG_WARN("tables: commit {} applied but its record could not be finalized: {}", commit_id, e.what());
+    if (!atomic) {
+        try {
+            co_await store_->put_commit(bucket, table_id, rec, {});
+        } catch (const std::exception& e) {
+            LOG_WARN("tables: commit {} applied but its record could not be finalized: {}", commit_id, e.what());
+        }
     }
     if (hooks.note_usage && wrote) hooks.note_usage(bucket, 1, static_cast<int64_t>(body.size()));
     commits_ok_->inc();
@@ -857,6 +871,7 @@ Task<void> Catalog::rename_table(std::string_view bucket, const Levels& src_leve
     auto src = co_await require_active(bucket, src_levels, src_name, /*writer=*/true);
     if (!co_await namespace_exists(bucket, dst_levels))
         throw not_found_ns("namespace " + ns_display(dst_levels) + " does not exist");
+    co_await require_name_free(bucket, dst_levels, dst_name, /*for_view=*/false);
     auto dst_existing = co_await store_->get_table(bucket, dst_levels, dst_name);
     if (dst_existing && dst_existing->value.state == TableState::Renaming) {
         co_await maybe_recover_renames(bucket, true);
@@ -900,6 +915,264 @@ Task<void> Catalog::rename_table(std::string_view bucket, const Levels& src_leve
         case RenameOutcome::Contended:
             throw unavailable("rename of " + std::string(src_name) + " is being completed by another gateway; retry");
     }
+}
+
+// ---------- views (step ⑥ §1) ----------
+
+Task<void> Catalog::require_name_free(std::string_view bucket, const Levels& levels, std::string_view name,
+                                      bool for_view) {
+    if (for_view) {
+        auto t = co_await store_->get_table(bucket, levels, name);
+        if (t && t->value.state != TableState::Deleted)
+            throw already_exists("table " + ns_display(levels) + "." + std::string(name) + " already exists");
+    } else {
+        auto v = co_await store_->get_view(bucket, levels, name);
+        if (v && v->value.state != TableState::Deleted)
+            throw already_exists("view " + ns_display(levels) + "." + std::string(name) + " already exists");
+    }
+}
+
+Task<Versioned<ViewEntry>> Catalog::require_view(std::string_view bucket, const Levels& levels, std::string_view name) {
+    auto cur = co_await store_->get_view(bucket, levels, name);
+    if (!cur || cur->value.state == TableState::Deleted)
+        throw not_found_view("view " + ns_display(levels) + "." + std::string(name) + " does not exist");
+    co_return std::move(*cur);
+}
+
+Task<json> Catalog::read_view_metadata(storage::IStorageBackend& backend, std::string_view bucket,
+                                       std::string_view key) {
+    storage::ObjectStream stream;
+    try {
+        stream = co_await backend.get_object(bucket, key, std::nullopt);
+    } catch (const S3Error& e) {
+        if (e.code == S3ErrorCode::NoSuchKey || e.code == S3ErrorCode::NoSuchBucket)
+            throw internal("view metadata file " + std::string(key) + " is missing");
+        throw;
+    }
+    std::string text;
+    std::byte buf[64 * 1024];
+    for (;;) {
+        size_t n = co_await stream.body->read(std::span(buf));
+        if (n == 0) break;
+        if (text.size() + n > cfg_.metadata_max_size) throw bad_request("view metadata exceeds the size limit");
+        text.append(reinterpret_cast<const char*>(buf), n);
+    }
+    co_await schedule();
+    co_return iceberg::parse_and_validate_view(text, cfg_.metadata_max_size);
+}
+
+Task<Catalog::LoadedView> Catalog::create_view(std::string_view bucket, const Levels& levels,
+                                               const CreateViewRequest& req) {
+    TableBucketEntry tb = co_await require_table_bucket(bucket);
+    require_segment("view name", req.name);
+    if (!co_await namespace_exists(bucket, levels))
+        throw not_found_ns("namespace " + ns_display(levels) + " does not exist");
+    co_await require_name_free(bucket, levels, req.name, /*for_view=*/true);
+    auto& backend = router_.resolve(bucket);
+    std::string loc_key = req.location ? location_to_key(bucket, tb.reserved_prefix, *req.location)
+                                       : ns_path(levels) + "/" + req.name;
+    ViewEntry entry;
+    entry.levels = levels;
+    entry.name = req.name;
+    entry.view_id = new_uuid();
+    entry.view_uuid = new_uuid();
+    entry.location = key_to_location(bucket, loc_key);
+    entry.version_token = new_token();
+    entry.generation = 1;
+    entry.created_unix = entry.updated_unix = now_unix();
+    entry.metadata_location = tb.reserved_prefix + ns_path(levels) + "/" + req.name + "/view-metadata/00001-" +
+                              entry.view_id + ".metadata.json";
+    co_await schedule();
+    iceberg::CreateViewInput in;
+    in.name = req.name;
+    in.schema = req.schema;
+    in.view_version = req.view_version;
+    in.properties = req.properties;
+    in.location = entry.location;
+    in.view_uuid = entry.view_uuid;
+    in.now_ms = now_ms();
+    json md = iceberg::initial_view_metadata(in);
+    // tombstone → conditional replacement; otherwise the name must be free
+    storage::PutCondition cond;
+    auto existing = co_await store_->get_view(bucket, levels, req.name);
+    if (existing) {
+        if (existing->value.state != TableState::Deleted)
+            throw already_exists("view " + ns_display(levels) + "." + req.name + " already exists");
+        cond.if_match_etag = existing->etag;
+    } else {
+        cond.if_none_match = true;
+    }
+    bool clash = false;
+    try {
+        co_await write_metadata(backend, bucket, entry.metadata_location, iceberg::canonical(md),
+                                /*if_none_match=*/true);
+    } catch (const S3Error& e) {
+        if (e.code != S3ErrorCode::PreconditionFailed) throw;
+        clash = true;
+    }
+    if (clash) throw already_exists("view " + ns_display(levels) + "." + req.name + " is being created");
+    std::string etag;
+    try {
+        etag = co_await store_->put_view(bucket, levels, req.name, entry, cond);
+    } catch (const S3Error& e) {
+        if (!is_precondition(e)) throw;
+        clash = true;
+    }
+    if (clash) {
+        co_await best_effort_delete(backend, bucket, entry.metadata_location);
+        throw already_exists("view " + ns_display(levels) + "." + req.name + " already exists");
+    }
+    co_return LoadedView{std::move(entry), std::move(etag), std::move(md)};
+}
+
+Task<Catalog::LoadedView> Catalog::load_view(std::string_view bucket, const Levels& levels, std::string_view name) {
+    co_await require_table_bucket(bucket);
+    auto cur = co_await require_view(bucket, levels, name);
+    auto& backend = router_.resolve(bucket);
+    json md = co_await read_view_metadata(backend, bucket, cur.value.metadata_location);
+    if (md.value("view-uuid", "") != cur.value.view_uuid)
+        throw internal("persisted view metadata does not match the catalog entry");
+    co_return LoadedView{std::move(cur.value), std::move(cur.etag), std::move(md)};
+}
+
+Task<bool> Catalog::view_exists(std::string_view bucket, const Levels& levels, std::string_view name) {
+    co_await require_table_bucket(bucket);
+    auto cur = co_await store_->get_view(bucket, levels, name);
+    co_return cur && cur->value.state != TableState::Deleted;
+}
+
+Task<ListPage<std::string>> Catalog::list_views(std::string_view bucket, const Levels& levels, PageCursor cursor) {
+    if (!co_await namespace_exists(bucket, levels))
+        throw not_found_ns("namespace " + ns_display(levels) + " does not exist");
+    ListPage<std::string> out;
+    std::string after = cursor.after;
+    while (static_cast<int>(out.items.size()) < cursor.limit) {
+        PageCursor c;
+        c.after = after;
+        c.limit = cursor.limit;
+        auto page = co_await store_->list_views(bucket, levels, c);
+        for (auto& n : page.items) {
+            auto e = co_await store_->get_view(bucket, levels, n);
+            if (e && e->value.state != TableState::Deleted) {
+                if (static_cast<int>(out.items.size()) >= cursor.limit) {
+                    out.next_after = out.items.back();
+                    co_return out;
+                }
+                out.items.push_back(n);
+            }
+        }
+        if (page.next_after.empty()) break;
+        after = page.next_after;
+    }
+    co_return out;
+}
+
+Task<Catalog::LoadedView> Catalog::replace_view(std::string_view bucket, const Levels& levels, std::string_view name,
+                                                const json& requirements, const json& updates) {
+    TableBucketEntry tb = co_await require_table_bucket(bucket);
+    auto& backend = router_.resolve(bucket);
+    auto cur = co_await require_view(bucket, levels, name);
+    auto lock = table_lock(bucket, cur.value.view_id);
+    auto permit = co_await lock->sem.acquire();
+    cur = co_await require_view(bucket, levels, name);
+    json current = co_await read_view_metadata(backend, bucket, cur.value.metadata_location);
+    if (current.value("view-uuid", "") != cur.value.view_uuid)
+        throw internal("persisted view metadata does not match the catalog entry");
+    co_await schedule();
+    iceberg::check_view_requirements(current, requirements);
+    json next = iceberg::apply_view_updates(current, updates, now_ms());
+    if (next.contains("location")) location_to_key(bucket, tb.reserved_prefix, next["location"].get<std::string>());
+    char num[16];
+    std::snprintf(num, sizeof(num), "%05llu", static_cast<unsigned long long>(cur.value.generation + 1));
+    std::string new_key = tb.reserved_prefix + ns_path(levels) + "/" + std::string(name) + "/view-metadata/" + num +
+                          "-" + new_uuid() + ".metadata.json";
+    co_await write_metadata(backend, bucket, new_key, iceberg::canonical(next), /*if_none_match=*/true);
+    ViewEntry next_entry = cur.value;
+    next_entry.metadata_location = new_key;
+    next_entry.version_token = new_token();
+    next_entry.generation = cur.value.generation + 1;
+    next_entry.location = next.value("location", next_entry.location);
+    next_entry.updated_unix = now_unix();
+    storage::PutCondition cas;
+    cas.if_match_etag = cur.etag;
+    std::string etag;
+    bool lost = false;
+    try {
+        etag = co_await store_->put_view(bucket, levels, name, next_entry, cas);
+    } catch (const S3Error& e) {
+        if (!is_precondition(e)) throw;
+        lost = true;
+    }
+    if (lost) {
+        co_await best_effort_delete(backend, bucket, new_key);
+        throw commit_failed("view " + ns_display(levels) + "." + std::string(name) +
+                            " was updated concurrently; refresh and retry");
+    }
+    co_return LoadedView{std::move(next_entry), std::move(etag), std::move(next)};
+}
+
+Task<void> Catalog::rename_view(std::string_view bucket, const Levels& src_levels, std::string_view src_name,
+                                const Levels& dst_levels, std::string_view dst_name) {
+    co_await require_table_bucket(bucket);
+    require_namespace(dst_levels);
+    require_segment("view name", dst_name);
+    if (src_levels == dst_levels && src_name == dst_name) co_return;
+    auto src = co_await require_view(bucket, src_levels, src_name);
+    if (!co_await namespace_exists(bucket, dst_levels))
+        throw not_found_ns("namespace " + ns_display(dst_levels) + " does not exist");
+    co_await require_name_free(bucket, dst_levels, dst_name, /*for_view=*/true);
+    storage::PutCondition dst_cond;
+    auto dst_existing = co_await store_->get_view(bucket, dst_levels, dst_name);
+    if (dst_existing) {
+        if (dst_existing->value.state != TableState::Deleted)
+            throw already_exists("view " + ns_display(dst_levels) + "." + std::string(dst_name) + " already exists");
+        dst_cond.if_match_etag = dst_existing->etag;
+    } else {
+        dst_cond.if_none_match = true;
+    }
+    // views have no in-flight readers to fence: destination first (the pointer only
+    // moves, the metadata stays where it is), then the source becomes a tombstone
+    ViewEntry d = src.value;
+    d.levels = dst_levels;
+    d.name = std::string(dst_name);
+    d.updated_unix = now_unix();
+    bool clash = false;
+    try {
+        co_await store_->put_view(bucket, dst_levels, dst_name, d, dst_cond);
+    } catch (const S3Error& e) {
+        if (!is_precondition(e)) throw;
+        clash = true;
+    }
+    if (clash) throw already_exists("view " + ns_display(dst_levels) + "." + std::string(dst_name) + " already exists");
+    ViewEntry s = src.value;
+    s.state = TableState::Deleted;
+    s.updated_unix = now_unix();
+    storage::PutCondition cas;
+    cas.if_match_etag = src.etag;
+    try {
+        co_await store_->put_view(bucket, src_levels, src_name, s, cas);
+    } catch (const S3Error& e) {
+        if (!is_precondition(e)) throw;
+        LOG_WARN("tables: view {} changed while being renamed; both names may exist until the next drop", src_name);
+    }
+}
+
+Task<void> Catalog::drop_view(std::string_view bucket, const Levels& levels, std::string_view name) {
+    co_await require_table_bucket(bucket);
+    auto cur = co_await require_view(bucket, levels, name);
+    ViewEntry e = cur.value;
+    e.state = TableState::Deleted;
+    e.updated_unix = now_unix();
+    storage::PutCondition cas;
+    cas.if_match_etag = cur.etag;
+    bool lost = false;
+    try {
+        co_await store_->put_view(bucket, levels, name, e, cas);
+    } catch (const S3Error& err) {
+        if (!is_precondition(err)) throw;
+        lost = true;
+    }
+    if (lost) throw unavailable("view " + std::string(name) + " is being updated concurrently; retry the drop");
 }
 
 Task<TableDiagnostics> Catalog::diagnose(std::string_view bucket, const Levels& levels, std::string_view name) {

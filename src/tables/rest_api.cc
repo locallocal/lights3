@@ -57,6 +57,20 @@ constexpr RestApi::Route kRoutes[] = {
      &RestApi::drop_table},
     {"POST", "tables/rename", Action::Write, RestApi::KeyKind::None, false, "RenameTable", true,
      &RestApi::rename_table},
+    // Iceberg views (step ⑥ §1): a view is addressed like a table for authorization
+    {"GET", "namespaces/{ns}/views", Action::Read, RestApi::KeyKind::Namespace, false, "ListViews", true,
+     &RestApi::list_views},
+    {"POST", "namespaces/{ns}/views", Action::Write, RestApi::KeyKind::Namespace, false, "CreateView", true,
+     &RestApi::create_view},
+    {"GET", "namespaces/{ns}/views/{t}", Action::Read, RestApi::KeyKind::Table, false, "LoadView", true,
+     &RestApi::load_view},
+    {"HEAD", "namespaces/{ns}/views/{t}", Action::Read, RestApi::KeyKind::Table, false, "ViewExists", true,
+     &RestApi::view_exists},
+    {"POST", "namespaces/{ns}/views/{t}", Action::Write, RestApi::KeyKind::Table, false, "ReplaceView", true,
+     &RestApi::replace_view},
+    {"DELETE", "namespaces/{ns}/views/{t}", Action::Delete, RestApi::KeyKind::Table, false, "DropView", true,
+     &RestApi::drop_view},
+    {"POST", "views/rename", Action::Write, RestApi::KeyKind::None, false, "RenameView", true, &RestApi::rename_view},
     {"POST", "namespaces/{ns}/tables/{t}/metrics", Action::Read, RestApi::KeyKind::Table, false, "ReportMetrics", true,
      &RestApi::report_metrics},
     {"GET", "namespaces/{ns}/tables/{t}/credentials", Action::Read, RestApi::KeyKind::Table, false, "LoadCredentials",
@@ -134,8 +148,9 @@ std::vector<std::string> RestApi::advertised_endpoints() {
             continue;
         }
         size_t pos;
+        bool view = p.find("views") != std::string::npos;
         while ((pos = p.find("{ns}")) != std::string::npos) p.replace(pos, 4, "{namespace}");
-        while ((pos = p.find("{t}")) != std::string::npos) p.replace(pos, 3, "{table}");
+        while ((pos = p.find("{t}")) != std::string::npos) p.replace(pos, 3, view ? "{view}" : "{table}");
         out.push_back(std::string(r.method) + " /v1/{prefix}/" + p);
     }
     return out;
@@ -146,11 +161,18 @@ RestApi::RestApi(std::shared_ptr<Catalog> catalog, TablesConfig cfg, MetricsScop
     requests_ = metrics_.counter("lights3_tables_requests_total", "Iceberg REST catalog requests");
 }
 
-bool RestApi::matches(std::string_view path) const {
-    std::string base = cfg_.path_prefix + "/v1";
-    if (path == base) return true;
-    return path.size() > base.size() && path.compare(0, base.size(), base) == 0 && path[base.size()] == '/';
+std::string RestApi::matched_prefix(std::string_view path) const {
+    for (const std::string* prefix : {&cfg_.path_prefix, &cfg_.compat_prefix}) {
+        if (prefix->empty()) continue;
+        std::string base = *prefix + "/v1";
+        if (path == base) return *prefix;
+        if (path.size() > base.size() && path.compare(0, base.size(), base) == 0 && path[base.size()] == '/')
+            return *prefix;
+    }
+    return {};
 }
+
+bool RestApi::matches(std::string_view path) const { return !matched_prefix(path).empty(); }
 
 std::vector<std::string> RestApi::split_path(std::string_view raw_path, size_t skip) {
     std::vector<std::string> out;
@@ -306,9 +328,12 @@ Task<http::HttpResponse> RestApi::dispatch(http::HttpRequest& req, Hooks& hooks,
     http::HttpResponse resp;
     std::optional<RestError> failure;
     try {
-        // "<prefix>/v1" has prefix_segments + 1 segments
+        // "<prefix>/v1" has prefix_segments + 1 segments; the compat prefix (step ⑥ §2) is
+        // an alias of the same routes
         size_t skip = 0;
-        for (auto p : split(cfg_.path_prefix, '/'))
+        std::string prefix = matched_prefix(req.path);
+        if (prefix.empty()) prefix = cfg_.path_prefix;
+        for (auto p : split(prefix, '/'))
             if (!p.empty()) ++skip;
         skip += 1;
         auto segs = split_path(req.raw_path.empty() ? req.path : req.raw_path, skip);
@@ -437,6 +462,7 @@ Task<http::HttpResponse> RestApi::get_config(http::HttpRequest& req, Hooks&, con
     json j;
     j["defaults"] = json::object();
     j["defaults"]["lights3.catalog-prefix"] = cfg_.path_prefix + "/v1";
+    if (!cfg_.compat_prefix.empty()) j["defaults"]["lights3.catalog-compat-prefix"] = cfg_.compat_prefix + "/v1";
     j["overrides"] = json::object();
     j["overrides"]["namespace-separator"] = "%1F";
     if (auto w = req.query_get("warehouse")) {
@@ -890,8 +916,49 @@ Task<http::HttpResponse> RestApi::put_metadata_location(http::HttpRequest& req, 
     co_return json_response(200, j);
 }
 
-Task<http::HttpResponse> RestApi::report_metrics(http::HttpRequest& req, Hooks&, const Match&) {
-    co_await read_json(req, true);
+// reportMetrics (step ⑥ §3): the engine's scan / commit report becomes an audit event
+// tables.metrics with a compact detail (filter, projection, the counters); reports over
+// 64 KiB are accepted but not recorded
+Task<http::HttpResponse> RestApi::report_metrics(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    std::string text;
+    if (req.body) {
+        std::byte buf[16 * 1024];
+        for (;;) {
+            size_t n = co_await req.body->read(std::span(buf));
+            if (n == 0) break;
+            if (text.size() + n > cfg_.request_max_size) throw bad_request("request body exceeds the size limit");
+            text.append(reinterpret_cast<const char*>(buf), n);
+        }
+    }
+    if (text.empty() || text.size() > 64 * 1024) co_return empty_response(204);
+    json report = json::parse(text, nullptr, false);
+    if (!report.is_object() || !report.contains("report-type")) co_return empty_response(204);
+    json detail;
+    detail["report-type"] = report.value("report-type", "");
+    detail["table-name"] = report.value("table-name", "");
+    if (report.contains("snapshot-id")) detail["snapshot-id"] = report["snapshot-id"];
+    if (report.contains("sequence-number")) detail["sequence-number"] = report["sequence-number"];
+    if (report.contains("operation")) detail["operation"] = report["operation"];
+    if (report.contains("filter")) detail["filter"] = report["filter"];
+    if (report.contains("projected-field-names")) detail["projected-field-names"] = report["projected-field-names"];
+    if (report.contains("schema-id")) detail["schema-id"] = report["schema-id"];
+    json metrics = json::object();
+    if (report.contains("metrics") && report["metrics"].is_object()) {
+        for (auto& [k, v] : report["metrics"].items()) {
+            // counters {"unit","value"}, timers {"count","time-unit","total-duration"}
+            if (v.is_object() && v.contains("value"))
+                metrics[k] = v["value"];
+            else if (v.is_object() && v.contains("total-duration"))
+                metrics[k] = json{{"count", v.value("count", 0)},
+                                  {"total-duration", v["total-duration"]},
+                                  {"time-unit", v.value("time-unit", "")}};
+            else if (v.is_number())
+                metrics[k] = v;
+        }
+    }
+    detail["metrics"] = metrics;
+    if (report.contains("metadata") && report["metadata"].is_object()) detail["metadata"] = report["metadata"];
+    audit(hooks, "metrics", m, detail.dump());
     co_return empty_response(204);
 }
 
@@ -912,6 +979,125 @@ Task<http::HttpResponse> RestApi::recover_table(http::HttpRequest& req, Hooks& h
           "finalized " + std::to_string(rep.finalized) + " pruned " + std::to_string(rep.pruned) + " manual " +
               std::to_string(rep.manual));
     co_return json_response(200, rep.to_json());
+}
+
+// ---------- views (step ⑥ §1) ----------
+
+json RestApi::load_view_result(std::string_view bucket, const Catalog::LoadedView& v) const {
+    json j;
+    j["metadata-location"] = Catalog::to_client_location(bucket, v.entry.metadata_location);
+    j["metadata"] = v.metadata;
+    json cfg;
+    cfg["lights3.version-token"] = v.entry.version_token;
+    cfg["lights3.catalog-etag"] = v.etag;
+    j["config"] = cfg;
+    return j;
+}
+
+Task<http::HttpResponse> RestApi::list_views(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    PageCursor c = page_cursor(req, "views", m);
+    auto page = co_await catalog_->list_views(m.bucket, m.ns, c);
+    json j;
+    j["identifiers"] = json::array();
+    for (auto& n : page.items) {
+        if (hooks.policy && !hooks.policy->allows_key(ns_path(m.ns) + "/" + n)) continue;
+        json id;
+        id["namespace"] = levels_json(m.ns);
+        id["name"] = n;
+        j["identifiers"].push_back(id);
+    }
+    if (page.next_after.empty())
+        j["next-page-token"] = nullptr;
+    else
+        j["next-page-token"] = page_token("views", m, page.next_after);
+    co_return json_response(200, j);
+}
+
+Task<http::HttpResponse> RestApi::create_view(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    CreateViewRequest r;
+    if (!body.contains("name") || !body["name"].is_string()) throw bad_request("'name' is required");
+    r.name = body["name"].get<std::string>();
+    if (body.contains("location") && !body["location"].is_null()) {
+        if (!body["location"].is_string()) throw bad_request("'location' must be a string");
+        r.location = body["location"].get<std::string>();
+    }
+    if (!body.contains("schema") || !body["schema"].is_object()) throw bad_request("'schema' is required");
+    r.schema = body["schema"];
+    if (!body.contains("view-version") || !body["view-version"].is_object())
+        throw bad_request("'view-version' is required");
+    r.view_version = body["view-version"];
+    r.properties = string_map(body.value("properties", json::object()), "properties");
+    auto v = co_await catalog_->create_view(m.bucket, m.ns, r);
+    Match ctx = m;
+    ctx.table = r.name;
+    audit(hooks, "create_view", ctx, "view_id " + v.entry.view_id);
+    auto resp = json_response(200, load_view_result(m.bucket, v));
+    resp.headers.set("ETag", "\"" + v.etag + "\"");
+    co_return resp;
+}
+
+Task<http::HttpResponse> RestApi::load_view(http::HttpRequest&, Hooks&, const Match& m) {
+    auto v = co_await catalog_->load_view(m.bucket, m.ns, m.table);
+    auto resp = json_response(200, load_view_result(m.bucket, v));
+    resp.headers.set("ETag", "\"" + v.etag + "\"");
+    co_return resp;
+}
+
+Task<http::HttpResponse> RestApi::view_exists(http::HttpRequest&, Hooks&, const Match& m) {
+    if (!co_await catalog_->view_exists(m.bucket, m.ns, m.table))
+        throw not_found_view("view " + ns_display(m.ns) + "." + m.table + " does not exist");
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::replace_view(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    if (body.contains("identifier") && !body["identifier"].is_null()) {
+        const json& id = body["identifier"];
+        bool same = id.is_object() && id.contains("namespace") && id.contains("name") && id["name"].is_string() &&
+                    id["name"].get<std::string>() == m.table && parse_namespace_json(id["namespace"]) == m.ns;
+        if (!same) throw bad_request("request identifier must match the resource URL");
+    }
+    json requirements = body.value("requirements", json::array());
+    json updates = body.value("updates", json::array());
+    if (!requirements.is_array() || !updates.is_array())
+        throw bad_request("'requirements' and 'updates' must be lists");
+    if (requirements.size() > 1024 || updates.size() > 1024)
+        throw bad_request("at most 1024 requirements and 1024 updates per commit");
+    auto v = co_await catalog_->replace_view(m.bucket, m.ns, m.table, requirements, updates);
+    audit(hooks, "replace_view", m, "generation " + std::to_string(v.entry.generation));
+    auto resp = json_response(200, load_view_result(m.bucket, v));
+    resp.headers.set("ETag", "\"" + v.etag + "\"");
+    co_return resp;
+}
+
+Task<http::HttpResponse> RestApi::drop_view(http::HttpRequest&, Hooks& hooks, const Match& m) {
+    co_await catalog_->drop_view(m.bucket, m.ns, m.table);
+    audit(hooks, "drop_view", m, "");
+    co_return empty_response(204);
+}
+
+Task<http::HttpResponse> RestApi::rename_view(http::HttpRequest& req, Hooks& hooks, const Match& m) {
+    json body = co_await read_json(req, false);
+    auto ident = [&](const char* which) {
+        if (!body.contains(which) || !body[which].is_object() || !body[which].contains("namespace") ||
+            !body[which].contains("name") || !body[which]["name"].is_string())
+            throw bad_request(std::string("'") + which + "' must be {namespace, name}");
+        return std::make_pair(parse_namespace_json(body[which]["namespace"]), body[which]["name"].get<std::string>());
+    };
+    auto [src_ns, src_name] = ident("source");
+    auto [dst_ns, dst_name] = ident("destination");
+    if (hooks.policy) {
+        if (!allows_table(*hooks.policy, m.bucket, src_ns, src_name, Action::Delete) ||
+            !allows_table(*hooks.policy, m.bucket, dst_ns, dst_name, Action::Write))
+            throw forbidden("Access denied by credential policy.");
+    }
+    co_await catalog_->rename_view(m.bucket, src_ns, src_name, dst_ns, dst_name);
+    Match ctx = m;
+    ctx.ns = src_ns;
+    ctx.table = src_name;
+    audit(hooks, "rename_view", ctx, "to " + ns_display(dst_ns) + "." + dst_name);
+    co_return empty_response(204);
 }
 
 // ---------- maintenance (design §9, step ④) ----------

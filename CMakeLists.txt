@@ -418,7 +418,12 @@ if(LIGHTS3_TABLES)
     src/tables/fsck.cc
     src/tables/maintenance.cc
     src/tables/maintenance_runner.cc
+    src/tables/iceberg/view_metadata.cc
   )
+  if(LIGHTS3_DUOSTORE)
+    # the duostore-meta catalog backing (docs/s3-tables/step-6-optional.md §5)
+    target_sources(lights3_core PRIVATE src/tables/duo_meta_catalog_store.cc)
+  endif()
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_TABLES)
   # deflate-coded Avro manifests need zlib (docs/s3-tables-design.md §7.4); without it the
   # deep check skips such snapshots and reports "skipped-codec"
@@ -543,6 +548,9 @@ add_dependencies(lights3_core lights3_version_gen)
 # src/cli/cli_<group>.cc (make_<group>()), shared helpers in cli_common
 add_executable(lights3 src/main.cc src/cli/cli_common.cc src/cli/cli_server.cc
                        src/cli/cli_tier.cc src/cli/cli_fsck.cc)
+if(LIGHTS3_TABLES)
+  target_sources(lights3 PRIVATE src/cli/cli_tables.cc)
+endif()
 if(LIGHTS3_DUOSTORE)
   target_sources(lights3 PRIVATE src/cli/cli_duostore.cc)
 endif()
@@ -603,6 +611,7 @@ if(LIGHTS3_BUILD_TESTS)
       tests/unit/test_tables_rest.cc
       tests/unit/test_tables_maintenance.cc
       tests/unit/test_tables_multi_gateway.cc
+      tests/unit/test_tables_optional.cc
     )
   endif()
   if(LIGHTS3_DUOSTORE)

@@ -427,6 +427,9 @@ public:
     // For test injection: self-assembled meta/data. Note cfg.data_kind must match
     // the injected data engine — it determines the extent kind the orphan scan
     // unlinks (the rados engine only accepts kRados)
+    // The meta engine (the S3 Tables catalog's KV backing when tables.catalog_backing =
+    // duostore, docs/s3-tables/step-6-optional.md §5); valid until close()
+    duostore::IMetaStore& meta() { return *meta_; }
     DuoStoreBackend(DuoStoreConfig cfg, std::shared_ptr<ThreadPool> pool, std::unique_ptr<duostore::IMetaStore> meta,
                     std::unique_ptr<duostore::IDataStore> data, MetricsScope metrics = {});
     ~DuoStoreBackend() override;

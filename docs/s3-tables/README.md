@@ -1,6 +1,6 @@
 # S3 Tables 实施文档（按 [../s3-tables-design.md](../s3-tables-design.md) §14 分步）
 
-> 状态：**①–⑤ 已实现（2026-09-12）；⑥ 为可选项未做**。设计层文档是
+> 状态：**①–⑥ 全部已实现（2026-09-12）**。设计层文档是
 > [../s3-tables-design.md](../s3-tables-design.md)（下文简称"设计 §N"）；本目录
 > 把 §14 的六个步骤各展开成一份可直接照着写代码的实现文档：新增/修改的文件、
 > 数据结构与函数签名、逐步流程、接入点（现有代码的文件与函数）、配置、单测清单、
@@ -15,7 +15,7 @@
 | ③ **已实现** | [step-3-validation-diagnostics.md](step-3-validation-diagnostics.md) | Avro OCF 读取器、快照图与冲突复核、`catalog/diagnostics` / `recovery`、rename 恢复、`fsck` 对账、LoadTable 的 ETag / If-None-Match | ① |
 | ④ **已实现** | [step-4-maintenance.md](step-4-maintenance.md) | `JobOp::Table*`、plan / run / purge、`purgeRequested=true`、周期 runner、CLI、墓碑清理 | ①③ |
 | ⑤ **已实现** | [step-5-multi-gateway-docs.md](step-5-multi-gateway-docs.md) | 双网关用例、`--check-config` 误配 WARN、deployment.md 矩阵、文档转正与 `docs/en/` 同步 | ①–④ |
-| ⑥ | [step-6-optional.md](step-6-optional.md) | views、`/_iceberg/v1` 别名、`reportMetrics` 落审计、compaction 候选规划、duostore-meta 后备 | 按需 |
+| ⑥ **已实现** | [step-6-optional.md](step-6-optional.md) | views、`/_iceberg/v1` 别名、`reportMetrics` 落审计、compaction 候选规划、duostore-meta 后备 | 按需 |
 
 ## 贯穿各步的约定
 

@@ -34,6 +34,8 @@ struct DataFile {
     int64_t size_bytes = 0;
     int64_t record_count = 0;
     std::optional<int64_t> snapshot_id;
+    // data_file.sort_order_id (v2; absent → 0)
+    int sort_order_id = 0;
     // null in the file for ADDED entries: inherited from the manifest when the caller
     // passes the manifest's sequence number
     std::optional<int64_t> sequence_number;

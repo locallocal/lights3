@@ -572,7 +572,106 @@ inline void case_list_uploads_hints(const MetaFactory& make) {
     m->close();
 }
 
+// KV facade (docs/s3-tables/step-6-optional.md §5): opaque values, etag = sha256[:16],
+// PutCondition inside the engine's atomic section, ordered prefix scans with an
+// exclusive `after`, all-or-nothing batches, survival across reopen
+inline void case_kv_facade(const MetaFactory& make) {
+    auto m = make();
+    CHECK(!m->kv_get("kv/a").has_value());
+    CHECK(m->kv_scan("kv/", "", 0).empty());
+    std::string e1 = m->kv_put("kv/a", "one");
+    CHECK_EQ(e1, kv_etag("one"));
+    auto got = m->kv_get("kv/a");
+    CHECK(got && got->value == "one" && got->etag == e1);
+    // if_none_match on an existing key, if_match on a wrong / missing etag
+    PutCondition none;
+    none.if_none_match = true;
+    bool failed = false;
+    try {
+        m->kv_put("kv/a", "two", none);
+    } catch (const lights3::s3::S3Error& e) {
+        failed = e.code == lights3::s3::S3ErrorCode::PreconditionFailed;
+    }
+    CHECK(failed);
+    PutCondition wrong;
+    wrong.if_match_etag = "0000000000000000";
+    failed = false;
+    try {
+        m->kv_put("kv/a", "two", wrong);
+    } catch (const lights3::s3::S3Error& e) {
+        failed = e.code == lights3::s3::S3ErrorCode::PreconditionFailed;
+    }
+    CHECK(failed);
+    failed = false;
+    try {
+        m->kv_put("kv/missing", "x", wrong);
+    } catch (const lights3::s3::S3Error& e) {
+        failed = e.code == lights3::s3::S3ErrorCode::NoSuchKey;
+    }
+    CHECK(failed);
+    CHECK_EQ(m->kv_get("kv/a")->value, "one");
+    // a matching etag swaps the value
+    PutCondition match;
+    match.if_match_etag = e1;
+    std::string e2 = m->kv_put("kv/a", "two", match);
+    CHECK_EQ(m->kv_get("kv/a")->value, "two");
+    CHECK_EQ(m->kv_get("kv/a")->etag, e2);
+    // ordered scan with prefix / after / limit; the empty value is a value
+    m->kv_put("kv/b", "");
+    m->kv_put("kv/c", "three");
+    m->kv_put("kw/z", "other");
+    auto all = m->kv_scan("kv/", "", 0);
+    CHECK_EQ(all.size(), size_t(3));
+    CHECK_EQ(all[0].key, "kv/a");
+    CHECK_EQ(all[1].key, "kv/b");
+    CHECK_EQ(all[1].value, "");
+    CHECK_EQ(all[2].key, "kv/c");
+    auto page = m->kv_scan("kv/", "", 2);
+    CHECK_EQ(page.size(), size_t(2));
+    auto rest = m->kv_scan("kv/", page.back().key, 2);
+    CHECK_EQ(rest.size(), size_t(1));
+    CHECK_EQ(rest[0].key, "kv/c");
+    CHECK(m->kv_scan("kv/", "kv/c", 2).empty());
+    CHECK_EQ(m->kv_scan("", "", 0).size(), size_t(4));
+    // batch: all or nothing
+    std::vector<KvPut> batch;
+    batch.push_back({"kv/d", "four", {}});
+    KvPut bad{"kv/a", "clobber", {}};
+    bad.cond.if_none_match = true;
+    batch.push_back(bad);
+    failed = false;
+    try {
+        m->kv_put_batch(batch);
+    } catch (const lights3::s3::S3Error& e) {
+        failed = e.code == lights3::s3::S3ErrorCode::PreconditionFailed;
+    }
+    CHECK(failed);
+    CHECK(!m->kv_get("kv/d").has_value());
+    CHECK_EQ(m->kv_get("kv/a")->value, "two");
+    batch[1].cond = match;
+    batch[1].cond.if_match_etag = e2;
+    auto etags = m->kv_put_batch(batch);
+    CHECK_EQ(etags.size(), size_t(2));
+    CHECK_EQ(m->kv_get("kv/d")->value, "four");
+    CHECK_EQ(m->kv_get("kv/a")->value, "clobber");
+    // delete is idempotent
+    CHECK(m->kv_delete("kv/b"));
+    CHECK(!m->kv_delete("kv/b"));
+    CHECK(!m->kv_get("kv/b").has_value());
+    m->close();
+    // reopen: the space is durable
+    auto m2 = make();
+    CHECK_EQ(m2->kv_get("kv/a")->value, "clobber");
+    CHECK_EQ(m2->kv_scan("kv/", "", 0).size(), size_t(3));
+    m2->kv_delete("kv/a");
+    m2->kv_delete("kv/c");
+    m2->kv_delete("kv/d");
+    m2->kv_delete("kw/z");
+    m2->close();
+}
+
 inline void run_meta_store_suite(const MetaFactory& make) {
+    case_kv_facade(make);
     case_gc_accounting(make);
     case_reclaim_reasons(make);
     case_alloc_monotonic_across_reopen(make);

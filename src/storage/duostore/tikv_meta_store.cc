@@ -226,6 +226,82 @@ auto TikvMetaStore::txn_retry(const char* what, Body&& body) {
     });
 }
 
+std::string TikvMetaStore::kv_key(std::string_view key) const { return tkey('T', key); }
+
+// ---------- KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+
+std::optional<KvItem> TikvMetaStore::kv_get(std::string_view key) {
+    return guarded("kv_get", [&]() -> std::optional<KvItem> {
+        auto v = snap_get(client().get_ts(), kv_key(key));
+        if (!v) return std::nullopt;
+        return KvItem{std::string(key), *v, kv_etag(*v)};
+    });
+}
+
+std::string TikvMetaStore::kv_put(std::string_view key, std::string_view value, PutCondition cond) {
+    KvPut one{std::string(key), std::string(value), cond};
+    return kv_put_batch(std::span<const KvPut>(&one, 1)).front();
+}
+
+std::vector<std::string> TikvMetaStore::kv_put_batch(std::span<const KvPut> puts) {
+    return txn_retry("kv_put", [&](uint64_t ts, std::vector<TikvMutation>& muts) -> std::vector<std::string> {
+        std::vector<std::string> etags;
+        for (const auto& p : puts) {
+            std::string k = kv_key(p.key);
+            std::optional<std::string> current;
+            if (auto v = snap_get(ts, k)) current = kv_etag(*v);
+            check_kv_condition(p.cond, current, p.key);
+            // an unconditional overwrite of a key nobody read would not conflict: the
+            // Put of the key itself is in the write set, so any concurrent write to it
+            // between ts and commit is a WriteConflict → retry with a fresh read
+            muts.push_back({current ? TikvOp::kPut : TikvOp::kInsert, k, p.value});
+            etags.push_back(kv_etag(p.value));
+        }
+        return etags;
+    });
+}
+
+bool TikvMetaStore::kv_delete(std::string_view key) {
+    return txn_retry("kv_delete", [&](uint64_t ts, std::vector<TikvMutation>& muts) -> bool {
+        std::string k = kv_key(key);
+        if (!snap_get(ts, k)) return false;
+        muts.push_back({TikvOp::kDel, k, {}});
+        return true;
+    });
+}
+
+std::vector<KvItem> TikvMetaStore::kv_scan(std::string_view prefix, std::string_view after, size_t limit) {
+    if (limit == 0) limit = 1000;
+    return guarded("kv_scan", [&]() -> std::vector<KvItem> {
+        std::string begin = after.empty() ? kv_key(prefix) : kv_key(after);
+        // the end of the 'T' tag range: the next tag byte
+        std::string end = tkey('T' + 1, "");
+        std::vector<KvItem> out;
+        uint64_t ts = client().get_ts();
+        while (out.size() < limit) {
+            const size_t want = limit - out.size() + 1;
+            auto page = client().scan(ts, begin, end, want);
+            if (page.empty()) break;
+            bool done = false;
+            for (auto& [k, v] : page) {
+                std::string_view rel(k);
+                rel.remove_prefix(opt_.prefix.size() + 1);
+                if (rel.substr(0, prefix.size()) != prefix) {
+                    done = true;
+                    break;
+                }
+                if (!after.empty() && rel <= after) continue;
+                out.push_back(KvItem{std::string(rel), v, kv_etag(v)});
+                if (out.size() >= limit) break;
+            }
+            if (done || page.size() < want) break;
+            begin = page.back().first;
+            begin.push_back('\0');
+        }
+        return out;
+    });
+}
+
 // ---------- Construction / shutdown ----------
 
 TikvMetaStore::TikvMetaStore(TikvMetaOptions opt) : opt_(std::move(opt)) {

@@ -292,6 +292,10 @@ struct TablesConfig {
     int validate_concurrency = 16;
     bool credential_vending = false;
     int credential_ttl_sec = 900;
+    // where the catalog state lives (docs/s3-tables-design.md §12): "object" = .sys objects
+    // of the default backend; "duostore" = the default backend's meta engine KV facade
+    // (default backend must be duostore; one transaction per commit)
+    std::string catalog_backing = "object";
     struct Maintenance {
         int scan_interval_sec = 0;
         int safety_window_sec = 900;

@@ -77,6 +77,15 @@ CREATE TABLE IF NOT EXISTS pack_stats(
 // SQL constants (§5.3): each connection keeps a resident prepared-statement cache
 // keyed by the literal's address; all parameters are bound via ?N — string
 // concatenation is forbidden (BLOB truncation source + injection surface)
+// S3 Tables catalog backing (KV facade, docs/s3-tables/step-6-optional.md §5): created on
+// every open so databases from before the facade get it too
+constexpr const char*
+    kKvDdl = "CREATE TABLE IF NOT EXISTS tc(key BLOB PRIMARY KEY, val BLOB NOT NULL) WITHOUT ROWID, STRICT";
+constexpr const char* kKvGet = "SELECT val FROM tc WHERE key=?1";
+constexpr const char* kKvPut = "INSERT OR REPLACE INTO tc(key,val) VALUES(?1,?2)";
+constexpr const char* kKvDel = "DELETE FROM tc WHERE key=?1";
+constexpr const char* kKvScanGe = "SELECT key,val FROM tc WHERE key>=?1 ORDER BY key LIMIT ?2";
+constexpr const char* kKvScanGt = "SELECT key,val FROM tc WHERE key>?1 ORDER BY key LIMIT ?2";
 constexpr const char* kBegin = "BEGIN";
 constexpr const char* kBeginImmediate = "BEGIN IMMEDIATE";
 constexpr const char* kCommit = "COMMIT";
@@ -456,6 +465,7 @@ SqliteMetaStore::SqliteMetaStore(SqliteMetaOptions opt) : opt_(std::move(opt)) {
         check_lineage(*wc_);
         apply_pragmas(*wc_, opt_.sync);
         init_schema(*wc_);
+        wc_->exec(kKvDdl, "create kv table");
         // id-segment connection is always FULL (§4)
         ac_ = open_conn(/*full_sync=*/true);
         // Backup chain (backlog-sequence ⑧): an existing chain in wal_archive means
@@ -837,6 +847,79 @@ std::optional<ObjectMeta> SqliteMetaStore::head_object(std::string_view b, std::
     auto v = object_raw(*lease, b, k);
     if (!v) return std::nullopt;
     return codec::decode_object_meta(std::string(k), *v);
+}
+
+// ---------- KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+
+std::optional<KvItem> SqliteMetaStore::kv_get(std::string_view key) {
+    Lease lease = read_conn();
+    Stmt st(*lease, kKvGet);
+    st.blob(1, key);
+    if (!st.step()) return std::nullopt;
+    std::string v(st.col_blob(0));
+    return KvItem{std::string(key), v, kv_etag(v)};
+}
+
+std::string SqliteMetaStore::kv_put(std::string_view key, std::string_view value, PutCondition cond) {
+    KvPut one{std::string(key), std::string(value), cond};
+    return kv_put_batch(std::span<const KvPut>(&one, 1)).front();
+}
+
+std::vector<std::string> SqliteMetaStore::kv_put_batch(std::span<const KvPut> puts) {
+    std::lock_guard lk(mu_);
+    Conn& c = wconn();
+    Txn t(c);
+    std::vector<std::string> etags;
+    for (const auto& p : puts) {
+        std::optional<std::string> current;
+        {
+            Stmt st(c, kKvGet);
+            st.blob(1, p.key);
+            if (st.step()) current = kv_etag(st.col_blob(0));
+        }
+        // checked in-transaction; throwing rolls back
+        check_kv_condition(p.cond, current, p.key);
+        Stmt st(c, kKvPut);
+        st.blob(1, p.key).blob(2, p.value);
+        st.exec();
+        etags.push_back(kv_etag(p.value));
+    }
+    t.commit();
+    return etags;
+}
+
+bool SqliteMetaStore::kv_delete(std::string_view key) {
+    std::lock_guard lk(mu_);
+    Conn& c = wconn();
+    Txn t(c);
+    bool existed = false;
+    {
+        Stmt st(c, kKvGet);
+        st.blob(1, key);
+        existed = st.step();
+    }
+    if (existed) {
+        Stmt st(c, kKvDel);
+        st.blob(1, key);
+        st.exec();
+    }
+    t.commit();
+    return existed;
+}
+
+std::vector<KvItem> SqliteMetaStore::kv_scan(std::string_view prefix, std::string_view after, size_t limit) {
+    if (limit == 0) limit = 1000;
+    Lease lease = read_conn();
+    std::vector<KvItem> out;
+    Stmt st(*lease, after.empty() ? kKvScanGe : kKvScanGt);
+    st.blob(1, after.empty() ? prefix : after).i64(2, int64_t(limit));
+    while (st.step()) {
+        std::string k(st.col_blob(0));
+        if (k.compare(0, prefix.size(), prefix) != 0) break;
+        std::string v(st.col_blob(1));
+        out.push_back(KvItem{std::move(k), v, kv_etag(v)});
+    }
+    return out;
 }
 
 void SqliteMetaStore::put_object(std::string_view b, std::string_view k, ObjectRec rec, PutCondition cond) {

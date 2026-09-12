@@ -27,7 +27,24 @@ struct PlannerOptions {
     std::optional<int64_t> max_snapshot_age_ms;
     int min_snapshots_to_keep = 1;
     bool orphan_cleanup = true;
+    // compaction candidates (step ⑥ §4): data files under small_file_ratio × target are
+    // grouped per (partition directory, sort order) and bin-packed to the target; 0 = off.
+    // The target follows the table property write.target-file-size-bytes when set
+    int64_t target_file_size_bytes = 512ll << 20;
+    double small_file_ratio = 0.75;
     iceberg::DeepCheckOptions deep;
+};
+
+// One bin of files the engine should rewrite into one (docs/s3-tables/step-6-optional.md
+// §4): not executed here (Spark rewrite_data_files / the engine's own compaction)
+struct CompactionCandidate {
+    // the files' directory prefix (Iceberg partitions are directories)
+    std::string partition;
+    int sort_order_id = 0;
+    std::vector<std::string> files;
+    int64_t bytes = 0;
+    // delete files touch this partition: a rewrite must apply them (row-level)
+    bool row_level_required = false;
 };
 
 // The settings a table is maintained with, resolved from (highest first) the Iceberg
@@ -60,6 +77,7 @@ struct MaintenancePlan {
     nlohmann::json expire_requirements = nlohmann::json::array();
     // keys under the table location that no retained metadata reaches
     std::vector<std::string> orphan_candidates;
+    std::vector<CompactionCandidate> compaction_candidates;
     bool manual_review = false;
     std::vector<std::string> notes;
     int64_t planned_unix = 0;

@@ -587,6 +587,7 @@ Config Config::from_string(const std::string& text) {
             t.validate_concurrency = to_int("tables.validate_concurrency", v, 0);
         if (std::string v = tb->get("credential_vending"); !v.empty()) t.credential_vending = parse_bool(v);
         if (std::string v = tb->get("credential_ttl"); !v.empty()) t.credential_ttl_sec = parse_duration_sec(v);
+        if (std::string v = tb->get("catalog_backing"); !v.empty()) t.catalog_backing = v;
         if (auto* mt = tb->find("maintenance")) {
             auto& m = t.maintenance;
             if (std::string v = mt->get("scan_interval"); !v.empty()) m.scan_interval_sec = parse_duration_sec(v);
@@ -616,6 +617,16 @@ Config Config::from_string(const std::string& text) {
                 "config: tables.reserved_prefix must be a relative key prefix ending with '/' and not start with "
                 "'.sys' (got '" +
                 t.reserved_prefix + "')");
+        if (t.catalog_backing != "object" && t.catalog_backing != "duostore")
+            throw std::runtime_error("config: tables.catalog_backing must be object or duostore");
+        if (t.enabled && t.catalog_backing == "duostore") {
+            bool duo = false;
+            for (auto& b : cfg.backends)
+                if (b.name == cfg.buckets.default_backend && b.type == "duostore") duo = true;
+            if (!duo)
+                throw std::runtime_error(
+                    "config: tables.catalog_backing duostore needs the default backend to be a duostore backend");
+        }
         check_range("tables.metadata_max_size", static_cast<long long>(t.metadata_max_size), 1LL << 20, 512LL << 20);
         check_range("tables.request_max_size", static_cast<long long>(t.request_max_size), 16LL << 10, 64LL << 20);
         check_range("tables.metadata_log_keep", t.metadata_log_keep, 1, 10000);

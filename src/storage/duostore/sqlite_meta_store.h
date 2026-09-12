@@ -90,7 +90,7 @@ public:
     // transaction materialized. Borrows this store — destroy before close()
     std::unique_ptr<IMetaReadView> snapshot() override;
 
-    // KV facade (table tc; docs/s3-tables/step-6-optional.md §5)
+    // KV facade (table tc; docs/s3-tables-design.md §12)
     std::optional<KvItem> kv_get(std::string_view key) override;
     std::string kv_put(std::string_view key, std::string_view value, PutCondition cond) override;
     bool kv_delete(std::string_view key) override;

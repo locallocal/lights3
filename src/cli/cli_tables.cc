@@ -22,7 +22,7 @@ namespace {
 
 using nlohmann::json;
 
-// The catalog store the configuration names (docs/s3-tables/step-6-optional.md §5): the
+// The catalog store the configuration names (docs/s3-tables-design.md §12): the
 // object backing on the default backend's .sys, or the duostore meta KV facade. The
 // lights3 daemon assembles the same pair in Application::start_server
 std::shared_ptr<lights3::tables::ITableCatalogStore> open_store(lights3::Application& app, const std::string& backing) {
@@ -141,7 +141,7 @@ Cmd make_tables() {
                           "lights3 tables <export|import> <file> [--backing=object|duostore] [--config=<path>]",
                           "S3 Tables catalog state migration between the object backing (.sys of the default "
                           "backend) and the duostore meta backing (tables.catalog_backing, "
-                          "docs/s3-tables/step-6-optional.md §5): export writes every catalog object of every "
+                          "docs/s3-tables-design.md §12): export writes every catalog object of every "
                           "table bucket as JSON lines, import writes them back. Offline: the backends are "
                           "built, no server listens; stop the gateways first (the catalog must not move "
                           "while it is copied). Table-bucket markers stay in .sys on both backings.",

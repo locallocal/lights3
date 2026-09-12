@@ -1,11 +1,10 @@
 # S3 Tables: Apache Iceberg REST Catalog (design after studying RustFS)
 
-> Status: **implemented (§14 ①–⑥, 2026-09-12)**. Implementation notes in
-> `docs/s3-tables/step-1-catalog-core.md` §18, `step-2-authz-credentials.md` §12,
-> `step-3-validation-diagnostics.md` §12, `step-4-maintenance.md` §10,
-> `step-5-multi-gateway-docs.md` §8 and `step-6-optional.md` §7 (Chinese); deviations are
-> folded into the sections here, and the loose ends and long-term items the notes left
-> behind are in [todo.md](todo.md) §2 / §4 / §5. The document first answers
+> Status: **implemented (§14 ①–⑥, 2026-09-12)**. A per-step summary of the
+> implementation notes is in §16 (the implementation documents under `docs/s3-tables/`
+> were removed once ①–⑥ had merged; git keeps the history); deviations are folded into
+> the sections here, and the loose ends and long-term items are in [todo.md](todo.md)
+> §2 / §4 / §5. The document first answers
 > "how does RustFS do S3 Tables" (§2, verified against source @853ae63 on
 > 2026-09-11), then gives the lights3 plan (§3–§13) and the implementation steps
 > (§14). Once code lands this file stays as the design-level document per repo
@@ -763,8 +762,8 @@ response `config` reports `lights3.snapshot-validation: "skipped-codec"`);
 Boost and fmt, and only a tenth of it — reading — would be used).
 
 Step ① does the shallow "manifest-list object exists + size" check; ③ added the deep
-Avro validation (implementation notes in `docs/s3-tables/step-3-validation-diagnostics.md`
-§12: the conflict re-check only considers entries attributed to the new snapshot, since
+Avro validation (implementation notes in §16 ③: the
+conflict re-check only considers entries attributed to the new snapshot, since
 a normal append reuses the parent's manifest files as they are).
 
 ## 8. Data-plane integration
@@ -972,11 +971,10 @@ Trino:      iceberg.catalog.type=rest  iceberg.rest-catalog.uri=…  .warehouse=
 
 ## 14. Implementation steps
 
-In dependency order; each step is independently mergeable with unit tests; when
-done, update the row to "implemented + date". The implementation-level document of
-each step (file list, signatures, flows, integration points, unit-test list) lives
-under `docs/s3-tables/` (Chinese only, like the other implementation-level docs):
-`step-1-catalog-core.md` … `step-6-optional.md`.
+In dependency order; each step is independently mergeable with unit tests. The
+implementation-level documents of the six steps (file list, signatures, flows,
+integration points, unit-test list) were removed once everything had merged; §16 keeps
+a summary of each step's implementation notes.
 
 | Step | Content | Acceptance |
 | --- | --- | --- |
@@ -998,3 +996,146 @@ under `docs/s3-tables/` (Chinese only, like the other implementation-level docs)
 | durable-strong single-snapshot backing | see §12 |
 | Delta Lake / Hudi, built-in SQL | outside the scope of an object-storage gateway |
 | active-active multi-region writes | single writer per table is an Iceberg premise; multiple gateways are only valid when they share one catalog state (§5.5) |
+
+## 16. Implementation notes, per step (2026-09-12)
+
+The six implementation documents (`docs/s3-tables/`: file list, signatures, flows,
+integration points and unit-test list per step) were removed once ①–⑥ had all merged
+(git keeps the history). The decisions that deviated from, or were not spelled out by,
+this design are summarized below; open items are in [todo.md](todo.md) §2 / §4 / §5.
+
+**① Catalog core (#119)**
+
+- Table-bucket endpoints are `PUT|GET|DELETE /iceberg/v1/buckets/{bucket}` (no warehouse
+  segment, as in RustFS).
+- Tombstones are not "children": `namespace_has_children` / `bucket_state_empty` only see
+  live objects, and dropping a namespace removes its tombstones (otherwise PyIceberg's
+  drop table → drop namespace sequence gets 409).
+- Idempotent replay uses the file the record points at, without comparing a recomputed
+  metadata (`last-updated-ms` necessarily differs).
+- The per-table lock is an `AsyncSemaphore(1)`, keyed `<bucket>/<table_id>`, never removed
+  (bounded by the number of tables).
+- `LoadTable.config` additionally carries `lights3.version-token`,
+  `lights3.snapshot-validation` and `lights3.catalog-etag` (③). GCC 15 ICEs on
+  `co_await (this->*fn)(...)`; store the `Task` in a local first.
+- The e2e main configuration enables `tables.enabled`; the six-driver matrix runs the
+  tables segment.
+
+**② Authorization and credentials (#121)**
+
+- `SigV4Authenticator::verify_any` takes a set of services; catalog paths accept
+  `{s3, s3tables}` under `tables.accept_s3tables_signing`, the S3 surface is unchanged; a
+  scope mismatch is still 400, mapped to 403 `ForbiddenException` on the catalog surface.
+- Authorization granularity: read routes on a namespace use `prefix_may_contain(ns + "/")`
+  (a credential limited to `sales/orders/` must be able to list `sales`), write routes
+  require `allows(bucket, ns + "/")`; table routes accept both `<ns>/<t>` and `<ns>/<t>/`
+  (vended session credentials carry the trailing slash); listings are filtered after
+  pagination (an empty page with a non-empty token is allowed by the spec).
+- `narrow_policy(parent, narrow)`: buckets / prefixes survive item by item only where the
+  parent allows them, `readonly` is or-ed, actions intersected, an empty intersection
+  throws `AccessDenied`; third parameter of `mint_session`, persisted format unchanged.
+- Vending gives `{bucket, prefixes: [<location>/, <reserved>/<ns>/<t>/metadata/],
+  readonly}`; a session credential asking for vending gets
+  `credential-vending-not-authorized` (the table is still returned); the response carries
+  `Cache-Control: no-store, private`; `GET …/credentials` is 406 when disabled, 403 when
+  not authorized.
+- The quota pre-check runs through `Hooks::commit.quota_check`; `QuotaExceeded` → 409
+  `CommitFailedException`.
+- Lifecycle exclusion goes through `LifecycleRunner::set_skip_predicate` (lifecycle does
+  not depend on the tables headers); lifecycle rules on a table bucket are stored as usual
+  and WARN.
+
+**③ Deep validation and diagnostics (#122)**
+
+- Avro reader: a union yields the branch value itself, `logicalType` is ignored; limits
+  depth 64, record 16 MiB, decompressed block 128 MiB; negative block counts (Spark's
+  writer) are supported; deflate uses zlib raw inflate (`LIGHTS3_TABLES_ZLIB`, `--version`
+  prints `tables: deflate=yes|no`). No avro-cpp.
+- Manifest `sequence_number` inheritance (null and ADDED, or manifest sequence 0) matches
+  PyIceberg's read-back field by field; fixtures are generated by PyIceberg 0.12.0
+  (`scripts/tables/gen_fixtures.py`) with the paths fixed to buckets `tbk` / `tbe2e`.
+- The conflict re-check only considers entries **attributed to the new snapshot** (an
+  Iceberg append reuses the parent's manifests as they are); manifest length comes from
+  the GET's size, no separate HEAD; an expired parent or an unreadable codec skips the
+  re-check and counts `skipped_codec`. No new configuration keys; the caps are the
+  `DeepCheckOptions` defaults (10 000 manifests / 1 000 000 files / 128 MiB).
+- `catalog/diagnostics` / `catalog/recovery` are not advertised in `/config.endpoints`;
+  `ITableCatalogStore::delete_commit` serves prune.
+- Rename: the normal path and the recovery path are the same `drive_rename`; every stage
+  advance CASes the intent itself (`put_rename` returns the ETag); in Prepared, a changed
+  source etag or `tombstone_ttl` exceeded without a fence abandons; a taken destination
+  restores the source to Active and answers 409 `DestinationTaken`; write entry points
+  that read `Renaming` recover first, otherwise `renames/` is scanned every 32nd call per
+  bucket; read entry points answer 503. Fault points
+  `tables.rename.after_prepare|after_fence|after_destination|after_tombstone|before_cleanup`.
+- ETag: `If-None-Match` accepts quotes / `W/` / comma lists / `*`; a hit is 304 without a
+  body and without reading the metadata.
+- fsck reconciliation lives in `tables/fsck.cc` (`reconcile_catalog`); both the online
+  `/-/admin/fsck/<default backend>` and the offline `lights3 fsck` merge it into the
+  verdict: `tables.orphan_state` / `dangling_pointer` / `stale_renaming` /
+  `inconsistent_rename` / `malformed_entry`; tombstones' pointers are not checked.
+
+**④ Maintenance (#123)**
+
+- The maintenance configuration object lives at `maint/<ns-path>/<t>.json` (next to the
+  pointer it would be taken for a table name); resolution order Iceberg properties
+  `history.expire.*` > table object > `tables.maintenance`, a mismatch sets
+  `effective.conflict` + `manual_review`; snapshot expiry only runs when
+  `max_snapshot_age_ms` is configured (no 5-day default); purge deletes the object, drop
+  keeps it.
+- The retention set contains every COMMITTED record's `new_metadata_location`, so metadata
+  produced by normal commits is never a candidate (only record-less files are); a
+  non-Active table is 404 / 503; snapshot-expiry requirements use
+  `assert-ref-snapshot-id` when `main` exists, else `assert-table-uuid`; the manifest
+  cap, a parse failure or an unreadable codec all mean `manual_review` with the candidates
+  cleared.
+- Runner: StalePlan → `InvalidRequest`; the expiry commit id is `maint-<uuid>`; every
+  file is re-HEADed for its mtime before deletion, yielding every 64 deletes;
+  `purge_table` requires a tombstone.
+- Job framework: `AdminJobs` gained `JobOp::TablePlan|TableRun|TablePurge` (group
+  `tables`), `start_custom` / `status_by_id`; the catalog only sees the `JobHooks` of
+  `tables/jobs.h`, injected by the app.
+- REST: plan 202; run's body is `{"plan":…}` / `{"job_id":N}` / empty (the table's latest
+  plan job), a `manual-review` plan is 400; `DELETE …?purgeRequested=true` → 204 +
+  `x-lights3-job-id` (406 without the job framework); admin plane
+  `POST/GET /-/admin/tables/<bucket>/<ns…>/<t>/<plan|run|purge>`.
+- Periodic runner: a pass waits for each table's job (one table at a time), busy tables
+  count `skipped_busy`, `manual_review` tables only get a plan; tombstone cleanup follows
+  `tombstone_ttl` (≤ 0 off), `recover_renames` runs first per bucket.
+- `lights3-ctl tables` has an extra `config` subcommand; `purge --yes` is mandatory and
+  polls the job.
+
+**⑤ Multiple gateways and docs (#124)**
+
+- The two-gateway suite runs at the `Catalog` layer (no two `S3Service`s), wired into
+  memory / redis / tikv; recovery is triggered by B writing to the fenced table
+  (unrelated writes only scan every 32nd call).
+- The "multi-gateway signal" of `tables_deployment_warning` only looks at explicit
+  configuration (`read_lease` explicitly > 0, `gc_enabled: false`,
+  `usage.reconcile: false`); defaults do not count.
+- SigV4: generic clients such as PyIceberg / Spark do not send `x-amz-content-sha256`;
+  for a catalog request without it (and not presigned) the body is read in full and its
+  sha256 filled in before verification; the admin plane is unchanged.
+- Smoke: PyIceberg uses boto3's default credential chain; DuckDB ATTACH needs
+  `SIGV4_REGION` + `SIGV4_SERVICE 's3'`; ctest `tables_smoke` is opt-in. Monitoring
+  assets: 4 rules in the `lights3.tables` alert group, 5 panels in the dashboard row.
+
+**⑥ Optional items (#125)**
+
+- Views: rename is a two-step "write the destination, then tombstone the source" without
+  an intent; replace writes no commit record; the emptiness checks of both backings know
+  `view/`; fsck / diagnostics do not cover views (todo §4); the default `location` is
+  `s3://<bucket>/<ns>/<name>`.
+- Alias: `RestApi::matched_prefix` decides how many segments dispatch skips (the first
+  segment was reserved in ①).
+- `reportMetrics` is parsed and recorded through `Hooks::audit` as `tables.metrics`
+  (≤ 64 KiB).
+- Compaction candidates: `iceberg::live_files_of_snapshot`, `DataFile.sort_order_id`, the
+  partition key is the in-bucket directory.
+- duostore-meta: `kv_*` sit on `IMetaStore` with `NotImplemented` defaults; the app
+  `dynamic_cast`s the raw backend instance (not the metering decorator);
+  `Catalog::commit_table` skips the STAGED write and the `tables.commit.*` fault points
+  when `supports_atomic_commit()`; `--check-config` rejects `catalog_backing: duostore`
+  with a non-duostore default backend; KV calls run synchronously on the caller
+  (todo §4); TiKV's get reports an empty value as absent, so the tikv KV facade stores
+  every value with a one-byte marker; tikv passed on a tiup playground.

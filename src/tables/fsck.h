@@ -1,5 +1,5 @@
 // Catalog reconciliation for `lights3 fsck` (docs/s3-tables-design.md §11,
-// docs/s3-tables/step-3-validation-diagnostics.md §9): the .sys catalog state of the default
+// §14 ③): the .sys catalog state of the default
 // backend against the table buckets it describes. Read-only; repairs go through
 // `POST …/catalog/recovery`. Findings:
 //   tables.orphan_state         catalog state / marker for a bucket that is not a table

@@ -765,7 +765,7 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
             resp = co_await admin_jobs(req, access_key, ctx);
 #ifdef LIGHTS3_TABLES
         } else if (internal && tables_api_ && req.path.rfind("/-/admin/tables/", 0) == 0) {
-            // Table maintenance jobs on the admin plane (docs/s3-tables/step-4-maintenance.md §5,
+            // Table maintenance jobs on the admin plane (docs/s3-tables-design.md §9,
             // `lights3-ctl tables plan|run`), same job model, resource = the table
             api_name = "AdminTables";
             resp = co_await admin_tables_jobs(req, access_key, ctx);

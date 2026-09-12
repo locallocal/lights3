@@ -111,8 +111,8 @@ void Application::start_server() {
     lifecycle_runner_->set_usage_tracker(usage_);
     if (!cfg_.usage.enabled) LOG_WARN("usage accounting is disabled: bucket/tenant quotas are not enforced");
 #ifdef LIGHTS3_TABLES
-    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §3, docs/s3-tables/step-1-catalog-core.md
-    // §13): table-bucket markers next to the other .sys records, catalog state on the
+    // S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md §3):
+    // table-bucket markers next to the other .sys records, catalog state on the
     // default backend, the REST surface and the S3-plane guard on the service
     if (auto w = tables_deployment_warning(cfg_)) LOG_WARN("{}", *w);
     if (cfg_.tables.enabled) {

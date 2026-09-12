@@ -38,7 +38,7 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   `x-amz-website-redirect-location` 301、匿名 listing / `?uploads` / 写 / 删 /
   非网站桶一律拒绝、静态条目 API 不可改（405）、非 root 不能 Put 配置、删除配置后
   匿名面立即关闭、`lights3_website_events_total` 计数。
-- **S3 Tables 步骤 ①**（[s3-tables/step-1-catalog-core.md §16](s3-tables/step-1-catalog-core.md)）：
+- **S3 Tables 步骤 ①**（[s3-tables-design.md §13](s3-tables-design.md)）：
   `/iceberg/v1/config` → 启用表桶（非 root 403）→ namespace / 表 → 保留前缀下的
   metadata.json 可读不可写 → 手工 CommitTable（add-snapshot 指向预放的 manifest-list）
   → 同 commit-id 重放幂等 → 陈旧 requirement 409 → 缺 manifest 409 → rename → 非空
@@ -49,7 +49,7 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   `test_tables_catalog.cc`（提交协议、幂等重放、`tables.commit.after_stage|after_cas`
   故障点的崩溃窗口、rename）、`test_tables_rest.cc`（端点、错误模型、policy 与列表过滤、租户门、`s3tables` 签名、
   凭证下发、lifecycle 跳过、守卫、`/config.endpoints` 与路由表一致）、`test_credentials.cc`
-  的 `policy_narrowing_for_vended_sessions`。步骤 ③（[s3-tables/step-3-validation-diagnostics.md](s3-tables/step-3-validation-diagnostics.md)）：
+  的 `policy_narrowing_for_vended_sessions`。步骤 ③：
   e2e 段改用 PyIceberg 写的 manifest 固件（`tests/fixtures/tables/`），深校验通过报
   `lights3.snapshot-validation: deep`、缺数据文件 409、坏 Avro 409、`If-None-Match` 304、
   `catalog/diagnostics` 报 `Committed` 且无未引用文件、`catalog/recovery` 无事可做、只读凭证
@@ -57,14 +57,14 @@ rados 看 `LIGHTS3_TEST_RADOS_CONF` + `_POOL`。`docker compose --profile e2e ru
   深度 / 未知 codec、PyIceberg 固件逐字段对照）、`test_tables_catalog.cc` 追加深校验六种 409
   与 codec 两态、诊断五态与 `recover` 指针不动、rename 五个故障点由另一实例恢复 + Prepared
   超时回滚、`test_tables_rest.cc` 的 diagnostics / recovery / 304 / `skipped-codec`、
-  `test_admin_jobs.cc` 的 fsck 扩展合并与目录对账三类 finding。步骤 ⑥（[s3-tables/step-6-optional.md](s3-tables/step-6-optional.md)）：
+  `test_admin_jobs.cc` 的 fsck 扩展合并与目录对账三类 finding。步骤 ⑥：
   e2e 段加 `/_iceberg` 别名（/config 报 `lights3.catalog-compat-prefix`、桶名 `_iceberg` 400）、views
   建 / 列 / HEAD / 同名表 409 / replace 版本 +1 / 陈旧 uuid 409 / rename / drop、`reportMetrics` 204、plan 的
   `compaction-candidates`。单测：`test_tables_optional.cc`（`catalog_store_suite.h` 对 object 与
   duostore-rocksdb 后备、views 生命周期两种后备、view 元数据模型、compaction 候选、`catalog_backing` 配置、
   duostore 后备的原子提交与 20 并发单胜者 + export/import）、`test_duostore_sqlite|redis|tikv.cc` 的
   `*_tables_catalog_store`、`meta_store_suite.h` 的 `case_kv_facade`（四引擎）、
-  `test_tables_rest.cc` 的 `tables_rest_views_compat_prefix_and_metrics`（审计文件里的 `tables.metrics`）。步骤 ④（[s3-tables/step-4-maintenance.md](s3-tables/step-4-maintenance.md)）：
+  `test_tables_rest.cc` 的 `tables_rest_views_compat_prefix_and_metrics`（审计文件里的 `tables.metrics`）。步骤 ④：
   e2e 段加 `maintenance/config` 默认与表级设置、plan 作业绑定 version token 且安全窗口内无候选、
   run 作业不删文件、只读凭证 plan 403、管理面 `/-/admin/tables/...` 202、`lights3-ctl tables
   status|list|plan|run|diagnose|recover|purge`（purge 无 `--yes` 退出 2，purge 后 metadata 404、

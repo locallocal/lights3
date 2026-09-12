@@ -42,8 +42,8 @@ using FsckOutcome = JobOutcome;
 
 // The maintenance operations. Fsck runs on duostore / localfs / xlocalfs, the
 // Duo* ops on duostore, the Tier* ops on tiered; anything else is Unsupported.
-// The Table* ops are resource-level custom jobs (docs/s3-tables/step-4-maintenance.md
-// §5): their resource is "tables:<bucket>/<ns-path>/<t>" and the work is a function
+// The Table* ops are resource-level custom jobs (docs/s3-tables-design.md §9):
+// their resource is "tables:<bucket>/<ns-path>/<t>" and the work is a function
 enum class JobOp { Fsck, DuoGc, DuoScan, TierScan, TierGc, TierReconcile, TablePlan, TableRun, TablePurge };
 // "fsck" | "gc" | "scan" | "reconcile" | "plan" | "run" | "purge": the op's name on the
 // admin plane and in the status document ("op"); the group ("fsck" | "duostore" |
@@ -115,8 +115,8 @@ public:
     bool remove_backend(const std::string& name);
     // a job of any op is running on that backend
     bool busy(const std::string& name) const;
-    // Extra fsck work after run_scrub (S3 Tables catalog reconciliation, docs/s3-tables/
-    // step-3-validation-diagnostics.md §9): called with the backend name inside the job
+    // Extra fsck work after run_scrub (S3 Tables catalog reconciliation,
+    // docs/s3-tables-design.md §14 ③): called with the backend name inside the job
     // thread; a returned outcome is merged into the scrub's (findings added, stats under
     // its kind). nullopt = nothing to add for that backend
     using FsckExtension = std::function<std::optional<JobOutcome>(const std::string& backend)>;

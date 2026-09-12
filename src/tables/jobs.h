@@ -1,4 +1,4 @@
-// The job framework as the catalog sees it (docs/s3-tables/step-4-maintenance.md §5): the
+// The job framework as the catalog sees it (docs/s3-tables-design.md §9): the
 // application owns AdminJobs; the catalog only needs "run this function on a dedicated
 // thread under a resource key, one job per resource at a time" plus status lookups. The
 // REST layer, the admin plane and the periodic runner all go through these hooks, so a

@@ -399,7 +399,7 @@ if(LIGHTS3_DRIVER_HTTPLIB)
 endif()
 
 if(LIGHTS3_TABLES)
-  # S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md, docs/s3-tables/step-1-catalog-core.md)
+  # S3 Tables / Iceberg REST catalog (docs/s3-tables-design.md)
   target_sources(lights3_core PRIVATE
     src/tables/identifier.cc
     src/tables/object_catalog_store.cc
@@ -421,7 +421,7 @@ if(LIGHTS3_TABLES)
     src/tables/iceberg/view_metadata.cc
   )
   if(LIGHTS3_DUOSTORE)
-    # the duostore-meta catalog backing (docs/s3-tables/step-6-optional.md §5)
+    # the duostore-meta catalog backing (docs/s3-tables-design.md §12)
     target_sources(lights3_core PRIVATE src/tables/duo_meta_catalog_store.cc)
   endif()
   target_compile_definitions(lights3_core PUBLIC LIGHTS3_TABLES)
@@ -692,8 +692,8 @@ if(LIGHTS3_BUILD_TESTS)
     set_tests_properties(soak_smoke PROPERTIES LABELS "perf;soak" TIMEOUT 900)
   endif()
 
-  # S3 Tables client smoke (docs/s3-tables-design.md §13, docs/s3-tables/step-5-multi-gateway-docs.md
-  # §6): PyIceberg and DuckDB against a live gateway. Opt-in through
+  # S3 Tables client smoke (docs/s3-tables-design.md §13): PyIceberg
+  # and DuckDB against a live gateway. Opt-in through
   # LIGHTS3_TABLES_SMOKE=1 (python packages required); SKIP (77) otherwise
   if(LIGHTS3_TABLES AND LIGHTS3_DRIVER_BUILTIN)
     add_test(NAME tables_smoke

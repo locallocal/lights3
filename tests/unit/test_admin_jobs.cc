@@ -488,7 +488,7 @@ TEST(service_admin_fsck_endpoint) {
     CHECK_EQ(call("GET", "/-/admin/tier/tier/quarantine", "", &p).status, 403);
 }
 
-// ---------- S3 Tables catalog reconciliation on fsck (docs/s3-tables/step-3-validation-diagnostics.md §9) ----------
+// ---------- S3 Tables catalog reconciliation on fsck (docs/s3-tables-design.md §14 ③) ----------
 
 TEST(admin_jobs_fsck_extension_merges_into_the_scrub) {
     TmpDirF tmp;

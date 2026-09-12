@@ -900,7 +900,7 @@ TEST(duostore_redis_multi_gateway_listings_shared) {
     multi_gateway_suite::listings_are_shared(redis_shared_meta(unique_prefix()), DuoMetaKind::kRedis);
 }
 
-// ---------- two-gateway S3 Tables (docs/s3-tables/step-5-multi-gateway-docs.md §2) ----------
+// ---------- two-gateway S3 Tables (docs/s3-tables-design.md §5.5) ----------
 // The catalog state is .sys objects on the shared meta; the fixtures and metadata files
 // go through the shared data engine, so both catalog stacks see everything
 #ifdef LIGHTS3_TABLES
@@ -912,7 +912,7 @@ TEST(duostore_redis_tables_multi_gateway) {
 }
 #endif
 
-// ---------- S3 Tables catalog on the KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+// ---------- S3 Tables catalog on the KV facade (docs/s3-tables-design.md §12) ----------
 #ifdef LIGHTS3_TABLES
 TEST(duostore_redis_tables_catalog_store) {
     REDIS_OR_SKIP();

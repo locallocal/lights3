@@ -1,5 +1,5 @@
 // Commit-record diagnostics, recovery and the rename driver (docs/s3-tables-design.md §5.4,
-// §5.6; docs/s3-tables/step-3-validation-diagnostics.md §6–§7). Everything here works on
+// §5.6). Everything here works on
 // the store alone (plus the table bucket for the unreferenced-metadata listing) so the
 // REST endpoints, the CLI and any writer entering the catalog can call it. Recovery only
 // completes bookkeeping the pointer CAS already decided: it never moves a pointer

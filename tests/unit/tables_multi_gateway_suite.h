@@ -1,5 +1,5 @@
-// Two-gateway S3 Tables suite (docs/s3-tables-design.md §5.5, docs/s3-tables/step-5-multi-gateway-docs.md
-// §2): two independent catalog stacks ("gateways" A and B, each its own TableBucketStore /
+// Two-gateway S3 Tables suite (docs/s3-tables-design.md §5.5): two
+// independent catalog stacks ("gateways" A and B, each its own TableBucketStore /
 // ObjectCatalogStore / Catalog) over two IStorageBackend handles that share one medium.
 // What converges across gateways is decided by the medium's PutCondition CAS alone:
 // concurrent commits leave exactly one winner, a rename interrupted on A is completed by

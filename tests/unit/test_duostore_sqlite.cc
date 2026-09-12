@@ -831,7 +831,7 @@ TEST(duostore_sqlite_backend_backup_and_restore_pitr) {
     pool->join();
 }
 
-// ---------- S3 Tables catalog on the KV facade (docs/s3-tables/step-6-optional.md §5) ----------
+// ---------- S3 Tables catalog on the KV facade (docs/s3-tables-design.md §12) ----------
 #ifdef LIGHTS3_TABLES
 TEST(duostore_sqlite_tables_catalog_store) {
     TmpDir tmp;

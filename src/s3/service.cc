@@ -1007,8 +1007,8 @@ Task<http::HttpResponse> S3Service::dispatch(http::HttpRequest req) {
                         bool creating = scope == Scope::Bucket && req.method == "PUT" && r->flag.empty();
                         co_await require_tenant_bucket(bucket, ident.tenant, creating);
                         if (auto src = req.headers.get("x-amz-copy-source")) {
-                            auto [sb, sk] = handlers::parse_copy_source(*src);
-                            co_await require_tenant_bucket(sb, ident.tenant, false);
+                            co_await require_tenant_bucket(handlers::parse_copy_source(*src).first, ident.tenant,
+                                                           false);
                         }
                     }
                 }

@@ -307,7 +307,9 @@ public:
 private:
     Task<void> accept_loop() {
         for (;;) {
-            auto [ec, sock] = co_await AcceptAwaiter{*acceptor_, ioc_, {}, {}};
+            auto accepted = co_await AcceptAwaiter{*acceptor_, ioc_, {}, {}};
+            auto& ec = accepted.first;
+            auto& sock = accepted.second;
             if (ec) {
                 if (stopping_.load() || ec == asio::error::operation_aborted) break;
                 // Retrying transient errors (fd exhaustion like EMFILE) immediately would busy-spin; back off, then

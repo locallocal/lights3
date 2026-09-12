@@ -211,7 +211,9 @@ Task<http::HttpResponse> S3Service::upload_part(http::HttpRequest& req, std::str
     // streamed out by range and written into the target upload as the part body; source/target may be on
     // different backends (same as CopyObject)
     if (auto src_hdr = req.headers.get("x-amz-copy-source")) {
-        auto [src_bucket, src_key] = parse_copy_source(*src_hdr);
+        auto src = parse_copy_source(*src_hdr);
+        const std::string& src_bucket = src.first;
+        const std::string& src_key = src.second;
         auto& src_backend = router_.resolve(src_bucket);
         auto src_meta = co_await src_backend.head_object(src_bucket, src_key);
         check_copy_preconditions(req, src_meta);

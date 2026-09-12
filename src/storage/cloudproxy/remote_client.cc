@@ -354,9 +354,9 @@ Task<ClientPool::Lease> ClientPool::acquire_async() {
 
     struct Acquire {
         ClientPool* pool;
-        PooledClient granted;
+        PooledClient granted{};
         bool create_new = false;
-        std::shared_ptr<Waiter> w;
+        std::shared_ptr<Waiter> w{};
 
         bool await_ready() const noexcept { return false; }
         bool await_suspend(std::coroutine_handle<> h) {

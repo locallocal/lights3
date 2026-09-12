@@ -870,8 +870,12 @@ Task<http::HttpResponse> RestApi::rename_table(http::HttpRequest& req, Hooks& ho
             throw bad_request(std::string("'") + which + "' must be {namespace, name}");
         return std::make_pair(parse_namespace_json(body[which]["namespace"]), body[which]["name"].get<std::string>());
     };
-    auto [src_ns, src_name] = ident("source");
-    auto [dst_ns, dst_name] = ident("destination");
+    auto src = ident("source");
+    auto dst = ident("destination");
+    const auto& src_ns = src.first;
+    const auto& src_name = src.second;
+    const auto& dst_ns = dst.first;
+    const auto& dst_name = dst.second;
     // policy: delete on the source, write on the destination (design §6.2)
     if (hooks.policy) {
         if (!allows_table(*hooks.policy, m.bucket, src_ns, src_name, Action::Delete) ||
@@ -1085,8 +1089,12 @@ Task<http::HttpResponse> RestApi::rename_view(http::HttpRequest& req, Hooks& hoo
             throw bad_request(std::string("'") + which + "' must be {namespace, name}");
         return std::make_pair(parse_namespace_json(body[which]["namespace"]), body[which]["name"].get<std::string>());
     };
-    auto [src_ns, src_name] = ident("source");
-    auto [dst_ns, dst_name] = ident("destination");
+    auto src = ident("source");
+    auto dst = ident("destination");
+    const auto& src_ns = src.first;
+    const auto& src_name = src.second;
+    const auto& dst_ns = dst.first;
+    const auto& dst_name = dst.second;
     if (hooks.policy) {
         if (!allows_table(*hooks.policy, m.bucket, src_ns, src_name, Action::Delete) ||
             !allows_table(*hooks.policy, m.bucket, dst_ns, dst_name, Action::Write))

@@ -56,6 +56,10 @@ if(LIGHTS3_DUOSTORE)
   else()
     add_subdirectory(third_party/rocksdb EXCLUDE_FROM_ALL SYSTEM)
   endif()
+  # Third-party sources are exempt from -Wall -Wextra (same convention as sqlite /
+  # client-c): the top-level flags leak into the subdirectory and surface upstream
+  # -Wmaybe-uninitialized noise in the release build
+  target_compile_options(rocksdb PRIVATE -w)
 endif()
 
 if(LIGHTS3_DUOSTORE_REDIS_META)

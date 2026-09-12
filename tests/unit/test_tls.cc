@@ -91,11 +91,11 @@ struct Server {
 // OpenSSL client with the knobs the tests need; no server verification (the
 // tests inspect the presented certificate instead)
 struct ClientOpts {
-    std::string sni;
+    std::string sni{};
     const tls_test::Cert* client_cert = nullptr;
     // 0 = library default
     int max_version = 0;
-    std::string ciphersuites;
+    std::string ciphersuites{};
 };
 
 struct Client {

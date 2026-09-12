@@ -2251,13 +2251,21 @@ public:
         co_return n;
     }
 
-    void release() { gate_.release(); }
+    // idempotent: a binary_semaphore must not be released twice (the SlowPut
+    // guard below releases on unwind even after the test already did)
+    void release() {
+        if (!released_) {
+            released_ = true;
+            gate_.release();
+        }
+    }
 
 private:
     std::string first_, rest_;
     uint64_t total_;
     size_t off_ = 0;
     int stage_ = 0;
+    bool released_ = false;
     std::binary_semaphore gate_{0};
 };
 
@@ -2323,13 +2331,30 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
     a.meta->use_board = true;
     sync_wait(a.b->create_bucket("bkt"));
 
-    auto start_slow_put = [&](const char* key, std::string& data, std::unique_ptr<GatedReader>& body,
-                              std::thread& writer) {
-        data = patterned(9000);
-        body = std::make_unique<GatedReader>(data.substr(0, 5000), data.substr(5000));
-        writer = std::thread([&, key] { sync_wait(a.b->put_object("bkt", key, {}, *body)); });
-        for (int i = 0; i < 200 && chunk_files_on_disk(cfg_a.root) < 1; ++i) usleep(20 * 1000);
-        CHECK(chunk_files_on_disk(cfg_a.root) >= 1);
+    // One gated PUT from A. The destructor opens the gate and joins, so a failed
+    // CHECK surfaces as a test failure instead of std::terminate from a joinable
+    // std::thread (the "terminate called without an active exception" this test
+    // used to abort with)
+    struct SlowPut {
+        std::string data = patterned(9000);
+        std::unique_ptr<GatedReader> body = std::make_unique<GatedReader>(data.substr(0, 5000), data.substr(5000));
+        std::thread writer;
+        ~SlowPut() {
+            if (writer.joinable()) {
+                body->release();
+                writer.join();
+            }
+        }
+    };
+    // Starts the PUT and waits until its first chunk has landed. The wait is
+    // relative to the chunk files already on disk: phase 1 leaves its tail chunks
+    // behind, so an absolute "< 1" would return at once and the scan would race
+    // the write (chunk not yet on disk → skipped_leased stays 0)
+    auto start_slow_put = [&](const char* key, SlowPut& put) {
+        const size_t base = chunk_files_on_disk(cfg_a.root);
+        put.writer = std::thread([&, key] { sync_wait(a.b->put_object("bkt", key, {}, *put.body)); });
+        for (int i = 0; i < 200 && chunk_files_on_disk(cfg_a.root) <= base; ++i) usleep(20 * 1000);
+        CHECK(chunk_files_on_disk(cfg_a.root) > base);
     };
 
     // Phase 1 — lease off on the scanning gateway: the gap the lease closes
@@ -2338,19 +2363,17 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
         cfg_b.read_lease_sec = 0;
         auto b = make_lease_backend(cfg_b, pool, a.rocks, board);
         b.meta->use_board = true;
-        std::string data;
-        std::unique_ptr<GatedReader> body;
-        std::thread writer;
-        start_slow_put("slow0", data, body, writer);
+        SlowPut put;
+        start_slow_put("slow0", put);
         // published, but b does not consult it
         CHECK(sync_wait(a.b->publish_lease_once()));
         auto st = sync_wait(b.b->run_orphan_scan_once());
         // A's in-flight chunk mistaken for crash residue
         CHECK(st.orphans_removed >= 1);
         CHECK_EQ(st.skipped_leased, uint64_t(0));
-        body->release();
+        put.body->release();
         // A commits refs to a deleted chunk: the object is now corrupt
-        writer.join();
+        put.writer.join();
         auto st2 = sync_wait(b.b->run_orphan_scan_once());
         CHECK(st2.refs_missing >= 1);
         sync_wait(b.b->close());
@@ -2364,10 +2387,8 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
         auto b = make_lease_backend(cfg_b, pool, a.rocks, board);
         b.meta->use_board = true;
         const size_t before = chunk_files_on_disk(cfg_a.root);
-        std::string data;
-        std::unique_ptr<GatedReader> body;
-        std::thread writer;
-        start_slow_put("slow1", data, body, writer);
+        SlowPut put;
+        start_slow_put("slow1", put);
         // oldest_write = the slow PUT's start
         CHECK(sync_wait(a.b->publish_lease_once()));
         auto st = sync_wait(b.b->run_orphan_scan_once());
@@ -2377,8 +2398,8 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
         CHECK_EQ(st.skipped_pinned, uint64_t(0));
         CHECK(chunk_files_on_disk(cfg_a.root) > before);
 
-        body->release();
-        writer.join();
+        put.body->release();
+        put.writer.join();
         // A idle again: floor moves to now
         CHECK(sync_wait(a.b->publish_lease_once()));
         auto st2 = sync_wait(b.b->run_orphan_scan_once());
@@ -2386,7 +2407,7 @@ TEST(duostore_orphan_scan_defers_to_peer_write_lease) {
         CHECK_EQ(st2.skipped_leased, uint64_t(0));
         // readable from the peer
         auto g = sync_wait(b.b->get_object("bkt", "slow1", std::nullopt));
-        CHECK_EQ(read_all(*g.body), data);
+        CHECK_EQ(read_all(*g.body), put.data);
         g.body.reset();
 
         // A genuine orphan older than the floor (minus the 1 s skew margin) is

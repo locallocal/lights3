@@ -228,7 +228,11 @@ Task<http::HttpResponse> S3Service::put_object(http::HttpRequest& req, std::stri
 
 Task<http::HttpResponse> S3Service::copy_object(http::HttpRequest& req, std::string bucket, std::string key,
                                                 const RequestAuth& auth) {
-    auto [src_bucket, src_key] = parse_copy_source(*req.headers.get("x-amz-copy-source"));
+    // a named pair, not a structured binding: GCC reports the binding's hidden object as
+    // maybe-uninitialized inside coroutine frames
+    auto src = parse_copy_source(*req.headers.get("x-amz-copy-source"));
+    const std::string& src_bucket = src.first;
+    const std::string& src_key = src.second;
     auto& src_backend = router_.resolve(src_bucket);
 
     auto src_meta = co_await src_backend.head_object(src_bucket, src_key);

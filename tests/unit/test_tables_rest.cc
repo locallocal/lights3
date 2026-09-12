@@ -56,8 +56,8 @@ struct TablesEnv {
         bool accept_s3tables = true;
         bool tenants = false;
         // step ⑥: the /_iceberg alias and an audit log file for reportMetrics
-        std::string compat_prefix;
-        std::string audit_path;
+        std::string compat_prefix{};
+        std::string audit_path{};
     };
     std::shared_ptr<AuditLog> audit;
     std::shared_ptr<TenantStore> tenant_store;

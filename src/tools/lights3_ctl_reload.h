@@ -8,6 +8,6 @@
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_reload();
+std::shared_ptr<ccmd::command> make_reload();
 
 }  // namespace lights3_ctl

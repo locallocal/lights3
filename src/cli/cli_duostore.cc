@@ -369,7 +369,7 @@ Cmd make_duo_quarantine() {
 // Leaf taking `<backend> <file>` (+ --config), i.e. dump / load
 Cmd make_admin_leaf(const char* name, const char* example, const char* usage, const char* help_long,
                     const char* help_short, void (*run)(const Cmd&)) {
-    auto cmd = std::make_shared<ccmd::c_command>(name, example, usage, help_long, help_short, run);
+    auto cmd = std::make_shared<ccmd::command>(name, example, usage, help_long, help_short, run);
     add_config_flag(cmd);
     cmd->var<std::string>("backend", "", "duostore backend name (alternative to the positional)");
     cmd->var<std::string>("file", "", "dump file path (alternative to the positional)");
@@ -399,7 +399,7 @@ Cmd make_duostore() {
                                         "Replay a meta dump from <file> into the backend, then run an orphan scan.",
                                         "load duostore meta from a file", run_load));
     {
-        auto bk = std::make_shared<ccmd::c_command>(
+        auto bk = std::make_shared<ccmd::command>(
             "backup", "lights3 duostore backup local --to=/backup/local-meta --incremental",
             "lights3 duostore backup <backend> --to=<dir> [--incremental] [--config=<path>]",
             "Append one entry to the meta backup chain in <dir> (docs/storage/duostore-core.md "
@@ -415,7 +415,7 @@ Cmd make_duostore() {
         bk->var<std::string>("to", "", "backup chain directory");
         bk->var<bool>("incremental", false, "delta since the previous entry instead of a full copy");
         cmd->add_subcommand(bk);
-        auto rs = std::make_shared<ccmd::c_command>(
+        auto rs = std::make_shared<ccmd::command>(
             "restore", "lights3 duostore restore local --from=/backup/local-meta --to-ts=2026-09-06T12:00:00Z",
             "lights3 duostore restore <backend> --from=<dir> [--to-id=<n> | --to-ts=<iso8601>] "
             "[--config=<path>]",

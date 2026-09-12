@@ -29,7 +29,7 @@ struct TableRef {
 };
 
 // "<bucket> <ns.table>" positional pair
-bool table_args(const std::shared_ptr<ccmd::c_command>& c, TableRef& out) {
+bool table_args(const std::shared_ptr<ccmd::command>& c, TableRef& out) {
     if (c->args().size() != 2) {
         fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
         g_exit = 2;
@@ -55,7 +55,7 @@ bool table_args(const std::shared_ptr<ccmd::c_command>& c, TableRef& out) {
     return !out.ns.empty();
 }
 
-bool one_bucket_arg(const std::shared_ptr<ccmd::c_command>& c, std::string& bucket) {
+bool one_bucket_arg(const std::shared_ptr<ccmd::command>& c, std::string& bucket) {
     if (c->args().size() != 1) {
         fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
         g_exit = 2;
@@ -74,7 +74,7 @@ std::string join(const std::vector<std::string>& v, const std::string& sep) {
     return s;
 }
 
-std::string catalog_root(const std::shared_ptr<ccmd::c_command>& c) {
+std::string catalog_root(const std::shared_ptr<ccmd::command>& c) {
     std::string p = c->var<std::string>("catalog-prefix");
     if (p.empty()) p = "/iceberg";
     if (p.front() != '/') p = "/" + p;
@@ -127,17 +127,17 @@ int admin_job(SignedClient& cli, const TableRef& t, const std::string& op, const
     return wait_job(cli, path, job, "tables " + op);
 }
 
-void add_common(const std::shared_ptr<ccmd::c_command>& cmd) {
+void add_common(const std::shared_ptr<ccmd::command>& cmd) {
     cmd->var<std::string>("catalog-prefix", "/iceberg", "the catalog's path prefix (tables.path_prefix).");
     add_conn_flags(cmd);
 }
 
-std::shared_ptr<ccmd::c_command> make_bucket_cmd(const std::string& name, const std::string& method,
-                                                 const std::string& what) {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_bucket_cmd(const std::string& name, const std::string& method,
+                                               const std::string& what) {
+    auto cmd = std::make_shared<ccmd::command>(
         name, "lights3-ctl tables " + name + " lake", "lights3-ctl tables " + name + " <bucket> [options]",
         what + " (" + method + " <prefix>/v1/buckets/<bucket>" + (name == "status" ? "" : ", root credential") + ").",
-        what + ".", [name, method](const std::shared_ptr<ccmd::c_command>& c) {
+        what + ".", [name, method](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             run_admin(c, [&](SignedClient& cli) {
@@ -154,13 +154,13 @@ std::shared_ptr<ccmd::c_command> make_bucket_cmd(const std::string& name, const 
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_list() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_list() {
+    auto cmd = std::make_shared<ccmd::command>(
         "list", "lights3-ctl tables list lake --namespace=sales", "lights3-ctl tables list <bucket> [options]",
         "List the tables of a table bucket, one \"<namespace>\\t<table>\" line each (namespace "
         "levels joined by '.'); --namespace restricts to that namespace, otherwise every "
         "namespace is walked. --json prints the identifiers as a JSON array instead.",
-        "list tables.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "list tables.", [](const std::shared_ptr<ccmd::command>& c) {
             std::string bucket;
             if (!one_bucket_arg(c, bucket)) return;
             std::string only = c->var<std::string>("namespace");
@@ -217,15 +217,15 @@ std::shared_ptr<ccmd::c_command> make_list() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_plan() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_plan() {
+    auto cmd = std::make_shared<ccmd::command>(
         "plan", "lights3-ctl tables plan lake sales.orders", "lights3-ctl tables plan <bucket> <ns.table> [options]",
         "Plan the maintenance of a table (POST /-/admin/tables/<bucket>/<ns>/<table>/plan, root "
         "credential): metadata files past the retention set and safety window, snapshots past "
         "history.expire.max-snapshot-age-ms, data files no retained metadata reaches. Read-only; "
         "waits for the job and prints its document (\"stats\" is the plan, \"manual-review\" "
         "true means run will refuse it). --no-wait returns the job id at once.",
-        "plan a table's maintenance.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "plan a table's maintenance.", [](const std::shared_ptr<ccmd::command>& c) {
             TableRef t;
             if (!table_args(c, t)) return;
             bool no_wait = c->var<bool>("no-wait");
@@ -236,8 +236,8 @@ std::shared_ptr<ccmd::c_command> make_plan() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_run() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_run() {
+    auto cmd = std::make_shared<ccmd::command>(
         "run", "lights3-ctl tables run lake sales.orders --yes", "lights3-ctl tables run <bucket> <ns.table> [options]",
         "Execute the table's most recent plan (or the plan job named by --plan-job): the "
         "snapshot expiry is a regular commit, then -- only when delete_enabled is true for the "
@@ -245,7 +245,7 @@ std::shared_ptr<ccmd::c_command> make_run() {
         "that changed since the plan fails with StalePlan (plan again). When delete_enabled is "
         "true the command refuses to start without --yes. Waits for the job and prints its "
         "document; --no-wait returns the job id at once.",
-        "run a table's maintenance plan.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "run a table's maintenance plan.", [](const std::shared_ptr<ccmd::command>& c) {
             TableRef t;
             if (!table_args(c, t)) return;
             bool no_wait = c->var<bool>("no-wait");
@@ -274,8 +274,8 @@ std::shared_ptr<ccmd::c_command> make_run() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_purge() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_purge() {
+    auto cmd = std::make_shared<ccmd::command>(
         "purge", "lights3-ctl tables purge lake sales.orders --yes",
         "lights3-ctl tables purge <bucket> <ns.table> --yes [options]",
         "Drop a table and delete everything it owns (DELETE <prefix>/v1/<bucket>/namespaces/<ns>/"
@@ -283,7 +283,7 @@ std::shared_ptr<ccmd::c_command> make_purge() {
         "removes the reserved metadata directory, the location prefix, the commit records and "
         "the tombstone. Irreversible and unaware of readers -- --yes is mandatory. Waits for the "
         "job (GET .../maintenance/jobs/<id>) and prints its document.",
-        "drop a table and purge its files.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "drop a table and purge its files.", [](const std::shared_ptr<ccmd::command>& c) {
             TableRef t;
             if (!table_args(c, t)) return;
             if (!c->var<bool>("yes")) {
@@ -314,15 +314,15 @@ std::shared_ptr<ccmd::c_command> make_purge() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_config() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_config() {
+    auto cmd = std::make_shared<ccmd::command>(
         "config", "lights3-ctl tables config lake sales.orders --set='{\"delete_enabled\":true}'",
         "lights3-ctl tables config <bucket> <ns.table> [--set=<json>] [options]",
         "Show a table's maintenance settings (GET .../maintenance/config: the effective values, "
         "the table's own object and the tables.maintenance defaults) or replace the table's "
         "object with --set (PUT; keys retain_recent_metadata_files, delete_enabled, "
         "max_snapshot_age_ms, min_snapshots_to_keep, orphan_cleanup; omitted keys fall back).",
-        "show or set a table's maintenance settings.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "show or set a table's maintenance settings.", [](const std::shared_ptr<ccmd::command>& c) {
             TableRef t;
             if (!table_args(c, t)) return;
             std::string set = c->var<std::string>("set");
@@ -339,14 +339,14 @@ std::shared_ptr<ccmd::c_command> make_config() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_diagnose() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_diagnose() {
+    auto cmd = std::make_shared<ccmd::command>(
         "diagnose", "lights3-ctl tables diagnose lake sales.orders",
         "lights3-ctl tables diagnose <bucket> <ns.table> [options]",
         "Classify the table's commit records against its pointer (GET .../catalog/diagnostics: "
         "Committed / StagedBeforeTableUpdate / FinalizationRequired / Superseded / ManualReview) "
         "and list metadata files nothing references. Read-only.",
-        "diagnose a table's commit log.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "diagnose a table's commit log.", [](const std::shared_ptr<ccmd::command>& c) {
             TableRef t;
             if (!table_args(c, t)) return;
             run_admin(c, [&](SignedClient& cli) {
@@ -360,14 +360,14 @@ std::shared_ptr<ccmd::c_command> make_diagnose() {
     return cmd;
 }
 
-std::shared_ptr<ccmd::c_command> make_recover() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_recover() {
+    auto cmd = std::make_shared<ccmd::command>(
         "recover", "lights3-ctl tables recover lake sales.orders --prune",
         "lights3-ctl tables recover <bucket> <ns.table> [--prune] [options]",
         "Repair the table's commit log (POST .../catalog/recovery): records the pointer already "
         "carries are finalized; with --prune the superseded and stale staged records are "
         "deleted. Never moves the pointer.",
-        "finalize / prune a table's commit records.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "finalize / prune a table's commit records.", [](const std::shared_ptr<ccmd::command>& c) {
             TableRef t;
             if (!table_args(c, t)) return;
             bool prune = c->var<bool>("prune");
@@ -386,16 +386,15 @@ std::shared_ptr<ccmd::c_command> make_recover() {
 
 }  // namespace
 
-std::shared_ptr<ccmd::c_command> make_tables() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_tables() {
+    auto cmd = std::make_shared<ccmd::command>(
         "tables", "lights3-ctl tables list lake", "lights3-ctl tables <command> [options]",
         "S3 Tables / Iceberg REST catalog operations (docs/s3-tables-design.md): table buckets "
         "(enable / disable / status), listing, maintenance (config / plan / run / purge) and "
         "the commit-log diagnostics (diagnose / recover). Catalog calls go to "
         "<prefix>/v1 (--catalog-prefix, default /iceberg); plan and run are admin-plane jobs "
         "(root credential). Options must follow the leaf subcommand as --name=value.",
-        "S3 Tables catalog: buckets, listing, maintenance, diagnostics.",
-        [](const std::shared_ptr<ccmd::c_command>& c) {
+        "S3 Tables catalog: buckets, listing, maintenance, diagnostics.", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });

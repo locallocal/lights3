@@ -11,6 +11,6 @@ namespace lights3_ctl {
 
 // Builds the `cred` command group (cred list / get / create / delete,
 // bind-cert / unbind-cert / list-certs for mTLS identity bindings).
-std::shared_ptr<ccmd::c_command> make_cred();
+std::shared_ptr<ccmd::command> make_cred();
 
 }  // namespace lights3_ctl

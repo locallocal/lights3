@@ -9,6 +9,6 @@
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_object();
+std::shared_ptr<ccmd::command> make_object();
 
 }  // namespace lights3_ctl

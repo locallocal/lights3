@@ -10,6 +10,6 @@
 namespace lights3_ctl {
 
 // Builds the `bench` command group.
-std::shared_ptr<ccmd::c_command> make_bench();
+std::shared_ptr<ccmd::command> make_bench();
 
 }  // namespace lights3_ctl

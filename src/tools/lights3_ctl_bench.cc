@@ -423,7 +423,7 @@ int run_bench(Mode mode, const BenchOpts& o) {
 
 // ---- flags & subcommand wiring ----
 
-void add_bench_flags(const std::shared_ptr<ccmd::c_command>& cmd, const char* def_size, bool with_pool) {
+void add_bench_flags(const std::shared_ptr<ccmd::command>& cmd, const char* def_size, bool with_pool) {
     if (with_pool) {
         cmd->varp<std::string>("bucket", "b", "", "target bucket (created if missing).");
         cmd->var<std::string>("prefix", "lights3-ctl-bench/", "key prefix for benchmark objects.");
@@ -440,7 +440,7 @@ void add_bench_flags(const std::shared_ptr<ccmd::c_command>& cmd, const char* de
 }
 
 // Flag validation + BenchOpts assembly; false = usage error already reported
-bool read_bench_opts(const std::shared_ptr<ccmd::c_command>& c, bool with_pool, BenchOpts& o) {
+bool read_bench_opts(const std::shared_ptr<ccmd::command>& c, bool with_pool, BenchOpts& o) {
     if (!c->args().empty()) {
         fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
         g_exit = 2;
@@ -487,7 +487,7 @@ bool read_bench_opts(const std::shared_ptr<ccmd::c_command>& c, bool with_pool, 
     return true;
 }
 
-void run_mode(const std::shared_ptr<ccmd::c_command>& c, Mode mode) {
+void run_mode(const std::shared_ptr<ccmd::command>& c, Mode mode) {
     try {
         BenchOpts o;
         if (!read_bench_opts(c, mode != Mode::ListBuckets, o)) return;
@@ -502,10 +502,10 @@ void run_mode(const std::shared_ptr<ccmd::c_command>& c, Mode mode) {
     }
 }
 
-std::shared_ptr<ccmd::c_command> make_mode(Mode mode, const char* name, const char* example, const char* usage,
-                                           const char* desc, const char* brief, const char* def_size) {
-    auto cmd = std::make_shared<ccmd::c_command>(
-        name, example, usage, desc, brief, [mode](const std::shared_ptr<ccmd::c_command>& c) { run_mode(c, mode); });
+std::shared_ptr<ccmd::command> make_mode(Mode mode, const char* name, const char* example, const char* usage,
+                                         const char* desc, const char* brief, const char* def_size) {
+    auto cmd = std::make_shared<ccmd::command>(name, example, usage, desc, brief,
+                                               [mode](const std::shared_ptr<ccmd::command>& c) { run_mode(c, mode); });
     if (mode == Mode::List) cmd->var<int>("max-keys", 100, "max-keys per ListObjectsV2 request.");
     add_bench_flags(cmd, def_size, mode != Mode::ListBuckets);
     return cmd;
@@ -517,8 +517,8 @@ namespace lights3_ctl {
 
 // `bench` command group: pure dispatcher, holds no options of its own (same
 // convention as `cred`)
-std::shared_ptr<ccmd::c_command> make_bench() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_bench() {
+    auto cmd = std::make_shared<ccmd::command>(
         "bench", "lights3-ctl bench put --bucket=test --size=1M --concurrency=8 --duration-sec=30",
         "lights3-ctl bench <command> [options]",
         "Benchmark the S3 data plane (put/get) and non-IO APIs (stat/list/list-buckets) "
@@ -527,7 +527,7 @@ std::shared_ptr<ccmd::c_command> make_bench() {
         "end unless --keep. Credentials come from each subcommand's --ak=/--sk= or from "
         "env LIGHTS3_ADMIN_AK/LIGHTS3_ADMIN_SK; options must follow the leaf subcommand "
         "as --name=value.",
-        "benchmark S3 IO and non-IO APIs.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "benchmark S3 IO and non-IO APIs.", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });

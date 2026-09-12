@@ -199,8 +199,8 @@ int run_fsck_offline(SignedClient& cli, const std::string& backend, uint64_t mbp
     return run_job(cli, "/-/admin/fsck/" + backend, "fsck", mbps, wait, status_only);
 }
 
-std::shared_ptr<ccmd::c_command> make_fsck() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_fsck() {
+    auto cmd = std::make_shared<ccmd::command>(
         "fsck", "lights3-ctl fsck my-bucket --prefix=photos/ --max-mbps=50",
         "lights3-ctl fsck <bucket> [options] | lights3-ctl fsck --offline <backend> [--max-mbps=N] [--no-wait] | "
         "lights3-ctl fsck --status <backend>",
@@ -214,7 +214,7 @@ std::shared_ptr<ccmd::c_command> make_fsck() {
         "it and print the outcome document (exit 1 on findings; --no-wait returns the "
         "job id at once). --status <backend>: print the running/last outcome. One job "
         "per backend at a time (409 ScrubInProgress).",
-        "verify a bucket's objects against their ETags.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "verify a bucket's objects against their ETags.", [](const std::shared_ptr<ccmd::command>& c) {
             bool offline = c->var<bool>("offline");
             bool status = c->var<bool>("status");
             if (c->args().size() != 1 || (offline && status)) {

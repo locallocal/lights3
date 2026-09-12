@@ -43,8 +43,8 @@ void print_text(const nlohmann::json& j) {
     }
 }
 
-std::shared_ptr<ccmd::c_command> make_inspect() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_inspect() {
+    auto cmd = std::make_shared<ccmd::command>(
         "inspect", "lights3-ctl object inspect photos 2026/01/a.jpg --output=text",
         "lights3-ctl object inspect <bucket> <key> [options]",
         "Print the object's internal layout as the routed backend reports it: data path, "
@@ -52,7 +52,7 @@ std::shared_ptr<ccmd::c_command> make_inspect() {
         "chunk/pack/rados extents (file id, offset, length, crc32c) for duostore; the "
         "tiering view plus the local engine's layout for tiered. memory and cloudproxy "
         "expose no layout. Requires the root credential.",
-        "print an object's internal layout.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "print an object's internal layout.", [](const std::shared_ptr<ccmd::command>& c) {
             if (c->args().size() != 2) {
                 fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;
@@ -84,13 +84,13 @@ std::shared_ptr<ccmd::c_command> make_inspect() {
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_object() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_object() {
+    auto cmd = std::make_shared<ccmd::command>(
         "object", "lights3-ctl object inspect photos 2026/01/a.jpg", "lights3-ctl object <command> [options]",
         "Object-level operator commands (roadmap §6.2). `inspect` prints the internal "
         "layout of one object; requires the root static credential like `cred`. Options "
         "must follow the leaf subcommand as --name=value.",
-        "object-level operator commands.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "object-level operator commands.", [](const std::shared_ptr<ccmd::command>& c) {
             c->print_help();
             g_exit = 2;
         });

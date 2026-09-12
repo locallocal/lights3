@@ -9,6 +9,6 @@
 namespace lights3_ctl {
 
 // Builds the `tenant` command group (list / get / create / update / delete / assign / unassign).
-std::shared_ptr<ccmd::c_command> make_tenant();
+std::shared_ptr<ccmd::command> make_tenant();
 
 }  // namespace lights3_ctl

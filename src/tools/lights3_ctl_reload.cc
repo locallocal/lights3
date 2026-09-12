@@ -11,15 +11,15 @@
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_reload() {
-    auto cmd = std::make_shared<ccmd::c_command>(
+std::shared_ptr<ccmd::command> make_reload() {
+    auto cmd = std::make_shared<ccmd::command>(
         "reload", "lights3-ctl reload --endpoint=http://127.0.0.1:9000", "lights3-ctl reload [options]",
         "Reload the server configuration file (POST /-/admin/config/reload, root "
         "credential). Applies the runtime-changeable subset (log level, request/stall "
         "timeouts, max_inflight_requests, min_part_size, rate limits, bucket routing "
         "rules, added/removed backend instances, TLS certificate material) and lists keys that changed but need a "
         "restart; a file that fails validation changes nothing (exit 1).",
-        "reload the server configuration.", [](const std::shared_ptr<ccmd::c_command>& c) {
+        "reload the server configuration.", [](const std::shared_ptr<ccmd::command>& c) {
             if (!c->args().empty()) {
                 fprintf(stderr, "lights3-ctl: usage: %s\n", c->usage().c_str());
                 g_exit = 2;

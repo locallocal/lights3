@@ -7,6 +7,6 @@
 
 namespace lights3_ctl {
 
-std::shared_ptr<ccmd::c_command> make_tables();
+std::shared_ptr<ccmd::command> make_tables();
 
 }  // namespace lights3_ctl
